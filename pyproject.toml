@@ -1,5 +1,28 @@
+[build-system]
+requires = ["uv_build>=0.8.11,<0.9.0"]
+build-backend = "uv_build"
+
 [project]
 name = "intelligence-agent"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "langchain-core>=1.5.4",
+    "langchain-openai>=1.5.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+agent-harness = "agent_harness.cli:main"
+
+[tool.uv.build-backend]
+module-name = "agent_harness"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.3",
+]
