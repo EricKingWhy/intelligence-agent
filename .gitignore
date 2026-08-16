@@ -1,0 +1,18 @@
+# 密钥与本地环境
+.env
+.venv/
+
+# 运行时产物（日志、工作区）
+.agent/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+
+# Claude Code 工具链（技能定义、本地会话状态——属工具链，非项目代码）
+.claude/

@@ -16,7 +16,7 @@
 
 ## Claude Code
 默认负责：
-- 读取已经生成的 `DayXX-Learning-Plan.md`；
+- 读取已经生成的 `Day2-Learning-Plan.md`；
 - 一次只执行当前 `ACTIVE Task`；
 - 现场解释必要知识；
 - 带用户开发、修改、运行、测试、Debug；

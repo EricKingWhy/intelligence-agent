@@ -26,3 +26,8 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.3",
 ]
+
+[tool.pytest.ini_options]
+# 让项目根进入 sys.path，使 tests/ 下的测试辅助模块（如 scripted_model）
+# 能以 tests.xxx 形式被跨文件导入；否则只有 src 在路径上。
+pythonpath = ["."]
