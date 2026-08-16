@@ -81,7 +81,6 @@ Day 2 只有同时满足以下条件才完成：
 - 仍未出现 Agent Loop、ToolRegistry 或 ToolExecutor。
 
 ## Current Task
-## Current Task
 
 ### Task 4 Brief：错误 ID Debug 与协议验收
 
@@ -103,6 +102,64 @@ Day 2 只有同时满足以下条件才完成：
 - 实验脚本 `tasks_experiment_wrong_id.py` 为一次性产物，已删除（不入主链、不入测试）。
 
 **编码模式**：`🧑 YOU WRITE`（复现实验 + 根因记录 + 复盘）
+
+## Day 2 Final Summary（复盘用）
+
+### 今天真正完成了什么
+
+你在 Day 1 的模型底座上，亲手走通了 Function Calling 的**完整两轮协议**，并用确定性测试把它钉死：
+
+```text
+bind_tools(schema) ── 告知菜单 ──> 模型
+                                     │
+第一轮：模型 AIMessage.tool_calls[{id, name, args}]   ← 只是"提议"
+                                     │
+Runtime：先 schema 校验 ──> 执行 add ──> ToolMessage(同 id) 回填
+                                     │
+第二轮：[Human, 原 AIMessage, ToolMessage] ──> 模型最终回答
+```
+
+并且建立了不烧 Token 的测试底座（ScriptedModel + RequestSnapshot），让协议正确性从此可验证、可回归。工程收尾：commit `21b421d`、tag `checkpoint-day-02` 已推送远端（`checkpoint-day-01` 同日补打，指向同一提交——Day 1 代码历史上从未单独入库，如实记录）。
+
+### 最重要的 5 个工程认识
+
+1. **`bind_tools()` 只递菜单，不端菜**：执行、校验、回填全是 Runtime 的活——模型永远不碰 Python 函数。
+2. **模型输出是非确定性"提议"**：`args` 永远要先 schema 校验后执行（`validated.model_dump()` 再传函数）；三次实验三次不同参数名就是铁证。
+3. **静默降级是 Function Calling 最阴的坑**：dict 里写 `args_schema` 会被 LangChain 默默丢弃，不报错、只让模型编参数名——靠本地 `convert_to_openai_tool` 对比才抓到。
+4. **`tool_call_id` 是多调用路由凭证**：单调用下 Provider 不强制校验（GLM 实测），但多工具并行时错配会**静默串结果**；永远按协议配对，不依赖 Provider 宽容。
+5. **一个断言写错的测试也会绿**：只有反向验证（故意改错看它变红）才能证明断言在把关——你今天亲手做了。
+
+### 三处超出计划的工程直觉（值得记住）
+
+- **校验失败也回填错误 ToolMessage**（Task 2）：保持消息链闭合 + 模型自我纠错——这是 Day 3 错误恢复的预告片。
+- **反向验证测试可信度**（Task 3）：跑绿后主动质疑"绿≠对"。
+- **从单调用现象自行推导出多工具串结果**（Task 4）：这是设计文档级判断。
+
+### 一句话主链
+
+> 模型按 schema 提出 `id+name+args` 调用请求，Runtime 校验执行后用同 id 的 ToolMessage 回填，模型基于结果生成最终回答——中间没有魔法，全是手写代码。
+
+### 最值得复习的代码
+
+1. `src/agent_harness/tool_call_demo.py`：两轮协议闭环全在这里（含 `model=None` 注入点）。
+2. `tests/scripted_model.py`：确定性替身怎么设计（`bind_tools(**kwargs)` 诚实吞参数 + `list(messages)` 拷贝防污染 + 剧本耗尽明确报错）。
+3. `tests/test_tool_call_demo.py`：消息顺序与 ID 配对的可验证断言（反射式 `type(m).__name__` 比对，不依赖 import）。
+
+### 5～10 分钟复盘提示
+
+1. 为什么 `bind_tools()` 之后，真正执行 Python 函数的责任仍然在你（Runtime）身上，而不是模型或 SDK？
+2. 模型返回的 `args` 为什么不能直接 `add(**tool_call["args"])`？正确的姿势是什么，为什么顺序不能反？
+3. 同一份 schema，为什么模型有时填 `num1/num2`、有时填 `a/b`、换成 `"parameters"` 键后又精确匹配？这个静默现象说明什么？
+4. 错误的 `tool_call_id` 在 GLM 上没报错还答对了——这是否意味着协议不重要？多工具并行时会怎样？
+5. 一个测试跑绿了，你怎么知道它的断言真的在把关、而不是恒真？
+
+### Day 2 到 Day 3 的接口
+
+你已经有了：
+- 一个能提 tool call、能回填的模型对象；
+- 一个验证过协议正确性的测试底座（ScriptedModel）。
+
+Day 3 的 Agent Loop，本质上只是把你今天手写的两次调用包进一个 `while ai_message.tool_calls:` 循环。**今天手写明白的，明天循环就只是一个结构。** 预告一个 Day 3+ 的自验证实验：写一个"双 add 并行"剧本，届时会亲眼看到单调用下的"宽容"在并行场景瞬间消失——从"不报错但正确"变成"不报错但串位"。
 
 ## Backlog / Out-of-Scope
 
