@@ -1,4 +1,10 @@
-"""Day4 Task2：ToolExecutor 单次执行链的行为测试。
+"""Day4 Task2/Task3：ToolExecutor 单次执行链 + Timeout/Retry 行为测试。
+
+Task3 新增（详见文件末尾 Task3 部分）：
+- SlowTool / FlakyTool / ForbiddenTool 制造三类失败，观察重试与不重试的差异；
+- JSONL 测试：按 tool_call_id 从日志还原 attempt / duration_ms / error_code 链。
+
+Hands-on 落点（见下方 TODO 注释）：
 
 Validation-first 是本 Task 最锋利的一刀：参数非法 → tool.execute 根本不被调用
 （execute 次数 = 0）。测试用【调用计数器】死死盯住这条边界。
@@ -15,20 +21,25 @@ Hands-on 落点（见下方 TODO 注释）：
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+from pathlib import Path
 from typing import Annotated
 
 import pytest
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
+from agent_harness.logging import setup_logging
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
     ToolExecutor,
     ToolRegistry,
     ToolResult,
-    ToolSideEffect,
 )
+from agent_harness.tooling.executor import MAX_ATTEMPTS
 from tests.scripted_model import ScriptedModel
 
 # ============================================================================
@@ -190,7 +201,7 @@ class TestToolNotFound:
         print(f"result.error_code       = {execution.result.error_code}")
         print(f"result.retryable        = {execution.result.retryable}")
         print(f"result.message          = {execution.result.message}")
-        print(f"result.model_dump_json()")
+        print("result.model_dump_json()")
         print(f"  = {execution.result.model_dump_json()}")
         print(f"CountingTool.call_count = {counting.call_count}  ← 工具根本没被找到，自然没执行")
         print("=" * 52)
@@ -242,7 +253,7 @@ class TestInvalidArgument:
         print(f"result.error_code       = {execution.result.error_code}")
         print(f"result.retryable        = {execution.result.retryable}")
         print(f"result.message          = {execution.result.message}")
-        print(f"result.model_dump_json()")
+        print("result.model_dump_json()")
         print(f"  = {execution.result.model_dump_json()}")
         print(f"CountingTool.call_count = {counting.call_count}  ← 必须是 0！参数错→没执行")
         print("=" * 52)
@@ -307,7 +318,7 @@ class TestToolExecutionError:
         print(f"result.error_code       = {execution.result.error_code}")
         print(f"result.retryable        = {execution.result.retryable}")
         print(f"result.message          = {execution.result.message}")
-        print(f"result.model_dump_json()")
+        print("result.model_dump_json()")
         print(f"  = {execution.result.model_dump_json()}")
         print("=" * 52)
 
@@ -337,7 +348,7 @@ class TestToolExecutionSerialization:
         content = execution.result.model_dump_json()
 
         print("\n========== [序列化] ToolResult → ToolMessage content ==========")
-        print(f"ToolExecution.result.model_dump_json():")
+        print("ToolExecution.result.model_dump_json():")
         print(f"  {content}")
         print("↑ 这串 JSON 就是将来回填给模型的 ToolMessage content（Task 5 接线点）")
         print("=" * 52)
@@ -369,3 +380,318 @@ class TestExecutorIsLocal:
 
         assert bound is model
         assert model.bound_tools == defs
+
+
+# ============================================================================
+# Task 3 工具：慢工具 / 抖动工具 / 权限工具 -- 亲手制造三类失败
+# ============================================================================
+
+
+class _EmptyArgs(BaseModel):
+    pass
+
+
+class SlowTool(Tool):
+    """慢工具：execute 睡 0.2s，但 timeout_seconds 只有 0.05s -> 必超时。
+
+    观察 Timeout 边界的关键：每一轮 attempt 都【真的进入】execute
+    （call_count 会涨），但到 0.05s 被 asyncio.timeout 掐断，永远到不了 return。
+    超时是"掐断"，不是"没启动"。
+    """
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    @property
+    def name(self) -> str:
+        return "slow"
+
+    @property
+    def description(self) -> str:
+        return "执行需 0.2 秒的慢工具（超时上限 0.05 秒），用于演示 TIMEOUT。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _EmptyArgs
+
+    @property
+    def timeout_seconds(self) -> float:
+        return 0.05  # 覆写 Contract 默认 10s：测试要跑得快
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        self.call_count += 1
+        await asyncio.sleep(0.2)
+        return ToolResult.success(message="永远到不了这里：早被 timeout 掐断")
+
+
+class FlakyTool(Tool):
+    """抖动工具：前 fail_times 次抛 ConnectionError，之后成功。
+
+    模拟真实世界的暂时性故障：网络抖一下，重试能自愈。
+    fail_times 给很大（如 99）-> 永不恢复 -> 耗尽重试上限后返回失败。
+    """
+
+    def __init__(self, fail_times: int) -> None:
+        self.fail_times = fail_times
+        self.call_count = 0
+
+    @property
+    def name(self) -> str:
+        return "flaky"
+
+    @property
+    def description(self) -> str:
+        return f"前 {self.fail_times} 次执行抛网络错误，之后成功。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _EmptyArgs
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        self.call_count += 1
+        if self.call_count <= self.fail_times:
+            raise ConnectionError(f"网络抖动（第 {self.call_count} 次失败）")
+        return ToolResult.success(
+            message="网络恢复了", data={"recovered_on_attempt": self.call_count}
+        )
+
+
+class ForbiddenTool(Tool):
+    """权限工具：永远抛 PermissionError -> 确定性失败，重试也不会有权限。"""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    @property
+    def name(self) -> str:
+        return "forbidden"
+
+    @property
+    def description(self) -> str:
+        return "总是抛 PermissionError 的工具，用于演示确定性失败不重试。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _EmptyArgs
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        self.call_count += 1
+        raise PermissionError("没有该资源的访问权限")
+
+
+# ============================================================================
+# Task 3 测试：Timeout 边界 -- 慢工具被掐断，每次 attempt 都真实发生
+# ============================================================================
+
+
+class TestTimeoutBoundary:
+    @pytest.mark.asyncio
+    async def test_slow_tool_times_out_and_retries(self):
+        """慢工具 -> TIMEOUT + retryable=True，重试耗尽后 attempt = MAX_ATTEMPTS。"""
+        reg = ToolRegistry()
+        slow = SlowTool()
+        reg.register(slow)
+        executor = ToolExecutor(reg)
+        tc = {"id": "call-slow", "name": "slow", "args": {}}
+
+        print("\n========== [Task3 超时] 慢工具 vs 0.05s Timeout 边界 ==========")
+        print(f"输入 tool_call = {tc}")
+        print("流程: lookup ✓ -> validate ✓ -> attempt 1..3 每次都被 asyncio.timeout(0.05) 掐断")
+        print(f"MAX_ATTEMPTS = {MAX_ATTEMPTS}")
+
+        execution = await executor.execute(tc)
+
+        print("\n--- 产出（超时被固化成 TIMEOUT，不是异常冒泡）---")
+        print(f"result.ok           = {execution.result.ok}")
+        print(f"result.error_code   = {execution.result.error_code}")
+        print(f"result.retryable    = {execution.result.retryable}")
+        print(f"result.message      = {execution.result.message}")
+        print(f"result.metadata     = {execution.result.metadata}")
+        print(f"SlowTool.call_count = {slow.call_count}")
+        print("=" * 52)
+
+        assert execution.result.ok is False
+        assert execution.result.error_code == ErrorCode.TIMEOUT
+        assert execution.result.retryable is True
+        # 耗尽上限：最终结果的 metadata 记录了"停在第几次尝试"
+        assert execution.result.metadata["attempt"] == MAX_ATTEMPTS
+        assert execution.result.metadata["max_attempts"] == MAX_ATTEMPTS
+
+        # 超时是"掐断"而不是"没启动"：每一轮 attempt 都真的调进了 execute
+        # （call_count 在 execute 第一行就涨），只是被 timeout 掐断在 sleep 里。
+        # TIMEOUT retryable=True -> 重试耗尽上限，共 MAX_ATTEMPTS(3) 轮 -> 计数 3。
+        assert slow.call_count == MAX_ATTEMPTS
+
+
+# ============================================================================
+# Task 3 测试：暂时性错误 -- 重试能自愈；永不恢复则耗尽上限
+# ============================================================================
+
+
+class TestTransientRetry:
+    @pytest.mark.asyncio
+    async def test_flaky_recovers_within_budget(self):
+        """前 2 次网络抖动、第 3 次成功 -> 重试自愈，最终 ok=True。"""
+        reg = ToolRegistry()
+        flaky = FlakyTool(fail_times=2)
+        reg.register(flaky)
+        executor = ToolExecutor(reg)
+        tc = {"id": "call-flaky", "name": "flaky", "args": {}}
+
+        print("\n========== [Task3 暂时性错误] 抖 2 次后自愈 ==========")
+        print(f"输入 tool_call = {tc}")
+        print("流程: attempt 1 ✗ ConnectionError -> 重试 -> attempt 2 ✗ -> 重试 -> attempt 3 ✓")
+
+        execution = await executor.execute(tc)
+
+        print("\n--- 产出（重试后成功）---")
+        print(f"result.ok           = {execution.result.ok}")
+        print(f"result.data         = {execution.result.data}")
+        print(f"result.metadata     = {execution.result.metadata}")
+        print(f"FlakyTool.call_count = {flaky.call_count}")
+        print("=" * 52)
+
+        assert execution.result.ok is True
+        assert execution.result.data == {"recovered_on_attempt": 3}
+        assert flaky.call_count == 3
+        assert execution.result.metadata["attempt"] == 3
+
+    @pytest.mark.asyncio
+    async def test_transient_never_recovers_exhausts_attempts(self):
+        """永不恢复的网络错误 -> TRANSIENT_ERROR + retryable=True，跑满上限后停。"""
+        reg = ToolRegistry()
+        flaky = FlakyTool(fail_times=99)  # 永不恢复
+        reg.register(flaky)
+        executor = ToolExecutor(reg)
+        tc = {"id": "call-flaky", "name": "flaky", "args": {}}
+
+        print("\n========== [Task3 暂时性错误] 永不恢复 -> 耗尽上限 ==========")
+        print(f"输入 tool_call = {tc}")
+        print(f"流程: attempt 1..{MAX_ATTEMPTS} 全部 ConnectionError -> 停手，不再无限重试")
+
+        execution = await executor.execute(tc)
+
+        print("\n--- 产出（跑满上限后的失败）---")
+        print(f"result.ok           = {execution.result.ok}")
+        print(f"result.error_code   = {execution.result.error_code}")
+        print(f"result.retryable    = {execution.result.retryable}")
+        print(f"result.metadata     = {execution.result.metadata}")
+        print(f"FlakyTool.call_count = {flaky.call_count}  ← 重试有上限，不会无限打")
+        print("=" * 52)
+
+        assert execution.result.ok is False
+        assert execution.result.error_code == ErrorCode.TRANSIENT_ERROR
+        assert execution.result.retryable is True
+        assert flaky.call_count == MAX_ATTEMPTS
+        assert execution.result.metadata["attempt"] == MAX_ATTEMPTS
+
+
+# ============================================================================
+# Task 3 测试：确定性失败 -- 权限/普通异常只跑 1 次，不进入重试
+# ============================================================================
+
+
+class TestDeterministicNoRetry:
+    @pytest.mark.asyncio
+    async def test_permission_denied_runs_exactly_once(self):
+        """PermissionError -> PERMISSION_DENIED + retryable=False，只跑 1 次。"""
+        reg = ToolRegistry()
+        forbidden = ForbiddenTool()
+        reg.register(forbidden)
+        executor = ToolExecutor(reg)
+        tc = {"id": "call-denied", "name": "forbidden", "args": {}}
+
+        print("\n========== [Task3 确定性失败] 权限拒绝不重试 ==========")
+        print(f"输入 tool_call = {tc}")
+        print("流程: attempt 1 ✗ PermissionError -> retryable=False -> 立即停，不重试")
+        print("       （重试也不会突然有权限）")
+
+        execution = await executor.execute(tc)
+
+        print("\n--- 产出 ---")
+        print(f"result.error_code      = {execution.result.error_code}")
+        print(f"result.retryable       = {execution.result.retryable}")
+        print(f"result.metadata        = {execution.result.metadata}")
+        print(f"ForbiddenTool.call_count = {forbidden.call_count}  ← 必须是 1")
+        print("=" * 52)
+
+        assert execution.result.ok is False
+        assert execution.result.error_code == ErrorCode.PERMISSION_DENIED
+        assert execution.result.retryable is False
+        assert forbidden.call_count == 1
+        assert execution.result.metadata["attempt"] == 1
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_still_runs_once(self):
+        """普通异常（RuntimeError）-> TOOL_EXECUTION_ERROR：Task 2 语义不变，只跑 1 次。"""
+        reg = ToolRegistry()
+        reg.register(ExplodingTool())
+        executor = ToolExecutor(reg)
+
+        execution = await executor.execute({"id": "call-b2", "name": "boom", "args": {}})
+
+        print("\n========== [Task3 确定性失败] 普通异常不重试（Task2 语义保持）==========")
+        print(f"result.error_code = {execution.result.error_code}")
+        print(f"result.metadata   = {execution.result.metadata}")
+        print("=" * 52)
+
+        assert execution.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        assert execution.result.retryable is False
+        assert execution.result.metadata["attempt"] == 1
+
+
+# ============================================================================
+# Task 3 测试：JSONL 可观察性 -- 按 tool_call_id 还原完整重试链
+# 这就是 Day4 必做清单第 6 条的自动化版本：从 JSONL 定位一次 Tool 执行过程。
+# ============================================================================
+
+
+class TestRetryLogging:
+    @pytest.mark.asyncio
+    async def test_jsonl_records_every_attempt(self, tmp_path: Path):
+        """慢工具跑完后，JSONL 里应有 3 条 tool_operation（attempt 1/2/3）+ 2 条 retry。"""
+        log_path = setup_logging(workspace_dir=str(tmp_path / "workspace"))
+        try:
+            reg = ToolRegistry()
+            reg.register(SlowTool())
+            executor = ToolExecutor(reg)
+            execution = await executor.execute(
+                {"id": "call-jsonl", "name": "slow", "args": {}}
+            )
+        finally:
+            # 测试收尾必须摘掉 root handler：
+            # 否则后续所有测试的 execute() 都会往这个临时文件写日志。
+            root = logging.getLogger()
+            for handler in root.handlers:
+                handler.close()
+            root.handlers.clear()
+
+        entries = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        tool_ops = [e for e in entries if e["event_type(事件类型)"] == "tool_operation"]
+        retries = [e for e in entries if e["event_type(事件类型)"] == "retry"]
+
+        print("\n========== [Task3 JSONL] 按 tool_call_id 还原重试链 ==========")
+        print(f"日志文件 = {log_path}")
+        print(f"tool_operation 条数 = {len(tool_ops)}，retry 条数 = {len(retries)}")
+        for e in tool_ops:
+            print(
+                f"  attempt={e['attempt(尝试次数)']} "
+                f"error_code={e.get('error_code(错误码)')} "
+                f"duration_ms={e['duration_ms(耗时毫秒)']} "
+                f"timeout_ms={e.get('timeout_ms')} "
+                f"tool_call_id={e['tool_call_id']}"
+            )
+        print("=" * 52)
+
+        assert execution.result.error_code == ErrorCode.TIMEOUT
+        assert len(tool_ops) == MAX_ATTEMPTS
+        assert [e["attempt(尝试次数)"] for e in tool_ops] == [1, 2, 3]
+        assert all(e["error_code(错误码)"] == "TIMEOUT" for e in tool_ops)
+        assert all(e["tool_call_id"] == "call-jsonl" for e in tool_ops)
+        # 每次超时都应被掐在超时上限附近（0.05s；放宽到 0.15s 防 CI 抖动）
+        assert all(e["duration_ms(耗时毫秒)"] < 150 for e in tool_ops)
+        # 两次"决定重试"事件：分别发生在 attempt 1 和 attempt 2 之后
+        assert [e["attempt(尝试次数)"] for e in retries] == [1, 2]
