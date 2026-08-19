@@ -1,25 +1,56 @@
 """临时调试脚本：把 Agent Loop 每一轮喂给模型的消息链打印出来，肉眼可观察。
 
-这不属于 Day 3 的产品代码或测试，只是一个可观测性辅助工具——
+这不属于 Day 4 的产品代码或测试，只是一个可观测性辅助工具——
 让你亲眼看见 Runtime 内部消息怎么流动、ToolMessage 怎么配对、历史怎么累积。
-Day 3 Task 3 会用更系统的方式（结构化日志）替代这种 print 调试。
 
-用法（在项目根目录）：
+Day 4 Task 5 迁移：add 从裸函数升级为 Tool Contract（AddTool），
+Runtime 不再持有 tools dict，而是绑 registry + ToolExecutor（工具怎么跑全下沉）。
+用法（项目根目录）：
     $env:PYTHONUTF8="1"; uv run python debug_loop.py
 """
 
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated
 
 from langchain_core.messages import AIMessage
+from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.scripted_model import ScriptedModel
 
 
-def add(first_number: float, second_number: float) -> float:
-    return first_number + second_number
+class AddArgs(BaseModel):
+    first_number: Annotated[float, Field(..., description="第一个加数")]
+    second_number: Annotated[float, Field(..., description="第二个加数")]
+
+
+class AddTool(Tool):
+    @property
+    def name(self) -> str:
+        return "add"
+
+    @property
+    def description(self) -> str:
+        return "计算两个数的和。参数：first_number、second_number 为加数。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return AddArgs
+
+    async def execute(self, args: AddArgs) -> ToolResult:
+        return ToolResult.success(
+            message=f"{args.first_number} + {args.second_number} = {args.first_number + args.second_number}",
+            data={"sum": args.first_number + args.second_number},
+        )
+
+
+def _runtime(model: ScriptedModel, max_steps: int = 20) -> AgentRuntime:
+    reg = ToolRegistry()
+    reg.register(AddTool())
+    return AgentRuntime(model=model, registry=reg, executor=ToolExecutor(reg), max_steps=max_steps)
 
 
 async def show_continuous_two_rounds() -> None:
@@ -35,7 +66,7 @@ async def show_continuous_two_rounds() -> None:
     )
     r3 = AIMessage(content="两笔的和分别是 3 和 7")
     scripted = ScriptedModel([r1, r2, r3])
-    runtime = AgentRuntime(model=scripted, tools={"add": add})
+    runtime = _runtime(scripted)
 
     result = await runtime.run("连续算两笔")
 
@@ -61,7 +92,7 @@ async def show_max_steps() -> None:
         tool_calls=[{"name": "add", "args": {"first_number": i, "second_number": i}, "id": "call_loop", "type": "tool_call"}],
     )
     scripted = ScriptedModel([loop_round(0), loop_round(1), loop_round(2)])
-    runtime = AgentRuntime(model=scripted, tools={"add": add}, max_steps=3)
+    runtime = _runtime(scripted, max_steps=3)
 
     result = await runtime.run("永远算不完")
 

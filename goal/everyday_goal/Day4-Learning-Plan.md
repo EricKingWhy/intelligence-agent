@@ -1,6 +1,6 @@
 # Day04 - Module 4：Tool Runtime 完整闭环
 
-> 状态：Task 1（Contract/ToolResult/Registry）、Task 2（Validation-first 单次执行链）、Task 3（Timeout + 唯一 Retry Layer）、Task 4（批次调度与严格 ID 配对）均已 PASS；Task 5 已解锁为 `ACTIVE`，待用户 `/speckit.implement` 后开工。  
+> 状态：Task 1–5 全部 `DONE ✅`——Module 4（Tool Runtime 完整闭环）**全部 Gate 通过**。  
 > 节奏决策：合并旧 Day 4+5 的自然工程闭环，但不压缩 Tool Runtime 的核心认知步骤。  
 > 执行边界：Claude Code 按本蓝图一次推进一个 Task；Codex 只编排计划，不实现 Day 4 代码。
 
@@ -71,7 +71,7 @@ LLM tool_call{id, name, args}
 | Task 2：实现 Validation-first 单次执行链 | S | `CORE_LEARNING` | Executor 完成 lookup → validate → execute → error mapping；参数错误不执行、不重试 | 用户制造非法参数，断言 execute 次数为 0，并检查 INVALID_ARGUMENT 回填 | `DONE ✅` |
 | Task 3：加入 Timeout、Error Classification 与唯一 Retry Layer | S | `CORE_LEARNING` | 暂时性错误按策略重试，确定性错误只执行一次，日志记录 attempt/duration/error | 用户触发 timeout/transient 与 permission 两类失败，从日志比较 attempt | `DONE ✅` |
 | Task 4：实现批次调度与严格 ID 配对 | S | `CORE_LEARNING` | 全 READ_ONLY 并发；含 MUTATING 整批串行；结果按原 call 顺序和 id 返回 | 用户用 Fake Tool 测耗时/顺序，并故意打乱完成顺序检查配对 | `DONE ✅` |
-| Task 5：Agent Loop 正式接入与 Module Gate | S | `CORE_LEARNING` | Runtime 只消费 ToolExecutor 结果并回填 ToolResult JSON；旧行为回归、JSONL Debug、模块 Full Review | 用户亲手完成核心接线，跑一次失败自纠错并从 JSONL 还原完整链路 | `ACTIVE` |
+| Task 5：Agent Loop 正式接入与 Module Gate | S | `CORE_LEARNING` | Runtime 只消费 ToolExecutor 结果并回填 ToolResult JSON；旧行为回归、JSONL Debug、模块 Full Review | 用户亲手完成核心接线，跑一次失败自纠错并从 JSONL 还原完整链路 | `DONE ✅` |
 
 > 解锁规则：当前 Task 的测试、Review 和 Checkpoint 通过后，Claude 才将下一 Task 改为 `ACTIVE`；完成后立即 STOP，等待用户继续。
 
@@ -190,3 +190,22 @@ ToolResult
 - MCP Tool Adapter、Knowledge Tool、权限策略系统：以后接入统一 Contract/Executor，不在今天预建框架。
 - 复杂依赖分析、细粒度读写冲突、全局 Retry Budget、Circuit Breaker：V1 不做。
 - Day 2 的故意教学错误和旧 TODO 保持原样，生产化清理由独立 Scope 决定。
+
+## Day 4 Final Summary（2026-08-19，Module 4 全部 Gate 通过）
+
+**Module 4（Tool Runtime 完整闭环）完成。** Task 1–5 全部 PASS，54 tests passed，ruff 全绿，Git 已推送。
+
+**用户 Hands-on 完成的实作**：
+- Task 1：补 AddArgs/描述 + 触发重复注册失败 + 补关键断言
+- Task 2：填 ValidationError→INVALID_ARGUMENT 映射 + call_count==0 断言
+- Task 3：填 TimeoutError→TIMEOUT 映射 + should_retry 三条件 + 慢工具 call_count==3
+- Task 4：填 side_effect==MUTATING→serial；亲手验证 113ms 并发 / 318ms 串行 / 乱序保序
+- Task 5：填 outcome=result.ok 映射；迁移 9 个 Agent Loop 测试夹具与两个失败断言
+
+**AI Coding 主导**：Executor 三阶段骨架、Timeout/Retry/execute_batch 样板、测试工具（Counting/Slow/Flaky/Forbidden/Timed*）、AgentRuntime 迁移、debug 脚本 Contract 化。
+
+**真实 Debug（Day 必做第 6 条）**：debug_real_loop 用真实模型跑通——happy path（add 一次成功）与失败自纠错（risky_add 超上限→TOOL_EXECUTION_ERROR→模型读 JSON 错误码建议改用 add）；从 JSONL 按 tool_call_id 还原了 Executor attempt 事件与 Runtime 回填事件的完整链路。
+
+**Module 是否完成**：是。DoD 全部达成；Full Review 口述主链 PASS（请求→路由→把关→限时→止损→排队→回执，前 5 环执行域 / 第 6 环批次层 / 第 7 环 Runtime 接线）。
+
+**下一入口**：Module 5（Docker Sandbox + 真实 read/write/edit/bash Coding Tools）——按 §8 等用户决定是否继续，不自行跨 Module。

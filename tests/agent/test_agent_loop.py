@@ -12,25 +12,90 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import pytest
 from langchain_core.messages import AIMessage
+from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED
+from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.scripted_model import ScriptedModel
 
 TOOL_CALL_ID = "call_agent_0001"
 
 
-# ---- 夹具：今天 Runtime 用到的唯一工具，一个同步 add ----
-def _add(first_number: float, second_number: float) -> float:
-    """add 工具：和 Day 2 同名同参，方便比对协议一致性。"""
-    return first_number + second_number
+# ---- 夹具（Day4 Task5 迁移）----
+# 从"tools: dict[callable]"迁到 Tool Contract + Registry + Executor。
+# add 是注册的同步工具；boom 是注册了但 execute 抛 ValueError 的工具；
+# multiply 不注册（走 TOOL_NOT_FOUND）。这与旧 _tools() 语义等价，
+# 但执行走 ToolExecutor（校验/执行/错误映射全下沉）。
 
 
-def _tools() -> dict[str, object]:
-    """tools dict：name -> 可调用对象。今天只有 add。"""
-    return {"add": _add}
+class _AddArgs(BaseModel):
+    first_number: Annotated[float, Field(..., description="第一个加数")]
+    second_number: Annotated[float, Field(..., description="第二个加数")]
+
+
+class AddTool(Tool):
+    """add 工具：和 Day 2 同名同参，走统一 Contract（name/description/args_schema/execute）。"""
+
+    @property
+    def name(self) -> str:
+        return "add"
+
+    @property
+    def description(self) -> str:
+        return "计算两个数的和。参数：first_number、second_number 为加数。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _AddArgs
+
+    async def execute(self, args: _AddArgs) -> ToolResult:
+        return ToolResult.success(
+            message=f"{args.first_number} + {args.second_number} = "
+            f"{args.first_number + args.second_number}",
+            data={"sum": args.first_number + args.second_number},
+        )
+
+
+class _EmptyArgs(BaseModel):
+    """boom 工具无必填参数（旧函数 boom(explode=True) 的 explode 有默认值）。"""
+
+
+class BoomTool(Tool):
+    """boom 工具：execute 内部抛 ValueError，用来测执行异常回填。"""
+
+    @property
+    def name(self) -> str:
+        return "boom"
+
+    @property
+    def description(self) -> str:
+        return "总是抛 ValueError 的测试工具。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _EmptyArgs
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        raise ValueError("故意炸：工具内部状态错误")
+
+
+def _registry() -> ToolRegistry:
+    """注册 add + boom 的 Registry。multiply 故意不注册（测 TOOL_NOT_FOUND）。"""
+    reg = ToolRegistry()
+    reg.register(AddTool())
+    reg.register(BoomTool())
+    return reg
+
+
+def _runtime(model: ScriptedModel, max_steps: int = 20) -> AgentRuntime:
+    """构造绑定了 executor + registry 的 Runtime（Day4 Task5 网格签）。"""
+    reg = _registry()
+    return AgentRuntime(model=model, registry=reg, executor=ToolExecutor(reg), max_steps=max_steps)
 
 
 # ---------- 路径 A：无工具直接完成 ----------
@@ -44,7 +109,7 @@ class TestAgentLoopNoTool:
     async def test_completes_in_one_step(self):
         """A：无工具 -> completed + steps=1 + 模型只被调用 1 次。"""
         scripted = _scripted_no_tool()
-        runtime = AgentRuntime(model=scripted, tools=_tools())
+        runtime = _runtime(scripted)
 
         result = await runtime.run("你好")
 
@@ -82,7 +147,7 @@ class TestAgentLoopOneTool:
     async def test_two_steps_and_completed(self):
         """B：一次工具往返 -> completed + steps=2 + 模型被调用 2 次。"""
         scripted = _scripted_one_tool()
-        runtime = AgentRuntime(model=scripted, tools=_tools())
+        runtime = _runtime(scripted)
 
         result = await runtime.run("计算 123 + 456")
 
@@ -104,7 +169,7 @@ class TestAgentLoopOneTool:
         现在落在新 Runtime 上，证明循环维护了相同的消息契约。
         """
         scripted = _scripted_one_tool()
-        runtime = AgentRuntime(model=scripted, tools=_tools())
+        runtime = _runtime(scripted)
         await runtime.run("计算 123 + 456")
 
         second_round = scripted.snapshots[1].messages
@@ -169,7 +234,7 @@ class TestAgentLoopTwoConsecutiveToolRounds:
         4. result.final_text 是第三轮剧本的 content
         """
         scripted = _scripted_two_tool_rounds()
-        runtime = AgentRuntime(model=scripted, tools=_tools())
+        runtime = _runtime(scripted)
 
         result = await runtime.run("连续算两笔")
 
@@ -196,7 +261,7 @@ class TestAgentLoopTwoConsecutiveToolRounds:
         6. 两个 tool_call 的 id 不相等（A != B）——证明不是误重用同一个 id
         """
         scripted = _scripted_two_tool_rounds()
-        runtime = AgentRuntime(model=scripted, tools=_tools())
+        runtime = _runtime(scripted)
         await runtime.run("连续算两笔")
 
         third_round = scripted.snapshots[2].messages
@@ -256,7 +321,7 @@ class TestAgentLoopMaxSteps:
             for i in range(3)
         ]
         scripted = ScriptedModel(rounds)
-        runtime = AgentRuntime(model=scripted, tools=_tools(), max_steps=3)
+        runtime = _runtime(scripted, max_steps=3)
 
         result = await runtime.run("永远算不完")
 
@@ -290,7 +355,7 @@ class TestAgentLoopUnknownTool:
         )
         round2 = AIMessage(content="抱歉，乘法工具不可用，我直接计算：3 × 4 = 12")
         scripted = ScriptedModel([round1, round2])
-        runtime = AgentRuntime(model=scripted, tools=_tools())  # tools 里只有 add
+        runtime = _runtime(scripted)  # tools 里只有 add
 
         result = await runtime.run("计算 3 乘 4")
 
@@ -305,8 +370,10 @@ class TestAgentLoopUnknownTool:
         ]
         tool_msg = second_round[2]
         assert tool_msg.tool_call_id == "call_unknown_001"
-        assert "multiply" in tool_msg.content   # 错误信息必须提到是哪个工具失败
-        assert "KeyError" in tool_msg.content   # 用户实现带了异常类型，锁住它
+        # Day4 Task5 迁移：content 从"自由字符串（含 KeyError）"升级为 ToolResult JSON。
+        # 断言 ErrorCode 的结构化语义（比字符串匹配稳）：multiply 未注册 -> TOOL_NOT_FOUND。
+        assert "multiply" in tool_msg.content
+        assert "TOOL_NOT_FOUND" in tool_msg.content
 
 
 class TestAgentLoopToolException:
@@ -314,11 +381,7 @@ class TestAgentLoopToolException:
 
     @pytest.mark.asyncio
     async def test_tool_exception_backfills_error_not_crash(self):
-        """模型调 boom -> boom 抛 ValueError -> Runtime 捕获回填 -> 模型给最终回答。"""
-
-        def boom(explode: bool = True) -> float:
-            msg = "故意炸：工具内部状态错误"
-            raise ValueError(msg)
+        """模型调 boom -> boom 抛 ValueError -> Executor 映射 TOOL_EXECUTION_ERROR 回填 -> 模型给最终回答。"""
 
         round1 = AIMessage(
             content="",
@@ -331,7 +394,7 @@ class TestAgentLoopToolException:
         )
         round2 = AIMessage(content="boom 工具内部出错了，我换个方式回答")
         scripted = ScriptedModel([round1, round2])
-        runtime = AgentRuntime(model=scripted, tools={"add": _add, "boom": boom})
+        runtime = _runtime(scripted)  # registry 已注册 add + boom
 
         result = await runtime.run("触发爆炸")
 
@@ -339,8 +402,12 @@ class TestAgentLoopToolException:
         assert result.steps == 2
         tool_msg = scripted.snapshots[1].messages[2]
         assert tool_msg.tool_call_id == "call_boom_001"
-        assert "ValueError" in tool_msg.content     # 异常类型回填给了模型
-        assert "故意炸" in tool_msg.content          # 异常消息也带上了
+        # Day4 Task5 迁移：content 是 ToolResult JSON，error_code 是结构化码。
+        # boom 抛 ValueError -> Executor 阶段3 分类表未命中 -> TOOL_EXECUTION_ERROR。
+        assert "TOOL_EXECUTION_ERROR" in tool_msg.content
+        # 异常细节仍在 JSON 的 message 字段里（如 "ValueError: 故意炸..."）——模型能读到。
+        assert "ValueError" in tool_msg.content
+        assert "故意炸" in tool_msg.content
 
 
 class TestAgentLoopEmptyContentWithToolCalls:
@@ -364,7 +431,7 @@ class TestAgentLoopEmptyContentWithToolCalls:
         )
         round2 = AIMessage(content="2 + 3 = 5")
         scripted = ScriptedModel([round1, round2])
-        runtime = AgentRuntime(model=scripted, tools=_tools())
+        runtime = _runtime(scripted)
 
         result = await runtime.run("计算 2 + 3")
 

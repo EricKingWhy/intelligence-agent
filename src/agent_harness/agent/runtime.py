@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
@@ -27,29 +26,32 @@ from agent_harness.agent.types import (
     AgentRunResult,
 )
 from agent_harness.logging import log_event, new_span_id
+from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 logger = logging.getLogger("agent_harness.agent")
-
-# 今天 tools 的形状：name -> 可调用对象。
-# 普通函数返回 Any；异步函数返回 Awaitable[Any]。
-# Day 4 才升级为正式 ToolRegistry / Schema / Executor，今天先用最朴素的 dict。
-ToolCallable = Callable[..., Any] | Callable[..., Awaitable[Any]]
 
 
 class AgentRuntime:
     """最小透明 Agent Loop。
 
-    构造时就绑定好 model + tools + max_steps；一次 run() 用一条本地 messages 链跑完。
+    构造时就绑定好 model + registry + executor + max_steps；一次 run() 用一条本地
+    messages 链跑完。
+
+    Day 4 Task 5 迁移：不再持有 tools dict / 不再手搓执行。工具怎么跑
+    （校验/超时/重试/并发）全部下沉到 ToolRegistry + ToolExecutor；
+    本类只保留"驱动循环"这一份职责。
     """
 
     def __init__(
         self,
         model: Any,
-        tools: dict[str, ToolCallable],
+        registry: ToolRegistry,
+        executor: ToolExecutor,
         max_steps: int = 20,
     ) -> None:
         self.model = model
-        self.tools = tools
+        self.registry = registry
+        self.executor = executor
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件。
         # 正常停止由"模型不再返回 tool_calls"决定；max_steps 只兜底。
         self.max_steps = max_steps
@@ -58,7 +60,8 @@ class AgentRuntime:
         """跑完整条 Agent Loop，返回 AgentRunResult。
 
         本方法只负责"驱动循环 + 回填消息 + 计数 + 决定停止"；
-        工具的实际执行今天用一个内部辅助方法 _exec_tool 完成（下方已实现）。
+        工具怎么跑（校验/超时/重试/并发）全部交给 self.executor（ToolExecutor），
+        本方法只消费它的 ToolExecution 结果并回填成 ToolMessage。
         """
         # 本地消息链：每次 run 用全新的一条，不跨 run 复用（今天不做 Session/Memory）。
         messages: list[AnyMessage] = [HumanMessage(content=user_input)]
@@ -123,41 +126,48 @@ class AgentRuntime:
                     final_text=final,
                     steps=steps,
                 )
-            # —— 第 6 步：串行执行每个 tool_call 并回填 ——
-            # 今天按 tool_calls 返回顺序逐个执行，不并发（Day 5+ 才碰并行）。
-            for tc in tool_calls:
-                # —— Task 3：失败回填 ——
-                # 为什么捕获而不让异常冒泡？
-                #   工具失败有三种：未知工具名（KeyError）、工具内部异常、参数错误。
-                #   生产里这些天天发生；任由它抛会让整个任务死掉，用户体验是"Agent 挂了"。
-                #   正确做法：把错误【反馈给模型】，模型看到后常能自我纠错（换工具或直接回答）。
-                #
-                # 你来写（TODO-T3-EXEC）：
-                #   1. try 里调 self._exec_tool(tc) 拿 result
-                #   2. except Exception as e: 把错误转成一条错误 ToolMessage 回填
-                #      - content 要写清楚【什么工具】【为什么失败】，方便模型纠错
-                #      - tool_call_id 必须【原样用 tc["id"]】，和成功回填同样的配对规则
-                #   3. 成功和失败最终都要 messages.append(ToolMessage(...))，分支不同只差 content
-                #   提示骨架：
-                try:
-                    result = await self._exec_tool(tc)
-                    content = str(result)
-                    outcome = "success"
-                # —— 工具执行边界必须宽捕获：工具是开放世界（Day 4+
-                # 用户可注册任意工具），Runtime 无法预知会抛什么；吞掉并回填给
-                # 模型正是本层职责。Bug 型异常（如签名写错）也会经 ToolMessage
-                # 暴露给模型/日志，不会被静默掩盖。
-                except Exception as e:  # noqa: BLE001
-                    content = (
-                        f"工具 '{tc['name']}' 执行失败: {type(e).__name__}: {e}。"
-                        "请检查工具名和参数后重试，或改用其他方式完成任务。"
-                    )
-                    outcome = "failure"
-                self._log("tool_operation", f"工具 {tc['name']} 执行 {outcome}",
+            # —— 第 6 步：用 ToolExecutor 执行整批 tool_call 并回填 ——
+            # Day 4 Task 5：不再手搓执行——工具怎么跑（校验/超时/重试/并发）
+            # 全部下沉到 ToolExecutor.execute_batch()。这里只消费它的结果并回填。
+            #
+            # execute_batch 的内存特性（Task 4）：
+            #   - 返回顺序 = 输入顺序（不是完成顺序）→ 回填顺序天然稳定；
+            #   - 每条结果都带着 tool_call_id → 配对是显式的，不靠数组下标。
+            # 例：下方回填处 content 是 ToolResult 的 JSON，
+            #   里面 error_code/retryable 是结构化语义，不再是自由字符串。
+            #
+            # 先记 args_by_id：日志还想带上模型的原始参数（args），但 execute_batch
+            # 拿到的是 ToolExecution（参数已被 Executor 消费）。我们按 tool_call_id
+            # 留一份原始 args，供日志用；展示层面 metadata 里已有 duration_ms/attempt。
+            args_by_id = {tc.get("id", ""): tc.get("args") for tc in tool_calls}
+            execs = await self.executor.execute_batch(tool_calls)
+            for e in execs:
+                result = e.result
+                # ToolMessage 的 content = ToolResult 的 JSON。
+                # 为什么用 JSON 而不是 str(result)（Day 3 的旧做法）？
+                #   - JSON 含结构化字段：ok / message / error_code / retryable / metadata；
+                #   - 模型读到的是稳定契约，能按字段语义纠错（参数错就看 error_code）；
+                #   - Day 3 的字符串无法区分成功/失败，只能靠人读。
+                content = result.model_dump_json()
+                # outcome 只看结构化的 result.ok 位：成功 "success" / 失败 "failure"。
+                # 不再需要 Day 3 的 try/except 分支——Executor 铁律一保证
+                # 任何失败都已固化成失败 ToolResult，这里永远只消费结果不接异常。
+                outcome: str = "success" if result.ok else "failure"
+
+                self._log("tool_operation", f"工具回复 {outcome}",
                           span_id=new_span_id(), parent_span_id=run_span, step=steps,
-                          tool_name=tc["name"], tool_input=tc.get("args"),
-                          tool_output=content[:200], outcome=outcome)
-                messages.append(ToolMessage(content=content, tool_call_id=tc["id"]))
+                          tool_call_id=e.tool_call_id,
+                          tool_input=args_by_id.get(e.tool_call_id),  # 模型原始参数
+                          tool_output=content[:200],
+                          error_code=result.error_code,
+                          retryable=result.retryable if not result.ok else None,
+                          duration_ms=result.metadata.get("duration_ms"),
+                          attempt=result.metadata.get("attempt"),
+                          timeout_ms=result.metadata.get("timeout_ms"),
+                          outcome=outcome)
+                # ToolMessage 的 tool_call_id 必须用【原 id】配对——这正是 Task 4
+                # execute_batch 保序返回 + 显式 id 配对的兑现点。
+                messages.append(ToolMessage(content=content, tool_call_id=e.tool_call_id))
 
             # 回填完所有 ToolMessage 后，进入下一轮 while（messages 已更新，再喂给模型）。
 
@@ -173,21 +183,3 @@ class AgentRuntime:
         if not logger.hasHandlers():
             return
         log_event(logger, event_type, message, **fields)
-
-    async def _exec_tool(self, tool_call: dict) -> Any:
-        """按 name 查找并执行单个 tool_call，返回结果（成功）或抛异常（失败）。
-
-        本方法已为你实现：今天只负责"按 name 找到函数并执行"。
-        Task 3 才处理"未知工具名 -> 抛 KeyError 被循环捕获回填错误"等失败边界。
-
-        参数取值约定：
-        - tool_call["name"]：工具名，用于在 self.tools 里查找；
-        - tool_call["args"]：dict，直接 ** 展开作为函数实参。
-        """
-        fn = self.tools[tool_call["name"]]
-        # 同时支持同步函数和 async 函数：今天主要是同步 add，但留 await 兼容异步工具。
-        import inspect
-
-        if inspect.iscoroutinefunction(fn):
-            return await fn(**tool_call["args"])
-        return fn(**tool_call["args"])
