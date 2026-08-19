@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from time import perf_counter
 from typing import Annotated
 
 import pytest
@@ -38,6 +39,7 @@ from agent_harness.tooling import (
     ToolExecutor,
     ToolRegistry,
     ToolResult,
+    ToolSideEffect,
 )
 from agent_harness.tooling.executor import MAX_ATTEMPTS
 from tests.scripted_model import ScriptedModel
@@ -695,3 +697,190 @@ class TestRetryLogging:
         assert all(e["duration_ms(耗时毫秒)"] < 150 for e in tool_ops)
         # 两次"决定重试"事件：分别发生在 attempt 1 和 attempt 2 之后
         assert [e["attempt(尝试次数)"] for e in retries] == [1, 2]
+
+
+# ============================================================================
+# Task 4 工具：带 timing + side_effect 的确定性工具
+# 用于证明【并发 vs 串行】的耗时差异，和【乱序完成 → 保序返回】。
+# ============================================================================
+
+
+class TimedReadTool(Tool):
+    """睡 delay 秒后返回的 READ_ONLY 工具（默认 side_effect）。
+
+    独立读操作可安全并发：3 个各睡 0.1s 的 read，并发跑总耗时 ≈ 0.1s。
+    """
+
+    def __init__(self, name: str, delay: float) -> None:
+        self._name = name
+        self._delay = delay
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"睡 {self._delay}s 的只读工具，用于演示并发耗时。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _EmptyArgs
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        await asyncio.sleep(self._delay)
+        return ToolResult.success(
+            message=f"{self._name} 完成（睡了 {self._delay}s）",
+            data={"name": self._name, "delay": self._delay},
+        )
+
+
+class TimedMutatingTool(Tool):
+    """睡 delay 秒后返回的 MUTATING 工具（覆写 side_effect）。
+
+    含 MUTATING 的批次必须整批串行：副作用顺序确定、可复现、部分失败可归因。
+    """
+
+    def __init__(self, name: str, delay: float = 0.1) -> None:
+        self._name = name
+        self._delay = delay
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"睡 {self._delay}s 的写工具（MUTATING），用于演示含写批次整批串行。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _EmptyArgs
+
+    @property
+    def side_effect(self) -> ToolSideEffect:
+        return ToolSideEffect.MUTATING  # 覆写默认 READ_ONLY
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        await asyncio.sleep(self._delay)
+        return ToolResult.success(
+            message=f"{self._name} 写入完成（睡了 {self._delay}s）",
+            data={"name": self._name, "delay": self._delay},
+        )
+
+
+# ============================================================================
+# Task 4 测试：并发 vs 串行 -- 用计时盯住"并发省时间"
+# ============================================================================
+
+
+class TestBatchConcurrency:
+    @pytest.mark.asyncio
+    async def test_all_read_only_runs_in_parallel(self):
+        """3 个各睡 0.1s 的 READ_ONLY 并发 -> 总耗时 ≈ 0.1s，不是 0.3s。"""
+        reg = ToolRegistry()
+        reg.register(TimedReadTool("r1", 0.1))
+        reg.register(TimedReadTool("r2", 0.1))
+        reg.register(TimedReadTool("r3", 0.1))
+        executor = ToolExecutor(reg)
+        calls = [
+            {"id": "c1", "name": "r1", "args": {}},
+            {"id": "c2", "name": "r2", "args": {}},
+            {"id": "c3", "name": "r3", "args": {}},
+        ]
+
+        t0 = perf_counter()
+        results = await executor.execute_batch(calls)
+        elapsed = perf_counter() - t0
+
+        print("\n========== [Task4 并发] 3 个 READ_ONLY 各睡 0.1s ==========")
+        print("调度模式：全 READ_ONLY → asyncio.gather 并发")
+        print(f"实测总耗时 = {elapsed * 1000:.0f} ms")
+        print("对照：串行会 ≈ 300ms，并发应 ≈ 100ms（给到 220ms 容忍调度开销）")
+        print("--- 结果（按输入顺序，不是完成顺序）---")
+        for r in results:
+            print(f"  id={r.tool_call_id} ok={r.result.ok} data={r.result.data}")
+        print("=" * 52)
+
+        assert len(results) == 3
+        assert all(r.result.ok for r in results)
+        # 核心证据：并发耗时远小于串行总和（0.3s）。
+        # 给 0.22s 上限：3×0.1s=0.3s 串行 vs 0.1s 并发，0.22s 卡在中间能区分两者。
+        assert elapsed < 0.22
+
+    @pytest.mark.asyncio
+    async def test_mutating_forces_whole_batch_serial(self):
+        """混入 1 个 MUTATING -> 整批串行 -> 总耗时 ≈ 0.3s（即使有 READ_ONLY）。"""
+        reg = ToolRegistry()
+        reg.register(TimedReadTool("r1", 0.1))
+        reg.register(TimedReadTool("r2", 0.1))
+        reg.register(TimedMutatingTool("w1", 0.1))
+        executor = ToolExecutor(reg)
+        calls = [
+            {"id": "c1", "name": "r1", "args": {}},
+            {"id": "c2", "name": "r2", "args": {}},
+            {"id": "c3", "name": "w1", "args": {}},  # 含这一个 MUTATING → 整批串行
+        ]
+
+        t0 = perf_counter()
+        results = await executor.execute_batch(calls)
+        elapsed = perf_counter() - t0
+
+        print("\n========== [Task4 串行] 含 1 个 MUTATING → 整批串行 ==========")
+        print("调度模式：任一 MUTATING → 整批按原顺序串行（保守默认）")
+        print(f"实测总耗时 = {elapsed * 1000:.0f} ms")
+        print("对照：3×0.1s=300ms 串行；并发会跌到 ≈100ms（含写并发有副作用乱序雷）")
+        print("--- 结果（按输入顺序）---")
+        for r in results:
+            print(f"  id={r.tool_call_id} ok={r.result.ok} data={r.result.data} message={r.result.message}")
+        print("=" * 52)
+
+        assert len(results) == 3
+        assert all(r.result.ok for r in results)
+        # 核心证据：整批串行，耗时接近 0.3s（给 0.25s 下限排除"误并发"）。
+        assert elapsed > 0.25
+
+
+# ============================================================================
+# Task 4 测试：乱序完成 → 保序返回 -- gather 的顺序保持
+# 故意让工具睡不同时长（先完成的是最后一个），验证结果仍是输入顺序。
+# ============================================================================
+
+
+class TestBatchOrderPreservation:
+    @pytest.mark.asyncio
+    async def test_out_of_order_completion_preserves_input_order(self):
+        """工具乱序完成（最后那个最先睡完），结果仍按输入顺序 + tool_call_id 配对。"""
+        reg = ToolRegistry()
+        # r1 睡最久，r3 睡最少 -> 完成顺序是 r3, r2, r1（与输入顺序完全相反）
+        reg.register(TimedReadTool("r1", 0.08))
+        reg.register(TimedReadTool("r2", 0.04))
+        reg.register(TimedReadTool("r3", 0.01))
+        executor = ToolExecutor(reg)
+        calls = [
+            {"id": "c1", "name": "r1", "args": {}},
+            {"id": "c2", "name": "r2", "args": {}},
+            {"id": "c3", "name": "r3", "args": {}},
+        ]
+
+        results = await executor.execute_batch(calls)
+        returned_ids = [r.tool_call_id for r in results]
+        returned_names = [r.result.data["name"] for r in results]
+
+        print("\n========== [Task4 保序] 乱序完成 → 保序返回 ==========")
+        print("完成顺序（谁先睡完）：r3(0.01s) → r2(0.04s) → r1(0.08s)")
+        print(f"返回顺序（应是输入顺序）：{returned_ids} / 工具名 {returned_names}")
+        print("↑ gather 保证：返回顺序 = 喂入顺序，与完成顺序无关")
+        print("↑ 这是 Task 5 回填 ToolMessage 的硬约束（tool_call_id 严格配对）")
+        print("=" * 52)
+
+        assert returned_ids == ["c1", "c2", "c3"]
+        assert returned_names == ["r1", "r2", "r3"]
+
+    @pytest.mark.asyncio
+    async def test_empty_batch_returns_empty_list(self):
+        """空批次 → 空 list（边界情况，execute_batch 不能炸）。"""
+        reg = ToolRegistry()
+        executor = ToolExecutor(reg)
+        results = await executor.execute_batch([])
+        assert results == []

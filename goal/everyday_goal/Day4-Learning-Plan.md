@@ -1,6 +1,6 @@
 # Day04 - Module 4：Tool Runtime 完整闭环
 
-> 状态：Task 1（Contract/ToolResult/Registry）、Task 2（Validation-first 单次执行链）、Task 3（Timeout + 唯一 Retry Layer）均已 PASS；Task 4 已解锁为 `ACTIVE`，待用户 `/speckit.implement` 后开工。  
+> 状态：Task 1（Contract/ToolResult/Registry）、Task 2（Validation-first 单次执行链）、Task 3（Timeout + 唯一 Retry Layer）、Task 4（批次调度与严格 ID 配对）均已 PASS；Task 5 已解锁为 `ACTIVE`，待用户 `/speckit.implement` 后开工。  
 > 节奏决策：合并旧 Day 4+5 的自然工程闭环，但不压缩 Tool Runtime 的核心认知步骤。  
 > 执行边界：Claude Code 按本蓝图一次推进一个 Task；Codex 只编排计划，不实现 Day 4 代码。
 
@@ -70,8 +70,8 @@ LLM tool_call{id, name, args}
 | Task 1：建立 Tool Contract、ToolResult 与 Registry | S | `CORE_LEARNING` | 形成 Tool 单一事实源、结构化结果、重复名保护及模型 Schema 导出 | 用户补写一个 Args Schema/描述，检查导出结果，并触发重复注册失败 | `DONE ✅` |
 | Task 2：实现 Validation-first 单次执行链 | S | `CORE_LEARNING` | Executor 完成 lookup → validate → execute → error mapping；参数错误不执行、不重试 | 用户制造非法参数，断言 execute 次数为 0，并检查 INVALID_ARGUMENT 回填 | `DONE ✅` |
 | Task 3：加入 Timeout、Error Classification 与唯一 Retry Layer | S | `CORE_LEARNING` | 暂时性错误按策略重试，确定性错误只执行一次，日志记录 attempt/duration/error | 用户触发 timeout/transient 与 permission 两类失败，从日志比较 attempt | `DONE ✅` |
-| Task 4：实现批次调度与严格 ID 配对 | S | `CORE_LEARNING` | 全 READ_ONLY 并发；含 MUTATING 整批串行；结果按原 call 顺序和 id 返回 | 用户用 Fake Tool 测耗时/顺序，并故意打乱完成顺序检查配对 | `ACTIVE` |
-| Task 5：Agent Loop 正式接入与 Module Gate | S | `CORE_LEARNING` | Runtime 只消费 ToolExecutor 结果并回填 ToolResult JSON；旧行为回归、JSONL Debug、模块 Full Review | 用户亲手完成核心接线，跑一次失败自纠错并从 JSONL 还原完整链路 | `LOCKED` |
+| Task 4：实现批次调度与严格 ID 配对 | S | `CORE_LEARNING` | 全 READ_ONLY 并发；含 MUTATING 整批串行；结果按原 call 顺序和 id 返回 | 用户用 Fake Tool 测耗时/顺序，并故意打乱完成顺序检查配对 | `DONE ✅` |
+| Task 5：Agent Loop 正式接入与 Module Gate | S | `CORE_LEARNING` | Runtime 只消费 ToolExecutor 结果并回填 ToolResult JSON；旧行为回归、JSONL Debug、模块 Full Review | 用户亲手完成核心接线，跑一次失败自纠错并从 JSONL 还原完整链路 | `ACTIVE` |
 
 > 解锁规则：当前 Task 的测试、Review 和 Checkpoint 通过后，Claude 才将下一 Task 改为 `ACTIVE`；完成后立即 STOP，等待用户继续。
 

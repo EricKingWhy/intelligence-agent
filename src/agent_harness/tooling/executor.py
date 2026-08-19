@@ -10,9 +10,12 @@
 - Task 2：单次执行链（Validation-first）--校验在 execute 之前，参数非法则 execute 次数=0。
 - Task 3：阶段3 外包两层边界--Timeout（asyncio.timeout + tool.timeout_seconds）
   和唯一 Retry Layer（只看 retryable 位，MAX_ATTEMPTS 上限）。
+- Task 4：批次调度 execute_batch（全 READ_ONLY 并发 / 含 MUTATING 整批串行）+ 严格保序。
+  每条 tool_call 仍走单条 execute()，批次层只决定并发还是串行。
 
 明确【不做】：
-- 不做并发/批次调度（Task 4，READ_ONLY 并发 / 含 MUTATING 串行）；
+- 不做细粒度 DAG / 读写冲突分析（整批串行一刀切即可）；
+- 不做并发上限（信号量）、批次级超时、部分失败回滚（都进 Backlog）；
 - 不做 Backoff / Circuit Breaker / Retry Budget（重试间隔为立即；复杂度进 Backlog）；
 - 不产出 ToolMessage（那是 AgentRuntime 在 Task 5 的接线活）；
 - 不调 LLM、不决定 Agent 是否停止、不维护 Session。
@@ -37,7 +40,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
-from agent_harness.tooling.contract import Tool
+from agent_harness.tooling.contract import Tool, ToolSideEffect
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
@@ -148,6 +151,69 @@ class ToolExecutor:
         # 三阶段顺序不变；Timeout/Retry 只包住 tool.execute 这一步。
         result = await self._execute_with_retry(tool_call_id, name, tool, validated)
         return ToolExecution(tool_call_id=tool_call_id, result=result)
+
+    async def execute_batch(self, tool_calls: list[dict[str, Any]]) -> list[ToolExecution]:
+        """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
+
+        一条可解释规则决定调度（Task 4 的核心）：
+          - 全 READ_ONLY → asyncio.gather 并发执行（独立读操作可安全重叠）；
+          - 任一 MUTATING → 整批按原顺序串行（保守默认，避免副作用乱序/部分失败难归因）。
+        无论并发还是串行，结果列表都按【输入 tool_calls 的顺序】返回，不是完成顺序。
+
+        为什么这是 Task 5 的接线点：
+          AgentRuntime 的 `for tc in tool_calls` 串行循环会被这一句替换。
+          每条 tool_call 仍走完整 execute()（lookup→validate→timeout→retry 全复用），
+          execute_batch 只在【批次层】决定并发还是串行，不重复执行域逻辑。
+
+        并发为什么用 gather 而不是 TaskGroup：
+          gather 最关键的特性是【返回顺序 = 喂入顺序，与完成顺序无关】--
+          这正是"并发跑、保序返"的天然实现，也是 ToolMessage 配对的安全网。
+          TaskGroup（3.11+）侧重结构化异常传播，返回顺序语义不如 gather 直观；
+          部分失败的传播策略也不同（gather(return_exceptions=True) 可兜底，TaskGroup 取消其余）。
+          这里要的是"每条都跑完、结果按序排"，gather 更贴。
+
+        mode 决策：
+          扫描本批所有 tool_call 的 side_effect：
+          - 某工具名查不到（将 TOOL_NOT_FOUND）→ 按 READ_ONLY 算，不影响并发决策、让其走正常 execute 报错；
+          - 全部 READ_ONLY → "parallel"；
+          - 任一 MUTATING → "serial"。
+        """
+        if not tool_calls:
+            return []
+
+        mode = self._decide_mode(tool_calls)
+
+        if mode == "parallel":
+            # gather 的顺序保持：即使第 3 个先完成，返回列表仍是 [结果1, 结果2, 结果3]。
+            return await asyncio.gather(
+                *(self.execute(tc) for tc in tool_calls)
+            )
+
+        # serial：含 MUTATING 整批串行，按原顺序逐个 await。
+        return [await self.execute(tc) for tc in tool_calls]
+
+    def _decide_mode(self, tool_calls: list[dict[str, Any]]) -> str:
+        """扫描批次，决定并发还是串行。
+
+        一条可解释规则：全 READ_ONLY 才并发；任一 MUTATING 整批串行。
+        未注册的工具名按 READ_ONLY 算（不影响调度，让其走 execute 正常报错）。
+        """
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            try:
+                tool = self._registry.get(name)
+            except KeyError:
+                # 工具不存在：不该用它干扰并发决策（可能只是本批其它工具合法地并发）。
+                # 让它走正常 execute() 报 TOOL_NOT_FOUND，mode 只看合法工具的 side_effect。
+                continue
+            # 任一 MUTATING 即整批串行：一个就够，无需扫剩下的工具。
+            # 判断钉在 side_effect 枚举位上（与 should_retry 只看 retryable 同理）：
+            # 确定性语义，不猜工具名、不解析描述。
+            if tool.side_effect == ToolSideEffect.MUTATING:
+                return "serial"
+
+        # 全部扫完没命中 MUTATING → 全 READ_ONLY → 并发。
+        return "parallel"
 
     async def _execute_with_retry(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel
