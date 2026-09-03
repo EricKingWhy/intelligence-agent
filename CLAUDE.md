@@ -573,3 +573,12 @@ Secondary / Task Agent：
 > **Engineering Specification 决定长期目标和架构边界；Spec Kit / Ticket 决定当前施工范围；代码与测试证明实现是否真实完成。**
 
 > **优先复用成熟设计，保持 Core 小而可控；任何框架、Provider、插件都不能反向拥有 Agent Runtime。**
+
+---
+
+# 15. 并行开发
+
+- 并行 AI Coding 时，每个会话必须使用独立 Git Worktree。
+- 后端使用 `D:\intelligence-agent-backend`（`feat/backend`），前端使用 `D:\intelligence-agent-frontend`（`feat/frontend`）。
+- `D:\intelligence-agent` 的 `main` 工作目录主要用于最终集成和测试。
+- 禁止两个并行 AI 会话同时修改同一个 Worktree。

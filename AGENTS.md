@@ -360,3 +360,12 @@ Scope 外问题只报告，不顺手修。
 # 12. 最终原则
 
 > **Engineering Specification 决定“要做什么与不能做什么”；Primary Spec Kit / ticket 决定“当前怎么施工”；Secondary Agent 的价值是独立验证、找根因、守住边界，并在明确 Scope 内完成高质量实现。**
+
+---
+
+# 13. 并行开发
+
+- 并行 AI Coding 时，每个会话必须使用独立 Git Worktree。
+- 后端使用 `D:\intelligence-agent-backend`（`feat/backend`），前端使用 `D:\intelligence-agent-frontend`（`feat/frontend`）。
+- `D:\intelligence-agent` 的 `main` 工作目录主要用于最终集成和测试。
+- 禁止两个并行 AI 会话同时修改同一个 Worktree。
