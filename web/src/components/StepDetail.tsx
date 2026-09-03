@@ -6,6 +6,7 @@
 
 import { ChevronRight, Clock, Hash, Package } from 'lucide-react';
 import type { ConversationState, ToolCall } from '../types';
+import { formatDuration } from '../lib/format';
 
 interface Props {
   conversation: ConversationState | null;
@@ -98,11 +99,7 @@ export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) 
             <div className="detail-row">
               <span className="detail-key">耗时</span>
               <span className="detail-val">
-                {(
-                  new Date(selectedTool.completed_at).getTime() -
-                  new Date(selectedTool.started_at).getTime()
-                )}
-                ms
+                {formatDuration(selectedTool.started_at, selectedTool.completed_at)}
               </span>
             </div>
           )}

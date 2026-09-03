@@ -16,7 +16,7 @@ import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { StepDetail } from './components/StepDetail';
-import type { ToolCall } from './types';
+import type { ToolCall, PresetTask } from './types';
 import './styles/app.css';
 
 export default function App() {
@@ -34,7 +34,7 @@ export default function App() {
 
   const [selectedTool, setSelectedTool] = useState<ToolCall | null>(null);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
-  const [presetTask, setPresetTask] = useState<{ text: string; id: number } | null>(null);
+  const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
 
   const handleNew = () => {
     selectSession(null);

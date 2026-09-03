@@ -46,7 +46,7 @@ export function SessionList({ sessions, selectedId, onSelect, onNew }: Props) {
             <span className="session-item-dot" />
             <div className="session-item-body">
               <div className="session-item-id">{s.session_id.slice(0, 12)}</div>
-              <div className="session-item-meta num">
+              <div className="session-item-meta">
                 {s.event_count} 事件 · {formatRelativeTime(s.last_event_time)}
               </div>
             </div>

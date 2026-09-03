@@ -6,12 +6,13 @@
 
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
+import type { PresetTask } from '../types';
 
 interface Props {
   streaming: boolean;
   onSubmit: (task: string) => void;
   onCancel: () => void;
-  presetTask?: { text: string; id: number } | null;
+  presetTask?: PresetTask | null;
 }
 
 export function Composer({ streaming, onSubmit, onCancel, presetTask }: Props) {

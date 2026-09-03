@@ -11,24 +11,17 @@
 import { useState } from 'react';
 import { Check, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
+import { formatDuration } from '../lib/format';
 
 interface Props {
   tool: ToolCall;
-}
-
-/** duration 格式化：<1s 用 ms，否则一位小数秒。无完成时间（running）返回 null。 */
-function formatDuration(tool: ToolCall): string | null {
-  if (!tool.started_at || !tool.completed_at) return null;
-  const ms = new Date(tool.completed_at).getTime() - new Date(tool.started_at).getTime();
-  if (ms < 1000) return `${Math.max(1, ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export function ToolCard({ tool }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const [expanded, setExpanded] = useState(false);
-  const duration = formatDuration(tool);
+  const duration = formatDuration(tool.started_at, tool.completed_at);
 
   return (
     <>

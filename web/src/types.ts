@@ -31,6 +31,12 @@ export interface SessionSummary {
 
 // ── View-models (projection output) ──
 
+/** 空状态示例任务注入 Composer 的载荷（对象引用变化即触发注入）。 */
+export interface PresetTask {
+  text: string;
+  id: number;
+}
+
 export interface ToolCall {
   tool_call_id: string;
   name: string;

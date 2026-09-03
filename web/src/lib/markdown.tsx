@@ -73,8 +73,10 @@ export function renderMarkdown(text: string): ReactNode[] {
     const heading = line.match(/^(#{1,4})\s+(.*)$/);
     if (heading) {
       flushList(key);
+      // 语义化标题：对话流里 #/## 视作 h3，###/#### 视作 h4（h1/h2 保留给页面骨架）
+      const Tag = heading[1].length <= 2 ? 'h3' : 'h4';
       blocks.push(
-        <div className="md-heading" key={key}>{renderInline(heading[2], key)}</div>,
+        <Tag className="md-heading" key={key}>{renderInline(heading[2], key)}</Tag>,
       );
       continue;
     }

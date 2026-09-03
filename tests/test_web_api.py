@@ -172,12 +172,13 @@ class _DisconnectingASGI:
 
     只实现能驱动 EventSourceResponse 跑起来的最小路径：app 发出 http.response.start
     后，置位 disconnected，下一次 receive() 投递 http.disconnect。
+    receive/send 参数按 ASGI 签名保留但弃用——替身内部自产自销这两个通道。
     """
 
     def __init__(self, app: Any) -> None:
         self._app = app
 
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+    async def __call__(self, scope: dict) -> None:
         request_sent = asyncio.Event()
         disconnected = asyncio.Event()
 
@@ -211,7 +212,7 @@ class _DisconnectingASGI:
 
 @pytest.mark.asyncio
 async def test_disconnect_cancels_sse_producer(tmp_path):
-    """客户端断连后 SSE producer 必须被取消（spec 11 §4 第 2/3 条）。
+    """客户端断连后 SSE producer 必须被取消（spec 11 §4 第 1-3 条）。
 
     用一个永不自然完成的 stub runtime：它只在被取消（GeneratorExit/CancelledError）
     时置位 finally 旗标。如果断连信号没传到 generator，旗标永远是 False，断言失败。
@@ -219,19 +220,26 @@ async def test_disconnect_cancels_sse_producer(tmp_path):
     cancelled = asyncio.Event()
 
     class HangingRuntime:
-        """run_stream 永远挂住，只有被取消时才退 finally——观察取消信号是否到达。"""
+        """模拟真实 runtime：先落盘一条事实事件，再挂起等模型流；只有被取消才退 finally。"""
+
+        def __init__(self) -> None:
+            self.cancelled = asyncio.Event()
+            self.persisted_session_id: str | None = None
 
         async def run_stream(self, session: Any, task: str) -> AsyncIterator[AgentEvent]:
+            self.persisted_session_id = session.session_id
+            session.append(event_type=RUN_STARTED, data={"reason": "disconnect-test"})
             try:
                 await asyncio.Event().wait()  # 永不 set，模拟 agent loop 永远在等模型
                 yield AgentEvent(type=RUN_STARTED)  # pragma: no cover — 永不执行到这里
             finally:
-                cancelled.set()
+                self.cancelled.set()
 
     settings = Settings(workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
 
-    with patch("agent_harness.web.app._build_runtime", return_value=HangingRuntime()):
+    hanging = HangingRuntime()
+    with patch("agent_harness.web.app._build_runtime", return_value=hanging):
         transport = _DisconnectingASGI(app)
         scope = {
             "type": "http",
@@ -240,10 +248,18 @@ async def test_disconnect_cancels_sse_producer(tmp_path):
             "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
             "query_string": b"",
         }
-        await transport(scope, None, None)
+        await transport(scope)
 
-    # 关键断言：producer 的 finally 已触发——断连信号确实传到了 generator。
-    assert cancelled.is_set(), (
+    # 断言 1（§4 第 2/3 条）：producer 的 finally 已触发——断连信号确实传到了 generator。
+    assert hanging.cancelled.is_set(), (
         "客户端断连后 SSE producer 未被取消——spec 11 §4 的 disconnect 清理未实现，"
         "这会在真实 uvicorn 下泄漏 task + 持有 session 锁。"
     )
+
+    # 断言 2（§4 第 4 条）：断连清理不破坏 Session 一致性——取消前已落盘的事实
+    # 必须完整可读、可重建，清理路径不得增删改持久化事件。
+    # 2 条 = Session.start 的 session/started 初始事实 + stub 落盘的 run/started。
+    assert hanging.persisted_session_id, "runtime 未创建 session"
+    events = app.state.agent.store.read_events(hanging.persisted_session_id)
+    assert len(events) == 2, f"断连后 session 事实应恰好 2 条，实际 {len(events)}"
+    assert [e.type for e in events] == [SESSION_STARTED, RUN_STARTED]
