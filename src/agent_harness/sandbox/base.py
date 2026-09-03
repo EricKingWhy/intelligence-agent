@@ -54,6 +54,19 @@ class Sandbox(ABC):
         """
 
     @abstractmethod
+    def list_files(self, pattern: str) -> list[str]:
+        """枚举 workspace 内匹配 glob 模式的文件，返回 workspace 相对路径列表。
+
+        - 仅返回文件，不返回目录。
+        - 相对路径用 POSIX 风格（正斜杠），按路径排序。
+        - pattern 为空字符串或 "*" 时返回 workspace 内所有文件。
+        - 越界访问（pattern 解析出 workspace 外）抛 PermissionError。
+
+        这是 grep / glob Coding Tool 跨后端枚举文件的唯一可移植入口；
+        LocalSubprocessSandbox 用 os.walk，DockerSandbox 用 exec("find")。
+        """
+
+    @abstractmethod
     def read_text(self, path: str) -> str:
         """读 workspace 内文件，返回文本。路径越界抛 PermissionError。"""
 

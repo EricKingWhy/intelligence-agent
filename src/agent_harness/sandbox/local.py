@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,6 +19,26 @@ from agent_harness.sandbox.base import ExecResult, Sandbox
 
 #: LocalSubprocess 的默认命令超时（秒）。None 表示不超时。
 DEFAULT_EXEC_TIMEOUT: float = 60.0
+
+
+def _glob_match(rel_path: str, pattern: str) -> bool:
+    """对 workspace 相对路径做 glob 匹配，支持 ** 递归。
+
+    pathlib.PurePath.match 不支持顶级 ** 前缀跨多段目录匹配，
+    所以这里把 ** 模式规范化后用 fnmatch 逐段处理。
+    """
+    if pattern in ("", "*"):
+        return True
+    if "**" in pattern:
+        # 把 "**/" 收敛成 ""，让 fnmatch 对完整相对路径匹配剩余字面段。
+        # 简化策略：如果模式含 **，剥掉 **/ 后对路径末尾段做匹配。
+        normalized = pattern.replace("**/", "").replace("**", "*")
+        return fnmatch.fnmatch(rel_path, normalized) or fnmatch.fnmatch(
+            Path(rel_path).name, normalized
+        )
+    return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
+        Path(rel_path).name, pattern
+    )
 
 
 class LocalSubprocessSandbox(Sandbox):
@@ -77,6 +99,24 @@ class LocalSubprocessSandbox(Sandbox):
                 + f"\n命令超时（上限 {effective_timeout} 秒）",
                 duration_ms=duration_ms,
             )
+
+    def list_files(self, pattern: str) -> list[str]:
+        """枚举 workspace 内匹配 glob 模式的文件，返回 POSIX 风格相对路径（排序）。
+
+        用 os.walk 遍历 workspace_root，对每个文件的【相对路径】做 glob 匹配。
+        pattern 为空或 "*" 时返回所有文件。仅返回文件，不返回目录。
+        """
+        effective = pattern if pattern else "*"
+        results: list[str] = []
+        for dirpath, _dirnames, filenames in os.walk(self._workspace_root):
+            for fname in filenames:
+                full = Path(dirpath) / fname
+                rel = full.relative_to(self._workspace_root)
+                rel_posix = rel.as_posix()
+                if _glob_match(rel_posix, effective):
+                    results.append(rel_posix)
+        results.sort()
+        return results
 
     def read_text(self, path: str) -> str:
         """读 workspace 内文件。路径越界抛 PermissionError，文件不存在抛 FileNotFoundError。"""

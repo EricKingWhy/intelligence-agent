@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import importlib
 import io
 import posixpath
@@ -11,6 +12,20 @@ from time import perf_counter
 from uuid import uuid4
 
 from agent_harness.sandbox.base import ExecResult, Sandbox
+
+
+def _glob_match_posix(rel_path: str, pattern: str) -> bool:
+    """对容器内相对路径做 glob 匹配，支持 ** 递归（与 LocalSubprocessSandbox._glob_match 同语义）。"""
+    if pattern in ("", "*"):
+        return True
+    if "**" in pattern:
+        normalized = pattern.replace("**/", "").replace("**", "*")
+        return fnmatch.fnmatch(rel_path, normalized) or fnmatch.fnmatch(
+            PurePosixPath(rel_path).name, normalized
+        )
+    return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
+        PurePosixPath(rel_path).name, pattern
+    )
 
 
 class DockerSandbox(Sandbox):
@@ -76,6 +91,24 @@ class DockerSandbox(Sandbox):
             stderr=(stderr_bytes or b"").decode("utf-8", errors="replace"),
             duration_ms=round((perf_counter() - started) * 1000, 1),
         )
+
+    def list_files(self, pattern: str) -> list[str]:
+        """枚举容器 workspace 内匹配 glob 模式的文件，返回相对 /workspace 路径（排序）。
+
+        用 exec("find . -type f -printf '%P\n'") 拿文件列表后 Python 侧 fnmatch 过滤。
+        """
+        effective = pattern if pattern else "*"
+        result = self.exec("find . -type f -printf '%P\n'")
+        if result.exit_code != 0:
+            return []
+        candidates = [line for line in result.stdout.splitlines() if line.strip()]
+        matched = [
+            rel
+            for rel in candidates
+            if _glob_match_posix(rel, effective)
+        ]
+        matched.sort()
+        return matched
 
     def read_text(self, path: str) -> str:
         target = self._resolve_within_workspace(path)
