@@ -1,19 +1,26 @@
 /** Composer — task input at the bottom of the conversation column.
  *
  * Submits on Cmd/Ctrl+Enter. Disabled while streaming.
+ * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
-import { useState, type KeyboardEvent } from 'react';
+import { useEffect, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 
 interface Props {
   streaming: boolean;
   onSubmit: (task: string) => void;
   onCancel: () => void;
+  presetTask?: { text: string; id: number } | null;
 }
 
-export function Composer({ streaming, onSubmit, onCancel }: Props) {
+export function Composer({ streaming, onSubmit, onCancel, presetTask }: Props) {
   const [value, setValue] = useState('');
+
+  // 外部示例任务注入（引用变化即触发；每次点击 chip 生成新对象）
+  useEffect(() => {
+    if (presetTask) setValue(presetTask.text);
+  }, [presetTask]);
 
   const submit = () => {
     const trimmed = value.trim();

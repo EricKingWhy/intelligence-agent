@@ -33,6 +33,8 @@ export default function App() {
   } = useSession();
 
   const [selectedTool, setSelectedTool] = useState<ToolCall | null>(null);
+  // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
+  const [presetTask, setPresetTask] = useState<{ text: string; id: number } | null>(null);
 
   const handleNew = () => {
     selectSession(null);
@@ -68,8 +70,17 @@ export default function App() {
 
         <section className="app-conversation-col surface-raised">
           {error && <div className="app-error">{error}</div>}
-          <Conversation conversation={conversation} loadingHistory={loadingHistory} />
-          <Composer streaming={streaming} onSubmit={handleSubmit} onCancel={cancelStream} />
+          <Conversation
+            conversation={conversation}
+            loadingHistory={loadingHistory}
+            onPresetTask={(text) => setPresetTask({ text, id: Date.now() })}
+          />
+          <Composer
+            streaming={streaming}
+            onSubmit={handleSubmit}
+            onCancel={cancelStream}
+            presetTask={presetTask}
+          />
         </section>
 
         <StepDetail

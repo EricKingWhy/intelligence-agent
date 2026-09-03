@@ -18,9 +18,17 @@ import { ToolCard } from './ToolCard';
 interface Props {
   conversation: ConversationState | null;
   loadingHistory: boolean;
+  /** 空状态示例任务回调——点击 chip 时由 App 注入 Composer。 */
+  onPresetTask?: (text: string) => void;
 }
 
-export function Conversation({ conversation, loadingHistory }: Props) {
+const EXAMPLE_TASKS = [
+  '写一个 FizzBuzz 脚本并运行验证',
+  '创建 todo.md，写入三条今日计划',
+  '列出当前目录的文件结构并总结',
+];
+
+export function Conversation({ conversation, loadingHistory, onPresetTask }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -45,6 +53,15 @@ export function Conversation({ conversation, loadingHistory }: Props) {
         <div className="conversation-empty">
           <div className="empty-hero">暂无对话</div>
           <div className="empty-sub">在下方提交任务，实时观看 Agent 执行。</div>
+          {onPresetTask && (
+            <div className="empty-examples">
+              {EXAMPLE_TASKS.map((task) => (
+                <button key={task} className="example-chip" onClick={() => onPresetTask(task)}>
+                  {task}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -52,7 +69,8 @@ export function Conversation({ conversation, loadingHistory }: Props) {
 
   return (
     <div className="conversation" ref={scrollRef}>
-      <div className="conversation-scroll">
+      {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
+      <div className="conversation-scroll" key={conversation.session_id}>
         {conversation.turns.map((turn) => (
           <TurnView key={turn.step_id} turn={turn} active={conversation.run_status === 'running'} />
         ))}

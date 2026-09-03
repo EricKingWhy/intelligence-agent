@@ -294,12 +294,42 @@
   font-size: var(--text-sm);
   max-width: 340px;
 }
+.empty-examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-xl);
+}
+.example-chip {
+  padding: 6px var(--space-md);
+  border-radius: var(--radius-full);
+  background: var(--color-hover);
+  border: var(--glass-border);
+  color: var(--color-muted-foreground);
+  font-size: var(--text-xs);
+  font-family: var(--font-ui);
+  cursor: pointer;
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple),
+    border-color var(--dur-out) var(--ease-apple), transform var(--dur-out) var(--ease-apple);
+}
+.example-chip:hover {
+  color: var(--color-foreground);
+  background: var(--color-surface-2);
+  border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+  transform: translateY(-1px);
+}
 
 /* ── Turn：用户极简右对齐 + Assistant 无卡排版 + Activity Timeline ── */
 .turn {
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
+  animation: turn-in var(--dur-in) var(--ease-apple);
+}
+@keyframes turn-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .msg {
   display: flex;
