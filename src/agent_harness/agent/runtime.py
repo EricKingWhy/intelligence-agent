@@ -40,12 +40,20 @@ class AgentRuntime:
         executor: ToolExecutor,
         max_steps: int = 20,
     ) -> None:
-        self.model = model
         self.registry = registry
         self.executor = executor
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
+
+        # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
+        # 并在回复里产出 tool_calls。bind_tools 是 LangChain 的标准接线点。
+        # ScriptedModel 没有 bind_tools（测试用剧本直接构造 tool_calls），跳过绑定。
+        definitions = registry.export_model_definitions()
+        if definitions and hasattr(model, "bind_tools"):
+            self.model = model.bind_tools(definitions)
+        else:
+            self.model = model
 
     async def run(self, user_input: str) -> AgentRunResult:
         """跑完整条 Agent Loop，返回 AgentRunResult。"""

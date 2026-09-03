@@ -31,3 +31,9 @@ dev = [
 # 让项目根进入 sys.path，使 tests/ 下的测试辅助模块（如 scripted_model）
 # 能以 tests.xxx 形式被跨文件导入；否则只有 src 在路径上。
 pythonpath = ["."]
+# 集成测试默认不跑（烧 token、依赖真实 LLM）。
+# 手动跑：uv run pytest -m integration
+addopts = ["-m", "not integration"]
+markers = [
+    "integration: 端到端集成测试（需要真实 LLM API key、烧 token）",
+]
