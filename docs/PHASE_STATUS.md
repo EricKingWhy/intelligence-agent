@@ -17,7 +17,7 @@
 | Phase | 名称 | 状态 | 关键 commit | Gate 证据 / 备注 |
 |---|---|---|---|---|
 | **0** | Repo Foundation | ✅ COMPLETED | `21b421d` 起 | Python 3.11+ / uv / pytest-asyncio / ruff / pydantic-settings / JSONL Diagnostic Logger。`config.py` + `logging.py` + 测试 harness 就位。 |
-| **1** | SessionEvent + Model + Minimal Agent Loop | 🔄 IN PROGRESS | `f789aac`（AgentRuntime）<br>`8ecb202`（bind_tools） | ModelProvider + minimal AgentRuntime + max_steps 已落地。**缺**：SessionEvent DTO、append-only JSONL SessionStore、derive_messages、基础 Resume、Runtime 改造为 event-sourced。ADR-0003 已冻结设计。 |
+| **1** | SessionEvent + Model + Minimal Agent Loop | ✅ COMPLETED | `f789aac`（AgentRuntime）<br>`8ecb202`（bind_tools）<br>`87c3a72`（event-sourced） | SessionEvent DTO + 10 种 event type + JsonlSessionStore（崩溃安全）+ derive_messages（配对+dangling 合成）+ Session 聚合根（start/resume/append/derive/begin_run/end_run）+ AgentRuntime event-sourced 改造 + Resume 集成测试。Gate 达成：进程重启后可从 JSONL 恢复完整对话历史。135 passed。 |
 | **2** | Tool Runtime | ✅ COMPLETED | `8572fd8` → `00f3753` | Tool Contract / Registry / ToolResult / Validation-first ToolExecutor / 单 Retry Layer / 批次调度 + 严格 ID 配对。Gate 达成：INVALID_ARGUMENT 不重试、transient 可重试、配对 100%。Permission interface 薄，留待 Phase 7 Capability seam 深化。 |
 | **3** | Docker Sandbox + Coding Tools | 🔄 PARTIAL | `2bfa457` → `76049d0` | Sandbox ABC + LocalSubprocessSandbox + DockerSandbox（懒加载）+ 24 契约测试 ✅。read/write/bash ✅。**缺**：edit / grep / glob / apply_patch / git_status / git_diff；Session-scoped Sandbox 生命周期；Approval（REQUIRE_APPROVAL）。 |
 | **4** | Storage + Operation Ledger + Recovery | ⬜ NOT STARTED | — | 依赖 Phase 1 SessionEvent 完成。 |
@@ -38,8 +38,11 @@
 
 ## 当前工作焦点
 
-**Phase 1 SessionEvent 模块**（进行中）。设计已通过 grilling 冻结（ADR-0003）。下一步：`/to-spec` → `/to-tickets` → `/implement`。
+**Phase 1 SessionEvent 模块已完成**（✅ COMPLETED）。全部 4 个 ticket（#7/#8/#9/#10）交付，Phase 1 Gate 达成。
+
+下一步建议：回到 **Phase 3 Docker Sandbox + Coding Tools** 补齐剩余 6 个工具（edit/grep/glob/apply_patch/git_status/git_diff）+ Approval + Session-scoped Sandbox 生命周期，或进入 **Phase 4 Storage + Operation Ledger + Recovery**（已有 SessionEvent 事实源作为前置）。
 
 ## 更新日志
 
 - 2026-09-03：初始建立。盘点 Phase 0-15 状态。
+- 2026-09-03：Phase 1 SessionEvent 完成（Tickets A-D）。SessionEvent DTO + JsonlSessionStore + derive_messages + Session 聚合根 + AgentRuntime event-sourced 改造 + Resume 集成测试。135 passed，ruff clean。Issues #6-#10 已关闭。
