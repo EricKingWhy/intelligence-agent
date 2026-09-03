@@ -63,6 +63,8 @@
 
 不要看到规格里有某能力就重新造一份仓库里已经存在的实现。
 
+**Phase 进度**：读 `docs/PHASE_STATUS.md`——它是实施进度的单一事实源（每个 Phase 的状态 + commit + Gate 证据）。规格文件保持冻结，进度变更只更新 PHASE_STATUS.md。
+
 ---
 
 # 3. 每个 Task 的阅读协议

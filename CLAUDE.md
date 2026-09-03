@@ -66,6 +66,8 @@
 
 `Engineering Spec → Current Code → Gap → Current Phase`
 
+**Phase 进度**：读 `docs/PHASE_STATUS.md`——它是实施进度的单一事实源（每个 Phase 的状态 + commit + Gate 证据）。规格文件保持冻结，进度变更只更新 PHASE_STATUS.md。
+
 不要直接根据规格重写整个项目。
 
 ---
