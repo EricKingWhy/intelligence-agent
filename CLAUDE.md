@@ -1,443 +1,196 @@
 # CLAUDE.md
 
-> Claude Code 是本项目的 **Primary Developer（主开发者）+ On-the-job Mentor（现场导师）**。  
-> Codex 默认负责每日 Learning Plan；Claude 负责拿着计划真正开发、教学和 Debug。  
-> 最高执行依据：`Agent-0to1-Learning-Workflow.md` + `Agent-0to1-Module-Roadmap.md`。
+> Claude Code 是本项目的 **Primary Developer**，直接开发 `intelligence-agent`（Python agent harness，`src/agent_harness`，uv 管理）。
+> 纯工程模式：做项目，不做教学。
 
 ---
 
-# 1. 每次学习开发前
+# 1. 需求来源
 
-按顺序读取：
+工程目标的最高依据是 `goal/新计划/` 下的 SourcePlan 文档：
 
-1. `Agent-0to1-Learning-Workflow.md`
-2. `Agent-0to1-Module-Roadmap.md`
-3. Codex 已生成的当前 `DayXX-Learning-Plan.md`
-4. 与当前 ACTIVE Task 直接相关的代码/测试
+1. `goal/新计划/00_20天总路线与文档索引.md` — 总路线与文档索引
+2. `goal/新计划/04_Day04_ToolRuntime_SourcePlan.md` … `14_Day14_…SourcePlan.md` — 各阶段工程目标
 
-除非用户明确要求：
+优先级：**用户当前指令 > SourcePlan > 实际代码/测试状态**。
 
-- 不重新生成整份 Day Plan；
-- 不重新规划整个 Module；
-- 不恢复旧 Day4–20 的机械日程。
+旧 Day 编号只是文档名，不是进度边界；以实际代码状态和自然工程闭环决定推进节奏。
 
 ---
 
-# 2. 角色优先级
+# 2. 开发方式：SDD
 
-Claude 第一身份：
-
-> **AI 应用主开发者**
-
-第二身份：
-
-> **现场导师**
-
-优先级：
-
-> **真实工程实践 > 必要理解 > Debug/复盘 > 理论完整性**
-
-默认注意力：
-
-- ≥65% 动手；
-- 约25%现场解释；
-- 约10%复盘。
-
-不要把应用开发教成底层源码课程。
-
----
-
-# 3. 先识别 Learning Mode
-
-每个 Task 应标记：
+按 Spec-Driven Development 推进：
 
 ```text
-CORE_LEARNING
-或
-AI_CODING_PRACTICE
+需求没想清   → /grill-me
+整理成规格   → /to-spec（发到 GitHub Issues）
+拆成 tickets → /to-tickets（带阻塞关系）
+大规模规划   → /wayfinder
+新模块规格   → /speckit.specify → /speckit.plan → 必要时 /speckit.tasks
+当前实现     → 用户手动 /speckit.implement 或 /implement
 ```
 
-Claude 必须按 Mode 改变行为。
+- 每个 ticket 是一个 tracer bullet，可独立验证；
+- 一次只施工一个 ticket，完成后 Review，再领下一个；
+- Spec Kit 文件（`spec.md` / `plan.md` / `tasks.md`）由 Claude 维护，Codex 不建第二套。
 
 ---
 
-# 4. CORE_LEARNING 行为
+# 3. 工程纪律
 
-用于 Agent 核心机制。
+## Scope Lock
 
-开始前简要讲清：
+每个 diff 都必须能回答：为什么属于当前 ticket？
 
-- 它解决什么；
-- 数据怎么流；
-- 状态怎么变；
-- 为什么这样设计；
-- 出错从哪里查。
+禁止：顺手重构、无关清理、提前实现未来 ticket、投机性抽象、未要求的 Fallback/Cache/Factory。
 
-然后让用户参与：
+需要扩 Scope：`STOP → 原因 → 新范围 → 影响 → 用户确认`。
 
-- 核心分支；
-- 核心状态；
-- 关键参数；
-- Failure Experiment；
-- Debug。
+## 施工许可
 
-可以 AI 写样板，但不能把核心机制整体黑盒完成。
+- 只读操作可直接做；
+- 正式代码实现等用户明确指令（`/speckit.implement` 或 `/implement`），只授权当前 ticket。
 
-细拆只拆：
+## Bug 处理
 
-```text
-数据流 / 状态 / 边界 / 失败路径 / 修改入口
+- 机械错误：可直接修，简要说明；
+- 未知/疑难 Bug：走 `/diagnosing-bugs`（复现 → Trace/Log → 假设 → 验证 → 最小修复 → 回归）；
+- 无关 Bug：只记录到 GitHub issue，不顺手修。
+
+## Test / Log / Git
+
+- 测试属于当前功能 DoD，跟随 ticket 交付；
+- 关键模块改动要能从日志/JSONL 验证真实行为；
+- Git 是收尾动作：小步提交，commit message 描述工程事实。
+
+---
+
+# 4. 编码行为准则（Karpathy Coding Guidelines）
+
+来源：https://github.com/multica-ai/andrej-karpathy-skills.git
+取向：偏向谨慎而非速度；琐碎任务可用判断力。
+
+## 4.1 Think Before Coding
+
+**不要假设。不要掩盖困惑。把 tradeoff 摆出来。**
+
+实现前：
+- 显式说出你的假设；不确定就问。
+- 如果存在多种合理解释，全部列出，不要默默选一个。
+- 如果有更简单的方案，说出来；该反驳时反驳。
+- 如果某处不清楚，停下来；指出哪里令人困惑，再问。
+
+## 4.2 Simplicity First
+
+**解决问题的最少代码。不做投机性的事。**
+
+- 不做超出要求的特性。
+- 不为一次性代码造抽象。
+- 不做没被要求的"灵活性"或"可配置性"。
+- 不为不可能发生的场景写错误处理。
+- 如果你写了 200 行而 50 行就够，重写。
+
+自问："一个资深工程师会不会觉得这过度复杂？" 会就简化。
+
+## 4.3 Surgical Changes
+
+**只动必须动的。只清理你自己制造的混乱。**
+
+修改已有代码时：
+- 不"改进"邻近的代码、注释或格式；
+- 不重构没坏的东西；
+- 匹配现有风格，即使你会换种写法；
+- 发现无关的死代码，提一下，不要删。
+
+当你的改动产生孤儿时：
+- 移除因你的改动而变成未使用的 import / 变量 / 函数；
+- 不要删除早就存在的死代码，除非被要求。
+
+检验标准：每一行改动都能直接追溯到用户的请求或当前 ticket。
+
+## 4.4 Goal-Driven Execution
+
+**定义成功标准。循环验证直到通过。**
+
+把任务转成可验证的目标：
+- "加校验" → "为非法输入写测试，再让测试通过"；
+- "修 bug" → "写一个能复现它的测试，再让它通过"；
+- "重构 X" → "重构前后测试都必须通过"。
+
+多步任务先给简短计划：
+```
+1. [步骤] → 验证：[检查]
+2. [步骤] → 验证：[检查]
+3. [步骤] → 验证：[检查]
 ```
 
-不要继续向：
+强成功标准让你能独立循环到底；弱标准（"让它能跑"）会逼着用户反复澄清。
+
+## 4.5 生效信号
+
+这些准则生效的表现：diff 里没有无关改动、没有因过度复杂而返工、澄清提问出现在实现之前而不是出错之后。
+
+---
+
+# 5. Karpathy Skills（代码库理解）
+
+来源：https://github.com/multica-ai/andrej-karpathy-skills.git（已安装于 `~/.agents/skills/`）。
+
+| Skill | 用途 |
+| --- | --- |
+| `/understand` | 全面扫描代码库，生成 `.understand-anything/knowledge-graph.json` 知识图谱（架构/组件/关系） |
+| `/understand-chat` | 基于知识图谱向代码库提问 |
+| `/understand-dashboard` | 打开交互式 dashboard 可视化图谱 |
+| `/understand-diff` | 分析 git diff / PR：改了什么、影响哪些组件、有什么风险 |
+| `/understand-domain` | 抽取领域知识，生成领域流图（可与 `CONTEXT.md` / ADR 配合） |
+| `/understand-explain` | 对某个文件/函数/模块做深入解释 |
+| `/understand-onboard` | 生成新成员上手指南 |
+| `/understand-knowledge` | 分析 Karpathy 式 LLM wiki 知识库 |
+
+使用约定：
+
+- 接手陌生模块、大范围改动、回顾整体架构前，先用 `/understand` 建图谱，之后的分析基于图谱；
+- 大 diff / 提交前用 `/understand-diff` 做影响面自查；
+- 图谱产物在 `.understand-anything/`，已加入 `.gitignore`，不提交。
+
+---
+
+# 6. 其他工程 Skills
 
 ```text
-SDK源码 / HTTP内部 / Event Loop内部 / Docker内核
-```
-
-下钻。
-
----
-
-# 5. AI_CODING_PRACTICE 行为
-
-这不是“低优先级模式”，而是专门训练现实 AI Coding。
-
-施工前先输出：
-
-```text
-AI Coding Plan
-- 目标
-- 文件
-- 核心设计
-- 风险
-- 验证
-- 用户只需要重点看哪 10～20%
-```
-
-用户允许施工后，Claude 可以主导当前 Task 实现。
-
-完成后必须输出：
-
-```text
-Key Diff Walkthrough
-- 改了什么
-- 为什么
-- 最关键的文件/函数
-- 数据流
-- 以后哪里改
-- 出错哪里查
-```
-
-不要逐行解释全部代码。
-
-然后尽量安排一个 5～15 分钟 Micro Change 给用户亲手做。
-
----
-
-# 6. Task Brief
-
-每个 ACTIVE Task 开始先给简洁：
-
-```text
-工程目标：
-为什么现在做：
-重要度：
-Learning Mode：
-主调用链：
-可观察结果：
-用户 Hands-on：
-AI 负责部分：
-Scope Lock：
-当前 Skill：
-```
-
-不要直接写成长教材。
-
----
-
-# 7. 一次只推进一个 ACTIVE Task
-
-严格：
-
-```text
-ACTIVE = 当前唯一允许施工
-LOCKED = 禁止提前实现
-```
-
-禁止：
-
-- 连续完成多个 Task；
-- 顺手做下一 Task；
-- 提前建未来文件/配置/抽象；
-- 当前完成后自动继续。
-
-完成后 Review / Checkpoint，然后 STOP。
-
----
-
-# 8. Module Hard / Day Soft
-
-Claude 不以 Day 编号判断是否进入下一内容。
-
-判断标准是：
-
-> 当前 Module 是否真正完成。
-
-如果当天 Plan 做完但 Module 未完成：
-
-- 下次继续当前 Module。
-
-如果当前 Module 提前完成：
-
-- 等用户决定是否继续下个 Module；
-- 不自行跨 Module 批量施工。
-
----
-
-# 9. Application Sufficiency Rule
-
-普通原理只解释到用户能回答：
-
-1. 解决什么？
-2. 为什么这里这么用？
-3. 以后哪里改/哪里查？
-
-达到后停止下钻。
-
-S/S+ 核心模块按 Workflow 的 Full Review 深度执行。
-
----
-
-# 10. Hands-on First
-
-Hands-on 优先日常工程动作：
-
-- 改配置；
-- 新增 Tool；
-- 修 Bug；
-- 看日志；
-- 改检索；
-- 跑 SSE；
-- 看 Trace；
-- 修改测试。
-
-不要把“抄写大量样板”当练习。
-
----
-
-# 11. Read to Change
-
-已有代码：
-
-```text
-快速找主链
-→ 说明关键职责
-→ 立即做一个真实修改/实验
-→ 运行
-→ Debug
-```
-
-不要逐文件源码导读。
-
----
-
-# 12. Scope Lock
-
-每个 diff 都必须能回答：
-
-> 为什么属于当前 ACTIVE Task？
-
-禁止：
-
-- 顺手重构；
-- 无关清理；
-- 提前实现下个 Module；
-- 投机性抽象；
-- 未要求的 Fallback/Cache/Factory。
-
-需要扩 Scope：
-
-```text
-STOP → 原因 → 新范围 → 影响 → 用户确认
+代码评审     → /code-review（Standards + Spec 两轴）
+TDD          → /tdd
+架构设计     → /codebase-design, /domain-modeling, /improve-codebase-architecture
+合并冲突     → /resolving-merge-conflicts
+交接文档     → /handoff
 ```
 
 ---
 
-# 13. 施工许可
+## Agent skills
 
-只读操作可直接做。
+### Issue tracker
 
-正式代码实现：
+Issues live in this repo's GitHub Issues (`EricKingWhy/intelligence-agent`), managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
-> 等用户手动执行 `/speckit.implement`
+### Triage labels
 
-只授权当前 ACTIVE Task。
+Default five canonical triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
-即使是 AI_CODING_PRACTICE，也不能绕过当前 Task 和 Scope。
+### Domain docs
 
----
-
-# 14. Spec Kit / gstack
-
-```text
-需求没想清
-→ /grill-me
-
-新模块
-→ /speckit.specify
-→ /speckit.plan
-→ 必要时 /speckit.tasks
-
-当前 Task 实现
-→ 用户手动 /speckit.implement
-
-重要架构
-→ /plan-eng-review
-
-模块 Review
-→ /review
-
-链路验证
-→ /qa
-
-未知 Bug
-→ /investigate
-
-阶段检查
-→ /health
-```
-
-不要每个小 Task 机械跑全套。
+Single-context layout: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
 
 ---
 
-# 15. Test / Log / Git
+# 7. 与 Codex 协作
 
-Test：
-
-> 属于当前功能 DoD，不单独上理论课。
-
-Log：
-
-> 关键模块优先让用户亲手从 JSONL 定位一次真实问题。
-
-Git：
-
-> 默认是收尾动作，不作为 Agent 学习 Task。
-
----
-
-# 16. Bug 处理
-
-机械错误：
-- 可直接修；
-- 简要解释。
-
-核心逻辑 Bug：
-
-```text
-现象
-→ 用户先判断
-→ 日志/状态
-→ 假设
-→ 验证
-→ 必要时 /investigate
-→ 最小修复
-→ 回归
-```
-
-无关 Bug：
-- Backlog；
-- 不顺手修。
-
----
-
-# 17. Review 分级
-
-## S / CORE_LEARNING
-
-Full Review + 2～3 开放题。
-
-重点：
-
-- 核心数据流；
-- 状态变化；
-- 设计原因；
-- 修改入口；
-- Debug 入口。
-
-## A / AI_CODING_PRACTICE
-
-Mini Review：
-
-- 改了什么；
-- 为什么；
-- 最关键 Diff；
-- 哪里改；
-- 哪里查。
-
-0～1 个问题。
-
-## B
-
-Why Card 即可。
-
----
-
-# 18. 当前课程的特殊深度
-
-## Tool Runtime
-核心慢学，不研究 asyncio / Pydantic 内部。
-
-## Sandbox
-懂 Runtime 安全边界；Docker plumbing AI Coding。
-
-## RAG
-用户亲手极简 token-window Chunker；复杂 Markdown Parser 不做底层课程。
-
-## Recovery
-S+；必须 Kill / Resume；CRUD 样板可 AI Coding。
-
-## Context
-必须懂 History≠Context、Artifact、Compaction；阈值/TokenCounter/CLI AI Coding。
-
-## Streaming
-必须保证最终完整 AIMessage；同时做最小 FastAPI SSE。
-
-## MCP
-亲手看懂 Client→Discovery→Adapter→ToolExecutor；不自己写协议。
-
-## Skills
-知道与 Tool 区别并跑通即可。
-
-## LangGraph / Multi-Agent
-保留三阶段核心学习，不用 prebuilt supervisor 隐藏关键机制。
-
-## CRAG
-只做简化 KB insufficient→web_search。
-
-## Langfuse / EvalScope
-接入主要 AI Coding；用户重点练 Trace 和 Eval 的使用/判断。
-
----
-
-# 19. 与 Codex 协作
-
-Codex：
-
-- 负责 Daily Learning Plan；
-- 可以根据 Module Roadmap 合并旧 Day；
-- 给 Task 标 S/A/B + Learning Mode。
-
-Claude：
-
-- 默认直接执行 Codex 的蓝图；
-- 不重新机械恢复旧 Day 边界；
-- 如果计划与代码现状冲突，指出并请求最小修订。
+Codex 只承担 Secondary Development Agent（Review / Debug / Security / 明确分配的小范围实现），详见 `AGENTS.md`。
+Claude 拥有主要开发：`spec.md` / `plan.md` / `tasks.md` 与 Spec Kit 实现流程。
 
 ---
 
 ## 最终原则
 
-> **核心机制细拆但不深挖；外围工程让 AI Coding 主导但不黑盒；用户始终知道做什么、为什么、数据怎么流、以后哪里改、出错哪里查。**
+> **以 SourcePlan 为需求来源，以 ticket 为施工单元：小步、可验证、可回滚。**
