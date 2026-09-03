@@ -29,7 +29,6 @@ import argparse
 import asyncio
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +43,6 @@ if _MAAS_DOMAIN not in _existing_no_proxy:
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.syntax import Syntax
 from rich.text import Text
 
 # 确认能 import 项目本身（uv 已经把 src 装进去了；手动跑也兜底）
@@ -52,12 +50,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from agent_harness.agent import AgentRuntime  # noqa: E402
-from agent_harness.config import Settings  # noqa: E402
-from agent_harness.model.config import ModelConfig  # noqa: E402
-from agent_harness.model.provider import create_chat_model  # noqa: E402
-from agent_harness.sandbox import LocalSubprocessSandbox  # noqa: E402
-from agent_harness.session import (  # noqa: E402
+from agent_harness.agent import AgentRuntime
+from agent_harness.config import Settings
+from agent_harness.model.config import ModelConfig
+from agent_harness.model.provider import create_chat_model
+from agent_harness.sandbox import LocalSubprocessSandbox
+from agent_harness.session import (
     MODEL_COMPLETED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -69,13 +67,13 @@ from agent_harness.session import (  # noqa: E402
     JsonlSessionStore,
     Session,
 )
-from agent_harness.tooling import ToolExecutor, ToolRegistry  # noqa: E402
-from agent_harness.tooling.approval import (  # noqa: E402
+from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tooling.approval import (
     ApprovalRequest,
     ApprovalResponse,
 )
-from agent_harness.tooling.contract import PermissionPolicy  # noqa: E402
-from agent_harness.tools import (  # noqa: E402
+from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tools import (
     ApplyPatchTool,
     BashTool,
     EditTool,
@@ -220,7 +218,7 @@ def _render_event(event_type: str, data: dict[str, Any], seq: int) -> None:
             rendered = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, indent=2)
             # bash/code 输出用 syntax 高亮一下，更像"看见代码"
             body = f"{badge}\n{_short(rendered, 800)}"
-        except Exception:
+        except Exception:  # noqa: BLE001
             body = _short(content, 800)
         console.print(Panel(body, title=title, border_style=color))
 
@@ -345,7 +343,7 @@ async def _main() -> int:
         session = _new_session(store_root)
         try:
             await _run_task(runtime, session, task, store_root, session.session_id)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             console.print(f"[red]任务出错:[/red] {e!r}")
 
 
