@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.result import ErrorCode
+from agent_harness.tools._diff_data import diff_data
 
 
 class _Hunk(BaseModel):
@@ -95,5 +96,9 @@ class ApplyPatchTool(Tool):
 
         return ToolResult.success(
             message=f"已在 '{args.path}' 中应用 {len(args.hunks)} 块补丁。",
-            data={"path": args.path, "hunks_applied": len(args.hunks)},
+            data={
+                "path": args.path,
+                "hunks_applied": len(args.hunks),
+                **diff_data(content, current),
+            },
         )

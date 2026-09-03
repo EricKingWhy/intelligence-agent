@@ -33,7 +33,8 @@ class TestSessionEventDTO:
         assert event.data == {}
         assert event.source_event_ids is None
 
-    def test_all_ten_event_types_registered(self):
+    def test_all_event_types_registered(self):
+        # Phase 1：10 种基础事件；Phase 9：+ model/started + model/delta（流式信号）。
         expected = {
             "session/started",
             "session/resumed",
@@ -41,6 +42,8 @@ class TestSessionEventDTO:
             "run/completed",
             "run/failed",
             "user/message",
+            "model/started",
+            "model/delta",
             "model/completed",
             "model/failed",
             "tool/call",

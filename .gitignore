@@ -6,6 +6,10 @@
 .agent/
 logs/
 
+# demo/live_agent.py 运行时产物（本地 workspace + SessionEvent JSONL）
+_demo_workspace/
+_demo_sessions/
+
 # Python
 __pycache__/
 *.pyc

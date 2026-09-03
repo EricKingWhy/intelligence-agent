@@ -190,10 +190,10 @@ class Session:
         *,
         status: str,
         final_text: str = "",
-    ) -> None:
-        """append run/completed 或 run/failed。"""
+    ) -> SessionEvent:
+        """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。"""
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
-        self.append(
+        return self.append(
             event_type,
             {"final_text": final_text} if final_text else {},
             run_id=run_id,

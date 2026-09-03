@@ -8,11 +8,14 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "aiosqlite>=0.21.0",
+    "fastapi>=0.115.0",
     "langchain-core>=1.5.4",
     "langchain-openai>=1.5.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.2",
+    "sse-starlette>=2.1.0",
+    "uvicorn[standard]>=0.30.0",
 ]
 
 [project.scripts]
@@ -26,6 +29,8 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.3",
+    # demo/live_agent.py 用它做彩色终端渲染；不是运行时依赖。
+    "rich>=13.7.0",
 ]
 
 [tool.pytest.ini_options]

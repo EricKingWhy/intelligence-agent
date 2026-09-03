@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.result import ErrorCode
+from agent_harness.tools._diff_data import diff_data
 
 
 class _EditArgs(BaseModel):
@@ -100,5 +101,9 @@ class EditTool(Tool):
 
         return ToolResult.success(
             message=f"已在 '{args.path}' 中替换 {replacements} 处。",
-            data={"path": args.path, "replacements": replacements},
+            data={
+                "path": args.path,
+                "replacements": replacements,
+                **diff_data(content, new_content),
+            },
         )
