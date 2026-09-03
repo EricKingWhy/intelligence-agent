@@ -19,7 +19,7 @@
 | **0** | Repo Foundation | ✅ COMPLETED | `21b421d` 起 | Python 3.11+ / uv / pytest-asyncio / ruff / pydantic-settings / JSONL Diagnostic Logger。`config.py` + `logging.py` + 测试 harness 就位。 |
 | **1** | SessionEvent + Model + Minimal Agent Loop | ✅ COMPLETED | `f789aac`（AgentRuntime）<br>`8ecb202`（bind_tools）<br>`87c3a72`（event-sourced） | SessionEvent DTO + 10 种 event type + JsonlSessionStore（崩溃安全）+ derive_messages（配对+dangling 合成）+ Session 聚合根（start/resume/append/derive/begin_run/end_run）+ AgentRuntime event-sourced 改造 + Resume 集成测试。Gate 达成：进程重启后可从 JSONL 恢复完整对话历史。135 passed。 |
 | **2** | Tool Runtime | ✅ COMPLETED | `8572fd8` → `00f3753` | Tool Contract / Registry / ToolResult / Validation-first ToolExecutor / 单 Retry Layer / 批次调度 + 严格 ID 配对。Gate 达成：INVALID_ARGUMENT 不重试、transient 可重试、配对 100%。Permission interface 薄，留待 Phase 7 Capability seam 深化。 |
-| **3** | Docker Sandbox + Coding Tools | 🔄 PARTIAL | `2bfa457` → `76049d0` | Sandbox ABC + LocalSubprocessSandbox + DockerSandbox（懒加载）+ 24 契约测试 ✅。read/write/bash ✅。**缺**：edit / grep / glob / apply_patch / git_status / git_diff；Session-scoped Sandbox 生命周期；Approval（REQUIRE_APPROVAL）。 |
+| **3** | Docker Sandbox + Coding Tools | ✅ COMPLETED | `2bfa457` → `b3e9596` | Sandbox ABC（含 list_files）+ LocalSubprocessSandbox + DockerSandbox（懒加载）+ 9 个 Coding Tools（read/write/bash/edit/grep/glob/apply_patch/git_status/git_diff）+ 批次调度验证 ✅。**仍缺**（独立后续 spec）：Session-scoped Sandbox 生命周期（Phase 4）、Approval / REQUIRE_APPROVAL（Phase 7 Capability）。Gate 达成：edit 多匹配明确失败、pytest exit_code=1 不被 retry、两个无冲突文件操作可并发、冲突写被串行化、路径越界统一 PERMISSION_DENIED。202 passed。 |
 | **4** | Storage + Operation Ledger + Recovery | ⬜ NOT STARTED | — | 依赖 Phase 1 SessionEvent 完成。 |
 | **5** | Artifact + MinIO + Context Compaction | ⬜ NOT STARTED | — | |
 | **6** | Memory Capability / Context Provider | ⬜ NOT STARTED | — | |
@@ -38,11 +38,12 @@
 
 ## 当前工作焦点
 
-**Phase 1 SessionEvent 模块已完成**（✅ COMPLETED）。全部 4 个 ticket（#7/#8/#9/#10）交付，Phase 1 Gate 达成。
+**Phase 3 Docker Sandbox + Coding Tools 已完成**（✅ COMPLETED）。全部 7 个 ticket（#12-#18）交付，9 个 V1 Coding Tools 全部就位。
 
-下一步建议：回到 **Phase 3 Docker Sandbox + Coding Tools** 补齐剩余 6 个工具（edit/grep/glob/apply_patch/git_status/git_diff）+ Approval + Session-scoped Sandbox 生命周期，或进入 **Phase 4 Storage + Operation Ledger + Recovery**（已有 SessionEvent 事实源作为前置）。
+下一步建议：进入 **Phase 4 Storage + Operation Ledger + Recovery**（已有 SessionEvent 事实源 + Sandbox 边界作为前置），或处理 **Phase 3 遗留的独立后续 spec**：Session-scoped Sandbox 生命周期（Phase 4）、Approval / REQUIRE_APPROVAL（Phase 7 Capability）。
 
 ## 更新日志
 
 - 2026-09-03：初始建立。盘点 Phase 0-15 状态。
 - 2026-09-03：Phase 1 SessionEvent 完成（Tickets A-D）。SessionEvent DTO + JsonlSessionStore + derive_messages + Session 聚合根 + AgentRuntime event-sourced 改造 + Resume 集成测试。135 passed，ruff clean。Issues #6-#10 已关闭。
+- 2026-09-03：Phase 3 剩余 Coding Tools 完成（Tickets 1-7, #12-#18）。Sandbox list_files + edit/apply_patch/glob/grep/git_status/git_diff 6 个新工具 + 批次调度验证。202 passed，ruff clean。Issues #11-#18 已关闭。Session-scoped Sandbox 生命周期和 Approval 作为独立后续 spec。
