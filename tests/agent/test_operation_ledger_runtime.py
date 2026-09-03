@@ -1,0 +1,97 @@
+"""AgentRuntime ordering contract for Ledger-first Tool execution."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from langchain_core.messages import AIMessage
+from pydantic import BaseModel
+
+from agent_harness.agent import AgentRuntime
+from agent_harness.session import (
+    MODEL_COMPLETED,
+    TOOL_CALL,
+    TOOL_RESULT,
+    JsonlSessionStore,
+    Session,
+)
+from agent_harness.storage import OperationState, SqliteOperationLedger
+from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
+from tests.scripted_model import ScriptedModel
+
+
+class _NoArgs(BaseModel):
+    pass
+
+
+class _OrderingTool(Tool):
+    def __init__(
+        self,
+        ledger: SqliteOperationLedger,
+        session: Session,
+        call_id: str,
+    ) -> None:
+        self._ledger = ledger
+        self._session = session
+        self._call_id = call_id
+        self.state_during_execute: OperationState | None = None
+        self.event_types_during_execute: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "observe_order"
+
+    @property
+    def description(self) -> str:
+        return "Observe durable state at the side-effect boundary."
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _NoArgs
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        operation = await self._ledger.get(self._call_id)
+        assert operation is not None
+        self.state_during_execute = operation.state
+        self.event_types_during_execute = [event.type for event in self._session.events]
+        return ToolResult.success("done")
+
+
+@pytest.mark.asyncio
+async def test_runtime_persists_ledger_before_tool_conversation_events(
+    tmp_path: Path,
+) -> None:
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    session = Session.start(JsonlSessionStore(tmp_path / "sessions"))
+    tool = _OrderingTool(ledger, session, "call-order")
+    registry = ToolRegistry()
+    registry.register(tool)
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "call-order", "name": "observe_order", "args": {}}
+                ],
+            ),
+            AIMessage(content="complete"),
+        ]
+    )
+    runtime = AgentRuntime(
+        model,
+        registry,
+        ToolExecutor(registry, operation_ledger=ledger),
+    )
+
+    await runtime.run(session, "run the tool")
+
+    operation = await ledger.get("call-order")
+    assert tool.state_during_execute is OperationState.RUNNING
+    assert MODEL_COMPLETED not in tool.event_types_during_execute
+    assert operation is not None
+    assert operation.state is OperationState.SUCCEEDED
+    event_types = [event.type for event in session.events]
+    first_model = event_types.index(MODEL_COMPLETED)
+    assert first_model < event_types.index(TOOL_CALL) < event_types.index(TOOL_RESULT)

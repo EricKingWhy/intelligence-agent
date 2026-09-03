@@ -20,7 +20,7 @@
 | **1** | SessionEvent + Model + Minimal Agent Loop | ✅ COMPLETED | `f789aac`（AgentRuntime）<br>`8ecb202`（bind_tools）<br>`87c3a72`（event-sourced） | SessionEvent DTO + 10 种 event type + JsonlSessionStore（崩溃安全）+ derive_messages（配对+dangling 合成）+ Session 聚合根（start/resume/append/derive/begin_run/end_run）+ AgentRuntime event-sourced 改造 + Resume 集成测试。Gate 达成：进程重启后可从 JSONL 恢复完整对话历史。135 passed。 |
 | **2** | Tool Runtime | ✅ COMPLETED | `8572fd8` → `00f3753` | Tool Contract / Registry / ToolResult / Validation-first ToolExecutor / 单 Retry Layer / 批次调度 + 严格 ID 配对。Gate 达成：INVALID_ARGUMENT 不重试、transient 可重试、配对 100%。Permission interface 薄，留待 Phase 7 Capability seam 深化。 |
 | **3** | Docker Sandbox + Coding Tools | ✅ COMPLETED | `2bfa457` → `ed96f5a` | Sandbox ABC（含 list_files）+ LocalSubprocessSandbox + DockerSandbox（懒加载 + 确定性命名 + 跨进程恢复）+ 9 个 Coding Tools（read/write/bash/edit/grep/glob/apply_patch/git_status/git_diff）+ 批次调度验证 ✅。**后续独立 spec 全部落地**：Approval / REQUIRE_APPROVAL 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 stage 2.5 + per-call scoping，默认安全拒绝 danger）；Session-scoped Sandbox 生命周期（WorkspaceRegistry 映射持久化 + Session.start/resume 自动绑定 sandbox + Docker 后端跨进程恢复）。Gate 达成：edit 多匹配明确失败、pytest exit_code=1 不被 retry、两个无冲突文件操作可并发、冲突写被串行化、路径越界统一 PERMISSION_DENIED、DANGER 工具在非 full-access policy 下被审批关卡拦截。252 passed。 |
-| **4** | Storage + Operation Ledger + Recovery | ⬜ NOT STARTED | — | 依赖 Phase 1 SessionEvent 完成。 |
+| **4** | Storage + Operation Ledger + Recovery | 🔄 IN PROGRESS | `5b85e36` 起 | Ticket #27：SQLite Operation Ledger + ToolExecutor durable lifecycle，258 tests pass。其余恢复能力见 #28-#33。 |
 | **5** | Artifact + MinIO + Context Compaction | ⬜ NOT STARTED | — | |
 | **6** | Memory Capability / Context Provider | ⬜ NOT STARTED | — | |
 | **7** | Capability / Plugin Foundation + Skills | ⬜ NOT STARTED | — | |
@@ -48,3 +48,4 @@
 - 2026-09-03：Phase 1 SessionEvent 完成（Tickets A-D）。SessionEvent DTO + JsonlSessionStore + derive_messages + Session 聚合根 + AgentRuntime event-sourced 改造 + Resume 集成测试。135 passed，ruff clean。Issues #6-#10 已关闭。
 - 2026-09-03：Phase 3 剩余 Coding Tools 完成（Tickets 1-7, #12-#18）。Sandbox list_files + edit/apply_patch/glob/grep/git_status/git_diff 6 个新工具 + 批次调度验证。202 passed，ruff clean。Issues #11-#18 已关闭。Session-scoped Sandbox 生命周期和 Approval 作为独立后续 spec。
 - 2026-09-03：Phase 3 后续独立 spec 全部落地（Tickets A-E, #21-#25）。Approval 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 + 默认安全拒绝 danger）+ Session-scoped Sandbox 生命周期（WorkspaceRegistry + Session.start/resume 自动绑定 + DockerSandbox 确定性命名 + 跨进程恢复）。252 passed，ruff clean。Issues #19-#25 已关闭。Phase 3 全部交付物落地。
+- 2026-09-04：Phase 4 开始实施。Ticket #27 落地 SQLite Operation Ledger、Operation 状态契约、ToolExecutor Ledger-first lifecycle 与 aiosqlite 依赖；#28-#33 待完成。

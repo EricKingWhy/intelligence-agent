@@ -104,19 +104,18 @@ class AgentRuntime:
                     {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
                     for tc in tool_calls
                 ]
-            session.append(
-                MODEL_COMPLETED,
-                model_data,
-                run_id=run_id,
-                step_id=steps + 1,
-            )
-
             # 第 4 步：这一轮算一步（数模型轮数，不是工具个数）
             steps += 1
 
             # 第 5 步：先判停止信号——若模型选择最终答复则立即返回。
             # 必须在 max_steps 之前判：否则模型恰好在最后一轮收敛会被误报为不收敛。
             if not tool_calls:
+                session.append(
+                    MODEL_COMPLETED,
+                    model_data,
+                    run_id=run_id,
+                    step_id=steps,
+                )
                 final = ai.content if isinstance(ai.content, str) else str(ai.content)
                 self._log("agent_decision", "模型给出最终回答，Agent Loop 完成",
                           span_id=new_span_id(), parent_span_id=run_span, step=steps,
@@ -133,6 +132,12 @@ class AgentRuntime:
 
             # 第 6 步：模型仍在请求工具——若已达 max_steps 则兜底返回。
             if steps >= self.max_steps:
+                session.append(
+                    MODEL_COMPLETED,
+                    model_data,
+                    run_id=run_id,
+                    step_id=steps,
+                )
                 self._log("agent_decision", "模型不收敛，撞 max_steps 兜底",
                           span_id=new_span_id(), parent_span_id=run_span, step=steps,
                           decision="max_steps_exceeded", remaining_steps=0,
@@ -155,6 +160,14 @@ class AgentRuntime:
                     run_id=run_id,
                     agent_id="default",
                 ),
+            )
+            # Ledger 已先记录每个 Operation 的终态，再提交对话事实。
+            # 这样 crash 不会留下只有 SessionEvent、却没有 Ledger 的调用。
+            session.append(
+                MODEL_COMPLETED,
+                model_data,
+                run_id=run_id,
+                step_id=steps,
             )
             for execution in executions:
                 result = execution.result

@@ -20,10 +20,11 @@
 - 不产出 ToolMessage（那是 AgentRuntime 在 Task 5 的接线活）；
 - 不调 LLM、不决定 Agent 是否停止、不维护 Session。
 
-设计铁律一：Executor 对外【永远返回 ToolExecution】。
-任何失败（找不到工具 / 参数非法 / 超时 / 工具内部抛异常）都被映射成失败 ToolResult，
-不让异常冒泡。这条结果最终要回填成 ToolMessage 给模型自纠错--
-Executor 的产出是"结果"，不是"中断"。上层（AgentRuntime）只消费结果，不接异常。
+设计铁律一：Tool 执行域失败对外【永远返回 ToolExecution】。
+找不到工具、参数非法、超时与工具内部异常都被映射成失败 ToolResult，
+不让异常冒泡。调用方配置错误和 Ledger 持久化失败不属于 Tool 结果：前者在副作用前
+快速失败，后者必须中断 Runtime，让恢复流程按已提交的 Ledger 状态处理，不能伪装成
+一个普通 ToolResult 后继续执行。
 
 设计铁律二：Executor 是 Tool 执行域的【唯一 Retry Layer】。
 往内：模型 SDK 层应关闭自己的重试；往外：AgentRuntime 只消费 ToolResult、不重试。
@@ -123,7 +124,10 @@ class ToolExecutor:
         *,
         operation_context: OperationContext | None = None,
     ) -> ToolExecution:
-        """跑完一条 tool_call，返回 ToolExecution（成功或失败，绝不抛异常给上层）。
+        """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
+
+        调用配置或 Ledger 持久化失败会抛出异常并中断执行，避免在没有 durable
+        Operation 状态的情况下继续产生真实副作用。
 
         tool_call 形状（和 LangChain 的 tool_calls 一致）：
           {"id": str, "name": str, "args": dict}
