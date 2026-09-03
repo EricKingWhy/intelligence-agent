@@ -20,7 +20,7 @@
 | **1** | SessionEvent + Model + Minimal Agent Loop | ✅ COMPLETED | `f789aac`（AgentRuntime）<br>`8ecb202`（bind_tools）<br>`87c3a72`（event-sourced） | SessionEvent DTO + 10 种 event type + JsonlSessionStore（崩溃安全）+ derive_messages（配对+dangling 合成）+ Session 聚合根（start/resume/append/derive/begin_run/end_run）+ AgentRuntime event-sourced 改造 + Resume 集成测试。Gate 达成：进程重启后可从 JSONL 恢复完整对话历史。135 passed。 |
 | **2** | Tool Runtime | ✅ COMPLETED | `8572fd8` → `00f3753` | Tool Contract / Registry / ToolResult / Validation-first ToolExecutor / 单 Retry Layer / 批次调度 + 严格 ID 配对。Gate 达成：INVALID_ARGUMENT 不重试、transient 可重试、配对 100%。Permission interface 薄，留待 Phase 7 Capability seam 深化。 |
 | **3** | Docker Sandbox + Coding Tools | ✅ COMPLETED | `2bfa457` → `ed96f5a` | Sandbox ABC（含 list_files）+ LocalSubprocessSandbox + DockerSandbox（懒加载 + 确定性命名 + 跨进程恢复）+ 9 个 Coding Tools（read/write/bash/edit/grep/glob/apply_patch/git_status/git_diff）+ 批次调度验证 ✅。**后续独立 spec 全部落地**：Approval / REQUIRE_APPROVAL 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 stage 2.5 + per-call scoping，默认安全拒绝 danger）；Session-scoped Sandbox 生命周期（WorkspaceRegistry 映射持久化 + Session.start/resume 自动绑定 sandbox + Docker 后端跨进程恢复）。Gate 达成：edit 多匹配明确失败、pytest exit_code=1 不被 retry、两个无冲突文件操作可并发、冲突写被串行化、路径越界统一 PERMISSION_DENIED、DANGER 工具在非 full-access policy 下被审批关卡拦截。252 passed。 |
-| **4** | Storage + Operation Ledger + Recovery | 🔄 IN PROGRESS | `5b85e36` 起 | Ticket #27：SQLite Operation Ledger + ToolExecutor durable lifecycle，260 tests pass。其余恢复能力见 #28-#33。 |
+| **4** | Storage + Operation Ledger + Recovery | 🔄 IN PROGRESS | `5b85e36` 起 | Tickets #27、#31：durable Operation lifecycle + 串行失败级联/并行失败隔离。#31 的 43 个相关测试通过；其余恢复能力见 #28-#30、#32-#33。 |
 | **5** | Artifact + MinIO + Context Compaction | ⬜ NOT STARTED | — | |
 | **6** | Memory Capability / Context Provider | ⬜ NOT STARTED | — | |
 | **7** | Capability / Plugin Foundation + Skills | ⬜ NOT STARTED | — | |
@@ -38,7 +38,7 @@
 
 ## 当前工作焦点
 
-**Phase 4 Storage + Operation Ledger + Recovery 正在实施**（🔄 IN PROGRESS）。Ticket #27 已落地 durable Operation lifecycle；当前 frontier 是 #28（Checkpoint persistence）和 #31（Tool batch failure cascading）。
+**Phase 4 Storage + Operation Ledger + Recovery 正在实施**（🔄 IN PROGRESS）。Tickets #27、#31 已落地；当前 frontier 是 #28（Checkpoint persistence）。
 
 ## 更新日志
 

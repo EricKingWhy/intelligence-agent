@@ -36,6 +36,7 @@ class ErrorCode(str, Enum):
     TRANSIENT_ERROR = "TRANSIENT_ERROR"  # 暂时性错误 → 可重试（Task 3）
     PERMISSION_DENIED = "PERMISSION_DENIED"  # 权限拒绝 → 不重试
     TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"  # 工具内部异常 → 默认不重试
+    CANCELLED = "CANCELLED"  # 批次前序失败或外部取消 → 不重试
 
 
 class ToolResult(BaseModel):
