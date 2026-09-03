@@ -34,12 +34,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
+from agent_harness.storage import (
+    Operation,
+    OperationContext,
+    OperationLedger,
+    OperationState,
+)
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalRequest,
@@ -103,12 +110,19 @@ class ToolExecutor:
         *,
         policy: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
         approval_callback: ApprovalCallback | None = None,
+        operation_ledger: OperationLedger | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
         self._approval_callback = approval_callback
+        self._operation_ledger = operation_ledger
 
-    async def execute(self, tool_call: dict[str, Any]) -> ToolExecution:
+    async def execute(
+        self,
+        tool_call: dict[str, Any],
+        *,
+        operation_context: OperationContext | None = None,
+    ) -> ToolExecution:
         """跑完一条 tool_call，返回 ToolExecution（成功或失败，绝不抛异常给上层）。
 
         tool_call 形状（和 LangChain 的 tool_calls 一致）：
@@ -169,12 +183,58 @@ class ToolExecutor:
         if denied is not None:
             return denied
 
+        if self._operation_ledger is not None:
+            if operation_context is None:
+                raise ValueError(
+                    "operation_context is required when OperationLedger is configured"
+                )
+            await self._operation_ledger.create(
+                Operation(
+                    tool_call_id=tool_call_id,
+                    session_id=operation_context.session_id,
+                    run_id=operation_context.run_id,
+                    agent_id=operation_context.agent_id,
+                    tool_name=name,
+                    args_identity=tool.args_identity(raw_args),
+                    state=OperationState.PENDING,
+                    started_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+                )
+            )
+            await self._operation_ledger.update_state(
+                tool_call_id, OperationState.RUNNING
+            )
+
         # -- 阶段 3：execute + Timeout 边界 + 唯一 Retry Layer（Task 3）--
         # 三阶段顺序不变；Timeout/Retry 只包住 tool.execute 这一步。
-        result = await self._execute_with_retry(tool_call_id, name, tool, validated)
+        try:
+            result = await self._execute_with_retry(
+                tool_call_id, name, tool, validated
+            )
+        except asyncio.CancelledError:
+            if self._operation_ledger is not None:
+                await self._operation_ledger.update_state(
+                    tool_call_id, OperationState.CANCELLED
+                )
+            raise
+
+        if self._operation_ledger is not None:
+            terminal_state = (
+                OperationState.SUCCEEDED if result.ok else OperationState.FAILED
+            )
+            await self._operation_ledger.update_state(
+                tool_call_id,
+                terminal_state,
+                result_json=result.model_dump_json(),
+                artifact_ref=result.artifact_ref,
+            )
         return ToolExecution(tool_call_id=tool_call_id, result=result)
 
-    async def execute_batch(self, tool_calls: list[dict[str, Any]]) -> list[ToolExecution]:
+    async def execute_batch(
+        self,
+        tool_calls: list[dict[str, Any]],
+        *,
+        operation_context: OperationContext | None = None,
+    ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
         一条可解释规则决定调度（Task 4 的核心）：
@@ -208,11 +268,17 @@ class ToolExecutor:
         if mode == "parallel":
             # gather 的顺序保持：即使第 3 个先完成，返回列表仍是 [结果1, 结果2, 结果3]。
             return await asyncio.gather(
-                *(self.execute(tc) for tc in tool_calls)
+                *(
+                    self.execute(tc, operation_context=operation_context)
+                    for tc in tool_calls
+                )
             )
 
         # serial：含 MUTATING 整批串行，按原顺序逐个 await。
-        return [await self.execute(tc) for tc in tool_calls]
+        return [
+            await self.execute(tc, operation_context=operation_context)
+            for tc in tool_calls
+        ]
 
     def _decide_mode(self, tool_calls: list[dict[str, Any]]) -> str:
         """扫描批次，决定并发还是串行。

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from enum import Enum
 
@@ -124,3 +125,7 @@ class Tool(ABC):
         permission 驱动授权关卡（ToolExecutor 的 approval gate）。
         """
         return ToolPermission.WORKSPACE_WRITE
+
+    def args_identity(self, args: dict[str, object]) -> str:
+        """Return the stable identity persisted for one Operation's arguments."""
+        return json.dumps(args, sort_keys=True, ensure_ascii=False)

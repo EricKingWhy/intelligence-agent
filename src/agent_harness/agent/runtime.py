@@ -31,6 +31,7 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
 )
+from agent_harness.storage import OperationContext
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 logger = logging.getLogger("agent_harness.agent")
@@ -147,7 +148,14 @@ class AgentRuntime:
             # execute_batch 保序返回 + 显式 id 配对；ToolMessage 的 content
             # 是 ToolResult 的 JSON（含结构化的 ok/error_code/retryable/metadata）。
             args_by_id = {tc.get("id", ""): tc.get("args") for tc in tool_calls}
-            executions = await self.executor.execute_batch(tool_calls)
+            executions = await self.executor.execute_batch(
+                tool_calls,
+                operation_context=OperationContext(
+                    session_id=session.session_id,
+                    run_id=run_id,
+                    agent_id="default",
+                ),
+            )
             for execution in executions:
                 result = execution.result
                 content = result.model_dump_json()
