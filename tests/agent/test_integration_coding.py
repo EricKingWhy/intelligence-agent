@@ -27,7 +27,17 @@ from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.tooling import ToolExecutor, ToolRegistry
-from agent_harness.tools import BashTool, ReadTool, WriteTool
+from agent_harness.tools import (
+    ApplyPatchTool,
+    BashTool,
+    EditTool,
+    GitDiffTool,
+    GitStatusTool,
+    GlobTool,
+    GrepTool,
+    ReadTool,
+    WriteTool,
+)
 from tests.conftest import make_session
 
 #: 从 .env 读 API key——存在才跑集成测试，否则 skipif。
@@ -36,7 +46,7 @@ _HAS_API_KEY = bool(_settings.model_api_key)
 
 
 def _make_runtime(workspace: Path) -> AgentRuntime:
-    """构造完整 AgentRuntime：真实模型 + LocalSandbox + read/write/bash Registry。"""
+    """构造完整 AgentRuntime：真实模型 + LocalSandbox + 全部 9 个 Coding Tools。"""
     config = ModelConfig.from_settings(_settings)
     model = create_chat_model(config)
 
@@ -45,6 +55,12 @@ def _make_runtime(workspace: Path) -> AgentRuntime:
     registry.register(ReadTool(sandbox))
     registry.register(WriteTool(sandbox))
     registry.register(BashTool(sandbox))
+    registry.register(EditTool(sandbox))
+    registry.register(ApplyPatchTool(sandbox))
+    registry.register(GlobTool(sandbox))
+    registry.register(GrepTool(sandbox))
+    registry.register(GitStatusTool(sandbox))
+    registry.register(GitDiffTool(sandbox))
 
     return AgentRuntime(
         model=model,

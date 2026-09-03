@@ -19,7 +19,17 @@ from agent_harness.tooling import (
     ToolRegistry,
     ToolSideEffect,
 )
-from agent_harness.tools import BashTool, ReadTool, WriteTool
+from agent_harness.tools import (
+    ApplyPatchTool,
+    BashTool,
+    EditTool,
+    GitDiffTool,
+    GitStatusTool,
+    GlobTool,
+    GrepTool,
+    ReadTool,
+    WriteTool,
+)
 
 # ============================================================================
 # 夹具
@@ -229,3 +239,114 @@ class TestBatchScheduling:
         assert results[0].tool_call_id == "b1"
         assert results[1].tool_call_id == "b2"
         assert all(r.result.ok for r in results)
+
+
+# ============================================================================
+# 新工具 side_effect 分类汇总验证 + 批次调度（Ticket 7）
+# ============================================================================
+
+
+class TestNewToolSideEffects:
+    """6 个新工具的 side_effect 分类断言汇总——批次调度依赖这些分类。"""
+
+    def test_edit_is_mutating(self, sandbox: LocalSubprocessSandbox):
+        assert EditTool(sandbox).side_effect == ToolSideEffect.MUTATING
+
+    def test_apply_patch_is_mutating(self, sandbox: LocalSubprocessSandbox):
+        assert ApplyPatchTool(sandbox).side_effect == ToolSideEffect.MUTATING
+
+    def test_glob_is_read_only(self, sandbox: LocalSubprocessSandbox):
+        assert GlobTool(sandbox).side_effect == ToolSideEffect.READ_ONLY
+
+    def test_grep_is_read_only(self, sandbox: LocalSubprocessSandbox):
+        assert GrepTool(sandbox).side_effect == ToolSideEffect.READ_ONLY
+
+    def test_git_status_is_read_only(self, sandbox: LocalSubprocessSandbox):
+        assert GitStatusTool(sandbox).side_effect == ToolSideEffect.READ_ONLY
+
+    def test_git_diff_is_read_only(self, sandbox: LocalSubprocessSandbox):
+        assert GitDiffTool(sandbox).side_effect == ToolSideEffect.READ_ONLY
+
+
+@pytest.fixture
+def full_registry(sandbox: LocalSubprocessSandbox) -> ToolRegistry:
+    """注册全部 9 个 Coding Tools（Ticket 7 集成验证用）。"""
+    reg = ToolRegistry()
+    reg.register(ReadTool(sandbox))
+    reg.register(WriteTool(sandbox))
+    reg.register(BashTool(sandbox))
+    reg.register(EditTool(sandbox))
+    reg.register(ApplyPatchTool(sandbox))
+    reg.register(GlobTool(sandbox))
+    reg.register(GrepTool(sandbox))
+    reg.register(GitStatusTool(sandbox))
+    reg.register(GitDiffTool(sandbox))
+    return reg
+
+
+@pytest.fixture
+def full_executor(full_registry: ToolRegistry) -> ToolExecutor:
+    return ToolExecutor(full_registry)
+
+
+class TestNewToolBatchScheduling:
+    """批次调度在新工具上行为正确：READ_ONLY 批可并发，含 MUTATING 的批串行。"""
+
+    @pytest.mark.asyncio
+    async def test_all_read_only_batch(
+        self, full_executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """纯 READ_ONLY 批（多个 glob + git_status）→ 全部成功、配对正确。"""
+        sandbox.write_text("a.py", "x")
+        sandbox.write_text("b.py", "y")
+
+        results = await full_executor.execute_batch([
+            _tool_call("glob", {"pattern": "*.py"}, "g1"),
+            _tool_call("glob", {"pattern": "*.py"}, "g2"),
+            _tool_call("git_status", {}, "gs1"),
+        ])
+
+        assert len(results) == 3
+        assert all(r.result.ok for r in results)
+        assert results[0].tool_call_id == "g1"
+        assert results[1].tool_call_id == "g2"
+        assert results[2].tool_call_id == "gs1"
+
+    @pytest.mark.asyncio
+    async def test_mixed_read_only_and_mutating_batch(
+        self, full_executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """READ_ONLY + MUTATING 混批（git_status + edit）→ 整批串行，全部成功。"""
+        sandbox.write_text("f.py", "old")
+
+        results = await full_executor.execute_batch([
+            _tool_call("git_status", {}, "gs1"),
+            _tool_call("edit", {"path": "f.py", "old_string": "old", "new_string": "new"}, "e1"),
+        ])
+
+        assert len(results) == 2
+        assert all(r.result.ok for r in results)
+        assert results[0].tool_call_id == "gs1"
+        assert results[1].tool_call_id == "e1"
+        assert sandbox.read_text("f.py") == "new"
+
+    @pytest.mark.asyncio
+    async def test_all_mutating_batch(
+        self, full_executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """全 MUTATING 批（edit + apply_patch）→ 串行，全部成功，顺序正确。"""
+        sandbox.write_text("f.py", "line1\nline2\n")
+
+        results = await full_executor.execute_batch([
+            _tool_call("edit", {"path": "f.py", "old_string": "line1", "new_string": "LINE1"}, "e1"),
+            _tool_call("apply_patch", {
+                "path": "f.py",
+                "hunks": [{"old_string": "line2", "new_string": "LINE2"}],
+            }, "ap1"),
+        ])
+
+        assert len(results) == 2
+        assert all(r.result.ok for r in results)
+        content = sandbox.read_text("f.py")
+        assert "LINE1" in content
+        assert "LINE2" in content
