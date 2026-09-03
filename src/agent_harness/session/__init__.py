@@ -1,7 +1,6 @@
 """Session：append-only typed SessionEvent + JSONL 存储 + derive 投影。
 
-Phase 1 Ticket A+B 导出 SessionEvent DTO、JsonlSessionStore、derive_messages。
-Session 聚合根在 Ticket C 中加入导出。
+Phase 1 完整导出：SessionEvent DTO、JsonlSessionStore、derive_messages、Session 聚合根。
 """
 
 from agent_harness.session.derive import (
@@ -23,6 +22,7 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
 )
+from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 
 __all__ = [
@@ -39,6 +39,7 @@ __all__ = [
     "TOOL_RESULT",
     "USER_MESSAGE",
     "JsonlSessionStore",
+    "Session",
     "SessionEvent",
     "derive_messages",
     "detect_dangling",

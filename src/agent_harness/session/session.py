@@ -1,0 +1,167 @@
+"""Session：Agent 交互历史的领域聚合根。
+
+持有 session_id 与已加载事件列表（内存缓存），对外提供：
+    - start() / resume()  构造入口
+    - append()            追加事件（分配 seq + 同步写 JSONL + 更新内存）
+    - derive_messages()   从事件投影模型可见 messages
+    - begin_run() / end_run()  标记 Run 边界
+
+SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、dangling 修复）。
+"""
+
+from __future__ import annotations
+
+import logging
+from uuid import uuid4
+
+from langchain_core.messages import AnyMessage
+
+from agent_harness.session.derive import (
+    DANGLING_TOOL_CONTENT,
+    derive_messages,
+    detect_dangling,
+)
+from agent_harness.session.event import (
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_STARTED,
+    SESSION_RESUMED,
+    SESSION_STARTED,
+    TOOL_RESULT,
+    SessionEvent,
+)
+from agent_harness.session.store import JsonlSessionStore
+
+logger = logging.getLogger("agent_harness.session")
+
+
+class Session:
+    """Agent 会话聚合根——Runtime 与外部世界的单一交互入口。"""
+
+    def __init__(
+        self,
+        session_id: str,
+        store: JsonlSessionStore,
+        events: list[SessionEvent] | None = None,
+    ) -> None:
+        self.session_id = session_id
+        self._store = store
+        self._events: list[SessionEvent] = events if events is not None else []
+
+    @property
+    def events(self) -> list[SessionEvent]:
+        """已加载的事件列表（内存缓存，只读视图）。"""
+        return list(self._events)
+
+    @property
+    def next_seq(self) -> int:
+        """下一条事件的 seq（当前最大 seq + 1，空列表从 0 开始）。"""
+        return max((e.seq for e in self._events), default=-1) + 1
+
+    # ── 构造入口 ──
+
+    @classmethod
+    def start(
+        cls,
+        store: JsonlSessionStore,
+        *,
+        agent_id: str = "default",
+    ) -> Session:
+        """新建 Session：生成 id、创建 JSONL、append session/started。"""
+        session_id = str(uuid4())
+        session = cls(session_id, store)
+        session.append(SESSION_STARTED, {}, agent_id=agent_id)
+        return session
+
+    @classmethod
+    def resume(cls, store: JsonlSessionStore, session_id: str) -> Session:
+        """加载已有 Session：读 JSONL、校验 seq、修复 dangling、append session/resumed。"""
+        events = store.read_events(session_id)
+        if not events:
+            raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+
+        session = cls(session_id, store, events)
+
+        # 校验 seq 单调递增（不容忍回退）
+        seen_seqs: set[int] = set()
+        for event in session._events:
+            if event.seq in seen_seqs:
+                raise ValueError(
+                    f"Session '{session_id}' 事件 seq 重复: {event.seq}"
+                )
+            seen_seqs.add(event.seq)
+
+        # 修复 dangling tool_call：为每个未解决的 tool_call 追加合成 tool/result
+        dangling_ids = detect_dangling(session._events)
+        for tc_id in dangling_ids:
+            logger.warning(
+                "Resume 修复 dangling tool_call_id=%s，追加合成 tool/result", tc_id
+            )
+            session.append(
+                TOOL_RESULT,
+                {"tool_call_id": tc_id, "content": DANGLING_TOOL_CONTENT},
+                source_event_ids=[tc_id],
+                _mark_dangling=True,
+            )
+
+        session.append(SESSION_RESUMED, {})
+        return session
+
+    # ── 核心操作 ──
+
+    def append(
+        self,
+        event_type: str,
+        data: dict,
+        *,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        step_id: int | None = None,
+        source_event_ids: list[str] | None = None,
+        _mark_dangling: bool = False,
+    ) -> SessionEvent:
+        """追加一条事件：分配 seq、同步写 JSONL、更新内存。
+
+        _mark_dangling 仅内部使用——在 data 中写入 dangling=true 标记。
+        """
+        seq = self.next_seq
+        event = SessionEvent(
+            seq=seq,
+            type=event_type,
+            session_id=self.session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            step_id=step_id,
+            data={**data, "dangling": True} if _mark_dangling else data,
+            source_event_ids=source_event_ids,
+        )
+        self._store.append_event(self.session_id, event)
+        self._events.append(event)
+        return event
+
+    def derive_messages(self) -> list[AnyMessage]:
+        """从已加载事件投影出模型可见 messages（委托纯函数）。"""
+        return derive_messages(self._events)
+
+    # ── Run 生命周期 ──
+
+    def begin_run(self, *, agent_id: str = "default") -> str:
+        """生成 run_id、append run/started、返回 run_id。"""
+        run_id = str(uuid4())
+        self.append(RUN_STARTED, {}, run_id=run_id, agent_id=agent_id)
+        return run_id
+
+    def end_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        final_text: str = "",
+    ) -> None:
+        """append run/completed 或 run/failed。"""
+        event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
+        self.append(
+            event_type,
+            {"final_text": final_text} if final_text else {},
+            run_id=run_id,
+        )
