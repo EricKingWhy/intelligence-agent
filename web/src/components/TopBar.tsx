@@ -4,7 +4,7 @@ import { Activity, Moon, Sun } from 'lucide-react';
 import { useState } from 'react';
 
 interface Props {
-  sessionMeta?: { session_id: string; event_count: number };
+  sessionMeta?: { session_id: string; turn_count: number };
   streaming: boolean;
 }
 
@@ -33,7 +33,7 @@ export function TopBar({ sessionMeta, streaming }: Props) {
         )}
         {sessionMeta && !streaming && (
           <span className="status-pill">
-            {sessionMeta.session_id.slice(0, 8)} · {sessionMeta.event_count} 事件
+            {sessionMeta.session_id.slice(0, 8)} · {sessionMeta.turn_count} 轮
           </span>
         )}
       </div>

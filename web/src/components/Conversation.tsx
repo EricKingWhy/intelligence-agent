@@ -32,9 +32,14 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom while streaming.
+  // Auto-scroll while streaming — but only when the user is already near the
+  // bottom; scrolling up to read history must not be yanked back every delta.
   useEffect(() => {
-    if (conversation?.run_status === 'running') {
+    if (conversation?.run_status !== 'running') return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom) {
       endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
   }, [conversation]);
@@ -69,9 +74,9 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
   }
 
   return (
-    <div className="conversation" ref={scrollRef}>
+    <div className="conversation">
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
-      <div className="conversation-scroll" key={conversation.session_id}>
+      <div className="conversation-scroll" key={conversation.session_id} ref={scrollRef}>
         {conversation.turns.map((turn) => (
           <TurnView key={turn.step_id} turn={turn} active={conversation.run_status === 'running'} />
         ))}

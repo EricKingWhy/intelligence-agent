@@ -56,7 +56,8 @@ export function consumeSSE(
           parseFrame(frame).forEach(onEvent);
         }
       }
-      // Flush any trailing frame without a terminator.
+      // Flush the decoder's pending multi-byte sequence, then any trailing frame.
+      buffer += decoder.decode();
       if (buffer.trim()) {
         parseFrame(buffer).forEach(onEvent);
       }

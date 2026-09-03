@@ -37,6 +37,8 @@ export default function App() {
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
 
   const handleNew = () => {
+    // 切走即放弃当前流：UI 只呈现选中会话（不变量 #22），流中残留内容不跨会话显示
+    if (streaming) cancelStream();
     selectSession(null);
     setSelectedTool(null);
   };
@@ -51,7 +53,7 @@ export default function App() {
       <TopBar
         sessionMeta={
           conversation
-            ? { session_id: conversation.session_id, event_count: conversation.turns.length }
+            ? { session_id: conversation.session_id, turn_count: conversation.turns.length }
             : undefined
         }
         streaming={streaming}
@@ -62,6 +64,7 @@ export default function App() {
           sessions={sessions}
           selectedId={selectedId}
           onSelect={(id) => {
+            if (streaming) cancelStream();
             selectSession(id);
             setSelectedTool(null);
           }}
