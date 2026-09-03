@@ -516,6 +516,9 @@
 .act-node:hover {
   background: var(--color-hover);
 }
+.act-node[aria-expanded='true'] {
+  background: var(--color-hover);
+}
 .act-icon {
   display: inline-flex;
   align-items: center;
