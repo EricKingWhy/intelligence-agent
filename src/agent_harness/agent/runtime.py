@@ -125,7 +125,7 @@ class AgentRuntime:
         )
 
         run_id = session.begin_run()
-        run_started = session._events[-1]  # begin_run append 了 run/started
+        run_started = session.events[-1]  # begin_run append 了 run/started；events 是公开 property
         yield AgentEvent(
             type=run_started.type, data=run_started.data, seq=run_started.seq, run_id=run_id,
         )

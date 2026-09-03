@@ -10,6 +10,9 @@ export interface AgentEvent {
   seq: number | null;
   run_id: string | null;
   step_id: number | null;
+  /** Present on SSE-streamed events (injected by POST /api/sessions endpoint).
+   *  Absent on historical events read from the store (session_id is known from the URL). */
+  session_id?: string;
 }
 
 /** Session summary from GET /api/sessions. */
@@ -30,8 +33,8 @@ export const EventType = {
   MODEL_STARTED: 'model/started',
   MODEL_DELTA: 'model/delta',
   MODEL_COMPLETED: 'model/completed',
-  TOOL_STARTED: 'tool/started',
-  TOOL_COMPLETED: 'tool/completed',
+  TOOL_CALL: 'tool/call',
+  TOOL_RESULT: 'tool/result',
 } as const;
 
 // ── View-models (projection output) ──

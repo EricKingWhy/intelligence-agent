@@ -130,6 +130,10 @@ def test_create_session_streams_sse(client):
     # 每个 durable event 都带 seq
     durable = [e for e in parsed if e.get("seq") is not None]
     assert durable, "expected at least one durable event with seq"
+    # 每帧都带 session_id（前端依赖它在首帧就切换 selectedId）
+    session_ids = {e.get("session_id") for e in parsed}
+    assert len(session_ids) == 1, f"expected one consistent session_id, got {session_ids}"
+    assert next(iter(session_ids)), "session_id must be non-null"
 
 
 # ── approve seam ──

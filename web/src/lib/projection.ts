@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Turn, ToolCall } from '../types';
+import type { AgentEvent, ConversationState, Turn } from '../types';
 import { EventType } from '../types';
 
 export function initConversation(session_id: string): ConversationState {
@@ -80,34 +80,17 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       // Final content may include consolidated text — prefer it over accumulated delta.
       turn.model.text = String(data.content ?? turn.model.text);
       turn.model.status = 'done';
-      // If model emitted tool_calls, attach them as tool entries.
-      const tool_calls = data.tool_calls as
-        | Array<{ id: string; name: string; args: Record<string, unknown> }>
-        | undefined;
-      if (Array.isArray(tool_calls)) {
-        for (const tc of tool_calls) {
-          if (!turn.tools.find((t) => t.tool_call_id === tc.id)) {
-            const call: ToolCall = {
-              tool_call_id: tc.id,
-              name: tc.name,
-              args: tc.args ?? {},
-              status: 'running',
-            };
-            turn.tools.push(call);
-          }
-        }
-      }
       break;
     }
 
-    case EventType.TOOL_STARTED: {
+    case EventType.TOOL_CALL: {
       const step = step_id ?? next.active_step_id ?? 1;
       const turn = findOrCreateTurn(next, step);
       const id = String(data.tool_call_id ?? '');
       if (!turn.tools.find((t) => t.tool_call_id === id)) {
         turn.tools.push({
           tool_call_id: id,
-          name: String(data.name ?? 'unknown'),
+          name: String(data.tool_name ?? 'unknown'),
           args: (data.args as Record<string, unknown>) ?? {},
           status: 'running',
           started_at: new Date().toISOString(),
@@ -116,17 +99,32 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       break;
     }
 
-    case EventType.TOOL_COMPLETED: {
+    case EventType.TOOL_RESULT: {
       const step = step_id ?? next.active_step_id ?? 1;
       const turn = findOrCreateTurn(next, step);
       const id = String(data.tool_call_id ?? '');
       const tool = turn.tools.find((t) => t.tool_call_id === id);
       if (tool) {
-        const success = data.status !== 'error' && data.error_code == null;
-        tool.status = success ? 'success' : 'failed';
-        tool.result = data.result ?? data.output;
-        if (data.diff && typeof data.diff === 'object') {
-          tool.diff = data.diff as ToolCall['diff'];
+        // Backend serializes the full ToolResult via model_dump_json() — so content is
+        // a JSON string shaped {ok, message, data, error_code, retryable, metadata, ...}.
+        // The structured payload (incl. diff for edit/write) lives under `.data`.
+        const parsed = tryParseContent(data.content);
+        const ok = parsed?.ok === true;
+        tool.status = ok ? 'success' : 'failed';
+        const parsedData = (parsed?.data ?? null) as Record<string, unknown> | null;
+        tool.result = parsedData ?? parsed?.message ?? data.content;
+        // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
+        // directly into ToolResult.data — not nested under data.diff. Detect them here.
+        if (
+          parsedData &&
+          typeof parsedData.before === 'string' &&
+          typeof parsedData.after === 'string'
+        ) {
+          tool.diff = {
+            before: parsedData.before,
+            after: parsedData.after,
+            truncated: parsedData.truncated === true,
+          };
         }
         tool.completed_at = new Date().toISOString();
       }
@@ -162,4 +160,18 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
 /** Rebuild full conversation from a history of durable events (on page load). */
 export function projectHistory(session_id: string, events: AgentEvent[]): ConversationState {
   return events.reduce(applyEvent, initConversation(session_id));
+}
+
+/** Try to JSON-parse a tool result `content` string; return null on failure.
+ * Backend serializes the full ToolResult via model_dump_json(), so this is the
+ * only way to get at ok / data / error_code without re-fetching from the API.
+ */
+function tryParseContent(content: unknown): Record<string, unknown> | null {
+  if (typeof content !== 'string') return null;
+  try {
+    const parsed = JSON.parse(content);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }

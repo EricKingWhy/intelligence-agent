@@ -23,6 +23,10 @@ MODEL_FAILED = "model/failed"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 
+# Durable event vocabulary — these are the ONLY types that may appear in the
+# append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
+# below is an ephemeral streaming signal (Phase 9 AgentEvent) and MUST NOT be
+# persisted (invariant #4: Event ≠ Diagnostic Log).
 EVENT_TYPES: frozenset[str] = frozenset(
     {
         SESSION_STARTED,
@@ -31,14 +35,17 @@ EVENT_TYPES: frozenset[str] = frozenset(
         RUN_COMPLETED,
         RUN_FAILED,
         USER_MESSAGE,
-        MODEL_STARTED,
-        MODEL_DELTA,
         MODEL_COMPLETED,
         MODEL_FAILED,
         TOOL_CALL,
         TOOL_RESULT,
     }
 )
+
+# Ephemeral streaming-only types — produced by run_stream() as AgentEvents, never
+# appended to the durable log. Listed here so the full event vocabulary is in one
+# place; NOT part of EVENT_TYPES, and Session.append must reject them.
+STREAM_ONLY_TYPES: frozenset[str] = frozenset({MODEL_STARTED, MODEL_DELTA})
 
 
 def _utc_now_iso() -> str:

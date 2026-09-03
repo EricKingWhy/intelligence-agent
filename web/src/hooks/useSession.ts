@@ -44,6 +44,9 @@ export function useSession() {
       setConversation(null);
       return;
     }
+    // Don't reload history while a live stream is painting this same session —
+    // that would overwrite in-flight state with a stale/partial read from disk.
+    if (streaming) return;
     let cancelled = false;
     setLoadingHistory(true);
     setError(null);
@@ -61,7 +64,7 @@ export function useSession() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId]);
+  }, [selectedId, streaming]);
 
   // Cleanup SSE on unmount.
   useEffect(() => {
@@ -84,25 +87,24 @@ export function useSession() {
         // We don't know session_id up-front from SSE (events carry it), so init blank
         // and fill from first event. For projection safety, use a temp id then patch.
         let conv: ConversationState | null = conversation;
+        let liveSessionId: string | null = null;
 
         const handle = consumeSSE(
           res,
           (event: AgentEvent) => {
+            const sid = event.session_id ?? null;
+            if (sid) liveSessionId = sid;
             if (!conv) {
-              // First event seeds the conversation.
-              const sid = (event.data.session_id as string) ?? 'streaming';
-              conv = initConversation(sid);
+              conv = initConversation(sid ?? 'streaming');
             }
             conv = applyEvent(conv, event);
             setConversation({ ...conv });
-            // Once we have a session_id, select it so list reload includes it.
-            const sid = (event.data.session_id as string) ?? conv.session_id;
-            if (sid && sid !== 'streaming' && selectedId !== sid) {
-              setSelectedId(sid);
-            }
           },
           () => {
             setStreaming(false);
+            // Stream finished: persist the live session as selected so the history
+            // loader runs (and list refresh picks up the new session row).
+            if (liveSessionId) setSelectedId(liveSessionId);
             refreshSessions();
           },
           (err) => {
@@ -116,7 +118,7 @@ export function useSession() {
         setError(`Submit failed: ${(e as Error).message}`);
       }
     },
-    [conversation, selectedId, refreshSessions],
+    [conversation, refreshSessions],
   );
 
   const cancelStream = useCallback(() => {

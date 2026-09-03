@@ -113,14 +113,19 @@ def _build_runtime(
     )
 
 
-def _event_to_sse_dict(event: AgentEvent) -> dict[str, str]:
-    """把 AgentEvent 转成 SSE 的 data 字段（JSON 字符串）。"""
+def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
+    """把 AgentEvent 转成 SSE 的 data 字段（JSON 字符串）。
+
+    session_id 由 endpoint 注入——runtime 内部的 AgentEvent 不知道自己属于哪个 session，
+    但前端需要它在第一帧就能切换 selectedId（否则新 session 的对话无法渲染）。
+    """
     payload = {
         "type": event.type,
         "data": event.data,
         "seq": event.seq,
         "run_id": event.run_id,
         "step_id": event.step_id,
+        "session_id": session_id,
     }
     return {"data": json.dumps(payload, ensure_ascii=False)}
 
@@ -205,7 +210,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             断连时 EventSourceResponse 自动取消这个 generator——不泄漏 producer。
             """
             async for event in runtime.run_stream(session, req.task):
-                yield _event_to_sse_dict(event)
+                yield _event_to_sse_dict(event, session.session_id)
 
         return EventSourceResponse(event_generator())
 
