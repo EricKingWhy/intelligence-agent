@@ -11,6 +11,7 @@
 - Task 3：阶段3 外包两层边界--Timeout（asyncio.timeout + tool.timeout_seconds）
   和唯一 Retry Layer（只看 retryable 位，MAX_ATTEMPTS 上限）。
 - Task 4：批次调度 execute_batch（全 READ_ONLY 并发 / 含 MUTATING 整批串行）+ 严格保序。
+- Phase 4 Ticket E：串行永久失败后取消剩余调用；并行读失败互不影响。
   每条 tool_call 仍走单条 execute()，批次层只决定并发还是串行。
 
 明确【不做】：
@@ -34,6 +35,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from time import perf_counter
@@ -246,9 +248,11 @@ class ToolExecutor:
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
-        一条可解释规则决定调度（Task 4 的核心）：
+        一条可解释规则决定调度与失败传播：
           - 全 READ_ONLY → asyncio.gather 并发执行（独立读操作可安全重叠）；
           - 任一 MUTATING → 整批按原顺序串行（保守默认，避免副作用乱序/部分失败难归因）。
+          - 串行调用永久失败 → 后续调用不执行，返回并持久化 CANCELLED；
+          - 并行调用失败 → 其他 READ_ONLY 调用继续独立完成。
         无论并发还是串行，结果列表都按【输入 tool_calls 的顺序】返回，不是完成顺序。
 
         为什么这是 Task 5 的接线点：
@@ -283,11 +287,73 @@ class ToolExecutor:
                 )
             )
 
-        # serial：含 MUTATING 整批串行，按原顺序逐个 await。
-        return [
-            await self.execute(tc, operation_context=operation_context)
-            for tc in tool_calls
-        ]
+        # serial：永久失败后停止真实执行，剩余调用返回并持久化 CANCELLED。
+        executions: list[ToolExecution] = []
+        for index, tool_call in enumerate(tool_calls):
+            execution = await self.execute(
+                tool_call, operation_context=operation_context
+            )
+            executions.append(execution)
+            if execution.result.ok:
+                continue
+            for remaining in tool_calls[index + 1 :]:
+                executions.append(
+                    await self._cancel_without_execution(
+                        remaining, operation_context=operation_context
+                    )
+                )
+            break
+        return executions
+
+    async def _cancel_without_execution(
+        self,
+        tool_call: dict[str, Any],
+        *,
+        operation_context: OperationContext | None,
+    ) -> ToolExecution:
+        """Represent a serially cascaded call without invoking its Tool."""
+        tool_call_id = tool_call.get("id", "")
+        name = tool_call.get("name", "")
+        raw_args = tool_call.get("args") or {}
+        result = ToolResult.failure(
+            message=(
+                f"工具 '{name}' 未执行：串行批次中的前序工具已永久失败。"
+            ),
+            error_code=ErrorCode.CANCELLED,
+            retryable=False,
+        )
+
+        if self._operation_ledger is not None:
+            if operation_context is None:
+                raise ValueError(
+                    "operation_context is required when OperationLedger is configured"
+                )
+            try:
+                tool = self._registry.get(name)
+                args_identity = tool.args_identity(raw_args)
+            except KeyError:
+                args_identity = json.dumps(
+                    raw_args, sort_keys=True, ensure_ascii=False
+                )
+            await self._operation_ledger.create(
+                Operation(
+                    tool_call_id=tool_call_id,
+                    session_id=operation_context.session_id,
+                    run_id=operation_context.run_id,
+                    agent_id=operation_context.agent_id,
+                    tool_name=name,
+                    args_identity=args_identity,
+                    state=OperationState.PENDING,
+                    started_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+                )
+            )
+            await self._operation_ledger.update_state(
+                tool_call_id,
+                OperationState.CANCELLED,
+                result_json=result.model_dump_json(),
+            )
+
+        return ToolExecution(tool_call_id=tool_call_id, result=result)
 
     def _decide_mode(self, tool_calls: list[dict[str, Any]]) -> str:
         """扫描批次，决定并发还是串行。

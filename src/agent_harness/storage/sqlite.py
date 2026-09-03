@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS operations (
 """
 
 _ALLOWED_TRANSITIONS: dict[OperationState, frozenset[OperationState]] = {
-    OperationState.PENDING: frozenset({OperationState.RUNNING}),
+    OperationState.PENDING: frozenset(
+        {OperationState.RUNNING, OperationState.CANCELLED}
+    ),
     OperationState.RUNNING: frozenset(
         {
             OperationState.SUCCEEDED,
