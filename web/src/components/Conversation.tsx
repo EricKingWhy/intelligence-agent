@@ -10,8 +10,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Brain, User } from 'lucide-react';
+import { Brain } from 'lucide-react';
 import type { ConversationState, Turn } from '../types';
+import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 
 interface Props {
@@ -63,7 +64,8 @@ export function Conversation({ conversation, loadingHistory }: Props) {
 
 function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
   // A turn is collapsible only if it's done and has content + tools.
-  const canCollapse = turn.status !== 'streaming' && (turn.model.text.length > 0 || turn.tools.length > 0);
+  const hasText = turn.model.text.length > 0;
+  const canCollapse = turn.status !== 'streaming' && (hasText || turn.tools.length > 0);
   const [collapsed, setCollapsed] = useState(false);
 
   // Active turn always expanded.
@@ -75,20 +77,20 @@ function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
 
   return (
     <div className={`turn turn-${turn.status}`}>
-      {/* User message */}
+      {/* User message — minimal, right-aligned */}
       {turn.user_message && (
         <div className="msg msg-user">
-          <div className="msg-avatar"><User size={14} /></div>
-          <div className="msg-bubble msg-bubble-user">{turn.user_message}</div>
+          <div className="msg-bubble-user">{turn.user_message}</div>
         </div>
       )}
 
-      {/* Model + tools */}
+      {/* Model + tools — activity timeline */}
       {(turn.model.text || turn.tools.length > 0) && (
         <div className="msg msg-model">
-          <div className="msg-avatar msg-avatar-model"><Brain size={14} /></div>
+          <div className="msg-avatar msg-avatar-model"><Brain size={13} /></div>
           <div className="msg-body">
-            {canCollapse && (
+            {/* 纯工具轮次不显示折叠控件——工具节点本身已极简，按钮只会制造噪音 */}
+            {canCollapse && hasText && (
               <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
                 {collapsed
                   ? `思考 · ${turn.tools.length} 个工具 · ~${tokenCount} tok`
@@ -99,12 +101,12 @@ function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
               <>
                 {turn.model.text && (
                   <div className={`model-output ${turn.model.status}`}>
-                    {turn.model.text}
+                    {renderMarkdown(turn.model.text)}
                     {turn.model.status === 'streaming' && <span className="stream-caret" />}
                   </div>
                 )}
                 {turn.tools.length > 0 && (
-                  <div className="turn-tools">
+                  <div className="act-stream">
                     {turn.tools.map((t) => (
                       <ToolCard key={t.tool_call_id} tool={t} />
                     ))}

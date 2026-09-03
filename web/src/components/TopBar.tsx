@@ -20,7 +20,7 @@ export function TopBar({ sessionMeta, streaming }: Props) {
   };
 
   return (
-    <header className="topbar glass">
+    <header className="topbar surface-raised">
       <div className="topbar-left">
         <Activity size={16} className="topbar-logo" />
         <span className="topbar-title">Agent Harness Inspector</span>

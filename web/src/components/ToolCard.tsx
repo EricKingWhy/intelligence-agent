@@ -9,28 +9,39 @@
  */
 
 import { useState } from 'react';
-import { Check, ChevronRight, ChevronDown, Terminal, Wrench, X } from 'lucide-react';
+import { Check, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 
 interface Props {
   tool: ToolCall;
 }
 
+/** duration 格式化：<1s 用 ms，否则一位小数秒。无完成时间（running）返回 null。 */
+function formatDuration(tool: ToolCall): string | null {
+  if (!tool.started_at || !tool.completed_at) return null;
+  const ms = new Date(tool.completed_at).getTime() - new Date(tool.started_at).getTime();
+  if (ms < 1000) return `${Math.max(1, ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 export function ToolCard({ tool }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const [expanded, setExpanded] = useState(false);
-
-  const statusClass = `tool-status tool-status-${tool.status}`;
+  const duration = formatDuration(tool);
 
   return (
-    <div className={`tool-card ${statusClass}`}>
-      <button className="tool-card-header" onClick={() => setExpanded((v) => !v)}>
-        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        {isBash ? <Terminal size={14} /> : <Wrench size={14} />}
-        <span className="tool-name">{tool.name}</span>
-        <span className="tool-args-summary">{summarizeArgs(tool)}</span>
-        <span className="tool-status-badge">
+    <>
+      <button
+        className="act-node"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>
+        <span className="act-name">{tool.name}</span>
+        <span className="act-args">{summarizeArgs(tool)}</span>
+        {duration && <span className="act-duration">{duration}</span>}
+        <span className={`act-status act-status-${tool.status}`}>
           {tool.status === 'success' && <Check size={12} />}
           {tool.status === 'failed' && <X size={12} />}
           {tool.status === 'running' && <span className="status-spinner" />}
@@ -44,7 +55,7 @@ export function ToolCard({ tool }: Props) {
           {!isBash && !isDiffTool && <GenericBlock tool={tool} />}
         </div>
       )}
-    </div>
+    </>
   );
 }
 

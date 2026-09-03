@@ -66,7 +66,7 @@ export default function App() {
           onNew={handleNew}
         />
 
-        <section className="app-conversation-col">
+        <section className="app-conversation-col surface-raised">
           {error && <div className="app-error">{error}</div>}
           <Conversation conversation={conversation} loadingHistory={loadingHistory} />
           <Composer streaming={streaming} onSubmit={handleSubmit} onCancel={cancelStream} />

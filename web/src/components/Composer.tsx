@@ -4,7 +4,7 @@
  */
 
 import { useState, type KeyboardEvent } from 'react';
-import { Send, Square } from 'lucide-react';
+import { ArrowUp, Square } from 'lucide-react';
 
 interface Props {
   streaming: boolean;
@@ -31,26 +31,32 @@ export function Composer({ streaming, onSubmit, onCancel }: Props) {
 
   return (
     <div className="composer-wrap">
-      <textarea
-        id="composer-input"
-        name="task"
-        className="composer glass"
-        placeholder="描述一个任务…（⌘+Enter 发送）"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={onKeyDown}
-        rows={2}
-        disabled={streaming}
-        aria-label="Agent 任务"
-      />
-      <div className="composer-actions">
+      <div className="composer-dock surface-floating">
+        <textarea
+          id="composer-input"
+          name="task"
+          className="composer"
+          placeholder="描述一个任务…（⌘+Enter 发送）"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={onKeyDown}
+          rows={2}
+          disabled={streaming}
+          aria-label="Agent 任务"
+        />
         {streaming ? (
-          <button className="btn-danger" onClick={onCancel}>
-            <Square size={14} /> 停止
+          <button className="composer-stop" onClick={onCancel} aria-label="停止" title="停止">
+            <Square size={12} />
           </button>
         ) : (
-          <button className="btn-primary" onClick={submit} disabled={!value.trim()}>
-            <Send size={14} /> 发送
+          <button
+            className="composer-send"
+            onClick={submit}
+            disabled={!value.trim()}
+            aria-label="发送"
+            title="发送（⌘+Enter）"
+          >
+            <ArrowUp size={16} />
           </button>
         )}
       </div>

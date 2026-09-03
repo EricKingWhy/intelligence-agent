@@ -53,8 +53,13 @@
 
   /* ── Motion ── */
   --ease-apple: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 150ms;
   --dur-in: 240ms;
   --dur-out: 150ms;
+
+  /* ── Edge lighting（玻璃顶部环境光反射 + 极弱内描边） ── */
+  --edge-light: inset 0 0.5px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 0.5px rgba(255, 255, 255, 0.04);
+  --color-hover: rgba(255, 255, 255, 0.05);
 
   /* ── Dark theme (default) ── */
   --color-background: #0a0a0c;
@@ -91,6 +96,8 @@
     --color-border: rgba(0, 0, 0, 0.08);
     --color-ring: #5b7cff;
     --glass-border: var(--glass-border-light);
+    --edge-light: inset 0 0.5px 0 rgba(255, 255, 255, 0.85), inset 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+    --color-hover: rgba(0, 0, 0, 0.04);
     color-scheme: light;
   }
 }
@@ -116,7 +123,12 @@ body {
   font-size: var(--text-base);
   line-height: 1.6;
   color: var(--color-foreground);
-  background: var(--color-background);
+  /* Ambient background：两团极弱环境光（accent / success 各一），玻璃才有可折射的深度 */
+  background:
+    radial-gradient(1100px 720px at 18% -8%, color-mix(in srgb, var(--color-accent) 7%, transparent), transparent 62%),
+    radial-gradient(920px 640px at 88% 108%, color-mix(in srgb, var(--color-accent-secondary) 5%, transparent), transparent 60%),
+    var(--color-background);
+  background-attachment: fixed;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -142,6 +154,53 @@ body {
   .glass {
     background: var(--color-surface-1);
   }
+}
+
+/* ── Glass tiers：Base（实色）/ Raised（面板）/ Floating（浮层 dock） ──
+ * 深度层级由 blur 强度 + 阴影 + 透明度三者共同表达，玻璃不能全部一样。 */
+.surface-raised {
+  background: var(--color-surface-2);
+  backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
+  box-shadow: var(--edge-light), var(--shadow-md);
+}
+.surface-floating {
+  background: var(--color-surface-2);
+  backdrop-filter: blur(var(--glass-blur-2)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  -webkit-backdrop-filter: blur(var(--glass-blur-2)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  border: var(--glass-border);
+  box-shadow: var(--edge-light), var(--shadow-lg);
+}
+@supports not (backdrop-filter: blur(1px)) {
+  .surface-raised,
+  .surface-floating {
+    background: var(--color-surface-1);
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .surface-raised,
+  .surface-floating {
+    backdrop-filter: none;
+    background: var(--color-surface-1);
+  }
+}
+
+/* 数字对齐：事件数、duration、token 计数一律 tabular-nums */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 键盘焦点：玻璃 UI 不牺牲可达性 */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-ring) 70%, transparent);
+  outline-offset: 2px;
+}
+
+/* 运行呼吸：仅用于"活着"的状态表达，禁止滥用 */
+@keyframes breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(1.12); }
 }
 
 @media (prefers-reduced-transparency: reduce) {
