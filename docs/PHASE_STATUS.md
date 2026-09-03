@@ -25,8 +25,8 @@
 | **6** | Memory Capability / Context Provider | ⬜ NOT STARTED | — | |
 | **7** | Capability / Plugin Foundation + Skills | ⬜ NOT STARTED | — | |
 | **8** | MCP | ⬜ NOT STARTED | — | |
-| **9** | Streaming Surfaces | 🔄 IN PROGRESS (精简版提前) | — | Phase 9+10 精简版提前施工（见 ADR-0005）。FastAPI + SSE + REST POST + AgentRuntime.run_stream。技术硬前置（Phase 1 events + Phase 2 tool events）已满足；跳过 Phase 4-8 完整交付，由用户明确授权。 |
-| **10** | Lightweight Web Session Inspector | 🔄 IN PROGRESS (精简版提前) | — | 与 Phase 9 同步提前。三栏 Inspector + chat 流 + 流式 token + 工具卡片 + approval + 历史 session 回放。Step Detail 里 Phase 4-5 字段（checkpoint/artifact/operation state）留空槽 + graceful empty state，后续 Phase 填。React 18 + Vite + Radix + 纯 CSS（液态玻璃风）。 |
+| **9** | Streaming Surfaces | ⬜ NOT STARTED | — | |
+| **10** | Lightweight Web Session Inspector | ⬜ NOT STARTED | — | |
 | **11** | Knowledge / RAG | ⬜ NOT STARTED | — | |
 | **12** | Web Search / Reliability | ⬜ NOT STARTED | — | |
 | **13** | Multi-Agent | ⬜ NOT STARTED | — | |
@@ -47,4 +47,3 @@
 - 2026-09-03：Phase 3 剩余 Coding Tools 完成（Tickets 1-7, #12-#18）。Sandbox list_files + edit/apply_patch/glob/grep/git_status/git_diff 6 个新工具 + 批次调度验证。202 passed，ruff clean。Issues #11-#18 已关闭。Session-scoped Sandbox 生命周期和 Approval 作为独立后续 spec。
 - 2026-09-03：Phase 3 后续独立 spec 全部落地（Tickets A-E, #21-#25）。Approval 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 + 默认安全拒绝 danger）+ Session-scoped Sandbox 生命周期（WorkspaceRegistry + Session.start/resume 自动绑定 + DockerSandbox 确定性命名 + 跨进程恢复）。252 passed，ruff clean。Issues #19-#25 已关闭。Phase 3 全部交付物落地。
 - 2026-09-04：Phase 4 开始实施。Ticket #27 落地 SQLite Operation Ledger、Operation 状态契约、ToolExecutor Ledger-first lifecycle 与 aiosqlite 依赖；#28-#33 待完成。
-- 2026-09-04：Phase 9+10 精简版提前施工（grill-with-docs 产出，见 ADR-0005 + CONTEXT.md「Streaming / Web UI 层」术语）。决策：SSE + REST POST（守规格默认）、React 18 + Vite + Radix + 纯 CSS（液态玻璃）、AgentRuntime 加 `run_stream`（保留旧 `run()`）、前端直接消费 raw SessionEvent（守不变量 #22）、工具卡片 bash/diff 专属 + 其余通用、diff 数据工具侧补返回、approval 内联卡片、`web/` 顶层目录。前后端均由本次会话主导，不覆盖后端会话已落地的 Phase 4 ADR/CONTEXT。
