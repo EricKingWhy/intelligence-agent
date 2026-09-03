@@ -20,5 +20,9 @@ __pycache__/
 
 # Karpathy understand skills 产物（本地知识图谱，不提交）
 .understand-anything/
+
 # ZCode 本地会话状态（属工具链，非项目代码）
 .zcode/
+
+# Codex CLI 本地配置（MCP servers 等——属工具链，非项目代码）
+.codex/
