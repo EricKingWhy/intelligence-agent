@@ -195,21 +195,12 @@ class ToolExecutor:
             return denied
 
         if self._operation_ledger is not None:
-            if operation_context is None:
-                raise ValueError(
-                    "operation_context is required when OperationLedger is configured"
-                )
-            await self._operation_ledger.create(
-                Operation(
-                    tool_call_id=tool_call_id,
-                    session_id=operation_context.session_id,
-                    run_id=operation_context.run_id,
-                    agent_id=operation_context.agent_id,
-                    tool_name=name,
-                    args_identity=tool.args_identity(raw_args),
-                    state=OperationState.PENDING,
-                    started_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
-                )
+            await self._create_pending_operation(
+                tool_call_id=tool_call_id,
+                name=name,
+                raw_args=raw_args,
+                operation_context=operation_context,
+                tool=tool,
             )
             await self._operation_ledger.update_state(
                 tool_call_id, OperationState.RUNNING
@@ -305,6 +296,45 @@ class ToolExecutor:
             break
         return executions
 
+    async def _create_pending_operation(
+        self,
+        *,
+        tool_call_id: str,
+        name: str,
+        raw_args: dict[str, Any],
+        operation_context: OperationContext | None,
+        tool: Tool | None = None,
+    ) -> None:
+        """Persist the shared PENDING boundary before execute or cancellation."""
+        if self._operation_ledger is None:
+            return
+        if operation_context is None:
+            raise ValueError(
+                "operation_context is required when OperationLedger is configured"
+            )
+        if tool is None:
+            try:
+                tool = self._registry.get(name)
+            except KeyError:
+                pass
+        args_identity = (
+            tool.args_identity(raw_args)
+            if tool is not None
+            else json.dumps(raw_args, sort_keys=True, ensure_ascii=False)
+        )
+        await self._operation_ledger.create(
+            Operation(
+                tool_call_id=tool_call_id,
+                session_id=operation_context.session_id,
+                run_id=operation_context.run_id,
+                agent_id=operation_context.agent_id,
+                tool_name=name,
+                args_identity=args_identity,
+                state=OperationState.PENDING,
+                started_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+            )
+        )
+
     async def _cancel_without_execution(
         self,
         tool_call: dict[str, Any],
@@ -324,28 +354,11 @@ class ToolExecutor:
         )
 
         if self._operation_ledger is not None:
-            if operation_context is None:
-                raise ValueError(
-                    "operation_context is required when OperationLedger is configured"
-                )
-            try:
-                tool = self._registry.get(name)
-                args_identity = tool.args_identity(raw_args)
-            except KeyError:
-                args_identity = json.dumps(
-                    raw_args, sort_keys=True, ensure_ascii=False
-                )
-            await self._operation_ledger.create(
-                Operation(
-                    tool_call_id=tool_call_id,
-                    session_id=operation_context.session_id,
-                    run_id=operation_context.run_id,
-                    agent_id=operation_context.agent_id,
-                    tool_name=name,
-                    args_identity=args_identity,
-                    state=OperationState.PENDING,
-                    started_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
-                )
+            await self._create_pending_operation(
+                tool_call_id=tool_call_id,
+                name=name,
+                raw_args=raw_args,
+                operation_context=operation_context,
             )
             await self._operation_ledger.update_state(
                 tool_call_id,
