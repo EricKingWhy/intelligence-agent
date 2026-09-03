@@ -1,6 +1,6 @@
 /**
  * App shell + component styles.
- * Token-only — references vars from index.css. No hardcoded colors (except terminal insets).
+ * Token-only — all colors reference vars from index.css (terminal blocks included).
  * Visual rules source: design-system/agent-harness-inspector/MASTER.md
  * Layout: floating glass panels over ambient background (not a boxed admin dashboard).
  */
@@ -403,7 +403,7 @@
   color: var(--color-muted-foreground);
 }
 
-/* Assistant 输出：干净 typography，不套 Card（MASTER.md/新目标 §6） */
+/* Assistant 输出：干净 typography，不套 Card（MASTER.md：玻璃不用于正文文本块） */
 .model-output {
   padding: 2px 0;
   font-size: var(--text-base);
@@ -446,7 +446,7 @@
   padding: 1px 5px;
 }
 .model-output .md-code-block {
-  background: #0d0d0f;
+  background: var(--terminal-bg);
   border: var(--glass-border);
   border-radius: var(--radius-md);
   padding: var(--space-sm) var(--space-md);
@@ -579,14 +579,16 @@
   to { transform: rotate(360deg); }
 }
 
-/* 展开区：从节点名称处缩进，深色实色（终端/diff 本身是内容不是玻璃） */
+/* 展开区：从节点名称处缩进，终端深底（--terminal-* 跨主题恒定，内文强制浅色，
+ * 否则浅色主题下继承深色文字 ≈ 1.1:1 不可读） */
 .tool-card-body {
   margin-left: calc(var(--space-md) + var(--space-sm) + 18px);
   margin-top: var(--space-xs);
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-md);
-  background: #0d0d0f;
+  background: var(--terminal-bg);
   border: var(--glass-border);
+  color: var(--terminal-fg);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   animation: reveal-in var(--dur-in) var(--ease-apple);
@@ -613,7 +615,7 @@
 }
 .bash-output {
   margin-top: var(--space-sm);
-  color: #a1a1a6;
+  color: var(--terminal-muted);
   max-height: 320px;
   overflow: auto;
 }
@@ -649,7 +651,7 @@
   gap: var(--space-sm);
 }
 .diff-col {
-  background: #0d0d0f;
+  background: var(--terminal-bg);
   border-radius: var(--radius-sm);
   padding: var(--space-sm);
   max-height: 360px;
@@ -663,7 +665,7 @@
   margin-bottom: var(--space-xs);
 }
 .diff-before pre {
-  color: #a1a1a6;
+  color: var(--terminal-muted);
 }
 .diff-after pre {
   color: var(--color-success);
@@ -722,7 +724,7 @@
 }
 .approval-args {
   margin-top: var(--space-xs);
-  background: #0d0d0f;
+  background: var(--terminal-bg);
   padding: var(--space-sm);
   border-radius: var(--radius-sm);
   font-size: var(--text-xs);
@@ -757,7 +759,6 @@
   border: none;
   resize: none;
   min-height: 52px;
-  max-height: 180px;
 }
 .composer:focus {
   outline: none;
@@ -926,7 +927,7 @@
   margin-top: var(--space-sm);
 }
 .detail-code {
-  background: #0d0d0f;
+  background: var(--terminal-bg);
   padding: var(--space-sm);
   border-radius: var(--radius-sm);
   border: var(--glass-border);

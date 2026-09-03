@@ -61,6 +61,13 @@
   --edge-light: inset 0 0.5px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 0.5px rgba(255, 255, 255, 0.04);
   --color-hover: rgba(255, 255, 255, 0.05);
 
+  /* ── 终端内嵌块（bash 输出 / diff 双栏 / 代码块 / 参数回显） ──
+   * 刻意跨主题恒定深底浅字（dev tool 惯例，终端即"内容里的另一块屏幕"，
+   * 不随玻璃主题翻转），因此只定义一份、不进主题变量组。 */
+  --terminal-bg: #0d0d0f;
+  --terminal-fg: #d4d4d4;
+  --terminal-muted: #a1a1a6;
+
   /* ── Dark theme (default) ── */
   --color-background: #0a0a0c;
   --color-surface-1: #131316;

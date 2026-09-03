@@ -87,9 +87,9 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
 }
 
 function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
-  // A turn is collapsible only if it's done and has content + tools.
-  const hasText = turn.model.text.length > 0;
-  const canCollapse = turn.status !== 'streaming' && (hasText || turn.tools.length > 0);
+  // 只有"已完成且有模型文本"的轮次才可折叠——纯工具轮次节点本身已极简，
+  // 折叠按钮只会制造噪音（时间轴上直接常驻展开）。
+  const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
   const [collapsed, setCollapsed] = useState(false);
 
   // Active turn always expanded.
@@ -114,7 +114,7 @@ function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
           <div className="msg-avatar msg-avatar-model"><Brain size={13} /></div>
           <div className="msg-body">
             {/* 纯工具轮次不显示折叠控件——工具节点本身已极简，按钮只会制造噪音 */}
-            {canCollapse && hasText && (
+            {collapsible && (
               <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
                 {collapsed
                   ? `思考 · ${turn.tools.length} 个工具 · ~${tokenCount} tok`

@@ -9,9 +9,11 @@ interface Props {
 }
 
 export function TopBar({ sessionMeta, streaming }: Props) {
-  // Theme toggle is cosmetic — color-scheme is driven by prefers-color-scheme
-  // via CSS. We toggle a data-theme attr on documentElement for future manual override.
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  // 手动主题切换：初始值跟随系统偏好（浅色系统用户首击即切 dark，不需要两击）。
+  // CSS 侧 :root 默认暗色、@media 系统偏好与 [data-theme='light'] 覆盖——见 index.css。
+  const [theme, setTheme] = useState<'dark' | 'light'>(() =>
+    window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark',
+  );
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
