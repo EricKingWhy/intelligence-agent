@@ -37,14 +37,6 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
     纯函数：不修改输入 events，不产生副作用。
     dangling tool_call（有 tool/call 无匹配 tool/result）会注入合成 ToolMessage。
     """
-    # 收集已有的 tool_result，用于检测 dangling
-    resolved_tool_call_ids: set[str] = set()
-    for event in events:
-        if event.type == TOOL_RESULT:
-            tool_call_id = event.data.get("tool_call_id", "")
-            if tool_call_id:
-                resolved_tool_call_ids.add(tool_call_id)
-
     # 第一遍：从事件按顺序投影 messages（不含 dangling 合成）
     messages: list[AnyMessage] = []
 

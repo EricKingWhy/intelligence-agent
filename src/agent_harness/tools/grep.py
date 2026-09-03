@@ -8,7 +8,9 @@ READ_ONLY 副作用。调 Sandbox.list_files 枚举，对每个文件 read_text 
 
 from __future__ import annotations
 
+import fnmatch
 import re
+from pathlib import PurePosixPath
 
 from pydantic import BaseModel, Field
 
@@ -90,11 +92,7 @@ class GrepTool(Tool):
             candidates = [f for f in candidates if f.startswith(prefix) or f == args.path]
 
         # include 文件名过滤
-        import fnmatch
-
         if args.include and args.include != "*":
-            from pathlib import PurePosixPath
-
             candidates = [
                 f for f in candidates if fnmatch.fnmatch(PurePosixPath(f).name, args.include)
             ]
