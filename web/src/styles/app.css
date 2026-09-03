@@ -272,6 +272,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-xl);
+  /* 沉浸式滚动条：静止透明，悬停才浮现 */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.conversation-scroll:hover,
+.conversation-scroll:focus-within {
+  scrollbar-color: var(--color-border) transparent;
 }
 .conversation-empty {
   flex: 1;
@@ -282,6 +289,18 @@
   text-align: center;
   color: var(--color-subtle-foreground);
   padding: var(--space-2xl);
+}
+.empty-logo {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-lg);
+  background: var(--color-hover);
+  border: var(--glass-border);
+  box-shadow: var(--edge-light), var(--shadow-md);
+  color: var(--color-accent);
+  margin-bottom: var(--space-lg);
 }
 .empty-hero {
   font-size: var(--text-xl);
@@ -366,6 +385,7 @@
 .msg-body {
   flex: 1;
   min-width: 0;
+  max-width: 78ch; /* 宽屏行宽控制：一行超过 ~78 字符可读性显著下降 */
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);

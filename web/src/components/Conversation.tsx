@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Brain } from 'lucide-react';
+import { Activity, Brain } from 'lucide-react';
 import type { ConversationState, Turn } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
@@ -51,6 +51,7 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
     return (
       <div className="conversation">
         <div className="conversation-empty">
+          <div className="empty-logo"><Activity size={20} /></div>
           <div className="empty-hero">暂无对话</div>
           <div className="empty-sub">在下方提交任务，实时观看 Agent 执行。</div>
           {onPresetTask && (
