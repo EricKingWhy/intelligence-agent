@@ -12,9 +12,15 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from langchain_core.messages import AnyMessage
+
+from agent_harness.sandbox.base import Sandbox
+
+if TYPE_CHECKING:
+    from agent_harness.sandbox.registry import WorkspaceRegistry
 
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
@@ -43,10 +49,17 @@ class Session:
         session_id: str,
         store: JsonlSessionStore,
         events: list[SessionEvent] | None = None,
+        sandbox: Sandbox | None = None,
     ) -> None:
         self.session_id = session_id
         self._store = store
         self._events: list[SessionEvent] = events if events is not None else []
+        self._sandbox: Sandbox | None = sandbox
+
+    @property
+    def sandbox(self) -> Sandbox | None:
+        """与 Session 绑定的 Sandbox（通过 WorkspaceRegistry 管理）。不传 registry 时为 None。"""
+        return self._sandbox
 
     @property
     def events(self) -> list[SessionEvent]:
@@ -66,21 +79,41 @@ class Session:
         store: JsonlSessionStore,
         *,
         agent_id: str = "default",
+        workspace_registry: WorkspaceRegistry | None = None,
     ) -> Session:
-        """新建 Session：生成 id、创建 JSONL、append session/started。"""
+        """新建 Session：生成 id、创建 JSONL、append session/started。
+
+        提供 workspace_registry 时，自动创建/绑定 Sandbox 实例到 session.sandbox。
+        """
         session_id = str(uuid4())
-        session = cls(session_id, store)
+        sandbox = None
+        if workspace_registry is not None:
+            sandbox = workspace_registry.create(session_id)
+        session = cls(session_id, store, sandbox=sandbox)
         session.append(SESSION_STARTED, {}, agent_id=agent_id)
         return session
 
     @classmethod
-    def resume(cls, store: JsonlSessionStore, session_id: str) -> Session:
-        """加载已有 Session：读 JSONL、校验 seq、修复 dangling、append session/resumed。"""
+    def resume(
+        cls,
+        store: JsonlSessionStore,
+        session_id: str,
+        *,
+        workspace_registry: WorkspaceRegistry | None = None,
+    ) -> Session:
+        """加载已有 Session：读 JSONL、校验 seq、修复 dangling、append session/resumed。
+
+        提供 workspace_registry 时，自动查回/恢复 Sandbox 实例到 session.sandbox。
+        """
         events = store.read_events(session_id)
         if not events:
             raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
 
-        session = cls(session_id, store, events)
+        sandbox = None
+        if workspace_registry is not None:
+            sandbox = workspace_registry.get(session_id)
+
+        session = cls(session_id, store, events, sandbox=sandbox)
 
         # 校验 seq 单调递增（不容忍回退）
         seen_seqs: set[int] = set()
