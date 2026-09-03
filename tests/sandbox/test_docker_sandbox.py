@@ -41,15 +41,7 @@ def docker_sandbox() -> Iterator[object]:
     try:
         yield sandbox
     finally:
-        sandbox.stop()
-        docker = importlib.import_module("docker")
-        client = docker.from_env(use_context=False)
-        try:
-            client.volumes.get(volume_name).remove(force=True)
-        except docker.errors.NotFound:
-            pass
-        finally:
-            client.close()
+        sandbox.delete()
 
 
 def test_constructor_reports_missing_docker_sdk(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -146,3 +146,53 @@ class TestStopAndDelete:
         registry.create("sess_1")
         registry.delete("sess_1")
         registry.delete("sess_1")  # 不报错
+
+
+class TestCrossProcessLifecycle:
+    """跨进程的 stop/delete：Registry 实例 cache 为空时，仍能从 JSON 重建并操作。"""
+
+    def test_stop_after_simulated_restart(self, tmp_path: Path):
+        """create → 新 Registry 实例（模拟重启）→ stop 不报错且清空 cache。"""
+        registry1 = WorkspaceRegistry(root=tmp_path, backend="local")
+        registry1.create("sess_x")
+        assert registry1.exists("sess_x")
+
+        # 模拟进程重启
+        registry2 = WorkspaceRegistry(root=tmp_path, backend="local")
+        assert "sess_x" not in registry2._cache  # cache 为空
+
+        # 跨进程 stop：应从 JSON 重建 Sandbox 再 stop，不报错
+        registry2.stop("sess_x")
+        assert "sess_x" not in registry2._cache
+
+    def test_delete_after_simulated_restart_removes_everything(
+        self, tmp_path: Path
+    ):
+        """create → 新 Registry → delete 应彻底清理映射 + workspace 目录。"""
+        registry1 = WorkspaceRegistry(root=tmp_path, backend="local")
+        sandbox = registry1.create("sess_y")
+        sandbox.write_text("data.txt", "persistent")
+
+        workspace_dir = Path(sandbox.workspace_root)
+        assert workspace_dir.exists()
+
+        # 模拟进程重启
+        registry2 = WorkspaceRegistry(root=tmp_path, backend="local")
+        assert "sess_y" not in registry2._cache
+
+        registry2.delete("sess_y")
+
+        # 映射 + workspace 目录都被清理
+        assert not registry2.exists("sess_y")
+        assert not workspace_dir.exists()
+
+    def test_delete_orphan_workspace_dir_without_mapping(self, tmp_path: Path):
+        """映射文件不存在但 workspace 目录残留 → delete 应清孤儿目录，幂等。"""
+        registry = WorkspaceRegistry(root=tmp_path, backend="local")
+        orphan = tmp_path / "workspaces" / "sess_orphan"
+        orphan.mkdir(parents=True)
+        (orphan / "junk.txt").write_text("junk")
+
+        registry.delete("sess_orphan")  # 不报错
+
+        assert not orphan.exists()

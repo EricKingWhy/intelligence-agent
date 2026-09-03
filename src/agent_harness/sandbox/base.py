@@ -84,7 +84,19 @@ class Sandbox(ABC):
 
     @abstractmethod
     def stop(self) -> None:
-        """清理执行环境。幂等：多次调用不报错。"""
+        """停止 Sandbox（保留持久状态以便 resume）。幂等：多次调用不报错。
+
+        语义：停容器/进程，但不删 workspace 数据/Volume——下次 ensure_started 可恢复。
+        对无持久化需要的后端（LocalSubprocess）可以是 no-op。
+        """
+
+    @abstractmethod
+    def delete(self) -> None:
+        """彻底清理 Sandbox 资源（容器 + Volume + workspace 目录）。幂等。
+
+        语义：完全销毁，不可 resume。WorkspaceRegistry.delete() 调它。
+        对 LocalSubprocess，删除 workspace_root 目录；对 Docker，移除容器和 Volume。
+        """
 
     # —— 路径安全工具（具体方法，子类复用） ——
 

@@ -163,6 +163,18 @@ class TestLifecycle:
         sandbox.stop()
         sandbox.stop()
 
+    def test_delete_removes_workspace_dir(self, sandbox: LocalSubprocessSandbox):
+        """delete 彻底删除 workspace 目录。"""
+        ws_root = Path(sandbox.workspace_root)
+        assert ws_root.exists()
+        sandbox.delete()
+        assert not ws_root.exists()
+
+    def test_delete_idempotent(self, sandbox: LocalSubprocessSandbox):
+        """多次 delete 不报错（目录已删再调）。"""
+        sandbox.delete()
+        sandbox.delete()
+
     def test_exec_works_without_explicit_ensure_started(self, sandbox: LocalSubprocessSandbox):
         """不显式 ensure_started 也能直接 exec（构造即可用）。"""
         result = sandbox.exec("echo works")

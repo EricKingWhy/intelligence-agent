@@ -17,7 +17,7 @@ volume 持久，resume 时用确定性名字重启容器即可恢复 workspace�
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agent_harness.sandbox.base import Sandbox
@@ -77,14 +77,38 @@ class WorkspaceRegistry:
         return self._mapping_path(session_id).exists()
 
     def stop(self, session_id: str) -> None:
-        """停止 session 的 Sandbox。幂等。"""
+        """停止 session 的 Sandbox（保留 Volume/workspace 以便 resume）。幂等。
+
+        跨进程安全：即使本进程没缓存该 Sandbox，也会从映射记录重建实例并停掉它。
+        """
         sandbox = self._cache.get(session_id)
-        if sandbox is not None:
-            sandbox.stop()
+        if sandbox is None:
+            # 跨进程恢复：进程重启后 cache 为空，但容器可能还在跑。
+            mapping = self._read_mapping(session_id)
+            if mapping is None:
+                return  # 没有映射记录，幂等 no-op
+            sandbox = self._instantiate_sandbox(mapping)
+        sandbox.stop()
+        self._cache.pop(session_id, None)
 
     def delete(self, session_id: str) -> None:
-        """彻底清理 session 的 Sandbox 和映射。幂等。"""
-        self.stop(session_id)
+        """彻底清理 session 的 Sandbox 资源和映射（容器 + Volume + workspace 目录）。幂等。
+
+        跨进程安全：即使本进程没缓存该 Sandbox，也会从映射记录重建实例再彻底销毁。
+        """
+        sandbox = self._cache.get(session_id)
+        if sandbox is None:
+            mapping = self._read_mapping(session_id)
+            if mapping is None:
+                # 没有映射记录——清理可能残留的孤儿 workspace 目录后返回。
+                workspace_dir = self._workspaces_dir / session_id
+                if workspace_dir.exists():
+                    import shutil
+
+                    shutil.rmtree(workspace_dir, ignore_errors=True)
+                return
+            sandbox = self._instantiate_sandbox(mapping)
+        sandbox.delete()
         self._cache.pop(session_id, None)
         mapping_file = self._mapping_path(session_id)
         if mapping_file.exists():
@@ -101,7 +125,7 @@ class WorkspaceRegistry:
             "workspace_root": str(workspace_root),
             "container_name": None,
             "volume_name": None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         if self._backend == "docker":
             # 确定性命名：基于 session_id，进程重启后能按名字找回容器/volume。

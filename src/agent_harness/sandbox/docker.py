@@ -64,14 +64,16 @@ class DockerSandbox(Sandbox):
         # 跨进程恢复：按确定性 container_name 查找已存在的容器。
         # 进程重启后 self._container 为 None，但容器可能还在（停止状态）。
         # 如果找到，重启它；找不到才创建新容器。
+        docker = importlib.import_module("docker")
         try:
             existing = self._client.containers.get(self._container_name)
+        except docker.errors.NotFound:
+            existing = None
+        if existing is not None:
             if existing.status != "running":
                 existing.start()
             self._container = existing
             return
-        except Exception:  # noqa: BLE001 — 容器不存在是正常情况，继续创建
-            pass
 
         self._container = self._client.containers.run(
             self._image,
@@ -182,9 +184,38 @@ class DockerSandbox(Sandbox):
         return resolved
 
     def stop(self) -> None:
+        """停容器（保留 Volume 以便 resume）。幂等。"""
         if self._container is None:
             return
+        docker = importlib.import_module("docker")
         try:
-            self._container.remove(force=True)
+            self._container.reload()
+            if self._container.status == "running":
+                self._container.stop()
+        except docker.errors.NotFound:
+            pass
         finally:
             self._container = None
+
+    def delete(self) -> None:
+        """彻底清理：移除容器 + 删除 Volume。幂等。"""
+        docker = importlib.import_module("docker")
+        if self._container is not None:
+            try:
+                self._container.remove(force=True)
+            except docker.errors.NotFound:
+                pass
+            finally:
+                self._container = None
+        else:
+            # 跨进程：容器可能还在，按确定性名字查回再删。
+            try:
+                existing = self._client.containers.get(self._container_name)
+            except docker.errors.NotFound:
+                existing = None
+            if existing is not None:
+                existing.remove(force=True)
+        try:
+            self._client.volumes.get(self._volume_name).remove(force=True)
+        except docker.errors.NotFound:
+            pass
