@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -114,11 +115,13 @@ class ToolExecutor:
         policy: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
         approval_callback: ApprovalCallback | None = None,
         operation_ledger: OperationLedger | None = None,
+        kill_hook: Callable[[str, str], None] | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
         self._approval_callback = approval_callback
         self._operation_ledger = operation_ledger
+        self._kill_hook = kill_hook
 
     @property
     def tracks_operations(self) -> bool:
@@ -202,9 +205,11 @@ class ToolExecutor:
                 operation_context=operation_context,
                 tool=tool,
             )
+            self._maybe_kill("pending", tool_call_id)
             await self._operation_ledger.update_state(
                 tool_call_id, OperationState.RUNNING
             )
+            self._maybe_kill("running", tool_call_id)
 
         # -- 阶段 3：execute + Timeout 边界 + 唯一 Retry Layer（Task 3）--
         # 三阶段顺序不变；Timeout/Retry 只包住 tool.execute 这一步。
@@ -229,7 +234,18 @@ class ToolExecutor:
                 result_json=result.model_dump_json(),
                 artifact_ref=result.artifact_ref,
             )
+            self._maybe_kill("terminal", tool_call_id)
         return ToolExecution(tool_call_id=tool_call_id, result=result)
+
+    def _maybe_kill(self, stage: str, tool_call_id: str) -> None:
+        """精确故障注入点（#32 Kill 集成测试专用；生产 kill_hook=None 行为不变）。
+
+        每个注入点都在对应 Ledger 状态【已持久化之后】触发——hook 内 os._exit
+        即可构造"状态已落盘、后续步骤未发生"的真实崩溃窗口（如 terminal 态
+        已写、tool/result 事件未写的 Ledger-first 恢复窗口）。
+        """
+        if self._kill_hook is not None:
+            self._kill_hook(stage, tool_call_id)
 
     async def execute_batch(
         self,
