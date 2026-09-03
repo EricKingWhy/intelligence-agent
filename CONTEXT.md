@@ -113,3 +113,41 @@ _Avoid_: session manager, recovery manager, resume controller
 **PendingPolicy**:
 Reconcile 时对 PENDING Operation（Tool 未启动）的处理策略。默认 skip（合成 skipped ToolResult，最安全）；可注入 retry 策略。Ledger-first 顺序下 PENDING 极罕见。
 _Avoid_: retry policy, execution policy, pending handler
+
+## Streaming / Web UI 层
+
+**AgentEvent**:
+Runtime 向外发出的业务事件流（`agent/started`、`model/delta`、`tool/started`、`tool/completed`、`run/completed` 等），供 CLI / SSE / Web UI / Test / Trace 多面消费。与 Diagnostic Log 分层（不变量 #4 重申）：AgentEvent 是业务事实可重放，Diagnostic Log 是运维调试不可恢复。`print()` 不能当事件通道。
+_Avoid_: log entry, debug message, notification
+
+**ModelDelta**:
+模型逐 token 流式产出的事件，对应 `model.astream()` 的单个 chunk。持久化可配置（spec 03 §3：live 必有，落盘可选）；完整 `AIMessage` 始终由 `model/completed` 持久化，delta 不替代完整消息。是「流式输出效果」的数据来源。
+_Avoid_: token stream, partial message, streaming chunk
+
+**AgentRuntime.run_stream**:
+新增的流式驱动方法，签名为 `async def run_stream(session, user_input) -> AsyncIterator[AgentEvent]`。内部用 `model.astream()` 逐 chunk 产 `model/delta`，保留现有 `tool/call`/`tool/result`/`run/*`/`model/completed` 事件语义。旧 `run()` 保留签名不变（现有 252 测试和 demo 不破），重构为 `run_stream` 的消费端薄封装。
+_Avoid_: streaming run, async run, chunked run
+
+**SSE Surface**:
+FastAPI 提供的 Server-Sent Events 下行通道（`GET /sessions/{id}/stream`），把 `run_stream` 的 AgentEvent 逐条推给前端。SSE 只是一层传输 surface，**不持有 Runtime 状态**（spec 11 §4）。客户端断连时要清理 generator/queue，不泄漏 producer task，不破坏 Session 一致性。
+_Avoid_: push connection, event endpoint, streaming pipe
+
+**Event Projection**:
+前端的纯函数 reducer，把 raw SessionEvent / AgentEvent 流投影成渲染模型（对话流 / 工具列表 / step detail）。镜像 Python 侧 `derive_messages` 的逻辑，**不存独立业务真相**（不变量 #22）。保证刷新后从 `GET /sessions/{id}/events` 读历史 + 接 live SSE 完整重建视图。
+_Avoid_: view model, state store, client-side truth
+
+**Turn**:
+Chat 视图里一个用户输入到下一次用户输入之间的完整循环，含模型若干轮 + 中间的所有工具调用。DSH 式「Thought for a while」折叠默认把过程收起，展开看完整推理 + 工具卡片。
+_Avoid_: step, loop, iteration, response
+
+**Tool Card**:
+对话流里工具调用的可视化单元，按工具类型分专属卡片：bash → 终端黑卡（stdout/stderr/exit_code）；edit/apply_patch/write → diff 双栏（绿增红删，数据来自工具返回的 before/after）；其余 7 个 → 统一折叠卡片（参数 + 结果 JSON）。每张卡片显式生命周期态（running / success / failed / interrupted）。
+_Avoid_: tool widget, call bubble, action block
+
+**Approval Card**:
+对话流内联的审批 UI 单元。agent 卡在需审批的 tool_call 时原地出现（工具名 + 参数 + 风险说明 + 同意/拒绝按钮），用户决策走 `POST /sessions/{id}/approve` 回传，批准后工具继续执行、结果回填同一卡片。不用 modal（割裂上下文）。
+_Avoid_: permission dialog, confirm popup, auth modal
+
+**Inspector 三栏**:
+Web UI 的冻结布局（spec 11 §5）：左栏 Sessions/Runs/Fork Tree；中栏 Conversation + Agent activity + Tool calls；右栏 Step Detail（model 元数据 / tool args/result / retry / artifact / context / checkpoint / recovery）。Phase 4-5 字段在 initial 版本留空槽 + graceful empty state，后续 Phase 填。
+_Avoid_: dashboard, console, panel layout

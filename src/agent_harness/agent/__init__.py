@@ -1,18 +1,20 @@
-"""Agent 模块：透明最小 Agent Loop。
+"""Agent 模块：透明最小 Agent Loop + 流式事件。
 
-对外只暴露两个名字：AgentRuntime（驱动循环）、AgentRunResult（运行结果）。
+对外暴露：AgentRuntime（驱动循环）、AgentRunResult（运行结果）、AgentEvent（流式信封）。
 """
 
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_MAX_STEPS_EXCEEDED,
+    AgentEvent,
     AgentRunResult,
 )
 
 __all__ = [
     "STATUS_COMPLETED",
     "STATUS_MAX_STEPS_EXCEEDED",
+    "AgentEvent",
     "AgentRunResult",
     "AgentRuntime",
 ]

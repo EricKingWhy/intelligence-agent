@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.result import ErrorCode
+from agent_harness.tools._diff_data import diff_data
 
 
 class _WriteArgs(BaseModel):
@@ -46,6 +47,14 @@ class WriteTool(Tool):
 
     async def execute(self, args: _WriteArgs) -> ToolResult:
         """调 sandbox.write_text；路径越界映射成 PERMISSION_DENIED。"""
+        # 读旧内容供前端 diff（文件不存在 → before 为空，表示这是新建）。
+        # 读失败不阻塞写入——write 本就是覆盖语义，diff 是辅助视图不是契约。
+        before = ""
+        try:
+            before = self._sandbox.read_text(args.path)
+        except (FileNotFoundError, PermissionError):
+            pass
+
         try:
             self._sandbox.write_text(args.path, args.content)
         except PermissionError as e:
@@ -55,5 +64,9 @@ class WriteTool(Tool):
             )
         return ToolResult.success(
             message=f"已写入 '{args.path}'（{len(args.content)} 字符）。",
-            data={"path": args.path, "bytes_written": len(args.content.encode("utf-8"))},
+            data={
+                "path": args.path,
+                "bytes_written": len(args.content.encode("utf-8")),
+                **diff_data(before, args.content),
+            },
         )

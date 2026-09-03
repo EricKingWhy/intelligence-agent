@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-# ── Event vocabulary V1（Phase 1 子集，共 10 种） ──
+# ── Event vocabulary V1（Phase 1 子集） ──
+# ── + Phase 9 流式信号（MODEL_STARTED / MODEL_DELTA） ──
 
 SESSION_STARTED = "session/started"
 SESSION_RESUMED = "session/resumed"
@@ -15,6 +16,8 @@ RUN_STARTED = "run/started"
 RUN_COMPLETED = "run/completed"
 RUN_FAILED = "run/failed"
 USER_MESSAGE = "user/message"
+MODEL_STARTED = "model/started"
+MODEL_DELTA = "model/delta"
 MODEL_COMPLETED = "model/completed"
 MODEL_FAILED = "model/failed"
 TOOL_CALL = "tool/call"
@@ -28,6 +31,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         RUN_COMPLETED,
         RUN_FAILED,
         USER_MESSAGE,
+        MODEL_STARTED,
+        MODEL_DELTA,
         MODEL_COMPLETED,
         MODEL_FAILED,
         TOOL_CALL,

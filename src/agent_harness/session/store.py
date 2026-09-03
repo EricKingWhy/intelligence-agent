@@ -64,3 +64,26 @@ class JsonlSessionStore:
                     continue
                 events.append(SessionEvent.from_dict(parsed))
         return events
+
+    def list_session_ids(self) -> list[str]:
+        """列出 root 下所有有 events.jsonl 的 session_id，按最近修改倒序。
+
+        Phase 9 / Web UI 用：GET /sessions 的基础。空 root 返回空列表。
+        """
+        if not self._root.exists():
+            return []
+        ids: list[tuple[str, float]] = []
+        for entry in self._root.iterdir():
+            if not entry.is_dir():
+                continue
+            events_path = entry / "events.jsonl"
+            if not events_path.exists():
+                continue
+            try:
+                mtime = events_path.stat().st_mtime
+            except OSError:
+                continue
+            ids.append((entry.name, mtime))
+        # 按修改时间倒序（最近在前）
+        ids.sort(key=lambda x: x[1], reverse=True)
+        return [sid for sid, _ in ids]
