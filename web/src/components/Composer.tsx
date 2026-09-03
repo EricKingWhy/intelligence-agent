@@ -32,6 +32,8 @@ export function Composer({ streaming, onSubmit, onCancel }: Props) {
   return (
     <div className="composer-wrap">
       <textarea
+        id="composer-input"
+        name="task"
         className="composer glass"
         placeholder="Describe a task for the agent… (⌘+Enter to send)"
         value={value}
@@ -39,6 +41,7 @@ export function Composer({ streaming, onSubmit, onCancel }: Props) {
         onKeyDown={onKeyDown}
         rows={2}
         disabled={streaming}
+        aria-label="Agent task"
       />
       <div className="composer-actions">
         {streaming ? (
