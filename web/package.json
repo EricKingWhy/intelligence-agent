@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "gen:event-types": "uv run python ../scripts/gen_event_types.py",
     "lint": "oxlint",
     "preview": "vite preview"
   },

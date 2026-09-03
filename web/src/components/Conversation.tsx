@@ -33,7 +33,7 @@ export function Conversation({ conversation, loadingHistory }: Props) {
   if (loadingHistory) {
     return (
       <div className="conversation">
-        <div className="conversation-empty">Loading history…</div>
+        <div className="conversation-empty">正在加载历史…</div>
       </div>
     );
   }
@@ -42,8 +42,8 @@ export function Conversation({ conversation, loadingHistory }: Props) {
     return (
       <div className="conversation">
         <div className="conversation-empty">
-          <div className="empty-hero">No conversation yet</div>
-          <div className="empty-sub">Submit a task below to watch the agent work in real time.</div>
+          <div className="empty-hero">暂无对话</div>
+          <div className="empty-sub">在下方提交任务，实时观看 Agent 执行。</div>
         </div>
       </div>
     );
@@ -91,8 +91,8 @@ function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
             {canCollapse && (
               <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
                 {collapsed
-                  ? `Thought · ${turn.tools.length} tools · ~${tokenCount} tok`
-                  : 'collapse'}
+                  ? `思考 · ${turn.tools.length} 个工具 · ~${tokenCount} tok`
+                  : '折叠'}
               </button>
             )}
             {!collapsed && (

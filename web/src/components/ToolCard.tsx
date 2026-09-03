@@ -83,15 +83,15 @@ function BashBlock({ tool }: { tool: ToolCall }) {
 function DiffBlock({ diff }: { diff: NonNullable<ToolCall['diff']> }) {
   return (
     <div className="diff-block">
-      {diff.truncated && <div className="diff-truncated">content truncated for display</div>}
+      {diff.truncated && <div className="diff-truncated">内容过长，已截断显示</div>}
       <div className="diff-cols">
         <div className="diff-col diff-before">
-          <div className="diff-col-label">before</div>
-          <pre>{diff.before || '(empty)'}</pre>
+          <div className="diff-col-label">变更前</div>
+          <pre>{diff.before || '（空）'}</pre>
         </div>
         <div className="diff-col diff-after">
-          <div className="diff-col-label">after</div>
-          <pre>{diff.after || '(empty)'}</pre>
+          <div className="diff-col-label">变更后</div>
+          <pre>{diff.after || '（空）'}</pre>
         </div>
       </div>
     </div>
@@ -102,12 +102,12 @@ function GenericBlock({ tool }: { tool: ToolCall }) {
   return (
     <div className="generic-block">
       <div className="generic-section">
-        <div className="generic-label">args</div>
+        <div className="generic-label">参数</div>
         <pre>{JSON.stringify(tool.args, null, 2)}</pre>
       </div>
       {tool.result !== undefined && (
         <div className="generic-section">
-          <div className="generic-label">result</div>
+          <div className="generic-label">结果</div>
           <pre>{typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}</pre>
         </div>
       )}

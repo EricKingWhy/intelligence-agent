@@ -30,7 +30,7 @@ export function useSession() {
       const list = await listSessions();
       setSessions(list);
     } catch (e) {
-      setError(`Failed to load sessions: ${(e as Error).message}`);
+      setError(`加载会话列表失败：${(e as Error).message}`);
     }
   }, []);
 
@@ -56,7 +56,7 @@ export function useSession() {
         setConversation(projectHistory(selectedId, events));
       })
       .catch((e) => {
-        if (!cancelled) setError(`Failed to load events: ${(e as Error).message}`);
+        if (!cancelled) setError(`加载历史事件失败：${(e as Error).message}`);
       })
       .finally(() => {
         if (!cancelled) setLoadingHistory(false);
@@ -109,13 +109,13 @@ export function useSession() {
           },
           (err) => {
             setStreaming(false);
-            setError(`Stream error: ${(err as Error).message}`);
+            setError(`流式错误：${(err as Error).message}`);
           },
         );
         sseRef.current = handle;
       } catch (e) {
         setStreaming(false);
-        setError(`Submit failed: ${(e as Error).message}`);
+        setError(`提交失败：${(e as Error).message}`);
       }
     },
     [conversation, refreshSessions],

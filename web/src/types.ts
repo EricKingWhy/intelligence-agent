@@ -3,6 +3,12 @@
  * Frontend never owns truth; it projects events into view-models.
  */
 
+/**
+ * Event type constants are GENERATED from session/event.py (single source) —
+ * see web/src/generated/event-types.ts. Do not hand-edit values here.
+ */
+export { EventType, STREAM_ONLY_TYPES } from './generated/event-types';
+
 /** A single SSE frame from POST /api/sessions or durable event from GET events. */
 export interface AgentEvent {
   type: string;
@@ -22,20 +28,6 @@ export interface SessionSummary {
   first_event_time: string | null;
   last_event_time: string | null;
 }
-
-// ── Event type constants (mirror session/event.py) ──
-export const EventType = {
-  SESSION_STARTED: 'session/started',
-  USER_MESSAGE: 'user/message',
-  RUN_STARTED: 'run/started',
-  RUN_COMPLETED: 'run/completed',
-  RUN_FAILED: 'run/failed',
-  MODEL_STARTED: 'model/started',
-  MODEL_DELTA: 'model/delta',
-  MODEL_COMPLETED: 'model/completed',
-  TOOL_CALL: 'tool/call',
-  TOOL_RESULT: 'tool/result',
-} as const;
 
 // ── View-models (projection output) ──
 

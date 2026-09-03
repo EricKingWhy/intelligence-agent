@@ -35,22 +35,22 @@ export function Composer({ streaming, onSubmit, onCancel }: Props) {
         id="composer-input"
         name="task"
         className="composer glass"
-        placeholder="Describe a task for the agent… (⌘+Enter to send)"
+        placeholder="描述一个任务…（⌘+Enter 发送）"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={onKeyDown}
         rows={2}
         disabled={streaming}
-        aria-label="Agent task"
+        aria-label="Agent 任务"
       />
       <div className="composer-actions">
         {streaming ? (
           <button className="btn-danger" onClick={onCancel}>
-            <Square size={14} /> Stop
+            <Square size={14} /> 停止
           </button>
         ) : (
           <button className="btn-primary" onClick={submit} disabled={!value.trim()}>
-            <Send size={14} /> Send
+            <Send size={14} /> 发送
           </button>
         )}
       </div>
