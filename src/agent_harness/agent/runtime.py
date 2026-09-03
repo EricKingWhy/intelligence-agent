@@ -19,7 +19,8 @@ Diagnostic Log（_log）保留不动——执行链路观察与 SessionEvent 分
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 

@@ -20,7 +20,7 @@
 | **1** | SessionEvent + Model + Minimal Agent Loop | ✅ COMPLETED | `f789aac`（AgentRuntime）<br>`8ecb202`（bind_tools）<br>`87c3a72`（event-sourced） | SessionEvent DTO + 10 种 event type + JsonlSessionStore（崩溃安全）+ derive_messages（配对+dangling 合成）+ Session 聚合根（start/resume/append/derive/begin_run/end_run）+ AgentRuntime event-sourced 改造 + Resume 集成测试。Gate 达成：进程重启后可从 JSONL 恢复完整对话历史。135 passed。 |
 | **2** | Tool Runtime | ✅ COMPLETED | `8572fd8` → `00f3753` | Tool Contract / Registry / ToolResult / Validation-first ToolExecutor / 单 Retry Layer / 批次调度 + 严格 ID 配对。Gate 达成：INVALID_ARGUMENT 不重试、transient 可重试、配对 100%。Permission interface 薄，留待 Phase 7 Capability seam 深化。 |
 | **3** | Docker Sandbox + Coding Tools | ✅ COMPLETED | `2bfa457` → `ed96f5a` | Sandbox ABC（含 list_files）+ LocalSubprocessSandbox + DockerSandbox（懒加载 + 确定性命名 + 跨进程恢复）+ 9 个 Coding Tools（read/write/bash/edit/grep/glob/apply_patch/git_status/git_diff）+ 批次调度验证 ✅。**后续独立 spec 全部落地**：Approval / REQUIRE_APPROVAL 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 stage 2.5 + per-call scoping，默认安全拒绝 danger）；Session-scoped Sandbox 生命周期（WorkspaceRegistry 映射持久化 + Session.start/resume 自动绑定 sandbox + Docker 后端跨进程恢复）。Gate 达成：edit 多匹配明确失败、pytest exit_code=1 不被 retry、两个无冲突文件操作可并发、冲突写被串行化、路径越界统一 PERMISSION_DENIED、DANGER 工具在非 full-access policy 下被审批关卡拦截。252 passed。 |
-| **4** | Storage + Operation Ledger + Recovery | 🔄 IN PROGRESS | `5b85e36` 起 | Tickets #27、#31：durable Operation lifecycle + 串行失败级联/并行失败隔离。#31 的 43 个相关测试通过；其余恢复能力见 #28-#30、#32-#33。 |
+| **4** | Storage + Operation Ledger + Recovery | ✅ COMPLETED | `5b85e36`（#27 Ledger）<br>`6c94398`（#28 Checkpoint）<br>`fbcf599`（#29 RecoveryCoordinator）<br>`596c53b`（#30 Reconcile）<br>`778c1da`（#32 Kill 集成测试） | 全部 6 个 Ticket 落地：durable Operation Ledger（SQLite + aiosqlite，Ledger-first 写入顺序）+ 稳定边界 Checkpoint 持久化（CheckpointPolicy seam，checkpoint 绝不进事件流）+ RecoveryCoordinator（07 §9 冻结 8 步唯一入口，决策与写入分离，BEGIN EXCLUSIVE sidecar 恢复锁）+ UNKNOWN 人工裁决（ReconcileHint / ReconcileVerdict / ReconcileCallback，RUNNING→UNKNOWN→NEED_RECONCILE 两步状态机强制，RETRY 只能来自用户裁决，operation/reconcile-required 落盘）+ 真实子进程 Kill 恢复集成测试。Gate 达成：duplicate confirmed side effect = 0、dangling tool call = 0、Workspace 按原映射恢复、5 个独立 Kill 场景全过、PENDING 默认 skip 不盲跑。345 passed, 8 skipped；全仓 ruff clean。 |
 | **5** | Artifact + MinIO + Context Compaction | ⬜ NOT STARTED | — | |
 | **6** | Memory Capability / Context Provider | ⬜ NOT STARTED | — | |
 | **7** | Capability / Plugin Foundation + Skills | ⬜ NOT STARTED | — | |
@@ -38,7 +38,7 @@
 
 ## 当前工作焦点
 
-**Phase 4 Storage + Operation Ledger + Recovery 正在实施**（🔄 IN PROGRESS）。Tickets #27、#31 已落地；当前 frontier 是 #28（Checkpoint persistence）。
+**Phase 4 Storage + Operation Ledger + Recovery 已完成**（✅ COMPLETED，2026-09-04 Gate 达成）。下一个 Phase 待用户/Primary Developer 排期。
 
 ## 更新日志
 
@@ -48,3 +48,4 @@
 - 2026-09-03：Phase 3 后续独立 spec 全部落地（Tickets A-E, #21-#25）。Approval 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 + 默认安全拒绝 danger）+ Session-scoped Sandbox 生命周期（WorkspaceRegistry + Session.start/resume 自动绑定 + DockerSandbox 确定性命名 + 跨进程恢复）。252 passed，ruff clean。Issues #19-#25 已关闭。Phase 3 全部交付物落地。
 - 2026-09-04：Phase 4 开始实施。Ticket #27 落地 SQLite Operation Ledger、Operation 状态契约、ToolExecutor Ledger-first lifecycle 与 aiosqlite 依赖；#28-#33 待完成。
 - 2026-09-04：Phase 9+10 精简版提前施工（grill-with-docs 产出，见 ADR-0005 + CONTEXT.md「Streaming / Web UI 层」术语）。决策：SSE + REST POST（守规格默认）、React 18 + Vite + Radix + 纯 CSS（液态玻璃）、AgentRuntime 加 `run_stream`（保留旧 `run()`）、前端直接消费 raw SessionEvent（守不变量 #22）、工具卡片 bash/diff 专属 + 其余通用、diff 数据工具侧补返回、approval 内联卡片、`web/` 顶层目录。前后端均由本次会话主导，不覆盖后端会话已落地的 Phase 4 ADR/CONTEXT。
+- 2026-09-04：Phase 4 全部完成（Tickets #27/#28/#29/#30/#31/#32/#33）。Checkpoint 持久化、RecoveryCoordinator 8 步恢复、UNKNOWN 人工裁决、真实子进程 Kill 集成测试全部落地。Phase Gate 达成：duplicate confirmed side effect = 0、dangling tool call = 0、Workspace 恢复正确、5 个独立 Kill 场景全过。345 passed, 8 skipped，全仓 ruff clean（含 phase9-10 合并带入的历史 lint 清零）。

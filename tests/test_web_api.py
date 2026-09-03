@@ -14,16 +14,15 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
-from agent_harness.agent import AgentEvent, AgentRuntime
+from agent_harness.agent import AgentRuntime
 from agent_harness.config import Settings
-from agent_harness.session import SESSION_STARTED, JsonlSessionStore, Session
+from agent_harness.session import SESSION_STARTED, Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.web.app import create_app
 from tests.scripted_model import ScriptedModel
@@ -103,7 +102,9 @@ def test_get_events_ok(tmp_path):
 def test_create_session_streams_sse(client):
     """POST /api/sessions 应返回 text/event-stream 并流多帧 AgentEvent。"""
     # 用 stub runtime 避免 LLM 调用：patch _build_runtime 返回一个轻量 runtime
-    settings = Settings(workspace_dir=str(client.app.state.agent.settings.workspace_dir))
+    _settings = Settings(
+        workspace_dir=str(client.app.state.agent.settings.workspace_dir)
+    )
     reg = ToolRegistry()
     exe = ToolExecutor(reg)
     stub_runtime = AgentRuntime(

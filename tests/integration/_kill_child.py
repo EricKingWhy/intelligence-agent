@@ -30,7 +30,7 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.storage import OperationContext, SqliteOperationLedger
-from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tooling import ApprovalResponse, ToolExecutor, ToolRegistry
 from agent_harness.tools import BashTool, WriteTool
 
 
@@ -40,6 +40,7 @@ async def main() -> None:
     calls = config["calls"]
     kill_stage = config["kill_stage"]
     kill_call_id = config["kill_call_id"]
+    kill_delay = config.get("kill_delay_seconds", 0.0)
 
     store = JsonlSessionStore(root / "sessions")
     ledger = SqliteOperationLedger(root / "state.db")
@@ -75,7 +76,14 @@ async def main() -> None:
 
     def kill_hook(stage: str, call_id: str) -> None:
         if stage == kill_stage and call_id == kill_call_id:
-            os._exit(137)  # 真实崩溃：不跑清理、不 flush、直接终止进程
+            if kill_delay:
+                # 延迟退出：hook 触发后工具继续真实执行，delay 秒后进程在
+                # 【执行中途】死亡——bash RUNNING 场景（#33）的 mid-flight 崩溃。
+                import threading
+
+                threading.Timer(kill_delay, os._exit, args=(137,)).start()
+            else:
+                os._exit(137)  # 真实崩溃：不跑清理、不 flush、直接终止进程
 
     registry = ToolRegistry()
     registry.register(WriteTool(sandbox))
@@ -83,6 +91,9 @@ async def main() -> None:
     executor = ToolExecutor(
         registry,
         operation_ledger=ledger,
+        # bash 是 DANGER 级：无审批回调时会在 Ledger 写入【之前】被拒，
+        # 注入点永远到不了——Kill 测试需要显式放行（模拟已获批准的调用）。
+        approval_callback=lambda request: ApprovalResponse(approved=True),
         kill_hook=kill_hook,
     )
     for call in calls:

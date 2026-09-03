@@ -25,7 +25,7 @@ from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
-from agent_harness.tooling.approval import ApprovalRequest, ApprovalResponse
+from agent_harness.tooling.approval import ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tools import (
     ApplyPatchTool,
@@ -38,7 +38,6 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
-
 
 # ── Request / Response schemas ──
 

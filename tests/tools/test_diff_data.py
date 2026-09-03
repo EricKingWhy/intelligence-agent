@@ -6,7 +6,6 @@ before / after / truncated 三个字段，供前端 diff 视图渲染（Q12=B �
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest

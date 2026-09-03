@@ -14,8 +14,8 @@ content 按 chunk_size 切成多个 AIMessageChunk 依次 yield。
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator
 
 from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage
 

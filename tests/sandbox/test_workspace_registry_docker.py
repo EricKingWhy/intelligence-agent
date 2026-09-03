@@ -40,7 +40,7 @@ def registry(tmp_path: Path):
     # 清理：删除测试容器和 volume
     try:
         reg.delete(SESSION_ID)
-    except Exception:  # noqa: BLE001 — best-effort cleanup
+    except Exception:  # noqa: BLE001, S110 — best-effort cleanup
         pass
     try:
         import docker
@@ -49,10 +49,10 @@ def registry(tmp_path: Path):
         for vol_suffix in [SESSION_ID]:
             try:
                 client.volumes.get(f"agent-harness-{vol_suffix}").remove(force=True)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110
                 pass
         client.close()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
 
 
@@ -62,7 +62,7 @@ class TestDockerRegistryDeterministicNaming:
         """同一 session_id 产生的容器名确定性。"""
         import json
 
-        sandbox = registry.create(SESSION_ID)
+        _sandbox = registry.create(SESSION_ID)
 
         mapping_file = tmp_path / "workspaces" / f"{SESSION_ID}.json"
         mapping = json.loads(mapping_file.read_text())

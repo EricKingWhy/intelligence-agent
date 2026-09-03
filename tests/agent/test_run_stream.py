@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from langchain_core.messages import AIMessage
 
-from agent_harness.agent import AgentEvent, AgentRuntime
+from agent_harness.agent import AgentRuntime
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
@@ -25,7 +25,6 @@ from agent_harness.session import (
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
-    JsonlSessionStore,
     Session,
 )
 from agent_harness.tooling import ToolExecutor, ToolRegistry
