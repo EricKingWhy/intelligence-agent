@@ -40,7 +40,13 @@ from agent_harness.session import (
     Session,
     SessionEvent,
 )
-from agent_harness.storage import OperationContext
+from agent_harness.storage import (
+    CheckpointBoundary,
+    CheckpointPolicy,
+    OnStableBoundary,
+    OperationContext,
+    SessionMeta,
+)
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 logger = logging.getLogger("agent_harness.agent")
@@ -60,12 +66,19 @@ class AgentRuntime:
         registry: ToolRegistry,
         executor: ToolExecutor,
         max_steps: int = 20,
+        *,
+        checkpoint_policy: CheckpointPolicy | None = None,
+        session_meta_store: Any | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
+        # Checkpoint seam（ADR-0004 Round 2）：默认策略 OnStableBoundary，
+        # 但只有注入了 CheckpointStore 才真正落盘——Core 不被存储强制依赖。
+        self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
+        self._session_meta_store = session_meta_store
 
         # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
         # 并在回复里产出 tool_calls。bind_tools 是 LangChain 的标准接线点。
@@ -123,6 +136,8 @@ class AgentRuntime:
         yield AgentEvent(
             type=USER_MESSAGE, data=user_event.data, seq=user_event.seq,
         )
+        # USER_ACCEPTED 稳定边界：user/message 已持久化。
+        await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
         run_id = session.begin_run()
         run_started = session._events[-1]  # begin_run append 了 run/started
@@ -203,6 +218,9 @@ class AgentRuntime:
                     type=MODEL_COMPLETED, data=model_event.data, seq=model_event.seq,
                     run_id=run_id, step_id=steps + 1,
                 )
+                # MODEL_COMPLETED 稳定边界：本轮模型回复已持久化（无 tool_calls 或
+                # 无 Ledger 时，model/completed 立即写入，这里直接保存 Checkpoint）。
+                await self._save_checkpoint(session, CheckpointBoundary.MODEL_COMPLETED)
             # 第 4 步：这一轮算一步（数模型轮数，不是工具个数）
             steps += 1
 
@@ -219,6 +237,8 @@ class AgentRuntime:
                 yield AgentEvent(
                     type=end_event.type, data=end_event.data, seq=end_event.seq, run_id=run_id,
                 )
+                # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
+                await self._save_checkpoint(session, CheckpointBoundary.FINAL_COMPLETED)
                 self._last_result = AgentRunResult(
                     status=STATUS_COMPLETED, final_text=final, steps=steps,
                 )
@@ -260,6 +280,8 @@ class AgentRuntime:
                     type=MODEL_COMPLETED, data=model_event.data, seq=model_event.seq,
                     run_id=run_id, step_id=steps,
                 )
+                # MODEL_COMPLETED 稳定边界：延迟写入的 model/completed 已持久化。
+                await self._save_checkpoint(session, CheckpointBoundary.MODEL_COMPLETED)
             for execution in executions:
                 result = execution.result
                 content = result.model_dump_json()
@@ -299,6 +321,42 @@ class AgentRuntime:
                           duration_ms=result.metadata.get("duration_ms"),
                           attempt=result.metadata.get("attempt"),
                           outcome=outcome)
+            # TOOL_BATCH_COMPLETED 稳定边界：整批 tool_call/result 已回填。
+            await self._save_checkpoint(
+                session, CheckpointBoundary.TOOL_BATCH_COMPLETED
+            )
+
+    async def _save_checkpoint(
+        self,
+        session: Session,
+        boundary_type: CheckpointBoundary,
+    ) -> None:
+        """在稳定边界调 CheckpointPolicy.maybe_save；并在配了 SessionMetaStore 时
+        同步更新 last_checkpoint_seq。
+
+        关键不变量（#28 要求）：checkpoint 保存发生在对应 SessionEvent 已持久化【之后】；
+        checkpoint/saved 绝不写入 SessionEvent（它只是存储层恢复辅助）。
+        """
+        checkpoint = await self._checkpoint_policy.maybe_save(
+            session, boundary_type
+        )
+        if checkpoint is not None and self._session_meta_store is not None:
+            try:
+                await self._session_meta_store.update_last_checkpoint_seq(
+                    session.session_id, checkpoint.event_seq
+                )
+            except KeyError:
+                # SessionMeta 尚未 upsert（首次 run）：惰性补建一行。
+                from datetime import UTC, datetime
+
+                await self._session_meta_store.upsert(
+                    SessionMeta(
+                        session_id=session.session_id,
+                        created_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+                        agent_id="default",
+                        last_checkpoint_seq=checkpoint.event_seq,
+                    )
+                )
 
     def _log(self, event_type: str, message: str, **fields: Any) -> None:
         """打一条结构化日志；无 handler 时静默 no-op（不污染未配日志的调用方/测试）。"""

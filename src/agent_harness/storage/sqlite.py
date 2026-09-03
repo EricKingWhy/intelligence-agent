@@ -1,4 +1,8 @@
-"""SQLite persistence adapters."""
+"""SQLite persistence adapters.
+
+三个 Store（OperationLedger / CheckpointStore / SessionMetaStore）物理上共享同一
+SQLite 文件，逻辑上各自独立 contract（ADR-0004 Round 3 §三张表）。
+"""
 
 from __future__ import annotations
 
@@ -7,11 +11,16 @@ from pathlib import Path
 
 import aiosqlite
 
+from agent_harness.storage.checkpoint import (
+    Checkpoint,
+    CheckpointStore,
+)
 from agent_harness.storage.operation import (
     Operation,
     OperationLedger,
     OperationState,
 )
+from agent_harness.storage.session_meta import SessionMeta, SessionMetaStore
 
 _OPERATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS operations (
@@ -179,3 +188,198 @@ class SqliteOperationLedger(OperationLedger):
     @staticmethod
     def _to_operation(row: aiosqlite.Row) -> Operation:
         return Operation.model_validate(dict(row))
+
+
+# ── Checkpoint / SessionMeta schema（共享同一 .db 文件，独立 contract）──
+
+_CHECKPOINTS_DDL = """
+CREATE TABLE IF NOT EXISTS checkpoints (
+    session_id    TEXT NOT NULL,
+    boundary_type TEXT NOT NULL CHECK (boundary_type IN (
+        'USER_ACCEPTED', 'MODEL_COMPLETED', 'TOOL_BATCH_COMPLETED', 'FINAL_COMPLETED'
+    )),
+    event_seq     INTEGER NOT NULL,
+    payload_json  TEXT,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (session_id, boundary_type, event_seq)
+)
+"""
+
+_SESSION_META_DDL = """
+CREATE TABLE IF NOT EXISTS session_meta (
+    session_id          TEXT PRIMARY KEY,
+    created_at          TEXT NOT NULL,
+    agent_id            TEXT,
+    last_checkpoint_seq INTEGER,
+    archived            BOOLEAN DEFAULT 0
+)
+"""
+
+
+class SqliteCheckpointStore(CheckpointStore):
+    """默认本地 Checkpoint Store，与 Operation Ledger 共享同一个 SQLite 文件。
+
+    schema 与 #26 冻结一致：PRIMARY KEY (session_id, boundary_type, event_seq)。
+    """
+
+    def __init__(self, database_path: str | Path) -> None:
+        self.database_path = Path(database_path)
+
+    async def initialize(self) -> None:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(self.database_path) as connection:
+            await connection.execute("PRAGMA journal_mode=WAL")
+            await connection.execute(_CHECKPOINTS_DDL)
+            await connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_checkpoints_session "
+                "ON checkpoints(session_id, event_seq)"
+            )
+            await connection.commit()
+
+    async def save(self, checkpoint: Checkpoint) -> None:
+        async with aiosqlite.connect(self.database_path) as connection:
+            await connection.execute(
+                """
+                INSERT INTO checkpoints (
+                    session_id, boundary_type, event_seq, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    checkpoint.session_id,
+                    checkpoint.boundary_type.value,
+                    checkpoint.event_seq,
+                    checkpoint.payload_json,
+                    checkpoint.created_at,
+                ),
+            )
+            await connection.commit()
+
+    async def list_for_session(self, session_id: str) -> list[Checkpoint]:
+        async with aiosqlite.connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                """
+                SELECT * FROM checkpoints
+                WHERE session_id = ?
+                ORDER BY event_seq
+                """,
+                (session_id,),
+            )
+            rows = await cursor.fetchall()
+        return [self._to_checkpoint(row) for row in rows]
+
+    async def latest(self, session_id: str) -> Checkpoint | None:
+        async with aiosqlite.connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                """
+                SELECT * FROM checkpoints
+                WHERE session_id = ?
+                ORDER BY event_seq DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+        return self._to_checkpoint(row) if row is not None else None
+
+    @staticmethod
+    def _to_checkpoint(row: aiosqlite.Row) -> Checkpoint:
+        return Checkpoint.model_validate(
+            {**dict(row), "boundary_type": row["boundary_type"]}
+        )
+
+
+class SqliteSessionMetaStore(SessionMetaStore):
+    """默认本地 Session Metadata Store，与其它 Store 共享同一个 SQLite 文件。
+
+    schema 与 #26 冻结一致；支持 archived 标记 + 显式 cleanup（不自动 TTL）。
+    """
+
+    def __init__(self, database_path: str | Path) -> None:
+        self.database_path = Path(database_path)
+
+    async def initialize(self) -> None:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(self.database_path) as connection:
+            await connection.execute("PRAGMA journal_mode=WAL")
+            await connection.execute(_SESSION_META_DDL)
+            await connection.commit()
+
+    async def upsert(self, meta: SessionMeta) -> SessionMeta:
+        async with aiosqlite.connect(self.database_path) as connection:
+            await connection.execute(
+                """
+                INSERT INTO session_meta (
+                    session_id, created_at, agent_id, last_checkpoint_seq, archived
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    agent_id = excluded.agent_id,
+                    last_checkpoint_seq = excluded.last_checkpoint_seq,
+                    archived = excluded.archived
+                """,
+                (
+                    meta.session_id,
+                    meta.created_at,
+                    meta.agent_id,
+                    meta.last_checkpoint_seq,
+                    1 if meta.archived else 0,
+                ),
+            )
+            await connection.commit()
+        loaded = await self.get(meta.session_id)
+        assert loaded is not None
+        return loaded
+
+    async def get(self, session_id: str) -> SessionMeta | None:
+        async with aiosqlite.connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                "SELECT * FROM session_meta WHERE session_id = ?",
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+        return self._to_meta(row) if row is not None else None
+
+    async def set_archived(self, session_id: str, archived: bool = True) -> SessionMeta:
+        async with aiosqlite.connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "UPDATE session_meta SET archived = ? WHERE session_id = ?",
+                (1 if archived else 0, session_id),
+            )
+            await connection.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(f"SessionMeta '{session_id}' does not exist")
+        loaded = await self.get(session_id)
+        assert loaded is not None
+        return loaded
+
+    async def update_last_checkpoint_seq(
+        self, session_id: str, event_seq: int
+    ) -> SessionMeta:
+        async with aiosqlite.connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "UPDATE session_meta SET last_checkpoint_seq = ? WHERE session_id = ?",
+                (event_seq, session_id),
+            )
+            await connection.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(f"SessionMeta '{session_id}' does not exist")
+        loaded = await self.get(session_id)
+        assert loaded is not None
+        return loaded
+
+    async def cleanup(self, session_id: str) -> None:
+        async with aiosqlite.connect(self.database_path) as connection:
+            await connection.execute(
+                "DELETE FROM session_meta WHERE session_id = ?",
+                (session_id,),
+            )
+            await connection.commit()
+
+    @staticmethod
+    def _to_meta(row: aiosqlite.Row) -> SessionMeta:
+        return SessionMeta.model_validate(
+            {**dict(row), "archived": bool(row["archived"])}
+        )
