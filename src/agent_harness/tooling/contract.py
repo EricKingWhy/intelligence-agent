@@ -36,6 +36,31 @@ class ToolSideEffect(str, Enum):
     MUTATING = "MUTATING"  # 改外部状态 → 整批串行（Task 4）
 
 
+class PermissionPolicy(str, Enum):
+    """Session 级权限策略——Agent 在这个 Session 里的最大权限边界。
+
+    05_SANDBOX_CODING_TOOLS.md §6 的三层 Permission Policy（参考 DeepSeek Harness）。
+    与 ToolSideEffect 正交：side_effect 驱动调度（并发/串行），
+    PermissionPolicy 驱动授权（允许/审批/拒绝）。
+    """
+
+    READ_ONLY = "read-only"
+    WORKSPACE_WRITE = "workspace-write"
+    DANGER_FULL_ACCESS = "danger-full-access"
+
+
+class ToolPermission(str, Enum):
+    """单个 Tool 的授权级别——这个工具需要什么级别的权限才能执行。
+
+    与 PermissionPolicy 对齐但不完全相同：Tool 声明自己需要什么级别，
+    ToolExecutor 检查 Session 的 PermissionPolicy 是否覆盖该级别。
+    """
+
+    READ_ONLY = "read-only"  # 读操作：read/grep/glob/git_status/git_diff
+    WORKSPACE_WRITE = "workspace-write"  # workspace 内写：write/edit/apply_patch
+    DANGER = "danger"  # 高风险：bash（可配网络/系统副作用）
+
+
 class Tool(ABC):
     """Tool Contract：模型 Schema 与 Runtime Tool 的共同来源。
 
@@ -90,3 +115,12 @@ class Tool(ABC):
     def side_effect(self) -> ToolSideEffect:
         """副作用分类。默认 READ_ONLY（安全默认，避免误并发执行 mutating 工具）。"""
         return ToolSideEffect.READ_ONLY
+
+    @property
+    def permission(self) -> ToolPermission:
+        """授权级别。默认 WORKSPACE_WRITE（安全偏高，避免新工具默认 DANGER）。
+
+        与 side_effect 正交：side_effect 驱动批次调度（并发/串行），
+        permission 驱动授权关卡（ToolExecutor 的 approval gate）。
+        """
+        return ToolPermission.WORKSPACE_WRITE
