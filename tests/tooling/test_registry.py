@@ -185,10 +185,7 @@ class TestExportModelDefinitions:
     def test_shape_matches_bind_tools_contract(
         self, registry: ToolRegistry, add_tool: AddTool
     ):
-        """导出的每个 dict 含 name/description/parameters 三键。
-
-        形状和 Day2 tool_call_demo 手工写的 dict 一致 → 证明同源。
-        """
+        """导出的每个 dict 含 name/description/parameters 三键。"""
         registry.register(add_tool)
         defs = registry.export_model_definitions()
 

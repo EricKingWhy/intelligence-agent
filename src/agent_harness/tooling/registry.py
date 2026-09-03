@@ -51,9 +51,9 @@ class ToolRegistry:
     def export_model_definitions(self) -> list[dict]:
         """导出给模型/SDK 的工具菜单：name + description + parameters。
 
-        形状和 Day2 tool_call_demo 里手工写的 dict 完全一致
+        形状即 LangChain bind_tools 消费的形状
         （{"name":..,"description":..,"parameters":..}），
-        证明【模型菜单与 Runtime Tool 来自同一份 Contract】。
+        模型菜单与 Runtime Tool 来自同一份 Contract。
 
         为什么返回普通 dict 列表、不包成 Pydantic：
         - LangChain bind_tools 要的就是这个形状，包一层反而要再拆。

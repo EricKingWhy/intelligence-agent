@@ -1,13 +1,13 @@
-"""Day3 Task1+2：用 ScriptedModel 验证最小 Agent Loop 的四象限行为。
+"""用 ScriptedModel 验证最小 Agent Loop 的四象限行为。
 
 零 API、零 Token：模型响应是固定剧本，断言的是 Runtime 实际发给模型的
 消息链（snapshots）和返回的 AgentRunResult，而不是只看最终字符串。
 
-四组场景（覆盖 Day 3 Definition of Done 的行为矩阵）：
-- A（Task1）：无工具——模型首轮就给最终回答，Runtime 只调用 1 次。
-- B（Task1）：一次工具往返——首轮提议 add，回填，第二轮给最终回答。
-- C（Task2）：连续两轮工具——证明 Loop 能跨第 2 轮继续走第 3 轮。
-- D（Task2）：max_steps 兜底——模型不收敛时保险丝正确熔断。
+四组场景：
+- A：无工具——模型首轮就给最终回答，Runtime 只调用 1 次。
+- B：一次工具往返——首轮提议 add，回填，第二轮给最终回答。
+- C：连续两轮工具——证明 Loop 能跨第 2 轮继续走第 3 轮。
+- D：max_steps 兜底——模型不收敛时保险丝正确熔断。
 """
 
 from __future__ import annotations
@@ -26,11 +26,7 @@ from tests.scripted_model import ScriptedModel
 TOOL_CALL_ID = "call_agent_0001"
 
 
-# ---- 夹具（Day4 Task5 迁移）----
-# 从"tools: dict[callable]"迁到 Tool Contract + Registry + Executor。
-# add 是注册的同步工具；boom 是注册了但 execute 抛 ValueError 的工具；
-# multiply 不注册（走 TOOL_NOT_FOUND）。这与旧 _tools() 语义等价，
-# 但执行走 ToolExecutor（校验/执行/错误映射全下沉）。
+# ---- 夹具：Tool Contract + Registry + Executor ----
 
 
 class _AddArgs(BaseModel):
@@ -39,7 +35,7 @@ class _AddArgs(BaseModel):
 
 
 class AddTool(Tool):
-    """add 工具：和 Day 2 同名同参，走统一 Contract（name/description/args_schema/execute）。"""
+    """add 工具：走统一 Contract（name/description/args_schema/execute）。"""
 
     @property
     def name(self) -> str:
@@ -93,7 +89,7 @@ def _registry() -> ToolRegistry:
 
 
 def _runtime(model: ScriptedModel, max_steps: int = 20) -> AgentRuntime:
-    """构造绑定了 executor + registry 的 Runtime（Day4 Task5 网格签）。"""
+    """构造绑定了 executor + registry 的 Runtime。"""
     reg = _registry()
     return AgentRuntime(model=model, registry=reg, executor=ToolExecutor(reg), max_steps=max_steps)
 
@@ -113,7 +109,7 @@ class TestAgentLoopNoTool:
 
         result = await runtime.run("你好")
 
-        # —— 你来断言（A 核心）——
+
         # 1. status 必须是 completed
         # 2. steps 必须是 1
         # 3. final_text 必须等于剧本那一轮的 content
@@ -151,7 +147,7 @@ class TestAgentLoopOneTool:
 
         result = await runtime.run("计算 123 + 456")
 
-        # —— 你来断言（B 基本）——
+
         # 1. status == completed
         # 2. steps == 2
         # 3. final_text == "123 + 456 = 579"
@@ -163,10 +159,9 @@ class TestAgentLoopOneTool:
 
     @pytest.mark.asyncio
     async def test_second_round_message_order_and_id_pairing(self):
-        """B 核心：第二轮发给模型的消息链顺序 + tool_call_id 配对。
+        """第二轮发给模型的消息链顺序 + tool_call_id 配对。
 
-        这是 Task 1 最值得保护的协议不变量——和 Day 2 同样的断言，
-        现在落在新 Runtime 上，证明循环维护了相同的消息契约。
+        协议不变量：ToolMessage 的 tool_call_id 必须与 AIMessage 里的 tool_call id 一致。
         """
         scripted = _scripted_one_tool()
         runtime = _runtime(scripted)
@@ -174,20 +169,13 @@ class TestAgentLoopOneTool:
 
         second_round = scripted.snapshots[1].messages
 
-        # —— 你来断言（B 协议核心）——
-        # 1. 第二轮消息链类型顺序 == ["HumanMessage", "AIMessage", "ToolMessage"]
-        #    提示：message_types = [type(m).__name__ for m in second_round]
-        # 2. AIMessage 里的 tool_call id == TOOL_CALL_ID
-        #    提示：second_round[1].tool_calls[0]["id"]
-        # 3. ToolMessage 的 tool_call_id == TOOL_CALL_ID（回填必须用原 id 配对）
-        #    提示：second_round[2].tool_call_id
         message_types = [type(m).__name__ for m in second_round]
         assert message_types == ["HumanMessage", "AIMessage", "ToolMessage"]
         assert second_round[1].tool_calls[0]["id"] == TOOL_CALL_ID
         assert second_round[2].tool_call_id == TOOL_CALL_ID
 
 
-# ---------- Task 2 · 场景③：连续两轮工具 ----------
+# ---------- 场景③：连续两轮工具 ----------
 # 剧本设计：模型第一轮提议 add(1,2)，第二轮提议 add(3,4)，第三轮给最终回答。
 # 关键：两个 tool_call 必须用【不同的 id】，证明 Loop 不是误重用同一个 id。
 TOOL_CALL_ID_A = "call_two_round_A"
@@ -225,14 +213,7 @@ def _scripted_two_tool_rounds() -> ScriptedModel:
 class TestAgentLoopTwoConsecutiveToolRounds:
     @pytest.mark.asyncio
     async def test_three_steps_completed_and_snapshot_count(self):
-        """连续两轮工具 -> completed + steps=3 + 模型被调用恰好 3 次。
-
-        验收清单（你来断言）：
-        1. status == STATUS_COMPLETED
-        2. steps == 3
-        3. len(scripted.snapshots) == 3
-        4. result.final_text 是第三轮剧本的 content
-        """
+        """连续两轮工具 -> completed + steps=3 + 模型被调用恰好 3 次。"""
         scripted = _scripted_two_tool_rounds()
         runtime = _runtime(scripted)
 
@@ -245,20 +226,10 @@ class TestAgentLoopTwoConsecutiveToolRounds:
 
     @pytest.mark.asyncio
     async def test_third_round_full_message_trace_and_id_pairing(self):
-        """场景③ 协议核心：第三轮发给模型的完整消息链（5 条）+ 两组 id 配对。
+        """第三轮发给模型的完整消息链（5 条）+ 两组 id 配对。
 
-        这是 Task 2 最值得保护的协议不变量——证明 Loop 真的把两轮工具调用
-        的请求与回填都累积进了历史，且各自的 tool_call_id 独立配对、互不串台。
-
-        验收清单（你来断言）：
-        1. 第三轮快照 scripted.snapshots[2].messages 共 5 条（模型第 3 次 ainvoke
-           的输入），类型顺序严格为：
-           ["HumanMessage", "AIMessage", "ToolMessage", "AIMessage", "ToolMessage"]
-        2. 第 1 条 AIMessage（下标 1）的 tool_call id == TOOL_CALL_ID_A
-        3. 第 1 条 ToolMessage（下标 2）的 tool_call_id == TOOL_CALL_ID_A
-        4. 第 2 条 AIMessage（下标 3）的 tool_call id == TOOL_CALL_ID_B
-        5. 第 2 条 ToolMessage（下标 4）的 tool_call_id == TOOL_CALL_ID_B
-        6. 两个 tool_call 的 id 不相等（A != B）——证明不是误重用同一个 id
+        协议不变量：两轮工具调用的请求与回填都累积进历史，各自的 tool_call_id
+        独立配对、互不串台。
         """
         scripted = _scripted_two_tool_rounds()
         runtime = _runtime(scripted)
@@ -282,30 +253,14 @@ class TestAgentLoopTwoConsecutiveToolRounds:
         assert TOOL_CALL_ID_A != TOOL_CALL_ID_B
 
 
-# ---------- Task 2 · 场景④：max_steps 不收敛兜底 ----------
-# 剧本设计：模型每轮都提议 add，永不收敛。
-# 技巧提示：ScriptedModel 剧本吐完会抛 RuntimeError("剧本耗尽")。
-#   要测"模型一直要工具"，你需要让剧本够长（>= max_steps 条）。
-#   本次建议 max_steps=3，剧本放 3 条带 tool_call 的 AIMessage 即可——
-#   Runtime 第 3 次 ainvoke 后 steps 到 3，触发兜底，不会再调第 4 次，剧本恰好够用。
+# ---------- 场景④：max_steps 不收敛兜底 ----------
 TOOL_CALL_ID_LOOP = "call_loop"
 
 
 class TestAgentLoopMaxSteps:
     @pytest.mark.asyncio
     async def test_max_steps_exceeded_with_exact_step_count(self):
-        """模型不收敛 + max_steps=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。
-
-        这是 Task 1 Q3 的 off-by-N 答案在代码上的实证：steps 数模型轮数，
-        所以 max_steps=3 意味着"允许调用模型 3 次"，第 3 次调用已发生、
-        steps 到 3，此时检测到不收敛 -> 兜底，绝不调用第 4 次。
-
-        验收清单（你来断言）：
-        1. result.status == STATUS_MAX_STEPS_EXCEEDED
-        2. result.final_text == ""            —— 兜底绝不伪造最终回答
-        3. result.steps == 3                  —— 恰好撞线，不是 4
-        4. len(scripted.snapshots) == 3       —— 模型被调用恰好 3 次，不多不少
-        """
+        """模型不收敛 + max_steps=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。"""
         rounds = [
             AIMessage(
                 content="",
@@ -330,12 +285,39 @@ class TestAgentLoopMaxSteps:
         assert result.steps == 3
         assert len(scripted.snapshots) == 3
 
+    @pytest.mark.asyncio
+    async def test_convergence_on_last_step_is_completed_not_exceeded(self):
+        """回归：模型恰好在第 max_steps 轮收敛（无 tool_calls）-> completed 而非 max_steps_exceeded。
 
-# ---------- Task 3 · 场景⑤：失败边界（故障注入，剧本可控可重现） ----------
-# 为什么这三类故障用剧本而不用真实模型？
-#   真实模型看到 bind_tools([add]) 后永远不会调 multiply（测不了"未知工具"）；
-#   工具异常和空 content 靠模型随机表现，不可稳定重现。
-#   剧本是故障注入：精确复现真实模型"不愿配合"的路径，每次必现、零 Token。
+        停止信号（无 tool_calls）必须先于 max_steps 兜底判定，
+        否则最终回答会被误报为不收敛且 final_text 被丢弃。
+        """
+        rounds = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "add",
+                        "args": {"first_number": i, "second_number": i},
+                        "id": TOOL_CALL_ID_LOOP,
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            for i in range(2)
+        ] + [AIMessage(content="总算算完了")]
+        scripted = ScriptedModel(rounds)
+        runtime = _runtime(scripted, max_steps=3)
+
+        result = await runtime.run("最后一步收敛")
+
+        assert result.status == STATUS_COMPLETED
+        assert result.final_text == "总算算完了"
+        assert result.steps == 3
+        assert len(scripted.snapshots) == 3
+
+
+# ---------- 场景⑤：失败边界（故障注入，剧本可控可重现） ----------
 
 
 class TestAgentLoopUnknownTool:
@@ -362,7 +344,7 @@ class TestAgentLoopUnknownTool:
         # 不崩 + 正常完成（模型看到错误后自我纠错给了最终回答）
         assert result.status == STATUS_COMPLETED
         assert result.steps == 2
-        # 核心：第二轮喂给模型的消息链里，ToolMessage 的 content 是错误信息，
+        # 第二轮喂给模型的消息链里，ToolMessage 的 content 是错误信息，
         # 且 tool_call_id 依然配对原 id（错误回执也要能配对请求）。
         second_round = scripted.snapshots[1].messages
         assert [type(m).__name__ for m in second_round] == [
@@ -370,8 +352,7 @@ class TestAgentLoopUnknownTool:
         ]
         tool_msg = second_round[2]
         assert tool_msg.tool_call_id == "call_unknown_001"
-        # Day4 Task5 迁移：content 从"自由字符串（含 KeyError）"升级为 ToolResult JSON。
-        # 断言 ErrorCode 的结构化语义（比字符串匹配稳）：multiply 未注册 -> TOOL_NOT_FOUND。
+        # content 是 ToolResult JSON：multiply 未注册 -> TOOL_NOT_FOUND。
         assert "multiply" in tool_msg.content
         assert "TOOL_NOT_FOUND" in tool_msg.content
 
@@ -402,8 +383,8 @@ class TestAgentLoopToolException:
         assert result.steps == 2
         tool_msg = scripted.snapshots[1].messages[2]
         assert tool_msg.tool_call_id == "call_boom_001"
-        # Day4 Task5 迁移：content 是 ToolResult JSON，error_code 是结构化码。
-        # boom 抛 ValueError -> Executor 阶段3 分类表未命中 -> TOOL_EXECUTION_ERROR。
+        # content 是 ToolResult JSON，error_code 是结构化码：
+        # boom 抛 ValueError -> Executor 分类表未命中 -> TOOL_EXECUTION_ERROR。
         assert "TOOL_EXECUTION_ERROR" in tool_msg.content
         # 异常细节仍在 JSON 的 message 字段里（如 "ValueError: 故意炸..."）——模型能读到。
         assert "ValueError" in tool_msg.content
@@ -417,8 +398,8 @@ class TestAgentLoopEmptyContentWithToolCalls:
     async def test_empty_content_does_not_stop_loop(self):
         """第一轮 content='' 且带 tool_call -> 必须继续执行工具 -> 第二轮完成。
 
-        这是 Task 1 Q2 的锁死版：content 空不空从来不是停止信号，
-        tool_calls 空不空才是。这条测试防止未来有人"顺手"把停止条件改成 content。
+        锁死停止信号：content 空不空从来不是停止信号，tool_calls 空不空才是。
+        这条测试防止未来有人把停止条件改成 content。
         """
         round1 = AIMessage(
             content="",  # 空 content + 要工具：最容易被误判为"模型没话说"的场景
