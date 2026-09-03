@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
+from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 from agent_harness.tools._diff_data import diff_data
 
@@ -44,6 +45,16 @@ class WriteTool(Tool):
     @property
     def side_effect(self) -> ToolSideEffect:
         return ToolSideEffect.MUTATING
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        return ReconcileHint(
+            verifiable=True,
+            suggested_action=(
+                "重新读取目标文件，核对内容是否已与写入预期一致："
+                "一致说明写入已生效（确认成功），不一致说明未执行。"
+            ),
+        )
 
     async def execute(self, args: _WriteArgs) -> ToolResult:
         """调 sandbox.write_text；路径越界映射成 PERMISSION_DENIED。"""

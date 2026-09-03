@@ -20,6 +20,7 @@ from agent_harness.tooling.contract import (
     ToolSideEffect,
 )
 from agent_harness.tooling.executor import ToolExecution, ToolExecutor
+from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
@@ -29,6 +30,7 @@ __all__ = [
     "ApprovalResponse",
     "ErrorCode",
     "PermissionPolicy",
+    "ReconcileHint",
     "Tool",
     "ToolExecution",
     "ToolExecutor",

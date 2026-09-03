@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
+from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 
 
@@ -47,6 +48,13 @@ class ReadTool(Tool):
     @property
     def permission(self) -> ToolPermission:
         return ToolPermission.READ_ONLY
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        return ReconcileHint(
+            verifiable=True,
+            suggested_action="重读目标路径，核对内容是否与预期一致（读操作无副作用，重读安全）。",
+        )
 
     async def execute(self, args: _ReadArgs) -> ToolResult:
         """调 sandbox.read_text；文件不存在或路径越界映射成失败 ToolResult。"""

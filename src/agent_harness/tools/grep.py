@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
+from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 
 
@@ -55,6 +56,13 @@ class GrepTool(Tool):
     @property
     def permission(self) -> ToolPermission:
         return ToolPermission.READ_ONLY
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        return ReconcileHint(
+            verifiable=True,
+            suggested_action="重新执行同样的正则搜索，核对匹配结果是否与预期一致（只读操作，重跑安全）。",
+        )
 
     async def execute(self, args: _GrepArgs) -> ToolResult:
         """re.compile → list_files → 逐文件逐行 search → 收集匹配。"""

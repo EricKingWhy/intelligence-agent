@@ -372,20 +372,22 @@ async def test_dangling_without_ledger_op_gets_phase1_placeholder(
 
 
 @pytest.mark.asyncio
-async def test_unknown_state_operation_left_untouched(tmp_path: Path) -> None:
-    """RUNNING/UNKNOWN 是 #30 的输入：#29 协调器不合成、不伪造结果。"""
+async def test_unresolved_operation_refused_without_callback(tmp_path: Path) -> None:
+    """RUNNING/UNKNOWN/NEED_RECONCILE 需要 #30 的人工裁决：无 callback 时
+    安全拒绝（不合成、不伪造结果、不写任何事件）。"""
     store = JsonlSessionStore(tmp_path / "sessions")
     crashed = _make_crashed_session(store)
     ledger = SqliteOperationLedger(tmp_path / "state.db")
     await ledger.initialize()
     await _seed_operation(ledger, "call-1", OperationState.RUNNING, crashed.session_id)
-    # RUNNING 是崩溃遗留态：手工把它置为 UNKNOWN 不可达（状态机限制），
-    # 这里就用 RUNNING 代表"未终止"边界。
+    events_before = store.read_events(crashed.session_id)
 
     coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
-    recovered = await coordinator.recover(crashed.session_id)
+    with pytest.raises(RecoveryError):
+        await coordinator.recover(crashed.session_id)
 
-    assert "call-1" not in _result_events(recovered)  # 不合成
+    # 拒绝即零写入：无 tool/result，也无 session/resumed。
+    assert store.read_events(crashed.session_id) == events_before
 
 
 @pytest.mark.asyncio
@@ -488,9 +490,10 @@ async def test_lock_timeout_raises_recovery_error(tmp_path: Path) -> None:
     await ledger.initialize()
     database_path = tmp_path / "state.db"
 
-    # 外部进程持有 EXCLUSIVE 写锁（模拟另一个恢复方）。
-    blocker = await aiosqlite.connect(database_path, timeout=1.0)
-    await blocker.execute("PRAGMA journal_mode=WAL")
+    # 外部进程持有恢复锁（sidecar 锁文件，与协调器抢同一把）。
+    blocker = await aiosqlite.connect(
+        str(database_path) + ".recovery-lock", timeout=1.0
+    )
     await blocker.execute("BEGIN EXCLUSIVE TRANSACTION")
 
     coordinator = _make_coordinator(store, ledger, database_path)

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
+from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 from agent_harness.tools._diff_data import diff_data
 
@@ -53,6 +54,16 @@ class EditTool(Tool):
     @property
     def side_effect(self) -> ToolSideEffect:
         return ToolSideEffect.MUTATING
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        return ReconcileHint(
+            verifiable=True,
+            suggested_action=(
+                "读取目标文件核对编辑是否已应用："
+                "含 new_string 说明已生效（确认成功），仍只有 old_string 说明未执行。"
+            ),
+        )
 
     async def execute(self, args: _EditArgs) -> ToolResult:
         """read_text → count → 替换或失败 → write_text。"""

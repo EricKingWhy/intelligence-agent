@@ -6,9 +6,12 @@ from agent_harness.recovery.coordinator import (
     RecoveryError,
     SkipPendingPolicy,
 )
+from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
 
 __all__ = [
     "PendingPolicy",
+    "ReconcileCallback",
+    "ReconcileVerdict",
     "RecoveryCoordinator",
     "RecoveryError",
     "SkipPendingPolicy",

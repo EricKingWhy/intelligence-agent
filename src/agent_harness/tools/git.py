@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
+from agent_harness.tooling.reconcile import ReconcileHint
 
 
 class _GitStatusArgs(BaseModel):
@@ -52,6 +53,13 @@ class GitStatusTool(Tool):
     @property
     def permission(self) -> ToolPermission:
         return ToolPermission.READ_ONLY
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        return ReconcileHint(
+            verifiable=True,
+            suggested_action="重新运行 git status，核对工作区状态是否与预期一致（只读查询，重跑安全）。",
+        )
 
     async def execute(self, args: _GitStatusArgs) -> ToolResult:
         """exec 硬编码 git status；ADR-0002：exit_code 非零仍 ok=True。"""
@@ -103,6 +111,13 @@ class GitDiffTool(Tool):
     @property
     def permission(self) -> ToolPermission:
         return ToolPermission.READ_ONLY
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        return ReconcileHint(
+            verifiable=True,
+            suggested_action="重新运行 git diff，核对变更内容是否与预期一致（只读查询，重跑安全）。",
+        )
 
     async def execute(self, args: _GitDiffArgs) -> ToolResult:
         """exec 硬编码 git diff；ADR-0002：exit_code 非零仍 ok=True。"""

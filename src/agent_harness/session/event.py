@@ -9,6 +9,7 @@ from uuid import uuid4
 
 # ── Event vocabulary V1（Phase 1 子集） ──
 # ── + Phase 9 流式信号（MODEL_STARTED / MODEL_DELTA） ──
+# ── + Phase 4 恢复信号（OPERATION_RECONCILE_REQUIRED） ──
 
 SESSION_STARTED = "session/started"
 SESSION_RESUMED = "session/resumed"
@@ -22,6 +23,7 @@ MODEL_COMPLETED = "model/completed"
 MODEL_FAILED = "model/failed"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
+OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
 
 EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -37,6 +39,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_FAILED,
         TOOL_CALL,
         TOOL_RESULT,
+        OPERATION_RECONCILE_REQUIRED,
     }
 )
 

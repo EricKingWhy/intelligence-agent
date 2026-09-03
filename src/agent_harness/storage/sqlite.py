@@ -51,6 +51,19 @@ _ALLOWED_TRANSITIONS: dict[OperationState, frozenset[OperationState]] = {
             OperationState.SUCCEEDED,
             OperationState.FAILED,
             OperationState.CANCELLED,
+            # 崩溃恢复语义（07 §4）：RUNNING 先进 UNKNOWN，不允许跳步直达
+            # NEED_RECONCILE——两步链由状态机强制（#30）。
+            OperationState.UNKNOWN,
+        }
+    ),
+    # UNKNOWN 只能进入待裁决态；终态必须经 ReconcileCallback 裁决后从
+    # NEED_RECONCILE 达成（#30：UNKNOWN 与 NEED_RECONCILE 始终询问用户）。
+    OperationState.UNKNOWN: frozenset({OperationState.NEED_RECONCILE}),
+    OperationState.NEED_RECONCILE: frozenset(
+        {
+            OperationState.SUCCEEDED,
+            OperationState.FAILED,
+            OperationState.CANCELLED,
         }
     ),
 }

@@ -34,7 +34,8 @@ class TestSessionEventDTO:
         assert event.source_event_ids is None
 
     def test_all_event_types_registered(self):
-        # Phase 1：10 种基础事件；Phase 9：+ model/started + model/delta（流式信号）。
+        # Phase 1：10 种基础事件；Phase 9：+ model/started + model/delta（流式信号）；
+        # Phase 4：+ operation/reconcile-required（UNKNOWN Operation 人工裁决信号，#30）。
         expected = {
             "session/started",
             "session/resumed",
@@ -48,6 +49,7 @@ class TestSessionEventDTO:
             "model/failed",
             "tool/call",
             "tool/result",
+            "operation/reconcile-required",
         }
         assert EVENT_TYPES == expected
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
+from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 
 
@@ -49,6 +50,13 @@ class GlobTool(Tool):
     @property
     def permission(self) -> ToolPermission:
         return ToolPermission.READ_ONLY
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        return ReconcileHint(
+            verifiable=True,
+            suggested_action="重新执行同样的 glob 匹配，核对结果是否与预期一致（只读操作，重跑安全）。",
+        )
 
     async def execute(self, args: _GlobArgs) -> ToolResult:
         """调 sandbox.list_files(pattern) → 截断到 max_results。"""

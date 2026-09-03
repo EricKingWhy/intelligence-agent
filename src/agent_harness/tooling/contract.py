@@ -20,6 +20,7 @@ from enum import Enum
 
 from pydantic import BaseModel
 
+from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ToolResult
 
 
@@ -125,6 +126,17 @@ class Tool(ABC):
         permission 驱动授权关卡（ToolExecutor 的 approval gate）。
         """
         return ToolPermission.WORKSPACE_WRITE
+
+    @property
+    def reconcile_hint(self) -> ReconcileHint:
+        """崩溃恢复时的可验证性提示。默认 unverifiable（安全默认即 NEED_RECONCILE）。
+
+        hint 只是给 ReconcileCallback 的建议数据——Runtime 永不据此自动验证
+        或自动重跑（不变量 #14）。副作用可事后核验的工具（read/write/edit/
+        glob/grep/git_status/git_diff）覆写；bash 保持默认（各命令副作用彼此
+        不同，不允许统一假装可验证）。
+        """
+        return ReconcileHint(verifiable=False)
 
     def args_identity(self, args: dict[str, object]) -> str:
         """Return the stable identity persisted for one Operation's arguments."""
