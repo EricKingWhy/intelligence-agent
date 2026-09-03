@@ -58,6 +58,28 @@ class _OrderingTool(Tool):
         return ToolResult.success("done")
 
 
+class _LegacyOrderingTool(Tool):
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self.event_types_during_execute: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "legacy_order"
+
+    @property
+    def description(self) -> str:
+        return "Observe event ordering without durable Operation tracking."
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _NoArgs
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        self.event_types_during_execute = [event.type for event in self._session.events]
+        return ToolResult.success("done")
+
+
 @pytest.mark.asyncio
 async def test_runtime_persists_ledger_before_tool_conversation_events(
     tmp_path: Path,
@@ -95,3 +117,29 @@ async def test_runtime_persists_ledger_before_tool_conversation_events(
     event_types = [event.type for event in session.events]
     first_model = event_types.index(MODEL_COMPLETED)
     assert first_model < event_types.index(TOOL_CALL) < event_types.index(TOOL_RESULT)
+
+
+@pytest.mark.asyncio
+async def test_runtime_preserves_eager_events_without_operation_ledger(
+    tmp_path: Path,
+) -> None:
+    session = Session.start(JsonlSessionStore(tmp_path / "sessions"))
+    tool = _LegacyOrderingTool(session)
+    registry = ToolRegistry()
+    registry.register(tool)
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "call-legacy", "name": "legacy_order", "args": {}}
+                ],
+            ),
+            AIMessage(content="complete"),
+        ]
+    )
+    runtime = AgentRuntime(model, registry, ToolExecutor(registry))
+
+    await runtime.run(session, "run the tool")
+
+    assert MODEL_COMPLETED in tool.event_types_during_execute

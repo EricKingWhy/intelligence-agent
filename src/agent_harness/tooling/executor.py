@@ -118,6 +118,11 @@ class ToolExecutor:
         self._approval_callback = approval_callback
         self._operation_ledger = operation_ledger
 
+    @property
+    def tracks_operations(self) -> bool:
+        """Whether this Executor enforces the durable Operation lifecycle."""
+        return self._operation_ledger is not None
+
     async def execute(
         self,
         tool_call: dict[str, Any],
