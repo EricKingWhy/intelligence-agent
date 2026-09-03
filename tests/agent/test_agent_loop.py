@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
+from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
 TOOL_CALL_ID = "call_agent_0001"
@@ -102,12 +103,12 @@ def _scripted_no_tool() -> ScriptedModel:
 
 class TestAgentLoopNoTool:
     @pytest.mark.asyncio
-    async def test_completes_in_one_step(self):
+    async def test_completes_in_one_step(self, tmp_path):
         """A：无工具 -> completed + steps=1 + 模型只被调用 1 次。"""
         scripted = _scripted_no_tool()
         runtime = _runtime(scripted)
 
-        result = await runtime.run("你好")
+        result = await runtime.run(make_session(tmp_path), "你好")
 
 
         # 1. status 必须是 completed
@@ -140,12 +141,12 @@ def _scripted_one_tool() -> ScriptedModel:
 
 class TestAgentLoopOneTool:
     @pytest.mark.asyncio
-    async def test_two_steps_and_completed(self):
+    async def test_two_steps_and_completed(self, tmp_path):
         """B：一次工具往返 -> completed + steps=2 + 模型被调用 2 次。"""
         scripted = _scripted_one_tool()
         runtime = _runtime(scripted)
 
-        result = await runtime.run("计算 123 + 456")
+        result = await runtime.run(make_session(tmp_path), "计算 123 + 456")
 
 
         # 1. status == completed
@@ -158,14 +159,14 @@ class TestAgentLoopOneTool:
         assert len(scripted.snapshots) == 2
 
     @pytest.mark.asyncio
-    async def test_second_round_message_order_and_id_pairing(self):
+    async def test_second_round_message_order_and_id_pairing(self, tmp_path):
         """第二轮发给模型的消息链顺序 + tool_call_id 配对。
 
         协议不变量：ToolMessage 的 tool_call_id 必须与 AIMessage 里的 tool_call id 一致。
         """
         scripted = _scripted_one_tool()
         runtime = _runtime(scripted)
-        await runtime.run("计算 123 + 456")
+        await runtime.run(make_session(tmp_path), "计算 123 + 456")
 
         second_round = scripted.snapshots[1].messages
 
@@ -212,12 +213,12 @@ def _scripted_two_tool_rounds() -> ScriptedModel:
 
 class TestAgentLoopTwoConsecutiveToolRounds:
     @pytest.mark.asyncio
-    async def test_three_steps_completed_and_snapshot_count(self):
+    async def test_three_steps_completed_and_snapshot_count(self, tmp_path):
         """连续两轮工具 -> completed + steps=3 + 模型被调用恰好 3 次。"""
         scripted = _scripted_two_tool_rounds()
         runtime = _runtime(scripted)
 
-        result = await runtime.run("连续算两笔")
+        result = await runtime.run(make_session(tmp_path), "连续算两笔")
 
         assert result.status == STATUS_COMPLETED
         assert result.steps == 3
@@ -225,7 +226,7 @@ class TestAgentLoopTwoConsecutiveToolRounds:
         assert result.final_text == "第一笔 3，第二笔 7"
 
     @pytest.mark.asyncio
-    async def test_third_round_full_message_trace_and_id_pairing(self):
+    async def test_third_round_full_message_trace_and_id_pairing(self, tmp_path):
         """第三轮发给模型的完整消息链（5 条）+ 两组 id 配对。
 
         协议不变量：两轮工具调用的请求与回填都累积进历史，各自的 tool_call_id
@@ -233,7 +234,7 @@ class TestAgentLoopTwoConsecutiveToolRounds:
         """
         scripted = _scripted_two_tool_rounds()
         runtime = _runtime(scripted)
-        await runtime.run("连续算两笔")
+        await runtime.run(make_session(tmp_path), "连续算两笔")
 
         third_round = scripted.snapshots[2].messages
 
@@ -259,7 +260,7 @@ TOOL_CALL_ID_LOOP = "call_loop"
 
 class TestAgentLoopMaxSteps:
     @pytest.mark.asyncio
-    async def test_max_steps_exceeded_with_exact_step_count(self):
+    async def test_max_steps_exceeded_with_exact_step_count(self, tmp_path):
         """模型不收敛 + max_steps=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。"""
         rounds = [
             AIMessage(
@@ -278,7 +279,7 @@ class TestAgentLoopMaxSteps:
         scripted = ScriptedModel(rounds)
         runtime = _runtime(scripted, max_steps=3)
 
-        result = await runtime.run("永远算不完")
+        result = await runtime.run(make_session(tmp_path), "永远算不完")
 
         assert result.status == STATUS_MAX_STEPS_EXCEEDED
         assert result.final_text == ""
@@ -286,7 +287,7 @@ class TestAgentLoopMaxSteps:
         assert len(scripted.snapshots) == 3
 
     @pytest.mark.asyncio
-    async def test_convergence_on_last_step_is_completed_not_exceeded(self):
+    async def test_convergence_on_last_step_is_completed_not_exceeded(self, tmp_path):
         """回归：模型恰好在第 max_steps 轮收敛（无 tool_calls）-> completed 而非 max_steps_exceeded。
 
         停止信号（无 tool_calls）必须先于 max_steps 兜底判定，
@@ -309,7 +310,7 @@ class TestAgentLoopMaxSteps:
         scripted = ScriptedModel(rounds)
         runtime = _runtime(scripted, max_steps=3)
 
-        result = await runtime.run("最后一步收敛")
+        result = await runtime.run(make_session(tmp_path), "最后一步收敛")
 
         assert result.status == STATUS_COMPLETED
         assert result.final_text == "总算算完了"
@@ -324,7 +325,7 @@ class TestAgentLoopUnknownTool:
     """未知工具名：模型提议了 tools 里不存在的工具，必须回填错误而不是崩溃。"""
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_backfills_error_not_crash(self):
+    async def test_unknown_tool_backfills_error_not_crash(self, tmp_path):
         """模型调 multiply（不存在）-> 不抛异常 -> 错误以 ToolMessage 回填 -> 模型最终回答。"""
         round1 = AIMessage(
             content="",
@@ -339,7 +340,7 @@ class TestAgentLoopUnknownTool:
         scripted = ScriptedModel([round1, round2])
         runtime = _runtime(scripted)  # tools 里只有 add
 
-        result = await runtime.run("计算 3 乘 4")
+        result = await runtime.run(make_session(tmp_path), "计算 3 乘 4")
 
         # 不崩 + 正常完成（模型看到错误后自我纠错给了最终回答）
         assert result.status == STATUS_COMPLETED
@@ -361,7 +362,7 @@ class TestAgentLoopToolException:
     """工具内部异常：工具存在但执行时炸了，同样回填错误而不是崩溃。"""
 
     @pytest.mark.asyncio
-    async def test_tool_exception_backfills_error_not_crash(self):
+    async def test_tool_exception_backfills_error_not_crash(self, tmp_path):
         """模型调 boom -> boom 抛 ValueError -> Executor 映射 TOOL_EXECUTION_ERROR 回填 -> 模型给最终回答。"""
 
         round1 = AIMessage(
@@ -377,7 +378,7 @@ class TestAgentLoopToolException:
         scripted = ScriptedModel([round1, round2])
         runtime = _runtime(scripted)  # registry 已注册 add + boom
 
-        result = await runtime.run("触发爆炸")
+        result = await runtime.run(make_session(tmp_path), "触发爆炸")
 
         assert result.status == STATUS_COMPLETED
         assert result.steps == 2
@@ -395,7 +396,7 @@ class TestAgentLoopEmptyContentWithToolCalls:
     """空 content + tool_calls：content 为空但模型在要工具，绝不能误停。"""
 
     @pytest.mark.asyncio
-    async def test_empty_content_does_not_stop_loop(self):
+    async def test_empty_content_does_not_stop_loop(self, tmp_path):
         """第一轮 content='' 且带 tool_call -> 必须继续执行工具 -> 第二轮完成。
 
         锁死停止信号：content 空不空从来不是停止信号，tool_calls 空不空才是。
@@ -414,7 +415,7 @@ class TestAgentLoopEmptyContentWithToolCalls:
         scripted = ScriptedModel([round1, round2])
         runtime = _runtime(scripted)
 
-        result = await runtime.run("计算 2 + 3")
+        result = await runtime.run(make_session(tmp_path), "计算 2 + 3")
 
         # 关键断言：模型被调用了 2 次（没有在第 1 轮误停）
         assert result.status == STATUS_COMPLETED

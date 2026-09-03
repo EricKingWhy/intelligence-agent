@@ -28,6 +28,7 @@ from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tools import BashTool, ReadTool, WriteTool
+from tests.conftest import make_session
 
 #: 从 .env 读 API key——存在才跑集成测试，否则 skipif。
 _settings = Settings()
@@ -64,6 +65,7 @@ class TestAgentCodingIntegration:
         runtime = _make_runtime(tmp_path)
 
         result = await runtime.run(
+            make_session(tmp_path),
             "请在 workspace 里创建一个文件 hello.txt，内容写 'Hello from Agent'，"
             "然后读取它确认内容，最后告诉我你写了什么。"
         )
@@ -80,6 +82,7 @@ class TestAgentCodingIntegration:
         runtime = _make_runtime(tmp_path)
 
         result = await runtime.run(
+            make_session(tmp_path),
             "请在 workspace 里用 bash 执行 'echo 42'，然后告诉我输出结果是什么数字。"
         )
 
@@ -95,6 +98,7 @@ class TestAgentCodingIntegration:
         runtime = _make_runtime(tmp_path)
 
         result = await runtime.run(
+            make_session(tmp_path),
             "请在 workspace 里写一个 pytest 测试文件 test_sample.py，"
             "里面有一个 assert 1 == 2 的测试（故意会失败的）。"
             "然后用 bash 跑 'pip install pytest -q 2>nul & pytest -q test_sample.py'，"
