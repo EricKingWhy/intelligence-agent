@@ -40,7 +40,14 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
-from agent_harness.tooling.contract import Tool, ToolSideEffect
+from agent_harness.tooling.approval import (
+    ApprovalCallback,
+    ApprovalRequest,
+    ApprovalResponse,
+    approval_reason,
+    needs_approval,
+)
+from agent_harness.tooling.contract import PermissionPolicy, Tool, ToolSideEffect
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
@@ -90,8 +97,16 @@ class ToolExecutor:
     是否重试只看 ToolResult.retryable 位，上限 MAX_ATTEMPTS。
     """
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        *,
+        policy: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
+        approval_callback: ApprovalCallback | None = None,
+    ) -> None:
         self._registry = registry
+        self._policy = policy
+        self._approval_callback = approval_callback
 
     async def execute(self, tool_call: dict[str, Any]) -> ToolExecution:
         """跑完一条 tool_call，返回 ToolExecution（成功或失败，绝不抛异常给上层）。
@@ -146,6 +161,13 @@ class ToolExecutor:
                     retryable=False,  # 参数错是确定性的，重试也是同样的错
                 ),
             )
+
+        # -- 阶段 2.5：approval gate -- 05_SANDBOX_CODING_TOOLS.md §6 的 REQUIRE_APPROVAL。
+        # 在 validate 之后、execute 之前：参数已合法，但授权关卡决定是否能跑。
+        # per-call scoping 由设计保证：每次 execute 独立检查，不存储"已批准"状态。
+        denied = self._check_approval(tool_call_id, name, tool, raw_args)
+        if denied is not None:
+            return denied
 
         # -- 阶段 3：execute + Timeout 边界 + 唯一 Retry Layer（Task 3）--
         # 三阶段顺序不变；Timeout/Retry 只包住 tool.execute 这一步。
@@ -214,6 +236,60 @@ class ToolExecutor:
 
         # 全部扫完没命中 MUTATING → 全 READ_ONLY → 并发。
         return "parallel"
+
+    def _check_approval(
+        self,
+        tool_call_id: str,
+        name: str,
+        tool: Tool,
+        raw_args: dict[str, Any],
+    ) -> ToolExecution | None:
+        """阶段 2.5：审批关卡。返回 None 表示放行，返回 ToolExecution 表示拒绝。
+
+        逻辑（05_SANDBOX_CODING_TOOLS.md §6）：
+        - DANGER_FULL_ACCESS → 放行。
+        - tool.permission 级别在 policy 允许范围内 → 放行。
+        - 超级别或 DANGER 在受限 policy 下 → 需要 approval：
+          - 无 callback → PERMISSION_DENIED（安全默认）。
+          - 有 callback → 调 callback；approved → 放行；denied → PERMISSION_DENIED。
+        """
+        tool_perm = tool.permission
+        if not needs_approval(tool_perm, self._policy):
+            return None
+
+        reason = approval_reason(tool_perm, self._policy)
+        request = ApprovalRequest(
+            tool_name=name,
+            args=raw_args,
+            permission=tool_perm,
+            policy=self._policy,
+            reason=reason,
+        )
+
+        if self._approval_callback is None:
+            # 安全默认值：无审批回调 → 拒绝。绝不静默放行高风险操作。
+            return ToolExecution(
+                tool_call_id=tool_call_id,
+                result=ToolResult.failure(
+                    message=f"工具 '{name}' 需要审批但未配置审批回调，已被拒绝。{reason}",
+                    error_code=ErrorCode.PERMISSION_DENIED,
+                    retryable=False,
+                ),
+            )
+
+        response: ApprovalResponse = self._approval_callback(request)
+        if response.approved:
+            # per-call scoping：批准只对这次 execute 生效，不存状态。
+            return None
+
+        return ToolExecution(
+            tool_call_id=tool_call_id,
+            result=ToolResult.failure(
+                message=f"工具 '{name}' 的执行请求已被拒绝。{response.reason or reason}",
+                error_code=ErrorCode.PERMISSION_DENIED,
+                retryable=False,
+            ),
+        )
 
     async def _execute_with_retry(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel

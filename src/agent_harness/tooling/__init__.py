@@ -8,6 +8,11 @@ Day4 Task 2 加入单次执行链（Executor，Validation-first）。
 Timeout / Retry / 批次调度是后续 Task。
 """
 
+from agent_harness.tooling.approval import (
+    ApprovalCallback,
+    ApprovalRequest,
+    ApprovalResponse,
+)
 from agent_harness.tooling.contract import (
     PermissionPolicy,
     Tool,
@@ -19,6 +24,9 @@ from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
 __all__ = [
+    "ApprovalCallback",
+    "ApprovalRequest",
+    "ApprovalResponse",
     "ErrorCode",
     "PermissionPolicy",
     "Tool",

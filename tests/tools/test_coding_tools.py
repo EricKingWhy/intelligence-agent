@@ -53,7 +53,11 @@ def registry(sandbox: LocalSubprocessSandbox) -> ToolRegistry:
 
 @pytest.fixture
 def executor(registry: ToolRegistry) -> ToolExecutor:
-    return ToolExecutor(registry)
+    """DANGER_FULL_ACCESS：这些测试验证工具执行行为，不是审批逻辑。
+    审批关卡在 tests/tooling/test_approval_gate.py 单独覆盖。"""
+    from agent_harness.tooling import PermissionPolicy
+
+    return ToolExecutor(registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
 
 
 def _tool_call(name: str, args: dict, call_id: str = "test_call") -> dict:
@@ -286,7 +290,10 @@ def full_registry(sandbox: LocalSubprocessSandbox) -> ToolRegistry:
 
 @pytest.fixture
 def full_executor(full_registry: ToolRegistry) -> ToolExecutor:
-    return ToolExecutor(full_registry)
+    """DANGER_FULL_ACCESS：批次调度测试验证并发/串行行为，不是审批逻辑。"""
+    from agent_harness.tooling import PermissionPolicy
+
+    return ToolExecutor(full_registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
 
 
 class TestNewToolBatchScheduling:
