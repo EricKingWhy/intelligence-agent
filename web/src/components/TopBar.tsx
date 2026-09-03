@@ -1,7 +1,7 @@
 /** TopBar — liquid glass chrome with app name, session meta, status. */
 
 import { Activity, Moon, Sun } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface Props {
   sessionMeta?: { session_id: string; turn_count: number };
@@ -14,6 +14,21 @@ export function TopBar({ sessionMeta, streaming }: Props) {
   const [theme, setTheme] = useState<'dark' | 'light'>(() =>
     window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark',
   );
+
+  // 流式计时（借鉴 ZCode 的"工作中 N 秒"）：进行中状态用真实秒数表达，而非空泛 spinner。
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!streaming) {
+      setElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(
+      () => setElapsedSec(Math.floor((Date.now() - startedAt) / 1000)),
+      1000,
+    );
+    return () => clearInterval(timer);
+  }, [streaming]);
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
@@ -31,6 +46,7 @@ export function TopBar({ sessionMeta, streaming }: Props) {
         {streaming && (
           <span className="status-pill status-running">
             <span className="status-dot" /> 流式传输中
+            {elapsedSec > 0 && <span className="num"> · {elapsedSec}s</span>}
           </span>
         )}
         {sessionMeta && !streaming && (

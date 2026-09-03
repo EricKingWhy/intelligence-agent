@@ -16,6 +16,11 @@ export interface AgentEvent {
   seq: number | null;
   run_id: string | null;
   step_id: number | null;
+  /** Durable-event timestamp (SessionEvent.time, present on GET /events history).
+   *  SSE frames don't carry it yet — projection falls back to client clock. */
+  time?: string;
+  /** Present on historical events read from the store. */
+  event_id?: string;
   /** Present on SSE-streamed events (injected by POST /api/sessions endpoint).
    *  Absent on historical events read from the store (session_id is known from the URL). */
   session_id?: string;

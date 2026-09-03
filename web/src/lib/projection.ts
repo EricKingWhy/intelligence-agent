@@ -93,7 +93,8 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
           name: String(data.tool_name ?? 'unknown'),
           args: (data.args as Record<string, unknown>) ?? {},
           status: 'running',
-          started_at: new Date().toISOString(),
+          // 事件真值时间优先（历史事件带 time）；SSE 帧无 time 时回退客户端时钟
+          started_at: event.time ?? new Date().toISOString(),
         });
       }
       break;
@@ -126,7 +127,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
             truncated: parsedData.truncated === true,
           };
         }
-        tool.completed_at = new Date().toISOString();
+        tool.completed_at = event.time ?? new Date().toISOString();
       }
       break;
     }
