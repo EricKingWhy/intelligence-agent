@@ -95,7 +95,7 @@ class WorkspaceRegistry:
     def _build_mapping(self, session_id: str) -> dict:
         """构造新 session 的映射字典。"""
         workspace_root = self._workspaces_dir / session_id
-        return {
+        mapping = {
             "session_id": session_id,
             "backend": self._backend,
             "workspace_root": str(workspace_root),
@@ -103,6 +103,11 @@ class WorkspaceRegistry:
             "volume_name": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if self._backend == "docker":
+            # 确定性命名：基于 session_id，进程重启后能按名字找回容器/volume。
+            mapping["container_name"] = f"agent-harness-{session_id}"
+            mapping["volume_name"] = f"agent-harness-{session_id}"
+        return mapping
 
     def _instantiate_sandbox(self, mapping: dict) -> Sandbox:
         """根据映射字典重建 Sandbox 实例。"""
@@ -113,8 +118,6 @@ class WorkspaceRegistry:
             return LocalSubprocessSandbox(workspace_root=workspace_root)
 
         if backend == "docker":
-            # Ticket D 实现 Docker 后端时填充此分支。
-            # 目前 DockerSandbox 需要确定性命名，由 Ticket D 接入。
             from agent_harness.sandbox.docker import DockerSandbox
 
             container_name = mapping.get("container_name") or None

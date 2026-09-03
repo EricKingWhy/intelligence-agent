@@ -61,6 +61,18 @@ class DockerSandbox(Sandbox):
             self._container.start()
             return
 
+        # 跨进程恢复：按确定性 container_name 查找已存在的容器。
+        # 进程重启后 self._container 为 None，但容器可能还在（停止状态）。
+        # 如果找到，重启它；找不到才创建新容器。
+        try:
+            existing = self._client.containers.get(self._container_name)
+            if existing.status != "running":
+                existing.start()
+            self._container = existing
+            return
+        except Exception:  # noqa: BLE001 — 容器不存在是正常情况，继续创建
+            pass
+
         self._container = self._client.containers.run(
             self._image,
             ["sleep", "infinity"],
