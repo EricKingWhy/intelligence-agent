@@ -14,11 +14,11 @@ from agent_harness.capability.base import (
 
 
 def _descriptor(**overrides) -> CapabilityDescriptor:
-    fields = dict(
-        name="memory", version="1.0.0", provider_name="langmem",
-        capabilities=["store", "search"], risk="low",
-        degradation=Degradation.OPTIONAL_RUNTIME,
-    )
+    fields = {
+        "name": "memory", "version": "1.0.0", "provider_name": "langmem",
+        "capabilities": ["store", "search"], "risk": "low",
+        "degradation": Degradation.OPTIONAL_RUNTIME,
+    }
     fields.update(overrides)
     return CapabilityDescriptor(**fields)
 
