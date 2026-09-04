@@ -6,6 +6,8 @@
 
 实施备注（#51）：IdentityContext 接受 scopes 列表，构造时复制为不可变 tuple，避免 contextvar 子任务修改共享权限。JWT 复用 PyJWT（MIT），固定 HS256；未配置 jwt_secret 时不信任 Bearer 声明，使用 local 身份。
 
+用户补充批准：SESSION namespace 追加可信 session_id（ADR-0009 补充），USER 保持四段。#56 使用专用 memory_gate_test Collection；需验证真实认证、CRUD、检索语义/隔离、删除与清理，并通过正式 Provider 路径执行。数据库沿用 default，不额外加 database 配置。
+
 | # | 决策 | 选定 |
 |---|---|---|
 | Q1 | V1 交付边界 | **B** 最小闭环：store/recall/search + USER/SESSION scope + ContextProvider + degrade |

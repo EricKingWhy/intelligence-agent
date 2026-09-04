@@ -64,6 +64,13 @@ class MemoryScope(str, Enum):
 
 V1 只实现 USER + SESSION，其余留枚举不实现。
 
+### SESSION 隔离补充（用户批准，2026-09-04）
+
+USER 沿用四段 namespace；SESSION 在末尾追加可信 `session_id`：
+`("memories", tenant_id, user_id, "session", session_id)`。
+独立 contextvar 由运行入口绑定，模型和请求 body 的 memory metadata 不能选择会话。
+未绑定会话时拒绝 SESSION 操作，不能退回用户级共享。SQLite 与 Milvus 同样校验会话。
+
 ### 子决策 3：Milvus partition key（官方推荐多租户方案）
 
 研究发现 Milvus 有四种隔离级别（Database / Collection / Partition / Partition key）。

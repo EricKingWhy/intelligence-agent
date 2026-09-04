@@ -215,7 +215,7 @@ Memory 能力的上下文注入层，实现 Phase 5 已定义的 `ContextProvide
 _Avoid_: memory injector, context memory hook
 
 **MemoryScope**:
-记忆的归属层级，对外是 5 值枚举（`GLOBAL` / `TENANT` / `USER` / `SESSION` / `AGENT`），对内映射成 namespace tuple（对齐 LangMem namespace + Milvus partition key）。V1 只实现 `USER`（跨 session 记住用户偏好）+ `SESSION`（session 内临时记忆），其余留枚举不实现。检索默认只查当前用户的数据（由 IdentityContext 约束）。
+记忆的归属层级，对外是 5 值枚举（`GLOBAL` / `TENANT` / `USER` / `SESSION` / `AGENT`），对内映射成 namespace tuple（对齐 LangMem namespace + Milvus partition key）。V1 只实现 `USER`（跨 session 记住用户偏好）+ `SESSION`（session 内临时记忆），其余留枚举不实现。SESSION 的内部 namespace 追加由可信运行入口绑定的 session_id；未绑定时拒绝访问。检索默认只查当前用户的数据（由 IdentityContext 约束）。
 _Avoid_: memory level, memory tier, memory namespace（namespace 是内部编码，不是用户面词汇）
 
 **MemoryEntry**:
