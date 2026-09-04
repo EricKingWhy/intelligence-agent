@@ -1,4 +1,4 @@
-"""ContextBuilder 保持完整事件投影，不提前执行 Compaction。"""
+"""ContextBuilder 在预算内保持完整事件投影。"""
 
 import logging
 
@@ -21,8 +21,7 @@ async def test_build_preserves_tool_pairs_and_persistent_history(tmp_path, caplo
     session.append(TOOL_RESULT, {"tool_call_id": "read-1", "content": "文件内容"})
     before = session.events
     model = ScriptedModel([])
-    # 极小预算仍应原样投影：硬限制由 #49 引入。
-    builder = ContextBuilder(model, max_context_tokens=1)
+    builder = ContextBuilder(model)
 
     with caplog.at_level(logging.DEBUG, logger="agent_harness.context"):
         messages = await builder.build(session)

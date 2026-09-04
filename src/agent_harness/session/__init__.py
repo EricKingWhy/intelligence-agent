@@ -10,6 +10,7 @@ from agent_harness.session.derive import (
 )
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
+    CONTEXT_COMPACTED,
     EVENT_TYPES,
     MODEL_COMPLETED,
     MODEL_DELTA,
@@ -31,6 +32,7 @@ from agent_harness.session.store import JsonlSessionStore
 
 __all__ = [
     "ARTIFACT_CREATED",
+    "CONTEXT_COMPACTED",
     "DANGLING_TOOL_CONTENT",
     "EVENT_TYPES",
     "MODEL_COMPLETED",

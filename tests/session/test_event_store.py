@@ -52,6 +52,7 @@ class TestSessionEventDTO:
             "tool/result",
             "operation/reconcile-required",
             "artifact/created",
+            "context/compacted",
         }
         assert EVENT_TYPES == expected
 
