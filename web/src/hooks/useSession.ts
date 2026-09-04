@@ -25,6 +25,28 @@ import { listSessions, getSessionEvents, startSession, type StartSessionPayload 
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
+/** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
+ *
+ * SSE 流在 submitTask 时开启，回调闭包持有当时的 conv。若用户在流结束前
+ * cancel / 切换会话 / 触发 error，mode 迁移到 viewing/idle，但 SSE 在途帧
+ * 仍可能晚于这次 mode 变更到达——回调再写 conversation 就会用旧流残留
+ * 覆盖刚加载的目标会话视图。
+ *
+ * 守护：每帧应用前先问「当前模式是否仍是这条流的权威消费者」。提取为
+ * 纯函数是为了锁不变量——React 状态机本身的回归需 testing-library，
+ * 引入它会扩大 scope；这一层契约纯函数就能锁住。 */
+export function shouldApplyStreamFrame(mode: SessionMode, event: AgentEvent): boolean {
+  // 离开 live 即丧失权威——viewing 由持久事件源重建，idle 无会话。
+  if (mode.kind !== 'live') return false;
+  // 首帧尚未确定 sid（sessionId === null）：任意帧都接受。
+  if (mode.sessionId === null) return true;
+  // 帧未带 sid（理论只会在首帧前出现）：宽容接受，避免误丢首帧。
+  const eventSid = event.session_id ?? null;
+  if (eventSid === null) return true;
+  // sid 不匹配——旧流迟到帧窜入新会话，明确拒绝。
+  return mode.sessionId === eventSid;
+}
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
@@ -38,6 +60,12 @@ export function useSession() {
   const sseRef = useRef<SSEHandle | null>(null);
   // live 流中已知的首帧 sid——结束/出错/取消时决定迁移目标。
   const liveSidRef = useRef<string | null>(null);
+  // mode 的实时镜像——SSE 回调闭包在 submitTask 时定型，读到的 mode 是
+  // 提交瞬间快照而非当前真相。镜像让每帧应用前能问「当前模式是否仍是
+  // 这条流的权威消费者」（不变量 #22），从而拒绝 cancel / selectSession
+  // 之后才到达的迟到帧。
+  const modeRef = useRef<SessionMode>(mode);
+  modeRef.current = mode;
 
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
@@ -130,6 +158,9 @@ export function useSession() {
         const handle = consumeSSE(
           res,
           (event: AgentEvent) => {
+            // 不变量 #22 守护：cancel / selectSession / error 之后才到达的
+            // 在途帧不再具有权威——若放行会用旧流残留覆盖刚加载的目标视图。
+            if (!shouldApplyStreamFrame(modeRef.current, event)) return;
             const sid = event.session_id ?? null;
             if (sid) {
               liveSidRef.current = sid;
