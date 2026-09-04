@@ -2,10 +2,12 @@
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import aiosqlite
 
 from agent_harness.identity import IdentityContext
+from agent_harness.memory.record_store import PendingMemory
 from agent_harness.memory.types import MemoryEntry, MemoryScope, scope_to_namespace
 
 
@@ -27,7 +29,7 @@ class SqliteMemoryRecordStore:
                 CREATE INDEX IF NOT EXISTS memory_owner
                     ON memory_records(tenant_id, user_id, scope);
                 CREATE TABLE IF NOT EXISTS memory_outbox (
-                    memory_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 1
+                    memory_id TEXT PRIMARY KEY, revision TEXT NOT NULL
                 );
             """)
             await db.commit()
@@ -47,9 +49,9 @@ class SqliteMemoryRecordStore:
             """, (entry.id, identity.tenant_id, identity.user_id, entry.scope.value, namespace,
                   entry.content, json.dumps(entry.metadata, ensure_ascii=False), entry.created_at))
             await db.execute("""
-                INSERT INTO memory_outbox(memory_id) VALUES (?)
-                ON CONFLICT(memory_id) DO UPDATE SET revision=revision+1
-            """, (entry.id,))
+                INSERT INTO memory_outbox(memory_id, revision) VALUES (?, ?)
+                ON CONFLICT(memory_id) DO UPDATE SET revision=excluded.revision
+            """, (entry.id, str(uuid4())))
             await db.commit()
         return entry.id
 
@@ -82,3 +84,29 @@ class SqliteMemoryRecordStore:
     def _entry(row: aiosqlite.Row) -> MemoryEntry:
         return MemoryEntry(id=row["memory_id"], content=row["content"], metadata=json.loads(row["metadata"]),
                            created_at=row["created_at"], scope=row["scope"], indexed=bool(row["indexed"]))
+
+    async def pending(self, limit: int = 100, after_id: str = "") -> list[PendingMemory]:
+        """仅 relay 调用的系统级 outbox 读取，不暴露给模型/请求。"""
+        async with aiosqlite.connect(self.database_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT r.*, o.revision FROM memory_records r JOIN memory_outbox o
+                    ON r.memory_id=o.memory_id WHERE r.memory_id > ? ORDER BY r.memory_id LIMIT ?
+            """, (after_id, max(0, limit))) as cursor:
+                rows = await cursor.fetchall()
+        return [PendingMemory(self._entry(row),
+                              IdentityContext(row["tenant_id"], row["user_id"], [row["scope"]]),
+                              json.loads(row["namespace"])[4] if row["scope"] == "session" else None,
+                              str(row["revision"])) for row in rows]
+
+    async def acknowledge(self, change: PendingMemory) -> bool:
+        async with aiosqlite.connect(self.database_path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute("DELETE FROM memory_outbox WHERE memory_id=? AND revision=?",
+                                      (change.entry.id, change.revision))
+            matched = cursor.rowcount == 1
+            if matched:
+                await db.execute("UPDATE memory_records SET indexed=TRUE WHERE memory_id=?",
+                                 (change.entry.id,))
+            await db.commit()
+        return matched

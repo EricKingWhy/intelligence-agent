@@ -2,6 +2,7 @@
 
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 
 from agent_harness.identity import IdentityContext
 from agent_harness.memory.fake_record_store import FakeMemoryRecordStore
@@ -25,6 +26,11 @@ async def store(request, tmp_path):
 def entry(memory_id="m1"):
     return MemoryEntry(id=memory_id, content="I prefer TypeScript", metadata={"importance": 0.8},
                        created_at="2026-09-04T00:00:00+00:00", scope=MemoryScope.USER)
+
+
+def test_memory_id_cannot_be_empty():
+    with pytest.raises(ValidationError):
+        entry("")
 
 
 @pytest.mark.asyncio

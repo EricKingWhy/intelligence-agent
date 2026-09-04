@@ -19,7 +19,7 @@ class MemoryScope(str, Enum):
 
 
 class MemoryEntry(BaseModel):
-    id: str
+    id: str = Field(min_length=1)
     content: str
     metadata: dict = Field(default_factory=dict)
     score: float | None = None

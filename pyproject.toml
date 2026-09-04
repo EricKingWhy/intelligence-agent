@@ -25,6 +25,9 @@ agent-harness = "agent_harness.cli:main"
 
 [project.optional-dependencies]
 artifact = ["aioboto3>=13.0"]
+memory = [
+    "pymilvus>=2.6,<2.7",
+]
 
 [tool.uv.build-backend]
 module-name = "agent_harness"

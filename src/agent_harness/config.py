@@ -1,5 +1,6 @@
 """全局运行配置：只定义"运行需要什么"，从 .env 读取。"""
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -13,6 +14,9 @@ class Settings(BaseSettings):
 
     temperature: float = 0.2
     jwt_secret: str | None = None
+    milvus_uri: str = ""
+    milvus_token: SecretStr = SecretStr("")
+    milvus_collection: str = ""
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70

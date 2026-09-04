@@ -297,3 +297,13 @@ HTTP 请求
 - 规格 `06_CONTEXT_ARTIFACT_MEMORY.md` §6-§9
 - 复用矩阵 `13_OPEN_SOURCE_REUSE_MATRIX.md`（LangMem = REUSE+ADAPT）
 - Roadmap `14_IMPLEMENTATION_ROADMAP.md` Phase 6 Gate
+
+## #53 实施证据
+
+正式配置仅 MILVUS_URI / MILVUS_TOKEN / MILVUS_COLLECTION，token 为 SecretStr，database 使用默认值。pymilvus 2.6.x（Apache-2.0）经 memory extra 懒加载；LangChain Embeddings 注入，document/query 分别编码，维度从输出读取，COSINE + AUTOINDEX。模型配置待用户提供，不使用猜测维度创建远程 Collection。
+
+2026-09-04：通过正式 MilvusVectorStore.connect 成功验证真实 Zilliz client/auth/list_collections，返回空列表，未创建 Collection、未写数据。不是 #56 完整 Gate。SDK 原始异常不出 adapter；当前 diff + 待提交文件 Secret scan 通过。
+
+Outbox 使用 revision 条件确认 + memory_id 游标分页，避免并发更新误确认和失败首页饿死后续任务。部署模型为单进程单 relay；start/stop 在 #55 组合入口接线。
+
+官方 SDK 参考：https://milvus.io/docs/use-async-milvus-client-with-asyncio.md ，https://milvus.io/docs/use-partition-key.md 。
