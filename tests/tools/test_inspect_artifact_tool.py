@@ -122,3 +122,83 @@ class TestInspectArtifactToolRegistration:
         registry = ToolRegistry()
         registry.register(tool)
         assert registry.get("inspect_artifact") is tool
+
+
+class TestInspectArtifactCharCap:
+    """字符级体积上限：防止单条超长行经 inspect_artifact 灌爆 Context。"""
+
+    @staticmethod
+    def _tool_with(content: str) -> tuple[InspectArtifactTool, str]:
+        from agent_harness.storage.artifact import Artifact, compute_artifact_id
+        from agent_harness.storage.sqlite import _utc_now_iso
+        store = FakeArtifactStore()
+        artifact_id = compute_artifact_id(content)
+        store._artifacts[artifact_id] = (
+            Artifact(
+                artifact_id=artifact_id, session_id="s1",
+                size=len(content.encode("utf-8")), mime_type="text/plain",
+                source_tool="bash", tool_call_id="c1", created_at=_utc_now_iso(),
+            ),
+            content,
+        )
+        return InspectArtifactTool(store), artifact_id
+
+    @pytest.mark.asyncio
+    async def test_single_huge_line_is_truncated(self) -> None:
+        """场景 1：max_lines=1 + 十万字符单行 → 受控截断，保留定位信息。"""
+        tool, artifact_id = self._tool_with("x" * 100_000)
+        args = tool.args_schema(artifact_id=artifact_id, max_lines=1)
+        result = await tool.execute(args)
+        assert result.ok is True
+        assert result.data["truncated"] is True
+        assert result.data["returned_lines"] == 1
+        line = result.data["lines"][0]
+        assert line["line_number"] == 1
+        assert line["truncated"] is True
+        assert line["full_length"] == 100_000
+        assert len(line["text"]) == 2000
+
+    @pytest.mark.asyncio
+    async def test_multiple_medium_lines_each_truncated(self) -> None:
+        """场景 2：多条中长行各自独立截断。"""
+        content = "\n".join(["y" * 5000 for _ in range(5)])
+        tool, artifact_id = self._tool_with(content)
+        result = await tool.execute(tool.args_schema(artifact_id=artifact_id))
+        assert result.ok is True
+        assert result.data["truncated"] is True
+        for line in result.data["lines"]:
+            assert line["truncated"] is True
+            assert line["full_length"] == 5000
+            assert len(line["text"]) == 2000
+
+    @pytest.mark.asyncio
+    async def test_normal_short_lines_unchanged(self) -> None:
+        """场景 3：正常短片段——契约回归，无 char 字段污染。"""
+        content = "\n".join([f"line {i}" for i in range(1, 11)])
+        tool, artifact_id = self._tool_with(content)
+        result = await tool.execute(tool.args_schema(artifact_id=artifact_id))
+        assert result.ok is True
+        assert result.data["truncated"] is False
+        assert result.data["lines"][0] == {"line_number": 1, "text": "line 1"}
+
+    @pytest.mark.asyncio
+    async def test_model_can_escalate_max_chars_per_line(self) -> None:
+        """模型可经 max_chars_per_line 参数放宽上限，拿到更多内容。"""
+        tool, artifact_id = self._tool_with("z" * 8000)
+        args = tool.args_schema(
+            artifact_id=artifact_id, max_chars_per_line=5000,
+        )
+        result = await tool.execute(args)
+        assert result.ok is True
+        assert len(result.data["lines"][0]["text"]) == 5000
+
+    @pytest.mark.asyncio
+    async def test_overflow_loop_not_triggered(self) -> None:
+        """截断后返回体严格小于 OverflowHandler 阈值，不触发二次溢出循环。"""
+        tool, artifact_id = self._tool_with("q" * 100_000)
+        args = tool.args_schema(artifact_id=artifact_id, max_lines=1)
+        result = await tool.execute(args)
+        # ToolResult 整体序列化长度远小于默认 overflow_chars(2000) 的几倍
+        import json
+        dumped = json.dumps(result.model_dump(), ensure_ascii=False)
+        assert len(dumped) < 5000

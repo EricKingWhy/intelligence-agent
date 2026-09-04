@@ -6,6 +6,7 @@
 - inspect 按关键词
 - max_lines 截断
 - 去重（同内容同 ID）
+- max_chars_per_line 单行体积上限（防止单条超长行灌爆 Context）
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from agent_harness.storage.artifact import (
     ArtifactSlice,
     ArtifactStore,
     FakeArtifactStore,
+    _slice_lines,
     compute_artifact_id,
 )
 
@@ -130,3 +132,96 @@ def test_artifact_store_is_abstract() -> None:
     """ArtifactStore 是 ABC，不能直接实例化。"""
     with pytest.raises(TypeError):
         ArtifactStore()  # type: ignore[abstract]
+
+
+class TestSliceLinesCharCap:
+    """单行体积上限：防止单条超长行灌爆 Context（spec 06 §4）。"""
+
+    def test_single_long_line_is_truncated(self) -> None:
+        """场景 1：单条超长行（十万字符）被默认上限截断，并保留定位信息。"""
+        long_line = "x" * 100_000
+        lines, truncated = _slice_lines(
+            [long_line], start_line=None, end_line=None, keyword=None, max_lines=200,
+        )
+        assert truncated is True
+        assert len(lines) == 1
+        entry = lines[0]
+        assert entry["line_number"] == 1
+        assert entry["truncated"] is True
+        assert entry["full_length"] == 100_000
+        assert len(entry["text"]) == 2000  # 默认 max_chars_per_line
+        assert entry["text"] == "x" * 2000
+
+    def test_multiple_medium_lines_each_truncated(self) -> None:
+        """场景 2：多条中长行（各自 5000 字符），每条独立截断并标记。"""
+        medium_lines = [("y" * 5000) for _ in range(5)]
+        lines, truncated = _slice_lines(
+            medium_lines, start_line=None, end_line=None, keyword=None, max_lines=200,
+        )
+        assert truncated is True
+        assert len(lines) == 5
+        for entry in lines:
+            assert entry["truncated"] is True
+            assert entry["full_length"] == 5000
+            assert len(entry["text"]) == 2000
+
+    def test_normal_short_lines_unchanged(self) -> None:
+        """场景 3：正常短片段——无 char 截断，无额外字段，回归现有契约。"""
+        lines, truncated = _slice_lines(
+            ["short", "another"], start_line=None, end_line=None, keyword=None, max_lines=200,
+        )
+        assert truncated is False
+        assert lines == [
+            {"line_number": 1, "text": "short"},
+            {"line_number": 2, "text": "another"},
+        ]
+
+    def test_custom_max_chars_per_line(self) -> None:
+        """自定义上限：模型可针对特定 artifact 放宽（escalate）以读更多内容。"""
+        long_line = "z" * 8000
+        lines, _ = _slice_lines(
+            [long_line], start_line=None, end_line=None, keyword=None,
+            max_lines=200, max_chars_per_line=5000,
+        )
+        assert len(lines[0]["text"]) == 5000
+        assert lines[0]["truncated"] is True
+        assert lines[0]["full_length"] == 8000
+
+    def test_row_and_char_truncation_combine(self) -> None:
+        """行数截断与字符截断并存时 truncated=True，两者都生效。"""
+        many_long = [("w" * 3000) for _ in range(20)]
+        lines, truncated = _slice_lines(
+            many_long, start_line=None, end_line=None, keyword=None, max_lines=5,
+        )
+        assert truncated is True
+        assert len(lines) == 5  # 行数上限生效
+        assert all(entry["truncated"] for entry in lines)  # 字符上限也生效
+
+
+class TestFakeArtifactStoreInspectCharCap:
+    @pytest.mark.asyncio
+    async def test_inspect_single_long_line_truncated(self) -> None:
+        """端到端：FakeArtifactStore.inspect 单条超长行受控。"""
+        store = FakeArtifactStore()
+        long_content = "a" * 100_000
+        artifact = await store.save(
+            "s1", long_content, mime_type="text/plain", source_tool="bash", tool_call_id="c1",
+        )
+        result = await store.inspect(artifact.artifact_id)
+        assert result.truncated is True
+        assert result.returned_lines == 1
+        assert result.lines[0]["truncated"] is True
+        assert result.lines[0]["full_length"] == 100_000
+        assert len(result.lines[0]["text"]) == 2000
+
+    @pytest.mark.asyncio
+    async def test_inspect_original_content_preserved(self) -> None:
+        """截断不破坏 Artifact 原文——load 仍能取回完整内容（spec 06 §4）。"""
+        store = FakeArtifactStore()
+        long_content = "b" * 50_000
+        artifact = await store.save(
+            "s1", long_content, mime_type="text/plain", source_tool="bash", tool_call_id="c1",
+        )
+        await store.inspect(artifact.artifact_id)
+        loaded = await store.load(artifact.artifact_id)
+        assert loaded.content == long_content

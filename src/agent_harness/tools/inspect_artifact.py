@@ -23,9 +23,14 @@ from agent_harness.tooling.result import ErrorCode
 class _InspectArgs(BaseModel):
     artifact_id: str = Field(..., description="要读取的 artifact ID（从 ToolResult.artifact_ref 获得）")
     start_line: int | None = Field(default=None, ge=1, description="起始行号（1-based）")
-    end_line: int | None = Field(default=None, ge=1, description="结束行号（含）")
+    end_line: int | None = Field(default=None, ge=1, description="结束行（含）")
     keyword: str | None = Field(default=None, description="关键词过滤，只返回含此关键词的行")
     max_lines: int = Field(default=200, ge=1, le=1000, description="返回行数上限（默认 200，最大 1000）")
+    max_chars_per_line: int = Field(
+        default=2000, ge=1, le=20000,
+        description="单行字符上限（默认 2000）。单行被截断时返回体携带 truncated 与 full_length，"
+                    "可放宽本参数重新读取更长片段。",
+    )
 
 
 class InspectArtifactTool(Tool):
@@ -44,7 +49,8 @@ class InspectArtifactTool(Tool):
             "读取之前被自动保存为 artifact 的大输出（如 bash 的长 stdout）的局部内容。"
             "参数：artifact_id（从工具结果的 artifact_ref 获得），"
             "start_line/end_line 按行范围读取，keyword 按关键词过滤，"
-            "max_lines 返回上限（默认 200）。"
+            "max_lines 返回行数上限（默认 200），"
+            "max_chars_per_line 单行字符上限（默认 2000，单行超限时可放宽）。"
         )
 
     @property
@@ -74,6 +80,7 @@ class InspectArtifactTool(Tool):
                 end_line=args.end_line,
                 keyword=args.keyword,
                 max_lines=args.max_lines,
+                max_chars_per_line=args.max_chars_per_line,
             )
         except KeyError as e:
             return ToolResult.failure(
