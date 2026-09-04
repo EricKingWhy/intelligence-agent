@@ -137,6 +137,8 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       next.active_step_id = null;
       for (const turn of next.turns) {
         if (turn.status === 'streaming') turn.status = 'done';
+        // run 终止后不再有 delta——model 段必须离开 streaming，否则 caret 永闪
+        if (turn.model.status === 'streaming') turn.model.status = 'done';
       }
       break;
     }
@@ -146,6 +148,8 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       next.active_step_id = null;
       for (const turn of next.turns) {
         if (turn.status === 'streaming') turn.status = 'failed';
+        // 同上：中断后 caret 必须熄灭
+        if (turn.model.status === 'streaming') turn.model.status = 'done';
       }
       break;
     }

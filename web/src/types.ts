@@ -42,6 +42,21 @@ export interface PresetTask {
   id: number;
 }
 
+/** 会话呈现模式——conversation 永远属于 mode 指向的会话（编译期保证）。
+ *
+ * - idle：无选中会话（空状态）。
+ * - live：正在流式创建/跟随的新会话；sessionId 为 null 表示 POST 已发出、
+ *   首帧尚未确认（session_id 由 SSE 帧注入）。
+ * - viewing：查看（历史重建）中的会话。
+ *
+ * 迁移规则：live → viewing 只发生在流结束/出错/取消时；viewing/live 之间切换
+ * 由 selectSession 处理（切走即放弃当前流，幂等）。
+ */
+export type SessionMode =
+  | { kind: 'idle' }
+  | { kind: 'live'; sessionId: string | null }
+  | { kind: 'viewing'; sessionId: string };
+
 export interface ToolCall {
   tool_call_id: string;
   name: string;

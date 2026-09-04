@@ -37,8 +37,7 @@ export default function App() {
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
 
   const handleNew = () => {
-    // 切走即放弃当前流：UI 只呈现选中会话（不变量 #22），流中残留内容不跨会话显示
-    if (streaming) cancelStream();
+    // selectSession 内部处理流取消（切走即放弃当前流，幂等）
     selectSession(null);
     setSelectedTool(null);
   };
@@ -64,7 +63,6 @@ export default function App() {
           sessions={sessions}
           selectedId={selectedId}
           onSelect={(id) => {
-            if (streaming) cancelStream();
             selectSession(id);
             setSelectedTool(null);
           }}
