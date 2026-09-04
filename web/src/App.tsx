@@ -19,6 +19,7 @@ import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { StepDetail } from './components/StepDetail';
+import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import type { ToolCall, PresetTask } from './types';
 import './styles/app.css';
 
@@ -34,6 +35,13 @@ export default function App() {
     submitTask,
     cancelStream,
   } = useSession();
+
+  // 密度四档（冻结决策）：状态在 App（TopBar 切换、Conversation 消费），persist 由 lib/density 负责。
+  const [density, setDensity] = useState<TraceDensity>(initDensity);
+  const changeDensity = (next: TraceDensity) => {
+    setDensity(next);
+    applyDensity(next);
+  };
 
   const [selectedTool, setSelectedTool] = useState<ToolCall | null>(null);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
@@ -76,6 +84,8 @@ export default function App() {
         streaming={streaming}
         inspectorOpen={inspectorOpen}
         onToggleInspector={toggleInspector}
+        density={density}
+        onDensityChange={changeDensity}
       />
 
       <main className={`app-regions ${inspectorOpen ? '' : 'inspector-closed'}`}>
@@ -95,6 +105,7 @@ export default function App() {
           <Conversation
             conversation={conversation}
             loadingHistory={loadingHistory}
+            density={density}
             onPresetTask={(text) => setPresetTask({ text, id: Date.now() })}
           />
           <Composer

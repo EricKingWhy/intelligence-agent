@@ -2,12 +2,14 @@
  *
  * Left: product identity. Center: current session title + Run Pulse
  * (signature #1 — icon + color + text, never color-only). Right:
- * inspector collapse toggle + theme toggle.
+ * trace density selector (four tiers, localStorage-persisted — frozen
+ * decision), inspector collapse toggle + theme toggle.
  */
 
 import { Activity, CircleDashed, Loader2, Moon, PanelRight, SquareCheckBig, SquareX, Sun } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { applyTheme, initTheme, type Theme } from '../lib/theme';
+import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, type RunPulseState } from '../lib/runState';
 import type { ConversationState } from '../types';
 
@@ -16,6 +18,9 @@ interface Props {
   streaming: boolean;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
+  /** Trace Density 四档（冻结决策）——状态归 App，这里只渲染切换控件。 */
+  density: TraceDensity;
+  onDensityChange: (d: TraceDensity) => void;
 }
 
 const PULSE_CLASS: Record<RunPulseState, string> = {
@@ -35,7 +40,7 @@ const PULSE_ICON: Record<RunPulseState, typeof Activity> = {
   failed: SquareX,
 };
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange }: Props) {
   // 主题持久化：初始值由 lib/theme 在 paint 前解析（localStorage → 系统偏好）。
   const [theme, setTheme] = useState<Theme>(initTheme);
 
@@ -85,6 +90,20 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       <div className="appbar-right">
+        <div className="density-picker" role="radiogroup" aria-label="Trace 密度">
+          {DENSITIES.map((d) => (
+            <button
+              key={d}
+              role="radio"
+              aria-checked={density === d}
+              className={`density-btn ${density === d ? 'sel' : ''}`}
+              onClick={() => onDensityChange(d)}
+              title={DENSITY_LABEL[d]}
+            >
+              {DENSITY_LABEL[d]}
+            </button>
+          ))}
+        </div>
         <button
           className="icon-btn"
           onClick={onToggleInspector}
@@ -101,3 +120,10 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
     </header>
   );
 }
+
+const DENSITY_LABEL: Record<TraceDensity, string> = {
+  compact: '紧凑',
+  balanced: '均衡',
+  detailed: '详细',
+  raw: 'Raw',
+};

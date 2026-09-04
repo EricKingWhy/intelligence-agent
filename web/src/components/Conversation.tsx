@@ -14,7 +14,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Activity, Brain } from 'lucide-react';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain } from '../lib/projection';
-import type { ConversationState, Turn } from '../types';
+import type { TraceDensity } from '../lib/density';
+import type { ConversationState, ModelSegment, Turn } from '../types';
 import { formatDuration } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
@@ -22,6 +23,8 @@ import { ToolCard } from './ToolCard';
 interface Props {
   conversation: ConversationState | null;
   loadingHistory: boolean;
+  /** Trace Density 四档（Brief 冻结决策）——控制执行链节点粒度。 */
+  density: TraceDensity;
   /** 空状态示例任务回调——点击 chip 时由 App 注入 Composer。 */
   onPresetTask?: (text: string) => void;
 }
@@ -32,7 +35,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, onPresetTask }: Props) {
+export function Conversation({ conversation, loadingHistory, density, onPresetTask }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -82,7 +85,12 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
       <div className="conversation-scroll" key={conversation.session_id} ref={scrollRef}>
         {conversation.turns.map((turn) => (
-          <TurnView key={turn.step_id} turn={turn} active={conversation.run_status === 'running'} />
+          <TurnView
+            key={turn.step_id}
+            turn={turn}
+            active={conversation.run_status === 'running'}
+            density={density}
+          />
         ))}
         <div ref={endRef} />
       </div>
@@ -90,7 +98,7 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
   );
 }
 
-function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
+function TurnView({ turn, active, density }: { turn: Turn; active: boolean; density: TraceDensity }) {
   // 只有"已完成且有模型文本"的轮次才可折叠——纯工具轮次节点本身已极简，
   // 折叠按钮只会制造噪音（时间轴上直接常驻展开）。
   const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
@@ -129,7 +137,7 @@ function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
             {!collapsed && (
               <div className="act-chain">
                 {deriveChain(turn).map((node, i) => (
-                  <ChainNodeView key={chainKey(node, i)} node={node} />
+                  <ChainNodeView key={chainKey(node, i)} node={node} density={density} />
                 ))}
               </div>
             )}
@@ -144,11 +152,19 @@ function chainKey(node: ChainNode, i: number): string {
   return node.kind === 'tool' ? node.tool.tool_call_id : `model-${i}`;
 }
 
-function ChainNodeView({ node }: { node: ChainNode }) {
+function ChainNodeView({ node, density }: { node: ChainNode; density: TraceDensity }) {
   if (node.kind === 'tool') {
-    return <ToolCard tool={node.tool} />;
+    return <ToolCard tool={node.tool} density={density} />;
   }
-  const { segment } = node;
+  const { segment }: { segment: ModelSegment } = node;
+  // Compact 档下 done 的 model 段只渲染首行摘要（渐进披露：详情留给 Inspector）
+  if (density === 'compact' && segment.status !== 'streaming') {
+    const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
+    if (!first) return null;
+    return (
+      <div className="model-output done model-output-compact">{renderMarkdown(first)}</div>
+    );
+  }
   if (!segment.text && segment.status !== 'streaming') return null;
   return (
     <div className={`model-output ${segment.status}`}>

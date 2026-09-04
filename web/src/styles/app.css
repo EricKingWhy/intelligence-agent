@@ -230,6 +230,40 @@
   background: var(--color-hover);
 }
 
+/* ── Trace Density 四档切换（Phase 4，App Bar 右侧 radiogroup） ── */
+.density-picker {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.density-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-muted-foreground);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
+}
+.density-btn + .density-btn {
+  border-left: 1px solid var(--color-border);
+}
+.density-btn:hover {
+  color: var(--color-foreground);
+  background: var(--color-hover);
+}
+.density-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.density-btn.sel {
+  color: #fff;
+  background: var(--color-accent);
+}
+
 /* ── Session Rail（左：低对比导航 chrome，嵌在 frame 内） ── */
 .session-rail {
   display: flex;
@@ -670,6 +704,80 @@
 }
 .act-status-running {
   color: var(--color-warning);
+}
+
+/* ── Trace Density 档位差异（Phase 4） ── */
+/* Compact：状态行 only——图标与参数弱化为一行小字 */
+.act-node-compact {
+  gap: var(--space-sm);
+  padding: 3px var(--space-sm);
+}
+.act-args-compact {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+}
+/* Detailed / Raw：节点下内联展开全字段 + 原始事件 JSON */
+.act-detail-inline {
+  margin: 2px 0 var(--space-xs) 0;
+  padding-left: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.act-detail-args,
+.act-detail-result {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: var(--color-surface-1, transparent);
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.act-detail-result {
+  max-height: 280px;
+  color: var(--color-foreground);
+}
+.act-raw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.act-raw-section {
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.act-raw-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--color-subtle-foreground);
+  padding: 2px var(--space-sm);
+  background: var(--color-surface-1, var(--color-hover));
+  border-bottom: 0.5px solid var(--color-border);
+  font-family: var(--font-mono);
+}
+.act-raw-section pre {
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Compact 档 model 段：仅首行摘要，弱化 */
+.model-output-compact {
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
 }
 .status-spinner {
   width: 11px;

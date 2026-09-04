@@ -1,10 +1,16 @@
 /** ToolCard — per-tool renderer with specialized layouts.
  *
- * Four shapes:
+ * Four shapes (expanded):
  *   - bash → terminal block (mono, dark inset, exit code badge)
  *   - edit/apply_patch/write → diff view (green/red, before/after)
  *   - inspect_artifact → artifact slice view (numbered lines, per-line truncation chips)
  *   - everything else → collapsible generic card (name · args · result)
+ *
+ * Trace Density tiers (Brief — frozen decision):
+ *   - compact  → status line only (✓ + name)
+ *   - balanced → name + key args + duration + status (default)
+ *   - detailed → balanced + full args JSON + result preview on the node itself
+ *   - raw      → detailed + verbatim source-event JSON (raw_call/raw_result)
  *
  * Status color: running=warning, success=green, failed=red.
  */
@@ -12,36 +18,73 @@
 import { useState } from 'react';
 import { Check, Scissors, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
+import type { TraceDensity } from '../lib/density';
 import { formatDuration } from '../lib/format';
 
 interface Props {
   tool: ToolCall;
+  density: TraceDensity;
 }
 
-export function ToolCard({ tool }: Props) {
+export function ToolCard({ tool, density }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const slice = tool.name === 'inspect_artifact' ? tryParseSlice(tool.result) : null;
   const [expanded, setExpanded] = useState(false);
   const duration = formatDuration(tool.started_at, tool.completed_at);
+  const detailed = density === 'detailed' || density === 'raw';
 
   return (
     <>
       <button
-        className="act-node"
+        className={`act-node act-node-${density}`}
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
       >
-        <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>
-        <span className="act-name">{tool.name}</span>
-        <span className="act-args">{summarizeArgs(tool)}</span>
-        {duration && <span className="act-duration">{duration}</span>}
         <span className={`act-status act-status-${tool.status}`}>
           {tool.status === 'success' && <Check size={12} />}
           {tool.status === 'failed' && <X size={12} />}
           {tool.status === 'running' && <span className="status-spinner" />}
         </span>
+        {density !== 'compact' && <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>}
+        <span className="act-name">{tool.name}</span>
+        {density !== 'compact' && <span className="act-args">{summarizeArgs(tool)}</span>}
+        {duration && <span className="act-duration">{duration}</span>}
+        {density === 'compact' && (
+          <span className="act-args act-args-compact">{summarizeArgs(tool, 32)}</span>
+        )}
       </button>
+
+      {/* 内联明细在 compact/balanced 不渲染；detailed/raw 展开时保留（四形态 body 追加在下方） */}
+      {detailed && (
+        <div className="act-detail-inline">
+          <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
+          {tool.result !== undefined && (
+            <pre className="act-detail-result">
+              {truncate(
+                typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),
+                400,
+              )}
+            </pre>
+          )}
+          {density === 'raw' && (tool.raw_call || tool.raw_result) && (
+            <div className="act-raw">
+              {tool.raw_call && (
+                <div className="act-raw-section">
+                  <div className="act-raw-label">tool/call 原始事件</div>
+                  <pre>{JSON.stringify(tool.raw_call, null, 2)}</pre>
+                </div>
+              )}
+              {tool.raw_result && (
+                <div className="act-raw-section">
+                  <div className="act-raw-label">tool/result 原始事件</div>
+                  <pre>{JSON.stringify(tool.raw_result, null, 2)}</pre>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {expanded && (
         <div className="tool-card-body">
@@ -55,9 +98,9 @@ export function ToolCard({ tool }: Props) {
   );
 }
 
-function summarizeArgs(tool: ToolCall): string {
+function summarizeArgs(tool: ToolCall, max = 60): string {
   const a = tool.args;
-  if (tool.name === 'bash') return String(a.command ?? '').slice(0, 60);
+  if (tool.name === 'bash') return String(a.command ?? '').slice(0, max);
   if ('path' in a) return String(a.path);
   const entries = Object.entries(a).slice(0, 2);
   return entries.map(([k, v]) => `${k}=${truncate(JSON.stringify(v), 30)}`).join(' ');

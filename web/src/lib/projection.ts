@@ -127,6 +127,8 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
           name: String(data.tool_name ?? 'unknown'),
           args: (data.args as Record<string, unknown>) ?? {},
           status: 'running',
+          // Raw 档真相源：完整源事件原样透传（type/time/step_id/data，Trace Density Raw）
+          raw_call: { ...event },
           // 事件真值时间优先（历史事件带 time）；SSE 帧无 time 时回退客户端时钟
           started_at: event.time ?? new Date().toISOString(),
         });
@@ -163,6 +165,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
           };
         }
         tool.completed_at = event.time ?? new Date().toISOString();
+        tool.raw_result = { ...event };
       }
       break;
     }

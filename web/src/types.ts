@@ -66,6 +66,13 @@ export interface ToolCall {
   diff?: { before: string; after: string; truncated: boolean };
   started_at?: string;
   completed_at?: string;
+  /**
+   * Raw event payloads (Trace Density Raw tier — Brief "Raw = 原始事件 JSON").
+   * Verbatim shallow copies of the projection source events (type/time/step_id/data);
+   * never fabricated, never synthesized from parsed fields.
+   */
+  raw_call?: Record<string, unknown>;
+  raw_result?: Record<string, unknown>;
   /** Artifact produced by this tool call when output overflows the inline limit.
    *  Set by artifact/created event (Phase 5). Inspector fetches via inspect_artifact. */
   artifact?: ArtifactRef;
