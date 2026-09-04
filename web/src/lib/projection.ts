@@ -122,6 +122,15 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       // Final content may include consolidated text — prefer it over accumulated delta.
       turn.model.text = String(data.content ?? turn.model.text);
       turn.model.status = 'done';
+      // 后端某些路径（无工具纯对话）只发 model/completed 不发 model/started：
+      // 此时 turn 既无 segment 也无 model activity → Conversation 的
+      // `activities.length > 0` 渲染条件会跳过整个 model 输出块（模型文本丢失）。
+      // 若该 turn 还没有任何 model activity，补一个，让渲染入口存在。
+      const hasModelActivity = turn.activities.some((a) => a.kind === 'model');
+      if (!hasModelActivity) {
+        turn.segments.push(turn.model);
+        turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
+      }
       // Run-level observability（后端 Gap 1）：可选字段，缺失/畸形不伪造。
       if (typeof data.model === 'string' && data.model) next.model = data.model;
       const usage = parseUsage(data.usage);
@@ -270,12 +279,16 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
  *
  * Priority: explicit `data.step` → event `step_id` → active step → next turn index.
  * All six event cases used to inline their own variant of this chain; centralizing
- * it means a new event type can't accidentally pick a different fallback. */
+ * it means a new event type can't accidentally pick a different fallback.
+ *
+ * 用 `!= null`（loose）而非 `!== null`（strict）：真实后端事件可能完全不带 step_id
+ * 键（JSON 解析为 undefined），strict 检查会让 undefined 漏网返回，导致 user/message
+ * 与后续 model/completed(step_id=number) 落入不同 turn——模型文本丢失。 */
 function resolveStep(event: AgentEvent, state: ConversationState): number {
   const fromData = (event.data.step as number | undefined) ?? null;
-  if (fromData !== null) return fromData;
-  if (event.step_id !== null) return event.step_id;
-  if (state.active_step_id !== null) return state.active_step_id;
+  if (fromData != null) return fromData;
+  if (event.step_id != null) return event.step_id;
+  if (state.active_step_id != null) return state.active_step_id;
   return state.turns.length + 1;
 }
 

@@ -252,6 +252,43 @@ describe('applyEvent — resolveStep 边界契约', () => {
     expect(s.turns[0].step_id).toBe(4);
     expect(s.turns[0].model.text).toBe('x');
   });
+
+  // ── 回归：step_id 字段缺失（undefined）≠ null 的边界 ──
+  // 真实后端 user/message 事件不带 step_id 字段（键完全缺失，JSON 解析为 undefined，
+  // 不是 null）。resolveStep 用 !== null 判定会让 undefined 漏网返回 undefined，
+  // 导致 user/message 与后续 model/completed(step_id=1) 落入不同 turn——模型文本丢失。
+  it('user/message 无 step_id 字段（undefined）时与后续 model/completed(step_id=1) 入同一 turn', () => {
+    // 模拟真实后端事件：step_id 键完全缺失（不是 null）
+    const userMsg: AgentEvent = { type: EventType.USER_MESSAGE, data: { content: '你是谁' }, seq: 1, run_id: null };
+    const modelCompleted: AgentEvent = { type: EventType.MODEL_COMPLETED, data: { content: '我是 Qwen' }, seq: 3, run_id: null, step_id: 1 };
+    let s = applyEvent(initConversation('s'), userMsg);
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
+    s = applyEvent(s, modelCompleted);
+    expect(s.turns).toHaveLength(1);
+    expect(s.turns[0].user_message).toBe('你是谁');
+    expect(s.turns[0].model.text).toBe('我是 Qwen');
+    expect(s.turns[0].step_id).toBe(1);
+  });
+
+  // ── 回归：MODEL_COMPLETED 无前置 MODEL_STARTED 时须补 model activity ──
+  // 后端某些路径（无工具的纯对话）只发 model/completed 不发 model/started。
+  // 此时 turn.activities 没有 model 节点 → Conversation 的 `activities.length > 0`
+  // 渲染条件跳过整个 model 输出块 → 模型文本丢失（用户看不到回复）。
+  // MODEL_COMPLETED 若发现 turn 还没有任何 model activity，补一个。
+  it('MODEL_COMPLETED 无前置 MODEL_STARTED 时补 model segment + activity（渲染入口）', () => {
+    const userMsg: AgentEvent = { type: EventType.USER_MESSAGE, data: { content: 'hi' }, seq: 1, run_id: null };
+    const modelCompleted: AgentEvent = { type: EventType.MODEL_COMPLETED, data: { content: 'hello' }, seq: 2, run_id: null, step_id: 1 };
+    let s = applyEvent(initConversation('s'), userMsg);
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
+    s = applyEvent(s, modelCompleted);
+    const turn = s.turns[0];
+    expect(turn.segments).toHaveLength(1);
+    expect(turn.segments[0].text).toBe('hello');
+    expect(turn.segments[0].status).toBe('done');
+    expect(turn.activities).toContainEqual({ kind: 'model', index: 0 });
+    // turn.model 应与 segments[0] 是同一对象（MODEL_STARTED 的引用对齐不变量）
+    expect(turn.model).toBe(turn.segments[0]);
+  });
 });
 
 describe('applyEvent — Phase 5 新事件投影', () => {
