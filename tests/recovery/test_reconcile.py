@@ -557,3 +557,66 @@ async def test_mixed_recovery_resolves_terminal_and_reconciles_unknown(
     assert len(_reconcile_required_events(recovered)) == 1
     # 恢复后投影无 dangling。
     recovered.derive_messages()
+
+
+# ── 损坏 result_json 不阻塞人工裁决（#30 容错回归）──
+
+
+@pytest.mark.asyncio
+async def test_confirm_success_with_corrupt_ledger_result_falls_back(
+    tmp_path: Path,
+) -> None:
+    """裁决 CONFIRM_SUCCESS 时若 Ledger 的 result_json 不是合法 ToolResult，
+    不能让 ValidationError 冒泡——回调已裁决、协调器不能因数据腐烂拒绝恢复。
+
+    _verdict_outcome 在 CONFIRM_SUCCESS/CONFIRM_FAILURE 两路都直调
+    ToolResult.model_validate_json(operation.result_json)：这里钉住两路守卫都
+    降级到"已由用户确认"的合成结果。
+    """
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger,
+        session.session_id,
+        "call-1",
+        OperationState.RUNNING,
+        result_json="not-json",
+    )
+    callback = _ScriptedCallback(ReconcileVerdict.CONFIRM_SUCCESS)
+
+    recovered = await _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback
+    ).recover(session.session_id)
+
+    synthesized = ToolResult.model_validate_json(_result_events(recovered)["call-1"])
+    assert synthesized.ok is True
+    assert "用户确认成功" in synthesized.message
+
+
+@pytest.mark.asyncio
+async def test_confirm_failure_with_corrupt_ledger_result_falls_back(
+    tmp_path: Path,
+) -> None:
+    """CONFIRM_FAILURE + 损坏 result_json：降级到"已由用户确认失败"合成结果。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger,
+        session.session_id,
+        "call-1",
+        OperationState.RUNNING,
+        result_json="{garbage",
+    )
+    callback = _ScriptedCallback(ReconcileVerdict.CONFIRM_FAILURE)
+
+    recovered = await _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback
+    ).recover(session.session_id)
+
+    synthesized = ToolResult.model_validate_json(_result_events(recovered)["call-1"])
+    assert synthesized.ok is False
+    assert "用户确认失败" in synthesized.message
