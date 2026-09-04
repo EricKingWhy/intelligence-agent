@@ -116,6 +116,67 @@ describe('applyEvent — 折叠语义', () => {
   });
 });
 
+describe('applyEvent — resolveStep 边界契约', () => {
+  // 这组测试钉死 resolveStep 的语义优先级链（commit 3663ab8 统一后的形态），
+  // 防止未来重构再次引入 6 处 step 解析变体时回退。
+  // 优先级：data.step → step_id → active_step_id → turns.length+1
+
+  it('data.step 优先于 step_id：当两者冲突时采纳 data.step（显式信号胜出）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_STARTED,
+      data: { step: 5 },      // 显式声明 step=5
+      step_id: 9,             // 持久化携带 step_id=9（冲突）
+    }));
+    // turn 应落在 step=5，active_step_id 也应是 5
+    expect(s.turns).toHaveLength(1);
+    expect(s.turns[0].step_id).toBe(5);
+    expect(s.active_step_id).toBe(5);
+  });
+
+  it('无 data.step 时回退到 step_id', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_STARTED,
+      step_id: 3,
+    }));
+    expect(s.turns[0].step_id).toBe(3);
+    expect(s.active_step_id).toBe(3);
+  });
+
+  it('MODEL_STARTED 无 data.step 且无 step_id、已有 turn 时走 turns.length+1（非旧的 1）', () => {
+    // 构造一个已有 1 个 turn 的状态（active_step_id 已被前一个 MODEL_STARTED 设过）
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.USER_MESSAGE,
+      data: { content: 'first', step: 1 },
+    }));
+    expect(s.turns).toHaveLength(1);
+    // 此时无任何 active step（USER_MESSAGE 不设 active_step_id），无 step_id 的
+    // MODEL_STARTED 应回退到 turns.length+1 = 2，而不是旧行为的 1。
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_STARTED,
+      // 故意不带 data.step 也不带 step_id
+    }));
+    expect(s.turns).toHaveLength(2);
+    expect(s.turns[1].step_id).toBe(2);
+    expect(s.active_step_id).toBe(2);
+  });
+
+  it('MODEL_DELTA 无 step_id 时跟随 active_step_id', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_STARTED,
+      data: { step: 4 },
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_DELTA,
+      data: { delta: 'x' },
+      // 不带 step_id，应跟随 active_step_id=4
+    }));
+    expect(s.turns).toHaveLength(1);
+    expect(s.turns[0].step_id).toBe(4);
+    expect(s.turns[0].model.text).toBe('x');
+  });
+});
+
 describe('projectHistory — 从持久事件重建', () => {
   it('重建结果与逐事件 apply 一致，且不携带流式 delta', () => {
     const history: AgentEvent[] = [
