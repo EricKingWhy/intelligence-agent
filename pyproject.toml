@@ -26,6 +26,7 @@ agent-harness = "agent_harness.cli:main"
 [project.optional-dependencies]
 artifact = ["aioboto3>=13.0"]
 memory = [
+    "langgraph>=0.6.0",
     "langmem>=0.0.30,<0.1",
     "pymilvus>=2.6,<2.7",
 ]
