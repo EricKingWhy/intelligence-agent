@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 class OutboxRelay:
+    """SQLite 权威记录 → 向量索引的进程内同步。
+
+    瞬态失败（网络/限流）按 ADR-0008 保留 outbox、下轮重试；持续失败的
+    毒丸条目在连续 MAX_CONSECUTIVE_FAILURES 次后进入本进程死信：不再重试
+    （避免每轮空转与告警噪音），outbox 行保留、indexed=FALSE 可观察。
+    计数器在进程内存中——重启自愈（如 schema 修复后重新获得重试机会）。
+    """
+
+    MAX_CONSECUTIVE_FAILURES = 5
+
     def __init__(self, record_store: MemoryOutbox, vector_store: VectorIndexStore,
                  poll_interval_seconds: float = 5.0) -> None:
         if poll_interval_seconds <= 0:
@@ -21,6 +31,7 @@ class OutboxRelay:
         self._interval = poll_interval_seconds
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._failure_counts: dict[str, int] = {}
 
     async def flush(self) -> int:
         async with self._lock:
@@ -28,14 +39,23 @@ class OutboxRelay:
             after_id = ""
             while page := await self._records.pending(after_id=after_id):
                 for change in page:
+                    if self._failure_counts.get(change.entry.id, 0) >= self.MAX_CONSECUTIVE_FAILURES:
+                        continue
                     token = memory_session_var.set(change.session_id)
                     try:
                         await self._vectors.upsert(change.entry.id, change.entry.content,
                                                    {**change.entry.metadata, "scope": change.entry.scope.value},
                                                    change.identity)
+                        self._failure_counts.pop(change.entry.id, None)
                         count += await self._records.acknowledge(change)
                     except Exception:  # noqa: BLE001 — 保留 durable outbox，下轮重试，不记录 SDK 原始异常。
-                        logger.warning("Memory index sync deferred; outbox retained")
+                        failures = self._failure_counts.get(change.entry.id, 0) + 1
+                        self._failure_counts[change.entry.id] = failures
+                        if failures >= self.MAX_CONSECUTIVE_FAILURES:
+                            logger.error("Memory index sync abandoned after %d consecutive failures; "
+                                         "record %s stays in outbox (indexed=false)", failures, change.entry.id)
+                        else:
+                            logger.warning("Memory index sync deferred; outbox retained")
                     finally:
                         memory_session_var.reset(token)
                 after_id = page[-1].entry.id

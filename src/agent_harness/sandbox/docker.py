@@ -12,6 +12,7 @@ from time import perf_counter
 from uuid import uuid4
 
 from agent_harness.sandbox.base import ExecResult, Sandbox
+from agent_harness.sandbox.local import DEFAULT_EXEC_TIMEOUT
 
 
 def _glob_match_posix(rel_path: str, pattern: str) -> bool:
@@ -90,14 +91,43 @@ class DockerSandbox(Sandbox):
         )
 
     def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
-        del timeout
+        """在容器内执行命令；timeout 到点返回 exit_code=-1 的超时结果（D10 契约）。
+
+        docker SDK 的 exec_run 没有超时参数且是阻塞读——实现上把调用放进
+        daemon 线程等待，到点放弃等待返回超时结果（容器内进程随容器生命周期
+        收敛）。调用方（tool 边界）已把本方法卸载到工作线程，event loop 不阻塞。
+        """
+        import threading
+
         self.ensure_started()
+        effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
         started = perf_counter()
-        result = self._container.exec_run(
-            ["/bin/sh", "-lc", command],
-            demux=True,
-            workdir=str(self.workspace_root),
-        )
+        container = self._container
+        holder: dict = {}
+
+        def _run() -> None:
+            try:
+                holder["result"] = container.exec_run(
+                    ["/bin/sh", "-lc", command],
+                    demux=True,
+                    workdir=str(self.workspace_root),
+                )
+            except Exception as error:  # noqa: BLE001 — 交给调用方统一处理
+                holder["error"] = error
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(effective_timeout)
+        if worker.is_alive():
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr=f"命令超时（上限 {effective_timeout} 秒）",
+                duration_ms=round((perf_counter() - started) * 1000, 1),
+            )
+        if "error" in holder:
+            raise holder["error"]
+        result = holder["result"]
         stdout_bytes, stderr_bytes = result.output
         return ExecResult(
             exit_code=result.exit_code,

@@ -12,6 +12,72 @@ from agent_harness.memory.types import MemoryEntry, MemoryScope, memory_session_
 
 
 @pytest.mark.asyncio
+async def test_poison_entry_is_dead_lettered_after_consecutive_failures(tmp_path):
+    """持续失败的条目在连续 MAX 失败后被本进程死信跳过：不再尝试 upsert，
+    outbox 行保留（indexed=FALSE 可观察，SQLite 仍是权威），新条目不受影响。"""
+    store = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await store.initialize()
+    alice = IdentityContext("acme", "alice", ["user"])
+    for entry_id in ("bad", "good"):
+        await store.store(MemoryEntry(id=entry_id, content="c", scope=MemoryScope.USER,
+                                      created_at="2026-09-04"), alice)
+
+    class Poisoned(FakeVectorStore):
+        def __init__(self):
+            super().__init__()
+            self.bad_attempts = 0
+
+        async def upsert(self, memory_id, *args):
+            if memory_id == "bad":
+                self.bad_attempts += 1
+                raise ValueError("permanent schema mismatch")
+            await super().upsert(memory_id, *args)
+
+    vector = Poisoned()
+    relay = OutboxRelay(store, vector)
+    for _ in range(OutboxRelay.MAX_CONSECUTIVE_FAILURES):
+        await relay.flush()
+    assert vector.bad_attempts == OutboxRelay.MAX_CONSECUTIVE_FAILURES
+    # 死信后不再重试毒丸（flush 返回 0 且 attempts 不再增长）；good 首轮已照常同步。
+    assert await relay.flush() == 0
+    assert vector.bad_attempts == OutboxRelay.MAX_CONSECUTIVE_FAILURES
+    assert (await store.get("good", alice)).indexed
+    bad = await store.get("bad", alice)
+    assert not bad.indexed and await store.pending()
+
+
+@pytest.mark.asyncio
+async def test_failure_counter_resets_after_success(tmp_path):
+    """间歇性失败不触发死信：一次成功把连续失败计数清零，重新计满才死信。"""
+    store = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await store.initialize()
+    alice = IdentityContext("acme", "alice", ["user"])
+    await store.store(MemoryEntry(id="flaky", content="c", scope=MemoryScope.USER,
+                                  created_at="2026-09-04"), alice)
+
+    class SometimesFailing(FakeVectorStore):
+        def __init__(self):
+            super().__init__()
+            self.fail = True
+
+        async def upsert(self, *args):
+            if self.fail:
+                self.fail = False
+                raise ConnectionError("offline")
+            await super().upsert(*args)
+
+    vector = SometimesFailing()
+    relay = OutboxRelay(store, vector)
+    for _ in range(OutboxRelay.MAX_CONSECUTIVE_FAILURES - 1):
+        await relay.flush()
+        vector.fail = True  # 恢复失败态，模拟每次都差一点的间歇故障
+    assert await store.pending()  # 仍未同步，但计数未达死信阈值
+    vector.fail = False
+    assert await relay.flush() == 1
+    assert (await store.get("flaky", alice)).indexed
+
+
+@pytest.mark.asyncio
 async def test_outbox_failure_retries_and_restarts_without_losing_record(tmp_path):
     class Flaky(FakeVectorStore):
         fail = True
