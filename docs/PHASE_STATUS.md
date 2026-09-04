@@ -21,7 +21,7 @@
 | **2** | Tool Runtime | ✅ COMPLETED | `8572fd8` → `00f3753` | Tool Contract / Registry / ToolResult / Validation-first ToolExecutor / 单 Retry Layer / 批次调度 + 严格 ID 配对。Gate 达成：INVALID_ARGUMENT 不重试、transient 可重试、配对 100%。Permission interface 薄，留待 Phase 7 Capability seam 深化。 |
 | **3** | Docker Sandbox + Coding Tools | ✅ COMPLETED | `2bfa457` → `ed96f5a` | Sandbox ABC（含 list_files）+ LocalSubprocessSandbox + DockerSandbox（懒加载 + 确定性命名 + 跨进程恢复）+ 9 个 Coding Tools（read/write/bash/edit/grep/glob/apply_patch/git_status/git_diff）+ 批次调度验证 ✅。**后续独立 spec 全部落地**：Approval / REQUIRE_APPROVAL 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 stage 2.5 + per-call scoping，默认安全拒绝 danger）；Session-scoped Sandbox 生命周期（WorkspaceRegistry 映射持久化 + Session.start/resume 自动绑定 sandbox + Docker 后端跨进程恢复）。Gate 达成：edit 多匹配明确失败、pytest exit_code=1 不被 retry、两个无冲突文件操作可并发、冲突写被串行化、路径越界统一 PERMISSION_DENIED、DANGER 工具在非 full-access policy 下被审批关卡拦截。252 passed。 |
 | **4** | Storage + Operation Ledger + Recovery | ✅ COMPLETED | `5b85e36`（#27 Ledger）<br>`6c94398`（#28 Checkpoint）<br>`fbcf599`（#29 RecoveryCoordinator）<br>`596c53b`（#30 Reconcile）<br>`778c1da`（#32 Kill 集成测试） | 全部 6 个 Ticket 落地：durable Operation Ledger（SQLite + aiosqlite，Ledger-first 写入顺序）+ 稳定边界 Checkpoint 持久化（CheckpointPolicy seam，checkpoint 绝不进事件流）+ RecoveryCoordinator（07 §9 冻结 8 步唯一入口，决策与写入分离，BEGIN EXCLUSIVE sidecar 恢复锁）+ UNKNOWN 人工裁决（ReconcileHint / ReconcileVerdict / ReconcileCallback，RUNNING→UNKNOWN→NEED_RECONCILE 两步状态机强制，RETRY 只能来自用户裁决，operation/reconcile-required 落盘）+ 真实子进程 Kill 恢复集成测试。Gate 达成：duplicate confirmed side effect = 0、dangling tool call = 0、Workspace 按原映射恢复、5 个独立 Kill 场景全过、PENDING 默认 skip 不盲跑。345 passed, 8 skipped；全仓 ruff clean。 |
-| **5** | Artifact + S3 + Context Compaction（ADR-0006） | 🔄 IN PROGRESS | `fd7439a`（#45）<br>`c98c9a5`（#46）<br>`de6a894`（#47）<br>`80086a9`（#48） | #45 ArtifactStore / Fake / inspect_artifact；#46 ContextBuilder 基础投影 + token 估算；#47 Overflow Handler + Executor + artifact/created；#48 S3ArtifactStore 已落地。#49–#50 待实施，真实七牛未验证，尚未达到 Phase Gate。 |
+| **5** | Artifact + S3 + Context Compaction（ADR-0006） | 🔄 IN PROGRESS | `fd7439a`（#45）<br>`c98c9a5`（#46）<br>`de6a894`（#47）<br>`80086a9`（#48）<br>`e19905d`（#49） | #45 ArtifactStore / Fake / inspect_artifact；#46 ContextBuilder 基础投影 + token 估算；#47 Overflow Handler + Executor + artifact/created；#48 S3ArtifactStore；#49 三层 Compaction 已落地。#50 待实施，真实七牛未验证，尚未达到 Phase Gate。 |
 | **6** | Memory Capability / Context Provider | ⬜ NOT STARTED | — | |
 | **7** | Capability / Plugin Foundation + Skills | ⬜ NOT STARTED | — | |
 | **8** | MCP | ⬜ NOT STARTED | — | |
@@ -38,9 +38,11 @@
 
 ## 当前工作焦点
 
-**Phase 5 Artifact + Context Compaction 正在实施**。#45–#48 已落地；下一项 #49 Compaction。#50 负责 Runtime 接线并需要真实七牛云凭证验证 Gate。冻结决策见 ADR-0006 / ADR-0007，交接见 `docs/HANDOFF_PHASE5.md`。
+**Phase 5 Artifact + Context Compaction 正在实施**。#45–#49 已落地；下一项 #50 Runtime 接线与端到端测试，需要真实七牛云凭证验证 Gate。冻结决策见 ADR-0006 / ADR-0007，交接见 `docs/HANDOFF_PHASE5.md`。
 
 ## 更新日志
+
+- 2026-09-04：#49 完成（`e19905d`）。ContextCompactor 结构化摘要 → 机械提取 → hard guard；保留当前 turn 和 Tool 原子块，ContextBuilder 集成并追加 context/compacted。新增 18 项测试；全量 415 passed、8 skipped、4 deselected，ruff / lock 检查通过。Standards 无问题；Spec 审查发现摘要未以 auto 为目标，已补回归并修复、复核通过。Runtime 捕获异常和流式事件镜像留 #50。
 
 - 2026-09-04：#48 完成（`80086a9`）。S3ArtifactStore 用可选 aioboto3（Apache-2.0）实现 save/load/inspect，复用 `_slice_lines`，Session 绑定实现可重启寻址，正文与元数据同次上传。新增 11 项 Provider 测试与 1 项默认排除的真实七牛测试。全量（artifact extra）：397 passed、8 skipped、4 deselected；ruff / lock 检查通过，Standards / Spec 审查均无问题。真实七牛连通性仍待 #50 凭证 Gate。
 

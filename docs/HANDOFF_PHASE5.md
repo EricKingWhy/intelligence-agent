@@ -3,7 +3,7 @@
 > **交接对象**：Codex（Secondary / Task Agent）
 > **交接时间**：2026-09-04
 > **交接人**：ZCode（本会话）
-> **当前进度**：#45–#48 已完成，#49–#50 待实施（Codex 2026-09-04 更新）
+> **当前进度**：#45–#49 已完成，#50 待实施（Codex 2026-09-04 更新）
 
 ---
 
@@ -30,14 +30,14 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 | 2 | #46 | estimate_tokens + ContextBuilder base (no Compaction) | ✅ DONE (c98c9a5) | — |
 | 3 | #47 | Overflow Handler + Executor 集成 + artifact/created | ✅ DONE (de6a894) | #45 ✅ |
 | 4 | #48 | S3ArtifactStore (七牛云 S3 兼容) | ✅ DONE (80086a9) | #45 ✅ |
-| 5 | #49 | Context Compactor 三层降级 + context/compacted | ⬜ TODO | #46 |
+| 5 | #49 | Context Compactor 三层降级 + context/compacted | ✅ DONE (e19905d) | #46 ✅ |
 | 6 | #50 | AgentRuntime 集成 + Phase 5 端到端测试 | ⬜ TODO | #47, #48, #49 |
 
-**可立即开始的**：#49（前置 #46 已完成）。
+**可立即开始的**：#50（前置 #47 / #48 / #49 已完成；真实七牛 Gate 仍需凭证）。
 
-**建议执行顺序**：#49 → #50（串行）。
+**剩余任务**：#50 Runtime 集成与 Phase Gate。
 
-**#46 接口说明**：`ContextBuilder.build` 和 `ContextProvider.select` 为 async，调用时使用 `await`；token 估算计入消息结构（含 tool_calls），记录在诊断日志，不写 SessionEvent。当前 build 即使超过阈值也返回完整投影，阈值执行留给 #49。
+**Context 接口说明**：`ContextBuilder.build` 和 `ContextProvider.select` 为 async，调用时使用 `await`；token 估算计入消息结构（含 tool_calls）。#49 已接入阈值执行；压缩成功追加 `context/compacted`，硬限制失败抛异常。
 
 ---
 
@@ -151,6 +151,14 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 
 ### #49: Context Compactor 三层降级
 
+**已完成的接线约定（供 #50 使用）**：
+- `await ContextBuilder(model_provider, ...).build(session)` 返回安全投影；从 `context.builder` 可导入 `ContextWindowExceededError`。Runtime 必须捕获它并结束当前 run；不得继续发模型请求。
+- 保留前置 SystemMessage 和当前用户 turn，压缩此前完整 turns。进入压缩前验证每个 AIMessage + 连续 ToolMessage 原子块，缺失、重复、孤立结果均拒绝。没有早期完整 turn 时：预算未超 hard 则原样返回、不造事件；超过 hard 则拒绝。
+- LLM 输出为八字段 JSON，各字段是字符串列表。摘要总投影须低于 auto；格式错、请求预算超 hard、超时（默认 30 秒）、模型失败或摘要未达到 auto 目标时机械降级。机械降级后允许 auto～hard 的安全区间；超过 hard 抛异常。外部取消继续传播。
+- `estimate_message_tokens` 统一估算模型消息结构，摘要请求本身也受 hard guard 约束。ContextProvider 保持空扩展点，未接 Memory。
+- 每次从完整 SessionEvent 独立计算，无摘要缓存。`context/compacted` 记录四项指标，不保存摘要正文；原有历史事件不删除。#50 需镜像新事件到流式输出。
+- PORT DESIGN 参考 [Pi compaction](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/compaction.md)（MIT），REUSE 现有 tokenizer / ModelProvider / Session 投影。未移植上游代码，未采用其 split-turn 或增量摘要缓存。
+
 **核心交付**：
 - `src/agent_harness/context/compactor.py`:
   `ContextCompactor` 类，三层降级逻辑
@@ -195,7 +203,7 @@ cd D:/intelligence-agent-backend
 .venv/Scripts/python.exe -m ruff check .
 ```
 
-**当前基线（#48 后，安装 artifact extra）**：397 passed, 8 skipped, 4 deselected, ruff All checks passed。默认额外排除真实七牛测试。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
+**当前基线（#49 后，安装 artifact extra）**：415 passed, 8 skipped, 4 deselected, ruff All checks passed。默认额外排除真实七牛测试。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
 
 ---
 
