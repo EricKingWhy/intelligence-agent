@@ -152,4 +152,7 @@ export interface ConversationState {
   /** Run-level metadata for the Inspector (Phase 5 events). */
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];
+  /** Every event that flowed through the projection, in arrival order (verbatim).
+   *  Timeline tab truth source — never filtered or reshaped (invariant #22). */
+  events: AgentEvent[];
 }

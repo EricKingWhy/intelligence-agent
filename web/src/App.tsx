@@ -18,9 +18,9 @@ import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
-import { StepDetail } from './components/StepDetail';
+import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
-import type { ToolCall, PresetTask } from './types';
+import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
 
 export default function App() {
@@ -43,7 +43,11 @@ export default function App() {
     applyDensity(next);
   };
 
-  const [selectedTool, setSelectedTool] = useState<ToolCall | null>(null);
+  // Inspector 焦点（Brief "上下文 Inspector"）：Run 级 ↔ 事件级，一键返回，不用弹窗。
+  const [focus, setFocus] = useState<InspectorFocus>({ kind: 'run' });
+  const focusTool = (tool: ToolCall) => setFocus({ kind: 'tool', tool });
+  const focusEvent = (event: AgentEvent) => setFocus({ kind: 'event', event });
+  const focusRun = () => setFocus({ kind: 'run' });
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
   // Inspector 折叠是视图状态：收起不卸载（DSH 语义，冻结决策）。
@@ -69,11 +73,11 @@ export default function App() {
   const handleNew = () => {
     // selectSession 内部处理流取消（切走即放弃当前流，幂等）
     selectSession(null);
-    setSelectedTool(null);
+    focusRun();
   };
 
   const handleSubmit = (task: string) => {
-    setSelectedTool(null);
+    focusRun();
     void submitTask({ task, max_steps: 10, auto_approve: true });
   };
 
@@ -95,7 +99,7 @@ export default function App() {
           liveSessionId={streaming ? selectedId : null}
           onSelect={(id) => {
             selectSession(id);
-            setSelectedTool(null);
+            focusRun();
           }}
           onNew={handleNew}
         />
@@ -107,6 +111,7 @@ export default function App() {
             loadingHistory={loadingHistory}
             density={density}
             onPresetTask={(text) => setPresetTask({ text, id: Date.now() })}
+            onFocusTool={focusTool}
           />
           <Composer
             streaming={streaming}
@@ -119,8 +124,10 @@ export default function App() {
         <StepDetail
           conversation={conversation}
           streaming={streaming}
-          selectedTool={selectedTool}
-          onSelectTool={setSelectedTool}
+          focus={focus}
+          onFocusRun={focusRun}
+          onFocusTool={focusTool}
+          onFocusEvent={focusEvent}
         />
       </main>
     </div>

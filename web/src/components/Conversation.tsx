@@ -15,7 +15,7 @@ import { Activity, Brain } from 'lucide-react';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain } from '../lib/projection';
 import type { TraceDensity } from '../lib/density';
-import type { ConversationState, ModelSegment, Turn } from '../types';
+import type { ConversationState, ModelSegment, ToolCall, Turn } from '../types';
 import { formatDuration } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
@@ -27,6 +27,8 @@ interface Props {
   density: TraceDensity;
   /** 空状态示例任务回调——点击 chip 时由 App 注入 Composer。 */
   onPresetTask?: (text: string) => void;
+  /** 点击工具块钻取到事件级 Inspector（Brief "Inspector Scope"）。 */
+  onFocusTool?: (tool: ToolCall) => void;
 }
 
 const EXAMPLE_TASKS = [
@@ -35,7 +37,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, onPresetTask }: Props) {
+export function Conversation({ conversation, loadingHistory, density, onPresetTask, onFocusTool }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -90,6 +92,7 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
             turn={turn}
             active={conversation.run_status === 'running'}
             density={density}
+            onFocusTool={onFocusTool}
           />
         ))}
         <div ref={endRef} />
@@ -98,7 +101,7 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
   );
 }
 
-function TurnView({ turn, active, density }: { turn: Turn; active: boolean; density: TraceDensity }) {
+function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: boolean; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
   // 只有"已完成且有模型文本"的轮次才可折叠——纯工具轮次节点本身已极简，
   // 折叠按钮只会制造噪音（时间轴上直接常驻展开）。
   const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
@@ -137,7 +140,7 @@ function TurnView({ turn, active, density }: { turn: Turn; active: boolean; dens
             {!collapsed && (
               <div className="act-chain">
                 {deriveChain(turn).map((node, i) => (
-                  <ChainNodeView key={chainKey(node, i)} node={node} density={density} />
+                  <ChainNodeView key={chainKey(node, i)} node={node} density={density} onFocusTool={onFocusTool} />
                 ))}
               </div>
             )}
@@ -152,9 +155,9 @@ function chainKey(node: ChainNode, i: number): string {
   return node.kind === 'tool' ? node.tool.tool_call_id : `model-${i}`;
 }
 
-function ChainNodeView({ node, density }: { node: ChainNode; density: TraceDensity }) {
+function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
   if (node.kind === 'tool') {
-    return <ToolCard tool={node.tool} density={density} />;
+    return <ToolCard tool={node.tool} density={density} onFocus={onFocusTool} />;
   }
   const { segment }: { segment: ModelSegment } = node;
   // Compact 档下 done 的 model 段只渲染首行摘要（渐进披露：详情留给 Inspector）

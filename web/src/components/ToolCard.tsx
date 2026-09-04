@@ -24,9 +24,12 @@ import { formatDuration } from '../lib/format';
 interface Props {
   tool: ToolCall;
   density: TraceDensity;
+  /** 点击工具块时钻取到事件级 Inspector（Brief "Inspector Scope"：点工具块切事件详情）。
+   *  未提供时回退为卡片自身展开/收起。 */
+  onFocus?: (tool: ToolCall) => void;
 }
 
-export function ToolCard({ tool, density }: Props) {
+export function ToolCard({ tool, density, onFocus }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const slice = tool.name === 'inspect_artifact' ? tryParseSlice(tool.result) : null;
@@ -38,7 +41,7 @@ export function ToolCard({ tool, density }: Props) {
     <>
       <button
         className={`act-node act-node-${density}`}
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => (onFocus ? onFocus(tool) : setExpanded((v) => !v))}
         aria-expanded={expanded}
       >
         <span className={`act-status act-status-${tool.status}`}>

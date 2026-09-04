@@ -14,7 +14,7 @@ describe('initConversation', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle',
-      compactions: [], reconcile_queue: [],
+      compactions: [], reconcile_queue: [], events: [],
     });
   });
 });
@@ -374,5 +374,43 @@ describe('applyEvent — 执行链投影（Phase 3）', () => {
     const t = s.turns[0];
     expect(t.segments[1].text).toBe('b');
     expect(t.model).toBe(t.segments[1]);
+  });
+});
+
+describe('applyEvent — Inspector Timeline 事件日志（Phase 5）', () => {
+  it('每个事件原样追加到 conversation.events（真相源，零过滤）', () => {
+    const e1 = ev({ type: EventType.RUN_STARTED });
+    const e2 = ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' } });
+    const state = [e1, e2].reduce(applyEvent, initConversation('s1'));
+    expect(state.events).toEqual([e1, e2]);
+  });
+
+  it('applyEvent 是纯追加：后续事件不改变既有日志条目', () => {
+    const e1 = ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' } });
+    const e2 = ev({ type: EventType.TOOL_RESULT, data: { tool_call_id: 't1', content: '{"ok":true}' } });
+    const afterFirst = applyEvent(initConversation('s1'), e1);
+    const snapshot = [...afterFirst.events];
+    applyEvent(afterFirst, e2);
+    expect(afterFirst.events).toEqual(snapshot);
+  });
+
+  it('projectHistory 重建的 events 与输入事件序列一致', () => {
+    const events = [
+      ev({ type: EventType.RUN_STARTED }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi', step: 1 } }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: 'ok', step: 1 } }),
+      ev({ type: EventType.RUN_COMPLETED }),
+    ];
+    const state = projectHistory('s1', events);
+    expect(state.events).toEqual(events);
+    expect(state.events).toHaveLength(4);
+  });
+
+  it('stream-only 事件（model/delta）也进日志——Timeline 显示折叠后的计数视图', () => {
+    const state = [
+      ev({ type: EventType.MODEL_DELTA, data: { delta: 'a', step: 1 } }),
+      ev({ type: EventType.MODEL_DELTA, data: { delta: 'b', step: 1 } }),
+    ].reduce(applyEvent, initConversation('s1'));
+    expect(state.events).toHaveLength(2);
   });
 });

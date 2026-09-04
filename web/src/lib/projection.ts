@@ -17,6 +17,7 @@ export function initConversation(session_id: string): ConversationState {
     run_status: 'idle',
     compactions: [],
     reconcile_queue: [],
+    events: [],
   };
 }
 
@@ -61,6 +62,8 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }),
     compactions: [...state.compactions],
     reconcile_queue: [...state.reconcile_queue],
+    // Inspector Timeline 真相源：流经的每个事件原样保留（不含 model/delta 折叠）
+    events: [...state.events, event],
   };
 
   const { type, data } = event;
