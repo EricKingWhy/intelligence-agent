@@ -90,8 +90,8 @@
 
   /* Text: primary > secondary > tertiary */
   --text-primary: #ededf0;
-  --text-secondary: #9b9ba3;
-  --text-tertiary: #63636b;
+  --text-secondary: #a4a4ac;
+  --text-tertiary: #7a7a83;
 
   /* Accent: restrained cool cyan (NOT AI purple) */
   --accent: #56b8c9;
@@ -146,8 +146,8 @@
   --border-strong: rgba(0, 0, 0, 0.16);
 
   --text-primary: #1d1d21;
-  --text-secondary: #66666e;
-  --text-tertiary: #97979e;
+  --text-secondary: #5f5f67;
+  --text-tertiary: #767680;
 
   --accent: #0e7f93;
   --accent-muted: rgba(14, 127, 147, 0.12);
