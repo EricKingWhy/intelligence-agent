@@ -1544,3 +1544,107 @@
     display: none;
   }
 }
+
+/* ── CopyButton（调研借鉴：AI chat 标配动作，hover 浮现不抢正文视觉） ── */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-muted-foreground);
+  cursor: pointer;
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple),
+    opacity var(--dur-out) var(--ease-apple);
+}
+.copy-btn:hover {
+  color: var(--color-foreground);
+  background: var(--color-hover);
+}
+.copy-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+  opacity: 1;
+}
+.copy-btn.copied {
+  color: var(--color-success, #22a06b);
+}
+
+/* 模型回答块：按钮绝对定位右上，hover 浮现（DOM 在正文后，屏阅顺序正确） */
+.model-output-wrap {
+  position: relative;
+}
+.model-output-wrap .copy-btn {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  opacity: 0;
+  background: var(--color-background, transparent);
+}
+.model-output-wrap:hover .copy-btn,
+.model-output-wrap .copy-btn:focus-visible,
+.model-output-wrap .copy-btn.copied {
+  opacity: 1;
+}
+
+/* markdown 围栏代码块：复制钮常驻半透明，hover 全亮（代码是高频复制对象） */
+.md-code {
+  position: relative;
+}
+.md-code .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0.45;
+  background: var(--color-hover);
+  border-color: var(--border-subtle);
+}
+.md-code .copy-btn:hover,
+.md-code .copy-btn.copied {
+  opacity: 1;
+}
+
+/* turn 工具行：折叠按钮 + 模型名标签两端对齐 */
+.turn-tools-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  width: 100%;
+}
+.model-tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: var(--color-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+/* Inspector 代码块：复制钮常驻右上（JSON 是 dev 高频复制对象） */
+.detail-code-wrap {
+  position: relative;
+  min-width: 0;
+}
+.detail-code-wrap .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0.45;
+  background: var(--color-hover);
+  border-color: var(--border-subtle);
+  z-index: 1;
+}
+.detail-code-wrap .copy-btn:hover,
+.detail-code-wrap .copy-btn.copied {
+  opacity: 1;
+}
+.detail-code-wrap .detail-code {
+  padding-right: 32px;
+}

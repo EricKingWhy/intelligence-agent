@@ -19,6 +19,7 @@ import type { ConversationState, ModelSegment, ToolCall, Turn } from '../types';
 import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
+import { CopyButton } from './CopyButton';
 
 interface Props {
   conversation: ConversationState | null;
@@ -90,6 +91,7 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
           <TurnView
             key={turn.step_id}
             turn={turn}
+            model={conversation.model}
             density={density}
             onFocusTool={onFocusTool}
           />
@@ -102,7 +104,7 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-const TurnView = memo(function TurnView({ turn, density, onFocusTool }: { turn: Turn; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
+const TurnView = memo(function TurnView({ turn, model, density, onFocusTool }: { turn: Turn; model: string | null; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -111,6 +113,10 @@ const TurnView = memo(function TurnView({ turn, density, onFocusTool }: { turn: 
 
   const duration = formatDuration(turn.started_at, turn.completed_at);
   const chain = useMemo(() => deriveChain(turn), [turn]);
+  // hover 时间戳（调研：完成后才展示，流式期间不打扰；title 属性最轻实现）
+  const completedTitle = turn.completed_at
+    ? `完成于 ${new Date(turn.completed_at).toLocaleString()}`
+    : undefined;
 
   return (
     <div className={`turn turn-${turn.status}`}>
@@ -123,16 +129,24 @@ const TurnView = memo(function TurnView({ turn, density, onFocusTool }: { turn: 
 
       {/* Execution chain — model segments and tools in true event order */}
       {turn.activities.length > 0 && (
-        <div className="msg msg-model">
+        <div className="msg msg-model" title={completedTitle}>
           <div className="msg-avatar msg-avatar-model"><Brain size={13} /></div>
           <div className="msg-body">
-            {/* 折叠摘要：派生计数 + 真实耗时，零伪造指标 */}
-            {collapsible && (
-              <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
-                {collapsed
-                  ? `已折叠 · ${turn.tools.length} 个工具 · ${turn.segments.length} 轮${duration ? ` · ${duration}` : ''}`
-                  : '折叠'}
-              </button>
+            {/* 工具行：折叠按钮（手动选项）+ 模型名小标签（调研 pitfall #6：
+                每条 AI 消息标注模型名，升级/降级模型时一眼可辨） */}
+            {(collapsible || (model && turn.model.text)) && (
+              <div className="turn-tools-row">
+                {collapsible && (
+                  <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
+                    {collapsed
+                      ? `已折叠 · ${turn.tools.length} 个工具 · ${turn.segments.length} 轮${duration ? ` · ${duration}` : ''}`
+                      : '折叠'}
+                  </button>
+                )}
+                {model && turn.model.text && (
+                  <span className="model-tag" title="本次运行使用的模型">{model}</span>
+                )}
+              </div>
             )}
             {!collapsed && (
               <div className="act-chain">
@@ -168,10 +182,17 @@ function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; densit
   if (!segment.text && segment.status !== 'streaming') return null;
   // 模型文本与工具输出同级不可信——单行超长模型输出同样会冻结 UI，渲染前截断
   // （41e7360 只覆盖了工具路径，code-review 补齐此处）。
+  // hover 复制（调研：per-message copy 是 AI chat 标配动作；仅完成段提供，
+  // 流式段文本还在增长，复制半成品是噪音）。
   return (
-    <div className={`model-output ${segment.status}`}>
-      {renderMarkdown(truncateForDisplay(segment.text))}
-      {segment.status === 'streaming' && <span className="stream-caret" />}
+    <div className="model-output-wrap">
+      <div className={`model-output ${segment.status}`}>
+        {renderMarkdown(truncateForDisplay(segment.text))}
+        {segment.status === 'streaming' && <span className="stream-caret" />}
+      </div>
+      {segment.status !== 'streaming' && segment.text && (
+        <CopyButton text={segment.text} label="复制回答" />
+      )}
     </div>
   );
 }

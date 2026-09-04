@@ -24,6 +24,7 @@ import { EventType } from '../types';
 import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
+import { CopyButton } from './CopyButton';
 
 /** Inspector focus: Run-level overview or a drilled-in event. */
 export type InspectorFocus =
@@ -454,6 +455,8 @@ function EventInspector({ focus }: { focus: EventFocus }) {
     return <ToolEventSections tool={focus.tool} />;
   }
   const event = focus.event;
+  const dataJson = JSON.stringify(event.data, null, 2);
+  const rawJson = JSON.stringify(event, null, 2);
   return (
     <>
       <div className="detail-section">
@@ -481,11 +484,17 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Input / Output (data)</div>
-        <pre className="detail-code">{truncateForDisplay(JSON.stringify(event.data, null, 2))}</pre>
+        <div className="detail-code-wrap">
+          <CopyButton text={dataJson} label="复制 JSON" />
+          <pre className="detail-code">{truncateForDisplay(dataJson)}</pre>
+        </div>
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Raw</div>
-        <pre className="detail-code">{truncateForDisplay(JSON.stringify(event, null, 2))}</pre>
+        <div className="detail-code-wrap">
+          <CopyButton text={rawJson} label="复制 Raw" />
+          <pre className="detail-code">{truncateForDisplay(rawJson)}</pre>
+        </div>
       </div>
     </>
   );
@@ -493,6 +502,8 @@ function EventInspector({ focus }: { focus: EventFocus }) {
 
 /** 工具事件级视图：Input(args) / Output(result) / Raw(raw_call/raw_result)。 */
 function ToolEventSections({ tool }: { tool: ToolCall }) {
+  const argsJson = JSON.stringify(tool.args, null, 2);
+  const outputText = stringifyForDisplay(tool.result);
   return (
     <>
       <div className="detail-section">
@@ -501,13 +512,17 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
           <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
         </div>
         <div className="detail-subsection">
-          <div className="detail-key">Input (args)</div>
-          <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.args, null, 2))}</pre>
+          <div className="detail-code-wrap">
+            <CopyButton text={argsJson} label="复制 JSON" />
+            <pre className="detail-code">{truncateForDisplay(argsJson)}</pre>
+          </div>
         </div>
         {tool.result !== undefined && (
           <div className="detail-subsection">
-            <div className="detail-key">Output</div>
-            <pre className="detail-code">{truncateForDisplay(stringifyForDisplay(tool.result))}</pre>
+            <div className="detail-code-wrap">
+              <CopyButton text={outputText} label="复制输出" />
+              <pre className="detail-code">{truncateForDisplay(outputText)}</pre>
+            </div>
           </div>
         )}
         {tool.started_at && tool.completed_at && (
@@ -520,8 +535,18 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
       {(tool.raw_call || tool.raw_result) && (
         <div className="detail-section">
           <div className="detail-section-title">Raw</div>
-          {tool.raw_call && <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_call, null, 2))}</pre>}
-          {tool.raw_result && <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_result, null, 2))}</pre>}
+          {tool.raw_call && (
+            <div className="detail-code-wrap">
+              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw" />
+              <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_call, null, 2))}</pre>
+            </div>
+          )}
+          {tool.raw_result && (
+            <div className="detail-code-wrap">
+              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw" />
+              <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_result, null, 2))}</pre>
+            </div>
+          )}
         </div>
       )}
     </>
