@@ -1,0 +1,84 @@
+/** markdown.tsx 白名单渲染测试——结构断言（无需 DOM）。 */
+
+import { describe, expect, it } from 'vitest';
+import type { ReactElement } from 'react';
+import { renderMarkdown } from './markdown';
+
+// React 19 类型中 ReactElement.props 是 unknown——测试里断言结构需要访问 props，
+// 收窄为 any 是测试代码的局部决定，不扩散到产品代码。
+type AnyEl = ReactElement<Record<string, any>>;
+
+function firstElement(nodes: ReturnType<typeof renderMarkdown>): AnyEl {
+  return nodes[0] as AnyEl;
+}
+
+describe('renderMarkdown', () => {
+  it('**bold** 渲染为 strong', () => {
+    const nodes = renderMarkdown('**创建文件**：hi.txt');
+    const el = firstElement(nodes);
+    expect(el.props.children[0].type).toBe('strong');
+    expect(el.props.children[0].props.children).toBe('创建文件');
+  });
+
+  it('`code` 渲染为 code 元素', () => {
+    const nodes = renderMarkdown('内容为 `hello`（5 字符）');
+    const el = firstElement(nodes);
+    // renderInline split: ['内容为 ', '`hello`', '（5 字符）'] → code 在 index 1
+    expect(el.props.children[1].type).toBe('code');
+    expect(el.props.children[1].props.children).toBe('hello');
+  });
+
+  it('- 列表聚合为 md-ul/md-li', () => {
+    const nodes = renderMarkdown('- a\n- b');
+    const ul = firstElement(nodes);
+    expect(ul.type).toBe('ul');
+    expect(ul.props.className).toBe('md-ul');
+    expect(ul.props.children).toHaveLength(2);
+  });
+
+  it('#/## 渲染为 h3，###/#### 渲染为 h4', () => {
+    const h3 = firstElement(renderMarkdown('# 标题'));
+    const h4 = firstElement(renderMarkdown('### 小节'));
+    expect(h3.type).toBe('h3');
+    expect(h4.type).toBe('h4');
+    expect(h4.props.className).toBe('md-heading');
+  });
+
+  it('围栏代码块渲染为 pre.md-code-block', () => {
+    const nodes = renderMarkdown('```py\nprint(1)\n```');
+    const pre = firstElement(nodes);
+    expect(pre.type).toBe('pre');
+    expect(pre.props.className).toBe('md-code-block');
+    expect(pre.props.children.props.children).toBe('print(1)');
+  });
+
+  it('未闭合围栏按代码块收尾（流式安全）', () => {
+    const nodes = renderMarkdown('```py\nprint(1)');
+    const pre = firstElement(nodes);
+    expect(pre.type).toBe('pre');
+    expect(pre.props.children.props.children).toBe('print(1)');
+  });
+
+  it('HTML 文本不产生 script 元素（无注入面，React 结构化渲染）', () => {
+    const nodes = renderMarkdown('<script>alert(1)</script>');
+    // 结构化断言：整树不存在字符串 'script' 类型的元素节点
+    const types: unknown[] = [];
+    const walk = (n: unknown) => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (n && typeof n === 'object' && 'type' in n) {
+        types.push((n as AnyEl).type);
+        walk((n as AnyEl).props?.children);
+      }
+    };
+    walk(nodes);
+    expect(types).not.toContain('script');
+    expect(types).toContain('span'); // 原文作为纯文本 children
+  });
+
+  it('纯文本按行分段', () => {
+    const nodes = renderMarkdown('第一行\n\n第二行');
+    expect(nodes).toHaveLength(2);
+    // md-paragraph 的 children 是 renderInline 数组，文本在首个 span 里
+    expect((nodes[0] as AnyEl).props.children[0].props.children).toBe('第一行');
+  });
+});

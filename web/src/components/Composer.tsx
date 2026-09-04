@@ -1,19 +1,27 @@
 /** Composer — task input at the bottom of the conversation column.
  *
  * Submits on Cmd/Ctrl+Enter. Disabled while streaming.
+ * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
-import { useState, type KeyboardEvent } from 'react';
-import { Send, Square } from 'lucide-react';
+import { useEffect, useState, type KeyboardEvent } from 'react';
+import { ArrowUp, Square } from 'lucide-react';
+import type { PresetTask } from '../types';
 
 interface Props {
   streaming: boolean;
   onSubmit: (task: string) => void;
   onCancel: () => void;
+  presetTask?: PresetTask | null;
 }
 
-export function Composer({ streaming, onSubmit, onCancel }: Props) {
+export function Composer({ streaming, onSubmit, onCancel, presetTask }: Props) {
   const [value, setValue] = useState('');
+
+  // 外部示例任务注入（引用变化即触发；每次点击 chip 生成新对象）
+  useEffect(() => {
+    if (presetTask) setValue(presetTask.text);
+  }, [presetTask]);
 
   const submit = () => {
     const trimmed = value.trim();
@@ -31,23 +39,32 @@ export function Composer({ streaming, onSubmit, onCancel }: Props) {
 
   return (
     <div className="composer-wrap">
-      <textarea
-        className="composer glass"
-        placeholder="Describe a task for the agent… (⌘+Enter to send)"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={onKeyDown}
-        rows={2}
-        disabled={streaming}
-      />
-      <div className="composer-actions">
+      <div className="composer-dock surface-floating">
+        <textarea
+          id="composer-input"
+          name="task"
+          className="composer"
+          placeholder="描述一个任务…（⌘+Enter 发送）"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={onKeyDown}
+          rows={2}
+          disabled={streaming}
+          aria-label="Agent 任务"
+        />
         {streaming ? (
-          <button className="btn-danger" onClick={onCancel}>
-            <Square size={14} /> Stop
+          <button className="composer-stop" onClick={onCancel} aria-label="停止" title="停止">
+            <Square size={12} />
           </button>
         ) : (
-          <button className="btn-primary" onClick={submit} disabled={!value.trim()}>
-            <Send size={14} /> Send
+          <button
+            className="composer-send"
+            onClick={submit}
+            disabled={!value.trim()}
+            aria-label="发送"
+            title="发送（⌘+Enter）"
+          >
+            <ArrowUp size={16} />
           </button>
         )}
       </div>

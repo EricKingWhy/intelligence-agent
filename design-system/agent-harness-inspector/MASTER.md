@@ -214,19 +214,25 @@
 .card-glass:hover { box-shadow: var(--glass-highlight), var(--shadow-lg); }
 ```
 
-### Tool Cards（专属渲染，按 Q12=B）
+### Tool Cards（Phase 9/10 精简版落地形态：Activity Timeline 节点）
 
-- **bash 卡**：深色 mono（`#0D0D0F` 内嵌），stdout/stderr 分流，exit code badge（0 绿、非0 红）。不要玻璃（终端本身就是深色实色）。
-- **diff 卡**（edit/apply_patch/write）：双栏并排或 unified diff，`+` 行绿色 `#7FE0B0` 透明底，`-` 行红色 `#FF6B6B` 透明底。行号左栏 mono。
-- **通用折叠卡**：默认折叠成一行（`工具名 · 参数摘要 · ✓/✗`），展开看完整参数 + 结果 JSON。
+Phase 1 重设计后，工具卡从"左色条卡片"演进为 **act-node 时间轴节点**（更贴 DeepSeek
+Harness 式 activity stream，但视觉语言保持本文件 token）：
+
+- **节点行（act-node，默认态）**：`icon · 工具名(mono) · 参数摘要(ellipsis) · duration(tabular-nums) · 状态图标`，
+  hover 浮起 `--color-hover`，`aria-expanded` 展开态同色。节点左侧一条 0.5px 极淡时间轴竖线（`--color-border`）。
+- **bash**：节点行 + 展开终端内嵌块（`--terminal-bg/--terminal-fg` 跨主题恒定深底浅字，stdout 深色 mono、exit code badge 0 绿非 0 红）。
+- **diff（edit/apply_patch/write）**：展开双栏"变更前/变更后"，`+` 行绿 `--color-success`、`-` 行红 `--color-destructive`，行内容 mono。
+- **通用工具**：展开看完整参数 + 结果 JSON（深底 mono）。
+- **状态表达**：右侧 12px 图标——✓ 绿（success）/ ✗ 红（destructive）/ spinner 黄（running）。不再使用左色条。
+- **Progressive Disclosure**：默认只显节点行，点击展开详情（height + fade，240ms apple ease）。
 
 ### Approval Card（内联，按 Q14=A）
 
 对话流里原地浮起一张 warning-yellow 玻璃卡：
-- 工具名 + 参数（mono）
-- 风险说明（warning 色）
+- 工具名 + 参数（mono，终端深底内嵌）
 - 两个按钮：批准（accent 色）、拒绝（subtle outline）
-- 批准后卡片渐变成 success 绿、工具继续、结果回填到下方
+- 决策后左边条转 success 绿 / destructive 红
 
 ### Buttons
 
@@ -246,23 +252,22 @@
 
 **绝不用**：阴影外扩的 hover（廉价感）、`scale(1.05)`（layout shift）、emoji 图标。
 
-### Inputs / Composer
+### Inputs / Composer（Phase 1 落地：Floating Command Dock）
+
+Composer 是"悬浮玻璃 dock"而非独立输入框：`--radius-lg` 圆角、`surface-floating`
+材质、textarea 透明内嵌（右侧留出按钮位），focus-within 时边框转 accent 45% +
+`--shadow-xl` + 3px accent 光晕。发送按钮 32px 圆钮内嵌右下（↑ 图标，accent 底），
+运行时切换为 destructive 呼吸态停止钮（Square 图标）。
 
 ```css
-.composer {
-  background: var(--color-surface-2);
-  backdrop-filter: blur(var(--glass-blur-2)) saturate(var(--glass-saturate));
-  border: var(--glass-border);
-  border-radius: var(--radius-xl);
-  padding: 14px 18px;
-  font: 400 15px var(--font-ui);
-  min-height: 52px;
-  resize: none;
+.composer-dock {
+  border-radius: var(--radius-lg);
+  transition: box-shadow var(--dur-in) var(--ease-apple), border-color var(--dur-in) var(--ease-apple);
 }
-.composer:focus {
-  outline: none;
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 30%, transparent);
+.composer-dock:focus-within {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  box-shadow: var(--edge-light), var(--shadow-xl),
+    0 0 0 3px color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 ```
 

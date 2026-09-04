@@ -16,7 +16,7 @@ import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { StepDetail } from './components/StepDetail';
-import type { ToolCall } from './types';
+import type { ToolCall, PresetTask } from './types';
 import './styles/app.css';
 
 export default function App() {
@@ -33,8 +33,11 @@ export default function App() {
   } = useSession();
 
   const [selectedTool, setSelectedTool] = useState<ToolCall | null>(null);
+  // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
+  const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
 
   const handleNew = () => {
+    // selectSession 内部处理流取消（切走即放弃当前流，幂等）
     selectSession(null);
     setSelectedTool(null);
   };
@@ -49,7 +52,7 @@ export default function App() {
       <TopBar
         sessionMeta={
           conversation
-            ? { session_id: conversation.session_id, event_count: conversation.turns.length }
+            ? { session_id: conversation.session_id, turn_count: conversation.turns.length }
             : undefined
         }
         streaming={streaming}
@@ -66,10 +69,19 @@ export default function App() {
           onNew={handleNew}
         />
 
-        <section className="app-conversation-col">
+        <section className="app-conversation-col surface-raised">
           {error && <div className="app-error">{error}</div>}
-          <Conversation conversation={conversation} loadingHistory={loadingHistory} />
-          <Composer streaming={streaming} onSubmit={handleSubmit} onCancel={cancelStream} />
+          <Conversation
+            conversation={conversation}
+            loadingHistory={loadingHistory}
+            onPresetTask={(text) => setPresetTask({ text, id: Date.now() })}
+          />
+          <Composer
+            streaming={streaming}
+            onSubmit={handleSubmit}
+            onCancel={cancelStream}
+            presetTask={presetTask}
+          />
         </section>
 
         <StepDetail

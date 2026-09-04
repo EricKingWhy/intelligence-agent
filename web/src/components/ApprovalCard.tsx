@@ -34,9 +34,9 @@ export function ApprovalCard({ sessionId, tool }: Props) {
       <div className="approval-header">
         <ShieldAlert size={16} className="approval-icon" />
         <span className="approval-title">
-          {decision === 'pending' && 'Approval required'}
-          {decision === 'approved' && 'Approved'}
-          {decision === 'denied' && 'Denied'}
+          {decision === 'pending' && '需要审批'}
+          {decision === 'approved' && '已批准'}
+          {decision === 'denied' && '已拒绝'}
         </span>
       </div>
       <div className="approval-tool">
@@ -46,10 +46,10 @@ export function ApprovalCard({ sessionId, tool }: Props) {
       {decision === 'pending' && (
         <div className="approval-actions">
           <button className="btn-primary approval-approve" disabled={busy} onClick={() => decide(true)}>
-            <Check size={14} /> Approve
+            <Check size={14} /> 批准
           </button>
           <button className="btn-ghost approval-deny" disabled={busy} onClick={() => decide(false)}>
-            <X size={14} /> Deny
+            <X size={14} /> 拒绝
           </button>
         </div>
       )}

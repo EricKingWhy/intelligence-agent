@@ -6,6 +6,7 @@
 
 import { ChevronRight, Clock, Hash, Package } from 'lucide-react';
 import type { ConversationState, ToolCall } from '../types';
+import { formatDuration } from '../lib/format';
 
 interface Props {
   conversation: ConversationState | null;
@@ -13,10 +14,17 @@ interface Props {
   onSelectTool: (tool: ToolCall | null) => void;
 }
 
+const RUN_LABELS: Record<ConversationState['run_status'], string> = {
+  idle: '空闲',
+  running: '运行中',
+  completed: '已完成',
+  failed: '失败',
+};
+
 export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) {
   if (!conversation) {
     return (
-      <aside className="step-detail">
+      <aside className="step-detail surface-raised">
         <DetailEmpty />
       </aside>
     );
@@ -26,35 +34,35 @@ export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) 
   const run = conversation.run_status;
 
   return (
-    <aside className="step-detail">
+    <aside className="step-detail surface-raised">
       <div className="detail-header">
-        <span className="panel-label">Step Detail</span>
-        <span className={`run-badge run-badge-${run}`}>{run}</span>
+        <span className="panel-label">步骤详情</span>
+        <span className={`run-badge run-badge-${run}`}>{RUN_LABELS[run]}</span>
       </div>
 
       <div className="detail-section">
         <div className="detail-section-title">
-          <Hash size={12} /> Session
+          <Hash size={12} /> 会话
         </div>
         <div className="detail-row">
           <span className="detail-key">id</span>
           <code className="detail-val">{conversation.session_id.slice(0, 16)}</code>
         </div>
         <div className="detail-row">
-          <span className="detail-key">turns</span>
+          <span className="detail-key">轮次</span>
           <span className="detail-val">{conversation.turns.length}</span>
         </div>
         <div className="detail-row">
-          <span className="detail-key">tools</span>
+          <span className="detail-key">工具</span>
           <span className="detail-val">{tools.length}</span>
         </div>
       </div>
 
       <div className="detail-section">
         <div className="detail-section-title">
-          <Package size={12} /> Tools
+          <Package size={12} /> 工具
         </div>
-        {tools.length === 0 && <div className="detail-empty-hint">No tool calls yet.</div>}
+        {tools.length === 0 && <div className="detail-empty-hint">暂无工具调用。</div>}
         {tools.map((t) => (
           <button
             key={t.tool_call_id}
@@ -74,12 +82,12 @@ export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) 
             <Clock size={12} /> {selectedTool.name}
           </div>
           <div className="detail-subsection">
-            <div className="detail-key">args</div>
+            <div className="detail-key">参数</div>
             <pre className="detail-code">{JSON.stringify(selectedTool.args, null, 2)}</pre>
           </div>
           {selectedTool.result !== undefined && (
             <div className="detail-subsection">
-              <div className="detail-key">result</div>
+              <div className="detail-key">结果</div>
               <pre className="detail-code">
                 {typeof selectedTool.result === 'string'
                   ? selectedTool.result
@@ -89,13 +97,9 @@ export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) 
           )}
           {selectedTool.started_at && selectedTool.completed_at && (
             <div className="detail-row">
-              <span className="detail-key">duration</span>
+              <span className="detail-key">耗时</span>
               <span className="detail-val">
-                {(
-                  new Date(selectedTool.completed_at).getTime() -
-                  new Date(selectedTool.started_at).getTime()
-                )}
-                ms
+                {formatDuration(selectedTool.started_at, selectedTool.completed_at)}
               </span>
             </div>
           )}
@@ -105,11 +109,11 @@ export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) 
       {/* Reserved slots for future phases — empty by design. */}
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">Checkpoint</div>
-        <div className="detail-empty-hint">Phase 7 — reserved</div>
+        <div className="detail-empty-hint">Phase 7 — 预留</div>
       </div>
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">Artifact</div>
-        <div className="detail-empty-hint">Phase 6 — reserved</div>
+        <div className="detail-empty-hint">Phase 6 — 预留</div>
       </div>
     </aside>
   );
@@ -118,8 +122,8 @@ export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) 
 function DetailEmpty() {
   return (
     <div className="detail-empty">
-      <div className="detail-empty-title">No session selected</div>
-      <div className="detail-empty-hint">Pick one from the left, or start a new task.</div>
+      <div className="detail-empty-title">未选择会话</div>
+      <div className="detail-empty-hint">从左侧选择，或开始新任务。</div>
     </div>
   );
 }

@@ -1,28 +1,44 @@
 /** useSession — orchestrates session list, history loading, and live streaming.
  *
- * Single React hook that components consume. Internally:
- *   - loads session list on mount
- *   - when a session is selected, loads its durable events → projects to ConversationState
- *   - on new task submit, POSTs and consumes SSE → folds events into same state
+ * State model: a single discriminated `mode` (SessionMode) is the source of truth —
+ *   idle                    → no session (empty state), conversation is null
+ *   live(sessionId?)        → a new task is streaming; events paint the conversation
+ *   viewing(sessionId)      → a durable session is being viewed (history rebuild)
+ * `selectedId` / `streaming` are derived from mode, so conversation.session_id and
+ * the highlighted row can never disagree (invariant #22: no second truth).
+ *
+ * Migrations:
+ *   submit    → live(null), conversation reset (a new task never folds into the
+ *               previously viewed session's state)
+ *   first SSE frame with session_id → live(sid)
+ *   done/error/cancel → viewing(known sid) or idle (nothing durable yet) — the
+ *               history loader re-reads the durable log so the view always
+ *               comes from the fact source.
+ *   selectSession → cancels any live stream (idempotent) and switches mode.
  *
  * Disconnect cleanup: SSE handle's cancel() is wired to unmount via useEffect ref.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ConversationState, SessionSummary } from '../types';
+import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { listSessions, getSessionEvents, startSession, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory } from '../lib/projection';
 
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
   const [conversation, setConversation] = useState<ConversationState | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const sseRef = useRef<SSEHandle | null>(null);
+  // live 流中已知的首帧 sid——结束/出错/取消时决定迁移目标。
+  const liveSidRef = useRef<string | null>(null);
+
+  // Derived, so the UI can never observe a mismatch between them.
+  const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
+  const streaming = mode.kind === 'live';
 
   // Load session list on mount.
   const refreshSessions = useCallback(async () => {
@@ -30,7 +46,7 @@ export function useSession() {
       const list = await listSessions();
       setSessions(list);
     } catch (e) {
-      setError(`Failed to load sessions: ${(e as Error).message}`);
+      setError(`加载会话列表失败：${(e as Error).message}`);
     }
   }, []);
 
@@ -38,22 +54,26 @@ export function useSession() {
     refreshSessions();
   }, [refreshSessions]);
 
-  // Load history when a session is selected.
+  // History loading: viewing mode reads the durable log; live mode lets the
+  // stream paint (a stale/partial disk read would overwrite in-flight state);
+  // idle owns no conversation.
   useEffect(() => {
-    if (!selectedId) {
+    if (mode.kind === 'idle') {
       setConversation(null);
       return;
     }
+    if (mode.kind !== 'viewing') return;
+    const sid = mode.sessionId;
     let cancelled = false;
     setLoadingHistory(true);
     setError(null);
-    getSessionEvents(selectedId)
+    getSessionEvents(sid)
       .then((events: AgentEvent[]) => {
         if (cancelled) return;
-        setConversation(projectHistory(selectedId, events));
+        setConversation(projectHistory(sid, events));
       })
       .catch((e) => {
-        if (!cancelled) setError(`Failed to load events: ${(e as Error).message}`);
+        if (!cancelled) setError(`加载历史事件失败：${(e as Error).message}`);
       })
       .finally(() => {
         if (!cancelled) setLoadingHistory(false);
@@ -61,7 +81,7 @@ export function useSession() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId]);
+  }, [mode]);
 
   // Cleanup SSE on unmount.
   useEffect(() => {
@@ -70,59 +90,79 @@ export function useSession() {
     };
   }, []);
 
-  /** Submit a new task. Creates a fresh session and streams the response. */
+  /** Submit a new task. Creates a fresh session and streams the response.
+   *  The conversation is reset first — a live stream never folds into the
+   *  previously viewed session's turns. */
   const submitTask = useCallback(
     async (payload: StartSessionPayload) => {
       setError(null);
-      setStreaming(true);
+      setConversation(null);
+      liveSidRef.current = null;
+      setMode({ kind: 'live', sessionId: null });
       try {
         const res = await startSession(payload);
         if (!res.ok || !res.body) {
           throw new Error(`Start failed: ${res.status}`);
         }
 
-        // We don't know session_id up-front from SSE (events carry it), so init blank
-        // and fill from first event. For projection safety, use a temp id then patch.
-        let conv: ConversationState | null = conversation;
+        let conv: ConversationState | null = null;
 
         const handle = consumeSSE(
           res,
           (event: AgentEvent) => {
-            if (!conv) {
-              // First event seeds the conversation.
-              const sid = (event.data.session_id as string) ?? 'streaming';
-              conv = initConversation(sid);
+            const sid = event.session_id ?? null;
+            if (sid) {
+              liveSidRef.current = sid;
+              // 首帧确认：把 sid 写进 mode（仅从 null 迁移一次）
+              setMode((m) =>
+                m.kind === 'live' && m.sessionId === null ? { kind: 'live', sessionId: sid } : m,
+              );
             }
+            if (!conv) conv = initConversation(sid ?? 'streaming');
             conv = applyEvent(conv, event);
             setConversation({ ...conv });
-            // Once we have a session_id, select it so list reload includes it.
-            const sid = (event.data.session_id as string) ?? conv.session_id;
-            if (sid && sid !== 'streaming' && selectedId !== sid) {
-              setSelectedId(sid);
-            }
           },
           () => {
-            setStreaming(false);
+            // Stream finished: view the session it produced (history loader
+            // re-reads the durable log), and refresh the list for the new row.
+            const sid = liveSidRef.current;
+            setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             refreshSessions();
           },
           (err) => {
-            setStreaming(false);
-            setError(`Stream error: ${(err as Error).message}`);
+            const sid = liveSidRef.current;
+            setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
+            setError(`流式错误：${(err as Error).message}`);
           },
         );
         sseRef.current = handle;
       } catch (e) {
-        setStreaming(false);
-        setError(`Submit failed: ${(e as Error).message}`);
+        setMode({ kind: 'idle' });
+        setError(`提交失败：${(e as Error).message}`);
       }
     },
-    [conversation, selectedId, refreshSessions],
+    [refreshSessions],
   );
 
+  /** Abort the live stream, if any. Falls back to the durable facts already
+   *  on disk (viewing(sid)) — or idle when the stream never identified itself. */
   const cancelStream = useCallback(() => {
     sseRef.current?.cancel();
     sseRef.current = null;
-    setStreaming(false);
+    setMode(
+      liveSidRef.current
+        ? { kind: 'viewing', sessionId: liveSidRef.current }
+        : { kind: 'idle' },
+    );
+  }, []);
+
+  /** Switch sessions. Cancels any live stream first (idempotent, no-op when idle) —
+   *  the UI only ever presents the session the mode points at. */
+  const selectSession = useCallback((id: string | null) => {
+    sseRef.current?.cancel();
+    sseRef.current = null;
+    liveSidRef.current = null;
+    setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
 
   return {
@@ -132,7 +172,7 @@ export function useSession() {
     loadingHistory,
     streaming,
     error,
-    selectSession: setSelectedId,
+    selectSession,
     submitTask,
     cancelStream,
     refreshSessions,

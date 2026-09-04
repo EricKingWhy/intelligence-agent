@@ -34,9 +34,9 @@ class TestSessionEventDTO:
         assert event.source_event_ids is None
 
     def test_all_event_types_registered(self):
-        # Phase 1：10 种基础事件；Phase 9：+ model/started + model/delta（流式信号）；
-        # Phase 4：+ operation/reconcile-required（UNKNOWN Operation 人工裁决信号，#30）。
-        # Phase 5：+ artifact/created（大 Tool 输出完整保存，#47）。
+        # Durable vocabulary: 13 types — Phase 1 基础 + Phase 9 model/completed-failed + tool/*
+        # + Phase 4 operation/reconcile-required (#30) + Phase 5 artifact/created (#47) + context/compacted.
+        # model/started + model/delta are STREAM_ONLY — never persisted (invariant #4).
         expected = {
             "session/started",
             "session/resumed",
@@ -44,8 +44,6 @@ class TestSessionEventDTO:
             "run/completed",
             "run/failed",
             "user/message",
-            "model/started",
-            "model/delta",
             "model/completed",
             "model/failed",
             "tool/call",

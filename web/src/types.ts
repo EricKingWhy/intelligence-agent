@@ -3,6 +3,12 @@
  * Frontend never owns truth; it projects events into view-models.
  */
 
+/**
+ * Event type constants are GENERATED from session/event.py (single source) —
+ * see web/src/generated/event-types.ts. Do not hand-edit values here.
+ */
+export { EventType, STREAM_ONLY_TYPES } from './generated/event-types';
+
 /** A single SSE frame from POST /api/sessions or durable event from GET events. */
 export interface AgentEvent {
   type: string;
@@ -10,6 +16,14 @@ export interface AgentEvent {
   seq: number | null;
   run_id: string | null;
   step_id: number | null;
+  /** Durable-event timestamp (SessionEvent.time, present on GET /events history).
+   *  SSE frames don't carry it yet — projection falls back to client clock. */
+  time?: string;
+  /** Present on historical events read from the store. */
+  event_id?: string;
+  /** Present on SSE-streamed events (injected by POST /api/sessions endpoint).
+   *  Absent on historical events read from the store (session_id is known from the URL). */
+  session_id?: string;
 }
 
 /** Session summary from GET /api/sessions. */
@@ -20,21 +34,28 @@ export interface SessionSummary {
   last_event_time: string | null;
 }
 
-// ── Event type constants (mirror session/event.py) ──
-export const EventType = {
-  SESSION_STARTED: 'session/started',
-  USER_MESSAGE: 'user/message',
-  RUN_STARTED: 'run/started',
-  RUN_COMPLETED: 'run/completed',
-  RUN_FAILED: 'run/failed',
-  MODEL_STARTED: 'model/started',
-  MODEL_DELTA: 'model/delta',
-  MODEL_COMPLETED: 'model/completed',
-  TOOL_STARTED: 'tool/started',
-  TOOL_COMPLETED: 'tool/completed',
-} as const;
-
 // ── View-models (projection output) ──
+
+/** 空状态示例任务注入 Composer 的载荷（对象引用变化即触发注入）。 */
+export interface PresetTask {
+  text: string;
+  id: number;
+}
+
+/** 会话呈现模式——conversation 永远属于 mode 指向的会话（编译期保证）。
+ *
+ * - idle：无选中会话（空状态）。
+ * - live：正在流式创建/跟随的新会话；sessionId 为 null 表示 POST 已发出、
+ *   首帧尚未确认（session_id 由 SSE 帧注入）。
+ * - viewing：查看（历史重建）中的会话。
+ *
+ * 迁移规则：live → viewing 只发生在流结束/出错/取消时；viewing/live 之间切换
+ * 由 selectSession 处理（切走即放弃当前流，幂等）。
+ */
+export type SessionMode =
+  | { kind: 'idle' }
+  | { kind: 'live'; sessionId: string | null }
+  | { kind: 'viewing'; sessionId: string };
 
 export interface ToolCall {
   tool_call_id: string;

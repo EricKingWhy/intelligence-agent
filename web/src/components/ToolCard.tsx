@@ -9,8 +9,9 @@
  */
 
 import { useState } from 'react';
-import { Check, ChevronRight, ChevronDown, Terminal, Wrench, X } from 'lucide-react';
+import { Check, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
+import { formatDuration } from '../lib/format';
 
 interface Props {
   tool: ToolCall;
@@ -20,17 +21,20 @@ export function ToolCard({ tool }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const [expanded, setExpanded] = useState(false);
-
-  const statusClass = `tool-status tool-status-${tool.status}`;
+  const duration = formatDuration(tool.started_at, tool.completed_at);
 
   return (
-    <div className={`tool-card ${statusClass}`}>
-      <button className="tool-card-header" onClick={() => setExpanded((v) => !v)}>
-        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        {isBash ? <Terminal size={14} /> : <Wrench size={14} />}
-        <span className="tool-name">{tool.name}</span>
-        <span className="tool-args-summary">{summarizeArgs(tool)}</span>
-        <span className="tool-status-badge">
+    <>
+      <button
+        className="act-node"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>
+        <span className="act-name">{tool.name}</span>
+        <span className="act-args">{summarizeArgs(tool)}</span>
+        {duration && <span className="act-duration">{duration}</span>}
+        <span className={`act-status act-status-${tool.status}`}>
           {tool.status === 'success' && <Check size={12} />}
           {tool.status === 'failed' && <X size={12} />}
           {tool.status === 'running' && <span className="status-spinner" />}
@@ -44,7 +48,7 @@ export function ToolCard({ tool }: Props) {
           {!isBash && !isDiffTool && <GenericBlock tool={tool} />}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -83,15 +87,15 @@ function BashBlock({ tool }: { tool: ToolCall }) {
 function DiffBlock({ diff }: { diff: NonNullable<ToolCall['diff']> }) {
   return (
     <div className="diff-block">
-      {diff.truncated && <div className="diff-truncated">content truncated for display</div>}
+      {diff.truncated && <div className="diff-truncated">内容过长，已截断显示</div>}
       <div className="diff-cols">
         <div className="diff-col diff-before">
-          <div className="diff-col-label">before</div>
-          <pre>{diff.before || '(empty)'}</pre>
+          <div className="diff-col-label">变更前</div>
+          <pre>{diff.before || '（空）'}</pre>
         </div>
         <div className="diff-col diff-after">
-          <div className="diff-col-label">after</div>
-          <pre>{diff.after || '(empty)'}</pre>
+          <div className="diff-col-label">变更后</div>
+          <pre>{diff.after || '（空）'}</pre>
         </div>
       </div>
     </div>
@@ -102,12 +106,12 @@ function GenericBlock({ tool }: { tool: ToolCall }) {
   return (
     <div className="generic-block">
       <div className="generic-section">
-        <div className="generic-label">args</div>
+        <div className="generic-label">参数</div>
         <pre>{JSON.stringify(tool.args, null, 2)}</pre>
       </div>
       {tool.result !== undefined && (
         <div className="generic-section">
-          <div className="generic-label">result</div>
+          <div className="generic-label">结果</div>
           <pre>{typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}</pre>
         </div>
       )}

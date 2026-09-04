@@ -42,7 +42,13 @@ export function consumeSSE(
         if (streamDone) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE frames separated by \n\n. Process each complete frame.
+        // SSE frames are separated by a blank line. The spec allows \n, \r\n, or \r
+        // line endings, so normalize CRLF → LF before searching for '\n\n'.
+        // Without this, a server emitting \r\n\r\n (uvicorn on Windows does)
+        // never matches a hard-coded '\n\n' boundary and every frame hangs.
+        buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+        // Process every complete frame currently in the buffer.
         let sep: number;
         while ((sep = buffer.indexOf('\n\n')) !== -1) {
           const frame = buffer.slice(0, sep);
@@ -50,7 +56,8 @@ export function consumeSSE(
           parseFrame(frame).forEach(onEvent);
         }
       }
-      // Flush trailing
+      // Flush the decoder's pending multi-byte sequence, then any trailing frame.
+      buffer += decoder.decode();
       if (buffer.trim()) {
         parseFrame(buffer).forEach(onEvent);
       }
