@@ -3,7 +3,7 @@
 > **交接对象**：Codex（Secondary / Task Agent）
 > **交接时间**：2026-09-04
 > **交接人**：ZCode（本会话）
-> **当前进度**：#45、#46 已完成，#47–#50 待实施（Codex 2026-09-04 更新）
+> **当前进度**：#45–#47 已完成，#48–#50 待实施（Codex 2026-09-04 更新）
 
 ---
 
@@ -28,14 +28,14 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 |---|--------|------|------|------------|
 | 1 | #45 | ArtifactStore ABC + FakeArtifactStore + inspect_artifact Tool | ✅ DONE (fd7439a) | — |
 | 2 | #46 | estimate_tokens + ContextBuilder base (no Compaction) | ✅ DONE (c98c9a5) | — |
-| 3 | #47 | Overflow Handler + Executor 集成 + artifact/created | ⬜ TODO | #45 ✅ |
+| 3 | #47 | Overflow Handler + Executor 集成 + artifact/created | ✅ DONE (de6a894) | #45 ✅ |
 | 4 | #48 | S3ArtifactStore (七牛云 S3 兼容) | ⬜ TODO | #45 ✅ |
 | 5 | #49 | Context Compactor 三层降级 + context/compacted | ⬜ TODO | #46 |
 | 6 | #50 | AgentRuntime 集成 + Phase 5 端到端测试 | ⬜ TODO | #47, #48, #49 |
 
-**可立即开始的**：#47、#48、#49（前置 #45 / #46 已完成）。
+**可立即开始的**：#48、#49（前置 #45 / #46 已完成）。
 
-**建议执行顺序**：#47 → #48 → #49 → #50（串行）。
+**建议执行顺序**：#48 → #49 → #50（串行）。
 
 **#46 接口说明**：`ContextBuilder.build` 和 `ContextProvider.select` 为 async，调用时使用 `await`；token 估算计入消息结构（含 tool_calls），记录在诊断日志，不写 SessionEvent。当前 build 即使超过阈值也返回完整投影，阈值执行留给 #49。
 
@@ -89,6 +89,14 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 **注意**：`tiktoken` 第一次 import 会下载编码文件——确保测试环境能联网或缓存了编码。
 
 ### #47: Overflow Handler + Executor 集成
+
+**已完成的接线约定（供 #50 使用）**：
+- `ToolExecutor(..., overflow_handler=ArtifactOverflowHandler(store))`；`execute()` / `execute_batch()` 需要显式传 `session=session`。没有 handler 的原调用兼容；缺 Session 或与 OperationContext 不匹配时在副作用前拒绝。
+- Runtime 的 Session 传递、事件流镜像和默认构造仍由 #50 集成，本 ticket 不修改 AgentRuntime。
+- 兼容现有 BashTool 的 `stdout/stderr`。单个大字段存原文；多个大字段存可完整还原的 JSON 对象，共用一个 ref，各字段返回摘要。短字段、exit_code、错误语义与 metadata 保留。
+- 默认阈值 2000 字符，摘要首尾各最多 10 行并限制字符数。阈值小于固定引用提示长度时仍保留提示，摘要可能超过这个极小阈值。
+- 上传或事件持久化失败直接传播，不能进入 Tool retry；已有 Ledger 保留 RUNNING 供恢复对账，不伪造 artifact_ref。
+- 复用决策：REUSE 已有 ArtifactStore / ToolResult / Ledger，BUILD 本项目后处理接线；参考 DeepSeek Harness 的 post-execute spill 设计（MIT，`docs/subsystems/spill.md`，master）。未移植代码；本项目存储失败中断，与上游保留内联大输出的 best-effort 策略不同。
 
 **核心交付**：
 - `src/agent_harness/tooling/overflow.py`:
@@ -178,7 +186,7 @@ cd D:/intelligence-agent-backend
 .venv/Scripts/python.exe -m ruff check .
 ```
 
-**当前基线（#46 后）**：374 passed, 8 skipped, 3 deselected, ruff All checks passed。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
+**当前基线（#47 后）**：386 passed, 8 skipped, 3 deselected, ruff All checks passed。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
 
 ---
 
