@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import fnmatch
+import logging
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from time import perf_counter
 
@@ -19,6 +21,41 @@ from agent_harness.sandbox.base import ExecResult, Sandbox
 
 #: LocalSubprocess 的默认命令超时（秒）。None 表示不超时。
 DEFAULT_EXEC_TIMEOUT: float = 60.0
+
+logger = logging.getLogger("agent_harness.sandbox.local")
+
+#: 捕获流读取块大小（字符）。
+_DRAIN_CHUNK_CHARS = 65536
+
+
+class _CappedCapture:
+    """有上限的捕获缓冲：超限后继续排空管道（让子进程自然结束）但丢弃内容。
+
+    没有它，`subprocess.run(capture_output=True)` 会把任意大的 stdout/stderr
+    整体读进内存——一个 cat 大文件的命令就能 OOM 掉整个 agent 进程（D4）。
+    """
+
+    def __init__(self, max_chars: int) -> None:
+        self.max_chars = max_chars
+        self._chunks: list[str] = []
+        self._remaining = max_chars
+        self.truncated = False
+        self._lock = threading.Lock()
+
+    def append(self, text: str) -> None:
+        with self._lock:
+            if self._remaining > 0:
+                keep = text[: self._remaining]
+                self._chunks.append(keep)
+                self._remaining -= len(keep)
+                if len(keep) < len(text):
+                    self.truncated = True
+            elif text:
+                self.truncated = True
+
+    def value(self) -> str:
+        with self._lock:
+            return "".join(self._chunks)
 
 
 def _glob_match(rel_path: str, pattern: str) -> bool:
@@ -48,9 +85,10 @@ class LocalSubprocessSandbox(Sandbox):
     进程不存在"启动"概念，ensure_started 是 no-op；stop 也不需要清理（幂等空操作）。
     """
 
-    def __init__(self, workspace_root: Path) -> None:
+    def __init__(self, workspace_root: Path, *, max_capture_chars: int = 2_000_000) -> None:
         self._workspace_root = Path(workspace_root).resolve()
         self._workspace_root.mkdir(parents=True, exist_ok=True)
+        self._max_capture_chars = max_capture_chars
 
     @property
     def workspace_root(self) -> Path:
@@ -62,8 +100,11 @@ class LocalSubprocessSandbox(Sandbox):
     def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
 
-        timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点 subprocess 抛 TimeoutExpired，
-        本方法把它包成 ExecResult(exit_code=-1, stderr="命令超时")，不抛异常。
+        timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉子进程并返回
+        ExecResult(exit_code=-1, stderr="命令超时…")，不抛异常。
+        stdout/stderr 捕获到 max_capture_chars 上限，超限丢弃并附截断标记
+        （D4：无上限捕获会被大输出 OOM）。管道由 reader 线程持续排空，
+        子进程可自然结束，不会因为缓冲塞满而死锁。
         """
         self.ensure_started()
         effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
@@ -71,34 +112,66 @@ class LocalSubprocessSandbox(Sandbox):
         # encoding/errors：Windows 中文系统默认 GBK，模型跑的命令可能输出 UTF-8 或 GBK；
         # 用 errors="replace" 保证任何字节序列都不会让 subprocess 解码崩掉。
         t0 = perf_counter()
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=self._workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        stdout_cap = _CappedCapture(self._max_capture_chars)
+        stderr_cap = _CappedCapture(self._max_capture_chars)
+        readers = [
+            threading.Thread(target=self._drain_stream, args=(process.stdout, stdout_cap), daemon=True),
+            threading.Thread(target=self._drain_stream, args=(process.stderr, stderr_cap), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+
+        timed_out = False
         try:
-            completed = subprocess.run(
-                command,
-                shell=True,
-                check=False,
-                cwd=self._workspace_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=effective_timeout,
-            )
-            duration_ms = round((perf_counter() - t0) * 1000, 1)
-            return ExecResult(
-                exit_code=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-                duration_ms=duration_ms,
-            )
-        except subprocess.TimeoutExpired as e:
-            duration_ms = round((perf_counter() - t0) * 1000, 1)
-            return ExecResult(
-                exit_code=-1,
-                stdout=e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or ""),
-                stderr=(e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or ""))
-                + f"\n命令超时（上限 {effective_timeout} 秒）",
-                duration_ms=duration_ms,
-            )
+            exit_code = process.wait(timeout=effective_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            try:
+                exit_code = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:  # pragma: no cover — kill 后通常立即退出
+                exit_code = -1
+        for reader in readers:
+            reader.join(5)
+
+        stdout, stderr = stdout_cap.value(), stderr_cap.value()
+        if stdout_cap.truncated:
+            stdout += f"\n[stdout 超过捕获上限 {self._max_capture_chars} 字符，已截断]"
+        if stderr_cap.truncated:
+            stderr += f"\n[stderr 超过捕获上限 {self._max_capture_chars} 字符，已截断]"
+        if timed_out:
+            exit_code = -1
+            stderr += f"\n命令超时（上限 {effective_timeout} 秒）"
+        return ExecResult(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=round((perf_counter() - t0) * 1000, 1),
+        )
+
+    @staticmethod
+    def _drain_stream(stream, cap: _CappedCapture) -> None:
+        """后台排空一条捕获流；超限后只读不存，保证子进程不被管道背压卡死。"""
+        try:
+            while chunk := stream.read(_DRAIN_CHUNK_CHARS):
+                cap.append(chunk)
+        except Exception as error:  # noqa: BLE001 — 流被随 kill 关闭属正常路径
+            logger.debug("capture stream closed during drain: %s", type(error).__name__)
+        finally:
+            try:
+                stream.close()
+            except Exception as error:  # noqa: BLE001 — 关闭失败不影响结果
+                logger.debug("capture stream close failed: %s", type(error).__name__)
 
     def list_files(self, pattern: str) -> list[str]:
         """枚举 workspace 内匹配 glob 模式的文件，返回 POSIX 风格相对路径（排序）。

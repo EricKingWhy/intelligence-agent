@@ -218,3 +218,28 @@ class TestNextSeq:
         session.append(USER_MESSAGE, {"content": "a"})  # seq 1
         session.append(MODEL_COMPLETED, {"content": "b"})  # seq 2
         assert session.next_seq == 3
+
+
+# ── mark / since：Session 拥有"自 X 之后追加的事件"句柄（A1 深化）──
+
+
+class TestMarkAndSince:
+    def test_mark_and_since_roundtrip(self, store: JsonlSessionStore):
+        session = Session.start(store)
+        marker = session.mark()
+        session.append(USER_MESSAGE, {"content": "a"})
+        session.append(MODEL_COMPLETED, {"content": "b"})
+        fresh = session.since(marker)
+        assert [e.type for e in fresh] == [USER_MESSAGE, MODEL_COMPLETED]
+
+    def test_since_before_any_append_is_empty(self, store: JsonlSessionStore):
+        session = Session.start(store)
+        assert session.since(session.mark()) == []
+
+    def test_since_returns_copy_not_internal_list(self, store: JsonlSessionStore):
+        session = Session.start(store)
+        marker = session.mark()
+        session.append(USER_MESSAGE, {"content": "a"})
+        fresh = session.since(marker)
+        fresh.clear()
+        assert len(session.since(marker)) == 1

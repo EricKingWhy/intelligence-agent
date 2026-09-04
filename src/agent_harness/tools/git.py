@@ -11,6 +11,7 @@ READ_ONLY 副作用：不改外部状态，可与同批其他 READ_ONLY 工具�
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 
 from pydantic import BaseModel, Field
@@ -66,7 +67,8 @@ class GitStatusTool(Tool):
         command = "git status --porcelain=v1"
         if args.pathspec:
             command += " " + shlex.quote(args.pathspec)
-        result = self._sandbox.exec(command)
+        # 同步 sandbox.exec 卸载到工作线程，避免阻塞 event loop（D10）。
+        result = await asyncio.to_thread(self._sandbox.exec, command)
         return ToolResult.success(
             message=f"git status 已执行，exit_code={result.exit_code}。",
             data={
@@ -126,7 +128,8 @@ class GitDiffTool(Tool):
             command += " --staged"
         if args.path:
             command += " " + shlex.quote(args.path)
-        result = self._sandbox.exec(command)
+        # 同步 sandbox.exec 卸载到工作线程，避免阻塞 event loop（D10）。
+        result = await asyncio.to_thread(self._sandbox.exec, command)
         return ToolResult.success(
             message=f"git diff 已执行，exit_code={result.exit_code}。",
             data={

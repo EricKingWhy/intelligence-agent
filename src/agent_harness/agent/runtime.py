@@ -33,12 +33,15 @@ from agent_harness.agent.types import (
     to_agent_event,
 )
 from agent_harness.context.builder import ContextBuilder, ContextWindowExceededError
+from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
+from agent_harness.memory.writeback import MemoryWriteback
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
     MODEL_STARTED,
     RUN_FAILED,
+    RUN_STARTED,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -52,9 +55,31 @@ from agent_harness.storage import (
     OperationContext,
     SessionMeta,
 )
-from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 
 logger = logging.getLogger("agent_harness.agent")
+
+
+def _usage_from_response(ai: Any) -> dict[str, int] | None:
+    """从模型响应如实抽取 token usage；响应没带就返回 None（绝不伪造）。"""
+    meta = getattr(ai, "usage_metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    usage: dict[str, int] = {}
+    for source_key, target_key in ({"input_tokens": "prompt_tokens",
+                                    "output_tokens": "completion_tokens",
+                                    "total_tokens": "total_tokens"}).items():
+        value = meta.get(source_key)
+        if value is not None:
+            usage[target_key] = value
+    return usage or None
+
+
+def _model_name_from_response(ai: Any) -> str | None:
+    """从响应元数据取本次推理的模型名；拿不到就 None，不猜不编。"""
+    meta = getattr(ai, "response_metadata", None) or {}
+    name = meta.get("model_name") or meta.get("model")
+    return name if isinstance(name, str) and name else None
 
 
 class AgentRuntime:
@@ -75,6 +100,8 @@ class AgentRuntime:
         checkpoint_policy: CheckpointPolicy | None = None,
         session_meta_store: Any | None = None,
         context_builder: ContextBuilder | None = None,
+        context_providers: list[ContextProvider] | None = None,
+        memory_writer: MemoryWriteback | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -86,7 +113,10 @@ class AgentRuntime:
         self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
         self._session_meta_store = session_meta_store
         # 使用未绑定工具的原始 Provider 生成摘要，不让摘要调用请求工具。
-        self._context_builder = context_builder or ContextBuilder(model)
+        self._context_builder = context_builder or ContextBuilder(model, context_providers=context_providers)
+        if context_builder is not None and context_providers:
+            self._context_builder.context_providers.extend(context_providers)
+        self._memory_writer = memory_writer
 
         # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
         # 并在回复里产出 tool_calls。bind_tools 是 LangChain 的标准接线点。
@@ -140,15 +170,19 @@ class AgentRuntime:
         循环结束把最终 AgentRunResult 存到 self._last_result 供 run() 取用。
         """
         # 写入 user 消息事件
+        memory_event_start = session.mark()
         user_event = session.append(USER_MESSAGE, {"content": user_input})
         yield to_agent_event(user_event)
         # USER_ACCEPTED 稳定边界：user/message 已持久化。
         await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
         run_id = session.begin_run()
-        run_started = session.events[-1]  # begin_run append 了 run/started；events 是公开 property
+        # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
+        run_started = next(e for e in session.since(memory_event_start) if e.type == RUN_STARTED)
         yield to_agent_event(run_started)
         steps = 0
+        # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
+        usage_total: dict[str, int] = {}
 
         run_span = new_span_id()
         self._log("agent_start", "Agent Loop 开始", span_id=run_span, step=0,
@@ -156,7 +190,7 @@ class AgentRuntime:
 
         while True:
             # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
-            context_event_start = len(session.events)
+            context_event_start = session.mark()
             try:
                 messages = await self._context_builder.build(session)
             except ContextWindowExceededError as error:
@@ -168,8 +202,9 @@ class AgentRuntime:
                 self._last_result = AgentRunResult(
                     status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps,
                 )
+                # 模型在本轮从未被调用：没有可抽取的对话内容，跳过 writeback。
                 return
-            for event in session.events[context_event_start:]:
+            for event in session.since(context_event_start):
                 yield to_agent_event(event)
 
             # 第 2 步：发起这一轮模型调用（按 stream 选 astream/ainvoke）
@@ -213,12 +248,21 @@ class AgentRuntime:
                       outcome="success")
 
             # 第 3 步：把 AIMessage 持久化为 model/completed 事件
-            tool_calls = ai.tool_calls or []
+            # 值对象归一化（A2）：本循环内所有消费点读类型化字段，不再拆原始 dict。
+            calls = ToolCall.normalize_all(ai.tool_calls or [])
+            tool_calls = calls
             model_data: dict[str, Any] = {"content": ai.content if isinstance(ai.content, str) else str(ai.content)}
+            model_name = _model_name_from_response(ai)
+            if model_name:
+                model_data["model"] = model_name
+            usage = _usage_from_response(ai)
+            if usage:
+                model_data["usage"] = usage
+                for key, value in usage.items():
+                    usage_total[key] = usage_total.get(key, 0) + value
             if tool_calls:
                 model_data["tool_calls"] = [
-                    {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
-                    for tc in tool_calls
+                    {"id": c.id, "name": c.name, "args": c.args} for c in calls
                 ]
             will_execute_tools = bool(tool_calls) and steps + 1 < self.max_steps
             defer_model_event = (
@@ -248,7 +292,11 @@ class AgentRuntime:
                           reason="本轮无 tool_calls，模型选择直接答复", outcome="success")
                 self._log("task_completed", "Agent Loop 正常结束", span_id=run_span,
                           step=steps, outcome="success")
-                end_event = session.end_run(run_id, status="completed", final_text=final)
+                end_event = session.end_run(run_id, status="completed", final_text=final,
+                                            usage_total=dict(usage_total) or None,
+                                            cost_usd=None,   # TODO(spec 12): 费率表未定义，不伪造
+                                            trace_id=None)   # TODO(Phase 15): Langfuse 接入后填真实 trace
+                self._write_memories(session, memory_event_start)
                 yield to_agent_event(end_event)
                 # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.FINAL_COMPLETED)
@@ -263,7 +311,9 @@ class AgentRuntime:
                           span_id=new_span_id(), parent_span_id=run_span, step=steps,
                           decision="max_steps_exceeded", remaining_steps=0,
                           reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
-                end_event = session.end_run(run_id, status="failed")
+                end_event = session.end_run(run_id, status="failed",
+                                            usage_total=dict(usage_total) or None)
+                self._write_memories(session, memory_event_start)
                 yield to_agent_event(end_event)
                 self._last_result = AgentRunResult(
                     status=STATUS_MAX_STEPS_EXCEEDED, final_text="", steps=steps,
@@ -271,12 +321,11 @@ class AgentRuntime:
                 return
 
             # 第 7 步：用 ToolExecutor 执行整批 tool_call 并按原 id 回填。
-            args_by_id = {tc.get("id", ""): tc.get("args") for tc in tool_calls}
-            tool_event_start = len(session.events)
+            tool_event_start = session.mark()
             tool_error = None
             try:
                 executions = await self.executor.execute_batch(
-                    tool_calls,
+                    calls,
                     session=session,
                     operation_context=OperationContext(
                         session_id=session.session_id,
@@ -286,7 +335,7 @@ class AgentRuntime:
                 )
             except Exception as error:  # noqa: BLE001
                 tool_error = error
-            for event in session.events[tool_event_start:]:
+            for event in session.since(tool_event_start):
                 yield to_agent_event(event)
             if tool_error is not None:
                 raise tool_error
@@ -300,16 +349,15 @@ class AgentRuntime:
                 yield to_agent_event(model_event)
                 # MODEL_COMPLETED 稳定边界：延迟写入的 model/completed 已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.MODEL_COMPLETED)
-            for execution in executions:
+            # execute_batch 契约保证返回顺序与输入一致（gather 保序 / 串行补 CANCELLED），
+            # 因此按位置配对 call↔execution——空/重复 id 也不会串对。
+            for call, execution in zip(calls, executions):
                 result = execution.result
                 content = result.model_dump_json()
                 outcome: str = "success" if result.ok else "failure"
 
-                tc_args = args_by_id.get(execution.tool_call_id, {})
-                tc_name = next(
-                    (tc.get("name", "") for tc in tool_calls if tc.get("id") == execution.tool_call_id),
-                    "",
-                )
+                tc_args = call.args
+                tc_name = call.name
                 call_event = session.append(
                     TOOL_CALL,
                     {"tool_call_id": execution.tool_call_id, "tool_name": tc_name, "args": tc_args},
@@ -326,7 +374,7 @@ class AgentRuntime:
                 self._log("tool_operation", f"工具回复 {outcome}",
                           span_id=new_span_id(), parent_span_id=run_span, step=steps,
                           tool_call_id=execution.tool_call_id,
-                          tool_input=args_by_id.get(execution.tool_call_id),
+                          tool_input=call.args,
                           tool_output=content[:200],
                           error_code=result.error_code,
                           retryable=result.retryable if not result.ok else None,
@@ -337,6 +385,10 @@ class AgentRuntime:
             await self._save_checkpoint(
                 session, CheckpointBoundary.TOOL_BATCH_COMPLETED
             )
+
+    def _write_memories(self, session: Session, start: int) -> None:
+        if self._memory_writer is not None:
+            self._memory_writer.submit(session, session.since(start))
 
     async def _save_checkpoint(
         self,

@@ -71,6 +71,18 @@ class Session:
         """下一条事件的 seq（当前最大 seq + 1，空列表从 0 开始）。"""
         return max((e.seq for e in self._events), default=-1) + 1
 
+    def mark(self) -> int:
+        """当前追加位置的句柄——配合 since() 取"之后追加的事件"。
+
+        调用方不需要知道 events 的内部表示（列表/游标/页）；这是
+        Session 拥有的追加语义，替代调用方自己做 len(events) 算术。
+        """
+        return len(self._events)
+
+    def since(self, marker: int) -> list[SessionEvent]:
+        """返回 mark() 之后追加的事件（副本，不影响内部状态）。"""
+        return list(self._events[marker:])
+
     # ── 构造入口 ──
 
     @classmethod
@@ -190,11 +202,24 @@ class Session:
         *,
         status: str,
         final_text: str = "",
+        usage_total: dict | None = None,
+        cost_usd: float | None = None,
+        trace_id: str | None = None,
     ) -> SessionEvent:
-        """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。"""
+        """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
+
+        usage_total / cost_usd / trace_id 是前端 Gap 1/2 契约（BACKEND_GAP_PROMPT.md）：
+        只扩展 data，不改既有语义；None 表示"未计算"，绝不伪造 0。
+        """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
+        data: dict = {"final_text": final_text} if final_text else {}
+        if usage_total:
+            data["usage_total"] = usage_total
+        if status == "completed":
+            data["cost_usd"] = cost_usd
+            data["trace_id"] = trace_id
         return self.append(
             event_type,
-            {"final_text": final_text} if final_text else {},
+            data,
             run_id=run_id,
         )

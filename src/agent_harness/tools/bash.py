@@ -10,6 +10,8 @@ MUTATING 副作用（保守默认）：即使命令本身是只读的（如 ls�
 
 from __future__ import annotations
 
+import asyncio
+
 from pydantic import BaseModel, Field
 
 from agent_harness.sandbox import Sandbox
@@ -54,9 +56,13 @@ class BashTool(Tool):
         return ToolPermission.DANGER
 
     async def execute(self, args: _BashArgs) -> ToolResult:
-        """调 sandbox.exec；exit_code 无论几都返回 ok=True（ADR-0002）。"""
+        """调 sandbox.exec；exit_code 无论几都返回 ok=True（ADR-0002）。
+
+        sandbox.exec 是同步阻塞调用（子进程最长跑满超时），卸载到工作线程
+        执行——否则 event loop 会被单条命令冻结整个异步服务器（D10）。
+        """
         try:
-            result = self._sandbox.exec(args.command)
+            result = await asyncio.to_thread(self._sandbox.exec, args.command)
         except PermissionError as e:
             return ToolResult.failure(
                 message=str(e),

@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AnyMessage, SystemMessage
 
 from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
 from agent_harness.context.provider import ContextProvider
@@ -17,7 +17,7 @@ __all__ = ["ContextBuilder", "ContextWindowExceededError"]
 
 
 class ContextBuilder:
-    """按预算压缩投影；不修改历史，Provider 选择留 Phase 6。"""
+    """按预算压缩投影与选择 Provider 内容，不修改历史。"""
 
     def __init__(
         self,
@@ -45,7 +45,7 @@ class ContextBuilder:
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
         )
         if token_estimate <= self.max_context_tokens * self.auto_compact_threshold:
-            return messages
+            return await self._with_providers(session, messages)
         result = await ContextCompactor(
             self.model_provider, max_context_tokens=self.max_context_tokens,
             auto_compact_threshold=self.auto_compact_threshold,
@@ -58,4 +58,25 @@ class ContextBuilder:
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
             })
-        return result.messages
+        return await self._with_providers(session, result.messages)
+
+    async def _with_providers(self, session: Session, messages: list[AnyMessage]) -> list[AnyMessage]:
+        remaining = int(self.max_context_tokens * self.hard_guard_threshold) - estimate_message_tokens(messages)
+        selected: list[AnyMessage] = []
+        for provider in self.context_providers:
+            if remaining <= 0:
+                break
+            try:
+                additions = await provider.select(session, remaining)
+            except Exception:  # noqa: BLE001 — optional Provider failure cannot stop the loop.
+                logger.warning("Context provider unavailable; continuing without its contribution")
+                continue
+            for message in additions:
+                cost = estimate_message_tokens([message])
+                if cost <= remaining:
+                    selected.append(message)
+                    remaining -= cost
+        insertion = 0
+        while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
+            insertion += 1
+        return messages[:insertion] + selected + messages[insertion:]

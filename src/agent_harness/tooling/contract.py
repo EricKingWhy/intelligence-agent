@@ -16,12 +16,44 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel
 
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """一次模型工具调用的值对象：id / name / args 的唯一形状。
+
+    LangChain AIMessage.tool_calls 是 list[dict]；在 ToolExecutor 边界一次性
+    归一化成本对象，之后所有消费者（批次调度/审批/Ledger/runtime 回填）读
+    类型化字段，不再各自做 tc.get("id", "") 防御式拆包。缺键/None 归一为
+    "" / {}（部分本地模型会这么吐）。
+    """
+
+    id: str
+    name: str
+    args: dict[str, Any]
+
+    @classmethod
+    def normalize(cls, tool_call: ToolCall | dict[str, Any]) -> ToolCall:
+        if isinstance(tool_call, ToolCall):
+            return tool_call
+        return cls(
+            id=tool_call.get("id") or "",
+            name=tool_call.get("name") or "",
+            args=tool_call.get("args") or {},
+        )
+
+    @classmethod
+    def normalize_all(cls, tool_calls: Iterable[ToolCall | dict[str, Any]]) -> list[ToolCall]:
+        return [cls.normalize(tc) for tc in tool_calls]
 
 
 class ToolSideEffect(str, Enum):

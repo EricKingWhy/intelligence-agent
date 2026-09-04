@@ -16,6 +16,7 @@ from agent_harness.tooling.approval import (
 from agent_harness.tooling.contract import (
     PermissionPolicy,
     Tool,
+    ToolCall,
     ToolPermission,
     ToolSideEffect,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "PermissionPolicy",
     "ReconcileHint",
     "Tool",
+    "ToolCall",
     "ToolExecution",
     "ToolExecutor",
     "ToolPermission",

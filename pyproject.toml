@@ -13,6 +13,7 @@ dependencies = [
     "langchain-openai>=1.5.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.15.0",
+    "pyjwt>=2.10,<3",
     "python-dotenv>=1.2.2",
     "sse-starlette>=2.1.0",
     "tiktoken>=0.7.0",
@@ -24,6 +25,11 @@ agent-harness = "agent_harness.cli:main"
 
 [project.optional-dependencies]
 artifact = ["aioboto3>=13.0"]
+memory = [
+    "langgraph>=0.6.0",
+    "langmem>=0.0.30,<0.1",
+    "pymilvus>=2.6,<2.7",
+]
 
 [tool.uv.build-backend]
 module-name = "agent_harness"

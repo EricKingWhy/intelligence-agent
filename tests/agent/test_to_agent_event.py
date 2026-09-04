@@ -68,6 +68,7 @@ class TestToAgentEvent:
             "run/failed",
             "artifact/created",
             "context/compacted",
+            "memory/degraded",
         ],
     )
     def test_all_durable_event_types_mirror(self, event_type: str) -> None:

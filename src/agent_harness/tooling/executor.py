@@ -59,7 +59,12 @@ from agent_harness.tooling.approval import (
     approval_reason,
     needs_approval,
 )
-from agent_harness.tooling.contract import PermissionPolicy, Tool, ToolSideEffect
+from agent_harness.tooling.contract import (
+    PermissionPolicy,
+    Tool,
+    ToolCall,
+    ToolSideEffect,
+)
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
@@ -134,7 +139,7 @@ class ToolExecutor:
 
     async def execute(
         self,
-        tool_call: dict[str, Any],
+        tool_call: ToolCall | dict[str, Any],
         *,
         operation_context: OperationContext | None = None,
         session: Session | None = None,
@@ -144,8 +149,8 @@ class ToolExecutor:
         调用配置或 Ledger 持久化失败会抛出异常并中断执行，避免在没有 durable
         Operation 状态的情况下继续产生真实副作用。
 
-        tool_call 形状（和 LangChain 的 tool_calls 一致）：
-          {"id": str, "name": str, "args": dict}
+        tool_call 接受 ToolCall 值对象或 LangChain 形状的 dict
+        （{"id": str, "name": str, "args": dict}）——入口一次性归一化。
 
         三阶段 + 三失败出口（Validation-first 的核心）：
           [1] Registry.get(name)        找不到     -> KeyError     -> TOOL_NOT_FOUND
@@ -156,9 +161,10 @@ class ToolExecutor:
         为什么只包阶段3：查字典、跑 Pydantic 都是本地瞬时操作，真正会慢、会挂
         （HTTP/文件/DB）的只有 execute 这一步。
         """
-        tool_call_id = tool_call.get("id", "")
-        name = tool_call.get("name", "")
-        raw_args = tool_call.get("args") or {}
+        call = ToolCall.normalize(tool_call)
+        tool_call_id = call.id
+        name = call.name
+        raw_args = call.args
 
         # -- 阶段 1：lookup -- Registry 找不到抛 KeyError，由本层映射成 TOOL_NOT_FOUND。
         # 为什么不抛自定义异常：见 registry.py 注释--Registry 只管查，映射成执行域语义是 Executor 的活。
@@ -269,7 +275,7 @@ class ToolExecutor:
 
     async def execute_batch(
         self,
-        tool_calls: list[dict[str, Any]],
+        tool_calls: list[ToolCall | dict[str, Any]],
         *,
         operation_context: OperationContext | None = None,
         session: Session | None = None,
@@ -381,14 +387,15 @@ class ToolExecutor:
 
     async def _cancel_without_execution(
         self,
-        tool_call: dict[str, Any],
+        tool_call: ToolCall | dict[str, Any],
         *,
         operation_context: OperationContext | None,
     ) -> ToolExecution:
         """Represent a serially cascaded call without invoking its Tool."""
-        tool_call_id = tool_call.get("id", "")
-        name = tool_call.get("name", "")
-        raw_args = tool_call.get("args") or {}
+        call = ToolCall.normalize(tool_call)
+        tool_call_id = call.id
+        name = call.name
+        raw_args = call.args
         result = ToolResult.failure(
             message=(
                 f"工具 '{name}' 未执行：串行批次中的前序工具已永久失败。"
@@ -412,14 +419,14 @@ class ToolExecutor:
 
         return ToolExecution(tool_call_id=tool_call_id, result=result)
 
-    def _decide_mode(self, tool_calls: list[dict[str, Any]]) -> str:
+    def _decide_mode(self, tool_calls: list[ToolCall | dict[str, Any]]) -> str:
         """扫描批次，决定并发还是串行。
 
         一条可解释规则：全 READ_ONLY 才并发；任一 MUTATING 整批串行。
         未注册的工具名按 READ_ONLY 算（不影响调度，让其走 execute 正常报错）。
         """
-        for tc in tool_calls:
-            name = tc.get("name", "")
+        for call in ToolCall.normalize_all(tool_calls):
+            name = call.name
             try:
                 tool = self._registry.get(name)
             except KeyError:
