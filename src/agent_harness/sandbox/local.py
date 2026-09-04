@@ -22,6 +22,8 @@ from agent_harness.sandbox.base import ExecResult, Sandbox
 #: LocalSubprocess 的默认命令超时（秒）。None 表示不超时。
 DEFAULT_EXEC_TIMEOUT: float = 60.0
 
+logger = logging.getLogger("agent_harness.sandbox.local")
+
 #: 捕获流读取块大小（字符）。
 _DRAIN_CHUNK_CHARS = 65536
 
@@ -164,12 +166,12 @@ class LocalSubprocessSandbox(Sandbox):
             while chunk := stream.read(_DRAIN_CHUNK_CHARS):
                 cap.append(chunk)
         except Exception as error:  # noqa: BLE001 — 流被随 kill 关闭属正常路径
-            logging.debug("capture stream closed during drain: %s", type(error).__name__)
+            logger.debug("capture stream closed during drain: %s", type(error).__name__)
         finally:
             try:
                 stream.close()
             except Exception as error:  # noqa: BLE001 — 关闭失败不影响结果
-                logging.debug("capture stream close failed: %s", type(error).__name__)
+                logger.debug("capture stream close failed: %s", type(error).__name__)
 
     def list_files(self, pattern: str) -> list[str]:
         """枚举 workspace 内匹配 glob 模式的文件，返回 POSIX 风格相对路径（排序）。
