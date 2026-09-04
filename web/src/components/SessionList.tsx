@@ -16,7 +16,7 @@ export function SessionList({ sessions, selectedId, onSelect, onNew }: Props) {
   // 相对时间随时间流逝刷新（issue #40）：每分钟推进一次 now 触发重渲染。
   const now = useTickingNow();
   return (
-    <aside className="session-list surface-raised">
+    <aside className="session-list surface-panel">
       <div className="session-list-header">
         <span className="panel-label">会话</span>
         <button className="icon-btn new-session-btn" onClick={onNew} aria-label="新建会话">

@@ -69,7 +69,7 @@ export default function App() {
           onNew={handleNew}
         />
 
-        <section className="app-conversation-col surface-raised">
+        <section className="app-conversation-col surface-panel">
           {error && <div className="app-error">{error}</div>}
           <Conversation
             conversation={conversation}

@@ -25,7 +25,7 @@ const RUN_LABELS: Record<ConversationState['run_status'], string> = {
 export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) {
   if (!conversation) {
     return (
-      <aside className="step-detail surface-raised">
+      <aside className="step-detail surface-panel">
         <DetailEmpty />
       </aside>
     );
@@ -35,7 +35,7 @@ export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) 
   const run = conversation.run_status;
 
   return (
-    <aside className="step-detail surface-raised">
+    <aside className="step-detail surface-panel">
       <div className="detail-header">
         <span className="panel-label">步骤详情</span>
         <span className={`run-badge run-badge-${run}`}>{RUN_LABELS[run]}</span>

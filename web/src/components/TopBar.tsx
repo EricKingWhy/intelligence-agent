@@ -2,6 +2,7 @@
 
 import { Activity, Moon, Sun } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { applyTheme, initTheme, type Theme } from '../lib/theme';
 
 interface Props {
   sessionMeta?: { session_id: string; turn_count: number };
@@ -9,11 +10,8 @@ interface Props {
 }
 
 export function TopBar({ sessionMeta, streaming }: Props) {
-  // 手动主题切换：初始值跟随系统偏好（浅色系统用户首击即切 dark，不需要两击）。
-  // CSS 侧 :root 默认暗色、@media 系统偏好与 [data-theme='light'] 覆盖——见 index.css。
-  const [theme, setTheme] = useState<'dark' | 'light'>(() =>
-    window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark',
-  );
+  // 主题持久化：初始值由 lib/theme 在 paint 前解析（localStorage → 系统偏好）。
+  const [theme, setTheme] = useState<Theme>(initTheme);
 
   // 流式计时（借鉴 ZCode 的"工作中 N 秒"）：进行中状态用真实秒数表达，而非空泛 spinner。
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -31,13 +29,13 @@ export function TopBar({ sessionMeta, streaming }: Props) {
   }, [streaming]);
 
   const toggleTheme = () => {
-    const next = theme === 'dark' ? 'light' : 'dark';
+    const next: Theme = theme === 'dark' ? 'light' : 'dark';
     setTheme(next);
-    document.documentElement.setAttribute('data-theme', next);
+    applyTheme(next);
   };
 
   return (
-    <header className="topbar surface-raised">
+    <header className="topbar surface-panel">
       <div className="topbar-left">
         <Activity size={16} className="topbar-logo" />
         <span className="topbar-title">Agent Harness Inspector</span>
