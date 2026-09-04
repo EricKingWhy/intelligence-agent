@@ -97,13 +97,17 @@ async def test_partial_batch_failure_still_emits_committed_artifact(tmp_path, pa
         overflow_handler=ArtifactOverflowHandler(Store()),
     ))
     emitted = []
-    with pytest.raises(ConnectionError):
-        async for event in runtime.run_stream(session, "run"):
-            emitted.append(event)
+    # FIX 1 契约：执行器 / 存储异常不再让流半途断掉——Runtime 补 run/failed
+    # 终结帧后正常收流（异常不再向上抛，ConnectionError 只进日志与终结事件）。
+    async for event in runtime.run_stream(session, "run"):
+        emitted.append(event)
     if parallel:
         await asyncio.sleep(0.02)
     assert [(e.type, e.seq) for e in emitted if e.is_durable] == [
         (e.type, e.seq) for e in session.events[before:]
     ]
-    assert emitted[-1].type == "artifact/created"
+    # 部分批失败的核心不变量不变：first 的 artifact/created 仍已提交并被镜像；
+    # 变化的是收尾方式——流以 run/failed 终结，而不是以异常截断。
+    assert emitted[-1].type == "run/failed"
+    assert "artifact/created" in [e.type for e in emitted]
     assert sandbox.exec.call_count == 2

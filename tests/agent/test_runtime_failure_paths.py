@@ -1,0 +1,242 @@
+"""AgentRuntime 失败路径回归：异常终结、并发结果隔离、非 str content 落盘。
+
+三个面：
+- 模型调用抛错（API 中断）：run / run_stream 必须以 run/failed 终结——JSONL 不能
+  停在悬空的 run/started 上，SSE 消费者必须收到终止帧，run() 返回 failed 结果
+  而不是把异常抛给调用方。
+- 非 str content（Anthropic 风格块列表）：落盘前抽纯文本，绝不把 Python repr
+  写进 model/completed 再被 derive_messages 回灌给模型。
+- 并发 run()：最终结果经每次调用的独立载体回传，不经实例字段跨 run 串台。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+from langchain_core.messages import AIMessage, AIMessageChunk
+
+from agent_harness.agent import AgentRuntime
+from agent_harness.agent.types import STATUS_FAILED
+from agent_harness.session import (
+    MODEL_COMPLETED,
+    MODEL_DELTA,
+    MODEL_FAILED,
+    RUN_FAILED,
+    RUN_STARTED,
+    TOOL_CALL,
+    TOOL_RESULT,
+    JsonlSessionStore,
+)
+from agent_harness.tooling import ToolExecutor, ToolRegistry
+from tests.conftest import make_session
+
+TOOL_CALL_ID = "call_failure_001"
+
+
+# ---- 失败注入替身：异常来自模型调用本身（不是工具），剧本可控可重现 ----
+
+
+class ExplodingModel:
+    """ainvoke / astream 一律抛 RuntimeError：模拟 API 中断（供应商宕机）。"""
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        raise RuntimeError("模拟 API 中断")
+
+    async def astream(self, messages: list, **kwargs):
+        raise RuntimeError("模拟 API 中断")
+        yield AIMessageChunk(content="")  # 不可达：仅为把函数声明成 async generator
+
+
+class ToolCallThenExplodeModel:
+    """第 1 轮正常提议工具，第 2 轮 ainvoke 抛错：模拟多轮循环中途 API 中断。"""
+
+    def __init__(self, tool_call: dict) -> None:
+        self._tool_call = tool_call
+        self._calls = 0
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        self._calls += 1
+        if self._calls == 1:
+            return AIMessage(content="", tool_calls=[self._tool_call])
+        raise RuntimeError("第二轮模型调用中断")
+
+
+class ListContentModel:
+    """ainvoke / astream 都吐 Anthropic 风格块列表：验证落盘前抽纯文本，不落 repr。"""
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        return AIMessage(content=[
+            {"type": "text", "text": "你好"},
+            {"type": "text", "text": "世界"},
+        ])
+
+    async def astream(self, messages: list, **kwargs):
+        yield AIMessageChunk(content=[{"type": "text", "text": "你好"}])
+        yield AIMessageChunk(content=[{"type": "text", "text": "世界"}])
+
+
+def _runtime(model: Any, registry: ToolRegistry | None = None) -> AgentRuntime:
+    """构造最小 Runtime：不传 registry 时用空 Registry（模型替身无需 bind_tools）。"""
+    reg = registry or ToolRegistry()
+    return AgentRuntime(model=model, registry=reg, executor=ToolExecutor(reg))
+
+
+# ---------- FIX 1：模型调用异常必须以 run/failed 终结，不能悬挂 ----------
+
+
+class TestModelExceptionTerminalEvents:
+    """模型 ainvoke / astream 抛错：补终结事件 + 正常收流 + 返回 failed 结果。"""
+
+    @pytest.mark.asyncio
+    async def test_run_returns_failed_result_and_persists_run_failed(self, tmp_path):
+        """ainvoke 抛错 -> run() 正常返回 failed（不向上抛）+ JSONL 以 run/failed 终结。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ExplodingModel())
+
+        result = await runtime.run(session, "你好")
+
+        # run() 不把异常抛给调用方；终结状态如实是 failed，final_text 绝不伪造
+        assert result.status == "failed"
+        assert result.final_text == ""
+        # 从 store 重读（不只看内存缓存）：JSONL 的最后一条必须是 run/failed
+        persisted = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
+        assert persisted[-1].type == RUN_FAILED
+        run_started = next(e for e in persisted if e.type == RUN_STARTED)
+        assert persisted[-1].run_id == run_started.run_id
+        assert "final_text" not in persisted[-1].data
+        # 故障归因：模型调用阶段炸的 -> model/failed 也要落盘（该类型此前从未发过）
+        assert [e.type for e in persisted[-2:]] == [MODEL_FAILED, RUN_FAILED]
+
+    @pytest.mark.asyncio
+    async def test_run_stream_completes_with_terminal_failure_frame(self, tmp_path):
+        """astream 中途抛错 -> 迭代器正常收尾，最后一帧是 run/failed（SSE 不断流）。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ExplodingModel())
+
+        frames = [frame async for frame in runtime.run_stream(session, "你好")]
+
+        # 迭代器正常耗尽（异常不向上抛），终结帧来自持久化事件（有 seq）
+        assert frames[-1].type == RUN_FAILED
+        assert frames[-1].is_durable
+        assert MODEL_FAILED in [f.type for f in frames]
+
+    @pytest.mark.asyncio
+    async def test_persisted_tool_backfill_intact_after_midloop_failure(self, tmp_path):
+        """工具回填已落盘后第 2 轮模型炸 -> 回填事件恰好一次、无重复补写。"""
+        session = make_session(tmp_path)
+        model = ToolCallThenExplodeModel({
+            "name": "multiply",
+            "args": {"first_number": 3, "second_number": 4},
+            "id": TOOL_CALL_ID,
+            "type": "tool_call",
+        })
+        runtime = _runtime(model)  # multiply 未注册 -> Executor 回填错误而不是抛
+
+        result = await runtime.run(session, "计算 3 乘 4")
+
+        assert result.status == "failed"
+        events = session.events
+        # 第 1 轮的 tool/call + tool/result 已持久化，且各恰好一份（兜底不得重复补写）
+        assert [e.data["tool_call_id"] for e in events if e.type == TOOL_CALL] == [TOOL_CALL_ID]
+        assert [e.data["tool_call_id"] for e in events if e.type == TOOL_RESULT] == [TOOL_CALL_ID]
+        # 第 1 轮 model/completed 也还在：历史完整可重放
+        assert any(e.type == MODEL_COMPLETED for e in events)
+        # 收尾：model/failed + run/failed
+        assert [e.type for e in events[-2:]] == [MODEL_FAILED, RUN_FAILED]
+
+
+# ---------- FIX 3：非 str content（Anthropic 风格块）落盘前抽纯文本 ----------
+
+
+class TestNonStrContentExtracted:
+    """list 型 content 绝不能以 Python repr 形态进 JSONL / final_text / delta。"""
+
+    @pytest.mark.asyncio
+    async def test_ainvoke_list_content_persisted_as_plain_text(self, tmp_path):
+        """ainvoke 返回块列表 -> model/completed.content 是拼接文本，不是 repr。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ListContentModel())
+
+        result = await runtime.run(session, "打个招呼")
+
+        # final_text 来自模型 content，抽纯文本而非 str(list) 的 repr
+        assert result.status == "completed"
+        assert result.final_text == "你好世界"
+        completed = next(e for e in session.events if e.type == MODEL_COMPLETED)
+        assert completed.data["content"] == "你好世界"
+        # 全部持久化事件里不允许出现 repr 痕迹（derive_messages 会把它回灌给模型）
+        for event in session.events:
+            assert "['" not in str(event.data.get("content", ""))
+
+    @pytest.mark.asyncio
+    async def test_astream_list_content_deltas_and_persistence(self, tmp_path):
+        """astream 逐 chunk 吐块列表 -> delta 是纯文本，聚合落盘同样是纯文本。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ListContentModel())
+
+        frames = [frame async for frame in runtime.run_stream(session, "打个招呼")]
+
+        deltas = [f.data["delta"] for f in frames if f.type == MODEL_DELTA]
+        assert deltas == ["你好", "世界"]
+        completed = next(e for e in session.events if e.type == MODEL_COMPLETED)
+        assert completed.data["content"] == "你好世界"
+        for frame in frames:
+            assert "['" not in str(frame.data.get("delta", ""))
+
+
+# ---------- FIX 2：并发 run() 的结果隔离（结果不经实例字段跨 run 串台） ----------
+
+
+class CounterModel:
+    """ainvoke 返回 answer-{n}；sleep(0) 让出事件循环，保证两个 run 真正并发交错。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        await asyncio.sleep(0)
+        self.calls += 1
+        return AIMessage(content=f"answer-{self.calls}")
+
+
+class TestConcurrentRunResultIsolation:
+    @pytest.mark.asyncio
+    async def test_two_concurrent_runs_each_get_own_result(self, tmp_path):
+        """同一 Runtime 并发两个 run -> 各拿自己那次调用的回答，不做"最后完成者"串台。"""
+        runtime = _runtime(CounterModel())
+
+        r1, r2 = await asyncio.gather(
+            runtime.run(make_session(tmp_path), "问题一"),
+            runtime.run(make_session(tmp_path), "问题二"),
+        )
+
+        assert r1.status == "completed"
+        assert r2.status == "completed"
+        # 结果必须经每次调用独立的载体回传：两份回答各归各的 run，
+        # 而不是共享实例字段上"谁后写谁生效"的那一份。
+        assert r1.final_text != r2.final_text
+        assert {r1.final_text, r2.final_text} == {"answer-1", "answer-2"}
+
+
+@pytest.mark.asyncio
+async def test_model_failed_event_redacts_exception_message(tmp_path):
+    """model/failed 事件只带异常类型名，不带原始消息——Provider 异常文本可能
+    含回显的凭证（脱敏不变量与 memory/writeback 一致）；完整消息只进日志。"""
+    class ExplodingModel:
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def ainvoke(self, messages, **kwargs):
+            raise RuntimeError("api-key sk-secret-123 invalid")
+
+    from tests.conftest import make_session
+
+    runtime = AgentRuntime(ExplodingModel(), ToolRegistry(), ToolExecutor(ToolRegistry()))
+    session = make_session(tmp_path)
+    result = await runtime.run(session, "hello")
+    assert result.status == STATUS_FAILED
+    model_failed = next(e for e in session.events if e.type == "model/failed")
+    assert model_failed.data["message"] == "model call failed: RuntimeError"
+    assert "sk-secret-123" not in str(model_failed.data)
