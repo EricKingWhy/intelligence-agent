@@ -3,7 +3,7 @@
 > **交接对象**：Codex（Secondary / Task Agent）
 > **交接时间**：2026-09-04
 > **交接人**：ZCode（本会话）
-> **当前进度**：#45 已完成，#46–#50 待实施
+> **当前进度**：#45、#46 已完成，#47–#50 待实施（Codex 2026-09-04 更新）
 
 ---
 
@@ -27,15 +27,17 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 | # | GitHub | 标题 | 状态 | Blocked by |
 |---|--------|------|------|------------|
 | 1 | #45 | ArtifactStore ABC + FakeArtifactStore + inspect_artifact Tool | ✅ DONE (fd7439a) | — |
-| 2 | #46 | estimate_tokens + ContextBuilder base (no Compaction) | ⬜ TODO | — |
+| 2 | #46 | estimate_tokens + ContextBuilder base (no Compaction) | ✅ DONE | — |
 | 3 | #47 | Overflow Handler + Executor 集成 + artifact/created | ⬜ TODO | #45 ✅ |
 | 4 | #48 | S3ArtifactStore (七牛云 S3 兼容) | ⬜ TODO | #45 ✅ |
 | 5 | #49 | Context Compactor 三层降级 + context/compacted | ⬜ TODO | #46 |
 | 6 | #50 | AgentRuntime 集成 + Phase 5 端到端测试 | ⬜ TODO | #47, #48, #49 |
 
-**可立即开始的**：#46、#47、#48（三个都只依赖已完成的 #45 或无依赖）。
+**可立即开始的**：#47、#48、#49（前置 #45 / #46 已完成）。
 
-**建议执行顺序**：#46 → #47 → #48 → #49 → #50（串行最安全，也可 #47/#48 并行）。
+**建议执行顺序**：#47 → #48 → #49 → #50（串行）。
+
+**#46 接口说明**：`ContextBuilder.build` 和 `ContextProvider.select` 为 async，调用时使用 `await`；token 估算计入消息结构（含 tool_calls），记录在诊断日志，不写 SessionEvent。当前 build 即使超过阈值也返回完整投影，阈值执行留给 #49。
 
 ---
 
@@ -167,7 +169,7 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 ```bash
 # 全量测试
 cd D:/intelligence-agent-backend
-.venv/Scripts/python.exe -m pytest tests/ -q --tb=no
+.venv/Scripts/python.exe -X utf8 -m pytest tests/ -q --tb=no
 
 # 只跑 Phase 5 相关
 .venv/Scripts/python.exe -m pytest tests/storage/test_artifact_store.py tests/tools/test_inspect_artifact_tool.py tests/context/ tests/tooling/test_overflow*.py -q
@@ -176,7 +178,7 @@ cd D:/intelligence-agent-backend
 .venv/Scripts/python.exe -m ruff check .
 ```
 
-**当前基线**：368 passed, 8 skipped, 3 deselected, ruff All checks passed。
+**当前基线（#46 后）**：374 passed, 8 skipped, 3 deselected, ruff All checks passed。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
 
 ---
 

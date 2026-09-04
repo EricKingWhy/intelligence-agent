@@ -13,5 +13,9 @@ class Settings(BaseSettings):
 
     temperature: float = 0.2
 
+    max_context_tokens: int = 200_000
+    auto_compact_threshold: float = 0.70
+    hard_guard_threshold: float = 0.85
+
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"

@@ -1,0 +1,41 @@
+"""Session 事件投影到 Runtime Context 的单一入口。"""
+
+import logging
+from typing import Any
+
+from langchain_core.messages import AnyMessage
+
+from agent_harness.context.provider import ContextProvider
+from agent_harness.context.tokens import estimate_tokens
+from agent_harness.session import Session
+
+logger = logging.getLogger("agent_harness.context")
+
+
+class ContextBuilder:
+    """保留完整投影；Compaction 与 Provider 选择在后续 ticket 接入。"""
+
+    def __init__(
+        self,
+        model_provider: Any,
+        *,
+        max_context_tokens: int = 200_000,
+        auto_compact_threshold: float = 0.70,
+        hard_guard_threshold: float = 0.85,
+        context_providers: list[ContextProvider] | None = None,
+    ) -> None:
+        self.model_provider = model_provider
+        self.max_context_tokens = max_context_tokens
+        self.auto_compact_threshold = auto_compact_threshold
+        self.hard_guard_threshold = hard_guard_threshold
+        self.context_providers = list(context_providers or [])
+
+    async def build(self, session: Session) -> list[AnyMessage]:
+        """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
+        messages = session.derive_messages()
+        token_estimate = sum(estimate_tokens(message.model_dump_json()) for message in messages)
+        logger.debug(
+            "Context projection token estimate: %s", token_estimate,
+            extra={"session_id": session.session_id, "token_estimate": token_estimate},
+        )
+        return messages
