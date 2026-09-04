@@ -33,7 +33,9 @@ from agent_harness.agent.types import (
     to_agent_event,
 )
 from agent_harness.context.builder import ContextBuilder, ContextWindowExceededError
+from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
+from agent_harness.memory.writeback import MemoryWriteback
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
@@ -75,6 +77,8 @@ class AgentRuntime:
         checkpoint_policy: CheckpointPolicy | None = None,
         session_meta_store: Any | None = None,
         context_builder: ContextBuilder | None = None,
+        context_providers: list[ContextProvider] | None = None,
+        memory_writer: MemoryWriteback | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -86,7 +90,10 @@ class AgentRuntime:
         self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
         self._session_meta_store = session_meta_store
         # 使用未绑定工具的原始 Provider 生成摘要，不让摘要调用请求工具。
-        self._context_builder = context_builder or ContextBuilder(model)
+        self._context_builder = context_builder or ContextBuilder(model, context_providers=context_providers)
+        if context_builder is not None and context_providers:
+            self._context_builder.context_providers.extend(context_providers)
+        self._memory_writer = memory_writer
 
         # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
         # 并在回复里产出 tool_calls。bind_tools 是 LangChain 的标准接线点。
@@ -140,6 +147,7 @@ class AgentRuntime:
         循环结束把最终 AgentRunResult 存到 self._last_result 供 run() 取用。
         """
         # 写入 user 消息事件
+        memory_event_start = len(session.events)
         user_event = session.append(USER_MESSAGE, {"content": user_input})
         yield to_agent_event(user_event)
         # USER_ACCEPTED 稳定边界：user/message 已持久化。
@@ -168,6 +176,7 @@ class AgentRuntime:
                 self._last_result = AgentRunResult(
                     status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps,
                 )
+                self._write_memories(session, memory_event_start)
                 return
             for event in session.events[context_event_start:]:
                 yield to_agent_event(event)
@@ -249,6 +258,7 @@ class AgentRuntime:
                 self._log("task_completed", "Agent Loop 正常结束", span_id=run_span,
                           step=steps, outcome="success")
                 end_event = session.end_run(run_id, status="completed", final_text=final)
+                self._write_memories(session, memory_event_start)
                 yield to_agent_event(end_event)
                 # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.FINAL_COMPLETED)
@@ -264,6 +274,7 @@ class AgentRuntime:
                           decision="max_steps_exceeded", remaining_steps=0,
                           reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
                 end_event = session.end_run(run_id, status="failed")
+                self._write_memories(session, memory_event_start)
                 yield to_agent_event(end_event)
                 self._last_result = AgentRunResult(
                     status=STATUS_MAX_STEPS_EXCEEDED, final_text="", steps=steps,
@@ -337,6 +348,10 @@ class AgentRuntime:
             await self._save_checkpoint(
                 session, CheckpointBoundary.TOOL_BATCH_COMPLETED
             )
+
+    def _write_memories(self, session: Session, start: int) -> None:
+        if self._memory_writer is not None:
+            self._memory_writer.submit(session, session.events[start:])
 
     async def _save_checkpoint(
         self,

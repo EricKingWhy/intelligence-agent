@@ -307,3 +307,9 @@ HTTP 请求
 Outbox 使用 revision 条件确认 + memory_id 游标分页，避免并发更新误确认和失败首页饿死后续任务。部署模型为单进程单 relay；start/stop 在 #55 组合入口接线。
 
 官方 SDK 参考：https://milvus.io/docs/use-async-milvus-client-with-asyncio.md ，https://milvus.io/docs/use-partition-key.md 。
+
+## #55 组合与生命周期
+
+调用方将 MemoryContextProvider(capability) 经 context_providers 注入 AgentRuntime，将 MemoryWriteback(capability, extractor) 经 memory_writer 注入。只依赖本项目契约与编排组件，Core 不导入 LangMem/Milvus。组合入口负责 relay.start()/stop() 和 writer.drain()/close()；测试可在 drain 后 flush，服务退出时先收敛写入、再停止 relay 并关闭 vector client。Web 默认模型配置尚无 embedding 模型，未猜测 embedding 或自动连接远程库。
+
+检索降级通过 Runtime 事件流镜像；后台写入在返回后发生，其降级事件持久化供刷新/回放读取，不保证已结束的 SSE 连接收到。

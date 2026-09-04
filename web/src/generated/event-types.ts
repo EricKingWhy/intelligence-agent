@@ -19,6 +19,7 @@ export const EventType = {
   OPERATION_RECONCILE_REQUIRED: 'operation/reconcile-required',
   ARTIFACT_CREATED: 'artifact/created',
   CONTEXT_COMPACTED: 'context/compacted',
+  MEMORY_DEGRADED: 'memory/degraded',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];

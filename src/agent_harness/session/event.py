@@ -26,6 +26,7 @@ TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
 ARTIFACT_CREATED = "artifact/created"
 CONTEXT_COMPACTED = "context/compacted"
+MEMORY_DEGRADED = "memory/degraded"
 
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
@@ -46,6 +47,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         OPERATION_RECONCILE_REQUIRED,
         ARTIFACT_CREATED,
         CONTEXT_COMPACTED,
+        MEMORY_DEGRADED,
     }
 )
 
