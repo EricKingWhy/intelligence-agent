@@ -950,6 +950,38 @@
   margin-bottom: var(--space-xs);
 }
 
+/* ── Phase 5 Inspector panels: compaction / reconcile / artifact ── */
+.detail-val-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.detail-val-tag {
+  font-size: var(--text-xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+  color: var(--color-warning);
+}
+.detail-compaction-row,
+.detail-reconcile-row,
+.detail-artifact-row {
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-accent) 4%, transparent);
+  border: var(--glass-border);
+}
+.detail-compaction-row + .detail-compaction-row,
+.detail-reconcile-row + .detail-reconcile-row,
+.detail-artifact-row + .detail-artifact-row {
+  margin-top: var(--space-xs);
+}
+.detail-row-warn {
+  color: var(--color-warning);
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-xs);
+}
+
 /* ── Concession chain（responsive） ── */
 @media (max-width: 1024px) {
   .app-columns {
