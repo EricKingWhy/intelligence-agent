@@ -66,6 +66,18 @@ export interface ToolCall {
   diff?: { before: string; after: string; truncated: boolean };
   started_at?: string;
   completed_at?: string;
+  /** Artifact produced by this tool call when output overflows the inline limit.
+   *  Set by artifact/created event (Phase 5). Inspector fetches via inspect_artifact. */
+  artifact?: ArtifactRef;
+}
+
+/** Large tool output offloaded to the ArtifactStore (Phase 5, spec 06 §15).
+ *  The model only sees a summary + this ref; the full content lives in storage. */
+export interface ArtifactRef {
+  artifact_id: string;
+  size: number;
+  mime_type: string;
+  source_tool: string;
 }
 
 export interface ModelSegment {
@@ -84,10 +96,34 @@ export interface Turn {
   started_at?: string;
 }
 
+/** Context compaction record (context/compacted event, Phase 5 spec 06).
+ *  Run-level metadata — the Inspector Context panel surfaces these. */
+export interface ContextCompaction {
+  compacted_turn_count: number;
+  summary_message_count: number;
+  token_estimate: number;
+  fallback_used: boolean;
+  time?: string;
+}
+
+/** A tool operation that crashed mid-flight and needs human reconciliation
+ *  (operation/reconcile-required event, Phase 4/5 spec 07 §13).
+ *  Surfaces in the Inspector as an approval queue item. */
+export interface ReconcileRequired {
+  tool_call_id: string;
+  tool_name: string;
+  args_identity: string;
+  state: string;
+  time?: string;
+}
+
 export interface ConversationState {
   session_id: string;
   turns: Turn[];
   /** The turn currently receiving events, if streaming. */
   active_step_id: number | null;
   run_status: 'idle' | 'running' | 'completed' | 'failed';
+  /** Run-level metadata for the Inspector (Phase 5 events). */
+  compactions: ContextCompaction[];
+  reconcile_queue: ReconcileRequired[];
 }

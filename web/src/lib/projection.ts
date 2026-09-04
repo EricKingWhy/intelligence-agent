@@ -15,6 +15,8 @@ export function initConversation(session_id: string): ConversationState {
     turns: [],
     active_step_id: null,
     run_status: 'idle',
+    compactions: [],
+    reconcile_queue: [],
   };
 }
 
@@ -40,6 +42,8 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
   const next: ConversationState = {
     ...state,
     turns: state.turns.map((t) => ({ ...t, model: { ...t.model }, tools: [...t.tools] })),
+    compactions: [...state.compactions],
+    reconcile_queue: [...state.reconcile_queue],
   };
 
   const { type, data } = event;
@@ -139,6 +143,51 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     case EventType.RUN_FAILED:
       finalizeRun(next, 'failed');
       break;
+
+    case EventType.ARTIFACT_CREATED: {
+      // Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
+      // Attach the ref to the producing tool call so the Inspector can fetch it.
+      const toolCallId = String(data.tool_call_id ?? '');
+      const turn = next.turns.find((t) =>
+        t.tools.some((tc) => tc.tool_call_id === toolCallId),
+      );
+      const tool = turn?.tools.find((tc) => tc.tool_call_id === toolCallId);
+      if (tool) {
+        tool.artifact = {
+          artifact_id: String(data.artifact_id ?? ''),
+          size: Number(data.size ?? 0),
+          mime_type: String(data.mime_type ?? 'application/octet-stream'),
+          source_tool: String(data.source_tool ?? ''),
+        };
+      }
+      break;
+    }
+
+    case EventType.CONTEXT_COMPACTED: {
+      // Context window exceeded → older turns summarized (Phase 5, spec 06).
+      // Run-level metadata for the Inspector Context panel.
+      next.compactions.push({
+        compacted_turn_count: Number(data.compacted_turn_count ?? 0),
+        summary_message_count: Number(data.summary_message_count ?? 0),
+        token_estimate: Number(data.token_estimate ?? 0),
+        fallback_used: data.fallback_used === true,
+        time: event.time,
+      });
+      break;
+    }
+
+    case EventType.OPERATION_RECONCILE_REQUIRED: {
+      // A tool operation crashed mid-flight and needs human裁决 (Phase 4/5, spec 07 §13).
+      // Surfaces in the Inspector as an approval queue item.
+      next.reconcile_queue.push({
+        tool_call_id: String(data.tool_call_id ?? ''),
+        tool_name: String(data.tool_name ?? ''),
+        args_identity: String(data.args_identity ?? ''),
+        state: String(data.state ?? 'NEED_RECONCILE'),
+        time: event.time,
+      });
+      break;
+    }
 
     default:
       // Unknown event types are ignored — forward-compatible.

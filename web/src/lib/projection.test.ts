@@ -12,7 +12,10 @@ function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
 describe('initConversation', () => {
   it('初始状态为空对话', () => {
     const s = initConversation('abc');
-    expect(s).toEqual({ session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle' });
+    expect(s).toEqual({
+      session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle',
+      compactions: [], reconcile_queue: [],
+    });
   });
 });
 
@@ -174,6 +177,115 @@ describe('applyEvent — resolveStep 边界契约', () => {
     expect(s.turns).toHaveLength(1);
     expect(s.turns[0].step_id).toBe(4);
     expect(s.turns[0].model.text).toBe('x');
+  });
+});
+
+describe('applyEvent — Phase 5 新事件投影', () => {
+  // 这组测试覆盖 Phase 5 新增的 3 个事件类型（ARTIFACT_CREATED /
+  // CONTEXT_COMPACTED / OPERATION_RECONCILE_REQUIRED）。
+  // MODEL_FAILED 是死常量（后端声明但无构造点），暂不投影（走 default 忽略）。
+
+  it('ARTIFACT_CREATED 把 artifact ref 挂到产生它的 ToolCall 上', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'cat big.log' } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_CREATED,
+      data: {
+        artifact_id: 'art-abc123',
+        session_id: 's',
+        source_tool: 'bash',
+        tool_call_id: 't1',
+        size: 1048576,
+        mime_type: 'text/plain',
+      },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].artifact).toEqual({
+      artifact_id: 'art-abc123',
+      size: 1048576,
+      mime_type: 'text/plain',
+      source_tool: 'bash',
+    });
+  });
+
+  it('ARTIFACT_CREATED 找不到对应 tool_call_id 时安全忽略（不崩溃）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.ARTIFACT_CREATED,
+      data: {
+        artifact_id: 'art-x',
+        session_id: 's',
+        source_tool: 'bash',
+        tool_call_id: 'nonexistent',
+        size: 100,
+        mime_type: 'text/plain',
+      },
+    }));
+    expect(s.turns).toHaveLength(0);
+  });
+
+  it('CONTEXT_COMPACTED 记录到 conversation.compactions（Inspector 数据源）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.CONTEXT_COMPACTED,
+      data: {
+        compacted_turn_count: 5,
+        summary_message_count: 1,
+        token_estimate: 2048,
+        fallback_used: false,
+      },
+      time: '2026-09-04T10:00:00.000Z',
+    }));
+    expect(s.compactions).toHaveLength(1);
+    expect(s.compactions[0]).toEqual({
+      compacted_turn_count: 5,
+      summary_message_count: 1,
+      token_estimate: 2048,
+      fallback_used: false,
+      time: '2026-09-04T10:00:00.000Z',
+    });
+  });
+
+  it('OPERATION_RECONCILE_REQUIRED 入队到 reconcile_queue', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.OPERATION_RECONCILE_REQUIRED,
+      data: {
+        tool_call_id: 't9',
+        tool_name: 'bash',
+        args_identity: 'rm -rf /tmp/x',
+        state: 'NEED_RECONCILE',
+      },
+      time: '2026-09-04T11:00:00.000Z',
+    }));
+    expect(s.reconcile_queue).toHaveLength(1);
+    expect(s.reconcile_queue[0]).toEqual({
+      tool_call_id: 't9',
+      tool_name: 'bash',
+      args_identity: 'rm -rf /tmp/x',
+      state: 'NEED_RECONCILE',
+      time: '2026-09-04T11:00:00.000Z',
+    });
+  });
+
+  it('多次 CONTEXT_COMPACTED 累积（不全量覆盖）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev({
+      type: EventType.CONTEXT_COMPACTED,
+      data: { compacted_turn_count: 3, summary_message_count: 1, token_estimate: 1024, fallback_used: false },
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.CONTEXT_COMPACTED,
+      data: { compacted_turn_count: 2, summary_message_count: 1, token_estimate: 2048, fallback_used: true },
+    }));
+    expect(s.compactions).toHaveLength(2);
+    expect(s.compactions[1].fallback_used).toBe(true);
+  });
+
+  it('initConversation 新字段初始化为空数组', () => {
+    const s = initConversation('s');
+    expect(s.compactions).toEqual([]);
+    expect(s.reconcile_queue).toEqual([]);
   });
 });
 
