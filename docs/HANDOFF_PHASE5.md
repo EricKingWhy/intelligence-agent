@@ -3,7 +3,7 @@
 > **交接对象**：Codex（Secondary / Task Agent）
 > **交接时间**：2026-09-04
 > **交接人**：ZCode（本会话）
-> **当前进度**：#45–#49 已完成，#50 待实施（Codex 2026-09-04 更新）
+> **当前进度**：#45–#50 全部完成，真实七牛 Gate 通过（Codex 2026-09-04 更新，证据见 `docs/PHASE5_GATE.md`）
 
 ---
 
@@ -31,11 +31,11 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 | 3 | #47 | Overflow Handler + Executor 集成 + artifact/created | ✅ DONE (de6a894) | #45 ✅ |
 | 4 | #48 | S3ArtifactStore (七牛云 S3 兼容) | ✅ DONE (80086a9) | #45 ✅ |
 | 5 | #49 | Context Compactor 三层降级 + context/compacted | ✅ DONE (e19905d) | #46 ✅ |
-| 6 | #50 | AgentRuntime 集成 + Phase 5 端到端测试 | ⬜ TODO | #47, #48, #49 |
+| 6 | #50 | AgentRuntime 集成 + Phase 5 端到端测试 | ✅ DONE (c0a4b0f) | #47, #48, #49 ✅ |
 
-**可立即开始的**：#50（前置 #47 / #48 / #49 已完成；真实七牛 Gate 仍需凭证）。
+**Phase 5 已完成**：真实七牛 Gate 2 passed，全量回归 424 passed。证据见 `docs/PHASE5_GATE.md`。
 
-**剩余任务**：#50 Runtime 集成与 Phase Gate。
+**剩余任务**：本 Phase 无；main 最终集成和后续 Phase 按用户/Primary Developer 排期。
 
 **Context 接口说明**：`ContextBuilder.build` 和 `ContextProvider.select` 为 async，调用时使用 `await`；token 估算计入消息结构（含 tool_calls）。#49 已接入阈值执行；压缩成功追加 `context/compacted`，硬限制失败抛异常。
 
@@ -176,6 +176,8 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 
 ### #50: AgentRuntime 集成 + 端到端测试
 
+**已完成**：Runtime 默认/注入 ContextBuilder；hard guard 返回 `context_window_exceeded` 并持久化 `run/failed`；Executor 收到 Session；新增事实镜像到实时流。Web 按 Settings 装配 Context/S3/inspect/overflow。串行及并行部分失败先发送已提交事件，再传播异常。真实七牛 Gate 已运行通过，凭证保存在本地 Git 忽略的 `.env`。
+
 **核心交付**：
 - `src/agent_harness/agent/runtime.py`:
   - 构造函数增加 `context_builder: ContextBuilder`
@@ -183,7 +185,7 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 - 端到端测试（**用真实七牛云 S3ArtifactStore**，不用 Fake）
 - Phase 5 Gate 达成证据
 
-**用户提供的七牛云凭证**：到 #50 实施时需要向用户索取 endpoint / bucket / access_key / secret_key。
+**七牛云配置**：用户已提供并写入本地 `.env`，不在文档复述；其他环境按 `.env.example` 配置。
 
 **注意**：现有 345+23=368 个测试不能回归。Runtime 改第 1 步后所有用 `session.derive_messages()` 的测试仍通过——因为 ContextBuilder.build() 内部调 derive_messages。
 
@@ -203,7 +205,7 @@ cd D:/intelligence-agent-backend
 .venv/Scripts/python.exe -m ruff check .
 ```
 
-**当前基线（#49 后，安装 artifact extra）**：415 passed, 8 skipped, 4 deselected, ruff All checks passed。默认额外排除真实七牛测试。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
+**当前基线（#50 后，安装 artifact extra）**：424 passed, 8 skipped, 5 deselected, ruff All checks passed；真实七牛单独运行 2 passed。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
 
 ---
 
@@ -223,9 +225,9 @@ cd D:/intelligence-agent-backend
 ## 7. Phase 5 Gate（spec 06 §9）
 
 实施完 #50 后验证：
-- [ ] 大 Tool Output 完整保存（Artifact）
-- [ ] Model 默认只收到 summary + ref（截断摘要 + artifact_ref）
-- [ ] `inspect_artifact` 能找回细节
-- [ ] 七牛云 Provider 可替换 Fake Provider
-- [ ] Compaction 后历史不删除（SessionEvent 不变）
-- [ ] 替换成 Fake Provider 时 Agent Core 无需修改（契约隔离）
+- [x] 大 Tool Output 完整保存（Artifact）
+- [x] Model 默认只收到 summary + ref（截断摘要 + artifact_ref）
+- [x] `inspect_artifact` 能找回细节
+- [x] 七牛云 Provider 可替换 Fake Provider
+- [x] Compaction 后历史不删除（原有 SessionEvent 不变）
+- [x] 替换成 Fake Provider 时 Agent Core 无需修改（契约隔离）
