@@ -7,7 +7,7 @@ from langgraph.store.base import BaseStore, GetOp, Item, PutOp, SearchItem, Sear
 
 from agent_harness.identity import get_identity_context
 from agent_harness.memory.record_store import MemoryRecordStore
-from agent_harness.memory.types import MemoryEntry, MemoryScope, scope_to_namespace
+from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
 from agent_harness.memory.vector_store import VectorIndexStore
 
 
@@ -18,12 +18,8 @@ class SqliteMilvusBaseStore(BaseStore):
 
     @staticmethod
     def _scope(namespace: tuple[str, ...]) -> MemoryScope:
-        if len(namespace) not in (4, 5):
-            raise PermissionError("Memory namespace is not authorized")
-        scope = MemoryScope(namespace[3])
-        if tuple(namespace) != scope_to_namespace(scope, get_identity_context()):
-            raise PermissionError("Memory namespace is not authorized")
-        return scope
+        # 形状/根段/归属校验收进 MemoryNamespace.authorize 一处（A3）。
+        return MemoryNamespace.authorize(namespace, get_identity_context()).scope
 
     def batch(self, ops):
         try:

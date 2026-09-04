@@ -9,7 +9,7 @@ from langchain_core.embeddings import Embeddings
 
 from agent_harness.config import Settings
 from agent_harness.identity import IdentityContext
-from agent_harness.memory.types import MemoryScope, scope_to_namespace
+from agent_harness.memory.types import MemoryNamespace, MemoryScope
 from agent_harness.memory.vector_store import VectorStoreError
 
 
@@ -113,19 +113,19 @@ class MilvusVectorStore:
 
     @staticmethod
     def _filter(identity: IdentityContext, scope: MemoryScope) -> tuple[str, dict]:
-        namespace = scope_to_namespace(scope, identity)
+        namespace = MemoryNamespace.of(scope, identity)
         return ("tenant_id == {tenant} AND user_id == {user} AND scope == {scope} AND session_id == {session}",
                 {"tenant": identity.tenant_id, "user": identity.user_id, "scope": scope.value,
-                 "session": namespace[4] if len(namespace) == 5 else ""})
+                 "session": namespace.session_id or ""})
 
     async def upsert(self, memory_id: str, content: str, metadata: dict, identity: IdentityContext) -> None:
         scope = MemoryScope(metadata["scope"])
-        namespace = scope_to_namespace(scope, identity)
+        namespace = MemoryNamespace.of(scope, identity)
         vector = await self._embed(content, document=True)
-        key = hashlib.sha256(json.dumps([*namespace, memory_id], ensure_ascii=False).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps(namespace.pk_parts(memory_id), ensure_ascii=False).encode()).hexdigest()
         await self._call("upsert", collection_name=self._settings.milvus_collection, data=[{
             "id": key, "memory_id": memory_id, "tenant_id": identity.tenant_id, "user_id": identity.user_id,
-            "scope": scope.value, "session_id": namespace[4] if len(namespace) == 5 else "",
+            "scope": scope.value, "session_id": namespace.session_id or "",
             "content": content, "metadata": metadata, "vector": vector,
         }])
 

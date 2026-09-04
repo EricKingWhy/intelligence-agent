@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from agent_harness.identity import get_identity_context
 from agent_harness.memory.record_store import MemoryRecordStore
-from agent_harness.memory.types import MemoryEntry, MemoryScope, scope_to_namespace
+from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
 from agent_harness.memory.vector_store import VectorIndexStore
 
 
@@ -35,7 +35,7 @@ class LangMemMemoryCapability:
         self._model = model
 
     async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str:
-        namespace = scope_to_namespace(scope, get_identity_context())
+        namespace = MemoryNamespace.of(scope, get_identity_context()).as_tuple()
         if self._model is not None:
             manager = self._manager(self._model, schemas=[MemoryPayload], namespace=namespace,
                                     store=self._store, enable_deletes=False)
@@ -62,7 +62,7 @@ class LangMemMemoryCapability:
             raise RuntimeError(f"memory tool returned unexpected shape: {result!r}") from None
 
     async def search(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
-        namespace = scope_to_namespace(scope, get_identity_context())
+        namespace = MemoryNamespace.of(scope, get_identity_context()).as_tuple()
         if not query or limit <= 0:
             return []
         tool = self._search(namespace=namespace, store=self._store)

@@ -8,7 +8,7 @@ import aiosqlite
 
 from agent_harness.identity import IdentityContext
 from agent_harness.memory.record_store import PendingMemory
-from agent_harness.memory.types import MemoryEntry, MemoryScope, scope_to_namespace
+from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
 
 
 class SqliteMemoryRecordStore:
@@ -35,7 +35,7 @@ class SqliteMemoryRecordStore:
             await db.commit()
 
     async def store(self, entry: MemoryEntry, identity: IdentityContext) -> str:
-        namespace = json.dumps(scope_to_namespace(entry.scope, identity))
+        namespace = MemoryNamespace.of(entry.scope, identity).as_json()
         async with aiosqlite.connect(self.database_path) as db:
             await db.execute("BEGIN IMMEDIATE")
             async with db.execute("SELECT namespace FROM memory_records WHERE memory_id=?", (entry.id,)) as cursor:
@@ -64,14 +64,14 @@ class SqliteMemoryRecordStore:
                 row = await cursor.fetchone()
         if row is None:
             raise KeyError(memory_id)
-        if json.loads(row["namespace"]) != list(scope_to_namespace(MemoryScope(row["scope"]), identity)):
+        if json.loads(row["namespace"]) != list(MemoryNamespace.of(MemoryScope(row["scope"]), identity).as_tuple()):
             raise KeyError(memory_id)
         return self._entry(row)
 
     async def list_by_scope(
         self, scope: MemoryScope, identity: IdentityContext, limit: int,
     ) -> list[MemoryEntry]:
-        namespace = json.dumps(scope_to_namespace(scope, identity))
+        namespace = MemoryNamespace.of(scope, identity).as_json()
         async with aiosqlite.connect(self.database_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
@@ -96,7 +96,7 @@ class SqliteMemoryRecordStore:
                 rows = await cursor.fetchall()
         return [PendingMemory(self._entry(row),
                               IdentityContext(row["tenant_id"], row["user_id"], [row["scope"]]),
-                              json.loads(row["namespace"])[4] if row["scope"] == "session" else None,
+                              MemoryNamespace(tuple(json.loads(row["namespace"]))).session_id,
                               str(row["revision"])) for row in rows]
 
     async def acknowledge(self, change: PendingMemory) -> bool:
