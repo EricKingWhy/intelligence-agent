@@ -1,6 +1,7 @@
 """Memory retrieval budgets, failure isolation, and background run writeback."""
 
 import asyncio
+import logging
 
 import pytest
 from langchain_core.messages import AIMessage, SystemMessage
@@ -165,6 +166,41 @@ async def test_background_failure_is_durable_and_redacted(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_writeback_failure_logs_root_cause_and_types_reason(tmp_path, caplog):
+    """写回失败必须把根因（含堆栈）写进日志，并在降级事件 reason 里带上异常
+    类型名，让代码 Bug 与存储故障可区分；原始异常消息不进事件流（防泄露）。"""
+    class Broken:
+        async def extract(self, events):
+            raise RuntimeError("storage-outage-details")
+
+    session = make_session(tmp_path)
+    writer = MemoryWriteback(FakeMemoryCapability(), Broken())
+    with caplog.at_level(logging.ERROR, logger="agent_harness.memory"):
+        writer.submit(session, session.events)
+        await writer.drain()
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert len(degraded) == 1
+    assert degraded[0].data["reason"] == "unavailable: RuntimeError"
+    assert "RuntimeError" in caplog.text  # 根因日志（含堆栈）可观测
+    assert "storage-outage-details" not in str(degraded[0].data)  # 原始消息不进事件
+
+
+@pytest.mark.asyncio
+async def test_degraded_event_fires_exactly_once_per_failure(tmp_path):
+    """每次失败恰好产生一条 memory/degraded，不丢失也不重复。"""
+    class Broken:
+        async def extract(self, events):
+            raise RuntimeError("boom")
+
+    session = make_session(tmp_path)
+    writer = MemoryWriteback(FakeMemoryCapability(), Broken())
+    writer.submit(session, session.events)
+    writer.submit(session, session.events)
+    await writer.drain()
+    assert len([e for e in session.events if e.type == "memory/degraded"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_stream_mirrors_retrieval_degradation_and_writer_can_close(tmp_path):
     class Broken:
         async def search(self, *args, **kwargs):
@@ -193,3 +229,24 @@ async def test_stream_mirrors_retrieval_degradation_and_writer_can_close(tmp_pat
     await asyncio.wait_for(started.wait(), 1)
     await writer.close()
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_search_failure_logs_root_cause_and_types_reason(tmp_path, caplog):
+    """检索失败的降级事件 reason 带异常类型名（与 writeback 同一模式）：
+    日志含根因堆栈，原始异常消息不进事件流（防泄露）。"""
+    class Broken:
+        async def search(self, *args, **kwargs):
+            raise RuntimeError("milvus-down-detail")
+
+    session = make_session(tmp_path)
+    session.append("user/message", {"content": "找一下我的偏好"})
+    provider = MemoryContextProvider(Broken())
+    with caplog.at_level(logging.ERROR, logger="agent_harness.memory"):
+        accepted = await provider.select(session, token_budget=500)
+    assert accepted == []
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert len(degraded) == 1
+    assert degraded[0].data["reason"] == "unavailable: RuntimeError"
+    assert "RuntimeError" in caplog.text
+    assert "milvus-down-detail" not in str(degraded[0].data)

@@ -1,6 +1,7 @@
 """SQLite 权威记录到向量索引的可重试同步。"""
 
 import asyncio
+import logging
 
 import pytest
 
@@ -9,6 +10,27 @@ from agent_harness.memory.fake_vector_store import FakeVectorStore
 from agent_harness.memory.outbox_relay import OutboxRelay
 from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
 from agent_harness.memory.types import MemoryEntry, MemoryScope, memory_session_var
+
+RELAY_LOGGER = "agent_harness.memory.outbox_relay"
+
+
+class AckFailed(RuntimeError):
+    """模拟 acknowledge（SQLite 写）持久失败。"""
+
+
+class AckBrokenStore(SqliteMemoryRecordStore):
+    async def acknowledge(self, change):
+        raise AckFailed("ack write unavailable")
+
+
+class CountingVector(FakeVectorStore):
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    async def upsert(self, *args):
+        self.attempts += 1
+        await super().upsert(*args)
 
 
 @pytest.mark.asyncio
@@ -163,4 +185,68 @@ async def test_failed_page_does_not_starve_later_records(tmp_path):
     relay = OutboxRelay(store, Poisoned())
     assert await relay.flush() == 1
     assert (await store.get("100", owner)).indexed
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_failure_is_attributed_to_ack_stage(tmp_path, caplog):
+    """向量写入成功但 acknowledge（SQLite 写）失败时，失败按 ack 阶段归因记录，
+    不得与 vector 失败混同；条目仍计入连续失败，outbox 行保留、下轮重试。"""
+    store = AckBrokenStore(tmp_path / "memory.db")
+    await store.initialize()
+    alice = IdentityContext("acme", "alice", ["user"])
+    await store.store(MemoryEntry(id="acked", content="c", scope=MemoryScope.USER,
+                                  created_at="2026-09-04"), alice)
+
+    vector = CountingVector()
+    relay = OutboxRelay(store, vector)
+    with caplog.at_level(logging.WARNING, logger=RELAY_LOGGER):
+        await relay.flush()
+    assert vector.attempts == 1  # 向量写入本身成功
+    assert "ack: AckFailed" in caplog.text  # 归因到 ack 阶段
+    assert "vector:" not in caplog.text  # 不得误报为 vector 失败
+    assert await store.pending()  # outbox 行保留，等待下轮重试
+
+
+@pytest.mark.asyncio
+async def test_vector_failure_reason_names_vector_stage(tmp_path, caplog):
+    """vector upsert 失败时，失败原因按 vector 阶段归因记录（含异常类型）。"""
+    store = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await store.initialize()
+    alice = IdentityContext("acme", "alice", ["user"])
+    await store.store(MemoryEntry(id="vfail", content="c", scope=MemoryScope.USER,
+                                  created_at="2026-09-04"), alice)
+
+    class Failing(FakeVectorStore):
+        async def upsert(self, *args):
+            raise ConnectionError("offline")
+
+    relay = OutboxRelay(store, Failing())
+    with caplog.at_level(logging.WARNING, logger=RELAY_LOGGER):
+        await relay.flush()
+    assert "vector: ConnectionError" in caplog.text
+    assert "ack:" not in caplog.text
+    assert await store.pending()
+
+
+@pytest.mark.asyncio
+async def test_persistent_ack_failures_still_dead_letter(tmp_path, caplog):
+    """持续 ack 失败同样计入连续失败：满 MAX 次后死信跳过，
+    不会每轮重复 upsert（毒丸不回归），outbox 行保留可观察。"""
+    store = AckBrokenStore(tmp_path / "memory.db")
+    await store.initialize()
+    alice = IdentityContext("acme", "alice", ["user"])
+    await store.store(MemoryEntry(id="stuck", content="c", scope=MemoryScope.USER,
+                                  created_at="2026-09-04"), alice)
+
+    vector = CountingVector()
+    relay = OutboxRelay(store, vector)
+    with caplog.at_level(logging.WARNING, logger=RELAY_LOGGER):
+        for _ in range(OutboxRelay.MAX_CONSECUTIVE_FAILURES):
+            await relay.flush()
+        assert vector.attempts == OutboxRelay.MAX_CONSECUTIVE_FAILURES
+        assert "ack: AckFailed" in caplog.text
+        assert "abandoned" in caplog.text  # 第 MAX 次连续失败进入死信
+        assert await relay.flush() == 0
+        assert vector.attempts == OutboxRelay.MAX_CONSECUTIVE_FAILURES  # 死信后不再重试
+    assert await store.pending()
 

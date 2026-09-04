@@ -31,9 +31,13 @@ class MemoryWriteback:
             async with asyncio.timeout(self._timeout):
                 for scope, content, metadata in await self._extractor.extract(events):
                     await self._capability.store(scope, content, metadata)
-        except Exception:  # noqa: BLE001 — optional work must not fail the runtime.
+        except Exception as error:
+            # 根因（类型 + 消息 + 堆栈）只进日志；事件 reason 仅带异常类型名——
+            # 原始异常消息可能含密钥，不得泄入事件流（见 redaction 测试）。
+            logger.exception("Memory writeback failed")
             try:
-                session.append(MEMORY_DEGRADED, {"operation": "writeback", "reason": "unavailable"},
+                session.append(MEMORY_DEGRADED,
+                               {"operation": "writeback", "reason": f"unavailable: {type(error).__name__}"},
                                run_id=next((e.run_id for e in events if e.run_id), None))
             except Exception:  # noqa: BLE001 — persistence can also be unavailable.
                 logger.warning("Memory degradation event persistence unavailable")
