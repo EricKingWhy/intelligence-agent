@@ -3,7 +3,7 @@
 > **交接对象**：Codex（Secondary / Task Agent）
 > **交接时间**：2026-09-04
 > **交接人**：ZCode（本会话）
-> **当前进度**：#45–#47 已完成，#48–#50 待实施（Codex 2026-09-04 更新）
+> **当前进度**：#45–#48 已完成，#49–#50 待实施（Codex 2026-09-04 更新）
 
 ---
 
@@ -29,13 +29,13 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 | 1 | #45 | ArtifactStore ABC + FakeArtifactStore + inspect_artifact Tool | ✅ DONE (fd7439a) | — |
 | 2 | #46 | estimate_tokens + ContextBuilder base (no Compaction) | ✅ DONE (c98c9a5) | — |
 | 3 | #47 | Overflow Handler + Executor 集成 + artifact/created | ✅ DONE (de6a894) | #45 ✅ |
-| 4 | #48 | S3ArtifactStore (七牛云 S3 兼容) | ⬜ TODO | #45 ✅ |
+| 4 | #48 | S3ArtifactStore (七牛云 S3 兼容) | ✅ DONE (80086a9) | #45 ✅ |
 | 5 | #49 | Context Compactor 三层降级 + context/compacted | ⬜ TODO | #46 |
 | 6 | #50 | AgentRuntime 集成 + Phase 5 端到端测试 | ⬜ TODO | #47, #48, #49 |
 
-**可立即开始的**：#48、#49（前置 #45 / #46 已完成）。
+**可立即开始的**：#49（前置 #46 已完成）。
 
-**建议执行顺序**：#48 → #49 → #50（串行）。
+**建议执行顺序**：#49 → #50（串行）。
 
 **#46 接口说明**：`ContextBuilder.build` 和 `ContextProvider.select` 为 async，调用时使用 `await`；token 估算计入消息结构（含 tool_calls），记录在诊断日志，不写 SessionEvent。当前 build 即使超过阈值也返回完整投影，阈值执行留给 #49。
 
@@ -124,6 +124,15 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 
 ### #48: S3ArtifactStore (七牛云)
 
+**已完成的接线约定（供 #50 使用）**：
+- 构造：`S3ArtifactStore(settings, session_id=session.session_id)`。每个 Session 单独构造；恢复时传相同 ID。`load(id)` / `inspect(id)` 由构造绑定的 Session 得到 `{session_id}/{artifact_id}`，没有内存索引或 bucket 扫描。
+- `save()` 的 Session ID 必须与实例绑定值一致。Fake/S3 共用契约测试覆盖同一 Session 内的行为；Fake 原有的跨 Session 去重测试不代表生产 Provider 可以跨 Session 共享实例。Fork 跨 Session 引用策略留 Phase 14。
+- 正文用 UTF-8，元数据以 ASCII JSON 放在同次 `put_object` 的 S3 Metadata 中；不会出现正文和元数据分两次写入的窗口。
+- `NoSuchKey` 转为契约的 `KeyError`，权限/上传/其他 SDK 错误直接传播。client 与 response body 通过 async context manager 关闭。
+- 安装：`uv sync --inexact --extra artifact`。默认测试排除 `qiniu`；显式验证：`uv run --extra artifact python -X utf8 -m pytest tests/integration/test_qiniu_artifact.py -m qiniu -q`。测试使用随机专属 key，结束清理这个 key。真实七牛尚未验证。
+- Settings 的五个 `artifact_store_*` 字段都须配置；bucket 应填七牛的 **S3 空间名**，region/endpoint 取空间所在区域。参考 [七牛服务域名](https://developer.qiniu.com/kodo/4088/s3-access-domainname)。
+- REUSE + ADAPT aioboto3（Apache-2.0；[官方用法](https://aioboto3.readthedocs.io/en/latest/usage.html)），锁定版本 15.5.0；未移植 SDK 代码。Core 不直接依赖具体客户端。
+
 **核心交付**：
 - `src/agent_harness/storage/s3_artifact.py`:
   `S3ArtifactStore(ArtifactStore)`，用 `aioboto3` 的 async S3 client
@@ -186,7 +195,7 @@ cd D:/intelligence-agent-backend
 .venv/Scripts/python.exe -m ruff check .
 ```
 
-**当前基线（#47 后）**：386 passed, 8 skipped, 3 deselected, ruff All checks passed。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
+**当前基线（#48 后，安装 artifact extra）**：397 passed, 8 skipped, 4 deselected, ruff All checks passed。默认额外排除真实七牛测试。Windows 使用上面的 `-X utf8`，避免既有 mapping JSON 测试用默认编码读取中文路径导致失败。
 
 ---
 
