@@ -37,7 +37,10 @@ def parse_capabilities_config(raw: str | None) -> dict[str, ProviderConfig]:
     try:
         return _CONFIG_ADAPTER.validate_python(data)
     except ValidationError as error:
+        # 带上首条具体错误（字段+原因），只报 error_count() 会让用户盲猜哪个键写错。
+        first = error.errors()[0]
         raise CapabilityError(
-            f"CAPABILITIES config is invalid: {error.error_count()} validation error(s)",
+            f"CAPABILITIES config is invalid: {error.error_count()} validation error(s); "
+            f"first: {'.'.join(str(loc) for loc in first.get('loc', [])) or '<root>'}: {first.get('msg')}",
             code="init_failed",
         ) from None

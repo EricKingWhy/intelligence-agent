@@ -8,6 +8,7 @@ create_app() 是单一入口——传入 Settings，返回装配好的 FastAPI�
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,10 @@ class AppState:
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
         # Capability 装配：只在首次使用时执行（含 Memory / Skills / demo 等）。
+        # asyncio.Lock 守住 once 语义：并发首请求都看到 _wiring is None 时，
+        # 只有一个真正执行 wire_capabilities，另一个等锁后复用结果
+        # （否则第二个会在重复注册上炸掉 / 被降级吞掉）。
+        self._wiring_lock = asyncio.Lock()
         self._registry: CapabilityRegistry | None = None
         self._wiring: CapabilityWiring | None = None
 
@@ -105,11 +110,13 @@ class AppState:
         """惰性装配 Capability 子系统并缓存；返回 (registry, wiring)。"""
         if self._wiring is not None and self._registry is not None:
             return self._registry, self._wiring
-        config = parse_capabilities_config(self.settings.capabilities)
-        registry = CapabilityRegistry()
-        wiring = await wire_capabilities(registry, config, settings=self.settings)
-        self._registry, self._wiring = registry, wiring
-        return registry, wiring
+        async with self._wiring_lock:
+            if self._wiring is None or self._registry is None:
+                config = parse_capabilities_config(self.settings.capabilities)
+                registry = CapabilityRegistry()
+                wiring = await wire_capabilities(registry, config, settings=self.settings)
+                self._registry, self._wiring = registry, wiring
+        return self._registry, self._wiring
 
     @property
     def wiring(self) -> CapabilityWiring | None:

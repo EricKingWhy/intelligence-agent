@@ -64,8 +64,10 @@ class TestRegistry:
     def test_duplicate_registration_rejected(self):
         registry = CapabilityRegistry()
         registry.register(_descriptor(), object())
-        with pytest.raises(CapabilityError, match="not_found|duplicate"):
+        with pytest.raises(CapabilityError) as err:
             registry.register(_descriptor(), object())
+        # 重复注册是装配冲突：用 init_failed（not_found 专指"注册表无此能力"，ADR-0010 Q2）。
+        assert err.value.code == "init_failed"
         # 原.provider 不被静默覆盖：
         first = registry.get("memory")
         with pytest.raises(CapabilityError):
@@ -93,7 +95,7 @@ class TestRegistry:
             registry.get("memory")
         assert err.value.code == "disabled"
         assert registry.optional("memory") is None
-        # available() 不列 disabled？——列，但带 enabled 标记由消费方判断：
+        # available() 列出 disabled 条目，带 enabled 标记由消费方判断：
         assert registry.descriptor("memory").enabled is False
 
     def test_error_vocabulary_is_explicit(self):

@@ -164,6 +164,18 @@ class TestWireCapabilities:
         assert err.value.code == "init_failed"
 
     @pytest.mark.asyncio
+    async def test_unknown_provider_raises_not_silently_ignored(self, tmp_path):
+        """config 写了未知 provider：显式失败（08 §5），不走降级、不静默换默认实现。"""
+        with pytest.raises(CapabilityError) as err:
+            await wire_capabilities(
+                CapabilityRegistry(),
+                parse_capabilities_config('{"memory": {"provider": "milvus"}}'),
+                settings=_memory_settings(tmp_path, ready=True),
+            )
+        assert err.value.code == "init_failed"
+        assert "milvus" in str(err.value)
+
+    @pytest.mark.asyncio
     async def test_contributes_tools_collected_into_wiring(self, tmp_path):
         """实现了 ContributesTools 的 provider：其工具被收集（T5 由装配侧注册进 ToolRegistry）。"""
         registry = CapabilityRegistry()

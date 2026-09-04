@@ -62,7 +62,7 @@ class CapabilityRegistry:
                 f"capability '{name}' is already registered "
                 f"(provider={self._descriptors[name].provider_name}); "
                 "duplicate registration is rejected, not silently overridden",
-                code="not_found",
+                code="init_failed",
             )
         self._descriptors[name] = descriptor
         self._providers[name] = provider

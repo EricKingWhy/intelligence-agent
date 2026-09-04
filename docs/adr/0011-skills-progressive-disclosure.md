@@ -14,7 +14,7 @@
 > **Grill 记录（2026-09-05，用户在线确认）**：Q1 配置载体走 env JSON（维持 ADR-0010 Q4）；Q3 全局+项目双目录布局维持；Q2 load_skill 工具机制维持。**Q6 新增决策**：frontmatter 允许可选 `when_to_use` 字段并进目录注入行——超出 spec 09 §2 的 name+description 最小集，经用户明确批准（帮助模型判断何时 load，代价可忽略）。
 
 ### Q1：SKILL.md 的解析格式？
-**决策**：YAML frontmatter（`---` 围栏）+ Markdown 正文；frontmatter 必填 `name`、`description`，未知字段保留在 `meta`。解析器 hand-roll 围栏切分 + `yaml.safe_load`（PyYAML 已在依赖树，零新增依赖）。解析失败的 skill **不静默跳过**：进 `SkillLoadError` 列表随目录结果返回（发现层可观察）。
+**决策**：YAML frontmatter（`---` 围栏）+ Markdown 正文；frontmatter 必填 `name`、`description`，未知字段保留在 `meta`。解析器 hand-roll 围栏切分 + `yaml.safe_load`（PyYAML 已在依赖树，零新增依赖）。解析失败的 skill **不静默跳过**：进错误字符串列表（`SkillCatalog.errors`，元素为 str）随目录结果返回（发现层可观察，装配期记 warning）。
 **理由**：SKILL.md 是本项目与 Pi/Claude skills 生态的事实标准（09 §2 原文即 SKILL.md）；复用格式而非发明格式。可观察的解析失败对应 08 §5"不允许接受但静默忽略"的同一精神。
 **后果**：frontmatter 缺 name/description 视为解析失败。
 

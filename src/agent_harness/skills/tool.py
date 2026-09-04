@@ -9,6 +9,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from agent_harness.capability.base import CapabilityError
+from agent_harness.skills.capability import SkillCapability
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.result import ErrorCode
@@ -21,7 +22,7 @@ class _LoadSkillArgs(BaseModel):
 class LoadSkillTool(Tool):
     """load_skill 工具：返回技能全文 + 数据非指令前缀（防注入框架）。"""
 
-    def __init__(self, capability) -> None:
+    def __init__(self, capability: SkillCapability) -> None:
         self._capability = capability
 
     @property

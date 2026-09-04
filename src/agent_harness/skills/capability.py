@@ -7,7 +7,11 @@ from agent_harness.skills.discovery import SkillCatalog, SkillCatalogEntry
 
 
 class SkillCapability:
-    """Skill 作为 Context Capability 的 Provider（不等于 Tool，ADR-0011 Q3）。"""
+    """Skill 作为 Context Capability 的 Provider（不等于 Tool，ADR-0011 Q3）。
+
+    "加载动作"是模型可调用的工具：本类实现 ContributesTools，把 load_skill
+    交给 wire_capabilities 统一收集进 ToolRegistry（零旁路）。
+    """
 
     def __init__(self, catalog: SkillCatalog) -> None:
         self._catalog = catalog
@@ -26,3 +30,8 @@ class SkillCapability:
             if entry.name == name:
                 return entry.load_body()
         raise CapabilityError(f"skill '{name}' is not in the catalog", code="not_found")
+
+    def contributes_tools(self) -> list:
+        from agent_harness.skills.tool import LoadSkillTool
+
+        return [LoadSkillTool(self)]

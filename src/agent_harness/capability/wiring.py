@@ -73,7 +73,6 @@ async def _wire_skills(
     from agent_harness.skills.capability import SkillCapability
     from agent_harness.skills.context_provider import SkillCatalogContextProvider
     from agent_harness.skills.discovery import SkillDiscovery
-    from agent_harness.skills.tool import LoadSkillTool
 
     # 全局目录（spec 09 §2）+ 项目目录（workspace 级）+ options 扩展目录/手动路径。
     global_dir = Path(settings.skill_global_dir) if settings.skill_global_dir \
@@ -82,6 +81,10 @@ async def _wire_skills(
     directories.extend(Path(d) for d in cfg.options.get("directories", []))
     manual_paths = [Path(p) for p in cfg.options.get("paths", [])]
     catalog = SkillDiscovery(directories=directories, manual_paths=manual_paths).discover()
+    # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
+    # SkillCapability.errors() 仍可编程读取。
+    if catalog.errors:
+        logger.warning("skill 发现阶段有 %d 个解析错误：%s", len(catalog.errors), catalog.errors)
     capability = SkillCapability(catalog)
     registry.register(
         CapabilityDescriptor(
@@ -93,7 +96,8 @@ async def _wire_skills(
         capability,
     )
     wiring.context_providers.append(SkillCatalogContextProvider(capability))
-    wiring.tools.append(LoadSkillTool(capability))
+    # load_skill 不在这里 append：SkillCapability 实现 ContributesTools，
+    # 与其他工具贡献统一走 wire_capabilities 末尾的收集循环。
 
 
 async def _wire_ticker(
@@ -122,13 +126,24 @@ _BUILTIN_WIRING: dict[str, tuple[Any, Degradation]] = {
 }
 
 
+#: 每个 capability 接受的 provider 名。`"builtin"` 恒合法（= 该能力的内置 factory）；
+# 其余是 factory 认的显式别名（memory 的内置 factory 即 LangMem 实现）。config 写了
+# 既非 builtin 也非已知别名的 provider 时显式失败（08 §5：不允许"接受但静默忽略"）
+# ——注意这是装配期直接抛错，不走降级：配置写错属于用户必须修的错误。
+_KNOWN_PROVIDERS: dict[str, set[str]] = {
+    "memory": {"builtin", "langmem"},
+    "skills": {"builtin"},
+    "ticker": {"builtin"},
+}
+
+
 async def wire_capabilities(
     registry: CapabilityRegistry,
     config: dict[str, ProviderConfig],
     *,
     settings: Settings,
 ) -> CapabilityWiring:
-    """按 config 驱动 builtin 接线；未知 capability 显式报错（不静默忽略）。
+    """按 config 驱动 builtin 接线；未知 capability / 未知 provider 显式报错（不静默忽略）。
 
     config 为空 = 零行为变化。返回的 CapabilityWiring 由调用方接到
     ToolRegistry / ContextBuilder / AgentRuntime。
@@ -143,6 +158,12 @@ async def wire_capabilities(
             raise CapabilityError(
                 f"unknown capability '{name}' in CAPABILITIES config "
                 f"(known: {sorted(_BUILTIN_WIRING)})",
+                code="init_failed",
+            )
+        if cfg.provider not in _KNOWN_PROVIDERS[name]:
+            raise CapabilityError(
+                f"unknown provider '{cfg.provider}' for capability '{name}' "
+                f"(known: {sorted(_KNOWN_PROVIDERS[name])})",
                 code="init_failed",
             )
         factory, degradation = entry

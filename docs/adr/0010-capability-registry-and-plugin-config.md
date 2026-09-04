@@ -22,7 +22,7 @@ Phase 6 已有一条竖切 Capability seam（`MemoryCapability` Protocol → `La
 **后果**：health/availability 字段 08 标注"按需"——V1 不做健康检查轮询，DEFER。
 
 ### Q3：错误词汇表？
-**决策**：`CapabilityError(RuntimeError)` + 四个码：`not_found`（注册表无此能力）、`unsupported`（有此能力但 descriptor 不支持所需子能力）、`disabled`（配置显式停用）、`init_failed`（factory 构造失败）。全部显式抛出。
+**决策**：`CapabilityError(RuntimeError)` + 四个码：`not_found`（注册表无此能力）、`unsupported`（有此能力但 descriptor 不支持所需子能力）、`disabled`（配置显式停用）、`init_failed`（装配期失败：factory 构造失败 / 注册冲突 / config 非法）。全部显式抛出。另：`unsupported` 在 V1 是保留码——唯一 Consumer 由显式装配选定，还没有按子能力在多 Provider 间挑选的场景，Consumer 侧检查随多 Provider 选择一起落地（DEFER）。
 **理由**：08 §2 要求 error vocabulary；四个码恰好覆盖 §9 验收的 3/4/5 三条失败形态。
 
 ### Q4：Plugin Config 的来源与形状？
