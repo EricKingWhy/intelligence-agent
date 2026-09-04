@@ -59,6 +59,28 @@ from agent_harness.tooling import ToolExecutor, ToolRegistry
 logger = logging.getLogger("agent_harness.agent")
 
 
+def _usage_from_response(ai: Any) -> dict[str, int] | None:
+    """从模型响应如实抽取 token usage；响应没带就返回 None（绝不伪造）。"""
+    meta = getattr(ai, "usage_metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    usage: dict[str, int] = {}
+    for source_key, target_key in ({"input_tokens": "prompt_tokens",
+                                    "output_tokens": "completion_tokens",
+                                    "total_tokens": "total_tokens"}).items():
+        value = meta.get(source_key)
+        if value is not None:
+            usage[target_key] = value
+    return usage or None
+
+
+def _model_name_from_response(ai: Any) -> str | None:
+    """从响应元数据取本次推理的模型名；拿不到就 None，不猜不编。"""
+    meta = getattr(ai, "response_metadata", None) or {}
+    name = meta.get("model_name") or meta.get("model")
+    return name if isinstance(name, str) and name else None
+
+
 class AgentRuntime:
     """最小透明 Agent Loop。
 
@@ -157,6 +179,8 @@ class AgentRuntime:
         run_started = session.events[-1]  # begin_run append 了 run/started；events 是公开 property
         yield to_agent_event(run_started)
         steps = 0
+        # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
+        usage_total: dict[str, int] = {}
 
         run_span = new_span_id()
         self._log("agent_start", "Agent Loop 开始", span_id=run_span, step=0,
@@ -224,6 +248,14 @@ class AgentRuntime:
             # 第 3 步：把 AIMessage 持久化为 model/completed 事件
             tool_calls = ai.tool_calls or []
             model_data: dict[str, Any] = {"content": ai.content if isinstance(ai.content, str) else str(ai.content)}
+            model_name = _model_name_from_response(ai)
+            if model_name:
+                model_data["model"] = model_name
+            usage = _usage_from_response(ai)
+            if usage:
+                model_data["usage"] = usage
+                for key, value in usage.items():
+                    usage_total[key] = usage_total.get(key, 0) + value
             if tool_calls:
                 model_data["tool_calls"] = [
                     {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
@@ -257,7 +289,10 @@ class AgentRuntime:
                           reason="本轮无 tool_calls，模型选择直接答复", outcome="success")
                 self._log("task_completed", "Agent Loop 正常结束", span_id=run_span,
                           step=steps, outcome="success")
-                end_event = session.end_run(run_id, status="completed", final_text=final)
+                end_event = session.end_run(run_id, status="completed", final_text=final,
+                                            usage_total=dict(usage_total) or None,
+                                            cost_usd=None,   # TODO(spec 12): 费率表未定义，不伪造
+                                            trace_id=None)   # TODO(Phase 15): Langfuse 接入后填真实 trace
                 self._write_memories(session, memory_event_start)
                 yield to_agent_event(end_event)
                 # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
@@ -273,7 +308,8 @@ class AgentRuntime:
                           span_id=new_span_id(), parent_span_id=run_span, step=steps,
                           decision="max_steps_exceeded", remaining_steps=0,
                           reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
-                end_event = session.end_run(run_id, status="failed")
+                end_event = session.end_run(run_id, status="failed",
+                                            usage_total=dict(usage_total) or None)
                 self._write_memories(session, memory_event_start)
                 yield to_agent_event(end_event)
                 self._last_result = AgentRunResult(
