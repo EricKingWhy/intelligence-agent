@@ -371,12 +371,14 @@ class ToolExecutor:
             call_id = ToolCall.normalize(tool_calls[index]).id
             # 不走 self._log/log_event：EVENT_TYPES 是冻结白名单（诊断事件不该
             # 为它动日志协议），ERROR 级别也需直达 module logger。
+            # exc_info=result 让 traceback 携带消息，避免在消息体里渲染异常字符串
+            # （某些工具会把入参/URL/凭据拼进异常文本）。
             logger.error(
                 "并行批次除首个异常外还有其它调用失败（首个异常照常抛出，其余仅记录）："
-                "tool_call_id=%s，%s: %s",
+                "tool_call_id=%s，%s",
                 call_id,
                 type(result).__name__,
-                result,
+                exc_info=result,
             )
 
     async def _create_pending_operation(

@@ -161,7 +161,7 @@ class _Synthesis:
     needs_call_event: bool  # tool/call 事件缺失时一并补齐
     run_id: str | None
     agent_id: str | None
-    args: dict = None  # 合成 tool/call 的入参；None 表示无可用 args_identity
+    args: dict | None = None  # 合成 tool/call 的入参；None 表示无可用 args_identity
 
     def call_event_args(self) -> dict:
         """tool/call 事件的 args 字段：有 args 用 args，否则空字典（不变量保持）。"""
