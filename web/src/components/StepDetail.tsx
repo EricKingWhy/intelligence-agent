@@ -22,6 +22,7 @@ import {
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
 import { formatDuration } from '../lib/format';
+import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
 
 /** Inspector focus: Run-level overview or a drilled-in event. */
@@ -101,7 +102,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       {tab === 'timeline' && <TimelineTab conversation={conversation} onFocusEvent={onFocusEvent} />}
       {tab === 'changes' && <ChangesTab tools={tools} />}
       {tab === 'terminal' && <TerminalTab tools={tools} onFocusTool={onFocusTool} />}
-      {tab === 'artifacts' && <ArtifactsTab tools={tools} events={conversation.events} />}
+      {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
     </aside>
   );
 }
@@ -252,7 +253,7 @@ function ChatTab({
         <div className="detail-section-title">
           <Database size={12} /> CHECKPOINT
         </div>
-        <div className="detail-empty-hint">后端未暴露（Phase 7 预留）</div>
+        <div className="detail-empty-hint">后端未暴露（无 API，集成阶段处理）</div>
       </div>
     </>
   );
@@ -273,37 +274,8 @@ export function seqGaps(events: AgentEvent[]): string[] {
   return gaps;
 }
 
-/** 事件行的单行摘要——从 data 提炼，不含糊、不伪造。 */
-function eventSummary(e: AgentEvent): string {
-  const d = e.data;
-  switch (e.type) {
-    case EventType.USER_MESSAGE: return String(d.content ?? '').slice(0, 40);
-    case EventType.MODEL_DELTA: return `+${String(d.delta ?? '').length} 字符`;
-    case EventType.MODEL_COMPLETED: return `${String(d.content ?? '').length} 字符`;
-    case EventType.TOOL_CALL: return `${String(d.tool_name ?? '?')} ${JSON.stringify(d.args ?? {}).slice(0, 40)}`;
-    case EventType.TOOL_RESULT: {
-      const parsed = tryParseOk(d.content);
-      return parsed ? (parsed.ok ? 'ok' : `失败 ${parsed.error_code ?? ''}`) : String(d.content ?? '').slice(0, 40);
-    }
-    case EventType.ARTIFACT_CREATED: return String(d.artifact_id ?? '').slice(0, 20);
-    case EventType.CONTEXT_COMPACTED: return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
-    case EventType.OPERATION_RECONCILE_REQUIRED: return String(d.tool_name ?? '');
-    default:
-      // UnknownSurfaceNode 兜底（冻结决策第 69 行）：未知事件渲染摘要提示而非空串，
-      // 配合 Timeline 的 raw JSON drill-in，保证不静默丢弃。
-      return `未知事件 · ${JSON.stringify(d).slice(0, 40)}`;
-  }
-}
-
-function tryParseOk(content: unknown): { ok?: boolean; error_code?: unknown } | null {
-  if (typeof content !== 'string') return null;
-  try {
-    const p = JSON.parse(content);
-    return typeof p === 'object' && p !== null ? p : null;
-  } catch {
-    return null;
-  }
-}
+/** 事件行的单行摘要——单一投影源（lib/projection.ts summarizeEvent）。 */
+const eventSummary = summarizeEvent;
 
 function TimelineTab({ conversation, onFocusEvent }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void }) {
   if (conversation.events.length === 0) {
@@ -391,51 +363,36 @@ function TerminalTab({ tools, onFocusTool }: { tools: ToolCall[]; onFocusTool: (
   );
 }
 
-// ── Artifacts tab：artifact 聚合页（工具挂载 ref + artifact/created 事件双源，去重） ──
+// ── Artifacts tab：artifact 聚合页（工具挂载 ref，单一投影源——不变量 #22） ──
 
-function ArtifactsTab({ tools, events }: { tools: ToolCall[]; events: AgentEvent[] }) {
-  // 工具挂载的 ref 为主；artifact/created 事件中未被投影挂载的（如 tool_call_id 失配）
-  // 从事件流补齐——数据仍来自事件真值，不伪造。
-  const seen = new Set(tools.filter((t) => t.artifact).map((t) => t.artifact!.artifact_id));
-  const orphans = events
-    .filter((e) => e.type === EventType.ARTIFACT_CREATED)
-    .map((e) => e.data)
-    .filter((d) => !seen.has(String(d.artifact_id ?? '')))
-    .map((d) => ({
-      tool_call_id: `evt-${String(d.artifact_id ?? '')}`,
-      name: String(d.source_tool ?? 'artifact/created'),
-      artifact: {
-        artifact_id: String(d.artifact_id ?? ''),
-        size: Number(d.size ?? 0),
-        mime_type: String(d.mime_type ?? 'application/octet-stream'),
-        source_tool: String(d.source_tool ?? ''),
-      },
-    }));
-  const artifacts: { tool_call_id: string; name: string; artifact: NonNullable<ToolCall['artifact']> }[] = [
-    ...tools.filter((t) => t.artifact).map((t) => ({ tool_call_id: t.tool_call_id, name: t.name, artifact: t.artifact! })),
-    ...orphans,
-  ];
+function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
+  // Artifacts only reach this tab through the projection attaching an ArtifactRef
+  // to the producing ToolCall (lib/projection.ts ARTIFACT_CREATED case). If an
+  // artifact/created event's tool isn't found by the projection, that's a
+  // projection concern — not something to paper over here with a second truth
+  // path (invariant #22).
+  const artifacts = tools.filter((t) => t.artifact);
   if (artifacts.length === 0) {
     return <TabEmpty hint="本次会话未产生 Artifact。" />;
   }
   return (
     <>
-      {artifacts.map((a) => (
-        <div key={a.tool_call_id} className="detail-section">
+      {artifacts.map((t) => (
+        <div key={t.tool_call_id} className="detail-section">
           <div className="detail-section-title">
-            <FileCheck2 size={12} /> {a.name}
+            <FileCheck2 size={12} /> {t.name}
           </div>
           <div className="detail-row">
             <span className="detail-key">ID</span>
-            <code className="detail-val detail-val-mono">{a.artifact.artifact_id.slice(0, 16)}</code>
+            <code className="detail-val detail-val-mono">{t.artifact!.artifact_id.slice(0, 16)}</code>
           </div>
           <div className="detail-row">
             <span className="detail-key">大小</span>
-            <span className="detail-val">{formatBytes(a.artifact.size)}</span>
+            <span className="detail-val">{formatBytes(t.artifact!.size)}</span>
           </div>
           <div className="detail-row">
             <span className="detail-key">类型</span>
-            <span className="detail-val detail-val-mono">{a.artifact.mime_type}</span>
+            <span className="detail-val detail-val-mono">{t.artifact!.mime_type}</span>
           </div>
         </div>
       ))}

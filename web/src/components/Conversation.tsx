@@ -133,7 +133,7 @@ function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: 
             {collapsible && (
               <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
                 {collapsed
-                  ? `已折叠 · ${turn.tools.length} 个工具 · ${turn.segments.length} 段回复${duration ? ` · ${duration}` : ''}`
+                  ? `已折叠 · ${turn.tools.length} 个工具 · ${turn.segments.length} 轮${duration ? ` · ${duration}` : ''}`
                   : '折叠'}
               </button>
             )}

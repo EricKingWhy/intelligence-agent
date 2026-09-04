@@ -6,11 +6,11 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, CircleDashed, Loader2, Moon, PanelRight, SquareCheckBig, SquareX, Sun } from 'lucide-react';
+import { Activity, Moon, PanelRight, Sun } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { applyTheme, initTheme, type Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
-import { deriveRunPulse, type RunPulseState } from '../lib/runState';
+import { deriveRunPulse } from '../lib/runState';
 import type { ConversationState } from '../types';
 
 interface Props {
@@ -22,23 +22,6 @@ interface Props {
   density: TraceDensity;
   onDensityChange: (d: TraceDensity) => void;
 }
-
-const PULSE_CLASS: Record<RunPulseState, string> = {
-  idle: 'pulse-idle',
-  thinking: 'pulse-thinking',
-  tool: 'pulse-tool',
-  completed: 'pulse-completed',
-  failed: 'pulse-failed',
-};
-
-/** Icon channel of signature #1 (icon + color + text, never color-only). */
-const PULSE_ICON: Record<RunPulseState, typeof Activity> = {
-  idle: CircleDashed,
-  thinking: Loader2,
-  tool: Loader2,
-  completed: SquareCheckBig,
-  failed: SquareX,
-};
 
 export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange }: Props) {
   // 主题持久化：初始值由 lib/theme 在 paint 前解析（localStorage → 系统偏好）。
@@ -66,8 +49,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   };
 
   const pulse = deriveRunPulse(conversation, streaming);
+  const PulseIcon = pulse.Icon;
   const active = pulse.state === 'thinking' || pulse.state === 'tool';
-  const PulseIcon = PULSE_ICON[pulse.state];
 
   return (
     <header className="appbar">
@@ -82,7 +65,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             {conversation.session_id.slice(0, 8)}
           </span>
         )}
-        <span className={`run-pulse ${PULSE_CLASS[pulse.state]}`}>
+        <span className={`run-pulse ${pulse.className}`}>
           <PulseIcon size={12} aria-hidden="true" />
           {pulse.label}
           {active && elapsedSec > 0 && <span className="num"> · {elapsedSec}s</span>}

@@ -349,3 +349,36 @@ function tryParseContent(content: unknown): Record<string, unknown> | null {
     return null;
   }
 }
+
+/**
+ * 单行事件摘要——projection 是事件→人类可读语义的唯一归属（不变量 #22）。
+ * 被 Timeline / Trace / Chat 多处复用；未知事件走 UnknownSurfaceNode 兜底（冻结决策 69）。
+ */
+export function summarizeEvent(event: AgentEvent): string {
+  const d = event.data;
+  switch (event.type) {
+    case EventType.USER_MESSAGE:
+      return String(d.content ?? '').slice(0, 40);
+    case EventType.MODEL_DELTA:
+      return `+${String(d.delta ?? '').length} 字符`;
+    case EventType.MODEL_COMPLETED:
+      return `${String(d.content ?? '').length} 字符`;
+    case EventType.TOOL_CALL:
+      return `${String(d.tool_name ?? '?')} ${JSON.stringify(d.args ?? {}).slice(0, 40)}`;
+    case EventType.TOOL_RESULT: {
+      const parsed = tryParseContent(d.content);
+      if (parsed) {
+        return parsed.ok === true ? 'ok' : `失败 ${String(parsed.error_code ?? '')}`;
+      }
+      return String(d.content ?? '').slice(0, 40);
+    }
+    case EventType.ARTIFACT_CREATED:
+      return String(d.artifact_id ?? '').slice(0, 20);
+    case EventType.CONTEXT_COMPACTED:
+      return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
+    case EventType.OPERATION_RECONCILE_REQUIRED:
+      return String(d.tool_name ?? '');
+    default:
+      return `未知事件 · ${JSON.stringify(d).slice(0, 40)}`;
+  }
+}
