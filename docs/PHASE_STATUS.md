@@ -38,9 +38,11 @@
 
 ## 当前工作焦点
 
-**Phase 6 Memory Capability / Context Provider 已完成（真实 Zilliz Gate 收口）**。当前焦点：Phase 9 前端 Gap 补齐（first_user_message / usage / trace_id）+ Directive B 高危隐患修复。下一 Phase 为 Phase 7。
+**Phase 6 已完成（真实 Zilliz Gate 收口）；Phase 9 前端 Gap 三项全部落地**（first_user_message `db8ea96` / model+usage+cost `daa03ef` / trace_id 字段随 Gap3 预置，null 至 Phase 15 接 Langfuse）。Directive B 高危隐患（outbox 毒丸死信、sandbox 捕获上限、exec 超时与 event loop 卸载）与架构深化 A1/A2/A3（Session.mark/since、ToolCall 值对象、MemoryNamespace 值对象）已落地。离线全量 528 passed、8 skipped、8 deselected，ruff clean；真实 Zilliz Gate 3 passed。下一 Phase 为 Phase 7。
 
 ## 更新日志
+
+- 2026-09-05：Directive B 收口 + 前端 Gap 补齐。D1 outbox relay 毒丸条目连续失败 5 次后死信跳过（outbox 行保留、重启自愈）；D4 LocalSubprocessSandbox 捕获上限 2M 字符（Popen + reader 线程排空，超限丢弃附标记）；D10 DockerSandbox.exec 补 timeout 契约（daemon 线程等待）+ bash/git 工具边界 asyncio.to_thread 卸载（event loop 不再被长命令冻结）。架构深化：A1 Session.mark()/since() 追加句柄（runtime 6 处偏移算术与 events[-1] 假设消除）；A2 ToolCall 值对象（executor 边界归一化，runtime 位置配对替代 O(n) 反查）；A3 MemoryNamespace 值对象（namespace 形状/授权/session 绑定单点化，真实 Zilliz 端到端验证）。
 
 - 2026-09-04：#50 完成（`c0a4b0f`），Phase 5 Gate 达成。Runtime 单一 ContextBuilder 入口、hard guard 终止、持久事件镜像、Web Settings/S3 装配；补齐批次部分失败时的事件发送及并行调用收敛。全量 424 passed、8 skipped、5 deselected，真实七牛 Provider 与完整 Gate 2 passed，ruff / lock 检查通过。审查问题修复后复核通过；测试专属 S3 对象已清理。密钥仅在本地忽略文件，验收文档不含凭证。
 
