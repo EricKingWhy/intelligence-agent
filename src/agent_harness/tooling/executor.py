@@ -59,7 +59,12 @@ from agent_harness.tooling.approval import (
     approval_reason,
     needs_approval,
 )
-from agent_harness.tooling.contract import PermissionPolicy, Tool, ToolCall, ToolSideEffect
+from agent_harness.tooling.contract import (
+    PermissionPolicy,
+    Tool,
+    ToolCall,
+    ToolSideEffect,
+)
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
