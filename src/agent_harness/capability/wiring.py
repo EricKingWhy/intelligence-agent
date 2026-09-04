@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -19,6 +20,8 @@ from agent_harness.capability.base import (
 )
 from agent_harness.capability.config import ProviderConfig
 from agent_harness.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -93,10 +96,29 @@ async def _wire_skills(
     wiring.tools.append(LoadSkillTool(capability))
 
 
+async def _wire_ticker(
+    registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
+) -> None:
+    from agent_harness.capability.demo import TickerCapability
+
+    registry.register(
+        CapabilityDescriptor(
+            name="ticker", version="1.0.0", provider_name=cfg.provider,
+            capabilities=["tick"], risk="low",
+            supports_concurrency=True, supports_recovery=False, supports_streaming=False,
+            degradation=Degradation.OPTIONAL_RUNTIME,
+        ),
+        TickerCapability(),
+    )
+
+
 #: 已知 capability 的显式接线表（ADR-0010 Q6：显式装配优于反射式发现）。
-_BUILTIN_WIRING: dict[str, Any] = {
-    "memory": _wire_memory,
-    "skills": _wire_skills,
+#: 值带该能力声明的降级档位：装配期 factory 失败时，OPTIONAL 按档降级跳过，
+#: REQUIRED_CORE 显式失败——08 §7 的三分类在装配边界落地。
+_BUILTIN_WIRING: dict[str, tuple[Any, Degradation]] = {
+    "memory": (_wire_memory, Degradation.OPTIONAL_RUNTIME),
+    "skills": (_wire_skills, Degradation.OPTIONAL_RUNTIME),
+    "ticker": (_wire_ticker, Degradation.OPTIONAL_RUNTIME),
 }
 
 
@@ -110,21 +132,34 @@ async def wire_capabilities(
 
     config 为空 = 零行为变化。返回的 CapabilityWiring 由调用方接到
     ToolRegistry / ContextBuilder / AgentRuntime。
+    OPTIONAL capability 的 factory 失败（外部依赖故障等）降级为跳过并记 warning——
+    失败的能力不会出现在 Registry 里，Consumer 走 optional() 的 None 降级路径
+    （08 §7 验收：Optional Provider 故障可以降级）；REQUIRED_CORE 则向上抛。
     """
     wiring = CapabilityWiring()
     for name, cfg in config.items():
-        factory = _BUILTIN_WIRING.get(name)
-        if factory is None:
+        entry = _BUILTIN_WIRING.get(name)
+        if entry is None:
             raise CapabilityError(
                 f"unknown capability '{name}' in CAPABILITIES config "
                 f"(known: {sorted(_BUILTIN_WIRING)})",
                 code="init_failed",
             )
+        factory, degradation = entry
         if not cfg.enabled:
             continue
-        await factory(registry, cfg, settings, wiring)
+        try:
+            await factory(registry, cfg, settings, wiring)
+        except Exception as error:
+            if degradation is Degradation.REQUIRED_CORE:
+                raise
+            logger.warning(
+                "capability '%s' 初始化失败，按 %s 降级跳过：%r",
+                name, degradation.value, error,
+            )
+            continue
 
-    # 收集所有已注册 provider 的工具贡献（T5 的 demo capability 走这条路）。
+    # 收集所有已注册 provider 的工具贡献（demo capability 走这条路）。
     for descriptor in registry.available():
         if not descriptor.enabled:
             continue

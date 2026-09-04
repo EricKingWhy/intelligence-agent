@@ -44,3 +44,7 @@ Phase 6 已有一条竖切 Capability seam（`MemoryCapability` Protocol → `La
 - `AgentRuntime`（Agent Loop）零改动——Gate 1 的结构保证。
 - Web `_build_runtime` 的 Memory 装配代码改为走 registry；REQUIRED_CORE 缺失在装配期显式失败，OPTIONAL 缺失返回 None 降级（与 Phase 6 行为一致）。
 - Registry 是进程内单例（挂在 AppState），无跨进程语义——DEFER。
+
+## 补充（T5/#62，2026-09-05）：装配期 factory 失败的降级语义
+
+`_BUILTIN_WIRING` 每项带该能力声明的降级档位：`wire_capabilities` 里 OPTIONAL capability 的 factory 抛错（外部依赖故障等）→ 记 warning 并跳过装配；REQUIRED_CORE → 向上抛。失败的能力不会出现在 Registry，Consumer 走 `optional()` 的 None 降级路径。两层分工：capability 代码内部仍显式抛 `init_failed`（Q5 不变），**装配边界**按 08 §7 决定降级还是失败。实证见 `tests/capability/test_phase7_gate.py::TestDegradation`。
