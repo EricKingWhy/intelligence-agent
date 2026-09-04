@@ -90,7 +90,6 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
           <TurnView
             key={turn.step_id}
             turn={turn}
-            active={conversation.run_status === 'running'}
             density={density}
             onFocusTool={onFocusTool}
           />
@@ -103,17 +102,12 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-const TurnView = memo(function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: boolean; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
-  // 只有"已完成且有模型文本"的轮次才可折叠——纯工具轮次节点本身已极简，
-  // 折叠按钮只会制造噪音（时间轴上直接常驻展开）。
+const TurnView = memo(function TurnView({ turn, density, onFocusTool }: { turn: Turn; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
+  // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
+  // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
+  // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
   const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
-  // 已完成轮次默认折叠为派生摘要（Brief §决策 L48）；用户点击展开后不再自动收回。
-  const [collapsed, setCollapsed] = useState(collapsible);
-
-  // Active turn always expanded.
-  useEffect(() => {
-    if (active && turn.status === 'streaming') setCollapsed(false);
-  }, [active, turn.status]);
+  const [collapsed, setCollapsed] = useState(false);
 
   const duration = formatDuration(turn.started_at, turn.completed_at);
   const chain = useMemo(() => deriveChain(turn), [turn]);
