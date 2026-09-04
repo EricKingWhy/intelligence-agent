@@ -2,6 +2,8 @@
 
 import { Plus } from 'lucide-react';
 import type { SessionSummary } from '../types';
+import { formatRelativeTime } from '../lib/format';
+import { useTickingNow } from '../hooks/useTickingNow';
 
 interface Props {
   sessions: SessionSummary[];
@@ -10,20 +12,9 @@ interface Props {
   onNew: () => void;
 }
 
-function formatRelativeTime(iso: string | null): string {
-  if (!iso) return '';
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const minutes = Math.floor(diffMs / 60000);
-  if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} 天前`;
-  return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
-}
-
 export function SessionList({ sessions, selectedId, onSelect, onNew }: Props) {
+  // 相对时间随时间流逝刷新（issue #40）：每分钟推进一次 now 触发重渲染。
+  const now = useTickingNow();
   return (
     <aside className="session-list surface-raised">
       <div className="session-list-header">
@@ -47,7 +38,7 @@ export function SessionList({ sessions, selectedId, onSelect, onNew }: Props) {
             <div className="session-item-body">
               <div className="session-item-id">{s.session_id.slice(0, 12)}</div>
               <div className="session-item-meta">
-                {s.event_count} 事件 · {formatRelativeTime(s.last_event_time)}
+                {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
               </div>
             </div>
           </button>
