@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
     artifact_overflow_chars: int = 2000
+    artifact_store_endpoint: str = ""
+    artifact_store_bucket: str = ""
+    artifact_store_access_key: str = ""
+    artifact_store_secret_key: str = ""
+    artifact_store_region: str = ""
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"

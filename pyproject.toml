@@ -22,6 +22,9 @@ dependencies = [
 [project.scripts]
 agent-harness = "agent_harness.cli:main"
 
+[project.optional-dependencies]
+artifact = ["aioboto3>=13.0"]
+
 [tool.uv.build-backend]
 module-name = "agent_harness"
 
@@ -40,7 +43,8 @@ dev = [
 pythonpath = ["."]
 # 集成测试默认不跑（烧 token、依赖真实 LLM）。
 # 手动跑：uv run pytest -m integration
-addopts = ["-m", "not integration"]
+addopts = ["-m", "not integration and not qiniu"]
 markers = [
     "integration: 端到端集成测试（需要真实 LLM API key、烧 token）",
+    "qiniu: 七牛云 S3 集成测试（需要真实对象存储凭证）",
 ]
