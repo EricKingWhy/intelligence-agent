@@ -313,3 +313,9 @@ Outbox 使用 revision 条件确认 + memory_id 游标分页，避免并发更�
 调用方将 MemoryContextProvider(capability) 经 context_providers 注入 AgentRuntime，将 MemoryWriteback(capability, extractor) 经 memory_writer 注入。只依赖本项目契约与编排组件，Core 不导入 LangMem/Milvus。组合入口负责 relay.start()/stop() 和 writer.drain()/close()；测试可在 drain 后 flush，服务退出时先收敛写入、再停止 relay 并关闭 vector client。Web 默认模型配置尚无 embedding 模型，未猜测 embedding 或自动连接远程库。
 
 检索降级通过 Runtime 事件流镜像；后台写入在返回后发生，其降级事件持久化供刷新/回放读取，不保证已结束的 SSE 连接收到。
+
+## #56 Embedding 选型（用户确认，2026-09-04）
+
+SiliconFlow `Qwen/Qwen3-Embedding-8B`，endpoint `https://api.siliconflow.cn/v1`。用户要求速度/存储/精度折中，显式采用 1024 维（EMBEDDING_DIMENSIONS），而非模型默认 4096。工厂复用现有 langchain-openai OpenAIEmbeddings；check_embedding_ctx_length=False 保持字符串请求，维度经真实响应与 Collection schema 双重验证。仅新增原来缺失的 EMBEDDING_MODEL / EMBEDDING_BASE_URL / EMBEDDING_API_KEY / EMBEDDING_DIMENSIONS；API Key 为 SecretStr，只存本地忽略的 .env。
+
+参考：https://docs.siliconflow.cn/cn/api-reference/embeddings/create-embeddings ，https://github.com/QwenLM/Qwen3-Embedding 。1024 维 float32 原始向量约 4 KiB，比 4096 维减少 75%；不代表总索引空间或端到端延迟同比降低。

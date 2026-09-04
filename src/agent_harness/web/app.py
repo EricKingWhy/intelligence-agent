@@ -75,7 +75,7 @@ class AppState:
     """app 内部共享状态的薄容器——避免全局变量。
 
     V1：单进程内存里的 runtime 工厂 + session store 根目录。
-    后续多用户时在这里挂 auth context（接缝点）。
+    Memory 子系统（记录库、向量库、relay）按 settings 惰性装配，进程退出时统一关闭。
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -86,9 +86,100 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # Memory 子系统：只在配置齐全时装配（连接在首次使用前完成）。
+        # 不齐全时保持 None——_build_runtime 会跳过 Memory 注入，Runtime 正常运行。
+        self._memory: _MemoryComponents | None = None
+        self._memory_initialized = False
+
+    async def get_memory(self) -> _MemoryComponents | None:
+        """惰性初始化 Memory 子系统；配置不全时返回 None（降级运行）。"""
+        if self._memory_initialized:
+            return self._memory
+        self._memory_initialized = True
+        memory = build_memory_components(self.settings)
+        if memory is None:
+            return None
+        await memory.initialize()
+        memory.relay.start()
+        self._memory = memory
+        return memory
+
+    async def shutdown(self) -> None:
+        """进程退出时关闭后台 relay 与外部连接。调用方保证只执行一次。"""
+        memory, self._memory = self._memory, None
+        if memory is not None:
+            await memory.close()
 
 
-def _build_runtime(
+class _MemoryComponents:
+    """聚合 Memory 子系统内各组件，统一生命周期。"""
+
+    def __init__(self, capability, records, vectors, relay, writeback) -> None:
+        self.capability = capability
+        self.records = records
+        self.vectors = vectors
+        self.relay = relay
+        self.writeback = writeback
+
+    async def initialize(self) -> None:
+        # SQLite 记录库必须先建表，再让 relay 读取 outbox；向量库惰性建立 collection。
+        if hasattr(self.records, "initialize"):
+            await self.records.initialize()
+        if hasattr(self.vectors, "initialize"):
+            await self.vectors.initialize()
+
+    async def close(self) -> None:
+        # 关闭顺序：先停 relay（停止派生任务），再关写回任务池，最后断向量库连接。
+        await self.relay.stop()
+        await self.writeback.close()
+        if hasattr(self.vectors, "close"):
+            await self.vectors.close()
+
+
+def build_memory_components(settings: Settings) -> _MemoryComponents | None:
+    """按 settings 决定是否能装配 Memory；配置不全返回 None（降级运行）。
+
+    与 .env 的两个最小集合对齐：
+      - 向量检索：milvus_uri + milvus_token + milvus_collection（无则不做语义记忆）
+      - 嵌入模型：embedding_model + embedding_base_url + embedding_api_key（无则无法嵌入）
+    两者都齐才装配；任一缺失返回 None，Runtime 继续工作但没有记忆能力。
+    """
+    milvus_ready = bool(
+        settings.milvus_uri
+        and settings.milvus_token.get_secret_value()
+        and settings.milvus_collection
+    )
+    embedding_ready = bool(
+        settings.embedding_model
+        and settings.embedding_base_url
+        and settings.embedding_api_key.get_secret_value()
+    )
+    if not (milvus_ready and embedding_ready):
+        return None
+
+    from agent_harness.memory.embeddings import create_embeddings
+    from agent_harness.memory.extractor import MemoryExtractor
+    from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+    from agent_harness.memory.milvus_vector_store import MilvusVectorStore
+    from agent_harness.memory.outbox_relay import OutboxRelay
+    from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
+    from agent_harness.memory.writeback import MemoryWriteback
+
+    records = SqliteMemoryRecordStore(Path(settings.workspace_dir) / "memory.db")
+    vectors = MilvusVectorStore(settings, create_embeddings(settings))
+    capability = LangMemMemoryCapability(records, vectors)
+    relay = OutboxRelay(records, vectors)
+    writeback = MemoryWriteback(capability, MemoryExtractor(create_chat_model(ModelConfig.from_settings(settings))))
+    return _MemoryComponents(
+        capability=capability,
+        records=records,
+        vectors=vectors,
+        relay=relay,
+        writeback=writeback,
+    )
+
+
+async def _build_runtime(
     state: AppState,
     workspace: Path,
     max_steps: int,
@@ -96,7 +187,11 @@ def _build_runtime(
     *,
     session_id: str,
 ) -> AgentRuntime:
-    """装配工具与 Context；配置对象存储时按 Session 绑定 Artifact Provider。"""
+    """装配工具与 Context；配置对象存储时按 Session 绑定 Artifact Provider。
+
+    Memory 子系统按配置惰性装配：齐了注入 capability + writeback + context provider，
+    不齐保持纯 Runtime（Memory 能力缺位，其他功能不受影响）。
+    """
     config = ModelConfig.from_settings(state.settings)
     model = create_chat_model(config)
 
@@ -126,6 +221,15 @@ def _build_runtime(
         policy = PermissionPolicy.WORKSPACE_WRITE
         approval_callback = lambda _req: ApprovalResponse(approved=False, reason="manual approval not yet wired")
 
+    # Memory 注入仅在配置齐全时发生（未装配返回 None）；缺失时 Runtime 正常降级。
+    memory = await state.get_memory()
+    context_providers: list[Any] = []
+    memory_writer = None
+    if memory is not None:
+        from agent_harness.memory.context_provider import MemoryContextProvider
+        context_providers.append(MemoryContextProvider(memory.capability))
+        memory_writer = memory.writeback
+
     return AgentRuntime(
         model=model,
         registry=registry,
@@ -136,7 +240,9 @@ def _build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            context_providers=context_providers,
         ),
+        memory_writer=memory_writer,
     )
 
 
@@ -163,8 +269,19 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     if settings is None:
         settings = Settings()
 
-    app = FastAPI(title="Agent Harness Inspector", version="0.1.0")
     state = AppState(settings)
+
+    # lifespan 替代 on_event：进程退出时关闭 Memory 子系统，避免泄露外部连接。
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            yield
+        finally:
+            await state.shutdown()
+
+    app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
 
     if enable_cors:
@@ -250,16 +367,23 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         workspace = Path(req.workspace) if req.workspace else state.workspaces_root / session.session_id
         workspace.mkdir(parents=True, exist_ok=True)
 
-        runtime = _build_runtime(state, workspace, req.max_steps, req.auto_approve,
-                                 session_id=session.session_id)
+        runtime = await _build_runtime(state, workspace, req.max_steps, req.auto_approve,
+                                       session_id=session.session_id)
 
         async def event_generator():
             """SSE 事件源：消费 run_stream，转成 SSE 帧。
 
             断连时 EventSourceResponse 自动取消这个 generator——不泄漏 producer。
+            memory_session_var 在这一帧绑定：SESSION-scope 记忆操作需要可信 session id，
+            不能让客户端任意指定（与 IdentityContext 同一信任边界）。
             """
-            async for event in runtime.run_stream(session, req.task):
-                yield _event_to_sse_dict(event, session.session_id)
+            from agent_harness.memory.types import memory_session_var
+            session_token = memory_session_var.set(session.session_id)
+            try:
+                async for event in runtime.run_stream(session, req.task):
+                    yield _event_to_sse_dict(event, session.session_id)
+            finally:
+                memory_session_var.reset(session_token)
 
         return EventSourceResponse(event_generator())
 

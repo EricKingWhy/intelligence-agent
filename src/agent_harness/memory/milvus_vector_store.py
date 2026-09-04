@@ -21,7 +21,11 @@ class MilvusVectorStore:
         self._embeddings = embeddings
         self._client = None
         self.dimension: int | None = None
-        self.created_collection = False
+        self._created_collection: str | None = None
+
+    @property
+    def created_collection(self) -> bool:
+        return self._created_collection is not None
 
     async def _call(self, operation: str, **kwargs):
         if self._client is None:
@@ -105,7 +109,7 @@ class MilvusVectorStore:
         index.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="COSINE")
         await self._call("create_collection", collection_name=collection, schema=schema,
                          index_params=index, consistency_level="Strong")
-        self.created_collection = True
+        self._created_collection = collection
 
     @staticmethod
     def _filter(identity: IdentityContext, scope: MemoryScope) -> tuple[str, dict]:
@@ -148,6 +152,12 @@ class MilvusVectorStore:
         expression, params = self._filter(identity, scope)
         await self._call("delete", collection_name=self._settings.milvus_collection,
                          filter=expression + " AND memory_id == {memory}", filter_params={**params, "memory": memory_id})
+
+    async def drop_created_collection(self) -> None:
+        """Explicit cleanup, only for a collection created by this adapter instance."""
+        if self._created_collection is not None:
+            await self._call("drop_collection", collection_name=self._created_collection)
+            self._created_collection = None
 
     async def close(self) -> None:
         if self._client is not None:

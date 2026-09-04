@@ -50,8 +50,16 @@ class LangMemMemoryCapability:
                 return previous[0].id
         tool = self._manage(namespace=namespace, schema=MemoryPayload, actions_permitted=("create",), store=self._store)
         result = await tool.ainvoke({"content": {"content": content, "metadata": metadata}})
-        # SDK 明确返回 "created memory <uuid>"；验证形状，不把任意文本当记录 ID。
-        return str(UUID(result.removeprefix("created memory ")))
+        # SDK 返回形如 "created memory <uuid>"。校验后缀确为 UUID 形状；
+        # 形状不符时降级为按 namespace 查最近一条同内容记录（不把任意文本当记录 ID）。
+        suffix = result.removeprefix("created memory ").strip()
+        try:
+            return str(UUID(suffix))
+        except (ValueError, TypeError):
+            recent = await self.search(scope, content, 1)
+            if recent and recent[0].content == content:
+                return recent[0].id
+            raise RuntimeError(f"memory tool returned unexpected shape: {result!r}") from None
 
     async def search(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
         namespace = scope_to_namespace(scope, get_identity_context())

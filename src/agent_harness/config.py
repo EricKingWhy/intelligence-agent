@@ -1,6 +1,6 @@
 """全局运行配置：只定义"运行需要什么"，从 .env 读取。"""
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     milvus_uri: str = ""
     milvus_token: SecretStr = SecretStr("")
     milvus_collection: str = ""
+    embedding_model: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: SecretStr = SecretStr("")
+    embedding_dimensions: int = Field(default=1024, gt=0)
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70

@@ -27,6 +27,7 @@ async def test_adapter_uses_embedding_dimension_and_identity_filter(monkeypatch)
     client.list_collections = AsyncMock(return_value=[])
     client.create_collection = AsyncMock()
     client.upsert = AsyncMock()
+    client.drop_collection = AsyncMock()
     client.search = AsyncMock(return_value=[[{"id": "storage-key", "distance": 0.97,
                                              "entity": {"memory_id": "m1"}}]])
     client.close = AsyncMock()
@@ -52,6 +53,9 @@ async def test_adapter_uses_embedding_dimension_and_identity_filter(monkeypatch)
     assert arguments["filter_params"]["user"] == "alice"
     assert arguments["filter_params"]["scope"] == "user"
     assert arguments["search_params"]["metric_type"] == "COSINE"
+    settings.milvus_collection = "existing_production_collection"
+    await vector.drop_created_collection()
+    assert client.drop_collection.call_args.kwargs["collection_name"] == "gate"
     await vector.close()
 
 

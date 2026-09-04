@@ -176,7 +176,7 @@ class AgentRuntime:
                 self._last_result = AgentRunResult(
                     status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps,
                 )
-                self._write_memories(session, memory_event_start)
+                # 模型在本轮从未被调用：没有可抽取的对话内容，跳过 writeback。
                 return
             for event in session.events[context_event_start:]:
                 yield to_agent_event(event)
