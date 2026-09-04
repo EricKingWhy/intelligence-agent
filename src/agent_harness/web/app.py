@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
+import anyio
 import jwt
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from starlette.responses import JSONResponse
 
@@ -61,9 +62,10 @@ from agent_harness.tools import (
 class CreateSessionRequest(BaseModel):
     """POST /api/sessions 的请求体。"""
 
-    task: str
-    workspace: str | None = None  # None → 用默认 workspace
-    max_steps: int = 10
+    # 空 task 直接 422（FastAPI 自动校验）；纯空白 task 容忍（runtime 侧无意义但不危险）。
+    task: str = Field(min_length=1)
+    workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（见 _validate_workspace_name）
+    max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
     auto_approve: bool = True  # V1 默认自动批准（demo 同款）
 
 
@@ -105,18 +107,32 @@ class AppState:
         self._wiring_lock = asyncio.Lock()
         self._registry: CapabilityRegistry | None = None
         self._wiring: CapabilityWiring | None = None
+        self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
 
     async def get_wiring(self) -> tuple[CapabilityRegistry, CapabilityWiring]:
-        """惰性装配 Capability 子系统并缓存；返回 (registry, wiring)。"""
+        """惰性装配 Capability 子系统并缓存；返回 (registry, wiring)。
+
+        shutdown 可能在 wire await 期间发生：入口和拿锁后都检查 _closed，
+        wire 完成后再查一次——在途调用以 RuntimeError 失败，但刚装配好的
+        wiring 仍留在字段上，由随后拿到锁的 shutdown 关闭（连接不泄露）。
+        """
+        if self._closed:
+            raise RuntimeError("AppState is shut down")
         if self._wiring is not None and self._registry is not None:
             return self._registry, self._wiring
         async with self._wiring_lock:
+            if self._closed:
+                raise RuntimeError("AppState is shut down")
             if self._wiring is None or self._registry is None:
                 config = parse_capabilities_config(self.settings.capabilities)
                 registry = CapabilityRegistry()
                 wiring = await wire_capabilities(registry, config, settings=self.settings)
+                # 先落字段再查 _closed：锁在手上，shutdown 必然排在本次释放之后，
+                # 它会从字段上取走这份 wiring 并关闭——绝不静默丢弃。
                 self._registry, self._wiring = registry, wiring
-        return self._registry, self._wiring
+                if self._closed:
+                    raise RuntimeError("AppState is shut down")
+            return self._registry, self._wiring
 
     @property
     def wiring(self) -> CapabilityWiring | None:
@@ -124,8 +140,16 @@ class AppState:
         return self._wiring
 
     async def shutdown(self) -> None:
-        """进程退出时关闭后台 relay 与外部连接。调用方保证只执行一次。"""
-        wiring, self._wiring, self._registry = self._wiring, None, None
+        """进程退出时关闭后台 relay 与外部连接。幂等：重复调用只关闭一次。
+
+        必须拿 _wiring_lock：否则在途 get_wiring 可能在 swap 之后才完成装配，
+        装配出的 wiring 永远没人关（泄露 Milvus / embedding 连接）。
+        先置位 _closed 再拿锁——让在途装配在 wire 完成后立刻失败，而不是
+        把 wiring 交给一个已关停的 app。
+        """
+        self._closed = True
+        async with self._wiring_lock:
+            wiring, self._wiring, self._registry = self._wiring, None, None
         if wiring is not None and wiring.memory is not None:
             await wiring.memory.close()
 
@@ -192,6 +216,40 @@ async def _build_runtime(
         ),
         memory_writer=wiring.memory_writer,
     )
+
+
+def _validate_workspace_name(state: AppState, workspace: str | None) -> str | None:
+    """校验请求里的 workspace 字段——V1 安全边界：它是名字，不是路径。
+
+    客户端若能直接传路径（"C:\\Users\\me"、"../../.."），Bash / Write 等工具
+    就会以任意宿主目录为 sandbox 根执行（路径逃逸漏洞）。V1 采用最简单的
+    安全规则：只接受单个路径段的目录名——
+    - None → 返回 None（调用方用默认 session_id 目录，向后兼容）；
+    - 单段相对名（"my-task"）→ 返回该名字，目录建在 workspaces_root 下；
+    - 绝对路径 / 盘符 / 含 / 或 \\ 的多段名 / "." ".." → 422 拒绝。
+
+    必须在任何 mkdir / Session 落盘之前调用：被拒请求不能留下任何痕迹。
+    """
+    if workspace is None:
+        return None
+    # PureWindowsPath 让盘符检查在非 Windows 平台上也生效（"C:foo" 在 POSIX
+    # 是合法单段名，但语义上是 Windows 盘符相对路径——一律拒绝）。
+    candidate = PureWindowsPath(workspace)
+    if (workspace.strip() in ("", ".", "..")
+            or candidate.drive or candidate.root or candidate.is_absolute()
+            or "/" in workspace or "\\" in workspace):
+        raise HTTPException(
+            status_code=422,
+            detail=f"workspace 只接受单个目录名（不接受路径）：{workspace!r}",
+        )
+    # 双保险：解析后的候选目录必须仍落在 workspaces_root 内（防符号链接逃逸）。
+    resolved_root = state.workspaces_root.resolve()
+    if not (resolved_root / workspace).resolve().is_relative_to(resolved_root):
+        raise HTTPException(
+            status_code=422,
+            detail=f"workspace 越出 workspaces_root：{workspace!r}",
+        )
+    return workspace
 
 
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
@@ -277,12 +335,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/sessions")
     async def list_sessions() -> list[SessionSummary]:
-        """列历史 session（按最近活动倒序）。"""
+        """列历史 session（按最近活动倒序）。
+
+        store 读是同步磁盘 I/O，走 to_thread 卸载——一份大 JSONL 不能卡住事件循环。
+        """
         store = app.state.agent.store
-        ids = store.list_session_ids()
+        ids = await anyio.to_thread.run_sync(store.list_session_ids)
         summaries: list[SessionSummary] = []
         for sid in ids:
-            events = store.read_events(sid)
+            events = await anyio.to_thread.run_sync(store.read_events, sid)
             if not events:
                 continue
             first_user_message = next(
@@ -303,9 +364,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/sessions/{session_id}/events")
     async def get_session_events(session_id: str) -> list[dict]:
-        """读历史 SessionEvent——前端刷新后从此重建视图（不变量 #22）。"""
+        """读历史 SessionEvent——前端刷新后从此重建视图（不变量 #22）。
+
+        store 读是同步磁盘 I/O，走 to_thread 卸载（同 list_sessions）。
+        """
         store = app.state.agent.store
-        events = store.read_events(session_id)
+        events = await anyio.to_thread.run_sync(store.read_events, session_id)
         if not events:
             raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
         return [e.to_dict() for e in events]
@@ -318,9 +382,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         state = app.state.agent
 
+        # 安全边界先行：workspace 名校验（422 拒绝）必须发生在任何 mkdir /
+        # Session 落盘之前——Session.start 会立刻持久化 session/started，
+        # 被拒请求不能留下孤儿 session 或目录。
+        workspace_name = _validate_workspace_name(state, req.workspace)
+
         # 为这次 session 准备 workspace（每个 session 独立目录）
         session = Session.start(state.store)
-        workspace = Path(req.workspace) if req.workspace else state.workspaces_root / session.session_id
+        workspace = (state.workspaces_root / workspace_name if workspace_name is not None
+                     else state.workspaces_root / session.session_id)
         workspace.mkdir(parents=True, exist_ok=True)
 
         runtime = await _build_runtime(state, workspace, req.max_steps, req.auto_approve,

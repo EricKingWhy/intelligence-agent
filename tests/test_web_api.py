@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -172,6 +173,248 @@ def test_create_session_streams_sse(client):
     # durable 事件的 time 应是 ISO 格式（由 SessionEvent.time 透传）
     durable_times = [e["time"] for e in parsed if e.get("seq") is not None]
     assert all("T" in t for t in durable_times), f"durable event times should be ISO, got {durable_times}"
+
+
+# ── create session：workspace 安全边界（名字，不是路径）──
+#
+# POST /api/sessions 的 workspace 字段 V1 只接受单个路径段的目录名：
+# 客户端若能直接传路径（绝对路径 / 盘符 / ".." 逃逸），Bash / Write 工具就会
+# 以任意宿主目录为 sandbox 根执行——这是路径逃逸漏洞。所有拒绝必须发生在
+# 任何 mkdir / Session 落盘之前，被拒请求不留任何痕迹。
+
+
+def _assert_rejection_left_no_trace(app: Any) -> None:
+    """被拒请求不应创建任何 workspace 目录或孤儿 session JSONL。"""
+    assert list(app.state.agent.workspaces_root.iterdir()) == []
+    assert list(app.state.agent.sessions_root.iterdir()) == []
+
+
+def test_create_session_rejects_absolute_workspace_path(tmp_path):
+    """绝对路径（workspaces_root 外 / 盘符路径）→ 422，且任何位置都不建目录。"""
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    client = TestClient(app)
+    outside_abs = str(tmp_path / "outside-abs")  # workspace_dir 内、workspaces_root 外
+    drive_abs = tmp_path.drive + "\\evil-drive-abs"  # 盘符绝对路径（如 D:\evil-drive-abs）
+    for candidate in (outside_abs, drive_abs):
+        resp = client.post("/api/sessions", json={"task": "hi", "workspace": candidate})
+        assert resp.status_code == 422, f"{candidate!r} 应被 422 拒绝"
+        assert not Path(outside_abs).exists()
+        assert not Path(drive_abs).exists()
+    _assert_rejection_left_no_trace(app)
+
+
+def test_create_session_rejects_parent_escape_workspace(app):
+    """"../escape" 这类 .. 逃逸 → 422。"""
+    client = TestClient(app)
+    resp = client.post("/api/sessions", json={"task": "hi", "workspace": "../escape"})
+    assert resp.status_code == 422
+    workspaces_root = app.state.agent.workspaces_root
+    assert not (workspaces_root.parent / "escape").exists()
+    _assert_rejection_left_no_trace(app)
+
+
+def test_create_session_accepts_plain_workspace_name(client):
+    """单段相对名 "my-task" 保持可用：200，目录建在 workspaces_root 下。"""
+    stub_runtime = AgentRuntime(
+        model=ScriptedModel(responses=[AIMessage(content="ok")]),
+        registry=ToolRegistry(),
+        executor=ToolExecutor(ToolRegistry()),
+        max_steps=2,
+    )
+    with patch("agent_harness.web.app._build_runtime", return_value=stub_runtime):
+        resp = client.post("/api/sessions", json={"task": "hi", "workspace": "my-task"})
+    assert resp.status_code == 200
+    assert (client.app.state.agent.workspaces_root / "my-task").is_dir()
+
+
+def test_create_session_rejects_nested_workspace_name(app):
+    """多段名 "a/b"（含反斜杠 "a\\\\b"）→ 422。
+
+    V1 取最简单的安全规则：只收单段名字。多段相对路径虽然解析后可能仍在
+    workspaces_root 内，但放行它等于维护一套路径语义——没有必要（接缝点：
+    未来要嵌套时再显式放开）。
+    """
+    client = TestClient(app)
+    for candidate in ("a/b", "a\\b"):
+        resp = client.post("/api/sessions", json={"task": "hi", "workspace": candidate})
+        assert resp.status_code == 422, f"{candidate!r} 应被 422 拒绝"
+    _assert_rejection_left_no_trace(app)
+
+
+# ── create session：请求体校验（FastAPI/pydantic 自动 422）──
+
+
+def test_create_session_rejects_empty_task(tmp_path):
+    """task="" → 422，且不留任何 session JSONL / workspace 目录。"""
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    client = TestClient(app)
+    resp = client.post("/api/sessions", json={"task": ""})
+    assert resp.status_code == 422
+    _assert_rejection_left_no_trace(app)
+
+
+def test_create_session_rejects_invalid_max_steps(tmp_path):
+    """max_steps=0（非正数）和 1000（超上限 200）→ 422，且不留任何落盘痕迹。"""
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    client = TestClient(app)
+    for max_steps in (0, 1000):
+        resp = client.post("/api/sessions", json={"task": "hi", "max_steps": max_steps})
+        assert resp.status_code == 422, f"max_steps={max_steps} 应被 422 拒绝"
+    _assert_rejection_left_no_trace(app)
+
+
+# ── AppState.shutdown 与惰性装配的竞争（FIX 3）──
+#
+# get_wiring() 惰性装配 Capability 子系统；shutdown() 若不拿 _wiring_lock 就把
+# _wiring 换成 None，一个在途的 get_wiring 可以在 shutdown 之后才完成装配——
+# 装配出的 wiring 永远不会被 close（泄露 Milvus / embedding 连接）。契约：
+# 在途装配以 RuntimeError 失败，但装配产物仍由 shutdown 关闭（恰好一次）。
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypatch):
+    """shutdown 与在途 get_wiring 竞争：在途调用 RuntimeError，wiring 仍被关闭。"""
+    import agent_harness.web.app as web_app
+
+    settings = Settings(workspace_dir=str(tmp_path))
+    state = web_app.AppState(settings)
+
+    close_calls: list[str] = []
+
+    class _StubMemory:
+        async def close(self) -> None:
+            close_calls.append("closed")
+
+    class _StubWiring:
+        def __init__(self) -> None:
+            self.context_providers = []
+            self.tools = []
+            self.memory_writer = None
+            self.memory = _StubMemory()
+
+    wire_started = asyncio.Event()
+    release_wire = asyncio.Event()
+
+    async def slow_wire(registry, config, settings=None):
+        wire_started.set()
+        await release_wire.wait()  # 模拟慢装配（真实场景是连 Milvus / embedding）
+        return _StubWiring()
+
+    monkeypatch.setattr(web_app, "wire_capabilities", slow_wire)
+
+    wiring_task = asyncio.create_task(state.get_wiring())
+    await asyncio.wait_for(wire_started.wait(), timeout=2.0)
+    shutdown_task = asyncio.create_task(state.shutdown())
+    await asyncio.sleep(0.01)  # 让 shutdown 置位关闭标记并阻塞在 _wiring_lock 上
+    release_wire.set()
+
+    with pytest.raises(RuntimeError, match="AppState is shut down"):
+        await wiring_task
+    await asyncio.wait_for(shutdown_task, timeout=2.0)
+    # 在途装配的 wiring 必须被 shutdown 拿去关闭——不能静默泄露连接。
+    assert close_calls == ["closed"]
+    # 幂等：重复 shutdown 不重复 close。
+    await state.shutdown()
+    assert close_calls == ["closed"]
+
+
+@pytest.mark.asyncio
+async def test_get_wiring_after_shutdown_raises(tmp_path):
+    """直接用例：shutdown 之后再 get_wiring → RuntimeError（绝不新装配）。"""
+    from agent_harness.web.app import AppState
+
+    state = AppState(Settings(workspace_dir=str(tmp_path)))
+    await state.shutdown()
+    with pytest.raises(RuntimeError, match="AppState is shut down"):
+        await state.get_wiring()
+
+
+# ── 读端点的磁盘 I/O 卸载（FIX 4）──
+#
+# list_sessions / get_session_events 直接内联调用同步的 JsonlSessionStore 读，
+# 一份大 JSONL 就能卡住整个事件循环。契约：store 读走 anyio.to_thread 卸载，
+# 响应形状不变（不加分页）。
+
+
+def test_read_endpoints_with_multi_event_session(tmp_path):
+    """回归锚：多事件 session 下两个读端点仍 200 且响应形状不变。"""
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+    session = Session.start(store)
+    for i in range(5):
+        session.append(event_type=USER_MESSAGE, data={"content": f"msg {i}"})
+    client = TestClient(app)
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    row = next(r for r in resp.json() if r["session_id"] == session.session_id)
+    assert row["event_count"] == 6  # session/started + 5 条 user/message
+    resp = client.get(f"/api/sessions/{session.session_id}/events")
+    assert resp.status_code == 200
+    assert [e["type"] for e in resp.json()] == [SESSION_STARTED] + [USER_MESSAGE] * 5
+
+
+def test_read_endpoints_offload_store_reads_off_event_loop(tmp_path, monkeypatch):
+    """store 的同步读必须发生在 worker 线程上（不在事件循环线程内联执行）。
+
+    探针：read_events 替身里 asyncio.get_running_loop() 在 worker 线程上抛
+    RuntimeError（没有 running loop）；若在事件循环线程内联调用，它会成功——
+    以此区分「卸载了」和「没卸载」。
+    """
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+    session = Session.start(store)
+    session.append(event_type=USER_MESSAGE, data={"content": "hi"})
+
+    real_read_events = store.read_events
+
+    def spy_read_events(session_id):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return real_read_events(session_id)  # worker 线程：符合契约
+        raise AssertionError(
+            "read_events 在事件循环线程内联执行——同步磁盘 I/O 未卸载，大日志会卡住 loop"
+        )
+
+    monkeypatch.setattr(store, "read_events", spy_read_events)
+
+    client = TestClient(app)
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    resp = client.get(f"/api/sessions/{session.session_id}/events")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+
+def test_create_session_sse_emits_run_failed_on_model_error(client):
+    """模型抛异常时 SSE 不能静默断流（FIX 5 集成锚）。
+
+    runtime 顶层兜底（agent/runtime.py 新契约）补 model/failed + run/failed
+    终结帧后正常 return——SSE 消费者必须收到 200 + 完整终止帧，而不是连接
+    半途而死。这里用真实 AgentRuntime + 空剧本模型（首次调用即抛 RuntimeError）。
+    """
+    stub_runtime = AgentRuntime(
+        model=ScriptedModel(responses=[]),  # 空剧本 → 首次模型调用即抛 RuntimeError
+        registry=ToolRegistry(),
+        executor=ToolExecutor(ToolRegistry()),
+        max_steps=2,
+    )
+    with patch("agent_harness.web.app._build_runtime", return_value=stub_runtime):
+        resp = client.post("/api/sessions", json={"task": "boom", "max_steps": 2})
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers.get("content-type", "")
+    frames = [line[len("data:"):].strip() for line in resp.text.splitlines() if line.startswith("data:")]
+    parsed = [json.loads(f) for f in frames]
+    types = [e["type"] for e in parsed]
+    assert "run/failed" in types, f"SSE 流缺少 run/failed 终结帧，实际事件：{types}"
+    assert types[-1] == "run/failed", f"run/failed 必须是最后一帧，实际：{types}"
+    # 模型在途抛错必须归因到 model/failed（供 resume / 审计区分故障源）。
+    assert "model/failed" in types, f"模型在途失败应补 model/failed，实际事件：{types}"
 
 
 # ── approve seam ──
