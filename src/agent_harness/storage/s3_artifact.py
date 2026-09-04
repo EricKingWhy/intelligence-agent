@@ -84,13 +84,14 @@ class S3ArtifactStore(ArtifactStore):
     async def inspect(
         self, artifact_id: str, *, start_line: int | None = None,
         end_line: int | None = None, keyword: str | None = None, max_lines: int = 200,
+        max_chars_per_line: int = 2000,
     ) -> ArtifactSlice:
         artifact = await self.load(artifact_id)
         assert artifact.content is not None
         all_lines = artifact.content.splitlines()
         lines, truncated = _slice_lines(
             all_lines, start_line=start_line, end_line=end_line,
-            keyword=keyword, max_lines=max_lines,
+            keyword=keyword, max_lines=max_lines, max_chars_per_line=max_chars_per_line,
         )
         return ArtifactSlice(
             artifact_id=artifact_id, lines=lines, total_lines=len(all_lines),

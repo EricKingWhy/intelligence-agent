@@ -10,6 +10,7 @@ from agent_harness.agent.types import (
     STATUS_MAX_STEPS_EXCEEDED,
     AgentEvent,
     AgentRunResult,
+    to_agent_event,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "AgentEvent",
     "AgentRunResult",
     "AgentRuntime",
+    "to_agent_event",
 ]

@@ -38,10 +38,15 @@ class Artifact(BaseModel):
 
 
 class ArtifactSlice(BaseModel):
-    """inspect() 的局部读取结果。"""
+    """inspect() 的局部读取结果。
+
+    truncated 含义是"返回内容不完整"的并集：行数截断或字符截断任一发生即为 True。
+    单行超长时该行按 max_chars 截断，原文始终完整保留在 Artifact 里，
+    模型可凭 line_number 重新定位（spec 06 §4：大 Artifact 不完整灌回 Context）。
+    """
 
     artifact_id: str
-    lines: list[dict[str, int | str]]
+    lines: list[dict[str, int | str | bool]]
     total_lines: int
     returned_lines: int
     truncated: bool
@@ -76,8 +81,13 @@ class ArtifactStore(ABC):
         end_line: int | None = None,
         keyword: str | None = None,
         max_lines: int = 200,
+        max_chars_per_line: int = 2000,
     ) -> ArtifactSlice:
-        """按行范围或关键词读取局部内容。"""
+        """按行范围或关键词读取局部内容。
+
+        max_chars_per_line 限制单行返回字符数，防止单条超长行灌爆 Context；
+        截断行额外携带 truncated=True 与 full_length，原文始终保留在 Artifact 里。
+        """
 
 
 def compute_artifact_id(content: str) -> str:
@@ -92,10 +102,16 @@ def _slice_lines(
     end_line: int | None,
     keyword: str | None,
     max_lines: int,
-) -> tuple[list[dict[str, int | str]], bool]:
+    max_chars_per_line: int = 2000,
+) -> tuple[list[dict[str, int | str | bool]], bool]:
     """通用切片逻辑：供 FakeArtifactStore 和 S3ArtifactStore 共享。
 
-    返回 (行列表, truncated)。
+    返回 (行列表, truncated)。truncated 是行数截断与字符截断的并集——
+    任一发生即 True（spec 06 §4：大 Artifact 不完整灌回 Context）。
+
+    每个超长行按 max_chars_per_line 截断，原文始终完整保留在 Artifact 里。
+    截断行额外携带 truncated=True 与 full_length 字段，模型可凭 line_number
+    重新定位（如经 max_chars_per_line 参数放宽上限继续读）。
     """
     indexed = [{"line_number": i + 1, "text": line} for i, line in enumerate(all_lines)]
 
@@ -106,8 +122,23 @@ def _slice_lines(
         e = end_line if end_line is not None else len(indexed)
         filtered = indexed[s:e]
 
-    truncated = len(filtered) > max_lines
-    return filtered[:max_lines], truncated
+    char_truncated = False
+    capped: list[dict[str, int | str | bool]] = []
+    for entry in filtered:
+        text = entry["text"]
+        if len(text) > max_chars_per_line:
+            char_truncated = True
+            capped.append({
+                "line_number": entry["line_number"],
+                "text": text[:max_chars_per_line],
+                "truncated": True,
+                "full_length": len(text),
+            })
+        else:
+            capped.append(entry)
+
+    truncated = char_truncated or len(filtered) > max_lines
+    return capped[:max_lines], truncated
 
 
 class FakeArtifactStore(ArtifactStore):
@@ -154,6 +185,7 @@ class FakeArtifactStore(ArtifactStore):
         end_line: int | None = None,
         keyword: str | None = None,
         max_lines: int = 200,
+        max_chars_per_line: int = 2000,
     ) -> ArtifactSlice:
         if artifact_id not in self._artifacts:
             raise KeyError(f"Artifact '{artifact_id}' does not exist")
@@ -165,6 +197,7 @@ class FakeArtifactStore(ArtifactStore):
             end_line=end_line,
             keyword=keyword,
             max_lines=max_lines,
+            max_chars_per_line=max_chars_per_line,
         )
         return ArtifactSlice(
             artifact_id=artifact_id,
