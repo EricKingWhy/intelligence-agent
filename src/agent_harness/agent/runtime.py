@@ -41,6 +41,7 @@ from agent_harness.session import (
     MODEL_DELTA,
     MODEL_STARTED,
     RUN_FAILED,
+    RUN_STARTED,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -54,7 +55,7 @@ from agent_harness.storage import (
     OperationContext,
     SessionMeta,
 )
-from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 
 logger = logging.getLogger("agent_harness.agent")
 
@@ -169,14 +170,15 @@ class AgentRuntime:
         循环结束把最终 AgentRunResult 存到 self._last_result 供 run() 取用。
         """
         # 写入 user 消息事件
-        memory_event_start = len(session.events)
+        memory_event_start = session.mark()
         user_event = session.append(USER_MESSAGE, {"content": user_input})
         yield to_agent_event(user_event)
         # USER_ACCEPTED 稳定边界：user/message 已持久化。
         await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
         run_id = session.begin_run()
-        run_started = session.events[-1]  # begin_run append 了 run/started；events 是公开 property
+        # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
+        run_started = next(e for e in session.since(memory_event_start) if e.type == RUN_STARTED)
         yield to_agent_event(run_started)
         steps = 0
         # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
@@ -188,7 +190,7 @@ class AgentRuntime:
 
         while True:
             # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
-            context_event_start = len(session.events)
+            context_event_start = session.mark()
             try:
                 messages = await self._context_builder.build(session)
             except ContextWindowExceededError as error:
@@ -202,7 +204,7 @@ class AgentRuntime:
                 )
                 # 模型在本轮从未被调用：没有可抽取的对话内容，跳过 writeback。
                 return
-            for event in session.events[context_event_start:]:
+            for event in session.since(context_event_start):
                 yield to_agent_event(event)
 
             # 第 2 步：发起这一轮模型调用（按 stream 选 astream/ainvoke）
@@ -246,7 +248,9 @@ class AgentRuntime:
                       outcome="success")
 
             # 第 3 步：把 AIMessage 持久化为 model/completed 事件
-            tool_calls = ai.tool_calls or []
+            # 值对象归一化（A2）：本循环内所有消费点读类型化字段，不再拆原始 dict。
+            calls = ToolCall.normalize_all(ai.tool_calls or [])
+            tool_calls = calls
             model_data: dict[str, Any] = {"content": ai.content if isinstance(ai.content, str) else str(ai.content)}
             model_name = _model_name_from_response(ai)
             if model_name:
@@ -258,8 +262,7 @@ class AgentRuntime:
                     usage_total[key] = usage_total.get(key, 0) + value
             if tool_calls:
                 model_data["tool_calls"] = [
-                    {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
-                    for tc in tool_calls
+                    {"id": c.id, "name": c.name, "args": c.args} for c in calls
                 ]
             will_execute_tools = bool(tool_calls) and steps + 1 < self.max_steps
             defer_model_event = (
@@ -318,12 +321,11 @@ class AgentRuntime:
                 return
 
             # 第 7 步：用 ToolExecutor 执行整批 tool_call 并按原 id 回填。
-            args_by_id = {tc.get("id", ""): tc.get("args") for tc in tool_calls}
-            tool_event_start = len(session.events)
+            tool_event_start = session.mark()
             tool_error = None
             try:
                 executions = await self.executor.execute_batch(
-                    tool_calls,
+                    calls,
                     session=session,
                     operation_context=OperationContext(
                         session_id=session.session_id,
@@ -333,7 +335,7 @@ class AgentRuntime:
                 )
             except Exception as error:  # noqa: BLE001
                 tool_error = error
-            for event in session.events[tool_event_start:]:
+            for event in session.since(tool_event_start):
                 yield to_agent_event(event)
             if tool_error is not None:
                 raise tool_error
@@ -347,16 +349,15 @@ class AgentRuntime:
                 yield to_agent_event(model_event)
                 # MODEL_COMPLETED 稳定边界：延迟写入的 model/completed 已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.MODEL_COMPLETED)
-            for execution in executions:
+            # execute_batch 契约保证返回顺序与输入一致（gather 保序 / 串行补 CANCELLED），
+            # 因此按位置配对 call↔execution——空/重复 id 也不会串对。
+            for call, execution in zip(calls, executions):
                 result = execution.result
                 content = result.model_dump_json()
                 outcome: str = "success" if result.ok else "failure"
 
-                tc_args = args_by_id.get(execution.tool_call_id, {})
-                tc_name = next(
-                    (tc.get("name", "") for tc in tool_calls if tc.get("id") == execution.tool_call_id),
-                    "",
-                )
+                tc_args = call.args
+                tc_name = call.name
                 call_event = session.append(
                     TOOL_CALL,
                     {"tool_call_id": execution.tool_call_id, "tool_name": tc_name, "args": tc_args},
@@ -373,7 +374,7 @@ class AgentRuntime:
                 self._log("tool_operation", f"工具回复 {outcome}",
                           span_id=new_span_id(), parent_span_id=run_span, step=steps,
                           tool_call_id=execution.tool_call_id,
-                          tool_input=args_by_id.get(execution.tool_call_id),
+                          tool_input=call.args,
                           tool_output=content[:200],
                           error_code=result.error_code,
                           retryable=result.retryable if not result.ok else None,
@@ -387,7 +388,7 @@ class AgentRuntime:
 
     def _write_memories(self, session: Session, start: int) -> None:
         if self._memory_writer is not None:
-            self._memory_writer.submit(session, session.events[start:])
+            self._memory_writer.submit(session, session.since(start))
 
     async def _save_checkpoint(
         self,

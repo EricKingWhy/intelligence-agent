@@ -71,6 +71,18 @@ class Session:
         """下一条事件的 seq（当前最大 seq + 1，空列表从 0 开始）。"""
         return max((e.seq for e in self._events), default=-1) + 1
 
+    def mark(self) -> int:
+        """当前追加位置的句柄——配合 since() 取"之后追加的事件"。
+
+        调用方不需要知道 events 的内部表示（列表/游标/页）；这是
+        Session 拥有的追加语义，替代调用方自己做 len(events) 算术。
+        """
+        return len(self._events)
+
+    def since(self, marker: int) -> list[SessionEvent]:
+        """返回 mark() 之后追加的事件（副本，不影响内部状态）。"""
+        return list(self._events[marker:])
+
     # ── 构造入口 ──
 
     @classmethod
