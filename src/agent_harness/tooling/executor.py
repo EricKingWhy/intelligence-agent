@@ -308,12 +308,19 @@ class ToolExecutor:
 
         if mode == "parallel":
             # gather 的顺序保持：即使第 3 个先完成，返回列表仍是 [结果1, 结果2, 结果3]。
-            return await asyncio.gather(
+            results = await asyncio.gather(
                 *(
                     self.execute(tc, operation_context=operation_context, session=session)
                     for tc in tool_calls
-                )
+                ),
+                return_exceptions=True,
             )
+            # 存储异常不能让批次提前返回，留下仍会追加 Artifact 事件的后台调用。
+            # 等所有已启动调用结束，再传播异常；不重跑任何 Tool。
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            return results
 
         # serial：永久失败后停止真实执行，剩余调用返回并持久化 CANCELLED。
         executions: list[ToolExecution] = []

@@ -1,7 +1,7 @@
 """AgentRuntime：把两轮 tool-calling 协议收进一段可读的异步循环。
 
 每轮固定顺序：
-    1. messages = session.derive_messages()（从事件事实源投影）
+    1. messages = await context_builder.build(session)（按预算投影）
     2. 模型调用（ainvoke 一次性 / astream 流式逐 chunk）
     3. session.append(model/completed)（持久化完整 AIMessage）
     4. steps += 1
@@ -26,15 +26,18 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
+    STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_MAX_STEPS_EXCEEDED,
     AgentEvent,
     AgentRunResult,
 )
+from agent_harness.context.builder import ContextBuilder, ContextWindowExceededError
 from agent_harness.logging import log_event, new_span_id
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
     MODEL_STARTED,
+    RUN_FAILED,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -70,6 +73,7 @@ class AgentRuntime:
         *,
         checkpoint_policy: CheckpointPolicy | None = None,
         session_meta_store: Any | None = None,
+        context_builder: ContextBuilder | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -80,6 +84,8 @@ class AgentRuntime:
         # 但只有注入了 CheckpointStore 才真正落盘——Core 不被存储强制依赖。
         self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
         self._session_meta_store = session_meta_store
+        # 使用未绑定工具的原始 Provider 生成摘要，不让摘要调用请求工具。
+        self._context_builder = context_builder or ContextBuilder(model)
 
         # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
         # 并在回复里产出 tool_calls。bind_tools 是 LangChain 的标准接线点。
@@ -152,8 +158,24 @@ class AgentRuntime:
                   outcome="started", agent_name="agent_runtime")
 
         while True:
-            # 第 1 步：从事件事实源投影出 messages（包含本轮之前的完整历史）
-            messages = session.derive_messages()
+            # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
+            context_event_start = len(session.events)
+            try:
+                messages = await self._context_builder.build(session)
+            except ContextWindowExceededError as error:
+                failed = session.append(
+                    RUN_FAILED, {"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": str(error)},
+                    run_id=run_id, step_id=steps,
+                )
+                yield AgentEvent(type=failed.type, data=failed.data, seq=failed.seq,
+                                 run_id=run_id, step_id=steps)
+                self._last_result = AgentRunResult(
+                    status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps,
+                )
+                return
+            for event in session.events[context_event_start:]:
+                yield AgentEvent(type=event.type, data=event.data, seq=event.seq,
+                                 run_id=event.run_id, step_id=event.step_id)
 
             # 第 2 步：发起这一轮模型调用（按 stream 选 astream/ainvoke）
             llm_span = new_span_id()
@@ -262,14 +284,25 @@ class AgentRuntime:
 
             # 第 7 步：用 ToolExecutor 执行整批 tool_call 并按原 id 回填。
             args_by_id = {tc.get("id", ""): tc.get("args") for tc in tool_calls}
-            executions = await self.executor.execute_batch(
-                tool_calls,
-                operation_context=OperationContext(
-                    session_id=session.session_id,
-                    run_id=run_id,
-                    agent_id="default",
-                ),
-            )
+            tool_event_start = len(session.events)
+            tool_error = None
+            try:
+                executions = await self.executor.execute_batch(
+                    tool_calls,
+                    session=session,
+                    operation_context=OperationContext(
+                        session_id=session.session_id,
+                        run_id=run_id,
+                        agent_id="default",
+                    ),
+                )
+            except Exception as error:  # noqa: BLE001
+                tool_error = error
+            for event in session.events[tool_event_start:]:
+                yield AgentEvent(type=event.type, data=event.data, seq=event.seq,
+                                 run_id=event.run_id, step_id=event.step_id)
+            if tool_error is not None:
+                raise tool_error
             if defer_model_event:
                 model_event = session.append(
                     MODEL_COMPLETED,

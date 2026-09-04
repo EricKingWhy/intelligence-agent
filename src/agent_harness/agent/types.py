@@ -18,6 +18,7 @@ from typing import Any
 STATUS_COMPLETED = "completed"
 # 不收敛兜底：模型反复请求工具直到 max_steps（Task 2 完整验证，Task 1 只留结构）
 STATUS_MAX_STEPS_EXCEEDED = "max_steps_exceeded"
+STATUS_CONTEXT_WINDOW_EXCEEDED = "context_window_exceeded"
 
 
 @dataclass

@@ -20,13 +20,16 @@ from sse_starlette.sse import EventSourceResponse
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.config import Settings
+from agent_harness.context.builder import ContextBuilder
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.session import JsonlSessionStore, Session
+from agent_harness.storage.s3_artifact import S3ArtifactStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tooling.overflow import ArtifactOverflowHandler
 from agent_harness.tools import (
     ApplyPatchTool,
     BashTool,
@@ -35,6 +38,7 @@ from agent_harness.tools import (
     GitStatusTool,
     GlobTool,
     GrepTool,
+    InspectArtifactTool,
     ReadTool,
     WriteTool,
 )
@@ -82,8 +86,10 @@ def _build_runtime(
     workspace: Path,
     max_steps: int,
     auto_approve: bool,
+    *,
+    session_id: str,
 ) -> AgentRuntime:
-    """复用 demo/live_agent.py 的 runtime 配方，绑定 9 个 Coding Tools。"""
+    """装配工具与 Context；配置对象存储时按 Session 绑定 Artifact Provider。"""
     config = ModelConfig.from_settings(state.settings)
     model = create_chat_model(config)
 
@@ -94,6 +100,15 @@ def _build_runtime(
         GlobTool, GrepTool, GitStatusTool, GitDiffTool,
     ):
         registry.register(tool_cls(sandbox))
+
+    settings = state.settings
+    overflow_handler = None
+    if any((settings.artifact_store_endpoint, settings.artifact_store_bucket,
+            settings.artifact_store_access_key, settings.artifact_store_secret_key,
+            settings.artifact_store_region)):
+        artifact_store = S3ArtifactStore(settings, session_id=session_id)
+        registry.register(InspectArtifactTool(artifact_store))
+        overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
 
     if auto_approve:
         policy = PermissionPolicy.WORKSPACE_WRITE
@@ -107,8 +122,14 @@ def _build_runtime(
     return AgentRuntime(
         model=model,
         registry=registry,
-        executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback),
+        executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
+                              overflow_handler=overflow_handler),
         max_steps=max_steps,
+        context_builder=ContextBuilder(
+            model, max_context_tokens=settings.max_context_tokens,
+            auto_compact_threshold=settings.auto_compact_threshold,
+            hard_guard_threshold=settings.hard_guard_threshold,
+        ),
     )
 
 
@@ -196,7 +217,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         workspace = Path(req.workspace) if req.workspace else state.workspaces_root / session.session_id
         workspace.mkdir(parents=True, exist_ok=True)
 
-        runtime = _build_runtime(state, workspace, req.max_steps, req.auto_approve)
+        runtime = _build_runtime(state, workspace, req.max_steps, req.auto_approve,
+                                 session_id=session.session_id)
 
         async def event_generator():
             """SSE 事件源：消费 run_stream，转成 SSE 帧。

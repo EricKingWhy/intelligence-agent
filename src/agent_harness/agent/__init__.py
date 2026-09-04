@@ -6,6 +6,7 @@
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
+    STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_MAX_STEPS_EXCEEDED,
     AgentEvent,
     AgentRunResult,
@@ -13,6 +14,7 @@ from agent_harness.agent.types import (
 
 __all__ = [
     "STATUS_COMPLETED",
+    "STATUS_CONTEXT_WINDOW_EXCEEDED",
     "STATUS_MAX_STEPS_EXCEEDED",
     "AgentEvent",
     "AgentRunResult",
