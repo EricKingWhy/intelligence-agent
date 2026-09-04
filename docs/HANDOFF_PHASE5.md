@@ -27,7 +27,7 @@ Phase 5 的全部决策已通过 `/grill-with-docs` 四轮拷打冻结，文档�
 | # | GitHub | 标题 | 状态 | Blocked by |
 |---|--------|------|------|------------|
 | 1 | #45 | ArtifactStore ABC + FakeArtifactStore + inspect_artifact Tool | ✅ DONE (fd7439a) | — |
-| 2 | #46 | estimate_tokens + ContextBuilder base (no Compaction) | ✅ DONE | — |
+| 2 | #46 | estimate_tokens + ContextBuilder base (no Compaction) | ✅ DONE (c98c9a5) | — |
 | 3 | #47 | Overflow Handler + Executor 集成 + artifact/created | ⬜ TODO | #45 ✅ |
 | 4 | #48 | S3ArtifactStore (七牛云 S3 兼容) | ⬜ TODO | #45 ✅ |
 | 5 | #49 | Context Compactor 三层降级 + context/compacted | ⬜ TODO | #46 |
