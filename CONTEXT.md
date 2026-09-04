@@ -151,3 +151,49 @@ _Avoid_: permission dialog, confirm popup, auth modal
 **Inspector 三栏**:
 Web UI 的冻结布局（spec 11 §5）：左栏 Sessions/Runs/Fork Tree；中栏 Conversation + Agent activity + Tool calls；右栏 Step Detail（model 元数据 / tool args/result / retry / artifact / context / checkpoint / recovery）。Phase 4-5 字段在 initial 版本留空槽 + graceful empty state，后续 Phase 填。
 _Avoid_: dashboard, console, panel layout
+
+## Artifact / Context 层
+
+**Artifact**:
+完整保存但默认不直接注入模型的大对象/大输出。由 ToolResult 溢出自动产生（非 Tool 显式声明），通过 content-hash 寻址（`artifact_id` = 内容哈希）。存于 Runtime 域存储（七牛云 Kodo S3 兼容），不经过 Sandbox。模型只拿到 summary + `artifact_ref`，需要细节时用 `inspect_artifact` 按行局部读取。守不变量 #15「Artifact 大内容优先 Local / MinIO，模型只拿 summary + ref」——此处 MinIO 泛化为对象存储。
+_Avoid_: cache file, blob, attachment, large output
+
+**ArtifactStore**:
+Artifact 的持久化边界（ABC）。`save()` 存内容返回 `Artifact` 元数据；`load()` 全量读回；`inspect()` 按行范围/关键词局部读。默认实现 `S3ArtifactStore`（七牛云 Kodo S3 兼容端点，用 `aioboto3`），测试用 `FakeArtifactStore`（内存）。接口保持 S3 抽象，未来可换 AWS S3 / R2 / COS。
+_Avoid_: file system, blob store, object storage wrapper
+
+**Artifact Overflow**:
+ToolResult 后处理的自动溢出检测。当 ToolResult 的主输出字段超过阈值（字符数），Executor 的 `OverflowHandler` 自动调 `ArtifactStore.save()` 存原始内容，然后把 ToolResult 替换成截断摘要 + `artifact_ref`。摘要零 LLM——纯截断（前 N 行 + 后 N 行 + 元数据），在 Ledger 写入之前完成，保证 Ledger 记录的 `result_json` 与 `artifact_ref` 一致。
+_Avoid_: truncation, output filter, result compression
+
+**inspect_artifact**:
+Phase 5 新增的第 10 个 Coding Tool，READ_ONLY 但操作 Runtime 存储而非 Sandbox。构造时注入 `ArtifactStore`（不是 `Sandbox`）。模型通过 `artifact_ref`（从 ToolResult 获得）按行局部读取 Artifact 细节：`start_line` / `end_line` / `keyword` / `max_lines`。大 Artifact 永远不完整灌回 Context。
+_Avoid_: view artifact, artifact reader, file viewer
+
+**ContextBuilder**:
+Runtime loop 第 1 步的替换层（`build(session) -> list[AnyMessage]`），内部复用 `derive_messages` 投影 + 做后处理：替换 artifact overflow 后的 ToolMessage、检测 token 占用、按需触发 Compaction。单一入口，Runtime 不再直接调 `derive_messages`。预留 `context_providers: list[ContextProvider]` 扩展点（Phase 6 填 MemoryContextProvider，Phase 5 空列表）。
+_Avoid_: context manager, message builder, prompt assembler
+
+**estimate_tokens**:
+Token 估算函数（`estimate_tokens(text) -> int`），用 `tiktoken` cl100k_base 精确计数。对所有 provider 一致（对非 OpenAI 模型是 ~10% 近似）。Compaction 的阈值（auto 0.70 / hard 0.85）相对于 `max_context_tokens`（默认 200000），基于这个估算。未来换 Claude 原生 tokenizer 是一行改动。
+_Avoid_: token counter, length calculator, context meter
+
+**Compaction**:
+当 Runtime Context 的 token 估算超过 `auto_compact_threshold`（默认 0.70 × max_context_tokens）时，ContextBuilder 将早期完整的 AIMessage+ToolMessage 块（以 AIMessage 为原子边界，不可拆断 tool_call/ToolResult 配对）压缩成结构化 summary，注入 messages 头部。持久化 SessionEvent 不变（不变量：完整保存 ≠ 完整注入）；压缩产生 `context/compacted` 事件记录投影变更。
+_Avoid_: context truncation, history pruning, window sliding
+
+**Compaction 三层降级**:
+摘要生成的降级链：(1) LLM 结构化摘要（用同一个 ModelProvider，保留 facts/decisions/constraints/failed_attempts/unresolved/artifact_refs/citations/tool outcomes）→ (2) LLM 失败时走 deterministic 机械提取（保留 HumanMessage 原文截断 + AIMessage 只留 tool_calls + ToolMessage 只留 tool_call_id + 截断 content）→ (3) 机械提取后仍超 `hard_guard_threshold`（0.85）则抛 `ContextWindowExceededError` 阻止 loop（spec §8：必须停止或要求用户处理）。
+_Avoid_: fallback summary, emergency compression, context eviction
+
+**ContextProvider**:
+Phase 5 只定义 Protocol（`select(session, token_budget) -> list[AnyMessage]`），不实现。是 ContextBuilder 的扩展点——Phase 6 的 MemoryContextProvider 通过它往 Runtime Context 注入 memory entries。Core 不直接依赖任何具体 Provider。
+_Avoid_: context plugin, injection hook, context source
+
+**artifact/created**:
+新增 typed SessionEvent，在 Artifact 溢出自动产生时 append。data 带 `{artifact_id, session_id, source_tool, tool_call_id, size, mime_type}`。是业务事实（Tool 副作用产生了外部存储对象），replay 和 fork 都需要。
+_Avoid_: artifact log, storage record
+
+**context/compacted**:
+新增 typed SessionEvent，在 Compaction 完成后 append。data 带 `{compacted_turn_count, summary_message_count, token_estimate, fallback_used}`。记录 Runtime Context 投影的语义变更（从这个点开始早期 turns 被压缩），replay 时重建 Context 投影需要。
+_Avoid_: compaction log, context snapshot
