@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import fnmatch
+import logging
 import os
 import shutil
 import subprocess
@@ -162,13 +163,13 @@ class LocalSubprocessSandbox(Sandbox):
         try:
             while chunk := stream.read(_DRAIN_CHUNK_CHARS):
                 cap.append(chunk)
-        except Exception:  # noqa: BLE001 — 流被随 kill 关闭属正常路径
-            pass
+        except Exception as error:  # noqa: BLE001 — 流被随 kill 关闭属正常路径
+            logging.debug("capture stream closed during drain: %s", type(error).__name__)
         finally:
             try:
                 stream.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as error:  # noqa: BLE001 — 关闭失败不影响结果
+                logging.debug("capture stream close failed: %s", type(error).__name__)
 
     def list_files(self, pattern: str) -> list[str]:
         """枚举 workspace 内匹配 glob 模式的文件，返回 POSIX 风格相对路径（排序）。
