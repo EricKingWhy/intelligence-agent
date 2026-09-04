@@ -12,6 +12,7 @@ import fnmatch
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -100,7 +101,7 @@ class LocalSubprocessSandbox(Sandbox):
     def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
 
-        timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉子进程并返回
+        timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉整个进程树并返回
         ExecResult(exit_code=-1, stderr="命令超时…")，不抛异常。
         stdout/stderr 捕获到 max_capture_chars 上限，超限丢弃并附截断标记
         （D4：无上限捕获会被大输出 OOM）。管道由 reader 线程持续排空，
@@ -112,6 +113,11 @@ class LocalSubprocessSandbox(Sandbox):
         # encoding/errors：Windows 中文系统默认 GBK，模型跑的命令可能输出 UTF-8 或 GBK；
         # 用 errors="replace" 保证任何字节序列都不会让 subprocess 解码崩掉。
         t0 = perf_counter()
+        # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀；
+        # Windows 不支持该参数（走 taskkill /T，见 _kill_process_tree）。
+        popen_kwargs: dict[str, object] = (
+            {"start_new_session": True} if os.name == "posix" else {}
+        )
         process = subprocess.Popen(
             command,
             shell=True,
@@ -121,6 +127,7 @@ class LocalSubprocessSandbox(Sandbox):
             text=True,
             encoding="utf-8",
             errors="replace",
+            **popen_kwargs,
         )
         stdout_cap = _CappedCapture(self._max_capture_chars)
         stderr_cap = _CappedCapture(self._max_capture_chars)
@@ -136,7 +143,7 @@ class LocalSubprocessSandbox(Sandbox):
             exit_code = process.wait(timeout=effective_timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            process.kill()
+            self._kill_process_tree(process)
             try:
                 exit_code = process.wait(timeout=5)
             except subprocess.TimeoutExpired:  # pragma: no cover — kill 后通常立即退出
@@ -158,6 +165,36 @@ class LocalSubprocessSandbox(Sandbox):
             stderr=stderr,
             duration_ms=round((perf_counter() - t0) * 1000, 1),
         )
+
+    @staticmethod
+    def _kill_process_tree(process: subprocess.Popen) -> None:
+        """超时击杀整棵进程树，而不只 shell 壳。
+
+        shell=True 时 process 只是 cmd.exe / /bin -c 壳，真正干活的是孙进程；
+        只杀壳会漏掉它们：继续改 workspace、占住捕获管道（reader join 超时），
+        锁住的文件还会让 delete() 的 rmtree 静默失败。
+        """
+        if os.name == "nt":
+            killed = False
+            try:
+                # taskkill /T 沿父子链整树击杀（含 start /b 脱管孙进程）。
+                result = subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                killed = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired) as error:  # pragma: no cover
+                logger.debug("taskkill 调用失败，回退 process.kill()：%s", type(error).__name__)
+            if not killed:
+                process.kill()
+        else:
+            # POSIX：子进程已在独立进程组（见 Popen start_new_session），整组 SIGKILL。
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:  # 进程组已退出，无须再杀
+                process.kill()
 
     @staticmethod
     def _drain_stream(stream, cap: _CappedCapture) -> None:
