@@ -80,3 +80,15 @@ async def test_upload_failure_does_not_create_reference_or_event(tmp_path):
         )
     assert result.artifact_ref is None
     assert session.events == before
+
+
+def test_overflow_chars_smaller_than_marker_is_rejected_at_construction():
+    """overflow_chars 小于截断 marker 最小长度时构造期快速失败。
+
+    marker（≈110+ 字符，含 artifact_id）本身不受 head/tail 预算约束：
+    overflow_chars 太小时摘要必然超出预算、悄悄污染 Context——与其运行时
+    静默违约，不如配置期直接拒绝。默认预算 2000 必须仍可正常构造。"""
+    with pytest.raises(ValueError, match="overflow_chars"):
+        ArtifactOverflowHandler(FakeArtifactStore(), overflow_chars=50)
+    # 默认预算不受影响（既有行为回归锚点）。
+    ArtifactOverflowHandler(FakeArtifactStore())

@@ -325,6 +325,10 @@ class ToolExecutor:
             # 等所有已启动调用结束，再传播异常；不重跑任何 Tool。
             for result in results:
                 if isinstance(result, BaseException):
+                    # 首个异常（输入顺序）维持原抛出契约；其余异常若不落日志，
+                    # 会随 raise 一起从诊断视野里消失——一次基础设施故障常伴随
+                    # 多个连锁失败，只看第一个会误判根因。这里补日志线索。
+                    self._log_secondary_exceptions(results, tool_calls)
                     raise result
             return results
 
@@ -345,6 +349,35 @@ class ToolExecutor:
                 )
             break
         return executions
+
+    @staticmethod
+    def _log_secondary_exceptions(
+        results: list[ToolExecution | BaseException],
+        tool_calls: list[ToolCall | dict[str, Any]],
+    ) -> None:
+        """把批次里除首个异常外的其余异常按 tool_call_id 落日志（不改变抛出契约）。
+
+        gather(return_exceptions=True) 只允许 raise 一个异常，其余异常若不在此
+        记录就永远丢失。首个异常由调用方原样抛出，不在这里重复记录。
+        """
+        primary = next(
+            index
+            for index, result in enumerate(results)
+            if isinstance(result, BaseException)
+        )
+        for index, result in enumerate(results):
+            if index == primary or not isinstance(result, BaseException):
+                continue
+            call_id = ToolCall.normalize(tool_calls[index]).id
+            # 不走 self._log/log_event：EVENT_TYPES 是冻结白名单（诊断事件不该
+            # 为它动日志协议），ERROR 级别也需直达 module logger。
+            logger.error(
+                "并行批次除首个异常外还有其它调用失败（首个异常照常抛出，其余仅记录）："
+                "tool_call_id=%s，%s: %s",
+                call_id,
+                type(result).__name__,
+                result,
+            )
 
     async def _create_pending_operation(
         self,
