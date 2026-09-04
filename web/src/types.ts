@@ -90,11 +90,30 @@ export interface Turn {
   step_id: number;
   /** User input that kicked off this turn. */
   user_message: string;
+  /**
+   * Latest model segment (kept for streaming caret + existing consumers).
+   *
+   * INVARIANT: `model === segments[latest model activity's index]` — the same
+   * object, not a copy. applyEvent's clone breaks this alias (it clones model
+   * and segments separately), so it re-aligns the reference after cloning;
+   * mutations to one must stay visible through the other. If this field is
+   * ever removed, the re-alignment step in applyEvent goes with it.
+   */
   model: ModelSegment;
+  /** All model segments in event order — one LLM burst each (execution chain). */
+  segments: ModelSegment[];
   tools: ToolCall[];
+  /** Execution chain in true event order: model bursts ↔ tool calls interleaved. */
+  activities: TurnActivity[];
   status: 'streaming' | 'done' | 'failed';
   started_at?: string;
+  completed_at?: string;
 }
+
+/** One entry of a turn's execution chain, in true event order (Trace Ladder). */
+export type TurnActivity =
+  | { kind: 'model'; /** Index into turn.segments. */ index: number }
+  | { kind: 'tool'; tool_call_id: string };
 
 /** Context compaction record (context/compacted event, Phase 5 spec 06).
  *  Run-level metadata — the Inspector Context panel surfaces these. */

@@ -557,6 +557,31 @@
   50% { opacity: 0; }
 }
 
+/* ── Execution Chain（Trace Ladder，签名 #2）：model 段 ↔ 工具节点按事件真序交错 ── */
+.act-chain {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding-left: var(--space-md);
+}
+/* 极淡执行链竖线：串联 model 段与工具节点（User→LLM→Tool→Result→…） */
+.act-chain::before {
+  content: '';
+  position: absolute;
+  left: 3.75px;
+  top: 14px;
+  bottom: 14px;
+  width: 0.5px;
+  background: var(--color-border);
+}
+.act-chain .model-output {
+  position: relative;
+}
+.act-chain .tool-card-body {
+  margin-left: 0;
+}
+
 /* ── Activity Timeline：工具行 = 节点（icon · 名称 · 摘要 · 耗时 · 状态） ── */
 .act-stream {
   position: relative;

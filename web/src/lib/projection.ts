@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Turn } from '../types';
+import type { AgentEvent, ConversationState, ModelSegment, ToolCall, Turn } from '../types';
 import { EventType } from '../types';
 
 export function initConversation(session_id: string): ConversationState {
@@ -27,7 +27,9 @@ function findOrCreateTurn(state: ConversationState, step_id: number): Turn {
       step_id,
       user_message: '',
       model: { text: '', status: 'streaming' },
+      segments: [],
       tools: [],
+      activities: [],
       status: 'streaming',
     };
     state.turns.push(turn);
@@ -41,7 +43,22 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
   // we mutate the clone's nested structures in place where noted.
   const next: ConversationState = {
     ...state,
-    turns: state.turns.map((t) => ({ ...t, model: { ...t.model }, tools: [...t.tools] })),
+    turns: state.turns.map((t) => {
+      const turn: Turn = {
+        ...t,
+        model: { ...t.model },
+        segments: t.segments.map((s) => ({ ...s })),
+        tools: [...t.tools],
+        activities: [...t.activities],
+      };
+      // model 与 segments[latest model index] 是同一逻辑段：clone 会切断引用，
+      // 这里按 activities 记录的 index 重新对齐，保证后续 mutation 同步。
+      const lastModel = [...turn.activities].reverse().find((a) => a.kind === 'model');
+      if (lastModel && lastModel.kind === 'model') {
+        turn.segments[lastModel.index] = turn.model;
+      }
+      return turn;
+    }),
     compactions: [...state.compactions],
     reconcile_queue: [...state.reconcile_queue],
   };
@@ -65,7 +82,18 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       const step = resolveStep(event, next);
       next.active_step_id = step;
       const turn = findOrCreateTurn(next, step);
-      turn.model = { text: '', status: 'streaming' };
+      touchTurn(turn, event);
+      // 新 burst → 新段；空段（重复 MODEL_STARTED、尚无 delta）复用不追加
+      const lastActivity = turn.activities[turn.activities.length - 1];
+      const isEmptyHead =
+        lastActivity?.kind === 'model' &&
+        turn.model.text === '' &&
+        turn.model.status === 'streaming';
+      if (!isEmptyHead) {
+        turn.model = { text: '', status: 'streaming' };
+        turn.segments.push(turn.model);
+        turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
+      }
       turn.status = 'streaming';
       break;
     }
@@ -73,6 +101,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     case EventType.MODEL_DELTA: {
       const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
+      touchTurn(turn, event);
       turn.model.text += String(data.delta ?? '');
       turn.model.status = 'streaming';
       break;
@@ -90,6 +119,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     case EventType.TOOL_CALL: {
       const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
+      touchTurn(turn, event);
       const id = String(data.tool_call_id ?? '');
       if (!turn.tools.find((t) => t.tool_call_id === id)) {
         turn.tools.push({
@@ -100,6 +130,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
           // 事件真值时间优先（历史事件带 time）；SSE 帧无 time 时回退客户端时钟
           started_at: event.time ?? new Date().toISOString(),
         });
+        turn.activities.push({ kind: 'tool', tool_call_id: id });
       }
       break;
     }
@@ -137,11 +168,11 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.RUN_COMPLETED:
-      finalizeRun(next, 'completed');
+      finalizeRun(next, 'completed', event.time);
       break;
 
     case EventType.RUN_FAILED:
-      finalizeRun(next, 'failed');
+      finalizeRun(next, 'failed', event.time);
       break;
 
     case EventType.ARTIFACT_CREATED: {
@@ -216,15 +247,47 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
  * turn.status differs ('done' vs 'failed'). Splitting them was the source of
  * a past caret-never-stops bug; the shared helper makes the invariant
  * "run ends → no streaming turn" structural. */
-function finalizeRun(state: ConversationState, status: 'completed' | 'failed'): void {
+function finalizeRun(state: ConversationState, status: 'completed' | 'failed', time?: string): void {
   state.run_status = status;
   state.active_step_id = null;
   const turnStatus = status === 'failed' ? 'failed' : 'done';
   for (const turn of state.turns) {
     if (turn.status === 'streaming') turn.status = turnStatus;
-    // run 终止后不再有 delta——model 段必须离开 streaming，否则 caret 永闪
-    if (turn.model.status === 'streaming') turn.model.status = 'done';
+    // run 终止后不再有 delta——所有段必须离开 streaming，否则 caret 永闪。
+    // turn.model 与 segments[latest model index] 是同一对象（clone 后已对齐），
+    // 因此遍历 segments 即同时覆盖 turn.model。
+    for (const seg of turn.segments) {
+      if (seg.status === 'streaming') seg.status = 'done';
+    }
+    if (turn.completed_at === undefined) {
+      turn.completed_at = time ?? new Date().toISOString();
+    }
   }
+}
+
+/** First touch of a turn records its true start time (event time preferred). */
+function touchTurn(turn: Turn, event: AgentEvent): void {
+  if (turn.started_at === undefined) {
+    turn.started_at = event.time ?? new Date().toISOString();
+  }
+}
+
+/** Expand a turn's execution chain into render nodes in true event order
+ *  (Trace Ladder — signature #2). Pure view over `activities` — no filtering
+ *  or collapsing; empty/done segments are a rendering concern (Conversation). */
+export type ChainNode =
+  | { kind: 'model'; segment: ModelSegment }
+  | { kind: 'tool'; tool: ToolCall };
+
+export function deriveChain(turn: Turn): ChainNode[] {
+  return turn.activities.flatMap((a): ChainNode[] => {
+    if (a.kind === 'model') {
+      const segment = turn.segments[a.index];
+      return segment ? [{ kind: 'model', segment }] : [];
+    }
+    const tool = turn.tools.find((t) => t.tool_call_id === a.tool_call_id);
+    return tool ? [{ kind: 'tool', tool }] : [];
+  });
 }
 
 /** Rebuild full conversation from a history of durable events (on page load). */

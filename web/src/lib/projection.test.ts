@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, initConversation, projectHistory } from './projection';
+import { applyEvent, deriveChain, initConversation, projectHistory } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -305,5 +305,74 @@ describe('projectHistory — 从持久事件重建', () => {
     expect(s.turns[0].user_message).toBe('task');
     expect(s.turns[0].model.text).toBe('done');
     expect(s.turns[0].tools[0].status).toBe('success');
+  });
+});
+
+describe('applyEvent — 执行链投影（Phase 3）', () => {
+  it('同 step 多轮 model burst 各存一段，turn.model 指向最新段', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1, time: '2026-09-04T00:00:00.000Z' }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'first' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: 'first done' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1, time: '2026-09-04T00:00:05.000Z' }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'second' }, step_id: 1 }));
+    expect(s.turns[0].segments).toHaveLength(2);
+    expect(s.turns[0].segments[0]).toEqual({ text: 'first done', status: 'done' });
+    expect(s.turns[0].segments[1]).toEqual({ text: 'second', status: 'streaming' });
+    expect(s.turns[0].model).toEqual({ text: 'second', status: 'streaming' });
+  });
+
+  it('activities 记录事件真序：model → tool → model', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'a' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'b' }, step_id: 1 }));
+    const t = s.turns[0];
+    expect(t.activities).toEqual([
+      { kind: 'model', index: 0 },
+      { kind: 'tool', tool_call_id: 't1' },
+      { kind: 'model', index: 1 },
+    ]);
+  });
+
+  it('重复 MODEL_STARTED（无 delta）不追加空段；重复 TOOL_CALL 不重复记 activity', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    const call = { type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' }, step_id: 1 };
+    s = applyEvent(s, ev(call));
+    s = applyEvent(s, ev(call));
+    expect(s.turns[0].segments).toHaveLength(1);
+    expect(s.turns[0].activities.filter((a) => a.kind === 'tool')).toHaveLength(1);
+  });
+
+  it('turn 时间真值：started_at 来自首个触碰事件，completed_at 来自 finalizeRun', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1, time: '2026-09-04T00:00:01.000Z' }));
+    expect(s.turns[0].started_at).toBe('2026-09-04T00:00:01.000Z');
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, time: '2026-09-04T00:00:09.500Z' }));
+    expect(s.turns[0].completed_at).toBe('2026-09-04T00:00:09.500Z');
+  });
+
+  it('deriveChain：activities 顺序展开为 model/tool 混合链', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'hi' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: {} }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    const chain = deriveChain(s.turns[0]);
+    expect(chain.map((n) => n.kind)).toEqual(['model', 'tool', 'model']);
+    expect(chain[0].kind === 'model' && chain[0].segment.text).toBe('hi');
+    expect(chain[1].kind === 'tool' && chain[1].tool.tool_call_id).toBe('t1');
+  });
+
+  it('clone 后 model↔segments 别名重新对齐：后续 delta 落在最新段且同步可见', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'a' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TOOL_RESULT, data: { tool_call_id: 'x', content: 'done' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    // 这次 applyEvent 的 clone 必须重新对齐 model 与 segments[last index]，
+    // 否则此 delta 只改 turn.model，deriveChain 读到的 segment 仍是空串
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'b' }, step_id: 1 }));
+    const t = s.turns[0];
+    expect(t.segments[1].text).toBe('b');
+    expect(t.model).toBe(t.segments[1]);
   });
 });
