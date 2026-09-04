@@ -35,3 +35,9 @@ export function truncateForDisplay(text: string, max: number = DISPLAY_TRUNCATE_
   if (text.length <= max) return text;
   return `${text.slice(0, max)}\n…（已截断，完整长度 ${text.length.toLocaleString()} 字符）`;
 }
+
+/** 展示层统一 stringify：字符串原样，其余 JSON 两空格缩进。
+ *  截断由 truncateForDisplay 负责，二者配套使用。 */
+export function stringifyForDisplay(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}

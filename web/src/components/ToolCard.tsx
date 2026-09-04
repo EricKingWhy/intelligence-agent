@@ -19,7 +19,7 @@ import { memo, useState } from 'react';
 import { Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
-import { formatDuration, truncateForDisplay } from '../lib/format';
+import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 
 interface Props {
   tool: ToolCall;
@@ -164,7 +164,7 @@ function GenericBlock({ tool }: { tool: ToolCall }) {
       {tool.result !== undefined && (
         <div className="generic-section">
           <div className="generic-label">结果</div>
-          <pre>{truncateForDisplay(typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2))}</pre>
+          <pre>{truncateForDisplay(stringifyForDisplay(tool.result))}</pre>
         </div>
       )}
     </div>

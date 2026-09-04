@@ -70,10 +70,16 @@ function withTurnAt(state: ConversationState, step: number, fn: (turn: Turn) => 
     return;
   }
   const turn = cloneTurn(state.turns[idx]);
+  replaceTurnAt(state, idx, turn);
+  fn(turn);
+}
+
+/** Swap one cloned turn back into the turns array (array identity changes,
+ *  其它元素引用不变）。withTurnAt 与 ARTIFACT_CREATED 共享的落盘路径。 */
+function replaceTurnAt(state: ConversationState, idx: number, turn: Turn): void {
   const turns = [...state.turns];
   turns[idx] = turn;
   state.turns = turns;
-  fn(turn);
 }
 
 /** Clone a single tool for in-place field updates (tool 级 copy-on-write：
@@ -82,7 +88,9 @@ function cloneTool(t: ToolCall): ToolCall {
   return { ...t };
 }
 
-/** Apply one event to state, mutating a draft. Call inside immer-style updater. */
+/** Apply one event to state, returning new state. Pure function — copy-on-write:
+ *  顶层浅克隆 + 只深克隆被本事件改写的 turn/tool/数组，未触及部分保持引用稳定
+ *  （渲染层 React.memo 的前提，引用契约由专项测试锁定）。 */
 export function applyEvent(state: ConversationState, event: AgentEvent): ConversationState {
   // Copy-on-write: top-level 一次浅克隆 + events 追加；turns / compactions /
   // reconcile_queue / unknown_events 仅在真正被事件改写时才克隆（引用稳定性
@@ -260,13 +268,9 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
         mime_type: String(data.mime_type ?? 'application/octet-stream'),
         source_tool: String(data.source_tool ?? ''),
       };
-      const tools = [...prevTurn.tools];
-      tools[toolIdx] = tool;
       const turn = cloneTurn(prevTurn);
-      turn.tools = tools;
-      const turns = [...next.turns];
-      turns[turnIdx] = turn;
-      next.turns = turns;
+      turn.tools[toolIdx] = tool; // cloneTurn 已给出新 tools 数组，原位替换即可
+      replaceTurnAt(next, turnIdx, turn);
       break;
     }
 
@@ -340,10 +344,10 @@ function finalizeRun(state: ConversationState, status: 'completed' | 'failed', t
   state.run_status = status;
   state.active_step_id = null;
   const turnStatus = status === 'failed' ? 'failed' : 'done';
-  const changedIdx: number[] = [];
-  const changedTurns: Turn[] = [];
-  for (let i = 0; i < state.turns.length; i++) {
-    const t = state.turns[i];
+  let changed = false;
+  const turns = [...state.turns];
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
     const needsTurn = t.status === 'streaming' || t.completed_at === undefined;
     const hasStreamingSeg = t.segments.some((seg) => seg.status === 'streaming');
     const hasRunningTool = t.tools.some((tool) => tool.status === 'running');
@@ -364,16 +368,10 @@ function finalizeRun(state: ConversationState, status: 'completed' | 'failed', t
     if (turn.completed_at === undefined) {
       turn.completed_at = time ?? new Date().toISOString();
     }
-    changedIdx.push(i);
-    changedTurns.push(turn);
+    turns[i] = turn;
+    changed = true;
   }
-  if (changedIdx.length > 0) {
-    const turns = [...state.turns];
-    changedIdx.forEach((idx, k) => {
-      turns[idx] = changedTurns[k];
-    });
-    state.turns = turns;
-  }
+  if (changed) state.turns = turns;
 }
 
 /** First touch of a turn records its true start time (event time preferred). */

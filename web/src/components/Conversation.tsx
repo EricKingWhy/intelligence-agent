@@ -16,7 +16,7 @@ import type { ChainNode } from '../lib/projection';
 import { deriveChain } from '../lib/projection';
 import type { TraceDensity } from '../lib/density';
 import type { ConversationState, ModelSegment, ToolCall, Turn } from '../types';
-import { formatDuration } from '../lib/format';
+import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 
@@ -162,13 +162,15 @@ function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; densit
     const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
     if (!first) return null;
     return (
-      <div className="model-output done model-output-compact">{renderMarkdown(first)}</div>
+      <div className="model-output done model-output-compact">{renderMarkdown(truncateForDisplay(first))}</div>
     );
   }
   if (!segment.text && segment.status !== 'streaming') return null;
+  // 模型文本与工具输出同级不可信——单行超长模型输出同样会冻结 UI，渲染前截断
+  // （41e7360 只覆盖了工具路径，code-review 补齐此处）。
   return (
     <div className={`model-output ${segment.status}`}>
-      {renderMarkdown(segment.text)}
+      {renderMarkdown(truncateForDisplay(segment.text))}
       {segment.status === 'streaming' && <span className="stream-caret" />}
     </div>
   );

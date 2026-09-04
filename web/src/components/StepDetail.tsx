@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
-import { formatDuration, truncateForDisplay } from '../lib/format';
+import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
 
@@ -507,9 +507,7 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
         {tool.result !== undefined && (
           <div className="detail-subsection">
             <div className="detail-key">Output</div>
-            <pre className="detail-code">
-              {truncateForDisplay(typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2))}
-            </pre>
+            <pre className="detail-code">{truncateForDisplay(stringifyForDisplay(tool.result))}</pre>
           </div>
         )}
         {tool.started_at && tool.completed_at && (
