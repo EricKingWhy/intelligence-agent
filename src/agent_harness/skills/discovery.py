@@ -18,12 +18,13 @@ import yaml
 
 @dataclass(frozen=True, slots=True)
 class SkillCatalogEntry:
-    """目录条目：name + description + 来源路径 + frontmatter 其余字段；正文延迟读取。"""
+    """目录条目：name + description(+when_to_use) + 来源路径 + frontmatter 其余字段；正文延迟读取。"""
 
     name: str
     description: str
     source_path: Path
     meta: dict[str, Any] = field(default_factory=dict)
+    when_to_use: str = ""  # 可选（ADR-0011 grill 记录：用户批准的扩展字段）
 
     def load_body(self) -> str:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
@@ -70,14 +71,16 @@ def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str
     meta = dict(meta)
     name = meta.pop("name", None)
     description = meta.pop("description", None)
+    when_to_use = meta.pop("when_to_use", None)
     if not isinstance(name, str) or not name.strip():
         errors.append(f"{path}: frontmatter requires non-empty 'name'")
     if not isinstance(description, str) or not description.strip():
         errors.append(f"{path}: frontmatter requires non-empty 'description'")
     if errors:
         return None, errors
+    when_to_use = when_to_use.strip() if isinstance(when_to_use, str) and when_to_use.strip() else ""
     return SkillCatalogEntry(name=name.strip(), description=description.strip(),
-                             source_path=path, meta=meta), []
+                             source_path=path, meta=meta, when_to_use=when_to_use), []
 
 
 def resolve_within(candidate: Path, root: Path) -> bool:

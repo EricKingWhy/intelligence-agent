@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from agent_harness.capability.base import (
@@ -63,9 +64,39 @@ async def _wire_memory(
     wiring.memory = components
 
 
+async def _wire_skills(
+    registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
+) -> None:
+    from agent_harness.skills.capability import SkillCapability
+    from agent_harness.skills.context_provider import SkillCatalogContextProvider
+    from agent_harness.skills.discovery import SkillDiscovery
+    from agent_harness.skills.tool import LoadSkillTool
+
+    # 全局目录（spec 09 §2）+ 项目目录（workspace 级）+ options 扩展目录/手动路径。
+    global_dir = Path(settings.skill_global_dir) if settings.skill_global_dir \
+        else Path.home() / ".intelligence-agent" / "skills"
+    directories = [global_dir, Path(settings.workspace_dir) / "skills"]
+    directories.extend(Path(d) for d in cfg.options.get("directories", []))
+    manual_paths = [Path(p) for p in cfg.options.get("paths", [])]
+    catalog = SkillDiscovery(directories=directories, manual_paths=manual_paths).discover()
+    capability = SkillCapability(catalog)
+    registry.register(
+        CapabilityDescriptor(
+            name="skills", version="1.0.0", provider_name=cfg.provider,
+            capabilities=["catalog", "load"], risk="low",
+            supports_concurrency=True, supports_recovery=False, supports_streaming=False,
+            degradation=Degradation.OPTIONAL_RUNTIME,
+        ),
+        capability,
+    )
+    wiring.context_providers.append(SkillCatalogContextProvider(capability))
+    wiring.tools.append(LoadSkillTool(capability))
+
+
 #: 已知 capability 的显式接线表（ADR-0010 Q6：显式装配优于反射式发现）。
 _BUILTIN_WIRING: dict[str, Any] = {
     "memory": _wire_memory,
+    "skills": _wire_skills,
 }
 
 
