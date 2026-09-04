@@ -32,6 +32,7 @@ from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import LocalSubprocessSandbox
 from agent_harness.session import JsonlSessionStore, Session
+from agent_harness.session.event import USER_MESSAGE
 from agent_harness.storage.s3_artifact import S3ArtifactStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalResponse
@@ -69,6 +70,12 @@ class SessionSummary(BaseModel):
     event_count: int
     first_event_time: str | None = None
     last_event_time: str | None = None
+    # Gap 3 (P0)：首条 user/message content 截断 128 字符——前端 SessionList
+    # 零额外请求渲染标题（保留 events 扫描作为后端未返回时的降级路径）。
+    first_user_message: str | None = None
+    # Gap 2 (P2)：Langfuse trace 关联。真实 trace 由 Phase 15 可观测层创建；
+    # 未接入前恒为 null（绝不伪造，前端显示「未追踪」）。
+    trace_id: str | None = None
 
 
 class AppState:
@@ -337,11 +344,19 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             events = store.read_events(sid)
             if not events:
                 continue
+            first_user_message = next(
+                (e.data.get("content") for e in events if e.type == USER_MESSAGE
+                 and isinstance(e.data.get("content"), str) and e.data["content"].strip()),
+                None,
+            )
+            if first_user_message is not None:
+                first_user_message = first_user_message.strip()[:128]
             summaries.append(SessionSummary(
                 session_id=sid,
                 event_count=len(events),
                 first_event_time=events[0].time,
                 last_event_time=events[-1].time,
+                first_user_message=first_user_message,
             ))
         return summaries
 

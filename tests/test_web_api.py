@@ -29,6 +29,7 @@ from agent_harness.config import Settings
 from agent_harness.session import (
     RUN_STARTED,
     SESSION_STARTED,
+    USER_MESSAGE,
     Session,
 )
 from agent_harness.tooling import ToolExecutor, ToolRegistry
@@ -80,6 +81,28 @@ def test_list_sessions_returns_existing(tmp_path):
     assert len(body) == 1
     assert body[0]["session_id"] == session.session_id
     assert body[0]["event_count"] >= 1
+
+
+def test_list_sessions_carries_first_user_message(tmp_path):
+    """Gap 3 (P0)：列表 payload 每行带首条 user/message content（截断 128），
+    前端零额外请求渲染标题；无 user message 返回 null。"""
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+    long_text = "帮我写一个 Python 函数" * 30  # 330 字符，应被截断到 128
+    session = Session.start(store)
+    session.append(event_type=SESSION_STARTED, data={"reason": "test"})
+    session.append(event_type=USER_MESSAGE, data={"content": long_text})
+    session.append(event_type=USER_MESSAGE, data={"content": "第二条不算"})
+    empty = Session.start(store)  # 无任何 user/message 的 session
+    client = TestClient(app)
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    by_id = {row["session_id"]: row for row in resp.json()}
+    first = by_id[session.session_id]["first_user_message"]
+    assert first == long_text[:128]
+    assert len(first) == 128
+    assert by_id[empty.session_id]["first_user_message"] is None
 
 
 # ── session events ──

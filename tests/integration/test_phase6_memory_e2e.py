@@ -1,5 +1,6 @@
 """Real Zilliz + embedding Gate; simulated conversation, real storage/provider path."""
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -62,7 +63,6 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
     from agent_harness.agent import AgentRuntime
     from agent_harness.identity import identity_context_var, set_identity_context
     from agent_harness.memory.context_provider import MemoryContextProvider
-    from agent_harness.memory.embeddings import create_embeddings
     from agent_harness.memory.extractor import MemoryExtractor
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
     from agent_harness.memory.outbox_relay import OutboxRelay
@@ -76,7 +76,18 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
 
     if not gate_settings.embedding_api_key.get_secret_value() or not gate_settings.embedding_model:
         pytest.skip("Real embedding model is not configured")
-    vectors = MilvusVectorStore(gate_settings, create_embeddings(gate_settings))
+
+    def gate_embeddings(settings):
+        """Gate 专用嵌入客户端：真实云厂商存在负载波动，本测试验证的是记忆语义
+        而非嵌入重试策略（生产保持快失败 + 降级事件，见 embeddings.py）。"""
+        from langchain_openai import OpenAIEmbeddings
+        return OpenAIEmbeddings(
+            model=settings.embedding_model, base_url=settings.embedding_base_url,
+            api_key=settings.embedding_api_key, check_embedding_ctx_length=False,
+            dimensions=settings.embedding_dimensions, request_timeout=30, max_retries=3,
+        )
+
+    vectors = MilvusVectorStore(gate_settings, gate_embeddings(gate_settings))
     records = SqliteMemoryRecordStore(tmp_path / "memory.db")
     await records.initialize()
     capability = LangMemMemoryCapability(records, vectors)
@@ -101,7 +112,16 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
         assert not any(e.type == "memory/degraded" for e in session.events)
         preference = (await records.list_by_scope(MemoryScope.USER, alice, 20))[0]
         other_id = await capability.store(MemoryScope.USER, "鲸鱼是生活在海洋中的哺乳动物。", {"importance": 0.2})
-        assert await relay.flush() == 2
+        # 真实 embedding 服务存在瞬态失败；outbox 语义保证失败条目被保留、
+        # 下轮 flush 重新 upsert。这里按该保证重试排空——同时验证持久 outbox 本身。
+        async with asyncio.timeout(240):
+            acknowledged = 0
+            while True:
+                acknowledged += await relay.flush()
+                if not await records.pending():
+                    break
+                await asyncio.sleep(2)
+        assert acknowledged == 2
         assert await records.pending() == []
         stored = await vectors.get(preference.id, alice, MemoryScope.USER)
         assert stored["memory_id"] == preference.id and "TypeScript" in stored["content"]
@@ -115,7 +135,7 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
 
         second = make_session(tmp_path / "sessions")
         second.append(USER_MESSAGE, {"content": "我偏好的编程语言是什么？"})
-        context = MemoryContextProvider(capability, timeout_seconds=20)
+        context = MemoryContextProvider(capability, timeout_seconds=60)
         messages = await context.select(second, 1000)
         assert len(messages) == 1 and "TypeScript" in messages[0].content
         for identity in (IdentityContext(alice.tenant_id, "bob", ["user"]),
@@ -129,7 +149,7 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
                 identity_context_var.reset(token)
 
         # A genuine alternate supported output dimension must reject the existing schema.
-        mismatched_embeddings = create_embeddings(gate_settings)
+        mismatched_embeddings = gate_embeddings(gate_settings)
         mismatched_embeddings.dimensions = 64 if vectors.dimension != 64 else 128
         mismatch = MilvusVectorStore(gate_settings, mismatched_embeddings)
         try:
