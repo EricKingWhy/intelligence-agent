@@ -1,25 +1,34 @@
 /** Conversation — center column rendering the projected ConversationState.
  *
- * Each Turn renders as:
+ * Each Turn renders as (Trace Ladder, signature #2 — Brief §24 Phase 3):
  *   - user message (right-aligned bubble)
- *   - model output (left-aligned, streamed via model/delta)
- *   - tool calls (ToolCards, collapsible)
+ *   - execution chain in TRUE event order: model segments ↔ ToolCards,
+ *     projected by deriveChain (shared projection.ts layer — no second truth)
  *
- * Turn collapse: completed turns collapse to a summary line ("3 tools · 12 tokens").
- * The active streaming turn is always expanded.
+ * Turn collapse: completed turns with model text collapse to a derived
+ * summary line (N tools · M 轮 · 真实耗时) — replaces the old fabricated
+ * "~N tok" estimate (zero-fake-metrics rule).
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { Activity, Brain } from 'lucide-react';
-import type { ConversationState, Turn } from '../types';
+import type { ChainNode } from '../lib/projection';
+import { deriveChain } from '../lib/projection';
+import type { TraceDensity } from '../lib/density';
+import type { ConversationState, ModelSegment, ToolCall, Turn } from '../types';
+import { formatDuration } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 
 interface Props {
   conversation: ConversationState | null;
   loadingHistory: boolean;
+  /** Trace Density 四档（Brief 冻结决策）——控制执行链节点粒度。 */
+  density: TraceDensity;
   /** 空状态示例任务回调——点击 chip 时由 App 注入 Composer。 */
   onPresetTask?: (text: string) => void;
+  /** 点击工具块钻取到事件级 Inspector（Brief "Inspector Scope"）。 */
+  onFocusTool?: (tool: ToolCall) => void;
 }
 
 const EXAMPLE_TASKS = [
@@ -28,7 +37,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, onPresetTask }: Props) {
+export function Conversation({ conversation, loadingHistory, density, onPresetTask, onFocusTool }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -78,7 +87,13 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
       <div className="conversation-scroll" key={conversation.session_id} ref={scrollRef}>
         {conversation.turns.map((turn) => (
-          <TurnView key={turn.step_id} turn={turn} active={conversation.run_status === 'running'} />
+          <TurnView
+            key={turn.step_id}
+            turn={turn}
+            active={conversation.run_status === 'running'}
+            density={density}
+            onFocusTool={onFocusTool}
+          />
         ))}
         <div ref={endRef} />
       </div>
@@ -86,18 +101,19 @@ export function Conversation({ conversation, loadingHistory, onPresetTask }: Pro
   );
 }
 
-function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
+function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: boolean; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
   // 只有"已完成且有模型文本"的轮次才可折叠——纯工具轮次节点本身已极简，
   // 折叠按钮只会制造噪音（时间轴上直接常驻展开）。
   const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
-  const [collapsed, setCollapsed] = useState(false);
+  // 已完成轮次默认折叠为派生摘要（Brief §决策 L48）；用户点击展开后不再自动收回。
+  const [collapsed, setCollapsed] = useState(collapsible);
 
   // Active turn always expanded.
   useEffect(() => {
     if (active && turn.status === 'streaming') setCollapsed(false);
   }, [active, turn.status]);
 
-  const tokenCount = Math.max(1, Math.ceil(turn.model.text.length / 4));
+  const duration = formatDuration(turn.started_at, turn.completed_at);
 
   return (
     <div className={`turn turn-${turn.status}`}>
@@ -108,39 +124,55 @@ function TurnView({ turn, active }: { turn: Turn; active: boolean }) {
         </div>
       )}
 
-      {/* Model + tools — activity timeline */}
-      {(turn.model.text || turn.tools.length > 0) && (
+      {/* Execution chain — model segments and tools in true event order */}
+      {turn.activities.length > 0 && (
         <div className="msg msg-model">
           <div className="msg-avatar msg-avatar-model"><Brain size={13} /></div>
           <div className="msg-body">
-            {/* 纯工具轮次不显示折叠控件——工具节点本身已极简，按钮只会制造噪音 */}
+            {/* 折叠摘要：派生计数 + 真实耗时，零伪造指标 */}
             {collapsible && (
               <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
                 {collapsed
-                  ? `思考 · ${turn.tools.length} 个工具 · ~${tokenCount} tok`
+                  ? `已折叠 · ${turn.tools.length} 个工具 · ${turn.segments.length} 轮${duration ? ` · ${duration}` : ''}`
                   : '折叠'}
               </button>
             )}
             {!collapsed && (
-              <>
-                {turn.model.text && (
-                  <div className={`model-output ${turn.model.status}`}>
-                    {renderMarkdown(turn.model.text)}
-                    {turn.model.status === 'streaming' && <span className="stream-caret" />}
-                  </div>
-                )}
-                {turn.tools.length > 0 && (
-                  <div className="act-stream">
-                    {turn.tools.map((t) => (
-                      <ToolCard key={t.tool_call_id} tool={t} />
-                    ))}
-                  </div>
-                )}
-              </>
+              <div className="act-chain">
+                {deriveChain(turn).map((node, i) => (
+                  <ChainNodeView key={chainKey(node, i)} node={node} density={density} onFocusTool={onFocusTool} />
+                ))}
+              </div>
             )}
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function chainKey(node: ChainNode, i: number): string {
+  return node.kind === 'tool' ? node.tool.tool_call_id : `model-${i}`;
+}
+
+function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
+  if (node.kind === 'tool') {
+    return <ToolCard tool={node.tool} density={density} onFocus={onFocusTool} />;
+  }
+  const { segment }: { segment: ModelSegment } = node;
+  // Compact 档下 done 的 model 段只渲染首行摘要（渐进披露：详情留给 Inspector）
+  if (density === 'compact' && segment.status !== 'streaming') {
+    const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
+    if (!first) return null;
+    return (
+      <div className="model-output done model-output-compact">{renderMarkdown(first)}</div>
+    );
+  }
+  if (!segment.text && segment.status !== 'streaming') return null;
+  return (
+    <div className={`model-output ${segment.status}`}>
+      {renderMarkdown(segment.text)}
+      {segment.status === 'streaming' && <span className="stream-caret" />}
     </div>
   );
 }

@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { listSessions, getSessionEvents, startSession, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
-import { initConversation, applyEvent, projectHistory } from '../lib/projection';
+import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -31,6 +31,9 @@ export function useSession() {
   const [conversation, setConversation] = useState<ConversationState | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Session Rail 行标题缓存（Session Model E 轮）：查看某会话时从首条 user/message
+  // 投影出标题，本地缓存供 SessionList 行渲染。无缓存时回退到短 ID——不伪造。
+  const [titlesById, setTitlesById] = useState<Record<string, string>>({});
 
   const sseRef = useRef<SSEHandle | null>(null);
   // live 流中已知的首帧 sid——结束/出错/取消时决定迁移目标。
@@ -71,6 +74,9 @@ export function useSession() {
       .then((events: AgentEvent[]) => {
         if (cancelled) return;
         setConversation(projectHistory(sid, events));
+        // 从真实事件流投影首条用户消息作为行标题（无则空串，回退短 ID）。
+        const title = deriveSessionTitle(events);
+        if (title) setTitlesById((m) => (m[sid] === title ? m : { ...m, [sid]: title }));
       })
       .catch((e) => {
         if (!cancelled) setError(`加载历史事件失败：${(e as Error).message}`);
@@ -120,6 +126,11 @@ export function useSession() {
             }
             if (!conv) conv = initConversation(sid ?? 'streaming');
             conv = applyEvent(conv, event);
+            // 首条用户消息到达时缓存行标题（Session Model E 轮）。
+            if (sid) {
+              const content = extractSessionTitle(event);
+              if (content) setTitlesById((m) => (m[sid] ? m : { ...m, [sid]: content }));
+            }
             setConversation({ ...conv });
           },
           () => {
@@ -172,6 +183,7 @@ export function useSession() {
     loadingHistory,
     streaming,
     error,
+    titlesById,
     selectSession,
     submitTask,
     cancelStream,

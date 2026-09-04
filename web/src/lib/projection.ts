@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Turn } from '../types';
+import type { AgentEvent, ConversationState, ModelSegment, ToolCall, Turn } from '../types';
 import { EventType } from '../types';
 
 export function initConversation(session_id: string): ConversationState {
@@ -17,6 +17,8 @@ export function initConversation(session_id: string): ConversationState {
     run_status: 'idle',
     compactions: [],
     reconcile_queue: [],
+    events: [],
+    unknown_events: [],
   };
 }
 
@@ -27,7 +29,9 @@ function findOrCreateTurn(state: ConversationState, step_id: number): Turn {
       step_id,
       user_message: '',
       model: { text: '', status: 'streaming' },
+      segments: [],
       tools: [],
+      activities: [],
       status: 'streaming',
     };
     state.turns.push(turn);
@@ -41,9 +45,27 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
   // we mutate the clone's nested structures in place where noted.
   const next: ConversationState = {
     ...state,
-    turns: state.turns.map((t) => ({ ...t, model: { ...t.model }, tools: [...t.tools] })),
+    turns: state.turns.map((t) => {
+      const turn: Turn = {
+        ...t,
+        model: { ...t.model },
+        segments: t.segments.map((s) => ({ ...s })),
+        tools: [...t.tools],
+        activities: [...t.activities],
+      };
+      // model 与 segments[latest model index] 是同一逻辑段：clone 会切断引用，
+      // 这里按 activities 记录的 index 重新对齐，保证后续 mutation 同步。
+      const lastModel = [...turn.activities].reverse().find((a) => a.kind === 'model');
+      if (lastModel && lastModel.kind === 'model') {
+        turn.segments[lastModel.index] = turn.model;
+      }
+      return turn;
+    }),
     compactions: [...state.compactions],
     reconcile_queue: [...state.reconcile_queue],
+    // Inspector Timeline 真相源：流经的每个事件原样保留（不含 model/delta 折叠）
+    events: [...state.events, event],
+    unknown_events: state.unknown_events,
   };
 
   const { type, data } = event;
@@ -65,7 +87,18 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       const step = resolveStep(event, next);
       next.active_step_id = step;
       const turn = findOrCreateTurn(next, step);
-      turn.model = { text: '', status: 'streaming' };
+      touchTurn(turn, event);
+      // 新 burst → 新段；空段（重复 MODEL_STARTED、尚无 delta）复用不追加
+      const lastActivity = turn.activities[turn.activities.length - 1];
+      const isEmptyHead =
+        lastActivity?.kind === 'model' &&
+        turn.model.text === '' &&
+        turn.model.status === 'streaming';
+      if (!isEmptyHead) {
+        turn.model = { text: '', status: 'streaming' };
+        turn.segments.push(turn.model);
+        turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
+      }
       turn.status = 'streaming';
       break;
     }
@@ -73,6 +106,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     case EventType.MODEL_DELTA: {
       const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
+      touchTurn(turn, event);
       turn.model.text += String(data.delta ?? '');
       turn.model.status = 'streaming';
       break;
@@ -90,6 +124,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     case EventType.TOOL_CALL: {
       const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
+      touchTurn(turn, event);
       const id = String(data.tool_call_id ?? '');
       if (!turn.tools.find((t) => t.tool_call_id === id)) {
         turn.tools.push({
@@ -97,9 +132,12 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
           name: String(data.tool_name ?? 'unknown'),
           args: (data.args as Record<string, unknown>) ?? {},
           status: 'running',
+          // Raw 档真相源：完整源事件原样透传（type/time/step_id/data，Trace Density Raw）
+          raw_call: { ...event },
           // 事件真值时间优先（历史事件带 time）；SSE 帧无 time 时回退客户端时钟
           started_at: event.time ?? new Date().toISOString(),
         });
+        turn.activities.push({ kind: 'tool', tool_call_id: id });
       }
       break;
     }
@@ -132,16 +170,17 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
           };
         }
         tool.completed_at = event.time ?? new Date().toISOString();
+        tool.raw_result = { ...event };
       }
       break;
     }
 
     case EventType.RUN_COMPLETED:
-      finalizeRun(next, 'completed');
+      finalizeRun(next, 'completed', event.time);
       break;
 
     case EventType.RUN_FAILED:
-      finalizeRun(next, 'failed');
+      finalizeRun(next, 'failed', event.time);
       break;
 
     case EventType.ARTIFACT_CREATED: {
@@ -189,8 +228,16 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       break;
     }
 
+    // 会话生命周期事件：不投影到轮次/工具，但识别为已知事件（不进 unknown_events）。
+    // Run Pulse 可消费 conversation.events 中的会话事件判断 resumed 等场景。
+    case EventType.SESSION_STARTED:
+    case EventType.SESSION_RESUMED:
+      break;
+
     default:
-      // Unknown event types are ignored — forward-compatible.
+      // UnknownSurfaceNode 兜底协议（冻结决策第 69 行）：未知事件类型不静默丢弃，
+      // 记录到 unknown_events 供 Timeline / Inspector 显式渲染为 raw 行。
+      next.unknown_events = [...next.unknown_events, event];
       break;
   }
 
@@ -216,20 +263,77 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
  * turn.status differs ('done' vs 'failed'). Splitting them was the source of
  * a past caret-never-stops bug; the shared helper makes the invariant
  * "run ends → no streaming turn" structural. */
-function finalizeRun(state: ConversationState, status: 'completed' | 'failed'): void {
+function finalizeRun(state: ConversationState, status: 'completed' | 'failed', time?: string): void {
   state.run_status = status;
   state.active_step_id = null;
   const turnStatus = status === 'failed' ? 'failed' : 'done';
   for (const turn of state.turns) {
     if (turn.status === 'streaming') turn.status = turnStatus;
-    // run 终止后不再有 delta——model 段必须离开 streaming，否则 caret 永闪
-    if (turn.model.status === 'streaming') turn.model.status = 'done';
+    // run 终止后不再有 delta——所有段必须离开 streaming，否则 caret 永闪。
+    // turn.model 与 segments[latest model index] 是同一对象（clone 后已对齐），
+    // 因此遍历 segments 即同时覆盖 turn.model。
+    for (const seg of turn.segments) {
+      if (seg.status === 'streaming') seg.status = 'done';
+    }
+    // DSH 四态语义（冻结决策第 69 行 "interrupted ≠ error"）：run 结束时仍在 running
+    // 的工具被中断而非失败——标记 stopped，不与 success/failed 混淆。
+    for (const tool of turn.tools) {
+      if (tool.status === 'running') tool.status = 'stopped';
+    }
+    if (turn.completed_at === undefined) {
+      turn.completed_at = time ?? new Date().toISOString();
+    }
   }
+}
+
+/** First touch of a turn records its true start time (event time preferred). */
+function touchTurn(turn: Turn, event: AgentEvent): void {
+  if (turn.started_at === undefined) {
+    turn.started_at = event.time ?? new Date().toISOString();
+  }
+}
+
+/** Expand a turn's execution chain into render nodes in true event order
+ *  (Trace Ladder — signature #2). Pure view over `activities` — no filtering
+ *  or collapsing; empty/done segments are a rendering concern (Conversation). */
+export type ChainNode =
+  | { kind: 'model'; segment: ModelSegment }
+  | { kind: 'tool'; tool: ToolCall };
+
+export function deriveChain(turn: Turn): ChainNode[] {
+  return turn.activities.flatMap((a): ChainNode[] => {
+    if (a.kind === 'model') {
+      const segment = turn.segments[a.index];
+      return segment ? [{ kind: 'model', segment }] : [];
+    }
+    const tool = turn.tools.find((t) => t.tool_call_id === a.tool_call_id);
+    return tool ? [{ kind: 'tool', tool }] : [];
+  });
 }
 
 /** Rebuild full conversation from a history of durable events (on page load). */
 export function projectHistory(session_id: string, events: AgentEvent[]): ConversationState {
   return events.reduce(applyEvent, initConversation(session_id));
+}
+
+/** Extract a session-title string from a single event if it's a user/message
+ *  with non-empty content; '' otherwise. Shared by deriveSessionTitle (history
+ *  replay) and the live SSE handler so there's one definition of "title-worthy". */
+export function extractSessionTitle(event: AgentEvent): string {
+  if (event.type !== EventType.USER_MESSAGE) return '';
+  return String(event.data.content ?? '').trim();
+}
+
+/** Extract the first user/message content from an event stream — used as the
+ *  Session Rail row title (frozen decision "Session Model E 轮" 第 73 行:
+ *  "会话行 = 首条用户消息截断为标题 + 短 ID + 事件数 + 相对时间 + Run Pulse 状态点"）。
+ *  Empty / no-user-message-yet → returns '' (caller falls back to short ID). */
+export function deriveSessionTitle(events: AgentEvent[]): string {
+  for (const e of events) {
+    const title = extractSessionTitle(e);
+    if (title) return title;
+  }
+  return '';
 }
 
 /** Try to JSON-parse a tool result `content` string; return null on failure.
@@ -243,5 +347,38 @@ function tryParseContent(content: unknown): Record<string, unknown> | null {
     return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 单行事件摘要——projection 是事件→人类可读语义的唯一归属（不变量 #22）。
+ * 被 Timeline / Trace / Chat 多处复用；未知事件走 UnknownSurfaceNode 兜底（冻结决策 69）。
+ */
+export function summarizeEvent(event: AgentEvent): string {
+  const d = event.data;
+  switch (event.type) {
+    case EventType.USER_MESSAGE:
+      return String(d.content ?? '').slice(0, 40);
+    case EventType.MODEL_DELTA:
+      return `+${String(d.delta ?? '').length} 字符`;
+    case EventType.MODEL_COMPLETED:
+      return `${String(d.content ?? '').length} 字符`;
+    case EventType.TOOL_CALL:
+      return `${String(d.tool_name ?? '?')} ${JSON.stringify(d.args ?? {}).slice(0, 40)}`;
+    case EventType.TOOL_RESULT: {
+      const parsed = tryParseContent(d.content);
+      if (parsed) {
+        return parsed.ok === true ? 'ok' : `失败 ${String(parsed.error_code ?? '')}`;
+      }
+      return String(d.content ?? '').slice(0, 40);
+    }
+    case EventType.ARTIFACT_CREATED:
+      return String(d.artifact_id ?? '').slice(0, 20);
+    case EventType.CONTEXT_COMPACTED:
+      return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
+    case EventType.OPERATION_RECONCILE_REQUIRED:
+      return String(d.tool_name ?? '');
+    default:
+      return `未知事件 · ${JSON.stringify(d).slice(0, 40)}`;
   }
 }

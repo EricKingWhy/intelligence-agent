@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, initConversation, projectHistory } from './projection';
+import { applyEvent, deriveChain, deriveSessionTitle, initConversation, projectHistory } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -14,7 +14,7 @@ describe('initConversation', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle',
-      compactions: [], reconcile_queue: [],
+      compactions: [], reconcile_queue: [], events: [], unknown_events: [],
     });
   });
 });
@@ -113,9 +113,82 @@ describe('applyEvent — 折叠语义', () => {
     expect(s.turns[0].tools[0].completed_at).toBe('2026-09-04T01:02:04.500Z');
   });
 
-  it('未知事件类型被忽略（前向兼容）', () => {
-    const s = applyEvent(initConversation('s'), ev({ type: 'future/thing' }));
+  it('UnknownSurface 兜底：未知事件记录到 unknown_events 而非静默丢弃（冻结决策第 69 行）', () => {
+    const s = applyEvent(initConversation('s'), ev({ type: 'future/thing', data: { x: 1 } }));
     expect(s.turns).toHaveLength(0);
+    expect(s.unknown_events).toHaveLength(1);
+    expect(s.unknown_events[0].type).toBe('future/thing');
+    expect(s.events).toHaveLength(1);
+  });
+
+  it('已知生命周期事件 SESSION_STARTED / SESSION_RESUMED 不进 unknown_events', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.SESSION_STARTED }));
+    s = applyEvent(s, ev({ type: EventType.SESSION_RESUMED }));
+    expect(s.unknown_events).toHaveLength(0);
+    expect(s.events).toHaveLength(2);
+  });
+
+  it('工具四态 stopped：run 结束时仍在 running 的工具被标记 stopped（DSH interrupted ≠ error）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash' },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].status).toBe('running');
+    // 未收到 TOOL_RESULT 就 RUN_FAILED → 工具被中断
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED }));
+    expect(s.turns[0].tools[0].status).toBe('stopped');
+  });
+
+  it('已完成（成功或失败）的工具在 run 结束时不被改成 stopped', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash' },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].status).toBe('success');
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED }));
+    // success 保持，不被 finalizeRun 改动
+    expect(s.turns[0].tools[0].status).toBe('success');
+  });
+});
+
+describe('deriveSessionTitle — Session Model E 轮首条用户消息投影', () => {
+  it('返回首条 user/message 的 content', () => {
+    const events = [
+      ev({ type: EventType.SESSION_STARTED }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '写一个 FizzBuzz', step: 1 } }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: 'ok', step: 1 } }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('写一个 FizzBuzz');
+  });
+
+  it('无 user/message 时返回空串（调用方回退到短 ID，不伪造）', () => {
+    const events = [
+      ev({ type: EventType.SESSION_STARTED }),
+      ev({ type: EventType.RUN_STARTED }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('');
+  });
+
+  it('空白 content 视为无标题（trim 后为空）', () => {
+    const events = [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '   ', step: 1 } }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('');
+  });
+
+  it('多条 user/message 只取首条（不随后续轮次更新）', () => {
+    const events = [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '第一句', step: 1 } }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '第二句', step: 2 } }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('第一句');
   });
 });
 
@@ -305,5 +378,112 @@ describe('projectHistory — 从持久事件重建', () => {
     expect(s.turns[0].user_message).toBe('task');
     expect(s.turns[0].model.text).toBe('done');
     expect(s.turns[0].tools[0].status).toBe('success');
+  });
+});
+
+describe('applyEvent — 执行链投影（Phase 3）', () => {
+  it('同 step 多轮 model burst 各存一段，turn.model 指向最新段', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1, time: '2026-09-04T00:00:00.000Z' }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'first' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: 'first done' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1, time: '2026-09-04T00:00:05.000Z' }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'second' }, step_id: 1 }));
+    expect(s.turns[0].segments).toHaveLength(2);
+    expect(s.turns[0].segments[0]).toEqual({ text: 'first done', status: 'done' });
+    expect(s.turns[0].segments[1]).toEqual({ text: 'second', status: 'streaming' });
+    expect(s.turns[0].model).toEqual({ text: 'second', status: 'streaming' });
+  });
+
+  it('activities 记录事件真序：model → tool → model', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'a' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'b' }, step_id: 1 }));
+    const t = s.turns[0];
+    expect(t.activities).toEqual([
+      { kind: 'model', index: 0 },
+      { kind: 'tool', tool_call_id: 't1' },
+      { kind: 'model', index: 1 },
+    ]);
+  });
+
+  it('重复 MODEL_STARTED（无 delta）不追加空段；重复 TOOL_CALL 不重复记 activity', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    const call = { type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' }, step_id: 1 };
+    s = applyEvent(s, ev(call));
+    s = applyEvent(s, ev(call));
+    expect(s.turns[0].segments).toHaveLength(1);
+    expect(s.turns[0].activities.filter((a) => a.kind === 'tool')).toHaveLength(1);
+  });
+
+  it('turn 时间真值：started_at 来自首个触碰事件，completed_at 来自 finalizeRun', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1, time: '2026-09-04T00:00:01.000Z' }));
+    expect(s.turns[0].started_at).toBe('2026-09-04T00:00:01.000Z');
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, time: '2026-09-04T00:00:09.500Z' }));
+    expect(s.turns[0].completed_at).toBe('2026-09-04T00:00:09.500Z');
+  });
+
+  it('deriveChain：activities 顺序展开为 model/tool 混合链', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'hi' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: {} }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    const chain = deriveChain(s.turns[0]);
+    expect(chain.map((n) => n.kind)).toEqual(['model', 'tool', 'model']);
+    expect(chain[0].kind === 'model' && chain[0].segment.text).toBe('hi');
+    expect(chain[1].kind === 'tool' && chain[1].tool.tool_call_id).toBe('t1');
+  });
+
+  it('clone 后 model↔segments 别名重新对齐：后续 delta 落在最新段且同步可见', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'a' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TOOL_RESULT, data: { tool_call_id: 'x', content: 'done' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    // 这次 applyEvent 的 clone 必须重新对齐 model 与 segments[last index]，
+    // 否则此 delta 只改 turn.model，deriveChain 读到的 segment 仍是空串
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'b' }, step_id: 1 }));
+    const t = s.turns[0];
+    expect(t.segments[1].text).toBe('b');
+    expect(t.model).toBe(t.segments[1]);
+  });
+});
+
+describe('applyEvent — Inspector Timeline 事件日志（Phase 5）', () => {
+  it('每个事件原样追加到 conversation.events（真相源，零过滤）', () => {
+    const e1 = ev({ type: EventType.RUN_STARTED });
+    const e2 = ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' } });
+    const state = [e1, e2].reduce(applyEvent, initConversation('s1'));
+    expect(state.events).toEqual([e1, e2]);
+  });
+
+  it('applyEvent 是纯追加：后续事件不改变既有日志条目', () => {
+    const e1 = ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' } });
+    const e2 = ev({ type: EventType.TOOL_RESULT, data: { tool_call_id: 't1', content: '{"ok":true}' } });
+    const afterFirst = applyEvent(initConversation('s1'), e1);
+    const snapshot = [...afterFirst.events];
+    applyEvent(afterFirst, e2);
+    expect(afterFirst.events).toEqual(snapshot);
+  });
+
+  it('projectHistory 重建的 events 与输入事件序列一致', () => {
+    const events = [
+      ev({ type: EventType.RUN_STARTED }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi', step: 1 } }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: 'ok', step: 1 } }),
+      ev({ type: EventType.RUN_COMPLETED }),
+    ];
+    const state = projectHistory('s1', events);
+    expect(state.events).toEqual(events);
+    expect(state.events).toHaveLength(4);
+  });
+
+  it('stream-only 事件（model/delta）也进日志——Timeline 显示折叠后的计数视图', () => {
+    const state = [
+      ev({ type: EventType.MODEL_DELTA, data: { delta: 'a', step: 1 } }),
+      ev({ type: EventType.MODEL_DELTA, data: { delta: 'b', step: 1 } }),
+    ].reduce(applyEvent, initConversation('s1'));
+    expect(state.events).toHaveLength(2);
   });
 });

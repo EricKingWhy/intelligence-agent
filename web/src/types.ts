@@ -61,11 +61,20 @@ export interface ToolCall {
   tool_call_id: string;
   name: string;
   args: Record<string, unknown>;
-  status: 'running' | 'success' | 'failed';
+  /** DSH 四态语义（冻结决策 "Unique Product Signatures" 第 69 行）：
+   *  running（进行中）| success（成功）| failed（失败）| stopped（被中断，≠ error）。 */
+  status: 'running' | 'success' | 'failed' | 'stopped';
   result?: unknown;
   diff?: { before: string; after: string; truncated: boolean };
   started_at?: string;
   completed_at?: string;
+  /**
+   * Raw event payloads (Trace Density Raw tier — Brief "Raw = 原始事件 JSON").
+   * Verbatim shallow copies of the projection source events (type/time/step_id/data);
+   * never fabricated, never synthesized from parsed fields.
+   */
+  raw_call?: Record<string, unknown>;
+  raw_result?: Record<string, unknown>;
   /** Artifact produced by this tool call when output overflows the inline limit.
    *  Set by artifact/created event (Phase 5). Inspector fetches via inspect_artifact. */
   artifact?: ArtifactRef;
@@ -90,11 +99,30 @@ export interface Turn {
   step_id: number;
   /** User input that kicked off this turn. */
   user_message: string;
+  /**
+   * Latest model segment (kept for streaming caret + existing consumers).
+   *
+   * INVARIANT: `model === segments[latest model activity's index]` — the same
+   * object, not a copy. applyEvent's clone breaks this alias (it clones model
+   * and segments separately), so it re-aligns the reference after cloning;
+   * mutations to one must stay visible through the other. If this field is
+   * ever removed, the re-alignment step in applyEvent goes with it.
+   */
   model: ModelSegment;
+  /** All model segments in event order — one LLM burst each (execution chain). */
+  segments: ModelSegment[];
   tools: ToolCall[];
+  /** Execution chain in true event order: model bursts ↔ tool calls interleaved. */
+  activities: TurnActivity[];
   status: 'streaming' | 'done' | 'failed';
   started_at?: string;
+  completed_at?: string;
 }
+
+/** One entry of a turn's execution chain, in true event order (Trace Ladder). */
+export type TurnActivity =
+  | { kind: 'model'; /** Index into turn.segments. */ index: number }
+  | { kind: 'tool'; tool_call_id: string };
 
 /** Context compaction record (context/compacted event, Phase 5 spec 06).
  *  Run-level metadata — the Inspector Context panel surfaces these. */
@@ -126,4 +154,12 @@ export interface ConversationState {
   /** Run-level metadata for the Inspector (Phase 5 events). */
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];
+  /** Every event that flowed through the projection, in arrival order (verbatim).
+   *  Timeline tab truth source — never filtered or reshaped (invariant #22). */
+  events: AgentEvent[];
+  /** Events whose type didn't match any known case (UnknownSurfaceNode 协议,
+   *  冻结决策第 69 行 "unknown 事件渲染为 raw 行兜底，永不静默丢弃")。
+   *  Kept separately so Timeline / Inspector can surface them explicitly
+   *  rather than dropping silently. Subset of `events`. */
+  unknown_events: AgentEvent[];
 }
