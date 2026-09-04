@@ -9,7 +9,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agent_harness.session import SessionEvent
 
 # 运行状态用字符串常量表达，而不是 Enum：
 # - 字段少、分支简单，Enum 是过度抽象（违背 Day 3 "简洁优先"）；
@@ -72,3 +75,23 @@ class AgentEvent:
     def is_durable(self) -> bool:
         """是否已被 SessionEvent 事实源记录（有 seq 即是）。"""
         return self.seq is not None
+
+
+def to_agent_event(event: SessionEvent) -> AgentEvent:
+    """把一条持久化 SessionEvent 镜像成 AgentEvent（集中映射）。
+
+    这是 runtime / SSE / Web UI 等所有 SessionEvent → AgentEvent 投影的
+    唯一构造点：新增字段（如 time 透传、agent_id）只在这里改一次，
+    不再在 run_stream 的 11 处手动拼装里逐个漂移（不变量 #4）。
+
+    SessionEvent 永远有 seq ≥ 0，所以映射产物始终 durable；
+    纯流式信号（model/started、model/delta）不经此函数构造——
+    它们在 runtime 里直接 new AgentEvent(..., seq=None)。
+    """
+    return AgentEvent(
+        type=event.type,
+        data=event.data,
+        seq=event.seq,
+        run_id=event.run_id,
+        step_id=event.step_id,
+    )
