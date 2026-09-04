@@ -22,7 +22,7 @@
 | **3** | Docker Sandbox + Coding Tools | ✅ COMPLETED | `2bfa457` → `ed96f5a` | Sandbox ABC（含 list_files）+ LocalSubprocessSandbox + DockerSandbox（懒加载 + 确定性命名 + 跨进程恢复）+ 9 个 Coding Tools（read/write/bash/edit/grep/glob/apply_patch/git_status/git_diff）+ 批次调度验证 ✅。**后续独立 spec 全部落地**：Approval / REQUIRE_APPROVAL 机制（PermissionPolicy + ToolPermission + ToolExecutor 审批关卡 stage 2.5 + per-call scoping，默认安全拒绝 danger）；Session-scoped Sandbox 生命周期（WorkspaceRegistry 映射持久化 + Session.start/resume 自动绑定 sandbox + Docker 后端跨进程恢复）。Gate 达成：edit 多匹配明确失败、pytest exit_code=1 不被 retry、两个无冲突文件操作可并发、冲突写被串行化、路径越界统一 PERMISSION_DENIED、DANGER 工具在非 full-access policy 下被审批关卡拦截。252 passed。 |
 | **4** | Storage + Operation Ledger + Recovery | ✅ COMPLETED | `5b85e36`（#27 Ledger）<br>`6c94398`（#28 Checkpoint）<br>`fbcf599`（#29 RecoveryCoordinator）<br>`596c53b`（#30 Reconcile）<br>`778c1da`（#32 Kill 集成测试） | 全部 6 个 Ticket 落地：durable Operation Ledger（SQLite + aiosqlite，Ledger-first 写入顺序）+ 稳定边界 Checkpoint 持久化（CheckpointPolicy seam，checkpoint 绝不进事件流）+ RecoveryCoordinator（07 §9 冻结 8 步唯一入口，决策与写入分离，BEGIN EXCLUSIVE sidecar 恢复锁）+ UNKNOWN 人工裁决（ReconcileHint / ReconcileVerdict / ReconcileCallback，RUNNING→UNKNOWN→NEED_RECONCILE 两步状态机强制，RETRY 只能来自用户裁决，operation/reconcile-required 落盘）+ 真实子进程 Kill 恢复集成测试。Gate 达成：duplicate confirmed side effect = 0、dangling tool call = 0、Workspace 按原映射恢复、5 个独立 Kill 场景全过、PENDING 默认 skip 不盲跑。345 passed, 8 skipped；全仓 ruff clean。 |
 | **5** | Artifact + S3 + Context Compaction（ADR-0006） | ✅ COMPLETED | `fd7439a`（#45）<br>`c98c9a5`（#46）<br>`de6a894`（#47）<br>`80086a9`（#48）<br>`e19905d`（#49）<br>`c0a4b0f`（#50） | ArtifactStore / Fake / S3 / inspect_artifact、Overflow Handler、ContextBuilder、三层 Compaction、Runtime/Web 装配全部落地。真实七牛 5000 行 Bash 溢出、局部回读、历史重建 Gate 通过。全量 424 passed；真实七牛 2 passed；ruff clean。证据：docs/PHASE5_GATE.md。 |
-| **6** | Memory Capability / Context Provider | 🔄 IN PROGRESS | `21a9e2f`（#51）+ `93d2e18`（#52）+ `62db7de`（#53）+ `e2a3a92`（#54）+ #55 | IdentityContext 与 SQLite/Fake MemoryRecordStore 完成；USER/SESSION 隔离、事务 outbox；501 passed、8 skipped、5 deselected，ruff clean。Memory Context 注入、typed 降级、Runtime 后台写回完成；#56 真实语义 Gate 待 embedding 模型配置。 |
+| **6** | Memory Capability / Context Provider | 🔄 IN PROGRESS | `21a9e2f`（#51）+ `93d2e18`（#52）+ `62db7de`（#53）+ `e2a3a92`（#54）+ `df2b3e8`（#55） | IdentityContext 与 SQLite/Fake MemoryRecordStore 完成；USER/SESSION 隔离、事务 outbox；502 passed、8 skipped、7 deselected，ruff clean。Memory Context 注入、typed 降级、Runtime 后台写回完成；#56 真实语义 Gate 待 embedding 模型配置。 |
 | **7** | Capability / Plugin Foundation + Skills | ⬜ NOT STARTED | — | |
 | **8** | MCP | ⬜ NOT STARTED | — | |
 | **9** | Streaming Surfaces | 🔄 IN PROGRESS (精简版提前) | — | Phase 9+10 精简版提前施工（见 ADR-0005）。FastAPI + SSE + REST POST + AgentRuntime.run_stream。技术硬前置（Phase 1 events + Phase 2 tool events）已满足；跳过 Phase 4-8 完整交付，由用户明确授权。 |
@@ -38,7 +38,7 @@
 
 ## 当前工作焦点
 
-**Phase 5 Artifact + Context Compaction 已完成**（#45–#50，2026-09-04）。真实七牛 Gate 已通过，证据见 `docs/PHASE5_GATE.md`。交付在 feat/backend；后续 main 集成和下一 Phase 按用户/Primary Developer 排期。
+**Phase 6 Memory Capability / Context Provider 实施中**。#51–#55 已提交推送 feat/backend；#56 真实连接与认证失败映射通过，完整 Gate 等待 embedding 模型配置，证据见 `docs/PHASE6_GATE.md`。Phase 5 已完成；不提前开始 Phase 7。
 
 ## 更新日志
 
@@ -69,3 +69,5 @@
 - 2026-09-04：#54 完成。LangMem 0.0.30（MIT）仅 memory extra；Formation/Consolidation 经项目 BaseStore 写 SQLite + outbox，Core 无 concrete class 依赖。Extractor 三层降级、异步取消保留；10 项新测试，全量 490 passed，ruff / lock clean。双轴审查修复 nearest-hit 误判为合并的问题并复核通过。
 
 - 2026-09-04：#55 完成。MemoryContextProvider 按 relevance/recency/importance 选择、单条 SystemMessage 注入；Builder 最终预算裁剪及可替换 Provider 故障隔离。Runtime run/run_stream 结束后后台抽取当前 run，继承身份、绑定可信 session_id；writer 支持 drain/close。memory/degraded 纳入统一事件词表和生成类型。双轴审查问题修复复核通过。
+
+- 2026-09-04：#56 部分验收：真实 Zilliz 连接/list_collections、缺失 Collection 和无效 token 两项集成测试通过；修复 SDK 包裹 gRPC 认证错误的映射并补回归。全量 502 passed、8 skipped、7 deselected。无真实数据写入，完整 Gate 等待 embedding 模型，#56 保持未完成。

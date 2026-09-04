@@ -68,6 +68,27 @@ async def test_sdk_error_does_not_leak_token(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wrapped_grpc_auth_error_is_mapped_without_message_parsing(monkeypatch):
+    from types import SimpleNamespace
+
+    sdk = pytest.importorskip("pymilvus")
+
+    class AuthenticationError(Exception):
+        def code(self):
+            return SimpleNamespace(name="UNAUTHENTICATED")
+
+    wrapper = sdk.MilvusException(code=2, message="generic connection error")
+    wrapper.__cause__ = AuthenticationError("credential-secret")
+    client = Mock(list_collections=AsyncMock(side_effect=wrapper))
+    monkeypatch.setattr(sdk, "AsyncMilvusClient", Mock(return_value=client))
+    vector = MilvusVectorStore(Settings(_env_file=None, milvus_uri="https://example.test", milvus_token="test-only"))
+    with pytest.raises(VectorStoreError) as error:
+        await vector.connect()
+    assert error.value.code == "authentication"
+    assert "credential-secret" not in str(error.value)
+
+
+@pytest.mark.asyncio
 async def test_adapter_get_delete_keep_owner_filter_and_reject_schema(monkeypatch):
     sdk = pytest.importorskip("pymilvus")
     client = Mock()

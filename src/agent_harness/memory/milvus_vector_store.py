@@ -29,9 +29,21 @@ class MilvusVectorStore:
         try:
             return await getattr(self._client, operation)(timeout=15, **kwargs)
         except Exception as error:  # noqa: BLE001 — SDK异常不得包含凭证进入日志/事件。
-            code = getattr(error, "code", None)
-            category = {1800: "authentication", 100: "collection_not_found",
-                        1100: "invalid_request"}.get(code, "unavailable")
+            category = "unavailable"
+            cause = error
+            seen: set[int] = set()
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                code = getattr(cause, "code", None)
+                code = code() if callable(code) else code
+                category = {1800: "authentication", 100: "collection_not_found",
+                            1100: "invalid_request"}.get(code, "unavailable") if isinstance(code, int) else {
+                                "UNAUTHENTICATED": "authentication", "PERMISSION_DENIED": "permission_denied",
+                            }.get(getattr(code, "name", None), "unavailable")
+                if category != "unavailable":
+                    break
+                # pymilvus wraps handshake gRPC errors in generic CONNECT_FAILED.
+                cause = cause.__cause__
             raise VectorStoreError(category) from None
 
     async def connect(self) -> list[str]:
