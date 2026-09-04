@@ -4,7 +4,7 @@
  * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
-import { useEffect, useState, type KeyboardEvent } from 'react';
+import { memo, useEffect, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import type { PresetTask } from '../types';
 
@@ -15,7 +15,9 @@ interface Props {
   presetTask?: PresetTask | null;
 }
 
-export function Composer({ streaming, onSubmit, onCancel, presetTask }: Props) {
+// memo：流式期间 props 稳定（streaming 布尔不变、回调由 App useCallback 固定），
+// 输入框不随对话区每个 delta 重渲染。
+export const Composer = memo(function Composer({ streaming, onSubmit, onCancel, presetTask }: Props) {
   const [value, setValue] = useState('');
 
   // 外部示例任务注入（引用变化即触发；每次点击 chip 生成新对象）
@@ -70,4 +72,4 @@ export function Composer({ streaming, onSubmit, onCancel, presetTask }: Props) {
       </div>
     </div>
   );
-}
+});

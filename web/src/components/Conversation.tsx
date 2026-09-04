@@ -10,7 +10,7 @@
  * "~N tok" estimate (zero-fake-metrics rule).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Brain } from 'lucide-react';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain } from '../lib/projection';
@@ -101,7 +101,9 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
   );
 }
 
-function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: boolean; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
+// memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
+// 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
+const TurnView = memo(function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: boolean; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
   // 只有"已完成且有模型文本"的轮次才可折叠——纯工具轮次节点本身已极简，
   // 折叠按钮只会制造噪音（时间轴上直接常驻展开）。
   const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
@@ -114,6 +116,7 @@ function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: 
   }, [active, turn.status]);
 
   const duration = formatDuration(turn.started_at, turn.completed_at);
+  const chain = useMemo(() => deriveChain(turn), [turn]);
 
   return (
     <div className={`turn turn-${turn.status}`}>
@@ -139,7 +142,7 @@ function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: 
             )}
             {!collapsed && (
               <div className="act-chain">
-                {deriveChain(turn).map((node, i) => (
+                {chain.map((node, i) => (
                   <ChainNodeView key={chainKey(node, i)} node={node} density={density} onFocusTool={onFocusTool} />
                 ))}
               </div>
@@ -149,7 +152,7 @@ function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: 
       )}
     </div>
   );
-}
+});
 
 function chainKey(node: ChainNode, i: number): string {
   return node.kind === 'tool' ? node.tool.tool_call_id : `model-${i}`;

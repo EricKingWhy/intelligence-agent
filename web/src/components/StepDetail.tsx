@@ -14,7 +14,7 @@
  * Run level (no modal — Brief "上下文 Inspector").
  */
 
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import {
   AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
   Hash, Layers, ListTree, Package, TerminalSquare,
@@ -320,15 +320,23 @@ function TimelineTab({ conversation, onFocusEvent }: { conversation: Conversatio
   return (
     <div className="detail-timeline">
       {conversation.events.map((e, i) => (
-        <button key={i} className="timeline-row" onClick={() => onFocusEvent(e)}>
-          <span className="tl-seq">{e.seq ?? '·'}</span>
-          <span className="tl-type">{e.type}</span>
-          <span className="tl-summary">{eventSummary(e)}</span>
-        </button>
+        <TimelineRow key={i} event={e} onFocusEvent={onFocusEvent} />
       ))}
     </div>
   );
 }
+
+// memo：投影层 events 数组为追加式（既有事件引用稳定），流式期间新 delta 到达时
+// 旧行跳过 summarizeEvent 重算——只有新增行参与渲染。
+const TimelineRow = memo(function TimelineRow({ event, onFocusEvent }: { event: AgentEvent; onFocusEvent: (e: AgentEvent) => void }) {
+  return (
+    <button className="timeline-row" onClick={() => onFocusEvent(event)}>
+      <span className="tl-seq">{event.seq ?? '·'}</span>
+      <span className="tl-type">{event.type}</span>
+      <span className="tl-summary">{eventSummary(event)}</span>
+    </button>
+  );
+});
 
 // ── Changes tab：diff 双栏聚合（复用 ToolCard diff 形态的数据与 .diff-cols 形状） ──
 

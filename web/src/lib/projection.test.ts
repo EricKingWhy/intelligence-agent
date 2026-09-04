@@ -258,8 +258,9 @@ describe('applyEvent — resolveStep 边界契约', () => {
   // 不是 null）。resolveStep 用 !== null 判定会让 undefined 漏网返回 undefined，
   // 导致 user/message 与后续 model/completed(step_id=1) 落入不同 turn——模型文本丢失。
   it('user/message 无 step_id 字段（undefined）时与后续 model/completed(step_id=1) 入同一 turn', () => {
-    // 模拟真实后端事件：step_id 键完全缺失（不是 null）
-    const userMsg: AgentEvent = { type: EventType.USER_MESSAGE, data: { content: '你是谁' }, seq: 1, run_id: null };
+    // 模拟真实后端事件：step_id 值为 undefined（运行时等价于键完全缺失，
+    // `!= null` 判定一致——strict 判定下 undefined 与 null 行为分叉正是本回归点）
+    const userMsg = ev({ type: EventType.USER_MESSAGE, data: { content: '你是谁' }, seq: 1, step_id: undefined });
     const modelCompleted: AgentEvent = { type: EventType.MODEL_COMPLETED, data: { content: '我是 Qwen' }, seq: 3, run_id: null, step_id: 1 };
     let s = applyEvent(initConversation('s'), userMsg);
     s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
@@ -276,7 +277,7 @@ describe('applyEvent — resolveStep 边界契约', () => {
   // 渲染条件跳过整个 model 输出块 → 模型文本丢失（用户看不到回复）。
   // MODEL_COMPLETED 若发现 turn 还没有任何 model activity，补一个。
   it('MODEL_COMPLETED 无前置 MODEL_STARTED 时补 model segment + activity（渲染入口）', () => {
-    const userMsg: AgentEvent = { type: EventType.USER_MESSAGE, data: { content: 'hi' }, seq: 1, run_id: null };
+    const userMsg = ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, seq: 1, step_id: undefined });
     const modelCompleted: AgentEvent = { type: EventType.MODEL_COMPLETED, data: { content: 'hello' }, seq: 2, run_id: null, step_id: 1 };
     let s = applyEvent(initConversation('s'), userMsg);
     s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
@@ -650,5 +651,106 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     ]) {
       expect(summarizeEvent(ev({ type }))).toBe('');
     }
+  });
+});
+
+describe('applyEvent — 引用稳定性（流式渲染 memo 契约）', () => {
+  /** 构造两个已完成的 turn（step 1 / step 2），返回其状态。 */
+  function twoDoneTurns() {
+    let s = initConversation('s');
+    for (const step of [1, 2]) {
+      s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
+      s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, data: { content: `q${step}` }, step_id: step }));
+      s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: `a${step}` }, step_id: step }));
+    }
+    return s;
+  }
+
+  it('MODEL_DELTA 只克隆目标 turn——未触及 turn 保持引用', () => {
+    const prev = twoDoneTurns();
+    const next = applyEvent(prev, ev({ type: EventType.MODEL_DELTA, data: { delta: 'x' }, step_id: 2 }));
+    expect(next.turns[0]).toBe(prev.turns[0]);
+    expect(next.turns[1]).not.toBe(prev.turns[1]);
+    expect(next.turns[1].model.text).toBe('a2x');
+  });
+
+  it('不触及 turn 的事件（run/started）保持全部 turn 引用与 turns 数组引用', () => {
+    const prev = twoDoneTurns();
+    const next = applyEvent(prev, ev({ type: EventType.RUN_STARTED }));
+    expect(next.turns).toBe(prev.turns);
+    expect(next.turns[0]).toBe(prev.turns[0]);
+    expect(next.turns[1]).toBe(prev.turns[1]);
+    expect(next.run_status).toBe('running');
+  });
+
+  it('RUN_COMPLETED 已 settle 的 turn 保持引用；streaming turn 被替换', () => {
+    // run 1 先完成，turn 1/2 拿到 completed_at（settle 完成）
+    let s = twoDoneTurns();
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED }));
+    // run 2：新 streaming turn
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 3 }));
+    const settledTurn = s.turns[1];
+    const streamingTurn = s.turns[2];
+    const next = applyEvent(s, ev({ type: EventType.RUN_COMPLETED }));
+    expect(next.turns[1]).toBe(settledTurn);
+    expect(next.turns[2]).not.toBe(streamingTurn);
+    expect(next.turns[2].status).toBe('done');
+    expect(next.turns[2].model.status).toBe('done');
+  });
+
+  it('TOOL_RESULT 只克隆宿主 turn；被更新的 tool 是新对象，其余 tool 引用不变', () => {
+    // turn 1 两个工具，turn 2 一个工具
+    let s = initConversation('s');
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
+    for (const id of ['t1', 't2']) {
+      s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: id, tool_name: 'bash', args: {} }, step_id: 1 }));
+    }
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't3', tool_name: 'bash', args: {} }, step_id: 2 }));
+    const otherTool = s.turns[0].tools[1]; // t2
+    const otherTurn = s.turns[1];
+    const next = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, data: {} }) },
+      step_id: 1,
+    }));
+    expect(next.turns[1]).toBe(otherTurn);
+    expect(next.turns[0].tools[1]).toBe(otherTool);
+    expect(next.turns[0].tools[0]).not.toBe(s.turns[0].tools[0]);
+    expect(next.turns[0].tools[0].status).toBe('success');
+  });
+
+  it('ARTIFACT_CREATED 只替换挂载工具所在 turn 与该工具；同 turn 其它工具引用不变', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
+    for (const id of ['t1', 't2']) {
+      s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: id, tool_name: 'bash', args: {} }, step_id: 1 }));
+    }
+    const prev = s;
+    const next = applyEvent(s, ev({
+      type: EventType.ARTIFACT_CREATED,
+      data: { tool_call_id: 't1', artifact_id: 'a1', size: 10, mime_type: 'text/plain', source_tool: 'bash' },
+    }));
+    expect(next.turns[0]).not.toBe(prev.turns[0]);
+    expect(next.turns[0].tools[0]).not.toBe(prev.turns[0].tools[0]);
+    expect(next.turns[0].tools[0].artifact?.artifact_id).toBe('a1');
+    expect(next.turns[0].tools[1]).toBe(prev.turns[0].tools[1]);
+  });
+
+  it('克隆后 turn.model 与 segments[最新 model index] 仍同一对象（别名契约不回退）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    const next = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'x' }, step_id: 1 }));
+    const turn = next.turns[0];
+    const lastModel = [...turn.activities].reverse().find((a) => a.kind === 'model');
+    expect(lastModel && turn.segments[lastModel.index]).toBe(turn.model);
+  });
+
+  it('compactions / reconcile_queue 未被触及的轮次不重建数组（引用保持）', () => {
+    const prev = twoDoneTurns();
+    const next = applyEvent(prev, ev({ type: EventType.MODEL_DELTA, data: { delta: 'x' }, step_id: 1 }));
+    expect(next.compactions).toBe(prev.compactions);
+    expect(next.reconcile_queue).toBe(prev.reconcile_queue);
+    expect(next.unknown_events).toBe(prev.unknown_events);
   });
 });

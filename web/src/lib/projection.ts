@@ -26,50 +26,71 @@ export function initConversation(session_id: string): ConversationState {
   };
 }
 
-function findOrCreateTurn(state: ConversationState, step_id: number): Turn {
-  let turn = state.turns.find((t) => t.step_id === step_id);
-  if (!turn) {
-    turn = {
-      step_id,
-      user_message: '',
-      model: { text: '', status: 'streaming' },
-      segments: [],
-      tools: [],
-      activities: [],
-      status: 'streaming',
-    };
-    state.turns.push(turn);
+function newTurn(step_id: number): Turn {
+  return {
+    step_id,
+    user_message: '',
+    model: { text: '', status: 'streaming' },
+    segments: [],
+    tools: [],
+    activities: [],
+    status: 'streaming',
+  };
+}
+
+/** Clone one turn for copy-on-write mutation. turn.model 与 segments[最新 model
+ *  index] 是同一逻辑段：clone 会切断引用，这里按 activities 记录的 index 重新
+ *  对齐，保证后续 mutation 同步（别名契约，有专项测试锁定）。 */
+function cloneTurn(t: Turn): Turn {
+  const turn: Turn = {
+    ...t,
+    model: { ...t.model },
+    segments: t.segments.map((s) => ({ ...s })),
+    tools: [...t.tools],
+    activities: [...t.activities],
+  };
+  const lastModel = [...turn.activities].reverse().find((a) => a.kind === 'model');
+  if (lastModel && lastModel.kind === 'model') {
+    turn.segments[lastModel.index] = turn.model;
   }
   return turn;
 }
 
+/** Copy-on-write turn access: locate (or create) the turn a step belongs to,
+ *  clone ONLY that turn, and hand the clone to `fn` for mutation.
+ *
+ * 未触及的 turn 保持引用稳定——这是渲染层 React.memo(TurnView) 的前提：
+ * 流式期间每个 delta 只应重渲染活跃轮次，而不是整条会话。 */
+function withTurnAt(state: ConversationState, step: number, fn: (turn: Turn) => void): void {
+  const idx = state.turns.findIndex((t) => t.step_id === step);
+  if (idx === -1) {
+    const turn = newTurn(step);
+    state.turns = [...state.turns, turn];
+    fn(turn);
+    return;
+  }
+  const turn = cloneTurn(state.turns[idx]);
+  const turns = [...state.turns];
+  turns[idx] = turn;
+  state.turns = turns;
+  fn(turn);
+}
+
+/** Clone a single tool for in-place field updates (tool 级 copy-on-write：
+ *  同 turn 内未触及的工具保持引用，ToolCard memo 才能跳过重渲染）。 */
+function cloneTool(t: ToolCall): ToolCall {
+  return { ...t };
+}
+
 /** Apply one event to state, mutating a draft. Call inside immer-style updater. */
 export function applyEvent(state: ConversationState, event: AgentEvent): ConversationState {
-  // Shallow-clone top-level for React. Components read nested fields by reference;
-  // we mutate the clone's nested structures in place where noted.
+  // Copy-on-write: top-level 一次浅克隆 + events 追加；turns / compactions /
+  // reconcile_queue / unknown_events 仅在真正被事件改写时才克隆（引用稳定性
+  // 是渲染层 memo 的前提，专项测试锁定）。
   const next: ConversationState = {
     ...state,
-    turns: state.turns.map((t) => {
-      const turn: Turn = {
-        ...t,
-        model: { ...t.model },
-        segments: t.segments.map((s) => ({ ...s })),
-        tools: [...t.tools],
-        activities: [...t.activities],
-      };
-      // model 与 segments[latest model index] 是同一逻辑段：clone 会切断引用，
-      // 这里按 activities 记录的 index 重新对齐，保证后续 mutation 同步。
-      const lastModel = [...turn.activities].reverse().find((a) => a.kind === 'model');
-      if (lastModel && lastModel.kind === 'model') {
-        turn.segments[lastModel.index] = turn.model;
-      }
-      return turn;
-    }),
-    compactions: [...state.compactions],
-    reconcile_queue: [...state.reconcile_queue],
     // Inspector Timeline 真相源：流经的每个事件原样保留（不含 model/delta 折叠）
     events: [...state.events, event],
-    unknown_events: state.unknown_events,
   };
 
   const { type, data } = event;
@@ -77,8 +98,10 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
   switch (type) {
     case EventType.USER_MESSAGE: {
       const step = resolveStep(event, next);
-      const turn = findOrCreateTurn(next, step);
-      turn.user_message = String(data.content ?? '');
+      withTurnAt(next, step, (turn) => {
+        touchTurn(turn, event);
+        turn.user_message = String(data.content ?? '');
+      });
       break;
     }
 
@@ -90,47 +113,50 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     case EventType.MODEL_STARTED: {
       const step = resolveStep(event, next);
       next.active_step_id = step;
-      const turn = findOrCreateTurn(next, step);
-      touchTurn(turn, event);
-      // 新 burst → 新段；空段（重复 MODEL_STARTED、尚无 delta）复用不追加
-      const lastActivity = turn.activities[turn.activities.length - 1];
-      const isEmptyHead =
-        lastActivity?.kind === 'model' &&
-        turn.model.text === '' &&
-        turn.model.status === 'streaming';
-      if (!isEmptyHead) {
-        turn.model = { text: '', status: 'streaming' };
-        turn.segments.push(turn.model);
-        turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
-      }
-      turn.status = 'streaming';
+      withTurnAt(next, step, (turn) => {
+        touchTurn(turn, event);
+        // 新 burst → 新段；空段（重复 MODEL_STARTED、尚无 delta）复用不追加
+        const lastActivity = turn.activities[turn.activities.length - 1];
+        const isEmptyHead =
+          lastActivity?.kind === 'model' &&
+          turn.model.text === '' &&
+          turn.model.status === 'streaming';
+        if (!isEmptyHead) {
+          turn.model = { text: '', status: 'streaming' };
+          turn.segments.push(turn.model);
+          turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
+        }
+        turn.status = 'streaming';
+      });
       break;
     }
 
     case EventType.MODEL_DELTA: {
       const step = resolveStep(event, next);
-      const turn = findOrCreateTurn(next, step);
-      touchTurn(turn, event);
-      turn.model.text += String(data.delta ?? '');
-      turn.model.status = 'streaming';
+      withTurnAt(next, step, (turn) => {
+        touchTurn(turn, event);
+        turn.model.text += String(data.delta ?? '');
+        turn.model.status = 'streaming';
+      });
       break;
     }
 
     case EventType.MODEL_COMPLETED: {
       const step = resolveStep(event, next);
-      const turn = findOrCreateTurn(next, step);
-      // Final content may include consolidated text — prefer it over accumulated delta.
-      turn.model.text = String(data.content ?? turn.model.text);
-      turn.model.status = 'done';
-      // 后端某些路径（无工具纯对话）只发 model/completed 不发 model/started：
-      // 此时 turn 既无 segment 也无 model activity → Conversation 的
-      // `activities.length > 0` 渲染条件会跳过整个 model 输出块（模型文本丢失）。
-      // 若该 turn 还没有任何 model activity，补一个，让渲染入口存在。
-      const hasModelActivity = turn.activities.some((a) => a.kind === 'model');
-      if (!hasModelActivity) {
-        turn.segments.push(turn.model);
-        turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
-      }
+      withTurnAt(next, step, (turn) => {
+        // Final content may include consolidated text — prefer it over accumulated delta.
+        turn.model.text = String(data.content ?? turn.model.text);
+        turn.model.status = 'done';
+        // 后端某些路径（无工具纯对话）只发 model/completed 不发 model/started：
+        // 此时 turn 既无 segment 也无 model activity → Conversation 的
+        // `activities.length > 0` 渲染条件会跳过整个 model 输出块（模型文本丢失）。
+        // 若该 turn 还没有任何 model activity，补一个，让渲染入口存在。
+        const hasModelActivity = turn.activities.some((a) => a.kind === 'model');
+        if (!hasModelActivity) {
+          turn.segments.push(turn.model);
+          turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
+        }
+      });
       // Run-level observability（后端 Gap 1）：可选字段，缺失/畸形不伪造。
       if (typeof data.model === 'string' && data.model) next.model = data.model;
       const usage = parseUsage(data.usage);
@@ -149,38 +175,40 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
 
     case EventType.TOOL_CALL: {
       const step = resolveStep(event, next);
-      const turn = findOrCreateTurn(next, step);
-      touchTurn(turn, event);
-      const id = String(data.tool_call_id ?? '');
-      if (!turn.tools.find((t) => t.tool_call_id === id)) {
-        turn.tools.push({
-          tool_call_id: id,
-          name: String(data.tool_name ?? 'unknown'),
-          args: (data.args as Record<string, unknown>) ?? {},
-          status: 'running',
-          // Raw 档真相源：完整源事件原样透传（type/time/step_id/data，Trace Density Raw）
-          raw_call: { ...event },
-          // 事件真值时间优先（历史事件带 time）；SSE 帧无 time 时回退客户端时钟
-          started_at: event.time ?? new Date().toISOString(),
-        });
-        turn.activities.push({ kind: 'tool', tool_call_id: id });
-      }
+      withTurnAt(next, step, (turn) => {
+        touchTurn(turn, event);
+        const id = String(data.tool_call_id ?? '');
+        if (!turn.tools.find((t) => t.tool_call_id === id)) {
+          turn.tools.push({
+            tool_call_id: id,
+            name: String(data.tool_name ?? 'unknown'),
+            args: (data.args as Record<string, unknown>) ?? {},
+            status: 'running',
+            // Raw 档真相源：完整源事件原样透传（type/time/step_id/data，Trace Density Raw）
+            raw_call: { ...event },
+            // 事件真值时间优先（历史事件带 time）；SSE 帧无 time 时回退客户端时钟
+            started_at: event.time ?? new Date().toISOString(),
+          });
+          turn.activities.push({ kind: 'tool', tool_call_id: id });
+        }
+      });
       break;
     }
 
     case EventType.TOOL_RESULT: {
       const step = resolveStep(event, next);
-      const turn = findOrCreateTurn(next, step);
-      const id = String(data.tool_call_id ?? '');
-      const tool = turn.tools.find((t) => t.tool_call_id === id);
-      if (tool) {
+      withTurnAt(next, step, (turn) => {
+        const id = String(data.tool_call_id ?? '');
+        const toolIdx = turn.tools.findIndex((t) => t.tool_call_id === id);
+        if (toolIdx === -1) return;
         // Backend serializes the full ToolResult via model_dump_json() — so content is
         // a JSON string shaped {ok, message, data, error_code, retryable, metadata, ...}.
         // The structured payload (incl. diff for edit/write) lives under `.data`.
         const parsed = tryParseContent(data.content);
         const ok = parsed?.ok === true;
-        tool.status = ok ? 'success' : 'failed';
         const parsedData = (parsed?.data ?? null) as Record<string, unknown> | null;
+        const tool = cloneTool(turn.tools[toolIdx]);
+        tool.status = ok ? 'success' : 'failed';
         tool.result = parsedData ?? parsed?.message ?? data.content;
         // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
         // directly into ToolResult.data — not nested under data.diff. Detect them here.
@@ -197,7 +225,8 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
         }
         tool.completed_at = event.time ?? new Date().toISOString();
         tool.raw_result = { ...event };
-      }
+        turn.tools[toolIdx] = tool;
+      });
       break;
     }
 
@@ -218,44 +247,52 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       // Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
       // Attach the ref to the producing tool call so the Inspector can fetch it.
       const toolCallId = String(data.tool_call_id ?? '');
-      const turn = next.turns.find((t) =>
+      const turnIdx = next.turns.findIndex((t) =>
         t.tools.some((tc) => tc.tool_call_id === toolCallId),
       );
-      const tool = turn?.tools.find((tc) => tc.tool_call_id === toolCallId);
-      if (tool) {
-        tool.artifact = {
-          artifact_id: String(data.artifact_id ?? ''),
-          size: Number(data.size ?? 0),
-          mime_type: String(data.mime_type ?? 'application/octet-stream'),
-          source_tool: String(data.source_tool ?? ''),
-        };
-      }
+      if (turnIdx === -1) break;
+      const prevTurn = next.turns[turnIdx];
+      const toolIdx = prevTurn.tools.findIndex((tc) => tc.tool_call_id === toolCallId);
+      const tool = cloneTool(prevTurn.tools[toolIdx]);
+      tool.artifact = {
+        artifact_id: String(data.artifact_id ?? ''),
+        size: Number(data.size ?? 0),
+        mime_type: String(data.mime_type ?? 'application/octet-stream'),
+        source_tool: String(data.source_tool ?? ''),
+      };
+      const tools = [...prevTurn.tools];
+      tools[toolIdx] = tool;
+      const turn = cloneTurn(prevTurn);
+      turn.tools = tools;
+      const turns = [...next.turns];
+      turns[turnIdx] = turn;
+      next.turns = turns;
       break;
     }
 
     case EventType.CONTEXT_COMPACTED: {
       // Context window exceeded → older turns summarized (Phase 5, spec 06).
       // Run-level metadata for the Inspector Context panel.
-      next.compactions.push({
+      next.compactions = [...next.compactions, {
         compacted_turn_count: Number(data.compacted_turn_count ?? 0),
         summary_message_count: Number(data.summary_message_count ?? 0),
         token_estimate: Number(data.token_estimate ?? 0),
         fallback_used: data.fallback_used === true,
         time: event.time,
-      });
+      }];
       break;
     }
 
     case EventType.OPERATION_RECONCILE_REQUIRED: {
       // A tool operation crashed mid-flight and needs human裁决 (Phase 4/5, spec 07 §13).
       // Surfaces in the Inspector as an approval queue item.
-      next.reconcile_queue.push({
+      next.reconcile_queue = [...next.reconcile_queue, {
         tool_call_id: String(data.tool_call_id ?? ''),
         tool_name: String(data.tool_name ?? ''),
         args_identity: String(data.args_identity ?? ''),
         state: String(data.state ?? 'NEED_RECONCILE'),
         time: event.time,
-      });
+      }];
       break;
     }
 
@@ -297,12 +334,21 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
  * RUN_COMPLETED and RUN_FAILED share the same sweep — only the terminal
  * turn.status differs ('done' vs 'failed'). Splitting them was the source of
  * a past caret-never-stops bug; the shared helper makes the invariant
- * "run ends → no streaming turn" structural. */
+ * "run ends → no streaming turn" structural.
+ * Copy-on-write：只克隆真正需要变更的 turn/tool，已 settle 的保持引用。 */
 function finalizeRun(state: ConversationState, status: 'completed' | 'failed', time?: string): void {
   state.run_status = status;
   state.active_step_id = null;
   const turnStatus = status === 'failed' ? 'failed' : 'done';
-  for (const turn of state.turns) {
+  const changedIdx: number[] = [];
+  const changedTurns: Turn[] = [];
+  for (let i = 0; i < state.turns.length; i++) {
+    const t = state.turns[i];
+    const needsTurn = t.status === 'streaming' || t.completed_at === undefined;
+    const hasStreamingSeg = t.segments.some((seg) => seg.status === 'streaming');
+    const hasRunningTool = t.tools.some((tool) => tool.status === 'running');
+    if (!needsTurn && !hasStreamingSeg && !hasRunningTool) continue;
+    const turn = cloneTurn(t);
     if (turn.status === 'streaming') turn.status = turnStatus;
     // run 终止后不再有 delta——所有段必须离开 streaming，否则 caret 永闪。
     // turn.model 与 segments[latest model index] 是同一对象（clone 后已对齐），
@@ -312,12 +358,21 @@ function finalizeRun(state: ConversationState, status: 'completed' | 'failed', t
     }
     // DSH 四态语义（冻结决策第 69 行 "interrupted ≠ error"）：run 结束时仍在 running
     // 的工具被中断而非失败——标记 stopped，不与 success/failed 混淆。
-    for (const tool of turn.tools) {
-      if (tool.status === 'running') tool.status = 'stopped';
-    }
+    turn.tools = turn.tools.map((tool) =>
+      tool.status === 'running' ? { ...tool, status: 'stopped' as const } : tool,
+    );
     if (turn.completed_at === undefined) {
       turn.completed_at = time ?? new Date().toISOString();
     }
+    changedIdx.push(i);
+    changedTurns.push(turn);
+  }
+  if (changedIdx.length > 0) {
+    const turns = [...state.turns];
+    changedIdx.forEach((idx, k) => {
+      turns[idx] = changedTurns[k];
+    });
+    state.turns = turns;
   }
 }
 
