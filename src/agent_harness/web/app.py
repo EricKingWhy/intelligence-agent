@@ -146,6 +146,7 @@ def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
         "run_id": event.run_id,
         "step_id": event.step_id,
         "session_id": session_id,
+        "time": event.time,
     }
     return {"data": json.dumps(payload, ensure_ascii=False)}
 

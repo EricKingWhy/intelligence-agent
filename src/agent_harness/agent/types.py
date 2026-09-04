@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 # 运行状态用字符串常量表达，而不是 Enum：
@@ -67,6 +68,10 @@ class AgentEvent:
     seq: int | None = None
     run_id: str | None = None
     step_id: int | None = None
+    # time：事件真值时间（ISO UTC ms）。durable 事件从 SessionEvent.time 透传，
+    # stream-only 信号（model/started、model/delta）用发送时刻——它们不持久化，
+    # 没有事实源时间，发送时刻是最接近的近似（spec 11 §4 / issue #43）。
+    time: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="milliseconds"))
 
     @property
     def is_durable(self) -> bool:

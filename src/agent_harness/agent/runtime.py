@@ -142,6 +142,7 @@ class AgentRuntime:
         user_event = session.append(USER_MESSAGE, {"content": user_input})
         yield AgentEvent(
             type=USER_MESSAGE, data=user_event.data, seq=user_event.seq,
+            time=user_event.time,
         )
         # USER_ACCEPTED 稳定边界：user/message 已持久化。
         await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
@@ -150,6 +151,7 @@ class AgentRuntime:
         run_started = session.events[-1]  # begin_run append 了 run/started；events 是公开 property
         yield AgentEvent(
             type=run_started.type, data=run_started.data, seq=run_started.seq, run_id=run_id,
+            time=run_started.time,
         )
         steps = 0
 
@@ -168,14 +170,14 @@ class AgentRuntime:
                     run_id=run_id, step_id=steps,
                 )
                 yield AgentEvent(type=failed.type, data=failed.data, seq=failed.seq,
-                                 run_id=run_id, step_id=steps)
+                                 run_id=run_id, step_id=steps, time=failed.time)
                 self._last_result = AgentRunResult(
                     status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps,
                 )
                 return
             for event in session.events[context_event_start:]:
                 yield AgentEvent(type=event.type, data=event.data, seq=event.seq,
-                                 run_id=event.run_id, step_id=event.step_id)
+                                 run_id=event.run_id, step_id=event.step_id, time=event.time)
 
             # 第 2 步：发起这一轮模型调用（按 stream 选 astream/ainvoke）
             llm_span = new_span_id()
@@ -239,7 +241,7 @@ class AgentRuntime:
                 )
                 yield AgentEvent(
                     type=MODEL_COMPLETED, data=model_event.data, seq=model_event.seq,
-                    run_id=run_id, step_id=steps + 1,
+                    run_id=run_id, step_id=steps + 1, time=model_event.time,
                 )
                 # MODEL_COMPLETED 稳定边界：本轮模型回复已持久化（无 tool_calls 或
                 # 无 Ledger 时，model/completed 立即写入，这里直接保存 Checkpoint）。
@@ -259,6 +261,7 @@ class AgentRuntime:
                 end_event = session.end_run(run_id, status="completed", final_text=final)
                 yield AgentEvent(
                     type=end_event.type, data=end_event.data, seq=end_event.seq, run_id=run_id,
+                    time=end_event.time,
                 )
                 # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.FINAL_COMPLETED)
@@ -276,6 +279,7 @@ class AgentRuntime:
                 end_event = session.end_run(run_id, status="failed")
                 yield AgentEvent(
                     type=end_event.type, data=end_event.data, seq=end_event.seq, run_id=run_id,
+                    time=end_event.time,
                 )
                 self._last_result = AgentRunResult(
                     status=STATUS_MAX_STEPS_EXCEEDED, final_text="", steps=steps,
@@ -300,7 +304,7 @@ class AgentRuntime:
                 tool_error = error
             for event in session.events[tool_event_start:]:
                 yield AgentEvent(type=event.type, data=event.data, seq=event.seq,
-                                 run_id=event.run_id, step_id=event.step_id)
+                                 run_id=event.run_id, step_id=event.step_id, time=event.time)
             if tool_error is not None:
                 raise tool_error
             if defer_model_event:
@@ -312,7 +316,7 @@ class AgentRuntime:
                 )
                 yield AgentEvent(
                     type=MODEL_COMPLETED, data=model_event.data, seq=model_event.seq,
-                    run_id=run_id, step_id=steps,
+                    run_id=run_id, step_id=steps, time=model_event.time,
                 )
                 # MODEL_COMPLETED 稳定边界：延迟写入的 model/completed 已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.MODEL_COMPLETED)
@@ -333,7 +337,7 @@ class AgentRuntime:
                 )
                 yield AgentEvent(
                     type=TOOL_CALL, data=call_event.data, seq=call_event.seq,
-                    run_id=run_id, step_id=steps,
+                    run_id=run_id, step_id=steps, time=call_event.time,
                 )
                 result_event = session.append(
                     TOOL_RESULT,
@@ -342,7 +346,7 @@ class AgentRuntime:
                 )
                 yield AgentEvent(
                     type=TOOL_RESULT, data=result_event.data, seq=result_event.seq,
-                    run_id=run_id, step_id=steps,
+                    run_id=run_id, step_id=steps, time=result_event.time,
                 )
 
                 self._log("tool_operation", f"工具回复 {outcome}",

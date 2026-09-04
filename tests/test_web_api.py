@@ -143,6 +143,12 @@ def test_create_session_streams_sse(client):
     session_ids = {e.get("session_id") for e in parsed}
     assert len(session_ids) == 1, f"expected one consistent session_id, got {session_ids}"
     assert next(iter(session_ids)), "session_id must be non-null"
+    # 每帧都带 time（issue #43：前端用事件真值时间，不再退化到客户端时钟）
+    times = [e.get("time") for e in parsed]
+    assert all(t for t in times), f"every SSE frame must carry a non-empty time, got {times}"
+    # durable 事件的 time 应是 ISO 格式（由 SessionEvent.time 透传）
+    durable_times = [e["time"] for e in parsed if e.get("seq") is not None]
+    assert all("T" in t for t in durable_times), f"durable event times should be ISO, got {durable_times}"
 
 
 # ── approve seam ──
