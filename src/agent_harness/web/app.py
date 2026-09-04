@@ -21,6 +21,9 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.responses import JSONResponse
 
 from agent_harness.agent import AgentEvent, AgentRuntime
+from agent_harness.capability.base import CapabilityRegistry
+from agent_harness.capability.config import parse_capabilities_config
+from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.identity import (
@@ -82,7 +85,8 @@ class AppState:
     """app 内部共享状态的薄容器——避免全局变量。
 
     V1：单进程内存里的 runtime 工厂 + session store 根目录。
-    Memory 子系统（记录库、向量库、relay）按 settings 惰性装配，进程退出时统一关闭。
+    Capability 子系统按 CAPABILITIES 配置惰性装配一次（wire_capabilities），
+    进程退出时统一关闭；配置为空 = 零行为变化。
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -93,97 +97,30 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
-        # Memory 子系统：只在配置齐全时装配（连接在首次使用前完成）。
-        # 不齐全时保持 None——_build_runtime 会跳过 Memory 注入，Runtime 正常运行。
-        self._memory: _MemoryComponents | None = None
-        self._memory_initialized = False
+        # Capability 装配：只在首次使用时执行（含 Memory / Skills / demo 等）。
+        self._registry: CapabilityRegistry | None = None
+        self._wiring: CapabilityWiring | None = None
 
-    async def get_memory(self) -> _MemoryComponents | None:
-        """惰性初始化 Memory 子系统；配置不全时返回 None（降级运行）。"""
-        if self._memory_initialized:
-            return self._memory
-        self._memory_initialized = True
-        memory = build_memory_components(self.settings)
-        if memory is None:
-            return None
-        await memory.initialize()
-        memory.relay.start()
-        self._memory = memory
-        return memory
+    async def get_wiring(self) -> tuple[CapabilityRegistry, CapabilityWiring]:
+        """惰性装配 Capability 子系统并缓存；返回 (registry, wiring)。"""
+        if self._wiring is not None and self._registry is not None:
+            return self._registry, self._wiring
+        config = parse_capabilities_config(self.settings.capabilities)
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(registry, config, settings=self.settings)
+        self._registry, self._wiring = registry, wiring
+        return registry, wiring
+
+    @property
+    def wiring(self) -> CapabilityWiring | None:
+        """已装配的 wiring（未装配时 None；测试与 shutdown 用）。"""
+        return self._wiring
 
     async def shutdown(self) -> None:
         """进程退出时关闭后台 relay 与外部连接。调用方保证只执行一次。"""
-        memory, self._memory = self._memory, None
-        if memory is not None:
-            await memory.close()
-
-
-class _MemoryComponents:
-    """聚合 Memory 子系统内各组件，统一生命周期。"""
-
-    def __init__(self, capability, records, vectors, relay, writeback) -> None:
-        self.capability = capability
-        self.records = records
-        self.vectors = vectors
-        self.relay = relay
-        self.writeback = writeback
-
-    async def initialize(self) -> None:
-        # SQLite 记录库必须先建表，再让 relay 读取 outbox；向量库惰性建立 collection。
-        if hasattr(self.records, "initialize"):
-            await self.records.initialize()
-        if hasattr(self.vectors, "initialize"):
-            await self.vectors.initialize()
-
-    async def close(self) -> None:
-        # 关闭顺序：先停 relay（停止派生任务），再关写回任务池，最后断向量库连接。
-        await self.relay.stop()
-        await self.writeback.close()
-        if hasattr(self.vectors, "close"):
-            await self.vectors.close()
-
-
-def build_memory_components(settings: Settings) -> _MemoryComponents | None:
-    """按 settings 决定是否能装配 Memory；配置不全返回 None（降级运行）。
-
-    与 .env 的两个最小集合对齐：
-      - 向量检索：milvus_uri + milvus_token + milvus_collection（无则不做语义记忆）
-      - 嵌入模型：embedding_model + embedding_base_url + embedding_api_key（无则无法嵌入）
-    两者都齐才装配；任一缺失返回 None，Runtime 继续工作但没有记忆能力。
-    """
-    milvus_ready = bool(
-        settings.milvus_uri
-        and settings.milvus_token.get_secret_value()
-        and settings.milvus_collection
-    )
-    embedding_ready = bool(
-        settings.embedding_model
-        and settings.embedding_base_url
-        and settings.embedding_api_key.get_secret_value()
-    )
-    if not (milvus_ready and embedding_ready):
-        return None
-
-    from agent_harness.memory.embeddings import create_embeddings
-    from agent_harness.memory.extractor import MemoryExtractor
-    from agent_harness.memory.langmem_capability import LangMemMemoryCapability
-    from agent_harness.memory.milvus_vector_store import MilvusVectorStore
-    from agent_harness.memory.outbox_relay import OutboxRelay
-    from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
-    from agent_harness.memory.writeback import MemoryWriteback
-
-    records = SqliteMemoryRecordStore(Path(settings.workspace_dir) / "memory.db")
-    vectors = MilvusVectorStore(settings, create_embeddings(settings))
-    capability = LangMemMemoryCapability(records, vectors)
-    relay = OutboxRelay(records, vectors)
-    writeback = MemoryWriteback(capability, MemoryExtractor(create_chat_model(ModelConfig.from_settings(settings))))
-    return _MemoryComponents(
-        capability=capability,
-        records=records,
-        vectors=vectors,
-        relay=relay,
-        writeback=writeback,
-    )
+        wiring, self._wiring, self._registry = self._wiring, None, None
+        if wiring is not None and wiring.memory is not None:
+            await wiring.memory.close()
 
 
 async def _build_runtime(
@@ -228,14 +165,11 @@ async def _build_runtime(
         policy = PermissionPolicy.WORKSPACE_WRITE
         approval_callback = lambda _req: ApprovalResponse(approved=False, reason="manual approval not yet wired")
 
-    # Memory 注入仅在配置齐全时发生（未装配返回 None）；缺失时 Runtime 正常降级。
-    memory = await state.get_memory()
-    context_providers: list[Any] = []
-    memory_writer = None
-    if memory is not None:
-        from agent_harness.memory.context_provider import MemoryContextProvider
-        context_providers.append(MemoryContextProvider(memory.capability))
-        memory_writer = memory.writeback
+    # Capability 装配（进程级缓存）：工具贡献进 ToolRegistry（统一 Executor 路径），
+    # context providers / memory_writer 注入 AgentRuntime——Agent Loop 零改动。
+    _, wiring = await state.get_wiring()
+    for capability_tool in wiring.tools:
+        registry.register(capability_tool)
 
     return AgentRuntime(
         model=model,
@@ -247,9 +181,9 @@ async def _build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
-            context_providers=context_providers,
+            context_providers=list(wiring.context_providers),
         ),
-        memory_writer=memory_writer,
+        memory_writer=wiring.memory_writer,
     )
 
 

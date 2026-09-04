@@ -32,5 +32,11 @@ class Settings(BaseSettings):
     artifact_store_secret_key: str = ""
     artifact_store_region: str = ""
 
+    # Capability / Plugin 显式配置（spec 08 §6 V1）：JSON 字符串，
+    # 形状 {"<name>": {"provider": "...", "enabled": bool, "options": {...}}}。
+    capabilities: str = ""
+    # Skills 全局目录（spec 09 §2）；项目目录是 <workspace>/skills/。
+    skill_global_dir: str = ""
+
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"
