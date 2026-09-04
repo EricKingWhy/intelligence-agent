@@ -197,3 +197,47 @@ _Avoid_: artifact log, storage record
 **context/compacted**:
 新增 typed SessionEvent，在 Compaction 完成后 append。data 带 `{compacted_turn_count, summary_message_count, token_estimate, fallback_used}`。记录 Runtime Context 投影的语义变更（从这个点开始早期 turns 被压缩），replay 时重建 Context 投影需要。
 _Avoid_: compaction log, context snapshot
+
+---
+
+## Memory 层（Phase 6）
+
+**IdentityContext**:
+请求级的身份上下文（`tenant_id` + `user_id` + `scopes`），由 HTTP 中间件从 JWT 解析后设入 Python `contextvar`。所有 Memory 读写操作从 `contextvar` 读取，不接受外部参数传入。关键安全属性：中间件设置后模型层无法修改——模型不能伪造 `user_id` 查别人的数据。CLI / 测试设默认值 `(tenant_id="local", user_id="local")`。不进 SessionEvent（身份是请求级的，事件是持久的）。
+_Avoid_: auth context, user session, identity token
+
+**MemoryCapability**:
+Memory 能力的读写原语层（`store` / `recall` / `search`），是 Protocol 不是具体实现。管「能不能存取记忆」。Core 永远只依赖这个 Protocol，不感知 LangMem 或任何具体 Provider。默认实现 `LangMemMemoryCapability`（通过 BaseStore 适配我们的存储），测试实现 `FakeMemoryCapability`（内存 dict）。换 Mem0 只换这个实现，上层不动。
+_Avoid_: memory provider (provider 是具体实现，capability 是接口), memory manager
+
+**MemoryContextProvider**:
+Memory 能力的上下文注入层，实现 Phase 5 已定义的 `ContextProvider` Protocol（`select(session, token_budget) -> list[AnyMessage]`）。管「按 budget 选哪些记忆注入 Context」。内部调 `MemoryCapability.search` → 按 relevance / recency / importance 修剪到 budget → 拼成单条 SystemMessage 注入 Context（插在 system prompt 之后、对话历史之前）。是 `ContextBuilder.context_providers` 列表的填充者（Phase 5 空列表，Phase 6 填入）。
+_Avoid_: memory injector, context memory hook
+
+**MemoryScope**:
+记忆的归属层级，对外是 5 值枚举（`GLOBAL` / `TENANT` / `USER` / `SESSION` / `AGENT`），对内映射成 namespace tuple（对齐 LangMem namespace + Milvus partition key）。V1 只实现 `USER`（跨 session 记住用户偏好）+ `SESSION`（session 内临时记忆），其余留枚举不实现。检索默认只查当前用户的数据（由 IdentityContext 约束）。
+_Avoid_: memory level, memory tier, memory namespace（namespace 是内部编码，不是用户面词汇）
+
+**MemoryEntry**:
+一条记忆的结构化表示（`id` / `content` / `metadata` / `score` / `created_at`）。由 MemoryExtractor 从 Session 事件流提取，存进 SQLite（权威记录）+ Milvus（向量索引），检索后拼进 SystemMessage 注入 Context。
+_Avoid_: memory record（record 是存储层词汇，entry 是领域词汇）, memory item
+
+**MemoryStore**:
+Memory 的持久化边界（对外单接口，内部组合 `MemoryRecordStore` + `VectorIndexStore` 两个 Protocol）。权威记录存 SQLite（事实源），向量索引存 Milvus（partition key 按 tenant_id 隔离）。双写通过 outbox pattern 保证最终一致：SQLite 事务同时写记忆行 + outbox 行，进程内 asyncio relay 读 outbox 推到 Milvus。Milvus 写失败不丢数据（SQLite 里有，标记 `indexed=False`，后台重试）。Milvus 索引可从 SQLite 重建。
+_Avoid_: memory database, memory backend
+
+**MemoryExtractor**:
+从 Session 事件流提取记忆条目的组件，两层降级：(1) LLM 抽取（用 ModelProvider，prompt 要求输出结构化 JSON 记忆条目，失败判据是超时 / 非 JSON / schema 不匹配）→ (2) 启发式规则（`user/message` 抽偏好关键词、`run/completed` 的 `final_text` 抽关键决策、`tool/result` `ok=False` 抽失败模式，纯规则不需 LLM）→ (3) 返回空列表（不写 Memory）。每次 run 结束后台自动触发，模型不参与写入决策。
+_Avoid_: memory scraper, memory harvester
+
+**memory/degraded**:
+新增 typed SessionEvent，在 Memory Provider 故障降级时 append。记录「本次 Memory 不可用，未注入历史记忆」事实，前端可据此显示降级提示。不阻塞 Runtime loop。
+_Avoid_: memory error, memory failed
+
+**LangMem**:
+默认 Memory Capability 实现（通过 `[memory]` optional extra 安装）。负责 Memory Formation（从对话提取结构化记忆）+ Consolidation（相似记忆合并去重）+ search（embedding + 相似度检索）。不拥有存储——通过 LangGraph 的 `BaseStore` Protocol 操作我们的 SQLite + Milvus。Core 禁止直接 import LangMem concrete class（不变量 #17）。
+_Avoid_: memory engine, memory service
+
+**Outbox（Memory）**:
+Memory 双写一致性机制（transactional outbox pattern）。SQLite 单事务同时写记忆行 + outbox 行（要么都成功要么都回滚），进程内 asyncio 后台 relay 定期 poll outbox 表把未同步的行推到 Milvus 向量索引，成功后标记。relay 崩溃重启自动恢复（outbox 行持久化在 SQLite 里）。幂等性由 consumer 保证（按 memory_id 去重）。
+_Avoid_: memory sync queue, vector indexer
