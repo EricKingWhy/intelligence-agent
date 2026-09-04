@@ -24,6 +24,7 @@ MODEL_FAILED = "model/failed"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
+ARTIFACT_CREATED = "artifact/created"
 
 EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -40,6 +41,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TOOL_CALL,
         TOOL_RESULT,
         OPERATION_RECONCILE_REQUIRED,
+        ARTIFACT_CREATED,
     }
 )
 

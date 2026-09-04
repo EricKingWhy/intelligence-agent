@@ -36,6 +36,7 @@ class TestSessionEventDTO:
     def test_all_event_types_registered(self):
         # Phase 1：10 种基础事件；Phase 9：+ model/started + model/delta（流式信号）；
         # Phase 4：+ operation/reconcile-required（UNKNOWN Operation 人工裁决信号，#30）。
+        # Phase 5：+ artifact/created（大 Tool 输出完整保存，#47）。
         expected = {
             "session/started",
             "session/resumed",
@@ -50,6 +51,7 @@ class TestSessionEventDTO:
             "tool/call",
             "tool/result",
             "operation/reconcile-required",
+            "artifact/created",
         }
         assert EVENT_TYPES == expected
 

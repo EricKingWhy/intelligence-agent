@@ -9,6 +9,7 @@ from agent_harness.session.derive import (
     detect_dangling,
 )
 from agent_harness.session.event import (
+    ARTIFACT_CREATED,
     EVENT_TYPES,
     MODEL_COMPLETED,
     MODEL_DELTA,
@@ -29,6 +30,7 @@ from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 
 __all__ = [
+    "ARTIFACT_CREATED",
     "DANGLING_TOOL_CONTENT",
     "EVENT_TYPES",
     "MODEL_COMPLETED",

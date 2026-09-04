@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
+    artifact_overflow_chars: int = 2000
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"

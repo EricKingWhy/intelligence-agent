@@ -45,6 +45,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
+from agent_harness.session import Session
 from agent_harness.storage import (
     Operation,
     OperationContext,
@@ -59,6 +60,7 @@ from agent_harness.tooling.approval import (
     needs_approval,
 )
 from agent_harness.tooling.contract import PermissionPolicy, Tool, ToolSideEffect
+from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
@@ -116,12 +118,14 @@ class ToolExecutor:
         approval_callback: ApprovalCallback | None = None,
         operation_ledger: OperationLedger | None = None,
         kill_hook: Callable[[str, str], None] | None = None,
+        overflow_handler: OverflowHandler | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
         self._approval_callback = approval_callback
         self._operation_ledger = operation_ledger
         self._kill_hook = kill_hook
+        self._overflow_handler = overflow_handler
 
     @property
     def tracks_operations(self) -> bool:
@@ -133,6 +137,7 @@ class ToolExecutor:
         tool_call: dict[str, Any],
         *,
         operation_context: OperationContext | None = None,
+        session: Session | None = None,
     ) -> ToolExecution:
         """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
 
@@ -197,6 +202,13 @@ class ToolExecutor:
         if denied is not None:
             return denied
 
+        # 配置错误必须在任何真实副作用之前拒绝。
+        if self._overflow_handler is not None and session is None:
+            raise ValueError("session is required when OverflowHandler is configured")
+        if (session is not None and operation_context is not None
+                and session.session_id != operation_context.session_id):
+            raise ValueError("session and operation_context must identify the same session")
+
         if self._operation_ledger is not None:
             await self._create_pending_operation(
                 tool_call_id=tool_call_id,
@@ -223,6 +235,14 @@ class ToolExecutor:
                     tool_call_id, OperationState.CANCELLED
                 )
             raise
+
+        # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
+        # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
+        if self._overflow_handler is not None:
+            assert session is not None
+            result = await self._overflow_handler.maybe_overflow(
+                session, tool_call_id, name, result,
+            )
 
         if self._operation_ledger is not None:
             terminal_state = (
@@ -252,6 +272,7 @@ class ToolExecutor:
         tool_calls: list[dict[str, Any]],
         *,
         operation_context: OperationContext | None = None,
+        session: Session | None = None,
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
@@ -289,7 +310,7 @@ class ToolExecutor:
             # gather 的顺序保持：即使第 3 个先完成，返回列表仍是 [结果1, 结果2, 结果3]。
             return await asyncio.gather(
                 *(
-                    self.execute(tc, operation_context=operation_context)
+                    self.execute(tc, operation_context=operation_context, session=session)
                     for tc in tool_calls
                 )
             )
@@ -298,7 +319,7 @@ class ToolExecutor:
         executions: list[ToolExecution] = []
         for index, tool_call in enumerate(tool_calls):
             execution = await self.execute(
-                tool_call, operation_context=operation_context
+                tool_call, operation_context=operation_context, session=session
             )
             executions.append(execution)
             if execution.result.ok:
