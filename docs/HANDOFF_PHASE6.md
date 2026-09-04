@@ -4,6 +4,8 @@
 
 ## 决策速查（27 个冻结决策）
 
+实施备注（#51）：IdentityContext 接受 scopes 列表，构造时复制为不可变 tuple，避免 contextvar 子任务修改共享权限。JWT 复用 PyJWT（MIT），固定 HS256；未配置 jwt_secret 时不信任 Bearer 声明，使用 local 身份。
+
 | # | 决策 | 选定 |
 |---|---|---|
 | Q1 | V1 交付边界 | **B** 最小闭环：store/recall/search + USER/SESSION scope + ContextProvider + degrade |

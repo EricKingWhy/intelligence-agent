@@ -12,15 +12,22 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jwt
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+from starlette.responses import JSONResponse
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
+from agent_harness.identity import (
+    IdentityContext,
+    identity_context_var,
+    set_identity_context,
+)
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import LocalSubprocessSandbox
@@ -170,12 +177,32 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             allow_headers=["*"],
         )
 
-    # ── 多用户 auth 中间件空壳（Q2=A 接缝点）──
-    # V1 no-op；后续接 auth provider 时在这里注入 user context 到 request.state。
     @app.middleware("http")
     async def auth_seam(request: Any, call_next: Any):
-        # request.state.user_id = "local-user"  # 占位，多用户时启用
-        return await call_next(request)
+        identity = IdentityContext("local", "local", ["user", "session"])
+        authorization = request.headers.get("authorization")
+        if settings.jwt_secret and authorization:
+            try:
+                scheme, encoded = authorization.split(" ", 1)
+                if scheme.lower() != "bearer":
+                    raise ValueError("Expected Bearer token")
+                claims = jwt.decode(encoded, settings.jwt_secret, algorithms=["HS256"],
+                                    options={"require": ["tenant_id", "user_id"]})
+                tenant, user = claims["tenant_id"], claims["user_id"]
+                scopes = claims.get("scopes", ["user", "session"])
+                if (not isinstance(tenant, str) or not tenant.strip()
+                        or not isinstance(user, str) or not user.strip()
+                        or not isinstance(scopes, list)
+                        or any(not isinstance(scope, str) for scope in scopes)):
+                    raise ValueError("Invalid identity claims")
+                identity = IdentityContext(tenant, user, scopes)
+            except (jwt.InvalidTokenError, ValueError):
+                return JSONResponse({"detail": "Invalid identity token"}, status_code=401)
+        token = set_identity_context(identity)
+        try:
+            return await call_next(request)
+        finally:
+            identity_context_var.reset(token)
 
     # ── 路由 ──
 

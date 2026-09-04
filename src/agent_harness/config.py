@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     model_base_url: str = ""
 
     temperature: float = 0.2
+    jwt_secret: str | None = None
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
