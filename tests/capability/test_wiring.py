@@ -198,3 +198,14 @@ class TestWireCapabilities:
         )
         assert isinstance(wiring, CapabilityWiring)
         assert wiring.tools == [] and wiring.context_providers == []
+
+    @pytest.mark.asyncio
+    async def test_dict_options_rejected_not_key_iterated(self, tmp_path):
+        """directories 是 dict 时按键迭代会静默产出 Path("a")——显式拒绝。"""
+        with pytest.raises(CapabilityError) as err:
+            await wire_capabilities(
+                CapabilityRegistry(),
+                parse_capabilities_config('{"skills": {"options": {"directories": {"a": 1}}}}'),
+                settings=_memory_settings(tmp_path, ready=False),
+            )
+        assert err.value.code == "init_failed"

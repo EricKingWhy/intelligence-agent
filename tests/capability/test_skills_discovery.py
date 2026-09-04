@@ -58,6 +58,33 @@ class TestParseSkillMarkdown:
         path.write_text(path.read_text(encoding="utf-8").replace("v1", "v2"), encoding="utf-8")
         assert entry.load_body() == "v2"
 
+    def test_utf8_bom_is_stripped(self, tmp_path):
+        """Windows 记事本默认写 BOM：按 utf-8 读会残留 \\ufeff，首行 '---' 校验失败 → 技能全灭。"""
+        skill_dir = tmp_path / "bom"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_bytes(
+            b"\xef\xbb\xbf" + "---\nname: bom-skill\ndescription: 带 BOM\n---\n\nBOM 正文\n".encode(),
+        )
+        entry, errors = parse_skill_markdown(skill_file)
+        assert errors == []
+        assert entry.name == "bom-skill"
+        assert entry.description == "带 BOM"
+        assert entry.load_body() == "BOM 正文"
+
+    def test_crlf_line_endings_frontmatter_ok(self, tmp_path):
+        """CRLF（Windows 换行）：splitlines 已能处理——pin 该行为防回归。"""
+        skill_dir = tmp_path / "crlf"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_bytes(
+            "---\r\nname: crlf-skill\r\ndescription: CRLF 换行\r\n---\r\n\r\nCRLF 正文\r\n".encode(),
+        )
+        entry, errors = parse_skill_markdown(skill_file)
+        assert errors == []
+        assert entry.name == "crlf-skill"
+        assert entry.load_body() == "CRLF 正文"
+
 
 class TestSkillDiscovery:
     def test_scans_global_then_project_single_level(self, tmp_path):

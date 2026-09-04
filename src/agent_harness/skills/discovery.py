@@ -28,7 +28,8 @@ class SkillCatalogEntry:
 
     def load_body(self) -> str:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
-        text = self.source_path.read_text(encoding="utf-8")
+        # utf-8-sig：Windows 记事本等默认写 BOM，残留 \ufeff 会让首行 '---' 校验失败。
+        text = self.source_path.read_text(encoding="utf-8-sig")
         return _split_frontmatter(text)[1].strip()
 
 
@@ -56,7 +57,8 @@ def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str
     """解析单个 SKILL.md；失败返回 (None, errors)，绝不抛出中断发现流程。"""
     errors: list[str] = []
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig：兼容 BOM 前缀（Windows 记事本默认），无 BOM 时行为与 utf-8 一致。
+        text = path.read_text(encoding="utf-8-sig")
     except OSError as error:
         return None, [f"{path}: unreadable ({type(error).__name__})"]
     frontmatter, _body = _split_frontmatter(text)

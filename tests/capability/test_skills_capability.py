@@ -19,6 +19,7 @@ from agent_harness.skills.context_provider import SkillCatalogContextProvider
 from agent_harness.skills.discovery import SkillCatalog, SkillCatalogEntry
 from agent_harness.skills.tool import LoadSkillTool
 from agent_harness.tooling.contract import ToolSideEffect
+from agent_harness.tooling.result import ErrorCode
 
 BODY = "第一步：读取模板\n第二步：导出 PDF"
 
@@ -130,11 +131,34 @@ class TestLoadSkillTool:
         assert "数据" in result.data["content"]
 
     @pytest.mark.asyncio
+    async def test_small_body_is_not_truncated(self, tmp_path):
+        tool = LoadSkillTool(_capability(tmp_path))
+        result = await tool.execute(tool.args_schema(name="pdf-export"))
+        assert result.data["content"].endswith(BODY)
+        assert "已截断" not in result.data["content"]
+
+    @pytest.mark.asyncio
+    async def test_huge_body_is_capped_with_honest_marker(self, tmp_path):
+        """64k 上限：技能是参考文档不是数据转储；无 Artifact 存储时防超大内容进 Context/事件。"""
+        body = "A" * 64_000 + "B" * 36_000  # 10 万字符正文
+        capability = SkillCapability(SkillCatalog(entries=[_entry("big", "大技能", body, tmp_path)]))
+        tool = LoadSkillTool(capability)
+        result = await tool.execute(tool.args_schema(name="big"))
+        assert result.ok is True
+        content = result.data["content"]
+        assert len(content) < 64_000 + 200  # 有界：截断正文 + 前缀 + 标记
+        assert "A" * 64_000 in content  # 前 64k 字符完整保留
+        assert "B" not in content  # 上限之后的正文绝不出现
+        assert "已截断" in content and "100000" in content  # 诚实标记，不伪造"文档结束"
+
+    @pytest.mark.asyncio
     async def test_unknown_skill_fails_without_fabrication(self, tmp_path):
+        """未知技能名是模型传参错误 → INVALID_ARGUMENT（TOOL_NOT_FOUND 语义是"未知工具名"）。"""
         tool = LoadSkillTool(_capability(tmp_path))
         result = await tool.execute(tool.args_schema(name="ghost"))
         assert result.ok is False
-        assert result.error_code is not None
+        assert result.error_code is ErrorCode.INVALID_ARGUMENT
+        assert result.retryable is False
         assert "ghost" in result.message
 
 
@@ -172,3 +196,48 @@ class TestWiring:
         )
         assert registry.available() == []
         assert wiring.tools == [] and wiring.context_providers == []
+
+
+class TestSkillsPathOptionCoercion:
+    """options 是 dict[str, Any]，strict 校验不查值："directories": "D:/skills" 这种
+    常见手误若按字符迭代会产出 Path("D")、Path(":")……不存在的路径又被静默跳过
+    → 技能悄悄消失。字符串必须包成单元素列表；不可迭代垃圾值响亮报错。"""
+
+    def _settings(self, tmp_path: Path) -> Settings:
+        return Settings(
+            _env_file=None, workspace_dir=str(tmp_path),
+            skill_global_dir=str(tmp_path / "no-global"),
+        )
+
+    async def _wire(self, registry: CapabilityRegistry, options: dict, tmp_path: Path):
+        import json
+
+        from agent_harness.capability.config import parse_capabilities_config
+        return await wire_capabilities(
+            registry,
+            parse_capabilities_config(json.dumps({"skills": {"options": options}})),
+            settings=self._settings(tmp_path),
+        )
+
+    @pytest.mark.asyncio
+    async def test_directories_as_string_is_wrapped_not_iterated(self, tmp_path):
+        _entry("from-str", "来自字符串目录", "正文", tmp_path / "custom")
+        registry = CapabilityRegistry()
+        await self._wire(registry, {"directories": str(tmp_path / "custom")}, tmp_path)
+        assert [e.name for e in registry.get("skills").catalog()] == ["from-str"]
+
+    @pytest.mark.asyncio
+    async def test_paths_as_string_is_wrapped_not_iterated(self, tmp_path):
+        entry = _entry("manual-str", "手动路径字符串", "正文", tmp_path / "anywhere")
+        registry = CapabilityRegistry()
+        await self._wire(registry, {"paths": str(entry.source_path)}, tmp_path)
+        assert [e.name for e in registry.get("skills").catalog()] == ["manual-str"]
+
+    @pytest.mark.asyncio
+    async def test_non_iterable_directories_raise_init_failed(self, tmp_path):
+        """配置错误响亮失败（与同文件 provider 校验一致），不走 OPTIONAL 静默降级。"""
+        registry = CapabilityRegistry()
+        with pytest.raises(CapabilityError) as err:
+            await self._wire(registry, {"directories": 123}, tmp_path)
+        assert err.value.code == "init_failed"
+        assert "directories" in str(err.value)

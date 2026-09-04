@@ -67,6 +67,33 @@ async def _wire_memory(
     wiring.memory = components
 
 
+def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
+    """规整 options 里的目录/路径选项为 list[Path]，容忍 str/Path 单值写法。
+
+    options 是 dict[str, Any]，strict 校验不查值：`"directories": "D:/skills"`
+    这种常见手误若直接迭代会按字符产出 Path("D")、Path(":")……而不存在的路径
+    又被当作 OPTIONAL 语义静默跳过 → 技能悄悄消失。字符串/Path 包一层成单元素
+    列表；不可迭代的垃圾值（int 等）显式 init_failed——配置写错必须响亮失败，
+    与本文件里 unknown capability / provider 的显式校验一致，不走静默降级。
+    """
+    value = cfg.options.get(key, [])
+    if isinstance(value, (str, Path)):
+        value = [value]
+    # dict 会按键迭代（{"a": 1} → Path("a")）——与按字符迭代同属静默错误，显式拒绝。
+    if not isinstance(value, (list, tuple)):
+        raise CapabilityError(
+            f"capability 'skills' option '{key}' must be a path or a list of paths, got {value!r}",
+            code="init_failed",
+        )
+    try:
+        return [Path(item) for item in value]
+    except TypeError:
+        raise CapabilityError(
+            f"capability 'skills' option '{key}' must be a path or a list of paths, got {value!r}",
+            code="init_failed",
+        ) from None
+
+
 async def _wire_skills(
     registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
 ) -> None:
@@ -78,8 +105,8 @@ async def _wire_skills(
     global_dir = Path(settings.skill_global_dir) if settings.skill_global_dir \
         else Path.home() / ".intelligence-agent" / "skills"
     directories = [global_dir, Path(settings.workspace_dir) / "skills"]
-    directories.extend(Path(d) for d in cfg.options.get("directories", []))
-    manual_paths = [Path(p) for p in cfg.options.get("paths", [])]
+    directories.extend(_coerce_path_list(cfg, "directories"))
+    manual_paths = _coerce_path_list(cfg, "paths")
     catalog = SkillDiscovery(directories=directories, manual_paths=manual_paths).discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
     # SkillCapability.errors() 仍可编程读取。
@@ -171,6 +198,10 @@ async def wire_capabilities(
             continue
         try:
             await factory(registry, cfg, settings, wiring)
+        except CapabilityError:
+            # CapabilityError 是配置/契约错误（init_failed 等，见 config.py 的同类校验），
+            # 不是"外部依赖故障"——响亮失败，不做 OPTIONAL 降级（降级只留给外部故障）。
+            raise
         except Exception as error:
             if degradation is Degradation.REQUIRED_CORE:
                 raise
