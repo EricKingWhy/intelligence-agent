@@ -42,11 +42,11 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     turns: state.turns.map((t) => ({ ...t, model: { ...t.model }, tools: [...t.tools] })),
   };
 
-  const { type, data, step_id } = event;
+  const { type, data } = event;
 
   switch (type) {
     case EventType.USER_MESSAGE: {
-      const step = (data.step as number) ?? step_id ?? next.turns.length + 1;
+      const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
       turn.user_message = String(data.content ?? '');
       break;
@@ -58,7 +58,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.MODEL_STARTED: {
-      const step = (data.step as number) ?? step_id ?? 1;
+      const step = resolveStep(event, next);
       next.active_step_id = step;
       const turn = findOrCreateTurn(next, step);
       turn.model = { text: '', status: 'streaming' };
@@ -67,7 +67,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.MODEL_DELTA: {
-      const step = step_id ?? next.active_step_id ?? 1;
+      const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
       turn.model.text += String(data.delta ?? '');
       turn.model.status = 'streaming';
@@ -75,7 +75,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.MODEL_COMPLETED: {
-      const step = step_id ?? next.active_step_id ?? 1;
+      const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
       // Final content may include consolidated text — prefer it over accumulated delta.
       turn.model.text = String(data.content ?? turn.model.text);
@@ -84,7 +84,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.TOOL_CALL: {
-      const step = step_id ?? next.active_step_id ?? 1;
+      const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
       const id = String(data.tool_call_id ?? '');
       if (!turn.tools.find((t) => t.tool_call_id === id)) {
@@ -101,7 +101,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.TOOL_RESULT: {
-      const step = step_id ?? next.active_step_id ?? 1;
+      const step = resolveStep(event, next);
       const turn = findOrCreateTurn(next, step);
       const id = String(data.tool_call_id ?? '');
       const tool = turn.tools.find((t) => t.tool_call_id === id);
@@ -132,27 +132,13 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       break;
     }
 
-    case EventType.RUN_COMPLETED: {
-      next.run_status = 'completed';
-      next.active_step_id = null;
-      for (const turn of next.turns) {
-        if (turn.status === 'streaming') turn.status = 'done';
-        // run 终止后不再有 delta——model 段必须离开 streaming，否则 caret 永闪
-        if (turn.model.status === 'streaming') turn.model.status = 'done';
-      }
+    case EventType.RUN_COMPLETED:
+      finalizeRun(next, 'completed');
       break;
-    }
 
-    case EventType.RUN_FAILED: {
-      next.run_status = 'failed';
-      next.active_step_id = null;
-      for (const turn of next.turns) {
-        if (turn.status === 'streaming') turn.status = 'failed';
-        // 同上：中断后 caret 必须熄灭
-        if (turn.model.status === 'streaming') turn.model.status = 'done';
-      }
+    case EventType.RUN_FAILED:
+      finalizeRun(next, 'failed');
       break;
-    }
 
     default:
       // Unknown event types are ignored — forward-compatible.
@@ -160,6 +146,36 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
   }
 
   return next;
+}
+
+/** Resolve which step an event belongs to.
+ *
+ * Priority: explicit `data.step` → event `step_id` → active step → next turn index.
+ * All six event cases used to inline their own variant of this chain; centralizing
+ * it means a new event type can't accidentally pick a different fallback. */
+function resolveStep(event: AgentEvent, state: ConversationState): number {
+  const fromData = (event.data.step as number | undefined) ?? null;
+  if (fromData !== null) return fromData;
+  if (event.step_id !== null) return event.step_id;
+  if (state.active_step_id !== null) return state.active_step_id;
+  return state.turns.length + 1;
+}
+
+/** Mark a run as finished and settle every in-flight turn.
+ *
+ * RUN_COMPLETED and RUN_FAILED share the same sweep — only the terminal
+ * turn.status differs ('done' vs 'failed'). Splitting them was the source of
+ * a past caret-never-stops bug; the shared helper makes the invariant
+ * "run ends → no streaming turn" structural. */
+function finalizeRun(state: ConversationState, status: 'completed' | 'failed'): void {
+  state.run_status = status;
+  state.active_step_id = null;
+  const turnStatus = status === 'failed' ? 'failed' : 'done';
+  for (const turn of state.turns) {
+    if (turn.status === 'streaming') turn.status = turnStatus;
+    // run 终止后不再有 delta——model 段必须离开 streaming，否则 caret 永闪
+    if (turn.model.status === 'streaming') turn.model.status = 'done';
+  }
 }
 
 /** Rebuild full conversation from a history of durable events (on page load). */
