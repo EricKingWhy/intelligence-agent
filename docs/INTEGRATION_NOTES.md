@@ -51,13 +51,15 @@ cd web && npm run dev
 #   6. 主题切换（暗/亮）+ 焦点环 Tab 键可达
 ```
 
-## 4. 后端集成 Gap（必须由后端 Phase 9 扩展，否则前端有 graceful 空槽）
+## 4. 后端集成 Gap（✅ 已落地——feat/backend `db8ea96..8e950e6`，前端已完成消费）
 
-详见 [`docs/BACKEND_GAP_PROMPT.md`](./BACKEND_GAP_PROMPT.md)——以下三个扩展是前端 UI 重设计的最后一块拼图，缺它们前端会显示"后端未暴露"空槽（不崩溃，但产品体验不完整）：
+三个 Gap 的字段形状按 [`docs/BACKEND_GAP_PROMPT.md`](./BACKEND_GAP_PROMPT.md) 契约交付，前端消费同批落地（见 git log）：
 
-1. **`usage` / `model` / `cost` 字段**：随 `run/completed` 或 `model/completed` 事件携带，前端 StepDetail MODEL 空槽消费
-2. **`trace_id`**：随 session 元数据返回，前端可链到 Langfuse trace（当前前端无渲染点，集成阶段补）
-3. **历史 session 列表 payload 携带首条用户消息**：`GET /api/sessions` 返回每行带上 `first_user_message` 字段，前端 SessionList 渲染标题；当前前端通过投影 `getSessionEvents` 提取首条 user/message 作为标题缓存（events 头部扫描），后端直接返回可省一次 events 拉取
+1. **`usage` / `model` / `cost` 字段** ✅ —— `model/completed.data` 增 `model?` / `usage?`；`run/completed.data` 增 `usage_total?`（权威聚合，覆盖前端对 model/completed 的累计）/ `cost_usd`（费率表未定义，恒 null → 显示「—」）。前端：projection 捕获 + StepDetail MODEL 区块渲染，全缺失时保留空槽提示
+2. **`trace_id`** ✅ —— `run/completed.data.trace_id` + `GET /api/sessions` 行级 `trace_id`。当前恒 null（Langfuse Phase 15 才接入）→ StepDetail Trace 行显示「未追踪」灰字（预期降级，非故障）；跳转链接待 Phase 15
+3. **首条用户消息** ✅ —— `GET /api/sessions` 行级 `first_user_message`（截断 128）。前端 useSession 零额外请求预填 titlesById；events 扫描保留为 fallback（后端未返回时）
+
+**集成 AI 注意**：验证数据路径前先重启后端进程加载 Gap 代码（此前 :8000 上跑的旧进程 payload 无新字段——前端对此完全优雅降级，已目检确认）。剩余未落地项：checkpoint 元数据 API（StepDetail CHECKPOINT 空槽保留中）、Langfuse 接入（Phase 15）。
 
 ## 5. 不变量守护（合并前必读）
 

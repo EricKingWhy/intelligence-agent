@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, ModelSegment, ToolCall, Turn } from '../types';
+import type { AgentEvent, ConversationState, ModelSegment, ToolCall, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
 
 export function initConversation(session_id: string): ConversationState {
@@ -19,6 +19,10 @@ export function initConversation(session_id: string): ConversationState {
     reconcile_queue: [],
     events: [],
     unknown_events: [],
+    model: null,
+    usage_total: null,
+    cost_usd: null,
+    trace_id: null,
   };
 }
 
@@ -118,6 +122,19 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       // Final content may include consolidated text — prefer it over accumulated delta.
       turn.model.text = String(data.content ?? turn.model.text);
       turn.model.status = 'done';
+      // Run-level observability（后端 Gap 1）：可选字段，缺失/畸形不伪造。
+      if (typeof data.model === 'string' && data.model) next.model = data.model;
+      const usage = parseUsage(data.usage);
+      if (usage) {
+        // run/completed 权威聚合到达前，累计各次推理 usage 作为运行中视图。
+        next.usage_total = next.usage_total
+          ? {
+              prompt_tokens: next.usage_total.prompt_tokens + usage.prompt_tokens,
+              completion_tokens: next.usage_total.completion_tokens + usage.completion_tokens,
+              total_tokens: next.usage_total.total_tokens + usage.total_tokens,
+            }
+          : usage;
+      }
       break;
     }
 
@@ -176,6 +193,11 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.RUN_COMPLETED:
+      // 权威聚合（后端 Gap 1/2）：事件携带的 usage_total 覆盖前端累计值；
+      // cost_usd / trace_id 缺失或 null 保持 null（费率表未定义 / Langfuse 未接入）。
+      next.usage_total = parseUsage(data.usage_total) ?? next.usage_total;
+      next.cost_usd = typeof data.cost_usd === 'number' && Number.isFinite(data.cost_usd) ? data.cost_usd : null;
+      next.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
       finalizeRun(next, 'completed', event.time);
       break;
 
@@ -351,6 +373,24 @@ function tryParseContent(content: unknown): Record<string, unknown> | null {
 }
 
 /**
+ * 窄化解析 usage 形状（后端 Gap 1 契约，见 types.ts UsageStats）：三字段必须
+ * 全为有限数，否则返回 null——缺失/畸形整体按「—」处理，绝不部分伪造或补零。
+ */
+function parseUsage(value: unknown): UsageStats | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const v = value as Record<string, unknown>;
+  const { prompt_tokens, completion_tokens, total_tokens } = v;
+  const ok =
+    typeof prompt_tokens === 'number' &&
+    typeof completion_tokens === 'number' &&
+    typeof total_tokens === 'number' &&
+    Number.isFinite(prompt_tokens) &&
+    Number.isFinite(completion_tokens) &&
+    Number.isFinite(total_tokens);
+  return ok ? { prompt_tokens, completion_tokens, total_tokens } : null;
+}
+
+/**
  * 单行事件摘要——projection 是事件→人类可读语义的唯一归属（不变量 #22）。
  * 被 Timeline / Trace / Chat 多处复用；未知事件走 UnknownSurfaceNode 兜底（冻结决策 69）。
  */
@@ -361,8 +401,18 @@ export function summarizeEvent(event: AgentEvent): string {
       return String(d.content ?? '').slice(0, 40);
     case EventType.MODEL_DELTA:
       return `+${String(d.delta ?? '').length} 字符`;
-    case EventType.MODEL_COMPLETED:
+    case EventType.MODEL_COMPLETED: {
+      // 后端 Gap 1：观测字段存在时优先展示（模型 · tokens）；否则回退内容长度。
+      // 千分位等 locale 格式化归展示层（StepDetail），projection 保持确定性。
+      const usage = parseUsage(d.usage);
+      const model = typeof d.model === 'string' && d.model ? d.model : null;
+      if (model || usage) {
+        return [model, usage ? `${usage.total_tokens} tok` : null]
+          .filter((p): p is string => p !== null)
+          .join(' · ');
+      }
       return `${String(d.content ?? '').length} 字符`;
+    }
     case EventType.TOOL_CALL:
       return `${String(d.tool_name ?? '?')} ${JSON.stringify(d.args ?? {}).slice(0, 40)}`;
     case EventType.TOOL_RESULT: {
@@ -378,6 +428,24 @@ export function summarizeEvent(event: AgentEvent): string {
       return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
     case EventType.OPERATION_RECONCILE_REQUIRED:
       return String(d.tool_name ?? '');
+    case EventType.RUN_COMPLETED: {
+      // 后端 Gap 1：聚合用量/成本（缺失字段不出现，全空则空摘要——类型标签已足够）。
+      const usage = parseUsage(d.usage_total);
+      const parts = [
+        usage ? `${usage.total_tokens} tok` : null,
+        typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) ? `$${d.cost_usd}` : null,
+      ].filter((p): p is string => p !== null);
+      return parts.join(' · ');
+    }
+    // 已知生命周期事件无单行语义——空摘要，类型标签已足够。
+    // 「未知事件」兜底必须只留给真正未知的类型（UnknownSurfaceNode 协议）。
+    case EventType.RUN_STARTED:
+    case EventType.RUN_FAILED:
+    case EventType.SESSION_STARTED:
+    case EventType.SESSION_RESUMED:
+    case EventType.MODEL_STARTED:
+    case EventType.MODEL_FAILED:
+      return '';
     default:
       return `未知事件 · ${JSON.stringify(d).slice(0, 40)}`;
   }

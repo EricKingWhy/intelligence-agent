@@ -48,6 +48,20 @@ export function useSession() {
     try {
       const list = await listSessions();
       setSessions(list);
+      // 后端 Gap 3：列表 payload 携带首条用户消息（截断 128）——零额外请求预填
+      // 标题缓存。events 扫描（viewing 路径）保留为后端未返回时的 fallback；
+      // 已有标题不覆盖（事件派生值优先，保持单一更新路径语义）。
+      setTitlesById((m) => {
+        let changed = false;
+        const next = { ...m };
+        for (const s of list) {
+          if (s.first_user_message && !next[s.session_id]) {
+            next[s.session_id] = s.first_user_message;
+            changed = true;
+          }
+        }
+        return changed ? next : m;
+      });
     } catch (e) {
       setError(`加载会话列表失败：${(e as Error).message}`);
     }

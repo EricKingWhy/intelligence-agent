@@ -32,6 +32,24 @@ export interface SessionSummary {
   event_count: number;
   first_event_time: string | null;
   last_event_time: string | null;
+  /** 首条 user/message content（后端截断 128 字符；无则 null）——Session Rail
+   *  标题零额外请求预填（后端 Gap 3）。events 扫描保留为 fallback。 */
+  first_user_message: string | null;
+  /** Langfuse trace id（后端 Gap 2）。Langfuse Phase 15 才接入，当前恒 null——
+   *  UI 显示「未追踪」，属预期降级而非故障。 */
+  trace_id: string | null;
+}
+
+/**
+ * Token 用量形状——model/completed.data.usage 与 run/completed.data.usage_total
+ * （后端 Gap 1）。AgentEvent.data 是宽松 Record<string, unknown>，此接口是
+ * projection 边界窄化解析的契约文档：三字段必须全为有限数，否则整体按 null
+ * 处理（UI 显示「—」，绝不部分伪造或补零）。
+ */
+export interface UsageStats {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
 }
 
 // ── View-models (projection output) ──
@@ -162,4 +180,15 @@ export interface ConversationState {
    *  Kept separately so Timeline / Inspector can surface them explicitly
    *  rather than dropping silently. Subset of `events`. */
   unknown_events: AgentEvent[];
+  /** Run-level observability（后端 Gap 1/2）。全部来自事件真值，缺失即 null——
+   *  UI 显示「—」/「未追踪」，绝不伪造 0：
+   *  - model：最新携带 data.model 的 model/completed；
+   *  - usage_total：run/completed.data.usage_total（权威聚合）覆盖前端对
+   *    model/completed.usage 的累计值（运行中视图）；
+   *  - cost_usd / trace_id：run/completed 携带（费率表未定义/Langfuse 未接入，
+   *    当前恒 null）。 */
+  model: string | null;
+  usage_total: UsageStats | null;
+  cost_usd: number | null;
+  trace_id: string | null;
 }

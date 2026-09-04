@@ -144,6 +144,16 @@ function ChatTab({
           <span className="detail-key">耗时</span>
           <span className="detail-val">{runDuration ?? '—'}</span>
         </div>
+        {/* 后端 Gap 2：trace_id 恒 null（Langfuse Phase 15 接入）→「未追踪」灰字，
+            属预期降级而非故障；跳转链接待 Phase 15 一并加（Scope Lock：不预做）。 */}
+        <div className="detail-row">
+          <span className="detail-key">Trace</span>
+          {conversation.trace_id ? (
+            <code className="detail-val detail-val-mono">{conversation.trace_id}</code>
+          ) : (
+            <span className="detail-val detail-val-muted">未追踪</span>
+          )}
+        </div>
       </div>
 
       <div className="detail-section">
@@ -242,13 +252,39 @@ function ChatTab({
         ))}
       </div>
 
-      {/* 可扩展空槽（冻结决策：标注"后端未暴露"，绝不伪造） */}
-      <div className="detail-section detail-reserved">
-        <div className="detail-section-title">
-          <Database size={12} /> MODEL
+      {/* MODEL：后端 Gap 1 已落地（model/completed + run/completed 观测字段）。
+          全部缺失时保留空槽语义（提示而非留白），有任一真值则逐行渲染，
+          缺失行显示「—」——绝不伪造 0（零伪造指标冻结决策）。 */}
+      {conversation.model === null && conversation.usage_total === null && conversation.cost_usd === null ? (
+        <div className="detail-section detail-reserved">
+          <div className="detail-section-title">
+            <Database size={12} /> MODEL
+          </div>
+          <div className="detail-empty-hint">暂无观测数据（等待 model/completed）</div>
         </div>
-        <div className="detail-empty-hint">后端未暴露（无事件无 API）</div>
-      </div>
+      ) : (
+        <div className="detail-section">
+          <div className="detail-section-title">
+            <Database size={12} /> MODEL
+          </div>
+          <div className="detail-row">
+            <span className="detail-key">模型</span>
+            <span className="detail-val detail-val-mono">{conversation.model ?? '—'}</span>
+          </div>
+          <div className="detail-row">
+            <span className="detail-key">用量</span>
+            <span className="detail-val">
+              {conversation.usage_total
+                ? `${conversation.usage_total.total_tokens.toLocaleString()} tok（${conversation.usage_total.prompt_tokens.toLocaleString()} + ${conversation.usage_total.completion_tokens.toLocaleString()}）`
+                : '—'}
+            </span>
+          </div>
+          <div className="detail-row">
+            <span className="detail-key">成本</span>
+            <span className="detail-val">{conversation.cost_usd !== null ? `$${conversation.cost_usd}` : '—'}</span>
+          </div>
+        </div>
+      )}
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">
           <Database size={12} /> CHECKPOINT

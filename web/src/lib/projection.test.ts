@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, deriveChain, deriveSessionTitle, initConversation, projectHistory } from './projection';
+import { applyEvent, deriveChain, deriveSessionTitle, initConversation, projectHistory, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -15,6 +15,7 @@ describe('initConversation', () => {
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle',
       compactions: [], reconcile_queue: [], events: [], unknown_events: [],
+      model: null, usage_total: null, cost_usd: null, trace_id: null,
     });
   });
 });
@@ -485,5 +486,132 @@ describe('applyEvent — Inspector Timeline 事件日志（Phase 5）', () => {
       ev({ type: EventType.MODEL_DELTA, data: { delta: 'b', step: 1 } }),
     ].reduce(applyEvent, initConversation('s1'));
     expect(state.events).toHaveLength(2);
+  });
+});
+
+describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
+  it('MODEL_COMPLETED 捕获 model 名与 usage（可选字段）', () => {
+    const s = applyEvent(
+      initConversation('s'),
+      ev({
+        type: EventType.MODEL_COMPLETED,
+        data: { content: 'ok', model: 'qwen-plus-0911', usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } },
+        step_id: 1,
+      }),
+    );
+    expect(s.model).toBe('qwen-plus-0911');
+    expect(s.usage_total).toEqual({ prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 });
+  });
+
+  it('多次 MODEL_COMPLETED 的 usage 累加（run/completed 到达前的运行中视图）', () => {
+    let s = initConversation('s');
+    for (const total of [150, 200]) {
+      s = applyEvent(s, ev({
+        type: EventType.MODEL_COMPLETED,
+        data: { content: 'x', model: 'm', usage: { prompt_tokens: total, completion_tokens: 0, total_tokens: total } },
+        step_id: 1,
+      }));
+    }
+    expect(s.usage_total).toEqual({ prompt_tokens: 350, completion_tokens: 0, total_tokens: 350 });
+  });
+
+  it('RUN_COMPLETED 的 usage_total 是权威聚合——覆盖前端累计值，并捕获 cost_usd / trace_id', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 999, completion_tokens: 999, total_tokens: 1998 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.RUN_COMPLETED,
+      data: {
+        usage_total: { prompt_tokens: 1234, completion_tokens: 567, total_tokens: 1801 },
+        cost_usd: 0.0024,
+        trace_id: 'lf-abc',
+      },
+    }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 1234, completion_tokens: 567, total_tokens: 1801 });
+    expect(s.cost_usd).toBe(0.0024);
+    expect(s.trace_id).toBe('lf-abc');
+  });
+
+  it('RUN_COMPLETED 未携带观测字段 → 保留前端累计 usage，cost/trace 保持 null（不伪造 0）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, data: {} }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+    expect(s.cost_usd).toBeNull();
+    expect(s.trace_id).toBeNull();
+  });
+
+  it('畸形 usage（字段缺失/类型错误/非有限数）整体按 null 处理——绝不部分伪造', () => {
+    for (const bad of [
+      { prompt_tokens: 1 },                                  // 缺字段
+      { prompt_tokens: '1', completion_tokens: 2, total_tokens: 3 }, // 类型错
+      { prompt_tokens: 1, completion_tokens: 2, total_tokens: Number.NaN }, // 非有限
+    ]) {
+      const s = applyEvent(initConversation('s'), ev({
+        type: EventType.MODEL_COMPLETED,
+        data: { content: 'x', usage: bad },
+        step_id: 1,
+      }));
+      expect(s.usage_total).toBeNull();
+    }
+  });
+
+  it('cost_usd 为显式 null 或非有限数 → null（费率表未定义的预期降级）', () => {
+    for (const cost of [null, Number.NaN]) {
+      const s = applyEvent(initConversation('s'), ev({
+        type: EventType.RUN_COMPLETED,
+        data: { cost_usd: cost },
+      }));
+      expect(s.cost_usd).toBeNull();
+    }
+  });
+
+  it('RUN_FAILED 不捕获 run 级观测字段（契约只定义在 run/completed），已累计 usage 保留', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { usage_total: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }, cost_usd: 1 } }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+    expect(s.cost_usd).toBeNull();
+  });
+
+  it('无观测字段的 MODEL_COMPLETED 不改动 model/usage（保持 null）', () => {
+    const s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_COMPLETED, data: { content: 'x' }, step_id: 1 }));
+    expect(s.model).toBeNull();
+    expect(s.usage_total).toBeNull();
+  });
+});
+
+describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 边界）', () => {
+  it('MODEL_COMPLETED：观测字段存在 → 「模型 · N tok」；缺失 → 回退内容长度', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'hello', model: 'qwen-plus-0911', usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 } },
+    }))).toBe('qwen-plus-0911 · 1801 tok');
+    expect(summarizeEvent(ev({ type: EventType.MODEL_COMPLETED, data: { content: 'hello' } }))).toBe('5 字符');
+  });
+
+  it('RUN_COMPLETED：聚合用量/成本摘要；全缺失 → 空摘要', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.RUN_COMPLETED,
+      data: { usage_total: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 }, cost_usd: 0.0024 },
+    }))).toBe('1801 tok · $0.0024');
+    expect(summarizeEvent(ev({ type: EventType.RUN_COMPLETED, data: {} }))).toBe('');
+  });
+
+  it('已知生命周期事件返回空摘要——「未知事件」兜底只留给真正未知的类型', () => {
+    for (const type of [
+      EventType.RUN_STARTED, EventType.RUN_FAILED, EventType.SESSION_STARTED,
+      EventType.SESSION_RESUMED, EventType.MODEL_STARTED, EventType.MODEL_FAILED,
+    ]) {
+      expect(summarizeEvent(ev({ type }))).toBe('');
+    }
   });
 });
