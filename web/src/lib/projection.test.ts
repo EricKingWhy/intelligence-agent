@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, deriveChain, initConversation, projectHistory } from './projection';
+import { applyEvent, deriveChain, deriveSessionTitle, initConversation, projectHistory } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -14,7 +14,7 @@ describe('initConversation', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle',
-      compactions: [], reconcile_queue: [], events: [],
+      compactions: [], reconcile_queue: [], events: [], unknown_events: [],
     });
   });
 });
@@ -113,9 +113,82 @@ describe('applyEvent — 折叠语义', () => {
     expect(s.turns[0].tools[0].completed_at).toBe('2026-09-04T01:02:04.500Z');
   });
 
-  it('未知事件类型被忽略（前向兼容）', () => {
-    const s = applyEvent(initConversation('s'), ev({ type: 'future/thing' }));
+  it('UnknownSurface 兜底：未知事件记录到 unknown_events 而非静默丢弃（冻结决策第 69 行）', () => {
+    const s = applyEvent(initConversation('s'), ev({ type: 'future/thing', data: { x: 1 } }));
     expect(s.turns).toHaveLength(0);
+    expect(s.unknown_events).toHaveLength(1);
+    expect(s.unknown_events[0].type).toBe('future/thing');
+    expect(s.events).toHaveLength(1);
+  });
+
+  it('已知生命周期事件 SESSION_STARTED / SESSION_RESUMED 不进 unknown_events', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.SESSION_STARTED }));
+    s = applyEvent(s, ev({ type: EventType.SESSION_RESUMED }));
+    expect(s.unknown_events).toHaveLength(0);
+    expect(s.events).toHaveLength(2);
+  });
+
+  it('工具四态 stopped：run 结束时仍在 running 的工具被标记 stopped（DSH interrupted ≠ error）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash' },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].status).toBe('running');
+    // 未收到 TOOL_RESULT 就 RUN_FAILED → 工具被中断
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED }));
+    expect(s.turns[0].tools[0].status).toBe('stopped');
+  });
+
+  it('已完成（成功或失败）的工具在 run 结束时不被改成 stopped', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash' },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].status).toBe('success');
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED }));
+    // success 保持，不被 finalizeRun 改动
+    expect(s.turns[0].tools[0].status).toBe('success');
+  });
+});
+
+describe('deriveSessionTitle — Session Model E 轮首条用户消息投影', () => {
+  it('返回首条 user/message 的 content', () => {
+    const events = [
+      ev({ type: EventType.SESSION_STARTED }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '写一个 FizzBuzz', step: 1 } }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: 'ok', step: 1 } }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('写一个 FizzBuzz');
+  });
+
+  it('无 user/message 时返回空串（调用方回退到短 ID，不伪造）', () => {
+    const events = [
+      ev({ type: EventType.SESSION_STARTED }),
+      ev({ type: EventType.RUN_STARTED }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('');
+  });
+
+  it('空白 content 视为无标题（trim 后为空）', () => {
+    const events = [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '   ', step: 1 } }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('');
+  });
+
+  it('多条 user/message 只取首条（不随后续轮次更新）', () => {
+    const events = [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '第一句', step: 1 } }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '第二句', step: 2 } }),
+    ];
+    expect(deriveSessionTitle(events)).toBe('第一句');
   });
 });
 

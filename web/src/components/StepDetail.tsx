@@ -227,6 +227,12 @@ function ChatTab({
           <span className="detail-key">事件数</span>
           <span className="detail-val">{conversation.events.length}</span>
         </div>
+        {conversation.unknown_events.length > 0 && (
+          <div className="detail-row detail-row-warn">
+            <span className="detail-key">未知事件</span>
+            <span className="detail-val">{conversation.unknown_events.length}</span>
+          </div>
+        )}
         {seqGaps(conversation.events).map((gap, i) => (
           <div key={i} className="detail-row detail-row-warn">
             <span className="detail-key">seq 缺口</span>
@@ -282,7 +288,10 @@ function eventSummary(e: AgentEvent): string {
     case EventType.ARTIFACT_CREATED: return String(d.artifact_id ?? '').slice(0, 20);
     case EventType.CONTEXT_COMPACTED: return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
     case EventType.OPERATION_RECONCILE_REQUIRED: return String(d.tool_name ?? '');
-    default: return '';
+    default:
+      // UnknownSurfaceNode 兜底（冻结决策第 69 行）：未知事件渲染摘要提示而非空串，
+      // 配合 Timeline 的 raw JSON drill-in，保证不静默丢弃。
+      return `未知事件 · ${JSON.stringify(d).slice(0, 40)}`;
   }
 }
 

@@ -16,7 +16,7 @@
  */
 
 import { useState } from 'react';
-import { Check, Scissors, Terminal, Wrench, X } from 'lucide-react';
+import { Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
 import { formatDuration } from '../lib/format';
@@ -47,6 +47,7 @@ export function ToolCard({ tool, density, onFocus }: Props) {
         <span className={`act-status act-status-${tool.status}`}>
           {tool.status === 'success' && <Check size={12} />}
           {tool.status === 'failed' && <X size={12} />}
+          {tool.status === 'stopped' && <Square size={11} />}
           {tool.status === 'running' && <span className="status-spinner" />}
         </span>
         {density !== 'compact' && <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>}

@@ -18,6 +18,7 @@ export function initConversation(session_id: string): ConversationState {
     compactions: [],
     reconcile_queue: [],
     events: [],
+    unknown_events: [],
   };
 }
 
@@ -64,6 +65,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     reconcile_queue: [...state.reconcile_queue],
     // Inspector Timeline 真相源：流经的每个事件原样保留（不含 model/delta 折叠）
     events: [...state.events, event],
+    unknown_events: state.unknown_events,
   };
 
   const { type, data } = event;
@@ -226,8 +228,16 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       break;
     }
 
+    // 会话生命周期事件：不投影到轮次/工具，但识别为已知事件（不进 unknown_events）。
+    // Run Pulse 可消费 conversation.events 中的会话事件判断 resumed 等场景。
+    case EventType.SESSION_STARTED:
+    case EventType.SESSION_RESUMED:
+      break;
+
     default:
-      // Unknown event types are ignored — forward-compatible.
+      // UnknownSurfaceNode 兜底协议（冻结决策第 69 行）：未知事件类型不静默丢弃，
+      // 记录到 unknown_events 供 Timeline / Inspector 显式渲染为 raw 行。
+      next.unknown_events = [...next.unknown_events, event];
       break;
   }
 
@@ -265,6 +275,11 @@ function finalizeRun(state: ConversationState, status: 'completed' | 'failed', t
     for (const seg of turn.segments) {
       if (seg.status === 'streaming') seg.status = 'done';
     }
+    // DSH 四态语义（冻结决策第 69 行 "interrupted ≠ error"）：run 结束时仍在 running
+    // 的工具被中断而非失败——标记 stopped，不与 success/failed 混淆。
+    for (const tool of turn.tools) {
+      if (tool.status === 'running') tool.status = 'stopped';
+    }
     if (turn.completed_at === undefined) {
       turn.completed_at = time ?? new Date().toISOString();
     }
@@ -299,6 +314,26 @@ export function deriveChain(turn: Turn): ChainNode[] {
 /** Rebuild full conversation from a history of durable events (on page load). */
 export function projectHistory(session_id: string, events: AgentEvent[]): ConversationState {
   return events.reduce(applyEvent, initConversation(session_id));
+}
+
+/** Extract a session-title string from a single event if it's a user/message
+ *  with non-empty content; '' otherwise. Shared by deriveSessionTitle (history
+ *  replay) and the live SSE handler so there's one definition of "title-worthy". */
+export function extractSessionTitle(event: AgentEvent): string {
+  if (event.type !== EventType.USER_MESSAGE) return '';
+  return String(event.data.content ?? '').trim();
+}
+
+/** Extract the first user/message content from an event stream — used as the
+ *  Session Rail row title (frozen decision "Session Model E 轮" 第 73 行:
+ *  "会话行 = 首条用户消息截断为标题 + 短 ID + 事件数 + 相对时间 + Run Pulse 状态点"）。
+ *  Empty / no-user-message-yet → returns '' (caller falls back to short ID). */
+export function deriveSessionTitle(events: AgentEvent[]): string {
+  for (const e of events) {
+    const title = extractSessionTitle(e);
+    if (title) return title;
+  }
+  return '';
 }
 
 /** Try to JSON-parse a tool result `content` string; return null on failure.

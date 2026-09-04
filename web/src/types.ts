@@ -61,7 +61,9 @@ export interface ToolCall {
   tool_call_id: string;
   name: string;
   args: Record<string, unknown>;
-  status: 'running' | 'success' | 'failed';
+  /** DSH 四态语义（冻结决策 "Unique Product Signatures" 第 69 行）：
+   *  running（进行中）| success（成功）| failed（失败）| stopped（被中断，≠ error）。 */
+  status: 'running' | 'success' | 'failed' | 'stopped';
   result?: unknown;
   diff?: { before: string; after: string; truncated: boolean };
   started_at?: string;
@@ -155,4 +157,9 @@ export interface ConversationState {
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22). */
   events: AgentEvent[];
+  /** Events whose type didn't match any known case (UnknownSurfaceNode 协议,
+   *  冻结决策第 69 行 "unknown 事件渲染为 raw 行兜底，永不静默丢弃")。
+   *  Kept separately so Timeline / Inspector can surface them explicitly
+   *  rather than dropping silently. Subset of `events`. */
+  unknown_events: AgentEvent[];
 }

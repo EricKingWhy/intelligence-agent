@@ -31,6 +31,7 @@ export default function App() {
     loadingHistory,
     streaming,
     error,
+    titlesById,
     selectSession,
     submitTask,
     cancelStream,
@@ -97,6 +98,7 @@ export default function App() {
           sessions={sessions}
           selectedId={selectedId}
           liveSessionId={streaming ? selectedId : null}
+          titlesById={titlesById}
           onSelect={(id) => {
             selectSession(id);
             focusRun();

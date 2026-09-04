@@ -16,6 +16,9 @@ interface Props {
   selectedId: string | null;
   /** The session currently receiving a live stream (Running group). */
   liveSessionId: string | null;
+  /** 行标题缓存（Session Model E 轮）：键为 session_id，值为首条 user/message 投影。
+   *  无缓存的会话回退到短 ID——不伪造标题。 */
+  titlesById: Record<string, string>;
   onSelect: (id: string) => void;
   onNew: () => void;
 }
@@ -23,7 +26,7 @@ interface Props {
 type GroupName = 'Running' | 'Today' | 'Yesterday' | 'Older';
 const GROUP_ORDER: GroupName[] = ['Running', 'Today', 'Yesterday', 'Older'];
 
-export function SessionList({ sessions, selectedId, liveSessionId, onSelect, onNew }: Props) {
+export function SessionList({ sessions, selectedId, liveSessionId, titlesById, onSelect, onNew }: Props) {
   // 相对时间随时间流逝刷新（issue #40）：每分钟推进一次 now 触发重渲染。
   const now = useTickingNow();
 
@@ -44,25 +47,29 @@ export function SessionList({ sessions, selectedId, liveSessionId, onSelect, onN
         {groups.map(([name, items]) => (
           <div key={name} className="session-group">
             <div className="session-group-label">{name}</div>
-            {items.map((s) => (
-              <button
-                key={s.session_id}
-                className={`session-item ${selectedId === s.session_id ? 'selected' : ''}`}
-                onClick={() => onSelect(s.session_id)}
-                title={`${s.session_id} · ${s.event_count} 事件`}
-              >
-                <span
-                  className={`session-item-dot ${name === 'Running' ? 'session-item-dot-live' : ''}`}
-                  aria-hidden="true"
-                />
-                <div className="session-item-body">
-                  <div className="session-item-id mono">{s.session_id.slice(0, 12)}</div>
-                  <div className="session-item-meta num">
-                    {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
+            {items.map((s) => {
+              const title = titlesById[s.session_id]?.slice(0, 48) || '';
+              return (
+                <button
+                  key={s.session_id}
+                  className={`session-item ${selectedId === s.session_id ? 'selected' : ''}`}
+                  onClick={() => onSelect(s.session_id)}
+                  title={`${s.session_id} · ${s.event_count} 事件`}
+                >
+                  <span
+                    className={`session-item-dot ${name === 'Running' ? 'session-item-dot-live' : ''}`}
+                    aria-hidden="true"
+                  />
+                  <div className="session-item-body">
+                    {title && <div className="session-item-title">{title}</div>}
+                    <div className="session-item-id mono">{s.session_id.slice(0, 12)}</div>
+                    <div className="session-item-meta num">
+                      {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
+                    </div>
                   </div>
-                </div>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         ))}
       </div>
