@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
-import { formatDuration } from '../lib/format';
+import { formatDuration, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
 
@@ -396,7 +396,7 @@ function TerminalTab({ tools, onFocusTool }: { tools: ToolCall[]; onFocusTool: (
               <span className="bash-prompt">$</span>
               <code>{String(t.args.command ?? '')}</code>
             </div>
-            {result?.stdout !== undefined && <pre className="detail-terminal-out">{result.stdout}</pre>}
+            {result?.stdout !== undefined && <pre className="detail-terminal-out">{truncateForDisplay(result.stdout)}</pre>}
             {result?.exit_code !== undefined && (
               <span className={`exit-badge ${result.exit_code === 0 ? 'exit-ok' : 'exit-err'}`}>exit {result.exit_code}</span>
             )}
@@ -481,11 +481,11 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Input / Output (data)</div>
-        <pre className="detail-code">{JSON.stringify(event.data, null, 2)}</pre>
+        <pre className="detail-code">{truncateForDisplay(JSON.stringify(event.data, null, 2))}</pre>
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Raw</div>
-        <pre className="detail-code">{JSON.stringify(event, null, 2)}</pre>
+        <pre className="detail-code">{truncateForDisplay(JSON.stringify(event, null, 2))}</pre>
       </div>
     </>
   );
@@ -502,13 +502,13 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
         </div>
         <div className="detail-subsection">
           <div className="detail-key">Input (args)</div>
-          <pre className="detail-code">{JSON.stringify(tool.args, null, 2)}</pre>
+          <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.args, null, 2))}</pre>
         </div>
         {tool.result !== undefined && (
           <div className="detail-subsection">
             <div className="detail-key">Output</div>
             <pre className="detail-code">
-              {typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
+              {truncateForDisplay(typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2))}
             </pre>
           </div>
         )}
@@ -522,8 +522,8 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
       {(tool.raw_call || tool.raw_result) && (
         <div className="detail-section">
           <div className="detail-section-title">Raw</div>
-          {tool.raw_call && <pre className="detail-code">{JSON.stringify(tool.raw_call, null, 2)}</pre>}
-          {tool.raw_result && <pre className="detail-code">{JSON.stringify(tool.raw_result, null, 2)}</pre>}
+          {tool.raw_call && <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_call, null, 2))}</pre>}
+          {tool.raw_result && <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_result, null, 2))}</pre>}
         </div>
       )}
     </>
