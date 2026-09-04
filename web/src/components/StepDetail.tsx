@@ -8,37 +8,32 @@
 import { AlertTriangle, ChevronRight, Clock, Database, FileCheck2, Hash, Layers, Package } from 'lucide-react';
 import type { ConversationState, ToolCall } from '../types';
 import { formatDuration } from '../lib/format';
+import { deriveRunPulse } from '../lib/runState';
 
 interface Props {
   conversation: ConversationState | null;
+  streaming: boolean;
   selectedTool: ToolCall | null;
   onSelectTool: (tool: ToolCall | null) => void;
 }
 
-const RUN_LABELS: Record<ConversationState['run_status'], string> = {
-  idle: '空闲',
-  running: '运行中',
-  completed: '已完成',
-  failed: '失败',
-};
-
-export function StepDetail({ conversation, selectedTool, onSelectTool }: Props) {
+export function StepDetail({ conversation, streaming, selectedTool, onSelectTool }: Props) {
   if (!conversation) {
     return (
-      <aside className="step-detail surface-panel">
+      <aside className="step-detail">
         <DetailEmpty />
       </aside>
     );
   }
 
   const tools = conversation.turns.flatMap((t) => t.tools);
-  const run = conversation.run_status;
+  const pulse = deriveRunPulse(conversation, streaming);
 
   return (
-    <aside className="step-detail surface-panel">
+    <aside className="step-detail">
       <div className="detail-header">
-        <span className="panel-label">步骤详情</span>
-        <span className={`run-badge run-badge-${run}`}>{RUN_LABELS[run]}</span>
+        <span className="panel-label">Run Inspector</span>
+        <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
       </div>
 
       <div className="detail-section">
