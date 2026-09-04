@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,15 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.types import STATUS_COMPLETED
 from agent_harness.session import (
+    RUN_COMPLETED,
+    RUN_FAILED,
     JsonlSessionStore,
     Session,
 )
 from agent_harness.storage import (
+    Checkpoint,
     CheckpointBoundary,
     EveryStep,
     NoCheckpoint,
@@ -322,3 +327,100 @@ async def test_checkpoint_always_saved_after_session_event_persisted(
         if c.boundary_type is CheckpointBoundary.TOOL_BATCH_COMPLETED
     )
     assert tb_checkpoint.event_seq >= tool_results[-1].seq
+
+
+# ── 存储故障隔离：checkpoint 是恢复辅助，绝不能毒化 run 结果 ──
+
+
+class _FailingCheckpointStore:
+    """CheckpointStore 替身：指定边界的 save 抛错（模拟存储故障），其余照常记录。
+
+    只需鸭子类型满足 OnStableBoundary 的调用面（save），无需继承 CheckpointStore ABC。
+    """
+
+    def __init__(self, fail_on: CheckpointBoundary) -> None:
+        self.fail_on = fail_on
+        self.saved: list[Checkpoint] = []
+
+    async def save(self, checkpoint: Checkpoint) -> None:
+        if checkpoint.boundary_type is self.fail_on:
+            raise RuntimeError("模拟 checkpoint 存储故障")
+        self.saved.append(checkpoint)
+
+
+def _runtime_with_failing_store(
+    tmp_path: Path, fail_on: CheckpointBoundary
+) -> tuple[AgentRuntime, Session]:
+    store = _FailingCheckpointStore(fail_on)
+    runtime, session = _build_tool_runtime(
+        tmp_path,
+        checkpoint_store=None,
+        session_meta_store=None,
+        policy=OnStableBoundary(store),
+    )
+    return runtime, session
+
+
+def _terminal_run_types(persisted: list) -> list[str]:
+    """从持久化事件里摘出 run 终结事件类型（run/completed 或 run/failed）。"""
+    return [e.type for e in persisted if e.type in (RUN_COMPLETED, RUN_FAILED)]
+
+
+def _read_persisted(tmp_path: Path, session: Session) -> list:
+    """从 store 重读持久化事件（根目录与 _build_tool_runtime 建的 store 一致）。"""
+    return JsonlSessionStore(root=tmp_path / "sessions").read_events(
+        session.session_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_at_final_completed_does_not_poison_run(
+    tmp_path: Path,
+) -> None:
+    """FINAL_COMPLETED 边界存储故障 -> run 仍 completed，不产生第二个终结事件。
+
+    run/completed 已持久化后再炸 checkpoint：异常若沿调用链传给顶层失败兜底，
+    会给已完成的 run 补一条矛盾的 run/failed（双终结事件 + run() 误报 failed）。
+    """
+    runtime, session = _runtime_with_failing_store(
+        tmp_path, CheckpointBoundary.FINAL_COMPLETED
+    )
+
+    result = await runtime.run(session, "hello")
+
+    assert result.status == STATUS_COMPLETED
+    persisted = _read_persisted(tmp_path, session)
+    assert _terminal_run_types(persisted) == [RUN_COMPLETED]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_at_user_accepted_does_not_abort_run(
+    tmp_path: Path,
+) -> None:
+    """USER_ACCEPTED 边界存储故障（发生在 begin_run 之前）-> run 照常完整跑完。"""
+    runtime, session = _runtime_with_failing_store(
+        tmp_path, CheckpointBoundary.USER_ACCEPTED
+    )
+
+    result = await runtime.run(session, "hello")
+
+    assert result.status == STATUS_COMPLETED
+    persisted = _read_persisted(tmp_path, session)
+    assert _terminal_run_types(persisted) == [RUN_COMPLETED]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_emits_log_record(tmp_path: Path, caplog) -> None:
+    """checkpoint 保存失败必须落一条带边界名的日志，绝不静默吞掉。"""
+    runtime, session = _runtime_with_failing_store(
+        tmp_path, CheckpointBoundary.FINAL_COMPLETED
+    )
+
+    with caplog.at_level(logging.WARNING, logger="agent_harness.agent"):
+        await runtime.run(session, "hello")
+
+    assert any(
+        "checkpoint" in record.getMessage()
+        and "FINAL_COMPLETED" in record.getMessage()
+        for record in caplog.records
+    )

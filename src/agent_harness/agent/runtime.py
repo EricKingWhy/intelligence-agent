@@ -471,27 +471,39 @@ class AgentRuntime:
 
         关键不变量（#28 要求）：checkpoint 保存发生在对应 SessionEvent 已持久化【之后】；
         checkpoint/saved 绝不写入 SessionEvent（它只是存储层恢复辅助）。
-        """
-        checkpoint = await self._checkpoint_policy.maybe_save(
-            session, boundary_type
-        )
-        if checkpoint is not None and self._session_meta_store is not None:
-            try:
-                await self._session_meta_store.update_last_checkpoint_seq(
-                    session.session_id, checkpoint.event_seq
-                )
-            except KeyError:
-                # SessionMeta 尚未 upsert（首次 run）：惰性补建一行。
-                from datetime import UTC, datetime
 
-                await self._session_meta_store.upsert(
-                    SessionMeta(
-                        session_id=session.session_id,
-                        created_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
-                        agent_id="default",
-                        last_checkpoint_seq=checkpoint.event_seq,
+        checkpoint 是恢复辅助（本方法定位即此），绝不能毒化 run 结果：存储故障若
+        沿调用链传给顶层失败兜底，会给已持久化 run/completed 的 run 补一条矛盾的
+        run/failed（双终结事件，历史不可对账）。这里吞掉异常只落日志，不向上抛。
+        """
+        try:
+            checkpoint = await self._checkpoint_policy.maybe_save(
+                session, boundary_type
+            )
+            if checkpoint is not None and self._session_meta_store is not None:
+                try:
+                    await self._session_meta_store.update_last_checkpoint_seq(
+                        session.session_id, checkpoint.event_seq
                     )
-                )
+                except KeyError:
+                    # SessionMeta 尚未 upsert（首次 run）：惰性补建一行。
+                    from datetime import UTC, datetime
+
+                    await self._session_meta_store.upsert(
+                        SessionMeta(
+                            session_id=session.session_id,
+                            created_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+                            agent_id="default",
+                            last_checkpoint_seq=checkpoint.event_seq,
+                        )
+                    )
+        except Exception:
+            # 宽捕获理由：checkpoint 是恢复辅助，任何存储侧故障都不属于 run 语义。
+            logger.exception(
+                "checkpoint 保存失败（boundary=%s, session=%s）：不影响 run 结果",
+                boundary_type.value,
+                session.session_id,
+            )
 
     def _log(self, event_type: str, message: str, **fields: Any) -> None:
         """打一条结构化日志；无 handler 时静默 no-op（不污染未配日志的调用方/测试）。"""
