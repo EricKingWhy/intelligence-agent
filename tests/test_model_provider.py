@@ -182,3 +182,81 @@ def test_env_file_anchored_to_repo_root():
 
     assert Settings.model_config["env_file"] == str(_REPO_ROOT / ".env")
     assert (_REPO_ROOT / "pyproject.toml").exists(), "锚点必须是仓库根"
+
+
+# ── Model Fallback 配置（T5, #80, ADR-0014 决策 14）──
+
+
+class TestSenseaudioPreset:
+    def test_senseaudio_preset_base_url(self):
+        config = ModelConfig.from_settings(
+            make_settings(
+                model_provider="senseaudio", model_name="deepseek-v4-flash-0731",
+            )
+        )
+        assert config.provider == "senseaudio"
+        assert config.model_name == "deepseek-v4-flash-0731"
+        assert config.base_url == "https://api.senseaudio.cn/v1"
+
+    def test_senseaudio_requires_model_name(self):
+        """senseaudio 无默认模型（同 tencent 姿势）：MODEL_NAME 必填。"""
+        with pytest.raises(ConfigError, match="MODEL_NAME"):
+            ModelConfig.from_settings(make_settings(model_provider="senseaudio"))
+
+    def test_fallback_provider_also_validated(self):
+        """fallback provider 同样过预设表校验——未知 provider 在配置期就抛错。"""
+        with pytest.raises(ConfigError, match="unknown-fb"):
+            ModelConfig.from_settings(
+                make_settings(fallback_model_provider="unknown-fb")
+            )
+
+
+class TestFallbackModelConfig:
+    def test_no_fallback_by_default(self):
+        config = ModelConfig.from_settings(make_settings(model_provider="deepseek"))
+        assert config.fallback is None
+
+    def test_fallback_parsed_from_settings(self):
+        config = ModelConfig.from_settings(
+            make_settings(
+                model_provider="deepseek",
+                fallback_model_provider="senseaudio",
+                fallback_model_name="deepseek-v4-flash-0731",
+                fallback_model_api_key="sk-fb",
+            )
+        )
+        assert config.fallback is not None
+        assert config.fallback.provider == "senseaudio"
+        assert config.fallback.model_name == "deepseek-v4-flash-0731"
+        assert config.fallback.base_url == "https://api.senseaudio.cn/v1"
+        assert config.fallback.temperature == config.temperature
+
+    def test_fallback_missing_key_raises(self):
+        """fallback 配了 provider 但缺 key → 配置期快速失败，不推迟到首次 ainvoke。"""
+        with pytest.raises(ConfigError, match="FALLBACK_MODEL_API_KEY"):
+            ModelConfig.from_settings(
+                make_settings(
+                    model_provider="deepseek",
+                    fallback_model_provider="senseaudio",
+                    fallback_model_name="deepseek-v4-flash-0731",
+                    fallback_model_api_key="",
+                )
+            )
+
+    def test_fallback_key_is_redacted_in_vars(self):
+        """fallback 的 key 也是活密钥：vars(config) 调试路径必须脱敏。"""
+        config = ModelConfig.from_settings(
+            make_settings(
+                model_provider="deepseek",
+                fallback_model_provider="senseaudio",
+                fallback_model_name="deepseek-v4-flash-0731",
+                fallback_model_api_key="sk-fb-live-key",
+            )
+        )
+        assert "sk-fb-live-key" not in str(vars(config))
+        assert config.fallback.get_secret_value() == "sk-fb-live-key"
+
+    def test_settings_fallback_key_is_secretstr(self):
+        settings = Settings(fallback_model_api_key="sk-fb-live", _env_file=None)
+        dumped = settings.model_dump(mode="json")
+        assert dumped["fallback_model_api_key"] != "sk-fb-live"

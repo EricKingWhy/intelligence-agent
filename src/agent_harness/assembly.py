@@ -108,6 +108,12 @@ async def build_runtime(
     """
     config = ModelConfig.from_settings(settings)
     model = create_chat_model(config)
+    # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
+    # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
+    # 的 per-run coordinator 负责（见 agent/fallback 接线）。
+    fallback_model = None
+    if config.fallback is not None:
+        fallback_model = create_chat_model(config.fallback)
 
     sandbox = workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
@@ -153,4 +159,8 @@ async def build_runtime(
             context_providers=list(wiring.context_providers),
         ),
         memory_writer=wiring.memory_writer,
+        fallback_model=fallback_model,
+        primary_model_name=config.model_name,
+        fallback_model_name=(config.fallback.model_name if config.fallback is not None
+                             else "fallback"),
     )

@@ -20,6 +20,8 @@ export const EventType = {
   ARTIFACT_CREATED: 'artifact/created',
   CONTEXT_COMPACTED: 'context/compacted',
   MEMORY_DEGRADED: 'memory/degraded',
+  TOOL_FAILURE_GUARD: 'tool/failure-guard',
+  MODEL_FALLBACK: 'model/fallback',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];
