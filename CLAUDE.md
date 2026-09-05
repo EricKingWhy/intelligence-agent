@@ -576,9 +576,27 @@ Secondary / Task Agent：
 
 ---
 
-# 15. 并行开发
+# 15. Git / Worktree
 
-- 并行 AI Coding 时，每个会话必须使用独立 Git Worktree。
-- 后端使用 `D:\intelligence-agent-backend`（`feat/backend`），前端使用 `D:\intelligence-agent-frontend`（`feat/frontend`）。
-- `D:\intelligence-agent` 的 `main` 工作目录主要用于最终集成和测试。
-- 禁止两个并行 AI 会话同时修改同一个 Worktree。
+本项目的 Git 分支、Worktree、合并和 Push 规则统一以 `AGENTS.md` 为准：
+
+- §13「并行开发」：Worktree 目录与分支映射、Feature Worktree 完成后的默认行为、最终合并规则。
+- §14「Git Workflow / Merge Safety」：Branch Roles、Worktree Rules、只读 / 需批准 Git 操作清单、Pull Policy、Merge Direction、Conflict Policy、Main Safety、One Branch at a Time、Validation Gate、Approval Workflow。
+
+默认行为：
+
+- 后端开发使用 `D:\intelligence-agent-backend` / `feat/backend`；
+- 前端开发使用 `D:\intelligence-agent-frontend` / `feat/frontend`；
+- 最终集成使用 `D:\intelligence-agent` / `main`；
+- Feature Worktree 完成后可以 commit，但**默认不得**自行 `merge main` 或 `push GitHub`；
+- 跨分支集成由 **Git Integrator**（或用户明确授权的集成角色）统一负责。
+
+关键纪律（详见 AGENTS.md §14）：
+
+- 任何 Git 写操作前先确认当前 worktree / branch / status；用 `git worktree list --porcelain` 取真实映射，不凭目录名猜 branch。
+- `merge`、`push`、冲突解决、`cherry-pick`、`revert`、branch / worktree 删除必须用户明确批准；`reset --hard` / `rebase` / `push --force` 默认禁止。
+- 同步统一用 `git fetch origin` + 显式 `git merge origin/main`，不用 `git pull`。
+- 集成顺序固定为：`origin/main → feature branch（解决冲突、测试）→ main`；先 Backend 后 Frontend，一次只集成一个；Backend 合入后 Frontend 的 Conflict 判断必须重做。
+- 出现 Conflict 立即停止自动解决，逐文件做语义分析后请求批准；禁止 `ours` / `theirs` 机械取舍，禁止为了让冲突消失删除一侧逻辑。
+- `main` 上出现未预期的复杂 Conflict 时优先 `git merge --abort`，回 Feature Worktree 解决。
+- Approval Workflow 固定为 `Analyze → Report → Ask → Execute → Validate → Report → Ask`；前一阶段获批不等于后续阶段自动授权。
