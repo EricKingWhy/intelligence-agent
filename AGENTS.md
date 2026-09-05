@@ -365,7 +365,291 @@ Scope 外问题只报告，不顺手修。
 
 # 13. 并行开发
 
-- 并行 AI Coding 时，每个会话必须使用独立 Git Worktree。
-- 后端使用 `D:\intelligence-agent-backend`（`feat/backend`），前端使用 `D:\intelligence-agent-frontend`（`feat/frontend`）。
-- `D:\intelligence-agent` 的 `main` 工作目录主要用于最终集成和测试。
-- 禁止两个并行 AI 会话同时修改同一个 Worktree。
+## 13.1 Git Worktree 并行开发规则
+
+### 固定目录与分支
+
+| 用途 | 目录 | 分支 |
+| --- | --- | --- |
+| 最终集成、完整验证、Push GitHub | `D:\intelligence-agent` | `main` |
+| 后端开发 | `D:\intelligence-agent-backend` | `feat/backend` |
+| 前端开发 | `D:\intelligence-agent-frontend` | `feat/frontend` |
+
+核心原则：
+
+```text
+backend / frontend = 施工区
+main = 最终整合版
+```
+
+### 开发规则
+
+1. 后端任务默认在 `D:\intelligence-agent-backend` 开发。
+2. 前端任务默认在 `D:\intelligence-agent-frontend` 开发。
+3. 并行 AI 会话不能使用同一个 Worktree。
+4. `D:\intelligence-agent` 的 `main` 默认不作为并行开发目录，主要用于最终整合和验证。
+5. 公共项目资产应通过 Git commit 进入版本控制，使其他 Worktree 同步后能看到，例如：
+   - `docs`
+   - `goal`
+   - Spec
+   - `AGENTS.md`
+   - `CLAUDE.md`
+   - `CONTEXT.md`
+   - 已确认源码
+   - `tests`
+   - 正式配置
+6. 以下本地内容不要求在 Worktree 之间同步：
+   - `.env`
+   - `.venv`
+   - cache
+   - `logs`
+   - IDE 临时文件
+   - runtime 临时文件
+   - secrets
+
+### 13.2 Feature Worktree 完成后的默认行为
+
+在 `feat/backend` 或 `feat/frontend` 完成任务后，可以自行：
+
+```bash
+git status
+git diff
+git add <本次任务相关文件>
+git commit -m "..."
+```
+
+但默认**不要擅自**：
+
+- `merge main`
+- `push GitHub`
+- `push feature branch`
+- 创建 PR
+- 删除 branch
+- 删除 worktree
+- `reset --hard`
+
+完成后向用户报告：
+
+- 完成了什么
+- 改了哪些文件
+- 测试结果
+- commit 信息
+- 是否建议合并
+
+等待用户决定下一步。
+
+### 13.3 最终合并规则
+
+最终集成统一在 `D:\intelligence-agent` 的 `main` 进行。
+
+默认流程：
+
+```text
+feat/backend
+→ diff 检查
+→ merge 到本地 main
+
+feat/frontend
+→ diff 检查
+→ merge 到本地 main
+
+→ 在 D:\intelligence-agent 启动完整项目
+→ 运行完整测试
+→ 确认前后端集成正常
+→ 最后 git push origin main
+```
+
+**默认先合并到本地 `main` 并验证，再 Push GitHub。** GitHub 不是 backend / frontend 之间交换代码的必经步骤。除非用户明确要求，否则不要默认「先 push feature branch 再通过 GitHub PR merge」。
+
+### 13.4 `git diff` 的用途
+
+合并前可以检查实际改动：
+
+```bash
+git diff main...feat/backend
+git diff main...feat/frontend
+```
+
+`git diff` 只是检查差异；真正进入最终版本需要 `merge` 到 `main`。
+
+---
+
+# 14. Git Workflow / Merge Safety
+
+本节定义跨分支集成、合并冲突、危险 Git 操作与集成 Approval 的长期规则，适用于所有 Agent 与所有 Worktree。它与 §13 并行开发规则配套：§13 定义「在哪个 Worktree 开发」，本节定义「如何安全地把成果合进 `main`」。
+
+## 14.1 Branch Roles
+
+- `main` 是 **Integration Branch（集成主分支）**，必须始终可运行、可验证、稳定。
+- `feat/backend` 负责 Backend / Runtime 实现。
+- `feat/frontend` 负责 Frontend / Web UI 实现。
+- Backend / Frontend Agent **不自行决定**最终进入 `main`；跨分支集成统一由 **Git Integrator**（或用户明确授权的集成角色）负责。
+
+## 14.2 Worktree Rules
+
+任何 Git 写操作前，必须先确认当前：
+
+- repository
+- worktree path
+- branch
+- working tree status
+
+禁止：
+
+- 凭目录名称猜 Branch；
+- 为了查看其他 Branch 在当前 Worktree 中随意 `checkout` / `switch`；
+- 在 dirty worktree 上执行 merge / rebase / reset。
+
+真实映射来源：
+
+```bash
+git worktree list --porcelain
+```
+
+跨 Worktree 操作优先使用：
+
+```bash
+git -C <worktree-path> <command>
+```
+
+## 14.3 Read-only Git Operations（无需批准）
+
+AI 可以不经用户确认执行：
+
+```text
+git status
+git branch
+git branch --show-current
+git worktree list
+git log
+git show
+git diff
+git diff --stat
+git diff --name-status
+git diff --check
+git merge-base
+git rev-list
+git fetch origin --prune
+```
+
+以及：只读源码分析、Test、Lint、Type Check、Diff Review。
+
+## 14.4 Approval Required（必须用户明确批准）
+
+以下操作**未经用户明确批准不得执行**：
+
+```text
+git merge
+Merge Conflict Resolution
+冲突后的 git add
+Merge / Integration Commit
+git push
+GitHub PR Merge
+git cherry-pick
+git revert
+Branch 删除
+Worktree 删除
+```
+
+以下操作**默认禁止**，除非用户针对具体操作明确批准：
+
+```text
+git reset --hard
+git rebase
+git push --force
+git push --force-with-lease
+git branch -D
+```
+
+## 14.5 Pull Policy
+
+禁止使用 `git pull` 作为默认同步方式（它会自动决定 merge / rebase）。统一采用：
+
+```bash
+git fetch origin
+# 显式分析后再：
+git merge origin/main
+```
+
+## 14.6 Merge Direction
+
+Feature Branch 集成时采用「先回后正」方向：
+
+```text
+origin/main
+    ↓
+feature branch   ← 在这里解决 Conflict、Test、Review、Push
+    ↓
+main             ← feature branch 稳定后再合入
+```
+
+不要优先在 `main` 上解决复杂业务 Conflict。
+
+## 14.7 Conflict Policy
+
+发生 Conflict 后**立即停止自动解决**，逐文件分析：
+
+1. `main` 修改了什么、出于什么目的；
+2. `feature branch` 修改了什么、出于什么目的；
+3. 为什么发生 Conflict；
+4. 两边逻辑是否可以同时保留；
+5. 推荐最终语义；
+6. 是否影响 Contract；
+7. 是否影响 Runtime Behavior；
+8. 是否影响 Test；
+9. 风险等级。
+
+然后请求用户批准。禁止：
+
+- 机械使用 `ours` / `theirs`；
+- 为了让 Conflict 消失直接删除一侧逻辑；
+- 擅自修改冲突文件或 `git add`。
+
+目标是「最终代码同时保持正确的工程语义」，而不是「Git 不再报冲突」。
+
+## 14.8 Main Safety
+
+`main` 必须尽量保持 Stable。在 `main` 上执行 Merge 时若出现之前未发现的复杂 Conflict，优先：
+
+```bash
+git merge --abort
+```
+
+然后回 Feature Worktree 解决。不在 `main` 上临时拼接复杂业务逻辑。
+
+## 14.9 One Branch at a Time
+
+禁止同时集成 Backend 和 Frontend。顺序：
+
+```text
+feat/backend → main（完成并验证）
+→ 新的 main 重新分析 feat/frontend
+→ feat/frontend → main
+```
+
+Backend 合入 `main` 后，之前针对 Frontend 做的 Conflict 判断**全部视为可能过期**，必须重新 `fetch` / `diff` / `merge-base` / conflict analysis。
+
+## 14.10 Validation Gate
+
+任何 Feature Branch 准备进入 `main` 前，至少检查：
+
+- Working Tree clean；
+- Diff 可解释；
+- Conflict 已全部处理；
+- Tests 通过；
+- Lint 通过；
+- Type Check（如项目存在）通过；
+- `git diff --check` 无 whitespace / conflict-marker 问题；
+- 没有误删文件；
+- 没有覆盖其他 Agent 成果；
+- 没有 Scope 外修改。
+
+## 14.11 Approval Workflow
+
+全过程固定为：
+
+```text
+Analyze → Report → Ask → Execute → Validate → Report → Ask
+```
+
+不得因为用户已批准前一个阶段，就默认后续阶段也获得授权。每个需要批准的动作都要单独显式确认。宁可停止询问，也不要猜测用户想保留哪一边。

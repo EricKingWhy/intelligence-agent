@@ -15,12 +15,17 @@
  *  - Ambient background light kept but halved (user decision: 减淡保留一点氛围).
  */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* 字体自托管（fontsource variable，2026-09-05 方案 A）：替换原 Google Fonts
+ * @import——CSP `default-src 'self'`（后端 df4f7d8 批加固）会拦截第三方样式表
+ * 与字体，fontsource 经 Vite 打包为同源哈希资源，font-src 'self' 天然满足。
+ * 可变字体覆盖原 400/450/500/600/700 全部字重（wght 100-900）。 */
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
 
 :root {
   /* ── Fonts ── */
-  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
+  --font-ui: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
 
   /* ── Type scale (dev-tool density) ── */
   --text-xs: 11px;
@@ -75,17 +80,19 @@
 
   /* ══ Dark theme (default) — semantic tokens per Brief §8 ══ */
 
-  /* App surfaces: low-contrast chrome, content brighter than chrome */
-  --bg-app: #0b0c0e;
-  --bg-sidebar: #0e1013;
-  --bg-workspace: #101216;
-  --bg-inspector: #0e1013;
-  --surface-1: #15171b;
-  --surface-2: #1a1d22;
-  --surface-overlay: #20242a;
+  /* App surfaces: low-contrast chrome, content brighter than chrome
+   * （2026-09-05 精修：workspace 与 chrome 拉开一整档亮度差——内容区是舞台，
+   * chrome 退后；之前三档几乎同色，整页一块黑板） */
+  --bg-app: #090a0c;
+  --bg-sidebar: #0d0f12;
+  --bg-workspace: #14171d;
+  --bg-inspector: #0d0f12;
+  --surface-1: #171a20;
+  --surface-2: #1f232b;
+  --surface-overlay: #262b34;
 
   /* Borders */
-  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-subtle: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
 
   /* Text: primary > secondary > tertiary */
@@ -134,15 +141,15 @@
 
 /* ══ Light theme — single source (JS sets data-theme before paint) ══ */
 :root[data-theme='light'] {
-  --bg-app: #f6f6f7;
-  --bg-sidebar: #eeeef0;
-  --bg-workspace: #fbfbfc;
-  --bg-inspector: #eeeef0;
+  --bg-app: #f2f2f4;
+  --bg-sidebar: #ececef;
+  --bg-workspace: #ffffff;
+  --bg-inspector: #ececef;
   --surface-1: #ffffff;
   --surface-2: #f1f1f3;
   --surface-overlay: #ffffff;
 
-  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-subtle: rgba(0, 0, 0, 0.09);
   --border-strong: rgba(0, 0, 0, 0.16);
 
   --text-primary: #1d1d21;
@@ -248,6 +255,12 @@ body {
 /* 数字对齐：事件数、duration、token 计数一律 tabular-nums */
 .num {
   font-variant-numeric: tabular-nums;
+}
+
+/* 文本选择：accent 淡染（细节质感，替代浏览器默认蓝） */
+::selection {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--text-primary);
 }
 
 /* 键盘焦点 */

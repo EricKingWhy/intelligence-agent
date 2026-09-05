@@ -10,15 +10,16 @@
  * "~N tok" estimate (zero-fake-metrics rule).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Brain } from 'lucide-react';
 import type { ChainNode } from '../lib/projection';
 import { deriveChain } from '../lib/projection';
 import type { TraceDensity } from '../lib/density';
 import type { ConversationState, ModelSegment, ToolCall, Turn } from '../types';
-import { formatDuration } from '../lib/format';
+import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
+import { CopyButton } from './CopyButton';
 
 interface Props {
   conversation: ConversationState | null;
@@ -90,7 +91,7 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
           <TurnView
             key={turn.step_id}
             turn={turn}
-            active={conversation.run_status === 'running'}
+            model={conversation.model}
             density={density}
             onFocusTool={onFocusTool}
           />
@@ -101,19 +102,21 @@ export function Conversation({ conversation, loadingHistory, density, onPresetTa
   );
 }
 
-function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: boolean; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
-  // 只有"已完成且有模型文本"的轮次才可折叠——纯工具轮次节点本身已极简，
-  // 折叠按钮只会制造噪音（时间轴上直接常驻展开）。
+// memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
+// 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
+const TurnView = memo(function TurnView({ turn, model, density, onFocusTool }: { turn: Turn; model: string | null; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
+  // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
+  // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
+  // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
   const collapsible = turn.status !== 'streaming' && turn.model.text.length > 0;
-  // 已完成轮次默认折叠为派生摘要（Brief §决策 L48）；用户点击展开后不再自动收回。
-  const [collapsed, setCollapsed] = useState(collapsible);
-
-  // Active turn always expanded.
-  useEffect(() => {
-    if (active && turn.status === 'streaming') setCollapsed(false);
-  }, [active, turn.status]);
+  const [collapsed, setCollapsed] = useState(false);
 
   const duration = formatDuration(turn.started_at, turn.completed_at);
+  const chain = useMemo(() => deriveChain(turn), [turn]);
+  // hover 时间戳（调研：完成后才展示，流式期间不打扰；title 属性最轻实现）
+  const completedTitle = turn.completed_at
+    ? `完成于 ${new Date(turn.completed_at).toLocaleString()}`
+    : undefined;
 
   return (
     <div className={`turn turn-${turn.status}`}>
@@ -126,20 +129,28 @@ function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: 
 
       {/* Execution chain — model segments and tools in true event order */}
       {turn.activities.length > 0 && (
-        <div className="msg msg-model">
+        <div className="msg msg-model" title={completedTitle}>
           <div className="msg-avatar msg-avatar-model"><Brain size={13} /></div>
           <div className="msg-body">
-            {/* 折叠摘要：派生计数 + 真实耗时，零伪造指标 */}
-            {collapsible && (
-              <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
-                {collapsed
-                  ? `已折叠 · ${turn.tools.length} 个工具 · ${turn.segments.length} 轮${duration ? ` · ${duration}` : ''}`
-                  : '折叠'}
-              </button>
+            {/* 工具行：折叠按钮（手动选项）+ 模型名小标签（调研 pitfall #6：
+                每条 AI 消息标注模型名，升级/降级模型时一眼可辨） */}
+            {(collapsible || (model && turn.model.text)) && (
+              <div className="turn-tools-row">
+                {collapsible && (
+                  <button className="turn-collapse-btn" onClick={() => setCollapsed((v) => !v)}>
+                    {collapsed
+                      ? `已折叠 · ${turn.tools.length} 个工具 · ${turn.segments.length} 轮${duration ? ` · ${duration}` : ''}`
+                      : '折叠'}
+                  </button>
+                )}
+                {model && turn.model.text && (
+                  <span className="model-tag" title="本次运行使用的模型">{model}</span>
+                )}
+              </div>
             )}
             {!collapsed && (
               <div className="act-chain">
-                {deriveChain(turn).map((node, i) => (
+                {chain.map((node, i) => (
                   <ChainNodeView key={chainKey(node, i)} node={node} density={density} onFocusTool={onFocusTool} />
                 ))}
               </div>
@@ -149,13 +160,13 @@ function TurnView({ turn, active, density, onFocusTool }: { turn: Turn; active: 
       )}
     </div>
   );
-}
+});
 
 function chainKey(node: ChainNode, i: number): string {
   return node.kind === 'tool' ? node.tool.tool_call_id : `model-${i}`;
 }
 
-function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
+export function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
   if (node.kind === 'tool') {
     return <ToolCard tool={node.tool} density={density} onFocus={onFocusTool} />;
   }
@@ -165,14 +176,35 @@ function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; densit
     const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
     if (!first) return null;
     return (
-      <div className="model-output done model-output-compact">{renderMarkdown(first)}</div>
+      <div className="model-output done model-output-compact">{renderMarkdown(truncateForDisplay(first))}</div>
     );
   }
   if (!segment.text && segment.status !== 'streaming') return null;
+  // 模型文本与工具输出同级不可信——单行超长模型输出同样会冻结 UI，渲染前截断
+  // （41e7360 只覆盖了工具路径，code-review 补齐此处）。
+  const display = truncateForDisplay(segment.text);
+  // P0-2a 流式 markdown 增量化（HANDOFF §6）：streaming 段渲染纯文本
+  // （pre-wrap 样式保留换行，标记原样透传——打字机状态本就不需要排版），
+  // model/completed 置 done 后一次性 renderMarkdown。消灭流式期间每 delta
+  // 全量重解析的 CPU 开销。纯文本走 React 文本节点，天然零 XSS 面。
+  if (segment.status === 'streaming') {
+    return (
+      <div className="model-output-wrap">
+        <div className="model-output streaming">
+          {display}
+          <span className="stream-caret" />
+        </div>
+      </div>
+    );
+  }
+  // hover 复制（调研：per-message copy 是 AI chat 标配动作；仅完成段提供，
+  // 流式段文本还在增长，复制半成品是噪音）。
   return (
-    <div className={`model-output ${segment.status}`}>
-      {renderMarkdown(segment.text)}
-      {segment.status === 'streaming' && <span className="stream-caret" />}
+    <div className="model-output-wrap">
+      <div className={`model-output ${segment.status}`}>
+        {renderMarkdown(display)}
+      </div>
+      {segment.text && <CopyButton text={segment.text} label="复制回答" />}
     </div>
   );
 }

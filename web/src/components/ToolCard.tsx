@@ -15,11 +15,20 @@
  * Status color: running=warning, success=green, failed=red.
  */
 
-import { useState } from 'react';
-import { Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
+import { memo, useState } from 'react';
+import { Archive, Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
-import { formatDuration } from '../lib/format';
+import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import {
+  GREP_TRUNCATED_SUFFIX,
+  hasGrepTruncatedSuffix,
+  parseReadShape,
+  splitMcpToolName,
+  stripGrepTruncatedSuffix,
+  type ReadShape,
+} from '../lib/toolShapes';
+import { CopyButton } from './CopyButton';
 
 interface Props {
   tool: ToolCall;
@@ -29,10 +38,14 @@ interface Props {
   onFocus?: (tool: ToolCall) => void;
 }
 
-export function ToolCard({ tool, density, onFocus }: Props) {
+// memo：投影层 copy-on-write 保证未触及的 tool 引用稳定——同 turn 内其它工具卡
+// 在本工具更新时跳过重渲染（配合 App 层 useCallback 稳定的 onFocus）。
+export const ToolCard = memo(function ToolCard({ tool, density, onFocus }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const slice = tool.name === 'inspect_artifact' ? tryParseSlice(tool.result) : null;
+  // read 新形状（df4f7d8 §1.3）：解析续读/单行截断标记；形状不符回退 GenericBlock。
+  const readShape = tool.name === 'read' ? parseReadShape(tool.result) : null;
   const [expanded, setExpanded] = useState(false);
   const duration = formatDuration(tool.started_at, tool.completed_at);
   const detailed = density === 'detailed' || density === 'raw';
@@ -51,7 +64,18 @@ export function ToolCard({ tool, density, onFocus }: Props) {
           {tool.status === 'running' && <span className="status-spinner" />}
         </span>
         {density !== 'compact' && <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>}
-        <span className="act-name">{tool.name}</span>
+        {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
+        {(() => {
+          const mcp = splitMcpToolName(tool.name);
+          return mcp ? (
+            <span className="act-name">
+              <span className="act-server" title={`MCP server: ${mcp.server}`}>{mcp.server}</span>
+              {mcp.tool}
+            </span>
+          ) : (
+            <span className="act-name">{tool.name}</span>
+          );
+        })()}
         {density !== 'compact' && <span className="act-args">{summarizeArgs(tool)}</span>}
         {duration && <span className="act-duration">{duration}</span>}
         {density === 'compact' && (
@@ -95,12 +119,13 @@ export function ToolCard({ tool, density, onFocus }: Props) {
           {isBash && <BashBlock tool={tool} />}
           {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} />}
           {slice && <ArtifactSliceBlock slice={slice} />}
-          {!isBash && !isDiffTool && !slice && <GenericBlock tool={tool} />}
+          {readShape && <ReadBlock shape={readShape} />}
+          {!isBash && !isDiffTool && !slice && !readShape && <GenericBlock tool={tool} />}
         </div>
       )}
     </>
   );
-}
+});
 
 function summarizeArgs(tool: ToolCall, max = 60): string {
   const a = tool.args;
@@ -119,6 +144,9 @@ function BashBlock({ tool }: { tool: ToolCall }) {
   const out = typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result ?? '', null, 2);
   const exitCode = (tool.result as { exit_code?: number } | string | undefined);
   const code = typeof exitCode === 'object' && exitCode ? exitCode.exit_code : undefined;
+  // bash 被取消（data.cancelled，df4f7d8 §1.3）——展示"已取消"而非普通失败
+  // （投影层已把 status 映射为 stopped；这里补明确文案，注明后端保证的语义）。
+  const cancelled = (tool.result as { cancelled?: boolean } | null | undefined)?.cancelled === true;
 
   return (
     <div className="bash-block">
@@ -126,7 +154,12 @@ function BashBlock({ tool }: { tool: ToolCall }) {
         <span className="bash-prompt">$</span>
         <code>{cmd}</code>
       </div>
-      {out && <pre className="bash-output">{out}</pre>}
+      {out && <pre className="bash-output">{truncateForDisplay(out)}</pre>}
+      {cancelled && (
+        <span className="bash-cancelled" title="命令被超时/断连取消，进程树已终止">
+          已取消
+        </span>
+      )}
       {code !== undefined && (
         <span className={`exit-badge ${code === 0 ? 'exit-ok' : 'exit-err'}`}>exit {code}</span>
       )}
@@ -135,6 +168,26 @@ function BashBlock({ tool }: { tool: ToolCall }) {
 }
 
 function DiffBlock({ diff }: { diff: NonNullable<ToolCall['diff']> }) {
+  // da394a9 批：before/after 已归档（>2000 字符截断摘要内嵌 inspect_artifact marker）
+  // → 占位态而非把 marker 原文当 diff 渲染。「点击查看」暂不接线（artifact 深链
+  // 是后端 Gap，提案 D）——诚实给出 artifact 引用复制，不造假链接。
+  if (diff.archived && diff.artifactId) {
+    return (
+      <div className="diff-block">
+        <div className="diff-archived">
+          <Archive size={14} />
+          <div className="diff-archived-text">
+            <div className="diff-archived-title">Diff 内容已归档（超过 2000 字符）</div>
+            <div className="diff-archived-hint">
+              原始变更已存为 artifact，可用 <code>inspect_artifact</code> 查看完整内容
+            </div>
+          </div>
+          <code className="diff-archived-id">{diff.artifactId.slice(0, 16)}…</code>
+          <CopyButton text={`inspect_artifact(${diff.artifactId})`} label="复制 inspect_artifact 引用" />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="diff-block">
       {diff.truncated && <div className="diff-truncated">内容过长，已截断显示</div>}
@@ -157,12 +210,80 @@ function GenericBlock({ tool }: { tool: ToolCall }) {
     <div className="generic-block">
       <div className="generic-section">
         <div className="generic-label">参数</div>
-        <pre>{JSON.stringify(tool.args, null, 2)}</pre>
+        <pre>{truncateForDisplay(JSON.stringify(tool.args, null, 2))}</pre>
       </div>
       {tool.result !== undefined && (
         <div className="generic-section">
           <div className="generic-label">结果</div>
-          <pre>{typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}</pre>
+          <TruncationAwarePre
+            text={truncateForDisplay(stringifyForDisplay(tool.result))}
+            className="generic-result"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 逐行渲染并把 grep 截断尾巴（`... [truncated]`，单行 >500 字符，df4f7d8 §1.3）
+ *  弱化为静音标记——内容是真实的，但视觉上明确"此处有省略"，不与正文混淆。 */
+function TruncationAwarePre({ text, className }: { text: string; className?: string }) {
+  if (!text.includes(GREP_TRUNCATED_SUFFIX)) return <pre className={className}>{text}</pre>;
+  const lines = text.split('\n');
+  return (
+    <pre className={className}>
+      {lines.map((line, i) => {
+        const cut = hasGrepTruncatedSuffix(line);
+        return (
+          <span key={i}>
+            {cut ? (
+              <>
+                {stripGrepTruncatedSuffix(line)}
+                <span className="trunc-suffix" title="该行因超长被截断">{GREP_TRUNCATED_SUFFIX}</span>
+              </>
+            ) : (
+              line
+            )}
+            {i < lines.length - 1 ? '\n' : ''}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
+
+// ── read 专用渲染（df4f7d8 §1.3：续读标记 / 单行截断 / 空文件）──
+
+function ReadBlock({ shape }: { shape: ReadShape }) {
+  // 空文件是正常成功（content:"" + total_lines:0），不渲染成失败或空泡。
+  const empty = shape.content === '' && (shape.totalLines === null || shape.totalLines === 0);
+  return (
+    <div className="read-block">
+      <div className="read-meta">
+        {empty && <span className="read-empty">空文件（0 行）</span>}
+        {!empty && shape.totalLines !== null && (
+          <span className="read-total">共 {shape.totalLines.toLocaleString()} 行</span>
+        )}
+        {shape.continuation && (
+          <span className="read-range">
+            已显示 {shape.continuation.shownFrom}–{shape.continuation.shownTo} 行
+          </span>
+        )}
+        {shape.lineTruncated && (
+          <span
+            className="read-line-trunc"
+            title="该行超过 51200 字节被截断，不可续读——需用 bash 分段读取"
+          >
+            第 {shape.lineTruncated.line} 行超长截断（{shape.lineTruncated.bytes.toLocaleString()} 字节）· 不可续读
+          </span>
+        )}
+      </div>
+      {!empty && shape.content !== '' && <pre className="read-content">{truncateForDisplay(shape.content)}</pre>}
+      {shape.continuation && (
+        <div className="read-continue">
+          <span className="read-continue-hint">续读参数（下一次 read 调用的 offset）</span>
+          <code className="read-continue-code">offset={shape.continuation.nextOffset}</code>
+          <CopyButton text={`offset=${shape.continuation.nextOffset}`} label="复制续读 offset" />
         </div>
       )}
     </div>
