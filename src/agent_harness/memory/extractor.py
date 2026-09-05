@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, TypeAdapter
 
 from agent_harness.memory.types import MemoryScope
-from agent_harness.session import SessionEvent
+from agent_harness.session import USER_MESSAGE, SessionEvent
 
 _MAX_EXTRACT_EVENT_CHARS = 1000
 _MAX_EXTRACT_EVENTS = 50
@@ -45,7 +45,7 @@ class MemoryExtractor:
             # provenance 约束（C4）：窗口内没有任何 user/message 时，LLM 声明的
             # USER 候选降级为 SESSION——纯工具输出窗口里的注入指令不能被洗成
             # 跨会话（USER）记忆。降级带显式 provenance 标记，可观察、可追溯。
-            has_user_message = any(e.type == "user/message" for e in events)
+            has_user_message = any(e.type == USER_MESSAGE for e in events)
             results: list[tuple[MemoryScope, str, dict]] = []
             for c in candidates:
                 metadata = {"importance": c.importance}

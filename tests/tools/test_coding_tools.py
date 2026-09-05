@@ -436,3 +436,15 @@ class TestReadOutputBudget:
         )
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_read_empty_file_returns_empty_success(
+    executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+):
+    """空文件（0 字节）→ 成功 + 空内容，而非 offset 越界误报（review MAJOR）。"""
+    sandbox.write_text("empty.txt", "")
+    result = await executor.execute(_tool_call("read", {"path": "empty.txt"}))
+    assert result.result.ok is True
+    assert result.result.data["content"] == ""
+    assert result.result.data["total_lines"] == 0

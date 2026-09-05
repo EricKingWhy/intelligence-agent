@@ -384,18 +384,24 @@ class ToolExecutor:
         if session is None:
             return
         run_id = run_context_var.get()
-        for tool_call, result in zip(tool_calls, results):
-            if isinstance(result, BaseException):
-                continue
-            call = ToolCall.normalize(tool_call)
-            session.append(
-                TOOL_CALL,
-                {"tool_call_id": result.tool_call_id, "tool_name": call.name,
-                 "args": call.args},
-                run_id=run_id,
-            )
-            for event_type, data in result.pending_events:
-                session.append(event_type, data, run_id=run_id)
+        try:
+            for tool_call, result in zip(tool_calls, results):
+                if isinstance(result, BaseException):
+                    continue
+                call = ToolCall.normalize(tool_call)
+                session.append(
+                    TOOL_CALL,
+                    {"tool_call_id": result.tool_call_id, "tool_name": call.name,
+                     "args": call.args},
+                    run_id=run_id,
+                )
+                for event_type, data in result.pending_events:
+                    session.append(event_type, data, run_id=run_id)
+        except Exception:
+            # flush 自身失败（存储故障）不得掩盖原始批次异常——原始异常是
+            # 调用方失败归因的依据；flush 失败由日志承载。
+            logger.exception("Flushing committed tool events failed during batch abort")
+            raise
 
     @staticmethod
     def _log_secondary_exceptions(

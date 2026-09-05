@@ -88,6 +88,14 @@ class ReadTool(Tool):
         # 输出预算（R8-2）：行数/字节双帽，先到为准；截断时给可续读标记。
         lines = content.splitlines()
         total_lines = len(lines)
+        if total_lines == 0:
+            # 空文件（0 字节）合法读取：返回空内容而非 INVALID_ARGUMENT——
+            # offset 守卫在此之上，默认 offset=1 对 0 行文件会误报越界
+            # （厂商行为一致：pi-mono / Claude Code 对空文件返回空内容）。
+            return ToolResult.success(
+                message=f"已读取 '{args.path}'（空文件）。",
+                data={"path": args.path, "content": "", "total_lines": 0},
+            )
         start = args.offset
         if start > total_lines:
             return ToolResult.failure(

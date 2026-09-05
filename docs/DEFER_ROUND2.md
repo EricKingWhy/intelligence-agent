@@ -35,6 +35,11 @@
   "多进程撕裂行"部分——仍无触发路径）、R3-6 本地 sandbox FS 限制（Docker 为真边界）
 
 **残余设计项（需 Primary 后续决策）**：
+- recover 端点租户内授权（R9）：POST /api/sessions/{id}/recover 已过认证中间件，
+  但与全部既有端点一致只做 authN 不做 authZ——多租户场景下任意租户的合法 token
+  可恢复他人 session（第一个带状态变更的恢复面，V1 单用户可接受，多租户前必须补）
+- 记忆逐候选来源追踪（provenance 记忆 schema 扩展）——本批以确定性降级规则落地，
+  更强方案需记忆模型字段设计
 - 记忆逐候选来源追踪（provenance 记忆 schema 扩展）——本批以确定性降级规则落地，
   更强方案需记忆模型字段设计
 

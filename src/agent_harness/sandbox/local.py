@@ -101,6 +101,9 @@ class LocalSubprocessSandbox(Sandbox):
         "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "LOGNAME", "SHELL",
         # 编码（无凭据风险，缺了会让子进程输出编码漂移）
         "PYTHONIOENCODING", "PYTHONUTF8",
+        # 网络环境（pip/curl 等在代理/企业环境下可用性；标准做法：
+        # 代理变量属运营配置，不是凭据——真正要防的是 API keys/tokens）
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
     )
 
     def __init__(

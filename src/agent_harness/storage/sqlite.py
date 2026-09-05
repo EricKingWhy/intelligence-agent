@@ -103,12 +103,31 @@ class SqliteOperationLedger(OperationLedger):
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
+            await self._reject_legacy_schema(connection)
             await connection.execute(_OPERATIONS_DDL)
             await connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_operations_session "
                 "ON operations(session_id, started_at)"
             )
             await connection.commit()
+
+    @staticmethod
+    async def _reject_legacy_schema(connection: aiosqlite.Connection) -> None:
+        """升级哨兵：C5 把主键改为 (session_id, tool_call_id) 复合键。
+
+        CREATE TABLE IF NOT EXISTS 不会迁移旧库——旧 schema（tool_call_id 单列
+        主键）的 harness.db 若继续使用，跨会话复用 tool_call_id 会以难解的
+        UNIQUE IntegrityError 爆掉。这里显式检测并 fail-loud，提示删除旧库
+        （ledger 是可重建的恢复辅助状态，不是唯一真相源，事件 JSONL 才是）。
+        """
+        cursor = await connection.execute("PRAGMA table_info(operations)")
+        columns = {row[1]: row[5] for row in await cursor.fetchall()}
+        if columns and columns.get("tool_call_id") == 1 and columns.get("session_id") != 1:
+            raise RuntimeError(
+                f"{connection} 的 operations 表是 C5 之前的旧 schema"
+                "（tool_call_id 单列主键）。请删除旧的 harness.db 后重启"
+                "（Ledger 是可重建的恢复辅助状态；事件 JSONL 不受影响）。"
+            )
 
     async def create(self, operation: Operation) -> None:
         if operation.state is not OperationState.PENDING:

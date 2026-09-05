@@ -26,12 +26,6 @@ def test_cancel_event_kills_process_tree(tmp_path):
     """
     sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
     result_holder: list = []
-    thread = threading.Thread(
-        target=lambda: result_holder.append(
-            sandbox.exec(_long_command(), cancel_event=threading.Event())
-        )
-    )
-    # 预先置位前先拿到 event 引用：改用外部 event，0.5s 后置位
     cancel_event = threading.Event()
     thread = threading.Thread(
         target=lambda: result_holder.append(

@@ -80,7 +80,8 @@ HTTP 请求
   - `get_identity_context() -> IdentityContext`: 读 contextvar，None 时返回 `IdentityContext(tenant_id="local", user_id="local", scopes=["user", "session"])`
   - `set_identity_context(ctx: IdentityContext) -> contextvars.Token`: 设 contextvar，返回 token 供 reset
 - `src/agent_harness/config.py`: 新增 `jwt_secret: str | None = None`
-- `src/agent_harness/web/app.py` 的 `auth_seam`: 从 `Authorization: Bearer <jwt>` 解析（可选，有 jwt_secret 时验证签名）→ 创建 IdentityContext → `set_identity_context()`。无 JWT 时用默认值。
+- `src/agent_harness/web/app.py` 的 `auth_seam`: 从 `Authorization: Bearer <jwt>` 解析 → 创建 IdentityContext → `set_identity_context()`。
+  - **⚠️ R6-4/R8-3 契约已变更（2026-09-05，用户拍板 fail-closed）**：配置了 `JWT_SECRET` 时，匿名请求返回 401（不再降级 local 身份），且 token 必须携带 `exp`（永不过期的 token 被拒）。未配置 `JWT_SECRET` 时保持本地信任模式（fail-open），但启动时输出响亮告警。前端在配置了密钥的部署环境必须附带有效 Bearer token。详见 `docs/DEFER_ROUND2.md` 决策执行日志。
 
 **测试** (`tests/test_identity.py`):
 - `test_default_identity_when_contextvar_unset`
