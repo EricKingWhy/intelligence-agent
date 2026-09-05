@@ -243,3 +243,22 @@ TTFT 模型侧主导，Run Pulse「思考中·Ns」已是最优解——**不要
 4. 候选额外优化点（workbuddy 读码观察，**未验证**，供参考）：StepDetail Timeline 每渲染全量 map `conversation.events`（大会话 O(N)/render，可与 P1-4 合并设计）；ToolCard grep 输出每渲染 split/map 全行（长输出可 memo）；TurnView memo 已挡住完成段重复 markdown 解析（无需再动）。
 
 **⚠️ 环境异常备案（接手必读）：** 本批施工期间 `refs/heads/feat/*` loose ref 两次神秘消失（reflog 出现无消息 `0000→sha` 重建条目），backend 侧同样发生。提交对象与 reflog 始终完好，非仓库损坏。根因指向多 AI 会话 × 双 Git 工具链（`D:/DevTools/Git` 与 workbuddy PortableGit）× 沙箱对 worktree 外 `.git` 路径写入拦截的复合干扰；backend 还观察到裸 `git status` 卡死而 `-uno` 秒过（疑 index 全量刷新 + 大目录 untracked 扫描）。应对协议：commit 后同命令内 `git log -1` 验证，缺失则从 reflog 重建 ref 文件并立即 push；以远端 `ls-remote` 为最终事实源；清理分支前 `git worktree list` + 确认无未推送提交。
+
+---
+
+## 10. UI 精修第二批回执（2026-09-06 workbuddy，feat/frontend `6f9a55b..56a3c24`）
+
+**主题：Inspector 与运行链的信息呈现（承接 §9 剩余候选的 UI 侧 + 第一批后续点）。纯表现层：零逻辑改动、零依赖新增。**
+
+| 项 | commit | 内容 |
+| --- | --- | --- |
+| C1 JsonTree | `6f9a55b` | Inspector JSON dump 平铺文本 → 折叠树 + 语法着色（string/number/literal 三类 token 双主题）；defaultDepth=2、单容器 50 子项渲染预算 + 余量行、160 字符串截断；**真值通道不变**（CopyButton 持全量文本，视图裁剪不删数据，同 truncateForDisplay 级）。集成：EventInspector data/Raw、ToolEventSections、ToolCard GenericBlock。9 个 SSR 契约测试 |
+| C2 IO 标签条 | `56a3c24` | ToolEventSections Input/Output/Raw 三段堆叠 → io-tabs segmented（density 同语言）；默认 Output（运行中回退 Input）；耗时右上置。3 个 SSR 测试 |
+| C3 内联整合+Compact | `56a3c24` | detailed/raw 档 args/result 裸 pre → act-field 面板（Input/Output 微标签，与 Inspector 同语言）；[data-density='compact'] 密度作用域（行距/字号/轨道线全面降档，信息零删减）。4 个 SSR 测试（ToolCard.test.tsx 新文件） |
+| C4 Timeline 浮层 | `56a3c24` | 行 hover 显示完整时间戳（含毫秒）+ step；formatEventTooltip 纯函数 + 单元素 fixed 浮层 + 容器事件委托（零每行 handler）；滚动/缩放/移出即隐藏；glass popover 合法玻璃区 + reduced-motion 兜底。4 个纯函数测试 |
+
+**验证**：Vitest 174/174（+20 vs §9 末态 154），perf 6/6，tsc clean，oxlint 0 error。双主题/各密度档 playwright 截图目检通过（系统 Chrome channel，免下载 Chromium）。
+
+**⚠️ 本批环境备案（新增两条，接手必读）**：
+1. **Edit 工具写入丢失**：同一会话内对同一文件的多个 Edit 出现部分落盘（StepDetail.tsx 的 EventInspector 段、ToolCard.tsx 的 GenericBlock 段、TimelineRow 签名各丢一次，工具返回成功但文件未变）。**对策：每次 Edit 后立即 grep 关键锚点验证**——tsc/vitest 全绿不代表编辑落盘（旧代码同样合法）。
+2. **本地 refs 写入静默吞没依旧**（`update-ref` 退出 0 但 ref 文件物理不存在；与 git 二进制无关，文件系统层）。**可靠路径：`git push origin <full-sha>:refs/heads/feat/frontend`**（sha 直推绕开本地 ref）；本地 ref 恢复由用户/集成 AI 终端执行 `git fetch origin && git update-ref refs/heads/feat/frontend origin/feat/frontend`。

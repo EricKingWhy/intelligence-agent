@@ -131,6 +131,11 @@
   --color-destructive: var(--danger);
   --color-border: var(--border-subtle);
   --color-ring: var(--accent);
+
+  /* JsonTree 语法着色（Inspector 结构化查看器） */
+  --json-string: #7ec699;
+  --json-number: #6cb6ff;
+  --json-literal: #d2a8ff;
   color-scheme: dark;
 }
 
@@ -165,6 +170,10 @@
   --info: #4a6fd6;
 
   --color-hover: rgba(0, 0, 0, 0.045);
+
+  --json-string: #0a7d32;
+  --json-number: #0550ae;
+  --json-literal: #8250df;
 
   --glass-border: var(--glass-border-light);
   --edge-light: inset 0 0.5px 0 rgba(255, 255, 255, 0.85), inset 0 0 0 0.5px rgba(0, 0, 0, 0.04);

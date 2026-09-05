@@ -806,15 +806,28 @@
   flex-direction: column;
   gap: var(--space-xs);
 }
+/* C3：字段面板化——边框/背景由 .act-field 容器承担，label 与内容同一视觉单元 */
+.act-field {
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1, transparent);
+  overflow: hidden;
+}
+.act-field-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  padding: 3px var(--space-sm) 0;
+}
 .act-detail-args,
 .act-detail-result {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--color-muted-foreground);
-  background: var(--color-surface-1, transparent);
-  border: 0.5px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-xs) var(--space-sm);
+  padding: 2px var(--space-sm) var(--space-xs);
   margin: 0;
   max-height: 200px;
   overflow: auto;
@@ -860,6 +873,56 @@
 .model-output-compact {
   font-size: var(--text-sm);
   color: var(--color-muted-foreground);
+}
+
+/* ── Compact 档密度（C3）：信息不删、节奏降档——行高/间距/次级字号全面收紧 ── */
+[data-density='compact'] .conversation-scroll {
+  padding-top: var(--space-xs);
+}
+[data-density='compact'] .msg-body {
+  gap: var(--space-xs);
+}
+[data-density='compact'] .msg-avatar {
+  width: 22px;
+  height: 22px;
+}
+[data-density='compact'] .act-chain {
+  gap: 2px;
+  padding-left: var(--space-sm);
+}
+[data-density='compact'] .act-stream {
+  gap: 0;
+  padding-left: var(--space-sm);
+}
+[data-density='compact'] .act-node {
+  padding: 1px 6px;
+  gap: 6px;
+  border-radius: var(--radius-sm);
+}
+[data-density='compact'] .act-name {
+  font-size: 11px;
+}
+[data-density='compact'] .act-duration,
+[data-density='compact'] .act-args {
+  font-size: 10px;
+}
+[data-density='compact'] .act-status {
+  width: 12px;
+}
+[data-density='compact'] .act-stream::before,
+[data-density='compact'] .act-chain::before {
+  opacity: 0.55;
+}
+[data-density='compact'] .model-output-compact {
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+[data-density='compact'] .turn-collapse-btn {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+[data-density='compact'] .msg-bubble-user {
+  padding: var(--space-xs) var(--space-md);
 }
 .status-spinner {
   width: 11px;
@@ -1348,6 +1411,42 @@
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Timeline hover 时间戳浮层（C4）：fixed 单元素，popover 合法 glass 区 ── */
+.tl-tooltip {
+  position: fixed;
+  z-index: 60;
+  padding: 5px 8px;
+  background: color-mix(in srgb, var(--surface-overlay) 88%, transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur-1)) saturate(1.3);
+  backdrop-filter: blur(var(--glass-blur-1)) saturate(1.3);
+  border: var(--glass-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  pointer-events: none;
+  animation: tip-in 90ms var(--ease-apple);
+}
+.tl-tooltip-line {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+@keyframes tip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tl-tooltip {
+    animation: none;
+  }
+}
 .timeline-row {
   display: flex;
   align-items: baseline;
@@ -1763,6 +1862,152 @@
 }
 .detail-code-wrap .detail-code {
   padding-right: 32px;
+}
+
+/* ── JsonTree：Inspector 级 JSON 折叠树（结构化查看器） ── */
+.detail-json {
+  max-height: 340px;
+  overflow: auto;
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1, transparent);
+  padding: var(--space-xs) var(--space-sm);
+  padding-right: 32px; /* 给常驻复制钮让位 */
+}
+.json-tree {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.65;
+  color: var(--color-foreground);
+  min-width: 0;
+}
+.json-row {
+  display: block;
+  min-height: 19px;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+button.json-row {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.json-toggle:hover {
+  background: var(--color-hover);
+}
+.json-toggle:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.json-chevron {
+  display: inline-block;
+  vertical-align: -1.5px;
+  margin-right: 3px;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-out) var(--ease-apple);
+}
+.json-chevron-open {
+  transform: rotate(90deg);
+}
+.json-key {
+  color: var(--color-foreground);
+}
+.json-index {
+  color: var(--text-tertiary);
+}
+.json-punct {
+  color: var(--text-tertiary);
+}
+.json-count {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  margin: 0 4px;
+  padding: 0 6px;
+  background: var(--color-hover);
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+.json-string {
+  color: var(--json-string);
+}
+.json-number {
+  color: var(--json-number);
+}
+.json-literal {
+  color: var(--json-literal);
+}
+.json-more {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.json-close {
+  color: var(--text-tertiary);
+}
+
+/* ── IO Tabs：Inspector 工具视图 Input/Output/Raw 标签条（C2，density 同语言小号版） ── */
+.io-tabs {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 1px;
+  padding: 1.5px;
+  background: var(--color-hover);
+  border: 0.5px solid var(--color-border);
+  border-radius: calc(var(--radius-sm) + 1.5px);
+  margin-bottom: var(--space-xs);
+}
+.io-tab {
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4.5px 12px;
+  cursor: pointer;
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple),
+    box-shadow var(--dur-out) var(--ease-apple);
+}
+.io-tab:hover {
+  color: var(--color-foreground);
+}
+.io-tab.sel {
+  color: var(--color-foreground);
+  background: var(--color-surface-3, var(--surface-overlay));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px var(--color-border);
+}
+.io-tab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.io-duration {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+.io-raw-panes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.io-raw-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-bottom: 3px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
