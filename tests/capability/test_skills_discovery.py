@@ -135,3 +135,45 @@ class TestSkillDiscovery:
         (deep / "SKILL.md").write_text("---\nname: deep\ndescription: x\n---\n", encoding="utf-8")
         catalog = SkillDiscovery(directories=[tmp_path / "skills"]).discover()
         assert catalog.entries == []
+
+
+# ── 非 UTF-8 编码的 SKILL.md 不应中断整个扫描流程 ──
+
+
+def test_non_utf8_skill_file_is_error_not_crash(tmp_path):
+    """GBK/Latin-1 编码的 SKILL.md 必须进 errors 列表，不抛 UnicodeDecodeError。
+
+    read_text(encoding="utf-8-sig") 遇到非 UTF-8 字节抛 UnicodeDecodeError
+    （ValueError 子类，不是 OSError）；原有 except OSError 兜不住——整个
+    discover() 会向上抛，扫描中断。这是模块 docstring 明确承诺的反契约：
+    "解析失败进 errors 列表，绝不抛出中断发现流程"。
+    """
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    # 写一个合法 UTF-8 的兄弟技能（验证扫描继续推进）
+    good_dir = skills_dir / "good"
+    good_dir.mkdir()
+    good_dir.joinpath("SKILL.md").write_text(
+        f"---\n{_fm('good', '好技能')}\n---\n正文\n", encoding="utf-8"
+    )
+    # 写一个 GBK 编码的坏技能（中文用 GBK 编码）
+    bad_dir = skills_dir / "bad"
+    bad_dir.mkdir()
+    (bad_dir / "SKILL.md").write_bytes(
+        ("---\nname: bad\ndescription: 坏技能\n---\n正文\n").encode("gbk")
+    )
+
+    catalog = SkillDiscovery(directories=[skills_dir]).discover()
+
+    # 扫描不抛、坏文件进 errors、好文件照常被发现。
+    assert [e.name for e in catalog.entries] == ["good"]
+    assert any("bad" in err or "unreadable" in err for err in catalog.errors)
+
+
+def test_parse_skill_markdown_non_utf8_returns_error_not_raises(tmp_path):
+    """parse_skill_markdown 单文件级也对非 UTF-8 容错。"""
+    path = tmp_path / "gbk.md"
+    path.write_bytes(("---\nname: x\ndescription: 中文\n---\n").encode("gbk"))
+    entry, errors = parse_skill_markdown(path)
+    assert entry is None
+    assert errors and "unreadable" in errors[0]

@@ -74,3 +74,117 @@
   配对的 ToolMessage 失去对应关系，破坏不变量 #7（统一工具路径 + 配对语义）。
 - 子块压缩（如把 ToolMessage.content 替换为引用 + artifact）属于专项设计，
   需与 ArtifactOverflowHandler / spec 06 共同演进。
+
+---
+
+# Round 3 细节加固 — 设计级 DEFER 清单
+
+> 来源：Round 3 并行审计（MCP/memory writeback/skills discovery/context tokens/sandbox）。
+> 同样按 AGENTS.md §5/§8 报告不改。
+
+## R3-1. MCP 子系统整体未实现（spec gap，未来 phase）
+
+**位置**：`src/agent_harness/mcp/` 目录不存在。
+
+**现状**：spec 09 §1/§10 要求的 Remote MCP Server → Client → Adapter → Registry →
+Executor 链路完全缺失；`pyproject.toml` 无 MCP 依赖。
+
+**为何 DEFER**：按 14_IMPLEMENTATION_ROADMAP，MCP 属于未来 phase，当前不应超前
+落地。任何 MCP 工具的统一执行路径问题（不变量 #7）、错误映射、连接生命周期
+都没有对象可守——这是阶段问题，不是 bug。
+
+**重启条件**：进入 MCP phase 时整体设计。
+
+## R3-2. Memory writeback close() 取消而非 drain（设计决策）
+
+**位置**：`src/agent_harness/memory/writeback.py::close`
+
+**现状**：`close()` 对所有在飞任务 `task.cancel()`，不 drain。
+
+**为何 DEFER**：当前契约已被
+`tests/memory/test_context_provider.py::test_stream_mirrors_retrieval_degradation_and_writer_can_close`
+明确钉死为"close 取消在飞任务"。改成 drain 是关停语义的设计选择
+（快关 vs 不丢记忆），需要 Primary Developer 明确应用关停契约：
+- 长 drain 会不会拖死滚动重启的 graceful shutdown budget？
+- drain 超时后退回 cancel 的预算应是多少？
+
+**重启条件**：用户/Primary 明确关停语义后改契约并改对应测试。
+
+## R3-3. 超大 memory content 永久死信（设计）
+
+**位置**：`src/agent_harness/memory/embeddings.py:14`（`check_embedding_ctx_length=False`）
+
+**现状**：超过 embedding 模型 token 上限的 content 永远索引失败、5 轮后死信，
+留在 SQLite 但永远 search 不到。
+
+**为何 DEFER**：合理的修复要么在 store 入口截断（丢语义保可检索），要么在
+embedding 前做 chunked embed（新能力）。两者都是设计决策。
+
+**重启条件**：观察到真实生产记忆因超长被死信，或决定加 chunked embed 能力。
+
+## R3-4. extractor 把整段会话无截断塞进单条 LLM prompt（设计）
+
+**位置**：`src/agent_harness/memory/extractor.py:33-35`
+
+**现状**：长会话 prompt 超模型上下文 → 静默回退到关键词启发式，无 degraded 事件
+或日志区分。
+
+**为何 DEFER**：修复需要在 extractor 内引入 token 预算 + 分段抽取 + 显式 degraded
+事件，是 extractor 的新设计，超出当前 scope。
+
+**重启条件**：profile 显示长会话下 LLM 抽取路径频繁回退到启发式。
+
+## R3-5. 本地 sandbox 泄漏 host 环境变量（安全加固，需设计）
+
+**位置**：`src/agent_harness/sandbox/local.py:121-131`（`Popen` 未传 `env=`）
+
+**现状**：模型经 `sandbox.exec("env")` 能拿到 host 的 `OPENAI_API_KEY`、
+`DATABASE_URL` 等任意环境变量——绕过文件系统路径安全（不变量 #11 边界泄漏）。
+
+**为何 DEFER**：local.py 文档已声明是"开发/测试后端，不做进程级隔离"，
+生产应走 docker.py。但即便开发后端，过滤 env 是有价值的硬化。延后是因为：
+- 需要明确白名单（`PATH`、`SYSTEMROOT`、`LANG`、`HOME`、`USERPROFILE` 等）
+  且不能破坏既有依赖 env 的命令测试。
+- 这是安全决策，应向用户明示而非默写。
+
+**建议**：未来引入 `SandboxEnvPolicy` 注入白名单/黑名单，默认拒绝凭据式键
+（`*_KEY`/`*_TOKEN`/`*_SECRET`/`*_CREDENTIAL*`），其余按白名单。
+
+**重启条件**：用户批准 sandbox 安全硬化，或观察到开发环境真实泄漏。
+
+## R3-6. 本地 sandbox 无 FS 限制（已知限制，文档化）
+
+**位置**：`src/agent_harness/sandbox/local.py`
+
+**现状**：`cwd=workspace_root` 仅设初始工作目录，`shell=True` 下 `cd /`、
+绝对路径都能逃出 workspace。
+
+**为何 DEFER**：local.py 文档已显式声明不做进程级隔离，生产走 docker.py。
+真正修复需要在 POSIX 引入 bwrap 类 namespace 封装——属于重大设计变更。
+
+**重启条件**：决定给本地后端加 namespace 隔离能力。
+
+## R3-7. context_provider MEMORY_DEGRADED 事件不带 run_id（跨层）
+
+**位置**：`src/agent_harness/memory/context_provider.py:54-57`
+
+**现状**：降级事件不带 `run_id`，无法归因到具体 run；writeback 路径却带了。
+
+**为何 DEFER**：ContextProvider 在 build() 内被调用，不知道当前 run_id；
+要带 run_id 得改 ContextProvider 协议（注入 run_id）或在 session 里跟踪
+current run——跨层改动，超出加固 scope。
+
+**重启条件**：观察到多 run 交错场景下降级事件归因断裂的真实痛点。
+
+## R3-8. estimate_message_tokens 对多模态图像爆炸（无触发路径）
+
+**位置**：`src/agent_harness/context/tokens.py:12-14`
+
+**现状**：`model_dump_json()` 把 base64 image 也算进 token 数；单张 1MB 图
+会让估计多出 ~330K token，触发过早压缩。
+
+**为何 DEFER**：当前 codebase 无任何多模态入口（grep `image_url`/`image_url`
+零命中）；按 §8 不为不存在的输入加防御。待真实多模态路径出现时再做内容
+分类剔除（替换 base64 为固定图像开销常量）。
+
+**重启条件**：引入多模态消息路径时。

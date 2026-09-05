@@ -29,6 +29,8 @@ class SkillCatalogEntry:
     def load_body(self) -> str:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
         # utf-8-sig：Windows 记事本等默认写 BOM，残留 \ufeff 会让首行 '---' 校验失败。
+        # 非 UTF-8 字节抛 UnicodeDecodeError（ValueError 子类）——让调用方明确看到
+        # 读盘失败，而不是吞回空字符串（吞空会让 load_skill 工具返回空内容）。
         text = self.source_path.read_text(encoding="utf-8-sig")
         return _split_frontmatter(text)[1].strip()
 
@@ -59,7 +61,9 @@ def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str
     try:
         # utf-8-sig：兼容 BOM 前缀（Windows 记事本默认），无 BOM 时行为与 utf-8 一致。
         text = path.read_text(encoding="utf-8-sig")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
+        # UnicodeDecodeError 是 ValueError 子类，不是 OSError——非 UTF-8（GBK/Latin-1
+        # 等）字节会从这里抛；捕获它才不违背"解析失败进 errors，绝不中断扫描"的契约。
         return None, [f"{path}: unreadable ({type(error).__name__})"]
     frontmatter, _body = _split_frontmatter(text)
     if frontmatter is None:
