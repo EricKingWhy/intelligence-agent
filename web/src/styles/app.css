@@ -573,6 +573,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .example-chip:focus-visible {
   outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.example-chip:focus-visible {
+  outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
 
@@ -1272,9 +1276,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-family: var(--font-ui);
 }
 
-/* ── Approval Card：warning 玻璃浮起（内联审批） ── */
+/* ── Approval Card：warning 语义化整卡（内联审批）──
+ * 审批是 human-in-the-loop 安全决策点：待决态整卡 warning 淡染底 +
+ * 全周 hairline + 左侧 3px 实条 + 微辉光——卡片自身要"压得住"。
+ * 终态收敛到对应语义色并撤除辉光（决定已做出，不再索取注意力）。 */
 .approval-card {
+  border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
   border-left: 3px solid var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 7%, transparent);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--color-warning) 9%, transparent);
   padding: var(--space-md) var(--space-lg);
   border-radius: var(--radius-lg);
   display: flex;
@@ -1283,10 +1293,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   animation: reveal-in var(--dur-in) var(--ease-apple);
 }
 .approval-card.approved {
+  border-color: color-mix(in srgb, var(--color-success) 28%, transparent);
   border-left-color: var(--color-success);
+  background: color-mix(in srgb, var(--color-success) 6%, transparent);
+  box-shadow: none;
 }
 .approval-card.denied {
+  border-color: color-mix(in srgb, var(--color-destructive) 28%, transparent);
   border-left-color: var(--color-destructive);
+  background: color-mix(in srgb, var(--color-destructive) 6%, transparent);
+  box-shadow: none;
 }
 .approval-header {
   display: flex;
@@ -1322,6 +1338,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   gap: var(--space-sm);
   margin-top: var(--space-sm);
+}
+/* 审批按钮语义着色：批准 = success 实底（同 composer-send 的对比度配方），
+ * 拒绝 = danger 描边（破坏性方向用描边而非实底，克制不刺激）。 */
+.approval-approve {
+  background: color-mix(in srgb, var(--color-success) 80%, #000);
+}
+.approval-approve:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.approval-deny {
+  color: var(--color-destructive);
+  border-color: color-mix(in srgb, var(--color-destructive) 38%, transparent);
+}
+.approval-deny:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
 }
 
 /* ── Composer：Floating Command Dock（视觉中心） ──
@@ -2582,6 +2613,7 @@ button.json-row {
 }
 .palette-item.active {
   background: var(--accent-muted);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 28%, transparent);
 }
 .palette-item-label {
   overflow: hidden;
@@ -2592,18 +2624,37 @@ button.json-row {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
+/* 键位提示 kbd 徽章化：hint 与 footer 的按键统一为 mono 小药丸——
+ * dev tool（Raycast/Linear palette）的键位提示语言。 */
 .palette-item-hint {
   flex-shrink: 0;
-  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
   color: var(--text-tertiary);
 }
 .palette-footer {
   display: flex;
-  gap: var(--space-lg);
+  gap: var(--space-sm);
+  align-items: center;
   padding: var(--space-sm) var(--space-lg);
   border-top: 1px solid var(--border-subtle);
   color: var(--text-tertiary);
   font-size: var(--text-xs);
+}
+.palette-footer span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
 }
 /* Radix 关闭动画（data-state=closed） */
 .palette-overlay[data-state='closed'],
