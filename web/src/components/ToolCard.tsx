@@ -16,7 +16,7 @@
  */
 
 import { memo, useState } from 'react';
-import { Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
+import { Archive, Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
 import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
@@ -24,6 +24,7 @@ import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
   parseReadShape,
+  splitMcpToolName,
   stripGrepTruncatedSuffix,
   type ReadShape,
 } from '../lib/toolShapes';
@@ -63,7 +64,18 @@ export const ToolCard = memo(function ToolCard({ tool, density, onFocus }: Props
           {tool.status === 'running' && <span className="status-spinner" />}
         </span>
         {density !== 'compact' && <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>}
-        <span className="act-name">{tool.name}</span>
+        {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
+        {(() => {
+          const mcp = splitMcpToolName(tool.name);
+          return mcp ? (
+            <span className="act-name">
+              <span className="act-server" title={`MCP server: ${mcp.server}`}>{mcp.server}</span>
+              {mcp.tool}
+            </span>
+          ) : (
+            <span className="act-name">{tool.name}</span>
+          );
+        })()}
         {density !== 'compact' && <span className="act-args">{summarizeArgs(tool)}</span>}
         {duration && <span className="act-duration">{duration}</span>}
         {density === 'compact' && (
@@ -156,6 +168,26 @@ function BashBlock({ tool }: { tool: ToolCall }) {
 }
 
 function DiffBlock({ diff }: { diff: NonNullable<ToolCall['diff']> }) {
+  // da394a9 批：before/after 已归档（>2000 字符截断摘要内嵌 inspect_artifact marker）
+  // → 占位态而非把 marker 原文当 diff 渲染。「点击查看」暂不接线（artifact 深链
+  // 是后端 Gap，提案 D）——诚实给出 artifact 引用复制，不造假链接。
+  if (diff.archived && diff.artifactId) {
+    return (
+      <div className="diff-block">
+        <div className="diff-archived">
+          <Archive size={14} />
+          <div className="diff-archived-text">
+            <div className="diff-archived-title">Diff 内容已归档（超过 2000 字符）</div>
+            <div className="diff-archived-hint">
+              原始变更已存为 artifact，可用 <code>inspect_artifact</code> 查看完整内容
+            </div>
+          </div>
+          <code className="diff-archived-id">{diff.artifactId.slice(0, 16)}…</code>
+          <CopyButton text={`inspect_artifact(${diff.artifactId})`} label="复制 inspect_artifact 引用" />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="diff-block">
       {diff.truncated && <div className="diff-truncated">内容过长，已截断显示</div>}

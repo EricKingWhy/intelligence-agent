@@ -8,6 +8,7 @@
 
 import type { AgentEvent, ConversationState, ModelSegment, ToolCall, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
+import { parseArtifactMarker } from './toolShapes';
 
 export function initConversation(session_id: string): ConversationState {
   return {
@@ -15,6 +16,7 @@ export function initConversation(session_id: string): ConversationState {
     turns: [],
     active_step_id: null,
     run_status: 'idle',
+    run_cancelled: false,
     compactions: [],
     reconcile_queue: [],
     events: [],
@@ -245,15 +247,21 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
         tool.result = parsedData ?? parsed?.message ?? data.content;
         // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
         // directly into ToolResult.data — not nested under data.diff. Detect them here.
+        // da394a9 批：>2000 字符的 before/after 变为截断摘要并内嵌
+        // "use inspect_artifact(<id>)" marker——diff 已归档，视图渲染占位态而非
+        // 把 marker 当 diff 内容。
         if (
           parsedData &&
           typeof parsedData.before === 'string' &&
           typeof parsedData.after === 'string'
         ) {
+          const artifactId =
+            parseArtifactMarker(parsedData.before) ?? parseArtifactMarker(parsedData.after);
           tool.diff = {
             before: parsedData.before,
             after: parsedData.after,
             truncated: parsedData.truncated === true,
+            ...(artifactId !== null ? { archived: true as const, artifactId } : {}),
           };
         }
         tool.completed_at = event.time ?? new Date().toISOString();
@@ -266,6 +274,7 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     case EventType.RUN_COMPLETED:
       // 权威聚合（后端 Gap 1/2）：事件携带的 usage_total 覆盖前端累计值；
       // cost_usd / trace_id 缺失或 null 保持 null（费率表未定义 / Langfuse 未接入）。
+      next.run_cancelled = false;
       next.usage_total = parseUsage(data.usage_total) ?? next.usage_total;
       next.cost_usd = typeof data.cost_usd === 'number' && Number.isFinite(data.cost_usd) ? data.cost_usd : null;
       next.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
@@ -273,6 +282,9 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       break;
 
     case EventType.RUN_FAILED:
+      // data.reason === 'cancelled'（客户端断连，da394a9 批语义）≠ 真实失败——
+      // Run Pulse 走「已取消」通道（runState），turn/tool 仍按失败终态 settle。
+      next.run_cancelled = data.reason === 'cancelled';
       finalizeRun(next, 'failed', event.time);
       break;
 

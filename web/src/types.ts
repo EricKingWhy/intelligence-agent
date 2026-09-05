@@ -83,7 +83,15 @@ export interface ToolCall {
    *  running（进行中）| success（成功）| failed（失败）| stopped（被中断，≠ error）。 */
   status: 'running' | 'success' | 'failed' | 'stopped';
   result?: unknown;
-  diff?: { before: string; after: string; truncated: boolean };
+  /** da394a9 批：before/after 内嵌 "use inspect_artifact(<id>)" marker 时
+   *  archived=true + artifactId——diff 内容已归档到 artifact，视图渲染占位态。 */
+  diff?: {
+    before: string;
+    after: string;
+    truncated: boolean;
+    archived?: boolean;
+    artifactId?: string;
+  };
   started_at?: string;
   completed_at?: string;
   /**
@@ -169,6 +177,9 @@ export interface ConversationState {
   /** The turn currently receiving events, if streaming. */
   active_step_id: number | null;
   run_status: 'idle' | 'running' | 'completed' | 'failed';
+  /** run/failed.data.reason === 'cancelled'（客户端断连，df4f7d8→da394a9 批语义）
+   *  时为 true——Run Pulse 显示「已取消」（中断 ≠ 错误，同 bash stopped 语义域）。 */
+  run_cancelled: boolean;
   /** Run-level metadata for the Inspector (Phase 5 events). */
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];

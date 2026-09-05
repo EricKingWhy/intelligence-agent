@@ -1878,3 +1878,76 @@
   font: 550 var(--text-xs) var(--font-mono);
   color: var(--accent);
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+ * da394a9 同步批——取消态脉冲 / 身份 chip / MCP 徽章 / diff 归档占位
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* 取消 ≠ 失败：中性色（同 bash stopped 语义域），无动画 */
+.pulse-cancelled {
+  color: var(--text-secondary);
+}
+
+/* 身份 chip：token 声称的身份（仅解码展示，验签在后端） */
+.auth-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-sm);
+  font: 500 var(--text-xs) var(--font-mono);
+  color: var(--text-secondary);
+  background: var(--color-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* MCP 工具名 server 徽章（mcp__{server}__{tool}） */
+.act-server {
+  display: inline-flex;
+  align-items: center;
+  margin-right: var(--space-xs);
+  padding: 0 var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  background: var(--accent-muted);
+  border-radius: var(--radius-xs);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* diff 归档占位（>2000 字符截断摘要 + inspect_artifact marker） */
+.diff-archived {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.diff-archived-text {
+  flex: 1;
+  min-width: 0;
+}
+.diff-archived-title {
+  font: 550 var(--text-sm) var(--font-ui);
+  color: var(--color-foreground);
+}
+.diff-archived-hint {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.diff-archived-hint code {
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+.diff-archived-id {
+  font: 500 var(--text-xs) var(--font-mono);
+  color: var(--text-secondary);
+}

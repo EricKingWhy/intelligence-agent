@@ -78,3 +78,34 @@ export function hasGrepTruncatedSuffix(line: string): boolean {
 export function stripGrepTruncatedSuffix(line: string): string {
   return hasGrepTruncatedSuffix(line) ? line.slice(0, -GREP_TRUNCATED_SUFFIX.length) : line;
 }
+
+// ── da394a9 批：diff 归档 marker / MCP 工具名 ──
+
+const INSPECT_ARTIFACT_RE = /use inspect_artifact\(([^)]+)\)/;
+
+/** 从 diff 截断摘要中提取归档 artifact id（后端 >2000 字符时内嵌 marker）。
+ *  无 marker 返回 null——零伪造，不猜 id。 */
+export function parseArtifactMarker(text: string): string | null {
+  const m = INSPECT_ARTIFACT_RE.exec(text);
+  const id = m?.[1]?.trim();
+  return id ? id : null;
+}
+
+export interface McpToolName {
+  server: string;
+  tool: string;
+}
+
+/** 拆解 MCP 工具名 mcp__{server}__{tool}（da394a9 Phase 8）。
+ *  非 MCP 名返回 null；tool 部分可能含下划线，以首个 `__` 后界分段：
+ *  mcp__github__list_issues → { server: 'github', tool: 'list_issues' }。 */
+export function splitMcpToolName(name: string): McpToolName | null {
+  if (!name.startsWith('mcp__')) return null;
+  const rest = name.slice('mcp__'.length);
+  const sep = rest.indexOf('__');
+  if (sep <= 0) return null;
+  const server = rest.slice(0, sep);
+  const tool = rest.slice(sep + 2);
+  if (!server || !tool) return null;
+  return { server, tool };
+}

@@ -54,3 +54,39 @@ export function onUnauthorized(cb: UnauthorizedListener): () => void {
 export function emitUnauthorized(detail: string): void {
   unauthorizedListeners.forEach((cb) => cb(detail));
 }
+
+// ── 身份 chip（da394a9 批认证 UX）：客户端解码展示，不验签 ──
+
+export interface IdentityClaims {
+  tenant_id?: string;
+  user_id?: string;
+  /** 秒级 Unix 过期时间（claims.exp）。 */
+  exp?: number;
+}
+
+/** 解码 JWT payload 的展示用 claims。仅解码不验签——验签是后端职责，
+ *  前端显示的 tenant/user 只是"token 声称的身份"（UI 据此配置成功与否
+ *  由 401 拦截兜底裁决）。畸形 token 返回 null，不抛错。 */
+export function decodeJwtClaims(token: string): IdentityClaims | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    // base64url → base64（atob 不认 - 和 _）
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const json = decodeURIComponent(
+      atob(pad)
+        .split('')
+        .map((c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'))
+        .join(''),
+    );
+    const claims = JSON.parse(json) as Record<string, unknown>;
+    return {
+      tenant_id: typeof claims.tenant_id === 'string' ? claims.tenant_id : undefined,
+      user_id: typeof claims.user_id === 'string' ? claims.user_id : undefined,
+      exp: typeof claims.exp === 'number' ? claims.exp : undefined,
+    };
+  } catch {
+    return null;
+  }
+}

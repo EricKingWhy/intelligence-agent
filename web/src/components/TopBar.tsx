@@ -7,11 +7,11 @@
  */
 
 import { Activity, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { applyTheme, initTheme, type Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse } from '../lib/runState';
-import { getToken, setToken } from '../lib/auth';
+import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
 import type { ConversationState } from '../types';
 
 interface Props {
@@ -29,6 +29,11 @@ interface Props {
 export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, authRequired }: Props) {
   // 主题持久化：初始值由 lib/theme 在 paint 前解析（localStorage → 系统偏好）。
   const [theme, setTheme] = useState<Theme>(initTheme);
+
+  // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
+  const [token, setTokenLive] = useState(getToken());
+  useEffect(() => onTokenChange(() => setTokenLive(getToken())), []);
+  const identity = useMemo(() => (token ? decodeJwtClaims(token) : null), [token]);
 
   // Auth 设置面板：token 是开发者设置项（localStorage ahi.apiToken）。
   // 输入框只在面板打开时同步真值——打开 = 读取当前存储，避免陈旧副本。
@@ -105,6 +110,18 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             </button>
           ))}
         </div>
+        {/* 身份 chip（da394a9 认证 UX）：token 已配置且可解码时展示 token 声称的身份。
+            仅解码不验签——真伪由 401 拦截兜底；无 token / 畸形 token 不渲染。 */}
+        {identity && (
+          <span
+            className="auth-chip"
+            title={`tenant: ${identity.tenant_id ?? '—'} · user: ${identity.user_id ?? '—'}${
+              identity.exp ? ` · 过期于 ${new Date(identity.exp * 1000).toLocaleString()}` : ''
+            }`}
+          >
+            {identity.user_id ?? '已配置'}
+          </span>
+        )}
         <button
           className={`icon-btn icon-btn-auth${authRequired ? ' attention' : ''}`}
           onClick={openAuthPanel}

@@ -21,6 +21,7 @@ import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
+import { isRecoverableRun } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
@@ -109,18 +110,15 @@ export default function App() {
     void submitTask({ task, max_steps: 10, auto_approve: true });
   }, [submitTask, focusRun]);
 
-  // ── Recover 入口可见性（df4f7d8 §1.1 建议条件）──
-  // 有选中会话、非流式、历史已加载、且最后事件不是 run/completed——即中断/
-  // 崩溃/失败的会话才需要恢复入口。运行完成的会话没有 dangling 可修。
-  const lastEventType = conversation?.events.length
-    ? conversation.events[conversation.events.length - 1].type
-    : null;
+  // ── Recover 入口可见性（da394a9 §二.2 后端建议语义）──
+  // isRecoverableRun：最后 run 缺终态（completed/failed 都没有）或存在未配对
+  // tool_call。干净失败的 run 是终态——不再显示恢复入口（旧条件会误标）。
   const canRecover =
     selectedId !== null &&
     !streaming &&
     !loadingHistory &&
     conversation !== null &&
-    lastEventType !== 'run/completed';
+    isRecoverableRun(conversation.events);
 
   return (
     <div className="app-frame">

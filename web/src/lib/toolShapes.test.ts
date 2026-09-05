@@ -87,3 +87,33 @@ describe('grep 截断尾巴', () => {
     expect(stripGrepTruncatedSuffix('')).toBe('');
   });
 });
+
+// ── da394a9 批：diff 归档 marker / MCP 工具名拆解 ──
+
+describe('parseArtifactMarker', () => {
+  it('从截断摘要提取 artifact id', () => {
+    expect(parseArtifactMarker('内容过大已归档。use inspect_artifact(abc-123) 查看全文')).toBe('abc-123');
+  });
+  it('无 marker → null', () => {
+    expect(parseArtifactMarker('普通 diff 内容')).toBeNull();
+    expect(parseArtifactMarker('')).toBeNull();
+  });
+  it('marker 空 id → null（零伪造）', () => {
+    expect(parseArtifactMarker('use inspect_artifact()')).toBeNull();
+  });
+});
+
+describe('splitMcpToolName', () => {
+  it('mcp__{server}__{tool} 两段拆解', () => {
+    expect(splitMcpToolName('mcp__github__list_issues')).toEqual({ server: 'github', tool: 'list_issues' });
+  });
+  it('tool 含下划线不受影响（首个 __ 后界）', () => {
+    expect(splitMcpToolName('mcp__fs__read_file')).toEqual({ server: 'fs', tool: 'read_file' });
+  });
+  it('非 MCP 名 → null', () => {
+    expect(splitMcpToolName('bash')).toBeNull();
+    expect(splitMcpToolName('mcp__')).toBeNull();
+    expect(splitMcpToolName('mcp__serveronly')).toBeNull();
+  });
+});
+import { parseArtifactMarker, splitMcpToolName } from './toolShapes';

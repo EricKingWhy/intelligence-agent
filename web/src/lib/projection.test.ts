@@ -13,7 +13,7 @@ describe('initConversation', () => {
   it('初始状态为空对话', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
-      session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle',
+      session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null,
     });
@@ -867,5 +867,51 @@ describe('applyEvent — recover 合成 tool/result 配对（df4f7d8 无 step_id
       step_id: 1,
     }));
     expect(s.turns[0].tools[0].status).toBe('success');
+  });
+});
+
+// ── da394a9 同步批：取消态 / diff 归档 marker ──
+
+describe('applyEvent — da394a9 新语义', () => {
+  it('run/failed.reason=cancelled → run_cancelled=true（取消 ≠ 失败）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'cancelled' } }));
+    expect(s.run_cancelled).toBe(true);
+    expect(s.run_status).toBe('failed'); // 生命周期仍是 failed 终态
+  });
+
+  it('run/failed 无 reason（真实失败）→ run_cancelled=false', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED }));
+    expect(s.run_cancelled).toBe(false);
+  });
+
+  it('取消后再 completed → run_cancelled 复位（rebuild 不残留旧态）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_FAILED, data: { reason: 'cancelled' } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED }));
+    expect(s.run_cancelled).toBe(false);
+  });
+
+  it('diff before 内嵌 inspect_artifact marker → archived=true + artifactId', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
+    const summary = '文件过大已归档。use inspect_artifact(abc-123) 查看全文';
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, data: { before: '', after: summary, truncated: true } }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].diff).toEqual({
+      before: '', after: summary, truncated: true, archived: true, artifactId: 'abc-123',
+    });
+  });
+
+  it('diff 无 marker → 无 archived 字段（形状不变，零伪造）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, data: { before: 'a', after: 'b' } }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].diff).toEqual({ before: 'a', after: 'b', truncated: false });
   });
 });

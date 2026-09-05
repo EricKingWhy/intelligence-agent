@@ -92,3 +92,19 @@ feat/frontend 已消费 [`HANDOFF_FRONTEND_SYNC.md`](后端仓库 docs/) 全部�
 - **#4 Event ≠ Diagnostic Log**——前端只消费 `SessionEvent`（后端映射为 `AgentEvent`），不读日志
 - **#8 Tool Retry 只有 ToolExecutor 一个责任域**——前端 ToolCard 只渲染投影出的 `status: running|success|failed|stopped`，不重试
 - **完整保存 ≠ 完整注入**——Artifact 大内容前端只持 ref（`artifact_id` + size + mime），不内联 payload
+
+## 6. 后端 da394a9 同步批（✅ 已完成消费，2026-09-05，ZCode 接手后第一批）
+
+后端提示词四项增量全部落地，重叠项（df4f7d8 批已做）未重做：
+
+1. **身份 chip**（认证 UX 增强）：`auth.decodeJwtClaims` 客户端解码展示 tenant/user/exp（仅解码不验签，真伪由 401 拦截兜底）；TopBar 钥匙图标旁 pill，保存/清除即时反映。活体验收：JWT 模式 401 → 面板配置合法 token → chip 显示 user + title 全 claims + 横幅消失 + 自动重载 ✓
+2. **恢复入口可见性细化**：新纯函数 `runState.isRecoverableRun`（最后 run 缺终态 OR 存在未配对 tool_call），替代旧「最后事件非 run/completed」条件——干净失败的 run 是终态，不再误标可恢复。活体验收：max-steps 失败会话按钮不可见 ✓
+3. **run/failed 取消态区分**：projection 捕获 `data.reason==='cancelled'` → `run_cancelled`；Run Pulse 新「已取消」通道（中性色，中断 ≠ 错误）
+4. **diff 归档占位**：`toolShapes.parseArtifactMarker` 捕获 `use inspect_artifact(<id>)` → `diff.archived`；DiffBlock 渲染占位卡（Archive 图标 + artifact 引用复制），**不渲染「点击查看」假链接**（artifact 深链是提案 D，后端未接线）
+5. **MCP 工具名徽章**：`toolShapes.splitMcpToolName` 拆 `mcp__{server}__{tool}`，ToolCard 渲染 server 徽章 + 工具名
+
+**⚠️ 给后端 AI 的两条实测发现（需后端跟进）：**
+- **客户端断连不会取消 run**：前端取消（fetch abort）后 run 继续执行至耗尽步数（实测多跑 ~20 事件、53k tokens），最终 `run/failed` **无 `reason='cancelled'` 字段**。前端契约已就绪（reason 出现即生效），但当前后端 `run/failed` 从不带 cancelled 语义——建议后端在 SSE 断连时触发 run 取消路径（uvicorn 断连检测 / `request.is_disconnected` 轮询）
+- qwen 模型在工具受限环境（无 python3/node、bash 10s cap）会进入长重试循环烧步数与 tokens——建议后端对连续同错工具调用做步数内熔断（前端已如实渲染，无需改）
+
+**提案 D（artifact 深链 / session 续聊）按后端要求未实现**——前端接缝：diff 归档占位已展示 artifact 引用，等后端端点落地后把复制按钮换成跳转即可。
