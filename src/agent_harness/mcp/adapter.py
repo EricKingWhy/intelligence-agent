@@ -108,8 +108,14 @@ class MCPTool(Tool):
         else:
             self._permission = ToolPermission.DANGER
 
+        # SDK 2.x 字段是 snake_case（input_schema）；camelCase 作为旧形状兜底
+        input_schema = (
+            getattr(remote_tool, "input_schema", None)
+            or getattr(remote_tool, "inputSchema", None)
+            or {}
+        )
         self._args_model = _pydantic_model_from_json_schema(
-            getattr(remote_tool, "inputSchema", {}) or {},
+            input_schema,
             f"{'_'.join(p for p in (server_config.name, remote_tool.name) if p)}_args",
         )
 
