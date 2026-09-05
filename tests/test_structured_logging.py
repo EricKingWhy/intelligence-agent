@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from agent_harness import cli
 from agent_harness.config import Settings
@@ -72,10 +71,18 @@ def test_tool_event_keeps_operation_fields_and_omits_none(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
+    """CLI（run_stream 路径）的结构化日志链：runtime 的 _log 统一产出
+    agent_start → llm_call → agent_decision → task_completed，CLI 只负责
+    setup_logging，不再手搓链路。单值 trace_id/task_id 贯穿全链。"""
+    from langchain_core.messages import AIMessageChunk
+
     class FakeModel:
-        async def ainvoke(self, messages):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def astream(self, messages, **kwargs):
             assert messages[0].content == "只回复 ok"
-            return AIMessage(
+            yield AIMessageChunk(
                 content="ok",
                 id="lc_run--internal-id",
                 response_metadata={
@@ -99,40 +106,47 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(cli, "create_chat_model", lambda config: FakeModel())
 
-    result = await cli.run("只回复 ok")
+    result = await cli.run("只回复 ok", write=lambda _text: None)
 
     assert result == "ok"
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [
-        "task_start",
         "agent_start",
         "llm_call",
         "agent_decision",
         "task_completed",
     ]
-    assert [entry["step(步骤)"] for entry in entries] == [0, 1, 2, 3, 4]
     assert len({entry["trace_id(追踪ID)"] for entry in entries}) == 1
     assert len({entry["task_id(任务ID)"] for entry in entries}) == 1
 
-    llm_entry = entries[2]
-    assert llm_entry["provider(模型提供商)"] == "deepseek"
-    assert llm_entry["provider_request_id(提供商请求ID)"] == "provider-response-123"
+    llm_entry = entries[1]
+    assert llm_entry["llm_input(模型输入)"] == "只回复 ok"
+    assert llm_entry["llm_output(模型输出)"] == "ok"
     assert llm_entry["token_usage(Token用量)"] == {
-        "input": 4,
-        "output": 1,
-        "total": 5,
-        "cached_input": 2,
-        "reasoning": 0,
+        "prompt_tokens": 4,
+        "completion_tokens": 1,
+        "total_tokens": 5,
     }
     assert llm_entry["outcome(结果)"] == "success"
-    assert entries[3]["decision(决策)"] == "finish"
+    assert "duration_ms(耗时毫秒)" in llm_entry
+    assert entries[2]["decision(决策)"] == "finish"
+    assert entries[-1]["outcome(结果)"] == "success"
 
 
 @pytest.mark.asyncio
 async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
+    """模型调用失败：runtime 补 model/failed + run/failed 终结事件，日志链
+    干净收尾（task_failed outcome=error）；cli.run 不抛异常（失败由终结事件
+    承载，返回空 final_text 供 main() 转 SystemExit(1)）。"""
+    from langchain_core.messages import AIMessageChunk
+
     class FailingModel:
-        async def ainvoke(self, messages):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def astream(self, messages, **kwargs):
             raise TimeoutError("模型请求超时")
+            yield AIMessageChunk(content="")  # pragma: no cover
 
     settings = Settings(
         model_api_key="sk-test",
@@ -142,23 +156,18 @@ async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(cli, "create_chat_model", lambda config: FailingModel())
 
-    with pytest.raises(TimeoutError, match="模型请求超时"):
-        await cli.run("触发失败")
+    result = await cli.run("触发失败", write=lambda _text: None)
+    assert result == ""
 
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [
-        "task_start",
         "agent_start",
-        "llm_call",
-        "error",
         "task_failed",
     ]
-    assert entries[2]["attempt(尝试次数)"] == 1
-    assert entries[2]["max_attempts(最大尝试)"] == 1
-    assert entries[3]["retryable(可重试)"] is False
-    assert entries[3]["error_type(错误类型)"] == "TimeoutError"
-    assert "stack_trace(调用栈)" in entries[3]
-    assert entries[-1]["outcome(结果)"] == "failure"
+    task_failed = entries[-1]
+    assert task_failed["outcome(结果)"] == "error"
+    assert task_failed["error_type(错误类型)"] == "TimeoutError"
+    assert len({entry["trace_id(追踪ID)"] for entry in entries}) == 1
 
 
 # ── B 组加固：formatter 对未知 event_type 显式告警（R4-6）──
