@@ -28,6 +28,8 @@ from typing import Any, Protocol, runtime_checkable
 import httpx
 from langchain_core.messages import AnyMessage
 
+from agent_harness.model.stall import ModelStallError, stream_with_stall_guard
+
 # openai SDK 的瞬时错误类名（不硬 import openai：按类名识别，避免版本
 # 差异与 LangChain 包装层变化破坏分类）。
 _TRANSIENT_ERROR_NAMES = frozenset({
@@ -41,12 +43,15 @@ _TRANSIENT_ERROR_NAMES = frozenset({
 def is_transient_model_error(error: BaseException) -> bool:
     """判断模型调用错误是否瞬时（值得切 fallback 重试）。
 
-    覆盖三层异常源：
+    覆盖四层异常源：
+    - 卡流看门狗：ModelStallError（超时形状，冒烟实测的 10 分钟缓速流）；
     - httpx 传输层：TimeoutException / TransportError（连接被拒、读失败等）；
     - httpx.HTTPStatusError：5xx / 429 瞬时，4xx 认证/参数错非瞬时；
     - openai SDK 风格：带 status_code 属性的按状态码判，APITimeoutError /
       APIConnectionError 按类名判（langchain-openai 的真实异常源）。
     """
+    if isinstance(error, ModelStallError):
+        return True
     # httpx.HTTPStatusError 与 TransportError 是兄弟分支（同出 HTTPError），
     # 先判状态错再判传输错，语义各自独立。
     if isinstance(error, httpx.HTTPStatusError):
@@ -114,16 +119,40 @@ class ModelFallbackCoordinator:
         policy: FallbackPolicy | None = None,
         primary_name: str = "primary",
         fallback_name: str = "fallback",
+        idle_timeout: float = 0.0,
+        total_timeout: float = 0.0,
     ) -> None:
         self._policy = policy or TwoLevelFallbackPolicy()
         self._fallback = fallback
         self._primary_name = primary_name
         self._fallback_name = fallback_name
+        # 流式守卫（秒，逐项 ≤0 关闭）：idle = N 秒无新 chunk（死连接）；
+        # total = 整条流必须 N 秒内完成（慢滴漏，冒烟 10 分钟场景）。
+        # 每次流式尝试（含 fallback 重试）都被包住，超时抛 ModelStallError
+        # （瞬时）→ fallback 接管。
+        self._idle_timeout = idle_timeout
+        self._total_timeout = total_timeout
         self.current = primary
         self._transitions: list[FallbackTransition] = []
 
+    def _guarded_stream(self, model: Any, messages: list[AnyMessage]) -> AsyncIterator[Any]:
+        """单次流式尝试（按需包双守卫；fallback 重试同样受保护）。"""
+        stream = model.astream(messages)
+        if (self._idle_timeout and self._idle_timeout > 0) or (
+            self._total_timeout and self._total_timeout > 0
+        ):
+            return stream_with_stall_guard(
+                stream, idle_timeout=self._idle_timeout,
+                total_timeout=self._total_timeout,
+            )
+        return stream
+
     async def ainvoke(self, messages: list[AnyMessage]) -> Any:
-        """非流式调用：primary 瞬时失败 → 切 fallback 重试一次。"""
+        """非流式调用：primary 瞬时失败 → 切 fallback 重试一次。
+
+        V1 看门狗不覆盖 ainvoke（总时限会误杀合法长推理）——socket 级
+        read-timeout 仍是底线，见 model/stall.py 模块 docstring。
+        """
         try:
             return await self.current.ainvoke(messages)
         except Exception as error:
@@ -134,18 +163,18 @@ class ModelFallbackCoordinator:
     async def astream(
         self, messages: list[AnyMessage]
     ) -> AsyncIterator[Any]:
-        """流式调用：流中途瞬时失败 → 切 fallback 继续产出。
+        """流式调用：流中途瞬时失败（含卡流）→ 切 fallback 继续产出。
 
         已产出的 chunk 由消费者聚合（前缀 + fallback 续写）——SSE 客户端
         看到的是一段连续流；完整聚合结果由 model/completed 持久化。
         """
         try:
-            async for chunk in self.current.astream(messages):
+            async for chunk in self._guarded_stream(self.current, messages):
                 yield chunk
         except Exception as error:
             if not self._try_switch(error):
                 raise
-            async for chunk in self.current.astream(messages):
+            async for chunk in self._guarded_stream(self.current, messages):
                 yield chunk
 
     def drain_transitions(self) -> list[FallbackTransition]:

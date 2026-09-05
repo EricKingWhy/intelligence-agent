@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     model_base_url: str = ""
 
     temperature: float = 0.2
+    # 流式守卫（秒，逐项 ≤0 关闭）：idle = N 秒无新 chunk（死连接）；
+    # total = 整条流必须 N 秒内完成（慢滴漏，冒烟实测 10 分钟场景）。
+    # 超时抛 ModelStallError（瞬时）→ fallback 接管 / 统一失败兜底。
+    model_stream_idle_timeout: float = 60.0
+    model_stream_total_timeout: float = 600.0
     # Model Fallback 两级链（ADR-0014 决策 14）：FALLBACK_MODEL_PROVIDER 为空 =
     # 单级（无 fallback）。fallback key 同 SecretStr 脱敏待遇（活密钥）。
     fallback_model_provider: str = ""

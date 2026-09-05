@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.runtime import AgentRuntime
@@ -56,6 +56,27 @@ def _tool_call(name: str, args: dict, idx: int) -> AIMessage:
         content="",
         tool_calls=[{"id": f"call_{idx:04d}", "name": name, "args": args}],
     )
+
+
+class _StalledStreamModel:
+    """先产出一个 chunk，休眠 stall_seconds 后产出第二个（模拟卡流/慢流）。"""
+
+    def __init__(self, first_chunk: str, stall_seconds: float) -> None:
+        self._first = first_chunk
+        self._stall = stall_seconds
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        raise NotImplementedError
+
+    async def astream(self, messages, **kwargs):
+        yield AIMessageChunk(content=self._first)
+        import asyncio
+
+        await asyncio.sleep(self._stall)
+        yield AIMessageChunk(content=" done")
 
 
 class FailOnceModel:
@@ -239,3 +260,68 @@ class TestMalformedToolCallMarkupGuard:
 
         assert result.status == "completed"
         assert "deepseek" in result.final_text
+
+
+class TestStallWatchdogInLoop:
+    """runtime 流式卡流治理（冒烟实测收尾）：N 秒无 chunk → 瞬时 → fallback /
+    统一失败兜底。watchdog 本体契约见 tests/model/test_stall_watchdog.py。"""
+
+    def _stall_runtime(
+        self, primary, fallback, idle_timeout: float = 0.2,
+        total_timeout: float = 0.0,
+    ) -> AgentRuntime:
+        return AgentRuntime(
+            model=primary, registry=_registry(), executor=ToolExecutor(_registry()),
+            max_steps=10,
+            fallback_model=fallback,
+            primary_model_name="primary-model",
+            fallback_model_name="fallback-model",
+            stream_idle_timeout=idle_timeout,
+            stream_total_timeout=total_timeout,
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_stall_switches_to_fallback_and_completes(self, tmp_path):
+        """primary 流卡死 → watchdog 断流 → fallback 接管 → run 完成 + 事件。"""
+        primary = _StalledStreamModel(first_chunk="partial ", stall_seconds=99.0)
+        fallback = ScriptedModel([AIMessage(content="fallback 接管完成")])
+        runtime = self._stall_runtime(primary, fallback)
+        session = make_session(tmp_path)
+
+        final_text = ""
+        async for event in runtime.run_stream(session, "你好"):
+            if event.type == "model/delta":
+                final_text += event.data["delta"]
+
+        assert "fallback 接管完成" in final_text
+        events = [e for e in session._events if e.type == MODEL_FALLBACK]
+        assert len(events) == 1
+        assert events[0].data["reason"] == "ModelStallError"
+        assert events[0].data["from_model"] == "primary-model"
+
+    @pytest.mark.asyncio
+    async def test_stream_stall_without_fallback_fails_run(self, tmp_path):
+        """未配 fallback：卡流 → watchdog 断流 → 统一失败兜底（不挂死）。"""
+        primary = _StalledStreamModel(first_chunk="partial ", stall_seconds=99.0)
+        runtime = self._stall_runtime(primary, None)
+        session = make_session(tmp_path)
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == "failed"
+        assert any(e.type == MODEL_FAILED for e in session._events)
+        assert not any(e.type == MODEL_FALLBACK for e in session._events)
+
+    @pytest.mark.asyncio
+    async def test_stall_disabled_keeps_old_behavior(self, tmp_path):
+        """stall_timeout=0 → 看门狗关闭：慢流原样通过（旧行为）。"""
+        primary = _StalledStreamModel(first_chunk="slow", stall_seconds=0.3)
+        runtime = self._stall_runtime(primary, None, idle_timeout=0)
+        session = make_session(tmp_path)
+
+        final_text = ""
+        async for event in runtime.run_stream(session, "你好"):
+            if event.type == "model/delta":
+                final_text += event.data["delta"]
+
+        assert final_text == "slow done"

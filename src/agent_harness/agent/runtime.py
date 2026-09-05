@@ -230,6 +230,8 @@ class AgentRuntime:
         fallback_policy: FallbackPolicy | None = None,
         primary_model_name: str = "primary",
         fallback_model_name: str = "fallback",
+        stream_idle_timeout: float = 0.0,
+        stream_total_timeout: float = 0.0,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -242,6 +244,10 @@ class AgentRuntime:
         self._fallback_policy = fallback_policy or TwoLevelFallbackPolicy()
         self._primary_model_name = primary_model_name
         self._fallback_model_name = fallback_model_name
+        # 流式守卫（秒，逐项 ≤0 关闭）：idle=死连接，total=慢滴漏——所有 run
+        # 都受保护（无 fallback 时走统一失败兜底），见 model/stall.py。
+        self._stream_idle_timeout = stream_idle_timeout
+        self._stream_total_timeout = stream_total_timeout
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
@@ -342,16 +348,17 @@ class AgentRuntime:
         # 同错熔断护栏：每 run 一个新实例（注入或新建）；计数不跨 run 累积。
         guard = self._failure_guard or RepeatedToolFailureGuard()
         guard.reset()
-        # Model Fallback：每 run 一个新 coordinator（切换状态不跨 run 共享）；
-        # 未配 fallback 时为 None，调用路径保持原样。
-        model_coord: ModelFallbackCoordinator | None = None
-        if self._fallback_model is not None:
-            model_coord = ModelFallbackCoordinator(
-                primary=self.model, fallback=self._fallback_model,
-                policy=self._fallback_policy,
-                primary_name=self._primary_model_name,
-                fallback_name=self._fallback_model_name,
-            )
+        # Model Fallback + 卡流看门狗：每 run 一个新 coordinator（切换状态
+        # 不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator 退化为
+        # 透传（异常原样上抛），但 stall 看门狗对所有 run 生效。
+        model_coord = ModelFallbackCoordinator(
+            primary=self.model, fallback=self._fallback_model,
+            policy=self._fallback_policy,
+            primary_name=self._primary_model_name,
+            fallback_name=self._fallback_model_name,
+            idle_timeout=self._stream_idle_timeout,
+            total_timeout=self._stream_total_timeout,
+        )
         run_span = new_span_id()
         try:
             # 写入 user 消息事件
@@ -400,8 +407,8 @@ class AgentRuntime:
                 llm_started = time.perf_counter()
 
                 # 在途标记：从发起调用到聚合完成，此间抛错按 model/failed 归因。
-                # 配了 fallback 时由 coordinator 编排：瞬时失败内部切换重试，
-                # 非瞬时/无 fallback 时异常照常上抛走统一失败兜底。
+                # coordinator 统一编排（含 stall 看门狗）：瞬时失败内部切换
+                # 重试，非瞬时/无 fallback 时异常照常上抛走统一失败兜底。
                 terminal.model_call_open = True
                 if stream:
                     # 流式：逐 chunk yield model/delta，聚合回完整 AIMessage
@@ -411,8 +418,7 @@ class AgentRuntime:
                         run_id=run_id, step_id=steps + 1,
                     )
                     collected: list[AIMessageChunk] = []
-                    stream_source = model_coord if model_coord is not None else self.model
-                    async for chunk in stream_source.astream(messages):
+                    async for chunk in model_coord.astream(messages):
                         collected.append(chunk)
                         delta_text = _extract_text(chunk.content)
                         if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
@@ -434,10 +440,7 @@ class AgentRuntime:
                     else:
                         ai = AIMessage(content="")
                 else:
-                    if model_coord is not None:
-                        ai = await model_coord.ainvoke(messages)
-                    else:
-                        ai = await self.model.ainvoke(messages)
+                    ai = await model_coord.ainvoke(messages)
                 # R6-2（用户拍板）：空响应不是成功——content 与 tool_calls 双空
                 # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
                 # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），

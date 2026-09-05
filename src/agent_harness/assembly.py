@@ -160,6 +160,8 @@ async def build_runtime(
         ),
         memory_writer=wiring.memory_writer,
         fallback_model=fallback_model,
+        stream_idle_timeout=settings.model_stream_idle_timeout,
+        stream_total_timeout=settings.model_stream_total_timeout,
         primary_model_name=config.model_name,
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
