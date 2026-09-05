@@ -13,6 +13,7 @@ from agent_harness.session import (
     TOOL_CALL,
     USER_MESSAGE,
     JsonlSessionStore,
+    Session,
     SessionEvent,
 )
 
@@ -195,3 +196,24 @@ class TestJsonlSessionStore:
 
         assert len(store.read_events("s1")) == 2
         assert len(store.read_events("s2")) == 1
+
+
+def test_append_event_fsyncs_for_power_loss_durability(tmp_path, monkeypatch):
+    """断电不丢（用户决策 D9→实施）：append 必须落 os.fsync，不只是 flush。
+
+    flush 只保证进程内缓冲进 OS page cache——断电时 page cache 丢失，
+    已"成功"的事件消失。fsync 把数据真正压到磁盘。
+    """
+    import os as _os
+
+    store = JsonlSessionStore(root=tmp_path)
+    fsynced: list[int] = []
+    real_fsync = _os.fsync
+    monkeypatch.setattr(_os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+
+    session = Session.start(store)
+    session.append(USER_MESSAGE, {"content": "hi"})
+
+    assert fsynced, "append_event 未调用 os.fsync"
+    events = store.read_events(session.session_id)
+    assert events[-1].type == USER_MESSAGE

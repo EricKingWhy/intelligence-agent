@@ -96,13 +96,17 @@ class Session:
         store: JsonlSessionStore,
         *,
         agent_id: str = "default",
+        session_id: str | None = None,
         workspace_registry: WorkspaceRegistry | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
         提供 workspace_registry 时，自动创建/绑定 Sandbox 实例到 session.sandbox。
+        session_id 允许调用方预生成（web 层"先组装 runtime 后建 Session"的顺序
+        需要：_build_runtime 要以 session_id 装配 S3 artifact 命名空间，组装失败
+        时不能留下任何已落盘的孤儿 session——R6-6）。
         """
-        session_id = str(uuid4())
+        session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
             sandbox = workspace_registry.create(session_id)

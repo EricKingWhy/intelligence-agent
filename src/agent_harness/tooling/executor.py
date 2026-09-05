@@ -45,7 +45,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
-from agent_harness.session import Session
+from agent_harness.session import TOOL_CALL, Session, run_context_var
 from agent_harness.storage import (
     Operation,
     OperationContext,
@@ -105,6 +105,9 @@ class ToolExecution(BaseModel):
 
     tool_call_id: str
     result: ToolResult
+    # OverflowHandler 产出的延迟会话事件 (event_type, data)：Runtime 在
+    # tool/call 落盘之后追加（R6-7，消除 artifact/created 前向引用）。
+    pending_events: list[tuple[str, dict[str, Any]]] = []
 
 
 class ToolExecutor:
@@ -244,9 +247,10 @@ class ToolExecutor:
 
         # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
         # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
+        deferred_events: list[tuple[str, dict[str, Any]]] = []
         if self._overflow_handler is not None:
             assert session is not None
-            result = await self._overflow_handler.maybe_overflow(
+            result, deferred_events = await self._overflow_handler.maybe_overflow(
                 session, tool_call_id, name, result,
             )
 
@@ -261,7 +265,8 @@ class ToolExecutor:
                 artifact_ref=result.artifact_ref,
             )
             self._maybe_kill("terminal", tool_call_id)
-        return ToolExecution(tool_call_id=tool_call_id, result=result)
+        return ToolExecution(tool_call_id=tool_call_id, result=result,
+                             pending_events=deferred_events)
 
     def _maybe_kill(self, stage: str, tool_call_id: str) -> None:
         """精确故障注入点（#32 Kill 集成测试专用；生产 kill_hook=None 行为不变）。
@@ -329,26 +334,66 @@ class ToolExecutor:
                     # 会随 raise 一起从诊断视野里消失——一次基础设施故障常伴随
                     # 多个连锁失败，只看第一个会误判根因。这里补日志线索。
                     self._log_secondary_exceptions(results, tool_calls)
+                    # 已完成执行的 committed 事件（TOOL_CALL + artifact/created）
+                    # 必须在异常传播前落盘，不能随异常一起消失（R6-7）。
+                    self._flush_committed_events(results, tool_calls, session)
                     raise result
             return results
 
         # serial：永久失败后停止真实执行，剩余调用返回并持久化 CANCELLED。
         executions: list[ToolExecution] = []
-        for index, tool_call in enumerate(tool_calls):
-            execution = await self.execute(
-                tool_call, operation_context=operation_context, session=session
-            )
-            executions.append(execution)
-            if execution.result.ok:
-                continue
-            for remaining in tool_calls[index + 1 :]:
-                executions.append(
-                    await self._cancel_without_execution(
-                        remaining, operation_context=operation_context
-                    )
+        try:
+            for index, tool_call in enumerate(tool_calls):
+                execution = await self.execute(
+                    tool_call, operation_context=operation_context, session=session
                 )
-            break
-        return executions
+                executions.append(execution)
+                if execution.result.ok:
+                    continue
+                for remaining in tool_calls[index + 1 :]:
+                    executions.append(
+                        await self._cancel_without_execution(
+                            remaining, operation_context=operation_context
+                        )
+                    )
+                break
+            return executions
+        except BaseException:
+            # 存储故障等真实异常传播前，已完成执行的 committed 事件先落盘（R6-7）。
+            self._flush_committed_events(
+                executions, tool_calls[: len(executions)], session
+            )
+            raise
+
+    def _flush_committed_events(
+        self,
+        results: list[ToolExecution | BaseException],
+        tool_calls: list[ToolCall | dict[str, Any]],
+        session: Any,
+    ) -> None:
+        """批次异常传播前，把已完成执行的 TOOL_CALL 与延迟事件落盘（R6-7）。
+
+        artifact 已写存储、Ledger 已终态——事件若随异常一起丢弃，store 里的
+        artifact 就成了无引用孤儿（旧缺陷：partial batch 失败丢已提交的
+        artifact/created 事件）。TOOL_CALL 一并补齐：正常路径由 Runtime 在结果
+        循环追加，异常路径永远到不了那里。run 归因经 run_context_var（executor
+        没有 run 上下文参数）；无 session 时（纯执行场景）无事可做。
+        """
+        if session is None:
+            return
+        run_id = run_context_var.get()
+        for tool_call, result in zip(tool_calls, results):
+            if isinstance(result, BaseException):
+                continue
+            call = ToolCall.normalize(tool_call)
+            session.append(
+                TOOL_CALL,
+                {"tool_call_id": result.tool_call_id, "tool_name": call.name,
+                 "args": call.args},
+                run_id=run_id,
+            )
+            for event_type, data in result.pending_events:
+                session.append(event_type, data, run_id=run_id)
 
     @staticmethod
     def _log_secondary_exceptions(

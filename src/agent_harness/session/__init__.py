@@ -56,3 +56,5 @@ __all__ = [
     "derive_messages",
     "detect_dangling",
 ]
+
+from agent_harness.session.context import run_context_var

@@ -51,6 +51,7 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
     SessionEvent,
+    run_context_var,
 )
 from agent_harness.storage import (
     CheckpointBoundary,
@@ -142,7 +143,12 @@ class AgentRuntime:
         # 使用未绑定工具的原始 Provider 生成摘要，不让摘要调用请求工具。
         self._context_builder = context_builder or ContextBuilder(model, context_providers=context_providers)
         if context_builder is not None and context_providers:
-            self._context_builder.context_providers.extend(context_providers)
+            # 双入口注入按身份去重：同一 provider 实例已在 builder 列表里时跳过
+            # ——否则每 build 重复执行（重复注入内容 + 双倍搜索/超时风险）。
+            existing_ids = {id(p) for p in self._context_builder.context_providers}
+            self._context_builder.context_providers.extend(
+                p for p in context_providers if id(p) not in existing_ids
+            )
         self._memory_writer = memory_writer
 
         # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
@@ -229,6 +235,10 @@ class AgentRuntime:
             await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
             run_id = session.begin_run()
+            # run 归因上下文（R3-7）：memory/context provider 等低层模块在
+            # 事件降级时需要 run_id 对账，经 contextvar 传递（task 作用域，
+            # 随请求 task 结束自然消亡），不改变 Provider 协议签名。
+            run_context_var.set(run_id)
             # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
             run_started = next(e for e in session.since(memory_event_start) if e.type == RUN_STARTED)
             yield to_agent_event(run_started)
@@ -435,6 +445,15 @@ class AgentRuntime:
                         run_id=run_id, step_id=steps,
                     )
                     yield to_agent_event(call_event)
+                    # OverflowHandler 的延迟事件（artifact/created 等）：在
+                    # tool/call 落盘之后、tool/result 之前追加（R6-7）——
+                    # 消除事件日志中"artifact 引用尚未存在的 tool_call"的前向引用。
+                    for deferred_type, deferred_data in execution.pending_events:
+                        deferred_event = session.append(
+                            deferred_type, deferred_data,
+                            run_id=run_id, step_id=steps,
+                        )
+                        yield to_agent_event(deferred_event)
                     result_event = session.append(
                         TOOL_RESULT,
                         {"tool_call_id": execution.tool_call_id, "content": content},

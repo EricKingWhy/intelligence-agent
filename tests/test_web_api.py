@@ -557,3 +557,22 @@ def test_get_events_rejects_path_traversal(tmp_path):
     for malicious in ("..%5C..%5Cescape", "..%5Cvictim", "a%5Cb", "C:%5Cabs"):
         resp = client.get(f"/api/sessions/{malicious}/events")
         assert resp.status_code == 422, f"{malicious!r}: {resp.status_code}"
+
+
+# ── B 组加固（R6-6）：runtime 组装失败不留孤儿 session ──
+
+
+def test_create_session_runtime_failure_leaves_no_orphan(client, monkeypatch):
+    """_build_runtime 抛错时不得留下已落盘的孤儿 session（先组装后建 Session）。"""
+    def boom(*args, **kwargs):
+        raise RuntimeError("model constructor exploded")
+
+    monkeypatch.setattr("agent_harness.web.app._build_runtime", boom)
+    from fastapi.testclient import TestClient as _TC
+    raw_client = _TC(client.app, raise_server_exceptions=False)
+    store_root = client.app.state.agent.sessions_root
+    before = set(store_root.iterdir())
+    resp = raw_client.post("/api/sessions", json={"task": "t"})
+    assert resp.status_code == 500
+    after = set(store_root.iterdir())
+    assert before == after, f"留下了孤儿 session: {after - before}"

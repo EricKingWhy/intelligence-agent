@@ -13,6 +13,7 @@ import json
 import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
+from uuid import uuid4
 
 import anyio
 import jwt
@@ -413,18 +414,21 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         state = app.state.agent
 
         # 安全边界先行：workspace 名校验（422 拒绝）必须发生在任何 mkdir /
-        # Session 落盘之前——Session.start 会立刻持久化 session/started，
-        # 被拒请求不能留下孤儿 session 或目录。
+        # Session 落盘之前——被拒请求不能留下孤儿 session 或目录。
         workspace_name = _validate_workspace_name(state, req.workspace)
 
-        # 为这次 session 准备 workspace（每个 session 独立目录）
-        session = Session.start(state.store)
+        # 组装顺序（R6-6）：先建 workspace + runtime，最后才 Session.start 落盘。
+        # _build_runtime 需要 session_id 装配 S3 artifact 命名空间，因此预生成
+        # id 传入——此前 Session.start 先落盘、runtime 组装失败时客户端拿
+        # JSON 500 且 store 里留下只含 session/started 的孤儿 session。
+        session_id = str(uuid4())
         workspace = (state.workspaces_root / workspace_name if workspace_name is not None
-                     else state.workspaces_root / session.session_id)
+                     else state.workspaces_root / session_id)
         workspace.mkdir(parents=True, exist_ok=True)
 
         runtime = await _build_runtime(state, workspace, req.max_steps, req.auto_approve,
-                                       session_id=session.session_id)
+                                       session_id=session_id)
+        session = Session.start(state.store, session_id=session_id)
 
         async def event_generator():
             """SSE 事件源：消费 run_stream，转成 SSE 帧。

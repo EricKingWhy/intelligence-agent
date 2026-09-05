@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 from agent_harness.session.event import SessionEvent
@@ -35,13 +36,19 @@ class JsonlSessionStore:
         return self._session_dir(session_id) / "events.jsonl"
 
     def append_event(self, session_id: str, event: SessionEvent) -> None:
-        """向 Session 的 JSONL 追加一条事件（整行 + flush）。"""
+        """向 Session 的 JSONL 追加一条事件（整行 + flush + fsync）。
+
+        fsync 是断电不丢的底线（用户拍板的耐久性决策）：flush 只把进程缓冲
+        推到 OS page cache，断电即失；fsync 才真正落盘。代价是每次 append
+        一次磁盘同步——事件流是恢复的唯一真相源，宁慢不丢。
+        """
         path = self._events_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
             fh.flush()
+            os.fsync(fh.fileno())
 
     def read_events(self, session_id: str) -> list[SessionEvent]:
         """读取 Session 的全部有效事件，跳过无法解析的损坏行。

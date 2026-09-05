@@ -273,5 +273,13 @@ class LocalSubprocessSandbox(Sandbox):
         """no-op：本机进程不需要清理。幂等。"""
 
     def delete(self) -> None:
-        """彻底删除 workspace 目录。幂等（目录不存在也不报错）。"""
+        """彻底删除 workspace 目录。幂等（目录不存在也不报错）。
+
+        删除未完成（文件被锁/AV 占用等）时显式抛错——调用方（Registry）据
+        此保留映射以便重试，而不是留下无记录的孤儿目录（R8-6）。
+        """
         shutil.rmtree(self._workspace_root, ignore_errors=True)
+        if self._workspace_root.exists():
+            raise RuntimeError(
+                f"workspace {self._workspace_root} 删除未完成（文件被占用？），请重试"
+            )

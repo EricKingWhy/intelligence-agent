@@ -9,7 +9,7 @@ from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.memory.capability import MemoryCapability
 from agent_harness.memory.types import MemoryEntry, MemoryScope
-from agent_harness.session import Session
+from agent_harness.session import Session, run_context_var
 from agent_harness.session.event import MEMORY_DEGRADED
 
 logger = logging.getLogger(__name__)
@@ -50,9 +50,12 @@ class MemoryContextProvider:
         except Exception as exc:
             # 根因可观察：日志带完整异常；事件只带异常类型名（消息可能含凭证等敏感文本，
             # 与 writeback 的脱敏不变量一致——诊断靠日志，事件靠类型定位）。
+            # run_id 经 session 层 contextvar 归因（R3-7）：runtime 在 begin_run
+            # 后设置；不在 run 上下文中调用时为 None，事件照常落盘。
             logger.exception("Memory context provider search failed")
             session.append(
                 MEMORY_DEGRADED,
                 {"operation": "search", "reason": f"unavailable: {type(exc).__name__}"},
+                run_id=run_context_var.get(),
             )
             return []

@@ -6,6 +6,8 @@ SQLite 文件，逻辑上各自独立 contract（ADR-0004 Round 3 §三张表）
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,6 +23,24 @@ from agent_harness.storage.operation import (
     OperationState,
 )
 from agent_harness.storage.session_meta import SessionMeta, SessionMetaStore
+
+
+#: 每操作新连接模式下的连接级 PRAGMA：busy_timeout 让并发写等锁而不是立刻抛
+#: "database is locked"（aiosqlite/sqlite3 默认 5s，多 Store 共享同一文件时不够）。
+#: journal_mode=WAL 在 initialize 设置一次即可持久；busy_timeout 是 per-connection
+#: 的，必须随每个新连接设置（R4-5）。
+_BUSY_TIMEOUT_MS = 10_000
+
+
+@asynccontextmanager
+async def _connect(database_path: Path) -> AsyncIterator[aiosqlite.Connection]:
+    connection = await aiosqlite.connect(database_path)
+    try:
+        await connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        yield connection
+    finally:
+        await connection.close()
+
 
 _OPERATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS operations (
@@ -81,7 +101,7 @@ class SqliteOperationLedger(OperationLedger):
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_OPERATIONS_DDL)
             await connection.execute(
@@ -93,7 +113,7 @@ class SqliteOperationLedger(OperationLedger):
     async def create(self, operation: Operation) -> None:
         if operation.state is not OperationState.PENDING:
             raise ValueError("A new Operation must start in PENDING")
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             await connection.execute(
                 """
                 INSERT INTO operations (
@@ -120,7 +140,7 @@ class SqliteOperationLedger(OperationLedger):
             await connection.commit()
 
     async def get(self, tool_call_id: str) -> Operation | None:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM operations WHERE tool_call_id = ?", (tool_call_id,)
@@ -155,7 +175,7 @@ class SqliteOperationLedger(OperationLedger):
             }
             else None
         )
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             cursor = await connection.execute(
                 """
                 UPDATE operations
@@ -185,7 +205,7 @@ class SqliteOperationLedger(OperationLedger):
         return updated
 
     async def list_for_session(self, session_id: str) -> list[Operation]:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
@@ -240,7 +260,7 @@ class SqliteCheckpointStore(CheckpointStore):
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_CHECKPOINTS_DDL)
             await connection.execute(
@@ -250,7 +270,7 @@ class SqliteCheckpointStore(CheckpointStore):
             await connection.commit()
 
     async def save(self, checkpoint: Checkpoint) -> None:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             await connection.execute(
                 """
                 INSERT INTO checkpoints (
@@ -268,7 +288,7 @@ class SqliteCheckpointStore(CheckpointStore):
             await connection.commit()
 
     async def list_for_session(self, session_id: str) -> list[Checkpoint]:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
@@ -282,7 +302,7 @@ class SqliteCheckpointStore(CheckpointStore):
         return [self._to_checkpoint(row) for row in rows]
 
     async def latest(self, session_id: str) -> Checkpoint | None:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
@@ -314,13 +334,13 @@ class SqliteSessionMetaStore(SessionMetaStore):
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_SESSION_META_DDL)
             await connection.commit()
 
     async def upsert(self, meta: SessionMeta) -> SessionMeta:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             await connection.execute(
                 """
                 INSERT INTO session_meta (
@@ -345,7 +365,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
         return loaded
 
     async def get(self, session_id: str) -> SessionMeta | None:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM session_meta WHERE session_id = ?",
@@ -355,7 +375,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
         return self._to_meta(row) if row is not None else None
 
     async def set_archived(self, session_id: str, archived: bool = True) -> SessionMeta:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "UPDATE session_meta SET archived = ? WHERE session_id = ?",
                 (1 if archived else 0, session_id),
@@ -370,7 +390,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
     async def update_last_checkpoint_seq(
         self, session_id: str, event_seq: int
     ) -> SessionMeta:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "UPDATE session_meta SET last_checkpoint_seq = ? WHERE session_id = ?",
                 (event_seq, session_id),
@@ -383,7 +403,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
         return loaded
 
     async def cleanup(self, session_id: str) -> None:
-        async with aiosqlite.connect(self.database_path) as connection:
+        async with _connect(self.database_path) as connection:
             await connection.execute(
                 "DELETE FROM session_meta WHERE session_id = ?",
                 (session_id,),

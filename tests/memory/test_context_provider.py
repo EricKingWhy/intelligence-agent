@@ -250,3 +250,28 @@ async def test_search_failure_logs_root_cause_and_types_reason(tmp_path, caplog)
     assert degraded[0].data["reason"] == "unavailable: RuntimeError"
     assert "RuntimeError" in caplog.text
     assert "milvus-down-detail" not in str(degraded[0].data)
+
+
+@pytest.mark.asyncio
+async def test_degraded_event_carries_run_id(tmp_path):
+    """MEMORY_DEGRADED 必须带 run_id（R3-7 跨层对账）：事件要能定位到
+    具体哪一轮 run 的上下文构建发生了降级。run 上下文经 session 层的
+    contextvar 传递（runtime 设置、provider 读取），不改变 Provider 协议。"""
+    from agent_harness.session import RUN_STARTED
+
+    session = make_session(tmp_path)
+
+    class Broken:
+        async def search(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    provider = MemoryContextProvider(Broken())
+    registry = ToolRegistry()
+    runtime = AgentRuntime(ScriptedModel([AIMessage(content="done")]), registry,
+                           ToolExecutor(registry), context_providers=[provider])
+    await runtime.run(session, "hello")
+
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert len(degraded) == 1
+    run_started = next(e for e in session.events if e.type == RUN_STARTED)
+    assert degraded[0].run_id == run_started.run_id

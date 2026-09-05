@@ -1,13 +1,21 @@
 """全局运行配置：只定义"运行需要什么"，从 .env 读取。"""
 
+from pathlib import Path
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
+
+#: .env 锚定到仓库根（config.py 位于 <root>/src/agent_harness/）——
+#: 相对路径 ".env" 依赖 CWD，从其它目录启动 uvicorn/CLI 会静默加载不到
+#: 配置，错误推迟到首个请求内才爆（R6-5）。安装为 site-packages 时锚点
+#: 无意义但无害（该路径下不存在 .env，退化为环境变量配置）。
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     # extra="ignore"：部署机 .env 常混有编辑器/部署工具/其它应用的变量；
     # 默认 extra='forbid' 会把它们当成致命错误让启动直接崩。外键忽略。
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {"env_file": str(_REPO_ROOT / ".env"), "extra": "ignore"}
 
     model_provider: str = "deepseek"
     model_name: str = ""

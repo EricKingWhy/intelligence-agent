@@ -123,3 +123,53 @@ async def test_operations_schema_contains_frozen_columns(tmp_path: Path) -> None
     }
     assert columns["tool_call_id"][5] == 1
     assert columns["artifact_ref"][3] == 0
+
+
+# ── B 组加固（R4-5）：连接级并发 PRAGMA ──
+
+
+@pytest.mark.asyncio
+async def test_connect_sets_busy_timeout(tmp_path):
+    """每操作新连接模式下 busy_timeout 必须随连接设置——默认 0 会让并发写
+    立刻抛 database is locked（WAL 是持久 PRAGMA，busy_timeout 不是）。"""
+    from agent_harness.storage.sqlite import _connect
+
+    async with _connect(tmp_path / "busy.db") as connection:
+        cursor = await connection.execute("PRAGMA busy_timeout")
+        (value,) = await cursor.fetchone()
+    assert int(value) > 0
+
+
+@pytest.mark.asyncio
+async def test_ledger_methods_route_through_shared_connect(tmp_path, monkeypatch):
+    """Ledger 的所有连接必须经 _connect 助手（busy_timeout 在其中设置）——
+    直接 aiosqlite.connect 会绕过并发保护。"""
+    from contextlib import asynccontextmanager
+
+    from agent_harness.storage import sqlite as sqlite_mod
+
+    used: list[Path] = []
+    real_connect = sqlite_mod._connect
+
+    @asynccontextmanager
+    async def spy_connect(path):
+        used.append(Path(path))
+        async with real_connect(path) as connection:
+            yield connection
+
+    monkeypatch.setattr(sqlite_mod, "_connect", spy_connect)
+
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    operation = Operation(
+        tool_call_id="call-route",
+        session_id="session-route",
+        run_id="run-route",
+        agent_id="agent-1",
+        tool_name="write",
+        args_identity="{}",
+        state=OperationState.PENDING,
+        started_at="2026-09-05T00:00:00+00:00",
+    )
+    await ledger.create(operation)
+    assert used, "Ledger 连接未经过 _connect 助手"

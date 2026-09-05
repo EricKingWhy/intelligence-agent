@@ -201,9 +201,21 @@ def _drop_none(value: Any) -> Any:
 class JsonlFormatter(logging.Formatter):
     """把每条日志格式化成严格的一行 UTF-8 JSON。"""
 
+    # 已告警过的非法 event_type：formatter 在热路径上，每类型只告警一次。
+    _warned_unknown_types: set[str] = set()
+
     def format(self, record: logging.LogRecord) -> str:
         event_type = getattr(record, "event_type", "system_log")
         if event_type not in EVENT_TYPES:
+            # 旁路写入的拼错 event_type：归一成 system_log，但必须留告警痕迹
+            # ——静默改写会让诊断协议被无声旁路（R4-6）。
+            if event_type != "system_log" and event_type not in self._warned_unknown_types:
+                self._warned_unknown_types.add(event_type)
+                logging.getLogger("agent_harness.logging").warning(
+                    "未知 event_type %r（未注册白名单），已归一为 system_log；"
+                    "请检查是否绕过 log_event 直接写 extra",
+                    event_type,
+                )
             event_type = "system_log"
 
         entry: dict[str, Any] = {

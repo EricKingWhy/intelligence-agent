@@ -1,6 +1,7 @@
 """ToolResult 后处理：先完整保存，再返回摘要；不参与 Tool retry。"""
 
 import json
+from typing import Any
 from abc import ABC, abstractmethod
 
 from agent_harness.session import Session
@@ -13,8 +14,14 @@ class OverflowHandler(ABC):
     @abstractmethod
     async def maybe_overflow(
         self, session: Session, tool_call_id: str, tool_name: str, result: ToolResult,
-    ) -> ToolResult:
-        """完整保存大输出并返回摘要；未溢出时返回原对象。"""
+    ) -> tuple[ToolResult, list[tuple[str, dict[str, Any]]]]:
+        """完整保存大输出并返回摘要 + 待延迟追加的会话事件；未溢出时原对象返回。
+
+        返回 (result, deferred_events)，deferred_events 是 (event_type, data) 列表。
+        事件不在这里 append：Runtime 在 tool/call 落盘之后才追加（R6-7）——
+        handler 在 execute_batch 内运行，直接 append 会让 artifact/created
+        （含 tool_call_id）先于其 tool/call 持久化，事件日志出现前向引用。
+        """
 
 
 class ArtifactOverflowHandler(OverflowHandler):
@@ -39,14 +46,14 @@ class ArtifactOverflowHandler(OverflowHandler):
 
     async def maybe_overflow(
         self, session: Session, tool_call_id: str, tool_name: str, result: ToolResult,
-    ) -> ToolResult:
+    ) -> tuple[ToolResult, list[tuple[str, dict[str, Any]]]]:
         data = result.data or {}
         outputs = {**{key: data.get(key) for key in ("output", "content", "stdout", "stderr")},
                    "message": result.message}
         oversized = {key: value for key, value in outputs.items()
                      if isinstance(value, str) and len(value) > self._overflow_chars}
         if not oversized:
-            return result
+            return result, []
         # 单字段保持原始文本；多个大字段共用一个可完整还原的 JSON Artifact。
         content = (next(iter(oversized.values())) if len(oversized) == 1 else
                    json.dumps(oversized, ensure_ascii=False, indent=2))
@@ -57,16 +64,16 @@ class ArtifactOverflowHandler(OverflowHandler):
         )
         summaries = {key: self._summarize(value, artifact.artifact_id)
                      for key, value in oversized.items()}
-        session.append(ARTIFACT_CREATED, {
+        deferred = [(ARTIFACT_CREATED, {
             "artifact_id": artifact.artifact_id, "session_id": session.session_id,
             "source_tool": tool_name, "tool_call_id": tool_call_id,
             "size": artifact.size, "mime_type": artifact.mime_type,
-        })
+        })]
         message = summaries.pop("message", result.message)
         return result.model_copy(update={
             "artifact_ref": artifact.artifact_id, "message": message,
             "data": {**data, **summaries} if summaries else result.data,
-        })
+        }), deferred
 
     def _summarize(self, content: str, artifact_id: str) -> str:
         lines = content.splitlines()

@@ -61,7 +61,20 @@ class ToolCall:
 
     @classmethod
     def normalize_all(cls, tool_calls: Iterable[ToolCall | dict[str, Any]]) -> list[ToolCall]:
-        return [cls.normalize(tc) for tc in tool_calls]
+        """批量归一化 + id 去重：重复的非空 id 与缺 id 同样破坏下游
+        （Ledger 主键冲突、_validate_tool_blocks 拒绝投影 → session 永久
+        无法压缩）。保留首个原 id，其余合成 gen_ 唯一占位（与缺 id 同策略）。"""
+        normalized: list[ToolCall] = []
+        seen: set[str] = set()
+        for tc in tool_calls:
+            call = cls.normalize(tc)
+            if call.id in seen:
+                call = ToolCall(
+                    id=f"gen_{uuid.uuid4().hex[:12]}", name=call.name, args=call.args,
+                )
+            seen.add(call.id)
+            normalized.append(call)
+        return normalized
 
 
 class ToolSideEffect(str, Enum):

@@ -111,3 +111,94 @@ async def test_partial_batch_failure_still_emits_committed_artifact(tmp_path, pa
     assert emitted[-1].type == "run/failed"
     assert "artifact/created" in [e.type for e in emitted]
     assert sandbox.exec.call_count == 2
+
+
+# ── B 组加固（R6-8）：双入口注入不得重复执行 provider ──
+
+
+@pytest.mark.asyncio
+async def test_context_providers_not_duplicated_when_builder_given(tmp_path):
+    """同时传 context_builder 和 context_providers 时，provider 不得被注入两次。
+
+    此前直接 extend——同一 provider 每 build 跑两次（重复注入内容 + 双倍
+    内存搜索/超时风险）。按身份去重：已在 builder 列表里的实例跳过。
+    """
+    model = ScriptedModel([AIMessage(content="done")])
+    session = make_session(tmp_path)
+
+    class _CountingProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def select(self, session, token_budget):
+            self.calls += 1
+            return []
+
+    provider = _CountingProvider()
+    builder = ContextBuilder(model, context_providers=[provider])
+    runtime = AgentRuntime(model, ToolRegistry(), ToolExecutor(ToolRegistry()),
+                           context_builder=builder, context_providers=[provider])
+    await runtime.run(session, "hi")
+    assert provider.calls == 1, f"provider 被执行了 {provider.calls} 次"
+
+
+# ── B 组加固（R6-7）：artifact/created 落在 tool/call 之后 ──
+
+
+@pytest.mark.asyncio
+async def test_artifact_created_lands_after_tool_call(tmp_path):
+    """事件顺序契约：tool/call → artifact/created → tool/result。
+
+    OverflowHandler 在 execute_batch 内保存 artifact，但事件必须延迟到
+    tool/call 落盘之后追加——否则事件日志里 artifact 引用一个尚未存在的
+    tool_call（前向引用），消费者按 tool_call_id 对账会扑空。
+    """
+    from typing import Annotated
+
+    from pydantic import BaseModel as _BaseModel, Field as _Field
+
+    from agent_harness.storage.artifact import FakeArtifactStore
+    from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
+    from agent_harness.tooling.overflow import ArtifactOverflowHandler
+
+    class _Args(_BaseModel):
+        size: Annotated[int, _Field(ge=1)]
+
+    class BigOutput(Tool):
+        @property
+        def name(self) -> str:
+            return "big_output"
+
+        @property
+        def description(self) -> str:
+            return "产出超预算输出的只读工具。"
+
+        @property
+        def args_schema(self) -> type[_BaseModel]:
+            return _Args
+
+        @property
+        def side_effect(self) -> ToolSideEffect:
+            return ToolSideEffect.READ_ONLY
+
+        async def execute(self, args: _Args) -> ToolResult:
+            return ToolResult.success("ok", data={"output": "x" * args.size})
+
+    session = make_session(tmp_path)
+    registry = ToolRegistry()
+    registry.register(BigOutput())
+    runtime = AgentRuntime(
+        ScriptedModel([
+            AIMessage(content="", tool_calls=[
+                {"id": "c1", "name": "big_output",
+                 "args": {"size": 5000}, "type": "tool_call"},
+            ]),
+            AIMessage(content="done"),
+        ]),
+        registry,
+        ToolExecutor(registry, overflow_handler=ArtifactOverflowHandler(FakeArtifactStore())),
+    )
+    await runtime.run(session, "run")
+
+    types = [e.type for e in session.events]
+    assert types.index("tool/call") < types.index("artifact/created") < types.index("tool/result"), types

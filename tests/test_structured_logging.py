@@ -159,3 +159,27 @@ async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
     assert entries[3]["error_type(错误类型)"] == "TimeoutError"
     assert "stack_trace(调用栈)" in entries[3]
     assert entries[-1]["outcome(结果)"] == "failure"
+
+
+# ── B 组加固：formatter 对未知 event_type 显式告警（R4-6）──
+
+
+def test_formatter_warns_on_unknown_event_type(caplog):
+    """绕过 log_event 直接写 extra 的拼错 event_type：仍归一成 system_log，
+    但必须发一条 warning（此前静默改写——诊断协议被旁路时无任何痕迹）。"""
+    import json
+    import logging as std_logging
+
+    from agent_harness.logging import JsonlFormatter
+
+    formatter = JsonlFormatter()
+    record = std_logging.LogRecord(
+        "agent_harness.test", std_logging.INFO, __file__, 1,
+        "msg", None, None,
+    )
+    record.event_type = "llm_cal"  # 拼错：不在 EVENT_TYPES 白名单
+    formatted = formatter.format(record)
+    assert json.loads(formatted)["event_type(事件类型)"] == "system_log"
+    warnings = [r for r in caplog.records if r.levelno == std_logging.WARNING
+                and "llm_cal" in r.getMessage()]
+    assert warnings, "未知 event_type 必须产生告警"

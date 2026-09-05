@@ -68,3 +68,21 @@ async def test_executor_accepts_toolcall_objects():
 
     bad_args = await executor.execute(ToolCall(id="c2", name="ghost", args={}))
     assert bad_args.result.error_code == ErrorCode.TOOL_NOT_FOUND
+
+
+def test_normalize_all_dedupes_duplicate_nonempty_ids():
+    """模型吐两条相同非空 id 的 tool_call 时必须去重（重复合成唯一占位）。
+
+    重复 id 与缺 id 同样破坏下游：Ledger 主键冲突、_validate_tool_blocks 拒绝
+    投影（session 越过阈值后永久 context_window_exceeded）。与缺 id 同一策略：
+    保留首个、其余合成 gen_ 唯一占位。
+    """
+    calls = ToolCall.normalize_all([
+        {"id": "c1", "name": "a", "args": {}},
+        {"id": "c1", "name": "b", "args": {}},
+        {"id": "c2", "name": "c", "args": {}},
+    ])
+    ids = [c.id for c in calls]
+    assert ids[0] == "c1" and ids[2] == "c2"
+    assert ids[1].startswith("gen_") and ids[1] != ids[0]
+    assert len(set(ids)) == 3
