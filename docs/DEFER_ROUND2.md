@@ -275,3 +275,105 @@ extra={"event_type": "...拼错..."})` 会被 formatter 静默归到 system_log�
 为告警模式属诊断协议变更，影响面需评估。
 
 **重启条件**：出现真实旁路写入拼错 event_type 的案例。
+
+## R6-1. 压缩结果不缓存：每步重建投影 + 重复跑摘要 LLM（设计级）
+
+**位置**：`src/agent_harness/context/builder.py:41-61` + `agent/runtime.py:225`
+
+**现状**：CONTEXT_COMPACTED 只持久化元数据不含摘要内容，derive_messages 忽略
+该事件；run 内每一步都重投影全量历史并重跑一次摘要 LLM（30s 超时预算），
+同轮内模型可见上下文可能每次不同（摘要重新生成）。usage_total 也不含摘要调用。
+
+**为何 DEFER**：缓存失效键（event mark）或"摘要消息持久化"是 derive/事件模型
+层面的设计变更，牵动 replay/resume 语义。
+
+**重启条件**：多步长会话的摘要 LLM 成本/延迟成为实测瓶颈，或 Primary 决定
+把摘要内容作为一等事件持久化。
+
+## R6-2. 零 chunk 流被当成"成功完成"（协议语义待定）
+
+**位置**：`src/agent_harness/agent/runtime.py:266-275,337-356`
+
+**现状**：provider 流吐 0 chunk（内容过滤/上游静默失败）时聚合为空 AIMessage，
+按 completed + final_text="" 收尾；SSE 客户端无法区分"模型答了空话"与"上游失败"。
+
+**为何 DEFER**：把空完成改为 model/failed 是主 SSE 契约的行为变更，影响前端
+消费语义，需 Primary 确认（也牵涉聚合后 content 与 tool_calls 双空的判定规则）。
+
+**重启条件**：Primary 确认空完成应视为失败；或出现真实 provider 零流案例。
+
+## R6-3. 重复非空 tool_call id 让 compaction 永久失败（边界归属待定）
+
+**位置**：`tooling/contract.py:ToolCall.normalize` vs `context/compactor.py:_validate_tool_blocks`
+
+**现状**：模型吐两条相同非空 id 的 tool_call 时，normalize 只补空 id 不去重，
+_validate_tool_blocks 按"expected id 集合不重复"拒绝投影——越过阈值后 session
+永久 context_window_exceeded。
+
+**为何 DEFER**：去重边界需设计决策（derive 层改写历史 vs normalize 层合成新 id
+vs compaction 层跳过坏块），牵动 tool_call_id 一致性不变量，不宜顺手改。
+
+**重启条件**：真实模型/网关吐重复 id 的案例，或 Primary 指定归一层。
+
+## R6-4. JWT_SECRET 未配置时静默关闭身份校验（安全策略待定）
+
+**位置**：`src/agent_harness/web/app.py:307` + `config.py`
+
+**现状**：`if settings.jwt_secret and authorization:` ——未配置 jwt_secret（默认值）
+时任何带 Authorization 的请求都被当 trusted "local" 身份放行且无告警日志；
+配合 allow_origins=["*"] 等于把 agent API 开放给任意网页。
+
+**为何 DEFER**：fail-closed 是部署策略变更（本地开发场景会直接不可用），需要
+Primary 决定"未配置即拒绝启动"还是"启动横幅告警"还是"仅非本地模式 fail-closed"。
+
+**重启条件**：进入真实部署/多租户阶段，或 Primary 拍板策略。
+
+## R6-5. env_file 相对路径依赖 CWD（部署约定）
+
+**位置**：`src/agent_harness/config.py:8`
+
+**现状**：`.env` 按 CWD 解析；从其它目录启动 uvicorn/CLI 时静默加载不到配置，
+错误推迟到首个请求内 ConfigError（HTTP 500）。
+
+**为何 DEFER**：改为包根锚定或启动期 fail-loud 是部署约定变更，影响现有
+启动脚本与 worktree 约定（AGENTS.md §13）。
+
+**重启条件**：出现真实"从错误目录启动导致配置丢失"的部署事故。
+
+## R6-6. create_session 组装顺序：runtime 构建失败留下孤儿 session（SSE 帧协议）
+
+**位置**：`src/agent_harness/web/app.py:377-414`
+
+**现状**：Session.start → workspace.mkdir → _build_runtime 任一抛错时客户端拿
+JSON 500 而非 SSE error 帧，且 store 里留下只含 session/started 的孤儿 session
+与空 workspace 目录。
+
+**为何 DEFER**：正确修法（先组装后建 session，或错误转终端 SSE 帧）牵动
+session 生命周期与 SSE 协议，属接口设计。
+
+**重启条件**：SSE 错误帧协议统一设计时一并处理。
+
+## R6-7. ARTIFACT_CREATED 先于 TOOL_CALL 落盘（事件顺序协议）
+
+**位置**：`tooling/overflow.py:60-62` vs `agent/runtime.py:392-415`
+
+**现状**：executor 跟踪 ledger 时 ARTIFACT_CREATED（含 tool_call_id）在
+execute_batch 内追加，早于该轮 MODEL_COMPLETED/TOOL_CALL 持久化——日志消费者
+看到前向引用。
+
+**为何 DEFER**：修法（缓冲 overflow 事件 vs 先写 TOOL_CALL）改变事件发射协议，
+影响 replay 语义与现有测试。
+
+**重启条件**：事件顺序协议统一评审时处理。
+
+## R6-8. runtime 双入口注入 context_providers 可能重复执行（API 契约）
+
+**位置**：`src/agent_harness/agent/runtime.py:137-139`
+
+**现状**：同时传 context_builder 与 context_providers 时，provider 列表直接
+extend 到 builder 已有列表，无去重——同一 provider 每 build 跑两次。
+
+**为何 DEFER**：正确语义（报错拒绝 vs 忽略 providers vs 按身份去重）是 API
+契约决策，当前无真实调用方踩中。
+
+**重启条件**：出现组合传参的真实调用方，或 Primary 定 API 契约。

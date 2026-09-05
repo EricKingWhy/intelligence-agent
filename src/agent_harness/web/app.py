@@ -309,7 +309,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 scheme, encoded = authorization.split(" ", 1)
                 if scheme.lower() != "bearer":
                     raise ValueError("Expected Bearer token")
-                claims = jwt.decode(encoded, settings.jwt_secret, algorithms=["HS256"],
+                # SecretStr 取明文给 jwt.decode；truthiness 判断仍基于密钥值
+                # （SecretStr("") 为 falsy，未配置语义不变）。
+                claims = jwt.decode(encoded, settings.jwt_secret.get_secret_value(),
+                                    algorithms=["HS256"],
                                     options={"require": ["tenant_id", "user_id"]})
                 tenant, user = claims["tenant_id"], claims["user_id"]
                 scopes = claims.get("scopes", ["user", "session"])

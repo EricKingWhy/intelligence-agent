@@ -5,7 +5,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = {"env_file": ".env"}
+    # extra="ignore"：部署机 .env 常混有编辑器/部署工具/其它应用的变量；
+    # 默认 extra='forbid' 会把它们当成致命错误让启动直接崩。外键忽略。
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
     model_provider: str = "deepseek"
     model_name: str = ""
@@ -15,7 +17,8 @@ class Settings(BaseSettings):
     model_base_url: str = ""
 
     temperature: float = 0.2
-    jwt_secret: str | None = None
+    # jwt_secret 泄漏等于可伪造任意身份，与 API key 同一脱敏待遇。
+    jwt_secret: SecretStr | None = None
     milvus_uri: str = ""
     milvus_token: SecretStr = SecretStr("")
     milvus_collection: str = ""
@@ -30,8 +33,9 @@ class Settings(BaseSettings):
     artifact_overflow_chars: int = 2000
     artifact_store_endpoint: str = ""
     artifact_store_bucket: str = ""
-    artifact_store_access_key: str = ""
-    artifact_store_secret_key: str = ""
+    # S3 密钥泄漏等于丢失整个 artifact bucket 的写权限，同一脱敏待遇。
+    artifact_store_access_key: SecretStr = SecretStr("")
+    artifact_store_secret_key: SecretStr = SecretStr("")
     artifact_store_region: str = ""
 
     # Capability / Plugin 显式配置（spec 08 §6 V1）：JSON 字符串，

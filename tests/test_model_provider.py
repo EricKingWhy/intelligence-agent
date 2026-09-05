@@ -73,6 +73,20 @@ class TestCreateChatModel:
         model = create_chat_model(config)
         assert model.temperature == 0.7
 
+    def test_client_timeout_and_retries_are_explicit(self):
+        """chat 模型客户端必须显式声明 timeout 与 max_retries。
+
+        缺省时 openai SDK 默认 request_timeout=600s、max_retries=2：
+        一次挂死的 provider 调用最坏拖 ~30 分钟（600s × 3 次尝试），SSE 客户端
+        只能干等；且 SDK 静默重试与 cli.py 记录的 attempt=1/max_attempts=1
+        相互矛盾——重试语义必须由 Harness 单一责任域拥有（不变量 #8/#9），
+        与 memory/embeddings.py 的 request_timeout=15, max_retries=0 同一原则。
+        """
+        config = ModelConfig.from_settings(make_settings(model_provider="deepseek"))
+        model = create_chat_model(config)
+        assert model.max_retries == 0
+        assert model.request_timeout is not None and model.request_timeout > 0
+
 # ── model_api_key 脱敏（Round 4 安全加固）──
 
 
@@ -92,6 +106,56 @@ class TestApiKeyHandling:
         assert dumped["milvus_token"] != "real"  # 同类字段参照
         # 但 SecretStr 仍可拿到明文（运行期正常使用）。
         assert settings.model_api_key.get_secret_value() == "sk-live-key"
+
+    def test_settings_remaining_secrets_are_secretstr(self):
+        """jwt_secret 与 artifact_store 密钥同样脱敏（Round 4 加固补全）。
+
+        这三个字段是活密钥：jwt_secret 泄漏等于伪造任意身份，S3 密钥泄漏等于
+        丢失整个 artifact bucket 的写权限。与 model_api_key 同一待遇。
+        """
+        settings = Settings(
+            jwt_secret="jwt-live-secret",
+            artifact_store_access_key="ak-live",
+            artifact_store_secret_key="sk-live",
+            _env_file=None,
+        )
+        dumped = settings.model_dump(mode="json")
+        assert dumped["jwt_secret"] != "jwt-live-secret"
+        assert dumped["artifact_store_access_key"] != "ak-live"
+        assert dumped["artifact_store_secret_key"] != "sk-live"
+        # 运行期仍可取明文。
+        assert settings.jwt_secret.get_secret_value() == "jwt-live-secret"
+
+    def test_settings_ignores_foreign_env_keys(self):
+        """.env 里出现非本应用配置的键不应让启动直接崩溃。
+
+        pydantic-settings 默认 extra='forbid'：部署机上 .env 常混有编辑器 /
+        部署工具 / 其它应用的变量，启动时抛 "Extra inputs are not permitted"
+        属于把无关环境污染当成致命错误。应忽略而不是拒绝。
+        """
+        settings = Settings(some_unrelated_deploy_var="x", _env_file=None)
+        assert settings.model_provider == "deepseek"  # 正常字段不受影响
+
+    def test_model_config_repr_redacts_api_key(self):
+        """ModelConfig 持有明文 key，repr / vars 必须脱敏——否则任何调试/日志路径
+        （pytest 失败局部变量、repr(config)、vars(config)）都会回显 live key。
+        """
+        config = ModelConfig(
+            provider="deepseek", model_name="deepseek-chat",
+            api_key="sk-live-key", base_url="https://api.deepseek.com",
+            temperature=0.2,
+        )
+        assert "sk-live-key" not in repr(config)
+        assert "sk-live-key" not in str(vars(config))
+
+    def test_model_config_rejects_blank_api_key(self):
+        """直接构造 ModelConfig 时空白 key 快速失败，不推迟到首次 ainvoke。"""
+        with pytest.raises(ConfigError, match="API key"):
+            ModelConfig(
+                provider="deepseek", model_name="deepseek-chat",
+                api_key="  ", base_url="https://api.deepseek.com",
+                temperature=0.2,
+            )
 
 
 # ── 空 api_key 快速失败（Round 4 健壮性）──

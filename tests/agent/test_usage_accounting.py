@@ -129,3 +129,33 @@ async def test_missing_usage_is_omitted_never_fabricated(tmp_path):
     assert "usage_total" not in finished.data
     assert finished.data["cost_usd"] is None
     assert finished.data["trace_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_negative_usage_values_are_dropped_not_aggregated(tmp_path):
+    """网关吐负值 token（如 total_tokens=-5）时不得入账聚合。
+
+    AIMessage 自身 pydantic 校验已把非数值 usage 挡在构造期（归因 model 失败，
+    语义正确），能流到 usage 聚合的病态形状只剩负整数。负 token 数对账无效，
+    入账会污染 usage_total——按"缺失/无效时省略"语义丢弃该条目（不伪造、
+    不猜补），同条响应里的合法条目照常入账。
+    """
+    round1 = AIMessage(
+        content="",
+        usage_metadata={"input_tokens": -5, "output_tokens": 7, "total_tokens": -5},
+        tool_calls=[{"name": "add", "args": {"first_number": 1, "second_number": 2},
+                     "id": "call_neg", "type": "tool_call"}],
+    )
+    round2 = AIMessage(content="1 + 2 = 3", usage_metadata=_usage(10, 5))
+    session = make_session(tmp_path)
+    await _runtime(ScriptedModel([round1, round2])).run(session, "计算")
+
+    # 第一轮：负值条目被丢弃，合法条目（output_tokens=7）保留。
+    first = _events_of_type(session, MODEL_COMPLETED)[0]
+    assert first.data["usage"] == {"completion_tokens": 7}
+
+    finished = _events_of_type(session, RUN_COMPLETED)[0]
+    # 聚合只含合法条目之和（10+0 / 5+7 / 15+0），绝无负值。
+    assert finished.data["usage_total"] == {"completion_tokens": 12,
+                                            "prompt_tokens": 10,
+                                            "total_tokens": 15}

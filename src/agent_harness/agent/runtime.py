@@ -64,7 +64,12 @@ logger = logging.getLogger("agent_harness.agent")
 
 
 def _usage_from_response(ai: Any) -> dict[str, int] | None:
-    """从模型响应如实抽取 token usage；响应没带就返回 None（绝不伪造）。"""
+    """从模型响应如实抽取 token usage；响应没带就返回 None（绝不伪造）。
+
+    负值条目直接丢弃：负 token 数对账无效，入账会污染 usage_total 聚合。
+    丢弃遵循"缺失/无效时省略"语义，不是伪造；非数值形状已被 AIMessage 自身
+    校验挡在构造期（归因 model 失败，语义正确），到不了这里。
+    """
     meta = getattr(ai, "usage_metadata", None)
     if not isinstance(meta, dict):
         return None
@@ -73,7 +78,7 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
                                     "output_tokens": "completion_tokens",
                                     "total_tokens": "total_tokens"}).items():
         value = meta.get(source_key)
-        if value is not None:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             usage[target_key] = value
     return usage or None
 

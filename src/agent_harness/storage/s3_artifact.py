@@ -21,8 +21,12 @@ class S3ArtifactStore(ArtifactStore):
     def __init__(self, settings: Settings, *, session_id: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
             raise ValueError("session_id must be a single safe key segment")
+        # SecretStr('') 为 falsy（truthiness 基于密钥值长度）："是否已配置"
+        # 判断可直接用字段本身（与 str 时代语义一致）。
+        access_key = settings.artifact_store_access_key.get_secret_value()
+        secret_key = settings.artifact_store_secret_key.get_secret_value()
         if not all((settings.artifact_store_endpoint, settings.artifact_store_bucket,
-                    settings.artifact_store_access_key, settings.artifact_store_secret_key,
+                    access_key, secret_key,
                     settings.artifact_store_region)):
             raise ValueError("S3ArtifactStore requires artifact_store_* configuration")
         try:
@@ -37,8 +41,8 @@ class S3ArtifactStore(ArtifactStore):
         self._client_kwargs = {
             "endpoint_url": settings.artifact_store_endpoint,
             "region_name": settings.artifact_store_region,
-            "aws_access_key_id": settings.artifact_store_access_key,
-            "aws_secret_access_key": settings.artifact_store_secret_key,
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
             "config": config_type(signature_version="s3v4", s3={"addressing_style": "path"}),
         }
 
