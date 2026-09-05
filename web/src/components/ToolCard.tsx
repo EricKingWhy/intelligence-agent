@@ -29,6 +29,7 @@ import {
   type ReadShape,
 } from '../lib/toolShapes';
 import { CopyButton } from './CopyButton';
+import { JsonTree } from './JsonTree';
 
 interface Props {
   tool: ToolCall;
@@ -206,19 +207,28 @@ function DiffBlock({ diff }: { diff: NonNullable<ToolCall['diff']> }) {
 }
 
 function GenericBlock({ tool }: { tool: ToolCall }) {
+  const resultIsObject = typeof tool.result === 'object' && tool.result !== null;
   return (
     <div className="generic-block">
       <div className="generic-section">
         <div className="generic-label">参数</div>
-        <pre>{truncateForDisplay(JSON.stringify(tool.args, null, 2))}</pre>
+        <div className="detail-json">
+          <JsonTree value={tool.args} />
+        </div>
       </div>
       {tool.result !== undefined && (
         <div className="generic-section">
           <div className="generic-label">结果</div>
-          <TruncationAwarePre
-            text={truncateForDisplay(stringifyForDisplay(tool.result))}
-            className="generic-result"
-          />
+          {resultIsObject ? (
+            <div className="detail-json">
+              <JsonTree value={tool.result} />
+            </div>
+          ) : (
+            <TruncationAwarePre
+              text={truncateForDisplay(stringifyForDisplay(tool.result))}
+              className="generic-result"
+            />
+          )}
         </div>
       )}
     </div>

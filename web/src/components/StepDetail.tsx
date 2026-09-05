@@ -25,6 +25,7 @@ import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
 import { CopyButton } from './CopyButton';
+import { JsonTree } from './JsonTree';
 
 /** Inspector focus: Run-level overview or a drilled-in event. */
 export type InspectorFocus =
@@ -513,14 +514,18 @@ function EventInspector({ focus }: { focus: EventFocus }) {
         <div className="detail-section-title">Input / Output (data)</div>
         <div className="detail-code-wrap">
           <CopyButton text={dataJson} label="复制 JSON" />
-          <pre className="detail-code">{truncateForDisplay(dataJson)}</pre>
+          <div className="detail-json">
+            <JsonTree value={event.data} />
+          </div>
         </div>
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Raw</div>
         <div className="detail-code-wrap">
           <CopyButton text={rawJson} label="复制 Raw" />
-          <pre className="detail-code">{truncateForDisplay(rawJson)}</pre>
+          <div className="detail-json">
+            <JsonTree value={event} />
+          </div>
         </div>
       </div>
     </>
@@ -531,6 +536,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
 function ToolEventSections({ tool }: { tool: ToolCall }) {
   const argsJson = JSON.stringify(tool.args, null, 2);
   const outputText = stringifyForDisplay(tool.result);
+  const resultIsObject = typeof tool.result === 'object' && tool.result !== null;
   return (
     <>
       <div className="detail-section">
@@ -541,14 +547,22 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
         <div className="detail-subsection">
           <div className="detail-code-wrap">
             <CopyButton text={argsJson} label="复制 JSON" />
-            <pre className="detail-code">{truncateForDisplay(argsJson)}</pre>
+            <div className="detail-json">
+              <JsonTree value={tool.args} />
+            </div>
           </div>
         </div>
         {tool.result !== undefined && (
           <div className="detail-subsection">
             <div className="detail-code-wrap">
               <CopyButton text={outputText} label="复制输出" />
-              <pre className="detail-code">{truncateForDisplay(outputText)}</pre>
+              {resultIsObject ? (
+                <div className="detail-json">
+                  <JsonTree value={tool.result} />
+                </div>
+              ) : (
+                <pre className="detail-code">{truncateForDisplay(outputText)}</pre>
+              )}
             </div>
           </div>
         )}
@@ -565,13 +579,17 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
           {tool.raw_call && (
             <div className="detail-code-wrap">
               <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw" />
-              <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_call, null, 2))}</pre>
+              <div className="detail-json">
+                <JsonTree value={tool.raw_call} />
+              </div>
             </div>
           )}
           {tool.raw_result && (
             <div className="detail-code-wrap">
               <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw" />
-              <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_result, null, 2))}</pre>
+              <div className="detail-json">
+                <JsonTree value={tool.raw_result} />
+              </div>
             </div>
           )}
         </div>
