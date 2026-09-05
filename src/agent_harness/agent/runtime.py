@@ -276,6 +276,11 @@ class AgentRuntime:
                 else:
                     ai = await self.model.ainvoke(messages)
                 model_call_open = False  # 调用完整返回，后续异常不再归因 model
+                # duration_ms 严格闭合模型调用本身（ainvoke/astream 区间），
+                # 不含 normalize / usage 解析等后处理——与 spec 12 §2 的
+                # "provider latency" 语义对齐（后处理是微秒级，但注释与字段语义
+                # 要自洽）。
+                llm_duration_ms = int((time.perf_counter() - llm_started) * 1000)
 
                 # 第 3 步：把 AIMessage 持久化为 model/completed 事件
                 # 值对象归一化（A2）：本循环内所有消费点读类型化字段，不再拆原始 dict。
@@ -295,7 +300,7 @@ class AgentRuntime:
                 llm_log_fields: dict[str, Any] = {
                     "llm_input": user_input,
                     "llm_output": str(ai.content)[:200],
-                    "duration_ms": int((time.perf_counter() - llm_started) * 1000),
+                    "duration_ms": llm_duration_ms,
                     "outcome": "success",
                 }
                 if model_name:

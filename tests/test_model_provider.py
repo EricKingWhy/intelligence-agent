@@ -105,7 +105,7 @@ class TestEmptyApiKeyFastFail:
         才由 SDK 抛 AuthenticationError（消息来自远端、语义模糊）。未知 provider
         与缺 model_name 都做了快速失败，api_key 应保持一致。
         """
-        with pytest.raises(ConfigError, match="(?i)api_key|API_KEY"):
+        with pytest.raises(ConfigError, match="API key|MODEL_API_KEY"):
             ModelConfig.from_settings(
                 Settings(model_provider="deepseek", model_api_key="", _env_file=None)
             )
