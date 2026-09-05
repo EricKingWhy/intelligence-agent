@@ -116,10 +116,6 @@ async def test_bash_tool_signals_cancel_event_on_timeout(tmp_path):
             return super().exec("echo hi", timeout=timeout, cancel_event=cancel_event)
 
     sandbox = SlowSandbox(workspace_root=tmp_path)
-    registry = ToolRegistry()
-    registry.register(BashTool(sandbox))
-    executor = ToolExecutor(registry)
-
     class _TimedBash(BashTool):
         @property
         def timeout_seconds(self) -> float:
