@@ -50,7 +50,7 @@ class ContextBuilder:
         # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
         # memo 终身 = builder 终身 = runtime 终身 = 单会话，无需淘汰。
         self._token_memo: dict[tuple[str, int], int] = {}
-        # 最近一次 build 的估算总量（供测试与 _with_providers 复用）。
+        # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
         self._token_estimate_total: int = 0
 
     async def build(self, session: Session) -> list[AnyMessage]:

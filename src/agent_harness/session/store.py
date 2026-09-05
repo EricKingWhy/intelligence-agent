@@ -140,7 +140,9 @@ class JsonlSessionStore:
         first_user_message: str | None = None
         head_done = False
         head_parsed = 0
-        tail: deque[str] = deque(maxlen=2)  # 末两行：末行损坏时回退取前一行
+        # 末两行 (lineno, stripped)：末行损坏时回退取前一行；lineno 留给
+        # 损坏告警——探针日志必须可定位，不用哨兵值伪造位置。
+        tail: deque[tuple[int, str]] = deque(maxlen=2)
 
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for lineno, raw_line in enumerate(fh, start=1):
@@ -148,7 +150,7 @@ class JsonlSessionStore:
                 if not stripped:
                     continue
                 event_count += 1
-                tail.append(stripped)
+                tail.append((lineno, stripped))
 
                 if not head_done:
                     event = self._parse_event_line(raw_line, path.name, lineno)
@@ -168,7 +170,7 @@ class JsonlSessionStore:
                             head_done = True
 
         # 末行损坏（崩溃半写的常态位置）→ 全量回退，保证精确
-        if tail and self._parse_event_line(tail[-1], path.name, -1) is None:
+        if tail and self._parse_event_line(tail[-1][1], path.name, tail[-1][0]) is None:
             return self._summary_fallback(session_id)
         last_time = self._last_event_time_from_tail(tail)
         if tail and last_time is None:
@@ -181,10 +183,12 @@ class JsonlSessionStore:
             first_user_message=first_user_message,
         )
 
-    def _last_event_time_from_tail(self, tail: deque[str]) -> str | None:
+    def _last_event_time_from_tail(
+        self, tail: deque[tuple[int, str]],
+    ) -> str | None:
         """从末两行取最后一个可解析事件的时间（末行损坏时用前一行）。"""
-        for raw in reversed(tail):
-            event = self._parse_event_line(raw, "tail", -1)
+        for lineno, stripped in reversed(tail):
+            event = self._parse_event_line(stripped, "events.jsonl", lineno)
             if event is not None:
                 return event.time
         return None
