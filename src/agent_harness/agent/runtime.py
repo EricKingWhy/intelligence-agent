@@ -46,8 +46,6 @@ from agent_harness.session import (
     MODEL_STARTED,
     RUN_FAILED,
     RUN_STARTED,
-    TOOL_CALL,
-    TOOL_RESULT,
     USER_MESSAGE,
     Session,
     SessionEvent,
@@ -516,29 +514,21 @@ class AgentRuntime:
                     content = result.model_dump_json()
                     outcome: str = "success" if result.ok else "failure"
 
-                    tc_args = call.args
-                    tc_name = call.name
-                    call_event = session.append(
-                        TOOL_CALL,
-                        {"tool_call_id": execution.tool_call_id, "tool_name": tc_name, "args": tc_args},
+                    # 持久化顺序（TOOL_CALL → 延迟事件 → TOOL_RESULT）的单一
+                    # owner 是 ToolExecutor.emit_*（批次 C 候选 3）：Runtime 只
+                    # 消费已持久化事件并镜像给流式消费者，不再自己 append——
+                    # 此前该顺序在 runtime 与 executor abort flush 各编码一遍。
+                    for persisted_event in self.executor.emit_call_events(
+                        session,
+                        tool_call_id=execution.tool_call_id, tool_name=call.name,
+                        args=call.args, pending_events=execution.pending_events,
                         run_id=run_id, step_id=steps,
-                    )
-                    yield to_agent_event(call_event)
-                    # OverflowHandler 的延迟事件（artifact/created 等）：在
-                    # tool/call 落盘之后、tool/result 之前追加（R6-7）——
-                    # 消除事件日志中"artifact 引用尚未存在的 tool_call"的前向引用。
-                    for deferred_type, deferred_data in execution.pending_events:
-                        deferred_event = session.append(
-                            deferred_type, deferred_data,
-                            run_id=run_id, step_id=steps,
-                        )
-                        yield to_agent_event(deferred_event)
-                    result_event = session.append(
-                        TOOL_RESULT,
-                        {"tool_call_id": execution.tool_call_id, "content": content},
-                        run_id=run_id, step_id=steps,
-                    )
-                    yield to_agent_event(result_event)
+                    ):
+                        yield to_agent_event(persisted_event)
+                    yield to_agent_event(self.executor.emit_result_event(
+                        session, tool_call_id=execution.tool_call_id,
+                        content=content, run_id=run_id, step_id=steps,
+                    ))
 
                     self._log("tool_operation", f"工具回复 {outcome}",
                               span_id=new_span_id(), parent_span_id=run_span, step=steps,
