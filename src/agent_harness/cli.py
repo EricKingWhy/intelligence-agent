@@ -33,6 +33,7 @@ from agent_harness.assembly import (
     recovery_stores,
 )
 from agent_harness.config import Settings
+from agent_harness.identity import IdentityContext
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
@@ -180,12 +181,57 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
 
 
 def main() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "ingest":
+        _main_ingest(argv[1:])
+        return
     parser = argparse.ArgumentParser(description="Agent Harness CLI")
     parser.add_argument("message", help="发送给 Agent 的任务")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     final_text = asyncio.run(run(args.message))
     if not final_text:
         raise SystemExit(1)
+
+
+def _main_ingest(argv: list[str]) -> None:
+    """CLI 建库入口（ADR-0013 决策 6）：与 ingest_document 工具同一服务函数。
+
+    人驱动的宿主路径直读（不走 sandbox 边界——CLI 是人不是模型）；向量库
+    配置与 capability 共用同一组 env（MILVUS_* / KNOWLEDGE_COLLECTION /
+    EMBEDDING_*），未配置时响亮失败。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness ingest")
+    parser.add_argument("path", help="要摄入的 UTF-8 文本文件路径（宿主本地）")
+    parser.add_argument("--name", default=None, help="语料来源名（缺省取文件名）")
+    args = parser.parse_args(argv)
+
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    from agent_harness.knowledge.milvus_store import MilvusKnowledgeVectorStore
+    from agent_harness.knowledge.registry import SqliteKnowledgeSourceRegistry
+    from agent_harness.knowledge.service import KnowledgeService
+    from agent_harness.memory.embeddings import create_embeddings
+
+    async def _entry() -> None:
+        store = MilvusKnowledgeVectorStore(
+            settings,
+            create_embeddings(settings) if settings.embedding_model else None,
+        )
+        await store.initialize()
+        registry = SqliteKnowledgeSourceRegistry(
+            Path(settings.workspace_dir) / "harness.db"
+        )
+        await registry.initialize()
+        service = KnowledgeService(store=store, registry=registry)
+        content = Path(args.path).read_text(encoding="utf-8")
+        result = await service.ingest(
+            text=content, source_name=args.name or Path(args.path).name,
+            identity=IdentityContext("local", "local", ["user", "session"]),
+        )
+        print(f"语料 '{result.source_name}' {result.status}："
+              f"{result.chunk_count} 个 chunk 已入索引。")
+
+    asyncio.run(_entry())
 
 
 if __name__ == "__main__":

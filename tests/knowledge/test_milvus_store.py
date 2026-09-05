@@ -25,10 +25,10 @@ class KnownEmbeddings(Embeddings):
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(milvus_uri="https://example.test", milvus_token="test-only",
-                knowledge_collection="knowledge_gate_test")
-    base.update(overrides)
-    return Settings(_env_file=None, **base)
+    values = {"milvus_uri": "https://example.test", "milvus_token": "test-only",
+              "knowledge_collection": "knowledge_gate_test"}
+    values.update(overrides)
+    return Settings(_env_file=None, **values)
 
 
 def _store(monkeypatch, settings=None) -> tuple[MilvusKnowledgeVectorStore, Mock]:
