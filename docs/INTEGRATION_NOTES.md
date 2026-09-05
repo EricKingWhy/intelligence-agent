@@ -4,21 +4,22 @@
 > ZCode（本会话）**不执行 merge**——按 AGENTS.md §13，并行开发工作树不互相合并，
 > main 集成由集成 AI 在用户批准后执行。
 
-## 1. 分支状态（2026-09-05 更新）
+## 1. 分支状态（2026-09-05 更新——集成前以此为准）
 
 - **分支**：`feat/frontend`（worktree `D:\intelligence-agent-frontend`）
-- **HEAD**：`4592fa2` —— **P0 bug 修复，main 需补并**（见下）
-- **七阶段提交链**：`6183d3f`（Phase 1）→ `05a1baa`（Phase 2）→ `f7684c6`（Phase 3）→ `e49d6b8`（Phase 4）→ `3ad4a37`（Phase 5）→ `a68a380`（Phase 6）→ `38fc775`（Phase 7）→ 收尾 fix → Gap 消费 `e1689c6` → **bug 修复 `4592fa2`**
-- **质量门**：`tsc --noEmit` clean、`vitest run` 86/86 passed、`npm run build` 通过
-- **冻结决策来源**：`docs/UI_DESIGN_DECISIONS.md`（七阶段 UI 重设计单一事实源）
+- **HEAD**：`91baaaf`（领先 main 8 个 commit，含 P0 修复）—— main 需整体补并，**不要按旧 SHA cherry-pick**（旧文档曾指向 `4592fa2`，其后还有 7 个 commit，按旧 SHA 补并会漏掉流式边界守护、截断防御、COW 性能与 UI 细节整批工作）
+- **提交链**：七阶段 UI 重设计（`6183d3f` → `38fc775`）→ 收尾 fix → Gap 消费 `e1689c6` → **P0 修复 `4592fa2`** → 六项回归记录 `62e6a68` → COW 性能 `e47e7e7` → 安全加固 `41e7360` → 完成轮默认展开 `560f0ac` → code-review 修复 `1e10dbc` → 调研驱动细节组件 `0d7bb6f` → **流式边界守护 `91baaaf`**
+- **质量门**：`tsc -b` clean、`vitest run` **102/102** passed、`npm run build` 通过
+- **冻结决策来源**：`docs/UI_DESIGN_DECISIONS.md`（七阶段 UI 重设计单一事实源）；其中 L48「已完成 Turn 默认折叠」已被用户指令覆盖为**默认展开 + 手动折叠**（`560f0ac`，见 Conversation.tsx 注释）
 
 > **⚠️ main 补并提示（集成 AI）**：`4592fa2` 修复「模型输出不渲染」P0 bug（用户实测踩中）。
 > 根因两层：①`resolveStep` 用 `!== null` 漏掉 JSON 缺键产生的 `undefined` → user/message 与
 > model/completed 落进不同 turn；②后端不持久化 `model/started`（stream-only），无工具会话只有
 > `model/completed`，此前该事件不回填 segment/activity → `activities.length > 0` 渲染条件不满足
-> → 模型文本整块不渲染。带 2 个回归测试。main 上若不补并，**所有无工具纯对话会话的模型回复都不显示**。
-> 补并方式：`git checkout main && git merge feat/frontend`（fast-forward 到 `4592fa2`）或
-> `git cherry-pick 4592fa2`。补并后重跑 §3 六项验证（2026-09-05 已在 feat/frontend 全绿，见 PHASE_STATUS 时间线）。
+> → 模型文本整块不渲染。main 上若不补并，**所有无工具纯对话会话的模型回复都不显示**。
+> 补并方式：`git checkout main && git merge --no-ff feat/frontend`（整分支补并到 `91baaaf`，
+> 见 §2）；不要按单 SHA cherry-pick。补并后重跑 §3 六项验证（2026-09-05 已在 feat/frontend
+> 全绿，见 PHASE_STATUS 时间线）。
 
 ## 2. 合并策略建议
 
