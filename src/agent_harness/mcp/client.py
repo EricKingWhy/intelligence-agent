@@ -202,22 +202,33 @@ class MCPServerConnection:
         if task is None or task.done():
             return
         self._stop.set()
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=5)
-        except BaseException:  # noqa: BLE001 — 收尾路径：超时/取消/任意 owner 异常
-            # 5s 内 owner 没有干净退出（如 server 子进程挂死）→ 硬取消
-            task.cancel()
+        if self._ready.is_set():
+            # owner 已建立完成、待命在 _stop.wait()：优雅退出窗口有效。
             try:
-                await task
-            except BaseException:
-                logger.debug(
-                    "MCP owner task 硬取消后仍有退出噪声（已忽略）", exc_info=True,
-                )
+                await asyncio.wait_for(asyncio.shield(task), timeout=5)
+            except BaseException:  # noqa: BLE001 — 收尾路径：超时/取消/任意 owner 异常
+                await self._hard_cancel_owner(task)
+        else:
+            # owner 还停在建立阶段（慢 npx spawn / 挂死的 initialize）：_stop
+            # 只在建立完成后才被观察，优雅等待是纯死等——立即硬取消。CM 退出
+            # 仍发生在 owner 任务内（anyio cancel scope 合规）。
+            await self._hard_cancel_owner(task)
         # 收尾的 BaseException 捕获会吞掉等待期间到达的外部取消；这里把它还给
         # 调用方——取消中的任务不得继续跑后续流程（例如再发起一轮 connect）。
         current = asyncio.current_task()
         if current is not None and current.cancelling():
             raise asyncio.CancelledError
+
+    @staticmethod
+    async def _hard_cancel_owner(task: asyncio.Task) -> None:
+        """硬取消 owner 并等待其退出；退出噪声只落日志。"""
+        task.cancel()
+        try:
+            await task
+        except BaseException:  # 硬取消后的任意退出形状都不上抛
+            logger.debug(
+                "MCP owner task 硬取消后仍有退出噪声（已忽略）", exc_info=True,
+            )
 
     async def reconnect(self) -> None:
         """恢复连接（不重执行任何历史调用）。

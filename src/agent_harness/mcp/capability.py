@@ -16,6 +16,8 @@ from agent_harness.mcp.adapter import MCPTool
 from agent_harness.mcp.client import MCPServerConnection
 from agent_harness.mcp.config import MCPServerConfig
 
+logger = logging.getLogger(__name__)
+
 
 class MCPCapability:
     """已连接 server 集合的工具贡献者；errors 可观察（不静默）。"""
@@ -36,6 +38,14 @@ class MCPCapability:
     async def aclose(self) -> None:
         for connection in self._connections:
             await connection.aclose()
+
+
+async def _discard_connection(connection: MCPServerConnection) -> None:
+    """降级路径就地关闭连接；清理失败只落日志（降级语义优先于清理噪声）。"""
+    try:
+        await connection.aclose()
+    except Exception:
+        logger.debug("MCP 连接清理失败（已按 server 降级，忽略）", exc_info=True)
 
 
 async def build_mcp_capability(servers: list[MCPServerConfig]) -> MCPCapability:
@@ -65,27 +75,18 @@ async def build_mcp_capability(servers: list[MCPServerConfig]) -> MCPCapability:
             server_tools = [MCPTool(connection, server, remote) for remote in remote_tools]
         except Exception as error:  # noqa: BLE001 — 隔离必须覆盖任意失败形状：
             # connect 的 MCPServerDownError 之外，tools/list 还可能抛协议错误/
-            # anyio 错误——漏接一种就会让整个 capability 降级（健康 server 的
-            # 工具全丢）且已连接的 exit stack 泄漏。按 server 关闭后降级缺席。
-            try:
-                await connection.aclose()
-            except Exception:
-                logging.getLogger(__name__).debug(
-                    "MCP 连接清理失败（已按 server 降级，忽略）", exc_info=True,
-                )
-            errors.append(f"server '{server.name}' 不可达（{type(error).__name__}: {error}），已降级缺席")
+            # anyio 错误、MCPTool 构造可能抛 pydantic 错误——漏接一种就会让
+            # 整个 capability 降级（健康 server 的工具全丢）且已连接的 exit
+            # stack 泄漏。按 server 关闭后降级缺席。
+            await _discard_connection(connection)
+            errors.append(f"server '{server.name}' 接线失败（{type(error).__name__}: {error}），已降级缺席")
             continue
         names_in_server = [tool.name for tool in server_tools]
         duplicated_names = {name for name in names_in_server
                             if names_in_server.count(name) > 1}
         duplicated_names.update(name for name in names_in_server if name in claimed)
         if duplicated_names:
-            try:
-                await connection.aclose()
-            except Exception:
-                logging.getLogger(__name__).debug(
-                    "MCP 连接清理失败（已按 server 降级，忽略）", exc_info=True,
-                )
+            await _discard_connection(connection)
             errors.append(
                 f"server '{server.name}' 工具名冲突 {sorted(duplicated_names)}"
                 f"（与更早 server 或本 server 内重复），已降级缺席"
@@ -96,4 +97,3 @@ async def build_mcp_capability(servers: list[MCPServerConfig]) -> MCPCapability:
         connections.append(connection)
         tools.extend(server_tools)
     return MCPCapability(connections, tools, errors)
-
