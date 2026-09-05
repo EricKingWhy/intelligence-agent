@@ -10,7 +10,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:perf": "vitest run -c vitest.perf.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
