@@ -25,46 +25,26 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from starlette.responses import JSONResponse
 
-from agent_harness.agent import AgentEvent, AgentRuntime
+from agent_harness.agent import AgentEvent
+from agent_harness.assembly import RecoveryStores, build_runtime, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
-from agent_harness.context.builder import ContextBuilder
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
     set_identity_context,
 )
 from agent_harness.logging import setup_logging
-from agent_harness.model.config import ModelConfig
-from agent_harness.model.provider import create_chat_model
 from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session.event import USER_MESSAGE
 from agent_harness.storage import (
-    OnStableBoundary,
     SqliteCheckpointStore,
     SqliteOperationLedger,
     SqliteSessionMetaStore,
-)
-from agent_harness.storage.s3_artifact import S3ArtifactStore
-from agent_harness.tooling import ToolExecutor, ToolRegistry
-from agent_harness.tooling.approval import ApprovalResponse
-from agent_harness.tooling.contract import PermissionPolicy
-from agent_harness.tooling.overflow import ArtifactOverflowHandler
-from agent_harness.tools import (
-    ApplyPatchTool,
-    BashTool,
-    EditTool,
-    GitDiffTool,
-    GitStatusTool,
-    GlobTool,
-    GrepTool,
-    InspectArtifactTool,
-    ReadTool,
-    WriteTool,
 )
 
 # ── Request / Response schemas ──
@@ -141,10 +121,17 @@ class AppState:
             return
         async with self._stores_lock:
             if not self._stores_ready:
-                await self.operation_ledger.initialize()
-                await self.checkpoint_store.initialize()
-                await self.session_meta_store.initialize()
+                await initialize_stores(self.stores)
                 self._stores_ready = True
+
+    @property
+    def stores(self) -> RecoveryStores:
+        """恢复三 Store 束（factory 消费；实例归 AppState 所有）。"""
+        return RecoveryStores(
+            operation_ledger=self.operation_ledger,
+            checkpoint_store=self.checkpoint_store,
+            session_meta_store=self.session_meta_store,
+        )
 
     async def get_wiring(self) -> tuple[CapabilityRegistry, CapabilityWiring]:
         """惰性装配 Capability 子系统并缓存；返回 (registry, wiring)。
@@ -187,94 +174,10 @@ class AppState:
         self._closed = True
         async with self._wiring_lock:
             wiring, self._wiring, self._registry = self._wiring, None, None
-        if wiring is not None and wiring.memory is not None:
-            await wiring.memory.close()
-        # 通用生命周期通道（Phase 8）：MCP 连接等按 aclose() 关闭；单个失败
-        # 不阻断其余清理（进程退出路径，隔离优先）。
+        # 关闭知识在 CapabilityWiring.aclose（批次 A 候选 4）：memory 组件 +
+        # lifecycle 通道逐项隔离关闭，web 层不再懂每种 capability 的关闭姿势。
         if wiring is not None:
-            for obj in wiring.lifecycle:
-                aclose = getattr(obj, "aclose", None)
-                if aclose is None:
-                    continue
-                try:
-                    await aclose()
-                except Exception:
-                    logging.getLogger("agent_harness.web").warning(
-                        "lifecycle 关闭失败（%s），继续其余清理", type(obj).__name__,
-                        exc_info=True,
-                    )
-
-
-async def _build_runtime(
-    state: AppState,
-    workspace: Path,
-    max_steps: int,
-    auto_approve: bool,
-    *,
-    session_id: str,
-) -> AgentRuntime:
-    """装配工具与 Context；配置对象存储时按 Session 绑定 Artifact Provider。
-
-    Memory 子系统按配置惰性装配：齐了注入 capability + writeback + context provider，
-    不齐保持纯 Runtime（Memory 能力缺位，其他功能不受影响）。
-    """
-    config = ModelConfig.from_settings(state.settings)
-    model = create_chat_model(config)
-
-    # Sandbox 由 WorkspaceRegistry 统一创建并持久化映射（R8-1）：恢复时
-    # RecoveryCoordinator 据映射还原 sandbox；workspace_root 允许命名 workspace。
-    sandbox = state.workspace_registry.create(session_id, workspace_root=workspace)
-    registry = ToolRegistry()
-    for tool_cls in (
-        ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
-        GlobTool, GrepTool, GitStatusTool, GitDiffTool,
-    ):
-        registry.register(tool_cls(sandbox))
-
-    settings = state.settings
-    overflow_handler = None
-    if any((settings.artifact_store_endpoint, settings.artifact_store_bucket,
-            settings.artifact_store_access_key, settings.artifact_store_secret_key,
-            settings.artifact_store_region)):
-        artifact_store = S3ArtifactStore(settings, session_id=session_id)
-        registry.register(InspectArtifactTool(artifact_store))
-        overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
-
-    if auto_approve:
-        policy = PermissionPolicy.WORKSPACE_WRITE
-        approval_callback: Any = lambda _req: ApprovalResponse(approved=True, reason="auto-approve")
-    else:
-        # manual 模式 V1：拒绝所有危险操作（不阻塞 demo 主流程）。
-        # 真正的交互式审批留到 WebSocket / pending queue（接缝点）。
-        policy = PermissionPolicy.WORKSPACE_WRITE
-        approval_callback = lambda _req: ApprovalResponse(approved=False, reason="manual approval not yet wired")
-
-    # Capability 装配（进程级缓存）：工具贡献进 ToolRegistry（统一 Executor 路径），
-    # context providers / memory_writer 注入 AgentRuntime——Agent Loop 零改动。
-    _, wiring = await state.get_wiring()
-    for capability_tool in wiring.tools:
-        registry.register(capability_tool)
-
-    # 恢复基础设施接线（R8-1，用户拍板）：Ledger 记录副作用状态（不变量 #13）、
-    # Checkpoint 在稳定边界落盘（不变量 #12）、SessionMeta 惰性登记。
-    await state.ensure_stores()
-    return AgentRuntime(
-        model=model,
-        registry=registry,
-        executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
-                              overflow_handler=overflow_handler,
-                              operation_ledger=state.operation_ledger),
-        max_steps=max_steps,
-        checkpoint_policy=OnStableBoundary(state.checkpoint_store),
-        session_meta_store=state.session_meta_store,
-        context_builder=ContextBuilder(
-            model, max_context_tokens=settings.max_context_tokens,
-            auto_compact_threshold=settings.auto_compact_threshold,
-            hard_guard_threshold=settings.hard_guard_threshold,
-            context_providers=list(wiring.context_providers),
-        ),
-        memory_writer=wiring.memory_writer,
-    )
+            await wiring.aclose()
 
 
 def _validate_workspace_name(state: AppState, workspace: str | None) -> str | None:
@@ -500,16 +403,22 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         workspace_name = _validate_workspace_name(state, req.workspace)
 
         # 组装顺序（R6-6）：先建 workspace + runtime，最后才 Session.start 落盘。
-        # _build_runtime 需要 session_id 装配 S3 artifact 命名空间，因此预生成
-        # id 传入——此前 Session.start 先落盘、runtime 组装失败时客户端拿
-        # JSON 500 且 store 里留下只含 session/started 的孤儿 session。
+        # factory 需要 session_id 装配 S3 artifact 命名空间，因此预生成 id 传入
+        # ——此前 Session.start 先落盘、runtime 组装失败时客户端拿 JSON 500
+        # 且 store 里留下只含 session/started 的孤儿 session。
         session_id = str(uuid4())
         workspace = (state.workspaces_root / workspace_name if workspace_name is not None
                      else state.workspaces_root / session_id)
         workspace.mkdir(parents=True, exist_ok=True)
 
-        runtime = await _build_runtime(state, workspace, req.max_steps, req.auto_approve,
-                                       session_id=session_id)
+        _, wiring = await state.get_wiring()
+        await state.ensure_stores()
+        runtime = await build_runtime(
+            settings=state.settings, wiring=wiring, stores=state.stores,
+            workspace_registry=state.workspace_registry,
+            session_id=session_id, workspace=workspace,
+            max_steps=req.max_steps, auto_approve=req.auto_approve,
+        )
         session = Session.start(state.store, session_id=session_id)
 
         async def event_generator():

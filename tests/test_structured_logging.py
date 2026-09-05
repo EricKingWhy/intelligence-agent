@@ -104,7 +104,8 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
         _env_file=None,
     )
     monkeypatch.setattr(cli, "Settings", lambda: settings)
-    monkeypatch.setattr(cli, "create_chat_model", lambda config: FakeModel())
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model",
+                      lambda config: FakeModel())
 
     result = await cli.run("只回复 ok", write=lambda _text: None)
 
@@ -154,7 +155,8 @@ async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
         _env_file=None,
     )
     monkeypatch.setattr(cli, "Settings", lambda: settings)
-    monkeypatch.setattr(cli, "create_chat_model", lambda config: FailingModel())
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model",
+                      lambda config: FailingModel())
 
     result = await cli.run("触发失败", write=lambda _text: None)
     assert result == ""

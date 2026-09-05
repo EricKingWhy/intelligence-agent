@@ -23,12 +23,18 @@ import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from uuid import uuid4
 
-from agent_harness.agent import AgentEvent, AgentRuntime
+from agent_harness.agent import AgentEvent
+from agent_harness.assembly import (
+    assemble_wiring,
+    build_runtime,
+    initialize_stores,
+    recovery_stores,
+)
 from agent_harness.config import Settings
 from agent_harness.logging import LogContext, log_context, setup_logging
-from agent_harness.model.config import ModelConfig
-from agent_harness.model.provider import create_chat_model
+from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
     MODEL_DELTA,
     RUN_COMPLETED,
@@ -38,7 +44,6 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
-from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 3
@@ -138,6 +143,8 @@ def _format_tokens(count: int | None) -> str:
 async def run(message: str, *, write: Callable[[str], None] | None = None) -> str:
     """跑一次 Agent Loop：流式渲染到 write，返回最终回答文本。
 
+    与 web 共享 assembly.build_runtime 全栈装配（coding 工具 + Ledger/
+    Checkpoint + capability 工具）——CLI 不再是削弱装配，耐久性语义一致。
     失败的 run 不抛异常（runtime 契约：失败事实由 run/failed 终结事件 +
     结构化日志承载）——返回空 final_text，main() 据此转 SystemExit(1)。
     成功的 run final_text 恒非空：空响应在 runtime 被拒为失败（R6-2），
@@ -148,11 +155,21 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
     # LogContext 提供 trace_id/task_id 关联列——没有它 runtime 的结构化日志
     # 整条链都缺关联键（一次 CLI 运行 = 一个可对账的 trace）。
     with log_context(LogContext.create(service="agent-harness", env="local")):
-        model = create_chat_model(ModelConfig.from_settings(settings))
-        registry = ToolRegistry()
-        runtime = AgentRuntime(model, registry, ToolExecutor(registry))
-        store = JsonlSessionStore(root=Path(settings.workspace_dir) / "sessions")
-        session = Session.start(store)
+        workspace_root = Path(settings.workspace_dir)
+        _, wiring = await assemble_wiring(settings)
+        stores = recovery_stores(workspace_root / "harness.db")
+        await initialize_stores(stores)
+        workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
+        session_id = str(uuid4())
+        workspace = workspace_root / "workspaces" / session_id
+        runtime = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=workspace_registry,
+            session_id=session_id, workspace=workspace,
+            max_steps=10, auto_approve=True,
+        )
+        store = JsonlSessionStore(root=workspace_root / "sessions")
+        session = Session.start(store, session_id=session_id)
         renderer = StreamRenderer(write if write is not None else sys.stdout.write)
         final_text = ""
         async for event in runtime.run_stream(session, message):

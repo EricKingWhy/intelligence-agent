@@ -111,7 +111,7 @@ async def test_cli_run_streams_persists_session_and_returns_final_text(
                          _env_file=None),
     )
     monkeypatch.setattr(
-        "agent_harness.cli.create_chat_model",
+        "agent_harness.assembly.create_chat_model",
         lambda config: ScriptedModel([AIMessage(content="你好世界")], chunk_size=2),
     )
     out: list[str] = []
@@ -149,7 +149,7 @@ async def test_cli_run_failed_returns_empty_final_text(tmp_path, monkeypatch):
                          _env_file=None),
     )
     monkeypatch.setattr(
-        "agent_harness.cli.create_chat_model", lambda config: ExplodingModel(),
+        "agent_harness.assembly.create_chat_model", lambda config: ExplodingModel(),
     )
     out: list[str] = []
     final = await run("触发失败", write=out.append)

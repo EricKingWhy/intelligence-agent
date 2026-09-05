@@ -81,7 +81,7 @@ async def _start_server(tmp_path, monkeypatch, model):
     from agent_harness.web.app import create_app
 
     monkeypatch.setattr(
-        "agent_harness.web.app.create_chat_model", lambda config: model())
+        "agent_harness.assembly.create_chat_model", lambda config: model())
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
@@ -165,7 +165,7 @@ async def test_client_disconnect_during_tool_execution_cancels(tmp_path, monkeyp
     server, serve_task, port = await _start_server(
         tmp_path, monkeypatch, lambda: scripted)
     try:
-        monkeypatch.setattr("agent_harness.web.app.BashTool", SlowBashTool)
+        monkeypatch.setattr("agent_harness.assembly.BashTool", SlowBashTool)
         await _read_until("tool/call", port)
         await _wait_for_cancelled(tmp_path)
     finally:
