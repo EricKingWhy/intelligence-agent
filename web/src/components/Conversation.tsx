@@ -166,7 +166,7 @@ function chainKey(node: ChainNode, i: number): string {
   return node.kind === 'tool' ? node.tool.tool_call_id : `model-${i}`;
 }
 
-function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
+export function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; density: TraceDensity; onFocusTool?: (tool: ToolCall) => void }) {
   if (node.kind === 'tool') {
     return <ToolCard tool={node.tool} density={density} onFocus={onFocusTool} />;
   }
@@ -182,17 +182,29 @@ function ChainNodeView({ node, density, onFocusTool }: { node: ChainNode; densit
   if (!segment.text && segment.status !== 'streaming') return null;
   // 模型文本与工具输出同级不可信——单行超长模型输出同样会冻结 UI，渲染前截断
   // （41e7360 只覆盖了工具路径，code-review 补齐此处）。
+  const display = truncateForDisplay(segment.text);
+  // P0-2a 流式 markdown 增量化（HANDOFF §6）：streaming 段渲染纯文本
+  // （pre-wrap 样式保留换行，标记原样透传——打字机状态本就不需要排版），
+  // model/completed 置 done 后一次性 renderMarkdown。消灭流式期间每 delta
+  // 全量重解析的 CPU 开销。纯文本走 React 文本节点，天然零 XSS 面。
+  if (segment.status === 'streaming') {
+    return (
+      <div className="model-output-wrap">
+        <div className="model-output streaming">
+          {display}
+          <span className="stream-caret" />
+        </div>
+      </div>
+    );
+  }
   // hover 复制（调研：per-message copy 是 AI chat 标配动作；仅完成段提供，
   // 流式段文本还在增长，复制半成品是噪音）。
   return (
     <div className="model-output-wrap">
       <div className={`model-output ${segment.status}`}>
-        {renderMarkdown(truncateForDisplay(segment.text))}
-        {segment.status === 'streaming' && <span className="stream-caret" />}
+        {renderMarkdown(display)}
       </div>
-      {segment.status !== 'streaming' && segment.text && (
-        <CopyButton text={segment.text} label="复制回答" />
-      )}
+      {segment.text && <CopyButton text={segment.text} label="复制回答" />}
     </div>
   );
 }

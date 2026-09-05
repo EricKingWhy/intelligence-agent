@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
+import { EventType } from '../types';
 import { listSessions, getSessionEvents, startSession, recoverSession, RecoverError, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
@@ -69,6 +70,51 @@ const RECOVER_IDLE: RecoverState = { status: 'idle', message: null, conflict: fa
  * recover 的结果才是当前视图的权威真相。 */
 export function shouldApplyRecoverResult(mode: SessionMode, sid: string): boolean {
   return mode.kind === 'viewing' && mode.sessionId === sid;
+}
+
+/** P1-3 delta 合帧提交器（HANDOFF_PERF_FRONTEND §6）：~24ms 窗口内多个 delta
+ * 只触发一次 React 提交。语义边界——只合并「提交」，不合并「折叠」：每帧仍
+ * 逐帧过 shouldApplyStreamFrame 守护并立即 applyEvent 进本地 conv（真相不
+ * 延迟）；延迟的只是 setConversation 通知。流终止（run/completed、
+ * run/failed、onDone、onError）必须 flush，否则尾帧丢失。 */
+export interface CommitCoalescer {
+  /** 标记有待提交数据；窗口内多次调用只调度一次。 */
+  schedule(): void;
+  /** 立即提交待合帧数据（无则 no-op），并取消挂起的定时器。 */
+  flush(): void;
+  /** 丢弃挂起的定时器与待提交标记（流被 cancel 后不再迟到提交）。 */
+  cancel(): void;
+}
+
+export function createCommitCoalescer(submit: () => void, windowMs = 24): CommitCoalescer {
+  let dirty = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const fire = () => {
+    timer = null;
+    if (!dirty) return;
+    dirty = false;
+    submit();
+  };
+  return {
+    schedule() {
+      dirty = true;
+      if (timer === null) timer = setTimeout(fire, windowMs);
+    },
+    flush() {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      fire();
+    },
+    cancel() {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      dirty = false;
+    },
+  };
 }
 
 export function useSession() {
@@ -185,6 +231,12 @@ export function useSession() {
         }
 
         let conv: ConversationState | null = null;
+        // P1-3 合帧：折叠逐帧即时（真相不延迟），提交按 ~24ms 窗口合并。
+        // submit 守卫 mode 仍是 live——cancel/selectSession 之后的迟到 fire
+        // 不得把旧流残留写回视图（与 shouldApplyStreamFrame 同一族守护）。
+        const coalescer = createCommitCoalescer(() => {
+          if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
+        });
 
         const handle = consumeSSE(
           res,
@@ -207,16 +259,23 @@ export function useSession() {
               const content = extractSessionTitle(event);
               if (content) setTitlesById((m) => (m[sid] ? m : { ...m, [sid]: content }));
             }
-            setConversation({ ...conv });
+            // 终态事件立即 flush（尾帧不得延迟到下一窗口）；中间帧合帧提交。
+            if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
+              coalescer.flush();
+            } else {
+              coalescer.schedule();
+            }
           },
           () => {
             // Stream finished: view the session it produced (history loader
             // re-reads the durable log), and refresh the list for the new row.
+            coalescer.flush(); // 尾帧不丢（P1-3）
             const sid = liveSidRef.current;
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             refreshSessions();
           },
           (err) => {
+            coalescer.flush(); // 尾帧不丢（P1-3）
             const sid = liveSidRef.current;
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             setError(`流式错误：${(err as Error).message}`);

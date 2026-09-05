@@ -8,9 +8,9 @@
  * 引入它会扩大 scope；提取是真正的深模块化（参 codebase-design）。
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, SessionMode } from '../types';
-import { shouldApplyRecoverResult, shouldApplyStreamFrame } from './useSession';
+import { createCommitCoalescer, shouldApplyRecoverResult, shouldApplyStreamFrame } from './useSession';
 
 const ev = (type: string, session_id: string | null): AgentEvent => ({
   type,
@@ -81,5 +81,59 @@ describe('shouldApplyRecoverResult — recover 响应是否仍是当前模式的
   it('idle：拒绝——已无持有会话', () => {
     const mode: SessionMode = { kind: 'idle' };
     expect(shouldApplyRecoverResult(mode, 'A')).toBe(false);
+  });
+});
+
+describe('createCommitCoalescer — P1-3 delta 合帧提交（HANDOFF §6）', () => {
+  it('窗口内多次 schedule 只触发一次提交', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      const c = createCommitCoalescer(() => commits++, 24);
+      c.schedule();
+      c.schedule();
+      c.schedule();
+      expect(commits).toBe(0);
+      vi.advanceTimersByTime(24);
+      expect(commits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flush 立即提交待合帧数据并取消挂起定时器（流终止尾帧不丢、不重复）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      const c = createCommitCoalescer(() => commits++, 24);
+      c.schedule();
+      c.flush();
+      expect(commits).toBe(1);
+      vi.advanceTimersByTime(100);
+      expect(commits).toBe(1); // 定时器已取消，不重复提交
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('无待提交数据时 flush 是 no-op', () => {
+    let commits = 0;
+    const c = createCommitCoalescer(() => commits++, 24);
+    c.flush();
+    expect(commits).toBe(0);
+  });
+
+  it('cancel 丢弃挂起定时器（cancel 流后不再迟到提交）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      const c = createCommitCoalescer(() => commits++, 24);
+      c.schedule();
+      c.cancel();
+      vi.advanceTimersByTime(100);
+      expect(commits).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
