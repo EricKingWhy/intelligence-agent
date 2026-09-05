@@ -162,10 +162,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .run-pulse svg {
   flex-shrink: 0;
 }
+/* 呼吸辉光：运行相位（thinking/tool）的胶囊体随相位呼吸——icon 自旋之外的
+ * 第二层"活着"信号。currentColor 让一套 keyframes 适配两种状态色；
+ * 胶囊面积小，box-shadow 动画 repaint 可忽略；reduced-motion 由全局块关闭。 */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
+  50% { box-shadow: 0 0 12px 1px color-mix(in srgb, currentColor 26%, transparent); }
+}
 .run-pulse.pulse-thinking {
   color: var(--accent);
   background: var(--accent-muted);
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  animation: pulse-glow 2.2s ease-in-out infinite;
 }
 .run-pulse.pulse-thinking svg {
   animation: spin 2.2s linear infinite;
@@ -174,6 +182,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  animation: pulse-glow 1.4s ease-in-out infinite;
 }
 .run-pulse.pulse-tool svg {
   animation: spin 1.4s linear infinite;
@@ -325,15 +334,23 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .density-btn:hover {
   color: var(--color-foreground);
+  background: var(--color-hover);
 }
 .density-btn:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
+/* 选中块真浮起：更亮一档的表面 + 双层投影（贴地 1px + 漂浮 6px）+
+ * edge-light 内高光——iOS/Linear segmented 的"凸起键"质感。
+ * 主题自适应：shadow-overlay 与 edge-light 均随 [data-theme] 翻转。 */
 .density-btn.sel {
   color: var(--text-primary);
-  background: var(--surface-1);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22), inset 0 0 0 0.5px var(--border-subtle);
+  font-weight: 600;
+  background: var(--surface-overlay);
+  box-shadow:
+    var(--edge-light),
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    var(--shadow-overlay);
 }
 
 /* ── Session Rail（左：低对比导航 chrome，嵌在 frame 内） ── */
@@ -400,9 +417,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   transition: background var(--dur-out) var(--ease-apple), box-shadow var(--dur-out) var(--ease-apple),
     transform var(--dur-out) var(--ease-apple);
 }
+/* hover 质感：底色淡染 + 发丝环（0.5px inset）+ 圆点点亮——
+ * 三层微反馈叠加出"可按"的暗示，仍保持低对比 chrome 定位。 */
 .session-item:hover {
   background: var(--color-hover);
+  box-shadow: inset 0 0 0 0.5px var(--border-subtle);
   transform: translateX(1px);
+}
+.session-item:hover .session-item-dot {
+  background: var(--text-secondary);
 }
 /* 选中态：accent 淡染 + 左侧 2px 聚焦指示条（Linear 式选中语言）——
  * 比单纯底色更有"当前位置"感，且不依赖大色块。 */
@@ -413,6 +436,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .session-item.selected:hover {
   transform: none;
+  /* 悬停加深一档（指示条 inset shadow 保持——本条只动背景） */
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
 }
 .session-item:focus-visible {
   outline: 2px solid var(--color-accent);
@@ -1380,10 +1405,23 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .composer-stop:hover {
   filter: brightness(1.1);
 }
+/* 聚焦态：双环挖空聚焦环（2px dock 同色挖空 + 2px 状态色外环）——
+ * 与 dock focus-within 的 ring 同一语言，比 outline 更融入。
+ * 键盘专属（focus-visible），鼠标点击不触发。 */
 .composer-send:focus-visible,
 .composer-stop:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  outline: none;
+}
+.composer-send:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--surface-overlay),
+    0 0 0 4px color-mix(in srgb, var(--color-accent) 55%, transparent),
+    0 2px 8px color-mix(in srgb, var(--color-accent) 32%, transparent);
+}
+.composer-stop:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--surface-overlay),
+    0 0 0 4px color-mix(in srgb, var(--color-destructive) 55%, transparent);
 }
 
 /* ── StepDetail（右：Run Inspector，嵌在 frame 内，无独立边框） ── */
