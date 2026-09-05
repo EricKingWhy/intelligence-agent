@@ -1,5 +1,6 @@
 """MCP 连接生命周期（T2）：连接/断开标记/重连不重执行/stdio 启动环境白名单。"""
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -212,3 +213,45 @@ async def test_http_transport_round_trip(tmp_path):
             await serve_task
         except _asyncio.CancelledError:
             pass
+
+
+# ── 真实 server 验收抓到的 anyio 跨任务 bug 回归钉（owner-task 模式）──
+
+
+@pytest.mark.asyncio
+async def test_aclose_from_different_task_does_not_crash(tmp_path):
+    """transport CM（内部持有 anyio cancel scope）在 owner 任务内进入；
+    aclose 从另一个任务调用不得触发 'exit cancel scope in a different task'
+    ——真实 Context7 server 验收时在旧实现上必现。"""
+    import anyio
+
+    @asynccontextmanager
+    async def scoped_factory():
+        # 模拟 stdio_client：CM 内部使用 anyio cancel scope
+        with anyio.CancelScope():
+            yield _ScriptedSession([])
+
+    conn = MCPServerConnection(_config(), session_factory=scoped_factory)
+    await conn.connect()
+    assert conn.connected is True
+
+    closer = asyncio.create_task(conn.aclose())  # 另一个任务关闭
+    await asyncio.wait_for(closer, timeout=10)  # 不得抛 RuntimeError
+    assert conn.connected is False
+
+
+@pytest.mark.asyncio
+async def test_owner_setup_failure_does_not_leak_task():
+    """建立失败的 owner task 必须被回收，不留悬挂任务。"""
+    before = {t.get_name() for t in asyncio.all_tasks()}
+
+    @asynccontextmanager
+    async def broken_factory():
+        raise RuntimeError("spawn failed")
+        yield None
+
+    conn = MCPServerConnection(_config(), session_factory=broken_factory)
+    with pytest.raises(MCPServerDownError):
+        await conn.connect()
+    after = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
+    assert not any("mcp-owner-fake" in n for n in after - before), "owner task 泄漏"
