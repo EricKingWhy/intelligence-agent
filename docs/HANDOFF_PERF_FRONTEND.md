@@ -214,3 +214,26 @@ TTFT 模型侧主导，Run Pulse「思考中·Ns」已是最优解——**不要
 - `resolveStep` 用 `!= null` 松散判空（null 与 undefined 同收）——同理不许回退
 - recover 合成的 tool/result 无 step_id 且 content 是纯文本（"工具执行被中断，结果未知"）——投影按 tool_call_id 全局配对是有意为之，条件化时**必须保留无 step_id 场景**
 - 浏览器验证时 React 受控输入用 CDP 真实键盘输入（`type_text`），`fill` 对部分受控组件不触发 onChange；合成 `el.click()` 能触发 React 委托事件，但不确定时用 CDP click
+
+---
+
+## 9. 进度回执（2026-09-05 workbuddy 批，feat/frontend `c13d08b..a78c322`）
+
+**已完成（§7 ①②③，全部红测先行，Vitest 136/136，tsc clean，lint 0 error）：**
+
+| 项 | commit | 基准（本机前后） |
+| --- | --- | --- |
+| 5 个已知 bug（§5） | `c13d08b` | — |
+| P0-1 events 去 O(N²)（方案 b append-only 共享日志） | `3344e34` | applyEvent @20k：240.9µs→**0.2µs**/事件；projectHistory 4650：35.0→**2.8ms**；20k：1536.9→**7.2ms** |
+| P0-2a 流式 markdown 增量化 + P1-3 delta 合帧 | `a78c322` | §4.4：239.9ms→**1.9ms**（预算 <50ms） |
+
+- P0-1 走了方案 b（不是推荐的 a）：验收基准直接测 applyEvent 单事件成本，方案 a 无法达标。全量核对无消费者把 `conversation.events` 放进 memo/useEffect 依赖（App/Conversation/StepDetail/Run Pulse），故未引入 eventsVersion（Simplicity First）。「纯追加」测试按 §5 唯一许可改写为 append-only 契约，另加引用稳定锁——turns/tools/compactions 的 7 个引用稳定契约原样全绿。
+- P1-3 合帧语义：只合并「提交」不合并「折叠」——每帧仍逐帧过 shouldApplyStreamFrame 守护并立即 applyEvent；run/completed、run/failed、onDone、onError 立即 flush；submit 守卫 mode 仍是 live（cancel 后迟到 fire 不写回）。
+
+**剩余（交接 ZCode）：**
+1. **P2-6 perf 预算测试车道**：`web/src/lib/projection.perf.test.ts` 已在库（基准可跑），还差独立 `vitest.perf.config.ts` 手动车道 + 预算断言（20k projectHistory <200ms、4650 <50ms）+ 默认套件 exclude `*.perf.test.ts`。
+2. **P1-4 大会话窗口化**（cropped views，真相全量不动）。
+3. **P1-5 会话列表 header-only**（转后端 AI）。
+4. 候选额外优化点（workbuddy 读码观察，**未验证**，供参考）：StepDetail Timeline 每渲染全量 map `conversation.events`（大会话 O(N)/render，可与 P1-4 合并设计）；ToolCard grep 输出每渲染 split/map 全行（长输出可 memo）；TurnView memo 已挡住完成段重复 markdown 解析（无需再动）。
+
+**⚠️ 环境异常备案（接手必读）：** 本批施工期间 `refs/heads/feat/*` loose ref 两次神秘消失（reflog 出现无消息 `0000→sha` 重建条目），backend 侧同样发生。提交对象与 reflog 始终完好，非仓库损坏。根因指向多 AI 会话 × 双 Git 工具链（`D:/DevTools/Git` 与 workbuddy PortableGit）× 沙箱对 worktree 外 `.git` 路径写入拦截的复合干扰；backend 还观察到裸 `git status` 卡死而 `-uno` 秒过（疑 index 全量刷新 + 大目录 untracked 扫描）。应对协议：commit 后同命令内 `git log -1` 验证，缺失则从 reflog 重建 ref 文件并立即 push；以远端 `ls-remote` 为最终事实源；清理分支前 `git worktree list` + 确认无未推送提交。
