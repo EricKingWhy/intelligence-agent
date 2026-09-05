@@ -31,7 +31,7 @@ async def test_create_pending_operation_can_be_loaded(tmp_path: Path) -> None:
 
     await ledger.create(operation)
 
-    loaded = await ledger.get("call-1")
+    loaded = await ledger.get("session-1", "call-1")
     assert loaded == operation
     assert loaded is not None
     assert loaded.operation_id == "call-1"
@@ -55,9 +55,9 @@ async def test_operation_moves_to_terminal_state_with_recovery_data(
         )
     )
 
-    running = await ledger.update_state("call-2", OperationState.RUNNING)
+    running = await ledger.update_state("session-1", "call-2", OperationState.RUNNING)
     succeeded = await ledger.update_state(
-        "call-2",
+        "session-1", "call-2",
         OperationState.SUCCEEDED,
         result_json='{"ok":true,"message":"read"}',
         artifact_ref="artifact://read-1",
@@ -69,7 +69,7 @@ async def test_operation_moves_to_terminal_state_with_recovery_data(
     assert succeeded.artifact_ref == "artifact://read-1"
     assert succeeded.finished_at is not None
     with pytest.raises(ValueError, match="SUCCEEDED -> RUNNING"):
-        await ledger.update_state("call-2", OperationState.RUNNING)
+        await ledger.update_state("session-1", "call-2", OperationState.RUNNING)
 
 
 @pytest.mark.asyncio
@@ -121,7 +121,9 @@ async def test_operations_schema_contains_frozen_columns(tmp_path: Path) -> None
         "finished_at",
         "reconcile_meta",
     }
-    assert columns["tool_call_id"][5] == 1
+    # C5 复合主键：session_id 是 pk 序 1，tool_call_id 是 pk 序 2
+    assert columns["session_id"][5] == 1
+    assert columns["tool_call_id"][5] == 2
     assert columns["artifact_ref"][3] == 0
 
 
@@ -173,3 +175,31 @@ async def test_ledger_methods_route_through_shared_connect(tmp_path, monkeypatch
     )
     await ledger.create(operation)
     assert used, "Ledger 连接未经过 _connect 助手"
+
+
+# ── C5（用户拍板，并入 R8-1）：复合主键防跨会话撞键 ──
+
+
+@pytest.mark.asyncio
+async def test_same_tool_call_id_across_sessions_do_not_collide(tmp_path):
+    """两个 session 复用同一 tool_call_id（模型高频输出 "call_1"）时，
+    复合主键 (session_id, tool_call_id) 保证互不覆盖——单列主键下第二次
+    create 会撞 UNIQUE 或覆盖第一个会话的状态。"""
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    for session_id in ("session-a", "session-b"):
+        await ledger.create(
+            Operation(
+                tool_call_id="call_1",
+                session_id=session_id,
+                tool_name="bash",
+                args_identity="{}",
+                state=OperationState.PENDING,
+                started_at="2026-09-05T00:00:00+00:00",
+            )
+        )
+    await ledger.update_state("session-a", "call_1", OperationState.RUNNING)
+    a = await ledger.get("session-a", "call_1")
+    b = await ledger.get("session-b", "call_1")
+    assert a is not None and a.state is OperationState.RUNNING
+    assert b is not None and b.state is OperationState.PENDING, "跨会话状态互相污染"

@@ -73,7 +73,7 @@ async def run_phase5_scenario(tmp_path, session, artifact_store, *, stream=True)
     assert any(e.type == "artifact/created" for e in session.events)
     assert any(e.type == "context/compacted" for e in session.events)
     assert (await artifact_store.load(ARTIFACT_ID)).content == RAW_OUTPUT
-    operation = await ledger.get("bash-1")
+    operation = await ledger.get(session.session_id, "bash-1")
     assert operation.artifact_ref == ARTIFACT_ID
     stored_result = json.loads(operation.result_json)
     assert len(stored_result["data"]["stdout"]) <= 2000

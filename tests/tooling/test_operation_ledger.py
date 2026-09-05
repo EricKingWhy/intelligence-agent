@@ -45,13 +45,15 @@ class _IdentityTool(Tool):
 
 
 class _LedgerObservingTool(_IdentityTool):
-    def __init__(self, ledger: SqliteOperationLedger, call_id: str) -> None:
+    def __init__(self, ledger: SqliteOperationLedger, call_id: str,
+                 session_id: str = "session-1") -> None:
         self._ledger = ledger
         self._call_id = call_id
+        self._session_id = session_id
         self.observed_states: list[OperationState] = []
 
     async def execute(self, args: BaseModel) -> ToolResult:
-        operation = await self._ledger.get(self._call_id)
+        operation = await self._ledger.get(self._session_id, self._call_id)
         assert operation is not None
         self.observed_states.append(operation.state)
         return await super().execute(args)
@@ -59,7 +61,7 @@ class _LedgerObservingTool(_IdentityTool):
 
 class _FlakyLedgerObservingTool(_LedgerObservingTool):
     async def execute(self, args: BaseModel) -> ToolResult:
-        operation = await self._ledger.get(self._call_id)
+        operation = await self._ledger.get(self._session_id, self._call_id)
         assert operation is not None
         self.observed_states.append(operation.state)
         if len(self.observed_states) < 3:
@@ -118,7 +120,7 @@ async def test_tool_execution_is_durable_before_and_after_side_effect(
         ),
     )
 
-    persisted = await ledger.get("call-1")
+    persisted = await ledger.get("session-1", "call-1")
     assert execution.result.ok is True
     assert tool.observed_states == [OperationState.RUNNING]
     assert persisted is not None
@@ -173,7 +175,7 @@ async def test_cancelled_execution_is_recorded_as_cancelled(tmp_path: Path) -> N
 
     with pytest.raises(asyncio.CancelledError):
         await task
-    operation = await ledger.get("call-cancel")
+    operation = await ledger.get("session-1", "call-cancel")
     assert operation is not None
     assert operation.state is OperationState.CANCELLED
     assert operation.finished_at is not None
@@ -192,7 +194,7 @@ async def test_failed_execution_persists_failure_result(tmp_path: Path) -> None:
         operation_context=OperationContext(session_id="session-1"),
     )
 
-    operation = await ledger.get("call-fail")
+    operation = await ledger.get("session-1", "call-fail")
     assert execution.result.ok is False
     assert operation is not None
     assert operation.state is OperationState.FAILED

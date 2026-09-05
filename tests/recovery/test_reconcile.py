@@ -110,6 +110,7 @@ async def _seed_operation(
     chain = _SEED_CHAIN[state]
     for step in chain:
         await ledger.update_state(
+            session_id,
             tool_call_id,
             step,
             result_json=result_json if step is chain[-1] else None,
@@ -178,15 +179,15 @@ async def test_ledger_enforces_two_step_unknown_transition(tmp_path: Path) -> No
     )
 
     # 两步链合法：RUNNING → UNKNOWN → NEED_RECONCILE → 终态。
-    await ledger.update_state("call-a", OperationState.UNKNOWN)
-    await ledger.update_state("call-a", OperationState.NEED_RECONCILE)
-    final = await ledger.update_state("call-a", OperationState.SUCCEEDED)
+    await ledger.update_state(session_id, "call-a", OperationState.UNKNOWN)
+    await ledger.update_state(session_id, "call-a", OperationState.NEED_RECONCILE)
+    final = await ledger.update_state(session_id, "call-a", OperationState.SUCCEEDED)
     assert final.state is OperationState.SUCCEEDED
 
     # 跳步非法：RUNNING 不允许直达 NEED_RECONCILE。
     await _seed_operation(ledger, session_id, "call-b", OperationState.RUNNING)
     with pytest.raises(ValueError, match="RUNNING -> NEED_RECONCILE"):
-        await ledger.update_state("call-b", OperationState.NEED_RECONCILE)
+        await ledger.update_state(session_id, "call-b", OperationState.NEED_RECONCILE)
 
 
 # ── 四种裁决 ──
@@ -215,7 +216,7 @@ async def test_running_crash_reaches_callback_and_confirms_success(
     ).recover(session.session_id)
 
     # 裁决结果落 Ledger：SUCCEEDED + 原 result_json。
-    op = await ledger.get("call-1")
+    op = await ledger.get(session.session_id, "call-1")
     assert op is not None and op.state is OperationState.SUCCEEDED
     # reconcile-required 事件可观察，携带 tool_call_id 与 NEED_RECONCILE。
     events = _reconcile_required_events(recovered)
@@ -277,7 +278,7 @@ async def test_confirm_success_without_ledger_result_synthesizes_confirmed(
     synthesized = ToolResult.model_validate_json(_result_events(recovered)["call-1"])
     assert synthesized.ok is True
     assert "确认成功" in synthesized.message
-    op = await ledger.get("call-1")
+    op = await ledger.get(session.session_id, "call-1")
     assert op is not None
     assert op.state is OperationState.SUCCEEDED
     assert op.result_json is not None  # 裁决结果回写 Ledger
@@ -301,7 +302,7 @@ async def test_confirm_failure_marks_failed(tmp_path: Path) -> None:
     synthesized = ToolResult.model_validate_json(_result_events(recovered)["call-1"])
     assert synthesized.ok is False
     assert "确认失败" in synthesized.message
-    op = await ledger.get("call-1")
+    op = await ledger.get(session.session_id, "call-1")
     assert op is not None and op.state is OperationState.FAILED
 
 
@@ -328,7 +329,7 @@ async def test_retry_verdict_produces_user_authorized_retryable_result(
     assert synthesized.ok is False
     assert synthesized.retryable is True
     assert synthesized.error_code is ErrorCode.CANCELLED
-    op = await ledger.get("call-1")
+    op = await ledger.get(session.session_id, "call-1")
     assert op is not None and op.state is OperationState.CANCELLED
     assert op.reconcile_meta is not None
     assert json.loads(op.reconcile_meta)["verdict"] == "RETRY"
@@ -353,7 +354,7 @@ async def test_abandon_verdict_marks_cancelled_non_retryable(tmp_path: Path) -> 
     assert synthesized.ok is False
     assert synthesized.retryable is False
     assert synthesized.error_code is ErrorCode.CANCELLED
-    op = await ledger.get("call-1")
+    op = await ledger.get(session.session_id, "call-1")
     assert op is not None and op.state is OperationState.CANCELLED
     assert json.loads(op.reconcile_meta)["verdict"] == "ABANDON"
 
@@ -378,7 +379,7 @@ async def test_preexisting_unknown_operation_flows_through_callback(
 
     assert len(callback.calls) == 1
     assert len(_reconcile_required_events(recovered)) == 1
-    op = await ledger.get("call-1")
+    op = await ledger.get(session.session_id, "call-1")
     assert op is not None and op.state is OperationState.SUCCEEDED
 
 
@@ -421,7 +422,7 @@ async def test_missing_callback_refuses_safely(tmp_path: Path) -> None:
         await coordinator.recover(session.session_id)
 
     # Ledger 状态未被推进（安全拒绝 = 完全不写）。
-    op = await ledger.get("call-1")
+    op = await ledger.get(session.session_id, "call-1")
     assert op is not None and op.state is OperationState.RUNNING
     # 事件流零写入。
     assert store.read_events(session.session_id) == events_before

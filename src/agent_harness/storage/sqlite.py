@@ -43,7 +43,7 @@ async def _connect(database_path: Path) -> AsyncIterator[aiosqlite.Connection]:
 
 _OPERATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS operations (
-    tool_call_id TEXT PRIMARY KEY,
+    tool_call_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     run_id TEXT,
     agent_id TEXT,
@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS operations (
     artifact_ref TEXT,
     started_at TEXT,
     finished_at TEXT,
-    reconcile_meta TEXT
+    reconcile_meta TEXT,
+    PRIMARY KEY (session_id, tool_call_id)
 )
 """
 
@@ -138,17 +139,24 @@ class SqliteOperationLedger(OperationLedger):
             )
             await connection.commit()
 
-    async def get(self, tool_call_id: str) -> Operation | None:
+    async def get(self, session_id: str, tool_call_id: str) -> Operation | None:
+        """按 (session_id, tool_call_id) 复合主键取 Operation（C5）。
+
+        tool_call_id 由模型生成、只在会话内保证唯一——跨会话复用同一 id
+        （"call_1" 是高频模型输出）时单列主键会互相覆盖/撞键。
+        """
         async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
-                "SELECT * FROM operations WHERE tool_call_id = ?", (tool_call_id,)
+                "SELECT * FROM operations WHERE session_id = ? AND tool_call_id = ?",
+                (session_id, tool_call_id),
             )
             row = await cursor.fetchone()
         return self._to_operation(row) if row is not None else None
 
     async def update_state(
         self,
+        session_id: str,
         tool_call_id: str,
         state: OperationState,
         *,
@@ -156,7 +164,7 @@ class SqliteOperationLedger(OperationLedger):
         artifact_ref: str | None = None,
         reconcile_meta: str | None = None,
     ) -> Operation:
-        current = await self.get(tool_call_id)
+        current = await self.get(session_id, tool_call_id)
         if current is None:
             raise KeyError(f"Operation '{tool_call_id}' does not exist")
         if state not in _ALLOWED_TRANSITIONS.get(current.state, frozenset()):
@@ -182,7 +190,7 @@ class SqliteOperationLedger(OperationLedger):
                     artifact_ref = COALESCE(?, artifact_ref),
                     finished_at = COALESCE(?, finished_at),
                     reconcile_meta = COALESCE(?, reconcile_meta)
-                WHERE tool_call_id = ? AND state = ?
+                WHERE session_id = ? AND tool_call_id = ? AND state = ?
                 """,
                 (
                     state.value,
@@ -190,6 +198,7 @@ class SqliteOperationLedger(OperationLedger):
                     artifact_ref,
                     finished_at,
                     reconcile_meta,
+                    session_id,
                     tool_call_id,
                     current.state.value,
                 ),
@@ -199,7 +208,7 @@ class SqliteOperationLedger(OperationLedger):
                 raise RuntimeError(
                     f"Operation '{tool_call_id}' changed concurrently"
                 )
-        updated = await self.get(tool_call_id)
+        updated = await self.get(session_id, tool_call_id)
         assert updated is not None
         return updated
 

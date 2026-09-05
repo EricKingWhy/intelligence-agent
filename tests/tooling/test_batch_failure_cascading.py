@@ -222,8 +222,8 @@ async def test_preflight_failure_has_no_operation_and_cancels_remainder(
     assert second.calls == 0
     assert results[0].result.error_code is ErrorCode.INVALID_ARGUMENT
     assert results[1].result.error_code is ErrorCode.CANCELLED
-    assert await ledger.get("call-invalid") is None
-    cancelled = await ledger.get("call-cancelled")
+    assert await ledger.get("session-1", "call-invalid") is None
+    cancelled = await ledger.get("session-1", "call-cancelled")
     assert cancelled is not None
     assert cancelled.state is OperationState.CANCELLED
 
@@ -246,7 +246,7 @@ async def test_permission_denial_has_no_operation_or_side_effect(
 
     assert dangerous.calls == 0
     assert execution.result.error_code is ErrorCode.PERMISSION_DENIED
-    assert await ledger.get("call-denied") is None
+    assert await ledger.get("session-1", "call-denied") is None
 
 
 # ============================================================================

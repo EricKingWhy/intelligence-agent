@@ -91,10 +91,10 @@ async def _seed_operation(
         )
     )
     if state is not OperationState.PENDING:
-        await ledger.update_state(tool_call_id, OperationState.RUNNING)
+        await ledger.update_state(session_id, tool_call_id, OperationState.RUNNING)
         if state is not OperationState.RUNNING:
             await ledger.update_state(
-                tool_call_id, state, result_json=result_json
+                session_id, tool_call_id, state, result_json=result_json
             )
 
 
@@ -295,7 +295,7 @@ async def test_pending_operation_skipped_without_execution(tmp_path: Path) -> No
     # 是状态机显式允许的迁移，不伪造任何执行结果（不写 SUCCEEDED/FAILED）。此前
     # 停留 PENDING 让 ledger 与 session 对同一 tool_call 永久不一致。再次 recover
     # 靠结果事件幂等跳过（dangling 判定基于事件配对，与 Ledger 状态正交）。
-    op = await ledger.get("call-1")
+    op = await ledger.get(crashed.session_id, "call-1")
     assert op is not None and op.state is OperationState.CANCELLED
     assert op.result_json == results["call-1"]
 

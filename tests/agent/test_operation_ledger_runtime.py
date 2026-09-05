@@ -51,7 +51,7 @@ class _OrderingTool(Tool):
         return _NoArgs
 
     async def execute(self, args: BaseModel) -> ToolResult:
-        operation = await self._ledger.get(self._call_id)
+        operation = await self._ledger.get(self._session.session_id, self._call_id)
         assert operation is not None
         self.state_during_execute = operation.state
         self.event_types_during_execute = [event.type for event in self._session.events]
@@ -109,7 +109,7 @@ async def test_runtime_persists_ledger_before_tool_conversation_events(
 
     await runtime.run(session, "run the tool")
 
-    operation = await ledger.get("call-order")
+    operation = await ledger.get(session.session_id, "call-order")
     assert tool.state_during_execute is OperationState.RUNNING
     assert MODEL_COMPLETED not in tool.event_types_during_execute
     assert operation is not None

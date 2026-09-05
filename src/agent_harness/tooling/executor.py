@@ -219,6 +219,8 @@ class ToolExecutor:
             raise ValueError("session and operation_context must identify the same session")
 
         if self._operation_ledger is not None:
+            assert operation_context is not None
+            session_id = operation_context.session_id
             await self._create_pending_operation(
                 tool_call_id=tool_call_id,
                 name=name,
@@ -228,7 +230,7 @@ class ToolExecutor:
             )
             self._maybe_kill("pending", tool_call_id)
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.RUNNING
+                session_id, tool_call_id, OperationState.RUNNING
             )
             self._maybe_kill("running", tool_call_id)
 
@@ -241,7 +243,7 @@ class ToolExecutor:
         except asyncio.CancelledError:
             if self._operation_ledger is not None:
                 await self._operation_ledger.update_state(
-                    tool_call_id, OperationState.CANCELLED
+                    session_id, tool_call_id, OperationState.CANCELLED
                 )
             raise
 
@@ -259,7 +261,7 @@ class ToolExecutor:
                 OperationState.SUCCEEDED if result.ok else OperationState.FAILED
             )
             await self._operation_ledger.update_state(
-                tool_call_id,
+                session_id, tool_call_id,
                 terminal_state,
                 result_json=result.model_dump_json(),
                 artifact_ref=result.artifact_ref,
@@ -485,6 +487,7 @@ class ToolExecutor:
         )
 
         if self._operation_ledger is not None:
+            assert operation_context is not None
             await self._create_pending_operation(
                 tool_call_id=tool_call_id,
                 name=name,
@@ -492,7 +495,7 @@ class ToolExecutor:
                 operation_context=operation_context,
             )
             await self._operation_ledger.update_state(
-                tool_call_id,
+                operation_context.session_id, tool_call_id,
                 OperationState.CANCELLED,
                 result_json=result.model_dump_json(),
             )

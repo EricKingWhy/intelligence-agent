@@ -289,7 +289,7 @@ class RecoveryCoordinator:
                         and operation.state is OperationState.PENDING
                         and self._operation_ledger is not None):
                     await self._operation_ledger.update_state(
-                        item.tool_call_id,
+                        session_id, item.tool_call_id,
                         OperationState.CANCELLED,
                         result_json=item.content,
                     )
@@ -499,14 +499,14 @@ class RecoveryCoordinator:
         """
         if operation.state is OperationState.RUNNING:
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.UNKNOWN
+                operation.session_id, tool_call_id, OperationState.UNKNOWN
             )
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.NEED_RECONCILE
+                operation.session_id, tool_call_id, OperationState.NEED_RECONCILE
             )
         elif operation.state is OperationState.UNKNOWN:
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.NEED_RECONCILE
+                operation.session_id, tool_call_id, OperationState.NEED_RECONCILE
             )
 
         session.append(
@@ -527,7 +527,7 @@ class RecoveryCoordinator:
         result, ledger_state = self._verdict_outcome(operation, verdict)
         content = result.model_dump_json()
         await self._operation_ledger.update_state(
-            tool_call_id,
+            operation.session_id, tool_call_id,
             ledger_state,
             result_json=content,
             reconcile_meta=json.dumps(
