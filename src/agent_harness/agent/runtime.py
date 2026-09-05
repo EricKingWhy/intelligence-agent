@@ -110,6 +110,79 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+class _RunFinalizer:
+    """一次 Run 的终态簿记 owner（批次 B / 架构候选 2）。
+
+    _drive 的取消臂/异常臂此前各自维护近重复的 ~40 行收尾，"一个 run 至多
+    一条终态事件"的不变量由散布在 360 行里的布尔旗执行——近期四次 bug 修复
+    （1cfe795 终结事件 / 59e4425 checkpoint 不毒化 / 19d7e47 取消耐久 /
+    4e47b90 空响应归失败）全落在两条臂的交互上。终态决策收拢到本类后，
+    单终态由单点执行，终态收尾可脱离 ScriptedModel 全链单测。
+
+    usage_total 是 _drive 聚合 dict 的引用（不复制）：终结时快照当时账目。
+    """
+
+    def __init__(self, session: Session, usage_total: dict[str, int]) -> None:
+        self._session = session
+        self._usage_total = usage_total
+        self.run_id: str | None = None
+        self.model_call_open = False
+        self._terminal_written = False
+
+    def begin_run(self, run_id: str) -> None:
+        self.run_id = run_id
+
+    def mark_terminal_written(self) -> None:
+        """成功路径（completed / max-steps）写入终结事件后调用。"""
+        self._terminal_written = True
+
+    def append_model_failed(
+        self, *, step: int, cancelled: bool, error_type: str | None = None,
+    ) -> SessionEvent:
+        """模型在途失败/取消 → model/failed，把故障归因到具体一步。
+
+        异常消息可能含 Provider 回显的敏感文本——事件只带类型名（与
+        memory/writeback 的脱敏不变量一致），完整消息只进结构化日志。
+        """
+        if cancelled:
+            message = "model call cancelled"
+        else:
+            message = f"model call failed: {error_type}"
+        return self._session.append(
+            MODEL_FAILED,
+            {"message": message},
+            run_id=self.run_id, step_id=step + 1,
+        )
+
+    def cancelled_terminal(self, *, steps: int) -> SessionEvent | None:
+        """取消臂收尾（纯同步、不 yield——生成器关闭中禁止再产出）。
+
+        run 未开始（begin_run 之前被取消）→ None，已写事件保持原样；
+        已终结的 run 不补第二条终结（双终结 = 历史不可对账）。"""
+        if self.run_id is None or self._terminal_written:
+            return None
+        terminal_data: dict[str, Any] = {"reason": "cancelled"}
+        if self._usage_total:
+            # 取消也如实带上 token 消耗（Gap 1 契约，不因取消路径丢账）。
+            terminal_data["usage_total"] = dict(self._usage_total)
+        event = self._session.append(
+            RUN_FAILED, terminal_data, run_id=self.run_id, step_id=steps,
+        )
+        self._terminal_written = True
+        return event
+
+    def failure_terminal(self, *, steps: int) -> SessionEvent | None:
+        """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。"""
+        if self.run_id is None or self._terminal_written:
+            return None
+        event = self._session.end_run(
+            self.run_id, status="failed",
+            usage_total=dict(self._usage_total) or None,
+        )
+        self._terminal_written = True
+        return event
+
+
 class AgentRuntime:
     """最小透明 Agent Loop。
 
@@ -219,12 +292,9 @@ class AgentRuntime:
         steps = 0
         # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
         usage_total: dict[str, int] = {}
-        # 模型调用是否在途：在途时抛错补 model/failed，把故障归因到具体一步。
-        model_call_open = False
-        # run 是否已写终结事件：取消臂据此避免给已终结的 run 补第二条终结
-        # （run/completed + run/failed 双终结 = 历史不可对账，_save_checkpoint
-        # docstring 明令禁止的状态）。
-        run_terminal_written = False
+        # 终态簿记 owner（批次 B 候选 2）：model 在途标记 + 单终态不变量 +
+        # usage 记账收拢一处，取消臂/异常臂只做调用。
+        terminal = _RunFinalizer(session, usage_total)
         run_span = new_span_id()
         try:
             # 写入 user 消息事件
@@ -235,6 +305,7 @@ class AgentRuntime:
             await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
             run_id = session.begin_run()
+            terminal.begin_run(run_id)
             # run 归因上下文（R3-7）：memory/context provider 等低层模块在
             # 事件降级时需要 run_id 对账，经 contextvar 传递（task 作用域，
             # 随请求 task 结束自然消亡），不改变 Provider 协议签名。
@@ -256,7 +327,7 @@ class AgentRuntime:
                         RUN_FAILED, {"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": str(error)},
                         run_id=run_id, step_id=steps,
                     )
-                    run_terminal_written = True
+                    terminal.mark_terminal_written()
                     yield to_agent_event(failed)
                     result_holder.append(
                         AgentRunResult(status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps),
@@ -272,7 +343,7 @@ class AgentRuntime:
                 llm_started = time.perf_counter()
 
                 # 在途标记：从发起调用到聚合完成，此间抛错按 model/failed 归因。
-                model_call_open = True
+                terminal.model_call_open = True
                 if stream:
                     # 流式：逐 chunk yield model/delta，聚合回完整 AIMessage
                     yield AgentEvent(
@@ -312,7 +383,7 @@ class AgentRuntime:
                     raise RuntimeError(
                         "model returned an empty response (no content, no tool calls)"
                     )
-                model_call_open = False  # 调用完整返回，后续异常不再归因 model
+                terminal.model_call_open = False  # 调用完整返回，后续异常不再归因 model
                 # duration_ms 严格闭合模型调用本身（ainvoke/astream 区间），
                 # 不含 normalize / usage 解析等后处理——与 spec 12 §2 的
                 # "provider latency" 语义对齐（后处理是微秒级，但注释与字段语义
@@ -383,7 +454,7 @@ class AgentRuntime:
                                                 usage_total=dict(usage_total) or None,
                                                 cost_usd=None,   # TODO(spec 12): 费率表未定义，不伪造
                                                 trace_id=None)   # TODO(Phase 15): Langfuse 接入后填真实 trace
-                    run_terminal_written = True
+                    terminal.mark_terminal_written()
                     self._write_memories(session, memory_event_start)
                     yield to_agent_event(end_event)
                     # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
@@ -401,7 +472,7 @@ class AgentRuntime:
                               reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
                     end_event = session.end_run(run_id, status="failed",
                                                 usage_total=dict(usage_total) or None)
-                    run_terminal_written = True
+                    terminal.mark_terminal_written()
                     self._write_memories(session, memory_event_start)
                     yield to_agent_event(end_event)
                     result_holder.append(
@@ -491,27 +562,9 @@ class AgentRuntime:
             # 禁止再产出（RuntimeError），取消中的 task 再 yield 也会被立即再取消。
             # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
             try:
-                if model_call_open:
-                    session.append(
-                        MODEL_FAILED,
-                        {"message": "model call cancelled"},
-                        run_id=run_id, step_id=steps + 1,
-                    )
-                if run_id is not None and not run_terminal_written:
-                    # 已终结的 run 不补第二条终结（run/completed + run/failed
-                    # 双终结 = 历史不可对账）：取消可能落在终结事件 yield /
-                    # 收尾 checkpoint 的窗口里。
-                    terminal_data: dict[str, Any] = {"reason": "cancelled"}
-                    if usage_total:
-                        # 与 except-Exception 兜底一致：取消也如实带上 token 消耗
-                        # （Gap 1 契约，不因取消路径丢账）。
-                        terminal_data["usage_total"] = dict(usage_total)
-                    session.append(
-                        RUN_FAILED,
-                        terminal_data,
-                        run_id=run_id, step_id=steps,
-                    )
-                    run_terminal_written = True
+                if terminal.model_call_open:
+                    terminal.append_model_failed(step=steps, cancelled=True)
+                terminal.cancelled_terminal(steps=steps)
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
@@ -534,22 +587,17 @@ class AgentRuntime:
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
             try:
                 # 模型调用在途时补 model/failed：把故障归因到具体一步，供 resume /
-                # 审计区分"模型故障"与"工具故障"（该类型此前从未被发过）。
-                # 异常消息可能含 Provider 回显的敏感文本——事件只带类型名（与
-                # memory/writeback 的脱敏不变量一致），完整消息只进结构化日志。
-                if model_call_open:
-                    model_failed = session.append(
-                        MODEL_FAILED,
-                        {"message": f"model call failed: {type(error).__name__}"},
-                        run_id=run_id, step_id=steps + 1,
+                # 审计区分"模型故障"与"工具故障"。异常消息可能含 Provider 回显的
+                # 敏感文本——事件只带类型名（脱敏不变量），完整消息只进日志。
+                if terminal.model_call_open:
+                    model_failed = terminal.append_model_failed(
+                        step=steps, cancelled=False, error_type=type(error).__name__,
                     )
                     yield to_agent_event(model_failed)
                 # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
                 # 已写入的事件保持原样，失败只能由日志承载。
-                if run_id is not None:
-                    end_event = session.end_run(run_id, status="failed",
-                                                usage_total=dict(usage_total) or None)
-                    run_terminal_written = True
+                end_event = terminal.failure_terminal(steps=steps)
+                if end_event is not None:
                     yield to_agent_event(end_event)
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "失败兜底事件写入失败（存储故障？）",
