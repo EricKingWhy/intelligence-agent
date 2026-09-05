@@ -54,6 +54,16 @@
   --radius-xl: 20px;  /* command palette (PRD §18.2: 18-22) */
   --radius-full: 9999px;
 
+  /* ── Icon system (Tabler/PatternFly informed) ──
+   *  三档尺寸：sm 行内密集 / md 默认按钮 / lg logo 空态。
+   *  Stroke 随尺寸降档——小图标细线更精致（lucide 默认 2px 在 14px 下偏粗）。 */
+  --icon-sm: 14px;
+  --icon-md: 16px;
+  --icon-lg: 20px;
+  --icon-stroke-sm: 1.5px;
+  --icon-stroke-md: 1.75px;
+  --icon-stroke-lg: 2px;
+
   /* ── Liquid Glass (floating surfaces ONLY) ── */
   --glass-blur-1: 20px;
   --glass-blur-2: 40px;

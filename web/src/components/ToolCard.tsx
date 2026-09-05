@@ -87,12 +87,12 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
           aria-expanded={effectiveLevel > 0}
         >
           <span className={`act-status act-status-${tool.status}`}>
-            {tool.status === 'success' && <Check size={12} />}
-            {tool.status === 'failed' && <X size={12} />}
-            {tool.status === 'stopped' && <Square size={11} />}
+            {tool.status === 'success' && <Check size={14} />}
+            {tool.status === 'failed' && <X size={14} />}
+            {tool.status === 'stopped' && <Square size={14} />}
             {tool.status === 'running' && <span className="status-spinner" />}
           </span>
-          {density !== 'compact' && <span className="act-icon"><KindIcon size={13} /></span>}
+          {density !== 'compact' && <span className="act-icon"><KindIcon size={14} /></span>}
         {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
         {(() => {
           const mcp = splitMcpToolName(tool.name);
@@ -409,7 +409,7 @@ function ArtifactSliceBlock({ slice }: { slice: SliceData }) {
         {slice.truncated && <span className="slice-meta-item">返回 {slice.lines.length} 行</span>}
         {truncatedCount > 0 && (
           <span className="slice-trunc-chip">
-            <Scissors size={11} />
+            <Scissors size={14} />
             {truncatedCount} 行超长截断 · 可放宽 max_chars_per_line 重读
           </span>
         )}

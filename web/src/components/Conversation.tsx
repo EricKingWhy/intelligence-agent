@@ -297,7 +297,7 @@ export function ChainNodeView({ node, density, disclosure, isFinalModel = true, 
   const kindRow =
     kind === 'final-answer' ? null : (
       <div className={`model-kind-row model-kind-row-${kind}`}>
-        <span className="model-kind-icon">{(() => { const Icon = KIND_ICON[kind]; return <Icon size={13} />; })()}</span>
+        <span className="model-kind-icon">{(() => { const Icon = KIND_ICON[kind]; return <Icon size={14} />; })()}</span>
         <span className="model-kind-label">{KIND_LABEL[kind]}</span>
         {kind === 'thinking' && <span className="model-kind-ellipsis" aria-hidden="true" />}
       </div>

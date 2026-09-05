@@ -300,7 +300,7 @@ export default function App() {
                 onClick={() => setAuthRequired(false)}
                 aria-label="关闭提示"
               >
-                <X size={13} />
+                <X size={14} />
               </button>
             </div>
           )}
@@ -313,7 +313,7 @@ export default function App() {
                 disabled={recoverState.status === 'pending'}
                 title="修复中断会话：按 Operation Ledger 回填工具结果、标记 dangling 调用（幂等）"
               >
-                <RotateCcw size={12} />
+                <RotateCcw size={14} />
                 {recoverState.status === 'pending' ? '恢复中…' : '恢复会话'}
               </button>
               {recoverState.status === 'error' && !recoverState.conflict && (

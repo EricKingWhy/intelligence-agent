@@ -84,7 +84,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           </span>
         )}
         <span className={`run-pulse ${pulse.className}`}>
-          <PulseIcon size={12} aria-hidden="true" />
+          <PulseIcon size={14} aria-hidden="true" />
           {pulse.label}
           {active && elapsedSec > 0 && <span className="num"> · {elapsedSec}s</span>}
         </span>
@@ -124,7 +124,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           aria-expanded={authPanelOpen}
           title="API 身份令牌（Bearer）——仅配置了 JWT_SECRET 的后端需要"
         >
-          <KeyRound size={15} />
+          <KeyRound size={16} />
         </button>
         <button
           className="icon-btn"

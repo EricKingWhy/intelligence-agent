@@ -76,7 +76,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       <aside className="step-detail">
         <div className="detail-header">
           <button className="detail-back-btn" onClick={onFocusRun}>
-            <ArrowLeft size={12} /> 返回 Timeline
+            <ArrowLeft size={14} /> 返回 Timeline
           </button>
           <span className="detail-focus-type">
             {focus.kind === 'tool' ? focus.tool.name : focus.event.type}
@@ -148,7 +148,7 @@ function ChatTab({
     <>
       <div className="detail-section">
         <div className="detail-section-title">
-          <Hash size={12} /> RUN
+          <Hash size={14} /> RUN
         </div>
         <div className="detail-row">
           <span className="detail-key">id</span>
@@ -182,7 +182,7 @@ function ChatTab({
 
       <div className="detail-section">
         <div className="detail-section-title">
-          <Package size={12} /> TOOLS
+          <Package size={14} /> TOOLS
         </div>
         <div className="detail-row">
           <span className="detail-key">计数</span>
@@ -198,7 +198,7 @@ function ChatTab({
         </div>
         {tools.map((t) => (
           <button key={t.tool_call_id} className="detail-tool-row" onClick={() => onFocusTool(t)}>
-            <ChevronRight size={12} />
+            <ChevronRight size={14} />
             <span className={`tool-status-dot tool-status-dot-${t.status}`} />
             <span className="detail-tool-name">{t.name}</span>
           </button>
@@ -208,7 +208,7 @@ function ChatTab({
       {conversation.compactions.length > 0 && (
         <div className="detail-section">
           <div className="detail-section-title">
-            <Layers size={12} /> CONTEXT
+            <Layers size={14} /> CONTEXT
           </div>
           {conversation.compactions.map((c, i) => (
             <div key={i} className="detail-compaction-row">
@@ -222,7 +222,7 @@ function ChatTab({
               </div>
               {c.fallback_used && (
                 <div className="detail-row detail-row-warn">
-                  <AlertTriangle size={11} /> <span>兜底降级（非模型摘要）</span>
+                  <AlertTriangle size={14} /> <span>兜底降级（非模型摘要）</span>
                 </div>
               )}
             </div>
@@ -233,7 +233,7 @@ function ChatTab({
       {conversation.reconcile_queue.length > 0 && (
         <div className="detail-section">
           <div className="detail-section-title">
-            <AlertTriangle size={12} /> 需人工裁决
+            <AlertTriangle size={14} /> 需人工裁决
           </div>
           {conversation.reconcile_queue.map((r, i) => (
             <div key={i} className="detail-reconcile-row">
@@ -256,7 +256,7 @@ function ChatTab({
 
       <div className="detail-section">
         <div className="detail-section-title">
-          <ListTree size={12} /> TRACE
+          <ListTree size={14} /> TRACE
         </div>
         <div className="detail-row">
           <span className="detail-key">事件数</span>
@@ -282,14 +282,14 @@ function ChatTab({
       {conversation.model === null && conversation.usage_total === null && conversation.cost_usd === null ? (
         <div className="detail-section detail-reserved">
           <div className="detail-section-title">
-            <Database size={12} /> MODEL
+            <Database size={14} /> MODEL
           </div>
           <div className="detail-empty-hint">暂无观测数据（等待 model/completed）</div>
         </div>
       ) : (
         <div className="detail-section">
           <div className="detail-section-title">
-            <Database size={12} /> MODEL
+            <Database size={14} /> MODEL
           </div>
           <div className="detail-row">
             <span className="detail-key">模型</span>
@@ -311,7 +311,7 @@ function ChatTab({
       )}
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">
-          <Database size={12} /> CHECKPOINT
+          <Database size={14} /> CHECKPOINT
         </div>
         <div className="detail-empty-hint">后端未暴露（无 API，集成阶段处理）</div>
       </div>
@@ -498,7 +498,7 @@ function ChangesTab({ tools }: { tools: ToolCall[] }) {
       {diffs.map((t) => (
         <div key={t.tool_call_id} className="detail-section">
           <div className="detail-section-title">
-            <FileDiff size={12} /> {t.name}: {String(t.args.path ?? '')}
+            <FileDiff size={14} /> {t.name}: {String(t.args.path ?? '')}
           </div>
           <div className="diff-cols">
             <div className="diff-col diff-before">
@@ -572,7 +572,7 @@ function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
       {artifacts.map((t) => (
         <div key={t.tool_call_id} className="detail-section">
           <div className="detail-section-title">
-            <FileCheck2 size={12} /> {t.name}
+            <FileCheck2 size={14} /> {t.name}
           </div>
           <div className="detail-row">
             <span className="detail-key">ID</span>
@@ -639,7 +639,7 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       {tab === 'overview' && (
         <div className="detail-section">
           <div className="detail-section-title">
-            <Clock size={12} /> {event.type}
+            <Clock size={14} /> {event.type}
           </div>
           {event.seq !== null && (
             <div className="detail-row">
@@ -732,7 +732,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
   return (
     <div className="detail-section">
       <div className="detail-section-title">
-        <TerminalSquare size={12} /> {tool.name}
+        <TerminalSquare size={14} /> {tool.name}
         <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
         {tool.started_at && tool.completed_at && (
           <span className="io-duration">{formatDuration(tool.started_at, tool.completed_at)}</span>

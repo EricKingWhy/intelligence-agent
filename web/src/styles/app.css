@@ -7,6 +7,14 @@
  * (composer dock). Main panels carry no shadow and no blur.
  */
 
+/* ── Icon stroke-width 全局降档 ──
+ *  lucide 默认 strokeWidth=2，在 14px 下偏粗显得"糊"。
+ *  按尺寸降档：14px→1.5、16px→1.75、20px→2（保持默认）。
+ *  用 CSS attribute selector 覆盖 lucide 的 SVG stroke-width 属性。 */
+svg[width="14"][height="14"] { stroke-width: var(--icon-stroke-sm); }
+svg[width="16"][height="16"] { stroke-width: var(--icon-stroke-md); }
+svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
+
 /* ═══════════════════════════════════════════════════════════════════
  * Phase 2 — Single Application Shell (Brief §5/§6)
  * ONE frame: App Bar top, three regions below split by 1px dividers.
@@ -98,7 +106,16 @@
   align-items: center;
   gap: var(--space-sm);
 }
+/* Logo 品牌化：gradient accent 容器 + 内高光，不再是裸色 icon */
 .appbar-logo {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--surface-1)), var(--surface-1));
+  border: 0.5px solid color-mix(in srgb, var(--accent) 30%, var(--border-subtle));
+  box-shadow: var(--edge-light);
   color: var(--accent);
 }
 .appbar-title {
@@ -243,26 +260,43 @@
   background: var(--color-hover);
 }
 
+/* ── Icon button：高级质感 = 层次 + 反馈 ──
+ *  32px 触达区、subtle 底色 + edge-light 内高光、hover 浮起 + 背景加深、
+ *  active 按下回缩。参考 Linear/Vercel icon button 的"quiet but tactile"。 */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  background: transparent;
-  border: none;
-  color: var(--color-muted-foreground);
+  width: 32px;
+  height: 32px;
+  background: var(--surface-1);
+  border: 0.5px solid var(--border-subtle);
+  color: var(--text-secondary);
   cursor: pointer;
   padding: 0;
   border-radius: var(--radius-sm);
-  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
+  box-shadow: var(--edge-light);
+  transition:
+    color var(--dur-out) var(--ease-apple),
+    background var(--dur-out) var(--ease-apple),
+    border-color var(--dur-out) var(--ease-apple),
+    box-shadow var(--dur-out) var(--ease-apple),
+    transform var(--dur-fast) var(--ease-apple);
 }
 .icon-btn:hover {
-  color: var(--color-foreground);
+  color: var(--text-primary);
+  background: var(--surface-overlay);
+  border-color: var(--border-strong);
+  box-shadow: var(--edge-light), var(--shadow-overlay);
+  transform: translateY(-1px);
+}
+.icon-btn:active {
+  transform: translateY(0);
   background: var(--color-hover);
+  box-shadow: var(--edge-light);
 }
 .icon-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
@@ -463,15 +497,16 @@
   color: var(--color-subtle-foreground);
   padding: var(--space-2xl);
 }
+/* 空态 logo：gradient accent 容器 + 内高光，与 appbar-logo 同族 */
 .empty-logo {
   width: 44px;
   height: 44px;
   display: grid;
   place-items: center;
   border-radius: var(--radius-lg);
-  background: var(--surface-2);
-  border: 1px solid var(--border-subtle);
-    color: var(--color-accent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--surface-2)), var(--surface-2));
+  border: 0.5px solid color-mix(in srgb, var(--accent) 30%, var(--border-subtle));
+  color: var(--accent);
   margin-bottom: var(--space-lg);
   box-shadow: var(--edge-light);
 }
@@ -858,25 +893,29 @@
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
+/* Status icon：filled badge 风格——实心圆底 + 反白 icon。
+ *  参考 GitHub commit status / Vercel deployment state。 */
 .act-status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  color: var(--color-subtle-foreground);
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
   flex-shrink: 0;
+  color: var(--bg-app); /* 反白：icon 用底色，badge 用状态色 */
 }
 .act-status-success {
-  color: var(--color-success);
+  background: var(--success);
 }
 .act-status-failed {
-  color: var(--color-destructive);
+  background: var(--danger);
 }
 .act-status-running {
-  color: var(--color-warning);
+  background: var(--warning);
 }
 .act-status-stopped {
-  color: var(--text-tertiary);
+  background: var(--text-tertiary);
 }
 
 /* ── Trace Density 档位差异（Phase 4） ── */
@@ -1000,6 +1039,12 @@
 }
 [data-density='compact'] .act-status {
   width: 12px;
+  height: 12px;
+}
+/* compact 下 badge 内 icon 等比缩小（14px icon 装不进 12px 圆） */
+[data-density='compact'] .act-status svg {
+  width: 10px;
+  height: 10px;
 }
 [data-density='compact'] .act-stream::before,
 [data-density='compact'] .act-chain::before {

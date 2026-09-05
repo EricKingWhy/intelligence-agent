@@ -56,7 +56,7 @@ export const Composer = memo(function Composer({ streaming, onSubmit, onCancel, 
         />
         {streaming ? (
           <button className="composer-stop" onClick={onCancel} aria-label="停止" title="停止">
-            <Square size={12} />
+            <Square size={14} />
           </button>
         ) : (
           <button
