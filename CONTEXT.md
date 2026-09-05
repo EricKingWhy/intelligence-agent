@@ -301,3 +301,25 @@ _Avoid_: document record, file entry, ingest job
 **Sufficiency（证据充分性）**:
 检索结果对当前问题的证据质量标记：最高相关分达到阈值 → is_sufficient=true，否则如实 false。它是对证据质量的诚实信号——阈值以下的 hits 照常返回，由模型自行鉴别；不是结果开关，更不做 LLM 二次评判（NOT-DO：学术式 Evidence Grader）。
 _Avoid_: relevance filter, answer confidence, evidence grade
+
+## Web Search / Reliability 层（Phase 12）
+
+**Web Search**:
+模型可自主调用的互联网检索能力，与 Knowledge 平行的检索域。背后是 `WebSearchProvider`（默认 Tavily），实现统一 `RetrievalProvider` 协议。`web_search` 是独立工具（spec §8 硬约束：Web MUST 独立于 retrieve_knowledge），citation 格式 `web:<url>`。不暴露 `read_web_source` 二次读取工具（网页二次抓取成本/法律风险 vs KB 本地切片）。
+_Avoid_: internet search tool, browser tool, scraper
+
+**RetrievalProvider**:
+Knowledge 和 Web 共享的窄检索协议：`search(query, *, k, gl, hl, freshness) -> list[RetrievalHit]`。两个域各自实现（KB 额外保留 chunk 生命周期方法）；替换 provider = 替换策略类，调用方不感知底层。这是「加搜索方式只要加策略类」的接缝点。
+_Avoid_: search engine interface, retrieval facade
+
+**Retrieval Fallback Policy**:
+当 `retrieve_knowledge` 返回 `is_sufficient=false` 时，tool result 附带 contextual 提示（"知识库证据不足，可调用 web_search 工具"）。决策仍由模型做出（agentic）；该提示是 tool 侧 affordance，不是 Agent Loop 特判（不违反「Knowledge/Web 是 Capability/Tool，不写进 Loop」不变量）。这是 spec §8 的「轻量 Retrieval Fallback Policy」实现，显式区别于学术 CRAG 的 Runtime 自动编排。
+_Avoid_: CRAG（学术名，我们显式不做自动编排）, auto web escalation, retrieval fallback chain
+
+**Repeated Tool Failure Guard（同错熔断）**:
+AgentRuntime 的运行时护栏：当模型连续 N=3 次以完全相同的指纹（tool_name + canonical args）调用同一工具且结果失败 → 软熔断（注入 user 角色纠正消息）；再 N=3 仍同指纹失败 → 硬熔断（end_run failed）。计数器在指纹变化时清零。堵住「模型在工具受限环境下反复重试同一失败烧穿步数/token」的回路（#69）。无上游蓝图（pi-mono/oh-my-pi/claude-code 都没这个）。
+_Avoid_: tool circuit breaker（我们做的是指纹级不是 provider 级）, tool retry limiter
+
+**Model Fallback**:
+主 model provider 瞬时故障（timeout / 5xx / 429 / 连接失败）时切到备用 provider 的运行时韧性机制。非瞬时故障（认证/参数/不支持 tool）不切、直接报错。决策在 provider/model 层（Agent Loop 不感知），通过 `FallbackPolicy` 接口的默认两级实现落地，未来升级全链只换 policy 实现。与 Tool Retry 完全分离（各自独立责任域）。
+_Avoid_: model switching, provider rotation, quality-based fallback（我们显式只做瞬时，不做质量判断）
