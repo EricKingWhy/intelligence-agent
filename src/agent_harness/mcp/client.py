@@ -105,6 +105,10 @@ class MCPServerConnection:
         self._stop = asyncio.Event()
         self._setup_error: BaseException | None = None
         self.connected = False
+        # lifecycle 串行锁：connect / reconnect / aclose 的 停止→重建 序列必须
+        # 原子——并发交叉（READ_ONLY gather 下 transport 死亡是自然场景）会产出
+        # connected=True 但 _session=None 的楔死态（见 call_tool 前置检查）。
+        self._lifecycle = asyncio.Lock()
 
     async def connect(self) -> None:
         """建立并初始化会话（wiring 时调用；幂等）。失败抛 MCPServerDownError。
@@ -113,6 +117,10 @@ class MCPServerConnection:
         initialize）——挂死的 server 进程/端点在 connect 这一步就会被掐断。
         工具调用超时不在这里（Executor 经 Tool.timeout_seconds 统一执行）。
         """
+        async with self._lifecycle:
+            await self._connect_locked()
+
+    async def _connect_locked(self) -> None:
         if self.connected:
             return
         self._ready = asyncio.Event()
@@ -125,7 +133,14 @@ class MCPServerConnection:
             async with asyncio.timeout(self._config.timeout_seconds):
                 await self._ready.wait()
         except asyncio.CancelledError:
+            # 调用方取消（如请求断连打断首次懒连接）：owner 多半还停在建立
+            # 阶段（慢 npx spawn），_stop 只在建立完成后才被观察——不回收就
+            # 泄漏 owner task 与 stdio 子进程。尽力收尾后继续向上传播取消。
             self._stop.set()
+            try:
+                await asyncio.shield(self._reap_owner())
+            except BaseException:  # 收尾尽力而为，取消必须继续传播
+                logger.debug("connect 取消路径的 owner 收尾未完成（忽略）", exc_info=True)
             raise
         except TimeoutError:
             self._stop.set()
@@ -198,11 +213,21 @@ class MCPServerConnection:
                 logger.debug(
                     "MCP owner task 硬取消后仍有退出噪声（已忽略）", exc_info=True,
                 )
+        # 收尾的 BaseException 捕获会吞掉等待期间到达的外部取消；这里把它还给
+        # 调用方——取消中的任务不得继续跑后续流程（例如再发起一轮 connect）。
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise asyncio.CancelledError
 
     async def reconnect(self) -> None:
-        """恢复连接（不重执行任何历史调用）。"""
-        await self.aclose()
-        await self.connect()
+        """恢复连接（不重执行任何历史调用）。
+
+        停止→重建整体持锁：并发 reconnect / aclose 交叉会让后到者的 aclose
+        拆掉先到者刚建好的 owner，最终停在 connected=True 但 _session=None。
+        """
+        async with self._lifecycle:
+            await self._aclose_locked()
+            await self._connect_locked()
 
     async def list_tools(self) -> list[types.Tool]:
         """discovery：tools/list。要求已连接。"""
@@ -213,9 +238,10 @@ class MCPServerConnection:
         """执行远程工具；transport 死亡 → 标记断开 + MCPServerDownError。
 
         协议层 MCPError（未知工具/非法参数）连接仍存活，包成 MCPCallError 上抛。
-        下次调用若已断开：先重连（恢复连接），再执行本次模型主动发起的调用。
+        下次调用若已断开（或处于会话丢失的楔死态）：先重连（恢复连接），再执行
+        本次模型主动发起的调用。
         """
-        if not self.connected:
+        if not self.connected or self._session is None:
             await self.reconnect()
         session = self._require_session()
         try:
@@ -237,6 +263,10 @@ class MCPServerConnection:
 
     async def aclose(self) -> None:
         """关闭连接：发停止信号，owner task 在自己的任务内退出全部 CM。"""
+        async with self._lifecycle:
+            await self._aclose_locked()
+
+    async def _aclose_locked(self) -> None:
         self.connected = False
         self._session = None
         self._stop.set()

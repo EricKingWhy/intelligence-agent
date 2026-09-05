@@ -161,6 +161,12 @@ async def _wire_mcp(
     servers = [server for server in servers if server.enabled]
 
     capability = await build_mcp_capability(servers)
+    # 连接生命周期先挂通道（AppState.shutdown 统一关闭；capability.aclose
+    # 关闭其全部连接——公共接口，不伸私有属性）。必须在任何早退之前：连上了
+    # 但 tools/list 为空的 server（mis-scoped token 常见症状）走"无工具降级
+    # 跳过"分支时，连接也必须能被 shutdown 关闭——否则 owner task 与 stdio
+    # 子进程泄漏到进程退出。
+    wiring.lifecycle.append(capability)
     if not capability.contributes_tools():
         detail = "; ".join(capability.errors) if capability.errors else "无可用 server"
         logger.warning("capability 'mcp' 无任何可用工具，按 %s 降级跳过：%s",
@@ -178,9 +184,6 @@ async def _wire_mcp(
         ),
         capability,
     )
-    # 连接生命周期：AppState.shutdown 统一关闭（通用 lifecycle 通道；
-    # capability.aclose 关闭其全部连接——公共接口，不伸私有属性）。
-    wiring.lifecycle.append(capability)
     # 工具贡献走 wire_capabilities 末尾的 ContributesTools 收集循环（零旁路）。
 
 

@@ -33,6 +33,12 @@ class TestParseServers:
         with pytest.raises(ConfigError, match="必须是列表"):
             parse_mcp_servers({"servers": {"github": {}}})
 
+    def test_dict_shape_error_names_claude_code_format(self):
+        """dict 形状的专属报错必须可达：用户带着 Claude Code 配置来时，
+        要告诉他为什么不能直接粘，而不是收到一句泛泛的"必须是列表"。"""
+        with pytest.raises(ConfigError, match="Claude Code"):
+            parse_mcp_servers({"servers": {"github": {}}})
+
     def test_non_dict_entry_is_reported(self):
         with pytest.raises(ConfigError, match=r"servers\[0\]"):
             parse_mcp_servers({"servers": ["nope"]})
@@ -92,6 +98,13 @@ class TestSecretRefs:
     def test_plain_values_pass_through(self):
         servers = parse_mcp_servers({"servers": [_stdio(env={"PLAIN": "value-$not-a-ref"})]})
         assert servers[0].env["PLAIN"] == "value-$not-a-ref"
+
+    def test_malformed_refs_fail_loud_not_silent(self):
+        """空引用/嵌套引用等畸形 ${...}：响亮报错而不是把字面残渣发给
+        远端（typo 的 token 会静默变成 'Bearer ${}'，坏配置推迟到首次调用）。"""
+        for bad in ("${}", "${A${B}}", "${1ABC}"):
+            with pytest.raises(ConfigError, match=r"\$\{"):
+                parse_mcp_servers({"servers": [_stdio(env={"X": bad})]})
 
 
 class TestPermissionOverrides:

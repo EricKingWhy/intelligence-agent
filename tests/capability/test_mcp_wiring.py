@@ -139,6 +139,30 @@ async def test_all_servers_down_skips_capability(tmp_path, stub_connections, cap
 
 
 @pytest.mark.asyncio
+async def test_zero_tool_capability_still_attached_to_lifecycle(tmp_path, stub_connections):
+    """连上了但 tools/list 为空的 server（mis-scoped token 的常见症状）：
+    wiring 早退跳过注册时，capability 仍必须挂进 lifecycle——否则 shutdown
+    永远不会关闭这些连接（owner task / stdio 子进程泄漏到进程退出）。"""
+    async def _empty_tools(self):
+        return []
+
+    stub_connections.list_tools = _empty_tools
+    registry = CapabilityRegistry()
+    wiring = await wire_capabilities(
+        registry,
+        parse_capabilities_config(json.dumps({
+            "mcp": {"provider": "builtin", "enabled": True,
+                    "options": {"servers": [_stdio("quiet")]}},
+        })),
+        settings=_settings([_stdio("quiet")], tmp_path),
+    )
+    assert wiring.tools == []
+    assert wiring.lifecycle, "零工具 capability 必须仍挂 lifecycle（连接要能被关闭）"
+    await wiring.lifecycle[0].aclose()
+    assert stub_connections.instances[0].closed
+
+
+@pytest.mark.asyncio
 async def test_appstate_shutdown_closes_mcp_lifecycle(tmp_path):
     from agent_harness.web.app import AppState
 

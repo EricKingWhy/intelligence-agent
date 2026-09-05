@@ -39,18 +39,30 @@ class MCPCapability:
 
 
 async def build_mcp_capability(servers: list[MCPServerConfig]) -> MCPCapability:
-    """逐 server 连接 + discovery；连接失败按 server 隔离降级（Q10）。
+    """逐 server 连接 + discovery + 工具包装；server 级故障隔离降级（Q10）。
 
+    隔离覆盖整条 per-server 链路（连接 / tools/list / MCPTool 构造 / 工具名
+    冲突检测）——任何一环失败只降级该 server（关闭其连接、errors 可观察），
+    其余 server 与核心不受影响（不变量 #21）。
     全部 server 都不可达时 capability 为空（wiring 据此跳过注册）。
     """
     connections: list[MCPServerConnection] = []
     tools: list[MCPTool] = []
     errors: list[str] = []
+    # 有效注册名（mcp__{server}__{tool}）→ 先到 server。`__` 分隔符注入
+    # （server a__b × 工具 c vs server a × 工具 b__c）与 server 端重复工具名
+    # 都能造出同名工具：装配期检出并降级冲突方，不能等到 runtime 注册才炸。
+    claimed: dict[str, str] = {}
+
     for server in servers:
         connection = MCPServerConnection(server)
         try:
             await connection.connect()
             remote_tools = await connection.list_tools()
+            # MCPTool 构造必须在隔离内：server 可控的 schema（如把属性命名为
+            # pydantic 保护名 model_dump）会让 create_model 抛 ValueError——
+            # 漏在隔离外就会拖垮整个 capability 并泄漏已连连接。
+            server_tools = [MCPTool(connection, server, remote) for remote in remote_tools]
         except Exception as error:  # noqa: BLE001 — 隔离必须覆盖任意失败形状：
             # connect 的 MCPServerDownError 之外，tools/list 还可能抛协议错误/
             # anyio 错误——漏接一种就会让整个 capability 降级（健康 server 的
@@ -63,7 +75,25 @@ async def build_mcp_capability(servers: list[MCPServerConfig]) -> MCPCapability:
                 )
             errors.append(f"server '{server.name}' 不可达（{type(error).__name__}: {error}），已降级缺席")
             continue
+        names_in_server = [tool.name for tool in server_tools]
+        duplicated_names = {name for name in names_in_server
+                            if names_in_server.count(name) > 1}
+        duplicated_names.update(name for name in names_in_server if name in claimed)
+        if duplicated_names:
+            try:
+                await connection.aclose()
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "MCP 连接清理失败（已按 server 降级，忽略）", exc_info=True,
+                )
+            errors.append(
+                f"server '{server.name}' 工具名冲突 {sorted(duplicated_names)}"
+                f"（与更早 server 或本 server 内重复），已降级缺席"
+            )
+            continue
+        for tool in server_tools:
+            claimed[tool.name] = server.name
         connections.append(connection)
-        tools.extend(MCPTool(connection, server, remote) for remote in remote_tools)
+        tools.extend(server_tools)
     return MCPCapability(connections, tools, errors)
 

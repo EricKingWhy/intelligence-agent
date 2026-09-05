@@ -255,3 +255,94 @@ async def test_owner_setup_failure_does_not_leak_task():
         await conn.connect()
     after = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
     assert not any("mcp-owner-fake" in n for n in after - before), "owner task 泄漏"
+
+
+# ── Round 9 审计修复回归钉：lifecycle 串行化 + 取消路径收尾 ──
+
+
+@pytest.mark.asyncio
+async def test_wedge_state_recovers_via_reconnect():
+    """楔死态（connected=True 但 _session=None，并发 lifecycle 交叉的产物）
+    必须自愈：下次调用重连成功，而不是永远 MCPServerDownError。"""
+    live_session = _ScriptedSession([])
+    factory = _factory([live_session])
+    conn = MCPServerConnection(_config(), session_factory=factory)
+    await conn.connect()
+    # 模拟并发 connect/aclose 交叉后的楔死态：标记存活但会话已丢
+    conn.connected = True
+    conn._session = None
+    # 重连拿到的"新"会话（factory 按序复用最后一个）要能成功执行本次调用
+    from mcp import types
+    live_session._behaviors.append(types.CallToolResult(
+        content=[types.TextContent(type="text", text="ok")], is_error=False))
+
+    result = await conn.call_tool("echo", {"text": "hi"})
+    assert result.is_error is False
+    assert factory.state["count"] == 2, "楔死态必须触发重连（新会话）"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reconnect_serialized():
+    """并发 reconnect（READ_ONLY gather + transport 死亡的自然场景）串行完成：
+    各自恰好一次 停止→重建，终态可用，不出楔死。"""
+    from mcp import types
+
+    dead_session = _ScriptedSession([ClosedResourceError("pipe closed")])
+    sessions = [
+        _ScriptedSession([types.CallToolResult(
+            content=[types.TextContent(type="text", text="ok")], is_error=False)])
+        for _ in range(3)
+    ]
+    factory = _factory([dead_session, *sessions])
+    conn = MCPServerConnection(_config(), session_factory=factory)
+    await conn.connect()
+
+    await asyncio.gather(conn.reconnect(), conn.reconnect())
+    assert conn.connected is True and conn._session is not None
+    assert factory.state["count"] == 3, "每个 reconnect 恰好一次重建"
+    result = await conn.call_tool("echo", {"text": "hi"})
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_connect_cancellation_reaps_owner():
+    """connect 等待中调用方被取消：owner task 必须被回收（挂死的传输 CM
+    回卷）——只 _stop.set() 够不到还停在建立阶段的 owner，会泄漏子进程。"""
+    exited: list[bool] = []
+
+    @asynccontextmanager
+    async def hanging_factory():
+        try:
+            await asyncio.Event().wait()  # 挂在建立阶段（慢 npx spawn 的替身）
+            yield None
+        finally:
+            exited.append(True)
+
+    conn = MCPServerConnection(_config(), session_factory=hanging_factory)
+    task = asyncio.create_task(conn.connect())
+    await asyncio.sleep(0.05)  # 让 owner 进入挂死的建立阶段
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=10)
+    assert conn._owner_task is None, "取消路径必须回收 owner task"
+    assert exited, "挂死的传输 CM 必须被回卷（否则 stdio 子进程泄漏到进程退出）"
+
+
+@pytest.mark.asyncio
+async def test_aclose_cancellation_is_not_swallowed():
+    """reap 吞不得调用方取消：取消中的 aclose 必须以 CancelledError 结束，
+    否则取消里的 handler 会继续跑下一轮 connect（取消延迟一整个重连周期）。"""
+    exit_gate = asyncio.Event()
+
+    @asynccontextmanager
+    async def slow_exit_factory():
+        yield _ScriptedSession([])
+        await exit_gate.wait()  # 模拟 server 子进程退出挂死
+
+    conn = MCPServerConnection(_config(), session_factory=slow_exit_factory)
+    await conn.connect()
+    closer = asyncio.create_task(conn.aclose())
+    await asyncio.sleep(0.1)  # closer 进入 reap 的优雅等待
+    closer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(closer, timeout=6)

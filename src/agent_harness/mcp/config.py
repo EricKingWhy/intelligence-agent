@@ -76,7 +76,9 @@ def expand_secret_ref(value: str, *, context: str) -> str:
 
     秘密间接引用：配置里只写变量名，明文 token 留在进程环境（oh-my-pi 同款）。
     引用缺失且无默认值 → ConfigError 显式报错（缺变量是部署错误，静默替换
-    成空串会把坏配置推迟到首次调用才爆）。
+    成空串会把坏配置推迟到首次调用才爆）。展开后仍残留 ${...} 形状（空引用 /
+    非法变量名 / 嵌套）→ 同样显式报错：typo 的引用静默变成字面量发给远端，
+    等于把坏配置伪装成"合法"凭证。
     """
 
     def _replace(match: re.Match[str]) -> str:
@@ -90,7 +92,14 @@ def expand_secret_ref(value: str, *, context: str) -> str:
             )
         return resolved
 
-    return _SECRET_REF.sub(_replace, value)
+    expanded = _SECRET_REF.sub(_replace, value)
+    residue = re.search(r"\$\{[^}]*\}", expanded)
+    if residue:
+        raise ConfigError(
+            f"{context}: 存在无法展开的引用 {residue.group(0)!r}"
+            "（空引用/非法变量名/嵌套引用）；请检查写法或改用 ${VAR:-default}"
+        )
+    return expanded
 
 
 def _expand_config_secrets(config: MCPServerConfig) -> MCPServerConfig:
@@ -113,14 +122,16 @@ def parse_mcp_servers(options: dict[str, Any]) -> list[MCPServerConfig]:
     disabled 的 server 保留在列表里（enabled 过滤是 wiring 的职责）。
     """
     raw_servers = options.get("servers", [])
-    if not isinstance(raw_servers, list):
-        raise ConfigError(
-            f"mcp options.servers 必须是列表，得到 {type(raw_servers).__name__}"
-        )
-    if isinstance(options.get("servers"), dict):
+    # dict 形状（Claude Code 的配置格式）先于泛型检查单独点名——用户带着别家
+    # 配置粘进来时，要告诉他为什么不能直接用，而不是一句泛泛的"必须是列表"。
+    if isinstance(raw_servers, dict):
         raise ConfigError(
             "mcp options.servers 必须是列表（dict 形状是 Claude Code 的格式，"
             "本仓用显式列表并以 name 字段为键）"
+        )
+    if not isinstance(raw_servers, list):
+        raise ConfigError(
+            f"mcp options.servers 必须是列表，得到 {type(raw_servers).__name__}"
         )
 
     errors: list[str] = []
