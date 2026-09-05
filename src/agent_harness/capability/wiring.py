@@ -178,8 +178,9 @@ async def _wire_mcp(
         ),
         capability,
     )
-    # 连接生命周期：AppState.shutdown 统一关闭（通用 lifecycle 通道）。
-    wiring.lifecycle.extend(capability._connections)
+    # 连接生命周期：AppState.shutdown 统一关闭（通用 lifecycle 通道；
+    # capability.aclose 关闭其全部连接——公共接口，不伸私有属性）。
+    wiring.lifecycle.append(capability)
     # 工具贡献走 wire_capabilities 末尾的 ContributesTools 收集循环（零旁路）。
 
 

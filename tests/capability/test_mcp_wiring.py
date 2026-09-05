@@ -88,8 +88,8 @@ async def test_mcp_wiring_contributes_namespaced_tools(tmp_path, stub_connection
     assert [c.config.name for c in stub_connections.instances] == ["srv1"]
     # descriptor 已注册（registry.available 含 mcp）
     assert any(d.name == "mcp" for d in registry.available())
-    # 连接挂 lifecycle（AppState.shutdown 关闭通道）
-    assert wiring.lifecycle and wiring.lifecycle[0].config.name == "srv1"
+    # capability 挂 lifecycle（aclose 关闭其全部连接，AppState.shutdown 调用）
+    assert wiring.lifecycle and wiring.lifecycle[0]._connections[0].config.name == "srv1"
 
 
 @pytest.mark.asyncio

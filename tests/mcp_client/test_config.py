@@ -114,3 +114,9 @@ def test_disabled_servers_still_parsed():
     """enabled 过滤是 wiring 的职责，解析层保留（声明与生效分离）。"""
     servers = parse_mcp_servers({"servers": [_stdio(enabled=False)]})
     assert servers[0].enabled is False
+
+
+def test_duplicate_server_names_rejected():
+    """重复 server 名响亮拒绝：命名空间与 lifecycle 追踪都会歧义。"""
+    with pytest.raises(ConfigError, match="重复"):
+        parse_mcp_servers({"servers": [_stdio(), _stdio()]})

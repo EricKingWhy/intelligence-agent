@@ -87,7 +87,6 @@ def _stdio(name: str, **overrides) -> dict:
 async def _wired_registry(settings: Settings, servers_cfg: list[dict],
                           servers: dict[str, FakeMCPServer]) -> list:
     """wire_capabilities + 连接打桩 → wiring.tools（MCP 工具已包好）。"""
-    real_connections: dict[str, StubConnection] = {}
 
     def factory(config):
         return StubConnection(config, servers[config.name])
@@ -99,8 +98,7 @@ async def _wired_registry(settings: Settings, servers_cfg: list[dict],
             parse_capabilities_config(settings.capabilities),
             settings=settings,
         )
-    # 打桩连接不持资源；把 server 的调用计数暴露给测试
-    return wiring, real_connections
+    return wiring
 
 
 @pytest.mark.asyncio
@@ -112,7 +110,7 @@ async def test_gate1_remote_mcp_tool_goes_through_unified_executor(tmp_path):
 
     echo_server = FakeMCPServer(tools=[make_fake_tool("echo", read_only=True)])
     settings = _settings([_stdio("github")], tmp_path)
-    wiring, _ = await _wired_registry(
+    wiring = await _wired_registry(
         settings, [_stdio("github")], {"github": echo_server}
     )
     ledger = SqliteOperationLedger(tmp_path / "state.db")
@@ -156,7 +154,7 @@ async def test_gate1_danger_mcp_tool_hits_approval_gate(tmp_path):
     关卡拦截——MCP 工具零旁路（spec 08 验收）。"""
     danger_server = FakeMCPServer(tools=[make_fake_tool("remote_exec")])  # 无 readOnlyHint → DANGER
     settings = _settings([_stdio("github")], tmp_path)
-    wiring, _ = await _wired_registry(
+    wiring = await _wired_registry(
         settings, [_stdio("github")], {"github": danger_server}
     )
     tool_registry = ToolRegistry()
@@ -203,7 +201,7 @@ async def test_gate2_no_double_retry_on_business_error(tmp_path):
         ),
     )
     settings = _settings([_stdio("github")], tmp_path)
-    wiring, _ = await _wired_registry(settings, [_stdio("github")], {"github": flaky})
+    wiring = await _wired_registry(settings, [_stdio("github")], {"github": flaky})
     tool_registry = ToolRegistry()
     for tool in wiring.tools:
         tool_registry.register(tool)
@@ -234,7 +232,7 @@ async def test_gate2_transport_death_does_not_reexecute(tmp_path):
 
     fake = FakeMCPServer(tools=[make_fake_tool("echo")], call_handler=handler)
     settings = _settings([_stdio("github")], tmp_path)
-    wiring, _ = await _wired_registry(settings, [_stdio("github")], {"github": fake})
+    wiring = await _wired_registry(settings, [_stdio("github")], {"github": fake})
     tool_registry = ToolRegistry()
     for tool in wiring.tools:
         tool_registry.register(tool)
@@ -281,7 +279,7 @@ async def test_gate_schema_validation_fails_before_remote_call(tmp_path):
         "required": ["text"],
     })])
     settings = _settings([_stdio("github")], tmp_path)
-    wiring, _ = await _wired_registry(settings, [_stdio("github")], {"github": fake})
+    wiring = await _wired_registry(settings, [_stdio("github")], {"github": fake})
     tool_registry = ToolRegistry()
     for tool in wiring.tools:
         tool_registry.register(tool)

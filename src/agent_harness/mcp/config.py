@@ -135,6 +135,11 @@ def parse_mcp_servers(options: dict[str, Any]) -> list[MCPServerConfig]:
             # pydantic ValidationError 的 str() 已含全部子错误明细
             name_hint = raw.get("name", f"index-{index}")
             errors.append(f"server '{name_hint}': {error}")
+    # 重复 server 名会让命名空间（mcp__{server}__{tool}）与 lifecycle 追踪歧义
+    names = [server.name for server in parsed]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        errors.append(f"server 名重复: {duplicates}（同名先到先得会静默吞掉后者）")
     if errors:
         raise ConfigError("MCP server 配置错误：\n" + "\n".join(f"- {e}" for e in errors))
     return parsed

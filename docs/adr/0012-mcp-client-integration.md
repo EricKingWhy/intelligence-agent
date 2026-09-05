@@ -16,7 +16,7 @@ Phase 7 已交付 Capability/Plugin seam（Registry / Descriptor / 降级三分�
 3. **接入身份**：MCP = 一种 Capability Provider。`capabilities` env JSON 新增 `"mcp"` 条目，`options.servers[]` 为 server 配置；discovery 在 wiring 时执行，tool 贡献进 ToolRegistry（统一 Executor 路径，零旁路——不变量 #7）；server 不可达按 OPTIONAL_RUNTIME 降级（不变量 #21）。
 4. **命名**：`mcp__{server}__{tool}`（双下划线两段，Claude Code/ZCode 惯例）；跨 server 同名按配置顺序先到先得 + 冲突显式记录（Phase 7 skills 先例）。
 5. **权限映射**（交付物 ④）：MCP 工具注解 `readOnlyHint=true` → `READ_ONLY`；无注解或非只读 → `DANGER`（最严默认）；server 配置允许显式覆写个别工具级别；policy 非 full-access 时 DANGER 全部走审批关卡。side_effect：readOnlyHint 工具 READ_ONLY，其余 MUTATING。`readOnlyHint` 是 server 自报元数据而非安全边界（业界共识），故只作降级信号、永不升级权限。
-6. **Retry 归口（Gate 2）**：MCP SDK 内部 retry 全关（`max_retries=0`，与 Round 6 模型客户端同先例）；重试语义归 ToolExecutor 唯一责任域。
+6. **Retry 归口（Gate 2）**：重试语义归 ToolExecutor 唯一责任域。SDK 2.1.1 的 tools/call 无自发重试旋钮（已核实 installed source；streamable GET 流的重连仅恢复 server 主动消息、从不重执行工具调用）——实现上无需关闭动作，Gate 2 以测试钉住单次执行。
 7. **生命周期**：连接时机 = wiring 时（per-server 超时，默认 30s）；未就绪/不可达 server 降级缺席 + errors 可观察。**重连只恢复连接、不隐式重执行**——调用中 transport 死亡 → 本次调用返回错误（TOOL_EXECUTION_ERROR，retryable=False），下次模型主动调用走新连接（避免对可能已有副作用的 remote 工具变相双重执行）。不做后台健康轮询（V1）。
 8. **超时与输出预算**：per-server `timeout_seconds` 默认 30，映射到 adapter 生成的 Tool.timeout_seconds；MCP 工具输出在 adapter 层截 50KB + 截断标记（与 read 工具同一预算哲学；配置 artifact store 时自动走既有 overflow 管线）。
 9. **配置 schema 与 secrets**：server 字段对齐 Claude Code 形状 `{name, transport, command?, args?, env?, cwd?, url?, headers?, timeout_seconds?, enabled?}`；`env`/`headers` 值支持 `${VAR}` 进程环境变量展开（秘密间接引用，明文 token 不入库；oh-my-pi 同款），变量缺失 → 该 server 进 errors 显式报错（不做静默丢弃——ZCode 反模式）；stdio server 启动环境 = OS 必需项白名单（C2 同款）+ 配置的 env 项，不继承全量进程 env。

@@ -9,11 +9,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from agent_harness.mcp.adapter import MCPTool
-from agent_harness.mcp.client import MCPServerConnection, MCPServerDownError
-from agent_harness.mcp.config import MCPServerConfig, parse_mcp_servers
+from agent_harness.mcp.client import MCPServerConnection
+from agent_harness.mcp.config import MCPServerConfig
 
 
 class MCPCapability:
@@ -50,14 +51,19 @@ async def build_mcp_capability(servers: list[MCPServerConfig]) -> MCPCapability:
         try:
             await connection.connect()
             remote_tools = await connection.list_tools()
-        except MCPServerDownError as error:
-            errors.append(f"server '{server.name}' 不可达（{error}），已降级缺席")
+        except Exception as error:  # noqa: BLE001 — 隔离必须覆盖任意失败形状：
+            # connect 的 MCPServerDownError 之外，tools/list 还可能抛协议错误/
+            # anyio 错误——漏接一种就会让整个 capability 降级（健康 server 的
+            # 工具全丢）且已连接的 exit stack 泄漏。按 server 关闭后降级缺席。
+            try:
+                await connection.aclose()
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "MCP 连接清理失败（已按 server 降级，忽略）", exc_info=True,
+                )
+            errors.append(f"server '{server.name}' 不可达（{type(error).__name__}: {error}），已降级缺席")
             continue
         connections.append(connection)
         tools.extend(MCPTool(connection, server, remote) for remote in remote_tools)
     return MCPCapability(connections, tools, errors)
 
-
-def _configured_servers(options: dict[str, Any]) -> list[MCPServerConfig]:
-    """解析 + 过滤 disabled；schema 非法 → ConfigError（wiring 转响亮失败）。"""
-    return [server for server in parse_mcp_servers(options) if server.enabled]

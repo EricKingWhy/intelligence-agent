@@ -48,11 +48,12 @@ def mcp_tool_name(server_name: str, tool_name: str) -> str:
 def _pydantic_model_from_json_schema(
     schema: dict[str, Any], model_name: str
 ) -> type[BaseModel]:
-    """把 MCP inputSchema（object 子集）转成动态 pydantic 模型。
+    """把 MCP inputSchema（object 子集）转成动态 pydantic 模型（入参快失败用）。
 
-    支持常用标量/数组/对象属性；schema 形状不可识别（非 object / 空字段）时
-    回退到 extra=allow 的宽松模型——server 才是入参校验的权威，本地校验只是
-    快速失败礼遇，绝不能因为转换失败而丢工具。
+    模型菜单导出不走这里——attach 原样透传的 model_json_schema（ADR-0012 实现
+    注记）：模型看到的就是 server 声明的原始 schema（enum/anyOf/嵌套全保留），
+    本地转换只服务 executor 的快速失败礼遇；server 仍是校验权威，绝不能因为
+    转换失败而丢工具。
     """
     properties = schema.get("properties") if isinstance(schema, dict) else None
     required = set(schema.get("required", []) if isinstance(schema, dict) else [])
@@ -64,8 +65,14 @@ def _pydantic_model_from_json_schema(
     for prop_name, prop_schema in properties.items():
         if not isinstance(prop_schema, dict):
             prop_schema = {}
-        json_type = prop_schema.get("type", "any")
-        python_type = _JSON_TYPE_MAP.get(json_type, Any)
+        if prop_schema.get("enum"):
+            # enum 是真实 server 的高频约束（如 format 名单）：Literal 化让
+            # 本地快失败拦得住非法取值，而不是全靠远端报错。
+            from typing import Literal as _Literal
+            python_type: Any = _Literal[tuple(prop_schema["enum"])]
+        else:
+            json_type = prop_schema.get("type", "any")
+            python_type = _JSON_TYPE_MAP.get(json_type, Any)
         description = prop_schema.get("description", "")
         if prop_name in required:
             fields[prop_name] = (
@@ -79,7 +86,25 @@ def _pydantic_model_from_json_schema(
                 Field(default=default, description=description) if description
                 else default,
             )
-    return create_model(model_name, **fields)
+    model = create_model(model_name, **fields)
+    if isinstance(schema, dict) and schema:
+        _attach_schema_passthrough(model, schema)
+    return model
+
+
+def _attach_schema_passthrough(
+    model: type[BaseModel], original_schema: dict[str, Any]
+) -> None:
+    """类级覆写 model_json_schema：registry 导出给模型的菜单 = server 原始
+    inputSchema（原样透传，enum/anyOf/嵌套全保留），仅补 title。本地动态模型的
+    快失败校验与菜单保真是两条独立通道（校验权威在 server）。"""
+
+    def _passthrough(cls: type[BaseModel], **_kwargs: Any) -> dict[str, Any]:
+        exported = dict(original_schema)
+        exported.setdefault("title", cls.__name__)
+        return exported
+
+    model.model_json_schema = classmethod(_passthrough)  # type: ignore[method-assign]
 
 
 class MCPTool(Tool):

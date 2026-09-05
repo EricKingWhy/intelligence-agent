@@ -52,6 +52,9 @@ from mcp.shared.exceptions import MCPError
 
 #: stdio server 启动环境的 OS 必需项（与 LocalSubprocessSandbox 白名单同一原则；
 #: MCP server 是第三方代码，继承全量 env 等于把部署机密钥喂给不可信进程）。
+#: 如实声明：SDK stdio_client 自身会 union get_default_environment()（OS 基础项
+#: 含 PROCESSOR_ARCHITECTURE 等）——有效 env = SDK 基础项 ∪ 本白名单 ∪ 配置项，
+#: 三者都无凭据语义；本白名单的职责是挡住部署机配置的自定义变量。
 MCP_STDIO_ENV_ALLOWLIST = (
     "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR",
     "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES",
