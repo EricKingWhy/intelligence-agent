@@ -1,241 +1,191 @@
-"""最小 Agent CLI：向模型发送一条消息并打印回复。
+"""Agent CLI（Phase 9 CLI Renderer）：驱动 AgentRuntime.run_stream 渲染事件流。
 
-当前项目还没有 ToolExecutor 和 Checkpoint；日志只记录真实发生的最小链路，
-不会为了看起来完整而伪造 tool_operation/checkpoint_saved/retry 事件。
+CLI 与 SSE 是同一 AgentEvent 流的两个消费端（spec 11 §1）：渲染是事件流的
+纯函数，只挑人要看的（流式正文 / 工具行 / 终态），完整事实源是 Session
+JSONL；Diagnostic Log 由 runtime 的 _log 统一产出（CLI 只负责 setup_logging，
+不再手搓 llm_call 链路）。最小 CLI 不装配工具（registry 为空——模型直接答复）。
+
+渲染约定借鉴 pi-mono / oh-my-pi（均为 MIT License，设计级借用 + 小工具重实现）：
+- 状态行语法 `glyph 标题 折叠参数 · meta`（oh-my-pi tui/status-line.ts）
+- 参数折叠 key=value、结果尾部预览 + `... +N more lines`（pi renderers/bash.ts）
+- 时长徽章、token 用量页脚 + K/M 压缩（pi footer.ts formatTokens/formatDuration）
+- ascii 符号路线（oh-my-pi theme/symbols.ts 的 ascii preset）——Windows GBK
+  控制台对 ✔/⏳ 等 glyph 会抛 UnicodeEncodeError，ascii 永远可打印。
+License 署名：pi-mono © 2025 Mario Zechner（MIT）；oh-my-pi © 2025-2026
+Can Bölük、© 2026 Stencil Labs, Inc.（MIT）。
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
-from collections.abc import Mapping
-from time import perf_counter
-from typing import Any
+import json
+import sys
+from collections.abc import Callable
+from pathlib import Path
+from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage
-
-from agent_harness.agent.runtime import _extract_text
-from agent_harness.config import Settings
-from agent_harness.logging import (
-    LogContext,
-    log_context,
-    log_event,
-    new_span_id,
-    setup_logging,
+from agent_harness.agent import AgentEvent
+from agent_harness.assembly import (
+    assemble_wiring,
+    build_runtime,
+    initialize_stores,
+    recovery_stores,
 )
-from agent_harness.model.config import ModelConfig
-from agent_harness.model.provider import create_chat_model
+from agent_harness.config import Settings
+from agent_harness.logging import LogContext, log_context, setup_logging
+from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.session import (
+    MODEL_DELTA,
+    RUN_COMPLETED,
+    RUN_FAILED,
+    TOOL_CALL,
+    TOOL_RESULT,
+    JsonlSessionStore,
+    Session,
+)
 
-logger = logging.getLogger("agent_harness")
+_ARGS_LINE_LIMIT = 120
+_PREVIEW_LINES = 3
 
 
-async def run(message: str) -> str:
+class StreamRenderer:
+    """AgentEvent → 终端文本（事件流的纯函数；write 注入便于测试）。
+
+    行式追加输出（无差分重绘）：delta 原样续写；工具块 = 空行 + 状态行 +
+    结果预览；终态行补齐换行。model/completed、user/message 等持久化镜像
+    一律静默——终端不是第二份事件日志。
+    """
+
+    def __init__(self, write: Callable[[str], None]) -> None:
+        self._write = write
+        self._delta_open = False  # 流式正文输出中：工具行/终态行前先补换行
+
+    def handle(self, event: AgentEvent) -> None:
+        if event.type == MODEL_DELTA:
+            self._write(event.data["delta"])
+            self._delta_open = True
+        elif event.type == TOOL_CALL:
+            self._end_delta()
+            args = _collapse_args(event.data.get("args") or {})
+            suffix = f" {args}" if args else ""
+            self._write(f"\n[tool] {event.data['tool_name']}{suffix}\n")
+        elif event.type == TOOL_RESULT:
+            self._render_result(event.data)
+        elif event.type == RUN_COMPLETED:
+            self._end_delta()
+            self._write("\n")
+            usage = event.data.get("usage_total") or {}
+            if usage:
+                self._write(f"tokens: in {_format_tokens(usage.get('prompt_tokens'))}, "
+                            f"out {_format_tokens(usage.get('completion_tokens'))}\n")
+        elif event.type == RUN_FAILED:
+            self._end_delta()
+            reason = event.data.get("reason")
+            suffix = f" ({reason})" if reason else ""
+            self._write(f"\n[run failed]{suffix}\n")
+
+    def _render_result(self, data: dict) -> None:
+        try:
+            result = json.loads(data["content"])
+        except (KeyError, ValueError):
+            self._write("  [fail] (unparseable result)\n")
+            return
+        status = "[ok]" if result.get("ok") else "[fail]"
+        duration = result.get("metadata", {}).get("duration_ms")
+        suffix = f" ({duration / 1000:.1f}s)" if isinstance(duration, (int, float)) else ""
+        self._write(f"  {status}{suffix}\n")
+        message = result.get("message") or ""
+        lines = message.splitlines()
+        for line in lines[:_PREVIEW_LINES]:
+            self._write(f"  {line}\n")
+        if len(lines) > _PREVIEW_LINES:
+            self._write(f"  ... +{len(lines) - _PREVIEW_LINES} more lines\n")
+
+    def _end_delta(self) -> None:
+        if self._delta_open:
+            self._write("\n")
+            self._delta_open = False
+
+
+def _collapse_args(args: dict) -> str:
+    """一行折叠工具参数：key=value，字符串含空格才加引号；整体超限截断。
+
+    折叠约定借鉴 oh-my-pi formatArgsInline（key=value 预算内联）；嵌套结构
+    压成紧凑 JSON（本地快失败用不到嵌套语义，终端只要能认出调用形状）。
+    """
+    parts: list[str] = []
+    for key, value in args.items():
+        if isinstance(value, str):
+            text = f'"{value}"' if (" " in value or not value) else value
+        elif isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False)
+        else:
+            text = str(value)
+        parts.append(f"{key}={text}")
+    line = " ".join(parts)
+    if len(line) > _ARGS_LINE_LIMIT:
+        line = line[:_ARGS_LINE_LIMIT] + "..."
+    return line
+
+
+def _format_tokens(count: int | None) -> str:
+    """token 数 → 紧凑文本（借鉴 pi footer.ts formatTokens 的 K/M 压缩）。"""
+    if not isinstance(count, int) or count < 0:
+        return "?"
+    if count < 1000:
+        return str(count)
+    if count < 1_000_000:
+        return f"{count / 1000:.1f}k"
+    return f"{count / 1_000_000:.1f}M"
+
+
+async def run(message: str, *, write: Callable[[str], None] | None = None) -> str:
+    """跑一次 Agent Loop：流式渲染到 write，返回最终回答文本。
+
+    与 web 共享 assembly.build_runtime 全栈装配（coding 工具 + Ledger/
+    Checkpoint + capability 工具）——CLI 不再是削弱装配，耐久性语义一致。
+    失败的 run 不抛异常（runtime 契约：失败事实由 run/failed 终结事件 +
+    结构化日志承载）——返回空 final_text，main() 据此转 SystemExit(1)。
+    成功的 run final_text 恒非空：空响应在 runtime 被拒为失败（R6-2），
+    不存在"成功但空回答"的歧义态。
+    """
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
-    context = LogContext.create(service="agent-harness", env="local")
-
-    task_started = perf_counter()
-    task_span_id = new_span_id()
-    agent_span_id = new_span_id()
-    llm_span_id = new_span_id()
-
-    with log_context(context):
-        log_event(
-            logger,
-            "task_start",
-            "收到用户任务",
-            node_name="cli",
-            step=0,
-            span_id=task_span_id,
-            outcome="started",
+    # LogContext 提供 trace_id/task_id 关联列——没有它 runtime 的结构化日志
+    # 整条链都缺关联键（一次 CLI 运行 = 一个可对账的 trace）。
+    with log_context(LogContext.create(service="agent-harness", env="local")):
+        workspace_root = Path(settings.workspace_dir)
+        _, wiring = await assemble_wiring(settings)
+        stores = recovery_stores(workspace_root / "harness.db")
+        await initialize_stores(stores)
+        workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
+        session_id = str(uuid4())
+        workspace = workspace_root / "workspaces" / session_id
+        runtime = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=workspace_registry,
+            session_id=session_id, workspace=workspace,
+            max_steps=10, auto_approve=True,
         )
-        log_event(
-            logger,
-            "agent_start",
-            "Agent 开始处理任务",
-            node_name="agent",
-            step=1,
-            span_id=agent_span_id,
-            parent_span_id=task_span_id,
-            outcome="started",
-        )
-
-        try:
-            config = ModelConfig.from_settings(settings)
-            model = create_chat_model(config)
-            llm_started = perf_counter()
-            try:
-                result = await model.ainvoke([HumanMessage(content=message)])
-            except Exception as error:
-                duration_ms = _elapsed_ms(llm_started)
-                error_fields = _error_fields(error)
-                log_event(
-                    logger,
-                    "llm_call",
-                    "LLM 调用失败",
-                    level="error",
-                    node_name="model",
-                    step=2,
-                    span_id=llm_span_id,
-                    parent_span_id=agent_span_id,
-                    provider=config.provider,
-                    model_id=config.model_name,
-                    stream=False,
-                    llm_input=message,
-                    attempt=1,
-                    max_attempts=1,
-                    duration_ms=duration_ms,
-                    outcome="failure",
-                    **error_fields,
-                )
-                raise
-
-            llm_fields = _llm_result_fields(result)
-            log_event(
-                logger,
-                "llm_call",
-                "LLM 调用完成",
-                node_name="model",
-                step=2,
-                span_id=llm_span_id,
-                parent_span_id=agent_span_id,
-                provider=config.provider,
-                model_id=config.model_name,
-                stream=False,
-                llm_input=message,
-                llm_output=result.content,
-                attempt=1,
-                max_attempts=1,
-                duration_ms=_elapsed_ms(llm_started),
-                outcome="success",
-                **llm_fields,
-            )
-            log_event(
-                logger,
-                "agent_decision",
-                "模型已给出最终回复，Agent 决定结束任务",
-                node_name="agent",
-                step=3,
-                span_id=new_span_id(),
-                parent_span_id=agent_span_id,
-                decision="finish",
-                requested_tools=[],
-                execution_mode="serial",
-                remaining_steps=0,
-                reason="当前最小流程收到最终文本回复，且没有待执行的 Tool Call",
-                outcome="success",
-            )
-        except Exception as error:
-            error_fields = _error_fields(error)
-            log_event(
-                logger,
-                "error",
-                "Agent 处理任务时发生错误",
-                level="error",
-                exc_info=True,
-                node_name="agent",
-                step=3,
-                span_id=new_span_id(),
-                parent_span_id=agent_span_id,
-                retryable=False,
-                attempt=1,
-                max_attempts=1,
-                outcome="failure",
-                **error_fields,
-            )
-            log_event(
-                logger,
-                "task_failed",
-                "任务执行失败",
-                level="error",
-                node_name="cli",
-                step=4,
-                span_id=task_span_id,
-                duration_ms=_elapsed_ms(task_started),
-                outcome="failure",
-                **error_fields,
-            )
-            raise
-
-        log_event(
-            logger,
-            "task_completed",
-            "任务执行完成",
-            node_name="cli",
-            step=4,
-            span_id=task_span_id,
-            duration_ms=_elapsed_ms(task_started),
-            outcome="success",
-        )
-        # 与 runtime 落盘同一文本投影：list 风格 content 不能 str() 兜底
-        # （会把 Python repr 打给用户，runtime._extract_text 的 docstring 明令禁止）。
-        return _extract_text(result.content)
-
-
-def _elapsed_ms(started: float) -> float:
-    return round((perf_counter() - started) * 1000, 3)
-
-
-def _error_fields(error: Exception) -> dict[str, Any]:
-    fields: dict[str, Any] = {
-        "error_type": type(error).__name__,
-        "error_message": str(error),
-    }
-    status_code = getattr(error, "status_code", None)
-    if status_code is not None:
-        fields["error_code"] = str(status_code)
-    return fields
-
-
-def _llm_result_fields(result: AIMessage) -> dict[str, Any]:
-    """只提取 LangChain/Provider 实际返回的元数据，不补造不可得字段。"""
-
-    response_metadata = result.response_metadata or {}
-    usage = _token_usage(result.usage_metadata, response_metadata)
-    fields: dict[str, Any] = {
-        "token_usage": usage or None,
-        "finish_reason": response_metadata.get("finish_reason"),
-    }
-
-    provider_request_id = response_metadata.get("id") or response_metadata.get(
-        "request_id"
-    )
-    if provider_request_id is not None:
-        fields["provider_request_id"] = provider_request_id
-    return {key: value for key, value in fields.items() if value is not None}
-
-
-def _token_usage(
-    usage_metadata: Mapping[str, Any] | None,
-    response_metadata: Mapping[str, Any],
-) -> dict[str, Any]:
-    usage_metadata = usage_metadata or {}
-    provider_usage = response_metadata.get("token_usage") or {}
-
-    input_details = usage_metadata.get("input_token_details") or {}
-    output_details = usage_metadata.get("output_token_details") or {}
-    usage = {
-        "input": usage_metadata.get("input_tokens", provider_usage.get("prompt_tokens")),
-        "output": usage_metadata.get(
-            "output_tokens", provider_usage.get("completion_tokens")
-        ),
-        "total": usage_metadata.get("total_tokens", provider_usage.get("total_tokens")),
-        "cached_input": input_details.get(
-            "cache_read", provider_usage.get("prompt_cache_hit_tokens")
-        ),
-        "reasoning": output_details.get(
-            "reasoning", provider_usage.get("reasoning_tokens")
-        ),
-    }
-    return {key: value for key, value in usage.items() if value is not None}
+        store = JsonlSessionStore(root=workspace_root / "sessions")
+        session = Session.start(store, session_id=session_id)
+        renderer = StreamRenderer(write if write is not None else sys.stdout.write)
+        final_text = ""
+        async for event in runtime.run_stream(session, message):
+            renderer.handle(event)
+            if event.type == RUN_COMPLETED:
+                final_text = event.data.get("final_text", "")
+        return final_text
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Agent Harness CLI")
-    parser.add_argument("message", help="发送给模型的消息")
+    parser.add_argument("message", help="发送给 Agent 的任务")
     args = parser.parse_args()
-    print(asyncio.run(run(args.message)))
+    final_text = asyncio.run(run(args.message))
+    if not final_text:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

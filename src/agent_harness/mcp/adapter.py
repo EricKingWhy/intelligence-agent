@@ -87,8 +87,8 @@ def _pydantic_model_from_json_schema(
                 else default,
             )
     model = create_model(model_name, **fields)
-    if isinstance(schema, dict) and schema:
-        _attach_schema_passthrough(model, schema)
+    # 走到这里 schema 必为非空 dict（properties 为空的形状已在上方回退）。
+    _attach_schema_passthrough(model, schema)
     return model
 
 

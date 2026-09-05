@@ -66,10 +66,6 @@ class MCPServerConfig(BaseModel):
             raise ValueError(f"http server '{self.name}' 缺少 url")
         return self
 
-    @property
-    def tool_permission_overrides(self) -> dict[str, ToolPermission]:
-        return dict(self.tool_permissions)
-
 
 def expand_secret_ref(value: str, *, context: str) -> str:
     """展开值内所有 `${VAR}` / `${VAR:-default}` 进程环境变量引用（支持嵌入）。

@@ -45,7 +45,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
-from agent_harness.session import TOOL_CALL, Session, run_context_var
+from agent_harness.session import TOOL_CALL, TOOL_RESULT, Session, SessionEvent
 from agent_harness.storage import (
     Operation,
     OperationContext,
@@ -338,7 +338,10 @@ class ToolExecutor:
                     self._log_secondary_exceptions(results, tool_calls)
                     # 已完成执行的 committed 事件（TOOL_CALL + artifact/created）
                     # 必须在异常传播前落盘，不能随异常一起消失（R6-7）。
-                    self._flush_committed_events(results, tool_calls, session)
+                    self._flush_committed_events(
+                        results, tool_calls, session,
+                        run_id=operation_context.run_id if operation_context else None,
+                    )
                     raise result
             return results
 
@@ -363,40 +366,88 @@ class ToolExecutor:
         except BaseException:
             # 存储故障等真实异常传播前，已完成执行的 committed 事件先落盘（R6-7）。
             self._flush_committed_events(
-                executions, tool_calls[: len(executions)], session
+                executions, tool_calls[: len(executions)], session,
+                run_id=operation_context.run_id if operation_context else None,
             )
             raise
+
+    def emit_call_events(
+        self,
+        session: Any,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        args: dict[str, Any],
+        pending_events: list[tuple[str, dict[str, Any]]],
+        run_id: str | None,
+        step_id: int | None,
+    ) -> list[SessionEvent]:
+        """持久化 TOOL_CALL → 延迟事件（R6-7 顺序的单一 owner）。
+
+        artifact/created 必须在其 tool_call 之后、tool/result 之前落盘——
+        消除"artifact 引用尚不存在的 tool_call"的前向引用。此前该顺序在
+        Runtime 结果循环与本类的 abort flush 各编码一遍；happy path 与
+        异常路径现在共用本方法，顺序知识一处可读。
+        """
+        call_event = session.append(
+            TOOL_CALL,
+            {"tool_call_id": tool_call_id, "tool_name": tool_name, "args": args},
+            run_id=run_id, step_id=step_id,
+        )
+        events = [call_event]
+        for event_type, data in pending_events:
+            events.append(
+                session.append(event_type, data, run_id=run_id, step_id=step_id)
+            )
+        return events
+
+    def emit_result_event(
+        self,
+        session: Any,
+        *,
+        tool_call_id: str,
+        content: str,
+        run_id: str | None,
+        step_id: int | None,
+    ) -> SessionEvent:
+        """持久化 TOOL_RESULT（content = ToolResult JSON，与旧契约一致）。"""
+        return session.append(
+            TOOL_RESULT,
+            {"tool_call_id": tool_call_id, "content": content},
+            run_id=run_id, step_id=step_id,
+        )
 
     def _flush_committed_events(
         self,
         results: list[ToolExecution | BaseException],
         tool_calls: list[ToolCall | dict[str, Any]],
         session: Any,
+        *,
+        run_id: str | None,
     ) -> None:
         """批次异常传播前，把已完成执行的 TOOL_CALL 与延迟事件落盘（R6-7）。
 
         artifact 已写存储、Ledger 已终态——事件若随异常一起丢弃，store 里的
         artifact 就成了无引用孤儿（旧缺陷：partial batch 失败丢已提交的
         artifact/created 事件）。TOOL_CALL 一并补齐：正常路径由 Runtime 在结果
-        循环追加，异常路径永远到不了那里。run 归因经 run_context_var（executor
-        没有 run 上下文参数）；无 session 时（纯执行场景）无事可做。
+        循环追加，异常路径永远到不了那里。run 归因走显式参数（此前从
+        run_context_var 隐式读取——docstring 声称不维护 Session 却经两层外
+        设置的 contextvar 写 Session，全仓最隐蔽的耦合）；无 session 时
+        （纯执行场景）无事可做。
         """
         if session is None:
             return
-        run_id = run_context_var.get()
         try:
             for tool_call, result in zip(tool_calls, results):
                 if isinstance(result, BaseException):
                     continue
                 call = ToolCall.normalize(tool_call)
-                session.append(
-                    TOOL_CALL,
-                    {"tool_call_id": result.tool_call_id, "tool_name": call.name,
-                     "args": call.args},
-                    run_id=run_id,
+                self.emit_call_events(
+                    session,
+                    tool_call_id=result.tool_call_id, tool_name=call.name,
+                    args=call.args, pending_events=result.pending_events,
+                    run_id=run_id, step_id=None,
                 )
-                for event_type, data in result.pending_events:
-                    session.append(event_type, data, run_id=run_id)
         except Exception:
             # flush 自身失败（存储故障）不得掩盖原始批次异常——原始异常是
             # 调用方失败归因的依据；flush 失败由日志承载。

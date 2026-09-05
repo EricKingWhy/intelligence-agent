@@ -33,14 +33,36 @@ class ContributesTools(Protocol):
 
 @dataclass
 class CapabilityWiring:
-    """一次装配的产出：调用方把这些接到 ToolRegistry / ContextBuilder / AgentRuntime。"""
+    """一次装配的产出：调用方把这些接到 ToolRegistry / ContextBuilder / AgentRuntime。
+
+    本对象同时是装配产物的 lifecycle owner：aclose() 关闭 memory 组件与
+    lifecycle 通道（关闭知识收拢在创建者，web 层只管 get / shutdown）。
+    """
 
     context_providers: list[Any] = field(default_factory=list)
     tools: list[Any] = field(default_factory=list)
     memory_writer: Any | None = None
-    memory: Any | None = None  # MemoryComponents 生命周期包（relay/writeback），由 AppState 关闭
-    # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 AppState 关闭。
+    memory: Any | None = None  # MemoryComponents 生命周期包（relay/writeback），由 aclose 关闭
+    # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 aclose 关闭。
     lifecycle: list[Any] = field(default_factory=list)
+
+    async def aclose(self) -> None:
+        """关闭本次装配持有的全部生命周期资源；逐项故障隔离——进程退出路径，
+        一项失败不阻断其余清理。"""
+        if self.memory is not None:
+            try:
+                await self.memory.close()
+            except Exception:
+                logger.warning("memory 组件关闭失败（继续其余清理）", exc_info=True)
+        for obj in self.lifecycle:
+            aclose = getattr(obj, "aclose", None)
+            if aclose is None:
+                continue
+            try:
+                await aclose()
+            except Exception:
+                logger.warning("lifecycle 关闭失败（%s），继续其余清理",
+                               type(obj).__name__, exc_info=True)
 
 
 async def _wire_memory(
