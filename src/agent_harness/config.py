@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # sufficient 阈值（ADR-0013 决策 9，用户拍板 0.6：低于此证据太弱，
     # 宁可如实标记不足防幻觉）。hits 照返，标记是诚实信号不是结果开关。
     knowledge_min_score: float = Field(default=0.6, ge=0, le=1)
+    # Web Search（ADR-0014 决策 9/10）：TAVILY_API_KEY 为空 = websearch
+    # capability OPTIONAL_RUNTIME 降级缺席（不配 = 不联网，绝不静默触网）。
+    tavily_api_key: SecretStr = SecretStr("")
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")
