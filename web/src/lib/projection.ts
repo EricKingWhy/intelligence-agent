@@ -88,18 +88,21 @@ function cloneTool(t: ToolCall): ToolCall {
   return { ...t };
 }
 
-/** Apply one event to state, returning new state. Pure function — copy-on-write:
+/** Apply one event to state, returning new state. Copy-on-write:
  *  顶层浅克隆 + 只深克隆被本事件改写的 turn/tool/数组，未触及部分保持引用稳定
- *  （渲染层 React.memo 的前提，引用契约由专项测试锁定）。 */
+ *  （渲染层 React.memo 的前提，引用契约由专项测试锁定）。
+ *
+ * events 日志例外（P0-1，HANDOFF_PERF_FRONTEND §4.3/§6 方案 b）：append-only
+ * 共享数组，push O(1)、引用跨 state 稳定——消灭 `[...state.events, event]`
+ * 每事件整体克隆的 O(N²)（20k 事件 240.9µs/事件 → <10µs）。契约：
+ * 既有条目永不改写、顺序不变；旧 state 的 events 视图会随后续追加继续增长，
+ * 消费端只持有最新 state（useSession 管线：局部 conv 折叠 + setConversation
+ * 提交，无消费者把 events 放进 memo/useEffect 依赖），不受影响。 */
 export function applyEvent(state: ConversationState, event: AgentEvent): ConversationState {
-  // Copy-on-write: top-level 一次浅克隆 + events 追加；turns / compactions /
-  // reconcile_queue / unknown_events 仅在真正被事件改写时才克隆（引用稳定性
-  // 是渲染层 memo 的前提，专项测试锁定）。
-  const next: ConversationState = {
-    ...state,
-    // Inspector Timeline 真相源：流经的每个事件原样保留（不含 model/delta 折叠）
-    events: [...state.events, event],
-  };
+  // Inspector Timeline 真相源：流经的每个事件原样追加（不含 model/delta 折叠）。
+  // 先落地日志再做投影——即使投影分支抛出，事件也不从日志丢失。
+  state.events.push(event);
+  const next: ConversationState = { ...state };
 
   const { type, data } = event;
 

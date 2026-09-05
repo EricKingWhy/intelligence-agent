@@ -497,13 +497,25 @@ describe('applyEvent — Inspector Timeline 事件日志（Phase 5）', () => {
     expect(state.events).toEqual([e1, e2]);
   });
 
-  it('applyEvent 是纯追加：后续事件不改变既有日志条目', () => {
+  it('applyEvent 是 append-only：既有日志条目永不改写（共享数组只增长）', () => {
+    // P0-1 新契约（HANDOFF §6 方案 b）：events 是引用稳定的共享数组，
+    // 「不改变既有条目」指条目不 mutate、不重排——不再保证旧 state 的
+    // events 长度冻结（旧语义靠每事件 O(N) 克隆换来，是 O(N²) 根因）。
     const e1 = ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' } });
     const e2 = ev({ type: EventType.TOOL_RESULT, data: { tool_call_id: 't1', content: '{"ok":true}' } });
     const afterFirst = applyEvent(initConversation('s1'), e1);
-    const snapshot = [...afterFirst.events];
     applyEvent(afterFirst, e2);
-    expect(afterFirst.events).toEqual(snapshot);
+    expect(afterFirst.events[0]).toBe(e1); // 既有条目引用不变、不被改写
+    expect(afterFirst.events[1]).toBe(e2); // 新条目只追加在尾部
+  });
+
+  it('events 日志数组引用跨事件稳定（O(1) 追加契约，消灭 O(N²) 的前提）', () => {
+    // 渲染层消费约定（useSession 管线）：只有最新 state 被提交给 React，
+    // events 引用稳定不影响 memo 契约（无任何消费者把 events 放进依赖数组）。
+    const s1 = applyEvent(initConversation('s1'), ev({ type: EventType.RUN_STARTED }));
+    const s2 = applyEvent(s1, ev({ type: EventType.RUN_COMPLETED }));
+    expect(s2.events).toBe(s1.events);
+    expect(s2.events).toHaveLength(2);
   });
 
   it('projectHistory 重建的 events 与输入事件序列一致', () => {
