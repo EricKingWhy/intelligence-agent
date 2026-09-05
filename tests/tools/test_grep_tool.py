@@ -118,8 +118,9 @@ class TestGrepHappyPath:
 
         assert result.result.ok is True
         paths = [m["path"] for m in result.result.data["matches"]]
-        assert all("src/" in p for p in paths)
-        assert all("other/" not in p for p in paths)
+        # Round 8 修复前 path="src" 恒空匹配（"src/" 作为 glob 永不匹配文件路径），
+        # 以下两条 all() 对空列表恒真——vacuous pass 掩盖了 bug。必须先断言非空。
+        assert paths == ["src/a.py"], f"path 子树限定失效: {paths}"
 
 
 class TestGrepTruncation:

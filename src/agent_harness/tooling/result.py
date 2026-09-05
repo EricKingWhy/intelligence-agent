@@ -32,7 +32,7 @@ class ErrorCode(str, Enum):
 
     INVALID_ARGUMENT = "INVALID_ARGUMENT"  # 参数校验失败 → 不重试，回模型自纠错
     TOOL_NOT_FOUND = "TOOL_NOT_FOUND"  # 未知工具名 → 不重试，回模型
-    TIMEOUT = "TIMEOUT"  # 超时 → 可重试（Task 3）
+    TIMEOUT = "TIMEOUT"  # 超时 → 默认可重试；MUTATING 工具由 Executor 置 False（副作用未知）
     TRANSIENT_ERROR = "TRANSIENT_ERROR"  # 暂时性错误 → 可重试（Task 3）
     PERMISSION_DENIED = "PERMISSION_DENIED"  # 权限拒绝 → 不重试
     TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"  # 工具内部异常 → 默认不重试

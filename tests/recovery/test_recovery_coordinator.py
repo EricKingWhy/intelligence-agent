@@ -290,9 +290,14 @@ async def test_pending_operation_skipped_without_execution(tmp_path: Path) -> No
     # 未自动执行：没有真实工具被调用（这里用执行计数恒 0 表达——policy 只被咨询，
     # 不触发任何 Tool.execute；execution_count 记录的是决策次数）。
     assert execution_count == 1
-    # Ledger 状态保持 PENDING（skip 不伪造终态；再次 recover 靠结果事件幂等跳过）。
+    # Ledger 推进到 CANCELLED（Round 8 契约修订）：skip 决策已把 CANCELLED 语义的
+    # 结果合成进 session，Ledger 行同步记录"恢复时被放弃、从未执行"——PENDING→CANCELLED
+    # 是状态机显式允许的迁移，不伪造任何执行结果（不写 SUCCEEDED/FAILED）。此前
+    # 停留 PENDING 让 ledger 与 session 对同一 tool_call 永久不一致。再次 recover
+    # 靠结果事件幂等跳过（dangling 判定基于事件配对，与 Ledger 状态正交）。
     op = await ledger.get("call-1")
-    assert op is not None and op.state is OperationState.PENDING
+    assert op is not None and op.state is OperationState.CANCELLED
+    assert op.result_json == results["call-1"]
 
 
 @pytest.mark.asyncio

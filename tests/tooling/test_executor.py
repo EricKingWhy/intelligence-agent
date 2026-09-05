@@ -884,3 +884,70 @@ class TestBatchOrderPreservation:
         executor = ToolExecutor(reg)
         results = await executor.execute_batch([])
         assert results == []
+
+
+# ============================================================================
+# Round 8 加固：MUTATING 工具超时不得自动重试（未知副作用不盲重跑）
+# ============================================================================
+
+
+class _SlowMutatingTimeoutTool(Tool):
+    """固定超时的 MUTATING 工具：每次 execute 都睡过上限。"""
+
+    @property
+    def name(self) -> str:
+        return "slow_mutating"
+
+    @property
+    def description(self) -> str:
+        return "必然超时的写工具。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _EmptyArgs
+
+    @property
+    def timeout_seconds(self) -> float:
+        return 0.05
+
+    @property
+    def side_effect(self) -> ToolSideEffect:
+        return ToolSideEffect.MUTATING
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        await asyncio.sleep(0.2)
+        return ToolResult.success("done")
+
+
+@pytest.mark.asyncio
+async def test_mutating_tool_timeout_is_not_auto_retried():
+    """MUTATING 工具超时 → retryable 必须为 False（不自动重试）。
+
+    超时意味着第 1 次尝试的副作用状态未知（进程可能还在跑、写可能已落盘）——
+    这与 Recovery 对 UNKNOWN 副作用要求人工 reconcile 是同一条语义（不变量
+    #14）：恢复层都不盲重跑，执行层更不能在 run 内静默 double-apply。
+    READ_ONLY 工具超时仍保持 retryable=True（重跑无副作用风险）。
+    """
+    registry = ToolRegistry()
+    registry.register(_SlowMutatingTimeoutTool())
+    executor = ToolExecutor(registry)
+
+    execution = await executor.execute({"id": "c1", "name": "slow_mutating", "args": {}})
+    assert execution.result.error_code == ErrorCode.TIMEOUT
+    assert execution.result.retryable is False
+    assert execution.result.metadata["attempt"] == 1  # 只尝试一次
+
+    # 对照组：READ_ONLY 超时仍可重试（原有语义）。
+    class _SlowReadTool(_SlowMutatingTimeoutTool):
+        @property
+        def name(self) -> str:
+            return "slow_read"
+
+        @property
+        def side_effect(self) -> ToolSideEffect:
+            return ToolSideEffect.READ_ONLY
+
+    registry.register(_SlowReadTool())
+    read_exec = await executor.execute({"id": "c2", "name": "slow_read", "args": {}})
+    assert read_exec.result.error_code == ErrorCode.TIMEOUT
+    assert read_exec.result.retryable is True

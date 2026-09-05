@@ -207,8 +207,11 @@ async def test_kill_while_pending_skips_operation_without_real_tool(
     assert "跳过" in synthesized.message
     assert not workspace_file.exists()  # 副作用为零：恢复没有执行 write
     assert detect_dangling(recovered.events) == []
+    # Ledger 推进到 CANCELLED（Round 8 契约修订，同 recovery 套件）：skip 已把
+    # CANCELLED 语义结果合成进 session，Ledger 同步记录"恢复时放弃、从未执行"
+    # ——不伪造执行结果（不写 SUCCEEDED/FAILED），但不再与 session 永久不一致。
     still_pending = await ledger.get("call-1")
-    assert still_pending is not None and still_pending.state is OperationState.PENDING
+    assert still_pending is not None and still_pending.state is OperationState.CANCELLED
 
 
 # ── 场景 C：多 Tool 部分完成后崩溃 ──

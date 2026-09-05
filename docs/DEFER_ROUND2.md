@@ -428,3 +428,83 @@ MEMORY_DEGRADED）；outbox 只覆盖已入 SQLite 的记录，不含未 store �
 重试）是 writeback/outbox 职责边界重构，牵动 ADR-0008 语义。
 
 **重启条件**：memory 可靠性专项 ticket（与 outbox 死信阈值时间化一起设计）。
+
+## R8-1. 恢复子系统在生产 runtime 完全未接线（ wiring 缺口，最高优先）
+
+**位置**：`web/app.py:_build_runtime`（无 operation_ledger / checkpoint_policy /
+session_meta_store）；全仓无 RecoveryCoordinator / Session.resume 调用方
+
+**现状**：Phase 4 组件（Ledger / Checkpoint / RecoveryCoordinator）只被测试
+驱动——唯一生产入口 web runtime 没接线，也没有任何 recover()/resume 的
+HTTP/CLI 入口。进程崩溃后 web session 的悬空 tool_call 永久无人修复，
+不变量 #12/#13/#14 在生产路径不可执行。
+
+**为何 DEFER**：接线 + 恢复入口暴露是 ticket 级工作（涉及启动配置、恢复 API
+的鉴权语义、前端交互），不是顺手修复；需要 Primary 确认接线方案。
+
+**重启条件**：Primary 排期恢复接线 ticket（建议作为 #27 后续最高优先）。
+
+## R8-2. read/grep 工具输出无上限（OOM + ledger 膨胀）
+
+**位置**：`tools/read.py:73-76`（整文件进 content）、`tools/grep.py:112-121`
+（整行进 matches，max_results 只有下界）
+
+**现状**：读 2GB 日志或 grep 压缩 bundle 会把多 MB 内容放进 ToolResult——
+进入 Context（模型可见）、SessionEvent、SQLite ledger（result_json 全量）。
+ArtifactOverflowHandler 是唯一缓解但默认未配置且不看 list 字段。
+
+**为何 DEFER**：截断上限是工具契约变更（模型可见行为 + 前端展示），需与
+overflow handler 的 artifact 化协同设计（截断应留 artifact ref 而非静默丢）。
+
+**重启条件**：overflow handler 默认接线时一并设计统一的内容预算策略。
+
+## R8-3. JWT 匿名请求 fail-open + 无 exp 强制（部署策略）
+
+**位置**：`web/app.py:330-332,339-341`
+
+**现状**：配置了 jwt_secret 时，无 Authorization 头的请求仍拿 trusted local
+身份；require 列表不含 exp——无 exp 的合法签名 token 永不过期。与 R6-4
+（未配置 secret 时静默关闭校验）同属认证策略决策。
+
+**为何 DEFER**：fail-closed / exp 强制会破坏现有本地开发流与已发 token，
+需要 Primary 拍板策略（同 R6-4 一并决策）。
+
+**重启条件**：同 R6-4。
+
+## R8-4. Memory 抽取的注入清洗与来源约束（信任链设计）
+
+**位置**：`memory/extractor.py:30-39` + `writeback.py` + `context_provider.py:44-48`
+
+**现状**：会话内容（工具输出/文件内容）进入抽取 prompt 仅靠 prompt 声明
+"untrusted"；LLM 路径候选无来源检查——注入指令可被"抽取"成 USER scope
+记忆（跨会话）并在未来 SystemMessage 回灌。Round 8 已加 2000 字符上限，
+但 provenance 约束与清洗属信任链设计。
+
+**为何 DEFER**：provenance 标记（候选只能来自 user/message 等）是记忆模型
+的字段/语义扩展，影响 writeback/store/注入链。
+
+**重启条件**：memory 安全专项（与 R7-4 writeback outbox 所有权一起）。
+
+## R8-5. 并发 session 可声明同一 workspace 名（所有权缺失）
+
+**位置**：`web/app.py:422-424` + `_validate_workspace_name`
+
+**现状**：两个 session 可同时用同一 workspace 名——两个 agent 对同一目录
+并发执行 MUTATING 工具，edit 的 read-modify-write 会丢更新。
+
+**为何 DEFER**：所有权模型（workspace 绑定创建 session / 目录锁 / 拒绝复用）
+是产品决策，V1 单用户本地场景风险低。
+
+**重启条件**：多用户 / 并发任务成为支持场景。
+
+## R8-6. WorkspaceRegistry.delete() 部分删除谎报成功
+
+**位置**：`sandbox/registry.py:111-115` + `local.py:LocalSubprocessSandbox.delete`
+
+**现状**：rmtree(ignore_errors=True) 遇锁定文件静默失败仍删映射——孤儿目录
+留在磁盘且注册表无记录（与 R7-1 的 60s 进程窗口叠加时易触发）。
+
+**为何 DEFER**：正确语义（删除后验证 + 保留映射重试 / 显式 partial 报告）
+是清理协议设计；当前危害仅限磁盘残留。
+
+**重启条件**：workspace 清理专项（可快修，非紧急）。

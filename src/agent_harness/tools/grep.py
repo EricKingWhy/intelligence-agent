@@ -77,19 +77,23 @@ class GrepTool(Tool):
             )
 
         try:
-            candidates = self._sandbox.list_files(
-                f"{args.path.rstrip('/')}/" if args.path != "." else ""
-            )
+            # 全量枚举 + 后面的子树前缀过滤：不能把 "path/" 当 glob 传下去——
+            # _glob_match 对文件相对路径匹配 "src/" 恒为 False，path 非空时
+            # 匹配数恒为 0（模型会静默得出"代码里没有"的错误结论）。
+            candidates = self._sandbox.list_files("")
         except PermissionError as e:
             return ToolResult.failure(
                 message=str(e),
                 error_code=ErrorCode.PERMISSION_DENIED,
             )
 
-        # 如果 path 不是 "."，过滤只保留该子树下的文件
+        # 如果 path 不是 "."，过滤只保留该子树下的文件。
+        # 分隔符归一：模型可能吐 win32 风格 "src\\sub"——不归一会回到
+        # 静默零匹配（与本次修复同类失效）。
         if args.path and args.path != ".":
-            prefix = args.path.rstrip("/") + "/"
-            candidates = [f for f in candidates if f.startswith(prefix) or f == args.path]
+            prefix = args.path.replace("\\", "/").rstrip("/") + "/"
+            candidates = [f for f in candidates if f.startswith(prefix)
+                          or f == prefix.rstrip("/")]
 
         # include 文件名过滤
         if args.include and args.include != "*":

@@ -16,6 +16,7 @@ from agent_harness.tooling import (
     ToolRegistry,
     ToolSideEffect,
 )
+from agent_harness.tooling.result import ErrorCode
 from agent_harness.tools import GitDiffTool, GitStatusTool
 
 
@@ -42,10 +43,12 @@ def _tool_call(name: str, args: dict, call_id: str = "test_call") -> dict:
 
 
 def _init_git_repo(sandbox: LocalSubprocessSandbox) -> None:
-    """在 workspace 里 git init + 配 user（防 git 报错）。"""
+    """在 workspace 里 git init + 配 user（防 git 报错）。quotepath 关掉：
+    porcelain 默认把非 ASCII 路径转义成八进制，断言可读性差。"""
     sandbox.exec("git init -q")
     sandbox.exec("git config user.email test@test.com")
     sandbox.exec("git config user.name test")
+    sandbox.exec("git config core.quotepath false")
 
 
 class TestGitStatusSideEffect:
@@ -176,3 +179,57 @@ class TestGitDiff:
         assert result.result.ok is True
         assert "+changed_a" in result.result.data["stdout"]
         assert "+changed_b" not in result.result.data["stdout"]
+
+
+# ── Round 8 安全加固：pathspec 白名单（cmd.exe 注入防线）──
+
+
+@pytest.mark.asyncio
+async def test_git_pathspec_rejects_shell_metacharacters(tmp_path):
+    """pathspec/path 是文件路径不是 shell 片段：含 cmd.exe/POSIX 元字符一律拒绝。
+
+    sandbox.exec 走 shell=True：win32 上是 cmd.exe，【不认 shlex 单引号】——
+    "src/.'& echo PWNED" 会拆成两条命令执行。git 工具声明 READ_ONLY：
+    - 绕过审批门（manual 模式拒绝 bash 但 READ_ONLY 直通）；
+    - 进入 READ_ONLY 并发批次（与串行 MUTATING 语义错位）。
+    白名单（字母数字 + 空格 + / . _ -）之外一律 INVALID_ARGUMENT，模型可自纠。
+    """
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    registry = ToolRegistry()
+    registry.register(GitStatusTool(sandbox))
+    registry.register(GitDiffTool(sandbox))
+    executor = ToolExecutor(registry)
+
+    for name, args in (
+        ("git_status", {"pathspec": "src/ &' echo PWNED"}),
+        ("git_status", {"pathspec": "a|b"}),
+        ("git_diff", {"path": "a>b"}),
+        ("git_diff", {"path": "x\n& echo PWNED"}),
+    ):
+        result = await executor.execute(_tool_call(name, args))
+        assert not result.result.ok, f"{name} {args} 应被拒绝"
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        stdout = (result.result.data or {}).get("stdout", "")
+        assert "PWNED" not in stdout
+
+
+@pytest.mark.asyncio
+async def test_git_pathspec_accepts_normal_paths(tmp_path):
+    """白名单内的常规路径（含中文与空格）真正生效——双引号包裹后 shell 不拆参。
+
+    修复前：空格路径被 shell 拆成多个参数（git 报 ambiguous pathspec 或匹配
+    不到）；ADR-0002 下 ok=True 恒真，必须断言过滤结果本身。
+    """
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    registry = ToolRegistry()
+    registry.register(GitStatusTool(sandbox))
+    executor = ToolExecutor(registry)
+    _init_git_repo(sandbox)
+    sandbox.write_text("src/文件 名.md", "x")
+    sandbox.write_text("other/b.py", "y")
+
+    result = await executor.execute(_tool_call("git_status", {"pathspec": "src/文件 名.md"}))
+    assert result.result.ok is True
+    stdout = result.result.data["stdout"]
+    assert "文件 名.md" in stdout, f"空格路径过滤失效: {stdout!r}"
+    assert "other/" not in stdout

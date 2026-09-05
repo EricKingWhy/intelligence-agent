@@ -17,6 +17,9 @@ volume 持久，resume 时用确定性名字重启容器即可恢复 workspace�
 from __future__ import annotations
 
 import json
+import os
+from contextlib import suppress
+from uuid import uuid4
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -157,10 +160,20 @@ class WorkspaceRegistry:
         return self._workspaces_dir / f"{session_id}.json"
 
     def _write_mapping(self, session_id: str, mapping: dict) -> None:
-        self._mapping_path(session_id).write_text(
-            json.dumps(mapping, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # temp + os.replace 原子落盘：truncate-in-place 写到一半崩溃会留下损坏
+        # JSON，get()/stop()/delete() 从此对该 session 永久 JSONDecodeError
+        # （resume 与清理双断，且不自愈）。同目录 rename 在两种平台都原子。
+        path = self._mapping_path(session_id)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(mapping, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        finally:
+            with suppress(OSError):
+                tmp.unlink()
 
     def _read_mapping(self, session_id: str) -> dict | None:
         path = self._mapping_path(session_id)

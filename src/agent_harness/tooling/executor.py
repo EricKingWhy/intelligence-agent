@@ -540,7 +540,8 @@ class ToolExecutor:
           t0 = perf_counter()
           asyncio.timeout(tool.timeout_seconds) 包住 await tool.execute(validated)
             -> 正常返回 ToolResult  -> 透传（尊重工具自己的 ok/retryable 语义）
-            -> 抛 TimeoutError      -> 映射 TIMEOUT（可重试，外部依赖慢通常是暂时的）
+            -> 抛 TimeoutError      -> 映射 TIMEOUT（READ_ONLY 可重试；MUTATING 不可——
+                                      副作用状态未知不盲重跑，见 except TimeoutError 注释）
             -> 抛其它 Exception     -> 查 _EXCEPTION_CLASSIFICATION 分类
           记 duration_ms -> 写一条 tool_operation 日志 -> 回填 metadata
           -> 重试决策（失败且 retryable 且未用完 MAX_ATTEMPTS 才重试）-> 决定重试则写一条 retry 日志
@@ -558,15 +559,17 @@ class ToolExecutor:
                 # asyncio.timeout 到点把 execute 掐断，抛出 TimeoutError。
                 # message 写清工具名 + 超时上限，给模型"外部依赖可能暂时无响应"的纠错线索；
                 # error_code 取 TIMEOUT（result.py 里该码语义即"超时 → 可重试"）；
-                # retryable=True：外部服务慢通常是暂时的，重试可能自愈（对照
-                # _EXCEPTION_CLASSIFICATION 里 ConnectionError 同为暂时性失败）。
+                # retryable：READ_ONLY 超时是暂时的、重跑安全 → True；MUTATING 超时
+                # 意味着第 1 次尝试的副作用状态未知（进程可能仍在跑、写可能已落盘）
+                # ——与 Recovery 对 UNKNOWN 副作用要求人工 reconcile 同一语义
+                # （不变量 #14）：不自动重试，交模型决定是否重发。
                 result = ToolResult.failure(
                     message=(
                         f"工具 '{name}' 执行超时（上限 {tool.timeout_seconds} 秒），"
                         "可能是外部依赖暂时无响应，可稍后重试。"
                     ),
                     error_code=ErrorCode.TIMEOUT,
-                    retryable=True,
+                    retryable=tool.side_effect is not ToolSideEffect.MUTATING,
                 )
             except Exception as e:  # noqa: BLE001
                 # 宽捕获理由同 Task 2：工具是开放世界，无法预知会抛什么。

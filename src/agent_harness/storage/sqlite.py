@@ -327,7 +327,6 @@ class SqliteSessionMetaStore(SessionMetaStore):
                     session_id, created_at, agent_id, last_checkpoint_seq, archived
                 ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
-                    created_at = excluded.created_at,
                     agent_id = excluded.agent_id,
                     last_checkpoint_seq = excluded.last_checkpoint_seq,
                     archived = excluded.archived

@@ -81,8 +81,25 @@ class S3ArtifactStore(ArtifactStore):
                     raise KeyError(f"Artifact '{artifact_id}' does not exist") from error
                 raise
             async with response["Body"] as stream:
-                content = (await stream.read()).decode("utf-8")
+                body = await stream.read()
+        # 先验哈希后解码：损坏对象可能在 decode 前就被识破（UnicodeDecodeError
+        # 不外泄——错误契约统一是 KeyError，与 id 非法/对象缺失一致）。
         artifact = Artifact.model_validate_json(response["Metadata"]["artifact"])
+        try:
+            content = body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise KeyError(
+                f"Artifact '{artifact_id}' is not valid UTF-8 "
+                "(object modified or corrupted out-of-band)"
+            ) from error
+        # 内容寻址自验证：artifact_id 就是 sha256(content)[:16]，读回时重算比对。
+        # S3 对象可能被带外覆盖/截断——静默把错误内容当 artifact 交给模型违背
+        # "内容寻址 = id 可验证"的承诺（不验证的 hash 只是摆设）。
+        if compute_artifact_id(content) != artifact_id:
+            raise KeyError(
+                f"Artifact '{artifact_id}' content hash mismatch "
+                "(object modified or corrupted out-of-band)"
+            )
         return artifact.model_copy(update={"content": content})
 
     async def inspect(

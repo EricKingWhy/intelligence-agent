@@ -281,6 +281,18 @@ class RecoveryCoordinator:
                     run_id=item.run_id,
                     agent_id=item.agent_id,
                 )
+                # PENDING 决策落地后同步推进 Ledger：session 已合成 CANCELLED
+                # 语义的 tool/result，Ledger 行却永远停在 PENDING——两边对同一
+                # tool_call 永久不一致（可观测性 + 后续 reconcile 重复触发）。
+                operation = operations_by_call_id.get(item.tool_call_id)
+                if (operation is not None
+                        and operation.state is OperationState.PENDING
+                        and self._operation_ledger is not None):
+                    await self._operation_ledger.update_state(
+                        item.tool_call_id,
+                        OperationState.CANCELLED,
+                        result_json=item.content,
+                    )
             # 人工裁决项（#30）：状态推进 → reconcile-required 事件 → 用户裁决 →
             # Ledger 终态 + 合成 tool/result。裁决是交互式决策，发生在写入段内；
             # 中途失败留下的 reconcile-required 事件是"需要人工"的诚实记录，

@@ -13,7 +13,10 @@ from agent_harness.session import SessionEvent
 
 class _Candidate(BaseModel):
     scope: Literal["user", "session"]
-    content: str = Field(min_length=1)
+    # max_length 与启发式路径的 [:2000] 截断一致：抽取内容是模型自由生成的，
+    # 无上限时一段注入的会话内容可被"抽取"成超大候选，逐字持久化进记忆库并在
+    # 未来每个 session 的 SystemMessage 里回灌（USER scope 跨会话存活）。
+    content: str = Field(min_length=1, max_length=2000)
     importance: float = Field(ge=0, le=1)
 
 

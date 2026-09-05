@@ -15,6 +15,8 @@ import shutil
 import signal
 import subprocess
 import threading
+from contextlib import suppress
+from uuid import uuid4
 from pathlib import Path
 from time import perf_counter
 
@@ -229,15 +231,33 @@ class LocalSubprocessSandbox(Sandbox):
         return results
 
     def read_text(self, path: str) -> str:
-        """读 workspace 内文件。路径越界抛 PermissionError，文件不存在抛 FileNotFoundError。"""
+        """读 workspace 内文件。路径越界抛 PermissionError，文件不存在抛 FileNotFoundError。
+
+        newline=""：字节透传，不做 universal-newlines 折叠——否则 CRLF 文件读出
+        变 LF，edit 回写即产生整文件 diff（EOL 破坏用户工作区）。
+        """
         resolved = self._resolve_within_workspace(path)
-        return resolved.read_text(encoding="utf-8")
+        return resolved.read_text(encoding="utf-8", newline="")
 
     def write_text(self, path: str, content: str) -> None:
-        """覆盖写 workspace 内文件（父目录自动创建）。路径越界抛 PermissionError。"""
+        """覆盖写 workspace 内文件（父目录自动创建）。路径越界抛 PermissionError。
+
+        两点字节级保证：
+        - newline=""：\\n 不翻译成 os.linesep（win32 上 LF→CRLF 会把 .sh/
+          Makefile 类文件写坏、git 显示整文件改动）。
+        - temp + os.replace 原子落盘：truncate-in-place 在进程被 kill 的写中途
+          不可逆损毁原文件；同目录 rename 在 POSIX/Windows 上都是原子操作。
+        """
         resolved = self._resolve_within_workspace(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
+        tmp = resolved.with_name(f".{resolved.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="") as fh:
+                fh.write(content)
+            os.replace(tmp, resolved)
+        finally:
+            with suppress(OSError):
+                tmp.unlink()  # Windows AV/索引器可能短暂锁住；清理失败不掩盖主流程
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
         """把宿主文件/目录拷入 workspace 内指定位置。workspace_path 越界抛 PermissionError。"""
