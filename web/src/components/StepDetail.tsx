@@ -298,6 +298,11 @@ function ChatTab({
 
 // ── Timeline tab：事件真序日志（真相源 conversation.events，零过滤） ──
 
+/** 尾窗默认大小 / 「加载更早」步长（P1-4）。200 行 ≈4ms 全量渲染（实测），
+ * 40fps 合帧下余量充足；步长 500 一次多翻约 2.5 屏。 */
+export const TIMELINE_WINDOW_DEFAULT = 200;
+export const TIMELINE_WINDOW_STEP = 500;
+
 /** seq 跳转检测（Inspector Scope "TRACE 事件计数 + seq 跳转"）：
  *  返回相邻可比较 seq 对之间的缺口描述（"12 → 15"），不可比较（null/乱序）则跳过。 */
 export function seqGaps(events: AgentEvent[]): string[] {
@@ -314,14 +319,34 @@ export function seqGaps(events: AgentEvent[]): string[] {
 /** 事件行的单行摘要——单一投影源（lib/projection.ts summarizeEvent）。 */
 const eventSummary = summarizeEvent;
 
-function TimelineTab({ conversation, onFocusEvent }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void }) {
-  if (conversation.events.length === 0) {
+export function TimelineTab({ conversation, onFocusEvent }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void }) {
+  // 尾窗裁剪（P1-4，DSH "cropped client views"）：真相全量留在 conversation.events
+  // （不变量 #22 不动），视图只渲染最近窗口。实测依据：2k 全量渲染 40ms、20k 359ms
+  // （流式合帧 40fps 下 Timeline tab 每秒烧 14s CPU）——200 行窗口 ≈4ms，流畅。
+  const total = conversation.events.length;
+  const [windowSize, setWindowSize] = useState(TIMELINE_WINDOW_DEFAULT);
+  if (total === 0) {
     return <TabEmpty hint="本会话尚无事件。" />;
   }
+  const hidden = Math.max(0, total - windowSize);
+  const visible = hidden > 0 ? conversation.events.slice(hidden) : conversation.events;
   return (
     <div className="detail-timeline">
-      {conversation.events.map((e, i) => (
-        <TimelineRow key={i} event={e} onFocusEvent={onFocusEvent} />
+      {hidden > 0 && (
+        <div className="timeline-window-bar">
+          <button
+            className="timeline-earlier"
+            onClick={() => setWindowSize((w) => w + TIMELINE_WINDOW_STEP)}
+          >
+            加载更早 {Math.min(TIMELINE_WINDOW_STEP, hidden)} 条
+          </button>
+          <span className="timeline-window-hint">
+            显示最近 {visible.length} / 共 {total} 条（前段已折叠，真相完整保留）
+          </span>
+        </div>
+      )}
+      {visible.map((e, i) => (
+        <TimelineRow key={hidden + i} event={e} onFocusEvent={onFocusEvent} />
       ))}
     </div>
   );
