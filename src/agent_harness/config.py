@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     milvus_uri: str = ""
     milvus_token: SecretStr = SecretStr("")
     milvus_collection: str = ""
+    # Knowledge 域独立 Collection（ADR-0013 决策 13）：必填无默认——
+    # 不配 = knowledge capability 缺席降级，绝不静默写默认库。
+    knowledge_collection: str = ""
+    # sufficient 阈值（ADR-0013 决策 9，用户拍板 0.6：低于此证据太弱，
+    # 宁可如实标记不足防幻觉）。hits 照返，标记是诚实信号不是结果开关。
+    knowledge_min_score: float = Field(default=0.6, ge=0, le=1)
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")
