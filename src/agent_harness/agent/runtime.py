@@ -448,7 +448,8 @@ class AgentRuntime:
 
                 # Model Fallback（ADR-0014 决策 18）：取走本步的切换事实；事件
                 # 持久化放在下方 llm_log_fields 构造之后、model/completed 之前
-                # （JSONL 顺序 = 时间顺序：切换事实 → 诊断日志 → 本步由谁完成）。
+                # ——SessionEvent 流里切换事实先于本步完成事件（llm_call 是
+                # Diagnostic Log 通道，另一条观察线，不进 JSONL 顺序）。
                 fallback_transitions = (
                     model_coord.drain_transitions() if model_coord is not None else []
                 )

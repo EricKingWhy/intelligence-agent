@@ -18,7 +18,8 @@ from typing import Protocol, runtime_checkable
 class RetrievalHit:
     """统一检索证据：citation 可追溯，content 是模型可见摘要，metadata 域特定。
 
-    - KB 域 metadata: {source_id, chunk_index, source_name}
+    - KB 域 metadata: {source_id, chunk_index}（source 名已含于 citation
+      `kb:<name>#<index>`，不重复携带）
     - Web 域 metadata: {url, title, raw_content?}
     """
 
