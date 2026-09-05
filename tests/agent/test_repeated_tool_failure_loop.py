@@ -128,6 +128,12 @@ class TestRepeatedToolFailureGuardInLoop:
             if e.type == USER_MESSAGE and "改变策略" in e.data.get("content", "")
         ]
         assert len(corrective) == 1
+        # 注入消息带来源标记（runtime 行为 ≠ 真实用户发言，前端投影可区分）
+        assert corrective[0].data.get("injected_by") == "tool_failure_guard"
+        # 持久化的 run/failed 带 reason（消费者区分失败原因，#76 契约）
+        run_failed = [e for e in session._events if e.type == "run/failed"]
+        assert len(run_failed) == 1
+        assert run_failed[0].data.get("reason") == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
 
     @pytest.mark.asyncio
     async def test_different_args_does_not_trigger(self, tmp_path):

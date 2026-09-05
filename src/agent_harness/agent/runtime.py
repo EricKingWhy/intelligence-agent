@@ -181,13 +181,18 @@ class _RunFinalizer:
         self._terminal_written = True
         return event
 
-    def failure_terminal(self, *, steps: int) -> SessionEvent | None:
-        """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。"""
+    def failure_terminal(self, *, steps: int, reason: str | None = None) -> SessionEvent | None:
+        """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。
+
+        reason 落事件 data（如 identical_tool_failure_loop）——消费者区分失败
+        原因，与取消臂的 reason=cancelled 同一语义层。
+        """
         if self.run_id is None or self._terminal_written:
             return None
         event = self._session.end_run(
             self.run_id, status="failed",
             usage_total=dict(self._usage_total) or None,
+            reason=reason,
         )
         self._terminal_written = True
         return event
@@ -441,19 +446,12 @@ class AgentRuntime:
                 # 要自洽）。
                 llm_duration_ms = int((time.perf_counter() - llm_started) * 1000)
 
-                # Model Fallback 白盒透明（ADR-0014）：本步若发生过切换，
-                # 在 model/completed 之前持久化 model/fallback 事件——
-                # JSONL 顺序 = 时间顺序（切换事实 → 本步最终由谁完成）。
-                if model_coord is not None:
-                    for transition in model_coord.drain_transitions():
-                        fallback_event = session.append(
-                            MODEL_FALLBACK,
-                            {"from_model": transition.from_model,
-                             "to_model": transition.to_model,
-                             "reason": transition.reason},
-                            run_id=run_id, step_id=steps + 1,
-                        )
-                        yield to_agent_event(fallback_event)
+                # Model Fallback（ADR-0014 决策 18）：取走本步的切换事实；事件
+                # 持久化放在下方 llm_log_fields 构造之后、model/completed 之前
+                # （JSONL 顺序 = 时间顺序：切换事实 → 诊断日志 → 本步由谁完成）。
+                fallback_transitions = (
+                    model_coord.drain_transitions() if model_coord is not None else []
+                )
 
                 # 第 3 步：把 AIMessage 持久化为 model/completed 事件
                 # 值对象归一化（A2）：本循环内所有消费点读类型化字段，不再拆原始 dict。
@@ -480,6 +478,26 @@ class AgentRuntime:
                     llm_log_fields["model_id"] = model_name
                 if usage:
                     llm_log_fields["token_usage"] = usage
+                # 切换事实持久化 + 诊断日志归因（ADR-0014 决策 18：llm_call 带
+                # fallback_reason/from/to）。usage = 切换后实际产出本步回答的那次
+                # 调用的用量（primary 失败一次的用量上游未结账，不可知，绝不
+                # 伪造）；run 级 usage_total 统一归集不分主备。
+                if fallback_transitions:
+                    for transition in fallback_transitions:
+                        fallback_event = session.append(
+                            MODEL_FALLBACK,
+                            {"from_model": transition.from_model,
+                             "to_model": transition.to_model,
+                             "reason": transition.reason,
+                             **({"usage": usage} if usage else {})},
+                            run_id=run_id, step_id=steps + 1,
+                        )
+                        yield to_agent_event(fallback_event)
+                    llm_log_fields.update(
+                        fallback_reason=fallback_transitions[0].reason,
+                        fallback_from=fallback_transitions[0].from_model,
+                        fallback_to=fallback_transitions[0].to_model,
+                    )
                 self._log("llm_call", f"第 {steps + 1} 轮模型调用完成",
                           span_id=llm_span, parent_span_id=run_span, step=steps + 1,
                           **llm_log_fields)
@@ -642,7 +660,10 @@ class AgentRuntime:
                                 f"{worst_signal.consecutive_failures} 次。请改变策略"
                                 "（换参数、换工具或向用户说明遇到的具体困难），不要再"
                                 "以相同方式重试。"
-                            )},
+                            ),
+                             # runtime 注入的纠正消息不是真实用户发言——标记来源
+                             # 供前端投影/审计区分（不变量 #22 边缘）。
+                             "injected_by": "tool_failure_guard"},
                             run_id=run_id, step_id=steps,
                         )
                         yield to_agent_event(corrective)
@@ -668,11 +689,12 @@ class AgentRuntime:
                                   tool_name=worst_signal.tool_name,
                                   consecutive_failures=worst_signal.consecutive_failures,
                                   outcome="failed")
-                        end_event = session.end_run(
-                            run_id, status="failed",
-                            usage_total=dict(usage_total) or None,
+                        # 与异常臂同一收尾语义（_RunFinalizer 单终态 owner），
+                        # reason 落 run/failed data 供消费者区分失败原因。
+                        end_event = terminal.failure_terminal(
+                            steps=steps,
+                            reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
                         )
-                        terminal.mark_terminal_written()
                         self._write_memories(session, memory_event_start)
                         yield to_agent_event(end_event)
                         result_holder.append(

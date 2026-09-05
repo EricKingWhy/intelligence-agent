@@ -104,7 +104,11 @@ class TestModelFallbackInLoop:
             ScriptedModel([AIMessage(content="unused")]),
             fail_times=1, error=TimeoutError("primary down"),
         )
-        fallback = ScriptedModel([AIMessage(content="fallback 的回答")])
+        fallback_answer = AIMessage(
+            content="fallback 的回答",
+            usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+        fallback = ScriptedModel([fallback_answer])
         runtime = _runtime(primary, fallback)
         session = make_session(tmp_path)
 
@@ -118,6 +122,9 @@ class TestModelFallbackInLoop:
         assert data["from_model"] == "primary-model"
         assert data["to_model"] == "fallback-model"
         assert data["reason"] == "TimeoutError"
+        # usage = 切换后实际产出本步回答的那次调用的用量（ADR-0014 决策 18）
+        assert data["usage"] == {"prompt_tokens": 10, "completion_tokens": 5,
+                                 "total_tokens": 15}
 
     @pytest.mark.asyncio
     async def test_non_transient_error_does_not_switch(self, tmp_path):

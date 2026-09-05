@@ -91,12 +91,16 @@ class TestWebSearchTool:
         await tool.execute(_args(query="news", recency="week"))
         assert provider.last_freshness == "week"
 
-    @pytest.mark.asyncio
-    async def test_invalid_recency_ignored(self):
-        provider = _FakeProvider(hits=[])
-        tool = WebSearchTool(provider)
-        await tool.execute(_args(query="news", recency="garbage"))
-        assert provider.last_freshness is None
+    def test_invalid_recency_rejected_at_schema(self):
+        """recency 是 Literal 枚举：非法值在 pydantic 参数校验边界拒绝（不是
+        执行期静默忽略——宁可让模型知道参数错了）。"""
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        from agent_harness.websearch.tools import _WebSearchArgs
+
+        with _pytest.raises(ValidationError):
+            _WebSearchArgs(query="news", recency="garbage")
 
     @pytest.mark.asyncio
     async def test_k_passed_to_provider(self):

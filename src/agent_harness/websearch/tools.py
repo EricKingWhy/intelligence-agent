@@ -12,7 +12,7 @@ web_search 工具走统一 ToolExecutor（不变量 #7，零旁路）：
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -35,7 +35,9 @@ class _WebSearchArgs(BaseModel):
             "若无结果，放宽约束并报告，而非返回空。"
         ),
     )
-    recency: str | None = Field(
+    # Literal 让 pydantic 在参数校验边界拒绝非法值并在模型可见 schema 生成
+    # enum——而不是执行期静默忽略（宁可让模型知道参数错了，别静默降级）。
+    recency: Literal["day", "week", "month", "year"] | None = Field(
         default=None,
         description="时间过滤：day / week / month / year；省略表示不限。",
     )
@@ -45,8 +47,12 @@ class _WebSearchArgs(BaseModel):
 class WebSearchTool(Tool):
     """网络搜索入口：模型自主判断何时联网（ADR-0014 决策 11）。"""
 
-    def __init__(self, provider: WebSearchProvider) -> None:
+    def __init__(
+        self, provider: WebSearchProvider, provider_name: str | None = None,
+    ) -> None:
         self._provider = provider
+        # provider 名进 payload（#79 契约）；缺省用实现类名（如实归属）。
+        self._provider_name = provider_name or type(provider).__name__
 
     @property
     def name(self) -> str:
@@ -84,12 +90,9 @@ class WebSearchTool(Tool):
         )
 
     async def execute(self, args: _WebSearchArgs) -> ToolResult:
-        # recency 校验：仅接受允许的枚举值或 None。
-        allowed_recency = {"day", "week", "month", "year"}
-        freshness = args.recency if args.recency in allowed_recency else None
         try:
             hits = await self._provider.search(
-                args.query, k=args.k, freshness=freshness,
+                args.query, k=args.k, freshness=args.recency,
             )
         except WebSearchError as error:
             return ToolResult.failure(
@@ -97,21 +100,25 @@ class WebSearchTool(Tool):
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
                 retryable=error.category in {"timeout", "unavailable", "server_error"},
             )
+        # citation 格式 web:<url> 的唯一出处是 WebHit.to_retrieval_hit
+        # （ADR-0014 决策 12；RetrievalHit 是 KB/Web 共享货币）。
+        retrieval_hits = [hit.to_retrieval_hit() for hit in hits]
         payload: dict[str, Any] = {
             "query": args.query,
+            "provider": self._provider_name,
             "hits": [
                 {
-                    "citation": f"web:{hit.url}",
-                    "content": hit.snippet,
-                    "score": hit.score,
-                    "url": hit.url,
-                    "title": hit.title,
+                    "citation": rh.citation,
+                    "content": rh.content,
+                    "score": rh.score,
+                    "url": rh.metadata.get("url", ""),
+                    "title": rh.metadata.get("title", ""),
                 }
-                for hit in hits
+                for rh in retrieval_hits
             ],
         }
         return ToolResult.success(
             message=f"{_RESULT_DATA_UNTRUSTED_NOTE}"
-                    f"命中 {len(hits)} 条网络结果。",
+                    f"命中 {len(retrieval_hits)} 条网络结果。",
             data={"output": json.dumps(payload, ensure_ascii=False)},
         )

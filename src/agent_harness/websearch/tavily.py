@@ -72,12 +72,11 @@ class TavilyWebSearchProvider:
             "include_raw_content": True,
             "topic": "general",
         }
-        # Tavily 时间过滤映射（freshness=day/week/month/year → days 数字近似）。
-        # Tavily 没有 freshness 直传参数——作为 query hint 加进 query 字符串。
-        effective_query = query
+        # 真实时间过滤：Tavily 原生 time_range 枚举（day/week/month/year）与
+        # 工具层 recency 语义一一对应——不是 query 文本拼接（那只是提示词，
+        # 过滤不了结果）。
         if freshness:
-            effective_query = f"{query} (time range: {freshness})"
-            body["query"] = effective_query
+            body["time_range"] = freshness
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
