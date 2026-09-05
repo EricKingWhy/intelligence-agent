@@ -23,3 +23,21 @@ export function formatRelativeTime(iso: string | null, now: number = Date.now())
   if (days < 7) return `${days} 天前`;
   return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
+
+/** 不可信大输出的展示截断上限（字符）。20k 字符远超正常阅读需要，
+ *  又足以拦住 MB 级 stdout / JSON 把主线程卡死的前端 DoS（安全审查发现 1）。 */
+export const DISPLAY_TRUNCATE_LIMIT = 20_000;
+
+/** 渲染层防御：失控模型/工具可返回 MB 级输出，全量进 <pre> 会冻结 UI。
+ *  只截显示——投影层与 state 保持全量真相（不变量 #22），Inspector 钻取
+ *  数据不受影响。超限时附截断标记（含原始长度，零伪造）。 */
+export function truncateForDisplay(text: string, max: number = DISPLAY_TRUNCATE_LIMIT): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n…（已截断，完整长度 ${text.length.toLocaleString()} 字符）`;
+}
+
+/** 展示层统一 stringify：字符串原样，其余 JSON 两空格缩进。
+ *  截断由 truncateForDisplay 负责，二者配套使用。 */
+export function stringifyForDisplay(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}

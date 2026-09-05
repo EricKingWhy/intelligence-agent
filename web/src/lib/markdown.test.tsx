@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ReactElement } from 'react';
-import { renderMarkdown } from './markdown';
+import { renderMarkdown, MdCodeBlock } from './markdown';
 
 // React 19 类型中 ReactElement.props 是 unknown——测试里断言结构需要访问 props，
 // 收窄为 any 是测试代码的局部决定，不扩散到产品代码。
@@ -44,19 +44,20 @@ describe('renderMarkdown', () => {
     expect(h4.props.className).toBe('md-heading');
   });
 
-  it('围栏代码块渲染为 pre.md-code-block', () => {
+  /** 围栏代码块现为 MdCodeBlock 组件（.md-code wrapper 含复制按钮）——
+   *  未渲染元素树无法穿透函数组件，按组件类型 + code 属性断言。 */
+  it('围栏代码块渲染为 MdCodeBlock（wrapper 含复制按钮）', () => {
     const nodes = renderMarkdown('```py\nprint(1)\n```');
-    const pre = firstElement(nodes);
-    expect(pre.type).toBe('pre');
-    expect(pre.props.className).toBe('md-code-block');
-    expect(pre.props.children.props.children).toBe('print(1)');
+    const wrapper = firstElement(nodes);
+    expect(wrapper.type).toBe(MdCodeBlock);
+    expect(wrapper.props.code).toBe('print(1)');
   });
 
   it('未闭合围栏按代码块收尾（流式安全）', () => {
     const nodes = renderMarkdown('```py\nprint(1)');
-    const pre = firstElement(nodes);
-    expect(pre.type).toBe('pre');
-    expect(pre.props.children.props.children).toBe('print(1)');
+    const wrapper = firstElement(nodes);
+    expect(wrapper.type).toBe(MdCodeBlock);
+    expect(wrapper.props.code).toBe('print(1)');
   });
 
   it('HTML 文本不产生 script 元素（无注入面，React 结构化渲染）', () => {

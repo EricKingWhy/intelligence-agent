@@ -4,13 +4,22 @@
 > ZCode（本会话）**不执行 merge**——按 AGENTS.md §13，并行开发工作树不互相合并，
 > main 集成由集成 AI 在用户批准后执行。
 
-## 1. 分支状态（2026-09-04 收尾）
+## 1. 分支状态（2026-09-05 更新——集成前以此为准）
 
 - **分支**：`feat/frontend`（worktree `D:\intelligence-agent-frontend`）
-- **HEAD**：待提交的 Phase 1-7 收尾 fix（本次会话产出的 5 个 Standards/Spec 修复 + 本文档）→ 推送后的新 HEAD 见 `git log -1`
-- **七阶段提交链**：`6183d3f`（Phase 1）→ `05a1baa`（Phase 2）→ `f7684c6`（Phase 3）→ `e49d6b8`（Phase 4）→ `3ad4a37`（Phase 5）→ `a68a380`（Phase 6）→ `38fc775`（Phase 7）→ 本次收尾 commit
-- **质量门**：`tsc --noEmit` clean、`vitest run` 73/73 passed、`npm run build` 通过
-- **冻结决策来源**：`docs/UI_DESIGN_DECISIONS.md`（七阶段 UI 重设计单一事实源）
+- **HEAD**：`91baaaf`（领先 main 8 个 commit，含 P0 修复）—— main 需整体补并，**不要按旧 SHA cherry-pick**（旧文档曾指向 `4592fa2`，其后还有 7 个 commit，按旧 SHA 补并会漏掉流式边界守护、截断防御、COW 性能与 UI 细节整批工作）
+- **提交链**：七阶段 UI 重设计（`6183d3f` → `38fc775`）→ 收尾 fix → Gap 消费 `e1689c6` → **P0 修复 `4592fa2`** → 六项回归记录 `62e6a68` → COW 性能 `e47e7e7` → 安全加固 `41e7360` → 完成轮默认展开 `560f0ac` → code-review 修复 `1e10dbc` → 调研驱动细节组件 `0d7bb6f` → **流式边界守护 `91baaaf`**
+- **质量门**：`tsc -b` clean、`vitest run` **102/102** passed、`npm run build` 通过
+- **冻结决策来源**：`docs/UI_DESIGN_DECISIONS.md`（七阶段 UI 重设计单一事实源）；其中 L48「已完成 Turn 默认折叠」已被用户指令覆盖为**默认展开 + 手动折叠**（`560f0ac`，见 Conversation.tsx 注释）
+
+> **⚠️ main 补并提示（集成 AI）**：`4592fa2` 修复「模型输出不渲染」P0 bug（用户实测踩中）。
+> 根因两层：①`resolveStep` 用 `!== null` 漏掉 JSON 缺键产生的 `undefined` → user/message 与
+> model/completed 落进不同 turn；②后端不持久化 `model/started`（stream-only），无工具会话只有
+> `model/completed`，此前该事件不回填 segment/activity → `activities.length > 0` 渲染条件不满足
+> → 模型文本整块不渲染。main 上若不补并，**所有无工具纯对话会话的模型回复都不显示**。
+> 补并方式：`git checkout main && git merge --no-ff feat/frontend`（整分支补并到 `91baaaf`，
+> 见 §2）；不要按单 SHA cherry-pick。补并后重跑 §3 六项验证（2026-09-05 已在 feat/frontend
+> 全绿，见 PHASE_STATUS 时间线）。
 
 ## 2. 合并策略建议
 
@@ -60,6 +69,12 @@ cd web && npm run dev
 3. **首条用户消息** ✅ —— `GET /api/sessions` 行级 `first_user_message`（截断 128）。前端 useSession 零额外请求预填 titlesById；events 扫描保留为 fallback（后端未返回时）
 
 **集成 AI 注意**：验证数据路径前先重启后端进程加载 Gap 代码（此前 :8000 上跑的旧进程 payload 无新字段——前端对此完全优雅降级，已目检确认）。剩余未落地项：checkpoint 元数据 API（StepDetail CHECKPOINT 空槽保留中）、Langfuse 接入（Phase 15）。
+
+## 4.1 安全加固建议（2026-09-05 前端安全审查产出，供集成 AI 参考落地）
+
+前端已完成两项加固：不可信工具输出渲染截断（`truncateForDisplay`，20k 字符上限，防 MB 级 stdout/JSON 冻结 UI）+ 生产 sourcemap 关闭（`vite.config.ts`，不再向静态资源暴露 1.03MB 源码映射）。审查同时确认：**零 XSS sink**（全 src 无 dangerouslySetInnerHTML/innerHTML/eval，markdown 白名单渲染声明属实）、URL 构造已 encodeURIComponent、localStorage 仅两个非敏感枚举键、dist 产物无任何密钥。
+
+**留给后端的一项（Scope Lock：后端 worktree 不归前端会话改）**：建议 FastAPI 静态服务（`src/agent_harness/web/app.py`）为 HTML 响应加 `Content-Security-Policy: default-src 'self'; img-src 'self' data:` 响应头——比 meta 标签可靠，且不影响 Vite dev。当前无注入 sink 故不可利用，属纵深防御。
 
 ## 5. 不变量守护（合并前必读）
 

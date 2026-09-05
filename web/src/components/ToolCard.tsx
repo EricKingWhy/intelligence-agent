@@ -15,11 +15,11 @@
  * Status color: running=warning, success=green, failed=red.
  */
 
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
-import { formatDuration } from '../lib/format';
+import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 
 interface Props {
   tool: ToolCall;
@@ -29,7 +29,9 @@ interface Props {
   onFocus?: (tool: ToolCall) => void;
 }
 
-export function ToolCard({ tool, density, onFocus }: Props) {
+// memo：投影层 copy-on-write 保证未触及的 tool 引用稳定——同 turn 内其它工具卡
+// 在本工具更新时跳过重渲染（配合 App 层 useCallback 稳定的 onFocus）。
+export const ToolCard = memo(function ToolCard({ tool, density, onFocus }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const slice = tool.name === 'inspect_artifact' ? tryParseSlice(tool.result) : null;
@@ -100,7 +102,7 @@ export function ToolCard({ tool, density, onFocus }: Props) {
       )}
     </>
   );
-}
+});
 
 function summarizeArgs(tool: ToolCall, max = 60): string {
   const a = tool.args;
@@ -126,7 +128,7 @@ function BashBlock({ tool }: { tool: ToolCall }) {
         <span className="bash-prompt">$</span>
         <code>{cmd}</code>
       </div>
-      {out && <pre className="bash-output">{out}</pre>}
+      {out && <pre className="bash-output">{truncateForDisplay(out)}</pre>}
       {code !== undefined && (
         <span className={`exit-badge ${code === 0 ? 'exit-ok' : 'exit-err'}`}>exit {code}</span>
       )}
@@ -157,12 +159,12 @@ function GenericBlock({ tool }: { tool: ToolCall }) {
     <div className="generic-block">
       <div className="generic-section">
         <div className="generic-label">参数</div>
-        <pre>{JSON.stringify(tool.args, null, 2)}</pre>
+        <pre>{truncateForDisplay(JSON.stringify(tool.args, null, 2))}</pre>
       </div>
       {tool.result !== undefined && (
         <div className="generic-section">
           <div className="generic-label">结果</div>
-          <pre>{typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}</pre>
+          <pre>{truncateForDisplay(stringifyForDisplay(tool.result))}</pre>
         </div>
       )}
     </div>

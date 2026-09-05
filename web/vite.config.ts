@@ -16,6 +16,8 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // 生产不发布 sourcemap：.map 会把全部原始源码暴露给任何能拉到静态资源的人
+    // （安全审查发现 3）。本地排障用 npm run build -- --sourcemap 临时开启。
+    sourcemap: false,
   },
 })

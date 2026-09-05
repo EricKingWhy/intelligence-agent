@@ -14,16 +14,17 @@
  * Run level (no modal — Brief "上下文 Inspector").
  */
 
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import {
   AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
   Hash, Layers, ListTree, Package, TerminalSquare,
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
-import { formatDuration } from '../lib/format';
+import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
+import { CopyButton } from './CopyButton';
 
 /** Inspector focus: Run-level overview or a drilled-in event. */
 export type InspectorFocus =
@@ -320,15 +321,23 @@ function TimelineTab({ conversation, onFocusEvent }: { conversation: Conversatio
   return (
     <div className="detail-timeline">
       {conversation.events.map((e, i) => (
-        <button key={i} className="timeline-row" onClick={() => onFocusEvent(e)}>
-          <span className="tl-seq">{e.seq ?? '·'}</span>
-          <span className="tl-type">{e.type}</span>
-          <span className="tl-summary">{eventSummary(e)}</span>
-        </button>
+        <TimelineRow key={i} event={e} onFocusEvent={onFocusEvent} />
       ))}
     </div>
   );
 }
+
+// memo：投影层 events 数组为追加式（既有事件引用稳定），流式期间新 delta 到达时
+// 旧行跳过 summarizeEvent 重算——只有新增行参与渲染。
+const TimelineRow = memo(function TimelineRow({ event, onFocusEvent }: { event: AgentEvent; onFocusEvent: (e: AgentEvent) => void }) {
+  return (
+    <button className="timeline-row" onClick={() => onFocusEvent(event)}>
+      <span className="tl-seq">{event.seq ?? '·'}</span>
+      <span className="tl-type">{event.type}</span>
+      <span className="tl-summary">{eventSummary(event)}</span>
+    </button>
+  );
+});
 
 // ── Changes tab：diff 双栏聚合（复用 ToolCard diff 形态的数据与 .diff-cols 形状） ──
 
@@ -388,7 +397,7 @@ function TerminalTab({ tools, onFocusTool }: { tools: ToolCall[]; onFocusTool: (
               <span className="bash-prompt">$</span>
               <code>{String(t.args.command ?? '')}</code>
             </div>
-            {result?.stdout !== undefined && <pre className="detail-terminal-out">{result.stdout}</pre>}
+            {result?.stdout !== undefined && <pre className="detail-terminal-out">{truncateForDisplay(result.stdout)}</pre>}
             {result?.exit_code !== undefined && (
               <span className={`exit-badge ${result.exit_code === 0 ? 'exit-ok' : 'exit-err'}`}>exit {result.exit_code}</span>
             )}
@@ -446,6 +455,8 @@ function EventInspector({ focus }: { focus: EventFocus }) {
     return <ToolEventSections tool={focus.tool} />;
   }
   const event = focus.event;
+  const dataJson = JSON.stringify(event.data, null, 2);
+  const rawJson = JSON.stringify(event, null, 2);
   return (
     <>
       <div className="detail-section">
@@ -473,11 +484,17 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Input / Output (data)</div>
-        <pre className="detail-code">{JSON.stringify(event.data, null, 2)}</pre>
+        <div className="detail-code-wrap">
+          <CopyButton text={dataJson} label="复制 JSON" />
+          <pre className="detail-code">{truncateForDisplay(dataJson)}</pre>
+        </div>
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Raw</div>
-        <pre className="detail-code">{JSON.stringify(event, null, 2)}</pre>
+        <div className="detail-code-wrap">
+          <CopyButton text={rawJson} label="复制 Raw" />
+          <pre className="detail-code">{truncateForDisplay(rawJson)}</pre>
+        </div>
       </div>
     </>
   );
@@ -485,6 +502,8 @@ function EventInspector({ focus }: { focus: EventFocus }) {
 
 /** 工具事件级视图：Input(args) / Output(result) / Raw(raw_call/raw_result)。 */
 function ToolEventSections({ tool }: { tool: ToolCall }) {
+  const argsJson = JSON.stringify(tool.args, null, 2);
+  const outputText = stringifyForDisplay(tool.result);
   return (
     <>
       <div className="detail-section">
@@ -493,15 +512,17 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
           <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
         </div>
         <div className="detail-subsection">
-          <div className="detail-key">Input (args)</div>
-          <pre className="detail-code">{JSON.stringify(tool.args, null, 2)}</pre>
+          <div className="detail-code-wrap">
+            <CopyButton text={argsJson} label="复制 JSON" />
+            <pre className="detail-code">{truncateForDisplay(argsJson)}</pre>
+          </div>
         </div>
         {tool.result !== undefined && (
           <div className="detail-subsection">
-            <div className="detail-key">Output</div>
-            <pre className="detail-code">
-              {typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
-            </pre>
+            <div className="detail-code-wrap">
+              <CopyButton text={outputText} label="复制输出" />
+              <pre className="detail-code">{truncateForDisplay(outputText)}</pre>
+            </div>
           </div>
         )}
         {tool.started_at && tool.completed_at && (
@@ -514,8 +535,18 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
       {(tool.raw_call || tool.raw_result) && (
         <div className="detail-section">
           <div className="detail-section-title">Raw</div>
-          {tool.raw_call && <pre className="detail-code">{JSON.stringify(tool.raw_call, null, 2)}</pre>}
-          {tool.raw_result && <pre className="detail-code">{JSON.stringify(tool.raw_result, null, 2)}</pre>}
+          {tool.raw_call && (
+            <div className="detail-code-wrap">
+              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw" />
+              <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_call, null, 2))}</pre>
+            </div>
+          )}
+          {tool.raw_result && (
+            <div className="detail-code-wrap">
+              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw" />
+              <pre className="detail-code">{truncateForDisplay(JSON.stringify(tool.raw_result, null, 2))}</pre>
+            </div>
+          )}
         </div>
       )}
     </>

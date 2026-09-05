@@ -12,7 +12,7 @@
  * Panel geometry is transient — NOT persisted (invariant #22: no second truth).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSession } from './hooks/useSession';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
@@ -45,12 +45,15 @@ export default function App() {
   };
 
   // Inspector 焦点（Brief "上下文 Inspector"）：Run 级 ↔ 事件级，一键返回，不用弹窗。
+  // 全部 useCallback：下游 SessionList/Composer/Conversation/StepDetail 的 memo
+  // 依赖引用稳定的回调，普通函数每次渲染新引用会让 memo 全部失效。
   const [focus, setFocus] = useState<InspectorFocus>({ kind: 'run' });
-  const focusTool = (tool: ToolCall) => setFocus({ kind: 'tool', tool });
-  const focusEvent = (event: AgentEvent) => setFocus({ kind: 'event', event });
-  const focusRun = () => setFocus({ kind: 'run' });
+  const focusRun = useCallback(() => setFocus({ kind: 'run' }), []);
+  const focusTool = useCallback((tool: ToolCall) => setFocus({ kind: 'tool', tool }), []);
+  const focusEvent = useCallback((event: AgentEvent) => setFocus({ kind: 'event', event }), []);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
+  const onPresetTask = useCallback((text: string) => setPresetTask({ text, id: Date.now() }), []);
   // Inspector 折叠是视图状态：收起不卸载（DSH 语义，冻结决策）。
   // 窄屏（<1200px）默认收起；用户手动切换后以手动值优先（仅本会话内，不持久化）。
   const [inspectorOpen, setInspectorOpen] = useState(
@@ -71,16 +74,21 @@ export default function App() {
     setInspectorOpen((v) => !v);
   };
 
-  const handleNew = () => {
+  const handleNew = useCallback(() => {
     // selectSession 内部处理流取消（切走即放弃当前流，幂等）
     selectSession(null);
     focusRun();
-  };
+  }, [selectSession, focusRun]);
 
-  const handleSubmit = (task: string) => {
+  const handleSelect = useCallback((id: string) => {
+    selectSession(id);
+    focusRun();
+  }, [selectSession, focusRun]);
+
+  const handleSubmit = useCallback((task: string) => {
     focusRun();
     void submitTask({ task, max_steps: 10, auto_approve: true });
-  };
+  }, [submitTask, focusRun]);
 
   return (
     <div className="app-frame">
@@ -99,10 +107,7 @@ export default function App() {
           selectedId={selectedId}
           liveSessionId={streaming ? selectedId : null}
           titlesById={titlesById}
-          onSelect={(id) => {
-            selectSession(id);
-            focusRun();
-          }}
+          onSelect={handleSelect}
           onNew={handleNew}
         />
 
@@ -112,7 +117,7 @@ export default function App() {
             conversation={conversation}
             loadingHistory={loadingHistory}
             density={density}
-            onPresetTask={(text) => setPresetTask({ text, id: Date.now() })}
+            onPresetTask={onPresetTask}
             onFocusTool={focusTool}
           />
           <Composer

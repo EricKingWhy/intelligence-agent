@@ -1,7 +1,7 @@
 /** format.ts 时间/数值格式化测试。 */
 
 import { describe, expect, it } from 'vitest';
-import { formatDuration, formatRelativeTime } from './format';
+import { formatDuration, formatRelativeTime, truncateForDisplay } from './format';
 
 describe('formatDuration', () => {
   it('缺 started/completed 任一（running 中）返回 null', () => {
@@ -55,5 +55,29 @@ describe('formatRelativeTime', () => {
     const out = formatRelativeTime('2026-08-28T12:00:00Z', NOW);
     expect(out).toMatch(/[\d]/); // 含日期数字
     expect(out).not.toMatch(/(刚刚|分钟前|小时前|天前)$/);
+  });
+});
+
+describe('truncateForDisplay — 不可信大输出渲染截断', () => {
+  it('未超限原样返回（同一字符串引用语义，无标记）', () => {
+    const s = 'hello world';
+    expect(truncateForDisplay(s)).toBe(s);
+    expect(truncateForDisplay('x'.repeat(20_000))).toHaveLength(20_000); // 恰在默认上限不截断
+  });
+
+  it('超限截断到 max 字符并附截断标记（含原始长度，零伪造）', () => {
+    const s = 'x'.repeat(25_000);
+    const out = truncateForDisplay(s);
+    expect(out.startsWith('x'.repeat(20_000))).toBe(true);
+    expect(out).toContain('已截断');
+    expect(out).toContain('25,000');
+    expect(out.length).toBeLessThan(20_100);
+  });
+
+  it('自定义 max 生效：刚好等于 max 不截断，超过一个字符即截断', () => {
+    expect(truncateForDisplay('abcde', 5)).toBe('abcde');
+    const out = truncateForDisplay('abcdef', 5);
+    expect(out.startsWith('abcde')).toBe(true);
+    expect(out).toContain('已截断');
   });
 });
