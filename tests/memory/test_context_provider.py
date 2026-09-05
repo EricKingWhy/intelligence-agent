@@ -18,7 +18,7 @@ from agent_harness.memory.context_provider import MemoryContextProvider
 from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.types import MemoryEntry, MemoryScope, memory_session_var
 from agent_harness.memory.writeback import MemoryWriteback
-from agent_harness.session import USER_MESSAGE
+from agent_harness.session import USER_MESSAGE, SessionEvent
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -275,3 +275,77 @@ async def test_degraded_event_carries_run_id(tmp_path):
     assert len(degraded) == 1
     run_started = next(e for e in session.events if e.type == RUN_STARTED)
     assert degraded[0].run_id == run_started.run_id
+
+
+# ── C3（用户拍板）：writeback 逐候选隔离 + close 先 drain ──
+
+
+@pytest.mark.asyncio
+async def test_writeback_isolates_per_candidate_failures(tmp_path):
+    """单个候选 store 失败不得吞掉其余候选（此前顺序写、第 N 个失败全丢）。"""
+    from agent_harness.memory.fake_capability import FakeMemoryCapability
+
+    class FlakyStore(FakeMemoryCapability):
+        def __init__(self):
+            super().__init__()
+            self.stored: list[str] = []
+
+        async def store(self, scope, content, metadata):
+            if "boom" in content:
+                raise ConnectionError("store offline")
+            self.stored.append(content)
+            return f"mem-{len(self.stored)}"
+
+    from agent_harness.memory.types import MemoryScope
+
+    class StaticExtractor:
+        async def extract(self, events):
+            return [
+                (MemoryScope.SESSION, "good-1", {"importance": 0.5}),
+                (MemoryScope.SESSION, "boom-candidate", {"importance": 0.5}),
+                (MemoryScope.SESSION, "good-2", {"importance": 0.5}),
+            ]
+
+    session = make_session(tmp_path)
+    writer = MemoryWriteback(FlakyStore(), StaticExtractor())
+    writer.submit(session, [SessionEvent(seq=1, type=USER_MESSAGE,
+                                         session_id=session.session_id,
+                                         data={"content": "hi"})])
+    await writer.drain()
+    cap = writer._capability
+    assert cap.stored == ["good-1", "good-2"], "部分失败必须隔离，不吞掉其余候选"
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert any("partial" in e.data["reason"] for e in degraded)
+
+
+@pytest.mark.asyncio
+async def test_close_drains_pending_writeback(tmp_path):
+    """close() 必须先 drain（等在途写完成），超时才取消——此前直接 cancel，
+    已抽取未存储的候选静默丢失。"""
+    import asyncio as _asyncio
+
+    from agent_harness.memory.fake_capability import FakeMemoryCapability
+    from agent_harness.memory.types import MemoryScope
+
+    class SlowStore(FakeMemoryCapability):
+        def __init__(self):
+            super().__init__()
+            self.stored: list[str] = []
+
+        async def store(self, scope, content, metadata):
+            await _asyncio.sleep(0.2)
+            self.stored.append(content)
+            return "mem-1"
+
+    class StaticExtractor:
+        async def extract(self, events):
+            return [(MemoryScope.SESSION, "drained-candidate", {"importance": 0.5})]
+
+    session = make_session(tmp_path)
+    writer = MemoryWriteback(SlowStore(), StaticExtractor())
+    writer.submit(session, [SessionEvent(seq=1, type=USER_MESSAGE,
+                                         session_id=session.session_id,
+                                         data={"content": "hi"})])
+    await _asyncio.sleep(0.05)  # 任务已启动、还在 store 的 sleep 中
+    await writer.close()
+    assert writer._capability.stored == ["drained-candidate"], "close 丢弃了在途候选"
