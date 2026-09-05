@@ -4,6 +4,43 @@
 > 按 AGENTS.md §5 与 §8，这些是设计级或投机性变更，超出当前 ticket scope，
 > 只报告不改；落地需 Primary Developer 确认后再开 ticket。
 
+## 决策执行记录（2026-09-05，用户拍板）
+
+用户对 Round 8 交付的 DEFER 清单逐项拍板，执行结果：
+
+**已落地（本批 commit）**：
+- R8-1 恢复子系统接线生产 runtime（Ledger/Checkpoint/SessionMetaStore 注入 + WorkspaceRegistry 映射持久化 + POST /api/sessions/{id}/recover 恢复端点）
+- R6-4 + R8-3 认证 fail-closed（配置密钥即强制认证 + 强制 exp；未配置启动横幅告警）
+- R6-2 零 chunk 流归 model/failed + run/failed
+- R8-2 read/grep 输出预算（2000 行/50KB + offset 分页 + 可执行截断标记；grep 单行 500 字符 + max_results ≤1000）
+- B 组九项：R6-3 重复 id 去重、R8-6 delete 验证、R4-5 busy_timeout、R6-5 .env 锚定、
+  R6-8 provider 去重、R6-6 create_session 顺序、R4-6 formatter 告警、R3-7 run_id、R6-7 事件顺序
+- D9→实施：JSONL append 增加 os.fsync（用户要求断电不丢）
+- C1 协作取消（Sandbox.exec cancel_event 钩子 + ExecResult.cancelled + BashTool 接线）
+- C2 环境变量白名单（默认 OS 必需项白名单 + passthrough_env 逃生门）
+- C5 Ledger 复合主键 (session_id, tool_call_id)
+- C3a/C3b writeback 逐候选隔离 + close 先 drain
+- C3c/R3-4 抽取 prompt 输入有界化（单事件 1000 字符、最多 50 事件）
+- C4 provenance 确定性约束（无 user/message 窗口的 USER 候选降级 SESSION）
+
+**关闭（过时/重复）**：
+- R4-3（derive/dangling 双真相源）：Round 5 已收敛，实质解决
+- 旧#1（= R6-1）、旧#3（= R6-8）：重复条目，以 R6 编号为准
+- 旧#2（estimate_message_tokens 微优化）：用户拍板保持 DEFER，保留在下节
+
+**保持 DEFER（用户拍板）**：
+- R4-1 Model Fallback（未来 Phase）、R6-1 压缩缓存、R7-2 append 同步 IO、
+  R7-3 skill catalog 刷新、R4-2 同 id 并发、R3-8 图像 token、旧#2 微优化、
+  旧#5 当前轮 tool 块不可压缩、R4-4 JSONL fsync（**fsync 已实施**，本条仅剩
+  "多进程撕裂行"部分——仍无触发路径）、R3-6 本地 sandbox FS 限制（Docker 为真边界）
+
+**残余设计项（需 Primary 后续决策）**：
+- 记忆逐候选来源追踪（provenance 记忆 schema 扩展）——本批以确定性降级规则落地，
+  更强方案需记忆模型字段设计
+
+---
+
+
 ## 1. ContextBuilder 的压缩摘要缓存（设计级）
 
 **位置**：`src/agent_harness/context/builder.py::ContextBuilder.build`
