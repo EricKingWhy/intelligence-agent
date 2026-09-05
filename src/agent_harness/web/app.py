@@ -40,7 +40,6 @@ from agent_harness.logging import setup_logging
 from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session
-from agent_harness.session.event import USER_MESSAGE
 from agent_harness.storage import (
     SqliteCheckpointStore,
     SqliteOperationLedger,
@@ -351,28 +350,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     async def list_sessions() -> list[SessionSummary]:
         """列历史 session（按最近活动倒序）。
 
-        store 读是同步磁盘 I/O，走 to_thread 卸载——一份大 JSONL 不能卡住事件循环。
+        列表页只需摘要字段——store.read_session_summary 单趟流式扫描
+        （头部早退 + 末行），不再全量解析每个 JSONL（30 会话 × 2000 事件
+        曾需秒级串行解析，现约几十 ms）。损坏行走 store 内全量回退，摘要
+        语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
         store = app.state.agent.store
         ids = await anyio.to_thread.run_sync(store.list_session_ids)
         summaries: list[SessionSummary] = []
         for sid in ids:
-            events = await anyio.to_thread.run_sync(store.read_events, sid)
-            if not events:
+            stats = await anyio.to_thread.run_sync(store.read_session_summary, sid)
+            if stats is None or stats.event_count == 0:
                 continue
-            first_user_message = next(
-                (e.data.get("content") for e in events if e.type == USER_MESSAGE
-                 and isinstance(e.data.get("content"), str) and e.data["content"].strip()),
-                None,
-            )
-            if first_user_message is not None:
-                first_user_message = first_user_message.strip()[:128]
             summaries.append(SessionSummary(
                 session_id=sid,
-                event_count=len(events),
-                first_event_time=events[0].time,
-                last_event_time=events[-1].time,
-                first_user_message=first_user_message,
+                event_count=stats.event_count,
+                first_event_time=stats.first_event_time,
+                last_event_time=stats.last_event_time,
+                first_user_message=stats.first_user_message,
             ))
         return summaries
 

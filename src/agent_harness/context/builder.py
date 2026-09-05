@@ -7,13 +7,23 @@ from langchain_core.messages import AnyMessage, SystemMessage
 
 from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
 from agent_harness.context.provider import ContextProvider
-from agent_harness.context.tokens import estimate_message_tokens
+from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.session import Session
-from agent_harness.session.event import CONTEXT_COMPACTED
+from agent_harness.session.event import (
+    CONTEXT_COMPACTED,
+    MODEL_COMPLETED,
+    TOOL_RESULT,
+    USER_MESSAGE,
+)
 
 logger = logging.getLogger("agent_harness.context")
 
 __all__ = ["ContextBuilder", "ContextWindowExceededError"]
+
+#: 会投影成消息的事件类型——与 derive_messages 的投影集合一一对应
+#: （每个此类事件恰好产出一条消息，顺序一致；dangling 合成注入是唯一例外，
+#: 由 _estimate_tokens_cached 的计数守卫回退处理）。
+_PROJECTING_EVENT_TYPES = frozenset({USER_MESSAGE, MODEL_COMPLETED, TOOL_RESULT})
 
 
 class ContextBuilder:
@@ -35,17 +45,24 @@ class ContextBuilder:
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
         self.context_providers = list(context_providers or [])
+        # (session_id, seq) → 该事件投影消息的 token 成本。事件落盘后其投影
+        # 消息内容终身不变，成本是常量——此前每步对全部历史重新 model_dump_json
+        # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
+        # memo 终身 = builder 终身 = runtime 终身 = 单会话，无需淘汰。
+        self._token_memo: dict[tuple[str, int], int] = {}
+        # 最近一次 build 的估算总量（供测试与 _with_providers 复用）。
+        self._token_estimate_total: int = 0
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
         messages = session.derive_messages()
-        token_estimate = estimate_message_tokens(messages)
+        token_estimate = self._estimate_tokens_cached(session, messages)
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
         )
         if token_estimate <= self.max_context_tokens * self.auto_compact_threshold:
-            return await self._with_providers(session, messages)
+            return await self._with_providers(session, messages, token_estimate)
         result = await ContextCompactor(
             self.model_provider, max_context_tokens=self.max_context_tokens,
             auto_compact_threshold=self.auto_compact_threshold,
@@ -58,10 +75,44 @@ class ContextBuilder:
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
             })
-        return await self._with_providers(session, result.messages)
+        return await self._with_providers(session, result.messages, result.token_estimate)
 
-    async def _with_providers(self, session: Session, messages: list[AnyMessage]) -> list[AnyMessage]:
-        remaining = int(self.max_context_tokens * self.hard_guard_threshold) - estimate_message_tokens(messages)
+    def _estimate_tokens_cached(
+        self, session: Session, messages: list[AnyMessage],
+    ) -> int:
+        """增量 token 估算：每条投影消息终身只编码一次。
+
+        derive_messages 对投影事件是一一映射（按序各产出一条消息）——
+        唯一例外是 dangling 合成 ToolMessage 的块尾注入（事件数 ≠ 消息数），
+        此时放弃增量假设整体重估（正确性优先；resume 已修复 dangling，
+        运行内该路径罕见）。
+        """
+        projecting = [e for e in session.events
+                      if e.type in _PROJECTING_EVENT_TYPES]
+        if len(projecting) != len(messages):
+            # 计数失配：合成注入等非常规形态。清掉本会话的 memo 整体重估
+            #（下一轮恢复一一对应后重新增量起步）。
+            sid = session.session_id
+            self._token_memo = {
+                key: cost for key, cost in self._token_memo.items() if key[0] != sid
+            }
+            self._token_estimate_total = estimate_message_tokens(messages)
+            return self._token_estimate_total
+        total = 0
+        for event, message in zip(projecting, messages):
+            key = (session.session_id, event.seq)
+            cost = self._token_memo.get(key)
+            if cost is None:
+                cost = estimate_tokens(message.model_dump_json())
+                self._token_memo[key] = cost
+            total += cost
+        self._token_estimate_total = total
+        return total
+
+    async def _with_providers(
+        self, session: Session, messages: list[AnyMessage], token_estimate: int,
+    ) -> list[AnyMessage]:
+        remaining = int(self.max_context_tokens * self.hard_guard_threshold) - token_estimate
         selected: list[AnyMessage] = []
         for provider in self.context_providers:
             if remaining <= 0:
