@@ -61,6 +61,14 @@ cd web && npm run dev
 
 **集成 AI 注意**：验证数据路径前先重启后端进程加载 Gap 代码（此前 :8000 上跑的旧进程 payload 无新字段——前端对此完全优雅降级，已目检确认）。剩余未落地项：checkpoint 元数据 API（StepDetail CHECKPOINT 空槽保留中）、Langfuse 接入（Phase 15）。
 
+## 4.1 安全响应头与认证（2026-09-05 移交记录——src/agent_harness/web/app.py 内注释引用本节）
+
+**CSP（Content-Security-Policy）**：所有 HTTP 响应统一携带 `Content-Security-Policy: default-src 'self'; img-src 'self' data:`（中间件 `csp_header`）。静态 HTML 的纵深防御——脚本/样式只认同源构建产物，`img-src` 放行 `data:`。前端影响：任何外链图片（头像/热链资源）会被浏览器拦截，资源必须本地打包。
+
+**JWT fail-closed 认证**：配置 `JWT_SECRET` 后所有请求要求 `Authorization: Bearer <HS256 JWT>`，claims 必须含 `tenant_id`、`user_id`、`exp`（无 exp 一律 401），`scopes` 可省（默认 user+session）；未配置密钥 = 本地信任模式（启动横幅告警）。**CORS 预检已修至最外层**：浏览器预检（OPTIONS，天然无 Bearer）不再被认证层 401 杀死——Vite dev 跨域模式在 JWT 生效下可用；预检放行不削弱认证，数据请求仍逐个过认证层。
+
+**静态挂载 × JWT 部署约束**：静态 serve（web/dist）只适配本地信任模式——fail-closed 生效时浏览器顶层导航无法携带 Bearer，index.html 会 401。生产 + JWT 的支持形态：反向代理直出静态资源，仅 `/api` 转发到本服务（前端带 Bearer 调用）。
+
 ## 5. 不变量守护（合并前必读）
 
 前端七阶段严守这些不变量，集成 AI 若发现后端新改动违反，应报告而非迁就：

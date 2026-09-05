@@ -76,12 +76,12 @@ async def test_hostile_tool_schema_degrades_single_server(stub_connections):
 
 
 @pytest.mark.asyncio
-async def test_name_collision_via_separator_injection_degrades_later_server(
+async def test_name_collision_via_separator_injection_first_tool_wins(
     stub_connections,
 ):
     """server 'a' 的工具 'b__c' 与 server 'a__b' 的工具 'c' 有效名都是
-    mcp__a__b__c——装配期检出冲突，后者降级缺席（runtime 注册期才炸 =
-    每个请求 500）。"""
+    mcp__a__b__c——按 ADR-0012 决策 4 先到先得：后到的工具丢弃并显式记录，
+    server 连接保留（冲突不拖垮 server，也不等到 runtime 注册才炸）。"""
     stub_connections.toolsets = {
         "a": [make_fake_tool("b__c")],
         "a__b": [make_fake_tool("c")],
@@ -89,20 +89,22 @@ async def test_name_collision_via_separator_injection_degrades_later_server(
     capability = await build_mcp_capability([_config("a"), _config("a__b")])
 
     assert [t.name for t in capability.contributes_tools()] == ["mcp__a__b__c"]
-    assert any("'a__b'" in error for error in capability.errors)
+    assert any("'a__b'" in error and "先到先得" in error
+               for error in capability.errors)
     collided = next(c for c in stub_connections.instances if c.config.name == "a__b")
-    assert collided.closed
+    assert not collided.closed, "冲突只丢工具，server 连接保留"
 
 
 @pytest.mark.asyncio
-async def test_duplicate_tool_names_within_one_server_degrade_it(stub_connections):
-    """server 自身列出两个同名工具：整个 server 降级（无法裁决哪个是真的）。"""
+async def test_duplicate_tool_names_within_one_server_first_wins(stub_connections):
+    """server 自身列出两个同名工具：按同一条先到先得规则取先者、丢弃后者
+    并逐条记录（无法裁决时取先者与丢弃整个 server 一样武断，但可观察）。"""
     stub_connections.toolsets = {
         "dupe": [make_fake_tool("echo", read_only=True), make_fake_tool("echo")],
     }
     capability = await build_mcp_capability([_config("dupe")])
 
-    assert capability.contributes_tools() == []
-    assert any("'dupe'" in error and "mcp__dupe__echo" in error
+    assert [t.name for t in capability.contributes_tools()] == ["mcp__dupe__echo"]
+    assert any("mcp__dupe__echo" in error and "先到先得" in error
                for error in capability.errors)
-    assert stub_connections.instances[0].closed
+    assert not stub_connections.instances[0].closed

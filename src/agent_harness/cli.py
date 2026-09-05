@@ -140,6 +140,8 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
 
     失败的 run 不抛异常（runtime 契约：失败事实由 run/failed 终结事件 +
     结构化日志承载）——返回空 final_text，main() 据此转 SystemExit(1)。
+    成功的 run final_text 恒非空：空响应在 runtime 被拒为失败（R6-2），
+    不存在"成功但空回答"的歧义态。
     """
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)

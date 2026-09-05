@@ -74,3 +74,10 @@
 
 > ⚠️ 上表 npx/npm 包名与远程端点在 T5 文档 ticket 施工时逐一以官方 README 复核
 > （调研数据为 2026-09-05，包名可能演进）。
+
+## 复核记录（2026-09-05，pre-merge review 补记）
+
+- **github**：✅ 真实验收通过（远程端点，`get_me` 返回登录身份，44 tools discovery）——docs/PHASE8_MANUAL_ACCEPTANCE.md。
+- **chrome-devtools**：✅ 真实验收通过（npx `chrome-devtools-mcp` stdio，29 tools discovery；页面级 isError 为 Chrome 环境状态，非配置问题）。
+- **context7**：✅ 真实验收通过（`@upstash/context7-mcp` npx 与远程 HTTP 双路径，真实调用返回 pydantic 文档）。
+- **sentry**：⏸️ 未验证——需要 `SENTRY_TOKEN`，用户配置后按 docs/PHASE8_MANUAL_ACCEPTANCE.md 补跑。`getsentry/sentry-mcp` 的 npm 包名仍是"以 repo README 为准"的未核实项。

@@ -112,7 +112,7 @@ class TestPermissionOverrides:
         servers = parse_mcp_servers({"servers": [
             _stdio(tool_permissions={"write_file": "workspace-write"}),
         ]})
-        assert servers[0].tool_permission_overrides == {
+        assert servers[0].tool_permissions == {
             "write_file": ToolPermission.WORKSPACE_WRITE,
         }
 
