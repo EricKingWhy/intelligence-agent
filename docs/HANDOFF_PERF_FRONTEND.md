@@ -134,7 +134,7 @@ console.log('累计', (performance.now()-t0).toFixed(0)+'ms');
 1. **events 数组 O(N²)**（§4.3）——2 万事件级长会话的流式渲染与历史重建都会劣化
 2. **流式 markdown 全量重解析**（§4.4）——长回答流式期间吃掉大半帧预算
 3. **delta 无合帧**——每个 SSE 帧一次 `setConversation`，高频流逐帧 setState
-4. **无 perf 回归测试**——O(N²) 这类退化没有护栏
+4. ~~**无 perf 回归测试**——O(N²) 这类退化没有护栏~~ ✅ 已由 P2-6 车道承担（比例探测器 + 绝对预算）
 5. **已知 bug（上批 code-review 抓到，顺手修掉）**：
    - `useSession.recover` 无模式守护：pending 期间切换会话，A 的 200 响应仍 `setConversation` 覆盖 B 视图（同 `shouldApplyStreamFrame` 家族的 stale-write，违反 #22 视图一致性）
    - `projection.ts` TOOL_RESULT 的全局配对扫描**无条件先执行**（正常带 step_id 的事件也付 O(轮×工具)）——应仅 `step_id == null` 时走全局定位；顺带 `orphanId` 改名 `callId`
@@ -165,7 +165,7 @@ DSH 方案 = 增量折叠 + watermark，日志不复制。落地方案（二选�
 
 `useSession` 的 SSE `onEvent` 回调里，`setConversation` 按 ~16-30ms 窗口合帧（rAF 或 setTimeout 批量），帧内多个 delta 只触发一次 React 提交。**注意**：合帧不能改变 `shouldApplyStreamFrame` 的逐帧判别语义（守卫仍逐帧执行，只合并提交）；流结束（run/completed、onDone、onError）必须立即 flush 待合帧数据，否则尾帧丢失。
 
-### P1-4 大会话窗口化（cropped views）
+### P1-4 大会话窗口化（cropped views）——✅ Timeline 部分落地（`da01efd`）；Conversation 部分按 YAGNI 暂缓（turn 级 memo + 增量 markdown 已挡热路径，待真实大会话证据）
 
 真相全量留在状态（#22 不动），UI 层裁剪：Timeline 只渲染最近 N（如 200）行 + "加载更早"；Conversation 超过 ~30 turn 时虚拟化或折叠早期轮次。参考 DSH `snapshot()` cropped client views。
 
@@ -230,7 +230,7 @@ TTFT 模型侧主导，Run Pulse「思考中·Ns」已是最优解——**不要
 - P0-1 走了方案 b（不是推荐的 a）：验收基准直接测 applyEvent 单事件成本，方案 a 无法达标。全量核对无消费者把 `conversation.events` 放进 memo/useEffect 依赖（App/Conversation/StepDetail/Run Pulse），故未引入 eventsVersion（Simplicity First）。「纯追加」测试按 §5 唯一许可改写为 append-only 契约，另加引用稳定锁——turns/tools/compactions 的 7 个引用稳定契约原样全绿。
 - P1-3 合帧语义：只合并「提交」不合并「折叠」——每帧仍逐帧过 shouldApplyStreamFrame 守护并立即 applyEvent；run/completed、run/failed、onDone、onError 立即 flush；submit 守卫 mode 仍是 live（cancel 后迟到 fire 不写回）。
 
-**剩余（交接 ZCode）：**
+**剩余（交接 ZCode）——✅ ZCode 批后全部关闭或显式转出（见下方回执）：**
 
 > **✅ ZCode 接手批回执（2026-09-05，`77de188..da01efd`）：**
 > 1. **P2-6 ✅**（`77de188`）：默认车道排除 `*.perf.test.ts`（vitest.config.ts + configDefaults）；手动车道 vitest.perf.config.ts（`pnpm test:perf`）；预算断言含**机器无关 O(N²) 比例探测器**（applyEvent @20k/@1k 成本比 <8，健康≈1，回潮 ~180x）+ 绝对预算（@20k <50µs、projectHistory 4650 <50ms、20k <200ms，基线 20 倍以上余量）。

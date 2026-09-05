@@ -70,7 +70,8 @@ describe('budget: O(N²) 回潮探测器（HANDOFF §6 P2-6）', () => {
       return (performance.now() - t0) / iters;
     };
     // 预热各一次，消除首跑 JIT/分配噪声
-    measure(1000, 50); measure(20000, 10);
+    measure(1000, 50);
+    measure(20000, 10);
     const per1k = measure(1000, 500);
     const per20k = measure(20000, 200);
     // 绝对预算：50µs = 健康值 0.2µs 的 250 倍余量，仍只有 O(N²) 形态（1.35ms）的 1/27

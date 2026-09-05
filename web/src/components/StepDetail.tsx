@@ -100,7 +100,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       </div>
 
       {tab === 'chat' && <ChatTab conversation={conversation} tools={tools} onFocusTool={onFocusTool} />}
-      {tab === 'timeline' && <TimelineTab conversation={conversation} onFocusEvent={onFocusEvent} />}
+      {tab === 'timeline' && <TimelineTab key={conversation.session_id} conversation={conversation} onFocusEvent={onFocusEvent} />}
       {tab === 'changes' && <ChangesTab tools={tools} />}
       {tab === 'terminal' && <TerminalTab tools={tools} onFocusTool={onFocusTool} />}
       {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
@@ -346,6 +346,8 @@ export function TimelineTab({ conversation, onFocusEvent }: { conversation: Conv
         </div>
       )}
       {visible.map((e, i) => (
+        /* key = 数组绝对下标：稳定性依赖 P0-1 的 append-only 事件契约
+         * （events 只追加不重排/删除，见 HANDOFF_PERF_FRONTEND §9 P0-1）。 */
         <TimelineRow key={hidden + i} event={e} onFocusEvent={onFocusEvent} />
       ))}
     </div>
