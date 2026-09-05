@@ -90,7 +90,8 @@ class DockerSandbox(Sandbox):
             },
         )
 
-    def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
+    def exec(self, command: str, *, timeout: float | None = None,
+             cancel_event=None) -> ExecResult:
         """在容器内执行命令；timeout 到点返回 exit_code=-1 的超时结果（D10 契约）。
 
         docker SDK 的 exec_run 没有超时参数且是阻塞读——实现上把调用放进

@@ -9,6 +9,7 @@ ExecResult 是 Sandbox 层的原生返回，不感知 ToolResult——Tool 层�
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,9 @@ class ExecResult:
     stdout: str
     stderr: str
     duration_ms: float = field(default=0.0)
+    # 协作取消（R7-1/C1）：进程因取消信号被整树击杀时置 True——
+    # 上层（Tool/Ledger）据此区分"自然结束"与"被取消（副作用未知）"。
+    cancelled: bool = field(default=False)
 
 
 class Sandbox(ABC):
@@ -46,11 +50,14 @@ class Sandbox(ABC):
         """
 
     @abstractmethod
-    def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
+    def exec(self, command: str, *, timeout: float | None = None,
+             cancel_event: threading.Event | None = None) -> ExecResult:
         """执行 shell 命令，返回 ExecResult。
 
-        timeout 为秒；None 表示用后端默认值。超时行为由后端决定
-        （LocalSubprocess 用 subprocess.run(timeout=...)；Docker 用 exec_run 的 TTY 超时）。
+        timeout 为秒；None 表示用后端默认值。超时行为由后端决定。
+        cancel_event 是协作取消钩子（C1）：置位后后端必须尽快击杀进程树并返回
+        cancelled=True 的结果——asyncio 超时/断连只能取消 await，杀不掉已经
+        跑起来的子进程，没有这个钩子，"超时返回"之后命令还会继续改 workspace。
         """
 
     @abstractmethod

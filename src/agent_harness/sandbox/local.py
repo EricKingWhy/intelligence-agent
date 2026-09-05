@@ -88,10 +88,38 @@ class LocalSubprocessSandbox(Sandbox):
     进程不存在"启动"概念，ensure_started 是 no-op；stop 也不需要清理（幂等空操作）。
     """
 
-    def __init__(self, workspace_root: Path, *, max_capture_chars: int = 2_000_000) -> None:
+    #: 传给子进程的环境变量白名单（C2，R3-5 落地）：bash 继承完整 host env 时，
+    #: 部署机上 export 过的密钥（API keys、tokens）对模型可执行命令可见
+    #: （echo $MY_TOKEN 即泄漏）。白名单只保留 OS 运行必需项，不含任何凭据。
+    DEFAULT_ENV_ALLOWLIST = (
+        # Windows 运行必需
+        "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR",
+        "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES",
+        "PROGRAMFILES(X86)", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+        "USERDOMAIN", "USERNAME", "NUMBER_OF_PROCESSORS", "OS",
+        # POSIX 运行必需
+        "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "LOGNAME", "SHELL",
+        # 编码（无凭据风险，缺了会让子进程输出编码漂移）
+        "PYTHONIOENCODING", "PYTHONUTF8",
+    )
+
+    def __init__(
+        self,
+        workspace_root: Path,
+        *,
+        max_capture_chars: int = 2_000_000,
+        env_allowlist: tuple[str, ...] | None = None,
+        passthrough_env: bool = False,
+    ) -> None:
         self._workspace_root = Path(workspace_root).resolve()
         self._workspace_root.mkdir(parents=True, exist_ok=True)
         self._max_capture_chars = max_capture_chars
+        # passthrough_env=True 是显式逃生门（本地调试）；默认过滤。
+        if passthrough_env:
+            self._env: dict[str, str] | None = None
+        else:
+            allowlist = env_allowlist if env_allowlist is not None else self.DEFAULT_ENV_ALLOWLIST
+            self._env = {k: os.environ[k] for k in allowlist if k in os.environ}
 
     @property
     def workspace_root(self) -> Path:
@@ -100,7 +128,8 @@ class LocalSubprocessSandbox(Sandbox):
     def ensure_started(self) -> None:
         """no-op：本机进程总在，无需启动。幂等。"""
 
-    def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
+    def exec(self, command: str, *, timeout: float | None = None,
+             cancel_event=None) -> ExecResult:
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
 
         timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉整个进程树并返回
@@ -129,6 +158,7 @@ class LocalSubprocessSandbox(Sandbox):
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=self._env,
             **popen_kwargs,
         )
         stdout_cap = _CappedCapture(self._max_capture_chars)
@@ -141,15 +171,44 @@ class LocalSubprocessSandbox(Sandbox):
             reader.start()
 
         timed_out = False
-        try:
-            exit_code = process.wait(timeout=effective_timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            self._kill_process_tree(process)
+        cancelled = False
+        if cancel_event is None:
             try:
-                exit_code = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:  # pragma: no cover — kill 后通常立即退出
-                exit_code = -1
+                exit_code = process.wait(timeout=effective_timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self._kill_process_tree(process)
+                try:
+                    exit_code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:  # pragma: no cover — kill 后通常立即退出
+                    exit_code = -1
+        else:
+            # 协作取消（C1）：小步轮询等退出；置位即击杀整树。
+            # pi-mono 同款"取消信号驱动到静默"模式；无 cancel_event 时保持
+            # 原单次 wait 路径（git 等只读命令零轮询开销）。
+            deadline = perf_counter() + effective_timeout
+            while True:
+                remaining = deadline - perf_counter()
+                try:
+                    exit_code = process.wait(timeout=max(0.05, min(0.1, remaining)))
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_event.is_set():
+                        cancelled = True
+                        self._kill_process_tree(process)
+                        try:
+                            exit_code = process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:  # pragma: no cover
+                            exit_code = -1
+                        break
+                    if perf_counter() >= deadline:
+                        timed_out = True
+                        self._kill_process_tree(process)
+                        try:
+                            exit_code = process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:  # pragma: no cover
+                            exit_code = -1
+                        break
         for reader in readers:
             reader.join(5)
 
@@ -158,6 +217,9 @@ class LocalSubprocessSandbox(Sandbox):
             stdout += f"\n[stdout 超过捕获上限 {self._max_capture_chars} 字符，已截断]"
         if stderr_cap.truncated:
             stderr += f"\n[stderr 超过捕获上限 {self._max_capture_chars} 字符，已截断]"
+        if cancelled:
+            exit_code = -1
+            stderr += "\n命令被取消，进程树已终止"
         if timed_out:
             exit_code = -1
             stderr += f"\n命令超时（上限 {effective_timeout} 秒）"
@@ -166,6 +228,7 @@ class LocalSubprocessSandbox(Sandbox):
             stdout=stdout,
             stderr=stderr,
             duration_ms=round((perf_counter() - t0) * 1000, 1),
+            cancelled=cancelled,
         )
 
     @staticmethod
