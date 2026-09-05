@@ -1,7 +1,7 @@
 /** format.ts 时间/数值格式化测试。 */
 
 import { describe, expect, it } from 'vitest';
-import { formatDuration, formatRelativeTime, truncateForDisplay } from './format';
+import { formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay } from './format';
 
 describe('formatDuration', () => {
   it('缺 started/completed 任一（running 中）返回 null', () => {
@@ -55,6 +55,29 @@ describe('formatRelativeTime', () => {
     const out = formatRelativeTime('2026-08-28T12:00:00Z', NOW);
     expect(out).toMatch(/[\d]/); // 含日期数字
     expect(out).not.toMatch(/(刚刚|分钟前|小时前|天前)$/);
+  });
+});
+
+describe('formatTimestamp — 全时间戳（本地时区，含毫秒）', () => {
+  it('合法 ISO：YYYY-MM-DD HH:mm:ss.fff 格式', () => {
+    expect(formatTimestamp('2026-09-05T13:17:06.288+08:00')).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/,
+    );
+  });
+
+  it('毫秒精度保留三位（不足补零）', () => {
+    // UTC 13:17:06.050 → 本地时区，但毫秒部分恒为 .050
+    const out = formatTimestamp('2026-09-05T13:17:06.05Z');
+    expect(out).toMatch(/\.050$/);
+  });
+
+  it('null / 空串返回 null（调用方不渲染该行）', () => {
+    expect(formatTimestamp(null)).toBeNull();
+    expect(formatTimestamp('')).toBeNull();
+  });
+
+  it('非法时间字符串返回 null（不抛异常）', () => {
+    expect(formatTimestamp('not-a-date')).toBeNull();
   });
 });
 

@@ -142,4 +142,11 @@ describe('formatEventTooltip（C4）', () => {
     } as Parameters<typeof formatEventTooltip>[0]);
     expect(lines).toEqual([]);
   });
+
+  it('step_id === 0：按合法数值渲染 step 行（0 不是哨兵，null 才是）', () => {
+    const lines = formatEventTooltip({
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 0, session_id: 's', time: null,
+    } as Parameters<typeof formatEventTooltip>[0]);
+    expect(lines).toEqual(['step 0']);
+  });
 });

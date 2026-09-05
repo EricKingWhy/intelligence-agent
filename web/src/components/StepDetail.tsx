@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
-import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
 import { CopyButton } from './CopyButton';
@@ -43,6 +43,13 @@ const TABS: readonly { id: Tab; label: string }[] = [
   { id: 'terminal', label: 'Terminal' },
   { id: 'artifacts', label: 'Artifacts' },
 ];
+
+// C4 Timeline hover 浮层布局常量（与 .tl-tooltip CSS 对齐——行高 16、内距 12、
+// 与行边的 4px 间隙、上方放置需要的 16px 顶部裕量）。改一个地方即可。
+const TIP_LINE_H = 16;
+const TIP_PADDING = 12;
+const TIP_GAP = 4;
+const TIP_TOP_MARGIN = 16;
 
 interface Props {
   conversation: ConversationState | null;
@@ -322,18 +329,13 @@ export function seqGaps(events: AgentEvent[]): string[] {
 const eventSummary = summarizeEvent;
 
 /** Timeline 行 hover 浮层内容（C4）：完整时间戳（含毫秒，本地时区）+ step。
- *  纯函数导出以便 SSR 测试锁定；行内已显示 seq/type，浮层只补看不到的。 */
+ *  纯函数导出以便 SSR 测试锁定；行内已显示 seq/type，浮层只补看不到的。
+ *  step_id 语义：null = 无归属（recover 合成事件等哨兵），不渲染行；
+ *  数值（含 0，后端从 1 起但类型契约为 number）按合法 step 渲染。 */
 export function formatEventTooltip(e: AgentEvent): string[] {
   const lines: string[] = [];
-  if (e.time) {
-    const d = new Date(e.time);
-    if (!Number.isNaN(d.getTime())) {
-      const p = (n: number, w = 2) => String(n).padStart(w, '0');
-      lines.push(
-        `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`,
-      );
-    }
-  }
+  const ts = formatTimestamp(e.time);
+  if (ts) lines.push(ts);
   if (e.step_id !== null) lines.push(`step ${e.step_id}`);
   return lines;
 }
@@ -391,9 +393,9 @@ export function TimelineTab({ conversation, onFocusEvent }: { conversation: Conv
       return;
     }
     const r = btn.getBoundingClientRect();
-    const tipH = lines.length * 16 + 12;
-    const above = r.top > tipH + 16;
-    setTip({ x: Math.max(8, r.left + 6), y: above ? r.top - tipH - 4 : r.bottom + 4, lines });
+    const tipH = lines.length * TIP_LINE_H + TIP_PADDING;
+    const above = r.top > tipH + TIP_TOP_MARGIN;
+    setTip({ x: Math.max(8, r.left + 6), y: above ? r.top - tipH - TIP_GAP : r.bottom + TIP_GAP, lines });
   };
   const handleLeave = () => {
     lastRowRef.current = null;

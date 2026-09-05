@@ -8,6 +8,17 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** 全时间戳（本地时区，含毫秒）：'YYYY-MM-DD HH:mm:ss.fff'。
+ *  Inspector 浮层 / Tooltip 等需要完整精度的展示场景使用（相对时间不够看时）。
+ *  非法或缺失时间返回 null——调用方据此决定是否渲染该行。 */
+export function formatTimestamp(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+
 /** 相对时间：把 ISO 时间戳渲染成 '刚刚 / N 分钟前 / N 小时前 / N 天前 / M月D日'。
  *  now 参数化以避免 Date.now() 副作用（可测、可由 tick hook 注入最新值）。
  *  缺省 now 用 Date.now()，保持调用点零改动。 */
