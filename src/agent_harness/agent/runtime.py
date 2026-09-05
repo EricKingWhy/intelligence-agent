@@ -19,6 +19,7 @@ Diagnostic Log（_log）保留不动——执行链路观察与 SessionEvent 分
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -238,6 +239,8 @@ class AgentRuntime:
 
                 # 第 2 步：发起这一轮模型调用（按 stream 选 astream/ainvoke）
                 llm_span = new_span_id()
+                # 计时锚点：供 llm_call 诊断日志带 duration_ms（与 cli.py 的 llm_call 对齐）。
+                llm_started = time.perf_counter()
 
                 # 在途标记：从发起调用到聚合完成，此间抛错按 model/failed 归因。
                 model_call_open = True
@@ -274,11 +277,6 @@ class AgentRuntime:
                     ai = await self.model.ainvoke(messages)
                 model_call_open = False  # 调用完整返回，后续异常不再归因 model
 
-                self._log("llm_call", f"第 {steps + 1} 轮模型调用完成", span_id=llm_span,
-                          parent_span_id=run_span, step=steps + 1,
-                          llm_input=user_input, llm_output=str(ai.content)[:200],
-                          outcome="success")
-
                 # 第 3 步：把 AIMessage 持久化为 model/completed 事件
                 # 值对象归一化（A2）：本循环内所有消费点读类型化字段，不再拆原始 dict。
                 calls = ToolCall.normalize_all(ai.tool_calls or [])
@@ -292,6 +290,21 @@ class AgentRuntime:
                     model_data["usage"] = usage
                     for key, value in usage.items():
                         usage_total[key] = usage_total.get(key, 0) + value
+                # llm_call 诊断日志带模型归因 + 时延 + 用量（与 cli.py 对齐，spec 02 §7/§10
+                # 要求每步可在 Diagnostic Log 定位到具体 provider/model）。
+                llm_log_fields: dict[str, Any] = {
+                    "llm_input": user_input,
+                    "llm_output": str(ai.content)[:200],
+                    "duration_ms": int((time.perf_counter() - llm_started) * 1000),
+                    "outcome": "success",
+                }
+                if model_name:
+                    llm_log_fields["model_id"] = model_name
+                if usage:
+                    llm_log_fields["token_usage"] = usage
+                self._log("llm_call", f"第 {steps + 1} 轮模型调用完成",
+                          span_id=llm_span, parent_span_id=run_span, step=steps + 1,
+                          **llm_log_fields)
                 if tool_calls:
                     model_data["tool_calls"] = [
                         {"id": c.id, "name": c.name, "args": c.args} for c in calls
