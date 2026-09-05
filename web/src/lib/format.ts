@@ -11,7 +11,7 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
 /** 全时间戳（本地时区，含毫秒）：'YYYY-MM-DD HH:mm:ss.fff'。
  *  Inspector 浮层 / Tooltip 等需要完整精度的展示场景使用（相对时间不够看时）。
  *  非法或缺失时间返回 null——调用方据此决定是否渲染该行。 */
-export function formatTimestamp(iso: string | null): string | null {
+export function formatTimestamp(iso: string | null | undefined): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;

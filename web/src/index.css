@@ -36,20 +36,22 @@
   --text-xl: 20px;
   --text-2xl: 28px;
 
-  /* ── Spacing ── */
+  /* ── Spacing (PRD §18.1: 4/8/12/16/20/24/32/40) ── */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 12px;
   --space-lg: 16px;
+  --space-lg2: 20px;
   --space-xl: 24px;
   --space-2xl: 32px;
+  --space-3xl: 40px;
 
-  /* ── Radii (semantic hierarchy; no giant rounding) ── */
+  /* ── Radii (semantic hierarchy; no giant rounding; PRD §18.2) ── */
   --radius-xs: 4px;   /* chips / tags */
   --radius-sm: 6px;   /* inputs / compact controls */
-  --radius-md: 8px;   /* cards / embedded blocks */
-  --radius-lg: 12px;  /* popovers / floating composer */
-  --radius-xl: 16px;  /* command palette only */
+  --radius-md: 8px;   /* cards / embedded blocks / segmented items */
+  --radius-lg: 12px;  /* popovers / floating composer / user prompt */
+  --radius-xl: 20px;  /* command palette (PRD §18.2: 18-22) */
   --radius-full: 9999px;
 
   /* ── Liquid Glass (floating surfaces ONLY) ── */
@@ -65,11 +67,15 @@
   --shadow-overlay: 0 2px 8px rgba(0, 0, 0, 0.25);
   --shadow-popover: 0 8px 28px rgba(0, 0, 0, 0.42);
 
-  /* ── Motion ── */
+  /* ── Motion (PRD §19 P0: inspector 220-280 / inline expand 160-220 /
+   *    pulse 600-900 / palette 120-180) ── */
   --ease-apple: cubic-bezier(0.2, 0.8, 0.2, 1);
   --dur-fast: 150ms;
-  --dur-in: 240ms;
+  --dur-in: 240ms;      /* inspector 展开/收起（PRD 220-280） */
   --dur-out: 150ms;
+  --dur-expand: 180ms;  /* event inline expand / todo expand（PRD 160-220） */
+  --dur-palette: 150ms; /* command palette（PRD 120-180） */
+  --dur-pulse: 750ms;   /* selected event highlight（PRD 600-900） */
 
   /* ── 终端内嵌块（bash 输出 / diff 双栏 / 代码块 / 参数回显） ──
    * 刻意跨主题恒定深底浅字（dev tool 惯例，终端即"内容里的另一块屏幕"，
@@ -282,6 +288,19 @@ body {
 @keyframes breathe {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.55; transform: scale(1.12); }
+}
+
+/* 选中事件高亮 pulse（Main↔Inspector 联动，PRD §9.2：600-900ms fade，克制不夸张） */
+@keyframes event-pulse {
+  0% { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  100% { background: transparent; }
+}
+
+/* 选中事件高亮 pulse（Main↔Inspector 联动，PRD §9.2：600-900ms fade，
+ * 克制不夸张；--dur-pulse 控制时长） */
+@keyframes event-pulse {
+  0% { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  100% { background: transparent; }
 }
 
 /* ── Scrollbars (subtle) ── */

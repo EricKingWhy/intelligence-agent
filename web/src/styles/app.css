@@ -732,6 +732,98 @@
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
+/* 失败摘要行（PRD §5.2 Error）：L0 下方的轻量错误信号——低饱和红 code + 弱化
+ * message，不满屏红、不强制展开；完整 Raw 留给 Inspector。缩进对齐 act-name。 */
+.act-error-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding: 0 var(--space-sm) var(--space-xs) calc(var(--space-sm) + 18px + var(--space-sm));
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+.act-error-code {
+  font-family: var(--font-mono);
+  font-weight: 550;
+  color: var(--danger);
+  letter-spacing: 0.02em;
+}
+.act-error-msg {
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* hover Inspect chip（PRD §9.1）：行尾浮现的小动作入口，克制不抢焦点 */
+.act-node-wrap {
+  position: relative;
+}
+.act-node-wrap-error .act-node {
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
+}
+.act-inspect-chip {
+  position: absolute;
+  right: var(--space-sm);
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-apple);
+  z-index: 1;
+}
+.act-node-wrap:hover .act-inspect-chip,
+.act-inspect-chip:focus-visible {
+  opacity: 1;
+}
+.act-inspect-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+/* ── Model 段语义行（PRD §5.2/§10）：思考中 / 中间输出，ZCode 式动作语言 ── */
+.stream-jump-pulse {
+  animation: event-pulse var(--dur-pulse) var(--ease-apple);
+  border-radius: var(--radius-sm);
+}
+.model-kind-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0 var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  user-select: none;
+}
+.model-kind-icon {
+  display: inline-flex;
+  color: var(--color-muted-foreground);
+}
+.model-kind-row-thinking .model-kind-icon {
+  color: var(--accent);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+.model-kind-ellipsis::after {
+  content: '···';
+  letter-spacing: 2px;
+  animation: kind-ellipsis 1.4s steps(3, end) infinite;
+}
+@keyframes kind-ellipsis {
+  0% { content: '·'; }
+  33% { content: '··'; }
+  66% { content: '···'; }
+}
+/* 中间输出段：低对比（D17 分层——Runtime Stream 弱化，Final Answer 高对比） */
+.model-output-intermediate {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
 .act-icon {
   display: inline-flex;
   align-items: center;
@@ -2315,4 +2407,127 @@ button.json-row {
 .diff-archived-id {
   font: 500 var(--text-xs) var(--font-mono);
   color: var(--text-secondary);
+}
+
+/* ── Command Palette（PRD §15，Ctrl/Cmd+K）：中心浮层，keyboard-first，
+ *    backdrop blur 只用于该浮层区域（冻结视觉原则：glass 仅浮层可用） ── */
+.palette-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  animation: palette-fade var(--dur-palette) var(--ease-apple);
+  z-index: 50;
+}
+.palette-content {
+  position: fixed;
+  left: 50%;
+  top: 18%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 48px));
+  background: var(--surface-overlay);
+  backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+  z-index: 51;
+  overflow: hidden;
+  animation: palette-in var(--dur-palette) var(--ease-apple);
+}
+@keyframes palette-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes palette-in {
+  from { opacity: 0; transform: translateX(-50%) scale(0.97); }
+  to { opacity: 1; transform: translateX(-50%) scale(1); }
+}
+.palette-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.palette-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.palette-search-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.palette-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font: 400 var(--text-md) var(--font-ui);
+}
+.palette-input::placeholder {
+  color: var(--text-tertiary);
+}
+.palette-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--space-xs);
+}
+.palette-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}
+.palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-primary);
+  font: 400 var(--text-sm) var(--font-ui);
+  text-align: left;
+}
+.palette-item.active {
+  background: var(--accent-muted);
+}
+.palette-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-item-events .palette-item-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.palette-item-hint {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.palette-footer {
+  display: flex;
+  gap: var(--space-lg);
+  padding: var(--space-sm) var(--space-lg);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+/* Radix 关闭动画（data-state=closed） */
+.palette-overlay[data-state='closed'],
+.palette-content[data-state='closed'] {
+  animation: palette-out var(--dur-out) var(--ease-apple);
+}
+@keyframes palette-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }

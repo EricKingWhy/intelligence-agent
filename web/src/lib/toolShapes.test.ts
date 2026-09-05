@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
+  parseErrorShape,
   parseReadShape,
   stripGrepTruncatedSuffix,
 } from './toolShapes';
@@ -117,3 +118,29 @@ describe('splitMcpToolName', () => {
   });
 });
 import { parseArtifactMarker, splitMcpToolName } from './toolShapes';
+
+// ── parseErrorShape（PRD §5.2 失败摘要行）──
+
+describe('parseErrorShape — 失败工具 L0 摘要', () => {
+  it('ok=false + error_code → 摘要', () => {
+    expect(parseErrorShape({ ok: false, error_code: 'TIMEOUT', message: '命令超时' })).toEqual({
+      errorCode: 'TIMEOUT',
+      message: '命令超时',
+    });
+  });
+  it('成功结果 → null（业务失败≠Tool失败，exit_code 在 data 里）', () => {
+    expect(parseErrorShape({ ok: true, data: { exit_code: 1 } })).toBeNull();
+  });
+  it('无 error_code / 非对象 / 空字符串 → null（零伪造）', () => {
+    expect(parseErrorShape({ ok: false, message: 'boom' })).toBeNull();
+    expect(parseErrorShape({ ok: false, error_code: '' })).toBeNull();
+    expect(parseErrorShape('plain string')).toBeNull();
+    expect(parseErrorShape(null)).toBeNull();
+  });
+  it('message 缺失 → 空串（error_code 单独可渲染）', () => {
+    expect(parseErrorShape({ ok: false, error_code: 'SANDBOX_DOWN' })).toEqual({
+      errorCode: 'SANDBOX_DOWN',
+      message: '',
+    });
+  });
+});

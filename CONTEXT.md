@@ -301,3 +301,37 @@ _Avoid_: document record, file entry, ingest job
 **Sufficiency（证据充分性）**:
 检索结果对当前问题的证据质量标记：最高相关分达到阈值 → is_sufficient=true，否则如实 false。它是对证据质量的诚实信号——阈值以下的 hits 照常返回，由模型自行鉴别；不是结果开关，更不做 LLM 二次评判（NOT-DO：学术式 Evidence Grader）。
 _Avoid_: relevance filter, answer confidence, evidence grade
+
+## Web UI 层（Phase 9-10 / 本轮 UI 重构）
+
+**Continuous Agent Stream**:
+中间主区的呈现模型——把 Agent 的 Runtime Events 投影成连续、可折叠、人类可读的工作流叙事，而非散乱日志。回答"Agent 正在做什么"，与右栏 Run Inspector 形成"可读叙事 vs 原始真相"的双层体验。
+_Avoid_: chat log, event list, message thread
+
+**Run Inspector**:
+右侧常驻的 Runtime Debugger，回答"Agent Runtime 到底发生了什么"。必须比中间主区更详细、更稳定、更适合工程排错：完整 event timeline、Tool Input/Output、Raw event、事件关联、复制/定位/跳转。是项目差异化亮点，不可降级为辅助面板。
+_Avoid_: debug panel, side bar, secondary view
+
+**RuntimeEventKind**:
+中间主区对事件的**语义分类**（thinking / search / tool / skill / mcp / subagent / todo / model / error / final-answer 等），驱动语义图标与渲染器选择。由**前端推断层**从已有 SessionEvent（tool.name、model 流、mcp__ 前缀等）推导而来——不是新增后端 EventType（不改 SessionEvent 协议，不变量 #3/#4/#18 不动）。
+_Avoid_: event type, backend event, raw event kind
+
+**Progressive Disclosure Layer（L0/L1/L2/L3）**:
+每条 RuntimeEvent 的四级展开模型——L0 摘要行（图标+动作+duration+status）/ L1 inline detail（input/output 摘要）/ L2 advanced inline（完整 input/output、diff、json tree）/ L3 Inspector Raw（完整原始事件 + event_id/seq/run_id/step_id/tool_call_id）。手动展开优先于全局 density；切换全局模式不丢失手动选中。
+_Avoid_: expand state, collapse mode, detail toggle
+
+**Density（四档全局密度）**:
+全局默认展开层级与视觉密度调节器：Compact（扫读）/ Balanced（默认，兼顾好看与可观察）/ Detailed（中间主区 L1 debug）/ Raw（原始事件 JSON）。与每事件 manual override 正交——density 给默认 L 级，manual override 覆盖个别事件。沿用现有 `data-density` CSS 属性 + localStorage。
+_Avoid_: view mode, display mode, zoom level
+
+**Event Rendering Registry**:
+RuntimeEventKind → React 组件 的映射表。新增事件类型只需注册 renderer，不动中间主区主循环。subagent / todo / skill 当前后端无对应 SessionEvent，registry 注册 renderer 但数据不存在时不渲染（不伪造、不占位），后端未来加事件只需接线。
+_Avoid_: event switch, hardcoded renderer, case statement
+
+**Inspector Focus**:
+右栏当前的上下文焦点——Run 级（默认，展示 RUN/TOOLS/CONTEXT/MODEL/TRACE 摘要）或事件级（点 Timeline 行或中间事件后切到 Input/Output/Raw）。选中 ≠ 展开：选中控制 Inspector 上下文，展开控制中间 inline detail。
+_Avoid_: selected event, active row, inspector state
+
+**Main ↔ Inspector Linking**:
+中间主区与右栏的双向定位：从中间事件 hover 显示 "Inspect" + 点击即跳（如右栏关着则打开 + Timeline 定位 + 高亮 + 切详情）；从 Inspector 点 event 反向滚动中间并 pulse 600-900ms。是本轮高级体验的核心。
+_Avoid_: sync selection, cross-panel highlight, click-through

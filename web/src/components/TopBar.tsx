@@ -8,7 +8,7 @@
 
 import { Activity, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { applyTheme, initTheme, type Theme } from '../lib/theme';
+import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse } from '../lib/runState';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
@@ -22,13 +22,14 @@ interface Props {
   /** Trace Density 四档（冻结决策）——状态归 App，这里只渲染切换控件。 */
   density: TraceDensity;
   onDensityChange: (d: TraceDensity) => void;
+  /** 主题状态归 App（Command Palette Toggle Theme 与本按钮共享同一状态源）。 */
+  theme: Theme;
+  onToggleTheme: () => void;
   /** 401 已发生（App 广播）——钥匙图标加提示点，引导配置 token。 */
   authRequired: boolean;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, authRequired }: Props) {
-  // 主题持久化：初始值由 lib/theme 在 paint 前解析（localStorage → 系统偏好）。
-  const [theme, setTheme] = useState<Theme>(initTheme);
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -54,12 +55,6 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
     );
     return () => clearInterval(timer);
   }, [streaming]);
-
-  const toggleTheme = () => {
-    const next: Theme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(next);
-    applyTheme(next);
-  };
 
   const openAuthPanel = () => {
     setTokenDraft(getToken());
@@ -140,7 +135,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         >
           <PanelRight size={16} className={inspectorOpen ? 'appbar-toggle-active' : undefined} />
         </button>
-        <button className="icon-btn" onClick={toggleTheme} aria-label="切换主题">
+        <button className="icon-btn" onClick={onToggleTheme} aria-label="切换主题">
           {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
         </button>
       </div>

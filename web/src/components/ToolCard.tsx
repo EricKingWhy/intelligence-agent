@@ -1,28 +1,32 @@
 /** ToolCard — per-tool renderer with specialized layouts.
  *
- * Four shapes (expanded):
+ * L0-L2 Progressive Disclosure（PRD §6，ADR-0014 D2）：
+ *   - L0 → summary row only（status/icon/name/args/duration）
+ *   - L1 → + Input/Output inline detail
+ *   - L2 → + full content surface（bash/diff/read/slice 专属块）+ raw event JSON
+ * 生效级 = App 层 manual override ?? 全局 density 默认；点击行循环 L0→L1→L2。
+ * hover "Inspect" chip → 进 Inspector（PRD §9.1 联动）。
+ *
+ * Four content shapes (L2):
  *   - bash → terminal block (mono, dark inset, exit code badge)
  *   - edit/apply_patch/write → diff view (green/red, before/after)
  *   - inspect_artifact → artifact slice view (numbered lines, per-line truncation chips)
- *   - everything else → collapsible generic card (name · args · result)
- *
- * Trace Density tiers (Brief — frozen decision):
- *   - compact  → status line only (✓ + name)
- *   - balanced → name + key args + duration + status (default)
- *   - detailed → balanced + full args JSON + result preview on the node itself
- *   - raw      → detailed + verbatim source-event JSON (raw_call/raw_result)
+ *   - read → continuation-aware block；everything else → generic JSON card
  *
  * Status color: running=warning, success=green, failed=red.
  */
 
-import { memo, useState } from 'react';
-import { Archive, Check, Scissors, Square, Terminal, Wrench, X } from 'lucide-react';
+import { memo } from 'react';
+import { Archive, Check, Scissors, Square, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
+import { defaultLevelFor, type DisclosureLevel } from '../lib/disclosure';
 import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { KIND_ICON, toolKind } from '../lib/eventKind';
 import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
+  parseErrorShape,
   parseReadShape,
   splitMcpToolName,
   stripGrepTruncatedSuffix,
@@ -34,37 +38,61 @@ import { JsonTree } from './JsonTree';
 interface Props {
   tool: ToolCall;
   density: TraceDensity;
-  /** 点击工具块时钻取到事件级 Inspector（Brief "Inspector Scope"：点工具块切事件详情）。
-   *  未提供时回退为卡片自身展开/收起。 */
+  /** 生效展开级（override ?? density 默认）。缺省 = density 推导（未接 disclosure 的旧用法）。 */
+  level?: DisclosureLevel;
+  /** 点击行 → 循环 L 级（App 层 setLevel(nextLevel)）。缺省回退旧行为。 */
+  onCycleLevel?: () => void;
+  /** hover Inspect chip 点击 → 进 Inspector。缺省时点击行为回退（旧：onFocus / 本地展开）。 */
   onFocus?: (tool: ToolCall) => void;
 }
 
 // memo：投影层 copy-on-write 保证未触及的 tool 引用稳定——同 turn 内其它工具卡
-// 在本工具更新时跳过重渲染（配合 App 层 useCallback 稳定的 onFocus）。
-export const ToolCard = memo(function ToolCard({ tool, density, onFocus }: Props) {
+// 在本工具更新时跳过重渲染（配合 App 层 useCallback 稳定的回调）。
+export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLevel, onFocus }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const slice = tool.name === 'inspect_artifact' ? tryParseSlice(tool.result) : null;
   // read 新形状（df4f7d8 §1.3）：解析续读/单行截断标记；形状不符回退 GenericBlock。
   const readShape = tool.name === 'read' ? parseReadShape(tool.result) : null;
-  const [expanded, setExpanded] = useState(false);
   const duration = formatDuration(tool.started_at, tool.completed_at);
-  const detailed = density === 'detailed' || density === 'raw';
+  // 生效 L 级：显式 level 优先，否则 density 推导（旧契约：detailed/raw 展开明细）。
+  const effectiveLevel: DisclosureLevel = level ?? defaultLevelFor(density);
+  const hasInspect = Boolean(onFocus);
+  // PRD §5.2/§10.2：语义图标按工具 kind 分发（终端/查阅/写入/MCP/扳手），
+  // 替换原 bash/其它 二分；状态仍由 act-status 列表达（中断 ≠ 错误）。
+  const KindIcon = KIND_ICON[toolKind(tool.name)];
+  // 失败摘要（PRD §5.2 Error：第二行 error_code 摘要，不满屏红、不强制展开）。
+  const errorShape = tool.status === 'failed' ? parseErrorShape(tool.result) : null;
+
+  const handleRowClick = () => {
+    if (onCycleLevel) {
+      onCycleLevel();
+      return;
+    }
+    // 旧回退（未接 disclosure 的用法）：点击 = 进 Inspector。
+    onFocus?.(tool);
+  };
 
   return (
     <>
-      <button
-        className={`act-node act-node-${density}`}
-        onClick={() => (onFocus ? onFocus(tool) : setExpanded((v) => !v))}
-        aria-expanded={expanded}
+      {/* data-stream-key：Main↔Inspector 联动定位锚（PRD §9.2 反向跳转目标）+ pulse */}
+      <div
+        className={`act-node-wrap${tool.status === 'failed' ? ' act-node-wrap-error' : ''}`}
+        data-stream-key={`tool:${tool.tool_call_id}`}
       >
-        <span className={`act-status act-status-${tool.status}`}>
-          {tool.status === 'success' && <Check size={12} />}
-          {tool.status === 'failed' && <X size={12} />}
-          {tool.status === 'stopped' && <Square size={11} />}
-          {tool.status === 'running' && <span className="status-spinner" />}
-        </span>
-        {density !== 'compact' && <span className="act-icon">{isBash ? <Terminal size={13} /> : <Wrench size={13} />}</span>}
+        <button
+          className={`act-node act-node-${density}`}
+          onClick={handleRowClick}
+          aria-level={effectiveLevel}
+          aria-expanded={effectiveLevel > 0}
+        >
+          <span className={`act-status act-status-${tool.status}`}>
+            {tool.status === 'success' && <Check size={12} />}
+            {tool.status === 'failed' && <X size={12} />}
+            {tool.status === 'stopped' && <Square size={11} />}
+            {tool.status === 'running' && <span className="status-spinner" />}
+          </span>
+          {density !== 'compact' && <span className="act-icon"><KindIcon size={13} /></span>}
         {/* MCP 工具名（da394a9 Phase 8）：mcp__{server}__{tool} 拆 server 徽章 + 工具名 */}
         {(() => {
           const mcp = splitMcpToolName(tool.name);
@@ -82,11 +110,34 @@ export const ToolCard = memo(function ToolCard({ tool, density, onFocus }: Props
         {density === 'compact' && (
           <span className="act-args act-args-compact">{summarizeArgs(tool, 32)}</span>
         )}
-      </button>
+        </button>
+        {/* hover Inspect chip（PRD §9.1）：点击进 Inspector 联动，不触发行点击。 */}
+        {hasInspect && (
+          <span
+            role="button"
+            tabIndex={-1}
+            className="act-inspect-chip"
+            onClick={(e) => {
+              e.stopPropagation();
+              onFocus?.(tool);
+            }}
+          >
+            Inspect
+          </span>
+        )}
+      </div>
 
-      {/* 内联明细在 compact/balanced 不渲染；detailed/raw 展开时保留（四形态 body 追加在下方）。
-          C3：Input/Output 微标签分区，与 Inspector io-tabs 同一标签语言。 */}
-      {detailed && (
+      {/* 失败摘要行（PRD §5.2 Error：TIMEOUT · 10.0s 式轻量摘要）——保持折叠，
+          只给关键错误信号；完整 Raw 留给 Inspector（D6：失败不强制全展开）。 */}
+      {errorShape && (
+        <div className="act-error-summary" role="status">
+          <span className="act-error-code">{errorShape.errorCode}</span>
+          {errorShape.message && <span className="act-error-msg">{truncate(errorShape.message, 120)}</span>}
+        </div>
+      )}
+
+      {/* L1 inline detail：Input/Output 摘要（C3 微标签分区，与 Inspector io-tabs 同语言）。 */}
+      {effectiveLevel >= 1 && (
         <div className="act-detail-inline">
           <div className="act-field">
             <div className="act-field-label">Input</div>
@@ -103,32 +154,33 @@ export const ToolCard = memo(function ToolCard({ tool, density, onFocus }: Props
               </pre>
             </div>
           )}
-          {density === 'raw' && (tool.raw_call || tool.raw_result) && (
-            <div className="act-raw">
-              {tool.raw_call && (
-                <div className="act-raw-section">
-                  <div className="act-raw-label">tool/call 原始事件</div>
-                  <pre>{JSON.stringify(tool.raw_call, null, 2)}</pre>
-                </div>
-              )}
-              {tool.raw_result && (
-                <div className="act-raw-section">
-                  <div className="act-raw-label">tool/result 原始事件</div>
-                  <pre>{JSON.stringify(tool.raw_result, null, 2)}</pre>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
 
-      {expanded && (
+      {/* L2 advanced inline：完整内容面（四形态专属块）+ 原始事件 JSON。 */}
+      {effectiveLevel >= 2 && (
         <div className="tool-card-body">
           {isBash && <BashBlock tool={tool} />}
           {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} />}
           {slice && <ArtifactSliceBlock slice={slice} />}
           {readShape && <ReadBlock shape={readShape} />}
           {!isBash && !isDiffTool && !slice && !readShape && <GenericBlock tool={tool} />}
+        </div>
+      )}
+      {effectiveLevel >= 2 && (tool.raw_call || tool.raw_result) && (
+        <div className="act-raw">
+          {tool.raw_call && (
+            <div className="act-raw-section">
+              <div className="act-raw-label">tool/call 原始事件</div>
+              <pre>{JSON.stringify(tool.raw_call, null, 2)}</pre>
+            </div>
+          )}
+          {tool.raw_result && (
+            <div className="act-raw-section">
+              <div className="act-raw-label">tool/result 原始事件</div>
+              <pre>{JSON.stringify(tool.raw_result, null, 2)}</pre>
+            </div>
+          )}
         </div>
       )}
     </>

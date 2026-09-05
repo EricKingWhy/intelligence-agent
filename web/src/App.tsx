@@ -12,17 +12,23 @@
  * Panel geometry is transient — NOT persisted (invariant #22: no second truth).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound, RotateCcw, X } from 'lucide-react';
 import { useSession } from './hooks/useSession';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
+import { CommandPalette } from './components/CommandPalette';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
+import { useDisclosure } from './lib/disclosure';
+import { streamKeyFromEvent } from './lib/eventKind';
+import { isPaletteShortcut, type CommandItem } from './lib/commands';
+import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
+import { summarizeEvent } from './lib/projection';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
 
@@ -64,6 +70,20 @@ export default function App() {
     applyDensity(next);
   };
 
+  // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
+  const [theme, setTheme] = useState<Theme>(initTheme);
+  const toggleTheme = useCallback(() => {
+    setTheme((cur) => {
+      const next: Theme = cur === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      return next;
+    });
+  }, []);
+
+  // L0-L2 展开状态（ADR-0014 D2）：全局 density 给默认级，手动 override 优先；
+  // 随选中会话切换清空（sessionKey = selectedId）。
+  const disclosure = useDisclosure(selectedId);
+
   // Inspector 焦点（Brief "上下文 Inspector"）：Run 级 ↔ 事件级，一键返回，不用弹窗。
   // 全部 useCallback：下游 SessionList/Composer/Conversation/StepDetail 的 memo
   // 依赖引用稳定的回调，普通函数每次渲染新引用会让 memo 全部失效。
@@ -71,6 +91,16 @@ export default function App() {
   const focusRun = useCallback(() => setFocus({ kind: 'run' }), []);
   const focusTool = useCallback((tool: ToolCall) => setFocus({ kind: 'tool', tool }), []);
   const focusEvent = useCallback((event: AgentEvent) => setFocus({ kind: 'event', event }), []);
+
+  // Main↔Inspector 联动（PRD §9，ADR-0014 D5）：
+  //   正向：中间 hover Inspect → focusTool/focusEvent（Inspector 打开 + 详情切换）。
+  //   反向：Inspector Timeline 点行 → 中间主区滚动定位 + pulse（jumpRequest nonce
+  //   保证重复跳同一目标也触发 Conversation effect）。
+  const [jumpRequest, setJumpRequest] = useState<{ key: string; nonce: number } | null>(null);
+  const jumpToStream = useCallback((event: AgentEvent) => {
+    const key = streamKeyFromEvent(event.data, event.step_id);
+    if (key) setJumpRequest({ key, nonce: Date.now() });
+  }, []);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
   const onPresetTask = useCallback((text: string) => setPresetTask({ text, id: Date.now() }), []);
@@ -120,6 +150,119 @@ export default function App() {
     conversation !== null &&
     isRecoverableRun(conversation.events);
 
+  // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isPaletteShortcut(e)) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const copyText = useCallback((text: string) => {
+    void navigator.clipboard.writeText(text).catch(() => {
+      /* 剪贴板不可用（非安全上下文等）：静默——复制是尽力而为动作 */
+    });
+  }, []);
+
+  const paletteItems = useMemo<CommandItem[]>(() => {
+    const items: CommandItem[] = [
+      {
+        id: 'toggle-inspector',
+        label: 'Toggle Run Inspector',
+        hint: '右栏',
+        group: 'actions',
+        run: () => {
+          userToggledRef.current = true;
+          setInspectorOpen((v) => !v);
+        },
+      },
+      {
+        id: 'jump-latest',
+        label: 'Jump to Latest Event',
+        hint: '定位',
+        group: 'actions',
+        run: () => {
+          if (!conversation || conversation.events.length === 0) return;
+          const last = conversation.events[conversation.events.length - 1];
+          focusEvent(last);
+          jumpToStream(last);
+        },
+      },
+      {
+        id: 'copy-run-id',
+        label: 'Copy Run ID',
+        hint: conversation ? conversation.session_id.slice(0, 12) : undefined,
+        group: 'actions',
+        run: () => conversation && copyText(conversation.session_id),
+      },
+      {
+        id: 'copy-trace-id',
+        label: 'Copy Trace ID',
+        hint: conversation?.trace_id ? 'Langfuse' : undefined,
+        group: 'actions',
+        run: () => {
+          // PRD §15 "Copy Trace ID（若存在）"：不存在不出现该命令。
+        },
+      },
+      {
+        id: 'toggle-theme',
+        label: 'Toggle Theme',
+        hint: theme === 'dark' ? '→ Light' : '→ Dark',
+        group: 'actions',
+        run: toggleTheme,
+      },
+      {
+        id: 'focus-composer',
+        label: 'Focus Composer',
+        hint: '输入框',
+        group: 'actions',
+        run: () => document.getElementById('composer-input')?.focus(),
+      },
+    ];
+    // trace_id 恒 null（Langfuse Phase 15 前不接入）→ 不展示该命令
+    if (conversation?.trace_id) {
+      items[items.findIndex((c) => c.id === 'copy-trace-id')].run = () => copyText(conversation.trace_id!);
+    } else {
+      items.splice(items.findIndex((c) => c.id === 'copy-trace-id'), 1);
+    }
+    for (const d of ['compact', 'balanced', 'detailed', 'raw'] as const) {
+      items.push({
+        id: `density-${d}`,
+        label: `Switch to ${d[0].toUpperCase()}${d.slice(1)}`,
+        hint: d === density ? '当前' : undefined,
+        group: 'density',
+        run: () => changeDensity(d),
+      });
+    }
+    // Search Runtime Events（PRD §15）：最近事件直出为可选项（选中即定位）。
+    if (conversation) {
+      const events = conversation.events.slice(-100).reverse(); // 新→旧
+      events.forEach((e, i) => {
+        const summary = summarizeEvent(e);
+        items.push({
+          id: `event-${conversation.events.length - 1 - i}`,
+          label: `${e.type}${summary ? ` · ${summary}` : ''}`,
+          hint: e.seq !== null ? `#${e.seq}` : undefined,
+          group: 'events',
+          run: () => {
+            focusEvent(e);
+            jumpToStream(e);
+            if (!inspectorOpen) {
+              userToggledRef.current = true;
+              setInspectorOpen(true);
+            }
+          },
+        });
+      });
+    }
+    return items;
+  }, [conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen]);
+
   return (
     <div className="app-frame">
       <TopBar
@@ -129,6 +272,8 @@ export default function App() {
         onToggleInspector={toggleInspector}
         density={density}
         onDensityChange={changeDensity}
+        theme={theme}
+        onToggleTheme={toggleTheme}
         authRequired={authRequired}
       />
 
@@ -188,6 +333,8 @@ export default function App() {
             conversation={conversation}
             loadingHistory={loadingHistory}
             density={density}
+            disclosure={disclosure}
+            jumpRequest={jumpRequest}
             onPresetTask={onPresetTask}
             onFocusTool={focusTool}
           />
@@ -206,8 +353,11 @@ export default function App() {
           onFocusRun={focusRun}
           onFocusTool={focusTool}
           onFocusEvent={focusEvent}
+          onJumpToStream={jumpToStream}
         />
       </main>
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} items={paletteItems} />
     </div>
   );
 }
