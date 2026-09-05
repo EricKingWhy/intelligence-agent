@@ -657,3 +657,19 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
 
     # 未知 session → 404
     assert client.post("/api/sessions/nonexistent-id-123/recover").status_code == 404
+
+
+# ── 集成 AI 移交：HTML 响应 CSP 头（纵深防御，INTEGRATION_NOTES §4.1）──
+
+
+def test_csp_header_on_all_responses(client):
+    """CSP 策略头必须存在且与前端约定的值一致。
+
+    default-src 'self'：脚本/样式只认同源文件（前端构建产物外置）；
+    img-src 放行 data:（内联图片）。API JSON 响应带上无害（浏览器仅对
+    HTML 文档执行 CSP），统一设置换取确定性——不会漏掉任何静态入口。
+    """
+    expected = "default-src 'self'; img-src 'self' data:"
+    for path in ("/api/health", "/api/sessions"):
+        resp = client.get(path)
+        assert resp.headers.get("content-security-policy") == expected, path

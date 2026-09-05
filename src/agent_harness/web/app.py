@@ -388,6 +388,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             "不做身份校验）。生产部署必须配置 JWT_SECRET。"
         )
 
+    # CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
+    # 脚本/样式只认同源构建产物，img 放行 data:。所有响应统一携带（浏览器
+    # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
+    _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
+
+    @app.middleware("http")
+    async def csp_header(request: Any, call_next: Any):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = _CSP_POLICY
+        return response
+
     @app.middleware("http")
     async def auth_seam(request: Any, call_next: Any):
         identity = IdentityContext("local", "local", ["user", "session"])
