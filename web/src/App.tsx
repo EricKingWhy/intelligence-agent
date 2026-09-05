@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { KeyRound, RotateCcw, X } from 'lucide-react';
 import { useSession } from './hooks/useSession';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
@@ -20,6 +21,7 @@ import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
+import { onTokenChange, onUnauthorized } from './lib/auth';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
 
@@ -32,10 +34,27 @@ export default function App() {
     streaming,
     error,
     titlesById,
+    recoverState,
     selectSession,
     submitTask,
     cancelStream,
+    recover,
+    refreshSessions,
   } = useSession();
+
+  // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
+  // 401 由 api.ts 统一拦截并广播；这里只负责展示引导横幅。配置 token 后
+  // 自动清横幅并重试会话列表（onTokenChange），无需整页刷新。
+  const [authRequired, setAuthRequired] = useState(false);
+  useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
+  useEffect(
+    () =>
+      onTokenChange(() => {
+        setAuthRequired(false);
+        void refreshSessions();
+      }),
+    [refreshSessions],
+  );
 
   // 密度四档（冻结决策）：状态在 App（TopBar 切换、Conversation 消费），persist 由 lib/density 负责。
   const [density, setDensity] = useState<TraceDensity>(initDensity);
@@ -90,6 +109,19 @@ export default function App() {
     void submitTask({ task, max_steps: 10, auto_approve: true });
   }, [submitTask, focusRun]);
 
+  // ── Recover 入口可见性（df4f7d8 §1.1 建议条件）──
+  // 有选中会话、非流式、历史已加载、且最后事件不是 run/completed——即中断/
+  // 崩溃/失败的会话才需要恢复入口。运行完成的会话没有 dangling 可修。
+  const lastEventType = conversation?.events.length
+    ? conversation.events[conversation.events.length - 1].type
+    : null;
+  const canRecover =
+    selectedId !== null &&
+    !streaming &&
+    !loadingHistory &&
+    conversation !== null &&
+    lastEventType !== 'run/completed';
+
   return (
     <div className="app-frame">
       <TopBar
@@ -99,6 +131,7 @@ export default function App() {
         onToggleInspector={toggleInspector}
         density={density}
         onDensityChange={changeDensity}
+        authRequired={authRequired}
       />
 
       <main className={`app-regions ${inspectorOpen ? '' : 'inspector-closed'}`}>
@@ -112,7 +145,47 @@ export default function App() {
         />
 
         <section className="app-workspace">
+          {authRequired && (
+            <div className="auth-banner" role="alert">
+              <KeyRound size={14} />
+              <span>
+                后端要求身份令牌（401）：点击顶栏 <strong>钥匙图标</strong> 配置 Bearer Token
+                即自动重试——本地开发环境（未配置 JWT_SECRET）不应出现此提示。
+              </span>
+              <button
+                className="auth-banner-close"
+                onClick={() => setAuthRequired(false)}
+                aria-label="关闭提示"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          )}
           {error && <div className="app-error">{error}</div>}
+          {canRecover && (
+            <div className="workspace-toolbar">
+              <button
+                className="recover-btn"
+                onClick={() => selectedId && void recover(selectedId)}
+                disabled={recoverState.status === 'pending'}
+                title="修复中断会话：按 Operation Ledger 回填工具结果、标记 dangling 调用（幂等）"
+              >
+                <RotateCcw size={12} />
+                {recoverState.status === 'pending' ? '恢复中…' : '恢复会话'}
+              </button>
+              {recoverState.status === 'error' && !recoverState.conflict && (
+                <span className="recover-error">{recoverState.message}</span>
+              )}
+              {recoverState.status === 'error' && recoverState.conflict && (
+                <span className="recover-conflict" title={recoverState.message ?? ''}>
+                  需人工裁决：{recoverState.message}
+                </span>
+              )}
+              {recoverState.status === 'idle' && (
+                <span className="recover-hint">最后事件非 run/completed——可尝试恢复</span>
+              )}
+            </div>
+          )}
           <Conversation
             conversation={conversation}
             loadingHistory={loadingHistory}

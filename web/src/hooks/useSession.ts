@@ -21,7 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, startSession, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, recoverSession, RecoverError, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
@@ -47,6 +47,15 @@ export function shouldApplyStreamFrame(mode: SessionMode, event: AgentEvent): bo
   return mode.sessionId === eventSid;
 }
 
+/** Recover 入口的三态视图状态（200 成功回到 idle——重建视图即成功反馈）。 */
+export interface RecoverState {
+  status: 'idle' | 'pending' | 'error';
+  /** 409 裁决原因 / 404·网络错误的具体信息。 */
+  message: string | null;
+  /** 409 = 存在需人工裁决的高风险操作（展示态，非普通失败）。 */
+  conflict: boolean;
+}
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
@@ -66,6 +75,11 @@ export function useSession() {
   // 之后才到达的迟到帧。
   const modeRef = useRef<SessionMode>(mode);
   modeRef.current = mode;
+
+  // Recover 三态（df4f7d8 §1.1）：idle → pending → 200 成功（回到 idle，整表
+  // 重建）/ 404·409·网络错误 → error。409 是"需人工裁决"（conflict=true），
+  // 本期只展示原因，不做裁决交互（不变量 #14：不伪造、不盲跑）。
+  const [recoverState, setRecoverState] = useState<RecoverState>({ status: 'idle', message: null, conflict: false });
 
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
@@ -103,6 +117,8 @@ export function useSession() {
   // stream paint (a stale/partial disk read would overwrite in-flight state);
   // idle owns no conversation.
   useEffect(() => {
+    // 任何 mode 迁移都重置 recover 三态（恢复状态不跨会话/流存活）。
+    setRecoverState({ status: 'idle', message: null, conflict: false });
     if (mode.kind === 'idle') {
       setConversation(null);
       return;
@@ -221,6 +237,32 @@ export function useSession() {
     setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
 
+  /** 恢复中断会话（POST /recover，幂等）。200 → 整表重建：响应是与 GET events
+   *  同构的全量事件数组，走同一 projectHistory 管线（不变量 #22——不引入第二套
+   *  会话真相）；404/409 → 三态 error（409 附裁决原因，conflict=true）。 */
+  const recover = useCallback(
+    async (sid: string) => {
+      setRecoverState({ status: 'pending', message: null, conflict: false });
+      try {
+        const events = await recoverSession(sid);
+        setConversation(projectHistory(sid, events));
+        setRecoverState({ status: 'idle', message: null, conflict: false });
+        void refreshSessions();
+      } catch (e) {
+        if (e instanceof RecoverError) {
+          setRecoverState({
+            status: 'error',
+            message: e.message,
+            conflict: e.status === 409,
+          });
+        } else {
+          setRecoverState({ status: 'error', message: (e as Error).message, conflict: false });
+        }
+      }
+    },
+    [refreshSessions],
+  );
+
   return {
     sessions,
     selectedId,
@@ -229,9 +271,11 @@ export function useSession() {
     streaming,
     error,
     titlesById,
+    recoverState,
     selectSession,
     submitTask,
     cancelStream,
+    recover,
     refreshSessions,
   };
 }

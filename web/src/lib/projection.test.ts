@@ -754,3 +754,74 @@ describe('applyEvent — 引用稳定性（流式渲染 memo 契约）', () => {
     expect(next.unknown_events).toBe(prev.unknown_events);
   });
 });
+
+// ── 后端 df4f7d8 同步批：工具结果新形状 / 收紧语义识别 ──
+
+describe('applyEvent — df4f7d8 新形状', () => {
+  it('bash data.cancelled=true → stopped（中断 ≠ 错误），而非 failed', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' }, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: false, message: 'cancelled', data: { cancelled: true } }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].status).toBe('stopped');
+    // result 保留原始 data（渲染层读 cancelled 出"已取消"文案）
+    expect((s.turns[0].tools[0].result as Record<string, unknown>).cancelled).toBe(true);
+  });
+
+  it('bash data.cancelled=false → 正常 ok 判定，不误伤', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' }, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: false, message: 'boom', data: { cancelled: false } }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].status).toBe('failed');
+  });
+
+  it('MODEL_FAILED 识别为已知终态事件——不落 unknown_events（零产出收紧语义）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_FAILED, data: { error: 'content filtered' }, step_id: 1 }));
+    expect(s.unknown_events).toHaveLength(0);
+    expect(s.events).toHaveLength(3);
+  });
+
+  it('MEMORY_DEGRADED 识别为已知事件（新增 run_id 字段不破坏投影）', () => {
+    const s = applyEvent(initConversation('s'), ev({ type: EventType.MEMORY_DEGRADED, data: { reason: 'store unavailable', run_id: 'r1' } }));
+    expect(s.unknown_events).toHaveLength(0);
+    expect(s.events).toHaveLength(1);
+  });
+
+  it('summarizeEvent：MEMORY_DEGRADED / MODEL_FAILED 空摘要（类型标签足够）', () => {
+    expect(summarizeEvent(ev({ type: EventType.MEMORY_DEGRADED, data: { reason: 'x' } }))).toBe('');
+    expect(summarizeEvent(ev({ type: EventType.MODEL_FAILED }))).toBe('');
+  });
+
+  it('空文件 read 成功语义：content:"" + total_lines:0 → success 且 result 保留真值', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'read' }, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, message: 'read', data: { content: '', total_lines: 0 } }) },
+      step_id: 1,
+    }));
+    const tool = s.turns[0].tools[0];
+    expect(tool.status).toBe('success');
+    expect((tool.result as Record<string, unknown>).total_lines).toBe(0);
+  });
+});
+
+describe('applyEvent — recover 合成 tool/result 配对（df4f7d8 无 step_id 形状）', () => {
+  it('无 step_id 的 tool/result 按 tool_call_id 全局配对，不造幽灵轮次', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: 'x' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 'c1', tool_name: 'bash', args: { command: 'echo' } }, step_id: 1 }));
+    // 恢复合成形状：step_id 缺失 + 纯文本 content（非 JSON ToolResult）
+    s = applyEvent(s, ev({ type: EventType.TOOL_RESULT, data: { tool_call_id: 'c1', content: '工具执行被中断，结果未知' } }));
+    expect(s.turns).toHaveLength(1); // 不造幽灵轮次
+    expect(s.turns[0].tools[0].status).toBe('failed'); // 非 JSON content → 失败而非 running
+  });
+});

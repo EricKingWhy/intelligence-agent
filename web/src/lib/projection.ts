@@ -204,7 +204,12 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.TOOL_RESULT: {
-      const step = resolveStep(event, next);
+      // 配对优先按 tool_call_id 全局定位所属轮次：recover 合成的 tool/result
+      // 不带 step_id（df4f7d8），resolveStep 的 turns.length+1 兜底会给它造出
+      // 幽灵轮次、工具永远停在 running。定位不到再走 resolveStep 旧路径。
+      const orphanId = String(data.tool_call_id ?? '');
+      const ownerIdx = next.turns.findIndex((t) => t.tools.some((x) => x.tool_call_id === orphanId));
+      const step = ownerIdx !== -1 ? next.turns[ownerIdx].step_id : resolveStep(event, next);
       withTurnAt(next, step, (turn) => {
         const id = String(data.tool_call_id ?? '');
         const toolIdx = turn.tools.findIndex((t) => t.tool_call_id === id);
@@ -216,7 +221,13 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
         const ok = parsed?.ok === true;
         const parsedData = (parsed?.data ?? null) as Record<string, unknown> | null;
         const tool = cloneTool(turn.tools[toolIdx]);
-        tool.status = ok ? 'success' : 'failed';
+        // bash 被超时/断连取消（data.cancelled，df4f7d8 §1.3）≠ 普通失败：
+        // 映射到 stopped（中断 ≠ 错误，与 finalizeRun 的 stopped 同一语义域）。
+        if (parsedData?.cancelled === true) {
+          tool.status = 'stopped';
+        } else {
+          tool.status = ok ? 'success' : 'failed';
+        }
         tool.result = parsedData ?? parsed?.message ?? data.content;
         // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
         // directly into ToolResult.data — not nested under data.diff. Detect them here.
@@ -304,6 +315,15 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     // Run Pulse 可消费 conversation.events 中的会话事件判断 resumed 等场景。
     case EventType.SESSION_STARTED:
     case EventType.SESSION_RESUMED:
+      break;
+
+    // model/failed 是真实终态（df4f7d8 §1.3 收紧：零产出模型响应以
+    // model/failed + run/failed 收尾，不再有"成功但空回答"）。轮次失败 settle
+    // 由随后的 run/failed → finalizeRun 统一负责，这里只保证不落 unknown 兜底。
+    // memory/degraded 新增 run_id 字段（可归因 run）——前端暂不渲染该归因，
+    // 仅识别为已知事件；失败展示复用既有降级管线。
+    case EventType.MODEL_FAILED:
+    case EventType.MEMORY_DEGRADED:
       break;
 
     default:
@@ -511,6 +531,7 @@ export function summarizeEvent(event: AgentEvent): string {
     case EventType.SESSION_RESUMED:
     case EventType.MODEL_STARTED:
     case EventType.MODEL_FAILED:
+    case EventType.MEMORY_DEGRADED:
       return '';
     default:
       return `未知事件 · ${JSON.stringify(d).slice(0, 40)}`;

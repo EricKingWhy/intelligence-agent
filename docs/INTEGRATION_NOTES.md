@@ -70,6 +70,10 @@ cd web && npm run dev
 
 **集成 AI 注意**：验证数据路径前先重启后端进程加载 Gap 代码（此前 :8000 上跑的旧进程 payload 无新字段——前端对此完全优雅降级，已目检确认）。剩余未落地项：checkpoint 元数据 API（StepDetail CHECKPOINT 空槽保留中）、Langfuse 接入（Phase 15）。
 
+## 3.1 后端 df4f7d8 硬化批前端同步（✅ 已完成消费，2026-09-05）
+
+feat/frontend 已消费 [`HANDOFF_FRONTEND_SYNC.md`](后端仓库 docs/) 全部三项：auth fail-closed 接缝（lib/auth.ts token 设置项 + apiFetch 统一注入 + 401 横幅引导）、recover 入口（三态 + projectHistory 重建）、工具结果新形状（read 续读/截断、bash cancelled、grep truncated、model/failed、memory/degraded）。前端对**旧后端完全兼容**（无 token 头时不注入、旧形状工具结果走 GenericBlock 回退）。集成验证注意：recover 幂等但每次调用会在事件流尾部追加 `session/resumed`（后端语义）；恢复合成的 tool/result 无 step_id 且 content 为纯文本（投影按 tool_call_id 配对、非 JSON content 显示为失败——真实语义"结果未知"）。409 人工裁决路径需真实高风险 UNKNOWN 操作才能触发，本地未实测 UI 呈现。
+
 ## 4.1 安全加固建议（2026-09-05 前端安全审查产出，供集成 AI 参考落地）
 
 前端已完成两项加固：不可信工具输出渲染截断（`truncateForDisplay`，20k 字符上限，防 MB 级 stdout/JSON 冻结 UI）+ 生产 sourcemap 关闭（`vite.config.ts`，不再向静态资源暴露 1.03MB 源码映射）。审查同时确认：**零 XSS sink**（全 src 无 dangerouslySetInnerHTML/innerHTML/eval，markdown 白名单渲染声明属实）、URL 构造已 encodeURIComponent、localStorage 仅两个非敏感枚举键、dist 产物无任何密钥。

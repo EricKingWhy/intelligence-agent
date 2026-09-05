@@ -1648,3 +1648,233 @@
 .detail-code-wrap .detail-code {
   padding-right: 32px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 后端同步批（df4f7d8）——Auth 接缝 / Recover 入口 / 工具结果新形状
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Auth：钥匙图标 + 设置面板 + 401 引导横幅 ── */
+.appbar {
+  position: relative;
+}
+.icon-btn-auth {
+  position: relative;
+}
+.icon-btn-auth.attention::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--warning);
+  /* 提示点属于 UI 组件状态指示：3:1 对比度由 --warning 主题色保证 */
+}
+.auth-panel {
+  position: absolute;
+  top: 46px;
+  right: var(--space-md);
+  z-index: 40;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+.auth-panel-title {
+  font: 600 var(--text-sm) var(--font-ui);
+  color: var(--color-foreground);
+}
+.auth-panel-input {
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  font: 400 var(--text-sm) var(--font-mono);
+  color: var(--color-foreground);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.auth-panel-input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.auth-panel-hint {
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.auth-panel-hint code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.auth-panel-actions {
+  display: flex;
+  gap: var(--space-xs);
+  justify-content: flex-end;
+}
+.auth-panel-save,
+.auth-panel-clear {
+  padding: var(--space-xs) var(--space-md);
+  font: 550 var(--text-xs) var(--font-ui);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.auth-panel-save {
+  background: var(--color-accent);
+  color: var(--surface-1);
+}
+.auth-panel-clear {
+  background: var(--color-hover);
+  color: var(--color-foreground);
+}
+.auth-panel-save:focus-visible,
+.auth-panel-clear:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.auth-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-sm);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.auth-banner strong {
+  font-weight: 600;
+}
+.auth-banner-close {
+  margin-left: auto;
+  display: inline-flex;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.auth-banner-close:focus-visible {
+  outline: 2px solid var(--color-accent);
+}
+
+/* ── Recover：工作区工具行 + 三态 ── */
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--warning) 5%, transparent);
+}
+.recover-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 3px var(--space-sm);
+  font: 550 var(--text-xs) var(--font-ui);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.recover-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--warning) 22%, transparent);
+}
+.recover-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.recover-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.recover-hint {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.recover-error {
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
+.recover-conflict {
+  font-size: var(--text-xs);
+  color: var(--warning);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* ── 工具新形状：bash 已取消 / grep 截断尾巴 / read 专用块 ── */
+.bash-cancelled {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-sm);
+  font: 550 var(--text-xs) var(--font-ui);
+  color: var(--text-secondary);
+  background: var(--color-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+}
+.trunc-suffix {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.read-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.read-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.read-empty {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.read-line-trunc {
+  color: var(--warning);
+}
+.read-content {
+  margin: 0;
+  padding: var(--space-sm);
+  font: 400 var(--text-xs) var(--font-mono);
+  line-height: 1.55;
+  color: var(--color-foreground);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  white-space: pre;
+}
+.read-continue {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  align-self: flex-start;
+  padding: 3px var(--space-sm);
+  background: var(--accent-muted);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: var(--radius-sm);
+}
+.read-continue-hint {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.read-continue-code {
+  font: 550 var(--text-xs) var(--font-mono);
+  color: var(--accent);
+}
