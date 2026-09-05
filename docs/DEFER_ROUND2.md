@@ -188,3 +188,90 @@ current run——跨层改动，超出加固 scope。
 分类剔除（替换 base64 为固定图像开销常量）。
 
 **重启条件**：引入多模态消息路径时。
+
+---
+
+# Round 4 细节加固 — 设计级 DEFER 清单
+
+> 来源：Round 4 并行审计（model/provider/logging/config + session/storage/web）。
+
+## R4-1. Model Fallback 链未实现（spec 02 §7，未来 phase）
+
+**位置**：`src/agent_harness/model/provider.py`、`src/agent_harness/cli.py`
+
+**现状**：spec 02 §7 明确要求 transient 失败（timeout/429/provider unavailable）
+可触发 fallback 到备用 provider/model，并记录 primary/fallback + reason + attempt；
+当前 `create_chat_model` 只返回单个 ChatOpenAI，无 fallback 链、无重试、无归因事件。
+
+**为何 DEFER**：fallback 链是 ModelConfig + provider + runtime 协同的新设计，
+属 spec 02 要求的功能但非当前 phase 必需；落地需要错误分类（transient vs
+config vs auth）与 fallback 链 schema，应作为独立 ticket 由 Primary Developer
+主导，不在加固循环里塞进来。
+
+**重启条件**：进入 model fallback 的专门 ticket。
+
+## R4-2. Session 同 id 多实例并发 append 可能重号（无真实触发路径）
+
+**位置**：`src/agent_harness/session/session.py::append`
+
+**现状**：`_next_seq` 是实例内存字段；同一 session_id 被两个 Session 实例
+持有并发 append 会生成两条同 seq 行，`Session.resume` 严格校验会 brick。
+
+**为何 DEFER**：当前所有调用路径都不并发持有同 id 的两个 Session 实例
+（web 每次新建 session；recovery 单进程串行；test 都独立 store）。按 §9.1
+"不存在的攻击面"，为不存在的并发路径加 store 层 seq 分配或文件锁属于投机。
+真实修复（seq 分配下沉到 store 单一事实源，或文件级排他锁）是跨层改动。
+
+**重启条件**：观察到真实生产出现同一 session 被并发持有两个实例的场景。
+
+## R4-3. derive_messages 与 detect_dangling 用两套工具配对真相源（设计）
+
+**位置**：`src/agent_harness/session/derive.py`
+
+**现状**：derive_messages 基于 `MODEL_COMPLETED.tool_calls`；detect_dangling
+基于独立 `TOOL_CALL` 事件。两条路径在当前 runtime 发射顺序下暂时一致，但
+任何旁路写入（replay、手工拼装、未来不经过 Ledger 的工具路径）会让两端分歧。
+
+**为何 DEFER**：统一两端是 derive 设计层面的重构（选哪个作单一真相源、
+对现存所有事件流的影响），超出加固 scope。
+
+**重启条件**：出现 derive_messages 投出孤立 ToolMessage 的真实事件流。
+
+## R4-4. JSONL 写入 flush 无 fsync + 文本模式可能撕裂行（无多进程触发）
+
+**位置**：`src/agent_harness/session/store.py`
+
+**现状**：`fh.flush()` 不调 `os.fsync`；文本模式单逻辑 write 可能拆多次
+syscall，多进程 append 可能交错损坏行。
+
+**为何 DEFER**：单进程内文本 TextIOWrapper 缓冲不会撕裂；多进程并发 append
+同一 session JSONL 当前不存在触发路径（见 R4-2）。引入 O_APPEND + os.write
+单次 syscall + fsync 是性能与耐久性的权衡，需要专门设计。
+
+**重启条件**：决定支持多进程并发写入同一 session，或要求断电级耐久性保证。
+
+## R4-5. SqliteOperationLedger 每操作新连接、无 busy_timeout PRAGMA
+
+**位置**：`src/agent_harness/storage/sqlite.py`
+
+**现状**：`initialize` 只设了 `journal_mode=WAL`，无 `busy_timeout`/`synchronous`；
+aiosqlite 默认 timeout=5s，长写并发会抛 `database is locked`。
+
+**为何 DEFER**：当前恢复路径由文件级 pessimistic lock 串行化，写并发不激烈；
+改 PRAGMA + 单长连接 + 事务边界是 ledger 性能/并发设计的专门工作，应与
+Primary 协同。
+
+**重启条件**：观察到真实 ledger 写并发超时，或进入 ledger 性能优化 ticket。
+
+## R4-6. EVENT_TYPES 白名单"半强制"：formatter 静默改写为 system_log
+
+**位置**：`src/agent_harness/logging.py:205-207`
+
+**现状**：业务经 log_event 强校验；绕过 log_event 直接 `logger.log(...,
+extra={"event_type": "...拼错..."})` 会被 formatter 静默归到 system_log，
+无告警。
+
+**为何 DEFER**：本仓当前所有 event_type 写入都经 log_event，无旁路；改 formatter
+为告警模式属诊断协议变更，影响面需评估。
+
+**重启条件**：出现真实旁路写入拼错 event_type 的案例。
