@@ -357,3 +357,82 @@ class TestNewToolBatchScheduling:
         content = sandbox.read_text("f.py")
         assert "LINE1" in content
         assert "LINE2" in content
+
+
+# ============================================================================
+# R8-2（用户拍板）：read 输出预算 —— 行/字节上限 + offset/limit 分页
+# 预算取厂商实测共识（pi-mono / Claude Code）：2000 行或 50KB 先到为准；
+# 截断标记必须给模型"可执行的下一步"（Use offset=N to continue）。
+# ============================================================================
+
+
+class TestReadOutputBudget:
+    @pytest.mark.asyncio
+    async def test_small_file_unaffected(self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox):
+        """小文件：行为不变，无截断标记。"""
+        sandbox.write_text("small.txt", "a\nb\nc\n")
+        result = await executor.execute(_tool_call("read", {"path": "small.txt"}))
+        assert result.result.ok is True
+        assert result.result.data["content"] == "a\nb\nc\n"
+        assert "offset" not in result.result.data["content"]
+
+    @pytest.mark.asyncio
+    async def test_line_cap_truncates_with_pagination_marker(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """5000 行文件：只回前 2000 行 + 可续读标记 + total_lines。"""
+        sandbox.write_text("big.txt", "\n".join(f"line {i}" for i in range(5000)))
+        result = await executor.execute(_tool_call("read", {"path": "big.txt"}))
+
+        assert result.result.ok is True
+        content = result.result.data["content"]
+        assert result.result.data["total_lines"] == 5000
+        assert "line 0" in content and "line 1999" in content
+        assert "line 2000" not in content
+        assert "Use offset=2001" in content, "截断标记必须给出下一步动作"
+
+    @pytest.mark.asyncio
+    async def test_offset_returns_second_window(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """offset=2001 → 返回后续窗口，可继续翻页直到读完。"""
+        sandbox.write_text("big.txt", "\n".join(f"line {i}" for i in range(5000)))
+        result = await executor.execute(
+            _tool_call("read", {"path": "big.txt", "offset": 2001})
+        )
+
+        content = result.result.data["content"]
+        assert "line 2000" in content and "line 3999" in content
+        assert "line 4000" not in content
+        assert "Use offset=4001" in content
+
+        tail = await executor.execute(
+            _tool_call("read", {"path": "big.txt", "offset": 4001})
+        )
+        tail_content = tail.result.data["content"]
+        assert "line 4999" in tail_content
+        assert "offset" not in tail_content.split("\n")[-1]  # 最后窗口无续读标记
+
+    @pytest.mark.asyncio
+    async def test_byte_cap_truncates_giant_single_line(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """单行 200KB：字节帽（50KB）先于行帽生效，同样给续读标记。"""
+        sandbox.write_text("one_line.txt", "x" * 200_000 + "\n")
+        result = await executor.execute(_tool_call("read", {"path": "one_line.txt"}))
+
+        content = result.result.data["content"]
+        assert len(content) < 100_000, "字节帽未生效"
+        assert "truncated" in content, "超长单行截断必须显式标记（不能续读）"
+
+    @pytest.mark.asyncio
+    async def test_offset_beyond_end_is_invalid(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """offset 越过文件末尾 → INVALID_ARGUMENT（dsh 行窗口契约）。"""
+        sandbox.write_text("tiny.txt", "hello\n")
+        result = await executor.execute(
+            _tool_call("read", {"path": "tiny.txt", "offset": 999})
+        )
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT

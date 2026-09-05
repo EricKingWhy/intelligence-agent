@@ -20,12 +20,18 @@ from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 
+#: 单条匹配行的字符预算（R8-2）：matches 整体进 Context/JSONL/Ledger，
+#: 无行上限时一条压缩 bundle 行即可撑爆三者。超出截断并显式标记
+#: （模型可用 read 工具按行号看原文）。
+_MAX_LINE_CHARS = 500
+
 
 class _GrepArgs(BaseModel):
     pattern: str = Field(..., description="正则表达式")
     path: str = Field(default=".", description="搜索范围子目录，相对 workspace")
     include: str = Field(default="*", description="文件名 glob 过滤（如 '*.py'）")
-    max_results: int = Field(default=100, ge=1, description="匹配上限，防上下文爆炸")
+    max_results: int = Field(default=100, ge=1, le=1000,
+                             description="匹配上限（最多 1000），防上下文爆炸；命中过多请细化 pattern")
 
 
 class GrepTool(Tool):
@@ -43,6 +49,7 @@ class GrepTool(Tool):
         return (
             "在 workspace 文件内容里做正则搜索。"
             "参数：pattern 正则表达式，include 文件名 glob 过滤（如 '*.py'），"
+            "超长匹配行截断到 500 字符（可用 read 按行号看原文），"
             "path 搜索范围子目录，max_results 匹配上限（默认 100）。"
             "返回匹配的文件路径、行号、行文本。"
         )
@@ -115,6 +122,8 @@ class GrepTool(Tool):
 
             for line_number, line in enumerate(content.splitlines(), start=1):
                 if regex.search(line):
+                    if len(line) > _MAX_LINE_CHARS:
+                        line = line[:_MAX_LINE_CHARS] + "... [truncated]"
                     matches.append({
                         "path": filepath,
                         "line_number": line_number,
