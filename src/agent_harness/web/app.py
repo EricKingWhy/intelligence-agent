@@ -39,9 +39,16 @@ from agent_harness.identity import (
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
-from agent_harness.sandbox import LocalSubprocessSandbox
+from agent_harness.recovery import RecoveryCoordinator, RecoveryError
+from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session.event import USER_MESSAGE
+from agent_harness.storage import (
+    OnStableBoundary,
+    SqliteCheckpointStore,
+    SqliteOperationLedger,
+    SqliteSessionMetaStore,
+)
 from agent_harness.storage.s3_artifact import S3ArtifactStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalResponse
@@ -106,6 +113,19 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
+        # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
+        # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
+        # 的测试路径。
+        self.harness_db = Path(settings.workspace_dir) / "harness.db"
+        self.operation_ledger = SqliteOperationLedger(self.harness_db)
+        self.checkpoint_store = SqliteCheckpointStore(self.harness_db)
+        self.session_meta_store = SqliteSessionMetaStore(self.harness_db)
+        self.workspace_registry = WorkspaceRegistry(
+            root=Path(settings.workspace_dir), backend="local"
+        )
+        self._stores_lock = asyncio.Lock()
+        self._stores_ready = False
         # Capability 装配：只在首次使用时执行（含 Memory / Skills / demo 等）。
         # asyncio.Lock 守住 once 语义：并发首请求都看到 _wiring is None 时，
         # 只有一个真正执行 wire_capabilities，另一个等锁后复用结果
@@ -114,6 +134,17 @@ class AppState:
         self._registry: CapabilityRegistry | None = None
         self._wiring: CapabilityWiring | None = None
         self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
+
+    async def ensure_stores(self) -> None:
+        """惰性初始化恢复三 Store（幂等；并发首请求由锁守 once 语义）。"""
+        if self._stores_ready:
+            return
+        async with self._stores_lock:
+            if not self._stores_ready:
+                await self.operation_ledger.initialize()
+                await self.checkpoint_store.initialize()
+                await self.session_meta_store.initialize()
+                self._stores_ready = True
 
     async def get_wiring(self) -> tuple[CapabilityRegistry, CapabilityWiring]:
         """惰性装配 Capability 子系统并缓存；返回 (registry, wiring)。
@@ -176,7 +207,9 @@ async def _build_runtime(
     config = ModelConfig.from_settings(state.settings)
     model = create_chat_model(config)
 
-    sandbox = LocalSubprocessSandbox(workspace_root=workspace)
+    # Sandbox 由 WorkspaceRegistry 统一创建并持久化映射（R8-1）：恢复时
+    # RecoveryCoordinator 据映射还原 sandbox；workspace_root 允许命名 workspace。
+    sandbox = state.workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
     for tool_cls in (
         ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
@@ -208,12 +241,18 @@ async def _build_runtime(
     for capability_tool in wiring.tools:
         registry.register(capability_tool)
 
+    # 恢复基础设施接线（R8-1，用户拍板）：Ledger 记录副作用状态（不变量 #13）、
+    # Checkpoint 在稳定边界落盘（不变量 #12）、SessionMeta 惰性登记。
+    await state.ensure_stores()
     return AgentRuntime(
         model=model,
         registry=registry,
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
-                              overflow_handler=overflow_handler),
+                              overflow_handler=overflow_handler,
+                              operation_ledger=state.operation_ledger),
         max_steps=max_steps,
+        checkpoint_policy=OnStableBoundary(state.checkpoint_store),
+        session_meta_store=state.session_meta_store,
         context_builder=ContextBuilder(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
@@ -461,6 +500,32 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 memory_session_var.reset(session_token)
 
         return EventSourceResponse(event_generator())
+
+    @app.post("/api/sessions/{session_id}/recover")
+    async def recover_session(session_id: str) -> list[dict]:
+        """恢复崩溃 session（R8-1 接线）：RecoveryCoordinator 唯一入口（07 §9）。
+
+        修复 dangling tool_call（配对合成）、按 Ledger 终态精确回填结果、
+        PENDING 默认 skip；RUNNING/UNKNOWN 需要人工裁决时返回 409（不伪造、
+        不盲跑，不变量 #14）。幂等：重复调用靠事件配对自然跳过已修复项。
+        """
+        _validate_session_id(session_id)
+        await state.ensure_stores()
+        # 不存在的 session 显式 404（RecoveryError 统一留给"需要人工裁决"语义）。
+        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
+        coordinator = RecoveryCoordinator(
+            session_store=state.store,
+            workspace_registry=state.workspace_registry,
+            operation_ledger=state.operation_ledger,
+            database_path=state.harness_db,
+        )
+        try:
+            recovered = await coordinator.recover(session_id)
+        except RecoveryError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return [e.to_dict() for e in recovered.events]
 
     @app.post("/api/sessions/{session_id}/approve")
     async def approve(session_id: str, body: dict):

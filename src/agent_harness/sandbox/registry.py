@@ -39,15 +39,20 @@ class WorkspaceRegistry:
         #: 进程内缓存：session_id → Sandbox 实例（避免重复重建）。
         self._cache: dict[str, Sandbox] = {}
 
-    def create(self, session_id: str) -> Sandbox:
+    def create(self, session_id: str, *, workspace_root: Path | None = None) -> Sandbox:
         """为新 session 创建 Sandbox，持久化映射，返回已 ensure_started 的 Sandbox。
 
         如果映射已存在（同 session_id 再次 create），直接从缓存或重建返回已有 Sandbox。
+        workspace_root 允许调用方指定实际工作目录（web 层的命名 workspace）；
+        缺省用 <root>/workspaces/<session_id>。映射里记录真实目录——
+        RecoveryCoordinator 据此恢复（R8-1）。
         """
         if session_id in self._cache:
             return self._cache[session_id]
 
         mapping = self._build_mapping(session_id)
+        if workspace_root is not None:
+            mapping["workspace_root"] = str(workspace_root)
         workspace_root = Path(mapping["workspace_root"])
         workspace_root.mkdir(parents=True, exist_ok=True)
 

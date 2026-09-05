@@ -34,7 +34,7 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.tooling import ToolExecutor, ToolRegistry
-from agent_harness.web.app import create_app
+from agent_harness.web.app import _build_runtime, create_app
 from tests.scripted_model import ScriptedModel
 
 
@@ -576,3 +576,83 @@ def test_create_session_runtime_failure_leaves_no_orphan(client, monkeypatch):
     assert resp.status_code == 500
     after = set(store_root.iterdir())
     assert before == after, f"留下了孤儿 session: {after - before}"
+
+
+# ── R8-1（用户拍板）：恢复子系统接线生产 runtime ──
+
+
+def test_build_runtime_wires_recovery_stores(tmp_path):
+    """_build_runtime 必须把 Ledger / Checkpoint / SessionMeta 接进 runtime
+    ——不变量 #12/#13/#14 在生产路径可执行，而不是只活在测试里。"""
+    import asyncio
+    from unittest.mock import patch as _patch
+
+    from agent_harness.storage import OnStableBoundary
+
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
+    app = create_app(settings, enable_cors=False)
+    state = app.state.agent
+    workspace = state.workspaces_root / "sess-wiring"
+    with _patch("agent_harness.web.app.create_chat_model", return_value=object()):
+        runtime = asyncio.run(_build_runtime(state, workspace, 10, True, session_id="sess-wiring"))
+    # 映射持久化：恢复时可还原 sandbox（web session 不再是无映射孤儿）
+    assert state.workspace_registry.exists("sess-wiring")
+    assert runtime.executor._operation_ledger is state.operation_ledger
+    assert runtime._session_meta_store is state.session_meta_store
+    assert isinstance(runtime._checkpoint_policy, OnStableBoundary)
+    assert runtime._checkpoint_policy._store is state.checkpoint_store
+
+
+def test_create_session_persists_workspace_mapping(tmp_path):
+    """web session 必须有 WorkspaceRegistry 映射——恢复时才能还原 sandbox。
+
+    走真实 _build_runtime（只替身 chat model）：registry.create 在装配期
+    持久化映射；同时验证 ensure_stores 完成三 Store 初始化。
+    """
+    from unittest.mock import patch as _patch
+
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
+    app = create_app(settings, enable_cors=False)
+    state = app.state.agent
+    with _patch("agent_harness.web.app.create_chat_model",
+                return_value=ScriptedModel([AIMessage(content="done")])):
+        client = TestClient(app)
+        resp = client.post("/api/sessions", json={"task": "t"})
+    assert resp.status_code == 200
+    ids = state.store.list_session_ids()
+    assert len(ids) == 1
+    assert state.workspace_registry.exists(ids[0]), "web session 缺少 workspace 映射"
+    assert state._stores_ready, "恢复三 Store 未初始化"
+
+
+def test_recover_endpoint_repairs_dangling_tool_call(client):
+    """POST /recover：dangling tool_call 无 Ledger 记录 → Phase-1 占位合成；
+    幂等（重复调用不再新增）。未知 session → 404。"""
+
+    from agent_harness.session import TOOL_CALL
+
+    state = client.app.state.agent
+    session = Session.start(state.store)
+    run_id = session.begin_run()
+    session.append(TOOL_CALL, {"tool_call_id": "call-x", "tool_name": "bash",
+                               "args": {"command": "ls"}},
+                   run_id=run_id)
+    # 不写 tool/result、不终结 run——模拟崩溃窗口
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+    assert resp.status_code == 200
+    events = resp.json()
+    types = [e["type"] for e in events]
+    assert "session/resumed" in types
+    repaired = [e for e in events if e["type"] == "tool/result"
+                and e["data"].get("tool_call_id") == "call-x"]
+    assert repaired, "dangling tool_call 未被合成结果"
+    from agent_harness.session import DANGLING_TOOL_CONTENT
+    assert repaired[0]["data"]["content"] == DANGLING_TOOL_CONTENT
+
+    # 幂等：再次 recover 不再新增合成
+    resp2 = client.post(f"/api/sessions/{session.session_id}/recover")
+    assert resp2.status_code == 200
+
+    # 未知 session → 404
+    assert client.post("/api/sessions/nonexistent-id-123/recover").status_code == 404
