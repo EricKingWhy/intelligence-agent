@@ -231,6 +231,12 @@ TTFT 模型侧主导，Run Pulse「思考中·Ns」已是最优解——**不要
 - P1-3 合帧语义：只合并「提交」不合并「折叠」——每帧仍逐帧过 shouldApplyStreamFrame 守护并立即 applyEvent；run/completed、run/failed、onDone、onError 立即 flush；submit 守卫 mode 仍是 live（cancel 后迟到 fire 不写回）。
 
 **剩余（交接 ZCode）：**
+
+> **✅ ZCode 接手批回执（2026-09-05，`77de188..da01efd`）：**
+> 1. **P2-6 ✅**（`77de188`）：默认车道排除 `*.perf.test.ts`（vitest.config.ts + configDefaults）；手动车道 vitest.perf.config.ts（`pnpm test:perf`）；预算断言含**机器无关 O(N²) 比例探测器**（applyEvent @20k/@1k 成本比 <8，健康≈1，回潮 ~180x）+ 绝对预算（@20k <50µs、projectHistory 4650 <50ms、20k <200ms，基线 20 倍以上余量）。
+> 2. **P1-4 ✅（Timeline 部分）**（`da01efd`）：实测坐实（renderToString 探针：20k 全量 359ms / 2k 40ms）→ TimelineTab 尾窗 200 行 + 「加载更早」500 步长 + 全局序号 key；SSR 行为契约测试 4 个；不变量 #22 不动（只裁视图）。**Conversation 虚拟化未做**——turn 级 memo + 增量 markdown 已挡住主要热路径，待真实大会话出现性能证据再议（YAGNI）。
+> 3. **候选优化点实测结论**：ToolCard grep split 非流式热路径（memo 已挡）→ 暂缓；StepDetail Timeline 全量 map 坐实 → 已修复。
+> 4. P1-5 维持转后端。Vitest 137/137，tsc clean，build 通过（dist 已清理）。
 1. **P2-6 perf 预算测试车道**：`web/src/lib/projection.perf.test.ts` 已在库（基准可跑），还差独立 `vitest.perf.config.ts` 手动车道 + 预算断言（20k projectHistory <200ms、4650 <50ms）+ 默认套件 exclude `*.perf.test.ts`。
 2. **P1-4 大会话窗口化**（cropped views，真相全量不动）。
 3. **P1-5 会话列表 header-only**（转后端 AI）。
