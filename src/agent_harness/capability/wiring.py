@@ -39,6 +39,8 @@ class CapabilityWiring:
     tools: list[Any] = field(default_factory=list)
     memory_writer: Any | None = None
     memory: Any | None = None  # MemoryComponents 生命周期包（relay/writeback），由 AppState 关闭
+    # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 AppState 关闭。
+    lifecycle: list[Any] = field(default_factory=list)
 
 
 async def _wire_memory(
@@ -138,6 +140,53 @@ async def _wire_skills(
     # 与其他工具贡献统一走 wire_capabilities 末尾的收集循环。
 
 
+async def _wire_mcp(
+    registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
+) -> None:
+    """MCP Client 接线（Phase 8，ADR-0012）：配置解析 → 逐 server 连接 → discovery。
+
+    失败语义（Q10）：schema 非法 = 配置错误 → CapabilityError(init_failed) 响亮
+    失败（不做 ZCode 式静默丢弃）；连接失败 = 环境错误 → 该 server 降级缺席
+    （errors 可观察），其余 server 不受影响；全部不可达 → 整个 capability 跳过。
+    """
+    from agent_harness.mcp.capability import build_mcp_capability
+    from agent_harness.mcp.config import ConfigError, parse_mcp_servers
+
+    try:
+        servers = parse_mcp_servers(cfg.options)
+    except ConfigError as error:
+        raise CapabilityError(
+            f"capability 'mcp' 配置错误：{error}", code="init_failed"
+        ) from error
+    servers = [server for server in servers if server.enabled]
+
+    capability = await build_mcp_capability(servers)
+    # 连接生命周期先挂通道（AppState.shutdown 统一关闭；capability.aclose
+    # 关闭其全部连接——公共接口，不伸私有属性）。必须在任何早退之前：连上了
+    # 但 tools/list 为空的 server（mis-scoped token 常见症状）走"无工具降级
+    # 跳过"分支时，连接也必须能被 shutdown 关闭——否则 owner task 与 stdio
+    # 子进程泄漏到进程退出。
+    wiring.lifecycle.append(capability)
+    if not capability.contributes_tools():
+        detail = "; ".join(capability.errors) if capability.errors else "无可用 server"
+        logger.warning("capability 'mcp' 无任何可用工具，按 %s 降级跳过：%s",
+                       Degradation.OPTIONAL_RUNTIME.value, detail)
+        return
+    if capability.errors:
+        logger.warning("capability 'mcp' 部分降级：%s", capability.errors)
+
+    registry.register(
+        CapabilityDescriptor(
+            name="mcp", version="1.0.0", provider_name=cfg.provider,
+            capabilities=["tools"], risk="high",
+            supports_concurrency=True, supports_recovery=False, supports_streaming=False,
+            degradation=Degradation.OPTIONAL_RUNTIME,
+        ),
+        capability,
+    )
+    # 工具贡献走 wire_capabilities 末尾的 ContributesTools 收集循环（零旁路）。
+
+
 async def _wire_ticker(
     registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
 ) -> None:
@@ -161,6 +210,7 @@ _BUILTIN_WIRING: dict[str, tuple[Any, Degradation]] = {
     "memory": (_wire_memory, Degradation.OPTIONAL_RUNTIME),
     "skills": (_wire_skills, Degradation.OPTIONAL_RUNTIME),
     "ticker": (_wire_ticker, Degradation.OPTIONAL_RUNTIME),
+    "mcp": (_wire_mcp, Degradation.OPTIONAL_RUNTIME),
 }
 
 
@@ -172,6 +222,7 @@ _KNOWN_PROVIDERS: dict[str, set[str]] = {
     "memory": {"builtin", "langmem"},
     "skills": {"builtin"},
     "ticker": {"builtin"},
+    "mcp": {"builtin"},
 }
 
 

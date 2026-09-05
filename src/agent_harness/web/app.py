@@ -189,6 +189,20 @@ class AppState:
             wiring, self._wiring, self._registry = self._wiring, None, None
         if wiring is not None and wiring.memory is not None:
             await wiring.memory.close()
+        # 通用生命周期通道（Phase 8）：MCP 连接等按 aclose() 关闭；单个失败
+        # 不阻断其余清理（进程退出路径，隔离优先）。
+        if wiring is not None:
+            for obj in wiring.lifecycle:
+                aclose = getattr(obj, "aclose", None)
+                if aclose is None:
+                    continue
+                try:
+                    await aclose()
+                except Exception:
+                    logging.getLogger("agent_harness.web").warning(
+                        "lifecycle 关闭失败（%s），继续其余清理", type(obj).__name__,
+                        exc_info=True,
+                    )
 
 
 async def _build_runtime(
@@ -356,16 +370,6 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
 
-    if enable_cors:
-        # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
-        # 多用户时收紧到已知 origin（接缝点）。
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
@@ -373,6 +377,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             "JWT_SECRET 未配置：API 以本地信任模式运行（所有请求视为 local 身份，"
             "不做身份校验）。生产部署必须配置 JWT_SECRET。"
         )
+
+    # CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
+    # 脚本/样式只认同源构建产物，img 放行 data:。所有响应统一携带（浏览器
+    # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
+    _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
+
+    @app.middleware("http")
+    async def csp_header(request: Any, call_next: Any):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = _CSP_POLICY
+        return response
 
     @app.middleware("http")
     async def auth_seam(request: Any, call_next: Any):
@@ -409,6 +424,19 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             return await call_next(request)
         finally:
             identity_context_var.reset(token)
+
+    if enable_cors:
+        # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
+        # 多用户时收紧到已知 origin（接缝点）。
+        # 必须最后添加 = 中间件栈最外层：浏览器预检（OPTIONS）天然不携带
+        # Bearer，认证层在内层时预检直接 401，配置 JWT_SECRET 后跨域 dev
+        # 模式整体失效。预检放行不削弱认证——数据请求仍逐个过认证层。
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # ── 路由 ──
 
@@ -542,6 +570,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     # ── 静态资源（前端 build 产物）──
     # 生产模式：FastAPI serve web/dist；dev 模式 Vite 自己跑 5173。
+    # 部署约束：静态挂载只适配本地信任模式（未配置 JWT_SECRET）。fail-closed
+    # 生效时全量默认拒绝（test_auth_fail_closed 契约），而浏览器顶层导航无法
+    # 携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
+    # 静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
     web_dist = Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
     if web_dist.exists():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
