@@ -6,7 +6,6 @@ from pathlib import Path
 
 from agent_harness.skills.discovery import (
     SKILL_FILE_MAX_BYTES,
-    SkillCatalog,
     SkillDiscovery,
     parse_skill_markdown,
 )
@@ -215,7 +214,7 @@ def test_unreadable_directory_degrades_to_error_not_abort(tmp_path):
     ——一个坏目录让全局+项目+手动路径的全部技能消失，违背"解析失败进
     errors，绝不中断扫描"的逐条容错契约。
     """
-    import unittest.mock as mock
+    from unittest import mock
 
     # 两个被扫描目录：bad_dir 的 iterdir 抛 OSError（权限/死挂载），good_dir 正常。
     bad_dir = tmp_path / "bad_dir"

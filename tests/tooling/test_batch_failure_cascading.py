@@ -322,10 +322,10 @@ async def test_parallel_batch_logs_secondary_exceptions_when_first_raises(
         {"id": "call-3", "name": "read-3", "args": {}},
     ]
 
-    with caplog.at_level(logging.ERROR, logger="agent_harness.tooling.executor"):
+    with (caplog.at_level(logging.ERROR, logger="agent_harness.tooling.executor"),
+          pytest.raises(ConnectionError)):
         # 首个异常（输入顺序）= call-2 的 ConnectionError，抛出契约不变。
-        with pytest.raises(ConnectionError):
-            await executor.execute_batch(calls, session=session)
+        await executor.execute_batch(calls, session=session)
 
     # 次要异常（call-3 的 RuntimeError）必须留下日志线索，且点名 tool_call_id。
     secondary = [

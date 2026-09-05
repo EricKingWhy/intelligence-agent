@@ -55,6 +55,7 @@ __all__ = [
     "SessionEvent",
     "derive_messages",
     "detect_dangling",
+    "run_context_var",
 ]
 
 from agent_harness.session.context import run_context_var

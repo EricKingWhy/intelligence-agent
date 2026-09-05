@@ -304,6 +304,14 @@ class AgentRuntime:
                         ai = AIMessage(content="")
                 else:
                     ai = await self.model.ainvoke(messages)
+                # R6-2（用户拍板）：空响应不是成功——content 与 tool_calls 双空
+                # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
+                # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），
+                # SSE 客户端因此能区分"模型答了空话"与"上游失败"。
+                if not _extract_text(ai.content) and not ai.tool_calls:
+                    raise RuntimeError(
+                        "model returned an empty response (no content, no tool calls)"
+                    )
                 model_call_open = False  # 调用完整返回，后续异常不再归因 model
                 # duration_ms 严格闭合模型调用本身（ainvoke/astream 区间），
                 # 不含 normalize / usage 解析等后处理——与 spec 12 §2 的

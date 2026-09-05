@@ -16,9 +16,9 @@ import signal
 import subprocess
 import threading
 from contextlib import suppress
-from uuid import uuid4
 from pathlib import Path
 from time import perf_counter
+from uuid import uuid4
 
 from agent_harness.sandbox.base import ExecResult, Sandbox
 

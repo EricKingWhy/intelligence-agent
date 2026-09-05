@@ -6,8 +6,8 @@ SQLite 文件，逻辑上各自独立 contract（ADR-0004 Round 3 §三张表）
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,7 +23,6 @@ from agent_harness.storage.operation import (
     OperationState,
 )
 from agent_harness.storage.session_meta import SessionMeta, SessionMetaStore
-
 
 #: 每操作新连接模式下的连接级 PRAGMA：busy_timeout 让并发写等锁而不是立刻抛
 #: "database is locked"（aiosqlite/sqlite3 默认 5s，多 Store 共享同一文件时不够）。

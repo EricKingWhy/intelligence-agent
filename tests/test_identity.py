@@ -53,6 +53,10 @@ def test_child_cannot_mutate_inherited_scope_permissions():
 
 
 def test_auth_seam_sets_contextvar(tmp_path):
+    """配置密钥后的认证链（R6-4/R8-3 契约修订：fail-closed + 强制 exp）——
+    合法 token 绑定身份；匿名/坏 token/过期 token/无 exp token 一律 401。"""
+    from datetime import UTC, datetime
+
     secret = "test-signing-secret-at-least-32-characters"
     app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
 
@@ -60,11 +64,13 @@ def test_auth_seam_sets_contextvar(tmp_path):
     async def probe():
         return get_identity_context()
 
-    encoded = jwt.encode({"tenant_id": "acme", "user_id": "alice", "scopes": ["user"]}, secret)
+    encoded = jwt.encode({"tenant_id": "acme", "user_id": "alice", "scopes": ["user"],
+                          "exp": int(datetime.now(UTC).timestamp()) + 600}, secret)
     with TestClient(app) as client:
         response = client.get("/identity-probe", headers={"Authorization": f"Bearer {encoded}"})
         assert response.json() == {"tenant_id": "acme", "user_id": "alice", "scopes": ["user"]}
-        assert client.get("/identity-probe").json()["user_id"] == "local"
+        # fail-closed：匿名不再降级 local，直接 401
+        assert client.get("/identity-probe").status_code == 401
         assert client.get("/identity-probe", headers={"Authorization": "Bearer invalid"}).status_code == 401
         expired = jwt.encode({"tenant_id": "acme", "user_id": "alice", "exp": 1}, secret)
         assert client.get("/identity-probe", headers={"Authorization": f"Bearer {expired}"}).status_code == 401
@@ -82,3 +88,51 @@ def test_no_secret_does_not_trust_bearer_identity(tmp_path):
 
     with TestClient(app) as client:
         assert client.get("/identity-probe", headers={"Authorization": "Bearer untrusted"}).json()["user_id"] == "local"
+
+
+# ── A 组（R6-4 + R8-3，用户拍板 fail-closed）：配置密钥即强制认证 ──
+
+
+def test_auth_fail_closed_when_secret_configured(tmp_path):
+    """配置了 JWT_SECRET 后：匿名请求 401、无 exp 的合法签名 token 401。
+
+    此前匿名请求拿 trusted local 身份（fail-open）+ 无 exp token 永不过期
+    ——配合 CORS * 等于把 agent API（含 bash 工具）开放给任意网页。
+    """
+    from datetime import UTC, datetime
+
+    secret = "test-signing-secret-at-least-32-characters"
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+
+    @app.get("/identity-probe")
+    async def probe():
+        return get_identity_context()
+
+    with TestClient(app) as client:
+        # 匿名 → 401（不再静默降级为 local）
+        resp = client.get("/identity-probe")
+        assert resp.status_code == 401
+        # 带未来 exp 的合法 token → 通过
+        live = jwt.encode({"tenant_id": "acme", "user_id": "alice",
+                           "exp": int(datetime.now(UTC).timestamp()) + 600}, secret)
+        assert client.get("/identity-probe", headers={"Authorization": f"Bearer {live}"}).json()["user_id"] == "alice"
+        # 无 exp 的合法签名 token → 401（强制过期语义）
+        no_exp = jwt.encode({"tenant_id": "acme", "user_id": "alice"}, secret)
+        assert client.get("/identity-probe", headers={"Authorization": f"Bearer {no_exp}"}).status_code == 401
+
+
+def test_auth_unset_secret_warns_loudly(tmp_path, caplog):
+    """未配置 JWT_SECRET = 本地信任模式：请求照常放行，但 create_app 必须
+    发出响亮的启动告警——静默 fail-open 是 R6-4 的核心危害。"""
+    import logging
+
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)))
+
+    @app.get("/identity-probe")
+    async def probe():
+        return get_identity_context()
+
+    with TestClient(app) as client:
+        assert client.get("/identity-probe").json()["user_id"] == "local"
+    assert any(r.levelno >= logging.WARNING and "JWT" in r.getMessage()
+               for r in caplog.records), "未配置密钥必须有启动告警"

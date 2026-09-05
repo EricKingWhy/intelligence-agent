@@ -155,7 +155,8 @@ async def test_artifact_created_lands_after_tool_call(tmp_path):
     """
     from typing import Annotated
 
-    from pydantic import BaseModel as _BaseModel, Field as _Field
+    from pydantic import BaseModel as _BaseModel
+    from pydantic import Field as _Field
 
     from agent_harness.storage.artifact import FakeArtifactStore
     from agent_harness.tooling import Tool, ToolResult, ToolSideEffect

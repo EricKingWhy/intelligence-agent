@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -326,11 +327,25 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             allow_headers=["*"],
         )
 
+    if not settings.jwt_secret:
+        # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
+        # 响亮告知——静默降级是原审计的核心危害。
+        logging.getLogger("agent_harness.web").warning(
+            "JWT_SECRET 未配置：API 以本地信任模式运行（所有请求视为 local 身份，"
+            "不做身份校验）。生产部署必须配置 JWT_SECRET。"
+        )
+
     @app.middleware("http")
     async def auth_seam(request: Any, call_next: Any):
         identity = IdentityContext("local", "local", ["user", "session"])
         authorization = request.headers.get("authorization")
-        if settings.jwt_secret and authorization:
+        if settings.jwt_secret:
+            # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
+            # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
+            # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
+            # 过期语义，永不过期的签名 token 等于永久凭证）。
+            if not authorization:
+                return JSONResponse({"detail": "Missing identity token"}, status_code=401)
             try:
                 scheme, encoded = authorization.split(" ", 1)
                 if scheme.lower() != "bearer":
@@ -339,7 +354,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 # （SecretStr("") 为 falsy，未配置语义不变）。
                 claims = jwt.decode(encoded, settings.jwt_secret.get_secret_value(),
                                     algorithms=["HS256"],
-                                    options={"require": ["tenant_id", "user_id"]})
+                                    options={"require": ["tenant_id", "user_id", "exp"]})
                 tenant, user = claims["tenant_id"], claims["user_id"]
                 scopes = claims.get("scopes", ["user", "session"])
                 if (not isinstance(tenant, str) or not tenant.strip()

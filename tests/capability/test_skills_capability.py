@@ -16,7 +16,11 @@ from agent_harness.config import Settings
 from agent_harness.session import Session
 from agent_harness.skills.capability import SkillCapability
 from agent_harness.skills.context_provider import SkillCatalogContextProvider
-from agent_harness.skills.discovery import SkillCatalog, SkillCatalogEntry, SkillDiscovery
+from agent_harness.skills.discovery import (
+    SkillCatalog,
+    SkillCatalogEntry,
+    SkillDiscovery,
+)
 from agent_harness.skills.tool import LoadSkillTool, _LoadSkillArgs
 from agent_harness.tooling.contract import ToolSideEffect
 from agent_harness.tooling.result import ErrorCode
@@ -255,8 +259,8 @@ def test_load_body_rejects_out_of_root_swap_after_discovery(tmp_path):
     任意宿主文件读进模型 Context。重验证后必须显式报错（CapabilityError），
     绝不返回外部内容。win32 用 _winapi.CreateJunction 构造（无需特权）。
     """
-    import shutil
     import _winapi
+    import shutil
 
     skills_dir = tmp_path / "skills"
     good = skills_dir / "good"

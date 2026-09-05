@@ -19,9 +19,9 @@ from __future__ import annotations
 import json
 import os
 from contextlib import suppress
-from uuid import uuid4
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
 from agent_harness.sandbox.local import LocalSubprocessSandbox

@@ -1,8 +1,8 @@
 """ToolResult 后处理：先完整保存，再返回摘要；不参与 Tool retry。"""
 
 import json
-from typing import Any
 from abc import ABC, abstractmethod
+from typing import Any
 
 from agent_harness.session import Session
 from agent_harness.session.event import ARTIFACT_CREATED

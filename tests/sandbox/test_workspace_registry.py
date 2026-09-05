@@ -208,12 +208,13 @@ def test_delete_keeps_mapping_when_workspace_locked(tmp_path, monkeypatch):
     磁盘且注册表无记录，永远无法再清理。现在：删除未完成 → 保留映射并抛错。
     """
     import shutil as _shutil
+
     import pytest as _pytest
 
     from agent_harness.sandbox.registry import WorkspaceRegistry
 
     registry = WorkspaceRegistry(root=tmp_path / "ws", backend="local")
-    sandbox = registry.create("sess-del")
+    registry.create("sess-del")
     workspace = tmp_path / "ws" / "workspaces" / "sess-del"
     assert workspace.exists()
 

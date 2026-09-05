@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 SCHEMA_VERSION = "1.0"
@@ -202,7 +202,7 @@ class JsonlFormatter(logging.Formatter):
     """把每条日志格式化成严格的一行 UTF-8 JSON。"""
 
     # 已告警过的非法 event_type：formatter 在热路径上，每类型只告警一次。
-    _warned_unknown_types: set[str] = set()
+    _warned_unknown_types: ClassVar[set[str]] = set()
 
     def format(self, record: logging.LogRecord) -> str:
         event_type = getattr(record, "event_type", "system_log")

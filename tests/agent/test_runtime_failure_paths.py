@@ -293,3 +293,39 @@ async def test_stream_close_after_completion_does_not_double_terminate(tmp_path)
 
     terminals = [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)]
     assert terminals == [RUN_COMPLETED], f"出现双终结：{terminals}"
+
+
+# ---- A 组（R6-2）：零 chunk 流不得伪装成成功完成 ----
+
+
+class EmptyStreamModel:
+    """ainvoke/astream 吐出零 chunk（内容过滤/上游静默失败的模拟）。"""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        return AIMessage(content="")
+
+    async def astream(self, messages, **kwargs):
+        return
+        yield AIMessageChunk(content="")  # 不可达：声明 async generator 用
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_stream", [True, False])
+async def test_empty_model_response_fails_the_run(tmp_path, use_stream):
+    """聚合后 content 与 tool_calls 双空 = 模型没有产出任何决策：
+    按 model/failed + run/failed 终结，而不是 completed + final_text=""。
+
+    SSE 客户端必须能区分"模型答了空话"与"上游失败"——静默空成功是最危险的
+    错误结果形态（R6-2，用户拍板）。"""
+    session = make_session(tmp_path)
+    runtime = AgentRuntime(EmptyStreamModel(), ToolRegistry(), ToolExecutor(ToolRegistry()))
+    result = await runtime.run(session, "hi")
+    assert result.status == STATUS_FAILED
+    types = [e.type for e in session.events]
+    assert types[-1] == RUN_FAILED
+    assert "model/failed" in types
+    completed = [e for e in session.events if e.type == "model/completed"]
+    assert not completed, "空响应不应持久化为 model/completed"

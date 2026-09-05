@@ -177,7 +177,6 @@ class TestEmptyApiKeyFastFail:
 
 def test_env_file_anchored_to_repo_root():
     """R6-5：.env 锚定仓库根而非 CWD——从其它目录启动 uvicorn/CLI 不再静默丢配置。"""
-    from pathlib import Path
 
     from agent_harness.config import _REPO_ROOT
 
