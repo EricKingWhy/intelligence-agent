@@ -14,7 +14,8 @@
  * Run level (no modal — Brief "上下文 Inspector").
  */
 
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import {
   AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
   Hash, Layers, ListTree, Package, TerminalSquare,
@@ -320,19 +321,87 @@ export function seqGaps(events: AgentEvent[]): string[] {
 /** 事件行的单行摘要——单一投影源（lib/projection.ts summarizeEvent）。 */
 const eventSummary = summarizeEvent;
 
+/** Timeline 行 hover 浮层内容（C4）：完整时间戳（含毫秒，本地时区）+ step。
+ *  纯函数导出以便 SSR 测试锁定；行内已显示 seq/type，浮层只补看不到的。 */
+export function formatEventTooltip(e: AgentEvent): string[] {
+  const lines: string[] = [];
+  if (e.time) {
+    const d = new Date(e.time);
+    if (!Number.isNaN(d.getTime())) {
+      const p = (n: number, w = 2) => String(n).padStart(w, '0');
+      lines.push(
+        `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`,
+      );
+    }
+  }
+  if (e.step_id !== null) lines.push(`step ${e.step_id}`);
+  return lines;
+}
+
+interface TipState {
+  x: number;
+  y: number;
+  lines: string[];
+}
+
 export function TimelineTab({ conversation, onFocusEvent }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void }) {
   // 尾窗裁剪（P1-4，DSH "cropped client views"）：真相全量留在 conversation.events
   // （不变量 #22 不动），视图只渲染最近窗口。实测依据：2k 全量渲染 40ms、20k 359ms
   // （流式合帧 40fps 下 Timeline tab 每秒烧 14s CPU）——200 行窗口 ≈4ms，流畅。
   const total = conversation.events.length;
   const [windowSize, setWindowSize] = useState(TIMELINE_WINDOW_DEFAULT);
+  // C4：hover 时间戳浮层——单元素 fixed 浮层 + 容器事件委托（零每行 handler）。
+  const [tip, setTip] = useState<TipState | null>(null);
+  const visibleRef = useRef<AgentEvent[]>([]);
+  const lastRowRef = useRef<HTMLElement | null>(null);
+
+  // 滚动/缩放即隐藏（fixed 定位不随容器滚动，留着会错位）。
+  useEffect(() => {
+    const hide = () => {
+      lastRowRef.current = null;
+      setTip(null);
+    };
+    window.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
+    return () => {
+      window.removeEventListener('scroll', hide, true);
+      window.removeEventListener('resize', hide);
+    };
+  }, []);
+
   if (total === 0) {
     return <TabEmpty hint="本会话尚无事件。" />;
   }
   const hidden = Math.max(0, total - windowSize);
   const visible = hidden > 0 ? conversation.events.slice(hidden) : conversation.events;
+  visibleRef.current = visible;
+
+  const handleOver = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const btn = (e.target as HTMLElement).closest?.('[data-tl-i]') as HTMLElement | null;
+    if (btn === lastRowRef.current) return;
+    lastRowRef.current = btn;
+    if (!btn) {
+      setTip(null);
+      return;
+    }
+    const ev = visibleRef.current[Number(btn.dataset.tlI)];
+    const lines = ev ? formatEventTooltip(ev) : [];
+    if (lines.length === 0) {
+      setTip(null);
+      return;
+    }
+    const r = btn.getBoundingClientRect();
+    const tipH = lines.length * 16 + 12;
+    const above = r.top > tipH + 16;
+    setTip({ x: Math.max(8, r.left + 6), y: above ? r.top - tipH - 4 : r.bottom + 4, lines });
+  };
+  const handleLeave = () => {
+    lastRowRef.current = null;
+    setTip(null);
+  };
+
   return (
-    <div className="detail-timeline">
+    <div className="detail-timeline" onMouseOver={handleOver} onMouseLeave={handleLeave}>
       {hidden > 0 && (
         <div className="timeline-window-bar">
           <button
@@ -349,17 +418,35 @@ export function TimelineTab({ conversation, onFocusEvent }: { conversation: Conv
       {visible.map((e, i) => (
         /* key = 数组绝对下标：稳定性依赖 P0-1 的 append-only 事件契约
          * （events 只追加不重排/删除，见 HANDOFF_PERF_FRONTEND §9 P0-1）。 */
-        <TimelineRow key={hidden + i} event={e} onFocusEvent={onFocusEvent} />
+        <TimelineRow key={hidden + i} index={i} event={e} onFocusEvent={onFocusEvent} />
       ))}
+      {tip && (
+        <div className="tl-tooltip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
+          {tip.lines.map((l, i) => (
+            <div key={i} className="tl-tooltip-line">
+              {l}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 // memo：投影层 events 数组为追加式（既有事件引用稳定），流式期间新 delta 到达时
 // 旧行跳过 summarizeEvent 重算——只有新增行参与渲染。
-const TimelineRow = memo(function TimelineRow({ event, onFocusEvent }: { event: AgentEvent; onFocusEvent: (e: AgentEvent) => void }) {
+const TimelineRow = memo(function TimelineRow({
+  index,
+  event,
+  onFocusEvent,
+}: {
+  /** 可见窗口内下标（hover 浮层经 data-tl-i 反查事件）。 */
+  index: number;
+  event: AgentEvent;
+  onFocusEvent: (e: AgentEvent) => void;
+}) {
   return (
-    <button className="timeline-row" onClick={() => onFocusEvent(event)}>
+    <button className="timeline-row" data-tl-i={index} onClick={() => onFocusEvent(event)}>
       <span className="tl-seq">{event.seq ?? '·'}</span>
       <span className="tl-type">{event.type}</span>
       <span className="tl-summary">{eventSummary(event)}</span>
@@ -532,52 +619,74 @@ function EventInspector({ focus }: { focus: EventFocus }) {
   );
 }
 
-/** 工具事件级视图：Input(args) / Output(result) / Raw(raw_call/raw_result)。 */
-function ToolEventSections({ tool }: { tool: ToolCall }) {
+/** 工具事件级视图：Input(args) / Output(result) / Raw(raw_call/raw_result)
+ *  收敛为标签条（C2）——三段堆叠改按需切换；默认 Output（运行中的工具回退 Input）。 */
+type IoTab = 'input' | 'output' | 'raw';
+
+export function ToolEventSections({ tool }: { tool: ToolCall }) {
   const argsJson = JSON.stringify(tool.args, null, 2);
   const outputText = stringifyForDisplay(tool.result);
   const resultIsObject = typeof tool.result === 'object' && tool.result !== null;
+  const hasOutput = tool.result !== undefined;
+  const hasRaw = Boolean(tool.raw_call || tool.raw_result);
+  const [tab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'input');
+
+  const tabs: readonly { id: IoTab; label: string }[] = [
+    { id: 'input', label: 'Input' },
+    ...(hasOutput ? [{ id: 'output', label: 'Output' } as const] : []),
+    ...(hasRaw ? [{ id: 'raw', label: 'Raw' } as const] : []),
+  ];
+
   return (
-    <>
-      <div className="detail-section">
-        <div className="detail-section-title">
-          <TerminalSquare size={12} /> {tool.name}
-          <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
-        </div>
-        <div className="detail-subsection">
-          <div className="detail-code-wrap">
-            <CopyButton text={argsJson} label="复制 JSON" />
-            <div className="detail-json">
-              <JsonTree value={tool.args} />
-            </div>
-          </div>
-        </div>
-        {tool.result !== undefined && (
-          <div className="detail-subsection">
-            <div className="detail-code-wrap">
-              <CopyButton text={outputText} label="复制输出" />
-              {resultIsObject ? (
-                <div className="detail-json">
-                  <JsonTree value={tool.result} />
-                </div>
-              ) : (
-                <pre className="detail-code">{truncateForDisplay(outputText)}</pre>
-              )}
-            </div>
-          </div>
-        )}
+    <div className="detail-section">
+      <div className="detail-section-title">
+        <TerminalSquare size={12} /> {tool.name}
+        <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
         {tool.started_at && tool.completed_at && (
-          <div className="detail-row">
-            <span className="detail-key">耗时</span>
-            <span className="detail-val">{formatDuration(tool.started_at, tool.completed_at)}</span>
-          </div>
+          <span className="io-duration">{formatDuration(tool.started_at, tool.completed_at)}</span>
         )}
       </div>
-      {(tool.raw_call || tool.raw_result) && (
-        <div className="detail-section">
-          <div className="detail-section-title">Raw</div>
+
+      <div className="io-tabs" role="tablist" aria-label="工具输入输出">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            className={`io-tab${tab === t.id ? ' sel' : ''}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'input' && (
+        <div className="detail-code-wrap">
+          <CopyButton text={argsJson} label="复制 JSON" />
+          <div className="detail-json">
+            <JsonTree value={tool.args} />
+          </div>
+        </div>
+      )}
+      {tab === 'output' && hasOutput && (
+        <div className="detail-code-wrap">
+          <CopyButton text={outputText} label="复制输出" />
+          {resultIsObject ? (
+            <div className="detail-json">
+              <JsonTree value={tool.result} />
+            </div>
+          ) : (
+            <pre className="detail-code">{truncateForDisplay(outputText)}</pre>
+          )}
+        </div>
+      )}
+      {tab === 'raw' && hasRaw && (
+        <div className="io-raw-panes">
           {tool.raw_call && (
             <div className="detail-code-wrap">
+              <div className="io-raw-label">tool/call 原始事件</div>
               <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_call} />
@@ -586,6 +695,7 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
           )}
           {tool.raw_result && (
             <div className="detail-code-wrap">
+              <div className="io-raw-label">tool/result 原始事件</div>
               <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_result} />
@@ -594,7 +704,7 @@ function ToolEventSections({ tool }: { tool: ToolCall }) {
           )}
         </div>
       )}
-    </>
+    </div>
   );
 }
 

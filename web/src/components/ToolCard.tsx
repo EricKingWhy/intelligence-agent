@@ -84,17 +84,24 @@ export const ToolCard = memo(function ToolCard({ tool, density, onFocus }: Props
         )}
       </button>
 
-      {/* 内联明细在 compact/balanced 不渲染；detailed/raw 展开时保留（四形态 body 追加在下方） */}
+      {/* 内联明细在 compact/balanced 不渲染；detailed/raw 展开时保留（四形态 body 追加在下方）。
+          C3：Input/Output 微标签分区，与 Inspector io-tabs 同一标签语言。 */}
       {detailed && (
         <div className="act-detail-inline">
-          <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
+          <div className="act-field">
+            <div className="act-field-label">Input</div>
+            <pre className="act-detail-args">{JSON.stringify(tool.args, null, 2)}</pre>
+          </div>
           {tool.result !== undefined && (
-            <pre className="act-detail-result">
-              {truncate(
-                typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),
-                400,
-              )}
-            </pre>
+            <div className="act-field">
+              <div className="act-field-label">Output</div>
+              <pre className="act-detail-result">
+                {truncate(
+                  typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2),
+                  400,
+                )}
+              </pre>
+            </div>
           )}
           {density === 'raw' && (tool.raw_call || tool.raw_result) && (
             <div className="act-raw">

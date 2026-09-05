@@ -55,3 +55,91 @@ describe('TimelineTab 尾窗裁剪', () => {
     expect(TIMELINE_WINDOW_STEP).toBe(500);
   });
 });
+
+// ── C2：ToolEventSections Input/Output/Raw 标签条化 ──
+
+import { ToolEventSections } from './StepDetail';
+import type { ToolCall } from '../types';
+
+const toolBase: ToolCall = {
+  tool_call_id: 'c1',
+  name: 'bash',
+  args: { command: 'echo hi' },
+  status: 'success',
+  result: { exit_code: 0, stdout: 'hi' },
+  started_at: '2026-09-05T10:00:00Z',
+  completed_at: '2026-09-05T10:00:01Z',
+};
+
+const renderTool = (tool: ToolCall) =>
+  renderToString(createElement(ToolEventSections, { tool })).replaceAll('<!-- -->', '');
+
+describe('ToolEventSections 标签条（C2）', () => {
+  it('三段堆叠收敛为 Input/Output 标签条；有 result 时默认 Output 选中', () => {
+    const html = renderTool(toolBase);
+    expect(html).toContain('io-tabs');
+    expect(html).toContain('>Input<');
+    expect(html).toContain('>Output<');
+    // 默认 Output 选中（aria-selected）
+    expect(html).toMatch(/aria-selected="true"[^>]*>Output</);
+    // Output 面板内容在（exit_code 键来自 result 对象树）
+    expect(html).toContain('exit_code');
+    // Input 面板默认不渲染其 args 内容（command 是 args 独有键）
+    expect(html).not.toContain('>command<');
+  });
+
+  it('无 result：默认 Input 选中且无 Output 标签', () => {
+    const html = renderTool({ ...toolBase, result: undefined, status: 'running' });
+    expect(html).toContain('>Input<');
+    expect(html).not.toContain('>Output<');
+    expect(html).toContain('>command<');
+  });
+
+  it('有 raw_call/raw_result 才出现 Raw 标签；raw 面板渲染原始事件树', () => {
+    const noRaw = renderTool(toolBase);
+    expect(noRaw).not.toContain('>Raw<');
+    const withRaw = renderTool({
+      ...toolBase,
+      raw_call: { type: 'tool/call', data: { x: 1 } },
+      raw_result: { type: 'tool/result', data: { y: 2 } },
+    } as ToolCall);
+    expect(withRaw).toContain('>Raw<');
+  });
+});
+
+// ── C4：Timeline 行 hover 时间戳浮层 ──
+
+import { formatEventTooltip } from './StepDetail';
+
+describe('formatEventTooltip（C4）', () => {
+  it('time + step 齐全：两行（完整时间戳含毫秒 + step）', () => {
+    const lines = formatEventTooltip({
+      type: EventType.TOOL_CALL, data: {}, seq: 3, run_id: 'r',
+      step_id: 9, session_id: 's', time: '2026-09-05T13:17:06.288+08:00',
+    } as Parameters<typeof formatEventTooltip>[0]);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/);
+    expect(lines[1]).toBe('step 9');
+  });
+
+  it('time 缺失：只保留 step 行', () => {
+    const lines = formatEventTooltip({
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 2, session_id: 's', time: null,
+    } as Parameters<typeof formatEventTooltip>[0]);
+    expect(lines).toEqual(['step 2']);
+  });
+
+  it('非法 time 字符串：不产出时间行', () => {
+    const lines = formatEventTooltip({
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: null, session_id: 's', time: 'not-a-date',
+    } as Parameters<typeof formatEventTooltip>[0]);
+    expect(lines).toEqual([]);
+  });
+
+  it('step_id 与 time 都缺：空数组（调用方不渲染浮层）', () => {
+    const lines = formatEventTooltip({
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: null, session_id: 's', time: null,
+    } as Parameters<typeof formatEventTooltip>[0]);
+    expect(lines).toEqual([]);
+  });
+});
