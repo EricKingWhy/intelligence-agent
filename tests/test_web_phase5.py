@@ -27,6 +27,7 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
     ])
     monkeypatch.setattr("agent_harness.web.app.create_chat_model", lambda config: model)
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path / "state"),
+                        model_api_key="sk-test-placeholder",
                         artifact_store_endpoint="https://example.test", artifact_overflow_chars=200)
     # workspace 字段是安全边界（V1）：只接受 workspaces_root 下的单段目录名，不是主机路径。
     workspace = tmp_path / "state" / "workspaces" / "overflow-task"
@@ -47,7 +48,8 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
 def test_web_applies_context_budget_before_calling_model(tmp_path, monkeypatch):
     model = ScriptedModel([])
     monkeypatch.setattr("agent_harness.web.app.create_chat_model", lambda config: model)
-    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), max_context_tokens=100)
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
+                        model_api_key="sk-test-placeholder", max_context_tokens=100)
     with TestClient(create_app(settings)) as client:
         response = client.post("/api/sessions", json={"task": "large " * 200})
         assert "context_window_exceeded" in response.text

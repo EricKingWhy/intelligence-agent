@@ -9,7 +9,9 @@ class Settings(BaseSettings):
 
     model_provider: str = "deepseek"
     model_name: str = ""
-    model_api_key: str = ""
+    # SecretStr：与 milvus_token / embedding_api_key 一致——model_dump() / repr()
+    # 脱敏为 **********，避免任何把 Settings 转储进日志/调试器/异常页的路径泄漏 live key。
+    model_api_key: SecretStr = SecretStr("")
     model_base_url: str = ""
 
     temperature: float = 0.2

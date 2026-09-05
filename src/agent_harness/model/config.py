@@ -60,11 +60,21 @@ class ModelConfig:
             raise ConfigError(
                 f"provider {provider!r} 无默认模型，必须在 .env 中配置 MODEL_NAME"
             )
+        # SecretStr 取明文用于实际请求；运行期持有明文是必要的（SDK 要用），
+        # 但 Settings 层保持脱敏（model_dump / repr 不再泄漏）。
+        api_key = settings.model_api_key.get_secret_value()
+        if not api_key:
+            # 已知 provider + 空 key 是确定性配置错误——不应静默构造空 key
+            # 把失败推到首次 ainvoke 时由 SDK 抛模糊的 AuthenticationError；
+            # 与未知 provider / 缺 model_name 一致在此快速失败。
+            raise ConfigError(
+                f"provider {provider!r} 缺少 API key，必须在 .env 中配置 MODEL_API_KEY"
+            )
         return cls(
             provider=provider,
             # 显式配置优先，否则用厂商预设
             model_name=model_name,
             base_url=settings.model_base_url or preset["model_base_url"],
-            api_key=settings.model_api_key,
+            api_key=api_key,
             temperature=settings.temperature,
         )
