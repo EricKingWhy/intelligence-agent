@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_harness.skills.discovery import SkillDiscovery, parse_skill_markdown
+from agent_harness.skills.discovery import (
+    SKILL_FILE_MAX_BYTES,
+    SkillCatalog,
+    SkillDiscovery,
+    parse_skill_markdown,
+)
 
 
 def _write_skill(root: Path, name: str, frontmatter: str, body: str = "正文内容") -> Path:
@@ -177,3 +182,61 @@ def test_parse_skill_markdown_non_utf8_returns_error_not_raises(tmp_path):
     entry, errors = parse_skill_markdown(path)
     assert entry is None
     assert errors and "unreadable" in errors[0]
+
+
+# ── Round 7 加固：发现读取有界性 + 目录级 IO 容错 ──
+
+
+def test_oversized_skill_file_rejected_with_catalog_error(tmp_path):
+    """超大 SKILL.md 不整读进内存：发现阶段 stat 上限拦截，进 errors 可观察。
+
+    SKILL.md 是被扫描目录里的自由文件（模型 workspace-write 可写），无上限时
+    一个多 MB 文件就能在 wiring 期把进程内存打爆；64K 正文截断发生在完整读盘
+    之后，拦不住读入阶段。
+    """
+    skills_dir = tmp_path / "skills"
+    big = skills_dir / "big"
+    big.mkdir(parents=True)
+    (big / "SKILL.md").write_text("x" * (SKILL_FILE_MAX_BYTES + 1), encoding="utf-8")
+    ok = skills_dir / "ok"
+    ok.mkdir()
+    (ok / "SKILL.md").write_text("---\nname: ok\ndescription: d\n---\nbody",
+                                 encoding="utf-8")
+
+    catalog = SkillDiscovery([skills_dir]).discover()
+    assert [e.name for e in catalog.entries] == ["ok"]  # 其它技能不受影响
+    assert any("too large" in e for e in catalog.errors)
+
+
+def test_unreadable_directory_degrades_to_error_not_abort(tmp_path):
+    """目录级 IO 错误（权限/死挂载）只损失该目录，不中断整个发现流程。
+
+    此前 iterdir() 的 OSError 直接抛出、被 wire_capabilities 当整体失败降级
+    ——一个坏目录让全局+项目+手动路径的全部技能消失，违背"解析失败进
+    errors，绝不中断扫描"的逐条容错契约。
+    """
+    import unittest.mock as mock
+
+    # 两个被扫描目录：bad_dir 的 iterdir 抛 OSError（权限/死挂载），good_dir 正常。
+    bad_dir = tmp_path / "bad_dir"
+    bad_dir.mkdir()
+    good_dir = tmp_path / "good_dir"
+    good_dir.mkdir()
+    good = good_dir / "good"
+    good.mkdir()
+    (good / "SKILL.md").write_text("---\nname: good\ndescription: d\n---\nbody",
+                                   encoding="utf-8")
+
+    discovery = SkillDiscovery([bad_dir, good_dir])
+    real_iterdir = Path.iterdir
+
+    def selective_iterdir(self):
+        if self == bad_dir:
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    with mock.patch.object(Path, "iterdir", selective_iterdir):
+        catalog = discovery.discover()
+
+    assert [e.name for e in catalog.entries] == ["good"]
+    assert any("bad_dir" in e for e in catalog.errors)

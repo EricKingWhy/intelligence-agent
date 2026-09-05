@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from agent_harness.capability.base import (
@@ -10,7 +13,7 @@ from agent_harness.capability.base import (
     CapabilityRegistry,
     Degradation,
 )
-from agent_harness.capability.config import parse_capabilities_config
+from agent_harness.capability.config import ProviderConfig, parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.tooling import Tool, ToolResult
@@ -209,3 +212,45 @@ class TestWireCapabilities:
                 settings=_memory_settings(tmp_path, ready=False),
             )
         assert err.value.code == "init_failed"
+
+
+# ── Round 7：半初始化的 MemoryComponents 必须被关闭（资源泄漏防线）──
+
+
+@pytest.mark.asyncio
+async def test_memory_partial_init_failure_closes_components(caplog):
+    """initialize() 半途失败（Milvus 连上后 schema/embedding 探测挂）时，
+    已构造的 gRPC channel / httpx client 必须被 close，而不是丢弃等 GC——
+    否则对故障 Milvus 的后台重连永不停止，wiring.memory 未设置导致
+    AppState.shutdown 也无法收尾。降级语义不变（OPTIONAL_RUNTIME 跳过）。
+    """
+    from unittest.mock import patch
+
+    class FakeComponents:
+        def __init__(self):
+            self.closed = False
+            self.relay = SimpleNamespace(stop=AsyncMock(return_value=None))
+            self.writeback = SimpleNamespace(close=AsyncMock(return_value=None))
+            self.vectors = SimpleNamespace(close=AsyncMock(return_value=None))
+
+        async def initialize(self):
+            raise RuntimeError("milvus schema mismatch")
+
+        async def close(self):
+            self.closed = True
+
+    fake = FakeComponents()
+    settings = Settings(
+        milvus_uri="http://localhost:19530", milvus_token="tk",
+        milvus_collection="c", embedding_model="e", embedding_base_url="http://x",
+        embedding_api_key="k", _env_file=None,
+    )
+    registry = CapabilityRegistry()
+    with patch("agent_harness.capability.factories.build_memory_components", return_value=fake):
+        wiring = await wire_capabilities(
+            registry,
+            {"memory": ProviderConfig(provider="builtin", enabled=True)},
+            settings=settings,
+        )
+    assert fake.closed, "半初始化的 components 必须被显式 close"
+    assert wiring.memory is None  # 未注册 → 调用方无从关闭 → 必须在接线内关闭

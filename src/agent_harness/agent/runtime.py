@@ -18,6 +18,7 @@ Diagnostic Log（_log）保留不动——执行链路观察与 SessionEvent 分
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -180,8 +181,16 @@ class AgentRuntime:
 
         SSE endpoint 直接消费这个 iterator；前端据此实时渲染。
         """
-        async for event in self._drive(session, user_input, stream=True):
-            yield event
+        drive = self._drive(session, user_input, stream=True)
+        try:
+            async for event in drive:
+                yield event
+        finally:
+            # 委托生成器不自动关闭内层（PEP 525）：消费者对 run_stream 直接
+            # aclose / GC 时，内层 _drive 收不到 GeneratorExit，取消臂的持久化
+            # 收尾（终结悬空 run/started）永远不会执行。这里显式收口——
+            # 收尾中禁止再 yield，但允许 await；_drive 的取消臂是纯同步收尾。
+            await drive.aclose()
 
     async def _drive(
         self, session: Session, user_input: str, *, stream: bool,
@@ -206,6 +215,10 @@ class AgentRuntime:
         usage_total: dict[str, int] = {}
         # 模型调用是否在途：在途时抛错补 model/failed，把故障归因到具体一步。
         model_call_open = False
+        # run 是否已写终结事件：取消臂据此避免给已终结的 run 补第二条终结
+        # （run/completed + run/failed 双终结 = 历史不可对账，_save_checkpoint
+        # docstring 明令禁止的状态）。
+        run_terminal_written = False
         run_span = new_span_id()
         try:
             # 写入 user 消息事件
@@ -233,6 +246,7 @@ class AgentRuntime:
                         RUN_FAILED, {"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": str(error)},
                         run_id=run_id, step_id=steps,
                     )
+                    run_terminal_written = True
                     yield to_agent_event(failed)
                     result_holder.append(
                         AgentRunResult(status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps),
@@ -351,6 +365,7 @@ class AgentRuntime:
                                                 usage_total=dict(usage_total) or None,
                                                 cost_usd=None,   # TODO(spec 12): 费率表未定义，不伪造
                                                 trace_id=None)   # TODO(Phase 15): Langfuse 接入后填真实 trace
+                    run_terminal_written = True
                     self._write_memories(session, memory_event_start)
                     yield to_agent_event(end_event)
                     # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
@@ -368,6 +383,7 @@ class AgentRuntime:
                               reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
                     end_event = session.end_run(run_id, status="failed",
                                                 usage_total=dict(usage_total) or None)
+                    run_terminal_written = True
                     self._write_memories(session, memory_event_start)
                     yield to_agent_event(end_event)
                     result_holder.append(
@@ -440,6 +456,43 @@ class AgentRuntime:
                 await self._save_checkpoint(
                     session, CheckpointBoundary.TOOL_BATCH_COMPLETED
                 )
+        except (asyncio.CancelledError, GeneratorExit):
+            # 取消臂：客户端断连（SSE 生成器被取消/关闭）走这里——GeneratorExit /
+            # CancelledError 是 BaseException，顶层 except Exception 兜不到，
+            # durable 日志会永远停在悬空的 run/started 上（无结局的历史，web 层
+            # 也不会调 resume 修复）。只做持久化收尾，不 yield：生成器关闭中
+            # 禁止再产出（RuntimeError），取消中的 task 再 yield 也会被立即再取消。
+            # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
+            try:
+                if model_call_open:
+                    session.append(
+                        MODEL_FAILED,
+                        {"message": "model call cancelled"},
+                        run_id=run_id, step_id=steps + 1,
+                    )
+                if run_id is not None and not run_terminal_written:
+                    # 已终结的 run 不补第二条终结（run/completed + run/failed
+                    # 双终结 = 历史不可对账）：取消可能落在终结事件 yield /
+                    # 收尾 checkpoint 的窗口里。
+                    terminal_data: dict[str, Any] = {"reason": "cancelled"}
+                    if usage_total:
+                        # 与 except-Exception 兜底一致：取消也如实带上 token 消耗
+                        # （Gap 1 契约，不因取消路径丢账）。
+                        terminal_data["usage_total"] = dict(usage_total)
+                    session.append(
+                        RUN_FAILED,
+                        terminal_data,
+                        run_id=run_id, step_id=steps,
+                    )
+                    run_terminal_written = True
+            except Exception as terminal_error:  # noqa: BLE001
+                self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
+                          span_id=run_span, outcome="error",
+                          error=str(terminal_error),
+                          error_type=type(terminal_error).__name__)
+            self._log("task_failed", "Agent Loop 被取消（客户端断连？）",
+                      span_id=run_span, outcome="cancelled")
+            raise
         except Exception as error:  # noqa: BLE001
             # 顶层失败兜底：模型 / 执行器抛异常时，JSONL 绝不能停在悬空的
             # run/started 上（resume 后是一段没有结局的历史），SSE 消费者也
@@ -469,6 +522,7 @@ class AgentRuntime:
                 if run_id is not None:
                     end_event = session.end_run(run_id, status="failed",
                                                 usage_total=dict(usage_total) or None)
+                    run_terminal_written = True
                     yield to_agent_event(end_event)
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "失败兜底事件写入失败（存储故障？）",

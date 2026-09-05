@@ -536,3 +536,24 @@ async def test_disconnect_cancels_sse_producer(tmp_path):
     events = app.state.agent.store.read_events(hanging.persisted_session_id)
     assert len(events) == 2, f"断连后 session 事实应恰好 2 条，实际 {len(events)}"
     assert [e.type for e in events] == [SESSION_STARTED, RUN_STARTED]
+
+
+# ── session_id 路径穿越防御（Round 7 安全加固）──
+
+
+def test_get_events_rejects_path_traversal(tmp_path):
+    r"""session_id 是路径段不是路径：含分隔符/盘符/点段的取值一律 422。
+
+    store.read_events 直接 self._root / session_id——不校验时反斜杠段
+    ("..\..\x") 在 win32 上可越出 sessions 根目录，盘符段 ("C:\x") 可整体
+    替换基路径，形成任意 events.jsonl 读取 oracle。与 workspace 校验
+    （_validate_workspace_name）同一安全边界，session_id 同样是名字不是路径。
+    """
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    client = TestClient(app)
+    # 注：裸 ".." / "." 会被 httpx 客户端在 URL 归一化阶段消解、到不了 app；
+    # 服务端字符集校验（[A-Za-z0-9_-]+）对它们同样拒绝，这里只测能到达 app 的形态。
+    for malicious in ("..%5C..%5Cescape", "..%5Cvictim", "a%5Cb", "C:%5Cabs"):
+        resp = client.get(f"/api/sessions/{malicious}/events")
+        assert resp.status_code == 422, f"{malicious!r}: {resp.status_code}"

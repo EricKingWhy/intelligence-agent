@@ -51,8 +51,19 @@ async def _wire_memory(
     if components is None:
         # 配置不齐 → OPTIONAL_RUNTIME 降级：不注册、不注入（与 Phase 6 行为一致）。
         return
-    await components.initialize()
-    components.relay.start()
+    try:
+        await components.initialize()
+        components.relay.start()
+    except Exception:
+        # 半初始化失败（Milvus 连上后 schema/探测挂）时，已构造的 gRPC channel /
+        # httpx client 必须显式关闭——外层 wire_capabilities 只会降级跳过，不会
+        # 关闭 components；wiring.memory 未设置意味着 AppState.shutdown 也够不到，
+        # 不关就是永久泄漏（对故障 Milvus 的后台重连永不停止）。
+        try:
+            await components.close()
+        except Exception as close_error:  # noqa: BLE001 — 清理失败不掩盖原始故障
+            logger.warning("memory components 清理失败：%r", close_error)
+        raise
     registry.register(
         CapabilityDescriptor(
             name="memory", version="1.0.0", provider_name=cfg.provider,

@@ -112,13 +112,19 @@ async def test_disconnected_run_stream_leaves_recoverable_dangling_tool_call(
     await agen.aclose()
     await asyncio.sleep(0)  # 让内层 _drive generator 的 GC 收尾跑一个事件循环 tick
 
-    # 断连后落盘停在 dangling tool/call 上：无 tool/result、无 run 终结事件。
+    # 断连后落盘：dangling tool/call（无 tool/result）+ 取消臂补的 run/failed 终结。
+    # Round 7 契约修订：此前断连不写任何 run 终结事件——web 层无人自动调 resume，
+    # run/started 永久悬空，违反 runtime 自己的不变量（"run 绝不能永久悬挂在
+    # 悬空的 run/started 上"）。现在取消臂补 run/failed(reason=cancelled)；
+    # resume 的 dangling 修复是配对语义、与 run 终结状态正交，可恢复性不变。
     before_resume = store.read_events(session.session_id)
     assert [
         e.data["tool_call_id"] for e in before_resume if e.type == TOOL_CALL
     ] == [TOOL_CALL_ID]
     assert not [e for e in before_resume if e.type == TOOL_RESULT]
-    assert not [e for e in before_resume if e.type in (RUN_COMPLETED, RUN_FAILED)]
+    terminal = [e for e in before_resume if e.type in (RUN_COMPLETED, RUN_FAILED)]
+    assert [e.type for e in terminal] == [RUN_FAILED]
+    assert terminal[-1].data.get("reason") == "cancelled"
 
     # Session.resume 必须成功，并合成配对的 tool/result（dangling 修复语义）。
     resumed = Session.resume(store, session.session_id)

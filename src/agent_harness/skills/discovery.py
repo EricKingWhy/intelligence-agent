@@ -9,11 +9,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+#: 发现阶段单文件读取上限（stat 尺寸拦截，先于任何 read；单位是字节）。
+#: SKILL.md 是被扫描目录里的自由文件（模型 workspace-write 可写），无上限时
+#: 超大文件会在 wiring 期打爆内存——tool 层的 64K 正文截断发生在完整读盘之后，
+#: 拦不住读入阶段。
+SKILL_FILE_MAX_BYTES = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,9 +31,23 @@ class SkillCatalogEntry:
     source_path: Path
     meta: dict[str, Any] = field(default_factory=dict)
     when_to_use: str = ""  # 可选（ADR-0011 grill 记录：用户批准的扩展字段）
+    # 目录扫描来源的包含根（手动路径为 None：用户显式声明本身即授权）。
+    # load_body 读盘时用它重验证边界——发现时的一次性校验是 TOCTOU：
+    # 模型可通过 workspace-write 工具在 wiring 之后把 skill 目录换成
+    # 指向目录外的 junction/symlink，把任意宿主文件读进 Context。
+    scanned_root: Path | None = None
 
     def load_body(self) -> str:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
+        if self.scanned_root is not None and not resolve_within(self.source_path, self.scanned_root):
+            raise OSError(
+                f"{self.source_path}: resolves outside scanned skill directory "
+                f"{self.scanned_root} (boundary changed after discovery, refusing to read)"
+            )
+        # 尺寸上限在 load 侧同样生效：发现后文件可被 workspace-write 换成超大内容，
+        # "读入阶段有界"必须覆盖模型触发的加载路径（与发现同一威胁模型）。
+        if self.source_path.stat().st_size > SKILL_FILE_MAX_BYTES:
+            raise OSError(f"{self.source_path}: too large (> {SKILL_FILE_MAX_BYTES} bytes)")
         # utf-8-sig：Windows 记事本等默认写 BOM，残留 \ufeff 会让首行 '---' 校验失败。
         # 非 UTF-8 字节抛 UnicodeDecodeError（ValueError 子类）——让调用方明确看到
         # 读盘失败，而不是吞回空字符串（吞空会让 load_skill 工具返回空内容）。
@@ -59,6 +79,9 @@ def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str
     """解析单个 SKILL.md；失败返回 (None, errors)，绝不抛出中断发现流程。"""
     errors: list[str] = []
     try:
+        # 尺寸上限先于 read（stat 一次 vs 全量读入）：读入阶段就有界。
+        if path.stat().st_size > SKILL_FILE_MAX_BYTES:
+            return None, [f"{path}: too large (> {SKILL_FILE_MAX_BYTES} bytes)"]
         # utf-8-sig：兼容 BOM 前缀（Windows 记事本默认），无 BOM 时行为与 utf-8 一致。
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as error:
@@ -117,6 +140,9 @@ class SkillDiscovery:
                     f"[{origin}] {path}: resolves outside scanned skill directory {root}"
                 )
                 return
+            if root is not None:
+                # 携带包含根，供 load_body 读盘时重验证（TOCTOU 防线）。
+                entry = replace(entry, scanned_root=root)
             if entry.name in seen:
                 # 同名先到先得，冲突显式可见（spec 08 §5 精神：不允许静默忽略）。
                 catalog.conflicts.append(
@@ -132,7 +158,14 @@ class SkillDiscovery:
             if not directory.is_dir():
                 catalog.errors.append(f"[directory] {directory}: not a directory")
                 continue
-            for skill_dir in sorted(directory.iterdir()):
+            try:
+                skill_dirs = sorted(directory.iterdir())
+            except OSError as error:
+                # 目录级 IO 错误（权限/死挂载）只损失该目录：与逐条解析失败同一
+                # 容错契约，绝不中断整个扫描（否则一个坏目录让所有技能消失）。
+                catalog.errors.append(f"[directory] {directory}: unreadable ({error})")
+                continue
+            for skill_dir in skill_dirs:
                 skill_file = skill_dir / "SKILL.md"
                 if skill_dir.is_dir() and skill_file.is_file():
                     _consider(skill_file, "directory", directory)

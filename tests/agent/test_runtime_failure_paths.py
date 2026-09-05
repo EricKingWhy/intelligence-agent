@@ -23,6 +23,7 @@ from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
     MODEL_FAILED,
+    RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
     TOOL_CALL,
@@ -31,6 +32,7 @@ from agent_harness.session import (
 )
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
+from tests.scripted_model import ScriptedModel
 
 TOOL_CALL_ID = "call_failure_001"
 
@@ -240,3 +242,54 @@ async def test_model_failed_event_redacts_exception_message(tmp_path):
     model_failed = next(e for e in session.events if e.type == "model/failed")
     assert model_failed.data["message"] == "model call failed: RuntimeError"
     assert "sk-secret-123" not in str(model_failed.data)
+
+
+# ---- Round 7：客户端断连 / 任务取消不得留下悬空 run/started ----
+
+
+@pytest.mark.asyncio
+async def test_stream_close_persists_terminal_event(tmp_path):
+    """消费方中途关闭 run_stream 生成器（客户端断连的运行时等价物）时，
+    _drive 必须补 run/failed 终结事件再退出——JSONL 绝不能停在悬空的
+    run/started 上（该 run 在历史里永远没有结局）。
+
+    GeneratorExit / CancelledError 是 BaseException，顶层 except Exception
+    兜不到；取消臂只做持久化收尾（不 yield——生成器关闭中禁止再产出），
+    然后继续向上传播取消。
+    """
+    session = make_session(tmp_path)
+    runtime = AgentRuntime(
+        model=ScriptedModel([AIMessage(content="第一轮就完成的答案")]),
+        registry=ToolRegistry(),
+        executor=ToolExecutor(ToolRegistry()),
+    )
+    agen = runtime.run_stream(session, "hi")
+    async for _event in agen:
+        if _event.type == RUN_STARTED:
+            break  # 悬空点：run/started 已持久化 + 已 yield，消费者在这里断开
+    await agen.aclose()
+
+    event_types = [e.type for e in session.events]
+    assert event_types[-1] == RUN_FAILED, f"悬空 run/started 未被终结：{event_types}"
+    failed = session.events[-1]
+    assert failed.data.get("reason") == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stream_close_after_completion_does_not_double_terminate(tmp_path):
+    """取消落在 run/completed 已持久化之后的窗口（终结帧 yield / 收尾 checkpoint
+    await）时，不得给同一 run 再补 run/failed——双终结事件 = 历史不可对账。"""
+    session = make_session(tmp_path)
+    runtime = AgentRuntime(
+        model=ScriptedModel([AIMessage(content="最终回答")]),
+        registry=ToolRegistry(),
+        executor=ToolExecutor(ToolRegistry()),
+    )
+    agen = runtime.run_stream(session, "hi")
+    async for _event in agen:
+        if _event.type == RUN_COMPLETED:
+            break  # 终结帧已拿到；生成器挂在终结帧 yield / 收尾 checkpoint 窗口
+    await agen.aclose()
+
+    terminals = [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)]
+    assert terminals == [RUN_COMPLETED], f"出现双终结：{terminals}"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -33,6 +34,7 @@ from agent_harness.identity import (
     identity_context_var,
     set_identity_context,
 )
+from agent_harness.logging import setup_logging
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import LocalSubprocessSandbox
@@ -63,7 +65,9 @@ class CreateSessionRequest(BaseModel):
     """POST /api/sessions 的请求体。"""
 
     # 空 task 直接 422（FastAPI 自动校验）；纯空白 task 容忍（runtime 侧无意义但不危险）。
-    task: str = Field(min_length=1)
+    # max_length 封顶：task 会逐字持久化进 JSONL（user/message）并整体进模型上下文，
+    # 无上限时一个多 MB 请求体就能写爆日志 + 撑爆 context。
+    task: str = Field(min_length=1, max_length=100_000)
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（见 _validate_workspace_name）
     max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
     auto_approve: bool = True  # V1 默认自动批准（demo 同款）
@@ -252,6 +256,22 @@ def _validate_workspace_name(state: AppState, workspace: str | None) -> str | No
     return workspace
 
 
+def _validate_session_id(session_id: str) -> str:
+    """校验路径里的 session_id——它是单个名字段，不是路径。
+
+    store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时反斜杠段
+    在 win32 上可越出 sessions 根目录（路径穿越读取 oracle），盘符段可整体替换
+    基路径。与 _validate_workspace_name 同一安全边界；字符集与 S3ArtifactStore
+    的 key 段规则一致（session_id 实际由 uuid4() 生成，天然满足）。
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"session_id 只接受单个安全名字段：{session_id!r}",
+        )
+    return session_id
+
+
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
     """把 AgentEvent 转成 SSE 的 data 字段（JSON 字符串）。
 
@@ -282,6 +302,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # web 部署必须自己接诊断日志：uvicorn 默认只配 uvicorn.* logger，root
+        # 无 handler 时 runtime/executor 的 log_event 全部 no-op——llm_call /
+        # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
+        # web 之前漏接）。幂等（重复调用先清 handlers）。
+        setup_logging(settings.log_level, settings.workspace_dir)
         try:
             yield
         finally:
@@ -369,8 +394,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     async def get_session_events(session_id: str) -> list[dict]:
         """读历史 SessionEvent——前端刷新后从此重建视图（不变量 #22）。
 
-        store 读是同步磁盘 I/O，走 to_thread 卸载（同 list_sessions）。
+        session_id 先过安全校验（名字段，不是路径）；store 读是同步磁盘 I/O，
+        走 to_thread 卸载（同 list_sessions）。
         """
+        _validate_session_id(session_id)
         store = app.state.agent.store
         events = await anyio.to_thread.run_sync(store.read_events, session_id)
         if not events:

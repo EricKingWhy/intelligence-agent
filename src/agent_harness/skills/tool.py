@@ -6,6 +6,8 @@ Skill 内容不是 Tool（spec 09 §2），但"加载动作"是模型可调用�
 
 from __future__ import annotations
 
+import asyncio
+
 from pydantic import BaseModel, Field
 
 from agent_harness.capability.base import CapabilityError
@@ -63,7 +65,10 @@ class LoadSkillTool(Tool):
 
     async def execute(self, args: _LoadSkillArgs) -> ToolResult:
         try:
-            body = self._capability.load(args.name)
+            # 读盘卸载到线程池：SkillCapability.load 是同步 Path.read_text，
+            # 直接在协程里跑会阻塞事件循环（所有并发 session 的流被磁盘延迟
+            # 拖住），且 executor 的 asyncio.timeout 打不断同步 IO。
+            body = await asyncio.to_thread(self._capability.load, args.name)
         except CapabilityError as error:
             # TOOL_NOT_FOUND 的语义是"未知工具名"；技能名不存在是模型传参错误，
             # 归 INVALID_ARGUMENT（不重试，回模型自纠错）。其余 CapabilityError

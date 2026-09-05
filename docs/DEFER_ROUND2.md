@@ -377,3 +377,54 @@ extend 到 builder 已有列表，无去重——同一 provider 每 build 跑�
 契约决策，当前无真实调用方踩中。
 
 **重启条件**：出现组合传参的真实调用方，或 Primary 定 API 契约。
+
+## R7-1. 工具超时/取消掐不断沙箱子进程（协作取消设计）
+
+**位置**：`tooling/executor.py:555` + `tools/bash.py:65` + `sandbox/local.py`
+
+**现状**：asyncio.timeout 只取消 await，bash 真正跑在 asyncio.to_thread 线程上
+无法中断——TIMEOUT 报给模型（或客户端断连取消）后命令继续改 workspace 最长
+到沙箱自身 60s 上限。
+
+**为何 DEFER**：需要给 sandbox exec 设计协作取消钩子（进程句柄/事件），是
+sandbox 边界协议变更；现状有 60s 硬上限兜底，不是无界。
+
+**重启条件**：Sandbox 执行协议下一次设计评审，或出现超时后副作用伤及真实
+环境的案例。
+
+## R7-2. Session.append 同步磁盘 IO 在事件循环上（后台写队列设计）
+
+**位置**：`session/store.py:42-44`（调用点 runtime._drive 全程）
+
+**现状**：每次 append 同步 open/write/flush；web 读路径已走 to_thread，写路径
+没有——并发 session 下每个 append 让所有在途 SSE 流等本地磁盘延迟。
+
+**为何 DEFER**：改后台写队列/to_thread 牵动 append 的同步返回语义（seq 分配、
+checkpoint 边界、测试大量依赖同步可见性），属存储层并发设计工作。
+
+**重启条件**：实测多 session 并发下 append 延迟成为吞吐瓶颈。
+
+## R7-3. Skill catalog 一次性快照无刷新路径（生命周期设计）
+
+**位置**：`capability/wiring.py:_wire_skills` + `skills/capability.py`
+
+**现状**：catalog 在首请求 wiring 时扫描一次；之后新增技能不可见、删除技能的
+load 报 io 错误（已映射为 typed CapabilityError，Round 7），errors/conflicts
+随时间过期。
+
+**为何 DEFER**：刷新语义（TTL / 显式 refresh 工具 / 每次 catalog 调用重扫）
+是产品决策，影响 provider 生命周期契约。
+
+**重启条件**：真实使用中出现"热更新技能"需求。
+
+## R7-4. Memory writeback 部分失败丢后续候选（outbox 所有权重构）
+
+**位置**：`memory/writeback.py:31-33`
+
+**现状**：extract 出的候选顺序 store，第 N 个失败后其余静默丢弃（只有一条
+MEMORY_DEGRADED）；outbox 只覆盖已入 SQLite 的记录，不含未 store 的候选。
+
+**为何 DEFER**：正确修法（候选先入 record store、由 outbox relay 统一拥有
+重试）是 writeback/outbox 职责边界重构，牵动 ADR-0008 语义。
+
+**重启条件**：memory 可靠性专项 ticket（与 outbox 死信阈值时间化一起设计）。

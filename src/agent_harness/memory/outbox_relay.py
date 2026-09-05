@@ -32,6 +32,10 @@ class OutboxRelay:
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._failure_counts: dict[str, int] = {}
+        # 计数对应的 outbox revision：内容被重新 store（revision 更新）时重置
+        # 重试预算——新版本不是旧毒丸的证据，死信不能跨版本生效（否则故障窗口
+        # 期间写入的记忆 + 其后所有更新都静默永不索引，直到进程重启）。
+        self._failure_revisions: dict[str, str] = {}
 
     async def flush(self) -> int:
         async with self._lock:
@@ -39,6 +43,10 @@ class OutboxRelay:
             after_id = ""
             while page := await self._records.pending(after_id=after_id):
                 for change in page:
+                    if self._failure_revisions.get(change.entry.id) != change.revision:
+                        # revision 变化（含首次出现）：重置该条目的连续失败计数。
+                        self._failure_counts.pop(change.entry.id, None)
+                    self._failure_revisions[change.entry.id] = change.revision
                     if self._failure_counts.get(change.entry.id, 0) >= self.MAX_CONSECUTIVE_FAILURES:
                         continue
                     token = memory_session_var.set(change.session_id)
@@ -57,6 +65,7 @@ class OutboxRelay:
                             self._count_failure(change, "ack", error)
                         else:
                             self._failure_counts.pop(change.entry.id, None)
+                            self._failure_revisions.pop(change.entry.id, None)
                     finally:
                         memory_session_var.reset(token)
                 after_id = page[-1].entry.id

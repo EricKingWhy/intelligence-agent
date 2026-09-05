@@ -15,6 +15,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agent_harness.agent.runtime import _extract_text
 from agent_harness.config import Settings
 from agent_harness.logging import (
     LogContext,
@@ -167,7 +168,9 @@ async def run(message: str) -> str:
             duration_ms=_elapsed_ms(task_started),
             outcome="success",
         )
-        return str(result.content)
+        # 与 runtime 落盘同一文本投影：list 风格 content 不能 str() 兜底
+        # （会把 Python repr 打给用户，runtime._extract_text 的 docstring 明令禁止）。
+        return _extract_text(result.content)
 
 
 def _elapsed_ms(started: float) -> float:

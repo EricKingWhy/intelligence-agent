@@ -16,8 +16,8 @@ from agent_harness.config import Settings
 from agent_harness.session import Session
 from agent_harness.skills.capability import SkillCapability
 from agent_harness.skills.context_provider import SkillCatalogContextProvider
-from agent_harness.skills.discovery import SkillCatalog, SkillCatalogEntry
-from agent_harness.skills.tool import LoadSkillTool
+from agent_harness.skills.discovery import SkillCatalog, SkillCatalogEntry, SkillDiscovery
+from agent_harness.skills.tool import LoadSkillTool, _LoadSkillArgs
 from agent_harness.tooling.contract import ToolSideEffect
 from agent_harness.tooling.result import ErrorCode
 
@@ -241,3 +241,77 @@ class TestSkillsPathOptionCoercion:
             await self._wire(registry, {"directories": 123}, tmp_path)
         assert err.value.code == "init_failed"
         assert "directories" in str(err.value)
+
+
+# ── Round 7 安全加固：load_body 路径边界重验证（TOCTOU 防线）──
+
+
+def test_load_body_rejects_out_of_root_swap_after_discovery(tmp_path):
+    r"""发现时校验的路径边界，load_body 读盘时必须重验证。
+
+    攻击面：模型可通过 workspace-write 工具在 <workspace>/skills/ 下把已发现的
+    skill 目录整体替换成指向目录外的 junction/symlink——只靠发现时一次性
+    resolve_within 是 TOCTOU：wiring 之后的任意时刻换入，load_body 都会把
+    任意宿主文件读进模型 Context。重验证后必须显式报错（CapabilityError），
+    绝不返回外部内容。win32 用 _winapi.CreateJunction 构造（无需特权）。
+    """
+    import shutil
+    import _winapi
+
+    skills_dir = tmp_path / "skills"
+    good = skills_dir / "good"
+    good.mkdir(parents=True)
+    (good / "SKILL.md").write_text(
+        "---\nname: good\ndescription: d\n---\nREAL BODY", encoding="utf-8"
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(
+        "---\nname: good\ndescription: d\n---\nESCAPED", encoding="utf-8"
+    )
+
+    catalog = SkillDiscovery([skills_dir]).discover()
+    assert [e.name for e in catalog.entries] == ["good"]
+
+    # 发现后替换：删除真实目录，换成指向 skills 根之外的 junction。
+    shutil.rmtree(good)
+    _winapi.CreateJunction(str(outside), str(good))
+
+    capability = SkillCapability(catalog)
+    with pytest.raises(CapabilityError):
+        capability.load("good")
+
+
+# ── Round 7：load_skill 读盘不阻塞事件循环 ──
+
+
+@pytest.mark.asyncio
+async def test_load_skill_reads_off_event_loop(tmp_path):
+    """LoadSkillTool 的读盘必须走线程池——同步 Path.read_text 在 async execute
+    里会卡住整个事件循环（所有并发 session 的流都被磁盘延迟拖住），且
+    executor 的 asyncio.timeout 无法打断同步 IO。"""
+    import threading
+
+    skills_dir = tmp_path / "skills"
+    good = skills_dir / "good"
+    good.mkdir(parents=True)
+    (good / "SKILL.md").write_text(
+        "---\nname: good\ndescription: d\n---\nBODY", encoding="utf-8"
+    )
+    capability = SkillCapability(SkillDiscovery([skills_dir]).discover())
+    tool = LoadSkillTool(capability)
+
+    loop_thread = threading.get_ident()
+    load_thread: list[int] = []
+
+    original_load = capability.load
+
+    def recording_load(name: str) -> str:
+        load_thread.append(threading.get_ident())
+        return original_load(name)
+
+    capability.load = recording_load  # monkey-patch 实例方法，记录调用线程
+
+    result = await tool.execute(_LoadSkillArgs(name="good"))
+    assert result.ok
+    assert load_thread and load_thread[0] != loop_thread, "读盘发生在事件循环线程上"
