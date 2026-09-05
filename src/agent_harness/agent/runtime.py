@@ -74,6 +74,13 @@ from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 
 logger = logging.getLogger("agent_harness.agent")
 
+#: DeepSeek 系（主/备 provider 均为 deepseek 模型）工具调用的协议保留标记。
+#: 碎片化流下网关的 DSML 工具调用可能未被解析成结构化 tool_calls 而以乱码
+#: content 泄漏（冒烟实测 session 7afd328a：流式标记混进最终回答）——含此
+#: 标记的 content 绝不可能是合法模型回答，按模型故障处理（走统一失败兜底，
+#: 决不伪造 run/completed）。用全角 ｜ 保留标记做判据以杜绝误伤正常讨论文本。
+_DSML_MARKUP_MARKER = "<｜DSML｜"
+
 
 def _usage_from_response(ai: Any) -> dict[str, int] | None:
     """从模型响应如实抽取 token usage；响应没带就返回 None（绝不伪造）。
@@ -435,9 +442,18 @@ class AgentRuntime:
                 # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
                 # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），
                 # SSE 客户端因此能区分"模型答了空话"与"上游失败"。
-                if not _extract_text(ai.content) and not ai.tool_calls:
+                extracted_content = _extract_text(ai.content)
+                if not extracted_content and not ai.tool_calls:
                     raise RuntimeError(
                         "model returned an empty response (no content, no tool calls)"
+                    )
+                # DSML 协议泄漏守卫（冒烟实测）：无结构化 tool_calls 且 content
+                # 含协议保留标记 = 网关没把工具调用解析成结构化字段，绝不能把
+                # 这段标记文本当最终回答持久化——与空响应同一失败语义。
+                if not ai.tool_calls and _DSML_MARKUP_MARKER in extracted_content:
+                    raise RuntimeError(
+                        "model response contains malformed tool-call markup"
+                        " (DSML protocol leak); treating as model failure"
                     )
                 terminal.model_call_open = False  # 调用完整返回，后续异常不再归因 model
                 # duration_ms 严格闭合模型调用本身（ainvoke/astream 区间），
@@ -458,7 +474,7 @@ class AgentRuntime:
                 # 值对象归一化（A2）：本循环内所有消费点读类型化字段，不再拆原始 dict。
                 calls = ToolCall.normalize_all(ai.tool_calls or [])
                 tool_calls = calls
-                model_data: dict[str, Any] = {"content": _extract_text(ai.content)}
+                model_data: dict[str, Any] = {"content": extracted_content}
                 model_name = _model_name_from_response(ai)
                 if model_name:
                     model_data["model"] = model_name

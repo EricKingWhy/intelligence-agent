@@ -203,3 +203,39 @@ class TestModelFallbackInLoop:
         events = [e for e in session._events if e.type == MODEL_FALLBACK]
         assert len(events) == 1
         assert events[0].data["reason"] == "TimeoutError"
+
+
+class TestMalformedToolCallMarkupGuard:
+    """冒烟实测发现（session 7afd328a）：碎片流下 deepseek 的 DSML 工具调用
+    协议未解析成结构化 tool_calls，而是以乱码 content 泄漏——旧实现把它当
+    正常最终回答 run/completed（假装成功）。契约：含协议保留标记的 content
+    必须按模型故障处理（model/failed + run/failed），绝不伪造最终回答。"""
+
+    @pytest.mark.asyncio
+    async def test_dsml_markup_final_answer_fails_run(self, tmp_path):
+        from agent_harness.session import MODEL_FAILED
+
+        scripted = ScriptedModel([AIMessage(
+            content='\n\n<｜DSML｜tool_calls</parameter>\n'
+                    '<invoke name="true">{"ok"</invoke></p></p></',
+        )])
+        runtime = _runtime(scripted, None)
+        session = make_session(tmp_path)
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == "failed"
+        assert any(e.type == MODEL_FAILED for e in session._events)
+        assert not any(e.type == "run/completed" for e in session._events)
+
+    @pytest.mark.asyncio
+    async def test_normal_content_mentioning_markup_passes(self, tmp_path):
+        """讨论性质的文本（无协议保留标记 <｜DSML｜）不受影响。"""
+        scripted = ScriptedModel([AIMessage(content="DSML 是 deepseek 的工具调用协议")])
+        runtime = _runtime(scripted, None)
+        session = make_session(tmp_path)
+
+        result = await runtime.run(session, "什么是 DSML？")
+
+        assert result.status == "completed"
+        assert "deepseek" in result.final_text
