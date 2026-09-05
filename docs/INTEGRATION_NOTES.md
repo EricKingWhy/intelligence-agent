@@ -76,7 +76,9 @@ feat/frontend 已消费 [`HANDOFF_FRONTEND_SYNC.md`](后端仓库 docs/) 全部�
 
 ## 4.1 安全加固建议（2026-09-05 前端安全审查产出，供集成 AI 参考落地）
 
-前端已完成两项加固：不可信工具输出渲染截断（`truncateForDisplay`，20k 字符上限，防 MB 级 stdout/JSON 冻结 UI）+ 生产 sourcemap 关闭（`vite.config.ts`，不再向静态资源暴露 1.03MB 源码映射）。审查同时确认：**零 XSS sink**（全 src 无 dangerouslySetInnerHTML/innerHTML/eval，markdown 白名单渲染声明属实）、URL 构造已 encodeURIComponent、localStorage 仅两个非敏感枚举键、dist 产物无任何密钥。
+前端已完成两项加固：不可信工具输出渲染截断（`truncateForDisplay`，20k 字符上限，防 MB 级 stdout/JSON 冻结 UI）+ 生产 sourcemap 关闭（`vite.config.ts`，不再向静态资源暴露 1.03MB 源码映射）。审查同时确认：**零 XSS sink**（全 src 无 dangerouslySetInnerHTML/innerHTML/eval，markdown 白名单渲染声明属实）、URL 构造已 encodeURIComponent、localStorage 只有两个非敏感枚举键（`ahi.theme` / `ahi.traceDensity`）与一个凭据键（`ahi.apiToken` Bearer token——df4f7d8 认证接缝引入的开发者设置项，仅存本地浏览器、不进构建产物，清除入口在 TopBar 钥匙面板）、dist 产物无任何密钥。
+
+**CSP 兼容性实测（2026-09-05，前端 AI 回复后端 AI 的知会事项）**：已用生产构建 + 真实 CSP 头（`default-src 'self'; img-src 'self' data:`）加载 dist 实测。结论：**应用本体完全兼容**——`dist/index.html` 零内联 `<style>`、唯一 `<script>` 为外置 module、全 src 零内联 style 属性（`style={{}}` 无命中）、零 eval/innerHTML。**唯一被拦项：`index.css:18` 的 Google Fonts `@import`（fonts.googleapis.com 样式表 + fonts.gstatic.com 字体文件）**——console 明确报 `style-src` 回退 default-src 拦截，后果仅为字体静默降级到系统字体栈（Segoe UI / Cascadia 等），功能零影响。三个方案待前后端共同拍板：(A 推荐) 前端自托管 woff2（`web/public/fonts/` + @font-face，`font-src 'self'` 天然满足，保留现视觉）；(B) CSP 补 `style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com`（引入第三方域，与 self-only 初衷相悖）；(C) 移除网页字体全用系统栈（零成本，视觉略降）。拍板前可先上 CSP——最坏后果只是字体降级。
 
 **留给后端的一项（Scope Lock：后端 worktree 不归前端会话改）**：建议 FastAPI 静态服务（`src/agent_harness/web/app.py`）为 HTML 响应加 `Content-Security-Policy: default-src 'self'; img-src 'self' data:` 响应头——比 meta 标签可靠，且不影响 Vite dev。当前无注入 sink 故不可利用，属纵深防御。
 
