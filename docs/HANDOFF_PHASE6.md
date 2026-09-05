@@ -305,6 +305,8 @@ HTTP 请求
 
 2026-09-04：通过正式 MilvusVectorStore.connect 成功验证真实 Zilliz client/auth/list_collections，返回空列表，未创建 Collection、未写数据。不是 #56 完整 Gate。SDK 原始异常不出 adapter；当前 diff + 待提交文件 Secret scan 通过。
 
+2026-09-05：**#56 完整 Gate 跑通并关单**（feat/backend @ ec2d8ed，`uv run pytest tests/integration/test_phase6_memory_e2e.py -m integration`，3 passed / 77.7s）。真实 Zilliz Cloud + SiliconFlow embedding（Qwen3-Embedding-8B，1024 维）：真实认证与 connect、缺失 Collection 映射 collection_not_found（零变更）、故意无效 token 映射 authentication 不泄密；完整记忆链路（AgentRuntime run → MemoryExtractor → SqliteMemoryRecordStore 同事务 outbox → 真实 embedding → 真实 Zilliz upsert）语义检索排序、limit 截断、多租户/多用户隔离（bob 与异租户检索为空、get None、Context 注入为空）、持久 outbox 失败重试排空、64 维对既有 1024 维 Collection schema_mismatch 拒绝；清理逐条 delete 断言消失 + drop 测试 Collection 断言不在列表。无 memory/degraded。全程未打印任何凭证。
+
 Outbox 使用 revision 条件确认 + memory_id 游标分页，避免并发更新误确认和失败首页饿死后续任务。部署模型为单进程单 relay；start/stop 在 #55 组合入口接线。
 
 官方 SDK 参考：https://milvus.io/docs/use-async-milvus-client-with-asyncio.md ，https://milvus.io/docs/use-partition-key.md 。
