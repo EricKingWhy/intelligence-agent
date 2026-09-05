@@ -189,6 +189,20 @@ class AppState:
             wiring, self._wiring, self._registry = self._wiring, None, None
         if wiring is not None and wiring.memory is not None:
             await wiring.memory.close()
+        # 通用生命周期通道（Phase 8）：MCP 连接等按 aclose() 关闭；单个失败
+        # 不阻断其余清理（进程退出路径，隔离优先）。
+        if wiring is not None:
+            for obj in wiring.lifecycle:
+                aclose = getattr(obj, "aclose", None)
+                if aclose is None:
+                    continue
+                try:
+                    await aclose()
+                except Exception:
+                    logging.getLogger("agent_harness.web").warning(
+                        "lifecycle 关闭失败（%s），继续其余清理", type(obj).__name__,
+                        exc_info=True,
+                    )
 
 
 async def _build_runtime(

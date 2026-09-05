@@ -294,6 +294,7 @@ async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypat
             self.tools = []
             self.memory_writer = None
             self.memory = _StubMemory()
+            self.lifecycle = []  # Phase 8：通用生命周期通道（CapabilityWiring 契约）
 
     wire_started = asyncio.Event()
     release_wire = asyncio.Event()
