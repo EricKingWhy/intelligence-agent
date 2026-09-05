@@ -84,8 +84,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 var(--space-md);
-  height: 44px;
+  padding: 0 var(--space-lg);
+  height: 48px;
   flex-shrink: 0;
   background: var(--bg-sidebar);
   border: 1px solid var(--border-subtle);
@@ -112,46 +112,70 @@
   gap: var(--space-sm);
   min-width: 0;
 }
+/* 会话 id：从裸小灰字升级为 context chip（与 run-pulse 同族的胶囊节奏） */
 .appbar-session {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
+  background: var(--color-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  padding: 2px var(--space-sm);
+  font-variant-numeric: tabular-nums;
 }
 .appbar-toggle-active {
   color: var(--accent);
 }
 
-/* ── Run Pulse（signature #1）：icon+色+文字三通道，永不 color-only ── */
+/* ── Run Pulse（signature #1）：icon+色+文字三通道，永不 color-only ──
+ * 状态胶囊：激活/终态各带对应色调的淡底与描边，远距一眼可辨运行相位。 */
 .run-pulse {
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 3px var(--space-sm);
+  padding: 3px var(--space-md);
   border-radius: var(--radius-full);
   font-size: var(--text-xs);
+  font-weight: 500;
   background: var(--color-hover);
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple),
+    border-color var(--dur-out) var(--ease-apple);
 }
 .run-pulse svg {
   flex-shrink: 0;
 }
 .run-pulse.pulse-thinking {
   color: var(--accent);
+  background: var(--accent-muted);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 .run-pulse.pulse-thinking svg {
   animation: spin 2.2s linear infinite;
 }
 .run-pulse.pulse-tool {
   color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
 }
 .run-pulse.pulse-tool svg {
   animation: spin 1.4s linear infinite;
 }
 .run-pulse.pulse-completed {
   color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
 }
 .run-pulse.pulse-failed {
   color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+/* 取消 ≠ 失败：中性色（同 bash stopped 语义域），无动画——tint 保持克制 */
+.run-pulse.pulse-cancelled {
+  color: var(--text-secondary);
+  background: var(--color-hover);
+  border-color: var(--border-subtle);
 }
 
 /* ── Buttons ── */
@@ -223,11 +247,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 28px;
+  height: 28px;
   background: transparent;
   border: none;
   color: var(--color-muted-foreground);
   cursor: pointer;
-  padding: var(--space-xs);
+  padding: 0;
   border-radius: var(--radius-sm);
   transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
 }
@@ -240,38 +266,40 @@
   outline-offset: -2px;
 }
 
-/* ── Trace Density 四档切换（Phase 4，App Bar 右侧 radiogroup） ── */
+/* ── Trace Density 四档切换（Phase 4）：segmented control——选中块浮起
+ * （Linear 式分段器），不再是裸按钮 + 分隔线 + 实心 accent 的拼装感。 */
 .density-picker {
   display: inline-flex;
   align-items: center;
-  border: 1px solid var(--color-border);
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  overflow: hidden;
 }
 .density-btn {
   background: transparent;
   border: none;
+  border-radius: var(--radius-xs);
   color: var(--color-muted-foreground);
   font-size: 11px;
   line-height: 1;
   padding: 4px 8px;
   cursor: pointer;
-  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
-}
-.density-btn + .density-btn {
-  border-left: 1px solid var(--color-border);
+  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple),
+    box-shadow var(--dur-out) var(--ease-apple);
 }
 .density-btn:hover {
   color: var(--color-foreground);
-  background: var(--color-hover);
 }
 .density-btn:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
 .density-btn.sel {
-  color: #fff;
-  background: var(--color-accent);
+  color: var(--text-primary);
+  background: var(--surface-1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22), inset 0 0 0 0.5px var(--border-subtle);
 }
 
 /* ── Session Rail（左：低对比导航 chrome，嵌在 frame 内） ── */
@@ -335,14 +363,22 @@
   cursor: pointer;
   text-align: left;
   color: var(--color-foreground);
-  transition: background var(--dur-out) var(--ease-apple), box-shadow var(--dur-out) var(--ease-apple);
+  transition: background var(--dur-out) var(--ease-apple), box-shadow var(--dur-out) var(--ease-apple),
+    transform var(--dur-out) var(--ease-apple);
 }
 .session-item:hover {
   background: var(--color-hover);
+  transform: translateX(1px);
 }
+/* 选中态：accent 淡染 + 左侧 2px 聚焦指示条（Linear 式选中语言）——
+ * 比单纯底色更有"当前位置"感，且不依赖大色块。 */
 .session-item.selected {
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 28%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--accent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 24%, transparent);
+}
+.session-item.selected:hover {
+  transform: none;
 }
 .session-item:focus-visible {
   outline: 2px solid var(--color-accent);
@@ -370,17 +406,19 @@
 }
 .session-item-title {
   font-size: var(--text-sm);
+  font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   margin-bottom: 1px;
-  line-height: 1.3;
+  line-height: 1.35;
 }
+/* id 是辅助寻址信息：降为第三级——标题/元信息之间的层级从此拉开 */
 .session-item-id {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--text-primary);
+  color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -431,16 +469,17 @@
   display: grid;
   place-items: center;
   border-radius: var(--radius-lg);
-  background: var(--color-hover);
+  background: var(--surface-2);
   border: 1px solid var(--border-subtle);
     color: var(--color-accent);
   margin-bottom: var(--space-lg);
+  box-shadow: var(--edge-light);
 }
 .empty-hero {
   font-size: var(--text-xl);
   font-weight: 600;
   letter-spacing: -0.01em;
-  color: var(--color-muted-foreground);
+  color: var(--text-primary);
   margin-bottom: var(--space-sm);
 }
 .empty-sub {
@@ -457,7 +496,7 @@
 .example-chip {
   padding: 6px var(--space-md);
   border-radius: var(--radius-full);
-  background: var(--color-hover);
+  background: var(--surface-2);
   border: 1px solid var(--border-subtle);
   color: var(--color-muted-foreground);
   font-size: var(--text-xs);
@@ -468,8 +507,8 @@
 }
 .example-chip:hover {
   color: var(--color-foreground);
-  background: var(--color-surface-2);
-  border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+  background: var(--surface-1);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
   transform: translateY(-1px);
 }
 .example-chip:focus-visible {
@@ -500,7 +539,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--color-hover);
+  background: var(--surface-2);
   color: var(--color-muted-foreground);
   flex-shrink: 0;
   border: 1px solid var(--border-subtle);
@@ -634,15 +673,15 @@
   gap: var(--space-xs);
   padding-left: var(--space-md);
 }
-/* 极淡执行链竖线：串联 model 段与工具节点（User→LLM→Tool→Result→…） */
+/* 执行链竖线：两端渐隐的 1px 线（有头有尾的"轨道"感，而非生硬灰条） */
 .act-chain::before {
   content: '';
   position: absolute;
   left: 3.75px;
   top: 14px;
   bottom: 14px;
-  width: 0.5px;
-  background: var(--color-border);
+  width: 1px;
+  background: linear-gradient(to bottom, transparent, var(--border-subtle) 12%, var(--border-subtle) 88%, transparent);
 }
 .act-chain .model-output {
   position: relative;
@@ -659,15 +698,14 @@
   gap: 1px;
   padding-left: var(--space-md);
 }
-/* 极淡时间轴竖线：在节点左侧 padding 区，不穿图标 */
 .act-stream::before {
   content: '';
   position: absolute;
   left: 3.75px;
   top: 14px;
   bottom: 14px;
-  width: 0.5px;
-  background: var(--color-border);
+  width: 1px;
+  background: linear-gradient(to bottom, transparent, var(--border-subtle) 12%, var(--border-subtle) 88%, transparent);
 }
 .act-node {
   display: flex;
@@ -677,7 +715,7 @@
   padding: var(--space-xs) var(--space-sm);
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--color-foreground);
   text-align: left;
@@ -703,11 +741,12 @@
   color: var(--color-muted-foreground);
   flex-shrink: 0;
 }
+/* 工具名：mono + accent 淡色 + 550——运行步骤的"动词"，在灰参数海洋里可跳读 */
 .act-name {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  font-weight: 500;
-  color: var(--color-foreground);
+  font-weight: 550;
+  color: var(--accent);
   flex-shrink: 0;
 }
 .act-args {
@@ -723,7 +762,7 @@
 .act-duration {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--color-muted-foreground);
+  color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
@@ -1060,18 +1099,24 @@
   margin-top: var(--space-sm);
 }
 
-/* ── Composer：Floating Command Dock（视觉中心） ── */
+/* ── Composer：Floating Command Dock（视觉中心） ──
+ * elevation 提到最高档：它是空闲时唯一的动作焦点，值得浮在 workspace 之上；
+ * focus 时 accent ring + 轻微上浮，给出"工作台已激活"的明确反馈。 */
 .composer-wrap {
   padding: var(--space-sm) var(--space-lg) var(--space-lg);
 }
 .composer-dock {
   position: relative;
   border-radius: var(--radius-lg);
-  transition: box-shadow var(--dur-in) var(--ease-apple), border-color var(--dur-in) var(--ease-apple);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+  transition: box-shadow var(--dur-in) var(--ease-apple), border-color var(--dur-in) var(--ease-apple),
+    transform var(--dur-in) var(--ease-apple);
 }
 .composer-dock:focus-within {
   border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: var(--edge-light), 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent),
+    var(--shadow-popover);
+  transform: translateY(-1px);
 }
 .composer {
   display: block;
@@ -1108,21 +1153,24 @@
   border-radius: var(--radius-full);
   cursor: pointer;
   transition: filter var(--dur-out) var(--ease-apple), transform var(--dur-out) var(--ease-apple),
-    background var(--dur-out) var(--ease-apple);
+    background var(--dur-out) var(--ease-apple), box-shadow var(--dur-out) var(--ease-apple);
 }
 .composer-send {
   /* accent 直接配白图标在浅色主题仅 ~2.3:1（UI 组件需 3:1）——混入 18% 黑
      加深实底，白图标对比过线，双主题视觉仍是同一族青色。 */
   background: color-mix(in srgb, var(--color-accent) 82%, #000);
   color: #fff;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-accent) 32%, transparent);
 }
 .composer-send:hover:not(:disabled) {
   filter: brightness(1.1);
   transform: translateY(-1px);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
 .composer-send:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+  box-shadow: none;
 }
 .composer-stop {
   background: color-mix(in srgb, var(--color-destructive) 88%, transparent);
@@ -1158,17 +1206,36 @@
 }
 .run-badge {
   font-size: var(--text-xs);
-  padding: 2px var(--space-sm);
+  font-weight: 500;
+  padding: 2px var(--space-md);
   border-radius: var(--radius-full);
   background: var(--color-hover);
+  border: 1px solid var(--border-subtle);
   color: var(--color-muted-foreground);
   font-variant-numeric: tabular-nums;
 }
-.run-badge-running { color: var(--accent); }
-.run-badge-thinking { color: var(--accent); }
-.run-badge-tool { color: var(--warning); }
-.run-badge-completed { color: var(--success); }
-.run-badge-failed { color: var(--danger); }
+/* 与顶栏 run-pulse 同一状态语言：tinted 胶囊 */
+.run-badge-running,
+.run-badge-thinking {
+  color: var(--accent);
+  background: var(--accent-muted);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.run-badge-tool {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+}
+.run-badge-completed {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+}
+.run-badge-failed {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
 .run-badge-idle { color: var(--text-tertiary); }
 
 /* ── Inspector 五 tab（Phase 5，Brief "V1 Tabs"） ── */
@@ -1189,7 +1256,7 @@
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  color: var(--color-muted-foreground);
+  color: var(--text-tertiary);
   font-size: var(--text-xs);
   font-weight: 500;
   padding: var(--space-xs) var(--space-xs);
@@ -1203,6 +1270,7 @@
 }
 .detail-tab.sel {
   color: var(--color-foreground);
+  font-weight: 600;
   border-bottom-color: var(--color-accent);
 }
 .detail-tab:focus-visible {
@@ -1241,6 +1309,44 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+/* Timeline 窗口化控制条（P1-4）：窗口化只裁视图不裁真相（不变量 #22）——
+ * 控制条要明示"前段已折叠但可加载"，用虚线分隔与列表区隔开。 */
+.timeline-window-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 0 var(--space-sm);
+  margin-bottom: var(--space-xs);
+  border-bottom: 1px dashed var(--border-subtle);
+}
+.timeline-earlier {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xs) var(--space-sm);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font: 500 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-apple), border-color var(--dur-fast) var(--ease-apple);
+}
+.timeline-earlier:hover {
+  background: var(--accent-muted);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.timeline-earlier:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.timeline-window-hint {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 .timeline-row {
   display: flex;
@@ -1374,12 +1480,16 @@
   font-weight: 600;
   margin-bottom: var(--space-xs);
 }
+.detail-section-title svg {
+  color: var(--accent);
+  opacity: 0.8;
+}
 .detail-row {
   display: flex;
   justify-content: space-between;
   gap: var(--space-md);
   font-size: var(--text-sm);
-  padding: 2px 0;
+  padding: 3px 0;
 }
 .detail-key {
   color: var(--color-muted-foreground);
@@ -1387,6 +1497,7 @@
 }
 .detail-val {
   color: var(--color-foreground);
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   text-align: right;
   overflow: hidden;
@@ -1416,7 +1527,7 @@
   font: 500 var(--text-sm) var(--font-ui);
   text-align: left;
   width: 100%;
-  transition: background var(--dur-fast) var(--ease-apple);
+  transition: background var(--dur-fast) var(--ease-apple), box-shadow var(--dur-fast) var(--ease-apple);
 }
 .detail-tool-row:hover {
   background: var(--color-hover);
@@ -1427,7 +1538,8 @@
 }
 .detail-tool-row.sel {
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 28%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--accent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 24%, transparent);
 }
 .tool-status-dot {
   width: 6px;
@@ -1623,11 +1735,11 @@
 .model-tag {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--color-muted-foreground);
-  background: var(--color-hover);
+  color: var(--text-secondary);
+  background: var(--surface-2);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
-  padding: 1px 8px;
+  padding: 2px var(--space-sm);
   white-space: nowrap;
 }
 
@@ -1677,7 +1789,7 @@
 }
 .auth-panel {
   position: absolute;
-  top: 46px;
+  top: 50px;
   right: var(--space-md);
   z-index: 40;
   width: 340px;
@@ -1685,10 +1797,14 @@
   flex-direction: column;
   gap: var(--space-sm);
   padding: var(--space-md);
-  background: var(--surface-overlay);
-  border: 1px solid var(--border-subtle);
+  /* popover 是玻璃合法区（tokens 冻结规则）：半透明 + blur + 边缘光 */
+  background: color-mix(in srgb, var(--surface-overlay) 84%, transparent);
+  backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+  animation: reveal-in var(--dur-in) var(--ease-apple);
 }
 .auth-panel-title {
   font: 600 var(--text-sm) var(--font-ui);
