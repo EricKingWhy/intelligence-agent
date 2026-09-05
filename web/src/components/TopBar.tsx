@@ -87,6 +87,12 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           <PulseIcon size={14} aria-hidden="true" />
           {pulse.label}
           {active && elapsedSec > 0 && <span className="num"> · {elapsedSec}s</span>}
+          {/* Claude Code "(13s · 28 tokens)" 语言：run 用量计数。usage_total 是
+              投影从 model/completed 聚合的已有真相——工具型 run 流式期间逐步累加，
+              纯文本 run 完成时一次到位；无数据不显示（零伪造）。 */}
+          {conversation?.usage_total && (
+            <span className="num"> · {conversation.usage_total.total_tokens.toLocaleString()} tok</span>
+          )}
         </span>
       </div>
 

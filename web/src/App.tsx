@@ -70,6 +70,22 @@ export default function App() {
     applyDensity(next);
   };
 
+  // Esc 中断（Claude Code "esc to interrupt" 语言）：流式中 Esc = 停止当前 run，
+  // 与 Composer 停止按钮同走 cancelStream。dialog 打开时（palette/auth 面板）
+  // Esc 优先归它们——target 在 dialog 内则不抢。target 可能是 window/document
+  //（合成事件/焦点缺失），closest 仅对 Element 存在——先做类型守卫。
+  useEffect(() => {
+    if (!streaming) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const t = e.target;
+      if (t instanceof Element && t.closest('[role="dialog"]')) return;
+      cancelStream();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [streaming, cancelStream]);
+
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
   const toggleTheme = useCallback(() => {

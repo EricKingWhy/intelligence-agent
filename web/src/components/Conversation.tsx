@@ -52,6 +52,9 @@ const EXAMPLE_TASKS = [
 export function Conversation({ conversation, loadingHistory, density, disclosure, jumpRequest, onPresetTask, onFocusTool }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
+  // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
+  const [follow, setFollow] = useState(true);
 
   // PRD §20.2 / ADR-0014 D7：turns 列表窗口化（@tanstack/react-virtual）。
   // turn 是虚拟单元（user 消息 + 执行链，高度差异大）→ measureElement 动态测高；
@@ -108,17 +111,30 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
     });
   }, [jumpRequest, turns, virtualizer]);
 
-  // Auto-scroll while streaming — but only when the user is already near the
-  // bottom; scrolling up to read history must not be yanked back every delta.
+  // Auto-scroll while streaming — but only when following (user near bottom);
+  // scrolling up to read history must not be yanked back every delta.
   useEffect(() => {
     if (conversation?.run_status !== 'running') return;
     const el = scrollRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    setFollow(nearBottom);
     if (nearBottom) {
       endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
   }, [conversation]);
+
+  // Follow-mode：用户主动滚动时更新跟随态（流式增长不触发 scroll 事件，
+  // scrollIntoView 会触发——nearBottom 判定天然收敛，不会闪烁）。
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 120);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
 
   if (loadingHistory) {
     return (
@@ -180,6 +196,19 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
         </div>
         <div ref={endRef} />
       </div>
+      {/* Follow-mode 浮标（pi-mono "jump to latest"）：仅在流式中且用户已上滚时出现 */}
+      {!follow && conversation.run_status === 'running' && (
+        <button
+          className="follow-pill"
+          onClick={() => {
+            setFollow(true);
+            endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+          }}
+          aria-label="滚动到最新内容"
+        >
+          ↓ 最新
+        </button>
+      )}
     </div>
   );
 }

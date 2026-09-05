@@ -55,9 +55,15 @@ export const Composer = memo(function Composer({ streaming, onSubmit, onCancel, 
           aria-label="Agent 任务"
         />
         {streaming ? (
-          <button className="composer-stop" onClick={onCancel} aria-label="停止" title="停止">
-            <Square size={14} />
-          </button>
+          <>
+            {/* Esc 中断提示（Claude Code "esc to interrupt" 语言）：键位绑定在 App 全局，这里只做可见性 */}
+            <span className="composer-esc-hint" aria-hidden="true">
+              <kbd>Esc</kbd> 停止
+            </span>
+            <button className="composer-stop" onClick={onCancel} aria-label="停止" title="停止">
+              <Square size={14} />
+            </button>
+          </>
         ) : (
           <button
             className="composer-send"
