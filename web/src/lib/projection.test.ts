@@ -824,4 +824,36 @@ describe('applyEvent — recover 合成 tool/result 配对（df4f7d8 无 step_id
     expect(s.turns).toHaveLength(1); // 不造幽灵轮次
     expect(s.turns[0].tools[0].status).toBe('failed'); // 非 JSON content → 失败而非 running
   });
+
+  it('TOOL_RESULT 的 step 与 tool/call 落点不一致时回退全局配对（不丢结果）', () => {
+    // 条件配对锁定：step 可解析时走快路径（step 定位宿主轮），但快路径
+    // 在目标轮找不到该 tool_call_id 时必须回退按 tool_call_id 全局配对——
+    // 否则后端 step 不一致形状下结果会被静默丢弃、工具永远停在 running。
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash', args: {} },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true }) },
+      step_id: 2, // 与 tool/call 落点（step 1）不一致
+    }));
+    expect(s.turns).toHaveLength(1);
+    expect(s.turns[0].tools[0].status).toBe('success');
+  });
+
+  it('TOOL_RESULT 正常同 step 快路径配对（step_id 定位，不依赖全局扫描）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 't1', tool_name: 'bash', args: {} },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, data: {} }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].status).toBe('success');
+  });
 });

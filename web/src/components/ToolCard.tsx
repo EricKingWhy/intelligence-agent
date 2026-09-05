@@ -24,6 +24,7 @@ import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
   parseReadShape,
+  stripGrepTruncatedSuffix,
   type ReadShape,
 } from '../lib/toolShapes';
 import { CopyButton } from './CopyButton';
@@ -205,7 +206,7 @@ function TruncationAwarePre({ text, className }: { text: string; className?: str
           <span key={i}>
             {cut ? (
               <>
-                {line.slice(0, -GREP_TRUNCATED_SUFFIX.length)}
+                {stripGrepTruncatedSuffix(line)}
                 <span className="trunc-suffix" title="该行因超长被截断">{GREP_TRUNCATED_SUFFIX}</span>
               </>
             ) : (

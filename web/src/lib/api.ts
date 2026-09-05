@@ -14,6 +14,17 @@ const BASE = ''; // relative — Vite proxy handles /api → :8000
 /** Thrown for any 401 (after auth.onUnauthorized has broadcast the detail). */
 export class UnauthorizedError extends Error {}
 
+/** FastAPI 错误体 {detail} 读取：形状不符或 JSON 解析失败返回 ''——
+ *  错误处理路径自身不再产生新错误（两处 401/409 消费共享的单一实现）。 */
+async function readErrorDetail(res: Response): Promise<string> {
+  try {
+    const j = await res.json();
+    return j && typeof j.detail === 'string' ? j.detail : '';
+  } catch {
+    return '';
+  }
+}
+
 /** Single request seam: auth header injection + 401 interception. */
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
@@ -21,10 +32,7 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
   if (res.status === 401) {
-    const detail = await res
-      .json()
-      .then((j) => (j && typeof j.detail === 'string' ? j.detail : ''))
-      .catch(() => '');
+    const detail = await readErrorDetail(res);
     emitUnauthorized(detail || 'Missing identity token');
     throw new UnauthorizedError(detail || '需要身份令牌（401）');
   }
@@ -98,10 +106,7 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
   });
   if (res.status === 404) throw new RecoverError(404, '会话不存在');
   if (res.status === 409) {
-    const detail = await res
-      .json()
-      .then((j) => (j && typeof j.detail === 'string' ? j.detail : ''))
-      .catch(() => '');
+    const detail = await readErrorDetail(res);
     throw new RecoverError(409, detail || '存在需要人工裁决的高风险操作');
   }
   if (!res.ok) throw new RecoverError(res.status, `恢复失败（${res.status}）`);

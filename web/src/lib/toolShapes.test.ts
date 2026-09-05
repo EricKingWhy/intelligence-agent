@@ -6,6 +6,7 @@ import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
   parseReadShape,
+  stripGrepTruncatedSuffix,
 } from './toolShapes';
 
 describe('parseReadShape — read 续读标记', () => {
@@ -78,5 +79,11 @@ describe('grep 截断尾巴', () => {
     expect(hasGrepTruncatedSuffix(`some matching line${GREP_TRUNCATED_SUFFIX}`)).toBe(true);
     expect(hasGrepTruncatedSuffix('normal line')).toBe(false);
     expect(hasGrepTruncatedSuffix('... [truncated] not at end')).toBe(false);
+  });
+
+  it('stripGrepTruncatedSuffix：带尾巴的行剥离尾巴、普通行原样返回', () => {
+    expect(stripGrepTruncatedSuffix(`some matching line${GREP_TRUNCATED_SUFFIX}`)).toBe('some matching line');
+    expect(stripGrepTruncatedSuffix('normal line')).toBe('normal line');
+    expect(stripGrepTruncatedSuffix('')).toBe('');
   });
 });

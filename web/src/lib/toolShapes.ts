@@ -72,3 +72,9 @@ export const GREP_TRUNCATED_SUFFIX = '... [truncated]';
 export function hasGrepTruncatedSuffix(line: string): boolean {
   return line.endsWith(GREP_TRUNCATED_SUFFIX);
 }
+
+/** 剥离行尾截断尾巴，返回正文（无尾巴时原样返回）。
+ *  标记语义归 toolShapes 单点所有——渲染层不再手写 slice 偏移。 */
+export function stripGrepTruncatedSuffix(line: string): string {
+  return hasGrepTruncatedSuffix(line) ? line.slice(0, -GREP_TRUNCATED_SUFFIX.length) : line;
+}

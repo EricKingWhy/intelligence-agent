@@ -56,6 +56,21 @@ export interface RecoverState {
   conflict: boolean;
 }
 
+/** Recover 三态的 idle 初值——三处复用（useState 初值 / mode 迁移重置 / 200
+ *  成功回位）。对象只被整体替换、从不就地修改，共享引用安全。 */
+const RECOVER_IDLE: RecoverState = { status: 'idle', message: null, conflict: false };
+
+/** Recover 响应落地守护（不变量 #22，shouldApplyStreamFrame 的姊妹契约）。
+ *
+ * recover 是异步请求：pending 期间用户可能已切走（selectSession /
+ * submitTask / cancelStream 都会迁移 mode）。晚到的 200 响应若仍
+ * setConversation，会用旧会话的重建结果覆盖刚加载的目标会话视图——
+ * 与迟到 SSE 帧同族的 stale-write。仅当当前模式仍是「查看该会话」时，
+ * recover 的结果才是当前视图的权威真相。 */
+export function shouldApplyRecoverResult(mode: SessionMode, sid: string): boolean {
+  return mode.kind === 'viewing' && mode.sessionId === sid;
+}
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
@@ -79,7 +94,7 @@ export function useSession() {
   // Recover 三态（df4f7d8 §1.1）：idle → pending → 200 成功（回到 idle，整表
   // 重建）/ 404·409·网络错误 → error。409 是"需人工裁决"（conflict=true），
   // 本期只展示原因，不做裁决交互（不变量 #14：不伪造、不盲跑）。
-  const [recoverState, setRecoverState] = useState<RecoverState>({ status: 'idle', message: null, conflict: false });
+  const [recoverState, setRecoverState] = useState<RecoverState>(RECOVER_IDLE);
 
   // Derived, so the UI can never observe a mismatch between them.
   const selectedId = mode.kind === 'idle' ? null : mode.sessionId;
@@ -118,7 +133,7 @@ export function useSession() {
   // idle owns no conversation.
   useEffect(() => {
     // 任何 mode 迁移都重置 recover 三态（恢复状态不跨会话/流存活）。
-    setRecoverState({ status: 'idle', message: null, conflict: false });
+    setRecoverState(RECOVER_IDLE);
     if (mode.kind === 'idle') {
       setConversation(null);
       return;
@@ -239,14 +254,19 @@ export function useSession() {
 
   /** 恢复中断会话（POST /recover，幂等）。200 → 整表重建：响应是与 GET events
    *  同构的全量事件数组，走同一 projectHistory 管线（不变量 #22——不引入第二套
-   *  会话真相）；404/409 → 三态 error（409 附裁决原因，conflict=true）。 */
+   *  会话真相）；404/409 → 三态 error（409 附裁决原因，conflict=true）。
+   *  落地前先过 shouldApplyRecoverResult 守护：pending 期间切走即丢弃。 */
   const recover = useCallback(
     async (sid: string) => {
       setRecoverState({ status: 'pending', message: null, conflict: false });
       try {
         const events = await recoverSession(sid);
-        setConversation(projectHistory(sid, events));
-        setRecoverState({ status: 'idle', message: null, conflict: false });
+        // stale-write 守护（不变量 #22）：pending 期间用户可能已切走——
+        // 晚到的 200 响应不得覆盖目标会话视图（viewing 会由持久事件源重建）。
+        if (shouldApplyRecoverResult(modeRef.current, sid)) {
+          setConversation(projectHistory(sid, events));
+        }
+        setRecoverState(RECOVER_IDLE);
         void refreshSessions();
       } catch (e) {
         if (e instanceof RecoverError) {

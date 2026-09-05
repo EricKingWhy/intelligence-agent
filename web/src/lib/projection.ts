@@ -204,15 +204,26 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     }
 
     case EventType.TOOL_RESULT: {
-      // 配对优先按 tool_call_id 全局定位所属轮次：recover 合成的 tool/result
-      // 不带 step_id（df4f7d8），resolveStep 的 turns.length+1 兜底会给它造出
-      // 幽灵轮次、工具永远停在 running。定位不到再走 resolveStep 旧路径。
-      const orphanId = String(data.tool_call_id ?? '');
-      const ownerIdx = next.turns.findIndex((t) => t.tools.some((x) => x.tool_call_id === orphanId));
-      const step = ownerIdx !== -1 ? next.turns[ownerIdx].step_id : resolveStep(event, next);
-      withTurnAt(next, step, (turn) => {
-        const id = String(data.tool_call_id ?? '');
-        const toolIdx = turn.tools.findIndex((t) => t.tool_call_id === id);
+      // 配对定位两段式（性能修复：旧实现无条件 O(轮×工具) 全局扫描，正常流
+      // 每个结果都白付）：
+      //   1. 快路径——事件可解析出 step 且该轮持有此 tool_call_id（正常流
+      //      tool/call 与 tool/result 同 step），直接定位；
+      //   2. 慢路径——目标轮里找不到该 id（recover 合成的无 step_id 事件、
+      //      或后端 step 与 tool/call 落点不一致）才按 tool_call_id 全局
+      //      配对定位宿主轮（df4f7d8：无 step_id 走 resolveStep 会造幽灵轮次，
+      //      工具永远停在 running）。
+      const callId = String(data.tool_call_id ?? '');
+      const step = resolveStep(event, next);
+      const hostIdx = next.turns.findIndex(
+        (t) => t.step_id === step && t.tools.some((x) => x.tool_call_id === callId),
+      );
+      const ownerIdx =
+        hostIdx !== -1
+          ? hostIdx
+          : next.turns.findIndex((t) => t.tools.some((x) => x.tool_call_id === callId));
+      const hostStep = ownerIdx !== -1 ? next.turns[ownerIdx].step_id : step;
+      withTurnAt(next, hostStep, (turn) => {
+        const toolIdx = turn.tools.findIndex((t) => t.tool_call_id === callId);
         if (toolIdx === -1) return;
         // Backend serializes the full ToolResult via model_dump_json() — so content is
         // a JSON string shaped {ok, message, data, error_code, retryable, metadata, ...}.

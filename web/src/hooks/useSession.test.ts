@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent, SessionMode } from '../types';
-import { shouldApplyStreamFrame } from './useSession';
+import { shouldApplyRecoverResult, shouldApplyStreamFrame } from './useSession';
 
 const ev = (type: string, session_id: string | null): AgentEvent => ({
   type,
@@ -53,5 +53,33 @@ describe('shouldApplyStreamFrame — 流式帧是否仍是当前模式的权威�
   it('live(sid) + 帧 session_id 缺省（首帧未带 sid）：仍应用——sid 首帧才落定', () => {
     const mode: SessionMode = { kind: 'live', sessionId: 'A' };
     expect(shouldApplyStreamFrame(mode, ev('model/delta', null))).toBe(true);
+  });
+});
+
+describe('shouldApplyRecoverResult — recover 响应是否仍是当前模式的权威真相', () => {
+  // 同 shouldApplyStreamFrame 家族的 stale-write 守护：recover pending 期间
+  // 用户可能已切走（selectSession / submitTask / cancelStream），晚到的 200
+  // 响应不得覆盖刚加载的目标会话视图（不变量 #22）。
+
+  it('viewing(sid) 且 sid 匹配：应用重建结果（正常路径）', () => {
+    const mode: SessionMode = { kind: 'viewing', sessionId: 'A' };
+    expect(shouldApplyRecoverResult(mode, 'A')).toBe(true);
+  });
+
+  it('viewing(其他 sid)：拒绝——pending 期间已切到别的会话，旧响应不得覆盖', () => {
+    const mode: SessionMode = { kind: 'viewing', sessionId: 'B' };
+    expect(shouldApplyRecoverResult(mode, 'A')).toBe(false);
+  });
+
+  it('live：拒绝——pending 期间已开始新流，recover 结果与当前视图无关', () => {
+    const mode: SessionMode = { kind: 'live', sessionId: null };
+    expect(shouldApplyRecoverResult(mode, 'A')).toBe(false);
+    const modeLive = { kind: 'live', sessionId: 'A' } as const;
+    expect(shouldApplyRecoverResult(modeLive, 'A')).toBe(false);
+  });
+
+  it('idle：拒绝——已无持有会话', () => {
+    const mode: SessionMode = { kind: 'idle' };
+    expect(shouldApplyRecoverResult(mode, 'A')).toBe(false);
   });
 });
