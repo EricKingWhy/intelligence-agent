@@ -254,3 +254,42 @@ async def test_memory_partial_init_failure_closes_components(caplog):
         )
     assert fake.closed, "半初始化的 components 必须被显式 close"
     assert wiring.memory is None  # 未注册 → 调用方无从关闭 → 必须在接线内关闭
+
+
+# ── 批次 A / 候选 4：CapabilityWiring 是 lifecycle owner ──
+
+
+@pytest.mark.asyncio
+async def test_wiring_aclose_closes_memory_and_lifecycle_with_isolation():
+    """aclose 关闭 memory 组件 + 全部 lifecycle 项；单项失败不阻断其余清理
+    （关闭知识从 web 层 AppState 收拢回创建者，web 只管 get/shutdown）。"""
+
+    class FakeMemory:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FailingClose:
+        async def aclose(self):
+            raise RuntimeError("mcp channel broken")
+
+    class FakeLifecycle:
+        def __init__(self):
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    memory = FakeMemory()
+    failing = FailingClose()
+    lifecycle = FakeLifecycle()
+    wiring = CapabilityWiring(
+        memory=memory, lifecycle=[failing, lifecycle],
+    )
+
+    await wiring.aclose()
+
+    assert memory.closed, "memory 组件必须被关闭"
+    assert lifecycle.closed, "failing 项之后其余 lifecycle 仍须被关闭（隔离）"

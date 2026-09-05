@@ -96,3 +96,30 @@ def test_overflow_chars_smaller_than_marker_is_rejected_at_construction():
         ArtifactOverflowHandler(FakeArtifactStore(), overflow_chars=50)
     # 默认预算不受影响（既有行为回归锚点）。
     ArtifactOverflowHandler(FakeArtifactStore())
+
+
+@pytest.mark.asyncio
+async def test_diff_view_fields_are_overflow_covered(tmp_path):
+    """write/edit 的 before/after diff 字段（Q12=B 前端双栏视图原料）也在
+    overflow 预算内：写大文件时完整内容进 Artifact、模型只拿摘要。此前只
+    覆盖 output/content/stdout/stderr——读大文件被摘要，写大文件却把
+    ~2×50KB 原文回灌进 Context（不变量 #15：模型只拿 summary + ref）。"""
+    session = make_session(tmp_path)
+    events_before = list(session.events)
+    store = FakeArtifactStore()
+    big = "\n".join(f"line {i}: 内容" for i in range(5000))
+    result = ToolResult.success(
+        "已写入。",
+        data={"path": "x.txt", "before": "", "after": big, "truncated": False},
+    )
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "write", result,
+    )
+    artifact = await store.load(compact.artifact_ref)
+    assert artifact.content == big
+    assert len(compact.data["after"]) < 2000
+    assert "inspect_artifact" in compact.data["after"]
+    assert compact.data["before"] == ""
+    assert compact.data["path"] == "x.txt" and compact.data["truncated"] is False
+    assert deferred and deferred[0][0] == "artifact/created"
+    assert session.events == events_before, "延迟事件由 Runtime 在 tool/call 后追加，handler 不落盘"

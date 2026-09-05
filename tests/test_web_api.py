@@ -25,7 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
-from agent_harness.agent import AgentEvent, AgentRuntime
+from agent_harness.agent import AgentEvent
 from agent_harness.config import Settings
 from agent_harness.session import (
     RUN_STARTED,
@@ -33,15 +33,17 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
 )
-from agent_harness.tooling import ToolExecutor, ToolRegistry
-from agent_harness.web.app import _build_runtime, create_app
+from agent_harness.web.app import create_app
 from tests.scripted_model import ScriptedModel
 
 
 @pytest.fixture
 def app(tmp_path):
-    """用 tmp workspace 创建 app，避免污染真实 .agent/。"""
-    settings = Settings(workspace_dir=str(tmp_path))
+    """用 tmp workspace 创建 app，避免污染真实 .agent/。
+
+    model_api_key 提供占位值：装配走真实 factory（批次 A），ModelConfig
+    需要 key 才能构造（模型调用本身由测试替换替身）。"""
+    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
     return create_app(settings, enable_cors=False)
 
 
@@ -133,19 +135,9 @@ def test_get_events_ok(tmp_path):
 
 def test_create_session_streams_sse(client):
     """POST /api/sessions 应返回 text/event-stream 并流多帧 AgentEvent。"""
-    # 用 stub runtime 避免 LLM 调用：patch _build_runtime 返回一个轻量 runtime
-    _settings = Settings(
-        workspace_dir=str(client.app.state.agent.settings.workspace_dir)
-    )
-    reg = ToolRegistry()
-    exe = ToolExecutor(reg)
-    stub_runtime = AgentRuntime(
-        model=ScriptedModel(responses=[AIMessage(content="hello from stub")]),
-        registry=reg,
-        executor=exe,
-        max_steps=2,
-    )
-    with patch("agent_harness.web.app._build_runtime", return_value=stub_runtime):
+    # 用替身模型避免 LLM 调用：patch 装配层 model seam，factory 构建真实 runtime
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModel(responses=[AIMessage(content="hello from stub")])):
         resp = client.post(
             "/api/sessions",
             json={"task": "say hi", "max_steps": 2},
@@ -216,13 +208,8 @@ def test_create_session_rejects_parent_escape_workspace(app):
 
 def test_create_session_accepts_plain_workspace_name(client):
     """单段相对名 "my-task" 保持可用：200，目录建在 workspaces_root 下。"""
-    stub_runtime = AgentRuntime(
-        model=ScriptedModel(responses=[AIMessage(content="ok")]),
-        registry=ToolRegistry(),
-        executor=ToolExecutor(ToolRegistry()),
-        max_steps=2,
-    )
-    with patch("agent_harness.web.app._build_runtime", return_value=stub_runtime):
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModel(responses=[AIMessage(content="ok")])):
         resp = client.post("/api/sessions", json={"task": "hi", "workspace": "my-task"})
     assert resp.status_code == 200
     assert (client.app.state.agent.workspaces_root / "my-task").is_dir()
@@ -288,12 +275,13 @@ async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypat
         async def close(self) -> None:
             close_calls.append("closed")
 
-    class _StubWiring:
-        def __init__(self) -> None:
-            self.context_providers = []
-            self.tools = []
-            self.memory_writer = None
-            self.memory = _StubMemory()
+    from agent_harness.capability.wiring import CapabilityWiring
+
+    class _StubWiring(CapabilityWiring):
+        """真 dataclass 子类：aclose 契约（memory + lifecycle 隔离关闭）生效。"""
+
+        def __init__(self, memory):
+            super().__init__(memory=memory, lifecycle=[])
 
     wire_started = asyncio.Event()
     release_wire = asyncio.Event()
@@ -301,7 +289,7 @@ async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypat
     async def slow_wire(registry, config, settings=None):
         wire_started.set()
         await release_wire.wait()  # 模拟慢装配（真实场景是连 Milvus / embedding）
-        return _StubWiring()
+        return _StubWiring(_StubMemory())
 
     monkeypatch.setattr(web_app, "wire_capabilities", slow_wire)
 
@@ -398,13 +386,9 @@ def test_create_session_sse_emits_run_failed_on_model_error(client):
     终结帧后正常 return——SSE 消费者必须收到 200 + 完整终止帧，而不是连接
     半途而死。这里用真实 AgentRuntime + 空剧本模型（首次调用即抛 RuntimeError）。
     """
-    stub_runtime = AgentRuntime(
-        model=ScriptedModel(responses=[]),  # 空剧本 → 首次模型调用即抛 RuntimeError
-        registry=ToolRegistry(),
-        executor=ToolExecutor(ToolRegistry()),
-        max_steps=2,
-    )
-    with patch("agent_harness.web.app._build_runtime", return_value=stub_runtime):
+    # 空剧本 → 首次模型调用即抛 RuntimeError
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModel(responses=[])):
         resp = client.post("/api/sessions", json={"task": "boom", "max_steps": 2})
     assert resp.status_code == 200
     assert "text/event-stream" in resp.headers.get("content-type", "")
@@ -508,11 +492,11 @@ async def test_disconnect_cancels_sse_producer(tmp_path):
             finally:
                 self.cancelled.set()
 
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
 
     hanging = HangingRuntime()
-    with patch("agent_harness.web.app._build_runtime", return_value=hanging):
+    with patch("agent_harness.web.app.build_runtime", return_value=hanging):
         transport = _DisconnectingASGI(app)
         scope = {
             "type": "http",
@@ -567,7 +551,7 @@ def test_create_session_runtime_failure_leaves_no_orphan(client, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("model constructor exploded")
 
-    monkeypatch.setattr("agent_harness.web.app._build_runtime", boom)
+    monkeypatch.setattr("agent_harness.web.app.build_runtime", boom)
     from fastapi.testclient import TestClient as _TC
     raw_client = _TC(client.app, raise_server_exceptions=False)
     store_root = client.app.state.agent.sessions_root
@@ -582,25 +566,33 @@ def test_create_session_runtime_failure_leaves_no_orphan(client, monkeypatch):
 
 
 def test_build_runtime_wires_recovery_stores(tmp_path):
-    """_build_runtime 必须把 Ledger / Checkpoint / SessionMeta 接进 runtime
+    """build_runtime 必须把 Ledger / Checkpoint / SessionMeta 接进 runtime
     ——不变量 #12/#13/#14 在生产路径可执行，而不是只活在测试里。"""
     import asyncio
     from unittest.mock import patch as _patch
 
+    from agent_harness.assembly import assemble_wiring, build_runtime
     from agent_harness.storage import OnStableBoundary
 
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
     state = app.state.agent
     workspace = state.workspaces_root / "sess-wiring"
-    with _patch("agent_harness.web.app.create_chat_model", return_value=object()):
-        runtime = asyncio.run(_build_runtime(state, workspace, 10, True, session_id="sess-wiring"))
+    stores = state.stores
+    _, wiring = asyncio.run(assemble_wiring(settings))
+    with _patch("agent_harness.assembly.create_chat_model", return_value=object()):
+        runtime = asyncio.run(build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=state.workspace_registry,
+            session_id="sess-wiring", workspace=workspace,
+            max_steps=10, auto_approve=True,
+        ))
     # 映射持久化：恢复时可还原 sandbox（web session 不再是无映射孤儿）
     assert state.workspace_registry.exists("sess-wiring")
-    assert runtime.executor._operation_ledger is state.operation_ledger
-    assert runtime._session_meta_store is state.session_meta_store
+    assert runtime.executor._operation_ledger is stores.operation_ledger
+    assert runtime._session_meta_store is stores.session_meta_store
     assert isinstance(runtime._checkpoint_policy, OnStableBoundary)
-    assert runtime._checkpoint_policy._store is state.checkpoint_store
+    assert runtime._checkpoint_policy._store is stores.checkpoint_store
 
 
 def test_create_session_persists_workspace_mapping(tmp_path):
@@ -614,7 +606,7 @@ def test_create_session_persists_workspace_mapping(tmp_path):
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
     state = app.state.agent
-    with _patch("agent_harness.web.app.create_chat_model",
+    with _patch("agent_harness.assembly.create_chat_model",
                 return_value=ScriptedModel([AIMessage(content="done")])):
         client = TestClient(app)
         resp = client.post("/api/sessions", json={"task": "t"})
@@ -656,3 +648,19 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
 
     # 未知 session → 404
     assert client.post("/api/sessions/nonexistent-id-123/recover").status_code == 404
+
+
+# ── 集成 AI 移交：HTML 响应 CSP 头（纵深防御，INTEGRATION_NOTES §4.1）──
+
+
+def test_csp_header_on_all_responses(client):
+    """CSP 策略头必须存在且与前端约定的值一致。
+
+    default-src 'self'：脚本/样式只认同源文件（前端构建产物外置）；
+    img-src 放行 data:（内联图片）。API JSON 响应带上无害（浏览器仅对
+    HTML 文档执行 CSP），统一设置换取确定性——不会漏掉任何静态入口。
+    """
+    expected = "default-src 'self'; img-src 'self' data:"
+    for path in ("/api/health", "/api/sessions"):
+        resp = client.get(path)
+        assert resp.headers.get("content-security-policy") == expected, path

@@ -48,7 +48,11 @@ class ArtifactOverflowHandler(OverflowHandler):
         self, session: Session, tool_call_id: str, tool_name: str, result: ToolResult,
     ) -> tuple[ToolResult, list[tuple[str, dict[str, Any]]]]:
         data = result.data or {}
-        outputs = {**{key: data.get(key) for key in ("output", "content", "stdout", "stderr")},
+        # before/after 是 write/edit/apply_patch 的 diff 视图字段（Q12=B），
+        # 各自上限 _DIFF_MAX_BYTES=50KB——远超本预算。漏掉它们时"读大文件被
+        # 摘要、写大文件却全文回灌"，是绕过 Context 预算的旁路（不变量 #15）。
+        outputs = {**{key: data.get(key) for key in ("output", "content", "stdout",
+                                                     "stderr", "before", "after")},
                    "message": result.message}
         oversized = {key: value for key, value in outputs.items()
                      if isinstance(value, str) and len(value) > self._overflow_chars}

@@ -136,3 +136,30 @@ def test_auth_unset_secret_warns_loudly(tmp_path, caplog):
         assert client.get("/identity-probe").json()["user_id"] == "local"
     assert any(r.levelno >= logging.WARNING and "JWT" in r.getMessage()
                for r in caplog.records), "未配置密钥必须有启动告警"
+
+
+def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
+    """CORS 中间件必须在认证层外层：浏览器预检（OPTIONS）天然不携带 Bearer，
+    预检 401 = 配置 JWT_SECRET 后 Vite dev 跨域模式整体失效。预检放行不削弱
+    认证——真实数据请求仍逐个过认证层（预检通过 ≠ 数据可匿名访问）。"""
+    from datetime import UTC, datetime
+
+    secret = "test-signing-secret-at-least-32-characters"
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+    with TestClient(app) as client:
+        preflight = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert preflight.status_code == 200, "预检请求不得被认证层拦截"
+        assert preflight.headers["access-control-allow-origin"] == "*"
+        # 数据面不受影响：匿名 GET 依然 401（fail-closed 契约不变）
+        assert client.get("/api/health").status_code == 401
+        live = jwt.encode({"tenant_id": "acme", "user_id": "alice",
+                           "exp": int(datetime.now(UTC).timestamp()) + 600}, secret)
+        assert client.get("/api/health",
+                          headers={"Authorization": f"Bearer {live}"}).status_code == 200

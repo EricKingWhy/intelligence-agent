@@ -329,3 +329,35 @@ async def test_empty_model_response_fails_the_run(tmp_path, use_stream):
     assert "model/failed" in types
     completed = [e for e in session.events if e.type == "model/completed"]
     assert not completed, "空响应不应持久化为 model/completed"
+
+
+# ---------- 批次 B / 候选 2：消费方抛异常不得产生双终结 ----------
+
+
+@pytest.mark.asyncio
+async def test_consumer_throw_after_completed_does_not_double_terminal(tmp_path):
+    """消费方在 run/completed 的 yield 点向生成器抛异常（SSE 中转层故障的
+    抽象）：异常臂不得对已终结的 run 再补 run/failed——"一个 run 至多一条
+    终态事件"是不变量（双终结 = 历史不可对账）。此前该检查只在取消臂有、
+    异常臂没有，属漏网的双终结窗口。"""
+    from tests.conftest import make_session
+
+    session = make_session(tmp_path)
+    runtime = _runtime(ScriptedModel(responses=[AIMessage(content="done")]))
+    terminals: list[str] = []
+
+    gen = runtime.run_stream(session, "hi")
+    async for event in gen:
+        if event.type in (RUN_COMPLETED, RUN_FAILED):
+            terminals.append(event.type)
+        if event.type == RUN_COMPLETED:
+            with pytest.raises(RuntimeError):
+                await gen.athrow(RuntimeError("consumer exploded mid-stream"))
+            break
+
+    persisted = [e.type for e in session.events]
+    assert terminals == ["run/completed"], f"消费方应已收到 run/completed：{terminals}"
+    assert persisted.count("run/completed") == 1
+    assert persisted.count("run/failed") == 0, (
+        f"已终结的 run 不得补第二条终态事件，实际事件链：{persisted}"
+    )

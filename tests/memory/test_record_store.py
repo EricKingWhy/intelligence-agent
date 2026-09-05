@@ -139,3 +139,48 @@ async def test_session_scope_does_not_cross_sessions(store):
         memory_session_var.reset(token)
     with pytest.raises(ValueError):
         await store.store(scoped, owner)
+
+
+# ── Round 9 审计修复：连接级并发 PRAGMA（与 storage/sqlite.py R4-5 同款）──
+
+
+@pytest.mark.asyncio
+async def test_record_store_connect_sets_busy_timeout(tmp_path):
+    """每操作新连接模式下 busy_timeout 必须随连接设置——writeback store 与
+    relay 的 pending/ack 并发写（BEGIN IMMEDIATE）在默认 0 时立刻抛
+    database is locked（WAL 是持久 PRAGMA，busy_timeout 不是）。"""
+    from agent_harness.memory.sqlite_record_store import _connect
+
+    async with _connect(tmp_path / "busy.db") as connection:
+        cursor = await connection.execute("PRAGMA busy_timeout")
+        (value,) = await cursor.fetchone()
+    assert int(value) > 0
+
+
+@pytest.mark.asyncio
+async def test_record_store_methods_route_through_connect(tmp_path, monkeypatch):
+    """Record store 的所有连接必须经 _connect 助手（busy_timeout 在其中设置）
+    ——直接 aiosqlite.connect 会绕过并发保护。"""
+    from contextlib import asynccontextmanager
+    from pathlib import Path
+
+    from agent_harness.memory import sqlite_record_store as mod
+
+    used: list[Path] = []
+    real_connect = mod._connect
+
+    @asynccontextmanager
+    async def spy_connect(path):
+        used.append(Path(path))
+        async with real_connect(path) as connection:
+            yield connection
+
+    monkeypatch.setattr(mod, "_connect", spy_connect)
+    store = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await store.initialize()
+    owner = IdentityContext("acme", "alice", ["user"])
+    await store.store(entry(), owner)
+    await store.get("m1", owner)
+    await store.list_by_scope(MemoryScope.USER, owner, 5)
+    await store.pending()
+    assert len(used) >= 5, "所有连接必须经 _connect（busy_timeout 在其中设置）"

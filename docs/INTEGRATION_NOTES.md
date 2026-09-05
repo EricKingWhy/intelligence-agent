@@ -74,7 +74,15 @@ cd web && npm run dev
 
 feat/frontend 已消费 [`HANDOFF_FRONTEND_SYNC.md`](后端仓库 docs/) 全部三项：auth fail-closed 接缝（lib/auth.ts token 设置项 + apiFetch 统一注入 + 401 横幅引导）、recover 入口（三态 + projectHistory 重建）、工具结果新形状（read 续读/截断、bash cancelled、grep truncated、model/failed、memory/degraded）。前端对**旧后端完全兼容**（无 token 头时不注入、旧形状工具结果走 GenericBlock 回退）。集成验证注意：recover 幂等但每次调用会在事件流尾部追加 `session/resumed`（后端语义）；恢复合成的 tool/result 无 step_id 且 content 为纯文本（投影按 tool_call_id 配对、非 JSON content 显示为失败——真实语义"结果未知"）。409 人工裁决路径需真实高风险 UNKNOWN 操作才能触发，本地未实测 UI 呈现。
 
-## 4.1 安全加固建议（2026-09-05 前端安全审查产出，供集成 AI 参考落地）
+## 4.1 安全响应头与认证（2026-09-05 移交记录——src/agent_harness/web/app.py 内注释引用本节）
+
+**CSP（Content-Security-Policy）**：所有 HTTP 响应统一携带 `Content-Security-Policy: default-src 'self'; img-src 'self' data:`（中间件 `csp_header`）。静态 HTML 的纵深防御——脚本/样式只认同源构建产物，`img-src` 放行 `data:`。前端影响：任何外链图片（头像/热链资源）会被浏览器拦截，资源必须本地打包。
+
+**JWT fail-closed 认证**：配置 `JWT_SECRET` 后所有请求要求 `Authorization: Bearer <HS256 JWT>`，claims 必须含 `tenant_id`、`user_id`、`exp`（无 exp 一律 401），`scopes` 可省（默认 user+session）；未配置密钥 = 本地信任模式（启动横幅告警）。**CORS 预检已修至最外层**：浏览器预检（OPTIONS，天然无 Bearer）不再被认证层 401 杀死——Vite dev 跨域模式在 JWT 生效下可用；预检放行不削弱认证，数据请求仍逐个过认证层。
+
+**静态挂载 × JWT 部署约束**：静态 serve（web/dist）只适配本地信任模式——fail-closed 生效时浏览器顶层导航无法携带 Bearer，index.html 会 401。生产 + JWT 的支持形态：反向代理直出静态资源，仅 `/api` 转发到本服务（前端带 Bearer 调用）。
+
+## 4.2 安全加固建议（2026-09-05 前端安全审查产出，供集成 AI 参考落地）
 
 前端已完成两项加固：不可信工具输出渲染截断（`truncateForDisplay`，20k 字符上限，防 MB 级 stdout/JSON 冻结 UI）+ 生产 sourcemap 关闭（`vite.config.ts`，不再向静态资源暴露 1.03MB 源码映射）。审查同时确认：**零 XSS sink**（全 src 无 dangerouslySetInnerHTML/innerHTML/eval，markdown 白名单渲染声明属实）、URL 构造已 encodeURIComponent、localStorage 只有两个非敏感枚举键（`ahi.theme` / `ahi.traceDensity`）与一个凭据键（`ahi.apiToken` Bearer token——df4f7d8 认证接缝引入的开发者设置项，仅存本地浏览器、不进构建产物，清除入口在 TopBar 钥匙面板）、dist 产物无任何密钥。
 
@@ -82,7 +90,7 @@ feat/frontend 已消费 [`HANDOFF_FRONTEND_SYNC.md`](后端仓库 docs/) 全部�
 
 **✅ 方案 A 已落地（2026-09-05，用户拍板）**：字体自托管改用 fontsource 可变字体 npm 包（`@fontsource-variable/inter` + `@fontsource-variable/jetbrains-mono`，REUSE——版本化管理、Vite 打包同源哈希资源），`index.css` 移除 Google Fonts `@import`，字体栈加 `* Variable` 名（可变字体 wght 100-900 覆盖原 400/450/500/600/700 全部字重）。**连带修复一个隐蔽违规**：Vite `assetsInlineLimit` 默认把最小字体子集内联为 data: URI——`data:` 不属于 `'self'`，`font-src` 回退 default-src 照样拦截；已设 `assetsInlineLimit: 0` 强制全部字体外置为同源文件。CSP 复测：`default-src 'self'; img-src 'self' data:` 头下 **console 零违规**，Inter 450/600 与 JetBrains Mono 全部同源加载成功，dev 模式零 googleapis/gstatic 请求。后端可按原策略值上线，无需放宽。
 
-**留给后端的一项（Scope Lock：后端 worktree 不归前端会话改）**：建议 FastAPI 静态服务（`src/agent_harness/web/app.py`）为 HTML 响应加 `Content-Security-Policy: default-src 'self'; img-src 'self' data:` 响应头——比 meta 标签可靠，且不影响 Vite dev。当前无注入 sink 故不可利用，属纵深防御。
+**留给后端的一项（✅ 已由 backend `a2fc9ef` 落地，策略与部署约束见 §4.1；Scope Lock：后端 worktree 不归前端会话改）**：建议 FastAPI 静态服务（`src/agent_harness/web/app.py`）为 HTML 响应加 `Content-Security-Policy: default-src 'self'; img-src 'self' data:` 响应头——比 meta 标签可靠，且不影响 Vite dev。当前无注入 sink 故不可利用，属纵深防御。
 
 ## 5. 不变量守护（合并前必读）
 

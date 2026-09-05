@@ -25,46 +25,26 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from starlette.responses import JSONResponse
 
-from agent_harness.agent import AgentEvent, AgentRuntime
+from agent_harness.agent import AgentEvent
+from agent_harness.assembly import RecoveryStores, build_runtime, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
-from agent_harness.context.builder import ContextBuilder
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
     set_identity_context,
 )
 from agent_harness.logging import setup_logging
-from agent_harness.model.config import ModelConfig
-from agent_harness.model.provider import create_chat_model
 from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session.event import USER_MESSAGE
 from agent_harness.storage import (
-    OnStableBoundary,
     SqliteCheckpointStore,
     SqliteOperationLedger,
     SqliteSessionMetaStore,
-)
-from agent_harness.storage.s3_artifact import S3ArtifactStore
-from agent_harness.tooling import ToolExecutor, ToolRegistry
-from agent_harness.tooling.approval import ApprovalResponse
-from agent_harness.tooling.contract import PermissionPolicy
-from agent_harness.tooling.overflow import ArtifactOverflowHandler
-from agent_harness.tools import (
-    ApplyPatchTool,
-    BashTool,
-    EditTool,
-    GitDiffTool,
-    GitStatusTool,
-    GlobTool,
-    GrepTool,
-    InspectArtifactTool,
-    ReadTool,
-    WriteTool,
 )
 
 # ── Request / Response schemas ──
@@ -141,10 +121,17 @@ class AppState:
             return
         async with self._stores_lock:
             if not self._stores_ready:
-                await self.operation_ledger.initialize()
-                await self.checkpoint_store.initialize()
-                await self.session_meta_store.initialize()
+                await initialize_stores(self.stores)
                 self._stores_ready = True
+
+    @property
+    def stores(self) -> RecoveryStores:
+        """恢复三 Store 束（factory 消费；实例归 AppState 所有）。"""
+        return RecoveryStores(
+            operation_ledger=self.operation_ledger,
+            checkpoint_store=self.checkpoint_store,
+            session_meta_store=self.session_meta_store,
+        )
 
     async def get_wiring(self) -> tuple[CapabilityRegistry, CapabilityWiring]:
         """惰性装配 Capability 子系统并缓存；返回 (registry, wiring)。
@@ -187,80 +174,10 @@ class AppState:
         self._closed = True
         async with self._wiring_lock:
             wiring, self._wiring, self._registry = self._wiring, None, None
-        if wiring is not None and wiring.memory is not None:
-            await wiring.memory.close()
-
-
-async def _build_runtime(
-    state: AppState,
-    workspace: Path,
-    max_steps: int,
-    auto_approve: bool,
-    *,
-    session_id: str,
-) -> AgentRuntime:
-    """装配工具与 Context；配置对象存储时按 Session 绑定 Artifact Provider。
-
-    Memory 子系统按配置惰性装配：齐了注入 capability + writeback + context provider，
-    不齐保持纯 Runtime（Memory 能力缺位，其他功能不受影响）。
-    """
-    config = ModelConfig.from_settings(state.settings)
-    model = create_chat_model(config)
-
-    # Sandbox 由 WorkspaceRegistry 统一创建并持久化映射（R8-1）：恢复时
-    # RecoveryCoordinator 据映射还原 sandbox；workspace_root 允许命名 workspace。
-    sandbox = state.workspace_registry.create(session_id, workspace_root=workspace)
-    registry = ToolRegistry()
-    for tool_cls in (
-        ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
-        GlobTool, GrepTool, GitStatusTool, GitDiffTool,
-    ):
-        registry.register(tool_cls(sandbox))
-
-    settings = state.settings
-    overflow_handler = None
-    if any((settings.artifact_store_endpoint, settings.artifact_store_bucket,
-            settings.artifact_store_access_key, settings.artifact_store_secret_key,
-            settings.artifact_store_region)):
-        artifact_store = S3ArtifactStore(settings, session_id=session_id)
-        registry.register(InspectArtifactTool(artifact_store))
-        overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
-
-    if auto_approve:
-        policy = PermissionPolicy.WORKSPACE_WRITE
-        approval_callback: Any = lambda _req: ApprovalResponse(approved=True, reason="auto-approve")
-    else:
-        # manual 模式 V1：拒绝所有危险操作（不阻塞 demo 主流程）。
-        # 真正的交互式审批留到 WebSocket / pending queue（接缝点）。
-        policy = PermissionPolicy.WORKSPACE_WRITE
-        approval_callback = lambda _req: ApprovalResponse(approved=False, reason="manual approval not yet wired")
-
-    # Capability 装配（进程级缓存）：工具贡献进 ToolRegistry（统一 Executor 路径），
-    # context providers / memory_writer 注入 AgentRuntime——Agent Loop 零改动。
-    _, wiring = await state.get_wiring()
-    for capability_tool in wiring.tools:
-        registry.register(capability_tool)
-
-    # 恢复基础设施接线（R8-1，用户拍板）：Ledger 记录副作用状态（不变量 #13）、
-    # Checkpoint 在稳定边界落盘（不变量 #12）、SessionMeta 惰性登记。
-    await state.ensure_stores()
-    return AgentRuntime(
-        model=model,
-        registry=registry,
-        executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
-                              overflow_handler=overflow_handler,
-                              operation_ledger=state.operation_ledger),
-        max_steps=max_steps,
-        checkpoint_policy=OnStableBoundary(state.checkpoint_store),
-        session_meta_store=state.session_meta_store,
-        context_builder=ContextBuilder(
-            model, max_context_tokens=settings.max_context_tokens,
-            auto_compact_threshold=settings.auto_compact_threshold,
-            hard_guard_threshold=settings.hard_guard_threshold,
-            context_providers=list(wiring.context_providers),
-        ),
-        memory_writer=wiring.memory_writer,
-    )
+        # 关闭知识在 CapabilityWiring.aclose（批次 A 候选 4）：memory 组件 +
+        # lifecycle 通道逐项隔离关闭，web 层不再懂每种 capability 的关闭姿势。
+        if wiring is not None:
+            await wiring.aclose()
 
 
 def _validate_workspace_name(state: AppState, workspace: str | None) -> str | None:
@@ -356,16 +273,6 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
 
-    if enable_cors:
-        # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
-        # 多用户时收紧到已知 origin（接缝点）。
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
@@ -373,6 +280,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             "JWT_SECRET 未配置：API 以本地信任模式运行（所有请求视为 local 身份，"
             "不做身份校验）。生产部署必须配置 JWT_SECRET。"
         )
+
+    # CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
+    # 脚本/样式只认同源构建产物，img 放行 data:。所有响应统一携带（浏览器
+    # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
+    _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
+
+    @app.middleware("http")
+    async def csp_header(request: Any, call_next: Any):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = _CSP_POLICY
+        return response
 
     @app.middleware("http")
     async def auth_seam(request: Any, call_next: Any):
@@ -409,6 +327,19 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             return await call_next(request)
         finally:
             identity_context_var.reset(token)
+
+    if enable_cors:
+        # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
+        # 多用户时收紧到已知 origin（接缝点）。
+        # 必须最后添加 = 中间件栈最外层：浏览器预检（OPTIONS）天然不携带
+        # Bearer，认证层在内层时预检直接 401，配置 JWT_SECRET 后跨域 dev
+        # 模式整体失效。预检放行不削弱认证——数据请求仍逐个过认证层。
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # ── 路由 ──
 
@@ -472,16 +403,22 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         workspace_name = _validate_workspace_name(state, req.workspace)
 
         # 组装顺序（R6-6）：先建 workspace + runtime，最后才 Session.start 落盘。
-        # _build_runtime 需要 session_id 装配 S3 artifact 命名空间，因此预生成
-        # id 传入——此前 Session.start 先落盘、runtime 组装失败时客户端拿
-        # JSON 500 且 store 里留下只含 session/started 的孤儿 session。
+        # factory 需要 session_id 装配 S3 artifact 命名空间，因此预生成 id 传入
+        # ——此前 Session.start 先落盘、runtime 组装失败时客户端拿 JSON 500
+        # 且 store 里留下只含 session/started 的孤儿 session。
         session_id = str(uuid4())
         workspace = (state.workspaces_root / workspace_name if workspace_name is not None
                      else state.workspaces_root / session_id)
         workspace.mkdir(parents=True, exist_ok=True)
 
-        runtime = await _build_runtime(state, workspace, req.max_steps, req.auto_approve,
-                                       session_id=session_id)
+        _, wiring = await state.get_wiring()
+        await state.ensure_stores()
+        runtime = await build_runtime(
+            settings=state.settings, wiring=wiring, stores=state.stores,
+            workspace_registry=state.workspace_registry,
+            session_id=session_id, workspace=workspace,
+            max_steps=req.max_steps, auto_approve=req.auto_approve,
+        )
         session = Session.start(state.store, session_id=session_id)
 
         async def event_generator():
@@ -542,6 +479,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     # ── 静态资源（前端 build 产物）──
     # 生产模式：FastAPI serve web/dist；dev 模式 Vite 自己跑 5173。
+    # 部署约束：静态挂载只适配本地信任模式（未配置 JWT_SECRET）。fail-closed
+    # 生效时全量默认拒绝（test_auth_fail_closed 契约），而浏览器顶层导航无法
+    # 携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
+    # 静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
     web_dist = Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
     if web_dist.exists():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
