@@ -17,7 +17,8 @@ def test_normalize_from_langchain_dict_defaults_missing_keys():
     assert call == ToolCall(id="c1", name="add", args={"x": 1})
 
     sparse = ToolCall.normalize({})
-    assert sparse.id == "" and sparse.name == "" and sparse.args == {}
+    # 缺 id 时不再坍缩为空串——降级为唯一占位（gen_ 前缀），避免下游主键冲突。
+    assert sparse.id.startswith("gen_") and sparse.name == "" and sparse.args == {}
 
     # args 为 None（部分模型会这么吐）→ 空字典，不是 None。
     assert ToolCall.normalize({"id": "c2", "name": "read", "args": None}).args == {}
@@ -35,6 +36,25 @@ def test_normalize_all_mixed_shapes():
     ])
     assert [c.id for c in calls] == ["c1", "c2"]
     assert calls[1].args == {"path": "a.txt"}
+
+
+def test_normalize_missing_id_yields_unique_nonempty_ids():
+    """缺 id 时不能让多条调用都坍缩成空串——否则下游以 tool_call_id 为主键的
+    Ledger 会互相覆盖、ToolMessage 配对会错位。必须降级为确定性且唯一的占位 id。
+    """
+    calls = ToolCall.normalize_all([
+        {"name": "add", "args": {"x": 1}},
+        {"name": "read", "args": {"path": "a"}},
+    ])
+    ids = [c.id for c in calls]
+    assert all(ids), "缺 id 时必须降级为非空占位，不能是空串"
+    assert len(set(ids)) == len(ids), "多条缺 id 调用必须各自唯一，避免下游主键冲突"
+
+
+def test_normalize_preserves_explicit_empty_string_id():
+    """模型显式给出 id='' 时与缺 id 同等对待，降级为唯一占位。"""
+    a = ToolCall.normalize({"id": "", "name": "x", "args": {}})
+    assert a.id != ""
 
 
 @pytest.mark.asyncio

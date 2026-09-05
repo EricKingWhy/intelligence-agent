@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -45,8 +46,15 @@ class ToolCall:
     def normalize(cls, tool_call: ToolCall | dict[str, Any]) -> ToolCall:
         if isinstance(tool_call, ToolCall):
             return tool_call
+        raw_id = tool_call.get("id") or ""
+        # 缺 id / 空串 id 不能让它坍缩成 ""——下游 Ledger 以 tool_call_id 为主键、
+        # ToolMessage 协议要求与 assistant 严格配对，空串会引发互相覆盖和配对错位。
+        # 降级为带前缀的唯一占位（uuid4 保证跨次唯一，非幂等：normalize 处于
+        # Runtime 入站边界，只跑一次，不重放；若未来需要对账幂等 id，应改内容哈希）。
+        if not raw_id:
+            raw_id = f"gen_{uuid.uuid4().hex[:12]}"
         return cls(
-            id=tool_call.get("id") or "",
+            id=raw_id,
             name=tool_call.get("name") or "",
             args=tool_call.get("args") or {},
         )
