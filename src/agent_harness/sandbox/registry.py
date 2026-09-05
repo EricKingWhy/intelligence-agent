@@ -17,8 +17,11 @@ volume 持久，resume 时用确定性名字重启容器即可恢复 workspace�
 from __future__ import annotations
 
 import json
+import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
 from agent_harness.sandbox.local import LocalSubprocessSandbox
@@ -36,15 +39,20 @@ class WorkspaceRegistry:
         #: 进程内缓存：session_id → Sandbox 实例（避免重复重建）。
         self._cache: dict[str, Sandbox] = {}
 
-    def create(self, session_id: str) -> Sandbox:
+    def create(self, session_id: str, *, workspace_root: Path | None = None) -> Sandbox:
         """为新 session 创建 Sandbox，持久化映射，返回已 ensure_started 的 Sandbox。
 
         如果映射已存在（同 session_id 再次 create），直接从缓存或重建返回已有 Sandbox。
+        workspace_root 允许调用方指定实际工作目录（web 层的命名 workspace）；
+        缺省用 <root>/workspaces/<session_id>。映射里记录真实目录——
+        RecoveryCoordinator 据此恢复（R8-1）。
         """
         if session_id in self._cache:
             return self._cache[session_id]
 
         mapping = self._build_mapping(session_id)
+        if workspace_root is not None:
+            mapping["workspace_root"] = str(workspace_root)
         workspace_root = Path(mapping["workspace_root"])
         workspace_root.mkdir(parents=True, exist_ok=True)
 
@@ -157,10 +165,20 @@ class WorkspaceRegistry:
         return self._workspaces_dir / f"{session_id}.json"
 
     def _write_mapping(self, session_id: str, mapping: dict) -> None:
-        self._mapping_path(session_id).write_text(
-            json.dumps(mapping, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # temp + os.replace 原子落盘：truncate-in-place 写到一半崩溃会留下损坏
+        # JSON，get()/stop()/delete() 从此对该 session 永久 JSONDecodeError
+        # （resume 与清理双断，且不自愈）。同目录 rename 在两种平台都原子。
+        path = self._mapping_path(session_id)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(mapping, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        finally:
+            with suppress(OSError):
+                tmp.unlink()
 
     def _read_mapping(self, session_id: str) -> dict | None:
         path = self._mapping_path(session_id)

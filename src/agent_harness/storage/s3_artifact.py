@@ -21,8 +21,12 @@ class S3ArtifactStore(ArtifactStore):
     def __init__(self, settings: Settings, *, session_id: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
             raise ValueError("session_id must be a single safe key segment")
+        # SecretStr('') 为 falsy（truthiness 基于密钥值长度）："是否已配置"
+        # 判断可直接用字段本身（与 str 时代语义一致）。
+        access_key = settings.artifact_store_access_key.get_secret_value()
+        secret_key = settings.artifact_store_secret_key.get_secret_value()
         if not all((settings.artifact_store_endpoint, settings.artifact_store_bucket,
-                    settings.artifact_store_access_key, settings.artifact_store_secret_key,
+                    access_key, secret_key,
                     settings.artifact_store_region)):
             raise ValueError("S3ArtifactStore requires artifact_store_* configuration")
         try:
@@ -37,8 +41,8 @@ class S3ArtifactStore(ArtifactStore):
         self._client_kwargs = {
             "endpoint_url": settings.artifact_store_endpoint,
             "region_name": settings.artifact_store_region,
-            "aws_access_key_id": settings.artifact_store_access_key,
-            "aws_secret_access_key": settings.artifact_store_secret_key,
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
             "config": config_type(signature_version="s3v4", s3={"addressing_style": "path"}),
         }
 
@@ -77,8 +81,25 @@ class S3ArtifactStore(ArtifactStore):
                     raise KeyError(f"Artifact '{artifact_id}' does not exist") from error
                 raise
             async with response["Body"] as stream:
-                content = (await stream.read()).decode("utf-8")
+                body = await stream.read()
+        # 先验哈希后解码：损坏对象可能在 decode 前就被识破（UnicodeDecodeError
+        # 不外泄——错误契约统一是 KeyError，与 id 非法/对象缺失一致）。
         artifact = Artifact.model_validate_json(response["Metadata"]["artifact"])
+        try:
+            content = body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise KeyError(
+                f"Artifact '{artifact_id}' is not valid UTF-8 "
+                "(object modified or corrupted out-of-band)"
+            ) from error
+        # 内容寻址自验证：artifact_id 就是 sha256(content)[:16]，读回时重算比对。
+        # S3 对象可能被带外覆盖/截断——静默把错误内容当 artifact 交给模型违背
+        # "内容寻址 = id 可验证"的承诺（不验证的 hash 只是摆设）。
+        if compute_artifact_id(content) != artifact_id:
+            raise KeyError(
+                f"Artifact '{artifact_id}' content hash mismatch "
+                "(object modified or corrupted out-of-band)"
+            )
         return artifact.model_copy(update={"content": content})
 
     async def inspect(

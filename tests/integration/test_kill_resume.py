@@ -145,7 +145,7 @@ async def test_kill_after_terminal_write_recovers_without_duplicate_side_effect(
 
     # 崩溃现场：Ledger 终态已写、tool/call 已持久化、result event 未写、副作用已发生。
     ledger, crashed_events = _crash_state(root, session_id)
-    operation = await ledger.get("call-1")
+    operation = await ledger.get(session_id, "call-1")
     assert operation is not None and operation.state is OperationState.SUCCEEDED
     assert [e.type for e in crashed_events].count(TOOL_CALL) == 1
     assert not [e for e in crashed_events if e.type == TOOL_RESULT]
@@ -193,7 +193,7 @@ async def test_kill_while_pending_skips_operation_without_real_tool(
 
     # 崩溃现场：Operation 停在 PENDING，真实 Tool 根本没跑（文件不存在）。
     ledger, _crashed_events = _crash_state(root, session_id)
-    operation = await ledger.get("call-1")
+    operation = await ledger.get(session_id, "call-1")
     assert operation is not None and operation.state is OperationState.PENDING
     workspace_file = root / "ws" / "workspaces" / session_id / "never.txt"
     assert not workspace_file.exists()
@@ -207,8 +207,11 @@ async def test_kill_while_pending_skips_operation_without_real_tool(
     assert "跳过" in synthesized.message
     assert not workspace_file.exists()  # 副作用为零：恢复没有执行 write
     assert detect_dangling(recovered.events) == []
-    still_pending = await ledger.get("call-1")
-    assert still_pending is not None and still_pending.state is OperationState.PENDING
+    # Ledger 推进到 CANCELLED（Round 8 契约修订，同 recovery 套件）：skip 已把
+    # CANCELLED 语义结果合成进 session，Ledger 同步记录"恢复时放弃、从未执行"
+    # ——不伪造执行结果（不写 SUCCEEDED/FAILED），但不再与 session 永久不一致。
+    still_pending = await ledger.get(session_id, "call-1")
+    assert still_pending is not None and still_pending.state is OperationState.CANCELLED
 
 
 # ── 场景 C：多 Tool 部分完成后崩溃 ──
@@ -253,8 +256,8 @@ async def test_multi_tool_partial_completion_crash_recovers_all_pairings(
 
     # 崩溃现场：call-a 终态（副作用已发生），call-b RUNNING（未执行），b.txt 不存在。
     ledger, _crashed_events = _crash_state(root, session_id)
-    assert (await ledger.get("call-a")).state is OperationState.SUCCEEDED
-    assert (await ledger.get("call-b")).state is OperationState.RUNNING
+    assert (await ledger.get(session_id, "call-a")).state is OperationState.SUCCEEDED
+    assert (await ledger.get(session_id, "call-b")).state is OperationState.RUNNING
     workspaces = root / "ws" / "workspaces" / session_id
     assert (workspaces / "a.txt").read_text(encoding="utf-8") == "aaa"
     assert not (workspaces / "b.txt").exists()

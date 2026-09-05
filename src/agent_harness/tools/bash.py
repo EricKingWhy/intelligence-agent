@@ -11,6 +11,7 @@ MUTATING 副作用（保守默认）：即使命令本身是只读的（如 ls�
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from pydantic import BaseModel, Field
 
@@ -61,8 +62,17 @@ class BashTool(Tool):
         sandbox.exec 是同步阻塞调用（子进程最长跑满超时），卸载到工作线程
         执行——否则 event loop 会被单条命令冻结整个异步服务器（D10）。
         """
+        # 协作取消（C1）：asyncio 超时/断连只能取消 await，杀不掉已在
+        # 工作线程里跑的子进程——通过 cancel_event 通知 sandbox 击杀进程树，
+        # "超时/取消返回"之后命令不再继续改 workspace（R7-1 的执行层闭环）。
+        cancel_event = threading.Event()
         try:
-            result = await asyncio.to_thread(self._sandbox.exec, args.command)
+            result = await asyncio.to_thread(
+                self._sandbox.exec, args.command, cancel_event=cancel_event,
+            )
+        except asyncio.CancelledError:
+            cancel_event.set()
+            raise
         except PermissionError as e:
             return ToolResult.failure(
                 message=str(e),
@@ -83,5 +93,6 @@ class BashTool(Tool):
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "duration_ms": result.duration_ms,
+                **({"cancelled": True} if result.cancelled else {}),
             },
         )

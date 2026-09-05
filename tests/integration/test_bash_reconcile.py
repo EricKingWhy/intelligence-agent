@@ -84,7 +84,7 @@ class _LedgerWatchingAbandon(ReconcileCallback):
     async def resolve(
         self, operation, hint: ReconcileHint
     ) -> ReconcileVerdict:
-        current = await self._ledger.get(operation.tool_call_id)
+        current = await self._ledger.get(operation.session_id, operation.tool_call_id)
         assert current is not None
         self.states_at_resolve.append(current.state)
         self.calls.append(operation.tool_call_id)
@@ -119,7 +119,7 @@ async def test_running_bash_kill_requires_human_and_abandons_cleanly(
     # 副作用恰好发生一次（mid-flight kill 的可观察证据）。
     ledger = SqliteOperationLedger(root / "state.db")
     await ledger.initialize()
-    operation = await ledger.get("call-1")
+    operation = await ledger.get(session_id, "call-1")
     assert operation is not None and operation.state is OperationState.RUNNING
     assert _sideeffect_count(root, session_id) == 1
 
@@ -156,7 +156,7 @@ async def test_running_bash_kill_requires_human_and_abandons_cleanly(
     assert Path(recovered.sandbox.workspace_root) == (
         root / "ws" / "workspaces" / session_id
     )
-    final_op = await ledger.get("call-1")
+    final_op = await ledger.get(session_id, "call-1")
     assert final_op is not None and final_op.state is OperationState.CANCELLED
 
 
@@ -187,7 +187,7 @@ async def test_running_bash_without_callback_refuses_and_executes_nothing(
     # bash 不执行：副作用计数不变、事件流零写入、Ledger 状态未被推进。
     assert _sideeffect_count(root, session_id) == 1
     assert _persisted_events(root, session_id) == events_before
-    operation = await ledger.get("call-1")
+    operation = await ledger.get(session_id, "call-1")
     assert operation is not None and operation.state is OperationState.RUNNING
 
 

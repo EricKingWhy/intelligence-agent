@@ -87,7 +87,7 @@ class ContextCompactor:
                 response = await self._model.ainvoke(request)
             if not isinstance(response, AIMessage) or response.tool_calls:
                 raise ValueError("Summary must be text without tool calls")
-            summary = _Summary.model_validate_json(response.content).model_dump_json()
+            summary = _parse_summary_json(response.content).model_dump_json()
             compacted = [*prefix, SystemMessage(content=summary), *recent]
             if estimate_message_tokens(compacted) >= self._auto_limit:
                 raise ContextWindowExceededError("LLM summary does not reach compaction target")
@@ -107,20 +107,57 @@ class ContextCompactor:
         )
 
 
+#: mechanical 摘要单字段截断预算（与 human/tool content 的 200/100 同级）。
+_MECHANICAL_CAP = 200
+
+
 def _mechanical_summary(messages: list[AnyMessage]) -> str:
     rows = []
     for message in messages:
         if isinstance(message, HumanMessage):
             rows.append({"type": "human", "content": message.text[:200]})
         elif isinstance(message, AIMessage):
-            rows.append({"type": "ai", "tool_calls": message.tool_calls})
+            # tool_call.args 必须截断：args 是模型自由生成的（write 大文件等），
+            # 原样嵌入会让摘要本身超硬护栏——历史从不裁剪 + 投影每轮重建，
+            # 该 session 从此每次 run 都 context_window_exceeded，永久 brick。
+            rows.append({"type": "ai", "tool_calls": [
+                {"id": call.get("id"), "name": call.get("name"),
+                 "args": _cap_text(json.dumps(call.get("args", {}), ensure_ascii=False))}
+                for call in message.tool_calls
+            ]})
         elif isinstance(message, ToolMessage):
             rows.append({"type": "tool", "tool_call_id": message.tool_call_id,
                          "content": message.text[:100]})
+        elif isinstance(message, SystemMessage):
+            rows.append({"type": "system", "content": message.text[:_MECHANICAL_CAP]})
         else:
-            # 不丢弃系统约束或未知类型的消息。
-            rows.append(message.model_dump(mode="json"))
+            # 不丢弃系统约束或未知类型的消息；dump 整体截断成字符串，保证摘要有界。
+            rows.append(_cap_text(
+                json.dumps(message.model_dump(mode="json"), ensure_ascii=False), 300,
+            ))
     return json.dumps({"mechanical_extract": rows}, ensure_ascii=False)
+
+
+def _cap_text(text: str, cap: int = _MECHANICAL_CAP) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap] + "…[truncated]"
+
+
+def _parse_summary_json(content: str) -> _Summary:
+    """解析摘要响应；提取最外层 JSON 对象再校验（容忍常见包裹形态）。
+
+    模型常把 JSON 包进 markdown 围栏（```json {...}```，含无换行形态）或
+    简短前言，直接 model_validate_json 会失败——每次 LLM 摘要都静默降级成
+    有损 mechanical 兜底，LLM 摘要路径形同虚设。提取首个 { 到末个 } 的切片
+    覆盖全部包裹形态；真正非 JSON 的响应仍由 pydantic 校验拒绝并走原有
+    确定性降级路径，校验强度不变。
+    """
+    text = content.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        text = text[start:end + 1]
+    return _Summary.model_validate_json(text)
 
 
 def _validate_tool_blocks(messages: list[AnyMessage]) -> None:

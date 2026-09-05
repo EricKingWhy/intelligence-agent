@@ -10,10 +10,12 @@ DockerSandbox 的 docker SDK 依赖在其实例化时才懒加载，
 from agent_harness.sandbox.base import ExecResult, Sandbox
 from agent_harness.sandbox.docker import DockerSandbox
 from agent_harness.sandbox.local import LocalSubprocessSandbox
+from agent_harness.sandbox.registry import WorkspaceRegistry
 
 __all__ = [
     "DockerSandbox",
     "ExecResult",
     "LocalSubprocessSandbox",
     "Sandbox",
+    "WorkspaceRegistry",
 ]

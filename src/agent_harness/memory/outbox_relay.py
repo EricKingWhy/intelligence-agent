@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import suppress
 
-from agent_harness.memory.record_store import MemoryOutbox
+from agent_harness.memory.record_store import MemoryOutbox, PendingMemory
 from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.vector_store import VectorIndexStore
 
@@ -32,6 +32,10 @@ class OutboxRelay:
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._failure_counts: dict[str, int] = {}
+        # 计数对应的 outbox revision：内容被重新 store（revision 更新）时重置
+        # 重试预算——新版本不是旧毒丸的证据，死信不能跨版本生效（否则故障窗口
+        # 期间写入的记忆 + 其后所有更新都静默永不索引，直到进程重启）。
+        self._failure_revisions: dict[str, str] = {}
 
     async def flush(self) -> int:
         async with self._lock:
@@ -39,6 +43,10 @@ class OutboxRelay:
             after_id = ""
             while page := await self._records.pending(after_id=after_id):
                 for change in page:
+                    if self._failure_revisions.get(change.entry.id) != change.revision:
+                        # revision 变化（含首次出现）：重置该条目的连续失败计数。
+                        self._failure_counts.pop(change.entry.id, None)
+                    self._failure_revisions[change.entry.id] = change.revision
                     if self._failure_counts.get(change.entry.id, 0) >= self.MAX_CONSECUTIVE_FAILURES:
                         continue
                     token = memory_session_var.set(change.session_id)
@@ -46,20 +54,33 @@ class OutboxRelay:
                         await self._vectors.upsert(change.entry.id, change.entry.content,
                                                    {**change.entry.metadata, "scope": change.entry.scope.value},
                                                    change.identity)
-                        self._failure_counts.pop(change.entry.id, None)
-                        count += await self._records.acknowledge(change)
-                    except Exception:  # noqa: BLE001 — 保留 durable outbox，下轮重试，不记录 SDK 原始异常。
-                        failures = self._failure_counts.get(change.entry.id, 0) + 1
-                        self._failure_counts[change.entry.id] = failures
-                        if failures >= self.MAX_CONSECUTIVE_FAILURES:
-                            logger.error("Memory index sync abandoned after %d consecutive failures; "
-                                         "record %s stays in outbox (indexed=false)", failures, change.entry.id)
+                    except Exception as error:  # noqa: BLE001 — 保留 durable outbox，下轮重试。
+                        self._count_failure(change, "vector", error)
+                    else:
+                        # ack（SQLite 写）失败与 vector 失败分开归因，但仍计入连续失败：
+                        # ack 持续失败的条目必须死信，不能靠每轮重复 upsert 空转（毒丸）。
+                        try:
+                            count += await self._records.acknowledge(change)
+                        except Exception as error:  # noqa: BLE001 — 保留 durable outbox，下轮重试。
+                            self._count_failure(change, "ack", error)
                         else:
-                            logger.warning("Memory index sync deferred; outbox retained")
+                            self._failure_counts.pop(change.entry.id, None)
+                            self._failure_revisions.pop(change.entry.id, None)
                     finally:
                         memory_session_var.reset(token)
                 after_id = page[-1].entry.id
             return count
+
+    def _count_failure(self, change: PendingMemory, stage: str, error: Exception) -> None:
+        """按失败阶段（vector/ack）归因记录；连续 MAX 次后死信跳过，outbox 行保留。"""
+        failures = self._failure_counts.get(change.entry.id, 0) + 1
+        self._failure_counts[change.entry.id] = failures
+        detail = f"{stage}: {type(error).__name__}: {error}"
+        if failures >= self.MAX_CONSECUTIVE_FAILURES:
+            logger.error("Memory index sync abandoned after %d consecutive failures (%s); "
+                         "record %s stays in outbox (indexed=false)", failures, detail, change.entry.id)
+        else:
+            logger.warning("Memory index sync deferred (%s); outbox retained", detail)
 
     def start(self) -> None:
         if self._task is None or self._task.done():

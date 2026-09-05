@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -43,6 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
+from pydantic import ValidationError
 
 from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
 from agent_harness.sandbox.registry import WorkspaceRegistry
@@ -59,6 +61,45 @@ from agent_harness.session import (
 from agent_harness.session.derive import DANGLING_TOOL_CONTENT
 from agent_harness.storage import Operation, OperationLedger, OperationState
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
+
+logger = logging.getLogger("agent_harness.recovery")
+
+
+def _try_parse_result_json(result_json: str, tool_name: str) -> ToolResult | None:
+    """尝试从 Ledger 的 result_json 还原 ToolResult；腐烂数据返回 None 并落日志。
+
+    Ledger 行可能被外部写入、迁移残留或写入中途崩溃污染成非法 JSON 或不符合
+    ToolResult schema 的字典——恢复必须把这些视为"结果详情缺失"而不是向上抛
+    ValidationError，否则整个 session 的恢复会被一行坏数据阻塞（#29 容错回归）。
+    """
+    try:
+        return ToolResult.model_validate_json(result_json)
+    except (ValidationError, ValueError):
+        logger.warning(
+            "Ledger result_json 解析失败（tool=%s），降级为结果详情缺失",
+            tool_name,
+            exc_info=True,
+        )
+        return None
+
+
+def _args_from_identity(args_identity: str | None) -> dict | None:
+    """从 Ledger 的 args_identity（JSON 字符串）还原 tool/call 的 args 字典。
+
+    腐烂或缺失返回 None（由调用方退回 {}）：合成事件不能因入参快照损坏就拒绝
+    恢复——args 缺失只是事实不完整，结果合成仍可基于 Ledger 终态。
+    """
+    if not args_identity:
+        return None
+    try:
+        parsed = json.loads(args_identity)
+    except (ValueError, TypeError):
+        logger.warning(
+            "args_identity 解析失败，合成 tool/call 退回空 args", exc_info=True
+        )
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
 
 #: RUNNING / UNKNOWN / NEED_RECONCILE 需要人工裁决（#30）——
 #: 不能为副作用状态未知的调用伪造结果（不变量 #14）。
@@ -120,6 +161,11 @@ class _Synthesis:
     needs_call_event: bool  # tool/call 事件缺失时一并补齐
     run_id: str | None
     agent_id: str | None
+    args: dict | None = None  # 合成 tool/call 的入参；None 表示无可用 args_identity
+
+    def call_event_args(self) -> dict:
+        """tool/call 事件的 args 字段：有 args 用 args，否则空字典（不变量保持）。"""
+        return self.args if self.args is not None else {}
 
 
 class RecoveryCoordinator:
@@ -224,7 +270,7 @@ class RecoveryCoordinator:
                         {
                             "tool_call_id": item.tool_call_id,
                             "tool_name": item.tool_name,
-                            "args": {},
+                            "args": item.call_event_args(),
                         },
                         run_id=item.run_id,
                         agent_id=item.agent_id,
@@ -235,6 +281,18 @@ class RecoveryCoordinator:
                     run_id=item.run_id,
                     agent_id=item.agent_id,
                 )
+                # PENDING 决策落地后同步推进 Ledger：session 已合成 CANCELLED
+                # 语义的 tool/result，Ledger 行却永远停在 PENDING——两边对同一
+                # tool_call 永久不一致（可观测性 + 后续 reconcile 重复触发）。
+                operation = operations_by_call_id.get(item.tool_call_id)
+                if (operation is not None
+                        and operation.state is OperationState.PENDING
+                        and self._operation_ledger is not None):
+                    await self._operation_ledger.update_state(
+                        session_id, item.tool_call_id,
+                        OperationState.CANCELLED,
+                        result_json=item.content,
+                    )
             # 人工裁决项（#30）：状态推进 → reconcile-required 事件 → 用户裁决 →
             # Ledger 终态 + 合成 tool/result。裁决是交互式决策，发生在写入段内；
             # 中途失败留下的 reconcile-required 事件是"需要人工"的诚实记录，
@@ -355,6 +413,10 @@ class RecoveryCoordinator:
                 agent_id=None,
             )
 
+        # 合成 tool/call 的入参：优先用 Ledger 冻结的 args_identity 快照，
+        # 让 derive_messages 投出的 AIMessage.tool_calls 带真实入参而非空字典。
+        args = _args_from_identity(operation.args_identity)
+
         if operation.state in _TERMINAL_STATES:
             return _Synthesis(
                 tool_call_id=tool_call_id,
@@ -363,6 +425,7 @@ class RecoveryCoordinator:
                 needs_call_event=needs_call_event,
                 run_id=run_id,
                 agent_id=agent_id,
+                args=args,
             )
 
         if operation.state is OperationState.PENDING:
@@ -374,15 +437,19 @@ class RecoveryCoordinator:
                 needs_call_event=needs_call_event,
                 run_id=run_id,
                 agent_id=agent_id,
+                args=args,
             )
 
         return None
 
     @staticmethod
     def _content_from_ledger(operation: Operation) -> str:
-        """从 Ledger 终态取恢复内容：result_json 优先；缺失时按状态降级合成。"""
+        """从 Ledger 终态取恢复内容：result_json 优先；缺失或腐烂时按状态降级合成。"""
         if operation.result_json:
-            return operation.result_json
+            parsed = _try_parse_result_json(operation.result_json, operation.tool_name)
+            if parsed is not None:
+                return parsed.model_dump_json()
+            # 腐烂 result_json：视为"结果详情缺失"，落入下面的降级合成。
         if operation.state is OperationState.SUCCEEDED:
             return ToolResult.success(
                 f"操作 '{operation.tool_name}' 已确认成功（Ledger 记录），"
@@ -432,14 +499,14 @@ class RecoveryCoordinator:
         """
         if operation.state is OperationState.RUNNING:
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.UNKNOWN
+                operation.session_id, tool_call_id, OperationState.UNKNOWN
             )
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.NEED_RECONCILE
+                operation.session_id, tool_call_id, OperationState.NEED_RECONCILE
             )
         elif operation.state is OperationState.UNKNOWN:
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.NEED_RECONCILE
+                operation.session_id, tool_call_id, OperationState.NEED_RECONCILE
             )
 
         session.append(
@@ -460,7 +527,7 @@ class RecoveryCoordinator:
         result, ledger_state = self._verdict_outcome(operation, verdict)
         content = result.model_dump_json()
         await self._operation_ledger.update_state(
-            tool_call_id,
+            operation.session_id, tool_call_id,
             ledger_state,
             result_json=content,
             reconcile_meta=json.dumps(
@@ -480,7 +547,7 @@ class RecoveryCoordinator:
                 {
                     "tool_call_id": tool_call_id,
                     "tool_name": operation.tool_name,
-                    "args": {},
+                    "args": _args_from_identity(operation.args_identity) or {},
                 },
                 run_id=operation.run_id,
                 agent_id=operation.agent_id,
@@ -505,10 +572,11 @@ class RecoveryCoordinator:
         """
         if verdict is ReconcileVerdict.CONFIRM_SUCCESS:
             if operation.result_json:
-                return (
-                    ToolResult.model_validate_json(operation.result_json),
-                    OperationState.SUCCEEDED,
+                parsed = _try_parse_result_json(
+                    operation.result_json, operation.tool_name
                 )
+                if parsed is not None:
+                    return (parsed, OperationState.SUCCEEDED)
             return (
                 ToolResult.success(
                     f"操作 '{operation.tool_name}' 崩溃时结果未知，"
@@ -518,10 +586,11 @@ class RecoveryCoordinator:
             )
         if verdict is ReconcileVerdict.CONFIRM_FAILURE:
             if operation.result_json:
-                return (
-                    ToolResult.model_validate_json(operation.result_json),
-                    OperationState.FAILED,
+                parsed = _try_parse_result_json(
+                    operation.result_json, operation.tool_name
                 )
+                if parsed is not None:
+                    return (parsed, OperationState.FAILED)
             return (
                 ToolResult.failure(
                     message=(

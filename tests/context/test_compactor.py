@@ -73,7 +73,8 @@ async def test_summary_failure_falls_back_with_atomic_tool_block(failure):
     assert result.messages[1:] == messages[3:]
     rows = json.loads(result.messages[0].content)["mechanical_extract"]
     assert rows[0]["content"] == messages[0].content[:200]
-    assert rows[1]["tool_calls"] == messages[1].tool_calls
+    # args 截断为有界字符串（Round 6 加固）：id/name 保留，args 序列化封顶。
+    assert rows[1]["tool_calls"] == [{"id": "c1", "name": "read", "args": "{}"}]
     assert rows[2]["tool_call_id"] == "c1"
     assert rows[2]["content"] == messages[2].content[:100]
 
@@ -178,3 +179,68 @@ async def test_valid_summary_above_auto_target_uses_smaller_fallback():
     ).compact(messages, estimate_message_tokens(messages))
     assert result.fallback_used
     assert result.token_estimate < 450
+
+
+# ── Round 6 加固：mechanical 摘要有界性 + 围栏 JSON 容错 ──
+
+
+def test_mechanical_summary_bounds_tool_call_args():
+    """mechanical 摘要必须对 tool_call.args 截断——否则一条带大 payload 的
+    tool call（如 write 大文件）会让摘要本身超硬护栏，compaction 永久失败，
+    session 从此每次 run 都 context_window_exceeded（历史从不裁剪）。"""
+    from agent_harness.context.compactor import _mechanical_summary
+
+    huge_args = {"path": "big.txt", "content": "x" * 100_000}
+    messages = [
+        HumanMessage(content="old"),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "write", "args": huge_args}]),
+        HumanMessage(content="current"),
+    ]
+    summary = _mechanical_summary(messages)
+    assert len(summary) < 2000  # 与摘要各字段 200/100 字符截断同级的有界性
+    assert "x" * 100_000 not in summary  # 大 payload 不整段进入摘要
+    rows = json.loads(summary)["mechanical_extract"]  # 整体仍是合法 JSON
+    assert rows[1]["tool_calls"][0]["id"] == "c1"
+    assert rows[1]["tool_calls"][0]["name"] == "write"
+
+
+@pytest.mark.asyncio
+async def test_huge_tool_call_args_fall_back_without_bricking():
+    """大 args + 摘要模型故障 → mechanical 兜底成功，而非永久 ContextWindowExceeded。
+
+    该场景此前一旦发生，历史从不裁剪、投影每轮重建，session 从此无法恢复。
+    """
+    class FailingModel:
+        async def ainvoke(self, messages):
+            raise ConnectionError("offline")
+
+    huge_args = {"path": "big.txt", "content": "y" * 100_000}
+    messages = [
+        HumanMessage(content="old " * 2000),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "write", "args": huge_args}]),
+        ToolMessage(content="written", tool_call_id="c1"),
+        HumanMessage(content="current"),
+    ]
+    result = await ContextCompactor(FailingModel(), max_context_tokens=8000).compact(
+        messages, estimate_message_tokens(messages),
+    )
+    assert result.fallback_used
+    assert result.token_estimate < 8000 * 0.85
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [
+    "```json\n" + json.dumps(SUMMARY) + "\n```",
+    "```json " + json.dumps(SUMMARY) + "```",
+    "Summary: " + json.dumps(SUMMARY),
+])
+async def test_summary_json_common_wrapping_shapes_parse(wrapped):
+    """围栏（含无换行形态）与短前言包裹都应解析成功，不降级 mechanical。"""
+    model = ScriptedModel([AIMessage(content=wrapped)])
+    messages = [HumanMessage(content="old " * 6000),
+                HumanMessage(content="current")]
+    result = await ContextCompactor(model, max_context_tokens=8000).compact(
+        messages, estimate_message_tokens(messages),
+    )
+    assert not result.fallback_used
+    assert json.loads(result.messages[0].content) == SUMMARY

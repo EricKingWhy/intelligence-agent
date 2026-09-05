@@ -22,7 +22,7 @@ from tests.conftest import make_session
 async def test_bash_overflow_is_outside_retry_and_before_ledger_terminal(tmp_path, failure):
     class Store(FakeArtifactStore):
         async def save(self, *args, **kwargs):
-            assert (await ledger.get("call")).state == OperationState.RUNNING
+            assert (await ledger.get(session.session_id, "call")).state == OperationState.RUNNING
             if failure:
                 raise ConnectionError("storage offline")
             return await super().save(*args, **kwargs)
@@ -45,14 +45,14 @@ async def test_bash_overflow_is_outside_retry_and_before_ledger_terminal(tmp_pat
     if failure:
         with pytest.raises(ConnectionError):
             await executor.execute_batch([call], session=session, operation_context=context)
-        assert (await ledger.get("call")).state == OperationState.RUNNING
+        assert (await ledger.get(session.session_id, "call")).state == OperationState.RUNNING
         assert not any(e.type == "artifact/created" for e in session.events)
     else:
         executions = await executor.execute_batch(
             [call], session=session, operation_context=context,
         )
         result = executions[0].result
-        persisted = await ledger.get("call")
+        persisted = await ledger.get(session.session_id, "call")
         assert persisted.state == OperationState.SUCCEEDED
         assert persisted.result_json == result.model_dump_json()
         assert persisted.artifact_ref == result.artifact_ref

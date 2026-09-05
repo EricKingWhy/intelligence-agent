@@ -39,7 +39,11 @@ class Operation(BaseModel):
     @computed_field
     @property
     def operation_id(self) -> str:
-        """Operation identity is exactly the originating tool_call_id."""
+        """会话内标识（= tool_call_id）；Ledger 主键是 (session_id, tool_call_id) 复合键（C5）。
+
+        tool_call_id 由模型生成、只在会话内唯一——单列主键会让跨会话复用
+        同一 id 的两个 Operation 互相覆盖。
+        """
         return self.tool_call_id
 
 
@@ -63,12 +67,13 @@ class OperationLedger(ABC):
         """Persist a new PENDING Operation."""
 
     @abstractmethod
-    async def get(self, tool_call_id: str) -> Operation | None:
-        """Load one Operation by its tool_call_id."""
+    async def get(self, session_id: str, tool_call_id: str) -> Operation | None:
+        """Load one Operation by its (session_id, tool_call_id) composite key."""
 
     @abstractmethod
     async def update_state(
         self,
+        session_id: str,
         tool_call_id: str,
         state: OperationState,
         *,

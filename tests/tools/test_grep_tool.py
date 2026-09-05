@@ -118,8 +118,9 @@ class TestGrepHappyPath:
 
         assert result.result.ok is True
         paths = [m["path"] for m in result.result.data["matches"]]
-        assert all("src/" in p for p in paths)
-        assert all("other/" not in p for p in paths)
+        # Round 8 修复前 path="src" 恒空匹配（"src/" 作为 glob 永不匹配文件路径），
+        # 以下两条 all() 对空列表恒真——vacuous pass 掩盖了 bug。必须先断言非空。
+        assert paths == ["src/a.py"], f"path 子树限定失效: {paths}"
 
 
 class TestGrepTruncation:
@@ -194,3 +195,43 @@ class TestGrepErrors:
 
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+
+
+# ── R8-2（用户拍板）：grep 输出预算 ──
+
+
+@pytest.mark.asyncio
+async def test_long_matching_line_truncated_to_budget(
+    executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+):
+    """单条匹配行超长（minified bundle 场景）：行内截断到预算 + 显式标记。
+
+    grep.matches 直接进 Context/JSONL/Ledger——无单行上限时一条 10 万字符
+    的压缩 JS 行就能撑爆三者。
+    """
+    from agent_harness.tools.grep import _MAX_LINE_CHARS
+
+    huge = "needle " + "y" * 100_000
+    sandbox.write_text("bundle.js", huge + "\n")
+
+    result = await executor.execute(_tool_call({"pattern": "needle"}))
+
+    assert result.result.ok is True
+    (match,) = result.result.data["matches"]
+    assert len(match["line"]) <= _MAX_LINE_CHARS + len("... [truncated]")
+    assert match["line"].endswith("... [truncated]")
+
+    # 非超长行不受影响
+    sandbox.write_text("ok.py", "needle short\n")
+    ok = await executor.execute(_tool_call({"pattern": "needle", "path": "ok.py"}))
+    assert ok.result.data["matches"][0]["line"] == "needle short"
+
+
+def test_max_results_upper_bound():
+    """max_results 上限 1000（Field le）：防一个参数把预算打穿。"""
+    from pydantic import ValidationError
+
+    from agent_harness.tools.grep import _GrepArgs
+
+    with pytest.raises(ValidationError):
+        _GrepArgs(pattern="x", max_results=5000)

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -42,13 +43,50 @@ def test_local_exec_under_cap_is_untouched(tmp_path):
     assert "截断" not in result.stdout and "截断" not in result.stderr
 
 
+# ============================================================================
+# 超时击杀范围：整棵进程树，而不只 shell 壳（[HAZARD] 超时杀树泄漏）
+# ============================================================================
+
+
+@pytest.mark.skipif(os.name != "nt", reason="泄漏场景依赖 Windows shell=True(cmd.exe) 与 start 语义")
+def test_local_exec_timeout_kills_grandchild_tree(tmp_path):
+    """超时后整棵进程树必须死透：孙进程不得在 exec 返回后继续写 workspace。
+
+    shell=True 时 Popen 拿到的只是 cmd.exe 壳；壳里 start 出的孙进程若只被
+    process.kill() 漏掉，会在 exec 返回后继续写 marker 文件、占住捕获管道
+    （reader join 超时），其 cwd 锁还会让 delete() 的 rmtree 静默失败。
+    """
+    sandbox = LocalSubprocessSandbox(tmp_path)
+    # start /b 拉起脱管的孙进程（ping 约 3 秒后才写 marker），外层 ping 让壳活到超时
+    command = (
+        'start /b cmd /c "ping -n 4 127.0.0.1 > nul & echo x > leak_marker.txt"'
+        " & ping -n 10 127.0.0.1 > nul"
+    )
+    result = sandbox.exec(command, timeout=1)
+
+    # 超时契约不变：不抛异常，返回 exit_code=-1 + stderr 超时提示
+    assert result.exit_code == -1
+    assert "超时" in result.stderr
+
+    # 泄漏的孙进程会在 ~3 秒后写出 marker；轮询窗口内绝不允许出现
+    marker = sandbox.workspace_root / "leak_marker.txt"
+    deadline = time.perf_counter() + 3.0
+    while time.perf_counter() < deadline:
+        assert not marker.exists(), "超时后孙进程仍存活并写出文件——超时击杀泄漏了进程树"
+        time.sleep(0.1)
+
+    # 整树已死：workspace 不再被孙进程 cwd 锁占住，delete() 能真正删干净
+    sandbox.delete()
+    assert not sandbox.workspace_root.exists()
+
+
 @pytest.mark.asyncio
 async def test_bash_tool_offloads_exec_to_worker_thread(tmp_path):
     """tool 边界把同步 sandbox.exec 卸载到工作线程——event loop 不被长命令冻结。"""
     seen: dict = {}
 
     class ProbeSandbox(LocalSubprocessSandbox):
-        def exec(self, command, *, timeout=None):
+        def exec(self, command, *, timeout=None, cancel_event=None):
             seen["thread"] = threading.current_thread()
             return ExecResult(exit_code=0, stdout="", stderr="", duration_ms=0.0)
 

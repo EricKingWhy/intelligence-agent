@@ -28,11 +28,13 @@ from agent_harness.session.derive import (
     detect_dangling,
 )
 from agent_harness.session.event import (
+    EVENT_TYPES,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
     SESSION_RESUMED,
     SESSION_STARTED,
+    STREAM_ONLY_TYPES,
     TOOL_RESULT,
     SessionEvent,
 )
@@ -54,6 +56,9 @@ class Session:
         self.session_id = session_id
         self._store = store
         self._events: list[SessionEvent] = events if events is not None else []
+        # 增量 seq 计数器：构造时一次性从已加载事件重算（max+1），append 时 O(1) 分配，
+        # 避免每次 append 对全量事件做 O(n) max 扫描（长会话累计 O(n²)）
+        self._next_seq: int = max((e.seq for e in self._events), default=-1) + 1
         self._sandbox: Sandbox | None = sandbox
 
     @property
@@ -68,8 +73,8 @@ class Session:
 
     @property
     def next_seq(self) -> int:
-        """下一条事件的 seq（当前最大 seq + 1，空列表从 0 开始）。"""
-        return max((e.seq for e in self._events), default=-1) + 1
+        """下一条事件的 seq（增量计数器，构造时从已加载事件取 max+1，空列表从 0 开始）。"""
+        return self._next_seq
 
     def mark(self) -> int:
         """当前追加位置的句柄——配合 since() 取"之后追加的事件"。
@@ -91,13 +96,17 @@ class Session:
         store: JsonlSessionStore,
         *,
         agent_id: str = "default",
+        session_id: str | None = None,
         workspace_registry: WorkspaceRegistry | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
         提供 workspace_registry 时，自动创建/绑定 Sandbox 实例到 session.sandbox。
+        session_id 允许调用方预生成（web 层"先组装 runtime 后建 Session"的顺序
+        需要：_build_runtime 要以 session_id 装配 S3 artifact 命名空间，组装失败
+        时不能留下任何已落盘的孤儿 session——R6-6）。
         """
-        session_id = str(uuid4())
+        session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
             sandbox = workspace_registry.create(session_id)
@@ -127,14 +136,20 @@ class Session:
 
         session = cls(session_id, store, events, sandbox=sandbox)
 
-        # 校验 seq 单调递增（不容忍回退）
+        # 校验 seq 严格递增（不容忍重复或回退）；计数器据此在构造时取 max+1
         seen_seqs: set[int] = set()
+        prev_seq = -1
         for event in session._events:
             if event.seq in seen_seqs:
                 raise ValueError(
                     f"Session '{session_id}' 事件 seq 重复: {event.seq}"
                 )
+            if event.seq <= prev_seq:
+                raise ValueError(
+                    f"Session '{session_id}' 事件 seq 回退: {event.seq}（前一条: {prev_seq}）"
+                )
             seen_seqs.add(event.seq)
+            prev_seq = event.seq
 
         # 修复 dangling tool_call：为每个未解决的 tool_call 追加合成 tool/result
         dangling_ids = detect_dangling(session._events)
@@ -168,8 +183,18 @@ class Session:
         """追加一条事件：分配 seq、同步写 JSONL、更新内存。
 
         _mark_dangling 仅内部使用——在 data 中写入 dangling=true 标记。
+        事件类型必须在 EVENT_TYPES 词汇表内；STREAM_ONLY_TYPES（流式专属信号）
+        拒绝持久化（invariant #4：Event ≠ Diagnostic Log）。
         """
-        seq = self.next_seq
+        # 词汇表校验：先拒绝再写盘，杜绝未知/流式事件悄悄污染 durable log
+        if event_type in STREAM_ONLY_TYPES:
+            raise ValueError(
+                f"流式专属事件 '{event_type}' 不得通过 Session.append 持久化"
+                "（仅作为 run_stream() 的 AgentEvent 输出）"
+            )
+        if event_type not in EVENT_TYPES:
+            raise ValueError(f"未知事件类型 '{event_type}'：不在 EVENT_TYPES 词汇表中")
+        seq = self._next_seq
         event = SessionEvent(
             seq=seq,
             type=event_type,
@@ -182,6 +207,8 @@ class Session:
         )
         self._store.append_event(self.session_id, event)
         self._events.append(event)
+        # 写盘成功后才推进计数器——失败不消耗 seq
+        self._next_seq += 1
         return event
 
     def derive_messages(self) -> list[AnyMessage]:

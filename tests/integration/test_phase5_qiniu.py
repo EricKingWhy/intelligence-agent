@@ -31,8 +31,8 @@ async def test_phase5_real_qiniu_gate(tmp_path):
         async with sdk.Session().client(
             "s3", endpoint_url=settings.artifact_store_endpoint,
             region_name=settings.artifact_store_region,
-            aws_access_key_id=settings.artifact_store_access_key,
-            aws_secret_access_key=settings.artifact_store_secret_key,
+            aws_access_key_id=settings.artifact_store_access_key.get_secret_value(),
+            aws_secret_access_key=settings.artifact_store_secret_key.get_secret_value(),
         ) as client:
             await client.delete_object(Bucket=settings.artifact_store_bucket,
                                        Key=f"{session.session_id}/{ARTIFACT_ID}")

@@ -90,12 +90,16 @@ class DockerSandbox(Sandbox):
             },
         )
 
-    def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
+    def exec(self, command: str, *, timeout: float | None = None,
+             cancel_event=None) -> ExecResult:
         """在容器内执行命令；timeout 到点返回 exit_code=-1 的超时结果（D10 契约）。
 
         docker SDK 的 exec_run 没有超时参数且是阻塞读——实现上把调用放进
         daemon 线程等待，到点放弃等待返回超时结果（容器内进程随容器生命周期
         收敛）。调用方（tool 边界）已把本方法卸载到工作线程，event loop 不阻塞。
+
+        V1 限制（诚实声明）：cancel_event 被接受但忽略——容器内进程的协作取消
+        需要 docker exec kill 链路，V1 不实现；容器内命令会跑完自身生命周期。
         """
         import threading
 

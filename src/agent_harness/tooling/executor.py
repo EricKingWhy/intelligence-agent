@@ -45,7 +45,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
-from agent_harness.session import Session
+from agent_harness.session import TOOL_CALL, Session, run_context_var
 from agent_harness.storage import (
     Operation,
     OperationContext,
@@ -105,6 +105,9 @@ class ToolExecution(BaseModel):
 
     tool_call_id: str
     result: ToolResult
+    # OverflowHandler 产出的延迟会话事件 (event_type, data)：Runtime 在
+    # tool/call 落盘之后追加（R6-7，消除 artifact/created 前向引用）。
+    pending_events: list[tuple[str, dict[str, Any]]] = []
 
 
 class ToolExecutor:
@@ -216,6 +219,8 @@ class ToolExecutor:
             raise ValueError("session and operation_context must identify the same session")
 
         if self._operation_ledger is not None:
+            assert operation_context is not None
+            session_id = operation_context.session_id
             await self._create_pending_operation(
                 tool_call_id=tool_call_id,
                 name=name,
@@ -225,7 +230,7 @@ class ToolExecutor:
             )
             self._maybe_kill("pending", tool_call_id)
             await self._operation_ledger.update_state(
-                tool_call_id, OperationState.RUNNING
+                session_id, tool_call_id, OperationState.RUNNING
             )
             self._maybe_kill("running", tool_call_id)
 
@@ -238,15 +243,16 @@ class ToolExecutor:
         except asyncio.CancelledError:
             if self._operation_ledger is not None:
                 await self._operation_ledger.update_state(
-                    tool_call_id, OperationState.CANCELLED
+                    session_id, tool_call_id, OperationState.CANCELLED
                 )
             raise
 
         # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
         # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
+        deferred_events: list[tuple[str, dict[str, Any]]] = []
         if self._overflow_handler is not None:
             assert session is not None
-            result = await self._overflow_handler.maybe_overflow(
+            result, deferred_events = await self._overflow_handler.maybe_overflow(
                 session, tool_call_id, name, result,
             )
 
@@ -255,13 +261,14 @@ class ToolExecutor:
                 OperationState.SUCCEEDED if result.ok else OperationState.FAILED
             )
             await self._operation_ledger.update_state(
-                tool_call_id,
+                session_id, tool_call_id,
                 terminal_state,
                 result_json=result.model_dump_json(),
                 artifact_ref=result.artifact_ref,
             )
             self._maybe_kill("terminal", tool_call_id)
-        return ToolExecution(tool_call_id=tool_call_id, result=result)
+        return ToolExecution(tool_call_id=tool_call_id, result=result,
+                             pending_events=deferred_events)
 
     def _maybe_kill(self, stage: str, tool_call_id: str) -> None:
         """精确故障注入点（#32 Kill 集成测试专用；生产 kill_hook=None 行为不变）。
@@ -325,26 +332,107 @@ class ToolExecutor:
             # 等所有已启动调用结束，再传播异常；不重跑任何 Tool。
             for result in results:
                 if isinstance(result, BaseException):
+                    # 首个异常（输入顺序）维持原抛出契约；其余异常若不落日志，
+                    # 会随 raise 一起从诊断视野里消失——一次基础设施故障常伴随
+                    # 多个连锁失败，只看第一个会误判根因。这里补日志线索。
+                    self._log_secondary_exceptions(results, tool_calls)
+                    # 已完成执行的 committed 事件（TOOL_CALL + artifact/created）
+                    # 必须在异常传播前落盘，不能随异常一起消失（R6-7）。
+                    self._flush_committed_events(results, tool_calls, session)
                     raise result
             return results
 
         # serial：永久失败后停止真实执行，剩余调用返回并持久化 CANCELLED。
         executions: list[ToolExecution] = []
-        for index, tool_call in enumerate(tool_calls):
-            execution = await self.execute(
-                tool_call, operation_context=operation_context, session=session
-            )
-            executions.append(execution)
-            if execution.result.ok:
-                continue
-            for remaining in tool_calls[index + 1 :]:
-                executions.append(
-                    await self._cancel_without_execution(
-                        remaining, operation_context=operation_context
-                    )
+        try:
+            for index, tool_call in enumerate(tool_calls):
+                execution = await self.execute(
+                    tool_call, operation_context=operation_context, session=session
                 )
-            break
-        return executions
+                executions.append(execution)
+                if execution.result.ok:
+                    continue
+                for remaining in tool_calls[index + 1 :]:
+                    executions.append(
+                        await self._cancel_without_execution(
+                            remaining, operation_context=operation_context
+                        )
+                    )
+                break
+            return executions
+        except BaseException:
+            # 存储故障等真实异常传播前，已完成执行的 committed 事件先落盘（R6-7）。
+            self._flush_committed_events(
+                executions, tool_calls[: len(executions)], session
+            )
+            raise
+
+    def _flush_committed_events(
+        self,
+        results: list[ToolExecution | BaseException],
+        tool_calls: list[ToolCall | dict[str, Any]],
+        session: Any,
+    ) -> None:
+        """批次异常传播前，把已完成执行的 TOOL_CALL 与延迟事件落盘（R6-7）。
+
+        artifact 已写存储、Ledger 已终态——事件若随异常一起丢弃，store 里的
+        artifact 就成了无引用孤儿（旧缺陷：partial batch 失败丢已提交的
+        artifact/created 事件）。TOOL_CALL 一并补齐：正常路径由 Runtime 在结果
+        循环追加，异常路径永远到不了那里。run 归因经 run_context_var（executor
+        没有 run 上下文参数）；无 session 时（纯执行场景）无事可做。
+        """
+        if session is None:
+            return
+        run_id = run_context_var.get()
+        try:
+            for tool_call, result in zip(tool_calls, results):
+                if isinstance(result, BaseException):
+                    continue
+                call = ToolCall.normalize(tool_call)
+                session.append(
+                    TOOL_CALL,
+                    {"tool_call_id": result.tool_call_id, "tool_name": call.name,
+                     "args": call.args},
+                    run_id=run_id,
+                )
+                for event_type, data in result.pending_events:
+                    session.append(event_type, data, run_id=run_id)
+        except Exception:
+            # flush 自身失败（存储故障）不得掩盖原始批次异常——原始异常是
+            # 调用方失败归因的依据；flush 失败由日志承载。
+            logger.exception("Flushing committed tool events failed during batch abort")
+            raise
+
+    @staticmethod
+    def _log_secondary_exceptions(
+        results: list[ToolExecution | BaseException],
+        tool_calls: list[ToolCall | dict[str, Any]],
+    ) -> None:
+        """把批次里除首个异常外的其余异常按 tool_call_id 落日志（不改变抛出契约）。
+
+        gather(return_exceptions=True) 只允许 raise 一个异常，其余异常若不在此
+        记录就永远丢失。首个异常由调用方原样抛出，不在这里重复记录。
+        """
+        primary = next(
+            index
+            for index, result in enumerate(results)
+            if isinstance(result, BaseException)
+        )
+        for index, result in enumerate(results):
+            if index == primary or not isinstance(result, BaseException):
+                continue
+            call_id = ToolCall.normalize(tool_calls[index]).id
+            # 不走 self._log/log_event：EVENT_TYPES 是冻结白名单（诊断事件不该
+            # 为它动日志协议），ERROR 级别也需直达 module logger。
+            # exc_info=result 让 traceback 携带消息，避免在消息体里渲染异常字符串
+            # （某些工具会把入参/URL/凭据拼进异常文本）。
+            logger.error(
+                "并行批次除首个异常外还有其它调用失败（首个异常照常抛出，其余仅记录）："
+                "tool_call_id=%s，%s",
+                call_id,
+                type(result).__name__,
+                exc_info=result,
+            )
 
     async def _create_pending_operation(
         self,
@@ -405,6 +493,7 @@ class ToolExecutor:
         )
 
         if self._operation_ledger is not None:
+            assert operation_context is not None
             await self._create_pending_operation(
                 tool_call_id=tool_call_id,
                 name=name,
@@ -412,7 +501,7 @@ class ToolExecutor:
                 operation_context=operation_context,
             )
             await self._operation_ledger.update_state(
-                tool_call_id,
+                operation_context.session_id, tool_call_id,
                 OperationState.CANCELLED,
                 result_json=result.model_dump_json(),
             )
@@ -505,7 +594,8 @@ class ToolExecutor:
           t0 = perf_counter()
           asyncio.timeout(tool.timeout_seconds) 包住 await tool.execute(validated)
             -> 正常返回 ToolResult  -> 透传（尊重工具自己的 ok/retryable 语义）
-            -> 抛 TimeoutError      -> 映射 TIMEOUT（可重试，外部依赖慢通常是暂时的）
+            -> 抛 TimeoutError      -> 映射 TIMEOUT（READ_ONLY 可重试；MUTATING 不可——
+                                      副作用状态未知不盲重跑，见 except TimeoutError 注释）
             -> 抛其它 Exception     -> 查 _EXCEPTION_CLASSIFICATION 分类
           记 duration_ms -> 写一条 tool_operation 日志 -> 回填 metadata
           -> 重试决策（失败且 retryable 且未用完 MAX_ATTEMPTS 才重试）-> 决定重试则写一条 retry 日志
@@ -523,15 +613,17 @@ class ToolExecutor:
                 # asyncio.timeout 到点把 execute 掐断，抛出 TimeoutError。
                 # message 写清工具名 + 超时上限，给模型"外部依赖可能暂时无响应"的纠错线索；
                 # error_code 取 TIMEOUT（result.py 里该码语义即"超时 → 可重试"）；
-                # retryable=True：外部服务慢通常是暂时的，重试可能自愈（对照
-                # _EXCEPTION_CLASSIFICATION 里 ConnectionError 同为暂时性失败）。
+                # retryable：READ_ONLY 超时是暂时的、重跑安全 → True；MUTATING 超时
+                # 意味着第 1 次尝试的副作用状态未知（进程可能仍在跑、写可能已落盘）
+                # ——与 Recovery 对 UNKNOWN 副作用要求人工 reconcile 同一语义
+                # （不变量 #14）：不自动重试，交模型决定是否重发。
                 result = ToolResult.failure(
                     message=(
                         f"工具 '{name}' 执行超时（上限 {tool.timeout_seconds} 秒），"
                         "可能是外部依赖暂时无响应，可稍后重试。"
                     ),
                     error_code=ErrorCode.TIMEOUT,
-                    retryable=True,
+                    retryable=tool.side_effect is not ToolSideEffect.MUTATING,
                 )
             except Exception as e:  # noqa: BLE001
                 # 宽捕获理由同 Task 2：工具是开放世界，无法预知会抛什么。

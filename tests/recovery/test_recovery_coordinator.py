@@ -91,10 +91,10 @@ async def _seed_operation(
         )
     )
     if state is not OperationState.PENDING:
-        await ledger.update_state(tool_call_id, OperationState.RUNNING)
+        await ledger.update_state(session_id, tool_call_id, OperationState.RUNNING)
         if state is not OperationState.RUNNING:
             await ledger.update_state(
-                tool_call_id, state, result_json=result_json
+                session_id, tool_call_id, state, result_json=result_json
             )
 
 
@@ -290,9 +290,14 @@ async def test_pending_operation_skipped_without_execution(tmp_path: Path) -> No
     # 未自动执行：没有真实工具被调用（这里用执行计数恒 0 表达——policy 只被咨询，
     # 不触发任何 Tool.execute；execution_count 记录的是决策次数）。
     assert execution_count == 1
-    # Ledger 状态保持 PENDING（skip 不伪造终态；再次 recover 靠结果事件幂等跳过）。
-    op = await ledger.get("call-1")
-    assert op is not None and op.state is OperationState.PENDING
+    # Ledger 推进到 CANCELLED（Round 8 契约修订）：skip 决策已把 CANCELLED 语义的
+    # 结果合成进 session，Ledger 行同步记录"恢复时被放弃、从未执行"——PENDING→CANCELLED
+    # 是状态机显式允许的迁移，不伪造任何执行结果（不写 SUCCEEDED/FAILED）。此前
+    # 停留 PENDING 让 ledger 与 session 对同一 tool_call 永久不一致。再次 recover
+    # 靠结果事件幂等跳过（dangling 判定基于事件配对，与 Ledger 状态正交）。
+    op = await ledger.get(crashed.session_id, "call-1")
+    assert op is not None and op.state is OperationState.CANCELLED
+    assert op.result_json == results["call-1"]
 
 
 @pytest.mark.asyncio
@@ -570,3 +575,114 @@ async def test_runtime_context_rederived_from_recovered_events(tmp_path: Path) -
     assert "migration applied" in messages[-1].content
     # 无 Phase 1 占位（真实结果已合成）。
     assert all(DANGLING_TOOL_CONTENT not in str(m.content) for m in messages)
+
+
+# ── 损坏 result_json 不阻塞恢复（#29 容错回归）──
+
+
+@pytest.mark.asyncio
+async def test_corrupt_succeeded_result_json_falls_back_to_missing_detail(
+    tmp_path: Path,
+) -> None:
+    """Ledger 的 result_json 不是合法 ToolResult JSON 时，恢复不能崩。
+
+    _content_from_ledger 直接返回 operation.result_json——若 Ledger 行被外部写入
+    或迁移残留污染成 'not-json'，恢复会向 Session 写入无法被 ToolResult 解析的
+    内容，下游 derive_messages / 模型回灌就会拿到乱码。守卫必须捕获 ValidationError
+    并降级到"结果详情缺失"合成结果（与无 result_json 的降级路径一致）。
+    """
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger,
+        "call-1",
+        OperationState.SUCCEEDED,
+        crashed.session_id,
+        result_json="not-json",
+    )
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    recovered = await coordinator.recover(crashed.session_id)
+
+    results = _result_events(recovered)
+    assert "call-1" in results
+    synthesized = ToolResult.model_validate_json(results["call-1"])
+    assert synthesized.ok is True
+    assert "结果详情缺失" in synthesized.message
+
+
+@pytest.mark.asyncio
+async def test_corrupt_failed_result_json_falls_back_to_missing_detail(
+    tmp_path: Path,
+) -> None:
+    """FAILED 终态 + 损坏 result_json：降级合成失败结果，恢复不崩。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger,
+        "call-1",
+        OperationState.FAILED,
+        crashed.session_id,
+        result_json="{not valid",
+    )
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    recovered = await coordinator.recover(crashed.session_id)
+
+    synthesized = ToolResult.model_validate_json(_result_events(recovered)["call-1"])
+    assert synthesized.ok is False
+    assert "结果详情缺失" in synthesized.message
+
+
+# ── 合成 tool/call 携带真实 args_identity（EX FIX 4）──
+
+
+@pytest.mark.asyncio
+async def test_synthesized_tool_call_carries_real_args_not_empty(
+    tmp_path: Path,
+) -> None:
+    """崩溃窗口补齐 tool/call 时，args 必须来自 Ledger 的 args_identity，
+    不是空 {}。
+
+    derive_messages 把 tool/call 的 args 投到 AIMessage.tool_calls[*].args
+    喂给模型——合成事件若是 {}，恢复后的对话历史会把"用户实际请求的命令"
+    抹成空字典，模型在后续轮次看到的就是一次空调用，事实被歪曲。
+    args_identity 是工具调用入参的冻结快照（Ledger 在执行前写入），是崩溃
+    现场最可靠的入参来源。
+    """
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = Session.start(store)
+    session.append(USER_MESSAGE, {"content": "hi"})
+    session.append(
+        MODEL_COMPLETED,
+        {
+            "content": "",
+            "tool_calls": [
+                {"id": "call-1", "name": "bash", "args": {"command": "migrate"}}
+            ],
+        },
+        run_id="run-1",
+        step_id=1,
+    )
+    # 崩溃：无 tool/call，无 tool/result。
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger,
+        "call-1",
+        OperationState.SUCCEEDED,
+        session.session_id,
+        result_json=ToolResult.success("done").model_dump_json(),
+    )
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    recovered = await coordinator.recover(session.session_id)
+
+    synthesized_call = next(
+        e for e in recovered.events if e.type == TOOL_CALL and e.data["tool_call_id"] == "call-1"
+    )
+    assert synthesized_call.data["args"] == {"command": "migrate"}

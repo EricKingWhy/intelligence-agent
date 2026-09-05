@@ -12,10 +12,13 @@ import fnmatch
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import threading
+from contextlib import suppress
 from pathlib import Path
 from time import perf_counter
+from uuid import uuid4
 
 from agent_harness.sandbox.base import ExecResult, Sandbox
 
@@ -85,10 +88,41 @@ class LocalSubprocessSandbox(Sandbox):
     进程不存在"启动"概念，ensure_started 是 no-op；stop 也不需要清理（幂等空操作）。
     """
 
-    def __init__(self, workspace_root: Path, *, max_capture_chars: int = 2_000_000) -> None:
+    #: 传给子进程的环境变量白名单（C2，R3-5 落地）：bash 继承完整 host env 时，
+    #: 部署机上 export 过的密钥（API keys、tokens）对模型可执行命令可见
+    #: （echo $MY_TOKEN 即泄漏）。白名单只保留 OS 运行必需项，不含任何凭据。
+    DEFAULT_ENV_ALLOWLIST = (
+        # Windows 运行必需
+        "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR",
+        "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES",
+        "PROGRAMFILES(X86)", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+        "USERDOMAIN", "USERNAME", "NUMBER_OF_PROCESSORS", "OS",
+        # POSIX 运行必需
+        "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "LOGNAME", "SHELL",
+        # 编码（无凭据风险，缺了会让子进程输出编码漂移）
+        "PYTHONIOENCODING", "PYTHONUTF8",
+        # 网络环境（pip/curl 等在代理/企业环境下可用性；标准做法：
+        # 代理变量属运营配置，不是凭据——真正要防的是 API keys/tokens）
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+    )
+
+    def __init__(
+        self,
+        workspace_root: Path,
+        *,
+        max_capture_chars: int = 2_000_000,
+        env_allowlist: tuple[str, ...] | None = None,
+        passthrough_env: bool = False,
+    ) -> None:
         self._workspace_root = Path(workspace_root).resolve()
         self._workspace_root.mkdir(parents=True, exist_ok=True)
         self._max_capture_chars = max_capture_chars
+        # passthrough_env=True 是显式逃生门（本地调试）；默认过滤。
+        if passthrough_env:
+            self._env: dict[str, str] | None = None
+        else:
+            allowlist = env_allowlist if env_allowlist is not None else self.DEFAULT_ENV_ALLOWLIST
+            self._env = {k: os.environ[k] for k in allowlist if k in os.environ}
 
     @property
     def workspace_root(self) -> Path:
@@ -97,10 +131,11 @@ class LocalSubprocessSandbox(Sandbox):
     def ensure_started(self) -> None:
         """no-op：本机进程总在，无需启动。幂等。"""
 
-    def exec(self, command: str, *, timeout: float | None = None) -> ExecResult:
+    def exec(self, command: str, *, timeout: float | None = None,
+             cancel_event=None) -> ExecResult:
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
 
-        timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉子进程并返回
+        timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉整个进程树并返回
         ExecResult(exit_code=-1, stderr="命令超时…")，不抛异常。
         stdout/stderr 捕获到 max_capture_chars 上限，超限丢弃并附截断标记
         （D4：无上限捕获会被大输出 OOM）。管道由 reader 线程持续排空，
@@ -112,6 +147,11 @@ class LocalSubprocessSandbox(Sandbox):
         # encoding/errors：Windows 中文系统默认 GBK，模型跑的命令可能输出 UTF-8 或 GBK；
         # 用 errors="replace" 保证任何字节序列都不会让 subprocess 解码崩掉。
         t0 = perf_counter()
+        # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀；
+        # Windows 不支持该参数（走 taskkill /T，见 _kill_process_tree）。
+        popen_kwargs: dict[str, object] = (
+            {"start_new_session": True} if os.name == "posix" else {}
+        )
         process = subprocess.Popen(
             command,
             shell=True,
@@ -121,6 +161,8 @@ class LocalSubprocessSandbox(Sandbox):
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=self._env,
+            **popen_kwargs,
         )
         stdout_cap = _CappedCapture(self._max_capture_chars)
         stderr_cap = _CappedCapture(self._max_capture_chars)
@@ -132,15 +174,44 @@ class LocalSubprocessSandbox(Sandbox):
             reader.start()
 
         timed_out = False
-        try:
-            exit_code = process.wait(timeout=effective_timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            process.kill()
+        cancelled = False
+        if cancel_event is None:
             try:
-                exit_code = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:  # pragma: no cover — kill 后通常立即退出
-                exit_code = -1
+                exit_code = process.wait(timeout=effective_timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self._kill_process_tree(process)
+                try:
+                    exit_code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:  # pragma: no cover — kill 后通常立即退出
+                    exit_code = -1
+        else:
+            # 协作取消（C1）：小步轮询等退出；置位即击杀整树。
+            # pi-mono 同款"取消信号驱动到静默"模式；无 cancel_event 时保持
+            # 原单次 wait 路径（git 等只读命令零轮询开销）。
+            deadline = perf_counter() + effective_timeout
+            while True:
+                remaining = deadline - perf_counter()
+                try:
+                    exit_code = process.wait(timeout=max(0.05, min(0.1, remaining)))
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_event.is_set():
+                        cancelled = True
+                        self._kill_process_tree(process)
+                        try:
+                            exit_code = process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:  # pragma: no cover
+                            exit_code = -1
+                        break
+                    if perf_counter() >= deadline:
+                        timed_out = True
+                        self._kill_process_tree(process)
+                        try:
+                            exit_code = process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:  # pragma: no cover
+                            exit_code = -1
+                        break
         for reader in readers:
             reader.join(5)
 
@@ -149,6 +220,9 @@ class LocalSubprocessSandbox(Sandbox):
             stdout += f"\n[stdout 超过捕获上限 {self._max_capture_chars} 字符，已截断]"
         if stderr_cap.truncated:
             stderr += f"\n[stderr 超过捕获上限 {self._max_capture_chars} 字符，已截断]"
+        if cancelled:
+            exit_code = -1
+            stderr += "\n命令被取消，进程树已终止"
         if timed_out:
             exit_code = -1
             stderr += f"\n命令超时（上限 {effective_timeout} 秒）"
@@ -157,7 +231,38 @@ class LocalSubprocessSandbox(Sandbox):
             stdout=stdout,
             stderr=stderr,
             duration_ms=round((perf_counter() - t0) * 1000, 1),
+            cancelled=cancelled,
         )
+
+    @staticmethod
+    def _kill_process_tree(process: subprocess.Popen) -> None:
+        """超时击杀整棵进程树，而不只 shell 壳。
+
+        shell=True 时 process 只是 cmd.exe / /bin -c 壳，真正干活的是孙进程；
+        只杀壳会漏掉它们：继续改 workspace、占住捕获管道（reader join 超时），
+        锁住的文件还会让 delete() 的 rmtree 静默失败。
+        """
+        if os.name == "nt":
+            killed = False
+            try:
+                # taskkill /T 沿父子链整树击杀（含 start /b 脱管孙进程）。
+                result = subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                killed = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired) as error:  # pragma: no cover
+                logger.debug("taskkill 调用失败，回退 process.kill()：%s", type(error).__name__)
+            if not killed:
+                process.kill()
+        else:
+            # POSIX：子进程已在独立进程组（见 Popen start_new_session），整组 SIGKILL。
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:  # 进程组已退出，无须再杀
+                process.kill()
 
     @staticmethod
     def _drain_stream(stream, cap: _CappedCapture) -> None:
@@ -192,15 +297,33 @@ class LocalSubprocessSandbox(Sandbox):
         return results
 
     def read_text(self, path: str) -> str:
-        """读 workspace 内文件。路径越界抛 PermissionError，文件不存在抛 FileNotFoundError。"""
+        """读 workspace 内文件。路径越界抛 PermissionError，文件不存在抛 FileNotFoundError。
+
+        newline=""：字节透传，不做 universal-newlines 折叠——否则 CRLF 文件读出
+        变 LF，edit 回写即产生整文件 diff（EOL 破坏用户工作区）。
+        """
         resolved = self._resolve_within_workspace(path)
-        return resolved.read_text(encoding="utf-8")
+        return resolved.read_text(encoding="utf-8", newline="")
 
     def write_text(self, path: str, content: str) -> None:
-        """覆盖写 workspace 内文件（父目录自动创建）。路径越界抛 PermissionError。"""
+        """覆盖写 workspace 内文件（父目录自动创建）。路径越界抛 PermissionError。
+
+        两点字节级保证：
+        - newline=""：\\n 不翻译成 os.linesep（win32 上 LF→CRLF 会把 .sh/
+          Makefile 类文件写坏、git 显示整文件改动）。
+        - temp + os.replace 原子落盘：truncate-in-place 在进程被 kill 的写中途
+          不可逆损毁原文件；同目录 rename 在 POSIX/Windows 上都是原子操作。
+        """
         resolved = self._resolve_within_workspace(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
+        tmp = resolved.with_name(f".{resolved.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="") as fh:
+                fh.write(content)
+            os.replace(tmp, resolved)
+        finally:
+            with suppress(OSError):
+                tmp.unlink()  # Windows AV/索引器可能短暂锁住；清理失败不掩盖主流程
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
         """把宿主文件/目录拷入 workspace 内指定位置。workspace_path 越界抛 PermissionError。"""
@@ -216,5 +339,13 @@ class LocalSubprocessSandbox(Sandbox):
         """no-op：本机进程不需要清理。幂等。"""
 
     def delete(self) -> None:
-        """彻底删除 workspace 目录。幂等（目录不存在也不报错）。"""
+        """彻底删除 workspace 目录。幂等（目录不存在也不报错）。
+
+        删除未完成（文件被锁/AV 占用等）时显式抛错——调用方（Registry）据
+        此保留映射以便重试，而不是留下无记录的孤儿目录（R8-6）。
+        """
         shutil.rmtree(self._workspace_root, ignore_errors=True)
+        if self._workspace_root.exists():
+            raise RuntimeError(
+                f"workspace {self._workspace_root} 删除未完成（文件被占用？），请重试"
+            )

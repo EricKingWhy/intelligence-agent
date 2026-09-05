@@ -15,9 +15,20 @@ from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 
+#: 输出预算（R8-2，厂商实测共识：pi-mono / Claude Code 均为 2000 行 + ~50KB）：
+#: 先到为准；超出即截断并给"可执行的下一步"标记（offset 续读）。
+#: 上下文保护是工具的领域语义，不依赖 OverflowHandler（那只在配置了 artifact
+#: 存储时接线，且不检查大文件本身）。
+_READ_MAX_LINES = 2000
+_READ_MAX_BYTES = 50 * 1024
+
 
 class _ReadArgs(BaseModel):
     path: str = Field(..., description="workspace 内的文件相对路径，如 'src/main.py'")
+    offset: int = Field(
+        default=1, ge=1,
+        description="起始行号（1-based）。大文件续读用：截断标记会提示下一次的 offset。",
+    )
 
 
 class ReadTool(Tool):
@@ -34,7 +45,11 @@ class ReadTool(Tool):
     def description(self) -> str:
         return (
             "读取 workspace 内的文本文件内容。"
-            "参数：path 为 workspace 内的文件路径（相对路径或绝对路径，必须在 workspace 范围内）。"
+            "参数：path 为 workspace 内的文件路径（相对路径或绝对路径，必须在 workspace 范围内）；"
+            "offset 为起始行号（1-based，默认 1）。"
+            f"单次最多返回 {_READ_MAX_LINES} 行或 {_READ_MAX_BYTES // 1024}KB（先到为准），"
+            "超出时附 [Showing lines X-Y of N. Use offset=Y+1 to continue.] 标记，"
+            "按提示传 offset 续读。"
         )
 
     @property
@@ -70,7 +85,69 @@ class ReadTool(Tool):
                 message=f"文件 '{args.path}' 不存在。",
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
+        # 输出预算（R8-2）：行数/字节双帽，先到为准；截断时给可续读标记。
+        lines = content.splitlines()
+        total_lines = len(lines)
+        if total_lines == 0:
+            # 空文件（0 字节）合法读取：返回空内容而非 INVALID_ARGUMENT——
+            # offset 守卫在此之上，默认 offset=1 对 0 行文件会误报越界
+            # （厂商行为一致：pi-mono / Claude Code 对空文件返回空内容）。
+            return ToolResult.success(
+                message=f"已读取 '{args.path}'（空文件）。",
+                data={"path": args.path, "content": "", "total_lines": 0},
+            )
+        start = args.offset
+        if start > total_lines:
+            return ToolResult.failure(
+                message=f"offset={start} 越过文件末尾（共 {total_lines} 行）。",
+                error_code=ErrorCode.INVALID_ARGUMENT,
+            )
+        kept: list[str] = []
+        bytes_used = 0
+        truncated = False
+        giant_line = False
+        for line in lines[start - 1:]:
+            if len(kept) >= _READ_MAX_LINES:
+                truncated = True
+                break
+            line_bytes = len(line.encode("utf-8")) + 1
+            if kept and bytes_used + line_bytes > _READ_MAX_BYTES:
+                truncated = True
+                break
+            if not kept and line_bytes > _READ_MAX_BYTES:
+                # 首行自身超字节帽：硬截该行（无法按行续读），标记改用 bash 建议
+                # ——pi-mono 同款策略：给模型"可执行的下一步"（sed/head 取片段）。
+                kept.append(
+                    line.encode("utf-8")[:_READ_MAX_BYTES].decode("utf-8", errors="replace")
+                )
+                bytes_used = _READ_MAX_BYTES
+                giant_line = True
+                truncated = True
+                break
+            kept.append(line)
+            bytes_used += line_bytes
+        if not truncated and start == 1:
+            # 未截断且从头读：原样返回（字节级保真，不因窗口化改写行尾）。
+            return ToolResult.success(
+                message=f"已读取 '{args.path}'（{len(content)} 字符）。",
+                data={"path": args.path, "content": content},
+            )
+        text = "\n".join(kept)
+        end_line = start + len(kept) - 1
+        if giant_line:
+            text += (
+                f"\n[Line {start} truncated at {_READ_MAX_BYTES} bytes. "
+                f"Use bash with 'sed -n '{start}p' <file> | head -c {_READ_MAX_BYTES}' "
+                f"plus 'tail -c +N' to read further segments.]"
+            )
+        elif truncated:
+            text += (
+                f"\n[Showing lines {start}-{end_line} of {total_lines}. "
+                f"Use offset={end_line + 1} to continue.]"
+            )
         return ToolResult.success(
-            message=f"已读取 '{args.path}'（{len(content)} 字符）。",
-            data={"path": args.path, "content": content},
+            message=(
+                f"已读取 '{args.path}' 行 {start}-{end_line}（共 {total_lines} 行）。"
+            ),
+            data={"path": args.path, "content": text, "total_lines": total_lines},
         )

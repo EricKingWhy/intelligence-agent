@@ -31,6 +31,46 @@ logger = logging.getLogger("agent_harness.session.derive")
 DANGLING_TOOL_CONTENT = "工具执行被中断，结果未知"
 
 
+def _normalize_tool_calls_for_projection(
+    raw: object,
+) -> list[dict[str, object]]:
+    """把 MODEL_COMPLETED.tool_calls 规整成投影安全的 list[dict]。
+
+    单事件层容错：tool_calls 可能被旧日志、手工写入、序列化路径污染成非 list
+    （dict / str / None）。derive_messages 是恢复链的必经节点，一行坏数据不能
+    brick 整个 session 的恢复（违反存储模块"一行坏数据只损失该行"的契约）。
+    非法形状降级为无 tool_calls（只丢该事件的工具调用，不让整个投影抛错）；
+    单条非 dict 元素跳过。
+
+    缺 id 在投影层保留空串（与事件原始形状一致，仅做消息重建），不在投影层
+    合成占位 id；Tool Runtime 边界的 ToolCall.normalize 才升级为 gen_<hex> 占位
+    （那是 Ledger 主键与 ToolMessage 配对的关键）。两层策略刻意不同：投影只读、
+    Runtime 才赋身份。详见 contract.py:ToolCall.normalize。
+    """
+    if not isinstance(raw, list):
+        if raw:
+            logger.warning(
+                "MODEL_COMPLETED.tool_calls 形状非法（%s），降级为无 tool_calls",
+                type(raw).__name__,
+            )
+        return []
+    normalized: list[dict[str, object]] = []
+    for tc in raw:
+        if not isinstance(tc, dict):
+            logger.warning(
+                "tool_call 元素非 dict（%s），跳过该项", type(tc).__name__
+            )
+            continue
+        normalized.append(
+            {
+                "id": tc.get("id", ""),
+                "name": tc.get("name", ""),
+                "args": tc.get("args", {}),
+            }
+        )
+    return normalized
+
+
 def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
     """从事件序列投影出 messages 列表。
 
@@ -47,21 +87,11 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
 
         elif event.type == MODEL_COMPLETED:
             content = event.data.get("content", "")
-            raw_tool_calls = event.data.get("tool_calls", [])
-            if raw_tool_calls:
-                messages.append(
-                    AIMessage(
-                        content=content,
-                        tool_calls=[
-                            {
-                                "id": tc.get("id", ""),
-                                "name": tc.get("name", ""),
-                                "args": tc.get("args", {}),
-                            }
-                            for tc in raw_tool_calls
-                        ],
-                    )
-                )
+            tool_calls = _normalize_tool_calls_for_projection(
+                event.data.get("tool_calls", [])
+            )
+            if tool_calls:
+                messages.append(AIMessage(content=content, tool_calls=tool_calls))
             else:
                 messages.append(AIMessage(content=content))
 
@@ -110,14 +140,28 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
 
 
 def detect_dangling(events: list[SessionEvent]) -> list[str]:
-    """返回事件序列中 dangling 的 tool_call_id 列表（有 tool/call 无 tool/result）。
+    """返回事件序列中 dangling 的 tool_call_id 列表（有请求无结果）。
 
     供 Session.append 在 resume 时决定是否需要合成 tool/result 事件。
+
+    真相源与 derive_messages 对齐：请求侧同时看 TOOL_CALL 事件和
+    MODEL_COMPLETED.tool_calls。崩溃可能发生在 MODEL_COMPLETED 已持久化但
+    TOOL_CALL 还没写的窗口——只看 TOOL_CALL 会让这种 dangling 静默漏掉，
+    Session.resume 不合成 tool/result，历史永久悬空（derive_messages 每次
+    投影都重复触发 dangling 警告）。与 RecoveryCoordinator._dangling_state
+    的双真相源逻辑保持一致。
     """
     requested: set[str] = set()
     resolved: set[str] = set()
     for event in events:
-        if event.type == TOOL_CALL:
+        if event.type == MODEL_COMPLETED:
+            for tc in _normalize_tool_calls_for_projection(
+                event.data.get("tool_calls", [])
+            ):
+                tc_id = tc.get("id", "")
+                if tc_id:
+                    requested.add(tc_id)
+        elif event.type == TOOL_CALL:
             tc_id = event.data.get("tool_call_id", "")
             if tc_id:
                 requested.add(tc_id)

@@ -270,3 +270,70 @@ class TestMixedScenarios:
         original_lens = len(events)
         derive_messages(events)
         assert len(events) == original_lens
+
+
+# ── 畸形 tool_calls 不应让 derive_messages 崩溃（Round 5 HARD BUG）──
+
+
+class TestMalformedToolCalls:
+    """MODEL_COMPLETED.tool_calls 的形状可能被旧日志、手工写入、序列化路径污染。
+    derive_messages 是恢复链的必经节点——一行坏数据不能 brick 整个 session 恢复。
+    """
+
+    def test_tool_calls_as_dict_does_not_crash(self):
+        """tool_calls 是 dict 而不是 list 时，投影降级为无 tool_calls 的 AIMessage。"""
+        events = [
+            _user(0, "s1", "hi"),
+            SessionEvent(
+                seq=1, type=MODEL_COMPLETED, session_id="s1",
+                data={"content": "reply", "tool_calls": {"x": {"name": "a"}}},
+            ),
+        ]
+        messages = derive_messages(events)
+        # 不抛 + 投出 AIMessage（无 tool_calls，因为形状不合法被丢弃）。
+        assert isinstance(messages[1], AIMessage)
+        assert messages[1].tool_calls in (None, [])
+
+    def test_tool_calls_as_string_does_not_crash(self):
+        """tool_calls 是 str（极端污染）时不抛。"""
+        events = [
+            _user(0, "s1", "hi"),
+            SessionEvent(
+                seq=1, type=MODEL_COMPLETED, session_id="s1",
+                data={"content": "reply", "tool_calls": "garbage"},
+            ),
+        ]
+        messages = derive_messages(events)
+        assert isinstance(messages[1], AIMessage)
+
+    def test_tool_calls_item_missing_id_key_uses_empty(self):
+        """单条 tool_call 缺 id 键——投影不抛（id 缺失降级为空串，由下游统一处理）。"""
+        events = [
+            _user(0, "s1", "hi"),
+            _model(1, "s1", "calling", tool_calls=[{"name": "a", "args": {}}]),
+        ]
+        messages = derive_messages(events)
+        assert isinstance(messages[1], AIMessage)
+        # 缺 id 的 tool_call 仍投出，id 字段存在（值可能是空串或占位）。
+        assert messages[1].tool_calls is not None and len(messages[1].tool_calls) == 1
+
+
+# ── detect_dangling 应与 derive_messages 一致（Round 5 HARD BUG #2）──
+
+
+class TestDetectDanglingConsistency:
+    """derive_messages 基于 MODEL_COMPLETED.tool_calls 配对；
+    detect_dangling 只看 TOOL_CALL 事件——两者真相源不一致。
+    当崩溃发生在 MODEL_COMPLETED 之后、TOOL_CALL 之前时，detect_dangling
+    看不到这个 dangling，Session.resume 不会合成 tool/result，历史永久悬空。
+    """
+
+    def test_detect_dangling_includes_model_completed_sourced_calls(self):
+        """MODEL_COMPLETED 带 tool_calls 但无 tool/call 也无 tool/result —— detect_dangling 必须返回这个 id。"""
+        events = [
+            _user(0, "s1", "run"),
+            _model(1, "s1", "", tool_calls=[{"id": "tc-x", "name": "bash", "args": {}}]),
+        ]
+        dangling = detect_dangling(events)
+        # 当前实现只扫 TOOL_CALL，会返回 [] —— 但 derive_messages 能看到 tc-x 是 dangling。
+        assert "tc-x" in dangling

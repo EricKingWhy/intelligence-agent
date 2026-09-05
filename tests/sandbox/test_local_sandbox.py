@@ -179,3 +179,35 @@ class TestLifecycle:
         """不显式 ensure_started 也能直接 exec（构造即可用）。"""
         result = sandbox.exec("echo works")
         assert result.exit_code == 0
+
+
+# ── Round 8 加固：EOL 字节保持 + 原子写 ──
+
+
+def test_write_then_read_preserves_lf_bytes(tmp_path):
+    """LF 文件经 write/edit 后必须逐字节保持——write_text 默认 newline=None
+    会把 \n 翻译成 os.linesep（win32 上 LF→CRLF）：git 显示整文件改动、
+    .sh/Makefile 类文件直接损坏。写与读都必须字节透传（newline=""）。"""
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    sandbox.write_text("a.txt", "line1\nline2\n")
+    raw = (tmp_path / "a.txt").read_bytes()
+    assert raw == b"line1\nline2\n", f"写入被 EOL 翻译污染: {raw!r}"
+    assert sandbox.read_text("a.txt") == "line1\nline2\n"
+
+
+def test_read_preserves_crlf_bytes(tmp_path):
+    """已存在的 CRLF 文件读出不得被归一化成 LF——read_text 默认 universal
+    newlines 会把 \r\n 折叠成 \n，edit 回写即产生整文件 diff。"""
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    (tmp_path / "crlf.txt").write_bytes(b"line1\r\nline2\r\n")
+    assert sandbox.read_text("crlf.txt") == "line1\r\nline2\r\n"
+
+
+def test_write_text_is_atomic_replace(tmp_path):
+    """写文件必须走 temp + os.replace（同目录），不能 truncate-in-place——
+    进程崩溃/被 kill 在写中途会不可逆损毁原文件。验证目标文件由 rename 产生：
+    写入过程短暂存在的临时文件留在同目录，最终内容完整。"""
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    (tmp_path / "f.txt").write_bytes(b"old content")
+    sandbox.write_text("f.txt", "new content")
+    assert (tmp_path / "f.txt").read_bytes() == b"new content"

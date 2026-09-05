@@ -196,3 +196,41 @@ class TestCrossProcessLifecycle:
         registry.delete("sess_orphan")  # 不报错
 
         assert not orphan.exists()
+
+
+# ── B 组加固（R8-6）：delete 谎报成功防线 ──
+
+
+def test_delete_keeps_mapping_when_workspace_locked(tmp_path, monkeypatch):
+    """workspace 目录删除失败（文件被锁等）时不得删映射谎报成功。
+
+    此前 rmtree(ignore_errors=True) 失败后映射照样被 unlink——孤儿目录留在
+    磁盘且注册表无记录，永远无法再清理。现在：删除未完成 → 保留映射并抛错。
+    """
+    import shutil as _shutil
+
+    import pytest as _pytest
+
+    from agent_harness.sandbox.registry import WorkspaceRegistry
+
+    registry = WorkspaceRegistry(root=tmp_path / "ws", backend="local")
+    registry.create("sess-del")
+    workspace = tmp_path / "ws" / "workspaces" / "sess-del"
+    assert workspace.exists()
+
+    real_rmtree = _shutil.rmtree
+
+    def locked_rmtree(path, *args, **kwargs):
+        real_rmtree(path, *args, **kwargs)
+        # 模拟 rmtree 部分失败：目录被重建且残留一个"锁死"的文件
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "locked.bin").write_bytes(b"x")
+
+    monkeypatch.setattr(_shutil, "rmtree", locked_rmtree)
+    with _pytest.raises(RuntimeError, match="sess-del"):
+        registry.delete("sess-del")
+    # 映射保留：下次可以重试清理
+    assert registry._mapping_path("sess-del").exists()
+    monkeypatch.undo()
+    registry.delete("sess-del")  # 重试成功
+    assert not registry._mapping_path("sess-del").exists()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from agent_harness.storage import (
     OperationState,
     SqliteOperationLedger,
 )
+from agent_harness.storage.artifact import FakeArtifactStore
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
@@ -21,6 +23,8 @@ from agent_harness.tooling import (
     ToolResult,
     ToolSideEffect,
 )
+from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from tests.conftest import make_session
 
 
 class _NoArgs(BaseModel):
@@ -218,8 +222,8 @@ async def test_preflight_failure_has_no_operation_and_cancels_remainder(
     assert second.calls == 0
     assert results[0].result.error_code is ErrorCode.INVALID_ARGUMENT
     assert results[1].result.error_code is ErrorCode.CANCELLED
-    assert await ledger.get("call-invalid") is None
-    cancelled = await ledger.get("call-cancelled")
+    assert await ledger.get("session-1", "call-invalid") is None
+    cancelled = await ledger.get("session-1", "call-cancelled")
     assert cancelled is not None
     assert cancelled.state is OperationState.CANCELLED
 
@@ -242,4 +246,91 @@ async def test_permission_denial_has_no_operation_or_side_effect(
 
     assert dangerous.calls == 0
     assert execution.result.error_code is ErrorCode.PERMISSION_DENIED
-    assert await ledger.get("call-denied") is None
+    assert await ledger.get("session-1", "call-denied") is None
+
+
+# ============================================================================
+# 并行批次的次要异常可观察性
+# ============================================================================
+
+
+class _BigReadTool(Tool):
+    """返回超预算 output 的只读工具：让批次走 OverflowHandler 的存储路径。
+
+    基础设施异常（存储写失败）从 overflow/store 路径冒出，而非工具内部——
+    这正是并行批次里 gather(return_exceptions=True) 会吞掉兄弟异常的场景。
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "Return an oversized read-only output."
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _NoArgs
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        return ToolResult.success("ok", data={"output": "x" * 5000})
+
+
+@pytest.mark.asyncio
+async def test_parallel_batch_logs_secondary_exceptions_when_first_raises(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """并行批次传播首个异常（输入顺序）的契约不变；其余异常落日志不被吞。
+
+    一次基础设施故障常伴随多个连锁失败：raise 只能带走一个异常，若不补日志，
+    call-3 的次要异常会随首个异常一起从诊断视野里消失。
+    """
+
+    class _FlakyStore(FakeArtifactStore):
+        """按 tool_call_id 注入不同异常的 ArtifactStore。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.failures: dict[str, Exception] = {}
+
+        async def save(self, session_id, content, *, mime_type, source_tool, tool_call_id):
+            failure = self.failures.get(tool_call_id)
+            if failure is not None:
+                raise failure
+            return await super().save(
+                session_id, content,
+                mime_type=mime_type, source_tool=source_tool, tool_call_id=tool_call_id,
+            )
+
+    session = make_session(tmp_path)
+    registry = ToolRegistry()
+    for name in ("read-1", "read-2", "read-3"):
+        registry.register(_BigReadTool(name))
+    store = _FlakyStore()
+    store.failures = {
+        "call-2": ConnectionError("storage offline"),
+        "call-3": RuntimeError("secondary boom"),
+    }
+    executor = ToolExecutor(registry, overflow_handler=ArtifactOverflowHandler(store))
+    calls = [
+        {"id": "call-1", "name": "read-1", "args": {}},
+        {"id": "call-2", "name": "read-2", "args": {}},
+        {"id": "call-3", "name": "read-3", "args": {}},
+    ]
+
+    with (caplog.at_level(logging.ERROR, logger="agent_harness.tooling.executor"),
+          pytest.raises(ConnectionError)):
+        # 首个异常（输入顺序）= call-2 的 ConnectionError，抛出契约不变。
+        await executor.execute_batch(calls, session=session)
+
+    # 次要异常（call-3 的 RuntimeError）必须留下日志线索，且点名 tool_call_id。
+    secondary = [
+        record
+        for record in caplog.records
+        if "call-3" in record.getMessage() and "RuntimeError" in record.getMessage()
+    ]
+    assert secondary, "次要异常被吞：并行批次 raise 首个异常时未记录其余异常"
