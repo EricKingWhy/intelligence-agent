@@ -35,6 +35,7 @@ from agent_harness.assembly import (
 from agent_harness.config import Settings
 from agent_harness.identity import IdentityContext
 from agent_harness.logging import LogContext, log_context, setup_logging
+from agent_harness.memory.types import memory_session_var
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
     MODEL_DELTA,
@@ -171,12 +172,18 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
         )
         store = JsonlSessionStore(root=workspace_root / "sessions")
         session = Session.start(store, session_id=session_id)
+        # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
+        # （ingest_document 的 sandbox 解析）需要可信 session id。
+        session_token = memory_session_var.set(session.session_id)
         renderer = StreamRenderer(write if write is not None else sys.stdout.write)
         final_text = ""
-        async for event in runtime.run_stream(session, message):
-            renderer.handle(event)
-            if event.type == RUN_COMPLETED:
-                final_text = event.data.get("final_text", "")
+        try:
+            async for event in runtime.run_stream(session, message):
+                renderer.handle(event)
+                if event.type == RUN_COMPLETED:
+                    final_text = event.data.get("final_text", "")
+        finally:
+            memory_session_var.reset(session_token)
         return final_text
 
 

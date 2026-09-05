@@ -27,7 +27,8 @@ from agent_harness.knowledge.tools import (
     _ReadSourceArgs,
     _RetrieveArgs,
 )
-from agent_harness.sandbox import Sandbox
+from agent_harness.memory.types import memory_session_var
+from agent_harness.sandbox import Sandbox, WorkspaceRegistry
 from agent_harness.storage import OperationContext
 from agent_harness.tooling import (
     ErrorCode,
@@ -111,8 +112,15 @@ async def test_read_source_tool_bad_citation_is_failure(seeded_service, identity
 
 
 @pytest.mark.asyncio
+def _registry_with(sandbox: Mock) -> Mock:
+    registry = Mock(spec=WorkspaceRegistry)
+    registry.get = Mock(return_value=sandbox)
+    return registry
+
+
+@pytest.mark.asyncio
 async def test_ingest_tool_text_mode_requires_source_name(service, identity):
-    tool = IngestDocumentTool(service, Mock(spec=Sandbox))
+    tool = IngestDocumentTool(service, _registry_with(Mock(spec=Sandbox)))
     result = await tool.execute(_IngestArgs(text="内容"))
     assert not result.ok
     assert result.error_code == ErrorCode.INVALID_ARGUMENT
@@ -120,7 +128,7 @@ async def test_ingest_tool_text_mode_requires_source_name(service, identity):
 
 @pytest.mark.asyncio
 async def test_ingest_tool_text_mode_success(service, identity):
-    tool = IngestDocumentTool(service, Mock(spec=Sandbox))
+    tool = IngestDocumentTool(service, _registry_with(Mock(spec=Sandbox)))
     result = await tool.execute(_IngestArgs(text="正文内容", source_name="doc"))
     assert result.ok
     assert result.data["status"] == "created"
@@ -129,7 +137,7 @@ async def test_ingest_tool_text_mode_success(service, identity):
 
 @pytest.mark.asyncio
 async def test_ingest_tool_rejects_both_inputs(service, identity):
-    tool = IngestDocumentTool(service, Mock(spec=Sandbox))
+    tool = IngestDocumentTool(service, _registry_with(Mock(spec=Sandbox)))
     result = await tool.execute(_IngestArgs(path="a.txt", text="x", source_name="s"))
     assert not result.ok and result.error_code == ErrorCode.INVALID_ARGUMENT
 
@@ -138,8 +146,12 @@ async def test_ingest_tool_rejects_both_inputs(service, identity):
 async def test_ingest_tool_path_mode_reads_via_sandbox(service, identity):
     sandbox = Mock(spec=Sandbox)
     sandbox.read_text = Mock(return_value="workspace 文件内容")
-    tool = IngestDocumentTool(service, sandbox)
-    result = await tool.execute(_IngestArgs(path="docs/notes.md"))
+    token = memory_session_var.set("sess-1")
+    try:
+        tool = IngestDocumentTool(service, _registry_with(sandbox))
+        result = await tool.execute(_IngestArgs(path="docs/notes.md"))
+    finally:
+        memory_session_var.reset(token)
     assert result.ok
     assert result.data["source_name"] == "notes.md", "缺省来源名取文件名"
     sandbox.read_text.assert_called_once_with("docs/notes.md")
@@ -149,8 +161,12 @@ async def test_ingest_tool_path_mode_reads_via_sandbox(service, identity):
 async def test_ingest_tool_path_escape_maps_permission_denied(service, identity):
     sandbox = Mock(spec=Sandbox)
     sandbox.read_text = Mock(side_effect=PermissionError("越出 workspace"))
-    tool = IngestDocumentTool(service, sandbox)
-    result = await tool.execute(_IngestArgs(path="../etc/passwd"))
+    token = memory_session_var.set("sess-1")
+    try:
+        tool = IngestDocumentTool(service, _registry_with(sandbox))
+        result = await tool.execute(_IngestArgs(path="../etc/passwd"))
+    finally:
+        memory_session_var.reset(token)
     assert not result.ok
     assert result.error_code == ErrorCode.PERMISSION_DENIED
 
@@ -159,8 +175,12 @@ async def test_ingest_tool_path_escape_maps_permission_denied(service, identity)
 async def test_ingest_tool_detects_binary_content(service, identity):
     sandbox = Mock(spec=Sandbox)
     sandbox.read_text = Mock(return_value="PK\x00\x03 binary trace")
-    tool = IngestDocumentTool(service, sandbox)
-    result = await tool.execute(_IngestArgs(path="doc.pdf"))
+    token = memory_session_var.set("sess-1")
+    try:
+        tool = IngestDocumentTool(service, _registry_with(sandbox))
+        result = await tool.execute(_IngestArgs(path="doc.pdf"))
+    finally:
+        memory_session_var.reset(token)
     assert not result.ok
     assert "二进制" in result.message
 

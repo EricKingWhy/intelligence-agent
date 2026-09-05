@@ -20,6 +20,7 @@ from agent_harness.capability.base import (
 )
 from agent_harness.capability.config import ProviderConfig
 from agent_harness.config import Settings
+from agent_harness.sandbox import WorkspaceRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,86 @@ async def _wire_mcp(
     # 工具贡献走 wire_capabilities 末尾的 ContributesTools 收集循环（零旁路）。
 
 
+async def _wire_knowledge(
+    registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
+) -> None:
+    """Knowledge Capability 接线（Phase 11，ADR-0013）。
+
+    失败语义（Q10）：KNOWLEDGE_COLLECTION 未配置 = OPTIONAL_RUNTIME 缺席
+    降级（警告可观察）；store 连接/schema 故障 = 环境错误同样降级缺席；
+    其余配置错误（provider 名等）在 wire_capabilities 上游响亮失败。
+    """
+    from agent_harness.knowledge.milvus_store import MilvusKnowledgeVectorStore
+    from agent_harness.knowledge.registry import SqliteKnowledgeSourceRegistry
+    from agent_harness.knowledge.service import KnowledgeService
+    from agent_harness.knowledge.tools import (
+        IngestDocumentTool,
+        ReadKnowledgeSourceTool,
+        RetrieveKnowledgeTool,
+    )
+
+    if not settings.knowledge_collection:
+        logger.warning(
+            "capability 'knowledge' 未配置 KNOWLEDGE_COLLECTION，按 %s 降级缺席",
+            Degradation.OPTIONAL_RUNTIME.value,
+        )
+        return
+
+    try:
+        from agent_harness.memory.embeddings import create_embeddings
+
+        store = MilvusKnowledgeVectorStore(
+            settings,
+            create_embeddings(settings) if settings.embedding_model else None,
+        )
+        await store.initialize()
+        source_registry = SqliteKnowledgeSourceRegistry(
+            Path(settings.workspace_dir) / "harness.db"
+        )
+        await source_registry.initialize()
+    except Exception as error:  # noqa: BLE001 — 环境故障（连接/维度/schema）按档降级
+        logger.warning(
+            "capability 'knowledge' 初始化失败（%s: %s），按 %s 降级缺席",
+            type(error).__name__, error, Degradation.OPTIONAL_RUNTIME.value,
+        )
+        return
+
+    service = KnowledgeService(
+        store=store, registry=source_registry,
+        min_score=settings.knowledge_min_score,
+    )
+    workspace_registry = WorkspaceRegistry(root=Path(settings.workspace_dir))
+    tools = [
+        RetrieveKnowledgeTool(service),
+        ReadKnowledgeSourceTool(service),
+        IngestDocumentTool(service, workspace_registry),
+    ]
+
+    registry.register(
+        CapabilityDescriptor(
+            name="knowledge", version="1.0.0", provider_name=cfg.provider,
+            capabilities=["tools"], risk="medium",
+            supports_concurrency=True, supports_recovery=False, supports_streaming=False,
+            degradation=Degradation.OPTIONAL_RUNTIME,
+        ),
+        _KnowledgeCapabilityProvider(tools, store),
+    )
+    # 向量 client 的关闭走 lifecycle 通道（批次 A 候选 4 的通用出口）。
+    wiring.lifecycle.append(store)
+    # 工具贡献走 wire_capabilities 末尾的 ContributesTools 收集循环（零旁路）。
+
+
+class _KnowledgeCapabilityProvider:
+    """ContributesTools 适配：工具列表经统一 ToolRegistry 进 Executor（不变量 #7）。"""
+
+    def __init__(self, tools: list[Any], store: Any) -> None:
+        self._tools = tools
+        self._store = store
+
+    def contributes_tools(self) -> list[Any]:
+        return list(self._tools)
+
+
 async def _wire_ticker(
     registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
 ) -> None:
@@ -233,6 +314,7 @@ _BUILTIN_WIRING: dict[str, tuple[Any, Degradation]] = {
     "skills": (_wire_skills, Degradation.OPTIONAL_RUNTIME),
     "ticker": (_wire_ticker, Degradation.OPTIONAL_RUNTIME),
     "mcp": (_wire_mcp, Degradation.OPTIONAL_RUNTIME),
+    "knowledge": (_wire_knowledge, Degradation.OPTIONAL_RUNTIME),
 }
 
 
@@ -245,6 +327,7 @@ _KNOWN_PROVIDERS: dict[str, set[str]] = {
     "skills": {"builtin"},
     "ticker": {"builtin"},
     "mcp": {"builtin"},
+    "knowledge": {"builtin"},
 }
 
 

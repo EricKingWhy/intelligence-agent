@@ -14,10 +14,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from agent_harness.identity import identity_context_var
+from agent_harness.identity import IdentityContext, get_identity_context
 from agent_harness.knowledge.service import KnowledgeService
 from agent_harness.knowledge.types import KnowledgeError
-from agent_harness.sandbox import Sandbox
+from agent_harness.memory.types import memory_session_var
+from agent_harness.sandbox import Sandbox, WorkspaceRegistry
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
@@ -33,8 +34,8 @@ def _failure(error: KnowledgeError) -> ToolResult:
     )
 
 
-def _identity():
-    return identity_context_var.get()
+def _identity() -> IdentityContext:
+    return get_identity_context()
 
 
 class _RetrieveArgs(BaseModel):
@@ -184,11 +185,18 @@ class _IngestArgs(BaseModel):
 
 
 class IngestDocumentTool(Tool):
-    """把文档收进知识语料库（ADR-0013 决策 6）：MUTATING，写语料 = 写产物。"""
+    """把文档收进知识语料库（ADR-0013 决策 6）：MUTATING，写语料 = 写产物。
 
-    def __init__(self, service: KnowledgeService, sandbox: Sandbox) -> None:
+    capability 工具是进程级的，而 sandbox 是每会话的：执行时经
+    memory_session_var（runtime 会话帧内已绑定）从 WorkspaceRegistry 解析
+    当前会话的 sandbox——路径边界仍由 sandbox 强制，不因注入方式改变。
+    """
+
+    def __init__(
+        self, service: KnowledgeService, workspace_registry: WorkspaceRegistry,
+    ) -> None:
         self._service = service
-        self._sandbox = sandbox
+        self._workspace_registry = workspace_registry
 
     @property
     def name(self) -> str:
@@ -223,6 +231,14 @@ class IngestDocumentTool(Tool):
     def reconcile_hint(self) -> ReconcileHint:
         return ReconcileHint(verifiable=False)
 
+    def _session_sandbox(self) -> Sandbox:
+        session_id = memory_session_var.get()
+        if not session_id:
+            raise KnowledgeError(
+                "ingest_document 只能在会话内使用（未找到当前会话）"
+            )
+        return self._workspace_registry.get(session_id)
+
     async def execute(self, args: _IngestArgs) -> ToolResult:
         if (args.path is None) == (args.text is None):
             return ToolResult.failure(
@@ -231,7 +247,7 @@ class IngestDocumentTool(Tool):
             )
         try:
             if args.path is not None:
-                content = self._sandbox.read_text(args.path)
+                content = self._session_sandbox().read_text(args.path)
                 source_name = args.source_name or Path(args.path).name
             else:
                 content = args.text or ""
