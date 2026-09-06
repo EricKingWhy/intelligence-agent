@@ -25,6 +25,7 @@ export function initConversation(session_id: string): ConversationState {
     usage_total: null,
     cost_usd: null,
     trace_id: null,
+    model_fallback: null,
   };
 }
 
@@ -114,6 +115,11 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       withTurnAt(next, step, (turn) => {
         touchTurn(turn, event);
         turn.user_message = String(data.content ?? '');
+        // Phase 12（ADR-0014 #69）：failure-guard soft 注入的纠正消息带
+        // injected_by 标记——渲染层据此显示为系统提示条而非用户气泡。
+        if (typeof data.injected_by === 'string' && data.injected_by) {
+          turn.injected_by = data.injected_by;
+        }
       });
       break;
     }
@@ -347,6 +353,42 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
     // model/failed + run/failed 收尾，不再有"成功但空回答"）。轮次失败 settle
     // 由随后的 run/failed → finalizeRun 统一负责，这里只保证不落 unknown 兜底。
     // memory/degraded 新增 run_id 字段（可归因 run）——前端暂不渲染该归因，
+    // Phase 12 白盒透明（ADR-0014）：
+    // #69 RepeatedToolFailureGuard——连续同错工具调用熔断。soft 已由后端
+    // 注入 user-role 纠正消息（injected_by 标记，见 USER_MESSAGE 分支）；
+    // hard 意味着本轮即将 end_run 终止。事件落所在轮 notices 供渲染。
+    case EventType.TOOL_FAILURE_GUARD: {
+      const step = resolveStep(event, next);
+      withTurnAt(next, step, (turn) => {
+        turn.notices = [
+          ...(turn.notices ?? []),
+          {
+            level: data.level === 'hard' ? 'hard' : 'soft',
+            tool_name: typeof data.tool_name === 'string' ? data.tool_name : '',
+            consecutive_failures:
+              typeof data.consecutive_failures === 'number' && Number.isFinite(data.consecutive_failures)
+                ? data.consecutive_failures
+                : 0,
+          },
+        ];
+      });
+      break;
+    }
+
+    // 模型两级 fallback：主模型失稳（ModelStallError / APIConnectionError 等）
+    // 切换到备选。记录最近一次切换供模型卡「已切换」态；后续推理已在
+    // to_model 上——同步 state.model（下一个 model/completed 亦会确认）。
+    case EventType.MODEL_FALLBACK: {
+      const from = typeof data.from_model === 'string' ? data.from_model : '';
+      const to = typeof data.to_model === 'string' ? data.to_model : '';
+      const reason = typeof data.reason === 'string' ? data.reason : '';
+      if (from && to) {
+        next.model_fallback = { from_model: from, to_model: to, reason };
+        next.model = to;
+      }
+      break;
+    }
+
     // 仅识别为已知事件；失败展示复用既有降级管线。
     case EventType.MODEL_FAILED:
     case EventType.MEMORY_DEGRADED:
@@ -540,6 +582,19 @@ export function summarizeEvent(event: AgentEvent): string {
       return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
     case EventType.OPERATION_RECONCILE_REQUIRED:
       return String(d.tool_name ?? '');
+    case EventType.TOOL_FAILURE_GUARD:
+      // Phase 12（ADR-0014 #69）：`工具 ×次数 熔断 · 级别`——硬熔断即终止标记。
+      return `${typeof d.tool_name === 'string' && d.tool_name ? d.tool_name : '?'} ×${
+        typeof d.consecutive_failures === 'number' ? d.consecutive_failures : '?'
+      } 熔断 · ${d.level === 'hard' ? 'hard' : 'soft'}`;
+    case EventType.MODEL_FALLBACK: {
+      // Phase 12（ADR-0014）：`from → to · 原因`；字段缺失不伪造。
+      const from = typeof d.from_model === 'string' && d.from_model ? d.from_model : null;
+      const to = typeof d.to_model === 'string' && d.to_model ? d.to_model : null;
+      if (!from || !to) return '';
+      const reason = typeof d.reason === 'string' && d.reason ? d.reason : null;
+      return `${from} → ${to}${reason ? ` · ${reason}` : ''}`;
+    }
     case EventType.RUN_COMPLETED: {
       // 后端 Gap 1：聚合用量/成本（缺失字段不出现，全空则空摘要——类型标签已足够）。
       const usage = parseUsage(d.usage_total);

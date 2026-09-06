@@ -104,7 +104,7 @@ function JsonNode({ name, keyCls, value, depth, defaultDepth }: NodeProps) {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
-        <ChevronRight size={11} className={`json-chevron${open ? ' json-chevron-open' : ''}`} />
+        <ChevronRight size={14} className={`json-chevron${open ? ' json-chevron-open' : ''}`} />
         {name !== null && <KeyLabel name={name} keyCls={keyCls} />}
         <span className="json-punct">{braceOpen}</span>
         {!open && (

@@ -81,6 +81,27 @@ export function stripGrepTruncatedSuffix(line: string): string {
 
 // ── da394a9 批：diff 归档 marker / MCP 工具名 ──
 
+/** 失败工具的 L0 错误摘要形状（PRD §5.2：× bash sleep 25 / TIMEOUT · 10.0s）。
+ *  后端 ToolResult 序列化形状 {ok, message, error_code, ...}；形状不符返回 null
+ *  ——零伪造，解析不出就退回通用渲染。 */
+export interface ErrorShape {
+  errorCode: string;
+  message: string;
+}
+
+/** 从 tool.result（tryParseContent 后的对象）提取错误摘要。ok=true / 非对象 / 无
+ *  error_code 都返回 null（成功与未知形状不是错误摘要）。 */
+export function parseErrorShape(result: unknown): ErrorShape | null {
+  if (typeof result !== 'object' || result === null) return null;
+  const r = result as Record<string, unknown>;
+  if (r.ok === true) return null;
+  const errorCode = typeof r.error_code === 'string' && r.error_code ? r.error_code : null;
+  if (!errorCode) return null;
+  const message = typeof r.message === 'string' ? r.message : '';
+  return { errorCode, message };
+}
+
+
 const INSPECT_ARTIFACT_RE = /use inspect_artifact\(([^)]+)\)/;
 
 /** 从 diff 截断摘要中提取归档 artifact id（后端 >2000 字符时内嵌 marker）。

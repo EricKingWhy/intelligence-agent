@@ -72,6 +72,21 @@ export function shouldApplyRecoverResult(mode: SessionMode, sid: string): boolea
   return mode.kind === 'viewing' && mode.sessionId === sid;
 }
 
+/** live→viewing 迁移时是否显示「正在加载历史…」占位符。
+ *
+ * 流结束的会话 conversation 已是该会话的完整投影真相（同一事件源流式构建，
+ * session_id 一致）——历史重读只是后台对账，不得用占位符把它替换掉
+ * （替换 = 主窗口闪烁 + 滚动位置丢失，用户可见回归 2026-09-06）。
+ * 仅当目标会话与当前视图不一致（首次打开/切换目标）时才需要占位符。 */
+export function shouldShowHistoryLoading(
+  conversation: ConversationState | null,
+  sid: string,
+): boolean {
+  if (!conversation) return true;
+  if (conversation.session_id !== sid) return true;
+  return false;
+}
+
 /** P1-3 delta 合帧提交器（HANDOFF_PERF_FRONTEND §6）：~24ms 窗口内多个 delta
  * 只触发一次 React 提交。语义边界——只合并「提交」，不合并「折叠」：每帧仍
  * 逐帧过 shouldApplyStreamFrame 守护并立即 applyEvent 进本地 conv（真相不
@@ -187,7 +202,9 @@ export function useSession() {
     if (mode.kind !== 'viewing') return;
     const sid = mode.sessionId;
     let cancelled = false;
-    setLoadingHistory(true);
+    // live→viewing 迁移：conversation 已是同会话真相，后台静默重读对账，
+    // 不用占位符替换（防主窗口闪烁）。切到不同会话才显示占位符。
+    setLoadingHistory(shouldShowHistoryLoading(conversation, sid));
     setError(null);
     getSessionEvents(sid)
       .then((events: AgentEvent[]) => {

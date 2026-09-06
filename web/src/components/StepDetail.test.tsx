@@ -74,10 +74,11 @@ const toolBase: ToolCall = {
 const renderTool = (tool: ToolCall) =>
   renderToString(createElement(ToolEventSections, { tool })).replaceAll('<!-- -->', '');
 
-describe('ToolEventSections 标签条（C2）', () => {
-  it('三段堆叠收敛为 Input/Output 标签条；有 result 时默认 Output 选中', () => {
+describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output/Raw）', () => {
+  it('有 result 时默认 Output 选中（看结果优先）', () => {
     const html = renderTool(toolBase);
     expect(html).toContain('io-tabs');
+    expect(html).toContain('>Overview<');
     expect(html).toContain('>Input<');
     expect(html).toContain('>Output<');
     // 默认 Output 选中（aria-selected）
@@ -88,11 +89,14 @@ describe('ToolEventSections 标签条（C2）', () => {
     expect(html).not.toContain('>command<');
   });
 
-  it('无 result：默认 Input 选中且无 Output 标签', () => {
+  it('无 result（运行中）：默认 Overview，元信息可见且无 Output 标签', () => {
     const html = renderTool({ ...toolBase, result: undefined, status: 'running' });
-    expect(html).toContain('>Input<');
+    expect(html).toContain('>Overview<');
+    expect(html).toMatch(/aria-selected="true"[^>]*>Overview</);
     expect(html).not.toContain('>Output<');
-    expect(html).toContain('>command<');
+    // Overview 元信息：tool_call_id / status
+    expect(html).toContain('tool_call_id');
+    expect(html).toContain('running');
   });
 
   it('有 raw_call/raw_result 才出现 Raw 标签；raw 面板渲染原始事件树', () => {
@@ -124,7 +128,7 @@ describe('formatEventTooltip（C4）', () => {
 
   it('time 缺失：只保留 step 行', () => {
     const lines = formatEventTooltip({
-      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 2, session_id: 's', time: null,
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 2, session_id: 's', time: undefined,
     } as Parameters<typeof formatEventTooltip>[0]);
     expect(lines).toEqual(['step 2']);
   });
@@ -138,14 +142,14 @@ describe('formatEventTooltip（C4）', () => {
 
   it('step_id 与 time 都缺：空数组（调用方不渲染浮层）', () => {
     const lines = formatEventTooltip({
-      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: null, session_id: 's', time: null,
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: null, session_id: 's', time: undefined,
     } as Parameters<typeof formatEventTooltip>[0]);
     expect(lines).toEqual([]);
   });
 
   it('step_id === 0：按合法数值渲染 step 行（0 不是哨兵，null 才是）', () => {
     const lines = formatEventTooltip({
-      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 0, session_id: 's', time: null,
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 0, session_id: 's', time: undefined,
     } as Parameters<typeof formatEventTooltip>[0]);
     expect(lines).toEqual(['step 0']);
   });

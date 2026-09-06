@@ -1,17 +1,15 @@
-/** StepDetail — right rail Run Inspector (Phase 5, Brief "V1 Tabs").
+/** StepDetail — right rail Run Inspector（PRD §8，ADR-0014 D3 重排）.
  *
- * Five permanent tabs with explanatory empty states (never hidden, never faked):
- *   Chat      → Run-level summary: RUN / TOOLS / CONTEXT / ARTIFACTS / TRACE
- *               blocks + reserved MODEL / CHECKPOINT slots ("后端未暴露")
- *   Timeline  → every projected event, verbatim (seq · type · summary); click
- *               a row to drill into the event-level inspector
- *   Changes   → file diffs aggregated from edit/write/apply_patch ToolResults
- *   Terminal  → bash invocations aggregated (command + exit + output)
- *   Artifacts → artifact refs from artifact/created events
+ * Timeline 升为 Inspector 常驻主体（PRD §8.3 "Timeline 是 Inspector 的核心"）：
+ *   Timeline  → 每条事件 verbatim（seq · type · summary），默认 tab；点击行钻取
+ *               事件详情，并反向定位中间主区（PRD §9.2 联动）
+ *   Overview  → Run 级摘要（RUN / TOOLS / CONTEXT / MODEL / TRACE——原 Chat tab）
+ *   Changes   → 文件 diff 聚合（保留，D11 不删）
+ *   Terminal  → bash 调用聚合（保留）
+ *   Artifacts → artifact ref 聚合（保留）
  *
- * Event-level inspector (Brief "Inspector Scope"): focusing an event swaps
- * the panel to Input / Output / Raw sections with a one-click return to
- * Run level (no modal — Brief "上下文 Inspector").
+ * Event-level inspector（PRD §8.4 四段）：Overview / Input / Output / Raw，
+ * 顶部返回按钮回 Timeline（无弹窗——"上下文 Inspector"）。
  */
 
 import { memo, useEffect, useRef, useState } from 'react';
@@ -34,11 +32,11 @@ export type InspectorFocus =
   | { kind: 'tool'; tool: ToolCall }
   | { kind: 'event'; event: AgentEvent };
 
-type Tab = 'chat' | 'timeline' | 'changes' | 'terminal' | 'artifacts';
+type Tab = 'timeline' | 'chat' | 'changes' | 'terminal' | 'artifacts';
 
 const TABS: readonly { id: Tab; label: string }[] = [
-  { id: 'chat', label: 'Chat' },
   { id: 'timeline', label: 'Timeline' },
+  { id: 'chat', label: 'Overview' },
   { id: 'changes', label: 'Changes' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'artifacts', label: 'Artifacts' },
@@ -58,10 +56,12 @@ interface Props {
   onFocusRun: () => void;
   onFocusTool: (tool: ToolCall) => void;
   onFocusEvent: (event: AgentEvent) => void;
+  /** PRD §9.2 反向联动：点 Timeline 行 → 中间主区滚动定位对应事件。 */
+  onJumpToStream?: (event: AgentEvent) => void;
 }
 
-export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent }: Props) {
-  const [tab, setTab] = useState<Tab>('chat');
+export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream }: Props) {
+  const [tab, setTab] = useState<Tab>('timeline');
 
   if (!conversation) {
     return (
@@ -76,10 +76,34 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       <aside className="step-detail">
         <div className="detail-header">
           <button className="detail-back-btn" onClick={onFocusRun}>
-            <ArrowLeft size={12} /> 返回 Run 级
+            <ArrowLeft size={14} /> 返回 Timeline
           </button>
+          <span className="detail-focus-type">
+            {focus.kind === 'tool' ? focus.tool.name : focus.event.type}
+          </span>
         </div>
-        <EventInspector focus={focus} />
+        {/* run 级 tabs 常驻（用户反馈 2026-09-06：事件详情里"根本切换不到
+            timeline/changes/terminal/artifacts"）——点击任意 tab = 返回 run 级
+            并切到该 tab，导航永远可达，不再依赖隐蔽的返回键。 */}
+        <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={false}
+              className="detail-tab"
+              onClick={() => {
+                setTab(t.id);
+                onFocusRun();
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="detail-body">
+          <EventInspector focus={focus} />
+        </div>
       </aside>
     );
   }
@@ -92,6 +116,10 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       <div className="detail-header">
         <span className="panel-label">Run Inspector</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
+        {/* PRD §8.2：Run ID 常驻头部（短码，完整 ID 在 Overview） */}
+        <span className="detail-run-id mono num" title={`session ${conversation.session_id}`}>
+          {conversation.session_id.slice(0, 8)}
+        </span>
       </div>
 
       <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
@@ -108,11 +136,22 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
         ))}
       </div>
 
-      {tab === 'chat' && <ChatTab conversation={conversation} tools={tools} onFocusTool={onFocusTool} />}
-      {tab === 'timeline' && <TimelineTab key={conversation.session_id} conversation={conversation} onFocusEvent={onFocusEvent} />}
-      {tab === 'changes' && <ChangesTab tools={tools} />}
-      {tab === 'terminal' && <TerminalTab tools={tools} onFocusTool={onFocusTool} />}
-      {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
+      {/* 结构分层：header/tabs 钉在面板顶部，只有内容滚动（用户反馈 2026-09-06：
+          长内容把 tabs 滚出视口后无法切换）。 */}
+      <div className="detail-body">
+        {tab === 'chat' && <ChatTab conversation={conversation} tools={tools} onFocusTool={onFocusTool} />}
+        {tab === 'timeline' && (
+          <TimelineTab
+            key={conversation.session_id}
+            conversation={conversation}
+            onFocusEvent={onFocusEvent}
+            onJumpToStream={onJumpToStream}
+          />
+        )}
+        {tab === 'changes' && <ChangesTab tools={tools} />}
+        {tab === 'terminal' && <TerminalTab tools={tools} onFocusTool={onFocusTool} />}
+        {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
+      </div>
     </aside>
   );
 }
@@ -134,7 +173,7 @@ function ChatTab({
     <>
       <div className="detail-section">
         <div className="detail-section-title">
-          <Hash size={12} /> RUN
+          <Hash size={14} /> RUN
         </div>
         <div className="detail-row">
           <span className="detail-key">id</span>
@@ -168,7 +207,7 @@ function ChatTab({
 
       <div className="detail-section">
         <div className="detail-section-title">
-          <Package size={12} /> TOOLS
+          <Package size={14} /> TOOLS
         </div>
         <div className="detail-row">
           <span className="detail-key">计数</span>
@@ -184,7 +223,7 @@ function ChatTab({
         </div>
         {tools.map((t) => (
           <button key={t.tool_call_id} className="detail-tool-row" onClick={() => onFocusTool(t)}>
-            <ChevronRight size={12} />
+            <ChevronRight size={14} />
             <span className={`tool-status-dot tool-status-dot-${t.status}`} />
             <span className="detail-tool-name">{t.name}</span>
           </button>
@@ -194,7 +233,7 @@ function ChatTab({
       {conversation.compactions.length > 0 && (
         <div className="detail-section">
           <div className="detail-section-title">
-            <Layers size={12} /> CONTEXT
+            <Layers size={14} /> CONTEXT
           </div>
           {conversation.compactions.map((c, i) => (
             <div key={i} className="detail-compaction-row">
@@ -208,7 +247,7 @@ function ChatTab({
               </div>
               {c.fallback_used && (
                 <div className="detail-row detail-row-warn">
-                  <AlertTriangle size={11} /> <span>兜底降级（非模型摘要）</span>
+                  <AlertTriangle size={14} /> <span>兜底降级（非模型摘要）</span>
                 </div>
               )}
             </div>
@@ -219,7 +258,7 @@ function ChatTab({
       {conversation.reconcile_queue.length > 0 && (
         <div className="detail-section">
           <div className="detail-section-title">
-            <AlertTriangle size={12} /> 需人工裁决
+            <AlertTriangle size={14} /> 需人工裁决
           </div>
           {conversation.reconcile_queue.map((r, i) => (
             <div key={i} className="detail-reconcile-row">
@@ -242,7 +281,7 @@ function ChatTab({
 
       <div className="detail-section">
         <div className="detail-section-title">
-          <ListTree size={12} /> TRACE
+          <ListTree size={14} /> TRACE
         </div>
         <div className="detail-row">
           <span className="detail-key">事件数</span>
@@ -268,19 +307,28 @@ function ChatTab({
       {conversation.model === null && conversation.usage_total === null && conversation.cost_usd === null ? (
         <div className="detail-section detail-reserved">
           <div className="detail-section-title">
-            <Database size={12} /> MODEL
+            <Database size={14} /> MODEL
           </div>
           <div className="detail-empty-hint">暂无观测数据（等待 model/completed）</div>
         </div>
       ) : (
         <div className="detail-section">
           <div className="detail-section-title">
-            <Database size={12} /> MODEL
+            <Database size={14} /> MODEL
           </div>
           <div className="detail-row">
             <span className="detail-key">模型</span>
             <span className="detail-val detail-val-mono">{conversation.model ?? '—'}</span>
           </div>
+          {conversation.model_fallback && (
+            <div className="detail-row">
+              <span className="detail-key">已切换</span>
+              <span className="detail-val detail-val-mono model-fallback-val" title="model/fallback：主模型失稳后切换">
+                {conversation.model_fallback.from_model} → {conversation.model_fallback.to_model}
+                {conversation.model_fallback.reason ? ` · ${conversation.model_fallback.reason}` : ''}
+              </span>
+            </div>
+          )}
           <div className="detail-row">
             <span className="detail-key">用量</span>
             <span className="detail-val">
@@ -297,7 +345,7 @@ function ChatTab({
       )}
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">
-          <Database size={12} /> CHECKPOINT
+          <Database size={14} /> CHECKPOINT
         </div>
         <div className="detail-empty-hint">后端未暴露（无 API，集成阶段处理）</div>
       </div>
@@ -346,7 +394,7 @@ interface TipState {
   lines: string[];
 }
 
-export function TimelineTab({ conversation, onFocusEvent }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void }) {
+export function TimelineTab({ conversation, onFocusEvent, onJumpToStream }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void; onJumpToStream?: (e: AgentEvent) => void }) {
   // 尾窗裁剪（P1-4，DSH "cropped client views"）：真相全量留在 conversation.events
   // （不变量 #22 不动），视图只渲染最近窗口。实测依据：2k 全量渲染 40ms、20k 359ms
   // （流式合帧 40fps 下 Timeline tab 每秒烧 14s CPU）——200 行窗口 ≈4ms，流畅。
@@ -420,7 +468,13 @@ export function TimelineTab({ conversation, onFocusEvent }: { conversation: Conv
       {visible.map((e, i) => (
         /* key = 数组绝对下标：稳定性依赖 P0-1 的 append-only 事件契约
          * （events 只追加不重排/删除，见 HANDOFF_PERF_FRONTEND §9 P0-1）。 */
-        <TimelineRow key={hidden + i} index={i} event={e} onFocusEvent={onFocusEvent} />
+        <TimelineRow
+          key={hidden + i}
+          index={i}
+          event={e}
+          onFocusEvent={onFocusEvent}
+          onJumpToStream={onJumpToStream}
+        />
       ))}
       {tip && (
         <div className="tl-tooltip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
@@ -441,14 +495,24 @@ const TimelineRow = memo(function TimelineRow({
   index,
   event,
   onFocusEvent,
+  onJumpToStream,
 }: {
   /** 可见窗口内下标（hover 浮层经 data-tl-i 反查事件）。 */
   index: number;
   event: AgentEvent;
   onFocusEvent: (e: AgentEvent) => void;
+  onJumpToStream?: (e: AgentEvent) => void;
 }) {
   return (
-    <button className="timeline-row" data-tl-i={index} onClick={() => onFocusEvent(event)}>
+    <button
+      className="timeline-row"
+      data-tl-i={index}
+      onClick={() => {
+        onFocusEvent(event);
+        // PRD §9.2 反向联动：选中行同时定位中间主区（App 层处理 pulse）。
+        onJumpToStream?.(event);
+      }}
+    >
       <span className="tl-seq">{event.seq ?? '·'}</span>
       <span className="tl-type">{event.type}</span>
       <span className="tl-summary">{eventSummary(event)}</span>
@@ -468,7 +532,7 @@ function ChangesTab({ tools }: { tools: ToolCall[] }) {
       {diffs.map((t) => (
         <div key={t.tool_call_id} className="detail-section">
           <div className="detail-section-title">
-            <FileDiff size={12} /> {t.name}: {String(t.args.path ?? '')}
+            <FileDiff size={14} /> {t.name}: {String(t.args.path ?? '')}
           </div>
           <div className="diff-cols">
             <div className="diff-col diff-before">
@@ -542,7 +606,7 @@ function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
       {artifacts.map((t) => (
         <div key={t.tool_call_id} className="detail-section">
           <div className="detail-section-title">
-            <FileCheck2 size={12} /> {t.name}
+            <FileCheck2 size={14} /> {t.name}
           </div>
           <div className="detail-row">
             <span className="detail-key">ID</span>
@@ -562,68 +626,127 @@ function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
   );
 }
 
-// ── 事件级 Inspector：Input / Output / Raw（Brief "Inspector Scope"） ──
+// ── 事件级 Inspector：Overview / Input / Output / Raw 四段（PRD §8.4） ──
 
 /** 事件级 Inspector 主体——只接收已收窄的非 Run 焦点。 */
 type EventFocus = Exclude<InspectorFocus, { kind: 'run' }>;
 
+/** 事件级四段 tab 状态：Overview（元信息）/ Input（data）/ Output（同 data，语义入口）/
+ *  Raw（完整事件）。Input 与 Output 对普通事件都是 event.data——Output 作为默认段
+ *  保留"看结果优先"的旧习惯；Raw 是完整事件 JSON。 */
+type EventIoTab = 'overview' | 'input' | 'output' | 'raw';
+
 function EventInspector({ focus }: { focus: EventFocus }) {
+  // hooks 规则：useState 必须在条件 return 之前（tool focus 分支也保持 hook 顺序稳定）
+  const [tab, setTab] = useState<EventIoTab>('overview');
   if (focus.kind === 'tool') {
     return <ToolEventSections tool={focus.tool} />;
   }
   const event = focus.event;
   const dataJson = JSON.stringify(event.data, null, 2);
   const rawJson = JSON.stringify(event, null, 2);
+
+  const tabs: readonly { id: EventIoTab; label: string }[] = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'input', label: 'Input' },
+    { id: 'output', label: 'Output' },
+    { id: 'raw', label: 'Raw' },
+  ];
+
   return (
     <>
-      <div className="detail-section">
-        <div className="detail-section-title">
-          <Clock size={12} /> {event.type}
-        </div>
-        {event.seq !== null && (
-          <div className="detail-row">
-            <span className="detail-key">seq</span>
-            <span className="detail-val detail-val-mono">{event.seq}</span>
-          </div>
-        )}
-        {event.time && (
-          <div className="detail-row">
-            <span className="detail-key">time</span>
-            <span className="detail-val detail-val-mono">{event.time}</span>
-          </div>
-        )}
-        {event.step_id !== null && (
-          <div className="detail-row">
-            <span className="detail-key">step</span>
-            <span className="detail-val">{event.step_id}</span>
-          </div>
-        )}
+      <div className="io-tabs" role="tablist" aria-label="事件详情段">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            className={`io-tab${tab === t.id ? ' sel' : ''}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
-      <div className="detail-section">
-        <div className="detail-section-title">Input / Output (data)</div>
-        <div className="detail-code-wrap">
-          <CopyButton text={dataJson} label="复制 JSON" />
-          <div className="detail-json">
-            <JsonTree value={event.data} />
+
+      {tab === 'overview' && (
+        <div className="detail-section">
+          <div className="detail-section-title">
+            <Clock size={14} /> {event.type}
+          </div>
+          {event.seq !== null && (
+            <div className="detail-row">
+              <span className="detail-key">seq</span>
+              <span className="detail-val detail-val-mono num">{event.seq}</span>
+            </div>
+          )}
+          {event.time && (
+            <div className="detail-row">
+              <span className="detail-key">time</span>
+              <span className="detail-val detail-val-mono">{event.time}</span>
+            </div>
+          )}
+          {event.step_id !== null && (
+            <div className="detail-row">
+              <span className="detail-key">step</span>
+              <span className="detail-val num">{event.step_id}</span>
+            </div>
+          )}
+          {event.run_id && (
+            <div className="detail-row">
+              <span className="detail-key">run</span>
+              <span className="detail-val detail-val-mono">{event.run_id.slice(0, 16)}</span>
+            </div>
+          )}
+          {event.event_id && (
+            <div className="detail-row">
+              <span className="detail-key">event_id</span>
+              <span className="detail-val detail-val-mono">{event.event_id.slice(0, 16)}</span>
+            </div>
+          )}
+        </div>
+      )}
+      {tab === 'input' && (
+        <div className="detail-section">
+          <div className="detail-section-title">Input (data)</div>
+          <div className="detail-code-wrap">
+            <CopyButton text={dataJson} label="复制 JSON" />
+            <div className="detail-json">
+              <JsonTree value={event.data} />
+            </div>
           </div>
         </div>
-      </div>
-      <div className="detail-section">
-        <div className="detail-section-title">Raw</div>
-        <div className="detail-code-wrap">
-          <CopyButton text={rawJson} label="复制 Raw" />
-          <div className="detail-json">
-            <JsonTree value={event} />
+      )}
+      {tab === 'output' && (
+        <div className="detail-section">
+          <div className="detail-section-title">Output (data)</div>
+          <div className="detail-code-wrap">
+            <CopyButton text={dataJson} label="复制 JSON" />
+            <div className="detail-json">
+              <JsonTree value={event.data} />
+            </div>
           </div>
         </div>
-      </div>
+      )}
+      {tab === 'raw' && (
+        <div className="detail-section">
+          <div className="detail-section-title">Raw</div>
+          <div className="detail-code-wrap">
+            <CopyButton text={rawJson} label="复制 Raw" />
+            <div className="detail-json">
+              <JsonTree value={event} />
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
-/** 工具事件级视图：Input(args) / Output(result) / Raw(raw_call/raw_result)
- *  收敛为标签条（C2）——三段堆叠改按需切换；默认 Output（运行中的工具回退 Input）。 */
-type IoTab = 'input' | 'output' | 'raw';
+/** 工具事件级视图：Overview / Input(args) / Output(result) / Raw(raw_call/raw_result)
+ *  四段标签条（PRD §8.4 统一）；默认 Output（运行中的工具回退 Overview）。 */
+type IoTab = 'overview' | 'input' | 'output' | 'raw';
 
 export function ToolEventSections({ tool }: { tool: ToolCall }) {
   const argsJson = JSON.stringify(tool.args, null, 2);
@@ -631,9 +754,10 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
   const resultIsObject = typeof tool.result === 'object' && tool.result !== null;
   const hasOutput = tool.result !== undefined;
   const hasRaw = Boolean(tool.raw_call || tool.raw_result);
-  const [tab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'input');
+  const [tab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'overview');
 
   const tabs: readonly { id: IoTab; label: string }[] = [
+    { id: 'overview', label: 'Overview' },
     { id: 'input', label: 'Input' },
     ...(hasOutput ? [{ id: 'output', label: 'Output' } as const] : []),
     ...(hasRaw ? [{ id: 'raw', label: 'Raw' } as const] : []),
@@ -642,7 +766,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
   return (
     <div className="detail-section">
       <div className="detail-section-title">
-        <TerminalSquare size={12} /> {tool.name}
+        <TerminalSquare size={14} /> {tool.name}
         <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
         {tool.started_at && tool.completed_at && (
           <span className="io-duration">{formatDuration(tool.started_at, tool.completed_at)}</span>
@@ -664,6 +788,40 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
         ))}
       </div>
 
+      {tab === 'overview' && (
+        <div className="detail-overview">
+          <div className="detail-row">
+            <span className="detail-key">tool</span>
+            <span className="detail-val detail-val-mono">{tool.name}</span>
+          </div>
+          <div className="detail-row">
+            <span className="detail-key">tool_call_id</span>
+            <span className="detail-val detail-val-mono">{tool.tool_call_id.slice(0, 16)}</span>
+          </div>
+          <div className="detail-row">
+            <span className="detail-key">status</span>
+            <span className="detail-val detail-val-tag">{tool.status}</span>
+          </div>
+          {tool.started_at && (
+            <div className="detail-row">
+              <span className="detail-key">started</span>
+              <span className="detail-val detail-val-mono">{tool.started_at}</span>
+            </div>
+          )}
+          {tool.started_at && tool.completed_at && (
+            <div className="detail-row">
+              <span className="detail-key">耗时</span>
+              <span className="detail-val num">{formatDuration(tool.started_at, tool.completed_at)}</span>
+            </div>
+          )}
+          {tool.artifact && (
+            <div className="detail-row">
+              <span className="detail-key">artifact</span>
+              <span className="detail-val detail-val-mono">{tool.artifact.artifact_id.slice(0, 16)}</span>
+            </div>
+          )}
+        </div>
+      )}
       {tab === 'input' && (
         <div className="detail-code-wrap">
           <CopyButton text={argsJson} label="复制 JSON" />

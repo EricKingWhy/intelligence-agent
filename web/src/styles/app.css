@@ -7,6 +7,14 @@
  * (composer dock). Main panels carry no shadow and no blur.
  */
 
+/* ── Icon stroke-width 全局降档 ──
+ *  lucide 默认 strokeWidth=2，在 14px 下偏粗显得"糊"。
+ *  按尺寸降档：14px→1.5、16px→1.75、20px→2（保持默认）。
+ *  用 CSS attribute selector 覆盖 lucide 的 SVG stroke-width 属性。 */
+svg[width="14"][height="14"] { stroke-width: var(--icon-stroke-sm); }
+svg[width="16"][height="16"] { stroke-width: var(--icon-stroke-md); }
+svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
+
 /* ═══════════════════════════════════════════════════════════════════
  * Phase 2 — Single Application Shell (Brief §5/§6)
  * ONE frame: App Bar top, three regions below split by 1px dividers.
@@ -98,7 +106,16 @@
   align-items: center;
   gap: var(--space-sm);
 }
+/* Logo 品牌化：gradient accent 容器 + 内高光，不再是裸色 icon */
 .appbar-logo {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--surface-1)), var(--surface-1));
+  border: 0.5px solid color-mix(in srgb, var(--accent) 30%, var(--border-subtle));
+  box-shadow: var(--edge-light);
   color: var(--accent);
 }
 .appbar-title {
@@ -145,10 +162,18 @@
 .run-pulse svg {
   flex-shrink: 0;
 }
+/* 呼吸辉光：运行相位（thinking/tool）的胶囊体随相位呼吸——icon 自旋之外的
+ * 第二层"活着"信号。currentColor 让一套 keyframes 适配两种状态色；
+ * 胶囊面积小，box-shadow 动画 repaint 可忽略；reduced-motion 由全局块关闭。 */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
+  50% { box-shadow: 0 0 12px 1px color-mix(in srgb, currentColor 26%, transparent); }
+}
 .run-pulse.pulse-thinking {
   color: var(--accent);
   background: var(--accent-muted);
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  animation: pulse-glow 2.2s ease-in-out infinite;
 }
 .run-pulse.pulse-thinking svg {
   animation: spin 2.2s linear infinite;
@@ -157,6 +182,7 @@
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  animation: pulse-glow 1.4s ease-in-out infinite;
 }
 .run-pulse.pulse-tool svg {
   animation: spin 1.4s linear infinite;
@@ -243,26 +269,43 @@
   background: var(--color-hover);
 }
 
+/* ── Icon button：高级质感 = 层次 + 反馈 ──
+ *  32px 触达区、subtle 底色 + edge-light 内高光、hover 浮起 + 背景加深、
+ *  active 按下回缩。参考 Linear/Vercel icon button 的"quiet but tactile"。 */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  background: transparent;
-  border: none;
-  color: var(--color-muted-foreground);
+  width: 32px;
+  height: 32px;
+  background: var(--surface-1);
+  border: 0.5px solid var(--border-subtle);
+  color: var(--text-secondary);
   cursor: pointer;
   padding: 0;
   border-radius: var(--radius-sm);
-  transition: color var(--dur-out) var(--ease-apple), background var(--dur-out) var(--ease-apple);
+  box-shadow: var(--edge-light);
+  transition:
+    color var(--dur-out) var(--ease-apple),
+    background var(--dur-out) var(--ease-apple),
+    border-color var(--dur-out) var(--ease-apple),
+    box-shadow var(--dur-out) var(--ease-apple),
+    transform var(--dur-fast) var(--ease-apple);
 }
 .icon-btn:hover {
-  color: var(--color-foreground);
+  color: var(--text-primary);
+  background: var(--surface-overlay);
+  border-color: var(--border-strong);
+  box-shadow: var(--edge-light), var(--shadow-overlay);
+  transform: translateY(-1px);
+}
+.icon-btn:active {
+  transform: translateY(0);
   background: var(--color-hover);
+  box-shadow: var(--edge-light);
 }
 .icon-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
@@ -291,15 +334,23 @@
 }
 .density-btn:hover {
   color: var(--color-foreground);
+  background: var(--color-hover);
 }
 .density-btn:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
+/* 选中块真浮起：更亮一档的表面 + 双层投影（贴地 1px + 漂浮 6px）+
+ * edge-light 内高光——iOS/Linear segmented 的"凸起键"质感。
+ * 主题自适应：shadow-overlay 与 edge-light 均随 [data-theme] 翻转。 */
 .density-btn.sel {
   color: var(--text-primary);
-  background: var(--surface-1);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22), inset 0 0 0 0.5px var(--border-subtle);
+  font-weight: 600;
+  background: var(--surface-overlay);
+  box-shadow:
+    var(--edge-light),
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    var(--shadow-overlay);
 }
 
 /* ── Session Rail（左：低对比导航 chrome，嵌在 frame 内） ── */
@@ -366,9 +417,15 @@
   transition: background var(--dur-out) var(--ease-apple), box-shadow var(--dur-out) var(--ease-apple),
     transform var(--dur-out) var(--ease-apple);
 }
+/* hover 质感：底色淡染 + 发丝环（0.5px inset）+ 圆点点亮——
+ * 三层微反馈叠加出"可按"的暗示，仍保持低对比 chrome 定位。 */
 .session-item:hover {
   background: var(--color-hover);
+  box-shadow: inset 0 0 0 0.5px var(--border-subtle);
   transform: translateX(1px);
+}
+.session-item:hover .session-item-dot {
+  background: var(--text-secondary);
 }
 /* 选中态：accent 淡染 + 左侧 2px 聚焦指示条（Linear 式选中语言）——
  * 比单纯底色更有"当前位置"感，且不依赖大色块。 */
@@ -379,6 +436,8 @@
 }
 .session-item.selected:hover {
   transform: none;
+  /* 悬停加深一档（指示条 inset shadow 保持——本条只动背景） */
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
 }
 .session-item:focus-visible {
   outline: 2px solid var(--color-accent);
@@ -463,15 +522,16 @@
   color: var(--color-subtle-foreground);
   padding: var(--space-2xl);
 }
+/* 空态 logo：gradient accent 容器 + 内高光，与 appbar-logo 同族 */
 .empty-logo {
   width: 44px;
   height: 44px;
   display: grid;
   place-items: center;
   border-radius: var(--radius-lg);
-  background: var(--surface-2);
-  border: 1px solid var(--border-subtle);
-    color: var(--color-accent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--surface-2)), var(--surface-2));
+  border: 0.5px solid color-mix(in srgb, var(--accent) 30%, var(--border-subtle));
+  color: var(--accent);
   margin-bottom: var(--space-lg);
   box-shadow: var(--edge-light);
 }
@@ -510,6 +570,10 @@
   background: var(--surface-1);
   border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
   transform: translateY(-1px);
+}
+.example-chip:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 .example-chip:focus-visible {
   outline: 2px solid var(--color-accent);
@@ -558,6 +622,80 @@
   border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
   max-width: 78%;
   font-size: var(--text-base);
+}
+
+/* ── Phase 12 白盒透明（ADR-0014）：failure-guard / 注入纠正消息 ──
+ * 系统注入条：harness 的 user-role 纠正消息不是真人输入——居中中性条，
+ * 与用户气泡（右对齐）和模型输出（左对齐）三态分明。 */
+.msg-system {
+  justify-content: center;
+}
+.system-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  max-width: 78%;
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-full);
+  background: var(--color-hover);
+  border: 1px dashed var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.system-notice-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+}
+.system-notice-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* failure-guard 事件条：soft 琥珀提示（纠正注入） / hard 红色终止标记。
+ * 全宽横条插在用户消息与执行链之间——运行相位里一眼可见的中断点。 */
+.notice-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  animation: reveal-in var(--dur-in) var(--ease-apple);
+}
+.notice-strip-soft {
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  color: var(--text-secondary);
+}
+.notice-strip-hard {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 34%, transparent);
+  color: var(--text-primary);
+}
+.notice-strip-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--radius-xs);
+  font-weight: 600;
+}
+.notice-strip-soft .notice-strip-badge {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+.notice-strip-hard .notice-strip-badge {
+  background: var(--danger);
+  color: #fff;
+}
+.notice-strip-text {
+  color: var(--text-secondary);
 }
 .msg-body {
   flex: 1;
@@ -722,6 +860,34 @@
   font: inherit;
   transition: background var(--dur-fast) var(--ease-apple);
 }
+/* 状态左条（oh-my-pi 卡片语言）：inset shadow 画 2px 色条，零布局位移。
+ * :has() 由状态徽章反推节点状态——成功/失败弱化一档，运行中全强度 + shimmer。 */
+.act-node:has(.act-status-running) {
+  box-shadow: inset 2px 0 0 0 var(--warning);
+  /* running shimmer：warning 7% 柔光从左向右扫——"正在发生"信号；
+   * reduced-motion 由全局块关闭。 */
+  background-image: linear-gradient(
+    90deg,
+    transparent 25%,
+    color-mix(in srgb, var(--warning) 7%, transparent) 50%,
+    transparent 75%
+  );
+  background-size: 200% 100%;
+  animation: act-running-shimmer 2.2s linear infinite;
+}
+.act-node:has(.act-status-success) {
+  box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--success) 45%, transparent);
+}
+.act-node:has(.act-status-failed) {
+  box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--danger) 55%, transparent);
+}
+.act-node:has(.act-status-stopped) {
+  box-shadow: inset 2px 0 0 0 var(--text-tertiary);
+}
+@keyframes act-running-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
 .act-node:hover {
   background: var(--color-hover);
 }
@@ -731,6 +897,98 @@
 .act-node:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
+}
+/* 失败摘要行（PRD §5.2 Error）：L0 下方的轻量错误信号——低饱和红 code + 弱化
+ * message，不满屏红、不强制展开；完整 Raw 留给 Inspector。缩进对齐 act-name。 */
+.act-error-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding: 0 var(--space-sm) var(--space-xs) calc(var(--space-sm) + 18px + var(--space-sm));
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+.act-error-code {
+  font-family: var(--font-mono);
+  font-weight: 550;
+  color: var(--danger);
+  letter-spacing: 0.02em;
+}
+.act-error-msg {
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* hover Inspect chip（PRD §9.1）：行尾浮现的小动作入口，克制不抢焦点 */
+.act-node-wrap {
+  position: relative;
+}
+.act-node-wrap-error .act-node {
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
+}
+.act-inspect-chip {
+  position: absolute;
+  right: var(--space-sm);
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-apple);
+  z-index: 1;
+}
+.act-node-wrap:hover .act-inspect-chip,
+.act-inspect-chip:focus-visible {
+  opacity: 1;
+}
+.act-inspect-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+/* ── Model 段语义行（PRD §5.2/§10）：思考中 / 中间输出，ZCode 式动作语言 ── */
+.stream-jump-pulse {
+  animation: event-pulse var(--dur-pulse) var(--ease-apple);
+  border-radius: var(--radius-sm);
+}
+.model-kind-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0 var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  user-select: none;
+}
+.model-kind-icon {
+  display: inline-flex;
+  color: var(--color-muted-foreground);
+}
+.model-kind-row-thinking .model-kind-icon {
+  color: var(--accent);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+.model-kind-ellipsis::after {
+  content: '···';
+  letter-spacing: 2px;
+  animation: kind-ellipsis 1.4s steps(3, end) infinite;
+}
+@keyframes kind-ellipsis {
+  0% { content: '·'; }
+  33% { content: '··'; }
+  66% { content: '···'; }
+}
+/* 中间输出段：低对比（D17 分层——Runtime Stream 弱化，Final Answer 高对比） */
+.model-output-intermediate {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
 }
 .act-icon {
   display: inline-flex;
@@ -766,25 +1024,29 @@
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
+/* Status icon：filled badge 风格——实心圆底 + 反白 icon。
+ *  参考 GitHub commit status / Vercel deployment state。 */
 .act-status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  color: var(--color-subtle-foreground);
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
   flex-shrink: 0;
+  color: var(--bg-app); /* 反白：icon 用底色，badge 用状态色 */
 }
 .act-status-success {
-  color: var(--color-success);
+  background: var(--success);
 }
 .act-status-failed {
-  color: var(--color-destructive);
+  background: var(--danger);
 }
 .act-status-running {
-  color: var(--color-warning);
+  background: var(--warning);
 }
 .act-status-stopped {
-  color: var(--text-tertiary);
+  background: var(--text-tertiary);
 }
 
 /* ── Trace Density 档位差异（Phase 4） ── */
@@ -908,6 +1170,12 @@
 }
 [data-density='compact'] .act-status {
   width: 12px;
+  height: 12px;
+}
+/* compact 下 badge 内 icon 等比缩小（14px icon 装不进 12px 圆） */
+[data-density='compact'] .act-status svg {
+  width: 10px;
+  height: 10px;
 }
 [data-density='compact'] .act-stream::before,
 [data-density='compact'] .act-chain::before {
@@ -1110,9 +1378,15 @@
   font-family: var(--font-ui);
 }
 
-/* ── Approval Card：warning 玻璃浮起（内联审批） ── */
+/* ── Approval Card：warning 语义化整卡（内联审批）──
+ * 审批是 human-in-the-loop 安全决策点：待决态整卡 warning 淡染底 +
+ * 全周 hairline + 左侧 3px 实条 + 微辉光——卡片自身要"压得住"。
+ * 终态收敛到对应语义色并撤除辉光（决定已做出，不再索取注意力）。 */
 .approval-card {
+  border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
   border-left: 3px solid var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 7%, transparent);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--color-warning) 9%, transparent);
   padding: var(--space-md) var(--space-lg);
   border-radius: var(--radius-lg);
   display: flex;
@@ -1121,10 +1395,16 @@
   animation: reveal-in var(--dur-in) var(--ease-apple);
 }
 .approval-card.approved {
+  border-color: color-mix(in srgb, var(--color-success) 28%, transparent);
   border-left-color: var(--color-success);
+  background: color-mix(in srgb, var(--color-success) 6%, transparent);
+  box-shadow: none;
 }
 .approval-card.denied {
+  border-color: color-mix(in srgb, var(--color-destructive) 28%, transparent);
   border-left-color: var(--color-destructive);
+  background: color-mix(in srgb, var(--color-destructive) 6%, transparent);
+  box-shadow: none;
 }
 .approval-header {
   display: flex;
@@ -1161,10 +1441,62 @@
   gap: var(--space-sm);
   margin-top: var(--space-sm);
 }
+/* 审批按钮语义着色：批准 = success 实底（同 composer-send 的对比度配方），
+ * 拒绝 = danger 描边（破坏性方向用描边而非实底，克制不刺激）。 */
+.approval-approve {
+  background: color-mix(in srgb, var(--color-success) 80%, #000);
+}
+.approval-approve:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.approval-deny {
+  color: var(--color-destructive);
+  border-color: color-mix(in srgb, var(--color-destructive) 38%, transparent);
+}
+.approval-deny:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+}
 
 /* ── Composer：Floating Command Dock（视觉中心） ──
  * elevation 提到最高档：它是空闲时唯一的动作焦点，值得浮在 workspace 之上；
  * focus 时 accent ring + 轻微上浮，给出"工作台已激活"的明确反馈。 */
+/* ── Follow-mode「↓ 最新」浮标（pi-mono jump-to-latest）──
+ * 流式中用户上滚脱离跟随时浮现；glass 药丸 + accent 调和边，一键回底。
+ * 挂在 .conversation 上（相对定位），悬浮于滚动区与 composer 交界。 */
+.conversation {
+  position: relative;
+}
+.follow-pill {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-sm);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 5px var(--space-md);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--surface-overlay) 88%, transparent);
+  backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  border: 0.5px solid color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  box-shadow: var(--edge-light), var(--shadow-overlay);
+  color: var(--accent);
+  font: 550 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+  animation: tip-in var(--dur-fast) var(--ease-apple);
+  transition: border-color var(--dur-out) var(--ease-apple), transform var(--dur-out) var(--ease-apple);
+}
+.follow-pill:hover {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  transform: translateX(-50%) translateY(-1px);
+}
+.follow-pill:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .composer-wrap {
   padding: var(--space-sm) var(--space-lg) var(--space-lg);
 }
@@ -1240,13 +1572,50 @@
   color: #fff;
   animation: breathe 2.2s var(--ease-apple) infinite;
 }
+/* Esc 中断提示（Claude Code "esc to interrupt"）：dock 左下角的 kbd 药丸，
+ * pointer-events none——提示不挡交互，真实绑定在 App 全局键监听。 */
+.composer-esc-hint {
+  position: absolute;
+  left: var(--space-lg);
+  bottom: var(--space-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  pointer-events: none;
+  user-select: none;
+}
+.composer-esc-hint kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+}
 .composer-stop:hover {
   filter: brightness(1.1);
 }
+/* 聚焦态：双环挖空聚焦环（2px dock 同色挖空 + 2px 状态色外环）——
+ * 与 dock focus-within 的 ring 同一语言，比 outline 更融入。
+ * 键盘专属（focus-visible），鼠标点击不触发。 */
 .composer-send:focus-visible,
 .composer-stop:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  outline: none;
+}
+.composer-send:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--surface-overlay),
+    0 0 0 4px color-mix(in srgb, var(--color-accent) 55%, transparent),
+    0 2px 8px color-mix(in srgb, var(--color-accent) 32%, transparent);
+}
+.composer-stop:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--surface-overlay),
+    0 0 0 4px color-mix(in srgb, var(--color-destructive) 55%, transparent);
 }
 
 /* ── StepDetail（右：Run Inspector，嵌在 frame 内，无独立边框） ── */
@@ -1695,6 +2064,10 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
+/* model/fallback「已切换」值——信息性事件用 info 色（非错误），等宽呈现 from → to */
+.model-fallback-val {
+  color: var(--info);
+}
 /* 预期降级灰字（如 Trace「未追踪」）——非故障，弱化呈现 */
 .detail-val-muted {
   color: var(--text-tertiary);
@@ -1953,6 +2326,12 @@ button.json-row {
 
 /* ── IO Tabs：Inspector 工具视图 Input/Output/Raw 标签条（C2，density 同语言小号版） ── */
 .io-tabs {
+  /* 事件详情内 sticky：长 Raw JSON 滚动时切换器保持可见（导航常驻原则）；
+     实色底衬遮住滚过的内容 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: 0 0 0 8px var(--bg-inspector);
   display: inline-flex;
   align-items: center;
   align-self: flex-start;
@@ -2315,4 +2694,147 @@ button.json-row {
 .diff-archived-id {
   font: 500 var(--text-xs) var(--font-mono);
   color: var(--text-secondary);
+}
+
+/* ── Command Palette（PRD §15，Ctrl/Cmd+K）：中心浮层，keyboard-first，
+ *    backdrop blur 只用于该浮层区域（冻结视觉原则：glass 仅浮层可用） ── */
+.palette-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  animation: palette-fade var(--dur-palette) var(--ease-apple);
+  z-index: 50;
+}
+.palette-content {
+  position: fixed;
+  left: 50%;
+  top: 18%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 48px));
+  background: var(--surface-overlay);
+  backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+  z-index: 51;
+  overflow: hidden;
+  animation: palette-in var(--dur-palette) var(--ease-apple);
+}
+@keyframes palette-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes palette-in {
+  from { opacity: 0; transform: translateX(-50%) scale(0.97); }
+  to { opacity: 1; transform: translateX(-50%) scale(1); }
+}
+.palette-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.palette-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.palette-search-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.palette-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font: 400 var(--text-md) var(--font-ui);
+}
+.palette-input::placeholder {
+  color: var(--text-tertiary);
+}
+.palette-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--space-xs);
+}
+.palette-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}
+.palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-primary);
+  font: 400 var(--text-sm) var(--font-ui);
+  text-align: left;
+}
+.palette-item.active {
+  background: var(--accent-muted);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 28%, transparent);
+}
+.palette-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-item-events .palette-item-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+/* 键位提示 kbd 徽章化：hint 与 footer 的按键统一为 mono 小药丸——
+ * dev tool（Raycast/Linear palette）的键位提示语言。 */
+.palette-item-hint {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+}
+.palette-footer {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  padding: var(--space-sm) var(--space-lg);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+.palette-footer span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  background: var(--surface-2);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+}
+/* Radix 关闭动画（data-state=closed） */
+.palette-overlay[data-state='closed'],
+.palette-content[data-state='closed'] {
+  animation: palette-out var(--dur-out) var(--ease-apple);
+}
+@keyframes palette-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }

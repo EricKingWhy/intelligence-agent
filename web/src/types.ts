@@ -143,6 +143,20 @@ export interface Turn {
   status: 'streaming' | 'done' | 'failed';
   started_at?: string;
   completed_at?: string;
+  /** Phase 12 白盒透明（ADR-0014 #69）：tool/failure-guard 落所在轮——
+   *  soft 渲染为系统提示条，hard 渲染为终止标记。 */
+  notices?: RunFailureGuard[];
+  /** Harness 注入纠正消息的来源标记（user/message data.injected_by）——
+   *  非真人输入，渲染为系统提示条而非用户气泡。 */
+  injected_by?: string;
+}
+
+/** RepeatedToolFailureGuard 触发记录（tool/failure-guard 事件，ADR-0014 #69）。
+ *  soft = 注入 user-role 纠正消息；hard = 终止本轮（end_run）。 */
+export interface RunFailureGuard {
+  level: 'soft' | 'hard';
+  tool_name: string;
+  consecutive_failures: number;
 }
 
 /** One entry of a turn's execution chain, in true event order (Trace Ladder). */
@@ -202,4 +216,7 @@ export interface ConversationState {
   usage_total: UsageStats | null;
   cost_usd: number | null;
   trace_id: string | null;
+  /** Phase 12 白盒透明（ADR-0014）：最近一次 model/fallback——模型卡「已切换」态。
+   *  字段缺失（形状不完整）时不记录（零伪造）；后续 model 已切 to_model。 */
+  model_fallback: { from_model: string; to_model: string; reason: string } | null;
 }

@@ -8,7 +8,7 @@
 
 import { Activity, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { applyTheme, initTheme, type Theme } from '../lib/theme';
+import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse } from '../lib/runState';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
@@ -22,13 +22,14 @@ interface Props {
   /** Trace Density 四档（冻结决策）——状态归 App，这里只渲染切换控件。 */
   density: TraceDensity;
   onDensityChange: (d: TraceDensity) => void;
+  /** 主题状态归 App（Command Palette Toggle Theme 与本按钮共享同一状态源）。 */
+  theme: Theme;
+  onToggleTheme: () => void;
   /** 401 已发生（App 广播）——钥匙图标加提示点，引导配置 token。 */
   authRequired: boolean;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, authRequired }: Props) {
-  // 主题持久化：初始值由 lib/theme 在 paint 前解析（localStorage → 系统偏好）。
-  const [theme, setTheme] = useState<Theme>(initTheme);
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -54,12 +55,6 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
     );
     return () => clearInterval(timer);
   }, [streaming]);
-
-  const toggleTheme = () => {
-    const next: Theme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(next);
-    applyTheme(next);
-  };
 
   const openAuthPanel = () => {
     setTokenDraft(getToken());
@@ -89,9 +84,15 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           </span>
         )}
         <span className={`run-pulse ${pulse.className}`}>
-          <PulseIcon size={12} aria-hidden="true" />
+          <PulseIcon size={14} aria-hidden="true" />
           {pulse.label}
           {active && elapsedSec > 0 && <span className="num"> · {elapsedSec}s</span>}
+          {/* Claude Code "(13s · 28 tokens)" 语言：run 用量计数。usage_total 是
+              投影从 model/completed 聚合的已有真相——工具型 run 流式期间逐步累加，
+              纯文本 run 完成时一次到位；无数据不显示（零伪造）。 */}
+          {conversation?.usage_total && (
+            <span className="num"> · {conversation.usage_total.total_tokens.toLocaleString()} tok</span>
+          )}
         </span>
       </div>
 
@@ -129,7 +130,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           aria-expanded={authPanelOpen}
           title="API 身份令牌（Bearer）——仅配置了 JWT_SECRET 的后端需要"
         >
-          <KeyRound size={15} />
+          <KeyRound size={16} />
         </button>
         <button
           className="icon-btn"
@@ -140,7 +141,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         >
           <PanelRight size={16} className={inspectorOpen ? 'appbar-toggle-active' : undefined} />
         </button>
-        <button className="icon-btn" onClick={toggleTheme} aria-label="切换主题">
+        <button className="icon-btn" onClick={onToggleTheme} aria-label="切换主题">
           {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
         </button>
       </div>
