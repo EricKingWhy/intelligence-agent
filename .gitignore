@@ -37,3 +37,6 @@ node_modules/
 
 # 临时剖析/调试产物（diagnosing-bugs harness 等），永不入库
 .scratch/
+
+# Eval 运行报告（本地 JSON 报告是运行产物；数据集真相源在 evaluation/datasets/ 入库）
+evaluation/reports/*.json

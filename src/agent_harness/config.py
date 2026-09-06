@@ -87,3 +87,12 @@ class Settings(BaseSettings):
     # 空 = 无可选模型（GET /api/models 只列默认链，model 参数一律 422）。
     # SecretStr：JSON 里可带条目级 api_key（活密钥），dump()/repr() 一律脱敏。
     agent_models: SecretStr = SecretStr("")
+
+    # Langfuse 旁路观测（ADR-0018 D2/D6，首个 OPTIONAL_OBSERVABILITY 实现）：
+    # key 空 = 旁路完全缺席（懒加载，零 import 开销）。key 同 SecretStr 脱敏待遇。
+    langfuse_public_key: SecretStr = SecretStr("")
+    langfuse_secret_key: SecretStr = SecretStr("")
+    langfuse_base_url: str = ""
+    # trace 上云内容边界：full=完整输入输出（自有 dev 项目默认）；
+    # redacted=只传 metadata + 截断/摘要。非法值按 full 处理并告警。
+    langfuse_trace_content: str = "full"

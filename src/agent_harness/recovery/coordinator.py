@@ -46,6 +46,7 @@ from pathlib import Path
 import aiosqlite
 from pydantic import ValidationError
 
+from agent_harness.logging import log_event
 from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import (
@@ -539,6 +540,22 @@ class RecoveryCoordinator:
                 },
                 ensure_ascii=False,
             ),
+        )
+
+        # reconcile reason 进 JSONL 诊断层（spec 12 §2）：裁决依据可 tail/grep，
+        # 与 SessionEvent 流（operation/reconcile-required + 合成 tool/result）
+        # 互补不替代（Event ≠ 诊断日志）。
+        log_event(
+            logging.getLogger("agent_harness.recovery"),
+            "system_log",
+            f"Operation {tool_call_id} reconcile 裁决完成",
+            component="recovery",
+            outcome="reconciled",
+            reconcile_verdict=verdict.value,
+            tool_call_id=tool_call_id,
+            tool_name=operation.tool_name,
+            session_id=operation.session_id,
+            ledger_state=ledger_state.value,
         )
 
         if needs_call_event:

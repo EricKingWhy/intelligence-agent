@@ -39,6 +39,7 @@ from agent_harness.identity import (
 )
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import ConfigError, ModelConfig, parse_model_catalog
+from agent_harness.observability import flush_process_sink
 from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session, SessionEvent
@@ -402,6 +403,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             yield
         finally:
             await state.shutdown()
+            # 旁路收尾（ADR-0018 D3）：服务停机前尽力发送剩余 Langfuse span
+            # （有超时上限，不阻塞退出）。
+            flush_process_sink()
 
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
