@@ -1,8 +1,10 @@
 /** markdown.tsx 白名单渲染测试——结构断言（无需 DOM）。 */
 
 import { describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { ReactElement } from 'react';
-import { renderMarkdown, MdCodeBlock } from './markdown';
+import { parseFenceLang, renderMarkdown, MdCodeBlock } from './markdown';
 
 // React 19 类型中 ReactElement.props 是 unknown——测试里断言结构需要访问 props，
 // 收窄为 any 是测试代码的局部决定，不扩散到产品代码。
@@ -81,5 +83,30 @@ describe('renderMarkdown', () => {
     expect(nodes).toHaveLength(2);
     // md-paragraph 的 children 是 renderInline 数组，文本在首个 span 里
     expect((nodes[0] as AnyEl).props.children[0].props.children).toBe('第一行');
+  });
+});
+
+describe('T6 — 围栏语言提取与代码块控件（#99）', () => {
+  it('parseFenceLang：语言 id 提取、多词 info 取首词、空白 → null', () => {
+    expect(parseFenceLang('python')).toBe('python');
+    expect(parseFenceLang(' ts strict ')).toBe('ts');
+    expect(parseFenceLang('')).toBeNull();
+    expect(parseFenceLang('   ')).toBeNull();
+  });
+
+  it('renderMarkdown 围栏产出 MdCodeBlock（md-code 容器在场）', () => {
+    const blocks = renderMarkdown('```js\nconst a = 1;\n```');
+    const html = renderToStaticMarkup(createElement('div', null, ...blocks));
+    expect(html).toContain('md-code');
+    expect(html).toContain('const a = 1;');
+  });
+
+  it('MdCodeBlock fallback：纯文本 + wrap 控件 + 复制（SSR 不触发异步高亮）', () => {
+    const html = renderToStaticMarkup(createElement(MdCodeBlock, { code: 'const a = 1;', lang: 'js' }));
+    expect(html).toContain('const a = 1;');
+    expect(html).toContain('md-code-wrap-btn');
+    expect(html).toContain('复制代码');
+    // wrap 初始 off：容器不挂 md-code-wrap（Standards 轴 Dead-Code finding 的回归锚）
+    expect(html).not.toContain('md-code md-code-wrap');
   });
 });

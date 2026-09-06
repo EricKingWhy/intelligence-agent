@@ -3158,3 +3158,44 @@ button.json-row {
   color: color-mix(in srgb, var(--danger) 78%, var(--text-secondary));
   border-color: color-mix(in srgb, var(--danger) 38%, transparent);
 }
+
+/* ═══ T6（#99）完成态代码高亮（shiki 双主题，token 颜色经 inline CSS 变量）═══ */
+
+/* 单主题 github-dark（恒深底容器语义，见 highlight.ts 决策）——
+   token 色由渲染层 inline 挂载，无 [data-theme] 翻转面 */
+.md-code-hl {
+  color: var(--terminal-fg);
+}
+
+/* wrap 控件（票面：补 wrap 切换）——与 copy 同族绝对定位（copy 在 right 6px） */
+.md-code-wrap-btn {
+  position: absolute;
+  top: 6px;
+  right: 44px;
+  padding: 2px 6px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--color-hover);
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 10px;
+  opacity: 0.45;
+  cursor: pointer;
+}
+.md-code-wrap-btn:hover {
+  opacity: 1;
+  color: var(--text-secondary);
+}
+.md-code-wrap-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+/* wrap on：pre 内换行（默认横向滚动不变） */
+.md-code .md-code-block code {
+  white-space: pre;
+}
+.md-code.md-code-wrap .md-code-block code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
