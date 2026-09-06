@@ -727,6 +727,7 @@ class AgentRuntime:
                 try:
                     executions = await self.executor.execute_batch(
                         calls,
+                        tracer=tracer,
                         session=session,
                         operation_context=OperationContext(
                             session_id=session.session_id,

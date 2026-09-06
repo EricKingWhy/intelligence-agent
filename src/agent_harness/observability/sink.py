@@ -133,6 +133,20 @@ class LangfuseSink:
             self._register_failure("start_observation", exc)
             return None
 
+    def trace_attributes(self, **kwargs: Any) -> Any:
+        """trace 级属性传播（session_id / tags / trace_name 等，ADR-0018 D5）。
+
+        返回上下文管理器：在该上下文内创建的观测都会带上这些 trace 级属性。
+        缺席/SDK 异常 → nullcontext（调用方无需判空）。"""
+        if self._client is None:
+            return nullcontext(None)
+        try:
+            from langfuse import propagate_attributes
+
+            return propagate_attributes(**kwargs)
+        except Exception:  # noqa: BLE001 - D3 异常边界
+            return nullcontext(None)
+
     def report_failure(self, operation: str, exc: Exception) -> None:
         """观测句柄上的后续操作（update/end/子观测）失败时由 tracer 回注——
         计数进同一熔断账本，但绝不向调用方抛出。"""

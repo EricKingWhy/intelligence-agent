@@ -124,17 +124,26 @@ class RunTracer:
             self.trace_id = binding.trace_id
             self._owns_root = False
             return
-        root = self._sink.start_observation(
-            name="agent-run",
-            as_type="span",
-            input=self._content(self._user_input),
-            metadata={
-                "session_id": self._session_id,
-                "run_id": self._run_id,
-                "agent_id": self._agent_id,
-                "git_commit": git_commit(),
-            },
-        )
+        # trace 级属性（session 聚合 + trace metadata）经官方 propagate
+        # 通道挂在 trace 上；观测级 metadata 平行保留（可审计）。
+        trace_meta = {
+            "run_id": self._run_id,
+            "agent_id": self._agent_id,
+            "git_commit": git_commit(),
+        }
+        with self._sink.trace_attributes(
+            session_id=self._session_id, trace_name="agent-run",
+            metadata=trace_meta,
+        ):
+            root = self._sink.start_observation(
+                name="agent-run",
+                as_type="span",
+                input=self._content(self._user_input),
+                metadata={
+                    "session_id": self._session_id,
+                    **trace_meta,
+                },
+            )
         if root is None:
             return
         self._root = root
