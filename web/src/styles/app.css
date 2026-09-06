@@ -2248,6 +2248,12 @@ button.json-row {
 
 /* ── IO Tabs：Inspector 工具视图 Input/Output/Raw 标签条（C2，density 同语言小号版） ── */
 .io-tabs {
+  /* 事件详情内 sticky：长 Raw JSON 滚动时切换器保持可见（导航常驻原则）；
+     实色底衬遮住滚过的内容 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: 0 0 0 8px var(--bg-inspector);
   display: inline-flex;
   align-items: center;
   align-self: flex-start;

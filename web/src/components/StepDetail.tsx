@@ -82,7 +82,28 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
             {focus.kind === 'tool' ? focus.tool.name : focus.event.type}
           </span>
         </div>
-        <EventInspector focus={focus} />
+        {/* run 级 tabs 常驻（用户反馈 2026-09-06：事件详情里"根本切换不到
+            timeline/changes/terminal/artifacts"）——点击任意 tab = 返回 run 级
+            并切到该 tab，导航永远可达，不再依赖隐蔽的返回键。 */}
+        <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={false}
+              className="detail-tab"
+              onClick={() => {
+                setTab(t.id);
+                onFocusRun();
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="detail-body">
+          <EventInspector focus={focus} />
+        </div>
       </aside>
     );
   }
@@ -115,18 +136,22 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
         ))}
       </div>
 
-      {tab === 'chat' && <ChatTab conversation={conversation} tools={tools} onFocusTool={onFocusTool} />}
-      {tab === 'timeline' && (
-        <TimelineTab
-          key={conversation.session_id}
-          conversation={conversation}
-          onFocusEvent={onFocusEvent}
-          onJumpToStream={onJumpToStream}
-        />
-      )}
-      {tab === 'changes' && <ChangesTab tools={tools} />}
-      {tab === 'terminal' && <TerminalTab tools={tools} onFocusTool={onFocusTool} />}
-      {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
+      {/* 结构分层：header/tabs 钉在面板顶部，只有内容滚动（用户反馈 2026-09-06：
+          长内容把 tabs 滚出视口后无法切换）。 */}
+      <div className="detail-body">
+        {tab === 'chat' && <ChatTab conversation={conversation} tools={tools} onFocusTool={onFocusTool} />}
+        {tab === 'timeline' && (
+          <TimelineTab
+            key={conversation.session_id}
+            conversation={conversation}
+            onFocusEvent={onFocusEvent}
+            onJumpToStream={onJumpToStream}
+          />
+        )}
+        {tab === 'changes' && <ChangesTab tools={tools} />}
+        {tab === 'terminal' && <TerminalTab tools={tools} onFocusTool={onFocusTool} />}
+        {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
+      </div>
     </aside>
   );
 }
