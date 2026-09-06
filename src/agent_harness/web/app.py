@@ -45,6 +45,7 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.web.runmanager import RunManager
 
 # ── Request / Response schemas ──
 
@@ -92,6 +93,12 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # detached-run 托管（ADR-0016 §2.1，D-A）：run 生命周期与 HTTP 请求
+        # 解耦——SSE 订阅者离开只 unsubscribe，取消只经 POST /cancel 或孤儿
+        # 回收（宽限期 Settings.run_disconnect_grace_seconds）。
+        self.run_manager = RunManager(
+            disconnect_grace_seconds=settings.run_disconnect_grace_seconds,
+        )
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -163,7 +170,7 @@ class AppState:
         return self._wiring
 
     async def shutdown(self) -> None:
-        """进程退出时关闭后台 relay 与外部连接。幂等：重复调用只关闭一次。
+        """进程退出时关闭后台 run task、relay 与外部连接。幂等：重复调用只关闭一次。
 
         必须拿 _wiring_lock：否则在途 get_wiring 可能在 swap 之后才完成装配，
         装配出的 wiring 永远没人关（泄露 Milvus / embedding 连接）。
@@ -171,6 +178,8 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
+        # 先停 detached run（它们引用 wiring 的工具/模型），再关 wiring。
+        await self.run_manager.aclose()
         async with self._wiring_lock:
             wiring, self._wiring, self._registry = self._wiring, None, None
         # 关闭知识在 CapabilityWiring.aclose（批次 A 候选 4）：memory 组件 +
@@ -393,7 +402,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     async def create_session(req: CreateSessionRequest):
         """起新 session + 跑任务，流式返回 AgentEvent（SSE）。
 
-        这是 Phase 9 的核心 endpoint：前端 POST 任务，后端流式回每个事件。
+        ADR-0016 §2.1（D-A）：run 由 RunManager 以 detached task 驱动，与
+        本次 HTTP 请求生命周期解耦——断连（本 generator 被取消）只做
+        unsubscribe，run 继续跑到终态；显式取消走 POST /cancel。
         """
         state = app.state.agent
 
@@ -421,20 +432,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         )
         session = Session.start(state.store, session_id=session_id)
 
-        async def event_generator():
-            """SSE 事件源：消费 run_stream，转成 SSE 帧。
+        # launch 内无 await（create_task 只调度不执行）→ 订阅者挂载必然
+        # 早于 run 的首批事件，不会丢帧。
+        run, subscriber = state.run_manager.launch(session, runtime, req.task)
 
-            断连时 EventSourceResponse 自动取消这个 generator——不泄漏 producer。
-            memory_session_var 在这一帧绑定：SESSION-scope 记忆操作需要可信 session id，
-            不能让客户端任意指定（与 IdentityContext 同一信任边界）。
+        async def event_generator():
+            """SSE 事件源：消费订阅队列，转成 SSE 帧。
+
+            断连时 EventSourceResponse 取消本 generator → finally unsubscribe
+            （run 不受影响）；run 终结 → sentinel → 流干净收尾。
             """
-            from agent_harness.memory.types import memory_session_var
-            session_token = memory_session_var.set(session.session_id)
             try:
-                async for event in runtime.run_stream(session, req.task):
+                while True:
+                    event = await subscriber.queue.get()
+                    if event is state.run_manager.DONE:
+                        break
                     yield _event_to_sse_dict(event, session.session_id)
             finally:
-                memory_session_var.reset(session_token)
+                run.unsubscribe(subscriber)
 
         return EventSourceResponse(event_generator())
 

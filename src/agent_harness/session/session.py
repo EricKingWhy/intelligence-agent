@@ -3,6 +3,7 @@
 持有 session_id 与已加载事件列表（内存缓存），对外提供：
     - start() / resume()  构造入口
     - append()            追加事件（分配 seq + 同步写 JSONL + 更新内存）
+    - add_listener()      追加监听器（事件落盘后实时回调，ADR-0016 §2.1）
     - derive_messages()   从事件投影模型可见 messages
     - begin_run() / end_run()  标记 Run 边界
 
@@ -12,6 +13,8 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -60,6 +63,10 @@ class Session:
         # 避免每次 append 对全量事件做 O(n) max 扫描（长会话累计 O(n²)）
         self._next_seq: int = max((e.seq for e in self._events), default=-1) + 1
         self._sandbox: Sandbox | None = sandbox
+        # 追加监听器（ADR-0016 §2.1）：事件持久化后同步回调——web 层据此实时
+        # 广播 durable 事实（含工具执行期间追加的 output_delta）。回调异常被
+        # 吞掉（落日志）：listener 是观察者，绝不能破坏 append 的持久化契约。
+        self._listeners: list[Callable[[SessionEvent], None]] = []
 
     @property
     def sandbox(self) -> Sandbox | None:
@@ -87,6 +94,17 @@ class Session:
     def since(self, marker: int) -> list[SessionEvent]:
         """返回 mark() 之后追加的事件（副本，不影响内部状态）。"""
         return list(self._events[marker:])
+
+    # ── 追加监听器（ADR-0016 §2.1）──
+
+    def add_listener(self, callback: Callable[[SessionEvent], None]) -> None:
+        """注册追加监听器：此后每条事件持久化成功后同步回调（任意线程上下文）。"""
+        self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[SessionEvent], None]) -> None:
+        """注销监听器；未注册时静默（幂等）。"""
+        with suppress(ValueError):
+            self._listeners.remove(callback)
 
     # ── 构造入口 ──
 
@@ -212,6 +230,15 @@ class Session:
         self._events.append(event)
         # 写盘成功后才推进计数器——失败不消耗 seq
         self._next_seq += 1
+        # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
+        for listener in self._listeners:
+            try:
+                listener(event)
+            except Exception:
+                logger.exception(
+                    "session listener 回调失败（session=%s, event=%s）",
+                    self.session_id, event.type,
+                )
         return event
 
     def derive_messages(self) -> list[AnyMessage]:

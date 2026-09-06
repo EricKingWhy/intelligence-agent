@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -188,14 +188,18 @@ class _RunFinalizer:
             run_id=self.run_id, step_id=step + 1,
         )
 
-    def cancelled_terminal(self, *, steps: int) -> SessionEvent | None:
+    def cancelled_terminal(
+        self, *, steps: int, reason: str = "cancelled",
+    ) -> SessionEvent | None:
         """取消臂收尾（纯同步、不 yield——生成器关闭中禁止再产出）。
 
         run 未开始（begin_run 之前被取消）→ None，已写事件保持原样；
-        已终结的 run 不补第二条终结（双终结 = 历史不可对账）。"""
+        已终结的 run 不补第二条终结（双终结 = 历史不可对账）。
+        reason 区分取消来源（02 §17 错误语义分离）：显式 POST /cancel 与
+        断连消费 = "cancelled"；孤儿回收 = "orphaned"（ADR-0016 §2.1）。"""
         if self.run_id is None or self._terminal_written:
             return None
-        terminal_data: dict[str, Any] = {"reason": "cancelled"}
+        terminal_data: dict[str, Any] = {"reason": reason}
         if self._usage_total:
             # 取消也如实带上 token 消耗（Gap 1 契约，不因取消路径丢账）。
             terminal_data["usage_total"] = dict(self._usage_total)
@@ -323,19 +327,27 @@ class AgentRuntime:
         return result_holder[-1]
 
     async def run_stream(
-        self, session: Session, user_input: str
+        self, session: Session, user_input: str,
+        cancel_reason_supplier: Callable[[], str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """流式驱动 Agent Loop，逐条 yield AgentEvent。
 
         与 run() 的区别：用 model.astream() 逐 chunk 流式产出，思考/文本 chunk
-        经 BlockStreamer 合帧持久化（ADR-0016：model/delta 与 reasoning/* 是
+        经 BlockStreamer 合帧持久化（ADR-0016：text/delta 与 reasoning/* 是
         durable 事实，断连重连可按 seq 重放恢复）；model/started 保持
         stream-only。每个被 session.append 持久化的事件，同时 yield 一个
         镜像 AgentEvent（带 seq）。
 
+        cancel_reason_supplier（ADR-0016 §2.1）：取消臂收尾时调用来决定
+        run/failed 的 reason（"cancelled" / "orphaned"），让 run 的宿主
+        （web RunManager）区分取消来源；None = 默认 "cancelled"。
+
         SSE endpoint 直接消费这个 iterator；前端据此实时渲染。
         """
-        drive = self._drive(session, user_input, stream=True)
+        drive = self._drive(
+            session, user_input, stream=True,
+            cancel_reason_supplier=cancel_reason_supplier,
+        )
         try:
             async for event in drive:
                 yield event
@@ -349,6 +361,7 @@ class AgentRuntime:
     async def _drive(
         self, session: Session, user_input: str, *, stream: bool,
         result_holder: list[AgentRunResult] | None = None,
+        cancel_reason_supplier: Callable[[], str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """共享的主循环——run 和 run_stream 的唯一实现，消除重复。
 
@@ -801,7 +814,11 @@ class AgentRuntime:
                     )
                 if terminal.model_call_open:
                     terminal.append_model_failed(step=steps, cancelled=True)
-                terminal.cancelled_terminal(steps=steps)
+                terminal.cancelled_terminal(
+                    steps=steps,
+                    reason=(cancel_reason_supplier() if cancel_reason_supplier
+                            else "cancelled"),
+                )
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
