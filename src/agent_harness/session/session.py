@@ -12,6 +12,7 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -210,6 +211,28 @@ class Session:
         # 写盘成功后才推进计数器——失败不消耗 seq
         self._next_seq += 1
         return event
+
+    def adopt_history(self, events: list[SessionEvent]) -> list[SessionEvent]:
+        """移植既有事件（fork seed 的唯一 owner，ADR-0017 决策 3）。
+
+        重编 seq（本聚合按序分配，child 局部单调），逐字保留原 event_id /
+        time / type / data / run_id / agent_id / step_id / source_event_ids，
+        session_id 改写为本会话。类型必须在 EVENT_TYPES 词表内（流式专属拒绝）。
+        """
+        adopted: list[SessionEvent] = []
+        for event in events:
+            if event.type in STREAM_ONLY_TYPES:
+                raise ValueError(
+                    f"流式专属事件 '{event.type}' 不得移植进 durable log（invariant #4）"
+                )
+            if event.type not in EVENT_TYPES:
+                raise ValueError(f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中")
+            moved = replace(event, seq=self._next_seq, session_id=self.session_id)
+            self._store.append_event(self.session_id, moved)
+            self._events.append(moved)
+            self._next_seq += 1
+            adopted.append(moved)
+        return adopted
 
     def derive_messages(self) -> list[AnyMessage]:
         """从已加载事件投影出模型可见 messages（委托纯函数）。"""
