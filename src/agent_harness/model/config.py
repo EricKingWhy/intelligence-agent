@@ -34,6 +34,11 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "model_base_url": "https://api.senseaudio.cn/v1",
         "model_name": "",
     },
+    # 智谱（OpenAI 兼容）。无默认模型，MODEL_NAME 必填。
+    "zhipu": {
+        "model_base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model_name": "",
+    },
 }
 
 

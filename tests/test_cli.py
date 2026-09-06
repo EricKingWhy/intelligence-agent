@@ -15,11 +15,11 @@ from agent_harness.agent import AgentEvent
 from agent_harness.cli import StreamRenderer, run
 from agent_harness.session import (
     MODEL_COMPLETED,
-    MODEL_DELTA,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
     SESSION_STARTED,
+    TEXT_DELTA,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -36,14 +36,14 @@ class TestStreamRenderer:
     def test_deltas_stream_verbatim_without_newlines(self):
         out: list[str] = []
         renderer = StreamRenderer(out.append)
-        renderer.handle(_event(MODEL_DELTA, {"delta": "你"}))
-        renderer.handle(_event(MODEL_DELTA, {"delta": "好"}))
+        renderer.handle(_event(TEXT_DELTA, {"delta": "你"}))
+        renderer.handle(_event(TEXT_DELTA, {"delta": "好"}))
         assert out == ["你", "好"], "delta 是流式正文，逐段原样续写"
 
     def test_tool_call_closes_delta_and_collapses_args(self):
         out: list[str] = []
         renderer = StreamRenderer(out.append)
-        renderer.handle(_event(MODEL_DELTA, {"delta": "正在查"}))
+        renderer.handle(_event(TEXT_DELTA, {"delta": "正在查"}))
         renderer.handle(_event(TOOL_CALL, {
             "tool_call_id": "c1", "tool_name": "bash",
             "args": {"command": "ls -la", "timeout": 5}}))
@@ -126,7 +126,7 @@ async def test_cli_run_streams_persists_session_and_returns_final_text(
     (session_id,) = store.list_session_ids()
     types = [event.type for event in store.read_events(session_id)]
     assert types == [SESSION_STARTED, USER_MESSAGE, RUN_STARTED,
-                     MODEL_COMPLETED, RUN_COMPLETED]
+                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED]
 
 
 @pytest.mark.asyncio

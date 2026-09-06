@@ -147,7 +147,7 @@ async def test_client_disconnect_mid_run_cancels(tmp_path, monkeypatch):
     server, serve_task, port = await _start_server(
         tmp_path, monkeypatch, SlowStreamModel)
     try:
-        await _read_until("model/delta", port)
+        await _read_until("text/delta", port)
         await _wait_for_cancelled(tmp_path)
     finally:
         await _shutdown(server, serve_task)

@@ -24,6 +24,12 @@ export const EventType = {
   MODEL_FALLBACK: 'model/fallback',
   AGENT_DELEGATION_STARTED: 'agent/delegation-started',
   AGENT_DELEGATION_FINISHED: 'agent/delegation-finished',
+  REASONING_STARTED: 'reasoning/started',
+  REASONING_DELTA: 'reasoning/delta',
+  REASONING_COMPLETED: 'reasoning/completed',
+  REASONING_INTERRUPTED: 'reasoning/interrupted',
+  TOOL_OUTPUT_DELTA: 'tool/output_delta',
+  TEXT_DELTA: 'text/delta',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];

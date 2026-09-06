@@ -10,7 +10,8 @@
 两个入口：
     - run(): 经典一次性调用，返回 AgentRunResult（向后兼容，252 现有测试不破）。
     - run_stream(): Phase 9 流式入口，async iterator 逐条 yield AgentEvent，
-      含纯流式信号 model/delta（不持久化）+ 每个持久化 SessionEvent 的镜像。
+      含持久化 SessionEvent 的镜像 + ADR-0016 起合帧落盘的流式事实
+      （model/delta、reasoning/*）+ 纯流式信号 model/started（不持久化）。
 
 事件事实源：Session.append 同步写 JSONL；messages list 退化为运行期投影缓存。
 Diagnostic Log（_log）保留不动——执行链路观察与 SessionEvent 分层并存。
@@ -30,6 +31,7 @@ from agent_harness.agent.guards import (
     GuardLevel,
     RepeatedToolFailureGuard,
 )
+from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_CONTEXT_WINDOW_EXCEEDED,
@@ -52,7 +54,6 @@ from agent_harness.model.fallback import (
 )
 from agent_harness.session import (
     MODEL_COMPLETED,
-    MODEL_DELTA,
     MODEL_FAILED,
     MODEL_FALLBACK,
     MODEL_STARTED,
@@ -125,6 +126,21 @@ def _extract_text(content: Any) -> str:
             for block in content
             if isinstance(block, dict) and block.get("type") == "text"
         )
+    return ""
+
+
+def _extract_reasoning(chunk: Any) -> str:
+    """从流式 chunk 抽第三方思考文本（D-B①，ADR-0016 §3.4）。
+
+    ReasoningChatOpenAI 把网关的 delta.reasoning_content 抬进
+    additional_kwargs["reasoning_content"]；非字符串/缺失 = 本 chunk 无思考，
+    返回空串（调用方据此跳过，零伪造）。
+    """
+    kwargs = getattr(chunk, "additional_kwargs", None)
+    if isinstance(kwargs, dict):
+        raw = kwargs.get("reasoning_content")
+        if isinstance(raw, str) and raw:
+            return raw
     return ""
 
 
@@ -311,11 +327,11 @@ class AgentRuntime:
     ) -> AsyncIterator[AgentEvent]:
         """流式驱动 Agent Loop，逐条 yield AgentEvent。
 
-        与 run() 的区别：用 model.astream() 逐 chunk 流式产出，每个 chunk
-        yield 一个 model/delta AgentEvent（不持久化——完整 AIMessage 由
-        model/completed 持久化，delta 只是 ephemeral 流式信号）。
-        每个被 session.append 持久化的事件，同时 yield 一个镜像 AgentEvent
-        （带 seq），让消费者拿到完整的事件流 + 流式 token。
+        与 run() 的区别：用 model.astream() 逐 chunk 流式产出，思考/文本 chunk
+        经 BlockStreamer 合帧持久化（ADR-0016：model/delta 与 reasoning/* 是
+        durable 事实，断连重连可按 seq 重放恢复）；model/started 保持
+        stream-only。每个被 session.append 持久化的事件，同时 yield 一个
+        镜像 AgentEvent（带 seq）。
 
         SSE endpoint 直接消费这个 iterator；前端据此实时渲染。
         """
@@ -349,6 +365,9 @@ class AgentRuntime:
         # 没有可终结的 run；run_span / steps / usage_total 同理需要初值。
         run_id: str | None = None
         steps = 0
+        # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
+        # begin_run 之前异常 = 没有可记账的 run，保持 None。
+        streamer: BlockStreamer | None = None
         # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
         usage_total: dict[str, int] = {}
         # 终态簿记 owner（批次 B 候选 2）：model 在途标记 + 单终态不变量 +
@@ -376,6 +395,10 @@ class AgentRuntime:
 
             run_id = session.begin_run(agent_id=self._agent_id)
             terminal.begin_run(run_id)
+            # 流式块记账绑定本 run（ADR-0016 §3.3）：此后思考/文本 chunk 经
+            # streamer 合帧成 durable delta；取消/失败臂负责 interrupt 收口。
+            streamer = BlockStreamer(session)
+            streamer.begin_run(run_id)
             # run 归因上下文（R3-7）：memory/context provider 等低层模块在
             # 事件降级时需要 run_id 对账，经 contextvar 传递。嵌套运行的恢复
             # 由外层 finally 兜底（token 捕获于下）。
@@ -417,22 +440,33 @@ class AgentRuntime:
                 # 重试，非瞬时/无 fallback 时异常照常上抛走统一失败兜底。
                 terminal.model_call_open = True
                 if stream:
-                    # 流式：逐 chunk yield model/delta，聚合回完整 AIMessage
+                    # 流式：思考/文本 chunk 经 BlockStreamer 合帧落盘（S19），
+                    # 聚合回完整 AIMessage。思考块（reasoning/*）与文本 delta
+                    # 都是 durable 事实：断连重连按 seq 重放即可恢复（ADR-0016）。
                     yield AgentEvent(
                         type=MODEL_STARTED,
                         data={"step": steps + 1},
                         run_id=run_id, step_id=steps + 1,
                     )
+                    assert streamer is not None
                     collected: list[AIMessageChunk] = []
                     async for chunk in model_coord.astream(messages):
                         collected.append(chunk)
+                        reasoning_text = _extract_reasoning(chunk)
+                        if reasoning_text:
+                            for streamed in streamer.offer_reasoning(
+                                reasoning_text, step=steps + 1,
+                            ):
+                                yield to_agent_event(streamed)
                         delta_text = _extract_text(chunk.content)
                         if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
-                            yield AgentEvent(
-                                type=MODEL_DELTA,
-                                data={"delta": delta_text},
-                                run_id=run_id, step_id=steps + 1,
-                            )
+                            for streamed in streamer.offer_text(
+                                delta_text, step=steps + 1,
+                            ):
+                                yield to_agent_event(streamed)
+                    # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
+                    for streamed in streamer.end_step(step=steps + 1):
+                        yield to_agent_event(streamed)
                     # 聚合 chunks 成完整 AIMessage：用 reduce 风格 + 累加。
                     # 空流（模型没吐任何 chunk）退化成空 content。
                     if collected:
@@ -738,6 +772,11 @@ class AgentRuntime:
             # 禁止再产出（RuntimeError），取消中的 task 再 yield 也会被立即再取消。
             # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
             try:
+                # 流式块收口（ADR-0016 §3.5）：残余思考/文本先落盘（部分内容
+                # 保留，S18/16.4），有 open 思考块则补 reasoning/interrupted
+                # ——先于 model/failed（块先于调用归因终结）。
+                if streamer is not None:
+                    streamer.interrupt(step=steps + 1)
                 # 切换事实在失败/取消路径同样落盘（白盒透明不因终态打折）：
                 # drain 是幂等的，成功路径未触达时这里兜住残留在 coordinator 里
                 # 的 transition（冒烟实测缺陷：primary→fallback 后 fallback 也
@@ -774,6 +813,11 @@ class AgentRuntime:
             # result_holder 一定拿到终态结果——"run() 必返回失败结果"的契约
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
             try:
+                # 流式块收口（与取消臂同一不变量）：interrupted 先于 model/failed。
+                # 异常臂允许 yield——部分内容 + interrupted 事件镜像给流消费者。
+                if streamer is not None:
+                    for streamed in streamer.interrupt(step=steps + 1):
+                        yield to_agent_event(streamed)
                 # 切换事实在失败路径同样落盘（与取消臂同一不变量，见上）——
                 # drain 幂等：成功路径已取走则此处为空。
                 for transition in model_coord.drain_transitions():

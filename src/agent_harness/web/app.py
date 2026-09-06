@@ -234,8 +234,10 @@ def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
 
     session_id 由 endpoint 注入——runtime 内部的 AgentEvent 不知道自己属于哪个 session，
     但前端需要它在第一帧就能切换 selectedId（否则新 session 的对话无法渲染）。
+    帧形状与重放路径（GET /stream 的 SessionEvent 帧）同形：seq 是幂等投影键，
+    event_id 是事件身份，block_id 聚合同一段流式块（ADR-0016 §2.3）。
     """
-    payload = {
+    payload: dict[str, Any] = {
         "type": event.type,
         "data": event.data,
         "seq": event.seq,
@@ -244,6 +246,8 @@ def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
         "session_id": session_id,
         "time": event.time,
     }
+    if event.block_id is not None:
+        payload["block_id"] = event.block_id
     return {"data": json.dumps(payload, ensure_ascii=False)}
 
 

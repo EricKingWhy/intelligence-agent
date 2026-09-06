@@ -177,12 +177,14 @@ class Session:
         run_id: str | None = None,
         agent_id: str | None = None,
         step_id: int | None = None,
+        block_id: str | None = None,
         source_event_ids: list[str] | None = None,
         _mark_dangling: bool = False,
     ) -> SessionEvent:
         """追加一条事件：分配 seq、同步写 JSONL、更新内存。
 
         _mark_dangling 仅内部使用——在 data 中写入 dangling=true 标记。
+        block_id 是流式块标识（ADR-0016 §3.2，reasoning 块等），透传给 SessionEvent。
         事件类型必须在 EVENT_TYPES 词汇表内；STREAM_ONLY_TYPES（流式专属信号）
         拒绝持久化（invariant #4：Event ≠ Diagnostic Log）。
         """
@@ -202,6 +204,7 @@ class Session:
             run_id=run_id,
             agent_id=agent_id,
             step_id=step_id,
+            block_id=block_id,
             data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
         )
