@@ -14,16 +14,19 @@
  * Run level (no modal — Brief "上下文 Inspector").
  */
 
-import { useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import {
   AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
   Hash, Layers, ListTree, Package, TerminalSquare,
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
-import { formatDuration } from '../lib/format';
+import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
+import { CopyButton } from './CopyButton';
+import { JsonTree } from './JsonTree';
 
 /** Inspector focus: Run-level overview or a drilled-in event. */
 export type InspectorFocus =
@@ -40,6 +43,13 @@ const TABS: readonly { id: Tab; label: string }[] = [
   { id: 'terminal', label: 'Terminal' },
   { id: 'artifacts', label: 'Artifacts' },
 ];
+
+// C4 Timeline hover 浮层布局常量（与 .tl-tooltip CSS 对齐——行高 16、内距 12、
+// 与行边的 4px 间隙、上方放置需要的 16px 顶部裕量）。改一个地方即可。
+const TIP_LINE_H = 16;
+const TIP_PADDING = 12;
+const TIP_GAP = 4;
+const TIP_TOP_MARGIN = 16;
 
 interface Props {
   conversation: ConversationState | null;
@@ -99,7 +109,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       </div>
 
       {tab === 'chat' && <ChatTab conversation={conversation} tools={tools} onFocusTool={onFocusTool} />}
-      {tab === 'timeline' && <TimelineTab conversation={conversation} onFocusEvent={onFocusEvent} />}
+      {tab === 'timeline' && <TimelineTab key={conversation.session_id} conversation={conversation} onFocusEvent={onFocusEvent} />}
       {tab === 'changes' && <ChangesTab tools={tools} />}
       {tab === 'terminal' && <TerminalTab tools={tools} onFocusTool={onFocusTool} />}
       {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
@@ -297,6 +307,11 @@ function ChatTab({
 
 // ── Timeline tab：事件真序日志（真相源 conversation.events，零过滤） ──
 
+/** 尾窗默认大小 / 「加载更早」步长（P1-4）。200 行 ≈4ms 全量渲染（实测），
+ * 40fps 合帧下余量充足；步长 500 一次多翻约 2.5 屏。 */
+export const TIMELINE_WINDOW_DEFAULT = 200;
+export const TIMELINE_WINDOW_STEP = 500;
+
 /** seq 跳转检测（Inspector Scope "TRACE 事件计数 + seq 跳转"）：
  *  返回相邻可比较 seq 对之间的缺口描述（"12 → 15"），不可比较（null/乱序）则跳过。 */
 export function seqGaps(events: AgentEvent[]): string[] {
@@ -313,22 +328,133 @@ export function seqGaps(events: AgentEvent[]): string[] {
 /** 事件行的单行摘要——单一投影源（lib/projection.ts summarizeEvent）。 */
 const eventSummary = summarizeEvent;
 
-function TimelineTab({ conversation, onFocusEvent }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void }) {
-  if (conversation.events.length === 0) {
+/** Timeline 行 hover 浮层内容（C4）：完整时间戳（含毫秒，本地时区）+ step。
+ *  纯函数导出以便 SSR 测试锁定；行内已显示 seq/type，浮层只补看不到的。
+ *  step_id 语义：null = 无归属（recover 合成事件等哨兵），不渲染行；
+ *  数值（含 0，后端从 1 起但类型契约为 number）按合法 step 渲染。 */
+export function formatEventTooltip(e: AgentEvent): string[] {
+  const lines: string[] = [];
+  const ts = formatTimestamp(e.time);
+  if (ts) lines.push(ts);
+  if (e.step_id !== null) lines.push(`step ${e.step_id}`);
+  return lines;
+}
+
+interface TipState {
+  x: number;
+  y: number;
+  lines: string[];
+}
+
+export function TimelineTab({ conversation, onFocusEvent }: { conversation: ConversationState; onFocusEvent: (e: AgentEvent) => void }) {
+  // 尾窗裁剪（P1-4，DSH "cropped client views"）：真相全量留在 conversation.events
+  // （不变量 #22 不动），视图只渲染最近窗口。实测依据：2k 全量渲染 40ms、20k 359ms
+  // （流式合帧 40fps 下 Timeline tab 每秒烧 14s CPU）——200 行窗口 ≈4ms，流畅。
+  const total = conversation.events.length;
+  const [windowSize, setWindowSize] = useState(TIMELINE_WINDOW_DEFAULT);
+  // C4：hover 时间戳浮层——单元素 fixed 浮层 + 容器事件委托（零每行 handler）。
+  const [tip, setTip] = useState<TipState | null>(null);
+  const visibleRef = useRef<AgentEvent[]>([]);
+  const lastRowRef = useRef<HTMLElement | null>(null);
+
+  // 滚动/缩放即隐藏（fixed 定位不随容器滚动，留着会错位）。
+  useEffect(() => {
+    const hide = () => {
+      lastRowRef.current = null;
+      setTip(null);
+    };
+    window.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
+    return () => {
+      window.removeEventListener('scroll', hide, true);
+      window.removeEventListener('resize', hide);
+    };
+  }, []);
+
+  if (total === 0) {
     return <TabEmpty hint="本会话尚无事件。" />;
   }
+  const hidden = Math.max(0, total - windowSize);
+  const visible = hidden > 0 ? conversation.events.slice(hidden) : conversation.events;
+  visibleRef.current = visible;
+
+  const handleOver = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const btn = (e.target as HTMLElement).closest?.('[data-tl-i]') as HTMLElement | null;
+    if (btn === lastRowRef.current) return;
+    lastRowRef.current = btn;
+    if (!btn) {
+      setTip(null);
+      return;
+    }
+    const ev = visibleRef.current[Number(btn.dataset.tlI)];
+    const lines = ev ? formatEventTooltip(ev) : [];
+    if (lines.length === 0) {
+      setTip(null);
+      return;
+    }
+    const r = btn.getBoundingClientRect();
+    const tipH = lines.length * TIP_LINE_H + TIP_PADDING;
+    const above = r.top > tipH + TIP_TOP_MARGIN;
+    setTip({ x: Math.max(8, r.left + 6), y: above ? r.top - tipH - TIP_GAP : r.bottom + TIP_GAP, lines });
+  };
+  const handleLeave = () => {
+    lastRowRef.current = null;
+    setTip(null);
+  };
+
   return (
-    <div className="detail-timeline">
-      {conversation.events.map((e, i) => (
-        <button key={i} className="timeline-row" onClick={() => onFocusEvent(e)}>
-          <span className="tl-seq">{e.seq ?? '·'}</span>
-          <span className="tl-type">{e.type}</span>
-          <span className="tl-summary">{eventSummary(e)}</span>
-        </button>
+    <div className="detail-timeline" onMouseOver={handleOver} onMouseLeave={handleLeave}>
+      {hidden > 0 && (
+        <div className="timeline-window-bar">
+          <button
+            className="timeline-earlier"
+            onClick={() => setWindowSize((w) => w + TIMELINE_WINDOW_STEP)}
+          >
+            加载更早 {Math.min(TIMELINE_WINDOW_STEP, hidden)} 条
+          </button>
+          <span className="timeline-window-hint">
+            显示最近 {visible.length} / 共 {total} 条（前段已折叠，真相完整保留）
+          </span>
+        </div>
+      )}
+      {visible.map((e, i) => (
+        /* key = 数组绝对下标：稳定性依赖 P0-1 的 append-only 事件契约
+         * （events 只追加不重排/删除，见 HANDOFF_PERF_FRONTEND §9 P0-1）。 */
+        <TimelineRow key={hidden + i} index={i} event={e} onFocusEvent={onFocusEvent} />
       ))}
+      {tip && (
+        <div className="tl-tooltip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
+          {tip.lines.map((l, i) => (
+            <div key={i} className="tl-tooltip-line">
+              {l}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
+
+// memo：投影层 events 数组为追加式（既有事件引用稳定），流式期间新 delta 到达时
+// 旧行跳过 summarizeEvent 重算——只有新增行参与渲染。
+const TimelineRow = memo(function TimelineRow({
+  index,
+  event,
+  onFocusEvent,
+}: {
+  /** 可见窗口内下标（hover 浮层经 data-tl-i 反查事件）。 */
+  index: number;
+  event: AgentEvent;
+  onFocusEvent: (e: AgentEvent) => void;
+}) {
+  return (
+    <button className="timeline-row" data-tl-i={index} onClick={() => onFocusEvent(event)}>
+      <span className="tl-seq">{event.seq ?? '·'}</span>
+      <span className="tl-type">{event.type}</span>
+      <span className="tl-summary">{eventSummary(event)}</span>
+    </button>
+  );
+});
 
 // ── Changes tab：diff 双栏聚合（复用 ToolCard diff 形态的数据与 .diff-cols 形状） ──
 
@@ -388,7 +514,7 @@ function TerminalTab({ tools, onFocusTool }: { tools: ToolCall[]; onFocusTool: (
               <span className="bash-prompt">$</span>
               <code>{String(t.args.command ?? '')}</code>
             </div>
-            {result?.stdout !== undefined && <pre className="detail-terminal-out">{result.stdout}</pre>}
+            {result?.stdout !== undefined && <pre className="detail-terminal-out">{truncateForDisplay(result.stdout)}</pre>}
             {result?.exit_code !== undefined && (
               <span className={`exit-badge ${result.exit_code === 0 ? 'exit-ok' : 'exit-err'}`}>exit {result.exit_code}</span>
             )}
@@ -446,6 +572,8 @@ function EventInspector({ focus }: { focus: EventFocus }) {
     return <ToolEventSections tool={focus.tool} />;
   }
   const event = focus.event;
+  const dataJson = JSON.stringify(event.data, null, 2);
+  const rawJson = JSON.stringify(event, null, 2);
   return (
     <>
       <div className="detail-section">
@@ -473,52 +601,112 @@ function EventInspector({ focus }: { focus: EventFocus }) {
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Input / Output (data)</div>
-        <pre className="detail-code">{JSON.stringify(event.data, null, 2)}</pre>
+        <div className="detail-code-wrap">
+          <CopyButton text={dataJson} label="复制 JSON" />
+          <div className="detail-json">
+            <JsonTree value={event.data} />
+          </div>
+        </div>
       </div>
       <div className="detail-section">
         <div className="detail-section-title">Raw</div>
-        <pre className="detail-code">{JSON.stringify(event, null, 2)}</pre>
+        <div className="detail-code-wrap">
+          <CopyButton text={rawJson} label="复制 Raw" />
+          <div className="detail-json">
+            <JsonTree value={event} />
+          </div>
+        </div>
       </div>
     </>
   );
 }
 
-/** 工具事件级视图：Input(args) / Output(result) / Raw(raw_call/raw_result)。 */
-function ToolEventSections({ tool }: { tool: ToolCall }) {
+/** 工具事件级视图：Input(args) / Output(result) / Raw(raw_call/raw_result)
+ *  收敛为标签条（C2）——三段堆叠改按需切换；默认 Output（运行中的工具回退 Input）。 */
+type IoTab = 'input' | 'output' | 'raw';
+
+export function ToolEventSections({ tool }: { tool: ToolCall }) {
+  const argsJson = JSON.stringify(tool.args, null, 2);
+  const outputText = stringifyForDisplay(tool.result);
+  const resultIsObject = typeof tool.result === 'object' && tool.result !== null;
+  const hasOutput = tool.result !== undefined;
+  const hasRaw = Boolean(tool.raw_call || tool.raw_result);
+  const [tab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'input');
+
+  const tabs: readonly { id: IoTab; label: string }[] = [
+    { id: 'input', label: 'Input' },
+    ...(hasOutput ? [{ id: 'output', label: 'Output' } as const] : []),
+    ...(hasRaw ? [{ id: 'raw', label: 'Raw' } as const] : []),
+  ];
+
   return (
-    <>
-      <div className="detail-section">
-        <div className="detail-section-title">
-          <TerminalSquare size={12} /> {tool.name}
-          <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
-        </div>
-        <div className="detail-subsection">
-          <div className="detail-key">Input (args)</div>
-          <pre className="detail-code">{JSON.stringify(tool.args, null, 2)}</pre>
-        </div>
-        {tool.result !== undefined && (
-          <div className="detail-subsection">
-            <div className="detail-key">Output</div>
-            <pre className="detail-code">
-              {typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
-            </pre>
-          </div>
-        )}
+    <div className="detail-section">
+      <div className="detail-section-title">
+        <TerminalSquare size={12} /> {tool.name}
+        <span className={`tool-status-dot tool-status-dot-${tool.status}`} />
         {tool.started_at && tool.completed_at && (
-          <div className="detail-row">
-            <span className="detail-key">耗时</span>
-            <span className="detail-val">{formatDuration(tool.started_at, tool.completed_at)}</span>
-          </div>
+          <span className="io-duration">{formatDuration(tool.started_at, tool.completed_at)}</span>
         )}
       </div>
-      {(tool.raw_call || tool.raw_result) && (
-        <div className="detail-section">
-          <div className="detail-section-title">Raw</div>
-          {tool.raw_call && <pre className="detail-code">{JSON.stringify(tool.raw_call, null, 2)}</pre>}
-          {tool.raw_result && <pre className="detail-code">{JSON.stringify(tool.raw_result, null, 2)}</pre>}
+
+      <div className="io-tabs" role="tablist" aria-label="工具输入输出">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            className={`io-tab${tab === t.id ? ' sel' : ''}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'input' && (
+        <div className="detail-code-wrap">
+          <CopyButton text={argsJson} label="复制 JSON" />
+          <div className="detail-json">
+            <JsonTree value={tool.args} />
+          </div>
         </div>
       )}
-    </>
+      {tab === 'output' && hasOutput && (
+        <div className="detail-code-wrap">
+          <CopyButton text={outputText} label="复制输出" />
+          {resultIsObject ? (
+            <div className="detail-json">
+              <JsonTree value={tool.result} />
+            </div>
+          ) : (
+            <pre className="detail-code">{truncateForDisplay(outputText)}</pre>
+          )}
+        </div>
+      )}
+      {tab === 'raw' && hasRaw && (
+        <div className="io-raw-panes">
+          {tool.raw_call && (
+            <div className="detail-code-wrap">
+              <div className="io-raw-label">tool/call 原始事件</div>
+              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw" />
+              <div className="detail-json">
+                <JsonTree value={tool.raw_call} />
+              </div>
+            </div>
+          )}
+          {tool.raw_result && (
+            <div className="detail-code-wrap">
+              <div className="io-raw-label">tool/result 原始事件</div>
+              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw" />
+              <div className="detail-json">
+                <JsonTree value={tool.raw_result} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

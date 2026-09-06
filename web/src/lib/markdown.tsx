@@ -13,6 +13,7 @@
  */
 
 import type { ReactNode } from 'react';
+import { CopyButton } from '../components/CopyButton';
 
 /** 行内标记解析：把 **bold** / `code` 切成 JSX 节点。 */
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
@@ -27,6 +28,19 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     }
     return <span key={key}>{part}</span>;
   });
+}
+
+/** 围栏代码块 + 右上角复制（调研：AI chat 代码块复制按钮是标配，且按钮
+ *  DOM 排在代码文本之后不碍屏阅顺序）。导出仅为结构测试断言用。 */
+export function MdCodeBlock({ code }: { code: string }) {
+  return (
+    <div className="md-code">
+      <CopyButton text={code} label="复制代码" />
+      <pre className="md-code-block">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
 }
 
 export function renderMarkdown(text: string): ReactNode[] {
@@ -56,11 +70,7 @@ export function renderMarkdown(text: string): ReactNode[] {
         flushList(key);
         codeBuffer = [];
       } else {
-        blocks.push(
-          <pre className="md-code-block" key={key}>
-            <code>{codeBuffer.join('\n')}</code>
-          </pre>,
-        );
+        blocks.push(<MdCodeBlock key={key} code={codeBuffer.join('\n')} />);
         codeBuffer = null;
       }
       continue;
@@ -96,11 +106,7 @@ export function renderMarkdown(text: string): ReactNode[] {
 
   // 收尾：未闭合的代码块/列表按原样落盘
   if (codeBuffer !== null) {
-    blocks.push(
-      <pre className="md-code-block" key="md-code-final">
-        <code>{codeBuffer.join('\n')}</code>
-      </pre>,
-    );
+    blocks.push(<MdCodeBlock key="md-code-final" code={codeBuffer.join('\n')} />);
   }
   flushList('md-list-final');
 

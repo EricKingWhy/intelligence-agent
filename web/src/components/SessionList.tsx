@@ -6,6 +6,7 @@
  * organization (frozen decision E + Brief §10).
  */
 
+import { memo } from 'react';
 import { Plus } from 'lucide-react';
 import type { SessionSummary } from '../types';
 import { formatRelativeTime } from '../lib/format';
@@ -26,7 +27,9 @@ interface Props {
 type GroupName = 'Running' | 'Today' | 'Yesterday' | 'Older';
 const GROUP_ORDER: GroupName[] = ['Running', 'Today', 'Yesterday', 'Older'];
 
-export function SessionList({ sessions, selectedId, liveSessionId, titlesById, onSelect, onNew }: Props) {
+// memo：流式期间本组件 props（sessions/selectedId/titlesById/回调）全部引用稳定，
+// 跳过每个 delta 的会话栏重渲染；相对时间刷新由内部 useTickingNow 独立驱动。
+export const SessionList = memo(function SessionList({ sessions, selectedId, liveSessionId, titlesById, onSelect, onNew }: Props) {
   // 相对时间随时间流逝刷新（issue #40）：每分钟推进一次 now 触发重渲染。
   const now = useTickingNow();
 
@@ -75,7 +78,7 @@ export function SessionList({ sessions, selectedId, liveSessionId, titlesById, o
       </div>
     </aside>
   );
-}
+});
 
 /** Group sessions into real-time buckets; sessions outside any bucket's
  *  boundary (no timestamps) fall into Older. Order within a group follows the
