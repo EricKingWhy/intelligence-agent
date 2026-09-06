@@ -35,11 +35,24 @@ MODEL_FALLBACK = "model/fallback"
 # ── + Phase 13 Multi-Agent（delegation 白盒事件，ADR-0015 决策 8） ──
 AGENT_DELEGATION_STARTED = "agent/delegation-started"
 AGENT_DELEGATION_FINISHED = "agent/delegation-finished"
+# ── + Streaming UI 生产级改造（reasoning 事件族 + 工具输出流，ADR-0016） ──
+# 协作约束（Phase 14 并行开发约定）：session/event.py 双方只做加法改动——
+# 合帧文本增量启用新类型 text/delta（规格 02 §7.4 text 事件族命名），
+# MODEL_DELTA 保持 stream-only 词汇原样（运行时不再发射，作为 legacy 保留）。
+REASONING_STARTED = "reasoning/started"
+REASONING_DELTA = "reasoning/delta"
+REASONING_COMPLETED = "reasoning/completed"
+REASONING_INTERRUPTED = "reasoning/interrupted"
+TOOL_OUTPUT_DELTA = "tool/output_delta"
+TEXT_DELTA = "text/delta"
 
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
 # below is an ephemeral streaming signal (Phase 9 AgentEvent) and MUST NOT be
 # persisted (invariant #4: Event ≠ Diagnostic Log).
+# ADR-0016 §3.1 修订：合帧后的 text/delta 与 reasoning/tool 输出增量是运行事实
+# （规格 02 §9.2 "meaningful raw/coalesced runtime chunks"），转 durable——S19
+# 禁止的是 per-token 行，不是合帧 chunk 本身。
 EVENT_TYPES: frozenset[str] = frozenset(
     {
         SESSION_STARTED,
@@ -53,6 +66,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_FAILED,
         TOOL_CALL,
         TOOL_RESULT,
+        TOOL_OUTPUT_DELTA,
+        TEXT_DELTA,
         OPERATION_RECONCILE_REQUIRED,
         ARTIFACT_CREATED,
         CONTEXT_COMPACTED,
@@ -61,12 +76,17 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_FALLBACK,
         AGENT_DELEGATION_STARTED,
         AGENT_DELEGATION_FINISHED,
+        REASONING_STARTED,
+        REASONING_DELTA,
+        REASONING_COMPLETED,
+        REASONING_INTERRUPTED,
     }
 )
 
 # Ephemeral streaming-only types — produced by run_stream() as AgentEvents, never
 # appended to the durable log. Listed here so the full event vocabulary is in one
 # place; NOT part of EVENT_TYPES, and Session.append must reject them.
+# ADR-0016：model/delta 词汇保留但运行时不再发射（由 text/delta 承接，见上）。
 STREAM_ONLY_TYPES: frozenset[str] = frozenset({MODEL_STARTED, MODEL_DELTA})
 
 
@@ -94,6 +114,10 @@ class SessionEvent:
     run_id: str | None = None
     agent_id: str | None = None
     step_id: int | None = None
+    # 流式块标识（ADR-0016 §3.2，规格 02 §5 的语义等价物）：同一段思考/文本/
+    # 输出的 delta 共享同一 block_id，post-tool 新段取新 id。None = 不适用
+    # （文本由既有 step/turn 语义聚合，工具输出按 data.tool_call_id 聚合）。
+    block_id: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
     source_event_ids: list[str] | None = None
 
@@ -112,6 +136,8 @@ class SessionEvent:
             result["agent_id"] = self.agent_id
         if self.step_id is not None:
             result["step_id"] = self.step_id
+        if self.block_id is not None:
+            result["block_id"] = self.block_id
         if self.data:
             result["data"] = self.data
         if self.source_event_ids is not None:
@@ -130,6 +156,7 @@ class SessionEvent:
             run_id=raw.get("run_id"),
             agent_id=raw.get("agent_id"),
             step_id=raw.get("step_id"),
+            block_id=raw.get("block_id"),
             data=raw.get("data", {}),
             source_event_ids=raw.get("source_event_ids"),
         )

@@ -23,7 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
-from starlette.responses import JSONResponse
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
 from agent_harness.assembly import RecoveryStores, build_runtime, initialize_stores
@@ -37,14 +38,16 @@ from agent_harness.identity import (
     set_identity_context,
 )
 from agent_harness.logging import setup_logging
+from agent_harness.model.config import ConfigError, ModelConfig, parse_model_catalog
 from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
-from agent_harness.session import JsonlSessionStore, Session
+from agent_harness.session import JsonlSessionStore, Session, SessionEvent
 from agent_harness.storage import (
     SqliteCheckpointStore,
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.web.runmanager import RunManager
 
 # ── Request / Response schemas ──
 
@@ -59,6 +62,9 @@ class CreateSessionRequest(BaseModel):
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（见 _validate_workspace_name）
     max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
     auto_approve: bool = True  # V1 默认自动批准（demo 同款）
+    # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
+    # 命名 = AGENT_MODELS catalog 条目，未知名字 422。fallback 链不受影响。
+    model: str | None = None
 
 
 class SessionSummary(BaseModel):
@@ -92,6 +98,12 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # detached-run 托管（ADR-0016 §2.1，D-A）：run 生命周期与 HTTP 请求
+        # 解耦——SSE 订阅者离开只 unsubscribe，取消只经 POST /cancel 或孤儿
+        # 回收（宽限期 Settings.run_disconnect_grace_seconds）。
+        self.run_manager = RunManager(
+            disconnect_grace_seconds=settings.run_disconnect_grace_seconds,
+        )
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -163,7 +175,7 @@ class AppState:
         return self._wiring
 
     async def shutdown(self) -> None:
-        """进程退出时关闭后台 relay 与外部连接。幂等：重复调用只关闭一次。
+        """进程退出时关闭后台 run task、relay 与外部连接。幂等：重复调用只关闭一次。
 
         必须拿 _wiring_lock：否则在途 get_wiring 可能在 swap 之后才完成装配，
         装配出的 wiring 永远没人关（泄露 Milvus / embedding 连接）。
@@ -171,6 +183,8 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
+        # 先停 detached run（它们引用 wiring 的工具/模型），再关 wiring。
+        await self.run_manager.aclose()
         async with self._wiring_lock:
             wiring, self._wiring, self._registry = self._wiring, None, None
         # 关闭知识在 CapabilityWiring.aclose（批次 A 候选 4）：memory 组件 +
@@ -229,13 +243,21 @@ def _validate_session_id(session_id: str) -> str:
     return session_id
 
 
+#: 重放 backlog 阈值（durable 事件数，ADR-0016 §2.3）：after_seq 落后超过
+#: 该值 → 单帧 stream/truncated 控制事件后收流，客户端走 GET /events 全量
+#: 重建后带 after_seq=latest_seq 重连（02 §10.4 简化版；snapshot 层 DEFER）。
+STREAM_REPLAY_MAX_EVENTS = 1000
+
+
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
     """把 AgentEvent 转成 SSE 的 data 字段（JSON 字符串）。
 
     session_id 由 endpoint 注入——runtime 内部的 AgentEvent 不知道自己属于哪个 session，
     但前端需要它在第一帧就能切换 selectedId（否则新 session 的对话无法渲染）。
+    帧形状与重放路径（GET /stream 的 SessionEvent 帧）同形：seq 是幂等投影键，
+    event_id 是事件身份，block_id 聚合同一段流式块（ADR-0016 §2.3）。
     """
-    payload = {
+    payload: dict[str, Any] = {
         "type": event.type,
         "data": event.data,
         "seq": event.seq,
@@ -244,7 +266,119 @@ def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
         "session_id": session_id,
         "time": event.time,
     }
+    if event.block_id is not None:
+        payload["block_id"] = event.block_id
     return {"data": json.dumps(payload, ensure_ascii=False)}
+
+
+def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str, str]:
+    """把持久化 SessionEvent 转成 SSE 帧（重放通道，GET /stream 用）。
+
+    帧形状与 live 通道（_event_to_sse_dict）严格同形——客户端对两条通道
+    做同一 seq 幂等投影，无需区分帧来源（event_id 仅存于 JSONL/全量接口）。
+    """
+    payload: dict[str, Any] = {
+        "type": event.type,
+        "data": event.data,
+        "seq": event.seq,
+        "run_id": event.run_id,
+        "step_id": event.step_id,
+        "session_id": session_id,
+        "time": event.time,
+    }
+    if event.block_id is not None:
+        payload["block_id"] = event.block_id
+    return {"data": json.dumps(payload, ensure_ascii=False)}
+
+
+#: CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
+#: 脚本/样式只认同源构建产物，img 放行 data:。所有响应统一携带（浏览器
+#: 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
+_CSP_POLICY = "default-src 'self'; img-src 'self' data:"
+
+
+class CSPHeaderMiddleware:
+    """纯 ASGI 中间件：所有响应统一携带 CSP 头（行为契约同旧实现）。
+
+    为什么不用 @app.middleware（BaseHTTPMiddleware）：SSE 流过其 anyio 内存
+    流 machinery 时，客户端断连的取消会在嵌套中间件间传播污染请求栈（全量
+    回归下曾放大为逐请求 500 "No response returned"）。纯 ASGI 直通流式
+    帧，无缓冲无任务组（ADR-0016 §2.1 生产级加固）。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["Content-Security-Policy"] = _CSP_POLICY
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+class AuthSeamMiddleware:
+    """纯 ASGI 中间件：身份认证 + IdentityContext 绑定（行为契约同旧实现）。
+
+    fail-open/fail-closed 语义、claims 校验、401 形状逐字节不变
+    （tests/test_identity.py / test_web_api.py 钉住）；差异仅在传输层：
+    不经 BaseHTTPMiddleware 的任务组，SSE 断连取消不再跨请求传染。
+    """
+
+    def __init__(self, app: Any, settings: Settings) -> None:
+        self.app = app
+        self._settings = settings
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        identity = IdentityContext("local", "local", ["user", "session"])
+        headers = Headers(scope=scope)
+        authorization = headers.get("authorization")
+        if self._settings.jwt_secret:
+            # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
+            # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
+            # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
+            # 过期语义，永不过期的签名 token 等于永久凭证）。
+            if not authorization:
+                response: Response = JSONResponse(
+                    {"detail": "Missing identity token"}, status_code=401)
+                await response(scope, receive, send)
+                return
+            try:
+                scheme, encoded = authorization.split(" ", 1)
+                if scheme.lower() != "bearer":
+                    raise ValueError("Expected Bearer token")
+                # SecretStr 取明文给 jwt.decode；truthiness 判断仍基于密钥值
+                # （SecretStr("") 为 falsy，未配置语义不变）。
+                claims = jwt.decode(
+                    encoded, self._settings.jwt_secret.get_secret_value(),
+                    algorithms=["HS256"],
+                    options={"require": ["tenant_id", "user_id", "exp"]})
+                tenant, user = claims["tenant_id"], claims["user_id"]
+                scopes = claims.get("scopes", ["user", "session"])
+                if (not isinstance(tenant, str) or not tenant.strip()
+                        or not isinstance(user, str) or not user.strip()
+                        or not isinstance(scopes, list)
+                        or any(not isinstance(s, str) for s in scopes)):
+                    raise ValueError("Invalid identity claims")
+                identity = IdentityContext(tenant, user, scopes)
+            except (jwt.InvalidTokenError, ValueError):
+                response = JSONResponse(
+                    {"detail": "Invalid identity token"}, status_code=401)
+                await response(scope, receive, send)
+                return
+        token = set_identity_context(identity)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            identity_context_var.reset(token)
 
 
 def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
@@ -290,47 +424,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
     _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
 
-    @app.middleware("http")
-    async def csp_header(request: Any, call_next: Any):
-        response = await call_next(request)
-        response.headers["Content-Security-Policy"] = _CSP_POLICY
-        return response
-
-    @app.middleware("http")
-    async def auth_seam(request: Any, call_next: Any):
-        identity = IdentityContext("local", "local", ["user", "session"])
-        authorization = request.headers.get("authorization")
-        if settings.jwt_secret:
-            # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
-            # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
-            # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
-            # 过期语义，永不过期的签名 token 等于永久凭证）。
-            if not authorization:
-                return JSONResponse({"detail": "Missing identity token"}, status_code=401)
-            try:
-                scheme, encoded = authorization.split(" ", 1)
-                if scheme.lower() != "bearer":
-                    raise ValueError("Expected Bearer token")
-                # SecretStr 取明文给 jwt.decode；truthiness 判断仍基于密钥值
-                # （SecretStr("") 为 falsy，未配置语义不变）。
-                claims = jwt.decode(encoded, settings.jwt_secret.get_secret_value(),
-                                    algorithms=["HS256"],
-                                    options={"require": ["tenant_id", "user_id", "exp"]})
-                tenant, user = claims["tenant_id"], claims["user_id"]
-                scopes = claims.get("scopes", ["user", "session"])
-                if (not isinstance(tenant, str) or not tenant.strip()
-                        or not isinstance(user, str) or not user.strip()
-                        or not isinstance(scopes, list)
-                        or any(not isinstance(scope, str) for scope in scopes)):
-                    raise ValueError("Invalid identity claims")
-                identity = IdentityContext(tenant, user, scopes)
-            except (jwt.InvalidTokenError, ValueError):
-                return JSONResponse({"detail": "Invalid identity token"}, status_code=401)
-        token = set_identity_context(identity)
-        try:
-            return await call_next(request)
-        finally:
-            identity_context_var.reset(token)
+    # 纯 ASGI 中间件（见类 docstring）：先 csp（内层）后 auth（外层），与
+    # 旧 BaseHTTPMiddleware 版注册顺序逐层一致；CORS 仍最后添加 = 最外层。
+    app.add_middleware(CSPHeaderMiddleware)
+    app.add_middleware(AuthSeamMiddleware, settings=settings)
 
     if enable_cors:
         # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
@@ -390,11 +487,37 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
         return [e.to_dict() for e in events]
 
+    @app.get("/api/models")
+    async def list_models() -> dict[str, Any]:
+        """列出可选模型（ADR-0016 §5，C6）：默认链 + AGENT_MODELS catalog。
+
+        绝不携带任何密钥字段；default=true 的条目 = 不传 model 参数时的链。
+        思考能力不进元数据（D-B③ 事件驱动：模型真吐思考才有 reasoning 事件）。
+        """
+        state = app.state.agent
+        default_config = ModelConfig.from_settings(state.settings)
+        models: list[dict[str, Any]] = [{
+            "name": default_config.model_name,
+            "provider": state.settings.model_provider,
+            "model": default_config.model_name,
+            "default": True,
+        }]
+        for entry in parse_model_catalog(state.settings):
+            models.append({
+                "name": entry.name,
+                "provider": entry.provider,
+                "model": entry.model_name,
+                "default": False,
+            })
+        return {"models": models}
+
     @app.post("/api/sessions")
     async def create_session(req: CreateSessionRequest):
         """起新 session + 跑任务，流式返回 AgentEvent（SSE）。
 
-        这是 Phase 9 的核心 endpoint：前端 POST 任务，后端流式回每个事件。
+        ADR-0016 §2.1（D-A）：run 由 RunManager 以 detached task 驱动，与
+        本次 HTTP 请求生命周期解耦——断连（本 generator 被取消）只做
+        unsubscribe，run 继续跑到终态；显式取消走 POST /cancel。
         """
         state = app.state.agent
 
@@ -411,6 +534,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                      else state.workspaces_root / session_id)
         workspace.mkdir(parents=True, exist_ok=True)
 
+        if req.model is not None:
+            try:
+                ModelConfig.from_catalog(state.settings, req.model)
+            except ConfigError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+
         _, wiring = await state.get_wiring()
         await state.ensure_stores()
         runtime = await build_runtime(
@@ -419,25 +548,109 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             session_id=session_id, workspace=workspace,
             max_steps=req.max_steps, auto_approve=req.auto_approve,
             session_store=state.store,
+            model_name=req.model,
         )
         session = Session.start(state.store, session_id=session_id)
 
-        async def event_generator():
-            """SSE 事件源：消费 run_stream，转成 SSE 帧。
+        # launch 内无 await（create_task 只调度不执行）→ 订阅者挂载必然
+        # 早于 run 的首批事件，不会丢帧。
+        run, subscriber = state.run_manager.launch(session, runtime, req.task)
 
-            断连时 EventSourceResponse 自动取消这个 generator——不泄漏 producer。
-            memory_session_var 在这一帧绑定：SESSION-scope 记忆操作需要可信 session id，
-            不能让客户端任意指定（与 IdentityContext 同一信任边界）。
+        async def event_generator():
+            """SSE 事件源：消费订阅队列，转成 SSE 帧。
+
+            断连时 EventSourceResponse 取消本 generator → finally unsubscribe
+            （run 不受影响）；run 终结 → sentinel → 流干净收尾。
             """
-            from agent_harness.memory.types import memory_session_var
-            session_token = memory_session_var.set(session.session_id)
             try:
-                async for event in runtime.run_stream(session, req.task):
+                while True:
+                    event = await subscriber.queue.get()
+                    if event is state.run_manager.DONE:
+                        break
                     yield _event_to_sse_dict(event, session.session_id)
             finally:
-                memory_session_var.reset(session_token)
+                run.unsubscribe(subscriber)
 
         return EventSourceResponse(event_generator())
+
+    @app.get("/api/sessions/{session_id}/stream")
+    async def stream_session(session_id: str, after_seq: int = -1):
+        """重连续传（ADR-0016 §2.3，C4/C5）：重放 durable 事实 + 接上在途流。
+
+        客户端维护 lastAppliedSeq，断线后带 after_seq 重连：
+        1. session 无事件 → 404；
+        2. 重放 durable 事件（after_seq < seq ≤ replay_upto，按 seq 序）；
+        3. backlog 超过 STREAM_REPLAY_MAX_EVENTS → 单帧 stream/truncated
+           控制事件（无 seq，非运行事实）后收流——客户端走 GET /events
+           全量重建后带 after_seq=latest_seq 重连；
+        4. run 在途 → 接上 live 流（先订阅后取游标，保证重放与 live 无缝
+           无重复）；run 已终态/不在途 → 重放到 latest 后正常收尾
+           （崩溃遗留的悬空 run 不伪造终态，修复走 POST /recover）。
+        客户端对重放帧与 live 帧做同一 seq 幂等投影（C5）。
+        """
+        _validate_session_id(session_id)
+        state = app.state.agent
+        events = await anyio.to_thread.run_sync(state.store.read_events, session_id)
+        if not events:
+            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
+        latest_seq = events[-1].seq
+
+        # 先订阅（注册进 fanout 集合）后取游标：订阅后到取游标之间的入队
+        # 必然 ≤ 游标（被重放覆盖）或 > 游标（在队列里）——无缝无重复。
+        run = state.run_manager.get_active(session_id)
+        subscriber = run.subscribe() if run is not None else None
+        replay_upto = run.last_enqueued_seq if run is not None else latest_seq
+
+        if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
+            async def truncated_generator():
+                control = {
+                    "type": "stream/truncated",
+                    "data": {"after_seq": after_seq, "latest_seq": latest_seq},
+                    "seq": None, "run_id": None, "step_id": None,
+                    "session_id": session_id,
+                }
+                yield {"data": json.dumps(control, ensure_ascii=False)}
+
+            return EventSourceResponse(truncated_generator())
+
+        async def event_generator():
+            try:
+                for event in events:
+                    if after_seq < event.seq <= replay_upto:
+                        yield _session_event_to_sse_dict(event, session_id)
+                if subscriber is None:
+                    return
+                while True:
+                    item = await subscriber.queue.get()
+                    if item is state.run_manager.DONE:
+                        break
+                    if item.seq is not None and item.seq <= replay_upto:
+                        continue  # 重放已覆盖（订阅与取游标窗口内的入队）
+                    yield _event_to_sse_dict(item, session_id)
+            finally:
+                if subscriber is not None and run is not None:
+                    run.unsubscribe(subscriber)
+
+        return EventSourceResponse(event_generator())
+
+    @app.post("/api/sessions/{session_id}/cancel")
+    async def cancel_session(session_id: str) -> dict[str, str]:
+        """显式取消在途 run（ADR-0016 §2.2，D-A）：前端 Esc/停止的唯一取消通道。
+
+        detached-run 下断连不再取消——本端点是仅有的两个外部终止路径之一
+        （另一个是孤儿回收）。语义：在途 → 200 cancelling；无在途 run →
+        200 no_active_run（幂等成功：用户按 Esc 与 run 恰好刚终结的竞态是
+        常态不是错误）；session 不存在 → 404。取消与失败不混淆（02 §17）：
+        run/failed data.reason=cancelled，与异常臂（无 reason）、孤儿回收
+        （reason=orphaned）区分。
+        """
+        _validate_session_id(session_id)
+        state = app.state.agent
+        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
+        cancelled = state.run_manager.cancel(session_id)
+        return {"status": "cancelling" if cancelled else "no_active_run"}
 
     @app.post("/api/sessions/{session_id}/recover")
     async def recover_session(session_id: str) -> list[dict]:

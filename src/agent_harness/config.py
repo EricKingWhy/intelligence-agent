@@ -77,3 +77,12 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"
+    # detached-run 孤儿回收宽限期（秒，ADR-0016 §2.1）：零订阅者连续超过
+    # 该时长 → run 被取消收尾（run/failed(reason=orphaned)）。有订阅者期间
+    # 不计时；≤0 = 不回收（不推荐：无人观看的 run 会烧到自然终态）。
+    run_disconnect_grace_seconds: float = 300.0
+    # 会话级可选模型 catalog（ADR-0016 §5，C6）：JSON 数组
+    # [{"name", "provider", "model_name", "base_url"?, "api_key"?, "temperature"?}]。
+    # api_key 缺省回落 MODEL_API_KEY，base_url 缺省回落 provider 预设。
+    # 空 = 无可选模型（GET /api/models 只列默认链，model 参数一律 422）。
+    agent_models: str = ""

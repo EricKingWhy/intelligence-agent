@@ -21,11 +21,11 @@ from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_FAILED
 from agent_harness.session import (
     MODEL_COMPLETED,
-    MODEL_DELTA,
     MODEL_FAILED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
+    TEXT_DELTA,
     TOOL_CALL,
     TOOL_RESULT,
     JsonlSessionStore,
@@ -180,8 +180,10 @@ class TestNonStrContentExtracted:
 
         frames = [frame async for frame in runtime.run_stream(session, "打个招呼")]
 
-        deltas = [f.data["delta"] for f in frames if f.type == MODEL_DELTA]
-        assert deltas == ["你好", "世界"]
+        deltas = [f.data["delta"] for f in frames if f.type == TEXT_DELTA]
+        # ADR-0016 §3.3：30ms 窗口内快速 chunk 合帧——拼接不变，行数不逐 token
+        assert "".join(deltas) == "你好世界"
+        assert all(f.seq is not None for f in frames if f.type == TEXT_DELTA)
         completed = next(e for e in session.events if e.type == MODEL_COMPLETED)
         assert completed.data["content"] == "你好世界"
         for frame in frames:
