@@ -37,6 +37,7 @@ from agent_harness.identity import (
     set_identity_context,
 )
 from agent_harness.logging import setup_logging
+from agent_harness.model.config import ConfigError, ModelConfig, parse_model_catalog
 from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session, SessionEvent
@@ -60,6 +61,9 @@ class CreateSessionRequest(BaseModel):
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（见 _validate_workspace_name）
     max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
     auto_approve: bool = True  # V1 默认自动批准（demo 同款）
+    # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
+    # 命名 = AGENT_MODELS catalog 条目，未知名字 422。fallback 链不受影响。
+    model: str | None = None
 
 
 class SessionSummary(BaseModel):
@@ -424,6 +428,30 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
         return [e.to_dict() for e in events]
 
+    @app.get("/api/models")
+    async def list_models() -> dict[str, Any]:
+        """列出可选模型（ADR-0016 §5，C6）：默认链 + AGENT_MODELS catalog。
+
+        绝不携带任何密钥字段；default=true 的条目 = 不传 model 参数时的链。
+        思考能力不进元数据（D-B③ 事件驱动：模型真吐思考才有 reasoning 事件）。
+        """
+        state = app.state.agent
+        default_config = ModelConfig.from_settings(state.settings)
+        models: list[dict[str, Any]] = [{
+            "name": default_config.model_name,
+            "provider": state.settings.model_provider,
+            "model": default_config.model_name,
+            "default": True,
+        }]
+        for entry in parse_model_catalog(state.settings):
+            models.append({
+                "name": entry.name,
+                "provider": entry.provider,
+                "model": entry.model_name,
+                "default": False,
+            })
+        return {"models": models}
+
     @app.post("/api/sessions")
     async def create_session(req: CreateSessionRequest):
         """起新 session + 跑任务，流式返回 AgentEvent（SSE）。
@@ -447,6 +475,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                      else state.workspaces_root / session_id)
         workspace.mkdir(parents=True, exist_ok=True)
 
+        if req.model is not None:
+            try:
+                ModelConfig.from_catalog(state.settings, req.model)
+            except ConfigError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+
         _, wiring = await state.get_wiring()
         await state.ensure_stores()
         runtime = await build_runtime(
@@ -455,6 +489,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             session_id=session_id, workspace=workspace,
             max_steps=req.max_steps, auto_approve=req.auto_approve,
             session_store=state.store,
+            model_name=req.model,
         )
         session = Session.start(state.store, session_id=session_id)
 

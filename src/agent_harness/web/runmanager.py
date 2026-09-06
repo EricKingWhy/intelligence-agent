@@ -207,9 +207,15 @@ class RunManager:
             run.finish()
 
     def get_active(self, session_id: str) -> ManagedRun | None:
-        """在途 run（未终态）；重连续传接 live 流用。"""
+        """在途 run（未终态）；重连续传接 live 流用。
+
+        task 已 done 但 terminal 旗标未及置位（finally 在途）的收尾窗口
+        视为非在途——否则取消/重连会在终态落盘后误判"仍在途"（store 已见
+        run/completed 而 cancel 返回 cancelling 的竞态）。"""
         run = self._runs.get(session_id)
         if run is None or run.terminal:
+            return None
+        if run.task is not None and run.task.done():
             return None
         return run
 
