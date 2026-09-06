@@ -18,7 +18,7 @@ import { Brain, ChevronDown } from 'lucide-react';
 import type { ReasoningBlock } from '../types';
 import { advanceCursor, REDUCED_MOTION_STEP_CHARS, type ReasoningStatus } from '../lib/reasoningCursor';
 import { reasoningIsOpen } from '../lib/disclosure';
-import { FOLLOW_BOTTOM, followOnJump, followOnScroll, nearBottom, type FollowState } from '../lib/followLatest';
+import { FOLLOW_BOTTOM, followOnJump, followOnScroll, nearBottom, useFollowResetOnStop, type FollowState } from '../lib/followLatest';
 import { useTickingNow } from '../hooks/useTickingNow';
 import type { TraceDensity } from '../lib/density';
 
@@ -232,6 +232,9 @@ function ExpandedBody({ text, streaming }: { text: string; streaming: boolean })
     if (!el || !streaming || !followRef.current.following) return;
     el.scrollTop = el.scrollHeight;
   }, [text, streaming]);
+
+  // 流结束清 suspended（T3 同族修复，复用 followLatest 单一实现）
+  useFollowResetOnStop(streaming, followRef, setSuspended);
 
   const jump = () => {
     const el = bodyRef.current;

@@ -104,6 +104,17 @@ export interface ToolCall {
   /** Artifact produced by this tool call when output overflows the inline limit.
    *  Set by artifact/created event (Phase 5). Inspector fetches via inspect_artifact. */
   artifact?: ArtifactRef;
+  /** T3（#96）：流式输出缓冲（tool/output_delta 逐段累积；按事件序保 channel）。 */
+  output?: ToolOutputChunk[];
+}
+
+/** T3（#96）：工具输出流块（契约 C2 tool/output_delta）。
+ *  channel 保真（stdout/stderr 分色，视觉可合并）；相邻同通道 delta 由投影
+ *  合并进尾块，数组规模有界。result 到达后 chunks 保留（流式内容不丢弃）
+ *  ——渲染优先 chunks，缺失回退既有 result 路径（视图不双写）。 */
+export interface ToolOutputChunk {
+  channel: 'stdout' | 'stderr';
+  text: string;
 }
 
 /** Large tool output offloaded to the ArtifactStore (Phase 5, spec 06 §15).

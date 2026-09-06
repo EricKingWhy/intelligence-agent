@@ -1300,3 +1300,95 @@ describe('T2 — reasoning 事件投影（#95，契约 C1，spec 03 §5/§7）',
     expect(summarizeEvent(rDelta(1, 'b1', 'xyz'))).toBe('+3 字符');
   });
 });
+
+describe('T3 — tool/output_delta 流式输出（#96，契约 C2，spec 03 §9.3）', () => {
+  const callEvent = (id: string, step = 1) =>
+    ev({ type: EventType.TOOL_CALL, data: { tool_call_id: id, tool_name: 'bash', args: { command: 'ls' } }, step_id: step });
+  const outDelta = (id: string, channel: string, delta: string, extra: Partial<AgentEvent> = {}) =>
+    ev({ type: 'tool/output_delta', data: { tool_call_id: id, channel, delta }, step_id: 1, ...extra });
+  const resultEvent = (id: string, step = 1, extra: Partial<AgentEvent> = {}) =>
+    ev({ type: EventType.TOOL_RESULT, data: { tool_call_id: id, content: JSON.stringify({ ok: true, data: { exit_code: 0 } }) }, step_id: step, ...extra });
+
+  it('stdout delta 逐段累积到运行中工具的 output 缓冲', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, callEvent('tc1'));
+    s = applyEvent(s, outDelta('tc1', 'stdout', 'RUN'));
+    s = applyEvent(s, outDelta('tc1', 'stdout', ' tests\n'));
+    expect(s.turns[0].tools[0].output).toEqual([{ channel: 'stdout', text: 'RUN tests\n' }]);
+    expect(s.turns[0].tools[0].status).toBe('running');
+  });
+
+  it('stderr 独立通道保真——双通道不串（验收：channel 徽标/分色）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, callEvent('tc1'));
+    s = applyEvent(s, outDelta('tc1', 'stdout', 'out\n'));
+    s = applyEvent(s, outDelta('tc1', 'stderr', 'warn\n'));
+    expect(s.turns[0].tools[0].output).toEqual([
+      { channel: 'stdout', text: 'out\n' },
+      { channel: 'stderr', text: 'warn\n' },
+    ]);
+  });
+
+  it('result 到达：终态校准且流式 chunks 保留（流式内容不丢弃）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, callEvent('tc1'));
+    s = applyEvent(s, outDelta('tc1', 'stdout', 'partial'));
+    s = applyEvent(s, resultEvent('tc1'));
+    const tool = s.turns[0].tools[0];
+    expect(tool.status).toBe('success');
+    expect(tool.output).toEqual([{ channel: 'stdout', text: 'partial' }]);
+  });
+
+  it('未知 tool_call_id 的 output_delta 不伪造工具，事件仍 verbatim 在 events', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, outDelta('ghost', 'stdout', 'x'));
+    expect(s.turns[0].tools).toHaveLength(0);
+    expect(s.events).toHaveLength(2);
+    expect(s.unknown_events).toHaveLength(0);
+  });
+
+  it('channel 非 stdout/stderr 的帧丢弃（契约 C2 严格两通道，不误标）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, callEvent('tc1'));
+    s = applyEvent(s, outDelta('tc1', 'bogus', 'x'));
+    expect(s.turns[0].tools[0].output).toBeUndefined();
+  });
+
+  it('慢路径配对：delta 无 step_id 也能按 tool_call_id 全局定位宿主轮', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, callEvent('tc1'));
+    s = applyEvent(s, ev({ type: 'tool/output_delta', data: { tool_call_id: 'tc1', channel: 'stdout', delta: 'x' }, step_id: null }));
+    expect(s.turns[0].tools[0].output).toEqual([{ channel: 'stdout', text: 'x' }]);
+  });
+
+  it('历史重放同构：output_delta + result 重放与逐帧应用一致', () => {
+    const events = [
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 }, seq: 1, time: '2026-09-06T00:00:01Z' }),
+      { ...callEvent('tc1'), seq: 2, time: '2026-09-06T00:00:02Z' },
+      { ...outDelta('tc1', 'stdout', 'a\n'), seq: 3, time: '2026-09-06T00:00:03Z' },
+      { ...outDelta('tc1', 'stderr', 'b\n'), seq: 4, time: '2026-09-06T00:00:04Z' },
+      { ...resultEvent('tc1'), seq: 5, time: '2026-09-06T00:00:05Z' },
+    ];
+    let live = initConversation('s');
+    for (const e of events) live = applyEvent(live, e);
+    expect(projectHistory('s', events)).toEqual(live);
+  });
+
+  it('summarizeEvent：output_delta 同 delta 惯例（+N 字符）', () => {
+    expect(summarizeEvent(outDelta('tc1', 'stdout', 'xyz'))).toBe('+3 字符');
+  });
+
+  it('交替通道流有界收缩：chunk 数超上限触发前半合并，文本零丢失', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, callEvent('tc1'));
+    for (let i = 0; i < 1200; i++) {
+      s = applyEvent(s, outDelta('tc1', i % 2 ? 'stderr' : 'stdout', `L${i}\n`));
+    }
+    const chunks = s.turns[0].tools[0].output ?? [];
+    expect(chunks.length).toBeLessThanOrEqual(512);
+    const total = chunks.reduce((n, c) => n + c.text.length, 0);
+    expect(total).toBeGreaterThan(0);
+    expect(chunks[0].text).toContain('L0\n');
+    expect(chunks[chunks.length - 1].text).toContain('L1199\n');
+  });
+});

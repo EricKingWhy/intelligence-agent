@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, ModelSegment, ReasoningBlock, ToolCall, Turn, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, ModelSegment, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
@@ -18,6 +18,10 @@ const REASONING_STARTED = 'reasoning/started';
 const REASONING_DELTA = 'reasoning/delta';
 const REASONING_COMPLETED = 'reasoning/completed';
 const REASONING_INTERRUPTED = 'reasoning/interrupted';
+// ── T3（#96）工具输出流——契约 C2（同上，backend 落库后收编 EventType）。
+const TOOL_OUTPUT_DELTA = 'tool/output_delta';
+/** 输出 chunk 数上限：交替通道流的有界收缩触发线（spec 03 §9.4 bounded DOM）。 */
+const MAX_OUTPUT_CHUNKS = 512;
 
 export function initConversation(session_id: string): ConversationState {
   return {
@@ -247,23 +251,11 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
 
     case EventType.TOOL_RESULT: {
       // 配对定位两段式（性能修复：旧实现无条件 O(轮×工具) 全局扫描，正常流
-      // 每个结果都白付）：
-      //   1. 快路径——事件可解析出 step 且该轮持有此 tool_call_id（正常流
-      //      tool/call 与 tool/result 同 step），直接定位；
-      //   2. 慢路径——目标轮里找不到该 id（recover 合成的无 step_id 事件、
-      //      或后端 step 与 tool/call 落点不一致）才按 tool_call_id 全局
-      //      配对定位宿主轮（df4f7d8：无 step_id 走 resolveStep 会造幽灵轮次，
-      //      工具永远停在 running）。
+      // 每个结果都白付）——定位逻辑抽 locateToolHostTurn 共享（T3 起与
+      // tool/output_delta 同用）：快路径按 step、慢路径按 tool_call_id 全局。
       const callId = String(data.tool_call_id ?? '');
       const step = resolveStep(event, next);
-      const hostIdx = next.turns.findIndex(
-        (t) => t.step_id === step && t.tools.some((x) => x.tool_call_id === callId),
-      );
-      const ownerIdx =
-        hostIdx !== -1
-          ? hostIdx
-          : next.turns.findIndex((t) => t.tools.some((x) => x.tool_call_id === callId));
-      const hostStep = ownerIdx !== -1 ? next.turns[ownerIdx].step_id : step;
+      const hostStep = locateToolHostTurn(next, callId, step);
       withTurnAt(next, hostStep, (turn) => {
         const toolIdx = turn.tools.findIndex((t) => t.tool_call_id === callId);
         if (toolIdx === -1) return;
@@ -303,6 +295,50 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
         }
         tool.completed_at = event.time ?? new Date().toISOString();
         tool.raw_result = { ...event };
+        turn.tools[toolIdx] = tool;
+      });
+      break;
+    }
+
+    case TOOL_OUTPUT_DELTA: {
+      // T3（#96，契约 C2）：stdout/stderr 逐段发射——配对复用 tool/result 的
+      // 两段式定位（快路径 step、慢路径全局 tool_call_id）。未知工具不伪造；
+      // channel 严格两值（其余帧丢弃，不误标通道）；相邻同通道 delta 合并进
+      // 尾块（数组规模有界）；result 到达后 chunks 保留（流式内容不丢弃）。
+      const outCallId = String(data.tool_call_id ?? '');
+      const outText = String(data.delta ?? '');
+      if (!outCallId || !outText || (data.channel !== 'stdout' && data.channel !== 'stderr')) break;
+      const outStep = resolveStep(event, next);
+      const outTarget = locateToolHostTurn(next, outCallId, outStep);
+      withTurnAt(next, outTarget, (turn) => {
+        const toolIdx = turn.tools.findIndex((t) => t.tool_call_id === outCallId);
+        if (toolIdx === -1) return;
+        const tool = cloneTool(turn.tools[toolIdx]);
+        let chunks = tool.output ?? [];
+        const last = chunks[chunks.length - 1];
+        const channel = data.channel === 'stderr' ? 'stderr' : 'stdout';
+        chunks =
+          last && last.channel === channel
+            ? [...chunks.slice(0, -1), { channel, text: last.text + outText }]
+            : [...chunks, { channel, text: outText }];
+        // 有界收缩（spec 03 §9.4 bounded DOM）：stdout/stderr 逐行交替时相邻
+        // 同通道合并永不触发，数组随行数线性膨胀、每 delta 全量拷贝退化为 O(n²)
+        // ——超限把头部区域按通道聚合（文本零丢失；交错顺序仅在头部降级，
+        // 尾窗与 terminal 的 result 校准不受影响——终态顺序由 result 真相恢复）。
+        if (chunks.length > MAX_OUTPUT_CHUNKS) {
+          const half = chunks.length >> 1;
+          const merged: ToolOutputChunk[] = [];
+          for (const channel of ['stdout', 'stderr'] as const) {
+            const text = chunks
+              .slice(0, half)
+              .filter((c) => c.channel === channel)
+              .map((c) => c.text)
+              .join('');
+            if (text) merged.push({ channel, text });
+          }
+          chunks = [...merged, ...chunks.slice(half)];
+        }
+        tool.output = chunks;
         turn.tools[toolIdx] = tool;
       });
       break;
@@ -584,6 +620,22 @@ function applyReasoningEvent(turn: Turn, event: AgentEvent, type: string): void 
   };
 }
 
+/** 工具事件宿主轮定位（两段式，性能修复同 df4f7d8；TOOL_RESULT 与
+ *  tool/output_delta 共享单一实现——T3 Standards 轴 Duplicated Code 收敛）：
+ *  快路径——事件 step 所在轮持有此 tool_call_id（正常流 call 与后继事件同
+ *  step），直接定位；慢路径——全局按 tool_call_id 配对（recover 合成的无
+ *  step_id 事件、或后端 step 落点不一致；df4f7d8：无 step_id 走 resolveStep
+ *  会造幽灵轮次）。找不到宿主轮时返回入参 step（withTurnAt 按 resolveStep
+ *  语义处理，与 TOOL_RESULT 既有行为一致）。 */
+function locateToolHostTurn(state: ConversationState, callId: string, step: number): number {
+  const hostIdx = state.turns.findIndex(
+    (t) => t.step_id === step && t.tools.some((x) => x.tool_call_id === callId),
+  );
+  if (hostIdx !== -1) return state.turns[hostIdx].step_id;
+  const ownerIdx = state.turns.findIndex((t) => t.tools.some((x) => x.tool_call_id === callId));
+  return ownerIdx !== -1 ? state.turns[ownerIdx].step_id : step;
+}
+
 /** Resolve which step an event belongs to.
  *
  * Priority: explicit `data.step` → event `step_id` → active step → next turn index.
@@ -752,6 +804,9 @@ export function summarizeEvent(event: AgentEvent): string {
     case EventType.USER_MESSAGE:
       return String(d.content ?? '').slice(0, 40);
     case EventType.MODEL_DELTA:
+      return `+${String(d.delta ?? '').length} 字符`;
+    case TOOL_OUTPUT_DELTA:
+      // T3（#96）：同 delta 惯例（Timeline 行 verbatim 在场，摘要只记增量）。
       return `+${String(d.delta ?? '').length} 字符`;
     case EventType.MODEL_COMPLETED: {
       // 后端 Gap 1：观测字段存在时优先展示（模型 · tokens）；否则回退内容长度。
