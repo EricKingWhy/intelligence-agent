@@ -213,7 +213,7 @@ class TestSummaryOverflow:
             payload["summary"].endswith("…"), "截断必须带指向信息"
         # 全文在 child JSONL（不丢数据）
         child = provider.last_child_sessions[-1]
-        full = [e for e in child._events if e.type == "run/completed"][0]
+        full = next(e for e in child._events if e.type == "run/completed")
         assert "长" * 100 in (full.data.get("final_text") or "")
 
     @pytest.mark.asyncio
