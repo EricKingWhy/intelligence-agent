@@ -2921,3 +2921,152 @@ button.json-row {
   from { opacity: 1; }
   to { opacity: 0; }
 }
+
+/* ═══ T2（#95）ReasoningBlock —— 推理/进度流块（规格 03 §7）═══ */
+
+.reasoning-block {
+  margin: var(--space-xs) 0;
+}
+
+/* header = 折叠/展开共用的一行：icon + 标签 + 时长 + (折叠时)前读视口 + chevron */
+.reasoning-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  margin: 0;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  text-align: left;
+  transition: color var(--dur-fast) var(--ease-apple), background var(--dur-fast) var(--ease-apple);
+}
+.reasoning-header:hover {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+}
+.reasoning-header:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
+/* 活跃呼吸（S21：subtle liveness，1.5-2.5s 档；reduced-motion 全局块关闭） */
+.reasoning-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.reasoning-icon-live {
+  animation: reasoning-breathe 2s var(--ease-apple) infinite;
+}
+@keyframes reasoning-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.reasoning-label {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.reasoning-source {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  padding: 0 4px;
+}
+.reasoning-duration {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums; /* S5：时长变化不跳宽 */
+}
+.reasoning-chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-fast) var(--ease-apple);
+}
+.reasoning-chevron-open {
+  transform: rotate(180deg);
+}
+
+/* 中断态：中性警示（中断 ≠ 错误，DSH stopped 语义域） */
+.reasoning-interrupted .reasoning-label,
+.reasoning-interrupted .reasoning-icon {
+  color: var(--warning);
+}
+
+/* 折叠前读视口（S3）：单行、双缘 mask 渐隐、inner transform 推进 */
+.reasoning-readline {
+  flex: 1;
+  min-width: 0;
+  display: block;
+  height: 1.5em;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  mask-image: linear-gradient(90deg, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
+}
+.reasoning-readline-inner {
+  display: inline-block;
+  will-change: transform;
+}
+
+/* 展开面（S8）：有界滚动 + 贴底跟随 + 上滚浮现跳到最新 */
+.reasoning-expanded {
+  position: relative;
+  margin: 2px 0 4px 24px;
+}
+.reasoning-text {
+  max-height: 260px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  font-size: var(--text-sm);
+  line-height: 1.65;
+  color: var(--text-secondary);
+  padding: var(--space-sm) var(--space-md);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  background: color-mix(in srgb, var(--surface-1) 60%, transparent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.reasoning-jump {
+  position: absolute;
+  bottom: var(--space-sm);
+  right: var(--space-md);
+  padding: 2px 10px;
+  border: 0.5px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: var(--radius-full);
+  background: var(--surface-overlay);
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  box-shadow: var(--shadow-overlay);
+}
+.reasoning-jump:hover {
+  transform: translateY(-1px);
+}
+.reasoning-jump:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
+/* compact 档（PRD §9.1）：一行实况，header 视觉再降一档 */
+[data-density='compact'] .reasoning-header {
+  padding: 2px 4px;
+}
+
+/* 呼吸在 reduce 下禁用（规格 03 §7.2；前读视口的 JS 降级在组件内 matchMedia） */
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-icon-live {
+    animation: none;
+  }
+}

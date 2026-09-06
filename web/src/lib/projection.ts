@@ -6,10 +6,18 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, ModelSegment, ToolCall, Turn, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, ModelSegment, ReasoningBlock, ToolCall, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
+
+// ── T2（#95）reasoning 事件族——契约 C1（docs/BACKEND_PROMPT_STREAMING_UI.md）。
+// generated/event-types.ts 是 backend-owned：后端 event.py 落库并重新生成后，
+// 这些常量收编为 EventType.REASONING_*。此前以 fixture 驱动（fixture 先行不硬阻塞）。
+const REASONING_STARTED = 'reasoning/started';
+const REASONING_DELTA = 'reasoning/delta';
+const REASONING_COMPLETED = 'reasoning/completed';
+const REASONING_INTERRUPTED = 'reasoning/interrupted';
 
 export function initConversation(session_id: string): ConversationState {
   return {
@@ -40,6 +48,7 @@ function newTurn(step_id: number): Turn {
     tools: [],
     activities: [],
     status: 'streaming',
+    reasoningById: {},
   };
 }
 
@@ -474,6 +483,22 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
       break;
     }
 
+    // ── T2（#95）Reasoning 事件族（契约 C1，fixture 先行）──
+    case REASONING_STARTED:
+    case REASONING_DELTA:
+    case REASONING_COMPLETED:
+    case REASONING_INTERRUPTED: {
+      // spec 02 §15 硬边界：visibility=internal 永不投影进用户可见推理块
+      //（events 日志 verbatim 保留——Inspector raw 可查，中心流不渲染）。
+      if (data.visibility === 'internal') break;
+      const step = resolveStep(event, next);
+      withTurnAt(next, step, (turn) => {
+        touchTurn(turn, event);
+        applyReasoningEvent(turn, event, type);
+      });
+      break;
+    }
+
     // 仅识别为已知事件；失败展示复用既有降级管线。
     case EventType.MODEL_FAILED:
     case EventType.MEMORY_DEGRADED:
@@ -492,6 +517,71 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
   // 而非事实丢失）。
   if (event.seq !== null) next.seenSeqs.add(event.seq);
   return next;
+}
+
+/** T2（#95）：reasoning 事件 → turn.reasoningById 单块 COW 更新。
+ *
+ * 目标块解析优先级：data.block_id → 本 turn 最近一个 streaming 块（宽松契约
+ * 降级）→ 合成 key `r:{step}:{seq}`（重放确定性）。块一旦 completed/interrupted
+ * 即不可变（spec 02 §8.1）：迟到 delta 丢弃、重复 started 幂等忽略（新分段必须
+ * 换新 block_id）；无块可终结的 terminal 事件丢弃——绝不伪造块。 */
+function applyReasoningEvent(turn: Turn, event: AgentEvent, type: string): void {
+  const data = event.data;
+  const blocks = turn.reasoningById ?? {};
+  const streaming = Object.values(blocks).filter((b) => b.status === 'streaming');
+  const lastStreaming = streaming[streaming.length - 1];
+  const explicit = typeof data.block_id === 'string' && data.block_id ? data.block_id : null;
+  const key =
+    explicit ?? lastStreaming?.blockId ?? `r:${event.step_id ?? turn.step_id}:${event.seq ?? 'n'}`;
+  const prev = blocks[key];
+
+  if (type === REASONING_STARTED) {
+    if (prev) return;
+    const block: ReasoningBlock = {
+      blockId: key,
+      source: data.source === 'agent' ? 'agent' : 'model',
+      text: '',
+      status: 'streaming',
+      started_at: event.time ?? new Date().toISOString(),
+    };
+    turn.reasoningById = { ...blocks, [key]: block };
+    turn.activities.push({ kind: 'reasoning', blockId: key });
+    return;
+  }
+
+  if (!prev || prev.status !== 'streaming') {
+    if (!prev && type === REASONING_DELTA) {
+      // 孤儿 delta（无 started 或块丢失）：按事实建块——started_at 记本事件
+      // 时间（块的可见起点，终态时长语义依赖它），其余字段不伪造
+      const block: ReasoningBlock = {
+        blockId: key,
+        source: data.source === 'agent' ? 'agent' : 'model',
+        text: String(data.delta ?? ''),
+        status: 'streaming',
+        started_at: event.time ?? new Date().toISOString(),
+      };
+      turn.reasoningById = { ...blocks, [key]: block };
+      turn.activities.push({ kind: 'reasoning', blockId: key });
+    }
+    return;
+  }
+
+  if (type === REASONING_DELTA) {
+    turn.reasoningById = {
+      ...blocks,
+      [key]: { ...prev, text: prev.text + String(data.delta ?? '') },
+    };
+    return;
+  }
+  // completed / interrupted：终结 + 时间戳，已聚合文本原样保留（PRD §16.4）
+  turn.reasoningById = {
+    ...blocks,
+    [key]: {
+      ...prev,
+      status: type === REASONING_COMPLETED ? 'completed' : 'interrupted',
+      completed_at: event.time ?? new Date().toISOString(),
+    },
+  };
 }
 
 /** Resolve which step an event belongs to.
@@ -573,7 +663,8 @@ function touchTurn(turn: Turn, event: AgentEvent): void {
 export type ChainNode =
   | { kind: 'model'; segment: ModelSegment }
   | { kind: 'tool'; tool: ToolCall }
-  | { kind: 'delegation'; delegation: Delegation };
+  | { kind: 'delegation'; delegation: Delegation }
+  | { kind: 'reasoning'; block: ReasoningBlock };
 
 export function deriveChain(turn: Turn): ChainNode[] {
   return turn.activities.flatMap((a): ChainNode[] => {
@@ -584,6 +675,10 @@ export function deriveChain(turn: Turn): ChainNode[] {
     if (a.kind === 'delegation') {
       const delegation = turn.delegations?.find((d) => d.child_session_id === a.child_session_id);
       return delegation ? [{ kind: 'delegation', delegation }] : [];
+    }
+    if (a.kind === 'reasoning') {
+      const block = turn.reasoningById?.[a.blockId];
+      return block ? [{ kind: 'reasoning', block }] : [];
     }
     const tool = turn.tools.find((t) => t.tool_call_id === a.tool_call_id);
     return tool ? [{ kind: 'tool', tool }] : [];
@@ -717,6 +812,16 @@ export function summarizeEvent(event: AgentEvent): string {
       ].filter((p): p is string => p !== null);
       return parts.join(' · ');
     }
+    // ── T2（#95）reasoning 事件族（契约 C1）——终态一行语义；
+    // delta 摘要同 model/delta 惯例（+N 字符，Timeline 行仍 verbatim 在场）。
+    case REASONING_STARTED:
+      return '思考开始';
+    case REASONING_DELTA:
+      return `+${String(d.delta ?? '').length} 字符`;
+    case REASONING_COMPLETED:
+      return '思考完成';
+    case REASONING_INTERRUPTED:
+      return '思考中断';
     // 已知生命周期事件无单行语义——空摘要，类型标签已足够。
     // 「未知事件」兜底必须只留给真正未知的类型（UnknownSurfaceNode 协议）。
     case EventType.RUN_STARTED:

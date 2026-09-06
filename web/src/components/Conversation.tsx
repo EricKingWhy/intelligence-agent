@@ -24,6 +24,7 @@ import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 import { DelegationNode } from './DelegationNode';
+import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
 import { CopyButton } from './CopyButton';
 
 interface Props {
@@ -33,6 +34,8 @@ interface Props {
   density: TraceDensity;
   /** L0-L2 展开状态（manual override ?? density 默认）。缺省 = 无手动层。 */
   disclosure?: Disclosure;
+  /** T2（#95）reasoning 开合状态（S6/S7 自动规则 + user_interacted override）。 */
+  reasoningDisclosure?: ReasoningDisclosureApi;
   /** Inspector → 主区反向联动（PRD §9.2）：定位目标 key + 变更序号（nonce 保证
    *  重复跳同一目标也触发 effect）。 */
   jumpRequest?: { key: string; nonce: number } | null;
@@ -52,7 +55,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, disclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession }: Props) {
+export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
@@ -194,6 +197,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
                 model={conversation.model}
                 density={density}
                 disclosure={disclosure}
+                reasoningDisclosure={reasoningDisclosure}
                 onFocusTool={onFocusTool}
                 onOpenSession={onOpenSession}
               />
@@ -221,7 +225,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-const TurnView = memo(function TurnView({ turn, model, density, disclosure, onFocusTool, onOpenSession }: { turn: Turn; model: string | null; density: TraceDensity; disclosure?: Disclosure; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void }) {
+const TurnView = memo(function TurnView({ turn, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession }: { turn: Turn; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -302,6 +306,7 @@ const TurnView = memo(function TurnView({ turn, model, density, disclosure, onFo
                     node={node}
                     density={density}
                     disclosure={disclosure}
+                    reasoningDisclosure={reasoningDisclosure}
                     isFinalModel={i === lastModelIndex}
                     onFocusTool={onFocusTool}
                     onOpenSession={onOpenSession}
@@ -319,10 +324,11 @@ const TurnView = memo(function TurnView({ turn, model, density, disclosure, onFo
 function chainKey(node: ChainNode, i: number): string {
   if (node.kind === 'tool') return node.tool.tool_call_id;
   if (node.kind === 'delegation') return node.delegation.child_session_id;
+  if (node.kind === 'reasoning') return node.block.blockId;
   return `model-${i}`;
 }
 
-export function ChainNodeView({ node, density, disclosure, isFinalModel = true, onFocusTool, onOpenSession }: { node: ChainNode; density: TraceDensity; disclosure?: Disclosure; /** 该 model 段是否为 turn 最后一个模型段（final-answer 高对比）。 */ isFinalModel?: boolean; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void }) {
+export function ChainNodeView({ node, density, disclosure, reasoningDisclosure, isFinalModel = true, onFocusTool, onOpenSession }: { node: ChainNode; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; /** 该 model 段是否为 turn 最后一个模型段（final-answer 高对比）。 */ isFinalModel?: boolean; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void }) {
   if (node.kind === 'tool') {
     const key = toolEventKey(node.tool.tool_call_id);
     const cycle = disclosure
@@ -340,6 +346,9 @@ export function ChainNodeView({ node, density, disclosure, isFinalModel = true, 
   }
   if (node.kind === 'delegation') {
     return <DelegationNode delegation={node.delegation} density={density} onOpenSession={onOpenSession} />;
+  }
+  if (node.kind === 'reasoning') {
+    return <ReasoningBlockView block={node.block} density={density} disclosure={reasoningDisclosure} />;
   }
   const { segment }: { segment: ModelSegment } = node;
   const kind: RuntimeEventKind = modelKind(segment.status, isFinalModel);

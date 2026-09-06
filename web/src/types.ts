@@ -121,6 +121,25 @@ export interface ModelSegment {
   status: 'streaming' | 'done';
 }
 
+/** 推理块状态（T2 #95）——块生命周期与原语层的共享别名（reasoningCursor /
+ *  disclosure 引用此处，单一来源）。 */
+export type ReasoningStatus = 'streaming' | 'completed' | 'interrupted';
+
+/** T2（#95）：推理/进度块（契约 C1 reasoning 事件族，S1 双来源共用一种块）。
+ *  source=model = provider 思考（reasoning_content）；source=agent = agent 进度
+ *  叙述。completed/interrupted 后不可变（spec 02 §8.1），迟到 delta 丢弃。
+ *  visibility=internal 的事件永不投影为本块（spec 02 §15 硬边界）。 */
+export interface ReasoningBlock {
+  /** 稳定聚合键（data.block_id；缺失时投影合成 `r:{step}:{seq}`，重放确定）。 */
+  blockId: string;
+  source: 'model' | 'agent';
+  /** 累积流文本（折叠前读视口与展开面消费同一份缓冲——两视图永不失同步）。 */
+  text: string;
+  status: ReasoningStatus;
+  started_at?: string;
+  completed_at?: string;
+}
+
 export interface Turn {
   step_id: number;
   /** User input that kicked off this turn. */
@@ -153,6 +172,9 @@ export interface Turn {
   /** Harness 注入纠正消息的来源标记（user/message data.injected_by）——
    *  非真人输入，渲染为系统提示条而非用户气泡。 */
   injected_by?: string;
+  /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
+   *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
+  reasoningById?: Record<string, ReasoningBlock>;
 }
 
 /** RepeatedToolFailureGuard 触发记录（tool/failure-guard 事件，ADR-0014 #69）。
@@ -186,7 +208,8 @@ export interface Delegation {
 export type TurnActivity =
   | { kind: 'model'; /** Index into turn.segments. */ index: number }
   | { kind: 'tool'; tool_call_id: string }
-  | { kind: 'delegation'; child_session_id: string };
+  | { kind: 'delegation'; child_session_id: string }
+  | { kind: 'reasoning'; blockId: string };
 
 /** Context compaction record (context/compacted event, Phase 5 spec 06).
  *  Run-level metadata — the Inspector Context panel surfaces these. */

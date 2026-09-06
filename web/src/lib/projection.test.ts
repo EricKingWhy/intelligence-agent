@@ -1183,3 +1183,120 @@ describe('T1 — seq 幂等去重 + 帧校验（#94，spec 02 §6/§14）', () =
     expect(s.turns[0].user_message).toBe('');
   });
 });
+
+describe('T2 — reasoning 事件投影（#95，契约 C1，spec 03 §5/§7）', () => {
+  const rStarted = (step: number, blockId: string | undefined, extra: Partial<AgentEvent> = {}) =>
+    ev({
+      type: 'reasoning/started',
+      data: blockId === undefined ? {} : { block_id: blockId },
+      step_id: step,
+      ...extra,
+    });
+  const rDelta = (step: number, blockId: string | undefined, delta: string, extra: Partial<AgentEvent> = {}) =>
+    ev({
+      type: 'reasoning/delta',
+      data: { delta, ...(blockId === undefined ? {} : { block_id: blockId }) },
+      step_id: step,
+      ...extra,
+    });
+  const rTerminal = (type: string, step: number, blockId: string | undefined, extra: Partial<AgentEvent> = {}) =>
+    ev({
+      type,
+      data: blockId === undefined ? {} : { block_id: blockId },
+      step_id: step,
+      ...extra,
+    });
+
+  it('started→delta→completed 聚合为一个 block，activities 记录真实顺序', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rStarted(1, 'b1'));
+    s = applyEvent(s, rDelta(1, 'b1', '想'));
+    s = applyEvent(s, rDelta(1, 'b1', '一下'));
+    s = applyEvent(s, rTerminal('reasoning/completed', 1, 'b1'));
+    const t = s.turns[0];
+    expect(t.reasoningById?.['b1']).toMatchObject({ blockId: 'b1', text: '想一下', status: 'completed' });
+    expect(t.activities).toContainEqual({ kind: 'reasoning', blockId: 'b1' });
+  });
+
+  it('S2 分段语义：reasoning → tool → reasoning 是兄弟节点，deriveChain 保序', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rStarted(1, 'b1'));
+    s = applyEvent(s, rTerminal('reasoning/completed', 1, 'b1'));
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { name: 'bash', tool_call_id: 'tc1' }, step_id: 1 }));
+    s = applyEvent(s, rStarted(1, 'b2'));
+    s = applyEvent(s, rTerminal('reasoning/completed', 1, 'b2'));
+    const kinds = deriveChain(s.turns[0]).map((n) => n.kind);
+    expect(kinds).toEqual(['reasoning', 'tool', 'reasoning']);
+  });
+
+  it('completed 不可变：终态后的迟到 delta 不改文本（spec 02 §8.1）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rStarted(1, 'b1'));
+    s = applyEvent(s, rTerminal('reasoning/completed', 1, 'b1'));
+    s = applyEvent(s, rDelta(1, 'b1', '迟到'));
+    expect(s.turns[0].reasoningById?.['b1']).toMatchObject({ text: '', status: 'completed' });
+  });
+
+  it('interrupted 保留已聚合文本并终结（PRD §16.4：部分内容不擦除）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rStarted(1, 'b1'));
+    s = applyEvent(s, rDelta(1, 'b1', 'partial '));
+    s = applyEvent(s, rDelta(1, 'b1', 'text'));
+    s = applyEvent(s, rTerminal('reasoning/interrupted', 1, 'b1'));
+    expect(s.turns[0].reasoningById?.['b1']).toMatchObject({ text: 'partial text', status: 'interrupted' });
+  });
+
+  it('visibility=internal 不建用户可见块（spec 02 §15 硬边界），events 日志仍 verbatim', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rStarted(1, 'x', { data: { block_id: 'x', visibility: 'internal' } }));
+    s = applyEvent(s, rDelta(1, 'x', 'secret', { data: { delta: 'secret', block_id: 'x', visibility: 'internal' } }));
+    s = applyEvent(s, rTerminal('reasoning/completed', 1, 'x', { data: { block_id: 'x', visibility: 'internal' } }));
+    expect(s.turns[0].reasoningById?.['x']).toBeUndefined();
+    expect(s.turns[0].activities.some((a) => a.kind === 'reasoning')).toBe(false);
+    expect(s.events).toHaveLength(4);
+  });
+
+  it('缺 block_id 的 delta 落到本 turn 最近一个 streaming block（宽松契约降级）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rStarted(1, 'b1'));
+    s = applyEvent(s, rDelta(1, undefined, 'fallthrough'));
+    expect(s.turns[0].reasoningById?.['b1']).toMatchObject({ text: 'fallthrough', status: 'streaming' });
+  });
+
+  it('无 started 直接 delta：合成 key 建块（delta 是事实，零伪造建块）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rDelta(1, undefined, 'orphan'));
+    const blocks = s.turns[0].reasoningById ?? {};
+    const ids = Object.keys(blocks);
+    expect(ids).toHaveLength(1);
+    expect(Object.values(blocks)[0]).toMatchObject({ text: 'orphan', status: 'streaming' });
+    expect(s.turns[0].activities.some((a) => a.kind === 'reasoning')).toBe(true);
+  });
+
+  it('source 缺省为 model；data.source=agent 显式可辨（S1 双来源）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    s = applyEvent(s, rStarted(1, 'b1'));
+    s = applyEvent(s, rStarted(1, 'b2', { data: { block_id: 'b2', source: 'agent' } }));
+    expect(s.turns[0].reasoningById?.['b1']).toMatchObject({ source: 'model' });
+    expect(s.turns[0].reasoningById?.['b2']).toMatchObject({ source: 'agent' });
+  });
+
+  it('历史重放同构：projectHistory === 逐帧 applyEvent（持久事件恒带 time）', () => {
+    const events = [
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 }, seq: 1, time: '2026-09-06T00:00:01Z' }),
+      rStarted(1, 'b1', { seq: 2, time: '2026-09-06T00:00:02Z' }),
+      rDelta(1, 'b1', 'a', { seq: 3, time: '2026-09-06T00:00:03Z' }),
+      rTerminal('reasoning/completed', 1, 'b1', { seq: 4, time: '2026-09-06T00:00:04Z' }),
+    ];
+    let live = initConversation('s');
+    for (const e of events) live = applyEvent(live, e);
+    expect(projectHistory('s', events)).toEqual(live);
+  });
+
+  it('summarizeEvent：终态有摘要、delta 记字符数（同 model/delta 惯例）', () => {
+    expect(summarizeEvent(rTerminal('reasoning/completed', 1, 'b1'))).toContain('思考');
+    expect(summarizeEvent(rTerminal('reasoning/interrupted', 1, 'b1'))).toContain('中断');
+    expect(summarizeEvent(rStarted(1, 'b1'))).toContain('思考');
+    expect(summarizeEvent(rDelta(1, 'b1', 'xyz'))).toBe('+3 字符');
+  });
+});
