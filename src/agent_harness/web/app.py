@@ -272,6 +272,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
 
+    # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
+    from agent_harness.web.lineage import register_lineage_routes
+
+    register_lineage_routes(app, validate_session_id=_validate_session_id)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。

@@ -8,12 +8,31 @@ NULL→具体值 的升级，绝不覆盖既有 origin=fork（fork 语义由 for
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from agent_harness.session.event import AGENT_DELEGATION_STARTED
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.session_meta import SessionMeta, SessionMetaStore
+
+
+def _scan_edges(
+    store: JsonlSessionStore, all_ids: list[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """同步扫描全部会话事件：delegation 边 + created_at（线程池内执行）。"""
+    edges: dict[str, str] = {}  # child_session_id -> parent_session_id
+    created_at_by_id: dict[str, str] = {}
+    for sid in all_ids:
+        events = store.read_events(sid)
+        if events:
+            created_at_by_id.setdefault(sid, events[0].time)
+        for event in events:
+            if event.type == AGENT_DELEGATION_STARTED:
+                child_id = event.data.get("child_session_id")
+                if child_id:
+                    edges.setdefault(str(child_id), sid)
+    return edges, created_at_by_id
 
 
 @dataclass
@@ -48,18 +67,11 @@ async def build_lineage_index(
     if not missing and not needs_upgrade:
         return list(existing.values())
 
-    # 扫描事件真相：delegation-started 边（parent → child_session_id）
-    edges: dict[str, str] = {}  # child_session_id -> parent_session_id
-    created_at_by_id: dict[str, str] = {}
-    for sid in all_ids:
-        events = store.read_events(sid)
-        if events:
-            created_at_by_id.setdefault(sid, events[0].time)
-        for event in events:
-            if event.type == AGENT_DELEGATION_STARTED:
-                child_id = event.data.get("child_session_id")
-                if child_id:
-                    edges.setdefault(str(child_id), sid)
+    # 扫描事件真相（同步磁盘 IO 走线程卸载——web 读取面也复用本函数）：
+    # delegation-started 边（parent → child_session_id）+ 各会话 created_at
+    edges, created_at_by_id = await asyncio.to_thread(
+        _scan_edges, store, all_ids
+    )
 
     now = datetime.now(UTC).isoformat(timespec="milliseconds")
     # 缺行的会话：delegation child 按边回填，其余按 root 建行
