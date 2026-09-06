@@ -55,6 +55,8 @@ class TestSessionEventDTO:
             "memory/degraded",
             "tool/failure-guard",
             "model/fallback",
+            "agent/delegation-started",
+            "agent/delegation-finished",
         }
         assert EVENT_TYPES == expected
 

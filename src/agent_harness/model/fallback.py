@@ -22,12 +22,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
 from langchain_core.messages import AnyMessage
 
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.stall import ModelStallError, stream_with_stall_guard
 
 # openai SDK 的瞬时错误类名（不硬 import openai：按类名识别，避免版本
@@ -121,6 +123,7 @@ class ModelFallbackCoordinator:
         fallback_name: str = "fallback",
         idle_timeout: float = 0.0,
         total_timeout: float = 0.0,
+        gate: ModelCallGate | None = None,
     ) -> None:
         self._policy = policy or TwoLevelFallbackPolicy()
         self._fallback = fallback
@@ -132,19 +135,28 @@ class ModelFallbackCoordinator:
         # （瞬时）→ fallback 接管。
         self._idle_timeout = idle_timeout
         self._total_timeout = total_timeout
+        # 进程级模型并发闸（#89）：共享实例（assembly 创建、parent/child 传递
+        # 同一引用）。闸包在 stall 看门狗【外面】——排队等槽位不计入 idle。
+        self._gate = gate
         self.current = primary
         self._transitions: list[FallbackTransition] = []
 
     def _guarded_stream(self, model: Any, messages: list[AnyMessage]) -> AsyncIterator[Any]:
-        """单次流式尝试（按需包双守卫；fallback 重试同样受保护）。"""
+        """单次流式尝试（按需包双守卫 + 并发闸；fallback 重试同样受保护）。
+
+        包裹顺序 = 闸(看门狗(原始流))：先拿到槽位，看门狗才开始计时。
+        """
         stream = model.astream(messages)
         if (self._idle_timeout and self._idle_timeout > 0) or (
             self._total_timeout and self._total_timeout > 0
         ):
-            return stream_with_stall_guard(
+            stream = stream_with_stall_guard(
                 stream, idle_timeout=self._idle_timeout,
                 total_timeout=self._total_timeout,
             )
+        if self._gate is not None:
+            stream = self._gate.wrap(stream)
+        return stream
         return stream
 
     async def ainvoke(self, messages: list[AnyMessage]) -> Any:
@@ -152,13 +164,17 @@ class ModelFallbackCoordinator:
 
         V1 看门狗不覆盖 ainvoke（总时限会误杀合法长推理）——socket 级
         read-timeout 仍是底线，见 model/stall.py 模块 docstring。
+        并发闸同样生效（非流式调用占一个槽位）。
         """
+        slot = self._gate.slot() if self._gate is not None else nullcontext(None)
         try:
-            return await self.current.ainvoke(messages)
+            async with slot:
+                return await self.current.ainvoke(messages)
         except Exception as error:
             if not self._try_switch(error):
                 raise
-            return await self.current.ainvoke(messages)
+            async with slot:
+                return await self.current.ainvoke(messages)
 
     async def astream(
         self, messages: list[AnyMessage]

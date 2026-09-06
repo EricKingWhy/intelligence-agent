@@ -14,18 +14,24 @@ web 与 CLI 是它的两个 adapter（两个 adapter = 真实 seam）；capabili
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from agent_harness.agent import AgentRuntime
+
+logger = logging.getLogger(__name__)
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
+from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
     OnStableBoundary,
     SqliteCheckpointStore,
@@ -100,6 +106,7 @@ async def build_runtime(
     workspace: Path,
     max_steps: int,
     auto_approve: bool,
+    session_store: JsonlSessionStore | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -114,6 +121,9 @@ async def build_runtime(
     fallback_model = None
     if config.fallback is not None:
         fallback_model = create_chat_model(config.fallback)
+    # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
+    # 同一实例（全局在飞模型调用数的语义）。
+    model_call_gate = ModelCallGate(settings.model_max_concurrency)
 
     sandbox = workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
@@ -141,7 +151,44 @@ async def build_runtime(
         approval_callback = lambda _req: ApprovalResponse(approved=False, reason="manual approval not yet wired")
 
     for capability_tool in wiring.tools:
+        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席
+        # （不注册 delegate，单代理照常），与 optional capability 语义一致。
+        if isinstance(capability_tool, DelegateTool) and session_store is None:
+            logger.warning(
+                "multiagent 已启用但未提供 session_store，delegate 工具降级缺席"
+            )
+            continue
         registry.register(capability_tool)
+
+    # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
+    # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
+    # 同一审批面（决策 11 权限传递）。
+    if wiring.multiagent_provider is not None and session_store is not None:
+        from agent_harness.agent.factory import AgentFactory
+
+        def _child_executor_factory(child_registry: ToolRegistry) -> ToolExecutor:
+            return ToolExecutor(
+                child_registry, policy=policy, approval_callback=approval_callback,
+                overflow_handler=overflow_handler,
+                operation_ledger=stores.operation_ledger,
+            )
+
+        wiring.multiagent_provider.activate(
+            factory=AgentFactory(
+                model=model, fallback_model=fallback_model,
+                executor_factory=_child_executor_factory,
+                primary_model_name=config.model_name,
+                fallback_model_name=(config.fallback.model_name
+                                     if config.fallback is not None else "fallback"),
+                stream_idle_timeout=settings.model_stream_idle_timeout,
+                stream_total_timeout=settings.model_stream_total_timeout,
+                model_call_gate=model_call_gate,
+            ),
+            source_registry=registry,
+            session_store=session_store,
+            workspace_registry=workspace_registry,
+            parent_session_id=session_id,
+        )
 
     return AgentRuntime(
         model=model,
@@ -162,6 +209,7 @@ async def build_runtime(
         fallback_model=fallback_model,
         stream_idle_timeout=settings.model_stream_idle_timeout,
         stream_total_timeout=settings.model_stream_total_timeout,
+        model_call_gate=model_call_gate,
         primary_model_name=config.model_name,
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
