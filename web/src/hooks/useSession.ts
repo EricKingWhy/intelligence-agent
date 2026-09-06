@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, cancelSession, recoverSession, RecoverError, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, RecoverError, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
@@ -91,6 +91,54 @@ export type CancelDecision =
 export function decideCancel(liveSid: string | null): CancelDecision {
   return liveSid ? { kind: 'cancel-request', sessionId: liveSid } : { kind: 'abort-transport' };
 }
+
+// ── T4（#97）重连契约纯函数（后端契约回执 §3，spec 02 §10 / 03 §20）──
+
+/** 流结束后的下一步决策。终态（run/completed|failed）已见 → 正常收尾迁移；
+ *  未终态且 sid 已知且重试额度未尽 → 重连（GET stream?after_seq=lastApplied
+ *  续传，重放由 seq 去重门吸收）；sid 未知（首帧未确认，无从对账）或额度
+ *  耗尽 → 放弃，走错误路径（悬空 run 的恢复入口由既有 recover UI 承接）。 */
+export type StreamEndDecision = 'migrate' | 'reconnect' | 'give-up';
+export const MAX_RECONNECT_ATTEMPTS = 3;
+
+export function decideStreamEnd(input: {
+  terminalSeen: boolean;
+  sidKnown: boolean;
+  attempts: number;
+}): StreamEndDecision {
+  if (input.terminalSeen) return 'migrate';
+  if (!input.sidKnown || input.attempts >= MAX_RECONNECT_ATTEMPTS) return 'give-up';
+  return 'reconnect';
+}
+
+/** seq gap 检测（契约 §1：subscriber 队列满时后端丢最旧保最新，gap = 重连信号）。
+ *  null seq（ephemeral 帧）与无基线（首帧前）永不构成 gap；回跳 seq 由 T1
+ *  去重门/投影宽松契约处理，不算 gap。 */
+export function isSeqGap(lastApplied: number | null, incoming: number | null): boolean {
+  return lastApplied !== null && incoming !== null && incoming > lastApplied + 1;
+}
+
+/** stream/truncated 控制帧载荷解析（backlog > 1000，契约 §3）：latest_seq 是
+ *  重建后续传游标，必须为有限数；畸形/缺失 → null（忽略控制帧，按普通断连
+ *  路径重连）。after_seq 字段仅为回显，前端不用。 */
+export function parseTruncated(data: Record<string, unknown>): { latestSeq: number } | null {
+  const seq = data.latest_seq;
+  return typeof seq === 'number' && Number.isFinite(seq) ? { latestSeq: seq } : null;
+}
+
+/** 重连退避（issue #97：指数退避）：500ms 起步 ×2，封顶 4s。attempt 从 1 计。 */
+export function reconnectDelayMs(attempt: number): number {
+  return Math.min(500 * 2 ** (attempt - 1), 4000);
+}
+
+/** T4（#97）停摆检测阈值（ms）：live 流超过该时长无任何帧且未终态 → 视为
+ *  静默断流（后台杀流/连接僵死），主动断开走重连（重放幂等，代价小）。
+ *  回前台由 visibilitychange 即时触发同一检查；hook 级心跳兜底其余路径。 */
+export const RECONNECT_STALL_MS = 10_000;
+
+/** 断线条显示延迟（ms，spec 03 §20「only if reconnect lasts long enough to
+ *  matter」）：500ms 级瞬时重连不闪条；超时未接通才出现（role=status 不轰炸）。 */
+export const RECONNECT_BANNER_DELAY_MS = 800;
 
 /** live→viewing 迁移时是否显示「正在加载历史…」占位符。
  *
@@ -164,6 +212,15 @@ export function createCommitCoalescer(
   };
 }
 
+/** 422 = 未知模型（契约 C6）的稳定标记与判定（Standards 轴：消魔法子串跨模块
+ *  耦合——useSession 的错误文案是 submitTask 对外的唯一通道，App 据此刷新模型
+ *  目录；判定函数+常量单一来源，文案改动不会静默破坏识别）。 */
+export const UNKNOWN_MODEL_ERROR_TEXT = '模型不可用（422）：请从模型选择器重新选择';
+
+export function isUnknownModelError(message: string | null | undefined): boolean {
+  return message === UNKNOWN_MODEL_ERROR_TEXT;
+}
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
@@ -186,6 +243,20 @@ export function useSession() {
   // 之后才到达的迟到帧。
   const modeRef = useRef<SessionMode>(mode);
   modeRef.current = mode;
+
+  // T4（#97）重连状态机 refs：lastAppliedSeq = 已应用最大持久 seq（续传游标，
+  // 重放与续传由 seenSeqs 去重吸收重复）；streamGen = 流代际（切走/取消/卸载
+  // 即自增，旧流全部回调自失效）；terminalSeen = 终态帧已达（决定流结束走
+  // 迁移还是重连）；lastFrameAt = 最后一帧墙钟（停摆检测基准）。
+  const lastAppliedSeqRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const streamGenRef = useRef(0);
+  const terminalSeenRef = useRef(false);
+  const lastFrameAtRef = useRef(Date.now());
+  // submitTask 闭包内的停摆检查（依赖 gen/coalescer 等闭包状态）——
+  // hook 级心跳与 visibilitychange 经此触达当前活跃流。
+  const stallCheckRef = useRef<(() => void) | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
 
   // Recover 三态（df4f7d8 §1.1）：idle → pending → 200 成功（回到 idle，整表
   // 重建）/ 404·409·网络错误 → error。409 是"需人工裁决"（conflict=true），
@@ -263,41 +334,63 @@ export function useSession() {
   // Cleanup SSE on unmount.
   useEffect(() => {
     return () => {
+      streamGenRef.current += 1; // 使任何在途重连/停摆检查失效
+      stallCheckRef.current = null;
       sseRef.current?.cancel();
     };
+  }, []);
+
+  // T4（#97）停摆心跳：每 RECONNECT_STALL_MS 检查一次当前活跃流（检查本体
+  // 在 submitTask 闭包内，经 stallCheckRef 触达；非 live 流为 no-op）。
+  useEffect(() => {
+    const heartbeat = setInterval(() => stallCheckRef.current?.(), RECONNECT_STALL_MS);
+    return () => clearInterval(heartbeat);
   }, []);
 
   // T7（#100）background tab 降渲染（spec 03 §18.3）：隐藏→flush 落盘当前状态
   // （干净暂停点）；回前台→flush 立即对账（后台积压合帧为单次提交，一帧内
   // reconcile，无重放动画）。隐藏期间 schedule 挂起，事件照常逐帧入本地 conv。
+  // T4（#97）：回前台附带即时停摆检查——后台期浏览器可能静默杀流。
   useEffect(() => {
     const onVisibility = () => {
       coalescerRef.current?.flush();
+      if (document.visibilityState === 'visible') stallCheckRef.current?.();
     };
     document.addEventListener('visibilitychange', onVisibility);
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
 
-  /** Submit a new task. Creates a fresh session and streams the response.
+/** Submit a new task. Creates a fresh session and streams the response.
    *  The conversation is reset first — a live stream never folds into the
-   *  previously viewed session's turns. */
+   *  previously viewed session's turns.
+   *  T4（#97）：流消费升级为重连状态机——异常关闭 / seq gap / 停摆（含后台
+   *  杀流）触发 GET stream?after_seq=lastApplied 续传；stream/truncated 控制
+   *  帧走 GET /events 全量重建后续传；终态帧已达 → 正常收尾迁移。 */
   const submitTask = useCallback(
     async (payload: StartSessionPayload) => {
       setError(null);
       setConversation(null);
       liveSidRef.current = null;
+      setReconnecting(false);
+      lastAppliedSeqRef.current = null;
+      terminalSeenRef.current = false;
+      reconnectAttemptRef.current = 0;
+      streamGenRef.current += 1; // 上一条流的回调/重连/停摆检查全部失效
+      const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId: null });
       try {
         const res = await startSession(payload);
+        // 422 = 未知模型（契约 C6）——专项消息供 App 识别后刷新目录
+        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
         if (!res.ok || !res.body) {
           throw new Error(`Start failed: ${res.status}`);
         }
 
-        let conv: ConversationState | null = null;
         // P1-3 合帧 + T7 后台降渲染：窗口内多 delta 一次提交；隐藏期挂起、
         // 回前台 flush 对账。折叠逐帧即时（真相不延迟），延迟的只是通知。
-        // submit 守卫 mode 仍是 live——cancel/selectSession 之后的迟到 fire
-        // 不得把旧流残留写回视图（与 shouldApplyStreamFrame 同一族守护）。
+        // T4：conv 由重连路径与 live 帧共享——同一折叠累积器，重放帧经
+        // seenSeqs 去重吸收（无缝无重复的关键在 T1 去重门 + seq 游标本地记账）。
+        let conv: ConversationState | null = null;
         const coalescer = createCommitCoalescer(
           () => {
             if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
@@ -307,53 +400,223 @@ export function useSession() {
         );
         coalescerRef.current = coalescer;
 
-        const handle = consumeSSE(
-          res,
-          (event: AgentEvent) => {
-            // 不变量 #22 守护：cancel / selectSession / error 之后才到达的
-            // 在途帧不再具有权威——若放行会用旧流残留覆盖刚加载的目标视图。
-            if (!shouldApplyStreamFrame(modeRef.current, event)) return;
-            const sid = event.session_id ?? null;
-            if (sid) {
-              liveSidRef.current = sid;
-              // 首帧确认：把 sid 写进 mode（仅从 null 迁移一次）
-              setMode((m) =>
-                m.kind === 'live' && m.sessionId === null ? { kind: 'live', sessionId: sid } : m,
-              );
-            }
-            if (!conv) conv = initConversation(sid ?? 'streaming');
-            conv = applyEvent(conv, event);
-            // 首条用户消息到达时缓存行标题（Session Model E 轮）。
-            if (sid) {
-              const content = extractSessionTitle(event);
-              if (content) setTitlesById((m) => (m[sid] ? m : { ...m, [sid]: content }));
-            }
-            // 终态事件立即 flush（尾帧不得延迟到下一窗口）；中间帧合帧提交。
-            if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
-              coalescer.flush();
-            } else {
-              coalescer.schedule();
-            }
-          },
-          () => {
-            // Stream finished: view the session it produced (history loader
-            // re-reads the durable log), and refresh the list for the new row.
-            coalescer.flush(); // 尾帧不丢（P1-3）
-            coalescerRef.current = null; // T7：流结束解钉（visibility 监听不再触达旧流）
-            const sid = liveSidRef.current;
-            setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
-            refreshSessions();
-          },
-          (err) => {
-            coalescer.flush(); // 尾帧不丢（P1-3）
+        /** 正常收尾迁移（终态已达）。 */
+        const finishLive = () => {
+          coalescer.flush(); // 尾帧不丢（P1-3）
+          coalescerRef.current = null;
+          setReconnecting(false);
+          const sid = liveSidRef.current;
+          setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
+          refreshSessions();
+        };
+
+        const onEvent = (event: AgentEvent) => {
+          if (streamGenRef.current !== gen) return;
+          // 不变量 #22 守护：cancel / selectSession / error 之后才到达的
+          // 在途帧不再具有权威——若放行会用旧流残留覆盖刚加载的目标视图。
+          if (!shouldApplyStreamFrame(modeRef.current, event)) return;
+          lastFrameAtRef.current = Date.now();
+          // T4 控制帧先于投影（seq=null 不入轮次）：backlog>1000 → 全量重建。
+          // 'stream/truncated' 是 web 层控制帧（app.py 内联构造，不在 event.py
+          // 词汇表）——generated/event-types.ts 由 event.py 生成，此字面量是
+          // 唯一正确落点（勿收进生成产物）。
+          if (event.type === 'stream/truncated') {
+            const plan = parseTruncated(event.data);
+            sseRef.current?.cancel(); // 静默断开，不走 onStreamEnd
+            if (plan && liveSidRef.current) void doTruncatedRebuild(liveSidRef.current);
+            // 畸形/缺失：按普通断连路径重连（parseTruncated 契约，不留 UI 死区）
+            else scheduleReconnect(liveSidRef.current, 'stream/truncated malformed');
+            return;
+          }
+          // T4：seq gap = 后端队列丢帧信号（契约 §1）→ 断开重连，本地不投影半截
+          if (isSeqGap(lastAppliedSeqRef.current, event.seq)) {
+            sseRef.current?.cancel();
+            scheduleReconnect(liveSidRef.current, 'seq gap');
+            return;
+          }
+          if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
+            terminalSeenRef.current = true;
+          }
+          const sid = event.session_id ?? null;
+          if (sid) {
+            liveSidRef.current = sid;
+            // 首帧确认：把 sid 写进 mode（仅从 null 迁移一次）
+            setMode((m) =>
+              m.kind === 'live' && m.sessionId === null ? { kind: 'live', sessionId: sid } : m,
+            );
+          }
+          if (!conv) conv = initConversation(sid ?? 'streaming');
+          conv = applyEvent(conv, event);
+          // T4 游标本地记账：续传 after_seq 的真相源（SSE 帧不携带 event_id，
+          // cursor = seq；event_id 优先键升级路径已记 ADR-0016 DEFER）。
+          if (event.seq !== null) {
+            const prev = lastAppliedSeqRef.current;
+            lastAppliedSeqRef.current = prev === null ? event.seq : Math.max(prev, event.seq);
+          }
+          // T4 额度复位以「观察到新 seq 进展」为准（Spec 轴 P0）：悬空 run
+          // 每轮重连都是 200 + 重放零新进展——若在 attach 成功时清零额度，
+          // give-up 不可达 → 无限重连、recover 入口永不出现。仅当新帧 seq
+          // 超过重连起点游标（真进展）才复位。
+          if (reconnectProgressBase !== null && event.seq !== null && event.seq > reconnectProgressBase) {
+            reconnectAttemptRef.current = 0;
+            reconnectProgressBase = null;
+          }
+          // 首条用户消息到达时缓存行标题（Session Model E 轮）。
+          if (sid) {
+            const content = extractSessionTitle(event);
+            if (content) setTitlesById((m) => (m[sid] ? m : { ...m, [sid]: content }));
+          }
+          // 终态事件立即 flush（尾帧不得延迟到下一窗口）；中间帧合帧提交。
+          if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
+            coalescer.flush();
+          } else {
+            coalescer.schedule();
+          }
+        };
+
+        const onStreamEnd = () => {
+          // gen 检查先于 flush：submit 重入后旧流的迟来收尾不得把旧 conv
+          // 写进新视图（modeRef live 守卫在同代际内失效）。
+          if (streamGenRef.current !== gen) return;
+          coalescer.flush(); // 尾帧不丢（P1-3）
+          // 终态已见 = 自然终结（含重放收到终态）；未终态 = 服务端提前收流
+          //（契约推荐重连时机①：连接异常关闭）。
+          if (terminalSeenRef.current) {
+            finishLive();
+            return;
+          }
+          scheduleReconnect(liveSidRef.current, 'stream ended unexpectedly');
+        };
+
+        const onStreamError = (err: unknown) => {
+          if (streamGenRef.current !== gen) return;
+          coalescer.flush();
+          // 终态已见：错误后置——正常收尾优先（不影响已到真相）。
+          if (terminalSeenRef.current) {
+            finishLive();
+            return;
+          }
+          scheduleReconnect(liveSidRef.current, (err as Error).message);
+        };
+
+        const attach = (streamRes: Response) => {
+          sseRef.current = consumeSSE(streamRes, onEvent, onStreamEnd, onStreamError);
+        };
+
+        // 单飞守卫（Standards 轴 P1）：同一流实例任一时刻最多一条重连链——
+        // 同批多帧 gap / 停摆心跳 / visibility 检查都汇入 scheduleReconnect，
+        // 挂起期间重复触发在此短路（对齐 sse.ts cancelled 的单流实例模式）。
+        let reconnectPending = false;
+        // 重连起点游标（Spec 轴 P0）：额度复位只在观察到超过它的真进展时发生。
+        let reconnectProgressBase: number | null = null;
+
+        /** 重连调度（契约 §3）：指数退避（reconnectDelayMs）+ 额度上限
+         *  （decideStreamEnd）。404 = 会话不存在，立即放弃不空转。重连成功
+         *  接流后额度与单飞标记复位。显式 cancel（T5）不经过这里——
+         *  cancel-request 分支不 abort 流，终态帧经流广播驱动 finishLive。 */
+        const scheduleReconnect = (sid: string | null, reason: string) => {
+          if (streamGenRef.current !== gen || reconnectPending) return;
+          const decision = decideStreamEnd({
+            terminalSeen: terminalSeenRef.current,
+            sidKnown: Boolean(sid),
+            attempts: reconnectAttemptRef.current,
+          });
+          if (decision === 'migrate') {
+            finishLive();
+            return;
+          }
+          if (decision === 'give-up') {
             coalescerRef.current = null;
-            const sid = liveSidRef.current;
+            setReconnecting(false);
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
-            setError(`流式错误：${(err as Error).message}`);
-          },
-        );
-        sseRef.current = handle;
+            setError(`连接中断（${reason}）：重试 ${MAX_RECONNECT_ATTEMPTS} 次未成功`);
+            refreshSessions();
+            return;
+          }
+          reconnectPending = true;
+          reconnectAttemptRef.current += 1;
+          const attempt = reconnectAttemptRef.current;
+          // 记录重连起点游标：额度复位只看是否出现超过它的真进展（onEvent）
+          reconnectProgressBase = lastAppliedSeqRef.current;
+          // 断线状态条延迟显示（spec 03 §20）：瞬时重连不闪条——延迟到期仍
+          // 在挂起中（reconnectPending）才出现；attach 成功即复位不显示。
+          setTimeout(() => {
+            if (streamGenRef.current === gen && reconnectPending) setReconnecting(true);
+          }, RECONNECT_BANNER_DELAY_MS);
+          setTimeout(() => {
+            if (streamGenRef.current !== gen) return;
+            void (async () => {
+              try {
+                const after = lastAppliedSeqRef.current ?? -1;
+                const streamRes = await streamSession(sid as string, after);
+                if (streamGenRef.current !== gen) return;
+                reconnectPending = false;
+                if (streamRes.status === 404) {
+                  coalescerRef.current = null;
+                  setReconnecting(false);
+                  setMode({ kind: 'viewing', sessionId: sid as string });
+                  setError('会话不存在（404）——流已终止');
+                  refreshSessions();
+                  return;
+                }
+                if (!streamRes.ok || !streamRes.body) throw new Error(`reconnect ${streamRes.status}`);
+                // 额度不在此复位（Spec 轴 P0）：以 onEvent 观察到真进展为准
+                setReconnecting(false);
+                attach(streamRes);
+              } catch (e) {
+                reconnectPending = false; // 放回调度口（额度仍受 decideStreamEnd 约束）
+                scheduleReconnect(sid, (e as Error).message || reason);
+              }
+            })();
+          }, reconnectDelayMs(attempt));
+        };
+
+        /** stream/truncated（backlog>1000，契约 §3）：GET /events 全量重建
+         *  （projectHistory 同一管线，不变量 #22）→ 以重建后真实 max seq 续传
+         *  （payload latest_seq 仅是回显，游标以本地真实事实为准）。 */
+        const doTruncatedRebuild = (sid: string) => {
+          reconnectPending = true;
+          setReconnecting(true); // 全量重建（GET /events + projectHistory）非瞬时，条即时在场
+          void (async () => {
+            try {
+              const events = await getSessionEvents(sid);
+              if (streamGenRef.current !== gen) return;
+              conv = projectHistory(sid, events);
+              setConversation({ ...conv });
+              let maxSeq: number | null = null;
+              for (const e of events) {
+                if (typeof e.seq === 'number' && (maxSeq === null || e.seq > maxSeq)) maxSeq = e.seq;
+              }
+              lastAppliedSeqRef.current = maxSeq;
+              const streamRes = await streamSession(sid, maxSeq ?? -1);
+              if (streamGenRef.current !== gen) return;
+              reconnectPending = false;
+              if (!streamRes.ok || !streamRes.body) throw new Error(`reconnect ${streamRes.status}`);
+              setReconnecting(false);
+              attach(streamRes);
+            } catch (e) {
+              reconnectPending = false;
+              scheduleReconnect(sid, (e as Error).message || 'full rebuild failed');
+            }
+          })();
+        };
+
+        /** 停摆检查（T4）：live 且未终态且超阈值无帧 → 静默断流（后台杀流/
+         *  连接僵死），主动断开走重连。经 stallCheckRef 暴露给心跳与
+         *  visibilitychange（回前台即时触发）。 */
+        const stallCheck = () => {
+          if (streamGenRef.current !== gen) return;
+          if (modeRef.current.kind !== 'live' || terminalSeenRef.current) return;
+          if (Date.now() - lastFrameAtRef.current > RECONNECT_STALL_MS) {
+            sseRef.current?.cancel();
+            scheduleReconnect(liveSidRef.current, 'connection stalled');
+          }
+        };
+        stallCheckRef.current = stallCheck;
+
+        attach(res);
       } catch (e) {
+        streamGenRef.current += 1;
         setMode({ kind: 'idle' });
         setError(`提交失败：${(e as Error).message}`);
       }
@@ -368,11 +631,19 @@ export function useSession() {
   const cancelStream = useCallback(() => {
     const decision = decideCancel(liveSidRef.current);
     if (decision.kind === 'cancel-request') {
+      // 显式取消不触发重连（issue #97）：POST /cancel 后流保持打开，终态帧
+      // run/failed(reason=cancelled) 经流广播驱动 finishLive；若流此间异常
+      // 断开，重连重放只会带回同一终态帧——语义收敛。自愈路径：网络级故障
+      // 会让 SSE 自身 onError 收尾；瞬时失败用户再按一次 Esc 即重试——
+      // POST /cancel 幂等，重复取消无害。
       void cancelSession(decision.sessionId).catch(() => {
         // 取消请求失败不双报：流终态/错误路径是 UI 收尾权威（契约 §3）。
       });
       return;
     }
+    streamGenRef.current += 1; // abort = 订阅清理，旧流的重连/停摆检查全部失效
+    stallCheckRef.current = null;
+    setReconnecting(false);
     sseRef.current?.cancel();
     sseRef.current = null;
     coalescerRef.current = null;
@@ -388,6 +659,9 @@ export function useSession() {
    *  T5（#98）语义修订：切走只是 unsubscribe（detached-run 契约），run 服务端
    *  继续跑到终态——切会话不再等于取消 run；流上残留订阅随 abort 清理。 */
   const selectSession = useCallback((id: string | null) => {
+    streamGenRef.current += 1;
+    stallCheckRef.current = null;
+    setReconnecting(false);
     sseRef.current?.cancel();
     sseRef.current = null;
     coalescerRef.current = null;
@@ -432,6 +706,7 @@ export function useSession() {
     conversation,
     loadingHistory,
     streaming,
+    reconnecting,
     error,
     titlesById,
     recoverState,

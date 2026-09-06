@@ -128,6 +128,15 @@ function pushDelegation(turn: Turn, delegation: Delegation): void {
   turn.activities.push({ kind: 'delegation', child_session_id: delegation.child_session_id });
 }
 
+/** model activity 缺位回填（MODEL_COMPLETED 与 MODEL_DELTA/TEXT_DELTA 共享）：
+ *  turn 还没有任何 model activity 时，把当前 model 段挂进 segments + activities。
+ *  推 turn.model 本体（别名契约：segments[最新 model index] === turn.model）。 */
+function ensureModelActivity(turn: Turn): void {
+  if (turn.activities.some((a) => a.kind === 'model')) return;
+  turn.segments.push(turn.model);
+  turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
+}
+
 /** Apply one event to state, returning new state. Copy-on-write:
  *  顶层浅克隆 + 只深克隆被本事件改写的 turn/tool/数组，未触及部分保持引用稳定
  *  （渲染层 React.memo 的前提，引用契约由专项测试锁定）。
@@ -215,11 +224,14 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
     // （运行时不再发射，词汇保留兼容旧历史/fixture）；TEXT_DELTA = T-contract
     //（#116，后端契约回执 §2）durable 合帧落盘——seq 走既有 seenSeqs 去重门，
     // 重放（projectHistory）天然同构。block_id 恒无（文本按 turn/step 聚合）。
+    // 回填：model/started 是 stream-only 不入历史，重放里 delta 无前驱——
+    // 不回填则 activities 为空，渲染门跳过整个模型块（取消/失败轮次文本消失）。
     case EventType.MODEL_DELTA:
     case EventType.TEXT_DELTA: {
       const step = resolveStep(event, next);
       withTurnAt(next, step, (turn) => {
         touchTurn(turn, event);
+        ensureModelActivity(turn);
         turn.model.text += String(data.delta ?? '');
         turn.model.status = 'streaming';
       });
@@ -232,15 +244,9 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
         // Final content may include consolidated text — prefer it over accumulated delta.
         turn.model.text = String(data.content ?? turn.model.text);
         turn.model.status = 'done';
-        // 后端某些路径（无工具纯对话）只发 model/completed 不发 model/started：
-        // 此时 turn 既无 segment 也无 model activity → Conversation 的
-        // `activities.length > 0` 渲染条件会跳过整个 model 输出块（模型文本丢失）。
-        // 若该 turn 还没有任何 model activity，补一个，让渲染入口存在。
-        const hasModelActivity = turn.activities.some((a) => a.kind === 'model');
-        if (!hasModelActivity) {
-          turn.segments.push(turn.model);
-          turn.activities.push({ kind: 'model', index: turn.segments.length - 1 });
-        }
+        // 后端某些路径（无工具纯对话、重放的取消/失败轮次）没有 model/started
+        // 前驱——回填 model activity，让 Conversation 的渲染入口存在（文本不丢）。
+        ensureModelActivity(turn);
       });
       // Run-level observability（后端 Gap 1）：可选字段，缺失/畸形不伪造。
       if (typeof data.model === 'string' && data.model) next.model = data.model;
@@ -386,8 +392,11 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
       break;
 
     case EventType.RUN_FAILED:
-      // data.reason === 'cancelled'（客户端断连，da394a9 批语义）≠ 真实失败——
-      // Run Pulse 走「已取消」通道（runState），turn/tool 仍按失败终态 settle。
+      // 终态 reason 三值（契约回执 §4，detached-run）：'cancelled' = 显式
+      // POST /cancel（用户意图中断，≠ 错误）→ Run Pulse「已取消」；
+      // 'orphaned' = 孤儿回收（零订阅 300s，非用户意图，按失败展示）；
+      // 缺省 = 模型/执行器异常。断连永远不出现在终态原因里（订阅者离开只
+      // unsubscribe）。turn/tool 仍按失败终态 settle。
       next.run_cancelled = data.reason === 'cancelled';
       finalizeRun(next, 'failed', event.time);
       break;
@@ -443,8 +452,11 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
 
     // 会话生命周期事件：不投影到轮次/工具，但识别为已知事件（不进 unknown_events）。
     // Run Pulse 可消费 conversation.events 中的会话事件判断 resumed 等场景。
+    // session/forked 是 Phase 14（ADR-0017）新词汇——随 backend-owned event-types
+    // 入树，先识别（不伪造任何 fork 语义），钻取/分叉视图属后续票。
     case EventType.SESSION_STARTED:
     case EventType.SESSION_RESUMED:
+    case EventType.SESSION_FORKED:
       break;
 
     // model/failed 是真实终态（df4f7d8 §1.3 收紧：零产出模型响应以

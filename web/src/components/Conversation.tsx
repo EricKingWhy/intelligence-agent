@@ -19,7 +19,7 @@ import type { TraceDensity } from '../lib/density';
 import type { Disclosure } from '../lib/disclosure';
 import { nextLevel, toolEventKey } from '../lib/disclosure';
 import { KIND_ICON, KIND_LABEL, modelKind, type RuntimeEventKind } from '../lib/eventKind';
-import type { ConversationState, ModelSegment, ToolCall, Turn } from '../types';
+import type { ConversationState, ToolCall, Turn } from '../types';
 import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';

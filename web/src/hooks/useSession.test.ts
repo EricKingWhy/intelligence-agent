@@ -10,7 +10,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, SessionMode } from '../types';
-import { createCommitCoalescer, decideCancel, shouldApplyRecoverResult, shouldApplyStreamFrame } from './useSession';
+import { createCommitCoalescer, decideCancel, decideStreamEnd, isSeqGap, isUnknownModelError, MAX_RECONNECT_ATTEMPTS, parseTruncated, reconnectDelayMs, shouldApplyRecoverResult, shouldApplyStreamFrame, UNKNOWN_MODEL_ERROR_TEXT } from './useSession';
 
 const ev = (type: string, session_id: string | null): AgentEvent => ({
   type,
@@ -238,5 +238,56 @@ describe('decideCancel — 显式取消走 POST /cancel 还是传输层清理（
 
   it('空串 sid 视同未知（liveSidRef 只写真值，防御不留空串）', () => {
     expect(decideCancel('')).toEqual({ kind: 'abort-transport' });
+  });
+});
+
+// ── T4（#97）：重连/resume 契约（后端契约回执 §3，spec 02 §10 / 03 §20）──
+describe('T4 — 重连契约纯函数（#97）', () => {
+  it('decideStreamEnd：终态已见 → migrate（正常收尾迁移）', () => {
+    expect(decideStreamEnd({ terminalSeen: true, sidKnown: true, attempts: 0 })).toBe('migrate');
+    expect(decideStreamEnd({ terminalSeen: true, sidKnown: false, attempts: 5 })).toBe('migrate');
+  });
+
+  it('decideStreamEnd：未终态 + sid 已知 + 额度内 → reconnect', () => {
+    expect(decideStreamEnd({ terminalSeen: false, sidKnown: true, attempts: 0 })).toBe('reconnect');
+    expect(decideStreamEnd({ terminalSeen: false, sidKnown: true, attempts: MAX_RECONNECT_ATTEMPTS - 1 })).toBe('reconnect');
+  });
+
+  it('decideStreamEnd：sid 未知（首帧未确认无从续传）或额度耗尽 → give-up', () => {
+    expect(decideStreamEnd({ terminalSeen: false, sidKnown: false, attempts: 0 })).toBe('give-up');
+    expect(decideStreamEnd({ terminalSeen: false, sidKnown: true, attempts: MAX_RECONNECT_ATTEMPTS })).toBe('give-up');
+  });
+
+  it('isSeqGap：null seq（ephemeral）与无基线永不构成 gap；跳号构成，连续/回跳不构成', () => {
+    expect(isSeqGap(null, 5)).toBe(false);
+    expect(isSeqGap(5, null)).toBe(false);
+    expect(isSeqGap(5, 6)).toBe(false);
+    expect(isSeqGap(5, 7)).toBe(true);
+    expect(isSeqGap(5, 4)).toBe(false);
+  });
+
+  it('parseTruncated：合法 latest_seq 提取；畸形/缺失/非有限数 → null（按普通断连路径）', () => {
+    expect(parseTruncated({ after_seq: 3, latest_seq: 1042 })).toEqual({ latestSeq: 1042 });
+    expect(parseTruncated({})).toBeNull();
+    expect(parseTruncated({ latest_seq: 'x' })).toBeNull();
+    expect(parseTruncated({ latest_seq: Number.POSITIVE_INFINITY })).toBeNull();
+  });
+
+  it('reconnectDelayMs：500ms 起步指数 ×2，封顶 4s', () => {
+    expect(reconnectDelayMs(1)).toBe(500);
+    expect(reconnectDelayMs(2)).toBe(1000);
+    expect(reconnectDelayMs(3)).toBe(2000);
+    expect(reconnectDelayMs(9)).toBe(4000);
+  });
+});
+
+describe('isUnknownModelError — 422 具名判定（#103，消魔法子串）', () => {
+  it('仅精确匹配未知模型专项错误', () => {
+    expect(isUnknownModelError(UNKNOWN_MODEL_ERROR_TEXT)).toBe(true);
+    expect(isUnknownModelError('模型不可用（422）：请从模型选择器重新选择 ')).toBe(false);
+    expect(isUnknownModelError('Start failed: 422')).toBe(false);
+    expect(isUnknownModelError('加载会话列表失败：422')).toBe(false);
+    expect(isUnknownModelError(null)).toBe(false);
+    expect(isUnknownModelError(undefined)).toBe(false);
   });
 });

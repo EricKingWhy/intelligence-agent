@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright artifacts（T8 #101）
+test-results
+playwright-report

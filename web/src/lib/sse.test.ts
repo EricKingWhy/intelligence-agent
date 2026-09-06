@@ -107,3 +107,49 @@ describe('consumeSSE', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// ── T4（#97）：cancel 必须真正中断消费（重连路径依赖断开旧流）──
+describe('consumeSSE cancel 真实性', () => {
+  it('cancel() 后不再消费后续帧，且不触发 onDone/onError（静默断开）', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+          c.enqueue(encoder.encode('data: {"type":"run/started"}\n\n'));
+        },
+      }),
+      { status: 200 },
+    );
+    const events: AgentEvent[] = [];
+    const errors: unknown[] = [];
+    let doneFired = false;
+    const handle = consumeSSE(
+      response,
+      (e) => events.push(e),
+      () => {
+        doneFired = true;
+      },
+      (err) => errors.push(err),
+    );
+    await Promise.resolve(); // 让首帧被消费
+    handle.cancel();
+    // cancel 后再推帧：消费必须已停止。reader.cancel() 会关闭底层流——
+    // enqueue 抛 "Controller is already closed" 恰是断开生效的旁证。
+    let closed = false;
+    try {
+      controller.enqueue(encoder.encode('data: {"type":"text/delta","data":{"delta":"x"}}\n\n'));
+
+    } catch {
+      closed = true; // 断开生效（流已被 reader.cancel() 关闭）
+    }
+    if (!closed) {
+      await new Promise((r) => setTimeout(r, 20)); // 流未被关闭时给消费循环时间
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events.map((e) => e.type)).toEqual(['run/started']); // 后续帧不被消费
+    expect(errors).toHaveLength(0);
+    expect(doneFired).toBe(false); // 显式断开不冒充自然终结（重连决策依据）
+    handle.cancel(); // 幂等
+  });
+});

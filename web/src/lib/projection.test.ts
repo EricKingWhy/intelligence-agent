@@ -1485,6 +1485,24 @@ describe('T-contract — text/delta 词汇 + envelope block_id（#116，后端�
     expect(summarizeEvent(ev({ type: EventType.TEXT_DELTA, data: { delta: 'abcd' } }))).toBe('+4 字符');
   });
 
+  it('T4 #97 重连重放无重复：live 已应用 [1..3]，从 seq2 重放 [2..4] —— 等价干净应用且日志无重复', () => {
+    const mk = (seq: number, delta: string) =>
+      ev({ type: EventType.TEXT_DELTA, data: { delta }, seq, step_id: 1, time: T });
+    const clean = [ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, seq: 1, step_id: 1, time: T }), mk(2, 'A'), mk(3, 'B'), mk(4, 'C')];
+    // 重连路径：conv 不重置——同一状态继续 applyEvent，重放帧经 seenSeqs 去重
+    let resumed = applyEvent(initConversation('s'), clean[0]);
+    resumed = applyEvent(resumed, clean[1]);
+    resumed = applyEvent(resumed, clean[1]); // 重放重复帧（重连窗口重叠）
+    resumed = applyEvent(resumed, clean[2]);
+    resumed = applyEvent(resumed, clean[3]);
+    expect(resumed.turns[0].model.text).toBe('ABC');
+    expect(resumed.events).toHaveLength(4); // 重复帧整帧不入日志
+    expect([...resumed.seenSeqs].sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+    // 与不重放的干净应用逐块等价
+    const direct = projectHistory('s', clean);
+    expect(resumed.turns[0].model).toEqual(direct.turns[0].model);
+  });
+
   it('legacy 容错：model/delta 与 data.block_id 路径保持可用', () => {
     let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
     s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'old' }, step_id: 1 }));
@@ -1492,5 +1510,22 @@ describe('T-contract — text/delta 词汇 + envelope block_id（#116，后端�
     s = applyEvent(s, ev({ type: 'reasoning/started', data: { source: 'model', block_id: 'legacy' }, seq: 20, step_id: 1 }));
     s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: 'x', source: 'model', block_id: 'legacy' }, seq: 21, step_id: 1 }));
     expect(s.turns[0].reasoningById!['legacy'].text).toBe('x');
+  });
+
+  it('取消轮次重放：text/delta 已落盘但无 model/completed——文本保留且可渲染', () => {
+    // T5 #98 使 run/failed(reason=cancelled) → onDone → viewing → projectHistory
+    // 成为一级行为：model/started 是 stream-only 不入历史，delta 分支必须回填
+    // model activity——否则 activities 为空，Conversation 渲染门跳过整个模型块。
+    const events = [
+      ev({ type: EventType.SESSION_STARTED, seq: 1, time: T }),
+      ev({ type: EventType.RUN_STARTED, seq: 2, time: T }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, seq: 3, step_id: 1, time: T }),
+      ev({ type: EventType.TEXT_DELTA, data: { delta: '部分回答' }, seq: 4, step_id: 1, time: T }),
+      ev({ type: EventType.RUN_FAILED, data: { reason: 'cancelled' }, seq: 5, time: T }),
+    ];
+    const s = projectHistory('s', events);
+    expect(s.turns[0].model.text).toBe('部分回答');
+    expect(s.turns[0].activities.some((a) => a.kind === 'model')).toBe(true);
+    expect(s.run_cancelled).toBe(true);
   });
 });

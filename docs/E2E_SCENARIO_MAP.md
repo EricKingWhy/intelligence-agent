@@ -1,0 +1,44 @@
+# E2E 场景↔测试映射（T8 #101）
+
+> 车道：`cd web && pnpm exec playwright test`（`npm run test:e2e`）。Chromium 单引擎
+> （grill Q5 批准范围），1280/1920 两档宽度 project。webServer = vite dev（5173），
+> API 由 `e2e/fixtures.ts` 的 page.route 拦截（mock SSE，帧形状 =
+> docs/BACKEND_CONTRACT_STREAMING_UI.md）——**核心矩阵不依赖真后端**。
+
+## 车道分层（spec 03 §22 尾注）
+
+| 车道 | 内容 | 触发 |
+| --- | --- | --- |
+| vitest 默认 | 纯函数/投影/SSR 契约（351/351） | 每次提交；e2e/** 已排除 |
+| Playwright 本骨架 | mock SSE 终态矩阵（12/12） | `pnpm exec playwright test`（手动/夜间） |
+| 联调车道 | 真模型、鉴权、流式中间态、长稳 | 后端集成后（spec 03 §21 完整矩阵） |
+
+## 场景映射（spec 01 §22 A-I）
+
+| 场景 | 文件 | 覆盖 | 备注 |
+| --- | --- | --- | --- |
+| A reasoning 流 | `e2e/a-reasoning.spec.ts` | 思考块聚合（envelope block_id）、完成态、最终文本唯一（无重复块） | 零伪造：fixture 有思考才有块 |
+| C 工具输出 | `e2e/c-tool-output.spec.ts` | tool/call 先于执行落盘、终态由 tool/result 校准、折叠行渲染 | 流式分块中间态见下 |
+| E 断连重连 | `e2e/e-reconnect.spec.ts` | 流异常收尾→断线条（800ms 阈值）→`after_seq=lastApplied` 续传（重放零重叠）→终态清条；重放无重复 | T4 #97 契约 §3 |
+| F 历史重放 | `e2e/f-history.spec.ts` | 会话行首条 user/message 标题 → projectHistory 重建 | 不变量 #22 同一管线 |
+| H 密度四档 | `e2e/h-density.spec.ts` | data-density 即时生效 + localStorage（ahi.traceDensity）刷新持久 | 冻结决策 |
+| I 键盘可达 | `e2e/i-keyboard.spec.ts` | Ctrl+K palette 唤起/焦点/Esc 关闭；Composer Ctrl+Enter 提交 | |
+| B/D/G | 未建 | B（多轮上下文）/D（compact 降档）/G（长会话性能）——真模型/长跑场景 | 联调车道 |
+
+## 骨架车道已知边界（联调车道补）
+
+1. **帧一次性到达**：`route.fulfill` 字符串形态在 1.63 不保证逐帧流式（实测
+   `response: new Response(ReadableStream)` 帧未送达）——投影瞬时完成，只断言
+   终态。caret / reasoning 呼吸图标 / ReadLine 读视口 / 工具输出跟随浮标 /
+   stdout/stderr 分色块（终态被 result 校准替换，T3 设计）等流式中间态，
+   由联调车道（真后端）或本地 SSE fixture server 覆盖。
+2. **Balanced 档工具卡是折叠行**（`.act-node`，name+args 摘要+状态 chip）；
+   `.tool-card-body` 只在展开/detailed 档存在。
+3. **终态后 viewing 迁移会重读 `GET /events`**（#22 后台对账）——mock 必须提供
+   `events` fixture，否则历史重建清空现场（f/e/i 场景的教训）。
+
+## 环境注意
+
+- 本仓 node_modules 为 **pnpm 布局**：装依赖用 `pnpm add`，npm 会报
+  `edgesOut` 错误；跑 playwright 用 `pnpm exec playwright test`（npx 会命中
+  全局缓存里的旧版）。
