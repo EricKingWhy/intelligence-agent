@@ -146,6 +146,10 @@ export interface Turn {
   /** Phase 12 白盒透明（ADR-0014 #69）：tool/failure-guard 落所在轮——
    *  soft 渲染为系统提示条，hard 渲染为终止标记。 */
   notices?: RunFailureGuard[];
+  /** Phase 13 Multi-Agent（ADR-0015）：agent/delegation-started 创建节点、
+   *  finished 按 child_session_id 回填——turn 级编排事实（与 notices 机制对齐，
+   *  ConversationState 不加全局字段）。 */
+  delegations?: Delegation[];
   /** Harness 注入纠正消息的来源标记（user/message data.injected_by）——
    *  非真人输入，渲染为系统提示条而非用户气泡。 */
   injected_by?: string;
@@ -159,10 +163,30 @@ export interface RunFailureGuard {
   consecutive_failures: number;
 }
 
+/** Multi-Agent 委派（agent/delegation-started / finished，Phase 13 ADR-0015）。
+ *  父流白盒编排事实：child 的完整多轮历史在 child 自己的 session（后端 Gate 4
+ *  不变量），父流只有 start/finish 两个锚点。阻塞语义：finished 返回即 child
+ *  已终态。status 复用 DSH 四态视觉语言——running → completed/failed；父 run
+ *  中断时未回填的委派 settle 为 stopped（中断 ≠ 错误，与 tool 同语义域）。 */
+export interface Delegation {
+  /** 子代理 profile 名：'research_review' | 'coding'（V1 内置）。 */
+  target: string;
+  /** 给 child 的完整任务描述（自洽，父对话不含在内）。 */
+  task: string;
+  /** child 独立会话 id——钻取主键，UI 可见可复制。 */
+  child_session_id: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  /** 结构化结果的文字摘要（可能带后端 #86 溢出截断指针后缀）。 */
+  summary?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
 /** One entry of a turn's execution chain, in true event order (Trace Ladder). */
 export type TurnActivity =
   | { kind: 'model'; /** Index into turn.segments. */ index: number }
-  | { kind: 'tool'; tool_call_id: string };
+  | { kind: 'tool'; tool_call_id: string }
+  | { kind: 'delegation'; child_session_id: string };
 
 /** Context compaction record (context/compacted event, Phase 5 spec 06).
  *  Run-level metadata — the Inspector Context panel surfaces these. */
