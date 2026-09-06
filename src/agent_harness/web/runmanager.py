@@ -105,6 +105,15 @@ class ManagedRun:
             with contextlib.suppress(asyncio.QueueFull):
                 sub.queue.put_nowait(_DONE)
 
+    @property
+    def last_enqueued_seq(self) -> int:
+        """已入队的最大 durable seq（重连续传的一致性游标，ADR-0016 §2.3）。
+
+        订阅者注册【后】读取：append 落盘先于 listener 入队，seq ≤ 本值的
+        durable 事件此刻必然已在磁盘上——重放读盘 + 队列跳过 seq ≤ 本值，
+        与 live 流无缝拼合、零重复。"""
+        return self._last_enqueued_seq
+
     # ── 内部 ──
 
     def _fanout(self, event: AgentEvent) -> None:
