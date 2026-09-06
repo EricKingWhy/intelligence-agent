@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, deriveChain, deriveSessionTitle, initConversation, projectHistory, summarizeEvent } from './projection';
+import { applyEvent, deriveChain, deriveSessionTitle, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -997,5 +997,135 @@ describe('Phase 12 — failure-guard / fallback 投影', () => {
       type: EventType.MODEL_FALLBACK,
       data: { from_model: 'qwen-a', to_model: 'qwen-b', reason: 'ModelStallError' },
     }))).toBe('qwen-a → qwen-b · ModelStallError');
+  });
+});
+
+describe('Phase 13 — delegation 投影（ADR-0015）', () => {
+  const started = (child: string, target = 'research_review', step = 1) => ev({
+    type: EventType.AGENT_DELEGATION_STARTED,
+    data: { target, task: `为 ${target} 准备任务`, child_session_id: child },
+    step_id: step,
+  });
+  const finished = (child: string, status: 'completed' | 'failed', summary: string, step = 1) => ev({
+    type: EventType.AGENT_DELEGATION_FINISHED,
+    data: { target: 'research_review', child_session_id: child, status, summary },
+    step_id: step,
+  });
+
+  it('STARTED → turn.delegations 建节点 running + activities 追加编排项（true event order）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, started('child-1'));
+    expect(s.turns[0].delegations).toEqual([
+      {
+        target: 'research_review',
+        task: '为 research_review 准备任务',
+        child_session_id: 'child-1',
+        status: 'running',
+        started_at: expect.any(String),
+      },
+    ]);
+    expect(s.turns[0].activities).toEqual([
+      { kind: 'model', index: 0 },
+      { kind: 'delegation', child_session_id: 'child-1' },
+    ]);
+    expect(s.unknown_events).toHaveLength(0);
+    // Trace Ladder 视图：deriveChain 吐出编排节点（真事件序）
+    const chain = deriveChain(s.turns[0]);
+    expect(chain[1]).toEqual({ kind: 'delegation', delegation: s.turns[0].delegations![0] });
+  });
+
+  it('FINISHED completed → 回填 status/summary/completed_at；failed → failed', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, started('child-1'));
+    s = applyEvent(s, finished('child-1', 'completed', '调研完成：3 篇核心文献'));
+    expect(s.turns[0].delegations![0].status).toBe('completed');
+    expect(s.turns[0].delegations![0].summary).toBe('调研完成：3 篇核心文献');
+    expect(s.turns[0].delegations![0].completed_at).toEqual(expect.any(String));
+    s = applyEvent(s, started('child-2', 'coding'));
+    s = applyEvent(s, finished('child-2', 'failed', '子代理执行出错'));
+    expect(s.turns[0].delegations![1].status).toBe('failed');
+  });
+
+  it('并行双委派两对事件（完成顺序落盘）→ 按 child_session_id 各自回填，顺序无关', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, started('child-a', 'research_review'));
+    s = applyEvent(s, started('child-b', 'coding'));
+    s = applyEvent(s, finished('child-b', 'completed', '编码完成'));
+    s = applyEvent(s, finished('child-a', 'failed', '调研超限'));
+    const ds = s.turns[0].delegations!;
+    expect(ds).toHaveLength(2);
+    expect(ds.find((d) => d.child_session_id === 'child-a')).toMatchObject({
+      status: 'failed',
+      target: 'research_review',
+    });
+    expect(ds.find((d) => d.child_session_id === 'child-b')).toMatchObject({
+      status: 'completed',
+      target: 'coding',
+    });
+  });
+
+  it('重复 STARTED（重放）→ 幂等不重复建节点', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, started('child-1'));
+    s = applyEvent(s, started('child-1'));
+    expect(s.turns[0].delegations).toHaveLength(1);
+    expect(s.turns[0].activities.filter((a) => a.kind === 'delegation')).toHaveLength(1);
+  });
+
+  it('FINISHED 先于 STARTED（乱序持久化防御）→ 从 finish 真值建终态节点，不虚构 task', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, finished('child-1', 'completed', '直接到达的结果'));
+    const d = s.turns[0].delegations![0];
+    expect(d.status).toBe('completed');
+    expect(d.summary).toBe('直接到达的结果');
+    expect(d.task).toBe('');
+    expect(d.started_at).toBeUndefined();
+  });
+
+  it('run 结束时仍在 running 的委派 → stopped（中断 ≠ 错误，与 tool 同语义域）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, started('child-1'));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED }));
+    expect(s.turns[0].delegations![0].status).toBe('stopped');
+  });
+
+  it('child_session_id 缺失 → 不建节点（不虚构身份），事件仍在 events 日志', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.AGENT_DELEGATION_STARTED,
+      data: { target: 'coding', task: 't' },
+      step_id: 1,
+    }));
+    expect(s.turns).toHaveLength(0);
+    expect(s.events).toHaveLength(1);
+    expect(s.unknown_events).toHaveLength(0);
+  });
+
+  it('summary 溢出指针后缀（后端 #86 冻结契约）→ hasSummaryOverflow 识别，summary 保真不剥离', () => {
+    const overflowed = `${'x'.repeat(8192)} [summary 超限已截断至 8192 字符；完整输出见 child session child-1]`;
+    expect(hasSummaryOverflow(overflowed)).toBe(true);
+    expect(hasSummaryOverflow('正常长度的结果摘要')).toBe(false);
+    let s = applyEvent(initConversation('s'), started('child-1'));
+    s = applyEvent(s, finished('child-1', 'completed', overflowed));
+    expect(s.turns[0].delegations![0].summary).toBe(overflowed);
+  });
+
+  it('summarizeEvent：started 行 `委派 → target`；finished 行 `target 完成/失败 · 摘要`', () => {
+    expect(summarizeEvent(started('child-1', 'coding'))).toBe('委派 → coding');
+    expect(summarizeEvent(finished('child-1', 'completed', '三篇文献综述'))).toBe(
+      'research_review 完成 · 三篇文献综述',
+    );
+    expect(summarizeEvent(finished('child-1', 'failed', ''))).toBe('research_review 失败');
+  });
+
+  it('copy-on-write：委派回填只克隆宿主 turn；同会话其它 turn 引用不变', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, started('child-1'));
+    s = applyEvent(s, ev({ type: EventType.MODEL_STARTED, step_id: 2 }));
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, data: { content: '下一轮', step: 2 }, step_id: 2 }));
+    const turn1Before = s.turns[0];
+    const turn2Before = s.turns[1];
+    s = applyEvent(s, finished('child-1', 'completed', 'done'));
+    expect(s.turns[0]).not.toBe(turn1Before);
+    expect(s.turns[1]).toBe(turn2Before);
   });
 });

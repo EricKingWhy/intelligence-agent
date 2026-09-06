@@ -4,9 +4,10 @@
  * 语义 kind，驱动语义图标 + 类型标签（ZCode 式"动作语言"）。纯函数、
  * view over events——events 仍是唯一事实源（不变量 #22），这里不持有状态。
  *
- * 协议边界：不新增后端 EventType。skill / subagent / todo 当前后端无对应
- * SessionEvent，kind 定义存在（renderer 注册、映射完备）但推断器永不返回
- * 它们——数据不存在就不渲染，不伪造（ADR-0014 D1 预留策略）。
+ * 协议边界：不新增后端 EventType。skill / todo 当前后端无对应 SessionEvent，
+ * kind 定义存在（renderer 注册、映射完备）但推断器永不返回它们——数据不存在
+ * 就不渲染，不伪造（ADR-0014 D1 预留策略）。subagent 自 Phase 13（ADR-0015）
+ * 起有真实事件承载：agent/delegation-started/finished 与 delegate 工具调用。
  */
 
 import {
@@ -36,18 +37,21 @@ export type RuntimeEventKind =
   | 'tool'
   /** 语义叠加态：任何 kind 的失败工具（错误摘要行 + 状态色，kind 不变） */
   | 'error'
-  // ── 以下三类后端当前无事件承载——注册位，推断器永不返回（ADR-0014 D1）──
-  | 'skill'
+  // ── 编排/委派类（Phase 13 ADR-0015：agent/delegation-* 与 delegate 工具）──
   | 'subagent'
+  // ── 以下两类后端当前无事件承载——注册位，推断器永不返回（ADR-0014 D1）──
+  | 'skill'
   | 'todo';
 
 /** 工具名 → kind（PRD §10.2 映射 + 现有 toolShapes 的识别逻辑）。
- * 识别顺序即优先级：MCP 前缀最先（mcp__ 名可能撞保留字），随后内置语义组。 */
+ * 识别顺序即优先级：MCP 前缀最先（mcp__ 名可能撞保留字），随后内置语义组。
+ * delegate 是 Multi-Agent 委派工具调用（Phase 13）——归编排/委派类。 */
 export function toolKind(name: string): RuntimeEventKind {
   if (name.startsWith('mcp__')) return 'mcp';
   if (name === 'bash') return 'terminal';
   if (name === 'read' || name === 'grep' || name === 'glob') return 'search';
   if (name === 'edit' || name === 'write' || name === 'apply_patch') return 'write';
+  if (name === 'delegate') return 'subagent';
   return 'tool';
 }
 
@@ -110,15 +114,20 @@ export function hasIconRow(kind: RuntimeEventKind): boolean {
 
 /** Inspector 事件 → 中间主区定位 key。
  *  工具域事件精确到工具行（复用 disclosure.toolEventKey——同一把 key 同时驱动
- *  L 级 override 与联动定位）；其余事件定位到轮次容器（step:{step_id}）——
- *  模型段在轮内无稳定反推索引，轮次级是诚实粒度。
- *  无 step 且非工具域（session 级事件等）返回 null（无可定位目标）。 */
+ *  L 级 override 与联动定位）；委派事件精确到委派节点（Phase 13，节点 DOM 挂
+ *  data-stream-key=`delegation:{child_session_id}`）；其余事件定位到轮次容器
+ *  （step:{step_id}）——模型段在轮内无稳定反推索引，轮次级是诚实粒度。
+ *  无 step 且非工具/委派域（session 级事件等）返回 null（无可定位目标）。 */
 export function streamKeyFromEvent(
   data: Record<string, unknown>,
   stepId: number | null,
 ): string | null {
   const toolCallId = data.tool_call_id;
   if (typeof toolCallId === 'string' && toolCallId) return toolEventKey(toolCallId);
+  const childSessionId = data.child_session_id;
+  if (typeof childSessionId === 'string' && childSessionId) {
+    return `delegation:${childSessionId}`;
+  }
   if (stepId !== null) return `step:${stepId}`;
   return null;
 }

@@ -19,18 +19,22 @@ describe('toolKind', () => {
     expect(toolKind('apply_patch')).toBe('write');
   });
 
+  it('Phase 13（ADR-0015）：delegate 委派工具 → 编排/委派类 subagent', () => {
+    expect(toolKind('delegate')).toBe('subagent');
+  });
+
   it('其它工具归 generic tool', () => {
     expect(toolKind('inspect_artifact')).toBe('tool');
     expect(toolKind('load_skill')).toBe('tool');
     expect(toolKind('unknown_future_tool')).toBe('tool');
   });
 
-  it('推断器永不返回预留 kind（skill/subagent/todo 无后端事件）', () => {
+  it('推断器永不返回预留 kind（skill/todo 无后端事件；subagent 自 Phase 13 有真实承载）', () => {
     const names = ['bash', 'read', 'grep', 'glob', 'edit', 'write', 'apply_patch',
       'inspect_artifact', 'load_skill', 'retrieve_knowledge', 'ingest_document',
       'mcp__github__list_issues', 'mcp__chrome__take_screenshot'];
     for (const n of names) {
-      expect(['skill', 'subagent', 'todo']).not.toContain(toolKind(n));
+      expect(['skill', 'todo']).not.toContain(toolKind(n));
     }
   });
 });
@@ -113,5 +117,14 @@ describe('streamKeyFromEvent — Inspector → 中间主区定位 key', () => {
 
   it('tool_call_id 非字符串（畸形）→ 按 step 回退', () => {
     expect(streamKeyFromEvent({ tool_call_id: 42 }, 7)).toBe('step:7');
+  });
+
+  it('Phase 13 委派事件（带 child_session_id）→ delegation:{child}（精确到委派节点）', () => {
+    expect(streamKeyFromEvent({ child_session_id: 'cs-1' }, 3)).toBe('delegation:cs-1');
+    expect(streamKeyFromEvent({ target: 'coding', child_session_id: 'cs-2' }, null)).toBe('delegation:cs-2');
+  });
+
+  it('tool_call_id 优先于 child_session_id（委派 tool/result 走工具行定位）', () => {
+    expect(streamKeyFromEvent({ tool_call_id: 'tc1', child_session_id: 'cs-1' }, 3)).toBe('tool:tc1');
   });
 });

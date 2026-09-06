@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, ModelSegment, ToolCall, Turn, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, ModelSegment, ToolCall, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
 import { parseArtifactMarker } from './toolShapes';
 
@@ -389,6 +389,69 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       break;
     }
 
+    // Phase 13 Multi-Agent（ADR-0015）：父流白盒委派事件。child 完整历史在
+    // child 自己的 session（后端 Gate 4 不变量），父流只有 start/finish 锚点——
+    // 节点按 child_session_id 键控（并行委派时 start/finish 按完成顺序落盘，
+    // 位置不可假设，只有 child_session_id 是稳定配对键）。
+    case EventType.AGENT_DELEGATION_STARTED: {
+      const child = typeof data.child_session_id === 'string' ? data.child_session_id : '';
+      if (!child) break; // 契约必有 child_session_id；缺失不造节点（事件仍在 events 日志）
+      const step = resolveStep(event, next);
+      withTurnAt(next, step, (turn) => {
+        touchTurn(turn, event);
+        if (turn.delegations?.some((d) => d.child_session_id === child)) return; // 重放幂等
+        turn.delegations = [
+          ...(turn.delegations ?? []),
+          {
+            target: typeof data.target === 'string' ? data.target : '',
+            task: typeof data.task === 'string' ? data.task : '',
+            child_session_id: child,
+            status: 'running',
+            started_at: event.time ?? new Date().toISOString(),
+          },
+        ];
+        turn.activities.push({ kind: 'delegation', child_session_id: child });
+      });
+      break;
+    }
+
+    case EventType.AGENT_DELEGATION_FINISHED: {
+      const child = typeof data.child_session_id === 'string' ? data.child_session_id : '';
+      if (!child) break;
+      // 契约冻结 status ∈ {completed, failed}；与 Phase 12 guard 模板同风格归一。
+      const status: Delegation['status'] = data.status === 'failed' ? 'failed' : 'completed';
+      const summary = typeof data.summary === 'string' && data.summary ? data.summary : undefined;
+      const target = typeof data.target === 'string' ? data.target : '';
+      const step = resolveStep(event, next);
+      withTurnAt(next, step, (turn) => {
+        touchTurn(turn, event);
+        const idx = turn.delegations?.findIndex((d) => d.child_session_id === child) ?? -1;
+        if (idx === -1) {
+          // 防御：finished 先于 started 到达（截断历史/乱序持久化）——从 finish
+          // 真值建终态节点（target/status/summary 事件自带），不虚构 task。
+          turn.delegations = [
+            ...(turn.delegations ?? []),
+            {
+              target,
+              task: '',
+              child_session_id: child,
+              status,
+              summary,
+              completed_at: event.time ?? new Date().toISOString(),
+            },
+          ];
+          turn.activities.push({ kind: 'delegation', child_session_id: child });
+          return;
+        }
+        turn.delegations = (turn.delegations ?? []).map((d, i) =>
+          i === idx
+            ? { ...d, status, summary, completed_at: event.time ?? new Date().toISOString() }
+            : d,
+        );
+      });
+      break;
+    }
+
     // 仅识别为已知事件；失败展示复用既有降级管线。
     case EventType.MODEL_FAILED:
     case EventType.MEMORY_DEGRADED:
@@ -439,7 +502,8 @@ function finalizeRun(state: ConversationState, status: 'completed' | 'failed', t
     const needsTurn = t.status === 'streaming' || t.completed_at === undefined;
     const hasStreamingSeg = t.segments.some((seg) => seg.status === 'streaming');
     const hasRunningTool = t.tools.some((tool) => tool.status === 'running');
-    if (!needsTurn && !hasStreamingSeg && !hasRunningTool) continue;
+    const hasRunningDelegation = t.delegations?.some((d) => d.status === 'running') === true;
+    if (!needsTurn && !hasStreamingSeg && !hasRunningTool && !hasRunningDelegation) continue;
     const turn = cloneTurn(t);
     if (turn.status === 'streaming') turn.status = turnStatus;
     // run 终止后不再有 delta——所有段必须离开 streaming，否则 caret 永闪。
@@ -453,6 +517,13 @@ function finalizeRun(state: ConversationState, status: 'completed' | 'failed', t
     turn.tools = turn.tools.map((tool) =>
       tool.status === 'running' ? { ...tool, status: 'stopped' as const } : tool,
     );
+    // 同一语义域适用于未回填的委派节点：父 run 终止即 child 协作被中断
+    // （阻塞语义下不该发生，发生即 kill/崩溃路径）——stopped，而非 failed。
+    if (turn.delegations?.some((d) => d.status === 'running')) {
+      turn.delegations = turn.delegations.map((d) =>
+        d.status === 'running' ? { ...d, status: 'stopped' as const } : d,
+      );
+    }
     if (turn.completed_at === undefined) {
       turn.completed_at = time ?? new Date().toISOString();
     }
@@ -474,13 +545,18 @@ function touchTurn(turn: Turn, event: AgentEvent): void {
  *  or collapsing; empty/done segments are a rendering concern (Conversation). */
 export type ChainNode =
   | { kind: 'model'; segment: ModelSegment }
-  | { kind: 'tool'; tool: ToolCall };
+  | { kind: 'tool'; tool: ToolCall }
+  | { kind: 'delegation'; delegation: Delegation };
 
 export function deriveChain(turn: Turn): ChainNode[] {
   return turn.activities.flatMap((a): ChainNode[] => {
     if (a.kind === 'model') {
       const segment = turn.segments[a.index];
       return segment ? [{ kind: 'model', segment }] : [];
+    }
+    if (a.kind === 'delegation') {
+      const delegation = turn.delegations?.find((d) => d.child_session_id === a.child_session_id);
+      return delegation ? [{ kind: 'delegation', delegation }] : [];
     }
     const tool = turn.tools.find((t) => t.tool_call_id === a.tool_call_id);
     return tool ? [{ kind: 'tool', tool }] : [];
@@ -582,6 +658,16 @@ export function summarizeEvent(event: AgentEvent): string {
       return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
     case EventType.OPERATION_RECONCILE_REQUIRED:
       return String(d.tool_name ?? '');
+    case EventType.AGENT_DELEGATION_STARTED:
+      // Phase 13（ADR-0015）：`委派 → {target}`——编排节点单行语义；
+      // child_session_id 在节点 UI 可见可复制，单行不塞长 ID。
+      return `委派 → ${typeof d.target === 'string' && d.target ? d.target : '?'}`;
+    case EventType.AGENT_DELEGATION_FINISHED: {
+      const target = typeof d.target === 'string' && d.target ? d.target : '?';
+      const outcome = d.status === 'failed' ? '失败' : '完成';
+      const summary = typeof d.summary === 'string' && d.summary ? ` · ${d.summary.slice(0, 40)}` : '';
+      return `${target} ${outcome}${summary}`;
+    }
     case EventType.TOOL_FAILURE_GUARD:
       // Phase 12（ADR-0014 #69）：`工具 ×次数 熔断 · 级别`——硬熔断即终止标记。
       return `${typeof d.tool_name === 'string' && d.tool_name ? d.tool_name : '?'} ×${
@@ -617,4 +703,16 @@ export function summarizeEvent(event: AgentEvent): string {
     default:
       return `未知事件 · ${JSON.stringify(d).slice(0, 40)}`;
   }
+}
+
+// ── Phase 13 委派 summary 溢出（后端 #86 冻结契约）──
+
+/** 后端 summary 超 8192 字符且未配 overflow store 时，截断并追加指针后缀：
+ *  `[summary 超限已截断至 8192 字符；完整输出见 child session <child_session_id>]`。
+ *  识别用原文片段而非整串——child_session_id 是变量，整串匹配会碎。 */
+export const DELEGATION_SUMMARY_OVERFLOW_MARKER = 'summary 超限已截断';
+
+/** 识别委派 summary 是否携带溢出截断指针后缀（后端 #86）。 */
+export function hasSummaryOverflow(summary: string): boolean {
+  return summary.includes(DELEGATION_SUMMARY_OVERFLOW_MARKER);
 }

@@ -920,6 +920,80 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* ── Phase 13 委派编排节点（DelegationNode，ADR-0015）──
+ * 与工具卡同一 act-node 骨架 + DSH 四态状态列；行下常驻子会话身份行
+ * （可见可复制可跳转）。摘要默认折叠——child 内幕留在子会话视图，
+ * 父流只外显编排事实。 */
+.deleg-node {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  animation: reveal-in var(--dur-in) var(--ease-apple);
+}
+.deleg-row-expandable {
+  cursor: pointer;
+}
+.deleg-child-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  /* 与 .act-error-summary 同一缩进基线：对齐 act-node 内容列（跳过状态列宽） */
+  padding: 0 var(--space-sm) 0 calc(var(--space-sm) + 18px + var(--space-sm));
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  min-width: 0;
+}
+.deleg-child-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+.deleg-child-id {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.deleg-open-btn {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.deleg-open-btn:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.deleg-overflow-chip {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--warning);
+}
+.deleg-summary {
+  margin-left: calc(var(--space-sm) + 18px + var(--space-sm));
+  padding: var(--space-sm) var(--space-md);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
 /* hover Inspect chip（PRD §9.1）：行尾浮现的小动作入口，克制不抢焦点 */
 .act-node-wrap {
   position: relative;

@@ -353,6 +353,7 @@ export default function App() {
             jumpRequest={jumpRequest}
             onPresetTask={onPresetTask}
             onFocusTool={focusTool}
+            onOpenSession={handleSelect}
           />
           <Composer
             streaming={streaming}
