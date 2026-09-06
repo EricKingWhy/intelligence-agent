@@ -19,6 +19,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from agent_harness.multiagent.provider import InProcessSubagentProvider
+from agent_harness.session import run_context_var
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
@@ -47,8 +48,31 @@ class _DelegateArgs(BaseModel):
 class DelegateTool(Tool):
     """委派工具：multiagent capability 贡献的编排入口（可装卸插件）。"""
 
-    def __init__(self, provider: InProcessSubagentProvider) -> None:
+    def __init__(
+        self,
+        provider: InProcessSubagentProvider,
+        *,
+        max_delegations: int = 8,
+    ) -> None:
         self._provider = provider
+        # 预算（ADR-0015 决策 13，用户强调）：按 run 计数，超限 = 明确失败
+        # 回填（模型可读已用/上限并自行收尾），绝不静默截断。
+        self._max_delegations = max_delegations
+        self._run_counts: dict[str, int] = {}
+
+    def _budget_check(self) -> str | None:
+        """超预算返回失败消息；未超则计数 +1 并返回 None。计数按 run 隔离。"""
+        run_id = run_context_var.get() or "__no_run__"
+        used = self._run_counts.get(run_id, 0)
+        if used >= self._max_delegations:
+            return (f"delegation 预算耗尽（已用 {used}/{self._max_delegations}）。"
+                    "请综合已有结果直接收尾，或改变策略，不要再委派。")
+        self._run_counts[run_id] = used + 1
+        # 计数字典防漏式上限（run 数量有界；防御性清理最老条目）
+        if len(self._run_counts) > 64:
+            oldest = next(iter(self._run_counts))
+            self._run_counts.pop(oldest, None)
+        return None
 
     @property
     def name(self) -> str:
@@ -91,6 +115,11 @@ class DelegateTool(Tool):
         )
 
     async def execute(self, args: _DelegateArgs) -> ToolResult:
+        budget_failure = self._budget_check()
+        if budget_failure is not None:
+            return ToolResult.failure(
+                message=budget_failure, error_code=ErrorCode.INVALID_ARGUMENT,
+            )
         try:
             result = await self._provider.run(
                 target=args.target, task=args.task, constraints=args.constraints,

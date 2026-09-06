@@ -357,6 +357,10 @@ class AgentRuntime:
         # 同错熔断护栏：每 run 一个新实例（注入或新建）；计数不跨 run 累积。
         guard = self._failure_guard or RepeatedToolFailureGuard()
         guard.reset()
+        # run 归因 token：嵌套运行（delegate→child 在同一父任务里跑）共享父
+        # 上下文——child 的 set 会覆盖父值且不会随 child 完成消失，必须显式
+        # 恢复，否则父后续的 Ledger/事件归因错挂到 child 的 run_id（#87 实锤）。
+        run_context_token = None
         # Model Fallback + 卡流看门狗 + 并发闸：每 run 一个新 coordinator
         # （切换状态不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator
         # 退化为透传（异常原样上抛），但看门狗/并发闸对所有 run 生效。
@@ -373,9 +377,9 @@ class AgentRuntime:
             run_id = session.begin_run(agent_id=self._agent_id)
             terminal.begin_run(run_id)
             # run 归因上下文（R3-7）：memory/context provider 等低层模块在
-            # 事件降级时需要 run_id 对账，经 contextvar 传递（task 作用域，
-            # 随请求 task 结束自然消亡），不改变 Provider 协议签名。
-            run_context_var.set(run_id)
+            # 事件降级时需要 run_id 对账，经 contextvar 传递。嵌套运行的恢复
+            # 由外层 finally 兜底（token 捕获于下）。
+            run_context_token = run_context_var.set(run_id)
             # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
             run_started = next(e for e in session.since(memory_event_start) if e.type == RUN_STARTED)
             yield to_agent_event(run_started)
@@ -803,6 +807,18 @@ class AgentRuntime:
                 AgentRunResult(status=STATUS_FAILED, final_text="", steps=steps),
             )
             return
+        finally:
+            # 嵌套运行恢复：child 的 run 归因在 child _drive 结束时还原为父值
+            # （或未设），父后续操作不再错挂 child 的 run_id。close/取消路径
+            # 同样收口（reset 为同步操作，生成器关闭中安全）。
+            if run_context_token is not None:
+                try:
+                    run_context_var.reset(run_context_token)
+                except ValueError:
+                    # SSE 消费方可能在【另一上下文】aclose 本生成器（断连路径）
+                    # ——token 无法跨上下文 reset。该上下文随任务消亡，无需恢复；
+                    # 正常路径（同任务）的 reset 一定成功。
+                    pass
 
     def _new_coordinator(self) -> ModelFallbackCoordinator:
         """per-run coordinator 工厂（_drive 每调一次；测试可直取验证接线）。"""

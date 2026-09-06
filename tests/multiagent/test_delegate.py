@@ -163,3 +163,63 @@ class TestDelegateTool:
         assert tool.name == "delegate"
         assert tool.permission == ToolPermission.WORKSPACE_WRITE
         assert isinstance(tool.reconcile_hint, ReconcileHint)
+
+
+class TestDelegationBudget:
+    """#87：max_delegations 按 run 计数；超预算 = 明确失败（不静默截断）。"""
+
+    def _budget_tool(self, tmp_path: Path, max_delegations: int) -> tuple[DelegateTool, InProcessSubagentProvider]:
+        from agent_harness.session import run_context_var
+
+        child_model = ScriptedModel([
+            AIMessage(content="child 完成") for _ in range(10)
+        ])
+        tool, _, _, provider = _activated_tool(tmp_path, child_model=child_model)
+        tool = DelegateTool(provider, max_delegations=max_delegations)
+        token = run_context_var.set("run-budget-1")
+        self._token = token
+        return tool, provider
+
+    @pytest.mark.asyncio
+    async def test_over_budget_fails_explicitly(self, tmp_path):
+        tool, _ = self._budget_tool(tmp_path, max_delegations=2)
+
+        r1 = await tool.execute(_args("coding", "任务一"))
+        r2 = await tool.execute(_args("coding", "任务二"))
+        r3 = await tool.execute(_args("coding", "任务三"))
+
+        assert r1.ok and r2.ok
+        assert not r3.ok
+        assert "预算耗尽" in r3.message
+        assert "2/2" in r3.message, "失败消息必须带已用/上限（模型可决策收尾）"
+
+    @pytest.mark.asyncio
+    async def test_budget_resets_per_run(self, tmp_path, caplog):
+        """计数按 run_id 隔离：不同 run 各自独立预算。"""
+        import logging
+
+        from agent_harness.session import run_context_var
+
+        child_model = ScriptedModel([
+            AIMessage(content="child 完成") for _ in range(10)
+        ])
+        tool, _, _, _ = _activated_tool(tmp_path, child_model=child_model)
+        tool = DelegateTool(tool._provider, max_delegations=1)
+        t1 = run_context_var.set("run-a")
+        try:
+            r1 = await tool.execute(_args("coding", "a"))
+            over = await tool.execute(_args("coding", "a2"))
+        finally:
+            run_context_var.reset(t1)
+        assert r1.ok and not over.ok
+
+        t2 = run_context_var.set("run-b")
+        try:
+            with caplog.at_level(logging.DEBUG, logger="agent_harness.agent"):
+                r2 = await tool.execute(_args("coding", "b"))
+        finally:
+            run_context_var.reset(t2)
+        for rec in caplog.records:
+            if "异常终止" in rec.getMessage():
+                print("DEBUG-ERR:", rec.error, "|", rec.error_type)
+        assert r2.ok, "新 run 预算必须重置"
