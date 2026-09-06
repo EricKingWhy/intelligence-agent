@@ -1,0 +1,1 @@
+{"name": "tool_selection_add", "case_type": "tool_selection", "task": "请计算 1+2 等于多少，使用 add 工具。", "script": [{"content": "", "tool_calls": [{"name": "add", "args": {"first_number": 1, "second_number": 2}, "id": "call_ev_1"}]}, {"content": "1 + 2 = 3"}], "expected": {"tools": ["add"]}, "tags": ["p0"]}
