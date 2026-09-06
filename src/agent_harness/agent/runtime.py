@@ -81,6 +81,14 @@ logger = logging.getLogger("agent_harness.agent")
 #: content 泄漏（冒烟实测 session 7afd328a：流式标记混进最终回答）——含此
 #: 标记的 content 绝不可能是合法模型回答，按模型故障处理（走统一失败兜底，
 #: 决不伪造 run/completed）。用全角 ｜ 保留标记做判据以杜绝误伤正常讨论文本。
+#: 记忆抽取排除的事件类型（ADR-0016 review 修复）：流式增量事实不进
+#: MemoryWriteback——reasoning 是 provider 私有思考（隐私边界），text/tool
+#: 增量与各自的终态事件（model/completed / tool/result）内容重复。
+_MEMORY_EXCLUDED_EVENT_TYPES = frozenset({
+    "reasoning/started", "reasoning/delta", "reasoning/completed",
+    "reasoning/interrupted", "text/delta", "tool/output_delta",
+})
+
 _DSML_MARKUP_MARKER = "<｜DSML｜"
 
 
@@ -905,7 +913,15 @@ class AgentRuntime:
 
     def _write_memories(self, session: Session, start: int) -> None:
         if self._memory_writer is not None:
-            self._memory_writer.submit(session, session.since(start))
+            # 排除流式增量事实（ADR-0016 review 修复）：reasoning/* 是 provider
+            # 思考（02 §15 / PRD §18 隐私硬边界——CoT 不得进记忆存储再回灌
+            # 上下文）；text/delta 与 tool/output_delta 与 model/completed、
+            # tool/result 内容重复，只会挤占抽取器的 50 条事件窗口。
+            self._memory_writer.submit(
+                session,
+                [e for e in session.since(start)
+                 if e.type not in _MEMORY_EXCLUDED_EVENT_TYPES],
+            )
 
     async def _save_checkpoint(
         self,

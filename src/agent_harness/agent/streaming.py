@@ -76,6 +76,9 @@ class BlockStreamer:
                 REASONING_STARTED, {"source": "model"},
                 run_id=self._run_id, step_id=step, block_id=self._rsn_block,
             ))
+        if not self._rsn_buf:
+            # 窗口锚点随缓冲重建（review 回归：只随开块设置会让首个窗口过期
+            # 后的每次 offer 都"即时过期"，长块退化为逐 chunk 落盘，S19）
             self._rsn_since = self._clock()
         self._rsn_buf += text
         events.extend(self._flush_if_due(self._rsn_buf, self._rsn_since,

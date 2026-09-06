@@ -387,3 +387,41 @@ _Avoid_: global token budget, unlimited delegation
 **Spawn vs Fork**:
 spawn = 全新 child context/session（V1）；fork = 从父 Session 事件前缀 seed（Phase 14 fork boundary）。V1 只有 spawn，SubagentProvider seam 为 fork/remote 留位。
 _Avoid_: clone, copy session
+
+## Streaming UI 层（S-UI，ADR-0016）
+
+**Detached Run**:
+run 生命周期与 HTTP 请求生命周期的解耦态：`POST /api/sessions` 只是把 `run_stream` 驱动为独立 asyncio.Task 并返回一个订阅者，断连（SSE generator 被取消）只做 unsubscribe，**绝不取消 run**。这是对 Phase 9「断连即取消」语义的有意修订（ADR-0016 §2.1）。run 的终止只有两个外部路径：显式 `POST /cancel` 与孤儿回收。
+_Avoid_: background run, fire-and-forget, async detach
+
+**RunManager**:
+web 层的 run 生命周期托管（`web/runmanager.py`）：per-session detached task + 订阅者扇出 + **seq 幂等合并**（session listener 通道与 `_drive` 镜像通道按 durable seq 去重汇流，durable 事实唯一来源是 `Session.append`）+ 有界订阅队列（2000 帧，满时丢最旧保最新——seq gap 让客户端重连自愈）。拥有 `memory_session_var` 的绑定权。
+_Avoid_: run registry, task manager, event bus
+
+**合帧（Coalescing）**:
+思考/文本/工具输出的 chunk 按窗口（30ms）或尺寸上限（4KB）或生命周期边界合并成**一条 durable 事件**再落盘 + 发帧（S19：禁逐 token 行；S20：绝不扣数据做打字机）。一条合帧 = 一次 `Session.append` = 一个 seq = 一帧 SSE，live 与重放完全同源。实现：`agent/streaming.py BlockStreamer`（思考/文本）与 `tooling/output_stream.py ToolOutputStream`（工具输出，线程安全 sink）。
+_Avoid_: batching, debounce, token buffering, typewriter
+
+**block_id**:
+流式块的聚合键（SessionEvent/AgentEvent/SSE 帧信封字段，ADR-0016 §3.2）：同一段思考的 delta 共享同一 `block_id`（`rsn-<step>-<序号>`），文本转场/工具转场后新思考段取新 id（02 §8.1 块不变量）。文本与工具输出不用它：文本按既有 turn/step 聚合，工具输出按 `tool_call_id` 聚合。
+_Avoid_: chunk id, segment id, group key
+
+**Reasoning 事件族**:
+provider 真实思考的 durable 事件（`reasoning/started|delta|completed|interrupted`，data 带 `source`）。**零伪造**：模型不吐思考整族不出现；是否支持思考不按模型名判断（事件驱动）。接出经 `ReasoningChatOpenAI`（langchain-openai 基类丢弃第三方 `reasoning_content`，子类抬进 additional_kwargs）。`interrupted` 保留已落盘部分内容（16.4）；`source:"agent"` 词汇预留给 agent 进度叙述。
+_Avoid_: thinking stream, CoT events, hidden thought
+
+**text/delta**:
+合帧文本增量（durable），**唯一的文本流通道**——`model/delta` 词汇保留 stream-only 但运行时不再发射（Phase 14 并行约定 event.py 只做加法，且对齐规格 02 §7.4 命名）。拼接 == `model/completed.data.content`。
+_Avoid_: model delta, token delta, partial message
+
+**after_seq 重连**:
+`GET /api/sessions/{id}/stream?after_seq=N` 的 cursor 续传协议：重放 durable 事实（seq>N）→ 接上在途广播（先订阅后取游标，无缝无重复）→ 终态 run 重放即收尾。backlog 超 1000 发 `stream/truncated` 控制帧（无 seq、非运行事实），客户端走 `GET /events` 全量重建后再连。前端幂等投影键 = seq。
+_Avoid_: Last-Event-ID, resume token, sync endpoint
+
+**孤儿回收（Orphan Reclaim）**:
+detached run 的零订阅者连续超过 `RUN_DISCONNECT_GRACE_SECONDS`（默认 300s）→ RunManager 取消 run task，取消臂收尾 `run/failed(reason=orphaned)`——与显式取消（reason=cancelled）、异常臂（无 reason）构成 02 §17 的错误语义分型。
+_Avoid_: gc, janitor, timeout kill
+
+**Model Catalog**:
+`AGENT_MODELS`（JSON 数组）定义的会话级可选模型集（ADR-0016 §5）：`GET /api/models` 列出（默认链 + 条目，零密钥字段），`POST /api/sessions` 的 `model` 参数按 name 选择；条目 api_key/base_url/temperature 缺省回落全局配置。**fallback 链不受选择影响**（ADR-0014：catalog 只替换 primary）。思考能力不进元数据（事件驱动）。
+_Avoid_: model routing table, model registry, provider pool
