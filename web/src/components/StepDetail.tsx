@@ -21,16 +21,19 @@ import {
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
-import { summarizeEvent } from '../lib/projection';
+import { summarizeEvent, projectHistory } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
+import { useChildConversation } from '../hooks/useChildConversation';
 import { CopyButton } from './CopyButton';
 import { JsonTree } from './JsonTree';
 
-/** Inspector focus: Run-level overview or a drilled-in event. */
+/** Inspector focus: Run-level overview, a drilled-in event, or a child session
+ *  (Phase 13 委派钻取，v2 PRD §10.5 "delegation start ↔ child run" 配对）。 */
 export type InspectorFocus =
   | { kind: 'run' }
   | { kind: 'tool'; tool: ToolCall }
-  | { kind: 'event'; event: AgentEvent };
+  | { kind: 'event'; event: AgentEvent }
+  | { kind: 'child'; childSessionId: string; target: string };
 
 type Tab = 'timeline' | 'chat' | 'changes' | 'terminal' | 'artifacts';
 
@@ -111,6 +114,27 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
   const tools = conversation.turns.flatMap((t) => t.tools);
   const pulse = deriveRunPulse(conversation, streaming);
 
+  // Phase 13 委派钻取（v2 PRD §10.5 "delegation start ↔ child run" 配对）：
+  // child 会话在 Inspector 内原位展开——父会话上下文不丢，「返回 Run」一键回。
+  if (focus.kind === 'child') {
+    return (
+      <aside className="step-detail">
+        <div className="detail-header">
+          <button className="child-back-btn" onClick={onFocusRun} title="返回父会话 Run 视图">
+            <ArrowLeft size={14} /> Run
+          </button>
+          <span className="panel-label">子会话 · {focus.target || '?'}</span>
+          <span className="detail-run-id mono num" title={`child session ${focus.childSessionId}`}>
+            {focus.childSessionId.slice(0, 8)}
+          </span>
+        </div>
+        <div className="detail-body">
+          <ChildSessionView childSessionId={focus.childSessionId} />
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <aside className="step-detail">
       <div className="detail-header">
@@ -167,11 +191,22 @@ function ChatTab({
 }: {
   conversation: ConversationState;
   tools: ToolCall[];
-  onFocusTool: (tool: ToolCall) => void;
+  /** 工具行点击回调——子会话视图等只读场景缺省：行渲染为静态行（假按钮≠诚实）。 */
+  onFocusTool?: (tool: ToolCall) => void;
 }) {
   const runStart = conversation.events.find((e) => e.type === EventType.RUN_STARTED)?.time;
   const runEnd = conversation.events.find((e) => e.type === EventType.RUN_COMPLETED || e.type === EventType.RUN_FAILED)?.time;
   const runDuration = formatDuration(runStart, runEnd);
+  // v2 PRD §10.4 Overview 保留可增补：状态 + tokens 两行（事件真值，缺失「—」）。
+  const runStatusLabel = conversation.run_cancelled
+    ? '已取消'
+    : conversation.run_status === 'running'
+      ? '运行中'
+      : conversation.run_status === 'completed'
+        ? '已完成'
+        : conversation.run_status === 'failed'
+          ? '失败'
+          : '空闲';
 
   return (
     <>
@@ -188,6 +223,10 @@ function ChatTab({
           <code className="detail-val detail-val-mono">{conversation.session_id.slice(0, 16)}</code>
         </div>
         <div className="detail-row">
+          <span className="detail-key">状态</span>
+          <span className="detail-val">{runStatusLabel}</span>
+        </div>
+        <div className="detail-row">
           <span className="detail-key">轮次</span>
           <span className="detail-val">{conversation.turns.length}</span>
         </div>
@@ -200,6 +239,14 @@ function ChatTab({
         <div className="detail-row">
           <span className="detail-key">耗时</span>
           <span className="detail-val">{runDuration ?? '—'}</span>
+        </div>
+        <div className="detail-row">
+          <span className="detail-key">tokens</span>
+          <span className="detail-val num">
+            {conversation.usage_total
+              ? conversation.usage_total.total_tokens.toLocaleString()
+              : <span className="detail-val-muted">—</span>}
+          </span>
         </div>
         {/* 后端 Gap 2：trace_id 恒 null（Langfuse Phase 15 接入）→「未追踪」灰字，
             属预期降级而非故障；跳转链接待 Phase 15 一并加（Scope Lock：不预做）。 */}
@@ -229,13 +276,20 @@ function ChatTab({
           <span className="detail-key">失败</span>
           <span className="detail-val">{tools.filter((t) => t.status === 'failed').length}</span>
         </div>
-        {tools.map((t) => (
-          <button key={t.tool_call_id} className="detail-tool-row" onClick={() => onFocusTool(t)}>
-            <ChevronRight size={14} />
-            <span className={`tool-status-dot tool-status-dot-${t.status}`} />
-            <span className="detail-tool-name">{t.name}</span>
-          </button>
-        ))}
+        {tools.map((t) =>
+          onFocusTool ? (
+            <button key={t.tool_call_id} className="detail-tool-row" onClick={() => onFocusTool(t)}>
+              <ChevronRight size={14} />
+              <span className={`tool-status-dot tool-status-dot-${t.status}`} />
+              <span className="detail-tool-name">{t.name}</span>
+            </button>
+          ) : (
+            <div key={t.tool_call_id} className="detail-tool-row detail-tool-row-static">
+              <span className={`tool-status-dot tool-status-dot-${t.status}`} />
+              <span className="detail-tool-name">{t.name}</span>
+            </div>
+          ),
+        )}
       </div>
 
       {conversation.compactions.length > 0 && (
@@ -894,4 +948,51 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Phase 13 委派钻取：child 会话视图（v2 PRD §10.5）──
+
+/** ChildSessionView — Inspector 内原位展开 child 会话（`GET /api/sessions/{id}/events`
+ *  拉取 → projectHistory 同一投影管线，不变量 #22）。只读呈现：Overview 摘要
+ *  （ChatTab 复用，工具行静态化）+ child 事件尾窗——child 的完整交互仍在
+ *  「打开子会话」主窗管线，这里不做第二套可操作 Inspector。 */
+function ChildSessionView({ childSessionId }: { childSessionId: string }) {
+  const { conversation, error } = useChildConversation(childSessionId);
+  if (error) {
+    return <div className="child-view-status">子会话加载失败：{error}</div>;
+  }
+  if (!conversation) {
+    return <div className="child-view-status">正在加载子会话…</div>;
+  }
+  return (
+    <>
+      <ChatTab conversation={conversation} tools={conversation.turns.flatMap((t) => t.tools)} />
+      <ChildTimeline events={conversation.events} />
+    </>
+  );
+}
+
+/** child 事件只读尾窗（有界 DOM，同 Timeline 尾窗纪律）：verbatim type + 单行
+ *  语义摘要。child 会话通常不长，但模型/delta 类事件可能多——tail 200 封顶。 */
+const CHILD_TIMELINE_WINDOW = 200;
+
+function ChildTimeline({ events }: { events: AgentEvent[] }) {
+  const total = events.length;
+  const tail = events.slice(-CHILD_TIMELINE_WINDOW);
+  return (
+    <div className="detail-section">
+      <div className="detail-section-title">
+        <ListTree size={14} /> CHILD TIMELINE
+      </div>
+      {total > CHILD_TIMELINE_WINDOW && (
+        <div className="detail-row detail-row-warn">显示最近 {CHILD_TIMELINE_WINDOW} 条 / 共 {total} 条</div>
+      )}
+      {tail.map((e, i) => (
+        <div key={e.event_id ?? `${e.seq ?? 'n'}-${i}`} className="detail-row child-ev-row">
+          <span className="detail-key mono">{e.type}</span>
+          <span className="detail-val">{summarizeEvent(e) || '—'}</span>
+        </div>
+      ))}
+    </div>
+  );
 }

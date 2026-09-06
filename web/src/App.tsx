@@ -110,6 +110,15 @@ export default function App() {
   const focusRun = useCallback(() => setFocus({ kind: 'run' }), []);
   const focusTool = useCallback((tool: ToolCall) => setFocus({ kind: 'tool', tool }), []);
   const focusEvent = useCallback((event: AgentEvent) => setFocus({ kind: 'event', event }), []);
+  // Phase 13 委派钻取（v2 PRD §10.5）：委派节点 Inspect → 右栏原位展开 child
+  // 会话；深层钻取是显式意图——Inspector 关着时一并打开（不同于 hover Inspect）。
+  const focusChild = useCallback(
+    (child: { childSessionId: string; target: string }) => {
+      setFocus({ kind: 'child', ...child });
+      setInspectorOpen(true);
+    },
+    [],
+  );
 
   // Main↔Inspector 联动（PRD §9，ADR-0014 D5）：
   //   正向：中间 hover Inspect → focusTool/focusEvent（Inspector 打开 + 详情切换）。
@@ -358,6 +367,7 @@ export default function App() {
             onPresetTask={onPresetTask}
             onFocusTool={focusTool}
             onOpenSession={handleSelect}
+            onInspectChild={focusChild}
           />
           <Composer
             streaming={streaming}

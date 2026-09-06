@@ -31,6 +31,9 @@ interface Props {
   /** 打开子会话（复用会话栏同一选择管线——child session 与父同 store）。
    *  缺省时不出现入口，不造假链接。 */
   onOpenSession?: (sessionId: string) => void;
+  /** Inspector 钻取（v2 PRD §10.5 委派配对）：在右栏原位展开 child 会话，
+   *  父会话上下文不丢。缺省时不出现入口。 */
+  onInspectChild?: (child: { childSessionId: string; target: string }) => void;
 }
 
 /** 委派状态 → DSH 四态列名（completed→success 共享同一组状态色与图标语言）。 */
@@ -43,7 +46,7 @@ const STATUS_CLASS: Record<Delegation['status'], string> = {
 
 // memo：projection copy-on-write 保证委派对象仅在自身事件到达时替换——
 // 同 turn 其它节点跳过重渲染。
-export const DelegationNode = memo(function DelegationNode({ delegation, density, onOpenSession }: Props) {
+export const DelegationNode = memo(function DelegationNode({ delegation, density, onOpenSession, onInspectChild }: Props) {
   const [open, setOpen] = useState(false);
   const duration = formatDuration(delegation.started_at, delegation.completed_at);
   const overflow = delegation.summary !== undefined && hasSummaryOverflow(delegation.summary);
@@ -84,6 +87,17 @@ export const DelegationNode = memo(function DelegationNode({ delegation, density
           {delegation.child_session_id}
         </code>
         <CopyButton text={delegation.child_session_id} label="复制子会话 ID" />
+        {onInspectChild && (
+          <button
+            className="deleg-open-btn"
+            onClick={() =>
+              onInspectChild({ childSessionId: delegation.child_session_id, target: delegation.target })
+            }
+            title="在右侧 Inspector 内展开该子会话（父会话上下文保留）"
+          >
+            Inspect 子会话
+          </button>
+        )}
         {onOpenSession && (
           <button
             className="deleg-open-btn"

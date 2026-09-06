@@ -188,3 +188,43 @@ describe('ChainNodeView — ReasoningBlock（#95，规格 03 §7）', () => {
     expect(html).toContain('进度');
   });
 });
+
+describe('ChainNodeView — DelegationNode 委派节点（Phase 13，v2 PRD §10.5）', () => {
+  const delegationNode: ChainNode = {
+    kind: 'delegation',
+    delegation: {
+      target: 'research_review',
+      task: '调研 python.org',
+      child_session_id: 'child-abc',
+      status: 'running',
+    },
+  };
+
+  it('注册表分发：编排节点渲染 DSH 四态行 + 子会话身份行 + 复制', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView node={delegationNode} density="balanced" />,
+    );
+    expect(html).toContain('委派 → research_review');
+    expect(html).toContain('child-abc');
+    expect(html).toContain('act-status-running');
+    expect(html).toContain('deleg-child-row');
+  });
+
+  it('onInspectChild / onOpenSession 提供时渲染两个入口；缺省不造假链接', () => {
+    const withEntries = renderToStaticMarkup(
+      <ChainNodeView
+        node={delegationNode}
+        density="balanced"
+        onInspectChild={() => undefined}
+        onOpenSession={() => undefined}
+      />,
+    );
+    expect(withEntries).toContain('Inspect 子会话');
+    expect(withEntries).toContain('打开子会话');
+    const without = renderToStaticMarkup(
+      <ChainNodeView node={delegationNode} density="balanced" />,
+    );
+    expect(without).not.toContain('Inspect 子会话');
+    expect(without).not.toContain('打开子会话');
+  });
+});
