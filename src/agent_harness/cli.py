@@ -39,13 +39,25 @@ from agent_harness.memory.types import memory_session_var
 from agent_harness.model.config import ModelConfig
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
+    AGENT_DELEGATION_FINISHED,
+    AGENT_DELEGATION_STARTED,
+    ARTIFACT_CREATED,
+    CONTEXT_COMPACTED,
+    MODEL_COMPLETED,
     MODEL_DELTA,
+    MODEL_FAILED,
+    MODEL_FALLBACK,
+    OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     RUN_FAILED,
+    SESSION_FORKED,
     TOOL_CALL,
+    TOOL_FAILURE_GUARD,
     TOOL_RESULT,
+    USER_MESSAGE,
     JsonlSessionStore,
     Session,
+    SessionEvent,
 )
 from agent_harness.session.fork import (
     ForkBoundaryError,
@@ -211,6 +223,9 @@ def main() -> None:
     if argv and argv[0] == "sessions":
         _main_sessions(argv[1:])
         return
+    if argv and argv[0] == "replay":
+        _main_replay(argv[1:])
+        return
     parser = argparse.ArgumentParser(description="Agent Harness CLI")
     parser.add_argument("message", help="发送给 Agent 的任务")
     args = parser.parse_args(argv)
@@ -337,6 +352,103 @@ async def fork_command(
     if write is not None:
         write(f"child session: {child.session_id}\n")
     return child.session_id
+
+
+# ── replay（Phase 14 T8, ADR-0017 决策 4：逻辑回放，零副作用契约）────────────
+
+
+def render_replay_event(event: SessionEvent) -> str | None:
+    """SessionEvent → 终端行（纯函数）。生命周期噪音返回 None 不渲染。
+
+    tool result 一律渲染**冻结终态**（spec 03 §6：逻辑回放不重执行、不产生
+    外部副作用）。失败事实（run/failed、model/failed、熔断、fallback）如实
+    呈现，绝不美化。
+    """
+    data = event.data
+    if event.type == USER_MESSAGE:
+        return f"\n[用户] {data.get('content', '')}"
+    if event.type == MODEL_COMPLETED:
+        content = data.get("content", "")
+        return f"[assistant] {content}" if content else None
+    if event.type == TOOL_CALL:
+        args = data.get("args", {})
+        return f"[工具] {data.get('tool_name', '')}({_collapse_args(args)})"
+    if event.type == TOOL_RESULT:
+        content = str(data.get("content", ""))
+        lines = content.splitlines() or [""]
+        preview = "\n".join(f"  │ {line}" for line in lines[:_PREVIEW_LINES])
+        more = "" if len(lines) <= _PREVIEW_LINES else f"\n  │ ... +{len(lines) - _PREVIEW_LINES} more lines"
+        return f"  → 结果（冻结）:\n{preview}{more}"
+    if event.type == RUN_FAILED:
+        return f"[run 失败] {data.get('reason', 'unspecified')}"
+    if event.type == MODEL_FAILED:
+        return f"[模型失败] {data.get('message', '')}"
+    if event.type == TOOL_FAILURE_GUARD:
+        return (f"[熔断] level={data.get('level', '')}"
+                f" consecutive_failures={data.get('consecutive_failures', '')}")
+    if event.type == MODEL_FALLBACK:
+        return (f"[fallback] {data.get('from_model', '')}→"
+                f"{data.get('to_model', '')} ({data.get('reason', '')})")
+    if event.type == AGENT_DELEGATION_STARTED:
+        return (f"[委派→{data.get('target', '')}] "
+                f"child={data.get('child_session_id', '')}")
+    if event.type == AGENT_DELEGATION_FINISHED:
+        summary = str(data.get("summary", ""))[:200]
+        return (f"[委派完成→{data.get('target', '')}] "
+                f"{data.get('status', '')}: {summary}")
+    if event.type == ARTIFACT_CREATED:
+        return f"[artifact] {str(data)[:120]}"
+    if event.type == SESSION_FORKED:
+        return (f"[fork] 来自 {data.get('parent_session_id', '')}"
+                f" @{data.get('fork_point_seq')}")
+    if event.type == CONTEXT_COMPACTED:
+        return "[context 压缩]（早期历史已摘要，原文在 JSONL）"
+    if event.type == OPERATION_RECONCILE_REQUIRED:
+        return f"[需裁决] {str(data)[:120]}"
+    # session/started, session/resumed, run/started, run/completed,
+    # memory/degraded：生命周期噪音，不渲染
+    return None
+
+
+async def replay_command(
+    session_id: str,
+    *,
+    workspace_dir: str | None = None,
+    write: Callable[[str], None] | None = None,
+) -> str:
+    """replay 命令的可测核心：返回渲染文本。
+
+    零副作用契约（测试钉死）：只经 store.read_events 只读加载——不走
+    Session.resume（那会追加 session/resumed）、不构造 runtime（无模型
+    访问）、不触碰 workspace。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    store = JsonlSessionStore(root=Path(settings.workspace_dir) / "sessions")
+    events = store.read_events(session_id)
+    if not events:
+        raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+    lines = [line for line in (render_replay_event(e) for e in events) if line]
+    output = "\n".join(lines) if lines else "（无可渲染内容）"
+    if write is not None:
+        write(output + "\n")
+    return output
+
+
+def _main_replay(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog="agent-harness replay")
+    parser.add_argument("session_id", help="要回放的历史会话 id")
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        output = asyncio.run(replay_command(args.session_id))
+    except ValueError as error:
+        print(f"replay 失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(output)
 
 
 def _main_sessions(argv: list[str]) -> None:
