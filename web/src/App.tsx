@@ -22,7 +22,7 @@ import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
-import { useDisclosure } from './lib/disclosure';
+import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
@@ -99,6 +99,9 @@ export default function App() {
   // L0-L2 展开状态（ADR-0014 D2）：全局 density 给默认级，手动 override 优先；
   // 随选中会话切换清空（sessionKey = selectedId）。
   const disclosure = useDisclosure(selectedId);
+  // T2（#95）reasoning 自动开合（S6/S7）：streaming 默认开、完成自动收、
+  // 手动 override 永久优先；同随会话切换清空。
+  const reasoningDisclosure = useReasoningDisclosure(selectedId, density);
 
   // Inspector 焦点（Brief "上下文 Inspector"）：Run 级 ↔ 事件级，一键返回，不用弹窗。
   // 全部 useCallback：下游 SessionList/Composer/Conversation/StepDetail 的 memo
@@ -107,6 +110,15 @@ export default function App() {
   const focusRun = useCallback(() => setFocus({ kind: 'run' }), []);
   const focusTool = useCallback((tool: ToolCall) => setFocus({ kind: 'tool', tool }), []);
   const focusEvent = useCallback((event: AgentEvent) => setFocus({ kind: 'event', event }), []);
+  // Phase 13 委派钻取（v2 PRD §10.5）：委派节点 Inspect → 右栏原位展开 child
+  // 会话；深层钻取是显式意图——Inspector 关着时一并打开（不同于 hover Inspect）。
+  const focusChild = useCallback(
+    (child: { childSessionId: string; target: string }) => {
+      setFocus({ kind: 'child', ...child });
+      setInspectorOpen(true);
+    },
+    [],
+  );
 
   // Main↔Inspector 联动（PRD §9，ADR-0014 D5）：
   //   正向：中间 hover Inspect → focusTool/focusEvent（Inspector 打开 + 详情切换）。
@@ -350,10 +362,12 @@ export default function App() {
             loadingHistory={loadingHistory}
             density={density}
             disclosure={disclosure}
+            reasoningDisclosure={reasoningDisclosure}
             jumpRequest={jumpRequest}
             onPresetTask={onPresetTask}
             onFocusTool={focusTool}
             onOpenSession={handleSelect}
+            onInspectChild={focusChild}
           />
           <Composer
             streaming={streaming}

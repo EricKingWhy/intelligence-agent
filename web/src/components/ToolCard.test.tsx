@@ -55,3 +55,79 @@ describe('ToolCard 内联明细字段标签（C3）', () => {
     expect(html).toContain('act-args-compact');
   });
 });
+
+describe('T3 — ToolOutputStream 流式尾窗（#96，S14/规格 03 §9.3）', () => {
+  const outTool = (over: Partial<ToolCall>): ToolCall => ({
+    tool_call_id: 'c9', name: 'bash', args: { command: 'npm test' },
+    status: 'running', started_at: '2026-09-06T00:00:00Z', ...over,
+  });
+  const render = (t: ToolCall) =>
+    renderToString(createElement(ToolCard, { tool: t, density: 'balanced' as const })).replaceAll('<!-- -->', '');
+
+  it('运行中工具的 stdout 流可见（活流不需展开）', () => {
+    const html = render(outTool({ output: [{ channel: 'stdout', text: 'RUN src/a.test.ts\n' }] }));
+    expect(html).toContain('tool-out-stream');
+    expect(html).toContain('RUN src/a.test.ts');
+  });
+
+  it('stderr 分色渲染（通道保真，双通道不串）', () => {
+    const html = render(outTool({
+      output: [
+        { channel: 'stdout', text: 'ok\n' },
+        { channel: 'stderr', text: 'warn!\n' },
+      ],
+    }));
+    expect(html).toContain('tool-out-stderr');
+    expect(html).toContain('warn!');
+  });
+
+  it('万行级输出有界渲染：尾窗裁剪 + 省略标记，DOM 不随总输出线性膨胀', () => {
+    const lines = Array.from({ length: 10000 }, (_, i) => `line-${i}`).join('\n');
+    const html = render(outTool({ output: [{ channel: 'stdout', text: lines }] }));
+    expect(html).toContain('tool-out-tail-mark');
+    expect(html).toContain('line-9999');
+    expect(html).not.toContain('line-0\n');
+    expect(html.length).toBeLessThan(30000);
+  });
+
+  it('终态以 result 校准（契约 C2 全量兜底）：L2 渲染 result 路径、chunks 区退位不双写', () => {
+    const html = renderToString(
+      createElement(ToolCard, {
+        tool: outTool({
+          status: 'success',
+          result: { ok: true, data: { exit_code: 0 } },
+          output: [{ channel: 'stdout', text: 'streamed-partial' }],
+        }),
+        density: 'balanced' as const,
+        level: 2,
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('bash-output');
+    expect(html).not.toContain('tool-out-stream');
+  });
+
+  it('终态且 result 缺失：chunks 兜底渲染（流式内容不丢弃）', () => {
+    const html = render(outTool({
+      status: 'success',
+      output: [{ channel: 'stdout', text: 'streamed-full' }],
+    }));
+    expect(html).toContain('tool-out-stream');
+    expect(html).toContain('streamed-full');
+  });
+
+  it('通道图例：出现过的通道出 chip（票面 channel 徽标）', () => {
+    const html = render(outTool({
+      output: [
+        { channel: 'stdout', text: 'a' },
+        { channel: 'stderr', text: 'b' },
+      ],
+    }));
+    expect(html).toContain('tool-out-chip-stdout');
+    expect(html).toContain('tool-out-chip-stderr');
+  });
+
+  it('无 output 的工具不渲染流式区（既有行为零回归）', () => {
+    const html = render(outTool({}));
+    expect(html).not.toContain('tool-out-stream');
+  });
+});

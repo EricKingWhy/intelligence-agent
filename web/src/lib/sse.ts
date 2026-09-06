@@ -3,8 +3,9 @@
  * Why not EventSource: EventSource is GET-only, doesn't support POST body.
  * Our backend streams from POST /api/sessions, so we parse SSE manually.
  *
- * Spec compliance (spec 11 §4): on disconnect we MUST stop consuming and
- * let the producer cancel — call abort() to break the stream.
+ * ADR-0016 detached-run 修订（T5 #98）：cancel() 只断传输层（unsubscribe）——
+ * run 服务端继续跑到终态，显式取消走 POST /cancel（useSession cancelStream）。
+ * abort 保留给导航离开/卸载时的订阅清理。
  */
 
 import type { AgentEvent } from '../types';

@@ -4,7 +4,9 @@ import {
   defaultLevelFor,
   modelEventKey,
   nextLevel,
+  reasoningIsOpen,
   resolveLevel,
+  setReasoningOpen,
   toolEventKey,
 } from './disclosure';
 
@@ -62,5 +64,27 @@ describe('nextLevel — 点击循环 L0→L1→L2→L0', () => {
     expect(nextLevel(0)).toBe(1);
     expect(nextLevel(1)).toBe(2);
     expect(nextLevel(2)).toBe(0);
+  });
+});
+
+describe('T2 — reasoning 自动开合（#95，S6/S7，规格 03 §7.5）', () => {
+  it('streaming 默认开（balanced/detailed/raw），completed/interrupted 自动收', () => {
+    expect(reasoningIsOpen(new Map(), 'b', 'streaming', 'balanced')).toBe(true);
+    expect(reasoningIsOpen(new Map(), 'b', 'streaming', 'detailed')).toBe(true);
+    expect(reasoningIsOpen(new Map(), 'b', 'streaming', 'raw')).toBe(true);
+    expect(reasoningIsOpen(new Map(), 'b', 'completed', 'balanced')).toBe(false);
+    expect(reasoningIsOpen(new Map(), 'b', 'interrupted', 'balanced')).toBe(false);
+  });
+
+  it('compact 档 streaming 默认收（PRD §9.1：一行实况）', () => {
+    expect(reasoningIsOpen(new Map(), 'b', 'streaming', 'compact')).toBe(false);
+  });
+
+  it('手动 override 永久优先——delta/完成/密度切换都不改写（S7 user_interacted）', () => {
+    const closed = setReasoningOpen(new Map(), 'b', false);
+    expect(reasoningIsOpen(closed, 'b', 'streaming', 'balanced')).toBe(false);
+    const open = setReasoningOpen(new Map(), 'b', true);
+    expect(reasoningIsOpen(open, 'b', 'completed', 'balanced')).toBe(true);
+    expect(reasoningIsOpen(open, 'b', 'streaming', 'compact')).toBe(true);
   });
 });

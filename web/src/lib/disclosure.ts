@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { TraceDensity } from './density';
+import type { ReasoningStatus } from './reasoningCursor';
 
 /** 中间主区展开级：L0 摘要行 / L1 inline detail / L2 advanced inline。
  *  L3（Inspector Raw）不是 inline 级，走联动选中。 */
@@ -91,4 +92,53 @@ export function useDisclosure(sessionKey: string | null): Disclosure {
   );
 
   return { levelFor, setLevel };
+}
+
+// ── T2（#95）reasoning 自动开合（S6/S7，规格 03 §7.5 DisclosureState）──
+
+/** 自动规则：streaming 且非 compact → 开（Balanced/Detailed 默认自动展开）；
+ *  其余 → 收（完成自动收、interrupted 收、compact 一行实况）。 */
+export function reasoningIsOpen(
+  overrides: ReadonlyMap<string, boolean>,
+  blockId: string,
+  status: ReasoningStatus,
+  density: TraceDensity,
+): boolean {
+  const manual = overrides.get(blockId);
+  if (manual !== undefined) return manual;
+  return status === 'streaming' && density !== 'compact';
+}
+
+/** 手动开合：写入 override 即 user_interacted=true——此后 delta/完成/密度切换
+ *  都不改写该块（S7：手动折叠期间流继续，绝不重开）。 */
+export function setReasoningOpen(
+  overrides: ReadonlyMap<string, boolean>,
+  blockId: string,
+  open: boolean,
+): ReadonlyMap<string, boolean> {
+  const next = new Map(overrides);
+  next.set(blockId, open);
+  return next;
+}
+
+/** 逐会话的 reasoning 开合状态（override 随 sessionKey 变化清空——
+ *  呈现状态是页内局部的，不进持久真相，规格 01 §17）。 */
+export function useReasoningDisclosure(sessionKey: string | null, density: TraceDensity) {
+  const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+
+  useEffect(() => {
+    setOverrides(new Map());
+  }, [sessionKey]);
+
+  const isOpen = useCallback(
+    (blockId: string, status: ReasoningStatus) =>
+      reasoningIsOpen(overrides, blockId, status, density),
+    [overrides, density],
+  );
+
+  const toggle = useCallback((blockId: string, currentOpen: boolean) => {
+    setOverrides((prev) => setReasoningOpen(prev, blockId, !currentOpen));
+  }, []);
+
+  return { isOpen, toggle };
 }
