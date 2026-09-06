@@ -80,10 +80,22 @@
 ### GET /api/models（新增，C6）
 ```json
 {"models":[{"name":"deepseek-v4-flash-0731","provider":"senseaudio","model":"deepseek-v4-flash-0731","default":true},
-           {"name":"qwen-max","provider":"senseaudio","model":"qwen3.8-max-0902","default":false}]}
+           {"name":"glm-5.3-flash","provider":"senseaudio","model":"glm-5.3-flash","default":false}]}
 ```
 零密钥字段；`name` 是 POST 的选择键；思考能力不进元数据（事件驱动）。
-配额：`AGENT_MODELS` env（JSON 数组），api_key 缺省回落 MODEL_API_KEY；未配 = 只有默认链。
+配额：`AGENT_MODELS` env（JSON 数组），api_key 缺省回落 MODEL_API_KEY，base_url 可覆盖 provider 预设（非厂商默认端点的账户专用地址）；未配 = 只有默认链。
+
+**实测思考矩阵（2026-09-07 真实网关，前端据此预期 reasoning 事件有无）**：
+
+| 模型 | 网关 | reasoning 事件 |
+|---|---|---|
+| glm-4.5-air | zhipu | **有**（全栈验证 PASS） |
+| qwen3.8-27b | dashscope 专属端点 | **有**（全栈验证 PASS，catalog 选择闭环） |
+| deepseek-v4-flash-0731 | senseaudio | 未观测到（该任务下） |
+| glm-5.3-flash | senseaudio | 无 |
+| qwen-plus | dashscope 专属端点 | 无（enable_thinking 未暴露，事件驱动下正确无事件） |
+
+注意：前端 prompt 所述 `qwen3.8-max-0902` 在 senseaudio 账户上**不存在**（网关 400「模型未找到」），真实可用清单以上表与 `AGENT_MODELS` 为准。
 
 ## 4. run 终态语义（02 §17，不并入 failed）
 

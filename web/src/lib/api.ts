@@ -84,6 +84,22 @@ export async function postApproval(sessionId: string, approved: boolean): Promis
   return res.json();
 }
 
+// ── Cancel（后端契约回执 §3，T5 #98：detached-run 显式中断唯一入口）──
+
+/** POST /api/sessions/{id}/cancel。200 {"status":"cancelling"|"no_active_run"}
+ *  ——两者都是幂等成功（Esc 与 run 恰好刚终结的竞态是常态，契约明示不是错误）；
+ *  404 = 会话不存在。非 2xx 抛 Error——调用方 cancelStream 静默降级，
+ *  流终态/错误路径是 UI 收尾权威。run/failed(data.reason='cancelled') 随后
+ *  经流广播（订阅者照常收到终态帧）。 */
+export async function cancelSession(sessionId: string): Promise<{ status: string }> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error(`cancel ${res.status}`);
+  return res.json();
+}
+
 // ── Recover（后端新端点，df4f7d8 §1.1）──
 
 /** 恢复失败的可区分错误：status 404 = 会话不存在；409 = 存在需人工裁决的高风险

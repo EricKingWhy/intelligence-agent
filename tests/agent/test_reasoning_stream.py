@@ -250,3 +250,73 @@ class TestReasoningProviderExtraction:
         assert _extract_reasoning(_reasoning("abc")) == "abc"
         assert _extract_reasoning(AIMessageChunk(content="x")) == ""
         assert _extract_reasoning(AIMessageChunk(content="x", additional_kwargs={})) == ""
+
+
+class TestCoalescingWindowRegression:
+    @pytest.mark.asyncio
+    async def test_long_block_keeps_coalescing_after_first_window(self, tmp_path):
+        """回归（review 发现）：首个窗口过期后合帧不得退化为逐 chunk 落盘。
+
+        旧实现 `_rsn_since` 只在开块时设置、flush 后不重置——30ms 后每个
+        chunk 都触发"窗口已过期"即时 flush，长思考块 = 数千 fsync 行（S19）。
+        """
+        monkeypatch_window = pytest.MonkeyPatch()
+        monkeypatch_window.setattr(
+            "agent_harness.agent.streaming.FLUSH_WINDOW_SECONDS", 0.05)
+        try:
+            chunks = [_reasoning(f"第{i}句。") for i in range(20)]
+            model = ReasoningStreamModel(chunks)
+
+            async def paced_astream(messages, **kwargs):
+                for chunk in chunks:
+                    yield chunk
+                    await asyncio.sleep(0.015)  # 15ms/chunk：窗口内 3-4 个
+
+            model.astream = paced_astream  # type: ignore[method-assign]
+            runtime = _build_runtime(model, tmp_path)
+            session = _make_session(tmp_path)
+
+            frames = [e async for e in runtime.run_stream(session, "hi")]
+            reasoning_deltas = [e for e in frames if e.type == REASONING_DELTA]
+            # 20 chunk × 15ms ≈ 300ms / 50ms 窗口 ≈ 6-8 次合帧（远小于 20）
+            assert len(reasoning_deltas) <= 10, (
+                f"窗口过期后合帧退化为逐 chunk（{len(reasoning_deltas)} 行）——S19 违背"
+            )
+            assert "".join(e.data["delta"] for e in reasoning_deltas) == \
+                "".join(f"第{i}句。" for i in range(20))
+        finally:
+            monkeypatch_window.undo()
+
+
+class TestMemoryWritebackPrivacy:
+    @pytest.mark.asyncio
+    async def test_writeback_excludes_streaming_facts(self, tmp_path, monkeypatch):
+        """review 发现：reasoning/*（provider 思考）与 delta 事件不得进记忆抽取
+        （02 §15 隐私硬边界 + 50 条窗口不被 chunk 挤占）。"""
+        submitted: list = []
+
+        class FakeWriter:
+            def submit(self, session, events):
+                submitted.append(events)
+
+        model = ReasoningStreamModel([
+            _reasoning("私密思考内容"),
+            AIMessageChunk(content="回答"),
+        ])
+        monkeypatch.setattr("agent_harness.agent.streaming.FLUSH_WINDOW_SECONDS", 0)
+        runtime = _build_runtime(model, tmp_path)
+        runtime._memory_writer = FakeWriter()
+        session = _make_session(tmp_path)
+
+        async for _ in runtime.run_stream(session, "hi"):
+            pass
+
+        assert submitted, "writeback 应被调用"
+        types = [e.type for e in submitted[0]]
+        assert not any(t.startswith("reasoning/") for t in types), (
+            "reasoning 事件（provider 思考）不得进记忆抽取"
+        )
+        assert "text/delta" not in types and "tool/output_delta" not in types, (
+            "流式增量与 model/completed、tool/result 重复，不得进抽取窗口"
+        )
+        assert "user/message" in types and "model/completed" in types

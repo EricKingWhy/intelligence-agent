@@ -300,12 +300,6 @@ body {
   50% { opacity: 0.55; transform: scale(1.12); }
 }
 
-/* 选中事件高亮 pulse（Main↔Inspector 联动，PRD §9.2：600-900ms fade，克制不夸张） */
-@keyframes event-pulse {
-  0% { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-  100% { background: transparent; }
-}
-
 /* 选中事件高亮 pulse（Main↔Inspector 联动，PRD §9.2：600-900ms fade，
  * 克制不夸张；--dur-pulse 控制时长） */
 @keyframes event-pulse {

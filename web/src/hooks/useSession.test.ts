@@ -10,7 +10,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, SessionMode } from '../types';
-import { createCommitCoalescer, shouldApplyRecoverResult, shouldApplyStreamFrame } from './useSession';
+import { createCommitCoalescer, decideCancel, shouldApplyRecoverResult, shouldApplyStreamFrame } from './useSession';
 
 const ev = (type: string, session_id: string | null): AgentEvent => ({
   type,
@@ -146,7 +146,9 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
   const conv = (session_id: string) => ({
     session_id, turns: [], active_step_id: null, run_status: 'completed' as const,
     run_cancelled: false, compactions: [], reconcile_queue: [], events: [],
-    unknown_events: [], model: null, usage_total: null, cost_usd: null, trace_id: null, model_fallback: null,
+    unknown_events: [], model: null, usage_total: null, cost_usd: null, trace_id: null,
+    model_fallback: null, run_id: null,
+    seenSeqs: new Set<number>(),
   });
 
   it('同一会话（live 流刚产出完整真相）：后台静默重读，不显示占位符', () => {
@@ -159,5 +161,82 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
 
   it('不同会话（切换目标）：显示占位符——旧会话内容不得冒充新会话', () => {
     expect(shouldShowHistoryLoading(conv('s-old'), 's-new')).toBe(true);
+  });
+});
+
+describe('T7 — createCommitCoalescer 后台降渲染（#100，spec 03 §18.3）', () => {
+  it('隐藏期 schedule 挂起：不排定时器、不提交（真相仍逐帧入本地 conv，只延迟通知）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      const c = createCommitCoalescer(() => commits++, 24, () => false);
+      c.schedule();
+      c.schedule();
+      vi.advanceTimersByTime(1000);
+      expect(commits).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('回前台 flush：整段后台积压合帧为单次提交（一帧内 reconcile）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      let visible = false;
+      const c = createCommitCoalescer(() => commits++, 24, () => visible);
+      c.schedule();
+      c.schedule();
+      c.schedule();
+      visible = true;
+      c.flush();
+      expect(commits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('isVisible 缺省恒 true——既有前台契约零回归（省略第三参走缺省路径）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      const c = createCommitCoalescer(() => commits++, 24);
+      c.schedule();
+      vi.advanceTimersByTime(24);
+      expect(commits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('隐藏→可见翻转后恢复调度：挂起的 dirty 与新 schedule 合帧单次提交', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      let visible = false;
+      const c = createCommitCoalescer(() => commits++, 24, () => visible);
+      c.schedule(); // hidden：挂起（dirty 挂起、无定时器）
+      visible = true;
+      c.schedule(); // visible：补排定时器
+      vi.advanceTimersByTime(24);
+      expect(commits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── T5（#98）：Esc/停止显式取消的传输层决策（detached-run 契约回执 §0.3/§3）──
+describe('decideCancel — 显式取消走 POST /cancel 还是传输层清理（#98 detached-run）', () => {
+  it('已知 sid：cancel-request——POST /cancel，流保持打开等终态帧广播', () => {
+    expect(decideCancel('A')).toEqual({ kind: 'cancel-request', sessionId: 'A' });
+  });
+
+  it('sid 未知（首帧未确认）：abort-transport——无从显式取消，孤儿回收兜底', () => {
+    expect(decideCancel(null)).toEqual({ kind: 'abort-transport' });
+  });
+
+  it('空串 sid 视同未知（liveSidRef 只写真值，防御不留空串）', () => {
+    expect(decideCancel('')).toEqual({ kind: 'abort-transport' });
   });
 });

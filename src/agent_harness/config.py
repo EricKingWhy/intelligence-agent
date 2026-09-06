@@ -85,7 +85,8 @@ class Settings(BaseSettings):
     # [{"name", "provider", "model_name", "base_url"?, "api_key"?, "temperature"?}]。
     # api_key 缺省回落 MODEL_API_KEY，base_url 缺省回落 provider 预设。
     # 空 = 无可选模型（GET /api/models 只列默认链，model 参数一律 422）。
-    agent_models: str = ""
+    # SecretStr：JSON 里可带条目级 api_key（活密钥），dump()/repr() 一律脱敏。
+    agent_models: SecretStr = SecretStr("")
 
     # Langfuse 旁路观测（ADR-0018 D2/D6，首个 OPTIONAL_OBSERVABILITY 实现）：
     # key 空 = 旁路完全缺席（懒加载，零 import 开销）。key 同 SecretStr 脱敏待遇。
