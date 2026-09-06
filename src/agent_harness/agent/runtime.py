@@ -732,6 +732,18 @@ class AgentRuntime:
             # 禁止再产出（RuntimeError），取消中的 task 再 yield 也会被立即再取消。
             # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
             try:
+                # 切换事实在失败/取消路径同样落盘（白盒透明不因终态打折）：
+                # drain 是幂等的，成功路径未触达时这里兜住残留在 coordinator 里
+                # 的 transition（冒烟实测缺陷：primary→fallback 后 fallback 也
+                # 挂，切换事件曾整条丢失，JSONL 看起来像"从未切换"）。
+                for transition in model_coord.drain_transitions():
+                    session.append(
+                        MODEL_FALLBACK,
+                        {"from_model": transition.from_model,
+                         "to_model": transition.to_model,
+                         "reason": transition.reason},
+                        run_id=run_id, step_id=steps + 1,
+                    )
                 if terminal.model_call_open:
                     terminal.append_model_failed(step=steps, cancelled=True)
                 terminal.cancelled_terminal(steps=steps)
@@ -756,6 +768,17 @@ class AgentRuntime:
             # result_holder 一定拿到终态结果——"run() 必返回失败结果"的契约
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
             try:
+                # 切换事实在失败路径同样落盘（与取消臂同一不变量，见上）——
+                # drain 幂等：成功路径已取走则此处为空。
+                for transition in model_coord.drain_transitions():
+                    fallback_event = session.append(
+                        MODEL_FALLBACK,
+                        {"from_model": transition.from_model,
+                         "to_model": transition.to_model,
+                         "reason": transition.reason},
+                        run_id=run_id, step_id=steps + 1,
+                    )
+                    yield to_agent_event(fallback_event)
                 # 模型调用在途时补 model/failed：把故障归因到具体一步，供 resume /
                 # 审计区分"模型故障"与"工具故障"。异常消息可能含 Provider 回显的
                 # 敏感文本——事件只带类型名（脱敏不变量），完整消息只进日志。
