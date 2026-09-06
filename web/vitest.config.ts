@@ -6,6 +6,6 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   test: {
-    exclude: [...configDefaults.exclude, '**/*.perf.test.ts'],
+    exclude: [...configDefaults.exclude, '**/*.perf.test.ts', 'e2e/**'],
   },
 })
