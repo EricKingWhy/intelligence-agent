@@ -325,3 +325,33 @@ class TestStallWatchdogInLoop:
                 final_text += event.data["delta"]
 
         assert final_text == "slow done"
+
+
+class TestTransitionPersistenceOnFailure:
+    """冒烟实测缺陷（集成 AI 报告）：primary 切到 fallback 后 fallback 也失败时，
+    切换事实只在成功路径 drain —— 异常臂丢失 model/fallback 事件，JSONL 里
+    看起来像"从未切换"（白盒透明的洞）。契约：任何终态下切换事实都落盘。"""
+
+    @pytest.mark.asyncio
+    async def test_fallback_also_stalls_still_persists_transition(self, tmp_path):
+        primary = _StalledStreamModel(first_chunk="partial ", stall_seconds=99.0)
+        fallback = _StalledStreamModel(first_chunk="fb ", stall_seconds=99.0)
+        runtime = AgentRuntime(
+            model=primary, registry=_registry(), executor=ToolExecutor(_registry()),
+            max_steps=10,
+            fallback_model=fallback,
+            primary_model_name="primary-model",
+            fallback_model_name="fallback-model",
+            stream_idle_timeout=0.2,
+        )
+        session = make_session(tmp_path)
+
+        # 流式路径（stall 守卫只治理流式；ainvoke 的总时限显式 DEFER）
+        async for _event in runtime.run_stream(session, "你好"):
+            pass
+
+        transitions = [e for e in session._events if e.type == MODEL_FALLBACK]
+        assert len(transitions) == 1, "fallback 也失败时切换事实仍必须持久化"
+        assert transitions[0].data["from_model"] == "primary-model"
+        assert transitions[0].data["to_model"] == "fallback-model"
+        assert transitions[0].data["reason"] == "ModelStallError"

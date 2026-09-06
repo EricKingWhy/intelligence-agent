@@ -87,7 +87,7 @@ git merge origin/main
 ## C2. 合并后验证 Gate（§14.10，在 feat/backend 上）
 
 ```bash
-uv sync                          # 应零变化（零新依赖）
+uv sync --all-extras              # 本项目 gate 恒为 all-extras 口径（裸 sync 被 extras 剪枝）
 uv run pytest -q                 # 基线：987 passed / 8 skipped / 12 deselected
 uv run ruff check src/ tests/    # clean
 git diff --check                 # 无 whitespace/冲突标记
@@ -121,7 +121,7 @@ main 侧 `.env` 需要追加后端 worktree `.env` 已有的 7 行键（用脚�
 ### D3. main 侧验证 Gate
 
 ```bash
-uv sync
+uv sync --all-extras
 uv run pytest -q                 # 与 C2 同基线口径；main .env 缺 Qiniu artifact 凭证时允许 +2 skip（历史基线口径）
 uv run ruff check src/ tests/
 ```
