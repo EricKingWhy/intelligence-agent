@@ -36,6 +36,7 @@ from agent_harness.config import Settings
 from agent_harness.identity import IdentityContext
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
+from agent_harness.model.config import ModelConfig
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
     MODEL_DELTA,
@@ -46,6 +47,8 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
+from agent_harness.session.fork import ForkBoundaryError, TailSummarizer, fork_session
+from agent_harness.storage.sqlite import SqliteSessionMetaStore
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 3
@@ -193,6 +196,9 @@ def main() -> None:
     if argv and argv[0] == "ingest":
         _main_ingest(argv[1:])
         return
+    if argv and argv[0] == "fork":
+        _main_fork(argv[1:])
+        return
     parser = argparse.ArgumentParser(description="Agent Harness CLI")
     parser.add_argument("message", help="发送给 Agent 的任务")
     args = parser.parse_args(argv)
@@ -240,6 +246,85 @@ def _main_ingest(argv: list[str]) -> None:
               f"{result.chunk_count} 个 chunk 已入索引。")
 
     asyncio.run(_entry())
+
+
+def _main_fork(argv: list[str]) -> None:
+    """CLI fork 入口（Phase 14 T5, ADR-0017 决策 6/10）：人驱动的分叉动作。
+
+    fork 是用户动作而非模型工具——不注册进任何 ToolRegistry。全链 =
+    boundary 校验 + seed + provenance + meta（fork 核心）→ copy-on-fork
+    → tail summary（默认开：主模型一次调用；--no-summary 关闭）。
+    """
+    args = _parse_fork_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        child_id = asyncio.run(
+            fork_command(
+                args.session_id, from_message=args.from_message,
+                no_summary=args.no_summary,
+            )
+        )
+    except ForkBoundaryError as error:
+        print(f"fork 失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(f"已分叉：child session = {child_id}")
+    print(f"（原会话 {args.session_id} 未改动；在新分支重发第 "
+          f"{args.from_message} 条用户消息即可继续）")
+
+
+def _parse_fork_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="agent-harness fork")
+    parser.add_argument("session_id", help="要分叉的父会话 id")
+    parser.add_argument(
+        "--from-message", type=int, required=True, metavar="N",
+        help="从父会话的第 N 条用户消息处分叉（该消息不进 seed，由你在新分支重发）",
+    )
+    parser.add_argument(
+        "--no-summary", action="store_true",
+        help="跳过 tail summary（默认对被放弃路线生成一次 LLM 摘要挂进新会话）",
+    )
+    return parser.parse_args(argv)
+
+
+async def fork_command(
+    session_id: str,
+    *,
+    from_message: int,
+    no_summary: bool,
+    workspace_dir: str | None = None,
+    write: Callable[[str], None] | None = None,
+) -> str:
+    """fork 命令的可测核心：返回 child session id。
+
+    与 run() 同一装配约定（workspace_dir 缺省取 Settings）；--no-summary
+    关闭 tail summary，否则用主模型链跑一次摘要（T4 seam）。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    workspace_root = Path(settings.workspace_dir)
+    store = JsonlSessionStore(root=workspace_root / "sessions")
+    meta_store = SqliteSessionMetaStore(workspace_root / "harness.db")
+    await meta_store.initialize()
+    workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
+    summarizer = None
+    if not no_summary:
+        from agent_harness.model.provider import create_chat_model
+
+        summarizer = TailSummarizer(
+            create_chat_model(ModelConfig.from_settings(settings))
+        )
+    child = await fork_session(
+        store, meta_store, session_id,
+        boundary_user_message_seq=from_message,
+        workspace_registry=workspace_registry,
+        summarizer=summarizer, with_tail_summary=not no_summary,
+    )
+    if write is not None:
+        write(f"child session: {child.session_id}\n")
+    return child.session_id
 
 
 if __name__ == "__main__":

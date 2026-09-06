@@ -25,8 +25,8 @@ from agent_harness.session.fork import (
     fork_session,
 )
 from agent_harness.session.store import JsonlSessionStore
-from tests.scripted_model import ScriptedModel
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
+from tests.scripted_model import ScriptedModel
 
 pytestmark = pytest.mark.asyncio
 
@@ -290,7 +290,7 @@ async def test_fork_without_parent_workspace_degrades(tmp_path) -> None:
 
 # ── T4 tail summary（#110, ADR-0017 决策 9）─────────────────────────────────
 
-from langchain_core.messages import AIMessage  # noqa: E402
+from langchain_core.messages import AIMessage
 
 
 class _FakeSummarizer:
