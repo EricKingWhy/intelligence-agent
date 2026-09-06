@@ -29,7 +29,11 @@ def store(tmp_path: Path) -> JsonlSessionStore:
 
 class TestAppendVocabularyValidation:
     def test_append_rejects_stream_only_types(self, store: JsonlSessionStore):
-        """model/started、model/delta 是流式专属信号，Session.append 必须拒绝持久化。"""
+        """model/started、model/delta 是流式专属词汇，Session.append 必须拒绝持久化。
+
+        ADR-0016 §3.1：合帧文本增量由新类型 text/delta 承接（durable）；
+        model/delta 词汇原样保留 stream-only（运行时不再发射）。
+        """
         session = Session.start(store)
         with pytest.raises(ValueError, match=MODEL_STARTED):
             session.append(MODEL_STARTED, {"model": "test-model"})

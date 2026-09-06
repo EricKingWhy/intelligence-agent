@@ -35,20 +35,25 @@ class TestSessionEventDTO:
         assert event.source_event_ids is None
 
     def test_all_event_types_registered(self):
-        # Durable vocabulary: 13 types — Phase 1 基础 + Phase 9 model/completed-failed + tool/*
-        # + Phase 4 operation/reconcile-required (#30) + Phase 5 artifact/created (#47) + context/compacted.
-        # model/started + model/delta are STREAM_ONLY — never persisted (invariant #4).
+        # Durable vocabulary — Phase 1 基础 + Phase 9 model/completed-failed + tool/*
+        # + Phase 4 operation/reconcile-required (#30) + Phase 5 artifact/created (#47) + context/compacted
+        # + Phase 12/13 reliability & delegation + ADR-0016 streaming（text/delta 合帧
+        # 文本增量、reasoning 族、tool/output_delta）。model/started + model/delta
+        # 词汇保留 STREAM_ONLY（后者运行时不再发射）。
         expected = {
             "session/started",
             "session/resumed",
+            "session/forked",
             "run/started",
             "run/completed",
             "run/failed",
             "user/message",
+            "text/delta",
             "model/completed",
             "model/failed",
             "tool/call",
             "tool/result",
+            "tool/output_delta",
             "operation/reconcile-required",
             "artifact/created",
             "context/compacted",
@@ -57,6 +62,10 @@ class TestSessionEventDTO:
             "model/fallback",
             "agent/delegation-started",
             "agent/delegation-finished",
+            "reasoning/started",
+            "reasoning/delta",
+            "reasoning/completed",
+            "reasoning/interrupted",
         }
         assert EVENT_TYPES == expected
 

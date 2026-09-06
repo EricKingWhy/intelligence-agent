@@ -38,6 +38,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -65,6 +66,7 @@ from agent_harness.tooling.contract import (
     ToolCall,
     ToolSideEffect,
 )
+from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
@@ -146,6 +148,7 @@ class ToolExecutor:
         *,
         operation_context: OperationContext | None = None,
         session: Session | None = None,
+        step_id: int | None = None,
     ) -> ToolExecution:
         """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
 
@@ -234,18 +237,50 @@ class ToolExecutor:
             )
             self._maybe_kill("running", tool_call_id)
 
+        # -- 阶段 2.7：输出流 sink（ADR-0016 §4.2）--
+        # 执行期 stdout/stderr 增量：工具（经 contextvar）从 sandbox reader
+        # 线程 push → 本 loop 的 drain task 合帧落盘 tool/output_delta。
+        # 非流式工具不读 contextvar → 零 delta（02 §7.5）。drain task 与
+        # 执行并发，finally 先关入队口再等最终 flush。
+        sink: ToolOutputStream | None = None
+        drain_task: asyncio.Task[list] | None = None
+        sink_token = None
+        if session is not None:
+            sink = ToolOutputStream(
+                session,
+                tool_call_id=tool_call_id,
+                run_id=operation_context.run_id if operation_context else None,
+                step_id=step_id,
+            )
+            sink_token = tool_output_sink_var.set(sink)
+            drain_task = asyncio.create_task(sink.drain())
+
         # -- 阶段 3：execute + Timeout 边界 + 唯一 Retry Layer（Task 3）--
         # 三阶段顺序不变；Timeout/Retry 只包住 tool.execute 这一步。
         try:
-            result = await self._execute_with_retry(
-                tool_call_id, name, tool, validated
-            )
-        except asyncio.CancelledError:
-            if self._operation_ledger is not None:
-                await self._operation_ledger.update_state(
-                    session_id, tool_call_id, OperationState.CANCELLED
+            try:
+                result = await self._execute_with_retry(
+                    tool_call_id, name, tool, validated
                 )
-            raise
+            except asyncio.CancelledError:
+                if self._operation_ledger is not None:
+                    await self._operation_ledger.update_state(
+                        session_id, tool_call_id, OperationState.CANCELLED
+                    )
+                raise
+        finally:
+            if sink_token is not None:
+                tool_output_sink_var.reset(sink_token)
+            if sink is not None and drain_task is not None:
+                sink.close()
+                try:
+                    await drain_task
+                except asyncio.CancelledError:
+                    # 二次取消到达：放弃最终 flush（增量已周期性落盘），停泵收口。
+                    drain_task.cancel()
+                    with suppress(BaseException):
+                        await drain_task
+                    raise
 
         # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
         # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
@@ -288,6 +323,7 @@ class ToolExecutor:
         *,
         operation_context: OperationContext | None = None,
         session: Session | None = None,
+        step_id: int | None = None,
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
@@ -325,7 +361,8 @@ class ToolExecutor:
             # gather 的顺序保持：即使第 3 个先完成，返回列表仍是 [结果1, 结果2, 结果3]。
             results = await asyncio.gather(
                 *(
-                    self.execute(tc, operation_context=operation_context, session=session)
+                    self.execute(tc, operation_context=operation_context,
+                            session=session, step_id=step_id)
                     for tc in tool_calls
                 ),
                 return_exceptions=True,
@@ -338,10 +375,11 @@ class ToolExecutor:
                     # 会随 raise 一起从诊断视野里消失——一次基础设施故障常伴随
                     # 多个连锁失败，只看第一个会误判根因。这里补日志线索。
                     self._log_secondary_exceptions(results, tool_calls)
-                    # 已完成执行的 committed 事件（TOOL_CALL + artifact/created）
-                    # 必须在异常传播前落盘，不能随异常一起消失（R6-7）。
+                    # 已完成执行的 committed 延迟事件（artifact/created 等）必须
+                    # 在异常传播前落盘，不能随异常一起消失（R6-7；TOOL_CALL 由
+                    # runtime 预持久化，见 emit_call_event）。
                     self._flush_committed_events(
-                        results, tool_calls, session,
+                        results, session,
                         run_id=operation_context.run_id if operation_context else None,
                     )
                     raise result
@@ -352,7 +390,8 @@ class ToolExecutor:
         try:
             for index, tool_call in enumerate(tool_calls):
                 execution = await self.execute(
-                    tool_call, operation_context=operation_context, session=session
+                    tool_call, operation_context=operation_context,
+                    session=session, step_id=step_id,
                 )
                 executions.append(execution)
                 if execution.result.ok:
@@ -368,40 +407,48 @@ class ToolExecutor:
         except BaseException:
             # 存储故障等真实异常传播前，已完成执行的 committed 事件先落盘（R6-7）。
             self._flush_committed_events(
-                executions, tool_calls[: len(executions)], session,
+                executions, session,
                 run_id=operation_context.run_id if operation_context else None,
             )
             raise
 
-    def emit_call_events(
+    def emit_call_event(
         self,
         session: Any,
         *,
         tool_call_id: str,
         tool_name: str,
         args: dict[str, Any],
-        pending_events: list[tuple[str, dict[str, Any]]],
         run_id: str | None,
         step_id: int | None,
-    ) -> list[SessionEvent]:
-        """持久化 TOOL_CALL → 延迟事件（R6-7 顺序的单一 owner）。
+    ) -> SessionEvent:
+        """持久化 TOOL_CALL（执行前，ADR-0016 §4.1）。
 
-        artifact/created 必须在其 tool_call 之后、tool/result 之前落盘——
-        消除"artifact 引用尚不存在的 tool_call"的前向引用。此前该顺序在
-        Runtime 结果循环与本类的 abort flush 各编码一遍；happy path 与
-        异常路径现在共用本方法，顺序知识一处可读。
+        02 §8.3 状态机要求 call 先于执行：前端（及重连重放）在工具在途期间
+        就有可关联的 tool_call（output_delta 按 tool_call_id 挂靠）。调用方
+        （AgentRuntime step 7）在每个 call 执行前调用并镜像 yield。
         """
-        call_event = session.append(
+        return session.append(
             TOOL_CALL,
             {"tool_call_id": tool_call_id, "tool_name": tool_name, "args": args},
             run_id=run_id, step_id=step_id,
         )
-        events = [call_event]
-        for event_type, data in pending_events:
-            events.append(
-                session.append(event_type, data, run_id=run_id, step_id=step_id)
-            )
-        return events
+
+    def emit_pending_events(
+        self,
+        session: Any,
+        *,
+        pending_events: list[tuple[str, dict[str, Any]]],
+        run_id: str | None,
+        step_id: int | None,
+    ) -> list[SessionEvent]:
+        """持久化延迟事件（R6-7：artifact/created 等，在 tool/call 之后、
+        tool/result 之前）。与 emit_call_event / emit_result_event 共同构成
+        顺序知识的单一 owner。"""
+        return [
+            session.append(event_type, data, run_id=run_id, step_id=step_id)
+            for event_type, data in pending_events
+        ]
 
     def emit_result_event(
         self,
@@ -422,32 +469,27 @@ class ToolExecutor:
     def _flush_committed_events(
         self,
         results: list[ToolExecution | BaseException],
-        tool_calls: list[ToolCall | dict[str, Any]],
         session: Any,
         *,
         run_id: str | None,
     ) -> None:
-        """批次异常传播前，把已完成执行的 TOOL_CALL 与延迟事件落盘（R6-7）。
+        """批次异常传播前，把已完成执行的延迟事件落盘（R6-7）。
 
         artifact 已写存储、Ledger 已终态——事件若随异常一起丢弃，store 里的
         artifact 就成了无引用孤儿（旧缺陷：partial batch 失败丢已提交的
-        artifact/created 事件）。TOOL_CALL 一并补齐：正常路径由 Runtime 在结果
-        循环追加，异常路径永远到不了那里。run 归因走显式参数（此前从
-        run_context_var 隐式读取——docstring 声称不维护 Session 却经两层外
-        设置的 contextvar 写 Session，全仓最隐蔽的耦合）；无 session 时
-        （纯执行场景）无事可做。
+        artifact/created 事件）。TOOL_CALL 不在这里补：ADR-0016 §4.1 起由
+        Runtime 在批次启动前预持久化（emit_call_event），补发即重复。
+        run 归因走显式参数；无 session 时（纯执行场景）无事可做。
         """
         if session is None:
             return
         try:
-            for tool_call, result in zip(tool_calls, results):
+            for result in results:
                 if isinstance(result, BaseException):
                     continue
-                call = ToolCall.normalize(tool_call)
-                self.emit_call_events(
+                self.emit_pending_events(
                     session,
-                    tool_call_id=result.tool_call_id, tool_name=call.name,
-                    args=call.args, pending_events=result.pending_events,
+                    pending_events=result.pending_events,
                     run_id=run_id, step_id=None,
                 )
         except Exception:

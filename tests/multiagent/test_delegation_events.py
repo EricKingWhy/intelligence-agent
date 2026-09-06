@@ -163,13 +163,15 @@ class TestDelegatePendingEvents:
                 session_id="sess-exec", run_id="r1", agent_id="main",
             ),
         )
-        for ev in executions[0].pending_events:
-            pass  # executor 主管线在 emit_call_events 落盘 pending
-
-        executor.emit_call_events(
+        # ADR-0016 §4.1：TOOL_CALL 由 runtime 预持久化，pending 事件走
+        # emit_pending_events（tool/call 之后、tool/result 之前）。
+        executor.emit_call_event(
             session, tool_call_id=executions[0].tool_call_id,
             tool_name="delegate", args={"target": "coding", "task": "做"},
-            pending_events=executions[0].pending_events,
+            run_id="r1", step_id=1,
+        )
+        executor.emit_pending_events(
+            session, pending_events=executions[0].pending_events,
             run_id="r1", step_id=1,
         )
         types = [e.type for e in session._events]

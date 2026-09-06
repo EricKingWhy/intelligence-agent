@@ -107,13 +107,17 @@ async def build_runtime(
     max_steps: int,
     auto_approve: bool,
     session_store: JsonlSessionStore | None = None,
+    model_name: str | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
     模型经 create_chat_model(settings) 构造（测试替身注入点）；sandbox 由
     WorkspaceRegistry 统一创建并持久化映射（恢复时按映射还原）。
+    model_name（ADR-0016 §5）：None = 默认链；catalog 名 = 会话级选择
+    （未知名字在 web 层已 422，这里 resolve 再响亮失败一次）。
     """
-    config = ModelConfig.from_settings(settings)
+    config = (ModelConfig.from_settings(settings) if model_name is None
+              else ModelConfig.from_catalog(settings, model_name))
     model = create_chat_model(config)
     # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime

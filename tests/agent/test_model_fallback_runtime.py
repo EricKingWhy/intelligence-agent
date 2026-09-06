@@ -218,7 +218,7 @@ class TestModelFallbackInLoop:
 
         final_text = ""
         async for event in runtime.run_stream(session, "你好"):
-            if event.type == "model/delta":
+            if event.type == "text/delta":
                 final_text += event.data["delta"]
 
         assert "流式回答" in final_text
@@ -291,7 +291,7 @@ class TestStallWatchdogInLoop:
 
         final_text = ""
         async for event in runtime.run_stream(session, "你好"):
-            if event.type == "model/delta":
+            if event.type == "text/delta":
                 final_text += event.data["delta"]
 
         assert "fallback 接管完成" in final_text
@@ -322,7 +322,7 @@ class TestStallWatchdogInLoop:
 
         final_text = ""
         async for event in runtime.run_stream(session, "你好"):
-            if event.type == "model/delta":
+            if event.type == "text/delta":
                 final_text += event.data["delta"]
 
         assert final_text == "slow done"

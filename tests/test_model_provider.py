@@ -260,3 +260,34 @@ class TestFallbackModelConfig:
         settings = Settings(fallback_model_api_key="sk-fb-live", _env_file=None)
         dumped = settings.model_dump(mode="json")
         assert dumped["fallback_model_api_key"] != "sk-fb-live"
+
+    def test_zhipu_preset(self):
+        """Phase 14：zhipu 入册（fallback 异构上游，CLI fork 摘要链真实路径）。"""
+        config = ModelConfig.from_settings(
+            make_settings(
+                model_provider="zhipu",
+                model_name="glm-4.5-air",
+            )
+        )
+        assert config.provider == "zhipu"
+        assert config.model_name == "glm-4.5-air"
+        assert config.base_url == "https://open.bigmodel.cn/api/paas/v4"
+
+        with pytest.raises(ConfigError, match="MODEL_NAME"):
+            ModelConfig.from_settings(make_settings(model_provider="zhipu"))
+
+    def test_from_settings_builds_fallback_chain_with_zhipu(self):
+        """from_settings 全链（含 fallback provider=zhipu）不再抛未知 provider。"""
+        config = ModelConfig.from_settings(
+            make_settings(
+                model_provider="senseaudio",
+                model_name="deepseek-v4-flash-0731",
+                fallback_model_provider="zhipu",
+                fallback_model_name="glm-4.5-air",
+                fallback_model_api_key="zk-test",
+                fallback_model_base_url="https://open.bigmodel.cn/api/paas/v4",
+            )
+        )
+        assert config.fallback is not None
+        assert config.fallback.provider == "zhipu"
+        assert config.fallback.model_name == "glm-4.5-air"

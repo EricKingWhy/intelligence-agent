@@ -36,16 +36,40 @@ from agent_harness.config import Settings
 from agent_harness.identity import IdentityContext
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
+from agent_harness.model.config import ModelConfig
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
-    MODEL_DELTA,
+    AGENT_DELEGATION_FINISHED,
+    AGENT_DELEGATION_STARTED,
+    ARTIFACT_CREATED,
+    CONTEXT_COMPACTED,
+    MODEL_COMPLETED,
+    MODEL_FAILED,
+    MODEL_FALLBACK,
+    OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     RUN_FAILED,
+    SESSION_FORKED,
+    TEXT_DELTA,
     TOOL_CALL,
+    TOOL_FAILURE_GUARD,
     TOOL_RESULT,
+    USER_MESSAGE,
     JsonlSessionStore,
     Session,
+    SessionEvent,
 )
+from agent_harness.session.fork import (
+    ForkBoundaryError,
+    TailSummarizer,
+    fork_session,
+)
+from agent_harness.session.lineage import (
+    build_lineage_index,
+    build_lineage_tree,
+    render_lineage_tree,
+)
+from agent_harness.storage.sqlite import SqliteSessionMetaStore
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 3
@@ -64,7 +88,7 @@ class StreamRenderer:
         self._delta_open = False  # 流式正文输出中：工具行/终态行前先补换行
 
     def handle(self, event: AgentEvent) -> None:
-        if event.type == MODEL_DELTA:
+        if event.type == TEXT_DELTA:
             self._write(event.data["delta"])
             self._delta_open = True
         elif event.type == TOOL_CALL:
@@ -193,6 +217,15 @@ def main() -> None:
     if argv and argv[0] == "ingest":
         _main_ingest(argv[1:])
         return
+    if argv and argv[0] == "fork":
+        _main_fork(argv[1:])
+        return
+    if argv and argv[0] == "sessions":
+        _main_sessions(argv[1:])
+        return
+    if argv and argv[0] == "replay":
+        _main_replay(argv[1:])
+        return
     parser = argparse.ArgumentParser(description="Agent Harness CLI")
     parser.add_argument("message", help="发送给 Agent 的任务")
     args = parser.parse_args(argv)
@@ -240,6 +273,224 @@ def _main_ingest(argv: list[str]) -> None:
               f"{result.chunk_count} 个 chunk 已入索引。")
 
     asyncio.run(_entry())
+
+
+def _main_fork(argv: list[str]) -> None:
+    """CLI fork 入口（Phase 14 T5, ADR-0017 决策 6/10）：人驱动的分叉动作。
+
+    fork 是用户动作而非模型工具——不注册进任何 ToolRegistry。全链 =
+    boundary 校验 + seed + provenance + meta（fork 核心）→ copy-on-fork
+    → tail summary（默认开：主模型一次调用；--no-summary 关闭）。
+    """
+    args = _parse_fork_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        child_id = asyncio.run(
+            fork_command(
+                args.session_id, from_message=args.from_message,
+                no_summary=args.no_summary,
+            )
+        )
+    except ForkBoundaryError as error:
+        print(f"fork 失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(f"已分叉：child session = {child_id}")
+    print(f"（原会话 {args.session_id} 未改动；在新分支重发第 "
+          f"{args.from_message} 条用户消息即可继续）")
+
+
+def _parse_fork_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="agent-harness fork")
+    parser.add_argument("session_id", help="要分叉的父会话 id")
+    parser.add_argument(
+        "--from-message", type=int, required=True, metavar="N",
+        help="从父会话的第 N 条用户消息处分叉（该消息不进 seed，由你在新分支重发）",
+    )
+    parser.add_argument(
+        "--no-summary", action="store_true",
+        help="跳过 tail summary（默认对被放弃路线生成一次 LLM 摘要挂进新会话）",
+    )
+    return parser.parse_args(argv)
+
+
+async def fork_command(
+    session_id: str,
+    *,
+    from_message: int,
+    no_summary: bool,
+    workspace_dir: str | None = None,
+    write: Callable[[str], None] | None = None,
+) -> str:
+    """fork 命令的可测核心：返回 child session id。
+
+    与 run() 同一装配约定（workspace_dir 缺省取 Settings）；--no-summary
+    关闭 tail summary，否则用主模型链跑一次摘要（T4 seam）。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    workspace_root = Path(settings.workspace_dir)
+    store = JsonlSessionStore(root=workspace_root / "sessions")
+    meta_store = SqliteSessionMetaStore(workspace_root / "harness.db")
+    await meta_store.initialize()
+    workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
+    summarizer = None
+    if not no_summary:
+        from agent_harness.model.provider import create_chat_model
+
+        summarizer = TailSummarizer(
+            create_chat_model(ModelConfig.from_settings(settings))
+        )
+    child = await fork_session(
+        store, meta_store, session_id,
+        boundary_user_message_seq=from_message,
+        workspace_registry=workspace_registry,
+        summarizer=summarizer, with_tail_summary=not no_summary,
+    )
+    if write is not None:
+        write(f"child session: {child.session_id}\n")
+    return child.session_id
+
+
+# ── replay（Phase 14 T8, ADR-0017 决策 4：逻辑回放，零副作用契约）────────────
+
+
+def render_replay_event(event: SessionEvent) -> str | None:
+    """SessionEvent → 终端行（纯函数）。生命周期噪音返回 None 不渲染。
+
+    tool result 一律渲染**冻结终态**（spec 03 §6：逻辑回放不重执行、不产生
+    外部副作用）。失败事实（run/failed、model/failed、熔断、fallback）如实
+    呈现，绝不美化。
+    """
+    data = event.data
+    if event.type == USER_MESSAGE:
+        return f"\n[用户] {data.get('content', '')}"
+    if event.type == MODEL_COMPLETED:
+        content = data.get("content", "")
+        return f"[assistant] {content}" if content else None
+    if event.type == TOOL_CALL:
+        args = data.get("args", {})
+        return f"[工具] {data.get('tool_name', '')}({_collapse_args(args)})"
+    if event.type == TOOL_RESULT:
+        content = str(data.get("content", ""))
+        lines = content.splitlines() or [""]
+        preview = "\n".join(f"  │ {line}" for line in lines[:_PREVIEW_LINES])
+        more = "" if len(lines) <= _PREVIEW_LINES else f"\n  │ ... +{len(lines) - _PREVIEW_LINES} more lines"
+        return f"  → 结果（冻结）:\n{preview}{more}"
+    if event.type == RUN_FAILED:
+        return f"[run 失败] {data.get('reason', 'unspecified')}"
+    if event.type == MODEL_FAILED:
+        return f"[模型失败] {data.get('message', '')}"
+    if event.type == TOOL_FAILURE_GUARD:
+        return (f"[熔断] level={data.get('level', '')}"
+                f" consecutive_failures={data.get('consecutive_failures', '')}")
+    if event.type == MODEL_FALLBACK:
+        return (f"[fallback] {data.get('from_model', '')}→"
+                f"{data.get('to_model', '')} ({data.get('reason', '')})")
+    if event.type == AGENT_DELEGATION_STARTED:
+        return (f"[委派→{data.get('target', '')}] "
+                f"child={data.get('child_session_id', '')}")
+    if event.type == AGENT_DELEGATION_FINISHED:
+        summary = str(data.get("summary", ""))[:200]
+        return (f"[委派完成→{data.get('target', '')}] "
+                f"{data.get('status', '')}: {summary}")
+    if event.type == ARTIFACT_CREATED:
+        return f"[artifact] {str(data)[:120]}"
+    if event.type == SESSION_FORKED:
+        return (f"[fork] 来自 {data.get('parent_session_id', '')}"
+                f" @{data.get('fork_point_seq')}")
+    if event.type == CONTEXT_COMPACTED:
+        return "[context 压缩]（早期历史已摘要，原文在 JSONL）"
+    if event.type == OPERATION_RECONCILE_REQUIRED:
+        return f"[需裁决] {str(data)[:120]}"
+    # session/started, session/resumed, run/started, run/completed,
+    # memory/degraded：生命周期噪音，不渲染
+    return None
+
+
+async def replay_command(
+    session_id: str,
+    *,
+    workspace_dir: str | None = None,
+    write: Callable[[str], None] | None = None,
+) -> str:
+    """replay 命令的可测核心：返回渲染文本。
+
+    零副作用契约（测试钉死）：只经 store.read_events 只读加载——不走
+    Session.resume（那会追加 session/resumed）、不构造 runtime（无模型
+    访问）、不触碰 workspace。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    store = JsonlSessionStore(root=Path(settings.workspace_dir) / "sessions")
+    events = store.read_events(session_id)
+    if not events:
+        raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+    lines = [line for line in (render_replay_event(e) for e in events) if line]
+    output = "\n".join(lines) if lines else "（无可渲染内容）"
+    if write is not None:
+        write(output + "\n")
+    return output
+
+
+def _main_replay(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog="agent-harness replay")
+    parser.add_argument("session_id", help="要回放的历史会话 id")
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        output = asyncio.run(replay_command(args.session_id))
+    except ValueError as error:
+        print(f"replay 失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(output)
+
+
+def _main_sessions(argv: list[str]) -> None:
+    """CLI sessions 入口（Phase 14 T6）：会话列表 / lineage 树视图。"""
+    parser = argparse.ArgumentParser(prog="agent-harness sessions")
+    parser.add_argument(
+        "--tree", action="store_true",
+        help="按 lineage 树渲染（fork + delegation 两类边）",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    output = asyncio.run(sessions_command(tree=args.tree))
+    print(output)
+
+
+async def sessions_command(
+    *, tree: bool = False, workspace_dir: str | None = None
+) -> str:
+    """sessions 命令的可测核心：返回渲染文本（flat 列表或 lineage 树）。"""
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    workspace_root = Path(settings.workspace_dir)
+    store = JsonlSessionStore(root=workspace_root / "sessions")
+    meta_store = SqliteSessionMetaStore(workspace_root / "harness.db")
+    await meta_store.initialize()
+    if not tree:
+        metas = await meta_store.list_all()
+        if not metas:
+            return "（暂无会话）"
+        lines = []
+        for meta in metas:
+            origin = f" [{meta.origin}]" if meta.origin else ""
+            lines.append(f"{meta.session_id}{origin}")
+        return "\n".join(lines)
+    metas = await build_lineage_index(store, meta_store)
+    roots = build_lineage_tree(metas)
+    if not roots:
+        return "（暂无会话）"
+    return render_lineage_tree(roots)
 
 
 if __name__ == "__main__":

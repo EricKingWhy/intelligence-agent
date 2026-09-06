@@ -3,6 +3,7 @@
 持有 session_id 与已加载事件列表（内存缓存），对外提供：
     - start() / resume()  构造入口
     - append()            追加事件（分配 seq + 同步写 JSONL + 更新内存）
+    - add_listener()      追加监听器（事件落盘后实时回调，ADR-0016 §2.1）
     - derive_messages()   从事件投影模型可见 messages
     - begin_run() / end_run()  标记 Run 边界
 
@@ -12,6 +13,9 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -60,6 +64,10 @@ class Session:
         # 避免每次 append 对全量事件做 O(n) max 扫描（长会话累计 O(n²)）
         self._next_seq: int = max((e.seq for e in self._events), default=-1) + 1
         self._sandbox: Sandbox | None = sandbox
+        # 追加监听器（ADR-0016 §2.1）：事件持久化后同步回调——web 层据此实时
+        # 广播 durable 事实（含工具执行期间追加的 output_delta）。回调异常被
+        # 吞掉（落日志）：listener 是观察者，绝不能破坏 append 的持久化契约。
+        self._listeners: list[Callable[[SessionEvent], None]] = []
 
     @property
     def sandbox(self) -> Sandbox | None:
@@ -87,6 +95,17 @@ class Session:
     def since(self, marker: int) -> list[SessionEvent]:
         """返回 mark() 之后追加的事件（副本，不影响内部状态）。"""
         return list(self._events[marker:])
+
+    # ── 追加监听器（ADR-0016 §2.1）──
+
+    def add_listener(self, callback: Callable[[SessionEvent], None]) -> None:
+        """注册追加监听器：此后每条事件持久化成功后同步回调（任意线程上下文）。"""
+        self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[SessionEvent], None]) -> None:
+        """注销监听器；未注册时静默（幂等）。"""
+        with suppress(ValueError):
+            self._listeners.remove(callback)
 
     # ── 构造入口 ──
 
@@ -177,12 +196,14 @@ class Session:
         run_id: str | None = None,
         agent_id: str | None = None,
         step_id: int | None = None,
+        block_id: str | None = None,
         source_event_ids: list[str] | None = None,
         _mark_dangling: bool = False,
     ) -> SessionEvent:
         """追加一条事件：分配 seq、同步写 JSONL、更新内存。
 
         _mark_dangling 仅内部使用——在 data 中写入 dangling=true 标记。
+        block_id 是流式块标识（ADR-0016 §3.2，reasoning 块等），透传给 SessionEvent。
         事件类型必须在 EVENT_TYPES 词汇表内；STREAM_ONLY_TYPES（流式专属信号）
         拒绝持久化（invariant #4：Event ≠ Diagnostic Log）。
         """
@@ -202,6 +223,7 @@ class Session:
             run_id=run_id,
             agent_id=agent_id,
             step_id=step_id,
+            block_id=block_id,
             data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
         )
@@ -209,7 +231,38 @@ class Session:
         self._events.append(event)
         # 写盘成功后才推进计数器——失败不消耗 seq
         self._next_seq += 1
+        # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
+        for listener in self._listeners:
+            try:
+                listener(event)
+            except Exception:
+                logger.exception(
+                    "session listener 回调失败（session=%s, event=%s）",
+                    self.session_id, event.type,
+                )
         return event
+
+    def adopt_history(self, events: list[SessionEvent]) -> list[SessionEvent]:
+        """移植既有事件（fork seed 的唯一 owner，ADR-0017 决策 3）。
+
+        重编 seq（本聚合按序分配，child 局部单调），逐字保留原 event_id /
+        time / type / data / run_id / agent_id / step_id / source_event_ids，
+        session_id 改写为本会话。类型必须在 EVENT_TYPES 词表内（流式专属拒绝）。
+        """
+        adopted: list[SessionEvent] = []
+        for event in events:
+            if event.type in STREAM_ONLY_TYPES:
+                raise ValueError(
+                    f"流式专属事件 '{event.type}' 不得移植进 durable log（invariant #4）"
+                )
+            if event.type not in EVENT_TYPES:
+                raise ValueError(f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中")
+            moved = replace(event, seq=self._next_seq, session_id=self.session_id)
+            self._store.append_event(self.session_id, moved)
+            self._events.append(moved)
+            self._next_seq += 1
+            adopted.append(moved)
+        return adopted
 
     def derive_messages(self) -> list[AnyMessage]:
         """从已加载事件投影出模型可见 messages（委托纯函数）。"""
