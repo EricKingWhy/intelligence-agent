@@ -9,6 +9,7 @@
 import type { AgentEvent, ConversationState, Delegation, ModelSegment, ToolCall, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
 import { parseArtifactMarker } from './toolShapes';
+import { quarantineRecord, validateEvent } from './eventValidate';
 
 export function initConversation(session_id: string): ConversationState {
   return {
@@ -26,6 +27,7 @@ export function initConversation(session_id: string): ConversationState {
     cost_usd: null,
     trace_id: null,
     model_fallback: null,
+    seenSeqs: new Set(),
   };
 }
 
@@ -101,7 +103,27 @@ function cloneTool(t: ToolCall): ToolCall {
  * 既有条目永不改写、顺序不变；旧 state 的 events 视图会随后续追加继续增长，
  * 消费端只持有最新 state（useSession 管线：局部 conv 折叠 + setConversation
  * 提交，无消费者把 events 放进 memo/useEffect 依赖），不受影响。 */
-export function applyEvent(state: ConversationState, event: AgentEvent): ConversationState {
+export function applyEvent(state: ConversationState, raw: AgentEvent): ConversationState {
+  // T1（#94）第一道闸——帧级形状校验（spec 02 §14）：完全不可辨的帧隔离进
+  // unknown_events（UnknownSurface 兜底协议，永不静默丢弃），不投影、不进轮次。
+  const checked = validateEvent(raw);
+  if (!checked.ok) {
+    const quarantined = quarantineRecord(raw);
+    state.events.push(quarantined);
+    const next: ConversationState = { ...state };
+    next.unknown_events = [...next.unknown_events, quarantined];
+    return next;
+  }
+  const event = checked.event;
+
+  // T1（#94）第二道闸——at-least-once 去重（spec 02 §6.1/6.3）：重复 seq 的
+  // 持久事实整帧丢弃——不进 events 日志、不投影（重复投递不得重复任何 UI 块）。
+  // null seq = ephemeral 流式信号（model/delta 等，后端契约 seq=None），永不去重。
+  // 精确重复判定；乱序小窗重排 DEFER（ADR-0016）——未见过的回跳 seq 照常应用。
+  // 去重键本轮取裸 seq：SSE 帧不携带 event_id（后端 _event_to_sse_dict 形状），
+  // seq 每 session 单调（契约 C5）；event_id 优先键的升级路径记 ADR-0016。
+  if (event.seq !== null && state.seenSeqs.has(event.seq)) return state;
+
   // Inspector Timeline 真相源：流经的每个事件原样追加（不含 model/delta 折叠）。
   // 先落地日志再做投影——即使投影分支抛出，事件也不从日志丢失。
   state.events.push(event);
@@ -464,6 +486,11 @@ export function applyEvent(state: ConversationState, event: AgentEvent): Convers
       break;
   }
 
+  // T1（#94）幂等标记在投影成功之后（seen = applied，spec 02 §6.1）：投影分支
+  // 若抛出，seq 不入册——at-least-once 重投会重新投影而非被误判为重复丢弃；
+  // 帧本身已先落地 events 日志，真相无损（崩溃路径下日志可能双行，是可见痕迹
+  // 而非事实丢失）。
+  if (event.seq !== null) next.seenSeqs.add(event.seq);
   return next;
 }
 

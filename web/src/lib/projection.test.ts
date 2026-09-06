@@ -16,6 +16,7 @@ describe('initConversation', () => {
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, model_fallback: null,
+      seenSeqs: new Set(),
     });
   });
 });
@@ -1127,5 +1128,58 @@ describe('Phase 13 — delegation 投影（ADR-0015）', () => {
     s = applyEvent(s, finished('child-1', 'completed', 'done'));
     expect(s.turns[0]).not.toBe(turn1Before);
     expect(s.turns[1]).toBe(turn2Before);
+  });
+});
+
+describe('T1 — seq 幂等去重 + 帧校验（#94，spec 02 §6/§14）', () => {
+  it('重复 seq 的持久事件整帧丢弃（at-least-once 不重复投影）', () => {
+    const first = ev({ type: EventType.USER_MESSAGE, data: { content: 'hi', step: 1 }, seq: 5 });
+    const s1 = applyEvent(initConversation('s'), first);
+    expect(s1.events).toHaveLength(1);
+    const s2 = applyEvent(s1, { ...first });
+    expect(s2.events).toHaveLength(1);
+    expect(s2.turns).toHaveLength(1);
+    expect(s2.turns[0].user_message).toBe('hi');
+  });
+
+  it('重复 seq 不重复进 events 日志，也不产生 unknown_events', () => {
+    const e = ev({ type: EventType.MODEL_COMPLETED, data: { content: 'x', step: 1 }, seq: 2 });
+    const s = applyEvent(applyEvent(initConversation('s'), e), { ...e });
+    expect(s.events).toHaveLength(1);
+    expect(s.unknown_events).toHaveLength(0);
+  });
+
+  it('null seq（model/delta 等流式帧）永不去重', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'a' }, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'b' }, step_id: 1 }));
+    expect(s.turns[0].model.text).toBe('ab');
+  });
+
+  it('未见过的回跳 seq（乱序补达）不丢弃——精确重复才幂等，乱序小窗 DEFER', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, seq: 5 }));
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, seq: 3 }));
+    expect(s.events).toHaveLength(2);
+    expect(s.run_status).toBe('completed');
+  });
+
+  it('畸形帧（type 非字符串）隔离进 unknown_events——不崩、不投影、verbatim 留档', () => {
+    const s = applyEvent(
+      initConversation('s'),
+      { data: {}, seq: 1, run_id: null, step_id: null, type: 123 } as unknown as AgentEvent,
+    );
+    expect(s.unknown_events).toHaveLength(1);
+    expect(s.unknown_events[0].type).toBe('malformed/event');
+    expect(s.turns).toHaveLength(0);
+    expect(s.events).toHaveLength(1);
+  });
+
+  it('缺 data 的帧不崩溃：校验层归一化为 {}（原 data.content 直取的 TypeError 向量）', () => {
+    const s = applyEvent(
+      initConversation('s'),
+      { type: EventType.USER_MESSAGE, seq: null, run_id: null, step_id: null } as unknown as AgentEvent,
+    );
+    expect(s.turns).toHaveLength(1);
+    expect(s.turns[0].user_message).toBe('');
   });
 });
