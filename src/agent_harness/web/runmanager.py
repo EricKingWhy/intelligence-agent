@@ -98,12 +98,20 @@ class ManagedRun:
         self._fanout(to_agent_event(event))
 
     def finish(self) -> None:
-        """run task 终结：标记终态、撤销孤儿计时、广播哨兵。"""
+        """run task 终结：标记终态、撤销孤儿计时、广播哨兵。
+
+        哨兵必达：满队列丢最旧腾位（review 修复——满队列吞哨兵会让该
+        订阅者的 SSE 流永不收尾，直到客户端自行断开）。"""
         self.terminal = True
         self._cancel_orphan_timer()
         for sub in list(self.subscribers.values()):
-            with contextlib.suppress(asyncio.QueueFull):
+            try:
                 sub.queue.put_nowait(_DONE)
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    sub.queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    sub.queue.put_nowait(_DONE)
 
     @property
     def last_enqueued_seq(self) -> int:

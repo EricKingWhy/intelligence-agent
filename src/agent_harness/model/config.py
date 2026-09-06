@@ -68,7 +68,8 @@ def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
     配置错误在此响亮失败（未知 provider / 重名 / 非法形状），绝不静默降级
     ——错误的 catalog 会让"会话级选模型"变成"永远落到默认链"的隐性 bug。
     """
-    raw = settings.agent_models
+    raw = (settings.agent_models.get_secret_value()
+           if isinstance(settings.agent_models, SecretStr) else settings.agent_models)
     if not raw.strip():
         return []
     try:

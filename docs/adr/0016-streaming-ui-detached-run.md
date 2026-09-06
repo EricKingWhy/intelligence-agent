@@ -28,7 +28,7 @@
 - 断连（EventSourceResponse 取消 SSE generator）只做 `unsubscribe`，**不再取消 run**。这是对 Phase 9 取消臂语义的有意修订（原语义保留在 `run_stream` 层：消费者 aclose 仍触发取消收尾，web 层不再利用它）。
 - 广播层（web 新增 `RunManager`）：
   - 每 session 至多一个在途 run（重复 POST 同一 session 不可能——session_id 服务端生成）。
-  - subscriber = 有界 `asyncio.Queue`（上限 2000 帧）；溢出 → 该 subscriber 被移除（客户端走重连续传，transport 层自愈）。run 侧 `put_nowait`，**慢客户端永不阻塞 Agent Loop**（02 §13.1）。
+  - subscriber = 有界 `asyncio.Queue`（上限 2000 帧）；满时**丢最旧保最新**（seq gap 让客户端检测并走 after_seq 重连自愈，02 §16.3；实现评审修订：原"移除 subscriber"方案会让断连重连路径复杂化，丢旧在语义上等价且自愈性更好）。run 侧 `put_nowait`，**慢客户端永不阻塞 Agent Loop**（02 §13.1）。
   - 事件合并去重：subscriber 队列按 seq 幂等合并——`seq is None`（stream-only）总是入队；durable 事件仅当 `seq > 已入队最大 seq` 才入队。durable 事实的唯一来源是 `Session.append`，因此挂一个 session 级 listener 即可实时捕获执行期间追加的一切事件（含 tool 输出 delta），与 `_drive` 的镜像 yield 天然汇流不重复。
   - run task 结束 → 向所有 subscriber 发 sentinel，SSE 流正常收尾（终态帧已先行）。
 - **孤儿回收**：零 subscriber 连续 `run_disconnect_grace_seconds`（默认 300s，Settings 可覆盖）→ run task 被 cancel，取消臂正常收尾，`run/failed(reason=orphaned)`。有 subscriber 期间不计时；run 自然完成则无事发生。max_steps/tool timeout/流看门狗继续兜底长 run，不另设总寿限。
