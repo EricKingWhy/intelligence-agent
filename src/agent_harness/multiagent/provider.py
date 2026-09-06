@@ -18,7 +18,9 @@ child 的边界（都在 activate 注入的 factory/registry 里固化）：
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
@@ -156,6 +158,9 @@ class InProcessSubagentProvider:
         # 全文交父侧 artifact 管线（tool result 携带 artifact_ref）。
         self._summary_limit = 8192
         self._overflow_configured = False
+        # 并发 child 封顶（#90, ADR-0015 决策 13）：超出排队不失败。
+        self._active_children: asyncio.Semaphore | None = None
+        self._max_active_children = 0
         # 子会话观测挂点（未来 Agent Hub / lineage 消费；测试断言共享 sandbox）。
         self.last_child_sessions: list[Session] = []
 
@@ -169,6 +174,7 @@ class InProcessSubagentProvider:
         parent_session_id: str,
         summary_limit: int = 8192,
         overflow_configured: bool = False,
+        max_active_children: int = 4,
     ) -> None:
         """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。"""
         self._factory = factory
@@ -178,6 +184,10 @@ class InProcessSubagentProvider:
         self._parent_session_id = parent_session_id
         self._summary_limit = summary_limit
         self._overflow_configured = overflow_configured
+        self._max_active_children = max_active_children
+        self._active_children = (
+            asyncio.Semaphore(max_active_children) if max_active_children > 0 else None
+        )
         self._activated = True
 
     def profile(self, target: str) -> AgentSpec:
@@ -200,6 +210,11 @@ class InProcessSubagentProvider:
         if constraints:
             full_task = task + "\n\n约束：\n" + "\n".join(f"- {c}" for c in constraints)
 
+        # 并发 child 封顶（#90）：超出排队等待，不失败不丢弃。
+        async with (self._active_children or nullcontext(None)):
+            return await self._run_child(spec, full_task)
+
+    async def _run_child(self, spec: AgentSpec, full_task: str) -> SubAgentResult:
         # child sandbox = 父的同一实例（spec §9：coding 的改动 review 直接可见）
         parent_sandbox = self._workspace_registry.get(self._parent_session_id)
         child_session = Session(
@@ -215,7 +230,7 @@ class InProcessSubagentProvider:
         status = ("completed" if run_result.status == "completed" else "failed")
         logger.info(
             "子代理 '%s' 完成：status=%s child_session=%s steps=%s",
-            target, run_result.status, child_session.session_id, run_result.steps,
+            spec.name, run_result.status, child_session.session_id, run_result.steps,
         )
         fields = collect_result_fields(child_session.events, summary=run_result.final_text)
         summary = run_result.final_text

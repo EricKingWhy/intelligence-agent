@@ -12,6 +12,7 @@ tracer bullet 契约（阻塞串行最小版）：
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -271,3 +272,85 @@ class TestRepeatedDelegationBreaker:
         levels = [e.data["level"] for e in guard_events]
         assert "soft" in levels and "hard" in levels
         assert guard_events[-1].data["consecutive_failures"] == 6
+
+
+class _SlowChildModel(ScriptedModel):
+    """ainvoke 睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
+
+    def __init__(self, delay: float, responses_count: int = 12) -> None:
+        super().__init__([AIMessage(content="child 完成") for _ in range(responses_count)])
+        self._delay = delay
+        self.in_flight = 0
+        self.peak = 0
+
+    async def ainvoke(self, messages, **kwargs):
+        import asyncio
+
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(self._delay)
+            return await super().ainvoke(messages, **kwargs)
+        finally:
+            self.in_flight -= 1
+
+
+class TestBlockingParallelDelegation:
+    """#90：一轮多个 delegate 并发执行（active_children 封顶 + 结果隔离）。"""
+
+    def _parallel_tool(self, tmp_path: Path, child_delay: float,
+                       max_active: int) -> tuple[DelegateTool, InProcessSubagentProvider]:
+        child_model = _SlowChildModel(child_delay)
+        tool, _, _, provider = _activated_tool(tmp_path, child_model=child_model)
+        provider.activate(
+            factory=provider._factory,
+            source_registry=provider._source_registry,
+            session_store=provider._session_store,
+            workspace_registry=provider._workspace_registry,
+            parent_session_id=provider._parent_session_id,
+            max_active_children=max_active,
+        )
+        return tool, provider
+
+    @pytest.mark.asyncio
+    async def test_three_delegates_run_concurrently(self, tmp_path):
+        import time
+
+        tool, _ = self._parallel_tool(tmp_path, child_delay=0.3, max_active=3)
+        calls = [_args("coding", f"任务{i}") for i in range(3)]
+
+        t0 = time.perf_counter()
+        results = await asyncio.gather(*[tool.execute(c) for c in calls])
+        wall = time.perf_counter() - t0
+
+        assert all(r.ok for r in results)
+        assert wall < 0.9, f"并发执行应远快于串行 0.9s，实际 {wall:.2f}s"
+
+    @pytest.mark.asyncio
+    async def test_active_children_capped_and_no_loss(self, tmp_path):
+
+        tool, provider = self._parallel_tool(tmp_path, child_delay=0.3, max_active=2)
+        calls = [_args("coding", f"任务{i}") for i in range(4)]
+
+        results = await asyncio.gather(*[tool.execute(c) for c in calls])
+
+        assert all(r.ok for r in results), "封顶下排队不丢失"
+        assert provider._factory._model.peak <= 2, (
+            f"峰值在飞 {provider._factory._model.peak} 超过 max_active_children=2"
+        )
+
+    @pytest.mark.asyncio
+    async def test_child_failure_isolated_from_batch(self, tmp_path):
+        child_model = ScriptedModel([
+            AIMessage(content="ok1"), AIMessage(content=""),
+            AIMessage(content="ok3"),
+        ])
+        tool, _, _, provider = _activated_tool(tmp_path, child_model=child_model)
+        tool = DelegateTool(provider, max_delegations=99)
+
+        results = await asyncio.gather(*[
+            tool.execute(_args("coding", f"任务{i}")) for i in range(3)
+        ])
+
+        assert results[0].ok and results[2].ok
+        assert not results[1].ok, "个别 child 失败不影响同批其他 child"
