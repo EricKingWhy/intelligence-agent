@@ -4,6 +4,9 @@ Provider 预设表是唯一允许出现厂商细节的地方。
 未知 provider 在这里就抛错，而不是等到网络请求失败才发现。
 """
 
+import json
+from dataclasses import dataclass
+
 from pydantic import SecretStr
 
 from agent_harness.config import Settings
@@ -41,6 +44,75 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "model_name": "",
     },
 }
+
+
+@dataclass(frozen=True)
+class ModelCatalogEntry:
+    """AGENT_MODELS 的一个可选模型（ADR-0016 §5，D-B②）。
+
+    api_key 缺省回落 MODEL_API_KEY；base_url 缺省回落 provider 预设；
+    temperature 缺省回落全局 TEMPERATURE。SecretStr 待遇与 Settings 层一致。
+    """
+
+    name: str
+    provider: str
+    model_name: str
+    base_url: str | None = None
+    api_key: SecretStr | None = None
+    temperature: float | None = None
+
+
+def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
+    """解析 AGENT_MODELS（JSON 数组）；空 = 无可选模型（默认链照旧）。
+
+    配置错误在此响亮失败（未知 provider / 重名 / 非法形状），绝不静默降级
+    ——错误的 catalog 会让"会话级选模型"变成"永远落到默认链"的隐性 bug。
+    """
+    raw = settings.agent_models
+    if not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ConfigError(f"AGENT_MODELS 不是合法 JSON: {error}") from error
+    if not isinstance(parsed, list):
+        raise ConfigError("AGENT_MODELS 必须是 JSON 数组")
+    entries: list[ModelCatalogEntry] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, dict):
+            raise ConfigError("AGENT_MODELS 每个条目必须是对象")
+        name = item.get("name")
+        provider = item.get("provider")
+        model_name = item.get("model_name", "")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError("AGENT_MODELS 条目缺少非空 name")
+        if name in seen:
+            raise ConfigError(f"AGENT_MODELS 条目重名: {name!r}")
+        seen.add(name)
+        if not isinstance(provider, str) or provider not in PROVIDER_PRESETS:
+            raise ConfigError(
+                f"AGENT_MODELS 条目 {name!r} 的 provider 未知: {provider!r}，"
+                f"可选: {sorted(PROVIDER_PRESETS)}"
+            )
+        if not isinstance(model_name, str) or not model_name:
+            model_name = PROVIDER_PRESETS[provider]["model_name"]
+        if not model_name:
+            raise ConfigError(
+                f"AGENT_MODELS 条目 {name!r} 缺少 model_name"
+                f"（provider {provider!r} 无预设默认）"
+            )
+        api_key = item.get("api_key")
+        temperature = item.get("temperature")
+        if temperature is not None and not isinstance(temperature, (int, float)):
+            raise ConfigError(f"AGENT_MODELS 条目 {name!r} 的 temperature 必须是数字")
+        entries.append(ModelCatalogEntry(
+            name=name, provider=provider, model_name=model_name,
+            base_url=item.get("base_url") or None,
+            api_key=SecretStr(api_key) if isinstance(api_key, str) and api_key else None,
+            temperature=temperature,
+        ))
+    return entries
 
 
 class ModelConfig:
@@ -82,17 +154,56 @@ class ModelConfig:
             temperature=settings.temperature,
             key_env="MODEL_API_KEY",
         )
-        # FALLBACK_MODEL_PROVIDER 为空 = 单级（无 fallback），静默缺省。
-        if settings.fallback_model_provider:
-            config.fallback = cls._single_from(
-                provider=settings.fallback_model_provider,
-                model_name=settings.fallback_model_name,
-                api_key=settings.fallback_model_api_key.get_secret_value(),
-                base_url=settings.fallback_model_base_url,
-                temperature=settings.temperature,
-                key_env="FALLBACK_MODEL_API_KEY",
-            )
+        config.fallback = cls._fallback_from(settings)
         return config
+
+    @classmethod
+    def _fallback_from(cls, settings: Settings) -> "ModelConfig | None":
+        """settings 的 fallback 模型（ADR-0014 决策 14）；未配置 = None。
+
+        from_settings 与 from_catalog 共享：会话级选择只替换 primary，
+        fallback 链永不被 catalog 选择静默丢弃。
+        """
+        # FALLBACK_MODEL_PROVIDER 为空 = 单级（无 fallback），静默缺省。
+        if not settings.fallback_model_provider:
+            return None
+        return cls._single_from(
+            provider=settings.fallback_model_provider,
+            model_name=settings.fallback_model_name,
+            api_key=settings.fallback_model_api_key.get_secret_value(),
+            base_url=settings.fallback_model_base_url,
+            temperature=settings.temperature,
+            key_env="FALLBACK_MODEL_API_KEY",
+        )
+
+    @classmethod
+    def from_catalog(cls, settings: Settings, name: str) -> "ModelConfig":
+        """按 catalog 名解析会话级模型（ADR-0016 §5，D-B②）。
+
+        未知名字响亮失败（web 层映射 422）。fallback 链语义不动（ADR-0014）：
+        catalog 项只替换 primary，fallback 仍由 FALLBACK_MODEL_* 决定。
+        """
+        entries = parse_model_catalog(settings)
+        entry = next((e for e in entries if e.name == name), None)
+        if entry is None:
+            raise ConfigError(
+                f"未知模型: {name!r}，可选: "
+                f"{[e.name for e in entries] + ['（不传 model 参数 = 默认链）']}"
+            )
+        api_key = (entry.api_key.get_secret_value() if entry.api_key is not None
+                   else settings.model_api_key.get_secret_value())
+        resolved = cls(
+            provider=entry.provider,
+            model_name=entry.model_name,
+            api_key=api_key,
+            base_url=(entry.base_url
+                      or PROVIDER_PRESETS[entry.provider]["model_base_url"]),
+            temperature=(entry.temperature if entry.temperature is not None
+                         else settings.temperature),
+        )
+        # fallback 链语义不动（ADR-0014）：catalog 选择只替换 primary。
+        resolved.fallback = cls._fallback_from(settings)
+        return resolved
 
     @classmethod
     def _single_from(

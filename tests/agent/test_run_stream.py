@@ -1,7 +1,7 @@
 """AgentRuntime.run_stream() 流式契约测试（Phase 9）。
 
 验证：
-1. run_stream 逐 chunk yield model/delta（纯流式信号，无 seq）。
+1. run_stream 合帧 yield text/delta（ADR-0016：durable，带 seq）。
 2. 每个持久化事件都有镜像 AgentEvent（带 seq）。
 3. 流式 delta 拼接后等于 model/completed 的 content。
 4. run() 向后兼容（用 ainvoke，不依赖 astream）。
@@ -18,10 +18,10 @@ from langchain_core.messages import AIMessage
 from agent_harness.agent import AgentRuntime
 from agent_harness.session import (
     MODEL_COMPLETED,
-    MODEL_DELTA,
     MODEL_STARTED,
     RUN_COMPLETED,
     RUN_STARTED,
+    TEXT_DELTA,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -45,7 +45,7 @@ def _build_runtime(model, tmp_path) -> AgentRuntime:
 
 @pytest.mark.asyncio
 async def test_run_stream_yields_model_delta_chunks(tmp_path):
-    """model/delta 逐 chunk 流式输出，拼接等于 model/completed 的 content。"""
+    """text/delta 合帧流式输出，拼接等于 model/completed 的 content。"""
     # ScriptedModel 默认 chunk_size=8，把 "Hello, world!" 切成 2 个 chunk
     model = ScriptedModel([AIMessage(content="Hello, world!")])
     runtime = _build_runtime(model, tmp_path)
@@ -53,17 +53,18 @@ async def test_run_stream_yields_model_delta_chunks(tmp_path):
 
     events = [e async for e in runtime.run_stream(session, "hi")]
 
-    deltas = [e for e in events if e.type == MODEL_DELTA]
+    deltas = [e for e in events if e.type == TEXT_DELTA]
     completed = [e for e in events if e.type == MODEL_COMPLETED]
 
-    assert len(deltas) >= 2, f"期望至少 2 个 delta chunk，实际 {len(deltas)}"
+    # 合帧（30ms 窗口内快速 chunk）：ScriptedModel 的两个 chunk 在窗口内
+    # 到达 → 一条 text/delta（S19 禁逐 token 行）；拼接仍 = content。
+    assert len(deltas) >= 1
     assert len(completed) == 1
-    # delta 拼接 = model/completed 的 content
     assembled = "".join(d.data["delta"] for d in deltas)
     assert assembled == completed[0].data["content"] == "Hello, world!"
-    # delta 是 ephemeral 信号：无 seq
+    # delta 是 durable 事实：合帧事件带 seq（ADR-0016 §3.1）
     for d in deltas:
-        assert d.seq is None, "model/delta 不应该有 seq（不持久化）"
+        assert d.seq is not None, "text/delta 合帧后必须持久化（带 seq）"
 
 
 @pytest.mark.asyncio
@@ -78,8 +79,8 @@ async def test_run_stream_yields_model_started_before_delta(tmp_path):
 
     assert MODEL_STARTED in types
     started_idx = types.index(MODEL_STARTED)
-    first_delta_idx = next((i for i, t in enumerate(types) if t == MODEL_DELTA), len(types))
-    assert started_idx < first_delta_idx, "model/started 必须在第一个 model/delta 之前"
+    first_delta_idx = next((i for i, t in enumerate(types) if t == TEXT_DELTA), len(types))
+    assert started_idx < first_delta_idx, "model/started 必须在第一个 text/delta 之前"
 
 
 @pytest.mark.asyncio
@@ -156,8 +157,15 @@ async def test_run_stream_and_run_produce_same_session_events(tmp_path):
     await runtime_invoke.run(session_invoke, "hi")
 
     # 比较 SessionEvent 的 type + data（seq 因为独立 session 会不同，不比 seq）
+    # ADR-0016 §3.1：run_stream 现在额外产生合帧流式事实（text/delta）——
+    # run() 走 ainvoke 无流式 chunk。两者的【非流式事实】（user/run/model/tool
+    # 生命周期）仍必须逐条一致；流式增量是 stream 专属的 durable 补充。
+    stream_fact_types = {TEXT_DELTA, "reasoning/started", "reasoning/delta",
+                         "reasoning/completed", "reasoning/interrupted"}
+
     def shape(session: Session):
-        return [(e.type, e.data) for e in session.events]
+        return [(e.type, e.data) for e in session.events
+                if e.type not in stream_fact_types]
 
     assert shape(session_stream) == shape(session_invoke), \
-        "run_stream 和 run 应该产生同样的 SessionEvent 事实源"
+        "run_stream 和 run 的非流式 SessionEvent 事实源应该一致"

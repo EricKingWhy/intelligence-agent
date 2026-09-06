@@ -115,8 +115,10 @@ async def test_runtime_persists_ledger_before_tool_conversation_events(
     assert operation is not None
     assert operation.state is OperationState.SUCCEEDED
     event_types = [event.type for event in session.events]
-    first_model = event_types.index(MODEL_COMPLETED)
-    assert first_model < event_types.index(TOOL_CALL) < event_types.index(TOOL_RESULT)
+    # ADR-0016 §4.1：TOOL_CALL 由 runtime 预持久化（先于延迟写入的
+    # model/completed），不变量收敛为 call < result 的会话配对 + Ledger
+    # RUNNING 先于 execute（上方 state_during_execute 断言）。
+    assert event_types.index(TOOL_CALL) < event_types.index(TOOL_RESULT)
 
 
 @pytest.mark.asyncio

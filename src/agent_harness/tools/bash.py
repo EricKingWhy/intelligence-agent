@@ -61,14 +61,21 @@ class BashTool(Tool):
 
         sandbox.exec 是同步阻塞调用（子进程最长跑满超时），卸载到工作线程
         执行——否则 event loop 会被单条命令冻结整个异步服务器（D10）。
+        执行期 stdout/stderr 经 sink 逐段流式（ADR-0016 §4.2）：sink 由
+        ToolExecutor 在执行期放入 contextvar，asyncio.to_thread 复制 context
+        使工作线程内可读；无 sink（纯执行场景）= None，sandbox 不回调。
         """
+        from agent_harness.tooling.output_stream import tool_output_sink_var
+
         # 协作取消（C1）：asyncio 超时/断连只能取消 await，杀不掉已在
         # 工作线程里跑的子进程——通过 cancel_event 通知 sandbox 击杀进程树，
         # "超时/取消返回"之后命令不再继续改 workspace（R7-1 的执行层闭环）。
         cancel_event = threading.Event()
+        sink = tool_output_sink_var.get()
         try:
             result = await asyncio.to_thread(
                 self._sandbox.exec, args.command, cancel_event=cancel_event,
+                on_output=(sink.push if sink is not None else None),
             )
         except asyncio.CancelledError:
             cancel_event.set()

@@ -44,13 +44,13 @@ from agent_harness.session import (
     ARTIFACT_CREATED,
     CONTEXT_COMPACTED,
     MODEL_COMPLETED,
-    MODEL_DELTA,
     MODEL_FAILED,
     MODEL_FALLBACK,
     OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     RUN_FAILED,
     SESSION_FORKED,
+    TEXT_DELTA,
     TOOL_CALL,
     TOOL_FAILURE_GUARD,
     TOOL_RESULT,
@@ -88,7 +88,7 @@ class StreamRenderer:
         self._delta_open = False  # 流式正文输出中：工具行/终态行前先补换行
 
     def handle(self, event: AgentEvent) -> None:
-        if event.type == MODEL_DELTA:
+        if event.type == TEXT_DELTA:
             self._write(event.data["delta"])
             self._delta_open = True
         elif event.type == TOOL_CALL:

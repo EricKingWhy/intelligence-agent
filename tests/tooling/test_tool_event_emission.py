@@ -87,25 +87,30 @@ def _executor(*tools: Tool) -> ToolExecutor:
 
 
 @pytest.mark.asyncio
-async def test_emit_call_events_orders_call_before_deferred(tmp_path):
-    """TOOL_CALL → 延迟事件（R6-7：artifact/created 不得前向引用 tool_call），
-    顺序知识单一持有。"""
+async def test_emit_call_event_then_pending_events_order(tmp_path):
+    """TOOL_CALL（执行前，ADR-0016 §4.1）→ 延迟事件（R6-7：artifact/created
+    不得前向引用 tool_call），顺序知识单一持有。"""
     from tests.conftest import make_session
 
     session = make_session(tmp_path)
     executor = _executor(EchoTool())
-    events = executor.emit_call_events(
+    call_event = executor.emit_call_event(
         session,
         tool_call_id="call-1", tool_name="bash",
         args={"command": "ls"},
+        run_id="run-1", step_id=2,
+    )
+    pending = executor.emit_pending_events(
+        session,
         pending_events=[("artifact/created", {"artifact_id": "a1"})],
         run_id="run-1", step_id=2,
     )
-    types = [e.type for e in events]
-    assert types == [TOOL_CALL, "artifact/created"]
-    assert events[0].data["tool_call_id"] == "call-1"
-    assert events[0].run_id == "run-1" and events[0].step_id == 2
-    assert [e.type for e in session.events[-2:]] == types, "事件已持久化"
+    assert call_event.type == TOOL_CALL
+    assert call_event.data["tool_call_id"] == "call-1"
+    assert call_event.run_id == "run-1" and call_event.step_id == 2
+    assert [e.type for e in pending] == ["artifact/created"]
+    assert [e.type for e in session.events[-2:]] == [TOOL_CALL, "artifact/created"], \
+        "事件已持久化"
 
 
 @pytest.mark.asyncio
@@ -127,7 +132,11 @@ async def test_emit_result_event_wraps_json_content(tmp_path):
 async def test_batch_abort_attributes_run_id_from_operation_context(tmp_path, monkeypatch):
     """批次 abort 路径的 run 归因走显式 operation_context.run_id——不再从
     runtime 两层外设置的 contextvar 隐式读取（docstring 说"不维护 Session"
-    却经隐式 seam 写 Session，全仓最隐蔽的耦合）。"""
+    却经隐式 seam 写 Session，全仓最隐蔽的耦合）。
+
+    ADR-0016 §4.1 flush 语义：TOOL_CALL 由 Runtime 预持久化（不在 flush 补），
+    flush 只补已提交执行的延迟事件（artifact/created 等）——本测试直接调
+    execute_batch，预持久化缺席，因此只断言 pending 事件归因。"""
     from tests.conftest import make_session
 
     # 显式证明不再依赖 contextvar：即使它带着另一个 run_id 也不用
@@ -156,6 +165,8 @@ async def test_batch_abort_attributes_run_id_from_operation_context(tmp_path, mo
     finally:
         run_context_var.reset(token)
 
-    call_events = [e for e in session.events if e.type == TOOL_CALL]
-    assert len(call_events) == 1, "已完成执行的 call 必须在异常传播前落盘"
-    assert call_events[0].run_id == "opctx-run"
+    # flush 通道：本批没有 pending 事件（overflow save 本身失败），核心断言
+    # 是 flush 不重复、不误归因——TOOL_CALL 归因由 runtime 预持久化路径
+    # （test_runtime_persists_ledger_before_tool_conversation_events）覆盖。
+    assert not [e for e in session.events if e.type == TOOL_CALL], \
+        "flush 不补 TOOL_CALL（预持久化契约，补发即重复）"

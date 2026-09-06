@@ -63,8 +63,9 @@ class AgentEvent:
 
     设计：
     - type 复用 SessionEvent 词汇（如 model/completed、tool/call），加上
-      纯流式信号（model/started、model/delta）。
-    - seq 对应 SessionEvent 的 seq；纯流式信号（model/delta）无 seq = None，
+      纯流式信号（model/started），以及 ADR-0016 起持久化的合帧流式事实
+      （model/delta、reasoning/*、tool/output_delta）。
+    - seq 对应 SessionEvent 的 seq；纯流式信号（model/started）无 seq = None，
       表示"这条没持久化，刷新后从 model/completed 重建"。
     - data 是事件载荷 dict，形状跟 SessionEvent.data 一致（持久化事件）
       或流式专属（delta 的 {"delta": "..."} 等）。
@@ -77,8 +78,11 @@ class AgentEvent:
     seq: int | None = None
     run_id: str | None = None
     step_id: int | None = None
+    # 流式块标识（ADR-0016 §3.2）：durable 事件从 SessionEvent.block_id 透传；
+    # stream-only 信号（model/started）无块归属，恒 None。
+    block_id: str | None = None
     # time：事件真值时间（ISO UTC ms）。durable 事件从 SessionEvent.time 透传，
-    # stream-only 信号（model/started、model/delta）用发送时刻——它们不持久化，
+    # stream-only 信号（model/started）用发送时刻——它们不持久化，
     # 没有事实源时间，发送时刻是最接近的近似（spec 11 §4 / issue #43）。
     time: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="milliseconds"))
 
@@ -96,7 +100,7 @@ def to_agent_event(event: SessionEvent) -> AgentEvent:
     不再在 run_stream 的 11 处手动拼装里逐个漂移（不变量 #4）。
 
     SessionEvent 永远有 seq ≥ 0，所以映射产物始终 durable；
-    纯流式信号（model/started、model/delta）不经此函数构造——
+    纯流式信号（model/started）不经此函数构造——
     它们在 runtime 里直接 new AgentEvent(..., seq=None)。
     """
     return AgentEvent(
@@ -105,5 +109,6 @@ def to_agent_event(event: SessionEvent) -> AgentEvent:
         seq=event.seq,
         run_id=event.run_id,
         step_id=event.step_id,
+        block_id=event.block_id,
         time=event.time,
     )
