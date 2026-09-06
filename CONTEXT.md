@@ -357,3 +357,33 @@ _Avoid_: tool circuit breaker（我们做的是指纹级不是 provider 级）, 
 **Model Fallback**:
 主 model provider 瞬时故障（timeout / 5xx / 429 / 连接失败）时切到备用 provider 的运行时韧性机制。非瞬时故障（认证/参数/不支持 tool）不切、直接报错。决策在 provider/model 层（Agent Loop 不感知），通过 `FallbackPolicy` 接口的默认两级实现落地，未来升级全链只换 policy 实现。与 Tool Retry 完全分离（各自独立责任域）。
 _Avoid_: model switching, provider rotation, quality-based fallback（我们显式只做瞬时，不做质量判断）
+
+## Multi-Agent 层（Phase 13）
+
+**AgentProfile / AgentSpec**:
+Profile 是预定义的 agent 角色（main/coding/research_review，核心域对象，tool_scope 显式声明）；Spec 是运行时实例化描述（AgentFactory 校验后构造现有 AgentRuntime）。动态创建 = 实例化 AgentSpec，绝不生成代码。create_agent 不是 LLM 可见工具（防权限提升）。
+_Avoid_: agent class, agent plugin (profile 不是插件；编排能力才是)
+
+**Supervisor**:
+持有 delegate 工具的 main profile——编排即 Agent Loop 本身，DelegationDecision = delegate 工具调用参数。无独立编排器组件；路由决策由模型做出（agentic）。
+_Avoid_: orchestrator component, router, master agent
+
+**Delegation（delegate 工具）**:
+supervisor 把 scoped task 派给子代理的工具，经统一 ToolExecutor（不变量 #7），阻塞并行。参数 {target, task, constraints?}，target 只能是预定义 profile。超预算 = 明确失败回填（不静默截断）。属 multiagent capability（可装卸插件）。
+_Avoid_: spawn command, subagent API call
+
+**SubAgentResult**:
+子代理只回结构化产物：status/summary/artifacts/citations/changed_files(推导)/unresolved。绝不倾倒完整历史（不变量 #19）。summary 超限溢出为「压缩摘要 + artifact 引用」，主 agent 按需读取（不变量 #15）。tests 字段 V1 缺席（无真实来源不伪造）。
+_Avoid_: full transcript dump, child message log
+
+**SubagentProvider**:
+spawn 执行器的可替换接缝：V1 唯一实现 in-process（复用同一 AgentRuntime）；未来 subprocess/remote(ACP) = 换实现。属 multiagent capability 的内部 seam。
+_Avoid_: agent factory (Factory 是校验+构造；Provider 是执行), runtime copy
+
+**Delegation Budget**:
+三级预算：max_delegations=8（每 run）、max_active_children=4（并行）、child max_steps=10。repeated-delegation 熔断复用同错熔断指纹机制（target+task 哈希）。作用域不得混淆（spec §12）。
+_Avoid_: global token budget, unlimited delegation
+
+**Spawn vs Fork**:
+spawn = 全新 child context/session（V1）；fork = 从父 Session 事件前缀 seed（Phase 14 fork boundary）。V1 只有 spawn，SubagentProvider seam 为 fork/remote 留位。
+_Avoid_: clone, copy session

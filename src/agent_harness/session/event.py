@@ -30,6 +30,9 @@ MEMORY_DEGRADED = "memory/degraded"
 # ── + Phase 12 Reliability 信号（同错熔断 + 模型 fallback，ADR-0014） ──
 TOOL_FAILURE_GUARD = "tool/failure-guard"
 MODEL_FALLBACK = "model/fallback"
+# ── + Phase 13 Multi-Agent（delegation 白盒事件，ADR-0015 决策 8） ──
+AGENT_DELEGATION_STARTED = "agent/delegation-started"
+AGENT_DELEGATION_FINISHED = "agent/delegation-finished"
 
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
@@ -53,6 +56,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MEMORY_DEGRADED,
         TOOL_FAILURE_GUARD,
         MODEL_FALLBACK,
+        AGENT_DELEGATION_STARTED,
+        AGENT_DELEGATION_FINISHED,
     }
 )
 

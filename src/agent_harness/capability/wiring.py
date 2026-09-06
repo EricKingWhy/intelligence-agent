@@ -46,6 +46,10 @@ class CapabilityWiring:
     memory: Any | None = None  # MemoryComponents 生命周期包（relay/writeback），由 aclose 关闭
     # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 aclose 关闭。
     lifecycle: list[Any] = field(default_factory=list)
+    # Multi-Agent（Phase 13，ADR-0015）：delegate 工具已进 tools，但其依赖
+    # （模型链/registry/session store）要等 build_runtime 装配完才能注入——
+    # 这里只携带 provider 引用，激活在 build_runtime 完成（激活前调用明确失败）。
+    multiagent_provider: Any | None = None
 
     async def aclose(self) -> None:
         """关闭本次装配持有的全部生命周期资源；逐项故障隔离——进程退出路径，
@@ -300,6 +304,46 @@ class _WebSearchCapabilityProvider:
         return list(self._tools)
 
 
+class _MultiagentCapabilityProvider:
+    """ContributesTools 适配（multiagent）：贡献 delegate 工具。"""
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def contributes_tools(self) -> list[Any]:
+        return [self._delegate]
+
+
+async def _wire_multiagent(
+    registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
+) -> None:
+    """Multi-Agent Capability 接线（Phase 13，ADR-0015 决策 2/4）。
+
+    「一切皆可插件」：multiagent 是 CAPABILITIES 显式 opt-in 的 capability，
+    贡献 delegate 工具（经统一 ToolExecutor，不变量 #7）。依赖分两段注入：
+    wire 期只造 provider+工具；factory/registry/session store 的激活在
+    build_runtime 装配完成后进行（激活前 delegate 调用明确失败）。未在
+    CAPABILITIES 配置 = 单代理零感知。
+    """
+    from agent_harness.multiagent.provider import InProcessSubagentProvider
+    from agent_harness.multiagent.tools import DelegateTool
+
+    provider = InProcessSubagentProvider()
+    delegate = DelegateTool(provider)
+    registry.register(
+        CapabilityDescriptor(
+            name="multiagent", version="1.0.0", provider_name=cfg.provider,
+            capabilities=["tools"], risk="medium",
+            supports_concurrency=True, supports_recovery=False, supports_streaming=False,
+            degradation=Degradation.OPTIONAL_RUNTIME,
+        ),
+        _MultiagentCapabilityProvider(delegate),
+    )
+    # delegate 进工具贡献循环（build_runtime 注册进 ToolRegistry）；
+    # provider 引用经 wiring 交给 build_runtime 激活。
+    wiring.multiagent_provider = provider
+
+
 async def _wire_websearch(
     registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
 ) -> None:
@@ -361,6 +405,7 @@ _BUILTIN_WIRING: dict[str, tuple[Any, Degradation]] = {
     "mcp": (_wire_mcp, Degradation.OPTIONAL_RUNTIME),
     "knowledge": (_wire_knowledge, Degradation.OPTIONAL_RUNTIME),
     "websearch": (_wire_websearch, Degradation.OPTIONAL_RUNTIME),
+    "multiagent": (_wire_multiagent, Degradation.OPTIONAL_RUNTIME),
 }
 
 
@@ -375,6 +420,7 @@ _KNOWN_PROVIDERS: dict[str, set[str]] = {
     "mcp": {"builtin"},
     "knowledge": {"builtin"},
     "websearch": {"builtin"},
+    "multiagent": {"builtin"},
 }
 
 

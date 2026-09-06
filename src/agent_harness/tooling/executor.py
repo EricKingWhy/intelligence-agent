@@ -267,8 +267,10 @@ class ToolExecutor:
                 artifact_ref=result.artifact_ref,
             )
             self._maybe_kill("terminal", tool_call_id)
+        # 工具自产的延迟事件（如 delegation）在前，overflow 在后。
+        pending = [*result.pending_events, *deferred_events]
         return ToolExecution(tool_call_id=tool_call_id, result=result,
-                             pending_events=deferred_events)
+                             pending_events=pending)
 
     def _maybe_kill(self, stage: str, tool_call_id: str) -> None:
         """精确故障注入点（#32 Kill 集成测试专用；生产 kill_hook=None 行为不变）。

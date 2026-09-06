@@ -22,6 +22,8 @@ export const EventType = {
   MEMORY_DEGRADED: 'memory/degraded',
   TOOL_FAILURE_GUARD: 'tool/failure-guard',
   MODEL_FALLBACK: 'model/fallback',
+  AGENT_DELEGATION_STARTED: 'agent/delegation-started',
+  AGENT_DELEGATION_FINISHED: 'agent/delegation-finished',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];

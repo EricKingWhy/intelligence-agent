@@ -48,6 +48,20 @@ class ToolRegistry:
         """列出所有已注册 Tool（按注册顺序）。"""
         return list(self._tools.values())
 
+    def filtered(self, names: frozenset[str] | set[str]) -> ToolRegistry:
+        """派生一个只含 names 中已注册工具的【新】registry（原实例不动）。
+
+        Multi-Agent 的 child 工具收窄机制（ADR-0015 决策 11）：构造期过滤、
+        生成独立实例——child 拿到的 registry 物理上不含未授权工具，无逃逸面。
+        names 中未注册的名字静默跳过（缺席 = optional capability 降级语义，
+        越权校验是 AgentFactory 的职责，不在这一层）。
+        """
+        derived = ToolRegistry()
+        for name, tool in self._tools.items():
+            if name in names:
+                derived.register(tool)
+        return derived
+
     def export_model_definitions(self) -> list[dict]:
         """导出给模型/SDK 的工具菜单：name + description + parameters。
 

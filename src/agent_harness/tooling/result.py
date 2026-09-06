@@ -65,6 +65,13 @@ class ToolResult(BaseModel):
     retryable: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
     artifact_ref: str | None = None
+    # 工具产生的延迟会话事件 (event_type, data)：executor 在 tool/call 之后
+    # 落盘（delegation 事件同款通道，overflow 是既有生产者）。exclude=True：
+    # 这是 durable 事件通道，不是模型可见内容——model_dump_json（回灌给模型
+    # 的 tool result content）不携带。
+    pending_events: list[tuple[str, dict[str, Any]]] = Field(
+        default_factory=list, exclude=True,
+    )
 
     @model_validator(mode="after")
     def _check_invariants(self) -> ToolResult:
@@ -80,9 +87,11 @@ class ToolResult(BaseModel):
         message: str,
         data: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        pending_events: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> ToolResult:
         """构造一个成功结果。error_code 强制为 None、retryable 强制为 False。"""
-        return cls(ok=True, message=message, data=data, metadata=metadata or {})
+        return cls(ok=True, message=message, data=data, metadata=metadata or {},
+                   pending_events=pending_events or [])
 
     @classmethod
     def failure(
@@ -91,6 +100,7 @@ class ToolResult(BaseModel):
         error_code: ErrorCode,
         retryable: bool = False,
         metadata: dict[str, Any] | None = None,
+        pending_events: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> ToolResult:
         """构造一个失败结果。error_code 必填；retryable 默认 False（确定性错误不重试）。"""
         return cls(
@@ -98,5 +108,6 @@ class ToolResult(BaseModel):
             message=message,
             error_code=error_code,
             retryable=retryable,
+            pending_events=pending_events or [],
             metadata=metadata or {},
         )

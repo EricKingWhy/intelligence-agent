@@ -164,13 +164,14 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
         workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
         session_id = str(uuid4())
         workspace = workspace_root / "workspaces" / session_id
+        store = JsonlSessionStore(root=workspace_root / "sessions")
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
             session_id=session_id, workspace=workspace,
             max_steps=10, auto_approve=True,
+            session_store=store,
         )
-        store = JsonlSessionStore(root=workspace_root / "sessions")
         session = Session.start(store, session_id=session_id)
         # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
         # （ingest_document 的 sandbox 解析）需要可信 session id。
