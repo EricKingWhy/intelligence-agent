@@ -19,7 +19,7 @@ child 的边界（都在 activate 注入的 factory/registry 里固化）：
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -46,6 +46,88 @@ class SubAgentResult:
     status: str
     summary: str
     child_session_id: str = ""
+    # 以下字段全部「真实来源收集，无则省略」（T4, #85；tests 字段 DEFER）
+    citations: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+    changed_files: list[str] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
+
+
+_WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch"})
+_SEARCH_TOOL_NAMES = frozenset({"retrieve_knowledge", "web_search"})
+_UNRESOLVED_MARKERS = ("未解决事项", "未解决")
+
+
+def collect_result_fields(
+    events: list, summary: str = "",
+) -> dict[str, list[str]]:
+    """从 child 会话事件与最终回答收集真实结果字段（绝不伪造：无则省略）。
+
+    - citations：检索类 tool/result 的 payload 命中（kb:/web: citation）；
+    - artifacts：artifact/created 事件的 artifact_id；
+    - changed_files：write/edit/apply_patch 的 path 参数推导（去重保序）；
+    - unresolved：最终回答「未解决」自报段的轻解析（缺失 = 空数组）。
+    """
+    import json as _json
+
+    call_names: dict[str, str] = {}
+    citations: list[str] = []
+    changed: list[str] = []
+    artifacts: list[str] = []
+
+    for event in events:
+        if event.type == "tool/call":
+            call_names[event.data.get("tool_call_id", "")] = event.data.get("tool_name", "")
+            tool_name = event.data.get("tool_name", "")
+            if tool_name in _WRITE_TOOL_NAMES:
+                path = (event.data.get("args") or {}).get("path")
+                if path and path not in changed:
+                    changed.append(path)
+        elif event.type == "tool/result":
+            call_id = event.data.get("tool_call_id", "")
+            tool_name = call_names.get(call_id, event.data.get("tool_name", ""))
+            if tool_name in _SEARCH_TOOL_NAMES:
+                try:
+                    outer = _json.loads(event.data.get("content", "{}"))
+                    output = _json.loads(outer.get("data", {}).get("output", "{}"))
+                    for hit in output.get("hits", []):
+                        citation = hit.get("citation")
+                        if citation and citation not in citations:
+                            citations.append(citation)
+                except (ValueError, AttributeError):
+                    pass  # 非法 payload 只损失该条 citation，不 brick 收集
+        elif event.type == "artifact/created":
+            artifact_id = event.data.get("artifact_id")
+            if artifact_id and artifact_id not in artifacts:
+                artifacts.append(artifact_id)
+
+    unresolved: list[str] = []
+    section_active = False
+    for line in (summary or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(stripped.startswith(m) for m in _UNRESOLVED_MARKERS):
+            # 「未解决事项：」标题行：段开始；同行内联条目也算
+            section_active = True
+            inline = stripped.split("：", 1)[-1].strip() if "：" in stripped else ""
+            if inline:
+                unresolved.append(inline.lstrip("-•* ").strip())
+            continue
+        if section_active and stripped.startswith(("-", "•", "*")):
+            unresolved.append(stripped.lstrip("-•* ").strip())
+        elif section_active:
+            section_active = False  # 非列表正文 = 段落结束
+
+    # unresolved 恒在（child system prompt 强制自报；空数组 = 自报无未解决）。
+    fields: dict[str, list[str]] = {"unresolved": unresolved}
+    if citations:
+        fields["citations"] = citations
+    if artifacts:
+        fields["artifacts"] = artifacts
+    if changed:
+        fields["changed_files"] = changed
+    return fields
 
 
 @runtime_checkable
@@ -126,7 +208,8 @@ class InProcessSubagentProvider:
             "子代理 '%s' 完成：status=%s child_session=%s steps=%s",
             target, run_result.status, child_session.session_id, run_result.steps,
         )
+        fields = collect_result_fields(child_session.events, summary=run_result.final_text)
         return SubAgentResult(
             agent_id=spec.name, status=status, summary=run_result.final_text,
-            child_session_id=child_session.session_id,
+            child_session_id=child_session.session_id, **fields,
         )

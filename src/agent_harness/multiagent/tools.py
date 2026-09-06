@@ -108,6 +108,11 @@ class DelegateTool(Tool):
             "status": result.status,
             "summary": result.summary,
         }
+        # 真实来源字段：无则省略（绝不伪造/补零，ADR-0015 决策 12）
+        for field_name in ("citations", "artifacts", "changed_files", "unresolved"):
+            value = getattr(result, field_name, [])
+            if value:
+                payload[field_name] = value
         # 白盒透明（ADR-0015 决策 6/8）：委派事实以 pending_events 经 executor
         # 落盘（tool/call 之后、tool/result 之前）。started/finished 的落盘时点
         # 都是委派完成时——阻塞串行模型下无观察者可见差。
