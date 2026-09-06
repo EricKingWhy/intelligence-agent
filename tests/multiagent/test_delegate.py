@@ -25,6 +25,7 @@ from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
+from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
 
@@ -223,3 +224,50 @@ class TestDelegationBudget:
             if "异常终止" in rec.getMessage():
                 print("DEBUG-ERR:", rec.error, "|", rec.error_type)
         assert r2.ok, "新 run 预算必须重置"
+
+
+class TestRepeatedDelegationBreaker:
+    """#88：repeated-delegation 熔断复用同错熔断机制——delegate 是普通工具，
+    同指纹 (delegate, {target, task}) 连续失败 3 次 → 软熔断，6 次 → 硬熔断。
+    无需新机制：验证既有护栏对 delegate 工具的真实覆盖。"""
+
+    @pytest.mark.asyncio
+    async def test_repeated_failing_delegation_trips_guard(self, tmp_path):
+        from langchain_core.messages import AIMessage as _AIM
+
+        from agent_harness.agent.runtime import AgentRuntime
+        from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        from agent_harness.tooling import ToolExecutor as _TE
+
+        failing_child = ScriptedModel([])  # 空剧本：child run 必失败
+        provider = InProcessSubagentProvider()
+        delegate = DelegateTool(provider, max_delegations=99)
+        registry = ToolRegistry()
+        registry.register(delegate)
+        provider.activate(
+            factory=AgentFactory(model=failing_child, primary_model_name="m"),
+            source_registry=registry,
+            session_store=JsonlSessionStore(tmp_path / "s"),
+            workspace_registry=WorkspaceRegistry(root=tmp_path / "w"),
+            parent_session_id="p1",
+        )
+
+        supervisor_calls = [
+            _AIM(content="", tool_calls=[{"id": f"d{i:03d}", "name": "delegate",
+                                          "args": {"target": "coding", "task": "同任务"}}])
+            for i in range(6)
+        ]
+        supervisor = ScriptedModel(supervisor_calls)
+        runtime = AgentRuntime(
+            model=supervisor, registry=registry, executor=_TE(registry),
+            max_steps=20,
+        )
+        session = make_session(tmp_path)
+
+        result = await runtime.run(session, "反复委派同一任务")
+
+        assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        guard_events = [e for e in session._events if e.type == "tool/failure-guard"]
+        levels = [e.data["level"] for e in guard_events]
+        assert "soft" in levels and "hard" in levels
+        assert guard_events[-1].data["consecutive_failures"] == 6
