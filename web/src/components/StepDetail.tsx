@@ -116,10 +116,14 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       <div className="detail-header">
         <span className="panel-label">Run Inspector</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
-        {/* PRD §8.2：Run ID 常驻头部（短码，完整 ID 在 Overview） */}
-        <span className="detail-run-id mono num" title={`session ${conversation.session_id}`}>
-          {conversation.session_id.slice(0, 8)}
-        </span>
+        {/* PRD §8.2：Run ID 常驻头部（短码，完整 ID 在 Overview）。
+            code-review P0 修正：此前误用 session_id 冒充 Run ID——run_id 是
+            projection 从事件真值捕获的运行归属，缺失（尚无事件）即隐藏该位。 */}
+        {conversation.run_id && (
+          <span className="detail-run-id mono num" title={`run ${conversation.run_id}`}>
+            {conversation.run_id.slice(0, 8)}
+          </span>
+        )}
       </div>
 
       <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
@@ -176,7 +180,11 @@ function ChatTab({
           <Hash size={14} /> RUN
         </div>
         <div className="detail-row">
-          <span className="detail-key">id</span>
+          <span className="detail-key">run</span>
+          <code className="detail-val detail-val-mono">{conversation.run_id ?? '—'}</code>
+        </div>
+        <div className="detail-row">
+          <span className="detail-key">会话</span>
           <code className="detail-val detail-val-mono">{conversation.session_id.slice(0, 16)}</code>
         </div>
         <div className="detail-row">

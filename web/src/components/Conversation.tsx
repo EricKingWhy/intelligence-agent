@@ -102,13 +102,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
       return;
     }
     // 窗口外兜底：key → turn index → scrollToIndex
-    const idx = turns.findIndex((t) =>
-      jumpRequest.key.startsWith('tool:')
-        ? t.tools.some((x) => `tool:${x.tool_call_id}` === jumpRequest.key)
-        : jumpRequest.key.startsWith('delegation:')
-          ? (t.delegations?.some((x) => `delegation:${x.child_session_id}` === jumpRequest.key) ?? false)
-          : `step:${t.step_id}` === jumpRequest.key,
-    );
+    const idx = turns.findIndex((t) => turnHasStreamKey(t, jumpRequest.key));
     if (idx === -1) return;
     virtualizer.scrollToIndex(idx, { align: 'center' });
     requestAnimationFrame(() => {
@@ -326,6 +320,16 @@ function chainKey(node: ChainNode, i: number): string {
   if (node.kind === 'delegation') return node.delegation.child_session_id;
   if (node.kind === 'reasoning') return node.block.blockId;
   return `model-${i}`;
+}
+
+/** 反向联动窗口外兜底的 key→turn 匹配（tool:/delegation:/step: 三定位域，
+ *  与 streamKeyFromEvent 的 key 词汇一一对应）。 */
+function turnHasStreamKey(t: Turn, key: string): boolean {
+  if (key.startsWith('tool:')) return t.tools.some((x) => `tool:${x.tool_call_id}` === key);
+  if (key.startsWith('delegation:')) {
+    return t.delegations?.some((x) => `delegation:${x.child_session_id}` === key) ?? false;
+  }
+  return `step:${t.step_id}` === key;
 }
 
 export function ChainNodeView({ node, density, disclosure, reasoningDisclosure, isFinalModel = true, onFocusTool, onOpenSession }: { node: ChainNode; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; /** 该 model 段是否为 turn 最后一个模型段（final-answer 高对比）。 */ isFinalModel?: boolean; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void }) {

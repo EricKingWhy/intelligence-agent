@@ -24,6 +24,10 @@ export interface AgentEvent {
   /** Present on SSE-streamed events (injected by POST /api/sessions endpoint).
    *  Absent on historical events read from the store (session_id is known from the URL). */
   session_id?: string;
+  /** Reasoning 块聚合键——envelope 顶层字段（T-contract #116，后端 SessionEvent.block_id
+   *  序列化位置）。reasoning/started|delta|completed|interrupted 携带；data.block_id
+   *  是 legacy 容错位（投影解析顺序：envelope → data → 合成）。 */
+  block_id?: string;
 }
 
 /** Session summary from GET /api/sessions. */
@@ -127,7 +131,7 @@ export interface ArtifactRef {
 }
 
 export interface ModelSegment {
-  /** Accumulated streamed text so far (from model/delta). */
+  /** Accumulated streamed text so far (from model/delta legacy / text/delta durable). */
   text: string;
   status: 'streaming' | 'done';
 }
@@ -199,8 +203,16 @@ export interface RunFailureGuard {
 /** Multi-Agent 委派（agent/delegation-started / finished，Phase 13 ADR-0015）。
  *  父流白盒编排事实：child 的完整多轮历史在 child 自己的 session（后端 Gate 4
  *  不变量），父流只有 start/finish 两个锚点。阻塞语义：finished 返回即 child
- *  已终态。status 复用 DSH 四态视觉语言——running → completed/failed；父 run
- *  中断时未回填的委派 settle 为 stopped（中断 ≠ 错误，与 tool 同语义域）。 */
+ *  已终态。
+ *
+ *  status 说明：契约冻结 finished.status ∈ {completed, failed}（无中间态）。
+ *  前端视图态在此基础上扩展两个——running（started 已到、finished 未回填）与
+ *  stopped（父 run 中断时未回填的委派，finalizeRun settle；中断 ≠ 错误，与
+ *  tool 同一 DSH 语义域）。stopped 不是契约值，只由前端投影产生。
+ *
+ *  copy-on-write 契约：delegations 数组与 tools 同规则——cloneTurn 会浅拷贝
+ *  数组，但变更必须整体 reassign（或经 pushDelegation），禁止对克隆前共享的
+ *  数组原地 push（会污染旧 turn 引用）。 */
 export interface Delegation {
   /** 子代理 profile 名：'research_review' | 'coding'（V1 内置）。 */
   target: string;
@@ -274,6 +286,9 @@ export interface ConversationState {
   usage_total: UsageStats | null;
   cost_usd: number | null;
   trace_id: string | null;
+  /** 最近一个携带 run_id 的事件的 run 归属（PRD §8.2 Inspector 头部 Run ID）。
+   *  事件真值，缺失即 null——UI 隐藏该位，不回退 session_id 冒充（零伪造）。 */
+  run_id: string | null;
   /** Phase 12 白盒透明（ADR-0014）：最近一次 model/fallback——模型卡「已切换」态。
    *  字段缺失（形状不完整）时不记录（零伪造）；后续 model 已切 to_model。 */
   model_fallback: { from_model: string; to_model: string; reason: string } | null;

@@ -15,7 +15,8 @@ describe('initConversation', () => {
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], events: [], unknown_events: [],
-      model: null, usage_total: null, cost_usd: null, trace_id: null, model_fallback: null,
+      model: null, usage_total: null, cost_usd: null, trace_id: null, run_id: null,
+      model_fallback: null,
       seenSeqs: new Set(),
     });
   });
@@ -1390,5 +1391,106 @@ describe('T3 — tool/output_delta 流式输出（#96，契约 C2，spec 03 §9.
     expect(total).toBeGreaterThan(0);
     expect(chunks[0].text).toContain('L0\n');
     expect(chunks[chunks.length - 1].text).toContain('L1199\n');
+  });
+});
+
+describe('code-review 修复批回归', () => {
+  it('run_id 捕获：事件携带 run_id 时记录（PRD §8.2 头部 Run ID），缺失不清除归属', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, run_id: 'run-abc' }));
+    expect(s.run_id).toBe('run-abc');
+    // 无 run_id 的事件（null）保持原值——不回退 session_id、不清空
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'x' }, step_id: 1 }));
+    expect(s.run_id).toBe('run-abc');
+    // 无任何 run_id 事件 → null（UI 隐藏该位，零伪造）
+    const empty = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'q', step: 1 } }));
+    expect(empty.run_id).toBeNull();
+  });
+
+  it('cloneTurn 对 delegations 数组浅拷贝（与 tools/activities 同规则）；未触及元素引用保持', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.AGENT_DELEGATION_STARTED,
+      data: { target: 'coding', task: 't', child_session_id: 'c1' },
+      step_id: 1,
+    }));
+    const arrBefore = s.turns[0].delegations;
+    // TOOL_CALL 触发同轮 cloneTurn
+    s = applyEvent(s, ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash' }, step_id: 1 }));
+    expect(s.turns[0].delegations).not.toBe(arrBefore); // 数组已拷贝——原地 push 不会再污染旧快照
+    expect(s.turns[0].delegations![0]).toBe(arrBefore![0]); // 未触及的委派对象引用保持（memo 前提）
+  });
+});
+
+// ── T-contract（#116）：text/delta 词汇 + envelope block_id（后端契约回执）──
+describe('T-contract — text/delta 词汇 + envelope block_id（#116，后端契约回执）', () => {
+  const T = '2026-09-07T00:00:00Z';
+
+  it('text/delta 累积进 turn.model.text（durable，与 MODEL_DELTA 同构）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TEXT_DELTA, data: { delta: '你好' }, seq: 5, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TEXT_DELTA, data: { delta: '世界' }, seq: 6, step_id: 1 }));
+    expect(s.turns[0].model.text).toBe('你好世界');
+    expect(s.turns[0].model.status).toBe('streaming');
+  });
+
+  it('text/delta 是 durable：重复 seq 整帧去重，不重复追加、不入事件日志', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TEXT_DELTA, data: { delta: 'abc' }, seq: 7, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.TEXT_DELTA, data: { delta: 'abc' }, seq: 7, step_id: 1 }));
+    expect(s.turns[0].model.text).toBe('abc');
+    expect(s.seenSeqs.has(7)).toBe(true);
+    // model/started(seq=null) + 首个 text/delta；重复帧整帧丢弃（不进日志）
+    expect(s.events).toHaveLength(2);
+  });
+
+  it('text/delta 重放同构：无 model/started 的持久历史重建同一文本', () => {
+    const events = [
+      ev({ type: EventType.SESSION_STARTED, seq: 1, time: T }),
+      ev({ type: EventType.RUN_STARTED, seq: 2, time: T }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, seq: 3, step_id: 1, time: T }),
+      ev({ type: EventType.TEXT_DELTA, data: { delta: '你好' }, seq: 4, step_id: 1, time: T }),
+      ev({ type: EventType.TEXT_DELTA, data: { delta: '世界' }, seq: 5, step_id: 1, time: T }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: '你好世界' }, seq: 6, step_id: 1, time: T }),
+      ev({ type: EventType.RUN_COMPLETED, seq: 7, time: T }),
+    ];
+    const s = projectHistory('s', events);
+    expect(s.turns[0].model.text).toBe('你好世界');
+    expect(s.turns[0].model.status).toBe('done');
+    expect(s.unknown_events).toHaveLength(0); // text/delta 是已知词汇，不落兜底
+  });
+
+  it('reasoning 按 envelope block_id 聚合（不再合成散键）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/started', data: { source: 'model' }, block_id: 'rsn-3-1', seq: 10, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: '想', source: 'model' }, block_id: 'rsn-3-1', seq: 11, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: '考', source: 'model' }, block_id: 'rsn-3-1', seq: 12, step_id: 3 }));
+    const blocks = s.turns[0].reasoningById!;
+    expect(Object.keys(blocks)).toEqual(['rsn-3-1']);
+    expect(blocks['rsn-3-1'].text).toBe('思考');
+  });
+
+  it('同 step 双块不串：post-tool 新块按 envelope block_id 分开聚合', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/started', data: { source: 'model' }, block_id: 'rsn-3-1', seq: 10, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: '一段', source: 'model' }, block_id: 'rsn-3-1', seq: 11, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/completed', data: {}, block_id: 'rsn-3-1', seq: 12, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/started', data: { source: 'model' }, block_id: 'rsn-3-2', seq: 13, step_id: 3 }));
+    s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: '二段', source: 'model' }, block_id: 'rsn-3-2', seq: 14, step_id: 3 }));
+    const blocks = s.turns[0].reasoningById!;
+    expect(blocks['rsn-3-1']).toMatchObject({ text: '一段', status: 'completed' });
+    expect(blocks['rsn-3-2']).toMatchObject({ text: '二段', status: 'streaming' });
+    expect(s.turns[0].activities.filter((a) => a.kind === 'reasoning')).toHaveLength(2);
+  });
+
+  it('summarizeEvent(text/delta) 沿 +N 字符惯例', () => {
+    expect(summarizeEvent(ev({ type: EventType.TEXT_DELTA, data: { delta: 'abcd' } }))).toBe('+4 字符');
+  });
+
+  it('legacy 容错：model/delta 与 data.block_id 路径保持可用', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_DELTA, data: { delta: 'old' }, step_id: 1 }));
+    expect(s.turns[0].model.text).toBe('old');
+    s = applyEvent(s, ev({ type: 'reasoning/started', data: { source: 'model', block_id: 'legacy' }, seq: 20, step_id: 1 }));
+    s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: 'x', source: 'model', block_id: 'legacy' }, seq: 21, step_id: 1 }));
+    expect(s.turns[0].reasoningById!['legacy'].text).toBe('x');
   });
 });

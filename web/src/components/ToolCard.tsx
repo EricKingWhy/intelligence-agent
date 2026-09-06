@@ -112,11 +112,12 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
           <span className="act-args act-args-compact">{summarizeArgs(tool, 32)}</span>
         )}
         </button>
-        {/* hover Inspect chip（PRD §9.1）：点击进 Inspector 联动，不触发行点击。 */}
+        {/* hover Inspect chip（PRD §9.1）：点击进 Inspector 联动，不触发行点击。
+            真按钮（code-review P0：span+tabIndex=-1 键盘不可达）——Tab 聚焦后
+            Enter/Space 原生触发，:focus-visible 时浮现（样式已覆盖）。 */}
         {hasInspect && (
-          <span
-            role="button"
-            tabIndex={-1}
+          <button
+            type="button"
             className="act-inspect-chip"
             onClick={(e) => {
               e.stopPropagation();
@@ -124,7 +125,7 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
             }}
           >
             Inspect
-          </span>
+          </button>
         )}
       </div>
 

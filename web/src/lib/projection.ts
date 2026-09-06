@@ -38,6 +38,7 @@ export function initConversation(session_id: string): ConversationState {
     usage_total: null,
     cost_usd: null,
     trace_id: null,
+    run_id: null,
     model_fallback: null,
     seenSeqs: new Set(),
   };
@@ -66,6 +67,7 @@ function cloneTurn(t: Turn): Turn {
     segments: t.segments.map((s) => ({ ...s })),
     tools: [...t.tools],
     activities: [...t.activities],
+    delegations: t.delegations ? [...t.delegations] : undefined,
   };
   const lastModel = [...turn.activities].reverse().find((a) => a.kind === 'model');
   if (lastModel && lastModel.kind === 'model') {
@@ -118,6 +120,14 @@ function cloneTool(t: ToolCall): ToolCall {
   return { ...t };
 }
 
+/** 编排节点落盘：追加委派 + activities 编排项（STARTED 与乱序 FINISHED 防御
+ *  分支共享的同构形状，Standards 轴 Duplicated Code 收敛）。整体 reassign——
+ *  契约见 types.ts Delegation 的 copy-on-write 说明。 */
+function pushDelegation(turn: Turn, delegation: Delegation): void {
+  turn.delegations = [...(turn.delegations ?? []), delegation];
+  turn.activities.push({ kind: 'delegation', child_session_id: delegation.child_session_id });
+}
+
 /** Apply one event to state, returning new state. Copy-on-write:
  *  顶层浅克隆 + 只深克隆被本事件改写的 turn/tool/数组，未触及部分保持引用稳定
  *  （渲染层 React.memo 的前提，引用契约由专项测试锁定）。
@@ -155,6 +165,10 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
   const next: ConversationState = { ...state };
 
   const { type, data } = event;
+
+  // Run 归属（PRD §8.2 Inspector 头部 Run ID）：事件真值，最后携带者胜出
+  // （run 串行）；缺失保持原值——UI 侧 null 即隐藏，不回退 session_id 冒充。
+  if (typeof event.run_id === 'string' && event.run_id) next.run_id = event.run_id;
 
   switch (type) {
     case EventType.USER_MESSAGE: {
@@ -197,7 +211,12 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
       break;
     }
 
-    case EventType.MODEL_DELTA: {
+    // 文本增量（同一 append 语义双词汇）：MODEL_DELTA = legacy stream-only
+    // （运行时不再发射，词汇保留兼容旧历史/fixture）；TEXT_DELTA = T-contract
+    //（#116，后端契约回执 §2）durable 合帧落盘——seq 走既有 seenSeqs 去重门，
+    // 重放（projectHistory）天然同构。block_id 恒无（文本按 turn/step 聚合）。
+    case EventType.MODEL_DELTA:
+    case EventType.TEXT_DELTA: {
       const step = resolveStep(event, next);
       withTurnAt(next, step, (turn) => {
         touchTurn(turn, event);
@@ -472,6 +491,14 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
     // child 自己的 session（后端 Gate 4 不变量），父流只有 start/finish 锚点——
     // 节点按 child_session_id 键控（并行委派时 start/finish 按完成顺序落盘，
     // 位置不可假设，只有 child_session_id 是稳定配对键）。
+    //
+    // 双渲染说明（code-review Spec 轴记录）：tool/call(delegate) 与
+    // agent/delegation-* 在 Trace Ladder 并存——前者是工具调用事实（ToolCard：
+    // args/耗时/ToolResult 终态），后者是编排事实（DelegationNode：
+    // child_session_id/summary/child 终态）。deriveChain 无过滤原则（真事件序）
+    // 决定了两者并存；「一委派=一节点」的合并需要可靠的 start↔tool_call 匹配，
+    // 而并行委派下两事件不携带 tool_call_id、按完成顺序落盘——匹配不存在，
+    // 故保持两个真值节点，各显其职。
     case EventType.AGENT_DELEGATION_STARTED: {
       const child = typeof data.child_session_id === 'string' ? data.child_session_id : '';
       if (!child) break; // 契约必有 child_session_id；缺失不造节点（事件仍在 events 日志）
@@ -479,17 +506,13 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
       withTurnAt(next, step, (turn) => {
         touchTurn(turn, event);
         if (turn.delegations?.some((d) => d.child_session_id === child)) return; // 重放幂等
-        turn.delegations = [
-          ...(turn.delegations ?? []),
-          {
-            target: typeof data.target === 'string' ? data.target : '',
-            task: typeof data.task === 'string' ? data.task : '',
-            child_session_id: child,
-            status: 'running',
-            started_at: event.time ?? new Date().toISOString(),
-          },
-        ];
-        turn.activities.push({ kind: 'delegation', child_session_id: child });
+        pushDelegation(turn, {
+          target: typeof data.target === 'string' ? data.target : '',
+          task: typeof data.task === 'string' ? data.task : '',
+          child_session_id: child,
+          status: 'running',
+          started_at: event.time ?? new Date().toISOString(),
+        });
       });
       break;
     }
@@ -508,18 +531,14 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
         if (idx === -1) {
           // 防御：finished 先于 started 到达（截断历史/乱序持久化）——从 finish
           // 真值建终态节点（target/status/summary 事件自带），不虚构 task。
-          turn.delegations = [
-            ...(turn.delegations ?? []),
-            {
-              target,
-              task: '',
-              child_session_id: child,
-              status,
-              summary,
-              completed_at: event.time ?? new Date().toISOString(),
-            },
-          ];
-          turn.activities.push({ kind: 'delegation', child_session_id: child });
+          pushDelegation(turn, {
+            target,
+            task: '',
+            child_session_id: child,
+            status,
+            summary,
+            completed_at: event.time ?? new Date().toISOString(),
+          });
           return;
         }
         turn.delegations = (turn.delegations ?? []).map((d, i) =>
@@ -569,8 +588,9 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
 
 /** T2（#95）：reasoning 事件 → turn.reasoningById 单块 COW 更新。
  *
- * 目标块解析优先级：data.block_id → 本 turn 最近一个 streaming 块（宽松契约
- * 降级）→ 合成 key `r:{step}:{seq}`（重放确定性）。块一旦 completed/interrupted
+ * 目标块解析优先级：envelope block_id（#116 契约形状）→ data.block_id（legacy
+ * 容错）→ 本 turn 最近一个 streaming 块（宽松契约降级）→ 合成 key
+ * `r:{step}:{seq}`（重放确定性）。块一旦 completed/interrupted
  * 即不可变（spec 02 §8.1）：迟到 delta 丢弃、重复 started 幂等忽略（新分段必须
  * 换新 block_id）；无块可终结的 terminal 事件丢弃——绝不伪造块。 */
 function applyReasoningEvent(turn: Turn, event: AgentEvent, type: string): void {
@@ -578,7 +598,14 @@ function applyReasoningEvent(turn: Turn, event: AgentEvent, type: string): void 
   const blocks = turn.reasoningById ?? {};
   const streaming = Object.values(blocks).filter((b) => b.status === 'streaming');
   const lastStreaming = streaming[streaming.length - 1];
-  const explicit = typeof data.block_id === 'string' && data.block_id ? data.block_id : null;
+  // 契约形状（T-contract #116）：block_id 在 envelope 顶层（SessionEvent.block_id）；
+  // data.block_id 为 legacy 容错（旧 fixture）。同 step 双块（post-tool 新段）靠它分块。
+  const explicit =
+    typeof event.block_id === 'string' && event.block_id
+      ? event.block_id
+      : typeof data.block_id === 'string' && data.block_id
+        ? data.block_id
+        : null;
   const key =
     explicit ?? lastStreaming?.blockId ?? `r:${event.step_id ?? turn.step_id}:${event.seq ?? 'n'}`;
   const prev = blocks[key];
@@ -821,6 +848,7 @@ export function summarizeEvent(event: AgentEvent): string {
     case EventType.USER_MESSAGE:
       return String(d.content ?? '').slice(0, 40);
     case EventType.MODEL_DELTA:
+    case EventType.TEXT_DELTA:
       return `+${String(d.delta ?? '').length} 字符`;
     case TOOL_OUTPUT_DELTA:
       // T3（#96）：同 delta 惯例（Timeline 行 verbatim 在场，摘要只记增量）。

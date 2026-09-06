@@ -898,13 +898,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
+/* act-node 内容列缩进基线（Standards 轴 Duplicated Code 收敛）：状态列 16px
+ * + 余量，行下附属块（错误摘要/委派子会话行/摘要区）统一对齐 act-name。 */
+:root {
+  --act-content-indent: calc(var(--space-sm) + 18px + var(--space-sm));
+}
 /* 失败摘要行（PRD §5.2 Error）：L0 下方的轻量错误信号——低饱和红 code + 弱化
  * message，不满屏红、不强制展开；完整 Raw 留给 Inspector。缩进对齐 act-name。 */
 .act-error-summary {
   display: flex;
   align-items: baseline;
   gap: var(--space-sm);
-  padding: 0 var(--space-sm) var(--space-xs) calc(var(--space-sm) + 18px + var(--space-sm));
+  padding: 0 var(--space-sm) var(--space-xs) var(--act-content-indent);
   font-size: var(--text-xs);
   line-height: 1.4;
 }
@@ -938,7 +943,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: var(--space-sm);
   /* 与 .act-error-summary 同一缩进基线：对齐 act-node 内容列（跳过状态列宽） */
-  padding: 0 var(--space-sm) 0 calc(var(--space-sm) + 18px + var(--space-sm));
+  padding: 0 var(--space-sm) 0 var(--act-content-indent);
   font-size: var(--text-xs);
   line-height: 1.4;
   min-width: 0;
@@ -980,7 +985,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--warning);
 }
 .deleg-summary {
-  margin-left: calc(var(--space-sm) + 18px + var(--space-sm));
+  margin-left: var(--act-content-indent);
   padding: var(--space-sm) var(--space-md);
   border-left: 2px solid color-mix(in srgb, var(--accent) 34%, transparent);
   background: color-mix(in srgb, var(--surface-2) 55%, transparent);
@@ -1006,6 +1011,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   right: var(--space-sm);
   top: 50%;
   transform: translateY(-50%);
+  font-family: inherit; /* button 元素不继承字体栈——chip 与行内文字同源 */
   font-size: 10px;
   line-height: 1;
   padding: 3px 7px;
@@ -1695,9 +1701,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* ── StepDetail（右：Run Inspector，嵌在 frame 内，无独立边框） ── */
 .step-detail {
   background: var(--bg-inspector);
-  /* 结构分层（Bug 修复 2026-09-06 二次落地：上次补丁在写盘前中止，CSS 未落盘
-     导致面板整体滚动、tabs 被滚出视口——见 git log -S detail-body 的教训）：
-     面板自身不滚动——header/tabs 钉在顶部，内容在 .detail-body 内滚。 */
+  /* 结构分层：面板自身不滚动——header/tabs 钉在顶部，内容在 .detail-body 内滚
+     （长内容不得把 tabs 滚出视口，否则 tab 行不可达）。 */
   overflow-x: hidden;
   padding: var(--space-md) var(--space-lg);
   display: flex;
@@ -2803,6 +2808,13 @@ button.json-row {
   z-index: 51;
   overflow: hidden;
   animation: palette-in var(--dur-palette) var(--ease-apple);
+}
+/* backdrop-filter 退化（code-review P0）：不支持毛玻璃的引擎改用近实心底，
+ * 保证浮层与底层内容仍可分辨（surface-overlay 本身偏透，直接用会糊成一片）。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .palette-content {
+    background: color-mix(in srgb, var(--surface-overlay) 88%, var(--bg-app, #000));
+  }
 }
 @keyframes palette-fade {
   from { opacity: 0; }
