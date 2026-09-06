@@ -469,11 +469,12 @@ class _DisconnectingASGI:
 
 
 @pytest.mark.asyncio
-async def test_disconnect_cancels_sse_producer(tmp_path):
-    """客户端断连后 SSE producer 必须被取消（spec 11 §4 第 1-3 条）。
+async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
+    """ADR-0016 D-A 反转：断连只 unsubscribe，detached run 继续在途；
+    显式取消（RunManager.cancel —— POST /cancel 的通道）才终止 run。
 
-    用一个永不自然完成的 stub runtime：它只在被取消（GeneratorExit/CancelledError）
-    时置位 finally 旗标。如果断连信号没传到 generator，旗标永远是 False，断言失败。
+    stub runtime 挂起等取消：断连后旗标不置位（run 存活）；显式取消后旗标
+    置位（取消信号确实传入 runtime 生成器，无 task 泄漏）。
     """
 
     class HangingRuntime:
@@ -483,7 +484,8 @@ async def test_disconnect_cancels_sse_producer(tmp_path):
             self.cancelled = asyncio.Event()
             self.persisted_session_id: str | None = None
 
-        async def run_stream(self, session: Any, task: str) -> AsyncIterator[AgentEvent]:
+        async def run_stream(self, session: Any, task: str,
+                             cancel_reason_supplier=None) -> AsyncIterator[AgentEvent]:
             self.persisted_session_id = session.session_id
             session.append(event_type=RUN_STARTED, data={"reason": "disconnect-test"})
             try:
@@ -507,18 +509,27 @@ async def test_disconnect_cancels_sse_producer(tmp_path):
         }
         await transport(scope)
 
-    # 断言 1（§4 第 2/3 条）：producer 的 finally 已触发——断连信号确实传到了 generator。
-    assert hanging.cancelled.is_set(), (
-        "客户端断连后 SSE producer 未被取消——spec 11 §4 的 disconnect 清理未实现，"
-        "这会在真实 uvicorn 下泄漏 task + 持有 session 锁。"
+    # 断言 1（D-A 反转核心）：断连后 run task 仍在途——SSE generator 被取消，
+    # 但 runtime 生成器未被关闭（旗标未置位）。
+    assert hanging.persisted_session_id, "runtime 未创建 session"
+    await asyncio.sleep(0.1)
+    assert not hanging.cancelled.is_set(), (
+        "客户端断连不应终止 detached run（ADR-0016 §2.1）；若此断言失败，"
+        "说明取消信号仍沿断连路径传播。"
     )
 
-    # 断言 2（§4 第 4 条）：断连清理不破坏 Session 一致性——取消前已落盘的事实
-    # 必须完整可读、可重建，清理路径不得增删改持久化事件。
+    # 断言 2：显式取消真正终止 run（POST /cancel 走同一通道）
+    assert app.state.agent.run_manager.cancel(hanging.persisted_session_id) is True
+    await asyncio.wait_for(hanging.cancelled.wait(), timeout=5)
+
+    # 断言 3：run task 已终结、订阅者已清空（无泄漏）
+    assert app.state.agent.run_manager.get_active(hanging.persisted_session_id) is None
+
+    # 断言 4（不变量 #22）：断连/取消不破坏 Session 一致性——已落盘的事实
+    # 完整可读、可重建，收尾路径不得增删改持久化事件。
     # 2 条 = Session.start 的 session/started 初始事实 + stub 落盘的 run/started。
-    assert hanging.persisted_session_id, "runtime 未创建 session"
     events = app.state.agent.store.read_events(hanging.persisted_session_id)
-    assert len(events) == 2, f"断连后 session 事实应恰好 2 条，实际 {len(events)}"
+    assert len(events) == 2, f"收尾后 session 事实应恰好 2 条，实际 {len(events)}"
     assert [e.type for e in events] == [SESSION_STARTED, RUN_STARTED]
 
 

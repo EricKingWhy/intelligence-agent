@@ -38,9 +38,9 @@ from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
-    MODEL_DELTA,
     RUN_COMPLETED,
     RUN_FAILED,
+    TEXT_DELTA,
     TOOL_CALL,
     TOOL_RESULT,
     JsonlSessionStore,
@@ -64,7 +64,7 @@ class StreamRenderer:
         self._delta_open = False  # 流式正文输出中：工具行/终态行前先补换行
 
     def handle(self, event: AgentEvent) -> None:
-        if event.type == MODEL_DELTA:
+        if event.type == TEXT_DELTA:
             self._write(event.data["delta"])
             self._delta_open = True
         elif event.type == TOOL_CALL:

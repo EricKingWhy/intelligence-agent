@@ -132,7 +132,8 @@ class LocalSubprocessSandbox(Sandbox):
         """no-op：本机进程总在，无需启动。幂等。"""
 
     def exec(self, command: str, *, timeout: float | None = None,
-             cancel_event=None) -> ExecResult:
+             cancel_event=None,
+             on_output=None) -> ExecResult:
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
 
         timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉整个进程树并返回
@@ -140,6 +141,9 @@ class LocalSubprocessSandbox(Sandbox):
         stdout/stderr 捕获到 max_capture_chars 上限，超限丢弃并附截断标记
         （D4：无上限捕获会被大输出 OOM）。管道由 reader 线程持续排空，
         子进程可自然结束，不会因为缓冲塞满而死锁。
+        on_output（ADR-0016 §4.2）：提供时 reader 线程按读取进度逐段回调
+        (channel, text)——回调在 reader 线程上下文执行，调用方负责线程安全；
+        回调异常不中断排空（捕获完整性优先，异常只落 debug 日志）。
         """
         self.ensure_started()
         effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
@@ -167,8 +171,12 @@ class LocalSubprocessSandbox(Sandbox):
         stdout_cap = _CappedCapture(self._max_capture_chars)
         stderr_cap = _CappedCapture(self._max_capture_chars)
         readers = [
-            threading.Thread(target=self._drain_stream, args=(process.stdout, stdout_cap), daemon=True),
-            threading.Thread(target=self._drain_stream, args=(process.stderr, stderr_cap), daemon=True),
+            threading.Thread(target=self._drain_stream,
+                             args=(process.stdout, stdout_cap, "stdout", on_output),
+                             daemon=True),
+            threading.Thread(target=self._drain_stream,
+                             args=(process.stderr, stderr_cap, "stderr", on_output),
+                             daemon=True),
         ]
         for reader in readers:
             reader.start()
@@ -265,11 +273,22 @@ class LocalSubprocessSandbox(Sandbox):
                 process.kill()
 
     @staticmethod
-    def _drain_stream(stream, cap: _CappedCapture) -> None:
-        """后台排空一条捕获流；超限后只读不存，保证子进程不被管道背压卡死。"""
+    def _drain_stream(stream, cap: _CappedCapture, channel: str,
+                      on_output=None) -> None:
+        """后台排空一条捕获流；超限后只读不存，保证子进程不被管道背压卡死。
+
+        on_output 提供时逐段回调 (channel, chunk)——在 reader 线程上下文执行，
+        回调异常只落 debug 日志（捕获完整性优先，流式是附加通道不是数据面）。
+        """
         try:
             while chunk := stream.read(_DRAIN_CHUNK_CHARS):
                 cap.append(chunk)
+                if on_output is not None and chunk:
+                    try:
+                        on_output(channel, chunk)
+                    except Exception as error:  # noqa: BLE001 — 流式回调故障不损捕获
+                        logger.debug("on_output callback failed: %s",
+                                     type(error).__name__)
         except Exception as error:  # noqa: BLE001 — 流被随 kill 关闭属正常路径
             logger.debug("capture stream closed during drain: %s", type(error).__name__)
         finally:

@@ -10,7 +10,8 @@
 两个入口：
     - run(): 经典一次性调用，返回 AgentRunResult（向后兼容，252 现有测试不破）。
     - run_stream(): Phase 9 流式入口，async iterator 逐条 yield AgentEvent，
-      含纯流式信号 model/delta（不持久化）+ 每个持久化 SessionEvent 的镜像。
+      含持久化 SessionEvent 的镜像 + ADR-0016 起合帧落盘的流式事实
+      （model/delta、reasoning/*）+ 纯流式信号 model/started（不持久化）。
 
 事件事实源：Session.append 同步写 JSONL；messages list 退化为运行期投影缓存。
 Diagnostic Log（_log）保留不动——执行链路观察与 SessionEvent 分层并存。
@@ -21,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -30,6 +31,7 @@ from agent_harness.agent.guards import (
     GuardLevel,
     RepeatedToolFailureGuard,
 )
+from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_CONTEXT_WINDOW_EXCEEDED,
@@ -52,7 +54,6 @@ from agent_harness.model.fallback import (
 )
 from agent_harness.session import (
     MODEL_COMPLETED,
-    MODEL_DELTA,
     MODEL_FAILED,
     MODEL_FALLBACK,
     MODEL_STARTED,
@@ -128,6 +129,21 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+def _extract_reasoning(chunk: Any) -> str:
+    """从流式 chunk 抽第三方思考文本（D-B①，ADR-0016 §3.4）。
+
+    ReasoningChatOpenAI 把网关的 delta.reasoning_content 抬进
+    additional_kwargs["reasoning_content"]；非字符串/缺失 = 本 chunk 无思考，
+    返回空串（调用方据此跳过，零伪造）。
+    """
+    kwargs = getattr(chunk, "additional_kwargs", None)
+    if isinstance(kwargs, dict):
+        raw = kwargs.get("reasoning_content")
+        if isinstance(raw, str) and raw:
+            return raw
+    return ""
+
+
 class _RunFinalizer:
     """一次 Run 的终态簿记 owner（批次 B / 架构候选 2）。
 
@@ -172,14 +188,18 @@ class _RunFinalizer:
             run_id=self.run_id, step_id=step + 1,
         )
 
-    def cancelled_terminal(self, *, steps: int) -> SessionEvent | None:
+    def cancelled_terminal(
+        self, *, steps: int, reason: str = "cancelled",
+    ) -> SessionEvent | None:
         """取消臂收尾（纯同步、不 yield——生成器关闭中禁止再产出）。
 
         run 未开始（begin_run 之前被取消）→ None，已写事件保持原样；
-        已终结的 run 不补第二条终结（双终结 = 历史不可对账）。"""
+        已终结的 run 不补第二条终结（双终结 = 历史不可对账）。
+        reason 区分取消来源（02 §17 错误语义分离）：显式 POST /cancel 与
+        断连消费 = "cancelled"；孤儿回收 = "orphaned"（ADR-0016 §2.1）。"""
         if self.run_id is None or self._terminal_written:
             return None
-        terminal_data: dict[str, Any] = {"reason": "cancelled"}
+        terminal_data: dict[str, Any] = {"reason": reason}
         if self._usage_total:
             # 取消也如实带上 token 消耗（Gap 1 契约，不因取消路径丢账）。
             terminal_data["usage_total"] = dict(self._usage_total)
@@ -307,19 +327,27 @@ class AgentRuntime:
         return result_holder[-1]
 
     async def run_stream(
-        self, session: Session, user_input: str
+        self, session: Session, user_input: str,
+        cancel_reason_supplier: Callable[[], str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """流式驱动 Agent Loop，逐条 yield AgentEvent。
 
-        与 run() 的区别：用 model.astream() 逐 chunk 流式产出，每个 chunk
-        yield 一个 model/delta AgentEvent（不持久化——完整 AIMessage 由
-        model/completed 持久化，delta 只是 ephemeral 流式信号）。
-        每个被 session.append 持久化的事件，同时 yield 一个镜像 AgentEvent
-        （带 seq），让消费者拿到完整的事件流 + 流式 token。
+        与 run() 的区别：用 model.astream() 逐 chunk 流式产出，思考/文本 chunk
+        经 BlockStreamer 合帧持久化（ADR-0016：text/delta 与 reasoning/* 是
+        durable 事实，断连重连可按 seq 重放恢复）；model/started 保持
+        stream-only。每个被 session.append 持久化的事件，同时 yield 一个
+        镜像 AgentEvent（带 seq）。
+
+        cancel_reason_supplier（ADR-0016 §2.1）：取消臂收尾时调用来决定
+        run/failed 的 reason（"cancelled" / "orphaned"），让 run 的宿主
+        （web RunManager）区分取消来源；None = 默认 "cancelled"。
 
         SSE endpoint 直接消费这个 iterator；前端据此实时渲染。
         """
-        drive = self._drive(session, user_input, stream=True)
+        drive = self._drive(
+            session, user_input, stream=True,
+            cancel_reason_supplier=cancel_reason_supplier,
+        )
         try:
             async for event in drive:
                 yield event
@@ -333,6 +361,7 @@ class AgentRuntime:
     async def _drive(
         self, session: Session, user_input: str, *, stream: bool,
         result_holder: list[AgentRunResult] | None = None,
+        cancel_reason_supplier: Callable[[], str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """共享的主循环——run 和 run_stream 的唯一实现，消除重复。
 
@@ -349,6 +378,9 @@ class AgentRuntime:
         # 没有可终结的 run；run_span / steps / usage_total 同理需要初值。
         run_id: str | None = None
         steps = 0
+        # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
+        # begin_run 之前异常 = 没有可记账的 run，保持 None。
+        streamer: BlockStreamer | None = None
         # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
         usage_total: dict[str, int] = {}
         # 终态簿记 owner（批次 B 候选 2）：model 在途标记 + 单终态不变量 +
@@ -376,6 +408,10 @@ class AgentRuntime:
 
             run_id = session.begin_run(agent_id=self._agent_id)
             terminal.begin_run(run_id)
+            # 流式块记账绑定本 run（ADR-0016 §3.3）：此后思考/文本 chunk 经
+            # streamer 合帧成 durable delta；取消/失败臂负责 interrupt 收口。
+            streamer = BlockStreamer(session)
+            streamer.begin_run(run_id)
             # run 归因上下文（R3-7）：memory/context provider 等低层模块在
             # 事件降级时需要 run_id 对账，经 contextvar 传递。嵌套运行的恢复
             # 由外层 finally 兜底（token 捕获于下）。
@@ -417,22 +453,33 @@ class AgentRuntime:
                 # 重试，非瞬时/无 fallback 时异常照常上抛走统一失败兜底。
                 terminal.model_call_open = True
                 if stream:
-                    # 流式：逐 chunk yield model/delta，聚合回完整 AIMessage
+                    # 流式：思考/文本 chunk 经 BlockStreamer 合帧落盘（S19），
+                    # 聚合回完整 AIMessage。思考块（reasoning/*）与文本 delta
+                    # 都是 durable 事实：断连重连按 seq 重放即可恢复（ADR-0016）。
                     yield AgentEvent(
                         type=MODEL_STARTED,
                         data={"step": steps + 1},
                         run_id=run_id, step_id=steps + 1,
                     )
+                    assert streamer is not None
                     collected: list[AIMessageChunk] = []
                     async for chunk in model_coord.astream(messages):
                         collected.append(chunk)
+                        reasoning_text = _extract_reasoning(chunk)
+                        if reasoning_text:
+                            for streamed in streamer.offer_reasoning(
+                                reasoning_text, step=steps + 1,
+                            ):
+                                yield to_agent_event(streamed)
                         delta_text = _extract_text(chunk.content)
                         if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
-                            yield AgentEvent(
-                                type=MODEL_DELTA,
-                                data={"delta": delta_text},
-                                run_id=run_id, step_id=steps + 1,
-                            )
+                            for streamed in streamer.offer_text(
+                                delta_text, step=steps + 1,
+                            ):
+                                yield to_agent_event(streamed)
+                    # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
+                    for streamed in streamer.end_step(step=steps + 1):
+                        yield to_agent_event(streamed)
                     # 聚合 chunks 成完整 AIMessage：用 reduce 风格 + 累加。
                     # 空流（模型没吐任何 chunk）退化成空 content。
                     if collected:
@@ -590,6 +637,15 @@ class AgentRuntime:
                     return
 
                 # 第 7 步：用 ToolExecutor 执行整批 tool_call 并按原 id 回填。
+                # ADR-0016 §4.1：tool/call 预持久化（执行前）——02 §8.3 状态机
+                # 要求 call 先于 running/output_delta，前端在工具在途期间就有
+                # 可关联的行；中断窗口也总是留下可配对修复的 call 事实。
+                for call in calls:
+                    call_event = self.executor.emit_call_event(
+                        session, tool_call_id=call.id, tool_name=call.name,
+                        args=call.args, run_id=run_id, step_id=steps,
+                    )
+                    yield to_agent_event(call_event)
                 tool_event_start = session.mark()
                 tool_error = None
                 try:
@@ -601,9 +657,12 @@ class AgentRuntime:
                             run_id=run_id,
                             agent_id=self._agent_id,
                         ),
+                        step_id=steps,
                     )
                 except Exception as error:  # noqa: BLE001
                     tool_error = error
+                # 执行期间追加的事件（tool/output_delta 等）镜像给流式消费者；
+                # web 订阅者经 session listener 实时收到（seq 幂等合并不重复）。
                 for event in session.since(tool_event_start):
                     yield to_agent_event(event)
                 if tool_error is not None:
@@ -625,14 +684,12 @@ class AgentRuntime:
                     content = result.model_dump_json()
                     outcome: str = "success" if result.ok else "failure"
 
-                    # 持久化顺序（TOOL_CALL → 延迟事件 → TOOL_RESULT）的单一
-                    # owner 是 ToolExecutor.emit_*（批次 C 候选 3）：Runtime 只
-                    # 消费已持久化事件并镜像给流式消费者，不再自己 append——
-                    # 此前该顺序在 runtime 与 executor abort flush 各编码一遍。
-                    for persisted_event in self.executor.emit_call_events(
+                    # 持久化顺序（延迟事件 → TOOL_RESULT）的单一 owner 是
+                    # ToolExecutor.emit_*（批次 C 候选 3 + ADR-0016 §4.1 拆分）：
+                    # Runtime 只消费已持久化事件并镜像，不再自己 append。
+                    for persisted_event in self.executor.emit_pending_events(
                         session,
-                        tool_call_id=execution.tool_call_id, tool_name=call.name,
-                        args=call.args, pending_events=execution.pending_events,
+                        pending_events=execution.pending_events,
                         run_id=run_id, step_id=steps,
                     ):
                         yield to_agent_event(persisted_event)
@@ -738,6 +795,11 @@ class AgentRuntime:
             # 禁止再产出（RuntimeError），取消中的 task 再 yield 也会被立即再取消。
             # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
             try:
+                # 流式块收口（ADR-0016 §3.5）：残余思考/文本先落盘（部分内容
+                # 保留，S18/16.4），有 open 思考块则补 reasoning/interrupted
+                # ——先于 model/failed（块先于调用归因终结）。
+                if streamer is not None:
+                    streamer.interrupt(step=steps + 1)
                 # 切换事实在失败/取消路径同样落盘（白盒透明不因终态打折）：
                 # drain 是幂等的，成功路径未触达时这里兜住残留在 coordinator 里
                 # 的 transition（冒烟实测缺陷：primary→fallback 后 fallback 也
@@ -752,7 +814,11 @@ class AgentRuntime:
                     )
                 if terminal.model_call_open:
                     terminal.append_model_failed(step=steps, cancelled=True)
-                terminal.cancelled_terminal(steps=steps)
+                terminal.cancelled_terminal(
+                    steps=steps,
+                    reason=(cancel_reason_supplier() if cancel_reason_supplier
+                            else "cancelled"),
+                )
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
@@ -774,6 +840,11 @@ class AgentRuntime:
             # result_holder 一定拿到终态结果——"run() 必返回失败结果"的契约
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
             try:
+                # 流式块收口（与取消臂同一不变量）：interrupted 先于 model/failed。
+                # 异常臂允许 yield——部分内容 + interrupted 事件镜像给流消费者。
+                if streamer is not None:
+                    for streamed in streamer.interrupt(step=steps + 1):
+                        yield to_agent_event(streamed)
                 # 切换事实在失败路径同样落盘（与取消臂同一不变量，见上）——
                 # drain 幂等：成功路径已取走则此处为空。
                 for transition in model_coord.drain_transitions():
