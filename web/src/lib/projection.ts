@@ -80,6 +80,18 @@ function cloneTurn(t: Turn): Turn {
  * 未触及的 turn 保持引用稳定——这是渲染层 React.memo(TurnView) 的前提：
  * 流式期间每个 delta 只应重渲染活跃轮次，而不是整条会话。 */
 function withTurnAt(state: ConversationState, step: number, fn: (turn: Turn) => void): void {
+  // 热路径（T9 10k 基准发现）：流式与顺序历史重放的目标几乎总是最后一轮——
+  // findIndex O(turns) 在长会话（数千轮）成为每事件主导成本（实测 5000 轮
+  // 8.79µs/事件）。前提 = turn.step_id 唯一（resolveStep 单调递增设计不变量；
+  // 退化重复步场景语义与 findIndex 首匹配可能不同，属既 broken 不变量）。
+  const lastIdx = state.turns.length - 1;
+  const last = lastIdx >= 0 ? state.turns[lastIdx] : undefined;
+  if (last && last.step_id === step) {
+    const turn = cloneTurn(last);
+    replaceTurnAt(state, lastIdx, turn);
+    fn(turn);
+    return;
+  }
   const idx = state.turns.findIndex((t) => t.step_id === step);
   if (idx === -1) {
     const turn = newTurn(step);
@@ -628,6 +640,11 @@ function applyReasoningEvent(turn: Turn, event: AgentEvent, type: string): void 
  *  会造幽灵轮次）。找不到宿主轮时返回入参 step（withTurnAt 按 resolveStep
  *  语义处理，与 TOOL_RESULT 既有行为一致）。 */
 function locateToolHostTurn(state: ConversationState, callId: string, step: number): number {
+  // 热路径（T9，与 withTurnAt 同理）：工具事件的目标几乎总是最后一轮
+  const last = state.turns[state.turns.length - 1];
+  if (last && last.step_id === step && last.tools.some((x) => x.tool_call_id === callId)) {
+    return last.step_id;
+  }
   const hostIdx = state.turns.findIndex(
     (t) => t.step_id === step && t.tools.some((x) => x.tool_call_id === callId),
   );
