@@ -52,6 +52,7 @@ class LangfuseSink:
         public_key: str,
         secret_key: str,
         base_url: str = "",
+        trace_content: str = "full",
         client_factory: Callable[..., Any] | None = None,
         breaker_threshold: int = 5,
         breaker_cooldown_seconds: float = 60.0,
@@ -59,6 +60,10 @@ class LangfuseSink:
     ) -> None:
         self._logger = _LOGGER
         self._client: Any = None
+        # 内容边界（ADR-0018 D6）：full=完整输入输出；redacted=只传 metadata+截断。
+        # 非法值按 full 处理（宁多不少地保守降级到完整侧会泄漏——这里反向：
+        # 未知值归 full 是用户显式默认，redaction 由 tracer 侧再次校验）。
+        self.trace_content = trace_content if trace_content in ("full", "redacted") else "full"
         self._breaker_threshold = breaker_threshold
         self._breaker_cooldown = breaker_cooldown_seconds
         self._flush_timeout = flush_timeout_seconds
@@ -110,6 +115,28 @@ class LangfuseSink:
         return _ObservationContext(
             self, client, {"name": name, "as_type": as_type, **fields}
         )
+
+    def start_observation(self, *, name: str, as_type: str = "span", **fields: Any) -> Any:
+        """非 current 形式：直接返回观测句柄（显式树控制用，RunTracer 的
+        trace 根由此创建）。缺席/熔断丢弃/SDK 异常 → None。"""
+        client = self._client
+        if client is None:
+            return None
+        if self._breaker_open():
+            self._register_drop("start_observation")
+            return None
+        try:
+            span = client.start_observation(name=name, as_type=as_type, **fields)
+            self._consecutive_failures = 0
+            return span
+        except Exception as exc:  # noqa: BLE001 - D3 异常边界
+            self._register_failure("start_observation", exc)
+            return None
+
+    def report_failure(self, operation: str, exc: Exception) -> None:
+        """观测句柄上的后续操作（update/end/子观测）失败时由 tracer 回注——
+        计数进同一熔断账本，但绝不向调用方抛出。"""
+        self._register_failure(operation, exc)
 
     def flush(self, timeout: float | None = None) -> None:
         """尽力把后台队列发送完；有超时上限，退出节奏不被旁路拖死（D3）。"""
