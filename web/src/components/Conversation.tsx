@@ -10,7 +10,7 @@
  * "~N tok" estimate (zero-fake-metrics rule).
  */
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Activity } from 'lucide-react';
 import type { ChainNode } from '../lib/projection';
@@ -24,6 +24,7 @@ import { formatDuration, truncateForDisplay } from '../lib/format';
 import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 import { DelegationNode } from './DelegationNode';
+import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
 import { CopyButton } from './CopyButton';
 
 interface Props {
@@ -33,6 +34,8 @@ interface Props {
   density: TraceDensity;
   /** L0-L2 展开状态（manual override ?? density 默认）。缺省 = 无手动层。 */
   disclosure?: Disclosure;
+  /** T2（#95）reasoning 开合状态（S6/S7 自动规则 + user_interacted override）。 */
+  reasoningDisclosure?: ReasoningDisclosureApi;
   /** Inspector → 主区反向联动（PRD §9.2）：定位目标 key + 变更序号（nonce 保证
    *  重复跳同一目标也触发 effect）。 */
   jumpRequest?: { key: string; nonce: number } | null;
@@ -42,6 +45,8 @@ interface Props {
   onFocusTool?: (tool: ToolCall) => void;
   /** 打开子会话（Phase 13 委派节点入口，复用会话栏同一选择管线）。 */
   onOpenSession?: (sessionId: string) => void;
+  /** Inspector 钻取子会话（v2 PRD §10.5 委派配对）——右栏原位展开 child。 */
+  onInspectChild?: (child: { childSessionId: string; target: string }) => void;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -52,7 +57,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, disclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession }: Props) {
+export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
@@ -99,13 +104,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
       return;
     }
     // 窗口外兜底：key → turn index → scrollToIndex
-    const idx = turns.findIndex((t) =>
-      jumpRequest.key.startsWith('tool:')
-        ? t.tools.some((x) => `tool:${x.tool_call_id}` === jumpRequest.key)
-        : jumpRequest.key.startsWith('delegation:')
-          ? (t.delegations?.some((x) => `delegation:${x.child_session_id}` === jumpRequest.key) ?? false)
-          : `step:${t.step_id}` === jumpRequest.key,
-    );
+    const idx = turns.findIndex((t) => turnHasStreamKey(t, jumpRequest.key));
     if (idx === -1) return;
     virtualizer.scrollToIndex(idx, { align: 'center' });
     requestAnimationFrame(() => {
@@ -194,8 +193,10 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
                 model={conversation.model}
                 density={density}
                 disclosure={disclosure}
+                reasoningDisclosure={reasoningDisclosure}
                 onFocusTool={onFocusTool}
                 onOpenSession={onOpenSession}
+                onInspectChild={onInspectChild}
               />
             </div>
           ))}
@@ -221,7 +222,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-const TurnView = memo(function TurnView({ turn, model, density, disclosure, onFocusTool, onOpenSession }: { turn: Turn; model: string | null; density: TraceDensity; disclosure?: Disclosure; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void }) {
+const TurnView = memo(function TurnView({ turn, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild }: { turn: Turn; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -302,9 +303,11 @@ const TurnView = memo(function TurnView({ turn, model, density, disclosure, onFo
                     node={node}
                     density={density}
                     disclosure={disclosure}
+                    reasoningDisclosure={reasoningDisclosure}
                     isFinalModel={i === lastModelIndex}
                     onFocusTool={onFocusTool}
                     onOpenSession={onOpenSession}
+                    onInspectChild={onInspectChild}
                   />
                 ))}
               </div>
@@ -319,11 +322,46 @@ const TurnView = memo(function TurnView({ turn, model, density, disclosure, onFo
 function chainKey(node: ChainNode, i: number): string {
   if (node.kind === 'tool') return node.tool.tool_call_id;
   if (node.kind === 'delegation') return node.delegation.child_session_id;
+  if (node.kind === 'reasoning') return node.block.blockId;
   return `model-${i}`;
 }
 
-export function ChainNodeView({ node, density, disclosure, isFinalModel = true, onFocusTool, onOpenSession }: { node: ChainNode; density: TraceDensity; disclosure?: Disclosure; /** 该 model 段是否为 turn 最后一个模型段（final-answer 高对比）。 */ isFinalModel?: boolean; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void }) {
-  if (node.kind === 'tool') {
+/** 反向联动窗口外兜底的 key→turn 匹配（tool:/delegation:/step: 三定位域，
+ *  与 streamKeyFromEvent 的 key 词汇一一对应）。 */
+function turnHasStreamKey(t: Turn, key: string): boolean {
+  if (key.startsWith('tool:')) return t.tools.some((x) => `tool:${x.tool_call_id}` === key);
+  if (key.startsWith('delegation:')) {
+    return t.delegations?.some((x) => `delegation:${x.child_session_id}` === key) ?? false;
+  }
+  return `step:${t.step_id}` === key;
+}
+
+// ── 语义事件渲染注册表（spec 03 §10 Semantic Event Renderer Registry）──
+// kind → 渲染器映射，禁止在单一巨型组件里硬编码全部运行时类型。
+// 键由 ChainNode['kind'] 类型系统穷举——新增节点类型必须注册渲染器才过 tsc；
+// 事件级未知类型在投影层已隔离（unknown_events 兜底），注册表不承担该职责。
+
+/** 执行链节点的渲染上下文（TurnView 透传，注册表内不再取 React hook）。 */
+interface ChainRenderCtx {
+  node: ChainNode;
+  density: TraceDensity;
+  disclosure?: Disclosure;
+  reasoningDisclosure?: ReasoningDisclosureApi;
+  /** 该 model 段是否为 turn 最后一个模型段（final-answer 高对比）。缺省 true
+   *  （与旧 ChainNodeView 默认一致——直接调用方多省略此 prop）。 */
+  isFinalModel?: boolean;
+  onFocusTool?: (tool: ToolCall) => void;
+  onOpenSession?: (sessionId: string) => void;
+  onInspectChild?: (child: { childSessionId: string; target: string }) => void;
+}
+
+/** 每种 kind 的渲染器只接收窄化后的 node 类型（Extract 按 kind 收紧）。 */
+type RendererFor<K extends ChainNode['kind']> = (
+  ctx: Omit<ChainRenderCtx, 'node'> & { node: Extract<ChainNode, { kind: K }> },
+) => ReactNode;
+
+const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
+  tool: ({ node, density, disclosure, onFocusTool }) => {
     const key = toolEventKey(node.tool.tool_call_id);
     const cycle = disclosure
       ? () => disclosure.setLevel(key, nextLevel(disclosure.levelFor(key, density)))
@@ -337,59 +375,76 @@ export function ChainNodeView({ node, density, disclosure, isFinalModel = true, 
         onFocus={onFocusTool}
       />
     );
-  }
-  if (node.kind === 'delegation') {
-    return <DelegationNode delegation={node.delegation} density={density} onOpenSession={onOpenSession} />;
-  }
-  const { segment }: { segment: ModelSegment } = node;
-  const kind: RuntimeEventKind = modelKind(segment.status, isFinalModel);
-  // Compact 档下 done 的 model 段只渲染首行摘要（渐进披露：详情留给 Inspector）
-  if (density === 'compact' && segment.status !== 'streaming') {
-    const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
-    if (!first) return null;
-    return (
-      <div className="model-output done model-output-compact">{renderMarkdown(truncateForDisplay(first))}</div>
-    );
-  }
-  if (!segment.text && segment.status !== 'streaming') return null;
-  // 模型文本与工具输出同级不可信——单行超长模型输出同样会冻结 UI，渲染前截断
-  // （41e7360 只覆盖了工具路径，code-review 补齐此处）。
-  const display = truncateForDisplay(segment.text);
-  // 语义图标行（PRD §5.2/§10）：思考中（streaming）/ 中间输出（done 非终段）。
-  // final-answer 不出行（高对比正文直接呈现，PRD §11.2）。
-  const kindRow =
-    kind === 'final-answer' ? null : (
-      <div className={`model-kind-row model-kind-row-${kind}`}>
-        <span className="model-kind-icon">{(() => { const Icon = KIND_ICON[kind]; return <Icon size={14} />; })()}</span>
-        <span className="model-kind-label">{KIND_LABEL[kind]}</span>
-        {kind === 'thinking' && <span className="model-kind-ellipsis" aria-hidden="true" />}
-      </div>
-    );
-  // P0-2a 流式 markdown 增量化（HANDOFF §6）：streaming 段渲染纯文本
-  // （pre-wrap 样式保留换行，标记原样透传——打字机状态本就不需要排版），
-  // model/completed 置 done 后一次性 renderMarkdown。消灭流式期间每 delta
-  // 全量重解析的 CPU 开销。纯文本走 React 文本节点，天然零 XSS 面。
-  if (segment.status === 'streaming') {
+  },
+  delegation: ({ node, density, onOpenSession, onInspectChild }) => (
+    <DelegationNode
+      delegation={node.delegation}
+      density={density}
+      onOpenSession={onOpenSession}
+      onInspectChild={onInspectChild}
+    />
+  ),
+  reasoning: ({ node, density, reasoningDisclosure }) => (
+    <ReasoningBlockView block={node.block} density={density} disclosure={reasoningDisclosure} />
+  ),
+  model: ({ node, density, isFinalModel: isFinal = true }) => {
+    const { segment } = node;
+    const kind: RuntimeEventKind = modelKind(segment.status, isFinal);
+    // Compact 档下 done 的 model 段只渲染首行摘要（渐进披露：详情留给 Inspector）
+    if (density === 'compact' && segment.status !== 'streaming') {
+      const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
+      if (!first) return null;
+      return (
+        <div className="model-output done model-output-compact">{renderMarkdown(truncateForDisplay(first))}</div>
+      );
+    }
+    if (!segment.text && segment.status !== 'streaming') return null;
+    // 模型文本与工具输出同级不可信——单行超长模型输出同样会冻结 UI，渲染前截断
+    // （41e7360 只覆盖了工具路径，code-review 补齐此处）。
+    const display = truncateForDisplay(segment.text);
+    // 语义图标行（PRD §5.2/§10）：思考中（streaming）/ 中间输出（done 非终段）。
+    // final-answer 不出行（高对比正文直接呈现，PRD §11.2）。
+    const kindRow =
+      kind === 'final-answer' ? null : (
+        <div className={`model-kind-row model-kind-row-${kind}`}>
+          <span className="model-kind-icon">{(() => { const Icon = KIND_ICON[kind]; return <Icon size={14} />; })()}</span>
+          <span className="model-kind-label">{KIND_LABEL[kind]}</span>
+          {kind === 'thinking' && <span className="model-kind-ellipsis" aria-hidden="true" />}
+        </div>
+      );
+    // P0-2a 流式 markdown 增量化（HANDOFF §6）：streaming 段渲染纯文本
+    // （pre-wrap 样式保留换行，标记原样透传——打字机状态本就不需要排版），
+    // model/completed 置 done 后一次性 renderMarkdown。消灭流式期间每 delta
+    // 全量重解析的 CPU 开销。纯文本走 React 文本节点，天然零 XSS 面。
+    if (segment.status === 'streaming') {
+      return (
+        <div className="model-output-wrap">
+          {kindRow}
+          <div className="model-output streaming">
+            {display}
+            <span className="stream-caret" />
+          </div>
+        </div>
+      );
+    }
+    // hover 复制（调研：per-message copy 是 AI chat 标配动作；仅完成段提供，
+    // 流式段文本还在增长，复制半成品是噪音）。中间段低对比（D17 分层），
+    // final-answer 保持正文高对比。
     return (
       <div className="model-output-wrap">
         {kindRow}
-        <div className="model-output streaming">
-          {display}
-          <span className="stream-caret" />
+        <div className={`model-output ${segment.status}${kind === 'model' ? ' model-output-intermediate' : ''}`}>
+          {renderMarkdown(display)}
         </div>
+        {segment.text && <CopyButton text={segment.text} label={kind === 'final-answer' ? '复制回答' : '复制输出'} />}
       </div>
     );
-  }
-  // hover 复制（调研：per-message copy 是 AI chat 标配动作；仅完成段提供，
-  // 流式段文本还在增长，复制半成品是噪音）。中间段低对比（D17 分层），
-  // final-answer 保持正文高对比。
-  return (
-    <div className="model-output-wrap">
-      {kindRow}
-      <div className={`model-output ${segment.status}${kind === 'model' ? ' model-output-intermediate' : ''}`}>
-        {renderMarkdown(display)}
-      </div>
-      {segment.text && <CopyButton text={segment.text} label={kind === 'final-answer' ? '复制回答' : '复制输出'} />}
-    </div>
-  );
+  },
+};
+
+export function ChainNodeView(ctx: ChainRenderCtx): ReactNode {
+  // 单点窄化：键与 node.kind 出自同一 ctx（编译期保证一致），注册表内部
+  // 已按 Extract 收紧各自 node 类型——调度处一次性还原宽签名。
+  const render = CHAIN_RENDERERS[ctx.node.kind] as (c: ChainRenderCtx) => ReactNode;
+  return render(ctx);
 }

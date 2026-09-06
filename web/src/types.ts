@@ -24,6 +24,10 @@ export interface AgentEvent {
   /** Present on SSE-streamed events (injected by POST /api/sessions endpoint).
    *  Absent on historical events read from the store (session_id is known from the URL). */
   session_id?: string;
+  /** Reasoning 块聚合键——envelope 顶层字段（T-contract #116，后端 SessionEvent.block_id
+   *  序列化位置）。reasoning/started|delta|completed|interrupted 携带；data.block_id
+   *  是 legacy 容错位（投影解析顺序：envelope → data → 合成）。 */
+  block_id?: string;
 }
 
 /** Session summary from GET /api/sessions. */
@@ -104,6 +108,17 @@ export interface ToolCall {
   /** Artifact produced by this tool call when output overflows the inline limit.
    *  Set by artifact/created event (Phase 5). Inspector fetches via inspect_artifact. */
   artifact?: ArtifactRef;
+  /** T3（#96）：流式输出缓冲（tool/output_delta 逐段累积；按事件序保 channel）。 */
+  output?: ToolOutputChunk[];
+}
+
+/** T3（#96）：工具输出流块（契约 C2 tool/output_delta）。
+ *  channel 保真（stdout/stderr 分色，视觉可合并）；相邻同通道 delta 由投影
+ *  合并进尾块，数组规模有界。result 到达后 chunks 保留（流式内容不丢弃）
+ *  ——渲染优先 chunks，缺失回退既有 result 路径（视图不双写）。 */
+export interface ToolOutputChunk {
+  channel: 'stdout' | 'stderr';
+  text: string;
 }
 
 /** Large tool output offloaded to the ArtifactStore (Phase 5, spec 06 §15).
@@ -116,9 +131,28 @@ export interface ArtifactRef {
 }
 
 export interface ModelSegment {
-  /** Accumulated streamed text so far (from model/delta). */
+  /** Accumulated streamed text so far (from model/delta legacy / text/delta durable). */
   text: string;
   status: 'streaming' | 'done';
+}
+
+/** 推理块状态（T2 #95）——块生命周期与原语层的共享别名（reasoningCursor /
+ *  disclosure 引用此处，单一来源）。 */
+export type ReasoningStatus = 'streaming' | 'completed' | 'interrupted';
+
+/** T2（#95）：推理/进度块（契约 C1 reasoning 事件族，S1 双来源共用一种块）。
+ *  source=model = provider 思考（reasoning_content）；source=agent = agent 进度
+ *  叙述。completed/interrupted 后不可变（spec 02 §8.1），迟到 delta 丢弃。
+ *  visibility=internal 的事件永不投影为本块（spec 02 §15 硬边界）。 */
+export interface ReasoningBlock {
+  /** 稳定聚合键（data.block_id；缺失时投影合成 `r:{step}:{seq}`，重放确定）。 */
+  blockId: string;
+  source: 'model' | 'agent';
+  /** 累积流文本（折叠前读视口与展开面消费同一份缓冲——两视图永不失同步）。 */
+  text: string;
+  status: ReasoningStatus;
+  started_at?: string;
+  completed_at?: string;
 }
 
 export interface Turn {
@@ -153,6 +187,9 @@ export interface Turn {
   /** Harness 注入纠正消息的来源标记（user/message data.injected_by）——
    *  非真人输入，渲染为系统提示条而非用户气泡。 */
   injected_by?: string;
+  /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
+   *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
+  reasoningById?: Record<string, ReasoningBlock>;
 }
 
 /** RepeatedToolFailureGuard 触发记录（tool/failure-guard 事件，ADR-0014 #69）。
@@ -166,8 +203,16 @@ export interface RunFailureGuard {
 /** Multi-Agent 委派（agent/delegation-started / finished，Phase 13 ADR-0015）。
  *  父流白盒编排事实：child 的完整多轮历史在 child 自己的 session（后端 Gate 4
  *  不变量），父流只有 start/finish 两个锚点。阻塞语义：finished 返回即 child
- *  已终态。status 复用 DSH 四态视觉语言——running → completed/failed；父 run
- *  中断时未回填的委派 settle 为 stopped（中断 ≠ 错误，与 tool 同语义域）。 */
+ *  已终态。
+ *
+ *  status 说明：契约冻结 finished.status ∈ {completed, failed}（无中间态）。
+ *  前端视图态在此基础上扩展两个——running（started 已到、finished 未回填）与
+ *  stopped（父 run 中断时未回填的委派，finalizeRun settle；中断 ≠ 错误，与
+ *  tool 同一 DSH 语义域）。stopped 不是契约值，只由前端投影产生。
+ *
+ *  copy-on-write 契约：delegations 数组与 tools 同规则——cloneTurn 会浅拷贝
+ *  数组，但变更必须整体 reassign（或经 pushDelegation），禁止对克隆前共享的
+ *  数组原地 push（会污染旧 turn 引用）。 */
 export interface Delegation {
   /** 子代理 profile 名：'research_review' | 'coding'（V1 内置）。 */
   target: string;
@@ -186,7 +231,8 @@ export interface Delegation {
 export type TurnActivity =
   | { kind: 'model'; /** Index into turn.segments. */ index: number }
   | { kind: 'tool'; tool_call_id: string }
-  | { kind: 'delegation'; child_session_id: string };
+  | { kind: 'delegation'; child_session_id: string }
+  | { kind: 'reasoning'; blockId: string };
 
 /** Context compaction record (context/compacted event, Phase 5 spec 06).
  *  Run-level metadata — the Inspector Context panel surfaces these. */
@@ -240,7 +286,15 @@ export interface ConversationState {
   usage_total: UsageStats | null;
   cost_usd: number | null;
   trace_id: string | null;
+  /** 最近一个携带 run_id 的事件的 run 归属（PRD §8.2 Inspector 头部 Run ID）。
+   *  事件真值，缺失即 null——UI 隐藏该位，不回退 session_id 冒充（零伪造）。 */
+  run_id: string | null;
   /** Phase 12 白盒透明（ADR-0014）：最近一次 model/fallback——模型卡「已切换」态。
    *  字段缺失（形状不完整）时不记录（零伪造）；后续 model 已切 to_model。 */
   model_fallback: { from_model: string; to_model: string; reason: string } | null;
+  /** T1（#94）幂等簿记：本会话已应用的持久事件 seq 集合（spec 02 §6.1 at-least-once
+   *  去重键）。append-only 共享日志纪律（同 events）：只增不改、跨快照共享引用、
+   *  绝不整体替换。null-seq 帧不入册——ephemeral 流式信号（model/delta 等）
+   *  按契约永不持久化也永不去重。 */
+  seenSeqs: Set<number>;
 }

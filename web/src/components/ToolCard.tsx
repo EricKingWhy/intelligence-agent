@@ -16,13 +16,14 @@
  * Status color: running=warning, success=green, failed=red.
  */
 
-import { memo } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, Check, Scissors, Square, X } from 'lucide-react';
-import type { ToolCall } from '../types';
+import type { ToolCall, ToolOutputChunk } from '../types';
 import type { TraceDensity } from '../lib/density';
 import { defaultLevelFor, type DisclosureLevel } from '../lib/disclosure';
 import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { KIND_ICON, toolKind } from '../lib/eventKind';
+import { FOLLOW_BOTTOM, followOnJump, followOnScroll, nearBottom, useFollowResetOnStop, type FollowState } from '../lib/followLatest';
 import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
@@ -111,11 +112,12 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
           <span className="act-args act-args-compact">{summarizeArgs(tool, 32)}</span>
         )}
         </button>
-        {/* hover Inspect chip（PRD §9.1）：点击进 Inspector 联动，不触发行点击。 */}
+        {/* hover Inspect chip（PRD §9.1）：点击进 Inspector 联动，不触发行点击。
+            真按钮（code-review P0：span+tabIndex=-1 键盘不可达）——Tab 聚焦后
+            Enter/Space 原生触发，:focus-visible 时浮现（样式已覆盖）。 */}
         {hasInspect && (
-          <span
-            role="button"
-            tabIndex={-1}
+          <button
+            type="button"
             className="act-inspect-chip"
             onClick={(e) => {
               e.stopPropagation();
@@ -123,9 +125,17 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
             }}
           >
             Inspect
-          </span>
+          </button>
         )}
       </div>
+
+      {/* T3（#96）：流式输出尾窗——running 渲染 chunks 活流（S14 活流不需展开）；
+          终态以 result 校准（契约 C2「tool/result 终态全量兜底」——delta 缺口/
+          重连丢失时 partial chunks 不得永久遮蔽全量），result 无可渲染输出时
+          chunks 兜底。chunks 数据本身永不清除（events/raw 可查）。 */}
+      {tool.output && tool.output.length > 0 && (tool.status === 'running' || !tool.result) && (
+        <ToolOutputStream chunks={tool.output} streaming={tool.status === 'running'} />
+      )}
 
       {/* 失败摘要行（PRD §5.2 Error：TIMEOUT · 10.0s 式轻量摘要）——保持折叠，
           只给关键错误信号；完整 Raw 留给 Inspector（D6：失败不强制全展开）。 */}
@@ -195,6 +205,129 @@ function summarizeArgs(tool: ToolCall, max = 60): string {
   return entries.map(([k, v]) => `${k}=${truncate(JSON.stringify(v), 30)}`).join(' ');
 }
 
+// ── T3（#96）：流式输出尾窗（S14，规格 03 §9.3/9.4）──
+
+/** 渲染预算：尾窗字符数——DOM 不随总输出线性膨胀（万行级 fixture 不冻结 UI）。
+ *  完整内容永远可复制（CopyButton 走全量 chunks）——视图裁剪 ≠ 数据丢弃。 */
+const OUTPUT_TAIL_CHARS = 8000;
+
+/** 尾部字符预算裁窗：从末尾向前跨块逐字符取——投影会把相邻同通道 delta
+ *  合并进单块（可能巨大），按整块取会让预算失效。 */
+function tailWindow(
+  chunks: ToolOutputChunk[],
+  budget: number,
+): { omitted: number; window: ToolOutputChunk[] } {
+  const window: ToolOutputChunk[] = [];
+  let remaining = budget;
+  let omitted = 0;
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const c = chunks[i];
+    if (remaining <= 0) {
+      omitted += c.text.length;
+      continue;
+    }
+    if (c.text.length <= remaining) {
+      window.unshift(c);
+      remaining -= c.text.length;
+    } else {
+      window.unshift({ channel: c.channel, text: c.text.slice(c.text.length - remaining) });
+      omitted += c.text.length - remaining;
+      remaining = 0;
+    }
+  }
+  return { omitted, window };
+}
+
+/** 流式输出区：stdout/stderr 分色（channel 保真）、有界尾窗、贴底跟随（S8 同族
+ *  谓词 lib/followLatest）、上滚浮现「↓ 最新」、换行切换、全量复制。 */
+function ToolOutputStream({ chunks, streaming }: { chunks: ToolOutputChunk[]; streaming: boolean }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const followRef = useRef<FollowState>(FOLLOW_BOTTOM);
+  const [suspended, setSuspended] = useState(false);
+  const [wrap, setWrap] = useState(true);
+  const { omitted, window: win } = useMemo(() => tailWindow(chunks, OUTPUT_TAIL_CHARS), [chunks]);
+  const fullText = useMemo(() => chunks.map((c) => c.text).join(''), [chunks]);
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const near = nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
+      followRef.current = followOnScroll(followRef.current, near, streaming);
+      setSuspended(followRef.current.suspended);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [streaming]);
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !streaming || !followRef.current.following) return;
+    el.scrollTop = el.scrollHeight;
+  }, [chunks, streaming]);
+
+  // 终态清 suspended（复用 followLatest 单一实现，T3 Standards 轴收敛）
+  useFollowResetOnStop(streaming, followRef, setSuspended);
+
+  const jump = () => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    followRef.current = followOnJump();
+    setSuspended(false);
+  };
+
+  const channels = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of chunks) set.add(c.channel);
+    return [...set];
+  }, [chunks]);
+
+  return (
+    <div className="tool-out-stream">
+      <div className="tool-out-bar">
+        <span className="tool-out-label">{streaming ? '输出 · 流式' : '输出'}</span>
+        {/* 通道图例（票面「channel 徽标」）：出现过的通道才显示 */}
+        {channels.map((ch) => (
+          <span key={ch} className={`tool-out-chip tool-out-chip-${ch}`}>
+            {ch}
+          </span>
+        ))}
+        {omitted > 0 && (
+          <span className="tool-out-tail-mark" title={`前 ${omitted} 字符未渲染，完整内容可复制`}>
+            …前 {omitted.toLocaleString()} 字符已省略
+          </span>
+        )}
+        <span className="tool-out-bar-gap" />
+        <button
+          type="button"
+          className="tool-out-wrap-btn"
+          onClick={() => setWrap((v) => !v)}
+        >
+          {wrap ? '不换行' : '自动换行'}
+        </button>
+        <CopyButton text={fullText} label="复制全部输出" />
+      </div>
+      <div ref={bodyRef} className={`tool-out-body ${wrap ? 'tool-out-wrap' : 'tool-out-nowrap'}`}>
+        {win.map((c, i) => (
+          <span
+            key={i}
+            className={c.channel === 'stderr' ? 'tool-out-stderr' : undefined}
+            title={c.channel === 'stderr' ? 'stderr' : undefined}
+          >
+            {c.text}
+          </span>
+        ))}
+        {streaming && <span className="stream-caret" />}
+      </div>
+      {suspended && (
+        <button type="button" className="tool-out-jump" onClick={jump}>
+          ↓ 最新
+        </button>
+      )}
+    </div>
+  );
+}
+
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
@@ -214,7 +347,11 @@ function BashBlock({ tool }: { tool: ToolCall }) {
         <span className="bash-prompt">$</span>
         <code>{cmd}</code>
       </div>
-      {out && <pre className="bash-output">{truncateForDisplay(out)}</pre>}
+      {/* T3（#96）：仅 running+chunks 时屏蔽 result 输出行（活流双写）；
+          终态由 result 校准渲染（stream 区已退位，无双写）。 */}
+      {!(tool.status === 'running' && tool.output?.length) && out && (
+        <pre className="bash-output">{truncateForDisplay(out)}</pre>
+      )}
       {cancelled && (
         <span className="bash-cancelled" title="命令被超时/断连取消，进程树已终止">
           已取消

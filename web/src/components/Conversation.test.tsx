@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ChainNodeView } from './Conversation';
 import type { ChainNode } from '../lib/projection';
-import type { ToolCall } from '../types';
+import type { ReasoningBlock, ToolCall } from '../types';
 import type { Disclosure } from '../lib/disclosure';
 
 function modelNode(text: string, status: 'streaming' | 'done'): ChainNode {
@@ -105,5 +105,126 @@ describe('ChainNodeView — ToolCard L 级接线（ADR-0014 D2）', () => {
     );
     expect(html).not.toContain('act-detail-inline');
     expect(html).not.toContain('tool-card-body');
+  });
+});
+
+describe('ChainNodeView — ReasoningBlock（#95，规格 03 §7）', () => {
+  const rNode = (over: Partial<ReasoningBlock>): ChainNode => ({
+    kind: 'reasoning',
+    block: { blockId: 'b1', source: 'model', text: '', status: 'streaming', ...over },
+  });
+
+  it('balanced streaming 自动展开（S6）：全文 + aria-expanded + 流式光标', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView node={rNode({ text: '完整推理文本' })} density="balanced" />,
+    );
+    expect(html).toContain('正在思考');
+    expect(html).toContain('reasoning-expanded');
+    expect(html).toContain('完整推理文本');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('stream-caret');
+  });
+
+  it('compact streaming 默认收（PRD §9.1 一行实况）：前读视口在场、aria-hidden', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView node={rNode({ text: '逐步分析' })} density="compact" />,
+    );
+    expect(html).toContain('reasoning-readline');
+    expect(html).toContain('aria-hidden="true"');
+    expect(html).toContain('逐步分析');
+    expect(html).not.toContain('reasoning-expanded');
+  });
+
+  it('手动 override 收起（S7 user_interacted）：balanced streaming 也保持收起', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView
+        node={rNode({ text: 'thinking' })}
+        density="balanced"
+        reasoningDisclosure={{ isOpen: () => false, toggle: () => {} }}
+      />,
+    );
+    expect(html).toContain('reasoning-readline');
+    expect(html).toContain('aria-expanded="false"');
+  });
+
+  it('completed：header 切「思考 · 持续了」时长；收起态前读视口定格', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView
+        node={rNode({
+          status: 'completed',
+          text: '已完成的思考',
+          started_at: '2026-09-06T00:00:00Z',
+          completed_at: '2026-09-06T00:00:36Z',
+        })}
+        density="balanced"
+      />,
+    );
+    expect(html).toContain('思考');
+    expect(html).toContain('持续了');
+    expect(html).toContain('36 秒');
+    expect(html).not.toContain('正在思考');
+  });
+
+  it('interrupted：中断于 + 已聚合文本保留（PRD §16.4 不擦除）', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView
+        node={rNode({
+          status: 'interrupted',
+          text: '部分内容',
+          started_at: '2026-09-06T00:00:00Z',
+          completed_at: '2026-09-06T00:00:18Z',
+        })}
+        density="balanced"
+      />,
+    );
+    expect(html).toContain('中断于');
+    expect(html).toContain('部分内容');
+  });
+
+  it('agent 进度来源出「进度」徽标（S1 双来源可辨）', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView node={rNode({ source: 'agent' })} density="balanced" />,
+    );
+    expect(html).toContain('进度');
+  });
+});
+
+describe('ChainNodeView — DelegationNode 委派节点（Phase 13，v2 PRD §10.5）', () => {
+  const delegationNode: ChainNode = {
+    kind: 'delegation',
+    delegation: {
+      target: 'research_review',
+      task: '调研 python.org',
+      child_session_id: 'child-abc',
+      status: 'running',
+    },
+  };
+
+  it('注册表分发：编排节点渲染 DSH 四态行 + 子会话身份行 + 复制', () => {
+    const html = renderToStaticMarkup(
+      <ChainNodeView node={delegationNode} density="balanced" />,
+    );
+    expect(html).toContain('委派 → research_review');
+    expect(html).toContain('child-abc');
+    expect(html).toContain('act-status-running');
+    expect(html).toContain('deleg-child-row');
+  });
+
+  it('onInspectChild / onOpenSession 提供时渲染两个入口；缺省不造假链接', () => {
+    const withEntries = renderToStaticMarkup(
+      <ChainNodeView
+        node={delegationNode}
+        density="balanced"
+        onInspectChild={() => undefined}
+        onOpenSession={() => undefined}
+      />,
+    );
+    expect(withEntries).toContain('Inspect 子会话');
+    expect(withEntries).toContain('打开子会话');
+    const without = renderToStaticMarkup(
+      <ChainNodeView node={delegationNode} density="balanced" />,
+    );
+    expect(without).not.toContain('Inspect 子会话');
+    expect(without).not.toContain('打开子会话');
   });
 });

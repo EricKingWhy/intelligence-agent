@@ -17,12 +17,14 @@
  *   selectSession → cancels any live stream (idempotent) and switches mode.
  *
  * Disconnect cleanup: SSE handle's cancel() is wired to unmount via useEffect ref.
+ * ADR-0016 detached-run（T5 #98）：cancel/abort 只解订阅，run 服务端跑到终态——
+ * 显式中断唯一入口是 cancelStream 的 POST /cancel（decideCancel 决策）。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, recoverSession, RecoverError, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, cancelSession, recoverSession, RecoverError, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
@@ -72,6 +74,24 @@ export function shouldApplyRecoverResult(mode: SessionMode, sid: string): boolea
   return mode.kind === 'viewing' && mode.sessionId === sid;
 }
 
+/** T5（#98）显式取消的传输层决策（detached-run 契约回执 §0.3/§3）。
+ *
+ * 断连不再取消 run（订阅者离开只 unsubscribe）——Esc/停止必须走
+ * POST /cancel 借道显式中断；abort 仅剩传输层清理语义。
+ *
+ * - 已知 sid → cancel-request：POST /cancel（200 cancelling / 200 no_active_run
+ *   幂等成功 / 404），**流保持打开**——run/failed(data.reason='cancelled') 经流
+ *   广播驱动既有 onDone → viewing 收尾迁移，不用 abort 伪装取消。
+ * - sid 未知（POST 在途、首帧未确认，无从显式取消）→ abort-transport：
+ *   仅清理订阅；run 由后端孤儿回收兜底（reason=orphaned，契约 §4）。 */
+export type CancelDecision =
+  | { kind: 'cancel-request'; sessionId: string }
+  | { kind: 'abort-transport' };
+
+export function decideCancel(liveSid: string | null): CancelDecision {
+  return liveSid ? { kind: 'cancel-request', sessionId: liveSid } : { kind: 'abort-transport' };
+}
+
 /** live→viewing 迁移时是否显示「正在加载历史…」占位符。
  *
  * 流结束的会话 conversation 已是该会话的完整投影真相（同一事件源流式构建，
@@ -101,7 +121,14 @@ export interface CommitCoalescer {
   cancel(): void;
 }
 
-export function createCommitCoalescer(submit: () => void, windowMs = 24): CommitCoalescer {
+/** T7（#100）可见性注入签名：默认恒 true（前台语义零回归）。 */
+export type VisibilityProbe = () => boolean;
+
+export function createCommitCoalescer(
+  submit: () => void,
+  windowMs = 24,
+  isVisible: VisibilityProbe = () => true,
+): CommitCoalescer {
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const fire = () => {
@@ -113,7 +140,12 @@ export function createCommitCoalescer(submit: () => void, windowMs = 24): Commit
   return {
     schedule() {
       dirty = true;
-      if (timer === null) timer = setTimeout(fire, windowMs);
+      if (timer !== null) return;
+      // T7（#100）后台降渲染（spec 03 §18.3）：隐藏期不排定时器——dirty 挂起，
+      // 真相仍逐帧 applyEvent 进本地 conv（数据零丢失），只延迟 setConversation
+      // 通知；回前台由 visibilitychange flush 一次（整段积压合帧单提交）。
+      if (!isVisible()) return;
+      timer = setTimeout(fire, windowMs);
     },
     flush() {
       if (timer !== null) {
@@ -143,6 +175,9 @@ export function useSession() {
   const [titlesById, setTitlesById] = useState<Record<string, string>>({});
 
   const sseRef = useRef<SSEHandle | null>(null);
+  // T7（#100）：活跃流的合帧提交器镜像——visibilitychange 监听要 flush 当前流，
+  // 而 coalescer 在 submitTask 闭包内创建，监听在 hook 顶层只能经 ref 触达。
+  const coalescerRef = useRef<CommitCoalescer | null>(null);
   // live 流中已知的首帧 sid——结束/出错/取消时决定迁移目标。
   const liveSidRef = useRef<string | null>(null);
   // mode 的实时镜像——SSE 回调闭包在 submitTask 时定型，读到的 mode 是
@@ -232,6 +267,17 @@ export function useSession() {
     };
   }, []);
 
+  // T7（#100）background tab 降渲染（spec 03 §18.3）：隐藏→flush 落盘当前状态
+  // （干净暂停点）；回前台→flush 立即对账（后台积压合帧为单次提交，一帧内
+  // reconcile，无重放动画）。隐藏期间 schedule 挂起，事件照常逐帧入本地 conv。
+  useEffect(() => {
+    const onVisibility = () => {
+      coalescerRef.current?.flush();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
   /** Submit a new task. Creates a fresh session and streams the response.
    *  The conversation is reset first — a live stream never folds into the
    *  previously viewed session's turns. */
@@ -248,12 +294,18 @@ export function useSession() {
         }
 
         let conv: ConversationState | null = null;
-        // P1-3 合帧：折叠逐帧即时（真相不延迟），提交按 ~24ms 窗口合并。
+        // P1-3 合帧 + T7 后台降渲染：窗口内多 delta 一次提交；隐藏期挂起、
+        // 回前台 flush 对账。折叠逐帧即时（真相不延迟），延迟的只是通知。
         // submit 守卫 mode 仍是 live——cancel/selectSession 之后的迟到 fire
         // 不得把旧流残留写回视图（与 shouldApplyStreamFrame 同一族守护）。
-        const coalescer = createCommitCoalescer(() => {
-          if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
-        });
+        const coalescer = createCommitCoalescer(
+          () => {
+            if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
+          },
+          24,
+          () => document.visibilityState === 'visible',
+        );
+        coalescerRef.current = coalescer;
 
         const handle = consumeSSE(
           res,
@@ -287,12 +339,14 @@ export function useSession() {
             // Stream finished: view the session it produced (history loader
             // re-reads the durable log), and refresh the list for the new row.
             coalescer.flush(); // 尾帧不丢（P1-3）
+            coalescerRef.current = null; // T7：流结束解钉（visibility 监听不再触达旧流）
             const sid = liveSidRef.current;
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             refreshSessions();
           },
           (err) => {
             coalescer.flush(); // 尾帧不丢（P1-3）
+            coalescerRef.current = null;
             const sid = liveSidRef.current;
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             setError(`流式错误：${(err as Error).message}`);
@@ -307,11 +361,21 @@ export function useSession() {
     [refreshSessions],
   );
 
-  /** Abort the live stream, if any. Falls back to the durable facts already
-   *  on disk (viewing(sid)) — or idle when the stream never identified itself. */
+  /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
+   *  已知 sid 发 POST /cancel 且流保持打开（终态帧驱动正常收尾迁移）；
+   *  sid 未知仅清理订阅（孤儿回收兜底）。POST 失败静默不双报：流自身的
+   *  终态（onDone）/错误（onError）路径是 UI 收尾的权威。 */
   const cancelStream = useCallback(() => {
+    const decision = decideCancel(liveSidRef.current);
+    if (decision.kind === 'cancel-request') {
+      void cancelSession(decision.sessionId).catch(() => {
+        // 取消请求失败不双报：流终态/错误路径是 UI 收尾权威（契约 §3）。
+      });
+      return;
+    }
     sseRef.current?.cancel();
     sseRef.current = null;
+    coalescerRef.current = null;
     setMode(
       liveSidRef.current
         ? { kind: 'viewing', sessionId: liveSidRef.current }
@@ -320,10 +384,13 @@ export function useSession() {
   }, []);
 
   /** Switch sessions. Cancels any live stream first (idempotent, no-op when idle) —
-   *  the UI only ever presents the session the mode points at. */
+   *  the UI only ever presents the session the mode points at.
+   *  T5（#98）语义修订：切走只是 unsubscribe（detached-run 契约），run 服务端
+   *  继续跑到终态——切会话不再等于取消 run；流上残留订阅随 abort 清理。 */
   const selectSession = useCallback((id: string | null) => {
     sseRef.current?.cancel();
     sseRef.current = null;
+    coalescerRef.current = null;
     liveSidRef.current = null;
     setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
