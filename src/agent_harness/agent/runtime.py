@@ -624,6 +624,15 @@ class AgentRuntime:
                     return
 
                 # 第 7 步：用 ToolExecutor 执行整批 tool_call 并按原 id 回填。
+                # ADR-0016 §4.1：tool/call 预持久化（执行前）——02 §8.3 状态机
+                # 要求 call 先于 running/output_delta，前端在工具在途期间就有
+                # 可关联的行；中断窗口也总是留下可配对修复的 call 事实。
+                for call in calls:
+                    call_event = self.executor.emit_call_event(
+                        session, tool_call_id=call.id, tool_name=call.name,
+                        args=call.args, run_id=run_id, step_id=steps,
+                    )
+                    yield to_agent_event(call_event)
                 tool_event_start = session.mark()
                 tool_error = None
                 try:
@@ -635,9 +644,12 @@ class AgentRuntime:
                             run_id=run_id,
                             agent_id=self._agent_id,
                         ),
+                        step_id=steps,
                     )
                 except Exception as error:  # noqa: BLE001
                     tool_error = error
+                # 执行期间追加的事件（tool/output_delta 等）镜像给流式消费者；
+                # web 订阅者经 session listener 实时收到（seq 幂等合并不重复）。
                 for event in session.since(tool_event_start):
                     yield to_agent_event(event)
                 if tool_error is not None:
@@ -659,14 +671,12 @@ class AgentRuntime:
                     content = result.model_dump_json()
                     outcome: str = "success" if result.ok else "failure"
 
-                    # 持久化顺序（TOOL_CALL → 延迟事件 → TOOL_RESULT）的单一
-                    # owner 是 ToolExecutor.emit_*（批次 C 候选 3）：Runtime 只
-                    # 消费已持久化事件并镜像给流式消费者，不再自己 append——
-                    # 此前该顺序在 runtime 与 executor abort flush 各编码一遍。
-                    for persisted_event in self.executor.emit_call_events(
+                    # 持久化顺序（延迟事件 → TOOL_RESULT）的单一 owner 是
+                    # ToolExecutor.emit_*（批次 C 候选 3 + ADR-0016 §4.1 拆分）：
+                    # Runtime 只消费已持久化事件并镜像，不再自己 append。
+                    for persisted_event in self.executor.emit_pending_events(
                         session,
-                        tool_call_id=execution.tool_call_id, tool_name=call.name,
-                        args=call.args, pending_events=execution.pending_events,
+                        pending_events=execution.pending_events,
                         run_id=run_id, step_id=steps,
                     ):
                         yield to_agent_event(persisted_event)
