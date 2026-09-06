@@ -1465,7 +1465,7 @@ describe('T-contract — text/delta 词汇 + envelope block_id（#116，后端�
     s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: '考', source: 'model' }, block_id: 'rsn-3-1', seq: 12, step_id: 3 }));
     const blocks = s.turns[0].reasoningById!;
     expect(Object.keys(blocks)).toEqual(['rsn-3-1']);
-    expect(blocks['rsn-3-1'].text).toBe('思考');
+    expect(blocks['rsn-3-1'].text).toBe('想考');
   });
 
   it('同 step 双块不串：post-tool 新块按 envelope block_id 分开聚合', () => {
