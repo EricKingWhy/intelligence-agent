@@ -239,12 +239,34 @@ const TurnView = memo(function TurnView({ turn, model, density, disclosure, onFo
 
   return (
     <div className={`turn turn-${turn.status}`} data-step-key={`step:${turn.step_id}`}>
-      {/* User message — minimal, right-aligned */}
-      {turn.user_message && (
-        <div className="msg msg-user">
-          <div className="msg-bubble-user">{turn.user_message}</div>
+      {/* User message — minimal, right-aligned；harness 注入的纠正消息
+          （failure-guard soft）渲染为系统提示条而非用户气泡（不是真人说的话） */}
+      {turn.user_message &&
+        (turn.injected_by ? (
+          <div className="msg msg-system">
+            <div
+              className="system-notice"
+              title={`注入来源：${turn.injected_by}`}
+            >
+              <span className="system-notice-badge">系统注入</span>
+              <span className="system-notice-text">{turn.user_message}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="msg msg-user">
+            <div className="msg-bubble-user">{turn.user_message}</div>
+          </div>
+        ))}
+
+      {/* Phase 12 白盒透明：failure-guard 事件条——soft 提示 / hard 终止标记 */}
+      {turn.notices?.map((n, i) => (
+        <div key={`${n.level}-${n.tool_name}-${i}`} className={`notice-strip notice-strip-${n.level}`}>
+          <span className="notice-strip-badge">{n.level === 'hard' ? '终止' : '熔断'}</span>
+          <span className="notice-strip-text">
+            工具 {n.tool_name || '?'} 连续失败 {n.consecutive_failures} 次
+          </span>
         </div>
-      )}
+      ))}
 
       {/* Execution chain — model segments and tools in true event order */}
       {turn.activities.length > 0 && (

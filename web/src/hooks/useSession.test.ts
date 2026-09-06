@@ -146,7 +146,7 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
   const conv = (session_id: string) => ({
     session_id, turns: [], active_step_id: null, run_status: 'completed' as const,
     run_cancelled: false, compactions: [], reconcile_queue: [], events: [],
-    unknown_events: [], model: null, usage_total: null, cost_usd: null, trace_id: null,
+    unknown_events: [], model: null, usage_total: null, cost_usd: null, trace_id: null, model_fallback: null,
   });
 
   it('同一会话（live 流刚产出完整真相）：后台静默重读，不显示占位符', () => {

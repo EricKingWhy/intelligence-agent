@@ -15,7 +15,7 @@ describe('initConversation', () => {
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], events: [], unknown_events: [],
-      model: null, usage_total: null, cost_usd: null, trace_id: null,
+      model: null, usage_total: null, cost_usd: null, trace_id: null, model_fallback: null,
     });
   });
 });
@@ -913,5 +913,89 @@ describe('applyEvent — da394a9 新语义', () => {
       step_id: 1,
     }));
     expect(s.turns[0].tools[0].diff).toEqual({ before: 'a', after: 'b', truncated: false });
+  });
+});
+
+// ── Phase 12 白盒透明：tool/failure-guard + model/fallback（ADR-0014）──
+describe('Phase 12 — failure-guard / fallback 投影', () => {
+  it('TOOL_FAILURE_GUARD soft → 落所在轮 notices，不进 unknown_events', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_FAILURE_GUARD,
+      data: { level: 'soft', tool_name: 'bash', fingerprint: 'fp-1', consecutive_failures: 3 },
+      step_id: 1,
+    }));
+    expect(s.turns[0].notices).toEqual([
+      { level: 'soft', tool_name: 'bash', consecutive_failures: 3 },
+    ]);
+    expect(s.unknown_events).toHaveLength(0);
+  });
+
+  it('TOOL_FAILURE_GUARD hard → level hard（终止标记语义）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 2 }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_FAILURE_GUARD,
+      data: { level: 'hard', tool_name: 'bash', fingerprint: 'fp-2', consecutive_failures: 3 },
+      step_id: 2,
+    }));
+    expect(s.turns[0].notices).toEqual([
+      { level: 'hard', tool_name: 'bash', consecutive_failures: 3 },
+    ]);
+  });
+
+  it('Harness 注入的纠正 user/message（injected_by）标记 turn——不冒充真人输入', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.USER_MESSAGE,
+      data: { content: 'bash 连续失败，请改用 PowerShell 重试', injected_by: 'tool_failure_guard', step: 2 },
+      step_id: 2,
+    }));
+    expect(s.turns).toHaveLength(2);
+    expect(s.turns[1].injected_by).toBe('tool_failure_guard');
+    expect(s.turns[1].user_message).toBe('bash 连续失败，请改用 PowerShell 重试');
+  });
+
+  it('真人 user/message 无 injected_by → turn 不带标记', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.USER_MESSAGE, data: { content: 'hi', step: 1 }, step_id: 1,
+    }));
+    expect(s.turns[0].injected_by).toBeUndefined();
+  });
+
+  it('MODEL_FALLBACK → 记录切换 + 后续 model 切到 to_model', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_FALLBACK,
+      data: { from_model: 'qwen-a', to_model: 'qwen-b', reason: 'ModelStallError' },
+      step_id: 1,
+    }));
+    expect(s.model_fallback).toEqual({ from_model: 'qwen-a', to_model: 'qwen-b', reason: 'ModelStallError' });
+    expect(s.model).toBe('qwen-b');
+  });
+
+  it('MODEL_FALLBACK 字段缺失不伪造（to_model 缺失 → 不记录切换）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_STARTED, step_id: 1 }));
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_FALLBACK,
+      data: { from_model: 'qwen-a', reason: 'ModelStallError' },
+      step_id: 1,
+    }));
+    expect(s.model_fallback).toBeNull();
+    expect(s.unknown_events).toHaveLength(0); // 已知事件，只是形状不完整
+  });
+
+  it('summarizeEvent：guard 行（工具 ×次数 熔断 · 级别）+ fallback 行（from → to · 原因）', () => {
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_FAILURE_GUARD,
+      data: { level: 'soft', tool_name: 'bash', consecutive_failures: 3 },
+    }))).toBe('bash ×3 熔断 · soft');
+    expect(summarizeEvent(ev({
+      type: EventType.TOOL_FAILURE_GUARD,
+      data: { level: 'hard', tool_name: 'bash', consecutive_failures: 3 },
+    }))).toBe('bash ×3 熔断 · hard');
+    expect(summarizeEvent(ev({
+      type: EventType.MODEL_FALLBACK,
+      data: { from_model: 'qwen-a', to_model: 'qwen-b', reason: 'ModelStallError' },
+    }))).toBe('qwen-a → qwen-b · ModelStallError');
   });
 });

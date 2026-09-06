@@ -320,6 +320,15 @@ function ChatTab({
             <span className="detail-key">模型</span>
             <span className="detail-val detail-val-mono">{conversation.model ?? '—'}</span>
           </div>
+          {conversation.model_fallback && (
+            <div className="detail-row">
+              <span className="detail-key">已切换</span>
+              <span className="detail-val detail-val-mono model-fallback-val" title="model/fallback：主模型失稳后切换">
+                {conversation.model_fallback.from_model} → {conversation.model_fallback.to_model}
+                {conversation.model_fallback.reason ? ` · ${conversation.model_fallback.reason}` : ''}
+              </span>
+            </div>
+          )}
           <div className="detail-row">
             <span className="detail-key">用量</span>
             <span className="detail-val">
