@@ -102,6 +102,13 @@ class RetrieveKnowledgeTool(Tool):
                 for hit in result.hits
             ],
         }
+        # Retrieval Fallback Policy（ADR-0014 决策 13）：证据不足时附 tool 侧
+        # affordance——引导模型可调 web_search，但决策仍由模型做出（agentic）。
+        # 这是 spec §8 的「轻量 Retrieval Fallback Policy」，非 Agent Loop 特判。
+        if not result.is_sufficient:
+            payload["hint"] = (
+                "知识库证据不足，如需最新或外部信息可调用 web_search 工具。"
+            )
         return ToolResult.success(
             message=f"{_RESULT_DATA_UNTRUSTED_NOTE}"
                     f"命中 {len(result.hits)} 条，"

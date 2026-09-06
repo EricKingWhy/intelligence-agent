@@ -201,3 +201,105 @@ def test_negative_seq_line_is_skipped(store):
     )
     events = store.read_events(sid)
     assert [e.seq for e in events] == [0]
+
+
+# ── read_session_summary：列表页快路径（perf-fix 4，损坏 fallback 保精确）──
+
+
+def _write_lines(store: JsonlSessionStore, sid: str, lines: list[str]) -> None:
+    path = store._events_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _event_line(store: JsonlSessionStore, sid: str, seq: int, etype: str,
+                data: dict) -> str:
+    return json.dumps({"seq": seq, "type": etype, "session_id": sid,
+                       "time": f"2026-09-06T00:00:{seq:02d}", "data": data},
+                      ensure_ascii=False, separators=(",", ":"))
+
+
+class TestReadSessionSummary:
+    def test_clean_session_matches_full_read(self, store: JsonlSessionStore):
+        """无损坏行时：event_count/时间/首条 user 消息与全量解析严格一致。"""
+        sid = "summary-clean"
+        lines = [_event_line(store, sid, 0, SESSION_STARTED, {})]
+        lines.append(_event_line(store, sid, 1, USER_MESSAGE,
+                                 {"content": "  帮我分析项目结构  "}))
+        lines.append(_event_line(store, sid, 2, "model/completed",
+                                 {"content": "好", "tool_calls": []}))
+        lines.append(_event_line(store, sid, 3, "tool/result",
+                                 {"tool_call_id": "c1", "content": "输出"}))
+        _write_lines(store, sid, lines)
+
+        stats = store.read_session_summary(sid)
+        full = store.read_events(sid)
+
+        assert stats is not None
+        assert stats.event_count == len(full) == 4
+        assert stats.first_event_time == full[0].time
+        assert stats.last_event_time == full[-1].time
+        assert stats.first_user_message == "帮我分析项目结构"  # strip + 无截断触发
+
+    def test_no_user_message_returns_none(self, store: JsonlSessionStore):
+        sid = "summary-nouser"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, "model/completed", {"content": "hi"}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.first_user_message is None
+        assert stats.event_count == 2
+
+    def test_first_user_message_after_head_cap_returns_none(self, store: JsonlSessionStore):
+        """user/message 出现在头部扫描上限之后 → None（前端有 events 扫描降级）。"""
+        sid = "summary-deep"
+        lines = [_event_line(store, sid, 0, SESSION_STARTED, {})]
+        for i in range(1, 250):
+            lines.append(_event_line(store, sid, i, "tool/result",
+                                     {"tool_call_id": f"c{i}", "content": "x"}))
+        lines.append(_event_line(store, sid, 250, USER_MESSAGE, {"content": "很晚"}))
+        _write_lines(store, sid, lines)
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.first_user_message is None
+        assert stats.event_count == 251
+
+    def test_corrupt_tail_line_falls_back_to_exact(self, store: JsonlSessionStore):
+        """末行半写（崩溃现场）→ 整体回退全量解析，event_count 精确排除坏行。"""
+        sid = "summary-tail-corrupt"
+        good = [_event_line(store, sid, i, USER_MESSAGE, {"content": f"m{i}"})
+                for i in range(3)]
+        _write_lines(store, sid, good + ['{"seq": 3, "type": "user/mess'])  # 半行
+
+        stats = store.read_session_summary(sid)
+        full = store.read_events(sid)
+
+        assert stats is not None
+        assert stats.event_count == len(full) == 3
+        assert stats.first_user_message == "m0"
+        assert stats.last_event_time == full[-1].time
+
+    def test_corrupt_head_line_falls_back_to_exact(self, store: JsonlSessionStore):
+        sid = "summary-head-corrupt"
+        good = [_event_line(store, sid, i, USER_MESSAGE, {"content": f"m{i}"})
+                for i in range(3)]
+        _write_lines(store, sid, ["not-json"] + good)
+
+        stats = store.read_session_summary(sid)
+        full = store.read_events(sid)
+
+        assert stats is not None
+        assert stats.event_count == len(full) == 3
+        assert stats.first_event_time == full[0].time
+
+    def test_missing_session_returns_none(self, store: JsonlSessionStore):
+        assert store.read_session_summary("no-such-session") is None
+
+    def test_empty_file_returns_zero_count(self, store: JsonlSessionStore):
+        sid = "summary-empty"
+        _write_lines(store, sid, [])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.event_count == 0

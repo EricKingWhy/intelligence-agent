@@ -53,6 +53,8 @@ class TestSessionEventDTO:
             "artifact/created",
             "context/compacted",
             "memory/degraded",
+            "tool/failure-guard",
+            "model/fallback",
         }
         assert EVENT_TYPES == expected
 
