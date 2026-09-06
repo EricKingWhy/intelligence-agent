@@ -432,6 +432,15 @@ class SqliteSessionMetaStore(SessionMetaStore):
             row = await cursor.fetchone()
         return self._to_meta(row) if row is not None else None
 
+    async def list_all(self) -> list[SessionMeta]:
+        async with _connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                "SELECT * FROM session_meta ORDER BY created_at, session_id"
+            )
+            rows = await cursor.fetchall()
+        return [self._to_meta(row) for row in rows]
+
     async def set_archived(self, session_id: str, archived: bool = True) -> SessionMeta:
         async with _connect(self.database_path) as connection:
             cursor = await connection.execute(

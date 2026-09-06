@@ -47,7 +47,16 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
-from agent_harness.session.fork import ForkBoundaryError, TailSummarizer, fork_session
+from agent_harness.session.fork import (
+    ForkBoundaryError,
+    TailSummarizer,
+    fork_session,
+)
+from agent_harness.session.lineage import (
+    build_lineage_index,
+    build_lineage_tree,
+    render_lineage_tree,
+)
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 
 _ARGS_LINE_LIMIT = 120
@@ -199,6 +208,9 @@ def main() -> None:
     if argv and argv[0] == "fork":
         _main_fork(argv[1:])
         return
+    if argv and argv[0] == "sessions":
+        _main_sessions(argv[1:])
+        return
     parser = argparse.ArgumentParser(description="Agent Harness CLI")
     parser.add_argument("message", help="发送给 Agent 的任务")
     args = parser.parse_args(argv)
@@ -325,6 +337,48 @@ async def fork_command(
     if write is not None:
         write(f"child session: {child.session_id}\n")
     return child.session_id
+
+
+def _main_sessions(argv: list[str]) -> None:
+    """CLI sessions 入口（Phase 14 T6）：会话列表 / lineage 树视图。"""
+    parser = argparse.ArgumentParser(prog="agent-harness sessions")
+    parser.add_argument(
+        "--tree", action="store_true",
+        help="按 lineage 树渲染（fork + delegation 两类边）",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    output = asyncio.run(sessions_command(tree=args.tree))
+    print(output)
+
+
+async def sessions_command(
+    *, tree: bool = False, workspace_dir: str | None = None
+) -> str:
+    """sessions 命令的可测核心：返回渲染文本（flat 列表或 lineage 树）。"""
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    workspace_root = Path(settings.workspace_dir)
+    store = JsonlSessionStore(root=workspace_root / "sessions")
+    meta_store = SqliteSessionMetaStore(workspace_root / "harness.db")
+    await meta_store.initialize()
+    if not tree:
+        metas = await meta_store.list_all()
+        if not metas:
+            return "（暂无会话）"
+        lines = []
+        for meta in metas:
+            origin = f" [{meta.origin}]" if meta.origin else ""
+            lines.append(f"{meta.session_id}{origin}")
+        return "\n".join(lines)
+    metas = await build_lineage_index(store, meta_store)
+    roots = build_lineage_tree(metas)
+    if not roots:
+        return "（暂无会话）"
+    return render_lineage_tree(roots)
 
 
 if __name__ == "__main__":

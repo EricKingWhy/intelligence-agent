@@ -55,6 +55,10 @@ class SessionMetaStore(ABC):
         """读取一条 session metadata；不存在返回 None。"""
 
     @abstractmethod
+    async def list_all(self) -> list[SessionMeta]:
+        """全量索引行（lineage 建树与 sessions 列表的读取面，ADR-0017 决策 7）。"""
+
+    @abstractmethod
     async def set_archived(self, session_id: str, archived: bool = True) -> SessionMeta:
         """标记 session 是否 archived；不存在抛 KeyError。"""
 
