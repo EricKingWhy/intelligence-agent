@@ -27,10 +27,14 @@ export function consumeSSE(
   onDone?: () => void,
   onError?: (err: unknown) => void,
 ): SSEHandle {
-  const controller = new AbortController();
   const reader = response.body?.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  // T4（#97）：cancel 必须真正中断消费——重连路径（seq gap / stream/truncated /
+  // 停摆）依赖断开旧流。此前 AbortController 从未接入 fetch，cancel 是空操作，
+  // 靠上游 modeRef 守卫兜住 UI 才未暴露。reader.cancel() 使挂起 read() 立即
+  // 落定，cancelled 标记保证静默断开（不冒充 onDone 自然终结——那是重连决策依据）。
+  let cancelled = false;
 
   if (!reader) {
     throw new Error('Response has no body — SSE requires a ReadableStream body.');
@@ -40,7 +44,7 @@ export function consumeSSE(
     try {
       while (true) {
         const { value, done: streamDone } = await reader.read();
-        if (streamDone) break;
+        if (streamDone || cancelled) break;
         buffer += decoder.decode(value, { stream: true });
 
         // SSE frames are separated by a blank line. The spec allows \n, \r\n, or \r
@@ -57,6 +61,7 @@ export function consumeSSE(
           parseFrame(frame).forEach(onEvent);
         }
       }
+      if (cancelled) return;
       // Flush the decoder's pending multi-byte sequence, then any trailing frame.
       buffer += decoder.decode();
       if (buffer.trim()) {
@@ -64,7 +69,7 @@ export function consumeSSE(
       }
       onDone?.();
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
+      if (!cancelled && (err as Error).name !== 'AbortError') {
         onError?.(err);
       }
     }
@@ -72,7 +77,11 @@ export function consumeSSE(
 
   return {
     done,
-    cancel: () => controller.abort(),
+    cancel: () => {
+      if (cancelled) return;
+      cancelled = true;
+      void reader.cancel().catch(() => {});
+    },
   };
 }
 

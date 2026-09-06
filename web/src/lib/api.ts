@@ -74,6 +74,16 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
   });
 }
 
+/** GET /api/sessions/{id}/stream?after_seq=N（T4 #97，契约回执 §3）：重放 durable
+ *  事件（after_seq < seq ≤ 游标，按 seq 序）后接续在途流——后端先订阅后取游标，
+ *  无缝无重复；重放帧与 live 帧同形状（不含 event_id），前端一套 reducer 两条
+ *  通道。返回原始 Response 由 consumeSSE 消费；404 = 会话不存在（终止重连）。 */
+export async function streamSession(sessionId: string, afterSeq: number): Promise<Response> {
+  return apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/stream?after_seq=${Number.isFinite(afterSeq) ? afterSeq : -1}`,
+  );
+}
+
 export async function postApproval(sessionId: string, approved: boolean): Promise<unknown> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/approve`, {
     method: 'POST',

@@ -39,6 +39,7 @@ export default function App() {
     conversation,
     loadingHistory,
     streaming,
+    reconnecting,
     error,
     titlesById,
     recoverState,
@@ -333,6 +334,14 @@ export default function App() {
             </div>
           )}
           {error && <div className="app-error">{error}</div>}
+          {reconnecting && (
+            // T4（#97）断线状态条：瞬时重连不清屏不轰炸——conversation 照常
+            // 累积，条只在重连期间在场（aria-live 播报一次状态变化）。
+            <div className="reconnect-banner" role="status" aria-live="polite">
+              <span className="reconnect-dot" aria-hidden="true" />
+              连接中断，正在重连…
+            </div>
+          )}
           {canRecover && (
             <div className="workspace-toolbar">
               <button
