@@ -21,7 +21,7 @@ import {
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
-import { summarizeEvent, projectHistory } from '../lib/projection';
+import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { CopyButton } from './CopyButton';
@@ -74,7 +74,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     );
   }
 
-  if (focus.kind !== 'run') {
+  // child focus 走下方专用面板（委派钻取），不进事件级早退分支——否则
+  // focus.event 对 child 不存在，头部行直接 TypeError（76e9993 回归）。
+  if (focus.kind !== 'run' && focus.kind !== 'child') {
     return (
       <aside className="step-detail">
         <div className="detail-header">
@@ -111,11 +113,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     );
   }
 
-  const tools = conversation.turns.flatMap((t) => t.tools);
-  const pulse = deriveRunPulse(conversation, streaming);
-
   // Phase 13 委派钻取（v2 PRD §10.5 "delegation start ↔ child run" 配对）：
   // child 会话在 Inspector 内原位展开——父会话上下文不丢，「返回 Run」一键回。
+  // 置于 run 级派生（tools/pulse）之前——child 视图不消费它们（Standards P3）。
   if (focus.kind === 'child') {
     return (
       <aside className="step-detail">
@@ -134,6 +134,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       </aside>
     );
   }
+
+  const tools = conversation.turns.flatMap((t) => t.tools);
+  const pulse = deriveRunPulse(conversation, streaming);
 
   return (
     <aside className="step-detail">
@@ -691,7 +694,9 @@ function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
 // ── 事件级 Inspector：Overview / Input / Output / Raw 四段（PRD §8.4） ──
 
 /** 事件级 Inspector 主体——只接收已收窄的非 Run 焦点。 */
-type EventFocus = Exclude<InspectorFocus, { kind: 'run' }>;
+// 事件级 Inspector 只接受 tool/event——child（委派钻取）有专用面板，
+// 永远不会到达这里（Exclude 与主组件的早退分支守卫保持同一形状）。
+type EventFocus = Exclude<InspectorFocus, { kind: 'run' } | { kind: 'child' }>;
 
 /** 事件级四段 tab 状态：Overview（元信息）/ Input（data）/ Output（同 data，语义入口）/
  *  Raw（完整事件）。Input 与 Output 对普通事件都是 event.data——Output 作为默认段

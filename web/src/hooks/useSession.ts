@@ -370,6 +370,8 @@ export function useSession() {
     if (decision.kind === 'cancel-request') {
       void cancelSession(decision.sessionId).catch(() => {
         // 取消请求失败不双报：流终态/错误路径是 UI 收尾权威（契约 §3）。
+        // 自愈路径：网络级故障会让 SSE 自身 onError 收尾；瞬时失败用户
+        // 再按一次 Esc 即重试——POST /cancel 幂等，重复取消无害。
       });
       return;
     }

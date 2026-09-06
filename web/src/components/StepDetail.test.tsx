@@ -113,7 +113,7 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
 
 // ── C4：Timeline 行 hover 时间戳浮层 ──
 
-import { formatEventTooltip } from './StepDetail';
+import { formatEventTooltip, StepDetail } from './StepDetail';
 
 describe('formatEventTooltip（C4）', () => {
   it('time + step 齐全：两行（完整时间戳含毫秒 + step）', () => {
@@ -152,5 +152,26 @@ describe('formatEventTooltip（C4）', () => {
       type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 0, session_id: 's', time: undefined,
     } as Parameters<typeof formatEventTooltip>[0]);
     expect(lines).toEqual(['step 0']);
+  });
+});
+
+// ── 修复批（frontend-B）：child focus 不得被「非 run」早退分支吞掉 ──
+// 76e9993 回归：委派钻取进 Inspector 即 TypeError（focus.event 对 child 不存在），
+// 专用 child 面板成死代码。SSR 契约：child focus 渲染专用面板而非崩溃。
+describe('StepDetail child focus（v2 PRD §10.5 委派钻取）', () => {
+  const conv: ConversationState = initConversation('parent');
+
+  it('child focus 渲染专用子会话面板（不落事件级早退分支、不崩溃）', () => {
+    const html = renderToString(createElement(StepDetail, {
+      conversation: conv,
+      streaming: false,
+      focus: { kind: 'child', childSessionId: 'c1234567890', target: 'research_review' },
+      onFocusRun: noop,
+      onFocusTool: noop,
+      onFocusEvent: noop,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('子会话');
+    expect(html).toContain('research_review');
+    expect(html).toContain('child-back-btn');
   });
 });

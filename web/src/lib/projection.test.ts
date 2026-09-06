@@ -1493,4 +1493,21 @@ describe('T-contract — text/delta 词汇 + envelope block_id（#116，后端�
     s = applyEvent(s, ev({ type: 'reasoning/delta', data: { delta: 'x', source: 'model', block_id: 'legacy' }, seq: 21, step_id: 1 }));
     expect(s.turns[0].reasoningById!['legacy'].text).toBe('x');
   });
+
+  it('取消轮次重放：text/delta 已落盘但无 model/completed——文本保留且可渲染', () => {
+    // T5 #98 使 run/failed(reason=cancelled) → onDone → viewing → projectHistory
+    // 成为一级行为：model/started 是 stream-only 不入历史，delta 分支必须回填
+    // model activity——否则 activities 为空，Conversation 渲染门跳过整个模型块。
+    const events = [
+      ev({ type: EventType.SESSION_STARTED, seq: 1, time: T }),
+      ev({ type: EventType.RUN_STARTED, seq: 2, time: T }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, seq: 3, step_id: 1, time: T }),
+      ev({ type: EventType.TEXT_DELTA, data: { delta: '部分回答' }, seq: 4, step_id: 1, time: T }),
+      ev({ type: EventType.RUN_FAILED, data: { reason: 'cancelled' }, seq: 5, time: T }),
+    ];
+    const s = projectHistory('s', events);
+    expect(s.turns[0].model.text).toBe('部分回答');
+    expect(s.turns[0].activities.some((a) => a.kind === 'model')).toBe(true);
+    expect(s.run_cancelled).toBe(true);
+  });
 });
