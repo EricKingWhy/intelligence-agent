@@ -123,6 +123,11 @@ class Tool(ABC):
     可选覆写：timeout_seconds / side_effect（有安全默认值）。
     """
 
+    #: SubAgent 委派标记（ADR-0018 D5）：True 的工具在 Langfuse 侧用 ``agent``
+    #: 型观测 + 具体目标命名（绝不用 tool/span 隐藏 SubAgent 结构），且其执行
+    #: 期间设置嵌套 trace 绑定——child run 的观测挂到同一 trace 下。
+    is_subagent_dispatch: bool = False
+
     # —— 必填字段（身份 + Schema + 行为） ——
     @property
     @abstractmethod

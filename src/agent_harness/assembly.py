@@ -188,6 +188,7 @@ async def build_runtime(
                 stream_idle_timeout=settings.model_stream_idle_timeout,
                 stream_total_timeout=settings.model_stream_total_timeout,
                 model_call_gate=model_call_gate,
+                observability_sink=get_observability_sink(settings),
             ),
             source_registry=registry,
             session_store=session_store,

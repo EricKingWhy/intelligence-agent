@@ -46,6 +46,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
+from agent_harness.observability.tracer import TraceBinding, current_trace_binding
 from agent_harness.session import TOOL_CALL, TOOL_RESULT, Session, SessionEvent
 from agent_harness.storage import (
     Operation,
@@ -149,6 +150,7 @@ class ToolExecutor:
         operation_context: OperationContext | None = None,
         session: Session | None = None,
         step_id: int | None = None,
+        tracer: Any = None,
     ) -> ToolExecution:
         """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
 
@@ -237,6 +239,23 @@ class ToolExecutor:
             )
             self._maybe_kill("running", tool_call_id)
 
+        # -- Langfuse 工具观测（ADR-0018 D7）：与 JSONL tool_operation 同点平行。
+        # delegate 工具按官方多 Agent 规则用 agent 型 + 目标命名，并在其存活
+        # 期间设置嵌套绑定——child runtime 的 RunTracer 认领该观测为根。
+        obs_span = None
+        attempts: list[dict[str, Any]] = []
+        is_delegate = getattr(tool, "is_subagent_dispatch", False)
+        if tracer is not None:
+            obs_span = tracer.tool_span_started(
+                tool_name=name, tool_call_id=tool_call_id, args=raw_args,
+                is_delegate=is_delegate,
+            )
+        binding_token = None
+        if tracer is not None and obs_span is not None and is_delegate and tracer.trace_id:
+            binding_token = current_trace_binding.set(
+                TraceBinding(trace_id=tracer.trace_id, observation=obs_span),
+            )
+
         # -- 阶段 2.7：输出流 sink（ADR-0016 §4.2）--
         # 执行期 stdout/stderr 增量：工具（经 contextvar）从 sandbox reader
         # 线程 push → 本 loop 的 drain task 合帧落盘 tool/output_delta。
@@ -260,7 +279,8 @@ class ToolExecutor:
         try:
             try:
                 result = await self._execute_with_retry(
-                    tool_call_id, name, tool, validated
+                    tool_call_id, name, tool, validated,
+                    tracer=tracer, attempts=attempts,
                 )
             except asyncio.CancelledError:
                 if self._operation_ledger is not None:
@@ -269,6 +289,8 @@ class ToolExecutor:
                     )
                 raise
         finally:
+            if binding_token is not None:
+                current_trace_binding.reset(binding_token)
             if sink_token is not None:
                 tool_output_sink_var.reset(sink_token)
             if sink is not None and drain_task is not None:
@@ -304,6 +326,13 @@ class ToolExecutor:
             self._maybe_kill("terminal", tool_call_id)
         # 工具自产的延迟事件（如 delegation）在前，overflow 在后。
         pending = [*result.pending_events, *deferred_events]
+        if tracer is not None:
+            tracer.tool_span_completed(
+                obs_span, outcome="success" if result.ok else "failure",
+                message=result.message, attempts=attempts or None,
+                session_id=(operation_context.session_id if operation_context else None),
+                extra={"artifact_ref": result.artifact_ref} if result.artifact_ref else None,
+            )
         return ToolExecution(tool_call_id=tool_call_id, result=result,
                              pending_events=pending)
 
@@ -324,6 +353,7 @@ class ToolExecutor:
         operation_context: OperationContext | None = None,
         session: Session | None = None,
         step_id: int | None = None,
+        tracer: Any = None,
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
@@ -362,7 +392,7 @@ class ToolExecutor:
             results = await asyncio.gather(
                 *(
                     self.execute(tc, operation_context=operation_context,
-                            session=session, step_id=step_id)
+                            session=session, step_id=step_id, tracer=tracer)
                     for tc in tool_calls
                 ),
                 return_exceptions=True,
@@ -391,7 +421,7 @@ class ToolExecutor:
             for index, tool_call in enumerate(tool_calls):
                 execution = await self.execute(
                     tool_call, operation_context=operation_context,
-                    session=session, step_id=step_id,
+                    session=session, step_id=step_id, tracer=tracer,
                 )
                 executions.append(execution)
                 if execution.result.ok:
@@ -681,7 +711,8 @@ class ToolExecutor:
         )
 
     async def _execute_with_retry(
-        self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel
+        self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
+        *, tracer: Any = None, attempts: list[dict[str, Any]] | None = None,
     ) -> ToolResult:
         """阶段3 主体：每次尝试被 timeout 包住，retryable 位驱动是否再来一轮。
 
@@ -754,6 +785,12 @@ class ToolExecutor:
                 }
             )
 
+            if attempts is not None:
+                attempts.append({
+                    "attempt": attempt, "duration_ms": duration_ms,
+                    "error_code": result.error_code, "retryable": result.retryable,
+                    "ok": result.ok,
+                })
             # 每个 attempt 一条 tool_operation：JSONL 靠它还原完整重试链。
             self._log(
                 "tool_operation",

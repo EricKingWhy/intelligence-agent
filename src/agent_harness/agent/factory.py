@@ -40,6 +40,7 @@ class AgentFactory:
         stream_idle_timeout: float = 0.0,
         stream_total_timeout: float = 0.0,
         model_call_gate: Any | None = None,
+        observability_sink: Any | None = None,
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
@@ -53,6 +54,7 @@ class AgentFactory:
         self._stream_total_timeout = stream_total_timeout
         # 进程级并发闸（#89）：assembly 传入共享实例，child runtime 同闸。
         self._model_call_gate = model_call_gate
+        self._observability_sink = observability_sink
 
     def create(
         self,
@@ -97,4 +99,5 @@ class AgentFactory:
             stream_total_timeout=self._stream_total_timeout,
             model_call_gate=self._model_call_gate,
             agent_id=spec.name,
+            observability_sink=self._observability_sink,
         )

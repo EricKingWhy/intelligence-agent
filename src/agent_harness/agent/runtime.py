@@ -54,6 +54,7 @@ from agent_harness.model.fallback import (
 )
 from agent_harness.observability.tracer import RunTracer
 from agent_harness.session import (
+    CONTEXT_COMPACTED,
     MODEL_COMPLETED,
     MODEL_FAILED,
     MODEL_FALLBACK,
@@ -392,6 +393,7 @@ class AgentRuntime:
         # 经它收口 trace 并回填 trace_id。begin_run 之前异常 = 无 run 可观测。
         tracer: Any = None
         generation: Any = None
+        ctx_span: Any = None
         # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
         # begin_run 之前异常 = 没有可记账的 run，保持 None。
         streamer: BlockStreamer | None = None
@@ -450,6 +452,10 @@ class AgentRuntime:
             while True:
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
+                ctx_span = (
+                    tracer.context_build_started(step=steps)
+                    if tracer is not None else None
+                )
                 try:
                     messages = await self._context_builder.build(session)
                 except ContextWindowExceededError as error:
@@ -460,6 +466,7 @@ class AgentRuntime:
                     )
                     terminal.mark_terminal_written()
                     if tracer is not None:
+                        tracer.context_build_completed(ctx_span)
                         tracer.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
                     yield to_agent_event(failed)
                     result_holder.append(
@@ -467,7 +474,20 @@ class AgentRuntime:
                     )
                     # 模型在本轮从未被调用：没有可抽取的对话内容，跳过 writeback。
                     return
-                for event in session.since(context_event_start):
+                new_events = list(session.since(context_event_start))
+                if tracer is not None:
+                    compaction = next(
+                        (e for e in new_events if e.type == CONTEXT_COMPACTED), None,
+                    )
+                    tracer.context_build_completed(
+                        ctx_span,
+                        compacted_turn_count=(
+                            compaction.data.get("compacted_turn_count")
+                            if compaction is not None else None
+                        ),
+                    )
+                    ctx_span = None
+                for event in new_events:
                     yield to_agent_event(event)
 
                 # 第 2 步：发起这一轮模型调用（按 stream 选 astream/ainvoke）
@@ -881,6 +901,9 @@ class AgentRuntime:
                     trace_id=(tracer.trace_id if tracer else None),
                 )
                 if tracer is not None:
+                    if ctx_span is not None:
+                        tracer.context_build_completed(ctx_span)
+                        ctx_span = None
                     if generation is not None:
                         tracer.model_call_failed(generation, error_type="cancelled")
                         generation = None
@@ -930,6 +953,9 @@ class AgentRuntime:
                         step=steps, cancelled=False, error_type=type(error).__name__,
                     )
                     yield to_agent_event(model_failed)
+                if tracer is not None and ctx_span is not None:
+                    tracer.context_build_completed(ctx_span)
+                    ctx_span = None
                 # 在途 generation 收口（ADR-0018 D7）：失败归因到具体调用。
                 if tracer is not None and generation is not None:
                     tracer.model_call_failed(generation, error_type=type(error).__name__)

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,27 @@ from agent_harness.observability.sink import LangfuseSink
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _REDACTED_TEXT_LIMIT = 500
+
+
+@dataclass(frozen=True)
+class TraceBinding:
+    """嵌套子 run 的 trace 绑定（ADR-0018 D5 多 Agent 规则）。
+
+    SubAgent 的 run 发生在父 run 的 delegate 工具执行内（同一异步上下文）：
+    executor 在 agent 型观测存活期间设置本绑定，child runtime 的 RunTracer
+    直接【认领】父侧 agent 观测作为自己的根——child 的 generation/span 全部
+    挂在 agent 观测下（官方结构：无 dispatch/execution 双节点、递归嵌套）。
+    根的生命周期归父侧 executor 所有（adopt 模式下 child 只 update 不 end）。
+    """
+
+    trace_id: str
+    observation: Any
+
+
+#: 嵌套绑定 contextvar：delegate 执行期间由 executor 设置、结束后还原。
+current_trace_binding: ContextVar[TraceBinding | None] = ContextVar(
+    "lf_trace_binding", default=None,
+)
 
 #: git_commit 惰性缓存：None=未取，False=取不到（不再重试），str=短哈希。
 _git_commit_cache: str | bool | None = None
@@ -79,6 +102,7 @@ class RunTracer:
         self._user_input = user_input
         self.trace_id: str | None = None
         self._root: Any = None
+        self._owns_root = True
 
     def _content(self, value: Any) -> Any:
         if getattr(self._sink, "trace_content", "full") == "redacted":
@@ -93,6 +117,13 @@ class RunTracer:
             return None
 
     def run_started(self) -> None:
+        binding = current_trace_binding.get()
+        if binding is not None:
+            # 嵌套子 run：认领父侧 agent 观测为根（官方多 Agent 结构），不新建。
+            self._root = binding.observation
+            self.trace_id = binding.trace_id
+            self._owns_root = False
+            return
         root = self._sink.start_observation(
             name="agent-run",
             as_type="span",
@@ -176,7 +207,8 @@ class RunTracer:
             output=self._content(final_text),
             **({"metadata": {"usage_total": usage_total}} if usage_total else {}),
         ))
-        self._quiet("run_end", self._root.end)
+        if self._owns_root:
+            self._quiet("run_end", self._root.end)
 
     def run_failed(self, reason: str) -> None:
         if self._root is None:
@@ -184,7 +216,72 @@ class RunTracer:
         self._quiet("run_failed", lambda: self._root.update(
             level="ERROR", status_message=reason,
         ))
-        self._quiet("run_end", self._root.end)
+        if self._owns_root:
+            self._quiet("run_end", self._root.end)
+
+    # —— tool / agent 观测（T3 #119：D7 逐 attempt 链 + SubAgent agent 型） ——
+
+    def tool_span_started(
+        self, *, tool_name: str, tool_call_id: str, args: Any, is_delegate: bool,
+    ) -> Any:
+        """一次工具调用的观测。delegate 工具按官方多 Agent 规则用 ``agent``
+        型 + 具体目标命名（绝不用 tool/span 隐藏 SubAgent 结构）。"""
+        if self._root is None:
+            return None
+        return self._quiet(
+            "tool_span_started",
+            lambda: self._root.start_observation(
+                name=tool_name,
+                as_type="agent" if is_delegate else "tool",
+                input=self._content(args),
+                metadata={"tool_call_id": tool_call_id},
+            ),
+        )
+
+    def tool_span_completed(
+        self, span: Any, *, outcome: str, message: str | None = None,
+        attempts: list[dict[str, Any]] | None = None,
+        session_id: str | None = None, extra: dict[str, Any] | None = None,
+    ) -> None:
+        """工具调用终结：result message/data 摘要 + 全量 attempt 链 + ledger 关联键。"""
+        if span is None:
+            return
+        metadata: dict[str, Any] = {"outcome": outcome}
+        if attempts:
+            metadata["attempts"] = attempts
+        if session_id:
+            metadata["session_id"] = session_id  # Operation Ledger 对账键
+        if extra:
+            metadata.update(extra)
+        self._quiet("tool_span_completed", lambda: span.update(
+            output=self._content(message) if message is not None else None,
+            metadata=metadata,
+            level=("DEFAULT" if outcome == "success" else "ERROR"),
+        ))
+        self._quiet("tool_span_end", span.end)
+
+    # —— context 构建/压缩观测（D7 上下文态） ——
+
+    def context_build_started(self, *, step: int) -> Any:
+        if self._root is None:
+            return None
+        return self._quiet(
+            "context_build_started",
+            lambda: self._root.start_observation(
+                name="context-build", as_type="span", metadata={"step": step},
+            ),
+        )
+
+    def context_build_completed(self, span: Any, *, compacted_turn_count: int | None = None) -> None:
+        if span is None:
+            return
+        metadata: dict[str, Any] = {}
+        if compacted_turn_count is not None:
+            metadata["compacted_turn_count"] = compacted_turn_count
+        self._quiet("context_build_completed", lambda: span.update(
+            **({"metadata": metadata} if metadata else {}),
+        ))
+        self._quiet("context_build_end", span.end)
 
 
 def _usage_details(usage: dict[str, int]) -> dict[str, int]:

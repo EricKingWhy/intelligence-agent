@@ -120,15 +120,17 @@ async def test_completed_run_backfills_real_trace_id_and_records_generation(tmp_
     assert root.ended
     assert root.updates[-1]["output"] == "你好"
 
-    assert len(root.children) == 1
-    gen = root.children[0]
-    assert gen.kind == "generation"
+    generations = [c for c in root.children if c.kind == "generation"]
+    assert len(generations) == 1
+    gen = generations[0]
     assert gen.ended
     assert gen.kwargs["model"] == "primary"  # 创建期默认链名
     update = gen.updates[-1]
     assert update["output"] == "你好"
     assert update["usage_details"] == {"input": 10, "output": 5, "total": 15}
     assert update["metadata"]["response_model"] == "qwen-plus-0911"
+    # context-build span（T3）：每步构建的模型可见投影有独立观测。
+    assert any(c.name == "context-build" for c in root.children)
 
 
 @pytest.mark.asyncio
