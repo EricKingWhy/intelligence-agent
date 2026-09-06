@@ -387,3 +387,37 @@ _Avoid_: global token budget, unlimited delegation
 **Spawn vs Fork**:
 spawn = 全新 child context/session（V1）；fork = 从父 Session 事件前缀 seed（Phase 14 fork boundary）。V1 只有 spawn，SubagentProvider seam 为 fork/remote 留位。
 _Avoid_: clone, copy session
+
+## Session Lineage 层（Phase 14）
+
+**Fork**:
+从既有 Session 的事件前缀派生新独立会话（file-per-lineage：每个 session 保持线性 append-only JSONL，树是文件之上的元数据关系）。fork = 用户 CLI 动作，绝不是模型可见工具。父文件 fork 后一字不改。
+_Avoid_: branch in place (pi 的树内分叉，被否), session copy (clone 无 provenance), model-invoked fork
+
+**Fork Boundary**:
+合法的 fork 切点：前缀必须止于 run 终态（completed/failed）之后——child 文件绝不能以悬空 run 开头。UX 选择器是「从第 N 条用户消息分叉」，两条用户消息之间天然 run 完整。
+_Avoid_: arbitrary event boundary, mid-run fork point
+
+**Seed**:
+fork 时复制进 child 的事件前缀：重编 seq（child 局部单调）、保留原 event_id 与全部数据。child 自包含可读，不依赖父文件存活（§10 父子独立）。复制原始事件使 fork 到 compaction 之前的节点仍可解释（§8）。
+_Avoid_: lazy reference seed (child 依赖父存活 = 不独立), snapshot-only (丢事件事实)
+
+**session/forked**:
+child 侧的 provenance 事件（seed 后、第一条活事件前）：parent_session_id / fork_point_seq / boundary_user_message_seq? / tail_summary?。零计算字段；物理细节（workspace 路径）不进事件词表。
+_Avoid_: parent-side fork event (父不可改)
+
+**Lineage / Lineage Edge**:
+会话树的边，统一两类来源（origin: fork | delegation），双层存储：事件 = 真相（可审计可重建），SessionMetaStore = 索引（parent_session_id / origin / fork_point_seq，O(1) 建树）。delegation child 与 fork child 同树。
+_Avoid_: event-only tree scan (全库扫描), index-only (丢审计), second source of truth
+
+**Tail Summary**:
+fork 时对父会话 fork point 之后 tail 的一次 LLM 摘要，经 session/forked 可选字段挂 child——file-per-lineage 下「被放弃的尝试」的信息桥。默认开、--no-summary 关、失败降级不挂接（不变量 #21）。injected 语义，绝不清算成用户发言。
+_Avoid_: branch summary entry (pi 树内机制，我们无换线场景), mandatory summary
+
+**Copy-on-Fork**:
+fork 的 workspace 物理策略：父 workspace 整目录复制为 child 的（fork 点世界快照），物理策略独立于事件 fork。Artifact 不复制——全局 store 内容寻址 ref 直接复用。
+_Avoid_: shared workspace (并发写), artifact copy (ref 即可), workspace path in events
+
+**Replay（逻辑回放）**:
+从已持久化事件重新派生视图（CLI replay 命令 / Web inspector），tool result 一律冻结终态，绝不产生外部副作用（§6）。重新执行式 replay（真重跑，LangGraph 式）是另一档位，须显式授权模式——本阶段 DEFER。
+_Avoid_: re-execute on replay, replay as recovery (恢复是 RecoveryCoordinator 的域)
