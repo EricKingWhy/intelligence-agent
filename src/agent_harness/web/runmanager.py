@@ -158,6 +158,12 @@ class ManagedRun:
     def _on_session_event(self, event) -> None:
         """session listener：任何线程上下文都安全（put_nowait）。"""
         self.enqueue_session_event(event)
+        # 终态事实落盘即视为非在途（02 §17）：checkpoint/memory 回写等收尾
+        # await 还会跑一会儿——只等 task.done() 会让 cancel/重连在此窗口
+        # 误判"仍在途"（store 已见 run/completed 而 cancel 返回 cancelling）。
+        if event.type in ("run/completed", "run/failed") and not self.terminal:
+            self.terminal = True
+            self._cancel_orphan_timer()
 
 
 class RunManager:

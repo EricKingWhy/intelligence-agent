@@ -23,7 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
-from starlette.responses import JSONResponse
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
 from agent_harness.assembly import RecoveryStores, build_runtime, initialize_stores
@@ -290,6 +291,96 @@ def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str
     return {"data": json.dumps(payload, ensure_ascii=False)}
 
 
+#: CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
+#: 脚本/样式只认同源构建产物，img 放行 data:。所有响应统一携带（浏览器
+#: 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
+_CSP_POLICY = "default-src 'self'; img-src 'self' data:"
+
+
+class CSPHeaderMiddleware:
+    """纯 ASGI 中间件：所有响应统一携带 CSP 头（行为契约同旧实现）。
+
+    为什么不用 @app.middleware（BaseHTTPMiddleware）：SSE 流过其 anyio 内存
+    流 machinery 时，客户端断连的取消会在嵌套中间件间传播污染请求栈（全量
+    回归下曾放大为逐请求 500 "No response returned"）。纯 ASGI 直通流式
+    帧，无缓冲无任务组（ADR-0016 §2.1 生产级加固）。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["Content-Security-Policy"] = _CSP_POLICY
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+class AuthSeamMiddleware:
+    """纯 ASGI 中间件：身份认证 + IdentityContext 绑定（行为契约同旧实现）。
+
+    fail-open/fail-closed 语义、claims 校验、401 形状逐字节不变
+    （tests/test_identity.py / test_web_api.py 钉住）；差异仅在传输层：
+    不经 BaseHTTPMiddleware 的任务组，SSE 断连取消不再跨请求传染。
+    """
+
+    def __init__(self, app: Any, settings: Settings) -> None:
+        self.app = app
+        self._settings = settings
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        identity = IdentityContext("local", "local", ["user", "session"])
+        headers = Headers(scope=scope)
+        authorization = headers.get("authorization")
+        if self._settings.jwt_secret:
+            # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
+            # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
+            # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
+            # 过期语义，永不过期的签名 token 等于永久凭证）。
+            if not authorization:
+                response: Response = JSONResponse(
+                    {"detail": "Missing identity token"}, status_code=401)
+                await response(scope, receive, send)
+                return
+            try:
+                scheme, encoded = authorization.split(" ", 1)
+                if scheme.lower() != "bearer":
+                    raise ValueError("Expected Bearer token")
+                # SecretStr 取明文给 jwt.decode；truthiness 判断仍基于密钥值
+                # （SecretStr("") 为 falsy，未配置语义不变）。
+                claims = jwt.decode(
+                    encoded, self._settings.jwt_secret.get_secret_value(),
+                    algorithms=["HS256"],
+                    options={"require": ["tenant_id", "user_id", "exp"]})
+                tenant, user = claims["tenant_id"], claims["user_id"]
+                scopes = claims.get("scopes", ["user", "session"])
+                if (not isinstance(tenant, str) or not tenant.strip()
+                        or not isinstance(user, str) or not user.strip()
+                        or not isinstance(scopes, list)
+                        or any(not isinstance(s, str) for s in scopes)):
+                    raise ValueError("Invalid identity claims")
+                identity = IdentityContext(tenant, user, scopes)
+            except (jwt.InvalidTokenError, ValueError):
+                response = JSONResponse(
+                    {"detail": "Invalid identity token"}, status_code=401)
+                await response(scope, receive, send)
+                return
+        token = set_identity_context(identity)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            identity_context_var.reset(token)
+
+
 def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
     """装配 FastAPI 应用。测试可注入 test settings；生产默认从 .env 读。"""
     if settings is None:
@@ -328,47 +419,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
     _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
 
-    @app.middleware("http")
-    async def csp_header(request: Any, call_next: Any):
-        response = await call_next(request)
-        response.headers["Content-Security-Policy"] = _CSP_POLICY
-        return response
-
-    @app.middleware("http")
-    async def auth_seam(request: Any, call_next: Any):
-        identity = IdentityContext("local", "local", ["user", "session"])
-        authorization = request.headers.get("authorization")
-        if settings.jwt_secret:
-            # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
-            # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
-            # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
-            # 过期语义，永不过期的签名 token 等于永久凭证）。
-            if not authorization:
-                return JSONResponse({"detail": "Missing identity token"}, status_code=401)
-            try:
-                scheme, encoded = authorization.split(" ", 1)
-                if scheme.lower() != "bearer":
-                    raise ValueError("Expected Bearer token")
-                # SecretStr 取明文给 jwt.decode；truthiness 判断仍基于密钥值
-                # （SecretStr("") 为 falsy，未配置语义不变）。
-                claims = jwt.decode(encoded, settings.jwt_secret.get_secret_value(),
-                                    algorithms=["HS256"],
-                                    options={"require": ["tenant_id", "user_id", "exp"]})
-                tenant, user = claims["tenant_id"], claims["user_id"]
-                scopes = claims.get("scopes", ["user", "session"])
-                if (not isinstance(tenant, str) or not tenant.strip()
-                        or not isinstance(user, str) or not user.strip()
-                        or not isinstance(scopes, list)
-                        or any(not isinstance(scope, str) for scope in scopes)):
-                    raise ValueError("Invalid identity claims")
-                identity = IdentityContext(tenant, user, scopes)
-            except (jwt.InvalidTokenError, ValueError):
-                return JSONResponse({"detail": "Invalid identity token"}, status_code=401)
-        token = set_identity_context(identity)
-        try:
-            return await call_next(request)
-        finally:
-            identity_context_var.reset(token)
+    # 纯 ASGI 中间件（见类 docstring）：先 csp（内层）后 auth（外层），与
+    # 旧 BaseHTTPMiddleware 版注册顺序逐层一致；CORS 仍最后添加 = 最外层。
+    app.add_middleware(CSPHeaderMiddleware)
+    app.add_middleware(AuthSeamMiddleware, settings=settings)
 
     if enable_cors:
         # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
