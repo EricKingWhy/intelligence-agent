@@ -13,18 +13,27 @@ PostgreSQL 实现本 Phase 只留 ABC 替换边界，不实装。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Literal
 
 from pydantic import BaseModel
 
 
 class SessionMeta(BaseModel):
-    """一条 session 的 metadata 索引行。"""
+    """一条 session 的 metadata 索引行。
+
+    lineage 三列（Phase 14, ADR-0017 决策 7，NULL = root）：事件流是真相、
+    这里是索引——建树查索引（O(1) 组装），事实可从事件流审计重建。origin
+    统一建模两类边（fork | delegation），一棵树两个来源。
+    """
 
     session_id: str
     created_at: str
     agent_id: str | None = None
     last_checkpoint_seq: int | None = None
     archived: bool = False
+    parent_session_id: str | None = None
+    origin: Literal["fork", "delegation"] | None = None
+    fork_point_seq: int | None = None
 
 
 class SessionMetaStore(ABC):

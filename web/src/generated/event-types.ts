@@ -6,6 +6,7 @@
 export const EventType = {
   SESSION_STARTED: 'session/started',
   SESSION_RESUMED: 'session/resumed',
+  SESSION_FORKED: 'session/forked',
   RUN_STARTED: 'run/started',
   RUN_COMPLETED: 'run/completed',
   RUN_FAILED: 'run/failed',

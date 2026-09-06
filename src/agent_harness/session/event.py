@@ -13,6 +13,8 @@ from uuid import uuid4
 
 SESSION_STARTED = "session/started"
 SESSION_RESUMED = "session/resumed"
+# Phase 14（ADR-0017 决策 8）：只落 child 文件的 provenance 事件
+SESSION_FORKED = "session/forked"
 RUN_STARTED = "run/started"
 RUN_COMPLETED = "run/completed"
 RUN_FAILED = "run/failed"
@@ -42,6 +44,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
     {
         SESSION_STARTED,
         SESSION_RESUMED,
+        SESSION_FORKED,
         RUN_STARTED,
         RUN_COMPLETED,
         RUN_FAILED,

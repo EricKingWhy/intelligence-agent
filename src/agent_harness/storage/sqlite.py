@@ -271,9 +271,21 @@ CREATE TABLE IF NOT EXISTS session_meta (
     created_at          TEXT NOT NULL,
     agent_id            TEXT,
     last_checkpoint_seq INTEGER,
-    archived            BOOLEAN DEFAULT 0
+    archived            BOOLEAN DEFAULT 0,
+    parent_session_id   TEXT,
+    origin              TEXT,
+    fork_point_seq      INTEGER
 )
 """
+
+#: lineage 三列（Phase 14 T1, ADR-0017 决策 7）：存量库加列迁移用。
+#: CREATE TABLE IF NOT EXISTS 只惠及新库——旧 schema 的库靠这里逐列补齐，
+#: 按列名判存（幂等），旧行三列 NULL = root 语义。
+_LINEAGE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("parent_session_id", "TEXT"),
+    ("origin", "TEXT"),
+    ("fork_point_seq", "INTEGER"),
+)
 
 
 class SqliteCheckpointStore(CheckpointStore):
@@ -364,19 +376,35 @@ class SqliteSessionMetaStore(SessionMetaStore):
         async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_SESSION_META_DDL)
+            await self._ensure_lineage_columns(connection)
             await connection.commit()
+
+    @staticmethod
+    async def _ensure_lineage_columns(connection: aiosqlite.Connection) -> None:
+        """存量库加列迁移（幂等）：缺哪列补哪列，旧行 NULL = root。"""
+        cursor = await connection.execute("PRAGMA table_info(session_meta)")
+        existing = {row[1] for row in await cursor.fetchall()}
+        for name, col_type in _LINEAGE_COLUMNS:
+            if name not in existing:
+                await connection.execute(
+                    f"ALTER TABLE session_meta ADD COLUMN {name} {col_type}"
+                )
 
     async def upsert(self, meta: SessionMeta) -> SessionMeta:
         async with _connect(self.database_path) as connection:
             await connection.execute(
                 """
                 INSERT INTO session_meta (
-                    session_id, created_at, agent_id, last_checkpoint_seq, archived
-                ) VALUES (?, ?, ?, ?, ?)
+                    session_id, created_at, agent_id, last_checkpoint_seq, archived,
+                    parent_session_id, origin, fork_point_seq
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     last_checkpoint_seq = excluded.last_checkpoint_seq,
-                    archived = excluded.archived
+                    archived = excluded.archived,
+                    parent_session_id = excluded.parent_session_id,
+                    origin = excluded.origin,
+                    fork_point_seq = excluded.fork_point_seq
                 """,
                 (
                     meta.session_id,
@@ -384,6 +412,9 @@ class SqliteSessionMetaStore(SessionMetaStore):
                     meta.agent_id,
                     meta.last_checkpoint_seq,
                     1 if meta.archived else 0,
+                    meta.parent_session_id,
+                    meta.origin,
+                    meta.fork_point_seq,
                 ),
             )
             await connection.commit()
