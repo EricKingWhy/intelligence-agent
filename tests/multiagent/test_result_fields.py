@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -173,3 +174,64 @@ class TestResultFieldsEndToEnd:
 
         payload = json.loads(result.data["output"])
         assert payload["changed_files"] == ["src/new.py"]
+
+
+class TestSummaryOverflow:
+    """#86：大产物治理——store 已配 = 全文交父侧 artifact 管线；
+    未配 = 截断 + child session 指针（不丢数据：全文在 child JSONL）。"""
+
+    def _tool(self, tmp_path: Path, summary: str, overflow_configured: bool):
+        store = JsonlSessionStore(tmp_path / "sessions")
+        workspace_registry = WorkspaceRegistry(root=tmp_path / "workspaces")
+        workspace_registry.create("p1", workspace_root=tmp_path / "ws")
+        provider = InProcessSubagentProvider()
+        tool = DelegateTool(provider)
+        source_registry = ToolRegistry()
+        source_registry.register(tool)
+        provider.activate(
+            factory=AgentFactory(
+                model=ScriptedModel([AIMessage(content=summary)]),
+                primary_model_name="m",
+            ),
+            source_registry=source_registry,
+            session_store=store, workspace_registry=workspace_registry,
+            parent_session_id="p1",
+            summary_limit=200,
+            overflow_configured=overflow_configured,
+        )
+        return tool, provider
+
+    @pytest.mark.asyncio
+    async def test_no_store_truncates_with_child_pointer(self, tmp_path):
+        tool, provider = self._tool(tmp_path, "长" * 500, overflow_configured=False)
+        result = await tool.execute(type("_A", (), {
+            "target": "coding", "task": "x", "constraints": [],
+        })())
+        payload = json.loads(result.data["output"])
+        assert len(payload["summary"]) < 500, "未配 store：截断控制上下文成本"
+        assert "child session" in payload["summary"] or \
+            payload["summary"].endswith("…"), "截断必须带指向信息"
+        # 全文在 child JSONL（不丢数据）
+        child = provider.last_child_sessions[-1]
+        full = [e for e in child._events if e.type == "run/completed"][0]
+        assert "长" * 100 in (full.data.get("final_text") or "")
+
+    @pytest.mark.asyncio
+    async def test_store_configured_passes_full_to_artifact_pipeline(self, tmp_path):
+        """store 已配：provider 不截断——全文交父侧 overflow handler 落 artifact
+        （tool result 携带 artifact_ref，supervisor 按需读）。"""
+        tool, _ = self._tool(tmp_path, "长" * 500, overflow_configured=True)
+        result = await tool.execute(type("_A", (), {
+            "target": "coding", "task": "x", "constraints": [],
+        })())
+        payload = json.loads(result.data["output"])
+        assert len(payload["summary"]) == 500, "全文交由父侧 artifact 管线"
+
+    @pytest.mark.asyncio
+    async def test_small_summary_untouched(self, tmp_path):
+        tool, _ = self._tool(tmp_path, "短摘要", overflow_configured=False)
+        result = await tool.execute(type("_A", (), {
+            "target": "coding", "task": "x", "constraints": [],
+        })())
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == "短摘要"

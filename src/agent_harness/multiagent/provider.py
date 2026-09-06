@@ -151,6 +151,11 @@ class InProcessSubagentProvider:
         self._session_store: JsonlSessionStore | None = None
         self._workspace_registry: WorkspaceRegistry | None = None
         self._parent_session_id: str | None = None
+        # 大产物治理（#86）：summary 超限且未配 overflow store 时截断 +
+        # child session 指针（全文在 child JSONL，不丢数据）；store 已配时
+        # 全文交父侧 artifact 管线（tool result 携带 artifact_ref）。
+        self._summary_limit = 8192
+        self._overflow_configured = False
         # 子会话观测挂点（未来 Agent Hub / lineage 消费；测试断言共享 sandbox）。
         self.last_child_sessions: list[Session] = []
 
@@ -162,6 +167,8 @@ class InProcessSubagentProvider:
         session_store: JsonlSessionStore,
         workspace_registry: WorkspaceRegistry,
         parent_session_id: str,
+        summary_limit: int = 8192,
+        overflow_configured: bool = False,
     ) -> None:
         """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。"""
         self._factory = factory
@@ -169,6 +176,8 @@ class InProcessSubagentProvider:
         self._session_store = session_store
         self._workspace_registry = workspace_registry
         self._parent_session_id = parent_session_id
+        self._summary_limit = summary_limit
+        self._overflow_configured = overflow_configured
         self._activated = True
 
     def profile(self, target: str) -> AgentSpec:
@@ -209,7 +218,14 @@ class InProcessSubagentProvider:
             target, run_result.status, child_session.session_id, run_result.steps,
         )
         fields = collect_result_fields(child_session.events, summary=run_result.final_text)
+        summary = run_result.final_text
+        # 大产物治理（#86，不变量 #15）：store 已配 → 全文交父侧 artifact 管线；
+        # 未配 → 截断 + child session 指针（全文在 child JSONL，不丢数据）。
+        if len(summary) > self._summary_limit and not self._overflow_configured:
+            pointer = (f"\n\n[summary 超限已截断至 {self._summary_limit} 字符；"
+                       f"完整输出见 child session {child_session.session_id}]")
+            summary = summary[:self._summary_limit] + pointer
         return SubAgentResult(
-            agent_id=spec.name, status=status, summary=run_result.final_text,
+            agent_id=spec.name, status=status, summary=summary,
             child_session_id=child_session.session_id, **fields,
         )
