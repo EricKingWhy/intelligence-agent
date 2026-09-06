@@ -10,7 +10,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, SessionMode } from '../types';
-import { createCommitCoalescer, decideCancel, decideStreamEnd, isSeqGap, MAX_RECONNECT_ATTEMPTS, parseTruncated, reconnectDelayMs, shouldApplyRecoverResult, shouldApplyStreamFrame } from './useSession';
+import { createCommitCoalescer, decideCancel, decideStreamEnd, isSeqGap, isUnknownModelError, MAX_RECONNECT_ATTEMPTS, parseTruncated, reconnectDelayMs, shouldApplyRecoverResult, shouldApplyStreamFrame, UNKNOWN_MODEL_ERROR_TEXT } from './useSession';
 
 const ev = (type: string, session_id: string | null): AgentEvent => ({
   type,
@@ -278,5 +278,16 @@ describe('T4 — 重连契约纯函数（#97）', () => {
     expect(reconnectDelayMs(2)).toBe(1000);
     expect(reconnectDelayMs(3)).toBe(2000);
     expect(reconnectDelayMs(9)).toBe(4000);
+  });
+});
+
+describe('isUnknownModelError — 422 具名判定（#103，消魔法子串）', () => {
+  it('仅精确匹配未知模型专项错误', () => {
+    expect(isUnknownModelError(UNKNOWN_MODEL_ERROR_TEXT)).toBe(true);
+    expect(isUnknownModelError('模型不可用（422）：请从模型选择器重新选择 ')).toBe(false);
+    expect(isUnknownModelError('Start failed: 422')).toBe(false);
+    expect(isUnknownModelError('加载会话列表失败：422')).toBe(false);
+    expect(isUnknownModelError(null)).toBe(false);
+    expect(isUnknownModelError(undefined)).toBe(false);
   });
 });

@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound, RotateCcw, X } from 'lucide-react';
-import { useSession } from './hooks/useSession';
+import { isUnknownModelError, useSession } from './hooks/useSession';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
@@ -28,6 +28,7 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
+import { getModels, type ModelCatalogEntry } from './lib/api';
 import { summarizeEvent } from './lib/projection';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
@@ -53,6 +54,18 @@ export default function App() {
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
   // 401 由 api.ts 统一拦截并广播；这里只负责展示引导横幅。配置 token 后
   // 自动清横幅并重试会话列表（onTokenChange），无需整页刷新。
+  // ── T10 #103 模型目录（GET /api/models，契约 C6）──
+  // 加载失败/端点缺席 → models=[] → Composer 选择器降级隐藏（不伪造列表）。
+  // selectedModel=null = 默认链（提交不带 model 字段，默认链行为不变）。
+  const [models, setModels] = useState<ModelCatalogEntry[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const fetchModels = useCallback(async () => {
+    try {
+      setModels(await getModels());
+    } catch {
+      setModels([]); // 降级隐藏入口——错误不打扰（非关键能力）
+    }
+  }, []);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -60,8 +73,9 @@ export default function App() {
       onTokenChange(() => {
         setAuthRequired(false);
         void refreshSessions();
+        void fetchModels(); // T10：模型目录同样吃鉴权缝——配置 token 后补拉
       }),
-    [refreshSessions],
+    [refreshSessions, fetchModels],
   );
 
   // 密度四档（冻结决策）：状态在 App（TopBar 切换、Conversation 消费），persist 由 lib/density 负责。
@@ -164,10 +178,35 @@ export default function App() {
     focusRun();
   }, [selectSession, focusRun]);
 
+  useEffect(() => {
+    void fetchModels();
+  }, [fetchModels]);
+
+  const handleModelChange = useCallback((name: string | null) => {
+    setSelectedModel(name);
+  }, []);
+
   const handleSubmit = useCallback((task: string) => {
     focusRun();
-    void submitTask({ task, max_steps: 10, auto_approve: true });
-  }, [submitTask, focusRun]);
+    void submitTask({
+      task,
+      max_steps: 10,
+      auto_approve: true,
+      ...(selectedModel ? { model: selectedModel } : {}),
+    });
+  }, [submitTask, focusRun, selectedModel]);
+
+  // 422 = 未知模型（契约 C6）：目录可能已变——自动刷新一次；刷新后若目录
+  // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
+  // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
+  useEffect(() => {
+    if (!error || !isUnknownModelError(error)) return;
+    void (async () => {
+      const list = await getModels().catch(() => [] as ModelCatalogEntry[]);
+      setModels(list);
+      setSelectedModel((prev) => (prev && list.some((m) => m.name === prev) ? prev : null));
+    })();
+  }, [error]);
 
   // ── Recover 入口可见性（da394a9 §二.2 后端建议语义）──
   // isRecoverableRun：最后 run 缺终态（completed/failed 都没有）或存在未配对
@@ -383,6 +422,9 @@ export default function App() {
             onSubmit={handleSubmit}
             onCancel={cancelStream}
             presetTask={presetTask}
+            models={models}
+            selectedModel={selectedModel}
+            onModelChange={handleModelChange}
           />
         </section>
 

@@ -62,6 +62,9 @@ export interface StartSessionPayload {
   workspace?: string;
   max_steps?: number;
   auto_approve?: boolean;
+  /** 可选模型选择（T10 #103，契约 C6）：GET /api/models 的 name；不传 = 默认
+   *  链；未知 → 422（调用方提示重新选择并刷新目录）。 */
+  model?: string;
 }
 
 /** POST a new session. Returns the raw Response — SSE stream is consumed by caller.
@@ -92,6 +95,43 @@ export async function postApproval(sessionId: string, approved: boolean): Promis
   });
   if (!res.ok) throw new Error(`approve ${res.status}`);
   return res.json();
+}
+
+// ── Models（后端契约回执 §3，T10 #103：多模型不写死，grill Q2 拍板）──
+
+/** GET /api/models 目录条目。零密钥字段；name 是 POST /api/sessions 的选择键；
+ *  思考能力不进元数据（显示侧由 reasoning 事件族驱动，有则显示无则不显示）。 */
+export interface ModelCatalogEntry {
+  name: string;
+  provider: string | null;
+  model: string | null;
+  default: boolean;
+}
+
+/** GET /api/models。窄化解析（零伪造）：仅 name 非空字符串的条目入选，
+ *  可选字段缺失记 null；models 数组缺失/形状不符 → 空数组——调用方据此
+ *  降级隐藏选择器入口，绝不伪造列表。 */
+export async function getModels(): Promise<ModelCatalogEntry[]> {
+  const res = await apiFetch('/api/models');
+  if (!res.ok) throw new Error(`models ${res.status}`);
+  const body: unknown = await res.json();
+  const raw =
+    typeof body === 'object' && body !== null && Array.isArray((body as { models?: unknown }).models)
+      ? ((body as { models: unknown[] }).models)
+      : [];
+  return raw.flatMap((m) => {
+    if (typeof m !== 'object' || m === null) return [];
+    const r = m as Record<string, unknown>;
+    if (typeof r.name !== 'string' || !r.name) return [];
+    return [
+      {
+        name: r.name,
+        provider: typeof r.provider === 'string' ? r.provider : null,
+        model: typeof r.model === 'string' ? r.model : null,
+        default: r.default === true,
+      },
+    ];
+  });
 }
 
 // ── Cancel（后端契约回执 §3，T5 #98：detached-run 显式中断唯一入口）──

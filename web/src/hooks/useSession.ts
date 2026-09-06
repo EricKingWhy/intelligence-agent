@@ -212,6 +212,15 @@ export function createCommitCoalescer(
   };
 }
 
+/** 422 = 未知模型（契约 C6）的稳定标记与判定（Standards 轴：消魔法子串跨模块
+ *  耦合——useSession 的错误文案是 submitTask 对外的唯一通道，App 据此刷新模型
+ *  目录；判定函数+常量单一来源，文案改动不会静默破坏识别）。 */
+export const UNKNOWN_MODEL_ERROR_TEXT = '模型不可用（422）：请从模型选择器重新选择';
+
+export function isUnknownModelError(message: string | null | undefined): boolean {
+  return message === UNKNOWN_MODEL_ERROR_TEXT;
+}
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
@@ -351,7 +360,7 @@ export function useSession() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
 
-  /** Submit a new task. Creates a fresh session and streams the response.
+/** Submit a new task. Creates a fresh session and streams the response.
    *  The conversation is reset first — a live stream never folds into the
    *  previously viewed session's turns.
    *  T4（#97）：流消费升级为重连状态机——异常关闭 / seq gap / 停摆（含后台
@@ -371,6 +380,8 @@ export function useSession() {
       setMode({ kind: 'live', sessionId: null });
       try {
         const res = await startSession(payload);
+        // 422 = 未知模型（契约 C6）——专项消息供 App 识别后刷新目录
+        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
         if (!res.ok || !res.body) {
           throw new Error(`Start failed: ${res.status}`);
         }
