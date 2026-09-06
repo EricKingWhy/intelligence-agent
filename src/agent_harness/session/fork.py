@@ -15,6 +15,7 @@ append-only 线性 JSONL，树是 SessionMetaStore 索引层的元数据关系�
 
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -103,11 +104,14 @@ async def fork_session(
     ]
     _validate_run_complete(seed, parent_session_id)
 
-    # 校验全部通过后才落盘：先建 child，再移植 seed，再写 provenance 与索引
+    # 校验全部通过后才落盘：先建 child，再做 workspace 物理复制，再移植
+    # seed 与 provenance/索引（copy 失败属基础设施故障，原样上抛）。
     child = Session.start(
         store, agent_id=agent_id, session_id=child_session_id,
         workspace_registry=workspace_registry,
     )
+    if workspace_registry is not None:
+        _copy_workspace(workspace_registry, parent_session_id, child)
     child.adopt_history(seed)
     fork_point_seq = seed[-1].seq if seed else None
     child.append(
@@ -131,6 +135,28 @@ async def fork_session(
         )
     )
     return child
+
+
+def _copy_workspace(
+    registry, parent_session_id: str, child: Session
+) -> None:
+    """copy-on-fork（ADR-0017 决策 5）：父 workspace 整目录复制为 child 的。
+
+    物理策略独立于事件 fork（spec §7）。父无 workspace / 目录不存在 =
+    child 空 workspace（降级）。Artifact 是全局 store 的内容寻址 ref——
+    随事件 seed 原样可用，绝不复制（规格「Artifact Ref 按权限复用」）。
+    复制失败 = 基础设施故障，原样上抛（fork 不带残缺快照继续）。
+    """
+    if not registry.exists(parent_session_id):
+        return
+    parent_root = registry.get(parent_session_id).workspace_root
+    child_sandbox = child.sandbox
+    if child_sandbox is None:
+        return
+    if parent_root.is_dir():
+        shutil.copytree(
+            parent_root, child_sandbox.workspace_root, dirs_exist_ok=True
+        )
 
 
 def _validate_run_complete(

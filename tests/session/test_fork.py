@@ -209,3 +209,79 @@ async def test_fork_from_failed_run_prefix(tmp_path) -> None:
     )
     assert [e.type for e in child.events].count(RUN_FAILED) == 1
     assert [e.type for e in child.events][-1] == SESSION_FORKED
+
+
+# ── T3 copy-on-fork（#109, ADR-0017 决策 5）─────────────────────────────────
+
+
+async def test_fork_copies_parent_workspace_to_child(tmp_path) -> None:
+    """fork 点世界快照：父 workspace 全部文件复制给 child。"""
+    from agent_harness.sandbox import WorkspaceRegistry
+
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    registry = WorkspaceRegistry(root=tmp_path / "ws")
+    parent = Session.start(
+        store, session_id="wsparent", workspace_registry=registry
+    )
+    parent.sandbox.write_text("a.txt", "hello")
+    parent.sandbox.write_text("sub/nested.txt", "nested")
+    anchor = parent.events[-1].seq
+    parent.append(USER_MESSAGE, {"content": "第二条"})
+    anchor = parent.events[-1].seq
+
+    child = await fork_session(
+        store, meta, "wsparent", boundary_user_message_seq=anchor,
+        child_session_id="wschild", workspace_registry=registry,
+    )
+    assert child.sandbox is not None
+    assert child.sandbox.read_text("a.txt") == "hello"
+    assert child.sandbox.read_text("sub/nested.txt") == "nested"
+
+
+async def test_fork_workspace_isolation_bidirectional(tmp_path) -> None:
+    """双向隔离：child 写不伤父；fork 后父写不进 child。"""
+    from agent_harness.sandbox import WorkspaceRegistry
+
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    registry = WorkspaceRegistry(root=tmp_path / "ws")
+    parent = Session.start(
+        store, session_id="isoparent", workspace_registry=registry
+    )
+    parent.sandbox.write_text("a.txt", "v1")
+    parent.append(USER_MESSAGE, {"content": "第二条"})
+    anchor = parent.events[-1].seq
+
+    child = await fork_session(
+        store, meta, "isoparent", boundary_user_message_seq=anchor,
+        child_session_id="isochild", workspace_registry=registry,
+    )
+    child.sandbox.write_text("child-only.txt", "x")
+    assert "child-only.txt" not in parent.sandbox.list_files("*")
+    parent.sandbox.write_text("parent-late.txt", "y")
+    assert "parent-late.txt" not in child.sandbox.list_files("*")
+    # 父的原文件仍是 v1（child 改它不影响父）
+    child.sandbox.write_text("a.txt", "child-version")
+    assert parent.sandbox.read_text("a.txt") == "v1"
+
+
+async def test_fork_without_parent_workspace_degrades(tmp_path) -> None:
+    """父从未绑定 workspace：child 得到空 workspace，不崩溃。"""
+    from agent_harness.sandbox import WorkspaceRegistry
+
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    registry = WorkspaceRegistry(root=tmp_path / "ws")
+    parent = _build_parent(store)  # 未传 registry
+    anchor = parent.events[-1].seq
+
+    child = await fork_session(
+        store, meta, "parent", boundary_user_message_seq=anchor,
+        child_session_id="freshws", workspace_registry=registry,
+    )
+    assert child.sandbox is not None
+    assert child.sandbox.list_files("*") == []
