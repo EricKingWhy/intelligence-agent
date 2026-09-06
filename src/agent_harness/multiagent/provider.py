@@ -222,10 +222,11 @@ class InProcessSubagentProvider:
             sandbox=parent_sandbox,
         )
         child_session.append(SESSION_STARTED, {}, agent_id=spec.name)
+        # spawn 即注册（hub/lineage 语义：子代理在 spawn 时可见，不等完成）
+        self.last_child_sessions.append(child_session)
 
         child_runtime = self._factory.create(spec, source_registry=self._source_registry)
         run_result: AgentRunResult = await child_runtime.run(child_session, full_task)
-        self.last_child_sessions.append(child_session)
 
         status = ("completed" if run_result.status == "completed" else "failed")
         logger.info(

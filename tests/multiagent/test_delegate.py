@@ -21,9 +21,11 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.factory import AgentFactory
+from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.multiagent.provider import InProcessSubagentProvider
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
@@ -354,3 +356,76 @@ class TestBlockingParallelDelegation:
 
         assert results[0].ok and results[2].ok
         assert not results[1].ok, "个别 child 失败不影响同批其他 child"
+
+
+class TestCancelAndResume:
+    """#91：父断连 → child 取消收尾 + 父 dangling 合成；child 留档可查。"""
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_child_and_leaves_dangling(self, tmp_path):
+        from agent_harness.session import Session as _Session
+
+        class _BlockingChildModel(ScriptedModel):
+            async def ainvoke(self, messages, **kwargs):
+                await asyncio.sleep(30)
+                return AIMessage(content="never")
+
+        provider = InProcessSubagentProvider()
+        delegate = DelegateTool(provider)
+        registry = ToolRegistry()
+        registry.register(delegate)
+        store = JsonlSessionStore(tmp_path / "sessions")
+        workspace_registry = WorkspaceRegistry(root=tmp_path / "w")
+        workspace_registry.create("parent-1", workspace_root=tmp_path / "ws")
+        provider.activate(
+            factory=AgentFactory(model=_BlockingChildModel([AIMessage(content="x")]),
+                                 primary_model_name="m"),
+            source_registry=registry,
+            session_store=store, workspace_registry=workspace_registry,
+            parent_session_id="parent-1",
+        )
+
+        supervisor = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "id": "d001", "name": "delegate",
+                "args": {"target": "coding", "task": "长任务"},
+            }]),
+        ])
+        runtime = AgentRuntime(model=supervisor, registry=registry,
+                               executor=ToolExecutor(registry), max_steps=5)
+        parent_store = JsonlSessionStore(tmp_path / "parent")
+        parent_session = Session.start(parent_store)
+
+        async def consume():
+            async for _event in runtime.run_stream(parent_session, "派个长任务"):
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.5)  # 让 child 进入 30s 模型调用
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # child session：取消收尾落盘（model/failed + run/failed）
+        child = provider.last_child_sessions[-1]
+        child_types = [e.type for e in child._events]
+        assert "model/failed" in child_types
+        assert "run/failed" in child_types
+
+        # 父 session：委派尝试已可见（model/completed 携带 tool_calls，无 Ledger
+        # 时立即持久化），但委派未完成 → 无 tool/result。
+        parent_events = [e for e in parent_session._events
+                         if e.type in ("model/completed", "tool/call", "tool/result")]
+        assert not any(e.type == "tool/result" for e in parent_events)
+        run_failed = [e for e in parent_session._events if e.type == "run/failed"]
+        assert len(run_failed) == 1
+
+        # resume：dangling 合成补齐（恢复可继续——spec §13 验收）
+        resumed = _Session.resume(parent_store, parent_session.session_id)
+        dangling = [e for e in resumed._events
+                    if e.type == "tool/result" and e.data.get("dangling")]
+        assert len(dangling) == 1, "resume 必须为未完成委派合成 dangling tool/result"
+
+    @pytest.mark.asyncio
+    async def test_child_session_persisted_after_disconnect(self, tmp_path):
+        """child 留档可查（不删除、不复活）——第二次委派不影响首次留档。"""
