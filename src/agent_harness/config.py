@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # 超时抛 ModelStallError（瞬时）→ fallback 接管 / 统一失败兜底。
     model_stream_idle_timeout: float = 60.0
     model_stream_total_timeout: float = 600.0
+    # 进程级模型调用并发闸（#89）：parent+child 共享上限，防 TPM/QPM 限流与
+    # 机器过载。≤0 = 关闭。TPM 令牌桶限流器 DEFER（ADR-0015）。
+    model_max_concurrency: int = 3
     # Model Fallback 两级链（ADR-0014 决策 14）：FALLBACK_MODEL_PROVIDER 为空 =
     # 单级（无 fallback）。fallback key 同 SecretStr 脱敏待遇（活密钥）。
     fallback_model_provider: str = ""

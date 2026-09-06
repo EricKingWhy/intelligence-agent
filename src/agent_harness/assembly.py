@@ -23,6 +23,7 @@ from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.sandbox import WorkspaceRegistry
@@ -114,6 +115,9 @@ async def build_runtime(
     fallback_model = None
     if config.fallback is not None:
         fallback_model = create_chat_model(config.fallback)
+    # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
+    # 同一实例（全局在飞模型调用数的语义）。
+    model_call_gate = ModelCallGate(settings.model_max_concurrency)
 
     sandbox = workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
@@ -162,6 +166,7 @@ async def build_runtime(
         fallback_model=fallback_model,
         stream_idle_timeout=settings.model_stream_idle_timeout,
         stream_total_timeout=settings.model_stream_total_timeout,
+        model_call_gate=model_call_gate,
         primary_model_name=config.model_name,
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),

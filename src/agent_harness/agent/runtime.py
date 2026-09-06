@@ -44,6 +44,7 @@ from agent_harness.context.builder import ContextBuilder, ContextWindowExceededE
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
 from agent_harness.memory.writeback import MemoryWriteback
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.fallback import (
     FallbackPolicy,
     ModelFallbackCoordinator,
@@ -232,6 +233,7 @@ class AgentRuntime:
         fallback_model_name: str = "fallback",
         stream_idle_timeout: float = 0.0,
         stream_total_timeout: float = 0.0,
+        model_call_gate: ModelCallGate | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -248,6 +250,9 @@ class AgentRuntime:
         # 都受保护（无 fallback 时走统一失败兜底），见 model/stall.py。
         self._stream_idle_timeout = stream_idle_timeout
         self._stream_total_timeout = stream_total_timeout
+        # 进程级模型并发闸（#89）：assembly 创建，parent 与所有 child 共享
+        # 同一引用（全局在飞模型调用数的语义），None = 不加闸。
+        self._model_call_gate = model_call_gate
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
@@ -348,17 +353,10 @@ class AgentRuntime:
         # 同错熔断护栏：每 run 一个新实例（注入或新建）；计数不跨 run 累积。
         guard = self._failure_guard or RepeatedToolFailureGuard()
         guard.reset()
-        # Model Fallback + 卡流看门狗：每 run 一个新 coordinator（切换状态
-        # 不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator 退化为
-        # 透传（异常原样上抛），但 stall 看门狗对所有 run 生效。
-        model_coord = ModelFallbackCoordinator(
-            primary=self.model, fallback=self._fallback_model,
-            policy=self._fallback_policy,
-            primary_name=self._primary_model_name,
-            fallback_name=self._fallback_model_name,
-            idle_timeout=self._stream_idle_timeout,
-            total_timeout=self._stream_total_timeout,
-        )
+        # Model Fallback + 卡流看门狗 + 并发闸：每 run 一个新 coordinator
+        # （切换状态不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator
+        # 退化为透传（异常原样上抛），但看门狗/并发闸对所有 run 生效。
+        model_coord = self._new_coordinator()
         run_span = new_span_id()
         try:
             # 写入 user 消息事件
@@ -801,6 +799,18 @@ class AgentRuntime:
                 AgentRunResult(status=STATUS_FAILED, final_text="", steps=steps),
             )
             return
+
+    def _new_coordinator(self) -> ModelFallbackCoordinator:
+        """per-run coordinator 工厂（_drive 每调一次；测试可直取验证接线）。"""
+        return ModelFallbackCoordinator(
+            primary=self.model, fallback=self._fallback_model,
+            policy=self._fallback_policy,
+            primary_name=self._primary_model_name,
+            fallback_name=self._fallback_model_name,
+            idle_timeout=self._stream_idle_timeout,
+            total_timeout=self._stream_total_timeout,
+            gate=self._model_call_gate,
+        )
 
     def _write_memories(self, session: Session, start: int) -> None:
         if self._memory_writer is not None:

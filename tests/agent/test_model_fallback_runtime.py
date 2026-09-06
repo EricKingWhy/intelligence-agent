@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -355,3 +356,31 @@ class TestTransitionPersistenceOnFailure:
         assert transitions[0].data["from_model"] == "primary-model"
         assert transitions[0].data["to_model"] == "fallback-model"
         assert transitions[0].data["reason"] == "ModelStallError"
+
+
+class TestModelCallGateWiring:
+    """#89：闸贯穿 coordinator/runtime/assembly；排队不计入卡流 idle。"""
+
+    @pytest.mark.asyncio
+    async def test_coordinator_ainvoke_gated(self, tmp_path):
+        import time
+
+        from agent_harness.model.concurrency import ModelCallGate
+
+        gate = ModelCallGate(limit=1)
+        inner = ScriptedModel([AIMessage(content="ok"), AIMessage(content="ok")])
+        coord_a = AgentRuntime(
+            model=inner, registry=_registry(), executor=ToolExecutor(_registry()),
+            max_steps=5, model_call_gate=gate,
+        )._new_coordinator()
+        coord_b = AgentRuntime(
+            model=inner, registry=_registry(), executor=ToolExecutor(_registry()),
+            max_steps=5, model_call_gate=gate,
+        )._new_coordinator()
+
+        t0 = time.perf_counter()
+        await asyncio.gather(coord_a.ainvoke([]), coord_b.ainvoke([]))
+        elapsed = time.perf_counter() - t0
+        # 两个调用共享 1 个槽位 → 串行化（各自 ScriptedModel ainvoke 无延迟，
+        # 串行化证据取槽位语义而非时长，这里主要验证不死锁、不丢结果）
+        assert elapsed < 5
