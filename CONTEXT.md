@@ -387,3 +387,63 @@ _Avoid_: global token budget, unlimited delegation
 **Spawn vs Fork**:
 spawn = 全新 child context/session（V1）；fork = 从父 Session 事件前缀 seed（Phase 14 fork boundary）。V1 只有 spawn，SubagentProvider seam 为 fork/remote 留位。
 _Avoid_: clone, copy session
+
+## Session Lineage 层（Phase 14）
+
+**Fork**:
+从既有 Session 的事件前缀派生新独立会话（file-per-lineage：每个 session 保持线性 append-only JSONL，树是文件之上的元数据关系）。fork = 用户 CLI 动作，绝不是模型可见工具。父文件 fork 后一字不改。
+_Avoid_: branch in place (pi 的树内分叉，被否), session copy (clone 无 provenance), model-invoked fork
+
+**Fork Boundary**:
+合法的 fork 切点：前缀必须止于 run 终态（completed/failed）之后——child 文件绝不能以悬空 run 开头。UX 选择器是「从第 N 条用户消息分叉」，两条用户消息之间天然 run 完整。
+_Avoid_: arbitrary event boundary, mid-run fork point
+
+**Seed**:
+fork 时复制进 child 的事件前缀：重编 seq（child 局部单调）、保留原 event_id 与全部数据。child 自包含可读，不依赖父文件存活（§10 父子独立）。复制原始事件使 fork 到 compaction 之前的节点仍可解释（§8）。
+_Avoid_: lazy reference seed (child 依赖父存活 = 不独立), snapshot-only (丢事件事实)
+
+**session/forked**:
+child 侧的 provenance 事件（seed 后、第一条活事件前）：parent_session_id / fork_point_seq / boundary_user_message_seq? / tail_summary?。零计算字段；物理细节（workspace 路径）不进事件词表。
+_Avoid_: parent-side fork event (父不可改)
+
+**Lineage / Lineage Edge**:
+会话树的边，统一两类来源（origin: fork | delegation），双层存储：事件 = 真相（可审计可重建），SessionMetaStore = 索引（parent_session_id / origin / fork_point_seq，O(1) 建树）。delegation child 与 fork child 同树。
+_Avoid_: event-only tree scan (全库扫描), index-only (丢审计), second source of truth
+
+**Tail Summary**:
+fork 时对父会话 fork point 之后 tail 的一次 LLM 摘要，经 session/forked 可选字段挂 child——file-per-lineage 下「被放弃的尝试」的信息桥。默认开、--no-summary 关、失败降级不挂接（不变量 #21）。injected 语义，绝不清算成用户发言。
+_Avoid_: branch summary entry (pi 树内机制，我们无换线场景), mandatory summary
+
+**Copy-on-Fork**:
+fork 的 workspace 物理策略：父 workspace 整目录复制为 child 的（fork 点世界快照），物理策略独立于事件 fork。Artifact 不复制——全局 store 内容寻址 ref 直接复用。
+_Avoid_: shared workspace (并发写), artifact copy (ref 即可), workspace path in events
+
+**Replay（逻辑回放）**:
+从已持久化事件重新派生视图（CLI replay 命令 / Web inspector），tool result 一律冻结终态，绝不产生外部副作用（§6）。重新执行式 replay（真重跑，LangGraph 式）是另一档位，须显式授权模式——本阶段 DEFER。
+_Avoid_: re-execute on replay, replay as recovery (恢复是 RecoveryCoordinator 的域)
+
+## Observability / Eval 层（Phase 15）
+
+**Langfuse 旁路（Bypass Observability）**:
+`OPTIONAL_OBSERVABILITY` 档的首个实现：未配置 = 模块完全缺席零开销；任何 SDK 异常/端点故障被单一异常边界吞掉，主流程零感知；热路径只做内存操作，全部发送走 SDK 后台队列。三层观测（SessionEvent / 诊断 JSONL / Langfuse）互补不可替代。
+_Avoid_: sync network in hot path, capability descriptor 包装（那是 Tool 能力体系）, silent exception (旁路故障必须留 JSONL 诊断痕迹)
+
+**Trace 映射（Trace Mapping）**:
+复用既有 ID 的固定对应：session_id→Langfuse session、一次 agent run→trace（恢复链用 `resumes` metadata 标注）、model call→generation、tool operation→tool span、SubAgent→`agent` 型 observation（官方多 Agent 规则：无双 dispatch 节点、递归嵌套、具体命名）。不发明第二套 trace identity。
+_Avoid_: new identity system (spec 12 §4), dispatch+execution 双节点, generic trace names
+
+**Trace Content 边界（full / redacted）**:
+`LANGFUSE_TRACE_CONTENT` 控制上云内容：full=完整输入输出（自有 dev 项目默认），redacted=只传 metadata+截断/摘要。redaction 是单一函数边界的 hook，未来接策略不改埋点。
+_Avoid_: per-call ad-hoc masking, hook as afterthought
+
+**熔断与丢弃计数（Drop Counter）**:
+Langfuse 端点持续不可达时旁路暂停发送（指数退避），期间被跳过的写入计数只进 JSONL 诊断行——Event ≠ 诊断日志，SessionEvent 流保持纯净业务事实。
+_Avoid_: drop counter into SessionEvent, unbounded retry backlog
+
+**Golden Case**:
+Langfuse Dataset 条目；真相源在 repo（`evaluation/datasets/*.jsonl` 版本化导出 + seed 脚本推送），云端不是唯一真相。Eval Runner 项目所有、调真实 AgentRuntime（不为评测重写 Runtime），结果作为 Experiment 上报。
+_Avoid_: cloud-only truth (repo 无导出则不可复现), eval-specific runtime
+
+**Deterministic Assertion**:
+代码判断的评测断言（tool 选择、dangling=0、recovery 成功、kill/resume 恢复），跑在 ScriptedModel + 真实 Runtime 上、可进 CI；与 LLM judge（语义质量、须校准、只搭不启用）严格分档。
+_Avoid_: single opaque score (spec 12 §6), judge for what code can assert, real-model assertions in CI

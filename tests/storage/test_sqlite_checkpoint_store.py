@@ -48,12 +48,17 @@ async def test_session_meta_schema_matches_frozen_columns(tmp_path: Path) -> Non
         cursor = await connection.execute("PRAGMA table_info(session_meta)")
         columns = {row[1]: row for row in await cursor.fetchall()}
 
+    # ADR-0017 决策 7（Phase 14 T1）：lineage 三列并入冻结 schema
+    # （NULL = root；origin ∈ {fork, delegation} 封闭词汇）。
     assert set(columns) == {
         "session_id",
         "created_at",
         "agent_id",
         "last_checkpoint_seq",
         "archived",
+        "parent_session_id",
+        "origin",
+        "fork_point_seq",
     }
     pk = await _primary_key_of(database_path, "session_meta")
     assert pk == ["session_id"]

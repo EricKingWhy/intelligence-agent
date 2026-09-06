@@ -43,6 +43,7 @@ class TestSessionEventDTO:
         expected = {
             "session/started",
             "session/resumed",
+            "session/forked",
             "run/started",
             "run/completed",
             "run/failed",
