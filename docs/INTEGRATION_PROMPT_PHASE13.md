@@ -2,7 +2,7 @@
 
 > **收件人**：集成 AI（Git Integrator 角色，AGENTS.md §14）
 > **任务**：把 `feat/backend` 的 Phase 13（Multi-Agent / Delegation，ADR-0015，tickets #82-#93）合入 `main` 并完成验证
-> **写于**：2026-09-06，后端 HEAD = `0f1d01d` + #93 收尾 commit（动手前以 `git log -1 --oneline` 为准，本文件所在仓库 `D:\intelligence-agent-backend`）
+> **写于**：2026-09-06，后端 HEAD = `80eaad6`（本文件所在仓库 `D:\intelligence-agent-backend`，动手前以 `git log -1 --oneline` 为准）
 > **红线**：永不 force-push / rebase / reset --hard；凭证零泄漏（.env 内容绝不打印/提交/复制进文档）；每次合并动作前确认所在 worktree 与分支（§14.2）；冲突后立即停止自动解决（§14.7）
 
 ---
@@ -154,7 +154,7 @@ git push origin main
 
 ## F. 集成后的已知协作点（写给用户的交接，不是本次要做的）
 
-1. **前端投影适配**（`feat/frontend` 侧）：两个新 SessionEvent `agent/delegation-started`（data: target/task/child_session_id）与 `agent/delegation-finished`（data: target/child_session_id/status/summary）的前端渲染——`web/src/generated/event-types.ts` 已由后端同步（backend-owned），投影层尚未消费，未适配前落 UnknownSurface 兜底（不丢）。可做的 UI：Trace Ladder 委派节点 + 点击跳 child session 钻取（child_session_id 已在事件 data，决策 8 白盒边界）
+1. **前端投影适配**（`feat/frontend` 侧，**手册已备**：`docs/FRONTEND_PROMPT_PHASE13.md`）：两个新 SessionEvent `agent/delegation-started`（data: target/task/child_session_id）与 `agent/delegation-finished`（data: target/child_session_id/status/summary）的前端渲染——`web/src/generated/event-types.ts` 已由后端同步（backend-owned），投影层尚未消费，未适配前落 UnknownSurface 兜底（不丢）。可做的 UI：Trace Ladder 委派节点 + 点击跳 child session 钻取（child_session_id 已在事件 data，决策 8 白盒边界）。**前端批应在本次集成（D 节）完成后启动**——其类型常量随本批 merge 到达 main
 2. **LangGraph 编排（DEFER，seam 已就位）**：`src/agent_harness/orchestration/adapter.py` 是 Protocol-only seam（#92）；接 LangGraph = 新增 adapter 实现（Graph State → agent node 调 AgentRuntime → 结果写回；Graph Checkpoint 永不替代 Operation Ledger），Core 零改动。import 边界由契约测试守护，新违反必须显式进豁免清单
 3. **深度 >1 / fork / 异步 park-revive（Phase 14 地盘）**：`AgentSpec.max_depth` 字段已保留（V1=1，child 无 delegate）；lineage = delegation 事件 child_session_id 引用，Phase 14 lineage tree 直接消费；V1 阻塞串行/阻塞并行，异步委派待 Phase 14+
 4. **上游网关稳定性**：senseaudio 间歇故障（500 服务繁忙/超时挂起）在 Gate 期间反复出现；可靠性层（看门狗 + fallback + 熔断）行为正确但双 provider 共用同一网关无法自救。若持续，建议上游侧更换/增设独立 fallback provider
