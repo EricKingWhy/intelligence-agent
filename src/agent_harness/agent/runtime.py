@@ -234,6 +234,7 @@ class AgentRuntime:
         stream_idle_timeout: float = 0.0,
         stream_total_timeout: float = 0.0,
         model_call_gate: ModelCallGate | None = None,
+        agent_id: str = "default",
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -253,6 +254,9 @@ class AgentRuntime:
         # 进程级模型并发闸（#89）：assembly 创建，parent 与所有 child 共享
         # 同一引用（全局在飞模型调用数的语义），None = 不加闸。
         self._model_call_gate = model_call_gate
+        # 归因身份（ADR-0015 决策 6）：child runtime 落 profile 名——run/started
+        # 与 Ledger 条目不再全是 "default"（parent 保持 "default" 向后兼容）。
+        self._agent_id = agent_id
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
@@ -366,7 +370,7 @@ class AgentRuntime:
             # USER_ACCEPTED 稳定边界：user/message 已持久化。
             await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
-            run_id = session.begin_run()
+            run_id = session.begin_run(agent_id=self._agent_id)
             terminal.begin_run(run_id)
             # run 归因上下文（R3-7）：memory/context provider 等低层模块在
             # 事件降级时需要 run_id 对账，经 contextvar 传递（task 作用域，
@@ -591,7 +595,7 @@ class AgentRuntime:
                         operation_context=OperationContext(
                             session_id=session.session_id,
                             run_id=run_id,
-                            agent_id="default",
+                            agent_id=self._agent_id,
                         ),
                     )
                 except Exception as error:  # noqa: BLE001

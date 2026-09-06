@@ -108,10 +108,25 @@ class DelegateTool(Tool):
             "status": result.status,
             "summary": result.summary,
         }
+        # 白盒透明（ADR-0015 决策 6/8）：委派事实以 pending_events 经 executor
+        # 落盘（tool/call 之后、tool/result 之前）。started/finished 的落盘时点
+        # 都是委派完成时——阻塞串行模型下无观察者可见差。
+        pending_events = [
+            ("agent/delegation-started", {
+                "target": args.target, "task": args.task,
+                "child_session_id": result.child_session_id,
+            }),
+            ("agent/delegation-finished", {
+                "target": args.target,
+                "child_session_id": result.child_session_id,
+                "status": result.status, "summary": result.summary,
+            }),
+        ]
         if result.status == "completed":
             return ToolResult.success(
                 message=f"子代理 '{result.agent_id}' 完成：{result.summary[:200]}",
                 data={"output": json.dumps(payload, ensure_ascii=False)},
+                pending_events=pending_events,
             )
         # failure 无 data 参数：结构化 payload 走 metadata（内容仍经
         # model_dump_json 全量回灌给 supervisor 模型）。
@@ -121,4 +136,5 @@ class DelegateTool(Tool):
             error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             retryable=False,
             metadata={"output": json.dumps(payload, ensure_ascii=False)},
+            pending_events=pending_events,
         )

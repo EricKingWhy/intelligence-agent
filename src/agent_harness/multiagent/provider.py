@@ -37,13 +37,15 @@ logger = logging.getLogger(__name__)
 class SubAgentResult:
     """子代理的结构化产物（ADR-0015 决策 12）——绝不倾倒完整历史。
 
-    V1 字段集：agent_id / status / summary。artifacts / citations /
-    changed_files / unresolved 由 T4 按「真实来源」逐字段补齐；tests DEFER。
+    V1 字段集：agent_id / status / summary / child_session_id（lineage 挂点）。
+    artifacts / citations / changed_files / unresolved 由 T4 按「真实来源」
+    逐字段补齐；tests DEFER。
     """
 
     agent_id: str
     status: str
     summary: str
+    child_session_id: str = ""
 
 
 @runtime_checkable
@@ -126,4 +128,5 @@ class InProcessSubagentProvider:
         )
         return SubAgentResult(
             agent_id=spec.name, status=status, summary=run_result.final_text,
+            child_session_id=child_session.session_id,
         )

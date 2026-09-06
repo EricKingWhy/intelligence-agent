@@ -96,4 +96,5 @@ class AgentFactory:
             stream_idle_timeout=self._stream_idle_timeout,
             stream_total_timeout=self._stream_total_timeout,
             model_call_gate=self._model_call_gate,
+            agent_id=spec.name,
         )
