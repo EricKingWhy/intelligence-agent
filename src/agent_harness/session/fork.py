@@ -15,16 +15,23 @@ append-only 线性 JSONL，树是 SessionMetaStore 索引层的元数据关系�
 
 from __future__ import annotations
 
+import logging
 import shutil
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
+
+from langchain_core.messages import HumanMessage
 
 from agent_harness.session.event import (
+    AGENT_DELEGATION_FINISHED,
+    MODEL_COMPLETED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
     SESSION_FORKED,
     SESSION_STARTED,
+    TOOL_CALL,
+    TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
 )
@@ -35,6 +42,66 @@ if TYPE_CHECKING:
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.store import JsonlSessionStore
     from agent_harness.storage.session_meta import SessionMetaStore
+
+logger = logging.getLogger("agent_harness.session.fork")
+
+#: tail 摘要输入的字符上限（尾部截断）——保护摘要调用不被超长会话打爆。
+_MAX_TAIL_CHARS = 8000
+
+
+class TailSummarizerProtocol(Protocol):
+    """tail 摘要 seam：任何提供 async summarize(text)->str 的对象可用。"""
+
+    async def summarize(self, text: str) -> str: ...
+
+
+def render_tail_transcript(tail_events: list[SessionEvent]) -> str:
+    """把 fork 点之后的事件渲染成有界可读文本（摘要器的输入）。"""
+    lines: list[str] = []
+    for event in tail_events:
+        if event.type == USER_MESSAGE:
+            lines.append(f"[user] {event.data.get('content', '')}")
+        elif event.type == MODEL_COMPLETED:
+            lines.append(f"[assistant] {event.data.get('content', '')}")
+        elif event.type == TOOL_CALL:
+            lines.append(f"[tool] {event.data.get('tool_name', '')}")
+        elif event.type == TOOL_RESULT:
+            content = str(event.data.get("content", ""))[:200]
+            lines.append(f"[tool-result] {content}")
+        elif event.type == RUN_FAILED:
+            lines.append(
+                f"[run] failed（{event.data.get('reason', 'unspecified')}）"
+            )
+        elif event.type == AGENT_DELEGATION_FINISHED:
+            lines.append(
+                f"[delegation] {event.data.get('target', '')}"
+                f" → {event.data.get('status', '')}"
+            )
+    return "\n".join(lines)[-_MAX_TAIL_CHARS:]
+
+
+class TailSummarizer:
+    """tail 摘要器（ADR-0017 决策 9）：任何 ainvoke(messages)->AIMessage 的模型可用。
+
+    pi branch_summary / oh-my-pi rewind-report 的 file-per-lineage 对应物：
+    把「被放弃的线得出了什么」压缩成一段可携带的上下文。恰好一次调用，
+    无重试放大；失败由调用方降级（fork 照常）。
+    """
+
+    def __init__(self, model, *, max_tail_chars: int = _MAX_TAIL_CHARS) -> None:
+        self._model = model
+        self._max_tail_chars = max_tail_chars
+
+    async def summarize(self, tail_text: str) -> str:
+        tail_text = tail_text[-self._max_tail_chars :]
+        prompt = (
+            "以下是一个 agent 会话在分叉切点之后被放弃的对话片段。请用不超过"
+            "150 字总结这条被放弃的路线尝试了什么、进行到哪一步、得出了什么"
+            "结论，供新分支参考。只输出总结正文，不要寒暄。\n\n"
+            f"{tail_text}"
+        )
+        response = await self._model.ainvoke([HumanMessage(content=prompt)])
+        return str(response.content)
 
 
 class ForkBoundaryError(ValueError):
@@ -68,6 +135,8 @@ async def fork_session(
     child_session_id: str | None = None,
     agent_id: str = "default",
     workspace_registry: WorkspaceRegistry | None = None,
+    summarizer: TailSummarizerProtocol | None = None,
+    with_tail_summary: bool = True,
 ) -> Session:
     """从父会话的第 boundary_user_message_seq 条用户消息处 fork 出 child。
 
@@ -114,15 +183,30 @@ async def fork_session(
         _copy_workspace(workspace_registry, parent_session_id, child)
     child.adopt_history(seed)
     fork_point_seq = seed[-1].seq if seed else None
-    child.append(
-        SESSION_FORKED,
-        {
-            "parent_session_id": parent_session_id,
-            "boundary_user_message_seq": anchor.seq,
-            "fork_point_seq": fork_point_seq,
-        },
-        agent_id=agent_id,
-    )
+
+    # tail summary（决策 9）：锚点之后被放弃的路线压缩成一段上下文。
+    # 恰好一次调用、无重试；失败降级不挂接，fork 照常（不变量 #21）。
+    tail_summary: str | None = None
+    tail_events = [e for e in parent_events if e.seq > anchor.seq]
+    if summarizer is not None and with_tail_summary and tail_events:
+        try:
+            tail_summary = await summarizer.summarize(
+                render_tail_transcript(tail_events)
+            )
+        except Exception:
+            logger.warning(
+                "tail summary 生成失败——降级不挂接（fork 照常完成）", exc_info=True
+            )
+            tail_summary = None
+
+    forked_data: dict = {
+        "parent_session_id": parent_session_id,
+        "boundary_user_message_seq": anchor.seq,
+        "fork_point_seq": fork_point_seq,
+    }
+    if tail_summary:
+        forked_data["tail_summary"] = tail_summary
+    child.append(SESSION_FORKED, forked_data, agent_id=agent_id)
 
     await meta_store.upsert(
         SessionMeta(

@@ -25,6 +25,7 @@ from agent_harness.session.fork import (
     fork_session,
 )
 from agent_harness.session.store import JsonlSessionStore
+from tests.scripted_model import ScriptedModel
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 
 pytestmark = pytest.mark.asyncio
@@ -127,7 +128,7 @@ async def test_fork_boundary_errors(tmp_path) -> None:
     await meta.initialize()
     parent = _build_parent(store)
 
-    # 锚点不是用户消息（指向 run/completed）
+    # 锚点不是用户消息（指向 run/completed，seq=4）
     with pytest.raises(ForkBoundaryError, match="用户消息"):
         await fork_session(
             store, meta, "parent",
@@ -285,3 +286,119 @@ async def test_fork_without_parent_workspace_degrades(tmp_path) -> None:
     )
     assert child.sandbox is not None
     assert child.sandbox.list_files("*") == []
+
+
+# ── T4 tail summary（#110, ADR-0017 决策 9）─────────────────────────────────
+
+from langchain_core.messages import AIMessage  # noqa: E402
+
+
+class _FakeSummarizer:
+    def __init__(self, reply: str | Exception) -> None:
+        self._reply = reply
+        self.calls: list[str] = []
+
+    async def summarize(self, text: str) -> str:
+        self.calls.append(text)
+        if isinstance(self._reply, Exception):
+            raise self._reply
+        return self._reply
+
+
+def _parent_with_tail(store: JsonlSessionStore) -> Session:
+    """user1 → 完整 run → user2(锚点) → 被放弃的 run（tail）。"""
+    s = Session.start(store, session_id="withtail")
+    s.append(USER_MESSAGE, {"content": "第一条"})
+    s.append(RUN_STARTED, {})
+    s.append(MODEL_COMPLETED, {"content": "好的"})
+    s.append(RUN_COMPLETED, {})
+    s.append(USER_MESSAGE, {"content": "第二条"})
+    s.append(RUN_STARTED, {})
+    s.append(MODEL_COMPLETED, {"content": "我打算用方案A实现"})
+    s.append(RUN_COMPLETED, {})
+    return s
+
+
+async def test_tail_summary_attached_when_summarizer_given(tmp_path) -> None:
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _parent_with_tail(store)
+    anchor = parent.events[5].seq  # 第二条用户消息（seq 0 起）
+    fake = _FakeSummarizer("被放弃的线尝试了方案A")
+
+    child = await fork_session(
+        store, meta, "withtail", boundary_user_message_seq=anchor,
+        child_session_id="sumchild", summarizer=fake,
+    )
+    forked = child.events[-1]
+    assert forked.type == SESSION_FORKED
+    assert forked.data["tail_summary"] == "被放弃的线尝试了方案A"
+    # 恰好一次调用，文本含被放弃路线的内容
+    assert len(fake.calls) == 1
+    assert "方案A" in fake.calls[0]
+
+
+async def test_tail_summary_can_be_disabled(tmp_path) -> None:
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _parent_with_tail(store)
+    fake = _FakeSummarizer("不该被调用")
+
+    child = await fork_session(
+        store, meta, "withtail",
+        boundary_user_message_seq=parent.events[5].seq,
+        summarizer=fake, with_tail_summary=False,
+    )
+    assert fake.calls == []
+    assert "tail_summary" not in child.events[-1].data
+
+
+async def test_tail_summary_degrades_on_failure(tmp_path) -> None:
+    """摘要失败 = 降级不挂接：fork 照常完成，无字段，meta 照写。"""
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _parent_with_tail(store)
+    fake = _FakeSummarizer(RuntimeError("模型故障"))
+
+    child = await fork_session(
+        store, meta, "withtail",
+        boundary_user_message_seq=parent.events[5].seq,
+        child_session_id="degrade", summarizer=fake,
+    )
+    assert "tail_summary" not in child.events[-1].data
+    assert child.events[-1].type == SESSION_FORKED
+    assert await meta.get("degrade") is not None
+    Session.resume(store, "degrade")  # child 完整可用
+
+
+async def test_tail_summary_skipped_when_tail_empty(tmp_path) -> None:
+    """锚点是最后一条事件：无 tail，不调用摘要器。"""
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _build_parent(store)  # 锚点（user2）后无事件
+    fake = _FakeSummarizer("不该被调用")
+
+    child = await fork_session(
+        store, meta, "parent",
+        boundary_user_message_seq=parent.events[-1].seq,
+        summarizer=fake,
+    )
+    assert fake.calls == []
+    assert "tail_summary" not in child.events[-1].data
+
+
+async def test_tail_summarizer_uses_scripted_model(tmp_path) -> None:
+    """真实 TailSummarizer 类：任何 ainvoke 模型可用（ScriptedModel 实测）。"""
+    from agent_harness.session.fork import TailSummarizer
+
+    model = ScriptedModel([AIMessage(content="这是摘要")])
+    summarizer = TailSummarizer(model)
+    out = await summarizer.summarize("[user] 试试方案A\n[assistant] 失败了")
+    assert out == "这是摘要"
+    # 提示词带进了 tail 文本与摘要指令
+    prompt = model.snapshots[0].messages[0].content
+    assert "方案A" in prompt
