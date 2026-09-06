@@ -346,9 +346,10 @@ class TestTransitionPersistenceOnFailure:
         )
         session = make_session(tmp_path)
 
-        result = await runtime.run(session, "你好")
+        # 流式路径（stall 守卫只治理流式；ainvoke 的总时限显式 DEFER）
+        async for _event in runtime.run_stream(session, "你好"):
+            pass
 
-        assert result.status == "failed"
         transitions = [e for e in session._events if e.type == MODEL_FALLBACK]
         assert len(transitions) == 1, "fallback 也失败时切换事实仍必须持久化"
         assert transitions[0].data["from_model"] == "primary-model"
