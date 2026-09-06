@@ -50,7 +50,7 @@ export const CopyButton = memo(function CopyButton({ text, label = '复制' }: P
       aria-label={copied ? '已复制' : label}
       title={copied ? '已复制' : label}
     >
-      {copied ? <Check size={12} /> : <Copy size={12} />}
+      {copied ? <Check size={14} /> : <Copy size={14} />}
     </button>
   );
 });

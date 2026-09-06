@@ -137,3 +137,27 @@ describe('createCommitCoalescer — P1-3 delta 合帧提交（HANDOFF §6）', (
     }
   });
 });
+
+// ── shouldShowHistoryLoading：live→viewing 迁移的占位符决策（Bug：流结束后
+//    完整对话被「正在加载历史…」占位符替换再重建 = 主窗口闪烁）──
+import { shouldShowHistoryLoading } from './useSession';
+
+describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载占位符', () => {
+  const conv = (session_id: string) => ({
+    session_id, turns: [], active_step_id: null, run_status: 'completed' as const,
+    run_cancelled: false, compactions: [], reconcile_queue: [], events: [],
+    unknown_events: [], model: null, usage_total: null, cost_usd: null, trace_id: null, model_fallback: null,
+  });
+
+  it('同一会话（live 流刚产出完整真相）：后台静默重读，不显示占位符', () => {
+    expect(shouldShowHistoryLoading(conv('s1'), 's1')).toBe(false);
+  });
+
+  it('无 conversation（idle→viewing / 首次打开）：显示占位符', () => {
+    expect(shouldShowHistoryLoading(null, 's1')).toBe(true);
+  });
+
+  it('不同会话（切换目标）：显示占位符——旧会话内容不得冒充新会话', () => {
+    expect(shouldShowHistoryLoading(conv('s-old'), 's-new')).toBe(true);
+  });
+});
