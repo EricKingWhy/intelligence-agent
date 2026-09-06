@@ -30,6 +30,7 @@ from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
+from agent_harness.observability import get_observability_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
@@ -187,6 +188,7 @@ async def build_runtime(
                 stream_idle_timeout=settings.model_stream_idle_timeout,
                 stream_total_timeout=settings.model_stream_total_timeout,
                 model_call_gate=model_call_gate,
+                observability_sink=get_observability_sink(settings),
             ),
             source_registry=registry,
             session_store=session_store,
@@ -217,4 +219,5 @@ async def build_runtime(
         primary_model_name=config.model_name,
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
+        observability_sink=get_observability_sink(settings),
     )

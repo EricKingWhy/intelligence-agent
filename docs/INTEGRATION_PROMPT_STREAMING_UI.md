@@ -114,13 +114,15 @@ git merge --no-ff feat/backend -m "Merge feat/backend: Streaming UI production o
 ### D2. main 侧 .env 增补（可选键，绝不回显其他键值）
 
 1. **可选** `RUN_DISCONNECT_GRACE_SECONDS=300`（默认已是 300，仅显式覆盖时才写）
-2. **可选** `AGENT_MODELS`（多模型 catalog，JSON 数组；main 不配 = 单默认链，`GET /api/models` 照常返回默认条目）。示例形状（值按用户意图填，**name 是 POST /api/sessions 的 model 参数选择键**）：
+2. **可选** `AGENT_MODELS`（多模型 catalog，JSON 数组；main 不配 = 单默认链，`GET /api/models` 照常返回默认条目）。示例形状（**name 是 POST /api/sessions 的 model 参数选择键**；非厂商默认端点必须显式 `base_url` + `api_key`）：
 
 ```json
-[{"name": "qwen-max", "provider": "senseaudio", "model_name": "qwen3.8-max-0902"}]
+[{"name": "qwen3.8-27b", "provider": "qwen", "model_name": "qwen3.8-27b",
+  "base_url": "https://ws-z6pxn1u9u3hqds3j.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  "api_key": "<dashscope-key>"}]
 ```
 
-3. `MODEL_*` / `FALLBACK_MODEL_*`：main 侧 Phase 12 批已同步过；后端施工区 `.env` 本次新增了 `FALLBACK_MODEL_PROVIDER=zhipu`（智谱）——若用户希望 main 与施工区同配，把 fallback 四键对齐（**值零回显**）；`zhipu` preset 已随本批进入代码，配置了即可用
+3. `MODEL_*` / `FALLBACK_MODEL_*`：main 侧 Phase 12 批已同步过；后端施工区 `.env` 本次新增了 `FALLBACK_MODEL_PROVIDER=zhipu`（智谱）与 `AGENT_MODELS`（3 条目实测可用：glm-5.3-flash / qwen3.8-27b / qwen-plus，思考矩阵见契约文档）——若用户希望 main 与施工区同配，把 fallback 四键 + AGENT_MODELS 对齐（**值零回显**）；`zhipu` preset 已随本批进入代码，配置了即可用
 4. 零新密钥要求：catalog 条目的 `api_key` 缺省回落 `MODEL_API_KEY`
 
 ### D3. main 侧验证 Gate

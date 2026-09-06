@@ -621,3 +621,43 @@ async def test_confirm_failure_with_corrupt_ledger_result_falls_back(
     synthesized = ToolResult.model_validate_json(_result_events(recovered)["call-1"])
     assert synthesized.ok is False
     assert "用户确认失败" in synthesized.message
+
+
+# ── T4 #120：reconcile reason 进 JSONL 诊断层（spec 12 §2）──
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verdict_recorded_in_jsonl_diagnostic_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_crashed_session(store, tool_name="bash")
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    result_json = ToolResult.success("migration applied").model_dump_json()
+    await _seed_operation(
+        ledger,
+        session.session_id,
+        "call-1",
+        OperationState.RUNNING,
+        result_json=result_json,
+    )
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.recovery"):
+        await _make_coordinator(
+            store, ledger, tmp_path / "state.db",
+            reconcile_callback=_ScriptedCallback(ReconcileVerdict.CONFIRM_SUCCESS),
+        ).recover(session.session_id)
+
+    verdict_lines = [
+        r for r in caplog.records
+        if getattr(r, "outcome", None) == "reconciled"
+        and getattr(r, "reconcile_verdict", None) == "CONFIRM_SUCCESS"
+    ]
+    assert len(verdict_lines) == 1, "reconcile 裁决必须恰好一条 JSONL 诊断行"
+    line = verdict_lines[0]
+    assert getattr(line, "tool_call_id", None) == "call-1"
+    assert getattr(line, "component", None) == "recovery"
+    assert getattr(line, "ledger_state", None) == "SUCCEEDED"

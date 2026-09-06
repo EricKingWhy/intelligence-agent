@@ -46,6 +46,7 @@ class _DelegateArgs(BaseModel):
 
 
 class DelegateTool(Tool):
+    is_subagent_dispatch = True
     """委派工具：multiagent capability 贡献的编排入口（可装卸插件）。"""
 
     def __init__(

@@ -37,6 +37,7 @@ from agent_harness.identity import IdentityContext
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.config import ModelConfig
+from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
     AGENT_DELEGATION_FINISHED,
@@ -213,6 +214,15 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
 
 
 def main() -> None:
+    try:
+        _main_dispatch()
+    finally:
+        # 旁路收尾（ADR-0018 D3）：任何退出路径（正常/异常/SystemExit）都尽力
+        # 发送剩余 Langfuse span；未配置/未装配时零开销 no-op。
+        flush_process_sink()
+
+
+def _main_dispatch() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "ingest":
         _main_ingest(argv[1:])
