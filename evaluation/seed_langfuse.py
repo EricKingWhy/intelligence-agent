@@ -78,6 +78,8 @@ def push_dataset(
                 "name": case["name"],
                 "case_type": case.get("case_type", ""),
                 "tags": case.get("tags", []),
+                # deterministic 剧本随 item round-trip（experiment task 复原用）
+                "script": case.get("script", []),
             },
         )
         created += 1

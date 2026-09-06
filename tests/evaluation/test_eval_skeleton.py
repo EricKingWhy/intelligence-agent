@@ -35,11 +35,11 @@ def test_run_case_with_real_runtime_deterministic(tmp_path: Path):
 def test_run_dataset_writes_local_report(tmp_path: Path):
     results = run_dataset(_DATASET, session_root=tmp_path / "sess")
 
-    assert len(results) == 1 and results[0].ok
+    assert len(results) == 3 and all(r.ok for r in results)
     reports = sorted((_REPO_ROOT / "evaluation" / "reports").glob("p0_core-*.json"))
     assert reports, "本地报告恒产生（云关也能看）"
     report = json.loads(reports[-1].read_text(encoding="utf-8"))
-    assert report["passed"] == 1 and report["total"] == 1
+    assert report["passed"] == 3 and report["total"] == 3
     reports[-1].unlink()  # 测试产物不留在 repo
 
 
@@ -76,15 +76,15 @@ def test_seed_pushes_and_is_idempotent():
         _DATASET, public_key="pk", secret_key="sk",
         base_url="https://example.invalid", client_factory=factory,
     )
-    assert first == {"status": "ok", "created": 1, "skipped": 0,
+    assert first == {"status": "ok", "created": 3, "skipped": 0,
                      "dataset": "p0_core"}
 
     second = push_dataset(
         _DATASET, public_key="pk", secret_key="sk",
         base_url="https://example.invalid", client_factory=factory,
     )
-    assert second["created"] == 0 and second["skipped"] == 1, "重复推送不得建重复 item"
-    assert len(client.created_items) == 1
+    assert second["created"] == 0 and second["skipped"] == 3, "重复推送不得建重复 item"
+    assert len(client.created_items) == 3
 
 
 def test_seed_skips_gracefully_without_keys():
@@ -101,3 +101,87 @@ def test_seed_skips_gracefully_without_keys():
     assert result["status"] == "skipped"
     assert "未配置" in result["reason"]
     assert not calls
+
+
+def test_all_p0_cases_pass_end_to_end(tmp_path: Path):
+    """P0 全量：tool_selection + recovery + kill_resume 三条 deterministic。"""
+    from evaluation.runner import run_dataset
+
+    results = run_dataset(_DATASET, session_root=tmp_path / "sess", write_report=False)
+    assert len(results) == 3
+    assert all(r.ok for r in results), [ (r.name, r.metrics, r.error) for r in results ]
+
+
+def test_langfuse_experiment_upload_and_graceful_skip(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from evaluation.experiment import run_langfuse_experiment
+
+    # 未配置 → 跳过，不触 SDK
+    skipped = run_langfuse_experiment(
+        "p0_core", public_key="", secret_key="",
+        base_url="https://example.invalid",
+        client_factory=lambda **kw: (_ for _ in ()).throw(AssertionError("no SDK")),
+    )
+    assert skipped["status"] == "skipped"
+
+    # 配置 → run_experiment 收到真实 task + deterministic evaluators
+    recorded: dict = {}
+
+    class _FakeExpClient:
+        def get_dataset(self, name):
+            return SimpleNamespace(items=[
+                SimpleNamespace(
+                    id="it-1",
+                    metadata={"name": "tool_selection_add",
+                              "case_type": "tool_selection", "tags": ["p0"],
+                              "script": [
+                                  {"content": "", "tool_calls": [
+                                      {"name": "add", "args": {"first_number": 1,
+                                                               "second_number": 2},
+                                       "id": "call_e1"}]},
+                                  {"content": "1 + 2 = 3"},
+                              ]},
+                    input={"task": "请计算 1+2 等于多少，使用 add 工具。"},
+                    expected_output={"tools": ["add"]},
+                ),
+            ])
+
+        def run_experiment(self, *, name, run_name, data, task, evaluators, max_concurrency):
+            recorded.update(name=name, run_name=run_name, n_items=len(data),
+                            task=task, evaluators=evaluators,
+                            max_concurrency=max_concurrency)
+
+    result = run_langfuse_experiment(
+        "p0_core", public_key="pk", secret_key="sk",
+        base_url="https://example.invalid",
+        client_factory=lambda **kw: _FakeExpClient(),
+        session_root=tmp_path / "exp",
+    )
+    assert result["status"] == "ok"
+    assert recorded["n_items"] == 1 and recorded["max_concurrency"] == 1
+    # 真跑一遍 task + evaluators：deterministic 评分器产出合法 Scores
+    from evaluation.experiment import _case_from_item, _deterministic_evaluators
+
+    fake_item = SimpleNamespace(
+        id="it-1", metadata={"name": "tool_selection_add",
+                             "case_type": "tool_selection", "tags": ["p0"],
+                             "script": [
+                                 {"content": "", "tool_calls": [
+                                     {"name": "add", "args": {"first_number": 1,
+                                                              "second_number": 2},
+                                      "id": "call_e1"}]},
+                                 {"content": "1 + 2 = 3"},
+                             ]},
+        input={"task": "请计算 1+2 等于多少，使用 add 工具。"},
+        expected_output={"tools": ["add"]},
+    )
+    output = recorded["task"](fake_item)
+    assert output["result"]["ok"] is True
+    scores = [ev(input=None, output=output, expected_output=None)
+              for ev in recorded["evaluators"]]
+    values = {s["name"]: s["value"] for s in scores}
+    assert values["p0_pass"] == 1
+    assert values["dangling_tool_calls"] == 0
+    assert _case_from_item(fake_item).name == "tool_selection_add"
+    assert _deterministic_evaluators  # 引用完整性

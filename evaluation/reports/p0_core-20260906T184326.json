@@ -1,0 +1,50 @@
+{
+  "dataset": "p0_core.jsonl",
+  "ran_at": "2026-09-06T18:43:26.757+00:00",
+  "results": [
+    {
+      "name": "tool_selection_add",
+      "case_type": "tool_selection",
+      "ok": true,
+      "metrics": {
+        "dangling_tool_calls": 0,
+        "status": "completed",
+        "tool_selected": true
+      },
+      "error": null,
+      "event_count": 8,
+      "usage_total": {},
+      "duration_ms": 11
+    },
+    {
+      "name": "recovery_guard_soft",
+      "case_type": "recovery",
+      "ok": true,
+      "metrics": {
+        "dangling_tool_calls": 0,
+        "status": "completed",
+        "recovered": true
+      },
+      "error": null,
+      "event_count": 19,
+      "usage_total": {},
+      "duration_ms": 23
+    },
+    {
+      "name": "kill_resume_confirm_success",
+      "case_type": "kill_resume",
+      "ok": true,
+      "metrics": {
+        "dangling_tool_calls": 0,
+        "kill_resume_ok": true,
+        "verdict": "CONFIRM_SUCCESS"
+      },
+      "error": null,
+      "event_count": 3,
+      "usage_total": {},
+      "duration_ms": 46
+    }
+  ],
+  "passed": 3,
+  "total": 3
+}

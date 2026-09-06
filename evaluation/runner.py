@@ -23,13 +23,24 @@ from agent_harness.agent import AgentRuntime
 from agent_harness.model.scripted import ScriptedModel
 from agent_harness.session import (
     RUN_COMPLETED,
+    USER_MESSAGE,
     JsonlSessionStore,
     Session,
     SessionEvent,
 )
 from agent_harness.tooling import ToolExecutor, ToolRegistry
-from evaluation.assertions import dangling_tool_call_ids, tool_selection_ok
-from evaluation.support import AddTool, FlakyAddTool
+from evaluation.assertions import (
+    dangling_tool_call_ids,
+    kill_resume_ok,
+    recovery_guard_ok,
+    tool_selection_ok,
+)
+from evaluation.support import (
+    AddTool,
+    ModeledFailureAddTool,
+    ReconcileVerdict,
+    ScriptedReconcileCallback,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REPORTS_DIR = _REPO_ROOT / "evaluation" / "reports"
@@ -93,7 +104,7 @@ def _registry_for_case(case: EvalCase) -> ToolRegistry:
     if case.case_type == "tool_selection":
         registry.register(AddTool())
     elif case.case_type == "recovery":
-        registry.register(FlakyAddTool())
+        registry.register(ModeledFailureAddTool())
     # kill_resume 的 registry/kill 注入在 T7 落地。
     return registry
 
@@ -111,6 +122,9 @@ def run_case(
     (CaseResult, 事件流)——事件流供 Langfuse Scores/审计复用。
     """
     started = time.perf_counter()
+    if case.case_type == "kill_resume":
+        return _run_kill_resume_case(case, session_root, started)
+
     store = JsonlSessionStore(Path(session_root))
     session: Session = Session.start(store)
 
@@ -138,7 +152,10 @@ def run_case(
         selection_ok = tool_selection_ok(events, list(case.expected.get("tools", [])))
         metrics["tool_selected"] = selection_ok
         ok = ok and selection_ok
-    # recovery / kill_resume 断言在 T7 落地。
+    elif case.case_type == "recovery":
+        recovered = recovery_guard_ok(events)
+        metrics["recovered"] = recovered
+        ok = ok and recovered
 
     usage_total: dict[str, int] = {}
     for event in events:
@@ -184,3 +201,92 @@ def run_dataset(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
         )
     return results
+
+
+def _run_kill_resume_case(
+    case: EvalCase, session_root: str | Path, started: float,
+) -> tuple[CaseResult, list[SessionEvent]]:
+    """kill/resume Golden Case（spec 12 §11 硬要求，deterministic in-CI 版）：
+
+    构造"崩溃窗口"事实——tool/call 已持久化、Ledger Operation 停在 RUNNING、
+    tool/result 缺失（= kill 后未收口）——再走真实 RecoveryCoordinator 恢复：
+    两步状态机 -> operation/reconcile-required -> 显式裁决 -> 合成 tool/result。
+    断言：session/resumed 在场、无悬空 tool_call、Ledger 终态与裁决一致。
+    """
+    import asyncio
+
+    from agent_harness.recovery import RecoveryCoordinator
+    from agent_harness.storage import (
+        SqliteOperationLedger,
+    )
+    from agent_harness.tooling import ToolResult
+
+    root = Path(session_root)
+    store = JsonlSessionStore(root / "sessions")
+    session: Session = Session.start(store)
+    session.append(USER_MESSAGE, {"content": case.task})
+
+    verdict_value = str(case.expected.get("verdict", "CONFIRM_SUCCESS"))
+    verdict = ReconcileVerdict(verdict_value)
+    tool_result = ToolResult.success(
+        message="migration applied (confirmed by user verdict)",
+    )
+    ledger = SqliteOperationLedger(root / "state.db")
+    asyncio.run(_seed_running_op(
+        ledger, session.session_id, "call-kill-1",
+        tool_result.model_dump_json(),
+    ))
+
+    coordinator = RecoveryCoordinator(
+        session_store=store,
+        workspace_registry=None,
+        operation_ledger=ledger,
+        database_path=root / "state.db",
+        reconcile_callback=ScriptedReconcileCallback(verdict),
+    )
+    error: str | None = None
+    recovered: Session | None = None
+    try:
+        recovered = asyncio.run(coordinator.recover(session.session_id))
+    except Exception as exc:  # noqa: BLE001 - 单条 case 失败不得炸掉实验
+        error = f"{type(exc).__name__}: {exc}"
+
+    events = list(recovered.events) if recovered is not None else []
+    metrics: dict[str, Any] = {
+        "dangling_tool_calls": len(dangling_tool_call_ids(events)),
+        "kill_resume_ok": kill_resume_ok(events) if recovered is not None else False,
+        "verdict": verdict_value,
+    }
+    ok = (
+        error is None
+        and recovered is not None
+        and metrics["kill_resume_ok"]
+        and metrics["dangling_tool_calls"] == 0
+    )
+    return (
+        CaseResult(
+            name=case.name, case_type=case.case_type, ok=ok, metrics=metrics,
+            error=error, event_count=len(events),
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        ),
+        events,
+    )
+
+
+async def _seed_running_op(ledger: Any, session_id: str, tool_call_id: str,
+                           result_json: str) -> None:
+    from agent_harness.storage import Operation, OperationState
+
+    await ledger.initialize()
+    await ledger.create(Operation(
+        tool_call_id=tool_call_id,
+        session_id=session_id,
+        run_id="run-kill",
+        agent_id="default",
+        tool_name="bash",
+        args_identity='{"command": "apply-migration"}',
+        state=OperationState.PENDING,
+        started_at=datetime.now(UTC).isoformat(timespec="milliseconds"),
+    ))
+    # 推进到 RUNNING（Ledger 强制 PENDING 起步）：模拟"kill 发生在执行中"。
+    await ledger.update_state(session_id, tool_call_id, OperationState.RUNNING)

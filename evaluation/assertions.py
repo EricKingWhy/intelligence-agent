@@ -6,7 +6,13 @@
 
 from __future__ import annotations
 
-from agent_harness.session import TOOL_CALL, TOOL_RESULT, SessionEvent
+from agent_harness.session import (
+    SESSION_RESUMED,
+    TOOL_CALL,
+    TOOL_FAILURE_GUARD,
+    TOOL_RESULT,
+    SessionEvent,
+)
 
 
 def dangling_tool_call_ids(events: list[SessionEvent]) -> list[str]:
@@ -37,3 +43,24 @@ def tool_selection_ok(events: list[SessionEvent], expected_tools: list[str]) -> 
             if name is not None and name not in requested:
                 requested.append(str(name))
     return sorted(requested) == sorted(expected_tools)
+
+
+def recovery_guard_ok(events: list[SessionEvent]) -> bool:
+    """recovery 断言（软熔断路径）：护栏软触发后 run 仍走到成功终态。
+
+    证据链：TOOL_FAILURE_GUARD(level=soft) 在场 + run/completed 存在
+    （模型在纠正消息后改变策略并完成），dangling 由调用方统一断言。
+    """
+    has_soft_guard = any(
+        e.type == TOOL_FAILURE_GUARD and e.data.get("level") == "soft"
+        for e in events
+    )
+    has_completed = any(e.type == "run/completed" for e in events)
+    return has_soft_guard and has_completed
+
+
+def kill_resume_ok(events: list[SessionEvent]) -> bool:
+    """kill/resume 断言：恢复后的会话补齐合成 tool/result（无悬空）
+    且 session/resumed 事件在场。"""
+    has_resumed = any(e.type == SESSION_RESUMED for e in events)
+    return has_resumed and not dangling_tool_call_ids(events)
