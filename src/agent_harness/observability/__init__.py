@@ -11,7 +11,7 @@ from typing import Any
 from agent_harness.observability.sink import LangfuseSink
 from agent_harness.observability.tracer import RunTracer
 
-__all__ = ["LangfuseSink", "RunTracer", "get_observability_sink"]
+__all__ = ["LangfuseSink", "RunTracer", "flush_process_sink", "get_observability_sink"]
 
 _process_sink: LangfuseSink | None = None
 
@@ -30,3 +30,12 @@ def get_observability_sink(settings: Any) -> LangfuseSink:
             trace_content=settings.langfuse_trace_content,
         )
     return _process_sink
+
+def flush_process_sink() -> None:
+    """进程收尾 flush（ADR-0018 D3）：CLI 退出 / web graceful shutdown 调用。
+
+    只 flush 本进程已装配的单例；未装配（CLI 短命令未跑 run）或 disabled
+    时是 no-op。有超时上限（sink 默认 5s），退出节奏不被旁路拖死。
+    """
+    if _process_sink is not None and _process_sink.enabled:
+        _process_sink.flush()
