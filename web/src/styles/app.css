@@ -1621,13 +1621,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* ── StepDetail（右：Run Inspector，嵌在 frame 内，无独立边框） ── */
 .step-detail {
   background: var(--bg-inspector);
-  overflow-y: auto;
+  /* 结构分层（Bug 修复 2026-09-06 二次落地：上次补丁在写盘前中止，CSS 未落盘
+     导致面板整体滚动、tabs 被滚出视口——见 git log -S detail-body 的教训）：
+     面板自身不滚动——header/tabs 钉在顶部，内容在 .detail-body 内滚。 */
   overflow-x: hidden;
   padding: var(--space-md) var(--space-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
   min-width: 0;
+  min-height: 0;
+}
+.detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .detail-header {
   display: flex;
