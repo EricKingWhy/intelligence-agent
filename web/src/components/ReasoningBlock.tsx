@@ -16,7 +16,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { Brain, ChevronDown } from 'lucide-react';
 import type { ReasoningBlock } from '../types';
-import { advanceCursor, REDUCED_MOTION_STEP_CHARS, type ReasoningStatus } from '../lib/reasoningCursor';
+import { advanceCursor, MAX_FRAME_DT_MS, REDUCED_MOTION_STEP_CHARS, type ReasoningStatus } from '../lib/reasoningCursor';
 import { reasoningIsOpen } from '../lib/disclosure';
 import { FOLLOW_BOTTOM, followOnJump, followOnScroll, nearBottom, useFollowResetOnStop, type FollowState } from '../lib/followLatest';
 import { useTickingNow } from '../hooks/useTickingNow';
@@ -107,7 +107,10 @@ function ReasoningReadLine({ text, status }: { text: string; status: ReasoningSt
     }
 
     const tick = (ts: number) => {
-      const dt = lastTsRef.current === null ? 0 : ts - lastTsRef.current;
+      // dt 钳制（MAX_FRAME_DT_MS）：后台标签页 rAF 暂停后的首帧巨 dt 不得绕过
+      // 有界加速策略（T7 #100）
+      const dt =
+        lastTsRef.current === null ? 0 : Math.min(ts - lastTsRef.current, MAX_FRAME_DT_MS);
       lastTsRef.current = ts;
       const len = textRef.current.length;
       if (len !== metricsRef.current.textLen) measure();

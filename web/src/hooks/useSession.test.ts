@@ -162,3 +162,65 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     expect(shouldShowHistoryLoading(conv('s-old'), 's-new')).toBe(true);
   });
 });
+
+describe('T7 — createCommitCoalescer 后台降渲染（#100，spec 03 §18.3）', () => {
+  it('隐藏期 schedule 挂起：不排定时器、不提交（真相仍逐帧入本地 conv，只延迟通知）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      const c = createCommitCoalescer(() => commits++, 24, () => false);
+      c.schedule();
+      c.schedule();
+      vi.advanceTimersByTime(1000);
+      expect(commits).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('回前台 flush：整段后台积压合帧为单次提交（一帧内 reconcile）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      let visible = false;
+      const c = createCommitCoalescer(() => commits++, 24, () => visible);
+      c.schedule();
+      c.schedule();
+      c.schedule();
+      visible = true;
+      c.flush();
+      expect(commits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('isVisible 缺省恒 true——既有前台契约零回归（省略第三参走缺省路径）', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      const c = createCommitCoalescer(() => commits++, 24);
+      c.schedule();
+      vi.advanceTimersByTime(24);
+      expect(commits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('隐藏→可见翻转后恢复调度：挂起的 dirty 与新 schedule 合帧单次提交', () => {
+    vi.useFakeTimers();
+    try {
+      let commits = 0;
+      let visible = false;
+      const c = createCommitCoalescer(() => commits++, 24, () => visible);
+      c.schedule(); // hidden：挂起（dirty 挂起、无定时器）
+      visible = true;
+      c.schedule(); // visible：补排定时器
+      vi.advanceTimersByTime(24);
+      expect(commits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

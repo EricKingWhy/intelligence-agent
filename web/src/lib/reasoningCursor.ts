@@ -20,6 +20,10 @@ export const MAX_SPEEDUP = 6;
 export const TERMINAL_SPEEDUP = 8;
 /** reduced-motion 降级：无 rAF 动画时每次文本变化的离散前读步长（字符）。 */
 export const REDUCED_MOTION_STEP_CHARS = 80;
+/** 单帧 dt 上限（ms）：后台标签页 rAF 暂停，回前台首帧 dt 可能是数十秒——
+ *  不设上限会把「有界加速」退化成一次性大跳（spec 03 §7.3 bounded catch-up）。
+ *  250ms ≈ 正常帧的 15 倍，追赶仍快、但被钳制在策略速度域内。 */
+export const MAX_FRAME_DT_MS = 250;
 
 /** 由 pos 推进 dtMs 后的游标位置（字符偏移；可为小数，渲染按比例映射）。 */
 export function advanceCursor(

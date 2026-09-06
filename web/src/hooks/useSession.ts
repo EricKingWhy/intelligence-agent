@@ -101,7 +101,14 @@ export interface CommitCoalescer {
   cancel(): void;
 }
 
-export function createCommitCoalescer(submit: () => void, windowMs = 24): CommitCoalescer {
+/** T7（#100）可见性注入签名：默认恒 true（前台语义零回归）。 */
+export type VisibilityProbe = () => boolean;
+
+export function createCommitCoalescer(
+  submit: () => void,
+  windowMs = 24,
+  isVisible: VisibilityProbe = () => true,
+): CommitCoalescer {
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const fire = () => {
@@ -113,7 +120,12 @@ export function createCommitCoalescer(submit: () => void, windowMs = 24): Commit
   return {
     schedule() {
       dirty = true;
-      if (timer === null) timer = setTimeout(fire, windowMs);
+      if (timer !== null) return;
+      // T7（#100）后台降渲染（spec 03 §18.3）：隐藏期不排定时器——dirty 挂起，
+      // 真相仍逐帧 applyEvent 进本地 conv（数据零丢失），只延迟 setConversation
+      // 通知；回前台由 visibilitychange flush 一次（整段积压合帧单提交）。
+      if (!isVisible()) return;
+      timer = setTimeout(fire, windowMs);
     },
     flush() {
       if (timer !== null) {
@@ -143,6 +155,9 @@ export function useSession() {
   const [titlesById, setTitlesById] = useState<Record<string, string>>({});
 
   const sseRef = useRef<SSEHandle | null>(null);
+  // T7（#100）：活跃流的合帧提交器镜像——visibilitychange 监听要 flush 当前流，
+  // 而 coalescer 在 submitTask 闭包内创建，监听在 hook 顶层只能经 ref 触达。
+  const coalescerRef = useRef<CommitCoalescer | null>(null);
   // live 流中已知的首帧 sid——结束/出错/取消时决定迁移目标。
   const liveSidRef = useRef<string | null>(null);
   // mode 的实时镜像——SSE 回调闭包在 submitTask 时定型，读到的 mode 是
@@ -232,6 +247,17 @@ export function useSession() {
     };
   }, []);
 
+  // T7（#100）background tab 降渲染（spec 03 §18.3）：隐藏→flush 落盘当前状态
+  // （干净暂停点）；回前台→flush 立即对账（后台积压合帧为单次提交，一帧内
+  // reconcile，无重放动画）。隐藏期间 schedule 挂起，事件照常逐帧入本地 conv。
+  useEffect(() => {
+    const onVisibility = () => {
+      coalescerRef.current?.flush();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
   /** Submit a new task. Creates a fresh session and streams the response.
    *  The conversation is reset first — a live stream never folds into the
    *  previously viewed session's turns. */
@@ -248,12 +274,18 @@ export function useSession() {
         }
 
         let conv: ConversationState | null = null;
-        // P1-3 合帧：折叠逐帧即时（真相不延迟），提交按 ~24ms 窗口合并。
+        // P1-3 合帧 + T7 后台降渲染：窗口内多 delta 一次提交；隐藏期挂起、
+        // 回前台 flush 对账。折叠逐帧即时（真相不延迟），延迟的只是通知。
         // submit 守卫 mode 仍是 live——cancel/selectSession 之后的迟到 fire
         // 不得把旧流残留写回视图（与 shouldApplyStreamFrame 同一族守护）。
-        const coalescer = createCommitCoalescer(() => {
-          if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
-        });
+        const coalescer = createCommitCoalescer(
+          () => {
+            if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
+          },
+          24,
+          () => document.visibilityState === 'visible',
+        );
+        coalescerRef.current = coalescer;
 
         const handle = consumeSSE(
           res,
@@ -287,12 +319,14 @@ export function useSession() {
             // Stream finished: view the session it produced (history loader
             // re-reads the durable log), and refresh the list for the new row.
             coalescer.flush(); // 尾帧不丢（P1-3）
+            coalescerRef.current = null; // T7：流结束解钉（visibility 监听不再触达旧流）
             const sid = liveSidRef.current;
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             refreshSessions();
           },
           (err) => {
             coalescer.flush(); // 尾帧不丢（P1-3）
+            coalescerRef.current = null;
             const sid = liveSidRef.current;
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             setError(`流式错误：${(err as Error).message}`);
@@ -312,6 +346,7 @@ export function useSession() {
   const cancelStream = useCallback(() => {
     sseRef.current?.cancel();
     sseRef.current = null;
+    coalescerRef.current = null;
     setMode(
       liveSidRef.current
         ? { kind: 'viewing', sessionId: liveSidRef.current }
@@ -324,6 +359,7 @@ export function useSession() {
   const selectSession = useCallback((id: string | null) => {
     sseRef.current?.cancel();
     sseRef.current = null;
+    coalescerRef.current = null;
     liveSidRef.current = null;
     setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
