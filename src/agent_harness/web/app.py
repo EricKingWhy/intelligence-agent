@@ -413,6 +413,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             workspace_registry=state.workspace_registry,
             session_id=session_id, workspace=workspace,
             max_steps=req.max_steps, auto_approve=req.auto_approve,
+            session_store=state.store,
         )
         session = Session.start(state.store, session_id=session_id)
 
