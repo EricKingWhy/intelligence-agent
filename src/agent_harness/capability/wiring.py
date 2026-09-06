@@ -290,6 +290,51 @@ class _KnowledgeCapabilityProvider:
         return list(self._tools)
 
 
+class _WebSearchCapabilityProvider:
+    """ContributesTools 适配（websearch）：无状态 provider，仅贡献工具。"""
+
+    def __init__(self, tools: list[Any]) -> None:
+        self._tools = tools
+
+    def contributes_tools(self) -> list[Any]:
+        return list(self._tools)
+
+
+async def _wire_websearch(
+    registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
+) -> None:
+    """Web Search Capability 接线（Phase 12，ADR-0014 决策 8/10）。
+
+    失败语义：TAVILY_API_KEY 未配置 = OPTIONAL_RUNTIME 缺席降级（警告可
+    观察）——不配 = 不联网，绝不静默触网。provider 无状态（per-request
+    httpx client），无生命周期资源。知识库证据不足时的降级引导由
+    retrieve_knowledge 的 hint 承担（tool 侧 affordance，决策 13）。
+    """
+    from agent_harness.websearch.tavily import TavilyWebSearchProvider
+    from agent_harness.websearch.tools import WebSearchTool
+
+    api_key = settings.tavily_api_key.get_secret_value()
+    if not api_key.strip():
+        logger.warning(
+            "capability 'websearch' 未配置 TAVILY_API_KEY，按 %s 降级缺席",
+            Degradation.OPTIONAL_RUNTIME.value,
+        )
+        return
+
+    provider = TavilyWebSearchProvider(api_key)
+    tools = [WebSearchTool(provider)]
+    registry.register(
+        CapabilityDescriptor(
+            name="websearch", version="1.0.0", provider_name=cfg.provider,
+            capabilities=["tools"], risk="low",
+            supports_concurrency=True, supports_recovery=False, supports_streaming=False,
+            degradation=Degradation.OPTIONAL_RUNTIME,
+        ),
+        _WebSearchCapabilityProvider(tools),
+    )
+    # 工具贡献走 wire_capabilities 末尾的 ContributesTools 收集循环（零旁路）。
+
+
 async def _wire_ticker(
     registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
 ) -> None:
@@ -315,6 +360,7 @@ _BUILTIN_WIRING: dict[str, tuple[Any, Degradation]] = {
     "ticker": (_wire_ticker, Degradation.OPTIONAL_RUNTIME),
     "mcp": (_wire_mcp, Degradation.OPTIONAL_RUNTIME),
     "knowledge": (_wire_knowledge, Degradation.OPTIONAL_RUNTIME),
+    "websearch": (_wire_websearch, Degradation.OPTIONAL_RUNTIME),
 }
 
 
@@ -328,6 +374,7 @@ _KNOWN_PROVIDERS: dict[str, set[str]] = {
     "ticker": {"builtin"},
     "mcp": {"builtin"},
     "knowledge": {"builtin"},
+    "websearch": {"builtin"},
 }
 
 

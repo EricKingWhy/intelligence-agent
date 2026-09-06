@@ -232,11 +232,14 @@ class Session:
         usage_total: dict | None = None,
         cost_usd: float | None = None,
         trace_id: str | None = None,
+        reason: str | None = None,
     ) -> SessionEvent:
         """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
 
         usage_total / cost_usd / trace_id 是前端 Gap 1/2 契约（BACKEND_GAP_PROMPT.md）：
         只扩展 data，不改既有语义；None 表示"未计算"，绝不伪造 0。
+        reason 仅 failed 语义使用（如 identical_tool_failure_loop），落事件
+        data——消费者可区分失败原因（取消路径的 reason=cancelled 同款先例）。
         """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}
@@ -245,6 +248,8 @@ class Session:
         if status == "completed":
             data["cost_usd"] = cost_usd
             data["trace_id"] = trace_id
+        elif reason:
+            data["reason"] = reason
         return self.append(
             event_type,
             data,

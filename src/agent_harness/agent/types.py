@@ -23,6 +23,9 @@ STATUS_COMPLETED = "completed"
 # 不收敛兜底：模型反复请求工具直到 max_steps（Task 2 完整验证，Task 1 只留结构）
 STATUS_MAX_STEPS_EXCEEDED = "max_steps_exceeded"
 STATUS_CONTEXT_WINDOW_EXCEEDED = "context_window_exceeded"
+# 同错熔断硬终止（ADR-0014 #69）：模型连续 N 次同指纹失败工具调用后，
+# AgentRuntime 强制 end_run(failed)，防止步数/token 烧穿。
+STATUS_IDENTICAL_TOOL_FAILURE_LOOP = "identical_tool_failure_loop"
 # 模型调用 / 执行器异常的兜底失败态：run 以 run/failed 终结，final_text 恒为空串
 # （绝不伪造最终回答）。这是 AgentRunResult 的内部状态值，不是事件 schema。
 STATUS_FAILED = "failed"

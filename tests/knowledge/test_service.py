@@ -252,3 +252,55 @@ def test_splitter_single_paragraph_hard_split():
     chunks = split_text("x" * 2500, chunk_size=800, overlap=100)
     assert len(chunks) == 4, "无分隔符的长文按字符硬切"
     assert all(len(chunk) <= 800 for chunk in chunks)
+
+
+# ── RetrievalProvider 窄接口视图（ADR-0014 决策 7，Phase 12 #77）──
+
+
+@pytest.mark.asyncio
+async def test_as_retrieval_provider_returns_unified_hits(service):
+    """KB 落在统一检索协议上：RetrievalHit + source_id/chunk_index 走 metadata。
+
+    identity 从 contextvar 继承（Runtime 会话帧内已绑定）——adapter 不传
+    identity 参数，租户隔离语义不因注入方式改变。
+    """
+    from agent_harness.identity import identity_context_var
+    from agent_harness.websearch.protocol import RetrievalHit, RetrievalProvider
+
+    source_id = await _ingest_python_doc(service)
+    provider = service.as_retrieval_provider()
+
+    # 结构化落在统一协议上（isinstance 过 runtime_checkable 检查）
+    assert isinstance(provider, RetrievalProvider)
+    token = identity_context_var.set(ALICE)
+    try:
+        hits = await provider.search("python typing", k=3)
+    finally:
+        identity_context_var.reset(token)
+
+    assert hits and all(isinstance(h, RetrievalHit) for h in hits)
+    first = hits[0]
+    assert first.citation.startswith("kb:")
+    assert first.citation.split("#")[0] == "kb:python-guide"
+    assert first.content
+    assert isinstance(first.score, float)
+    assert first.metadata["source_id"] == source_id
+    assert isinstance(first.metadata["chunk_index"], int)
+
+
+@pytest.mark.asyncio
+async def test_as_retrieval_provider_k_clamped_and_gl_hl_ignored(service):
+    """gl/hl/freshness 对本地语料无意义即忽略；k 超界钳制不炸。"""
+    await _ingest_python_doc(service)
+    provider = service.as_retrieval_provider()
+
+    from agent_harness.identity import identity_context_var
+
+    token = identity_context_var.set(ALICE)
+    try:
+        hits = await provider.search(
+            "python typing", k=999, gl="us", hl="en", freshness="week",
+        )
+    finally:
+        identity_context_var.reset(token)
+    assert hits and len(hits) <= 20

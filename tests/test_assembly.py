@@ -147,6 +147,58 @@ async def test_build_runtime_wires_capability_tools_and_manual_approval(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_build_runtime_wires_model_fallback(tmp_path):
+    """Model Fallback 装配（T5, #80, ADR-0014 决策 14/16）：config.fallback
+    存在 → 两级模型入 Runtime；未配 → fallback 保持 None（单级）。"""
+    _, wiring = await assemble_wiring(_settings(tmp_path))
+    stores = _stores(tmp_path)
+    await initialize_stores(stores)
+    created = []
+
+    def fake_create(config):
+        model = ScriptedModelFactory()
+        created.append((config, model))
+        return model
+
+    # 未配 fallback：单级
+    with patch("agent_harness.assembly.create_chat_model", side_effect=fake_create):
+        runtime = await build_runtime(
+            settings=_settings(tmp_path), wiring=wiring, stores=stores,
+            workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+            session_id="s1", workspace=tmp_path / "w1",
+            max_steps=5, auto_approve=True,
+        )
+    assert runtime._fallback_model is None
+    assert runtime._primary_model_name == "deepseek-chat"
+
+    created.clear()
+    fb_settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+        fallback_model_provider="senseaudio",
+        fallback_model_name="deepseek-v4-flash-0731",
+        fallback_model_api_key="sk-fb",
+    )
+    with patch("agent_harness.assembly.create_chat_model", side_effect=fake_create):
+        runtime = await build_runtime(
+            settings=fb_settings, wiring=wiring, stores=stores,
+            workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+            session_id="s2", workspace=tmp_path / "w2",
+            max_steps=5, auto_approve=True,
+        )
+    # 两次构造：第 1 次 primary、第 2 次 fallback；配置链一致
+    assert len(created) == 2
+    primary_config, _ = created[0]
+    fallback_config, _ = created[1]
+    assert primary_config.provider == "deepseek"
+    assert fallback_config is primary_config.fallback
+    assert fallback_config.provider == "senseaudio"
+    assert runtime._fallback_model is not None
+    assert runtime._fallback_model is not runtime.model
+    assert runtime._fallback_model_name == "deepseek-v4-flash-0731"
+    assert runtime._primary_model_name == "deepseek-chat"
+
+
+@pytest.mark.asyncio
 async def test_assemble_wiring_empty_config_is_inert(tmp_path):
     """CAPABILITIES 为空 → 零工具、零 provider、零生命周期对象（默认 opt-in）。"""
     _, wiring = await assemble_wiring(_settings(tmp_path))

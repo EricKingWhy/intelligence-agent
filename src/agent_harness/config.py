@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     model_base_url: str = ""
 
     temperature: float = 0.2
+    # 流式守卫（秒，逐项 ≤0 关闭）：idle = N 秒无新 chunk（死连接）；
+    # total = 整条流必须 N 秒内完成（慢滴漏，冒烟实测 10 分钟场景）。
+    # 超时抛 ModelStallError（瞬时）→ fallback 接管 / 统一失败兜底。
+    model_stream_idle_timeout: float = 60.0
+    model_stream_total_timeout: float = 600.0
+    # Model Fallback 两级链（ADR-0014 决策 14）：FALLBACK_MODEL_PROVIDER 为空 =
+    # 单级（无 fallback）。fallback key 同 SecretStr 脱敏待遇（活密钥）。
+    fallback_model_provider: str = ""
+    fallback_model_name: str = ""
+    fallback_model_api_key: SecretStr = SecretStr("")
+    fallback_model_base_url: str = ""
     # jwt_secret 泄漏等于可伪造任意身份，与 API key 同一脱敏待遇。
     jwt_secret: SecretStr | None = None
     milvus_uri: str = ""
@@ -36,6 +47,9 @@ class Settings(BaseSettings):
     # sufficient 阈值（ADR-0013 决策 9，用户拍板 0.6：低于此证据太弱，
     # 宁可如实标记不足防幻觉）。hits 照返，标记是诚实信号不是结果开关。
     knowledge_min_score: float = Field(default=0.6, ge=0, le=1)
+    # Web Search（ADR-0014 决策 9/10）：TAVILY_API_KEY 为空 = websearch
+    # capability OPTIONAL_RUNTIME 降级缺席（不配 = 不联网，绝不静默触网）。
+    tavily_api_key: SecretStr = SecretStr("")
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")

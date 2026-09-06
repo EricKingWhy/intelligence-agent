@@ -34,3 +34,6 @@ __pycache__/
 
 # 根目录不应有 JS 依赖（前端依赖在 web/node_modules）
 node_modules/
+
+# 临时剖析/调试产物（diagnosing-bugs harness 等），永不入库
+.scratch/

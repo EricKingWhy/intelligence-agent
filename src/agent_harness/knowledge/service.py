@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import uuid4
 
-from agent_harness.identity import IdentityContext
+from agent_harness.identity import IdentityContext, get_identity_context
 from agent_harness.knowledge.registry import SqliteKnowledgeSourceRegistry
 from agent_harness.knowledge.splitter import split_text
 from agent_harness.knowledge.store import KnowledgeVectorStore
@@ -28,6 +28,7 @@ from agent_harness.knowledge.types import (
     KnowledgeSearchResult,
     KnowledgeSource,
 )
+from agent_harness.websearch.protocol import RetrievalHit
 
 _CITATION_RE = re.compile(r"^kb:(?P<name>.+)#(?P<index>\d+)$")
 _MAX_K = 20
@@ -193,3 +194,38 @@ class KnowledgeService:
     @staticmethod
     def _citation(source_name: str, chunk_index: int) -> str:
         return f"{CITATION_PREFIX}{source_name}#{chunk_index}"
+
+    def as_retrieval_provider(self) -> KnowledgeRetrievalProvider:
+        """暴露 RetrievalProvider 窄接口视图（ADR-0014 决策 7：KB 落在统一检索协议上）。"""
+        return KnowledgeRetrievalProvider(self)
+
+
+class KnowledgeRetrievalProvider:
+    """KnowledgeService 的 RetrievalProvider 窄接口实现（ADR-0014 决策 7）。
+
+    冻结的 `KnowledgeVectorStore.search(query, identity, *, limit, source_id)`
+    签名与窄协议不同（identity 是 KB 的租户隔离语义）——适配器是两者之间的
+    唯一翻译点：调用方拿统一 RetrievalHit，source_id/chunk_index 走 metadata
+    dict（决策 7 的约定），citation 仍是可回读的 kb:<source>#<index>。
+    gl/hl/freshness 对本地语料无意义——忽略（协议默认值即合法）。
+    """
+
+    def __init__(self, service: KnowledgeService) -> None:
+        self._service = service
+
+    async def search(
+        self, query: str, *, k: int = 5, gl: str | None = None,
+        hl: str | None = None, freshness: str | None = None,
+    ) -> list[RetrievalHit]:
+        result = await self._service.retrieve(
+            query=query, identity=get_identity_context(),
+            k=max(1, min(k, _MAX_K)),
+        )
+        return [
+            RetrievalHit(
+                citation=hit.citation, content=hit.content, score=hit.score,
+                metadata={"source_id": hit.source_id,
+                          "chunk_index": hit.chunk_index},
+            )
+            for hit in result.hits
+        ]

@@ -26,10 +26,15 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
+from agent_harness.agent.guards import (
+    GuardLevel,
+    RepeatedToolFailureGuard,
+)
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_FAILED,
+    STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
     STATUS_MAX_STEPS_EXCEEDED,
     AgentEvent,
     AgentRunResult,
@@ -39,13 +44,20 @@ from agent_harness.context.builder import ContextBuilder, ContextWindowExceededE
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
 from agent_harness.memory.writeback import MemoryWriteback
+from agent_harness.model.fallback import (
+    FallbackPolicy,
+    ModelFallbackCoordinator,
+    TwoLevelFallbackPolicy,
+)
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
     MODEL_FAILED,
+    MODEL_FALLBACK,
     MODEL_STARTED,
     RUN_FAILED,
     RUN_STARTED,
+    TOOL_FAILURE_GUARD,
     USER_MESSAGE,
     Session,
     SessionEvent,
@@ -61,6 +73,13 @@ from agent_harness.storage import (
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 
 logger = logging.getLogger("agent_harness.agent")
+
+#: DeepSeek 系（主/备 provider 均为 deepseek 模型）工具调用的协议保留标记。
+#: 碎片化流下网关的 DSML 工具调用可能未被解析成结构化 tool_calls 而以乱码
+#: content 泄漏（冒烟实测 session 7afd328a：流式标记混进最终回答）——含此
+#: 标记的 content 绝不可能是合法模型回答，按模型故障处理（走统一失败兜底，
+#: 决不伪造 run/completed）。用全角 ｜ 保留标记做判据以杜绝误伤正常讨论文本。
+_DSML_MARKUP_MARKER = "<｜DSML｜"
 
 
 def _usage_from_response(ai: Any) -> dict[str, int] | None:
@@ -169,13 +188,18 @@ class _RunFinalizer:
         self._terminal_written = True
         return event
 
-    def failure_terminal(self, *, steps: int) -> SessionEvent | None:
-        """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。"""
+    def failure_terminal(self, *, steps: int, reason: str | None = None) -> SessionEvent | None:
+        """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。
+
+        reason 落事件 data（如 identical_tool_failure_loop）——消费者区分失败
+        原因，与取消臂的 reason=cancelled 同一语义层。
+        """
         if self.run_id is None or self._terminal_written:
             return None
         event = self._session.end_run(
             self.run_id, status="failed",
             usage_total=dict(self._usage_total) or None,
+            reason=reason,
         )
         self._terminal_written = True
         return event
@@ -201,9 +225,29 @@ class AgentRuntime:
         context_builder: ContextBuilder | None = None,
         context_providers: list[ContextProvider] | None = None,
         memory_writer: MemoryWriteback | None = None,
+        failure_guard: RepeatedToolFailureGuard | None = None,
+        fallback_model: Any | None = None,
+        fallback_policy: FallbackPolicy | None = None,
+        primary_model_name: str = "primary",
+        fallback_model_name: str = "fallback",
+        stream_idle_timeout: float = 0.0,
+        stream_total_timeout: float = 0.0,
     ) -> None:
         self.registry = registry
         self.executor = executor
+        # 同错熔断护栏（ADR-0014 #69）：可选注入；默认每 run 一个新实例
+        # （计数不跨 run 累积——每个 run 的循环各自干净起步）。
+        self._failure_guard = failure_guard
+        # Model Fallback（ADR-0014 决策 14-16）：两级 + FallbackPolicy seam。
+        # 切换决策在 policy（瞬时性判断）；本类只编排调用序列并持久化
+        # model/fallback 事件。切换状态按 run 独立（见 _drive）。
+        self._fallback_policy = fallback_policy or TwoLevelFallbackPolicy()
+        self._primary_model_name = primary_model_name
+        self._fallback_model_name = fallback_model_name
+        # 流式守卫（秒，逐项 ≤0 关闭）：idle=死连接，total=慢滴漏——所有 run
+        # 都受保护（无 fallback 时走统一失败兜底），见 model/stall.py。
+        self._stream_idle_timeout = stream_idle_timeout
+        self._stream_total_timeout = stream_total_timeout
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
@@ -230,6 +274,14 @@ class AgentRuntime:
             self.model = model.bind_tools(definitions)
         else:
             self.model = model
+        # fallback 模型同样绑定工具：切换后仍能发 tool_calls（否则带工具的
+        # 会话切到 fallback 后模型看不到工具，行为静默退化）。
+        self._fallback_model: Any | None = None
+        if fallback_model is not None:
+            if definitions and hasattr(fallback_model, "bind_tools"):
+                self._fallback_model = fallback_model.bind_tools(definitions)
+            else:
+                self._fallback_model = fallback_model
 
     async def run(self, session: Session, user_input: str) -> AgentRunResult:
         """跑完整条 Agent Loop，返回 AgentRunResult。
@@ -293,6 +345,20 @@ class AgentRuntime:
         # 终态簿记 owner（批次 B 候选 2）：model 在途标记 + 单终态不变量 +
         # usage 记账收拢一处，取消臂/异常臂只做调用。
         terminal = _RunFinalizer(session, usage_total)
+        # 同错熔断护栏：每 run 一个新实例（注入或新建）；计数不跨 run 累积。
+        guard = self._failure_guard or RepeatedToolFailureGuard()
+        guard.reset()
+        # Model Fallback + 卡流看门狗：每 run 一个新 coordinator（切换状态
+        # 不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator 退化为
+        # 透传（异常原样上抛），但 stall 看门狗对所有 run 生效。
+        model_coord = ModelFallbackCoordinator(
+            primary=self.model, fallback=self._fallback_model,
+            policy=self._fallback_policy,
+            primary_name=self._primary_model_name,
+            fallback_name=self._fallback_model_name,
+            idle_timeout=self._stream_idle_timeout,
+            total_timeout=self._stream_total_timeout,
+        )
         run_span = new_span_id()
         try:
             # 写入 user 消息事件
@@ -341,6 +407,8 @@ class AgentRuntime:
                 llm_started = time.perf_counter()
 
                 # 在途标记：从发起调用到聚合完成，此间抛错按 model/failed 归因。
+                # coordinator 统一编排（含 stall 看门狗）：瞬时失败内部切换
+                # 重试，非瞬时/无 fallback 时异常照常上抛走统一失败兜底。
                 terminal.model_call_open = True
                 if stream:
                     # 流式：逐 chunk yield model/delta，聚合回完整 AIMessage
@@ -350,7 +418,7 @@ class AgentRuntime:
                         run_id=run_id, step_id=steps + 1,
                     )
                     collected: list[AIMessageChunk] = []
-                    async for chunk in self.model.astream(messages):
+                    async for chunk in model_coord.astream(messages):
                         collected.append(chunk)
                         delta_text = _extract_text(chunk.content)
                         if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
@@ -372,14 +440,23 @@ class AgentRuntime:
                     else:
                         ai = AIMessage(content="")
                 else:
-                    ai = await self.model.ainvoke(messages)
+                    ai = await model_coord.ainvoke(messages)
                 # R6-2（用户拍板）：空响应不是成功——content 与 tool_calls 双空
                 # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
                 # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），
                 # SSE 客户端因此能区分"模型答了空话"与"上游失败"。
-                if not _extract_text(ai.content) and not ai.tool_calls:
+                extracted_content = _extract_text(ai.content)
+                if not extracted_content and not ai.tool_calls:
                     raise RuntimeError(
                         "model returned an empty response (no content, no tool calls)"
+                    )
+                # DSML 协议泄漏守卫（冒烟实测）：无结构化 tool_calls 且 content
+                # 含协议保留标记 = 网关没把工具调用解析成结构化字段，绝不能把
+                # 这段标记文本当最终回答持久化——与空响应同一失败语义。
+                if not ai.tool_calls and _DSML_MARKUP_MARKER in extracted_content:
+                    raise RuntimeError(
+                        "model response contains malformed tool-call markup"
+                        " (DSML protocol leak); treating as model failure"
                     )
                 terminal.model_call_open = False  # 调用完整返回，后续异常不再归因 model
                 # duration_ms 严格闭合模型调用本身（ainvoke/astream 区间），
@@ -388,11 +465,19 @@ class AgentRuntime:
                 # 要自洽）。
                 llm_duration_ms = int((time.perf_counter() - llm_started) * 1000)
 
+                # Model Fallback（ADR-0014 决策 18）：取走本步的切换事实；事件
+                # 持久化放在下方 llm_log_fields 构造之后、model/completed 之前
+                # ——SessionEvent 流里切换事实先于本步完成事件（llm_call 是
+                # Diagnostic Log 通道，另一条观察线，不进 JSONL 顺序）。
+                fallback_transitions = (
+                    model_coord.drain_transitions() if model_coord is not None else []
+                )
+
                 # 第 3 步：把 AIMessage 持久化为 model/completed 事件
                 # 值对象归一化（A2）：本循环内所有消费点读类型化字段，不再拆原始 dict。
                 calls = ToolCall.normalize_all(ai.tool_calls or [])
                 tool_calls = calls
-                model_data: dict[str, Any] = {"content": _extract_text(ai.content)}
+                model_data: dict[str, Any] = {"content": extracted_content}
                 model_name = _model_name_from_response(ai)
                 if model_name:
                     model_data["model"] = model_name
@@ -413,6 +498,26 @@ class AgentRuntime:
                     llm_log_fields["model_id"] = model_name
                 if usage:
                     llm_log_fields["token_usage"] = usage
+                # 切换事实持久化 + 诊断日志归因（ADR-0014 决策 18：llm_call 带
+                # fallback_reason/from/to）。usage = 切换后实际产出本步回答的那次
+                # 调用的用量（primary 失败一次的用量上游未结账，不可知，绝不
+                # 伪造）；run 级 usage_total 统一归集不分主备。
+                if fallback_transitions:
+                    for transition in fallback_transitions:
+                        fallback_event = session.append(
+                            MODEL_FALLBACK,
+                            {"from_model": transition.from_model,
+                             "to_model": transition.to_model,
+                             "reason": transition.reason,
+                             **({"usage": usage} if usage else {})},
+                            run_id=run_id, step_id=steps + 1,
+                        )
+                        yield to_agent_event(fallback_event)
+                    llm_log_fields.update(
+                        fallback_reason=fallback_transitions[0].reason,
+                        fallback_from=fallback_transitions[0].from_model,
+                        fallback_to=fallback_transitions[0].to_model,
+                    )
                 self._log("llm_call", f"第 {steps + 1} 轮模型调用完成",
                           span_id=llm_span, parent_span_id=run_span, step=steps + 1,
                           **llm_log_fields)
@@ -544,6 +649,81 @@ class AgentRuntime:
                 await self._save_checkpoint(
                     session, CheckpointBoundary.TOOL_BATCH_COMPLETED
                 )
+
+                # ── 同错熔断护栏（ADR-0014 #69）──
+                # 工具回填后、下一轮模型调用前观察本轮工具结果；取最严重信号。
+                worst_signal = None
+                for call, execution in zip(calls, executions):
+                    sig = guard.observe(call.name, call.args, execution.result.ok)
+                    if sig.level != GuardLevel.NONE and (
+                        worst_signal is None or sig.level > worst_signal.level
+                    ):
+                        worst_signal = sig
+                if worst_signal is not None:
+                    guard_span = new_span_id()
+                    if worst_signal.level == GuardLevel.SOFT:
+                        # 软熔断：注入 user 角色纠正消息——护栏是 runtime 行为
+                        # 不污染固定 system prompt（ADR-0014 决策 4）。
+                        soft_event = session.append(
+                            TOOL_FAILURE_GUARD,
+                            {"level": "soft",
+                             "tool_name": worst_signal.tool_name,
+                             "fingerprint": worst_signal.fingerprint,
+                             "consecutive_failures": worst_signal.consecutive_failures},
+                            run_id=run_id, step_id=steps,
+                        )
+                        yield to_agent_event(soft_event)
+                        corrective = session.append(
+                            USER_MESSAGE,
+                            {"content": (
+                                f"同一调用 {worst_signal.tool_name!r} 已连续失败 "
+                                f"{worst_signal.consecutive_failures} 次。请改变策略"
+                                "（换参数、换工具或向用户说明遇到的具体困难），不要再"
+                                "以相同方式重试。"
+                            ),
+                             # runtime 注入的纠正消息不是真实用户发言——标记来源
+                             # 供前端投影/审计区分（不变量 #22 边缘）。
+                             "injected_by": "tool_failure_guard"},
+                            run_id=run_id, step_id=steps,
+                        )
+                        yield to_agent_event(corrective)
+                        self._log("agent_decision", "同错熔断软触发",
+                                  span_id=guard_span, parent_span_id=run_span, step=steps,
+                                  decision="tool_failure_guard_soft",
+                                  tool_name=worst_signal.tool_name,
+                                  consecutive_failures=worst_signal.consecutive_failures)
+                    elif worst_signal.level == GuardLevel.HARD:
+                        # 硬熔断：强制 end_run(failed)，绝不伪造最终回答。
+                        hard_event = session.append(
+                            TOOL_FAILURE_GUARD,
+                            {"level": "hard",
+                             "tool_name": worst_signal.tool_name,
+                             "fingerprint": worst_signal.fingerprint,
+                             "consecutive_failures": worst_signal.consecutive_failures},
+                            run_id=run_id, step_id=steps,
+                        )
+                        yield to_agent_event(hard_event)
+                        self._log("agent_decision", "同错熔断硬触发，强制终止 run",
+                                  span_id=guard_span, parent_span_id=run_span, step=steps,
+                                  decision="tool_failure_guard_hard",
+                                  tool_name=worst_signal.tool_name,
+                                  consecutive_failures=worst_signal.consecutive_failures,
+                                  outcome="failed")
+                        # 与异常臂同一收尾语义（_RunFinalizer 单终态 owner），
+                        # reason 落 run/failed data 供消费者区分失败原因。
+                        end_event = terminal.failure_terminal(
+                            steps=steps,
+                            reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+                        )
+                        self._write_memories(session, memory_event_start)
+                        yield to_agent_event(end_event)
+                        result_holder.append(
+                            AgentRunResult(
+                                status=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+                                final_text="", steps=steps,
+                            ),
+                        )
+                        return
         except (asyncio.CancelledError, GeneratorExit):
             # 取消臂：客户端断连（SSE 生成器被取消/关闭）走这里——GeneratorExit /
             # CancelledError 是 BaseException，顶层 except Exception 兜不到，
