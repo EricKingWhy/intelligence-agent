@@ -3,6 +3,8 @@
 不写 HTTP Client、不做重试/缓存——这些都由 langchain-openai 和底层 openai SDK 负责。
 """
 
+from typing import Any
+
 from langchain_openai import ChatOpenAI
 
 from agent_harness.model.config import ModelConfig
@@ -43,7 +45,9 @@ class ReasoningChatOpenAI(ChatOpenAI):
         return generation_chunk
 
 
-def create_chat_model(config: ModelConfig) -> ReasoningChatOpenAI:
+def create_chat_model(
+    config: ModelConfig, *, reasoning_effort: str | None = None,
+) -> ReasoningChatOpenAI:
     """根据配置创建 OpenAI 兼容的 ChatModel（DeepSeek/Qwen/OpenAI 通吃）。
 
     显式声明 request_timeout / max_retries，不吃 SDK 默认（600s × (1+2) 次尝试
@@ -52,12 +56,20 @@ def create_chat_model(config: ModelConfig) -> ReasoningChatOpenAI:
       与 memory/embeddings.py 同一原则。
     - request_timeout=300：chat 生成 legitimately 比 embedding 慢（长输出可到
       分钟级），300s 覆盖正常长生成、又把挂死调用的最坏代价从 30min 压到 5min。
+
+    reasoning_effort（RUNTIME 子批次）：会话级思考深度控制。非 None 时直接
+    作为构造器参数传入——ChatOpenAI 原生支持该字段，会把它放进 API 请求的
+    extra_body。不支持的 Provider 静默忽略（OpenAI SDK 语义）。不在每次
+    astream/ainvoke 调用时传递——构造期注入即可。
     """
-    return ReasoningChatOpenAI(
-        model=config.model_name,
-        api_key=config.get_secret_value(),
-        base_url=config.base_url,
-        temperature=config.temperature,
-        request_timeout=300,
-        max_retries=0,
-    )
+    kwargs: dict[str, Any] = {
+        "model": config.model_name,
+        "api_key": config.get_secret_value(),
+        "base_url": config.base_url,
+        "temperature": config.temperature,
+        "request_timeout": 300,
+        "max_retries": 0,
+    }
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
+    return ReasoningChatOpenAI(**kwargs)

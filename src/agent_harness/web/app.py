@@ -73,7 +73,7 @@ from agent_harness.web.runmanager import RunManager
 # description。两边引用同一份常量 → 加新档位只改一处，validator 与清单永不漂移。
 # 与 PERMISSION_MODE_DESCRIPTIONS（tooling/contract.py）同模式（Reuse First §6）。
 
-#: reasoning_effort 三档（当前 runtime no-op，清单端点诚实标注）。
+#: reasoning_effort 三档（已运行时消费——经 create_chat_model 注入 model_kwargs）。
 REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "minimal": {
         "display_name": "Minimal",
@@ -89,7 +89,7 @@ REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
 }
 
-#: agent_profile 三档（当前 runtime no-op，清单端点诚实标注）。
+#: agent_profile 三档（已运行时消费——system_prompt 经 ContextBuilder 注入 + tool_scope 经 registry.filtered 收窄，ADR-0020a）。
 AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "main": {
         "display_name": "Main",
@@ -759,11 +759,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     async def list_reasoning_efforts() -> dict[str, Any]:
         """列出 reasoning_effort 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
 
-        Phase 5 已把 reasoning_effort 作为 staged 契约接收（validator 锁集合）；
-        本端点只暴露「后端认识哪些档位」，**不假装运行时已消费**（当前 runtime no-op，
-        与 POST /api/sessions 的 staged 语义一致）。字段与 /api/permission-modes 同
-        模式（{id, display_name, description}），单一事实源是模块级
-        REASONING_EFFORT_DESCRIPTIONS（validator 与清单引用同一份 → 永不漂移）。
+        reasoning_effort 已被运行时真实消费（经 create_chat_model 注入
+        model_kwargs → extra_body 传给 API）；本端点暴露「后端认识哪些档位」。
+        字段与 /api/permission-modes 同模式（{id, display_name, description}），
+        单一事实源是模块级 REASONING_EFFORT_DESCRIPTIONS（validator 与清单
+        引用同一份 → 永不漂移）。
         """
         efforts = [
             {
