@@ -27,6 +27,7 @@ from agent_harness.session.event import (
     QUEUE_CANCELLED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
+    _utc_now_iso,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session
@@ -466,6 +467,7 @@ class SessionService:
                 session_id=session_id,
                 content=content,
                 run_id=active_run.run_id,
+                created_at=_utc_now_iso(),
             )
             # durable 记录：STEER_REQUESTED（不写进 run 事件流，写 SessionEvent）。
             session = Session.resume(
@@ -498,7 +500,7 @@ class SessionService:
 
         # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
         queued = await self._state.message_queues.enqueue(
-            session_id=session_id, content=content
+            session_id=session_id, content=content, created_at=_utc_now_iso()
         )
         session = Session.resume(
             self._state.store,
