@@ -163,7 +163,7 @@ async def test_build_runtime_wires_model_fallback(tmp_path):
     await initialize_stores(stores)
     created = []
 
-    def fake_create(config):
+    def fake_create(config, **kwargs):
         model = ScriptedModelFactory()
         created.append((config, model))
         return model

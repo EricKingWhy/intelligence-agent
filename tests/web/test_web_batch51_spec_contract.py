@@ -53,7 +53,7 @@ async def _start_server(tmp_path, monkeypatch, model_cls):
     from agent_harness.web.app import create_app
 
     monkeypatch.setattr(
-        "agent_harness.assembly.create_chat_model", lambda config: _BashThenTextImpl())
+        "agent_harness.assembly.create_chat_model", lambda config, **kw: _BashThenTextImpl())
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,

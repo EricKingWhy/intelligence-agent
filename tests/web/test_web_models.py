@@ -117,7 +117,7 @@ class TestSessionModelParam:
         """model 参数命中 catalog → 装配层拿到该 model_name 的配置。"""
         seen: dict = {}
 
-        def fake_factory(config):
+        def fake_factory(config, **kwargs):
             # build_runtime 对 primary/fallback 各调一次——收集全量，主链取首个
             seen.setdefault("names", []).append(config.model_name)
             return ScriptedModel(responses=[AIMessage(content="ok")])
@@ -133,7 +133,7 @@ class TestSessionModelParam:
         """不传 model = 默认链（现行为不变）。"""
         seen: dict = {}
 
-        def fake_factory(config):
+        def fake_factory(config, **kwargs):
             seen.setdefault("names", []).append(config.model_name)
             return ScriptedModel(responses=[AIMessage(content="ok")])
 

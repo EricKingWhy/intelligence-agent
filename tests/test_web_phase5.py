@@ -25,7 +25,7 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
                                            "args": {"path": "data.txt"}}]),
         AIMessage(content="done"),
     ])
-    monkeypatch.setattr("agent_harness.assembly.create_chat_model", lambda config: model)
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", lambda config, **kw: model)
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path / "state"),
                         model_api_key="sk-test-placeholder",
                         artifact_store_endpoint="https://example.test", artifact_overflow_chars=200)
@@ -47,7 +47,7 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
 
 def test_web_applies_context_budget_before_calling_model(tmp_path, monkeypatch):
     model = ScriptedModel([])
-    monkeypatch.setattr("agent_harness.assembly.create_chat_model", lambda config: model)
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", lambda config, **kw: model)
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
                         model_api_key="sk-test-placeholder", max_context_tokens=100)
     with TestClient(create_app(settings)) as client:
