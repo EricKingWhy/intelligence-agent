@@ -15,7 +15,7 @@ describe('initConversation', () => {
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], events: [], unknown_events: [],
-      model: null, usage_total: null, cost_usd: null, trace_id: null, run_id: null,
+      model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       seenSeqs: new Set(),
     });
@@ -567,7 +567,7 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
     expect(s.usage_total).toEqual({ prompt_tokens: 350, completion_tokens: 0, total_tokens: 350 });
   });
 
-  it('RUN_COMPLETED 的 usage_total 是权威聚合——覆盖前端累计值，并捕获 cost_usd / trace_id', () => {
+  it('RUN_COMPLETED 的 usage_total 是权威聚合——覆盖前端累计值，并捕获 cost_usd / trace_id / trace_url', () => {
     let s = applyEvent(initConversation('s'), ev({
       type: EventType.MODEL_COMPLETED,
       data: { content: 'x', usage: { prompt_tokens: 999, completion_tokens: 999, total_tokens: 1998 } },
@@ -579,14 +579,60 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
         usage_total: { prompt_tokens: 1234, completion_tokens: 567, total_tokens: 1801 },
         cost_usd: 0.0024,
         trace_id: 'lf-abc',
+        trace_url: 'https://cloud.langfuse.com/project/p1/traces/lf-abc',
       },
     }));
     expect(s.usage_total).toEqual({ prompt_tokens: 1234, completion_tokens: 567, total_tokens: 1801 });
     expect(s.cost_usd).toBe(0.0024);
     expect(s.trace_id).toBe('lf-abc');
+    expect(s.trace_url).toBe('https://cloud.langfuse.com/project/p1/traces/lf-abc');
   });
 
-  it('RUN_COMPLETED 未携带观测字段 → 保留前端累计 usage，cost/trace 保持 null（不伪造 0）', () => {
+  it('RUN_FAILED 对称下发 trace_id / trace_url（契约 2d7f87a——失败 run 也有可见 trace）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: {},
+      run_id: 'r1',
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.RUN_FAILED,
+      data: {
+        reason: 'identical_tool_failure_loop',
+        trace_id: 'lf-fail',
+        trace_url: 'https://cloud.langfuse.com/project/p1/traces/lf-fail',
+      },
+      run_id: 'r1',
+      step_id: 2,
+    }));
+    expect(s.run_status).toBe('failed');
+    expect(s.trace_id).toBe('lf-fail');
+    expect(s.trace_url).toBe('https://cloud.langfuse.com/project/p1/traces/lf-fail');
+  });
+
+  it('RUN_CANCELLED（reason=cancelled）也对称下发 trace_id / trace_url', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: {},
+      run_id: 'r1',
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.RUN_FAILED,
+      data: {
+        reason: 'cancelled',
+        trace_id: 'lf-cancel',
+        trace_url: 'https://cloud.langfuse.com/project/p1/traces/lf-cancel',
+      },
+      run_id: 'r1',
+      step_id: 2,
+    }));
+    expect(s.run_cancelled).toBe(true);
+    expect(s.trace_id).toBe('lf-cancel');
+    expect(s.trace_url).toBe('https://cloud.langfuse.com/project/p1/traces/lf-cancel');
+  });
+
+  it('RUN_COMPLETED 未携带观测字段 → 保留前端累计 usage，cost/trace/trace_url 保持 null（不伪造 0）', () => {
     let s = applyEvent(initConversation('s'), ev({
       type: EventType.MODEL_COMPLETED,
       data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
@@ -596,6 +642,33 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
     expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
     expect(s.cost_usd).toBeNull();
     expect(s.trace_id).toBeNull();
+    expect(s.trace_url).toBeNull();
+  });
+
+  it('RUN_COMPLETED 携带 trace 字段但值为 null（Langfuse 未启用）→ trace_id / trace_url 保持 null', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_COMPLETED,
+      data: { trace_id: null, trace_url: null },
+    }));
+    expect(s.trace_id).toBeNull();
+    expect(s.trace_url).toBeNull();
+  });
+
+  it('RUN_FAILED 携带 trace 字段但值为 null → trace_id / trace_url 保持 null', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: {},
+      run_id: 'r1',
+      step_id: 1,
+    }));
+    const s2 = applyEvent(s, ev({
+      type: EventType.RUN_FAILED,
+      data: { reason: 'error', trace_id: null, trace_url: null },
+      run_id: 'r1',
+      step_id: 2,
+    }));
+    expect(s2.trace_id).toBeNull();
+    expect(s2.trace_url).toBeNull();
   });
 
   it('畸形 usage（字段缺失/类型错误/非有限数）整体按 null 处理——绝不部分伪造', () => {

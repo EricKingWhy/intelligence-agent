@@ -189,7 +189,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
 
 // ── Chat tab：Run 级摘要（真数据区块 + 空槽标注） ──
 
-function ChatTab({
+export function ChatTab({
   conversation, tools, onFocusTool,
 }: {
   conversation: ConversationState;
@@ -251,12 +251,25 @@ function ChatTab({
               : <span className="detail-val-muted">—</span>}
           </span>
         </div>
-        {/* 后端 Gap 2：trace_id 恒 null（Langfuse Phase 15 接入）→「未追踪」灰字，
-            属预期降级而非故障；跳转链接待 Phase 15 一并加（Scope Lock：不预做）。 */}
+        {/* Langfuse trace 关联（ADR-0018 D7 + 契约 2d7f87a）：
+            trace_url 有值 → trace_id 渲染为可点超链接直达 Langfuse dashboard；
+            trace_id 有值但 trace_url 缺 → 纯 mono code（可复制，手动粘到 Langfuse 搜索）；
+            两者都 null（Langfuse 未启用）→「未追踪」灰字（预期降级非故障）。 */}
         <div className="detail-row">
           <span className="detail-key">Trace</span>
           {conversation.trace_id ? (
-            <code className="detail-val detail-val-mono">{conversation.trace_id}</code>
+            conversation.trace_url ? (
+              <a
+                className="detail-val detail-val-mono detail-trace-link"
+                href={conversation.trace_url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {conversation.trace_id}
+              </a>
+            ) : (
+              <code className="detail-val detail-val-mono">{conversation.trace_id}</code>
+            )
           ) : (
             <span className="detail-val detail-val-muted">未追踪</span>
           )}
