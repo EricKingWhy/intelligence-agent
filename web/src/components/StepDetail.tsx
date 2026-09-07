@@ -37,6 +37,17 @@ export type InspectorFocus =
 
 type Tab = 'timeline' | 'chat' | 'changes' | 'terminal' | 'artifacts';
 
+/** Tab 图标 —— 每个 tab 一个 lucide icon，与 label 配对。
+ *  Inspector 分段控件（segmented control）参考 Linear issue 面板与 VS Code
+ *  侧栏：icon + label 在宽面板下并排，窄面板（<300px）降级为 icon-only + title。 */
+const TAB_ICONS: Record<Tab, typeof ListTree> = {
+  timeline: ListTree,
+  chat: Hash,
+  changes: FileDiff,
+  terminal: TerminalSquare,
+  artifacts: Package,
+};
+
 const TABS: readonly { id: Tab; label: string }[] = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'chat', label: 'Overview' },
@@ -91,20 +102,26 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
             timeline/changes/terminal/artifacts"）——点击任意 tab = 返回 run 级
             并切到该 tab，导航永远可达，不再依赖隐蔽的返回键。 */}
         <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={false}
-              className="detail-tab"
-              onClick={() => {
-                setTab(t.id);
-                onFocusRun();
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
+          {TABS.map((t) => {
+            const Icon = TAB_ICONS[t.id];
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                role="tab"
+                aria-selected={active}
+                className={`detail-tab ${active ? 'sel' : ''}`}
+                onClick={() => {
+                  setTab(t.id);
+                  onFocusRun();
+                }}
+                title={t.label}
+              >
+                <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
+                <span className="detail-tab-label">{t.label}</span>
+              </button>
+            );
+          })}
         </div>
         <div className="detail-body">
           <EventInspector focus={focus} />
@@ -154,17 +171,22 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       </div>
 
       <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            className={`detail-tab ${tab === t.id ? 'sel' : ''}`}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
+        {TABS.map((t) => {
+          const Icon = TAB_ICONS[t.id];
+          return (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={tab === t.id}
+              className={`detail-tab ${tab === t.id ? 'sel' : ''}`}
+              onClick={() => setTab(t.id)}
+              title={t.label}
+            >
+              <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
+              <span className="detail-tab-label">{t.label}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* 结构分层：header/tabs 钉在面板顶部，只有内容滚动（用户反馈 2026-09-06：
@@ -498,7 +520,7 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream }: { co
   }, []);
 
   if (total === 0) {
-    return <TabEmpty hint="本会话尚无事件。" />;
+    return <TabEmpty hint="本会话尚无事件。" icon={ListTree} />;
   }
   const hidden = Math.max(0, total - windowSize);
   const visible = hidden > 0 ? conversation.events.slice(hidden) : conversation.events;
@@ -603,7 +625,7 @@ const TimelineRow = memo(function TimelineRow({
 function ChangesTab({ tools }: { tools: ToolCall[] }) {
   const diffs = tools.filter((t) => t.diff);
   if (diffs.length === 0) {
-    return <TabEmpty hint="本次会话未产生文件变更。" />;
+    return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
   }
   return (
     <>
@@ -644,7 +666,7 @@ function bashResult(tool: ToolCall): { exit_code?: number; stdout?: string } | n
 function TerminalTab({ tools, onFocusTool }: { tools: ToolCall[]; onFocusTool: (t: ToolCall) => void }) {
   const bashes = tools.filter((t) => t.name === 'bash');
   if (bashes.length === 0) {
-    return <TabEmpty hint="本次会话未执行命令。" />;
+    return <TabEmpty hint="本次会话未执行命令。" icon={TerminalSquare} />;
   }
   return (
     <>
@@ -677,7 +699,7 @@ function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
   // path (invariant #22).
   const artifacts = tools.filter((t) => t.artifact);
   if (artifacts.length === 0) {
-    return <TabEmpty hint="本次会话未产生 Artifact。" />;
+    return <TabEmpty hint="本次会话未产生 Artifact。" icon={Package} />;
   }
   return (
     <>
@@ -948,8 +970,16 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
   );
 }
 
-function TabEmpty({ hint }: { hint: string }) {
-  return <div className="detail-empty-hint detail-tab-empty">{hint}</div>;
+/** Tab 空状态 —— 对应 tab 的 icon + 一句话。
+ *  参考 Linear/Vercel dashboard 空状态：轻量图标（非灰黄 emoji）+ 克制文案，
+ *  让"没有数据"读起来是预期而非故障。icon 与 tab 条同一图标，视觉呼应。 */
+function TabEmpty({ hint, icon: Icon }: { hint: string; icon: typeof ListTree }) {
+  return (
+    <div className="detail-tab-empty">
+      <Icon size={24} className="detail-empty-icon" aria-hidden="true" />
+      <div className="detail-empty-hint">{hint}</div>
+    </div>
+  );
 }
 
 function DetailEmpty() {
