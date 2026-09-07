@@ -37,6 +37,7 @@ class ContextBuilder:
         auto_compact_threshold: float = 0.70,
         hard_guard_threshold: float = 0.85,
         context_providers: list[ContextProvider] | None = None,
+        system_prompt: str | None = None,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
@@ -45,6 +46,11 @@ class ContextBuilder:
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
         self.context_providers = list(context_providers or [])
+        # Runtime 装配期确定的角色提示（ADR-0020a，agent_profile 运行时消费）：
+        # 不是持久历史事件（不变量 #5），不写 JSONL——在 build() 返回前 prepend。
+        # 缓存其 token 成本：文本终身不变，复用常量避免每步重估。
+        self.system_prompt = system_prompt
+        self._system_prompt_tokens: int | None = None
         # (session_id, seq) → 该事件投影消息的 token 成本。事件落盘后其投影
         # 消息内容终身不变，成本是常量——此前每步对全部历史重新 model_dump_json
         # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
@@ -57,12 +63,22 @@ class ContextBuilder:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
         messages = session.derive_messages()
         token_estimate = self._estimate_tokens_cached(session, messages)
+        # system_prompt 是 runtime 装配期上下文（非事件），其 token 成本单列加总，
+        # 不进入 derive_messages 结果——避免触发 _estimate_tokens_cached 的
+        # 「事件数 ≠ 消息数」计数失配分支（builder.py 的整体重估路径）。
+        if self.system_prompt:
+            if self._system_prompt_tokens is None:
+                self._system_prompt_tokens = estimate_message_tokens(
+                    [SystemMessage(content=self.system_prompt)]
+                )
+            token_estimate += self._system_prompt_tokens
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
         )
         if token_estimate <= self.max_context_tokens * self.auto_compact_threshold:
-            return await self._with_providers(session, messages, token_estimate)
+            built = await self._with_providers(session, messages, token_estimate)
+            return self._prepend_system_prompt(built)
         result = await ContextCompactor(
             self.model_provider, max_context_tokens=self.max_context_tokens,
             auto_compact_threshold=self.auto_compact_threshold,
@@ -75,7 +91,23 @@ class ContextBuilder:
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
             })
-        return await self._with_providers(session, result.messages, result.token_estimate)
+        # 压缩后的 token_estimate 只含 messages，不含 system_prompt——
+        # 补回 system_prompt 的 token 成本，否则 _with_providers 会把
+        # system_prompt 占用的预算当作可用空间分配给 provider 内容。
+        provider_estimate = result.token_estimate + (self._system_prompt_tokens or 0)
+        built = await self._with_providers(session, result.messages, provider_estimate)
+        return self._prepend_system_prompt(built)
+
+    def _prepend_system_prompt(self, messages: list[AnyMessage]) -> list[AnyMessage]:
+        """把 system_prompt 作为列表首条 SystemMessage 注入（runtime context，非事件）。
+
+        在 _with_providers 之后 prepend：provider 内容已按既有约定插在开头
+        连续 SystemMessage 之后——这里再加一条 SystemMessage 在最前，不破坏
+        provider 的插入位置语义（SystemMessage 前缀更长，provider 仍紧随其后）。
+        """
+        if not self.system_prompt:
+            return messages
+        return [SystemMessage(content=self.system_prompt), *messages]
 
     def _estimate_tokens_cached(
         self, session: Session, messages: list[AnyMessage],

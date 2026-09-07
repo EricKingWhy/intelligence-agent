@@ -263,6 +263,7 @@ class AgentRuntime:
         session_meta_store: Any | None = None,
         context_builder: ContextBuilder | None = None,
         context_providers: list[ContextProvider] | None = None,
+        system_prompt: str | None = None,
         memory_writer: MemoryWriteback | None = None,
         failure_guard: RepeatedToolFailureGuard | None = None,
         fallback_model: Any | None = None,
@@ -307,7 +308,18 @@ class AgentRuntime:
         self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
         self._session_meta_store = session_meta_store
         # 使用未绑定工具的原始 Provider 生成摘要，不让摘要调用请求工具。
-        self._context_builder = context_builder or ContextBuilder(model, context_providers=context_providers)
+        # system_prompt（ADR-0020a，agent_profile 运行时消费）：与 context_builder
+        # 不同时传——context_builder 是更完整的注入点（调用方自管 system_prompt）；
+        # 同时传时 context_builder 优先，system_prompt 被忽略并记一条 warning。
+        if context_builder is not None and system_prompt is not None:
+            logger.warning(
+                "AgentRuntime 同时收到 context_builder 和 system_prompt——"
+                "context_builder 优先，system_prompt 被忽略（调用方应在构造 "
+                "context_builder 时注入 system_prompt）"
+            )
+        self._context_builder = context_builder or ContextBuilder(
+            model, context_providers=context_providers, system_prompt=system_prompt,
+        )
         if context_builder is not None and context_providers:
             # 双入口注入按身份去重：同一 provider 实例已在 builder 列表里时跳过
             # ——否则每 build 重复执行（重复注入内容 + 双倍搜索/超时风险）。

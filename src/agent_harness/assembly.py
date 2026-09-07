@@ -129,10 +129,17 @@ async def build_runtime(
     """
     if reasoning_effort is not None:
         logger.info("reasoning_effort=%s received but not yet consumed by runtime", reasoning_effort)
-    if agent_profile is not None:
-        logger.info("agent_profile=%s received but not yet consumed by runtime", agent_profile)
     if context_providers is not None:
         logger.info("context_providers=%s received but not yet consumed by runtime", context_providers)
+
+    # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
+    # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
+    # coding/research_review 收窄 registry 到 spec.tool_scope + 注入 spec.system_prompt。
+    # 未知名字 web 层已 422，这里 KeyError 再响亮失败一次（防御性，不应发生）。
+    profile_spec = None
+    if agent_profile is not None:
+        from agent_harness.agent.profiles import BUILTIN_PROFILES
+        profile_spec = BUILTIN_PROFILES[agent_profile]
 
     config = (ModelConfig.from_settings(settings) if model_name is None
               else ModelConfig.from_catalog(settings, model_name))
@@ -184,6 +191,14 @@ async def build_runtime(
             continue
         registry.register(capability_tool)
 
+    # agent_profile tool_scope 收窄（ADR-0020a）：仅在非 main profile 时过滤——
+    # main 的 _MAIN_TOOLS 是全量的超集，filter 等价不过滤，但若未来新增了一个
+    # tool_scope 未声明的工具，filter 会隐性收窄它。所以 main/None 走原路径不 filter，
+    # 只有 coding/research_review 才收窄。收窄后 registry 流向所有下游：
+    # ToolExecutor / AgentRuntime / multiagent activate 的 source_registry。
+    if profile_spec is not None and agent_profile != "main":
+        registry = registry.filtered(profile_spec.tool_scope)
+
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
     # 同一审批面（决策 11 权限传递）。
@@ -229,6 +244,7 @@ async def build_runtime(
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
             context_providers=list(wiring.context_providers),
+            system_prompt=(profile_spec.system_prompt if profile_spec is not None else None),
         ),
         memory_writer=wiring.memory_writer,
         fallback_model=fallback_model,
