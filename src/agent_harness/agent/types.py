@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
+
 if TYPE_CHECKING:
     from agent_harness.session import SessionEvent
 
@@ -85,11 +87,23 @@ class AgentEvent:
     # stream-only 信号（model/started）用发送时刻——它们不持久化，
     # 没有事实源时间，发送时刻是最接近的近似（spec 11 §4 / issue #43）。
     time: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="milliseconds"))
+    # RuntimeEvent 信封字段（SDD 03 §3，Phase 2 加法）：
+    # - schema_version：信封版本，与 SessionEvent 同源常量；
+    # - durability：由 is_durable 推导（durable/transient），SSE 渲染时写入帧；
+    #   不存为字段，避免与 is_durable 重复真值源；
+    # - capability：事件归属 capability id（Phase 6 注入点），运行时恒 None。
+    schema_version: str = RUNTIME_EVENT_SCHEMA_VERSION
+    capability: str | None = None
 
     @property
     def is_durable(self) -> bool:
         """是否已被 SessionEvent 事实源记录（有 seq 即是）。"""
         return self.seq is not None
+
+    @property
+    def durability(self) -> str:
+        """RuntimeEvent 信封 durability 推导（SDD 03 §3）：有 seq = durable。"""
+        return "durable" if self.seq is not None else "transient"
 
 
 def to_agent_event(event: SessionEvent) -> AgentEvent:
@@ -111,4 +125,6 @@ def to_agent_event(event: SessionEvent) -> AgentEvent:
         step_id=event.step_id,
         block_id=event.block_id,
         time=event.time,
+        schema_version=event.schema_version,
+        capability=event.capability,
     )
