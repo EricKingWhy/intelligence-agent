@@ -94,31 +94,45 @@
   --terminal-fg: #d4d4d4;
   --terminal-muted: #a1a1a6;
 
-  /* ══ Dark theme (default) — semantic tokens per Brief §8 ══ */
+  /* ══ Dark theme (default) — SDD 02 §4.1 semantic surface model ══
+   * Observable Agent Workspace redesign (feat/frontend-c, Phase 1):
+   * primary tokens are the SDD §3/§4.1 semantic surfaces; the older
+   * --bg-* / --surface-N names are kept as aliases so app.css keeps
+   * working unchanged. Pink accent per frozen decision 08 #14. */
+  --surface-canvas:    #0c0c0f;   /* app frame / ambient backdrop */
+  --surface-chrome:    #101014;   /* app bar / rails / inspector (quieter) */
+  --surface-workspace: #121217;   /* primary content area (brightest) */
+  --surface-elevated:  #17171d;   /* inset cards, terminal blocks base */
+  --surface-overlay:   #262b34;   /* popovers / floating controls */
+  --surface-glass:     rgba(38, 43, 52, 0.72); /* translucent overlays */
+  --surface-selected:  rgba(245, 174, 201, 0.08); /* pink-tinted selection */
+  --surface-hover:     rgba(255, 255, 255, 0.045);
+  --surface-danger:    rgba(229, 114, 111, 0.10);
 
-  /* App surfaces: low-contrast chrome, content brighter than chrome
-   * （2026-09-05 精修：workspace 与 chrome 拉开一整档亮度差——内容区是舞台，
-   * chrome 退后；之前三档几乎同色，整页一块黑板） */
-  --bg-app: #090a0c;
-  --bg-sidebar: #0d0f12;
-  --bg-workspace: #14171d;
-  --bg-inspector: #0d0f12;
-  --surface-1: #171a20;
-  --surface-2: #1f232b;
-  --surface-overlay: #262b34;
+  /* Legacy surface aliases (app.css pre-Phase-2 references; mapped onto the
+   * new semantic model so existing selectors resolve unchanged). */
+  --bg-app:       var(--surface-canvas);
+  --bg-sidebar:   var(--surface-chrome);
+  --bg-workspace: var(--surface-workspace);
+  --bg-inspector: var(--surface-chrome);
+  --surface-1:    var(--surface-elevated);
+  --surface-2:    #1f232b;
 
   /* Borders */
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-subtle: rgba(255, 255, 255, 0.075);
+  --border-strong: rgba(255, 255, 255, 0.13);
 
-  /* Text: primary > secondary > tertiary */
-  --text-primary: #ededf0;
-  --text-secondary: #a4a4ac;
-  --text-tertiary: #7a7a83;
+  /* Text: primary > secondary > tertiary (SDD 02 §4.1) */
+  --text-primary:   rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.64);
+  --text-tertiary:  rgba(255, 255, 255, 0.42);
 
-  /* Accent: restrained cool cyan (NOT AI purple) */
-  --accent: #56b8c9;
-  --accent-muted: rgba(86, 184, 201, 0.14);
+  /* Accent: restrained pale pink signature (frozen decision 08 #14, SDD 02 §4.1).
+   * Not AI purple, not the prior cool cyan — the product's own quiet tint. */
+  --accent:        #f1b3ca;
+  --accent-strong: #f4a5c4;
+  --accent-soft:   rgba(241, 179, 202, 0.12);
+  --accent-muted:  var(--accent-soft); /* legacy alias used across app.css */
 
   /* Status colors (small-area use only: dots, badges, labels) */
   --success: #6fce9e;
@@ -127,7 +141,7 @@
   --info: #7c9eff;
 
   /* State tint for hover / selected washes */
-  --color-hover: rgba(255, 255, 255, 0.05);
+  --color-hover: var(--surface-hover);
 
   /* Edge lighting for floating glass only */
   --edge-light: inset 0 0.5px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 0.5px rgba(255, 255, 255, 0.04);
@@ -155,37 +169,44 @@
   color-scheme: dark;
 }
 
-/* Danger lives outside the alias block so both themes can reference cleanly */
-:root {
-  --danger: #e5726f;
-}
-
-/* ══ Light theme — single source (JS sets data-theme before paint) ══ */
+/* ══ Light theme — equal priority (SDD 02 §4.2), JS sets data-theme before paint ══ */
 :root[data-theme='light'] {
-  --bg-app: #f2f2f4;
-  --bg-sidebar: #ececef;
-  --bg-workspace: #ffffff;
-  --bg-inspector: #ececef;
-  --surface-1: #ffffff;
-  --surface-2: #f1f1f3;
-  --surface-overlay: #ffffff;
+  --surface-canvas:    #f6f6f8;
+  --surface-chrome:    #f1f1f4;
+  --surface-workspace: #fbfbfc;
+  --surface-elevated:  #ffffff;
+  --surface-overlay:   #ffffff;
+  --surface-glass:     rgba(255, 255, 255, 0.78);
+  --surface-selected:  rgba(207, 91, 139, 0.07);
+  --surface-hover:     rgba(20, 20, 28, 0.04);
+  --surface-danger:    rgba(207, 74, 70, 0.08);
 
-  --border-subtle: rgba(0, 0, 0, 0.09);
-  --border-strong: rgba(0, 0, 0, 0.16);
+  /* Legacy aliases onto the new semantic model. */
+  --bg-app:       var(--surface-canvas);
+  --bg-sidebar:   var(--surface-chrome);
+  --bg-workspace: var(--surface-workspace);
+  --bg-inspector: var(--surface-chrome);
+  --surface-1:    var(--surface-elevated);
+  --surface-2:    #f1f1f3;
 
-  --text-primary: #1d1d21;
-  --text-secondary: #5f5f67;
-  --text-tertiary: #767680;
+  --border-subtle: rgba(18, 18, 24, 0.08);
+  --border-strong: rgba(18, 18, 24, 0.14);
 
-  --accent: #0e7f93;
-  --accent-muted: rgba(14, 127, 147, 0.12);
+  --text-primary:   rgba(18, 18, 24, 0.92);
+  --text-secondary: rgba(18, 18, 24, 0.62);
+  --text-tertiary:  rgba(18, 18, 24, 0.42);
+
+  --accent:        #c96990;
+  --accent-strong: #b95680;
+  --accent-soft:   rgba(201, 105, 144, 0.10);
+  --accent-muted:  var(--accent-soft);
 
   --success: #2f9e63;
   --warning: #b07a10;
   --danger: #cf4a46;
   --info: #4a6fd6;
 
-  --color-hover: rgba(0, 0, 0, 0.045);
+  --color-hover: var(--surface-hover);
 
   --json-string: #0a7d32;
   --json-number: #0550ae;
