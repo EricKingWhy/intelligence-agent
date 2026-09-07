@@ -1869,6 +1869,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .detail-tab:active {
   transform: scale(0.97);
 }
+@media (prefers-reduced-motion: reduce) {
+  .detail-tab:active {
+    transform: none;
+  }
+}
 /* 窄面板（<310px Inspector 宽度）：icon-only，label 隐藏。
    数字来自：5 tab × (24px icon + gap + padding) ≈ 280px 容得下 icon+label，
    更窄切 icon-only。用容器查询（@container inspector）而非视口媒体查询，
@@ -2814,6 +2819,11 @@ button.json-row {
 }
 .workspace-mode:active {
   transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-mode:active {
+    transform: none;
+  }
 }
 @media (max-width: 360px) {
   .workspace-mode-label {
