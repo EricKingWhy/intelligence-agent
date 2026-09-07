@@ -33,6 +33,10 @@ export const EventType = {
   PERMISSION_RESOLVED: 'permission/resolved',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
+  MESSAGE_QUEUED: 'message/queued',
+  QUEUE_CANCELLED: 'queue/cancelled',
+  STEER_REQUESTED: 'steer/requested',
+  STEER_APPLIED: 'steer/applied',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];

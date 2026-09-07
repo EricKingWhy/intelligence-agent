@@ -14,9 +14,7 @@ import logging
 import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
-from uuid import uuid4
 
-import anyio
 import jwt
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +25,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
-from agent_harness.assembly import RecoveryStores, build_runtime, initialize_stores
+from agent_harness.assembly import RecoveryStores, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
@@ -40,33 +38,15 @@ from agent_harness.identity import (
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import (
     PROVIDER_PRESETS,
-    ConfigError,
     ModelConfig,
     _pick_capabilities,
     parse_model_catalog,
 )
 from agent_harness.observability import flush_process_sink
-from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
-from agent_harness.session import JsonlSessionStore, Session, SessionEvent
+from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 from agent_harness.session.queue import MessageQueueManager
-from agent_harness.storage import (
-    SqliteCheckpointStore,
-    SqliteOperationLedger,
-    SqliteSessionMetaStore,
-)
-from agent_harness.tooling.approval import (
-    ApprovalCallback,
-    ApprovalRequest,
-    ApprovalResponse,
-    PermissionDecision,
-)
-from agent_harness.tooling.approval_queue import PendingApprovalQueue
-from agent_harness.tooling.contract import (
-    PERMISSION_MODE_DESCRIPTIONS,
-    PermissionPolicy,
-)
 from agent_harness.session.service import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -76,12 +56,20 @@ from agent_harness.session.service import (
     InvalidSessionId,
     QueueItemNotFound,
     RecoveryConflict,
-    SendMessageResult,
     SessionNotFound,
     SessionService,
-    SessionServiceError,
     SteerTargetNotFound,
     WorkspaceNameInvalid,
+)
+from agent_harness.storage import (
+    SqliteCheckpointStore,
+    SqliteOperationLedger,
+    SqliteSessionMetaStore,
+)
+from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.contract import (
+    PERMISSION_MODE_DESCRIPTIONS,
+    PermissionPolicy,
 )
 from agent_harness.web.runmanager import RunManager
 
@@ -1176,7 +1164,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         是正常客户端断开，吞掉不打日志。
         """
         try:
-            await handle_websocket(websocket, app.state)
+            await handle_websocket(websocket, app.state.agent)
         except WebSocketDisconnect:
             # 正常断开：客户端关页 / 重连切换。
             return

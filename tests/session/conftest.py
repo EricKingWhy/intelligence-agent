@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_harness.config import Settings
-from agent_harness.session import JsonlSessionStore, Session
+from agent_harness.session import Session
 from agent_harness.web.app import AppState
 
 

@@ -68,6 +68,11 @@ class TestSessionEventDTO:
             "reasoning/interrupted",
             "tool/approval-requested",
             "permission/resolved",
+            # Phase Multiturn T2 (#132)：续聊队列 + steer 引导（PRD §6）
+            "message/queued",
+            "queue/cancelled",
+            "steer/requested",
+            "steer/applied",
         }
         assert EVENT_TYPES == expected
 

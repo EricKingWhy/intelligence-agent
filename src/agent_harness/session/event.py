@@ -56,6 +56,15 @@ PERMISSION_RESOLVED = "permission/resolved"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
+# ── Phase Multiturn T2（#132）：续聊队列 + steer 引导 ────────────────────
+# 用户在 run 进行中继续输入：queue 模式排队等下个 run 自然消费；steer 模式
+# 注入在途 run 的引导请求（不抢断、不改写历史事件）。四种新事件构成
+# 续聊生命周期的 durable 词汇——前端据 type 决定占位/取消 UI。
+MESSAGE_QUEUED = "message/queued"
+QUEUE_CANCELLED = "queue/cancelled"
+STEER_REQUESTED = "steer/requested"
+STEER_APPLIED = "steer/applied"
+
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
 # below is an ephemeral streaming signal (Phase 9 AgentEvent) and MUST NOT be
@@ -92,6 +101,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         REASONING_INTERRUPTED,
         TOOL_APPROVAL_REQUESTED,
         PERMISSION_RESOLVED,
+        # Phase Multiturn T2 (#132)：续聊队列 + steer 引导（PRD §6）
+        MESSAGE_QUEUED,
+        QUEUE_CANCELLED,
+        STEER_REQUESTED,
+        STEER_APPLIED,
     }
 )
 

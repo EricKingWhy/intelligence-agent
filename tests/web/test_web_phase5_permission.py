@@ -16,8 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
+from agent_harness.session import service as service_module
 from agent_harness.tooling.contract import PermissionPolicy
-from agent_harness.web import app as app_module
 from agent_harness.web.app import create_app
 
 
@@ -36,7 +36,7 @@ def captured_build(monkeypatch, tmp_path):
         # 返回一个占位对象；后续 Session.start + launch 会被另一处 patch 拦掉
         return object()
 
-    monkeypatch.setattr(app_module, "build_runtime", _fake_build)
+    monkeypatch.setattr(service_module, "build_runtime", _fake_build)
     # launch 同步函数（不 async）；返回带 unsubscribe 的 fake run + 真实 Subscriber
     # （队列里预先塞入 DONE sentinel，event_generator 拿到就立刻干净收尾）。
     from agent_harness.web.runmanager import RunManager, Subscriber

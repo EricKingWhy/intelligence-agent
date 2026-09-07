@@ -22,7 +22,13 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from agent_harness.assembly import build_runtime
-from agent_harness.session.event import TOOL_APPROVAL_REQUESTED
+from agent_harness.session.event import (
+    MESSAGE_QUEUED,
+    QUEUE_CANCELLED,
+    STEER_REQUESTED,
+    TOOL_APPROVAL_REQUESTED,
+)
+from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling.approval import (
@@ -35,7 +41,6 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
-    from agent_harness.assembly import RecoveryStores
     from agent_harness.web.app import AppState
     from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
 
@@ -84,6 +89,14 @@ class WorkspaceNameInvalid(SessionServiceError):
     """workspace 名字不合法（路径逃逸风险）。"""
 
 
+class QueueItemNotFound(SessionServiceError):
+    """排队消息不存在 / 已消费 / 已取消。"""
+
+
+class SteerTargetNotFound(SessionServiceError):
+    """steer 目标 run 不存在（无在途 run）。"""
+
+
 # ── 数据载体 ──────────────────────────────────────────────────────────
 
 
@@ -117,6 +130,35 @@ class ApprovalDecision:
 
     decision: PermissionDecision
     response: ApprovalResponse
+
+
+@dataclass(frozen=True)
+class SendMessageResult:
+    """send_message 的返回束——三种结果分支。
+
+    - launched：idle session，直接起了新 run。
+    - queued：活跃 run，消息已排队。
+    - steered：活跃 run + mode=steer，请求已注册。
+    """
+
+    status: str  # "launched" | "queued" | "steered"
+    session: Session | None = None
+    run: ManagedRun | None = None
+    subscriber: Subscriber | None = None
+    queued_message: QueuedMessage | None = None
+    steer_request: SteerRequest | None = None
+
+    def to_response(self) -> dict[str, str]:
+        """Web 层 queued/steered 分支返回体（launched 走 SSE 不经此）。
+
+        始终包含 ``status``；queued 附 ``queue_id``，steered 附
+        ``steer_id``——前端据此更新本地占位状态/取消按钮。
+        """
+        if self.status == "queued" and self.queued_message is not None:
+            return {"status": "queued", "queue_id": self.queued_message.queue_id}
+        if self.status == "steered" and self.steer_request is not None:
+            return {"status": "steered", "steer_id": self.steer_request.steer_id}
+        return {"status": self.status}
 
 
 # ── SessionService ───────────────────────────────────────────────────
@@ -380,6 +422,141 @@ class SessionService:
             subscriber=subscriber,
             replay_upto=replay_upto,
             latest_seq=latest_seq,
+        )
+
+    # ── 续聊（Phase Multiturn T2 / PRD §5.3）──────────────────────
+
+    async def send_message(
+        self,
+        *,
+        session_id: str,
+        content: str,
+        mode: str = "queue",
+        max_steps: int = 10,
+    ) -> SendMessageResult:
+        """续聊消息入口（统一 CLI / Web 续聊路径）。
+
+        双模式（PRD 锁定决策 D-7）：
+
+          * ``mode="queue"``（默认）：
+              - idle（无在途 run）→ ``resume_and_launch`` 拉起新 run，返回
+                ``SendMessageResult(status="launched", ...)``；Web 层据此打开
+                SSE 流（同创建端点语义，PRD D-10）。
+              - 活跃 run → 入队等下个 run 自然消费，写一条 ``MESSAGE_QUEUED``
+                SessionEvent，返回 ``status="queued"``。
+          * ``mode="steer"``：仅在途 run 时合法——注册 SteerRequest，写
+            ``STEER_REQUESTED`` 事件，返回 ``status="steered"``；无在途 run →
+            ``SteerTargetNotFound``（409）。
+
+        不抢断、不改写历史事件（不变量 #3 / #22）；queue 与 steer 的消费由
+        run 边界 / runtime 自身驱动，本方法只做注册与 durable 记录。
+        """
+        self._validate_session_id(session_id)
+        if not await self.has_session(session_id):
+            raise SessionNotFound(f"session '{session_id}' not found")
+
+        active_run = self._state.run_manager.get_active(session_id)
+
+        if mode == "steer":
+            if active_run is None:
+                raise SteerTargetNotFound(
+                    "steer requires an active run; use mode='queue' to enqueue"
+                )
+            steer_req = await self._state.message_queues.register_steer(
+                session_id=session_id,
+                content=content,
+                run_id=active_run.run_id,
+            )
+            # durable 记录：STEER_REQUESTED（不写进 run 事件流，写 SessionEvent）。
+            session = Session.resume(
+                self._state.store,
+                session_id,
+                workspace_registry=self._state.workspace_registry,
+            )
+            session.append(
+                STEER_REQUESTED,
+                data={
+                    "steer_id": steer_req.steer_id,
+                    "content": content,
+                    "run_id": steer_req.run_id,
+                },
+            )
+            return SendMessageResult(status="steered", steer_request=steer_req)
+
+        # mode == "queue"
+        if active_run is None:
+            # idle → 直接拉起新 run（同 resume 路径）。
+            launched = await self.resume_and_launch(
+                session_id=session_id, task=content, max_steps=max_steps
+            )
+            return SendMessageResult(
+                status="launched",
+                session=launched.session,
+                run=launched.run,
+                subscriber=launched.subscriber,
+            )
+
+        # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
+        queued = await self._state.message_queues.enqueue(
+            session_id=session_id, content=content
+        )
+        session = Session.resume(
+            self._state.store,
+            session_id,
+            workspace_registry=self._state.workspace_registry,
+        )
+        session.append(
+            MESSAGE_QUEUED,
+            data={
+                "queue_id": queued.queue_id,
+                "content": content,
+            },
+        )
+        return SendMessageResult(status="queued", queued_message=queued)
+
+    async def cancel_queue(self, *, session_id: str, queue_id: str) -> bool:
+        """取消尚未消费的排队消息（PRD §5.3）。
+
+        幂等失败语义：queue_id 已取消 / 已消费 / 不存在 →
+        ``QueueItemNotFound``（前端 404）；取消成功 → 写一条
+        ``QUEUE_CANCELLED`` SessionEvent，返回 True。
+        """
+        self._validate_session_id(session_id)
+        if not await self.has_session(session_id):
+            raise SessionNotFound(f"session '{session_id}' not found")
+        cancelled = await self._state.message_queues.cancel(
+            session_id=session_id, queue_id=queue_id
+        )
+        if not cancelled:
+            raise QueueItemNotFound(
+                f"queue item '{queue_id}' not found, already consumed, or cancelled"
+            )
+        session = Session.resume(
+            self._state.store,
+            session_id,
+            workspace_registry=self._state.workspace_registry,
+        )
+        session.append(
+            QUEUE_CANCELLED,
+            data={"queue_id": queue_id},
+        )
+        return True
+
+    async def drain_queued_message(
+        self, *, session_id: str, max_steps: int = 10
+    ) -> LaunchResult | None:
+        """run 结束后自动消费下一条排队消息（PRD §5.3 FIFO 续聊链）。
+
+        无排队或全部已取消 → 返回 None（调用方静默收尾）；有可用消息 →
+        drain 出来 + ``resume_and_launch`` 拉起下一轮 run。此方法是
+        「续聊链接力」的唯一驱动入口，避免 Web / CLI 各自实现而漂移。
+        """
+        self._validate_session_id(session_id)
+        msg = await self._state.message_queues.drain_next(session_id)
+        if msg is None:
+            return None
+        return await self.resume_and_launch(
+            session_id=session_id, task=msg.content, max_steps=max_steps
         )
 
     # ── 取消 ─────────────────────────────────────────────────────────
