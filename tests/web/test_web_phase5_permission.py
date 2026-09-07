@@ -57,7 +57,9 @@ def captured_build(monkeypatch, tmp_path):
 
 
 class _FakeRun:
-    """占位 run：只需 unsubscribe 存在（event_generator 收尾时调用）。"""
+    """占位 run：模拟 ManagedRun 最小接口（unsubscribe + task）。"""
+
+    task = None  # ManagedRun.launch 后必设；mock 里永远 None（不触发 GC 回调）
 
     def unsubscribe(self, _sub):
         pass

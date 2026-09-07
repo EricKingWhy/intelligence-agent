@@ -49,7 +49,10 @@ REASONING_COMPLETED = "reasoning/completed"
 REASONING_INTERRUPTED = "reasoning/interrupted"
 # ── + Phase 5 Composer（SDD 06 Phase 5）：交互式审批——run 在审批关卡暂停，
 # 向前端广播 tool/approval-requested（durable）；前端 /approve 后续解。 ──
+# ── + Batch 5.1：permission/resolved 补审计 trail（03 §9 PermissionResolvedData）。
+# 前端据 approval_id 把 requested 与 resolved 配对，JSONL 可回放完整决策历史。 ──
 TOOL_APPROVAL_REQUESTED = "tool/approval-requested"
+PERMISSION_RESOLVED = "permission/resolved"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
@@ -88,6 +91,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         REASONING_COMPLETED,
         REASONING_INTERRUPTED,
         TOOL_APPROVAL_REQUESTED,
+        PERMISSION_RESOLVED,
     }
 )
 

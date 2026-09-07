@@ -59,6 +59,7 @@ from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalRequest,
     ApprovalResponse,
+    PermissionDecision,
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import (
@@ -123,10 +124,16 @@ class CreateSessionRequest(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    """POST /api/sessions/{id}/approve 的请求体（Phase 5）。"""
+    """POST /api/sessions/{id}/approve 的请求体（Phase 5 + Batch 5.1）。
+
+    decision 是 spec 契约（03 §9 PermissionDecision）；approved 是兼容字段。
+    两者都传时 decision 优先；只传 approved 时从它推导（True→approve_once，
+    False→deny）。decision 必须命中 requested 事件里 allowed_decisions。
+    """
 
     approval_id: str | None = None
     approved: bool = True
+    decision: str | None = None
     reason: str = ""
 
 
@@ -777,21 +784,47 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             async def _interactive_callback(req: ApprovalRequest) -> ApprovalResponse:
                 approval_id = queue.register(req)
                 # emit tool/approval-requested（durable）：前端据 approval_id 调 /approve
+                # payload 契约见 03_RUNTIME_EVENT_CONTRACT.md §9 PermissionRequestedData
                 from agent_harness.session.event import TOOL_APPROVAL_REQUESTED
                 sess = session_holder["session"]
-                assert sess is not None, "interactive callback 在 Session.start 之前被触发"
+                if sess is None:
+                    # 时序约束：callback 只能在 launch 之后被 ToolExecutor 调用，
+                    # 那时 session_holder 已注入。触发不到说明调用顺序被破坏。
+                    raise RuntimeError("interactive callback invoked before Session.start")
+                # 当前 runtime 只兑现 deny / approve_once（per-call scoping）。
+                # approve_session / approve_policy 留后续批次（需 session 级缓存）。
+                allowed_decisions = [
+                    PermissionDecision.DENY.value,
+                    PermissionDecision.APPROVE_ONCE.value,
+                ]
                 sess.append(
                     TOOL_APPROVAL_REQUESTED,
                     {
                         "approval_id": approval_id,
                         "tool_name": req.tool_name,
-                        "args": req.args,
+                        "tool_call_id": req.tool_call_id,
+                        "action_type": req.permission.value,
+                        "title": f"{req.tool_name} ({req.permission.value})",
+                        "description": req.reason,
+                        "arguments_preview": req.args,
                         "permission": req.permission.value,
                         "policy": req.policy.value,
                         "reason": req.reason,
+                        "allowed_decisions": allowed_decisions,
                     },
                 )
-                return await queue.wait_for(approval_id)
+                response = await queue.wait_for(approval_id)
+                # 回调返回后 emit permission/resolved（审计 trail）：
+                # 决策被记录进 JSONL，前端据 approval_id 与 requested 配对。
+                sess.append(
+                    "permission/resolved",
+                    {
+                        "approval_id": approval_id,
+                        "decision": response.decision.value,
+                        "reason": response.reason,
+                    },
+                )
+                return response
 
             approval_callback = _interactive_callback
         elif (
@@ -830,6 +863,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # launch 内无 await（create_task 只调度不执行）→ 订阅者挂载必然
         # 早于 run 的首批事件，不会丢帧。
         run, subscriber = state.run_manager.launch(session, runtime, req.task)
+
+        if interactive:
+            # run 终结时 GC 该 session 的 approval_queue（防长期泄漏）：
+            # done_callback 在 detached-run 模式下无论有无客户端连流都会触发。
+            # 闭包捕获 run.task（launch 后必然非 None）。
+            _task = run.task
+
+            def _gc_approval_queue(_t):
+                state.approval_queues.pop(session_id, None)
+
+            if _task is not None:
+                _task.add_done_callback(_gc_approval_queue)
 
         async def event_generator():
             """SSE 事件源：消费订阅队列，转成 SSE 帧。
@@ -983,11 +1028,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.post("/api/sessions/{session_id}/approve")
     async def approve_tool_call(session_id: str, req: ApproveRequest) -> dict[str, str]:
-        """交互式审批决策入口（Phase 5 切片 C）：前端拿到 tool/approval-requested
-        事件后，调本端点注入批准/拒绝决策，唤醒 run 内阻塞的 callback。
+        """交互式审批决策入口（Phase 5 切片 C + Batch 5.1）：前端拿到
+        tool/approval-requested 事件后，调本端点注入批准/拒绝决策，唤醒 run
+        内阻塞的 callback。
 
         语义：
-          成功 resolve → 200 ok（run 在 callback 处继续）
+          成功 resolve → 200 ok（run 在 callback 处继续；resolved 事件由 callback 写入）
+          decision 不在 requested 事件的 allowed_decisions 内 → 422（违反契约）
           approval_id 已 resolved → 409（防重复决策；幂等性拒绝）
           approval_id 不存在 → 404（前端过期事件或非本 session 的 id）
           无 approval_id（旧 seam 调用）→ 200 received（向后兼容）
@@ -1012,7 +1059,45 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 detail=f"session '{session_id}' has no interactive approval queue "
                        "(permission_mode not interactive, or run already terminated)",
             )
-        response = ApprovalResponse(approved=req.approved, reason=req.reason)
+        # 找到 requested 事件，读它声明的 allowed_decisions（03 §9 契约：
+        # 后端校验决策在允许集内——前端不是 enforcement boundary）。
+        requested = next(
+            (
+                e for e in existing
+                if e.type == "tool/approval-requested"
+                and e.data.get("approval_id") == req.approval_id
+            ),
+            None,
+        )
+        if requested is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"approval_id '{req.approval_id}' not found in session '{session_id}'",
+            )
+        allowed = requested.data.get("allowed_decisions", [])
+        # 解析 decision：显式传 → 用它；只传 approved → 推导；未知值 → 422。
+        if req.decision is not None:
+            try:
+                decision = PermissionDecision(req.decision)
+            except ValueError:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"decision '{req.decision}' is not a valid PermissionDecision",
+                )
+        else:
+            decision = (
+                PermissionDecision.APPROVE_ONCE if req.approved else PermissionDecision.DENY
+            )
+        if allowed and decision.value not in allowed:
+            raise HTTPException(
+                status_code=422,
+                detail=f"decision '{decision.value}' not in allowed_decisions {allowed}",
+            )
+        response = ApprovalResponse(
+            approved=(decision != PermissionDecision.DENY),
+            reason=req.reason,
+            decision=decision,
+        )
         try:
             ok = queue.resolve(req.approval_id, response)
         except KeyError:
@@ -1025,7 +1110,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 status_code=404,
                 detail=f"approval_id '{req.approval_id}' not found in session '{session_id}'",
             )
-        return {"status": "resolved", "approval_id": req.approval_id}
+        return {
+            "status": "resolved",
+            "approval_id": req.approval_id,
+            "decision": decision.value,
+        }
 
     @app.post("/api/sessions/{session_id}/recover")
     async def recover_session(session_id: str) -> list[dict]:
@@ -1052,19 +1141,6 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except RecoveryError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return [e.to_dict() for e in recovered.events]
-
-    @app.post("/api/sessions/{session_id}/approve")
-    async def approve(session_id: str, body: dict):
-        """审批决策回传（V1 seam：runtime 用 auto-approve，此 endpoint 预留）。
-
-        真正的交互式审批需要 pending approval queue + 通知机制（WebSocket seam）。
-        V1 返回 202 表示「已接收但当前 runtime 用 auto-approve」。
-        """
-        return {
-            "status": "received",
-            "session_id": session_id,
-            "note": "V1 uses auto-approve; interactive approval pending WebSocket seam",
-        }
 
     # ── 静态资源（前端 build 产物）──
     # 生产模式：FastAPI serve web/dist；dev 模式 Vite 自己跑 5173。

@@ -30,6 +30,7 @@ export const EventType = {
   REASONING_COMPLETED: 'reasoning/completed',
   REASONING_INTERRUPTED: 'reasoning/interrupted',
   TOOL_APPROVAL_REQUESTED: 'tool/approval-requested',
+  PERMISSION_RESOLVED: 'permission/resolved',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
 } as const;

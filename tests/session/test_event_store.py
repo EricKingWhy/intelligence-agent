@@ -67,6 +67,7 @@ class TestSessionEventDTO:
             "reasoning/completed",
             "reasoning/interrupted",
             "tool/approval-requested",
+            "permission/resolved",
         }
         assert EVENT_TYPES == expected
 
