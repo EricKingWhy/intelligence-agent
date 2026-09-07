@@ -35,6 +35,9 @@ interface Props {
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
   onReasoningEffortChange?: (id: string | null) => void;
+  /** GET /api/context-providers 清单。空 → 隐藏控件。
+   *  多选语义推迟——当前后端诚实返空，控件不会渲染。 */
+  contextProviders?: CatalogEntry[];
 }
 
 // memo：流式期间 props 稳定（streaming 布尔不变、回调由 App useCallback 固定），
@@ -56,6 +59,7 @@ export const Composer = memo(function Composer({
   reasoningEfforts = [],
   selectedReasoningEffort = null,
   onReasoningEffortChange,
+  contextProviders = [],
 }: Props) {
   const [value, setValue] = useState('');
 
@@ -83,7 +87,8 @@ export const Composer = memo(function Composer({
     models.length > 0 ||
     permissionModes.length > 0 ||
     agentProfiles.length > 0 ||
-    reasoningEfforts.length > 0;
+    reasoningEfforts.length > 0 ||
+    contextProviders.length > 0;
 
   return (
     <div className="composer-wrap">
@@ -135,6 +140,10 @@ export const Composer = memo(function Composer({
               placeholder="推理"
               disabled={streaming}
             />
+            {/* Context Providers 推迟——多选语义需要新组件或扩展 ControlPicker
+                支持 multi 模式。后端当前诚实返空，此控件不会渲染。提交链路已就绪：
+                App.tsx 的 handleSubmit 在 selectedContextProviders 非空时传
+                context_providers 数组。 */}
           </div>
         )}
         {streaming ? (
