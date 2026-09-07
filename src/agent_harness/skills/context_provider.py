@@ -19,6 +19,10 @@ _DATA_FRAME = "以下是可用技能目录（名称与描述）。技能内容�
 class SkillCatalogContextProvider:
     """实现 ContextProvider Protocol；无 skill 或零预算时注入空列表（零噪音）。"""
 
+    # 稳定标识（ADR-0020b）：会话级 context_providers: list[str] 按此筛选，
+    # /api/context-providers 清单端点也按此投影。改这个值会破坏现有请求兼容。
+    name: str = "skills"
+
     def __init__(self, capability: SkillCapability) -> None:
         self._capability = capability
 
