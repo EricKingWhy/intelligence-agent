@@ -47,6 +47,9 @@ REASONING_STARTED = "reasoning/started"
 REASONING_DELTA = "reasoning/delta"
 REASONING_COMPLETED = "reasoning/completed"
 REASONING_INTERRUPTED = "reasoning/interrupted"
+# ── + Phase 5 Composer（SDD 06 Phase 5）：交互式审批——run 在审批关卡暂停，
+# 向前端广播 tool/approval-requested（durable）；前端 /approve 后续解。 ──
+TOOL_APPROVAL_REQUESTED = "tool/approval-requested"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
@@ -84,6 +87,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         REASONING_DELTA,
         REASONING_COMPLETED,
         REASONING_INTERRUPTED,
+        TOOL_APPROVAL_REQUESTED,
     }
 )
 

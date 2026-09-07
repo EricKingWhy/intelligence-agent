@@ -21,7 +21,7 @@ import jwt
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, Response
@@ -55,7 +55,16 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
-from agent_harness.tooling.contract import PERMISSION_MODE_DESCRIPTIONS
+from agent_harness.tooling.approval import (
+    ApprovalCallback,
+    ApprovalRequest,
+    ApprovalResponse,
+)
+from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.contract import (
+    PERMISSION_MODE_DESCRIPTIONS,
+    PermissionPolicy,
+)
 from agent_harness.web.runmanager import RunManager
 
 # ── Request / Response schemas ──
@@ -70,10 +79,61 @@ class CreateSessionRequest(BaseModel):
     task: str = Field(min_length=1, max_length=100_000)
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（见 _validate_workspace_name）
     max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
-    auto_approve: bool = True  # V1 默认自动批准（demo 同款）
+    # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
+    # PermissionPolicy；未知值 → 422。permission_mode 决定 ToolExecutor 的 policy
+    # 上限，审批本身仍走 ApprovalCallback（默认 auto-approve）。
+    permission_mode: str = Field(default="workspace-write")
+    # auto_approve 保留为 deprecated alias（向后兼容）：true ≡ workspace-write
+    # + auto-approve callback；false ≡ workspace-write + deny callback。两者同传
+    # 时 permission_mode 优先。两个字段都缺省 → workspace-write + auto-approve
+    # （现行为不变）。
+    auto_approve: bool = True
+    # amend contract fields（Phase 5，当前 runtime no-op；明确接受但不假装生效）
+    reasoning_effort: str | None = None
+    agent_profile: str | None = None
+    context_providers: list[str] | None = None
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _validate_reasoning_effort(cls, v: str | None) -> str | None:
+        if v is not None and v not in {"minimal", "standard", "deep"}:
+            raise ValueError("reasoning_effort must be one of: minimal, standard, deep")
+        return v
+
+    @field_validator("agent_profile")
+    @classmethod
+    def _validate_agent_profile(cls, v: str | None) -> str | None:
+        if v is not None and v not in {"main", "coding", "research_review"}:
+            raise ValueError("agent_profile must be one of: main, coding, research_review")
+        return v
+
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
     # 命名 = AGENT_MODELS catalog 条目，未知名字 422。fallback 链不受影响。
     model: str | None = None
+
+    @field_validator("permission_mode")
+    @classmethod
+    def _validate_permission_mode(cls, v: str) -> str:
+        valid = {p.value for p in PermissionPolicy}
+        if v not in valid:
+            raise ValueError(
+                f"permission_mode must be one of {sorted(valid)}; got {v!r}"
+            )
+        return v
+
+
+class ApproveRequest(BaseModel):
+    """POST /api/sessions/{id}/approve 的请求体（Phase 5）。"""
+
+    approval_id: str | None = None
+    approved: bool = True
+    reason: str = ""
+
+
+class ResumeRequest(BaseModel):
+    """POST /api/sessions/{id}/resume 的请求体。"""
+
+    task: str = Field(min_length=1, max_length=100_000)
 
 
 class SessionSummary(BaseModel):
@@ -113,6 +173,10 @@ class AppState:
         self.run_manager = RunManager(
             disconnect_grace_seconds=settings.run_disconnect_grace_seconds,
         )
+        # Phase 5：会话级待审批队列——当 permission_mode 非 danger-full-access
+        # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
+        # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
+        self.approval_queues: dict[str, PendingApprovalQueue] = {}
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -682,15 +746,86 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         _, wiring = await state.get_wiring()
         await state.ensure_stores()
+
+        # Phase 5：permission_mode 是真值源；auto_approve 是 deprecated alias。
+        # 三种路由（保留向后兼容）：
+        #   1. 显式 permission_mode + 非 danger-full-access → 交互式审批：
+        #      needs_approval 触发时 emit tool/approval-requested + run 暂停，
+        #      前端 /approve 唤醒。
+        #   2. 纯 auto_approve=true（含缺省） → silent auto-approve（旧行为）。
+        #   3. 纯 auto_approve=false → deny callback（旧行为，已被 (1) 取代但保留）。
+        permission_mode = PermissionPolicy(req.permission_mode)
+        permission_mode_explicit = "permission_mode" in req.model_fields_set
+        auto_approve_explicit = "auto_approve" in req.model_fields_set
+
+        # 交互式审批触发条件：显式选了 permission_mode（不含只传 auto_approve 的旧客户端）
+        # 且 mode 不是 danger-full-access（后者 needs_approval 永远 False，无审批点）。
+        interactive = (
+            permission_mode_explicit
+            and permission_mode != PermissionPolicy.DANGER_FULL_ACCESS
+        )
+
+        approval_callback: ApprovalCallback | None
+        if interactive:
+            # 注册会话级 queue——callback 把 ApprovalRequest 登记后 emit + 等外部 resolve
+            queue = PendingApprovalQueue()
+            state.approval_queues[session_id] = queue
+            # session 还未创建（保持「先 build_runtime 再 Session.start」的无孤儿语义），
+            # 用 container 让 callback 在被调时拿到真实 session（launch 后才发生调用）。
+            session_holder: dict[str, Session | None] = {"session": None}
+
+            async def _interactive_callback(req: ApprovalRequest) -> ApprovalResponse:
+                approval_id = queue.register(req)
+                # emit tool/approval-requested（durable）：前端据 approval_id 调 /approve
+                from agent_harness.session.event import TOOL_APPROVAL_REQUESTED
+                sess = session_holder["session"]
+                assert sess is not None, "interactive callback 在 Session.start 之前被触发"
+                sess.append(
+                    TOOL_APPROVAL_REQUESTED,
+                    {
+                        "approval_id": approval_id,
+                        "tool_name": req.tool_name,
+                        "args": req.args,
+                        "permission": req.permission.value,
+                        "policy": req.policy.value,
+                        "reason": req.reason,
+                    },
+                )
+                return await queue.wait_for(approval_id)
+
+            approval_callback = _interactive_callback
+        elif (
+            auto_approve_explicit
+            and not permission_mode_explicit
+            and req.auto_approve is False
+        ):
+            # 旧路径：纯 auto_approve=false → deny（已被 interactive 取代但保留向后兼容）
+            async def _deny_callback(_req):
+                return ApprovalResponse(
+                    approved=False, reason="manual approval not yet wired"
+                )
+
+            approval_callback = _deny_callback
+        else:
+            approval_callback = None  # build_runtime 默认 auto-approve
+
         runtime = await build_runtime(
             settings=state.settings, wiring=wiring, stores=state.stores,
             workspace_registry=state.workspace_registry,
             session_id=session_id, workspace=workspace,
-            max_steps=req.max_steps, auto_approve=req.auto_approve,
+            max_steps=req.max_steps,
+            permission_mode=permission_mode,
+            approval_callback=approval_callback,
             session_store=state.store,
             model_name=req.model,
+            reasoning_effort=req.reasoning_effort,
+            agent_profile=req.agent_profile,
+            context_providers=req.context_providers,
         )
         session = Session.start(state.store, session_id=session_id)
+        if interactive:
+            # 把真实 session 注入 callback 闭包（callback 在 launch 后才被调）
+            session_holder["session"] = session
 
         # launch 内无 await（create_task 只调度不执行）→ 订阅者挂载必然
         # 早于 run 的首批事件，不会丢帧。
@@ -775,6 +910,58 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         return EventSourceResponse(event_generator())
 
+    @app.post("/api/sessions/{session_id}/resume")
+    async def resume_session(session_id: str, req: ResumeRequest):
+        """最小 Resume（Phase 5）：重建 Session 后追加一轮新 user input。
+
+        这是「续跑」而非精确恢复中断 run：Session.resume() 重建 append-only
+        历史与 dangling 修复，RunManager.launch 驱动一轮新的 Agent Loop。
+        在途 session 拒绝 409，避免同一 session 并发两轮。
+        """
+        _validate_session_id(session_id)
+        state = app.state.agent
+        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
+        if state.run_manager.get_active(session_id) is not None:
+            raise HTTPException(status_code=409, detail="session has an active run")
+
+        try:
+            session = Session.resume(
+                state.store, session_id,
+                workspace_registry=state.workspace_registry,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+        workspace = state.workspaces_root / session_id
+        workspace.mkdir(parents=True, exist_ok=True)
+        _, wiring = await state.get_wiring()
+        await state.ensure_stores()
+        runtime = await build_runtime(
+            settings=state.settings, wiring=wiring, stores=state.stores,
+            workspace_registry=state.workspace_registry,
+            session_id=session_id, workspace=workspace,
+            max_steps=10,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+            approval_callback=None,
+            session_store=state.store,
+            model_name=None,
+        )
+        run, subscriber = state.run_manager.launch(session, runtime, req.task)
+
+        async def event_generator():
+            try:
+                while True:
+                    event = await subscriber.queue.get()
+                    if event is state.run_manager.DONE:
+                        break
+                    yield _event_to_sse_dict(event, session_id)
+            finally:
+                run.unsubscribe(subscriber)
+
+        return EventSourceResponse(event_generator())
+
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:
         """显式取消在途 run（ADR-0016 §2.2，D-A）：前端 Esc/停止的唯一取消通道。
@@ -793,6 +980,52 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
         cancelled = state.run_manager.cancel(session_id)
         return {"status": "cancelling" if cancelled else "no_active_run"}
+
+    @app.post("/api/sessions/{session_id}/approve")
+    async def approve_tool_call(session_id: str, req: ApproveRequest) -> dict[str, str]:
+        """交互式审批决策入口（Phase 5 切片 C）：前端拿到 tool/approval-requested
+        事件后，调本端点注入批准/拒绝决策，唤醒 run 内阻塞的 callback。
+
+        语义：
+          成功 resolve → 200 ok（run 在 callback 处继续）
+          approval_id 已 resolved → 409（防重复决策；幂等性拒绝）
+          approval_id 不存在 → 404（前端过期事件或非本 session 的 id）
+          无 approval_id（旧 seam 调用）→ 200 received（向后兼容）
+          session 不存在 → 404
+        """
+        _validate_session_id(session_id)
+        state = app.state.agent
+        if req.approval_id is None:
+            # 旧 seam 入口（Phase 2 阶段性占位）：不解析任何决策，仅回 200 信号；
+            # 不要求 session 存在——Phase 2 seam 测试用任意 id 探活。
+            return {
+                "status": "received",
+                "note": "auto-approve is default; interactive approval via approval_id",
+            }
+        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
+        queue = state.approval_queues.get(session_id)
+        if queue is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"session '{session_id}' has no interactive approval queue "
+                       "(permission_mode not interactive, or run already terminated)",
+            )
+        response = ApprovalResponse(approved=req.approved, reason=req.reason)
+        try:
+            ok = queue.resolve(req.approval_id, response)
+        except KeyError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"approval_id '{req.approval_id}' already resolved",
+            )
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail=f"approval_id '{req.approval_id}' not found in session '{session_id}'",
+            )
+        return {"status": "resolved", "approval_id": req.approval_id}
 
     @app.post("/api/sessions/{session_id}/recover")
     async def recover_session(session_id: str) -> list[dict]:

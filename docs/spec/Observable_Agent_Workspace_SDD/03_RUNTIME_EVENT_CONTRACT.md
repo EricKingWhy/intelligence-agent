@@ -606,3 +606,17 @@ Contract is complete when:
 - model metadata is authoritative;
 - capability tab availability is truthful;
 - frontend can build Chat + Timeline + Inspector from events without inferring runtime behavior from prose.
+
+
+## Phase 5 staged session controls (Class B amend)
+
+`POST /api/sessions` accepts the following staged contract fields:
+
+- `reasoning_effort`: `minimal | standard | deep | null`
+- `agent_profile`: `main | coding | research_review | null`
+- `context_providers`: string array or `null`
+
+These fields are accepted and validated at the API boundary in Phase 5, but are
+not yet consumed by the runtime (`phase: staged`). Clients must not infer that
+the selected reasoning/profile/providers are active until a later runtime-wiring
+batch exposes that status explicitly.
