@@ -28,7 +28,14 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
-import { getModels, type ModelCatalogEntry } from './lib/api';
+import {
+  getAgentProfiles,
+  getModels,
+  getPermissionModes,
+  getReasoningEfforts,
+  type CatalogEntry,
+  type ModelCatalogEntry,
+} from './lib/api';
 import { summarizeEvent } from './lib/projection';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
@@ -78,6 +85,33 @@ export default function App() {
       setModels(await getModels());
     } catch {
       setModels([]); // 降级隐藏入口——错误不打扰（非关键能力）
+    }
+  }, []);
+
+  // ── Phase 2b Composer control row（Ticket F1）──
+  // 四个 staged 契约清单：permission-modes / agent-profiles /
+  // reasoning-efforts / context-providers。空 → 隐藏控件。
+  const [permissionModes, setPermissionModes] = useState<CatalogEntry[]>([]);
+  const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null);
+  const [agentProfiles, setAgentProfiles] = useState<CatalogEntry[]>([]);
+  const [selectedAgentProfile, setSelectedAgentProfile] = useState<string | null>(null);
+  const [reasoningEfforts, setReasoningEfforts] = useState<CatalogEntry[]>([]);
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
+  const fetchControlCatalogs = useCallback(async () => {
+    try {
+      const [modes, profiles, efforts] = await Promise.all([
+        getPermissionModes(),
+        getAgentProfiles(),
+        getReasoningEfforts(),
+      ]);
+      setPermissionModes(modes);
+      setAgentProfiles(profiles);
+      setReasoningEfforts(efforts);
+    } catch {
+      // 降级隐藏——非关键能力
+      setPermissionModes([]);
+      setAgentProfiles([]);
+      setReasoningEfforts([]);
     }
   }, []);
   const [authRequired, setAuthRequired] = useState(false);
@@ -194,21 +228,35 @@ export default function App() {
 
   useEffect(() => {
     void fetchModels();
-  }, [fetchModels]);
+    void fetchControlCatalogs();
+  }, [fetchModels, fetchControlCatalogs]);
 
   const handleModelChange = useCallback((name: string | null) => {
     setSelectedModel(name);
   }, []);
 
-  const handleSubmit = useCallback((task: string) => {
-    focusRun();
-    void submitTask({
-      task,
-      max_steps: 10,
-      auto_approve: true,
-      ...(selectedModel ? { model: selectedModel } : {}),
-    });
-  }, [submitTask, focusRun, selectedModel]);
+  const handleSubmit = useCallback(
+    (task: string) => {
+      focusRun();
+      void submitTask({
+        task,
+        max_steps: 10,
+        auto_approve: true,
+        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedPermissionMode ? { permission_mode: selectedPermissionMode } : {}),
+        ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
+        ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
+      });
+    },
+    [
+      submitTask,
+      focusRun,
+      selectedModel,
+      selectedPermissionMode,
+      selectedAgentProfile,
+      selectedReasoningEffort,
+    ],
+  );
 
   // 422 = 未知模型（契约 C6）：目录可能已变——自动刷新一次；刷新后若目录
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
@@ -487,6 +535,15 @@ export default function App() {
             models={models}
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
+            permissionModes={permissionModes}
+            selectedPermissionMode={selectedPermissionMode}
+            onPermissionModeChange={setSelectedPermissionMode}
+            agentProfiles={agentProfiles}
+            selectedAgentProfile={selectedAgentProfile}
+            onAgentProfileChange={setSelectedAgentProfile}
+            reasoningEfforts={reasoningEfforts}
+            selectedReasoningEffort={selectedReasoningEffort}
+            onReasoningEffortChange={setSelectedReasoningEffort}
           />
         </section>
 

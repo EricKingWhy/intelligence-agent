@@ -3517,6 +3517,70 @@ button.json-row {
   cursor: default;
 }
 
+/* ── Phase 2b Composer control row（Ticket F1）──
+ *   textarea 下方一行 flex 容器，横向排列 ModelPicker + ControlPicker。
+ *   控件复用 .composer-model 同族样式（紧凑、底部对齐、克制）。 */
+.composer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0 var(--space-sm) var(--space-sm);
+}
+.composer-control {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  padding: 3px var(--space-sm);
+  font-size: var(--text-xs);
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: var(--surface-elevated);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-apple),
+    color var(--dur-fast) var(--ease-apple),
+    background var(--dur-fast) var(--ease-apple);
+}
+.composer-control-icon {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+.composer-control-current {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.composer-control-chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-fast) var(--ease-apple);
+}
+.composer-control[data-state="open"] .composer-control-chevron {
+  transform: rotate(180deg);
+}
+.composer-control:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--surface-workspace);
+}
+.composer-control:hover:not(:disabled) .composer-control-icon {
+  color: var(--accent);
+}
+.composer-control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.composer-control:disabled,
+.composer-control[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ── Popover 内容（Radix portal，客户端渲染）──
  *   参照 Linear issue 面板：浅卡片、分组 label 小写大字距、
  *   选中项右侧粉色 check（不是整行高亮）。 */
