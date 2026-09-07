@@ -1743,6 +1743,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: var(--space-lg);
   min-width: 0;
   min-height: 0;
+  /* 容器查询锚点：让 .detail-tabs 等 Inspector 内部元素按面板宽度
+     （而非视口）响应窄模式（spec 02 §12 narrow panels）。 */
+  container-type: inline-size;
+  container-name: inspector;
 }
 .detail-body {
   flex: 1;
@@ -1867,8 +1871,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 /* 窄面板（<310px Inspector 宽度）：icon-only，label 隐藏。
    数字来自：5 tab × (24px icon + gap + padding) ≈ 280px 容得下 icon+label，
-   更窄切 icon-only。 */
-@media (max-width: 360px) {
+   更窄切 icon-only。用容器查询（@container inspector）而非视口媒体查询，
+   因为这是 Inspector 面板的宽度行为（spec 02 §12），不是窗口宽度——
+   大屏上把 Inspector 拖到 280px 也应降级 icon-only。 */
+@container inspector (max-width: 360px) {
   .detail-tab-label {
     display: none;
   }

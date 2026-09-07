@@ -104,12 +104,13 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
         <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
           {TABS.map((t) => {
             const Icon = TAB_ICONS[t.id];
+            const active = tab === t.id;
             return (
               <button
                 key={t.id}
                 role="tab"
-                aria-selected={false}
-                className="detail-tab"
+                aria-selected={active}
+                className={`detail-tab ${active ? 'sel' : ''}`}
                 onClick={() => {
                   setTab(t.id);
                   onFocusRun();
