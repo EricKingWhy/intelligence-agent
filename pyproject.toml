@@ -34,6 +34,9 @@ memory = [
 observability = [
     "langfuse>=3",
 ]
+sandbox = [
+    "docker>=7",
+]
 
 [tool.uv.build-backend]
 module-name = "agent_harness"
