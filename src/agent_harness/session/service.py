@@ -427,6 +427,22 @@ class SessionService:
 
     # ── 续聊（Phase Multiturn T2 / PRD §5.3）──────────────────────
 
+    def _append_session_event(
+        self, session_id: str, event_type: str, **data: object
+    ) -> None:
+        """resume session + append typed event（续聊路径共用 helper）。
+
+        所有续聊事件（MESSAGE_QUEUED / QUEUE_CANCELLED /
+        STEER_REQUESTED）都经此写入——统一 resume+append 形状，
+        消除三处重复的 Session.resume(...).append(...) 模式。
+        """
+        session = Session.resume(
+            self._state.store,
+            session_id,
+            workspace_registry=self._state.workspace_registry,
+        )
+        session.append(event_type, data=dict(data))
+
     async def send_message(
         self,
         *,
@@ -469,19 +485,11 @@ class SessionService:
                 run_id=active_run.run_id,
                 created_at=_utc_now_iso(),
             )
-            # durable 记录：STEER_REQUESTED（不写进 run 事件流，写 SessionEvent）。
-            session = Session.resume(
-                self._state.store,
-                session_id,
-                workspace_registry=self._state.workspace_registry,
-            )
-            session.append(
-                STEER_REQUESTED,
-                data={
-                    "steer_id": steer_req.steer_id,
-                    "content": content,
-                    "run_id": steer_req.run_id,
-                },
+            self._append_session_event(
+                session_id, STEER_REQUESTED,
+                steer_id=steer_req.steer_id,
+                content=content,
+                run_id=steer_req.run_id,
             )
             return SendMessageResult(status="steered", steer_request=steer_req)
 
@@ -502,17 +510,10 @@ class SessionService:
         queued = await self._state.message_queues.enqueue(
             session_id=session_id, content=content, created_at=_utc_now_iso()
         )
-        session = Session.resume(
-            self._state.store,
-            session_id,
-            workspace_registry=self._state.workspace_registry,
-        )
-        session.append(
-            MESSAGE_QUEUED,
-            data={
-                "queue_id": queued.queue_id,
-                "content": content,
-            },
+        self._append_session_event(
+            session_id, MESSAGE_QUEUED,
+            queue_id=queued.queue_id,
+            content=content,
         )
         return SendMessageResult(status="queued", queued_message=queued)
 
@@ -533,15 +534,7 @@ class SessionService:
             raise QueueItemNotFound(
                 f"queue item '{queue_id}' not found, already consumed, or cancelled"
             )
-        session = Session.resume(
-            self._state.store,
-            session_id,
-            workspace_registry=self._state.workspace_registry,
-        )
-        session.append(
-            QUEUE_CANCELLED,
-            data={"queue_id": queue_id},
-        )
+        self._append_session_event(session_id, QUEUE_CANCELLED, queue_id=queue_id)
         return True
 
     async def drain_queued_message(
