@@ -33,6 +33,8 @@ export const EventType = {
   PERMISSION_RESOLVED: 'permission/resolved',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
+  COMPACTION_START: 'compaction/start',
+  COMPACTION_END: 'compaction/end',
   MESSAGE_QUEUED: 'message/queued',
   QUEUE_CANCELLED: 'queue/cancelled',
   STEER_REQUESTED: 'steer/requested',

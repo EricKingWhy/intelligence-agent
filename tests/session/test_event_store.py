@@ -73,6 +73,9 @@ class TestSessionEventDTO:
             "queue/cancelled",
             "steer/requested",
             "steer/applied",
+            # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
+            "compaction/start",
+            "compaction/end",
         }
         assert EVENT_TYPES == expected
 

@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent_harness.session.event import (
+    COMPACTION_END,
+    COMPACTION_START,
+    CONTEXT_COMPACTED,
     MODEL_COMPLETED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -29,6 +32,11 @@ logger = logging.getLogger("agent_harness.session.derive")
 
 #: 合成 dangling ToolMessage 的固定内容（模型可见，引导自主决策）
 DANGLING_TOOL_CONTENT = "工具执行被中断，结果未知"
+
+#: bracket 元数据事件——不投影成消息，仅标记 shadowed 区间。
+_BRACKET_META_TYPES = frozenset({
+    COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+})
 
 
 def _normalize_tool_calls_for_projection(
@@ -76,11 +84,58 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
 
     纯函数：不修改输入 events，不产生副作用。
     dangling tool_call（有 tool/call 无匹配 tool/result）会注入合成 ToolMessage。
+
+    T4 (#134)：识别 4-event compaction bracket。bracket 标记的 source_seq 区间
+    内的原始投影事件被 shadowed（跳过），CONTEXT_COMPACTED 的 summary 投影成
+    SystemMessage 替代被压缩段。
     """
-    # 第一遍：从事件按顺序投影 messages（不含 dangling 合成）
+    # 第一遍：收集所有 bracket 的 shadowed seq 区间 + 对应 summary。
+    # 每个 bracket 由 COMPACTION_START(source_seq_start..source_seq_end) 标记，
+    # CONTEXT_COMPACTED 携带 summary，COMPACTION_END 关闭 bracket。
+    shadowed_ranges: list[tuple[int, int]] = []
+    bracket_summaries: list[str] = []
+    for event in events:
+        if event.type == COMPACTION_START:
+            start = event.data.get("source_seq_start", 0)
+            end = event.data.get("source_seq_end", 0)
+            shadowed_ranges.append((start, end))
+        elif event.type == CONTEXT_COMPACTED:
+            bracket_summaries.append(event.data.get("summary", ""))
+
+    def is_shadowed(seq: int) -> bool:
+        return any(start <= seq <= end for start, end in shadowed_ranges)
+
+    # 第二遍：从事件按顺序投影 messages（不含 dangling 合成）。
+    #
+    # summary SystemMessage 必须在被压缩段的**原位置**注入——即遇到第一个
+    # shadowed 事件时插入 summary，而不是在 CONTEXT_COMPACTED 事件的位置
+    # 插入。原因：bracket 事件可能排在当前用户消息之后（compaction 在
+    # context build 阶段触发，此时 user/message 已经 append），如果按
+    # CONTEXT_COMPACTED 的位置投影 summary，summary 会落到当前用户消息
+    # 之后，破坏"摘要在前、当前请求在后"的语义。
     messages: list[AnyMessage] = []
+    summary_idx = 0
+    summary_emitted = [False] * len(bracket_summaries)
 
     for event in events:
+        # 遇到某个 bracket 的第一个 shadowed 事件时，先吐 summary
+        for bi, (s, _e) in enumerate(shadowed_ranges):
+            if not summary_emitted[bi] and event.seq == s:
+                if bi < len(bracket_summaries):
+                    summary = bracket_summaries[bi]
+                    if summary:
+                        messages.append(SystemMessage(content=summary))
+                summary_emitted[bi] = True
+                break
+
+        # CONTEXT_COMPACTED / COMPACTION_START / COMPACTION_END 不投影成消息
+        if event.type in _BRACKET_META_TYPES:
+            continue
+
+        # 跳过被 bracket shadowed 的原始事件
+        if is_shadowed(event.seq):
+            continue
+
         if event.type == USER_MESSAGE:
             content = event.data.get("content", "")
             messages.append(HumanMessage(content=content))

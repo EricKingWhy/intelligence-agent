@@ -10,6 +10,8 @@ from agent_harness.context.provider import ContextProvider
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.session import Session
 from agent_harness.session.event import (
+    COMPACTION_END,
+    COMPACTION_START,
     CONTEXT_COMPACTED,
     MODEL_COMPLETED,
     TOOL_RESULT,
@@ -34,8 +36,8 @@ class ContextBuilder:
         model_provider: Any,
         *,
         max_context_tokens: int = 200_000,
-        auto_compact_threshold: float = 0.70,
-        hard_guard_threshold: float = 0.85,
+        auto_compact_threshold: float = 0.80,
+        hard_guard_threshold: float = 0.90,
         context_providers: list[ContextProvider] | None = None,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
@@ -67,13 +69,28 @@ class ContextBuilder:
             self.model_provider, max_context_tokens=self.max_context_tokens,
             auto_compact_threshold=self.auto_compact_threshold,
             hard_guard_threshold=self.hard_guard_threshold,
-        ).compact(messages, token_estimate)
+        ).compact(messages, token_estimate, events=session.events)
         if result.compacted_turn_count:
+            # T4 (#134)：写 4-event bracket 替代单个 CONTEXT_COMPACTED。
+            # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
+            bracket_id = result.bracket_id or ""
+            session.append(COMPACTION_START, {
+                "bracket_id": bracket_id,
+                "source_seq_start": result.source_seq_start or 0,
+                "source_seq_end": result.source_seq_end or 0,
+            })
             session.append(CONTEXT_COMPACTED, {
+                "schema": "six_section",
+                "summary": result.summary or "",
+                "source_seq_start": result.source_seq_start or 0,
+                "source_seq_end": result.source_seq_end or 0,
                 "compacted_turn_count": result.compacted_turn_count,
-                "summary_message_count": 1,
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
+                "bracket_id": bracket_id,
+            })
+            session.append(COMPACTION_END, {
+                "bracket_id": bracket_id,
             })
         return await self._with_providers(session, result.messages, result.token_estimate)
 
@@ -83,7 +100,7 @@ class ContextBuilder:
         """增量 token 估算：每条投影消息终身只编码一次。
 
         derive_messages 对投影事件是一一映射（按序各产出一条消息）——
-        唯一例外是 dangling 合成 ToolMessage 的块尾注入（事件数 ≠ 消息数），
+        唯一例外是 dangling 合成注入的块尾 ToolMessage（事件数 ≠ 消息数），
         此时放弃增量假设整体重估（正确性优先；resume 已修复 dangling，
         运行内该路径罕见）。
         """

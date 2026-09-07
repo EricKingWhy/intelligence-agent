@@ -56,6 +56,16 @@ PERMISSION_RESOLVED = "permission/resolved"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
+# ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
+# 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
+#   COMPACTION_START (source_seq_start, source_seq_end)
+#   → CONTEXT_COMPACTED (six_section summary + source 区间)
+#   → USER_MESSAGE(replace) — 摘要替代被压缩段
+#   → COMPACTION_END (bracket_id)
+# 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
+COMPACTION_START = "compaction/start"
+COMPACTION_END = "compaction/end"
+
 # ── Phase Multiturn T2（#132）：续聊队列 + steer 引导 ────────────────────
 # 用户在 run 进行中继续输入：queue 模式排队等下个 run 自然消费；steer 模式
 # 注入在途 run 的引导请求（不抢断、不改写历史事件）。四种新事件构成
@@ -106,6 +116,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         QUEUE_CANCELLED,
         STEER_REQUESTED,
         STEER_APPLIED,
+        # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
+        COMPACTION_START,
+        COMPACTION_END,
     }
 )
 
