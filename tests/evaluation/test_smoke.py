@@ -111,3 +111,44 @@ def test_smoke_pipeline_with_injected_fake_runtime(tmp_path: Path, monkeypatch):
     assert payload["smoke"] == "real-model"
     assert payload["regression_metadata"]["model_name"] == "scripted"
     reports[-1].unlink()
+
+
+def test_smoke_builds_runtime_with_fallback_config(tmp_path: Path, monkeypatch):
+    """fallback 配置在场时真实构建路径不崩（回归：ModelConfig 字段名错配）。
+
+    手动车道入口曾因 ModelConfig 字段名错配（name vs model_name、缺 temperature、
+    api_key 传 SecretStr）在首次真实运行时崩——现有 factory 注入测试绕过了这段。
+    此处 monkeypatch create_chat_model 返回 ScriptedModel（不烧 token），强制
+    走完 fallback 构建分支，验证字段正确解析。
+    """
+    from langchain_core.messages import AIMessage
+    from pydantic import SecretStr
+
+    import agent_harness.model.provider as provider_mod
+
+    settings_stub = type("S", (), {
+        "model_provider": "deepseek", "model_name": "primary-model",
+        "model_api_key": SecretStr("sk-primary"),
+        "model_base_url": "https://primary.example.com",
+        "temperature": 0.2,
+        "fallback_model_provider": "zhipu", "fallback_model_name": "fallback-model",
+        "fallback_model_api_key": SecretStr("sk-fallback"),
+        "fallback_model_base_url": "https://fallback.example.com",
+        "langfuse_public_key": SecretStr(""), "langfuse_secret_key": SecretStr(""),
+        "langfuse_base_url": "", "langfuse_trace_content": "full",
+    })()
+
+    def fake_create(config):
+        return ScriptedModel([AIMessage(content="ok", usage_metadata={
+            "input_tokens": 1, "output_tokens": 1, "total_tokens": 2})])
+
+    monkeypatch.setattr(provider_mod, "create_chat_model", fake_create)
+
+    result = run_real_model_smoke(
+        "计算 1+1。", settings=settings_stub,
+        session_root=tmp_path / "sess",
+    )
+    assert result.ok, (result.metrics, result.error)
+    reports = sorted((_REPO_ROOT / "evaluation" / "reports").glob("smoke-real-*.json"))
+    if reports:
+        reports[-1].unlink()

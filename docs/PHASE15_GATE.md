@@ -53,3 +53,90 @@
 
 - Langfuse 云（jp 区）密钥在 worktree `.env`（零泄漏）；集成时需同步 `LANGFUSE_*` 到 main worktree `.env`。
 - 上游模型网关（senseaudio）与 Langfuse 云均出现过间歇抖动；Gate 全部按「退避复跑 + 结果登记」处理，无 FAIL 被掩盖。
+
+## 集成后真实模型 smoke（2026-09-07，main 86adedc）
+
+> Phase 15 合入 main 并 push 后，在 main（`D:\intelligence-agent`）执行真实模型 smoke——
+> ADR-0018 D10 手动车道（deterministic 进 CI / 真实模型手动），Phase 15 闭合的最后一脚。
+
+### 触发
+
+```python
+from evaluation.smoke import run_real_model_smoke
+result = run_real_model_smoke(
+    task="用 add 工具算一下 7 加 35 等于多少，然后告诉我结果。",
+    session_root="evaluation/smoke_sessions",
+    require_trace=True,
+)
+```
+
+### 结构性结果
+
+| 指标 | 值 |
+| --- | --- |
+| ok | **true** |
+| error | null |
+| dangling_tool_calls | 0 |
+| terminal_present | true |
+| usage_reported | true（prompt=631 / completion=162 / total=793） |
+| trace_id_present | **true**（`d9a49a30be8ccd14df5468c2adc6851c`） |
+| event_count | 9（session/started → user/message → run/started → model/completed → tool/call → tool/result → model/fallback → model/completed → run/completed） |
+| duration_ms | 178646（含真实模型往返；第一轮主模型触发了 fallback 切换） |
+
+### Langfuse 真云回捞（trace `d9a49a30...`）
+
+6 个观测，完整 agent loop 链路：
+
+| 类型 | 名称 | model | usage_details | parent |
+| --- | --- | --- | --- | --- |
+| SPAN | `agent-run`（根） | — | — | — |
+| SPAN | `context-build` | — | — | agent-run |
+| GENERATION | `model-call` | deepseek-v4-flash-0731 | {input:328, output:61, total:389} | agent-run |
+| TOOL | `add` | — | — | agent-run |
+| SPAN | `context-build` | — | — | agent-run |
+| GENERATION | `model-call`（fallback） | deepseek-v4-flash-0731 | {input:303, output:101, total:404} | agent-run |
+
+- trace.name = `agent-run`、trace.session_id = `70a7eb2e...`（D5 ID 映射正确）
+- trace.metadata = `run_id, agent_id, git_commit=86adedc, session_id, usage_total`（D7 详细埋点齐全）
+- 根观测 input = 用户消息、output = `根据计算结果，7 加 35 等于 42。`
+- GENERATION usage 对账：389 + 404 = 793 = session `usage_total.total_tokens` ✓
+- fallback 切换在第二轮 GENERATION metadata 里（fallback_from / fallback_to / fallback_reason）
+- TOOL 观测 input = {first_number, second_number}、output = `ok`
+
+### Best-practices 审计（对照官方 checklist，逐条）
+
+| # | 检查项 | 结果 |
+| --- | --- | --- |
+| 1 | 一个 trace = 一个自包含工作单元 | ✅ |
+| 2 | session_id 正确（多轮分组） | ✅ |
+| 3 | trace/observation 名 verb-first 低基数 | ✅ |
+| 4 | 每个 LLM 调用是 `generation` 类型 | ✅ |
+| 5 | 工具调用是 `tool` 类型 | ✅ |
+| 6 | agent loop 逐次 generation + tool 交错（不折叠） | ✅ |
+| 7 | 工具观测嵌套在 agent/span 下 | ✅ |
+| 8 | generation 有 model + usage_details | ✅ |
+| 9 | usage_details bucket 互斥（input/output/total） | ✅ |
+| 10 | 根观测有可读 input/output | ✅ |
+| 11 | metadata 放运行上下文 | ✅ |
+| 12 | flush 在短生命周期进程退出前调用 | ✅ |
+| 13 | 手动 start_observation 配 .end() | ✅ |
+
+### 发现的 Gap（非阻塞，登记为 D7 后续批次）
+
+| Gap | 严重度 | 现状 | 建议 |
+| --- | --- | --- | --- |
+| environment=`default` | 中 | 未设 `LANGFUSE_TRACING_ENVIRONMENT`，测试 trace 落入 default 环境，无法区分 prod/staging/dev | 设 `LANGFUSE_TRACING_ENVIRONMENT=development` 或 SDK init `environment=` |
+| release=None | 低 | 未设 release（版本/SHA），无法按版本对比 | 设 `LANGFUSE_RELEASE` 或 SDK init `release=`（git_commit 已在 metadata，但 release 是一等字段） |
+| cost_details 为空 | 低 | usage 已上报但 cost 空——Langfuse 可从 model 定义推断，若 model 字符串不匹配则失败 | 在 Langfuse 项目设置定义 `deepseek-v4-flash-0731` 定价，或上报 cost_details |
+| user_id=None | 低 | 单用户 CLI 可接受；多用户 web 需要 | web 场景接入时设置 user_id |
+| 第一轮 generation output=None | 低 | 第一轮返回 tool_calls 但 output 为空——应含 content 或 tool_calls 结构 | 检查 tracer 对 tool_calls 轮的 output 设置 |
+
+### 修复的 bug
+
+真实模型 smoke 首次触发暴露了 `evaluation/smoke.py` 的 fallback 构建错误：
+
+- **根因**：`ModelConfig` 字段名 `model_name` 被误写为 `name`，且缺 `temperature` 参数、`api_key` 传了 SecretStr 而非明文——手动重建 fallback 的整段代码与 `ModelConfig` 真实签名不匹配。
+- **为何此前未暴露**：所有 smoke 测试都用 `runtime_factory` 注入绕过了真实构建路径；真实模型调用是手动车道，此前从未真跑过。
+- **修复**：删掉手动重建 fallback 的重复代码，直接消费 `model_config.fallback`（`ModelConfig.from_settings` 已解析两级链）。
+- **回归测试**：`test_smoke_builds_runtime_with_fallback_config`——monkeypatch `create_chat_model` 返回 ScriptedModel（不烧 token），强制走完 fallback 构建分支。
+- **验证**：1176 passed（+1 新增）、ruff 全绿。
