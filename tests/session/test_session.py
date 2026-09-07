@@ -204,6 +204,50 @@ class TestRunLifecycle:
         assert last.type == RUN_FAILED
         assert last.run_id == run_id
 
+    # ── trace_id / trace_url 契约（trace_url 契约：并列字段，对称终态） ──
+
+    def test_end_run_completed_persists_trace_id_and_trace_url(self, store: JsonlSessionStore):
+        session = Session.start(store)
+        run_id = session.begin_run()
+        session.end_run(
+            run_id, status="completed", final_text="done",
+            trace_id="tr-001", trace_url="https://lf.example/traces/tr-001",
+        )
+
+        last = session.events[-1]
+        assert last.data.get("trace_id") == "tr-001"
+        assert last.data.get("trace_url") == "https://lf.example/traces/tr-001"
+
+    def test_end_run_failed_symmetrically_persists_trace_id_and_trace_url(
+        self, store: JsonlSessionStore,
+    ):
+        """失败 run 也下发 trace_id / trace_url（契约对称决策：失败 trace 在
+        Langfuse 也有排查价值）。补既有 bug：failed 分支此前丢弃了 trace_id。"""
+        session = Session.start(store)
+        run_id = session.begin_run()
+        session.end_run(
+            run_id, status="failed", reason="boom",
+            trace_id="tr-failed", trace_url="https://lf.example/traces/tr-failed",
+        )
+
+        last = session.events[-1]
+        assert last.data.get("trace_id") == "tr-failed"
+        assert last.data.get("trace_url") == "https://lf.example/traces/tr-failed"
+        assert last.data.get("reason") == "boom"
+
+    def test_end_run_trace_fields_null_when_not_provided(self, store: JsonlSessionStore):
+        """trace_id / trace_url 键恒存在（前端契约据此降级显示）；未追踪 = null，
+        不伪造占位字符串（保持 None 语义；与既有 completed 的 cost_usd 同款）。"""
+        session = Session.start(store)
+        run_id = session.begin_run()
+        session.end_run(run_id, status="completed", final_text="done")
+
+        last = session.events[-1]
+        assert "trace_id" in last.data
+        assert last.data["trace_id"] is None
+        assert "trace_url" in last.data
+        assert last.data["trace_url"] is None
+
 
 # ── next_seq ──
 

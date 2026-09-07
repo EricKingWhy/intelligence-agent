@@ -147,6 +147,27 @@ class LangfuseSink:
         except Exception:  # noqa: BLE001 - D3 异常边界
             return nullcontext(None)
 
+    def get_trace_url(self, *, trace_id: str | None) -> str | None:
+        """官方 SDK 的 trace 可点击 URL 薄封装（trace_url 契约；ADR-0018 D7 延伸）。
+
+        - 不手拼 URL——host / project_id 由 SDK 解析（§6 Reuse First）；
+        - 未配置 / 熔断开启 / SDK 异常 → None（与 trace_id 同一降级模式）；
+        - 仅内存合成（host+project 来自配置），不走外部网络，热路径安全。
+        """
+        client = self._client
+        if client is None:
+            return None
+        if self._breaker_open():
+            self._register_drop("get_trace_url")
+            return None
+        try:
+            url = client.get_trace_url(trace_id=trace_id)
+            self._consecutive_failures = 0
+            return url if isinstance(url, str) else None
+        except Exception as exc:  # noqa: BLE001 - D3 异常边界
+            self._register_failure("get_trace_url", exc)
+            return None
+
     def report_failure(self, operation: str, exc: Exception) -> None:
         """观测句柄上的后续操作（update/end/子观测）失败时由 tracer 回注——
         计数进同一熔断账本，但绝不向调用方抛出。"""

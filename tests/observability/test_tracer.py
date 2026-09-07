@@ -42,6 +42,9 @@ class FakeRecorder:
     def __init__(self):
         self.spans: list[FakeSpan] = []
         self.next_trace_id = "tr-fake-001"
+        self.trace_url_template = (
+            "https://cloud.langfuse.com/project/proj-trace-{trace_id}/traces/{trace_id}"
+        )
 
     def client(self):
         recorder = self
@@ -49,6 +52,11 @@ class FakeRecorder:
         class _Client:
             def start_observation(self, *, name: str, as_type: str = "span", **kwargs):
                 return FakeSpan(recorder, name=name, kind=as_type, kwargs=kwargs)
+
+            def get_trace_url(self, *, trace_id):
+                if trace_id is None:
+                    return None
+                return recorder.trace_url_template.format(trace_id=trace_id)
 
         return _Client()
 
@@ -221,3 +229,76 @@ def test_span_op_failures_never_propagate():
     gen = tracer.model_call_started(step=1, messages=[])
     tracer.model_call_completed(gen, output_text="x", usage=None, duration_ms=1)  # 不抛
     tracer.run_completed("done")  # 不抛
+
+
+# ── trace_url（trace_url 契约：官方 SDK URL 与 trace_id 并列缓存于终态） ──
+
+
+def test_trace_url_cached_on_run_completed():
+    """run_completed 时把 trace_id 经官方 SDK 合成可点击 URL 并缓存到 tracer。
+
+    trace_id 与 trace_url 并列保留——前者机器可读 + Copy，后者人类可点击，
+    不互相替代（契约决策）。URL 由 sink.get_trace_url（官方 SDK）合成，不手拼。
+    """
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder)
+    tracer.run_started()
+    assert tracer.trace_id == "tr-fake-001"
+    # 终态前 trace_url 未构造（懒构造——只有终态时才确定该 run 是可点击句柄）
+    assert tracer.trace_url is None
+
+    tracer.run_completed("最终回答")
+    assert tracer.trace_url == recorder.trace_url_template.format(trace_id="tr-fake-001")
+
+
+def test_trace_url_cached_on_run_failed():
+    """run_failed 对称缓存 trace_url（失败 run 在 Langfuse 也有可见 trace，
+    跳转有排查价值——契约对称决策）。"""
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder)
+    tracer.run_started()
+    tracer.run_failed("max_steps_exceeded")
+    assert tracer.trace_url == recorder.trace_url_template.format(trace_id="tr-fake-001")
+
+
+def test_trace_url_none_when_trace_id_none():
+    """trace_id 未回填（SDK 未暴露 / sink 缺席）→ trace_url 恒 None。
+    tracer 不得在 trace_id=None 时尝试合成 URL（契约降级模式）。"""
+    sink = LangfuseSink(public_key="", secret_key="", base_url="")
+    tracer = RunTracer(
+        sink, session_id="s", run_id="r", agent_id="a", user_input="hi",
+    )
+    tracer.run_started()
+    assert tracer.trace_id is None
+    tracer.run_completed("done")
+    assert tracer.trace_url is None
+
+
+def test_trace_url_inherited_from_parent_on_nested_binding():
+    """嵌套子 run（SubAgent adopt 父侧根）时 trace_url 同 trace_id 一起继承——
+    子 run 与父 run 共享同一 trace 根，URL 一致（ADR-0018 D5 多 Agent 规则）。"""
+    from agent_harness.observability.tracer import TraceBinding, current_trace_binding
+
+    parent_recorder = FakeRecorder()
+    parent_recorder.next_trace_id = "tr-parent-001"
+    parent_tracer = _tracer(parent_recorder)
+    parent_tracer.run_started()
+    parent_tracer.run_completed("parent done")
+
+    # 构造父侧 binding（delegate 执行期间由 executor 设置）
+    binding = TraceBinding(
+        trace_id=parent_tracer.trace_id,
+        observation=object(),  # 测试只验 trace_url 继承，根句柄本身不入断言
+    )
+    token = current_trace_binding.set(binding)
+    try:
+        child_tracer = _tracer(FakeRecorder())
+        child_tracer.run_started()  # adopt 模式：认领父侧 trace_id
+        assert child_tracer.trace_id == "tr-parent-001"
+        assert child_tracer.trace_url is None  # 未到终态
+        child_tracer.run_completed("child done")
+        # 子 run 用继承的 trace_id 经自己 sink 合成 URL（host/project 配置相同 → 一致）
+        assert child_tracer.trace_url is not None
+        assert "tr-parent-001" in child_tracer.trace_url
+    finally:
+        current_trace_binding.reset(token)

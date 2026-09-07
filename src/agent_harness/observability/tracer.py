@@ -101,6 +101,10 @@ class RunTracer:
         self._agent_id = agent_id
         self._user_input = user_input
         self.trace_id: str | None = None
+        #: trace_url 与 trace_id 并列（trace_url 契约，ADR-0018 D7 延伸）：
+        #: 同一 trace 的可点击 URL，由官方 SDK 合成（不手拼）；终态时构造。
+        #: trace_id 缺失 → trace_url 恒 None；两者不互替（机器可读 + 人类可点击并存）。
+        self.trace_url: str | None = None
         self._root: Any = None
         self._owns_root = True
 
@@ -218,6 +222,7 @@ class RunTracer:
         ))
         if self._owns_root:
             self._quiet("run_end", self._root.end)
+        self._finalize_trace_url()
 
     def run_failed(self, reason: str) -> None:
         if self._root is None:
@@ -227,6 +232,20 @@ class RunTracer:
         ))
         if self._owns_root:
             self._quiet("run_end", self._root.end)
+        # 与 run_completed 对称：失败 run 在 Langfuse 也有可见 trace，跳转同样有
+        # 排查价值；trace_id 缺失时构造降级为 None（同 completed 路径）。
+        self._finalize_trace_url()
+
+    def _finalize_trace_url(self) -> None:
+        """终态时把 trace_id 经官方 SDK 合成可点击 URL 并缓存（trace_url 契约）。
+
+        懒构造——只有终态时才合成（契约侧 runtime 在 tracer 收尾后读取
+        ``tracer.trace_url`` 下发到 run/completed|failed.data）。trace_id 缺失
+        时跳过，trace_url 保持 None；已构造过则不重复（幂等）。
+        """
+        if self.trace_url is not None or self.trace_id is None:
+            return
+        self.trace_url = self._sink.get_trace_url(trace_id=self.trace_id)
 
     # —— tool / agent 观测（T3 #119：D7 逐 attempt 链 + SubAgent agent 型） ——
 
