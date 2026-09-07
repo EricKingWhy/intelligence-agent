@@ -29,7 +29,13 @@ class CapabilityError(RuntimeError):
 
 
 class CapabilityDescriptor(BaseModel):
-    """能力自描述元数据——字段清单为 spec 08 §5 原文 + 本项目两个必需位。"""
+    """能力自描述元数据——字段清单为 spec 08 §5 原文 + 本项目两个必需位。
+
+    Phase 2 加法（SDD 03 §17 CapabilityManifest）：display_name / surfaces / actions
+    全 Optional，用于 GET /api/capabilities 端点投影 manifest。本轮无 capability
+    填这些字段——只搭骨架；具体 surfaces/actions 声明是 Phase 6 capability-aware
+    surfaces 的工作。
+    """
 
     name: str = Field(min_length=1)
     version: str = Field(min_length=1)
@@ -42,6 +48,11 @@ class CapabilityDescriptor(BaseModel):
     config_schema: dict[str, Any] = Field(default_factory=dict)
     degradation: Degradation
     enabled: bool = True
+    # Phase 2 加法（SDD 03 §17）：UI manifest 投影用。默认 None = 该 capability
+    # 不声明 surface/action 覆盖；端点投影时用保守默认（chat/timeline=true，余=false）。
+    display_name: str | None = None
+    surfaces: dict[str, bool] | None = None
+    actions: dict[str, bool] | None = None
 
     def supports(self, capability: str) -> bool:
         """Consumer 使用前 MUST 检查；不支持必须显式报错（08 §5：不允许静默忽略）。"""

@@ -104,6 +104,27 @@ class PermissionPolicy(str, Enum):
     DANGER_FULL_ACCESS = "danger-full-access"
 
 
+#: 各权限模式的可读描述（SDD 03 §10，Phase 2 加法）：用于 GET /api/permission-modes
+#: 端点向前端暴露「后端能真实执行的 mode 列表」+ 人类可读说明。如实描述，
+#: 不假装交互式审批已就绪（那是 Phase 5）。display_name 给 UI 标签，description 给 tooltip。
+PERMISSION_MODE_DESCRIPTIONS: dict[PermissionPolicy, dict[str, str]] = {
+    PermissionPolicy.READ_ONLY: {
+        "display_name": "Read-only",
+        "description": "Agent can read files and run read-only tools; no writes.",
+    },
+    PermissionPolicy.WORKSPACE_WRITE: {
+        "display_name": "Workspace write",
+        "description": "Agent can read and write within the workspace sandbox; "
+                       "danger tools still require approval.",
+    },
+    PermissionPolicy.DANGER_FULL_ACCESS: {
+        "display_name": "Danger full access",
+        "description": "All tools run without approval, including bash with "
+                       "network/system side effects. Use only in trusted contexts.",
+    },
+}
+
+
 class ToolPermission(str, Enum):
     """单个 Tool 的授权级别——这个工具需要什么级别的权限才能执行。
 
