@@ -1,22 +1,29 @@
-/** ModelPicker — Radix DropdownMenu 实现的模型选择器（Phase 2a）。
+/** ModelPicker — Radix Popover + cmdk Command 实现的模型选择器（Phase 2a / F2）。
  *
- * 替换 Composer 里原生 <select>。设计参考 Linear / Vercel 的模型选择器：
- *   - 紧凑 trigger（icon + 当前选中 + chevron），不占太多 Composer 宽度；
- *   - 打开为 Radix DropdownMenu（portal），按 provider 分组，展示默认标记；
- *   - 「默认链」永远在顶部（null 选中）；
- *   - 目录缺席（models 空）→ 组件返回 null（调用方据此隐藏入口），不伪造列表；
- *   - 键盘、焦点陷阱、Esc 关闭、外点关闭由 Radix 负责——不自造浮层。
+ * 历史：Phase 2a 用 Radix DropdownMenu（`role="menu"`）——可用但语义不准，
+ * menu 是动作菜单，不是可搜索的选项列表。F2 升级为 Popover + cmdk Command：
+ *   - cmdk 注入 `role="listbox"`（List）、`role="combobox"`（Input）、
+ *     `role="option"`（Item），匹配 SDD §11「Combobox/Command-like」；
+ *   - 方向键 / Home / End / Enter 由 cmdk 内置（无需自造 ArrowDown 拦截）；
+ *   - 搜索过滤走 cmdk 的 command-score（同时匹配 name/provider/model），
+ *     通过 keywords 字段把 provider 和 model 也纳入打分；
+ *   - Radix Popover 负责 portal 定位 + 外点关闭 + Esc 关闭（与 DropdownMenu 等价）。
  *
- * 契约向后兼容（Composer.test.tsx 的 SSR 断言）：
+ * 「默认链」永远在顶部（null 提交）；分组按 provider；空目录 → 返回 null
+ * （调用方据此隐藏入口，不伪造列表）。
+ *
+ * 契约向后兼容（ModelPicker.test.tsx 的 SSR 断言）：
  *   - class 名 `composer-model` 仍在 trigger 上；
- *   - aria-label="模型选择"；
- *   - 空目录不渲染任何节点。
+ *   - `aria-label="模型选择"`；
+ *   - 空目录不渲染任何节点；
+ *   - 端点缺席时 trigger 文本为「默认链」。
  *
  * 数据真相仍是 /api/models（lib/api.ts 的 ModelCatalogEntry）。
- * 这里只是提交偏好，不是会话内模型真相——后者仍以模型卡 data.model 为准（不变量 #22）。 */
+ * 这里只提交偏好，不是会话内模型真相——后者仍以模型卡 data.model 为准（不变量 #22）。 */
 
+import * as Popover from '@radix-ui/react-popover';
+import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from 'cmdk';
 import { useMemo, useState } from 'react';
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { Check, ChevronDown, Cpu, Search } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
 
@@ -39,16 +46,13 @@ function groupByProvider(models: ModelCatalogEntry[]): { provider: string; items
   return Array.from(groups, ([provider, items]) => ({ provider, items }));
 }
 
+/** cmdk Item value 必须唯一、稳定（不依赖 textContent）。null 选中态用 sentinel。 */
+const DEFAULT_VALUE = '__default__';
+
 export function ModelPicker({ models, selectedModel, onModelChange, disabled = false }: Props) {
-  // Hooks 永远在最前（rules-of-hooks）—— 空目录降级在 Hooks 之后。
-  const [query, setQuery] = useState('');
-  const grouped = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    const visible = normalized
-      ? models.filter((m) => [m.name, m.provider, m.model].some((value) => value?.toLocaleLowerCase().includes(normalized)))
-      : models;
-    return groupByProvider(visible);
-  }, [models, query]);
+  // Popover 受控开关：搜索框聚焦、键盘导航都由 cmdk 自己管，这里只管开/关浮层。
+  const [open, setOpen] = useState(false);
+  const grouped = useMemo(() => groupByProvider(models), [models]);
   const selectedEntry = useMemo(
     () => (selectedModel ? models.find((m) => m.name === selectedModel) ?? null : null),
     [models, selectedModel],
@@ -60,86 +64,87 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
   if (models.length === 0) return null;
 
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger
-        asChild
-        disabled={disabled}
-      >
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
         <button
           type="button"
           className="composer-model model-picker"
           aria-label="模型选择"
           title={triggerLabel}
-          // Radix 会注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
+          // Radix Popover 会注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
           aria-disabled={disabled || undefined}
+          disabled={disabled}
         >
           <Cpu size={13} className="model-picker-icon" aria-hidden="true" />
           <span className="model-picker-current">{triggerLabel}</span>
           <ChevronDown size={12} className="model-picker-chevron" aria-hidden="true" />
         </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
           className="model-picker-content"
           side="top"
           align="end"
           sideOffset={6}
-          // 高度上限 + 滚动，避免目录长时顶出视口
-          // (max-height 由 CSS 处理)
+          // 高度上限 + 滚动由 CSS 处理（避免目录长时顶出视口）
         >
-          <div className="model-picker-search-wrap">
-            <Search size={13} aria-hidden="true" />
-            <input
-              className="model-picker-search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="搜索模型"
-              aria-label="搜索模型"
-              onKeyDown={(e) => {
-                // Radix DropdownMenu 监听 Arrow/Home/End 做导航；搜索框要拦截这些键，
-                // 否则输字时光标会被 Radix 抢走。但 Escape（关闭菜单）和 Enter（确认）
-                // 必须冒泡，满足 Spec §19「Esc 关闭最上层临时表面」。
-                const nav = new Set([
-                  'ArrowUp',
-                  'ArrowDown',
-                  'ArrowLeft',
-                  'ArrowRight',
-                  'Home',
-                  'End',
-                ]);
-                if (nav.has(e.key)) e.stopPropagation();
-              }}
-            />
-          </div>
-          {/* 默认链永远在顶部（null 提交——后端按默认链行为） */}
-          {!query.trim() && <DropdownMenu.Item
-            className={`model-picker-item ${effectiveSelectedModel === null ? 'sel' : ''}`}
-            onSelect={() => onModelChange(null)}
+          <Command
+            label="模型选择"
+            // cmdk 默认 filter 走 command-score；我们用简单 includes 兼容旧「子串匹配」预期，
+            // 同时把 provider/model 也喂进 keywords 提升多字段命中率（输入「anthropic」能匹配到 claude-sonnet-4）。
+            filter={(value, search, keywords) => {
+              const q = search.trim().toLocaleLowerCase();
+              if (!q) return 1;
+              const haystack = [value, ...(keywords ?? [])].join(' ').toLocaleLowerCase();
+              return haystack.includes(q) ? 1 : 0;
+            }}
           >
-            <span className="model-picker-item-label">默认链</span>
-            <span className="model-picker-item-meta">系统自动选</span>
-            {effectiveSelectedModel === null && <Check size={13} className="model-picker-check" aria-hidden="true" />}
-          </DropdownMenu.Item>}
-          {grouped.map(({ provider, items }) => (
-            <DropdownMenu.Group key={provider}>
-              <DropdownMenu.Label className="model-picker-group-label">{provider}</DropdownMenu.Label>
-              {items.map((m) => (
-                <DropdownMenu.Item
-                  key={m.name}
-                  className={`model-picker-item ${effectiveSelectedModel === m.name ? 'sel' : ''}`}
-                  onSelect={() => onModelChange(m.name)}
+            <div className="model-picker-search-wrap">
+              <Search size={13} aria-hidden="true" />
+              <CommandInput placeholder="搜索模型" className="model-picker-search" />
+            </div>
+            <CommandList>
+              {/* 默认链永远在顶部（null 提交——后端按默认链行为） */}
+              <CommandGroup>
+                <CommandItem
+                  value={DEFAULT_VALUE}
+                  className={`model-picker-item ${effectiveSelectedModel === null ? 'sel' : ''}`}
+                  onSelect={(value) => {
+                    onModelChange(value === DEFAULT_VALUE ? null : value);
+                    setOpen(false);
+                  }}
                 >
-                  <span className="model-picker-item-label">{m.name}</span>
-                  <span className="model-picker-item-meta">
-                    {m.default ? '默认' : m.model && m.model !== m.name ? m.model : ''}
-                  </span>
-                  {effectiveSelectedModel === m.name && <Check size={13} className="model-picker-check" aria-hidden="true" />}
-                </DropdownMenu.Item>
+                  <span className="model-picker-item-label">默认链</span>
+                  <span className="model-picker-item-meta">系统自动选</span>
+                  {effectiveSelectedModel === null && <Check size={13} className="model-picker-check" aria-hidden="true" />}
+                </CommandItem>
+              </CommandGroup>
+              {grouped.map(({ provider, items }) => (
+                <CommandGroup key={provider} heading={provider}>
+                  {items.map((m) => (
+                    <CommandItem
+                      key={m.name}
+                      value={m.name}
+                      keywords={[m.provider, m.model].filter((s): s is string => Boolean(s?.length))}
+                      className={`model-picker-item ${effectiveSelectedModel === m.name ? 'sel' : ''}`}
+                      onSelect={(value) => {
+                        onModelChange(value);
+                        setOpen(false);
+                      }}
+                    >
+                      <span className="model-picker-item-label">{m.name}</span>
+                      <span className="model-picker-item-meta">
+                        {m.default ? '默认' : m.model && m.model !== m.name ? m.model : ''}
+                      </span>
+                      {effectiveSelectedModel === m.name && <Check size={13} className="model-picker-check" aria-hidden="true" />}
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
               ))}
-            </DropdownMenu.Group>
-          ))}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+            </CommandList>
+          </Command>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
