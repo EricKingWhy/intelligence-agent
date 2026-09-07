@@ -486,15 +486,15 @@ export default function App() {
           {/* Workspace 模式条（Phase 1d 方案 B）：Chat 永远是主阅读面，
               Split/Preview 为后续 Phase 预留的空架子。条本身克制——
               只在选中非 chat 时渲染下方占位行；Chat 模式下完全不占垂直空间。 */}
-          <div className="workspace-mode-bar" role="tablist" aria-label="Workspace 模式">
+          <div className="workspace-mode-bar" role="toolbar" aria-label="Workspace 模式">
             {WORKSPACE_MODES.map((m) => {
               const Icon = m.icon;
               const sel = workspaceMode === m.id;
               return (
                 <button
                   key={m.id}
-                  role="tab"
-                  aria-selected={sel}
+                  type="button"
+                  aria-pressed={sel}
                   className={`workspace-mode ${sel ? 'sel' : ''}`}
                   onClick={() => setWorkspaceMode(m.id)}
                   title={m.label}
