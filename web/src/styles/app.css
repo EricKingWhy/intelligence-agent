@@ -34,7 +34,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr) 320px;
   min-height: 0;
-  background: var(--surface-1);
+  /* SDD §9: chrome quieter than workspace. The container is the quietest
+   * tone (canvas) so the rail/inspector (chrome) and workspace sit on top
+   * with their own surfaces — no brighter bleed through sub-pixel gaps. */
+  background: var(--bg-app);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   overflow: hidden;
