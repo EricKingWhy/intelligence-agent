@@ -51,7 +51,10 @@ async def main() -> None:
     store = JsonlSessionStore(root / "sessions")
     ledger = SqliteOperationLedger(root / "state.db")
     await ledger.initialize()
-    workspaces = WorkspaceRegistry(root / "ws", backend="local")
+    # Phase 16 T4（ADR-0019 D4/D5）：默认 local，config 可选 backend="docker"
+    # 支持 Docker sandbox kill/restore 分段。缺省走 local 不影响 Phase 4 调用方。
+    backend = config.get("backend", "local")
+    workspaces = WorkspaceRegistry(root / "ws", backend=backend)
 
     session = Session.start(store)
     sandbox = workspaces.create(session.session_id)  # 崩溃前创建 workspace 映射
