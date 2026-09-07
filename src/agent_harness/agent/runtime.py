@@ -655,6 +655,7 @@ class AgentRuntime:
                         provider_request_id=response_meta.get("id"),
                         response_model=model_name,
                         fallback_transitions=fallback_transitions,
+                        tool_call_names=[c.name for c in calls] if calls else None,
                     )
                     generation = None
                 if tool_calls:

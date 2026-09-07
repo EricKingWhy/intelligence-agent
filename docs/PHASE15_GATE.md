@@ -121,15 +121,15 @@ result = run_real_model_smoke(
 | 12 | flush 在短生命周期进程退出前调用 | ✅ |
 | 13 | 手动 start_observation 配 .end() | ✅ |
 
-### 发现的 Gap（非阻塞，登记为 D7 后续批次）
+### 发现的 Gap（D7 后续批次——2026-09-07 复审）
 
-| Gap | 严重度 | 现状 | 建议 |
+| Gap | 严重度 | 状态 | 处置 |
 | --- | --- | --- | --- |
-| environment=`default` | 中 | 未设 `LANGFUSE_TRACING_ENVIRONMENT`，测试 trace 落入 default 环境，无法区分 prod/staging/dev | 设 `LANGFUSE_TRACING_ENVIRONMENT=development` 或 SDK init `environment=` |
-| release=None | 低 | 未设 release（版本/SHA），无法按版本对比 | 设 `LANGFUSE_RELEASE` 或 SDK init `release=`（git_commit 已在 metadata，但 release 是一等字段） |
-| cost_details 为空 | 低 | usage 已上报但 cost 空——Langfuse 可从 model 定义推断，若 model 字符串不匹配则失败 | 在 Langfuse 项目设置定义 `deepseek-v4-flash-0731` 定价，或上报 cost_details |
-| user_id=None | 低 | 单用户 CLI 可接受；多用户 web 需要 | web 场景接入时设置 user_id |
-| 第一轮 generation output=None | 低 | 第一轮返回 tool_calls 但 output 为空——应含 content 或 tool_calls 结构 | 检查 tracer 对 tool_calls 轮的 output 设置 |
+| environment=`default` | 中 | ✅ 已修（D7 批） | `LANGFUSE_TRACING_ENVIRONMENT`（Settings 缺省 `development`）经 Sink factory 透传到 SDK init |
+| release=None | 低 | ✅ 已修（D7 批） | `LANGFUSE_RELEASE`（Settings 空=不塞，SDK 自决）经 Sink factory 透传到 SDK init |
+| cost_details 为空 | 低 | ⏳ 云端配置项（非代码） | 在 Langfuse 项目设置定义模型定价或上传 cost_details——代码侧不消费成本字段 |
+| user_id=None | 低 | 📌 DEFER web 场景 | 单用户 CLI 可接受；web 多用户接入时在 Sink 层加 user_id 入参 |
+| 第一轮 generation output=None | 低 | ✅ 已修（D7 批） | `RunTracer.model_call_completed` 接受 `tool_call_names`；空 content + 有 tool_calls 时写 `<tool_calls: …>` 标记让观测层可读 |
 
 ### 修复的 bug
 
