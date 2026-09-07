@@ -127,8 +127,6 @@ async def build_runtime(
     approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
     式审批 callback（见 web 层 PendingApprovalQueue）。
     """
-    if reasoning_effort is not None:
-        logger.info("reasoning_effort=%s received but not yet consumed by runtime", reasoning_effort)
     if context_providers is not None:
         logger.info("context_providers=%s received but not yet consumed by runtime", context_providers)
 
@@ -143,13 +141,15 @@ async def build_runtime(
 
     config = (ModelConfig.from_settings(settings) if model_name is None
               else ModelConfig.from_catalog(settings, model_name))
-    model = create_chat_model(config)
+    model = create_chat_model(config, reasoning_effort=reasoning_effort)
     # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
     # 的 per-run coordinator 负责（见 agent/fallback 接线）。
     fallback_model = None
     if config.fallback is not None:
-        fallback_model = create_chat_model(config.fallback)
+        fallback_model = create_chat_model(
+            config.fallback, reasoning_effort=reasoning_effort,
+        )
     # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
     # 同一实例（全局在飞模型调用数的语义）。
     model_call_gate = ModelCallGate(settings.model_max_concurrency)
