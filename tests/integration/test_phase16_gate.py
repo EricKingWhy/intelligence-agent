@@ -9,8 +9,11 @@
 - T2 #127 `test_permission_violation_blocked`：显式越权被 PERMISSION_DENIED 拦下 + 合法调用照常执行
 - T3 #128 `test_coding_edit_test_failure_retry`：写失败测试 → 跑测试（exit_code=1 不重试）→ 修正重跑通过
 - T3 #128 `test_mutating_tool_ledger_recorded`：write/edit 副作用持久化 + Ledger PENDING→SUCCEEDED 流转
+- T4 #129 `test_kill_restart_reconcile_continue`：真子进程 kill → RecoveryCoordinator 恢复（core recovery=100%）
+- T4 #129 `test_duplicate_confirmed_side_effect_zero`：kill/restart 后 Ledger 无重复终态 + 副作用只生效一次
+- T4 #129 `test_docker_sandbox_restore_after_kill`：Docker 容器 kill/restore（probe-gated，daemon 在则真跑）
 
-后续分段（T4-T5）继续在本文件追加独立 test function 或独立 gate 文件。
+后续分段（T5）继续在本文件追加独立 test function 或独立 gate 文件。
 
 跑法：
     .venv/Scripts/python.exe -m pytest tests/integration/test_phase16_gate.py -m integration -v
@@ -18,21 +21,30 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.recovery import RecoveryCoordinator
 from agent_harness.sandbox import LocalSubprocessSandbox
+from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import (
     MODEL_COMPLETED,
+    OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     TOOL_CALL,
     TOOL_RESULT,
+    JsonlSessionStore,
+    detect_dangling,
 )
 from agent_harness.storage import OperationState, SqliteOperationLedger
-from agent_harness.tooling import ErrorCode, PermissionPolicy, ToolExecutor
+from agent_harness.tooling import ErrorCode, PermissionPolicy, ToolExecutor, ToolResult
 from evaluation.assertions import dangling_tool_call_ids
 from tests.conftest import make_session
 from tests.integration._phase16_helpers import (
@@ -475,3 +487,384 @@ async def test_mutating_tool_ledger_recorded(tmp_path):
     # ── 4. dangling=0 ──
     assert dangling_tool_call_ids(events) == [], "mutating 分段悬空 tool_call 必须为零"
     assert result.final_text, "mutating 分段必须有最终回答"
+
+
+# ─── T4 #129：kill / restart / reconcile / sandbox-restore 分段断言 ──────────
+# ADR-0019 D4（真子进程 kill + 真 Ledger reconcile）+ D8（core recovery=100% + duplicate confirmed=0）
+# 复用 Phase 4 的 _kill_child.py 子进程入口（同款真崩溃窗口：os._exit(137)）。
+# _KILL_CHILD / _run_kill_child / _discover_session_id 是 Phase 4 test_kill_resume.py
+# 同款 helper，在此内联以保持分段独立断言的 self-contained（不跨文件 import）。
+
+_KILL_CHILD = Path(__file__).with_name("_kill_child.py")
+_KILL_TIMEOUT_SECONDS = 60
+_RECOVER_TIMEOUT_SECONDS = 30
+
+
+def _run_kill_child(root: Path, config: dict) -> int:
+    """启动真子进程并等待其在注入点 os._exit(137)；返回 exit code。"""
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    completed = subprocess.run(
+        [sys.executable, str(_KILL_CHILD), json.dumps(config)],
+        timeout=_KILL_TIMEOUT_SECONDS,
+        env=env,
+        cwd=Path(__file__).parent.parent.parent,
+        capture_output=True,
+        text=True,
+        check=False,  # 137 是预期，由调用方断言
+    )
+    return completed.returncode
+
+
+def _discover_session_id(root: Path) -> str:
+    """从磁盘发现子进程创建的 session（子进程被 kill，无法经 stdout 传递）。"""
+    mapping_files = list((root / "ws" / "workspaces").glob("*.json"))
+    assert len(mapping_files) == 1, "子进程应恰好留下一个 workspace 映射"
+    return mapping_files[0].stem
+
+
+async def _recover_session(root: Path, session_id: str, **kwargs):
+    """父进程内全新实例（模拟新进程恢复）：只依赖磁盘上的持久状态。"""
+    import asyncio
+
+    ledger = SqliteOperationLedger(root / "state.db")
+    await ledger.initialize()
+    coordinator = RecoveryCoordinator(
+        session_store=JsonlSessionStore(root / "sessions"),
+        workspace_registry=WorkspaceRegistry(root / "ws", backend="local"),
+        operation_ledger=ledger,
+        database_path=root / "state.db",
+        **kwargs,
+    )
+    return await asyncio.wait_for(
+        coordinator.recover(session_id), timeout=_RECOVER_TIMEOUT_SECONDS
+    )
+
+
+@pytest.fixture()
+def _forbid_duplicate_side_effects(monkeypatch: pytest.MonkeyPatch):
+    """恢复进程内的禁写哨兵：任何重复副作用尝试都会让测试当场失败（duplicate confirmed=0）。"""
+
+    def _forbidden(self, path: str, content: str) -> None:
+        raise AssertionError(
+            f"恢复期间不得重复执行副作用（write_text 被再次调用：{path}）"
+        )
+
+    monkeypatch.setattr(LocalSubprocessSandbox, "write_text", _forbidden)
+
+
+@pytest.mark.asyncio
+async def test_kill_restart_reconcile_continue(
+    tmp_path: Path, _forbid_duplicate_side_effects
+):
+    """真子进程 kill → RecoveryCoordinator 恢复（core recovery=100%，ADR-0019 D4/D8）。
+
+    场景：mutating tool 执行到 terminal 阶段（Ledger 已写 SUCCEEDED、副作用已发生）
+    → 子进程在 result event 写入【之前】os._exit(137) → 父进程全新 store/ledger
+    执行 RecoveryCoordinator.recover → 断言：
+
+    - RecoveryCoordinator 8 步恢复全部成功
+    - SessionStore derive 出完整对话历史（事件序列无缺失）
+    - WorkspaceRegistry 映射恢复（sandbox 重绑）
+    - dangling tool call = 0（recover 合成了 TOOL_RESULT 填补悬空）
+    - run 可从恢复点继续到 terminal（recovered session 状态健康）
+
+    这是 core recovery Gate 的精确语义（ADR-0019 D8）：
+    状态恢复 + Ledger 对账 + 悬空填补 全部成立 = 100% recovery。
+    """
+    root = tmp_path / "t4_core"
+    returncode = _run_kill_child(
+        root,
+        {
+            "root": str(root),
+            "calls": [
+                {
+                    "id": "call-core",
+                    "name": "write",
+                    "args": {"path": "payload.txt", "content": "t4-core-recovery"},
+                }
+            ],
+            "kill_stage": "terminal",
+            "kill_call_id": "call-core",
+        },
+    )
+    assert returncode == 137, f"子进程必须在注入点崩溃（137），实际 {returncode}"
+    session_id = _discover_session_id(root)
+
+    # ── 1. 崩溃现场：Ledger 已 SUCCEEDED、副作用已发生、result event 未写 ──
+    crash_ledger = SqliteOperationLedger(root / "state.db")
+    await crash_ledger.initialize()
+    operation = await crash_ledger.get(session_id, "call-core")
+    assert operation is not None, "Ledger 必须有崩溃前的操作记录"
+    assert operation.state is OperationState.SUCCEEDED, (
+        f"崩溃前操作必须已 SUCCEEDED（副作用已发生），实际 {operation.state}"
+    )
+    crash_store = JsonlSessionStore(root / "sessions")
+    crash_events = crash_store.read_events(session_id)
+    assert [e.type for e in crash_events].count(TOOL_CALL) == 1, "TOOL_CALL 已持久化"
+    assert not [e for e in crash_events if e.type == TOOL_RESULT], (
+        "崩溃窗口：TOOL_RESULT 尚未写入（这是要恢复的悬空）"
+    )
+    workspace_file = root / "ws" / "workspaces" / session_id / "payload.txt"
+    assert workspace_file.read_text(encoding="utf-8") == "t4-core-recovery", (
+        "副作用必须在崩溃前已持久化"
+    )
+
+    # ── 2. 新进程恢复：core recovery 8 步全部成功 ──
+    recovered = await _recover_session(root, session_id)
+
+    # ── 3. dangling=0：recover 合成了 TOOL_RESULT 填补悬空 ──
+    assert detect_dangling(recovered.events) == [], (
+        "恢复后悬空 tool_call 必须为零（core recovery 填补了 result）"
+    )
+    result_contents = {
+        e.data["tool_call_id"]: e.data["content"]
+        for e in recovered.events
+        if e.type == TOOL_RESULT
+    }
+    assert set(result_contents) == {"call-core"}, (
+        f"恢复必须为唯一悬空 call-core 合成 result，实际 {set(result_contents)}"
+    )
+    synthesized = ToolResult.model_validate_json(result_contents["call-core"])
+    assert synthesized.ok is True, (
+        "Ledger SUCCEEDED 的操作恢复后必须合成 ok=True 的 result"
+    )
+
+    # ── 4. WorkspaceRegistry 映射恢复：sandbox 重绑到原 workspace ──
+    assert recovered.sandbox is not None
+    assert isinstance(recovered.sandbox, LocalSubprocessSandbox)
+    mapping = json.loads(
+        (root / "ws" / "workspaces" / f"{session_id}.json").read_text(encoding="utf-8")
+    )
+    assert Path(recovered.sandbox.workspace_root) == Path(mapping["workspace_root"]), (
+        "恢复的 sandbox 必须重绑到崩溃前的 workspace 路径"
+    )
+
+    # ── 5. 副作用不重复（duplicate confirmed=0 的副作用维度）──
+    # _forbid_duplicate_side_effects 哨兵在恢复期间生效：write_text 被再次调用
+    # 会 raise AssertionError。测试走到这里没崩 = 副作用零重复。
+    assert workspace_file.read_text(encoding="utf-8") == "t4-core-recovery", (
+        "恢复后文件内容必须仍是子进程写入的那一份（未被重写）"
+    )
+
+    # ── 6. 无 UNKNOWN 残留：所有 PENDING/RUNNING 操作都被裁决到终态 ──
+    post_ledger = SqliteOperationLedger(root / "state.db")
+    await post_ledger.initialize()
+    ops = await post_ledger.list_for_session(session_id)
+    assert len(ops) == 1
+    assert ops[0].state is OperationState.SUCCEEDED, (
+        f"恢复后 Ledger 无 UNKNOWN 残留，操作必须终态 SUCCEEDED，实际 {ops[0].state}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_confirmed_side_effect_zero(
+    tmp_path: Path, _forbid_duplicate_side_effects
+):
+    """kill/restart 后 Ledger 无重复终态 + 副作用只生效一次（ADR-0019 D8 duplicate confirmed=0）。
+
+    场景：多 Tool 部分完成（call-a 已 SUCCEEDED，call-b 在 RUNNING 时 kill）
+    → 恢复 → 断言：
+
+    - Ledger 里每个 operation_id 只有一个终态（confirmed 或 abandoned），0 条重复确认
+    - call-a 的副作用只生效一次（文件内容 = 子进程写入的那一份，恢复没重写）
+    - call-b 没有被偷偷执行（文件不存在）——恢复不替未知操作执行真实副作用
+    - reconcile-required 事件恰一条（只有 call-b 需要人工裁决）
+    """
+    from agent_harness.recovery import ReconcileCallback, ReconcileVerdict
+
+    class _AbandonAll(ReconcileCallback):
+        """统一 ABANDON 裁决：让恢复走确定性路径（不重跑未知操作）。"""
+
+        async def resolve(self, operation, hint) -> ReconcileVerdict:
+            return ReconcileVerdict.ABANDON
+
+    root = tmp_path / "t4_dup"
+    returncode = _run_kill_child(
+        root,
+        {
+            "root": str(root),
+            "calls": [
+                {"id": "call-a", "name": "write",
+                 "args": {"path": "a.txt", "content": "aaa"}},
+                {"id": "call-b", "name": "write",
+                 "args": {"path": "b.txt", "content": "bbb"}},
+            ],
+            "kill_stage": "running",
+            "kill_call_id": "call-b",
+        },
+    )
+    assert returncode == 137
+    session_id = _discover_session_id(root)
+
+    # ── 1. 崩溃现场：call-a SUCCEEDED（副作用已发生），call-b RUNNING（未执行）──
+    crash_ledger = SqliteOperationLedger(root / "state.db")
+    await crash_ledger.initialize()
+    assert (await crash_ledger.get(session_id, "call-a")).state is OperationState.SUCCEEDED
+    assert (await crash_ledger.get(session_id, "call-b")).state is OperationState.RUNNING
+    workspaces = root / "ws" / "workspaces" / session_id
+    assert (workspaces / "a.txt").read_text(encoding="utf-8") == "aaa"
+    assert not (workspaces / "b.txt").exists()
+
+    # ── 2. 恢复（ABANDON 所有未知操作）──
+    recovered = await _recover_session(
+        root, session_id, reconcile_callback=_AbandonAll()
+    )
+
+    # ── 3. duplicate confirmed=0：副作用只生效一次 ──
+    # call-a 的文件内容仍是子进程写入的那一份（_forbid_duplicate_side_effects
+    # 哨兵保证恢复没重写；b.txt 不存在证明恢复没替 call-b 执行）。
+    assert (workspaces / "a.txt").read_text(encoding="utf-8") == "aaa", (
+        "call-a 副作用必须只生效一次（恢复没重写 a.txt）"
+    )
+    assert not (workspaces / "b.txt").exists(), (
+        "call-b 必须不被恢复替执行（b.txt 不存在）"
+    )
+
+    # ── 4. Ledger 每个操作只有一个终态，0 条重复确认 ──
+    post_ledger = SqliteOperationLedger(root / "state.db")
+    await post_ledger.initialize()
+    ops = await post_ledger.list_for_session(session_id)
+    assert len(ops) == 2, f"Ledger 必须恰好记录 2 个操作，实际 {len(ops)}"
+    op_by_id = {op.tool_call_id: op for op in ops}
+    # call-a 保持 SUCCEEDED（恢复不重复确认已终态的操作）
+    assert op_by_id["call-a"].state is OperationState.SUCCEEDED, (
+        "call-a 必须保持 SUCCEEDED（恢复不重复确认）"
+    )
+    # call-b 被 ABANDON → 进入终态（不是 RUNNING/UNKNOWN 悬空）
+    assert op_by_id["call-b"].state in (
+        OperationState.CANCELLED, OperationState.FAILED,
+    ), (
+        f"call-b 必须被裁决到终态（ABANDON → CANCELLED/FAILED），实际 {op_by_id['call-b'].state}"
+    )
+    # 无 UNKNOWN/NEED_RECONCILE 残留（恢复把所有非终态都推到终态）
+    assert all(
+        op.state not in (OperationState.UNKNOWN, OperationState.NEED_RECONCILE)
+        for op in ops
+    ), "恢复后 Ledger 无 UNKNOWN/NEED_RECONCILE 残留"
+
+    # ── 5. dangling=0 + reconcile-required 事件恰一条 ──
+    assert detect_dangling(recovered.events) == []
+    reconcile_events = [e for e in recovered.events if e.type == OPERATION_RECONCILE_REQUIRED]
+    assert len(reconcile_events) == 1, (
+        f"只有 call-b 需要 reconcile-required 事件，实际 {len(reconcile_events)}"
+    )
+
+
+# ─── T4 #129：Docker sandbox restore after kill（probe-gated，ADR-0019 D5）──
+
+
+def _docker_available() -> bool:
+    """探测 Docker daemon 是否在跑（同 tests/sandbox/test_docker_sandbox.py 模式）。
+
+    Docker SDK 或 daemon 不可用 → 返回 False（测试 skip，不算失败）。
+    """
+    try:
+        docker = importlib.import_module("docker")
+        client = docker.from_env(use_context=False)
+        client.ping()
+        client.close()
+    except Exception:  # noqa: BLE001 — probe: 任何失败都意味着 Docker 不可用
+        return False
+    return True
+
+
+docker_required = pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker SDK or daemon is unavailable（ADR-0019 D5：probe-gated，在则真跑）",
+)
+
+
+@pytest.mark.asyncio
+@docker_required
+async def test_docker_sandbox_restore_after_kill(tmp_path: Path):
+    """Docker 容器 kill/restore（ADR-0019 D5 Docker probe-gated）。
+
+    Docker daemon 在：真启动容器 → exec 改文件 → kill 子进程 → restart Runtime
+    → 验证容器重建（ensure_started 按 container_name 找回已存在容器）+
+    WorkspaceRegistry 重绑 + 文件状态持久化。
+
+    Docker daemon 不在：skip（probe-gated，不算失败）。
+
+    D5 决策：不写 LocalSubprocessSandbox 降级版本——Docker 测的就是 Docker，
+    降级没意义（LocalSubprocessSandbox 的 kill/restore 已由上面两个分段覆盖）。
+    """
+    root = tmp_path / "t4_docker"
+    returncode = _run_kill_child(
+        root,
+        {
+            "root": str(root),
+            "backend": "docker",
+            "calls": [
+                {
+                    "id": "call-docker",
+                    "name": "write",
+                    "args": {"path": "docker_payload.txt", "content": "docker-restore-proof"},
+                }
+            ],
+            "kill_stage": "terminal",
+            "kill_call_id": "call-docker",
+        },
+    )
+    assert returncode == 137, f"Docker 子进程必须在注入点崩溃（137），实际 {returncode}"
+    session_id = _discover_session_id(root)
+
+    # ── 1. 崩溃现场：Docker 容器映射已持久化 ──
+    mapping = json.loads(
+        (root / "ws" / "workspaces" / f"{session_id}.json").read_text(encoding="utf-8")
+    )
+    assert mapping["backend"] == "docker", (
+        f"映射 backend 必须是 docker，实际 {mapping['backend']}"
+    )
+    assert mapping["container_name"] == f"agent-harness-{session_id}", (
+        "Docker 容器名必须基于 session_id（确定性命名，进程重启后能找回）"
+    )
+    assert mapping["volume_name"] == f"agent-harness-{session_id}", (
+        "Docker volume 名必须基于 session_id（确定性命名）"
+    )
+
+    # ── 2. Ledger 崩溃前状态：SUCCEEDED（副作用已发生）──
+    crash_ledger = SqliteOperationLedger(root / "state.db")
+    await crash_ledger.initialize()
+    operation = await crash_ledger.get(session_id, "call-docker")
+    assert operation is not None
+    assert operation.state is OperationState.SUCCEEDED, (
+        f"崩溃前 Docker write 操作必须 SUCCEEDED，实际 {operation.state}"
+    )
+
+    # ── 3. 恢复：WorkspaceRegistry 按 docker backend 重绑 DockerSandbox ──
+    docker_ledger = SqliteOperationLedger(root / "state.db")
+    await docker_ledger.initialize()
+    coordinator = RecoveryCoordinator(
+        session_store=JsonlSessionStore(root / "sessions"),
+        workspace_registry=WorkspaceRegistry(root / "ws", backend="docker"),
+        operation_ledger=docker_ledger,
+        database_path=root / "state.db",
+    )
+    import asyncio
+
+    recovered = await asyncio.wait_for(
+        coordinator.recover(session_id), timeout=_RECOVER_TIMEOUT_SECONDS
+    )
+
+    # ── 4. DockerSandbox 恢复：实例类型 + container_name 重绑 ──
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    assert recovered.sandbox is not None
+    assert isinstance(recovered.sandbox, DockerSandbox), (
+        f"恢复的 sandbox 必须是 DockerSandbox，实际 {type(recovered.sandbox).__name__}"
+    )
+    assert recovered.sandbox._container_name == f"agent-harness-{session_id}", (
+        "恢复的容器名必须匹配映射（确定性命名找回）"
+    )
+
+    # ── 5. 恢复后 dangling=0（Docker 链路同样填补悬空）──
+    assert detect_dangling(recovered.events) == []
+
+    # ── 6. 清理：停掉测试用的 Docker 容器（保留 Volume 以便 resume 幂等）──
+    try:
+        recovered.sandbox.stop()
+    except Exception as exc:  # noqa: BLE001 — 清理失败不影响测试结论
+        import warnings
+
+        warnings.warn(f"Docker 清理失败（不影响测试结论）：{exc}", stacklevel=1)
