@@ -15,9 +15,9 @@
  * 数据真相仍是 /api/models（lib/api.ts 的 ModelCatalogEntry）。
  * 这里只是提交偏好，不是会话内模型真相——后者仍以模型卡 data.model 为准（不变量 #22）。 */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { Check, ChevronDown, Cpu } from 'lucide-react';
+import { Check, ChevronDown, Cpu, Search } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
 
 interface Props {
@@ -41,11 +41,19 @@ function groupByProvider(models: ModelCatalogEntry[]): { provider: string; items
 
 export function ModelPicker({ models, selectedModel, onModelChange, disabled = false }: Props) {
   // Hooks 永远在最前（rules-of-hooks）—— 空目录降级在 Hooks 之后。
-  const grouped = useMemo(() => groupByProvider(models), [models]);
+  const [query, setQuery] = useState('');
+  const grouped = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    const visible = normalized
+      ? models.filter((m) => [m.name, m.provider, m.model].some((value) => value?.toLocaleLowerCase().includes(normalized)))
+      : models;
+    return groupByProvider(visible);
+  }, [models, query]);
   const selectedEntry = useMemo(
     () => (selectedModel ? models.find((m) => m.name === selectedModel) ?? null : null),
     [models, selectedModel],
   );
+  const effectiveSelectedModel = selectedEntry?.name ?? null;
   const triggerLabel = selectedEntry?.name ?? '默认链';
 
   // 端点缺席：不渲染（不伪造列表）。调用方靠这个降级隐藏入口。
@@ -79,29 +87,34 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
           // 高度上限 + 滚动，避免目录长时顶出视口
           // (max-height 由 CSS 处理)
         >
+          <div className="model-picker-search-wrap">
+            <Search size={13} aria-hidden="true" />
+            <input
+              className="model-picker-search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索模型"
+              aria-label="搜索模型"
+              onKeyDown={(e) => e.stopPropagation()}
+            />
+          </div>
           {/* 默认链永远在顶部（null 提交——后端按默认链行为） */}
-          <DropdownMenu.Item
-            className={`model-picker-item ${selectedModel === null || selectedModel === '' ? 'sel' : ''}`}
-            onSelect={(e) => {
-              e.preventDefault();
-              onModelChange(null);
-            }}
+          {!query.trim() && <DropdownMenu.Item
+            className={`model-picker-item ${effectiveSelectedModel === null ? 'sel' : ''}`}
+            onSelect={() => onModelChange(null)}
           >
             <span className="model-picker-item-label">默认链</span>
             <span className="model-picker-item-meta">系统自动选</span>
-            {(selectedModel === null || selectedModel === '') && <Check size={13} className="model-picker-check" aria-hidden="true" />}
-          </DropdownMenu.Item>
+            {effectiveSelectedModel === null && <Check size={13} className="model-picker-check" aria-hidden="true" />}
+          </DropdownMenu.Item>}
           {grouped.map(({ provider, items }) => (
             <DropdownMenu.Group key={provider}>
               <DropdownMenu.Label className="model-picker-group-label">{provider}</DropdownMenu.Label>
               {items.map((m) => (
                 <DropdownMenu.Item
                   key={m.name}
-                  className={`model-picker-item ${selectedModel === m.name ? 'sel' : ''}`}
-                  onSelect={(e) => {
-                    e.preventDefault();
-                    onModelChange(m.name);
-                  }}
+                  className={`model-picker-item ${effectiveSelectedModel === m.name ? 'sel' : ''}`}
+                  onSelect={() => onModelChange(m.name)}
                 >
                   <span className="model-picker-item-label">{m.name}</span>
                   <span className="model-picker-item-meta">

@@ -3540,6 +3540,29 @@ button.json-row {
   from { opacity: 1; transform: translateY(0); }
   to { opacity: 0; transform: translateY(4px); }
 }
+.model-picker-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0 var(--space-xs) var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--text-tertiary);
+  background: var(--surface-workspace);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.model-picker-search {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: var(--text-xs) var(--font-ui);
+}
+.model-picker-search::placeholder {
+  color: var(--text-tertiary);
+}
 .model-picker-group-label {
   padding: var(--space-xs) var(--space-sm);
   font-size: 10px;

@@ -45,7 +45,15 @@ describe('ModelPicker（Radix Popover 契约）', () => {
       createElement(ModelPicker, { models: CATALOG, selectedModel: 'qwen-max', onModelChange: noop, disabled: false }),
     ).replaceAll('<!-- -->', '');
     expect(html).toContain('qwen-max');
-    expect(html).not.toContain('默认链');
+    expect(html).not.toContain('>默认链<');
+  });
+
+  it('selectedModel 已不在目录 → 归一化为默认链', () => {
+    const html = renderToString(
+      createElement(ModelPicker, { models: CATALOG, selectedModel: 'removed-model', onModelChange: noop, disabled: false }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('>默认链<');
+    expect(html).not.toContain('removed-model');
   });
 
   it('Radix DropdownMenu 内容项不在 SSR HTML 中（客户端 portal）', () => {
