@@ -142,7 +142,9 @@ async def build_runtime(
     # 的 per-run coordinator 负责（见 agent/fallback 接线）。
     fallback_model = None
     if config.fallback is not None:
-        fallback_model = create_chat_model(config.fallback)
+        fallback_model = create_chat_model(
+            config.fallback, reasoning_effort=reasoning_effort
+        )
     # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
     # 同一实例（全局在飞模型调用数的语义）。
     model_call_gate = ModelCallGate(settings.model_max_concurrency)

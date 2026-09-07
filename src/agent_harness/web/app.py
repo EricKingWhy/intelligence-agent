@@ -79,7 +79,7 @@ from agent_harness.web.runmanager import RunManager
 # description。两边引用同一份常量 → 加新档位只改一处，validator 与清单永不漂移。
 # 与 PERMISSION_MODE_DESCRIPTIONS（tooling/contract.py）同模式（Reuse First §6）。
 
-#: reasoning_effort 三档（当前 runtime no-op，清单端点诚实标注）。
+#: reasoning_effort 三档（RUNTIME 子批次 1 已消费到模型构造 seam）。
 REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "minimal": {
         "display_name": "Minimal",
@@ -132,7 +132,7 @@ class CreateSessionRequest(BaseModel):
     # 时 permission_mode 优先。两个字段都缺省 → workspace-write + auto-approve
     # （现行为不变）。
     auto_approve: bool = True
-    # amend contract fields（Phase 5，当前 runtime no-op；明确接受但不假装生效）
+    # amend contract fields（Phase 5 staged → RUNTIME 子批次 1 消费 reasoning_effort）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
     context_providers: list[str] | None = None
@@ -788,10 +788,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     async def list_reasoning_efforts() -> dict[str, Any]:
         """列出 reasoning_effort 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
 
-        Phase 5 已把 reasoning_effort 作为 staged 契约接收（validator 锁集合）；
-        本端点只暴露「后端认识哪些档位」，**不假装运行时已消费**（当前 runtime no-op，
-        与 POST /api/sessions 的 staged 语义一致）。字段与 /api/permission-modes 同
-        模式（{id, display_name, description}），单一事实源是模块级
+        RUNTIME 子批次 1 已把 reasoning_effort 消费到模型构造 seam
+        （minimal→low, standard→medium, deep→high）。本端点只暴露
+        「后端认识哪些档位」。字段与 /api/permission-modes 同模式
+        （{id, display_name, description}），单一事实源是模块级
         REASONING_EFFORT_DESCRIPTIONS（validator 与清单引用同一份 → 永不漂移）。
         """
         efforts = [
