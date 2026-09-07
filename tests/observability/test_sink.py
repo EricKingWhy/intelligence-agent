@@ -220,6 +220,43 @@ def test_get_trace_url_accepts_none_trace_id_returns_none():
     assert sink.get_trace_url(trace_id="abc") == "https://x/abc"
 
 
+def test_init_passes_environment_and_release_to_factory():
+    """Gap 1+2（D7 DEFER 批）：environment/release 是 Langfuse 一等字段，
+    必须透传到 SDK init——否则 trace 落入 default 环境、release 永远 null。"""
+
+    captured: dict = {}
+
+    def _capturing_factory(**kwargs):
+        captured.update(kwargs)
+
+        class _Client: ...
+        return _Client()
+
+    _sink(
+        client_factory=_capturing_factory,
+        tracing_environment="development",
+        release="v1.2.3",
+    )
+    assert captured.get("environment") == "development"
+    assert captured.get("release") == "v1.2.3"
+
+
+def test_init_defaults_environment_development_empty_release_omitted():
+    """environment 缺省 development（避免落入 default）；release 空串不塞给 SDK。"""
+
+    captured: dict = {}
+
+    def _capturing_factory(**kwargs):
+        captured.update(kwargs)
+
+        class _Client: ...
+        return _Client()
+
+    _sink(client_factory=_capturing_factory)  # 不传新参数
+    assert captured.get("environment") == "development"
+    assert not captured.get("release")  # 空=不塞（SDK 自决）
+
+
 def _null_span_cm():
     import contextlib
 

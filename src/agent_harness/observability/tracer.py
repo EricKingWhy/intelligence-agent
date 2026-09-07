@@ -181,9 +181,16 @@ class RunTracer:
         provider_request_id: str | None = None,
         response_model: str | None = None,
         fallback_transitions: list[Any] | None = None,
+        tool_call_names: list[str] | None = None,
     ) -> None:
         if generation is None:
             return
+        # Gap 5（D7 DEFER 批）：模型返回 tool_calls 但 content 空——Langfuse UI
+        # 把空 output 显示成 None，tool_calls 轮在 trace 里不可读。这里兜底
+        # 写结构化标记（仅空 content + 有 tool_calls 时），让观测层可读。
+        effective_output = output_text
+        if not effective_output and tool_call_names:
+            effective_output = f"<tool_calls: {', '.join(tool_call_names)}>"
         metadata: dict[str, Any] = {}
         if duration_ms is not None:
             metadata["duration_ms"] = duration_ms
@@ -199,7 +206,7 @@ class RunTracer:
             metadata["fallback_to"] = first.to_model
             metadata["fallback_reason"] = first.reason
         self._quiet("model_call_completed", lambda: generation.update(
-            output=self._content(output_text),
+            output=self._content(effective_output),
             **({"usage_details": _usage_details(usage)} if usage else {}),
             **({"metadata": metadata} if metadata else {}),
         ))
