@@ -484,3 +484,25 @@ _Avoid_: cloud-only truth (repo 无导出则不可复现), eval-specific runtime
 **Deterministic Assertion**:
 代码判断的评测断言（tool 选择、dangling=0、recovery 成功、kill/resume 恢复），跑在 ScriptedModel + 真实 Runtime 上、可进 CI；与 LLM judge（语义质量、须校准、只搭不启用）严格分档。
 _Avoid_: single opaque score (spec 12 §6), judge for what code can assert, real-model assertions in CI
+
+## Final E2E 层（Phase 16）
+
+**Final Full E2E**:
+Roadmap 收尾 milestone——一条完整场景链串联所有核心能力（research → KB → web → citation → coding → kill → recovery → replay → fork → Langfuse trace → Eval report），证明端到端可串 + Gate 指标达标。这是集成验收，不是"把所有 Phase 的 Gate 重跑一遍"。
+_Avoid_: 20-step ScriptedModel 大剧本（脆化）, 重复测各 Phase 已覆盖的能力（delegation/compaction/memory/MCP/web-ui）
+
+**分段独立断言 + 薄编排层（Segmented Assertions + Thin Orchestrator）**:
+20 节点链路不连续真跑（单步偏离全链崩），拆成分段独立断言（每段独立红/绿/重跑）+ 一个薄编排层 test function（5-6 轮简化链路）证明关键路径可串。薄编排层承担 "Full E2E reproducible" Gate。
+_Avoid_: monolithic end-to-end script（维护成本远超收益）
+
+**Probe-gated Integration（探测门控集成）**:
+外部依赖不可用时自动 skip 并登记原因（不算失败）的 integration 测试模式。Docker sandbox restore 用此模式（`_docker_available() + skipif`）——daemon 在则真跑容器重建，不在则 skip。与手动验收清单不同：probe-gated 是自动探测、有就跑、没有自动跳。
+_Avoid_: 手动验收清单承载可自动化的验证, CI 硬依赖 Docker daemon
+
+**Gate 指标精确化（Gate Metric Precise Definitions）**:
+Roadmap 6 项 Gate 的精确口径（ADR-0019 D8）：duplicate confirmed = 0 条重复确认（非计数）；dangling = 0（合成补齐）；core recovery = 全或无（状态恢复 + Ledger 对账闭环 + 继续到 terminal，非百分比）；citation validity = 格式合法 + KB chunk 可查；permission violation = 显式越权被拦 + 合法调用放行；Full E2E reproducible = 薄编排层 deterministic 可复跑。
+_Avoid_: 模糊百分比指标无算法支撑, 只测"没遇到边界"不测"边界有效"
+
+**只量不裁（Measure Don't Gate）**:
+性能基线（E2E wall clock + 各段耗时）记录到 PHASE16_GATE.md 供后续回归对比，但不设硬阈值——ScriptedModel 延迟不代表真实延迟，真性能优化是独立 Phase。
+_Avoid_: CI 硬阈值用 ScriptedModel 延迟（无参考价值）, 性能优化混入 Final E2E
