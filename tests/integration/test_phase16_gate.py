@@ -7,8 +7,10 @@
 - T1 #126 `test_critical_path_e2e`：薄编排层 4 轮关键路径全链通
 - T2 #127 `test_research_kb_insufficient_web_citation`：research → KB 证据不足 → web 补齐 → citation validity
 - T2 #127 `test_permission_violation_blocked`：显式越权被 PERMISSION_DENIED 拦下 + 合法调用照常执行
+- T3 #128 `test_coding_edit_test_failure_retry`：写失败测试 → 跑测试（exit_code=1 不重试）→ 修正重跑通过
+- T3 #128 `test_mutating_tool_ledger_recorded`：write/edit 副作用持久化 + Ledger PENDING→SUCCEEDED 流转
 
-后续分段（T3-T5）继续在本文件追加独立 test function 或独立 gate 文件。
+后续分段（T4-T5）继续在本文件追加独立 test function 或独立 gate 文件。
 
 跑法：
     .venv/Scripts/python.exe -m pytest tests/integration/test_phase16_gate.py -m integration -v
@@ -29,16 +31,21 @@ from agent_harness.session import (
     TOOL_CALL,
     TOOL_RESULT,
 )
+from agent_harness.storage import OperationState, SqliteOperationLedger
 from agent_harness.tooling import ErrorCode, PermissionPolicy, ToolExecutor
 from evaluation.assertions import dangling_tool_call_ids
 from tests.conftest import make_session
 from tests.integration._phase16_helpers import (
     PHASE16_WEB_URL,
+    build_coding_executor,
+    build_coding_registry,
     build_critical_path_registry,
     build_kb_seeded_registry,
     build_permission_registry,
+    coding_failure_then_fix_script,
     critical_path_scripted_model,
     kb_insufficient_then_web_script,
+    mutating_tool_ledger_script,
     permission_violation_script,
 )
 
@@ -310,3 +317,161 @@ async def test_permission_violation_blocked(t2_sandbox: LocalSubprocessSandbox, 
     assert dangling_tool_call_ids(events) == [], (
         "permission 分段悬空 tool_call 必须为零（每个 tool_call 都有配对 tool_result）"
     )
+
+
+# ─── T3 #128：coding / edit / test-failure / mutating-tool 分段独立断言 ──────
+
+
+@pytest.mark.asyncio
+async def test_coding_edit_test_failure_retry(tmp_path):
+    """写失败测试 → 跑测试（exit_code=1 不重试）→ 修正重跑通过（ADR-0002 + ADR-0019 D6）。
+
+    核心断言：
+    - bash 工具被执行 4 次（write-fail / run-fail / write-pass / run-pass）
+    - 测试失败（exit_code=1）时 ToolResult.ok=True（ADR-0002：非零退出是确定性失败，
+      不是工具异常）→ ToolExecutor 不重试
+    - 模型据此调整策略（覆写测试文件）而非原地重试同一条命令
+    - 最终重跑 exit_code=0 → 测试通过
+    - 文件系统副作用持久化（test_fail.py 真被写入）
+    - dangling=0
+    """
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path / "t3_coding")
+    ledger = SqliteOperationLedger(tmp_path / "t3_coding_ledger.db")
+    await ledger.initialize()
+    registry = build_coding_registry(sandbox)
+    executor = build_coding_executor(sandbox, ledger)
+    model = coding_failure_then_fix_script()
+    session = make_session(tmp_path / "t3_coding_sess")
+    runtime = AgentRuntime(model, registry, executor)
+
+    result = await runtime.run(session, "帮我写一个测试并跑通它。")
+
+    events = session.events
+    tool_calls = [e for e in events if e.type == TOOL_CALL]
+    tool_results = [e for e in events if e.type == TOOL_RESULT]
+
+    # ── 1. 4 次 bash 调用，顺序匹配剧本 ──
+    assert len(tool_calls) == 4, f"coding 分段 4 次 bash 调用，实际 {len(tool_calls)}"
+    assert all(e.data.get("tool_name") == "bash" for e in tool_calls), (
+        "coding 分段全部走 bash"
+    )
+    call_ids = [e.data.get("tool_call_id") for e in tool_calls]
+    assert call_ids == [
+        "t3-write-fail", "t3-run-fail", "t3-write-pass", "t3-run-pass",
+    ], f"bash 调用顺序必须匹配剧本，实际 {call_ids}"
+
+    # ── 2. 测试失败（exit_code=1）是 ok=True 的确定性失败（ADR-0002）──
+    run_fail_payload = _tool_result_payload(tool_results[1])
+    assert run_fail_payload["ok"] is True, (
+        "bash 非零退出时 ToolResult.ok 必须 True（ADR-0002：exit_code 不是工具异常）"
+    )
+    assert run_fail_payload["data"]["exit_code"] != 0, (
+        f"第一次跑测试必须失败（exit_code != 0），实际 "
+        f"exit_code={run_fail_payload['data']['exit_code']}"
+    )
+    # retryable 必须为 False（ok=True 的结果天然不重试；这条断言锁定语义不被未来改动破坏）
+    assert run_fail_payload["retryable"] is False, (
+        "确定性失败（ok=True, exit_code!=0）不应标记 retryable"
+    )
+
+    # ── 3. ToolExecutor 没有重试失败的 bash（Ledger 只有 1 条 run-fail 操作）──
+    run_fail_op = await ledger.get(session.session_id, "t3-run-fail")
+    assert run_fail_op is not None, "run-fail 操作必须在 Ledger 里有记录"
+    assert run_fail_op.state is OperationState.SUCCEEDED, (
+        f"bash ok=True 的操作 Ledger 状态必须 SUCCEEDED（不是 FAILED/重试），"
+        f"实际 {run_fail_op.state}"
+    )
+
+    # ── 4. 修正后重跑通过（exit_code=0）──
+    run_pass_payload = _tool_result_payload(tool_results[3])
+    assert run_pass_payload["ok"] is True
+    assert run_pass_payload["data"]["exit_code"] == 0, (
+        f"修正后重跑必须 exit_code=0，实际 "
+        f"exit_code={run_pass_payload['data']['exit_code']}, "
+        f"stderr={run_pass_payload['data'].get('stderr')}"
+    )
+
+    # ── 5. 文件系统副作用持久化（test_fail.py 真被写入且最终内容是通过的测试）──
+    persisted = (tmp_path / "t3_coding" / "test_fail.py").read_text(encoding="utf-8")
+    assert "assert True" in persisted, (
+        f"test_fail.py 最终内容必须是修正后的通过测试，实际 {persisted!r}"
+    )
+
+    # ── 6. run terminal + dangling=0 ──
+    assert result.final_text, "coding 分段必须有最终回答"
+    assert any(e.type == RUN_COMPLETED for e in events)
+    assert dangling_tool_call_ids(events) == [], "coding 分段悬空 tool_call 必须为零"
+
+
+@pytest.mark.asyncio
+async def test_mutating_tool_ledger_recorded(tmp_path):
+    """write/edit 副作用持久化 + Ledger PENDING→SUCCEEDED 流转（ADR-0004 + ADR-0019 D6）。
+
+    核心断言：
+    - write 创建 doc.md → 文件真实写入；Ledger 记录 SUCCEEDED
+    - edit 替换 doc.md 内容 → 文件真实变更；Ledger 记录 SUCCEEDED
+    - 两次 MUTATING 操作都在 Ledger 里有完整记录（list_for_session 顺序 = 执行顺序）
+    - 副作用持久化可经 sandbox.read_text 反查验证
+    - dangling=0
+
+    这是 T4 kill/reconcile 的前置上下文：mutating tool 先正常跑通，
+    然后 T4 才能验证 kill 后 Ledger 残留态经 RecoveryCoordinator 对账。
+    """
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path / "t3_mutating")
+    ledger = SqliteOperationLedger(tmp_path / "t3_mutating_ledger.db")
+    await ledger.initialize()
+    registry = build_coding_registry(sandbox)
+    executor = build_coding_executor(sandbox, ledger)
+    model = mutating_tool_ledger_script()
+    session = make_session(tmp_path / "t3_mutating_sess")
+    runtime = AgentRuntime(model, registry, executor)
+
+    result = await runtime.run(session, "帮我写一份文档并编辑它。")
+
+    events = session.events
+    tool_results = [e for e in events if e.type == TOOL_RESULT]
+
+    # ── 1. 两次 MUTATING 工具调用都成功（ok=True）──
+    assert len(tool_results) == 2, f"mutating 分段 2 次工具调用，实际 {len(tool_results)}"
+    write_payload = _tool_result_payload(tool_results[0])
+    edit_payload = _tool_result_payload(tool_results[1])
+    assert write_payload["ok"] is True, (
+        f"write 必须成功，实际 error_code={write_payload.get('error_code')}"
+    )
+    assert edit_payload["ok"] is True, (
+        f"edit 必须成功，实际 error_code={edit_payload.get('error_code')}"
+    )
+
+    # ── 2. 副作用持久化：doc.md 真被写 + 被 edit，最终内容含"已编辑完成"──
+    persisted = (tmp_path / "t3_mutating" / "doc.md").read_text(encoding="utf-8")
+    assert "已编辑完成。" in persisted, (
+        f"edit 副作用必须持久化到 doc.md，实际 {persisted!r}"
+    )
+    assert "待编辑" not in persisted, (
+        f"edit 必须替换掉 old_string，实际仍含旧文本：{persisted!r}"
+    )
+
+    # ── 3. Ledger 记录完整：write + edit 都 SUCCEEDED，顺序 = 执行顺序 ──
+    operations = await ledger.list_for_session(session.session_id)
+    assert len(operations) == 2, (
+        f"Ledger 必须记录 2 次 MUTATING 操作，实际 {len(operations)}"
+    )
+    assert all(op.state is OperationState.SUCCEEDED for op in operations), (
+        f"两次 MUTATING 操作都必须 SUCCEEDED，实际 states="
+        f"{[op.state for op in operations]}"
+    )
+    op_ids = [op.tool_call_id for op in operations]
+    assert op_ids == ["t3-write", "t3-edit"], (
+        f"Ledger 操作顺序必须 = 执行顺序（write → edit），实际 {op_ids}"
+    )
+    # 操作的 tool_name 与 args_identity 必须记录（reconcile 时据此判断幂等性）
+    assert operations[0].tool_name == "write", (
+        f"第一条操作 tool_name 必须 write，实际 {operations[0].tool_name}"
+    )
+    assert operations[1].tool_name == "edit", (
+        f"第二条操作 tool_name 必须 edit，实际 {operations[1].tool_name}"
+    )
+
+    # ── 4. dangling=0 ──
+    assert dangling_tool_call_ids(events) == [], "mutating 分段悬空 tool_call 必须为零"
+    assert result.final_text, "mutating 分段必须有最终回答"

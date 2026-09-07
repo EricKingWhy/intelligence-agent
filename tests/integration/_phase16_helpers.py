@@ -27,8 +27,13 @@ from agent_harness.knowledge.store import FakeKnowledgeVectorStore
 from agent_harness.knowledge.tools import RetrieveKnowledgeTool
 from agent_harness.model.scripted import ScriptedModel
 from agent_harness.sandbox import LocalSubprocessSandbox
-from agent_harness.tooling import ToolRegistry
-from agent_harness.tools import BashTool, ReadTool
+from agent_harness.storage import SqliteOperationLedger
+from agent_harness.tooling import (
+    ApprovalResponse,
+    ToolExecutor,
+    ToolRegistry,
+)
+from agent_harness.tools import BashTool, EditTool, ReadTool, WriteTool
 from agent_harness.websearch.fake import FakeWebSearchProvider
 from agent_harness.websearch.tools import WebSearchTool
 from evaluation.support import AddTool
@@ -231,4 +236,135 @@ def permission_violation_script() -> ScriptedModel:
             }],
         ),
         AIMessage(content="已读取 workspace 文件并据此回答。"),
+    ])
+
+
+# ─── T3 #128：coding / edit / test-failure / mutating-tool 分段断言 ──────────
+
+
+def _auto_approve(_req) -> ApprovalResponse:
+    """测试用统一自动审批回调（BashTool DANGER 必须有 callback 才能执行）。"""
+    return ApprovalResponse(approved=True, reason="phase16-t3-auto-approve")
+
+
+def build_coding_registry(sandbox: LocalSubprocessSandbox) -> ToolRegistry:
+    """T3 coding 分段用的 registry：WriteTool + EditTool + BashTool（全 MUTATING）。
+
+    WriteTool/EditTool 是 WORKSPACE_WRITE（默认 policy 下不需审批）；
+    BashTool 是 DANGER，必须配 approval_callback（测试用 _auto_approve）。
+    """
+    registry = ToolRegistry()
+    registry.register(WriteTool(sandbox))
+    registry.register(EditTool(sandbox))
+    registry.register(BashTool(sandbox))
+    return registry
+
+
+def build_coding_executor(
+    sandbox: LocalSubprocessSandbox,
+    ledger: SqliteOperationLedger,
+) -> ToolExecutor:
+    """T3 coding 执行器：registry + Ledger + auto-approve（BashTool DANGER 放行）。"""
+    return ToolExecutor(
+        build_coding_registry(sandbox),
+        operation_ledger=ledger,
+        approval_callback=_auto_approve,
+    )
+
+
+def coding_failure_then_fix_script() -> ScriptedModel:
+    """T3 coding 剧本：写失败测试 → 跑测试（exit_code=1）→ 修成通过 → 重跑通过 → 最终回答。
+
+    证明 ADR-0002：bash 非零退出是确定性失败（ok=True），不触发 ToolExecutor 重试；
+    模型据此调整策略（覆写测试文件）而非原地重试同一条命令。
+
+    4 轮 bash 调用（跨平台：用 python -c 写文件，避免 echo 单/双引号在 Windows
+    cmd 下的转义差异；跑测试也用 python -c 直接 exec + 调函数，零外部依赖）：
+    1. write 失败测试文件
+    2. 跑测试 → exit_code=1（AssertionError）
+    3. write 通过测试文件
+    4. 重跑测试 → exit_code=0
+    """
+    # 跨平台写文件：python -c 内 open(..., 'w').write(...) 不依赖 shell 引号语义。
+    write_fail_cmd = (
+        'python -c "open(\'test_fail.py\', \'w\').write(\'def test_x(): assert False\\n\')"'
+    )
+    write_pass_cmd = (
+        'python -c "open(\'test_fail.py\', \'w\').write(\'def test_x(): assert True\\n\')"'
+    )
+    # 跑测试：exec 测试文件到独立命名空间，再调 test_x()；零依赖 pytest。
+    run_cmd = (
+        'python -c "ns={}; exec(open(\'test_fail.py\').read(), ns); ns[\'test_x\']()"'
+    )
+    return ScriptedModel([
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "t3-write-fail",
+                "name": "bash",
+                "args": {"command": write_fail_cmd},
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "t3-run-fail",
+                "name": "bash",
+                "args": {"command": run_cmd},
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "t3-write-pass",
+                "name": "bash",
+                "args": {"command": write_pass_cmd},
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "t3-run-pass",
+                "name": "bash",
+                "args": {"command": run_cmd},
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(content="测试已修好并通过。"),
+    ])
+
+
+def mutating_tool_ledger_script() -> ScriptedModel:
+    """T3 mutating-tool Ledger 剧本：write 新文件 → edit 改内容 → 最终回答。
+
+    两次 MUTATING 工具调用，验证 Ledger 对每次副作用都有 PENDING → SUCCEEDED 流转记录，
+    且文件系统副作用真实持久化（write 创建 + edit 替换字符串都生效）。
+    """
+    return ScriptedModel([
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "t3-write",
+                "name": "write",
+                "args": {"path": "doc.md", "content": "原始草稿。待编辑。"},
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "t3-edit",
+                "name": "edit",
+                "args": {
+                    "path": "doc.md",
+                    "old_string": "待编辑。",
+                    "new_string": "已编辑完成。",
+                },
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(content="文档已写好并编辑完成。"),
     ])
