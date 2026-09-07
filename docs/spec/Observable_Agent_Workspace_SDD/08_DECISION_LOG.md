@@ -124,7 +124,7 @@ Interpretation:
 5. custom-code only the product-specific layer.
 
 
-### ADR-0019 — Stage Composer controls before runtime consumption
+### ADR-0020 — Stage Composer controls before runtime consumption
 
 Phase 5 accepts `reasoning_effort`, `agent_profile`, and `context_providers` as
 validated session contract fields while keeping runtime behavior unchanged. This
