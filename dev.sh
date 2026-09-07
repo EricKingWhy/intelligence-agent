@@ -40,7 +40,7 @@ check_prereqs() {
 # ── 后端：FastAPI via uvicorn（:8000，热重载） ──
 start_backend() {
   log "启动后端 FastAPI (uvicorn :8000, reload)..."
-  exec uv run uvicorn agent_harness.web.app:create_app \
+  exec uv run uvicorn agent_harness.web.app:create_prod_app \
     --factory \
     --reload \
     --host 127.0.0.1 \
@@ -86,7 +86,7 @@ start_web() {
 
   # 后端
   log "后端 → http://127.0.0.1:8000 (uvicorn reload)"
-  uv run uvicorn agent_harness.web.app:create_app \
+  uv run uvicorn agent_harness.web.app:create_prod_app \
     --factory --reload --host 127.0.0.1 --port 8000 &
   BACKEND_PID=$!
 

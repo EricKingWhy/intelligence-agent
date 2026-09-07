@@ -17,6 +17,6 @@
 - durable 事实按 seq 幂等合并（listener 通道 + 镜像通道不重复）。
 """
 
-from agent_harness.web.app import create_app
+from agent_harness.web.app import create_app, create_prod_app, mount_static
 
-__all__ = ["create_app"]
+__all__ = ["create_app", "create_prod_app", "mount_static"]
