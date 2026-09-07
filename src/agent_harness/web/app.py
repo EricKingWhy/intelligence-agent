@@ -1157,14 +1157,35 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             "note": "V1 uses auto-approve; interactive approval pending WebSocket seam",
         }
 
-    # ── 静态资源（前端 build 产物）──
-    # 生产模式：FastAPI serve web/dist；dev 模式 Vite 自己跑 5173。
-    # 部署约束：静态挂载只适配本地信任模式（未配置 JWT_SECRET）。fail-closed
-    # 生效时全量默认拒绝（test_auth_fail_closed 契约），而浏览器顶层导航无法
-    # 携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
-    # 静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
+    return app
+
+
+def mount_static(app: FastAPI) -> None:
+    """挂载前端构建产物为静态资源。
+
+    独立于 ``create_app`` —— 测试在 ``create_app`` 返回后追加的自定义路由
+    （如 ``/identity-probe``）不会被 StaticFiles Mount 遮蔽。生产部署由
+    uvicorn ``--factory`` 调 ``create_prod_app``（= ``create_app`` +
+    ``mount_static``)，或由反向代理直接服务静态资源、仅将 ``/api``
+    转发到本服务。
+
+    部署约束：静态挂载只适配本地信任模式（未配置 JWT_SECRET）。fail-closed
+    生效时全量默认拒绝（test_auth_fail_closed 契约），而浏览器顶层导航无法
+    携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
+    静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
+    """
     web_dist = Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
     if web_dist.exists():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
 
+
+def create_prod_app(settings: Settings | None = None) -> FastAPI:
+    """生产工厂：``create_app`` + ``mount_static``。
+
+    dev.sh / Dockerfile 用 ``uvicorn agent_harness.web.app:create_prod_app
+    --factory``；测试仍直调 ``create_app``——不挂静态资源，避免 Mount
+    遮蔽测试后加的 probe 路由。
+    """
+    app = create_app(settings, enable_cors=True)
+    mount_static(app)
     return app
