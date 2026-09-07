@@ -38,16 +38,24 @@ from agent_harness.identity import (
     set_identity_context,
 )
 from agent_harness.logging import setup_logging
-from agent_harness.model.config import ConfigError, ModelConfig, parse_model_catalog
+from agent_harness.model.config import (
+    PROVIDER_PRESETS,
+    ConfigError,
+    ModelConfig,
+    _pick_capabilities,
+    parse_model_catalog,
+)
 from agent_harness.observability import flush_process_sink
 from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session, SessionEvent
+from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 from agent_harness.storage import (
     SqliteCheckpointStore,
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.tooling.contract import PERMISSION_MODE_DESCRIPTIONS
 from agent_harness.web.runmanager import RunManager
 
 # ── Request / Response schemas ──
@@ -250,6 +258,39 @@ def _validate_session_id(session_id: str) -> str:
 STREAM_REPLAY_MAX_EVENTS = 1000
 
 
+def _render_model_option(
+    *, id: str, provider: str, model_name: str, is_default: bool,
+    capabilities: dict[str, Any], metadata_source: str,
+) -> dict[str, Any]:
+    """渲染一条 ModelOption（SDD 03 §16）。
+
+    新契约字段：id / display_name / provider / is_default / is_available /
+    context_window? / speed_tier? / supports_*? / metadata_source。
+    旧字段 alias（向后兼容）：name / model / default。
+    未知能力位不在 capabilities dict 里即不出现在响应（契约：「not guessed」）。
+    """
+    option: dict[str, Any] = {
+        # 新契约字段
+        "id": id,
+        "provider": provider,
+        "is_default": is_default,
+        "is_available": True,  # catalog 无 disabled 概念，恒可用
+        "metadata_source": metadata_source,
+        # 旧字段 alias（前端切换期间保留，避免破坏现有客户端）
+        "name": id,
+        "model": model_name,
+        "default": is_default,
+    }
+    # display_name 缺省回落到 model_name（更可读）。
+    option["display_name"] = capabilities.get("display_name", model_name)
+    # 已知能力位透传（未声明的键不在 capabilities 里 → 省略，不猜测）。
+    for cap_key in ("context_window", "speed_tier", "supports_tools",
+                    "supports_vision", "supports_reasoning_summary"):
+        if cap_key in capabilities:
+            option[cap_key] = capabilities[cap_key]
+    return option
+
+
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
     """把 AgentEvent 转成 SSE 的 data 字段（JSON 字符串）。
 
@@ -257,6 +298,9 @@ def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
     但前端需要它在第一帧就能切换 selectedId（否则新 session 的对话无法渲染）。
     帧形状与重放路径（GET /stream 的 SessionEvent 帧）同形：seq 是幂等投影键，
     event_id 是事件身份，block_id 聚合同一段流式块（ADR-0016 §2.3）。
+
+    RuntimeEvent 信封（SDD 03 §3，Phase 2 加法）：schema_version + durability 始终携带；
+    capability 仅在非 None 时携带（与 block_id 同模式）。
     """
     payload: dict[str, Any] = {
         "type": event.type,
@@ -266,9 +310,13 @@ def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
         "step_id": event.step_id,
         "session_id": session_id,
         "time": event.time,
+        "schema_version": event.schema_version,
+        "durability": event.durability,
     }
     if event.block_id is not None:
         payload["block_id"] = event.block_id
+    if event.capability is not None:
+        payload["capability"] = event.capability
     return {"data": json.dumps(payload, ensure_ascii=False)}
 
 
@@ -277,6 +325,10 @@ def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str
 
     帧形状与 live 通道（_event_to_sse_dict）严格同形——客户端对两条通道
     做同一 seq 幂等投影，无需区分帧来源（event_id 仅存于 JSONL/全量接口）。
+
+    RuntimeEvent 信封（SDD 03 §3，Phase 2 加法）：schema_version + durability 始终携带；
+    durability 恒 "durable"（SessionEvent 已通过 append 词汇表校验）；capability 仅在
+    非 None 时携带。
     """
     payload: dict[str, Any] = {
         "type": event.type,
@@ -286,9 +338,13 @@ def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str
         "step_id": event.step_id,
         "session_id": session_id,
         "time": event.time,
+        "schema_version": event.schema_version,
+        "durability": "durable",
     }
     if event.block_id is not None:
         payload["block_id"] = event.block_id
+    if event.capability is not None:
+        payload["capability"] = event.capability
     return {"data": json.dumps(payload, ensure_ascii=False)}
 
 
@@ -493,27 +549,107 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/models")
     async def list_models() -> dict[str, Any]:
-        """列出可选模型（ADR-0016 §5，C6）：默认链 + AGENT_MODELS catalog。
+        """列出可选模型（ADR-0016 §5，C6 + SDD 03 §16 ModelOption）。
 
-        绝不携带任何密钥字段；default=true 的条目 = 不传 model 参数时的链。
+        绝不携带任何密钥字段；is_default=true 的条目 = 不传 model 参数时的链。
         思考能力不进元数据（D-B③ 事件驱动：模型真吐思考才有 reasoning 事件）。
+
+        Phase 2 加法（SDD 03 §16）：每条返回能力位元数据，来源标注 metadata_source。
+        - 默认链：能力位来自 PROVIDER_PRESETS → metadata_source="provider_preset"；
+        - catalog 条目：条目显式声明的能力位优先，回落 preset；条目自身声明时
+          metadata_source="agent_models"，否则（全靠 preset 回落）="provider_preset"。
+        未知能力位省略（契约：「not guessed」）。旧字段 name/model/default 作为
+        alias 保留（前端切换期间不破）。
         """
         state = app.state.agent
         default_config = ModelConfig.from_settings(state.settings)
-        models: list[dict[str, Any]] = [{
-            "name": default_config.model_name,
-            "provider": state.settings.model_provider,
-            "model": default_config.model_name,
-            "default": True,
-        }]
+        default_provider = state.settings.model_provider
+        default_caps = _pick_capabilities(PROVIDER_PRESETS.get(default_provider, {}))
+        models: list[dict[str, Any]] = [_render_model_option(
+            id=default_config.model_name,
+            provider=default_provider,
+            model_name=default_config.model_name,
+            is_default=True,
+            capabilities=default_caps,
+            metadata_source="provider_preset",
+        )]
         for entry in parse_model_catalog(state.settings):
-            models.append({
-                "name": entry.name,
-                "provider": entry.provider,
-                "model": entry.model_name,
-                "default": False,
-            })
+            declared = entry.declared_capabilities()
+            preset_caps = _pick_capabilities(PROVIDER_PRESETS.get(entry.provider, {}))
+            # catalog 声明优先，preset 回落。metadata_source：条目声明了任何能力位
+            # → agent_models；否则（全靠 preset）→ provider_preset。
+            merged = {**preset_caps, **declared}
+            source = "agent_models" if declared else "provider_preset"
+            models.append(_render_model_option(
+                id=entry.name,
+                provider=entry.provider,
+                model_name=entry.model_name,
+                is_default=False,
+                capabilities=merged,
+                metadata_source=source,
+            ))
         return {"models": models}
+
+    @app.get("/api/permission-modes")
+    async def list_permission_modes() -> dict[str, Any]:
+        """列出后端能真实执行的权限模式（SDD 03 §10，Phase 2 加法）。
+
+        返回 PermissionPolicy 全集 + 人类可读描述。诚实标注：当前 Web 层
+        auto_approve 默认开（同步 callback），交互式审批是 Phase 5 的工作——
+        这里只暴露「后端认识哪些 mode」，不假装审批已就绪。
+        """
+        modes = [
+            {
+                "id": policy.value,
+                "display_name": desc["display_name"],
+                "description": desc["description"],
+            }
+            for policy, desc in PERMISSION_MODE_DESCRIPTIONS.items()
+        ]
+        return {"modes": modes}
+
+    @app.get("/api/capabilities")
+    async def list_capabilities() -> dict[str, Any]:
+        """列出已装配的 capability manifest（SDD 03 §17，Phase 2 加法）。
+
+        默认 CAPABILITIES="" → registry.available() 为空 → 返回 {"capabilities": []}。
+        前端据空列表自行 fallback 显示 chat/timeline（空就是空，不假装有基础能力）。
+
+        投影规则：descriptor 无 surfaces 声明 → 保守默认（chat/timeline=true）；
+        descriptor 显式声明 surfaces → 以声明为准。本轮没有 capability 填 surfaces，
+        只搭骨架——具体 surfaces 声明是 Phase 6 的工作。
+        """
+        state = app.state.agent
+        registry, _wiring = await state.get_wiring()
+        available = registry.available()
+        capabilities: list[dict[str, Any]] = []
+        for descriptor in available:
+            declared_surfaces = descriptor.surfaces or {}
+            # 保守默认：未声明 surfaces 的 capability 只保证 chat + timeline 可用
+            # （其余 surface 按 capability 显式声明）。
+            surfaces = {
+                "chat": declared_surfaces.get("chat", True),
+                "timeline": declared_surfaces.get("timeline", True),
+                "changes": declared_surfaces.get("changes", False),
+                "terminal": declared_surfaces.get("terminal", False),
+                "artifacts": declared_surfaces.get("artifacts", False),
+            }
+            actions = descriptor.actions or {
+                # 保守默认：未声明 actions 的 capability 不主张任何交互动作可用。
+                "permissions": False,
+                "stop": False,
+                "retry": False,
+                "resume": False,
+            }
+            capabilities.append({
+                "id": descriptor.name,
+                "display_name": descriptor.display_name or descriptor.name,
+                "version": descriptor.version,
+                "provider_name": descriptor.provider_name,
+                "surfaces": surfaces,
+                "actions": actions,
+            })
+        return {"capabilities": capabilities}
 
     @app.post("/api/sessions")
     async def create_session(req: CreateSessionRequest):
@@ -612,6 +748,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     "data": {"after_seq": after_seq, "latest_seq": latest_seq},
                     "seq": None, "run_id": None, "step_id": None,
                     "session_id": session_id,
+                    "schema_version": RUNTIME_EVENT_SCHEMA_VERSION,
+                    "durability": "transient",
                 }
                 yield {"data": json.dumps(control, ensure_ascii=False)}
 

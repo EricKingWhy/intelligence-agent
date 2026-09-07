@@ -38,6 +38,7 @@ export function initConversation(session_id: string): ConversationState {
     usage_total: null,
     cost_usd: null,
     trace_id: null,
+    trace_url: null,
     run_id: null,
     model_fallback: null,
     seenSeqs: new Set(),
@@ -382,12 +383,14 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
     }
 
     case EventType.RUN_COMPLETED:
-      // 权威聚合（后端 Gap 1/2）：事件携带的 usage_total 覆盖前端累计值；
-      // cost_usd / trace_id 缺失或 null 保持 null（费率表未定义 / Langfuse 未接入）。
+      // 权威聚合（后端 Gap 1/2 + trace_url 契约 2d7f87a）：事件携带的 usage_total
+      // 覆盖前端累计值；cost_usd / trace_id / trace_url 缺失或 null 保持 null
+      // （费率表未定义 / Langfuse 未接入）。trace_id 与 trace_url 并列不互替。
       next.run_cancelled = false;
       next.usage_total = parseUsage(data.usage_total) ?? next.usage_total;
       next.cost_usd = typeof data.cost_usd === 'number' && Number.isFinite(data.cost_usd) ? data.cost_usd : null;
       next.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
+      next.trace_url = typeof data.trace_url === 'string' && data.trace_url ? data.trace_url : null;
       finalizeRun(next, 'completed', event.time);
       break;
 
@@ -397,7 +400,11 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
       // 'orphaned' = 孤儿回收（零订阅 300s，非用户意图，按失败展示）；
       // 缺省 = 模型/执行器异常。断连永远不出现在终态原因里（订阅者离开只
       // unsubscribe）。turn/tool 仍按失败终态 settle。
+      // trace_id / trace_url 对称抽取（契约 2d7f87a——失败 run 在 Langfuse 也有
+      // 可见 trace，跳转有排查价值；此前 failed 分支漏抽 trace_id 是 pre-existing bug）。
       next.run_cancelled = data.reason === 'cancelled';
+      next.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
+      next.trace_url = typeof data.trace_url === 'string' && data.trace_url ? data.trace_url : null;
       finalizeRun(next, 'failed', event.time);
       break;
 

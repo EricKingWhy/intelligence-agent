@@ -6,6 +6,7 @@ Provider 预设表是唯一允许出现厂商细节的地方。
 
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import SecretStr
 
@@ -17,14 +18,28 @@ class ConfigError(Exception):
 
 
 # 各厂商 OpenAI 兼容端点与默认模型。
-PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+#
+# Phase 2（SDD 03 §16 ModelOption）：preset 可携带能力位元数据——
+# display_name / context_window / speed_tier / supports_tools / supports_vision /
+# supports_reasoning_summary。仅写入**已验证**的字段；不确定的省略
+# （契约：「Unknown capabilities should be omitted, not guessed」）。
+# 能力位字段全 Optional，旧消费者只读 model_base_url / model_name，无破坏。
+PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
     "deepseek": {
         "model_base_url": "https://api.deepseek.com",
         "model_name": "deepseek-chat",
+        # OpenAI 兼容 tool_calls 已在生产路径验证（项目主链就是工具驱动）。
+        "supports_tools": True,
+        # deepseek-chat 窗口 64K（官方公告）；reasoning 是 deepseek-reasoner 才有，
+        # 默认 preset 不带 reasoning_summary 能力位（诚实标注）。
+        "context_window": 64000,
+        "speed_tier": "fast",
     },
     "qwen": {
         "model_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "model_name": "qwen-plus",
+        # DashScope 兼容模式支持 function calling。
+        "supports_tools": True,
     },
     # 腾讯 Coding Plan（OpenAI 兼容）。base_url 不含 /chat/completions，
     # SDK 会自动拼接；无默认模型，MODEL_NAME 必填。
@@ -42,8 +57,25 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "zhipu": {
         "model_base_url": "https://open.bigmodel.cn/api/paas/v4",
         "model_name": "",
+        # GLM-4 系列支持 function calling。
+        "supports_tools": True,
     },
 }
+
+#: 能力位字段清单（preset 与 catalog 共用）。值类型固定，便于解析校验。
+_CAPABILITY_FIELDS: dict[str, type] = {
+    "display_name": str,
+    "context_window": int,
+    "speed_tier": str,  # "fast" | "balanced" | "quality"
+    "supports_tools": bool,
+    "supports_vision": bool,
+    "supports_reasoning_summary": bool,
+}
+
+
+def _pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
+    """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。"""
+    return {k: source[k] for k in _CAPABILITY_FIELDS if k in source}
 
 
 @dataclass(frozen=True)
@@ -52,6 +84,9 @@ class ModelCatalogEntry:
 
     api_key 缺省回落 MODEL_API_KEY；base_url 缺省回落 provider 预设；
     temperature 缺省回落全局 TEMPERATURE。SecretStr 待遇与 Settings 层一致。
+
+    Phase 2 加法：能力位字段全 Optional，catalog 可声明覆盖 preset（SDD 03 §16）。
+    未声明（None）的字段在 list_models 渲染时回落到 provider preset。
     """
 
     name: str
@@ -60,6 +95,30 @@ class ModelCatalogEntry:
     base_url: str | None = None
     api_key: SecretStr | None = None
     temperature: float | None = None
+    # 能力位（Phase 2 加法）——None = 未在 catalog 条目声明（回落 preset）。
+    display_name: str | None = None
+    context_window: int | None = None
+    speed_tier: str | None = None
+    supports_tools: bool | None = None
+    supports_vision: bool | None = None
+    supports_reasoning_summary: bool | None = None
+
+    def declared_capabilities(self) -> dict[str, Any]:
+        """返回本条目【显式声明】的能力位（None 的不计入）。"""
+        caps: dict[str, Any] = {}
+        if self.display_name is not None:
+            caps["display_name"] = self.display_name
+        if self.context_window is not None:
+            caps["context_window"] = self.context_window
+        if self.speed_tier is not None:
+            caps["speed_tier"] = self.speed_tier
+        if self.supports_tools is not None:
+            caps["supports_tools"] = self.supports_tools
+        if self.supports_vision is not None:
+            caps["supports_vision"] = self.supports_vision
+        if self.supports_reasoning_summary is not None:
+            caps["supports_reasoning_summary"] = self.supports_reasoning_summary
+        return caps
 
 
 def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
@@ -107,11 +166,34 @@ def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
         temperature = item.get("temperature")
         if temperature is not None and not isinstance(temperature, (int, float)):
             raise ConfigError(f"AGENT_MODELS 条目 {name!r} 的 temperature 必须是数字")
+        # 能力位（Phase 2 加法）：按 _CAPABILITY_FIELDS 类型校验，缺省 None。
+        capability_kwargs: dict[str, Any] = {}
+        for cap_field, cap_type in _CAPABILITY_FIELDS.items():
+            if cap_field in item:
+                value = item[cap_field]
+                # bool 是 int 的子类，单独先判避免误收 int 当 bool。
+                if cap_type is bool:
+                    if not isinstance(value, bool):
+                        raise ConfigError(
+                            f"AGENT_MODELS 条目 {name!r} 的 {cap_field} 必须是 bool"
+                        )
+                elif cap_type is int:
+                    if not isinstance(value, int) or isinstance(value, bool):
+                        raise ConfigError(
+                            f"AGENT_MODELS 条目 {name!r} 的 {cap_field} 必须是 int"
+                        )
+                else:
+                    if not isinstance(value, str):
+                        raise ConfigError(
+                            f"AGENT_MODELS 条目 {name!r} 的 {cap_field} 必须是 string"
+                        )
+                capability_kwargs[cap_field] = value
         entries.append(ModelCatalogEntry(
             name=name, provider=provider, model_name=model_name,
             base_url=item.get("base_url") or None,
             api_key=SecretStr(api_key) if isinstance(api_key, str) and api_key else None,
             temperature=temperature,
+            **capability_kwargs,
         ))
     return entries
 

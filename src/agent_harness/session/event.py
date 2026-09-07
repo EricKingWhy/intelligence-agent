@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+#: RuntimeEvent 信封版本（SDD 03 §3）：SSE 帧 / JSONL 行 / AgentEvent 统一携带，
+#: 客户端据此判断 schema 兼容。当前冻结为 ``runtime_event/v1``。
+RUNTIME_EVENT_SCHEMA_VERSION = "runtime_event/v1"
+
 # ── Event vocabulary V1（Phase 1 子集） ──
 # ── + Phase 9 流式信号（MODEL_STARTED / MODEL_DELTA） ──
 # ── + Phase 4 恢复信号（OPERATION_RECONCILE_REQUIRED） ──
@@ -120,6 +124,14 @@ class SessionEvent:
     block_id: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
     source_event_ids: list[str] | None = None
+    # RuntimeEvent 信封字段（SDD 03 §3，Phase 2 加法）：
+    # - schema_version：信封版本，恒 RUNTIME_EVENT_SCHEMA_VERSION；
+    # - capability：事件归属的 capability id（Phase 6 capability-aware 投影注入点），
+    #   当前 Runtime 不发射归属 → 运行时恒 None；None 时 to_dict 省略（同 block_id 模式）。
+    # SessionEvent 恒 durable（append 已校验词汇表），durability 不存为字段——
+    # 序列化路径（to_dict / SSE）固定写 "durable"。
+    schema_version: str = RUNTIME_EVENT_SCHEMA_VERSION
+    capability: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSONL 行字典（None 字段省略以保持行紧凑）。"""
@@ -129,6 +141,7 @@ class SessionEvent:
             "time": self.time,
             "type": self.type,
             "session_id": self.session_id,
+            "schema_version": self.schema_version,
         }
         if self.run_id is not None:
             result["run_id"] = self.run_id
@@ -142,11 +155,16 @@ class SessionEvent:
             result["data"] = self.data
         if self.source_event_ids is not None:
             result["source_event_ids"] = self.source_event_ids
+        if self.capability is not None:
+            result["capability"] = self.capability
         return result
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> SessionEvent:
-        """从 JSONL 解析出的字典重建 SessionEvent。"""
+        """从 JSONL 解析出的字典重建 SessionEvent。
+
+        向后兼容：旧 JSONL 行缺 ``schema_version`` 时回落当前版本（加法字段）。
+        """
         return cls(
             event_id=raw.get("event_id", _new_event_id()),
             seq=raw.get("seq", 0),
@@ -159,4 +177,6 @@ class SessionEvent:
             block_id=raw.get("block_id"),
             data=raw.get("data", {}),
             source_event_ids=raw.get("source_event_ids"),
+            schema_version=raw.get("schema_version", RUNTIME_EVENT_SCHEMA_VERSION),
+            capability=raw.get("capability"),
         )

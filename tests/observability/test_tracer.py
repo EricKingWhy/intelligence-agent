@@ -139,6 +139,40 @@ def test_fallback_transitions_recorded_on_generation():
     assert "usage_details" not in root.children[0].updates[-1]  # 零伪造：无 usage 不造
 
 
+def test_model_call_with_tool_calls_writes_marker_when_output_empty():
+    """Gap 5（D7 DEFER 批）：模型返回 tool_calls 但 content 空——generation output
+    不应是 None/空，写结构化标记让 Langfuse UI 可读（tool_calls 轮可见）。"""
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder)
+    tracer.run_started()
+    root = recorder.spans[0]
+    gen = tracer.model_call_started(step=1, messages=[{"role": "user", "content": "hi"}])
+    tracer.model_call_completed(
+        gen,
+        output_text="",
+        tool_call_names=["add", "search"],
+        usage={"total_tokens": 5},
+    )
+    update = root.children[0].updates[-1]
+    assert update["output"], "tool_calls 轮 output 不应空白"
+    assert "add" in update["output"]
+    assert "search" in update["output"]
+
+
+def test_model_call_with_content_ignores_tool_calls_marker():
+    """正常回答轮（有 content）不写 tool_calls 标记——标记仅兜底空 content。"""
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder)
+    tracer.run_started()
+    root = recorder.spans[0]
+    gen = tracer.model_call_started(step=1, messages=[])
+    tracer.model_call_completed(
+        gen, output_text="最终回答", tool_call_names=["add"], usage=None,
+    )
+    update = root.children[0].updates[-1]
+    assert update["output"] == "最终回答"  # 不被标记污染
+
+
 def test_model_call_failed_marks_error_and_ends():
     recorder = FakeRecorder()
     tracer = _tracer(recorder)

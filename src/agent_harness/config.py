@@ -96,3 +96,7 @@ class Settings(BaseSettings):
     # trace 上云内容边界：full=完整输入输出（自有 dev 项目默认）；
     # redacted=只传 metadata + 截断/摘要。非法值按 full 处理并告警。
     langfuse_trace_content: str = "full"
+    # Langfuse 一等字段（D7 DEFER 批）：environment 区分 prod/staging/dev（缺省
+    # development，绝不落入 default）；release 标版本/SHA（空=不塞，SDK 自决）。
+    langfuse_tracing_environment: str = "development"
+    langfuse_release: str = ""

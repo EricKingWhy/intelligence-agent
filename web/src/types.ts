@@ -42,6 +42,11 @@ export interface SessionSummary {
   /** Langfuse trace id（后端 Gap 2）。Langfuse Phase 15 才接入，当前恒 null——
    *  UI 显示「未追踪」，属预期降级而非故障。 */
   trace_id: string | null;
+  /** Langfuse trace 可点击 URL（契约 2d7f87a，ADR-0018 D7 延伸）：后端用官方
+   *  get_trace_url(trace_id) 构造，含 host + project_id，前端零 URL 拼接。
+   *  trace_id 与 trace_url 并列不互替：前者机器可读（Copy 命令），后者人类
+   *  可点击（详情面板超链接）。未启用 Langfuse 两者都 null。 */
+  trace_url: string | null;
 }
 
 /**
@@ -280,12 +285,13 @@ export interface ConversationState {
    *  - model：最新携带 data.model 的 model/completed；
    *  - usage_total：run/completed.data.usage_total（权威聚合）覆盖前端对
    *    model/completed.usage 的累计值（运行中视图）；
-   *  - cost_usd / trace_id：run/completed 携带（费率表未定义/Langfuse 未接入，
-   *    当前恒 null）。 */
+   *  - cost_usd / trace_id / trace_url：run/completed 与 run/failed 对称携带
+   *    （契约 2d7f87a——失败 run 也有可见 trace）；未启用 Langfuse 恒 null。 */
   model: string | null;
   usage_total: UsageStats | null;
   cost_usd: number | null;
   trace_id: string | null;
+  trace_url: string | null;
   /** 最近一个携带 run_id 的事件的 run 归属（PRD §8.2 Inspector 头部 Run ID）。
    *  事件真值，缺失即 null——UI 隐藏该位，不回退 session_id 冒充（零伪造）。 */
   run_id: string | null;
