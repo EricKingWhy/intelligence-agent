@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { KeyRound, RotateCcw, X } from 'lucide-react';
+import { Columns2, Eye, KeyRound, MessageSquare, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
@@ -33,7 +33,21 @@ import { summarizeEvent } from './lib/projection';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
 
+/** Workspace 模式 —— Chat 常驻；Split/Preview 为后续 Phase 预留的空架子。 */
+type WorkspaceMode = 'chat' | 'split' | 'preview';
+const WORKSPACE_MODES: readonly { id: WorkspaceMode; label: string; icon: typeof MessageSquare }[] = [
+  { id: 'chat', label: 'Chat', icon: MessageSquare },
+  { id: 'split', label: 'Split', icon: Columns2 },
+  { id: 'preview', label: 'Preview', icon: Eye },
+];
+
 export default function App() {
+  // ── Workspace 模式（Phase 1d，方案 B）──
+  // Chat = 常驻阅读面，永不切换走（用户冻结决策）。
+  // Split / Preview = 后续 Phase 升级的副面板，当前仅空架子（占位条），
+  // 表明 Workspace 有自己的结构扩展点，但内容不由 tab 与 Inspector 抢走。
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('chat');
+
   const {
     sessions,
     selectedId,
@@ -419,6 +433,38 @@ export default function App() {
               {recoverState.status === 'idle' && (
                 <span className="recover-hint">最后事件非 run/completed——可尝试恢复</span>
               )}
+            </div>
+          )}
+          {/* Workspace 模式条（Phase 1d 方案 B）：Chat 永远是主阅读面，
+              Split/Preview 为后续 Phase 预留的空架子。条本身克制——
+              只在选中非 chat 时渲染下方占位行；Chat 模式下完全不占垂直空间。 */}
+          <div className="workspace-mode-bar" role="tablist" aria-label="Workspace 模式">
+            {WORKSPACE_MODES.map((m) => {
+              const Icon = m.icon;
+              const sel = workspaceMode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  role="tab"
+                  aria-selected={sel}
+                  className={`workspace-mode ${sel ? 'sel' : ''}`}
+                  onClick={() => setWorkspaceMode(m.id)}
+                  title={m.label}
+                >
+                  <Icon size={13} className="workspace-mode-icon" aria-hidden="true" />
+                  <span className="workspace-mode-label">{m.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          {workspaceMode !== 'chat' && (
+            <div className="workspace-scaffold" role="note">
+              <span className="workspace-scaffold-tag">未来升级点</span>
+              <span className="workspace-scaffold-text">
+                {workspaceMode === 'split'
+                  ? 'Split：副面板显示同一会话的另一视图（代码 diff / 预览）。当前仍以 Chat 为主阅读面。'
+                  : 'Preview：副面板渲染当前会话产出的 Artifact（文档 / 图表 / 页面）。当前仍以 Chat 为主阅读面。'}
+              </span>
             </div>
           )}
           <Conversation
