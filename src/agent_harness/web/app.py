@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import anyio
 import jwt
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -50,6 +50,7 @@ from agent_harness.recovery import RecoveryCoordinator, RecoveryError
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session, SessionEvent
 from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
+from agent_harness.session.queue import MessageQueueManager
 from agent_harness.storage import (
     SqliteCheckpointStore,
     SqliteOperationLedger,
@@ -73,10 +74,13 @@ from agent_harness.session.service import (
     ApprovalRequestMissing,
     InvalidDecision,
     InvalidSessionId,
+    QueueItemNotFound,
     RecoveryConflict,
+    SendMessageResult,
     SessionNotFound,
     SessionService,
     SessionServiceError,
+    SteerTargetNotFound,
     WorkspaceNameInvalid,
 )
 from agent_harness.web.runmanager import RunManager
@@ -196,6 +200,22 @@ class ResumeRequest(BaseModel):
     task: str = Field(min_length=1, max_length=100_000)
 
 
+class SendMessageRequest(BaseModel):
+    """POST /api/sessions/{id}/messages 的请求体（PRD §5.3 续聊入口）。
+
+    ``mode`` 取自 PRD 锁定决策 D-7：
+
+      * ``queue``（默认）——空闲 → 直接拉起新 run；在途 → 入队等待
+        （不抢断不丢消息，下个 run 自然消费）。
+      * ``steer``——仅在途 run 时合法：注入引导请求，被当前 step 边界
+        的 run 读取（不重启 run、不改写历史事件）。
+    """
+
+    content: str = Field(min_length=1, max_length=100_000)
+    mode: str = Field(default="queue", pattern="^(queue|steer)$")
+    max_steps: int = Field(default=10, ge=1, le=200)
+
+
 class SessionSummary(BaseModel):
     """GET /api/sessions 返回的单条摘要。"""
 
@@ -237,6 +257,8 @@ class AppState:
         # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
         # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
         self.approval_queues: dict[str, PendingApprovalQueue] = {}
+        # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
+        self.message_queues = MessageQueueManager()
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -1070,14 +1092,124 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(status_code=409, detail=str(e)) from e
         return [e.to_dict() for e in events]
 
-    # ── 静态资源（前端 build 产物）──
-    # 生产模式：FastAPI serve web/dist；dev 模式 Vite 自己跑 5173。
-    # 部署约束：静态挂载只适配本地信任模式（未配置 JWT_SECRET）。fail-closed
-    # 生效时全量默认拒绝（test_auth_fail_closed 契约），而浏览器顶层导航无法
-    # 携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
-    # 静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
+    # ── 续聊入口（PRD §5.3）───────────────────────────────────────────
+    # 双模式：queue（默认）= 入队/直接拉起；steer = 注入在途 run。
+    # launched 分支返回 SSE 流（PRD 锁定 D-10：续聊端点响应与创建端点一致）；
+    # queued / steered 分支返回 JSON 确认（不打开流，前端订阅既有 SSE/WS）。
+    @app.post("/api/sessions/{session_id}/messages")
+    async def send_message(session_id: str, req: SendMessageRequest):
+        """续聊消息入口（Phase Multiturn T2 / PRD §5.3）。
+
+        ``mode=queue``：空闲 → 直接 resume_and_launch 拉起新 run，返回
+        SSE 流（同创建端点语义）；在途 → 入队并返回 JSON 确认。
+        ``mode=steer``：仅在途 run 时合法——注册 SteerRequest 并返回
+        JSON 确认；无在途 run → 409（steer 必须有目标）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            result = await service.send_message(
+                session_id=session_id,
+                content=req.content,
+                mode=req.mode,
+                max_steps=req.max_steps,
+            )
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ActiveRunConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except QueueItemNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except SteerTargetNotFound as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+
+        if result.status == "launched":
+            # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
+            run = result.run
+            subscriber = result.subscriber
+
+            async def event_generator():
+                try:
+                    async for ev in subscriber:
+                        yield {"event": ev.type, "data": json.dumps(ev.to_dict())}
+                        if ev.type in {"run/completed", "run/failed"}:
+                            break
+                finally:
+                    run.unsubscribe(subscriber)
+
+            return EventSourceResponse(event_generator())
+        # queued / steered：JSON 确认（不打开流——前端订阅既有 SSE/WS）。
+        return result.to_response()
+
+    @app.post("/api/sessions/{session_id}/queue/{queue_id}/cancel")
+    async def cancel_queue_item(session_id: str, queue_id: str) -> dict[str, str]:
+        """取消尚未消费的排队消息（PRD §5.3 / D-7）。
+
+        语义：取消成功 → 200 cancelled；queue_id 已取消 / 已消费 /
+        不存在 → 404；session 不存在 → 404。幂等失败（防覆盖式重置语义）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            cancelled = await service.cancel_queue(
+                session_id=session_id, queue_id=queue_id
+            )
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except QueueItemNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        return {"status": "cancelled" if cancelled else "already_consumed"}
+
+    # ── WebSocket 多路复用通道（T2 / PRD §5.1）──────────────────────
+    # 主 streaming 通道：单连接订阅多个 session、推增量事件；
+    # 心跳 ping/pong；断线重连先推快照再增量。SSE 保留为灰度兼容路径。
+    # 不维护第二套 session 真相（不变量 #22）——所有事件源于 RunManager 订阅。
+    from agent_harness.web.websocket import handle_websocket
+
+    @app.websocket("/api/ws")
+    async def websocket_endpoint(websocket: WebSocket) -> None:
+        """WS 主入口（PRD §5.1）：接受连接后交由 handle_websocket 多路复用。
+
+        WS 只做传输——业务决策一律走 SessionService。WebSocketDisconnect
+        是正常客户端断开，吞掉不打日志。
+        """
+        try:
+            await handle_websocket(websocket, app.state)
+        except WebSocketDisconnect:
+            # 正常断开：客户端关页 / 重连切换。
+            return
+
+    return app
+
+
+def mount_static(app: FastAPI) -> None:
+    """挂载前端构建产物为静态资源。
+
+    独立于 ``create_app`` —— 测试在 ``create_app`` 返回后追加的自定义路由
+    （如 ``/identity-probe``）不会被 StaticFiles Mount 遮蔽。生产部署由
+    uvicorn ``--factory`` 调 ``create_prod_app``（= ``create_app`` +
+    ``mount_static``)，或由反向代理直接服务静态资源、仅将 ``/api``
+    转发到本服务。
+
+    部署约束：静态挂载只适配本地信任模式（未配置 JWT_SECRET）。fail-closed
+    生效时全量默认拒绝（test_auth_fail_closed 契约），而浏览器顶层导航无法
+    携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
+    静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
+    """
     web_dist = Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
     if web_dist.exists():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
 
+
+def create_prod_app(settings: Settings | None = None) -> FastAPI:
+    """生产工厂：``create_app`` + ``mount_static``。
+
+    dev.sh / Dockerfile 用 ``uvicorn agent_harness.web.app:create_prod_app
+    --factory``；测试仍直调 ``create_app``——不挂静态资源，避免 Mount
+    遮蔽测试后加的 probe 路由。
+    """
+    app = create_app(settings, enable_cors=True)
+    mount_static(app)
     return app
