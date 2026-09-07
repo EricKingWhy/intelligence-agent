@@ -67,6 +67,44 @@ from agent_harness.tooling.contract import (
 )
 from agent_harness.web.runmanager import RunManager
 
+# ── Staged amend 字段的人类可读描述（Phase 5 + Ticket B1）──────────────
+# 这些 dict 是 POST /api/sessions validator 与 GET 清单端点的**单一事实源**：
+# validator 用它们的 key 集合判断合法值；GET 端点用它们的 value 投影 display_name +
+# description。两边引用同一份常量 → 加新档位只改一处，validator 与清单永不漂移。
+# 与 PERMISSION_MODE_DESCRIPTIONS（tooling/contract.py）同模式（Reuse First §6）。
+
+#: reasoning_effort 三档（当前 runtime no-op，清单端点诚实标注）。
+REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "minimal": {
+        "display_name": "Minimal",
+        "description": "Least reasoning overhead; fastest but least thorough.",
+    },
+    "standard": {
+        "display_name": "Standard",
+        "description": "Balanced reasoning depth for typical tasks (default).",
+    },
+    "deep": {
+        "display_name": "Deep",
+        "description": "Most reasoning overhead; slower but most thorough.",
+    },
+}
+
+#: agent_profile 三档（当前 runtime no-op，清单端点诚实标注）。
+AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "main": {
+        "display_name": "Main",
+        "description": "General-purpose orchestrator agent (default).",
+    },
+    "coding": {
+        "display_name": "Coding",
+        "description": "Specialized for code editing, debugging, and build tasks.",
+    },
+    "research_review": {
+        "display_name": "Research & Review",
+        "description": "Specialized for research, retrieval, and review tasks.",
+    },
+}
+
 # ── Request / Response schemas ──
 
 
@@ -96,15 +134,17 @@ class CreateSessionRequest(BaseModel):
     @field_validator("reasoning_effort")
     @classmethod
     def _validate_reasoning_effort(cls, v: str | None) -> str | None:
-        if v is not None and v not in {"minimal", "standard", "deep"}:
-            raise ValueError("reasoning_effort must be one of: minimal, standard, deep")
+        if v is not None and v not in REASONING_EFFORT_DESCRIPTIONS:
+            valid = ", ".join(REASONING_EFFORT_DESCRIPTIONS)
+            raise ValueError(f"reasoning_effort must be one of: {valid}")
         return v
 
     @field_validator("agent_profile")
     @classmethod
     def _validate_agent_profile(cls, v: str | None) -> str | None:
-        if v is not None and v not in {"main", "coding", "research_review"}:
-            raise ValueError("agent_profile must be one of: main, coding, research_review")
+        if v is not None and v not in AGENT_PROFILE_DESCRIPTIONS:
+            valid = ", ".join(AGENT_PROFILE_DESCRIPTIONS)
+            raise ValueError(f"agent_profile must be one of: {valid}")
         return v
 
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
@@ -714,6 +754,57 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 "actions": actions,
             })
         return {"capabilities": capabilities}
+
+    @app.get("/api/reasoning-efforts")
+    async def list_reasoning_efforts() -> dict[str, Any]:
+        """列出 reasoning_effort 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
+
+        Phase 5 已把 reasoning_effort 作为 staged 契约接收（validator 锁集合）；
+        本端点只暴露「后端认识哪些档位」，**不假装运行时已消费**（当前 runtime no-op，
+        与 POST /api/sessions 的 staged 语义一致）。字段与 /api/permission-modes 同
+        模式（{id, display_name, description}），单一事实源是模块级
+        REASONING_EFFORT_DESCRIPTIONS（validator 与清单引用同一份 → 永不漂移）。
+        """
+        efforts = [
+            {
+                "id": effort_id,
+                "display_name": desc["display_name"],
+                "description": desc["description"],
+            }
+            for effort_id, desc in REASONING_EFFORT_DESCRIPTIONS.items()
+        ]
+        return {"efforts": efforts}
+
+    @app.get("/api/agent-profiles")
+    async def list_agent_profiles() -> dict[str, Any]:
+        """列出 agent_profile 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
+
+        同 reasoning-efforts：Phase 5 staged 契约的清单投影，运行时 no-op 不变。
+        字段与 /api/permission-modes 同模式，单一事实源是 AGENT_PROFILE_DESCRIPTIONS。
+        """
+        profiles = [
+            {
+                "id": profile_id,
+                "display_name": desc["display_name"],
+                "description": desc["description"],
+            }
+            for profile_id, desc in AGENT_PROFILE_DESCRIPTIONS.items()
+        ]
+        return {"profiles": profiles}
+
+    @app.get("/api/context-providers")
+    async def list_context_providers() -> dict[str, Any]:
+        """列出已装配的 context provider 清单（Ticket B1，SDD 03 §17 对齐）。
+
+        当前 runtime 尚未装配任何 context provider（Memory = Capability + Context
+        Provider，§7.16——provider 落地是独立批次）。诚实返 {"providers": []}，
+        与 /api/capabilities 空目录降级同原则（不伪造基础项）。前端据空列表自行
+        fallback；provider 装配落地后本端点会自然返回真实清单，契约形态不变。
+        """
+        # Phase 5 接收 context_providers: list[str] | None 但运行时 no-op；
+        # 这里同样诚实暴露「当前没有任何已装配 provider」。待 provider registry
+        # 落地后替换为真实投影（独立批次，本 Ticket 不消费运行时——Scope Lock §8）。
+        return {"providers": []}
 
     @app.post("/api/sessions")
     async def create_session(req: CreateSessionRequest):
