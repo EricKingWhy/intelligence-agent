@@ -95,7 +95,20 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
               onChange={(e) => setQuery(e.target.value)}
               placeholder="搜索模型"
               aria-label="搜索模型"
-              onKeyDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                // Radix DropdownMenu 监听 Arrow/Home/End 做导航；搜索框要拦截这些键，
+                // 否则输字时光标会被 Radix 抢走。但 Escape（关闭菜单）和 Enter（确认）
+                // 必须冒泡，满足 Spec §19「Esc 关闭最上层临时表面」。
+                const nav = new Set([
+                  'ArrowUp',
+                  'ArrowDown',
+                  'ArrowLeft',
+                  'ArrowRight',
+                  'Home',
+                  'End',
+                ]);
+                if (nav.has(e.key)) e.stopPropagation();
+              }}
             />
           </div>
           {/* 默认链永远在顶部（null 提交——后端按默认链行为） */}
@@ -120,7 +133,7 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
                   <span className="model-picker-item-meta">
                     {m.default ? '默认' : m.model && m.model !== m.name ? m.model : ''}
                   </span>
-                  {selectedModel === m.name && <Check size={13} className="model-picker-check" aria-hidden="true" />}
+                  {effectiveSelectedModel === m.name && <Check size={13} className="model-picker-check" aria-hidden="true" />}
                 </DropdownMenu.Item>
               ))}
             </DropdownMenu.Group>

@@ -3447,6 +3447,11 @@ button.json-row {
   .reconnect-dot {
     animation: none;
   }
+  /* Spec §18/§21：reduced motion 必须移除新动画的 transform/opacity 入场。
+   * Radix 自身已通过 data-state 切换显隐；这里只关掉我们的 keyframe 动画。 */
+  .model-picker-content {
+    animation: none;
+  }
 }
 
 /* ── T10（#103）模型选择器：dock 内玻璃 chip，与 Esc 提示同族 ── */
@@ -3616,4 +3621,3 @@ button.json-row {
   opacity: 0.5;
   cursor: default;
 }
-
