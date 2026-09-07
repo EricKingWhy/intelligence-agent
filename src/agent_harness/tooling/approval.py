@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
@@ -41,7 +41,9 @@ class ApprovalResponse:
 
 #: 可插拔审批回调：接收 ApprovalRequest，返回 ApprovalResponse。
 #: 不提供时 ToolExecutor 对超级别或 DANGER 级别默认拒绝（安全默认值）。
-ApprovalCallback = Callable[[ApprovalRequest], ApprovalResponse]
+#:
+#: Phase 5：async 化以支持交互式审批（run 暂停等外部 /approve 决策）。
+ApprovalCallback = Callable[[ApprovalRequest], Awaitable[ApprovalResponse]]
 
 
 def needs_approval(

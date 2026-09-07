@@ -31,7 +31,13 @@ from agent_harness.session import (
 )
 from agent_harness.storage import OperationContext, SqliteOperationLedger
 from agent_harness.tooling import ApprovalResponse, ToolExecutor, ToolRegistry
+from agent_harness.tooling.approval import ApprovalRequest
 from agent_harness.tools import BashTool, WriteTool
+
+
+async def _approve_all(_req: ApprovalRequest) -> ApprovalResponse:
+    """bash 是 DANGER 级：需要审批 callback 显式放行（Kill 测试需要到注入点）。"""
+    return ApprovalResponse(approved=True)
 
 
 async def main() -> None:
@@ -93,7 +99,7 @@ async def main() -> None:
         operation_ledger=ledger,
         # bash 是 DANGER 级：无审批回调时会在 Ledger 写入【之前】被拒，
         # 注入点永远到不了——Kill 测试需要显式放行（模拟已获批准的调用）。
-        approval_callback=lambda request: ApprovalResponse(approved=True),
+        approval_callback=_approve_all,
         kill_hook=kill_hook,
     )
     for call in calls:

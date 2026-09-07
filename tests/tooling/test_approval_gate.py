@@ -39,11 +39,11 @@ def _tc(name: str, args: dict, call_id: str = "c1") -> dict:
     return {"id": call_id, "name": name, "args": args}
 
 
-def _auto_approve(_req: ApprovalRequest) -> ApprovalResponse:
+async def _auto_approve(_req: ApprovalRequest) -> ApprovalResponse:
     return ApprovalResponse(approved=True, reason="auto-approve")
 
 
-def _auto_deny(_req: ApprovalRequest) -> ApprovalResponse:
+async def _auto_deny(_req: ApprovalRequest) -> ApprovalResponse:
     return ApprovalResponse(approved=False, reason="auto-deny")
 
 
@@ -188,7 +188,7 @@ class TestPerCallScoping:
         """
         call_count = 0
 
-        def counting_approve(_req: ApprovalRequest) -> ApprovalResponse:
+        async def counting_approve(_req: ApprovalRequest) -> ApprovalResponse:
             nonlocal call_count
             call_count += 1
             return ApprovalResponse(approved=True)
@@ -211,7 +211,7 @@ class TestPerCallScoping:
         """ApprovalRequest 包含正确的 tool_name/args/permission/policy/reason。"""
         captured: list[ApprovalRequest] = []
 
-        def capturing(req: ApprovalRequest) -> ApprovalResponse:
+        async def capturing(req: ApprovalRequest) -> ApprovalResponse:
             captured.append(req)
             return ApprovalResponse(approved=True)
 

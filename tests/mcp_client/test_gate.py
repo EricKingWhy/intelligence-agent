@@ -163,7 +163,7 @@ async def test_gate1_danger_mcp_tool_hits_approval_gate(tmp_path):
 
     approval_requests: list[str] = []
 
-    def approval_callback(request):
+    async def approval_callback(request):
         approval_requests.append(request.tool_name)
         return ApprovalResponse(approved=False, reason="gate test denies")
 

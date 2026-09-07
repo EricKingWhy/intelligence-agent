@@ -25,7 +25,7 @@ from agent_harness.config import Settings
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.storage import OnStableBoundary
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
-from agent_harness.tooling.contract import ToolPermission
+from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
 
 
@@ -104,7 +104,8 @@ async def test_build_runtime_wires_full_stack(tmp_path):
             workspace_registry=workspace_registry,
             session_id="sess-assembly",
             workspace=tmp_path / "workspaces" / "sess-assembly",
-            max_steps=10, auto_approve=True,
+            max_steps=10,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
 
     # coding 工具在册（CLI 不再是削弱装配——与 web 同一 stack）
@@ -116,7 +117,7 @@ async def test_build_runtime_wires_full_stack(tmp_path):
     assert runtime._checkpoint_policy._store is stores.checkpoint_store
     # workspace 映射持久化：恢复时可还原 sandbox
     assert workspace_registry.exists("sess-assembly")
-    # auto_approve=True → 审批直通
+    # 无 approval_callback 注入 → assembly 默认 auto-approve callback
     assert runtime.executor._approval_callback is not None
 
 
@@ -131,18 +132,25 @@ async def test_build_runtime_wires_capability_tools_and_manual_approval(tmp_path
     stores = _stores(tmp_path)
     await initialize_stores(stores)
 
+    # manual 模式：注入 deny callback（旧 auto_approve=false 行为由调用方构造）
+    async def _deny(_req):
+        from agent_harness.tooling.approval import ApprovalResponse
+        return ApprovalResponse(approved=False, reason="manual approval not yet wired")
+
     with patch("agent_harness.assembly.create_chat_model",
                return_value=ScriptedModelFactory()):
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="s", workspace=tmp_path / "w",
-            max_steps=5, auto_approve=False,
+            max_steps=5,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+            approval_callback=_deny,
         )
 
     assert "capability_probe" in [tool.name for tool in runtime.registry.list()]
     assert runtime._context_builder.context_providers == [provider_sentinel]
-    response = runtime.executor._approval_callback(object())
+    response = await runtime.executor._approval_callback(object())
     assert response.approved is False
 
 
@@ -166,7 +174,8 @@ async def test_build_runtime_wires_model_fallback(tmp_path):
             settings=_settings(tmp_path), wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="s1", workspace=tmp_path / "w1",
-            max_steps=5, auto_approve=True,
+            max_steps=5,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
     assert runtime._fallback_model is None
     assert runtime._primary_model_name == "deepseek-chat"
@@ -183,7 +192,8 @@ async def test_build_runtime_wires_model_fallback(tmp_path):
             settings=fb_settings, wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="s2", workspace=tmp_path / "w2",
-            max_steps=5, auto_approve=True,
+            max_steps=5,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
     # 两次构造：第 1 次 primary、第 2 次 fallback；配置链一致
     assert len(created) == 2

@@ -41,7 +41,7 @@ from agent_harness.storage import (
 )
 from agent_harness.storage.s3_artifact import S3ArtifactStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
-from agent_harness.tooling.approval import ApprovalResponse
+from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
 from agent_harness.tools import (
@@ -106,9 +106,14 @@ async def build_runtime(
     session_id: str,
     workspace: Path,
     max_steps: int,
-    auto_approve: bool,
+    permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
+    auto_approve: bool | None = None,
+    approval_callback: ApprovalCallback | None = None,
     session_store: JsonlSessionStore | None = None,
     model_name: str | None = None,
+    reasoning_effort: str | None = None,
+    agent_profile: str | None = None,
+    context_providers: list[str] | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -116,7 +121,19 @@ async def build_runtime(
     WorkspaceRegistry 统一创建并持久化映射（恢复时按映射还原）。
     model_name（ADR-0016 §5）：None = 默认链；catalog 名 = 会话级选择
     （未知名字在 web 层已 422，这里 resolve 再响亮失败一次）。
+
+    permission_mode（Phase 5）：会话级 PermissionPolicy 上限（审批阈值，不是
+    硬墙——policy 决定哪些工具 needs_approval，审批结果仍由 callback 决定）。
+    approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
+    式审批 callback（见 web 层 PendingApprovalQueue）。
     """
+    if reasoning_effort is not None:
+        logger.info("reasoning_effort=%s received but not yet consumed by runtime", reasoning_effort)
+    if agent_profile is not None:
+        logger.info("agent_profile=%s received but not yet consumed by runtime", agent_profile)
+    if context_providers is not None:
+        logger.info("context_providers=%s received but not yet consumed by runtime", context_providers)
+
     config = (ModelConfig.from_settings(settings) if model_name is None
               else ModelConfig.from_catalog(settings, model_name))
     model = create_chat_model(config)
@@ -146,14 +163,16 @@ async def build_runtime(
         registry.register(InspectArtifactTool(artifact_store))
         overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
 
-    if auto_approve:
-        policy = PermissionPolicy.WORKSPACE_WRITE
-        approval_callback = lambda _req: ApprovalResponse(approved=True, reason="auto-approve")
-    else:
-        # manual 模式 V1：拒绝所有危险操作（真正的交互式审批留到
-        # WebSocket / pending queue，接缝点）。
-        policy = PermissionPolicy.WORKSPACE_WRITE
-        approval_callback = lambda _req: ApprovalResponse(approved=False, reason="manual approval not yet wired")
+    # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
+    # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
+    # 切片 B：ApprovalCallback 已 async 化（外部 /approve 交互式审批需要 run 暂停）。
+    policy = permission_mode
+    if auto_approve is False and approval_callback is None:
+        async def approval_callback(_req):  # type: ignore[no-redef]
+            return ApprovalResponse(approved=False, reason="manual approval not yet wired")
+    elif approval_callback is None:
+        async def approval_callback(_req):  # type: ignore[no-redef]
+            return ApprovalResponse(approved=True, reason="auto-approve")
 
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席

@@ -122,3 +122,12 @@ Interpretation:
 3. inspect MIT-licensed DeepSeek Harness implementation where compatible;
 4. borrow proprietary products' interaction/design principles, not proprietary source/assets;
 5. custom-code only the product-specific layer.
+
+
+### ADR-0019 — Stage Composer controls before runtime consumption
+
+Phase 5 accepts `reasoning_effort`, `agent_profile`, and `context_providers` as
+validated session contract fields while keeping runtime behavior unchanged. This
+avoids a frontend/backend contract mismatch without pretending provider-specific
+reasoning switches, profile tool scoping, or provider filtering are implemented.
+Runtime consumption is a follow-up batch with explicit capability/status evidence.

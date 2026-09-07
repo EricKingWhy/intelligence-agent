@@ -212,7 +212,7 @@ class ToolExecutor:
         # -- 阶段 2.5：approval gate -- 05_SANDBOX_CODING_TOOLS.md §6 的 REQUIRE_APPROVAL。
         # 在 validate 之后、execute 之前：参数已合法，但授权关卡决定是否能跑。
         # per-call scoping 由设计保证：每次 execute 独立检查，不存储"已批准"状态。
-        denied = self._check_approval(tool_call_id, name, tool, raw_args)
+        denied = await self._check_approval(tool_call_id, name, tool, raw_args)
         if denied is not None:
             return denied
 
@@ -656,7 +656,7 @@ class ToolExecutor:
         # 全部扫完没命中 MUTATING → 全 READ_ONLY → 并发。
         return "parallel"
 
-    def _check_approval(
+    async def _check_approval(
         self,
         tool_call_id: str,
         name: str,
@@ -696,7 +696,7 @@ class ToolExecutor:
                 ),
             )
 
-        response: ApprovalResponse = self._approval_callback(request)
+        response: ApprovalResponse = await self._approval_callback(request)
         if response.approved:
             # per-call scoping：批准只对这次 execute 生效，不存状态。
             return None

@@ -66,6 +66,7 @@ class TestSessionEventDTO:
             "reasoning/delta",
             "reasoning/completed",
             "reasoning/interrupted",
+            "tool/approval-requested",
         }
         assert EVENT_TYPES == expected
 
