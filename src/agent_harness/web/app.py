@@ -66,7 +66,58 @@ from agent_harness.tooling.contract import (
     PERMISSION_MODE_DESCRIPTIONS,
     PermissionPolicy,
 )
+from agent_harness.session.service import (
+    ActiveRunConflict,
+    ApprovalAlreadyResolved,
+    ApprovalQueueMissing,
+    ApprovalRequestMissing,
+    InvalidDecision,
+    InvalidSessionId,
+    RecoveryConflict,
+    SessionNotFound,
+    SessionService,
+    SessionServiceError,
+    WorkspaceNameInvalid,
+)
 from agent_harness.web.runmanager import RunManager
+
+# ── Staged amend 字段的人类可读描述（Phase 5 + Ticket B1）──────────────
+# 这些 dict 是 POST /api/sessions validator 与 GET 清单端点的**单一事实源**：
+# validator 用它们的 key 集合判断合法值；GET 端点用它们的 value 投影 display_name +
+# description。两边引用同一份常量 → 加新档位只改一处，validator 与清单永不漂移。
+# 与 PERMISSION_MODE_DESCRIPTIONS（tooling/contract.py）同模式（Reuse First §6）。
+
+#: reasoning_effort 三档（当前 runtime no-op，清单端点诚实标注）。
+REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "minimal": {
+        "display_name": "Minimal",
+        "description": "Least reasoning overhead; fastest but least thorough.",
+    },
+    "standard": {
+        "display_name": "Standard",
+        "description": "Balanced reasoning depth for typical tasks (default).",
+    },
+    "deep": {
+        "display_name": "Deep",
+        "description": "Most reasoning overhead; slower but most thorough.",
+    },
+}
+
+#: agent_profile 三档（当前 runtime no-op，清单端点诚实标注）。
+AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "main": {
+        "display_name": "Main",
+        "description": "General-purpose orchestrator agent (default).",
+    },
+    "coding": {
+        "display_name": "Coding",
+        "description": "Specialized for code editing, debugging, and build tasks.",
+    },
+    "research_review": {
+        "display_name": "Research & Review",
+        "description": "Specialized for research, retrieval, and review tasks.",
+    },
+}
 
 # ── Request / Response schemas ──
 
@@ -97,15 +148,17 @@ class CreateSessionRequest(BaseModel):
     @field_validator("reasoning_effort")
     @classmethod
     def _validate_reasoning_effort(cls, v: str | None) -> str | None:
-        if v is not None and v not in {"minimal", "standard", "deep"}:
-            raise ValueError("reasoning_effort must be one of: minimal, standard, deep")
+        if v is not None and v not in REASONING_EFFORT_DESCRIPTIONS:
+            valid = ", ".join(REASONING_EFFORT_DESCRIPTIONS)
+            raise ValueError(f"reasoning_effort must be one of: {valid}")
         return v
 
     @field_validator("agent_profile")
     @classmethod
     def _validate_agent_profile(cls, v: str | None) -> str | None:
-        if v is not None and v not in {"main", "coding", "research_review"}:
-            raise ValueError("agent_profile must be one of: main, coding, research_review")
+        if v is not None and v not in AGENT_PROFILE_DESCRIPTIONS:
+            valid = ", ".join(AGENT_PROFILE_DESCRIPTIONS)
+            raise ValueError(f"agent_profile must be one of: {valid}")
         return v
 
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
@@ -588,21 +641,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         曾需秒级串行解析，现约几十 ms）。损坏行走 store 内全量回退，摘要
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
-        store = app.state.agent.store
-        ids = await anyio.to_thread.run_sync(store.list_session_ids)
-        summaries: list[SessionSummary] = []
-        for sid in ids:
-            stats = await anyio.to_thread.run_sync(store.read_session_summary, sid)
-            if stats is None or stats.event_count == 0:
-                continue
-            summaries.append(SessionSummary(
-                session_id=sid,
-                event_count=stats.event_count,
-                first_event_time=stats.first_event_time,
-                last_event_time=stats.last_event_time,
-                first_user_message=stats.first_user_message,
-            ))
-        return summaries
+        service = SessionService(app.state.agent)
+        summaries = await service.list_sessions()
+        return [
+            SessionSummary(
+                session_id=s["session_id"],
+                event_count=s["event_count"],
+                first_event_time=s["first_event_time"],
+                last_event_time=s["last_event_time"],
+                first_user_message=s["first_user_message"],
+            )
+            for s in summaries
+        ]
 
     @app.get("/api/sessions/{session_id}/events")
     async def get_session_events(session_id: str) -> list[dict]:
@@ -611,11 +661,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         session_id 先过安全校验（名字段，不是路径）；store 读是同步磁盘 I/O，
         走 to_thread 卸载（同 list_sessions）。
         """
-        _validate_session_id(session_id)
-        store = app.state.agent.store
-        events = await anyio.to_thread.run_sync(store.read_events, session_id)
-        if not events:
-            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
+        service = SessionService(app.state.agent)
+        try:
+            events = await service.get_events(session_id)
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
         return [e.to_dict() for e in events]
 
     @app.get("/api/models")
@@ -722,6 +774,57 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             })
         return {"capabilities": capabilities}
 
+    @app.get("/api/reasoning-efforts")
+    async def list_reasoning_efforts() -> dict[str, Any]:
+        """列出 reasoning_effort 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
+
+        Phase 5 已把 reasoning_effort 作为 staged 契约接收（validator 锁集合）；
+        本端点只暴露「后端认识哪些档位」，**不假装运行时已消费**（当前 runtime no-op，
+        与 POST /api/sessions 的 staged 语义一致）。字段与 /api/permission-modes 同
+        模式（{id, display_name, description}），单一事实源是模块级
+        REASONING_EFFORT_DESCRIPTIONS（validator 与清单引用同一份 → 永不漂移）。
+        """
+        efforts = [
+            {
+                "id": effort_id,
+                "display_name": desc["display_name"],
+                "description": desc["description"],
+            }
+            for effort_id, desc in REASONING_EFFORT_DESCRIPTIONS.items()
+        ]
+        return {"efforts": efforts}
+
+    @app.get("/api/agent-profiles")
+    async def list_agent_profiles() -> dict[str, Any]:
+        """列出 agent_profile 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
+
+        同 reasoning-efforts：Phase 5 staged 契约的清单投影，运行时 no-op 不变。
+        字段与 /api/permission-modes 同模式，单一事实源是 AGENT_PROFILE_DESCRIPTIONS。
+        """
+        profiles = [
+            {
+                "id": profile_id,
+                "display_name": desc["display_name"],
+                "description": desc["description"],
+            }
+            for profile_id, desc in AGENT_PROFILE_DESCRIPTIONS.items()
+        ]
+        return {"profiles": profiles}
+
+    @app.get("/api/context-providers")
+    async def list_context_providers() -> dict[str, Any]:
+        """列出已装配的 context provider 清单（Ticket B1，SDD 03 §17 对齐）。
+
+        当前 runtime 尚未装配任何 context provider（Memory = Capability + Context
+        Provider，§7.16——provider 落地是独立批次）。诚实返 {"providers": []}，
+        与 /api/capabilities 空目录降级同原则（不伪造基础项）。前端据空列表自行
+        fallback；provider 装配落地后本端点会自然返回真实清单，契约形态不变。
+        """
+        # Phase 5 接收 context_providers: list[str] | None 但运行时 no-op；
+        # 这里同样诚实暴露「当前没有任何已装配 provider」。待 provider registry
+        # 落地后替换为真实投影（独立批次，本 Ticket 不消费运行时——Scope Lock §8）。
+        return {"providers": []}
+
     @app.post("/api/sessions")
     async def create_session(req: CreateSessionRequest):
         """起新 session + 跑任务，流式返回 AgentEvent（SSE）。
@@ -730,151 +833,33 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         本次 HTTP 请求生命周期解耦——断连（本 generator 被取消）只做
         unsubscribe，run 继续跑到终态；显式取消走 POST /cancel。
         """
+        service = SessionService(app.state.agent)
         state = app.state.agent
 
-        # 安全边界先行：workspace 名校验（422 拒绝）必须发生在任何 mkdir /
-        # Session 落盘之前——被拒请求不能留下孤儿 session 或目录。
-        workspace_name = _validate_workspace_name(state, req.workspace)
-
-        # 组装顺序（R6-6）：先建 workspace + runtime，最后才 Session.start 落盘。
-        # factory 需要 session_id 装配 S3 artifact 命名空间，因此预生成 id 传入
-        # ——此前 Session.start 先落盘、runtime 组装失败时客户端拿 JSON 500
-        # 且 store 里留下只含 session/started 的孤儿 session。
-        session_id = str(uuid4())
-        workspace = (state.workspaces_root / workspace_name if workspace_name is not None
-                     else state.workspaces_root / session_id)
-        workspace.mkdir(parents=True, exist_ok=True)
-
-        if req.model is not None:
-            try:
-                ModelConfig.from_catalog(state.settings, req.model)
-            except ConfigError as error:
-                raise HTTPException(status_code=422, detail=str(error)) from error
-
-        _, wiring = await state.get_wiring()
-        await state.ensure_stores()
-
-        # Phase 5：permission_mode 是真值源；auto_approve 是 deprecated alias。
-        # 三种路由（保留向后兼容）：
-        #   1. 显式 permission_mode + 非 danger-full-access → 交互式审批：
-        #      needs_approval 触发时 emit tool/approval-requested + run 暂停，
-        #      前端 /approve 唤醒。
-        #   2. 纯 auto_approve=true（含缺省） → silent auto-approve（旧行为）。
-        #   3. 纯 auto_approve=false → deny callback（旧行为，已被 (1) 取代但保留）。
         permission_mode = PermissionPolicy(req.permission_mode)
         permission_mode_explicit = "permission_mode" in req.model_fields_set
         auto_approve_explicit = "auto_approve" in req.model_fields_set
 
-        # 交互式审批触发条件：显式选了 permission_mode（不含只传 auto_approve 的旧客户端）
-        # 且 mode 不是 danger-full-access（后者 needs_approval 永远 False，无审批点）。
-        interactive = (
-            permission_mode_explicit
-            and permission_mode != PermissionPolicy.DANGER_FULL_ACCESS
-        )
+        try:
+            result = await service.create_and_launch(
+                task=req.task,
+                workspace_name=req.workspace,
+                max_steps=req.max_steps,
+                permission_mode=permission_mode,
+                permission_mode_explicit=permission_mode_explicit,
+                auto_approve_explicit=auto_approve_explicit,
+                auto_approve=req.auto_approve,
+                model=req.model,
+                reasoning_effort=req.reasoning_effort,
+                agent_profile=req.agent_profile,
+                context_providers=req.context_providers,
+            )
+        except WorkspaceNameInvalid as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except InvalidDecision as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
-        approval_callback: ApprovalCallback | None
-        if interactive:
-            # 注册会话级 queue——callback 把 ApprovalRequest 登记后 emit + 等外部 resolve
-            queue = PendingApprovalQueue()
-            state.approval_queues[session_id] = queue
-            # session 还未创建（保持「先 build_runtime 再 Session.start」的无孤儿语义），
-            # 用 container 让 callback 在被调时拿到真实 session（launch 后才发生调用）。
-            session_holder: dict[str, Session | None] = {"session": None}
-
-            async def _interactive_callback(req: ApprovalRequest) -> ApprovalResponse:
-                approval_id = queue.register(req)
-                # emit tool/approval-requested（durable）：前端据 approval_id 调 /approve
-                # payload 契约见 03_RUNTIME_EVENT_CONTRACT.md §9 PermissionRequestedData
-                from agent_harness.session.event import TOOL_APPROVAL_REQUESTED
-                sess = session_holder["session"]
-                if sess is None:
-                    # 时序约束：callback 只能在 launch 之后被 ToolExecutor 调用，
-                    # 那时 session_holder 已注入。触发不到说明调用顺序被破坏。
-                    raise RuntimeError("interactive callback invoked before Session.start")
-                # 当前 runtime 只兑现 deny / approve_once（per-call scoping）。
-                # approve_session / approve_policy 留后续批次（需 session 级缓存）。
-                allowed_decisions = [
-                    PermissionDecision.DENY.value,
-                    PermissionDecision.APPROVE_ONCE.value,
-                ]
-                sess.append(
-                    TOOL_APPROVAL_REQUESTED,
-                    {
-                        "approval_id": approval_id,
-                        "tool_name": req.tool_name,
-                        "tool_call_id": req.tool_call_id,
-                        "action_type": req.permission.value,
-                        "title": f"{req.tool_name} ({req.permission.value})",
-                        "description": req.reason,
-                        "arguments_preview": req.args,
-                        "permission": req.permission.value,
-                        "policy": req.policy.value,
-                        "reason": req.reason,
-                        "allowed_decisions": allowed_decisions,
-                    },
-                )
-                response = await queue.wait_for(approval_id)
-                # 回调返回后 emit permission/resolved（审计 trail）：
-                # 决策被记录进 JSONL，前端据 approval_id 与 requested 配对。
-                sess.append(
-                    "permission/resolved",
-                    {
-                        "approval_id": approval_id,
-                        "decision": response.decision.value,
-                        "reason": response.reason,
-                    },
-                )
-                return response
-
-            approval_callback = _interactive_callback
-        elif (
-            auto_approve_explicit
-            and not permission_mode_explicit
-            and req.auto_approve is False
-        ):
-            # 旧路径：纯 auto_approve=false → deny（已被 interactive 取代但保留向后兼容）
-            async def _deny_callback(_req):
-                return ApprovalResponse(
-                    approved=False, reason="manual approval not yet wired"
-                )
-
-            approval_callback = _deny_callback
-        else:
-            approval_callback = None  # build_runtime 默认 auto-approve
-
-        runtime = await build_runtime(
-            settings=state.settings, wiring=wiring, stores=state.stores,
-            workspace_registry=state.workspace_registry,
-            session_id=session_id, workspace=workspace,
-            max_steps=req.max_steps,
-            permission_mode=permission_mode,
-            approval_callback=approval_callback,
-            session_store=state.store,
-            model_name=req.model,
-            reasoning_effort=req.reasoning_effort,
-            agent_profile=req.agent_profile,
-            context_providers=req.context_providers,
-        )
-        session = Session.start(state.store, session_id=session_id)
-        if interactive:
-            # 把真实 session 注入 callback 闭包（callback 在 launch 后才被调）
-            session_holder["session"] = session
-
-        # launch 内无 await（create_task 只调度不执行）→ 订阅者挂载必然
-        # 早于 run 的首批事件，不会丢帧。
-        run, subscriber = state.run_manager.launch(session, runtime, req.task)
-
-        if interactive:
-            # run 终结时 GC 该 session 的 approval_queue（防长期泄漏）：
-            # done_callback 在 detached-run 模式下无论有无客户端连流都会触发。
-            # 闭包捕获 run.task（launch 后必然非 None）。
-            _task = run.task
-
-            def _gc_approval_queue(_t):
-                state.approval_queues.pop(session_id, None)
-
-            if _task is not None:
-                _task.add_done_callback(_gc_approval_queue)
+        session, run, subscriber = result.session, result.run, result.subscriber
 
         async def event_generator():
             """SSE 事件源：消费订阅队列，转成 SSE 帧。
@@ -908,18 +893,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
            （崩溃遗留的悬空 run 不伪造终态，修复走 POST /recover）。
         客户端对重放帧与 live 帧做同一 seq 幂等投影（C5）。
         """
-        _validate_session_id(session_id)
-        state = app.state.agent
-        events = await anyio.to_thread.run_sync(state.store.read_events, session_id)
-        if not events:
-            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
-        latest_seq = events[-1].seq
+        service = SessionService(app.state.agent)
+        try:
+            handle = await service.stream_reconnect(
+                session_id=session_id,
+                after_seq=after_seq,
+                max_replay_events=STREAM_REPLAY_MAX_EVENTS,
+            )
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
-        # 先订阅（注册进 fanout 集合）后取游标：订阅后到取游标之间的入队
-        # 必然 ≤ 游标（被重放覆盖）或 > 游标（在队列里）——无缝无重复。
-        run = state.run_manager.get_active(session_id)
-        subscriber = run.subscribe() if run is not None else None
-        replay_upto = run.last_enqueued_seq if run is not None else latest_seq
+        events = handle.events
+        latest_seq = handle.latest_seq
+        run = handle.run
+        subscriber = handle.subscriber
+        replay_upto = handle.replay_upto
+        state = app.state.agent
 
         if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
             async def truncated_generator():
@@ -963,37 +954,22 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         历史与 dangling 修复，RunManager.launch 驱动一轮新的 Agent Loop。
         在途 session 拒绝 409，避免同一 session 并发两轮。
         """
-        _validate_session_id(session_id)
-        state = app.state.agent
-        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
-        if state.run_manager.get_active(session_id) is not None:
-            raise HTTPException(status_code=409, detail="session has an active run")
-
+        service = SessionService(app.state.agent)
         try:
-            session = Session.resume(
-                state.store, session_id,
-                workspace_registry=state.workspace_registry,
+            result = await service.resume_and_launch(
+                session_id=session_id,
+                task=req.task,
             )
-        except ValueError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ActiveRunConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
 
-        workspace = state.workspaces_root / session_id
-        workspace.mkdir(parents=True, exist_ok=True)
-        _, wiring = await state.get_wiring()
-        await state.ensure_stores()
-        runtime = await build_runtime(
-            settings=state.settings, wiring=wiring, stores=state.stores,
-            workspace_registry=state.workspace_registry,
-            session_id=session_id, workspace=workspace,
-            max_steps=10,
-            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
-            approval_callback=None,
-            session_store=state.store,
-            model_name=None,
-        )
-        run, subscriber = state.run_manager.launch(session, runtime, req.task)
+        session_id = result.session.session_id
+        run, subscriber = result.run, result.subscriber
+        state = app.state.agent
 
         async def event_generator():
             try:
@@ -1018,12 +994,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         run/failed data.reason=cancelled，与异常臂（无 reason）、孤儿回收
         （reason=orphaned）区分。
         """
-        _validate_session_id(session_id)
-        state = app.state.agent
-        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
-        cancelled = state.run_manager.cancel(session_id)
+        service = SessionService(app.state.agent)
+        try:
+            cancelled = await service.cancel(session_id)
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
         return {"status": "cancelling" if cancelled else "no_active_run"}
 
     @app.post("/api/sessions/{session_id}/approve")
@@ -1040,8 +1017,6 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
           无 approval_id（旧 seam 调用）→ 200 received（向后兼容）
           session 不存在 → 404
         """
-        _validate_session_id(session_id)
-        state = app.state.agent
         if req.approval_id is None:
             # 旧 seam 入口（Phase 2 阶段性占位）：不解析任何决策，仅回 200 信号；
             # 不要求 session 存在——Phase 2 seam 测试用任意 id 探活。
@@ -1049,71 +1024,31 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 "status": "received",
                 "note": "auto-approve is default; interactive approval via approval_id",
             }
-        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
-        queue = state.approval_queues.get(session_id)
-        if queue is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"session '{session_id}' has no interactive approval queue "
-                       "(permission_mode not interactive, or run already terminated)",
-            )
-        # 找到 requested 事件，读它声明的 allowed_decisions（03 §9 契约：
-        # 后端校验决策在允许集内——前端不是 enforcement boundary）。
-        requested = next(
-            (
-                e for e in existing
-                if e.type == "tool/approval-requested"
-                and e.data.get("approval_id") == req.approval_id
-            ),
-            None,
-        )
-        if requested is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"approval_id '{req.approval_id}' not found in session '{session_id}'",
-            )
-        allowed = requested.data.get("allowed_decisions", [])
-        # 解析 decision：显式传 → 用它；只传 approved → 推导；未知值 → 422。
-        if req.decision is not None:
-            try:
-                decision = PermissionDecision(req.decision)
-            except ValueError:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"decision '{req.decision}' is not a valid PermissionDecision",
-                )
-        else:
-            decision = (
-                PermissionDecision.APPROVE_ONCE if req.approved else PermissionDecision.DENY
-            )
-        if allowed and decision.value not in allowed:
-            raise HTTPException(
-                status_code=422,
-                detail=f"decision '{decision.value}' not in allowed_decisions {allowed}",
-            )
-        response = ApprovalResponse(
-            approved=(decision != PermissionDecision.DENY),
-            reason=req.reason,
-            decision=decision,
-        )
+        service = SessionService(app.state.agent)
         try:
-            ok = queue.resolve(req.approval_id, response)
-        except KeyError:
-            raise HTTPException(
-                status_code=409,
-                detail=f"approval_id '{req.approval_id}' already resolved",
+            result = await service.resolve_approval(
+                session_id=session_id,
+                approval_id=req.approval_id,
+                approved=req.approved,
+                decision=req.decision,
+                reason=req.reason,
             )
-        if not ok:
-            raise HTTPException(
-                status_code=404,
-                detail=f"approval_id '{req.approval_id}' not found in session '{session_id}'",
-            )
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ApprovalQueueMissing as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ApprovalRequestMissing as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except InvalidDecision as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except ApprovalAlreadyResolved as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
         return {
             "status": "resolved",
             "approval_id": req.approval_id,
-            "decision": decision.value,
+            "decision": result.decision.value,
         }
 
     @app.post("/api/sessions/{session_id}/recover")
@@ -1124,23 +1059,16 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         PENDING 默认 skip；RUNNING/UNKNOWN 需要人工裁决时返回 409（不伪造、
         不盲跑，不变量 #14）。幂等：重复调用靠事件配对自然跳过已修复项。
         """
-        _validate_session_id(session_id)
-        await state.ensure_stores()
-        # 不存在的 session 显式 404（RecoveryError 统一留给"需要人工裁决"语义）。
-        existing = await anyio.to_thread.run_sync(state.store.read_events, session_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"session '{session_id}' not found")
-        coordinator = RecoveryCoordinator(
-            session_store=state.store,
-            workspace_registry=state.workspace_registry,
-            operation_ledger=state.operation_ledger,
-            database_path=state.harness_db,
-        )
+        service = SessionService(app.state.agent)
         try:
-            recovered = await coordinator.recover(session_id)
-        except RecoveryError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        return [e.to_dict() for e in recovered.events]
+            events = await service.recover(session_id)
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except RecoveryConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return [e.to_dict() for e in events]
 
     # ── 静态资源（前端 build 产物）──
     # 生产模式：FastAPI serve web/dist；dev 模式 Vite 自己跑 5173。
