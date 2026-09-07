@@ -100,4 +100,7 @@ class AgentFactory:
             model_call_gate=self._model_call_gate,
             agent_id=spec.name,
             observability_sink=self._observability_sink,
+            # ADR-0020a：child 拿它 spec 的 system_prompt（与 parent 路径一致），
+            # 经 AgentRuntime 内部的 ContextBuilder 注入为列表首条 SystemMessage。
+            system_prompt=spec.system_prompt,
         )
