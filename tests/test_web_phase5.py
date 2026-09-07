@@ -37,7 +37,7 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
         response = client.post("/api/sessions", json={"task": "read", "workspace": "overflow-task"})
         assert response.status_code == 200
         live = [json.loads(line[5:]) for line in response.text.splitlines() if line.startswith("data:")]
-        assert any(e["type"] == "artifact/created" for e in live)
+        assert any(e["type"] == "artifact/externalized" for e in live)
         assert any(tool["name"] == "inspect_artifact" for tool in model.bound_tools)
         refreshed = client.get(f"/api/sessions/{configured_sessions[0]}/events").json()
         assert [(e["seq"], e["type"], e["data"]) for e in live if e["seq"] is not None] == [

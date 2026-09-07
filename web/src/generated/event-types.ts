@@ -19,6 +19,7 @@ export const EventType = {
   TOOL_RESULT: 'tool/result',
   OPERATION_RECONCILE_REQUIRED: 'operation/reconcile-required',
   ARTIFACT_CREATED: 'artifact/created',
+  ARTIFACT_EXTERNALIZED: 'artifact/externalized',
   CONTEXT_COMPACTED: 'context/compacted',
   MEMORY_DEGRADED: 'memory/degraded',
   TOOL_FAILURE_GUARD: 'tool/failure-guard',

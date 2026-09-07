@@ -31,6 +31,11 @@ TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
 ARTIFACT_CREATED = "artifact/created"
+# Phase Multiturn T5 (#135)：大产物外置对象存储事件。
+# 当 tool result 超过阈值时，原始内容外置到 MinIO（或 S3 兼容存储），
+# session 里留摘要 + artifact_ref。此事件标记"大产物已外置"，
+# 模型可凭 artifact_ref 用 read_artifact 工具按需读取局部内容。
+ARTIFACT_EXTERNALIZED = "artifact/externalized"
 CONTEXT_COMPACTED = "context/compacted"
 MEMORY_DEGRADED = "memory/degraded"
 # ── + Phase 12 Reliability 信号（同错熔断 + 模型 fallback，ADR-0014） ──
@@ -77,6 +82,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TEXT_DELTA,
         OPERATION_RECONCILE_REQUIRED,
         ARTIFACT_CREATED,
+        ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,
         MEMORY_DEGRADED,
         TOOL_FAILURE_GUARD,

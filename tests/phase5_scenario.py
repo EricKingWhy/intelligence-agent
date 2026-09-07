@@ -70,7 +70,7 @@ async def run_phase5_scenario(tmp_path, session, artifact_store, *, stream=True)
         assert result.completed and result.steps == 3
     assert session.events[-1].type == "run/completed"
     assert session.events[:len(before)] == before
-    assert any(e.type == "artifact/created" for e in session.events)
+    assert any(e.type == "artifact/externalized" for e in session.events)
     assert any(e.type == "context/compacted" for e in session.events)
     assert (await artifact_store.load(ARTIFACT_ID)).content == RAW_OUTPUT
     operation = await ledger.get(session.session_id, "bash-1")

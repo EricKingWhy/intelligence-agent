@@ -12,6 +12,7 @@ from agent_harness.tools.glob import GlobTool
 from agent_harness.tools.grep import GrepTool
 from agent_harness.tools.inspect_artifact import InspectArtifactTool
 from agent_harness.tools.read import ReadTool
+from agent_harness.tools.read_artifact import ReadArtifactTool
 from agent_harness.tools.write import WriteTool
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "InspectArtifactTool",
+    "ReadArtifactTool",
     "ReadTool",
     "WriteTool",
 ]

@@ -109,7 +109,7 @@ async def test_partial_batch_failure_still_emits_committed_artifact(tmp_path, pa
     # 部分批失败的核心不变量不变：first 的 artifact/created 仍已提交并被镜像；
     # 变化的是收尾方式——流以 run/failed 终结，而不是以异常截断。
     assert emitted[-1].type == "run/failed"
-    assert "artifact/created" in [e.type for e in emitted]
+    assert "artifact/externalized" in [e.type for e in emitted]
     assert sandbox.exec.call_count == 2
 
 
@@ -202,4 +202,4 @@ async def test_artifact_created_lands_after_tool_call(tmp_path):
     await runtime.run(session, "run")
 
     types = [e.type for e in session.events]
-    assert types.index("tool/call") < types.index("artifact/created") < types.index("tool/result"), types
+    assert types.index("tool/call") < types.index("artifact/externalized") < types.index("tool/result"), types

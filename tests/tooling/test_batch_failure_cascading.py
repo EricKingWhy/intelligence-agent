@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
+from agent_harness.session import Session
 from agent_harness.storage import (
     OperationContext,
     OperationState,
     SqliteOperationLedger,
 )
-from agent_harness.storage.artifact import FakeArtifactStore
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
@@ -23,7 +24,7 @@ from agent_harness.tooling import (
     ToolResult,
     ToolSideEffect,
 )
-from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.overflow import OverflowHandler
 from tests.conftest import make_session
 
 
@@ -288,34 +289,38 @@ async def test_parallel_batch_logs_secondary_exceptions_when_first_raises(
 
     一次基础设施故障常伴随多个连锁失败：raise 只能带走一个异常，若不补日志，
     call-3 的次要异常会随首个异常一起从诊断视野里消失。
+
+    用自定义 OverflowHandler 子类直接 raise（绕过 ArtifactOverflowHandler
+    的 T5 fail-open 机制）：基础设施异常从 overflow/store 路径冒出，到达
+    execute() → gather(return_exceptions=True)，正是并行批次里 gather 会
+    吞掉兄弟异常的场景。
     """
 
-    class _FlakyStore(FakeArtifactStore):
-        """按 tool_call_id 注入不同异常的 ArtifactStore。"""
+    class _RaisingOverflow(OverflowHandler):
+        """按 tool_call_id 注入不同异常的 OverflowHandler。"""
 
         def __init__(self) -> None:
-            super().__init__()
             self.failures: dict[str, Exception] = {}
 
-        async def save(self, session_id, content, *, mime_type, source_tool, tool_call_id):
+        async def maybe_overflow(
+            self, session: Session, tool_call_id: str, tool_name: str,
+            result: ToolResult,
+        ) -> tuple[ToolResult, list[tuple[str, dict[str, Any]]]]:
             failure = self.failures.get(tool_call_id)
             if failure is not None:
                 raise failure
-            return await super().save(
-                session_id, content,
-                mime_type=mime_type, source_tool=source_tool, tool_call_id=tool_call_id,
-            )
+            return result, []
 
     session = make_session(tmp_path)
     registry = ToolRegistry()
     for name in ("read-1", "read-2", "read-3"):
         registry.register(_BigReadTool(name))
-    store = _FlakyStore()
-    store.failures = {
+    overflow = _RaisingOverflow()
+    overflow.failures = {
         "call-2": ConnectionError("storage offline"),
         "call-3": RuntimeError("secondary boom"),
     }
-    executor = ToolExecutor(registry, overflow_handler=ArtifactOverflowHandler(store))
+    executor = ToolExecutor(registry, overflow_handler=overflow)
     calls = [
         {"id": "call-1", "name": "read-1", "args": {}},
         {"id": "call-2", "name": "read-2", "args": {}},

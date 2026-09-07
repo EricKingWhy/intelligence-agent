@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
     artifact_overflow_chars: int = 2000
+    # Phase Multiturn T5 (#135)：MinIO 作为大产物外置对象存储。
+    # 与 artifact_store_* 字段独立——MinIO 用于 tool result 外置，
+    # artifact_store_* 用于 inspect_artifact 的 S3 兼容存储。
+    # 空值 = MinIO 未配置，tool result 不外置（fail-open）。
+    minio_endpoint: str = ""
+    minio_access_key: SecretStr = SecretStr("")
+    minio_secret_key: SecretStr = SecretStr("")
+    minio_bucket: str = ""
     artifact_store_endpoint: str = ""
     artifact_store_bucket: str = ""
     # S3 密钥泄漏等于丢失整个 artifact bucket 的写权限，同一脱敏待遇。

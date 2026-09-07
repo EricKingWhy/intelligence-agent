@@ -56,6 +56,7 @@ class TestSessionEventDTO:
             "tool/output_delta",
             "operation/reconcile-required",
             "artifact/created",
+            "artifact/externalized",
             "context/compacted",
             "memory/degraded",
             "tool/failure-guard",
