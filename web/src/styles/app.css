@@ -2190,6 +2190,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .detail-val-muted {
   color: var(--text-tertiary);
 }
+/* Langfuse trace 跳转链接——继承 mono 字号，accent 色区分可点，hover 强化 */
+.detail-trace-link {
+  color: var(--color-accent, var(--info));
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in srgb, var(--color-accent, var(--info)) 50%, transparent);
+}
+.detail-trace-link:hover {
+  color: var(--color-accent-strong, var(--color-accent, var(--info)));
+  border-bottom-style: solid;
+}
 .detail-val-tag {
   font-size: var(--text-xs);
   padding: 1px 6px;

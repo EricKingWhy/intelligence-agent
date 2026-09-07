@@ -278,6 +278,15 @@ export default function App() {
         },
       },
       {
+        id: 'open-trace',
+        label: 'Open Trace',
+        hint: conversation?.trace_url ? 'Langfuse ↗' : undefined,
+        group: 'actions',
+        run: () => {
+          // 契约 2d7f87a：trace_url 缺则该命令不出现（splice 移除）。
+        },
+      },
+      {
         id: 'toggle-theme',
         label: 'Toggle Theme',
         hint: theme === 'dark' ? '→ Light' : '→ Dark',
@@ -292,11 +301,18 @@ export default function App() {
         run: () => document.getElementById('composer-input')?.focus(),
       },
     ];
-    // trace_id 恒 null（Langfuse Phase 15 前不接入）→ 不展示该命令
+    // trace_id 缺则 Copy Trace ID 不出现；trace_url 缺则 Open Trace 不出现
+    // （Langfuse 未启用时两者都 null，两个命令都移除；启用时 Copy 恒在、Open 看 trace_url）。
     if (conversation?.trace_id) {
       items[items.findIndex((c) => c.id === 'copy-trace-id')].run = () => copyText(conversation.trace_id!);
     } else {
       items.splice(items.findIndex((c) => c.id === 'copy-trace-id'), 1);
+    }
+    if (conversation?.trace_url) {
+      items[items.findIndex((c) => c.id === 'open-trace')].run = () =>
+        window.open(conversation.trace_url!, '_blank', 'noopener');
+    } else {
+      items.splice(items.findIndex((c) => c.id === 'open-trace'), 1);
     }
     for (const d of ['compact', 'balanced', 'detailed', 'raw'] as const) {
       items.push({
