@@ -1125,7 +1125,24 @@ async def test_eval_report_gate_metrics(tmp_path: Path):
     completions = [e for e in events if e.type == RUN_COMPLETED]
     assert len(completions) >= 1, "Gate: 至少一条 RUN_COMPLETED（run 正常终结）"
 
-    # ── 5. Full E2E reproducible=1.0（ScriptedModel deterministic）──
+    # ── 5. duplicate confirmed=0（无 tool_call_id 在 Ledger 中出现多条 SUCCEEDED）──
+    # 事件维度：每个 tool_call_id 恰好一条 TOOL_RESULT（即无重复确认）。
+    # 高风险重复路径由 test_duplicate_confirmed_side_effect_zero 分段覆盖（含
+    # _forbid_duplicate_side_effects 哨兵），这里补齐 6 指标字面齐全。
+    from collections import Counter
+
+    result_ids = [
+        e.data.get("tool_call_id")
+        for e in events
+        if e.type == TOOL_RESULT
+    ]
+    id_counts = Counter(result_ids)
+    duplicates = {tcid: n for tcid, n in id_counts.items() if n > 1}
+    assert not duplicates, (
+        f"Gate: duplicate confirmed=0，实际存在重复 TOOL_RESULT：{duplicates}"
+    )
+
+    # ── 6. Full E2E reproducible=1.0（ScriptedModel deterministic）──
     # 薄编排层用 ScriptedModel（固定回复序列），重跑必然产生相同事件序列。
     # 这里验证 deterministic 的可观测证据：MODEL_COMPLETED 数量 = 轮次数。
     model_completed = [e for e in events if e.type == MODEL_COMPLETED]

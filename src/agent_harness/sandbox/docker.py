@@ -163,7 +163,14 @@ class DockerSandbox(Sandbox):
     def read_text(self, path: str) -> str:
         target = self._resolve_within_workspace(path)
         self.ensure_started()
-        stream, _ = self._container.get_archive(str(target))
+        docker = importlib.import_module("docker")
+        try:
+            stream, _ = self._container.get_archive(str(target))
+        except docker.errors.NotFound as exc:
+            # Docker 的 get_archive 对不存在的文件抛 NotFound（OSError 子类，
+            # 不是 FileNotFoundError）。统一映射成 FileNotFoundError，
+            # 让调用方（如 WriteTool 读 before）能按预期捕获。
+            raise FileNotFoundError(path) from exc
         with tarfile.open(fileobj=io.BytesIO(b"".join(stream)), mode="r:") as archive:
             member = next((item for item in archive.getmembers() if item.isfile()), None)
             if member is None:
