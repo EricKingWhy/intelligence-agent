@@ -1792,13 +1792,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .run-badge-idle { color: var(--text-tertiary); }
 
 /* ── Inspector 五 tab（Phase 5，Brief "V1 Tabs"） ── */
+/* ── Inspector tab 条：分段控件（segmented control）──
+ *   参照 Linear issue panel / VS Code 侧栏 segmented：整个 tab 条嵌在
+ *   一条凹槽内（surface-elevated + radius），每个 tab 是 pill，选中态用
+ *   surface-workspace（比 chrome 亮一档）+ 轻微 inset。icon + label 并排，
+ *   窄面板降级为 icon-only。Impeccable operate.md："一致性 > 惊喜"。 */
 .detail-tabs {
   display: flex;
   gap: 2px;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 3px;
   margin-bottom: var(--space-md);
-  /* 窄面板安全网：实测 280px 面板下五 tab 需 ~278px，更窄时横向滚动兜底
-     （"Artifacts" 被硬截成 "Artifa" 是不可接受的细节）。 */
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  /* 窄面板安全网：5 个 icon+label tab 在 280px 面板里紧凑放得下；
+     更窄时横向滚动兜底，不被截断。 */
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -1806,33 +1814,83 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: none;
 }
 .detail-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   background: transparent;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm);
   color: var(--text-tertiary);
   font-size: var(--text-xs);
   font-weight: 500;
-  padding: var(--space-xs) var(--space-xs);
-  flex-shrink: 0;
+  padding: var(--space-xs) var(--space-sm);
+  flex: 1 1 0;
+  min-width: 0;
   white-space: nowrap;
   cursor: pointer;
-  transition: color var(--dur-out) var(--ease-apple), border-color var(--dur-out) var(--ease-apple);
+  transition: color var(--dur-out) var(--ease-apple),
+    background var(--dur-out) var(--ease-apple);
+}
+.detail-tab-icon {
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity var(--dur-out) var(--ease-apple);
+}
+.detail-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .detail-tab:hover {
-  color: var(--color-foreground);
+  color: var(--text-secondary);
+}
+.detail-tab:hover .detail-tab-icon {
+  opacity: 0.9;
 }
 .detail-tab.sel {
-  color: var(--color-foreground);
+  color: var(--text-primary);
   font-weight: 600;
-  border-bottom-color: var(--color-accent);
+  background: var(--surface-workspace);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.06),
+    inset 0 0 0 0.5px var(--border-subtle);
+}
+.detail-tab.sel .detail-tab-icon {
+  opacity: 1;
+  color: var(--accent);
 }
 .detail-tab:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: -2px;
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
+.detail-tab:active {
+  transform: scale(0.97);
+}
+/* 窄面板（<310px Inspector 宽度）：icon-only，label 隐藏。
+   数字来自：5 tab × (24px icon + gap + padding) ≈ 280px 容得下 icon+label，
+   更窄切 icon-only。 */
+@media (max-width: 360px) {
+  .detail-tab-label {
+    display: none;
+  }
+  .detail-tab {
+    flex: 0 0 auto;
+    padding: var(--space-xs);
+  }
+}
+
+/* ── Tab 空状态：icon + 一句话（Impeccable："teach the interface, not 'nothing here'"）── */
 .detail-tab-empty {
-  padding: var(--space-lg) 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding: var(--space-xl) var(--space-md);
   text-align: center;
+}
+.detail-empty-icon {
+  color: var(--text-tertiary);
+  opacity: 0.5;
 }
 
 /* 返回 Run 级按钮（事件级 Inspector 头部） */
@@ -2053,10 +2111,23 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   word-break: break-word;
 }
 
+/* ── Section 分组：轻量分隔（不用卡片阴影——SDD 禁止列上的大阴影）──
+ *   Impeccable craft-floor："more space above a heading than below it"。
+ *   section 间用 top-border 分隔（除第一个），标题行呼吸感更好。 */
 .detail-section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: 2px;
+  padding-top: var(--space-md);
+  margin-top: var(--space-md);
+  border-top: 1px solid var(--border-subtle);
+}
+/* 第一个 section 不需要顶部分隔（紧跟 tab 内容） */
+.detail-body > .detail-section:first-child,
+.detail-body > *:first-child .detail-section:first-child {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: none;
 }
 .detail-section-title {
   display: flex;
@@ -2065,24 +2136,28 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--color-subtle-foreground);
+  color: var(--text-secondary);
   font-weight: 600;
   margin-bottom: var(--space-xs);
 }
 .detail-section-title svg {
   color: var(--accent);
-  opacity: 0.8;
+  opacity: 0.7;
+  flex-shrink: 0;
 }
+/* ── Key-Value 行：VS Code Settings 式对齐（key 固定宽度，扫读快）── */
 .detail-row {
   display: flex;
-  justify-content: space-between;
+  align-items: baseline;
   gap: var(--space-md);
   font-size: var(--text-sm);
-  padding: 3px 0;
+  padding: 2px 0;
 }
 .detail-key {
-  color: var(--color-muted-foreground);
+  color: var(--text-tertiary);
   flex-shrink: 0;
+  min-width: 56px;
+  font-size: var(--text-xs);
 }
 .detail-val {
   color: var(--color-foreground);
