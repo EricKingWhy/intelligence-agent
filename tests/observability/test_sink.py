@@ -150,6 +150,113 @@ def test_flush_timeout_is_bounded():
     assert time.monotonic() - started < 1.5
 
 
+# ── get_trace_url（trace_url 契约：官方 SDK 薄封装，故障隔离同款） ──
+
+
+def test_get_trace_url_returns_official_url_when_enabled():
+    """启用时透传官方 client.get_trace_url(trace_id=…) 的结果（不手拼 URL）。"""
+
+    class _UrlClient:
+        def get_trace_url(self, *, trace_id):
+            return f"https://lf.example.invalid/project/proj/traces/{trace_id}"
+
+    sink = _sink(client_factory=lambda **kwargs: _UrlClient())
+
+    url = sink.get_trace_url(trace_id="tr-123")
+    assert url == "https://lf.example.invalid/project/proj/traces/tr-123"
+
+
+def test_get_trace_url_returns_none_when_disabled():
+    """未配置（key 空）= 完全缺席：恒 None（同 trace_id 降级模式）。"""
+    sink = _sink(client_factory=_NeverFactory(), public_key="", secret_key="")
+    assert sink.get_trace_url(trace_id="tr-x") is None
+
+
+def test_get_trace_url_returns_none_when_breaker_open():
+    """熔断开启时 trace_url 也被丢弃（与 start_observation 同款）；不触达 SDK。"""
+
+    class _CountingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def start_as_current_observation(self, **kwargs):
+            self.calls += 1
+            raise RuntimeError("down")
+
+        def get_trace_url(self, *, trace_id):
+            raise AssertionError("熔断期不得触达 SDK")
+
+    client = _CountingClient()
+    sink = _sink(client_factory=lambda **kwargs: client)
+    for _ in range(5):
+        with sink.start_as_current_observation(name="x"):
+            pass
+    assert client.calls == 5
+    # 熔断已开
+    assert sink.get_trace_url(trace_id="tr-y") is None
+
+
+def test_get_trace_url_swallows_sdk_exception_and_returns_none():
+    """SDK 抛异常 → 单一异常边界吞掉并计数，调用方拿到 None（D3 不变）。"""
+
+    class _ExplodingUrlClient:
+        def get_trace_url(self, *, trace_id):
+            raise RuntimeError("sdk blew up building url")
+
+    sink = _sink(client_factory=lambda **kwargs: _ExplodingUrlClient())
+    assert sink.get_trace_url(trace_id="tr-z") is None
+
+
+def test_get_trace_url_accepts_none_trace_id_returns_none():
+    """trace_id=None 是合法入参（SDK 也接受），结果视 SDK 而定；
+    我们不假设——直接透传 SDK 返回值。这里的 FakeClient 返回 None。"""
+
+    class _NullUrlClient:
+        def get_trace_url(self, *, trace_id):
+            return None if trace_id is None else f"https://x/{trace_id}"
+
+    sink = _sink(client_factory=lambda **kwargs: _NullUrlClient())
+    assert sink.get_trace_url(trace_id=None) is None
+    assert sink.get_trace_url(trace_id="abc") == "https://x/abc"
+
+
+def test_init_passes_environment_and_release_to_factory():
+    """Gap 1+2（D7 DEFER 批）：environment/release 是 Langfuse 一等字段，
+    必须透传到 SDK init——否则 trace 落入 default 环境、release 永远 null。"""
+
+    captured: dict = {}
+
+    def _capturing_factory(**kwargs):
+        captured.update(kwargs)
+
+        class _Client: ...
+        return _Client()
+
+    _sink(
+        client_factory=_capturing_factory,
+        tracing_environment="development",
+        release="v1.2.3",
+    )
+    assert captured.get("environment") == "development"
+    assert captured.get("release") == "v1.2.3"
+
+
+def test_init_defaults_environment_development_empty_release_omitted():
+    """environment 缺省 development（避免落入 default）；release 空串不塞给 SDK。"""
+
+    captured: dict = {}
+
+    def _capturing_factory(**kwargs):
+        captured.update(kwargs)
+
+        class _Client: ...
+        return _Client()
+
+    _sink(client_factory=_capturing_factory)  # 不传新参数
+    assert captured.get("environment") == "development"
+    assert not captured.get("release")  # 空=不塞（SDK 自决）
+
+
 def _null_span_cm():
     import contextlib
 

@@ -28,6 +28,8 @@ def get_observability_sink(settings: Any) -> LangfuseSink:
             secret_key=settings.langfuse_secret_key.get_secret_value(),
             base_url=settings.langfuse_base_url,
             trace_content=settings.langfuse_trace_content,
+            tracing_environment=settings.langfuse_tracing_environment,
+            release=settings.langfuse_release,
         )
     return _process_sink
 

@@ -31,16 +31,30 @@ from agent_harness.logging import log_event
 _LOGGER = logging.getLogger("agent_harness.observability")
 
 
-def _default_client_factory(*, public_key: str, secret_key: str, base_url: str) -> Any:
+def _default_client_factory(
+    *,
+    public_key: str,
+    secret_key: str,
+    base_url: str,
+    environment: str = "",
+    release: str = "",
+) -> Any:
     # 懒加载：只有配置了 key 才会执行到这里（D2）。必须在 load_dotenv 之后
     # 调用（assembly/CLI 入口保证），否则 SDK 读不到环境变量。
     from langfuse import Langfuse
 
-    return Langfuse(
-        public_key=public_key or None,
-        secret_key=secret_key or None,
-        base_url=base_url or None,
-    )
+    kwargs: dict[str, Any] = {
+        "public_key": public_key or None,
+        "secret_key": secret_key or None,
+        "base_url": base_url or None,
+    }
+    # D7 DEFER 批：environment/release 是 Langfuse 一等字段；空值不塞（SDK 自决），
+    # 非空才透传——避免把空串当显式设置覆盖云端项目配置。
+    if environment:
+        kwargs["environment"] = environment
+    if release:
+        kwargs["release"] = release
+    return Langfuse(**kwargs)
 
 
 class LangfuseSink:
@@ -53,6 +67,8 @@ class LangfuseSink:
         secret_key: str,
         base_url: str = "",
         trace_content: str = "full",
+        tracing_environment: str = "development",
+        release: str = "",
         client_factory: Callable[..., Any] | None = None,
         breaker_threshold: int = 5,
         breaker_cooldown_seconds: float = 60.0,
@@ -76,7 +92,8 @@ class LangfuseSink:
         factory = client_factory or _default_client_factory
         try:
             self._client = factory(
-                public_key=public_key, secret_key=secret_key, base_url=base_url
+                public_key=public_key, secret_key=secret_key, base_url=base_url,
+                environment=tracing_environment, release=release,
             )
         except Exception as exc:  # noqa: BLE001 - D3 异常边界：初始化失败必须隔离
             self._client = None  # 永久禁用：本进程不再尝试
@@ -146,6 +163,27 @@ class LangfuseSink:
             return propagate_attributes(**kwargs)
         except Exception:  # noqa: BLE001 - D3 异常边界
             return nullcontext(None)
+
+    def get_trace_url(self, *, trace_id: str | None) -> str | None:
+        """官方 SDK 的 trace 可点击 URL 薄封装（trace_url 契约；ADR-0018 D7 延伸）。
+
+        - 不手拼 URL——host / project_id 由 SDK 解析（§6 Reuse First）；
+        - 未配置 / 熔断开启 / SDK 异常 → None（与 trace_id 同一降级模式）；
+        - 仅内存合成（host+project 来自配置），不走外部网络，热路径安全。
+        """
+        client = self._client
+        if client is None:
+            return None
+        if self._breaker_open():
+            self._register_drop("get_trace_url")
+            return None
+        try:
+            url = client.get_trace_url(trace_id=trace_id)
+            self._consecutive_failures = 0
+            return url if isinstance(url, str) else None
+        except Exception as exc:  # noqa: BLE001 - D3 异常边界
+            self._register_failure("get_trace_url", exc)
+            return None
 
     def report_failure(self, operation: str, exc: Exception) -> None:
         """观测句柄上的后续操作（update/end/子观测）失败时由 tracer 回注——

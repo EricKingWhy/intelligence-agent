@@ -285,14 +285,20 @@ class Session:
         usage_total: dict | None = None,
         cost_usd: float | None = None,
         trace_id: str | None = None,
+        trace_url: str | None = None,
         reason: str | None = None,
     ) -> SessionEvent:
         """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
 
-        usage_total / cost_usd / trace_id 是前端 Gap 1/2 契约（BACKEND_GAP_PROMPT.md）：
-        只扩展 data，不改既有语义；None 表示"未计算"，绝不伪造 0。
-        reason 仅 failed 语义使用（如 identical_tool_failure_loop），落事件
-        data——消费者可区分失败原因（取消路径的 reason=cancelled 同款先例）。
+        usage_total / cost_usd / trace_id / trace_url 是前端 Gap 1/2 契约 +
+        trace_url 契约（BACKEND_GAP_PROMPT.md / BACKEND_PROMPT_TRACE_URL.md）：
+        只扩展 data，不改既有语义；None 表示"未追踪"，前端据此降级显示
+        （trace_url=null → 渲染纯 mono code 的 trace_id），不伪造占位字符串。
+        trace_id 与 trace_url 并列保留（前者机器可读，后者人类可点击，不互替）。
+        对称终态：completed 与 failed 都下发 trace_id / trace_url——失败 run 在
+        Langfuse 也有可见 trace，跳转有排查价值。reason 仅 failed 语义使用
+        （如 identical_tool_failure_loop），落事件 data——消费者可区分失败原因
+        （取消路径的 reason=cancelled 同款先例）。
         """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}
@@ -300,8 +306,9 @@ class Session:
             data["usage_total"] = usage_total
         if status == "completed":
             data["cost_usd"] = cost_usd
-            data["trace_id"] = trace_id
-        elif reason:
+        data["trace_id"] = trace_id
+        data["trace_url"] = trace_url
+        if status != "completed" and reason:
             data["reason"] = reason
         return self.append(
             event_type,

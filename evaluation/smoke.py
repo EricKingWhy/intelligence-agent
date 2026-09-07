@@ -112,35 +112,24 @@ def run_real_model_smoke(
     if runtime_factory is not None:
         runtime = runtime_factory(task)
     else:
+        # from_settings 已解析两级链（primary + config.fallback），
+        # 手动重建 fallback 会重复劳动且曾因字段名错配（name vs model_name）崩——
+        # 直接消费 config.fallback 即可（ADR-0014 fallback 链语义不动）。
         model_config = ModelConfig.from_settings(settings)
-        fallback = None
-        if settings.fallback_model_provider:
-            from agent_harness.model.config import ModelConfig as _MC
-
-            fallback = create_chat_model(_MC(
-                provider=settings.fallback_model_provider,
-                name=settings.fallback_model_name,
-                api_key=settings.fallback_model_api_key.get_secret_value(),
-                base_url=settings.fallback_model_base_url,
-            ))
         model = create_chat_model(model_config)
-        if fallback is not None:
-            registry = ToolRegistry()
-            registry.register(AddTool())
-            runtime = AgentRuntime(
-                model, registry, ToolExecutor(registry),
-                fallback_model=fallback,
-                primary_model_name=settings.model_name,
-                fallback_model_name=settings.fallback_model_name,
-                observability_sink=_maybe_sink(settings),
-            )
-        else:
-            registry = ToolRegistry()
-            registry.register(AddTool())
-            runtime = AgentRuntime(
-                model, registry, ToolExecutor(registry),
-                observability_sink=_maybe_sink(settings),
-            )
+        fallback_model = (
+            create_chat_model(model_config.fallback)
+            if model_config.fallback is not None else None
+        )
+        registry = ToolRegistry()
+        registry.register(AddTool())
+        runtime = AgentRuntime(
+            model, registry, ToolExecutor(registry),
+            fallback_model=fallback_model,
+            primary_model_name=settings.model_name,
+            fallback_model_name=settings.fallback_model_name,
+            observability_sink=_maybe_sink(settings),
+        )
 
     from agent_harness.session import JsonlSessionStore, Session
 

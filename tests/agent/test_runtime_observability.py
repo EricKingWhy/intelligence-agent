@@ -49,6 +49,9 @@ class _FakeRecorder:
     def __init__(self):
         self.spans: list = []
         self.next_trace_id = "tr-fake-001"
+        self.trace_url_template = (
+            "https://cloud.langfuse.com/project/proj-{trace_id}/traces/{trace_id}"
+        )
 
     def client(self):
         recorder = self
@@ -56,6 +59,11 @@ class _FakeRecorder:
         class _Client:
             def start_observation(self, *, name: str, as_type: str = "span", **kwargs):
                 return _FakeSpan(recorder, name=name, kind=as_type, kwargs=kwargs)
+
+            def get_trace_url(self, *, trace_id):
+                if trace_id is None:
+                    return None
+                return recorder.trace_url_template.format(trace_id=trace_id)
 
         return _Client()
 
@@ -155,3 +163,90 @@ async def test_no_sink_construction_keeps_trace_id_null(tmp_path):
 
     completed = next(e for e in session.events if e.type == RUN_COMPLETED)
     assert completed.data["trace_id"] is None
+
+
+# ── trace_url 契约（trace_id 的可点击 URL 并列字段，run/completed + run/failed 对称下发） ──
+
+
+@pytest.mark.asyncio
+async def test_completed_run_backfills_trace_url(tmp_path):
+    """run/completed.data 同时含 trace_id（机器可读）与 trace_url（可点击 URL）。
+
+    两者并列不互替；URL 由官方 SDK 合成（不手拼）；sink 缺席时都 null。
+    """
+    from agent_harness.session import RUN_COMPLETED
+
+    recorder = _FakeRecorder()
+    scripted = ScriptedModel([AIMessage(
+        content="你好",
+        usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    )])
+    session = make_session(tmp_path)
+    await _runtime(scripted, _sink(recorder)).run(session, "打个招呼")
+
+    completed = next(e for e in session.events if e.type == RUN_COMPLETED)
+    assert completed.data["trace_id"] == "tr-fake-001"
+    expected_url = recorder.trace_url_template.format(trace_id="tr-fake-001")
+    assert completed.data["trace_url"] == expected_url
+
+
+@pytest.mark.asyncio
+async def test_failed_run_backfills_trace_id_and_trace_url_symmetrically(tmp_path):
+    """run/failed 对称下发 trace_id + trace_url（失败 run 在 Langfuse 也有可见 trace）。
+
+    同时回归：end_run 失败路径此前丢失 trace_id（只 completed 写）——本测固化修复。
+    触发方式：模型每轮都请求工具不收敛 → max_steps_exceeded → run/failed。
+    """
+    from agent_harness.session import RUN_FAILED
+
+    recorder = _FakeRecorder()
+    # 模型每轮都请求 add 工具——永不收敛，撞 max_steps 兜底 → run/failed。
+    rounds = [
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "add",
+                "args": {"first_number": i, "second_number": i},
+                "id": f"call_loop_{i}",
+                "type": "tool_call",
+            }],
+        )
+        for i in range(2)
+    ]
+    scripted = ScriptedModel(rounds)
+    session = make_session(tmp_path)
+    runtime = AgentRuntime(
+        scripted,
+        _registry_with_add(),
+        ToolExecutor(_registry_with_add()),
+        observability_sink=_sink(recorder),
+        max_steps=2,
+    )
+    await runtime.run(session, "force fail")
+
+    failed = next(e for e in session.events if e.type == RUN_FAILED)
+    # 失败路径此前丢失 trace_id——现在对称下发
+    assert failed.data.get("trace_id") == "tr-fake-001"
+    expected_url = recorder.trace_url_template.format(trace_id="tr-fake-001")
+    assert failed.data.get("trace_url") == expected_url
+
+
+def _registry_with_add() -> ToolRegistry:
+    """复用模块级 _AddTool 的注册表（失败测试需要真实工具循环到 max_steps）。"""
+    registry = ToolRegistry()
+    registry.register(_AddTool())
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_disabled_sink_keeps_trace_url_null(tmp_path):
+    """sink 缺席时 trace_url 恒 null（同 trace_id 降级模式）。"""
+    from agent_harness.session import RUN_COMPLETED
+
+    scripted = ScriptedModel([AIMessage(content="你好")])
+    session = make_session(tmp_path)
+    await _runtime(scripted, LangfuseSink(public_key="", secret_key="")).run(session, "hi")
+
+    completed = next(e for e in session.events if e.type == RUN_COMPLETED)
+    assert completed.data["trace_id"] is None
+    assert completed.data.get("trace_url") is None
