@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, RecoverError, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, RecoverError, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
@@ -243,6 +243,11 @@ export function useSession() {
   // 之后才到达的迟到帧。
   const modeRef = useRef<SessionMode>(mode);
   modeRef.current = mode;
+  // conversation 的实时镜像——sendFollowUp 需要当前 conversation 作为
+  // attachLiveStream 的 initialConv，但不能把 conversation 放进 deps
+  //（每帧变化会导致回调重建）。用 ref 读最新值即可。
+  const conversationRef = useRef<ConversationState | null>(conversation);
+  conversationRef.current = conversation;
 
   // T4（#97）重连状态机 refs：lastAppliedSeq = 已应用最大持久 seq（续传游标，
   // 重放与续传由 seenSeqs 去重吸收重复）；streamGen = 流代际（切走/取消/卸载
@@ -366,31 +371,17 @@ export function useSession() {
    *  T4（#97）：流消费升级为重连状态机——异常关闭 / seq gap / 停摆（含后台
    *  杀流）触发 GET stream?after_seq=lastApplied 续传；stream/truncated 控制
    *  帧走 GET /events 全量重建后续传；终态帧已达 → 正常收尾迁移。 */
-  const submitTask = useCallback(
-    async (payload: StartSessionPayload) => {
-      setError(null);
-      setConversation(null);
-      liveSidRef.current = null;
-      setReconnecting(false);
-      lastAppliedSeqRef.current = null;
-      terminalSeenRef.current = false;
-      reconnectAttemptRef.current = 0;
-      streamGenRef.current += 1; // 上一条流的回调/重连/停摆检查全部失效
-      const gen = streamGenRef.current;
-      setMode({ kind: 'live', sessionId: null });
-      try {
-        const res = await startSession(payload);
-        // 422 = 未知模型（契约 C6）——专项消息供 App 识别后刷新目录
-        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
-        if (!res.ok || !res.body) {
-          throw new Error(`Start failed: ${res.status}`);
-        }
-
+  /** SSE 流消费机器——submitTask 和 sendMessage 共用。
+   *  P1-3 合帧 + T7 后台降渲染 + T4 重连状态机全部内联于此。
+   *  initialConv：新会话传 null（首帧惰性初始化）；续聊传当前 conversation（追加）。
+   *  gen：流代际（submit/sendMessage 入口已自增并捕获），旧流全部回调凭此失效。 */
+  const attachLiveStream = useCallback(
+    (res: Response, gen: number, initialConv: ConversationState | null) => {
         // P1-3 合帧 + T7 后台降渲染：窗口内多 delta 一次提交；隐藏期挂起、
         // 回前台 flush 对账。折叠逐帧即时（真相不延迟），延迟的只是通知。
         // T4：conv 由重连路径与 live 帧共享——同一折叠累积器，重放帧经
         // seenSeqs 去重吸收（无缝无重复的关键在 T1 去重门 + seq 游标本地记账）。
-        let conv: ConversationState | null = null;
+        let conv: ConversationState | null = initialConv;
         const coalescer = createCommitCoalescer(
           () => {
             if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
@@ -614,14 +605,79 @@ export function useSession() {
         };
         stallCheckRef.current = stallCheck;
 
-        attach(res);
+        sseRef.current = consumeSSE(res, onEvent, onStreamEnd, onStreamError);
+    },
+    [refreshSessions],
+  );
+
+  /** Submit a new task. Creates a fresh session and streams the response.
+   *  The conversation is reset first — a live stream never folds into the
+   *  previously viewed session's turns. */
+  const submitTask = useCallback(
+    async (payload: StartSessionPayload) => {
+      setError(null);
+      setConversation(null);
+      liveSidRef.current = null;
+      setReconnecting(false);
+      lastAppliedSeqRef.current = null;
+      terminalSeenRef.current = false;
+      reconnectAttemptRef.current = 0;
+      streamGenRef.current += 1;
+      const gen = streamGenRef.current;
+      setMode({ kind: 'live', sessionId: null });
+      try {
+        const res = await startSession(payload);
+        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
+        if (!res.ok || !res.body) throw new Error(`Start failed: ${res.status}`);
+        attachLiveStream(res, gen, null);
       } catch (e) {
         streamGenRef.current += 1;
         setMode({ kind: 'idle' });
         setError(`提交失败：${(e as Error).message}`);
       }
     },
-    [refreshSessions],
+    [refreshSessions, attachLiveStream],
+  );
+
+  /** 续聊：向已有会话发消息（PRD §5.3）。
+   *  空闲会话 → 后端 launched 直驱新 run（同形 SSE）→ attachLiveStream 续接。
+   *  在途 run → 后端 queued 入队（JSON 确认）→ 当前流继续，下个 run 消费消息。 */
+  const sendFollowUp = useCallback(
+    async (sessionId: string, content: string, opts?: { maxSteps?: number }) => {
+      setError(null);
+      // 续聊不重置 conversation——在现有对话上追加新 run 的事件。
+      liveSidRef.current = sessionId;
+      setReconnecting(false);
+      terminalSeenRef.current = false;
+      reconnectAttemptRef.current = 0;
+      streamGenRef.current += 1;
+      const gen = streamGenRef.current;
+      setMode({ kind: 'live', sessionId });
+      try {
+        const res = await apiSendMessage(sessionId, {
+          content,
+          mode: 'queue',
+          max_steps: opts?.maxSteps ?? 10,
+        });
+        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
+        if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
+        // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
+        // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。
+        // 后者不 attach 新流；回到 viewing 让用户看到当前 run 继续推进。
+        const ct = res.headers.get('content-type') ?? '';
+        if (ct.includes('text/event-stream')) {
+          attachLiveStream(res, gen, conversationRef.current);
+        } else {
+          // queued/steered JSON：当前流仍在跑，回 viewing 等终态帧迁移。
+          setMode({ kind: 'viewing', sessionId });
+        }
+      } catch (e) {
+        streamGenRef.current += 1;
+        setMode({ kind: 'viewing', sessionId });
+        setError(`续聊失败：${(e as Error).message}`);
+      }
+    },
+    [attachLiveStream],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
@@ -712,6 +768,7 @@ export function useSession() {
     recoverState,
     selectSession,
     submitTask,
+    sendMessage: sendFollowUp,
     cancelStream,
     recover,
     refreshSessions,

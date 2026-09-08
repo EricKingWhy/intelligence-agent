@@ -153,6 +153,31 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
   });
 }
 
+/** POST /api/sessions/{id}/messages（PRD §5.3 续聊入口）。
+ *  后端两种响应：
+ *    - launched → SSE 流（与 POST /api/sessions 同形），返回原始 Response 供 consumeSSE 消费；
+ *    - queued / steered → JSON 确认（Content-Type: application/json），调用方需检查
+ *      res.headers.get('content-type') 区分。
+ *  空闲会话（无在途 run）→ launched 直驱新 run，返回 SSE。
+ *  在途会话 → queued 入队（JSON），消息在下个 run 自然消费。 */
+export interface SendMessagePayload {
+  content: string;
+  mode?: 'queue' | 'steer';
+  max_steps?: number;
+}
+
+export async function sendMessage(sessionId: string, payload: SendMessagePayload): Promise<Response> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      content: payload.content,
+      mode: payload.mode ?? 'queue',
+      max_steps: payload.max_steps ?? 10,
+    }),
+  });
+}
+
 /** GET /api/sessions/{id}/stream?after_seq=N（T4 #97，契约回执 §3）：重放 durable
  *  事件（after_seq < seq ≤ 游标，按 seq 序）后接续在途流——后端先订阅后取游标，
  *  无缝无重复；重放帧与 live 帧同形状（不含 event_id），前端一套 reducer 两条
