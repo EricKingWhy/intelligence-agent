@@ -45,21 +45,8 @@ class ReasoningChatOpenAI(ChatOpenAI):
         return generation_chunk
 
 
-#: reasoning_effort 域值 → OpenAI API 值映射（单一事实源）。
-# Phase 5 接收三档 staged 契约；RUNTIME 子批次 1 把它消费到模型构造 seam。
-# langchain_openai.ChatOpenAI 原生支持 reasoning_effort 字段（v1.5.0+），
-# 设置后出现在发给 provider 的 request payload 中。
-REASONING_EFFORT_TO_API: dict[str, str] = {
-    "minimal": "low",
-    "standard": "medium",
-    "deep": "high",
-}
-
-
 def create_chat_model(
-    config: ModelConfig,
-    *,
-    reasoning_effort: str | None = None,
+    config: ModelConfig, *, reasoning_effort: str | None = None,
 ) -> ReasoningChatOpenAI:
     """根据配置创建 OpenAI 兼容的 ChatModel（DeepSeek/Qwen/OpenAI 通吃）。
 
@@ -70,10 +57,10 @@ def create_chat_model(
     - request_timeout=300：chat 生成 legitimately 比 embedding 慢（长输出可到
       分钟级），300s 覆盖正常长生成、又把挂死调用的最坏代价从 30min 压到 5min。
 
-    reasoning_effort（RUNTIME 子批次 1）：域值 minimal/standard/deep 经
-    REASONING_EFFORT_TO_API 映射为 low/medium/high，传入 ChatOpenAI 构造器。
-    None = 不设 reasoning_effort（payload 不含此键）。逐家 provider 支持差异
-    由 provider 自身处理——未知参数可能被忽略或报错，这是 provider 契约边界。
+    reasoning_effort（RUNTIME 子批次）：会话级思考深度控制。非 None 时直接
+    作为构造器参数传入——ChatOpenAI 原生支持该字段，会把它放进 API 请求的
+    extra_body。不支持的 Provider 静默忽略（OpenAI SDK 语义）。不在每次
+    astream/ainvoke 调用时传递——构造期注入即可。
     """
     kwargs: dict[str, Any] = {
         "model": config.model_name,
@@ -84,11 +71,5 @@ def create_chat_model(
         "max_retries": 0,
     }
     if reasoning_effort is not None:
-        api_effort = REASONING_EFFORT_TO_API.get(reasoning_effort)
-        if api_effort is None:
-            raise ValueError(
-                f"reasoning_effort {reasoning_effort!r} 不在 "
-                f"REASONING_EFFORT_TO_API 映射中"
-            )
-        kwargs["reasoning_effort"] = api_effort
+        kwargs["reasoning_effort"] = reasoning_effort
     return ReasoningChatOpenAI(**kwargs)

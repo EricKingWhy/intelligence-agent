@@ -28,7 +28,15 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
-import { getModels, type ModelCatalogEntry } from './lib/api';
+import {
+  getAgentProfiles,
+  getContextProviders,
+  getModels,
+  getPermissionModes,
+  getReasoningEfforts,
+  type CatalogEntry,
+  type ModelCatalogEntry,
+} from './lib/api';
 import { summarizeEvent } from './lib/projection';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
@@ -80,6 +88,38 @@ export default function App() {
       setModels([]); // 降级隐藏入口——错误不打扰（非关键能力）
     }
   }, []);
+
+  // ── Phase 2b Composer control row（Ticket F1）──
+  // 四个 staged 契约清单：permission-modes / agent-profiles /
+  // reasoning-efforts / context-providers。空 → 隐藏控件。
+  const [permissionModes, setPermissionModes] = useState<CatalogEntry[]>([]);
+  const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null);
+  const [agentProfiles, setAgentProfiles] = useState<CatalogEntry[]>([]);
+  const [selectedAgentProfile, setSelectedAgentProfile] = useState<string | null>(null);
+  const [reasoningEfforts, setReasoningEfforts] = useState<CatalogEntry[]>([]);
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
+  const [contextProviders, setContextProviders] = useState<CatalogEntry[]>([]);
+  const [selectedContextProviders, setSelectedContextProviders] = useState<string[]>([]);
+  const fetchControlCatalogs = useCallback(async () => {
+    try {
+      const [modes, profiles, efforts, providers] = await Promise.all([
+        getPermissionModes(),
+        getAgentProfiles(),
+        getReasoningEfforts(),
+        getContextProviders(),
+      ]);
+      setPermissionModes(modes);
+      setAgentProfiles(profiles);
+      setReasoningEfforts(efforts);
+      setContextProviders(providers);
+    } catch {
+      // 降级隐藏——非关键能力
+      setPermissionModes([]);
+      setAgentProfiles([]);
+      setReasoningEfforts([]);
+      setContextProviders([]);
+    }
+  }, []);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -88,8 +128,9 @@ export default function App() {
         setAuthRequired(false);
         void refreshSessions();
         void fetchModels(); // T10：模型目录同样吃鉴权缝——配置 token 后补拉
+        void fetchControlCatalogs(); // 控制目录也走 apiFetch 认证缝——补拉
       }),
-    [refreshSessions, fetchModels],
+    [refreshSessions, fetchModels, fetchControlCatalogs],
   );
 
   // 密度四档（冻结决策）：状态在 App（TopBar 切换、Conversation 消费），persist 由 lib/density 负责。
@@ -194,31 +235,65 @@ export default function App() {
 
   useEffect(() => {
     void fetchModels();
-  }, [fetchModels]);
+    void fetchControlCatalogs();
+  }, [fetchModels, fetchControlCatalogs]);
 
   const handleModelChange = useCallback((name: string | null) => {
     setSelectedModel(name);
   }, []);
 
-  const handleSubmit = useCallback((task: string) => {
-    focusRun();
-    void submitTask({
-      task,
-      max_steps: 10,
-      auto_approve: true,
-      ...(selectedModel ? { model: selectedModel } : {}),
-    });
-  }, [submitTask, focusRun, selectedModel]);
+  const handleSubmit = useCallback(
+    (task: string) => {
+      focusRun();
+      void submitTask({
+        task,
+        max_steps: 10,
+        auto_approve: true,
+        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedPermissionMode ? { permission_mode: selectedPermissionMode } : {}),
+        ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
+        ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
+        ...(selectedContextProviders.length > 0
+          ? { context_providers: selectedContextProviders }
+          : {}),
+      });
+    },
+    [
+      submitTask,
+      focusRun,
+      selectedModel,
+      selectedPermissionMode,
+      selectedAgentProfile,
+      selectedReasoningEffort,
+      selectedContextProviders,
+    ],
+  );
 
   // 422 = 未知模型（契约 C6）：目录可能已变——自动刷新一次；刷新后若目录
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
+  // 同步刷新控制目录并清除死选中值（permission_mode / agent_profile /
+  // reasoning_effort 的 staged 契约同样可能因目录变更而 422）。
   useEffect(() => {
     if (!error || !isUnknownModelError(error)) return;
     void (async () => {
-      const list = await getModels().catch(() => [] as ModelCatalogEntry[]);
-      setModels(list);
-      setSelectedModel((prev) => (prev && list.some((m) => m.name === prev) ? prev : null));
+      const [modelList, modes, profiles, efforts, providers] = await Promise.all([
+        getModels().catch(() => [] as ModelCatalogEntry[]),
+        getPermissionModes().catch(() => [] as CatalogEntry[]),
+        getAgentProfiles().catch(() => [] as CatalogEntry[]),
+        getReasoningEfforts().catch(() => [] as CatalogEntry[]),
+        getContextProviders().catch(() => [] as CatalogEntry[]),
+      ]);
+      setModels(modelList);
+      setSelectedModel((prev) => (prev && modelList.some((m) => m.name === prev) ? prev : null));
+      setPermissionModes(modes);
+      setSelectedPermissionMode((prev) => (prev && modes.some((m) => m.id === prev) ? prev : null));
+      setAgentProfiles(profiles);
+      setSelectedAgentProfile((prev) => (prev && profiles.some((m) => m.id === prev) ? prev : null));
+      setReasoningEfforts(efforts);
+      setSelectedReasoningEffort((prev) => (prev && efforts.some((m) => m.id === prev) ? prev : null));
+      setContextProviders(providers);
+      setSelectedContextProviders((prev: string[]) => prev.filter((id) => providers.some((p) => p.id === id)));
     })();
   }, [error]);
 
@@ -438,15 +513,15 @@ export default function App() {
           {/* Workspace 模式条（Phase 1d 方案 B）：Chat 永远是主阅读面，
               Split/Preview 为后续 Phase 预留的空架子。条本身克制——
               只在选中非 chat 时渲染下方占位行；Chat 模式下完全不占垂直空间。 */}
-          <div className="workspace-mode-bar" role="tablist" aria-label="Workspace 模式">
+          <div className="workspace-mode-bar" role="toolbar" aria-label="Workspace 模式">
             {WORKSPACE_MODES.map((m) => {
               const Icon = m.icon;
               const sel = workspaceMode === m.id;
               return (
                 <button
                   key={m.id}
-                  role="tab"
-                  aria-selected={sel}
+                  type="button"
+                  aria-pressed={sel}
                   className={`workspace-mode ${sel ? 'sel' : ''}`}
                   onClick={() => setWorkspaceMode(m.id)}
                   title={m.label}
@@ -487,6 +562,18 @@ export default function App() {
             models={models}
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
+            permissionModes={permissionModes}
+            selectedPermissionMode={selectedPermissionMode}
+            onPermissionModeChange={setSelectedPermissionMode}
+            agentProfiles={agentProfiles}
+            selectedAgentProfile={selectedAgentProfile}
+            onAgentProfileChange={setSelectedAgentProfile}
+            reasoningEfforts={reasoningEfforts}
+            selectedReasoningEffort={selectedReasoningEffort}
+            onReasoningEffortChange={setSelectedReasoningEffort}
+            contextProviders={contextProviders}
+            selectedContextProviders={selectedContextProviders}
+            onContextProvidersChange={setSelectedContextProviders}
           />
         </section>
 

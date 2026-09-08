@@ -29,7 +29,6 @@ from agent_harness.session.derive import derive_messages
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
-
 # ── 六段式摘要 fixture ──────────────────────────────────────────────
 
 SIX_SECTION_SUMMARY = """## 目标

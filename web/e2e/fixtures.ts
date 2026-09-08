@@ -42,6 +42,15 @@ export interface ApiMock {
   onSessionPost?: (route: Route) => Promise<void> | void;
   /** GET /api/sessions/{id}/stream?after_seq=N（重连续传） */
   onStreamGet?: (route: Route) => Promise<void> | void;
+  // ── Phase 2b Composer control row（Ticket F1/B1）──
+  /** GET /api/permission-modes（权限模式清单） */
+  permissionModes?: unknown[];
+  /** GET /api/agent-profiles（Agent Profile 清单） */
+  agentProfiles?: unknown[];
+  /** GET /api/reasoning-efforts（Reasoning Effort 档位清单） */
+  reasoningEfforts?: unknown[];
+  /** GET /api/context-providers（Context Provider 清单；当前诚实返空） */
+  contextProviders?: unknown[];
 }
 
 export function routeApi(page: Page, mock: ApiMock): void {
@@ -67,6 +76,19 @@ export function routeApi(page: Page, mock: ApiMock): void {
     }
     if (path === '/api/models') {
       return route.fulfill({ status: 200, body: JSON.stringify({ models: mock.models ?? [] }), contentType: 'application/json' });
+    }
+    // ── Phase 2b Composer control row（Ticket F1/B1）──
+    if (path === '/api/permission-modes') {
+      return route.fulfill({ status: 200, body: JSON.stringify({ modes: mock.permissionModes ?? [] }), contentType: 'application/json' });
+    }
+    if (path === '/api/agent-profiles') {
+      return route.fulfill({ status: 200, body: JSON.stringify({ profiles: mock.agentProfiles ?? [] }), contentType: 'application/json' });
+    }
+    if (path === '/api/reasoning-efforts') {
+      return route.fulfill({ status: 200, body: JSON.stringify({ efforts: mock.reasoningEfforts ?? [] }), contentType: 'application/json' });
+    }
+    if (path === '/api/context-providers') {
+      return route.fulfill({ status: 200, body: JSON.stringify({ providers: mock.contextProviders ?? [] }), contentType: 'application/json' });
     }
     return route.fulfill({ status: 404, body: '{"detail":"not mocked in e2e"}', contentType: 'application/json' });
   });

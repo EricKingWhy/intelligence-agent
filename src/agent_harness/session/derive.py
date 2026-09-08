@@ -15,7 +15,13 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from agent_harness.session.event import (
     COMPACTION_END,
@@ -114,7 +120,6 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
     # CONTEXT_COMPACTED 的位置投影 summary，summary 会落到当前用户消息
     # 之后，破坏"摘要在前、当前请求在后"的语义。
     messages: list[AnyMessage] = []
-    summary_idx = 0
     summary_emitted = [False] * len(bracket_summaries)
 
     for event in events:

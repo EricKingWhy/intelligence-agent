@@ -5,10 +5,12 @@
  */
 
 import { memo, useEffect, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Square } from 'lucide-react';
+import { ArrowUp, Brain, Layers, Shield, Square, User } from 'lucide-react';
 import type { PresetTask } from '../types';
-import type { ModelCatalogEntry } from '../lib/api';
+import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
+import { ControlPicker } from './ControlPicker';
+import { ContextProviderPicker } from './ContextProviderPicker';
 
 interface Props {
   streaming: boolean;
@@ -21,6 +23,23 @@ interface Props {
   /** 当前选中（null = 默认链，提交不带 model 字段）。 */
   selectedModel?: string | null;
   onModelChange?: (name: string | null) => void;
+  // ── Phase 2b Composer control row（Ticket F1）──
+  /** GET /api/permission-modes 清单。空 → 隐藏控件。 */
+  permissionModes?: CatalogEntry[];
+  selectedPermissionMode?: string | null;
+  onPermissionModeChange?: (id: string | null) => void;
+  /** GET /api/agent-profiles 清单。空 → 隐藏控件。 */
+  agentProfiles?: CatalogEntry[];
+  selectedAgentProfile?: string | null;
+  onAgentProfileChange?: (id: string | null) => void;
+  /** GET /api/reasoning-efforts 清单。空 → 隐藏控件。 */
+  reasoningEfforts?: CatalogEntry[];
+  selectedReasoningEffort?: string | null;
+  onReasoningEffortChange?: (id: string | null) => void;
+  /** GET /api/context-providers 清单。空 → 隐藏控件（不伪造）。多选。 */
+  contextProviders?: CatalogEntry[];
+  selectedContextProviders?: string[];
+  onContextProvidersChange?: (ids: string[]) => void;
 }
 
 // memo：流式期间 props 稳定（streaming 布尔不变、回调由 App useCallback 固定），
@@ -33,6 +52,18 @@ export const Composer = memo(function Composer({
   models = [],
   selectedModel = null,
   onModelChange,
+  permissionModes = [],
+  selectedPermissionMode = null,
+  onPermissionModeChange,
+  agentProfiles = [],
+  selectedAgentProfile = null,
+  onAgentProfileChange,
+  reasoningEfforts = [],
+  selectedReasoningEffort = null,
+  onReasoningEffortChange,
+  contextProviders = [],
+  selectedContextProviders = [],
+  onContextProvidersChange,
 }: Props) {
   const [value, setValue] = useState('');
 
@@ -55,6 +86,14 @@ export const Composer = memo(function Composer({
     }
   };
 
+  // 控件行是否渲染——至少有一个非空目录时才显示 control row 容器
+  const hasControls =
+    models.length > 0 ||
+    permissionModes.length > 0 ||
+    agentProfiles.length > 0 ||
+    reasoningEfforts.length > 0 ||
+    contextProviders.length > 0;
+
   return (
     <div className="composer-wrap">
       <div className="composer-dock surface-floating">
@@ -70,16 +109,52 @@ export const Composer = memo(function Composer({
           disabled={streaming}
           aria-label="Agent 任务"
         />
-        {/* 模型选择器（Phase 2a Radix Popover）：目录来自端点，缺席即隐藏
-            （ModelPicker 内部处理 models.length === 0 → null）。
-            会话内实际模型仍以模型卡 data.model 真相展示——
-            此处只是提交偏好，不是第二真相。 */}
-        <ModelPicker
-          models={models}
-          selectedModel={selectedModel}
-          onModelChange={onModelChange ?? (() => {})}
-          disabled={streaming}
-        />
+        {hasControls && (
+          <div className="composer-controls">
+            <ModelPicker
+              models={models}
+              selectedModel={selectedModel}
+              onModelChange={onModelChange ?? (() => {})}
+              disabled={streaming}
+            />
+            <ControlPicker
+              ariaLabel="权限模式"
+              entries={permissionModes}
+              selectedId={selectedPermissionMode}
+              onChange={onPermissionModeChange ?? (() => {})}
+              icon={Shield}
+              placeholder="权限"
+              disabled={streaming}
+            />
+            <ControlPicker
+              ariaLabel="Agent Profile"
+              entries={agentProfiles}
+              selectedId={selectedAgentProfile}
+              onChange={onAgentProfileChange ?? (() => {})}
+              icon={User}
+              placeholder="Agent"
+              disabled={streaming}
+            />
+            <ControlPicker
+              ariaLabel="Reasoning Effort"
+              entries={reasoningEfforts}
+              selectedId={selectedReasoningEffort}
+              onChange={onReasoningEffortChange ?? (() => {})}
+              icon={Brain}
+              placeholder="推理"
+              disabled={streaming}
+            />
+            <ContextProviderPicker
+              ariaLabel="Context Providers"
+              entries={contextProviders}
+              selectedIds={selectedContextProviders}
+              onChange={onContextProvidersChange ?? (() => {})}
+              icon={Layers}
+              placeholder="Context"
+              disabled={streaming}
+            />
+          </div>
+        )}
         {streaming ? (
           <>
             {/* Esc 中断提示（Claude Code "esc to interrupt" 语言）：键位绑定在 App 全局，这里只做可见性 */}

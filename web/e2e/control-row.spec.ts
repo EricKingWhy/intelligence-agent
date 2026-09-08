@@ -1,0 +1,160 @@
+/** F1（Phase 2b）Composer control row e2e 交互测试。
+ *
+ * 验收项：
+ *   - 四个控件 trigger 在场（ModelPicker + Permission/Agent/Reasoning）
+ *   - 空目录隐藏入口（context-providers 返 [] → 控件不渲染）
+ *   - 键盘打开浮层 + 方向键导航 + Enter 选档 → trigger 文本更新
+ *   - Esc 关闭浮层（§19）
+ *
+ * 车道归属：Playwright e2e（同 model-picker.spec.ts 约定）。 */
+
+import { expect, test } from '@playwright/test';
+import { routeApi, fulfillSse } from './fixtures';
+
+const PERMISSION_MODES = [
+  { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
+  { id: 'ask', display_name: 'Ask Each Time', description: '每次工具调用都询问' },
+  { id: 'deny', display_name: 'Deny All', description: '拒绝所有工具调用' },
+];
+
+const AGENT_PROFILES = [
+  { id: 'main', display_name: 'Main', description: '通用编排代理（默认）' },
+  { id: 'coding', display_name: 'Coding', description: '代码编辑、调试和构建任务专用' },
+  { id: 'research_review', display_name: 'Research & Review', description: '研究、检索和审查任务专用' },
+];
+
+const REASONING_EFFORTS = [
+  { id: 'minimal', display_name: 'Minimal', description: '最少推理开销；最快但最不彻底。' },
+  { id: 'standard', display_name: 'Standard', description: '典型任务的平衡推理深度（默认）。' },
+  { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。' },
+];
+
+test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async ({ page }) => {
+  const frames = [
+    { type: 'session/started', seq: 1, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
+    { type: 'run/started', seq: 2, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
+    { type: 'user/message', data: { content: '测试 control row' }, seq: 3, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', step_id: 1, time: '2026-09-08T00:00:00Z' },
+    { type: 'run/completed', data: {}, seq: 4, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
+  ];
+
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+    onSessionPost: (route) => fulfillSse(route, frames),
+  });
+
+  await page.goto('/');
+
+  // 四个控件 trigger 在场
+  const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
+  const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
+  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+
+  // ModelPicker 目录空时不渲染——这里没 mock models，所以 model-picker 不在场
+  await expect(modelTrigger).toHaveCount(0);
+  // 三个 ControlPicker 在场
+  await expect(permTrigger).toBeVisible();
+  await expect(agentTrigger).toBeVisible();
+  await expect(effortTrigger).toBeVisible();
+
+  // 键盘打开 Permission Mode 浮层
+  await permTrigger.focus();
+  await page.keyboard.press('Enter');
+  // cmdk 注入 combobox 角色
+  await expect(page.locator('[role="combobox"]')).toBeVisible();
+  // option 角色在场——至少 3 个（auto/ask/deny）
+  await expect(page.locator('[role="option"]')).toHaveCount(3);
+
+  // 搜索过滤：键入「ask」只剩匹配项
+  await page.keyboard.type('ask');
+  await expect(page.locator('[role="option"]')).toHaveCount(1);
+  await expect(page.locator('[role="option"]')).toContainText('Ask Each Time');
+
+  // Esc 关闭浮层（§19）
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="combobox"]')).toBeHidden();
+
+  // 再次打开 + Enter 选第一个 option → trigger 文本更新
+  await permTrigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="combobox"]')).toBeVisible();
+  // 清空搜索
+  await page.locator('[role="combobox"]').fill('');
+  // cmdk 打开后默认激活第一个 option；Enter 直接选中
+  await page.keyboard.press('Enter');
+  // trigger 显示已选条目名（非 placeholder「权限」）
+  await expect(permTrigger).toContainText('Auto Approve');
+});
+
+test('Composer control row：提交 payload 字段名对齐后端契约', async ({ page }) => {
+  const frames = [
+    { type: 'session/started', seq: 1, session_id: 'e2e-session-payload', run_id: 'e2e-run-payload', time: '2026-09-08T00:00:00Z' },
+    { type: 'run/started', seq: 2, session_id: 'e2e-session-payload', run_id: 'e2e-run-payload', time: '2026-09-08T00:00:00Z' },
+    { type: 'user/message', data: { content: 'payload 测试' }, seq: 3, session_id: 'e2e-session-payload', run_id: 'e2e-run-payload', step_id: 1, time: '2026-09-08T00:00:00Z' },
+    { type: 'run/completed', data: {}, seq: 4, session_id: 'e2e-session-payload', run_id: 'e2e-run-payload', time: '2026-09-08T00:00:00Z' },
+  ];
+
+  let capturedBody: string | null = null;
+
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+    onSessionPost: (route) => {
+      const req = route.request();
+      capturedBody = req.postData() ?? '';
+      return fulfillSse(route, frames);
+    },
+  });
+
+  await page.goto('/');
+
+  // 选 Permission Mode → auto
+  const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await permTrigger.focus();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter'); // cmdk 默认激活第一项（auto）
+  await expect(permTrigger).toContainText('Auto Approve');
+  await page.keyboard.press('Escape'); // 关闭浮层
+
+  // 选 Agent Profile → coding
+  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  await agentTrigger.focus();
+  await page.keyboard.press('Enter');
+  // 第二项是 Coding——按 ArrowDown 一次再 Enter
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(agentTrigger).toContainText('Coding');
+  await page.keyboard.press('Escape'); // 关闭浮层
+
+  // 选 Reasoning Effort → deep
+  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await effortTrigger.focus();
+  await page.keyboard.press('Enter');
+  // 第三项是 Deep——按 ArrowDown 两次再 Enter
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(effortTrigger).toContainText('Deep');
+
+  // 提交任务
+  await page.getByLabel('Agent 任务').fill('payload 测试');
+  await page.getByLabel('发送').click();
+
+  // 等待 POST 被拦截
+  await expect.poll(() => capturedBody).not.toBeNull();
+
+  const body = JSON.parse(capturedBody!);
+  // 字段名对齐后端 B1 契约
+  expect(body.permission_mode).toBe('auto');
+  expect(body.agent_profile).toBe('coding');
+  expect(body.reasoning_effort).toBe('deep');
+  // 未选 context_providers → 不传该字段
+  expect(body.context_providers).toBeUndefined();
+});

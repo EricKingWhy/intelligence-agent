@@ -65,6 +65,82 @@ export interface StartSessionPayload {
   /** 可选模型选择（T10 #103，契约 C6）：GET /api/models 的 name；不传 = 默认
    *  链；未知 → 422（调用方提示重新选择并刷新目录）。 */
   model?: string;
+  /** Phase 5 staged amend 字段（Ticket B1 清单端点对齐）：
+   *  - permission_mode: GET /api/permission-modes 的 id；不传 = 后端默认。
+   *  - agent_profile: GET /api/agent-profiles 的 id；不传 = 后端默认。
+   *  - reasoning_effort: GET /api/reasoning-efforts 的 id；不传 = 后端默认。
+   *  - context_providers: GET /api/context-providers 的 id 列表；不传 = 后端默认。
+   *
+   *  这些字段在 POST /api/sessions 是 staged 契约：API 边界验证通过（未知值 → 422），
+   *  运行时记一条 INFO 日志后忽略（received but not yet consumed by runtime）。
+   *  前端不应断言"已生效"——控件只提交偏好，运行时是否消费由后端决定。 */
+  permission_mode?: string;
+  agent_profile?: string;
+  reasoning_effort?: string;
+  context_providers?: string[];
+}
+
+/** B1 契约通用清单条目——{id, display_name, description}。
+ *  四个清单端点（permission-modes / agent-profiles / reasoning-efforts /
+ *  context-providers）共用此结构，与 /api/models 富化模式对齐。 */
+export interface CatalogEntry {
+  id: string;
+  display_name: string;
+  description: string;
+}
+
+/** GET /api/permission-modes —— 权限模式清单。
+ *  返回 PermissionPolicy 全集 + 人类可读描述。 */
+export async function getPermissionModes(): Promise<CatalogEntry[]> {
+  const res = await apiFetch('/api/permission-modes');
+  if (!res.ok) throw new Error(`permission-modes ${res.status}`);
+  return parseCatalogEntries(await res.json(), 'modes');
+}
+
+/** GET /api/agent-profiles —— Agent Profile 清单。
+ *  返回 AGENT_PROFILE_DESCRIPTIONS 全集。 */
+export async function getAgentProfiles(): Promise<CatalogEntry[]> {
+  const res = await apiFetch('/api/agent-profiles');
+  if (!res.ok) throw new Error(`agent-profiles ${res.status}`);
+  return parseCatalogEntries(await res.json(), 'profiles');
+}
+
+/** GET /api/reasoning-efforts —— Reasoning Effort 档位清单。
+ *  返回 REASONING_EFFORT_DESCRIPTIONS 全集。 */
+export async function getReasoningEfforts(): Promise<CatalogEntry[]> {
+  const res = await apiFetch('/api/reasoning-efforts');
+  if (!res.ok) throw new Error(`reasoning-efforts ${res.status}`);
+  return parseCatalogEntries(await res.json(), 'efforts');
+}
+
+/** GET /api/context-providers —— Context Provider 清单。
+ *  当前诚实返空数组（runtime 尚未装配任何 provider）。 */
+export async function getContextProviders(): Promise<CatalogEntry[]> {
+  const res = await apiFetch('/api/context-providers');
+  if (!res.ok) throw new Error(`context-providers ${res.status}`);
+  return parseCatalogEntries(await res.json(), 'providers');
+}
+
+/** 窄化解析清单端点响应——仅 id/display_name/description 非空字符串的条目入选。
+ *  顶层 key 用复数短名（modes/profiles/efforts/providers），调用方传入对应 key。 */
+function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
+  const raw =
+    typeof body === 'object' && body !== null && Array.isArray((body as Record<string, unknown>)[key])
+      ? ((body as Record<string, unknown[]>)[key])
+      : [];
+  return raw.flatMap((m) => {
+    if (typeof m !== 'object' || m === null) return [];
+    const r = m as Record<string, unknown>;
+    if (typeof r.id !== 'string' || !r.id) return [];
+    if (typeof r.display_name !== 'string' || !r.display_name) return [];
+    return [
+      {
+        id: r.id,
+        display_name: r.display_name,
+        description: typeof r.description === 'string' ? r.description : '',
+      },
+    ];
+  });
 }
 
 /** POST a new session. Returns the raw Response — SSE stream is consumed by caller.

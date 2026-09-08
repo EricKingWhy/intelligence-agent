@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agent_harness.agent import AgentRuntime
 
@@ -97,6 +98,26 @@ async def assemble_wiring(
     return registry, wiring
 
 
+def _select_context_providers(
+    wired: list[Any], requested: list[str] | None,
+) -> list[Any]:
+    """会话级 context_providers 筛选（ADR-0020b）。
+
+    - ``requested is None`` → 返回全量 wired（默认行为，向后兼容）；
+    - ``requested == []`` → 返回空（用户显式选零 provider，区别于 None 的默认全量）；
+    - ``requested`` 非空 → 仅保留 ``name ∈ requested`` 的 provider；
+      未知名字 fail-open 跳过（与 OPTIONAL_RUNTIME 降级原则一致——会话请求不能
+      因为一个未装配的 provider 名字而拖垮 Core，不变量 #21）。
+
+    未声明 ``name`` 属性的 provider（未来情况）经 ``getattr`` 容错为 None，
+    不会被任何请求名字命中——fail-open 不报错。
+    """
+    if requested is None:
+        return list(wired)
+    wanted = set(requested)
+    return [p for p in wired if getattr(p, "name", None) in wanted]
+
+
 async def build_runtime(
     *,
     settings: Settings,
@@ -127,12 +148,14 @@ async def build_runtime(
     approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
     式审批 callback（见 web 层 PendingApprovalQueue）。
     """
-    # RUNTIME 子批次 1：reasoning_effort 消费到模型构造 seam。
-    # agent_profile / context_providers 仍是 staged no-op（独立子批次）。
+    # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
+    # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
+    # coding/research_review 收窄 registry 到 spec.tool_scope + 注入 spec.system_prompt。
+    # 未知名字 web 层已 422，这里 KeyError 再响亮失败一次（防御性，不应发生）。
+    profile_spec = None
     if agent_profile is not None:
-        logger.info("agent_profile=%s received but not yet consumed by runtime", agent_profile)
-    if context_providers is not None:
-        logger.info("context_providers=%s received but not yet consumed by runtime", context_providers)
+        from agent_harness.agent.profiles import BUILTIN_PROFILES
+        profile_spec = BUILTIN_PROFILES[agent_profile]
 
     config = (ModelConfig.from_settings(settings) if model_name is None
               else ModelConfig.from_catalog(settings, model_name))
@@ -143,7 +166,7 @@ async def build_runtime(
     fallback_model = None
     if config.fallback is not None:
         fallback_model = create_chat_model(
-            config.fallback, reasoning_effort=reasoning_effort
+            config.fallback, reasoning_effort=reasoning_effort,
         )
     # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
     # 同一实例（全局在飞模型调用数的语义）。
@@ -185,6 +208,14 @@ async def build_runtime(
             )
             continue
         registry.register(capability_tool)
+
+    # agent_profile tool_scope 收窄（ADR-0020a）：仅在非 main profile 时过滤——
+    # main 的 _MAIN_TOOLS 是全量的超集，filter 等价不过滤，但若未来新增了一个
+    # tool_scope 未声明的工具，filter 会隐性收窄它。所以 main/None 走原路径不 filter，
+    # 只有 coding/research_review 才收窄。收窄后 registry 流向所有下游：
+    # ToolExecutor / AgentRuntime / multiagent activate 的 source_registry。
+    if profile_spec is not None and agent_profile != "main":
+        registry = registry.filtered(profile_spec.tool_scope)
 
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
@@ -230,7 +261,12 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
-            context_providers=list(wiring.context_providers),
+            # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
+            # wiring 自动装配的 provider 子集；None=默认全量，[]=显式零，未知名字 fail-open。
+            context_providers=_select_context_providers(
+                wiring.context_providers, context_providers,
+            ),
+            system_prompt=(profile_spec.system_prompt if profile_spec is not None else None),
         ),
         memory_writer=wiring.memory_writer,
         fallback_model=fallback_model,
