@@ -794,17 +794,32 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/context-providers")
     async def list_context_providers() -> dict[str, Any]:
-        """列出已装配的 context provider 清单（Ticket B1，SDD 03 §17 对齐）。
+        """列出已装配的 context provider 清单（Ticket B2，ADR-0021，SDD 03 §17 对齐）。
 
-        当前 runtime 尚未装配任何 context provider（Memory = Capability + Context
-        Provider，§7.16——provider 落地是独立批次）。诚实返 {"providers": []}，
-        与 /api/capabilities 空目录降级同原则（不伪造基础项）。前端据空列表自行
-        fallback；provider 装配落地后本端点会自然返回真实清单，契约形态不变。
+        从 wiring.context_provider_entries 投影真实清单——只反映**当前配置下
+        实际装配的 provider 集合**（conditional wiring，不是静态全集）。配置关了
+        的 provider 不在这里出现，validator 也不接受（诚实原则）。wiring 尚未
+        装配时返空（与 /api/capabilities 空目录降级同原则：不伪造基础项）。
         """
-        # Phase 5 接收 context_providers: list[str] | None 但运行时 no-op；
-        # 这里同样诚实暴露「当前没有任何已装配 provider」。待 provider registry
-        # 落地后替换为真实投影（独立批次，本 Ticket 不消费运行时——Scope Lock §8）。
-        return {"providers": []}
+        state = app.state.agent
+        # 与其他依赖 wiring 的端点一致：惰性装配。wiring 未就绪时返空——
+        # 首次 GET（早于任何 POST /sessions）装配可能因配置缺失降级跳过，
+        # 此时确实没有 provider 可列。
+        if state.wiring is None:
+            try:
+                _, wiring = await state.get_wiring()
+            except Exception:
+                logging.getLogger("agent_harness.web").warning(
+                    "context-providers listing: wiring unavailable", exc_info=True,
+                )
+                return {"providers": []}
+        else:
+            wiring = state.wiring
+        providers = [
+            {"id": entry.id, "display_name": entry.display_name, "description": entry.description}
+            for entry in wiring.context_provider_entries.values()
+        ]
+        return {"providers": providers}
 
     @app.post("/api/sessions")
     async def create_session(req: CreateSessionRequest):
@@ -837,6 +852,22 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         _, wiring = await state.get_wiring()
         await state.ensure_stores()
+
+        # context_providers 运行时校验（Ticket B2，ADR-0021）：validator 无法访问
+        # AppState/wiring（Pydantic parse 早于 handler），故在 handler 内对 wiring
+        # 真实装配的 id 集合校验——与 model 字段的 from_catalog 422 模式一致。
+        # 未知 id（含配置降级后消失的）→ 422，让客户端看到诚实清单。
+        if req.context_providers is not None:
+            wired_ids = set(wiring.context_provider_entries)
+            unknown = [pid for pid in req.context_providers if pid not in wired_ids]
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"context_providers contains unknown ids {unknown}; "
+                        f"available: {sorted(wired_ids)}"
+                    ),
+                )
 
         # Phase 5：permission_mode 是真值源；auto_approve 是 deprecated alias。
         # 三种路由（保留向后兼容）：

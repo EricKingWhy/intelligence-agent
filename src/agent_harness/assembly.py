@@ -127,8 +127,28 @@ async def build_runtime(
     approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
     式审批 callback（见 web 层 PendingApprovalQueue）。
     """
-    if context_providers is not None:
-        logger.info("context_providers=%s received but not yet consumed by runtime", context_providers)
+    # context_providers 运行时消费（Ticket B2，ADR-0021）：
+    #   - None  → wiring 全集（向后兼容，当前默认行为）
+    #   - []    → 空集（用户显式选了不启用任何 provider）
+    #   - [ids] → wiring 全集中用户选中的子集
+    # 未知 id 在 web 层已 422（validator）；这里额外查一次 wiring registry 是
+    # 防御性——若运行时 wiring 实际没装配该 provider（配置降级），从全集里剔除它
+    # 并记日志，而不是 KeyError 让装配崩溃。
+    if context_providers is None:
+        selected_providers = list(wiring.context_providers)
+    else:
+        selected_entries = []
+        for pid in context_providers:
+            entry = wiring.context_provider_entries.get(pid)
+            if entry is None:
+                logger.warning(
+                    "context_providers=%s references id %r not in wired set %s "
+                    "(possibly config-degraded); skipping",
+                    context_providers, pid, set(wiring.context_provider_entries),
+                )
+                continue
+            selected_entries.append(entry)
+        selected_providers = [entry.provider for entry in selected_entries]
 
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
@@ -254,7 +274,7 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
-            context_providers=list(wiring.context_providers),
+            context_providers=selected_providers,
             system_prompt=(profile_spec.system_prompt if profile_spec is not None else None),
         ),
         memory_writer=wiring.memory_writer,
