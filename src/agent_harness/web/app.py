@@ -1182,13 +1182,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
             run = result.run
             subscriber = result.subscriber
+            state = app.state.agent
 
             async def event_generator():
                 try:
-                    async for ev in subscriber:
-                        yield {"event": ev.type, "data": json.dumps(ev.to_dict())}
-                        if ev.type in {"run/completed", "run/failed"}:
+                    while True:
+                        event = await subscriber.queue.get()
+                        if event is state.run_manager.DONE:
                             break
+                        yield _event_to_sse_dict(event, session_id)
                 finally:
                     run.unsubscribe(subscriber)
 
