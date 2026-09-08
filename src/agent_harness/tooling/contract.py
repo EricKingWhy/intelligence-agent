@@ -109,18 +109,16 @@ class PermissionPolicy(str, Enum):
 #: 不假装交互式审批已就绪（那是 Phase 5）。display_name 给 UI 标签，description 给 tooltip。
 PERMISSION_MODE_DESCRIPTIONS: dict[PermissionPolicy, dict[str, str]] = {
     PermissionPolicy.READ_ONLY: {
-        "display_name": "Read-only",
-        "description": "Agent can read files and run read-only tools; no writes.",
+        "display_name": "只读",
+        "description": "可读文件和运行只读工具，不可写入。",
     },
     PermissionPolicy.WORKSPACE_WRITE: {
-        "display_name": "Workspace write",
-        "description": "Agent can read and write within the workspace sandbox; "
-                       "danger tools still require approval.",
+        "display_name": "工作区写入",
+        "description": "可读写工作区内文件；高危工具仍需审批。",
     },
     PermissionPolicy.DANGER_FULL_ACCESS: {
-        "display_name": "Danger full access",
-        "description": "All tools run without approval, including bash with "
-                       "network/system side effects. Use only in trusted contexts.",
+        "display_name": "完全访问",
+        "description": "所有工具无需审批，含网络/系统副作用。仅在可信环境使用。",
     },
 }
 
