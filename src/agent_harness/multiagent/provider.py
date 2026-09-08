@@ -98,7 +98,7 @@ def collect_result_fields(
                             citations.append(citation)
                 except (ValueError, AttributeError):
                     pass  # 非法 payload 只损失该条 citation，不 brick 收集
-        elif event.type == "artifact/created":
+        elif event.type in ("artifact/created", "artifact/externalized"):
             artifact_id = event.data.get("artifact_id")
             if artifact_id and artifact_id not in artifacts:
                 artifacts.append(artifact_id)

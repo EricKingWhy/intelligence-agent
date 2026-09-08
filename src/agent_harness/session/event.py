@@ -31,6 +31,11 @@ TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
 ARTIFACT_CREATED = "artifact/created"
+# Phase Multiturn T5 (#135)：大产物外置对象存储事件。
+# 当 tool result 超过阈值时，原始内容外置到 MinIO（或 S3 兼容存储），
+# session 里留摘要 + artifact_ref。此事件标记"大产物已外置"，
+# 模型可凭 artifact_ref 用 read_artifact 工具按需读取局部内容。
+ARTIFACT_EXTERNALIZED = "artifact/externalized"
 CONTEXT_COMPACTED = "context/compacted"
 MEMORY_DEGRADED = "memory/degraded"
 # ── + Phase 12 Reliability 信号（同错熔断 + 模型 fallback，ADR-0014） ──
@@ -49,9 +54,31 @@ REASONING_COMPLETED = "reasoning/completed"
 REASONING_INTERRUPTED = "reasoning/interrupted"
 # ── + Phase 5 Composer（SDD 06 Phase 5）：交互式审批——run 在审批关卡暂停，
 # 向前端广播 tool/approval-requested（durable）；前端 /approve 后续解。 ──
+# ── + Batch 5.1：permission/resolved 补审计 trail（03 §9 PermissionResolvedData）。
+# 前端据 approval_id 把 requested 与 resolved 配对，JSONL 可回放完整决策历史。 ──
 TOOL_APPROVAL_REQUESTED = "tool/approval-requested"
+PERMISSION_RESOLVED = "permission/resolved"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
+
+# ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
+# 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
+#   COMPACTION_START (source_seq_start, source_seq_end)
+#   → CONTEXT_COMPACTED (six_section summary + source 区间)
+#   → USER_MESSAGE(replace) — 摘要替代被压缩段
+#   → COMPACTION_END (bracket_id)
+# 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
+COMPACTION_START = "compaction/start"
+COMPACTION_END = "compaction/end"
+
+# ── Phase Multiturn T2（#132）：续聊队列 + steer 引导 ────────────────────
+# 用户在 run 进行中继续输入：queue 模式排队等下个 run 自然消费；steer 模式
+# 注入在途 run 的引导请求（不抢断、不改写历史事件）。四种新事件构成
+# 续聊生命周期的 durable 词汇——前端据 type 决定占位/取消 UI。
+MESSAGE_QUEUED = "message/queued"
+QUEUE_CANCELLED = "queue/cancelled"
+STEER_REQUESTED = "steer/requested"
+STEER_APPLIED = "steer/applied"
 
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
@@ -77,6 +104,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TEXT_DELTA,
         OPERATION_RECONCILE_REQUIRED,
         ARTIFACT_CREATED,
+        ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,
         MEMORY_DEGRADED,
         TOOL_FAILURE_GUARD,
@@ -88,6 +116,15 @@ EVENT_TYPES: frozenset[str] = frozenset(
         REASONING_COMPLETED,
         REASONING_INTERRUPTED,
         TOOL_APPROVAL_REQUESTED,
+        PERMISSION_RESOLVED,
+        # Phase Multiturn T2 (#132)：续聊队列 + steer 引导（PRD §6）
+        MESSAGE_QUEUED,
+        QUEUE_CANCELLED,
+        STEER_REQUESTED,
+        STEER_APPLIED,
+        # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
+        COMPACTION_START,
+        COMPACTION_END,
     }
 )
 

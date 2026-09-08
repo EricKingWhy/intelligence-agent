@@ -43,10 +43,13 @@ async def test_bash_overflow_is_outside_retry_and_before_ledger_terminal(tmp_pat
     call = {"id": "call", "name": "bash", "args": {"command": "run-tests"}}
     context = OperationContext(session_id=session.session_id)
     if failure:
-        with pytest.raises(ConnectionError):
-            await executor.execute_batch([call], session=session, operation_context=context)
-        assert (await ledger.get(session.session_id, "call")).state == OperationState.RUNNING
-        assert not any(e.type == "artifact/created" for e in session.events)
+        # T5 (#135): fail-open — store unavailable → raw result kept.
+        executions = await executor.execute_batch(
+            [call], session=session, operation_context=context,
+        )
+        result = executions[0].result
+        assert result.artifact_ref is None
+        assert not any(e.type == "artifact/externalized" for e in session.events)
     else:
         executions = await executor.execute_batch(
             [call], session=session, operation_context=context,

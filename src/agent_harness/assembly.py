@@ -188,6 +188,17 @@ async def build_runtime(
         registry.register(InspectArtifactTool(artifact_store))
         overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
 
+    # Phase Multiturn T5 (#135): MinIO-backed externalization for large tool results.
+    # When minio_* is configured, register ReadArtifactTool so the model can read
+    # back slices of externalized artifacts by ref.
+    if any((settings.minio_endpoint, settings.minio_bucket,
+            settings.minio_access_key.get_secret_value(),
+            settings.minio_secret_key.get_secret_value())):
+        from agent_harness.storage.minio_artifact import MinioArtifactStore
+        from agent_harness.tools.read_artifact import ReadArtifactTool
+        minio_store = MinioArtifactStore(settings, session_id=session_id)
+        registry.register(ReadArtifactTool(minio_store))
+
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
     # 切片 B：ApprovalCallback 已 async 化（外部 /approve 交互式审批需要 run 暂停）。

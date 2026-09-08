@@ -1,13 +1,18 @@
 """ToolResult 后处理：先完整保存，再返回摘要；不参与 Tool retry。"""
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 from agent_harness.session import Session
-from agent_harness.session.event import ARTIFACT_CREATED
+from agent_harness.session.event import (
+    ARTIFACT_EXTERNALIZED,
+)
 from agent_harness.storage.artifact import ArtifactStore
 from agent_harness.tooling.result import ToolResult
+
+logger = logging.getLogger("agent_harness.tooling.overflow")
 
 
 class OverflowHandler(ABC):
@@ -25,11 +30,27 @@ class OverflowHandler(ABC):
 
 
 class ArtifactOverflowHandler(OverflowHandler):
-    def __init__(self, store: ArtifactStore, overflow_chars: int = 2000) -> None:
+    """当 tool result 超过 ``overflow_chars`` 阈值时，将原始内容外置到
+    ``ArtifactStore``，并在 session 中保留截断摘要 + ``artifact_ref``。
+
+    T5 (#135): 如果存储不可用（网络故障、MinIO 宕机等），handler 会优雅降级
+    (fail-open)：保留原始未截断的 tool result 在 session 中，不外置产物，
+    不发出 ``ARTIFACT_EXTERNALIZED`` 事件。这确保了工具执行不会因为对象存储
+    故障而失败——模型仍然能看到完整的输出。
+    """
+
+    def __init__(
+        self,
+        store: ArtifactStore,
+        overflow_chars: int = 2000,
+        *,
+        externalize_event_type: str = ARTIFACT_EXTERNALIZED,
+    ) -> None:
         if overflow_chars <= 0:
             raise ValueError("overflow_chars must be positive")
         self._store = store
         self._overflow_chars = overflow_chars
+        self._externalize_event_type = externalize_event_type
         # 构造期预算下界校验：截断 marker（含总行数与 artifact_id）不受
         # _summarize 的 head/tail 预算约束——overflow_chars 若小于 marker
         # 本身，head/tail 被压成 0 也压不住它，摘要必然超出预算、悄悄污染
@@ -62,13 +83,25 @@ class ArtifactOverflowHandler(OverflowHandler):
         content = (next(iter(oversized.values())) if len(oversized) == 1 else
                    json.dumps(oversized, ensure_ascii=False, indent=2))
         mime_type = "text/plain" if len(oversized) == 1 else "application/json"
-        artifact = await self._store.save(
-            session.session_id, content, mime_type=mime_type,
-            source_tool=tool_name, tool_call_id=tool_call_id,
-        )
+
+        # T5 (#135): graceful degradation — if the store is unavailable,
+        # keep the original (untruncated) tool result in-session.
+        try:
+            artifact = await self._store.save(
+                session.session_id, content, mime_type=mime_type,
+                source_tool=tool_name, tool_call_id=tool_call_id,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "Artifact store unavailable, keeping raw tool result "
+                "in-session (fail-open): %s",
+                error,
+            )
+            return result, []
+
         summaries = {key: self._summarize(value, artifact.artifact_id)
                      for key, value in oversized.items()}
-        deferred = [(ARTIFACT_CREATED, {
+        deferred = [(self._externalize_event_type, {
             "artifact_id": artifact.artifact_id, "session_id": session.session_id,
             "source_tool": tool_name, "tool_call_id": tool_call_id,
             "size": artifact.size, "mime_type": artifact.mime_type,
@@ -82,7 +115,7 @@ class ArtifactOverflowHandler(OverflowHandler):
     def _summarize(self, content: str, artifact_id: str) -> str:
         lines = content.splitlines()
         marker = (f"... [truncated, {len(lines)} lines total, "
-                  f"use inspect_artifact({artifact_id}) to view]")
+                  f"use read_artifact({artifact_id}) to view]")
         # 行数限制之外再限制字符数，避免单行日志本身撑爆 Context。
         budget = max(0, (self._overflow_chars - len(marker) - 2) // 2)
         head = "\n".join(lines[:10])[:budget]
