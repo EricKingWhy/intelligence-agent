@@ -99,7 +99,7 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
               return haystack.includes(q) ? 1 : 0;
             }}
           >
-            <div className="model-picker-search-wrap">
+            <div className={`model-picker-search-wrap${models.length + 1 > 5 ? '' : ' hidden'}`}>
               <Search size={13} aria-hidden="true" />
               <CommandInput placeholder="搜索模型" className="model-picker-search" />
             </div>

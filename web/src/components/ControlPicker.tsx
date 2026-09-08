@@ -88,7 +88,7 @@ export function ControlPicker({
               return haystack.includes(q) ? 1 : 0;
             }}
           >
-            <div className="model-picker-search-wrap">
+            <div className={`model-picker-search-wrap${entries.length > 5 ? '' : ' hidden'}`}>
               <Icon size={13} aria-hidden="true" />
               <CommandInput placeholder="搜索…" className="model-picker-search" />
             </div>

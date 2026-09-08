@@ -82,32 +82,32 @@ from agent_harness.web.runmanager import RunManager
 #: reasoning_effort 三档（已运行时消费——经 create_chat_model 注入 model_kwargs）。
 REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "minimal": {
-        "display_name": "Minimal",
-        "description": "Least reasoning overhead; fastest but least thorough.",
+        "display_name": "轻量",
+        "description": "最少推理开销，最快但不够深入。",
     },
     "standard": {
-        "display_name": "Standard",
-        "description": "Balanced reasoning depth for typical tasks (default).",
+        "display_name": "标准",
+        "description": "平衡的推理深度，适用于常规任务（默认）。",
     },
     "deep": {
-        "display_name": "Deep",
-        "description": "Most reasoning overhead; slower but most thorough.",
+        "display_name": "深度",
+        "description": "最多推理开销，较慢但最深入。",
     },
 }
 
 #: agent_profile 三档（已运行时消费——system_prompt 经 ContextBuilder 注入 + tool_scope 经 registry.filtered 收窄，ADR-0020a）。
 AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "main": {
-        "display_name": "Main",
-        "description": "General-purpose orchestrator agent (default).",
+        "display_name": "通用",
+        "description": "通用编排 Agent（默认）。",
     },
     "coding": {
-        "display_name": "Coding",
-        "description": "Specialized for code editing, debugging, and build tasks.",
+        "display_name": "编程",
+        "description": "专精代码编辑、调试和构建任务。",
     },
     "research_review": {
-        "display_name": "Research & Review",
-        "description": "Specialized for research, retrieval, and review tasks.",
+        "display_name": "研究审查",
+        "description": "专精研究、检索和审查任务。",
     },
 }
 
@@ -117,12 +117,12 @@ AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
 #: 前端据本清单渲染选项，用户选中的 id 经 POST /api/sessions 回传触发筛选。
 CONTEXT_PROVIDER_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "memory": {
-        "display_name": "Memory",
-        "description": "Inject relevant recalled memories scoped to the user into the model context.",
+        "display_name": "记忆",
+        "description": "注入与用户相关的召回记忆。",
     },
     "skills": {
-        "display_name": "Skills",
-        "description": "Inject the catalog of available skills (name + description) into the model context.",
+        "display_name": "技能",
+        "description": "注入可用技能目录（名称 + 描述）。",
     },
 }
 
