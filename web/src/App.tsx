@@ -68,6 +68,7 @@ export default function App() {
     recoverState,
     selectSession,
     submitTask,
+    sendMessage,
     cancelStream,
     recover,
     refreshSessions,
@@ -245,6 +246,12 @@ export default function App() {
   const handleSubmit = useCallback(
     (task: string) => {
       focusRun();
+      // 续聊：已有会话且不在流式中 → 发消息到现有会话（PRD §5.3 续聊入口）。
+      // 新会话：无 selectedId → startSession 创建新会话。
+      if (selectedId && !streaming) {
+        void sendMessage(selectedId, task, { maxSteps: 10 });
+        return;
+      }
       void submitTask({
         task,
         max_steps: 10,
@@ -260,7 +267,10 @@ export default function App() {
     },
     [
       submitTask,
+      sendMessage,
       focusRun,
+      selectedId,
+      streaming,
       selectedModel,
       selectedPermissionMode,
       selectedAgentProfile,

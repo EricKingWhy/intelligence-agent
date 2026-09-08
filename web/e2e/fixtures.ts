@@ -51,6 +51,8 @@ export interface ApiMock {
   reasoningEfforts?: unknown[];
   /** GET /api/context-providers（Context Provider 清单；当前诚实返空） */
   contextProviders?: unknown[];
+  /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
+  onMessagesPost?: (route: Route) => Promise<void> | void;
 }
 
 export function routeApi(page: Page, mock: ApiMock): void {
@@ -89,6 +91,10 @@ export function routeApi(page: Page, mock: ApiMock): void {
     }
     if (path === '/api/context-providers') {
       return route.fulfill({ status: 200, body: JSON.stringify({ providers: mock.contextProviders ?? [] }), contentType: 'application/json' });
+    }
+    if (/^\/api\/sessions\/[^/]+\/messages$/.test(path) && req.method() === 'POST') {
+      if (mock.onMessagesPost) return mock.onMessagesPost(route);
+      return route.abort('aborted');
     }
     return route.fulfill({ status: 404, body: '{"detail":"not mocked in e2e"}', contentType: 'application/json' });
   });
