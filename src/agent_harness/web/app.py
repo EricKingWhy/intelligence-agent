@@ -894,6 +894,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         service = SessionService(app.state.agent)
         state = app.state.agent
 
+        # context_providers handler-level 422（ADR-0021 模式，适配 ADR-0020b 的
+        # name 属性机制）：validator 无法访问 AppState/wiring（Pydantic parse 早于
+        # handler），故在 handler 内对 wiring 真实装配的 id 集合校验——与 model
+        # 字段的 from_catalog 422 模式一致。未知 id → 422 + 可用清单。
+        if req.context_providers is not None:
+            _, wiring = await state.get_wiring()
+            wired_ids = {getattr(p, "name", None) for p in wiring.context_providers}
+            wired_ids.discard(None)
+            unknown = [pid for pid in req.context_providers if pid not in wired_ids]
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"context_providers contains unknown ids {unknown}; "
+                        f"available: {sorted(wired_ids)}"
+                    ),
+                )
+
         permission_mode = PermissionPolicy(req.permission_mode)
         permission_mode_explicit = "permission_mode" in req.model_fields_set
         auto_approve_explicit = "auto_approve" in req.model_fields_set

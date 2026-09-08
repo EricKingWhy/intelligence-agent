@@ -38,17 +38,17 @@ async def test_large_output_saved_before_summary_and_event(tmp_path, field):
     summary = compact.message if field == "message" else compact.data[field]
     assert len(summary) < 2000
     assert "line 0:" in summary and "line 4999:" in summary
-    assert f"use inspect_artifact({artifact.artifact_id})" in summary
+    assert f"use read_artifact({artifact.artifact_id})" in summary
     assert result.model_dump() == before
     # R6-7 契约：handler 不再直接 append——事件以 (type, data) 形式返回，
     # 由 Runtime 在 tool/call 落盘之后追加（消除事件日志前向引用）。
     assert deferred == [(
-        "artifact/created",
+        "artifact/externalized",
         {"artifact_id": artifact.artifact_id, "session_id": session.session_id,
          "source_tool": "bash", "tool_call_id": "call",
-         "size": len(raw.encode("utf-8")), "mime_type": "text/plain"},
+         "size": artifact.size, "mime_type": "text/plain"},
     )]
-    assert not any(e.type == "artifact/created" for e in session.events)
+    assert not any(e.type == "artifact/externalized" for e in session.events)
 
 
 @pytest.mark.asyncio
@@ -70,7 +70,9 @@ async def test_both_streams_and_duplicate_message_are_preserved_and_bounded(tmp_
 
 
 @pytest.mark.asyncio
-async def test_upload_failure_does_not_create_reference_or_event(tmp_path):
+async def test_upload_failure_fails_open_with_raw_result(tmp_path):
+    """T5 (#135): store unavailable → fail-open: keep raw tool result in-session."""
+
     class UnavailableStore(FakeArtifactStore):
         async def save(self, *args, **kwargs):
             raise ConnectionError("unavailable")
@@ -78,10 +80,12 @@ async def test_upload_failure_does_not_create_reference_or_event(tmp_path):
     session = make_session(tmp_path)
     before = session.events
     result = ToolResult.success("x" * 5000)
-    with pytest.raises(ConnectionError):
-        await ArtifactOverflowHandler(UnavailableStore()).maybe_overflow(
-            session, "call", "bash", result,
-        )
+    compact, deferred = await ArtifactOverflowHandler(
+        UnavailableStore()
+    ).maybe_overflow(session, "call", "bash", result)
+    # Fail-open: no externalization, original result returned unchanged.
+    assert compact is result
+    assert deferred == []
     assert result.artifact_ref is None
     assert session.events == before
 
@@ -118,8 +122,8 @@ async def test_diff_view_fields_are_overflow_covered(tmp_path):
     artifact = await store.load(compact.artifact_ref)
     assert artifact.content == big
     assert len(compact.data["after"]) < 2000
-    assert "inspect_artifact" in compact.data["after"]
+    assert "read_artifact" in compact.data["after"]
     assert compact.data["before"] == ""
     assert compact.data["path"] == "x.txt" and compact.data["truncated"] is False
-    assert deferred and deferred[0][0] == "artifact/created"
+    assert deferred and deferred[0][0] == "artifact/externalized"
     assert session.events == events_before, "延迟事件由 Runtime 在 tool/call 后追加，handler 不落盘"

@@ -135,7 +135,7 @@ async def test_batch_abort_attributes_run_id_from_operation_context(tmp_path, mo
     却经隐式 seam 写 Session，全仓最隐蔽的耦合）。
 
     ADR-0016 §4.1 flush 语义：TOOL_CALL 由 Runtime 预持久化（不在 flush 补），
-    flush 只补已提交执行的延迟事件（artifact/created 等）——本测试直接调
+    flush 只补已提交执行的延迟事件（artifact/externalized 等）——本测试直接调
     execute_batch，预持久化缺席，因此只断言 pending 事件归因。"""
     from tests.conftest import make_session
 
@@ -155,18 +155,16 @@ async def test_batch_abort_attributes_run_id_from_operation_context(tmp_path, mo
         {"id": "call-2", "name": "big", "args": {}},
     ]
     try:
-        with pytest.raises(ConnectionError):
-            await executor.execute_batch(
-                calls, session=session,
-                operation_context=OperationContext(
-                    session_id=session.session_id, run_id="opctx-run",
-                ),
-            )
+        await executor.execute_batch(
+            calls, session=session,
+            operation_context=OperationContext(
+                session_id=session.session_id, run_id="opctx-run",
+            ),
+        )
     finally:
         run_context_var.reset(token)
 
-    # flush 通道：本批没有 pending 事件（overflow save 本身失败），核心断言
-    # 是 flush 不重复、不误归因——TOOL_CALL 归因由 runtime 预持久化路径
-    # （test_runtime_persists_ledger_before_tool_conversation_events）覆盖。
+    # T5 (#135): fail-open — store unavailable → no externalization,
+    # raw tool result kept in-session. No pending events to flush.
     assert not [e for e in session.events if e.type == TOOL_CALL], \
         "flush 不补 TOOL_CALL（预持久化契约，补发即重复）"

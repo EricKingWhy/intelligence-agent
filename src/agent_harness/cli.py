@@ -43,6 +43,7 @@ from agent_harness.session import (
     AGENT_DELEGATION_FINISHED,
     AGENT_DELEGATION_STARTED,
     ARTIFACT_CREATED,
+    ARTIFACT_EXTERNALIZED,
     CONTEXT_COMPACTED,
     MODEL_COMPLETED,
     MODEL_FAILED,
@@ -408,6 +409,8 @@ def render_replay_event(event: SessionEvent) -> str | None:
                 f"{data.get('status', '')}: {summary}")
     if event.type == ARTIFACT_CREATED:
         return f"[artifact] {str(data)[:120]}"
+    if event.type == ARTIFACT_EXTERNALIZED:
+        return f"[外置产物] artifact_id={data.get('artifact_id', '')} size={data.get('size', 0)}"
     if event.type == SESSION_FORKED:
         return (f"[fork] 来自 {data.get('parent_session_id', '')}"
                 f" @{data.get('fork_point_seq')}")
