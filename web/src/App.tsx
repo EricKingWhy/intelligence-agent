@@ -99,8 +99,7 @@ export default function App() {
   const [reasoningEfforts, setReasoningEfforts] = useState<CatalogEntry[]>([]);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const [contextProviders, setContextProviders] = useState<CatalogEntry[]>([]);
-  // setSelectedContextProviders unused — F3 multi-select will wire it. Underscore marks intentional.
-  const [selectedContextProviders, _setSelectedContextProviders] = useState<string[]>([]);
+  const [selectedContextProviders, setSelectedContextProviders] = useState<string[]>([]);
   const fetchControlCatalogs = useCallback(async () => {
     try {
       const [modes, profiles, efforts, providers] = await Promise.all([
@@ -294,6 +293,7 @@ export default function App() {
       setReasoningEfforts(efforts);
       setSelectedReasoningEffort((prev) => (prev && efforts.some((m) => m.id === prev) ? prev : null));
       setContextProviders(providers);
+      setSelectedContextProviders((prev: string[]) => prev.filter((id) => providers.some((p) => p.id === id)));
     })();
   }, [error]);
 
@@ -572,6 +572,8 @@ export default function App() {
             selectedReasoningEffort={selectedReasoningEffort}
             onReasoningEffortChange={setSelectedReasoningEffort}
             contextProviders={contextProviders}
+            selectedContextProviders={selectedContextProviders}
+            onContextProvidersChange={setSelectedContextProviders}
           />
         </section>
 

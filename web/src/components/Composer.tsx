@@ -5,11 +5,12 @@
  */
 
 import { memo, useEffect, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Brain, Shield, Square, User } from 'lucide-react';
+import { ArrowUp, Brain, Layers, Shield, Square, User } from 'lucide-react';
 import type { PresetTask } from '../types';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { ControlPicker } from './ControlPicker';
+import { ContextProviderPicker } from './ContextProviderPicker';
 
 interface Props {
   streaming: boolean;
@@ -35,9 +36,10 @@ interface Props {
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
   onReasoningEffortChange?: (id: string | null) => void;
-  /** GET /api/context-providers 清单。空 → 隐藏控件。
-   *  多选语义推迟——当前后端诚实返空，控件不会渲染。 */
+  /** GET /api/context-providers 清单。空 → 隐藏控件（不伪造）。多选。 */
   contextProviders?: CatalogEntry[];
+  selectedContextProviders?: string[];
+  onContextProvidersChange?: (ids: string[]) => void;
 }
 
 // memo：流式期间 props 稳定（streaming 布尔不变、回调由 App useCallback 固定），
@@ -60,6 +62,8 @@ export const Composer = memo(function Composer({
   selectedReasoningEffort = null,
   onReasoningEffortChange,
   contextProviders = [],
+  selectedContextProviders = [],
+  onContextProvidersChange,
 }: Props) {
   const [value, setValue] = useState('');
 
@@ -140,10 +144,15 @@ export const Composer = memo(function Composer({
               placeholder="推理"
               disabled={streaming}
             />
-            {/* Context Providers 推迟——多选语义需要新组件或扩展 ControlPicker
-                支持 multi 模式。后端当前诚实返空，此控件不会渲染。提交链路已就绪：
-                App.tsx 的 handleSubmit 在 selectedContextProviders 非空时传
-                context_providers 数组。 */}
+            <ContextProviderPicker
+              ariaLabel="Context Providers"
+              entries={contextProviders}
+              selectedIds={selectedContextProviders}
+              onChange={onContextProvidersChange ?? (() => {})}
+              icon={Layers}
+              placeholder="Context"
+              disabled={streaming}
+            />
           </div>
         )}
         {streaming ? (
