@@ -1,15 +1,144 @@
-# 交接单：/improve-codebase-architecture（参考扫描结果）
+# 交接单：/improve-codebase-architecture（参考扫描结果）+ 分支拓扑审计
 
-> **给 Codex。** 下面是 ZCode 在 `D:\intelligence-agent-backend\src\agent_harness\`
-> 做过的一次架构扫描发现，作为你的**参考输入**——不是结论，不是指令。
-> 请独立执行完整的 `/improve-codebase-architecture` 全仓扫描流程，产出你自己的
-> 可视化 HTML 报告和你自己的优先级判断。这份交接单的唯一作用是交叉验证：
-> 如果你扫到了我没扫到的东西，说明那是真信号；如果你扫到的东西和我的重叠，
-> 说明高置信；如果你没扫到我列的某些项，按你自己的流程判断，不必迁就。
+> **给 Codex。你有两个任务。**
+>
+> **任务一（§B）是重点**：分支拓扑审计——用户用 6 个并行会话（3 后端 + 3 前端 +
+> 1 merge）开发，自己控制分支集成，已经出现过平行实现撞车（B2 冲突）。需要你
+> 全面审计当前分支状态，找出孤儿 commit、未集成工作、平行实现、失控的迹象。
+>
+> **任务二（§C）**：`/improve-codebase-architecture` 全仓扫描——下面是我做过的
+> 一次扫描发现，作为参考输入，不是结论。请独立全仓扫描，交叉验证。
 
 ---
 
-## 我做了什么
+## §A 背景你先知道
+
+用户的工作模式：
+
+- **6 个并行 AI 会话**：3 个做后端、3 个做前端、1 个做 merge（Git Integrator）
+- **每个会话在独立 worktree 工作**，分支各自分叉
+- **用户自己做分支管理和 merge 决策**，有时候控制不好
+- **已知后果**：B2（context_providers）有两个会话各写了一套独立实现，撞车了
+  （ADR-0020b vs ADR-0021），最后靠集成 AI 裁决用混合方案解决
+- **用户的痛点原话**："有时候我控制不好可能会导致分支混乱错误的问题，甚至有的
+  计划有没有被执行我都不记得了"
+
+已知 worktree 布局（截至最近一次确认，可能已变）：
+
+| Worktree | 分支 | 用途 |
+| --- | --- | --- |
+| `D:\intelligence-agent` | `main` | 最终集成 |
+| `D:\intelligence-agent-backend` | `feat/backend` | 后端开发 |
+| `D:\intelligence-agent-frontend` | `feat/frontend` 或 `feat/frontend-context-providers` | 前端开发 |
+| `D:\intelligence-agent-runtime` | `feat/runtime-context-providers` 等 | 后端 RUNTIME 子批次 |
+| `D:\intelligence-agent-phase14` | `feat/phase14` | Phase 14 |
+| `D:\intelligence-agent-phase15` | `feat/phase15` | Phase 15 |
+| `D:\intelligence-agent-phase16` | `feat/phase16` | Phase 16 |
+
+---
+
+## §B 任务一（重点）：分支拓扑审计
+
+### 要查什么
+
+这是**只读审计任务**——不改任何分支、不 push、不 merge、不删任何东西。只产出报告。
+
+#### B1. 全 worktree 盘点
+
+```bash
+git worktree list --porcelain
+```
+
+对每个 worktree，记录：
+- 当前分支 + HEAD
+- 工作区是否 dirty（有未提交改动）
+- 相对 `origin/main` 领先/落后多少 commit
+
+#### B2. 每个分支的集成状态
+
+对每个本地分支（含已 merge 的历史分支），查：
+
+- **是否已集成入 main**？（`git merge-base --is-ancestor <branch> main`）
+- 如果没集成：**领先 main 多少 commit**？那些 commit 是什么？
+- 如果已集成：**main 是否有分支没有的 commit**？（分支落后于 main，可能是集成后
+  main 又推进了，分支该废弃了）
+- **分支的 merge-base 是什么**？如果 merge-base 很深（很多 commit 前），说明分支
+  长时间没和 main 同步，集成时冲突风险高
+
+#### B3. 孤儿 commit / 孤儿分支
+
+- 有没有分支上的 commit **既不在 main 里，也不在任何活跃分支的 tip 上**？
+  （用 `git log --all --oneline` + `git log main --oneline` 对比）
+- 有没有分支**已经废弃但没删**？（worktree 还在但分支已 merge 入 main 且落后很多）
+- 有没有**同名测试文件在不同分支有不同实现**？（B2 冲突的征兆——
+  `test_assembly_context_providers.py` 就是这样）
+
+#### B4. 平行实现 / 重复劳动
+
+这是最危险的失控信号。重点查：
+
+- **同一个功能在多个分支各有一套实现**？怎么查：
+  - 搜 ADR 文件：同一个主题有没有多个 ADR 编号？（比如 ADR-0020b 和 ADR-0021
+    都是 context_providers runtime consumption——这就是平行实现）
+  - 搜 commit message：同一个 ticket 号 / 功能名出现在多个分支？
+  - 搜代码：同一个函数 / 类名在不同分支有不同实现？
+- **已集成入 main 的功能，在其他分支又重新实现了一遍**？（分支分叉太早，
+  不知道 main 已经有了）
+
+#### B5. 计划执行状态核对
+
+用户说"有的计划有没有被执行我都不记得了"。查：
+
+- `docs/integration/` 下的所有交接单（`*_HANDOFF.md`、`*_PROMPT.md`）——
+  每个交接单对应的分支/commit 是否已集成入 main？
+- `docs/spec/14_IMPLEMENTATION_ROADMAP.md` 和 `docs/PHASE_STATUS.md`——
+  各 Phase 的声称状态是否和实际 git 历史一致？
+- 有没有交接单写了但**没人执行**？有没有**执行了但没写交接单**的 commit？
+
+#### B6. 输出格式
+
+产出一个 Markdown 报告（放 `docs/integration/BRANCH_TOPOLOGY_AUDIT.md`），结构：
+
+```
+## 全 worktree 状态表
+（worktree | 分支 | HEAD | dirty? | 领先main | 落后main | 状态：活跃/待集成/可废弃）
+
+## 待集成工作
+（分支 | commit | 描述 | 风险评估）
+
+## 孤儿 / 可废弃分支
+（分支 | 最后活跃时间 | 建议：保留/删除）
+
+## 平行实现 / 重复劳动
+（主题 | 分支A 实现 | 分支B 实现 | main 上是哪个 | 建议）
+
+## 计划执行核对
+（交接单/Phase | 对应分支 | 已集成? | 差异说明）
+
+## 风险与建议
+（按严重程度排序的发现 + 建议）
+```
+
+### 审计纪律
+
+- **纯只读**：不 checkout、不 merge、不 rebase、不 push、不删分支、不删 worktree
+- **用 `git -C <worktree> <command>`** 操作其他 worktree，不在当前 worktree 里
+  随意 checkout 别的分支
+- **不确定就报告，不猜测**：比如某个分支"可能是废弃的"——报告你看到的证据，
+  让用户决定是否删
+- **§14.4**：任何写操作都需要用户明确批准，审计阶段零写操作（除了写报告文件）
+
+---
+
+## §C 任务二：/improve-codebase-architecture 全仓扫描
+
+> 下面是 ZCode 做过的一次架构扫描发现，作为你的**参考输入**——不是结论，不是指令。
+> 请独立执行完整的 `/improve-codebase-architecture` 全仓扫描流程，产出你自己的
+> 可视化 HTML 报告和你自己的优先级判断。这份参考的唯一作用是交叉验证：
+> 如果你扫到了我没扫到的东西，说明那是真信号；如果你扫到的东西和我的重叠，
+> 说明高置信；如果你没扫到我列的某些项，按你自己的流程判断，不必迁就。
+
+### 我做了什么
 
 - 在 `D:\intelligence-agent-backend\src\agent_harness\` 核心模块做了文件级和
   函数级扫描（agent/ capability/ context/ session/ tooling/ web/ storage/ model/
@@ -102,7 +231,7 @@
 
 ---
 
-## 对你的期望
+## §C 扫描对 Codex 的期望
 
 1. **独立全仓扫描**——不要因为我在上面列了 9 项就跳过你自己的发现流程。你的
    扫描应该覆盖面不窄于我，优先级判断也不必和我一致。
@@ -113,10 +242,28 @@
 
 ---
 
-## 项目约束提醒
+## §D 两个任务的优先级与产出
+
+**建议先做 §B（分支拓扑审计），再做 §C（架构扫描）**。理由：如果分支状态失控，
+架构扫描的基线可能本身就不可靠（比如你扫到的"问题"其实是某个分支的平行实现，
+不是 main 的真实状态）。先确认分支拓扑干净，再在干净的基线上做架构扫描。
+
+产出物：
+- `docs/integration/BRANCH_TOPOLOGY_AUDIT.md`——§B 的审计报告
+- `/improve-codebase-architecture` 的标准 HTML 报告——§C 的架构扫描报告
+
+两个报告都要交给用户审阅，不要自行执行修复（审计和扫描都是只读任务）。
+
+---
+
+## §E 项目约束提醒（两个任务通用）
 
 - AGENTS.md §8 Scope Lock：每个 deepening 是独立 ticket，不顺手重构无关代码
 - AGENTS.md §9.2 Simplicity First：最小改动，不为通用堆无用抽象
 - AGENTS.md §9.3 Surgical Changes：只动必须动的，匹配现有风格
+- AGENTS.md §14.4：任何写操作（merge / push / rebase / reset / branch 删除 /
+  worktree 删除）都需要用户明确批准
 - 不变量 #1–22（AGENTS.md §7）：任何重构不能破坏架构不变量
-- 工作目录：`D:\intelligence-agent-backend`（feat/backend）；不要碰 main
+- 工作目录：`D:\intelligence-agent-backend`（feat/backend）；审计其他 worktree
+  时用 `git -C <path>` 只读访问，不在那里随意 checkout
+- 零密钥泄露（.env 内容绝不打印/提交/复制进文档）
