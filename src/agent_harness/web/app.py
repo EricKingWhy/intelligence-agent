@@ -885,6 +885,27 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         _, wiring = await state.get_wiring()
         await state.ensure_stores()
 
+        # context_providers handler 层 422 校验（B2-MixIn，ADR-0020b 补强）：
+        # validator 只查形状（非空字符串），集合校验需要 wiring（runtime conditional），
+        # 故在 handler 内做——与 model 字段 from_catalog 422 同模式。未知 id → 422
+        # + detail 含当前实际装配的 provider 清单（诚实反馈，不 fail-open 静默跳过）。
+        # assembly 层 _select_context_providers 的 fail-open 语义作为防御性兜底保留
+        # （万一 wiring 在 422 后降级），两层不矛盾。
+        if req.context_providers is not None:
+            wired_names = {
+                name for p in wiring.context_providers
+                if isinstance(name := getattr(p, "name", None), str) and name
+            }
+            unknown = [pid for pid in req.context_providers if pid not in wired_names]
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"context_providers contains unknown ids {unknown}; "
+                        f"available: {sorted(wired_names)}"
+                    ),
+                )
+
         # Phase 5：permission_mode 是真值源；auto_approve 是 deprecated alias。
         # 三种路由（保留向后兼容）：
         #   1. 显式 permission_mode + 非 danger-full-access → 交互式审批：

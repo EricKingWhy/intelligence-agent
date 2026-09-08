@@ -105,3 +105,66 @@ class TestProviderNameAttributes:
 
     def test_skills_provider_name(self):
         assert SkillCatalogContextProvider.name == "skills"
+
+
+class TestContextProvidersHandler422:
+    """POST /api/sessions 的 context_providers handler 层 422 校验（B2-MixIn）。
+
+    validator 只查形状（非空字符串），集合校验在 handler 内对 wiring 真实装配
+    的 provider name 集合做——与 model 字段 from_catalog 422 同模式。
+    """
+
+    def test_unknown_id_returns_422_with_available(self, wired_client):
+        """未知 id → 422 + detail 含 available 清单（诚实反馈，不 fail-open）。"""
+        resp = wired_client.post("/api/sessions", json={
+            "task": "x", "workspace": "b2-mixin-unknown",
+            "context_providers": ["nonexistent"],
+        })
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert "nonexistent" in detail
+        # detail 含 available 清单——让客户端看到当前实际装配了什么
+        assert "memory" in detail or "skills" in detail
+
+    def test_known_id_not_422_for_context_field(self, wired_client):
+        """合法 id（已装配）→ 不因 context_providers 字段被 422。"""
+        resp = wired_client.post("/api/sessions", json={
+            "task": "x", "workspace": "b2-mixin-ok",
+            "context_providers": ["memory"],
+        })
+        # 不是 422 即说明 context_providers 字段通过了校验（其他失败原因可接受）
+        if resp.status_code == 422:
+            detail = resp.json().get("detail", "")
+            assert "context_providers" not in str(detail), (
+                f"合法 id 不应触发 context_providers 422；detail={detail}"
+            )
+
+    def test_empty_list_accepted(self, wired_client):
+        """空列表是合法值（显式选了不启用任何 provider）。"""
+        resp = wired_client.post("/api/sessions", json={
+            "task": "x", "workspace": "b2-mixin-empty",
+            "context_providers": [],
+        })
+        if resp.status_code == 422:
+            detail = resp.json().get("detail", "")
+            assert "context_providers" not in str(detail)
+
+    def test_bare_config_known_id_returns_422(self, bare_client):
+        """bare 配置（没装配任何 provider）传 ["memory"] → 422（memory 没装配）。"""
+        resp = bare_client.post("/api/sessions", json={
+            "task": "x", "workspace": "b2-mixin-bare",
+            "context_providers": ["memory"],
+        })
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert "memory" in detail
+
+    def test_none_context_providers_accepted(self, wired_client):
+        """None（默认）→ 正常（用默认全量，不触发 422）。"""
+        resp = wired_client.post("/api/sessions", json={
+            "task": "x", "workspace": "b2-mixin-none",
+        })
+        if resp.status_code == 422:
+            detail = resp.json().get("detail", "")
+            assert "context_providers" not in str(detail)
+
