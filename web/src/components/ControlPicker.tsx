@@ -78,7 +78,16 @@ export function ControlPicker({
           align="start"
           sideOffset={6}
         >
-          <Command label={ariaLabel}>
+          <Command
+            label={ariaLabel}
+            // 与 ModelPicker 同款 includes 子串匹配（cmdk 默认 command-score 行为不一致）。
+            filter={(value, search, keywords) => {
+              const q = search.trim().toLocaleLowerCase();
+              if (!q) return 1;
+              const haystack = [value, ...(keywords ?? [])].join(' ').toLocaleLowerCase();
+              return haystack.includes(q) ? 1 : 0;
+            }}
+          >
             <div className="model-picker-search-wrap">
               <Icon size={13} aria-hidden="true" />
               <CommandInput placeholder="搜索…" className="model-picker-search" />
