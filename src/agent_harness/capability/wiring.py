@@ -33,43 +33,6 @@ class ContributesTools(Protocol):
 
 
 @dataclass
-class ContextProviderEntry:
-    """已装配 context provider 的描述符（Ticket B2，ADR-0021）。
-
-    wiring 装配的 provider 实例关联到稳定 id，让 web 层能用 ``list[str]`` 引用、
-    GET 端点能投影真实清单、validator 能校验未知 id。display_name / description
-    用于前端多选控件展示。最小映射层——不是 provider registry subsystem（§9.2）。
-    """
-
-    id: str
-    provider: Any
-    display_name: str
-    description: str
-
-
-def register_context_provider(
-    wiring: CapabilityWiring,
-    provider_id: str,
-    provider: Any,
-    *,
-    display_name: str,
-    description: str,
-) -> None:
-    """注册一个已装配 context provider 到 wiring（id→instance 映射 + 兼容列表）。
-
-    单一入口保证 ``context_provider_entries``（id map，build_runtime filter 用）
-    与 ``context_providers``（list，向后兼容）永远一致——conditional append 处
-    改调本函数即可，不会出现「在列表里但不在 map 里」的漂移（不变量对齐 §16）。
-    """
-    entry = ContextProviderEntry(
-        id=provider_id, provider=provider,
-        display_name=display_name, description=description,
-    )
-    wiring.context_provider_entries[provider_id] = entry
-    wiring.context_providers.append(provider)
-
-
-@dataclass
 class CapabilityWiring:
     """一次装配的产出：调用方把这些接到 ToolRegistry / ContextBuilder / AgentRuntime。
 
@@ -77,12 +40,10 @@ class CapabilityWiring:
     lifecycle 通道（关闭知识收拢在创建者，web 层只管 get / shutdown）。
     """
 
-    # Ticket B2（ADR-0021）：id→provider 映射——build_runtime 据用户提交的
-    # ``context_providers: list[str]`` filter 子集，GET 端点投影真实清单，
-    # validator 校验未知 id。context_providers（裸 list）保留为向后兼容视图，
-    # 由 register_context_provider 单点维护一致性。
+    # Ticket B2（ADR-0020b）：已装配 context provider 裸 list。
+    # web 层 GET 端点投影 wiring.context_providers 的 name 属性；
+    # handler 层 422 校验也走裸 list + getattr(p, "name")。
     context_providers: list[Any] = field(default_factory=list)
-    context_provider_entries: dict[str, ContextProviderEntry] = field(default_factory=dict)
     tools: list[Any] = field(default_factory=list)
     memory_writer: Any | None = None
     memory: Any | None = None  # MemoryComponents 生命周期包（relay/writeback），由 aclose 关闭
@@ -144,13 +105,7 @@ async def _wire_memory(
         ),
         components.capability,
     )
-    register_context_provider(
-        wiring,
-        provider_id="memory",
-        provider=MemoryContextProvider(components.capability),
-        display_name="Memory",
-        description="Recall relevant memories from the memory store (LangMem default, replaceable).",
-    )
+    wiring.context_providers.append(MemoryContextProvider(components.capability))
     wiring.memory_writer = components.writeback
     wiring.memory = components
 
@@ -210,13 +165,7 @@ async def _wire_skills(
         ),
         capability,
     )
-    register_context_provider(
-        wiring,
-        provider_id="skills",
-        provider=SkillCatalogContextProvider(capability),
-        display_name="Skills",
-        description="Inject catalog of available skills (titles + descriptions) as context.",
-    )
+    wiring.context_providers.append(SkillCatalogContextProvider(capability))
     # load_skill 不在这里 append：SkillCapability 实现 ContributesTools，
     # 与其他工具贡献统一走 wire_capabilities 末尾的收集循环。
 
