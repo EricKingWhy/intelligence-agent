@@ -243,6 +243,11 @@ export function useSession() {
   // 之后才到达的迟到帧。
   const modeRef = useRef<SessionMode>(mode);
   modeRef.current = mode;
+  // conversation 的实时镜像——sendFollowUp 需要当前 conversation 作为
+  // attachLiveStream 的 initialConv，但不能把 conversation 放进 deps
+  //（每帧变化会导致回调重建）。用 ref 读最新值即可。
+  const conversationRef = useRef<ConversationState | null>(conversation);
+  conversationRef.current = conversation;
 
   // T4（#97）重连状态机 refs：lastAppliedSeq = 已应用最大持久 seq（续传游标，
   // 重放与续传由 seenSeqs 去重吸收重复）；streamGen = 流代际（切走/取消/卸载
@@ -657,10 +662,14 @@ export function useSession() {
         if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
         // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
-        // queued/steered → JSON（Content-Type 非 event-stream），无需 attach。
+        // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。
+        // 后者不 attach 新流；回到 viewing 让用户看到当前 run 继续推进。
         const ct = res.headers.get('content-type') ?? '';
         if (ct.includes('text/event-stream')) {
-          attachLiveStream(res, gen, conversation);
+          attachLiveStream(res, gen, conversationRef.current);
+        } else {
+          // queued/steered JSON：当前流仍在跑，回 viewing 等终态帧迁移。
+          setMode({ kind: 'viewing', sessionId });
         }
       } catch (e) {
         streamGenRef.current += 1;
@@ -668,7 +677,7 @@ export function useSession() {
         setError(`续聊失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, conversation],
+    [attachLiveStream],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
