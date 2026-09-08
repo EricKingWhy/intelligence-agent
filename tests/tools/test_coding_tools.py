@@ -448,3 +448,31 @@ async def test_read_empty_file_returns_empty_success(
     assert result.result.ok is True
     assert result.result.data["content"] == ""
     assert result.result.data["total_lines"] == 0
+
+
+def test_crlf_line_endings_preserved_on_read_write_cycle(
+    sandbox: LocalSubprocessSandbox,
+):
+    """CRLF 行尾在 read_text → write_text 往返中不被篡改。
+
+    回归守护：sandbox/local.py 的 read_text 曾用 Path.read_text(newline="")，
+    该关键字参数在 Python 3.12+ 才加入 pathlib。若有人改回 read_text() 且
+    运行在开启 universal-newlines 的环境上，CRLF 会被折叠成 LF，edit 回写
+    即产生整文件 diff。
+    """
+    crlf_content = "line one\r\nline two\r\n"
+    # 直接用 open() 写入 CRLF 原始字节，绕过 sandbox.write_text 的 newline=""
+    raw_path = sandbox._workspace_root / "crlf.txt"
+    with open(raw_path, "w", encoding="utf-8", newline="") as f:
+        f.write(crlf_content)
+
+    # read_text 必须原样返回 CRLF
+    read_back = sandbox.read_text("crlf.txt")
+    assert read_back == crlf_content, "CRLF 行尾在 read_text 中被篡改"
+
+    # write_text → read_text 往返也不变
+    sandbox.write_text("crlf_out.txt", read_back)
+    raw_out = sandbox._workspace_root / "crlf_out.txt"
+    with open(raw_out, "r", encoding="utf-8", newline="") as f:
+        roundtrip = f.read()
+    assert roundtrip == crlf_content, "CRLF 行尾在 write_text → read 中被篡改"

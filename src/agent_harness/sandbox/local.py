@@ -322,7 +322,10 @@ class LocalSubprocessSandbox(Sandbox):
         变 LF，edit 回写即产生整文件 diff（EOL 破坏用户工作区）。
         """
         resolved = self._resolve_within_workspace(path)
-        return resolved.read_text(encoding="utf-8", newline="")
+        # open() 而非 Path.read_text()：newline="" 关键字参数在 Python 3.12+
+        # 才加入 pathlib（PEP 436 backport），3.11 上会 TypeError。
+        with open(resolved, "r", encoding="utf-8", newline="") as f:
+            return f.read()
 
     def write_text(self, path: str, content: str) -> None:
         """覆盖写 workspace 内文件（父目录自动创建）。路径越界抛 PermissionError。
