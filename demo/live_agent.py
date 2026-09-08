@@ -326,23 +326,81 @@ async def _main() -> int:
         await _run_task(runtime, session, args.task, store_root, session.session_id)
         return 0
 
-    # 交互模式
-    console.print("[dim]交互模式：输入任务回车开始；输入 :q 退出。[/dim]\n")
+    # 交互模式：REPL 持有 current_session_id，普通 prompt 在同一 session 上续聊
+    console.print("[dim]交互模式：输入任务回车续聊；/help 看命令；:q 退出。[/dim]\n")
+
+    from demo.live_agent_repl import format_help, parse_slash_command
+
+    current_session = _new_session(store_root)
+    console.print(f"[dim]current session: {current_session.session_id}[/dim]\n")
+
     while True:
         try:
-            task = Prompt.ask("[bold green]你 ›[/bold green]")
+            user_input = Prompt.ask("[bold green]你 ›[/bold green]")
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
             return 0
-        if task.strip().lower() in {":q", ":quit", ":exit"}:
+        if user_input.strip().lower() in {":q", ":quit", ":exit"}:
             console.print("[dim]bye[/dim]")
             return 0
-        if not task.strip():
+        if not user_input.strip():
             continue
-        # 每次任务起一个新 session——便于观察独立的完整闭环
-        session = _new_session(store_root)
+
+        # slash 命令分发
+        parsed = parse_slash_command(user_input)
+        if parsed is not None:
+            if parsed.name == "help":
+                console.print(format_help())
+            elif parsed.name == "new":
+                current_session = _new_session(store_root)
+                console.print(f"[green]新建 session: {current_session.session_id}[/green]")
+            elif parsed.name == "clear":
+                console.clear()
+            elif parsed.name == "history":
+                store = JsonlSessionStore(root=store_root)
+                ids = store.list_session_ids()
+                if not ids:
+                    console.print("[dim]（暂无会话）[/dim]")
+                else:
+                    for sid in ids:
+                        marker = " ← current" if sid == current_session.session_id else ""
+                        console.print(f"  {sid}{marker}")
+            elif parsed.name == "resume":
+                store = JsonlSessionStore(root=store_root)
+                ids = store.list_session_ids()
+                if not ids:
+                    console.print("[red]无可恢复的 session[/red]")
+                elif parsed.args:
+                    target_id = parsed.args[0]
+                    if target_id in ids:
+                        current_session = Session.resume(
+                            store, target_id,
+                            workspace_registry=None,
+                        )
+                        console.print(f"[green]恢复 session: {target_id}[/green]")
+                    else:
+                        console.print(f"[red]session 不存在: {target_id}[/red]")
+                else:
+                    console.print("[dim]可用 session:[/dim]")
+                    for i, sid in enumerate(ids):
+                        console.print(f"  [{i}] {sid}")
+                    console.print("[dim]用 /resume <session_id> 恢复[/dim]")
+            elif parsed.name == "compact":
+                console.print("[yellow]/compact 尚未实现（T4 压缩 bracket 升级后接线）[/yellow]")
+            elif parsed.name == "model":
+                if len(parsed.args) < 2:
+                    console.print("[red]用法: /model <provider> <model>[/red]")
+                else:
+                    console.print("[yellow]/model 尚未实现（T7 模型切换 + MODEL_CHANGED 后接线）[/yellow]")
+            elif parsed.name == "fork":
+                console.print("[yellow]/fork 尚未实现（T7 Fork API/UI/CLI 后接线）[/yellow]")
+            elif parsed.name == "cancel":
+                console.print("[yellow]/cancel 尚未实现（T8 崩溃恢复 + Ledger reconcile 后接线）[/yellow]")
+            continue
+
+        # 普通 prompt：在 current_session 上续聊
         try:
-            await _run_task(runtime, session, task, store_root, session.session_id)
+            await _run_task(runtime, current_session, user_input, store_root, current_session.session_id)
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]任务出错:[/red] {e!r}")
 

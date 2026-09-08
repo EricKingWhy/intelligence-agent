@@ -683,6 +683,7 @@ class ToolExecutor:
             permission=tool_perm,
             policy=self._policy,
             reason=reason,
+            tool_call_id=tool_call_id,
         )
 
         if self._approval_callback is None:

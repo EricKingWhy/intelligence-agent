@@ -498,7 +498,7 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
     app = create_app(settings, enable_cors=False)
 
     hanging = HangingRuntime()
-    with patch("agent_harness.web.app.build_runtime", return_value=hanging):
+    with patch("agent_harness.session.service.build_runtime", return_value=hanging):
         transport = _DisconnectingASGI(app)
         scope = {
             "type": "http",
@@ -562,7 +562,7 @@ def test_create_session_runtime_failure_leaves_no_orphan(client, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("model constructor exploded")
 
-    monkeypatch.setattr("agent_harness.web.app.build_runtime", boom)
+    monkeypatch.setattr("agent_harness.session.service.build_runtime", boom)
     from fastapi.testclient import TestClient as _TC
     raw_client = _TC(client.app, raise_server_exceptions=False)
     store_root = client.app.state.agent.sessions_root
