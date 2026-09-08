@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryContextProvider:
+    # 稳定标识（ADR-0020b）：会话级 context_providers: list[str] 按此筛选，
+    # /api/context-providers 清单端点也按此投影。改这个值会破坏现有请求兼容。
+    name: str = "memory"
+
     def __init__(self, capability: MemoryCapability, timeout_seconds: float = 5.0) -> None:
         self._capability = capability
         self._timeout = timeout_seconds

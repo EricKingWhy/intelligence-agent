@@ -105,6 +105,21 @@ AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
 }
 
+#: context_providers 已装配清单投影（ADR-0020b，已运行时消费——按 name 筛选
+#: wiring 自动装配的 ContextProvider 子集注入 ContextBuilder）。id 必须与
+#: MemoryContextProvider.name / SkillCatalogContextProvider.name 严格对齐——
+#: 前端据本清单渲染选项，用户选中的 id 经 POST /api/sessions 回传触发筛选。
+CONTEXT_PROVIDER_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "memory": {
+        "display_name": "Memory",
+        "description": "Inject relevant recalled memories scoped to the user into the model context.",
+    },
+    "skills": {
+        "display_name": "Skills",
+        "description": "Inject the catalog of available skills (name + description) into the model context.",
+    },
+}
+
 # ── Request / Response schemas ──
 
 
@@ -145,6 +160,22 @@ class CreateSessionRequest(BaseModel):
         if v is not None and v not in AGENT_PROFILE_DESCRIPTIONS:
             valid = ", ".join(AGENT_PROFILE_DESCRIPTIONS)
             raise ValueError(f"agent_profile must be one of: {valid}")
+        return v
+
+    @field_validator("context_providers")
+    @classmethod
+    def _validate_context_providers(cls, v: list[str] | None) -> list[str] | None:
+        # 运行时消费（ADR-0020b）：会话请求按已装配 provider 的 name 子集筛选。
+        # 不对未知名字 422——provider 是否装配取决于 CAPABILITIES 运行时状态，
+        # 静态校验没法判定；未知名字在 assembly 层 fail-open 跳过（不变量 #21）。
+        # 这里只校验形状：每项是非空字符串（Pydantic 已保证 list[str]，空 list 合法）。
+        if v is None:
+            return v
+        for item in v:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "context_providers entries must be non-empty strings"
+                )
         return v
 
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
@@ -794,17 +825,33 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/context-providers")
     async def list_context_providers() -> dict[str, Any]:
-        """列出已装配的 context provider 清单（Ticket B1，SDD 03 §17 对齐）。
+        """列出已装配的 context provider 清单（ADR-0020b 运行时消费）。
 
-        当前 runtime 尚未装配任何 context provider（Memory = Capability + Context
-        Provider，§7.16——provider 落地是独立批次）。诚实返 {"providers": []}，
-        与 /api/capabilities 空目录降级同原则（不伪造基础项）。前端据空列表自行
-        fallback；provider 装配落地后本端点会自然返回真实清单，契约形态不变。
+        动态投影 ``wiring.context_providers`` 的 ``name`` 属性（与
+        MemoryContextProvider.name / SkillCatalogContextProvider.name 对齐）。
+        display_name / description 从 CONTEXT_PROVIDER_DESCRIPTIONS 取——
+        清单端点与 POST /api/sessions 共用同一 id 集合。
+
+        未装配任何 capability（bare 配置）→ wiring.context_providers 为空 →
+        返 ``{"providers": []}``（与 /api/capabilities 空目录降级同原则，
+        不伪造基础项）。前端据空列表自行 fallback。
         """
-        # Phase 5 接收 context_providers: list[str] | None 但运行时 no-op；
-        # 这里同样诚实暴露「当前没有任何已装配 provider」。待 provider registry
-        # 落地后替换为真实投影（独立批次，本 Ticket 不消费运行时——Scope Lock §8）。
-        return {"providers": []}
+        state = app.state.agent
+        _, wiring = await state.get_wiring()
+        providers: list[dict[str, Any]] = []
+        for provider in wiring.context_providers:
+            name = getattr(provider, "name", None)
+            if not isinstance(name, str) or not name:
+                # 未声明 name 的 provider（未来情况）不出现在清单——
+                # 清单端点是稳定 id 契约，不暴露匿名项。
+                continue
+            desc = CONTEXT_PROVIDER_DESCRIPTIONS.get(name)
+            providers.append({
+                "id": name,
+                "display_name": (desc["display_name"] if desc else name),
+                "description": (desc["description"] if desc else ""),
+            })
+        return {"providers": providers}
 
     @app.post("/api/sessions")
     async def create_session(req: CreateSessionRequest):

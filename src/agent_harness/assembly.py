@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agent_harness.agent import AgentRuntime
 
@@ -97,6 +98,26 @@ async def assemble_wiring(
     return registry, wiring
 
 
+def _select_context_providers(
+    wired: list[Any], requested: list[str] | None,
+) -> list[Any]:
+    """会话级 context_providers 筛选（ADR-0020b）。
+
+    - ``requested is None`` → 返回全量 wired（默认行为，向后兼容）；
+    - ``requested == []`` → 返回空（用户显式选零 provider，区别于 None 的默认全量）；
+    - ``requested`` 非空 → 仅保留 ``name ∈ requested`` 的 provider；
+      未知名字 fail-open 跳过（与 OPTIONAL_RUNTIME 降级原则一致——会话请求不能
+      因为一个未装配的 provider 名字而拖垮 Core，不变量 #21）。
+
+    未声明 ``name`` 属性的 provider（未来情况）经 ``getattr`` 容错为 None，
+    不会被任何请求名字命中——fail-open 不报错。
+    """
+    if requested is None:
+        return list(wired)
+    wanted = set(requested)
+    return [p for p in wired if getattr(p, "name", None) in wanted]
+
+
 async def build_runtime(
     *,
     settings: Settings,
@@ -127,9 +148,6 @@ async def build_runtime(
     approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
     式审批 callback（见 web 层 PendingApprovalQueue）。
     """
-    if context_providers is not None:
-        logger.info("context_providers=%s received but not yet consumed by runtime", context_providers)
-
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
     # coding/research_review 收窄 registry 到 spec.tool_scope + 注入 spec.system_prompt。
@@ -243,7 +261,11 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
-            context_providers=list(wiring.context_providers),
+            # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
+            # wiring 自动装配的 provider 子集；None=默认全量，[]=显式零，未知名字 fail-open。
+            context_providers=_select_context_providers(
+                wiring.context_providers, context_providers,
+            ),
             system_prompt=(profile_spec.system_prompt if profile_spec is not None else None),
         ),
         memory_writer=wiring.memory_writer,

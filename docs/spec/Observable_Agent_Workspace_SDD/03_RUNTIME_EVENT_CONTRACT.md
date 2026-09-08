@@ -608,15 +608,22 @@ Contract is complete when:
 - frontend can build Chat + Timeline + Inspector from events without inferring runtime behavior from prose.
 
 
-## Phase 5 staged session controls (Class B amend)
+## Phase 5 session controls (Class B amend) — runtime consumed
 
-`POST /api/sessions` accepts the following staged contract fields:
+`POST /api/sessions` accepts the following session-level control fields. All three
+are now **runtime consumed** (RUNTIME follow-up batches complete):
 
-- `reasoning_effort`: `minimal | standard | deep | null`
-- `agent_profile`: `main | coding | research_review | null`
-- `context_providers`: string array or `null`
+- `reasoning_effort`: `minimal | standard | deep | null` — injected via
+  `create_chat_model` into the model's native `reasoning_effort` field (ADR-0018 D7).
+- `agent_profile`: `main | coding | research_review | null` — injects `system_prompt`
+  via `ContextBuilder` + narrows tool registry via `registry.filtered(spec.tool_scope)`
+  (ADR-0020a).
+- `context_providers`: string array or `null` — selects a subset of already-wired
+  `ContextProvider` instances by their `name` attribute (`memory`, `skills`).
+  `null` = all wired providers (default); `[]` = explicitly zero; unknown names
+  fail-open silently. `/api/context-providers` dynamically projects the wired set
+  (ADR-0020b).
 
-These fields are accepted and validated at the API boundary in Phase 5, but are
-not yet consumed by the runtime (`phase: staged`). Clients must not infer that
-the selected reasoning/profile/providers are active until a later runtime-wiring
-batch exposes that status explicitly.
+All three are validated at the API boundary (closed enumerations 422 for
+`reasoning_effort` / `agent_profile`; shape-only validation for `context_providers`).
+Clients can rely on the selected values being active at runtime.
