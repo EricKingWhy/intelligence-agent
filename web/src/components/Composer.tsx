@@ -5,11 +5,12 @@
  */
 
 import { memo, useEffect, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Brain, Shield, Square, User } from 'lucide-react';
+import { ArrowUp, Brain, Layers, Shield, Square, User } from 'lucide-react';
 import type { PresetTask } from '../types';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { ControlPicker } from './ControlPicker';
+import { ContextProviderPicker } from './ContextProviderPicker';
 
 interface Props {
   streaming: boolean;
@@ -35,6 +36,10 @@ interface Props {
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
   onReasoningEffortChange?: (id: string | null) => void;
+  /** GET /api/context-providers 清单。空 → 隐藏控件（不伪造）。多选。 */
+  contextProviders?: CatalogEntry[];
+  selectedContextProviders?: string[];
+  onContextProvidersChange?: (ids: string[]) => void;
 }
 
 // memo：流式期间 props 稳定（streaming 布尔不变、回调由 App useCallback 固定），
@@ -56,6 +61,9 @@ export const Composer = memo(function Composer({
   reasoningEfforts = [],
   selectedReasoningEffort = null,
   onReasoningEffortChange,
+  contextProviders = [],
+  selectedContextProviders = [],
+  onContextProvidersChange,
 }: Props) {
   const [value, setValue] = useState('');
 
@@ -83,7 +91,8 @@ export const Composer = memo(function Composer({
     models.length > 0 ||
     permissionModes.length > 0 ||
     agentProfiles.length > 0 ||
-    reasoningEfforts.length > 0;
+    reasoningEfforts.length > 0 ||
+    contextProviders.length > 0;
 
   return (
     <div className="composer-wrap">
@@ -133,6 +142,15 @@ export const Composer = memo(function Composer({
               onChange={onReasoningEffortChange ?? (() => {})}
               icon={Brain}
               placeholder="推理"
+              disabled={streaming}
+            />
+            <ContextProviderPicker
+              ariaLabel="Context Providers"
+              entries={contextProviders}
+              selectedIds={selectedContextProviders}
+              onChange={onContextProvidersChange ?? (() => {})}
+              icon={Layers}
+              placeholder="Context"
               disabled={streaming}
             />
           </div>

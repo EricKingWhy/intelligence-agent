@@ -31,8 +31,15 @@ export const EventType = {
   REASONING_COMPLETED: 'reasoning/completed',
   REASONING_INTERRUPTED: 'reasoning/interrupted',
   TOOL_APPROVAL_REQUESTED: 'tool/approval-requested',
+  PERMISSION_RESOLVED: 'permission/resolved',
   TOOL_OUTPUT_DELTA: 'tool/output_delta',
   TEXT_DELTA: 'text/delta',
+  COMPACTION_START: 'compaction/start',
+  COMPACTION_END: 'compaction/end',
+  MESSAGE_QUEUED: 'message/queued',
+  QUEUE_CANCELLED: 'queue/cancelled',
+  STEER_REQUESTED: 'steer/requested',
+  STEER_APPLIED: 'steer/applied',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];

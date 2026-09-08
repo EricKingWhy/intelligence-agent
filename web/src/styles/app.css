@@ -3691,6 +3691,18 @@ button.json-row {
   flex-shrink: 0;
   color: var(--accent);
 }
+/* ContextProviderPicker 多选 checkbox 字符——与 model-picker-check 同位，
+   accent 着色选中态，未选中时 tertiary 安静。 */
+.ctx-picker-checkbox {
+  flex-shrink: 0;
+  width: 14px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-tertiary);
+}
+.model-picker-item.sel .ctx-picker-checkbox {
+  color: var(--accent);
+}
 .model-picker-item[data-disabled] {
   opacity: 0.5;
   cursor: default;

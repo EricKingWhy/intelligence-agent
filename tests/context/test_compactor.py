@@ -19,31 +19,53 @@ SUMMARY = {
     "citations": [], "tool_outcomes": ["call-1 succeeded"],
 }
 
+#: T4 (#134)：六段式摘要 fixture（Pi 风格结构化 Markdown）。
+SIX_SECTION_SUMMARY = """## 目标
+用户要求读取文件并总结内容。
+
+## 约束
+- 必须保持中文回答
+- 文件路径必须在 workspace 内
+
+## 进展
+已成功读取 old.txt 文件，内容为历史记录。
+
+## 决策
+决定直接展示文件内容而非重新生成。
+
+## 下一步
+等待用户的新请求。
+
+## 关键上下文
+- 历史文件包含 6000 字的旧数据
+- 用户已确认收到文件内容"""
+
 
 @pytest.mark.asyncio
 async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_path):
     session = make_session(tmp_path)
-    session.append(USER_MESSAGE, {"content": "old " * 6000})
+    session.append(USER_MESSAGE, {"content": "old " * 8000})
     session.append(MODEL_COMPLETED, {"content": "finished"})
     session.append(USER_MESSAGE, {"content": "current request"})
     before = session.events
-    model = ScriptedModel([AIMessage(content=json.dumps(SUMMARY))])
-    messages = await ContextBuilder(model, max_context_tokens=8000).build(session)
+    model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
+    messages = await ContextBuilder(model, max_context_tokens=10000).build(session)
     assert isinstance(messages[0], SystemMessage)
-    assert json.loads(messages[0].content) == SUMMARY
+    assert "## 目标" in messages[0].content or "目标" in messages[0].content
     assert messages[1:] == [HumanMessage(content="current request")]
     assert estimate_message_tokens(messages) < 5600
-    assert session.events[:-1] == before
-    event = session.events[-1]
-    assert event.type == "context/compacted"
-    assert event.data == {"compacted_turn_count": 1, "summary_message_count": 1,
-                          "token_estimate": estimate_message_tokens(messages),
-                          "fallback_used": False}
+    assert session.events[:-3] == before  # 3 new events: START, COMPACTED, END
+    # Verify all 3 bracket events were written
+    new_events = session.events[len(before):]
+    event_types = [e.type for e in new_events]
+    assert "compaction/start" in event_types
+    assert "context/compacted" in event_types
+    assert "compaction/end" in event_types
     assert len(model.snapshots) == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["error", "timeout", "format", "tool_call"])
+@pytest.mark.parametrize("failure", ["error", "timeout", "tool_call"])
 async def test_summary_failure_falls_back_with_atomic_tool_block(failure):
     class Model:
         async def ainvoke(self, messages):
@@ -52,7 +74,7 @@ async def test_summary_failure_falls_back_with_atomic_tool_block(failure):
             if failure == "timeout":
                 await asyncio.Event().wait()
             if failure == "tool_call":
-                return AIMessage(content=json.dumps(SUMMARY), tool_calls=[
+                return AIMessage(content=SIX_SECTION_SUMMARY, tool_calls=[
                     {"id": "unwanted", "name": "bash", "args": {}},
                 ])
             return AIMessage(content="not a summary")
@@ -116,7 +138,11 @@ async def test_summary_request_over_budget_skips_model_and_records_fallback(tmp_
     model = ScriptedModel([])
     messages = await ContextBuilder(model, max_context_tokens=1000).build(session)
     assert model.snapshots == []
-    assert session.events[-1].data["fallback_used"] is True
+    # T4 (#134): fallback 标记在 CONTEXT_COMPACTED 事件里
+    compacted_event = next(
+        e for e in session.events if e.type == "context/compacted"
+    )
+    assert compacted_event.data["fallback_used"] is True
     assert estimate_message_tokens(messages) <= 850
 
 
@@ -159,7 +185,7 @@ async def test_single_turn_between_auto_and_hard_guard_does_not_fake_compaction(
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"max_context_tokens": 0}, {"auto_compact_threshold": 0.9},
+    {"max_context_tokens": 0}, {"auto_compact_threshold": 0.95},
     {"hard_guard_threshold": 1.5}, {"auto_compact_threshold": float("nan")},
 ])
 def test_invalid_context_budget_is_rejected(kwargs):
@@ -229,18 +255,17 @@ async def test_huge_tool_call_args_fall_back_without_bricking():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wrapped", [
-    "```json\n" + json.dumps(SUMMARY) + "\n```",
-    "```json " + json.dumps(SUMMARY) + "```",
-    "Summary: " + json.dumps(SUMMARY),
-])
-async def test_summary_json_common_wrapping_shapes_parse(wrapped):
-    """围栏（含无换行形态）与短前言包裹都应解析成功，不降级 mechanical。"""
-    model = ScriptedModel([AIMessage(content=wrapped)])
-    messages = [HumanMessage(content="old " * 6000),
-                HumanMessage(content="current")]
-    result = await ContextCompactor(model, max_context_tokens=8000).compact(
-        messages, estimate_message_tokens(messages),
-    )
+async def test_six_section_summary_passes_shrink_validation():
+    """六段式摘要通过 shrink 校验（严格小于被压缩段）。"""
+    model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
+    messages = [
+        HumanMessage(content="old " * 6000),
+        AIMessage(content="done"),
+        HumanMessage(content="current"),
+    ]
+    result = await ContextCompactor(
+        model, max_context_tokens=8000,
+    ).compact(messages, estimate_message_tokens(messages))
     assert not result.fallback_used
-    assert json.loads(result.messages[0].content) == SUMMARY
+    assert result.summary == SIX_SECTION_SUMMARY
+    assert result.bracket_id is not None

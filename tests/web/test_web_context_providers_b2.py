@@ -15,12 +15,25 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_harness.capability.wiring import (
-    CapabilityWiring,
-    ContextProviderEntry,
-)
+from agent_harness.capability.wiring import CapabilityWiring
 from agent_harness.config import Settings
 from agent_harness.web.app import create_app
+
+
+class _FakeMemoryProvider:
+    """Placeholder provider with stable name (ADR-0020b mechanism)."""
+    name: str = "memory"
+
+    async def select(self, messages):
+        return []
+
+
+class _FakeSkillsProvider:
+    """Placeholder provider with stable name (ADR-0020b mechanism)."""
+    name: str = "skills"
+
+    async def select(self, messages):
+        return []
 
 
 @pytest.fixture
@@ -46,18 +59,8 @@ def wired_client(tmp_path):
     )
     app = create_app(settings, enable_cors=False)
     wiring = CapabilityWiring()
-    wiring.context_provider_entries["memory"] = ContextProviderEntry(
-        id="memory", provider=object(),
-        display_name="Memory", description="Recall relevant memories.",
-    )
-    wiring.context_provider_entries["skills"] = ContextProviderEntry(
-        id="skills", provider=object(),
-        display_name="Skills", description="Inject catalog of skills.",
-    )
-    wiring.context_providers = [
-        wiring.context_provider_entries["memory"].provider,
-        wiring.context_provider_entries["skills"].provider,
-    ]
+    # ADR-0020b mechanism: providers with `name` class attribute
+    wiring.context_providers = [_FakeMemoryProvider(), _FakeSkillsProvider()]
     # 直接落 _wiring + _registry（模拟装配已完成）；get_wiring 缓存命中即可
     from agent_harness.capability.base import CapabilityRegistry
     app.state.agent._wiring = wiring

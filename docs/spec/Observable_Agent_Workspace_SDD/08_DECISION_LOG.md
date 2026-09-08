@@ -131,3 +131,10 @@ validated session contract fields while keeping runtime behavior unchanged. This
 avoids a frontend/backend contract mismatch without pretending provider-specific
 reasoning switches, profile tool scoping, or provider filtering are implemented.
 Runtime consumption is a follow-up batch with explicit capability/status evidence.
+
+**RUNTIME follow-up batches complete (all three fields consumed):**
+- `reasoning_effort` → injected via `create_chat_model` (ADR-0018 D7).
+- `agent_profile` → `system_prompt` via ContextBuilder + `tool_scope` via
+  `registry.filtered` (ADR-0020a).
+- `context_providers` → session-level subset selection by provider `name`,
+  dynamic discovery endpoint projection (ADR-0020b).

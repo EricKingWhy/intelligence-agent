@@ -30,6 +30,7 @@ import { isRecoverableRun } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
   getAgentProfiles,
+  getContextProviders,
   getModels,
   getPermissionModes,
   getReasoningEfforts,
@@ -97,21 +98,26 @@ export default function App() {
   const [selectedAgentProfile, setSelectedAgentProfile] = useState<string | null>(null);
   const [reasoningEfforts, setReasoningEfforts] = useState<CatalogEntry[]>([]);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
+  const [contextProviders, setContextProviders] = useState<CatalogEntry[]>([]);
+  const [selectedContextProviders, setSelectedContextProviders] = useState<string[]>([]);
   const fetchControlCatalogs = useCallback(async () => {
     try {
-      const [modes, profiles, efforts] = await Promise.all([
+      const [modes, profiles, efforts, providers] = await Promise.all([
         getPermissionModes(),
         getAgentProfiles(),
         getReasoningEfforts(),
+        getContextProviders(),
       ]);
       setPermissionModes(modes);
       setAgentProfiles(profiles);
       setReasoningEfforts(efforts);
+      setContextProviders(providers);
     } catch {
       // 降级隐藏——非关键能力
       setPermissionModes([]);
       setAgentProfiles([]);
       setReasoningEfforts([]);
+      setContextProviders([]);
     }
   }, []);
   const [authRequired, setAuthRequired] = useState(false);
@@ -122,8 +128,9 @@ export default function App() {
         setAuthRequired(false);
         void refreshSessions();
         void fetchModels(); // T10：模型目录同样吃鉴权缝——配置 token 后补拉
+        void fetchControlCatalogs(); // 控制目录也走 apiFetch 认证缝——补拉
       }),
-    [refreshSessions, fetchModels],
+    [refreshSessions, fetchModels, fetchControlCatalogs],
   );
 
   // 密度四档（冻结决策）：状态在 App（TopBar 切换、Conversation 消费），persist 由 lib/density 负责。
@@ -246,6 +253,9 @@ export default function App() {
         ...(selectedPermissionMode ? { permission_mode: selectedPermissionMode } : {}),
         ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
         ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
+        ...(selectedContextProviders.length > 0
+          ? { context_providers: selectedContextProviders }
+          : {}),
       });
     },
     [
@@ -255,18 +265,35 @@ export default function App() {
       selectedPermissionMode,
       selectedAgentProfile,
       selectedReasoningEffort,
+      selectedContextProviders,
     ],
   );
 
   // 422 = 未知模型（契约 C6）：目录可能已变——自动刷新一次；刷新后若目录
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
+  // 同步刷新控制目录并清除死选中值（permission_mode / agent_profile /
+  // reasoning_effort 的 staged 契约同样可能因目录变更而 422）。
   useEffect(() => {
     if (!error || !isUnknownModelError(error)) return;
     void (async () => {
-      const list = await getModels().catch(() => [] as ModelCatalogEntry[]);
-      setModels(list);
-      setSelectedModel((prev) => (prev && list.some((m) => m.name === prev) ? prev : null));
+      const [modelList, modes, profiles, efforts, providers] = await Promise.all([
+        getModels().catch(() => [] as ModelCatalogEntry[]),
+        getPermissionModes().catch(() => [] as CatalogEntry[]),
+        getAgentProfiles().catch(() => [] as CatalogEntry[]),
+        getReasoningEfforts().catch(() => [] as CatalogEntry[]),
+        getContextProviders().catch(() => [] as CatalogEntry[]),
+      ]);
+      setModels(modelList);
+      setSelectedModel((prev) => (prev && modelList.some((m) => m.name === prev) ? prev : null));
+      setPermissionModes(modes);
+      setSelectedPermissionMode((prev) => (prev && modes.some((m) => m.id === prev) ? prev : null));
+      setAgentProfiles(profiles);
+      setSelectedAgentProfile((prev) => (prev && profiles.some((m) => m.id === prev) ? prev : null));
+      setReasoningEfforts(efforts);
+      setSelectedReasoningEffort((prev) => (prev && efforts.some((m) => m.id === prev) ? prev : null));
+      setContextProviders(providers);
+      setSelectedContextProviders((prev: string[]) => prev.filter((id) => providers.some((p) => p.id === id)));
     })();
   }, [error]);
 
@@ -544,6 +571,9 @@ export default function App() {
             reasoningEfforts={reasoningEfforts}
             selectedReasoningEffort={selectedReasoningEffort}
             onReasoningEffortChange={setSelectedReasoningEffort}
+            contextProviders={contextProviders}
+            selectedContextProviders={selectedContextProviders}
+            onContextProvidersChange={setSelectedContextProviders}
           />
         </section>
 

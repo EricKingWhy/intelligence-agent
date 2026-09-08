@@ -1,13 +1,13 @@
-"""build_runtime context_providers 运行时消费（Ticket B2，ADR-0021）。
+"""build_runtime context_providers 运行时筛选（ADR-0020b，RUNTIME 子批次）。
 
-覆盖验收标准的运行时侧（assembly）：
-  - 用户传 ["memory"] → ContextBuilder 只含 MemoryContextProvider（子集）
-  - 用户传 [] → ContextBuilder 空（用户显式选了不启用任何 provider）
-  - 用户传 None → wiring 全集（向后兼容）
-  - wiring 里未知 id（配置降级）→ 跳过 + 不崩溃
+覆盖五条契约：
+  F1：context_providers=None（默认）→ wiring 全量注入（向后兼容）；
+  F2：context_providers=[] → 不注入任何 provider（显式零，区别于 None）；
+  F3：context_providers=["memory"] + wiring=[memory, skills] → 只注入 memory；
+  F4：context_providers=["nonexistent"] → 空注入（fail-open，不抛错）；
+  F5：context_providers=["memory", "ghost"] → 只留 memory（已知保留、未知跳过）。
 
-测试沿用 test_assembly_agent_profile.py 的装配模式：patch create_chat_model +
-手工注册 provider 到 wiring.context_provider_entries。
+另含一条单元测试直接覆盖 _select_context_providers helper（不经 build_runtime）。
 """
 
 from __future__ import annotations
@@ -18,27 +18,32 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessageChunk
 
-from agent_harness.assembly import build_runtime, initialize_stores, recovery_stores
-from agent_harness.capability.wiring import (
-    CapabilityWiring,
-    ContextProviderEntry,
+from agent_harness.assembly import (
+    _select_context_providers,
+    build_runtime,
+    initialize_stores,
+    recovery_stores,
 )
+from agent_harness.capability.wiring import CapabilityWiring
 from agent_harness.config import Settings
 from agent_harness.sandbox import WorkspaceRegistry
-
-
-class _FakeProvider:
-    """最小 ContextProvider 占位——装配只关心引用相等，不需要真实 select()。"""
-
-    def __init__(self, tag: str) -> None:
-        self.tag = tag
 
 
 def _settings(tmp_path) -> Settings:
     return Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
 
 
-class ScriptedModelFactory:
+class _NamedProvider:
+    """最小 ContextProvider stand-in：只带 name，用于测试筛选层。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def select(self, session, token_budget):
+        return []
+
+
+class _ScriptedModel:
     def bind_tools(self, tools, **kwargs):
         return self
 
@@ -46,37 +51,18 @@ class ScriptedModelFactory:
         yield AIMessageChunk(content="ok")
 
 
-def _wire_two_providers(wiring: CapabilityWiring) -> tuple[_FakeProvider, _FakeProvider]:
-    """模拟 wiring 装配了 memory + skills 两个 provider（带稳定 id）。"""
-    mem = _FakeProvider("memory")
-    skills = _FakeProvider("skills")
-    wiring.context_provider_entries["memory"] = ContextProviderEntry(
-        id="memory", provider=mem, display_name="Memory", description="recall",
-    )
-    wiring.context_provider_entries["skills"] = ContextProviderEntry(
-        id="skills", provider=skills, display_name="Skills", description="catalog",
-    )
-    # 保持向后兼容视图同步（register_context_provider 在真实装配里做这事）
-    wiring.context_providers.extend([mem, skills])
-    return mem, skills
-
-
-async def _build_runtime(
-    tmp_path: Path,
-    wiring: CapabilityWiring,
-    context_providers: list[str] | None,
-):
+async def _build_runtime(tmp_path: Path, wiring: CapabilityWiring, context_providers):
     settings = _settings(tmp_path)
     stores = recovery_stores(tmp_path / "harness.db")
     await initialize_stores(stores)
     workspace_registry = WorkspaceRegistry(root=tmp_path, backend="local")
 
-    with patch("agent_harness.assembly.create_chat_model", return_value=ScriptedModelFactory()):
+    with patch("agent_harness.assembly.create_chat_model", return_value=_ScriptedModel()):
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
-            session_id="sess-ctx",
-            workspace=tmp_path / "workspaces" / "sess-ctx",
+            session_id="sess-cp",
+            workspace=tmp_path / "workspaces" / "sess-cp",
             max_steps=10,
             context_providers=context_providers,
         )
@@ -84,60 +70,70 @@ async def _build_runtime(
 
 
 @pytest.mark.asyncio
-async def test_context_providers_subset_selects_only_memory(tmp_path):
-    """验收：context_providers=["memory"] → 只启用 MemoryContextProvider（不含 skills）。"""
-    wiring = CapabilityWiring()
-    mem, _skills = _wire_two_providers(wiring)
-    runtime = await _build_runtime(tmp_path, wiring, context_providers=["memory"])
-    providers = runtime._context_builder.context_providers
-    assert providers == [mem], f"应只含 memory provider，实际：{providers}"
+async def test_build_runtime_none_request_keeps_all_providers(tmp_path):
+    """F1：context_providers=None → wiring 全量注入（默认行为，向后兼容）。"""
+    wiring = CapabilityWiring(context_providers=[_NamedProvider("memory"), _NamedProvider("skills")])
+    runtime = await _build_runtime(tmp_path, wiring, context_providers=None)
+    names = [getattr(p, "name", None) for p in runtime._context_builder.context_providers]
+    assert names == ["memory", "skills"]
 
 
 @pytest.mark.asyncio
-async def test_context_providers_empty_list_selects_none(tmp_path):
-    """验收：context_providers=[] → ContextBuilder 空（用户显式选了空）。"""
-    wiring = CapabilityWiring()
-    _wire_two_providers(wiring)
+async def test_build_runtime_empty_list_injects_no_providers(tmp_path):
+    """F2：context_providers=[] → 不注入任何 provider（显式零）。"""
+    wiring = CapabilityWiring(context_providers=[_NamedProvider("memory"), _NamedProvider("skills")])
     runtime = await _build_runtime(tmp_path, wiring, context_providers=[])
-    providers = runtime._context_builder.context_providers
-    assert providers == [], f"空列表应产生空 provider 集合，实际：{providers}"
+    assert runtime._context_builder.context_providers == []
 
 
 @pytest.mark.asyncio
-async def test_context_providers_none_uses_full_set(tmp_path):
-    """验收：context_providers=None → wiring 全集（向后兼容）。"""
-    wiring = CapabilityWiring()
-    mem, skills = _wire_two_providers(wiring)
-    runtime = await _build_runtime(tmp_path, wiring, context_providers=None)
-    providers = runtime._context_builder.context_providers
-    assert providers == [mem, skills], f"None 应用 wiring 全集，实际：{providers}"
+async def test_build_runtime_subset_filters_to_named(tmp_path):
+    """F3：context_providers=["memory"] + wiring=[memory, skills] → 只注入 memory。"""
+    wiring = CapabilityWiring(context_providers=[_NamedProvider("memory"), _NamedProvider("skills")])
+    runtime = await _build_runtime(tmp_path, wiring, context_providers=["memory"])
+    names = [getattr(p, "name", None) for p in runtime._context_builder.context_providers]
+    assert names == ["memory"]
 
 
 @pytest.mark.asyncio
-async def test_context_providers_unknown_id_in_wiring_is_skipped(tmp_path):
-    """运行时降级防御：wiring 未装配该 id（配置降级）→ 跳过不崩溃（web 层应先 422）。"""
-    wiring = CapabilityWiring()
-    mem, _skills = _wire_two_providers(wiring)
-    # 用户传了 "memory" + 不存在的 "rag"——只有 memory 命中
-    runtime = await _build_runtime(tmp_path, wiring, context_providers=["memory", "rag"])
-    providers = runtime._context_builder.context_providers
-    assert providers == [mem], f"应跳过未知 id 只留 memory，实际：{providers}"
+async def test_build_runtime_unknown_name_silently_skipped(tmp_path):
+    """F4：context_providers=["nonexistent"] → 空注入（fail-open，不抛错）。"""
+    wiring = CapabilityWiring(context_providers=[_NamedProvider("memory"), _NamedProvider("skills")])
+    runtime = await _build_runtime(tmp_path, wiring, context_providers=["nonexistent"])
+    assert runtime._context_builder.context_providers == []
 
 
 @pytest.mark.asyncio
-async def test_context_providers_order_preserved(tmp_path):
-    """用户传 ["skills", "memory"] → 输出按用户指定顺序（不是 wiring 注册顺序）。"""
-    wiring = CapabilityWiring()
-    mem, skills = _wire_two_providers(wiring)
-    runtime = await _build_runtime(tmp_path, wiring, context_providers=["skills", "memory"])
-    providers = runtime._context_builder.context_providers
-    assert providers == [skills, mem], f"应按用户顺序，实际：{providers}"
+async def test_build_runtime_unknown_plus_known_keeps_known(tmp_path):
+    """F5：context_providers=["memory", "ghost"] → 只留 memory（未知 fail-open）。"""
+    wiring = CapabilityWiring(context_providers=[_NamedProvider("memory"), _NamedProvider("skills")])
+    runtime = await _build_runtime(tmp_path, wiring, context_providers=["memory", "ghost"])
+    names = [getattr(p, "name", None) for p in runtime._context_builder.context_providers]
+    assert names == ["memory"]
 
 
-@pytest.mark.asyncio
-async def test_context_providers_empty_wiring_with_none_yields_empty(tmp_path):
-    """边界：wiring 没装配任何 provider + 用户传 None → 空（不伪造）。"""
-    wiring = CapabilityWiring()
-    runtime = await _build_runtime(tmp_path, wiring, context_providers=None)
-    providers = runtime._context_builder.context_providers
-    assert providers == [], f"空 wiring + None 应产生空集合，实际：{providers}"
+# ── _select_context_providers 单元测试 ──
+
+
+def test_select_helper_none_returns_full_copy():
+    """helper：None → 返回全量副本（不是原列表引用，避免下游 mutate 污染 wiring）。"""
+    wired = [_NamedProvider("memory"), _NamedProvider("skills")]
+    out = _select_context_providers(wired, None)
+    assert [getattr(p, "name", None) for p in out] == ["memory", "skills"]
+    assert out is not wired  # 副本，非原引用
+
+
+def test_select_helper_empty_returns_empty():
+    """helper：[] → 空列表。"""
+    wired = [_NamedProvider("memory")]
+    assert _select_context_providers(wired, []) == []
+
+
+def test_select_helper_unnamed_provider_never_matched():
+    """helper：未声明 name 的 provider 经 getattr 容错为 None，不被任何请求命中。"""
+    class Anon:
+        async def select(self, session, token_budget):
+            return []
+    wired = [Anon(), _NamedProvider("memory")]
+    out = _select_context_providers(wired, ["anon", "memory"])
+    assert [getattr(p, "name", None) for p in out] == ["memory"]
