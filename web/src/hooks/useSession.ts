@@ -221,6 +221,13 @@ export function isUnknownModelError(message: string | null | undefined): boolean
   return message === UNKNOWN_MODEL_ERROR_TEXT;
 }
 
+/** 续聊 422 的稳定文案（handoff §5 P2，P1 修复后）：/messages 的 422 现在可能来自
+ *  session_id 非法 / 未知 model 或 context_providers（仅 idle→launched 时校验）/
+ *  非法 reasoning_effort 或 agent_profile 取值——不再等同于「未知模型」。
+ *  后端 detail 不是契约文本（Pydantic 校验与 HTTPException 的形状也不同），
+ *  所以不做子串区分，统一提示「刷新选项后重试」。 */
+export const CONTINUE_PARAMS_ERROR_TEXT = '续聊参数无效（422）：请刷新选项后重试';
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
@@ -315,8 +322,12 @@ export function useSession() {
     let cancelled = false;
     // live→viewing 迁移：conversation 已是同会话真相，后台静默重读对账，
     // 不用占位符替换（防主窗口闪烁）。切到不同会话才显示占位符。
-    setLoadingHistory(shouldShowHistoryLoading(conversation, sid));
-    setError(null);
+    // live→viewing 自迁移（流终态 / 续聊失败 / 重连放弃）不清错误横幅——否则
+    // sendFollowUp 与重连的失败提示会在同一批次被这条 effect 立刻抹掉。
+    // 只有真的切到别的会话（或首次加载）才清。
+    const switchingSession = shouldShowHistoryLoading(conversation, sid);
+    setLoadingHistory(switchingSession);
+    if (switchingSession) setError(null);
     getSessionEvents(sid)
       .then((events: AgentEvent[]) => {
         if (cancelled) return;
@@ -675,7 +686,7 @@ export function useSession() {
           max_steps: opts?.maxSteps ?? 10,
           ...(opts?.amend ?? {}),
         });
-        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
+        if (res.status === 422) throw new Error(CONTINUE_PARAMS_ERROR_TEXT);
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
         // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
         // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。

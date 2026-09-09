@@ -101,7 +101,7 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
 
   const body = JSON.parse(messagesBody!);
   expect(body.content).toBe('第二条消息');
-  expect(body.model).toBe('deepseek-v4-flash-0731');
+  expect(body.model).toBe(MODELS[0].name);
   expect(body.agent_profile).toBe('coding');
   expect(body.reasoning_effort).toBe('deep');
   // 未选 context_providers → 不发键（有值才带，与 create 分支同模式）
@@ -170,8 +170,32 @@ test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend �
   await submitTask(page, '第二条消息');
   await expect.poll(() => messagesBody).not.toBeNull();
 
-  expect(JSON.parse(messagesBody!).model).toBe('deepseek-v4-flash-0731');
+  expect(JSON.parse(messagesBody!).model).toBe(MODELS[0].name);
   // queued ≠ 新 run：不弹错误、不进入流式（Composer 保持可用）
   await expect(page.locator('.app-error')).toHaveCount(0);
   await expect(page.getByLabel('Agent 任务')).toBeEnabled();
+});
+
+test('续聊 422：提示「续聊参数无效」而非「未知模型」（handoff §5 P2）', async ({ page }) => {
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    // P1 修复后 /messages 的 422 可能是 session_id 非法 / 未知引用类 id /
+    // 非法枚举取值——前端不做 detail 子串区分，统一提示刷新选项。
+    onMessagesPost: (route) =>
+      route.fulfill({
+        status: 422,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'unknown session id' }),
+      }),
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+  await submitTask(page, '第二条消息');
+
+  const err = page.locator('.app-error');
+  await expect(err).toContainText('续聊参数无效');
+  await expect(err).not.toContainText('模型不可用');
 });
