@@ -65,15 +65,19 @@ export interface StartSessionPayload {
   /** 可选模型选择（T10 #103，契约 C6）：GET /api/models 的 name；不传 = 默认
    *  链；未知 → 422（调用方提示重新选择并刷新目录）。 */
   model?: string;
-  /** Phase 5 staged amend 字段（Ticket B1 清单端点对齐）：
-   *  - permission_mode: GET /api/permission-modes 的 id；不传 = 后端默认。
-   *  - agent_profile: GET /api/agent-profiles 的 id；不传 = 后端默认。
-   *  - reasoning_effort: GET /api/reasoning-efforts 的 id；不传 = 后端默认。
-   *  - context_providers: GET /api/context-providers 的 id 列表；不传 = 后端默认。
+  /** 会话级控制字段——全部在运行时真实消费（不再是 staged no-op）：
+   *  - permission_mode: GET /api/permission-modes 的 id；审批阈值（非硬墙），
+   *    不传 = 后端默认。
+   *  - agent_profile: GET /api/agent-profiles 的 id；注入 system_prompt +
+   *    按 tool_scope 收窄工具集（ADR-0020a），不传 = 后端默认。
+   *  - reasoning_effort: GET /api/reasoning-efforts 的 id；经 create_chat_model
+   *    注入模型原生字段（ADR-0018 D7），不传 = 后端默认。
+   *  - context_providers: GET /api/context-providers 的 id 列表；按 provider
+   *    name 筛选已装配子集（ADR-0021），不传 = 全部已装配 provider。
    *
-   *  这些字段在 POST /api/sessions 是 staged 契约：API 边界验证通过（未知值 → 422），
-   *  运行时记一条 INFO 日志后忽略（received but not yet consumed by runtime）。
-   *  前端不应断言"已生效"——控件只提交偏好，运行时是否消费由后端决定。 */
+   *  API 边界校验：permission_mode / reasoning_effort / agent_profile 为封闭枚举
+   *  （未知值 → 422）；context_providers 做形状校验并对照 wiring 真实 id
+   *  （未知 → 422）。 */
   permission_mode?: string;
   agent_profile?: string;
   reasoning_effort?: string;
@@ -164,16 +168,37 @@ export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
   max_steps?: number;
+  /** 续聊 amend 字段（后端 Q2 批次起 /messages 接受，与 create 路径同词汇）：
+   *  - model: GET /api/models 的 name；
+   *  - agent_profile: GET /api/agent-profiles 的 id；
+   *  - reasoning_effort: GET /api/reasoning-efforts 的 id；
+   *  - context_providers: GET /api/context-providers 的 id 列表。
+   *
+   *  生效范围：仅「空闲会话 → launched 新 run」时应用；在途 run 的 queued
+   *  消息忽略它们（runtime 已固定，不抢断不改写）。空值不发键 = 后端默认，
+   *  与 POST /api/sessions 的 create 分支同一模式。 */
+  model?: string;
+  agent_profile?: string;
+  reasoning_effort?: string;
+  context_providers?: string[];
 }
 
 export async function sendMessage(sessionId: string, payload: SendMessagePayload): Promise<Response> {
   return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    // 续聊 amend：有值才带键（空值/空数组不发键 = 后端默认）。单一归一化点——
+    // 调用方可以直接传 undefined，payload 仍保持干净（与 create 分支同一语义）。
     body: JSON.stringify({
       content: payload.content,
       mode: payload.mode ?? 'queue',
       max_steps: payload.max_steps ?? 10,
+      ...(payload.model ? { model: payload.model } : {}),
+      ...(payload.agent_profile ? { agent_profile: payload.agent_profile } : {}),
+      ...(payload.reasoning_effort ? { reasoning_effort: payload.reasoning_effort } : {}),
+      ...(payload.context_providers && payload.context_providers.length > 0
+        ? { context_providers: payload.context_providers }
+        : {}),
     }),
   });
 }

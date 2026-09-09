@@ -248,8 +248,21 @@ export default function App() {
       focusRun();
       // 续聊：已有会话且不在流式中 → 发消息到现有会话（PRD §5.3 续聊入口）。
       // 新会话：无 selectedId → startSession 创建新会话。
+      // amend 按「有值才带」传入（与下方 create 分支同一模式）：仅空闲会话
+      // 拉起新 run 时被后端应用，在途 run 的 queued 消息忽略。permission_mode
+      // 不在 /messages 的 amend 契约内（后端 SendMessageRequest 只收这四项）。
       if (selectedId && !streaming) {
-        void sendMessage(selectedId, task, { maxSteps: 10 });
+        void sendMessage(selectedId, task, {
+          maxSteps: 10,
+          amend: {
+            ...(selectedModel ? { model: selectedModel } : {}),
+            ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
+            ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
+            ...(selectedContextProviders.length > 0
+              ? { context_providers: selectedContextProviders }
+              : {}),
+          },
+        });
         return;
       }
       void submitTask({

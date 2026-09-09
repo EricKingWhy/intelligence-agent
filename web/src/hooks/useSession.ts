@@ -642,9 +642,25 @@ export function useSession() {
 
   /** 续聊：向已有会话发消息（PRD §5.3）。
    *  空闲会话 → 后端 launched 直驱新 run（同形 SSE）→ attachLiveStream 续接。
-   *  在途 run → 后端 queued 入队（JSON 确认）→ 当前流继续，下个 run 消费消息。 */
+   *  在途 run → 后端 queued 入队（JSON 确认）→ 当前流继续，下个 run 消费消息。
+   *
+   *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 档位。仅在
+   *  「空闲 → launched 新 run」时被后端应用；在途 run 的 queued 消息忽略。
+   *  空值不发键（api.sendMessage 统一归一化），与 create 分支同一语义。 */
   const sendFollowUp = useCallback(
-    async (sessionId: string, content: string, opts?: { maxSteps?: number }) => {
+    async (
+      sessionId: string,
+      content: string,
+      opts?: {
+        maxSteps?: number;
+        amend?: {
+          model?: string;
+          agent_profile?: string;
+          reasoning_effort?: string;
+          context_providers?: string[];
+        };
+      },
+    ) => {
       setError(null);
       // 续聊不重置 conversation——在现有对话上追加新 run 的事件。
       liveSidRef.current = sessionId;
@@ -659,6 +675,7 @@ export function useSession() {
           content,
           mode: 'queue',
           max_steps: opts?.maxSteps ?? 10,
+          ...(opts?.amend ?? {}),
         });
         if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
