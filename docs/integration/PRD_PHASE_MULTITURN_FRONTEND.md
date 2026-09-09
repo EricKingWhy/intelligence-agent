@@ -229,3 +229,19 @@ CSS 原生没有变量组复用机制，修改时必须两处同步。2026-09-04
 | `POST /api/sessions/{id}/model` | HTTP 切换模型 | #137 |
 | `POST /api/sessions/{id}/forks` | HTTP 从历史点 fork | #137 |
 | SSE/WS `model/changed` 事件（取 `event` 后匹配 `type`） | 监听事件流更新 UI | #137 |
+| `run/interrupted` 事件（信封带 `run_id` / `step_id`，data 带 `interrupted_seq` / `reason`） | 打开 session 时在事件流里检测 → 显示"上次运行在第 N 步中断" + 继续/重发/忽略 | #138 |
+
+### 6.1 崩溃恢复（#138）前端契约
+
+- **事件名是 `run/interrupted`**（不是 `run_interrupted`）。打开已有 session 时，
+  从事件流（`GET /api/sessions/{id}/events` 或重连重放）里找最后一条
+  `run/interrupted`：`step_id` 显示"第 N 步"，`interrupted_seq` 定位中断点。
+- 三个动作复用既有端点，后端不新增：
+  - **继续** → `POST /api/sessions/{id}/messages`（新 user 消息续聊）；
+  - **重发** → 用中断前的最后一条 user 消息内容再发一次 `messages`；
+  - **忽略** → 纯前端收起提示（可选：不改后端状态）。
+- 若后端扫描时发现 UNKNOWN 工具调用（副作用未知），该 session 不会自动
+  合成结果，也不会写 `session/resumed`；前端不应假设"已恢复"。此时**继续 /
+  重发都会返回 409**（后端拒绝伪造"结果未知"，不变量 #14），detail 点名
+  需要裁决的 `tool_name` / `tool_call_id`；按需引导用户走
+  `POST /api/sessions/{id}/recover` 的人工裁决路径（409 = 需裁决）。

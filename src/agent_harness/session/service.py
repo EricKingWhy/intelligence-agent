@@ -24,6 +24,7 @@ import anyio
 
 from agent_harness.assembly import build_runtime
 from agent_harness.config import Settings
+from agent_harness.session.derive import detect_dangling
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
     MODEL_CHANGED,
@@ -34,6 +35,7 @@ from agent_harness.session.event import (
     SessionEvent,
     _utc_now_iso,
 )
+from agent_harness.session.interrupt import detect_unterminated_runs
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
@@ -47,6 +49,7 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
+    from agent_harness.recovery.scan import InterruptionScanResult
     from agent_harness.web.app import AppState
     from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
 
@@ -645,11 +648,24 @@ class SessionService:
             raise ActiveRunConflict("session has an active run")
 
         try:
-            session = Session.resume(
-                self._state.store,
-                session_id,
-                workspace_registry=self._state.workspace_registry,
-            )
+            # T8 #138：崩溃遗留（悬空 tool_call / 无终态 run）必须走 Ledger
+            # reconcile——Session.resume 的 dangling 兜底对 RUNNING/UNKNOWN 的
+            # tool_call 一律伪造「结果未知」，等于替高风险副作用猜结论
+            # （不变量 #13/#14）。recover() 是唯一恢复入口：UNKNOWN 无 callback
+            # 时安全拒绝（→ 409），确定性项精确回填后再 load 继续跑。
+            if detect_dangling(existing) or detect_unterminated_runs(existing):
+                await self.recover(session_id)
+                session = Session.load(
+                    self._state.store,
+                    session_id,
+                    workspace_registry=self._state.workspace_registry,
+                )
+            else:
+                session = Session.resume(
+                    self._state.store,
+                    session_id,
+                    workspace_registry=self._state.workspace_registry,
+                )
         except ValueError as error:
             raise SessionNotFound(str(error)) from error
 
@@ -975,6 +991,23 @@ class SessionService:
         except RecoveryError as error:
             raise RecoveryConflict(str(error)) from error
         return recovered.events
+
+    async def scan_interrupted(self) -> list[InterruptionScanResult]:
+        """进程启动扫描（T8 #138）：无终态 run 补记 ``run/interrupted`` + 强制 reconcile。
+
+        返回被处理的 session 结论（无中断的 session 不出现在结果里）。
+        单个 session 失败不抛出——扫描的职责是把全部中断如实标记出来。
+        """
+        from agent_harness.recovery.scan import scan_interrupted_sessions
+
+        await self._state.ensure_stores()
+        results = await scan_interrupted_sessions(
+            session_store=self._state.store,
+            operation_ledger=self._state.operation_ledger,
+            workspace_registry=self._state.workspace_registry,
+            database_path=self._state.harness_db,
+        )
+        return results
 
     # ── 模型切换 / Fork（T7 #137）────────────────────────────────────
 

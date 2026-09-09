@@ -181,8 +181,10 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 
 ```json
 {
-  "type": "run_interrupted",
+  "type": "run/interrupted",
   "session_id": "sess-xxx",
+  "run_id": "run-xxx",
+  "step_id": 3,
   "data": {
     "interrupted_seq": 42,
     "reason": "process_restart"
@@ -191,6 +193,29 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 ```
 
 用户重新打开有 `RUN_INTERRUPTED` 的 session 时，前端显示"上次运行在第 N 步中断"，提供继续/重发/忽略三个动作。
+
+> **as-built 注（2026-09-09，T8 实现）**：事件字符串是 **`run/interrupted`**（仓库
+> `run/*` 词汇表约定），不是本稿的 `run_interrupted`。`run_id` / `step_id` 挂事件
+> 信封（前端按 run 归组、显示"第 N 步"）；`data` 只放 `interrupted_seq` +
+> `reason="process_restart"`。扫描幂等：`run/interrupted` 本身是 run 终态，重复
+> 扫描不会重复追加。无终态 run 的 session 标记后强制跑 Ledger reconcile；存在
+> UNKNOWN Operation 且无 ReconcileCallback 时该 session 记为「需人工确认」
+> （不伪造结果、不盲重跑，不变量 #14），其 `session/resumed` 不写（恢复未完成）。
+>
+> **扫描归属（单进程假设）**：扫描只在**持有会话的进程**启动时执行一次——
+> web lifespan（`SessionService.scan_interrupted()`）。CLI 子命令**不扫描**：
+> 在途 run 只存在于本进程内存，短命命令无法区分「别的进程在跑」与「崩溃遗留」，
+> 误标会让两侧各自推算 seq 撞号。多进程/多 worker 需跨进程 run lease（后续 Phase）。
+>
+> **续跑守卫（不变量 #13/#14）**：`POST /api/sessions/{id}/messages`（idle →
+> launched）与 `POST /api/sessions/{id}/resume` 在检测到悬空 tool_call / 无终态 run
+> 时先走 Ledger reconcile，不再落到 `Session.resume` 的 dangling 兜底；UNKNOWN
+> 高风险副作用安全拒绝 → **409**（detail 点名 tool_name/tool_call_id）。前端遇到
+> 409 应提示「需人工确认」并可调 `POST /api/sessions/{id}/recover` 重试，不得
+> 伪造"结果未知"继续。
+>
+> **Fork 边界**：`run/interrupted` 与 `run/completed` / `run/failed` 同属 run
+> 终态（`RUN_TERMINAL_TYPES`），被中断轮之后的用户消息仍是合法 fork 锚点。
 
 ### 2.6 CLI slash 命令 (#137 CLI 部分)
 

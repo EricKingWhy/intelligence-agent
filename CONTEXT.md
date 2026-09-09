@@ -57,8 +57,12 @@ _Avoid_: serialize messages, flatten history, get messages
 _Avoid_: orphan call, broken chain, missing result
 
 **Run**:
-一次 `AgentRuntime.run()` 调用的生命周期单元，绑定 `run_id`。同一 Session 可有多次 Run；Run 边界由 `run/started` 与 `run/completed` / `run/failed` 事件标记，是 Phase 14 Fork 的切分依据。
+一次 `AgentRuntime.run()` 调用的生命周期单元，绑定 `run_id`。同一 Session 可有多次 Run；Run 边界由 `run/started` 与 `run/completed` / `run/failed` / `run/interrupted` 事件标记，是 Phase 14 Fork 的切分依据。
 _Avoid_: turn, iteration, loop, attempt
+
+**run/interrupted**:
+进程重启扫描时，对「开了没关」的 run 补记的中断事实（信封带 `run_id` / `step_id`，data 带 `interrupted_seq` / `reason`）。它只声明 run 被打断，**不判定工具副作用是否发生**——那仍由 Ledger reconcile 决定（不变量 #12/#14）。标记后强制 reconcile；UNKNOWN 工具调用需人工裁决，不盲重跑。
+_Avoid_: crash log, aborted run, failed run（失败 run 是 `run/failed`，语义不同）
 
 **Resume**:
 从已持久化 SessionEvent 加载 Session 并继续对话的能力。流程：`load events → validate seq → restore state → reconcile → continue`。Resume MUST NOT 默认重放已完成 Tool。

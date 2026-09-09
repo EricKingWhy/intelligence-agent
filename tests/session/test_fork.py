@@ -14,6 +14,7 @@ from agent_harness.session.event import (
     MODEL_COMPLETED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_INTERRUPTED,
     RUN_STARTED,
     SESSION_FORKED,
     SESSION_STARTED,
@@ -209,6 +210,34 @@ async def test_fork_from_failed_run_prefix(tmp_path) -> None:
         child_session_id="after-fail",
     )
     assert [e.type for e in child.events].count(RUN_FAILED) == 1
+    assert [e.type for e in child.events][-1] == SESSION_FORKED
+
+
+async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
+    """T8 #138：run/interrupted 也是 run 终态——被中断轮之后的消息仍是合法边界。
+
+    回归：终态集合若漏掉 run/interrupted，该 run 永远算「开着」，
+    之后的用户消息不再被列为锚点，seed 校验也会以「悬空 run」拒绝。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    s = Session.start(store, session_id="interrupted")
+    s.append(USER_MESSAGE, {"content": "第一条"})
+    run_id = s.begin_run()
+    s.append(RUN_INTERRUPTED, {"interrupted_seq": 3, "reason": "process_restart"},
+             run_id=run_id)
+    s.append(USER_MESSAGE, {"content": "第二条"})
+
+    assert find_fork_boundaries(s.events) == [
+        s.events[1].seq, s.events[-1].seq
+    ]
+    child = await fork_session(
+        store, meta, "interrupted",
+        boundary_user_message_seq=s.events[-1].seq,
+        child_session_id="after-interrupt",
+    )
+    assert [e.type for e in child.events].count(RUN_INTERRUPTED) == 1
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 

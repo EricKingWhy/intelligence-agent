@@ -207,6 +207,10 @@
 > `docs/integration/PRD_PHASE_MULTITURN_TOTAL.md` §2.3 对齐为
 > `from_provider` / `from_model_id` / `to_provider` / `to_model_id`（本表旧稿的
 > `from_model` / `to_model` 作废）。
+>
+> **as-built 注（2026-09-09，T8 实现）**：`RUN_INTERRUPTED` 的事件字符串是
+> **`run/interrupted`**（`run/*` 族），`run_id` / `step_id` 挂事件信封，`data`
+> 只放 `interrupted_seq` + `reason="process_restart"`（见 TOTAL §2.5）。
 
 所有事件 append-only 写入 JSONL，单一事实源。
 

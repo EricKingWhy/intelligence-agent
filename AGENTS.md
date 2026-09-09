@@ -678,3 +678,71 @@ gh issue close <n> --comment "<验证证据：commit / 测试结果 / 关键文�
 3. 遗漏亮色覆盖 → 该 token 在亮色模式下仍用暗色值（对比度/可见性问题）。
 
 CSS 原生没有变量组复用机制，手工双份同步是当前最小风险方案。
+
+---
+
+# 16. SDD 长任务工作流协议（防指令漂移）
+
+> **触发条件**：用户明确要求「按顺序做剩余 tickets」「使用 SDD 方式」「每完成一个 ticket 必须 code-review」「出现 bug 用 diagnose-bug」「修完再 code-review 直到没问题才进下一个 ticket」「全部完成后用 improve-codebase-architecture」「不知道怎么做用 ask-matt」「每完成一个 ticket 不许推送到远程 GitHub——这是集成 AI 做的事」「完成后写提示词给集成 AI」。
+>
+> 本节是**自执行协议**：用户睡觉期间，Agent 按此循环自主推进，不需要逐 step 询问用户。只有遇到 §9.1 列出的需要用户决策的情况时才停下。
+
+## 16.1 单 Ticket SDD 循环
+
+每个 ticket 严格按以下顺序执行：
+
+```text
+1. 读 spec + 现状审计（§3 每个 Task 的阅读协议）
+2. /implement（TDD：先红后绿；Reuse First §6）
+3. /code-review（两轴：Standards + Spec）
+   - 发现问题 → 修复 → 再 /code-review
+   - 循环直到零 finding
+4. ruff check + 全量 pytest
+5. git add <相关文件> + git commit
+6. 关单判定（§14.12）：
+   - 纯后端 ticket 且 AC 全覆盖 → gh issue close
+   - 跨端 ticket 只做完后端 → comment 记录已完成部分 + 剩余前端项，不关单
+7. 更新 docs/PHASE_STATUS.md（进度单一事实源）
+8. 写集成提示词到 docs/INTEGRATION_PROMPT_*.md（告诉集成 AI 做了什么）
+```
+
+## 16.2 Bug 处理协议
+
+当 `/code-review` 或测试发现 bug 时：
+
+```text
+1. 使用 /diagnose-bug（或 diagnosing-bugs skill）定位根因
+2. 最小修复（Surgical Changes §9.3）
+3. 回归测试（确保修复不引入新问题）
+4. 再 /code-review（验证修复有效且无新问题）
+5. 循环直到零 finding
+```
+
+## 16.3 全部 Ticket 完成后
+
+```text
+1. /improve-codebase-architecture（扫描深化机会）
+2. 如果发现问题 → 修复 → /code-review
+3. 最终全量回归：ruff check + pytest
+4. 写最终集成提示词
+```
+
+## 16.4 防漂移纪律
+
+- **每个 ticket 开始前**：重读本节（§16），确认当前在哪个步骤。
+- **每个 ticket 完成后**：更新 `docs/PHASE_STATUS.md`，记录 commit、测试结果、关单状态。
+- **不允许跳过 /code-review**：即使代码看起来没问题，也必须走完整 SDD 循环。
+- **不允许跳过测试**：`ruff check` + 全量 `pytest` 必须通过才能 commit。
+- **不推送远程**：`git push` 由集成 AI 执行，本 Agent 只做本地 commit。
+- **遇到不确定的问题**：使用 `/ask-matt` 寻求指导，不要盲目猜测。
+- **上下文被摘要后**：重新读 `docs/PHASE_STATUS.md` 确认进度，读本节确认工作流。
+
+## 16.5 进度追踪
+
+进度追踪使用 `docs/PHASE_STATUS.md` 作为单一事实源。每个 ticket 完成后，在该文件追加一条记录，格式：
+
+```markdown
+- YYYY-MM-DD：**ticket #N 标题**。commit `<sha>`。测试：N passed / M skipped。关单：是/否（理由）。集成提示词：`docs/INTEGRATION_PROMPT_*.md`。
+```
+
+---

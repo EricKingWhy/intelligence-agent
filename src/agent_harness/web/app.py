@@ -644,6 +644,22 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
         # web 之前漏接）。幂等（重复调用先清 handlers）。
         setup_logging(settings.log_level, settings.workspace_dir)
+        # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
+        # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
+        # 不该让服务起不来），但必须响亮落日志。
+        try:
+            from agent_harness.session.service import SessionService
+
+            scan_results = await SessionService(state).scan_interrupted()
+            for result in scan_results:
+                logging.getLogger("agent_harness.web").warning(
+                    "启动崩溃扫描：session=%s recovery=%s detail=%s",
+                    result.session_id, result.recovery, result.detail,
+                )
+        except Exception:
+            logging.getLogger("agent_harness.web").exception(
+                "启动崩溃扫描失败（不阻塞启动）"
+            )
         try:
             yield
         finally:
@@ -1061,6 +1077,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(status_code=404, detail=str(e)) from e
         except ActiveRunConflict as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+        except RecoveryConflict as e:
+            # T8 #138：崩溃遗留需人工裁决的 UNKNOWN tool_call → 409，不伪造结果。
+            raise HTTPException(status_code=409, detail=str(e)) from e
 
         session_id = result.session.session_id
         run, subscriber = result.run, result.subscriber
@@ -1242,6 +1261,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except SessionNotFound as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
         except ActiveRunConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except RecoveryConflict as e:
+            # T8 #138：崩溃遗留（UNKNOWN 高风险 tool_call）需人工裁决——
+            # 拒绝续跑而不是伪造「结果未知」（不变量 #14）。
             raise HTTPException(status_code=409, detail=str(e)) from e
         except QueueItemNotFound as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
