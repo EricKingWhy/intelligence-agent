@@ -40,6 +40,7 @@ export const EventType = {
   QUEUE_CANCELLED: 'queue/cancelled',
   STEER_REQUESTED: 'steer/requested',
   STEER_APPLIED: 'steer/applied',
+  MODEL_CHANGED: 'model/changed',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];

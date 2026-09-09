@@ -117,6 +117,7 @@ class Session:
         agent_id: str = "default",
         session_id: str | None = None,
         workspace_registry: WorkspaceRegistry | None = None,
+        started_data: dict | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
@@ -124,14 +125,42 @@ class Session:
         session_id 允许调用方预生成（web 层"先组装 runtime 后建 Session"的顺序
         需要：_build_runtime 要以 session_id 装配 S3 artifact 命名空间，组装失败
         时不能留下任何已落盘的孤儿 session——R6-6）。
+        started_data（T7 #137，加法字段）：会话级初始配置写进 session/started——
+        目前用于记录创建时选定的模型（provider / model_id），使"当前模型"可从
+        事件流派生。
         """
         session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
             sandbox = workspace_registry.create(session_id)
         session = cls(session_id, store, sandbox=sandbox)
-        session.append(SESSION_STARTED, {}, agent_id=agent_id)
+        session.append(
+            SESSION_STARTED,
+            dict(started_data) if started_data else {},
+            agent_id=agent_id,
+        )
         return session
+
+    @classmethod
+    def append_event(
+        cls,
+        store: JsonlSessionStore,
+        session_id: str,
+        event_type: str,
+        data: dict,
+    ) -> SessionEvent:
+        """只追加一条会话事实事件，**不触发 resume 副作用**。
+
+        ``resume()`` 会修复 dangling tool_call 并 append ``session/resumed``——
+        那是「恢复会话」的语义。写一条无关事实（排队消息 / 模型切换 / 取消排队）
+        时套用它，会把 run 在途的 tool_call 判成悬空并注入合成 tool/result，
+        破坏 tool_call/result 配对（不变量 #7）。本入口只做「加载 + 追加」。
+        """
+        events = store.read_events(session_id)
+        if not events:
+            raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+        session = cls(session_id, store, events)
+        return session.append(event_type, dict(data))
 
     @classmethod
     def resume(

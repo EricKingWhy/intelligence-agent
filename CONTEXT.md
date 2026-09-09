@@ -68,6 +68,14 @@ _Avoid_: restart, reload, reconnect, replay（Replay 是独立概念，见 Phase
 用于 debug / 性能追踪 / 全链路观察的结构化日志（span / trace / agent_decision / retry 等），写入 `logs/agent.jsonl`。与 SessionEvent 分层（不变量 #5：Event ≠ Log），不是业务事实源，不可用于恢复。
 _Avoid_: event log, session log, audit trail
 
+**会话当前模型**:
+一个 Session 在某一时刻生效的模型选择，由事件流派生而非可变字段：每次切换追加一条 `model/changed`（记 from/to provider + model），当前值取「最后一次切换 > 会话创建时的初值 > 默认链」。切换只写事实、不改历史，下一轮 Run 从事件流读取生效（不变量 #3 / #22）；「切回默认链」同样是一次切换（to 为空）。
+_Avoid_: current model field, model override, session model config
+
+**无副作用追加**:
+向已有 Session 追加单条事件、但不触发 Resume 副作用的写入路径。Resume 会修复 dangling tool_call 并写 `session/resumed`；Run 在途时走 Resume 会把正在执行的 tool_call 误判为悬空并注入合成结果，破坏 tool_call / tool_result 配对（不变量 #7）。因此切换模型等旁路写入必须走只追加路径。
+_Avoid_: raw append, append-only helper
+
 ## Storage / Recovery 层
 
 **Operation**:

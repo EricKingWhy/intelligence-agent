@@ -11,7 +11,12 @@ import json
 import pytest
 
 from agent_harness.config import Settings
-from agent_harness.model.config import ConfigError, ModelConfig, parse_model_catalog
+from agent_harness.model.config import (
+    ConfigError,
+    ModelConfig,
+    find_catalog_entry,
+    parse_model_catalog,
+)
 
 
 def _settings(agent_models: str = "", **kwargs) -> Settings:
@@ -81,3 +86,30 @@ class TestResolveModelConfig:
         config = ModelConfig.from_settings(_settings(_VALID))
         assert config.model_name == "deepseek-chat"  # deepseek preset 默认
         assert config.get_secret_value() == "sk-default"
+
+
+class TestFindCatalogEntry:
+    """T7 #137：模型切换按 (provider, model_id) 寻址。"""
+
+    def test_match_by_entry_name(self):
+        entry = find_catalog_entry(_settings(_VALID), "senseaudio", "qwen-max")
+        assert entry is not None and entry.name == "qwen-max"
+
+    def test_match_by_upstream_model_name(self):
+        entry = find_catalog_entry(_settings(_VALID), "zhipu", "glm-4.5-air")
+        assert entry is not None and entry.name == "glm-air"
+
+    def test_provider_mismatch_returns_none(self):
+        assert find_catalog_entry(_settings(_VALID), "deepseek", "qwen-max") is None
+
+    def test_unknown_returns_none(self):
+        assert find_catalog_entry(_settings(_VALID), "zhipu", "nope") is None
+
+    def test_name_match_wins_over_model_name_collision(self):
+        """条目 A 的 name 撞上条目 B 的 model_name 时，精确 name 匹配优先。"""
+        catalog = json.dumps([
+            {"name": "alpha", "provider": "deepseek", "model_name": "beta"},
+            {"name": "beta", "provider": "deepseek", "model_name": "alpha"},
+        ])
+        entry = find_catalog_entry(_settings(catalog), "deepseek", "beta")
+        assert entry is not None and entry.name == "beta"

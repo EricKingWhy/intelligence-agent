@@ -141,7 +141,7 @@
 
 ```json
 {
-  "type": "model_changed",
+  "type": "model/changed",
   "session_id": "sess-xxx",
   "data": {
     "from_provider": "openai",
@@ -151,6 +151,11 @@
   }
 }
 ```
+
+> **as-built 勘误（2026-09-09，T7 实现）**：事件字符串是 **`model/changed`**（仓库
+> `model/*` 词汇表约定），不是本稿的 `model_changed`；跨端契约以
+> `PRD_PHASE_MULTITURN_TOTAL.md` §2.3 为准（含响应回传规范 picker id、默认条目 =
+> 切回默认链等 as-built 注）。
 
 ### 4.2 B. Fork（从历史点派生新 session）
 

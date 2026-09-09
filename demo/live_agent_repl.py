@@ -39,8 +39,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     SlashCommand(
         name="fork",
-        description="从当前/指定历史点派生新 session",
-        usage="/fork <from_seq>",
+        description="从当前/指定历史点派生新 session（省略 seq = 最近切点）",
+        usage="/fork [from_seq]",
     ),
     SlashCommand(
         name="compact",

@@ -202,6 +202,12 @@
 | `RUN_INTERRUPTED` | 崩溃后重启扫描发现无终态 run | `interrupted_seq`, `reason="process_restart"` |
 | `ARTIFACT_EXTERNALIZED` | 工具结果外置对象存储 | `artifact_id`, `mime`, `token_count`, `summary`, `ref_uri` |
 
+> **as-built 注（2026-09-09，T7 实现）**：事件类型字符串按仓库既有词汇表约定写作
+> **`model/changed`**（`model/*` 族），字段名与跨端契约
+> `docs/integration/PRD_PHASE_MULTITURN_TOTAL.md` §2.3 对齐为
+> `from_provider` / `from_model_id` / `to_provider` / `to_model_id`（本表旧稿的
+> `from_model` / `to_model` 作废）。
+
 所有事件 append-only 写入 JSONL，单一事实源。
 
 ---

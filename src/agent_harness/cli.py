@@ -360,6 +360,10 @@ async def fork_command(
         workspace_registry=workspace_registry,
         summarizer=summarizer, with_tail_summary=not no_summary,
     )
+    # child 继承父当前模型（T7 #137：fork seed 不含父 session/started）。
+    from agent_harness.session.service import inherit_parent_model
+
+    inherit_parent_model(child, store.read_events(session_id))
     if write is not None:
         write(f"child session: {child.session_id}\n")
     return child.session_id

@@ -80,6 +80,11 @@ QUEUE_CANCELLED = "queue/cancelled"
 STEER_REQUESTED = "steer/requested"
 STEER_APPLIED = "steer/applied"
 
+# ── Phase Multiturn T7（#137）：同 session 内模型切换 ────────────────────
+# 切换是会话事实（durable）：后续 run 从事件流派生"当前模型"，不依赖创建时
+# 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id。
+MODEL_CHANGED = "model/changed"
+
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
 # below is an ephemeral streaming signal (Phase 9 AgentEvent) and MUST NOT be
@@ -125,6 +130,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
         COMPACTION_START,
         COMPACTION_END,
+        # Phase Multiturn T7 (#137)：同 session 内模型切换
+        MODEL_CHANGED,
     }
 )
 
