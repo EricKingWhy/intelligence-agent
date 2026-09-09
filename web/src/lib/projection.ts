@@ -32,6 +32,7 @@ export function initConversation(session_id: string): ConversationState {
     run_cancelled: false,
     compactions: [],
     reconcile_queue: [],
+    pending_approvals: [],
     events: [],
     unknown_events: [],
     model: null,
@@ -454,6 +455,44 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
         state: String(data.state ?? 'NEED_RECONCILE'),
         time: event.time,
       }];
+      break;
+    }
+
+    // #37 交互式审批（PRD §2.2）：ToolExecutor._check_approval 暂停 run，
+    // 发 tool/approval-requested 事件；前端 ApprovalCard 内联渲染。
+    // permission/resolved 事件从 pending 队列移除已决审批。
+    case EventType.TOOL_APPROVAL_REQUESTED: {
+      const approvalId = String(data.approval_id ?? '');
+      if (!approvalId) break; // 契约必有 approval_id
+      // 幂等：重放已存在的 approval_id 不重复入队
+      if (next.pending_approvals.some((a) => a.approval_id === approvalId)) break;
+      next.pending_approvals = [...next.pending_approvals, {
+        approval_id: approvalId,
+        tool_name: String(data.tool_name ?? ''),
+        tool_call_id: String(data.tool_call_id ?? ''),
+        action_type: String(data.action_type ?? ''),
+        title: String(data.title ?? ''),
+        description: String(data.description ?? ''),
+        arguments_preview: (data.arguments_preview ?? {}) as Record<string, unknown>,
+        permission: String(data.permission ?? ''),
+        policy: String(data.policy ?? ''),
+        reason: String(data.reason ?? ''),
+        allowed_decisions: Array.isArray(data.allowed_decisions)
+          ? data.allowed_decisions.map(String)
+          : [],
+        time: event.time,
+      }];
+      break;
+    }
+
+    // #37 审批已决——从 pending_approvals 移除。
+    case EventType.PERMISSION_RESOLVED: {
+      const approvalId = String(data.approval_id ?? '');
+      if (approvalId) {
+        next.pending_approvals = next.pending_approvals.filter(
+          (a) => a.approval_id !== approvalId,
+        );
+      }
       break;
     }
 

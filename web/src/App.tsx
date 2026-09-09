@@ -91,8 +91,8 @@ export default function App() {
   }, []);
 
   // ── Phase 2b Composer control row（Ticket F1）──
-  // 四个 staged 契约清单：permission-modes / agent-profiles /
-  // reasoning-efforts / context-providers。空 → 隐藏控件。
+  // 四个控制目录（均已运行时消费，非 staged）：permission-modes /
+  // agent-profiles / reasoning-efforts / context-providers。空 → 隐藏控件。
   const [permissionModes, setPermissionModes] = useState<CatalogEntry[]>([]);
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null);
   const [agentProfiles, setAgentProfiles] = useState<CatalogEntry[]>([]);
@@ -248,8 +248,21 @@ export default function App() {
       focusRun();
       // 续聊：已有会话且不在流式中 → 发消息到现有会话（PRD §5.3 续聊入口）。
       // 新会话：无 selectedId → startSession 创建新会话。
+      // amend 按「有值才带」传入（与下方 create 分支同一模式）：仅空闲会话
+      // 拉起新 run 时被后端应用，在途 run 的 queued 消息忽略。permission_mode
+      // 不在 /messages 的 amend 契约内（后端 SendMessageRequest 只收这四项）。
       if (selectedId && !streaming) {
-        void sendMessage(selectedId, task, { maxSteps: 10 });
+        void sendMessage(selectedId, task, {
+          maxSteps: 10,
+          amend: {
+            ...(selectedModel ? { model: selectedModel } : {}),
+            ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
+            ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
+            ...(selectedContextProviders.length > 0
+              ? { context_providers: selectedContextProviders }
+              : {}),
+          },
+        });
         return;
       }
       void submitTask({
@@ -283,7 +296,7 @@ export default function App() {
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
   // 同步刷新控制目录并清除死选中值（permission_mode / agent_profile /
-  // reasoning_effort 的 staged 契约同样可能因目录变更而 422）。
+  // reasoning_effort 同样可能因目录变更而 422）。
   useEffect(() => {
     if (!error || !isUnknownModelError(error)) return;
     void (async () => {

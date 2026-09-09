@@ -11,19 +11,13 @@
  * （同 i-keyboard.spec.ts 的约定）。本文件不入 vitest 四门禁，归夜间/手动 e2e 车道。 */
 
 import { expect, test } from '@playwright/test';
-import { routeApi } from './fixtures';
-
-const CATALOG = [
-  { name: 'deepseek-v4-flash-0731', provider: 'senseaudio', model: 'deepseek-v4-flash-0731', default: true },
-  { name: 'qwen-max', provider: 'senseaudio', model: 'qwen3.8-max-0902', default: false },
-  { name: 'claude-sonnet-4', provider: 'anthropic', model: 'claude-sonnet-4-20250514', default: false },
-];
+import { MODELS, routeApi } from './fixtures';
 
 test('ModelPicker Combobox：角色语义 + 键盘导航 + 搜索 + Esc', async ({ page }) => {
   routeApi(page, {
     sessions: [],
     events: [],
-    models: CATALOG,
+    models: MODELS,
   });
 
   await page.goto('/');

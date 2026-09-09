@@ -3,22 +3,13 @@
  *  B1 spec 要求：6 档宽度（1440/1280/1024/820/768/浅色）回归。 */
 
 import { expect, test } from '@playwright/test';
-import { routeApi, fulfillSse } from './fixtures';
-
-const PERMISSION_MODES = [
-  { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
-  { id: 'ask', display_name: 'Ask Each Time', description: '每次工具调用都询问' },
-];
-
-const AGENT_PROFILES = [
-  { id: 'main', display_name: 'Main', description: '通用编排代理（默认）' },
-  { id: 'coding', display_name: 'Coding', description: '代码编辑专用' },
-];
-
-const REASONING_EFFORTS = [
-  { id: 'minimal', display_name: 'Minimal', description: '最少推理开销' },
-  { id: 'standard', display_name: 'Standard', description: '平衡推理深度' },
-];
+import {
+  AGENT_PROFILES,
+  PERMISSION_MODES,
+  REASONING_EFFORTS,
+  fulfillSse,
+  routeApi,
+} from './fixtures';
 
 const frames = [
   { type: 'session/started', seq: 1, session_id: 'e2e-vqa', run_id: 'e2e-vqa-run', time: '2026-09-08T00:00:00Z' },

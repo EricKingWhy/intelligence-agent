@@ -2,7 +2,7 @@
  *  text/delta durable 承接文本流、reasoning 族 envelope block_id、tool/output_delta
  *  按 channel、seq 每 session 单调。page.route 拦截 API，核心矩阵不依赖真后端。 */
 
-import type { Page, Route } from '@playwright/test';
+import { expect, type Page, type Route } from '@playwright/test';
 
 export const SID = 'e2e-session-0001';
 export const RUN = 'e2e-run-0001';
@@ -104,4 +104,73 @@ export function routeApi(page: Page, mock: ApiMock): void {
 export async function submitTask(page: Page, task: string): Promise<void> {
   await page.getByLabel('Agent 任务').fill(task);
   await page.getByLabel('发送').click();
+}
+
+// ── 控制目录 fixture（/api/models + 四个清单端点）──
+// 多个 spec 共用同一份，避免各自复制后静默漂移（code-review：catalog drift）。
+
+export const MODELS = [
+  { name: 'deepseek-v4-flash-0731', provider: 'senseaudio', model: 'deepseek-v4-flash-0731', default: true },
+  { name: 'qwen-max', provider: 'senseaudio', model: 'qwen3.8-max-0902', default: false },
+  { name: 'claude-sonnet-4', provider: 'anthropic', model: 'claude-sonnet-4-20250514', default: false },
+];
+
+export const PERMISSION_MODES = [
+  { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
+  { id: 'ask', display_name: 'Ask Each Time', description: '每次工具调用都询问' },
+  { id: 'deny', display_name: 'Deny All', description: '拒绝所有工具调用' },
+];
+
+export const AGENT_PROFILES = [
+  { id: 'main', display_name: 'Main', description: '通用编排代理（默认）' },
+  { id: 'coding', display_name: 'Coding', description: '代码编辑、调试和构建任务专用' },
+  { id: 'research_review', display_name: 'Research & Review', description: '研究、检索和审查任务专用' },
+];
+
+export const REASONING_EFFORTS = [
+  { id: 'minimal', display_name: 'Minimal', description: '最少推理开销；最快但最不彻底。' },
+  { id: 'standard', display_name: 'Standard', description: '典型任务的平衡推理深度（默认）。' },
+  { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。' },
+];
+
+export const CONTEXT_PROVIDERS = [
+  { id: 'memory', display_name: 'Memory', description: 'Inject relevant recalled memories scoped to the user into the model context.' },
+  { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
+];
+
+// ── Composer 控制行交互 helper（跨 spec 共用）──
+
+/** 键盘在 ControlPicker 里选第 N+1 项：打开 → 清搜索 → ↓×N → Enter，断言 trigger 文本。 */
+export async function pickControl(
+  page: Page,
+  label: string,
+  downPresses: number,
+  expected: string,
+): Promise<void> {
+  const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
+  // 浮层关闭动画期间内容仍留在 DOM——按 aria-label 限定到本次打开的浮层，
+  // 否则第二次调用会同时命中上一层残留（strict mode violation）。
+  const combo = page.getByRole('combobox', { name: label });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(combo).toBeVisible();
+  await combo.fill('');
+  for (let i = 0; i < downPresses; i += 1) await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText(expected);
+  await page.keyboard.press('Escape');
+}
+
+/** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。 */
+export async function pickFirstModel(page: Page): Promise<void> {
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]');
+  const combo = page.getByRole('combobox', { name: '模型选择' });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(combo).toBeVisible();
+  await combo.fill('');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText(MODELS[0].name);
+  await page.keyboard.press('Escape');
 }

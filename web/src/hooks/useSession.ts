@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, RecoverError, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
@@ -221,6 +221,13 @@ export function isUnknownModelError(message: string | null | undefined): boolean
   return message === UNKNOWN_MODEL_ERROR_TEXT;
 }
 
+/** 续聊 422 的稳定文案（handoff §5 P2，P1 修复后）：/messages 的 422 现在可能来自
+ *  session_id 非法 / 未知 model 或 context_providers（仅 idle→launched 时校验）/
+ *  非法 reasoning_effort 或 agent_profile 取值——不再等同于「未知模型」。
+ *  后端 detail 不是契约文本（Pydantic 校验与 HTTPException 的形状也不同），
+ *  所以不做子串区分，统一提示「刷新选项后重试」。 */
+export const CONTINUE_PARAMS_ERROR_TEXT = '续聊参数无效（422）：请刷新选项后重试';
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
@@ -315,8 +322,12 @@ export function useSession() {
     let cancelled = false;
     // live→viewing 迁移：conversation 已是同会话真相，后台静默重读对账，
     // 不用占位符替换（防主窗口闪烁）。切到不同会话才显示占位符。
-    setLoadingHistory(shouldShowHistoryLoading(conversation, sid));
-    setError(null);
+    // live→viewing 自迁移（流终态 / 续聊失败 / 重连放弃）不清错误横幅——否则
+    // sendFollowUp 与重连的失败提示会在同一批次被这条 effect 立刻抹掉。
+    // 只有真的切到别的会话（或首次加载）才清。
+    const switchingSession = shouldShowHistoryLoading(conversation, sid);
+    setLoadingHistory(switchingSession);
+    if (switchingSession) setError(null);
     getSessionEvents(sid)
       .then((events: AgentEvent[]) => {
         if (cancelled) return;
@@ -642,9 +653,23 @@ export function useSession() {
 
   /** 续聊：向已有会话发消息（PRD §5.3）。
    *  空闲会话 → 后端 launched 直驱新 run（同形 SSE）→ attachLiveStream 续接。
-   *  在途 run → 后端 queued 入队（JSON 确认）→ 当前流继续，下个 run 消费消息。 */
+   *  在途 run → 后端 queued 入队（JSON 确认）→ 当前流继续，下个 run 消费消息。
+   *
+   *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 档位。仅在
+   *  「空闲 → launched 新 run」时被后端应用；在途 run 的 queued 消息忽略。
+   *  空值不发键（api.sendMessage 兜底归一化；App.tsx 侧另有与 create 分支
+   *  同款的「有值才带」展开），与 create 分支同一语义。 */
   const sendFollowUp = useCallback(
-    async (sessionId: string, content: string, opts?: { maxSteps?: number }) => {
+    async (
+      sessionId: string,
+      content: string,
+      opts?: {
+        maxSteps?: number;
+        /** 字段集直接取自 /messages 的请求契约——Omit 出 amend 面，不会随
+         *  请求契约增删字段而漂移。 */
+        amend?: Omit<SendMessagePayload, 'content' | 'mode' | 'max_steps'>;
+      },
+    ) => {
       setError(null);
       // 续聊不重置 conversation——在现有对话上追加新 run 的事件。
       liveSidRef.current = sessionId;
@@ -659,8 +684,9 @@ export function useSession() {
           content,
           mode: 'queue',
           max_steps: opts?.maxSteps ?? 10,
+          ...(opts?.amend ?? {}),
         });
-        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
+        if (res.status === 422) throw new Error(CONTINUE_PARAMS_ERROR_TEXT);
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
         // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
         // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。

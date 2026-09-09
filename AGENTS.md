@@ -653,3 +653,15 @@ Analyze → Report → Ask → Execute → Validate → Report → Ask
 ```
 
 不得因为用户已批准前一个阶段，就默认后续阶段也获得授权。每个需要批准的动作都要单独显式确认。宁可停止询问，也不要猜测用户想保留哪一边。
+
+## 15. 前端 CSS 主题变量维护纪律（Ticket #35）
+
+`web/src/index.css` 使用 `[data-theme]` 属性切换暗/亮主题。暗色 token 在 `:root` 中定义，亮色 token 在 `:root[data-theme='light']` 中覆盖。
+
+**维护规则：**
+
+1. 修改 `:root` 中的某个 token 时，必须检查 `:root[data-theme='light']` 是否也需要同步覆盖。
+2. 新增 token 时在两个块都加定义，或确认亮色可安全继承暗色值。
+3. 遗漏亮色覆盖 → 该 token 在亮色模式下仍用暗色值（对比度/可见性问题）。
+
+CSS 原生没有变量组复用机制，手工双份同步是当前最小风险方案。

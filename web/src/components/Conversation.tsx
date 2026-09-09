@@ -26,6 +26,7 @@ import { ToolCard } from './ToolCard';
 import { DelegationNode } from './DelegationNode';
 import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
 import { CopyButton } from './CopyButton';
+import { ApprovalCard } from './ApprovalCard';
 
 interface Props {
   conversation: ConversationState | null;
@@ -201,6 +202,17 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
             </div>
           ))}
         </div>
+        {/* #37 交互式审批——pending_approvals 非空时内联渲染。
+         *  位于虚拟化轮次列表之后、endRef 之前，确保：
+         *  - 不参与虚拟化窗口（审批卡必须始终可见）
+         *  - 自动滚动到最新内容时包含审批卡 */}
+        {conversation.pending_approvals.map((a) => (
+          <ApprovalCard
+            key={a.approval_id}
+            sessionId={conversation.session_id}
+            approval={a}
+          />
+        ))}
         <div ref={endRef} />
       </div>
       {/* Follow-mode 浮标（pi-mono "jump to latest"）：仅在流式中且用户已上滚时出现 */}
