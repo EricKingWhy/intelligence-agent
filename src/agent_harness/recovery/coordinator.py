@@ -50,16 +50,14 @@ from agent_harness.logging import log_event
 from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import (
-    MODEL_COMPLETED,
     OPERATION_RECONCILE_REQUIRED,
     SESSION_RESUMED,
     TOOL_CALL,
     TOOL_RESULT,
     JsonlSessionStore,
     Session,
-    SessionEvent,
 )
-from agent_harness.session.derive import DANGLING_TOOL_CONTENT
+from agent_harness.session.derive import DANGLING_TOOL_CONTENT, collect_dangling
 from agent_harness.storage import Operation, OperationLedger, OperationState
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
 
@@ -235,7 +233,7 @@ class RecoveryCoordinator:
             # 确定性决策（终态 / PENDING / 占位）全部完成前不写任何事件
             # （先决策后写结果）；需人工裁决的先收集——没有 ReconcileCallback
             # 时在这里整体安全拒绝，什么都不写（#30）。
-            dangling_ids, call_event_ids = self._dangling_state(session.events)
+            dangling_ids, call_event_ids = collect_dangling(session.events)
             plan: list[_Synthesis] = []
             reconcile_required: list[tuple[str, Operation]] = []
             callback = self._reconcile_callback
@@ -353,37 +351,6 @@ class RecoveryCoordinator:
                 raise
         finally:
             await connection.close()
-
-    @staticmethod
-    def _dangling_state(
-        events: list[SessionEvent],
-    ) -> tuple[set[str], set[str]]:
-        """返回 (dangling tool_call_ids, 已有 tool/call 事件的 ids)。
-
-        dangling 的判定必须同时覆盖两个事实源：
-        - tool/call 事件（detect_dangling / resume 一致性用）；
-        - model/completed 的 tool_calls 字段（derive_messages 的 AIMessage 投影用）。
-        缺 tool/call 事件时恢复要一并补齐，否则两个视角不一致。
-        """
-        requested: set[str] = set()
-        call_event_ids: set[str] = set()
-        resolved: set[str] = set()
-        for event in events:
-            if event.type == TOOL_CALL:
-                tc_id = event.data.get("tool_call_id", "")
-                if tc_id:
-                    requested.add(tc_id)
-                    call_event_ids.add(tc_id)
-            elif event.type == MODEL_COMPLETED:
-                for tc in event.data.get("tool_calls", []):
-                    tc_id = tc.get("id", "")
-                    if tc_id:
-                        requested.add(tc_id)
-            elif event.type == TOOL_RESULT:
-                tc_id = event.data.get("tool_call_id", "")
-                if tc_id:
-                    resolved.add(tc_id)
-        return requested - resolved, call_event_ids
 
     def _decide(
         self,

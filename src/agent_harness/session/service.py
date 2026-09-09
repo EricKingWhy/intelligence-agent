@@ -98,7 +98,77 @@ class SteerTargetNotFound(SessionServiceError):
     """steer 目标 run 不存在（无在途 run）。"""
 
 
+#: session_id 安全校验正则——名字段，不是路径。
+#: store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时
+#: 反斜杠段在 win32 上可越出 sessions 根目录，盘符段可整体替换基路径。
+#: 字符集与 S3ArtifactStore 的 key 段规则一致。
+_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def validate_session_id(session_id: str) -> str:
+    """校验 session_id 是否为单个安全名字段。
+
+    正则 ``[A-Za-z0-9_-]+`` 保证只接受字母、数字、下划线、连字符，
+    拒绝含 ``/`` ``\\\\`` ``.`` 等路径分隔符的输入（路径穿越防护）。
+
+    :returns: 校验通过的 session_id（原值返回）。
+    :raises InvalidSessionId: session_id 含非法字符或为空。
+    """
+    if not _SESSION_ID_PATTERN.fullmatch(session_id):
+        raise InvalidSessionId(
+            f"session_id 只接受单个安全名字段：{session_id!r}"
+        )
+    return session_id
+
+
 # ── 数据载体 ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class AmendOptions:
+    """staged amend 字段：续跑/续聊时覆盖运行时可配置项。
+
+    全部可空——None = 使用 session 既有配置（默认行为不变）。
+    service 层 create / resume / send_message / drain 共用这一束，
+    避免 4 个字段在每个签名里平铺（Data Clump）。
+    """
+
+    reasoning_effort: str | None = None
+    agent_profile: str | None = None
+    context_providers: list[str] | None = None
+    model: str | None = None
+
+    @classmethod
+    def from_request(cls, request: Any) -> AmendOptions:
+        """从请求模型组装（Pydantic 或任何带同名属性的对象）。
+
+        web 层三个请求体（create / resume / messages）字段同形，组装逻辑
+        收敛到这里，避免在 app.py 重复三遍。
+        """
+        return cls(
+            reasoning_effort=getattr(request, "reasoning_effort", None),
+            agent_profile=getattr(request, "agent_profile", None),
+            context_providers=getattr(request, "context_providers", None),
+            model=getattr(request, "model", None),
+        )
+
+    def to_runtime_kwargs(self) -> dict[str, Any]:
+        """转成 ``build_runtime`` 的 amend 相关关键字参数。
+
+        ``model`` → ``model_name``（build_runtime 的参数名）；四个字段总是
+        全部给出（None 即默认行为），让调用点无需重复 None 判断。
+        """
+        return {
+            "model_name": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "agent_profile": self.agent_profile,
+            "context_providers": self.context_providers,
+        }
+
+
+def _amend_kwargs(amend: AmendOptions | None) -> dict[str, Any]:
+    """amend → build_runtime 关键字参数；None 等价于全 None（当前行为不变）。"""
+    return (amend or AmendOptions()).to_runtime_kwargs()
 
 
 @dataclass(frozen=True)
@@ -261,10 +331,7 @@ class SessionService:
         permission_mode_explicit: bool = False,
         auto_approve_explicit: bool = False,
         auto_approve: bool = True,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-        agent_profile: str | None = None,
-        context_providers: list[str] | None = None,
+        amend: AmendOptions | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -290,9 +357,9 @@ class SessionService:
         workspace.mkdir(parents=True, exist_ok=True)
 
         # 模型 catalog 校验（在落盘前，避免孤儿）
-        if model is not None:
+        if amend is not None and amend.model is not None:
             try:
-                ModelConfig.from_catalog(self._state.settings, model)
+                ModelConfig.from_catalog(self._state.settings, amend.model)
             except ConfigError as error:
                 raise InvalidDecision(str(error)) from error
 
@@ -324,10 +391,7 @@ class SessionService:
             permission_mode=permission_mode,
             approval_callback=approval_callback,
             session_store=self._state.store,
-            model_name=model,
-            reasoning_effort=reasoning_effort,
-            agent_profile=agent_profile,
-            context_providers=context_providers,
+            **_amend_kwargs(amend),
         )
         session = Session.start(self._state.store, session_id=session_id)
 
@@ -349,12 +413,16 @@ class SessionService:
         session_id: str,
         task: str,
         max_steps: int = 10,
+        amend: AmendOptions | None = None,
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
 
         这是「续跑」而非精确恢复中断 run：Session.resume 重建 append-only
         历史与 dangling 修复，RunManager.launch 驱动一轮新 Agent Loop。
         在途 session 拒绝（ActiveRunConflict），避免并发。
+
+        staged amend 字段（amend）透传给 build_runtime，与
+        create_and_launch 对齐。默认 None = 当前行为不变。
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
@@ -389,7 +457,7 @@ class SessionService:
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             approval_callback=None,
             session_store=self._state.store,
-            model_name=None,
+            **_amend_kwargs(amend),
         )
         run, subscriber = self._state.run_manager.launch(session, runtime, task)
         return LaunchResult(session=session, run=run, subscriber=subscriber)
@@ -450,6 +518,7 @@ class SessionService:
         content: str,
         mode: str = "queue",
         max_steps: int = 10,
+        amend: AmendOptions | None = None,
     ) -> SendMessageResult:
         """续聊消息入口（统一 CLI / Web 续聊路径）。
 
@@ -464,6 +533,9 @@ class SessionService:
           * ``mode="steer"``：仅在途 run 时合法——注册 SteerRequest，写
             ``STEER_REQUESTED`` 事件，返回 ``status="steered"``；无在途 run →
             ``SteerTargetNotFound``（409）。
+
+        staged amend 字段透传给 ``resume_and_launch``（idle 分支），
+        与 create 路径对齐。默认 None = 当前行为不变。
 
         不抢断、不改写历史事件（不变量 #3 / #22）；queue 与 steer 的消费由
         run 边界 / runtime 自身驱动，本方法只做注册与 durable 记录。
@@ -497,7 +569,8 @@ class SessionService:
         if active_run is None:
             # idle → 直接拉起新 run（同 resume 路径）。
             launched = await self.resume_and_launch(
-                session_id=session_id, task=content, max_steps=max_steps
+                session_id=session_id, task=content, max_steps=max_steps,
+                amend=amend,
             )
             return SendMessageResult(
                 status="launched",
@@ -538,20 +611,26 @@ class SessionService:
         return True
 
     async def drain_queued_message(
-        self, *, session_id: str, max_steps: int = 10
+        self,
+        *,
+        session_id: str,
+        max_steps: int = 10,
+        amend: AmendOptions | None = None,
     ) -> LaunchResult | None:
         """run 结束后自动消费下一条排队消息（PRD §5.3 FIFO 续聊链）。
 
         无排队或全部已取消 → 返回 None（调用方静默收尾）；有可用消息 →
         drain 出来 + ``resume_and_launch`` 拉起下一轮 run。此方法是
         「续聊链接力」的唯一驱动入口，避免 Web / CLI 各自实现而漂移。
+        staged amend 字段透传给 ``resume_and_launch``。
         """
         self._validate_session_id(session_id)
         msg = await self._state.message_queues.drain_next(session_id)
         if msg is None:
             return None
         return await self.resume_and_launch(
-            session_id=session_id, task=msg.content, max_steps=max_steps
+            session_id=session_id, task=msg.content, max_steps=max_steps,
+            amend=amend,
         )
 
     # ── 取消 ─────────────────────────────────────────────────────────
@@ -682,16 +761,8 @@ class SessionService:
 
     @staticmethod
     def _validate_session_id(session_id: str) -> None:
-        """session_id 安全校验：名字段，不是路径（路径逃逸防护）。
-
-        store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时
-        反斜杠段在 win32 上可越出 sessions 根目录，盘符段可整体替换基路径。
-        字符集与 S3ArtifactStore 的 key 段规则一致。
-        """
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
-            raise InvalidSessionId(
-                f"session_id 只接受单个安全名字段：{session_id!r}"
-            )
+        """委托公开函数 validate_session_id（保持调用方 self._validate_session_id 不变）。"""
+        validate_session_id(session_id)
 
     def _validate_workspace_name(self, workspace: str | None) -> str | None:
         """workspace 名字校验（路径逃逸防护）。

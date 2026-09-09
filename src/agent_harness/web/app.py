@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -38,6 +37,7 @@ from agent_harness.identity import (
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import (
     PROVIDER_PRESETS,
+    ConfigError,
     ModelConfig,
     _pick_capabilities,
     parse_model_catalog,
@@ -49,6 +49,7 @@ from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.service import (
     ActiveRunConflict,
+    AmendOptions,
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
@@ -60,6 +61,7 @@ from agent_harness.session.service import (
     SessionService,
     SteerTargetNotFound,
     WorkspaceNameInvalid,
+    validate_session_id,
 )
 from agent_harness.storage import (
     SqliteCheckpointStore,
@@ -72,6 +74,10 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
 )
 from agent_harness.web.runmanager import RunManager
+from agent_harness.web.serialization import (
+    build_event_payload,
+    build_session_event_payload,
+)
 
 # ── Staged amend 字段的人类可读描述（Phase 5 + Ticket B1）──────────────
 # 这些 dict 是 POST /api/sessions validator 与 GET 清单端点的**单一事实源**：
@@ -129,7 +135,49 @@ CONTEXT_PROVIDER_DESCRIPTIONS: dict[str, dict[str, str]] = {
 # ── Request / Response schemas ──
 
 
-class CreateSessionRequest(BaseModel):
+class _AmendValueValidators(BaseModel):
+    """amend 字段的静态取值校验（三个请求体共用一份，ADR-0020b / ADR-0021）。
+
+    ``check_fields=False``：字段声明在子类（CreateSessionRequest / ResumeRequest /
+    SendMessageRequest），校验逻辑只写一遍——三个入口对同一份取值集合负责。
+    未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
+    （见 ``_validate_wired_context_providers``）。
+    """
+
+    @field_validator("reasoning_effort", check_fields=False)
+    @classmethod
+    def _validate_reasoning_effort(cls, v: str | None) -> str | None:
+        if v is not None and v not in REASONING_EFFORT_DESCRIPTIONS:
+            valid = ", ".join(REASONING_EFFORT_DESCRIPTIONS)
+            raise ValueError(f"reasoning_effort must be one of: {valid}")
+        return v
+
+    @field_validator("agent_profile", check_fields=False)
+    @classmethod
+    def _validate_agent_profile(cls, v: str | None) -> str | None:
+        if v is not None and v not in AGENT_PROFILE_DESCRIPTIONS:
+            valid = ", ".join(AGENT_PROFILE_DESCRIPTIONS)
+            raise ValueError(f"agent_profile must be one of: {valid}")
+        return v
+
+    @field_validator("context_providers", check_fields=False)
+    @classmethod
+    def _validate_context_providers_shape(
+        cls, v: list[str] | None
+    ) -> list[str] | None:
+        # 只校验形状（每项非空字符串，空 list 合法）。是否已装配由 handler 对照
+        # wiring 判定——静态校验没法知道 CAPABILITIES 运行时状态。
+        if v is None:
+            return v
+        for item in v:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "context_providers entries must be non-empty strings"
+                )
+        return v
+
+
+class CreateSessionRequest(_AmendValueValidators):
     """POST /api/sessions 的请求体。"""
 
     # 空 task 直接 422（FastAPI 自动校验）；纯空白 task 容忍（runtime 侧无意义但不危险）。
@@ -152,38 +200,6 @@ class CreateSessionRequest(BaseModel):
     reasoning_effort: str | None = None
     agent_profile: str | None = None
     context_providers: list[str] | None = None
-
-    @field_validator("reasoning_effort")
-    @classmethod
-    def _validate_reasoning_effort(cls, v: str | None) -> str | None:
-        if v is not None and v not in REASONING_EFFORT_DESCRIPTIONS:
-            valid = ", ".join(REASONING_EFFORT_DESCRIPTIONS)
-            raise ValueError(f"reasoning_effort must be one of: {valid}")
-        return v
-
-    @field_validator("agent_profile")
-    @classmethod
-    def _validate_agent_profile(cls, v: str | None) -> str | None:
-        if v is not None and v not in AGENT_PROFILE_DESCRIPTIONS:
-            valid = ", ".join(AGENT_PROFILE_DESCRIPTIONS)
-            raise ValueError(f"agent_profile must be one of: {valid}")
-        return v
-
-    @field_validator("context_providers")
-    @classmethod
-    def _validate_context_providers(cls, v: list[str] | None) -> list[str] | None:
-        # 运行时消费（ADR-0020b）：会话请求按已装配 provider 的 name 子集筛选。
-        # 不对未知名字 422——provider 是否装配取决于 CAPABILITIES 运行时状态，
-        # 静态校验没法判定；未知名字在 assembly 层 fail-open 跳过（不变量 #21）。
-        # 这里只校验形状：每项是非空字符串（Pydantic 已保证 list[str]，空 list 合法）。
-        if v is None:
-            return v
-        for item in v:
-            if not isinstance(item, str) or not item.strip():
-                raise ValueError(
-                    "context_providers entries must be non-empty strings"
-                )
-        return v
 
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
     # 命名 = AGENT_MODELS catalog 条目，未知名字 422。fallback 链不受影响。
@@ -214,13 +230,18 @@ class ApproveRequest(BaseModel):
     reason: str = ""
 
 
-class ResumeRequest(BaseModel):
+class ResumeRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/resume 的请求体。"""
 
     task: str = Field(min_length=1, max_length=100_000)
+    # staged amend 字段（可选，None = 默认行为）
+    reasoning_effort: str | None = None
+    agent_profile: str | None = None
+    context_providers: list[str] | None = None
+    model: str | None = None
 
 
-class SendMessageRequest(BaseModel):
+class SendMessageRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/messages 的请求体（PRD §5.3 续聊入口）。
 
     ``mode`` 取自 PRD 锁定决策 D-7：
@@ -234,6 +255,11 @@ class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=100_000)
     mode: str = Field(default="queue", pattern="^(queue|steer)$")
     max_steps: int = Field(default=10, ge=1, le=200)
+    # staged amend 字段（可选，None = 默认行为）
+    reasoning_effort: str | None = None
+    agent_profile: str | None = None
+    context_providers: list[str] | None = None
+    model: str | None = None
 
 
 class SessionSummary(BaseModel):
@@ -368,6 +394,50 @@ class AppState:
             await wiring.aclose()
 
 
+async def _validate_wired_context_providers(
+    state: AppState, ids: list[str] | None
+) -> None:
+    """``context_providers`` 对照 wiring 真实装配集校验 → 422（ADR-0021）。
+
+    Pydantic 只能校验形状；某个 provider 是否装配取决于 CAPABILITIES 运行时
+    状态，必须在这里看 wiring。三个 amend 入口（create / resume / messages）
+    共用同一份判定。
+    """
+    if ids is None:
+        return
+    _, wiring = await state.get_wiring()
+    wired_ids = {getattr(p, "name", None) for p in wiring.context_providers}
+    wired_ids.discard(None)
+    unknown = [pid for pid in ids if pid not in wired_ids]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"context_providers contains unknown ids {unknown}; "
+                f"available: {sorted(wired_ids)}"
+            ),
+        )
+
+
+async def _validate_amend_for_existing_session(
+    state: AppState, amend: AmendOptions
+) -> None:
+    """``/resume`` 与 ``/messages`` 的 amend 校验（与 POST /api/sessions 对齐）。
+
+    create 路径的 ``model`` 校验在 service 里（落盘前避免孤儿 session）；这两个
+    端点没有那道闸门——不在此拦截的话，未知 model 会让 ``build_runtime`` 抛
+    ``ConfigError`` 且无人捕获 → 500，未知 context_providers 则被静默跳过。
+    ``reasoning_effort`` / ``agent_profile`` 已由 Pydantic 在 parse 期 422
+    （``_AmendValueValidators``）。
+    """
+    await _validate_wired_context_providers(state, amend.context_providers)
+    if amend.model is not None:
+        try:
+            ModelConfig.from_catalog(state.settings, amend.model)
+        except ConfigError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 def _validate_workspace_name(state: AppState, workspace: str | None) -> str | None:
     """校验请求里的 workspace 字段——V1 安全边界：它是名字，不是路径。
 
@@ -400,22 +470,6 @@ def _validate_workspace_name(state: AppState, workspace: str | None) -> str | No
             detail=f"workspace 越出 workspaces_root：{workspace!r}",
         )
     return workspace
-
-
-def _validate_session_id(session_id: str) -> str:
-    """校验路径里的 session_id——它是单个名字段，不是路径。
-
-    store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时反斜杠段
-    在 win32 上可越出 sessions 根目录（路径穿越读取 oracle），盘符段可整体替换
-    基路径。与 _validate_workspace_name 同一安全边界；字符集与 S3ArtifactStore
-    的 key 段规则一致（session_id 实际由 uuid4() 生成，天然满足）。
-    """
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
-        raise HTTPException(
-            status_code=422,
-            detail=f"session_id 只接受单个安全名字段：{session_id!r}",
-        )
-    return session_id
 
 
 #: 重放 backlog 阈值（durable 事件数，ADR-0016 §2.3）：after_seq 落后超过
@@ -458,60 +512,17 @@ def _render_model_option(
 
 
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
-    """把 AgentEvent 转成 SSE 的 data 字段（JSON 字符串）。
-
-    session_id 由 endpoint 注入——runtime 内部的 AgentEvent 不知道自己属于哪个 session，
-    但前端需要它在第一帧就能切换 selectedId（否则新 session 的对话无法渲染）。
-    帧形状与重放路径（GET /stream 的 SessionEvent 帧）同形：seq 是幂等投影键，
-    event_id 是事件身份，block_id 聚合同一段流式块（ADR-0016 §2.3）。
-
-    RuntimeEvent 信封（SDD 03 §3，Phase 2 加法）：schema_version + durability 始终携带；
-    capability 仅在非 None 时携带（与 block_id 同模式）。
-    """
-    payload: dict[str, Any] = {
-        "type": event.type,
-        "data": event.data,
-        "seq": event.seq,
-        "run_id": event.run_id,
-        "step_id": event.step_id,
-        "session_id": session_id,
-        "time": event.time,
-        "schema_version": event.schema_version,
-        "durability": event.durability,
-    }
-    if event.block_id is not None:
-        payload["block_id"] = event.block_id
-    if event.capability is not None:
-        payload["capability"] = event.capability
-    return {"data": json.dumps(payload, ensure_ascii=False)}
+    """AgentEvent → SSE 帧（信封构建在 web/serialization.py，SSE/WS 共用）。"""
+    return {"data": json.dumps(
+        build_event_payload(event, session_id), ensure_ascii=False
+    )}
 
 
 def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str, str]:
-    """把持久化 SessionEvent 转成 SSE 帧（重放通道，GET /stream 用）。
-
-    帧形状与 live 通道（_event_to_sse_dict）严格同形——客户端对两条通道
-    做同一 seq 幂等投影，无需区分帧来源（event_id 仅存于 JSONL/全量接口）。
-
-    RuntimeEvent 信封（SDD 03 §3，Phase 2 加法）：schema_version + durability 始终携带；
-    durability 恒 "durable"（SessionEvent 已通过 append 词汇表校验）；capability 仅在
-    非 None 时携带。
-    """
-    payload: dict[str, Any] = {
-        "type": event.type,
-        "data": event.data,
-        "seq": event.seq,
-        "run_id": event.run_id,
-        "step_id": event.step_id,
-        "session_id": session_id,
-        "time": event.time,
-        "schema_version": event.schema_version,
-        "durability": "durable",
-    }
-    if event.block_id is not None:
-        payload["block_id"] = event.block_id
-    if event.capability is not None:
-        payload["capability"] = event.capability
-    return {"data": json.dumps(payload, ensure_ascii=False)}
+    """SessionEvent → SSE 帧（重放通道，信封构建在 web/serialization.py）。"""
+    return {"data": json.dumps(
+        build_session_event_payload(event, session_id), ensure_ascii=False
+    )}
 
 
 #: CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
@@ -635,7 +646,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
     from agent_harness.web.lineage import register_lineage_routes
 
-    register_lineage_routes(app, validate_session_id=_validate_session_id)
+    register_lineage_routes(app, validate_session_id=validate_session_id)
 
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
@@ -898,19 +909,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # name 属性机制）：validator 无法访问 AppState/wiring（Pydantic parse 早于
         # handler），故在 handler 内对 wiring 真实装配的 id 集合校验——与 model
         # 字段的 from_catalog 422 模式一致。未知 id → 422 + 可用清单。
-        if req.context_providers is not None:
-            _, wiring = await state.get_wiring()
-            wired_ids = {getattr(p, "name", None) for p in wiring.context_providers}
-            wired_ids.discard(None)
-            unknown = [pid for pid in req.context_providers if pid not in wired_ids]
-            if unknown:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"context_providers contains unknown ids {unknown}; "
-                        f"available: {sorted(wired_ids)}"
-                    ),
-                )
+        await _validate_wired_context_providers(state, req.context_providers)
 
         permission_mode = PermissionPolicy(req.permission_mode)
         permission_mode_explicit = "permission_mode" in req.model_fields_set
@@ -925,10 +924,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 permission_mode_explicit=permission_mode_explicit,
                 auto_approve_explicit=auto_approve_explicit,
                 auto_approve=req.auto_approve,
-                model=req.model,
-                reasoning_effort=req.reasoning_effort,
-                agent_profile=req.agent_profile,
-                context_providers=req.context_providers,
+                amend=AmendOptions.from_request(req),
             )
         except WorkspaceNameInvalid as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1031,10 +1027,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         在途 session 拒绝 409，避免同一 session 并发两轮。
         """
         service = SessionService(app.state.agent)
+        amend = AmendOptions.from_request(req)
+        await _validate_amend_for_existing_session(app.state.agent, amend)
         try:
             result = await service.resume_and_launch(
                 session_id=session_id,
                 task=req.task,
+                amend=amend,
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1160,12 +1159,28 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         JSON 确认；无在途 run → 409（steer 必须有目标）。
         """
         service = SessionService(app.state.agent)
+        amend = AmendOptions.from_request(req)
+        # 契约（handoff §3.1 / P3）：只有 idle → launched 才消费 amend；在途 run
+        # 的 queued 消息与 steer 一律忽略这些字段。因此引用类字段（model /
+        # context_providers，取值集合来自运行时 catalog / wiring，可能已失效）
+        # 只在这条路径上校验——否则一个失效引用会 422 掉用户刚敲的消息。
+        # 值/形状类字段（reasoning_effort / agent_profile / context_providers 形状）
+        # 由 Pydantic 在 parse 期校验，与是否消费无关（静态集合，非法值即客户端 bug）。
+        if (
+            req.mode == "queue"
+            and app.state.agent.run_manager.get_active(session_id) is None
+        ):
+            await _validate_amend_for_existing_session(app.state.agent, amend)
+        else:
+            # 未被消费：按契约丢弃（与改动前 send_message 的忽略语义一致）。
+            amend = AmendOptions()
         try:
             result = await service.send_message(
                 session_id=session_id,
                 content=req.content,
                 mode=req.mode,
                 max_steps=req.max_steps,
+                amend=amend,
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
