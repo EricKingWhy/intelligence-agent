@@ -105,3 +105,35 @@ export async function submitTask(page: Page, task: string): Promise<void> {
   await page.getByLabel('Agent 任务').fill(task);
   await page.getByLabel('发送').click();
 }
+
+// ── 控制目录 fixture（/api/models + 四个清单端点）──
+// 多个 spec 共用同一份，避免各自复制后静默漂移（code-review：catalog drift）。
+
+export const MODELS = [
+  { name: 'deepseek-v4-flash-0731', provider: 'senseaudio', model: 'deepseek-v4-flash-0731', default: true },
+  { name: 'qwen-max', provider: 'senseaudio', model: 'qwen3.8-max-0902', default: false },
+  { name: 'claude-sonnet-4', provider: 'anthropic', model: 'claude-sonnet-4-20250514', default: false },
+];
+
+export const PERMISSION_MODES = [
+  { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
+  { id: 'ask', display_name: 'Ask Each Time', description: '每次工具调用都询问' },
+  { id: 'deny', display_name: 'Deny All', description: '拒绝所有工具调用' },
+];
+
+export const AGENT_PROFILES = [
+  { id: 'main', display_name: 'Main', description: '通用编排代理（默认）' },
+  { id: 'coding', display_name: 'Coding', description: '代码编辑、调试和构建任务专用' },
+  { id: 'research_review', display_name: 'Research & Review', description: '研究、检索和审查任务专用' },
+];
+
+export const REASONING_EFFORTS = [
+  { id: 'minimal', display_name: 'Minimal', description: '最少推理开销；最快但最不彻底。' },
+  { id: 'standard', display_name: 'Standard', description: '典型任务的平衡推理深度（默认）。' },
+  { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。' },
+];
+
+export const CONTEXT_PROVIDERS = [
+  { id: 'memory', display_name: 'Memory', description: 'Inject relevant recalled memories scoped to the user into the model context.' },
+  { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
+];

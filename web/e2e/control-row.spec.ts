@@ -9,25 +9,13 @@
  * 车道归属：Playwright e2e（同 model-picker.spec.ts 约定）。 */
 
 import { expect, test } from '@playwright/test';
-import { routeApi, fulfillSse } from './fixtures';
-
-const PERMISSION_MODES = [
-  { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
-  { id: 'ask', display_name: 'Ask Each Time', description: '每次工具调用都询问' },
-  { id: 'deny', display_name: 'Deny All', description: '拒绝所有工具调用' },
-];
-
-const AGENT_PROFILES = [
-  { id: 'main', display_name: 'Main', description: '通用编排代理（默认）' },
-  { id: 'coding', display_name: 'Coding', description: '代码编辑、调试和构建任务专用' },
-  { id: 'research_review', display_name: 'Research & Review', description: '研究、检索和审查任务专用' },
-];
-
-const REASONING_EFFORTS = [
-  { id: 'minimal', display_name: 'Minimal', description: '最少推理开销；最快但最不彻底。' },
-  { id: 'standard', display_name: 'Standard', description: '典型任务的平衡推理深度（默认）。' },
-  { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。' },
-];
+import {
+  AGENT_PROFILES,
+  PERMISSION_MODES,
+  REASONING_EFFORTS,
+  fulfillSse,
+  routeApi,
+} from './fixtures';
 
 test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async ({ page }) => {
   const frames = [

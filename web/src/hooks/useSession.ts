@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, RecoverError, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
@@ -646,19 +646,19 @@ export function useSession() {
    *
    *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 档位。仅在
    *  「空闲 → launched 新 run」时被后端应用；在途 run 的 queued 消息忽略。
-   *  空值不发键（api.sendMessage 统一归一化），与 create 分支同一语义。 */
+   *  空值不发键（api.sendMessage 兜底归一化；App.tsx 侧另有与 create 分支
+   *  同款的「有值才带」展开），与 create 分支同一语义。 */
   const sendFollowUp = useCallback(
     async (
       sessionId: string,
       content: string,
       opts?: {
         maxSteps?: number;
-        amend?: {
-          model?: string;
-          agent_profile?: string;
-          reasoning_effort?: string;
-          context_providers?: string[];
-        };
+        /** 字段集直接取自 /messages 的请求契约——不另起一份手写清单。 */
+        amend?: Pick<
+          SendMessagePayload,
+          'model' | 'agent_profile' | 'reasoning_effort' | 'context_providers'
+        >;
       },
     ) => {
       setError(null);

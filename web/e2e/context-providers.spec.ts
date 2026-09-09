@@ -10,16 +10,7 @@
  * 车道归属：Playwright e2e（同 control-row.spec.ts 约定）。 */
 
 import { expect, test } from '@playwright/test';
-import { fulfillSse, routeApi } from './fixtures';
-
-const CONTEXT_PROVIDERS = [
-  { id: 'memory', display_name: 'Memory', description: 'Inject relevant recalled memories scoped to the user into the model context.' },
-  { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
-];
-
-const PERMISSION_MODES = [
-  { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
-];
+import { CONTEXT_PROVIDERS, PERMISSION_MODES, fulfillSse, routeApi } from './fixtures';
 
 const frames = [
   { type: 'session/started', seq: 1, session_id: 'e2e-cp-session', run_id: 'e2e-cp-run', time: '2026-09-08T00:00:00Z' },

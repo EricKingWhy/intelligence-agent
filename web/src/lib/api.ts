@@ -71,7 +71,7 @@ export interface StartSessionPayload {
    *  - agent_profile: GET /api/agent-profiles 的 id；注入 system_prompt +
    *    按 tool_scope 收窄工具集（ADR-0020a），不传 = 后端默认。
    *  - reasoning_effort: GET /api/reasoning-efforts 的 id；经 create_chat_model
-   *    注入模型原生字段（ADR-0018 D7），不传 = 后端默认。
+   *    注入模型原生字段（reasoning_effort 批次 `79e2860`），不传 = 后端默认。
    *  - context_providers: GET /api/context-providers 的 id 列表；按 provider
    *    name 筛选已装配子集（ADR-0021），不传 = 全部已装配 provider。
    *
@@ -176,7 +176,11 @@ export interface SendMessagePayload {
    *
    *  生效范围：仅「空闲会话 → launched 新 run」时应用；在途 run 的 queued
    *  消息忽略它们（runtime 已固定，不抢断不改写）。空值不发键 = 后端默认，
-   *  与 POST /api/sessions 的 create 分支同一模式。 */
+   *  与 POST /api/sessions 的 create 分支同一模式。
+   *
+   *  ⚠ 已知 Gap：`context_providers: []` 同样不发键，但后端把 `[]` 当作
+   *  「显式选零个」（区别于不传 = 全量）。前端选择器无法表达「零个」，
+   *  改语义需先定契约（技术债交接 §5）。 */
   model?: string;
   agent_profile?: string;
   reasoning_effort?: string;
@@ -187,8 +191,9 @@ export async function sendMessage(sessionId: string, payload: SendMessagePayload
   return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    // 续聊 amend：有值才带键（空值/空数组不发键 = 后端默认）。单一归一化点——
-    // 调用方可以直接传 undefined，payload 仍保持干净（与 create 分支同一语义）。
+    // 续聊 amend：有值才带键（空值/空数组不发键 = 后端默认）。这里是兜底
+    // 归一化——调用方即使直接传 undefined / [] 也不会脏 payload；App.tsx
+    // 续聊分支另有与 create 分支同款的「有值才带」展开，两者不冲突。
     body: JSON.stringify({
       content: payload.content,
       mode: payload.mode ?? 'queue',
