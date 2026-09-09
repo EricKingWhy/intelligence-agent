@@ -665,3 +665,38 @@ Analyze → Report → Ask → Execute → Validate → Report → Ask
 3. 遗漏亮色覆盖 → 该 token 在亮色模式下仍用暗色值（对比度/可见性问题）。
 
 CSS 原生没有变量组复用机制，手工双份同步是当前最小风险方案。
+
+## 16. SDD 工作流协议（防指令漂移）
+
+长任务（多 ticket × SDD 循环）跨越多个 context window 时，必须遵循持久化协议：
+
+- **协议文件**：`docs/SDD_WORKFLOW_PROTOCOL.md`
+- **Ticket Tracker**：`docs/SDD_TICKET_TRACKER.md`
+
+### 进入新 context window 时
+
+1. 读 `docs/SDD_WORKFLOW_PROTOCOL.md`
+2. 读 `docs/SDD_TICKET_TRACKER.md`
+3. 根据 Tracker 中「下一个待处理 ticket」继续工作
+
+### 每个 Ticket 的 SDD 循环
+
+```text
+1. /implement  ← 用 implement skill 实现 ticket
+2. /code-review ← 用 code-review skill 审查
+3. 有 bug？ → 修复 → 回到步骤 2
+4. 无 bug → ticket 完成 → 更新 Tracker
+5. 进入下一个 ticket
+```
+
+### 全部完成后
+
+```text
+1. /improve-codebase-architecture ← 扫描深化机会
+2. 出现问题 → 修复 → /code-review
+3. 无问题 → 写集成 AI 交接提示词
+```
+
+### 遇到不确定时
+
+使用 `/ask-matt` skill 提问。不要猜测、不要自行决定架构方向。
