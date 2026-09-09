@@ -800,7 +800,10 @@ class SessionService:
         if interactive:
             queue = PendingApprovalQueue()
             self._state.approval_queues[session_id] = queue
-            return _InteractiveCallbackHolder(queue=queue)
+            return _InteractiveCallbackHolder(
+                queue=queue,
+                timeout_seconds=self._state.settings.approval_timeout_seconds,
+            )
         elif (
             auto_approve_explicit
             and not permission_mode_explicit
@@ -836,9 +839,12 @@ class _InteractiveCallbackHolder:
     as_callback() 获取真正的 callable。
     """
 
-    def __init__(self, queue: PendingApprovalQueue) -> None:
+    def __init__(self, *, queue: PendingApprovalQueue, timeout_seconds: float) -> None:
         self._queue = queue
         self._session: Session | None = None
+        #: ≤0 → None（无限等待，旧行为）；>0 → fail-closed 超时（PRD T6 §2.2 C）。
+        #: 无默认值：审批等待是安全边界，超时值必须由调用方（Settings）显式给出。
+        self._timeout: float | None = timeout_seconds if timeout_seconds > 0 else None
 
     def bind_session(self, session: Session) -> None:
         self._session = session
@@ -869,7 +875,24 @@ class _InteractiveCallbackHolder:
                 "allowed_decisions": allowed_decisions,
             },
         )
-        response = await self._queue.wait_for(approval_id)
+        try:
+            response = await self._queue.wait_for(approval_id, timeout=self._timeout)
+        except TimeoutError:
+            # fail-closed（PRD T6 §2.2 C）：无人决策 = 拒绝，绝不默认放行。
+            assert self._timeout is not None  # 未配置超时不会抛 TimeoutError
+            timeout_deny = ApprovalResponse(
+                approved=False,
+                reason=f"审批超时（{self._timeout:g}s 无决策），按 fail-closed 拒绝",
+                decision=PermissionDecision.DENY,
+            )
+            if self._queue.expire(approval_id, timeout_deny):
+                response = timeout_deny
+            else:
+                # 极端竞态：外部 /approve 与超时同刻到达，且 /approve 已抢先写入
+                # _resolved（future 已被 wait_for 取消 → 本协程收到 TimeoutError）。
+                # 先写入者胜（一次性语义）：采用人类决策，不覆盖。
+                settled = self._queue.resolved_response(approval_id)
+                response = settled if settled is not None else timeout_deny
         self._session.append(
             "permission/resolved",
             {

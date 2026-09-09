@@ -50,6 +50,23 @@ CSS 原生没有变量组复用机制，修改时必须两处同步。2026-09-04
 
 ## 3. Ticket #37: 交互式审批走通
 
+> **勘误（as-built 契约，2026-09-09）**：本节 §3.1–§3.2 正文与下面的 JSON 示例是旧稿，
+> **已作废**。实际契约以 `PRD_PHASE_MULTITURN_TOTAL.md` §2.2（已勘误）为准：
+>
+> - 推送不是 WS 自定义帧，而是既有事件流里的 **durable 事件**
+>   `tool/approval-requested` / `permission/resolved`。WS 帧外层是
+>   `{"type":"event","session_id":...,"event":{<信封>}}`，前端必须取 `event` 再匹配 `type`。
+> - 审批上下文字段：`data.approval_id` / `data.tool_name` / `data.tool_call_id` /
+>   `data.permission` / `data.policy` / `data.reason` / `data.allowed_decisions`
+>   （词表 `["deny","approve_once"]`，不是 `allow`/`reject`）。
+> - 回传端点是 `POST /api/sessions/{session_id}/approve`，body
+>   `{approval_id, approved, decision, reason}`；200 返回
+>   `{"status":"resolved","approval_id":...,"decision":...}`。
+> - 超时 fail-closed 由**后端**兜底（`APPROVAL_TIMEOUT_SECONDS`，默认 300s → 自动 deny
+>   并写 `permission/resolved`）。前端**不需要**自己倒计时后发 reject；若前端在
+>   后端超时之前发（reject 或 approve_once）仍合法（200），后端超时之后再发才是
+>   409（one-shot）。
+
 ### 3.1 现有基础设施
 
 - **ApprovalCard 组件**：`web/src/components/ApprovalCard.tsx`
@@ -188,8 +205,8 @@ CSS 原生没有变量组复用机制，修改时必须两处同步。2026-09-04
 
 | 接口 | 前端消费方式 | 对应后端 ticket |
 |---|---|---|
-| WS `approval_requested` 推送 | 监听 WS 消息流 | #136 |
-| `POST /api/sessions/{id}/approvals/{call_id}` | HTTP 回传审批决策 | #136 |
+| WS `tool/approval-requested` 事件（取 `event` 后匹配 `type`） | 监听 WS 事件流 | #136 |
+| `POST /api/sessions/{id}/approve`（body 带 `approval_id`） | HTTP 回传审批决策 | #136 |
 | `POST /api/sessions/{id}/model` | HTTP 切换模型 | #137 |
 | `POST /api/sessions/{id}/forks` | HTTP 从历史点 fork | #137 |
 | SSE/WS `model_changed` 事件 | 监听事件流更新 UI | #137 |
