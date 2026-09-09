@@ -138,6 +138,38 @@ class AmendOptions:
     context_providers: list[str] | None = None
     model: str | None = None
 
+    @classmethod
+    def from_request(cls, request: Any) -> AmendOptions:
+        """从请求模型组装（Pydantic 或任何带同名属性的对象）。
+
+        web 层三个请求体（create / resume / messages）字段同形，组装逻辑
+        收敛到这里，避免在 app.py 重复三遍。
+        """
+        return cls(
+            reasoning_effort=getattr(request, "reasoning_effort", None),
+            agent_profile=getattr(request, "agent_profile", None),
+            context_providers=getattr(request, "context_providers", None),
+            model=getattr(request, "model", None),
+        )
+
+    def to_runtime_kwargs(self) -> dict[str, Any]:
+        """转成 ``build_runtime`` 的 amend 相关关键字参数。
+
+        ``model`` → ``model_name``（build_runtime 的参数名）；四个字段总是
+        全部给出（None 即默认行为），让调用点无需重复 None 判断。
+        """
+        return {
+            "model_name": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "agent_profile": self.agent_profile,
+            "context_providers": self.context_providers,
+        }
+
+
+def _amend_kwargs(amend: AmendOptions | None) -> dict[str, Any]:
+    """amend → build_runtime 关键字参数；None 等价于全 None（当前行为不变）。"""
+    return (amend or AmendOptions()).to_runtime_kwargs()
+
 
 @dataclass(frozen=True)
 class LaunchResult:
@@ -359,10 +391,7 @@ class SessionService:
             permission_mode=permission_mode,
             approval_callback=approval_callback,
             session_store=self._state.store,
-            model_name=amend.model if amend is not None else None,
-            reasoning_effort=amend.reasoning_effort if amend is not None else None,
-            agent_profile=amend.agent_profile if amend is not None else None,
-            context_providers=amend.context_providers if amend is not None else None,
+            **_amend_kwargs(amend),
         )
         session = Session.start(self._state.store, session_id=session_id)
 
@@ -428,10 +457,7 @@ class SessionService:
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             approval_callback=None,
             session_store=self._state.store,
-            model_name=amend.model if amend is not None else None,
-            reasoning_effort=amend.reasoning_effort if amend is not None else None,
-            agent_profile=amend.agent_profile if amend is not None else None,
-            context_providers=amend.context_providers if amend is not None else None,
+            **_amend_kwargs(amend),
         )
         run, subscriber = self._state.run_manager.launch(session, runtime, task)
         return LaunchResult(session=session, run=run, subscriber=subscriber)

@@ -1,10 +1,12 @@
-"""Q2 spec tests: resume_and_launch 透传 staged amend 字段到 build_runtime。
+"""Q2 spec tests: amend 字段透传（service 层）。
 
 spec 要求（docs/TECH_DEBT_FIX_SPEC.md §Q2）：
   - 新增测试：验证 ``resume_and_launch`` 透传 amend 字段到 ``build_runtime``
     （mock build_runtime，断言参数传递）
-  - 新增测试：验证 ``POST /api/sessions/{id}/resume`` 带 amend 字段时正确透传
   - 新增测试：验证 ``send_message`` idle 分支带 amend 字段时正确透传
+
+端点层（``POST /api/sessions/{id}/resume`` 请求体 → AmendOptions）见
+tests/web/test_web_amend_passthrough.py。
 """
 
 from __future__ import annotations
@@ -144,3 +146,47 @@ class TestResumeAndLaunchPassthrough:
         assert call_kwargs["reasoning_effort"] is None
         assert call_kwargs["agent_profile"] is None
         assert call_kwargs["context_providers"] is None
+
+
+class TestSendMessageIdlePassthrough:
+    """``send_message`` idle 分支把 amend 透传给 ``resume_and_launch``。"""
+
+    def test_send_message_idle_forwards_amend(self, tmp_path):
+        """idle（无在途 run）→ resume_and_launch 收到完整 amend 对象。"""
+        state = _make_state(tmp_path)
+        state.run_manager.get_active = MagicMock(return_value=None)
+
+        amend = AmendOptions(
+            reasoning_effort="deep",
+            agent_profile="coding",
+            context_providers=["memory"],
+            model="gpt-4o",
+        )
+        launched = MagicMock()
+        launched.session.session_id = "test-sid"
+        launched.run = MagicMock()
+        launched.subscriber = MagicMock()
+
+        service = SessionService(state)
+        with (
+            patch.object(
+                SessionService, "has_session", new_callable=AsyncMock
+            ) as mock_has,
+            patch.object(
+                SessionService, "resume_and_launch", new_callable=AsyncMock
+            ) as mock_resume,
+        ):
+            mock_has.return_value = True
+            mock_resume.return_value = launched
+            result = asyncio.run(
+                service.send_message(
+                    session_id="test-sid",
+                    content="继续",
+                    mode="queue",
+                    amend=amend,
+                )
+            )
+
+        assert result.status == "launched"
+        assert mock_resume.call_args.kwargs["task"] == "继续"
+        assert mock_resume.call_args.kwargs["amend"] is amend

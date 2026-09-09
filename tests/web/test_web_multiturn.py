@@ -158,10 +158,15 @@ class TestWebSocketMultisession:
 
 
 class TestWebSocketDisconnectCleanup:
-    """断开连接后 subscription 清理。"""
+    """断开连接后服务端仍可服务新连接（不崩溃）。
+
+    真正的「订阅者归零」断言在 tests/web/test_web_ws_relay.py::
+    test_ws_disconnect_cleans_subscriber（需要真实在途 run + RunManager 内部状态）；
+    这里只做轻量的连接级 smoke：断开后服务端可继续接受新连接。
+    """
 
     def test_ws_disconnect_does_not_crash(self, app_and_client):
-        """WS 断开后服务端不崩溃（subscription 清理走 finally）。"""
+        """WS 断开后服务端不崩溃，可继续接受新连接。"""
         _, client = app_and_client
         with client.websocket_connect("/api/ws") as ws:
             ws.send_text(json.dumps({"type": "ping"}))

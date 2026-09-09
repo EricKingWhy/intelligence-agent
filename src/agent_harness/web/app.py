@@ -881,12 +881,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 permission_mode_explicit=permission_mode_explicit,
                 auto_approve_explicit=auto_approve_explicit,
                 auto_approve=req.auto_approve,
-                amend=AmendOptions(
-                    model=req.model,
-                    reasoning_effort=req.reasoning_effort,
-                    agent_profile=req.agent_profile,
-                    context_providers=req.context_providers,
-                ),
+                amend=AmendOptions.from_request(req),
             )
         except WorkspaceNameInvalid as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -993,12 +988,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             result = await service.resume_and_launch(
                 session_id=session_id,
                 task=req.task,
-                amend=AmendOptions(
-                    reasoning_effort=req.reasoning_effort,
-                    agent_profile=req.agent_profile,
-                    context_providers=req.context_providers,
-                    model=req.model,
-                ),
+                amend=AmendOptions.from_request(req),
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1130,12 +1120,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 content=req.content,
                 mode=req.mode,
                 max_steps=req.max_steps,
-                amend=AmendOptions(
-                    reasoning_effort=req.reasoning_effort,
-                    agent_profile=req.agent_profile,
-                    context_providers=req.context_providers,
-                    model=req.model,
-                ),
+                amend=AmendOptions.from_request(req),
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e

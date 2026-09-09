@@ -19,14 +19,14 @@ from agent_harness.agent import AgentEvent
 from agent_harness.session import SessionEvent
 
 
-def build_event_payload(event: AgentEvent, session_id: str) -> dict[str, Any]:
-    """AgentEvent → RuntimeEvent 信封 payload（SSE live 通道 / WS 共用）。
+def _envelope(event: Any, session_id: str, durability: str) -> dict[str, Any]:
+    """RuntimeEvent 信封（SDD 03 §3）的单一构建点。
 
-    session_id 由 endpoint 注入——runtime 内部的 AgentEvent 不知道自己属于
-    哪个 session，但前端需要它在第一帧就能切换 selectedId。
+    session_id 由 endpoint 注入——runtime 内部事件不知道自己属于哪个 session，
+    但前端需要它在第一帧就能切换 selectedId。
     seq 是幂等投影键，block_id 聚合同一段流式块（ADR-0016 §2.3）。
-    RuntimeEvent 信封（SDD 03 §3）：schema_version + durability 始终携带；
-    capability 仅在非 None 时携带（与 block_id 同模式）。
+    schema_version + durability 始终携带；block_id / capability 仅在非 None
+    时携带（可选字段不进信封，避免前端拿到无意义 null）。
     """
     payload: dict[str, Any] = {
         "type": event.type,
@@ -37,37 +37,30 @@ def build_event_payload(event: AgentEvent, session_id: str) -> dict[str, Any]:
         "session_id": session_id,
         "time": event.time,
         "schema_version": event.schema_version,
-        "durability": event.durability,
+        "durability": durability,
     }
     if event.block_id is not None:
         payload["block_id"] = event.block_id
     if event.capability is not None:
         payload["capability"] = event.capability
     return payload
+
+
+def build_event_payload(event: AgentEvent, session_id: str) -> dict[str, Any]:
+    """AgentEvent → 信封 payload（SSE live 通道 / WS 共用）。
+
+    durability 取自事件自身（live 事件可能是 ephemeral）。
+    """
+    return _envelope(event, session_id, event.durability)
 
 
 def build_session_event_payload(
     event: SessionEvent, session_id: str
 ) -> dict[str, Any]:
-    """SessionEvent → RuntimeEvent 信封 payload（SSE 重放通道 / WS 共用）。
+    """SessionEvent → 信封 payload（SSE 重放通道 / WS 共用）。
 
-    帧形状与 live 通道（build_event_payload）严格同形——客户端对两条通道
-    做同一 seq 幂等投影，无需区分帧来源（event_id 仅存于 JSONL/全量接口）。
+    帧形状与 live 通道严格同形——客户端对两条通道做同一 seq 幂等投影，
+    无需区分帧来源（event_id 仅存于 JSONL/全量接口）。
     durability 恒 "durable"（SessionEvent 已通过 append 词汇表校验）。
     """
-    payload: dict[str, Any] = {
-        "type": event.type,
-        "data": event.data,
-        "seq": event.seq,
-        "run_id": event.run_id,
-        "step_id": event.step_id,
-        "session_id": session_id,
-        "time": event.time,
-        "schema_version": event.schema_version,
-        "durability": "durable",
-    }
-    if event.block_id is not None:
-        payload["block_id"] = event.block_id
-    if event.capability is not None:
-        payload["capability"] = event.capability
-    return payload
+    return _envelope(event, session_id, "durable")

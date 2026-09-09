@@ -1,9 +1,10 @@
-"""Q4d spec tests: WS live event relay + client-initiated heartbeat。
+"""Q4d spec tests: WS live event relay + server-initiated logical heartbeat。
 
 覆盖（docs/TECH_DEBT_FIX_SPEC.md §Q4d + code-review P1/P2/P3/P4）：
-  - P2 live event relay：WS ``send_message`` 触发续聊 → 收到增量 event 帧，
-    帧结构完整（信封含 type/data/seq/session_id）。
-  - P4 heartbeat：client-initiated ping → server pong 应用层心跳。
+  - Q4d.2 live event relay：subscribe 一个**有 active run** 的 session，
+    验证增量事件通过 WS 推送（信封含 type/data/seq/session_id）。
+  - Q4d.4 heartbeat：服务端每 ``WS_PING_INTERVAL`` 秒下行 ``server_ping``；
+    客户端不应答则在 ``WS_PING_TIMEOUT`` 后关闭连接。
   - P1 multisession：单 WS 订阅两个真实 session → 各自收到 snapshot。
   - P3 disconnect cleanup：WS 断开后 RunManager 订阅者归零。
 
@@ -116,6 +117,26 @@ async def _create_session(port: int, task: str) -> str:
     return frames[0]["session_id"]
 
 
+async def _start_run_get_session_id(port: int, task: str) -> str:
+    """POST /api/sessions，读首帧拿 session_id 后立即断开。
+
+    run 是 detached（ADR-0016）：HTTP 流断开只是 unsubscribe，run 继续在途。
+    """
+    import httpx2
+
+    async with httpx2.AsyncClient(timeout=None) as client, client.stream(
+        "POST", f"http://127.0.0.1:{port}/api/sessions", json={"task": task},
+    ) as response:
+        assert response.status_code == 200
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            sid = json.loads(line.removeprefix("data:").strip()).get("session_id")
+            if sid:
+                return sid
+    raise AssertionError("首帧未带 session_id")
+
+
 async def _recv_until(ws, predicate, timeout: float = 8.0) -> list[dict]:
     """持续收 WS 文本帧直到 predicate(累计帧列表) 为真或超时。"""
     frames: list[dict] = []
@@ -136,61 +157,43 @@ async def _recv_until(ws, predicate, timeout: float = 8.0) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_ws_live_event_relay(tmp_path, monkeypatch):
-    """P2 live event relay：WS send_message 触发续聊 → 增量事件经 WS 推送。
+    """Q4d.2 live event relay：subscribe 一个有 active run 的 session，
+    验证增量事件通过 WS 推送。
 
-    不通过 SSE 中转：全程走 /api/ws。subscribe 拿到 snapshot 后，用 WS 的
-    send_message 拉新一轮 run——WS 层自动订阅并把增量 event 帧推到客户端。
+    规格字面：订阅时必须已有在途 run（而非先订阅 idle session 再触发新 run）。
+    run 由 HTTP 发起后立即断开连接（detached 仍在途），WS 订阅接上 live 流。
     """
     server, serve_task, port, _app = await _start_server(
         tmp_path, monkeypatch,
-        model_factory=lambda config, **kw: _SlowStreamModel(chunks=8, interval=0.05),
+        # 3s 慢流：HTTP 断开后 run 仍在途，WS 有充足窗口订阅并收增量
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=30, interval=0.1),
     )
     try:
-        # 先建一个已完成的 session（idle 可续聊）
-        session_id = await _create_session(port, "首轮任务")
+        session_id = await _start_run_get_session_id(port, "慢任务")
 
         import httpx2
 
         async with httpx2.AsyncClient(timeout=15) as client, client.websocket(
             f"ws://127.0.0.1:{port}/api/ws"
         ) as ws:
-            # subscribe → snapshot
             await ws.send_text(json.dumps({
                 "type": "subscribe", "session_id": session_id,
             }))
-            snap = await _recv_until(
+            frames = await _recv_until(
                 ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
-            snap_frame = next(f for f in snap if f.get("type") == "snapshot")
-            assert snap_frame["session_id"] == session_id
-            assert "events" in snap_frame
-            assert "replay_upto" in snap_frame
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            assert snap["session_id"] == session_id
+            assert snap["has_active_run"] is True, \
+                "订阅时 run 必须在途（规格要求 active run）"
 
-            # WS send_message 续聊 → launched 确认 + 增量 event 帧
-            await ws.send_text(json.dumps({
-                "type": "send_message",
-                "session_id": session_id,
-                "content": "继续",
-                "mode": "queue",
-            }))
-
-            def _has_launched_then_events(fs: list[dict]) -> bool:
-                types = [f.get("type") for f in fs]
-                if "launched" not in types:
-                    return False
-                # launched 之后的 event 帧（非 snapshot）
-                launched_at = types.index("launched")
-                events_after = [f for f in fs[launched_at + 1:]
-                                if f.get("type") == "event"]
-                return len(events_after) >= 1
-
-            frames = await _recv_until(ws, _has_launched_then_events)
-            types = [f.get("type") for f in frames]
-            assert "launched" in types, f"缺少 launched 帧：{types}"
-            launched_at = types.index("launched")
-            event_frames = [f for f in frames[launched_at + 1:]
-                            if f.get("type") == "event"]
-            assert event_frames, "WS 必须收到至少一个增量 event 帧"
-            for ef in event_frames:
+            # 继续收增量 event 帧（run 仍在流式产出）
+            event_frames = await _recv_until(
+                ws,
+                lambda fs: len([f for f in fs if f.get("type") == "event"]) >= 1,
+            )
+            events = [f for f in event_frames if f.get("type") == "event"]
+            assert events, "在途 run 的增量事件必须经 WS 推送"
+            for ef in events:
                 assert ef["session_id"] == session_id
                 inner = ef["event"]
                 for key in ("type", "data", "seq", "session_id"):
@@ -201,11 +204,7 @@ async def test_ws_live_event_relay(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ws_client_ping_pong(tmp_path, monkeypatch):
-    """P4 heartbeat：client-initiated ping → server pong 应用层心跳。
-
-    应用层心跳（非 WebSocket PING control frame）：客户端周期性发
-    ``{"type": "ping"}`` 探测连接活性，服务端回 ``{"type": "pong"}``。
-    """
+    """客户端主动 ping → 服务端 pong（既有应用层契约）。"""
     server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
     try:
         import httpx2
@@ -219,6 +218,65 @@ async def test_ws_client_ping_pong(tmp_path, monkeypatch):
                 timeout=3.0)
             assert any(f.get("type") == "pong" for f in frames), \
                 "期望 pong 帧，未收到"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_server_heartbeat_ping_arrives(tmp_path, monkeypatch):
+    """Q4d.4 heartbeat：服务端按 ``WS_PING_INTERVAL`` 下行 ``server_ping``。
+
+    ASGI 发不出 RFC 6455 PING 控制帧，故心跳是应用层帧（SDD 02 §7.9
+    「logical heartbeat」）。客户端回 ``pong`` 后连接保持可用。
+    """
+    monkeypatch.setattr("agent_harness.web.websocket.WS_PING_INTERVAL", 0.2)
+    monkeypatch.setattr("agent_harness.web.websocket.WS_PING_TIMEOUT", 5.0)
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=5) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            frames = await _recv_until(
+                ws,
+                lambda fs: any(f.get("type") == "server_ping" for f in fs),
+                timeout=3.0,
+            )
+            assert any(f.get("type") == "server_ping" for f in frames), \
+                "期望 server_ping 帧，未收到"
+
+            # 应答 pong → 连接保持可用（再发 ping 仍能拿到 pong）
+            await ws.send_text(json.dumps({"type": "pong"}))
+            await ws.send_text(json.dumps({"type": "ping"}))
+            alive = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "pong" for f in fs),
+                timeout=3.0)
+            assert any(f.get("type") == "pong" for f in alive), \
+                "应答心跳后连接应保持可用"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_dead_peer_closed_after_timeout(tmp_path, monkeypatch):
+    """Q4d.4 heartbeat：客户端不应答 → ``WS_PING_TIMEOUT`` 后服务端关闭连接。"""
+    monkeypatch.setattr("agent_harness.web.websocket.WS_PING_INTERVAL", 0.1)
+    monkeypatch.setattr("agent_harness.web.websocket.WS_PING_TIMEOUT", 0.3)
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            closed = False
+            try:
+                for _ in range(50):
+                    await asyncio.wait_for(ws.receive_text(), timeout=2.0)
+            except Exception:  # noqa: BLE001 — 断开以任意传输异常收场
+                closed = True
+            assert closed, "客户端不应答心跳，服务端应关闭连接"
     finally:
         await _shutdown(server, serve_task)
 

@@ -88,7 +88,7 @@ class TestCollectDangling:
         assert dangling == {"tc-2"}
         assert call_ids == {"tc-1"}
 
-    def test_detect_dangling_usescollect_dangling(self):
+    def test_detect_dangling_uses_collect_dangling(self):
         """detect_dangling 委托 collect_dangling 并返回 sorted list。"""
         events = [
             _event(0, SESSION_STARTED),
