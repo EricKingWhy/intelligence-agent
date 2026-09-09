@@ -14,7 +14,7 @@ describe('initConversation', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
-      compactions: [], reconcile_queue: [], events: [], unknown_events: [],
+      compactions: [], reconcile_queue: [], pending_approvals: [], events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       seenSeqs: new Set(),

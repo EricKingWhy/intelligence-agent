@@ -188,11 +188,24 @@ export async function streamSession(sessionId: string, afterSeq: number): Promis
   );
 }
 
-export async function postApproval(sessionId: string, approved: boolean): Promise<unknown> {
+/** POST /api/sessions/{id}/approve — interactive approval decision (#37, PRD §2.2).
+ *  Backend resolves the pending approval via PendingApprovalQueue.resolve().
+ *  Response (200): {"status":"resolved","approval_id":"...","decision":"approve_once"}
+ *  404 = approval_id not found; 409 = already resolved; 422 = invalid decision.
+ *  Idempotent for already-resolved (409 is non-fatal for UI). */
+export async function postApproval(
+  sessionId: string,
+  approvalId: string,
+  approved: boolean,
+): Promise<{ status: string; approval_id: string; decision: string }> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approved }),
+    body: JSON.stringify({
+      approval_id: approvalId,
+      approved,
+      decision: approved ? 'approve_once' : 'deny',
+    }),
   });
   if (!res.ok) throw new Error(`approve ${res.status}`);
   return res.json();

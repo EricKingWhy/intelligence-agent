@@ -145,9 +145,9 @@ import { shouldShowHistoryLoading } from './useSession';
 describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载占位符', () => {
   const conv = (session_id: string) => ({
     session_id, turns: [], active_step_id: null, run_status: 'completed' as const,
-    run_cancelled: false, compactions: [], reconcile_queue: [], events: [],
-    unknown_events: [], model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null,
-    model_fallback: null, run_id: null,
+    run_cancelled: false, compactions: [], reconcile_queue: [], pending_approvals: [],
+    events: [], unknown_events: [], model: null, usage_total: null, cost_usd: null,
+    trace_id: null, trace_url: null, model_fallback: null, run_id: null,
     seenSeqs: new Set<number>(),
   });
 

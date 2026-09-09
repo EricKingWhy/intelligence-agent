@@ -260,6 +260,24 @@ export interface ReconcileRequired {
   time?: string;
 }
 
+/** Pending interactive approval — tool/approval-requested event (#37, PRD §2.2).
+ *  Runtime pauses at ToolExecutor._check_approval until user resolves via
+ *  POST /api/sessions/{id}/approve. ApprovalCard renders this inline. */
+export interface PendingApproval {
+  approval_id: string;
+  tool_name: string;
+  tool_call_id: string;
+  action_type: string;
+  title: string;
+  description: string;
+  arguments_preview: Record<string, unknown>;
+  permission: string;
+  policy: string;
+  reason: string;
+  allowed_decisions: string[];
+  time?: string;
+}
+
 export interface ConversationState {
   session_id: string;
   turns: Turn[];
@@ -272,6 +290,10 @@ export interface ConversationState {
   /** Run-level metadata for the Inspector (Phase 5 events). */
   compactions: ContextCompaction[];
   reconcile_queue: ReconcileRequired[];
+  /** Pending interactive approvals (#37, PRD §2.2).
+   *  tool/approval-requested adds to this list; permission/resolved removes.
+   *  Empty array = no pending approval (auto-approve or already resolved). */
+  pending_approvals: PendingApproval[];
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22). */
   events: AgentEvent[];
