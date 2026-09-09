@@ -631,6 +631,7 @@ export function useSession() {
         if (!res.ok || !res.body) throw new Error(`Start failed: ${res.status}`);
         attachLiveStream(res, gen, null);
       } catch (e) {
+        if (streamGenRef.current !== gen) return; // 过期请求迟到失败：丢弃，不污染新会话
         streamGenRef.current += 1;
         setMode({ kind: 'idle' });
         setError(`提交失败：${(e as Error).message}`);
@@ -672,6 +673,7 @@ export function useSession() {
           setMode({ kind: 'viewing', sessionId });
         }
       } catch (e) {
+        if (streamGenRef.current !== gen) return; // 过期请求迟到失败：丢弃，不污染新会话
         streamGenRef.current += 1;
         setMode({ kind: 'viewing', sessionId });
         setError(`续聊失败：${(e as Error).message}`);
