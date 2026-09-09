@@ -654,6 +654,19 @@ Analyze → Report → Ask → Execute → Validate → Report → Ask
 
 不得因为用户已批准前一个阶段，就默认后续阶段也获得授权。每个需要批准的动作都要单独显式确认。宁可停止询问，也不要猜测用户想保留哪一边。
 
+## 14.12 Ticket 关单纪律
+
+**完成的 ticket 必须立即关闭 GitHub issue，不留 OPEN。**（用户 2026-09-09 明确要求：「以后做完的都要关掉」。）
+
+```bash
+gh issue close <n> --comment "<验证证据：commit / 测试结果 / 关键文件>"
+```
+
+- 已合入 `main` 且门禁通过 → 直接关单。
+- 代码完成但尚未合入 `main` → 关单 comment 必须写明分支与 commit，并注明集成由谁执行。
+- 只完成部分交付（例如跨端 ticket 只做完一端）→ **不关单**，用 comment 记录已完成部分与剩余项。
+- 关单前先核实实际状态（代码/测试），不要凭进度文档或记忆关单。
+
 ## 15. 前端 CSS 主题变量维护纪律（Ticket #35）
 
 `web/src/index.css` 使用 `[data-theme]` 属性切换暗/亮主题。暗色 token 在 `:root` 中定义，亮色 token 在 `:root[data-theme='light']` 中覆盖。
