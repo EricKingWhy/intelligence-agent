@@ -1,11 +1,11 @@
 """WebSocket 多路复用通道（T2 / #132，PRD §5.1）。
 
 单连接多路复用所有 session 的 streaming / 推送：
-- 客户端 `subscribe(session_id)` 后，服务端推该 session 的增量事件。
-- 心跳 ping/pong（2s 默认，30s 超时断开）。
-- 断线重连：客户端开新 WS + `subscribe(session_id)`，服务端先推一份
+- 客户端 ``subscribe(session_id)`` 后，服务端推该 session 的增量事件。
+- 断线重连：客户端开新 WS + ``subscribe(session_id)``，服务端先推一份
   完整快照（session 当前事件投影 + 在途 run baseline），之后增量。
-- 废弃 SSE+after_seq 作为主通道（SSE 保留灰度兼容）。
+- 心跳是**客户端主动**的：客户发 ``{"type": "ping"}``，服务端回
+  ``{"type": "pong"}``（应用层心跳，供客户端检测连接活性）。
 
 设计原则（不变量守护）：
 - WS 不维护第二套 session 真相（#22）：所有事件来自 RunManager 订阅，
@@ -23,16 +23,13 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from agent_harness.web.serialization import build_event_payload
+
 if TYPE_CHECKING:
     from agent_harness.web.app import AppState
     from agent_harness.web.runmanager import RunManager
 
 logger = logging.getLogger("agent_harness.web.websocket")
-
-#: 心跳间隔（秒）——服务端发 ping。
-WS_PING_INTERVAL: float = 2.0
-#: 客户端无响应超时（秒）——超时断开。
-WS_PING_TIMEOUT: float = 30.0
 
 
 async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
@@ -43,6 +40,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
       {"type": "send_message", "session_id": "...", "content": "...", "mode": "queue"}
       {"type": "steer", "session_id": "...", "content": "..."}
       {"type": "cancel", "session_id": "..."}
+      {"type": "ping"}  — client-initiated ping, server replies pong
 
     下行消息格式（JSON）：
       {"type": "snapshot", "session_id": "...", "events": [...]}
@@ -122,7 +120,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                 await out_q.put({
                     "type": "event",
                     "session_id": session_id,
-                    "event": _event_to_ws_dict(event, session_id),
+                    "event": build_event_payload(event, session_id),
                 })
         except asyncio.CancelledError:
             pass
@@ -140,6 +138,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         try:
             while True:
                 raw = await websocket.receive_text()
+
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -240,35 +239,3 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         subscriptions.clear()
         with contextlib.suppress(asyncio.CancelledError):
             await write_task
-
-
-def _event_to_ws_dict(event: Any, session_id: str) -> dict[str, Any]:
-    """AgentEvent → WS 下行 dict（与 SSE 帧格式一致）。"""
-    from agent_harness.agent.types import AgentEvent
-
-    if isinstance(event, AgentEvent):
-        result: dict[str, Any] = {
-            "type": event.type,
-            "data": event.data,
-            "session_id": session_id,
-        }
-        if event.seq is not None:
-            result["seq"] = event.seq
-        if event.run_id is not None:
-            result["run_id"] = event.run_id
-        if event.step_id is not None:
-            result["step_id"] = event.step_id
-        if event.time is not None:
-            result["time"] = event.time
-        if event.schema_version is not None:
-            result["schema_version"] = event.schema_version
-        result["durability"] = event.durability
-        if event.block_id is not None:
-            result["block_id"] = event.block_id
-        if event.capability is not None:
-            result["capability"] = event.capability
-        return result
-    # SessionEvent fallback
-    if hasattr(event, "to_dict"):
-        return event.to_dict()
-    return {"type": "unknown", "data": str(event)}

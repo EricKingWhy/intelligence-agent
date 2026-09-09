@@ -127,6 +127,53 @@ class TestWebSocketBasics:
             assert payload["type"] == "pong"
 
 
+class TestWebSocketMultisession:
+    """多会话订阅：单 WS 连接订阅多个 session。"""
+
+    def test_ws_subscribe_multiple_sessions(self, app_and_client):
+        """subscribe 两个不存在 session → 两个 error 帧。"""
+        _, client = app_and_client
+        with client.websocket_connect("/api/ws") as ws:
+            ws.send_text(json.dumps({"type": "subscribe", "session_id": "sess-a"}))
+            msg1 = ws.receive_text()
+            payload1 = json.loads(msg1)
+            assert payload1["type"] == "error"
+
+            ws.send_text(json.dumps({"type": "subscribe", "session_id": "sess-b"}))
+            msg2 = ws.receive_text()
+            payload2 = json.loads(msg2)
+            assert payload2["type"] == "error"
+
+    def test_ws_subscribe_then_ping(self, app_and_client):
+        """subscribe 后仍可 ping → 连接保持。"""
+        _, client = app_and_client
+        with client.websocket_connect("/api/ws") as ws:
+            ws.send_text(json.dumps({"type": "subscribe", "session_id": "nope"}))
+            ws.receive_text()  # error frame
+
+            ws.send_text(json.dumps({"type": "ping"}))
+            msg = ws.receive_text()
+            payload = json.loads(msg)
+            assert payload["type"] == "pong"
+
+
+class TestWebSocketDisconnectCleanup:
+    """断开连接后 subscription 清理。"""
+
+    def test_ws_disconnect_does_not_crash(self, app_and_client):
+        """WS 断开后服务端不崩溃（subscription 清理走 finally）。"""
+        _, client = app_and_client
+        with client.websocket_connect("/api/ws") as ws:
+            ws.send_text(json.dumps({"type": "ping"}))
+            ws.receive_text()
+        # 断开后再次建连验证服务端仍然正常
+        with client.websocket_connect("/api/ws") as ws2:
+            ws2.send_text(json.dumps({"type": "ping"}))
+            msg = ws2.receive_text()
+            payload = json.loads(msg)
+            assert payload["type"] == "pong"
+
+
 class TestTypedEvents:
     """新 typed SessionEvent 词汇表注册。"""
 
