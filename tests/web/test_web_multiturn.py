@@ -179,6 +179,148 @@ class TestWebSocketDisconnectCleanup:
             assert payload["type"] == "pong"
 
 
+class TestCrashReconcileGuard:
+    """T8 #138：崩溃遗留（UNKNOWN tool_call）续聊必须 409，不伪造「结果未知」。
+
+    不变量 #13/#14：Ledger reconcile 是唯一恢复入口；UNKNOWN 高风险副作用
+    无 ReconcileCallback 时安全拒绝，绝不能落到 Session.resume 的 dangling
+    兜底去替模型猜结论。
+    """
+
+    def _seed_crashed_unknown(self, app, session_id: str) -> None:
+        import asyncio
+
+        from agent_harness.session import Session
+        from agent_harness.session.event import TOOL_CALL, USER_MESSAGE
+        from agent_harness.storage import Operation, OperationState
+
+        state = app.state.agent
+        session = Session.start(state.store, session_id=session_id)
+        run_id, _ = session.begin_run()
+        session.append(USER_MESSAGE, {"content": "删库"}, run_id=run_id)
+        session.append(
+            TOOL_CALL,
+            {
+                "tool_call_id": "call-1",
+                "tool_name": "bash",
+                "args": {"command": "rm -rf /prod"},
+            },
+            run_id=run_id,
+        )
+
+        async def _seed() -> None:
+            await state.ensure_stores()
+            await state.operation_ledger.create(Operation(
+                tool_call_id="call-1",
+                session_id=session_id,
+                run_id=run_id,
+                agent_id="default",
+                tool_name="bash",
+                args_identity='{"command": "rm -rf /prod"}',
+                state=OperationState.PENDING,
+                started_at="2026-09-09T00:00:00+00:00",
+            ))
+            await state.operation_ledger.update_state(
+                session_id, "call-1", OperationState.RUNNING
+            )
+            await state.operation_ledger.update_state(
+                session_id, "call-1", OperationState.UNKNOWN
+            )
+
+        asyncio.run(_seed())
+
+    def test_unknown_operation_blocks_continue_with_409(self, app_and_client):
+        app, client = app_and_client
+        session_id = "crashed-unknown"
+        self._seed_crashed_unknown(app, session_id)
+
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "继续", "mode": "queue"},
+        )
+
+        assert response.status_code == 409
+        assert "UNKNOWN" in response.json()["detail"]
+        # 拒绝即零伪造：没有合成 tool/result，也没有假的恢复完成标记
+        events = app.state.agent.store.read_events(session_id)
+        assert not any(e.type == "tool/result" for e in events)
+        assert not any(e.type == "session/resumed" for e in events)
+
+    def test_terminal_operation_is_reconciled_then_continue_succeeds(
+        self, tmp_path, monkeypatch
+    ):
+        """Ledger 有终态 → 精确回填后照常续跑（守卫不误伤正常路径）。"""
+        import asyncio
+
+        from fastapi.testclient import TestClient
+        from langchain_core.messages import AIMessage
+
+        from agent_harness.config import Settings
+        from agent_harness.session import Session
+        from agent_harness.session.event import TOOL_CALL, USER_MESSAGE
+        from agent_harness.storage import Operation, OperationState
+        from agent_harness.web.app import create_app
+        from tests.scripted_model import ScriptedModel
+
+        monkeypatch.setattr(
+            "agent_harness.assembly.create_chat_model",
+            lambda config, **kw: ScriptedModel([AIMessage(content="done")]),
+        )
+        app = create_app(Settings(
+            _env_file=None, workspace_dir=str(tmp_path),
+            model_api_key="sk-test", model_provider="deepseek",
+            model_name="deepseek-chat", enable_cors=False,
+        ))
+        client = TestClient(app)
+        state = app.state.agent
+        session_id = "crashed-succeeded"
+        session = Session.start(
+            state.store,
+            session_id=session_id,
+            workspace_registry=state.workspace_registry,
+        )
+        run_id, _ = session.begin_run()
+        session.append(USER_MESSAGE, {"content": "跑测试"}, run_id=run_id)
+        session.append(
+            TOOL_CALL,
+            {"tool_call_id": "call-1", "tool_name": "bash", "args": {"command": "pytest"}},
+            run_id=run_id,
+        )
+
+        async def _seed() -> None:
+            await state.ensure_stores()
+            await state.operation_ledger.create(Operation(
+                tool_call_id="call-1",
+                session_id=session_id,
+                run_id=run_id,
+                agent_id="default",
+                tool_name="bash",
+                args_identity='{"command": "pytest"}',
+                state=OperationState.PENDING,
+                started_at="2026-09-09T00:00:00+00:00",
+            ))
+            await state.operation_ledger.update_state(
+                session_id, "call-1", OperationState.RUNNING
+            )
+            await state.operation_ledger.update_state(
+                session_id, "call-1", OperationState.SUCCEEDED
+            )
+
+        asyncio.run(_seed())
+
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "继续", "mode": "queue"},
+        )
+
+        assert response.status_code == 200
+        events = app.state.agent.store.read_events(session_id)
+        assert any(
+            e.type == "tool/result" and e.data["tool_call_id"] == "call-1"
+            for e in events
+        )
+
+
 class TestTypedEvents:
     """新 typed SessionEvent 词汇表注册。"""
 

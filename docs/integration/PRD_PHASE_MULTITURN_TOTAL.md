@@ -131,7 +131,7 @@ subscribe 流，帧形状严格同形）追加一条 **durable SessionEvent**：
 
 ```json
 {
-  "type": "model_changed",
+  "type": "model/changed",
   "session_id": "sess-xxx",
   "data": {
     "from_provider": "openai",
@@ -141,6 +141,16 @@ subscribe 流，帧形状严格同形）追加一条 **durable SessionEvent**：
   }
 }
 ```
+
+> **as-built 注（2026-09-09，T7 实现）**：事件类型字符串是 **`model/changed`**（仓库既有
+> `model/*` 词汇表约定：`model/started` / `model/completed` / `model/fallback`），不是
+> 旧稿的 `model_changed`。`model_id` = catalog 条目名（`GET /api/models` 里的 `name`），
+> 前端切模型后 UI 用它对齐选项。`from_*` 可能为 `null`（此前走默认链）。响应里的
+> `model_id` 回传**规范 picker id**（条目名，或默认链的默认模型名），不回显请求值。
+> 选中 `GET /api/models` 的 `is_default` 条目（`provider` = 默认 provider、
+> `model_id` = 默认模型名或字面量 `"default"`）= **切回默认链**，事件写 `to_model_id: null`，
+> 后续 run 不再带 catalog 覆盖。与默认条目同 provider + 同名的 catalog 条目会被默认条目
+> 遮蔽（选不中），`GET /api/models` 不再列出它。
 
 Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁定的模型）。
 
@@ -158,14 +168,23 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 
 复用已有 `src/agent_harness/session/fork.py` 和 `lineage.py`，不重写。
 
+> **as-built 注（2026-09-09，T7 实现）**：`from_seq` 是父会话中**用户消息**的 seq
+> （`find_fork_boundaries` 列出的合法锚点）；锚点消息不进 child。在途 run → 409；
+> 锚点非法 → 422。HTTP 端点**不生成 tail summary**（无模型调用，确定性）；CLI
+> `/fork`（`demo/live_agent.py`）省略 `from_seq` 时取**最近一个合法切点**，tail 摘要
+> 默认开启（`TailSummarizer`，失败自动降级不挂接）。child 继承父会话当前模型
+> （seed 不含父 `session/started`，后端补一条 `model/changed`）。
+
 ### 2.5 崩溃恢复事件 (#138)
 
 进程重启后扫描无终态 run 的 session，追加 `RUN_INTERRUPTED` 事件：
 
 ```json
 {
-  "type": "run_interrupted",
+  "type": "run/interrupted",
   "session_id": "sess-xxx",
+  "run_id": "run-xxx",
+  "step_id": 3,
   "data": {
     "interrupted_seq": 42,
     "reason": "process_restart"
@@ -175,11 +194,35 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 
 用户重新打开有 `RUN_INTERRUPTED` 的 session 时，前端显示"上次运行在第 N 步中断"，提供继续/重发/忽略三个动作。
 
+> **as-built 注（2026-09-09，T8 实现）**：事件字符串是 **`run/interrupted`**（仓库
+> `run/*` 词汇表约定），不是本稿的 `run_interrupted`。`run_id` / `step_id` 挂事件
+> 信封（前端按 run 归组、显示"第 N 步"）；`data` 只放 `interrupted_seq` +
+> `reason="process_restart"`。扫描幂等：`run/interrupted` 本身是 run 终态，重复
+> 扫描不会重复追加。无终态 run 的 session 标记后强制跑 Ledger reconcile；存在
+> UNKNOWN Operation 且无 ReconcileCallback 时该 session 记为「需人工确认」
+> （不伪造结果、不盲重跑，不变量 #14），其 `session/resumed` 不写（恢复未完成）。
+>
+> **扫描归属（单进程假设）**：扫描只在**持有会话的进程**启动时执行一次——
+> web lifespan（`SessionService.scan_interrupted()`）。CLI 子命令**不扫描**：
+> 在途 run 只存在于本进程内存，短命命令无法区分「别的进程在跑」与「崩溃遗留」，
+> 误标会让两侧各自推算 seq 撞号。多进程/多 worker 需跨进程 run lease（后续 Phase）。
+>
+> **续跑守卫（不变量 #13/#14）**：`POST /api/sessions/{id}/messages`（idle →
+> launched）与 `POST /api/sessions/{id}/resume` 在检测到悬空 tool_call / 无终态 run
+> 时先走 Ledger reconcile，不再落到 `Session.resume` 的 dangling 兜底；UNKNOWN
+> 高风险副作用安全拒绝 → **409**（detail 点名 tool_name/tool_call_id）。前端遇到
+> 409 应提示「需人工确认」并可调 `POST /api/sessions/{id}/recover` 重试，不得
+> 伪造"结果未知"继续。
+>
+> **Fork 边界**：`run/interrupted` 与 `run/completed` / `run/failed` 同属 run
+> 终态（`RUN_TERMINAL_TYPES`），被中断轮之后的用户消息仍是合法 fork 锚点。
+
 ### 2.6 CLI slash 命令 (#137 CLI 部分)
 
-已有入口在 `src/agent_harness/cli.py`：
-- `/model <provider> <model>` — 切换模型
-- `/fork` — 从历史点 fork
+slash 命令入口在交互式 REPL（`demo/live_agent_repl.py` 定义 + `demo/live_agent.py` 分发）；
+`src/agent_harness/cli.py` 只有子命令（`fork` / `sessions` / `replay` / `ingest`）：
+- `/model <provider> <model>` — 切换模型（含切回默认链）
+- `/fork [from_seq]` — 从历史点 fork（省略 = 最近合法切点）
 
 ---
 

@@ -120,6 +120,14 @@ class RecoveryError(Exception):
     """恢复入口的确定性失败（如锁超时）。调用方可安全重试。"""
 
 
+class ReconcileRequired(RecoveryError):
+    """存在 UNKNOWN / RUNNING Operation 且没有 ReconcileCallback → 需人工裁决。
+
+    与「恢复失败」区分：这不是基础设施故障，而是不变量 #14 要求的人工关卡。
+    启动扫描据此把 session 标成「需人工确认」而不是「恢复失败」。
+    """
+
+
 class PendingPolicy(ABC):
     """PENDING Operation 的恢复策略 seam（ADR-0004 Round 3 §Q13）。
 
@@ -255,7 +263,7 @@ class RecoveryCoordinator:
                     f"{op.tool_name}(tool_call_id={tc})"
                     for tc, op in reconcile_required
                 )
-                raise RecoveryError(
+                raise ReconcileRequired(
                     f"存在需要人工裁决的 UNKNOWN Operation（{detail}）："
                     "未提供 ReconcileCallback，拒绝恢复——避免伪造结果或盲目重跑"
                     "高风险副作用（不变量 #14）。注入 ReconcileCallback 后可重试 recover()。"

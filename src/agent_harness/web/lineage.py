@@ -1,8 +1,9 @@
 """Web lineage API（Phase 14 T7, #113, ADR-0017 决策 6/10）。
 
-只读 lineage 查询面。**独立 router 文件**：本阶段 app.py 正被流式改造
-（ADR-0016）重刀，注册只经 create_app 里的一行调用接入——把冲突面压到
-最小。fork 创建不做 Web 端（CLI-only，ADR 决策 6）。
+只读 lineage 查询面 + （T7 #137 起）fork 创建面。**独立 router 文件**：
+本阶段 app.py 正被流式改造（ADR-0016）重刀，注册只经 create_app 里的一行
+调用接入——把冲突面压到最小。fork 创建原为 CLI-only（ADR 决策 6），
+T7 #137 按 PRD §2.4 重新启用 Web 端点，实现仍复用 `session/fork.py`。
 
 形状（前端消费契约）：
 {
@@ -19,15 +20,32 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
+from pydantic import BaseModel, Field
 
 from agent_harness.session.lineage import (
     LineageNode,
     build_lineage_index,
     build_lineage_tree,
 )
+from agent_harness.session.service import (
+    ActiveRunConflict,
+    InvalidForkBoundary,
+    InvalidSessionId,
+    SessionNotFound,
+    SessionService,
+)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+
+
+class ForkRequest(BaseModel):
+    """POST /api/sessions/{id}/forks 的请求体（T7 #137，PRD §2.4）。
+
+    from_seq 是父会话中用户消息的 seq（fork 锚点，锚点消息不进 child）。
+    """
+
+    from_seq: int = Field(ge=0)
 
 
 def register_lineage_routes(
@@ -90,6 +108,28 @@ def register_lineage_routes(
             "children": descendants,
             "edges": edges,
         }
+
+    @app.post("/api/sessions/{session_id}/forks")
+    async def fork_session(session_id: str, req: ForkRequest) -> dict:
+        """从历史用户消息 seq 派生 child session（T7 #137，PRD §2.4）。
+
+        404 = session 不存在；409 = 在途 run（历史未 settled）；
+        422 = from_seq 不是合法 fork 锚点。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            child_id = await service.fork(
+                session_id=session_id, from_seq=req.from_seq
+            )
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ActiveRunConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except InvalidForkBoundary as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        return {"session_id": child_id, "from_seq": req.from_seq}
 
 
 def _find(roots: list[LineageNode], session_id: str) -> LineageNode | None:

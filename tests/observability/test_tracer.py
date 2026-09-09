@@ -91,6 +91,24 @@ def test_run_started_creates_root_with_identity_metadata():
     assert "git_commit" in meta  # 有值或键存在（CI/异常环境如实缺失）
 
 
+def test_turn_index_passed_to_trace_metadata():
+    """T9 #139：turn_index 出现在 trace metadata。"""
+    recorder = FakeRecorder()
+    tracer = RunTracer(
+        LangfuseSink(
+            public_key="pk", secret_key="sk", base_url="https://example.invalid",
+            client_factory=lambda **kwargs: recorder.client(),
+        ),
+        session_id="sess-1", run_id="run-1", agent_id="default",
+        user_input="hi", turn_index=3,
+    )
+
+    tracer.run_started()
+
+    meta = recorder.spans[0].kwargs["metadata"]
+    assert meta["turn_index"] == 3
+
+
 def test_model_call_generation_mapping_and_usage_translation():
     recorder = FakeRecorder()
     tracer = _tracer(recorder)

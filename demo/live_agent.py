@@ -106,14 +106,18 @@ def _build_runtime(
     max_steps: int,
     policy: PermissionPolicy,
     approval_callback,
+    model_name: str | None = None,
 ) -> AgentRuntime:
     """复用 tests/agent/test_integration_coding.py:_make_runtime 的配方。
 
     与生产代码唯一的差别在审批：demo 要让你看到工具真的执行，
     所以默认配一个自动批准的 approval_callback；加 --yolo 则进一步切到
     DANGER_FULL_ACCESS（绕过审批关卡）。这两种都是 demo 旋钮，不改框架。
+
+    model_name（T7 #137）：catalog 条目名；None = 默认链（settings）。
     """
-    config = ModelConfig.from_settings(settings)
+    config = (ModelConfig.from_settings(settings) if model_name is None
+              else ModelConfig.from_catalog(settings, model_name))
     model = create_chat_model(config)
 
     sandbox = LocalSubprocessSandbox(workspace_root=workspace)
@@ -134,6 +138,41 @@ def _build_runtime(
         ),
         max_steps=max_steps,
     )
+
+
+def _runtime_for_session(
+    session: Session,
+    store_root: Path,
+    workspace: Path,
+    settings: Settings,
+    max_steps: int,
+    policy: PermissionPolicy,
+    approval_callback,
+) -> AgentRuntime:
+    """按 session 派生的当前模型重建 runtime（T7 #137）。
+
+    /model、/resume、/fork 之后必须重建，否则 runtime 会一直沿用上一个会话的
+    模型。模型条目已不在 catalog 时回落默认链（demo 不因配置漂移炸掉）。
+    """
+    from agent_harness.model.config import ConfigError
+    from agent_harness.session.service import current_model_selection
+
+    events = JsonlSessionStore(root=store_root).read_events(session.session_id)
+    _, model_id = current_model_selection(events)
+    if model_id is None:
+        return _build_runtime(
+            workspace, settings, max_steps, policy, approval_callback
+        )
+    try:
+        return _build_runtime(
+            workspace, settings, max_steps, policy, approval_callback,
+            model_name=model_id,
+        )
+    except ConfigError:
+        console.print(f"[yellow]会话模型 {model_id} 已不在 catalog，回落默认链[/yellow]")
+        return _build_runtime(
+            workspace, settings, max_steps, policy, approval_callback
+        )
 
 
 def _make_approval_callback(auto: bool):
@@ -377,6 +416,12 @@ async def _main() -> int:
                             store, target_id,
                             workspace_registry=None,
                         )
+                        # 恢复的会话可能带着自己的模型（T7 #137）——必须重建
+                        # runtime，否则会沿用上一个会话的模型。
+                        runtime = _runtime_for_session(
+                            current_session, store_root, workspace, settings,
+                            args.max_steps, policy, approval_callback,
+                        )
                         console.print(f"[green]恢复 session: {target_id}[/green]")
                     else:
                         console.print(f"[red]session 不存在: {target_id}[/red]")
@@ -391,9 +436,95 @@ async def _main() -> int:
                 if len(parsed.args) < 2:
                     console.print("[red]用法: /model <provider> <model>[/red]")
                 else:
-                    console.print("[yellow]/model 尚未实现（T7 模型切换 + MODEL_CHANGED 后接线）[/yellow]")
+                    from agent_harness.session.service import (
+                        UnknownModel,
+                        append_model_change,
+                        assert_model_resolvable,
+                        resolve_model_target,
+                    )
+
+                    provider, model_id = parsed.args[0], parsed.args[1]
+                    target = resolve_model_target(settings, provider, model_id)
+                    if target is None:
+                        console.print(f"[red]未知模型: {provider}/{model_id}[/red]")
+                    else:
+                        try:
+                            # 与 Web 端点同判据：catalog 命中之外还要装得起来
+                            # （provider 已知 + 有可用 key），否则不写事件。
+                            assert_model_resolvable(settings, target)
+                        except UnknownModel as e:
+                            console.print(f"[red]模型不可用: {e}[/red]")
+                        else:
+                            append_model_change(current_session, target)
+                            runtime = _runtime_for_session(
+                                current_session, store_root, workspace, settings,
+                                args.max_steps, policy, approval_callback,
+                            )
+                            label = (f"{target.provider}/{target.model_id}"
+                                     if target.model_id
+                                     else f"{target.provider}/(默认链)")
+                            console.print(
+                                f"[green]模型已切换: {label}（下一轮生效）[/green]"
+                            )
             elif parsed.name == "fork":
-                console.print("[yellow]/fork 尚未实现（T7 Fork API/UI/CLI 后接线）[/yellow]")
+                from agent_harness.session.fork import (
+                    TailSummarizer,
+                    find_fork_boundaries,
+                    fork_session,
+                )
+                from agent_harness.session.service import inherit_parent_model
+                from agent_harness.storage.sqlite import SqliteSessionMetaStore
+
+                store = JsonlSessionStore(root=store_root)
+                events = store.read_events(current_session.session_id)
+                boundaries = find_fork_boundaries(events)
+                if not boundaries:
+                    console.print("[red]当前会话没有可用的 fork 切点（需完整 run 后的用户消息）[/red]")
+                    continue
+                if parsed.args:
+                    try:
+                        from_seq = int(parsed.args[0])
+                    except ValueError:
+                        console.print("[red]from_seq 必须是整数[/red]")
+                        continue
+                    if from_seq not in boundaries:
+                        console.print(f"[red]非法切点 {from_seq}，可用: {boundaries}[/red]")
+                        continue
+                else:
+                    from_seq = boundaries[-1]
+
+                meta_store = SqliteSessionMetaStore(
+                    Path(settings.workspace_dir) / "harness.db"
+                )
+                await meta_store.initialize()
+                # tail 摘要默认开（ADR-0017 决策 9）：被放弃的路线压成一段
+                # 上下文挂给 child；摘要模型用默认链，失败自动降级。
+                summarizer = TailSummarizer(
+                    create_chat_model(ModelConfig.from_settings(settings))
+                )
+                try:
+                    child = await fork_session(
+                        store, meta_store,
+                        current_session.session_id,
+                        boundary_user_message_seq=from_seq,
+                        workspace_registry=None,
+                        summarizer=summarizer,
+                        with_tail_summary=True,
+                    )
+                except Exception as e:  # noqa: BLE001 - demo 友好提示
+                    console.print(f"[red]fork 失败: {e}[/red]")
+                else:
+                    # child 继承父当前模型（与 Web fork 同语义，T7 #137）。
+                    inherit_parent_model(child, events)
+                    current_session = child
+                    runtime = _runtime_for_session(
+                        child, store_root, workspace, settings,
+                        args.max_steps, policy, approval_callback,
+                    )
+                    console.print(
+                        f"[green]fork 出 child session: {child.session_id}"
+                        f"（切点 seq={from_seq}）[/green]"
+                    )
             elif parsed.name == "cancel":
                 console.print("[yellow]/cancel 尚未实现（T8 崩溃恢复 + Ledger reconcile 后接线）[/yellow]")
             continue

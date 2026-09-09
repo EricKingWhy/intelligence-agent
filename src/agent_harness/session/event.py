@@ -22,6 +22,16 @@ SESSION_FORKED = "session/forked"
 RUN_STARTED = "run/started"
 RUN_COMPLETED = "run/completed"
 RUN_FAILED = "run/failed"
+# Phase Multiturn T8（#138）：进程重启后，对无终态 run 补记的中断事实。
+# 信封带 run_id / step_id；data 只放 interrupted_seq + reason="process_restart"
+# （前端按 run 归组、显示"上次运行在第 N 步中断"）。
+RUN_INTERRUPTED = "run/interrupted"
+
+#: run 终态词汇（出现任一即该 run 已收口）——单一事实源，fork 边界校验、
+#: 中断检测、replay 等所有「这个 run 结束了吗」的判断都引用它，避免各写一份。
+RUN_TERMINAL_TYPES: frozenset[str] = frozenset(
+    {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED}
+)
 USER_MESSAGE = "user/message"
 MODEL_STARTED = "model/started"
 MODEL_DELTA = "model/delta"
@@ -80,6 +90,11 @@ QUEUE_CANCELLED = "queue/cancelled"
 STEER_REQUESTED = "steer/requested"
 STEER_APPLIED = "steer/applied"
 
+# ── Phase Multiturn T7（#137）：同 session 内模型切换 ────────────────────
+# 切换是会话事实（durable）：后续 run 从事件流派生"当前模型"，不依赖创建时
+# 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id。
+MODEL_CHANGED = "model/changed"
+
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
 # below is an ephemeral streaming signal (Phase 9 AgentEvent) and MUST NOT be
@@ -95,6 +110,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         RUN_STARTED,
         RUN_COMPLETED,
         RUN_FAILED,
+        RUN_INTERRUPTED,
         USER_MESSAGE,
         MODEL_COMPLETED,
         MODEL_FAILED,
@@ -125,6 +141,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
         COMPACTION_START,
         COMPACTION_END,
+        # Phase Multiturn T7 (#137)：同 session 内模型切换
+        MODEL_CHANGED,
     }
 )
 

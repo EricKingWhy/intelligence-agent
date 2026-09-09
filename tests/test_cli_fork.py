@@ -74,6 +74,28 @@ async def test_fork_command_bad_boundary_raises(tmp_path: Path) -> None:
         )
 
 
+async def test_fork_command_child_inherits_parent_model(tmp_path: Path) -> None:
+    """T7 #137：CLI fork 的 child 继承父当前模型（与 Web / demo 同语义）。"""
+    from agent_harness.session.service import current_model_selection
+
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    parent = Session.start(
+        store, session_id="parent",
+        started_data={"provider": "deepseek", "model_id": "gpt-4o"},
+    )
+    parent.append(USER_MESSAGE, {"content": "第一条"})
+    parent.append(USER_MESSAGE, {"content": "第二条"})
+
+    child_id = await fork_command(
+        "parent", from_message=2, no_summary=True,
+        workspace_dir=str(tmp_path), write=lambda _line: None,
+    )
+
+    assert current_model_selection(
+        store.read_events(child_id)
+    ) == ("deepseek", "gpt-4o")
+
+
 def test_parse_fork_args() -> None:
     args = _parse_fork_args(["sess-1", "--from-message", "3"])
     assert (args.session_id, args.from_message, args.no_summary) == (

@@ -145,6 +145,25 @@ CSS 原生没有变量组复用机制，修改时必须两处同步。2026-09-04
 
 ## 4. Ticket #137 前端部分: fork/model UI
 
+> **as-built 契约（2026-09-09，后端 #137 已实现，可开工）**
+>
+> - `POST /api/sessions/{id}/model` body `{"provider": "zhipu", "model_id": "glm-4.5"}`。
+>   `model_id` = `GET /api/models` 返回条目的 `name`（不是上游 `model_name`）；`provider`
+>   必须与条目一致。成功 200 `{"status":"changed","provider","model_id"}`（`model_id`
+>   是规范 picker id：条目名，或默认链的默认模型名）；422 = 不在 catalog；
+>   404 = session 不存在。**选中 `is_default: true` 的条目 = 切回默认链**（合法，事件
+>   `to_model_id: null`）——picker 应把它当普通选项处理，不要在前端禁止。`from_*` 可能为 null。
+>   与默认条目同 provider + 同名的 catalog 条目不会出现在 `GET /api/models` 里（被默认条目遮蔽）。
+> - `POST /api/sessions/{id}/forks` body `{"from_seq": <用户消息 seq>}`。
+>   成功 200 `{"session_id": "<child>", "from_seq": ...}`；409 = 在途 run；422 = 锚点非法。
+>   `from_seq` 只接受**用户消息**的 seq（可用边界由后端 `find_fork_boundaries` 决定）。
+> - 事件是 **`model/changed`**（不是 `model_changed`），data 字段
+>   `from_provider` / `from_model_id` / `to_provider` / `to_model_id`（`from_*` 可能为 null）。
+>   前端在事件流里取 `event` 再匹配内层 `type`。**投递时机**：若切换时该 session
+>   有在途 run，事件经该 run 的 listener 实时推给已订阅的 SSE/WS；若空闲，
+>   没有 run 级订阅可推——picker 应直接用 POST 响应的 `model_id` 做乐观更新，
+>   durable 事件在重连重放 / 下一轮 run 的事件流里到达。
+
 ### 4.1 现有基础设施
 
 - **后端 API**：`POST /api/sessions/{id}/model` + `POST /api/sessions/{id}/forks`（后端 #137 负责）
@@ -209,4 +228,20 @@ CSS 原生没有变量组复用机制，修改时必须两处同步。2026-09-04
 | `POST /api/sessions/{id}/approve`（body 带 `approval_id`） | HTTP 回传审批决策 | #136 |
 | `POST /api/sessions/{id}/model` | HTTP 切换模型 | #137 |
 | `POST /api/sessions/{id}/forks` | HTTP 从历史点 fork | #137 |
-| SSE/WS `model_changed` 事件 | 监听事件流更新 UI | #137 |
+| SSE/WS `model/changed` 事件（取 `event` 后匹配 `type`） | 监听事件流更新 UI | #137 |
+| `run/interrupted` 事件（信封带 `run_id` / `step_id`，data 带 `interrupted_seq` / `reason`） | 打开 session 时在事件流里检测 → 显示"上次运行在第 N 步中断" + 继续/重发/忽略 | #138 |
+
+### 6.1 崩溃恢复（#138）前端契约
+
+- **事件名是 `run/interrupted`**（不是 `run_interrupted`）。打开已有 session 时，
+  从事件流（`GET /api/sessions/{id}/events` 或重连重放）里找最后一条
+  `run/interrupted`：`step_id` 显示"第 N 步"，`interrupted_seq` 定位中断点。
+- 三个动作复用既有端点，后端不新增：
+  - **继续** → `POST /api/sessions/{id}/messages`（新 user 消息续聊）；
+  - **重发** → 用中断前的最后一条 user 消息内容再发一次 `messages`；
+  - **忽略** → 纯前端收起提示（可选：不改后端状态）。
+- 若后端扫描时发现 UNKNOWN 工具调用（副作用未知），该 session 不会自动
+  合成结果，也不会写 `session/resumed`；前端不应假设"已恢复"。此时**继续 /
+  重发都会返回 409**（后端拒绝伪造"结果未知"，不变量 #14），detail 点名
+  需要裁决的 `tool_name` / `tool_call_id`；按需引导用户走
+  `POST /api/sessions/{id}/recover` 的人工裁决路径（409 = 需裁决）。
