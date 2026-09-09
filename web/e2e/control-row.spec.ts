@@ -14,6 +14,7 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   fulfillSse,
+  pickControl,
   routeApi,
 } from './fixtures';
 
@@ -67,15 +68,7 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
   await expect(page.locator('[role="combobox"]')).toBeHidden();
 
   // 再次打开 + Enter 选第一个 option → trigger 文本更新
-  await permTrigger.focus();
-  await page.keyboard.press('Enter');
-  await expect(page.locator('[role="combobox"]')).toBeVisible();
-  // 清空搜索
-  await page.locator('[role="combobox"]').fill('');
-  // cmdk 打开后默认激活第一个 option；Enter 直接选中
-  await page.keyboard.press('Enter');
-  // trigger 显示已选条目名（非 placeholder「权限」）
-  await expect(permTrigger).toContainText('Auto Approve');
+  await pickControl(page, '权限模式', 0, 'Auto Approve');
 });
 
 test('Composer control row：提交 payload 字段名对齐后端契约', async ({ page }) => {
@@ -103,33 +96,10 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   await page.goto('/');
 
-  // 选 Permission Mode → auto
-  const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
-  await permTrigger.focus();
-  await page.keyboard.press('Enter');
-  await page.keyboard.press('Enter'); // cmdk 默认激活第一项（auto）
-  await expect(permTrigger).toContainText('Auto Approve');
-  await page.keyboard.press('Escape'); // 关闭浮层
-
-  // 选 Agent Profile → coding
-  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
-  await agentTrigger.focus();
-  await page.keyboard.press('Enter');
-  // 第二项是 Coding——按 ArrowDown 一次再 Enter
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(agentTrigger).toContainText('Coding');
-  await page.keyboard.press('Escape'); // 关闭浮层
-
-  // 选 Reasoning Effort → deep
-  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
-  await effortTrigger.focus();
-  await page.keyboard.press('Enter');
-  // 第三项是 Deep——按 ArrowDown 两次再 Enter
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(effortTrigger).toContainText('Deep');
+  // 选 Permission Mode → auto / Agent Profile → coding / Reasoning Effort → deep
+  await pickControl(page, '权限模式', 0, 'Auto Approve');
+  await pickControl(page, 'Agent Profile', 1, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 2, 'Deep');
 
   // 提交任务
   await page.getByLabel('Agent 任务').fill('payload 测试');

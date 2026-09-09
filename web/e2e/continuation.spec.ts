@@ -14,6 +14,8 @@ import {
   MODELS,
   REASONING_EFFORTS,
   fulfillSse,
+  pickControl,
+  pickFirstModel,
   routeApi,
   submitTask,
 } from './fixtures';
@@ -35,35 +37,6 @@ const SECOND_FRAMES = [
 async function openIdleSession(page: Page): Promise<void> {
   await submitTask(page, '第一条消息');
   await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
-}
-
-/** ModelPicker：键盘选目录第一行（「默认链」之后第一项），断言 trigger 文本。 */
-async function pickFirstModel(page: Page, expected: string): Promise<void> {
-  const trigger = page.locator('.composer-model[aria-label="模型选择"]');
-  await trigger.focus();
-  await page.keyboard.press('Enter');
-  await expect(page.locator('[role="combobox"]')).toBeVisible();
-  await page.locator('[role="combobox"]').fill('');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(trigger).toContainText(expected);
-  await page.keyboard.press('Escape');
-}
-
-/** ControlPicker：键盘选第 N+1 项（Enter 打开 → ↓×N → Enter），断言 trigger 文本。 */
-async function pickControl(
-  page: Page,
-  label: string,
-  downPresses: number,
-  expected: string,
-): Promise<void> {
-  const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
-  await trigger.focus();
-  await page.keyboard.press('Enter');
-  for (let i = 0; i < downPresses; i += 1) await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(trigger).toContainText(expected);
-  await page.keyboard.press('Escape');
 }
 
 test('续聊：第二条消息走 /messages 端点而非新建会话', async ({ page }) => {
@@ -117,7 +90,7 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
   await openIdleSession(page);
 
   // 选模型：目录第一行（catalog 里 default: true 的项）
-  await pickFirstModel(page, 'deepseek-v4-flash-0731');
+  await pickFirstModel(page);
   // Agent Profile → coding（第二项）；Reasoning Effort → deep（第三项）
   await pickControl(page, 'Agent Profile', 1, 'Coding');
   await pickControl(page, 'Reasoning Effort', 2, 'Deep');
@@ -192,7 +165,7 @@ test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend �
 
   await page.goto('/');
   await openIdleSession(page);
-  await pickFirstModel(page, 'deepseek-v4-flash-0731');
+  await pickFirstModel(page);
 
   await submitTask(page, '第二条消息');
   await expect.poll(() => messagesBody).not.toBeNull();

@@ -2,7 +2,7 @@
  *  text/delta durable 承接文本流、reasoning 族 envelope block_id、tool/output_delta
  *  按 channel、seq 每 session 单调。page.route 拦截 API，核心矩阵不依赖真后端。 */
 
-import type { Page, Route } from '@playwright/test';
+import { expect, type Page, type Route } from '@playwright/test';
 
 export const SID = 'e2e-session-0001';
 export const RUN = 'e2e-run-0001';
@@ -137,3 +137,40 @@ export const CONTEXT_PROVIDERS = [
   { id: 'memory', display_name: 'Memory', description: 'Inject relevant recalled memories scoped to the user into the model context.' },
   { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
 ];
+
+// ── Composer 控制行交互 helper（跨 spec 共用）──
+
+/** 键盘在 ControlPicker 里选第 N+1 项：打开 → 清搜索 → ↓×N → Enter，断言 trigger 文本。 */
+export async function pickControl(
+  page: Page,
+  label: string,
+  downPresses: number,
+  expected: string,
+): Promise<void> {
+  const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
+  // 浮层关闭动画期间内容仍留在 DOM——按 aria-label 限定到本次打开的浮层，
+  // 否则第二次调用会同时命中上一层残留（strict mode violation）。
+  const combo = page.getByRole('combobox', { name: label });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(combo).toBeVisible();
+  await combo.fill('');
+  for (let i = 0; i < downPresses; i += 1) await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText(expected);
+  await page.keyboard.press('Escape');
+}
+
+/** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。 */
+export async function pickFirstModel(page: Page): Promise<void> {
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]');
+  const combo = page.getByRole('combobox', { name: '模型选择' });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(combo).toBeVisible();
+  await combo.fill('');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText(MODELS[0].name);
+  await page.keyboard.press('Escape');
+}
