@@ -178,9 +178,9 @@ export interface SendMessagePayload {
    *  消息忽略它们（runtime 已固定，不抢断不改写）。空值不发键 = 后端默认，
    *  与 POST /api/sessions 的 create 分支同一模式。
    *
-   *  ⚠ 已知 Gap：`context_providers: []` 同样不发键，但后端把 `[]` 当作
-   *  「显式选零个」（区别于不传 = 全量）。前端选择器无法表达「零个」，
-   *  改语义需先定契约（技术债交接 §5）。 */
+   *  ⚠ 已知 Gap：`context_providers: []` 同样不发键，但契约把 `[]` 定为「显式
+   *  空集」（交接 §3.1；后端区分 None/[]）。前端选择器无法表达「零个」，
+   *  改语义需先定契约。 */
   model?: string;
   agent_profile?: string;
   reasoning_effort?: string;

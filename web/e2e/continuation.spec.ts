@@ -7,7 +7,7 @@
  *
  * 车道归属：Playwright e2e（同 control-row.spec.ts 约定）。 */
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import {
   AGENT_PROFILES,
   CONTEXT_PROVIDERS,
@@ -15,6 +15,7 @@ import {
   REASONING_EFFORTS,
   fulfillSse,
   routeApi,
+  submitTask,
 } from './fixtures';
 
 const FIRST_FRAMES = [
@@ -29,6 +30,41 @@ const SECOND_FRAMES = [
   { type: 'user/message', data: { content: '第二条消息' }, seq: 6, session_id: 'cont-session-1', run_id: 'cont-run-2', step_id: 1, time: '2026-09-08T00:00:01Z' },
   { type: 'run/completed', data: {}, seq: 7, session_id: 'cont-session-1', run_id: 'cont-run-2', time: '2026-09-08T00:00:02Z' },
 ];
+
+/** 发第一条消息建会话，等 run 终态（Composer 重新可用）——续聊前置。 */
+async function openIdleSession(page: Page): Promise<void> {
+  await submitTask(page, '第一条消息');
+  await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
+}
+
+/** ModelPicker：键盘选目录第一行（「默认链」之后第一项），断言 trigger 文本。 */
+async function pickFirstModel(page: Page, expected: string): Promise<void> {
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]');
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="combobox"]')).toBeVisible();
+  await page.locator('[role="combobox"]').fill('');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText(expected);
+  await page.keyboard.press('Escape');
+}
+
+/** ControlPicker：键盘选第 N+1 项（Enter 打开 → ↓×N → Enter），断言 trigger 文本。 */
+async function pickControl(
+  page: Page,
+  label: string,
+  downPresses: number,
+  expected: string,
+): Promise<void> {
+  const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  for (let i = 0; i < downPresses; i += 1) await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText(expected);
+  await page.keyboard.press('Escape');
+}
 
 test('续聊：第二条消息走 /messages 端点而非新建会话', async ({ page }) => {
   let firstPostHit = false;
@@ -49,21 +85,13 @@ test('续聊：第二条消息走 /messages 端点而非新建会话', async ({ 
 
   await page.goto('/');
 
-  // 第一条消息
-  await page.getByLabel('Agent 任务').fill('第一条消息');
-  await page.getByLabel('发送').click();
-
-  // 等待第一条消息的 POST 被拦截
+  // 第一条消息（新会话）
+  await submitTask(page, '第一条消息');
   await expect.poll(() => firstPostHit).toBe(true);
-
-  // 等 run/completed 到达——textarea 重新可用
   await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
 
   // 第二条消息（续聊）
-  await page.getByLabel('Agent 任务').fill('第二条消息');
-  await page.getByLabel('发送').click();
-
-  // 断言第二条走了 /messages 端点
+  await submitTask(page, '第二条消息');
   await expect.poll(() => messagesPostHit).toBe(true);
 });
 
@@ -86,45 +114,16 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
   });
 
   await page.goto('/');
+  await openIdleSession(page);
 
-  // 第一条消息建会话，等终态
-  await page.getByLabel('Agent 任务').fill('第一条消息');
-  await page.getByLabel('发送').click();
-  await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
-
-  // 选模型：ArrowDown 从「默认链」移到目录第一行（catalog 里 default: true 的项）
-  const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
-  await modelTrigger.focus();
-  await page.keyboard.press('Enter');
-  await expect(page.locator('[role="combobox"]')).toBeVisible();
-  await page.locator('[role="combobox"]').fill('');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(modelTrigger).toContainText('deepseek-v4-flash-0731');
-  await page.keyboard.press('Escape');
-
-  // 选 Agent Profile → coding（第二项）
-  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
-  await agentTrigger.focus();
-  await page.keyboard.press('Enter');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(agentTrigger).toContainText('Coding');
-  await page.keyboard.press('Escape');
-
-  // 选 Reasoning Effort → deep（第三项）
-  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
-  await effortTrigger.focus();
-  await page.keyboard.press('Enter');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(effortTrigger).toContainText('Deep');
-  await page.keyboard.press('Escape');
+  // 选模型：目录第一行（catalog 里 default: true 的项）
+  await pickFirstModel(page, 'deepseek-v4-flash-0731');
+  // Agent Profile → coding（第二项）；Reasoning Effort → deep（第三项）
+  await pickControl(page, 'Agent Profile', 1, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 2, 'Deep');
 
   // 续聊发第二条
-  await page.getByLabel('Agent 任务').fill('第二条消息');
-  await page.getByLabel('发送').click();
+  await submitTask(page, '第二条消息');
   await expect.poll(() => messagesBody).not.toBeNull();
 
   const body = JSON.parse(messagesBody!);
@@ -153,10 +152,7 @@ test('续聊 amend 透传：所选 context_providers 进 /messages payload', asy
   });
 
   await page.goto('/');
-
-  await page.getByLabel('Agent 任务').fill('第一条消息');
-  await page.getByLabel('发送').click();
-  await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
+  await openIdleSession(page);
 
   // 多选控件：Enter 勾选第一项（memory）——浮层不关闭，Esc 收起
   const ctxTrigger = page.locator('.composer-control[aria-label="Context Providers"]');
@@ -167,8 +163,7 @@ test('续聊 amend 透传：所选 context_providers 进 /messages payload', asy
   await expect(ctxTrigger).toContainText('Context · 1');
   await page.keyboard.press('Escape');
 
-  await page.getByLabel('Agent 任务').fill('第二条消息');
-  await page.getByLabel('发送').click();
+  await submitTask(page, '第二条消息');
   await expect.poll(() => messagesBody).not.toBeNull();
 
   // 选中的 provider 确实经 App → useSession → api 到达请求体（string[] 形状）
@@ -196,23 +191,10 @@ test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend �
   });
 
   await page.goto('/');
+  await openIdleSession(page);
+  await pickFirstModel(page, 'deepseek-v4-flash-0731');
 
-  await page.getByLabel('Agent 任务').fill('第一条消息');
-  await page.getByLabel('发送').click();
-  await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
-
-  const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
-  await modelTrigger.focus();
-  await page.keyboard.press('Enter');
-  await expect(page.locator('[role="combobox"]')).toBeVisible();
-  await page.locator('[role="combobox"]').fill('');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(modelTrigger).toContainText('deepseek-v4-flash-0731');
-  await page.keyboard.press('Escape');
-
-  await page.getByLabel('Agent 任务').fill('第二条消息');
-  await page.getByLabel('发送').click();
+  await submitTask(page, '第二条消息');
   await expect.poll(() => messagesBody).not.toBeNull();
 
   expect(JSON.parse(messagesBody!).model).toBe('deepseek-v4-flash-0731');

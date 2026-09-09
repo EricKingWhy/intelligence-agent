@@ -654,11 +654,9 @@ export function useSession() {
       content: string,
       opts?: {
         maxSteps?: number;
-        /** 字段集直接取自 /messages 的请求契约——不另起一份手写清单。 */
-        amend?: Pick<
-          SendMessagePayload,
-          'model' | 'agent_profile' | 'reasoning_effort' | 'context_providers'
-        >;
+        /** 字段集直接取自 /messages 的请求契约——Omit 出 amend 面，不会随
+         *  请求契约增删字段而漂移。 */
+        amend?: Omit<SendMessagePayload, 'content' | 'mode' | 'max_steps'>;
       },
     ) => {
       setError(null);
