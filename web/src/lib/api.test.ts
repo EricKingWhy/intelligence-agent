@@ -4,15 +4,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getModels, sendMessage } from './api';
 
-function mockFetchOnce(status: number, body: unknown): void {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => new Response(JSON.stringify(body), { status })),
-  );
-}
-
-/** 捕获 fetch 调用（url + 已解析 body）——请求体契约断言用。 */
-function captureFetch(status = 200): {
+/** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
+function captureFetch(
+  status = 200,
+  body: unknown = {},
+): {
   calls: { url: string; body: Record<string, unknown> }[];
 } {
   const calls: { url: string; body: Record<string, unknown> }[] = [];
@@ -26,7 +22,7 @@ function captureFetch(status = 200): {
             ? (JSON.parse(init.body) as Record<string, unknown>)
             : {},
       });
-      return new Response('{}', { status });
+      return new Response(JSON.stringify(body), { status });
     }),
   );
   return { calls };
@@ -38,7 +34,7 @@ afterEach(() => {
 
 describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
   it('200 合法 body：提取条目，name 为选择键', async () => {
-    mockFetchOnce(200, {
+    captureFetch(200, {
       models: [
         { name: 'deepseek-v4-flash-0731', provider: 'senseaudio', model: 'deepseek-v4-flash-0731', default: true },
         { name: 'qwen-max', provider: 'senseaudio', model: 'qwen3.8-max-0902', default: false },
@@ -51,7 +47,7 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
   });
 
   it('畸形条目剔除（name 缺失/非对象），零伪造；可选字段缺失记 null', async () => {
-    mockFetchOnce(200, {
+    captureFetch(200, {
       models: [
         { name: 'ok-model' },
         { provider: 'x', model: 'y', default: true }, // 无 name → 剔除
@@ -64,14 +60,14 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
   });
 
   it('models 数组缺失/形状不符 → 空数组（入口降级隐藏，不伪造列表）', async () => {
-    mockFetchOnce(200, {});
+    captureFetch(200, {});
     expect(await getModels()).toEqual([]);
-    mockFetchOnce(200, { models: 'not-an-array' });
+    captureFetch(200, { models: 'not-an-array' });
     expect(await getModels()).toEqual([]);
   });
 
   it('非 2xx → 抛错（调用方降级隐藏入口）', async () => {
-    mockFetchOnce(500, {});
+    captureFetch(500, {});
     await expect(getModels()).rejects.toThrow('models 500');
   });
 });
