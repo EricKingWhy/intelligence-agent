@@ -13,6 +13,9 @@
   → queue.resolve(approval_id, ApprovalResponse(...))
   → 唤醒上面 wait_for 的 Future
 
+超时（fail-closed）：等待方用 wait_for(approval_id, timeout) 设上限，超时后由
+  queue.expire(approval_id, ApprovalResponse(deny)) 写入默认拒绝（不默认放行）。
+
 幂等性：approval_id 已 resolved 时 resolve() 返 409（防重复决策）；
 未登记的 approval_id → 404。
 """
@@ -38,7 +41,7 @@ class _Pending:
 
 
 class PendingApprovalQueue:
-    """单 session 的待审批队列：register / wait_for / resolve。
+    """单 session 的待审批队列：register / wait_for / resolve / expire。
 
     线程模型：所有方法必须在同一事件循环（FastAPI 请求 + run task 同循环）。
     """
@@ -54,7 +57,11 @@ class PendingApprovalQueue:
         return approval_id
 
     async def wait_for(self, approval_id: str, timeout: float | None = None) -> ApprovalResponse:
-        """async 阻塞等决策：run 的审批 callback 在此暂停，等 /approve resolve 唤醒。"""
+        """async 阻塞等决策：run 的审批 callback 在此暂停，等 /approve resolve 唤醒。
+
+        timeout 非 None 时超时抛 TimeoutError（future 被取消，entry 仍在 pending，
+        由调用方的 expire() 收尾）。
+        """
         if approval_id not in self._pending:
             # 已被 resolve（early）或外部错误 id——查历史映射，找不到就报 KeyError
             if approval_id in self._resolved:
@@ -77,11 +84,37 @@ class PendingApprovalQueue:
             if approval_id in self._resolved:
                 raise KeyError(f"approval_id {approval_id} already resolved")
             return False  # 404
-        pending = self._pending.pop(approval_id)
-        self._resolved[approval_id] = response
+        self._settle(self._pending.pop(approval_id), response)
+        return True
+
+    def expire(self, approval_id: str, response: ApprovalResponse) -> bool:
+        """超时裁决：等待方在超时后写入默认决策（fail-closed）。
+
+        与 resolve() 的裁决者不同（超时兜底 vs 外部 /approve），但同样写 `_resolved`，
+        因此超时后迟到的 /approve 会看到 "already resolved" → 409，一次性语义不破。
+
+        返回 False 表示该 id 已不在 pending（已被 resolve / 已 expire / 未登记）——
+        此时**不覆盖** `_resolved`，先写入者胜（见 resolved_response()）。
+        """
+        pending = self._pending.pop(approval_id, None)
+        if pending is None:
+            return False
+        self._settle(pending, response)
+        return True
+
+    def resolved_response(self, approval_id: str) -> ApprovalResponse | None:
+        """已裁决请求的决策（resolve() 与 expire() 写入的都在此）。
+
+        等待方在超时兜底前用它检查是否已被外部 /approve 抢先裁决：wait_for 取消
+        future 与 /approve 到达之间存在窗口，先写入者的决策为准。
+        """
+        return self._resolved.get(approval_id)
+
+    def _settle(self, pending: _Pending, response: ApprovalResponse) -> None:
+        """写入终态并唤醒等待方（resolve / expire 共用）。"""
+        self._resolved[pending.approval_id] = response
         if not pending.future.done():
             pending.future.set_result(response)
-        return True
 
     def pending_ids(self) -> list[str]:
         """当前待审批 approval_id 列表（诊断 / 前端 polling 用）。"""

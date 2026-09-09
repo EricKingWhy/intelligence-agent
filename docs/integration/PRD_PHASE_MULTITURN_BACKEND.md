@@ -23,55 +23,50 @@
 - **WS 入口**：`src/agent_harness/web/websocket.py` 的 `handle_websocket()`
   - 已有 `subscribe` / `ping` / `send_message` / `cancel` 消息处理
   - 已有多路复用 session 事件流推送
-- **审批端点**：`src/agent_harness/web/app.py:1082` 的 `approve_tool_call()`
-  - 已有 `POST /api/sessions/{id}/approvals/{call_id}` 端点
-  - 已有 `ApproveRequest` Pydantic model（`decision` 字段）
+- **审批端点**：`src/agent_harness/web/app.py` 的 `approve_tool_call()`
+  - 实际端点 `POST /api/sessions/{id}/approve`（**不是** 旧稿写的 `/approvals/{call_id}`）
+  - `ApproveRequest` model 字段：`approval_id` / `approved` / `decision` / `reason`
+- **审批事件**：`src/agent_harness/session/event.py` 的 `TOOL_APPROVAL_REQUESTED`
+  （`tool/approval-requested`）与 `permission/resolved`——走既有 session 事件流，无自定义 WS 帧
 - **ApprovalCallback**：已有 callback 机制（默认 auto-approve）
 
 ### 2.2 要做什么
 
-**A. WS 推送 `APPROVAL_REQUESTED` 事件**
+> **勘误（as-built 契约，2026-09-09）**：本节旧稿的 `{"type":"approval_requested"}` 帧、
+> `POST /api/sessions/{id}/approvals/{call_id}` 端点、`["allow","reject"]` 决策词表
+> **均不存在**。权威契约以 `PRD_PHASE_MULTITURN_TOTAL.md` §2.2（已勘误）为准，摘要如下：
 
-当 ToolExecutor 触发 `needs_approval` 时，通过 WS 推送审批请求给已订阅该 session 的客户端：
+**A. 事件推送（不是新 WS 帧类型）**
 
-```json
-{
-  "type": "approval_requested",
-  "session_id": "sess-xxx",
-  "call_id": "call-xxx",
-  "tool_name": "write_file",
-  "args_summary": "path=/foo/bar.py, content=...",
-  "scope": "workspace-write",
-  "allowed_decisions": ["allow", "reject"]
-}
-```
+交互式审批（`permission_mode=interactive`）下，`_InteractiveCallbackHolder` 向 session
+事件流 append durable `tool/approval-requested`（data 含 `approval_id` / `tool_name` /
+`tool_call_id` / `permission` / `policy` / `reason` / `allowed_decisions=["deny","approve_once"]` 等），
+决策后 append `permission/resolved`。SSE 与 WS 的内层信封同形，外层封装不同
+（SSE 包 `{"data": "<json>"}`；WS 包 `{"type":"event","event":<信封>}`，客户端取 `event` 再匹配 `type`）——
+信封由 `web/serialization.py` 单点构建。
 
-实现路径：
-1. 在 `websocket.py` 的 `handle_websocket()` 中新增 `approval_requested` 消息类型处理
-2. 或在现有 subscribe 流中注入审批推送
+**B. HTTP 回传端点**
 
-**B. HTTP 回传端点（已有，需验证）**
-
-已有端点 `POST /api/sessions/{id}/approvals/{call_id}`：
-- body: `{"decision": "allow"}` 或 `{"decision": "reject"}`
-- 走 HTTP 保证 WS 抖动时也能完成审批
-- 统一汇聚到现有 ToolExecutor approval callback（不变量 #7）
+`POST /api/sessions/{session_id}/approve`，body `{approval_id, approved, decision, reason}`；
+成功 200 `{"status":"resolved","approval_id":...,"decision":...}`；422 = decision 越权 /
+非法词表；409 = one-shot 重复决策；404 = approval_id / session 不存在。
 
 **C. 审批语义**
 
-- fail-closed：超时默认拒绝
-- one-shot：同一 callId 只能决策一次
+- fail-closed：等待超 `APPROVAL_TIMEOUT_SECONDS`（默认 300s，≤0 关闭超时）→ 自动 deny + 写 `permission/resolved`
+- one-shot：同一 `approval_id` 只能决策一次
 - WS 断开时审批仍可通过 HTTP 完成
+- 非交互式 session 不产生审批事件（默认 auto-approve / deny callback）
 
 ### 2.3 验收标准
 
-- [ ] WS 推送 `APPROVAL_REQUESTED` 带完整审批上下文
-- [ ] HTTP 回传端点正确更新 PendingApprovalQueue 并唤醒 callback
-- [ ] 审批 fail-closed（超时默认拒绝）
-- [ ] 审批 one-shot（同一 callId 只能决策一次）
-- [ ] WS 断开时审批仍可通过 HTTP 完成
-- [ ] 所有 tool 执行仍走 ToolExecutor 单一路径（不变量 #7）
-- [ ] ruff clean + 测试 green
+- [x] 审批请求以 durable 事件 `tool/approval-requested` 推送，带完整审批上下文
+- [x] HTTP 回传端点正确更新 PendingApprovalQueue 并唤醒 callback
+- [x] 审批 fail-closed（超时默认拒绝，见 `tests/session/test_approval_timeout.py`）
+- [x] 审批 one-shot（同一 approval_id 只能决策一次 → 409）
+- [x] WS 断开时审批仍可通过 HTTP 完成
+- [x] 所有 tool 执行仍走 ToolExecutor 单一路径（不变量 #7）
+- [x] ruff clean + 测试 green
 
 ### 2.4 测试接缝
 
