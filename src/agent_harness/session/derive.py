@@ -199,19 +199,22 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
     return result
 
 
-def detect_dangling(events: list[SessionEvent]) -> list[str]:
-    """返回事件序列中 dangling 的 tool_call_id 列表（有请求无结果）。
+def collect_dangling(
+    events: list[SessionEvent],
+) -> tuple[set[str], set[str]]:
+    """单遍扫描事件，返回 (dangling tool_call_ids, 已有 tool/call 事件的 ids)。
 
-    供 Session.append 在 resume 时决定是否需要合成 tool/result 事件。
+    dangling 的判定必须同时覆盖两个事实源（此前 RecoveryCoordinator 与
+    detect_dangling 各维护一份近重复实现，2026-09-09 统一到这里）：
+    - tool/call 事件（resume 一致性用）；
+    - model/completed 的 tool_calls 字段（derive_messages 的 AIMessage 投影用）。
 
-    真相源与 derive_messages 对齐：请求侧同时看 TOOL_CALL 事件和
-    MODEL_COMPLETED.tool_calls。崩溃可能发生在 MODEL_COMPLETED 已持久化但
-    TOOL_CALL 还没写的窗口——只看 TOOL_CALL 会让这种 dangling 静默漏掉，
-    Session.resume 不合成 tool/result，历史永久悬空（derive_messages 每次
-    投影都重复触发 dangling 警告）。与 RecoveryCoordinator._dangling_state
-    的双真相源逻辑保持一致。
+    MODEL_COMPLETED.tool_calls 经 ``_normalize_tool_calls_for_projection``
+    容错（非 list / 非 dict 元素降级跳过——恢复链必经节点，一行坏数据不能
+    brick 整个 session 的恢复）。
     """
     requested: set[str] = set()
+    call_event_ids: set[str] = set()
     resolved: set[str] = set()
     for event in events:
         if event.type == MODEL_COMPLETED:
@@ -225,8 +228,24 @@ def detect_dangling(events: list[SessionEvent]) -> list[str]:
             tc_id = event.data.get("tool_call_id", "")
             if tc_id:
                 requested.add(tc_id)
+                call_event_ids.add(tc_id)
         elif event.type == TOOL_RESULT:
             tc_id = event.data.get("tool_call_id", "")
             if tc_id:
                 resolved.add(tc_id)
-    return sorted(requested - resolved)
+    return requested - resolved, call_event_ids
+
+
+def detect_dangling(events: list[SessionEvent]) -> list[str]:
+    """返回事件序列中 dangling 的 tool_call_id 列表（有请求无结果）。
+
+    供 Session.append 在 resume 时决定是否需要合成 tool/result 事件。
+
+    真相源与 derive_messages 对齐：请求侧同时看 TOOL_CALL 事件和
+    MODEL_COMPLETED.tool_calls。崩溃可能发生在 MODEL_COMPLETED 已持久化但
+    TOOL_CALL 还没写的窗口——只看 TOOL_CALL 会让这种 dangling 静默漏掉，
+    Session.resume 不合成 tool/result，历史永久悬空（derive_messages 每次
+    投影都重复触发 dangling 警告）。
+    """
+    dangling, _ = collect_dangling(events)
+    return sorted(dangling)

@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -49,6 +48,7 @@ from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.service import (
     ActiveRunConflict,
+    AmendOptions,
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
@@ -60,6 +60,7 @@ from agent_harness.session.service import (
     SessionService,
     SteerTargetNotFound,
     WorkspaceNameInvalid,
+    validate_session_id,
 )
 from agent_harness.storage import (
     SqliteCheckpointStore,
@@ -72,6 +73,10 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
 )
 from agent_harness.web.runmanager import RunManager
+from agent_harness.web.serialization import (
+    build_event_payload,
+    build_session_event_payload,
+)
 
 # ── Staged amend 字段的人类可读描述（Phase 5 + Ticket B1）──────────────
 # 这些 dict 是 POST /api/sessions validator 与 GET 清单端点的**单一事实源**：
@@ -218,6 +223,11 @@ class ResumeRequest(BaseModel):
     """POST /api/sessions/{id}/resume 的请求体。"""
 
     task: str = Field(min_length=1, max_length=100_000)
+    # staged amend 字段（可选，None = 默认行为）
+    reasoning_effort: str | None = None
+    agent_profile: str | None = None
+    context_providers: list[str] | None = None
+    model: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -234,6 +244,11 @@ class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=100_000)
     mode: str = Field(default="queue", pattern="^(queue|steer)$")
     max_steps: int = Field(default=10, ge=1, le=200)
+    # staged amend 字段（可选，None = 默认行为）
+    reasoning_effort: str | None = None
+    agent_profile: str | None = None
+    context_providers: list[str] | None = None
+    model: str | None = None
 
 
 class SessionSummary(BaseModel):
@@ -402,22 +417,6 @@ def _validate_workspace_name(state: AppState, workspace: str | None) -> str | No
     return workspace
 
 
-def _validate_session_id(session_id: str) -> str:
-    """校验路径里的 session_id——它是单个名字段，不是路径。
-
-    store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时反斜杠段
-    在 win32 上可越出 sessions 根目录（路径穿越读取 oracle），盘符段可整体替换
-    基路径。与 _validate_workspace_name 同一安全边界；字符集与 S3ArtifactStore
-    的 key 段规则一致（session_id 实际由 uuid4() 生成，天然满足）。
-    """
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
-        raise HTTPException(
-            status_code=422,
-            detail=f"session_id 只接受单个安全名字段：{session_id!r}",
-        )
-    return session_id
-
-
 #: 重放 backlog 阈值（durable 事件数，ADR-0016 §2.3）：after_seq 落后超过
 #: 该值 → 单帧 stream/truncated 控制事件后收流，客户端走 GET /events 全量
 #: 重建后带 after_seq=latest_seq 重连（02 §10.4 简化版；snapshot 层 DEFER）。
@@ -458,60 +457,17 @@ def _render_model_option(
 
 
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
-    """把 AgentEvent 转成 SSE 的 data 字段（JSON 字符串）。
-
-    session_id 由 endpoint 注入——runtime 内部的 AgentEvent 不知道自己属于哪个 session，
-    但前端需要它在第一帧就能切换 selectedId（否则新 session 的对话无法渲染）。
-    帧形状与重放路径（GET /stream 的 SessionEvent 帧）同形：seq 是幂等投影键，
-    event_id 是事件身份，block_id 聚合同一段流式块（ADR-0016 §2.3）。
-
-    RuntimeEvent 信封（SDD 03 §3，Phase 2 加法）：schema_version + durability 始终携带；
-    capability 仅在非 None 时携带（与 block_id 同模式）。
-    """
-    payload: dict[str, Any] = {
-        "type": event.type,
-        "data": event.data,
-        "seq": event.seq,
-        "run_id": event.run_id,
-        "step_id": event.step_id,
-        "session_id": session_id,
-        "time": event.time,
-        "schema_version": event.schema_version,
-        "durability": event.durability,
-    }
-    if event.block_id is not None:
-        payload["block_id"] = event.block_id
-    if event.capability is not None:
-        payload["capability"] = event.capability
-    return {"data": json.dumps(payload, ensure_ascii=False)}
+    """AgentEvent → SSE 帧（信封构建在 web/serialization.py，SSE/WS 共用）。"""
+    return {"data": json.dumps(
+        build_event_payload(event, session_id), ensure_ascii=False
+    )}
 
 
 def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str, str]:
-    """把持久化 SessionEvent 转成 SSE 帧（重放通道，GET /stream 用）。
-
-    帧形状与 live 通道（_event_to_sse_dict）严格同形——客户端对两条通道
-    做同一 seq 幂等投影，无需区分帧来源（event_id 仅存于 JSONL/全量接口）。
-
-    RuntimeEvent 信封（SDD 03 §3，Phase 2 加法）：schema_version + durability 始终携带；
-    durability 恒 "durable"（SessionEvent 已通过 append 词汇表校验）；capability 仅在
-    非 None 时携带。
-    """
-    payload: dict[str, Any] = {
-        "type": event.type,
-        "data": event.data,
-        "seq": event.seq,
-        "run_id": event.run_id,
-        "step_id": event.step_id,
-        "session_id": session_id,
-        "time": event.time,
-        "schema_version": event.schema_version,
-        "durability": "durable",
-    }
-    if event.block_id is not None:
-        payload["block_id"] = event.block_id
-    if event.capability is not None:
-        payload["capability"] = event.capability
-    return {"data": json.dumps(payload, ensure_ascii=False)}
+    """SessionEvent → SSE 帧（重放通道，信封构建在 web/serialization.py）。"""
+    return {"data": json.dumps(
+        build_session_event_payload(event, session_id), ensure_ascii=False
+    )}
 
 
 #: CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
@@ -635,7 +591,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
     from agent_harness.web.lineage import register_lineage_routes
 
-    register_lineage_routes(app, validate_session_id=_validate_session_id)
+    register_lineage_routes(app, validate_session_id=validate_session_id)
 
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
@@ -925,10 +881,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 permission_mode_explicit=permission_mode_explicit,
                 auto_approve_explicit=auto_approve_explicit,
                 auto_approve=req.auto_approve,
-                model=req.model,
-                reasoning_effort=req.reasoning_effort,
-                agent_profile=req.agent_profile,
-                context_providers=req.context_providers,
+                amend=AmendOptions(
+                    model=req.model,
+                    reasoning_effort=req.reasoning_effort,
+                    agent_profile=req.agent_profile,
+                    context_providers=req.context_providers,
+                ),
             )
         except WorkspaceNameInvalid as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1035,6 +993,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             result = await service.resume_and_launch(
                 session_id=session_id,
                 task=req.task,
+                amend=AmendOptions(
+                    reasoning_effort=req.reasoning_effort,
+                    agent_profile=req.agent_profile,
+                    context_providers=req.context_providers,
+                    model=req.model,
+                ),
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1166,6 +1130,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 content=req.content,
                 mode=req.mode,
                 max_steps=req.max_steps,
+                amend=AmendOptions(
+                    reasoning_effort=req.reasoning_effort,
+                    agent_profile=req.agent_profile,
+                    context_providers=req.context_providers,
+                    model=req.model,
+                ),
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
