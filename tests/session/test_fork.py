@@ -224,7 +224,7 @@ async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
     await meta.initialize()
     s = Session.start(store, session_id="interrupted")
     s.append(USER_MESSAGE, {"content": "第一条"})
-    run_id = s.begin_run()
+    run_id, _ = s.begin_run()
     s.append(RUN_INTERRUPTED, {"interrupted_seq": 3, "reason": "process_restart"},
              run_id=run_id)
     s.append(USER_MESSAGE, {"content": "第二条"})

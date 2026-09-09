@@ -94,12 +94,14 @@ class RunTracer:
         run_id: str,
         agent_id: str,
         user_input: str,
+        turn_index: int | None = None,
     ) -> None:
         self._sink = sink
         self._session_id = session_id
         self._run_id = run_id
         self._agent_id = agent_id
         self._user_input = user_input
+        self._turn_index = turn_index
         self.trace_id: str | None = None
         #: trace_url 与 trace_id 并列（trace_url 契约，ADR-0018 D7 延伸）：
         #: 同一 trace 的可点击 URL，由官方 SDK 合成（不手拼）；终态时构造。
@@ -135,6 +137,8 @@ class RunTracer:
             "agent_id": self._agent_id,
             "git_commit": git_commit(),
         }
+        if self._turn_index is not None:
+            trace_meta["turn_index"] = self._turn_index
         with self._sink.trace_attributes(
             session_id=self._session_id, trace_name="agent-run",
             metadata=trace_meta,

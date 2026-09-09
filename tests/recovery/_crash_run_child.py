@@ -27,7 +27,7 @@ def main() -> None:
     root = Path(config["root"])
     store = JsonlSessionStore(root / "sessions")
     session = Session.start(store, session_id=config["session_id"])
-    run_id = session.begin_run()
+    run_id, _ = session.begin_run()
     session.append(USER_MESSAGE, {"content": "do the work"}, run_id=run_id)
     session.append(
         TOOL_CALL,

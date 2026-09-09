@@ -326,11 +326,17 @@ class Session:
 
     # ── Run 生命周期 ──
 
-    def begin_run(self, *, agent_id: str = "default") -> str:
-        """生成 run_id、append run/started、返回 run_id。"""
+    def begin_run(self, *, agent_id: str = "default") -> tuple[str, int]:
+        """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
+
+        ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
+        trace metadata 标记「这是第 N 轮」（T9 #139）。
+        """
         run_id = str(uuid4())
-        self.append(RUN_STARTED, {}, run_id=run_id, agent_id=agent_id)
-        return run_id
+        turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
+        self.append(RUN_STARTED, {"turn_index": turn_index},
+                    run_id=run_id, agent_id=agent_id)
+        return run_id, turn_index
 
     def end_run(
         self,

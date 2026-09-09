@@ -51,7 +51,7 @@ def _make_store(tmp_path: Path) -> JsonlSessionStore:
 def _open_run_session(store: JsonlSessionStore, session_id: str = "sid") -> Session:
     """run/started → user/message → tool/call，没有终态（= 崩溃现场）。"""
     session = Session.start(store, session_id=session_id)
-    run_id = session.begin_run()
+    run_id, _ = session.begin_run()
     session.append(USER_MESSAGE, {"content": "do the work"}, run_id=run_id)
     session.append(
         TOOL_CALL,
@@ -116,7 +116,7 @@ class TestDetectUnterminatedRuns:
     def test_completed_run_is_not_interrupted(self, tmp_path):
         store = _make_store(tmp_path)
         session = Session.start(store, session_id="sid")
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.append(USER_MESSAGE, {"content": "hi"}, run_id=run_id)
         session.append(RUN_COMPLETED, {"final_text": "ok"}, run_id=run_id)
 
@@ -125,7 +125,7 @@ class TestDetectUnterminatedRuns:
     def test_failed_run_is_not_interrupted(self, tmp_path):
         store = _make_store(tmp_path)
         session = Session.start(store, session_id="sid")
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.append(RUN_FAILED, {"reason": "boom"}, run_id=run_id)
 
         assert detect_unterminated_runs(store.read_events("sid")) == []
@@ -181,7 +181,7 @@ class TestScanInterruptedSessions:
     def test_completed_session_is_untouched(self, tmp_path):
         store = _make_store(tmp_path)
         session = Session.start(store, session_id="done")
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.append(USER_MESSAGE, {"content": "hi"}, run_id=run_id)
         session.append(RUN_COMPLETED, {"final_text": "ok"}, run_id=run_id)
         ledger = SqliteOperationLedger(tmp_path / "harness.db")

@@ -196,7 +196,7 @@ class TestCrashReconcileGuard:
 
         state = app.state.agent
         session = Session.start(state.store, session_id=session_id)
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.append(USER_MESSAGE, {"content": "删库"}, run_id=run_id)
         session.append(
             TOOL_CALL,
@@ -279,7 +279,7 @@ class TestCrashReconcileGuard:
             session_id=session_id,
             workspace_registry=state.workspace_registry,
         )
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.append(USER_MESSAGE, {"content": "跑测试"}, run_id=run_id)
         session.append(
             TOOL_CALL,
