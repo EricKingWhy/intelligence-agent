@@ -169,7 +169,13 @@
   color-scheme: dark;
 }
 
-/* ══ Light theme — equal priority (SDD 02 §4.2), JS sets data-theme before paint ══ */
+/* ══ Light theme — equal priority (SDD 02 §4.2), JS sets data-theme before paint ══
+ *
+ * ⚠ 亮色变量维护纪律（Ticket #35）：
+ * 亮色 token 只在此块定义——没有 @media (prefers-color-scheme: light) 兜底。
+ * 修改暗色 :root 中的某个 token 时，必须检查此块是否也需要同步覆盖。
+ * 遗漏亮色覆盖 → 该 token 在亮色模式下仍用暗色值（对比度/可见性问题）。
+ * 新增 token 时在两个块都加定义，或确认亮色可安全继承暗色值。 */
 :root[data-theme='light'] {
   --surface-canvas:    #f6f6f8;
   --surface-chrome:    #f1f1f4;
