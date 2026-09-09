@@ -37,6 +37,7 @@ from agent_harness.identity import (
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import (
     PROVIDER_PRESETS,
+    ConfigError,
     ModelConfig,
     _pick_capabilities,
     parse_model_catalog,
@@ -134,7 +135,49 @@ CONTEXT_PROVIDER_DESCRIPTIONS: dict[str, dict[str, str]] = {
 # ── Request / Response schemas ──
 
 
-class CreateSessionRequest(BaseModel):
+class _AmendValueValidators(BaseModel):
+    """amend 字段的静态取值校验（三个请求体共用一份，ADR-0020b / ADR-0021）。
+
+    ``check_fields=False``：字段声明在子类（CreateSessionRequest / ResumeRequest /
+    SendMessageRequest），校验逻辑只写一遍——三个入口对同一份取值集合负责。
+    未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
+    （见 ``_validate_wired_context_providers``）。
+    """
+
+    @field_validator("reasoning_effort", check_fields=False)
+    @classmethod
+    def _validate_reasoning_effort(cls, v: str | None) -> str | None:
+        if v is not None and v not in REASONING_EFFORT_DESCRIPTIONS:
+            valid = ", ".join(REASONING_EFFORT_DESCRIPTIONS)
+            raise ValueError(f"reasoning_effort must be one of: {valid}")
+        return v
+
+    @field_validator("agent_profile", check_fields=False)
+    @classmethod
+    def _validate_agent_profile(cls, v: str | None) -> str | None:
+        if v is not None and v not in AGENT_PROFILE_DESCRIPTIONS:
+            valid = ", ".join(AGENT_PROFILE_DESCRIPTIONS)
+            raise ValueError(f"agent_profile must be one of: {valid}")
+        return v
+
+    @field_validator("context_providers", check_fields=False)
+    @classmethod
+    def _validate_context_providers_shape(
+        cls, v: list[str] | None
+    ) -> list[str] | None:
+        # 只校验形状（每项非空字符串，空 list 合法）。是否已装配由 handler 对照
+        # wiring 判定——静态校验没法知道 CAPABILITIES 运行时状态。
+        if v is None:
+            return v
+        for item in v:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "context_providers entries must be non-empty strings"
+                )
+        return v
+
+
+class CreateSessionRequest(_AmendValueValidators):
     """POST /api/sessions 的请求体。"""
 
     # 空 task 直接 422（FastAPI 自动校验）；纯空白 task 容忍（runtime 侧无意义但不危险）。
@@ -157,38 +200,6 @@ class CreateSessionRequest(BaseModel):
     reasoning_effort: str | None = None
     agent_profile: str | None = None
     context_providers: list[str] | None = None
-
-    @field_validator("reasoning_effort")
-    @classmethod
-    def _validate_reasoning_effort(cls, v: str | None) -> str | None:
-        if v is not None and v not in REASONING_EFFORT_DESCRIPTIONS:
-            valid = ", ".join(REASONING_EFFORT_DESCRIPTIONS)
-            raise ValueError(f"reasoning_effort must be one of: {valid}")
-        return v
-
-    @field_validator("agent_profile")
-    @classmethod
-    def _validate_agent_profile(cls, v: str | None) -> str | None:
-        if v is not None and v not in AGENT_PROFILE_DESCRIPTIONS:
-            valid = ", ".join(AGENT_PROFILE_DESCRIPTIONS)
-            raise ValueError(f"agent_profile must be one of: {valid}")
-        return v
-
-    @field_validator("context_providers")
-    @classmethod
-    def _validate_context_providers(cls, v: list[str] | None) -> list[str] | None:
-        # 运行时消费（ADR-0020b）：会话请求按已装配 provider 的 name 子集筛选。
-        # 不对未知名字 422——provider 是否装配取决于 CAPABILITIES 运行时状态，
-        # 静态校验没法判定；未知名字在 assembly 层 fail-open 跳过（不变量 #21）。
-        # 这里只校验形状：每项是非空字符串（Pydantic 已保证 list[str]，空 list 合法）。
-        if v is None:
-            return v
-        for item in v:
-            if not isinstance(item, str) or not item.strip():
-                raise ValueError(
-                    "context_providers entries must be non-empty strings"
-                )
-        return v
 
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
     # 命名 = AGENT_MODELS catalog 条目，未知名字 422。fallback 链不受影响。
@@ -219,7 +230,7 @@ class ApproveRequest(BaseModel):
     reason: str = ""
 
 
-class ResumeRequest(BaseModel):
+class ResumeRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/resume 的请求体。"""
 
     task: str = Field(min_length=1, max_length=100_000)
@@ -230,7 +241,7 @@ class ResumeRequest(BaseModel):
     model: str | None = None
 
 
-class SendMessageRequest(BaseModel):
+class SendMessageRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/messages 的请求体（PRD §5.3 续聊入口）。
 
     ``mode`` 取自 PRD 锁定决策 D-7：
@@ -381,6 +392,50 @@ class AppState:
         # lifecycle 通道逐项隔离关闭，web 层不再懂每种 capability 的关闭姿势。
         if wiring is not None:
             await wiring.aclose()
+
+
+async def _validate_wired_context_providers(
+    state: AppState, ids: list[str] | None
+) -> None:
+    """``context_providers`` 对照 wiring 真实装配集校验 → 422（ADR-0021）。
+
+    Pydantic 只能校验形状；某个 provider 是否装配取决于 CAPABILITIES 运行时
+    状态，必须在这里看 wiring。三个 amend 入口（create / resume / messages）
+    共用同一份判定。
+    """
+    if ids is None:
+        return
+    _, wiring = await state.get_wiring()
+    wired_ids = {getattr(p, "name", None) for p in wiring.context_providers}
+    wired_ids.discard(None)
+    unknown = [pid for pid in ids if pid not in wired_ids]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"context_providers contains unknown ids {unknown}; "
+                f"available: {sorted(wired_ids)}"
+            ),
+        )
+
+
+async def _validate_amend_for_existing_session(
+    state: AppState, amend: AmendOptions
+) -> None:
+    """``/resume`` 与 ``/messages`` 的 amend 校验（与 POST /api/sessions 对齐）。
+
+    create 路径的 ``model`` 校验在 service 里（落盘前避免孤儿 session）；这两个
+    端点没有那道闸门——不在此拦截的话，未知 model 会让 ``build_runtime`` 抛
+    ``ConfigError`` 且无人捕获 → 500，未知 context_providers 则被静默跳过。
+    ``reasoning_effort`` / ``agent_profile`` 已由 Pydantic 在 parse 期 422
+    （``_AmendValueValidators``）。
+    """
+    await _validate_wired_context_providers(state, amend.context_providers)
+    if amend.model is not None:
+        try:
+            ModelConfig.from_catalog(state.settings, amend.model)
+        except ConfigError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 def _validate_workspace_name(state: AppState, workspace: str | None) -> str | None:
@@ -854,19 +909,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # name 属性机制）：validator 无法访问 AppState/wiring（Pydantic parse 早于
         # handler），故在 handler 内对 wiring 真实装配的 id 集合校验——与 model
         # 字段的 from_catalog 422 模式一致。未知 id → 422 + 可用清单。
-        if req.context_providers is not None:
-            _, wiring = await state.get_wiring()
-            wired_ids = {getattr(p, "name", None) for p in wiring.context_providers}
-            wired_ids.discard(None)
-            unknown = [pid for pid in req.context_providers if pid not in wired_ids]
-            if unknown:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"context_providers contains unknown ids {unknown}; "
-                        f"available: {sorted(wired_ids)}"
-                    ),
-                )
+        await _validate_wired_context_providers(state, req.context_providers)
 
         permission_mode = PermissionPolicy(req.permission_mode)
         permission_mode_explicit = "permission_mode" in req.model_fields_set
@@ -984,11 +1027,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         在途 session 拒绝 409，避免同一 session 并发两轮。
         """
         service = SessionService(app.state.agent)
+        amend = AmendOptions.from_request(req)
+        await _validate_amend_for_existing_session(app.state.agent, amend)
         try:
             result = await service.resume_and_launch(
                 session_id=session_id,
                 task=req.task,
-                amend=AmendOptions.from_request(req),
+                amend=amend,
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1114,13 +1159,28 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         JSON 确认；无在途 run → 409（steer 必须有目标）。
         """
         service = SessionService(app.state.agent)
+        amend = AmendOptions.from_request(req)
+        # 契约（handoff §3.1 / P3）：只有 idle → launched 才消费 amend；在途 run
+        # 的 queued 消息与 steer 一律忽略这些字段。因此引用类字段（model /
+        # context_providers，取值集合来自运行时 catalog / wiring，可能已失效）
+        # 只在这条路径上校验——否则一个失效引用会 422 掉用户刚敲的消息。
+        # 值/形状类字段（reasoning_effort / agent_profile / context_providers 形状）
+        # 由 Pydantic 在 parse 期校验，与是否消费无关（静态集合，非法值即客户端 bug）。
+        if (
+            req.mode == "queue"
+            and app.state.agent.run_manager.get_active(session_id) is None
+        ):
+            await _validate_amend_for_existing_session(app.state.agent, amend)
+        else:
+            # 未被消费：按契约丢弃（与改动前 send_message 的忽略语义一致）。
+            amend = AmendOptions()
         try:
             result = await service.send_message(
                 session_id=session_id,
                 content=req.content,
                 mode=req.mode,
                 max_steps=req.max_steps,
-                amend=AmendOptions.from_request(req),
+                amend=amend,
             )
         except InvalidSessionId as e:
             raise HTTPException(status_code=422, detail=str(e)) from e

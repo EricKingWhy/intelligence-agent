@@ -7,7 +7,8 @@ spec 要求（docs/TECH_DEBT_FIX_SPEC.md §Q2）：
 ``ActiveRunConflict`` 让请求以 409 收束——避免在单元测试里拉起真实 run /
 消费 SSE 流。断言点是「端点确实把请求体的 amend 字段组装成 AmendOptions
 并原样传入 service」，这正是 Q2 要防的回归（新增字段只加在 Pydantic 模型上
-却忘了接线）。
+却忘了接线）。P1 之后端点会先校验 amend（未知值 → 422），故 fixture 备好
+真实 catalog 条目与 memory provider，让合法值能走到接缝。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from agent_harness.capability.wiring import CapabilityWiring
 from agent_harness.config import Settings
 from agent_harness.session.service import (
     ActiveRunConflict,
@@ -23,18 +25,36 @@ from agent_harness.session.service import (
 )
 from agent_harness.web.app import create_app
 
+#: 合法 amend 取值需要真实 catalog 条目 + 已装配 provider（P1 校验之后，
+#: 端点不再放行未知值——透传测试必须用合法值才能走到 service 接缝）。
+_CATALOG_JSON = '[{"name": "gpt-4o", "provider": "deepseek", "model_name": "gpt-4o-mini"}]'
+
+
+class _FakeMemoryProvider:
+    name: str = "memory"
+
+    async def select(self, messages):
+        return []
+
 
 @pytest.fixture
 def app_and_client(tmp_path):
-    """创建隔离的 FastAPI app + TestClient。"""
+    """创建隔离的 FastAPI app + TestClient（catalog + memory provider 就位）。"""
     settings = Settings(
         workspace_dir=str(tmp_path),
         model_api_key="test-key",
         model_name="test-model",
         model_provider="openai",
+        agent_models=_CATALOG_JSON,
         enable_cors=True,
     )
     app = create_app(settings)
+    wiring = CapabilityWiring()
+    wiring.context_providers = [_FakeMemoryProvider()]
+    from agent_harness.capability.base import CapabilityRegistry
+
+    app.state.agent._wiring = wiring
+    app.state.agent._registry = CapabilityRegistry()
     client = TestClient(app)
     yield app, client
 

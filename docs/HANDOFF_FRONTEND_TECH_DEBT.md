@@ -88,9 +88,14 @@ T2. 更新过期注释（不行为变更）。
 
 生效范围（重要）：
 
-- `/messages`：仅 **idle 会话 → `launched` 新 run** 时生效；**在途 run 的 `queued` 消息忽略这些字段**（在途 run 的 runtime 已固定，不抢断、不改写）。
+- `/messages`：仅 **idle 会话 → `launched` 新 run** 时生效；**在途 run 的 `queued` 消息与 `mode=steer` 不应用这些字段**（在途 run 的 runtime 已固定，不抢断、不改写）。
 - `/resume`：无在途 run 时拉起新 run 时生效；有在途 run → 409。
 - 响应形状不变：`launched` → SSE 流；`queued`/`steered` → JSON 确认。前端现有的 content-type 分支逻辑继续适用。
+
+校验语义（P1 修复后，见 §5）：
+
+- **值/形状类**（`reasoning_effort`、`agent_profile` 的取值；`context_providers` 的每项非空）由 Pydantic 在 parse 期校验——**任何**请求的非法值都 422（集合是静态常量，不会因目录变化而失效）。
+- **引用类**（`model`、`context_providers` 的 id）只在**会被应用**时才校验：`/resume` 总是校验；`/messages` 仅在 idle → launched 时校验。queued/steer 请求即使带失效的 `model` 也不会 422——该字段按契约被忽略。
 
 ### 3.2 新增契约：WS 服务端心跳（仅 WS 通道，SSE 不受影响）
 
@@ -143,25 +148,27 @@ T2. 更新过期注释（不行为变更）。
 
 ## 5. 坑点
 
-**P1（重要，后端 Gap）：续聊/续跑的 amend 没有 create 路径的校验。**
-`POST /api/sessions` 的三道闸门在 `/resume` 与 `/messages` 上都不存在：
+**P1（已修复，2026-09-09）：续聊/续跑的 amend 校验现已与 create 路径对齐。**
+修复前：`POST /api/sessions` 的三道闸门在 `/resume` 与 `/messages` 上都不存在——
 
-| 字段 | `POST /api/sessions` | `/resume`、`/messages` |
+| 字段 | `POST /api/sessions` | `/resume`、`/messages`（修复前） |
 | --- | --- | --- |
 | `reasoning_effort` | Pydantic `@field_validator` → 422 | 无校验，透传给 `create_chat_model` |
 | `agent_profile` | Pydantic `@field_validator` → 422 | 无校验 → `BUILTIN_PROFILES[...]` **KeyError → HTTP 500** |
 | `context_providers` | handler 对照 wiring 真实 id → 422 | 无校验 → `build_runtime` 记 WARNING 后**静默跳过** |
 | `model` | `ModelConfig.from_catalog` → `InvalidDecision` → 422 | 无校验 → `ConfigError` 未被 handler 捕获 → **HTTP 500** |
 
-结论：前端**只发目录端点返回的 id**；续聊选到失效的 model/agent_profile 时可能拿到 **500 而不是 422**。`assembly.build_runtime` 的 docstring 自称"未知名字在 web 层已 422，这里响亮失败一次"——对 resume 路径这句不成立，是本批新暴露的 Gap，建议后端补票（见 §6）。
+修复后：未知 `reasoning_effort` / `agent_profile` → Pydantic 422；未知 `context_providers` / `model` 在**会被应用**时 → 422（`/resume` 总是校验；`/messages` 仅 idle → launched 时校验，queued/steer 忽略字段不校验）。详见 §3.1 的校验语义。
 
-> 已实测（2026-09-09）：`POST /api/sessions/{id}/messages` 带未知 `model` → `ConfigError` 未被捕获 → **500**；`build_runtime(agent_profile="nope")` → `KeyError('nope')`，同样未被捕获 → 500。`reasoning_effort` 未知值不在此列（无校验、透传）。
+结论：前端**仍应只发目录端点返回的 id**；但已不再有 500——失效的引用类字段要么 422（会被应用时），要么被忽略（不会被应用时）。
+
+> 修复前实测（2026-09-09）：`POST /api/sessions/{id}/messages` 带未知 `model` → `ConfigError` 未被捕获 → **500**；`build_runtime(agent_profile="nope")` → `KeyError('nope')`，同样未被捕获 → 500。修复后回归测试见 `tests/web/test_web_amend_validation.py`。
 
 **P2：续聊的 422 语义与现有前端假设不符。**
-`/messages` 的 422 只来自 `InvalidSessionId`；`useSession.ts:663` 现在把 422 一律当"未知模型"（`UNKNOWN_MODEL_ERROR_TEXT`）——对续聊并不成立。加 amend 后，未知模型走的是 500。要么按状态码分别提示，要么等 P1 后端修完再统一。
+`useSession.ts:663` 把 422 一律当"未知模型"（`UNKNOWN_MODEL_ERROR_TEXT`）。现在 `/messages` 的 422 可能来自：`InvalidSessionId`（session_id 非法）、未知 `model` / `context_providers`（仅 idle → launched 时）、非法 `reasoning_effort` / `agent_profile` 取值。建议按 `detail` 文本区分，或统一提示"续聊参数无效，请刷新选项后重试"。
 
 **P3：amend 只在"拉起新 run"时生效。**
-在途 run 的 queued 消息不应用 amend；UI 不要在 queued 路径提示"档位已切换"。
+在途 run 的 queued 消息与 steer 不应用 amend（服务端按契约丢弃这些字段）；UI 不要在 queued/steer 路径提示"档位已切换"。
 
 **P4（后端 Gap，WS 采用前需处理）：WS 快照帧与 live/SSE 帧形状不同。**
 `websocket.py` 的 `snapshot` 用 `SessionEvent.to_dict()`（JSONL 形状：含 `event_id`、**无 `durability`**、`data` 为空时省略）；而 live `event` 帧和 SSE 帧用信封形状（`build_event_payload`，含 `durability`、无 `event_id`）。SSE 两条通道同形，WS 快照不同形——WS 客户端需要归一化，或让后端统一。本批未改（Scope 外）。
@@ -177,10 +184,11 @@ T2. 更新过期注释（不行为变更）。
 ## 6. 下一步建议
 
 1. **前端票（本批收口）**：T1 + T2。这是本批唯一真实前端工作量，可在后端合入 main 前先做（SSE 契约未变，改动只依赖请求体新增可选字段）。
-2. **后端票 P1（建议 P1 优先级）**：把 amend 校验抽成三端点共享的 handler 辅助（`model` from_catalog → 422、`context_providers` 对照 wiring → 422），并捕获 `ConfigError` 映射 422，消除 create 与 resume/messages 的行为不对称。
+2. ~~**后端票 P1**：amend 校验对齐~~ **已完成**（`feat/backend`，与 §5 P1 同步更新）。
 3. **后端票 P2**：WS `snapshot` 统一为信封形状（或前端加归一化），作为 WS 迁移的前置条件。
 4. **契约文档**：`docs/BACKEND_CONTRACT_STREAMING_UI.md` 补 WS 章节（心跳 + 帧形状 + 上行词汇），否则 WS 迁移没有单一契约来源。
 5. **WS 迁移本身**：不在本批范围，建议单独立票，前端先保持 SSE。
+6. **测试脚手架去重（低优先）**：`tests/web/test_web_amend_validation.py` 与 `test_web_amend_passthrough.py`（以及 `test_web_context_providers_b2.py`）各自复制了 `_FakeMemoryProvider` + wiring 注入。值得建 `tests/web/conftest.py` 统一——纯测试基础设施，与本批功能无关。
 
 ---
 
