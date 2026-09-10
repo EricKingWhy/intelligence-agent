@@ -53,6 +53,7 @@ function newTurn(step_id: number): Turn {
     activities: [],
     status: 'streaming',
     reasoningById: {},
+    turn_index: null,
   };
 }
 
@@ -205,10 +206,22 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
 
 function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   state.run_status = 'running';
-  // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run。
+  // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
+  // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
+  // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
+  // 导致所有历史轮次显示同一个数字。
   const idx = event.data.turn_index;
-  if (typeof idx === 'number' && Number.isFinite(idx)) {
-    state.turn_index = idx;
+  if (typeof idx !== 'number' || !Number.isFinite(idx)) return;
+  state.turn_index = idx; // 会话级镜像（Langfuse / turn 元数据消费）
+  // 当轮 = 最后一个 turn：生产时序为 user/message（建轮）→ run/started，
+  // 故 RUN_STARTED 到达时本轮 turn 已存在。不调用 withTurnAt——它在无匹配时
+  // 会新建空 turn，而 RUN_STARTED 本身不携带 step（在途 run 的 step 无法解析），
+  // 会凭空多出一个错位轮次。仅在已有轮次时回填。
+  const last = state.turns[state.turns.length - 1];
+  if (last) {
+    const turn = cloneTurn(last);
+    turn.turn_index = idx;
+    replaceTurnAt(state, state.turns.length - 1, turn);
   }
 }
 
