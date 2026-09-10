@@ -140,7 +140,11 @@ export const CONTEXT_PROVIDERS = [
 
 // ── Composer 控制行交互 helper（跨 spec 共用）──
 
-/** 键盘在 ControlPicker 里选第 N+1 项：打开 → 清搜索 → ↓×N → Enter，断言 trigger 文本。 */
+/** 键盘在 ControlPicker 里选第 N+1 项：打开 → 清搜索 → ↓×N → Enter，断言 trigger 文本。
+ *
+ * F-DEFER-1：搜索框按目录长度显示（≤5 条隐藏）。隐藏时 `role="combobox"`
+ * （CommandInput 本身）也一起 display:none——故「浮层已开」只看 `listbox`
+ * （CommandList，恒可见），清空搜索仅在搜索框确实可见时执行。 */
 export async function pickControl(
   page: Page,
   label: string,
@@ -153,22 +157,25 @@ export async function pickControl(
   const combo = page.getByRole('combobox', { name: label });
   await trigger.focus();
   await page.keyboard.press('Enter');
-  await expect(combo).toBeVisible();
-  await combo.fill('');
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
+  // 只有搜索框可见（长目录）才清残留搜索词；短目录下 fill 会静默失败
+  if (await combo.isVisible()) await combo.fill('');
   for (let i = 0; i < downPresses; i += 1) await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   await expect(trigger).toContainText(expected);
   await page.keyboard.press('Escape');
 }
 
-/** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。 */
+/** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。
+ *
+ * F-DEFER-1：同上——短目录（≤5 条）时搜索框隐藏，不强行 fill；用 listbox 判开。 */
 export async function pickFirstModel(page: Page): Promise<void> {
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');
   const combo = page.getByRole('combobox', { name: '模型选择' });
   await trigger.focus();
   await page.keyboard.press('Enter');
-  await expect(combo).toBeVisible();
-  await combo.fill('');
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
+  if (await combo.isVisible()) await combo.fill('');
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   await expect(trigger).toContainText(MODELS[0].name);

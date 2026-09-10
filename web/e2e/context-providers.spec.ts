@@ -45,8 +45,8 @@ test('ContextProviderPicker：目录非空 → 渲染；键盘 toggle + POST str
   // 键盘打开浮层
   await ctxTrigger.focus();
   await page.keyboard.press('Enter');
-  // cmdk 注入 combobox 角色
-  await expect(page.locator('[role="combobox"]')).toBeVisible();
+  // 浮层已开——用 listbox 判定（CONTEXT_PROVIDERS 仅 2 条 → 搜索框隐藏 → combobox 不可见，F-DEFER-1）
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
   // 两个 option 在场
   await expect(page.locator('[role="option"]')).toHaveCount(2);
 
@@ -62,7 +62,7 @@ test('ContextProviderPicker：目录非空 → 渲染；键盘 toggle + POST str
 
   // Esc 关闭浮层
   await page.keyboard.press('Escape');
-  await expect(page.locator('[role="combobox"]')).toBeHidden();
+  await expect(page.locator('[role="listbox"]')).toBeHidden();
 
   // 提交任务
   await page.getByLabel('Agent 任务').fill('cp 测试');

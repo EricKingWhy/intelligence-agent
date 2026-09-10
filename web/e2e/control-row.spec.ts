@@ -53,22 +53,49 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
   // 键盘打开 Permission Mode 浮层
   await permTrigger.focus();
   await page.keyboard.press('Enter');
-  // cmdk 注入 combobox 角色
-  await expect(page.locator('[role="combobox"]')).toBeVisible();
+  // 浮层已开——listbox 恒可见（combobox 在短目录下会随搜索框隐藏，见 F-DEFER-1）
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
   // option 角色在场——至少 3 个（auto/ask/deny）
   await expect(page.locator('[role="option"]')).toHaveCount(3);
+
+  // Esc 关闭浮层（§19）
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="listbox"]')).toBeHidden();
+
+  // 再次打开 + Enter 选第一个 option → trigger 文本更新
+  await pickControl(page, '权限模式', 0, 'Auto Approve');
+});
+
+test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', async ({ page }) => {
+  // 权限模式 3 条 ≤ 5 → 搜索框隐藏；要测搜索需换长目录（F-DEFER-1）
+  const LONG_MODES = Array.from({ length: 6 }, (_, i) => ({
+    id: `mode-${i}`,
+    display_name: i === 2 ? 'Ask Each Time' : `Mode ${i}`,
+    description: `档位 ${i}`,
+  }));
+
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: LONG_MODES,
+  });
+
+  await page.goto('/');
+
+  const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await expect(permTrigger).toBeVisible();
+  await permTrigger.focus();
+  await page.keyboard.press('Enter');
+
+  // 长目录（6 > 5）→ 搜索框可见、可交互
+  const combo = page.getByRole('combobox', { name: '权限模式' });
+  await expect(combo).toBeVisible();
+  await expect(page.locator('[role="option"]')).toHaveCount(6);
 
   // 搜索过滤：键入「ask」只剩匹配项
   await page.keyboard.type('ask');
   await expect(page.locator('[role="option"]')).toHaveCount(1);
   await expect(page.locator('[role="option"]')).toContainText('Ask Each Time');
-
-  // Esc 关闭浮层（§19）
-  await page.keyboard.press('Escape');
-  await expect(page.locator('[role="combobox"]')).toBeHidden();
-
-  // 再次打开 + Enter 选第一个 option → trigger 文本更新
-  await pickControl(page, '权限模式', 0, 'Auto Approve');
 });
 
 test('Composer control row：提交 payload 字段名对齐后端契约', async ({ page }) => {

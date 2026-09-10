@@ -131,7 +131,8 @@ test('续聊 amend 透传：所选 context_providers 进 /messages payload', asy
   const ctxTrigger = page.locator('.composer-control[aria-label="Context Providers"]');
   await ctxTrigger.focus();
   await page.keyboard.press('Enter');
-  await expect(page.locator('[role="combobox"]')).toBeVisible();
+  // 浮层已开用 listbox 判定（2 条短目录 → 搜索框隐藏 → combobox 不可见，F-DEFER-1）
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
   await page.keyboard.press('Enter');
   await expect(ctxTrigger).toContainText('Context · 1');
   await page.keyboard.press('Escape');

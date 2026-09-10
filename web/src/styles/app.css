@@ -3666,6 +3666,11 @@ button.json-row {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
 }
+/* 短目录（≤5 条）隐藏搜索框。F-DEFER-1：此前 class 已挂但无规则，修复从未生效。
+   cmdk 要求 CommandInput 始终留在 DOM，故用 display:none 隐藏，不条件卸载组件。 */
+.model-picker-search-wrap.hidden {
+  display: none;
+}
 .model-picker-search {
   width: 100%;
   min-width: 0;
