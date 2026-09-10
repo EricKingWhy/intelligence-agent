@@ -13,7 +13,7 @@
 | Branch | `feat/frontend` |
 | 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` v1 |
 | 后端交接手册 | `D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_T7_T9.md` |
-| 集成交接提示词 | `docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md`（已含深化批次 + 拓扑重测 + AGENTS.md 冲突分析） |
+| 集成交接提示词 | `docs/integration/FRONTEND_INTEGRATION_PROMPT.md`（已含深化批次 + 拓扑重测 + AGENTS.md 冲突分析） |
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
@@ -155,7 +155,7 @@
 
 ### 3. 集成交接提示词（已更新）
 
-`docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md` 已重写：14 个 commit 清单、
+`docs/integration/FRONTEND_INTEGRATION_PROMPT.md` 已重写：14 个 commit 清单、
 新 HEAD `d5a8dca`、深化批次新增模块、两处已披露行为变化、C1 未完成范围，
 以及**重测后的拓扑与冲突预判**。
 

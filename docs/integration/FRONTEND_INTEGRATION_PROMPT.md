@@ -91,7 +91,7 @@ CONFLICT (content): Merge conflict in AGENTS.md
 ### 本项目新增文档（`main` 上不存在，纯新增，无冲突）
 
 `docs/SDD_WORKFLOW_PROTOCOL.md`、`docs/SDD_TICKET_TRACKER.md`、`docs/ARCHITECTURE_REVIEW.md`、
-`docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md`。
+`docs/integration/FRONTEND_INTEGRATION_PROMPT.md`。
 
 ---
 
