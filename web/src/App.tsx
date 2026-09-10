@@ -56,6 +56,8 @@ export default function App() {
   // Split / Preview = 后续 Phase 升级的副面板，当前仅空架子（占位条），
   // 表明 Workspace 有自己的结构扩展点，但内容不由 tab 与 Inspector 抢走。
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('chat');
+  // BUG-001 fix：fork 失败的本地错误状态（useSession 的 error 是流级通道）。
+  const [forkError, setForkError] = useState<string | null>(null);
 
   const {
     sessions,
@@ -312,13 +314,15 @@ export default function App() {
   const handleFork = useCallback(
     async (fromSeq: number) => {
       if (!selectedId) return;
+      setForkError(null);
       try {
         const result = await fork(selectedId, fromSeq);
         // 跳转到 child session
         selectSession(result.session_id);
         void refreshSessions();
-      } catch {
-        // 分叉失败静默——用户可重试
+      } catch (e) {
+        // BUG-001 fix：分叉失败不再静默——展示后端 detail。
+        setForkError(`分叉失败：${(e as Error).message}`);
       }
     },
     [selectedId, fork, selectSession, refreshSessions],
@@ -533,6 +537,7 @@ export default function App() {
             </div>
           )}
           {error && <div className="app-error">{error}</div>}
+          {forkError && <div className="app-error" role="alert">{forkError}</div>}
           {reconnecting && (
             // T4（#97）断线状态条：瞬时重连不清屏不轰炸——conversation 照常
             // 累积，条只在重连期间在场（aria-live 播报一次状态变化）。
@@ -561,8 +566,18 @@ export default function App() {
                 </span>
               )}
               {recoverState.status === 'idle' && (
-                <span className="recover-hint">最后事件非 run/completed——可尝试恢复</span>
+                <span className="recover-hint">该会话缺少 run 终态或有未配对工具调用——可尝试恢复</span>
               )}
+            </div>
+          )}
+          {/* 恢复成功提示**必须在 canRecover 门外**：修好后 dangling 归零、
+              入口随 canRecover 一起消失，提示若挂在门内会立刻被卸载——
+              等于用户又什么都看不到（这正是本缺陷的原始症状）。 */}
+          {recoverState.status === 'done' && !streaming && (
+            <div className="recover-done" role="status" aria-live="polite">
+              {recoverState.repaired > 0
+                ? `已恢复：回填 ${recoverState.repaired} 条工具结果`
+                : '已恢复：无可修复项（会话事件已完整）'}
             </div>
           )}
           {conversation?.run_interrupted && !streaming && (

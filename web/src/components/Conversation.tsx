@@ -283,11 +283,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
         ) : (
           <div className="msg msg-user">
             <div className="msg-bubble-user">{turn.user_message}</div>
-            {onFork && turn.status !== 'streaming' && (
+            {onFork && turn.status !== 'streaming' && turn.user_message_seq !== null && (
               <button
                 className="fork-btn"
                 title="从此处分叉新会话"
-                onClick={() => onFork(turn.step_id)}
+                onClick={() => onFork(turn.user_message_seq!)}
               >
                 分叉
               </button>

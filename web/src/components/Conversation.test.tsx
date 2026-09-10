@@ -240,6 +240,7 @@ describe('TurnView — T9 #139 轮次标签', () => {
       activities: [{ kind: 'model', index: 0 }],
       status: 'done',
       turn_index: 1,
+      user_message_seq: 1,
       ...over,
     };
   }

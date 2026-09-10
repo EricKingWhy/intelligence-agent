@@ -430,7 +430,12 @@ export async function forkSession(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ from_seq: fromSeq }),
   });
-  if (!res.ok) throw new Error(`fork ${res.status}`);
+  if (!res.ok) {
+    // BUG-001 fix：解析后端 detail 给用户看（可用边界列表等）。
+    let detail = '';
+    try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
+    throw new Error(detail || `fork ${res.status}`);
+  }
   return res.json();
 }
 

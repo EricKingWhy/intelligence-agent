@@ -196,6 +196,11 @@ export interface Turn {
    *  per-turn 事实——同轮所有事件共享，供 TurnView 渲染「第 N 轮」标签。
    *  null = 该轮未携带该字段（旧版后端 / 非 run 起始路径）。 */
   turn_index: number | null;
+  /** BUG-001 fix：user/message 事件的 seq（持久事实），用作 fork 锚点。
+   *  后端 POST /forks 要求 from_seq 是 user/message 的 seq；
+   *  此前传 turn.step_id（resolveStep 合成值）→ 422。
+   *  null = 该轮没有 user/message 事件（不应该出现，但防御性处理）。 */
+  user_message_seq: number | null;
   /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
    *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
   reasoningById?: Record<string, ReasoningBlock>;

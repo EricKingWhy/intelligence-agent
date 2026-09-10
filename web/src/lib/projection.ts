@@ -54,6 +54,7 @@ function newTurn(step_id: number): Turn {
     status: 'streaming',
     reasoningById: {},
     turn_index: null,
+    user_message_seq: null,
   };
 }
 
@@ -196,6 +197,11 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
   withTurnAt(state, step, (turn) => {
     touchTurn(turn, event);
     turn.user_message = String(event.data.content ?? '');
+    // BUG-001：fork 锚点需要 user/message 的 seq（持久事实），
+    // 而非 turn.step_id（resolveStep 合成值）。null-seq 帧不入册。
+    if (event.seq !== null) {
+      turn.user_message_seq = event.seq;
+    }
     // Phase 12（ADR-0014 #69）：failure-guard soft 注入的纠正消息带
     // injected_by 标记——渲染层据此显示为系统提示条而非用户气泡。
     if (typeof event.data.injected_by === 'string' && event.data.injected_by) {
