@@ -85,6 +85,77 @@ test('BUG-005 写入路径：真实点击会话行 → 写键 → 不带种子�
   await expect(page.locator('.empty-hero')).toBeHidden();
 });
 
+test('子会话 id 与普通会话同一持久化/恢复路径：非首行真实点击 → 写键 → 刷新恢复', async ({ page }) => {
+  // 意图边界：child id 不特殊，与普通会话共用同一条 persist/restore 路径。若后人
+  // 认为「子会话 id 不该持久化」而在 persist effect 里按 child 过滤 → 本用例变红
+  // （变异验证：写入过滤 `-child` → 两个视口都报
+  //  Expected: "e2e-session-0001-child" / Received: null）。
+  //
+  // 与兄弟用例 `BUG-005 写入路径` 的差别（两者都有存在价值）：
+  //  ① 点**非首行**——兄弟用例点 `.first()`，发现不了「总是持久化第 0 行」；
+  //  ② id 是首行 id 的**严格前缀**（SID vs SID-child），刷新断言因此真的能区分
+  //     「恢复了错的会话」（`new RegExp(SID)` 同时匹配 SID-child，无鉴别力）。
+  //
+  // 本用例是**合成 fixture**，不含真的委派/分叉事件；真机验证（委派 child 经列表
+  // 与「打开子会话」两条入口、410 事件的分叉 child，刷新后正文 fingerprint 逐字节
+  // 一致）记在 docs/FRONTEND_ISSUES_LOG.md——勿把本用例当成那次的自动化复现。
+  //
+  // 必须走**真实点击的写入路径**，不能 addInitScript 播种：播种在每次导航（含
+  // reload）都会重跑，「刷新后还在」便只能证明读路径（实测：播种版在写入被过滤时
+  // 依然全绿）。
+  const CHILD = `${SID}-child`;
+  const CHILD_EVENTS: FrameSpec[] = [
+    { type: 'session/started', seq: 1, session_id: CHILD, run_id: RUN, time: T },
+    { type: 'run/started', seq: 2, session_id: CHILD, run_id: RUN, time: T },
+    { type: 'user/message', data: { content: '委派给 research_review 的子任务' }, seq: 3, session_id: CHILD, run_id: RUN, step_id: 1, time: T },
+    { type: 'text/delta', data: { delta: '子会话结论。' }, seq: 4, session_id: CHILD, run_id: RUN, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 5, session_id: CHILD, run_id: RUN, time: T },
+  ];
+  // 父会话给**不同正文**：routeApi 对任意 id 都返回同一份 events，那样的
+  // `toContainText` 在「恢复了父会话」时也会通过，等于没锁内容一致性。
+  const PARENT_EVENTS: FrameSpec[] = [
+    { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
+    { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
+    { type: 'user/message', data: { content: '刷新前就发出的任务' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'text/delta', data: { delta: '父会话正文。' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
+  ];
+  routeApi(page, {
+    sessions: [
+      ...SESSIONS,
+      { session_id: CHILD, event_count: 5, first_event_time: T, last_event_time: T, first_user_message: '委派给 research_review 的子任务', trace_id: null },
+    ],
+  });
+  // 后注册的路由优先：按请求的 session id 返回**各自**的事件，内容一致性才有鉴别力
+  await page.route('**/api/sessions/*/events', (route) => {
+    const id = new URL(route.request().url()).pathname.split('/')[3];
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(id === CHILD ? CHILD_EVENTS : PARENT_EVENTS),
+    });
+  });
+
+  await page.goto('/');
+  // 前置条件：空态、且本（全新）上下文里没有键
+  await expect(page.locator('.empty-hero')).toBeVisible();
+  expect(await page.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+
+  // 真实点击 **child** 行（非首行）；按 title 属性定位（稳定身份），不按业务文案
+  await page.locator(`.session-item[title^="${CHILD} "]`).click();
+  await expect(page.locator('.model-output').last()).toContainText('子会话结论。');
+  await expect(page.locator('.model-output').last()).not.toContainText('父会话正文。');
+  // 写入路径断言：child id 与普通会话一样被记住
+  expect(await page.evaluate((k) => localStorage.getItem(k), KEY)).toBe(CHILD);
+
+  // 刷新（**不重新播种**）：恢复只能来自上一步写下的键
+  await page.reload();
+  await expect(page.locator('.session-item.selected')).toHaveAttribute('title', new RegExp(`${CHILD} `));
+  await expect(page.locator('.model-output').last()).toContainText('子会话结论。');
+  await expect(page.locator('.model-output').last()).not.toContainText('父会话正文。');
+  await expect(page.locator('.empty-hero')).toBeHidden();
+});
+
 test('BUG-006：刷新时 run 在途 → 以 after_seq 接回流，刷新后的事件继续到达', async ({ page }) => {
   let streamCalls = 0;
   const afterReloadReqs: string[] = [];

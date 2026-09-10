@@ -230,4 +230,6 @@ merge 后追加。这是本批的协议偏离，记录在案。
 **判定为后端/非前端**（仅记录，未改）：OBS-008（`glm-5.3-flash` 工具成功后 `model/failed`）、OBS-009（bash 工具 10s 超时上限与 `retryable` 语义）、OBS-010（`GET /api/sessions` 的 `trace_id` 恒为 `null`，但会话详情事件里的 `trace_id` 正常，故 UI 的 Trace 命令实际可用——**原登记曾误判为「命令不出现」，已订正**）。
 **已知覆盖缺口**：OBS-006 审批卡不可达（`auto_approve` 硬编码）；`已中断` 脉冲态真实语料不可达（仅单测）；`pulse-interrupted` 类名字符串与 CSS 选择器无测试绑定。
 
-**本批最终门禁（实跑）**：tsc ✓ · vitest **494 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **96 passed**（`--workers=2`）· vite build ✓。
+**子会话刷新一致性（追加真机验证）**：委派 child `2515a128`（列表点击 / 「打开子会话」两条入口）与分叉 child `1fdac9b9`（410 事件）刷新前后正文指纹**逐字节相同**（日志见登记簿对应章节）。新增回归锁 1 例（×2 视口）——首版播种式被变异验证证伪（只覆盖读路径），已改为真实点击写入路径 + 按 id 区分事件。
+
+**本批最终门禁（实跑）**：tsc ✓ · vitest **494 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **98 passed**（`--workers=2`）· vite build ✓。
