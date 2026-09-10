@@ -17,14 +17,9 @@
  * （同 i-keyboard.spec.ts 的约定）。本文件不入 vitest 四门禁，归夜间/手动 e2e 车道。 */
 
 import { expect, test } from '@playwright/test';
-import { MODELS, routeApi } from './fixtures';
+import { SEARCHABLE_MODELS, routeApi } from './fixtures';
 
-/** 搜索框要出现必须 > 5：默认链 1 + 模型数 ≥ 5。MODELS 3 条 → 加 2 条。 */
-const SEARCHABLE_MODELS = [
-  ...MODELS,
-  { name: 'gpt-5-mini', provider: 'openai', model: 'gpt-5-mini', default: false },
-  { name: 'gemini-3-pro', provider: 'google', model: 'gemini-3-pro', default: false },
-];
+// SEARCHABLE_MODELS 来自 fixtures（MODELS 3 + 2 = 5，+1 默认链 = 6 > 5 → 搜索框显示）。
 
 test('ModelPicker Combobox：角色语义 + 键盘导航 + 搜索 + Esc', async ({ page }) => {
   routeApi(page, {

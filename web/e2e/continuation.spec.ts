@@ -132,7 +132,10 @@ test('续聊 amend 透传：所选 context_providers 进 /messages payload', asy
   await ctxTrigger.focus();
   await page.keyboard.press('Enter');
   // 浮层已开用 listbox 判定（2 条短目录 → 搜索框隐藏 → combobox 不可见，F-DEFER-1）
-  await expect(page.locator('[role="listbox"]')).toBeVisible();
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  await expect(listbox).toBeVisible();
+  // 焦点必须显式落到 listbox——打开后 activeElement 是 popover 容器，Enter 不会选中
+  await listbox.focus();
   await page.keyboard.press('Enter');
   await expect(ctxTrigger).toContainText('Context · 1');
   await page.keyboard.press('Escape');

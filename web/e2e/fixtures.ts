@@ -138,13 +138,50 @@ export const CONTEXT_PROVIDERS = [
   { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
 ];
 
+// ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 >5 条）──
+// 阈值速查（源码）：ModelPicker 用 `models.length + 1 > 5`（默认链算 1 条）；
+// ControlPicker / ContextProviderPicker 用 `entries.length > 5`。
+// 三处 spec 曾各自内联长目录 → 阈值/条数一改就静默漂移，故统一在此构造。
+
+/** 造一个 id/display_name 结构的长目录（映射 ControlPicker / ContextProviderPicker 端点形状）。
+ *
+ * `highlight` 指定某一项的 display_name（供"键入过滤"类用例断言），默认 `前缀 N`。 */
+export function longCatalog(prefix: string, n: number, highlight?: { index: number; label: string }) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `${prefix}-${i}`,
+    display_name: highlight?.index === i ? highlight.label : `${prefix} ${i}`,
+    description: `${prefix} 档位 ${i}`,
+  }));
+}
+
+/** 长模型目录：MODELS（3）+ 2 条 = 5 条，+1 默认链 = 6 > 5 → 搜索框显示。 */
+export const SEARCHABLE_MODELS = [
+  ...MODELS,
+  { name: 'gpt-5-mini', provider: 'openai', model: 'gpt-5-mini', default: false },
+  { name: 'gemini-3-pro', provider: 'google', model: 'gemini-3-pro', default: false },
+];
+
+/** 长模型目录 PLUS：MODELS（3）+ 4 条 = 7 条，+1 = 8 > 5（更强的长目录信号，供可见性用例）。 */
+export const LONG_MODELS = [
+  ...SEARCHABLE_MODELS,
+  { name: 'llama-5-70b', provider: 'meta', model: 'llama-5-70b', default: false },
+  { name: 'mistral-large-3', provider: 'mistral', model: 'mistral-large-3', default: false },
+];
+
 // ── Composer 控制行交互 helper（跨 spec 共用）──
 
-/** 键盘在 ControlPicker 里选第 N+1 项：打开 → 清搜索 → ↓×N → Enter，断言 trigger 文本。
+/** 键盘在 ControlPicker 里选第 N+1 项：打开 → ↓×N → Enter，断言 trigger 文本。
  *
- * F-DEFER-1：搜索框按目录长度显示（≤5 条隐藏）。隐藏时 `role="combobox"`
- * （CommandInput 本身）也一起 display:none——故「浮层已开」只看 `listbox`
- * （CommandList，恒可见），清空搜索仅在搜索框确实可见时执行。 */
+ * F-DEFER-1（cmdk 焦点真相，2026-09-10 探针实测）：
+ * - 「浮层已开」只看 `[role="listbox"]`（CommandList）。`role="combobox"`
+ *   （CommandInput 本身）在短目录（≤5 条）时被 `.hidden` 的 wrap 包住，
+ *   其 rect 为 0×0 → Playwright 判为不可见。
+ * - **不要对搜索框调 fill()**：短目录下 rect 为 0，fill 会永久等待可交互
+ *   状态直至超时；长目录下 aria-label 并不落在 input 上，
+ *   `getByRole('combobox', { name })` 命中 0 个。
+ * - 打开后焦点在 `DIV[role="dialog"]`（popover 容器），键盘事件需落到
+ *   **listbox 自身**（`tabIndex=-1`，cmdk 在此承接方向键）才能驱动选中。
+ *   故统一 `listbox.focus()`——长短目录同一路径，无分支。 */
 export async function pickControl(
   page: Page,
   label: string,
@@ -152,14 +189,14 @@ export async function pickControl(
   expected: string,
 ): Promise<void> {
   const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
-  // 浮层关闭动画期间内容仍留在 DOM——按 aria-label 限定到本次打开的浮层，
-  // 否则第二次调用会同时命中上一层残留（strict mode violation）。
-  const combo = page.getByRole('combobox', { name: label });
+  // `:visible` 限定当前打开的浮层：关闭动画期间上一层 listbox 仍是 DOM 节点，
+  // 不加过滤会 strict mode violation（探针实测命中 2 个）。
+  const listbox = page.locator('[role="listbox"]:visible').last();
   await trigger.focus();
   await page.keyboard.press('Enter');
-  await expect(page.locator('[role="listbox"]')).toBeVisible();
-  // 只有搜索框可见（长目录）才清残留搜索词；短目录下 fill 会静默失败
-  if (await combo.isVisible()) await combo.fill('');
+  await expect(listbox).toBeVisible();
+  // 焦点落到 listbox（cmdk 的方向键承接者）；短目录搜索框 0×0，不能 fill。
+  await listbox.focus();
   for (let i = 0; i < downPresses; i += 1) await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   await expect(trigger).toContainText(expected);
@@ -168,14 +205,14 @@ export async function pickControl(
 
 /** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。
  *
- * F-DEFER-1：同上——短目录（≤5 条）时搜索框隐藏，不强行 fill；用 listbox 判开。 */
+ * F-DEFER-1：同 pickControl——焦点显式落到 listbox，不碰 0×0 的搜索框。 */
 export async function pickFirstModel(page: Page): Promise<void> {
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');
-  const combo = page.getByRole('combobox', { name: '模型选择' });
+  const listbox = page.locator('[role="listbox"]:visible').last();
   await trigger.focus();
   await page.keyboard.press('Enter');
-  await expect(page.locator('[role="listbox"]')).toBeVisible();
-  if (await combo.isVisible()) await combo.fill('');
+  await expect(listbox).toBeVisible();
+  await listbox.focus();
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   await expect(trigger).toContainText(MODELS[0].name);

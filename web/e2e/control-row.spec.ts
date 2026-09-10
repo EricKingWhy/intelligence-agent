@@ -14,6 +14,7 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   fulfillSse,
+  longCatalog,
   pickControl,
   routeApi,
 } from './fixtures';
@@ -67,12 +68,9 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
 });
 
 test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', async ({ page }) => {
-  // 权限模式 3 条 ≤ 5 → 搜索框隐藏；要测搜索需换长目录（F-DEFER-1）
-  const LONG_MODES = Array.from({ length: 6 }, (_, i) => ({
-    id: `mode-${i}`,
-    display_name: i === 2 ? 'Ask Each Time' : `Mode ${i}`,
-    description: `档位 ${i}`,
-  }));
+  // 权限模式 3 条 ≤ 5 → 搜索框隐藏；要测搜索需换长目录（F-DEFER-1）。
+  // 长目录来自 fixtures 公共构造，避免内联后与其它 spec 漂移。
+  const LONG_MODES = longCatalog('mode', 6, { index: 2, label: 'Ask Each Time' });
 
   routeApi(page, {
     sessions: [],

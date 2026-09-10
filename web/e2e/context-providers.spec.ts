@@ -46,9 +46,13 @@ test('ContextProviderPicker：目录非空 → 渲染；键盘 toggle + POST str
   await ctxTrigger.focus();
   await page.keyboard.press('Enter');
   // 浮层已开——用 listbox 判定（CONTEXT_PROVIDERS 仅 2 条 → 搜索框隐藏 → combobox 不可见，F-DEFER-1）
-  await expect(page.locator('[role="listbox"]')).toBeVisible();
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  await expect(listbox).toBeVisible();
   // 两个 option 在场
   await expect(page.locator('[role="option"]')).toHaveCount(2);
+  // 焦点显式落到 listbox：打开后 activeElement 是 popover 容器（DIV[role=dialog]），
+  // 键盘事件不落到 cmdk 的方向键承接者 → Enter 不会选中（探针实测）。
+  await listbox.focus();
 
   // Enter 选中第一项（memory）——多选模式不关闭 popover
   await page.keyboard.press('Enter');

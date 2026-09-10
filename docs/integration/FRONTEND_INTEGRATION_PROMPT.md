@@ -29,9 +29,14 @@
 | commit | 内容 |
 | --- | --- |
 | `cddea36` | feat(web): T9 #139 轮次标签 UI——`turn_index` 落到当轮 + `TurnView` 渲染 |
-| `<F-DEFER-1 待提交>` | fix(web): F-DEFER-1 补 `.model-picker-search-wrap.hidden` CSS + e2e 断言；修正被该修复暴露的 4 个既有 e2e 断言缺陷 |
+| `949c92a` | fix(web): F-DEFER-1 补 `.model-picker-search-wrap.hidden` CSS + e2e；修正被该修复暴露的 4 个既有 e2e 断言缺陷 |
+| `f2b4929` | docs(integration): 重写集成交接提示词至真实拓扑 + Tracker 勘误 |
 
-> 只有 **1 个已存在 commit + 1 个待提交 commit**。请以 `git log --oneline 977b319..HEAD` 实测为准。
+> **共 3 个 commit**。请以 `git log --oneline 977b319..HEAD` 实测为准。
+>
+> ⚠ **`cddea36` 不在 `main` 祖先链上**（`git merge-base --is-ancestor cddea36 977b319` → NO）。
+> 上一批合入 main 的是 `9964adc`（其中含 T9 的 `projection` 层）。UI 层补完 `cddea36` 在
+> 本分支、**尚未进 main**——这正是本批要合的内容。
 
 ---
 
@@ -41,30 +46,38 @@
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
-| HEAD | **集成时实测**（撰写时为 `cddea36` + 待提交 F-DEFER-1） |
+| HEAD | `f2b4929289087fd1f1aad9436a8fc2a64729b321` |
 | `main`（remote） | `977b3195e95c53791e04c0958d969f2bad689074` |
-| `feat/frontend`（remote） | `cddea36ad7834bad999d50907f179f84e565e183`（已与本地对齐） |
+| `feat/frontend`（remote） | `f2b4929289087fd1f1aad9436a8fc2a64729b321`（已与本地对齐） |
 | merge-base(`HEAD`, `main`) | **`c00f742`**（即「先回后正」的 merge 点） |
-| ahead / behind | HEAD 领先 `main` **1 个 commit**（+ 待提交 F-DEFER-1）；behind **0** |
+| ahead / behind | HEAD 领先 `main` **3 个 commit**；behind **2 个 commit** |
+
+> `behind = 2` 的含义：`main` 自 merge-base 起有两处提交（`9964adc` merge + `977b319`
+> PHASE_STATUS 回填）。**这 2 个 commit 只碰 `docs/PHASE_STATUS.md`**，与本分支零重叠，
+> 故合并不是 fast-forward、但**无冲突**（见 §2）。
 
 > ⚠ **本文件上一版写的 `5c07fff` / `4f987fb` / `14 / 13` 全部作废**——那是 T7-T9 主体
-> 集成前的快照。主体已合入，现在是一个小增量。
+> 集成前的快照。**同版本中写的 `ahead 1` / `behind 0` / `cddea36 已在 main` 也是错的**，
+> 已按本节实测修正。
 
 ---
 
 ## 2. 冲突预判：**本次无冲突**（2026-09-10 实测）
 
 ```text
-$ git merge-tree --write-tree --name-only 977b319 HEAD
-382100dcaedf5b2a27aaba85c4f54276d8aabc64      # 只有 tree 哈希，无冲突段
+$ git merge-tree --write-tree --name-only f2b4929 977b319
+8f35c93dcdc020b9779c0eb5688a6e793ca58b10      # 只有 tree 哈希，无冲突段
 ```
+
+> ⚠ 上一版引用的 `382100d` 是**对 `cddea36` 算的**（当时 HEAD 还没到 `f2b4929`）。
+> 对真实 HEAD `f2b4929` 实测值为 **`8f35c93`**。树哈希随 HEAD 变化，集成时请重跑。
 
 自 merge-base `c00f742` 以来，两侧改动文件**零重叠**：
 
 | 侧 | 改动文件 |
 | --- | --- |
 | `main`（`c00f742..977b319`） | `docs/PHASE_STATUS.md`（唯一） |
-| `feat/frontend`（含本增量） | `web/**` + `docs/SDD_TICKET_TRACKER.md` + 本目录文档 |
+| `feat/frontend`（`c00f742..f2b4929`） | `web/**`（11 个）+ `docs/FRONTEND_DEFER.md` + `docs/SDD_TICKET_TRACKER.md` + `docs/integration/`（共 15 个） |
 
 `AGENTS.md` 的 §16 冲突**已在上一批解决**（`9964adc` 之后 `main` 侧只有 `PHASE_STATUS.md` 一处），
 本批不再涉及。
@@ -73,16 +86,21 @@ $ git merge-tree --write-tree --name-only 977b319 HEAD
 
 ---
 
-## 3. 门禁证据（2026-09-10 在本分支实测，F-DEFER-1 提交前）
+## 3. 门禁证据（2026-09-10 在本分支实测）
 
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
 | Type check | `npx tsc --noEmit` | **exit 0**，无输出 |
 | 单元测试 | `cd web && npx vitest run` | **27 files / 416 tests passed** |
-| Lint | `npx oxlint .` | **0 errors / 35 warnings**（全部既有，非本批引入） |
-| e2e | `npx playwright test` | **46 passed**（双 viewport：chromium-1280 / chromium-1920） |
+| Lint | `npx oxlint` | **0 errors / 35 warnings**（全部既有，非本批引入） |
+| e2e | `npx playwright test` | **58 passed**（双 viewport：chromium-1280 / chromium-1920） |
 | 性能 | `npx vitest run -c vitest.perf.config.ts` | **2 files / 12 tests passed** |
 | 生产构建 | `npx vite build` | ✓ built（仅既有 chunk-size 提示） |
+
+> ⚠ 上一版写「46 passed」。**修正为 58**：F-DEFER-1 修复新增
+> `e2e/picker-search-visibility.spec.ts`（5 条）+ 补齐既有 spec，总数上升。
+> 另注：修复过程中我曾引入一版**回归**（`pickControl` 误用 `combo.fill()` 致 12 条失败），
+> 已在 `949c92a` 内一并修正，**当前 58/58 全绿**。
 
 > ⚠ **跑 e2e / build 前先 `rm -rf web/test-results web/dist`**——目录文件数 >50 时会被
 > 沙箱 safe-delete 守卫拦截，看起来像测试失败，实为环境限制。
@@ -158,13 +176,21 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
 | `e2e/control-row.spec.ts` | 「键入 ask 过滤」用 3 条 `PERMISSION_MODES` | 拆出独立用例用 6 条长目录测过滤；原用例改用 `listbox` 判开 |
 | `e2e/context-providers.spec.ts` | 用 `combobox` 当「浮层已开」信号 | 改用 `[role="listbox"]` |
 | `e2e/continuation.spec.ts` | 同上 | 同上 |
-| `e2e/fixtures.ts` | `pickControl` / `pickFirstModel` 硬依赖 `combo.fill('')` | 「浮层已开」改判 `listbox`；仅当搜索框可见时才 `fill` |
+| `e2e/fixtures.ts` | `pickControl` / `pickFirstModel` 硬依赖 `combo.fill('')` 建立焦点 | 「浮层已开」改判 `[role="listbox"]:visible`，并**显式 `listbox.focus()`**（见下方「后续发现」） |
 
 **根因**：cmdk 把 `role="combobox"` 放在 `CommandInput` **本身**。搜索框 `display:none` 时，
 该 role 也一起从 a11y 树消失，**且输入框拿不到焦点**（focus 落到浮层容器，`type` 静默无效）。
 因此「浮层是否打开」必须用 `[role="listbox"]`（`CommandList`，恒可见）判定。
 
-> 这是**修 bug 暴露旧测试的坏断言**，不是本批引入的回归；修正后 e2e 46 passed（含新 5 条）。
+> 这是**修 bug 暴露旧测试的坏断言**，不是本批引入的回归；修正后 e2e **58 passed**（含新 5 条）。
+>
+> **后续发现（同一 commit 内已修）**：改用 `listbox` 判开后，`pickControl` 一度保留了对
+> 搜索框的 `combo.fill('')`。实测证明该调用在短目录下会**永久挂起**（该 `role="combobox"`
+> 元素 rect 为 0×0，`fill` 等不到可交互状态 → 30s 超时），且 `getByRole('combobox', { name })`
+> 命中 **0** 个（aria-label 不落在 input 上）。**根因**：浮层打开后 `activeElement` 是
+> popover 容器 `DIV[role="dialog"]`，键盘事件不落到 cmdk 的方向键承接者。
+> **正解**：显式 `[role="listbox"]:visible` `.focus()` 后再走方向键——长短目录同一路径、无分支。
+> 该修正与其余 4 条 spec 的同类修正均已在 `949c92a` 内。
 
 ### 4.6 明确未动的部分
 
@@ -211,15 +237,16 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
 
 ```markdown
 - 2026-09-10：**集成记录：feat/frontend T9 #139 UI 补完 + F-DEFER-1 → main**。
-  commit：`cddea36`（T9 UI）+ F-DEFER-1 修复 commit。交付：①T9 #139 UI 层——
-  `turn_index` 由会话级改为 **per-turn 事实**（`Turn.turn_index`，修掉「历史轮次显示同一个
-  数字」的设计缺陷）+ `TurnView`「第 N 轮」渲染 + 8 条测试；②F-DEFER-1——
-  补 `.model-picker-search-wrap.hidden` CSS（三个 picker 的短目录应隐藏搜索框，此前
-  class 挂了但无规则）；③顺带修正被该修复暴露的 4 个既有 e2e 断言缺陷（用 `combobox`
-  当「浮层已开」信号，短目录下该 role 会随搜索框隐藏——改用 `[role="listbox"]`）。
-  **冲突**：无（`merge-tree` 实测 clean；两侧改动零重叠）。门禁：tsc 0 + vitest 27 files /
-  416 passed + oxlint 0 error / 35 既有 warning + playwright 46 passed（双 viewport）+
-  perf 12 passed + vite build OK。
+  commit：`cddea36`（T9 UI）+ `949c92a`（F-DEFER-1 修复）+ `f2b4929`（交接文档勘误）。
+  交付：①T9 #139 UI 层——`turn_index` 由会话级改为 **per-turn 事实**（`Turn.turn_index`，
+  修掉「历史轮次显示同一个数字」的设计缺陷）+ `TurnView`「第 N 轮」渲染 + 8 条测试；
+  ②F-DEFER-1——补 `.model-picker-search-wrap.hidden` CSS（三个 picker 的短目录应隐藏搜索框，
+  此前 class 挂了但无规则）；③顺带修正被该修复暴露的 4 个既有 e2e 断言缺陷（用 `combobox`
+  当「浮层已开」信号，短目录下该 role 会随搜索框隐藏——改用 `[role="listbox"]`），
+  并把 picker 键盘 helper 的焦点显式落到 listbox（原依赖 `fill()` 建立焦点，短目录下会挂起）。
+  **冲突**：无（`merge-tree` 实测 clean；两侧改动零重叠——`main` 侧仅 `docs/PHASE_STATUS.md`）。
+  门禁：tsc 0 + vitest 27 files / 416 passed + oxlint 0 error / 35 既有 warning +
+  playwright **58 passed**（双 viewport）+ perf 12 passed + vite build OK。
 ```
 
 ---
@@ -254,11 +281,15 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
 
 ## 9. 集成 AI 注意事项
 
-1. **本批很小**（1 commit + 1 待提交），且 `merge-tree` 实测**无冲突**。不要把它当成上一批那样
+1. **本批很小**（3 个 commit），且 `merge-tree` 实测**无冲突**。不要把它当成上一批那样
    的复杂集成——上一批已在 `9964adc` 完成。
 2. **`web/src/generated/event-types.ts` 本次未改**——若后端 `session/event.py` 后续变化，
    在后端 worktree 跑 `uv run python scripts/gen_event_types.py` 后同步。
 3. **e2e 断言用 `[role="listbox"]` 判「浮层已开」是刻意的**（§4.5）——不要改回 `combobox`。
+   picker 键盘 helper 也**不要**再对搜索框调 `fill()`（短目录下会挂起 30s）。
 4. **推送前先实测远端 sha**（本文件哈希会随修订变化）：`git ls-remote origin main feat/frontend`。
 5. **工作区清洁度**：`test-results/` 与 `docs/HANDOFF_WORKBUDDY_FRONTEND.md` 等为过程产物，
    提交时不要纳入（`test-results/` 应在 `.gitignore`）。
+6. **合并方向**：`feat/frontend` ahead 3 / behind 2，合并不是 fast-forward——`main` 侧那 2 个
+   commit 只碰 `docs/PHASE_STATUS.md`，与本分支无重叠，预计 clean。若 `main` 又前进，
+   重跑 `git merge-tree` 实测。

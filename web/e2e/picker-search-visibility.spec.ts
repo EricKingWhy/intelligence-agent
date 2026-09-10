@@ -23,25 +23,10 @@
  * 车道归属：Playwright e2e（浮层内内容在关闭态不渲染，SSR/单测断不到）。 */
 
 import { expect, test } from '@playwright/test';
-import { CONTEXT_PROVIDERS, MODELS, PERMISSION_MODES, routeApi } from './fixtures';
+import { CONTEXT_PROVIDERS, LONG_MODELS, MODELS, PERMISSION_MODES, longCatalog, routeApi } from './fixtures';
 
-/** 造一个 >5 条的长目录（id + display_name 必填，description 可选）。 */
-function longCatalog(prefix: string, n: number) {
-  return Array.from({ length: n }, (_, i) => ({
-    id: `${prefix}-${i}`,
-    display_name: `${prefix} ${i}`,
-    description: `${prefix} 档位 ${i}`,
-  }));
-}
-
-/** 长模型目录：MODELS 3 条 + 4 条 → 7 条，+1 默认链 = 8 > 5 → 搜索框应显示。 */
-const LONG_MODELS = [
-  ...MODELS,
-  { name: 'gpt-5-mini', provider: 'openai', model: 'gpt-5-mini', default: false },
-  { name: 'gemini-3-pro', provider: 'google', model: 'gemini-3-pro', default: false },
-  { name: 'llama-5-70b', provider: 'meta', model: 'llama-5-70b', default: false },
-  { name: 'mistral-large-3', provider: 'mistral', model: 'mistral-large-3', default: false },
-];
+// 长目录统一来自 fixtures（避免三处内联后静默漂移，见 fixtures.ts「长目录 fixture」段）。
+const LONG_MODES = longCatalog('mode', 6);
 
 const searchWrap = (page: import('@playwright/test').Page) => page.locator('.model-picker-search-wrap');
 
@@ -99,7 +84,7 @@ test('长目录：ControlPicker（权限模式）搜索框可见', async ({ page
   routeApi(page, {
     sessions: [],
     events: [],
-    permissionModes: longCatalog('mode', 6), // 6 > 5
+    permissionModes: LONG_MODES, // 6 > 5
   });
   await page.goto('/');
 
