@@ -127,6 +127,16 @@ printf 'ref: refs/heads/feat/frontend\n' > .git/HEAD
 > 本批期间该故障还升级过一次：`objects/pack/*.pack` **全部消失**（只剩 `.idx`）+ `refs/` 目录整个不见
 > → git 直接报 `not a git repository`。已在原地 `git init` + `fetch` 恢复，**零数据损失**。
 
+**⚠️ 原地 `git init` 的遗留副作用（本批收尾时发现并已修）**：`git init` 只重建了
+`refs/heads/feat/frontend` 与 `refs/remotes/origin/*`，**没有本地 `main` 分支**。
+后果是文档里让人执行的 `git rev-list --left-right --count main...HEAD`、
+`git merge-tree ... main HEAD` 全部报
+`fatal: ambiguous argument 'main': unknown revision`——
+**「照文档做却报错」比文档数字过期更糟**。已补写 `refs/heads/main`（= `origin/main`）修复。
+
+教训：**恢复后的仓库要做一次「文档命令逐条试跑」**，别只验 ref 三件套
+（HEAD/本地分支/远端跟踪）。
+
 ---
 
 ## 6. 剩余事项（非本批范围）
