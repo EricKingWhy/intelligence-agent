@@ -193,6 +193,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
             >
               <TurnView
                 turn={turns[vi.index]}
+                turnIndex={turns[vi.index].turn_index}
                 model={conversation.model}
                 density={density}
                 disclosure={disclosure}
@@ -237,7 +238,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-const TurnView = memo(function TurnView({ turn, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork }: { turn: Turn; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void }) {
+export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -261,6 +262,11 @@ const TurnView = memo(function TurnView({ turn, model, density, disclosure, reas
 
   return (
     <div className={`turn turn-${turn.status}`} data-step-key={`step:${turn.step_id}`}>
+      {/* T9 #139：轮次标签——turn_index 为 per-turn 事实（run/started 携带）。
+          仅正整数显示：null=旧版后端缺字段，≤0=防御性不渲染。 */}
+      {turnIndex != null && turnIndex > 0 && (
+        <div className="turn-index-label">第 {turnIndex} 轮</div>
+      )}
       {/* User message — minimal, right-aligned；harness 注入的纠正消息
           （failure-guard soft）渲染为系统提示条而非用户气泡（不是真人说的话） */}
       {turn.user_message &&

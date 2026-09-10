@@ -192,6 +192,10 @@ export interface Turn {
   /** Harness 注入纠正消息的来源标记（user/message data.injected_by）——
    *  非真人输入，渲染为系统提示条而非用户气泡。 */
   injected_by?: string;
+  /** T9 #139：本轮 run 的轮次索引（1-based，来自 run/started data.turn_index）。
+   *  per-turn 事实——同轮所有事件共享，供 TurnView 渲染「第 N 轮」标签。
+   *  null = 该轮未携带该字段（旧版后端 / 非 run 起始路径）。 */
+  turn_index: number | null;
   /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
    *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
   reasoningById?: Record<string, ReasoningBlock>;

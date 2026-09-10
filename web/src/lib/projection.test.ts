@@ -920,6 +920,44 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(summarizeEvent(ev({ type: EventType.RUN_INTERRUPTED, data: {}, step_id: 3 }))).toBe('第 3 步中断');
   });
 
+  it('T9 #139 RUN_STARTED：turn_index 落到当轮 turn（per-turn 事实）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.USER_MESSAGE,
+      data: { content: 'hi', step: 1 },
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    expect(s.turns).toHaveLength(1);
+    expect(s.turns[0].turn_index).toBe(1);
+    expect(s.turn_index).toBe(1); // 会话级镜像
+  });
+
+  it('T9 #139 多轮：每轮各自保留自己的 turn_index（不被最新 run 覆盖）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, data: { content: 'a', step: 1 } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, data: {} }));
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, data: { content: 'b', step: 2 } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    expect(s.turns.map((t) => t.turn_index)).toEqual([1, 2]);
+  });
+
+  it('T9 #139 RUN_STARTED 无前驱轮次：不新建孤立 turn', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { turn_index: 4 },
+    }));
+    expect(s.turns).toHaveLength(0);
+    expect(s.run_status).toBe('running');
+    expect(s.turn_index).toBe(4); // 会话级仍记录，但无轮可挂
+  });
+
+  it('T9 #139 RUN_STARTED 缺 turn_index：字段保持 null（旧版后端）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.USER_MESSAGE, data: { content: 'x', step: 1 } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: {} }));
+    expect(s.turns[0].turn_index).toBeNull();
+    expect(s.turn_index).toBeNull();
+  });
+
   it('MODEL_CHANGED：更新 conversation.model + Timeline 摘要', () => {
     const s = applyEvent(initConversation('s'), ev({
       type: EventType.MODEL_CHANGED,
