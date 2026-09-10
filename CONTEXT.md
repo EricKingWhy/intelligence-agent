@@ -126,6 +126,16 @@ _Avoid_: session manager, recovery manager, resume controller
 Reconcile 时对 PENDING Operation（Tool 未启动）的处理策略。默认 skip（合成 skipped ToolResult，最安全）；可注入 retry 策略。Ledger-first 顺序下 PENDING 极罕见。
 _Avoid_: retry policy, execution policy, pending handler
 
+**StartupInterruptionScan**（架构约束 / 候选 3）:
+进程启动时对全部 session 做一次「无终态 run」扫描：先补记 `run/interrupted`（只写 run 级事实，不猜工具终态——不变量 #12），再强制走一遍 RecoveryCoordinator（Ledger reconcile 才判定工具结局；UNKNOWN 无 ReconcileCallback 时安全拒绝 → 记为「需人工确认」，不伪造、不盲重跑——不变量 #14）。顺序固定为「先标记中断，再 reconcile」；单 session 失败不阻断整轮扫描，以 `FAILED` + detail 如实上报。
+
+**约束——单进程假设（V1）**：扫描**只能在「持有该会话的进程」启动时执行一次**（当前唯一调用点是 web lifespan）。原因：不变量 #22 要求事件流只有一个真相，而 `RunManager` 的在途 run 只存在于本进程内存里——另一个进程无法区分「run 正在跑」与「run 被崩溃打断」。
+
+因此**禁止**在会与长驻服务并发的短命命令（CLI run / 子命令）里触发扫描：那会把别的进程在途 run 误标为中断，进而让两边各自从同一磁盘快照推算 seq 而撞号（会话不可 resume）。多进程 / 多 worker 部署需要跨进程 run lease，属后续 Phase；在此之前，横向扩容会破坏本约束。
+
+本约束是该扫描**不能被吸收进 `RecoveryCoordinator`** 的根本原因之一（另一个是职责层次不同：扫描是「批量 + 三分类结论 + 单会话隔离」，recover 是「单 session 8 步编排」）。二者共享 reconcile 语义，但生命周期契约不同。
+_Avoid_: startup recovery, boot scanner, crash sweep, multiprocess scan
+
 ## Streaming / Web UI 层
 
 **AgentEvent**:
