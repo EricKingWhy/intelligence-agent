@@ -3,11 +3,40 @@
 不写 HTTP Client、不做重试/缓存——这些都由 langchain-openai 和底层 openai SDK 负责。
 """
 
+import logging
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 
 from agent_harness.model.config import ModelConfig
+
+logger = logging.getLogger("agent_harness.model")
+
+#: provider 线格式的合法 reasoning_effort 枚举（OpenAI 兼容推理接口字段定义）。
+#: 只认这几个字面量——其他值一律 400 invalid_parameter_error（实测）。
+WIRE_REASONING_EFFORTS: frozenset[str] = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
+#: harness 语义档位 → 线格式枚举的翻译表（键集 = Web 层
+#: REASONING_EFFORT_DESCRIPTIONS，由 tests/model/test_reasoning_effort.py 的
+#: G5 漂移守护锁住）。
+#:
+#: 为什么需要翻译：`minimal | standard | deep` 是**产品词汇**（前端显示
+#: 轻量 / 标准 / 深度），不是任何 API 认的字面量。曾经原样透传的后果是
+#: 真实会话选「标准 / 深度」后每一次 run 都必然 400 → 零输出（生产日志
+#: 2026-09-08 ~ 09-11 反复出现）。这里把两者分开，翻译只做一次、只在此处。
+#:
+#: 这是 provider 无关的**线格式适配**，不是「按 provider 分别映射参数名」——
+#: 所有 OpenAI 兼容推理端点共用同一套枚举。
+#:
+#: `deep` 落在 `high` 而非 `xhigh`/`max`：枚举里更高的两档只有部分端点支持，
+#: `high` 是「深度推理」里兼容面最广的一档（想更激进只改这一行）。
+REASONING_EFFORT_WIRE: dict[str, str] = {
+    "minimal": "minimal",
+    "standard": "medium",
+    "deep": "high",
+}
 
 
 class ReasoningChatOpenAI(ChatOpenAI):
@@ -57,10 +86,15 @@ def create_chat_model(
     - request_timeout=300：chat 生成 legitimately 比 embedding 慢（长输出可到
       分钟级），300s 覆盖正常长生成、又把挂死调用的最坏代价从 30min 压到 5min。
 
-    reasoning_effort（RUNTIME 子批次）：会话级思考深度控制。非 None 时直接
-    作为构造器参数传入——ChatOpenAI 原生支持该字段，会把它放进 API 请求的
-    extra_body。不支持的 Provider 静默忽略（OpenAI SDK 语义）。不在每次
-    astream/ainvoke 调用时传递——构造期注入即可。
+    reasoning_effort（RUNTIME 子批次）：会话级思考深度控制。传入的是 harness
+    语义档位（`REASONING_EFFORT_WIRE` 的 key），此处翻译成 provider 线格式枚举
+    后作为构造器参数注入——ChatOpenAI 原生声明该字段，会把它放进请求体。
+    不在每次 astream/ainvoke 调用时传递——构造期注入即可。
+
+    翻译表查不到的值、或查到的字面量不在线格式合法枚举内，都**不注入**
+    （只记一条 warn）：宁可不传，也不发一个必然 400 的字面量——一次非法参数
+    会让整个 run 在第一次模型调用就失败。第二道判定是给翻译表本身的防呆：
+    把 `minimal` 误改成 `min` 这类编辑错误不应变成线上 400。
     """
     kwargs: dict[str, Any] = {
         "model": config.model_name,
@@ -71,5 +105,13 @@ def create_chat_model(
         "max_retries": 0,
     }
     if reasoning_effort is not None:
-        kwargs["reasoning_effort"] = reasoning_effort
+        wire = REASONING_EFFORT_WIRE.get(reasoning_effort)
+        if wire is None or wire not in WIRE_REASONING_EFFORTS:
+            logger.warning(
+                "reasoning_effort 档位 %r 未映射到合法线格式字面量（翻译结果 %r，"
+                "合法集合 %s）——不注入该参数",
+                reasoning_effort, wire, ", ".join(sorted(WIRE_REASONING_EFFORTS)),
+            )
+        else:
+            kwargs["reasoning_effort"] = wire
     return ReasoningChatOpenAI(**kwargs)

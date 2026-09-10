@@ -87,7 +87,11 @@ from agent_harness.web.serialization import (
 # description。两边引用同一份常量 → 加新档位只改一处，validator 与清单永不漂移。
 # 与 PERMISSION_MODE_DESCRIPTIONS（tooling/contract.py）同模式（Reuse First §6）。
 
-#: reasoning_effort 三档（已运行时消费——经 create_chat_model 注入 model_kwargs）。
+#: reasoning_effort 三档（已运行时消费——经 create_chat_model 注入）。
+#: key 是 **harness 语义档位**，不是 provider 线格式枚举：翻译在
+#: model/provider.py 的 REASONING_EFFORT_WIRE（两处键集由
+#: tests/model/test_reasoning_effort.py G5 锁住）。不要把这里的 key 直接
+#: 改成 'medium'/'high'——那是线格式词汇，会让前端清单与产品语义脱节。
 REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "minimal": {
         "display_name": "轻量",
