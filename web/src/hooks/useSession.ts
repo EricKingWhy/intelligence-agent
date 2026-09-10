@@ -687,6 +687,13 @@ export function useSession() {
           ...(opts?.amend ?? {}),
         });
         if (res.status === 422) throw new Error(CONTINUE_PARAMS_ERROR_TEXT);
+        if (res.status === 409) {
+          // T8 #138：409 = 存在需人工裁决的 UNKNOWN Operation。
+          // detail 含 tool_name 和 tool_call_id；不伪造「结果未知」继续。
+          let detail = '';
+          try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
+          throw new Error(detail || '存在需要人工裁决的高风险操作');
+        }
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
         // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
         // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。

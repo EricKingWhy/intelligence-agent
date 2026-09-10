@@ -3451,6 +3451,17 @@ button.json-row {
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.interrupt-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-sm);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 .reconnect-dot {
   width: 8px;
   height: 8px;

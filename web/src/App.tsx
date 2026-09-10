@@ -569,6 +569,12 @@ export default function App() {
               )}
             </div>
           )}
+          {conversation?.run_interrupted && !streaming && (
+            <div className="interrupt-banner" role="status" aria-live="polite">
+              上次运行在第 {conversation.run_interrupted.step_id ?? '?'} 步中断
+             （原因：{conversation.run_interrupted.reason}）
+            </div>
+          )}
           {/* Workspace 模式条（Phase 1d 方案 B）：Chat 永远是主阅读面，
               Split/Preview 为后续 Phase 预留的空架子。条本身克制——
               只在选中非 chat 时渲染下方占位行；Chat 模式下完全不占垂直空间。 */}

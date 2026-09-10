@@ -320,6 +320,9 @@ export interface ConversationState {
   /** Phase 12 白盒透明（ADR-0014）：最近一次 model/fallback——模型卡「已切换」态。
    *  字段缺失（形状不完整）时不记录（零伪造）；后续 model 已切 to_model。 */
   model_fallback: { from_model: string; to_model: string; reason: string } | null;
+  /** T8 #138：最近一次 run/interrupted 事件的信息。null = 无中断。
+   *  来自事件真值，用于 UI 显示「上次运行在第 N 步中断」。 */
+  run_interrupted: { step_id: number | null; interrupted_seq: number | null; reason: string } | null;
   /** T1（#94）幂等簿记：本会话已应用的持久事件 seq 集合（spec 02 §6.1 at-least-once
    *  去重键）。append-only 共享日志纪律（同 events）：只增不改、跨快照共享引用、
    *  绝不整体替换。null-seq 帧不入册——ephemeral 流式信号（model/delta 等）

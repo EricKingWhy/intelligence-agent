@@ -42,6 +42,7 @@ export function initConversation(session_id: string): ConversationState {
     trace_url: null,
     run_id: null,
     model_fallback: null,
+    run_interrupted: null,
     seenSeqs: new Set(),
   };
 }
@@ -634,6 +635,20 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
     case EventType.MODEL_CHANGED: {
       const toModel = typeof data.to_model_id === 'string' ? data.to_model_id : null;
       if (toModel) next.model = toModel;
+      break;
+    }
+
+    // T8 #138：崩溃恢复——run 被进程重启打断。
+    // 与 run/completed / run/failed 同属终态（RUN_TERMINAL_TYPES），
+    // 但语义是「中断」而非「完成」。finalizeRun 把 streaming
+    // 段 settle 为 done，running 工具标记 stopped（中断 ≠ 错误）。
+    case EventType.RUN_INTERRUPTED: {
+      next.run_interrupted = {
+        step_id: event.step_id ?? null,
+        interrupted_seq: typeof data.interrupted_seq === 'number' ? data.interrupted_seq : null,
+        reason: typeof data.reason === 'string' ? data.reason : 'process_restart',
+      };
+      finalizeRun(next, 'completed', event.time);
       break;
     }
 
