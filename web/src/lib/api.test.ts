@@ -2,7 +2,7 @@
  *  fetch 全局 mock；auth.getToken 在 node 下走 try/catch 兜底（无 localStorage）。 */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModels, sendMessage } from './api';
+import { getModels, sendMessage, startSession } from './api';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
 function captureFetch(
@@ -126,5 +126,49 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
     const cap = captureFetch();
     await sendMessage('s1', { content: '继续', mode: 'steer', max_steps: 3 });
     expect(cap.calls[0].body).toMatchObject({ mode: 'steer', max_steps: 3 });
+  });
+});
+
+describe('startSession — create 路径的有值才带（归一化单一执行点）', () => {
+  it('全空控制字段 → payload 只有 task + 显式传入的 max_steps/auto_approve', async () => {
+    const cap = captureFetch();
+    await startSession({ task: '干活', max_steps: 10, auto_approve: true });
+    expect(cap.calls[0].url).toBe('/api/sessions');
+    expect(cap.calls[0].body).toEqual({ task: '干活', max_steps: 10, auto_approve: true });
+    for (const key of [
+      'workspace',
+      'model',
+      'permission_mode',
+      'agent_profile',
+      'reasoning_effort',
+      'context_providers',
+    ]) {
+      expect(cap.calls[0].body).not.toHaveProperty(key);
+    }
+  });
+
+  it('context_providers 空数组 → 不发键（空 = 后端默认全集，不是显式零）', async () => {
+    const cap = captureFetch();
+    await startSession({ task: 't', context_providers: [] });
+    expect(cap.calls[0].body).not.toHaveProperty('context_providers');
+  });
+
+  it('五项控制字段全有值 → 全部带键（含 permission_mode，create 路径独有）', async () => {
+    const cap = captureFetch();
+    await startSession({
+      task: 't',
+      model: 'glm-4.5',
+      permission_mode: 'auto',
+      agent_profile: 'coding',
+      reasoning_effort: 'deep',
+      context_providers: ['memory'],
+    });
+    expect(cap.calls[0].body).toMatchObject({
+      model: 'glm-4.5',
+      permission_mode: 'auto',
+      agent_profile: 'coding',
+      reasoning_effort: 'deep',
+      context_providers: ['memory'],
+    });
   });
 });

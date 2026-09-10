@@ -264,17 +264,55 @@ export function buildAmendPayload(opts: {
 
 ---
 
+## 选择的最佳路径（企业级标准）
+
+**标准**：性能 / 速度 / 鲁棒性 / 可用性，四者都要高。参考 pi-mono 与 deepseek-harness 的设计。
+
+### 主路径：Candidate #1 — StreamOrchestrator（流式编排深化）
+
+四条企业级标准逐条对照：
+
+| 标准 | Candidate #1 的贡献 |
+| --- | --- |
+| **性能** | 合帧批量提交（coalescer）在编排层——这是每 delta 都走的路径；封装后可独立基准与优化 |
+| **速度** | 重连/停流的时间参数（退避、停摆阈值、banner 延迟）集中为一处可调常量，而非散落在闭包 |
+| **鲁棒性** | 重连状态机从「不可测试的嵌套闭包」变为「可注入依赖的模块」——正确性可被测试锁定，这是鲁棒性的前提 |
+| **可用性** | 断线/停摆/截断/seq-gap 四条降级路径是 UI 在网络故障下存活的关键；集中后不会因一次改动互相踩 |
+
+**参考设计（哪里不明白就抄）**：
+
+- **pi-mono** `packages/agent/src/harness/runtime/lane.ts` + `drive/`：把一次 run 的生命周期拆成 `checkpoint` / `generation` / `reconcile` / `recovery` / `tools` 等**独立文件**，由一个 `driveOperation` 循环按状态分派。这正是 attachLiveStream 该有的形状——现在是 230 行嵌套闭包，没有分派边界。
+- **pi-mono** `packages/ai/src/utils/event-stream.ts`：`EventStream<T, R>` 把**生产者**（`push` / `end`）与**消费者**（`asyncIterator` / `result`）分离，终态用 `isComplete` 谓词判定。attachLiveStream 目前生产与消费交织，抄这个分离。
+- **deepseek-harness** `src/agent_harness/agent/streaming.py` 的 `BlockStreamer`：**clock 经构造函数注入**（`clock=time.monotonic`），窗口常量经模块属性读取使测试可归零。这是「时间相关逻辑可测试」的标准做法，直接抄。
+
+### 配套路径：Candidate #2 — 事件语义注册表（编译期穷尽性）
+
+Candidate #1 解决运行时的编排鲁棒性；Candidate #2 解决**契约漂移**的鲁棒性：现在 `applyEvent` 与 `summarizeEvent` 是两个并行 switch，且注册表**不穷尽**——生成物新增事件类型时，两个 switch 都不会报错，只会静默落到 `unknown_events`。
+
+改为 `Record<EventTypeValue, EventSemantics>` 后，`event-types.ts` 一旦新增类型，`tsc` 立即失败直到注册。这把「记得改两处」从人的纪律变成编译器的强制——正是防漂移。
+
+> 附带发现（本批不修，仅登记）：`ARTIFACT_EXTERNALIZED`、`COMPACTION_START`、`COMPACTION_END`、`MESSAGE_QUEUED`、`QUEUE_CANCELLED`、`STEER_REQUESTED`、`STEER_APPLIED` 这 7 个类型虽在生成词汇表中，但前端零处理——目前静默进 `unknown_events`。穷尽注册表会**显式登记**它们（保持既有兜底行为不变），使这个缺口可见。
+
+### 执行顺序（先低风险后深水）
+
+```
+1. Candidate #4  — api 层成为唯一归一化点（小、安全）
+2. Candidate #3  — Composer 档位 → 提交字段的单一构造器（小、安全）
+3. Candidate #2  — 事件语义注册表（中，编译期保障）
+4. Candidate #1  — StreamOrchestrator（深，企业级核心）
+```
+
+前两条是清理，把 amend 字段的归属理顺，为 #1 减少干扰面。
+
+### 明确不做：Candidate #5（ConversationState 拆分）
+
+**理由：YAGNI + 参考实现反证。** pi-mono 的 `Session` 同样是扁平会话状态，deepseek-harness 的事件模型也是扁平 `SessionEvent`——两者都没有把「运行产物 / 可观测元数据 / 幂等簿记」拆成独立对象。拆分会把 COW 投影逻辑打散到多个结构之间，增加复杂度而不增加能力。**记录为已评估、已否决**，避免未来的架构评审重复提议。
+
+---
+
 ## Top Recommendation
 
-**Candidate #2: projection.ts — 并行 switch 收敛**
-
-理由：
-
-1. **投入产出比最高**：不改变外部行为，但显著降低未来添加事件类型的认知负荷和出错概率
-2. **已知 bug 磁体**：每次新增事件类型（如本批的 MODEL_CHANGED、RUN_INTERRUPTED），都需要同时修改两个 switch
-3. **成熟模式**：handler 注册表是成熟模式，pi-mono 的 drive/ 子目录也用了类似结构
-4. **低风险**：有专项测试锁定 COW 语义，提取后行为不变
-5. **企业级要求**：鲁棒性——减少并行 switch 的漂移风险；可维护性——新增事件类型更简单
+**Candidate #1 + #2 组合**：`#1` 解决运行时（性能/速度/鲁棒性/可用性），`#2` 解决编译期契约漂移。`#3`/`#4` 作为前置清理先行落地；`#5` 已否决（见上）。
 
 执行顺序建议：
 

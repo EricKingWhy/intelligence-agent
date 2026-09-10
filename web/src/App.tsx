@@ -38,6 +38,7 @@ import {
   type ModelCatalogEntry,
 } from './lib/api';
 import { summarizeEvent } from './lib/projection';
+import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
 
@@ -263,25 +264,37 @@ export default function App() {
     [selectedId, models, changeModel],
   );
 
+  // Composer 档位打包（提交路径与 handleSubmit 的依赖数组共用同一引用）。
+  // useMemo 而非内联对象：handleSubmit 是 useCallback，内联对象会让它每次
+  // 渲染都换引用，Composer 的 memo 随之失效（流式期间每 delta 重渲染输入框）。
+  const composerControls = useMemo<ComposerControls>(
+    () => ({
+      model: selectedModel,
+      permissionMode: selectedPermissionMode,
+      agentProfile: selectedAgentProfile,
+      reasoningEffort: selectedReasoningEffort,
+      contextProviders: selectedContextProviders,
+    }),
+    [
+      selectedModel,
+      selectedPermissionMode,
+      selectedAgentProfile,
+      selectedReasoningEffort,
+      selectedContextProviders,
+    ],
+  );
+
   const handleSubmit = useCallback(
     (task: string) => {
       focusRun();
+      // Composer 档位 → 契约字段的映射统一走 lib/amend.ts（单一构造器）；
+      // 空值丢弃由 api 层单一执行（见 amend.ts 顶部契约说明）。
       // 续聊：已有会话且不在流式中 → 发消息到现有会话（PRD §5.3 续聊入口）。
       // 新会话：无 selectedId → startSession 创建新会话。
-      // amend 按「有值才带」传入（与下方 create 分支同一模式）：仅空闲会话
-      // 拉起新 run 时被后端应用，在途 run 的 queued 消息忽略。permission_mode
-      // 不在 /messages 的 amend 契约内（后端 SendMessageRequest 只收这四项）。
       if (selectedId && !streaming) {
         void sendMessage(selectedId, task, {
           maxSteps: 10,
-          amend: {
-            ...(selectedModel ? { model: selectedModel } : {}),
-            ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
-            ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
-            ...(selectedContextProviders.length > 0
-              ? { context_providers: selectedContextProviders }
-              : {}),
-          },
+          amend: toAmendFields(composerControls),
         });
         return;
       }
@@ -289,27 +302,10 @@ export default function App() {
         task,
         max_steps: 10,
         auto_approve: true,
-        ...(selectedModel ? { model: selectedModel } : {}),
-        ...(selectedPermissionMode ? { permission_mode: selectedPermissionMode } : {}),
-        ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
-        ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
-        ...(selectedContextProviders.length > 0
-          ? { context_providers: selectedContextProviders }
-          : {}),
+        ...toCreateControls(composerControls),
       });
     },
-    [
-      submitTask,
-      sendMessage,
-      focusRun,
-      selectedId,
-      streaming,
-      selectedModel,
-      selectedPermissionMode,
-      selectedAgentProfile,
-      selectedReasoningEffort,
-      selectedContextProviders,
-    ],
+    [submitTask, sendMessage, focusRun, selectedId, streaming, composerControls],
   );
 
   /** T7 #137：从历史用户消息 seq 派生 child session，成功后跳转到 child。 */

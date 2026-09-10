@@ -148,12 +148,27 @@ function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
 }
 
 /** POST a new session. Returns the raw Response — SSE stream is consumed by caller.
- *  401 throws UnauthorizedError (after broadcasting) — fail fast, no empty stream. */
+ *  401 throws UnauthorizedError (after broadcasting) — fail fast, no empty stream.
+ *
+ *  「有值才带键」的**单一执行点**（与 sendMessage 同一契约，见 lib/amend.ts）：
+ *  空值 / 空数组不发键 = 后端默认；调用方只做字段名映射，不判空。 */
 export async function startSession(payload: StartSessionPayload): Promise<Response> {
   return apiFetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      task: payload.task,
+      ...(payload.workspace ? { workspace: payload.workspace } : {}),
+      ...(payload.max_steps !== undefined ? { max_steps: payload.max_steps } : {}),
+      ...(payload.auto_approve !== undefined ? { auto_approve: payload.auto_approve } : {}),
+      ...(payload.model ? { model: payload.model } : {}),
+      ...(payload.permission_mode ? { permission_mode: payload.permission_mode } : {}),
+      ...(payload.agent_profile ? { agent_profile: payload.agent_profile } : {}),
+      ...(payload.reasoning_effort ? { reasoning_effort: payload.reasoning_effort } : {}),
+      ...(payload.context_providers && payload.context_providers.length > 0
+        ? { context_providers: payload.context_providers }
+        : {}),
+    }),
   });
 }
 
@@ -191,9 +206,8 @@ export async function sendMessage(sessionId: string, payload: SendMessagePayload
   return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    // 续聊 amend：有值才带键（空值/空数组不发键 = 后端默认）。这里是兜底
-    // 归一化——调用方即使直接传 undefined / [] 也不会脏 payload；App.tsx
-    // 续聊分支另有与 create 分支同款的「有值才带」展开，两者不冲突。
+    // 「有值才带键」的单一执行点（与 startSession 同一契约，见 lib/amend.ts）：
+    // 调用方只做字段名映射，空值 / 空数组的丢弃只在这里发生。
     body: JSON.stringify({
       content: payload.content,
       mode: payload.mode ?? 'queue',
