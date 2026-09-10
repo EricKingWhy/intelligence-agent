@@ -590,6 +590,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: var(--space-md);
   animation: turn-in var(--dur-in) var(--ease-apple);
 }
+/* T9 #139 轮次标签：克制、低对比、inline——不抢用户消息与执行链的注意力。 */
+.turn-index-label {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  letter-spacing: 0.04em;
+  user-select: none;
+}
 @keyframes turn-in {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
@@ -3656,6 +3665,11 @@ button.json-row {
   background: var(--surface-workspace);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
+}
+/* 短目录（≤5 条）隐藏搜索框。F-DEFER-1：此前 class 已挂但无规则，修复从未生效。
+   cmdk 要求 CommandInput 始终留在 DOM，故用 display:none 隐藏，不条件卸载组件。 */
+.model-picker-search-wrap.hidden {
+  display: none;
 }
 .model-picker-search {
   width: 100%;

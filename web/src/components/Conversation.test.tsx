@@ -2,9 +2,9 @@
  *  done 段一次性 markdown——HANDOFF_PERF_FRONTEND §6 P0-2 方案 a）。 */
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ChainNodeView } from './Conversation';
+import { ChainNodeView, TurnView } from './Conversation';
 import type { ChainNode } from '../lib/projection';
-import type { ReasoningBlock, ToolCall } from '../types';
+import type { ReasoningBlock, ToolCall, Turn } from '../types';
 import type { Disclosure } from '../lib/disclosure';
 
 function modelNode(text: string, status: 'streaming' | 'done'): ChainNode {
@@ -226,5 +226,58 @@ describe('ChainNodeView — DelegationNode 委派节点（Phase 13，v2 PRD §10
     );
     expect(without).not.toContain('Inspect 子会话');
     expect(without).not.toContain('打开子会话');
+  });
+});
+
+describe('TurnView — T9 #139 轮次标签', () => {
+  function turn(over: Partial<Turn> = {}): Turn {
+    return {
+      step_id: 1,
+      user_message: 'hi',
+      model: { text: 'ok', status: 'done' },
+      segments: [],
+      tools: [],
+      activities: [{ kind: 'model', index: 0 }],
+      status: 'done',
+      turn_index: 1,
+      ...over,
+    };
+  }
+
+  it('turnIndex 为正整数时渲染「第 N 轮」', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn()} turnIndex={3} model={null} density="balanced" />,
+    );
+    expect(html).toContain('turn-index-label');
+    expect(html).toContain('第 3 轮');
+  });
+
+  it('turnIndex 为 null 时不渲染标签（旧版后端缺字段）', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn({ turn_index: null })} turnIndex={null} model={null} density="balanced" />,
+    );
+    expect(html).not.toContain('turn-index-label');
+    expect(html).not.toContain('轮');
+  });
+
+  it('turnIndex ≤ 0 时不渲染标签（防御性）', () => {
+    for (const bad of [0, -1]) {
+      const html = renderToStaticMarkup(
+        <TurnView turn={turn({ turn_index: bad })} turnIndex={bad} model={null} density="balanced" />,
+      );
+      expect(html, `turnIndex=${bad}`).not.toContain('turn-index-label');
+    }
+  });
+
+  it('每轮标签取自自身 turn（两个 turn 显示不同轮次）', () => {
+    const first = renderToStaticMarkup(
+      <TurnView turn={turn({ step_id: 1, turn_index: 1 })} turnIndex={1} model={null} density="balanced" />,
+    );
+    const second = renderToStaticMarkup(
+      <TurnView turn={turn({ step_id: 2, turn_index: 2 })} turnIndex={2} model={null} density="balanced" />,
+    );
+    expect(first).toContain('第 1 轮');
+    expect(second).toContain('第 2 轮');
+    expect(first).not.toContain('第 2 轮');
   });
 });

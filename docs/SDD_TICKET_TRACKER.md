@@ -25,7 +25,7 @@
 | --- | --- | --- | --- |
 | FE-T7 | 会话级模型切换 + Fork UI（#137） | `done` | `71c01dd` + review 修复 `c6e6fab` |
 | FE-T8 | 崩溃恢复 UI — run/interrupted + 409 守卫（#138） | `done` | `c137a23` |
-| FE-T9 | 轮次标签（turn_index 显示）（#139） | `done` | `d2bfbc8` |
+| FE-T9 | 轮次标签（turn_index 显示）（#139） | `done` | `d2bfbc8`（类型/投影层）+ `cddea36`（UI 层） |
 | 前置 | 重新生成 event-types（MODEL_CHANGED + RUN_INTERRUPTED） | `done` | `6012414` |
 | 深化 C4 | api 层成为唯一归一化点 | `done` | `9b2234f` |
 | 深化 C3 | Composer 档位 → 提交字段的单一构造器 | `done` | `9b2234f` |
@@ -77,8 +77,12 @@
 
 ### FE-T9 轮次标签
 
-- 投影：`run/started` 提取 `data.turn_index` → `ConversationState.turn_index`。
-- UI：TurnView 显示「第 N 轮」。
+- **数据层（`d2bfbc8`）**：`run/started` 提取 `data.turn_index`（后端 `session.begin_run`
+  定义为「该 session 第几个 run，1-based」，每次 run 各自携带）→
+  `ConversationState.turn_index`（会话级，供 Langfuse/turn 元数据）。
+- **UI 层（`cddea36`）**：`Turn.turn_index`（per-turn 事实）→ `TurnView` 显示「第 N 轮」。
+  ⚠️ 修正：原计划复用会话级 `state.turn_index` 传入 `TurnView`，但该字段被最新 run
+  覆盖 → 所有历史轮次会显示同一个数字。改为把 RUN_STARTED 的值落到**当轮 turn** 上。
 
 ---
 

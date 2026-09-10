@@ -6,6 +6,10 @@
 .agent/
 logs/
 
+# 测试运行产物（playwright 上次运行状态 / real-model smoke 会话 JSONL）
+test-results/
+evaluation/smoke_sessions/
+
 # demo/live_agent.py 运行时产物（本地 workspace + SessionEvent JSONL）
 _demo_workspace/
 _demo_sessions/
