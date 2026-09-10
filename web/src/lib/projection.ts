@@ -43,6 +43,7 @@ export function initConversation(session_id: string): ConversationState {
     run_id: null,
     model_fallback: null,
     run_interrupted: null,
+    turn_index: null,
     seenSeqs: new Set(),
   };
 }
@@ -199,6 +200,10 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
 
     case EventType.RUN_STARTED: {
       next.run_status = 'running';
+      // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run。
+      if (typeof data.turn_index === 'number' && Number.isFinite(data.turn_index)) {
+        next.turn_index = data.turn_index;
+      }
       break;
     }
 

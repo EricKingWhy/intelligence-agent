@@ -17,7 +17,7 @@ describe('initConversation', () => {
       compactions: [], reconcile_queue: [], pending_approvals: [], events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
-      run_interrupted: null,
+      run_interrupted: null, turn_index: null,
       seenSeqs: new Set(),
     });
   });
