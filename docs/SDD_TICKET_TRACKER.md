@@ -17,16 +17,18 @@
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
-### 最近一批：瞬态三键的确定性覆盖 + 401 缝补测（2026-09-11）
+### 最近一批：瞬态三键 + 401 缝 + 审批卡两键（覆盖账目收口到 45/45，2026-09-11）
 
 | 项 | 值 |
 | --- | --- |
-| 本批 commit | `35cd0a1`（401 缝单测 + `l-auth-banner.spec.ts`）、`8ed86f0`（瞬态三键 `m-stream-affordances.spec.ts`） |
+| 本批 commit | `35cd0a1`（401 缝单测 + `l-auth-banner.spec.ts`）、`8ed86f0`（瞬态三键 `m-stream-affordances.spec.ts`）、`c9dcf2a`（审批卡 `n-approval-card.spec.ts` + 联调车道） |
 | 门禁 | tsc ✓ / vitest **497 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **112 passed**（`--workers=2`；104 + 审批卡 8）/ vite build ✓ |
-| 交付 | 三个此前唯一没被真机点过的按钮（`tool-out-wrap-btn` / `tool-out-jump` / `reasoning-jump`）用 mock 流钉住流式窗口后**真实点击**；401 缝补 3 例单测 + 横幅 e2e |
+| 交付 | ① 三个瞬态按钮（`tool-out-wrap-btn` / `tool-out-jump` / `reasoning-jump`）用 mock 流钉住窗口后**真实点击**；② 401 缝补 3 例单测 + 横幅 e2e；③ 审批卡「批准」「拒绝」**真机点击**（真实后端 + 真实模型） |
 | 覆盖账目 | **45/45 全部已被点击**：38 真机 + 3 mock 流 + 1 mock 401 + 1 e2e 内激活 + **2 审批卡真机点击**（原记「产品不可达」已证伪） |
-| 原「残余不可达」 | ~~审批卡「批准」「拒绝」：`auto_approve` 硬编码 → 永不渲染~~ **已证伪**：门是 `session/service.py:348` 的 `permission_mode_explicit`（显式选权限档位即开启交互式审批），与 `auto_approve` 无关。两键已真机点击，JSONL 持久化 `permission/resolved`；回归锁 `n-approval-card.spec.ts` |
-| 审查 | 新 spec 独立审查 **approve**（0 P0/P1/P2、6 项 P3 **全部已修**），按加固后版本重跑三处变异均红 |
+| 原「残余不可达」 | ~~审批卡「批准」「拒绝」：`auto_approve` 硬编码 → 永不渲染~~ **已证伪**：门是 `session/service.py:348` 的 `permission_mode_explicit`（显式选权限档位即开启交互式审批），与 `auto_approve` 无关。两键已真机点击，后端 JSONL 落库 `permission/resolved`（由测试自身轮询断言）；回归锁 `web/e2e/n-approval-card.spec.ts`；真机脚本走独立联调车道 `web/e2e-live/` + `playwright.live.config.ts` |
+| 新登记问题 | **OBS-015（P2，前端，预存在，需产品决策）**：`ApprovalCard.tsx:26-33` 的 `catch` 对任何错误都翻成「已批准/已拒绝」，与注释「其它错误保持 pending」相反 → 审批 POST 失败时是乐观假象。本轮未改代码（§8） |
+| 审查 | 两轮独立审查。`m-stream-affordances` **approve**（0 P0/P1/P2、6 项 P3 全修）；审批卡一轮发现 **2 项 P2**（URL 会话 id 未断言、联调车道分不清「后端已决」与「乐观 UI」）**均已修 + 变异验证**，P3 三项处置 |
+| 自曝缺陷 | 新建联调车道时 `vitest.config.ts` 的 `exclude` 漏了 `e2e-live/**` → 单测车道被 Playwright 用例污染而变红；已修，并写入 HANDOFF §6 警示 |
 | 关单 | 不适用（缺陷/覆盖批次，非 ticket 交付） |
 
 ### 最近一批：刷新一致性 BUG-005 / BUG-006 + 第二轮逐按钮巡检（2026-09-11）
