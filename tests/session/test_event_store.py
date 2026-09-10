@@ -47,6 +47,7 @@ class TestSessionEventDTO:
             "run/started",
             "run/completed",
             "run/failed",
+            "run/interrupted",
             "user/message",
             "text/delta",
             "model/completed",
@@ -77,6 +78,8 @@ class TestSessionEventDTO:
             # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
             "compaction/start",
             "compaction/end",
+            # Phase Multiturn T7 (#137)：同 session 内模型切换
+            "model/changed",
         }
         assert EVENT_TYPES == expected
 

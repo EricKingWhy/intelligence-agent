@@ -57,8 +57,12 @@ _Avoid_: serialize messages, flatten history, get messages
 _Avoid_: orphan call, broken chain, missing result
 
 **Run**:
-一次 `AgentRuntime.run()` 调用的生命周期单元，绑定 `run_id`。同一 Session 可有多次 Run；Run 边界由 `run/started` 与 `run/completed` / `run/failed` 事件标记，是 Phase 14 Fork 的切分依据。
+一次 `AgentRuntime.run()` 调用的生命周期单元，绑定 `run_id`。同一 Session 可有多次 Run；Run 边界由 `run/started` 与 `run/completed` / `run/failed` / `run/interrupted` 事件标记，是 Phase 14 Fork 的切分依据。
 _Avoid_: turn, iteration, loop, attempt
+
+**run/interrupted**:
+进程重启扫描时，对「开了没关」的 run 补记的中断事实（信封带 `run_id` / `step_id`，data 带 `interrupted_seq` / `reason`）。它只声明 run 被打断，**不判定工具副作用是否发生**——那仍由 Ledger reconcile 决定（不变量 #12/#14）。标记后强制 reconcile；UNKNOWN 工具调用需人工裁决，不盲重跑。
+_Avoid_: crash log, aborted run, failed run（失败 run 是 `run/failed`，语义不同）
 
 **Resume**:
 从已持久化 SessionEvent 加载 Session 并继续对话的能力。流程：`load events → validate seq → restore state → reconcile → continue`。Resume MUST NOT 默认重放已完成 Tool。
@@ -67,6 +71,14 @@ _Avoid_: restart, reload, reconnect, replay（Replay 是独立概念，见 Phase
 **Diagnostic Log**:
 用于 debug / 性能追踪 / 全链路观察的结构化日志（span / trace / agent_decision / retry 等），写入 `logs/agent.jsonl`。与 SessionEvent 分层（不变量 #5：Event ≠ Log），不是业务事实源，不可用于恢复。
 _Avoid_: event log, session log, audit trail
+
+**会话当前模型**:
+一个 Session 在某一时刻生效的模型选择，由事件流派生而非可变字段：每次切换追加一条 `model/changed`（记 from/to provider + model），当前值取「最后一次切换 > 会话创建时的初值 > 默认链」。切换只写事实、不改历史，下一轮 Run 从事件流读取生效（不变量 #3 / #22）；「切回默认链」同样是一次切换（to 为空）。
+_Avoid_: current model field, model override, session model config
+
+**无副作用追加**:
+向已有 Session 追加单条事件、但不触发 Resume 副作用的写入路径。Resume 会修复 dangling tool_call 并写 `session/resumed`；Run 在途时走 Resume 会把正在执行的 tool_call 误判为悬空并注入合成结果，破坏 tool_call / tool_result 配对（不变量 #7）。因此切换模型等旁路写入必须走只追加路径。
+_Avoid_: raw append, append-only helper
 
 ## Storage / Recovery 层
 

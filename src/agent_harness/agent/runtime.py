@@ -445,7 +445,7 @@ class AgentRuntime:
             # USER_ACCEPTED 稳定边界：user/message 已持久化。
             await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
-            run_id = session.begin_run(agent_id=self._agent_id)
+            run_id, turn_index = session.begin_run(agent_id=self._agent_id)
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
             if self._observability_sink is not None and self._observability_sink.enabled:
@@ -455,6 +455,7 @@ class AgentRuntime:
                     run_id=run_id,
                     agent_id=self._agent_id,
                     user_input=user_input,
+                    turn_index=turn_index,
                 )
                 tracer.run_started()
             # 流式块记账绑定本 run（ADR-0016 §3.3）：此后思考/文本 chunk 经

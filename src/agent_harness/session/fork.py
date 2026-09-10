@@ -25,9 +25,9 @@ from langchain_core.messages import HumanMessage
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
-    RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
+    RUN_TERMINAL_TYPES,
     SESSION_FORKED,
     SESSION_STARTED,
     TOOL_CALL,
@@ -112,14 +112,15 @@ def find_fork_boundaries(events: list[SessionEvent]) -> list[int]:
     """列出合法 fork 锚点（用户消息 seq，锚点语义：seed = [0, seq)）。
 
     规则：锚点处的 seed 前缀必须 run 完整——逐事件跟踪 run/started 与
-    run/completed|failed 的开合计数，计数为 0 时遇到的用户消息才是合法切点。
+    run 终态（`RUN_TERMINAL_TYPES`：completed / failed / interrupted）的
+    开合计数，计数为 0 时遇到的用户消息才是合法切点。
     """
     boundaries: list[int] = []
     open_runs = 0
     for event in events:
         if event.type == RUN_STARTED:
             open_runs += 1
-        elif event.type in (RUN_COMPLETED, RUN_FAILED):
+        elif event.type in RUN_TERMINAL_TYPES:
             open_runs -= 1
         elif event.type == USER_MESSAGE and open_runs == 0:
             boundaries.append(event.seq)
@@ -250,7 +251,7 @@ def _validate_run_complete(
     for event in seed:
         if event.type == RUN_STARTED:
             open_runs += 1
-        elif event.type in (RUN_COMPLETED, RUN_FAILED):
+        elif event.type in RUN_TERMINAL_TYPES:
             open_runs -= 1
         if open_runs < 0:
             raise ForkBoundaryError(

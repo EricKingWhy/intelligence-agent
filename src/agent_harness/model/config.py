@@ -198,6 +198,26 @@ def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
     return entries
 
 
+def find_catalog_entry(
+    settings: Settings, provider: str, model_id: str
+) -> ModelCatalogEntry | None:
+    """按 (provider, model_id) 查 catalog 条目（T7 #137 模型切换寻址）。
+
+    model_id 命中条目 ``name``（前端/amend 用的 catalog 名）或上游 ``model_name``；
+    provider 必须与条目一致——防止跨 provider 误选同名模型。``name`` 精确匹配优先
+    于 ``model_name`` 匹配（否则条目 A 的 name 撞上条目 B 的 model_name 时结果由
+    声明顺序决定）。未命中返回 None，由调用方翻译为领域异常 / CLI 提示。
+    """
+    entries = parse_model_catalog(settings)
+    for entry in entries:
+        if entry.provider == provider and entry.name == model_id:
+            return entry
+    for entry in entries:
+        if entry.provider == provider and entry.model_name == model_id:
+            return entry
+    return None
+
+
 class ModelConfig:
     def __init__(
         self,

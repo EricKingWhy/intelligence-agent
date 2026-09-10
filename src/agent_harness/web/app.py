@@ -60,7 +60,9 @@ from agent_harness.session.service import (
     SessionNotFound,
     SessionService,
     SteerTargetNotFound,
+    UnknownModel,
     WorkspaceNameInvalid,
+    resolve_model_target,
     validate_session_id,
 )
 from agent_harness.storage import (
@@ -214,6 +216,16 @@ class CreateSessionRequest(_AmendValueValidators):
                 f"permission_mode must be one of {sorted(valid)}; got {v!r}"
             )
         return v
+
+
+class ModelChangeRequest(BaseModel):
+    """POST /api/sessions/{id}/model 的请求体（T7 #137，PRD §2.3）。
+
+    provider 必须与 catalog 条目一致；model_id 命中条目名或上游模型名。
+    """
+
+    provider: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
 
 
 class ApproveRequest(BaseModel):
@@ -632,6 +644,22 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
         # web 之前漏接）。幂等（重复调用先清 handlers）。
         setup_logging(settings.log_level, settings.workspace_dir)
+        # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
+        # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
+        # 不该让服务起不来），但必须响亮落日志。
+        try:
+            from agent_harness.session.service import SessionService
+
+            scan_results = await SessionService(state).scan_interrupted()
+            for result in scan_results:
+                logging.getLogger("agent_harness.web").warning(
+                    "启动崩溃扫描：session=%s recovery=%s detail=%s",
+                    result.session_id, result.recovery, result.detail,
+                )
+        except Exception:
+            logging.getLogger("agent_harness.web").exception(
+                "启动崩溃扫描失败（不阻塞启动）"
+            )
         try:
             yield
         finally:
@@ -750,6 +778,14 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             metadata_source="provider_preset",
         )]
         for entry in parse_model_catalog(state.settings):
+            # 与默认条目同 provider + 同名 = 被默认条目遮蔽（POST /model 会解析成
+            # 「切回默认链」），列出来只会是选不中的死选项 → 不返回（T7 #137）。
+            # 判据复用 resolve_model_target，不在这里重写一遍遮蔽规则。
+            shadowed = resolve_model_target(
+                state.settings, entry.provider, entry.name
+            )
+            if shadowed is not None and shadowed.model_id is None:
+                continue
             declared = entry.declared_capabilities()
             preset_caps = _pick_capabilities(PROVIDER_PRESETS.get(entry.provider, {}))
             # catalog 声明优先，preset 回落。metadata_source：条目声明了任何能力位
@@ -1041,6 +1077,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(status_code=404, detail=str(e)) from e
         except ActiveRunConflict as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+        except RecoveryConflict as e:
+            # T8 #138：崩溃遗留需人工裁决的 UNKNOWN tool_call → 409，不伪造结果。
+            raise HTTPException(status_code=409, detail=str(e)) from e
 
         session_id = result.session.session_id
         run, subscriber = result.run, result.subscriber
@@ -1145,6 +1184,41 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(status_code=409, detail=str(e)) from e
         return [e.to_dict() for e in events]
 
+    # ── 模型切换（T7 #137，PRD §2.3）───────────────────────────────────
+    # fork 创建端点在 web/lineage.py（ADR-0017 决策 6 的独立 router 面）。
+
+    @app.post("/api/sessions/{session_id}/model")
+    async def change_session_model(
+        session_id: str, req: ModelChangeRequest
+    ) -> dict[str, str]:
+        """切换会话当前模型并写 ``model/changed``（PRD §2.3）。
+
+        下一轮 run 从事件流派生当前模型生效（不打断在途 run）。
+        404 = session 不存在；422 = provider/model_id 不在 catalog
+        （``GET /api/models`` 的默认条目也是合法目标 = 切回默认链）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            change = await service.change_model(
+                session_id=session_id,
+                provider=req.provider,
+                model_id=req.model_id,
+            )
+        except InvalidSessionId as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except SessionNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except UnknownModel as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        # 回传规范 model_id（service 解析出的 picker id）：catalog 条目名，或默认链
+        # 的默认模型名——不能回显请求值，否则上游 model_name / "default" 别名会与
+        # 事件里的 to_model_id 及 GET /api/models 的 id 对不上。
+        return {
+            "status": "changed",
+            "provider": change.to_provider,
+            "model_id": change.effective_model_id,
+        }
+
     # ── 续聊入口（PRD §5.3）───────────────────────────────────────────
     # 双模式：queue（默认）= 入队/直接拉起；steer = 注入在途 run。
     # launched 分支返回 SSE 流（PRD 锁定 D-10：续聊端点响应与创建端点一致）；
@@ -1187,6 +1261,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except SessionNotFound as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
         except ActiveRunConflict as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except RecoveryConflict as e:
+            # T8 #138：崩溃遗留（UNKNOWN 高风险 tool_call）需人工裁决——
+            # 拒绝续跑而不是伪造「结果未知」（不变量 #14）。
             raise HTTPException(status_code=409, detail=str(e)) from e
         except QueueItemNotFound as e:
             raise HTTPException(status_code=404, detail=str(e)) from e

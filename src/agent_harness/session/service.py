@@ -14,21 +14,28 @@ HTTP 是传输层，不进本模块；领域异常由调用方翻译为 HTTP/CLI
 
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from agent_harness.assembly import build_runtime
+from agent_harness.config import Settings
+from agent_harness.session.derive import detect_dangling
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
+    MODEL_CHANGED,
     QUEUE_CANCELLED,
+    SESSION_STARTED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
+    SessionEvent,
     _utc_now_iso,
 )
+from agent_harness.session.interrupt import detect_unterminated_runs
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
@@ -42,8 +49,12 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
+    from agent_harness.recovery.scan import InterruptionScanResult
     from agent_harness.web.app import AppState
     from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── 领域异常 ──────────────────────────────────────────────────────────
@@ -96,6 +107,14 @@ class QueueItemNotFound(SessionServiceError):
 
 class SteerTargetNotFound(SessionServiceError):
     """steer 目标 run 不存在（无在途 run）。"""
+
+
+class UnknownModel(SessionServiceError):
+    """模型切换目标不在 catalog 中（provider + model_id 未命中）。"""
+
+
+class InvalidForkBoundary(SessionServiceError):
+    """fork 锚点非法（不是用户消息 seq / 前缀含未终态 run）。"""
 
 
 #: session_id 安全校验正则——名字段，不是路径。
@@ -169,6 +188,183 @@ class AmendOptions:
 def _amend_kwargs(amend: AmendOptions | None) -> dict[str, Any]:
     """amend → build_runtime 关键字参数；None 等价于全 None（当前行为不变）。"""
     return (amend or AmendOptions()).to_runtime_kwargs()
+
+
+def current_model_selection(events: list[SessionEvent]) -> tuple[str | None, str | None]:
+    """从事件流派生会话当前模型 (provider, model_id)。
+
+    优先级：最后一条 ``model/changed`` 的 to_* > ``session/started`` 的初始值
+    > (None, None)（= 默认链）。append-only 语义下"最后一次切换"即当前模型，
+    replay 确定性（不变量 #3）。
+    """
+    for event in reversed(events):
+        if event.type == MODEL_CHANGED:
+            return event.data.get("to_provider"), event.data.get("to_model_id")
+    for event in reversed(events):
+        if event.type == SESSION_STARTED:
+            return event.data.get("provider"), event.data.get("model_id")
+    return None, None
+
+
+def _amend_with_session_model(
+    amend: AmendOptions | None, events: list[SessionEvent], settings: Settings
+) -> AmendOptions | None:
+    """未显式指定 model 时，用 session 派生的当前模型补齐。
+
+    显式 amend.model 永远优先（一次性覆盖）；session 也没记录模型则原样返回
+    （走默认链，行为不变）。session 记录的模型若已不在 catalog（配置变更），
+    回落默认链并记 warning——历史选择不该让续聊 500。AGENT_MODELS 本身畸形
+    仍是配置错误，`parse_model_catalog` 照旧响亮失败（不静默降级）。
+    """
+    if amend is not None and amend.model is not None:
+        return amend
+    provider, model_id = current_model_selection(events)
+    if model_id is None:
+        return amend
+
+    from agent_harness.model.config import find_catalog_entry
+
+    if find_catalog_entry(settings, provider or "", model_id) is None:
+        logger.warning(
+            "会话当前模型 %s/%s 已不在 catalog，本轮回落默认链", provider, model_id
+        )
+        return amend
+    return replace(amend or AmendOptions(), model=model_id)
+
+
+def _default_model_id(settings: Settings) -> str:
+    """默认链在 ``GET /api/models`` 里的 picker id（= 默认模型名）。"""
+    from agent_harness.model.config import ModelConfig
+
+    return ModelConfig.from_settings(settings).model_name
+
+
+def _is_default_selection(settings: Settings, provider: str, model_id: str) -> bool:
+    """判断目标是否是 ``GET /api/models`` 的默认条目（is_default=true）。
+
+    默认条目不是一个 catalog 条目，但前端 picker 会展示它——选中它 = 清除会话级
+    覆盖、回到默认链（事件写 ``to_model_id=None``）。
+    """
+    from agent_harness.model.config import ConfigError
+
+    if provider != settings.model_provider:
+        return False
+    try:
+        default_name = _default_model_id(settings)
+    except ConfigError:
+        return False
+    return model_id in {default_name, "default"}
+
+
+@dataclass(frozen=True)
+class ModelTarget:
+    """一次模型切换的解析结果（T7 #137）。
+
+    ``model_id=None`` = 切回默认链（``GET /api/models`` 的 is_default 条目）；
+    ``effective_model_id`` 是 picker 应显示的 id——catalog 条目名，或默认链的默认
+    模型名（HTTP 响应回传它，避免 handler 自己推导领域值）。
+    """
+
+    provider: str
+    model_id: str | None
+    effective_model_id: str
+
+
+def resolve_model_target(
+    settings: Settings, provider: str, model_id: str
+) -> ModelTarget | None:
+    """解析 (provider, model_id) → ModelTarget；未命中返回 None。
+
+    默认条目优先于同名 catalog 条目：picker 的默认选项 id 就是默认模型名，
+    catalog 恰有同名条目时必须按「默认条目 = 清覆盖」语义处理，否则前端选默认
+    反而锁死在该 catalog 条目的 base_url / temperature 上。
+    """
+    from agent_harness.model.config import find_catalog_entry
+
+    if _is_default_selection(settings, provider, model_id):
+        return ModelTarget(
+            provider=provider, model_id=None,
+            effective_model_id=_default_model_id(settings),
+        )
+    entry = find_catalog_entry(settings, provider, model_id)
+    if entry is None:
+        return None
+    return ModelTarget(
+        provider=entry.provider, model_id=entry.name, effective_model_id=entry.name,
+    )
+
+
+@dataclass(frozen=True)
+class ModelChange:
+    """一次模型切换的结果。
+
+    ``from_*`` 可能为 None = 此前走默认链；``to_model_id`` 为 None = 切回默认链
+    （选中 ``GET /api/models`` 的 ``is_default`` 条目），后续 run 不再带 catalog 覆盖。
+    ``effective_model_id`` = 前端 picker 应对齐的 id（见 ``ModelTarget``）。
+    """
+
+    from_provider: str | None
+    from_model_id: str | None
+    to_provider: str
+    to_model_id: str | None
+    effective_model_id: str
+
+
+def append_model_change(session: Session, target: ModelTarget) -> ModelChange:
+    """追加 ``model/changed``——MODEL_CHANGED 的唯一写入口（T7 #137）。
+
+    走 ``Session.append``（无 resume 副作用，不变量 #7）；``from_*`` 从事件流派生。
+    service 与 CLI demo 共用，避免两处各自拼事件 data。
+    """
+    from_provider, from_model_id = current_model_selection(session.events)
+    session.append(MODEL_CHANGED, {
+        "from_provider": from_provider,
+        "from_model_id": from_model_id,
+        "to_provider": target.provider,
+        "to_model_id": target.model_id,
+    })
+    return ModelChange(
+        from_provider=from_provider,
+        from_model_id=from_model_id,
+        to_provider=target.provider,
+        to_model_id=target.model_id,
+        effective_model_id=target.effective_model_id,
+    )
+
+
+def inherit_parent_model(child: Session, parent_events: list[SessionEvent]) -> None:
+    """child 继承父会话的当前模型（fork seed 不含父 ``session/started``，T7 #137）。
+
+    父走默认链时什么都不做；父有会话级模型时补一条 ``model/changed``——否则父创建
+    时选的 catalog 模型会在 child 静默回落默认链（切换过的父反而会继承，语义不一致）。
+    """
+    provider, model_id = current_model_selection(parent_events)
+    if provider is None or model_id is None:
+        return
+    append_model_change(
+        child,
+        ModelTarget(
+            provider=provider, model_id=model_id, effective_model_id=model_id,
+        ),
+    )
+
+
+def assert_model_resolvable(settings: Settings, target: ModelTarget) -> None:
+    """校验目标模型真能装配（provider 已知 + 有可用 key），否则 UnknownModel。
+
+    AC「校验 provider 可用性」：catalog 成员资格之外，还确认 ``ModelConfig`` 能
+    构造出来——与创建路径（``create_and_launch`` 的 ``from_catalog``）同一判据，
+    避免 POST /model 接受一个 POST /sessions 会拒绝的目标。CLI 与 Web 共用。
+    """
+    from agent_harness.model.config import ConfigError, ModelConfig
+
+    try:
+        if target.model_id is None:
+            ModelConfig.from_settings(settings)
+        else:
+            ModelConfig.from_catalog(settings, target.model_id)
+    except (ConfigError, KeyError) as error:
+        raise UnknownModel(str(error)) from error
 
 
 @dataclass(frozen=True)
@@ -271,6 +467,11 @@ class SessionService:
     def workspace_registry(self):
         return self._state.workspace_registry
 
+    @property
+    def session_meta_store(self):
+        """Session 元信息存储（fork 需要写 child 的 provenance）。"""
+        return self._state.session_meta_store
+
     # ── 只读操作 ─────────────────────────────────────────────────────
 
     async def list_sessions(self) -> list[dict[str, Any]]:
@@ -356,12 +557,20 @@ class SessionService:
         )
         workspace.mkdir(parents=True, exist_ok=True)
 
-        # 模型 catalog 校验（在落盘前，避免孤儿）
+        # 模型 catalog 校验（在落盘前，避免孤儿）；合法则记为会话初始模型，
+        # 使后续 run 不传 amend 也能从事件流派生出「当前模型」（T7 #137）。
+        initial_model_data: dict[str, Any] = {}
         if amend is not None and amend.model is not None:
             try:
-                ModelConfig.from_catalog(self._state.settings, amend.model)
+                initial_model = ModelConfig.from_catalog(
+                    self._state.settings, amend.model
+                )
             except ConfigError as error:
                 raise InvalidDecision(str(error)) from error
+            initial_model_data = {
+                "provider": initial_model.provider,
+                "model_id": amend.model,
+            }
 
         _, wiring = await self._state.get_wiring()
         await self._state.ensure_stores()
@@ -393,7 +602,10 @@ class SessionService:
             session_store=self._state.store,
             **_amend_kwargs(amend),
         )
-        session = Session.start(self._state.store, session_id=session_id)
+        session = Session.start(
+            self._state.store, session_id=session_id,
+            started_data=initial_model_data or None,
+        )
 
         # 交互式审批：把真实 session 注入 callback 闭包
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
@@ -430,15 +642,30 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
+        amend = _amend_with_session_model(amend, existing, self._state.settings)
         if self._state.run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
 
         try:
-            session = Session.resume(
-                self._state.store,
-                session_id,
-                workspace_registry=self._state.workspace_registry,
-            )
+            # T8 #138：崩溃遗留（悬空 tool_call / 无终态 run）必须走 Ledger
+            # reconcile——Session.resume 的 dangling 兜底对 RUNNING/UNKNOWN 的
+            # tool_call 一律伪造「结果未知」，等于替高风险副作用猜结论
+            # （不变量 #13/#14）。recover() 是唯一恢复入口：UNKNOWN 无 callback
+            # 时安全拒绝（→ 409），确定性项精确回填后再 load 继续跑。
+            if detect_dangling(existing) or detect_unterminated_runs(existing):
+                await self.recover(session_id)
+                session = Session.load(
+                    self._state.store,
+                    session_id,
+                    workspace_registry=self._state.workspace_registry,
+                )
+            else:
+                session = Session.resume(
+                    self._state.store,
+                    session_id,
+                    workspace_registry=self._state.workspace_registry,
+                )
         except ValueError as error:
             raise SessionNotFound(str(error)) from error
 
@@ -495,21 +722,29 @@ class SessionService:
 
     # ── 续聊（Phase Multiturn T2 / PRD §5.3）──────────────────────
 
+    def _live_session(self, session_id: str) -> Session | None:
+        """在途 run 持有的 Session 聚合（seq 计数器与 listener 都是活的）；无则 None。
+
+        旁路追加必须优先用它：两个 Session 实例各自从同一磁盘快照推算 seq 会撞号
+        （run 的内存计数器看不到旁路追加，写出重复 seq 让会话不可 resume），且
+        run 的 listener 在册才能把旁路事件实时广播给 SSE/WS 订阅者。
+        """
+        active = self._state.run_manager.get_active(session_id)
+        return active.session if active is not None else None
+
     def _append_session_event(
         self, session_id: str, event_type: str, **data: object
     ) -> None:
-        """resume session + append typed event（续聊路径共用 helper）。
+        """追加 typed 事件（queue / steer 路径共用 helper）。
 
-        所有续聊事件（MESSAGE_QUEUED / QUEUE_CANCELLED /
-        STEER_REQUESTED）都经此写入——统一 resume+append 形状，
-        消除三处重复的 Session.resume(...).append(...) 模式。
+        在途 run 存在时走 ``_live_session``；否则走 ``Session.append_event``
+        （只 append，不做 resume 的 dangling 修复 / ``session/resumed``，不变量 #7）。
         """
-        session = Session.resume(
-            self._state.store,
-            session_id,
-            workspace_registry=self._state.workspace_registry,
-        )
-        session.append(event_type, data=dict(data))
+        live = self._live_session(session_id)
+        if live is not None:
+            live.append(event_type, dict(data))
+            return
+        Session.append_event(self._state.store, session_id, event_type, dict(data))
 
     async def send_message(
         self,
@@ -757,6 +992,95 @@ class SessionService:
             raise RecoveryConflict(str(error)) from error
         return recovered.events
 
+    async def scan_interrupted(self) -> list[InterruptionScanResult]:
+        """进程启动扫描（T8 #138）：无终态 run 补记 ``run/interrupted`` + 强制 reconcile。
+
+        返回被处理的 session 结论（无中断的 session 不出现在结果里）。
+        单个 session 失败不抛出——扫描的职责是把全部中断如实标记出来。
+        """
+        from agent_harness.recovery.scan import scan_interrupted_sessions
+
+        await self._state.ensure_stores()
+        results = await scan_interrupted_sessions(
+            session_store=self._state.store,
+            operation_ledger=self._state.operation_ledger,
+            workspace_registry=self._state.workspace_registry,
+            database_path=self._state.harness_db,
+        )
+        return results
+
+    # ── 模型切换 / Fork（T7 #137）────────────────────────────────────
+
+    async def change_model(
+        self, *, session_id: str, provider: str, model_id: str
+    ) -> ModelChange:
+        """切换会话当前模型并写 ``model/changed``（PRD §2.3）。
+
+        model_id 命中 catalog 条目名或上游模型名；provider 必须与条目一致
+        （防止跨 provider 误选）。切换只写事件，不打断在途 run——下一轮
+        run 经 ``resume_and_launch`` 从事件流派生当前模型生效。
+        """
+        from agent_harness.model.config import parse_model_catalog
+
+        self._validate_session_id(session_id)
+        existing = await anyio.to_thread.run_sync(
+            self._state.store.read_events, session_id
+        )
+        if not existing:
+            raise SessionNotFound(f"session '{session_id}' not found")
+
+        target = resolve_model_target(self._state.settings, provider, model_id)
+        if target is None:
+            raise UnknownModel(
+                f"未知模型: provider={provider!r} model_id={model_id!r}，可选: "
+                f"{[(e.provider, e.name) for e in parse_model_catalog(self._state.settings)]}"
+            )
+        assert_model_resolvable(self._state.settings, target)
+        # 在途 run 存在时用它的 Session 聚合追加（seq 不撞号 + listener 实时广播）；
+        # 否则只读加载一个聚合。两条路径都只 append，不走 resume。
+        live = self._live_session(session_id) or Session(
+            session_id, self._state.store, existing
+        )
+        return append_model_change(live, target)
+
+    async def fork(
+        self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
+    ) -> str:
+        """从 ``from_seq``（用户消息 seq）派生 child session，返回其 id（PRD §2.4）。
+
+        复用 ``fork.py``，不重写。在途 run 拒绝（ActiveRunConflict），锚点非法
+        → InvalidForkBoundary。HTTP 端点默认不生成 tail summary（无模型调用，
+        确定性；CLI ``fork`` 仍可显式开启）。
+
+        child 继承父会话的当前模型：fork seed 按设计不含父 ``session/started``，
+        不补一条 ``model/changed`` 的话，父创建时选的 catalog 模型会在 child 静默
+        回落到默认链（切换过的父则会继承，语义不一致）。
+        """
+        from agent_harness.session.fork import ForkBoundaryError, fork_session
+
+        self._validate_session_id(session_id)
+        existing = await anyio.to_thread.run_sync(
+            self._state.store.read_events, session_id
+        )
+        if not existing:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        if self._state.run_manager.get_active(session_id) is not None:
+            raise ActiveRunConflict("session has an active run; fork needs settled history")
+        await self._state.ensure_stores()
+        try:
+            child = await fork_session(
+                self._state.store,
+                self._state.session_meta_store,
+                session_id,
+                boundary_user_message_seq=from_seq,
+                workspace_registry=self._state.workspace_registry,
+                with_tail_summary=with_tail_summary,
+            )
+        except ForkBoundaryError as error:
+            raise InvalidForkBoundary(str(error)) from error
+        inherit_parent_model(child, existing)
+        return child.session_id
+
     # ── 内部方法 ─────────────────────────────────────────────────────
 
     @staticmethod
@@ -800,7 +1124,10 @@ class SessionService:
         if interactive:
             queue = PendingApprovalQueue()
             self._state.approval_queues[session_id] = queue
-            return _InteractiveCallbackHolder(queue=queue)
+            return _InteractiveCallbackHolder(
+                queue=queue,
+                timeout_seconds=self._state.settings.approval_timeout_seconds,
+            )
         elif (
             auto_approve_explicit
             and not permission_mode_explicit
@@ -836,9 +1163,12 @@ class _InteractiveCallbackHolder:
     as_callback() 获取真正的 callable。
     """
 
-    def __init__(self, queue: PendingApprovalQueue) -> None:
+    def __init__(self, *, queue: PendingApprovalQueue, timeout_seconds: float) -> None:
         self._queue = queue
         self._session: Session | None = None
+        #: ≤0 → None（无限等待，旧行为）；>0 → fail-closed 超时（PRD T6 §2.2 C）。
+        #: 无默认值：审批等待是安全边界，超时值必须由调用方（Settings）显式给出。
+        self._timeout: float | None = timeout_seconds if timeout_seconds > 0 else None
 
     def bind_session(self, session: Session) -> None:
         self._session = session
@@ -869,7 +1199,24 @@ class _InteractiveCallbackHolder:
                 "allowed_decisions": allowed_decisions,
             },
         )
-        response = await self._queue.wait_for(approval_id)
+        try:
+            response = await self._queue.wait_for(approval_id, timeout=self._timeout)
+        except TimeoutError:
+            # fail-closed（PRD T6 §2.2 C）：无人决策 = 拒绝，绝不默认放行。
+            assert self._timeout is not None  # 未配置超时不会抛 TimeoutError
+            timeout_deny = ApprovalResponse(
+                approved=False,
+                reason=f"审批超时（{self._timeout:g}s 无决策），按 fail-closed 拒绝",
+                decision=PermissionDecision.DENY,
+            )
+            if self._queue.expire(approval_id, timeout_deny):
+                response = timeout_deny
+            else:
+                # 极端竞态：外部 /approve 与超时同刻到达，且 /approve 已抢先写入
+                # _resolved（future 已被 wait_for 取消 → 本协程收到 TimeoutError）。
+                # 先写入者胜（一次性语义）：采用人类决策，不覆盖。
+                settled = self._queue.resolved_response(approval_id)
+                response = settled if settled is not None else timeout_deny
         self._session.append(
             "permission/resolved",
             {

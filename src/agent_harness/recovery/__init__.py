@@ -2,17 +2,27 @@
 
 from agent_harness.recovery.coordinator import (
     PendingPolicy,
+    ReconcileRequired,
     RecoveryCoordinator,
     RecoveryError,
     SkipPendingPolicy,
 )
 from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
+from agent_harness.recovery.scan import (
+    InterruptionScanResult,
+    ScanRecovery,
+    scan_interrupted_sessions,
+)
 
 __all__ = [
+    "InterruptionScanResult",
     "PendingPolicy",
     "ReconcileCallback",
+    "ReconcileRequired",
     "ReconcileVerdict",
     "RecoveryCoordinator",
     "RecoveryError",
+    "ScanRecovery",
     "SkipPendingPolicy",
+    "scan_interrupted_sessions",
 ]

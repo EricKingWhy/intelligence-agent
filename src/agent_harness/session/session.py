@@ -117,6 +117,7 @@ class Session:
         agent_id: str = "default",
         session_id: str | None = None,
         workspace_registry: WorkspaceRegistry | None = None,
+        started_data: dict | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
@@ -124,35 +125,75 @@ class Session:
         session_id 允许调用方预生成（web 层"先组装 runtime 后建 Session"的顺序
         需要：_build_runtime 要以 session_id 装配 S3 artifact 命名空间，组装失败
         时不能留下任何已落盘的孤儿 session——R6-6）。
+        started_data（T7 #137，加法字段）：会话级初始配置写进 session/started——
+        目前用于记录创建时选定的模型（provider / model_id），使"当前模型"可从
+        事件流派生。
         """
         session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
             sandbox = workspace_registry.create(session_id)
         session = cls(session_id, store, sandbox=sandbox)
-        session.append(SESSION_STARTED, {}, agent_id=agent_id)
+        session.append(
+            SESSION_STARTED,
+            dict(started_data) if started_data else {},
+            agent_id=agent_id,
+        )
         return session
 
     @classmethod
-    def resume(
+    def append_event(
+        cls,
+        store: JsonlSessionStore,
+        session_id: str,
+        event_type: str,
+        data: dict,
+        *,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        step_id: int | None = None,
+    ) -> SessionEvent:
+        """只追加一条会话事实事件，**不触发 resume 副作用**。
+
+        ``resume()`` 会修复 dangling tool_call 并 append ``session/resumed``——
+        那是「恢复会话」的语义。写一条无关事实（排队消息 / 模型切换 / 取消排队 /
+        中断标记）时套用它，会把 run 在途的 tool_call 判成悬空并注入合成
+        tool/result，破坏 tool_call/result 配对（不变量 #7）。本入口只做
+        「加载 + 追加」；run_id / agent_id / step_id 透传事件信封（T8 #138 的
+        ``run/interrupted`` 要挂到被中断的 run 上）。
+        """
+        events = store.read_events(session_id)
+        if not events:
+            raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+        session = cls(session_id, store, events)
+        return session.append(
+            event_type, dict(data),
+            run_id=run_id, agent_id=agent_id, step_id=step_id,
+        )
+
+    @classmethod
+    def load(
         cls,
         store: JsonlSessionStore,
         session_id: str,
         *,
         workspace_registry: WorkspaceRegistry | None = None,
     ) -> Session:
-        """加载已有 Session：读 JSONL、校验 seq、修复 dangling、append session/resumed。
+        """加载并校验 seq 的**无副作用**入口：不修复 dangling、不写 session/resumed。
 
-        提供 workspace_registry 时，自动查回/恢复 Sandbox 实例到 session.sandbox。
+        用于「恢复语义已由上游完成」的场景——崩溃路径先经 RecoveryCoordinator
+        按 Ledger 精确回填（不变量 #13/#14），再 load 出 Session 继续跑，
+        避免与恢复标记重复再写一条 `session/resumed`。
         """
         events = store.read_events(session_id)
         if not events:
             raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
 
-        sandbox = None
-        if workspace_registry is not None:
-            sandbox = workspace_registry.get(session_id)
-
+        sandbox = (
+            workspace_registry.get(session_id)
+            if workspace_registry is not None
+            else None
+        )
         session = cls(session_id, store, events, sandbox=sandbox)
 
         # 校验 seq 严格递增（不容忍重复或回退）；计数器据此在构造时取 max+1
@@ -169,6 +210,21 @@ class Session:
                 )
             seen_seqs.add(event.seq)
             prev_seq = event.seq
+        return session
+
+    @classmethod
+    def resume(
+        cls,
+        store: JsonlSessionStore,
+        session_id: str,
+        *,
+        workspace_registry: WorkspaceRegistry | None = None,
+    ) -> Session:
+        """加载已有 Session：校验 seq、修复 dangling、append session/resumed。
+
+        提供 workspace_registry 时，自动查回/恢复 Sandbox 实例到 session.sandbox。
+        """
+        session = cls.load(store, session_id, workspace_registry=workspace_registry)
 
         # 修复 dangling tool_call：为每个未解决的 tool_call 追加合成 tool/result
         dangling_ids = detect_dangling(session._events)
@@ -270,11 +326,17 @@ class Session:
 
     # ── Run 生命周期 ──
 
-    def begin_run(self, *, agent_id: str = "default") -> str:
-        """生成 run_id、append run/started、返回 run_id。"""
+    def begin_run(self, *, agent_id: str = "default") -> tuple[str, int]:
+        """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
+
+        ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
+        trace metadata 标记「这是第 N 轮」（T9 #139）。
+        """
         run_id = str(uuid4())
-        self.append(RUN_STARTED, {}, run_id=run_id, agent_id=agent_id)
-        return run_id
+        turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
+        self.append(RUN_STARTED, {"turn_index": turn_index},
+                    run_id=run_id, agent_id=agent_id)
+        return run_id, turn_index
 
     def end_run(
         self,

@@ -188,9 +188,12 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
         stores = recovery_stores(workspace_root / "harness.db")
         await initialize_stores(stores)
         workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
+        store = JsonlSessionStore(root=workspace_root / "sessions")
+        # 崩溃扫描**不**在 CLI 里跑：在途 run 只存在于持有它的进程内存中，
+        # 短命命令无法区分「别的进程在跑」与「崩溃遗留」，误标会撞 seq
+        # （见 recovery/scan.py 单进程假设）。扫描归属长驻会话宿主（web lifespan）。
         session_id = str(uuid4())
         workspace = workspace_root / "workspaces" / session_id
-        store = JsonlSessionStore(root=workspace_root / "sessions")
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
@@ -360,6 +363,10 @@ async def fork_command(
         workspace_registry=workspace_registry,
         summarizer=summarizer, with_tail_summary=not no_summary,
     )
+    # child 继承父当前模型（T7 #137：fork seed 不含父 session/started）。
+    from agent_harness.session.service import inherit_parent_model
+
+    inherit_parent_model(child, store.read_events(session_id))
     if write is not None:
         write(f"child session: {child.session_id}\n")
     return child.session_id

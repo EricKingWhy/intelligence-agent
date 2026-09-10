@@ -37,41 +37,83 @@
 
 所有 session 事件通过 WS 多路复用推送给已订阅的客户端。事件形状与 SSE 通道一致（`_event_to_sse_dict` / `_session_event_to_sse_dict`）。
 
-### 2.2 审批 WS 推送 (#136 后端部分)
+### 2.2 审批事件推送 + HTTP 回传 (#136 后端部分)
 
-当 ToolExecutor 触发 `needs_approval` 时，后端通过 WS 推送审批请求：
+> **勘误（as-built 契约，2026-09-09）**：本节旧稿的自定义 `{"type":"approval_requested"}`
+> 帧与 `POST /api/sessions/{id}/approvals/{call_id}` 端点**均不存在**，会误导前后端对接，
+> 现替换为实际契约。实现位置：`src/agent_harness/session/service.py`
+> （`_InteractiveCallbackHolder`）、`src/agent_harness/web/app.py`（`approve_tool_call`）、
+> `src/agent_harness/web/serialization.py`（信封构建）。
+> 依据：SDD 03 §9 PermissionDecision / PermissionResolvedData；不变量 #7（Tool 只有一条执行路径）。
 
-**WS 推送消息 `APPROVAL_REQUESTED`：**
+**推送：复用既有 session 事件流，不新增 WS 帧类型。**
+
+ToolExecutor 触发 `needs_approval` 且 session 为交互式审批（`permission_mode=interactive`）时，
+后端向该 session 的既有事件通道（SSE `GET /api/sessions/{id}/events` 与 WS `/api/ws`
+subscribe 流，帧形状严格同形）追加一条 **durable SessionEvent**：
 
 ```json
 {
-  "type": "approval_requested",
+  "type": "tool/approval-requested",
+  "seq": 42,
+  "run_id": "run-xxx",
+  "step_id": "step-xxx",
   "session_id": "sess-xxx",
-  "call_id": "call-xxx",
-  "tool_name": "write_file",
-  "args_summary": "path=/foo/bar.py, content=...",
-  "scope": "workspace-write",
-  "allowed_decisions": ["allow", "reject"]
+  "durability": "durable",
+  "data": {
+    "approval_id": "appr-xxx",
+    "tool_name": "write_file",
+    "tool_call_id": "call-xxx",
+    "action_type": "workspace_write",
+    "title": "write_file (workspace_write)",
+    "description": "<审批原因>",
+    "arguments_preview": {"path": "/foo/bar.py"},
+    "permission": "workspace_write",
+    "policy": "read_only",
+    "reason": "<审批原因>",
+    "allowed_decisions": ["deny", "approve_once"]
+  }
 }
 ```
 
-**HTTP 回传端点 `POST /api/sessions/{id}/approvals/{call_id}`：**
+**传输封装（SSE 与 WS 的外层不同，内层信封同形）：**
 
-已有端点：`src/agent_harness/web/app.py:1082` 的 `approve_tool_call()`。
+- SSE：`{"data": "<上述信封 JSON 字符串>"}`。
+- WS：`{"type": "event", "session_id": "...", "event": {<上述信封>}}`；重连快照是
+  `{"type": "snapshot", "session_id": "...", "events": [<信封>, ...]}`。
+
+**客户端必须取 `event` 字段后再匹配内层 `type`**——WS 帧顶层 `type` 恒为
+`event` / `snapshot`，不会是 `tool/approval-requested`。
+
+决策落地后同通道追加 `permission/resolved`：
+
+```json
+{"type": "permission/resolved", "data": {"approval_id": "appr-xxx", "decision": "deny", "reason": "..."}}
+```
+
+**HTTP 回传端点：`POST /api/sessions/{session_id}/approve`。**
 
 ```json
 // Request body
-{"decision": "allow"}   // 或 "reject"
+{"approval_id": "appr-xxx", "approved": true, "decision": "approve_once", "reason": ""}
 
 // Response (200)
-{"status": "decided", "decision": "allow"}
+{"status": "resolved", "approval_id": "appr-xxx", "decision": "approve_once"}
 ```
 
+- `approval_id` 必传；`decision` 是契约字段（`deny` / `approve_once`），`approved` 是兼容字段，
+  两者同传时 `decision` 优先；只传 `approved` 时推导（`true`→`approve_once`，`false`→`deny`）。
+- 状态码：`decision` 不在该请求的 `allowed_decisions` 内 → 422；
+  已决策 → 409（one-shot）；`approval_id` 不存在 → 404；session 不存在 → 404。
+- `approval_id` 缺省走旧 seam 兼容分支，返回 `200 {"status":"received"}`，不解析决策。
+
 **语义约束：**
-- fail-closed：超时默认拒绝
-- one-shot：同一 callId 只能决策一次
-- WS 断开时审批仍可通过 HTTP 完成
-- 所有 tool 执行仍走 ToolExecutor 单一路径（不变量 #7）
+- fail-closed：交互式审批等待超过 `APPROVAL_TIMEOUT_SECONDS`（默认 300s，`≤0` = 无限等待）
+  仍无决策 → 自动 `deny` 并写 `permission/resolved`；**永不默认放行**。
+- one-shot：同一 `approval_id` 只能决策一次，第二次 409。
+- WS 断开时审批仍可通过 HTTP 完成（决策不依赖 WS 连接）。
+- 所有 tool 执行仍走 ToolExecutor 单一路径（不变量 #7）。
+- 非交互式 session（默认 auto-approve / deny callback）不产生审批事件。
 
 ### 2.3 模型切换 API (#137 后端部分 A)
 
@@ -89,7 +131,7 @@
 
 ```json
 {
-  "type": "model_changed",
+  "type": "model/changed",
   "session_id": "sess-xxx",
   "data": {
     "from_provider": "openai",
@@ -99,6 +141,16 @@
   }
 }
 ```
+
+> **as-built 注（2026-09-09，T7 实现）**：事件类型字符串是 **`model/changed`**（仓库既有
+> `model/*` 词汇表约定：`model/started` / `model/completed` / `model/fallback`），不是
+> 旧稿的 `model_changed`。`model_id` = catalog 条目名（`GET /api/models` 里的 `name`），
+> 前端切模型后 UI 用它对齐选项。`from_*` 可能为 `null`（此前走默认链）。响应里的
+> `model_id` 回传**规范 picker id**（条目名，或默认链的默认模型名），不回显请求值。
+> 选中 `GET /api/models` 的 `is_default` 条目（`provider` = 默认 provider、
+> `model_id` = 默认模型名或字面量 `"default"`）= **切回默认链**，事件写 `to_model_id: null`，
+> 后续 run 不再带 catalog 覆盖。与默认条目同 provider + 同名的 catalog 条目会被默认条目
+> 遮蔽（选不中），`GET /api/models` 不再列出它。
 
 Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁定的模型）。
 
@@ -116,14 +168,23 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 
 复用已有 `src/agent_harness/session/fork.py` 和 `lineage.py`，不重写。
 
+> **as-built 注（2026-09-09，T7 实现）**：`from_seq` 是父会话中**用户消息**的 seq
+> （`find_fork_boundaries` 列出的合法锚点）；锚点消息不进 child。在途 run → 409；
+> 锚点非法 → 422。HTTP 端点**不生成 tail summary**（无模型调用，确定性）；CLI
+> `/fork`（`demo/live_agent.py`）省略 `from_seq` 时取**最近一个合法切点**，tail 摘要
+> 默认开启（`TailSummarizer`，失败自动降级不挂接）。child 继承父会话当前模型
+> （seed 不含父 `session/started`，后端补一条 `model/changed`）。
+
 ### 2.5 崩溃恢复事件 (#138)
 
 进程重启后扫描无终态 run 的 session，追加 `RUN_INTERRUPTED` 事件：
 
 ```json
 {
-  "type": "run_interrupted",
+  "type": "run/interrupted",
   "session_id": "sess-xxx",
+  "run_id": "run-xxx",
+  "step_id": 3,
   "data": {
     "interrupted_seq": 42,
     "reason": "process_restart"
@@ -133,11 +194,35 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 
 用户重新打开有 `RUN_INTERRUPTED` 的 session 时，前端显示"上次运行在第 N 步中断"，提供继续/重发/忽略三个动作。
 
+> **as-built 注（2026-09-09，T8 实现）**：事件字符串是 **`run/interrupted`**（仓库
+> `run/*` 词汇表约定），不是本稿的 `run_interrupted`。`run_id` / `step_id` 挂事件
+> 信封（前端按 run 归组、显示"第 N 步"）；`data` 只放 `interrupted_seq` +
+> `reason="process_restart"`。扫描幂等：`run/interrupted` 本身是 run 终态，重复
+> 扫描不会重复追加。无终态 run 的 session 标记后强制跑 Ledger reconcile；存在
+> UNKNOWN Operation 且无 ReconcileCallback 时该 session 记为「需人工确认」
+> （不伪造结果、不盲重跑，不变量 #14），其 `session/resumed` 不写（恢复未完成）。
+>
+> **扫描归属（单进程假设）**：扫描只在**持有会话的进程**启动时执行一次——
+> web lifespan（`SessionService.scan_interrupted()`）。CLI 子命令**不扫描**：
+> 在途 run 只存在于本进程内存，短命命令无法区分「别的进程在跑」与「崩溃遗留」，
+> 误标会让两侧各自推算 seq 撞号。多进程/多 worker 需跨进程 run lease（后续 Phase）。
+>
+> **续跑守卫（不变量 #13/#14）**：`POST /api/sessions/{id}/messages`（idle →
+> launched）与 `POST /api/sessions/{id}/resume` 在检测到悬空 tool_call / 无终态 run
+> 时先走 Ledger reconcile，不再落到 `Session.resume` 的 dangling 兜底；UNKNOWN
+> 高风险副作用安全拒绝 → **409**（detail 点名 tool_name/tool_call_id）。前端遇到
+> 409 应提示「需人工确认」并可调 `POST /api/sessions/{id}/recover` 重试，不得
+> 伪造"结果未知"继续。
+>
+> **Fork 边界**：`run/interrupted` 与 `run/completed` / `run/failed` 同属 run
+> 终态（`RUN_TERMINAL_TYPES`），被中断轮之后的用户消息仍是合法 fork 锚点。
+
 ### 2.6 CLI slash 命令 (#137 CLI 部分)
 
-已有入口在 `src/agent_harness/cli.py`：
-- `/model <provider> <model>` — 切换模型
-- `/fork` — 从历史点 fork
+slash 命令入口在交互式 REPL（`demo/live_agent_repl.py` 定义 + `demo/live_agent.py` 分发）；
+`src/agent_harness/cli.py` 只有子命令（`fork` / `sessions` / `replay` / `ingest`）：
+- `/model <provider> <model>` — 切换模型（含切回默认链）
+- `/fork [from_seq]` — 从历史点 fork（省略 = 最近合法切点）
 
 ---
 
@@ -145,8 +230,8 @@ Runtime 在下一轮 run 时从 session 读取当前模型（而非创建时锁�
 
 | 接口/功能 | 后端负责 | 前端负责 |
 |---|---|---|
-| WS `/api/ws` | 已有 `handle_websocket()`，需扩展推送 `APPROVAL_REQUESTED` | 已有 WS 连接逻辑，需消费 `approval_requested` 消息 |
-| `POST /api/sessions/{id}/approvals/{call_id}` | 已有 `approve_tool_call()` 端点 | ApprovalCard 组件已有，需接真实 WS 推送的 pending 事件 |
+| WS `/api/ws` | 已有 `handle_websocket()`，复用事件流推送 `tool/approval-requested` | 已有 WS 连接逻辑，需消费 `tool/approval-requested` 事件 |
+| `POST /api/sessions/{id}/approve` | 已有 `approve_tool_call()` 端点（body 带 `approval_id`） | ApprovalCard 组件已有，需接真实事件推送的 pending 审批 |
 | `POST /api/sessions/{id}/model` | 新增端点 + `MODEL_CHANGED` event | 前端从历史消息右键/菜单触发 fork（可选，后续迭代） |
 | `POST /api/sessions/{id}/forks` | 新增端点，复用 fork.py | 同上 |
 | 崩溃恢复 `RUN_INTERRUPTED` | 进程启动扫描 + 追加事件 + Ledger reconcile | 显示中断提示 + 继续/重发/忽略按钮 |

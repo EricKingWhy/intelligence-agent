@@ -178,15 +178,27 @@ class TestSessionResume:
 class TestRunLifecycle:
     def test_begin_run_returns_run_id_and_writes_event(self, store: JsonlSessionStore):
         session = Session.start(store)
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         assert run_id  # UUID
         last = session.events[-1]
         assert last.type == RUN_STARTED
         assert last.run_id == run_id
 
+    def test_begin_run_increments_turn_index(self, store: JsonlSessionStore):
+        """T9 #139：每个 run 的 turn_index 递增（1-based）。"""
+        session = Session.start(store)
+        session.begin_run()
+        assert session.events[-1].data["turn_index"] == 1
+        session.end_run(session.events[-1].run_id, status="completed", final_text="ok")
+        session.begin_run()
+        assert session.events[-1].data["turn_index"] == 2
+        session.end_run(session.events[-1].run_id, status="completed", final_text="ok2")
+        session.begin_run()
+        assert session.events[-1].data["turn_index"] == 3
+
     def test_end_run_completed(self, store: JsonlSessionStore):
         session = Session.start(store)
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.append(USER_MESSAGE, {"content": "test"})
         session.end_run(run_id, status="completed", final_text="done")
 
@@ -197,7 +209,7 @@ class TestRunLifecycle:
 
     def test_end_run_failed(self, store: JsonlSessionStore):
         session = Session.start(store)
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.end_run(run_id, status="failed")
 
         last = session.events[-1]
@@ -208,7 +220,7 @@ class TestRunLifecycle:
 
     def test_end_run_completed_persists_trace_id_and_trace_url(self, store: JsonlSessionStore):
         session = Session.start(store)
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.end_run(
             run_id, status="completed", final_text="done",
             trace_id="tr-001", trace_url="https://lf.example/traces/tr-001",
@@ -224,7 +236,7 @@ class TestRunLifecycle:
         """失败 run 也下发 trace_id / trace_url（契约对称决策：失败 trace 在
         Langfuse 也有排查价值）。补既有 bug：failed 分支此前丢弃了 trace_id。"""
         session = Session.start(store)
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.end_run(
             run_id, status="failed", reason="boom",
             trace_id="tr-failed", trace_url="https://lf.example/traces/tr-failed",
@@ -239,7 +251,7 @@ class TestRunLifecycle:
         """trace_id / trace_url 键恒存在（前端契约据此降级显示）；未追踪 = null，
         不伪造占位字符串（保持 None 语义；与既有 completed 的 cost_usd 同款）。"""
         session = Session.start(store)
-        run_id = session.begin_run()
+        run_id, _ = session.begin_run()
         session.end_run(run_id, status="completed", final_text="done")
 
         last = session.events[-1]

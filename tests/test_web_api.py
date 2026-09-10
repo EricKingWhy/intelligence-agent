@@ -636,7 +636,7 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
 
     state = client.app.state.agent
     session = Session.start(state.store)
-    run_id = session.begin_run()
+    run_id, _ = session.begin_run()
     session.append(TOOL_CALL, {"tool_call_id": "call-x", "tool_name": "bash",
                                "args": {"command": "ls"}},
                    run_id=run_id)

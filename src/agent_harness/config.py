@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # 进程级模型调用并发闸（#89）：parent+child 共享上限，防 TPM/QPM 限流与
     # 机器过载。≤0 = 关闭。TPM 令牌桶限流器 DEFER（ADR-0015）。
     model_max_concurrency: int = 3
+    # 交互式审批等待上限（秒）：无人决策 = fail-closed 默认拒绝（PRD T6 §2.2 C）。
+    # ≤0 = 无限等待（关闭 fail-closed，保留旧行为）。默认 300s：足够人类走开再回来，
+    # 又不让一个没人管的危险工具无限期挂住 run。
+    approval_timeout_seconds: float = 300.0
     # Model Fallback 两级链（ADR-0014 决策 14）：FALLBACK_MODEL_PROVIDER 为空 =
     # 单级（无 fallback）。fallback key 同 SecretStr 脱敏待遇（活密钥）。
     fallback_model_provider: str = ""
