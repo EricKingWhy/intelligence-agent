@@ -687,11 +687,13 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 
 ### 覆盖缺口 2：`tool-out-wrap-btn` / `tool-out-jump`——登记为**实际不可达**（非缺陷）
 
+> **【第四轮已作废本条结论】** 本节的前提是「必须等真实后端出现流式尾窗」，该前提是错的：尾窗的开关是 **projection 状态**，不是网络时序（`ToolCard.tsx:137` 的 `streaming={tool.status === 'running'}`）。用 mock SSE 只发 `tool/output_delta`、**不发** `tool/result`，尾窗即**永久驻留**，两个按钮都变成可控点击。**第四轮实测：两按钮各点击成功并完成变异验证**（`onClick` 改 no-op → 断言立刻变红）。回归锁：`web/e2e/m-stream-affordances.spec.ts`。以下「不可达」叙述仅作历史记录保留。
+
 **机制**（源码 + 事件双侧取证）：输出尾窗的渲染条件是 `tool.output.length > 0 && (status === 'running' || !tool.result)`（`ToolCard.tsx:136`）。而本后端 cmd.exe **缓冲输出**，整段输出以**单个**终态 `tool/output_delta` 到达，`tool/result` 紧随其后——窗口只存在毫秒级。实证：会话 `01fa7167` 的 `echo LINE-1 & ping…` 三个 echo 在 6.2s 内跑完，`tool/output_delta` **仅 1 条**，其 `stdout` 一次性为 `"LINE-1 \nLINE-2 \nLINE-3 \n"`。叠加 bash 工具 **10.0s 硬超时**（见 OBS-014）与模型不确定性（本轮 6 次尝试中出现 1 次模型不改写命令、1 次完全拒绝调用工具、1 次 3.5 分钟退化循环），该窗口是移动靶。
 
-**本轮实际观察到**：窗口确实渲染过（3 次），默认态为 `tool-out-body tool-out-wrap` + 按钮文案「不换行」，内容为真实输出（`LINE-1 LINE-2 LINE-3`）。**未观察到**：换行点击的切换效果、`↓ 最新` 的出现与点击（它还需要「流式中用户上滚」这一叠加条件）。
+**本轮实际观察到**：窗口确实渲染过（3 次），默认态为 `tool-out-body tool-out-wrap` + 按钮文案「不换行」，内容为真实输出（`LINE-1 LINE-2 LINE-3`）。**未观察到**：换行点击的切换效果、`↓ 最新` 的出现与点击（它还需要「流式中用户上滚」这一叠加条件）。（**第四轮已用 mock 流全部点到并变异验证**，见下文「第四轮」。）
 
-**测试侧现状（勿误认为已覆盖）**：`ToolCard.test.tsx` 只断言窗口的**存在条件**（`tool-out-stream` 的有/无），**没有**换行或跳转的点击用例；`j-scroll.spec.ts:53` 只断言非流式态**不出现** `↓ 最新`。两处点击均无覆盖，也未能在真机点击——如实登记，不当作已完成。
+**测试侧现状（本轮时点，勿误认为已覆盖）**：`ToolCard.test.tsx` 只断言窗口的**存在条件**（`tool-out-stream` 的有/无），**没有**换行或跳转的点击用例；`j-scroll.spec.ts:53` 只断言非流式态**不出现** `↓ 最新`。两处点击均无覆盖，也未能在真机点击——如实登记，不当作已完成。（**该缺口已由 `web/e2e/m-stream-affordances.spec.ts` 在第四轮闭合。**）
 
 ### 本轮新发现的**后端**问题（含根因文件行号，供后端修复）
 
@@ -745,7 +747,7 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 
 **审阅者结论**：**approve with a P2 comment fix**——该用例确实锁住了此前零覆盖的关闭按钮（空 `onClick` 变异会让它红），路由优先级与其余 gate 均确认无误；要求订正注释里的覆盖声明，并把惰性的粘性构件简化或改成测真实行为（两者均已照做）。它另确认：未改动任何生产代码、无其它 spec 与之重复、`oxlint` 仍是 **35 warnings / 0 errors**。
 
-**审查后的最终门禁**：tsc ✓ · vitest **497 passed**（+3）· oxlint **35 warnings / 0 errors** · playwright **100 passed** · vite build ✓。
+**该轮审查后的门禁（`l-auth-banner`，历史快照）**：tsc ✓ · vitest **497 passed**（+3）· oxlint **35 warnings / 0 errors** · playwright **100 passed** · vite build ✓。
 
 ### 修正：文本比对审计本身不可靠（本轮自查，务必以真机点击为准）
 
@@ -786,8 +788,77 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 | 真机点击验证通过 | **38** | **前两轮已验**：`detail-back-btn`（返回 Timeline）、`density-btn`（密度四档）、身份令牌图标、主题切换、`act-node`（ToolCard 与 DelegationNode 两处展开）、`fork-btn`、`turn-collapse-btn`、`workspace-mode`、`recover-btn`、`follow-pill`、新建会话、会话行、发送、停止、模型选择、CopyButton、ControlPicker（权限模式）、`palette-item`。**本轮新验**：Inspector `detail-tab` ×2 标签（5 个实例）、`timeline-earlier`、`timeline-row`、`detail-terminal-row`、`io-tab` ×2 标签（4 个实例）、`json-row`、`child-back-btn`、`md-code-wrap-btn`、`example-chip`、`reasoning-header`、`act-inspect-chip`、`detail-tool-row`、`auth-panel-save`、`auth-panel-clear`、Inspector 展开/收起 |
 | 不可达 · 已补 e2e | 1 | `auth-banner-close`（本地未配 `jwt_secret`；新增 `l-auth-banner.spec.ts` + 变异验证） |
 | 不可达 · 按设计 | 3 | 审批卡「批准」「拒绝」（`auto_approve` 硬编码，OBS-006）；`ContextProviderPicker`（本部署后端目录为空 → 正确地不渲染，第 29 行；组件本身由 `picker-search-visibility.spec.ts` 用长目录 fixture 覆盖） |
-| 不可达 · 瞬态窗口 | 3 | `tool-out-wrap-btn`、`tool-out-jump`（见缺口 2）、`reasoning-jump`（同一族：需「流式中 + 用户上滚」才渲染，`ReasoningBlock.tsx:255` 的 `suspended &&`；其底层 `followLatest` 原语已由第 19 行的 `j-scroll.spec.ts` 用真实滚轮锁住） |
+| **已用可控流补点**（见本文末「第四轮」） | 3 | `tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`——**已不再是缺口**：新增 `m-stream-affordances.spec.ts` 用 mock 流把窗口钉住后**真实点击**，三个按钮各经一次变异验证 |
 
-**合计 45 = 38 + 1 + 3 + 3** ✓ —— 每个 `<button>` 都有明确去向：**38 个真机点过**，其余 7 个各有**书面理由**（e2e / 产品设计 / 瞬态窗口），不再有「不知道点没点过」的项。
+**该行账目已被「第四轮」取代**（下表为历史快照）：`**45 = 38 真机 + 4 真实浏览器点击（mock 网络）+ 1 e2e 内激活 + 2 产品不可达**`——即 **43/45 已被真实点击**，仅剩审批卡两个按钮因 `auto_approve` 硬编码而无法出现（需产品决策，OBS-006）。
+
 
 **附带证据：控制台干净**。走完上述全部点击后，页面控制台（含最近 3 次导航的保留消息）只有 **2 条 error**，且都是**本轮变异验证自身的残留**——临时改坏 `App.tsx` 再还原时，Vite HMR 报了一次 500 与一次「Failed to reload /src/App.tsx」。**没有**任何一条来自被点控件（Inspector tab / io-tab / JSON 展开 / 令牌保存 / 推理展开 / 委派钻取等）的应用级错误。
+
+---
+
+## 第四轮：三个瞬态按钮的确定性覆盖（把「缺口」补成「点过」）
+
+**起因**：第三轮把 `tool-out-wrap-btn` / `tool-out-jump` / `reasoning-jump` 记为「瞬态窗口不可达」——真机六次尝试只看到窗口、点不进去。但「不可达」不等于「不可能」：窗口之所以只有毫秒级，是因为**真实后端缓冲输出**，而不是按钮本身不可及。用**可控 mock 流**把窗口钉住即可确定性地点击。
+
+### 手段：不发终态帧，让容器保持「流式中」
+
+`lib/followLatest.ts:33-38` 决定 `suspended` 只在 `streaming === true` 时置位；而两个容器的 `streaming` 来源都是**投影状态**，不是 socket 是否开着：
+
+- 工具尾窗：`ToolCard.tsx:137` 传 `streaming={tool.status === 'running'}` —— **不发 `tool/result`** 即恒为 running；
+- 推理块：`ReasoningBlock.tsx:206` 传 `streaming={block.status === 'streaming'}` —— **不发 `reasoning/completed`** 即恒为 streaming。
+
+于是按 `c-tool-output.spec.ts` / `a-reasoning.spec.ts` 既有形态造帧（`routeApi` + `onSessionPost: fulfillSse` + 同一份 `events`），再补足文本量保证容器**可滚动**（滚动是 `suspended` 的前置条件，故测试里用 `expect(scrollable).toBe(true)` 显式断言该前置，而不是默默假设）。
+
+### 新增 `web/e2e/m-stream-affordances.spec.ts`（2 用例 × 2 视口）
+
+| 按钮 | 断言的可观察契约 |
+| --- | --- |
+| `tool-out-wrap-btn` | 默认「不换行」+ body `tool-out-wrap` → 点击变「自动换行」+ body `tool-out-nowrap`（且不再匹配 `tool-out-wrap`）→ 再点回到「不换行」+ `tool-out-wrap` |
+| `tool-out-jump` | 初始 0 个 → 上滚触发 `suspended` → **出现** → 点击 → **`toHaveCount(0)`**（回底即复位）且 `scrollHeight - scrollTop - clientHeight < 8`（真的回到底部，不只是隐藏） |
+| `reasoning-jump` | 同上：展开思考正文 → 初始 0 个 → 上滚 → 出现 → 点击 → 消失 + 真的回底 |
+
+### 变异验证（三个按钮各一次，全部生效）
+
+| 变异 | 结果 |
+| --- | --- |
+| `ToolCard` 换行按钮 `onClick={() => setWrap((v) => !v)}` 改空实现 | 两视口都红：`Expected: "自动换行" / Received: "不换行"` |
+| `ToolCard` `jump` 改空实现 | 两视口都红：`Expected: 0 / Received: 1`（点完浮标不消失） |
+| `ReasoningBlock` `jump` 改空实现 | 两视口都红：`Expected: 0 / Received: 1` |
+
+三次变异后均还原（`git diff` 无残留）。
+
+### 口径说明（避免把 mock 说成真机）
+
+这三次点击发生在**真实浏览器里的真实鼠标事件**上，只有**网络**被替换成 fixture。所以它与前 38 个的口径**不同**，登记时分开记：前者是「真实后端 + 真机」，这里是「真实浏览器点击 + mock 流」。这么做的正当性在于：这些按钮的渲染条件是**组件契约**（`streaming === true`），与「后端为什么缓冲输出」无关——任何会增量产出输出的后端（例如按行 flush 的容器 / Docker 沙箱）都会让这个窗口长期存在，届时这三个按钮就是常规可达控件。
+
+### 最终覆盖账目（45 个 `<button>`）
+
+| 验证口径 | 数量 | 按钮 |
+| --- | --- | --- |
+| 真实后端 + 真实浏览器点击 | **38** | 见第三轮清单 |
+| 真实浏览器点击 + **mock 流** | **3** | `tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`（本轮） |
+| 真实浏览器点击 + mock 401 | **1** | `auth-banner-close`（第三轮 `l-auth-banner.spec.ts`） |
+| e2e 内激活（mock 目录，键盘 Enter 触发） | **1** | `ContextProviderPicker` 触发器（`picker-search-visibility.spec.ts`） |
+| **产品不可达 · 仍无任何覆盖** | **2** | 审批卡「批准」「拒绝」——`App.tsx:336` 硬编码 `auto_approve: true`，该卡在本 UI **永不渲染**，且 `ApprovalCard` 无测试文件 |
+
+**合计 45 = 38 + 3 + 1 + 1 + 2** ✓ —— **43/45 已被真实点击**；剩下 2 个不是「没点到」，而是**在当前产品配置下不存在**：要验证它们得先让 UI 能发出审批请求（放开 `auto_approve` 或加一个「人工审批」档位），那是产品决策，已登记为 OBS-006。
+
+### 第四轮收尾：独立审查结论与 6 项 P3 处置
+
+新 spec 先送独立 agent 审查：**结论 approve，P0/P1/P2 均为 0**，P3 共 6 项。审查方另逐条排除了 5 个「疑似」——「点击不是真实点击」（无间接路径：`setWrap` / `jump` 是唯一改写点）、「fixture 态不可达」（`running + output + 无 result` 任何按行 flush 的工具都会出现）、`expect.poll` 阈值、`submitTask` 竞态、以及「与既有 spec 重复」（三个选择器全仓仅此一处点击）。**无空洞断言**：唯一「看起来空洞」的 `scrollable` 前置被确认**可证伪**（删掉 `.tool-out-body` 的 `max-height` 即变红；没有它 `scrollTop=0` 会变成空操作、jump 断言反而假通过）。
+
+6 项 P3 **全部已修**（非仅记录）：
+
+| # | 问题 | 处置 |
+| --- | --- | --- |
+| P3-1 | 文件头把三个按钮的挂载条件混为一谈（换行键实际**无** streaming 条件） | 头注释改为分别陈述：换行键看尾窗挂载条件（`ToolCard.tsx:136`）、两个跳转键才额外要求 `suspended`（`followLatest.ts:33-38`） |
+| P3-2 | 上滚是 `scrollTop=0` + **合成** `scroll` 事件，不是真实滚轮 | 头注释加「没锁什么」小节，明确划界（另：fixture 一次铺完，无「suspended 期间持续增量」时序） |
+| P3-3 | `if (aria-expanded==='false') click` 是**隐藏分支**，正常走不到 | 删掉条件分支，改为显式断言 `aria-expanded='true'`（顺带锁住 `disclosure.ts:109` 的流式自动展开规则） |
+| P3-4 | `toBe(true)` 失败只报 `Received: false`，看不出差距 | 改为数值断言 `expect(scroll, '容器必须可滚动…').toBeGreaterThan(client + 5)` |
+| P3-5 | 只断 class 名，删掉 `.tool-out-nowrap` 的真实 CSS 仍然会绿 | 补 `toHaveCSS('white-space', 'pre-wrap' / 'pre')`——断到**生效样式**而非类名 |
+| P3-6 | 头注释指向第三轮「缺口 2」，而那处当时仍写「无覆盖」 | 头注释明写该结论**已在第四轮作废并补齐**；第三轮原文亦加同向作废标记 |
+
+**加固后的变异复验（针对修改后的版本重跑，非沿用旧结论）**：换行 `onClick` → 空实现 ⇒ `Expected: "自动换行" / Received: "不换行"` 两视口红；`ToolCard` 跳转 `onClick` → 空实现 ⇒ `Expected: 0 / Received: 1`；`ReasoningBlock` 跳转同理 ⇒ `Expected: 0 / Received: 1`。三处均还原，`git ls-files --eol` 确认两个源文件回到 `i/lf w/lf`（**注意**：用 Python 文本模式改写会把 LF 变成 CRLF，`git diff` 因 `autocrlf=input` 而归一化看不出差异——必须用 `git ls-files --eol` 才能发现）。
+
+**第四轮最终门禁**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **104 passed**（100 + 本轮 4）· vite build ✓。

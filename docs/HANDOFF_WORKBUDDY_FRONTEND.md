@@ -220,7 +220,7 @@ RUN_INTERRUPTED: 'run/interrupted',  // T8 #138
 | Type check | `npx tsc -b` | exit 0 |
 | 单元测试 | `npx vitest run` | 28 files / 497 tests passed |
 | Lint | `npx oxlint` | 0 errors / 35 warnings（全部既有，**基线值：不得升高**） |
-| e2e | `npx playwright test --workers=2` | 100 passed |
+| e2e | `npx playwright test --workers=2` | 104 passed |
 | 生产构建 | `npx vite build` | ✓ built |
 
 ---

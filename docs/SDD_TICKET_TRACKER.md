@@ -237,10 +237,13 @@ merge 后追加。这是本批的协议偏离，记录在案。
 - **38 个真机点击通过**（本轮新验含：Inspector 5 tab、加载更早 200→410、时间线行跳转、终端行→工具焦点、io-tabs ×4、JSON 展开、返回父会话、代码块换行、**推理块展开**、**Inspect chip**、**Inspector 工具行**、**令牌保存/清除**、空态示例 chip）；
 - `auth-banner-close` 本地不可达（后端仅配 `jwt_secret` 时 401）→ 新增 `web/e2e/l-auth-banner.spec.ts`（含变异验证）；
 - **按设计不可达 3**：审批卡「批准」「拒绝」（`auto_approve` 硬编码，OBS-006）、`ContextProviderPicker`（本部署后端目录为空 → 正确不渲染）；
-- **瞬态窗口不可达 3**：`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`（均需「流式中 + 用户上滚」才渲染；cmd 缓冲输出使尾窗仅存毫秒级，叠加工具 10s 硬超时）→ 如实登记，未假装已点。
+- **瞬态窗口 3 已在第四轮补齐**：`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump` 原需「流式中 + 用户上滚」才渲染（cmd 缓冲输出使尾窗仅存毫秒级），已用 **mock 流钉住窗口**（不发 `tool/result` / `reasoning/completed` → 投影状态恒为 running/streaming）后**真实点击**并逐一变异验证，见 `web/e2e/m-stream-affordances.spec.ts`。
+
+**最终覆盖账目（第四轮后）**：`45 = 38 真机点击 + 3 mock 流真实点击 + 1 mock 401 真实点击 + 1 e2e 内激活 + 2 产品不可达`。即 **43/45 已被真实点击**；仅剩审批卡「批准」「拒绝」——`App.tsx:336` 硬编码 `auto_approve: true` 使该卡永不渲染，且 `ApprovalCard` 无测试，**需产品决策**（放开 `auto_approve` 或加人工审批档位）才能验证。
 
 **新发现的后端问题（含根因行号，需后端修复）**：OBS-011 子进程输出按 UTF-8 解码而 cmd.exe 输出 GBK → **乱码固化进 JSONL**（`sandbox/local.py:166-167`，铁证：原始字节中 U+FFFD 与侥幸合法的 GBK 双字节混杂）；OBS-012 `bash` 工具在 Windows 实为 cmd.exe（`shell=True`，`local.py:161`）→ bash 语法 41ms 失败；OBS-013 provider 退化重复（2,868 delta / 186,507 字符的同句循环，3.5 分钟无工具调用，另见多次 `model/fallback … InternalServerError`）；OBS-014 bash 工具 10.0s 硬超时且 `retryable:false`。
 
-**本批最终门禁（实跑）**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **100 passed**（`--workers=2`）· vite build ✓。
+**本批最终门禁（实跑）**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **104 passed**（`--workers=2`，含本轮瞬态三键 4 例）· vite build ✓。
+**第四轮新 spec 的独立审查**：0 个 P0/P1/P2，6 项 P3 **全部已修**（头注释挂载条件、合成滚动划界、显式 `aria-expanded`、数值化可滚动断言、`toHaveCSS` 断生效样式、作废指针），并按修改后版本**重跑三处变异**（均红）。详见登记簿「第四轮收尾」。
 
 **本轮审查（`l-auth-banner.spec.ts`）**：0 个 P0/P1，1 项 **P2** + 4 项 P3，**全部已处置**。P2 是**注释谎报覆盖**——我写「`api.test.ts` 测 401 分类」，实则全 `src` 测试树零个 401 引用（该缝当时**无单测**）。已把谎报改成事实：`api.test.ts` 新增 3 例（401→`UnauthorizedError`、广播 detail、**body 非 JSON 的回退文案**）。P3 中一项揭示了**真实行为被我注释说反**：关闭**不是**永久忽略（`App.tsx:148` 每次广播都会重新显示），故 e2e 改为走「配置令牌」真实路径断言**横幅重新出现**（变异验证：删掉 `refreshSessions()` → 两视口都红）。

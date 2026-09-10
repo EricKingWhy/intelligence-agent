@@ -174,9 +174,11 @@ git -C D:/intelligence-agent merge feat/frontend      # 需用户批准
 | 3 P3 提前返回同时覆盖 `failed`/`cancelled`，优先级仅靠口头不变量 | **已修（显式化）**：条件补成 `run_interrupted && run_status === 'completed'`——真实数据下恒真，故对全部合法日志行为**逐字节不变**；破坏不变量时退化为「更晚的终态赢」。新增一例锁住该退化语义 |
 | 4 P3 后续发消息 RTT 内短暂显示「已中断」+ 图标风格 | **不改**：瞬时态比修复前的绿色「已完成」更接近真相；图标纯审美，换图标零收益（§9.3） |
 
-### 8.5 门禁（本批最终实跑，含第三轮）
+### 8.5 门禁（本批最终实跑，含第三、四轮）
 
-tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **100 passed** · vite build ✓。
+tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **104 passed**（含第四轮瞬态三键 4 例）· vite build ✓。
+
+> 第四轮新增 `m-stream-affordances.spec.ts`（2 用例 × 2 视口），把此前唯一没点过的三个按钮（`tool-out-wrap-btn` / `tool-out-jump` / `reasoning-jump`）用 mock 流钉住窗口后**真实点击**；独立审查结论 approve（0 P0/P1/P2、6 项 P3 全修），并按加固后版本重跑三处变异均红。
 
 > 第三轮的审查（针对 `l-auth-banner.spec.ts`）发现并已修一项 **P2**：我原注释声称 `api.test.ts` 覆盖 401 分类，**实则全 `src` 测试树零个 401 引用**（该缝无单测）。已补齐 3 例（401→`UnauthorizedError`、`onUnauthorized` 广播 detail、body 非 JSON 的回退文案）——故 vitest 由 494 升至 497。同一轮还把一处**说反的真实行为**订正：横幅关闭**并非**永久忽略，任何新 401 都会让它回来（e2e 已按真实行为断言，并做变异验证）。
 
@@ -206,7 +208,14 @@ tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 error
 
 - 源码 `<button>` 共 **45 个**（17 个文件）；`onClick` 的非 `<button>` 元素 **0 个** → 按钮即全部点击面。
 - 对照结果：初版用**关键词比对**判出「11 项未覆盖」，但复查发现该方法**两个方向都会错**——`保存`/`清除` 命中的是无关散文（登记簿第 160/167 行），于是令牌弹窗的「保存」「清除」实际从未被点过却判为 OK（假阳性）；而 `滚动到最新`（第 19 行有 e2e + 真机证据）、`恢复会话`（第 41 行）其实有覆盖（假阴性）。**故放弃文本比对，改为逐个真机点击。**
-- **最终逐标签核对（45 个）**：**38 个真机点击验证通过**；1 个 `auth-banner-close` 本地不可达 → **已补 e2e**；3 个**按设计不可达**（审批卡「批准」「拒绝」= `auto_approve` 硬编码 OBS-006；`ContextProviderPicker` = 本部署后端目录为空，正确地不渲染）；3 个**瞬态窗口不可达**（`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`——均需「流式中 + 用户上滚」才渲染）。即 **45 = 38 + 1 + 3 + 3**，每个 `<button>` 都有明确去向与书面理由。
+- **最终逐标签核对（45 个）**——第四轮补齐瞬态窗口后的**最终账目**：
+  - **38** 个「真实后端 + 真实浏览器」点击验证通过；
+  - **3** 个（`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`）在第四轮用 **mock 流钉住窗口后真实点击**（不发 `tool/result` / `reasoning/completed` → 投影状态恒为 running/streaming），新增 `web/e2e/m-stream-affordances.spec.ts`，三个按钮各经一次变异验证；
+  - **1** 个 `auth-banner-close` 用 **mock 401** 真实点击（`l-auth-banner.spec.ts`，本地无 `jwt_secret` 时它不出现）；
+  - **1** 个 `ContextProviderPicker` 触发器在 `picker-search-visibility.spec.ts` 内用 mock 目录激活（本部署后端目录为空，故真机上正确地不渲染）；
+  - **2** 个**产品不可达**：审批卡「批准」「拒绝」——`App.tsx:336` 硬编码 `auto_approve: true` 使该卡永不渲染，且 `ApprovalCard` 无测试文件。
+
+  即 **45 = 38 + 3 + 1 + 1 + 2**，**43/45 已被真实点击**。剩下 2 个不是「漏点」而是「当前配置下不存在」：要验证需先让 UI 能发出审批请求（放开 `auto_approve` 或新增人工审批档位）——**需产品决策**，已登记 OBS-006。
 
 ### 需要集成 AI 转交后端的问题（本轮主产出，均有文件行号）
 
@@ -221,6 +230,10 @@ tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 error
 
 `web/e2e/l-auth-banner.spec.ts`（×2 视口）：401 → 引导横幅 → 点「关闭提示」→ 横幅消失且不复现。因该按钮在本地开发**不可达**（后端仅配 `jwt_secret` 时校验令牌，`web/app.py:594` fail-open），故按后端**已冻结的契约形状**（`{"detail":"Missing identity token"}`）在网络层造 401。**变异验证**：把关闭回调改为空实现 → 两视口都红（`Expected: hidden / Received: visible`），随后还原。
 
-### 未覆盖（如实登记，勿误判为已点）
+### 瞬态窗口：第三轮记为缺口，**第四轮已补齐**
 
-`tool-out-wrap-btn`（自动换行）与 `tool-out-jump`（↓ 最新）：二者所在的流式尾窗要求 `tool.output.length > 0 && (running || !result)`，而本后端 cmd.exe **缓冲输出**，整段输出以**单个终态 delta** 到达、`result` 紧随其后 → 窗口仅存毫秒级（实证：`echo LINE-1 & ping…` 6.2s 跑完，`output_delta` 仅 1 条）。叠加工具 10s 硬超时与模型不确定性（本轮 6 次尝试里 1 次模型拒绝调用工具、1 次 3.5 分钟退化循环），该窗口是移动靶。本轮**观察到**窗口渲染过 3 次（默认 `tool-out-wrap`、「不换行」、真实内容 `LINE-1 LINE-2 LINE-3`），**未观察到**换行点击与 `↓ 最新`。测试侧：`ToolCard.test.tsx` 只覆盖窗口的**存在条件**，`j-scroll.spec.ts:53` 只断言非流式态不出现 `↓ 最新`——两处点击均无覆盖。
+`tool-out-wrap-btn`（自动换行）、`tool-out-jump` 与 `reasoning-jump`（↓ 最新）：三者所在的流式容器要求 `streaming === true` 才会出现 `suspended` 浮标，而本后端 cmd.exe **缓冲输出**（整段输出以**单个终态 delta** 到达、`result` 紧随其后），叠加工具 10s 硬超时，真机上该窗口仅存毫秒级（实证：`echo LINE-1 & ping…` 6.2s 跑完、`output_delta` 仅 1 条；第三轮 6 次真机尝试 1 次模型拒调工具、1 次 3.5 分钟退化循环）。第三轮如实登记为「无法点击」。
+
+**第四轮改为可控复现**：两个容器的 `streaming` 都取自**投影状态**而非 socket——工具是 `tool.status === 'running'`（`ToolCard.tsx:137`），推理是 `block.status === 'streaming'`（`ReasoningBlock.tsx:206`）。故 mock 流里**不发 `tool/result` / `reasoning/completed`**，窗口即常驻；再补足文本量让容器可滚动（`suspended` 的前置条件，测试里显式断言 `scrollable === true`），即可确定性点击。新增 `web/e2e/m-stream-affordances.spec.ts`（2 用例 × 2 视口），三个按钮**各经一次变异验证**：换行 `onClick` 改空实现 → `Expected: "自动换行" / Received: "不换行"`；两个 `jump` 改空实现 → `Expected: 0 / Received: 1`。
+
+**口径**：点击是真实浏览器里的真实鼠标事件，只有**网络**是 fixture——故与前 38 个（真实后端）分开记账，不混为「真机」。
