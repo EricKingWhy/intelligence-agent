@@ -24,9 +24,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
+import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 
 /** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
  *
@@ -92,24 +93,17 @@ export function decideCancel(liveSid: string | null): CancelDecision {
   return liveSid ? { kind: 'cancel-request', sessionId: liveSid } : { kind: 'abort-transport' };
 }
 
-// ── T4（#97）重连契约纯函数（后端契约回执 §3，spec 02 §10 / 03 §20）──
-
-/** 流结束后的下一步决策。终态（run/completed|failed）已见 → 正常收尾迁移；
- *  未终态且 sid 已知且重试额度未尽 → 重连（GET stream?after_seq=lastApplied
- *  续传，重放由 seq 去重门吸收）；sid 未知（首帧未确认，无从对账）或额度
- *  耗尽 → 放弃，走错误路径（悬空 run 的恢复入口由既有 recover UI 承接）。 */
-export type StreamEndDecision = 'migrate' | 'reconnect' | 'give-up';
-export const MAX_RECONNECT_ATTEMPTS = 3;
-
-export function decideStreamEnd(input: {
-  terminalSeen: boolean;
-  sidKnown: boolean;
-  attempts: number;
-}): StreamEndDecision {
-  if (input.terminalSeen) return 'migrate';
-  if (!input.sidKnown || input.attempts >= MAX_RECONNECT_ATTEMPTS) return 'give-up';
-  return 'reconnect';
-}
+// ── T4（#97）重连契约（后端契约回执 §3，spec 02 §10 / 03 §20）──
+// 决策纯函数与重连状态机同住 lib/reconnect.ts（无 React / 定时器 / I/O，
+// 可独立单测）；此处 re-export 保持既有导入路径不破。
+export {
+  decideStreamEnd,
+  reconnectDelayMs,
+  RECONNECT_STALL_MS,
+  RECONNECT_BANNER_DELAY_MS,
+  MAX_RECONNECT_ATTEMPTS,
+  type StreamEndDecision,
+} from '../lib/reconnect';
 
 /** seq gap 检测（契约 §1：subscriber 队列满时后端丢最旧保最新，gap = 重连信号）。
  *  null seq（ephemeral 帧）与无基线（首帧前）永不构成 gap；回跳 seq 由 T1
@@ -125,20 +119,6 @@ export function parseTruncated(data: Record<string, unknown>): { latestSeq: numb
   const seq = data.latest_seq;
   return typeof seq === 'number' && Number.isFinite(seq) ? { latestSeq: seq } : null;
 }
-
-/** 重连退避（issue #97：指数退避）：500ms 起步 ×2，封顶 4s。attempt 从 1 计。 */
-export function reconnectDelayMs(attempt: number): number {
-  return Math.min(500 * 2 ** (attempt - 1), 4000);
-}
-
-/** T4（#97）停摆检测阈值（ms）：live 流超过该时长无任何帧且未终态 → 视为
- *  静默断流（后台杀流/连接僵死），主动断开走重连（重放幂等，代价小）。
- *  回前台由 visibilitychange 即时触发同一检查；hook 级心跳兜底其余路径。 */
-export const RECONNECT_STALL_MS = 10_000;
-
-/** 断线条显示延迟（ms，spec 03 §20「only if reconnect lasts long enough to
- *  matter」）：500ms 级瞬时重连不闪条；超时未接通才出现（role=status 不轰炸）。 */
-export const RECONNECT_BANNER_DELAY_MS = 800;
 
 /** live→viewing 迁移时是否显示「正在加载历史…」占位符。
  *
@@ -261,7 +241,10 @@ export function useSession() {
   // 即自增，旧流全部回调自失效）；terminalSeen = 终态帧已达（决定流结束走
   // 迁移还是重连）；lastFrameAt = 最后一帧墙钟（停摆检测基准）。
   const lastAppliedSeqRef = useRef<number | null>(null);
-  const reconnectAttemptRef = useRef(0);
+  // 重连策略状态机（T4 #97，深化 C1）：额度 / 单飞 / 进展游标三份状态从
+  // attachLiveStream 闭包里剥出——它们此前散在一个 ref 与两个闭包变量里，
+  // 迁移规则只能靠通读整段闭包确认。控制器无 I/O 无定时器，调度仍留在此处。
+  const reconnectRef = useRef<ReconnectController>(new ReconnectController());
   const streamGenRef = useRef(0);
   const terminalSeenRef = useRef(false);
   const lastFrameAtRef = useRef(Date.now());
@@ -459,10 +442,7 @@ export function useSession() {
           // 每轮重连都是 200 + 重放零新进展——若在 attach 成功时清零额度，
           // give-up 不可达 → 无限重连、recover 入口永不出现。仅当新帧 seq
           // 超过重连起点游标（真进展）才复位。
-          if (reconnectProgressBase !== null && event.seq !== null && event.seq > reconnectProgressBase) {
-            reconnectAttemptRef.current = 0;
-            reconnectProgressBase = null;
-          }
+          reconnectRef.current.observeProgress(event.seq);
           // 首条用户消息到达时缓存行标题（Session Model E 轮）。
           if (sid) {
             const content = extractSessionTitle(event);
@@ -507,27 +487,26 @@ export function useSession() {
 
         // 单飞守卫（Standards 轴 P1）：同一流实例任一时刻最多一条重连链——
         // 同批多帧 gap / 停摆心跳 / visibility 检查都汇入 scheduleReconnect，
-        // 挂起期间重复触发在此短路（对齐 sse.ts cancelled 的单流实例模式）。
-        let reconnectPending = false;
-        // 重连起点游标（Spec 轴 P0）：额度复位只在观察到超过它的真进展时发生。
-        let reconnectProgressBase: number | null = null;
+        // 挂起期间重复触发在 request 内短路（对齐 sse.ts cancelled 的单流
+        // 实例模式）。额度 / 单飞 / 进展游标三份状态见 lib/reconnect.ts。
 
-        /** 重连调度（契约 §3）：指数退避（reconnectDelayMs）+ 额度上限
-         *  （decideStreamEnd）。404 = 会话不存在，立即放弃不空转。重连成功
-         *  接流后额度与单飞标记复位。显式 cancel（T5）不经过这里——
-         *  cancel-request 分支不 abort 流，终态帧经流广播驱动 finishLive。 */
+        /** 重连调度（契约 §3）：指数退避 + 额度上限（decideStreamEnd）。
+         *  404 = 会话不存在，立即放弃不空转。接流成功即释放单飞；额度复位
+         *  以 onEvent 观察到真进展为准（见上）。显式 cancel（T5）不经过这里
+         *  ——cancel-request 分支不 abort 流，终态帧经流广播驱动 finishLive。 */
         const scheduleReconnect = (sid: string | null, reason: string) => {
-          if (streamGenRef.current !== gen || reconnectPending) return;
-          const decision = decideStreamEnd({
+          if (streamGenRef.current !== gen) return;
+          const req = reconnectRef.current.request({
+            sid,
             terminalSeen: terminalSeenRef.current,
-            sidKnown: Boolean(sid),
-            attempts: reconnectAttemptRef.current,
+            lastAppliedSeq: lastAppliedSeqRef.current,
           });
-          if (decision === 'migrate') {
+          if (req === null) return; // 单飞中：已有重连链在途
+          if (req.decision === 'migrate') {
             finishLive();
             return;
           }
-          if (decision === 'give-up') {
+          if (req.decision === 'give-up') {
             coalescerRef.current = null;
             setReconnecting(false);
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
@@ -535,15 +514,10 @@ export function useSession() {
             refreshSessions();
             return;
           }
-          reconnectPending = true;
-          reconnectAttemptRef.current += 1;
-          const attempt = reconnectAttemptRef.current;
-          // 记录重连起点游标：额度复位只看是否出现超过它的真进展（onEvent）
-          reconnectProgressBase = lastAppliedSeqRef.current;
           // 断线状态条延迟显示（spec 03 §20）：瞬时重连不闪条——延迟到期仍
-          // 在挂起中（reconnectPending）才出现；attach 成功即复位不显示。
+          // 在挂起中才出现；接流成功即释放单飞，条不显示。
           setTimeout(() => {
-            if (streamGenRef.current === gen && reconnectPending) setReconnecting(true);
+            if (streamGenRef.current === gen && reconnectRef.current.isPending) setReconnecting(true);
           }, RECONNECT_BANNER_DELAY_MS);
           setTimeout(() => {
             if (streamGenRef.current !== gen) return;
@@ -552,7 +526,7 @@ export function useSession() {
                 const after = lastAppliedSeqRef.current ?? -1;
                 const streamRes = await streamSession(sid as string, after);
                 if (streamGenRef.current !== gen) return;
-                reconnectPending = false;
+                reconnectRef.current.release();
                 if (streamRes.status === 404) {
                   coalescerRef.current = null;
                   setReconnecting(false);
@@ -562,22 +536,21 @@ export function useSession() {
                   return;
                 }
                 if (!streamRes.ok || !streamRes.body) throw new Error(`reconnect ${streamRes.status}`);
-                // 额度不在此复位（Spec 轴 P0）：以 onEvent 观察到真进展为准
                 setReconnecting(false);
                 attach(streamRes);
               } catch (e) {
-                reconnectPending = false; // 放回调度口（额度仍受 decideStreamEnd 约束）
+                reconnectRef.current.release(); // 放回调度口（额度仍受 decideStreamEnd 约束）
                 scheduleReconnect(sid, (e as Error).message || reason);
               }
             })();
-          }, reconnectDelayMs(attempt));
+          }, req.delayMs);
         };
 
         /** stream/truncated（backlog>1000，契约 §3）：GET /events 全量重建
          *  （projectHistory 同一管线，不变量 #22）→ 以重建后真实 max seq 续传
          *  （payload latest_seq 仅是回显，游标以本地真实事实为准）。 */
         const doTruncatedRebuild = (sid: string) => {
-          reconnectPending = true;
+          reconnectRef.current.hold();
           setReconnecting(true); // 全量重建（GET /events + projectHistory）非瞬时，条即时在场
           void (async () => {
             try {
@@ -592,12 +565,12 @@ export function useSession() {
               lastAppliedSeqRef.current = maxSeq;
               const streamRes = await streamSession(sid, maxSeq ?? -1);
               if (streamGenRef.current !== gen) return;
-              reconnectPending = false;
+              reconnectRef.current.release();
               if (!streamRes.ok || !streamRes.body) throw new Error(`reconnect ${streamRes.status}`);
               setReconnecting(false);
               attach(streamRes);
             } catch (e) {
-              reconnectPending = false;
+              reconnectRef.current.release();
               scheduleReconnect(sid, (e as Error).message || 'full rebuild failed');
             }
           })();
@@ -632,7 +605,7 @@ export function useSession() {
       setReconnecting(false);
       lastAppliedSeqRef.current = null;
       terminalSeenRef.current = false;
-      reconnectAttemptRef.current = 0;
+      reconnectRef.current.reset();
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId: null });
@@ -675,7 +648,7 @@ export function useSession() {
       liveSidRef.current = sessionId;
       setReconnecting(false);
       terminalSeenRef.current = false;
-      reconnectAttemptRef.current = 0;
+      reconnectRef.current.reset();
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId });
@@ -687,6 +660,13 @@ export function useSession() {
           ...(opts?.amend ?? {}),
         });
         if (res.status === 422) throw new Error(CONTINUE_PARAMS_ERROR_TEXT);
+        if (res.status === 409) {
+          // T8 #138：409 = 存在需人工裁决的 UNKNOWN Operation。
+          // detail 含 tool_name 和 tool_call_id；不伪造「结果未知」继续。
+          let detail = '';
+          try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
+          throw new Error(detail || '存在需要人工裁决的高风险操作');
+        }
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
         // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
         // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。
@@ -784,6 +764,34 @@ export function useSession() {
     [refreshSessions],
   );
 
+  /** T7 #137：切换会话当前模型（POST /api/sessions/{id}/model）。
+   *
+   * - 切换不打断在途 run——下一轮 run 从事件流派生当前模型生效
+   * - 响应回传规范 model_id，不回显请求值
+   * - 404 = session 不存在；422 = provider/model_id 不在 catalog
+   *
+   * 错误向上抛——调用方决定是否展示。 */
+  const changeModel = useCallback(
+    async (sessionId: string, provider: string, modelId: string) => {
+      return changeSessionModel(sessionId, provider, modelId);
+    },
+    [],
+  );
+
+  /** T7 #137：从历史用户消息 seq 派生 child session（POST /api/sessions/{id}/forks）。
+   *
+   * - 锚点消息本身不进 child seed
+   * - child 继承父会话当前模型
+   * - copy-on-fork：父 workspace 整目录复制为 child 的
+   *
+   * 成功后返回 child session_id——调用方决定是否跳转。 */
+  const fork = useCallback(
+    async (sessionId: string, fromSeq: number) => {
+      return forkSession(sessionId, fromSeq);
+    },
+    [],
+  );
+
   return {
     sessions,
     selectedId,
@@ -800,5 +808,7 @@ export function useSession() {
     cancelStream,
     recover,
     refreshSessions,
+    changeModel,
+    fork,
   };
 }

@@ -48,6 +48,8 @@ interface Props {
   onOpenSession?: (sessionId: string) => void;
   /** Inspector 钻取子会话（v2 PRD §10.5 委派配对）——右栏原位展开 child。 */
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
+  /** T7 #137：从指定用户消息 seq 分叉新会话。 */
+  onFork?: (fromSeq: number) => void;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -58,7 +60,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild }: Props) {
+export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
@@ -198,6 +200,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
                 onFocusTool={onFocusTool}
                 onOpenSession={onOpenSession}
                 onInspectChild={onInspectChild}
+                onFork={onFork}
               />
             </div>
           ))}
@@ -234,7 +237,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-const TurnView = memo(function TurnView({ turn, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild }: { turn: Turn; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void }) {
+const TurnView = memo(function TurnView({ turn, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork }: { turn: Turn; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -274,6 +277,15 @@ const TurnView = memo(function TurnView({ turn, model, density, disclosure, reas
         ) : (
           <div className="msg msg-user">
             <div className="msg-bubble-user">{turn.user_message}</div>
+            {onFork && turn.status !== 'streaming' && (
+              <button
+                className="fork-btn"
+                title="从此处分叉新会话"
+                onClick={() => onFork(turn.step_id)}
+              >
+                分叉
+              </button>
+            )}
           </div>
         ))}
 

@@ -626,6 +626,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   max-width: 78%;
   font-size: var(--text-base);
 }
+.fork-btn {
+  margin-top: var(--space-xs);
+  align-self: flex-end;
+  padding: 2px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.fork-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
 
 /* ── Phase 12 白盒透明（ADR-0014）：failure-guard / 注入纠正消息 ──
  * 系统注入条：harness 的 user-role 纠正消息不是真人输入——居中中性条，
@@ -3425,6 +3441,17 @@ button.json-row {
 
 /* ── T4（#97）重连状态条：瞬时断连不清屏——条只在重连期间在场 ── */
 .reconnect-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-sm);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.interrupt-banner {
   display: flex;
   align-items: center;
   gap: var(--space-sm);

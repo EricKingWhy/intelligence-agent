@@ -148,6 +148,7 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     run_cancelled: false, compactions: [], reconcile_queue: [], pending_approvals: [],
     events: [], unknown_events: [], model: null, usage_total: null, cost_usd: null,
     trace_id: null, trace_url: null, model_fallback: null, run_id: null,
+    run_interrupted: null, turn_index: null,
     seenSeqs: new Set<number>(),
   });
 

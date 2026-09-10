@@ -147,13 +147,54 @@ function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
   });
 }
 
+/** 请求体字段表：字段 → [契约键, 值]，返回 null = **不发键**（= 后端默认）。
+ *
+ *  `Record<keyof T, …>` 是编译期完整性锁：payload 类型新增字段而此处未登记
+ *  → tsc 失败。此前的手写白名单会**静默**把新字段丢掉——请求照发、后端拿
+ *  不到，是最难查的一类失效。字段判空规则因语义而异（falsy / undefined /
+ *  非空数组），故此表只统一「构造」，不强行统一「判空」。
+ *
+ *  契约键的类型是 `keyof T & string` 而非裸 string：本项目的 payload 键与线上
+ *  契约键同名，把这条不变量写进类型——写错键名（如 'max_step'）直接编译失败，
+ *  而不是发出一条后端不认的请求。 */
+type BodyEntry<T> = [keyof T & string, unknown] | null;
+
+type BodyFields<T> = Record<keyof T, (payload: T) => BodyEntry<T>>;
+
+/** 依字段表构造请求体（null 条目跳过）。键序 = 表内声明序。 */
+function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  for (const serialize of Object.values(table) as ((p: T) => BodyEntry<T>)[]) {
+    const entry = serialize(payload);
+    if (entry) body[entry[0]] = entry[1];
+  }
+  return body;
+}
+
+/** create 路径字段表（与下方 sendMessage 的 amend 四项同词汇、各自登记）。 */
+const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
+  task: (p) => ['task', p.task],
+  workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
+  max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+  auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
+  model: (p) => (p.model ? ['model', p.model] : null),
+  permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
+  agent_profile: (p) => (p.agent_profile ? ['agent_profile', p.agent_profile] : null),
+  reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
+  context_providers: (p) =>
+    p.context_providers && p.context_providers.length > 0 ? ['context_providers', p.context_providers] : null,
+};
+
 /** POST a new session. Returns the raw Response — SSE stream is consumed by caller.
- *  401 throws UnauthorizedError (after broadcasting) — fail fast, no empty stream. */
+ *  401 throws UnauthorizedError (after broadcasting) — fail fast, no empty stream.
+ *
+ *  「有值才带键」的**单一执行点**（与 sendMessage 同一契约，见 lib/amend.ts）：
+ *  空值 / 空数组不发键 = 后端默认；调用方只做字段名映射，不判空。 */
 export async function startSession(payload: StartSessionPayload): Promise<Response> {
   return apiFetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(buildBody(payload, START_SESSION_FIELDS)),
   });
 }
 
@@ -187,24 +228,26 @@ export interface SendMessagePayload {
   context_providers?: string[];
 }
 
+/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；mode / max_steps
+ *  有后端默认值，故缺省在此补齐（与 create 路径「缺省即不发键」不同）。 */
+const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
+  content: (p) => ['content', p.content],
+  mode: (p) => ['mode', p.mode ?? 'queue'],
+  max_steps: (p) => ['max_steps', p.max_steps ?? 10],
+  model: (p) => (p.model ? ['model', p.model] : null),
+  agent_profile: (p) => (p.agent_profile ? ['agent_profile', p.agent_profile] : null),
+  reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
+  context_providers: (p) =>
+    p.context_providers && p.context_providers.length > 0 ? ['context_providers', p.context_providers] : null,
+};
+
 export async function sendMessage(sessionId: string, payload: SendMessagePayload): Promise<Response> {
   return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    // 续聊 amend：有值才带键（空值/空数组不发键 = 后端默认）。这里是兜底
-    // 归一化——调用方即使直接传 undefined / [] 也不会脏 payload；App.tsx
-    // 续聊分支另有与 create 分支同款的「有值才带」展开，两者不冲突。
-    body: JSON.stringify({
-      content: payload.content,
-      mode: payload.mode ?? 'queue',
-      max_steps: payload.max_steps ?? 10,
-      ...(payload.model ? { model: payload.model } : {}),
-      ...(payload.agent_profile ? { agent_profile: payload.agent_profile } : {}),
-      ...(payload.reasoning_effort ? { reasoning_effort: payload.reasoning_effort } : {}),
-      ...(payload.context_providers && payload.context_providers.length > 0
-        ? { context_providers: payload.context_providers }
-        : {}),
-    }),
+    // 「有值才带键」的单一执行点（与 startSession 同一契约，见 lib/amend.ts）：
+    // 调用方只做字段名映射，空值 / 空数组的丢弃只在这里发生。
+    body: JSON.stringify(buildBody(payload, SEND_MESSAGE_FIELDS)),
   });
 }
 
@@ -322,3 +365,72 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
   if (!res.ok) throw new RecoverError(res.status, `恢复失败（${res.status}）`);
   return res.json();
 }
+
+// ── Session-level model switch（T7 #137，PRD §2.3）──
+
+/** POST /api/sessions/{id}/model 的响应体。
+ *  ``effective_model_id`` 是 service 解析出的规范 picker id——不能回显请求值，
+ *  否则上游 model_name / "default" 别名会与事件里的 to_model_id 对不上。 */
+export interface ModelChangeResult {
+  status: string;
+  provider: string;
+  model_id: string;
+}
+
+/** 切换会话当前模型并写 ``model/changed``（PRD §2.3）。
+ *
+ * - 切换不打断在途 run——下一轮 run 从事件流派生当前模型生效
+ * - ``GET /api/models`` 的默认条目（is_default=true）也是合法 POST target = 切回默认链
+ * - 响应回传规范 model_id（service 解析出的 picker id），不回显请求值
+ *
+ * 错误码：
+ * - 404 = session 不存在
+ * - 422 = provider/model_id 不在 catalog
+ */
+export async function changeSessionModel(
+  sessionId: string,
+  provider: string,
+  modelId: string,
+): Promise<ModelChangeResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, model_id: modelId }),
+  });
+  if (!res.ok) throw new Error(`change model ${res.status}`);
+  return res.json();
+}
+
+// ── Fork（T7 #137，PRD §2.4）──
+
+/** POST /api/sessions/{id}/forks 的响应体。 */
+export interface ForkResult {
+  session_id: string;
+  from_seq: number;
+}
+
+/** 从历史用户消息 seq 派生 child session（PRD §2.4）。
+ *
+ * - 锚点消息本身不进 child seed（child 侧由用户重新发送，pi /fork 同款语义）
+ * - child 继承父会话当前模型
+ * - HTTP 端点不生成 tail summary（确定性、无模型调用）
+ * - copy-on-fork：父 workspace 整目录复制为 child 的
+ *
+ * 错误码：
+ * - 404 = session 不存在
+ * - 409 = 在途 run（历史未 settled）
+ * - 422 = from_seq 不是合法 fork 锚点（不是用户消息 seq）
+ */
+export async function forkSession(
+  sessionId: string,
+  fromSeq: number,
+): Promise<ForkResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/forks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_seq: fromSeq }),
+  });
+  if (!res.ok) throw new Error(`fork ${res.status}`);
+  return res.json();
+}
+

@@ -17,6 +17,7 @@ describe('initConversation', () => {
       compactions: [], reconcile_queue: [], pending_approvals: [], events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
+      run_interrupted: null, turn_index: null,
       seenSeqs: new Set(),
     });
   });
@@ -884,6 +885,58 @@ describe('applyEvent — df4f7d8 新形状', () => {
   it('summarizeEvent：MEMORY_DEGRADED / MODEL_FAILED 空摘要（类型标签足够）', () => {
     expect(summarizeEvent(ev({ type: EventType.MEMORY_DEGRADED, data: { reason: 'x' } }))).toBe('');
     expect(summarizeEvent(ev({ type: EventType.MODEL_FAILED }))).toBe('');
+  });
+
+  // ── 事件语义注册表（架构深化 C2）：穷尽性由 tsc 强制
+  //    （Record<EventTypeValue, EventSemantics> 缺键即编译失败）；这里锁定
+  //    「词汇表内但前端未接线」那批类型的**既有兜底行为**，使未来接线成为
+  //    一次显式决定，而不是悄悄改变。
+
+  it('未接线类型仍进 unknown_events（显式登记，行为与重构前一致）', () => {
+    for (const type of [
+      EventType.ARTIFACT_EXTERNALIZED,
+      EventType.COMPACTION_START,
+      EventType.COMPACTION_END,
+      EventType.MESSAGE_QUEUED,
+      EventType.QUEUE_CANCELLED,
+      EventType.STEER_REQUESTED,
+      EventType.STEER_APPLIED,
+    ]) {
+      const s = applyEvent(initConversation('s'), ev({ type }));
+      expect(s.unknown_events, `${type} 应落 unknown_events`).toHaveLength(1);
+    }
+  });
+
+  it('RUN_INTERRUPTED：终态 + run_interrupted 真值 + Timeline 摘要', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({
+      type: EventType.RUN_INTERRUPTED,
+      data: { interrupted_seq: 42, reason: 'process_restart' },
+      step_id: 3,
+    }));
+    expect(s.unknown_events).toHaveLength(0);
+    expect(s.run_status).toBe('completed');
+    expect(s.run_interrupted).toEqual({ step_id: 3, interrupted_seq: 42, reason: 'process_restart' });
+    expect(summarizeEvent(ev({ type: EventType.RUN_INTERRUPTED, data: {}, step_id: 3 }))).toBe('第 3 步中断');
+  });
+
+  it('MODEL_CHANGED：更新 conversation.model + Timeline 摘要', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_CHANGED,
+      data: { from_provider: 'openai', from_model_id: 'gpt-4o', to_provider: 'deepseek', to_model_id: 'deepseek-chat' },
+    }));
+    expect(s.unknown_events).toHaveLength(0);
+    expect(s.model).toBe('deepseek-chat');
+    expect(summarizeEvent(ev({
+      type: EventType.MODEL_CHANGED,
+      data: { to_model_id: 'deepseek-chat' },
+    }))).toBe('模型 → deepseek-chat');
+  });
+
+  it('MODEL_CHANGED 缺 to_model_id → 不伪造模型（保持原值 null）', () => {
+    const s = applyEvent(initConversation('s'), ev({ type: EventType.MODEL_CHANGED, data: {} }));
+    expect(s.model).toBeNull();
+    expect(summarizeEvent(ev({ type: EventType.MODEL_CHANGED, data: {} }))).toBe('模型已切换');
   });
 
   it('空文件 read 成功语义：content:"" + total_lines:0 → success 且 result 保留真值', () => {

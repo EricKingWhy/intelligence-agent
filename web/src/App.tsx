@@ -38,6 +38,7 @@ import {
   type ModelCatalogEntry,
 } from './lib/api';
 import { summarizeEvent } from './lib/projection';
+import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
 import type { ToolCall, PresetTask, AgentEvent } from './types';
 import './styles/app.css';
 
@@ -72,6 +73,8 @@ export default function App() {
     cancelStream,
     recover,
     refreshSessions,
+    changeModel,
+    fork,
   } = useSession();
 
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
@@ -239,51 +242,40 @@ export default function App() {
     void fetchControlCatalogs();
   }, [fetchModels, fetchControlCatalogs]);
 
-  const handleModelChange = useCallback((name: string | null) => {
-    setSelectedModel(name);
-  }, []);
-
-  const handleSubmit = useCallback(
-    (task: string) => {
-      focusRun();
-      // 续聊：已有会话且不在流式中 → 发消息到现有会话（PRD §5.3 续聊入口）。
-      // 新会话：无 selectedId → startSession 创建新会话。
-      // amend 按「有值才带」传入（与下方 create 分支同一模式）：仅空闲会话
-      // 拉起新 run 时被后端应用，在途 run 的 queued 消息忽略。permission_mode
-      // 不在 /messages 的 amend 契约内（后端 SendMessageRequest 只收这四项）。
-      if (selectedId && !streaming) {
-        void sendMessage(selectedId, task, {
-          maxSteps: 10,
-          amend: {
-            ...(selectedModel ? { model: selectedModel } : {}),
-            ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
-            ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
-            ...(selectedContextProviders.length > 0
-              ? { context_providers: selectedContextProviders }
-              : {}),
-          },
-        });
-        return;
+  const handleModelChange = useCallback(
+    (name: string | null) => {
+      setSelectedModel(name);
+      // T7 #137：已有会话时，模型选择触发 POST /model 切换会话当前模型。
+      // 新会话（无 selectedId）只更新本地状态——startSession 时携带 model。
+      if (selectedId && name) {
+        const entry = models.find((m) => m.name === name);
+        if (entry?.provider) {
+          void changeModel(selectedId, entry.provider, name)
+            .then((result) => {
+              // 用响应里的规范 model_id 更新本地状态（不回显请求值）
+              setSelectedModel(result.model_id);
+            })
+            .catch(() => {
+              // 切换失败静默——用户可重试；不阻塞主流程
+            });
+        }
       }
-      void submitTask({
-        task,
-        max_steps: 10,
-        auto_approve: true,
-        ...(selectedModel ? { model: selectedModel } : {}),
-        ...(selectedPermissionMode ? { permission_mode: selectedPermissionMode } : {}),
-        ...(selectedAgentProfile ? { agent_profile: selectedAgentProfile } : {}),
-        ...(selectedReasoningEffort ? { reasoning_effort: selectedReasoningEffort } : {}),
-        ...(selectedContextProviders.length > 0
-          ? { context_providers: selectedContextProviders }
-          : {}),
-      });
     },
+    [selectedId, models, changeModel],
+  );
+
+  // Composer 档位打包（提交路径与 handleSubmit 的依赖数组共用同一引用）。
+  // useMemo 而非内联对象：handleSubmit 是 useCallback，内联对象会让它每次
+  // 渲染都换引用，Composer 的 memo 随之失效（流式期间每 delta 重渲染输入框）。
+  const composerControls = useMemo<ComposerControls>(
+    () => ({
+      model: selectedModel,
+      permissionMode: selectedPermissionMode,
+      agentProfile: selectedAgentProfile,
+      reasoningEffort: selectedReasoningEffort,
+      contextProviders: selectedContextProviders,
+    }),
     [
-      submitTask,
-      sendMessage,
-      focusRun,
-      selectedId,
-      streaming,
       selectedModel,
       selectedPermissionMode,
       selectedAgentProfile,
@@ -292,7 +284,47 @@ export default function App() {
     ],
   );
 
-  // 422 = 未知模型（契约 C6）：目录可能已变——自动刷新一次；刷新后若目录
+  const handleSubmit = useCallback(
+    (task: string) => {
+      focusRun();
+      // Composer 档位 → 契约字段的映射统一走 lib/amend.ts（单一构造器）；
+      // 空值丢弃由 api 层单一执行（见 amend.ts 顶部契约说明）。
+      // 续聊：已有会话且不在流式中 → 发消息到现有会话（PRD §5.3 续聊入口）。
+      // 新会话：无 selectedId → startSession 创建新会话。
+      if (selectedId && !streaming) {
+        void sendMessage(selectedId, task, {
+          maxSteps: 10,
+          amend: toAmendFields(composerControls),
+        });
+        return;
+      }
+      void submitTask({
+        task,
+        max_steps: 10,
+        auto_approve: true,
+        ...toCreateControls(composerControls),
+      });
+    },
+    [submitTask, sendMessage, focusRun, selectedId, streaming, composerControls],
+  );
+
+  /** T7 #137：从历史用户消息 seq 派生 child session，成功后跳转到 child。 */
+  const handleFork = useCallback(
+    async (fromSeq: number) => {
+      if (!selectedId) return;
+      try {
+        const result = await fork(selectedId, fromSeq);
+        // 跳转到 child session
+        selectSession(result.session_id);
+        void refreshSessions();
+      } catch {
+        // 分叉失败静默——用户可重试
+      }
+    },
+    [selectedId, fork, selectSession, refreshSessions],
+  );
+
+
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
   // 同步刷新控制目录并清除死选中值（permission_mode / agent_profile /
@@ -533,6 +565,12 @@ export default function App() {
               )}
             </div>
           )}
+          {conversation?.run_interrupted && !streaming && (
+            <div className="interrupt-banner" role="status" aria-live="polite">
+              上次运行在第 {conversation.run_interrupted.step_id ?? '?'} 步中断
+             （原因：{conversation.run_interrupted.reason}）
+            </div>
+          )}
           {/* Workspace 模式条（Phase 1d 方案 B）：Chat 永远是主阅读面，
               Split/Preview 为后续 Phase 预留的空架子。条本身克制——
               只在选中非 chat 时渲染下方占位行；Chat 模式下完全不占垂直空间。 */}
@@ -576,6 +614,7 @@ export default function App() {
             onFocusTool={focusTool}
             onOpenSession={handleSelect}
             onInspectChild={focusChild}
+            onFork={handleFork}
           />
           <Composer
             streaming={streaming}

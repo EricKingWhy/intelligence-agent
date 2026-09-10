@@ -679,6 +679,7 @@ gh issue close <n> --comment "<验证证据：commit / 测试结果 / 关键文�
 
 CSS 原生没有变量组复用机制，手工双份同步是当前最小风险方案。
 
+
 ---
 
 # 16. SDD 长任务工作流协议（防指令漂移）
@@ -744,5 +745,19 @@ CSS 原生没有变量组复用机制，手工双份同步是当前最小风险�
 ```markdown
 - YYYY-MM-DD：**ticket #N 标题**。commit `<sha>`。测试：N passed / M skipped。关单：是/否（理由）。集成提示词：`docs/INTEGRATION_PROMPT_*.md`。
 ```
+
+---
+
+## 16.6 前端 worktree 补充
+
+前端 SDD 循环（worktree `D:\intelligence-agent-frontend`）与后端同构，但门禁工具链与进度落点不同：
+
+- **前端门禁**（替换 16.1 步骤 4 的 `ruff check + 全量 pytest`）：
+  `cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build`
+  （e2e 必须 `--workers=2`：4 worker 全量并行存在资源竞争型抖动）。
+- **前端在途进度**记 `docs/SDD_TICKET_TRACKER.md`（frontend worktree 内）；
+  合入 main 后的整合进度仍记 `docs/PHASE_STATUS.md`（单一事实源不变）。
+- **前端细化协议**：`docs/SDD_WORKFLOW_PROTOCOL.md`（frontend worktree 内）。
+- **遇到不确定时**：使用 `/ask-matt` skill 提问。不要猜测、不要自行决定架构方向。
 
 ---
