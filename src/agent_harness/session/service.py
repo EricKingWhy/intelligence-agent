@@ -10,38 +10,78 @@ HTTP 是传输层，不进本模块；领域异常由调用方翻译为 HTTP/CLI
 - Tool 只有一条执行路径（不变量 #7）：审批回传统一汇聚到 ToolExecutor callback。
 
 本模块是 T1 纯重构产物——无行为变化，现有测试保持 green。
+
+候选 2（架构深化，纯结构重构）把三块高内聚的领域逻辑抽到兄弟模块，本模块保留
+``SessionService`` 门面并重新导出全部公开符号，因此所有既有导入路径
+（``from agent_harness.session.service import X``）与调用点均不变：
+
+- ``session/errors.py``       —— 领域异常层级（14 个类）
+- ``session/model_switch.py`` —— 会话级模型切换（MODEL_CHANGED 唯一写入口）
+- ``session/approval.py``     —— 交互式审批 callback 构建 + 延迟绑定容器
+
+``build_runtime`` 仍在本模块以模块级名字导入：``tests/web/test_web_phase5_permission.py``
+用 ``monkeypatch.setattr(service_module, "build_runtime", ...)`` 打桩，名字必须在场。
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from agent_harness.assembly import build_runtime
-from agent_harness.config import Settings
+from agent_harness.session.approval import (
+    InteractiveCallbackHolder as _InteractiveCallbackHolder,
+)
+from agent_harness.session.approval import (
+    build_approval_callback as _build_approval_callback_impl,
+)
 from agent_harness.session.derive import detect_dangling
+from agent_harness.session.errors import (
+    ActiveRunConflict,
+    ApprovalAlreadyResolved,
+    ApprovalQueueMissing,
+    ApprovalRequestMissing,
+    InvalidDecision,
+    InvalidForkBoundary,
+    InvalidSessionId,
+    QueueItemNotFound,
+    RecoveryConflict,
+    SessionNotFound,
+    SessionServiceError,
+    SteerTargetNotFound,
+    UnknownModel,
+    WorkspaceNameInvalid,
+)
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
-    MODEL_CHANGED,
     QUEUE_CANCELLED,
-    SESSION_STARTED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
-    SessionEvent,
     _utc_now_iso,
 )
 from agent_harness.session.interrupt import detect_unterminated_runs
+from agent_harness.session.model_switch import (
+    ModelChange,
+    ModelTarget,
+    append_model_change,
+    assert_model_resolvable,
+    current_model_selection,
+    inherit_parent_model,
+    resolve_model_target,
+)
+from agent_harness.session.model_switch import (
+    amend_with_session_model as _amend_with_session_model,
+)
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling.approval import (
     ApprovalCallback,
-    ApprovalRequest,
     ApprovalResponse,
     PermissionDecision,
 )
@@ -58,64 +98,8 @@ logger = logging.getLogger(__name__)
 
 
 # ── 领域异常 ──────────────────────────────────────────────────────────
-# 调用方（Web handler / CLI）负责翻译为 HTTP status / CLI 错误消息。
-
-
-class SessionServiceError(Exception):
-    """SessionService 所有领域异常的基类。"""
-
-
-class SessionNotFound(SessionServiceError):
-    """session_id 不存在（store 中无事件）。"""
-
-
-class InvalidSessionId(SessionServiceError):
-    """session_id 格式不合法（安全校验失败）。"""
-
-
-class ActiveRunConflict(SessionServiceError):
-    """session 已有在途 run，不允许并发。"""
-
-
-class ApprovalQueueMissing(SessionServiceError):
-    """session 没有交互式审批队列（permission_mode 非交互，或 run 已结束）。"""
-
-
-class ApprovalRequestMissing(SessionServiceError):
-    """approval_id 在 session 事件中找不到对应的 approval-requested。"""
-
-
-class ApprovalAlreadyResolved(SessionServiceError):
-    """approval_id 已被决策（防重复）。"""
-
-
-class InvalidDecision(SessionServiceError):
-    """决策值不合法或不在 allowed_decisions 内。"""
-
-
-class RecoveryConflict(SessionServiceError):
-    """恢复需要人工裁决（UNKNOWN 工具状态）。"""
-
-
-class WorkspaceNameInvalid(SessionServiceError):
-    """workspace 名字不合法（路径逃逸风险）。"""
-
-
-class QueueItemNotFound(SessionServiceError):
-    """排队消息不存在 / 已消费 / 已取消。"""
-
-
-class SteerTargetNotFound(SessionServiceError):
-    """steer 目标 run 不存在（无在途 run）。"""
-
-
-class UnknownModel(SessionServiceError):
-    """模型切换目标不在 catalog 中（provider + model_id 未命中）。"""
-
-
-class InvalidForkBoundary(SessionServiceError):
-    """fork 锚点非法（不是用户消息 seq / 前缀含未终态 run）。"""
-
+# 定义已移至 session/errors.py（候选 2 纯结构重构）；此处重新导出，
+# 保持 `from agent_harness.session.service import SessionNotFound` 等导入路径不变。
 
 #: session_id 安全校验正则——名字段，不是路径。
 #: store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时
@@ -190,181 +174,10 @@ def _amend_kwargs(amend: AmendOptions | None) -> dict[str, Any]:
     return (amend or AmendOptions()).to_runtime_kwargs()
 
 
-def current_model_selection(events: list[SessionEvent]) -> tuple[str | None, str | None]:
-    """从事件流派生会话当前模型 (provider, model_id)。
-
-    优先级：最后一条 ``model/changed`` 的 to_* > ``session/started`` 的初始值
-    > (None, None)（= 默认链）。append-only 语义下"最后一次切换"即当前模型，
-    replay 确定性（不变量 #3）。
-    """
-    for event in reversed(events):
-        if event.type == MODEL_CHANGED:
-            return event.data.get("to_provider"), event.data.get("to_model_id")
-    for event in reversed(events):
-        if event.type == SESSION_STARTED:
-            return event.data.get("provider"), event.data.get("model_id")
-    return None, None
-
-
-def _amend_with_session_model(
-    amend: AmendOptions | None, events: list[SessionEvent], settings: Settings
-) -> AmendOptions | None:
-    """未显式指定 model 时，用 session 派生的当前模型补齐。
-
-    显式 amend.model 永远优先（一次性覆盖）；session 也没记录模型则原样返回
-    （走默认链，行为不变）。session 记录的模型若已不在 catalog（配置变更），
-    回落默认链并记 warning——历史选择不该让续聊 500。AGENT_MODELS 本身畸形
-    仍是配置错误，`parse_model_catalog` 照旧响亮失败（不静默降级）。
-    """
-    if amend is not None and amend.model is not None:
-        return amend
-    provider, model_id = current_model_selection(events)
-    if model_id is None:
-        return amend
-
-    from agent_harness.model.config import find_catalog_entry
-
-    if find_catalog_entry(settings, provider or "", model_id) is None:
-        logger.warning(
-            "会话当前模型 %s/%s 已不在 catalog，本轮回落默认链", provider, model_id
-        )
-        return amend
-    return replace(amend or AmendOptions(), model=model_id)
-
-
-def _default_model_id(settings: Settings) -> str:
-    """默认链在 ``GET /api/models`` 里的 picker id（= 默认模型名）。"""
-    from agent_harness.model.config import ModelConfig
-
-    return ModelConfig.from_settings(settings).model_name
-
-
-def _is_default_selection(settings: Settings, provider: str, model_id: str) -> bool:
-    """判断目标是否是 ``GET /api/models`` 的默认条目（is_default=true）。
-
-    默认条目不是一个 catalog 条目，但前端 picker 会展示它——选中它 = 清除会话级
-    覆盖、回到默认链（事件写 ``to_model_id=None``）。
-    """
-    from agent_harness.model.config import ConfigError
-
-    if provider != settings.model_provider:
-        return False
-    try:
-        default_name = _default_model_id(settings)
-    except ConfigError:
-        return False
-    return model_id in {default_name, "default"}
-
-
-@dataclass(frozen=True)
-class ModelTarget:
-    """一次模型切换的解析结果（T7 #137）。
-
-    ``model_id=None`` = 切回默认链（``GET /api/models`` 的 is_default 条目）；
-    ``effective_model_id`` 是 picker 应显示的 id——catalog 条目名，或默认链的默认
-    模型名（HTTP 响应回传它，避免 handler 自己推导领域值）。
-    """
-
-    provider: str
-    model_id: str | None
-    effective_model_id: str
-
-
-def resolve_model_target(
-    settings: Settings, provider: str, model_id: str
-) -> ModelTarget | None:
-    """解析 (provider, model_id) → ModelTarget；未命中返回 None。
-
-    默认条目优先于同名 catalog 条目：picker 的默认选项 id 就是默认模型名，
-    catalog 恰有同名条目时必须按「默认条目 = 清覆盖」语义处理，否则前端选默认
-    反而锁死在该 catalog 条目的 base_url / temperature 上。
-    """
-    from agent_harness.model.config import find_catalog_entry
-
-    if _is_default_selection(settings, provider, model_id):
-        return ModelTarget(
-            provider=provider, model_id=None,
-            effective_model_id=_default_model_id(settings),
-        )
-    entry = find_catalog_entry(settings, provider, model_id)
-    if entry is None:
-        return None
-    return ModelTarget(
-        provider=entry.provider, model_id=entry.name, effective_model_id=entry.name,
-    )
-
-
-@dataclass(frozen=True)
-class ModelChange:
-    """一次模型切换的结果。
-
-    ``from_*`` 可能为 None = 此前走默认链；``to_model_id`` 为 None = 切回默认链
-    （选中 ``GET /api/models`` 的 ``is_default`` 条目），后续 run 不再带 catalog 覆盖。
-    ``effective_model_id`` = 前端 picker 应对齐的 id（见 ``ModelTarget``）。
-    """
-
-    from_provider: str | None
-    from_model_id: str | None
-    to_provider: str
-    to_model_id: str | None
-    effective_model_id: str
-
-
-def append_model_change(session: Session, target: ModelTarget) -> ModelChange:
-    """追加 ``model/changed``——MODEL_CHANGED 的唯一写入口（T7 #137）。
-
-    走 ``Session.append``（无 resume 副作用，不变量 #7）；``from_*`` 从事件流派生。
-    service 与 CLI demo 共用，避免两处各自拼事件 data。
-    """
-    from_provider, from_model_id = current_model_selection(session.events)
-    session.append(MODEL_CHANGED, {
-        "from_provider": from_provider,
-        "from_model_id": from_model_id,
-        "to_provider": target.provider,
-        "to_model_id": target.model_id,
-    })
-    return ModelChange(
-        from_provider=from_provider,
-        from_model_id=from_model_id,
-        to_provider=target.provider,
-        to_model_id=target.model_id,
-        effective_model_id=target.effective_model_id,
-    )
-
-
-def inherit_parent_model(child: Session, parent_events: list[SessionEvent]) -> None:
-    """child 继承父会话的当前模型（fork seed 不含父 ``session/started``，T7 #137）。
-
-    父走默认链时什么都不做；父有会话级模型时补一条 ``model/changed``——否则父创建
-    时选的 catalog 模型会在 child 静默回落默认链（切换过的父反而会继承，语义不一致）。
-    """
-    provider, model_id = current_model_selection(parent_events)
-    if provider is None or model_id is None:
-        return
-    append_model_change(
-        child,
-        ModelTarget(
-            provider=provider, model_id=model_id, effective_model_id=model_id,
-        ),
-    )
-
-
-def assert_model_resolvable(settings: Settings, target: ModelTarget) -> None:
-    """校验目标模型真能装配（provider 已知 + 有可用 key），否则 UnknownModel。
-
-    AC「校验 provider 可用性」：catalog 成员资格之外，还确认 ``ModelConfig`` 能
-    构造出来——与创建路径（``create_and_launch`` 的 ``from_catalog``）同一判据，
-    避免 POST /model 接受一个 POST /sessions 会拒绝的目标。CLI 与 Web 共用。
-    """
-    from agent_harness.model.config import ConfigError, ModelConfig
-
-    try:
-        if target.model_id is None:
-            ModelConfig.from_settings(settings)
-        else:
-            ModelConfig.from_catalog(settings, target.model_id)
-    except (ConfigError, KeyError) as error:
-        raise UnknownModel(str(error)) from error
+# ── 模型切换 / Fork 领域逻辑 ────────────────────────────────────────
+# current_model_selection / resolve_model_target / append_model_change /
+# inherit_parent_model / assert_model_resolvable 已移至 session/model_switch.py
+# （候选 2）；本模块从那里重新导出，CLI / Web 调用点不变。
 
 
 @dataclass(frozen=True)
@@ -1120,27 +933,20 @@ class SessionService:
         auto_approve: bool,
         session_id: str,
     ) -> ApprovalCallback | None | _InteractiveCallbackHolder:
-        """构建审批 callback（三种路由，与原 handler 行为完全一致）。"""
-        if interactive:
-            queue = PendingApprovalQueue()
-            self._state.approval_queues[session_id] = queue
-            return _InteractiveCallbackHolder(
-                queue=queue,
-                timeout_seconds=self._state.settings.approval_timeout_seconds,
-            )
-        elif (
-            auto_approve_explicit
-            and not permission_mode_explicit
-            and auto_approve is False
-        ):
-            async def _deny_callback(_req):
-                return ApprovalResponse(
-                    approved=False, reason="manual approval not yet wired"
-                )
+        """构建审批 callback（三种路由，与原 handler 行为完全一致）。
 
-            return _deny_callback
-        else:
-            return None
+        委托 ``session/approval.py`` 的模块级函数（候选 2）；把 ``self._state``
+        的两处依赖显式传入，本方法签名与调用点保持不变。
+        """
+        return _build_approval_callback_impl(
+            interactive=interactive,
+            auto_approve_explicit=auto_approve_explicit,
+            permission_mode_explicit=permission_mode_explicit,
+            auto_approve=auto_approve,
+            approval_queues=self._state.approval_queues,
+            session_id=session_id,
+            approval_timeout_seconds=self._state.settings.approval_timeout_seconds,
+        )
 
     def _attach_approval_queue_gc(self, run: ManagedRun, session_id: str) -> None:
         """run 终结时 GC approval_queue（防长期泄漏）。"""
@@ -1153,76 +959,38 @@ class SessionService:
             _task.add_done_callback(_gc_approval_queue)
 
 
-class _InteractiveCallbackHolder:
-    """交互式审批 callback 的延迟绑定容器。
+# ── 公开符号重导出（候选 2 纯结构重构）────────────────────────────────
+# 异常 / 模型切换领域逻辑已移到兄弟模块，这里统一 re-export，
+# 使 `from agent_harness.session.service import X` 等既有导入路径全部不变。
 
-    session 在 callback 创建时尚未存在（R6-6 组装顺序：先 runtime 后 Session.start），
-    因此用 holder 延迟注入 session，再返回真正的 async callback。
-
-    bind_session 后才可被当作 ApprovalCallback 使用——调用方需通过
-    as_callback() 获取真正的 callable。
-    """
-
-    def __init__(self, *, queue: PendingApprovalQueue, timeout_seconds: float) -> None:
-        self._queue = queue
-        self._session: Session | None = None
-        #: ≤0 → None（无限等待，旧行为）；>0 → fail-closed 超时（PRD T6 §2.2 C）。
-        #: 无默认值：审批等待是安全边界，超时值必须由调用方（Settings）显式给出。
-        self._timeout: float | None = timeout_seconds if timeout_seconds > 0 else None
-
-    def bind_session(self, session: Session) -> None:
-        self._session = session
-
-    async def __call__(self, req: ApprovalRequest) -> ApprovalResponse:
-        if self._session is None:
-            raise RuntimeError(
-                "interactive callback invoked before Session.start"
-            )
-        approval_id = self._queue.register(req)
-        allowed_decisions = [
-            PermissionDecision.DENY.value,
-            PermissionDecision.APPROVE_ONCE.value,
-        ]
-        self._session.append(
-            TOOL_APPROVAL_REQUESTED,
-            {
-                "approval_id": approval_id,
-                "tool_name": req.tool_name,
-                "tool_call_id": req.tool_call_id,
-                "action_type": req.permission.value,
-                "title": f"{req.tool_name} ({req.permission.value})",
-                "description": req.reason,
-                "arguments_preview": req.args,
-                "permission": req.permission.value,
-                "policy": req.policy.value,
-                "reason": req.reason,
-                "allowed_decisions": allowed_decisions,
-            },
-        )
-        try:
-            response = await self._queue.wait_for(approval_id, timeout=self._timeout)
-        except TimeoutError:
-            # fail-closed（PRD T6 §2.2 C）：无人决策 = 拒绝，绝不默认放行。
-            assert self._timeout is not None  # 未配置超时不会抛 TimeoutError
-            timeout_deny = ApprovalResponse(
-                approved=False,
-                reason=f"审批超时（{self._timeout:g}s 无决策），按 fail-closed 拒绝",
-                decision=PermissionDecision.DENY,
-            )
-            if self._queue.expire(approval_id, timeout_deny):
-                response = timeout_deny
-            else:
-                # 极端竞态：外部 /approve 与超时同刻到达，且 /approve 已抢先写入
-                # _resolved（future 已被 wait_for 取消 → 本协程收到 TimeoutError）。
-                # 先写入者胜（一次性语义）：采用人类决策，不覆盖。
-                settled = self._queue.resolved_response(approval_id)
-                response = settled if settled is not None else timeout_deny
-        self._session.append(
-            "permission/resolved",
-            {
-                "approval_id": approval_id,
-                "decision": response.decision.value,
-                "reason": response.reason,
-            },
-        )
-        return response
+__all__ = [
+    "ActiveRunConflict",
+    "AmendOptions",
+    "ApprovalAlreadyResolved",
+    "ApprovalDecision",
+    "ApprovalQueueMissing",
+    "ApprovalRequestMissing",
+    "InvalidDecision",
+    "InvalidForkBoundary",
+    "InvalidSessionId",
+    "LaunchResult",
+    "ModelChange",
+    "ModelTarget",
+    "QueueItemNotFound",
+    "RecoveryConflict",
+    "SendMessageResult",
+    "SessionNotFound",
+    "SessionService",
+    "SessionServiceError",
+    "SteerTargetNotFound",
+    "StreamReconnectHandle",
+    "UnknownModel",
+    "WorkspaceNameInvalid",
+    "_InteractiveCallbackHolder",
+    "append_model_change",
+    "assert_model_resolvable",
+    "current_model_selection",
+    "inherit_parent_model",
+    "resolve_model_target",
+    "validate_session_id",
+]
