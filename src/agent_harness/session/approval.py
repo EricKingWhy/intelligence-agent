@@ -21,7 +21,6 @@ from agent_harness.tooling.approval import (
     PermissionDecision,
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
-from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
     from agent_harness.session.session import Session
@@ -33,8 +32,7 @@ class InteractiveCallbackHolder:
     session 在 callback 创建时尚未存在（R6-6 组装顺序：先 runtime 后 Session.start），
     因此用 holder 延迟注入 session，再返回真正的 async callback。
 
-    bind_session 后才可被当作 ApprovalCallback 使用——调用方需通过
-    as_callback() 获取真正的 callable。
+    bind_session 后才可被当作 ApprovalCallback 使用（bind 前调用 raise）。
     """
 
     def __init__(self, *, queue: PendingApprovalQueue, timeout_seconds: float) -> None:
@@ -101,9 +99,6 @@ class InteractiveCallbackHolder:
         )
         return response
 
-    def as_callback(self) -> ApprovalCallback:
-        return self
-
 
 def build_approval_callback(
     *,
@@ -145,6 +140,5 @@ def build_approval_callback(
 
 __all__ = [
     "InteractiveCallbackHolder",
-    "PermissionPolicy",
     "build_approval_callback",
 ]

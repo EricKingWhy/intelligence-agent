@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from agent_harness.assembly import build_runtime
+from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
     InteractiveCallbackHolder as _InteractiveCallbackHolder,
 )
@@ -125,53 +126,8 @@ def validate_session_id(session_id: str) -> str:
 
 
 # ── 数据载体 ──────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class AmendOptions:
-    """staged amend 字段：续跑/续聊时覆盖运行时可配置项。
-
-    全部可空——None = 使用 session 既有配置（默认行为不变）。
-    service 层 create / resume / send_message / drain 共用这一束，
-    避免 4 个字段在每个签名里平铺（Data Clump）。
-    """
-
-    reasoning_effort: str | None = None
-    agent_profile: str | None = None
-    context_providers: list[str] | None = None
-    model: str | None = None
-
-    @classmethod
-    def from_request(cls, request: Any) -> AmendOptions:
-        """从请求模型组装（Pydantic 或任何带同名属性的对象）。
-
-        web 层三个请求体（create / resume / messages）字段同形，组装逻辑
-        收敛到这里，避免在 app.py 重复三遍。
-        """
-        return cls(
-            reasoning_effort=getattr(request, "reasoning_effort", None),
-            agent_profile=getattr(request, "agent_profile", None),
-            context_providers=getattr(request, "context_providers", None),
-            model=getattr(request, "model", None),
-        )
-
-    def to_runtime_kwargs(self) -> dict[str, Any]:
-        """转成 ``build_runtime`` 的 amend 相关关键字参数。
-
-        ``model`` → ``model_name``（build_runtime 的参数名）；四个字段总是
-        全部给出（None 即默认行为），让调用点无需重复 None 判断。
-        """
-        return {
-            "model_name": self.model,
-            "reasoning_effort": self.reasoning_effort,
-            "agent_profile": self.agent_profile,
-            "context_providers": self.context_providers,
-        }
-
-
-def _amend_kwargs(amend: AmendOptions | None) -> dict[str, Any]:
-    """amend → build_runtime 关键字参数；None 等价于全 None（当前行为不变）。"""
-    return (amend or AmendOptions()).to_runtime_kwargs()
+# AmendOptions 已移至 session/amend.py（候选 2 后续修正：消除 model_switch ↔
+# service 的双向导入环）。本模块从那里重新导出，既有导入路径不变。
 
 
 # ── 模型切换 / Fork 领域逻辑 ────────────────────────────────────────
@@ -413,7 +369,7 @@ class SessionService:
             permission_mode=permission_mode,
             approval_callback=approval_callback,
             session_store=self._state.store,
-            **_amend_kwargs(amend),
+            **amend_kwargs(amend),
         )
         session = Session.start(
             self._state.store, session_id=session_id,
@@ -497,7 +453,7 @@ class SessionService:
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             approval_callback=None,
             session_store=self._state.store,
-            **_amend_kwargs(amend),
+            **amend_kwargs(amend),
         )
         run, subscriber = self._state.run_manager.launch(session, runtime, task)
         return LaunchResult(session=session, run=run, subscriber=subscriber)
