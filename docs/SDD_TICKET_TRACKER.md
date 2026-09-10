@@ -93,14 +93,19 @@ MODEL_CHANGED: 'model/changed',
 
 #### 第 1 轮：/implement
 
-- 状态：`pending`
-- 改了哪些文件：—
-- 门禁结果：—
+- 状态：`done`
+- 改了哪些文件：
+  - `web/src/lib/api.ts` — 新增 `changeSessionModel()` 和 `forkSession()`
+  - `web/src/lib/projection.ts` — MODEL_CHANGED → 更新 conversation.model；RUN_INTERRUPTED → finalizeRun
+  - `web/src/hooks/useSession.ts` — useSession 暴露 changeModel 和 fork 操作
+  - `web/src/App.tsx` — handleModelChange 在已有会话时触发 POST /model；handleFork 调用 forkSession 并跳转
+  - `web/src/components/Conversation.tsx` — 用户消息上添加「分叉」按钮
+  - `web/src/styles/app.css` — fork-btn 样式
+- 门禁结果：tsc 0 / vitest 377 passed / oxlint 0 errors / playwright 46 passed
 
 #### 第 1 轮：/code-review
 
 - 状态：`pending`
-- 发现的问题：—
 
 #### 修复循环
 
