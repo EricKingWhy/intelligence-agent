@@ -17,6 +17,11 @@
 进程在途 run 误标中断，进而让两边各自推算 seq 撞号。多进程/多 worker 需要
 跨进程 run lease，属后续 Phase。
 
+该单进程假设已提升为正式架构约束，见 ``CONTEXT.md`` 的
+**StartupInterruptionScan** 条目——它是本扫描**不能**被吸收进
+``RecoveryCoordinator`` 的根本原因（另一原因是职责层次不同：扫描是
+「批量 + 三分类结论 + 单会话隔离」，recover 是「单 session 8 步编排」）。
+
 单个 session 失败不阻断整轮扫描（一个坏会话不该拖垮进程启动）；失败以
 ``ScanRecovery.FAILED`` + detail 如实上报。``run/interrupted`` 是终态，所以
 失败的 session 不会被下一轮扫描重试——但它的悬空 tool_call 仍在，续聊/``/recover``

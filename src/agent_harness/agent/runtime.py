@@ -23,6 +23,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -242,6 +243,75 @@ class _RunFinalizer:
         )
         self._terminal_written = True
         return event
+
+
+@dataclass
+class _TerminalContext:
+    """取消臂 / 异常臂共享的收尾上下文（架构候选 1）。
+
+    两条臂历史上各自维护近重复的收尾序列（streamer 收口 → 切换事实落盘 →
+    model/failed 归因 → tracer 收口），差异只有「能否 yield」与 reason 取值。
+    收拢到本对象后，重复收尾由单点方法执行，两条臂只决定 yield 策略。
+
+    两个收尾方法都返回本次追加的持久化事件列表（按 append 顺序），调用方决定
+    逐条镜像给流消费者（异常臂）还是丢弃（取消臂——生成器关闭中禁止 yield）。
+    """
+
+    session: Session
+    run_id: str | None
+    steps: int
+    terminal: _RunFinalizer
+    streamer: BlockStreamer | None
+    model_coord: ModelFallbackCoordinator
+    tracer: Any
+    ctx_span: Any
+    generation: Any
+
+    def interrupt_streams(self) -> list[SessionEvent]:
+        """流式块收口 + 切换事实落盘（取消臂与异常臂同一不变量）。
+
+        顺序固定：interrupted（块级部分内容保留）先于 model/failed（调用级归因）；
+        drain 幂等——成功路径已取走则此处为空。
+        """
+        events: list[SessionEvent] = []
+        if self.streamer is not None:
+            # 取消臂忽略返回值（生成器关闭中禁止 yield）；异常臂逐条镜像。
+            events.extend(self.streamer.interrupt(step=self.steps + 1))
+        for transition in self.model_coord.drain_transitions():
+            events.append(self.session.append(
+                MODEL_FALLBACK,
+                {"from_model": transition.from_model,
+                 "to_model": transition.to_model,
+                 "reason": transition.reason},
+                run_id=self.run_id, step_id=self.steps + 1,
+            ))
+        return events
+
+    def close_observability(
+        self, *, error_type: str | None, reason: str, cancelled: bool = False,
+    ) -> list[SessionEvent]:
+        """model/failed 归因 + tracer 收口（ctx_span / generation / run_failed）。
+
+        ``cancelled`` 区分取消臂（True）与异常臂（False）的 model/failed 消息；
+        ``error_type`` 只落类型名（脱敏不变量，完整消息只进结构化日志）。
+        """
+        events: list[SessionEvent] = []
+        if self.terminal.model_call_open:
+            events.append(self.terminal.append_model_failed(
+                step=self.steps, cancelled=cancelled, error_type=error_type,
+            ))
+        if self.tracer is not None:
+            if self.ctx_span is not None:
+                self.tracer.context_build_completed(self.ctx_span)
+                self.ctx_span = None
+            if self.generation is not None:
+                self.tracer.model_call_failed(
+                    self.generation,
+                    error_type=("cancelled" if cancelled else error_type),
+                )
+                self.generation = None
+            self.tracer.run_failed(reason)
+        return events
 
 
 class AgentRuntime:
@@ -904,35 +974,19 @@ class AgentRuntime:
             # 禁止再产出（RuntimeError），取消中的 task 再 yield 也会被立即再取消。
             # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
             try:
-                # 流式块收口（ADR-0016 §3.5）：残余思考/文本先落盘（部分内容
-                # 保留，S18/16.4），有 open 思考块则补 reasoning/interrupted
-                # ——先于 model/failed（块先于调用归因终结）。
-                if streamer is not None:
-                    streamer.interrupt(step=steps + 1)
-                # 切换事实在失败/取消路径同样落盘（白盒透明不因终态打折）：
-                # drain 是幂等的，成功路径未触达时这里兜住残留在 coordinator 里
-                # 的 transition（冒烟实测缺陷：primary→fallback 后 fallback 也
-                # 挂，切换事件曾整条丢失，JSONL 看起来像"从未切换"）。
-                for transition in model_coord.drain_transitions():
-                    session.append(
-                        MODEL_FALLBACK,
-                        {"from_model": transition.from_model,
-                         "to_model": transition.to_model,
-                         "reason": transition.reason},
-                        run_id=run_id, step_id=steps + 1,
-                    )
-                if terminal.model_call_open:
-                    terminal.append_model_failed(step=steps, cancelled=True)
+                ctx = _TerminalContext(
+                    session=session, run_id=run_id, steps=steps,
+                    terminal=terminal, streamer=streamer, model_coord=model_coord,
+                    tracer=tracer, ctx_span=ctx_span, generation=generation,
+                )
+                # 收尾事件一律丢弃不 yield（生成器关闭中禁止产出）——这正是本臂
+                # 与异常臂的唯一差异，收拢后由调用方决定 yield 策略。
+                ctx.interrupt_streams()
                 cancel_reason = (cancel_reason_supplier() if cancel_reason_supplier
                                  else "cancelled")
-                if tracer is not None:
-                    if ctx_span is not None:
-                        tracer.context_build_completed(ctx_span)
-                        ctx_span = None
-                    if generation is not None:
-                        tracer.model_call_failed(generation, error_type="cancelled")
-                        generation = None
-                    tracer.run_failed(cancel_reason)
+                ctx.close_observability(
+                    error_type=None, reason=cancel_reason, cancelled=True,
+                )
                 terminal.cancelled_terminal(
                     steps=steps,
                     reason=cancel_reason,
@@ -960,43 +1014,23 @@ class AgentRuntime:
             # result_holder 一定拿到终态结果——"run() 必返回失败结果"的契约
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
             try:
-                # 流式块收口（与取消臂同一不变量）：interrupted 先于 model/failed。
-                # 异常臂允许 yield——部分内容 + interrupted 事件镜像给流消费者。
-                if streamer is not None:
-                    for streamed in streamer.interrupt(step=steps + 1):
-                        yield to_agent_event(streamed)
-                # 切换事实在失败路径同样落盘（与取消臂同一不变量，见上）——
-                # drain 幂等：成功路径已取走则此处为空。
-                for transition in model_coord.drain_transitions():
-                    fallback_event = session.append(
-                        MODEL_FALLBACK,
-                        {"from_model": transition.from_model,
-                         "to_model": transition.to_model,
-                         "reason": transition.reason},
-                        run_id=run_id, step_id=steps + 1,
-                    )
-                    yield to_agent_event(fallback_event)
-                # 模型调用在途时补 model/failed：把故障归因到具体一步，供 resume /
-                # 审计区分"模型故障"与"工具故障"。异常消息可能含 Provider 回显的
-                # 敏感文本——事件只带类型名（脱敏不变量），完整消息只进日志。
-                if terminal.model_call_open:
-                    model_failed = terminal.append_model_failed(
-                        step=steps, cancelled=False, error_type=type(error).__name__,
-                    )
-                    yield to_agent_event(model_failed)
-                if tracer is not None and ctx_span is not None:
-                    tracer.context_build_completed(ctx_span)
-                    ctx_span = None
-                # 在途 generation 收口（ADR-0018 D7）：失败归因到具体调用。
-                if tracer is not None and generation is not None:
-                    tracer.model_call_failed(generation, error_type=type(error).__name__)
-                    generation = None
+                ctx = _TerminalContext(
+                    session=session, run_id=run_id, steps=steps,
+                    terminal=terminal, streamer=streamer, model_coord=model_coord,
+                    tracer=tracer, ctx_span=ctx_span, generation=generation,
+                )
+                # 本臂允许 yield——收尾事件（部分内容 + interrupted + 切换事实 +
+                # model/failed）逐条镜像给流消费者（与取消臂的唯一差异）。
+                for streamed in ctx.interrupt_streams():
+                    yield to_agent_event(streamed)
+                for streamed in ctx.close_observability(
+                    error_type=type(error).__name__,
+                    reason=type(error).__name__,
+                    cancelled=False,
+                ):
+                    yield to_agent_event(streamed)
                 # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
                 # 已写入的事件保持原样，失败只能由日志承载。
-                if tracer is not None:
-                    # 脱敏不变量：异常消息可能含 Provider 敏感回显，trace 状态
-                    # 只落类型名（与 model/failed 同一语义层）。
-                    tracer.run_failed(type(error).__name__)
                 end_event = terminal.failure_terminal(
                     steps=steps,
                     trace_id=(tracer.trace_id if tracer else None),
