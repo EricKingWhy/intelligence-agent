@@ -27,7 +27,7 @@ import { EventType } from '../types';
 import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
-import { MAX_RECONNECT_ATTEMPTS, ReconnectController } from '../lib/reconnect';
+import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 
 /** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
  *
@@ -99,6 +99,8 @@ export function decideCancel(liveSid: string | null): CancelDecision {
 export {
   decideStreamEnd,
   reconnectDelayMs,
+  RECONNECT_STALL_MS,
+  RECONNECT_BANNER_DELAY_MS,
   MAX_RECONNECT_ATTEMPTS,
   type StreamEndDecision,
 } from '../lib/reconnect';
@@ -118,14 +120,6 @@ export function parseTruncated(data: Record<string, unknown>): { latestSeq: numb
   return typeof seq === 'number' && Number.isFinite(seq) ? { latestSeq: seq } : null;
 }
 
-/** T4（#97）停摆检测阈值（ms）：live 流超过该时长无任何帧且未终态 → 视为
- *  静默断流（后台杀流/连接僵死），主动断开走重连（重放幂等，代价小）。
- *  回前台由 visibilitychange 即时触发同一检查；hook 级心跳兜底其余路径。 */
-export const RECONNECT_STALL_MS = 10_000;
-
-/** 断线条显示延迟（ms，spec 03 §20「only if reconnect lasts long enough to
- *  matter」）：500ms 级瞬时重连不闪条；超时未接通才出现（role=status 不轰炸）。 */
-export const RECONNECT_BANNER_DELAY_MS = 800;
 
 /** live→viewing 迁移时是否显示「正在加载历史…」占位符。
  *

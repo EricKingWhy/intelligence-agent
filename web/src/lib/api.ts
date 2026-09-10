@@ -147,6 +147,38 @@ function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
   });
 }
 
+/** 请求体字段表：字段 → [契约键, 值]，返回 null = **不发键**（= 后端默认）。
+ *
+ *  `Record<keyof T, …>` 是编译期完整性锁：payload 类型新增字段而此处未登记
+ *  → tsc 失败。此前的手写白名单会**静默**把新字段丢掉——请求照发、后端拿
+ *  不到，是最难查的一类失效。字段判空规则因语义而异（falsy / undefined /
+ *  非空数组），故此表只统一「构造」，不强行统一「判空」。 */
+type BodyFields<T> = Record<keyof T, (payload: T) => [string, unknown] | null>;
+
+/** 依字段表构造请求体（null 条目跳过）。键序 = 表内声明序。 */
+function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  for (const serialize of Object.values(table) as ((p: T) => [string, unknown] | null)[]) {
+    const entry = serialize(payload);
+    if (entry) body[entry[0]] = entry[1];
+  }
+  return body;
+}
+
+/** create 路径字段表（与下方 sendMessage 的 amend 四项同词汇、各自登记）。 */
+const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
+  task: (p) => ['task', p.task],
+  workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
+  max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+  auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
+  model: (p) => (p.model ? ['model', p.model] : null),
+  permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
+  agent_profile: (p) => (p.agent_profile ? ['agent_profile', p.agent_profile] : null),
+  reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
+  context_providers: (p) =>
+    p.context_providers && p.context_providers.length > 0 ? ['context_providers', p.context_providers] : null,
+};
+
 /** POST a new session. Returns the raw Response — SSE stream is consumed by caller.
  *  401 throws UnauthorizedError (after broadcasting) — fail fast, no empty stream.
  *
@@ -156,19 +188,7 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
   return apiFetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      task: payload.task,
-      ...(payload.workspace ? { workspace: payload.workspace } : {}),
-      ...(payload.max_steps !== undefined ? { max_steps: payload.max_steps } : {}),
-      ...(payload.auto_approve !== undefined ? { auto_approve: payload.auto_approve } : {}),
-      ...(payload.model ? { model: payload.model } : {}),
-      ...(payload.permission_mode ? { permission_mode: payload.permission_mode } : {}),
-      ...(payload.agent_profile ? { agent_profile: payload.agent_profile } : {}),
-      ...(payload.reasoning_effort ? { reasoning_effort: payload.reasoning_effort } : {}),
-      ...(payload.context_providers && payload.context_providers.length > 0
-        ? { context_providers: payload.context_providers }
-        : {}),
-    }),
+    body: JSON.stringify(buildBody(payload, START_SESSION_FIELDS)),
   });
 }
 
@@ -202,23 +222,26 @@ export interface SendMessagePayload {
   context_providers?: string[];
 }
 
+/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；mode / max_steps
+ *  有后端默认值，故缺省在此补齐（与 create 路径「缺省即不发键」不同）。 */
+const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
+  content: (p) => ['content', p.content],
+  mode: (p) => ['mode', p.mode ?? 'queue'],
+  max_steps: (p) => ['max_steps', p.max_steps ?? 10],
+  model: (p) => (p.model ? ['model', p.model] : null),
+  agent_profile: (p) => (p.agent_profile ? ['agent_profile', p.agent_profile] : null),
+  reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
+  context_providers: (p) =>
+    p.context_providers && p.context_providers.length > 0 ? ['context_providers', p.context_providers] : null,
+};
+
 export async function sendMessage(sessionId: string, payload: SendMessagePayload): Promise<Response> {
   return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     // 「有值才带键」的单一执行点（与 startSession 同一契约，见 lib/amend.ts）：
     // 调用方只做字段名映射，空值 / 空数组的丢弃只在这里发生。
-    body: JSON.stringify({
-      content: payload.content,
-      mode: payload.mode ?? 'queue',
-      max_steps: payload.max_steps ?? 10,
-      ...(payload.model ? { model: payload.model } : {}),
-      ...(payload.agent_profile ? { agent_profile: payload.agent_profile } : {}),
-      ...(payload.reasoning_effort ? { reasoning_effort: payload.reasoning_effort } : {}),
-      ...(payload.context_providers && payload.context_providers.length > 0
-        ? { context_providers: payload.context_providers }
-        : {}),
-    }),
+    body: JSON.stringify(buildBody(payload, SEND_MESSAGE_FIELDS)),
   });
 }
 

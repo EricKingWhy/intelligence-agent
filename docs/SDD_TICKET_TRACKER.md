@@ -13,6 +13,9 @@
 | Branch | `feat/frontend` |
 | 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` v1 |
 | 后端交接手册 | `D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_T7_T9.md` |
+| 集成交接提示词 | `docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md`（**待补深化批次**） |
+
+**禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
 ---
 
@@ -20,220 +23,136 @@
 
 | Ticket | 描述 | 状态 | Commit |
 | --- | --- | --- | --- |
-| FE-T7 | 会话级模型切换 + Fork UI | `pending` | — |
-| FE-T8 | 崩溃恢复 UI — run/interrupted + 409 守卫 | `pending` | — |
-| FE-T9 | 轮次标签（turn_index 显示） | `pending` | — |
+| FE-T7 | 会话级模型切换 + Fork UI（#137） | `done` | `71c01dd` + review 修复 `c6e6fab` |
+| FE-T8 | 崩溃恢复 UI — run/interrupted + 409 守卫（#138） | `done` | `c137a23` |
+| FE-T9 | 轮次标签（turn_index 显示）（#139） | `done` | `d2bfbc8` |
+| 前置 | 重新生成 event-types（MODEL_CHANGED + RUN_INTERRUPTED） | `done` | `6012414` |
+| 深化 C4 | api 层成为唯一归一化点 | `done` | `9b2234f` |
+| 深化 C3 | Composer 档位 → 提交字段的单一构造器 | `done` | `9b2234f` |
+| 深化 C2 | projection 事件语义注册表（编译期穷尽） | `done` | `f481ea5` |
+| 深化 C1 | StreamOrchestrator 流式编排深化 | **`partial`** | `ae341e2`（第一刀） |
+| 深化 C5 | ConversationState 拆分 | `rejected` | —（YAGNI + 参考实现反证，见 `docs/ARCHITECTURE_REVIEW.md`） |
 
 ### 全部完成后的步骤
 
 | 步骤 | 状态 |
 | --- | --- |
-| /improve-codebase-architecture | `pending` |
-| 写集成 AI 交接提示词 | `pending` |
+| /improve-codebase-architecture | `done` → `docs/ARCHITECTURE_REVIEW.md`（`3e71b33`） |
+| 深化批次实施 | `partial`（C1 剩余部分见下） |
+| 写集成 AI 交接提示词 | `pending`（`25917c1` 已写 T7–T9 版，需补深化批次 + 新 HEAD） |
 
 ---
 
-## FE-T7: 会话级模型切换 + Fork UI
+## 门禁基线（本轮全绿）
 
-### 后端契约（来自 HANDOFF_FRONTEND_T7_T9.md §一.T7）
-
-**新增端点：**
-
-```
-POST /api/sessions/{id}/model
-Body: { "provider": "deepseek", "model_id": "deepseek-chat" }
-→ 200 { "status": "changed", "provider": "deepseek", "model_id": "deepseek-chat" }
-→ 404 session 不存在
-→ 422 provider/model_id 不在 catalog
-```
-
-```
-POST /api/sessions/{id}/forks
-Body: { "from_seq": 5 }
-→ 200 { "session_id": "child-uuid", "from_seq": 5 }
-→ 404 session 不存在
-→ 409 在途 run（历史未 settled）
-→ 422 from_seq 不是合法 fork 锚点
-```
-
-**新增事件：**
-
-```typescript
-MODEL_CHANGED: 'model/changed',
-// data: { from_provider, from_model_id, to_provider, to_model_id }
-```
-
-**关键行为：**
-- 切换不打断在途 run——下一轮 run 从事件流派生当前模型生效
-- `GET /api/models` 的默认条目（`is_default=true`）也是合法 POST target = 切回默认链
-- 与默认条目同 provider + 同名的 catalog 条目会被遮蔽（选不中），`GET /api/models` 不列出该死选项
-- 响应回传规范 model_id（service 解析出的 picker id），**不回显请求值**——否则上游 `model_name` / `"default"` 别名会与事件里的 `to_model_id` 及 `GET /api/models` 的 id 对不上
-
-### 前端实现范围
-
-1. **API 层**（`web/src/lib/api.ts`）：
-   - 新增 `changeSessionModel(sessionId, provider, modelId)` → POST /api/sessions/{id}/model
-   - 新增 `forkSession(sessionId, fromSeq)` → POST /api/sessions/{id}/forks
-
-2. **事件类型**（`web/src/generated/event-types.ts`）：
-   - 添加 `MODEL_CHANGED: 'model/changed'`
-
-3. **投影层**（`web/src/lib/projection.ts`）：
-   - 处理 `model/changed` 事件 → 更新 `conversation.model`
-
-4. **UI 层**：
-   - ModelPicker 选择后调 `POST /api/sessions/{id}/model`（而非仅本地状态更新）
-   - 用响应里的 `model_id` 更新本地状态
-   - 监听 SSE 事件流中的 `model/changed` 事件，更新 UI 显示当前模型
-   - Fork 选择器：在历史用户消息上提供 fork 入口
-   - 调 `POST /api/sessions/{id}/forks` body `{from_seq}`
-   - 成功后跳转到 child session
-
-### SDD 循环记录
-
-#### 第 1 轮：/implement
-
-- 状态：`done`
-- 改了哪些文件：
-  - `web/src/lib/api.ts` — 新增 `changeSessionModel()` 和 `forkSession()`
-  - `web/src/lib/projection.ts` — MODEL_CHANGED → 更新 conversation.model；RUN_INTERRUPTED → finalizeRun
-  - `web/src/hooks/useSession.ts` — useSession 暴露 changeModel 和 fork 操作
-  - `web/src/App.tsx` — handleModelChange 在已有会话时触发 POST /model；handleFork 调用 forkSession 并跳转
-  - `web/src/components/Conversation.tsx` — 用户消息上添加「分叉」按钮
-  - `web/src/styles/app.css` — fork-btn 样式
-- 门禁结果：tsc 0 / vitest 377 passed / oxlint 0 errors / playwright 46 passed
-
-#### 第 1 轮：/code-review
-
-- 状态：`pending`
-
-#### 修复循环
-
-（如有问题，记录每轮修复内容）
+| 门禁 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 0 error |
+| `npx vitest run` | 408 passed / 27 files |
+| `npx oxlint` | 0 error / 35 warning（全部既有，非本批引入） |
+| `npx playwright test --workers=2` | 46 passed |
+| `npx vite build` | OK（仅既有 chunk-size 提示） |
 
 ---
 
-## FE-T8: 崩溃恢复 UI — run/interrupted + 409 守卫
+## 已完成批次：FE-T7 / T8 / T9（#137–#139）
 
-### 后端契约（来自 HANDOFF_FRONTEND_T7_T9.md §一.T8）
+### FE-T7 会话级模型切换 + Fork UI
 
-**新增事件：**
+- API：`changeSessionModel(sessionId, provider, modelId)` → `POST /api/sessions/{id}/model`；
+  `forkSession(sessionId, fromSeq)` → `POST /api/sessions/{id}/forks`。
+- 投影：`model/changed` → 更新 `conversation.model`。
+- UI：ModelPicker 走 POST 并以**响应回传的规范 model_id**更新本地状态（不回显请求值）；
+  用户消息上的「分叉」入口（`Conversation.tsx` + `.fork-btn`）。
+- review 修复（`c6e6fab`）：CSS 变量改正、响应 model_id 采用、移除越出 T8 范围的改动。
 
-```typescript
-RUN_INTERRUPTED: 'run/interrupted',
-// data: { interrupted_seq, reason }
-// 信封字段: run_id, step_id
-```
+### FE-T8 崩溃恢复 UI
 
-**崩溃扫描流程（web lifespan 启动时自动执行）：**
+- 投影：`run/interrupted` → `finalizeRun` + `ConversationState.run_interrupted`
+  `{ step_id, interrupted_seq, reason }`。
+- `sendFollowUp` 捕获 **409**：解析 detail，抛「存在需要人工裁决的高风险操作」，
+  **不伪造结果继续**（后端硬拒绝，不变量 #14）。
+- UI：中断横幅（`.interrupt-banner`）。
 
-```
-进程重启
-→ 遍历所有 session
-→ 检测无终态 run（run/started 之后没有 run/completed / run/failed / run/interrupted）
-→ 补记 run/interrupted 事件
-→ 强制跑 RecoveryCoordinator（Ledger-first reconcile）
-→ UNKNOWN 工具调用无 ReconcileCallback 时安全拒绝
-  （ReconcileRequired → ScanRecovery.NEEDS_MANUAL_RECONCILE）
-→ 不伪造结果、不盲重跑（不变量 #14）
-```
+### FE-T9 轮次标签
 
-**续跑守卫（前端需要处理的 409）：**
-
-当用户对一个有崩溃遗留（UNKNOWN 高风险 tool_call）的 session 发 `POST /api/sessions/{id}/messages`（继续/重发）时：
-
-```json
-// HTTP 409
-{
-  "detail": "存在需要人工裁决的 UNKNOWN Operation（bash(tool_call_id=call-1)）：..."
-}
-```
-
-前端应：
-1. 捕获 409，解析 detail 中的 `tool_name` 和 `tool_call_id`
-2. 提示用户「此会话有未确认的高风险工具调用，需人工裁决」
-3. 提供「调 `POST /api/sessions/{id}/recover` 重试」或「忽略」的选项
-4. **不得**伪造「结果未知」继续——这是后端硬拒绝的
-
-### 前端实现范围
-
-1. **事件类型**（`web/src/generated/event-types.ts`）：
-   - 添加 `RUN_INTERRUPTED: 'run/interrupted'`
-
-2. **投影层**（`web/src/lib/projection.ts`）：
-   - 处理 `run/interrupted` 事件 → 标记 run 为 interrupted 状态
-   - 在 ConversationState 中添加 `run_interrupted` 字段
-
-3. **UI 层**：
-   - 打开有 `run/interrupted` 的 session 时，显示「上次运行在第 N 步中断」
-   - 三个动作按钮：继续 / 重发 / 忽略
-   - 409 人工裁决提示：当 `POST /api/sessions/{id}/messages` 返回 409 且 detail 含「UNKNOWN」时
-   - 提示用户「此会话有未确认的高风险工具调用，需人工裁决」
-   - 提供「调 `POST /api/sessions/{id}/recover` 重试」或「忽略」的选项
-
-### SDD 循环记录
-
-#### 第 1 轮：/implement
-
-- 状态：`pending`
-- 改了哪些文件：—
-- 门禁结果：—
-
-#### 第 1 轮：/code-review
-
-- 状态：`pending`
-- 发现的问题：—
+- 投影：`run/started` 提取 `data.turn_index` → `ConversationState.turn_index`。
+- UI：TurnView 显示「第 N 轮」。
 
 ---
 
-## FE-T9: 轮次标签（turn_index 显示）
+## 深化批次（架构评审 → 实施）
 
-### 后端契约（来自 HANDOFF_FRONTEND_T7_T9.md §一.T9）
+评审产物：`docs/ARCHITECTURE_REVIEW.md`（5 个候选 + 「选择的最佳路径」+ 「交付状态」+ 「已披露的行为变化」）。
 
-`RUN_STARTED` 事件 data 现在多一个字段：
+**执行顺序（先低风险后深水）**：C4 → C3 → C2 → C1；C5 已否决。
 
-```json
-{
-  "type": "run/started",
-  "data": { "turn_index": 1 }
-}
-```
+### C4 + C3（`9b2234f`，一个 SDD 循环覆盖两个 candidate——偏离「每 candidate 一轮」，已记录）
 
-前端可以选择显示「第 N 轮」标签，也可以忽略这个字段（不影响现有行为）。
+- 新增 `lib/amend.ts`：`toAmendFields` / `toCreateControls`——Composer 档位（camelCase）
+  → 契约字段名的**单一映射点**；明确**不做**空值丢弃（丢弃归 api 层）。
+- `lib/api.ts`：`startSession` 成为与 `sendMessage` 同款的「有值才带键」执行点；
+  空值 / 空数组不发键 = 后端默认。
+- 新增 `lib/amend.test.ts`（5 例）锁字段集边界与「映射层不判空」契约。
 
-### 前端实现范围
+### C2（`f481ea5`）事件语义注册表
 
-1. **投影层**（`web/src/lib/projection.ts`）：
-   - 在 `RUN_STARTED` 分支中提取 `data.turn_index`
-   - 存入 ConversationState（新增 `turn_index` 字段）
+- `applyEvent` 与 `summarizeEvent` 两个并行 switch 收敛为
+  `EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics>`（`{ apply, summarize }`）。
+- **穷尽性经实验证伪**：注入 `FUTURE_THING` → `tsc` 报 TS2741；
+  还原后 `git diff --stat` 干净。生成物新增事件类型而忘记登记 → 编译失败。
+- 词汇表内但前端零处理的 7 个类型（`artifact/externalized`、`context/compaction_start|end`、
+  `message/queued`、`queue/cancelled`、`steer/requested|applied`）**显式登记**为
+  `unhandledProjection`（保持既有兜底行为进 `unknown_events`），使缺口可见而非静默。
 
-2. **UI 层**：
-   - 在 TurnView 中显示「第 N 轮」标签（如果 turn_index 存在）
+### C1（`ae341e2`）第一刀——`ReconnectController`
 
-### SDD 循环记录
-
-#### 第 1 轮：/implement
-
-- 状态：`pending`
-- 改了哪些文件：—
-- 门禁结果：—
-
-#### 第 1 轮：/code-review
-
-- 状态：`pending`
-- 发现的问题：—
+- 新增 `lib/reconnect.ts`：**无 React / 无定时器 / 无 I/O** 的重连策略状态机。
+  调用方拿 `decision` + `delayMs` 后自行调度（参考 deepseek-harness `BlockStreamer`
+  的 injectable clock、pi-mono `lane.ts` 把 operation 生命周期从编排循环剥出）。
+- 契约原语一并迁入：`decideStreamEnd` / `reconnectDelayMs` / `MAX_RECONNECT_ATTEMPTS` /
+  `RECONNECT_STALL_MS` / `RECONNECT_BANNER_DELAY_MS`（时间参数集中——评审「速度」目标）。
+  `useSession.ts` 以 re-export 保持既有导入路径不破。
+- 行为逐点对齐旧闭包：准入即占单飞并递增额度；`observeProgress` 只在 seq **严格超过**
+  重连起点游标时复位额度（重放旧帧不是真进展，否则额度永不耗尽 → `give-up` 不可达 →
+  悬空 run 无限重连）；`release` 放单飞但不动额度；`hold` 是 truncated 全量重建的占位；
+  `reset` 是流的生命周期边界。
+- 新增 `lib/reconnect.test.ts`（19 例）锁此前无测试的状态迁移。
 
 ---
 
-## 全部完成后的步骤
+## 剩余工作
 
-### /improve-codebase-architecture
+### 1. C1 深水部分：`StreamOrchestrator`（未做，风险最高，需完整回归）
 
-- 状态：`pending`
-- 扫描结果：—
-- 修复记录：—
+`attachLiveStream` 仍是约 200 行嵌套闭包，以下四类降级路径与合帧提交仍在 hook 内：
 
-### 写集成 AI 交接提示词
+| 路径 | 现状位置 |
+| --- | --- |
+| 合帧批量提交（性能正向路径） | `coalescer` / `coalescerRef` |
+| 停摆心跳 + visibilitychange | `stallCheckRef` / `stallCheck` |
+| truncated 全量重建 | `doTruncatedRebuild` |
+| seq-gap 分流 | `onEvent` 内 `isSeqGap` 分支 |
 
-- 状态：`pending`
-- 内容：—
+目标形状（评审「主路径」）：`lib/stream-orchestrator.ts`，构造注入
+`fetchStream` / `scheduleTimer` / `clock`，内部按 pi-mono `drive/` 的状态分派
+拆成 recovery / rebuild / stall 子模块；生产（SSE 解析）与消费（投影应用）分离
+（pi-mono `EventStream<T,R>`）。
+
+**为何本轮不做**：该段处于每帧热路径与全部降级路径的交汇处，无监督长会话收尾阶段
+风险过高。先剥出重连策略状态机并锁单测，是后续提取的安全网前置条件。
+
+### 2. 已登记待定项（不在本批范围）
+
+- `session/forked`：已知类型但 Timeline 摘要仍落「未知事件」文案（pre-existing，
+  文案变更未经确认）。C2 注册表按等价迁移保留，已登记。
+- 上述 7 个未接线类型：需产品确认是否显示。
+- `api.ts` 中 `START_SESSION_FIELDS` 与 `SEND_MESSAGE_FIELDS` 的 amend 四项各自登记
+  （编译期各自穷尽，但同一字段集两处书写）——是否抽公共表待定，当前按
+  「简单优先」保留显式重复。
+
+### 3. 集成交接提示词待补
+
+`docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md` 目前只覆盖 T7–T9；
+需补深化批次 commits（`9b2234f` / `f481ea5` / `ae341e2` + review 修复）与新 HEAD，
+并标注「已披露的行为变化」两处，供集成 AI 判定合并影响。

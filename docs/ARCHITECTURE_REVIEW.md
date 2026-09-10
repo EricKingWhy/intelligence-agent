@@ -310,35 +310,10 @@ Candidate #1 解决运行时的编排鲁棒性；Candidate #2 解决**契约漂�
 
 ---
 
-## Top Recommendation
-
-**Candidate #1 + #2 组合**：`#1` 解决运行时（性能/速度/鲁棒性/可用性），`#2` 解决编译期契约漂移。`#3`/`#4` 作为前置清理先行落地；`#5` 已否决（见上）。
-
-执行顺序建议：
-
-```
-1. Candidate #2 (projection.ts 并行 switch 收敛)
-   → 最高 ROI，低风险
-
-2. Candidate #3 (App.tsx 重复 amend-payload)
-   → 中等 ROI，低风险
-
-3. Candidate #4 (api.ts 双重归一化)
-   → 低 ROI 但简单
-
-4. Candidate #1 (useSession.ts attachLiveStream)
-   → 最高价值但最大风险，需要完整 e2e 回归
-
-5. Candidate #5 (types.ts ConversationState)
-   → 可能过度工程化，暂缓
-```
-
----
-
 ## 实施约束
 
 1. **每个 candidate 都走 SDD 循环**：/implement → /code-review → 修复 → /code-review
-2. **不改变外部行为**：所有重构必须是行为保持的
+2. **不改变外部行为**：所有重构必须是行为保持的（例外须在「已披露的行为变化」登记）
 3. **门禁全绿**：tsc + vitest + oxlint + playwright + build
 4. **不推送到远程**：本地 commit 可以，push 不行
 5. **参考但不照抄**：pi-mono 和 deepseek-harness 的设计模式是参考，不是模板——我们的上下文不同
@@ -371,3 +346,43 @@ class EventStream<T, R = T> implements AsyncIterable<T> {
 - **result promise**：最终结果可以独立于迭代获取
 
 这个模式可以启发我们重构 attachLiveStream：将流的生产（SSE 解析）和消费（projection 应用）分离到独立的 StreamOrchestrator 中。
+
+---
+
+## 交付状态（本批实际落地）
+
+| Candidate | commit | 状态 |
+| --- | --- | --- |
+| #4 api 层唯一归一化点 | `9b2234f` | 交付 |
+| #3 Composer 档位单一构造器 | `9b2234f` | 交付（与 #4 同批：一个 SDD 循环覆盖两个 candidate，偏离约束 #1，记录在案） |
+| #2 事件语义注册表 | `f481ea5` | 交付；穷尽性经实验证伪（注入 `FUTURE_THING` → tsc TS2741） |
+| #1 StreamOrchestrator | `ae341e2` | **部分交付**：仅第一刀（重连策略状态机 + 时间参数集中）。完整编排提取未做，范围见下 |
+| #5 ConversationState 拆分 | — | 明确不做（YAGNI + 参考实现反证） |
+
+### C1 未完成部分（后续 ticket 范围）
+
+`attachLiveStream` 仍是约 200 行嵌套闭包：`coalescer`（合帧提交，性能正向路径）、
+`stallCheck`（停摆心跳）、`doTruncatedRebuild`（全量重建）、seq-gap 分流仍在 hook 内，
+且生产（SSE 解析）与消费（投影应用）仍交织。按本文件「主路径」的参考设计，目标形状是
+`lib/stream-orchestrator.ts`：构造注入 `fetchStream` / `scheduleTimer` / `clock`
+（抄 deepseek-harness `BlockStreamer`），内部按 pi-mono `drive/` 的状态分派拆成
+recovery / rebuild / stall 子模块。
+
+本轮不做，因为该段处于每帧热路径与全部降级路径的交汇处，在无监督的长会话收尾阶段风险过高。
+先剥出重连策略状态机并锁上单测，是让后续提取有安全网的前置条件。
+
+### 已披露的行为变化（「不改变外部行为」的例外）
+
+1. **Timeline 摘要**（`f481ea5`）：`run/interrupted` 由「未知事件 · …」变为「第 N 步中断」，
+   `model/changed` 由「未知事件 · …」变为「模型 → X」。旧行为把**已处理**的事件类型渲染成
+   「未知事件」，与 projection 内「未知兜底只留给真正未知类型（UnknownSurfaceNode 协议）」的
+   既定注释自相矛盾——按契约修正而非保持。`session/forked` 保持旧文案（同属已知类型，
+   但文案变更未经确认，登记待定）。
+2. **create 请求体**（`9b2234f`）：`context_providers: []` 不再发键（此前会发）。这是
+   「有值才带键」的既定语义（见 `api.ts` 注释与 `SendMessagePayload` 的已知 Gap）；
+   后端区分 None / []，前端选择器无法表达「零个」。
+
+### 交付时新增的防漂移装置
+
+`api.ts` 的 `BodyFields<T>` 字段表取代手写请求体：payload 类型新增字段而未登记 → tsc 失败。
+此前的手写白名单会**静默**丢弃新字段（请求照发、后端拿不到），是本轮 review 发现并修掉的失效模式。

@@ -46,6 +46,15 @@ export function reconnectDelayMs(attempt: number): number {
   return Math.min(500 * 2 ** (attempt - 1), 4000);
 }
 
+/** 停摆检测阈值（ms）：live 流超过该时长无任何帧且未终态 → 视为静默断流
+ *  （后台杀流 / 连接僵死），主动断开走重连（重放幂等，代价小）。回前台由
+ *  visibilitychange 即时触发同一检查；hook 级心跳兜底其余路径。 */
+export const RECONNECT_STALL_MS = 10_000;
+
+/** 断线条显示延迟（ms，spec 03 §20「only if reconnect lasts long enough to
+ *  matter」）：500ms 级瞬时重连不闪条；超时未接通才出现（role=status 不轰炸）。 */
+export const RECONNECT_BANNER_DELAY_MS = 800;
+
 /** `request` 的裁决结果：允许重连（带调度参数）或终态迁移。 */
 export type ReconnectRequest =
   | { decision: 'reconnect'; attempt: number; delayMs: number }
@@ -98,7 +107,8 @@ export class ReconnectController {
    *  重连重放的旧帧（seq ≤ 游标）不算——否则额度永不耗尽。
    *  起点游标为 null（sid 已知但尚无持久帧）时永不复位——照搬重构前的
    *  闭包守卫，实测路径上 sid 由首帧带入而首帧带 seq，属窄边角。
-   *  返回是否发生了复位（调用方可据此打点，当前实现无消费方）。 */
+   *  返回是否发生了复位：调用方当前不消费，但单测据此直接锁定迁移，
+   *  不必为断言去反推内部状态。 */
   observeProgress(seq: number | null): boolean {
     if (this.progressBase === null || seq === null || seq <= this.progressBase) return false;
     this.attempts = 0;
