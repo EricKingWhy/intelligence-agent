@@ -120,7 +120,6 @@ export function parseTruncated(data: Record<string, unknown>): { latestSeq: numb
   return typeof seq === 'number' && Number.isFinite(seq) ? { latestSeq: seq } : null;
 }
 
-
 /** live→viewing 迁移时是否显示「正在加载历史…」占位符。
  *
  * 流结束的会话 conversation 已是该会话的完整投影真相（同一事件源流式构建，

@@ -31,6 +31,7 @@
 | 深化 C3 | Composer 档位 → 提交字段的单一构造器 | `done` | `9b2234f` |
 | 深化 C2 | projection 事件语义注册表（编译期穷尽） | `done` | `f481ea5` |
 | 深化 C1 | StreamOrchestrator 流式编排深化 | **`partial`** | `ae341e2`（第一刀） |
+| 深化 review 修复 | 字段表编译期锁 + 时间参数集中 + 记录修订 | `done` | `2735422` |
 | 深化 C5 | ConversationState 拆分 | `rejected` | —（YAGNI + 参考实现反证，见 `docs/ARCHITECTURE_REVIEW.md`） |
 
 ### 全部完成后的步骤
@@ -110,9 +111,10 @@
 - 新增 `lib/reconnect.ts`：**无 React / 无定时器 / 无 I/O** 的重连策略状态机。
   调用方拿 `decision` + `delayMs` 后自行调度（参考 deepseek-harness `BlockStreamer`
   的 injectable clock、pi-mono `lane.ts` 把 operation 生命周期从编排循环剥出）。
-- 契约原语一并迁入：`decideStreamEnd` / `reconnectDelayMs` / `MAX_RECONNECT_ATTEMPTS` /
-  `RECONNECT_STALL_MS` / `RECONNECT_BANNER_DELAY_MS`（时间参数集中——评审「速度」目标）。
-  `useSession.ts` 以 re-export 保持既有导入路径不破。
+- 契约原语一并迁入 `decideStreamEnd` / `reconnectDelayMs` / `MAX_RECONNECT_ATTEMPTS`；
+  时间常量 `RECONNECT_STALL_MS` / `RECONNECT_BANNER_DELAY_MS` 在 review 修复 `2735422` 随迁
+  （评审「速度」目标：退避 / 停摆阈值 / banner 延迟集中为一处）。`useSession.ts` 以 re-export
+  保持既有导入路径不破。
 - 行为逐点对齐旧闭包：准入即占单飞并递增额度；`observeProgress` 只在 seq **严格超过**
   重连起点游标时复位额度（重放旧帧不是真进展，否则额度永不耗尽 → `give-up` 不可达 →
   悬空 run 无限重连）；`release` 放单飞但不动额度；`hold` 是 truncated 全量重建的占位；

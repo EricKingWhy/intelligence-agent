@@ -108,7 +108,7 @@ class StreamOrchestrator {
 
 ## Candidate #2: projection.ts — 并行 switch，1000 行 god-file
 
-**强度：Worth exploring（Top Recommendation）**
+**强度：Worth exploring**
 
 **文件：** `web/src/lib/projection.ts`（applyEvent ~500 lines + summarizeEvent parallel switch）
 
@@ -373,8 +373,9 @@ recovery / rebuild / stall 子模块。
 
 ### 已披露的行为变化（「不改变外部行为」的例外）
 
-1. **Timeline 摘要**（`f481ea5`）：`run/interrupted` 由「未知事件 · …」变为「第 N 步中断」，
-   `model/changed` 由「未知事件 · …」变为「模型 → X」。旧行为把**已处理**的事件类型渲染成
+1. **Timeline 摘要**（`f481ea5`）：`run/interrupted` 由「未知事件 · …」变为
+   「第 N 步中断」（`step_id` 缺失时「运行中断」），`model/changed` 由「未知事件 · …」变为
+   「模型 → X」（`to_model_id` 缺失时「模型已切换」）。旧行为把**已处理**的事件类型渲染成
    「未知事件」，与 projection 内「未知兜底只留给真正未知类型（UnknownSurfaceNode 协议）」的
    既定注释自相矛盾——按契约修正而非保持。`session/forked` 保持旧文案（同属已知类型，
    但文案变更未经确认，登记待定）。

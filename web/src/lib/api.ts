@@ -152,13 +152,19 @@ function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
  *  `Record<keyof T, …>` 是编译期完整性锁：payload 类型新增字段而此处未登记
  *  → tsc 失败。此前的手写白名单会**静默**把新字段丢掉——请求照发、后端拿
  *  不到，是最难查的一类失效。字段判空规则因语义而异（falsy / undefined /
- *  非空数组），故此表只统一「构造」，不强行统一「判空」。 */
-type BodyFields<T> = Record<keyof T, (payload: T) => [string, unknown] | null>;
+ *  非空数组），故此表只统一「构造」，不强行统一「判空」。
+ *
+ *  契约键的类型是 `keyof T & string` 而非裸 string：本项目的 payload 键与线上
+ *  契约键同名，把这条不变量写进类型——写错键名（如 'max_step'）直接编译失败，
+ *  而不是发出一条后端不认的请求。 */
+type BodyEntry<T> = [keyof T & string, unknown] | null;
+
+type BodyFields<T> = Record<keyof T, (payload: T) => BodyEntry<T>>;
 
 /** 依字段表构造请求体（null 条目跳过）。键序 = 表内声明序。 */
 function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<string, unknown> {
   const body: Record<string, unknown> = {};
-  for (const serialize of Object.values(table) as ((p: T) => [string, unknown] | null)[]) {
+  for (const serialize of Object.values(table) as ((p: T) => BodyEntry<T>)[]) {
     const entry = serialize(payload);
     if (entry) body[entry[0]] = entry[1];
   }
