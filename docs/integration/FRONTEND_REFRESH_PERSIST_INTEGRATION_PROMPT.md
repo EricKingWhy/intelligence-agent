@@ -2,7 +2,7 @@
 
 > **分支**：`feat/frontend` @ `D:\intelligence-agent-frontend`
 > **起始 commit**：`cf8f3a7`
-> **本批 commit**：见下方 §1（写完回填）
+> **本批 commit**：`138b056`（代码 + 文档 + 测试同批）
 > **门禁**：tsc ✓ · vitest **487 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线持平）· playwright **96 passed** · vite build ✓
 > **禁止推送远程**：本分支只做本地 commit，`git push` / merge 由集成 AI 执行（AGENTS.md §13.2 / §14.4）
 
