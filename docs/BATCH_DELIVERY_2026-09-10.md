@@ -1,9 +1,9 @@
-# 本批次交付概览 — feat/frontend `eb999bc`
+# 本批次交付概览 — feat/frontend `b354896`
 
 **日期**：2026-09-10
 **分支**：`feat/frontend`（`D:\intelligence-agent-frontend`）
-**状态**：**5 个 commit 已推送 origin**；门禁全绿；工作树干净
-**目标**：合入 `main`（当前 `ebb2d68`）——`ahead 5 / behind 6`，实测**无冲突**
+**状态**：**8 个 commit 已推送 origin**；门禁全绿；工作树干净
+**目标**：合入 `main`（当前 `ebb2d68`）——`ahead 8 / behind 6`，实测**无冲突**
 
 > **本文件是本批次交付的权威入口。** 细节分文档见：
 > - `docs/integration/FRONTEND_INTEGRATION_PROMPT.md` —— **给集成 AI 的执行指令**（含实测拓扑与冲突预判）
@@ -12,11 +12,16 @@
 > - `docs/T9_TURN_INDEX_DELIVERY.md` —— T9 专项说明（per-turn `turn_index` 的设计推理与核实过程）
 >
 > ⚠️ **哈希均为快照，集成时以 `git ls-remote` 实测为准。** 预检脚本已内置该纪律。
+> ⚠️ **本文件曾滞后 3 个 commit**（2026-09-10 code-review 发现：header 仍写 `eb999bc` / 5 个 commit）。
+> 已同步至 `b354896` / 8 个。**判断数量以 `git rev-list --count main..HEAD` 实测为准。**
 
-## 本批 5 个 commit
+## 本批 8 个 commit
 
 | commit | 内容 |
 | --- | --- |
+| `b354896` | docs(T9): 补记原地 `git init` 的遗留副作用——本地 `main` 分支缺失 |
+| `85c427d` | docs(integration): 新增集成前预检脚本 `verify-before-merge.sh`（只读、每次实测） |
+| `e1990ec` | docs: 交付文档入库——T9 专项说明 + 批次概览 + code-review 说明 |
 | `eb999bc` | docs(integration): 集成提示词同步 main 新 tip `ebb2d68` + 本分支 tip `4b45bc5` |
 | `4b45bc5` | fix(web): code-review 修复——picker 键盘焦点落到 listbox + 长目录 fixture 去重 |
 | `f2b4929` | docs(integration): 重写集成交接提示词至真实拓扑 + Tracker 勘误 |
@@ -114,6 +119,9 @@ T7+T8+T9+深化 C1–C4 **已并入 main**（`9964adc` + `977b319`）。重写�
 ## 四、commit 链与合并预检
 
 ```
+b354896  docs(T9): 补记原地 git init 的遗留副作用——本地 main 分支缺失
+85c427d  docs(integration): 新增集成前预检脚本 verify-before-merge.sh（只读、每次实测）
+e1990ec  docs: 交付文档入库——T9 专项说明 + 批次概览 + code-review 说明
 eb999bc  docs(integration): 同步 main 新 tip ebb2d68 + 本分支 tip 4b45bc5
 4b45bc5  fix(web): code-review 修复——picker 键盘焦点落到 listbox + 长目录 fixture 去重
 f2b4929  docs(integration): 重写集成交接提示词至真实拓扑 + Tracker 勘误
@@ -123,14 +131,14 @@ cddea36  feat(web): T9 #139 轮次标签 UI——turn_index 落到当轮 + TurnV
                       c00f742  ← merge-base，已在 main 中
 ```
 
-**拓扑（2026-09-10 17:55 实测）**：
+**拓扑（2026-09-10 18:25 实测）**：
 
 | 项 | 值 |
 | --- | --- |
-| `feat/frontend` | **`eb999bc`**（已推送） |
+| `feat/frontend` | **`b354896`**（已推送） |
 | `main` | **`ebb2d68`** |
-| ahead / behind | **5 / 6** |
-| merge-tree(`eb999bc`, `ebb2d68`) | **`e0998e9`**（仅 tree 哈希，**无冲突段**） |
+| ahead / behind | **8 / 6** |
+| merge-tree(`main`, `b354896`) | **`ac73da9`**（仅 tree 哈希，**无冲突段**） |
 | 双侧文件交集 | **空**（`comm -12` 交叉验证） |
 
 > ⚠️ 哈希是快照。`main` 会继续前进——**合并前跑预检脚本**（它每次重新实测，不读常量）：
@@ -142,17 +150,29 @@ cddea36  feat(web): T9 #139 轮次标签 UI——turn_index 落到当轮 + TurnV
 > git ls-remote origin main feat/frontend
 > git merge-tree --write-tree --name-only <HEAD> <main>
 > ```
-> > 实测记录：`merge-tree(eb999bc, ebb2d68)` = `e0998e9`（2026-09-10 17:55）；
-> > 稍后对 `e1990ec` 重跑得 `bf49e27`（HEAD 前进 → 树哈希随之变化，**属正常**，
+> > 实测记录：`merge-tree(eb999bc, ebb2d68)` = `e0998e9`（17:55）；对 `e1990ec` 重跑得 `bf49e27`；
+> > 对 `b354896` 得 **`ac73da9`**（HEAD 前进 → 树哈希随之变化，**属正常**，
 > > 无冲突结论不变）。这正是**不该在文档里写死哈希**的实证。
+
+### 四.1 ⚠ 判断「合并带什么进 main」用**三点** diff
+
+`git diff main...feat/frontend`（三点 = `merge-base..feat`）才是合并真正引入的改动（19 文件，
+全在 `docs/` + `web/`）。**两点** `git diff main feat/frontend` 会把 main 侧**新增**的后端文件
+（`src/agent_harness/session/*.py`）显示成「删除」——**那是假象，别据此误报事故**。
+详见 `FRONTEND_INTEGRATION_PROMPT.md` §2.1。
 
 ---
 
 ## 五、交给集成 AI
 
-1. 把 `eb999bc` 合入 `main`（预计 clean；合并前重跑 `merge-tree` 实测）
+1. 把 **`b354896`** 合入 `main`（预计 clean；合并前重跑 `merge-tree` 实测
+   或跑 `verify-before-merge.sh`）
 2. 回填 `docs/PHASE_STATUS.md`（`FRONTEND_INTEGRATION_PROMPT.md` §6 有建议文本）
 3. **推送前实测** `git ls-remote origin main feat/frontend`
+
+> ⚠️ **`D:\intelligence-agent` 与前端仓库不共享对象库**——在 main 侧合并**必须先
+> `git fetch origin feat/frontend`**，并使用 `origin/feat/frontend` 这个 ref 名。
+> 完整步骤与坑位见 `FRONTEND_INTEGRATION_PROMPT.md` §5。
 
 **未完成项**（详见 `FRONTEND_INTEGRATION_PROMPT.md` §7）：
 - C1 深水 `StreamOrchestrator`（`attachLiveStream` 仍约 200 行闭包；风险高，非本轮）
