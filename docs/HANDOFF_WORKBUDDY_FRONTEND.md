@@ -220,8 +220,10 @@ RUN_INTERRUPTED: 'run/interrupted',  // T8 #138
 | Type check | `npx tsc -b` | exit 0 |
 | 单元测试 | `npx vitest run` | 28 files / 497 tests passed |
 | Lint | `npx oxlint` | 0 errors / 35 warnings（全部既有，**基线值：不得升高**） |
-| e2e | `npx playwright test --workers=2` | 104 passed |
+| e2e | `npx playwright test --workers=2` | 112 passed |
 | 生产构建 | `npx vite build` | ✓ built |
+
+**另有一条不入 CI 的联调车道**：`web/e2e-live/`（真后端 + 真模型，无 `page.route` mock），配置 `web/playwright.live.config.ts`，跑法 `npx playwright test --config playwright.live.config.ts`（需后端已启动）。**新增任何测试目录时，务必同时改两处**：`playwright.config.ts` 的 `testDir` 与 `vitest.config.ts` 的 `exclude`——只改一侧会让单测车道把 Playwright 用例当单测收集而整体变红（第五轮踩过）。
 
 ---
 

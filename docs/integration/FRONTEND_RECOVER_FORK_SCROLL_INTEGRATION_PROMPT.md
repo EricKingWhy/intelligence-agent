@@ -114,7 +114,7 @@
 | 分叉双击抑制 / 切换会话丢弃在途结果 / 30s 超时 / `forkError` 切回重现 | 无自动化 |
 | `StepDetail` 多 run 时长（依赖「run 顺序收口」假设） | 无自动化，注释已标注为假设 |
 | 滚动条拖拽（非 wheel）路径的同步脱离 | 无自动化 |
-| `ApprovalCard`（#37） | **本 UI 中不可达**，无单测（OBS-006） |
+| `ApprovalCard`（#37） | ~~**本 UI 中不可达**，无单测（OBS-006）~~ **勘误（第五轮）**：该结论已证伪——显式选权限档位即开启交互式审批，两键已真机点击并有回归锁 `web/e2e/n-approval-card.spec.ts`。见登记簿 OBS-006 订正条 |
 | OBS-005 非默认 amend 档位 → provider 400 | 疑似后端/provider，非前端 |
 
 ---

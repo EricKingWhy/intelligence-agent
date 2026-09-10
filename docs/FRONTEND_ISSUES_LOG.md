@@ -286,16 +286,33 @@ onClick={() => onFork(turn.step_id)}
 
 ---
 
-### OBS-006 审批卡（#37）在本 UI 中不可达且无测试【观察项 · 覆盖缺口】
+### OBS-006 审批卡（#37）「不可达」结论**已证伪**——两个按钮已真机点击【已闭合】
 
-**发现时间**：2026-09-11 真实浏览器点击巡检（逐按钮清点）
+**原登记（错误）**：`App.tsx` 提交任务硬编码 `auto_approve: true` → 待审批项永不产生 → 卡片不可达；且 `ApprovalCard.tsx` 无测试、`e2e/` 无对应 spec。
 
-**现象**：`ApprovalCard` 由 `Conversation` 按 `pending_approvals` 渲染，但：
+**为什么错**（同一类错误的第二次：把「我没找到路径」当成「不存在路径」）：
 
-1. **本 UI 无法触发**：`App.tsx` 提交任务时硬编码 `auto_approve: true`，所以从这里发起的 run 永远不会产生待审批项（只有「在别处以 `auto_approve=false` 发起的会话、再在本 UI 打开」才可能看到卡）。
-2. **无测试**：`src/components/ApprovalCard.tsx` 没有单测文件，`e2e/` 也没有对应 spec——16 个 spec 里一个都没有审批场景。
+1. 卡片的渲染完全由 **`tool/approval-requested` 事件**驱动（`projection.ts:514` 填 `pending_approvals` → `Conversation.tsx:348` 渲染），**与 `auto_approve` 无关**——`auto_approve` 只是 create 请求的 deprecated alias。
+2. 后端真正的开关是 `session/service.py:348`：`interactive = permission_mode_explicit and permission_mode != danger-full-access`。**只要客户端显式传 `permission_mode`，交互式审批即开启**（`app.py:199` 明载「两者同传时 `permission_mode` 优先」）。
+3. 前端**确实会传**：Composer 权限档位选择器 → `toCreateControls()` 的 `permission_mode`（`lib/amend.ts:47`）→ 键存在即 `permission_mode_explicit=True`。
+4. 至于「哪个工具会被拦」：`tooling/approval.py:80` 的 `needs_approval`——policy=`read-only` 时任何 `workspace-write` 工具都需审批，`executor.py:659` 随即调 callback 发事件。
 
-**影响**：这个交互（批准/拒绝按钮 → 后端回调）目前既点不到也测不到，属未验证区域。本轮不做功能改动（超出交接手册 A–D 范围），仅登记。
+**真机证据（真实后端 + 真实模型 + 真实浏览器点击，无任何 `page.route` mock）**：
+
+| 步骤 | 结果 |
+| --- | --- |
+| Composer 选「只读」→ 提交「创建工作区文件」 | 卡片渲染（「需要审批」+ 工具名 `write` + 参数预览含目标路径） |
+| 点「批准」 | 卡片变「已批准」、按钮消失；`POST /approve` 体 `{approved: true, decision: 'approve_once'}` |
+| 点「拒绝」 | 卡片变「已拒绝」、按钮消失；请求体 `{approved: false, decision: 'deny'}` |
+
+落盘证据（`events.jsonl`，durable，**由联调车道自身的断言轮询**）：批准会话 `8e06984e` seq 26 `tool/approval-requested`(write) → seq 27 `permission/resolved` **decision=approve_once**；拒绝会话 `4c5a30c4` seq 30 requested → seq 31 resolved **decision=deny**。**后端把人类决策持久化了**，且这一步现在是**测试断言**（`expect.poll` 后端 `/events`），不再只是人工观察。联调车道 2 passed（2.1 分钟，含真实模型往返）。
+
+**回归锁**：`web/e2e/n-approval-card.spec.ts`（4 用例 × 2 视口）用同形状 fixture 锁前端契约——事件→卡片渲染（工具名/参数预览）、批准/拒绝两键的**决策标签 + 按钮消失 + POST 请求体 + 请求 URL 的会话 id**、`permission/resolved` 把卡片移出待决队列。变异验证 5 处全部变红：批准 `onClick` 置空、拒绝 `onClick` 置空、`api.ts` 的 `decision` 线格式固定成 `approve_once`（**只有请求体断言能抓到**）、`api.ts` 的会话 id 换成常量（**只有 URL 断言能抓到**）、`projection.ts` 的 resolved 移除分支短路。
+
+**保留结论**：默认路径（不选权限档位）下不会出现审批卡——这是**正确的产品默认**，不是缺口。要让普通用户看到卡片，UI 需在选「只读」时给出提示；是否把交互式审批做成默认档位属产品决策，不在本轮范围。
+
+**注**：真机脚本**已入库但走独立车道**——`web/e2e-live/approval-live.spec.ts` + `web/playwright.live.config.ts`。主车道只扫 `./e2e`，**不会**把这条依赖真后端/真模型的用例拉进门禁（结果非确定：模型是否调工具由模型决定）；跑它用
+`npx playwright test --config playwright.live.config.ts`（需后端已启动）。
 
 ---
 
@@ -483,7 +500,7 @@ run: () => conversation && copyText(conversation.session_id),
 | 41 | 恢复会话 | ✓ 真实 dangling 会话（停止 run 留下）→ 点击 → **「已恢复：回填 1 条工具结果」**，入口与 hint 消失而成功提示保留（原症状已消除） |
 | 42 | 中断横幅 | ✓ 真实会话 `c63ce4d3-…`（run/interrupted 无 step_id）显示「上次运行在首个步骤开始前中断（原因：process_restart）」 |
 | 43 | 浮标 ↓ 最新 | ✓ 见第 19 项（真实 wheel 上滚 → 浮标 → 点回底） |
-| 未及 | 审批卡（#37） | ⚠ 本 UI 不可达（硬编码 `auto_approve: true`）且无测试——见 OBS-006 |
+| 未及 | 审批卡（#37） | ~~⚠ 本 UI 不可达~~ **已证伪并闭合**：显式选权限档位即开启交互式审批，两键已真机点击——见 OBS-006 订正条 |
 | 73 ★ | `复制 Trace ID` / `打开 Trace` | ✓ 两条**确实渲染且工作**（初版误判为「不可达」，已订正，见 OBS-010）。实测会话 `f181c5ce`：`复制 Trace ID` 经拦截 `clipboard.writeText` 拿到实参 `2482fcee…43b1`（与 seq 33 `run/failed` 的 `trace_id` 逐字一致）；`打开 Trace` 经拦截 `window.open` 拿到 `https://jp.cloud.langfuse.com/project/…/traces/2482fcee…`、`_blank`。⚠ 用例的可达条件：会话的 run 终态事件带 `trace_id`/`trace_url`（取自 `conversation.*`，**不依赖会话列表**） |
 | 74 ★ | 中断态脉冲与横幅的一致性（OBS-007 修复后复验） | ✓ 会话 `c63ce4d3`（中断→**完成**）：脉冲「已完成」且**过期中断横幅消失**；会话 `f181c5ce`（中断→**失败**）：脉冲「失败」且**横幅消失**。两例 Timeline 仍保留 `运行中断` / `第 3 步中断` 的历史行（事实不删）；恢复入口不受影响（`canRecover` 由事件判定）。⚠「已中断」脉冲态当前真实语料不可达（无「中断且从未重跑」的会话），由单测锁定 |
 
@@ -538,7 +555,7 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 | 71 ★ | Timeline 行直接点击 → StepDetail | ✓ 点 `3 model/completed qwen3.8-flash · 2170 tok` 行 → Inspector 切到该事件（出现「返回 Timeline」）；点返回 → 复位到 Run Inspector（34 行 Timeline 全部可点） |
 | 72 ★ | 命令面板**逐条执行**（不只搜到） | ✓ `切换 Run Inspector` → `app-regions` 加 `inspector-closed`；`切换主题` light→dark；`切换到紧凑` detailed→compact；`跳到最新事件` → Inspector 切到最后一条事件（`run/failed`）并出现「返回 Timeline」；`聚焦输入框` → 焦点落到 `textarea#composer-input`（与命令实现里的 id 逐字一致）。执行后已把主题/密度还原 |
 
-**本轮未复验（依赖特定现场，沿用上轮结论）**：审批卡（OBS-006：UI 不可达）、浮标↓最新（上轮埋点验证）、恢复会话按钮的**正向**点击（上轮以真实 dangling 会话验证过成功反馈「已恢复：回填 1 条工具结果」；本轮语料里两个 interrupted 会话都无 dangling，故入口按设计不出现——见第 68 行）。
+**本轮未复验（依赖特定现场，沿用上轮结论）**：审批卡（OBS-006：~~UI 不可达~~ **第四轮已证伪并真机点击，见该条订正**）、浮标↓最新（上轮埋点验证）、恢复会话按钮的**正向**点击（上轮以真实 dangling 会话验证过成功反馈「已恢复：回填 1 条工具结果」；本轮语料里两个 interrupted 会话都无 dangling，故入口按设计不出现——见第 68 行）。
 
 **合成事件假象清单（本轮新增，避免下次误报）**：Radix 系浮层/弹窗的外部点击关闭与 Esc 关闭依赖**真实** `pointerdown`/`keydown`；`element.click()` 与 `dispatchEvent(new KeyboardEvent(...))` 都不触发，会造成「浮层关不掉 / 多个同时开着 / Esc 无效」的假象。复测一律用真实指针序列或 CDP 按键。
 
@@ -731,6 +748,25 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 
 `sleep 30 && echo resume-test-done`、`ping -n 45 127.0.0.1` 均以 `TIMEOUT`（`retryable:false`）失败；`ping -n 4` / `sleep 9` 正常。即单条命令**上限 10.0s**，长任务必须由模型自行切分。结合 OBS-013 会出现「想跑长命令 → 超时 → 反复重试/退化」的组合失效。
 
+#### OBS-015 审批卡的 `catch` 把「任何错误」都当成已决——注释与行为相反（P2，预存在，**本轮由独立审查发现**）
+
+**位置**：`web/src/components/ApprovalCard.tsx:26-33`。
+
+```ts
+} catch {
+  // 409 = already resolved (idempotent success); other errors leave card pending
+  setDecision(approved ? 'approved' : 'denied');
+}
+```
+
+**问题**：注释写「其它错误保持 pending」，**代码却把任何错误都翻成「已批准/已拒绝」**。后果：审批 POST 真的失败（网络抖动、404、403、后端未接线）时，用户看到的是「已批准/已拒绝」的**乐观假象**，而 run 实际仍卡在等审批（直到 300s fail-closed 超时）。对安全相关的审批交互，这个方向的假象比「转圈不响应」更危险：用户以为放行了。
+
+**证据（本轮反驳「UI 变了 = 决策成功」的直接原因）**：把 `/approve` 改成恒返回 404，UI 依旧显示「已批准」、按钮消失、请求体依旧正确——**只有查后端 `permission/resolved` 才能区分**。故联调车道的判决断言改为轮询后端事件（`e2e-live/approval-live.spec.ts`）。
+
+**建议（需产品决策，本轮未改代码，§8 Scope Lock）**：区分 `409/404 已决`（幂等成功，翻已决）与**其它**传输/服务错误（**保持 pending + 报错提示**，让用户可重试）。至少应先把注释改成与代码一致，避免下一个人再被误导。
+
+**回归锁现状**：`e2e/n-approval-card.spec.ts` 只覆盖**成功路径**（mock 返回 200）。失败路径**无覆盖**——修 OBS-015 时应补一条「POST 500 → 卡片保持 pending」的用例。
+
 **本轮门禁**：tsc ✓ · vitest **494 passed** · oxlint **35 warnings / 0 errors** · playwright **100 passed**（+2）· vite build ✓。
 
 ### 本轮审查（对新增的 `l-auth-banner.spec.ts`）：0 个 P0/P1，1 项 **P2** + 4 项 P3——全部已处置
@@ -787,10 +823,11 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 | --- | --- | --- |
 | 真机点击验证通过 | **38** | **前两轮已验**：`detail-back-btn`（返回 Timeline）、`density-btn`（密度四档）、身份令牌图标、主题切换、`act-node`（ToolCard 与 DelegationNode 两处展开）、`fork-btn`、`turn-collapse-btn`、`workspace-mode`、`recover-btn`、`follow-pill`、新建会话、会话行、发送、停止、模型选择、CopyButton、ControlPicker（权限模式）、`palette-item`。**本轮新验**：Inspector `detail-tab` ×2 标签（5 个实例）、`timeline-earlier`、`timeline-row`、`detail-terminal-row`、`io-tab` ×2 标签（4 个实例）、`json-row`、`child-back-btn`、`md-code-wrap-btn`、`example-chip`、`reasoning-header`、`act-inspect-chip`、`detail-tool-row`、`auth-panel-save`、`auth-panel-clear`、Inspector 展开/收起 |
 | 不可达 · 已补 e2e | 1 | `auth-banner-close`（本地未配 `jwt_secret`；新增 `l-auth-banner.spec.ts` + 变异验证） |
-| 不可达 · 按设计 | 3 | 审批卡「批准」「拒绝」（`auto_approve` 硬编码，OBS-006）；`ContextProviderPicker`（本部署后端目录为空 → 正确地不渲染，第 29 行；组件本身由 `picker-search-visibility.spec.ts` 用长目录 fixture 覆盖） |
+| 不可达 · 按设计 | ~~3~~ **1** | ~~审批卡「批准」「拒绝」（`auto_approve` 硬编码，OBS-006）~~ **已证伪：两键均已真机点击**；仅剩 `ContextProviderPicker`（本部署后端目录为空 → 正确地不渲染，第 29 行；组件本身由 `picker-search-visibility.spec.ts` 用长目录 fixture 覆盖） |
 | **已用可控流补点**（见本文末「第四轮」） | 3 | `tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`——**已不再是缺口**：新增 `m-stream-affordances.spec.ts` 用 mock 流把窗口钉住后**真实点击**，三个按钮各经一次变异验证 |
+| **审批卡两键**（见 OBS-006 订正条） | 2 | 「批准」「拒绝」——**真机点击**（真实后端 + 真实模型：选「只读」→ `write` 工具触发 `tool/approval-requested` → 点击 → JSONL 持久化 `permission/resolved`）；回归锁 `n-approval-card.spec.ts` |
 
-**该行账目已被「第四轮」取代**（下表为历史快照）：`**45 = 38 真机 + 4 真实浏览器点击（mock 网络）+ 1 e2e 内激活 + 2 产品不可达**`——即 **43/45 已被真实点击**，仅剩审批卡两个按钮因 `auto_approve` 硬编码而无法出现（需产品决策，OBS-006）。
+**该行账目已被「第四轮」取代**（下表为历史快照）：~~`45 = 38 真机 + 4 真实浏览器点击（mock 网络）+ 1 e2e 内激活 + 2 产品不可达`——即 **43/45 已被真实点击**~~ → **现为 45/45**（审批卡两键已证伪「不可达」，见 OBS-006 订正条）。
 
 
 **附带证据：控制台干净**。走完上述全部点击后，页面控制台（含最近 3 次导航的保留消息）只有 **2 条 error**，且都是**本轮变异验证自身的残留**——临时改坏 `App.tsx` 再还原时，Vite HMR 报了一次 500 与一次「Failed to reload /src/App.tsx」。**没有**任何一条来自被点控件（Inspector tab / io-tab / JSON 展开 / 令牌保存 / 推理展开 / 委派钻取等）的应用级错误。
@@ -840,9 +877,9 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 | 真实浏览器点击 + **mock 流** | **3** | `tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`（本轮） |
 | 真实浏览器点击 + mock 401 | **1** | `auth-banner-close`（第三轮 `l-auth-banner.spec.ts`） |
 | e2e 内激活（mock 目录，键盘 Enter 触发） | **1** | `ContextProviderPicker` 触发器（`picker-search-visibility.spec.ts`） |
-| **产品不可达 · 仍无任何覆盖** | **2** | 审批卡「批准」「拒绝」——`App.tsx:336` 硬编码 `auto_approve: true`，该卡在本 UI **永不渲染**，且 `ApprovalCard` 无测试文件 |
+| **真机点击（真实后端 + 真实模型，第五轮）** | **2** | 审批卡「批准」「拒绝」——（原登记「产品不可达」**已证伪**：显式选权限档位即开启交互式审批）。真机点过 + JSONL 持久化决策；回归锁 `n-approval-card.spec.ts`（另用 mock fixture 锁前端契约） |
 
-**合计 45 = 38 + 3 + 1 + 1 + 2** ✓ —— **43/45 已被真实点击**；剩下 2 个不是「没点到」，而是**在当前产品配置下不存在**：要验证它们得先让 UI 能发出审批请求（放开 `auto_approve` 或加一个「人工审批」档位），那是产品决策，已登记为 OBS-006。
+**合计 45 = 38 + 3 + 1 + 1 + 2** ✓ —— **45/45 全部已被点击**。此前记为「2 个产品不可达」的两个按钮**已证伪并闭合**（OBS-006 订正条）：`auto_approve` 不是审批卡的门，`session/service.py:348` 的 `permission_mode_explicit` 才是。**本轮无任何「未验证」按钮遗留**。
 
 ### 第四轮收尾：独立审查结论与 6 项 P3 处置
 
@@ -862,3 +899,24 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 **加固后的变异复验（针对修改后的版本重跑，非沿用旧结论）**：换行 `onClick` → 空实现 ⇒ `Expected: "自动换行" / Received: "不换行"` 两视口红；`ToolCard` 跳转 `onClick` → 空实现 ⇒ `Expected: 0 / Received: 1`；`ReasoningBlock` 跳转同理 ⇒ `Expected: 0 / Received: 1`。三处均还原，`git ls-files --eol` 确认两个源文件回到 `i/lf w/lf`（**注意**：用 Python 文本模式改写会把 LF 变成 CRLF，`git diff` 因 `autocrlf=input` 而归一化看不出差异——必须用 `git ls-files --eol` 才能发现）。
 
 **第四轮最终门禁**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **104 passed**（100 + 本轮 4）· vite build ✓。
+
+### 第五轮：审批卡两键——证伪「不可达」+ 真机点击 + 回归锁
+
+见上「OBS-006 订正条」与「最终覆盖账目」。要点：`auto_approve` 不是审批卡的门，`session/service.py:348` 的 `permission_mode_explicit` 才是；真实后端 + 真实模型下选「只读」即可让 `write` 工具触发卡片，两键真机点击后 JSONL 留下 `permission/resolved`（`approve_once` / `deny`）。回归锁 `web/e2e/n-approval-card.spec.ts`（4 用例 × 2 视口），4 处变异全红；真机脚本入独立联调车道 `web/e2e-live/` + `playwright.live.config.ts`（**主车道只扫 `./e2e`，不受影响**）。
+
+**第五轮最终门禁（含前四轮全部用例）**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（扫 99 文件，基线未变）· playwright **112 passed**（104 + 审批卡 8）· vite build ✓。主车道对 live 车道用例计数为 **0**（已核验）。
+
+**本轮自曝缺陷（已修，值得记住）**：新建联调车道后，`vitest.config.ts` 的 `exclude` 只写了 `'e2e/**'`，**没覆盖 `'e2e-live/**'`** → vitest 把 Playwright 的 `test()` 当单测收集，**单测车道直接变红**（`1 failed | 28 passed`，29 文件）。我第一次跑 vitest 时该文件尚未就位，故报了「497 passed」——**这是错误的门禁结论**，随后的自查才发现。修复：`exclude` 增补 `'e2e-live/**'`（与 `e2e/**` 同理，注释写明原因）。**教训：新增任何测试目录，必须同时检查 vitest 的 `exclude` 与 playwright 的 `testDir` 两侧，只查一侧会漏。**
+
+### 第五轮审查（对 `n-approval-card.spec.ts` + fixtures + 联调车道）：0 个 P0/P1，2 项 **P2** + 4 项 P3
+
+**2 项 P2 全部已修**（都是「断言不足以证明所声称之事」）：
+
+1. **URL 里的 session id 未断言**：只断请求体时，把 `api.ts` 的会话 id 换成常量（打到别的会话）**两条车道都会绿**（`routeApi` 的 route 正则是 `[^/]+`，任何 id 都匹配）。→ 已改为记录并断言 `path === /api/sessions/${SID}/approve`；联调车道同样记录 path。
+2. **联调车道分不清「后端已决」与「POST 失败 + 乐观 UI」**：这正是 OBS-015 的直接后果——`catch` 对任何错误都翻标题。→ 已改为点击后 **`expect.poll` 后端 `/events` 里的 `permission/resolved`**，POST 被拒就过不去。
+
+**P3 处置**：`reuseExistingServer: true` → 改 `!process.env.CI`（与主车道同规矩）并在头注释写明「可能复用到别 worktree 的 5173」；档位选择按序号会随目录重排而失效 → 保留但注明「会**明确变红**，不是静默错选」；「`resolved` 移除」用例对**新增**路径非自足（审查方确认与用例 1 配对后可接受，已保留）。
+
+**审查方排除的误报**（记录以免后人重复怀疑）：fixture 与后端 `approval.py:56-72` **逐字段一致**（含 `allowed_decisions: ['deny','approve_once']`）；`fixtures.ts` 新分支不影响任何既有 spec（无其它 spec 命中该路径，catch-all 仍在最后）；联调车道不会进主门禁；点击类断言均**非空洞**（三轮变异可证）；`service.py:348` 的引用**准确**。
+
+**审查方另指出（预存在，未改）**：`tsconfig.app.json` 只含 `src`、`tsconfig.node.json` 只含 `vite.config.ts` → **e2e spec 与 Playwright 配置都不被 `tsc -b` 类型检查**，`onApprovePost` 之类的接线错误无编译期兜底（靠 playwright 运行时加载与 oxlint 解析）。属既有结构，登记备查。

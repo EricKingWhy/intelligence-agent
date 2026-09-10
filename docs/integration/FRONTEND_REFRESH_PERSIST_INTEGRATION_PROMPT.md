@@ -79,7 +79,8 @@
 | 零帧回落全静默 | P3 | 若后端某天在 run 活着时返回 200+空 body（契约破坏），用户会盯着半截会话且无信号。按**已实测契约**（空闲会话 → 立即 200+空 body；活着的 run 不会零帧 EOF）这不构成缺陷；加延迟复查会在回调里引入新重入面，收益不抵复杂度。风险已登记 |
 | OBS-008 `glm-5.3-flash` model/failed | 后端 | 工具成功后 `model/failed: "model call failed: RuntimeError"` → `run/failed`。**非前端**，与既有 OBS-001 同族（同一模型）。建议后端把原始异常落进日志/JSONL |
 | OBS-009 bash 工具 10s 上限 | 后端 | `sleep 10` 贴边越界 → `TIMEOUT`，且 `retryable:false`。前端渲染忠实（工具失败 ≠ run 失败，模型自行改用 `sleep 1` 后收口成功）。建议后端确认超时上限与 `retryable` 语义 |
-| OBS-006 审批卡不可达 | 覆盖缺口 | 硬编码 `auto_approve: true`，UI 不可达且无测试（预存在，上批已登记） |
+| ~~OBS-006 审批卡不可达~~ **已证伪并闭合** | 前端覆盖（原误判） | 原记「硬编码 `auto_approve: true` → UI 不可达」**是错的**：审批卡由 `tool/approval-requested` 事件驱动（`projection.ts:514`），真正的门是 `session/service.py:348` 的 `permission_mode_explicit`——**显式选权限档位即开启交互式审批**，与 `auto_approve` 无关。已用真实后端 + 真实模型真机点击「批准」「拒绝」两键，JSONL 持久化 `permission/resolved`（decision=approve_once / deny）；回归锁 `web/e2e/n-approval-card.spec.ts`。详见登记簿 OBS-006 订正条 |
+| **OBS-015 审批卡 `catch` 把任何错误当已决** | **P2（前端，预存在，需产品决策）** | `ApprovalCard.tsx:26-33`：注释写「其它错误保持 pending」，代码却对**任何**错误都 `setDecision(已批准/已拒绝)`。后果：审批 POST 真失败时用户看到「已批准」的**乐观假象**，run 实际仍卡在等审批（300s 才 fail-closed）——对安全相关交互，这个方向的假象比「无响应」更危险。**证据**：把 `/approve` 恒返回 404，UI 照样显示已批准。**本轮未改代码**（§8 Scope Lock），建议区分「409/404 已幂等」与「其它错误 → 保持 pending + 提示重试」；修时应补「POST 500 → 卡片保持 pending」用例（当前只覆盖成功路径）。详见登记簿 OBS-015 |
 | `test-results/.last-run.json` | 卫生 | 工作区根目录的 Playwright 残留（**Sep 9，非本批产生**），未纳入提交。`web/.gitignore` 已忽略 `web/test-results`，根目录这份是历史遗留 |
 
 ---
@@ -176,7 +177,7 @@ git -C D:/intelligence-agent merge feat/frontend      # 需用户批准
 
 ### 8.5 门禁（本批最终实跑，含第三、四轮）
 
-tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **104 passed**（含第四轮瞬态三键 4 例）· vite build ✓。
+tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **112 passed**（104 + 审批卡 8；瞬态三键 4 例见第四轮）· vite build ✓。真机联调车道（`web/e2e-live/` + `playwright.live.config.ts`）不计入主车道门禁。
 
 > 第四轮新增 `m-stream-affordances.spec.ts`（2 用例 × 2 视口），把此前唯一没点过的三个按钮（`tool-out-wrap-btn` / `tool-out-jump` / `reasoning-jump`）用 mock 流钉住窗口后**真实点击**；独立审查结论 approve（0 P0/P1/P2、6 项 P3 全修），并按加固后版本重跑三处变异均红。
 
@@ -208,14 +209,14 @@ tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 error
 
 - 源码 `<button>` 共 **45 个**（17 个文件）；`onClick` 的非 `<button>` 元素 **0 个** → 按钮即全部点击面。
 - 对照结果：初版用**关键词比对**判出「11 项未覆盖」，但复查发现该方法**两个方向都会错**——`保存`/`清除` 命中的是无关散文（登记簿第 160/167 行），于是令牌弹窗的「保存」「清除」实际从未被点过却判为 OK（假阳性）；而 `滚动到最新`（第 19 行有 e2e + 真机证据）、`恢复会话`（第 41 行）其实有覆盖（假阴性）。**故放弃文本比对，改为逐个真机点击。**
-- **最终逐标签核对（45 个）**——第四轮补齐瞬态窗口后的**最终账目**：
+- **最终逐标签核对（45 个）**——第四轮补齐瞬态窗口、第五轮补齐审批卡后的**最终账目**：
   - **38** 个「真实后端 + 真实浏览器」点击验证通过；
   - **3** 个（`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`）在第四轮用 **mock 流钉住窗口后真实点击**（不发 `tool/result` / `reasoning/completed` → 投影状态恒为 running/streaming），新增 `web/e2e/m-stream-affordances.spec.ts`，三个按钮各经一次变异验证；
   - **1** 个 `auth-banner-close` 用 **mock 401** 真实点击（`l-auth-banner.spec.ts`，本地无 `jwt_secret` 时它不出现）；
   - **1** 个 `ContextProviderPicker` 触发器在 `picker-search-visibility.spec.ts` 内用 mock 目录激活（本部署后端目录为空，故真机上正确地不渲染）；
-  - **2** 个**产品不可达**：审批卡「批准」「拒绝」——`App.tsx:336` 硬编码 `auto_approve: true` 使该卡永不渲染，且 `ApprovalCard` 无测试文件。
+  - **2** 个审批卡「批准」「拒绝」：第五轮**真机点击**（真实后端 + 真实模型）——原记「产品不可达」**已证伪**。门是 `session/service.py:348` 的 `permission_mode_explicit`（显式选权限档位即开启交互式审批），不是 `auto_approve`；选「只读」后 `write` 工具触发 `tool/approval-requested`，卡片渲染，两键点击后 JSONL 留下 `permission/resolved`（`approve_once` / `deny`）。回归锁 `web/e2e/n-approval-card.spec.ts`（4 用例 × 2 视口，含 POST 请求体断言，4 处变异验证全红）。
 
-  即 **45 = 38 + 3 + 1 + 1 + 2**，**43/45 已被真实点击**。剩下 2 个不是「漏点」而是「当前配置下不存在」：要验证需先让 UI 能发出审批请求（放开 `auto_approve` 或新增人工审批档位）——**需产品决策**，已登记 OBS-006。
+  即 **45/45 全部已被点击**，**无「未验证」按钮遗留**。默认（不选权限档位）不出现审批卡是**正确的产品默认**；是否把交互式审批做成默认档位属产品决策，不在本轮范围。
 
 ### 需要集成 AI 转交后端的问题（本轮主产出，均有文件行号）
 

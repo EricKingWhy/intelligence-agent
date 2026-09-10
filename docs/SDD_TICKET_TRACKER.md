@@ -22,10 +22,10 @@
 | 项 | 值 |
 | --- | --- |
 | 本批 commit | `35cd0a1`（401 缝单测 + `l-auth-banner.spec.ts`）、`8ed86f0`（瞬态三键 `m-stream-affordances.spec.ts`） |
-| 门禁 | tsc ✓ / vitest **497 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **104 passed**（`--workers=2`）/ vite build ✓ |
+| 门禁 | tsc ✓ / vitest **497 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **112 passed**（`--workers=2`；104 + 审批卡 8）/ vite build ✓ |
 | 交付 | 三个此前唯一没被真机点过的按钮（`tool-out-wrap-btn` / `tool-out-jump` / `reasoning-jump`）用 mock 流钉住流式窗口后**真实点击**；401 缝补 3 例单测 + 横幅 e2e |
-| 覆盖账目 | **45 = 38 真机 + 3 mock 流 + 1 mock 401 + 1 e2e 内激活 + 2 产品不可达** → **43/45 已被真实点击** |
-| 残余不可达 | 审批卡「批准」「拒绝」：`App.tsx:336` 硬编码 `auto_approve: true` → 该卡永不渲染，且 `ApprovalCard` 无测试文件。**需产品决策**（OBS-006），非漏点 |
+| 覆盖账目 | **45/45 全部已被点击**：38 真机 + 3 mock 流 + 1 mock 401 + 1 e2e 内激活 + **2 审批卡真机点击**（原记「产品不可达」已证伪） |
+| 原「残余不可达」 | ~~审批卡「批准」「拒绝」：`auto_approve` 硬编码 → 永不渲染~~ **已证伪**：门是 `session/service.py:348` 的 `permission_mode_explicit`（显式选权限档位即开启交互式审批），与 `auto_approve` 无关。两键已真机点击，JSONL 持久化 `permission/resolved`；回归锁 `n-approval-card.spec.ts` |
 | 审查 | 新 spec 独立审查 **approve**（0 P0/P1/P2、6 项 P3 **全部已修**），按加固后版本重跑三处变异均红 |
 | 关单 | 不适用（缺陷/覆盖批次，非 ticket 交付） |
 
@@ -240,7 +240,7 @@ merge 后追加。这是本批的协议偏离，记录在案。
 
 **已修**：BUG-005、BUG-006、BUG-007、OBS-007。
 **判定为后端/非前端**（仅记录，未改）：OBS-008（`glm-5.3-flash` 工具成功后 `model/failed`）、OBS-009（bash 工具 10s 超时上限与 `retryable` 语义）、OBS-010（`GET /api/sessions` 的 `trace_id` 恒为 `null`，但会话详情事件里的 `trace_id` 正常，故 UI 的 Trace 命令实际可用——**原登记曾误判为「命令不出现」，已订正**）。
-**已知覆盖缺口**：OBS-006 审批卡不可达（`auto_approve` 硬编码）；`已中断` 脉冲态真实语料不可达（仅单测）；`pulse-interrupted` 类名字符串与 CSS 选择器无测试绑定。
+**已知覆盖缺口**：~~OBS-006 审批卡不可达（`auto_approve` 硬编码）~~ **已证伪并闭合（第五轮真机点击）**；`已中断` 脉冲态真实语料不可达（仅单测）；`pulse-interrupted` 类名字符串与 CSS 选择器无测试绑定。
 
 **子会话刷新一致性（追加真机验证）**：委派 child `2515a128`（列表点击 / 「打开子会话」两条入口）与分叉 child `1fdac9b9`（410 事件）刷新前后正文指纹**逐字节相同**（日志见登记簿对应章节）。新增回归锁 1 例（×2 视口）——首版播种式被变异验证证伪（只覆盖读路径），已改为真实点击写入路径 + 按 id 区分事件。
 
@@ -251,11 +251,11 @@ merge 后追加。这是本批的协议偏离，记录在案。
 - **按设计不可达 3**：审批卡「批准」「拒绝」（`auto_approve` 硬编码，OBS-006）、`ContextProviderPicker`（本部署后端目录为空 → 正确不渲染）；
 - **瞬态窗口 3 已在第四轮补齐**：`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump` 原需「流式中 + 用户上滚」才渲染（cmd 缓冲输出使尾窗仅存毫秒级），已用 **mock 流钉住窗口**（不发 `tool/result` / `reasoning/completed` → 投影状态恒为 running/streaming）后**真实点击**并逐一变异验证，见 `web/e2e/m-stream-affordances.spec.ts`。
 
-**最终覆盖账目（第四轮后）**：`45 = 38 真机点击 + 3 mock 流真实点击 + 1 mock 401 真实点击 + 1 e2e 内激活 + 2 产品不可达`。即 **43/45 已被真实点击**；仅剩审批卡「批准」「拒绝」——`App.tsx:336` 硬编码 `auto_approve: true` 使该卡永不渲染，且 `ApprovalCard` 无测试，**需产品决策**（放开 `auto_approve` 或加人工审批档位）才能验证。
+**最终覆盖账目（第五轮后）**：**45/45 全部已被点击**，其中审批卡「批准」「拒绝」为**真机点击**（真实后端 + 真实模型）。原记的「2 产品不可达」是**误判**并被证伪——审批卡由 `tool/approval-requested` 事件驱动（`projection.ts:514`），门在 `session/service.py:348`（`permission_mode_explicit`），与 `auto_approve` 无关；显式选「只读」后任何 workspace-write 工具都会触发。真机证据 + 回归锁见登记簿 OBS-006 订正条。**不再有「未验证」按钮。**
 
 **新发现的后端问题（含根因行号，需后端修复）**：OBS-011 子进程输出按 UTF-8 解码而 cmd.exe 输出 GBK → **乱码固化进 JSONL**（`sandbox/local.py:166-167`，铁证：原始字节中 U+FFFD 与侥幸合法的 GBK 双字节混杂）；OBS-012 `bash` 工具在 Windows 实为 cmd.exe（`shell=True`，`local.py:161`）→ bash 语法 41ms 失败；OBS-013 provider 退化重复（2,868 delta / 186,507 字符的同句循环，3.5 分钟无工具调用，另见多次 `model/fallback … InternalServerError`）；OBS-014 bash 工具 10.0s 硬超时且 `retryable:false`。
 
-**本批最终门禁（实跑）**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **104 passed**（`--workers=2`，含本轮瞬态三键 4 例）· vite build ✓。
+**本批最终门禁（实跑）**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **112 passed**（`--workers=2`：瞬态三键 4 例 + 审批卡 8 例）· vite build ✓。联调车道（`e2e-live/`）用例不计入主车道（已核验计数 0）。
 **第四轮新 spec 的独立审查**：0 个 P0/P1/P2，6 项 P3 **全部已修**（头注释挂载条件、合成滚动划界、显式 `aria-expanded`、数值化可滚动断言、`toHaveCSS` 断生效样式、作废指针），并按修改后版本**重跑三处变异**（均红）。详见登记簿「第四轮收尾」。
 
 **本轮审查（`l-auth-banner.spec.ts`）**：0 个 P0/P1，1 项 **P2** + 4 项 P3，**全部已处置**。P2 是**注释谎报覆盖**——我写「`api.test.ts` 测 401 分类」，实则全 `src` 测试树零个 401 引用（该缝当时**无单测**）。已把谎报改成事实：`api.test.ts` 新增 3 例（401→`UnauthorizedError`、广播 detail、**body 非 JSON 的回退文案**）。P3 中一项揭示了**真实行为被我注释说反**：关闭**不是**永久忽略（`App.tsx:148` 每次广播都会重新显示），故 e2e 改为走「配置令牌」真实路径断言**横幅重新出现**（变异验证：删掉 `refreshSessions()` → 两视口都红）。
