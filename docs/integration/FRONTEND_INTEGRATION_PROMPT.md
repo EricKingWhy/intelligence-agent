@@ -1,192 +1,202 @@
 # 集成 AI 提示词 — feat/frontend → main
 
 > **给集成 AI（Git Integrator）的执行提示词。**
-> 按 AGENTS.md §14 集成规则执行；merge / push 需用户明确批准。
+> 按 `AGENTS.md` §14 集成规则执行；merge / push 需用户明确批准。
 >
-> **本文件已更新**：原版只覆盖 T7–T9，且拓扑已过期（见 §1、§2）。
-> 代码交付固定在 `b9b9c88..d5a8dca`（14 个 commit）；HEAD 请实测，勿引用本文件哈希。
+> **本文件已重写（2026-09-10 第二次）**：上一批 T7+T8+T9+深化 C1–C4 **已经并入 `main`**
+> （`9964adc`），`main` 已前进到 `977b319`。当前只剩**一个新的 T9 UI 增量**待集成。
+> 本文件的哈希全部为实测值，但仍以**集成时实测**为准。
 
 ---
 
 ## 0. 任务
 
-将 `feat/frontend` 分支合入 `main`。
+把 `feat/frontend` 的**最后一个增量**合入 `main`。
 
-**内容**：T7 #137 + T8 #138 + T9 #139 前端实现，加架构深化批次（C1–C4）+ SDD 防漂移协议文档。
+**背景**：T7 #137 / T8 #138 / T9 #139 主体 + 架构深化 C1–C4 **已于 `9964adc` 合入 `main`**，
+其后 `977b319` 回填了 `PHASE_STATUS.md`。本分支的拓扑是：`feat/frontend` 从
+**已进 main 的 `c00f742`** 再前进——因此本批只含**新 commit**，不是重做上一批。
 
-### 0.1 Commit 清单（相对 merge-base `5c07fff`，共 14 个）
+**内容**：
+1. **T9 #139 UI 层补完**（`cddea36`）：上一批只做了 `projection` 里的会话级 `turn_index`，
+   但**漏了 UI 渲染**，且手册「选项 A」的设计有缺陷——会话级字段会被最新 run 覆盖，
+   导致**历史轮次全部显示同一个数字**。本 commit 把 `turn_index` 改为 **per-turn 事实**
+   （`Turn.turn_index`）并补上 `TurnView` 的「第 N 轮」渲染。
+2. **F-DEFER-1 修复 + 暴露的 e2e 测试缺陷修正**（见 §4.5）。
+
+### 0.1 Commit 清单（相对 `main` = `977b319`）
 
 | commit | 内容 |
 | --- | --- |
-| `b9b9c88` | docs: SDD 工作流协议 + Ticket Tracker（防指令漂移） |
-| `6012414` | chore(web): 重新生成 event-types.ts——新增 MODEL_CHANGED + RUN_INTERRUPTED |
-| `71c01dd` | feat(web): T7 会话级模型切换 + Fork UI（#137） |
-| `c6e6fab` | fix(web): code-review 修复——CSS 变量 + 响应 model_id + 移除 T8 范围 |
-| `c137a23` | feat(web): T8 崩溃恢复 UI — run/interrupted + 409 守卫（#138） |
-| `ff458f2` | docs: 更新 SDD Ticket Tracker——FE-T7 完成 |
-| `d2bfbc8` | feat(web): T9 轮次标签——turn_index 显示（#139） |
-| `3e71b33` | docs: 架构评审——5 个深化候选 + 选择的最佳路径 |
-| `25917c1` | docs(integration): feat/frontend T7+T8+T9 集成交接提示词 |
-| `9b2234f` | refactor(web): 架构深化 C3+C4——Composer 档位映射 + 归一化归属 api 层 |
-| `f481ea5` | refactor(web): 架构深化 C2——事件语义注册表（编译期穷尽性） |
-| `ae341e2` | refactor(web): 架构深化 C1 第一刀——ReconnectController 重连策略状态机 |
-| `2735422` | fix(web): 深化批次 code-review 修复——字段表编译期锁 + 时间参数集中 |
-| `d5a8dca` | fix(web): code-review 二轮——契约键类型锁 + 文档/追踪表勘误 |
-| `4f987fb` | docs(integration): 本提示词补全深化批次 + 拓扑重测 + `AGENTS.md` 冲突预判 |
+| `cddea36` | feat(web): T9 #139 轮次标签 UI——`turn_index` 落到当轮 + `TurnView` 渲染 |
+| `<F-DEFER-1 待提交>` | fix(web): F-DEFER-1 补 `.model-picker-search-wrap.hidden` CSS + e2e 断言；修正被该修复暴露的 4 个既有 e2e 断言缺陷 |
 
-> 上表最后两行及之后任何**只改本文件**的 commit 都是文档修订：它们的哈希会随本文件每次修订而变。
-> 稳定的锚点是**区间** `5c07fff..HEAD`（代码 commit 固定为 `b9b9c88..d5a8dca` 共 14 个）
-> 与本节的内容表；HEAD 本身请实测，不要引用本文件里写的哈希。
+> 只有 **1 个已存在 commit + 1 个待提交 commit**。请以 `git log --oneline 977b319..HEAD` 实测为准。
 
 ---
 
-## 1. Git 拓扑（**已重测，与初版不同**）
+## 1. Git 拓扑（**2026-09-10 实测**）
 
 | 项 | 值 |
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
-| HEAD | **不要引用本文件写的哈希**——集成时实测 `git rev-parse --short HEAD` |
-| HEAD（撰写时实测） | `4f987fb`（其后再改本文件会继续前进） |
-| `main` | `c5149ad` |
-| merge-base(`HEAD`, `main`) | `5c07fff` |
-| ahead / behind（截至 `d5a8dca`） | **14 / 13** |
+| HEAD | **集成时实测**（撰写时为 `cddea36` + 待提交 F-DEFER-1） |
+| `main`（remote） | `977b3195e95c53791e04c0958d969f2bad689074` |
+| `feat/frontend`（remote） | `cddea36ad7834bad999d50907f179f84e565e183`（已与本地对齐） |
+| merge-base(`HEAD`, `main`) | **`c00f742`**（即「先回后正」的 merge 点） |
+| ahead / behind | HEAD 领先 `main` **1 个 commit**（+ 待提交 F-DEFER-1）；behind **0** |
 
-> ⚠ 初版提示词写的是 `6 / 0`。**`main` 已在 merge-base 之后前进 13 个 commit**
-> （含后端 T7/T8/T9 合入、#136 审批超时、多份 PRD/调研文档、`AGENTS.md` §14.12 + §16）。
-> 按 AGENTS.md §14.9，此前的冲突判断**全部过期**，本文件的预判是重测结果。
-
----
-
-## 2. 冲突预判：**`AGENTS.md` 必然冲突**（§14.7 分析，**请勿机械解决**）
-
-`git merge-tree --write-tree --name-only main HEAD` 输出：
-
-```
-Auto-merging AGENTS.md
-CONFLICT (content): Merge conflict in AGENTS.md
-```
-
-这是**唯一**冲突文件。按 §14.7 逐项分析：
-
-| # | 项 | 结论 |
-| --- | --- | --- |
-| 1 | `main` 改了什么 | 在 §15 之后追加 `# 16. SDD 长任务工作流协议（防指令漂移）`，含 16.1 单 Ticket SDD 循环 / 16.2 Bug 处理协议 / 16.3 全部完成后 / 16.4 防漂移纪律 / 16.5 进度追踪；另在 §14 后追加 §14.12 Ticket 关单纪律 |
-| 2 | `feat/frontend` 改了什么 | 同样在 §15 之后追加 `## 16. SDD 工作流协议（防指令漂移）`——短版，指向 `docs/SDD_WORKFLOW_PROTOCOL.md` + `docs/SDD_TICKET_TRACKER.md` |
-| 3 | 为何冲突 | 两侧都在**同一位置**（文件末尾）追加同号 §16，锚点相同、内容不同 |
-| 4 | 两边能否同时保留 | **能**，且应当——两者互补而非互斥：`main` 版是 Primary/后端口径（ruff + pytest + `gh issue close` + `PHASE_STATUS.md`），前端版是 Secondary/前端口径（tsc + vitest + oxlint + playwright + build，独立协议文件 + tracker）。真正重复的是「循环骨架」，真正分歧的是「门禁工具链」与「进度落哪个文件」 |
-| 5 | 推荐的最终语义 | **保留 `main` 版为唯一 §16 正文**，把前端内容折叠为一个小节（如 `## 16.6 前端 worktree 补充`）：前端门禁为 `tsc -b` / `vitest run` / `oxlint` / `playwright test --workers=2` / `vite build`；前端在途进度记 `docs/SDD_TICKET_TRACKER.md`，整合后的进度仍记 `docs/PHASE_STATUS.md`；并保留 `docs/SDD_WORKFLOW_PROTOCOL.md` 作为前端细化版。**不要**保留两个 §16 标题 |
-| 6 | 影响 Contract | 无（纯文档） |
-| 7 | 影响 Runtime | 无 |
-| 8 | 影响 Test | 无 |
-| 9 | 风险等级 | **低**（文档），但用 `ours`/`theirs` 机械解决会**静默丢掉一侧的防漂移协议**——正是 §14.7 明令禁止的 |
-
-### 其余路径：无冲突
-
-`web/src/generated/event-types.ts` 两侧都改过，但**内容逐字节相同**：
-`git diff main:web/src/generated/event-types.ts HEAD:web/src/generated/event-types.ts` 为空
-（同为后端 `session/event.py` 的生成物），auto-merge 后零差异。`main` 侧其余变更全在
-`src/**` / `tests/**` / `docs/**`（后端域），与前端 `web/**` 无交集。
-
-### 本项目新增文档（`main` 上不存在，纯新增，无冲突）
-
-`docs/SDD_WORKFLOW_PROTOCOL.md`、`docs/SDD_TICKET_TRACKER.md`、`docs/ARCHITECTURE_REVIEW.md`、
-`docs/integration/FRONTEND_INTEGRATION_PROMPT.md`。
+> ⚠ **本文件上一版写的 `5c07fff` / `4f987fb` / `14 / 13` 全部作废**——那是 T7-T9 主体
+> 集成前的快照。主体已合入，现在是一个小增量。
 
 ---
 
-## 3. 门禁证据（在代码交付末端 `d5a8dca` 复跑；其后仅文档修订）
+## 2. 冲突预判：**本次无冲突**（2026-09-10 实测）
+
+```text
+$ git merge-tree --write-tree --name-only 977b319 HEAD
+382100dcaedf5b2a27aaba85c4f54276d8aabc64      # 只有 tree 哈希，无冲突段
+```
+
+自 merge-base `c00f742` 以来，两侧改动文件**零重叠**：
+
+| 侧 | 改动文件 |
+| --- | --- |
+| `main`（`c00f742..977b319`） | `docs/PHASE_STATUS.md`（唯一） |
+| `feat/frontend`（含本增量） | `web/**` + `docs/SDD_TICKET_TRACKER.md` + 本目录文档 |
+
+`AGENTS.md` 的 §16 冲突**已在上一批解决**（`9964adc` 之后 `main` 侧只有 `PHASE_STATUS.md` 一处），
+本批不再涉及。
+
+> 若集成时拓扑已变（`main` 又前进），**重新跑 `git merge-tree` 实测**，不要沿用本表。
+
+---
+
+## 3. 门禁证据（2026-09-10 在本分支实测，F-DEFER-1 提交前）
 
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
-| Type check | `npx tsc -b` | exit 0，无输出 |
-| 单元测试 | `npx vitest run` | **27 files / 408 tests passed** |
-| Lint | `npx oxlint` | **0 errors / 35 warnings**（全部既有，非本批引入） |
-| e2e | `npx playwright test --workers=2` | **46 passed** |
+| Type check | `npx tsc --noEmit` | **exit 0**，无输出 |
+| 单元测试 | `cd web && npx vitest run` | **27 files / 416 tests passed** |
+| Lint | `npx oxlint .` | **0 errors / 35 warnings**（全部既有，非本批引入） |
+| e2e | `npx playwright test` | **46 passed**（双 viewport：chromium-1280 / chromium-1920） |
+| 性能 | `npx vitest run -c vitest.perf.config.ts` | **2 files / 12 tests passed** |
 | 生产构建 | `npx vite build` | ✓ built（仅既有 chunk-size 提示） |
+
+> ⚠ **跑 e2e / build 前先 `rm -rf web/test-results web/dist`**——目录文件数 >50 时会被
+> 沙箱 safe-delete 守卫拦截，看起来像测试失败，实为环境限制。
 
 ---
 
-## 4. 契约接触面
+## 4. 本次契约接触面
 
-### 4.1 新增 API 函数（`web/src/lib/api.ts`）
+### 4.1 新增：per-turn `turn_index`（`web/src/types.ts`）
 
-```typescript
-// POST /api/sessions/{id}/model
-changeSessionModel(sessionId, provider, modelId): Promise<ModelChangeResult>
-
-// POST /api/sessions/{id}/forks
-forkSession(sessionId, fromSeq): Promise<ForkResult>
+```ts
+export interface Turn {
+  // ...
+  /** T9 #139：本轮 run 的轮次索引（1-based，来自 run/started data.turn_index）。
+   *  per-turn 事实——同轮所有事件共享，供 TurnView 渲染「第 N 轮」标签。
+   *  null = 该轮未携带该字段（旧版后端 / 非 run 起始路径）。 */
+  turn_index: number | null;
+}
 ```
 
-### 4.2 新增事件投影（`web/src/lib/projection.ts`）
+**为什么改 per-turn**：上一版把 `turn_index` 存在会话级 `ConversationState` 上，每次新 run
+都覆盖，历史轮次读到的永远是**最新那个数字**。`run/started` 只携带当轮索引，而
+「当轮」在生产时序里 = `user/message`（建轮）之后、`run/started` 到达时的最后一个 turn。
 
-| 事件 | 投影行为 |
+### 4.2 投影（`web/src/lib/projection.ts`）
+
+```ts
+function projectRunStarted(state: ConversationState, event: AgentEvent): void {
+  state.run_status = 'running';
+  const idx = event.data.turn_index;
+  if (typeof idx !== 'number' || !Number.isFinite(idx)) return;
+  state.turn_index = idx;              // 会话级镜像（Langfuse / turn 元数据消费方）
+  const last = state.turns[state.turns.length - 1];
+  if (last) {                          // 不用 withTurnAt——它在无匹配时会新建空 turn
+    const turn = cloneTurn(last);
+    turn.turn_index = idx;
+    replaceTurnAt(state, state.turns.length - 1, turn);
+  }
+}
+```
+
+> `state.turn_index` 会话级镜像**保留**（向后兼容既有消费方）；per-turn 字段是新增的真相源。
+
+### 4.3 UI（`web/src/components/Conversation.tsx` + `app.css`）
+
+- `TurnView` 改为 `export`（对齐 `ChainNodeView` 测试模式），新增 `turnIndex?: number | null` prop
+- 渲染：`{turnIndex != null && turnIndex > 0 && <div className="turn-index-label">第 {turnIndex} 轮</div>}`
+- 实例化处传 `turnIndex={turns[vi.index].turn_index}`
+- CSS 新增 `.turn-index-label`（`app.css`）
+
+### 4.4 测试
+
+| 文件 | 新增 |
 | --- | --- |
-| `model/changed` | 更新 `conversation.model` 为 `data.to_model_id` |
-| `run/interrupted` | `finalizeRun` 标记为终态；存 `run_interrupted` |
-| `run/started` | 提取 `data.turn_index` → `ConversationState.turn_index` |
+| `web/src/lib/projection.test.ts` | +4：per-turn 落位 / 多轮不互相覆盖 / 无前驱不建孤立轮 / 缺字段保持 null |
+| `web/src/components/Conversation.test.tsx` | +4：`TurnView` 标签渲染（`turnIndex` 有值 / null / 0 / 负值） |
 
-### 4.3 深化批次新增模块（**新的对外接口面**）
+### 4.5 F-DEFER-1 修复（**本批附带，值得单独说明**）
 
-| 文件 | 内容 |
-| --- | --- |
-| `web/src/lib/amend.ts` | `toAmendFields` / `toCreateControls`——Composer 档位 → 契约字段名的单一映射点（不判空） |
-| `web/src/lib/reconnect.ts` | `ReconnectController` 状态机 + `decideStreamEnd` / `reconnectDelayMs` / `MAX_RECONNECT_ATTEMPTS` / `RECONNECT_STALL_MS` / `RECONNECT_BANNER_DELAY_MS` |
-| `web/src/lib/projection.ts` | `EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics>` 穷尽注册表取代两个并行 switch |
-| `web/src/lib/api.ts` | `BodyFields<T>` 字段表取代手写请求体（payload 新增字段未登记 → tsc 失败） |
+**问题**：三个 picker（`ModelPicker` / `ControlPicker` / `ContextProviderPicker`）都挂了
+`model-picker-search-wrap${长目录 ? '' : ' hidden'}`，但 CSS 里**从来没有**
+`.model-picker-search-wrap.hidden { display: none }` 规则——class 挂了等于没挂，
+短目录下搜索框一直显示（与设计意图相反）。
 
-### 4.4 新增 UI
+**修复**：补上该 CSS 规则（cmdk 要求 `CommandInput` 始终留在 DOM，故用 `display:none`
+隐藏而非条件卸载组件）。新增 e2e `web/e2e/picker-search-visibility.spec.ts`（5 条）锁死行为。
 
-- ModelPicker 选择后调 `POST /api/sessions/{id}/model`（而非仅本地状态更新），并以**响应回传的规范 `model_id`** 更新本地状态（不回显请求值）
-- 历史用户消息上的 fork 入口 → `POST /api/sessions/{id}/forks` → 跳转 child session
-- 中断横幅：「上次运行在第 N 步中断」
-- 轮次标签：TurnView 显示「第 N 轮」
+**⚠ 该修复暴露了 4 个既有 e2e 的潜在断言缺陷**（此前因 CSS 缺失而「假通过」）：
 
-### 4.5 ⚠ 已披露的行为变化（合并影响评估用）
+| 文件 | 缺陷 | 修正 |
+| --- | --- | --- |
+| `e2e/model-picker.spec.ts` | 用 `MODELS`（3 条）却断言 `combobox` 可见 + 键入过滤 | 改用长目录（5 模型）；`combobox` 仅作长目录断言；过滤测试保留 |
+| `e2e/control-row.spec.ts` | 「键入 ask 过滤」用 3 条 `PERMISSION_MODES` | 拆出独立用例用 6 条长目录测过滤；原用例改用 `listbox` 判开 |
+| `e2e/context-providers.spec.ts` | 用 `combobox` 当「浮层已开」信号 | 改用 `[role="listbox"]` |
+| `e2e/continuation.spec.ts` | 同上 | 同上 |
+| `e2e/fixtures.ts` | `pickControl` / `pickFirstModel` 硬依赖 `combo.fill('')` | 「浮层已开」改判 `listbox`；仅当搜索框可见时才 `fill` |
 
-深化批次以「行为保持」为约束，但有两处**有意**改变，已登记在 `docs/ARCHITECTURE_REVIEW.md`
-「已披露的行为变化」：
+**根因**：cmdk 把 `role="combobox"` 放在 `CommandInput` **本身**。搜索框 `display:none` 时，
+该 role 也一起从 a11y 树消失，**且输入框拿不到焦点**（focus 落到浮层容器，`type` 静默无效）。
+因此「浮层是否打开」必须用 `[role="listbox"]`（`CommandList`，恒可见）判定。
 
-1. **Timeline 摘要**（`f481ea5`）：`run/interrupted` 由「未知事件 · …」变为「第 N 步中断」
-   （`step_id` 缺失时「运行中断」）；`model/changed` 由「未知事件 · …」变为「模型 → X」
-   （`to_model_id` 缺失时「模型已切换」）。旧行为把**已处理**的类型渲染成「未知事件」，
-   与 projection 内「未知兜底只留给真正未知类型」的既定注释自相矛盾。
-2. **create 请求体**（`9b2234f`）：`context_providers: []` 不再发键（此前会发）。这是
-   「有值才带键」的既定语义，与 `SendMessagePayload` 的已知 Gap 一致；后端区分 None / `[]`，
-   前端选择器当前无法表达「零个」——如需 `[]` 语义请先定契约（见
-   `docs/integration/CONTRACT_CONTEXT_PROVIDERS_EMPTY.md`）。
+> 这是**修 bug 暴露旧测试的坏断言**，不是本批引入的回归；修正后 e2e 46 passed（含新 5 条）。
 
 ### 4.6 明确未动的部分
 
-- SSE 帧形状 / seq 投影 / 消费机器**零改动**（`consumeSSE` 未改）
-- 未迁 WebSocket
-- `permission_mode` 不在 `/messages` 的 amend 契约内，未传
+- SSE 帧形状 / seq 投影 / `consumeSSE` **零改动**
+- 未迁 WebSocket；`permission_mode` 不在 `/messages` amend 契约内，未传
+- 上一批（T7/T8/深化 C1–C4）的对外接口面**均已并入 main**，本批不重复
 
 ---
 
 ## 5. 集成步骤
 
 ```text
-1. 前置检查
-   git worktree list --porcelain
-   git -C D:/intelligence-agent-frontend status --short
-   git -C D:/intelligence-agent-frontend log --oneline -1   # 实测 HEAD；应为含本文件最后一次修订的 commit
+1. 前置检查（实测，勿信本文件哈希）
+   git -C D:/intelligence-agent-frontend status --short      # 应为干净
+   git -C D:/intelligence-agent-frontend log --oneline -3
+   git ls-remote origin main feat/frontend                   # 实测两侧 sha
 
 2. 先回后正（§14.6，需用户批准）
    git -C D:/intelligence-agent-frontend fetch origin --prune
-   git -C D:/intelligence-agent-frontend merge main
-   # AGENTS.md 会冲突 → 停止，按 §2 的推荐语义统一为一个 §16，再请用户确认
+   git -C D:/intelligence-agent-frontend merge main          # 预计 clean（§2）
+   # 若 main 又前进且出现冲突 → 停止，按 §14.7 语义化解决并请用户确认
 
-3. 在 feat/frontend 上复跑门禁（§3 五条命令）
+3. 在 feat/frontend 上复跑门禁（§3 六条；先 rm -rf web/test-results web/dist）
 
 4. 合入 main（§14.4，需用户批准）
    git -C D:/intelligence-agent merge feat/frontend
 
 5. main 上验证
    复跑门禁 + 在 D:\intelligence-agent 起完整项目做前后端联调
+   （重点手验：多轮会话里「第 N 轮」标签逐轮递增，不是同一个数字）
 
-6. 追加 PHASE_STATUS.md 记录（§6，纯新增条目，不会冲突）
+6. 追加 PHASE_STATUS.md 记录（§6，纯追加条目，不会冲突）
 
 7. push（§14.4，需用户批准）
    git -C D:/intelligence-agent push origin main
@@ -199,23 +209,17 @@ forkSession(sessionId, fromSeq): Promise<ForkResult>
 
 ## 6. `docs/PHASE_STATUS.md` 待追加条目（建议文本）
 
-本分支按前端协议记在 `docs/SDD_TICKET_TRACKER.md`，**未**写 `main` 的 `PHASE_STATUS.md`
-（该文件的既有条目均为「合入 main 后回填」，故留给你在 §5 步骤 6 追加）：
-
 ```markdown
-- 2026-09-10：**集成记录：feat/frontend T7+T8+T9 + 架构深化批次 → main**。14 commits
-  `b9b9c88..d5a8dca`（含 4 个 code-review 修复 commit）。交付：①T7 #137 会话级模型切换 +
-  Fork UI（`changeSessionModel`/`forkSession` + `model/changed` 投影 + 用户消息 fork 入口）；
-  ②T8 #138 崩溃恢复 UI（`run/interrupted` 投影 + `/messages` 409 人工裁决守卫，不伪造结果继续）；
-  ③T9 #139 轮次标签（`RUN_STARTED.data.turn_index` → TurnView）；④架构深化 C1–C4
-  （`lib/amend.ts` 单一映射点、`lib/reconnect.ts` 重连状态机、projection 事件语义穷尽注册表、
-  api 请求体字段表编译期锁）；⑤SDD 防漂移协议（`docs/SDD_WORKFLOW_PROTOCOL.md` +
-  `docs/SDD_TICKET_TRACKER.md` + AGENTS.md §16）。**冲突**：仅 `AGENTS.md`（两侧都追加 §16，
-  已按统一语义合并为单节）；`web/src/generated/event-types.ts` 两侧改动逐字节相同，零差异。
-  门禁：tsc 0 + vitest 27 files/408 passed + oxlint 0 error/35 既有 warning + playwright 46 passed
-  （--workers=2）+ vite build OK。**未完成**：C1 深水部分 `StreamOrchestrator`（`attachLiveStream`
-  仍是约 200 行嵌套闭包，coalescer/stallCheck/doTruncatedRebuild/seq-gap 未集中）——已在
-  `docs/ARCHITECTURE_REVIEW.md`「C1 未完成部分」声明范围与不做的风险理由，留作后续 ticket。
+- 2026-09-10：**集成记录：feat/frontend T9 #139 UI 补完 + F-DEFER-1 → main**。
+  commit：`cddea36`（T9 UI）+ F-DEFER-1 修复 commit。交付：①T9 #139 UI 层——
+  `turn_index` 由会话级改为 **per-turn 事实**（`Turn.turn_index`，修掉「历史轮次显示同一个
+  数字」的设计缺陷）+ `TurnView`「第 N 轮」渲染 + 8 条测试；②F-DEFER-1——
+  补 `.model-picker-search-wrap.hidden` CSS（三个 picker 的短目录应隐藏搜索框，此前
+  class 挂了但无规则）；③顺带修正被该修复暴露的 4 个既有 e2e 断言缺陷（用 `combobox`
+  当「浮层已开」信号，短目录下该 role 会随搜索框隐藏——改用 `[role="listbox"]`）。
+  **冲突**：无（`merge-tree` 实测 clean；两侧改动零重叠）。门禁：tsc 0 + vitest 27 files /
+  416 passed + oxlint 0 error / 35 既有 warning + playwright 46 passed（双 viewport）+
+  perf 12 passed + vite build OK。
 ```
 
 ---
@@ -224,38 +228,37 @@ forkSession(sessionId, fromSeq): Promise<ForkResult>
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
-| T7 前端 | ✅ 完成 | 模型选择器、fork 入口、`model/changed` 监听 |
-| T8 前端 | ✅ 完成 | 中断横幅、409 人工裁决守卫 |
-| T9 前端 | ✅ 完成 | 轮次标签 |
-| C2 / C3 / C4 深化 | ✅ 完成 | 见 §4.3；C2 穷尽性已实验证伪 |
-| **C1 深化（StreamOrchestrator）** | ⚠ **部分交付** | 仅第一刀 `ReconnectController`。剩余：`coalescer`（合帧提交，性能正向路径）、`stallCheck`（停摆心跳）、`doTruncatedRebuild`（全量重建）、seq-gap 分流仍在 hook 内。目标形状 `lib/stream-orchestrator.ts`，构造注入 `fetchStream`/`scheduleTimer`/`clock`（参考 deepseek-harness `BlockStreamer`、pi-mono `lane.ts`+`drive/`、`EventStream<T,R>`）。**本轮不做**：处于每帧热路径与全部降级路径的交汇处，无监督收尾阶段风险过高 |
-| C5（ConversationState 拆分） | ❌ 已否决 | YAGNI + 参考实现反证（pi-mono `Session` 与 deepseek-harness `SessionEvent` 均扁平） |
-| `session/forked` 摘要文案 | 📋 待定 | 已知类型但 Timeline 仍落「未知事件」文案（pre-existing，变更未经确认） |
-| 7 个未接线事件类型 | 📋 待定 | `artifact/externalized`、`context/compaction_start\|end`、`message/queued`、`queue/cancelled`、`steer/requested\|applied` 已在注册表显式登记为 `unhandledProjection`（保持既有兜底），缺口已可见，需产品确认是否显示 |
+| T7 / T8 / T9 主体 | ✅ 已合入 main | `9964adc` + `977b319` 回填 |
+| **T9 #139 UI 层** | ✅ 本批完成 | per-turn `turn_index` + TurnView |
+| **F-DEFER-1** | ✅ 本批完成 | CSS 规则 + e2e 全覆盖 |
+| **C1 深化（StreamOrchestrator）** | ⚠ **部分交付（已在 main）** | 仅第一刀 `ReconnectController`。剩余：`coalescer` / `stallCheck` / `doTruncatedRebuild` / seq-gap 分流仍在 hook 内，目标形状 `lib/stream-orchestrator.ts`（注入 `fetchStream` / `scheduleTimer` / `clock`）。**风险说明见 `docs/ARCHITECTURE_REVIEW.md`** |
+| C5（ConversationState 拆分） | ❌ 已否决 | YAGNI + 参考实现反证 |
+| `session/forked` 摘要文案 | 📋 待定 | 已知类型但 Timeline 仍落「未知事件」（pre-existing） |
+| 7 个未接线事件类型 | 📋 待定 | `artifact/externalized`、`context/compaction_start\|end`、`message/queued`、`queue/cancelled`、`steer/requested\|applied` 已登记为 `unhandledProjection`，需产品确认是否显示 |
 
 ---
 
 ## 8. 后端依赖确认
 
-| 后端功能 | 后端 commit | 前端消费方式 |
-| --- | --- | --- |
-| `POST /api/sessions/{id}/model` | `ae553ad` (T7) | `changeSessionModel()` |
-| `POST /api/sessions/{id}/forks` | `ae553ad` (T7) | `forkSession()` |
-| `model/changed` 事件 | `ae553ad` (T7) | projection `MODEL_CHANGED` |
-| `run/interrupted` 事件 | `ccebf9a` (T8) | projection `RUN_INTERRUPTED` |
-| `RUN_STARTED.data.turn_index` | `c438a1e` (T9) | projection `RUN_STARTED` |
+| 后端功能 | 后端 commit | 前端消费方式 | 在 main？ |
+| --- | --- | --- | --- |
+| `POST /api/sessions/{id}/model` | `ae553ad` (T7) | `changeSessionModel()` | ✅ |
+| `POST /api/sessions/{id}/forks` | `ae553ad` (T7) | `forkSession()` | ✅ |
+| `model/changed` 事件 | `ae553ad` (T7) | projection `MODEL_CHANGED` | ✅ |
+| `run/interrupted` 事件 | `ccebf9a` (T8) | projection `RUN_INTERRUPTED` | ✅ |
+| `RUN_STARTED.data.turn_index` | `c438a1e` (T9) | projection `RUN_STARTED` → per-turn | ✅ |
 
-以上均已在 `main`（`c5149ad`）中。
+> 本批**无新增后端依赖**——全部消费既有契约。
 
 ---
 
 ## 9. 集成 AI 注意事项
 
-1. **`AGENTS.md` 的 §16 冲突是本次唯一的语义决策点**——不要机械 `ours`/`theirs`（§14.7），
-   按 §2 表格第 5 行的统一语义处理，并请用户确认。
-2. **`web/src/generated/event-types.ts` 是生成物**——本分支版本与 `main` 逐字节相同，
-   合入后无需再生成；若后端 `session/event.py` 后续再变，用
-   `uv run python scripts/gen_event_types.py`（在**后端** worktree 跑）后同步。
-3. **`AGENTS.md` §16 是本次新增的防指令漂移机制**，请勿删除。
-4. **未推送远程**——本分支全部为本地 commit，push 归你执行。
-5. **工作区无未提交改动**（除 `test-results/` 与两份历史 untracked 文档，均非本批产物）。
+1. **本批很小**（1 commit + 1 待提交），且 `merge-tree` 实测**无冲突**。不要把它当成上一批那样
+   的复杂集成——上一批已在 `9964adc` 完成。
+2. **`web/src/generated/event-types.ts` 本次未改**——若后端 `session/event.py` 后续变化，
+   在后端 worktree 跑 `uv run python scripts/gen_event_types.py` 后同步。
+3. **e2e 断言用 `[role="listbox"]` 判「浮层已开」是刻意的**（§4.5）——不要改回 `combobox`。
+4. **推送前先实测远端 sha**（本文件哈希会随修订变化）：`git ls-remote origin main feat/frontend`。
+5. **工作区清洁度**：`test-results/` 与 `docs/HANDOFF_WORKBUDDY_FRONTEND.md` 等为过程产物，
+   提交时不要纳入（`test-results/` 应在 `.gitignore`）。
