@@ -7,10 +7,11 @@
 
 > **本文件是本批次交付的权威入口。** 细节分文档见：
 > - `docs/integration/FRONTEND_INTEGRATION_PROMPT.md` —— **给集成 AI 的执行指令**（含实测拓扑与冲突预判）
+> - `docs/integration/verify-before-merge.sh` —— **集成前预检脚本**（只读、每次重新实测，全绿才 merge）
 > - `docs/CODE_REVIEW_FIXES_2026-09-10.md` —— code-review 发现与修复详情
 > - `docs/T9_TURN_INDEX_DELIVERY.md` —— T9 专项说明（per-turn `turn_index` 的设计推理与核实过程）
 >
-> ⚠️ **哈希均为快照，集成时以 `git ls-remote` 实测为准。**
+> ⚠️ **哈希均为快照，集成时以 `git ls-remote` 实测为准。** 预检脚本已内置该纪律。
 
 ## 本批 5 个 commit
 
@@ -132,11 +133,18 @@ cddea36  feat(web): T9 #139 轮次标签 UI——turn_index 落到当轮 + TurnV
 | merge-tree(`eb999bc`, `ebb2d68`) | **`e0998e9`**（仅 tree 哈希，**无冲突段**） |
 | 双侧文件交集 | **空**（`comm -12` 交叉验证） |
 
-> ⚠️ 哈希是快照。`main` 会继续前进——**合并前重跑**：
+> ⚠️ 哈希是快照。`main` 会继续前进——**合并前跑预检脚本**（它每次重新实测，不读常量）：
+> ```bash
+> bash docs/integration/verify-before-merge.sh
+> ```
+> 或手工：
 > ```bash
 > git ls-remote origin main feat/frontend
 > git merge-tree --write-tree --name-only <HEAD> <main>
 > ```
+> > 实测记录：`merge-tree(eb999bc, ebb2d68)` = `e0998e9`（2026-09-10 17:55）；
+> > 稍后对 `e1990ec` 重跑得 `bf49e27`（HEAD 前进 → 树哈希随之变化，**属正常**，
+> > 无冲突结论不变）。这正是**不该在文档里写死哈希**的实证。
 
 ---
 

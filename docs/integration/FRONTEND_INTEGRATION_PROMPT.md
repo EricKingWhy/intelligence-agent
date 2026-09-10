@@ -206,14 +206,19 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
 ## 5. 集成步骤
 
 ```text
-1. 前置检查（实测，勿信本文件哈希）
+1. 前置检查（**推荐用脚本，它每次重新实测**）
+   bash docs/integration/verify-before-merge.sh
+   #   ↑ 只读：ls-remote 实测 + 工作树干净度 + HEAD 对齐 + merge-tree + 重叠检查
+   #   全绿才继续；有任何 FAIL 先处理
+
+   或手工：
    git -C D:/intelligence-agent-frontend status --short      # 应为干净
    git -C D:/intelligence-agent-frontend log --oneline -3
    git ls-remote origin main feat/frontend                   # 实测两侧 sha
 
 2. 先回后正（§14.6，需用户批准）
    git -C D:/intelligence-agent-frontend fetch origin --prune
-   git -C D:/intelligence-agent-frontend merge main          # 预计 clean（§2）
+   git -C D:/intelligence-agent-frontend merge main          # 预计 clean（见脚本输出）
    # 若 main 又前进且出现冲突 → 停止，按 §14.7 语义化解决并请用户确认
 
 3. 在 feat/frontend 上复跑门禁（§3 六条；先 rm -rf web/test-results web/dist）
