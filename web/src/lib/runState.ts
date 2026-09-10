@@ -12,6 +12,7 @@
 
 import { Activity, CircleDashed, Loader2, SquareCheckBig, SquareX } from 'lucide-react';
 import { EventType, type AgentEvent, type ConversationState } from '../types';
+import { formatDuration } from './format';
 
 /**
  * run 终态词汇——镜像后端 `session/event.py:RUN_TERMINAL_TYPES`。
@@ -118,6 +119,56 @@ export function deriveRunPulse(
       };
     }
   }
+}
+
+// ── Inspector Overview 的 Run 摘要（状态 + 时长） ──
+
+/** 把脉冲的细粒度状态粗化成 Inspector 想显示的那一档。
+ *
+ *  用**穷尽 switch** 而不是 `else` 兜底：`RunPulseState` 新增一档时 TS 会在这里
+ *  报错，逼着我们决定它的粗标签——而不是让它静默落进「运行中」。 */
+function coarsenPulseState(state: RunPulseState): string {
+  switch (state) {
+    case 'thinking':
+    case 'tool':
+      return '运行中';
+    case 'completed':
+      return '已完成';
+    case 'cancelled':
+      return '已取消';
+    case 'failed':
+      return '失败';
+    case 'idle':
+      return '空闲';
+  }
+}
+
+/** Run 的粗口径状态标签 + 首个 run 的时长——Inspector Overview 两行的单一来源。
+ *
+ *  状态**不在这里再判断一次**：语义（取消 ≠ 失败 da394a9、`run/interrupted` 算终态）
+ *  只由 `deriveRunPulse` 的状态机决定，这里仅把它的细粒度（思考中 / 执行工具）合并成
+ *  「运行中」（见 `coarsenPulseState`）。此前 `StepDetail` 自己再分支一次
+ *  `run_cancelled`/`run_status`，规则一旦变化（T8 加 `run/interrupted` 时就是三处枚举
+ *  集体漂移）Inspector 就会与顶栏各说一套。
+ *
+ *  时长 = **第一个 run 自己的起止**：依赖后端「run 顺序收口」不变量（新 run 只能在
+ *  旧 run 有终态之后开始，启动扫描会给中断的 run 补 `run/interrupted`），因此
+ *  「首个 `run/started` 之后的第一个终态」属于首个 run。已对 8 个多 run 会话实测确认；
+ *  若出现违反该不变量的旧日志（run1 未落终态就起了 run2），起止会配到两个 run 上——
+ *  要修得先有真实反例，故仍用全表 `find`（这是**假设**，不是代码保证）。 */
+export function deriveRunSummary(conversation: ConversationState): {
+  label: string;
+  /** 首个 run 的绝对开始时间（ISO）。**缺失为 undefined**（没有 run/started 的裸会话）
+   *  ——Inspector「开始」行要用，与 duration 同源，免得调用方再自己 find 一次。 */
+  startedAt: string | undefined;
+  /** **未收口（无终态）或未开始时为 null——不编造时长。** null 不等于「正在运行」：
+   *  运行中的 run 同样没有终态，也是 null。要区分请看 label。 */
+  duration: string | null;
+} {
+  const label = coarsenPulseState(deriveRunPulse(conversation, false).state);
+  const start = conversation.events.find((e) => e.type === EventType.RUN_STARTED)?.time;
+  const end = conversation.events.find((e) => RUN_TERMINAL_TYPES.has(e.type))?.time;
+  return { label, startedAt: start, duration: formatDuration(start, end) };
 }
 
 // ── 会话健康度：恢复入口可见性（da394a9 §二.2 建议语义） ──

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RUN_TERMINAL_TYPES, deriveRunPulse, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, unpairedToolCallIds } from './runState';
+import { RUN_TERMINAL_TYPES, deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, unpairedToolCallIds } from './runState';
 import { initConversation, applyEvent } from './projection';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
@@ -295,5 +295,75 @@ describe('unpairedToolCallIds', () => {
 
   it('无 tool_call → 空集合', () => {
     expect(unpairedToolCallIds([ev(EventType.RUN_STARTED, {})]).size).toBe(0);
+  });
+});
+
+describe('deriveRunSummary — Inspector Overview 的状态 + 时长（单一来源）', () => {
+  it('运行中 → 粗标签「运行中」（不细分思考中/执行工具，那是脉冲的粒度）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.RUN_STARTED, {}));
+    expect(deriveRunSummary(s).label).toBe('运行中');
+  });
+
+  it('run/failed(reason=cancelled) → 「已取消」，不是「失败」', () => {
+    // 取消 ≠ 失败（da394a9）：这条语义与顶栏脉冲必须同一处判断，否则 Inspector
+    // 与顶栏会各说一套——此前 StepDetail 自己再分支一次 run_cancelled。
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.RUN_STARTED, {}));
+    s = applyEvent(s, ev(EventType.RUN_FAILED, { reason: 'cancelled' }));
+    expect(deriveRunSummary(s).label).toBe('已取消');
+  });
+
+  it('run/failed（无 reason，真实失败）→ 「失败」', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.RUN_STARTED, {}));
+    s = applyEvent(s, ev(EventType.RUN_FAILED, {}));
+    expect(deriveRunSummary(s).label).toBe('失败');
+  });
+
+  it('run/completed → 「已完成」；裸会话 → 「空闲」', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.RUN_STARTED, {}));
+    s = applyEvent(s, ev(EventType.RUN_COMPLETED, {}));
+    expect(deriveRunSummary(s).label).toBe('已完成');
+    expect(deriveRunSummary(initConversation('empty')).label).toBe('空闲');
+  });
+
+  it('时长取首个 run 的起止，且 run/interrupted 也算终态', () => {
+    // 旧代码只认 completed/failed：被进程重启打断的会话在这里算不出时长
+    // （T8 加 run/interrupted 时漏掉的三处之一）。本用例锁住回归。
+    // 注意 applyEvent 会**原地 push** 进 state.events（projection.ts 的
+    // `state.events.push(event)`），所以「未收口的 run」必须独立建一份——
+    // 在同一份 state 上继续 applyEvent 会把它的 events 数组一起改掉。
+    const done = applyEvent(
+      applyEvent(initConversation('s'), {
+        ...ev(EventType.RUN_STARTED, {}, null), time: '2026-09-11T00:00:02.000Z',
+      }),
+      { ...ev(EventType.RUN_INTERRUPTED, { reason: 'process_restart' }, null), time: '2026-09-11T00:00:05.000Z' },
+    );
+    const summary = deriveRunSummary(done);
+    expect(summary.startedAt).toBe('2026-09-11T00:00:02.000Z');
+    expect(summary.duration).not.toBeNull();
+
+    // 未收口的 run 有开始时间但无终态 → 时长为 null（不编造）
+    const unfinished = applyEvent(initConversation('s'), {
+      ...ev(EventType.RUN_STARTED, {}, null), time: '2026-09-11T00:00:02.000Z',
+    });
+    expect(deriveRunSummary(unfinished).startedAt).toBe('2026-09-11T00:00:02.000Z');
+    expect(deriveRunSummary(unfinished).duration).toBeNull();
+  });
+
+  it('多 run 会话：时长取**首个 run 自己**的起止，不是首起→末止', () => {
+    // 「首个 run/started 之后的第一个终态属于首个 run」是承重假设（后端 run 顺序
+    // 收口）。这里把它锁住：run1 02s→05s，run2 10s→12s ⇒ 时长 3s，而不是 10s。
+    let s = initConversation('s');
+    s = applyEvent(s, { ...ev(EventType.RUN_STARTED, {}, null), time: '2026-09-11T00:00:02.000Z' });
+    s = applyEvent(s, { ...ev(EventType.RUN_COMPLETED, {}, null), time: '2026-09-11T00:00:05.000Z' });
+    s = applyEvent(s, { ...ev(EventType.RUN_STARTED, {}, 2), time: '2026-09-11T00:00:10.000Z' });
+    s = applyEvent(s, { ...ev(EventType.RUN_FAILED, {}, 2), time: '2026-09-11T00:00:12.000Z' });
+    const summary = deriveRunSummary(s);
+    expect(summary.startedAt).toBe('2026-09-11T00:00:02.000Z');
+    expect(summary.duration).toBe('3.0s');
+    expect(summary.label).toBe('失败'); // 最后一次 run 的状态（与脉冲一致）
   });
 });

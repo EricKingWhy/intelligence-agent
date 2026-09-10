@@ -304,7 +304,13 @@ export interface ConversationState {
    *  Empty array = no pending approval (auto-approve or already resolved). */
   pending_approvals: PendingApproval[];
   /** Every event that flowed through the projection, in arrival order (verbatim).
-   *  Timeline tab truth source — never filtered or reshaped (invariant #22). */
+   *  Timeline tab truth source — never filtered or reshaped (invariant #22).
+   *
+   *  ⚠ NOT a snapshot: `applyEvent` pushes into this very array in place, so an
+   *  older `ConversationState` value shares it and its `events` keeps growing
+   *  (deliberate hot-path trade-off — see the contract at `projection.ts`).
+   *  Never key a `useMemo`/`useEffect` on `events` identity, and never stash it as
+   *  a frozen "before": copy it, or derive what you need, before the next append. */
   events: AgentEvent[];
   /** Events whose type didn't match any known case (UnknownSurfaceNode 协议,
    *  冻结决策第 69 行 "unknown 事件渲染为 raw 行兜底，永不静默丢弃")。
