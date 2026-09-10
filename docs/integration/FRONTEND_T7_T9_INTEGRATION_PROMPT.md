@@ -3,7 +3,8 @@
 > **给集成 AI（Git Integrator）的执行提示词。**
 > 按 AGENTS.md §14 集成规则执行；merge / push 需用户明确批准。
 >
-> **本文件已更新**：原版只覆盖 T7–T9，且拓扑已过期（见 §1、§2）。当前 HEAD 为 `d5a8dca`。
+> **本文件已更新**：原版只覆盖 T7–T9，且拓扑已过期（见 §1、§2）。
+> 代码交付固定在 `b9b9c88..d5a8dca`（14 个 commit）；HEAD 请实测，勿引用本文件哈希。
 
 ---
 
@@ -31,6 +32,11 @@
 | `ae341e2` | refactor(web): 架构深化 C1 第一刀——ReconnectController 重连策略状态机 |
 | `2735422` | fix(web): 深化批次 code-review 修复——字段表编译期锁 + 时间参数集中 |
 | `d5a8dca` | fix(web): code-review 二轮——契约键类型锁 + 文档/追踪表勘误 |
+| `4f987fb` | docs(integration): 本提示词补全深化批次 + 拓扑重测 + `AGENTS.md` 冲突预判 |
+
+> 上表最后两行及之后任何**只改本文件**的 commit 都是文档修订：它们的哈希会随本文件每次修订而变。
+> 稳定的锚点是**区间** `5c07fff..HEAD`（代码 commit 固定为 `b9b9c88..d5a8dca` 共 14 个）
+> 与本节的内容表；HEAD 本身请实测，不要引用本文件里写的哈希。
 
 ---
 
@@ -40,10 +46,11 @@
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
-| HEAD | `d5a8dca` |
+| HEAD | **不要引用本文件写的哈希**——集成时实测 `git rev-parse --short HEAD` |
+| HEAD（撰写时实测） | `4f987fb`（其后再改本文件会继续前进） |
 | `main` | `c5149ad` |
 | merge-base(`HEAD`, `main`) | `5c07fff` |
-| ahead / behind | **14 / 13** |
+| ahead / behind（截至 `d5a8dca`） | **14 / 13** |
 
 > ⚠ 初版提示词写的是 `6 / 0`。**`main` 已在 merge-base 之后前进 13 个 commit**
 > （含后端 T7/T8/T9 合入、#136 审批超时、多份 PRD/调研文档、`AGENTS.md` §14.12 + §16）。
@@ -88,7 +95,7 @@ CONFLICT (content): Merge conflict in AGENTS.md
 
 ---
 
-## 3. 门禁证据（在 `d5a8dca` 复跑）
+## 3. 门禁证据（在代码交付末端 `d5a8dca` 复跑；其后仅文档修订）
 
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
@@ -164,7 +171,7 @@ forkSession(sessionId, fromSeq): Promise<ForkResult>
 1. 前置检查
    git worktree list --porcelain
    git -C D:/intelligence-agent-frontend status --short
-   git -C D:/intelligence-agent-frontend log --oneline -1   # 应为 d5a8dca
+   git -C D:/intelligence-agent-frontend log --oneline -1   # 实测 HEAD；应为含本文件最后一次修订的 commit
 
 2. 先回后正（§14.6，需用户批准）
    git -C D:/intelligence-agent-frontend fetch origin --prune
