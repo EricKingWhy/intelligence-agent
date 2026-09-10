@@ -26,7 +26,7 @@ import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
-import { isRecoverableRun } from './lib/runState';
+import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
   getAgentProfiles,
@@ -50,6 +50,24 @@ const WORKSPACE_MODES: readonly { id: WorkspaceMode; label: string; icon: typeof
   { id: 'preview', label: 'Preview', icon: Eye },
 ];
 
+/** 分叉请求的兜底超时。`forkInFlightRef` 只在 `finally` 里复位——请求若既不
+ *  resolve 也不 reject（socket 挂死），按钮会被永久静默禁用，正是本 ticket 要
+ *  消灭的那类「点了没反应」。api 层没有统一超时（其余请求同病），这里只兜 fork
+ *  这一处；代价是极端情况下后端其实已建好 child、客户端却报超时（用户重试会多
+ *  一个 child），比死按钮可接受。 */
+const FORK_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer = 0;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(
+      () => reject(new Error(`${label}超时（${Math.round(ms / 1000)}s）`)),
+      ms,
+    );
+  });
+  return Promise.race([p, timeout]).finally(() => window.clearTimeout(timer));
+}
+
 export default function App() {
   // ── Workspace 模式（Phase 1d，方案 B）──
   // Chat = 常驻阅读面，永不切换走（用户冻结决策）。
@@ -57,7 +75,7 @@ export default function App() {
   // 表明 Workspace 有自己的结构扩展点，但内容不由 tab 与 Inspector 抢走。
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('chat');
   // BUG-001 fix：fork 失败的本地错误状态（useSession 的 error 是流级通道）。
-  const [forkError, setForkError] = useState<string | null>(null);
+  const [forkError, setForkError] = useState<{ sessionId: string; message: string } | null>(null);
 
   const {
     sessions,
@@ -228,13 +246,25 @@ export default function App() {
     setInspectorOpen((v) => !v);
   };
 
+  /** 当前选中会话的 ref 镜像——异步回调（分叉落地）需要「落地时的当下值」，
+   *  而闭包里的 selectedId 只是发起时的快照。镜像在 effect 里同步（render 期写
+   *  ref 会被 react-hooks lint 判为 "Cannot update ref value during render"），
+   *  但 effect 要等提交后 flush；切会话的两条入口额外**同步**写一次，把「点了
+   *  另一个会话」到「镜像跟上」之间的窗口压到零。 */
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
   const handleNew = useCallback(() => {
     // selectSession 内部处理流取消（切走即放弃当前流，幂等）
+    selectedIdRef.current = null;
     selectSession(null);
     focusRun();
   }, [selectSession, focusRun]);
 
   const handleSelect = useCallback((id: string) => {
+    selectedIdRef.current = id;
     selectSession(id);
     focusRun();
   }, [selectSession, focusRun]);
@@ -310,24 +340,41 @@ export default function App() {
     [submitTask, sendMessage, focusRun, selectedId, streaming, composerControls],
   );
 
-  /** T7 #137：从历史用户消息 seq 派生 child session，成功后跳转到 child。 */
+  /** T7 #137：从历史用户消息 seq 派生 child session，成功后跳转到 child。
+   *
+   *  分叉是异步的，而它的两个结局都会动用户视野（跳 child / 弹错误条），
+   *  所以结局落地前要确认用户还停在发起时那个会话上（同 shouldApplyStreamFrame
+   *  的 stale-write 纪律）——切走了就别把 A 会话的结论贴到 B 会话界面上。 */
+  /** 在途分叉的 **origin session id**（不是布尔）。按钮没有 pending 态，连点会在
+   *  后端造出两个 child 会话，所以同一会话在途时要挡；但挡的范围必须限定在
+   *  「同一个 origin」——用全局布尔的话，A 会话的分叉还在飞时切到 B 会话点分叉
+   *  会被静默丢弃，又回到本 ticket 要消灭的「点了没反应」。 */
+  const forkInFlightRef = useRef<string | null>(null);
+
   const handleFork = useCallback(
     async (fromSeq: number) => {
-      if (!selectedId) return;
+      if (!selectedId || forkInFlightRef.current === selectedId) return;
+      forkInFlightRef.current = selectedId;
+      const origin = selectedId;
       setForkError(null);
       try {
-        const result = await fork(selectedId, fromSeq);
-        // 跳转到 child session
+        const result = await withTimeout(fork(origin, fromSeq), FORK_TIMEOUT_MS, '分叉请求');
+        if (selectedIdRef.current !== origin) return;
+        // 跳转到 child session（同步镜像，见 selectedIdRef 注释）
+        selectedIdRef.current = result.session_id;
         selectSession(result.session_id);
         void refreshSessions();
       } catch (e) {
+        if (selectedIdRef.current !== origin) return;
         // BUG-001 fix：分叉失败不再静默——展示后端 detail。
-        setForkError(`分叉失败：${(e as Error).message}`);
+        setForkError({ sessionId: origin, message: `分叉失败：${(e as Error).message}` });
+      } finally {
+        // 只清自己那一格：期间可能已有另一个会话的分叉在途
+        if (forkInFlightRef.current === origin) forkInFlightRef.current = null;
       }
     },
     [selectedId, fork, selectSession, refreshSessions],
   );
-
 
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
@@ -357,14 +404,23 @@ export default function App() {
   }, [error]);
 
   // ── Recover 入口可见性（da394a9 §二.2 后端建议语义）──
-  // isRecoverableRun：最后 run 缺终态（completed/failed 都没有）或存在未配对
-  // tool_call。干净失败的 run 是终态——不再显示恢复入口（旧条件会误标）。
-  const canRecover =
-    selectedId !== null &&
-    !streaming &&
-    !loadingHistory &&
-    conversation !== null &&
-    isRecoverableRun(conversation.events);
+  // isRecoverableRun：最后 run 缺终态（completed/failed/interrupted 都没有）或
+  // 存在未配对 tool_call（含恢复后仍悬空的那部分——所以 recover 成功后入口
+  // 会自己消失）。干净失败的 run 是终态——不再显示恢复入口（旧条件会误标）。
+  // useMemo：isRecoverableRun 要扫全量事件（run 状态一遍 + dangling 配对一遍，
+  // 共两趟），而 App 在流式期间每个 delta 都渲染一次；不记忆化就是每帧一份
+  // O(events)。（依赖里 conversation 每帧都是新对象 → 记忆化在这里其实救不了
+  // 流式帧；真正让它在流式期间不跑的是 `!streaming` 短路。留着是为了非流式下
+  // 的重复渲染不重扫。）
+  const canRecover = useMemo(
+    () =>
+      selectedId !== null &&
+      !streaming &&
+      !loadingHistory &&
+      conversation !== null &&
+      isRecoverableRun(conversation.events),
+    [selectedId, streaming, loadingHistory, conversation],
+  );
 
   // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -409,13 +465,18 @@ export default function App() {
           jumpToStream(last);
         },
       },
-      {
-        id: 'copy-run-id',
-        label: 'Copy Run ID',
-        hint: conversation ? conversation.session_id.slice(0, 12) : undefined,
-        group: 'actions',
-        run: () => conversation && copyText(conversation.session_id),
-      },
+      // run_id 缺则该命令不出现：留着会是个「点了没反应」的假按钮。
+      // （它此前抄的是 `conversation.session_id`——标签说 Run ID、动作给 Session ID，
+      //   两者都是 UUID，粘出去只能用错地方才发现。）
+      ...(conversation?.run_id
+        ? [{
+            id: 'copy-run-id',
+            label: 'Copy Run ID',
+            hint: conversation.run_id.slice(0, 12),
+            group: 'actions' as const,
+            run: () => copyText(conversation.run_id!),
+          }]
+        : []),
       {
         id: 'copy-trace-id',
         label: 'Copy Trace ID',
@@ -537,7 +598,12 @@ export default function App() {
             </div>
           )}
           {error && <div className="app-error">{error}</div>}
-          {forkError && <div className="app-error" role="alert">{forkError}</div>}
+          {/* 分叉失败提示带上它属于哪个会话：只属于发起它的那个会话，切走自然
+              不再渲染（不用 effect 清空——那会多一次渲染，也会留下「清空」与
+              「切会话」两份状态需要同步）。 */}
+          {forkError && forkError.sessionId === selectedId && (
+            <div className="app-error" role="alert">{forkError.message}</div>
+          )}
           {reconnecting && (
             // T4（#97）断线状态条：瞬时重连不清屏不轰炸——conversation 照常
             // 累积，条只在重连期间在场（aria-live 播报一次状态变化）。
@@ -572,18 +638,33 @@ export default function App() {
           )}
           {/* 恢复成功提示**必须在 canRecover 门外**：修好后 dangling 归零、
               入口随 canRecover 一起消失，提示若挂在门内会立刻被卸载——
-              等于用户又什么都看不到（这正是本缺陷的原始症状）。 */}
+              等于用户又什么都看不到（这正是本缺陷的原始症状）。
+              文案由 recoverDoneMessage 统一给出：回填 N 条 / 补齐 run 终态 / 两者
+              都有 / 后端没修完（附**具体**原因，可重试）/ 真无可修。两个「没修完」
+              的原因是分开传的——canRecover 是 OR，压成布尔就会把原因说错（终态已
+              补、只是还有悬空 tool_call 时报「仍缺 run 终态」）。 */}
           {recoverState.status === 'done' && !streaming && (
             <div className="recover-done" role="status" aria-live="polite">
-              {recoverState.repaired > 0
-                ? `已恢复：回填 ${recoverState.repaired} 条工具结果`
-                : '已恢复：无可修复项（会话事件已完整）'}
+              {recoverDoneMessage({
+                repaired: recoverState.repaired,
+                terminalRepaired: recoverState.terminalRepaired,
+                stillUnterminated: recoverState.stillUnterminated,
+                stillDangling: recoverState.stillDangling,
+              })}
             </div>
           )}
           {conversation?.run_interrupted && !streaming && (
             <div className="interrupt-banner" role="status" aria-live="polite">
-              上次运行在第 {conversation.run_interrupted.step_id ?? '?'} 步中断
-             （原因：{conversation.run_interrupted.reason}）
+              {/* step_id 可能缺失/null，且这是**真值不是缺失**：进程在该 run 的第一个
+                  带步号事件之前就死了（run/started 本身不带 step，检测器只能
+                  一路沿用后续事件的 step_id）。实测扫 71 个真实会话：4 条
+                  run/interrupted 里有 2 条信封整个不带 step_id（run/started 后
+                  紧接 interrupted，如 c63ce4d3-3b26-40bb-8e8c-e3af8dd33035）——
+                  渲染成「第 ? 步」等于把「还没开始就断了」说成一个未知数字。*/}
+              {conversation.run_interrupted.step_id !== null
+                ? `上次运行在第 ${conversation.run_interrupted.step_id} 步中断`
+                : '上次运行在首个步骤开始前中断'}
+              （原因：{conversation.run_interrupted.reason}）
             </div>
           )}
           {/* Workspace 模式条（Phase 1d 方案 B）：Chat 永远是主阅读面，

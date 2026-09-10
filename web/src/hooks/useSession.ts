@@ -23,11 +23,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
-import { EventType } from '../types';
 import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
+import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
 
 /** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
  *
@@ -51,18 +51,37 @@ export function shouldApplyStreamFrame(mode: SessionMode, event: AgentEvent): bo
   return mode.sessionId === eventSid;
 }
 
-/** Recover 入口的三态视图状态（200 成功回到 idle——重建视图即成功反馈）。 */
+/** Recover 入口的视图状态。
+ *
+ * `done` 是**成功后的落地态**，不是过场动画：崩溃会话常常已经被后端启动
+ * 扫描修完了，此时 recover 是一次真 no-op、投影逐字不变——若成功也回到
+ * `idle`，「修好了」与「按钮坏了」在界面上完全同形（用户实测：「点了什么
+ * 反应也没有」，连点 15 次）。`repaired` 给出这次到底补了几条工具结果，
+ * 0 就是「无可修复项」——两者都是诚实的成功。 */
 export interface RecoverState {
-  status: 'idle' | 'pending' | 'error';
+  status: 'idle' | 'pending' | 'done' | 'error';
   /** 409 裁决原因 / 404·网络错误的具体信息。 */
   message: string | null;
   /** 409 = 存在需人工裁决的高风险操作（展示态，非普通失败）。 */
   conflict: boolean;
+  /** status === 'done' 时：本次恢复补上的 tool/result 条数。 */
+  repaired: number;
+  /** status === 'done' 时：本次恢复补上了缺失的 run 终态。
+   *  与 `repaired` 分开计数——只报工具回填会把「补齐终态」说成「无可修复项」。 */
+  terminalRepaired: boolean;
+  /** status === 'done' 时：恢复后**投影**仍未收口的两项原因（分开传，见
+   *  runState.recoverDoneMessage——压成一个布尔会把原因说错）。 */
+  stillUnterminated: boolean;
+  stillDangling: boolean;
 }
 
-/** Recover 三态的 idle 初值——三处复用（useState 初值 / mode 迁移重置 / 200
- *  成功回位）。对象只被整体替换、从不就地修改，共享引用安全。 */
-const RECOVER_IDLE: RecoverState = { status: 'idle', message: null, conflict: false };
+/** Recover 的 idle 初值——两处复用（useState 初值 / mode 迁移重置）。
+ *  对象只被整体替换、从不就地修改，共享引用安全。retry 直接置 `pending`，
+ *  不经这里（这也是它区别于初值的地方：重试不该先闪一下 idle）。 */
+const RECOVER_IDLE: RecoverState = {
+  status: 'idle', message: null, conflict: false, repaired: 0,
+  terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+};
 
 /** Recover 响应落地守护（不变量 #22，shouldApplyStreamFrame 的姊妹契约）。
  *
@@ -253,9 +272,10 @@ export function useSession() {
   const stallCheckRef = useRef<(() => void) | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
 
-  // Recover 三态（df4f7d8 §1.1）：idle → pending → 200 成功（回到 idle，整表
-  // 重建）/ 404·409·网络错误 → error。409 是"需人工裁决"（conflict=true），
-  // 本期只展示原因，不做裁决交互（不变量 #14：不伪造、不盲跑）。
+  // Recover 四态（df4f7d8 §1.1 + 本次修复）：idle → pending → 200 成功落 `done`
+  // （整表重建 + 明确的成功反馈，原因见 RecoverState 注释）/ 404·409·网络错误
+  // → error。409 是"需人工裁决"（conflict=true），本期只展示原因，不做裁决
+  // 交互（不变量 #14：不伪造、不盲跑）。
   const [recoverState, setRecoverState] = useState<RecoverState>(RECOVER_IDLE);
 
   // Derived, so the UI can never observe a mismatch between them.
@@ -419,7 +439,7 @@ export function useSession() {
             scheduleReconnect(liveSidRef.current, 'seq gap');
             return;
           }
-          if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
+          if (RUN_TERMINAL_TYPES.has(event.type)) {
             terminalSeenRef.current = true;
           }
           const sid = event.session_id ?? null;
@@ -449,7 +469,7 @@ export function useSession() {
             if (content) setTitlesById((m) => (m[sid] ? m : { ...m, [sid]: content }));
           }
           // 终态事件立即 flush（尾帧不得延迟到下一窗口）；中间帧合帧提交。
-          if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
+          if (RUN_TERMINAL_TYPES.has(event.type)) {
             coalescer.flush();
           } else {
             coalescer.schedule();
@@ -733,31 +753,66 @@ export function useSession() {
     setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
 
-  /** 恢复中断会话（POST /recover，幂等）。200 → 整表重建：响应是与 GET events
+  /** 恢复中断会话（POST /recover）。200 → 整表重建：响应是与 GET events
    *  同构的全量事件数组，走同一 projectHistory 管线（不变量 #22——不引入第二套
-   *  会话真相）；404/409 → 三态 error（409 附裁决原因，conflict=true）。
-   *  落地前先过 shouldApplyRecoverResult 守护：pending 期间切走即丢弃。 */
+   *  会话真相）；404/409 → error（409 附裁决原因，conflict=true）。
+   *  落地前先过 shouldApplyRecoverResult 守护：pending 期间切走即丢弃。
+   *
+   *  成功落 `done` 而非回 `idle`：崩溃会话往往已被后端启动扫描修完，recover
+   *  是一次真 no-op、投影逐字不变；回 idle 会让「修好了」与「按钮坏了」同形。
+   *  `repaired` = 恢复前 dangling 的 tool_call 里、恢复后已配上的条数
+   *  （append-only 日志下集合只减不增，差集即本次修复量）；`terminalRepaired`
+   *  = 恢复前缺 run 终态、恢复后补上了。两者分开——只看 `repaired` 会把一次
+   *  真实的终态修复报成「无可修复项」。
+   *
+   *  守护覆盖**全部**状态写入，不只 setConversation：`done`/`error` 都是用户看得见
+   *  的反馈，晚到的响应若落到已切走的会话上，等于把 A 会话的恢复结论贴在 B 会话
+   *  界面（同族的 stale-write）。同理 `unpairedBefore` 只在该响应确实属于当前视图
+   *  时才用来算差集——否则它取自别的会话，`repaired` 就是个凭空造出来的数字。 */
   const recover = useCallback(
     async (sid: string) => {
-      setRecoverState({ status: 'pending', message: null, conflict: false });
+      setRecoverState({
+        status: 'pending', message: null, conflict: false, repaired: 0,
+        terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+      });
+      const viewed = conversationRef.current;
+      const mineBefore = viewed?.session_id === sid ? viewed.events : null;
+      const unpairedBefore = mineBefore === null ? null : unpairedToolCallIds(mineBefore);
+      const unterminatedBefore = mineBefore === null ? false : hasUnterminatedRun(mineBefore);
       try {
         const events = await recoverSession(sid);
-        // stale-write 守护（不变量 #22）：pending 期间用户可能已切走——
-        // 晚到的 200 响应不得覆盖目标会话视图（viewing 会由持久事件源重建）。
-        if (shouldApplyRecoverResult(modeRef.current, sid)) {
-          setConversation(projectHistory(sid, events));
-        }
-        setRecoverState(RECOVER_IDLE);
+        // 会话列表的计数要跟着更新，与"当前看的是哪个会话"无关。
         void refreshSessions();
+        if (!shouldApplyRecoverResult(modeRef.current, sid)) return;
+        const unpairedAfter = unpairedToolCallIds(events);
+        const repaired = unpairedBefore === null
+          ? 0
+          : [...unpairedBefore].filter((id) => !unpairedAfter.has(id)).length;
+        const terminalRepaired = unterminatedBefore && !hasUnterminatedRun(events);
+        setConversation(projectHistory(sid, events));
+        setRecoverState({
+          status: 'done', message: null, conflict: false, repaired, terminalRepaired,
+          // 原因分开算：isRecoverableRun 是 OR，压回一个布尔就会把原因说错。
+          stillUnterminated: hasUnterminatedRun(events),
+          stillDangling: unpairedAfter.size > 0,
+        });
       } catch (e) {
+        if (!shouldApplyRecoverResult(modeRef.current, sid)) return;
         if (e instanceof RecoverError) {
           setRecoverState({
             status: 'error',
             message: e.message,
             conflict: e.status === 409,
+            repaired: 0,
+            terminalRepaired: false,
+            stillUnterminated: false,
+            stillDangling: false,
           });
         } else {
-          setRecoverState({ status: 'error', message: (e as Error).message, conflict: false });
+          setRecoverState({
+            status: 'error', message: (e as Error).message, conflict: false,
+            repaired: 0, terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+          });
         }
       }
     },

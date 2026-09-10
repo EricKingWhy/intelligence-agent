@@ -30,3 +30,35 @@ test('palette 键盘唤起与关闭；Composer 键盘提交', async ({ page }) =
   await page.getByLabel('Agent 任务').press('Control+Enter');
   await expect(page.locator('.session-item')).toContainText('键盘提交');
 });
+
+test('palette 的 Copy Run ID 复制 run id，而不是 session id', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  // run id 与 session id 刻意不同：两个都是 UUID，抄错了粘出去才发现
+  const frames = [
+    { type: 'session/started', seq: 1, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
+    { type: 'run/started', seq: 2, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
+    { type: 'user/message', data: { content: '复制 run id' }, seq: 3, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', step_id: 1, time: '2026-09-07T00:00:00Z' },
+    { type: 'model/completed', data: { content: '好。' }, seq: 4, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', step_id: 1, time: '2026-09-07T00:00:00Z' },
+    { type: 'run/completed', data: {}, seq: 5, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
+  ];
+  routeApi(page, {
+    sessions: [{ session_id: 'e2e-session-0002', event_count: 5, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '复制 run id', trace_id: null }],
+    events: frames,
+  });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+  await expect(page.locator('.turn')).toHaveCount(1);
+
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('Copy Run');
+  await page.locator('.palette-item', { hasText: 'Copy Run ID' }).click();
+  await expect(page.locator('.palette-input')).toBeHidden();
+
+  // copyText 内部是 `void navigator.clipboard.writeText(...)`（不 await）——点击
+  // 返回时写可能还没落地，直接读会拿到空/旧值。轮询到写完成再断言。
+  // 断言 run id（而非「不是 session id」）：后者在等值断言成立后是同义反复，
+  // 且 run id 写错成 session id 时它才会失败——正是被测的那一个 bug。
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe('e2e-run-0002');
+});

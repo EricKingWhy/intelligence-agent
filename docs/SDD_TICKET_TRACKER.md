@@ -12,10 +12,22 @@
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
 | 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` v1 |
-| 后端交接手册 | `D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_T7_T9.md` |
-| 集成交接提示词 | `docs/integration/FRONTEND_INTEGRATION_PROMPT.md`（已含深化批次 + 拓扑重测 + AGENTS.md 冲突分析） |
+| 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
+| 集成交接提示词 | 本轮：`docs/integration/FRONTEND_RECOVER_FORK_SCROLL_INTEGRATION_PROMPT.md`；上一批：`docs/integration/FRONTEND_INTEGRATION_PROMPT.md` |
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
+
+### 最近一批：恢复/分叉/滚动 三缺陷 + 真实浏览器逐按钮巡检（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 起始 commit | `8469a34`（另一 Agent 的 BUG-001 修复） |
+| 本批 commit | `<COMMIT_SHA>` |
+| 门禁 | tsc ✓ / vitest **466 passed**（27 文件）/ oxlint **35w 0e** / playwright **86 passed** / vite build ✓ |
+| 交付 | 交接手册 A/B/C/D；额外 BUG-004（Copy Run ID）+ 分叉 30s 超时反馈 |
+| 真机验证 | A/B/D 三项在真实浏览器 + 真实后端复验（回执见 `FRONTEND_ISSUES_LOG.md` OBS-003/OBS-004）；43 行逐按钮巡检表 |
+| 遗留 | OBS-007（中断会话绿色「已完成」脉冲与中断横幅矛盾，**预存在、故意未修**，§8）；覆盖缺口清单见集成提示词 §4 |
+| 关单 | 不适用（缺陷修复批次，非 ticket 交付） |
 
 ---
 

@@ -22,7 +22,7 @@ import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { EventType } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
-import { deriveRunPulse } from '../lib/runState';
+import { deriveRunPulse, RUN_TERMINAL_TYPES } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { CopyButton } from './CopyButton';
 import { JsonTree } from './JsonTree';
@@ -219,8 +219,16 @@ export function ChatTab({
   /** 工具行点击回调——子会话视图等只读场景缺省：行渲染为静态行（假按钮≠诚实）。 */
   onFocusTool?: (tool: ToolCall) => void;
 }) {
+  // 时长 = **第一个 run 自己的起止**：依赖后端的「run 顺序收口」不变量（新 run 只能
+  // 在旧 run 有终态之后开始，且启动扫描会给中断的 run 补 `run/interrupted`），因此
+  // 「首个 run/started 之后的第一个终态」属于首个 run。已对 8 个多 run 会话实测确认。
+  // 注意下面用的是全表 `find`（未按 run 区间切分）：若出现违反该不变量的旧日志
+  // （run1 从未落终态就起了 run2），起止会配到两个 run 上。概率低，且要修得先有真实
+  // 反例，故暂不加区间切分——这条注释描述的是**假设**，不是代码保证。
+  // 终态集合必须含 `run/interrupted`：旧代码只认 completed/failed，被进程重启
+  // 打断的会话在这里显示不出时长（这正是 T8 加这个类型时漏掉的三处之一）。
   const runStart = conversation.events.find((e) => e.type === EventType.RUN_STARTED)?.time;
-  const runEnd = conversation.events.find((e) => e.type === EventType.RUN_COMPLETED || e.type === EventType.RUN_FAILED)?.time;
+  const runEnd = conversation.events.find((e) => RUN_TERMINAL_TYPES.has(e.type))?.time;
   const runDuration = formatDuration(runStart, runEnd);
   // v2 PRD §10.4 Overview 保留可增补：状态 + tokens 两行（事件真值，缺失「—」）。
   const runStatusLabel = conversation.run_cancelled
