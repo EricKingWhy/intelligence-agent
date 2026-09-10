@@ -790,7 +790,6 @@ export function useSession() {
    * - 响应回传规范 model_id，不回显请求值
    * - 404 = session 不存在；422 = provider/model_id 不在 catalog
    *
-   * 成功后刷新会话列表（模型变更可能影响 session summary）。
    * 错误向上抛——调用方决定是否展示。 */
   const changeModel = useCallback(
     async (sessionId: string, provider: string, modelId: string) => {
@@ -804,11 +803,6 @@ export function useSession() {
    * - 锚点消息本身不进 child seed
    * - child 继承父会话当前模型
    * - copy-on-fork：父 workspace 整目录复制为 child 的
-   *
-   * 错误码：
-   * - 404 = session 不存在
-   * - 409 = 在途 run（历史未 settled）
-   * - 422 = from_seq 不是合法 fork 锚点
    *
    * 成功后返回 child session_id——调用方决定是否跳转。 */
   const fork = useCallback(

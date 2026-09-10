@@ -249,9 +249,14 @@ export default function App() {
       if (selectedId && name) {
         const entry = models.find((m) => m.name === name);
         if (entry?.provider) {
-          void changeModel(selectedId, entry.provider, name).catch(() => {
-            // 切换失败静默——用户可重试；不阻塞主流程
-          });
+          void changeModel(selectedId, entry.provider, name)
+            .then((result) => {
+              // 用响应里的规范 model_id 更新本地状态（不回显请求值）
+              setSelectedModel(result.model_id);
+            })
+            .catch(() => {
+              // 切换失败静默——用户可重试；不阻塞主流程
+            });
         }
       }
     },

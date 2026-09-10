@@ -637,14 +637,6 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
       break;
     }
 
-    // T8 #138：崩溃恢复——run 被进程重启打断。
-    // 与 run/completed / run/failed 同属终态（RUN_TERMINAL_TYPES），
-    // 但语义是「中断」而非「完成」或「失败」。finalizeRun 把 streaming
-    // 段 settle 为 done，running 工具标记 stopped（中断 ≠ 错误）。
-    case EventType.RUN_INTERRUPTED:
-      finalizeRun(next, 'completed', event.time);
-      break;
-
     default:
       // UnknownSurfaceNode 兜底协议（冻结决策第 69 行）：未知事件类型不静默丢弃，
       // 记录到 unknown_events 供 Timeline / Inspector 显式渲染为 raw 行。
