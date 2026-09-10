@@ -10,6 +10,184 @@
 
 ## 问题清单
 
+### BUG-007 命令面板 50 条命令的 label/hint 全是英文，中文查询零命中（中文 UI 里的本地化缺口）【P2 · 未修（待产品决定）】
+
+**发现时间**：2026-09-11 真实浏览器逐按钮巡检（Ctrl+K）
+
+**现象**：面板整体是中文（标题「命令面板」、占位「搜索命令或运行事件…」、页脚「↑↓ 选择 Enter 执行 Esc 关闭」），但**可搜索的条目文案全英文**：`Toggle Run Inspector` / `Jump to Latest Event` / `Copy Run ID` / `Copy Trace ID` / `Open Trace` / `Toggle Theme` / `Focus Composer` / `Switch to Compact|Balanced|Detailed|Raw`。
+
+**实测（同一面板，逐个输入）**：
+
+| 输入 | 命中 |
+| --- | --- |
+| `Theme` | `Toggle Theme`（+4 条 fuzzy 子序列命中的事件项） |
+| `toggle` | `Toggle Run Inspector` / `Toggle Theme` |
+| `Compact` | `Switch to Compact` |
+| `Copy` | `Copy Run ID` / `Copy Trace ID` |
+| `MARKER-A2` | `tool/call · bash {...MARKER-A2}`（事件搜索正常） |
+| **`主题`** | **空** |
+| **`复制`** | **空** |
+| `zzzz` | 空（对照组：确属无匹配） |
+
+**判读**：
+- 过滤本身**没坏**——`lib/commands.ts` 的 `fuzzyScore` 是「子序列匹配 + 前缀/连续加分」的纯函数，大小写不敏感，输入 `Compact`/`copy`/`MARKER-A2` 都正确命中。`Theme` 顺带命中 4 条 `tool/call` 事件项也是**正确的 fuzzy 行为**（`t..h..e..m..e` 在 `tool/call · bash {"command":"sleep 1 && echo MARKER-A3"}` 里按序出现），不是 bug。
+- 真正的缺口是**文案语言**：中文用户按母语输入（「主题」「复制」「密度」）一条都搜不到，而工具栏上的同名按钮写的正是「紧凑/均衡/详细」「切换主题」。同一功能两套语言。
+
+**归因：前端（文案）**。不是逻辑缺陷，是本地化一致性问题。
+
+**建议（未改，属产品文案决定，非本次 BUG-005/006 范围——§8 只报告不顺手改）**：
+1. 首选：把 `lib/commands.ts` 的 `label` 改中文（与工具栏 `aria-label` 对齐：`切换主题` / `切换 Run Inspector` / `复制 Run ID`…），`hint` 保留英文快捷键。
+2. 或让 `filterCommands` 同时匹配一个 `keywords` 别名数组（中英双查），不动展示文案。
+3. 两个方案都只需改 `lib/commands.ts` 一处；e2e 有 `i-keyboard.spec.ts` 覆盖面板，改动有回归锁。
+
+---
+
+### OBS-008 `model/failed: RuntimeError`（glm-5.3-flash）紧跟在成功的 tool/result 之后【观察项 · 后端/provider】
+
+**发现时间**：2026-09-11 真实浏览器刷新一致性测试中顺带记录（会话 `1fdac9b9`）
+
+**事件真值**（`GET /events`，seq 404–409）：
+
+```
+404 tool/call      bash {"command": "sleep 8 && echo proof-8842"}
+405 tool/output_delta  stdout: "proof-8842\n"
+406 model/completed  model=glm-5.3-flash usage=9521  tool_calls=[bash]
+407 tool/result      {"ok": true, "exit_code": 0, "stdout": "proof-8842\n", "duration_ms": 8115.9}
+408 model/failed     "model call failed: RuntimeError"
+409 run/failed
+```
+
+**判读**：工具**成功**（`ok:true, exit_code=0`），随后**模型调用**抛 `RuntimeError` → run 收口为 failed。UI 显示「失败」并保留工具成功输出，是对事件真值的忠实渲染，**不是前端 bug**。
+
+**归因**：后端/provider。与既有 OBS-001 同族（同一模型 `glm-5.3-flash` 此前返回 400 BadRequestError），本次是 `RuntimeError`——同一默认链上的模型不稳定，值得后端排查（`model call failed: RuntimeError` 的原始异常被吞成了这一句，建议把 traceback 落进日志/JSONL 以便定位）。
+
+**前端侧无需修**：失败态、错误横幅、后续可重试都已有既有通路。
+
+---
+
+### OBS-009 bash 工具执行上限 10.0 秒，`sleep 10` 恰好越界 → `TIMEOUT`（且 `retryable:false`）【观察项 · 后端工具运行时】
+
+**发现时间**：2026-09-11 BUG-006 实机取证时顺带命中（会话 `affd6084-…`，seq 6/8）
+
+**事件真值**：
+```
+seq 6  tool/call   bash {"command": "sleep 10 && echo MARKER-A1"}
+seq 8  tool/result {"ok":false,"message":"工具 'bash' 执行超时（上限 10.0 秒）…",
+                    "error_code":"TIMEOUT","retryable":false,
+                    "metadata":{"attempt":1,"max_attempts":3,"duration_ms":10002.6}}
+```
+模型随后自行改写成 `sleep 1 && echo MARKER-A1` 并在 seq 14/17 成功，最终 `run/completed`。
+
+**判读**：`sleep 10` 与上限 10.0s 贴边，必然越界。**前端渲染正确**——Timeline 第 8 行显示 `tool/result 失败 TIMEOUT`，同一 run 的 pulse 仍是「已完成」，因为工具失败可被模型恢复：这是忠实且正确的语义（工具失败 ≠ run 失败）。
+
+**归因**：后端工具运行时（`bash` 超时上限 10s）。**两点值得后端确认（非前端，未改）**：
+1. 超时被标 `retryable: false` —— 与不变量 #8「Tool Retry 归 ToolExecutor」的取舍值得确认：若 TIMEOUT 一律不重试，则瞬时超时只能靠模型自己重发（本例正是如此）。
+2. 上限 10s 对 `sleep`/长构建类命令偏紧，且错误文案已说明「可稍后重试」却标 `retryable:false`，二者读起来略冲突。
+
+---
+
+### BUG-005 页面刷新后选中的会话与全部内容丢失（回到空态）【P1 · 已修复（待提交）】
+
+**发现时间**：2026-09-11 真实浏览器测试（用户预判要求：刷新后会话必须与刷新前一致）
+
+**测试环境**：真实浏览器（Chrome DevTools MCP）→ `http://localhost:5173/`（feat/frontend worktree 的 vite）；后端 `http://127.0.0.1:8000`（集成版 `agent_harness.web.app`）；会话列表 **67 个真实会话**。
+
+**复现**：点左侧会话 `1fdac9b9-1dee-4fc5-95d3-d4ab2787b004`（305 事件）→ 按 F5 刷新。
+
+**证据（刷新前后同脚本实测）**：
+
+| 观测量 | 刷新前 | 刷新后 |
+| --- | --- | --- |
+| 侧栏选中行 | `1fdac9b9-…`（class `session-item selected`） | **无**（`selected: null`） |
+| `.turn` 轮次 | **8** | **0** |
+| 会话正文指纹 / 长度 | `-271347586` / 4102 字符 | **0 / 0 字符** |
+| 主区 | 8 轮对话 + 「已完成 · 4,339 tok」脉冲 | **「暂无对话 / 在下方提交任务」** |
+| 右栏 Inspector | 「RUN INSPECTOR / 已完成 / run 2ab617e9 / 显示最近 200 / 共 305 条」 | **「未选择会话 / 从左侧选择，或开始新任务。」** |
+| 地址栏 | `http://localhost:5173/` | 同（**不含任何会话标识**） |
+| `localStorage` | `ahi.theme` / `ahi.traceDensity` | 同（**存活**） |
+
+**结论**：会话列表（67 条）还在，但**选中的会话与它的全部内容在刷新后消失**，主区退回空态。持久化的只有主题/密度/API token——**会话选择没有持久化**。
+
+**归因：前端。** 后端数据完好（刷新后 67 条列表仍由 `GET /api/sessions` 返回，事件也在 JSONL 里）；丢的是 UI 的选中状态。
+
+**根因**（代码可证）：
+1. `web/src/hooks/useSession.ts:232` —— `const [mode, setMode] = useState<SessionMode>({ kind: 'idle' })`，**初始态恒为 idle**，没有任何恢复路径。
+2. 全仓 `grep localStorage` 只有三处：`lib/theme.ts`、`lib/density.ts`、`lib/auth.ts`（token）。**没有第四处保存会话选择**。
+3. `grep 'location.hash|history.replaceState|URLSearchParams|useSearchParams'` 在 `web/src` **零命中**——URL 里也没有会话标识，所以刷新既恢复不了，也无法分享/收藏会话，浏览器前进后退也不生效。
+4. 初始加载 effect（`App.tsx:149`）只做 `refreshSessions() / fetchModels() / fetchControlCatalogs()`，**不恢复选中**。
+
+**影响**：任何刷新（F5、误触、崩溃恢复、切标签页后重载）都会丢掉当前正在读的会话——长会话尤其痛（用户可能已经翻了很久）。属于「功能可用但体验破损」= P1。
+
+**修复方向**：
+1. 持久化选中的 `session_id`（沿用本仓既有 localStorage 惯例，键名 `ahi.` 前缀，如 `ahi.selectedSession`），在 `selectSession` / 分叉跳 child / 新任务落定 sid 时写入；显式回到「新建会话」空态时清除。
+2. 首屏在会话列表返回后恢复：存了 id 且**该 id 仍在列表中** → `selectSession(id)`；不在（已被删/不存在）→ 清键并保持空态（不造假入口）。
+3. `viewing` 分支本来就会 `GET /events` 重建（`projectHistory`，不变量 #22），所以恢复只需把 mode 设对，不必新增数据通路。
+4. 待验证并决定：**流式中刷新**（下面是 BUG-006 的测试）、以及刷新后滚动落点是否要跟随内容。
+
+**未修原因**：本次先完成取证与登记（用户要求实时写入），修复在后续步骤按 `/implement` 进行。
+
+**修复实现（2026-09-11）**：
+- 新增 `web/src/lib/sessionRestore.ts`（无 React 依赖，可单测）：`SELECTED_SESSION_KEY = 'ahi.selectedSession'`、`readStoredSessionId` / `writeStoredSessionId`（localStorage 不可用时静默降级，不抛）、`maxEventSeq`（供 BUG-006 接流游标）。
+- 新增 `web/src/lib/sessionRestore.test.ts`（4 例）：读写成环；`null` 删键；storage 被拒时不抛不读；`maxEventSeq` 跳过 null / 空集返回 `-1`。
+- `web/src/lib/api.ts`：新增 `NotFoundError`，`getSessionEvents` 遇 404 抛它——用于「存的 id 已被删」时静默回落空态，而不是弹错误。
+- `web/src/hooks/useSession.ts`：
+  - `mode` 改**惰性初始化**：`useState(() => readStoredSessionId() ? {kind:'viewing', sessionId} : {kind:'idle'})`——首帧即选中，**不出现空态闪烁**（这是替换「先 idle 再 effect 里 setMode」写法的原因：后者既闪一下空态，又触发 oxlint `set-state-in-effect`）。
+  - 新增持久化 effect：`idle → 删键`；`live/viewing(sid) → 写 sid`。三态 `SessionMode` 是唯一真相（不变量 #22），持久化挂在它上面，不新增第二份状态。
+  - 历史装载 `.catch`：`NotFoundError → 删键 + 回 idle`（陈旧 id 自愈）。
+
+**修复验证（同一脚本，刷新前后对照）**：
+| 观测量 | 修复前（刷新后） | 修复后（刷新后，**零点击**） |
+| --- | --- | --- |
+| 侧栏选中行 | 无 | **`1fdac9b9-…`（与刷新前同一行）** |
+| `.turn` 轮次 | 0 | **8** |
+| 正文指纹 / 长度 | `0` / 0 字符 | **`-271347586` / 4102 字符（与刷新前完全一致）** |
+| 主区 | 「暂无对话」空态 | 8 轮对话 + 「已完成 · 4,339 tok」脉冲 |
+| 右栏 Inspector | 「未选择会话」 | 「RUN INSPECTOR / 已完成 / run 2ab617e9 / 共 305 条」 |
+
+→ 刷新后与刷新前**逐项一致**（用户要求的「刷新后会话要和刷新前一致」达成）。
+
+---
+
+### BUG-006 流式（run 在途）期间刷新页面：刷新后停在静态快照，不再继续接收【P1 · 已修复（已实机取证）】
+
+**发现时间**：2026-09-11，随 BUG-005 的设计评审一并识别（BUG-005 修好只是「刷新后还能看见已落盘的历史」，**在途 run 的后续事件**是另一个问题）。
+
+**问题**：`viewing` 分支只 `GET /events` 取一次历史快照就收工。若刷新时该会话的 run **仍在后端跑**（ADR-0016 detached-run：订阅者断开不影响 run 继续执行），刷新后 UI 会显示一个「停在半截、看起来已完成」的静态画面，后续事件（工具输出、模型回复、run 终态）再也进不来——直到用户手动再发一条消息。这是**数据正确性**问题：用户看到的不是当前真相。
+
+**归因：前端。** 后端能力齐备且已实测：`GET /api/sessions/{id}/stream?after_seq=N`（T4 #97）会先重放 `after_seq < seq ≤ cursor` 的耐久事件，再**无缝接上实时流**；detached-run 确认有效（实测一次中途刷新，新会话仍产出 69 条事件）。缺的是前端刷新后**主动去接**。
+
+**修复实现（2026-09-11）**：
+1. `attachLiveStream` 增加 `opts.resume` + 帧计数器 `framesSeen`。
+2. 历史装载后：`hasUnterminatedRun(events)`（`lib/runState` 既有纯函数，判「最后一个 run 无终态」）为真 → `resumeLiveStream(sid, maxEventSeq(events), projected)`。游标取自**已加载事件的最大持久 seq**，正好落在后端「重放 + 续流」契约上，不重不漏。
+3. 新增 `resumeLiveStream`：清旧流 → 置 `live` → `streamSession(sid, afterSeq)`；404 则交回历史重跑裁决（已知会话被删 → `NotFoundError` → 清键回 idle，见下方审查 #1）；失败只回 `viewing` + 报错，**不把已渲染的历史打回空态**。
+4. **零帧收流兜底**（关键）：若 `resume` 流**一帧未收到就 EOF**，说明「看的时候 run 其实已经跑完了」（刷新与 run 收尾的竞态）——此时**静默回落 `viewing`**，绝不弹「连接断开/重连中」。判据用 `framesSeen === 0 && !terminalSeenRef.current`。
+5. **防死循环**：`resumeAttemptedRef` 按 **(sid, 游标)** 记账（`nextResumeAttempt` 纯函数，首轮审查后由 `Set<string>` 改造而来）。若不做这层，上面第 4 条会在「viewing → 接流 → 空流 → viewing」上无限转（该 bug 是自查发现的，已消除）；零帧空流不带来新事件 → 游标不变 → 第二次被拦下。按游标而非只按 sid，是为了不误伤「切走再切回来接着看」——并且 `selectSession`（用户显式切会话）会 `forgetResumeAttempt` 再彻底放行一次。刷新页面即重置，记录清空。
+
+**已验证**：刷新与 run 收尾的竞态（第 4 条）——在 run 恰好于刷新窗口内完成的会话上刷新，UI 稳定落在 9 轮 / 「已完成 · 9,251 tok」，终态文本完整，**无错误横幅、无重连横幅**（兜底按设计静默生效）。
+
+**实机正向取证（2026-09-11，决定性）**：
+
+测试任务：新会话发 `用 bash 工具依次执行三条命令：sleep 10 && echo MARKER-A1 / A2 / A3…`（预计在途 ~30s）。
+
+1. 提交后 5s，run **确在途**：新会话 `affd6084-1c04-4580-b24a-150387cc0fbb`，`pulse = 思考中 · 15s`，事件仅到 `run/started`、`model/started`；`ahi.selectedSession` = 该新会话。
+2. **此刻 F5 刷新**（run 未结束）。刷新后 3s 观测：
+   - 侧栏选中行已恢复 = `affd6084-…`；`stored` 同值；用户消息在。
+   - `reconnecting = false`、**无「连接断开/重连」横幅**、**无空态**。
+   - Inspector 已渲染事件 0–6，其中 `6 tool/call bash {"command":"sleep 10 && echo MARKER-A1"}`。
+
+3. **网络层铁证**：`reqid=2380 GET /api/sessions/affd6084-…/stream?after_seq=2 [200]`。
+   说明：刷新时 `GET /events` 快照只到 **seq 2**（`run/started`），`maxEventSeq` = 2 → 前端以 `after_seq=2` 接流；**事件 3–6（text/delta、tool/call）是经由这条流重放+续送达的**，而不是历史快照。
+
+4. **零交互前进（决定性）**：此后**不碰页面**等待 16s，事件从 **3 → 54** 条，Inspector 末条 = `53 run/completed`，`pulse = 已完成 · 15,306 tok`。静态快照不可能自增——**证明实时流已接上并跟到终态**。
+
+5. **与后端真值逐项对账**（`GET /api/sessions/{id}/events`）：服务端 54 条、seq 0–53、**重复 0、空洞 0**；UI 显示 54 条、末条 53。→ 「无缝无重复」契约在 UI 侧成立（游标取自已加载事件的最大持久 seq，恰好落在重放区间）。
+
+**结论**：BUG-006 修复有效。「刷新后会话与刷新前一致」不仅覆盖已落盘历史（BUG-005），也覆盖**在途 run 的后续事件**（BUG-006）。
+
+**附注**：本次 run 用的模型是 `deepseek-v4-flash-0731`，全程正常收口（`run/completed`）。对照 OBS-008 的 `glm-5.3-flash` 失败——**佐证 OBS-008 是 provider 侧的模型不稳定，与前端无关**。
+
+---
+
 ### BUG-001 分叉按钮 422：`turn.step_id` 不是后端要的用户消息 seq 【P0 · 已修复（8469a34）】
 
 **发现时间**：2026-09-10 真实浏览器点击测试（会话 28eb3302，点第 2 轮的「分叉」）
@@ -261,3 +439,88 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 ```
 
 **测试环境**：后端 `localhost:8000`（探测时 71 个真实会话）+ 前端 dev server `localhost:5173`，Chrome 经 CDP 驱动，点击 + 网络面板 + 埋点三重验证。
+
+---
+
+### 2026-09-11 第二轮逐按钮巡检 + 刷新一致性专项（真实浏览器 + 真实后端）
+
+> 起因：用户要求「每个功能按钮都要点一遍」「检查刷新后会话内容还在不在」。本轮把工具栏/Composer/Inspector/命令面板/委派节点全部真机点过，并新增 BUG-005/006 专项。带 ★ 的是本轮新验证。
+
+| # | 交互 | 结果 |
+| --- | --- | --- |
+| 44 ★ | 密度四档（复验） | ✓ 紧凑/均衡/Raw/详细 → `data-density` = compact/balanced/raw/detailed，`.density-btn.sel` 跟随 |
+| 45 ★ | 主题切换（复验） | ✓ light→dark→light，`data-theme` 往返一致（无 §15 token 漏覆盖的可观察症状） |
+| 46 ★ | Inspector 收起/展开（复验） | ✓ `.app-regions` ↔ `.app-regions.inspector-closed`，展开恢复原状 |
+| 47 ★ | Workspace Chat/Split/Preview | ✓ 三者 `aria-pressed` 互斥（选中 true，另两个 false） |
+| 48 ★ | 会话行「新建会话」 | ✓ 回到空态、Composer 就位 |
+| 49 ★ | **刷新恢复（BUG-005）** | ✓ 刷新后零点击回到同一会话：选中行/轮次/正文指纹/脉冲逐项一致（详见 BUG-005 修复验证表） |
+| 50 ★ | **流式中刷新（BUG-006）** | ✓ `GET /stream?after_seq=2 [200]` 接流，零交互下事件 3 → 54 条直到 `run/completed`；与后端真值 54 条 / 0 重复 / 0 空洞（详见 BUG-006 实机取证） |
+| 51 ★ | 模型选择器（复验） | ✓ 5 项（默认链 + 4 模型），选中后 trigger 更新、浮层自动关闭 |
+| 52 ★ | 权限模式选择器（复验） | ✓ 3 项（只读/工作区写入/完全访问），选中回填 trigger |
+| 53 ★ | Agent Profile 选择器（复验） | ✓ 3 项（通用/编程/研究审查），选中回填 trigger |
+| 54 ★ | Reasoning Effort 选择器（复验） | ✓ 3 项（轻量/标准/深度），选中回填 trigger |
+| 55 ★ | 选择器浮层关闭语义 | ✓ 选完即关、浮层整体卸载（`totalMenusInDom: 0`）；**「多个浮层同时开着」是合成事件假象**——Radix 靠真实 `pointerdown` 判定外部点击，`.click()` 不产生它。用真实指针序列复测：全部正常 |
+| 56 ★ | Inspector 五个 Tab | ✓ Timeline（事件行）/ Overview（run+session 摘要）/ Changes（「本次会话未产生文件变更。」）/ Terminal（真实命令回显 `$sleep 10 && echo MARKER-A1`）/ Artifacts（「本次会话未产生 Artifact。」）——空态文案诚实，无伪造 |
+| 57 ★ | 命令面板 Ctrl+K（复验） | ✓ 50 项（11 静态命令 + 39 最近事件）；fuzzy 子序列过滤正确（`toggle`/`Compact`/`Copy`/`MARKER-A2` 均精准命中）；页脚快捷键提示在位。**新发现 BUG-007（label 全英文）** |
+| 58 ★ | 工具卡展开/折叠 | ✓ `aria-expanded` true→false→true（首次测出「点不动」实为前一步折叠了整轮导致的连带现象，隔离后正常） |
+| 59 ★ | 复制回答 | ✓ `aria-label` 复制回答 → 已复制 |
+| 60 ★ | 工具卡 Inspect 芯片 | ✓ Inspector 切到事件焦点，出现「返回 Timeline」返回affordance |
+| 61 ★ | 委派节点（真实会话 `7b84625c`） | ✓ 展开 true↔false；**复制子会话 ID** → 已复制；**Inspect 子会话** → Inspector 切到 `delegate target="research_review"`；**打开子会话** → 主窗口切到 child `2515a128`（2 轮内容），且 `ahi.selectedSession` 同步为 child |
+| 62 ★ | 分叉按钮 | ✓ 真实点击 → 后端建 child `19c76d4b`（行数 69→70）、主窗口切到 child、child 为空会话 + 空态 hero；`POST /api/sessions/{parent}/forks [200]`；`ahi.selectedSession` 同步为 child |
+| 63 ★ | 空态 preset chip | ✓ 3 个 chip；点击填入 Composer（「写一个 FizzBuzz 脚本并运行验证」）并启用发送 |
+| 64 ★ | 发送禁用态 / 停止按钮 | ✓ 空内容禁用发送；有内容启用；run 中 `.composer-stop` 在场、发送消失、三个控制选择器禁用；点停止 → 脉冲 **「已取消」**（中性通道，非红色失败）、按钮复位、无横幅 |
+| 65 ★ | API 身份令牌弹窗 | ✓ 打开：密码输入框（placeholder「粘贴 HS256 token（eyJ…）」）+ 说明文案（localStorage `ahi.apiToken`、claims 要求）；**Esc 真实按键可关**（合成 keydown 关不掉——同一类合成事件假象） |
+| 66 ★ | 请求量核对 | ✓ 单次全新加载每端点恰好 2 次（React StrictMode dev 双调用，已知）；静置 3.5s 零增长——**无请求风暴** |
+
+**本轮未复验（依赖特定现场，沿用上轮结论）**：审批卡（OBS-006：UI 不可达）、恢复会话按钮（上轮以真实 dangling 会话验证）、中断横幅（上轮以真实 `c63ce4d3` 验证）、浮标↓最新（上轮埋点验证）。
+
+**合成事件假象清单（本轮新增，避免下次误报）**：Radix 系浮层/弹窗的外部点击关闭与 Esc 关闭依赖**真实** `pointerdown`/`keydown`；`element.click()` 与 `dispatchEvent(new KeyboardEvent(...))` 都不触发，会造成「浮层关不掉 / 多个同时开着 / Esc 无效」的假象。复测一律用真实指针序列或 CDP 按键。
+
+---
+
+## /code-review 第一轮（2026-09-11，BUG-005/006 未提交 diff）——6 findings 处置
+
+审查范围：`web/src/lib/sessionRestore.ts`(+test)、`web/src/lib/api.ts`、`web/src/hooks/useSession.ts`。两轴（Standards + Spec/不变量）。**无 P0 / 无 P1**；3×P2 + 3×P3，逐条处置如下。
+
+| # | 级别 | 结论 | 处置 |
+| --- | --- | --- | --- |
+| 1 | P2 | **成立**——resume-404 分支的 `writeStoredSessionId(null)` 是**死写**：紧接着 `setMode(viewing(sid))`，持久化 effect 会在同一批次把 sid 写回去，清了等于没清 | **已修**：删掉那行死写并写明理由。真正的「会话已被删」由紧随其后的历史重跑兜住（mode 变更 → `getSessionEvents` 404 → `NotFoundError` → 清键 + 回 idle，**那次落得住**） |
+| 2 | P2 | **成立且重要**——`resumeAttemptedRef: Set<string>` 只按 sid 记账，会把**正当的再次恢复**也一并禁掉：A 会话接流成功 → 给 A 续聊 → 切到 B 再切回 A（期间 A 的新 run 在跑）→ 自动接流被拒 → 冻结在历史快照 | **已修**：改为按 **(sid, 游标)** 记账（`nextResumeAttempt` 纯函数）。死循环的断点仍在（零帧空流不带来新事件 → 游标不变 → 拦下），而「有新事件」时游标变大 → 允许再接。**追加加固**：`selectSession`（用户显式切会话）再调 `forgetResumeAttempt` 忘掉该 sid 的记账——消除「两次尝试之间只落了非持久帧（seq=null）→ 游标不变 → 手动切回来被误拦」这个边角；自动重入的死循环不经过 `selectSession`，断点不受影响 |
+| 3 | P2 | **成立**——接流逻辑（本次改动的核心行为）无任何测试；`api.test.ts` 也没覆盖新增的 `NotFoundError` | **已修**：新增 `e2e/k-refresh-restore.spec.ts`（4 用例 × 2 视口 = 8 例）、`sessionRestore.test.ts` +5 例、`api.test.ts` +3 例 |
+| 4 | P3 | 判断项——零帧回落是**全静默**的；若某天后端在 run 活着时返回 200+空 body（契约破坏），用户会永远盯着半截会话且无任何信号 | **接受的取舍**（不改）：零帧 + 干净 EOF 在**已实测的契约**下只能意味着「服务端已无在跑 run」（活着的 run 会把流开着、不会零帧 EOF）。加「延迟复查」会在回调里引入异步与新的重入面，收益不抵复杂度（§9.2）。风险已登记于此 |
+| 5 | P3 | **成立（低影响）**——`scheduleReconnect` 的 404 分支也没清存储键 | **不改，补注释**：该分支 `live→viewing` 同样会重跑历史装载 → 404 → `NotFoundError` → 清键 + 回 idle，已在同一 tick 内自愈；单独加一次 `writeStoredSessionId(null)` 与 #1 同理是死写 |
+| 6 | P3 | **成立**——diff 引入了一处多余空行 | **已修**：删除 |
+
+**审查确认正确的部分**（作为覆盖凭据）：死循环断点充分（`nextResumeAttempt` 在首个 `await` 前记账；`mode.kind !== 'viewing'` 时历史 effect 早退，`setMode(live)` 不会二次装载）、StrictMode 双调用已被 `cancelled` 守卫挡住、游标数学不重不漏（`after_seq=max` 重放 `(max, cursor]`，`projection` 的 `seenSeqs` 再兜一层去重）、`framesSeen` 计数位置正确（被 mode/sid 拒的帧不计，去重帧计——「流还活着」的语义正确）、`terminalSeenRef` 每流重置、`streamGenRef` 代际守卫在 404/异常两路都复检、不变量 #22 未被破坏（复用同一 `projectHistory` 与唯一 `ConversationState`）、无 CSS/主题改动（§15 不涉及）。
+
+**门禁（改后全量）**：`tsc -b` 0 · `vitest run` **484 passed**（476 → +8）· `oxlint` **35 warnings / 0 errors**（基线持平）· `playwright test --workers=2` **94 passed**（86 → +8）· `vite build` 0。
+
+---
+
+## /code-review 第二轮（对修复后的 diff 复审）——6 项一审 findings 全 RESOLVED，新发现 4 项（1×P2 + 3×P3）
+
+### 一审 6 项的复核结论
+
+| 一审 # | 复核 |
+| --- | --- |
+| 1（死写） | **RESOLVED**——404 分支只剩 `setMode(viewing)`；mode 对象是新的 → 持久化 effect 与历史 effect 双双重跑 → `/events` 404 → `NotFoundError` → 清键 + `idle`（`idle` 不会自恢复，故粘得住）。代码注释的说法成立（审阅者订正：严格说不是「同一批次」，是一次后续异步拉取，但同样粘得住） |
+| 2（Set → 游标 Map） | **RESOLVED**——(a) 零帧分支直接 `setMode(viewing)` **不经过 `selectSession`**，记账因此留存，重装后再调被 `nextResumeAttempt` 拦下 → 死循环断点仍在（只有一条流请求，e2e 锁住）；(b) A→B→A 两条路都通（游标变大放行 / 显式切会话经 `forgetResumeAttempt` 放行）。ref 赋值在 effect 内，oxlint 无新增 refs 告警 |
+| 3（补测试） | **PARTIALLY → RESOLVED**（见新发现 A：当时缺写入路径覆盖，已补） |
+| 4（零帧静默取舍） | **RESOLVED / 站得住**——零帧 + 干净 EOF 在已实测契约下等于「无在跑 run」；「run 在缺口内收尾」这条竞态仍被覆盖（回到 viewing 会重跑历史、把终态重新渲染出来） |
+| 5（重连 404 不清键） | **RESOLVED**——与 #1 同一自愈路径；若 `/events` 反而 200（会话确实还在），保留 id 才是对的。附注：首次历史重跑会多一次注定 404 的接流尝试，随即记上账稳定下来——有界，非循环 |
+| 6（多余空行） | **RESOLVED**——五个改动文件无连续空行，`git diff --check` 干净 |
+
+### 新发现 4 项及处置
+
+| 新 # | 级别 | 内容 | 处置 |
+| --- | --- | --- | --- |
+| A | **P2** | **BUG-005 写入路径零自动化覆盖**——所有 e2e 都用 `addInitScript` 播种，而 `addInitScript` **每次导航（含 `page.reload()`）都会重跑**，所以它们只证明**读**路径；把持久化 effect 整段删掉，全套依然绿——恰好是本批要防的 BUG-005 回归 | **已修**：新增「空态 → 真实点击会话行 → 断言键被写下 → **不重新播种**刷新 → 仍恢复」用例（`k-refresh-restore.spec.ts`）。并做**变异验证**：临时把写入 effect 改为 no-op → 该用例在两个视口都变红（`Expected: "e2e-session-0001" / Received: null`），随后还原。这是本条 finding 的闭环证据。 |
+| B | P3 | `useSession.ts:288` 注释称 ref 在 render 期赋值，与实现（effect 内）矛盾，会诱导后人「改回去」 | **已修**：改为「在 effect 里镜像」并加一句「曾据此改过一次，别改回去」 |
+| C | P3 | 失败尝试在 `await` **之前**记账，会吃掉该游标的一次自动重试 | **不改 + 补注释写明理由**：这是刻意的。失败路径同样 `setMode(live)` → `setMode(viewing)`，mode 每变一次历史 effect 就重跑；若失败不记账，「失败 → 回 viewing → 重跑 → 再失败」就是**无上限重试**（每轮两条请求）。代价是失败后不自动重试（错误横幅已告知用户），用户重点一次该会话行即经 `selectSession → forgetResumeAttempt` 重新武装 |
+| D | P3 | 交接文档定稿早于最后一次改动（测试数 9 vs 12、缺 `forgetResumeAttempt`） | **已修**：`FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md` 已更新计数、模块导出表与「重新武装」机制 |
+
+### 第二轮额外确认（「无 P0/P1」的依据）
+
+`NotFoundError` 三个调用点：历史 effect 已处理；`doTruncatedRebuild` 走重连自愈；`useChildConversation` 仅读 `.message`（文案更友好，无回归）。`tsconfig` 目标 `es2023` → `class extends Error` 原型链完好，`toBeInstanceOf` 可靠。`maxEventSeq` 返回 `-1` 不会与 `hasUnterminatedRun` 同时成立（`run/started` 必带数字 seq），首帧不会被误判为 gap。`resumeAttemptedRef` 只按「本页会话内选中过的不同会话数」增长，刷新即清，非泄漏。§8 Scope Lock 与 §15 CSS 规则均未被触碰。`test-results/` 已被 `web/.gitignore` 忽略。
+
+**第二轮后的门禁（实跑）**：tsc ✓ · vitest **487 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **96 passed** · vite build ✓。

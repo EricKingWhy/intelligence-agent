@@ -14,6 +14,13 @@ const BASE = ''; // relative — Vite proxy handles /api → :8000
 /** Thrown for any 401 (after auth.onUnauthorized has broadcast the detail). */
 export class UnauthorizedError extends Error {}
 
+/** 404 = 目标资源不存在（会话已被删除 / 属于另一个后端实例）。
+ *
+ *  与「加载失败」区分开：调用方据此**清理记住的选中会话**并安静回到空态，
+ *  而不是弹一条用户无法处理、每次刷新都会重演的错误横幅（BUG-005 的
+ *  陈旧 id 分支）。 */
+export class NotFoundError extends Error {}
+
 /** FastAPI 错误体 {detail} 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（两处 401/409 消费共享的单一实现）。 */
 async function readErrorDetail(res: Response): Promise<string> {
@@ -53,6 +60,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
 
 export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
+  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
   if (!res.ok) throw new Error(`get events ${res.status}`);
   return res.json();
 }

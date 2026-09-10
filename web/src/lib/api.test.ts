@@ -2,7 +2,7 @@
  *  fetch 全局 mock；auth.getToken 在 node 下走 try/catch 兜底（无 localStorage）。 */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModels, sendMessage, startSession } from './api';
+import { getModels, getSessionEvents, NotFoundError, sendMessage, startSession } from './api';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
 function captureFetch(
@@ -170,5 +170,25 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
       reasoning_effort: 'deep',
       context_providers: ['memory'],
     });
+  });
+});
+
+describe('getSessionEvents — 404 归类为 NotFoundError（BUG-005 陈旧会话自愈）', () => {
+  it('404 → 抛 NotFoundError（调用方据此清持久化键 + 静默回空态，不弹错误）', async () => {
+    captureFetch(404, { detail: 'session not found' });
+    await expect(getSessionEvents('gone')).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('500 → 抛普通 Error（真正的故障仍要显示错误横幅，不能被当成「会话已删除」吞掉）', async () => {
+    captureFetch(500, { detail: 'boom' });
+    const err = await getSessionEvents('x').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(NotFoundError);
+  });
+
+  it('200 → 原样返回事件数组', async () => {
+    const events = [{ seq: 1, type: 'run/started' }];
+    captureFetch(200, events);
+    await expect(getSessionEvents('ok')).resolves.toEqual(events);
   });
 });
