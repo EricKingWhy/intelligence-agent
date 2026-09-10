@@ -40,6 +40,7 @@ from agent_harness.session.event import (
     SESSION_STARTED,
     STREAM_ONLY_TYPES,
     TOOL_RESULT,
+    USER_MESSAGE,
     SessionEvent,
 )
 from agent_harness.session.store import JsonlSessionStore
@@ -323,6 +324,33 @@ class Session:
     def derive_messages(self) -> list[AnyMessage]:
         """从已加载事件投影出模型可见 messages（委托纯函数）。"""
         return derive_messages(self._events)
+
+    # ── step_id 基数（前端 turn 定位键的服务端镜像）──
+
+    @property
+    def max_step_id(self) -> int:
+        """已出现过的最大 step_id（无则 0）。
+
+        事件信封的 step_id 是前端 turn 定位键（`projection.resolveStep` →
+        `withTurnAt`），必须 session 级单调；续聊 run 以它为步号基数接续，
+        否则第二轮 run 再从 1 编号会与首轮冲突（前端把第二轮模型输出折叠进
+        首轮 turn）。计算与消费见 `AgentRuntime._drive` 的 `step_base`。
+        """
+        return max(
+            (e.step_id for e in self._events if e.step_id is not None), default=0,
+        )
+
+    @property
+    def user_turn_count(self) -> int:
+        """真实用户发言轮数 = 前端已为「用户消息」开出的 turn 数。
+
+        runtime 注入的纠正消息（`data.injected_by`，同错熔断软触发）不算：
+        它带 step_id 落在当前轮内，不新开 turn。
+        """
+        return sum(
+            1 for e in self._events
+            if e.type == USER_MESSAGE and not e.data.get("injected_by")
+        )
 
     # ── Run 生命周期 ──
 
