@@ -13,7 +13,7 @@
 | Branch | `feat/frontend` |
 | 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` v1 |
 | 后端交接手册 | `D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_T7_T9.md` |
-| 集成交接提示词 | `docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md`（**待补深化批次**） |
+| 集成交接提示词 | `docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md`（已含深化批次 + 拓扑重测 + AGENTS.md 冲突分析） |
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
@@ -40,7 +40,7 @@
 | --- | --- |
 | /improve-codebase-architecture | `done` → `docs/ARCHITECTURE_REVIEW.md`（`3e71b33`） |
 | 深化批次实施 | `partial`（C1 剩余部分见下） |
-| 写集成 AI 交接提示词 | `pending`（`25917c1` 已写 T7–T9 版，需补深化批次 + 新 HEAD） |
+| 写集成 AI 交接提示词 | `done`（`25917c1` 初版 → 本轮补深化批次 + 拓扑重测 + AGENTS.md 冲突预判） |
 
 ---
 
@@ -153,8 +153,28 @@
   （编译期各自穷尽，但同一字段集两处书写）——是否抽公共表待定，当前按
   「简单优先」保留显式重复。
 
-### 3. 集成交接提示词待补
+### 3. 集成交接提示词（已更新）
 
-`docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md` 目前只覆盖 T7–T9；
-需补深化批次 commits（`9b2234f` / `f481ea5` / `ae341e2` + review 修复）与新 HEAD，
-并标注「已披露的行为变化」两处，供集成 AI 判定合并影响。
+`docs/integration/FRONTEND_T7_T9_INTEGRATION_PROMPT.md` 已重写：14 个 commit 清单、
+新 HEAD `d5a8dca`、深化批次新增模块、两处已披露行为变化、C1 未完成范围，
+以及**重测后的拓扑与冲突预判**。
+
+#### ⚠ 拓扑已变，冲突预判与初版相反
+
+初版写「ahead/behind 6/0，预期 merge 干净」。重测：merge-base `5c07fff`，
+`main` `c5149ad`，**14 / 13**（main 在 merge-base 后又前进 13 个 commit）。
+
+`git merge-tree --write-tree --name-only main HEAD` → **`AGENTS.md` 必然冲突**：
+两侧都在 §15 之后追加同号 §16（`main` 版是后端/Primary 口径，本分支版是前端口径）。
+按 §14.7 已给出 9 项分析与推荐统一语义（保留 main 版为唯一 §16，前端内容折叠为
+`## 16.6 前端 worktree 补充`）——**留给集成 AI + 用户决策，本分支不自行解决**。
+
+`web/src/generated/event-types.ts` 两侧都改过但**逐字节相同**，auto-merge 零差异。
+其余 `main` 侧变更全在 `src/**` / `tests/**` / `docs/**`，与 `web/**` 无交集。
+
+#### 已识别但未做的协议项
+
+`main` 的 AGENTS.md §16.4 要求「每个 ticket 完成后更新 `docs/PHASE_STATUS.md`」。
+本分支按前端协议记在 `docs/SDD_TICKET_TRACKER.md`，**未写 PHASE_STATUS.md**——该文件既有
+条目均为「合入 main 后回填」，故在交接触提示词 §6 提供了建议条目文本，由集成 AI 在
+merge 后追加。这是本批的协议偏离，记录在案。
