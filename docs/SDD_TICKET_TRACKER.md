@@ -232,4 +232,15 @@ merge 后追加。这是本批的协议偏离，记录在案。
 
 **子会话刷新一致性（追加真机验证）**：委派 child `2515a128`（列表点击 / 「打开子会话」两条入口）与分叉 child `1fdac9b9`（410 事件）刷新前后正文指纹**逐字节相同**（日志见登记簿对应章节）。新增回归锁 1 例（×2 视口）——首版播种式被变异验证证伪（只覆盖读路径），已改为真实点击写入路径 + 按 id 区分事件。
 
-**本批最终门禁（实跑）**：tsc ✓ · vitest **494 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **98 passed**（`--workers=2`）· vite build ✓。
+**第三轮控制面清点（可核对方法）**：从源码枚举全部 **45 个 `<button>`**（17 文件）逐个核对。初版**关键词比对**不可靠（两个方向都会错：`保存`/`清除` 命中的是无关散文 → 令牌弹窗两键实际没点过却判 OK；`滚动到最新`/`恢复会话` 其实有覆盖却判缺失），**故改为逐个真机点击**。最终 **45 = 38 点过 + 1 补 e2e + 3 按设计不可达 + 3 瞬态窗口不可达**：
+
+- **38 个真机点击通过**（本轮新验含：Inspector 5 tab、加载更早 200→410、时间线行跳转、终端行→工具焦点、io-tabs ×4、JSON 展开、返回父会话、代码块换行、**推理块展开**、**Inspect chip**、**Inspector 工具行**、**令牌保存/清除**、空态示例 chip）；
+- `auth-banner-close` 本地不可达（后端仅配 `jwt_secret` 时 401）→ 新增 `web/e2e/l-auth-banner.spec.ts`（含变异验证）；
+- **按设计不可达 3**：审批卡「批准」「拒绝」（`auto_approve` 硬编码，OBS-006）、`ContextProviderPicker`（本部署后端目录为空 → 正确不渲染）；
+- **瞬态窗口不可达 3**：`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`（均需「流式中 + 用户上滚」才渲染；cmd 缓冲输出使尾窗仅存毫秒级，叠加工具 10s 硬超时）→ 如实登记，未假装已点。
+
+**新发现的后端问题（含根因行号，需后端修复）**：OBS-011 子进程输出按 UTF-8 解码而 cmd.exe 输出 GBK → **乱码固化进 JSONL**（`sandbox/local.py:166-167`，铁证：原始字节中 U+FFFD 与侥幸合法的 GBK 双字节混杂）；OBS-012 `bash` 工具在 Windows 实为 cmd.exe（`shell=True`，`local.py:161`）→ bash 语法 41ms 失败；OBS-013 provider 退化重复（2,868 delta / 186,507 字符的同句循环，3.5 分钟无工具调用，另见多次 `model/fallback … InternalServerError`）；OBS-014 bash 工具 10.0s 硬超时且 `retryable:false`。
+
+**本批最终门禁（实跑）**：tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **100 passed**（`--workers=2`）· vite build ✓。
+
+**本轮审查（`l-auth-banner.spec.ts`）**：0 个 P0/P1，1 项 **P2** + 4 项 P3，**全部已处置**。P2 是**注释谎报覆盖**——我写「`api.test.ts` 测 401 分类」，实则全 `src` 测试树零个 401 引用（该缝当时**无单测**）。已把谎报改成事实：`api.test.ts` 新增 3 例（401→`UnauthorizedError`、广播 detail、**body 非 JSON 的回退文案**）。P3 中一项揭示了**真实行为被我注释说反**：关闭**不是**永久忽略（`App.tsx:148` 每次广播都会重新显示），故 e2e 改为走「配置令牌」真实路径断言**横幅重新出现**（变异验证：删掉 `refreshSessions()` → 两视口都红）。

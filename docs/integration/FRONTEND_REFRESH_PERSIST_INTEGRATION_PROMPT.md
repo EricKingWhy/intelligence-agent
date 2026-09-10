@@ -174,9 +174,11 @@ git -C D:/intelligence-agent merge feat/frontend      # 需用户批准
 | 3 P3 提前返回同时覆盖 `failed`/`cancelled`，优先级仅靠口头不变量 | **已修（显式化）**：条件补成 `run_interrupted && run_status === 'completed'`——真实数据下恒真，故对全部合法日志行为**逐字节不变**；破坏不变量时退化为「更晚的终态赢」。新增一例锁住该退化语义 |
 | 4 P3 后续发消息 RTT 内短暂显示「已中断」+ 图标风格 | **不改**：瞬时态比修复前的绿色「已完成」更接近真相；图标纯审美，换图标零收益（§9.3） |
 
-### 8.5 门禁（本批最终实跑）
+### 8.5 门禁（本批最终实跑，含第三轮）
 
-tsc ✓ · vitest **494 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **98 passed** · vite build ✓。
+tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **100 passed** · vite build ✓。
+
+> 第三轮的审查（针对 `l-auth-banner.spec.ts`）发现并已修一项 **P2**：我原注释声称 `api.test.ts` 覆盖 401 分类，**实则全 `src` 测试树零个 401 引用**（该缝无单测）。已补齐 3 例（401→`UnauthorizedError`、`onUnauthorized` 广播 detail、body 非 JSON 的回退文案）——故 vitest 由 494 升至 497。同一轮还把一处**说反的真实行为**订正：横幅关闭**并非**永久忽略，任何新 401 都会让它回来（e2e 已按真实行为断言，并做变异验证）。
 
 ---
 
@@ -193,3 +195,32 @@ tsc ✓ · vitest **494 passed**（28 文件）· oxlint **35 warnings / 0 error
 **有意保留的边界（勿当缺陷）**：右栏委派**钻取**（`Inspect 子会话`）刷新后退回默认 run 焦点。Inspector 属**视图状态**，与 `inspectorOpen` 一样按冻结决策「仅本会话内，不持久化」；会话选中与正文全部恢复，只有右栏子面板焦点不恢复。
 
 **新增回归锁 + 审查**：`k-refresh-restore.spec.ts` 增 1 例（×2 视口）。首版用 `addInitScript` 播种，**变异验证时发现它只覆盖读路径**（把写入按 `-child` 过滤后依然全绿），遂改为真实点击写入路径并让事件按 session id 返回不同正文；改后同一变异在两个视口都红（`Expected: "e2e-session-0001-child" / Received: null`）。对该用例的独立审查：**0 个 P0/P1/P2**，5 项 P3 全为「注释/标题超出实际断言」类，**已全部处置**（准确表述 + 按 id 区分事件 + 移除恒真断言 + 行定位改 `title` 属性前缀）。
+
+---
+
+## 8.7 第三轮：控制面清点（45 个按钮逐个核对）与后端问题移交
+
+### 为什么要做这一轮
+
+前两轮的巡检表是**人工列举**的，无法证明「每个按钮都点过」（用户的硬要求）。本轮改为**可核对的方法**：从源码枚举全部交互控件再逐项对照记录。
+
+- 源码 `<button>` 共 **45 个**（17 个文件）；`onClick` 的非 `<button>` 元素 **0 个** → 按钮即全部点击面。
+- 对照结果：初版用**关键词比对**判出「11 项未覆盖」，但复查发现该方法**两个方向都会错**——`保存`/`清除` 命中的是无关散文（登记簿第 160/167 行），于是令牌弹窗的「保存」「清除」实际从未被点过却判为 OK（假阳性）；而 `滚动到最新`（第 19 行有 e2e + 真机证据）、`恢复会话`（第 41 行）其实有覆盖（假阴性）。**故放弃文本比对，改为逐个真机点击。**
+- **最终逐标签核对（45 个）**：**38 个真机点击验证通过**；1 个 `auth-banner-close` 本地不可达 → **已补 e2e**；3 个**按设计不可达**（审批卡「批准」「拒绝」= `auto_approve` 硬编码 OBS-006；`ContextProviderPicker` = 本部署后端目录为空，正确地不渲染）；3 个**瞬态窗口不可达**（`tool-out-wrap-btn`、`tool-out-jump`、`reasoning-jump`——均需「流式中 + 用户上滚」才渲染）。即 **45 = 38 + 1 + 3 + 3**，每个 `<button>` 都有明确去向与书面理由。
+
+### 需要集成 AI 转交后端的问题（本轮主产出，均有文件行号）
+
+| # | 级别 | 问题 | 根因（后端） |
+| --- | --- | --- | --- |
+| **OBS-011** | P2 | 工具输出在 UI **与落盘 JSONL** 中都是乱码（`��ʱ��Ӧ�� i��`、`���� Ping 127.0.0.1 …`）。**乱码发生在落盘之前**，前端只是忠实渲染 | `src/agent_harness/sandbox/local.py:166-167` 用 `encoding="utf-8", errors="replace"` 解 cmd.exe 的 **GBK** 输出；铁证：原始字节里 U+FFFD 与「侥幸合法的 GBK 双字节」混杂（GBK 的「时/应」两字节恰是合法 UTF-8）。同模式见 `sandbox/docker.py:140-141`。**JSONL 是本项目可观测性的单一事实源，乱码一旦落盘不可逆** |
+| **OBS-012** | P2 | `bash` 工具在 Windows 上**不是 bash**：`for i in $(seq 1 10); do …; done` 41ms 内 `exit_code=1`，stderr 为 cmd.exe 的「此时不应有 i。」；同会话里 `$(whoami)` 被**原样回显** | `sandbox/local.py:161` `shell=True` → `COMSPEC`（cmd.exe）。工具名与语义不符会诱导模型按 bash 语法写命令并莫名失败（该会话因此 7 次工具调用、2 次失败、4 次 fallback） |
+| **OBS-013** | P2 | provider 退化重复：一轮生成 **2,868 个 `text/delta`、186,507 字符**的 `"Let me run the command."` 无限重复，**始终不调用工具**，持续 3.5 分钟（由用户点停止收口）。另有多次 `model/fallback: deepseek-v4-flash-0731 → glm-4.5-air · InternalServerError` | provider/后端。前端表现正确（脉冲「思考中」、文本持续流入、停止可用） |
+| **OBS-014** | — | bash 工具 **10.0s 硬超时**且 `retryable:false`（`sleep 30`、`ping -n 45` 失败；`sleep 9`、`ping -n 4` 正常） | 与 OBS-009 同族，此处补实证。与 OBS-013 组合会出现「想跑长命令 → 超时 → 反复重试/退化」的失效链 |
+
+### 本轮新增的测试
+
+`web/e2e/l-auth-banner.spec.ts`（×2 视口）：401 → 引导横幅 → 点「关闭提示」→ 横幅消失且不复现。因该按钮在本地开发**不可达**（后端仅配 `jwt_secret` 时校验令牌，`web/app.py:594` fail-open），故按后端**已冻结的契约形状**（`{"detail":"Missing identity token"}`）在网络层造 401。**变异验证**：把关闭回调改为空实现 → 两视口都红（`Expected: hidden / Received: visible`），随后还原。
+
+### 未覆盖（如实登记，勿误判为已点）
+
+`tool-out-wrap-btn`（自动换行）与 `tool-out-jump`（↓ 最新）：二者所在的流式尾窗要求 `tool.output.length > 0 && (running || !result)`，而本后端 cmd.exe **缓冲输出**，整段输出以**单个终态 delta** 到达、`result` 紧随其后 → 窗口仅存毫秒级（实证：`echo LINE-1 & ping…` 6.2s 跑完，`output_delta` 仅 1 条）。叠加工具 10s 硬超时与模型不确定性（本轮 6 次尝试里 1 次模型拒绝调用工具、1 次 3.5 分钟退化循环），该窗口是移动靶。本轮**观察到**窗口渲染过 3 次（默认 `tool-out-wrap`、「不换行」、真实内容 `LINE-1 LINE-2 LINE-3`），**未观察到**换行点击与 `↓ 最新`。测试侧：`ToolCard.test.tsx` 只覆盖窗口的**存在条件**，`j-scroll.spec.ts:53` 只断言非流式态不出现 `↓ 最新`——两处点击均无覆盖。

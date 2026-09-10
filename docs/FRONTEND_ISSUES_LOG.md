@@ -10,6 +10,8 @@
 
 ## 问题清单
 
+> **本轮（第三轮 · 控制面清点）新增的后端问题 OBS-011～OBS-014 与两项覆盖缺口，正文在文末「第三轮」章节**（含根因文件行号与原始字节级证据）——它们不在下方历史清单里，勿以为遗漏。
+
 ### BUG-007 命令面板 11 条静态命令的 label 全是英文，中文查询零命中（中文 UI 里的本地化缺口）【P2 · 已修复】
 
 **发现时间**：2026-09-11 真实浏览器逐按钮巡检（Ctrl+K）
@@ -651,3 +653,141 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 **本轮审查（对新 e2e 用例）**：**0 个 P0/P1/P2**，5 项 P3——全部指向「注释/标题的说法超出用例实际断言」（合成 fixture 无真委派/分叉事件却写得像自动化复现了真机结果；`toContainText` 无鉴别力；`toBeNull()` 前置断言在全新上下文里恒真）。**5 项已全部处置**：标题与注释改为准确表述并明确「真机验证记在登记簿」、事件按 id 区分、移除恒真断言的误导性说法、行定位改用 `title` 属性前缀（稳定身份，不依赖业务文案）。
 
 **门禁**：tsc ✓ · vitest **494 passed** · oxlint **35w 0e** · playwright **98 passed**（+2）· vite build ✓。
+
+---
+
+## 第三轮：控制面清点（源码 45 个 `<button>` 逐个对照登记簿）
+
+**起因**：前两轮的巡检表是**人工列举**的，无法证明「每个按钮都点过」——这正是用户的硬要求（「每个功能按钮你必须都要点击一下…每个都要点一遍」）。故本轮改用**可核对的方法**：从源码枚举全部交互控件，再逐项对照登记簿。
+
+**方法**：扫 `web/src/**/*.tsx`（排除测试）取全部 `<button>` 标签 → **45 个**，分布在 17 个文件（StepDetail 10、TopBar 6、ToolCard 4、Conversation 4、DelegationNode 3、App 3、SessionList 2、ReasoningBlock 2、Composer 2、ApprovalCard 2、markdown/ModelPicker/JsonTree/CopyButton/ControlPicker/ContextProviderPicker/CommandPalette 各 1）。另有 `onClick` 非 `<button>` 元素 **0 个**（即按钮即全部点击面）。再逐个在登记簿里找覆盖证据。
+
+**结果：11 项此前从未被点过**（前两轮的 74 行表确实漏了）。本轮逐项真机验证后，9 项正常、1 项不可达（已补 e2e）、1 项实际不可达（登记为覆盖缺口）。
+
+### 本轮真机验证通过（9 项 + 附带确认）
+
+| 控件 | 真机证据 |
+| --- | --- |
+| **Inspector 5 个 tab**（Timeline/Overview/Changes/Terminal/Artifacts） | 各渲染不同内容：Overview = RUN/TOOLS/TRACE/MODEL/CHECKPOINT（状态失败、15 轮、28,357 tok、7 工具 2 失败、410 事件、含 `glm-5.3-flash → glm-4.5-air` 切换史）；Changes = 文件写入前后 diff；Terminal = 5 行 shell 输出；Artifacts = 诚实的「本次会话未产生 Artifact。」；Timeline = 200 行 |
+| **加载更早 210 条**（`.timeline-earlier`） | 点击后时间线 **200 → 410 行**（等于该会话真实事件总数），按钮消失，首行变为 `0 session/started`——**不重不漏** |
+| **时间线行点击**（`.timeline-row` ×200） | 点 seq 406 `model/completed`：主区滚动 `0 → 5205`，出现 1 个跳转脉冲——反向联动（Inspector → 主区定位）成立 |
+| **终端行**（`.detail-terminal-row` ×5） | 点击后 Inspector 头部切为 `bash`、出现返回键、io-tabs 出现 |
+| **io-tabs ×4**（Overview/Input/Output/Raw） | 四档渲染各不相同：正文长度 136 / 122 / 276 / 921 字符；JSON 行 0 / 3 / 6 / 29 |
+| **JSON 树展开**（`.json-row[aria-expanded]`，5 个可展开） | `args: {1 key}`：`aria-expanded` false → true，行数 29 → 31 |
+| **返回父会话 Run 视图**（`.child-back-btn`） | 钻取态点它：从 child `2515a128` 退回父 run `2c2ad2e6`，返回键消失 |
+| **代码块换行**（`.md-code-wrap-btn`） | label `自动换行 → 不换行`，class 加 `md-code-wrap`，`aria-label` 同步为「代码不换行」 |
+| **停止（工具运行中点）** | 脉冲 → 中性「已取消」，无重连横幅；且**全语料 0 个 dangling tool_call**——取消会把工具收口，**不会**留下虚假的「恢复」入口（配合 `isRecoverableRun` 设计正确） |
+| （附带）工具终态输出未丢失 | 卡片展开渲染 `.act-detail-result`（含 `stdout: "LINE-1 \nLINE-2 \nLINE-3 \n"`），Inspector 亦有——流式尾窗关闭**不是**输出丢失 |
+
+### 覆盖缺口 1：`auth-banner-close`——本轮已补 e2e
+
+**不可达原因**：后端仅在配置 `jwt_secret` 时校验令牌并要求 401（`src/agent_harness/web/app.py:594`，未配置则 fail-open），本地开发不设该密钥 → 横幅永不出现。重启后端加密钥属改动后端状态、且超出前端范围，故按**后端已冻结的契约形状**（`lib/auth.ts` 文档：匿名 → 401 `{"detail":"Missing identity token"}`）补 e2e。
+
+**新增** `web/e2e/l-auth-banner.spec.ts`（×2 视口）：401 → 横幅出现（含文案断言）→ 点「关闭提示」→ 横幅消失 → 且**不再自行复现**（把 401 翻成 200 后再断言，否则「关闭后复现」会变成假阴性）。**变异验证**：把 `onClick={() => setAuthRequired(false)}` 改为空实现 → 两个视口都红（`Expected: hidden / Received: visible`，14 次轮询都可见），随后还原。
+
+### 覆盖缺口 2：`tool-out-wrap-btn` / `tool-out-jump`——登记为**实际不可达**（非缺陷）
+
+**机制**（源码 + 事件双侧取证）：输出尾窗的渲染条件是 `tool.output.length > 0 && (status === 'running' || !tool.result)`（`ToolCard.tsx:136`）。而本后端 cmd.exe **缓冲输出**，整段输出以**单个**终态 `tool/output_delta` 到达，`tool/result` 紧随其后——窗口只存在毫秒级。实证：会话 `01fa7167` 的 `echo LINE-1 & ping…` 三个 echo 在 6.2s 内跑完，`tool/output_delta` **仅 1 条**，其 `stdout` 一次性为 `"LINE-1 \nLINE-2 \nLINE-3 \n"`。叠加 bash 工具 **10.0s 硬超时**（见 OBS-014）与模型不确定性（本轮 6 次尝试中出现 1 次模型不改写命令、1 次完全拒绝调用工具、1 次 3.5 分钟退化循环），该窗口是移动靶。
+
+**本轮实际观察到**：窗口确实渲染过（3 次），默认态为 `tool-out-body tool-out-wrap` + 按钮文案「不换行」，内容为真实输出（`LINE-1 LINE-2 LINE-3`）。**未观察到**：换行点击的切换效果、`↓ 最新` 的出现与点击（它还需要「流式中用户上滚」这一叠加条件）。
+
+**测试侧现状（勿误认为已覆盖）**：`ToolCard.test.tsx` 只断言窗口的**存在条件**（`tool-out-stream` 的有/无），**没有**换行或跳转的点击用例；`j-scroll.spec.ts:53` 只断言非流式态**不出现** `↓ 最新`。两处点击均无覆盖，也未能在真机点击——如实登记，不当作已完成。
+
+### 本轮新发现的**后端**问题（含根因文件行号，供后端修复）
+
+#### OBS-011 子进程输出按 UTF-8 解码，而 cmd.exe 输出 GBK → **乱码被持久化进 JSONL**（P2）
+
+**现象**：工具输出在 UI 与**落盘事件**中都成乱码。两次实证：`��ʱ��Ӧ�� i��`（cmd 的「此时不应有 i。」）、`���� Ping 127.0.0.1 …`。
+
+**铁证（区分前后端的关键）**：读 `25fe14b0…/events.jsonl` 的**原始字节**，delta 为
+`\xef\xbf\xbd\xef\xbf\xbd\xca\xb1\xef\xbf\xbd…` ——
+即 **U+FFFD（`\xef\xbf\xbd`）与"侥幸合法的 UTF-8 双字节"混杂**：`\xca\xb1` 被解成 U+02B1（ʱ）、`\xd3\xa6` 被解成 U+04E6（Ӧ）。GBK 的「时」「应」两字节恰好构成合法 UTF-8 序列 → 剩下非法处变 U+FFFD。文件本身是**合法 UTF-8**、含 **24 个 U+FFFD**。
+
+**归因：后端，且写入发生在事件落盘之前**——前端只是忠实渲染磁盘上的内容。
+
+**根因**：`src/agent_harness/sandbox/local.py:166-167` 的 `encoding="utf-8", errors="replace"`（源码注释已自承认「Windows 中文系统默认 GBK…用 errors=replace 保证不崩」——代价是把乱码固化进了 append-only 事件日志）。同一模式另见 `sandbox/docker.py:140-141`。
+
+**为什么值得修**：JSONL 是本项目可观测性的**单一事实源**（回放 / eval / Langfuse 都读它）。乱码一旦落盘即不可逆，且会让「模型看到的工具输出」与「真相」不一致。
+
+#### OBS-012 `bash` 工具在 Windows 上不是 bash（P2）
+
+**现象**：`for i in $(seq 1 10); do …; done` 41ms 内以 `exit_code=1` 失败，stderr 为 cmd.exe 的「此时不应有 i。」。
+
+**根因**：`sandbox/local.py:161` `shell=True` → Windows 下走 `COMSPEC`（cmd.exe）。
+
+**旁证（同会话 `1fdac9b9`）**：`echo "Current user: $(whoami)"` 的输出里 `$(whoami)` 被**原样回显**（`"Current user: $(whoami)"`）——cmd.exe 不做命令替换；而 `ls -la` 却能工作（PATH 里有 Unix 工具）。模型据此在**同一任务里反复试错**（该会话 4 次 `model/fallback`、7 次工具调用、2 次工具失败）。
+
+**影响**：工具名与语义不符会让模型（与人类）按 bash 语法写命令并莫名失败，直接拉高 token 与失败率。
+
+#### OBS-013 模型退化重复循环 + 频繁 fallback（P2 · provider）
+
+**现象**：会话 `7d5a6f24` 一轮生成 **2,868 个 `text/delta`、共 186,507 字符**，内容为 `"Let me run the command."` 的无限重复，**始终没有发出工具调用**，持续 3.5 分钟后由我点「停止」收口（`model/failed: model call cancelled`）。全语料另有多次 `model/fallback: deepseek-v4-flash-0731 → glm-4.5-air · InternalServerError`。
+
+**归因：provider/后端**。前端表现正确（脉冲「思考中」，文本持续流入，停止可用）。但值得后端评估：该 provider 是否存在重复惩罚/最大生成长度护栏，以及「长时间无工具调用的大段自重复」能否作为可观测信号提前暴露。
+
+#### OBS-014 bash 工具 10.0s 硬超时且 `retryable:false`（与 OBS-009 同族，此处补实证）
+
+`sleep 30 && echo resume-test-done`、`ping -n 45 127.0.0.1` 均以 `TIMEOUT`（`retryable:false`）失败；`ping -n 4` / `sleep 9` 正常。即单条命令**上限 10.0s**，长任务必须由模型自行切分。结合 OBS-013 会出现「想跑长命令 → 超时 → 反复重试/退化」的组合失效。
+
+**本轮门禁**：tsc ✓ · vitest **494 passed** · oxlint **35 warnings / 0 errors** · playwright **100 passed**（+2）· vite build ✓。
+
+### 本轮审查（对新增的 `l-auth-banner.spec.ts`）：0 个 P0/P1，1 项 **P2** + 4 项 P3——全部已处置
+
+审阅者做了三件我没有做的核验：① 用**实测的网络捕获**确认「横幅出现后到关闭前没有任何 `/api/sessions` 请求」；② 用 `playwright-core@1.63.0` 源码确认「后注册路由优先」；③ **逐字检查了我注释里的覆盖声明**。
+
+| # | 级别 | 内容 | 处置 |
+| --- | --- | --- | --- |
+| 1 | **P2** | **注释谎报覆盖**：我写「`lib/api.test.ts` 测 401 的分类（`UnauthorizedError`）」，实际该文件**零个 401 引用**——全 `src` 测试树里都搜不到 401/Unauthorized。即 **401→`UnauthorizedError` 这条缝当时根本没有单测** | **已修（把谎报变成事实，而非删掉句子）**：在 `api.test.ts` 新增一组 3 例——401 → 抛 `UnauthorizedError`（且**不是** `NotFoundError`）、401 → `onUnauthorized` 收到后端 detail、**body 非 JSON 时回退文案**（覆盖 `readErrorDetail` 的失败路径）。注释改为准确的两层分工 |
+| 2 | P3 | `denied` 开关与 `waitForTimeout(400)` 是**惰性构件**：实测「横幅出现后再无 `/api/sessions` 请求」，故 200 分支永不执行、「关闭后不复现」是**空断言**；且它把真实行为**说反了**——关闭并非永久忽略（`App.tsx:148` 每次广播都会 `setAuthRequired(true)`） | **已修并改成测真实行为**：删掉开关与空等；改为走应用内真实路径「配置令牌」→ `onTokenChange` 先清横幅再 `refreshSessions()` → 后端仍 401 → **断言横幅重新出现**。**变异验证**：删掉那句 `refreshSessions()` → 两视口都红（`Expected: visible`），随后还原 |
+| 3 | P3 | 契约形状的 body 只作输入、从未断言被传播；`toContainText('身份令牌')` 命中的是**静态文案**，`readErrorDetail` 坏了也照样通过 | **已修**：detail 的传播与回退文案由上面新增的 3 个单测覆盖；e2e 注释写明「文案是静态的，传播由单测覆盖」，不再暗示 e2e 覆盖了它 |
+| 4 | P3 | `toBeHidden()` 在**组件树崩溃卸载**时也会通过（`main.tsx` 无 error boundary），故「点了没反应」与「点崩了」区分不开 | **已修**：关闭后补断言顶栏「API 身份令牌设置」按钮仍可见（页面还在，真的只是横幅关了） |
+| 5 | P3 | `getByRole('button', { name: '关闭提示' })` 的 `name` 是归一化子串匹配，当前唯一但不够表态 | **已修**：加 `exact: true` |
+
+**审阅者结论**：**approve with a P2 comment fix**——该用例确实锁住了此前零覆盖的关闭按钮（空 `onClick` 变异会让它红），路由优先级与其余 gate 均确认无误；要求订正注释里的覆盖声明，并把惰性的粘性构件简化或改成测真实行为（两者均已照做）。它另确认：未改动任何生产代码、无其它 spec 与之重复、`oxlint` 仍是 **35 warnings / 0 errors**。
+
+**审查后的最终门禁**：tsc ✓ · vitest **497 passed**（+3）· oxlint **35 warnings / 0 errors** · playwright **100 passed** · vite build ✓。
+
+### 修正：文本比对审计本身不可靠（本轮自查，务必以真机点击为准）
+
+上文的「11 项未覆盖」是**文本关键词比对**的产物，复查发现该方法**两个方向都会错**：
+
+- **假阳性（判成已覆盖，实际没点过）**：`保存` 命中的是第 160 行「没有第四处**保存**会话选择」、`清除` 命中的是第 167 行「回到空态时**清除**」——两处都是无关散文，于是**令牌弹窗的「保存」「清除」两个按钮实际从未被点过**，却被判为 OK。同理 `Inspect` 一词的泛命中掩盖了 `act-inspect-chip`。
+- **假阴性（判成未覆盖，实际有 e2e 或真机证据）**：`滚动到最新`（第 19 行明确写着 e2e `j-scroll.spec.ts` 用真实 `page.mouse.wheel` 锁「上滚→浮标出现→点浮标回底」）、`恢复会话`（第 41 行：真实 dangling 会话点击 →「已恢复：回填 1 条工具结果」）其实都有覆盖。
+
+**结论：按钮级覆盖率不能用关键词比对裁决。** 故改为**逐个真机点击**，见下表。
+
+### 本轮真机点击的完整清单（新增覆盖，均已确认「点了有反应且符合预期」）
+
+| 控件 | 真机观察到的反应 |
+| --- | --- |
+| Inspector tab ×5 | Overview/Changes/Terminal/Artifacts/Timeline 各渲染**不同**内容（见上文详表） |
+| 加载更早 210 条 | 200 → **410** 行，按钮消失，首行 `0 session/started` |
+| 时间线行 ×200 | 主区滚动 `0 → 5205` + 出现 1 个跳转脉冲 |
+| 终端行 ×5 | Inspector 头切 `bash`、出现返回键、io-tabs 出现 |
+| io-tab ×4 | Overview/Input/Output/Raw 正文长度 136/122/276/921，JSON 行 0/3/6/29 |
+| JSON 树行 | `aria-expanded` false → true，行数 29 → 31 |
+| 返回父会话 Run 视图 | 从 child `2515a128` 退回父 run `2c2ad2e6` |
+| 代码块换行 | 文案 `自动换行 ↔ 不换行`，class 加/去 `md-code-wrap`，`aria-label` 同步 |
+| 空态示例 chip ×3 | 点「创建 todo.md，写入三条今日计划」→ Composer 文本被填入该任务 |
+| **推理块展开**（`.reasoning-header` ×5） | `aria-expanded` false → true（**此前无任何覆盖**） |
+| **Inspect chip**（`.act-inspect-chip` ×3） | 点击 → Inspector 聚焦 `bash` 工具 + 出现返回键（**此前无覆盖**） |
+| **Inspector 工具行**（`.detail-tool-row` ×7） | 点 `bash` 行 → Inspector 聚焦该工具（**此前无覆盖**） |
+| **令牌保存**（`.auth-panel-save`） | 填 dummy token → 点保存 → `localStorage ahi.apiToken` = 该串（**此前无覆盖**） |
+| **令牌清除**（`.auth-panel-clear`） | 点清除 → `ahi.apiToken` 变 `null`（**已还原，无残留**）（**此前无覆盖**） |
+| Inspector 展开/收起 | `aria-label` `收起 Inspector ↔ 展开 Inspector` 互换（配合第 8/23 行：`.app-regions.inspector-closed` 归零宽度） |
+| 停止（工具运行中） | 脉冲 → 中性「已取消」；**全语料 0 dangling tool_call**——不留虚假恢复入口 |
+
+### 全部 45 个 `<button>` 的最终状态
+
+**逐个文件核对 45 个标签**（StepDetail 10、TopBar 6、ToolCard 4、Conversation 4、DelegationNode 3、App 3、SessionList 2、ReasoningBlock 2、Composer 2、ApprovalCard 2、其余 7 个文件各 1）：
+
+| 状态 | 数量 | 项 |
+| --- | --- | --- |
+| 真机点击验证通过 | **38** | **前两轮已验**：`detail-back-btn`（返回 Timeline）、`density-btn`（密度四档）、身份令牌图标、主题切换、`act-node`（ToolCard 与 DelegationNode 两处展开）、`fork-btn`、`turn-collapse-btn`、`workspace-mode`、`recover-btn`、`follow-pill`、新建会话、会话行、发送、停止、模型选择、CopyButton、ControlPicker（权限模式）、`palette-item`。**本轮新验**：Inspector `detail-tab` ×2 标签（5 个实例）、`timeline-earlier`、`timeline-row`、`detail-terminal-row`、`io-tab` ×2 标签（4 个实例）、`json-row`、`child-back-btn`、`md-code-wrap-btn`、`example-chip`、`reasoning-header`、`act-inspect-chip`、`detail-tool-row`、`auth-panel-save`、`auth-panel-clear`、Inspector 展开/收起 |
+| 不可达 · 已补 e2e | 1 | `auth-banner-close`（本地未配 `jwt_secret`；新增 `l-auth-banner.spec.ts` + 变异验证） |
+| 不可达 · 按设计 | 3 | 审批卡「批准」「拒绝」（`auto_approve` 硬编码，OBS-006）；`ContextProviderPicker`（本部署后端目录为空 → 正确地不渲染，第 29 行；组件本身由 `picker-search-visibility.spec.ts` 用长目录 fixture 覆盖） |
+| 不可达 · 瞬态窗口 | 3 | `tool-out-wrap-btn`、`tool-out-jump`（见缺口 2）、`reasoning-jump`（同一族：需「流式中 + 用户上滚」才渲染，`ReasoningBlock.tsx:255` 的 `suspended &&`；其底层 `followLatest` 原语已由第 19 行的 `j-scroll.spec.ts` 用真实滚轮锁住） |
+
+**合计 45 = 38 + 1 + 3 + 3** ✓ —— 每个 `<button>` 都有明确去向：**38 个真机点过**，其余 7 个各有**书面理由**（e2e / 产品设计 / 瞬态窗口），不再有「不知道点没点过」的项。
+
+**附带证据：控制台干净**。走完上述全部点击后，页面控制台（含最近 3 次导航的保留消息）只有 **2 条 error**，且都是**本轮变异验证自身的残留**——临时改坏 `App.tsx` 再还原时，Vite HMR 报了一次 500 与一次「Failed to reload /src/App.tsx」。**没有**任何一条来自被点控件（Inspector tab / io-tab / JSON 展开 / 令牌保存 / 推理展开 / 委派钻取等）的应用级错误。
