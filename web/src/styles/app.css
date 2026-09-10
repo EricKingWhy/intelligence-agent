@@ -626,6 +626,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   max-width: 78%;
   font-size: var(--text-base);
 }
+.fork-btn {
+  margin-top: var(--space-xs);
+  align-self: flex-end;
+  padding: 2px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.fork-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
 
 /* ── Phase 12 白盒透明（ADR-0014）：failure-guard / 注入纠正消息 ──
  * 系统注入条：harness 的 user-role 纠正消息不是真人输入——居中中性条，

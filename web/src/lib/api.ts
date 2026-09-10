@@ -322,3 +322,72 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
   if (!res.ok) throw new RecoverError(res.status, `恢复失败（${res.status}）`);
   return res.json();
 }
+
+// ── Session-level model switch（T7 #137，PRD §2.3）──
+
+/** POST /api/sessions/{id}/model 的响应体。
+ *  ``effective_model_id`` 是 service 解析出的规范 picker id——不能回显请求值，
+ *  否则上游 model_name / "default" 别名会与事件里的 to_model_id 对不上。 */
+export interface ModelChangeResult {
+  status: string;
+  provider: string;
+  model_id: string;
+}
+
+/** 切换会话当前模型并写 ``model/changed``（PRD §2.3）。
+ *
+ * - 切换不打断在途 run——下一轮 run 从事件流派生当前模型生效
+ * - ``GET /api/models`` 的默认条目（is_default=true）也是合法 POST target = 切回默认链
+ * - 响应回传规范 model_id（service 解析出的 picker id），不回显请求值
+ *
+ * 错误码：
+ * - 404 = session 不存在
+ * - 422 = provider/model_id 不在 catalog
+ */
+export async function changeSessionModel(
+  sessionId: string,
+  provider: string,
+  modelId: string,
+): Promise<ModelChangeResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, model_id: modelId }),
+  });
+  if (!res.ok) throw new Error(`change model ${res.status}`);
+  return res.json();
+}
+
+// ── Fork（T7 #137，PRD §2.4）──
+
+/** POST /api/sessions/{id}/forks 的响应体。 */
+export interface ForkResult {
+  session_id: string;
+  from_seq: number;
+}
+
+/** 从历史用户消息 seq 派生 child session（PRD §2.4）。
+ *
+ * - 锚点消息本身不进 child seed（child 侧由用户重新发送，pi /fork 同款语义）
+ * - child 继承父会话当前模型
+ * - HTTP 端点不生成 tail summary（确定性、无模型调用）
+ * - copy-on-fork：父 workspace 整目录复制为 child 的
+ *
+ * 错误码：
+ * - 404 = session 不存在
+ * - 409 = 在途 run（历史未 settled）
+ * - 422 = from_seq 不是合法 fork 锚点（不是用户消息 seq）
+ */
+export async function forkSession(
+  sessionId: string,
+  fromSeq: number,
+): Promise<ForkResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/forks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_seq: fromSeq }),
+  });
+  if (!res.ok) throw new Error(`fork ${res.status}`);
+  return res.json();
+}
+

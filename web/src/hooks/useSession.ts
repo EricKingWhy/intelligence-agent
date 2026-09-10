@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
 import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 
@@ -784,6 +784,40 @@ export function useSession() {
     [refreshSessions],
   );
 
+  /** T7 #137：切换会话当前模型（POST /api/sessions/{id}/model）。
+   *
+   * - 切换不打断在途 run——下一轮 run 从事件流派生当前模型生效
+   * - 响应回传规范 model_id，不回显请求值
+   * - 404 = session 不存在；422 = provider/model_id 不在 catalog
+   *
+   * 成功后刷新会话列表（模型变更可能影响 session summary）。
+   * 错误向上抛——调用方决定是否展示。 */
+  const changeModel = useCallback(
+    async (sessionId: string, provider: string, modelId: string) => {
+      return changeSessionModel(sessionId, provider, modelId);
+    },
+    [],
+  );
+
+  /** T7 #137：从历史用户消息 seq 派生 child session（POST /api/sessions/{id}/forks）。
+   *
+   * - 锚点消息本身不进 child seed
+   * - child 继承父会话当前模型
+   * - copy-on-fork：父 workspace 整目录复制为 child 的
+   *
+   * 错误码：
+   * - 404 = session 不存在
+   * - 409 = 在途 run（历史未 settled）
+   * - 422 = from_seq 不是合法 fork 锚点
+   *
+   * 成功后返回 child session_id——调用方决定是否跳转。 */
+  const fork = useCallback(
+    async (sessionId: string, fromSeq: number) => {
+      return forkSession(sessionId, fromSeq);
+    },
+    [],
+  );
+
   return {
     sessions,
     selectedId,
@@ -800,5 +834,7 @@ export function useSession() {
     cancelStream,
     recover,
     refreshSessions,
+    changeModel,
+    fork,
   };
 }

@@ -72,6 +72,8 @@ export default function App() {
     cancelStream,
     recover,
     refreshSessions,
+    changeModel,
+    fork,
   } = useSession();
 
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
@@ -239,9 +241,22 @@ export default function App() {
     void fetchControlCatalogs();
   }, [fetchModels, fetchControlCatalogs]);
 
-  const handleModelChange = useCallback((name: string | null) => {
-    setSelectedModel(name);
-  }, []);
+  const handleModelChange = useCallback(
+    (name: string | null) => {
+      setSelectedModel(name);
+      // T7 #137：已有会话时，模型选择触发 POST /model 切换会话当前模型。
+      // 新会话（无 selectedId）只更新本地状态——startSession 时携带 model。
+      if (selectedId && name) {
+        const entry = models.find((m) => m.name === name);
+        if (entry?.provider) {
+          void changeModel(selectedId, entry.provider, name).catch(() => {
+            // 切换失败静默——用户可重试；不阻塞主流程
+          });
+        }
+      }
+    },
+    [selectedId, models, changeModel],
+  );
 
   const handleSubmit = useCallback(
     (task: string) => {
@@ -292,7 +307,23 @@ export default function App() {
     ],
   );
 
-  // 422 = 未知模型（契约 C6）：目录可能已变——自动刷新一次；刷新后若目录
+  /** T7 #137：从历史用户消息 seq 派生 child session，成功后跳转到 child。 */
+  const handleFork = useCallback(
+    async (fromSeq: number) => {
+      if (!selectedId) return;
+      try {
+        const result = await fork(selectedId, fromSeq);
+        // 跳转到 child session
+        selectSession(result.session_id);
+        void refreshSessions();
+      } catch {
+        // 分叉失败静默——用户可重试
+      }
+    },
+    [selectedId, fork, selectSession, refreshSessions],
+  );
+
+
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
   // 同步刷新控制目录并清除死选中值（permission_mode / agent_profile /
@@ -576,6 +607,7 @@ export default function App() {
             onFocusTool={focusTool}
             onOpenSession={handleSelect}
             onInspectChild={focusChild}
+            onFork={handleFork}
           />
           <Composer
             streaming={streaming}
