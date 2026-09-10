@@ -13,15 +13,21 @@
 
 ## 2. commit 与改动面
 
-| commit | 内容 | 文件 |
-| --- | --- | --- |
-| `4219cbc` | `fix(model): reasoning_effort 语义档位翻译为 provider 线格式枚举` | 3 files +128/−22 |
+| commit | 内容 |
+| --- | --- |
+| `4219cbc` | `fix(model): reasoning_effort 语义档位翻译为 provider 线格式枚举`（主修复） |
+| `10e34ce` | `fix(model): code-review 双轴跟进——结构化日志 + 文案/文档对齐` |
+| `7f543e9` | `docs: 集成提示词 + 前端三缺陷交接单` |
+| `5cc54dc` | `docs(phase-status): record reasoning_effort P0 fix`（§16.5 字段补齐） |
 
 ```
-src/agent_harness/model/provider.py   | 54 +++++++++++++++++++---
-src/agent_harness/web/app.py          |  6 ++-
-tests/model/test_reasoning_effort.py  | 90 ++++++++++++++++++++++++++++++------
-docs/PHASE_STATUS.md                  | 新增 2026-09-11 条目
+src/agent_harness/model/provider.py              | 线格式枚举 + 翻译表 + 结构化告警
+src/agent_harness/web/app.py                     | 目录注释 + GET 端点 docstring + deep 档描述
+tests/model/test_reasoning_effort.py             | 重写为 6 条契约（G1/G1b/G2/G3/G4/G4b/G5）
+docs/goal/GOAL_RUNTIME_REASONING_EFFORT.md       | 勘误块（作废的透传假设）
+docs/PHASE_STATUS.md                             | 2026-09-11 条目
+docs/INTEGRATION_PROMPT_REASONING_EFFORT_FIX.md  | 本文件
+docs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md     | 前端交接单
 ```
 
 base：`5c7d85b`（merge：origin/main 架构深化 code-review 集成 + 前端 T9 集成记录）。
@@ -113,9 +119,27 @@ pytest -q                                               # 预期 1506 passed / 9
 
 | 项 | 说明 | 影响 |
 | --- | --- | --- |
-| `deep` 的映射落点 | 现落 `high`。`deep` 的 UI 描述是「最多推理开销，较慢但最深入」——若产品语义要求「最深入」，应改 `xhigh`（一行 + 1 条断言） | 只影响「深度」档的推理强度 |
+| `deep` 的映射落点 | 现落 `high`，且 catalog 里该档描述已同步改成「较高推理开销，较慢但更深入」——**代码与 UI 文案现在一致**。若产品坚持字面「最深入」，需同时改两处：翻译表 `deep` 一行 + catalog 描述，并确认目标端点接受 `xhigh`（追字面值会引入新的 400 风险，这是当初选 `high` 的原因） | 只影响「深度」档的推理强度 |
 | `standard` 的映射落点 | 现落 `medium`。语义是「平衡」，中位合理 | 低 |
 | 是否按 provider 分档 | 未做。GOAL §7 明确禁止 per-provider 参数映射（如 Qwen 的 `enable_thinking`），本次只做 provider 无关的线格式适配 | 低 |
+
+---
+
+## 7b. code-review 双轴结果（第二轮，独立 sub-agent）
+
+两轴分开跑、不互相污染。**均无硬违规**，共 4 处 finding，已全部在 `10e34ce` 修掉：
+
+| 轴 | finding | 处置 |
+| --- | --- | --- |
+| Standards | 裸 `logger.warning` 不利于事后检索——本 P0 拖了三天正因为没留下可检索记录 | 改 `log_event` 结构化事件（`component=model_provider` / `outcome=reasoning_effort_not_injected`） |
+| Standards | `docs/PHASE_STATUS.md` 条目缺 §16.5 规定的 commit sha / 关单字段 | `5cc54dc` 补齐 |
+| Spec | `deep` 档 UI 描述「最多推理开销…最深入」与其映射 `high` 自相矛盾（枚举里还有 `xhigh`/`max`） | 对齐文案（见 §7），不追字面值 |
+| Spec | `web/app.py` 的 `GET /api/reasoning-efforts` docstring 仍写「注入 model_kwargs → extra_body」，与翻译后路径不符 | 已改 |
+| Spec | 原始设计文档 §1.2/§2.3/§3.1/§5/§6 仍主张原样透传，§5 断言「静默忽略不会报错」被生产证伪 → 作废契约留在唯一的设计记录里 | 加勘误块，保留原文备查 |
+
+两轴均确认：不变量 #7 / #21、§8 Scope Lock 无违反；「前端零改动」结论经独立核验正确；前端交接单里三条缺陷的 file:line 经独立抽查准确（±2 行内）。
+
+> 说明：第一轮我只做了自审（在 diff 上看 Standards/Spec 两个视角），**那不是协议要求的独立两轴**，所以补跑了这一轮。
 
 ---
 
