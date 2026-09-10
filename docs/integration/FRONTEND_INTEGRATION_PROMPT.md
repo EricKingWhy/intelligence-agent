@@ -3,8 +3,9 @@
 > **给集成 AI（Git Integrator）的执行提示词。**
 > 按 `AGENTS.md` §14 集成规则执行；merge / push 需用户明确批准。
 >
-> **本文件已重写（2026-09-10 第二次）**：上一批 T7+T8+T9+深化 C1–C4 **已经并入 `main`**
-> （`9964adc`），`main` 已前进到 `977b319`。当前只剩**一个新的 T9 UI 增量**待集成。
+> **本文件已重写（2026-09-10 第三次）**：上一批 T7+T8+T9+深化 C1–C4 **已经并入 `main`**
+> （`9964adc`），`main` 已继续前进到 **`ebb2d68`**（后端 session 集成）。当前只剩
+> **4 个前端增量 commit** 待集成。
 > 本文件的哈希全部为实测值，但仍以**集成时实测**为准。
 
 ---
@@ -14,8 +15,8 @@
 把 `feat/frontend` 的**最后一个增量**合入 `main`。
 
 **背景**：T7 #137 / T8 #138 / T9 #139 主体 + 架构深化 C1–C4 **已于 `9964adc` 合入 `main`**，
-其后 `977b319` 回填了 `PHASE_STATUS.md`。本分支的拓扑是：`feat/frontend` 从
-**已进 main 的 `c00f742`** 再前进——因此本批只含**新 commit**，不是重做上一批。
+其后 `977b319` 回填了 `PHASE_STATUS.md`、`ebb2d68` 又合了后端 session 集成。本分支的拓扑是：
+`feat/frontend` 从**已进 main 的 `c00f742`** 再前进——因此本批只含**新 commit**，不是重做上一批。
 
 **内容**：
 1. **T9 #139 UI 层补完**（`cddea36`）：上一批只做了 `projection` 里的会话级 `turn_index`，
@@ -24,60 +25,62 @@
    （`Turn.turn_index`）并补上 `TurnView` 的「第 N 轮」渲染。
 2. **F-DEFER-1 修复 + 暴露的 e2e 测试缺陷修正**（见 §4.5）。
 
-### 0.1 Commit 清单（相对 `main` = `977b319`）
+### 0.1 Commit 清单（相对当时的 `main` = `977b319`）
 
 | commit | 内容 |
 | --- | --- |
 | `cddea36` | feat(web): T9 #139 轮次标签 UI——`turn_index` 落到当轮 + `TurnView` 渲染 |
 | `949c92a` | fix(web): F-DEFER-1 补 `.model-picker-search-wrap.hidden` CSS + e2e；修正被该修复暴露的 4 个既有 e2e 断言缺陷 |
 | `f2b4929` | docs(integration): 重写集成交接提示词至真实拓扑 + Tracker 勘误 |
+| `4b45bc5` | fix(web): code-review 修复——picker 键盘焦点落到 listbox + 长目录 fixture 去重 |
 
-> **共 3 个 commit**。请以 `git log --oneline 977b319..HEAD` 实测为准。
+> **共 4 个 commit**。请以 `git log --oneline ebb2d68..HEAD` 实测为准。
 >
-> ⚠ **`cddea36` 不在 `main` 祖先链上**（`git merge-base --is-ancestor cddea36 977b319` → NO）。
+> ⚠ **`cddea36` 不在 `main` 祖先链上**（`git merge-base --is-ancestor cddea36 ebb2d68` → NO）。
 > 上一批合入 main 的是 `9964adc`（其中含 T9 的 `projection` 层）。UI 层补完 `cddea36` 在
 > 本分支、**尚未进 main**——这正是本批要合的内容。
 
 ---
 
-## 1. Git 拓扑（**2026-09-10 实测**）
+## 1. Git 拓扑（**2026-09-10 17:50 复核，main 已再次前进**）
 
 | 项 | 值 |
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
-| HEAD | `f2b4929289087fd1f1aad9436a8fc2a64729b321` |
-| `main`（remote） | `977b3195e95c53791e04c0958d969f2bad689074` |
-| `feat/frontend`（remote） | `f2b4929289087fd1f1aad9436a8fc2a64729b321`（已与本地对齐） |
+| HEAD | `4b45bc52bca2e87e8dacb16b566e319aa793ddd9` |
+| `main`（remote） | `ebb2d6850fbf333cb586b3885d41985c8ff3ce8d` |
+| `feat/frontend`（remote） | `4b45bc52bca2e87e8dacb16b566e319aa793ddd9`（已与本地对齐） |
 | merge-base(`HEAD`, `main`) | **`c00f742`**（即「先回后正」的 merge 点） |
-| ahead / behind | HEAD 领先 `main` **3 个 commit**；behind **2 个 commit** |
+| ahead / behind | HEAD 领先 `main` **4 个 commit**；behind **6 个 commit** |
 
-> `behind = 2` 的含义：`main` 自 merge-base 起有两处提交（`9964adc` merge + `977b319`
-> PHASE_STATUS 回填）。**这 2 个 commit 只碰 `docs/PHASE_STATUS.md`**，与本分支零重叠，
-> 故合并不是 fast-forward、但**无冲突**（见 §2）。
+> **`main` 已从 `977b319` 前进到 `ebb2d68`**（集成 AI 又推了后端集成）。`behind = 6` 即
+> `9964adc`(merge) → `977b319`(PHASE_STATUS) → … → `ebb2d68`(后端 session 集成)。
+> **这 6 个 commit 改的是 `src/agent_harness/**`（后端）+ `CONTEXT.md` + 2 个 docs，与
+> 本分支零重叠**（见 §2 实测），故合并不是 fast-forward、但**无冲突**。
 
 > ⚠ **本文件上一版写的 `5c07fff` / `4f987fb` / `14 / 13` 全部作废**——那是 T7-T9 主体
-> 集成前的快照。**同版本中写的 `ahead 1` / `behind 0` / `cddea36 已在 main` 也是错的**，
-> 已按本节实测修正。
+> 集成前的快照。**同版本中写的 `ahead 1` / `behind 0` / `cddea36 已在 main` 也是错的**
+> （已勘误）。**`ahead 3` / `behind 2` / `main = 977b319` 也已被本轮 `main` 前进取代**。
 
 ---
 
-## 2. 冲突预判：**本次无冲突**（2026-09-10 实测）
+## 2. 冲突预判：**本次无冲突**（2026-09-10 17:50 实测，对 `main = ebb2d68`）
 
 ```text
-$ git merge-tree --write-tree --name-only f2b4929 977b319
-8f35c93dcdc020b9779c0eb5688a6e793ca58b10      # 只有 tree 哈希，无冲突段
+$ git merge-tree --write-tree --name-only 4b45bc5 ebb2d68
+e0998e928ae3c7d022cea1547b18cdfde56d1b93      # 只有 tree 哈希，无冲突段
 ```
 
-> ⚠ 上一版引用的 `382100d` 是**对 `cddea36` 算的**（当时 HEAD 还没到 `f2b4929`）。
-> 对真实 HEAD `f2b4929` 实测值为 **`8f35c93`**。树哈希随 HEAD 变化，集成时请重跑。
+> ⚠ 树哈希随 `HEAD` / `main` 变化：`382100d`（对 `cddea36`）→ `8f35c93`（对 `f2b4929`）
+> → **`e0998e9`（对 `4b45bc5` / `ebb2d68`）**。集成时请重跑，勿沿用。
 
-自 merge-base `c00f742` 以来，两侧改动文件**零重叠**：
+自 merge-base `c00f742` 以来，两侧改动文件**零重叠**（已用 `comm -12` 交叉验证，交集为空）：
 
 | 侧 | 改动文件 |
 | --- | --- |
-| `main`（`c00f742..977b319`） | `docs/PHASE_STATUS.md`（唯一） |
-| `feat/frontend`（`c00f742..f2b4929`） | `web/**`（11 个）+ `docs/FRONTEND_DEFER.md` + `docs/SDD_TICKET_TRACKER.md` + `docs/integration/`（共 15 个） |
+| `main`（`c00f742..ebb2d68`） | `CONTEXT.md` + `docs/INTEGRATION_PROMPT_ARCH_DEEPENING_C1_C3.md` + `docs/PHASE_STATUS.md` + `src/agent_harness/**`（6 个后端文件） |
+| `feat/frontend`（`c00f742..4b45bc5`） | `web/**`（11 个）+ `docs/FRONTEND_DEFER.md` + `docs/SDD_TICKET_TRACKER.md` + `docs/integration/`（共 15 个） |
 
 `AGENTS.md` 的 §16 冲突**已在上一批解决**（`9964adc` 之后 `main` 侧只有 `PHASE_STATUS.md` 一处），
 本批不再涉及。
@@ -99,8 +102,8 @@ $ git merge-tree --write-tree --name-only f2b4929 977b319
 
 > ⚠ 上一版写「46 passed」。**修正为 58**：F-DEFER-1 修复新增
 > `e2e/picker-search-visibility.spec.ts`（5 条）+ 补齐既有 spec，总数上升。
-> 另注：修复过程中我曾引入一版**回归**（`pickControl` 误用 `combo.fill()` 致 12 条失败），
-> 已在 `949c92a` 内一并修正，**当前 58/58 全绿**。
+> 另注：`949c92a` 曾引入一版**回归**（`pickControl` 误用 `combo.fill()`，短目录下挂起
+> 30s，致 12 条 e2e 失败），已在 **`4b45bc5`** 内修正，**当前 58/58 全绿**。
 
 > ⚠ **跑 e2e / build 前先 `rm -rf web/test-results web/dist`**——目录文件数 >50 时会被
 > 沙箱 safe-delete 守卫拦截，看起来像测试失败，实为环境限制。
@@ -190,7 +193,7 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
 > 命中 **0** 个（aria-label 不落在 input 上）。**根因**：浮层打开后 `activeElement` 是
 > popover 容器 `DIV[role="dialog"]`，键盘事件不落到 cmdk 的方向键承接者。
 > **正解**：显式 `[role="listbox"]:visible` `.focus()` 后再走方向键——长短目录同一路径、无分支。
-> 该修正与其余 4 条 spec 的同类修正均已在 `949c92a` 内。
+> 该修正已在 **`4b45bc5`** 内（与其余 4 条 spec 的同类修正、长目录 fixture 去重同一 commit）。
 
 ### 4.6 明确未动的部分
 
@@ -236,15 +239,18 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
 ## 6. `docs/PHASE_STATUS.md` 待追加条目（建议文本）
 
 ```markdown
-- 2026-09-10：**集成记录：feat/frontend T9 #139 UI 补完 + F-DEFER-1 → main**。
-  commit：`cddea36`（T9 UI）+ `949c92a`（F-DEFER-1 修复）+ `f2b4929`（交接文档勘误）。
+- 2026-09-10：**集成记录：feat/frontend T9 #139 UI 补完 + F-DEFER-1 + e2e 焦点修复 → main**。
+  commit：`cddea36`（T9 UI）+ `949c92a`（F-DEFER-1 修复）+ `f2b4929`（交接文档勘误）
+  + `4b45bc5`（code-review 修复）。
   交付：①T9 #139 UI 层——`turn_index` 由会话级改为 **per-turn 事实**（`Turn.turn_index`，
   修掉「历史轮次显示同一个数字」的设计缺陷）+ `TurnView`「第 N 轮」渲染 + 8 条测试；
   ②F-DEFER-1——补 `.model-picker-search-wrap.hidden` CSS（三个 picker 的短目录应隐藏搜索框，
   此前 class 挂了但无规则）；③顺带修正被该修复暴露的 4 个既有 e2e 断言缺陷（用 `combobox`
   当「浮层已开」信号，短目录下该 role 会随搜索框隐藏——改用 `[role="listbox"]`），
-  并把 picker 键盘 helper 的焦点显式落到 listbox（原依赖 `fill()` 建立焦点，短目录下会挂起）。
-  **冲突**：无（`merge-tree` 实测 clean；两侧改动零重叠——`main` 侧仅 `docs/PHASE_STATUS.md`）。
+  并把 picker 键盘 helper 的焦点显式落到 listbox（原依赖 `fill()` 建立焦点，短目录下会挂起）；
+  ④code-review 去重：长目录 fixture 抽为 `fixtures.ts` 公共导出（消除 catalog drift）。
+  **冲突**：无（`merge-tree` 对 `4b45bc5 × ebb2d68` 实测 clean，tree = `e0998e9`；
+  两侧改动零重叠——`main` 侧为 `src/agent_harness/**` + 3 个 docs，本侧全在 `web/` + 前端 docs）。
   门禁：tsc 0 + vitest 27 files / 416 passed + oxlint 0 error / 35 既有 warning +
   playwright **58 passed**（双 viewport）+ perf 12 passed + vite build OK。
 ```
