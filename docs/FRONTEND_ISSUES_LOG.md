@@ -10,7 +10,7 @@
 
 ## 问题清单
 
-### BUG-007 命令面板 50 条命令的 label/hint 全是英文，中文查询零命中（中文 UI 里的本地化缺口）【P2 · 未修（待产品决定）】
+### BUG-007 命令面板 11 条静态命令的 label 全是英文，中文查询零命中（中文 UI 里的本地化缺口）【P2 · 已修复】
 
 **发现时间**：2026-09-11 真实浏览器逐按钮巡检（Ctrl+K）
 
@@ -35,10 +35,53 @@
 
 **归因：前端（文案）**。不是逻辑缺陷，是本地化一致性问题。
 
-**建议（未改，属产品文案决定，非本次 BUG-005/006 范围——§8 只报告不顺手改）**：
-1. 首选：把 `lib/commands.ts` 的 `label` 改中文（与工具栏 `aria-label` 对齐：`切换主题` / `切换 Run Inspector` / `复制 Run ID`…），`hint` 保留英文快捷键。
-2. 或让 `filterCommands` 同时匹配一个 `keywords` 别名数组（中英双查），不动展示文案。
-3. 两个方案都只需改 `lib/commands.ts` 一处；e2e 有 `i-keyboard.spec.ts` 覆盖面板，改动有回归锁。
+**为什么最终判定为「缺陷」而不是「产品文案决定」**：面板的 `hint` 早就是中文（`右栏` / `定位` / `输入框`），只有 `label` 是英文——这是**本地化做了一半**，不是刻意的英文设计。工具栏同名按钮的 `aria-label` 也是中文（`切换主题` / `收起 Inspector`）。两处中文夹着一处英文，用户按母语搜索却零命中，属可修的一致性缺陷。
+
+**修复实现（2026-09-11）**：
+1. `lib/commands.ts`：`CommandItem` 增加 **不显示** 的 `keywords?: string`；`filterCommands` 的匹配 haystack 改为 `label + ' ' + keywords`。label 在前，所以**只按 label 命中的那条打分逐字不变**（追加文本不会移动 label 字符的贪心下标；已穷举 3 字符以内 query 验证：0 个既有命中失分或改分）。但**跨命令仍按分数比大小**——一条命令靠 keywords 命中且分高于另一条靠 label 命中的，就会排到前面（例：query `to` 下 `切换主题` 经 keyword `toggle theme` 高于 `切换 Run Inspector` 的 `Inspector`）。这是可接受的：keywords 的存在就是为了让中文 label 的命令仍能被英文搜到。
+2. `App.tsx`：11 条静态命令的 `label` 全部改中文，与工具栏/提示口径对齐——`切换 Run Inspector` / `跳到最新事件` / `复制 Run ID` / `复制 Trace ID` / `打开 Trace` / `切换主题` / `聚焦输入框` / `切换到紧凑|均衡|详细|Raw`（密度名与工具栏四档同名）。英文原词进 `keywords`，老用户的英文肌肉记忆不作废。
+3. 事件项（`tool/call · bash {...}`）**保持原样**——那是后端事件类型，本就属技术词汇。
+
+**验证（真实浏览器，同一面板）**：
+
+| 输入 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `主题` | 空 | **切换主题** |
+| `复制` | 空 | **复制 Run ID** |
+| `密度` | — | 切换到紧凑 / 均衡 / 详细 |
+| `紧凑` | — | 切换到紧凑 |
+| `toggle theme` | Toggle Theme | **切换主题**（经 keywords，英文仍可搜） |
+| `Copy Run` | Copy Run ID | **复制 Run ID**（经 keywords） |
+| `compact` | Switch to Compact | 切换到紧凑（经 keywords） |
+
+静态条目现状（**11 条**）：`切换 Run Inspector` / `跳到最新事件` / `复制 Run ID` / `复制 Trace ID`* / `打开 Trace`* / `切换主题` / `聚焦输入框` / `切换到紧凑` / `切换到均衡` / `切换到详细` / `切换到Raw`。打 * 的两条按契约条件出现（取决于该会话的 run 终态事件是否带 `trace_id`/`trace_url`）；实测会话 `f181c5ce` 上 **11 条全部渲染**，两条 trace 命令也都能正常工作（见 OBS-010）。事件项（约 39 条 `tool/call · bash {...}`）的 label **保持英文**，那是后端事件类型。
+
+**回归锁**：`e2e/i-keyboard.spec.ts` 的 Copy Run ID 用例改为**英文查询 + 中文条目**——一条测试同时锁「label 已本地化」与「英文别名仍命中」；`lib/commands.test.ts` 新增 3 例（中文 label 命中 / 英文 keywords 命中 / 无 keywords 条目不回归）。
+
+**参考 deepseek harness 的结论（用户要求「能抄就抄」）**：查了 `docs/RESEARCH_DEEPSEEK_HARNESS_WEB.md`——dsh 的命令面板/侧栏本地化不在其研究范围内（该文档聚焦会话/流式/审批/恢复），本条无可直接抄的设计。有一处相关差异记录在案：dsh 的重连是**服务端权威快照**（`history.ts:180-200`，无客户端游标），我们的契约是 `?after_seq=` 游标重放（这是本项目后端 T4 #97 定的，不是前端能选的），所以 BUG-006 按游标实现是当前契约下的正解，不适用「改成快照」。
+
+---
+
+### OBS-010 会话**列表**端点的 `trace_id` 恒为 null（但事件里有，命令照常工作）【观察项 · 后端·已订正】
+
+> ⚠ **本条已订正**：初版写成「70 个会话 trace_id 全为 null → Copy Trace ID / Open Trace 永不出现」，**结论是错的**。错因是只查了会话列表端点，没查事件。实录订正如下。
+
+**实测（2026-09-11）**：
+- `GET /api/sessions`：70 个会话，**`trace_id` 全部为 null**。
+- 但**事件里有**：会话 `f181c5ce` 的 `run/failed`（seq 33）携带
+  `trace_id: 2482fcee980f20ad111e3d19289043b1` +
+  `trace_url: https://jp.cloud.langfuse.com/project/…/traces/2482fcee…`。
+- 命令面板的两条命令**确实出现且工作**（同一会话上实测）：
+  | 命令 | 实测行为 |
+  | --- | --- |
+  | `复制 Trace ID` | 拦截 `clipboard.writeText` 拿到实参 = `2482fcee980f20ad111e3d19289043b1`（与事件逐字一致）✓ |
+  | `打开 Trace` | 拦截 `window.open` 拿到 `https://jp.cloud.langfuse.com/project/…/traces/2482fcee…`，`_blank` ✓ |
+
+**判读**：Langfuse **已接入**。前端这两条命令的可见性取自 **`conversation.trace_id` / `conversation.trace_url`**（由 `projection` 从 run 终态事件抽取，契约 2d7f87a），**不依赖会话列表**——所以列表端点 trace_id 为 null 完全不影响它们。
+
+**真正剩下的后端小观察**：`GET /api/sessions` 的 `trace_id` 字段**从来没有值**（不是「本部署没接 Langfuse」，是该端点没回填）。当前前端不用它（命令走事件、会话行也不显示 trace），所以**无用户可见影响**；但若将来想在会话行上直接标 trace，要先把该字段回填。
+
+**归因：后端（会话列表端点未回填 trace_id）**。**前端无需改动**。
 
 ---
 
@@ -426,6 +469,7 @@ run: () => conversation && copyText(conversation.session_id),
 | 42 | 中断横幅 | ✓ 真实会话 `c63ce4d3-…`（run/interrupted 无 step_id）显示「上次运行在首个步骤开始前中断（原因：process_restart）」 |
 | 43 | 浮标 ↓ 最新 | ✓ 见第 19 项（真实 wheel 上滚 → 浮标 → 点回底） |
 | 未及 | 审批卡（#37） | ⚠ 本 UI 不可达（硬编码 `auto_approve: true`）且无测试——见 OBS-006 |
+| 73 ★ | `复制 Trace ID` / `打开 Trace` | ✓ 两条**确实渲染且工作**（初版误判为「不可达」，已订正，见 OBS-010）。实测会话 `f181c5ce`：`复制 Trace ID` 经拦截 `clipboard.writeText` 拿到实参 `2482fcee…43b1`（与 seq 33 `run/failed` 的 `trace_id` 逐字一致）；`打开 Trace` 经拦截 `window.open` 拿到 `https://jp.cloud.langfuse.com/project/…/traces/2482fcee…`、`_blank`。⚠ 用例的可达条件：会话的 run 终态事件带 `trace_id`/`trace_url`（取自 `conversation.*`，**不依赖会话列表**） |
 
 **第 19 项的真机证据（2026-09-11，dev server + 真实后端）**：会话内提交 2500 行生成任务，流式中用真实 wheel 事件上滚并对 `scrollTop` 打点（临时埋点，验证后已移除）——
 
@@ -471,8 +515,14 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 | 64 ★ | 发送禁用态 / 停止按钮 | ✓ 空内容禁用发送；有内容启用；run 中 `.composer-stop` 在场、发送消失、三个控制选择器禁用；点停止 → 脉冲 **「已取消」**（中性通道，非红色失败）、按钮复位、无横幅 |
 | 65 ★ | API 身份令牌弹窗 | ✓ 打开：密码输入框（placeholder「粘贴 HS256 token（eyJ…）」）+ 说明文案（localStorage `ahi.apiToken`、claims 要求）；**Esc 真实按键可关**（合成 keydown 关不掉——同一类合成事件假象） |
 | 66 ★ | 请求量核对 | ✓ 单次全新加载每端点恰好 2 次（React StrictMode dev 双调用，已知）；静置 3.5s 零增长——**无请求风暴** |
+| 67 ★ | 中断横幅（复验，真实会话 `f181c5ce`） | ✓ 横幅「上次运行在**第 3 步**中断（原因：process_restart）」+ 文档内「第 3 步中断」标记；同一会话的工具卡另显示「工具 'bash' 执行超时（上限 10.0 秒）…可稍后重试」——**独立复现 OBS-009** |
+| 68 ★ | 恢复会话按钮的**诚实自隐** | ✓ 两个含 `run/interrupted` 的真实会话（`f181c5ce` 末态 `run/failed`、`c63ce4d3` 末态 `run/completed`）都**不显示**恢复入口——因为它们的 run 都已有终态，确实**没有东西可修**。另：我本轮的「停止」实验（会话 `19c76d4b`）留下的是 `run/failed(reason=cancelled)` 干净终态，因此也不出现恢复入口。**这是正确行为不是缺按钮**：入口只在真有 dangling（tool/call 缺 result、或 run 缺终态）时才出现 |
+| 69 ★ | 命令面板本地化（BUG-007 修复后复验） | ✓ 静态命令 label 全部中文（该会话 11 条俱在）；中文查询「主题/复制/密度/紧凑」命中，英文 `toggle theme`/`Copy Run`/`compact` 经 keywords 仍命中 |
+| 70 ★ | Workspace Chat/Split/Preview（深挖，非仅 aria） | ✓ Chat **不渲染**占位行（零垂直占用，与源码注释一致）；Split/Preview 渲染 `.workspace-scaffold`，带「未来升级点」标签 + 各自说明文案（Split=另一视图 diff/预览，Preview=渲染 Artifact）——**是标注清楚的预留位，不是假面板**；三者切换间 Chat 主阅读面与 4 轮内容始终在位，切回 Chat 占位行消失 |
+| 71 ★ | Timeline 行直接点击 → StepDetail | ✓ 点 `3 model/completed qwen3.8-flash · 2170 tok` 行 → Inspector 切到该事件（出现「返回 Timeline」）；点返回 → 复位到 Run Inspector（34 行 Timeline 全部可点） |
+| 72 ★ | 命令面板**逐条执行**（不只搜到） | ✓ `切换 Run Inspector` → `app-regions` 加 `inspector-closed`；`切换主题` light→dark；`切换到紧凑` detailed→compact；`跳到最新事件` → Inspector 切到最后一条事件（`run/failed`）并出现「返回 Timeline」；`聚焦输入框` → 焦点落到 `textarea#composer-input`（与命令实现里的 id 逐字一致）。执行后已把主题/密度还原 |
 
-**本轮未复验（依赖特定现场，沿用上轮结论）**：审批卡（OBS-006：UI 不可达）、恢复会话按钮（上轮以真实 dangling 会话验证）、中断横幅（上轮以真实 `c63ce4d3` 验证）、浮标↓最新（上轮埋点验证）。
+**本轮未复验（依赖特定现场，沿用上轮结论）**：审批卡（OBS-006：UI 不可达）、浮标↓最新（上轮埋点验证）、恢复会话按钮的**正向**点击（上轮以真实 dangling 会话验证过成功反馈「已恢复：回填 1 条工具结果」；本轮语料里两个 interrupted 会话都无 dangling，故入口按设计不出现——见第 68 行）。
 
 **合成事件假象清单（本轮新增，避免下次误报）**：Radix 系浮层/弹窗的外部点击关闭与 Esc 关闭依赖**真实** `pointerdown`/`keydown`；`element.click()` 与 `dispatchEvent(new KeyboardEvent(...))` 都不触发，会造成「浮层关不掉 / 多个同时开着 / Esc 无效」的假象。复测一律用真实指针序列或 CDP 按键。
 
@@ -524,3 +574,20 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 `NotFoundError` 三个调用点：历史 effect 已处理；`doTruncatedRebuild` 走重连自愈；`useChildConversation` 仅读 `.message`（文案更友好，无回归）。`tsconfig` 目标 `es2023` → `class extends Error` 原型链完好，`toBeInstanceOf` 可靠。`maxEventSeq` 返回 `-1` 不会与 `hasUnterminatedRun` 同时成立（`run/started` 必带数字 seq），首帧不会被误判为 gap。`resumeAttemptedRef` 只按「本页会话内选中过的不同会话数」增长，刷新即清，非泄漏。§8 Scope Lock 与 §15 CSS 规则均未被触碰。`test-results/` 已被 `web/.gitignore` 忽略。
 
 **第二轮后的门禁（实跑）**：tsc ✓ · vitest **487 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **96 passed** · vite build ✓。
+
+---
+
+## /code-review（BUG-007 修复，2026-09-11）——4 findings 全是 P3，无 P0/P1/P2
+
+审阅者用**计算**而非目测验证了两条承重主张：①「label 命中的打分逐字不变」——穷举 3 字符以内全部 query × 11 条命令（3072 组），**0 个既有命中失分或改分**；②「英文仍可搜」——`toggle theme` / `compact` 在移除 keywords 后断言即失败，说明新测试真的守住了这个特性。e2e 的 BUG-004 回归锁（复制的是 **run** id 而非 session id）未被削弱。
+
+| # | 级别 | 内容 | 处置 |
+| --- | --- | --- | --- |
+| 1 | P3 | 注释/文档把排序保证说过头了：「keywords 命中因下标靠后天然排在后面，不会抢位次」**跨命令不成立**——query `to` 下 `切换主题`（keyword `toggle theme`，37 分）会压过 `切换 Run Inspector`（label `Inspector`，21 分） | **已修**：订正为「同一命令内 label 优先；跨命令仍按分数比大小，keywords 命中可能排到前面，这是可接受的」。穷举验证结论写进注释（零既有命中改分） |
+| 2 | P3 | 密度命令的 keywords 末尾重复了一次档位名（`switch to ${d} density 密度 ${d}`）；实测 1780 个 3 字符 query **只靠这层重复**命中（如 `aac`/`aca`），纯增噪而正当匹配一次都不受益 | **已修**：去掉尾部重复 token → `switch to ${d} density 密度`（`compact` 仍可由 `switch to compact` 命中） |
+| 3 | P3 | 主题命令的**显示** hint 仍是英文（`→ Light` / `→ Dark`），与刚改中文的 label 同属「半本地化」 | **已修**：改 `→ 亮色` / `→ 暗色`（与已加的 keywords 同词）。判为 BUG-007 同一类而非范围外——它是面板里的显示文本；`Langfuse` 这类专有名词保留英文 |
+| 4 | P3 | 问题登记簿自身的标题/清点不准：标题说「50 条命令 label 全是英文」（事件项 label 是后端事件类型，故意保留），正文说 11 条而清点只列 9 条 | **已修**：标题收窄为「11 条静态命令」；清点补齐 11 条并标注其中 2 条按契约条件出现（本部署实际渲染 9 条，见 OBS-010） |
+
+**审阅者另附的过程提示**：审阅期间工作区有并发写入（我在同期更新 tracker/提示词文档，纯文档）。已在提交前重核 diff。
+
+**门禁（修复后）**：tsc ✓ · vitest **490 passed** · oxlint **35w 0e** · playwright **96 passed** · vite build ✓。

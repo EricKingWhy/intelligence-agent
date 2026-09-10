@@ -442,10 +442,13 @@ export default function App() {
   }, []);
 
   const paletteItems = useMemo<CommandItem[]>(() => {
+    // label 用中文（与工具栏/空态/提示文案一致——此前只有 label 是英文、hint 已是
+    // 中文，属本地化做了一半），英文说法放进 keywords 继续可搜（BUG-007）。
     const items: CommandItem[] = [
       {
         id: 'toggle-inspector',
-        label: 'Toggle Run Inspector',
+        label: '切换 Run Inspector',
+        keywords: 'toggle run inspector 右栏',
         hint: '右栏',
         group: 'actions',
         run: () => {
@@ -455,7 +458,8 @@ export default function App() {
       },
       {
         id: 'jump-latest',
-        label: 'Jump to Latest Event',
+        label: '跳到最新事件',
+        keywords: 'jump to latest event 定位',
         hint: '定位',
         group: 'actions',
         run: () => {
@@ -471,7 +475,8 @@ export default function App() {
       ...(conversation?.run_id
         ? [{
             id: 'copy-run-id',
-            label: 'Copy Run ID',
+            label: '复制 Run ID',
+            keywords: 'copy run id',
             hint: conversation.run_id.slice(0, 12),
             group: 'actions' as const,
             run: () => copyText(conversation.run_id!),
@@ -479,7 +484,8 @@ export default function App() {
         : []),
       {
         id: 'copy-trace-id',
-        label: 'Copy Trace ID',
+        label: '复制 Trace ID',
+        keywords: 'copy trace id langfuse',
         hint: conversation?.trace_id ? 'Langfuse' : undefined,
         group: 'actions',
         run: () => {
@@ -488,7 +494,8 @@ export default function App() {
       },
       {
         id: 'open-trace',
-        label: 'Open Trace',
+        label: '打开 Trace',
+        keywords: 'open trace langfuse',
         hint: conversation?.trace_url ? 'Langfuse ↗' : undefined,
         group: 'actions',
         run: () => {
@@ -497,14 +504,17 @@ export default function App() {
       },
       {
         id: 'toggle-theme',
-        label: 'Toggle Theme',
-        hint: theme === 'dark' ? '→ Light' : '→ Dark',
+        label: '切换主题',
+        keywords: 'toggle theme dark light 暗色 亮色',
+        // hint 也走中文：它是**显示文本**，langfuse 那种专有名词才保留英文（BUG-007 同一类）。
+        hint: theme === 'dark' ? '→ 亮色' : '→ 暗色',
         group: 'actions',
         run: toggleTheme,
       },
       {
         id: 'focus-composer',
-        label: 'Focus Composer',
+        label: '聚焦输入框',
+        keywords: 'focus composer',
         hint: '输入框',
         group: 'actions',
         run: () => document.getElementById('composer-input')?.focus(),
@@ -523,10 +533,15 @@ export default function App() {
     } else {
       items.splice(items.findIndex((c) => c.id === 'open-trace'), 1);
     }
+    // 密度命令的 label 与工具栏同名（紧凑/均衡/详细/Raw），英文档位名进 keywords。
+    const DENSITY_CN = { compact: '紧凑', balanced: '均衡', detailed: '详细', raw: 'Raw' } as const;
     for (const d of ['compact', 'balanced', 'detailed', 'raw'] as const) {
       items.push({
         id: `density-${d}`,
-        label: `Switch to ${d[0].toUpperCase()}${d.slice(1)}`,
+        label: `切换到${DENSITY_CN[d]}`,
+        // 末尾不再重复一次 ${d}：实测「重复的尾 token」会让大量无意义的 3 字符
+        // query（如 aac/aca）只靠这层重复命中，纯增噪，而正当匹配一次都不受益。
+        keywords: `switch to ${d} density 密度`,
         hint: d === density ? '当前' : undefined,
         group: 'density',
         run: () => changeDensity(d),

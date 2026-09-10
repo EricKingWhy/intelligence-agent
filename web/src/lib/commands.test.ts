@@ -59,6 +59,30 @@ describe('filterCommands — 过滤排序', () => {
   });
 });
 
+describe('filterCommands — 中文 label + 英文 keywords 双通道（BUG-007）', () => {
+  // 真实形状：label 与工具栏一致用中文，英文说法放 keywords 继续可搜。
+  const items = [
+    { ...item('theme', '切换主题'), keywords: 'toggle theme dark light' },
+    { ...item('density', '切换到紧凑'), keywords: 'switch to compact density' },
+  ];
+
+  it('中文查询命中中文 label', () => {
+    expect(filterCommands(items, '主题').map((x) => x.id)).toEqual(['theme']);
+    expect(filterCommands(items, '紧凑').map((x) => x.id)).toEqual(['density']);
+  });
+
+  it('英文查询仍经 keywords 命中（本地化不作废老用户的肌肉记忆）', () => {
+    expect(filterCommands(items, 'toggle theme').map((x) => x.id)).toEqual(['theme']);
+    expect(filterCommands(items, 'compact').map((x) => x.id)).toEqual(['density']);
+  });
+
+  it('无 keywords 的条目照旧只按 label 匹配（不回归）', () => {
+    const bare = [item('a', '复制 Run ID')];
+    expect(filterCommands(bare, 'Run').map((x) => x.id)).toEqual(['a']);
+    expect(filterCommands(bare, 'copy run')).toEqual([]);
+  });
+});
+
 describe('isPaletteShortcut — Ctrl/Cmd + K', () => {
   it('Ctrl+K（Win/Linux）与 Meta+K（macOS）命中', () => {
     expect(isPaletteShortcut({ key: 'k', ctrlKey: true, metaKey: false })).toBe(true);

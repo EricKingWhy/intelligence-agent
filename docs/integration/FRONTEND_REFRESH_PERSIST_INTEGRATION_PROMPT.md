@@ -3,7 +3,7 @@
 > **分支**：`feat/frontend` @ `D:\intelligence-agent-frontend`
 > **起始 commit**：`cf8f3a7`
 > **本批 commit**：`138b056`（代码 + 文档 + 测试同批）
-> **门禁**：tsc ✓ · vitest **487 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线持平）· playwright **96 passed** · vite build ✓
+> **门禁**：tsc ✓ · vitest **490 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线持平）· playwright **96 passed** · vite build ✓
 > **禁止推送远程**：本分支只做本地 commit，`git push` / merge 由集成 AI 执行（AGENTS.md §13.2 / §14.4）
 
 ---
@@ -67,7 +67,7 @@
 
 | 项 | 级别 | 说明 |
 | --- | --- | --- |
-| **BUG-007** 命令面板 label 全英文 | P2 | 面板 50 条命令的 `label`/`hint` 全英文（`Toggle Theme` / `Copy Run ID`…），中文查询（「主题」「复制」）**零命中**；过滤逻辑本身正确（fuzzy 子序列，已实测）。**只登记未改**——文案语言属产品决定，且超出 BUG-005/006 范围（§8）。建议改 `lib/commands.ts` 一处，`i-keyboard.spec.ts` 有回归锁 |
+| ~~BUG-007 命令面板 label 全英文~~ | P2 | **已修（本批追加）**：11 条静态命令 label 改中文（与工具栏口径一致），英文原词进新增的 `keywords` 别名继续可搜。判定为缺陷而非产品决定——面板 `hint` 早就是中文（`右栏`/`定位`/`输入框`），属本地化做了一半。回归锁：`i-keyboard.spec.ts` 改为英文查询+中文条目，`commands.test.ts` +3 例 |
 | 零帧回落全静默 | P3 | 若后端某天在 run 活着时返回 200+空 body（契约破坏），用户会盯着半截会话且无信号。按**已实测契约**（空闲会话 → 立即 200+空 body；活着的 run 不会零帧 EOF）这不构成缺陷；加延迟复查会在回调里引入新重入面，收益不抵复杂度。风险已登记 |
 | OBS-008 `glm-5.3-flash` model/failed | 后端 | 工具成功后 `model/failed: "model call failed: RuntimeError"` → `run/failed`。**非前端**，与既有 OBS-001 同族（同一模型）。建议后端把原始异常落进日志/JSONL |
 | OBS-009 bash 工具 10s 上限 | 后端 | `sleep 10` 贴边越界 → `TIMEOUT`，且 `retryable:false`。前端渲染忠实（工具失败 ≠ run 失败，模型自行改用 `sleep 1` 后收口成功）。建议后端确认超时上限与 `retryable` 语义 |
@@ -108,7 +108,7 @@
 
 **第二轮额外确认（作为「无 P0/P1」的依据）**：`NotFoundError` 三个调用点①历史 effect 已处理②`doTruncatedRebuild` 走重连自愈③`useChildConversation` 仅读 `.message`（文案更友好，无回归）；`tsconfig` 目标 `es2023` 故 `class extends Error` 原型链完好，`toBeInstanceOf` 可靠；`maxEventSeq` 返回 `-1` 不会与 `hasUnterminatedRun` 同时成立（`run/started` 必带数字 seq），首帧不会被误判为 gap；`resumeAttemptedRef` 只按「本页会话内选中过的不同会话数」增长，刷新即清，非泄漏；§8 Scope Lock 与 §15 CSS 规则均未被触碰。
 
-**第二轮后的门禁**：tsc ✓ · vitest **487 passed**（+3 例 `forgetResumeAttempt`）· oxlint **35w 0e** · playwright **96 passed**（+2 例写入路径）· vite build ✓。
+**第二轮后的门禁**：tsc ✓ · vitest **490 passed**· oxlint **35w 0e** · playwright **96 passed**（+2 例写入路径）· vite build ✓。
 
 ---
 

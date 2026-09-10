@@ -23,11 +23,11 @@
 | --- | --- |
 | 起始 commit | `cf8f3a7` |
 | 本批 commit | `138b056`（+ 后续小提交回填本 hash） |
-| 门禁 | tsc ✓ / vitest **487 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **96 passed**（86 → +10）/ vite build ✓ |
+| 门禁 | tsc ✓ / vitest **490 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **96 passed**（86 → +10）/ vite build ✓ |
 | 交付 | BUG-005 刷新恢复选中会话；BUG-006 流式中刷新 → `?after_seq=` 接回流继续收事件；新增 `lib/sessionRestore.ts`(+test)、`api.ts` `NotFoundError`、`e2e/k-refresh-restore.spec.ts` |
 | 真机验证 | BUG-006 **决定性取证**：真实后端 run 在途时 F5 → `GET /stream?after_seq=2 [200]`，零交互下事件 3 → 54 条直到 `run/completed`；与后端真值 54 条 / 0 重复 / 0 空洞。BUG-005 刷新前后正文指纹 `-271347586` / 4102 字符逐项一致 |
 | 巡检 | 第二轮 66 行逐按钮表（密度/主题/Inspector 收起/Workspace/四选择器/五 Tab/命令面板/委派节点/分叉/令牌弹窗/preset chip/发送禁用/停止/请求量）全部通过 |
-| 新发现 | BUG-007（命令面板 50 条 label 全英文，中文查询零命中）——**只登记不改**（产品文案决定，§8）；OBS-008（`glm-5.3-flash` `model/failed: RuntimeError`）、OBS-009（bash 工具 10s 超时且 `retryable:false`）均为**后端/provider**问题，前端渲染忠实 |
+| 新发现 | BUG-007（命令面板 label 全英文，中文查询零命中）——**已修复**（label 本地化 + `keywords` 别名，英文仍可搜）；OBS-008（`glm-5.3-flash` `model/failed: RuntimeError`）、OBS-009（bash 工具 10s 超时且 `retryable:false`）均为**后端/provider**问题，前端渲染忠实 |
 | 审查 | 第一轮 6 findings（3×P2 + 3×P3）：4 修 + 2 说明理由不改；第二轮见集成提示词 |
 | 关单 | 不适用（缺陷修复批次，非 ticket 交付） |
 
