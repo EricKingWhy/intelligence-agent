@@ -224,7 +224,7 @@ merge 后追加。这是本批的协议偏离，记录在案。
 | `138b056` | BUG-005 刷新恢复选中会话 + BUG-006 在途 run 接回流（`after_seq=N` 重放+续流） |
 | `21fb004` | 文档回填 138b056 |
 | `03d6a70` | BUG-007 命令面板本地化 + 可搜索英文别名 |
-| （本批待提交） | OBS-007 中断脉冲第四态 + 清 `run_interrupted` 标记（含审查 P3 处置） |
+| `b4181ad` | OBS-007 中断脉冲第四态 + 清 `run_interrupted` 标记（含审查 P3 处置） |
 
 **已修**：BUG-005、BUG-006、BUG-007、OBS-007。
 **判定为后端/非前端**（仅记录，未改）：OBS-008（`glm-5.3-flash` 工具成功后 `model/failed`）、OBS-009（bash 工具 10s 超时上限与 `retryable` 语义）、OBS-010（`GET /api/sessions` 的 `trace_id` 恒为 `null`，但会话详情事件里的 `trace_id` 正常，故 UI 的 Trace 命令实际可用——**原登记曾误判为「命令不出现」，已订正**）。

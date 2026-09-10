@@ -213,12 +213,14 @@ RUN_INTERRUPTED: 'run/interrupted',  // T8 #138
 
 ## 6. 门禁基线
 
+**基线日期：2026-09-11（真机验收批次 `b4181ad` 实跑；下方数字随批次推进，比对时以最新一次实跑为准）**
+
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
 | Type check | `npx tsc -b` | exit 0 |
-| 单元测试 | `npx vitest run` | 27 files / 408 tests passed |
-| Lint | `npx oxlint` | 0 errors / 35 warnings（全部既有） |
-| e2e | `npx playwright test --workers=2` | 46 passed |
+| 单元测试 | `npx vitest run` | 28 files / 494 tests passed |
+| Lint | `npx oxlint` | 0 errors / 35 warnings（全部既有，**基线值：不得升高**） |
+| e2e | `npx playwright test --workers=2` | 96 passed |
 | 生产构建 | `npx vite build` | ✓ built |
 
 ---
@@ -229,6 +231,6 @@ RUN_INTERRUPTED: 'run/interrupted',  // T8 #138
 2. **`web/src/generated/event-types.ts` 是后端生成物** — 不要手动改，后端 `scripts/gen_event_types.py` 重新生成后会同步
 3. **AGENTS.md §16 SDD 工作流协议** — 本次新增的防指令漂移机制，请勿删除
 4. **工作区有未跟踪文件** — `test-results/` 和两份历史 untracked 文档，均非本批产物
-5. **T9 是唯一剩余工作** — 投影和类型都做完了，只差 `TurnView` 渲染「第 N 轮」标签
+5. ~~**T9 是唯一剩余工作**~~ **（已过时，2026-09-11 勘误）** — T9 轮次标签早已完成（commit `cddea36`，页面真实渲染「第 1 轮」~「第 6 轮」，见本手册 §1/§2）。T7/T8/T9 全部完成，勿再重复实现。当前剩余项见 `docs/SDD_TICKET_TRACKER.md` §3/§4 与 `docs/FRONTEND_ISSUES_LOG.md`
 6. **SDD 流程** — 每个 ticket 都走 `/implement` → `/code-review` → 修复 → 再 `/code-review` 直到零 finding
 7. **不推送远程** — 本分支全部为本地 commit，push 归集成 AI 执行
