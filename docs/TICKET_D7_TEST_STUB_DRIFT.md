@@ -1,10 +1,10 @@
 # Ticket: 修复 `tests/evaluation/test_smoke.py` 的 Settings stub 字段漂移（Phase 15 D7 欠账）
 
-> **状态**：✅ 已修复并验证（代码改动待提交）
+> **状态**：✅ 已修复并验证 · commit `f8e0ba7`（feat/backend）
 > **类型**：Bug / 测试欠账（pre-existing，非本轮 refactor 引入）
 > **优先级**：P2（测试套仅在 full-suite 顺序下红，隔离跑绿——但会污染全量基线，且掩盖真实回归）
 > **来源**：2026-09-10 对架构深化（候选 1/2/3）集成产物的独立验证
-> **关联 commit**：根因引入于 `dbb48a5`（Phase 15 D7 DEFER 批）· 修复于本轮
+> **关联 commit**：根因引入于 `dbb48a5`（Phase 15 D7 DEFER 批）· 修复于 `f8e0ba7`
 
 ---
 
@@ -73,6 +73,21 @@ FAILED tests/evaluation/test_smoke.py::test_smoke_builds_runtime_with_fallback_c
 
 * `tests/evaluation/test_smoke.py:83-88`（`test_smoke_pipeline_with_injected_fake_runtime`）
 * `tests/evaluation/test_smoke.py:129-139`（`test_smoke_builds_runtime_with_fallback_config`）
+
+### 同批派生的 CRLF 处置（附带）
+
+提交 `f8e0ba7` 时 git 警告新增的 `scripts/run_tests_clean.sh` 会被转 CRLF。
+仓库原无 `.gitattributes`，`.sh` 下次检出将变 CRLF → Git Bash 执行报
+`bad interpreter: ...^M`。故同批补最小 `.gitattributes`：
+
+```
+*.sh  text eol=lf
+*.ps1 text eol=crlf
+```
+
+验证：`git check-attr eol -- scripts/run_tests_clean.sh` → `lf`；
+`dev.sh` 亦为 `lf`；`.ps1` 全部位于 `.specify/scripts/powershell/`（CRLF 正确）。
+加入后 `git status` 零改动——**不**执行 `git add --renormalize`（入库本就 LF，无必要）。
 
 ## Acceptance Criteria
 
