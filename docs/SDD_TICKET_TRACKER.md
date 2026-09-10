@@ -22,7 +22,7 @@
 | 项 | 值 |
 | --- | --- |
 | 起始 commit | `8469a34`（另一 Agent 的 BUG-001 修复） |
-| 本批 commit | `<COMMIT_SHA>` |
+| 本批 commit | `32356f4` |
 | 门禁 | tsc ✓ / vitest **466 passed**（27 文件）/ oxlint **35w 0e** / playwright **86 passed** / vite build ✓ |
 | 交付 | 交接手册 A/B/C/D；额外 BUG-004（Copy Run ID）+ 分叉 30s 超时反馈 |
 | 真机验证 | A/B/D 三项在真实浏览器 + 真实后端复验（回执见 `FRONTEND_ISSUES_LOG.md` OBS-003/OBS-004）；43 行逐按钮巡检表 |
