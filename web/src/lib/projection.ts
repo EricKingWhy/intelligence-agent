@@ -212,6 +212,11 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
 
 function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   state.run_status = 'running';
+  // OBS-007：新 run 开始 = 用户已经接着往下跑了，「上次运行…中断」这条提示随之
+  // 过期——不清掉的话它会挂到会话生命结束，与后续 run 的真实结局（比如绿色
+  // 「已完成」）同屏打架。清空后 `run_interrupted` 的语义收窄为「**最近一个** run
+  // 以中断收口」，deriveRunPulse 也就据此给出中性的「已中断」而不是「已完成」。
+  state.run_interrupted = null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，

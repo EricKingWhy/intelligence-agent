@@ -10,7 +10,7 @@
  * that themselves come from events — no fabrication (zero-fake-metrics rule).
  */
 
-import { Activity, CircleDashed, Loader2, SquareCheckBig, SquareX } from 'lucide-react';
+import { Activity, CircleDashed, CircleSlash, Loader2, SquareCheckBig, SquareX } from 'lucide-react';
 import { EventType, type AgentEvent, type ConversationState } from '../types';
 import { formatDuration } from './format';
 
@@ -34,6 +34,7 @@ export type RunPulseState =
   | 'thinking' // run active, model segment streaming, no tools yet
   | 'tool' // run active, latest tool call still running
   | 'completed'
+  | 'interrupted' // 最近一个 run 被进程重启打断（run/interrupted）——终态但非完成
   | 'cancelled' // run/failed.data.reason === 'cancelled'（客户端断连，中断 ≠ 错误）
   | 'failed';
 
@@ -58,6 +59,8 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   thinking: { label: '思考中', className: 'pulse-thinking', Icon: Loader2 },
   tool: { label: '执行工具', className: 'pulse-tool', Icon: Loader2 },
   completed: { label: '已完成', className: 'pulse-completed', Icon: SquareCheckBig },
+  // 已中断：进程重启打断（run/interrupted）——中性色，既不是成功也不是失败
+  interrupted: { label: '已中断', className: 'pulse-interrupted', Icon: CircleSlash },
   // 已取消：客户端断连（run/failed.reason=cancelled，da394a9）——中性色，非红色报错
   cancelled: { label: '已取消', className: 'pulse-cancelled', Icon: SquareX },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
@@ -74,6 +77,22 @@ export function deriveRunPulse(
   if (!conversation) {
     const r = PULSE_TABLE.idle;
     return { state: 'idle', label: r.label, className: r.className, Icon: r.Icon };
+  }
+
+  // 中断优先于 run_status（BUG/OBS-007）——`projectRunInterrupted` 把 run_status
+  // 收成 'completed'（冻结决策 69：中断 ≠ 失败，而 finalizeRun 只有 completed/
+  // failed 两档），于是被进程重启打断、且之后**没有再跑过**的会话会挂着绿色对勾
+  // 说「已完成」，同一屏却有「上次运行…中断」横幅——自相矛盾。
+  // `run_interrupted` 的语义是「**最近一个** run 以中断收口」（新 run 开始时由
+  // projectRunStarted 清空），所以它比 run_status='completed' 更能说明真相。
+  //
+  // 连带 `run_status === 'completed'`：后端不变量保证这两者同时成立（中断只与
+  // completed 共存），所以该条件是恒真的**显式化**，不是新分支。写成恒真条件是为了
+  // 破坏不变量时（更晚的 run/failed|已取消 之后标记仍在）退化到「更晚的终态赢」，
+  // 而不是让过期的中断标记把一次失败粉饰成中性色。
+  if (conversation.run_interrupted && conversation.run_status === 'completed') {
+    const r = PULSE_TABLE.interrupted;
+    return { state: 'interrupted', label: r.label, className: r.className, Icon: r.Icon };
   }
 
   switch (conversation.run_status) {
@@ -134,6 +153,8 @@ function coarsenPulseState(state: RunPulseState): string {
       return '运行中';
     case 'completed':
       return '已完成';
+    case 'interrupted':
+      return '已中断';
     case 'cancelled':
       return '已取消';
     case 'failed':

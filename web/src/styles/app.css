@@ -206,6 +206,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: var(--color-hover);
   border-color: var(--border-subtle);
 }
+/* 中断 ≠ 完成也 ≠ 失败：进程重启打断（OBS-007），同中性色域，无动画。
+   复用既有语义 token，不新增 :root 变量（§15 无需补亮色覆盖）。 */
+.run-pulse.pulse-interrupted {
+  color: var(--text-secondary);
+  background: var(--color-hover);
+  border-color: var(--border-subtle);
+}
 
 /* ── Buttons ── */
 .btn-primary {

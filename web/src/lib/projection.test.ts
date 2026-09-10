@@ -943,6 +943,20 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(summarizeEvent(ev({ type: EventType.RUN_INTERRUPTED, data: {}, step_id: 3 }))).toBe('第 3 步中断');
   });
 
+  it('OBS-007 RUN_STARTED 清空中断标记：提示不跨 run 存活', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({
+      type: EventType.RUN_INTERRUPTED,
+      data: { interrupted_seq: 42, reason: 'process_restart' },
+      step_id: 3,
+    }));
+    expect(s.run_interrupted).not.toBeNull();
+    // 用户接着往下跑：新 run 一开始，「上次运行…中断」这条提示就过期了
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    expect(s.run_interrupted).toBeNull();
+    expect(s.run_status).toBe('running');
+  });
+
   it('T9 #139 RUN_STARTED：turn_index 落到当轮 turn（per-turn 事实）', () => {
     let s = applyEvent(initConversation('s'), ev({
       type: EventType.USER_MESSAGE,

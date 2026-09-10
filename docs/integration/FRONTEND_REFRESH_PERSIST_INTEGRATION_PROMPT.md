@@ -16,6 +16,7 @@
 | --- | --- | --- | --- |
 | **BUG-005** 刷新丢失选中会话 | F5 后回到空态：8 轮 → 0 轮、正文 4102 字符 → 0；会话列表 67 条还在，只是没人记得用户选的是哪条 | `useSession` 的 `mode` 初始态恒为 `idle`，会话选择**没有任何持久化**（全仓只有 theme / density / apiToken 三处 localStorage） | 新增 `lib/sessionRestore.ts`：`ahi.selectedSession` 键 + `readStoredSessionId` / `writeStoredSessionId`（storage 不可用静默降级）。`mode` 改为**惰性初始化**；持久化挂在 `mode` 上（`idle` ⇒ 删键） |
 | **BUG-006** 流式中刷新后停在假快照 | run 仍在服务端跑（ADR-0016 detached-run），刷新后的 UI 只显示一次历史快照，后续事件**再也进不来**，看起来像已完成 | `viewing` 分支只 `GET /events` 取一次就收工，没有任何「接回实时流」的通路 | 历史装载后若 `hasUnterminatedRun(events)` → `resumeLiveStream(sid, maxEventSeq(events))` → `GET /stream?after_seq=N`（后端 T4 #97 的重放+续流契约），不重不漏 |
+| **OBS-007** 中断的会话谎报绿色「已完成」+ 过期中断横幅不消 | 会话 `c63ce4d3` 同一屏既有绿色对勾「已完成 · 2,583 tok」，又有「上次运行在首个步骤开始前中断」横幅——两句都在说「最近一次运行」的结局，却互相矛盾 | ① `projectRunStarted` 从不清 `run_interrupted`，该标记一旦置上就挂到会话生命结束（横幅只看它，于是永久显示）；② `projectRunInterrupted` 走 `finalizeRun(state, 'completed')`（冻结决策 69：中断 ≠ 失败，而 `finalizeRun` 只有两档）→ 脉冲报「已完成」 | 见 §8：新增第四态脉冲 `interrupted`（`已中断` / 中性色 / `CircleSlash`）+ 新 run 开始即清标记。**两处必须同改**，只改一处会比原来更错 |
 
 ### 文件清单
 
@@ -27,6 +28,12 @@
 | `web/src/lib/api.test.ts` | +3 例（404/500/200 三态归类） |
 | `web/src/hooks/useSession.ts` | 主改动：惰性 `mode`、持久化 effect、`resumeLiveStream`、`attachLiveStream` 的 `opts.resume` + 零帧兜底、`selectSession` 的重新武装 |
 | `web/e2e/k-refresh-restore.spec.ts` | **新增** 5 用例（× 2 视口 = 10 例） |
+| `web/src/lib/runState.ts` | OBS-007：新增第四态 `interrupted`（`PULSE_TABLE` 行 + `deriveRunPulse` 的行前返回，连带恒真守卫 `run_status === 'completed'`）+ `coarsenPulseState` 同步映射 |
+| `web/src/lib/runState.test.ts` | OBS-007：+3 例（含 Inspector 「已中断」标签断言、不变量被破坏时「更晚终态赢」的退化语义） |
+| `web/src/lib/projection.ts` | OBS-007：`projectRunStarted` 清空 `run_interrupted`（语义收窄为「**最近一个** run 以中断收口」） |
+| `web/src/lib/projection.test.ts` | OBS-007：+1 例（新 run 开始即清标记） |
+| `web/src/styles/app.css` | OBS-007：`.run-pulse.pulse-interrupted`——复用既有中性 token（`--text-secondary` / `--color-hover` / `--border-subtle`），**未新增 `:root` 变量，§15 不涉及** |
+| `web/src/lib/commands.ts` + `web/src/App.tsx` | BUG-007（详见 §4）：`CommandItem.keywords` 别名 + 11 条静态命令 label 中文化 |
 | `docs/FRONTEND_ISSUES_LOG.md` | BUG-005/006/007 + OBS-008/009 + 第二轮 66 行巡检表 + 审查处置 |
 | `docs/SDD_TICKET_TRACKER.md` | 本批进度 |
 
@@ -128,3 +135,44 @@ git -C D:/intelligence-agent merge feat/frontend      # 需用户批准
 2. 提交一个 ≥20s 的任务 → 流式中 **F5** → 应看到「思考中/执行工具」继续前进，直到终态；**不应**出现「连接中断，正在重连…」或停在半截。
 
 `docs/PHASE_STATUS.md` 按本分支协议未改（前端进度记 `docs/SDD_TICKET_TRACKER.md`），merge 后由集成 AI 追加一条。
+
+---
+
+## 8. 追加批次：OBS-007 中断脉冲 / 过期横幅一致性
+
+### 8.1 为什么必须两处一起改
+
+| 只改一处 | 后果 |
+| --- | --- |
+| 只加第四态「已中断」，不清标记 | 「中断后成功重跑」的会话（如 `c63ce4d3`）永远显示「已中断」——**比修复前更错**（现在至少说「已完成」） |
+| 只清标记，不加第四态 | 「被中断且此后再没跑过」的会话仍谎报绿色「已完成」，与残留的横幅继续打架 |
+
+修复后语义：`run_interrupted` = **最近一个 run 以中断收口**（新 run 开始即清空），因此脉冲行前判断它比 `run_status` 更能说明真相。
+
+### 8.2 真机复验（真实浏览器 + 真实后端）
+
+| 会话 | run 序列 | 修复前 | 修复后 |
+| --- | --- | --- | --- |
+| `c63ce4d3` | 中断 → **完成** | 绿色「已完成」+ 中断横幅（已过期） | 脉冲「已完成 · 2,583 tok」，**横幅消失**；Timeline 仍保留 `运行中断` 行（历史事实不删） |
+| `f181c5ce` | 中断 → **失败** | 「失败」+ 中断横幅（已过期） | 脉冲「失败」，**横幅消失**；Timeline 仍保留「第 3 步中断」 |
+
+两例的**恢复入口不受影响**（`canRecover` 由 `isRecoverableRun(events)` 判定，与标记无关）。
+
+### 8.3 覆盖边界（请勿误读为已目视确认）
+
+「`已中断` 脉冲」这一态在**当前真实语料里不可达**——两个含 `run/interrupted` 的会话都被后续 run 取代了，没有「中断且从未重跑」的真实会话。故该态**仅由单测锁定**（`runState.test.ts` 3 例 + `projection.test.ts` 1 例），未在真机上目视确认。其中两例做**变异验证**：抹掉 `coarsenPulseState` 的中断映射、或去掉 `run_status === 'completed'` 守卫 → 对应断言立刻变红，随后还原。
+
+### 8.4 本批审查结论（第三轮：OBS-007 修复）
+
+**0 个可复现 bug（P0/P1/P2 全无），4 项 P3。** 审阅者独立确认：不存在 `run_status === 'running'` 与 `run_interrupted` 同时为真的可达状态；重放确定（无时间/随机依赖）；`run_interrupted` 全仓无其他消费者；`coarsenPulseState` 穷尽性由编译器保证（实测触发 TS2366）。
+
+| # | 处置 |
+| --- | --- |
+| 1 P3 `coarsenPulseState` 的「已中断」映射无断言 | **已修**：补 `expect(deriveRunSummary(s).label).toBe('已中断')`（与脉冲是两条独立映射）+ 变异验证 |
+| 2 P3 无测试把 `pulse-interrupted` 类名与 CSS 选择器绑起来 | **登记为已知覆盖缺口，不改**：JS/CSS 分界的固有限制，仓库无「测试读 CSS」先例；当前视觉表现不受影响（`.run-pulse` 基类已是同款中性 token） |
+| 3 P3 提前返回同时覆盖 `failed`/`cancelled`，优先级仅靠口头不变量 | **已修（显式化）**：条件补成 `run_interrupted && run_status === 'completed'`——真实数据下恒真，故对全部合法日志行为**逐字节不变**；破坏不变量时退化为「更晚的终态赢」。新增一例锁住该退化语义 |
+| 4 P3 后续发消息 RTT 内短暂显示「已中断」+ 图标风格 | **不改**：瞬时态比修复前的绿色「已完成」更接近真相；图标纯审美，换图标零收益（§9.3） |
+
+### 8.5 门禁（本批最终实跑）
+
+tsc ✓ · vitest **494 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线未变）· playwright **96 passed** · vite build ✓。

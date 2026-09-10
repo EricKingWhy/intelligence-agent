@@ -209,3 +209,25 @@
 本分支按前端协议记在 `docs/SDD_TICKET_TRACKER.md`，**未写 PHASE_STATUS.md**——该文件既有
 条目均为「合入 main 后回填」，故在交接触提示词 §6 提供了建议条目文本，由集成 AI 在
 merge 后追加。这是本批的协议偏离，记录在案。
+
+---
+
+## 4. 真机验收批次（2026-09-11）：逐按钮巡检 + 刷新一致性
+
+用户要求「用真实浏览器把每个功能按钮都点一遍，问题实时写进文档，并检查刷新后会话是否与刷新前一致」。本批不新增 ticket，交付物是**问题登记簿 + 修复 + 回归锁**。
+
+- 登记簿（单一事实源）：`docs/FRONTEND_ISSUES_LOG.md`——含 74 行逐按钮巡检表、BUG-005/006/007、OBS-007～010、前后端归因、三轮 code-review 处置。
+- 交接提示词：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md`（§1 改了什么 / §2 真机取证 / §8 OBS-007）。
+
+| commit | 内容 |
+| --- | --- |
+| `138b056` | BUG-005 刷新恢复选中会话 + BUG-006 在途 run 接回流（`after_seq=N` 重放+续流） |
+| `21fb004` | 文档回填 138b056 |
+| `03d6a70` | BUG-007 命令面板本地化 + 可搜索英文别名 |
+| （本批待提交） | OBS-007 中断脉冲第四态 + 清 `run_interrupted` 标记（含审查 P3 处置） |
+
+**已修**：BUG-005、BUG-006、BUG-007、OBS-007。
+**判定为后端/非前端**（仅记录，未改）：OBS-008（`glm-5.3-flash` 工具成功后 `model/failed`）、OBS-009（bash 工具 10s 超时上限与 `retryable` 语义）、OBS-010（`GET /api/sessions` 的 `trace_id` 恒为 `null`，但会话详情事件里的 `trace_id` 正常，故 UI 的 Trace 命令实际可用——**原登记曾误判为「命令不出现」，已订正**）。
+**已知覆盖缺口**：OBS-006 审批卡不可达（`auto_approve` 硬编码）；`已中断` 脉冲态真实语料不可达（仅单测）；`pulse-interrupted` 类名字符串与 CSS 选择器无测试绑定。
+
+**本批最终门禁（实跑）**：tsc ✓ · vitest **494 passed**（28 文件）· oxlint **35 warnings / 0 errors** · playwright **96 passed**（`--workers=2`）· vite build ✓。

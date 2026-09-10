@@ -398,21 +398,34 @@ run: () => conversation && copyText(conversation.session_id),
 
 ---
 
-### OBS-007 被中断的会话同时显示绿色「已完成」脉冲与「上次运行…中断」横幅【观察项 · 既有行为，未修（§8 范围外）】
+### OBS-007 中断的会话显示绿色「已完成」脉冲 + 过期不消的「上次运行…中断」横幅【P2 · 已修复（本轮）】
 
-**发现时间**：2026-09-11 独立 code-review（Spec 轴，非用户报告）
+**发现时间**：2026-09-11（独立 code-review，Spec 轴）；**本轮真实浏览器复现并修复**
 
-**现象**：`projectRunInterrupted`（`lib/projection.ts`）在写入 `run_interrupted` 之后调用 `finalizeRun(state, 'completed', …)`，于是 `run_status === 'completed'`；`deriveRunPulse` 只看 `run_status` → 渲染 `pulse-completed`（绿色 + `SquareCheckBig` + 文案「已完成」）。同时 `App.tsx` 的 `interrupt-banner` 因 `run_interrupted` 为真而渲染「上次运行在首个步骤开始前中断（原因：process_restart）」。**同一屏同时说「已完成」和「已中断」。**
+**现象（实测复现，会话 `c63ce4d3`）**：同一屏同时出现
+- `run-pulse pulse-completed` + 文案「已完成 · 2,583 tok」（**绿色对勾**）
+- `.interrupt-banner`「上次运行在首个步骤开始前中断（原因：process_restart）」
 
-**为什么当时这么写（可辩护的部分）**：冻结决策 69「interrupted ≠ error」——中断不是失败，所以不能走 `failed`。`finalizeRun` 只有 `completed | failed` 两档，作者取了「非失败」的那一档。
+**真相（查事件后）**：该会话是 `run/started`(seq 2) → `run/interrupted`(seq 3) → **`run/started`(seq 9) → `run/completed`(seq 14)**。也就是说**中断的那次运行早已被后来一次成功的运行取代**——横幅是**过期提示**，而脉冲说的是**最新 run 的真实结局**。两者打架的根因不是脉冲错，而是**横幅不清**。
 
-**为什么仍是问题**：`completed` 在 UI 上的语义是「跑完了」，与横幅文案直接冲突；用户看到绿色对勾会以为任务完成。
+**根因（两处，缺一不可）**：
+1. `projection.ts: projectRunStarted` 只置 `run_status='running'`，**从不复位 `run_interrupted`** → 该标记一旦置上就挂到会话生命结束；`App.tsx:671` 的横幅只看 `run_interrupted && !streaming` → 永久显示。
+2. `projectRunInterrupted` 调 `finalizeRun(state, 'completed', …)`（冻结决策 69：中断 ≠ 失败，而 `finalizeRun` 只有 completed/failed 两档）→ 被中断且**此后再没跑过**的会话，脉冲是绿色「已完成」。
 
-**未修的原因**：`projectRunInterrupted` 与 `PULSE_TABLE` 都不在本次交接手册 A/B/C/D 的范围内，且这是**改动前就存在**的行为（`git diff HEAD -- src/lib/projection.ts` 里本项目只新增了 `firstForkableTurnIndex`），按 `AGENTS.md` §8「Scope 外问题只报告，不顺手修」不在本次动手。
+**修复实现**：
+1. `projectRunStarted` 清空 `state.run_interrupted`——新 run 开始即「上次运行」已被取代，提示随之过期。语义收窄为：**`run_interrupted` = 最近一个 run 以中断收口**。
+2. 新增第四种终态脉冲 `interrupted`：`RunPulseState` + `PULSE_TABLE`（`已中断` / `pulse-interrupted` / `CircleSlash`）+ `coarsenPulseState`（Inspector Overview 同步说「已中断」）+ CSS（复用既有中性语义 token `--text-secondary`/`--color-hover`/`--border-subtle`，**不新增 `:root` 变量，§15 无需补亮色覆盖**）。`deriveRunPulse` **优先看 `run_interrupted`，但连带恒真条件 `run_status === 'completed'`**（详见下方审查第 3 条）——因为 1 已保证该标记只反映最近一个 run，这两者在真实数据里必然同时成立。
+3. 为什么必须两处一起改：只加第四态而不清标记，会让「中断后成功重跑」的会话反而显示「已中断」（比原来更错）；只清标记而不加第四态，被中断且未重跑的会话仍谎报绿色「已完成」。
 
-**建议修法**（留给集成决策）：给 `RunPulseDescriptor` 加第四态 `interrupted`（中性色 + 文案「已中断」），在 `deriveRunPulse` 里优先看 `conversation.run_interrupted`，或把 `finalizeRun` 的状态参数扩成三态。两条路都要同步 `runState.test.ts` 的 `deriveRunPulse` 用例与 `PULSE_TABLE`。
+**验证（真实浏览器 + 真实后端）**：
+| 会话 | run 序列 | 修复前 | 修复后 |
+| --- | --- | --- | --- |
+| `c63ce4d3` | 中断 → **完成** | 绿色「已完成」+ 中断横幅（过期） | 脉冲「已完成」，**横幅消失**；Timeline 仍保留 `运行中断` 那一行（历史事实不删） |
+| `f181c5ce` | 中断 → **失败** | 「失败」+ 中断横幅（过期） | 脉冲「失败」，**横幅消失**；Timeline 仍保留「第 3 步中断」 |
 
-**验证**：`web/src/lib/runState.test.ts` 现有 `deriveRunPulse` 用例覆盖 completed/failed/cancelled/running/idle，不含 interrupted——即本组合无测试锁定。
+两例的**恢复入口都不受影响**（`canRecover` 由 `isRecoverableRun(events)` 判定，与本标记无关；两例会话语料本就没有 dangling，故按设计不出现入口）。
+
+**覆盖边界（诚实说明）**：「`已中断` 脉冲」这一态在**当前真实语料里不可达**——两个含 `run/interrupted` 的会话都被后续 run 取代了，没有「中断且从未重跑」的真实会话。故该态由新增单测锁定（`runState.test.ts` 三例 + `projection.test.ts` 一例），未能在真机上目视确认。三例中两例经**变异验证**：把 `coarsenPulseState` 的中断映射改成「已完成」、或去掉 `run_status === 'completed'` 恒真条件，对应断言立刻变红，随后还原。
 
 ---
 
@@ -470,6 +483,7 @@ run: () => conversation && copyText(conversation.session_id),
 | 43 | 浮标 ↓ 最新 | ✓ 见第 19 项（真实 wheel 上滚 → 浮标 → 点回底） |
 | 未及 | 审批卡（#37） | ⚠ 本 UI 不可达（硬编码 `auto_approve: true`）且无测试——见 OBS-006 |
 | 73 ★ | `复制 Trace ID` / `打开 Trace` | ✓ 两条**确实渲染且工作**（初版误判为「不可达」，已订正，见 OBS-010）。实测会话 `f181c5ce`：`复制 Trace ID` 经拦截 `clipboard.writeText` 拿到实参 `2482fcee…43b1`（与 seq 33 `run/failed` 的 `trace_id` 逐字一致）；`打开 Trace` 经拦截 `window.open` 拿到 `https://jp.cloud.langfuse.com/project/…/traces/2482fcee…`、`_blank`。⚠ 用例的可达条件：会话的 run 终态事件带 `trace_id`/`trace_url`（取自 `conversation.*`，**不依赖会话列表**） |
+| 74 ★ | 中断态脉冲与横幅的一致性（OBS-007 修复后复验） | ✓ 会话 `c63ce4d3`（中断→**完成**）：脉冲「已完成」且**过期中断横幅消失**；会话 `f181c5ce`（中断→**失败**）：脉冲「失败」且**横幅消失**。两例 Timeline 仍保留 `运行中断` / `第 3 步中断` 的历史行（事实不删）；恢复入口不受影响（`canRecover` 由事件判定）。⚠「已中断」脉冲态当前真实语料不可达（无「中断且从未重跑」的会话），由单测锁定 |
 
 **第 19 项的真机证据（2026-09-11，dev server + 真实后端）**：会话内提交 2500 行生成任务，流式中用真实 wheel 事件上滚并对 `scrollTop` 打点（临时埋点，验证后已移除）——
 
@@ -591,3 +605,20 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 **审阅者另附的过程提示**：审阅期间工作区有并发写入（我在同期更新 tracker/提示词文档，纯文档）。已在提交前重核 diff。
 
 **门禁（修复后）**：tsc ✓ · vitest **490 passed** · oxlint **35w 0e** · playwright **96 passed** · vite build ✓。
+
+---
+
+## /code-review（OBS-007 修复，2026-09-11）——0 个可复现 bug（P0/P1/P2 全无），4 项 P3
+
+审阅者独立复核了四条承重主张并**逐条给出反证或确认**：① 排序/优先级安全——不存在 `run_status === 'running'` 与 `run_interrupted` 同为真值的可达状态（`projectRunInterrupted` 必先 `finalizeRun`，而新 run 的 `run/started` 会清标记）；② 重放确定性——`projectRunStarted`/`projectRunInterrupted` 都只写纯函数状态，无时间/随机依赖；③ `run_interrupted` **没有**其他消费者（全仓 grep），改其语义不影响他处；④ `coarsenPulseState` 的穷尽性由编译器保证（实测删掉一个 case 触发 TS2366），非仅注释承诺。另确认 `CircleSlash` 是真实 lucide 导出、CSS 只复用双主题 token、3 条新测试在还原后确实变红、`git diff --check` 干净。
+
+| # | 级别 | 内容 | 处置 |
+| --- | --- | --- | --- |
+| 1 | P3 | `coarsenPulseState` 的 `'已中断'` 映射**无任何测试断言**（`runState.ts`）：改成任一同类型字符串（如「已完成」）都不会有测试变红，Inspector Overview 会静默回归 | **已修**：在既有中断用例内补 `expect(deriveRunSummary(s).label).toBe('已中断')`——它与脉冲是**两条独立映射**，必须分开断言。已做变异验证（改成「已完成」→ 该用例变红） |
+| 2 | P3 | 没有任何测试把 `pulse-interrupted` 这个**类名字符串**与 `app.css` 的**选择器**绑起来——类名字符串本身已被 `runState.test.ts` 锁住，但 CSS 选择器改名后无测试会发现（视觉表现当前恰好不变，因为 `.run-pulse` 基类已是同样的中性 token） | **不改 + 登记为已知覆盖缺口**：这是 JS/CSS 分界的固有限制，仓库无「测试读 CSS 文件」先例；为它引入构建期 CSS 断言属于 §9.2 之外的抽象。此处显式记录，避免被误当作已有覆盖 |
+| 3 | P3 | 提前返回**同时覆盖** `failed`/`cancelled`（只要标记为真），而该分支在真实数据里不可达 → 优先级只靠「不变量成立」这一口头约定，无代码/测试约束 | **已修（显式化，非新分支）**：条件补成 `run_interrupted && run_status === 'completed'`。后端不变量保证两条件恒同时成立，故行为对全部合法日志**逐字节不变**（`deriveRunSummary` 的 8 个多 run 会话实测标签无变化）；破坏不变量时退化到「更晚的终态赢」，而非让过期标记把一次失败粉饰成中性色。新增一例锁住该退化语义 |
+| 4 | P3 | (a) 后续发消息的 RTT 窗口内会短暂显示「已中断」（提前返回不看 `streaming`）；(b) `CircleSlash` 与邻位方形图标（`SquareCheckBig`/`SquareX`）风格不齐 | **不改（审阅者亦不建议改代码）**：(a) 该瞬时态比修复前的绿色「已完成」更接近真相，且窗口仅一个 RTT；(b) 纯审美，圆形已在图标族内（`CircleDashed` 空闲态）。换图标属无收益改动（§9.3） |
+
+**审阅者结论**：本次修复**与规格一致**（冻结决策 69「中断 ≠ 失败」得到前端一致表达）、**无副作用**（`canRecover` 走 `isRecoverableRun(events)`，与本标记无关）、**范围克制**（§8 未被触碰）。
+
+**门禁（修复后实跑）**：tsc ✓ · vitest **494 passed**（28 文件，+1 例）· oxlint **35 warnings / 0 errors** · playwright **96 passed** · vite build ✓。

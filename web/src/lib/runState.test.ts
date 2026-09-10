@@ -64,6 +64,47 @@ describe('deriveRunPulse', () => {
   });
 });
 
+// ── OBS-007：中断是第三种终态，不能冒充「已完成」──
+
+describe('deriveRunPulse — interrupted 通道', () => {
+  it('run/interrupted → 已中断（中性），而不是绿色「已完成」', () => {
+    let s = applyEvent(initConversation('s'), ev(EventType.RUN_STARTED, {}));
+    s = applyEvent(s, ev(EventType.RUN_INTERRUPTED, { reason: 'process_restart' }));
+    // run_status 仍是 completed（冻结决策 69：中断 ≠ 失败，finalizeRun 只有两档）
+    expect(s.run_status).toBe('completed');
+    // 但脉冲必须说「已中断」，与同屏的「上次运行…中断」横幅一致
+    expect(deriveRunPulse(s, false).state).toBe('interrupted');
+    expect(deriveRunPulse(s, false).label).toBe('已中断');
+    expect(deriveRunPulse(s, false).className).toBe('pulse-interrupted');
+    // Inspector Overview 的标签是**另一条**映射（coarsenPulseState），
+    // 单独断言：改错成任一同类型字符串（如「已完成」）都不会被上面的断言拦住。
+    expect(deriveRunSummary(s).label).toBe('已中断');
+  });
+
+  it('不变量被破坏时：更晚的终态（failed）优先于过期的中断标记', () => {
+    // 后端不变量保证 run_interrupted 只与 run_status='completed' 共存（新 run
+    // 开始即清标记），所以下面这份日志在真实数据里**不可达**。这里锁的是
+    // 破坏不变量时的退化语义：宁可显示更晚那个终态（失败/红），也不让过期的
+    // 中断标记把一次失败粉饰成中性色。
+    let s = applyEvent(initConversation('s'), ev(EventType.RUN_STARTED, {}));
+    s = applyEvent(s, ev(EventType.RUN_INTERRUPTED, { reason: 'process_restart' }));
+    s = applyEvent(s, ev(EventType.RUN_FAILED, {}));
+    expect(s.run_interrupted).not.toBeNull(); // 标记确实还在（run/failed 不清它）
+    expect(deriveRunPulse(s, false).state).toBe('failed');
+    expect(deriveRunSummary(s).label).toBe('失败');
+  });
+
+  it('中断之后再起一个 run 并正常完成 → 回到「已完成」（提示不再过期挂着）', () => {
+    let s = applyEvent(initConversation('s'), ev(EventType.RUN_STARTED, {}));
+    s = applyEvent(s, ev(EventType.RUN_INTERRUPTED, { reason: 'process_restart' }));
+    s = applyEvent(s, ev(EventType.RUN_STARTED, {}));
+    // 新 run 开始即清空中断标记：提示的「上次运行」已被取代
+    expect(s.run_interrupted).toBeNull();
+    s = applyEvent(s, ev(EventType.RUN_COMPLETED, {}));
+    expect(deriveRunPulse(s, false).state).toBe('completed');
+  });
+});
+
 // ── da394a9 批：取消态脉冲 + 恢复可见性 ──
 
 describe('deriveRunPulse — cancelled 通道', () => {
