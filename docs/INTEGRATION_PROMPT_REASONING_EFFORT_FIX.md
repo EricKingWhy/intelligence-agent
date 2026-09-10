@@ -102,10 +102,12 @@ None      -> 不注入
 
 | 位置 | ref | sha |
 | --- | --- | --- |
-| 后端 worktree `D:\intelligence-agent-backend` | `feat/backend` | `dfeb485` |
+| 后端 worktree `D:\intelligence-agent-backend` | `feat/backend` | **请现读** `git -C D:/intelligence-agent-backend rev-parse --short feat/backend`（本文件自身的 commit 会让 tip 递增，故不在此硬编码） |
 | 后端 worktree | `origin/main` | `d5a1a27` |
 | 主仓 `D:\intelligence-agent` | `main`（本地） | `bb756a0` |
 | 主仓 | `origin/main` | `d5a1a27` |
+
+本分支自 `5c7d85b` 起的全部 commit（用 `git log --oneline 5c7d85b..FETCH_HEAD` 复核）：`4219cbc`（主修复）→ `7f543e9` → `10e34ce` → `5cc54dc` → `dfeb485` → `618fd12` → tip。
 
 两个关键事实（**都影响本次合并动作，请勿凭直觉跳过核验**）：
 
