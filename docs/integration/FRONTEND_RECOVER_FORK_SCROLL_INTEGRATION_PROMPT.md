@@ -29,7 +29,10 @@
 ## 2. 交付清单
 
 **分支**：`feat/frontend`
-**本批新增 commit**：`32356f4` — `fix(web): 恢复/分叉/滚动 三项缺陷 + 真实浏览器巡检修复`
+**本批新增 commit（2 个）**：
+- `32356f4` — `fix(web): 恢复/分叉/滚动 三项缺陷修复 + 真实浏览器逐按钮巡检（含 BUG-004）`
+- `0d6b82d` — `refactor(web): Inspector 的 Run 摘要收归 runState 单一状态机（deriveRunSummary）`（`/improve-codebase-architecture` 的低风险项）
+
 （前一个 commit `8469a34` = 另一 Agent 的 BUG-001 修复；本批在其之上）
 
 ### 2.1 代码
@@ -60,7 +63,21 @@
 ### 2.3 文档
 
 - `docs/FRONTEND_ISSUES_LOG.md` —— 缺陷台账（BUG-003 / BUG-004 / OBS-003 / OBS-004 / OBS-005 / OBS-006 / **OBS-007**）+ 43 行逐按钮巡检表 + 真机埋点证据
-- `docs/E2E_SCENARIO_MAP.md` —— 用例计数更新（466 vitest / 86 e2e / 16 spec）
+- `docs/E2E_SCENARIO_MAP.md` —— 用例计数更新（472 vitest / 86 e2e / 16 spec）
+- `docs/SDD_TICKET_TRACKER.md` —— 本批状态、门禁、遗留
+
+### 2.4 架构扫描（`/improve-codebase-architecture`，用户要求的收尾步骤）
+
+已扫描热点（`useSession.ts` / `App.tsx` / `api.ts` / `projection.ts`；近 40 次提交里被碰最多的文件），产出 4 个候选：
+
+| 候选 | 结论 |
+| --- | --- |
+| 1. `StreamOrchestrator`（把 224 行流生命周期从 `useSession.ts` 的 10-ref 协议后抽出） | **Worth exploring，但明确不可无人监督执行**（最热路径、e2e 网薄、语义只在注释里）。仅报告。 |
+| 2. `useFollowLatest`（三处接线的合并） | **Speculative**；代码库已显式推迟（ADR-0016，先例 C5 被否决）。仅报告。 |
+| 3. Inspector 重新推导 Run 语义 | **已修**（`0d6b82d`）。 |
+| 4. `applyEvent` 原地 push 未写在 Interface 上 | 判定今天无实际危害；仅补 `types.ts` 字段级 ⚠ 文档，**不改热路径语义**。 |
+
+扫描报告（只读产物，未入库）：`%TEMP%rchitecture-review-20260911-0345.html`
 
 ---
 
@@ -113,7 +130,7 @@ git -C D:/intelligence-agent-frontend log --oneline -3
 # ── 1. 复测本分支门禁（§16.6 前端门禁）──
 cd D:/intelligence-agent-frontend/web
 npx tsc -b
-npx vitest run                 # 期望 466 passed / 27 files
+npx vitest run                 # 期望 472 passed / 27 files
 npx oxlint                     # 期望 35 warnings / 0 errors（基线，未新增）
 npx playwright test --workers=2   # 期望 86 passed（必须 --workers=2，4 worker 有资源竞争抖动）
 npx vite build
@@ -144,10 +161,10 @@ git -C D:/intelligence-agent-frontend merge-tree --write-tree --name-only origin
 按 `AGENTS.md` §16.6，前端在途进度记 `docs/SDD_TICKET_TRACKER.md`，**PHASE_STATUS.md 由集成 AI 在 merge 后回填**。建议条目：
 
 ```markdown
-- 2026-09-11：**前端缺陷修复批次（恢复/分叉/滚动 + 真实浏览器逐按钮巡检）**。commit `32356f4`
+- 2026-09-11：**前端缺陷修复批次（恢复/分叉/滚动 + 真实浏览器逐按钮巡检）**。commit `32356f4` + `0d6b82d`
   （feat/frontend → main）。依据 `docs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md` A/B/C/D；
   额外修复 BUG-004（Copy Run ID 复制 session id）+ 分叉超时反馈。
-  测试：vitest 466 passed / playwright 86 passed / oxlint 35w0e / tsc + vite build 通过。
+  测试：vitest 472 passed / playwright 86 passed / oxlint 35w0e / tsc + vite build 通过。
   已在真实浏览器 + 真实后端验证 A/B/D 三项（真机回执见 FRONTEND_ISSUES_LOG OBS-003/OBS-004）。
   遗留：OBS-007（中断会话绿色「已完成」脉冲与中断横幅矛盾，预存在，需单独决策）。
   关单：不适用（本批为缺陷修复，非 ticket 交付）。

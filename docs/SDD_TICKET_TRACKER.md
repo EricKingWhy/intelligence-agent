@@ -22,12 +22,13 @@
 | 项 | 值 |
 | --- | --- |
 | 起始 commit | `8469a34`（另一 Agent 的 BUG-001 修复） |
-| 本批 commit | `32356f4` |
-| 门禁 | tsc ✓ / vitest **466 passed**（27 文件）/ oxlint **35w 0e** / playwright **86 passed** / vite build ✓ |
+| 本批 commit | `32356f4`（缺陷修复 + 巡检）、`0d6b82d`（架构扫描低风险项） |
+| 门禁 | tsc ✓ / vitest **472 passed**（27 文件）/ oxlint **35w 0e** / playwright **86 passed** / vite build ✓ |
 | 交付 | 交接手册 A/B/C/D；额外 BUG-004（Copy Run ID）+ 分叉 30s 超时反馈 |
 | 真机验证 | A/B/D 三项在真实浏览器 + 真实后端复验（回执见 `FRONTEND_ISSUES_LOG.md` OBS-003/OBS-004）；43 行逐按钮巡检表 |
 | 遗留 | OBS-007（中断会话绿色「已完成」脉冲与中断横幅矛盾，**预存在、故意未修**，§8）；覆盖缺口清单见集成提示词 §4 |
 | 关单 | 不适用（缺陷修复批次，非 ticket 交付） |
+| 架构扫描 | `/improve-codebase-architecture` 已完成。已修：候选 3（Inspector Run 摘要收归 `runState`，`0d6b82d`）+ 候选 4 字段级文档。**未做（按扫描结论 + §8）**：候选 1 `StreamOrchestrator`（最热路径，需监督 + 测试先行）、候选 2 `useFollowLatest`（代码库已显式推迟，ADR-0016）。报告：`%TEMP%rchitecture-review-20260911-0345.html` |
 
 ---
 
