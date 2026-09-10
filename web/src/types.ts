@@ -7,7 +7,7 @@
  * Event type constants are GENERATED from session/event.py (single source) —
  * see web/src/generated/event-types.ts. Do not hand-edit values here.
  */
-export { EventType, STREAM_ONLY_TYPES } from './generated/event-types';
+export { EventType, STREAM_ONLY_TYPES, type EventTypeValue } from './generated/event-types';
 
 /** A single SSE frame from POST /api/sessions or durable event from GET events. */
 export interface AgentEvent {
