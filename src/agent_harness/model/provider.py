@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
+from agent_harness.logging import log_event
 from agent_harness.model.config import ModelConfig
 
 logger = logging.getLogger("agent_harness.model")
@@ -31,7 +32,10 @@ WIRE_REASONING_EFFORTS: frozenset[str] = frozenset(
 #: 所有 OpenAI 兼容推理端点共用同一套枚举。
 #:
 #: `deep` 落在 `high` 而非 `xhigh`/`max`：枚举里更高的两档只有部分端点支持，
-#: `high` 是「深度推理」里兼容面最广的一档（想更激进只改这一行）。
+#: `high` 是「深度推理」里兼容面最广的一档。产品文案已随之对齐——catalog 里
+#: 该档的描述是「较高推理开销，较慢但更深入」，不再宣称「最多 / 最深入」，
+#: 避免 UI 承诺超出实际发出的档位（想改成字面最深入：这一行 + catalog 描述
+#: 一起改，并确认目标端点接受 `xhigh`）。
 REASONING_EFFORT_WIRE: dict[str, str] = {
     "minimal": "minimal",
     "standard": "medium",
@@ -107,10 +111,18 @@ def create_chat_model(
     if reasoning_effort is not None:
         wire = REASONING_EFFORT_WIRE.get(reasoning_effort)
         if wire is None or wire not in WIRE_REASONING_EFFORTS:
-            logger.warning(
-                "reasoning_effort 档位 %r 未映射到合法线格式字面量（翻译结果 %r，"
-                "合法集合 %s）——不注入该参数",
-                reasoning_effort, wire, ", ".join(sorted(WIRE_REASONING_EFFORTS)),
+            # 结构化（而非裸 logger.warning）：这一档参数出问题时，运维/事后
+            # 排查要在 JSONL 里按 outcome 直接捞出这条——本次 P0 之所以拖了
+            # 三天（09-08 ~ 09-11），正是因为非法参数本该留下一条可检索的记录
+            # 却什么都没留（logging.py：业务代码用 log_event 写稳定事件）。
+            log_event(
+                logger, "system_log",
+                "reasoning_effort 档位未映射到合法线格式字面量，已跳过注入",
+                level="warn",
+                component="model_provider",
+                outcome="reasoning_effort_not_injected",
+                harness_level=reasoning_effort,
+                wire_value=wire,
             )
         else:
             kwargs["reasoning_effort"] = wire

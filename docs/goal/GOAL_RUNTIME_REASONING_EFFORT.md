@@ -7,6 +7,39 @@
 
 ---
 
+> ## ⚠️ 勘误（2026-09-11，commit `4219cbc`）——本文件 §1.2 / §2.3 / §3.1 / §5 / §6 的透传假设已被生产证伪
+>
+> 本文件要求把 harness 档位（`minimal | standard | deep`）**原样**作为
+> `reasoning_effort` 发出，并在 §5 风险表断言「不支持的字段会被 Provider
+> 静默忽略，不会报错」。**该断言是错的。**
+>
+> 实测：OpenAI 兼容推理端点**严格校验该字段的取值枚举**并硬 400——
+> `.agent/logs/agent.jsonl` 2026-09-08 ~ 09-11 反复出现
+> `error_type=BadRequestError`，正文
+> `'reasoning_effort' must be one of: 'none','minimal','low','medium','high','xhigh','max'`，
+> `input: 'deep'`。只有 `minimal` 恰好同名合法；`standard` / `deep` 是非法字面量，
+> 选这两档后**该会话每一次 run 都在第一次模型调用失败、零输出**。
+>
+> 现状（以代码为准）：
+>
+> - `minimal | standard | deep` 是**产品词汇**（前端显示 轻量/标准/深度），
+>   不是任何 API 认的字面量；
+> - `src/agent_harness/model/provider.py` 新增线格式合法枚举
+>   `WIRE_REASONING_EFFORTS` 与翻译表 `REASONING_EFFORT_WIRE`
+>   （`minimal→minimal` / `standard→medium` / `deep→high`），
+>   `create_chat_model` 只注入翻译后的合法字面量；
+> - 翻译表键集与 Web 层目录键集由
+>   `tests/model/test_reasoning_effort.py` 的 G5 漂移守护锁住。
+>
+> 因此：**§1.2 的「静默忽略」结论、§2.3 的「同理透传」、§3.1 的
+> `model_kwargs = {"reasoning_effort": reasoning_effort}`、§5 风险表第一行、
+> §6 的 `"deep"` Gate 断言均已作废**，保留原文仅为记录当时的推理。
+> §7「不做的事」中「不按 Provider 映射不同的 reasoning 参数」**未被违反**：
+> 本次是 provider 无关的**线格式适配**，未引入 `enable_thinking` 等
+> per-provider 参数名。
+
+---
+
 ## 1. 现状勘察结论
 
 ### 1.1 `reasoning_effort` 当前完全未接线

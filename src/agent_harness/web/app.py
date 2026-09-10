@@ -103,7 +103,7 @@ REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
     "deep": {
         "display_name": "深度",
-        "description": "最多推理开销，较慢但最深入。",
+        "description": "较高推理开销，较慢但更深入。",
     },
 }
 
@@ -871,8 +871,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     async def list_reasoning_efforts() -> dict[str, Any]:
         """列出 reasoning_effort 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
 
-        reasoning_effort 已被运行时真实消费（经 create_chat_model 注入
-        model_kwargs → extra_body 传给 API）；本端点暴露「后端认识哪些档位」。
+        reasoning_effort 已被运行时真实消费：harness 语义档位经
+        create_chat_model 翻译为 provider 线格式枚举后注入（翻译表在
+        model/provider.py）；本端点暴露「后端认识哪些档位」。
         字段与 /api/permission-modes 同模式（{id, display_name, description}），
         单一事实源是模块级 REASONING_EFFORT_DESCRIPTIONS（validator 与清单
         引用同一份 → 永不漂移）。
