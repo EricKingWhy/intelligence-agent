@@ -17,6 +17,18 @@
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
+### 最近一批：瞬态三键的确定性覆盖 + 401 缝补测（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `35cd0a1`（401 缝单测 + `l-auth-banner.spec.ts`）、`8ed86f0`（瞬态三键 `m-stream-affordances.spec.ts`） |
+| 门禁 | tsc ✓ / vitest **497 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **104 passed**（`--workers=2`）/ vite build ✓ |
+| 交付 | 三个此前唯一没被真机点过的按钮（`tool-out-wrap-btn` / `tool-out-jump` / `reasoning-jump`）用 mock 流钉住流式窗口后**真实点击**；401 缝补 3 例单测 + 横幅 e2e |
+| 覆盖账目 | **45 = 38 真机 + 3 mock 流 + 1 mock 401 + 1 e2e 内激活 + 2 产品不可达** → **43/45 已被真实点击** |
+| 残余不可达 | 审批卡「批准」「拒绝」：`App.tsx:336` 硬编码 `auto_approve: true` → 该卡永不渲染，且 `ApprovalCard` 无测试文件。**需产品决策**（OBS-006），非漏点 |
+| 审查 | 新 spec 独立审查 **approve**（0 P0/P1/P2、6 项 P3 **全部已修**），按加固后版本重跑三处变异均红 |
+| 关单 | 不适用（缺陷/覆盖批次，非 ticket 交付） |
+
 ### 最近一批：刷新一致性 BUG-005 / BUG-006 + 第二轮逐按钮巡检（2026-09-11）
 
 | 项 | 值 |
