@@ -98,20 +98,69 @@ None      -> 不注入
 
 ## 6. 集成步骤（§14.6 先回后正）
 
+### 6.1 实测拓扑（2026-09-11，合并前请重新核验——§14.9/§14.10）
+
+| 位置 | ref | sha |
+| --- | --- | --- |
+| 后端 worktree `D:\intelligence-agent-backend` | `feat/backend` | `dfeb485` |
+| 后端 worktree | `origin/main` | `d5a1a27` |
+| 主仓 `D:\intelligence-agent` | `main`（本地） | `bb756a0` |
+| 主仓 | `origin/main` | `d5a1a27` |
+
+两个关键事实（**都影响本次合并动作，请勿凭直觉跳过核验**）：
+
+1. **后端分支的 merge-base 就是 `origin/main`（`d5a1a27`）**——`origin/main` 是 `feat/backend` 的直接祖先（behind = 0，ahead = 8）。所以 §14.6 的「先回后正」**反向回并无事可做**，直接正向 `--no-ff` merge 即可。
+2. **主仓本地 `main`（`bb756a0`）领先 `origin/main` 4 个 commit 且尚未 push**，内容是 step_id P0 修复的集成（`0cdbcc9` / `a76efce` / `4fd5716` / `bb756a0`）。**合并目标是本地 `main`，不是 `origin/main`**。另注意：`0cdbcc9` 与 `a76efce` 本来就已经在后端分支的历史里（后端分支从含它们的 `5c7d85b` 起），所以真正 main-only 的只有 merge commit `4fd5716` 与 PHASE_STATUS 记录 `bb756a0`。
+
+### 6.2 为什么本文件不能给出 merge-tree 预判
+
+两个 repo 是**独立对象库**：后端 worktree 里 `git cat-file -t bb756a0` → `fatal: Not a valid object name`。所以任何在本次合并之前算出的 `merge-tree` 结果都不覆盖本地 main 的那 4 个 commit，**没有参考价值**。请先 fetch，再在主仓现算。
+
+### 6.3 步骤
+
 ```bash
-# 在 main worktree
-git fetch D:/intelligence-agent-backend feat/backend   # 两侧 repo 独立，需 fetch 才看得到对象
-git merge-base --is-ancestor <本分支 tip> main && echo "main 已是祖先"
-git merge-tree --write-tree main feat/backend          # 预期零冲突（改动仅 3 文件，与 main 无交集）
-git merge --no-ff feat/backend                          # 需用户明确批准（§14.4）
+# ── 主仓 D:\intelligence-agent，先核验工作区 clean ──
+git status --porcelain                    # 应为空
+
+# 1) 把后端对象拉进主仓（两侧独立对象库，必须 fetch）
+git fetch D:/intelligence-agent-backend feat/backend
+
+# 2) 现算拓扑（不要用本文件的数字代替这一步）
+git rev-parse --short FETCH_HEAD main origin/main
+git merge-base --is-ancestor origin/main feat/backend && echo "反向回并无事可做"
+git rev-list --left-right --count main...feat/backend
+git merge-tree --write-tree main feat/backend     # 唯一冲突预判见 6.4
+
+# 3) 正向合并（需用户明确批准，§14.4）
+git merge --no-ff feat/backend
+
+# 4) 合并后门禁
+git diff --check
 ruff check src/ tests/
-pytest -q                                               # 预期 1506 passed / 9 skipped / 0 failed
+pytest -q                                         # 预期 1506 passed / 9 skipped / 39 deselected / 0 failed
 ```
 
-预期冲突：**无**。改动面只落在 `model/provider.py`（本分支独占）、`web/app.py` 一处注释、一个测试文件、`docs/PHASE_STATUS.md`（同位追加，注意最新在上）。
+### 6.4 预期冲突：`docs/PHASE_STATUS.md` 一处（同位追加）
 
-集成后建议顺手做的事（**不属于本 commit，需用户决定**）：
-- `docs/INTEGRATION_PROMPT_STEP_ID_FIX.md` 目前仍是**未跟踪文件**（step_id 修复那次遗留的集成提示词，未入库）。AGENTS.md §13.1 要求 docs 入库——请确认是否随本次一并 `git add`。
+依据（可自行复核）：本地 main 独有的 4 个 commit 触及的文件里，与本分支 5 个 commit 触及的文件**只有 `docs/PHASE_STATUS.md` 相交**——
+
+```bash
+# 在后端 worktree 验：main-only 提交的文件清单
+cd D:/intelligence-agent && git diff --name-only origin/main..main
+#   → PHASE_STATUS.md + step_id 的 runtime/session/tests/docs（与本分支零交集）
+# 本分支触及：model/provider.py / web/app.py / tests/model/test_reasoning_effort.py
+#            / docs/PHASE_STATUS.md / docs/goal/GOAL_RUNTIME_REASONING_EFFORT.md
+#            / 本文件 / HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md
+```
+
+两边都是在「## 更新日志」**同一位置追加**（最新在上），因此会冲突。按 **§14.7 逐条保留、两边语义都成立**：本分支的 2026-09-11 条目 + main 的 step_id 集成条目**全部保留**（不是 ours/theirs 二选一）。上一轮 `5c7d85b` 处理过完全同型的冲突（「PHASE_STATUS 同位追加冲突按 §14.7 三条全保留」），可照抄那个判定口径。
+
+其余文件预期**零冲突**：`model/provider.py` 由本分支独占；`web/app.py` 本分支只改了注释与一处描述字符串；tests 与两个新 docs 本分支独占。
+
+### 6.5 合并后需用户单独批准的动作
+
+- `git push`（§14.4）——合并后本地 main 会领先 `origin/main`（合并前已领先 4，本次再合入本分支相对 `origin/main` 的 8 个 commit，其中 `0cdbcc9`/`a76efce` main 已有，另加一个 merge commit）。确切数字请在合并后读 `git rev-list --left-right --count origin/main...main`，**不要沿用估算值**。**push 需用户单独明确批准**，不要因为已批准 merge 就默认批准 push（§14.11）。
+- `docs/INTEGRATION_PROMPT_STEP_ID_FIX.md` 目前仍是**未跟踪文件**（step_id 修复那次遗留的集成提示词，未入库）。AGENTS.md §13.1 要求 docs 入库——请确认是否随本次一并 `git add`。**这是本次唯一遗留的未跟踪文件**（其余 4 份历史提示词已由 `5c7d85b` 带入）。
 
 ---
 
