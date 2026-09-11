@@ -8,6 +8,7 @@ ToolExecutor.execute()，断言 ToolResult 形状。复用 tests/tooling/test_ex
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,107 @@ class TestBashTool:
         assert "out" in result.result.data["stdout"]
         assert "err" in result.result.data["stderr"]
         assert "duration_ms" in result.result.data
+
+
+class _ShellStub(LocalSubprocessSandbox):
+    """只覆写 shell_description 的替身：让 cmd / 非 cmd 两条描述分支在任何平台都可测。"""
+
+    def __init__(self, workspace_root: Path, shell: str) -> None:
+        super().__init__(workspace_root=workspace_root)
+        self._shell = shell
+
+    @property
+    def shell_description(self) -> str:
+        return self._shell
+
+
+class TestBashToolShellHonesty:
+    """OBS-012：工具名叫 bash，但**没有任何后端真的用 bash**——描述必须声明真相。
+
+    为什么值得一个专类：模型按工具名写 bash 语法，在 Windows（cmd.exe）会被解析器
+    直接拒绝（本机实证报错「此时不应有 i。」，见 OBS-011 的复现），整次工具调用作废。
+    工具描述是模型唯一的线索来源，所以「声明与真相一致」本身就是要锁的契约。
+    """
+
+    def test_description_declares_the_real_shell_and_denies_bash(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        description = BashTool(sandbox).description
+
+        assert sandbox.shell_description in description
+        assert "不是 bash" in description
+
+    @pytest.mark.skipif(os.name != "nt", reason="shell=True 走 COMSPEC 仅 Windows")
+    def test_local_sandbox_reports_cmd_exe_on_windows(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        assert sandbox.shell_description.lower().endswith("cmd.exe")
+
+    @pytest.mark.skipif(os.name != "nt", reason="shell=True 走 COMSPEC 仅 Windows")
+    def test_local_sandbox_shell_comes_from_comspec_not_a_literal(
+        self, tmp_path, monkeypatch
+    ):
+        """必须真的读 COMSPEC——硬编码 "cmd.exe" 会在这里变红。
+
+        本机 COMSPEC 恰好就是 cmd.exe，所以「与 COMSPEC 相等」的断言无法区分硬编码；
+        这里注入一个**带引号的、独一份的**值，一并锁住引号剥离（否则模型可见描述会
+        出现 `mystery-shell.exe"`）。
+        """
+        monkeypatch.setenv("COMSPEC", r'"C:\opt\weird\mystery-shell.exe"')
+
+        assert LocalSubprocessSandbox(
+            workspace_root=tmp_path
+        ).shell_description == "mystery-shell.exe"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX 上 shell=True 用 /bin/sh")
+    def test_local_sandbox_reports_posix_sh(self, sandbox: LocalSubprocessSandbox):
+        assert sandbox.shell_description == "/bin/sh"
+
+    def test_description_warns_about_cmd_pitfalls_for_cmd_like_shell(self, tmp_path):
+        description = BashTool(_ShellStub(tmp_path, "cmd.exe")).description
+
+        assert "单引号" in description
+        assert "$VAR" in description
+        assert "2>/dev/null" in description
+
+    def test_description_omits_cmd_pitfalls_for_posix_shell(self, tmp_path):
+        description = BashTool(_ShellStub(tmp_path, "/bin/sh")).description
+
+        assert "/bin/sh" in description
+        assert "不是 bash" in description
+        assert "单引号" not in description
+
+    def test_description_does_not_deny_bash_when_backend_really_uses_bash(
+        self, tmp_path
+    ):
+        """后端真用 bash 时不得出现「实际解释器是 bash（不是 bash）」的自相矛盾。"""
+        description = BashTool(_ShellStub(tmp_path, "bash")).description
+
+        assert "实际解释器是 bash" in description
+        assert "不是 bash" not in description
+
+    def test_docker_backend_declares_posix_sh(self):
+        """容器后端声明 /bin/sh（与 exec 的 [\"/bin/sh\", \"-lc\", ...] 一致）。
+
+        不构造实例：`DockerSandbox.__init__` 需要能连上 Docker daemon。该 property
+        不读 self，故直接用类级 getter 取值。
+        """
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        assert DockerSandbox.shell_description.fget(None) == "/bin/sh"
+
+    def test_base_declaration_is_not_abstract(self):
+        """`shell_description` 必须**保持非抽象**：抽象化会让既有/第三方后端无法实例化
+        （ADR-0001 冻结 6 个抽象方法，加后端不应被迫改实现）。"""
+        from agent_harness.sandbox.base import Sandbox
+
+        assert "shell_description" not in Sandbox.__abstractmethods__
+
+    def test_base_contract_default_is_posix_sh(self):
+        """基类默认（第三方后端未覆写时）必须是保守的 POSIX sh，而不是 bash。"""
+        from agent_harness.sandbox.base import Sandbox
+
+        assert Sandbox.shell_description.fget(None) == "sh"
 
 
 # ============================================================================

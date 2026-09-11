@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent_harness.session import USER_MESSAGE, Session
 from agent_harness.session.service import (
     ActiveRunConflict,
     ApprovalQueueMissing,
@@ -145,6 +146,28 @@ class TestListSessions:
         assert len(result) == 1
         assert result[0]["session_id"] == existing_session
         assert result[0]["event_count"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_carries_terminal_trace_id(self, app_state, existing_session):
+        """OBS-010：列表行回填最近一次 run 终结事件的 trace_id。"""
+        session = Session.resume(app_state.store, existing_session)
+        run_id, _ = session.begin_run()
+        session.append(USER_MESSAGE, {"content": "hi"}, run_id=run_id)
+        session.end_run(run_id, status="completed", final_text="ok",
+                        trace_id="tr-list")
+
+        service = SessionService(app_state)
+        result = await service.list_sessions()
+        row = next(r for r in result if r["session_id"] == existing_session)
+        assert row["trace_id"] == "tr-list"
+
+    @pytest.mark.asyncio
+    async def test_trace_id_none_without_terminal_event(self, app_state, existing_session):
+        """只有 session/started（无 run 终态）→ trace_id 为 None，不伪造。"""
+        service = SessionService(app_state)
+        result = await service.list_sessions()
+        row = next(r for r in result if r["session_id"] == existing_session)
+        assert row["trace_id"] is None
 
 
 # ── cancel ───────────────────────────────────────────────────────────

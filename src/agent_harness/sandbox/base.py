@@ -130,3 +130,21 @@ class Sandbox(ABC):
     @abstractmethod
     def workspace_root(self) -> Path:
         """workspace 根目录的绝对路径（路径边界的基准）。"""
+
+    # —— 执行环境事实（供模型可见的工具描述声明真相） ——
+
+    @property
+    def shell_description(self) -> str:
+        """该后端执行 `command` 时**实际**使用的 shell 解释器名（如 `cmd.exe`、`/bin/sh`）。
+
+        OBS-012：`BashTool` 的名字叫 bash，但**没有任何后端真的用 bash**——
+        LocalSubprocessSandbox 走 `subprocess` 的平台默认（POSIX = `/bin/sh`，
+        Windows = `cmd.exe`），DockerSandbox 硬编码 `["/bin/sh", "-lc", command]`。
+        模型按工具名以为是 bash，就会写出该解释器不认的语法（本机实证：cmd.exe 对
+        bash 语法报「此时不应有 i。」）。工具描述据此声明真相——**不要**让 Tool 层
+        自己用 `os.name` 猜：宿主是 Windows 时 Docker 容器内仍是 sh。
+
+        非抽象（**不并入 ADR-0001 冻结的 6 个抽象方法契约**，避免破坏既有/第三方后端
+        实现）：基类给保守的 POSIX 默认，子类应覆写为真实解释器名。
+        """
+        return "sh"

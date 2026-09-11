@@ -108,6 +108,30 @@ def test_list_sessions_carries_first_user_message(tmp_path):
     assert by_id[empty.session_id]["first_user_message"] is None
 
 
+def test_list_sessions_carries_terminal_trace_id(tmp_path):
+    """OBS-010：列表 payload 回填最近一次 run 终结事件的 trace_id。
+
+    run 在途（末事件非终结）时为 null——前端据此显示「未追踪」，不伪造。
+    """
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+
+    session = Session.start(store)
+    run_id, _ = session.begin_run()
+    session.append(event_type=USER_MESSAGE, data={"content": "hi"}, run_id=run_id)
+    session.end_run(run_id, status="completed", final_text="ok", trace_id="tr-web")
+
+    in_flight = Session.start(store)  # 只有 session/started，run 尚未收口
+
+    client = TestClient(app)
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    by_id = {row["session_id"]: row for row in resp.json()}
+    assert by_id[session.session_id]["trace_id"] == "tr-web"
+    assert by_id[in_flight.session_id]["trace_id"] is None
+
+
 # ── session events ──
 
 

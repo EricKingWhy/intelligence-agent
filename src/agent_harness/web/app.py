@@ -288,8 +288,13 @@ class SessionSummary(BaseModel):
     # Gap 3 (P0)：首条 user/message content 截断 128 字符——前端 SessionList
     # 零额外请求渲染标题（保留 events 扫描作为后端未返回时的降级路径）。
     first_user_message: str | None = None
-    # Gap 2 (P2)：Langfuse trace 关联。真实 trace 由 Phase 15 可观测层创建；
-    # 未接入前恒为 null（绝不伪造，前端显示「未追踪」）。
+    # Gap 2 (P2)：Langfuse trace 关联。OBS-010 起**真实回填**：**末事件恰为
+    # run 终结事件**（run/completed|failed|interrupted）时取其 trace_id；末事件
+    # 非终结（run 在途，或上一轮已完成后新轮的 user/message/run-started 垫在末尾）
+    # 或未配置可观测性时为 null——绝不伪造，前端显示「未追踪」。
+    # 有意只认末事件（不回溯）以保住列表页快路径，取舍见
+    # `JsonlSessionStore._terminal_trace_id_from_tail`；不变量 #21：可观测性缺席
+    # 不致命也不造假。
     trace_id: str | None = None
 
 
@@ -735,6 +740,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 first_event_time=s["first_event_time"],
                 last_event_time=s["last_event_time"],
                 first_user_message=s["first_user_message"],
+                trace_id=s["trace_id"],
             )
             for s in summaries
         ]

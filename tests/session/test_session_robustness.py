@@ -298,6 +298,122 @@ class TestReadSessionSummary:
         assert stats.event_count == len(full) == 3
         assert stats.first_event_time == full[0].time
 
+    # ── OBS-010：列表行回填最近一次 run 的 trace_id ──
+    # 口径：只认**最后一个事件**、且必须是 run 终结事件（run/completed|
+    # failed|interrupted）——快路径与全量回退严格一致（见 _terminal_trace_id）。
+
+    def test_trace_id_backfilled_from_run_completed(self, store: JsonlSessionStore):
+        sid = "summary-trace-completed"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, USER_MESSAGE, {"content": "hi"}),
+            _event_line(store, sid, 2, "run/completed",
+                        {"final_text": "ok", "trace_id": "tr-abc"}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.trace_id == "tr-abc"
+
+    def test_trace_id_backfilled_from_run_failed(self, store: JsonlSessionStore):
+        """对称终态：失败 run 在 Langfuse 也有可见 trace，同样回填。"""
+        sid = "summary-trace-failed"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, "run/failed",
+                        {"final_text": "boom", "trace_id": "tr-fail"}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.trace_id == "tr-fail"
+
+    def test_trace_id_none_when_langfuse_disabled(self, store: JsonlSessionStore):
+        """Langfuse 未启用 → 终结事件 trace_id 本就是 null → 摘要 None（不伪造）。"""
+        sid = "summary-trace-disabled"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, "run/completed",
+                        {"final_text": "ok", "trace_id": None}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.trace_id is None
+
+    def test_trace_id_none_when_terminal_is_not_last_event(self, store: JsonlSessionStore):
+        """run 终态之后又落了事件（末事件非终结）→ None。
+
+        锁住「只看最后一个事件」的显式契约（OBS-010 有意的性能取舍）：不向历史
+        回溯更早 run 的 trace，因为那要逐行解析到 EOF，会抵消 read_session_summary
+        的快路径。典型触发：上一轮已 completed，新轮的 user/message 成了末事件。
+        """
+        sid = "summary-trace-not-last"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, "run/completed",
+                        {"final_text": "ok", "trace_id": "tr-old"}),
+            _event_line(store, sid, 2, "tool/result",
+                        {"tool_call_id": "c1", "content": "x"}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.trace_id is None
+
+    def test_trace_id_none_for_non_terminal_tail_with_trace(self, store: JsonlSessionStore):
+        """末事件类型非 run 终结（即便 data 里恰好有 trace_id）不得被当成 run trace。"""
+        sid = "summary-trace-nonterminal"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, "model/completed",
+                        {"content": "ok", "trace_id": "tr-not-a-run-trace"}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.trace_id is None
+
+    def test_trace_id_none_for_run_interrupted(self, store: JsonlSessionStore):
+        """恢复扫描补记的 run/interrupted.data 无 trace_id（真实形状）→ None。
+
+        run 崩在半途，Langfuse 没有可跳转的最终 trace；诚实返回「未追踪」。
+        """
+        sid = "summary-trace-interrupted"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, "run/interrupted",
+                        {"interrupted_seq": 3, "reason": "process_restart"}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.trace_id is None
+
+    @pytest.mark.parametrize("bad_value", [123, "", None, ["tr-x"], {"id": "tr-x"}])
+    def test_trace_id_non_string_is_none(self, store: JsonlSessionStore, bad_value):
+        """磁盘被手工改坏成非字符串/空串 → None，不把非法值塞进 API 契约。"""
+        sid = f"summary-trace-bad-{type(bad_value).__name__}"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, "run/completed",
+                        {"final_text": "ok", "trace_id": bad_value}),
+        ])
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        assert stats.trace_id is None
+
+    def test_trace_id_fallback_path_matches_fast_path(self, store: JsonlSessionStore):
+        """头部损坏触发全量回退时，trace_id 与快路径同口径。"""
+        sid = "summary-trace-fallback"
+        good = [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, USER_MESSAGE, {"content": "hi"}),
+            _event_line(store, sid, 2, "run/completed",
+                        {"final_text": "ok", "trace_id": "tr-fallback"}),
+        ]
+        _write_lines(store, sid, ["not-json"] + good)
+
+        stats = store.read_session_summary(sid)
+        assert stats is not None
+        # 坏行被全量路径排除（证明确实走了 fallback），trace_id 仍正确回填
+        assert stats.event_count == 3
+        assert stats.trace_id == "tr-fallback"
+
     def test_missing_session_returns_none(self, store: JsonlSessionStore):
         assert store.read_session_summary("no-such-session") is None
 
