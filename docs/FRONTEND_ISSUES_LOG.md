@@ -1137,3 +1137,56 @@ picker 搜索框均**已在其他轮次真机点过并有 e2e/单测回归锁**�
 `model/fallback deepseek-v4-flash-0731 → glm-4.5-air · ModelStallError` 是同一现象。
 **建议（供后端参考，不在本轮前端范围）**：停顿检测的阈值约 50s 偏长，且停顿期间 UI 没有任何
 「正在等待模型/即将回退」的中间态提示——可考虑让后端更早发出 fallback 事件，前端已有渲染通道。
+
+### BUG-009 非流式 run 的 Model Fallback 在带并发闸时**必崩**（`AttributeError`）【P1 · 后端 · 已修复】
+
+**发现时间**：2026-09-11 第六轮验收——把 `multiagent` 加进 `feat/backend` 的 `.env` 后跑真实委派，
+**委派子会话 `run/failed`**，而父会话正常完成。这属于用户问的「判断是前端还是后端的问题」的典型：
+**后端**，前端只是把后端的真实失败如实渲染出来。
+
+**症状（真实事件，非推断）**：child `1f2c2af4` 的事件序列
+```
+3 model/fallback {"from_model":"deepseek-v4-flash-0731","to_model":"glm-4.5-air","reason":"InternalServerError"}
+4 model/failed   {"message":"model call failed: AttributeError"}
+5 run/failed     {"trace_id":null,"trace_url":null}
+```
+
+**根因（后端服务端日志 traceback 逐字）**：
+```
+File ".../agent_harness/agent/runtime.py", line 663, in _drive
+File ".../agent_harness/model/fallback.py",  line 176, in ainvoke
+File ".../contextlib.py",                    line 212, in __aenter__
+AttributeError: '_AsyncGeneratorContextManager' object has no attribute 'args'
+```
+
+`fallback.py::ainvoke` 把 `slot = self._gate.slot() if self._gate is not None else nullcontext(None)`
+**只取一次**，然后在「首次尝试」和「回退重试」两处 `async with slot:` **复用同一个 CM**。
+`ModelCallGate.slot()` 带 `@asynccontextmanager`（`concurrency.py:52`），其产物是**一次性**的——
+contextlib 退出时执行 `del self.args, self.kwds, self.func`（CPython 源码注释原话：
+"only needed for recreation, **which is not possible anymore**"），二次进入即抛 `AttributeError`。
+
+**影响面（不变量 #9 被破坏）**：`runtime.py` 的 `if stream:` **else 分支**（`:663`）走 `ainvoke`。
+`run()` 传 `stream=False`（`:432`），`run_stream()` 传 `True`（`:455`）；delegate 派生的子会话走
+`child_runtime.run(...)`（`multiagent/provider.py:229`）→ **非流式**。所以
+**所有非流式 run（含全部 delegate 子会话）在主模型瞬断时永远回退不了**，直接 `model/failed` + `run/failed`。
+生产恒带闸（`model_max_concurrency` 默认 3）故必然触发。
+
+**为什么既有测试长期没抓到（精确的覆盖缺口）**：`tests/test_model_fallback.py::TestCoordinatorAinvoke`
+的用例**全部 `gate=None`**——此时走 `contextlib.nullcontext`，而 `nullcontext` **可以重复进入**，
+所以那条 `async with slot` 第二次进入是合法的。**「闸 + ainvoke 回退重试」这个组合此前零覆盖。**
+
+**修复**：新增 `_slot()` 帮助方法（每次调用取**新** CM），两处尝试各自调用它。
+改 `src/agent_harness/model/fallback.py`，并补回归锁 2 例（含 5xx 形状参数化与「回退也失败」的
+重试一次边界）。**变异验证**：把 `ainvoke` 改回复用同一个 CM → 只有新用例变红（红灯非空洞）。
+
+**真实 A/B 实证（同一触发形状、不同结局）**：
+| | 触发 | 结局 |
+| --- | --- | --- |
+| 修复前 child `1f2c2af4` | `model/fallback … reason: InternalServerError` | `model/failed(AttributeError)` → `run/failed` |
+| 修复后 child `6eed381f` | `model/fallback … reason: InternalServerError`（**同形**） | `model/completed` → `tool/result` → **`run/completed`**，`final_text` = "Python 官网网址是 https://www.python.org" |
+
+父会话 `7cf291d1` 也 `run/completed`，`final_text` = "子代理 `research_review` 已成功完成任务：…"。
+
+**门禁**：`ruff check src/ tests/` 干净 · `pytest -q` 全绿。**登记归因：后端**（前端无需改动）。
+**另记**：`fallback.py::_guarded_stream` 末尾有一处**重复的 `return stream`（死代码，非本次引入）**，
+按 §8 Scope Lock 只报告、不顺手改。
