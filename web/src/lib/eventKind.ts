@@ -118,12 +118,13 @@ export function hasIconRow(kind: RuntimeEventKind): boolean {
  *  data-stream-key=`delegation:{child_session_id}`）；其余事件定位到轮次容器
  *  （step:{step_id}）——模型段在轮内无稳定反推索引，轮次级是诚实粒度。
  *  无 step 且非工具/委派域（session 级事件等）返回 null（无可定位目标）。
- *  ⚠ 判空用宽松 `!= null`：后端省略值为 null 的字段，无步号事件的 step_id 是
- *  **键缺失**（'step_id' in e === false）；严格 `!== null` 会返回伪造 key
- *  `step:undefined`，违背上面的 null 契约，并让联动定位去查一个不存在的锚点。 */
+ *  ⚠ 判空用宽松 `!= null`（信封契约与理由见 `types.ts::AgentEvent`，此处不重述）：
+ *  无步号事件的 step_id 在 GET 历史事件路径上是**键缺失**（故形参类型含 `undefined`）；
+ *  严格 `!== null` 会返回伪造 key `step:undefined`，违背上面的 null 契约，并让联动
+ *  定位去查一个不存在的锚点。 */
 export function streamKeyFromEvent(
   data: Record<string, unknown>,
-  stepId: number | null,
+  stepId: number | null | undefined,
 ): string | null {
   const toolCallId = data.tool_call_id;
   if (typeof toolCallId === 'string' && toolCallId) return toolEventKey(toolCallId);

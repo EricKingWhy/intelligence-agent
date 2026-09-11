@@ -1137,3 +1137,110 @@ picker 搜索框均**已在其他轮次真机点过并有 e2e/单测回归锁**�
 `model/fallback deepseek-v4-flash-0731 → glm-4.5-air · ModelStallError` 是同一现象。
 **建议（供后端参考，不在本轮前端范围）**：停顿检测的阈值约 50s 偏长，且停顿期间 UI 没有任何
 「正在等待模型/即将回退」的中间态提示——可考虑让后端更早发出 fallback 事件，前端已有渲染通道。
+
+### BUG-009 非流式 run 的 Model Fallback 在带并发闸时**必崩**（`AttributeError`）【P1 · 后端 · 已修复】
+
+**发现时间**：2026-09-11 第六轮验收——把 `multiagent` 加进 `feat/backend` 的 `.env` 后跑真实委派，
+**委派子会话 `run/failed`**，而父会话正常完成。这属于用户问的「判断是前端还是后端的问题」的典型：
+**后端**，前端只是把后端的真实失败如实渲染出来。
+
+**症状（真实事件，非推断）**：child `1f2c2af4` 的事件序列
+```
+3 model/fallback {"from_model":"deepseek-v4-flash-0731","to_model":"glm-4.5-air","reason":"InternalServerError"}
+4 model/failed   {"message":"model call failed: AttributeError"}
+5 run/failed     {"trace_id":null,"trace_url":null}
+```
+
+**根因（后端服务端日志 traceback 逐字）**：
+```
+File ".../agent_harness/agent/runtime.py", line 663, in _drive
+File ".../agent_harness/model/fallback.py",  line 176, in ainvoke
+File ".../contextlib.py",                    line 212, in __aenter__
+AttributeError: '_AsyncGeneratorContextManager' object has no attribute 'args'
+```
+
+`fallback.py::ainvoke` 把 `slot = self._gate.slot() if self._gate is not None else nullcontext(None)`
+**只取一次**，然后在「首次尝试」和「回退重试」两处 `async with slot:` **复用同一个 CM**。
+`ModelCallGate.slot()` 带 `@asynccontextmanager`（`concurrency.py:52`），其产物是**一次性**的——
+contextlib 退出时执行 `del self.args, self.kwds, self.func`（CPython 源码注释原话：
+"only needed for recreation, **which is not possible anymore**"），二次进入即抛 `AttributeError`。
+
+**影响面（不变量 #9 被破坏）**：`runtime.py` 的 `if stream:` **else 分支**（`:663`）走 `ainvoke`。
+`run()` 传 `stream=False`（`:432`），`run_stream()` 传 `True`（`:455`）；delegate 派生的子会话走
+`child_runtime.run(...)`（`multiagent/provider.py:229`）→ **非流式**。所以
+**所有非流式 run（含全部 delegate 子会话）在主模型瞬断时永远回退不了**，直接 `model/failed` + `run/failed`。
+生产恒带闸（`model_max_concurrency` 默认 3）故必然触发。
+
+**为什么既有测试长期没抓到（精确的覆盖缺口）**：`tests/test_model_fallback.py::TestCoordinatorAinvoke`
+的用例**全部 `gate=None`**——此时走 `contextlib.nullcontext`，而 `nullcontext` **可以重复进入**，
+所以那条 `async with slot` 第二次进入是合法的。**「闸 + ainvoke 回退重试」这个组合此前零覆盖。**
+
+**修复**：新增 `_slot()` 帮助方法（每次调用取**新** CM），两处尝试各自调用它。
+改 `src/agent_harness/model/fallback.py`，并补回归锁 2 例（含 5xx 形状参数化与「回退也失败」的
+重试一次边界）。**变异验证**：把 `ainvoke` 改回复用同一个 CM → 只有新用例变红（红灯非空洞）。
+
+**真实 A/B 实证（同一触发形状、不同结局）**：
+| | 触发 | 结局 |
+| --- | --- | --- |
+| 修复前 child `1f2c2af4` | `model/fallback … reason: InternalServerError` | `model/failed(AttributeError)` → `run/failed` |
+| 修复后 child `6eed381f` | `model/fallback … reason: InternalServerError`（**同形**） | `model/completed` → `tool/result` → **`run/completed`**，`final_text` = "Python 官网网址是 https://www.python.org" |
+
+父会话 `7cf291d1` 也 `run/completed`，`final_text` = "子代理 `research_review` 已成功完成任务：…"。
+
+**门禁**：`ruff check src/ tests/` 干净 · `pytest -q` 全绿。**登记归因：后端**（前端无需改动）。
+**另记**：`fallback.py::_guarded_stream` 末尾有一处**重复的 `return stream`（死代码，非本次引入）**，
+按 §8 Scope Lock 只报告、不顺手改。
+
+---
+
+## 第七轮（2026-09-11）：停顿提示（FE-01/#148）——阈值依据 + 真机时间线
+
+### 停顿提示阈值：可复现的测量
+
+方法（可重跑）：对 `GET /api/sessions` 前 20 个会话，各取 `GET /api/sessions/<id>/events`，
+找**首个带 `time` 的 `user/message`** 到其后**首个模型活动事件**（`model/started` /
+`text/delta` / `reasoning/started` / `tool/call`）的 `time` 差，作为「首事件延迟」的代理
+（它量的是「提交 → 模型开始动弹」，不是 SSE 首帧的网络延迟）。
+
+实测（本机 `:8000`，脚本见本条记录时的 `/tmp/lat.py`）：**n=13，min 0.8s，p50 4.6s，
+max 61.0s；>15s 占 3/13，>30s 占 2/13**。样本：0.8 / 1.3 / 1.4 / 2.3 / 2.3 / 4.6 / 4.6 /
+11.3 / 12.3 / 13.5 / 23.2 / 60.5（s）。
+
+结论：30s 阈值落在真实分布的长尾上（历史上约 15% 的 run 会触发），而提示文案只陈述
+「已经多久没有新进展」这一已观测事实，所以长尾触发时它说的是真话，不是误报。
+
+### 真机时间线（真实后端 + 真实模型，Reasoning Effort=Deep）
+
+`.wait-hint` 用 250ms 采样器记录（页面内 `window.__obs`）：
+
+| 时刻（自提交） | 脉冲 | 提示 |
+| --- | --- | --- |
+| 0.3–20.3s | `思考中 · 11s` → `思考中 · 31s` | 无 |
+| **20.5s** | `思考中 · 31s` | **`已 30s 没有新进展，仍在等待模型`**（首次出现） |
+| 21.5s–24.5s | `思考中 · 32s` → `35s` | `已 31s…` → `已 34s…`（逐秒递增） |
+| ~65s | `思考中`（无秒数） | 无（**断线横幅接管**：`连接中断（connection stalled）：重试 3 次未成功` → `连接中断，正在重连…`） |
+| ~70s+ | `思考中 · 4s`（重连成功后**流龄重置**） | `已 79s 没有新进展，仍在等待模型`（空闲是**跨重连累计**的） |
+
+**三条结论**：
+1. **AC7「真机出现该说明」成立**——首 token 等了 31s 的真实 run 上，提示在空闲 30s 时
+   出现并逐秒递增；且提示秒数（30）**小于**同屏脉冲秒数（31），正是「锚空闲而非流龄」的
+   现场证明（e2e 里把这条做成了决定性断言）。
+2. **降级路径是对的**：客户端自己 give-up 时 `streaming=false`，提示让位给断线横幅/恢复
+   入口（`思考中` 无秒数 + 横幅），重连成功后提示带着累计空闲秒数回来。三种信号不互相
+   冒充，符合「等待态是展示层状态」的设计。
+3. **观察（未改，§8 Scope Lock）**：脉冲的 `思考中 · Ns` 是**流龄**、重连成功后会重置
+   （上表 `4s`），而提示的秒数是**跨重连累计的空闲**（`79s`）——两个数字可以相差很大，
+   同屏看会以为是矛盾。这是脉冲既有语义（不是本票引入）；若要消除，最小改法是提示可见
+   时隐藏脉冲秒数，但那会改动本票 AC 明确要求保留的既有计时显示，故**只登记不动**，
+   交用户决定。
+
+### 过程自查（值得记住）
+
+- **假绿一次**：给「工具执行中不提示」写的第一版 e2e，用 `route.fulfill` 的**有限响应体**
+  mock 流 → 流立刻结束 → 重连额度（3 次）十几秒内耗尽走 give-up → `streaming` 先变 false
+  → 「有提示」和「无提示」两个变体都不显示，用例**因错误的原因通过**（变异验证时抓到：
+  把相位门改回 `active` 依然全绿）。结论：**这类相位门必须在纯函数层锁**（`shouldShowWaitHint`
+  单测，变异后 2 处变红），不能靠有限体 mock 的 e2e。
+- **真实后端与 mock 的差异**：真机 `/stream` 在途会话是长连接（所以不会连锁 give-up），
+  已收口会话回放完即关（实测 237ms/21831B 正常退出）。mock 的有限体两头都不像，是上一条
+  假绿的根因。

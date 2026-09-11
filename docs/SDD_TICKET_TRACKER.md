@@ -357,3 +357,33 @@ merge 后追加。这是本批的协议偏离，记录在案。
 glm-4.5-air · 6907 tok` → `run/completed 13873 tok`）。停顿期间 UI 全程只显示诚实的 `思考中 · Ns`
 （不伪造进度、不假报错），但**没有任何「正在等待模型/即将回退」的中间态提示，且阈值偏长**——
 建议后端更早发 fallback 事件（前端已有渲染通道）。
+
+---
+
+## 第七轮（2026-09-11）：类型诚实化（#147）+ 停顿提示（#148）+ `加载更早` 覆盖锁
+
+| commit | 内容 |
+| --- | --- |
+| `ec2a961` | BUG-010/#147：`AgentEvent.step_id`/`run_id` 放宽为可选——类型不再对「键缺失」撒谎 |
+| `9517e5d` | FE-01/#148：停顿提示（展示层旁注，不新增 SessionEvent） |
+| `051aff6` | e2e：`加载更早 N 条` 真实点击锁（唯一零自动化覆盖的控件） |
+
+**grill 轮的四个决策用户未作答** → 按各题推荐项执行（放宽类型 / `step_id`+`run_id` 同票 /
+前端本地观察式 / 超时默认一律不改），已在 issue 正文与 commit message 里标注为
+「未获用户确认的默认值」，用户可事后否决。
+
+**门禁（末次实跑）**：tsc 0 · vitest **519 passed**（29 文件）· oxlint **0 errors**（37 warnings）
+· playwright **126 passed**（`--workers=2`）· vite build ✓。
+
+**真机证据**：真实后端 + 真实模型（Reasoning Effort=Deep）在一次 31s 首 token 等待上验证
+停顿提示（出现时机、秒数语义、give-up 让位、重连后累计），完整时间线见
+`docs/FRONTEND_ISSUES_LOG.md` 第七轮。
+
+**关单**：#147、#148 均已关闭（comment 内含 AC 逐条证据与残留观察）。**未 push**。
+
+**过程自查（值得记住）**：门禁的 playwright 与我另外两次 ad-hoc e2e **并发**跑，两个进程
+写同一个 `test-results/` → `ENOENT ... .playwright-artifacts-*` → 门禁假失败 4 例
+（其中 3 例是无关用例）。清掉并发、`rm -rf test-results` 后重跑全绿。**同一 worktree 里
+不要并行跑两个 playwright。**
+
+**集成提示词**：`docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。

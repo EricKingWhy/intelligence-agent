@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RUN_TERMINAL_TYPES, deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, unpairedToolCallIds } from './runState';
+import { RUN_TERMINAL_TYPES, WAIT_HINT_IDLE_SEC, deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, shouldShowWaitHint, unpairedToolCallIds, waitingHintText } from './runState';
 import { initConversation, applyEvent } from './projection';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
@@ -406,5 +406,53 @@ describe('deriveRunSummary — Inspector Overview 的状态 + 时长（单一来
     expect(summary.startedAt).toBe('2026-09-11T00:00:02.000Z');
     expect(summary.duration).toBe('3.0s');
     expect(summary.label).toBe('失败'); // 最后一次 run 的状态（与脉冲一致）
+  });
+});
+
+// ── FE-01（#148）：停顿等待提示——展示层观察，不是会话事实 ──
+
+describe('waitingHintText', () => {
+  it('阈值以下返回 null（生成态渲染与现状逐字节一致）', () => {
+    expect(waitingHintText(0)).toBeNull();
+    expect(waitingHintText(WAIT_HINT_IDLE_SEC - 1)).toBeNull();
+  });
+
+  it('恰好等于阈值即出现，并带上已等待秒数', () => {
+    const text = waitingHintText(WAIT_HINT_IDLE_SEC);
+    expect(text).not.toBeNull();
+    expect(text).toContain(String(WAIT_HINT_IDLE_SEC));
+  });
+
+  it('只说「还在等」——不预测进度/回退（零伪造：等待态不是会话事实）', () => {
+    const text = waitingHintText(95) ?? '';
+    expect(text).toContain('95');
+    for (const banned of ['%', '进度', '预计', 'ETA', '即将', '回退']) {
+      expect(text).not.toContain(banned);
+    }
+  });
+
+  it('非有限值不产提示——畸形计时不得渲染成文案', () => {
+    expect(waitingHintText(Number.NaN)).toBeNull();
+    expect(waitingHintText(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe('shouldShowWaitHint', () => {
+  it('只有「思考中 + 流仍挂着」才提示', () => {
+    expect(shouldShowWaitHint('thinking', true)).toBe(true);
+  });
+
+  it('工具执行 / 审批等待不提示——否则顶栏一边写「执行工具」一边写「仍在等待模型」', () => {
+    expect(shouldShowWaitHint('tool', true)).toBe(false);
+  });
+
+  it('终态不提示（没有停顿可言）', () => {
+    for (const s of ['completed', 'failed', 'interrupted', 'cancelled', 'idle'] as const) {
+      expect(shouldShowWaitHint(s, true)).toBe(false);
+    }
+  });
+
+  it('流已脱离不提示——我们没在听，那句「仍在等待」是断线条的地盘', () => {
+    expect(shouldShowWaitHint('thinking', false)).toBe(false);
   });
 });

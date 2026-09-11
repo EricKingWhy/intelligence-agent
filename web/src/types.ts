@@ -14,8 +14,20 @@ export interface AgentEvent {
   type: string;
   data: Record<string, unknown>;
   seq: number | null;
-  run_id: string | null;
-  step_id: number | null;
+  /** ⚠ 可能整个键缺失，但**只在历史事件路径**：`GET /api/sessions/<id>/events` 走
+   *  `SessionEvent.to_dict`，它省略值为 None 的字段（实测 59 事件里 2 条无此键：
+   *  session/started、user/message）。**SSE 帧相反**——`web/serialization.py::_envelope`
+   *  恒写这个键，无归属显式下发 `null`（实测 59/59 帧键都在）。两条路径喂同一个
+   *  `AgentEvent`，故类型取超集「可能缺失」；契约与冻结规格一致
+   *  （03_SESSION_EVENT_MODEL.md 的 `run_id?` / 03_RUNTIME_EVENT_CONTRACT.md 的
+   *  `run_id?: string | null`）。判空一律宽松 `!= null`：严格 `!== null` 会把键缺失
+   *  当有值，run_id 直接 `.slice()` 抛 TypeError。 */
+  run_id?: string | null;
+  /** 语义与超集理由同 `run_id`。⚠ 额外陷阱：模板字符串接受 `undefined`，所以
+   *  `if (e.step_id !== null) \`step ${e.step_id}\`` 仍能通过 tsc——**正是 BUG-008
+   *  的写法**（渲染出字面量 "step undefined" 与伪造 key `step:undefined`）。
+   *  本字段必须 `!= null` 判空。 */
+  step_id?: number | null;
   /** Durable-event timestamp (SessionEvent.time, present on GET /events history).
    *  SSE frames don't carry it yet — projection falls back to client clock. */
   time?: string;
