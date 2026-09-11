@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | #150 ARCH-7 单实例锁 | DONE | `9a45a20`（+ 流程锚点 `f3224d9`） |
 | #161 PromptRegistry T1 | DONE | `36fd7ef` + `a51fde2` |
-| #162 PromptRegistry T2 | TODO | |
+| #162 PromptRegistry T2 | DONE | `af6cf44` |
 | #163–#168 | TODO | |
 | #149 / #151–#160 | TODO | |
 
@@ -111,3 +111,54 @@ PRD `docs/PRD_PROMPT_REGISTRY.md` **§10.7** 的 `AssembledPrompt` 代码块只�
 - code-review 两轴：Standards 零硬违规（§10.5 正则、§10.6 算法、§10.4 表逐项核对通过）、
   Spec 零缺项（12 条模板测试 + 13 条注册表测试逐条存在且断言符合票面）。
   收口两条 judgement call：scope 校验单点化、补孤立 `}}` 前置分支测试。
+
+---
+
+## 3. #162 PromptRegistry T2 组装与校验管线
+
+**commit**：`af6cf44`
+
+### 改了什么（仍为**纯新增**，未碰生产路径）
+
+- `registry.py` 追加 `PromptRegistry.assemble(scope, variables)` 与模块级
+  `run_self_check(registry, scopes)`；`__init__.py` 增加两者导出。
+- 新增 `tests/prompt/test_assemble.py`（15）、`tests/prompt/test_self_check.py`（6）。
+
+### 必须守住的语义
+
+- **单 section 时产物 = 原文逐字节**（`"\n\n".join([x]) == x`）。T3 的「零行为变化」
+  全靠这一条——迁移后的 prompt 文本必须与原内联字符串 `repr` 相等。
+- 分隔符固定 `"\n\n"`；三个 `Target` **各自独立分区**，空段是 `""` 而非 `None`。
+- **R4 不在 `assemble` 内重复实现**（`render` 已抛 `missing_variable`）。
+- R5 只对 `profile:` 前缀 scope 要求 identity。
+- `run_self_check` **不吞异常**（fail-fast 是它的全部意义），变量按 `requires`
+  自动填空串——**不能改成传 `{}`**，否则 T4 的 `aux:fork_tail`（含 `{{tail_text}}`）
+  会在 import 期误报 `missing_variable`。
+
+### ⚠ 三条给 T3 的交接要点
+
+1. **`builtin` 必须走 `registry.register(...)`**：§10.8 把"模板语法"列为自检职责，
+   但实际由 `register`（R3a）承担——坏模板进不了 `_sections`，自检单独发现不了语法错误。
+2. **T3 需自建 scope 集推导**（「注册表里所有非 `*` 的 scope」）。T2 的
+   `run_self_check` 签名按票面冻结为接收 `scopes` 参数，未提供 `_declared_scopes`。
+3. PRD 需随 T3 补齐两处：§10.7 的 `AssembledPrompt` 代码块（补 `fragment_text`）、
+   §10.2 导出清单（补 `run_self_check`、`DEFAULT_REGISTRY`）。
+
+### 两条票面测试因结构不可达而改形（**已报告，非偷工**）
+
+1. `test_assemble_duplicate_identity_raises`：`_sections` 以 section 名为 key 且 R1
+   拒重名 → 「两条同名 identity」构造不出来，`len(ids)` 只可能 0 或 1，R5 的 `!= 1`
+   实际退化为 `== 0`。代码**保留 `!= 1`**（PRD §10.7 逐行照抄 + 防将来换分层注册时
+   静默放行），改为新增 `test_duplicate_identity_section_cannot_be_registered`
+   锁住该不可达性的**成因**（重名注册必抛 `duplicate_section`）。
+2. `test_self_check_still_raises_on_bad_template_syntax`：语法错误在 register 期已拦，
+   改名 `test_bad_template_rejected_at_registration`。**若谁把 register 的语法校验去掉，
+   这两条会红**，提醒职责必须补回自检。
+
+### 验证证据
+
+- 真实 Python 会话跑通组装管线：单 section `repr` 等价 `True`、三段互不混装、
+  空段 `== ""` 且 `is not None`、缺 identity 自检 fail-fast 抛 `missing_identity`、
+  含变量 scope 自检不误报。
+- `tests/prompt/` 48 passed；ruff clean；`git diff --check` clean。
+- 全量 pytest `1676 passed / 10 skipped / 39 deselected / 0 failed`。
