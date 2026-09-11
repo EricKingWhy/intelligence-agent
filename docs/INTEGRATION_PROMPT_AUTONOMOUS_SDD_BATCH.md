@@ -358,3 +358,41 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 - **无新 env / 配置项**：`include_tool_guidance` 是构造参数，装配点固定传 `True`；集成方无需改 `.env`。
 - **待用户裁定的文本重复**（已上报 #166，**不是 bug，不要顺手删**）：`子代理看不到你们的对话历史` 出现在 4 处（`profile:main:identity`、`DelegateTool.prompt_guidance`、`_DelegateArgs.task` description、`DelegateTool.description`）。删除方案已列在 issue comment，动 profile 正文会连带改 T3 逐字节基线。
 - T7（运行时上下文快照，order 9500）与 T8（纠偏/框架消息，order 9000~9200）都会往同一张 order 表加 section，**在 persona 后缀 10200 之前**，与本票的 2000 无冲突。
+
+---
+
+## §8 T7 — #167 运行时上下文快照（commit `1a4c41f`）
+
+### 做了什么
+
+把「当前工作目录 / 操作系统 / 日期 / 模型 / 可用工具」（PRD Q19=C）作为**非持久化** `meta_user` 段注入，位置在**当前用户消息之前**。
+
+| 文件 | 变化 |
+| --- | --- |
+| `src/agent_harness/prompt/builtin.py` | 新增 section `runtime:context_snapshot`（META_USER / 9500 / 非 `*`）+ 五个变量声明 |
+| `src/agent_harness/context/builder.py` | 新增 `runtime_context_provider`（默认 `None`）+ `_inject_runtime_context()` |
+| `src/agent_harness/assembly.py` | 渲染闭包 `_render_runtime_context()` |
+| 3 个新测试文件 | 30 个用例（含污染边界与防假绿对照） |
+
+### 集成方【不要】做的事
+
+1. **不要在 `_inject_runtime_context` 里加 `session.append`**（哪怕"顺手记一笔好排查"）。这一条会同时复活三个污染面：JSONL 永久滞留、`derive_messages` 每轮重放累积、`memory/extractor.py` 的 `has_user_message` 降级保护失效（注入内容可被洗成跨会话 USER 记忆）。这是本票唯一绝对不能犯的错。
+2. **不要给 `memory/extractor.py` 加"过滤注入内容"的过滤器**。本设计用"快照不在 events 里"从根上避免；加过滤器是**错的**方向（那是 T8 针对既有 `injected_by` 事件的另一件事）。
+3. **不要把快照改成 `SystemMessage` 或拼进 `system_prompt`**。前者会让易变日期毁掉 system-role 的 prefix cache；后者会破坏 T5/T6 与 C4/C5/C7 的逐字节契约。
+4. **不要改 `ContextBuilder` 既有参数的名称与位置**。`runtime_context_provider` 是 `*` 之后的 keyword-only、默认 `None`；改成位置参数会影响大量既有构造点。
+5. **不要把 `tools` 改成全量 registry**。快照必须用**收窄后**的 registry，否则 coding profile 会列出它调不到的工具（与 T6 收集 guidance 同一原则）。
+6. **不要把 `model` 改成 `settings.model_name`**。用户用 `model_name` 参数选目录里的模型时后者可能为空，快照就会报一个假模型名。用 `config.model_name`。
+7. **不要为了"省一次计算"缓存快照文本**。provider 是 callable 且每次 build 调用一次是**契约**（跨午夜会话需要新日期）；缓存会让日期过期。
+
+### 证据
+
+- 门禁：`ruff` clean；全量 pytest **1799 passed / 10 skipped / 39 deselected / 0 failed**；`git diff --check` clean。
+- 冻结契约：`git diff HEAD -- tests/context/test_builder_system_prompt.py tests/agent/test_system_prompt_wiring.py tests/test_assembly_agent_profile.py` **输出为空**（断言逐字未改）。
+- 真实验证：真 turn 下模型收到 `[System(main 身份), Human(快照), Human(当前用户)]`；三层持久化面实测干净且有防假绿对照。
+- 变异验证：把快照 `append` 成 USER 事件 → 7 条边界测试变红（含修复后的等价性测试）；还原后全绿。
+
+### 前向兼容注意
+
+- **无新 env / 配置项**：Q19 清单是设计决定，不引入旋钮（PRD §8 已把"清单可配置"列为 DEFER）。
+- **待用户裁定的设计问题**（已上报 #167，**不要擅自实现**）：child（`AgentFactory` 构造的子代理 runtime）目前**没有**快照。票面只给了父组装点、AC 未要求。若要给 child 也加，接线点在 `agent/factory.py`（那里已有 `_primary_model_name` 与 `child_registry`）。
+- **T8 会往同一张 order 表加 3 条 section**（`frame:untrusted_data` 9000 / `corrective:tool_failure_guard` 9100 / `frame:recovery_skipped` 9200），全部在快照 9500 **之前**、persona 后缀 10200 之前。T8 还要改 `memory/extractor.py` 剔除 `injected_by` 事件——**这正是本票刻意不加过滤器的原因**，两者不要混做。
