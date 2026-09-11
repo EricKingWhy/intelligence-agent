@@ -1,7 +1,21 @@
-"""后台 Memory 抽取：LLM → 确定性规则 → 空；取消不吞掉。"""
+"""后台 Memory 抽取：LLM（含非严格 JSON 修复）→ 确定性规则 → 空；取消不吞掉。
+
+**降级必须可见**：每次回退都通过 ``ExtractionOutcome.degraded_reason`` 上报原因
+（只带异常类型名，不带原始消息——模型输出可能夹带密钥），由调用方落
+``memory/degraded`` 事件。此前回退完全静默，于是中文模型把 JSON 分隔符写成全角
+引号（``“scope”``）导致严格校验 100% 失败、抽取无声退回正则（真机连测 5/5，
+BUG-012）——记忆质量掉到"关键词 + 终答"水平而无人知道。
+
+三层：LLM → （修复后重校验）→ 纯规则 → 空。修复只做**字符级**规范化
+（围栏 / 全角引号 / 尾随逗号），且**修复结果必须重校验通过才采用**——修不好就
+老老实实回退，绝不把改坏的文本当候选存下去。
+"""
 
 import asyncio
 import json
+import logging
+import re
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,8 +24,20 @@ from pydantic import BaseModel, Field, TypeAdapter
 from agent_harness.memory.types import MemoryScope
 from agent_harness.session import USER_MESSAGE, SessionEvent
 
+logger = logging.getLogger("agent_harness.memory")
+
 _MAX_EXTRACT_EVENT_CHARS = 1000
 _MAX_EXTRACT_EVENTS = 50
+
+#: markdown 代码围栏（模型爱把 JSON 包起来），首尾各剥一次。
+_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", flags=re.IGNORECASE)
+#: 全角/弯引号 → ASCII（中文模型把 JSON 分隔符写成全角是常态，不是"答错格式"）。
+_CURLY_TO_STRAIGHT = str.maketrans({
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+    "\u2018": "'", "\u2019": "'",
+})
+#: 尾随逗号（`[...,]` / `{...,}`）。
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 
 
 class _Candidate(BaseModel):
@@ -23,14 +49,37 @@ class _Candidate(BaseModel):
     importance: float = Field(ge=0, le=1)
 
 
+@dataclass(frozen=True)
+class ExtractionOutcome:
+    """一次抽取的结果 + 降级原因（``None`` = LLM 路径成功）。
+
+    ``degraded_reason`` 形如 ``heuristic_fallback: ValidationError``：只有阶段 +
+    异常**类型名**。原始异常消息会带上模型原始输出（可能夹带密钥/隐私），不得进入
+    事件流——与 writeback 的脱敏不变量一致。
+    """
+
+    candidates: list[tuple[MemoryScope, str, dict]] = field(default_factory=list)
+    degraded_reason: str | None = None
+
+
+def _repair_json(text: str) -> str:
+    """字符级修复常见的 LLM 非严格 JSON（不保证可解析，调用方必须重校验）。
+
+    不做结构猜测：修完仍要过 schema 校验，修不好就回退——"降级"优于"静默篡改"。
+    """
+    repaired = _JSON_FENCE_RE.sub("", text.strip())
+    repaired = repaired.translate(_CURLY_TO_STRAIGHT)
+    return _TRAILING_COMMA_RE.sub(r"\1", repaired)
+
+
 class MemoryExtractor:
     def __init__(self, model: Any, timeout_seconds: float = 15.0) -> None:
         self._model = model
         self._timeout = timeout_seconds
 
-    async def extract(self, events: list[SessionEvent]) -> list[tuple[MemoryScope, str, dict]]:
+    async def extract(self, events: list[SessionEvent]) -> ExtractionOutcome:
         if not events:
-            return []
+            return ExtractionOutcome()
         try:
             async with asyncio.timeout(self._timeout):
                 response = await self._model.ainvoke([
@@ -41,7 +90,7 @@ class MemoryExtractor:
                 ])
             if getattr(response, "tool_calls", None):
                 raise ValueError("Memory extraction cannot call tools")
-            candidates = TypeAdapter(list[_Candidate]).validate_json(response.content)
+            candidates = self._parse_candidates(response.content)
             # provenance 约束（C4）：窗口内没有任何 user/message 时，LLM 声明的
             # USER 候选降级为 SESSION——纯工具输出窗口里的注入指令不能被洗成
             # 跨会话（USER）记忆。降级带显式 provenance 标记，可观察、可追溯。
@@ -54,12 +103,35 @@ class MemoryExtractor:
                     scope = MemoryScope.SESSION
                     metadata["provenance"] = "demoted_no_user_message"
                 results.append((scope, c.content, metadata))
-            return results
-        except Exception:  # noqa: BLE001 — 结构/模型失败走纯规则，异常文本不持久化。
+            return ExtractionOutcome(results)
+        except Exception as error:  # noqa: BLE001 — 结构/模型失败走纯规则，异常文本不持久化。
+            error_type = type(error).__name__
+            logger.warning("Memory extraction degraded to heuristic: %s", error_type)
             try:
-                return self._heuristic_extract(events)
-            except Exception:  # noqa: BLE001
-                return []
+                return ExtractionOutcome(
+                    self._heuristic_extract(events), f"heuristic_fallback: {error_type}"
+                )
+            except Exception:  # 规则路径也失败 → 空结果（不伪造候选）
+                logger.exception("Memory heuristic extraction failed")
+                return ExtractionOutcome([], f"heuristic_unavailable: {error_type}")
+
+    @staticmethod
+    def _parse_candidates(content: Any) -> list[_Candidate]:
+        """严格解析；失败则修复后**重校验**，只有重校验通过才采用修复结果。"""
+        payload = content if isinstance(content, str) else str(content)
+        adapter = TypeAdapter(list[_Candidate])
+        try:
+            return adapter.validate_json(payload)
+        except ValueError as strict_error:
+            repaired = _repair_json(payload)
+            if repaired == payload:
+                raise
+            try:
+                candidates = adapter.validate_json(repaired)
+            except ValueError:
+                raise strict_error from None
+            logger.info("Memory extraction payload needed JSON repair (model returned non-strict JSON)")
+            return candidates
 
     @staticmethod
     def _clip_events(events: list[SessionEvent]) -> list[dict]:

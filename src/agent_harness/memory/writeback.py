@@ -14,6 +14,8 @@ logger = logging.getLogger("agent_harness.memory")
 
 class MemoryWriteback:
     def __init__(self, capability: MemoryCapability, extractor: Any, timeout_seconds: float = 30.0) -> None:
+        # extractor 端口：``async extract(events) -> ExtractionOutcome``
+        # （候选 + 降级原因；原因非 None 时落 memory/degraded，见 _write）。
         self._capability = capability
         self._extractor = extractor
         self._timeout = timeout_seconds
@@ -29,7 +31,18 @@ class MemoryWriteback:
         token = memory_session_var.set(session.session_id)
         try:
             async with asyncio.timeout(self._timeout):
-                candidates = await self._extractor.extract(events)
+                outcome = await self._extractor.extract(events)
+                candidates = outcome.candidates
+                if outcome.degraded_reason is not None:
+                    # 抽取回退必须可观测（BUG-012 真机验收发现）：LLM 路径失败会静默
+                    # 把记忆质量降到"关键词 + 终答"的正则水平，此前只在日志里留痕、
+                    # 事件流毫无痕迹。reason 只含阶段 + 异常类型名（脱敏不变量同上）。
+                    logger.warning("Memory extraction degraded: %s", outcome.degraded_reason)
+                    session.append(
+                        MEMORY_DEGRADED,
+                        {"operation": "extraction", "reason": outcome.degraded_reason},
+                        run_id=next((e.run_id for e in events if e.run_id), None),
+                    )
                 stored, failed = 0, 0
                 for scope, content, metadata in candidates:
                     try:
