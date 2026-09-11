@@ -30,7 +30,8 @@ uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带�
 | --- | --- | --- | --- | --- |
 | OBS-011 | P2 | ✅ 完成 | `d4eb17e` | 子进程输出按产出方编码解码，GBK 乱码不再固化进 JSONL |
 | OBS-015 | P2 | ✅ 完成 | `cb0e008`+`4580a69`+`274afcf`（**feat/frontend**） | 审批卡 catch 不再乐观翻转；404 语义订正 + fail-safe 回归锁 |
-| OBS-012 | P2 | ⏳ 待做 | — | `bash` 工具实为 cmd.exe：描述诚实化 + 测试锁 |
+| OBS-012 | P2 | ✅ 完成 | `d9bef3a` | bash 工具描述声明真实解释器（POSIX/容器=sh，Windows=cmd.exe），不再谎称 bash |
+| OBS-016 | P2 | 🆕 待定 | — | **本轮新发现（同源缺陷，Scope 外）**：`tools/read.py:140` 超长行提示仍教模型用 POSIX 专有 `sed`/`head -c`/`tail -c` |
 | OBS-013 | P2 | ⏳ 待做 | — | provider 退化重复：护栏或登记已知风险 |
 | OBS-009/014 | — | ⏳ 待做 | — | TIMEOUT `retryable` 语义 + 文案矛盾 |
 | OBS-008 | — | ⏳ 待做 | — | model/failed 吞 traceback |
@@ -185,3 +186,89 @@ cd D:\intelligence-agent-frontend/web
 npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
 # 门禁基线：vitest 501 passed / oxlint 35 warnings 0 errors / playwright 118 passed
 ```
+
+---
+
+## 4. OBS-012：`bash` 工具实为 cmd.exe / sh——工具描述诚实化
+
+**状态**：✅ 完成，commit `d9bef3a`（分支 `feat/backend`，未 push）。
+
+### 根因
+
+工具名 `bash` 是历史名称，**没有任何后端真的调 bash**：
+
+| 后端 | 实际机制 | 真实解释器 |
+| --- | --- | --- |
+| `LocalSubprocessSandbox`（Windows） | `Popen(shell=True)` → CPython 用 `%COMSPEC%` | `cmd.exe` |
+| `LocalSubprocessSandbox`（POSIX） | `Popen(shell=True)` → CPython 用 `/bin/sh` | `/bin/sh` |
+| `DockerSandbox` | 硬编码 `["/bin/sh", "-lc", command]` | `/bin/sh` |
+
+模型按工具名写 bash 语法，会被真实解释器**直接拒绝**：本机实证 cmd.exe 对 bash 语法报
+「此时不应有 i。」——OBS-011 的乱码复现正是这条报错，整次工具调用作废。
+
+规范面：`05_SANDBOX_CODING_TOOLS.md` §117 只规定 bash 工具返回 exit_code/stdout/stderr，
+**对 Windows/shell 选择无任何要求** → 这是代码诚实性问题，不是规格冲突。
+
+### 修法（不改执行语义，只让声明与真相一致）
+
+1. `Sandbox` 新增**非抽象** property `shell_description`（**不进 ADR-0001 冻结的
+   6 个抽象方法契约**——抽象化会让既有/第三方后端无法实例化）。基类保守默认 `"sh"`。
+2. `LocalSubprocessSandbox` → `%COMSPEC%` 的 basename（剥离可能的引号、空值回落
+   `cmd.exe`）；`DockerSandbox` → `/bin/sh`（与 exec 一致）。
+3. `BashTool.description` 按 Sandbox 的声明如实写出解释器名并否认 bash；声明为 cmd 系时
+   追加 cmd 专有陷阱（单引号非引用符 / `$VAR` 不展开 / `cat`·`ls` 不可用 / `2>/dev/null` 无效）。
+   **不用 `os.name` 猜**：宿主是 Windows 时 Docker 容器内仍是 sh。
+
+### 交付物
+
+| 文件 | 性质 |
+| --- | --- |
+| `src/agent_harness/sandbox/base.py` | 新增非抽象 property `shell_description` |
+| `src/agent_harness/sandbox/local.py` | 覆写：COMSPEC basename / `/bin/sh` |
+| `src/agent_harness/sandbox/docker.py` | 覆写：`/bin/sh` |
+| `src/agent_harness/tools/bash.py` | `description` 据声明合成（含 cmd 陷阱） |
+| `tests/tools/test_coding_tools.py` | 新增 `TestBashToolShellHonesty`（10 例，1 例平台跳过） |
+| `tests/agent/test_context_runtime.py` | `Mock(spec=Sandbox)` 显式声明 shell（假件补全） |
+
+### 门禁与证据
+
+- ruff clean；全量 pytest **1537 passed / 10 skipped / 39 deselected / 0 failed**。
+- 变异验证：① 还原旧描述 → **3 个用例变红**；② 把 Local 硬编码成 `"cmd.exe"` →
+  「取自 COMSPEC」用例变红（该用例注入**带引号的独有值** `"C:\opt\weird\mystery-shell.exe"`，
+  同时锁住引号剥离——初版断言「与 COMSPEC 相等」在本机无法区分硬编码，已按独立复核意见加强）。
+- 独立 code-review：**SOUND / approve，零 P0/P1/P2（本 scope 内）**。复核实证
+  `shell=True` 在本机确实走 cmd.exe（`echo %OS%`→`Windows_NT`、`ver`→Windows 版本串），
+  并确认改描述**不破坏任何工具 schema/提示快照**（无测试断言该文本）。
+
+### 有意未做（附理由）
+
+- **不真去调 bash**（不探测 Git Bash / WSL）：宿主依赖强、Alpine/Debian 精简镜像无 bash、
+  且属执行/安全语义变更，超出 OBS-012 scope。
+- **不改工具名 `bash`**：`"bash"` 是载荷（`profiles.py:_CODING_TOOLS`、前端
+  `ToolCard`/`StepDetail` 按 `tool.name === 'bash'` 渲染、审批/权限测试、已落库 SessionEvent
+  工具名）——改名是跨端破坏性变更。
+- 两项 P3 保留（已在提交说明与复核中记录理由）：基类默认 `"sh"` 可能被忘记覆写的第三方
+  后端误用（有 docstring 声明，且当前两个具体后端都覆写）；`"cmd" in shell.lower()` 是宽松
+  子串门（`tccmd.exe` 误触发无害；COMSPEC 指向 PowerShell 时描述诚实但无语法提示）。
+
+## 5. OBS-016（本轮新发现，**未修**，Scope 外）：`ReadTool` 的超长行提示仍教模型用 POSIX 专有命令
+
+**位置**：`src/agent_harness/tools/read.py:140`。
+
+单行超过 `_READ_MAX_BYTES` 时，ReadTool 往模型可见的 `content` 里追加：
+
+```text
+Use bash with 'sed -n '{start}p' <file> | head -c {_READ_MAX_BYTES}' plus 'tail -c +N' to read further segments.
+```
+
+在本机（Windows 本机 → cmd.exe）`sed` / `head -c` / `tail -c` **都不存在**，cmd.exe 会回
+`'sed' is not recognized...`。这与 OBS-012 是**同一类缺陷**（模型可见文案描述了一个不存在的
+解释器环境），目标场景同样会复现。
+
+**为什么本轮未顺手修**：① 属另一个工具（ReadTool），不在 OBS-012（bash 工具描述）scope 内
+（AGENTS.md §8 Scope Lock）；② 该字符串被前端 handoff 文档 `docs/HANDOFF_FRONTEND_SYNC.md:46`
+当作契约引用，改它需要跨端同步。**独立复核也建议只报告不修**。
+
+**建议的最小修法**（交给集成 AI 排期）：把该提示改成后端无关的表述（如「用 shell 工具按
+字节/行切片读取后续内容」），或按 `sandbox.shell_description` 给对应平台的示例；若采用后者，
+需同步 `docs/HANDOFF_FRONTEND_SYNC.md:46`。
