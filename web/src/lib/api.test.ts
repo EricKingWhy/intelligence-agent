@@ -2,7 +2,16 @@
  *  fetch 全局 mock；auth.getToken 在 node 下走 try/catch 兜底（无 localStorage）。 */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModels, getSessionEvents, NotFoundError, UnauthorizedError, sendMessage, startSession } from './api';
+import {
+  getModels,
+  getSessionEvents,
+  NotFoundError,
+  UnauthorizedError,
+  AlreadyResolvedError,
+  postApproval,
+  sendMessage,
+  startSession,
+} from './api';
 import { onUnauthorized } from './auth';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
@@ -224,3 +233,34 @@ describe('401 → UnauthorizedError + onUnauthorized 广播', () => {
     expect(seen).toEqual(['Missing identity token']);
   });
 });
+
+/** OBS-015：postApproval 必须区分幂等已决（409）与真失败（5xx/网络）。
+ *  幂等 → AlreadyResolvedError（调用方翻卡片）；真失败 → 普通 Error（保持 pending）。 */
+describe('postApproval — 409 幂等 vs 500 真失败（OBS-015）', () => {
+  it('200 → 返回 resolved 结果', async () => {
+    captureFetch(200, { status: 'resolved', approval_id: 'ap-1', decision: 'approve_once' });
+    const result = await postApproval('s1', 'ap-1', true);
+    expect(result).toEqual({ status: 'resolved', approval_id: 'ap-1', decision: 'approve_once' });
+  });
+
+  it('409 → 抛 AlreadyResolvedError（调用方据此翻卡片为幂等成功）', async () => {
+    captureFetch(409, { detail: 'Approval already resolved' });
+    const err = await postApproval('s1', 'ap-1', true).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AlreadyResolvedError);
+  });
+
+  it('500 → 抛普通 Error（不是 AlreadyResolvedError）', async () => {
+    captureFetch(500, { detail: 'Internal Server Error' });
+    const err = await postApproval('s1', 'ap-1', true).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(AlreadyResolvedError);
+  });
+
+  it('422 → 抛普通 Error（无效决策，不是幂等成功）', async () => {
+    captureFetch(422, { detail: 'Invalid decision' });
+    const err = await postApproval('s1', 'ap-1', true).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(AlreadyResolvedError);
+  });
+});
+

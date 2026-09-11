@@ -21,6 +21,13 @@ export class UnauthorizedError extends Error {}
  *  陈旧 id 分支）。 */
 export class NotFoundError extends Error {}
 
+/** 409 = 审批已决（幂等成功）——OBS-015 修复引入。
+ *
+ *  后端 `PendingApprovalQueue.resolve()` 对同一 approval_id 的第二次决策返回 409。
+ *  这**不是**错误：用户的意图已经生效，卡片应翻到「已批准/已拒绝」。
+ *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
+export class AlreadyResolvedError extends Error {}
+
 /** FastAPI 错误体 {detail} 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（两处 401/409 消费共享的单一实现）。 */
 async function readErrorDetail(res: Response): Promise<string> {
@@ -272,8 +279,10 @@ export async function streamSession(sessionId: string, afterSeq: number): Promis
 /** POST /api/sessions/{id}/approve — interactive approval decision (#37, PRD §2.2).
  *  Backend resolves the pending approval via PendingApprovalQueue.resolve().
  *  Response (200): {"status":"resolved","approval_id":"...","decision":"approve_once"}
- *  404 = approval_id not found; 409 = already resolved; 422 = invalid decision.
- *  Idempotent for already-resolved (409 is non-fatal for UI). */
+ *  409 = already resolved (idempotent success → AlreadyResolvedError);
+ *  other non-ok = real failure (decision did NOT reach backend).
+ *  OBS-015 fix: the caller must distinguish these two — flipping the card to
+ *  "decided" on a network error is a dangerous false positive for security. */
 export async function postApproval(
   sessionId: string,
   approvalId: string,
@@ -288,7 +297,8 @@ export async function postApproval(
       decision: approved ? 'approve_once' : 'deny',
     }),
   });
-  if (!res.ok) throw new Error(`approve ${res.status}`);
+  if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
+  if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }
 
