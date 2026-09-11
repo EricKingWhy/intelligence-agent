@@ -5,7 +5,19 @@
 > **红线**：永不 force-push / rebase / reset --hard；凭据零泄漏（`.env` 值不进任何输出/提交）；
 > 每次合并动作前确认 worktree 与分支（§14.2）；冲突后**立即停止**自动解决并按 §14.7 逐文件分析；
 > 一次只合一个分支（§14.9：先 backend → main 验证完，再重新分析 frontend）。
-> **本文件状态**：逐票追加——已完成票在对应 § 里给出 commit 与门禁；在途票明确标注「在途」。
+> **本文件状态**：**4 票全部完成**（OBS-016 / ARCH-4 / ARCH-4b / ARCH-5），全部已关单、
+> 全部未 push（集成 AI 执行合并）。逐票细节见 §1–§4；集成顺序见 §5。
+
+## 本批总表
+
+| 票 | issue | 后端 commit | 前端 commit | 状态 |
+| --- | --- | --- | --- | --- |
+| OBS-016 read 超长单行提示去 POSIX 专有命令 | #141 | `aa29562` | `1fac807` + `43b9ffd` | ✅ 跨端完成 |
+| ARCH-4 `list_sessions` 返回领域 dataclass | #143 | `2ea83d4` | —（纯后端） | ✅ 完成 |
+| ARCH-4b `/api/sessions` 补 `trace_url` | #142 | `a0f86a4` | `4c38c69` + `ef3f7c8` | ✅ 跨端完成 |
+| ARCH-5 领域异常→HTTP 映射单源化 | #144 | `87fc388` | —（纯后端） | ✅ 完成 |
+
+（另有各票的 docs commit：PHASE_STATUS / 本文件 / 前端 tracker，见各 § 末尾。）
 
 ---
 
@@ -14,13 +26,15 @@
 | 用途 | 目录 | 分支 | 本批 tip |
 | --- | --- | --- | --- |
 | 集成主战场 | `D:\intelligence-agent` | `main` | 以实际为准 |
-| 后端施工区 | `D:\intelligence-agent-backend` | `feat/backend` | `aa29562`（+ 本文件所在 docs commit） |
-| 前端施工区 | `D:\intelligence-agent-frontend` | `feat/frontend` | `43b9ffd` |
+| 后端施工区 | `D:\intelligence-agent-backend` | `feat/backend` | 以移交时 `git log -1` 为准（本批最后一票 `87fc388` + docs commit） |
+| 前端施工区 | `D:\intelligence-agent-frontend` | `feat/frontend` | 以移交时 `git log -1` 为准（本批最后一票 `ef3f7c8`） |
 
 - **拓扑**：`D:\intelligence-agent-frontend` 是**独立 clone**（自带 `.git`），不是 worktree；`D:\intelligence-agent-backend` 才是 worktree。
-- **origin/main 基线**：两 clone 都看到 `63db650`。
-- **后端领先** `origin/main` **8 commits**（本批之前 OBS-008/010/011/012/013/015 + 架构深化三连）。
-- **前端相对 `origin/main`**：基线 `274afcf` 是 `63db650` 的**严格祖先**；本批在其上加 2 commits（`1fac807`、`43b9ffd`）。两边**改动文件集不相交**（main 那 18 个 commit 只动 backend/`docs/PHASE_STATUS.md`，本批只动 `web/src/lib/` 与两处 docs）→ 合并预期零冲突，但**仍需按 §14.9 顺序做，且后端合入后重新 `fetch`/`diff`/`merge-base` 再判前端**。
+- **origin/main 基线**：本批开始时两 clone 都看到 `63db650`。
+- **前端相对 `origin/main`**：基线 `274afcf` 是 `63db650` 的**严格祖先**；本批在其上加 4 commits（OBS-016 两个 + ARCH-4b 两个）。两边**改动文件集不相交**（main 那 18 个 commit 只动 backend 与 `docs/PHASE_STATUS.md`，本批前端只动 `web/src/lib/`、`web/e2e/*.spec.ts` 与会话 docs）→ 合并预期零冲突，但**仍需按 §14.9 顺序做，且后端合入后重新 `fetch`/`diff`/`merge-base` 再判前端**。
+- **⚠ 后端内部的重叠改动**：ARCH-4（#143）与 ARCH-4b（#142）都改 `session/store.py` + `web/app.py` 的同一区域
+  （「改返回类型」与「增加字段」正交）。两票已在 `feat/backend` 上先后提交、**无冲突**；集成 AI 只需按顺序
+  快进即可，但若单独 cherry-pick 其中一票，需注意另一票的上下文依赖。
 
 ---
 
@@ -218,13 +232,81 @@ Pydantic `SessionSummary`。中间那层 untyped dict 是前端契约静默漂�
 
 ---
 
-## 4. ARCH-5（#144）：领域异常→HTTP 映射单源化 —— ⏳ 在途
+## 4. ARCH-5（#144）：领域异常→HTTP 映射单源化 —— ✅ 已完成
 
-`web/app.py` 有 9 处重复的「领域异常 → HTTP 状态」阶梯（行号见 issue #144）。**动手前必须逐处
-审计**：`approve` 端点的 404 有四个不可区分来源（OBS-015 记录），且各 handler 可能只覆盖子集
-——不能盲目合并同一张表。
+**commit `87fc388`**（`feat/backend`）
 
-**完成时本节补齐**：commit、逐 handler 审计表、门禁数字。
+### 4.1 问题
+
+11 个 handler（`app.py` 10 + `lineage.py` 1）各自重述同一段「领域异常 → status + detail」
+阶梯，共 **37 个 except 臂**。后果：新增一个领域异常要改每一处；同一个异常在不同 handler
+给出不同状态码不会被任何检查发现（翻译层事实存在，却没有 home）。
+
+### 4.2 审计结论（AC#3）
+
+**⚠ issue 只列了 9 处（`app.py`），实际是 11 个 handler / 37 个臂 / 13 个异常。**
+复核方式：`git diff HEAD | grep -c '^-\s*except '` = 37 → `^+` = 11。多出的两处同形阶梯：
+
+- `POST /api/sessions`（`create_session`：`WorkspaceNameInvalid` + `InvalidDecision`）；
+- `lineage.py` 的 `POST /api/sessions/{id}/forks`（4 臂）。
+
+不收进来就谈不上「单一映射源」，故一并处理（同层超集、零契约变化）。
+
+**关键发现：每个异常在所有 handler 里状态码一致** —— 这正是可单源化的前提。
+
+| status | 异常 |
+| --- | --- |
+| 422 | InvalidSessionId, WorkspaceNameInvalid, InvalidDecision, UnknownModel, InvalidForkBoundary |
+| 404 | SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, QueueItemNotFound |
+| 409 | ActiveRunConflict, RecoveryConflict, ApprovalAlreadyResolved, SteerTargetNotFound |
+
+两个**不得「顺手统一」**的特例（已写进契约）：
+- `approve` 的 404 有**三个不可区分来源**（SessionNotFound / ApprovalQueueMissing /
+  ApprovalRequestMissing）—— OBS-015；
+- `ApprovalAlreadyResolved` 是 **409 幂等已决**（可区分），不是 404。
+
+逐端点异常集合表见 `src/agent_harness/web/domain_errors.py` 模块 docstring。
+
+### 4.3 修法
+
+新增 **`src/agent_harness/web/domain_errors.py`** 作为翻译层的唯一 home：
+`_DOMAIN_ERROR_STATUS`（13 条，覆盖全部 `SessionServiceError` 子类）+ `http_error(exc)`。
+每个 handler 的阶梯从 N 臂收敛为 **1 臂**：
+
+```python
+except (<本端点翻译的异常>) as e:
+    raise http_error(e) from e
+```
+
+**为什么保留 per-endpoint 的 except 元组**（两个被否决的方案 + 理由）：
+
+| 方案 | 否决理由 |
+| --- | --- |
+| FastAPI 全局 `exception_handler` | 会把整张表应用到**每个**端点，使本来只会 500 的意外异常突然变成 404/422——issue 边界明确禁止「引入该端点本来不产生的状态码」。每端点用**自己的元组**声明子集，语义不变。 |
+| 装饰器 | app.py / lineage.py 都启用 `from __future__ import annotations`，注解是字符串；包装函数定义在别的模块会改变 `__globals__`，FastAPI 的 `get_type_hints` 解析 `ForkRequest`/`ResumeRequest` 这类本模块名会 **NameError**。收益不抵风险。 |
+
+### 4.4 验收标准核对
+
+| # | 标准 | 状态 |
+| --- | --- | --- |
+| 1 | 阶梯收敛到单一映射源；handler 内只剩传输特有分支 | ✅ 37 臂 → 11 臂 |
+| 2 | 所有既有状态码行为不变（既有 web 测试零改动通过即证据） | ✅ `tests/test_web_api.py` + `tests/web/*` 零改动通过（仅新增映射测试文件）；`detail=str(e)` 与 `raise … from e` 链保留 |
+| 3 | 审计结论写进代码/文档（含 approve 四来源差异） | ✅ `domain_errors.py` docstring 表（**注意**：issue 说的「9 处」实际为 11 handler / 37 臂，已订正；approve 的表述订正为「三个 404 + 一个可区分 409」） |
+| 4 | ruff + 全量 pytest 绿 | ✅ 1578 passed / 10 skipped / 0 failed |
+
+- 变异验证（已还原）：把表里 `SessionNotFound` 改成 418 → **16 个既有用例转红**（跨
+  `test_web_api` / `multiturn` / `stream` / `recover`）→ 证明该表是 11 个 handler 的
+  **活映射源**（不是文档），且既有测试确实覆盖这些状态码。
+- 新增测试 3 例（`tests/web/test_domain_error_mapping.py`）：① `_all_subclasses` 遍历断言
+  每个领域异常都已登记（漏登记先红——`http_error` 直接索引不猜）；② 审计契约逐条钉住
+  13 个状态码；③ `http_error` 的 status/detail 投影。
+- 两轴 code-review：均确认 13 个状态码与改前逐字一致；两轴**各自独立算出臂数是 37**
+  （我 docstring 初稿写 35 有误），并指出「approve 四个不可区分 404」措辞自相矛盾——
+  两处文档错误已改正（AC#3 要求审计记录准确）。
+- **过程记录（如实）**：其中一次全量运行出现 14 个 web 实时流/WS 计时敏感用例失败，
+  隔离复跑与紧接着的复跑全绿。本票为纯状态码映射重构、不触及流式与计时路径，与仓库
+  既有备案的计时 flake 同类。
+- **关单**：GitHub issue #144 已关闭。
 
 ---
 
@@ -241,3 +323,39 @@ Pydantic `SessionSummary`。中间那层 untyped dict 是前端契约静默漂�
 ```
 
 **每个 merge 动作前单独确认**（§14.11：不得因为上一阶段获批就默认本阶段也获批）。
+
+### 5.1 建议的后合并验证命令
+
+后端（在 `main` worktree）：
+
+```bash
+uv run ruff check src/ tests/
+uv run python -X utf8 -m pytest -q        # 期望 1578 passed / 10 skipped / 0 failed
+uv run python -X utf8 -m pytest tests/web/test_domain_error_mapping.py -q   # ARCH-5 映射契约 3 例
+```
+
+前端（在 `main` 的 `web/`）：
+
+```bash
+npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
+# 期望：vitest 504 passed / oxlint 35w 0e（基线持平）/ playwright 118 passed
+```
+
+契约抽查（真机，建议）：
+
+1. `GET /api/sessions` 每行**含 `trace_url` 键**（Langfuse 关闭 → `null`；开启 → 与
+   `run/completed.data.trace_url` 同值）——ARCH-4b；
+2. `read` 一个单行 > 50KiB 的文件，返回标记能解析出 `{line, bytes}` 且正文不含
+   `sed`/`head -c`/`tail -c`；再回放一条**历史**会话（旧文案）确认前端仍解析——OBS-016；
+3. 打一遍既有 404/409/422 场景（如 `POST /api/sessions/{unknown}/cancel` → 404、
+   `POST /api/sessions/{id}/approve` 已决 → 409、非法 session_id → 422），确认状态码与
+   改前一致——ARCH-5。
+
+### 5.2 本批的风险提示（给集成 AI）
+
+| 风险 | 说明 |
+| --- | --- |
+| ARCH-4 / ARCH-4b 同区重叠 | 两票改同一文件区域；在 `feat/backend` 上已顺序提交无冲突，集成时按顺序快进即可。 |
+| ARCH-5 是纯重构但面广 | 37 臂 → 11 臂，涉及 11 个端点；**唯一行为不变证据是既有 web 测试零改动通过**（`tests/test_web_api.py` + `tests/web/*` 均未改动）。合并后请勿跳过 web 测试。 |
+| 计时敏感 flake | 本批施工中出现过一次全量运行 14 个 web 实时流/WS 用例失败、隔离与复跑全绿（仓库既有备案同类）。若合并后遇到，先隔离复跑再判定。 |
+| 前端 e2e mock 已补 `trace_url` | 若只合后端不合前端，`web/e2e` 的 mock 仍缺该键（前端 mock 与后端 payload 会短暂不一致）——建议两分支按顺序合完再跑联调。 |
