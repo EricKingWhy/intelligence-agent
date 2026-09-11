@@ -135,6 +135,21 @@ class LocalSubprocessSandbox(Sandbox):
     def workspace_root(self) -> Path:
         return self._workspace_root
 
+    @property
+    def shell_description(self) -> str:
+        """`shell=True` 实际用的解释器（OBS-012）。
+
+        CPython 的 `shell=True` 在 Windows 用 `%COMSPEC%`（缺省 `cmd.exe`），
+        在 POSIX 用 `/bin/sh`——**都不是 bash**。这里报告真实解释器名（取 basename，
+        避免把 `C:\\Windows\\system32\\cmd.exe` 整条路径塞进模型可见的工具描述）。
+        """
+        if os.name == "nt":
+            # COMSPEC 可能被引号包住（部分环境写成 "\"C:\\...\\cmd.exe\""），
+            # 不剥引号会让模型可见描述出现 `cmd.exe"`。空值则回落到 cmd.exe。
+            comspec = os.environ.get("COMSPEC", "cmd.exe").strip().strip('"')
+            return Path(comspec).name or "cmd.exe"
+        return "/bin/sh"
+
     def ensure_started(self) -> None:
         """no-op：本机进程总在，无需启动。幂等。"""
 

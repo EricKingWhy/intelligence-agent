@@ -86,6 +86,9 @@ async def test_partial_batch_failure_still_emits_committed_artifact(tmp_path, pa
     before = len(session.events)
     sandbox = Mock(spec=Sandbox)
     sandbox.exec.return_value = ExecResult(exit_code=0, stdout="long " * 1000, stderr="")
+    # BashTool.description 现在按 Sandbox 声明真实解释器（OBS-012）；spec'd Mock 的
+    # property 会返回 Mock，故显式声明，让本用例与 shell 无关。
+    sandbox.shell_description = "sh"
     registry = ToolRegistry()
     registry.register(TestTool(sandbox))
     model = ScriptedModel([AIMessage(content="", tool_calls=[

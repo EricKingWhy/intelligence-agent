@@ -54,6 +54,11 @@ class DockerSandbox(Sandbox):
     def workspace_root(self) -> PurePosixPath:
         return PurePosixPath("/workspace")
 
+    @property
+    def shell_description(self) -> str:
+        """容器内固定用 `/bin/sh -lc`（见 exec）——OBS-012：是 sh，不是 bash。"""
+        return "/bin/sh"
+
     def ensure_started(self) -> None:
         if self._container is not None:
             self._container.reload()

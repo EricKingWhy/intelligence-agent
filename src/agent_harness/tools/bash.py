@@ -26,7 +26,11 @@ class _BashArgs(BaseModel):
 
 
 class BashTool(Tool):
-    """bash 工具：在 workspace 内执行 shell 命令，返回 exit_code/stdout/stderr。"""
+    """bash 工具：在 workspace 内执行 shell 命令，返回 exit_code/stdout/stderr。
+
+    名字是**历史名称**（OBS-012）：实际解释器由 Sandbox 后端决定，**不是 bash**——
+    POSIX/容器为 `/bin/sh`，Windows 本机为 `cmd.exe`。模型可见描述据此声明真相。
+    """
 
     def __init__(self, sandbox: Sandbox) -> None:
         self._sandbox = sandbox
@@ -37,12 +41,36 @@ class BashTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "在 workspace 内执行 shell 命令（如 pytest、ls、cat）。"
+        """模型可见描述——必须声明**实际** shell（OBS-012）。
+
+        工具名 `bash` 是历史名称：没有任何后端真的调 bash（POSIX/容器是 `/bin/sh`，
+        Windows 本机是 `cmd.exe`）。若描述暗示 bash，模型会写出该解释器不认的语法
+        （本机实证：cmd.exe 对 bash 语法报「此时不应有 i。」）。解释器名取自 Sandbox
+        的事实声明，**不用 `os.name` 猜**（宿主 Windows 时容器内仍是 sh）。
+        """
+        shell = self._sandbox.shell_description
+        if "bash" in shell.lower():
+            # 后端真的用 bash 时不否认（当前无此后端，但 API 允许——避免出现
+            # 「实际解释器是 bash（不是 bash）」的自相矛盾）。
+            lead = f"在 workspace 内执行 shell 命令。实际解释器是 {shell}。"
+        else:
+            lead = (
+                "在 workspace 内执行 shell 命令。注意：工具名 bash 是历史名称，"
+                f"实际解释器是 {shell}（不是 bash），请按该解释器的语法书写命令。"
+            )
+        parts = [lead]
+        if "cmd" in shell.lower():
+            parts.append(
+                "Windows cmd.exe 注意事项：单引号不是引用符、$VAR 不展开、"
+                "cat/ls/grep 等 Unix 命令通常不可用（用 type/dir/findstr 代替）、"
+                "Unix 风格重定向（如 2>/dev/null）无效。"
+            )
+        parts.append(
             "参数：command 为要执行的 shell 命令字符串。"
             "返回 exit_code、stdout、stderr——命令返回非零 exit_code 不代表工具调用失败，"
             "应读取 stdout/stderr 判断命令执行结果。"
         )
+        return "".join(parts)
 
     @property
     def args_schema(self) -> type[BaseModel]:
