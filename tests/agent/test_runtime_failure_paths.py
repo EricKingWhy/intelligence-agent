@@ -246,7 +246,95 @@ async def test_model_failed_event_redacts_exception_message(tmp_path):
     assert "sk-secret-123" not in str(model_failed.data)
 
 
-# ---- Round 7：客户端断连 / 任务取消不得留下悬空 run/started ----
+# ---- provider 内容审查拒绝（data_inspection_failed）→ 可读失败消息 ----
+
+
+#: 2026-09-11 真实案例：阿里云百炼专有端点对含检索网页文本的二次调用返回
+#: 400，错误码只出现在响应体文本里（openai SDK 对 SSE 形状错误解析不出结构
+#: 化 body）。原样保留形状作分类器输入。
+ALIYUN_INSPECTION_PAYLOAD = (
+    'data: {"error":{"code":"data_inspection_failed","param":null,'
+    '"message":"Input text data may contain inappropriate content.",'
+    '"type":"data_inspection_failed"},"id":"chatcmpl-88bc0696"}'
+)
+
+
+class ModerationRejectModel:
+    """ainvoke / astream 抛携带 data_inspection_failed 载荷的错误。"""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        raise RuntimeError(ALIYUN_INSPECTION_PAYLOAD)
+
+    async def astream(self, messages, **kwargs):
+        raise RuntimeError(ALIYUN_INSPECTION_PAYLOAD)
+        yield AIMessageChunk(content="")  # 不可达：声明 async generator 用
+
+
+READABLE = "provider 内容审查拒绝输入（可能因检索到的网页文本）"
+
+
+class TestProviderContentModerationClassification:
+    """错误文本含 data_inspection_failed → 失败事件升级为已分类可读消息。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_stream", [True, False])
+    async def test_moderation_rejection_upgrades_terminal_events(
+        self,
+        tmp_path,
+        use_stream,
+    ):
+        """model/failed.message 是固定可读文案；run/failed 落
+        reason=provider_content_moderation + 同文案 message（与上下文超限
+        路径的 reason+message 形状一致）。run()/run_stream() 两条路径同享。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ModerationRejectModel())
+
+        if use_stream:
+            frames = [f async for f in runtime.run_stream(session, "写论文")]
+            failed = next(f for f in frames if f.type == RUN_FAILED)
+        else:
+            result = await runtime.run(session, "写论文")
+            assert result.status == STATUS_FAILED
+            failed = next(e for e in session.events if e.type == RUN_FAILED)
+
+        assert failed.data["reason"] == "provider_content_moderation"
+        assert failed.data["message"] == READABLE
+
+    @pytest.mark.asyncio
+    async def test_moderation_rejection_model_failed_message_readable(self, tmp_path):
+        """model/failed 的 message 用固定可读文案，且绝不携带 provider 回显
+        原文（脱敏不变量——载荷文本可能含敏感内容，只进结构化日志）。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ModerationRejectModel())
+
+        await runtime.run(session, "写论文")
+
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        assert model_failed.data["message"] == READABLE
+        for event in session.events:
+            assert "inappropriate" not in str(event.data), (
+                "provider 回显原文不得进任何持久化事件"
+            )
+            assert "chatcmpl-88bc0696" not in str(event.data)
+
+    @pytest.mark.asyncio
+    async def test_unclassified_failure_keeps_type_only_terminal(self, tmp_path):
+        """未分类错误保持原行为：model/failed 只带类型名，run/failed 不落
+        reason / message 键（合同：缺省 = 模型/执行器异常）。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ExplodingModel())
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        assert model_failed.data["message"] == "model call failed: RuntimeError"
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert "reason" not in run_failed.data
+        assert "message" not in run_failed.data
 
 
 @pytest.mark.asyncio
