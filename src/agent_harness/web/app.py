@@ -293,7 +293,7 @@ class SessionSummary(BaseModel):
     # 非终结（run 在途，或上一轮已完成后新轮的 user/message/run-started 垫在末尾）
     # 或未配置可观测性时为 null——绝不伪造，前端显示「未追踪」。
     # 有意只认末事件（不回溯）以保住列表页快路径，取舍见
-    # `JsonlSessionStore._terminal_trace_id_from_tail`；不变量 #21：可观测性缺席
+    # `JsonlSessionStore._terminal_trace_id`；不变量 #21：可观测性缺席
     # 不致命也不造假。
     trace_id: str | None = None
 

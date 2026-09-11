@@ -414,6 +414,60 @@ class TestReadSessionSummary:
         assert stats.event_count == 3
         assert stats.trace_id == "tr-fallback"
 
+    def test_fast_path_agrees_with_full_parse_on_clean_session(
+        self, store: JsonlSessionStore
+    ):
+        """快路径与全量回退在末事件派生的字段上同口径——契约直接可测，非靠 docstring。
+
+        只比 event_count / last_event_time / trace_id：first_user_message 的头部
+        解析上限是有意的分歧（见 test_first_user_message_after_head_cap_returns_none），
+        不在本断言内。
+        """
+        sid = "summary-agree"
+        _write_lines(store, sid, [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, USER_MESSAGE, {"content": "hi"}),
+            _event_line(store, sid, 2, "run/completed",
+                        {"final_text": "ok", "trace_id": "tr-agree"}),
+        ])
+        fast = store.read_session_summary(sid)
+        full = store._summary_fallback(sid)
+
+        assert fast is not None and full is not None
+        assert (fast.event_count, fast.last_event_time, fast.trace_id) == (
+            full.event_count, full.last_event_time, full.trace_id)
+
+    def test_each_line_is_parsed_at_most_once(
+        self, store: JsonlSessionStore, monkeypatch
+    ):
+        """每行最多解析一次（快路径的性能契约，回归锁）。
+
+        深化前同一末行被解析 3 次（损坏守卫 / 取 last_time / 取 trace_id），
+        O(头部上限 + 1) 的解析量因此名不副实。用调用计数钉住。
+        """
+        sid = "summary-parse-once"
+        lines = [
+            _event_line(store, sid, 0, SESSION_STARTED, {}),
+            _event_line(store, sid, 1, USER_MESSAGE, {"content": "hi"}),
+            _event_line(store, sid, 2, "run/completed",
+                        {"final_text": "ok", "trace_id": "tr-once"}),
+        ]
+        _write_lines(store, sid, lines)
+
+        parsed: list[int] = []
+        original = JsonlSessionStore._parse_event_line
+
+        def counting(raw_line, path_name, lineno):
+            parsed.append(lineno)
+            return original(raw_line, path_name, lineno)
+
+        monkeypatch.setattr(store, "_parse_event_line", counting)
+        stats = store.read_session_summary(sid)
+
+        assert stats is not None
+        assert stats.trace_id == "tr-once"
+        assert parsed == [1, 2, 3]  # 三行各一次；重复解析末行会让计数膨胀
+
     def test_missing_session_returns_none(self, store: JsonlSessionStore):
         assert store.read_session_summary("no-such-session") is None
 

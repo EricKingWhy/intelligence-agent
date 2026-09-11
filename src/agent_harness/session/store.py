@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -144,9 +143,10 @@ class JsonlSessionStore:
         first_user_message: str | None = None
         head_done = False
         head_parsed = 0
-        # 末两行 (lineno, stripped)：末行损坏时回退取前一行；lineno 留给
-        # 损坏告警——探针日志必须可定位，不用哨兵值伪造位置。
-        tail: deque[tuple[int, str]] = deque(maxlen=2)
+        # 末条非空行的 (lineno, stripped)：lineno 留给损坏告警——探针日志必须
+        # 可定位，不用哨兵值伪造位置。只保留最后一条：末行损坏一律整体回退
+        # （见下方守卫），所以不存在「改用前一行」的分支。
+        last_line: tuple[int, str] | None = None
 
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for lineno, raw_line in enumerate(fh, start=1):
@@ -154,7 +154,7 @@ class JsonlSessionStore:
                 if not stripped:
                     continue
                 event_count += 1
-                tail.append((lineno, stripped))
+                last_line = (lineno, stripped)
 
                 if not head_done:
                     event = self._parse_event_line(raw_line, path.name, lineno)
@@ -173,19 +173,22 @@ class JsonlSessionStore:
                         if head_parsed >= _SUMMARY_HEAD_PARSE_LIMIT:
                             head_done = True
 
-        # 末行损坏（崩溃半写的常态位置）→ 全量回退，保证精确
-        if tail and self._parse_event_line(tail[-1][1], path.name, tail[-1][0]) is None:
-            return self._summary_fallback(session_id)
-        last_time = self._last_event_time_from_tail(tail)
-        if tail and last_time is None:
+        # 末行损坏（崩溃半写的常态位置）→ 全量回退，保证精确。
+        # 只解析这一次：last_event_time 与 trace_id 同源于本事件，快路径与
+        # _summary_fallback 的口径一致因此是**结构性**的，而非两份实现靠约定对齐。
+        last_event = (
+            self._parse_event_line(last_line[1], path.name, last_line[0])
+            if last_line is not None else None
+        )
+        if last_line is not None and last_event is None:
             return self._summary_fallback(session_id)
 
         return SessionSummaryStats(
             event_count=event_count,
             first_event_time=first_time,
-            last_event_time=last_time,
+            last_event_time=last_event.time if last_event is not None else None,
             first_user_message=first_user_message,
-            trace_id=self._terminal_trace_id_from_tail(tail),
+            trace_id=self._terminal_trace_id(last_event),
         )
 
     @staticmethod
@@ -194,41 +197,21 @@ class JsonlSessionStore:
 
         只认 run 终结事件：trace_id 是 **per-run** 事实（`run/completed|failed|
         interrupted` 的 data 里），会话可能有多次 run，末端那次才是列表页要展示的。
+
+        快路径与 `_summary_fallback` 共用本方法（各自传自己的末事件），所以
+        「扫描路径与全量严格一致」是结构性的，而非两份实现靠约定对齐。
+
+        已知边界（有意取舍）：末事件不是 run 终结事件即返回 None——包括
+        「上一轮已 completed，但新轮的 user/message 或 run/started 成了末事件」。
+        此时更早那个已完成的 trace 不回填。不向历史回溯是因为那需要逐行
+        `json.loads` 直到 EOF，正好抵消 `read_session_summary` 的快路径（列表页
+        从秒级全量解析压到几十 ms）。在途/新轮返回「未追踪」属诚实降级：那是
+        尚无最终 trace 的 run。
         """
         if event is None or event.type not in RUN_TERMINAL_TYPES:
             return None
         value = event.data.get("trace_id")
         return value if isinstance(value, str) and value else None
-
-    def _terminal_trace_id_from_tail(
-        self, tail: deque[tuple[int, str]],
-    ) -> str | None:
-        """快路径版本：只看**最后一个事件**。
-
-        刻意与 `_summary_fallback` 同口径（那里也只看 `events[-1]`），否则
-        「扫描路径与全量严格一致」的契约会破。
-
-        已知边界（有意取舍）：末事件不是 run 终结事件即返回 None——包括
-        「上一轮已 completed，但新轮的 user/message 或 run/started 成了末事件」。
-        此时更早那个已完成的 trace 不回填。不向历史回溯是因为那需要逐行
-        `json.loads` 直到 EOF，正好抵消本方法所在的快路径（见
-        `read_session_summary` docstring：列表页从秒级全量解析压到几十 ms）。
-        在途/新轮返回「未追踪」也属诚实降级：那是尚无最终 trace 的 run。
-        """
-        if not tail:
-            return None
-        event = self._parse_event_line(tail[-1][1], "events.jsonl", tail[-1][0])
-        return self._terminal_trace_id(event)
-
-    def _last_event_time_from_tail(
-        self, tail: deque[tuple[int, str]],
-    ) -> str | None:
-        """从末两行取最后一个可解析事件的时间（末行损坏时用前一行）。"""
-        for lineno, stripped in reversed(tail):
-            event = self._parse_event_line(stripped, "events.jsonl", lineno)
-            if event is not None:
-                return event.time
-        return None
 
     def _summary_fallback(self, session_id: str) -> SessionSummaryStats | None:
         """扫描路径发现损坏 → 全量解析，产出与旧实现严格一致的摘要。"""
