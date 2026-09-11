@@ -34,7 +34,7 @@ uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带�
 | OBS-016 | P2 | 🆕 待定 | — | **本轮新发现（同源缺陷，Scope 外）**：`tools/read.py:140` 超长行提示仍教模型用 POSIX 专有 `sed`/`head -c`/`tail -c` |
 | OBS-013 | P2 | ✅ 已评估（登记风险） | — | 限时护栏已存在/启用/已测（600s total）；无代码改动 |
 | OBS-009/014 | — | ✅ 完成 | `9807928` | 超时文案与实际 `retryable` 对齐（MUTATING 不再教盲重跑）；纯文案 |
-| OBS-008 | — | ⏳ 待做 | — | model/failed 吞 traceback |
+| OBS-008 | — | ✅ 完成 | `0fceccc` | 模型调用失败的调用栈落结构化日志（durable 事件仍只带类型名） |
 | OBS-010 | low | ⏳ 待做 | — | `GET /api/sessions` 的 `trace_id` 恒 null |
 
 ---
@@ -408,3 +408,70 @@ text/delta」定为 durable，禁止的是 per-token 行）。所以一次退化
 但放宽会拉长挂死命令的最坏停顿（且 MUTATING 调用会串行化整批），属**产品/行为决策**，
 应单独立项（`BashTool.timeout_seconds` 覆写为多少、是否随 sandbox 走），不塞进本次文案修复。
 取消路径本身是安全的（`bash.py` 在 `CancelledError` 时置 `cancel_event`，`local.py` 击杀进程树）。
+
+---
+
+## 8. OBS-008：模型调用失败吞掉 traceback
+
+**状态**：✅ 完成，commit `0fceccc`（分支 `feat/backend`，未 push）。
+
+### 根因
+
+设计上 durable 的 `model/failed` 事件**只带异常类型名**（`"model call failed: TimeoutError"`）
+——这是脱敏不变量：provider 回显的文本不得进 append-only SessionEvent 历史。
+代码 docstring 声称「完整消息只进结构化日志」，**但顶层失败臂实际只记了
+`error=str(error)` + `error_type`，从不记 traceback**。于是排障信息只剩一个类型名：
+「哪一帧、哪个 SDK 调用挂的」全丢。docstring 与实现不符。
+
+### 修法（`src/agent_harness/agent/runtime.py`）
+
+1. `_log()` 增加显式 keyword-only `exc_info: bool = False` 并转发给 `log_event`
+   ——`logging.py::JsonlFormatter` **早已**支持 `record.exc_info` → `stack_trace(调用栈)`，
+   只是从没有人传过这个旗标（一个「机制齐备、接线缺失」的典型）。
+2. 顶层失败臂 `Agent Loop 异常终止` 传 `exc_info=True`。
+3. 同类收尾：两处「取消收尾 / 失败兜底事件写入失败（存储故障？）」也补 `exc_info=True`
+   （独立复核 P3：同属「吞 traceback」缺陷类；两处都在 except 块内，捕获的是正确异常）。
+4. 两处 docstring 的「完整消息只进结构化日志」改为「完整消息**与调用栈**」，与实现一致。
+
+### 实测证据（真实 `cli.run` + `FailingModel.astream` 抛 `TimeoutError` → 读 `logs/agent.jsonl`）
+
+日志出现完整调用链，19 行 `stack_trace(调用栈)`：
+
+```text
+File "...\src\agent_harness\agent\runtime.py", line 633, in _drive
+File "...\src\agent_harness\model\fallback.py", line 188, in astream
+File "...\src\agent_harness\model\concurrency.py", line 45, in gated
+File "...\src\agent_harness\model\stall.py", line 87, in stream_with_stall_guard
+File "...\Lib\asyncio\tasks.py", line 507, in wait_for
+TimeoutError: 模型请求超时
+```
+
+durable 事件仍严格是 `{"message": "model call failed: TimeoutError"}`（脱敏不变量完好）。
+
+### 交付物与门禁
+
+| 项 | 内容 |
+| --- | --- |
+| `src/agent_harness/agent/runtime.py` | `_log` 转发 `exc_info`；顶层失败臂 + 两处收尾臂传 `exc_info=True`；docstring 对齐 |
+| `tests/test_structured_logging.py` | 扩展 `test_minimal_agent_failure_chain`：断言 `stack_trace(调用栈)` 非空且含 `Traceback (most recent call last)` / `TimeoutError` |
+| 门禁 | ruff clean；全量 pytest **1538 passed / 10 skipped / 39 deselected / 0 failed** |
+| 变异验证 | 去掉 `exc_info=True` → 该用例立即变红（`stack_trace` 为 `None`） |
+
+**独立 code-review**：**SOUND / 零 P0/P1/P2**。复核独立复现并给出完整帧链，并确认：
+① durable 事件脱敏不变量完好（provider 回显密文只进诊断日志，不进 SessionEvent /
+Langfuse / Web UI）；② Python traceback **不**捕获局部变量；③ `_log` 签名变更零碰撞
+（12 处调用无一把 `exc_info` 当数据字段，无 `**` splat）；④ 生产两个入口
+（`cli.py` 8 处 `setup_logging`、`web/app.py` lifespan）都配了 handler。
+
+### ⚠ 集成时须知（复核 P3-1）
+
+调用栈会带**绝对路径（含宿主用户名）、源码行、以及链式异常（`__cause__`/`__context__`）
+的消息**——比原先多。诊断 JSONL 是本地未脱敏详情汇聚处（不变量 #4：Event ≠ Diagnostic Log），
+但**不要原样附到 issue / 上传**；需外发先脱敏。已在 `_log` docstring 注明。
+
+### 复核提出但核实为**非问题**（记录以免重复怀疑）
+
+`runtime.py:571` 把 `str(error)` 写进 durable 的 `RUN_FAILED` 事件，看起来像脱敏不一致。
+已核实：该错误是 `ContextWindowExceededError`，消息全部**本地拼装**（token 计数、
+`"No complete early turn can be compacted"`、`"Summary request exceeds hard guard"`），
+**不含 provider 回显**，写进事件既安全又有用（token 数字解释了失败原因）。不登记为问题。
