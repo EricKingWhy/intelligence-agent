@@ -75,6 +75,7 @@ from agent_harness.tooling.contract import (
     PERMISSION_MODE_DESCRIPTIONS,
     PermissionPolicy,
 )
+from agent_harness.web.domain_errors import http_error
 from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
     build_event_payload,
@@ -760,10 +761,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         service = SessionService(app.state.agent)
         try:
             events = await service.get_events(session_id)
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
         return [e.to_dict() for e in events]
 
     @app.get("/api/models")
@@ -978,10 +977,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 auto_approve=req.auto_approve,
                 amend=AmendOptions.from_request(req),
             )
-        except WorkspaceNameInvalid as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except InvalidDecision as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
+        except (WorkspaceNameInvalid, InvalidDecision) as e:
+            raise http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
@@ -1024,10 +1021,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 after_seq=after_seq,
                 max_replay_events=STREAM_REPLAY_MAX_EVENTS,
             )
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
 
         events = handle.events
         latest_seq = handle.latest_seq
@@ -1087,15 +1082,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 task=req.task,
                 amend=amend,
             )
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except ActiveRunConflict as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
-        except RecoveryConflict as e:
-            # T8 #138：崩溃遗留需人工裁决的 UNKNOWN tool_call → 409，不伪造结果。
-            raise HTTPException(status_code=409, detail=str(e)) from e
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ActiveRunConflict,
+            RecoveryConflict,
+        ) as e:
+            # RecoveryConflict → 409（T8 #138）：崩溃遗留需人工裁决的 UNKNOWN
+            # tool_call，不伪造结果（不变量 #14）。
+            raise http_error(e) from e
 
         session_id = result.session.session_id
         run, subscriber = result.run, result.subscriber
@@ -1127,10 +1122,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         service = SessionService(app.state.agent)
         try:
             cancelled = await service.cancel(session_id)
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
         return {"status": "cancelling" if cancelled else "no_active_run"}
 
     @app.post("/api/sessions/{session_id}/approve")
@@ -1163,18 +1156,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 decision=req.decision,
                 reason=req.reason,
             )
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except ApprovalQueueMissing as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except ApprovalRequestMissing as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except InvalidDecision as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except ApprovalAlreadyResolved as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ApprovalQueueMissing,
+            ApprovalRequestMissing,
+            InvalidDecision,
+            ApprovalAlreadyResolved,
+        ) as e:
+            # 三个 404（SessionNotFound / ApprovalQueueMissing /
+            # ApprovalRequestMissing）**有意不可区分**；ApprovalAlreadyResolved
+            # 是 409 幂等已决（OBS-015）。状态码见 web/domain_errors.py。
+            raise http_error(e) from e
         return {
             "status": "resolved",
             "approval_id": req.approval_id,
@@ -1192,12 +1185,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         service = SessionService(app.state.agent)
         try:
             events = await service.recover(session_id)
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except RecoveryConflict as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
+        except (InvalidSessionId, SessionNotFound, RecoveryConflict) as e:
+            # RecoveryConflict → 409：RUNNING/UNKNOWN 需人工裁决，不伪造不盲跑
+            # （不变量 #14）。
+            raise http_error(e) from e
         return [e.to_dict() for e in events]
 
     # ── 模型切换（T7 #137，PRD §2.3）───────────────────────────────────
@@ -1220,12 +1211,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 provider=req.provider,
                 model_id=req.model_id,
             )
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except UnknownModel as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
+        except (InvalidSessionId, SessionNotFound, UnknownModel) as e:
+            raise http_error(e) from e
         # 回传规范 model_id（service 解析出的 picker id）：catalog 条目名，或默认链
         # 的默认模型名——不能回显请求值，否则上游 model_name / "default" 别名会与
         # 事件里的 to_model_id 及 GET /api/models 的 id 对不上。
@@ -1272,20 +1259,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 max_steps=req.max_steps,
                 amend=amend,
             )
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except ActiveRunConflict as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
-        except RecoveryConflict as e:
-            # T8 #138：崩溃遗留（UNKNOWN 高风险 tool_call）需人工裁决——
-            # 拒绝续跑而不是伪造「结果未知」（不变量 #14）。
-            raise HTTPException(status_code=409, detail=str(e)) from e
-        except QueueItemNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except SteerTargetNotFound as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ActiveRunConflict,
+            RecoveryConflict,
+            QueueItemNotFound,
+            SteerTargetNotFound,
+        ) as e:
+            # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
+            # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
+            raise http_error(e) from e
 
         if result.status == "launched":
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
@@ -1319,12 +1303,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             cancelled = await service.cancel_queue(
                 session_id=session_id, queue_id=queue_id
             )
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except QueueItemNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+        except (InvalidSessionId, SessionNotFound, QueueItemNotFound) as e:
+            raise http_error(e) from e
         return {"status": "cancelled" if cancelled else "already_consumed"}
 
     # ── WebSocket 多路复用通道（T2 / PRD §5.1）──────────────────────
