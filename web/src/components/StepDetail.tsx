@@ -469,13 +469,15 @@ const eventSummary = summarizeEvent;
 
 /** Timeline 行 hover 浮层内容（C4）：完整时间戳（含毫秒，本地时区）+ step。
  *  纯函数导出以便 SSR 测试锁定；行内已显示 seq/type，浮层只补看不到的。
- *  step_id 语义：null = 无归属（recover 合成事件等哨兵），不渲染行；
- *  数值（含 0，后端从 1 起但类型契约为 number）按合法 step 渲染。 */
+ *  step_id 语义：**缺失或 null** 都 = 无归属（后端省略值为 null 的字段 → 键缺失；
+ *  recover 合成事件等用 null 哨兵），不渲染该行；数值（含 0，后端从 1 起但类型
+ *  契约为 number）按合法 step 渲染。判空必须宽松——严格 `!== null` 会把缺失的键
+ *  渲染成字面量 "step undefined"（BUG-008）。 */
 export function formatEventTooltip(e: AgentEvent): string[] {
   const lines: string[] = [];
   const ts = formatTimestamp(e.time);
   if (ts) lines.push(ts);
-  if (e.step_id !== null) lines.push(`step ${e.step_id}`);
+  if (e.step_id != null) lines.push(`step ${e.step_id}`);
   return lines;
 }
 
@@ -780,7 +782,8 @@ function EventInspector({ focus }: { focus: EventFocus }) {
               <span className="detail-val detail-val-mono">{event.time}</span>
             </div>
           )}
-          {event.step_id !== null && (
+          {/* 宽松判空（语义见 formatEventTooltip 文档）：缺失/null 都不渲染 step 行。 */}
+          {event.step_id != null && (
             <div className="detail-row">
               <span className="detail-key">step</span>
               <span className="detail-val num">{event.step_id}</span>

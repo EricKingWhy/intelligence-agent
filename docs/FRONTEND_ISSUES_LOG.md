@@ -931,3 +931,189 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 **审查方排除的误报**（记录以免后人重复怀疑）：fixture 与后端 `approval.py:56-72` **逐字段一致**（含 `allowed_decisions: ['deny','approve_once']`）；`fixtures.ts` 新分支不影响任何既有 spec（无其它 spec 命中该路径，catch-all 仍在最后）；联调车道不会进主门禁；点击类断言均**非空洞**（三轮变异可证）；`service.py:348` 的引用**准确**。
 
 **审查方另指出（预存在，未改）**：`tsconfig.app.json` 只含 `src`、`tsconfig.node.json` 只含 `vite.config.ts` → **e2e spec 与 Playwright 配置都不被 `tsc -b` 类型检查**，`onApprovePost` 之类的接线错误无编译期兜底（靠 playwright 运行时加载与 oxlint 解析）。属既有结构，登记备查。
+
+---
+
+## 第六轮：全量真实浏览器验收（2026-09-11，真实 dev server 5173 + 真实后端 8000）
+
+> 起因：用户要求「前端的每个功能都要测试一遍，每个按钮都要点一下，遇到任何问题实时写入本文档」。
+> 本轮在**当前 `feat/backend` 后端（源码树启动，非 main worktree 的旧进程）+ `feat/frontend` 前端**上重建验收面：
+> 先复验刷新一致性，再逐个点过此前未覆盖的控件，最后跑真实模型 run。
+
+### 本轮刷新一致性复验（新增证据，结论与 BUG-005 一致）
+
+在会话 `3b35b83d-dcae-476f-8343-9912e40e77d7`（35 事件 · 中断态）上做**同函数**前后对比
+（`document.body.innerText` 的 djb2 `${len}:${hash}` + 按钮指纹 + 滚动位 + tab 选中态）：
+
+| 量 | balanced 档 | detailed 档 |
+| --- | --- | --- |
+| 内容指纹 | `2235:1645848761`（刷新前后**逐字节相同**） | `2309:2105849635`（同） |
+| 按钮指纹（74 键） | `2032:3401835054`（同） | 同 |
+| 滚动位 | `session-items 0/822`、`detail-body 0/860`（同） | 同 |
+| `ahi.selectedSession` | 恢复为该会话 | 同 |
+
+**视图状态（非内容）刷新不保留**：切到 Overview tab、`.detail-body` 滚到 105.5、思考区折叠
+→ 刷新后回到 Timeline / `scrollTop 0` / 展开。**这与「真机验证（2026-09-11 追加）」记录的冻结边界一致**
+（Inspector 是视图状态、DSH 语义、刻意不持久化），**不是缺陷**；本轮为它补了
+「内容一致 + 视图状态不保留」并存的实测证据。`ahi.theme` / `ahi.traceDensity` 两个 localStorage
+键按设计跨刷新保留（density 手动切 detailed 后刷新仍为 detailed）。
+
+### 本轮真机点过并确认正常（新增覆盖）
+
+| 控件 | 结果 |
+| --- | --- |
+| Inspector 运行级 5 个 icon tab | ✓ 每个 21×21，label span `display:none`，名称经 `title`（如 `title="Timeline"`）；点击切换正确 |
+| 事件详情 io-tabs Overview/Input/Output/Raw | ✓ 四段内容各自正确（Input 出 args、Raw 出完整事件 JSON）；`返回 Timeline` 复位 |
+| 事件 Input/Output `复制 JSON`、Raw `复制 Raw` | ✓ 剪贴板实得 165 / 165 / 490 字符，均为 JSON；按钮 `aria-label` 1.6s 内翻 `已复制` |
+| 工具详情 4 tabs（默认 Output） | ✓ `bash echo smoke-ok`：Overview 出 status/duration；Input `复制 JSON`→`{"command":"echo smoke-ok"}`(32)；Output `复制输出`→`{"exit_code":0,"stdout":"smoke-ok\n",…}`(85)；Raw **两个** `复制 Raw`→seq 4(446) / seq 5(685) = tool/call + tool/result |
+| 中断会话的工具详情零伪造 | ✓ `delegate` 无 tool/result 时**不渲染 Output tab**、Raw 只有 1 个复制键（`hasOutput`/`hasRaw` 判定正确） |
+| Timeline 行 hover 浮层 | ✓ 出现 `role=tooltip` 且带完整时间戳（毫秒）——**但文案发现 BUG-008** |
+| 会话切换（rail 行） | ✓ 点 `b46a6029` → 头显示 `已完成 · 5,922 tok`，`ahi.selectedSession` 同步 |
+| `返回 Timeline` | ✓ 事件/工具视图下点击后返回键消失、运行级 tabs 恢复 |
+
+**方法说明（诚实口径）**：Inspector 内的点击用**页面内 `.click()`**（React `onClick` 正常触发）；
+Radix 浮层 / `Esc` 类依赖真实指针与按键事件者，沿用既有的 MCP/CDP 真实序列
+（「合成事件假象清单」不变）。**本轮两处自曝误报已排除**：(1) 我最初用
+`innerText` 匹配 `^复制` 找复制键，得出「事件详情没有复制按钮」的**错误**结论——
+`CopyButton` 是纯图标按钮（`aria-label`/`title` 承载名称、`innerText` 为空），换
+`button.copy-btn` 选择器后三个键全部存在且工作；(2) 曾怀疑「事件 Output 段与 Input 段显示同一份
+JSON」是 bug——读源码 `:807`/`:818` 确认两者都 render `event.data`，**是事件级视图的既定语义**
+（事件没有 call/result 两段，只有 data），非缺陷。
+
+### BUG-008 Timeline 浮层渲染字面量 `step undefined`，事件详情出现空的 `step` 幽灵行【P2 · 已修复（见下方修复条）】
+
+**发现时间**：2026-09-11 第六轮真机 hover。
+
+**现象（两处，同一根因）**：
+1. 悬停 Timeline 第 1 行（seq 0 `session/started`）→ 浮层文字为
+   `2026-09-06 05:57:19.553 step undefined`（**字面量 `undefined`**）。
+2. 点开该行事件详情 → Overview 段多出一行 `step` 但**值为空**。实测 `.detail-row` =
+   `[{seq:"0"},{time:"2026-09-05T21:57:19.553+00:00"},{step:""},{event_id:"034292cf-2c13-41"}]`。
+
+**根因（文件行号）**：
+- 后端序列化**省略值为 null 的字段**——实测 `GET /api/sessions/b46a6029-…/events` 的 seq 0/1/2
+  均为 `'step_id' in e === False`（**键整个不存在**，不是 `step_id: null`）。
+- 前端 `components/StepDetail.tsx:478` 用**严格判等**：
+  ``if (e.step_id !== null) lines.push(`step ${e.step_id}`)`` —— `undefined !== null` 为真
+  → 推出模板串 `step undefined`。
+- 同文件 `:783` ``{event.step_id !== null && (<div className="detail-row">step {event.step_id}</div>)}``
+  同理，且 `<span>{undefined}</span>` 被 React 渲染为空 → **幽灵行**。
+
+**为什么别处没中招（对照，证明是渲染层疏漏而非契约问题）**：
+`lib/projection.ts:1024` 用宽松判断 ``if (event.step_id != null)``；`:453` 对派生字段做
+``event.step_id ?? null``；`App.tsx:679` 读的是已归一的 `conversation.run_interrupted.step_id`，
+故中断横幅文案（「第 N 步」/「首个步骤开始前」）**不受影响**。
+
+> ⚠ **初版结论已订正（对 reviewer 的 Spec 轴自查）**：初版写「只有 `StepDetail.tsx` 这两处」是**错的**。
+> 同一 bug 类**还有第三处**：`lib/eventKind.ts::streamKeyFromEvent` 也是严格 ``stepId !== null``，
+> 入参由 `App.tsx:223` 直接传 `event.step_id`（同样是可能缺失的键）。键缺失时它返回**伪造 key
+> `step:undefined`**——违背它自己文档里写明的「无 step 且非工具/委派域 → 返回 null（无可定位目标）」
+> 契约，并让 `App.tsx:222` 的 `if (key)` 把一个不存在的定位目标当真。**诚实的后果评估**：
+> `Conversation.tsx:126-127` 的兜底 `turns.findIndex(...)` 会得到 `-1` 并 `return`，**当前不产生
+> 任何可见差异**（无 step 的事件本来就无处可跳）；所以这一处的价值是**契约正确性 + 不伪造 key**，
+> 不是修复一个可见症状。三处均已修，且各自有测试锁。
+
+**归因：前端（渲染判空）**。后端「省略 null 字段」是既定序列化约定（Raw 档"完整源事件原样透传"，
+见 `projection.ts:313` 注释），改后端会改动 Raw 真相源形状，不作首选。
+
+**测试缺口**：`StepDetail.test.tsx` 的 5 个 `formatEventTooltip` 用例只覆盖
+`step_id: 9 / 2 / null / null / 0`，**没有「键缺失（undefined）」这一真实线上形状**——所以它一直绿。
+`eventKind.test.ts` 的 `streamKeyFromEvent` 6 个用例同理：只测 `null`，不测 `undefined`
+（第 113-116 行「无 tool_call_id 且无 step → null」用的正是 `null`，所以第三处的伪造 key 也一直是绿的）。
+
+**为什么定 P2 而非 P1**：不影响会话内容、不阻断任何操作；但确实是用户可见的**伪造文本**
+（不变量 #21 精神：缺席不得被渲染成一个看似有值的占位）。
+
+### BUG-008 修复条（2026-09-11）
+
+**思路**：三处都是**渲染/构造层用严格判等读一个线上可能缺失的键**，统一改为宽松判空
+（``!= null``）——与仓库既有口径一致：`projection.ts:1024` 的 `resolveStep` 早就这么写，
+且它的注释记录了**同一 bug 类此前已造成过一次回归**。**明确否决的两个替代方案**：
+① 改后端让 `step_id` 总是出现——会改动 Raw 档「完整源事件原样透传」的形状（`projection.ts:313`），
+且后端省略 null 字段是既定约定；② 在 `lib/eventValidate.ts::validateEvent` 统一归一化——
+它的 docstring 明确把归一化范围限定为缺失的 `data`/`seq`（「只守可辨、不崩」），
+把业务字段塞进去等于扩权该层。两轴 reviewer 独立得出同一结论：修在消费点、保持一致。
+
+**改动（3 文件）**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `web/src/components/StepDetail.tsx` | `:481` `formatEventTooltip` 的 ``e.step_id !== null`` → ``!= null``；`:788` 事件详情 Overview 的 `step` 行同改。docstring 补齐「缺失或 null」语义，行内注释收敛为一句指针（消除两处重复注释的漂移风险） |
+| `web/src/lib/eventKind.ts` | `streamKeyFromEvent` 的 ``stepId !== null`` → ``!= null``（第三处，见上方订正块）；docstring 写明为何必须宽松 |
+| `web/src/components/StepDetail.test.tsx`<br>`web/src/lib/eventKind.test.ts` | 各补「键缺失（undefined）」红灯用例（TDD：先见 ``["step undefined"]`` / ``"step:undefined"`` 再修）；Overview 的相邻语义用例补 `withStep(0)` 并改名（原名把 `null` 说成「缺失」，措辞不准） |
+
+**验证**：
+
+1. **红灯→绿灯**：修复前 `formatEventTooltip` 实收 ``["step undefined"]``、SSR HTML 里确有
+   ``<span class="detail-key">step</span><span class="detail-val num"></span>``、
+   `streamKeyFromEvent` 实收 ``"step:undefined"``；修复后三处全绿（`StepDetail` 16 + `eventKind` 19）。
+2. **真实浏览器复验**（dev 5173，会话 `b46a6029`）：
+   - 无 step 的行 hover → 浮层 `2026-09-06 05:57:19.553`（**无 `undefined`**）；带 step 的 `tool/call` 行 → `…21.816 step 1`（正对照）。
+   - 事件详情 Overview 的 `.detail-row` 由 `[seq, time, step(空), event_id]` 变为 `[seq, time, event_id]`。
+   - 跳转路径正/负对照：点 `session/started`（无 step）`stream-jump-pulse` **0** 个；点 `tool/call`（有 step）**1** 个、pulse 落在工具行——**修复没有破坏跳转**。
+3. **门禁**：`tsc -b` 0 · `vitest run` **507 passed / 0 failed**（28 文件）· `oxlint` **35 warnings / 0 errors**（基线未变）· `playwright test --workers=2` **118 passed** · `vite build` 0。
+
+**过程自查（两条，值得记住）**：
+- 我最初的探针用 `innerText` 匹配 `^复制` 找 Inspector 的复制键，得出「事件详情没有复制按钮」的
+  **错误**结论；`CopyButton` 是纯图标按钮（名称在 `aria-label`/`title`）。**教训：图标按钮必须按
+  `aria-label` 定位，不能按可见文本**。
+- 本轮的第一次全量门禁我把 vitest 输出接了 `| tail`，**管道退出码掩盖了 `1 failed`**，命令链继续
+  跑完并报「成功」。发现后重跑：**连续 5 次全量均只失败我当时故意留的红灯**，那次失败**不可复现**。
+  **教训：门禁链路必须用 `set -o pipefail`（或 `${PIPESTATUS[0]}`），任何 `| tail` 都会吞掉失败。**
+  那次未复现的失败已如实记录在此，不当作已通过。
+
+### OBS-016 委派/子会话整块 UI 在当前后端配置下**不可达**（multiagent capability 未启用）【配置 · 非缺陷 · 验收环境缺口】
+
+**发现时间**：2026-09-11 第六轮真实 run（为验收委派节点而发起）。
+
+**现实现象**：我发起的真实 run（新会话 `a39876d7`，提示词就是「用 delegate 工具把任务委派给
+research_review…」）里，**模型自己说没有这个工具**，并列出它实际可见的工具表：
+`read / write / edit / apply_patch / bash / glob / grep / git_status / git_diff / inspect_artifact / web_search`
+——**有 `inspect_artifact` 但没有 `delegate`**，随后它自行改用 `web_search` 完成任务（自适应行为正确）。
+
+**证据链（三层，互相印证）**：
+1. `GET /api/capabilities` → **只返回 1 个能力 `websearch`**，无 `multiagent`。
+2. 后端启动配置 `CAPABILITIES` = 仅 `websearch`（`"enabled": true`）——`multiagent` 是
+   **ADR-0015 的显式 opt-in capability**，未列即不激活。
+3. 装配层 `assembly.py:211-221`：capability 贡献的 delegate 工具只在 multiagent 启用时进 registry，
+   且 `session_store is None` 时还会「降级缺席」并打 warning——
+   即 **delegate 缺席是设计内的 optional-capability 语义**（不变量 #21：可选能力缺席不得拖垮 Core）。
+
+**归因：既不是前端 bug 也不是后端 bug，是运行配置。**
+- 前端正确：委派 UI（`DelegationNode`、`复制子会话 ID`、`Inspect 子会话`、`打开子会话`、child 视图
+  `Run` 返回）**只由真实事件驱动渲染**，无事件就不渲染——零伪造，符合不变量 #21。
+- 后端正确：`main` profile 的 `tool_scope`（`agent/profiles.py:58`）确实含 `delegate`，
+  但 capacity 未启用时 registry 里根本没有它；`main` profile 不做过滤（`assembly.py:224`），
+  所以不是被 scope 收窄掉的。
+
+**本轮覆盖后果（诚实登记）**：以下 **5 个控件在本轮配置下无法真机点击**，故本轮不宣称覆盖：
+`委派行按钮（委派 → target）`、`复制子会话 ID`、`Inspect 子会话`、`打开子会话`、`child 视图 Run（child-back-btn）`。
+它们**已有上两轮的真机结论**（第二轮第 38/61 项：展开、复制子会话 ID 实测剪贴板、Inspect 子会话、
+打开子会话切到 child `2515a128`；`k-refresh-restore.spec.ts` 还锁了 child 会话刷新），
+**e2e 回归锁也在**（`k-refresh-restore.spec.ts` 的 `.session-item[title^="${CHILD} "]`）。
+本轮追加的语料核查：**当前 11 个会话里只有 `3b35b83d` 出现过 `tool/call delegate`，且它没有任何
+`child_session_id`**（那次的委派在 run 被中断前没跑起来）——所以库里**确实不存在**可钻取的子会话。
+
+**建议（需用户决定，我没有擅自改）**：若要在这条验收车道上真机覆盖委派/子会话，需要在
+`feat/backend` 的 `.env` 里给 `CAPABILITIES` 增加 multiagent 项。这是**改运行配置**（会改变产品
+实际行为，不只是测试开关），按 §9.1 属需要用户确认的范围，故**只登记建议、不改**。
+
+### 本轮新增真机覆盖（第二批：真实 run 路径）
+
+| 控件 | 结果 |
+| --- | --- |
+| `Escape`（全局，R3） | ✓ **决定性证据**：真实 CDP 按键后 fetch 记录器立刻捕获 `POST /api/sessions/a39876d7-…/cancel`；脉冲 `思考中 · 2s` → **`已取消`（中性通道）**；停止键消失、发送键复位、四个控制选择器恢复、无错误横幅。与 Composer 停止键行为一致 |
+| 流式期的 Composer 状态 | ✓ run 中：`[aria-label="停止"]` 在场、发送键消失、`.composer-control/.composer-model` 四个选择器 `disabled`；结束/取消后全部复位 |
+| 顶栏 Run Pulse（观察项） | ✓ 忠实反映真实阶段：`思考中 · Ns` → `执行工具 · Ns` → `已完成 · N tok` / `已取消`；无伪造进度 |
+| 代码块 `自动换行`/`不换行`（markdown.tsx:61） | ✓ `.md-code` ↔ `.md-code md-code-wrap`，标签 `代码自动换行` ↔ `代码不换行` 往返一致 |
+| 代码块 `复制代码`（markdown.tsx:69） | ✓ 剪贴板实得 22 字符 `print("Hello, World!")`，与 `.md-code code` 的 `textContent` **逐字相等**（非截断版），反馈翻 `已复制` |
+
+**真实 run 的模型行为观察（后端/provider，非缺陷）**：本次「写 hello world 代码块」的 run 在
+`思考中` 停留 **50s+ 且 token 零增长**（默认链 `deepseek-v4-flash-0731` 停顿），随后**模型回退
+按设计生效**（不变量 #9：Model Fallback 与 Tool Retry 分离）——时间线落
+`model/completed glm-4.5-air · 6907 tok`，由 glm-4.5-air 完成，`run/completed 13873 tok`。
+**UI 全程诚实**：期间只显示 `思考中 · Ns` 实时计时、不伪造进度、不报假错误、也不假装卡死；
+用户可随时用停止键/Esc 取消（本轮已实测）。这与 `3b35b83d` 里
+`model/fallback deepseek-v4-flash-0731 → glm-4.5-air · ModelStallError` 是同一现象。
+**建议（供后端参考，不在本轮前端范围）**：停顿检测的阈值约 50s 偏长，且停顿期间 UI 没有任何
+「正在等待模型/即将回退」的中间态提示——可考虑让后端更早发出 fallback 事件，前端已有渲染通道。
