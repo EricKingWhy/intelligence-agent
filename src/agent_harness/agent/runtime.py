@@ -1069,16 +1069,24 @@ class AgentRuntime:
                 # provider 内容审查拒绝（data_inspection_failed）→ 已分类 reason
                 # + 固定可读文案（run/failed 与 model/failed 成对升级，形状同
                 # 上下文超限路径）；其余异常保持类型名原行为。
-                moderation_reason = _classify_provider_failure(error)
+                # 分类只在**模型调用在途**时进行（model_call_open 正是 model/failed
+                # 的归因窗口）：本臂同时兜底工具/执行器异常，其错误文本可能恰好
+                # 引用该错误码（如抓取阿里云文档），不得误标为内容审查。
+                moderation_reason = (
+                    _classify_provider_failure(error)
+                    if terminal.model_call_open
+                    else None
+                )
+                moderation_message = (
+                    CONTENT_MODERATION_MESSAGE if moderation_reason else None
+                )
                 for streamed in ctx.interrupt_streams():
                     yield to_agent_event(streamed)
                 for streamed in ctx.close_observability(
                     error_type=type(error).__name__,
                     reason=moderation_reason or type(error).__name__,
                     cancelled=False,
-                    readable_message=(
-                        CONTENT_MODERATION_MESSAGE if moderation_reason else None
-                    ),
+                    readable_message=moderation_message,
                 ):
                     yield to_agent_event(streamed)
                 # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
@@ -1086,7 +1094,7 @@ class AgentRuntime:
                 end_event = terminal.failure_terminal(
                     steps=step_base + steps,
                     reason=moderation_reason,
-                    message=(CONTENT_MODERATION_MESSAGE if moderation_reason else None),
+                    message=moderation_message,
                     trace_id=(tracer.trace_id if tracer else None),
                     trace_url=(tracer.trace_url if tracer else None),
                 )

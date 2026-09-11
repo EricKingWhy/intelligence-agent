@@ -294,12 +294,17 @@ class TestProviderContentModerationClassification:
 
         if use_stream:
             frames = [f async for f in runtime.run_stream(session, "写论文")]
-            failed = next(f for f in frames if f.type == RUN_FAILED)
+            assert any(f.type == MODEL_FAILED for f in frames), (
+                "流路径 model/failed 也必须镜像给 SSE 消费者"
+            )
         else:
             result = await runtime.run(session, "写论文")
             assert result.status == STATUS_FAILED
-            failed = next(e for e in session.events if e.type == RUN_FAILED)
 
+        # 两条路径都以持久化事件为准断言（SSE 帧来自持久化事件镜像）
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        assert model_failed.data["message"] == READABLE
+        failed = next(e for e in session.events if e.type == RUN_FAILED)
         assert failed.data["reason"] == "provider_content_moderation"
         assert failed.data["message"] == READABLE
 
@@ -335,6 +340,40 @@ class TestProviderContentModerationClassification:
         run_failed = next(e for e in session.events if e.type == RUN_FAILED)
         assert "reason" not in run_failed.data
         assert "message" not in run_failed.data
+
+    @pytest.mark.asyncio
+    async def test_tool_phase_error_with_marker_not_misclassified(self, tmp_path):
+        """分类只在模型调用在途时进行：工具/执行器阶段异常的错误文本即使恰好
+        含 data_inspection_failed（如抓取到引用该错误码的文档），也不得误标——
+        model_call_open 在模型完整返回后已复位（runtime.py「调用完整返回，
+        后续异常不再归因 model」）。"""
+        session = make_session(tmp_path)
+        model = ToolCallThenExplodeModel({
+            "name": "multiply",
+            "args": {"first_number": 3, "second_number": 4},
+            "id": TOOL_CALL_ID,
+            "type": "tool_call",
+        })
+        # 篡改：tool/call 写盘时抛含错误码的异常（模拟工具阶段异常抵达顶层兜底）
+        original_append = session.append
+        marker_error = RuntimeError('data: {"error":{"code":"data_inspection_failed"}}')
+
+        def sabotaged_append(event_type, data, **kwargs):
+            if event_type == TOOL_CALL:
+                raise marker_error
+            return original_append(event_type, data, **kwargs)
+
+        session.append = sabotaged_append
+        runtime = _runtime(model)
+
+        result = await runtime.run(session, "计算 3 乘 4")
+
+        assert result.status == STATUS_FAILED
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert "reason" not in run_failed.data, "工具阶段异常不得误标内容审查"
+        assert "message" not in run_failed.data
+        # 模型已完整返回（归因窗口已关）：不补 model/failed
+        assert not [e for e in session.events if e.type == MODEL_FAILED]
 
 
 @pytest.mark.asyncio

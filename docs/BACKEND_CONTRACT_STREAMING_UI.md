@@ -102,8 +102,11 @@
 `run/failed` 的 `data.reason`：
 - `"cancelled"`：显式 POST /cancel（或旧式消费者关闭）；
 - `"orphaned"`：孤儿回收（零订阅者连续 300s，`RUN_DISCONNECT_GRACE_SECONDS` 可调）；
+- `"identical_tool_failure_loop"`：同错熔断硬保险丝（ADR-0014）；
+- `"provider_content_moderation"`：provider 内容审查拒绝输入（如阿里云 `data_inspection_failed`，仅模型调用在途时分类）；与 `data.message` 成对出现（固定可读文案），provider 回显原文只进服务端日志；
 - 缺省：模型/执行器异常。
 `run/completed` 语义不变。**断连永远不会出现在终态原因里**。
+（上下文超限另有独立终态 `reason=context_window_exceeded` + `data.message`，见 02 §17。）
 
 ## 5. 前端迁移清单（建议 ticket 顺序）
 
