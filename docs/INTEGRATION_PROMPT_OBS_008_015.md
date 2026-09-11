@@ -29,7 +29,7 @@ uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带�
 | 项 | 优先级 | 状态 | commit | 一句话 |
 | --- | --- | --- | --- | --- |
 | OBS-011 | P2 | ✅ 完成 | `d4eb17e` | 子进程输出按产出方编码解码，GBK 乱码不再固化进 JSONL |
-| OBS-015 | P2 | ⏳ 待做 | — | `ApprovalCard.tsx` catch 乐观翻转（**前端 worktree**） |
+| OBS-015 | P2 | ✅ 完成 | `cb0e008`+`4580a69`+`274afcf`（**feat/frontend**） | 审批卡 catch 不再乐观翻转；404 语义订正 + fail-safe 回归锁 |
 | OBS-012 | P2 | ⏳ 待做 | — | `bash` 工具实为 cmd.exe：描述诚实化 + 测试锁 |
 | OBS-013 | P2 | ⏳ 待做 | — | provider 退化重复：护栏或登记已知风险 |
 | OBS-009/014 | — | ⏳ 待做 | — | TIMEOUT `retryable` 语义 + 文案矛盾 |
@@ -130,4 +130,58 @@ Langfuse 都读它，且模型看到的工具输出与真相不一致。
 uv run pytest tests/sandbox/test_output_encoding.py -q
 # 内容哈希敏感的回归（新换行归一必须保持原样）
 uv run pytest tests/agent/test_phase5_runtime.py -q
+```
+
+---
+
+## 3. OBS-015：审批卡的 `catch` 乐观翻转（**feat/frontend**，非本分支）
+
+**状态**：✅ 完成。**改动在 `feat/frontend`**，不在 `feat/backend`：
+`cb0e008`（实现）+ `4580a69`（code-review 收尾：`.approval-error` CSS / tracker / 注释）
++ `274afcf`（本次收尾：404 语义订正 + 404 fail-safe 回归锁）。
+
+### ⚠️ 重要：交接单里 OBS-015 的前提是**错的**，请勿按原文"修回"
+
+交接单写的是「409/**404** 幂等已决 vs 其它错误保持 pending」。**404 不是幂等已决。**
+后端 approve 端点的 404 有四个来源，全部**无法**与「已解析且已出队」区分
+（`src/agent_harness/web/app.py:1157-1166`）：
+
+| 后端异常 | HTTP | 含义 |
+| --- | --- | --- |
+| `ApprovalAlreadyResolved` | **409** | **幂等已决**（决策已生效）→ 唯一可翻卡片的错误码 |
+| `SessionNotFound` | 404 | 会话不存在 |
+| `ApprovalQueueMissing` | 404 | 审批队列缺失（run 已结束等） |
+| `ApprovalRequestMissing` | 404 | `approval_id` 不在队列（可能是过期事件，也可能是已出队——**不可区分**） |
+| `InvalidDecision` | 422 | 决策不在 `allowed_decisions` 内 |
+
+把 404 当成功 = 决策其实**没有**生效却显示「已批准」——正是 OBS-015 本身要消灭的安全假象。
+所以正确语义是：**只有 409 → 翻卡片；404/5xx/网络失败 → 保持 pending + 错误提示 + 可重试。**
+「已经决」的真正兜底不靠错误码，而是 `permission/resolved` 投影事件把卡片移出待决队列。
+
+### 本次收尾做了什么（零产品行为改动）
+
+1. `web/src/lib/api.ts`：`postApproval` 的 docstring 原写「404 with "already resolved"
+   detail = same semantics → AlreadyResolvedError」，与代码相反 → 已按上表改写。
+2. `web/e2e/n-approval-card.spec.ts`：+1 用例 ×2 视口「**POST 404 → 保持『需要审批』**
+   + 错误文案含 404 + 按钮仍可重试」。此前 404 路径**零覆盖**；变异验证（注入
+   `if (404) throw AlreadyResolvedError`）→ 两视口变红，还原后全绿。
+3. `docs/PROMPT_FRONTEND_NEXT_BATCH.md`：原文把错误前提写进任务与验收标准 → 加
+   2026-09-11 订正块（保留原文 + 明确 404 不走已决）。
+
+### 既有批次已锁定的部分（无需重复做）
+
+- `ApprovalCard.tsx` catch：`AlreadyResolvedError` → 翻卡片；其它错误 → 保持 pending +
+  `role="alert"` 提示 + 按钮重新可用（可重试）。
+- e2e `n-approval-card.spec.ts`：**POST 500 → 保持 pending + 可重试（连点两次）**、
+  **POST 409 → 翻「已批准」**、200 → 翻、`permission/resolved` → 移除卡片。
+- 单测 `api.test.ts`：200/409/500/422 四例。
+- 变异验证：还原旧「任何错误都翻卡片」→ 500 用例变红；禁用 `AlreadyResolvedError`
+  分支 → 409 用例变红。
+
+### 集成后建议核对
+
+```bash
+cd D:\intelligence-agent-frontend/web
+npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
+# 门禁基线：vitest 501 passed / oxlint 35 warnings 0 errors / playwright 118 passed
 ```
