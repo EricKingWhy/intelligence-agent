@@ -524,3 +524,59 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
   启动时会看到一条弃用 warning（预期行为，建议改为 `"builtin"`，两者行为完全相同）。
 - **无行为变化**：`builtin`（含缺省）路径与原实现逐字节相同，relay 启动时机不变
   （仍在两个存储就绪之后），只是执行位置从装配方挪进 provider。
+
+## §11 WS-1 — #151 会话归属锚：规范化 cwd 写进 `session/started`（commit `9144631`）
+
+### 一句话
+
+会话多了一个**不可变的会话侧工作目录锚**（`session/started` 的 `cwd` 字段，规范化绝对
+路径），fork 与 SubAgent 子会话显式继承；从此"这个会话属于哪个项目"不必只信 sandbox
+映射表。本票只做**写侧 + 派生侧**，没有新的 HTTP 契约、没有新配置项、没有事件模型重构。
+
+### 新增 / 改动
+
+| 位置 | 内容 |
+| --- | --- |
+| `src/agent_harness/sandbox/paths.py`（新） | `canonical_workspace_path()`——唯一一套规范化（`os.path.realpath` 语义） |
+| `src/agent_harness/session/cwd.py`（新） | `cwd_event_data()`（写侧构造）/ `session_cwd()`（读侧派生） |
+| `Session.start(..., cwd=)` | 由创建者赋予；`started_data` 夹带的 `cwd` 被丢弃并记 warning |
+| `WorkspaceRegistry.create` | 落盘 `workspace_root` 前走同一个规范化函数（与事件侧同源） |
+| `session/service.py`、`cli.py` | 把 `workspace` 作为 `cwd` 传给创建者 |
+| `session/fork.py`、`multiagent/provider.py` | 子会话显式继承父的已存 header cwd |
+
+### 集成方需要知道的行为
+
+- **新增了一个事件字段**：`session/started.data.cwd`（字符串，绝对路径）。老会话没有该字段
+  → 读出 `None`（= 未分组）。**这是加法式变更**，但如果有下游对 `session/started.data`
+  做**严格 schema 校验 / 全字段断言**，需要放行这个新键；导出/回放的事件流里会多出它。
+- **映射文件里的 `workspace_root` 现在是规范化的**（解析尾斜杠 / `..` / 链接）。
+  若某处曾依赖"映射里的原始写法"，会看到盘上值变化——这是 AC5 的必然结果。
+- **fork / SubAgent 子会话的映射与事件 cwd 故意不同**：事件里是**父的项目**（项目归属），
+  映射里是 child 自己那份 copy-on-fork 目录（sandbox 物理隔离）。不要把两者相等当成不变量。
+- **`.env` / 依赖 / 迁移**：零新增、零删除。空串 `cwd` 现在按"未分组"处理（不写字段）。
+
+### 门禁与验收
+
+- `ruff check` clean；`git diff --check` clean；全量 pytest **1871 passed / 10 skipped /
+  39 deselected / 0 failed**；16 组单行变异全被杀（逐字节还原）。
+- 真机（真 `.env` / 真模型 / 真 uvicorn :8792）：建会话后盘上 `started.data.cwd` 与映射
+  `workspace_root` **逐字符相等**；真 fork 继承且 child sandbox 独立；真续聊后 started
+  首行**逐字节未变**；真 delegate 子会话（`agent=coding`）cwd == 父 cwd。
+
+### 交接给 #152（WS-2）的硬约束
+
+1. 路径规范化**必须复用** `canonical_workspace_path`，不要另起 `Path.resolve()`。
+2. 成员资格只能读**第一条 `session/started` 的 `cwd`**；**不得**信 sandbox 映射表
+   （fork child 的映射是复制目录、SubAgent child 根本没有映射）。
+3. 已存的 header cwd **照字面比较**，不要在成员校验时重新 realpath（目录被移动/链接被
+   重指不应追溯改写归属）。
+4. `session_cwd` 只做形状宽松判定（非字符串/空串 → `None`），绝对性校验由 #152 自己加。
+5. 内部子会话（fork / SubAgent child）会因继承而落进父的项目分组 → #152 要明确
+   **过滤还是纳入**（SubAgent child 没有用户可见身份）。
+6. `attachSession` 必须用已存 header cwd 重新校验，绝不信任映射（`service.py` 已有注释）。
+
+### 残留（范围外，仅报告）
+
+- `AppState._wiring` 是进程级缓存，`InProcessSubagentProvider` 在多会话并发启动下会被
+  反复 `activate()`——既有形状，非本票引入。
+
