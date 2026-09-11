@@ -20,9 +20,22 @@ uv run pytest tests/sandbox/test_output_encoding.py -q      # OBS-011（22 个�
 uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带回归
 ```
 
-合并顺序与冲突面：本批次**只动后端 sandbox 解码路径 + 测试**，不碰 API 形状、不碰前端。
-唯一需要留意的集成点是 `LocalSubprocessSandbox` 的构造签名新增了可选参数
-`fallback_encoding`（默认 `None` → 自动探测），既有调用方无需改动。
+合并顺序与冲突面（随批次推进更新——本批次已从纯 sandbox 扩到 runtime/executor/session 多层）：
+
+- **OBS-011**：sandbox 解码路径 + 测试。`LocalSubprocessSandbox` 构造签名新增可选参数
+  `fallback_encoding`（默认 `None` → 自动探测），既有调用方无需改动。
+- **OBS-012**：`sandbox/base.py` 新增非抽象 property `shell_description`（不进冻结的
+  6 个抽象契约）+ local/docker 覆写 + `tools/bash.py` 描述合成。第三方 Sandbox 后端
+  不覆写也能实例化（基类默认 `"sh"`）。
+- **OBS-009/014**：`tooling/executor.py` 超时文案分支（纯文案，无重试行为变化）。
+- **OBS-008**：`agent/runtime.py` 的 `_log` 新增 keyword-only `exc_info`（12 处调用
+  已核零碰撞）+ 三处失败臂传 `True`。
+- **OBS-010**：`session/store.py` 的 `SessionSummaryStats` 末尾新增带默认值的
+  `trace_id` 字段（既有 5 个位置参数构造不受影响）+ `session/service.py` 与
+  `web/app.py` 各透传一处。
+
+**不碰前端**（OBS-015 除外，其改动在 `feat/frontend`）。API 形状只增不改：`/api/sessions`
+每行新增 `trace_id` 字段（前端类型早已声明该字段，本次是让后端真的返回值）。
 
 ## 1. 状态总表
 
@@ -35,7 +48,7 @@ uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带�
 | OBS-013 | P2 | ✅ 已评估（登记风险） | — | 限时护栏已存在/启用/已测（600s total）；无代码改动 |
 | OBS-009/014 | — | ✅ 完成 | `9807928` | 超时文案与实际 `retryable` 对齐（MUTATING 不再教盲重跑）；纯文案 |
 | OBS-008 | — | ✅ 完成 | `0fceccc` | 模型调用失败的调用栈落结构化日志（durable 事件仍只带类型名） |
-| OBS-010 | low | ⏳ 待做 | — | `GET /api/sessions` 的 `trace_id` 恒 null |
+| OBS-010 | low | ✅ 完成 | `499dc3d` | `GET /api/sessions` 的 `trace_id` 从恒 null 改为回填末条 run 终结事件 |
 
 ---
 
@@ -475,3 +488,97 @@ Langfuse / Web UI）；② Python traceback **不**捕获局部变量；③ `_lo
 已核实：该错误是 `ContextWindowExceededError`，消息全部**本地拼装**（token 计数、
 `"No complete early turn can be compacted"`、`"Summary request exceeds hard guard"`），
 **不含 provider 回显**，写进事件既安全又有用（token 数字解释了失败原因）。不登记为问题。
+
+---
+
+## 9. OBS-010：`GET /api/sessions` 的 `trace_id` 恒 null
+
+**状态**：✅ 完成，commit `499dc3d`（分支 `feat/backend`，未 push）。
+
+### 根因
+
+`SessionSummary.trace_id` 是 Gap 2 契约，前端 `types.ts` 也早已声明该字段——但
+**没有任何后端代码从事件流里取值**。而 Langfuse 开启时 run 终结事件的
+`data.trace_id` 一直是真实值（ADR-0018 D7：`run/completed.data.trace_id` 回填真实
+Langfuse trace id）。字段存在、真值存在，中间缺一根接线：列表页恒 null，
+「点击跳 Langfuse」入口是死的。
+
+### 修法
+
+| 文件 | 改动 |
+| --- | --- |
+| `session/store.py` | `SessionSummaryStats` 新增 `trace_id`；新增 `_terminal_trace_id`（取值 + 守卫）与 `_terminal_trace_id_from_tail`（快路径）；`read_session_summary` 快路径与 `_summary_fallback` 同口径 |
+| `session/service.py` | `list_sessions` 每行透传 `trace_id` |
+| `web/app.py` | `SessionSummary.trace_id` 映射 + docstring 订正 |
+
+取值规则：**末事件恰为 run 终结事件**（`run/completed|failed|interrupted`）时取
+`data.trace_id`；非终结类型 / `null` / 空串 / 非字符串 → `None`（不把磁盘上被改坏的
+值塞进 API 契约）。
+
+### 两条路径同口径（不变量：扫描与全量严格一致）
+
+- 快路径 `_terminal_trace_id_from_tail`：只看 `tail[-1]`。
+- 全量回退 `_summary_fallback`：只看 `events[-1]`（`read_events` 已剔除坏行）。
+- 两者都只认**末事件**，这是有意的（见下）。
+
+### ⚠ 已知边界 = 有意的性能取舍（**不要「顺手修」成全量扫描**）
+
+只认末事件、不向历史回溯，因为回溯要逐行 `json.loads` 到 EOF，正好抵消
+`read_session_summary` 的快路径（列表页从秒级全量解析压到几十 ms）。后果：
+
+| 情形 | `trace_id` | 说明 |
+| --- | --- | --- |
+| 末事件是 `run/completed/failed` 且带 trace | 真实 id | 主路径 |
+| 上一轮已 completed，本轮的 `user/message`/`run/started` 垫在末尾 | `null` | 在途 run 尚无最终 trace，显示「未追踪」属诚实降级 |
+| `run/interrupted`（recovery 补记，data 只有 `interrupted_seq`+`reason`） | `null` | 崩在半途的 run 在 Langfuse 没有可跳转的最终 trace，不伪造（不变量 #21） |
+| Langfuse 未启用（终结事件 `trace_id` 本就是 null） | `null` | 预期降级，前端显示「未追踪」灰字 |
+
+第二行是两轴 code-review 共同指出的张力点：若产品希望「上一轮的 trace 在新轮期间
+仍可点」，需要一张**独立**的票来权衡（把快路径改回全量解析，或引入每会话末次
+trace 的侧车存储）——**不要**在 OBS-010 里偷偷改成回溯扫描。取舍已写进
+`_terminal_trace_id_from_tail` docstring 与对应测试注释。
+
+### 测试（15 例）
+
+- `tests/session/test_session_robustness.py` +12：completed/failed 回填、Langfuse
+  未启用、末事件非终结、非终结类型带 trace、`run/interrupted` 真实形状、非字符串
+  5 参数（`123`/`""`/`None`/list/dict）、头部损坏触发 fallback 时同口径。
+- `tests/session/test_service.py` +2：服务层透传 / 无 run 终态为 `None`。
+- `tests/test_web_api.py` +1：`/api/sessions` payload 回填 + 在途为 `null`。
+
+### 门禁与变异验证
+
+- ruff clean；全量 pytest **1553 passed / 10 skipped / 39 deselected / 0 failed**
+  （= 1538 基线 + 15 新增）。
+- 变异验证 5 组（全部已还原）：
+  1. 快路径返回 `None` → 4 用例红（含 service/web）；
+  2. `_terminal_trace_id` 返回 `None` → 5 用例红（含 fallback 口径锁）；
+  3. 去掉字符串/空值守卫 → 4 参数用例红；
+  4. 去掉终结类型守卫 → 非终结类型用例红；
+  5. 向历史回溯找带 trace 的终结事件 → 「末事件非终结」用例红。
+
+### 双轴 code-review 结论
+
+- **Spec**：无 scope creep；`run/interrupted` → `None` 与「不伪造」一致（已核实
+  `recovery/scan.py:163` 确实不写 `trace_id`）；跨轮可用性是判断项，已按上表取舍
+  并文档化，可另立票。
+- **Standards**：无硬性违规；两项 judgement call 保留——末行多解析 1 次（复用会
+  加宽 helper 签名）、`trace_id` 是 `SessionSummaryStats` 唯一带默认值的字段
+  （默认 `None` 语义正确，且三处构造均已接线）。
+
+### 未决（Scope 外，仅报告）
+
+前端 `types.ts::SessionSummary` 还声明了 `trace_url: string | null`（契约 `2d7f87a`），
+但后端列表 `SessionSummary` **未返回**该字段 → 运行时为 `undefined`。当前前端
+`SessionList` 未消费该字段，无可见影响；属 OBS-010 scope 外的另一张票
+（OBS-010 行只要求 `trace_id`；`BACKEND_PROMPT_TRACE_URL.md` 是 per-run 事件契约，
+不覆盖列表）。
+
+### 集成后建议核对
+
+```bash
+# 聚焦回归（15 例）
+uv run pytest tests/session/test_session_robustness.py tests/session/test_service.py tests/test_web_api.py -q -k "trace_id"
+# 或全量
+uv run ruff check src/ tests/ && uv run pytest -q
+```
