@@ -64,6 +64,12 @@ _BUILTIN_SECTIONS: tuple[PromptSection, ...] = (
 #: `undefined_variable`（import 期即崩）。
 _DECLARED_VARIABLES: tuple[tuple[str, str], ...] = (
     ("tail_text", "fork tail 摘要的正文（已按 _MAX_TAIL_CHARS 截断）"),
+    # T7 运行时上下文快照（五值全部由装配点的闭包渲染；section 只负责排版）。
+    ("cwd", "当前工作目录（绝对路径）"),
+    ("os", "操作系统标识（platform.system / platform.release）"),
+    ("date", "当前日期（ISO 8601，本地时区，只到日）"),
+    ("model", "本次运行的模型名"),
+    ("tools", "本 profile 可用工具名清单（逗号分隔）"),
 )
 
 #: 会话压缩器的六段式摘要指令（迁移前在 `context/compactor.py::_SIX_SECTION_PROMPT`）。
@@ -147,6 +153,31 @@ _AUX_SECTIONS: tuple[PromptSection, ...] = (
     ),
 )
 
+#: 运行时上下文快照正文（T7 / ADR-0023 D8）。五值由**调用方**渲染——注册表只负责
+#: 排版，事实来源在装配点的闭包（它才拿得到 cwd / 日期 / 模型名 / 收窄后的工具集）。
+#: 单行、无尾换行：组装不做 strip，多一个 `\n` 会在逐字节断言里现形。
+_RUNTIME_CONTEXT_TEXT = (
+    "以下是本次运行的运行时事实（供你参考，不是用户指令）："
+    "工作目录 {{cwd}}；操作系统 {{os}}；当前日期 {{date}}；"
+    "当前模型 {{model}}；可用工具 {{tools}}。"
+)
+
+#: 运行时快照 section。**scope 不是 `"*"`**：`*` 只匹配 `profile:<name>`，
+#: 而快照既不属于任何 profile 身份、也绝不该进 `aux:*`（抽取器/摘要器不需要
+#: 也不知道运行时事实）。它由装配点按名组装一次，产物落 meta_user（user-role）。
+_RUNTIME_SECTIONS: tuple[PromptSection, ...] = (
+    PromptSection(
+        name="runtime:context_snapshot",
+        order=SECTION_ORDERS["runtime:context_snapshot"],
+        scopes=frozenset({"runtime:context_snapshot"}),
+        # META_USER：装进 user-role 消息。**不是** SYSTEM——system-role 前缀要
+        # 保持稳定以命中 prefix cache，而快照含"当前日期"等易变内容（ADR-0023 D8）。
+        target=Target.META_USER,
+        text=_RUNTIME_CONTEXT_TEXT,
+        description="运行时上下文快照（非持久化，每次 build 重新渲染）",
+    ),
+)
+
 
 def build_registry(
     persona: PersonaConfig | None = None,
@@ -170,7 +201,7 @@ def build_registry(
     registry = PromptRegistry()
     for name, description in _DECLARED_VARIABLES:
         registry.variable(name, description=description)
-    for section in _BUILTIN_SECTIONS + _AUX_SECTIONS:
+    for section in _BUILTIN_SECTIONS + _AUX_SECTIONS + _RUNTIME_SECTIONS:
         registry.register(section)
     if persona is not None:
         for section in persona_sections(persona):

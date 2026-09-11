@@ -15,7 +15,9 @@ web 与 CLI 是它的两个 adapter（两个 adapter = 真实 seam）；capabili
 from __future__ import annotations
 
 import logging
+import platform
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
 from agent_harness.prompt import (
+    DEFAULT_REGISTRY,
     build_registry,
     compose_agent_prompt,
     join_guidance,
@@ -284,6 +287,31 @@ async def build_runtime(
             parent_session_id=session_id,
         )
 
+    def _render_runtime_context() -> str:
+        """渲染运行时上下文快照（T7 / ADR-0023 D8）——每次 build 调用一次。
+
+        事实来源全部取**当前**值，不缓存：
+        - `cwd`：当前进程工作目录；
+        - `os`：`platform.system()` + `release()`；
+        - `date`：本地日期，只到日（用 `datetime.now()` 会让每次 build 文本都变，
+          既毁 prefix cache 又难断言）；
+        - `model`：`config.model_name`（本次**实际**模型），不是 `settings.model_name`
+          ——用户用 `model_name` 参数选目录里的模型时后者可能为空；
+        - `tools`：**收窄后** registry 的工具名——coding profile 不该在快照里列出
+          它用不了的工具（与 T6 收集 guidance 同一原则）。
+
+        产物落 `meta_user`：快照是 user-role 消息，不是 system-role。
+        """
+        return DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
+            "cwd": str(Path.cwd()),
+            "os": f"{platform.system()} {platform.release()}",
+            # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
+            # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
+            "date": date.today().isoformat(),  # noqa: DTZ011
+            "model": config.model_name,
+            "tools": ", ".join(sorted(tool.name for tool in registry.list())),
+        }).meta_user_text
+
     return AgentRuntime(
         model=model,
         registry=registry,
@@ -312,6 +340,9 @@ async def build_runtime(
                 if profile_spec is not None
                 else compose_agent_prompt(None, persona, join_guidance(registry.list()))
             ),
+            # T7：快照**不**拼进 system_prompt（那会破坏 T5/T6 与 C4/C5/C7 的逐字节
+            # 契约），而是走独立通道，由 builder 按 meta_user 语义插到当前用户消息前。
+            runtime_context_provider=_render_runtime_context,
         ),
         memory_writer=wiring.memory_writer,
         fallback_model=fallback_model,
