@@ -131,9 +131,9 @@ def test_aux_scopes_self_checked() -> None:
     )
 
 
-def test_builtin_registry_has_seven_sections() -> None:
-    """T3 的 3 条 profile + T4 的 3 条 aux + T7 的 1 条运行时快照。"""
-    assert len(build_registry().available()) == 7
+def test_builtin_registry_has_eleven_sections() -> None:
+    """T3 的 3 条 profile + T4 的 3 条 aux + T7 的 1 条运行时快照 + T8 的 4 条框架/纠偏。"""
+    assert len(build_registry().available()) == 11
 
 
 def test_tail_text_is_declared() -> None:

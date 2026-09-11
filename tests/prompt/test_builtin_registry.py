@@ -65,23 +65,28 @@ def test_default_registry_is_zero_config_baseline() -> None:
     ]
 
 
-def test_declared_variables_are_exactly_the_six_used() -> None:
-    """T4 起声明 `tail_text`；T7 追加快照的五个变量（`cwd`/`os`/`date`/`model`/`tools`）。
+def test_declared_variables_are_exactly_the_eight_used() -> None:
+    """T4 `tail_text`；T7 快照五值；T8 `tool_name` / `consecutive_failures`。
 
     断言**精确集合**而不是 `"tail_text" in ...`：多声明一个没人用的变量说明
     `_DECLARED_VARIABLES` 被写脏了，值得红。
     """
     assert build_registry().declared_variables() == frozenset(
-        {"tail_text", "cwd", "os", "date", "model", "tools"}
+        {"tail_text", "cwd", "os", "date", "model", "tools",
+         "tool_name", "consecutive_failures"}
     )
 
 
 def test_declared_scopes_covers_every_non_wildcard_scope() -> None:
-    """自检 scope 集 = 注册表里所有非 `*` 的 scope（T4 起含 `aux:*`，T7 起含运行时快照）。"""
+    """自检 scope 集 = 注册表里所有非 `*` 的 scope（T4 `aux:*`，T7 快照，T8 框架/纠偏）。"""
     assert _declared_scopes(build_registry()) == [
         "aux:compaction",
         "aux:fork_tail",
         "aux:memory_extraction",
+        "corrective:tool_failure_guard",
+        "frame:recovery_skipped",
+        "frame:untrusted_knowledge",
+        "frame:untrusted_websearch",
         "profile:coding",
         "profile:main",
         "profile:research_review",

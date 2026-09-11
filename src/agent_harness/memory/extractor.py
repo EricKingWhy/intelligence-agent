@@ -128,12 +128,36 @@ def _diagnostic_detail(error: Exception) -> str:
     return type(error).__name__
 
 
+def _is_runtime_injected(event: SessionEvent) -> bool:
+    """事件是否由 runtime 注入（非真实用户/模型产出）。
+
+    标记是 ``data["injected_by"]``：**非空字符串**即视为注入（当前唯一产出点：
+    ``agent/runtime.py`` 的同错熔断纠偏，值 ``"tool_failure_guard"``）。
+    写成"非空字符串"而不是"等于某常量"，是为了让未来新增的注入点自动获得同一
+    保护；``injected_by=""`` 不算标记（键存在 ≠ 是注入）。判定只看我们自己写入的
+    结构化字段，不看内容——"内容像不像注入"是不可靠的启发式。
+    """
+    data = event.data if isinstance(event.data, dict) else {}
+    marker = data.get("injected_by")
+    return isinstance(marker, str) and bool(marker.strip())
+
+
 class MemoryExtractor:
     def __init__(self, model: Any, timeout_seconds: float = 15.0) -> None:
         self._model = model
         self._timeout = timeout_seconds
 
     async def extract(self, events: list[SessionEvent]) -> ExtractionOutcome:
+        # 运行时注入的消息（`data["injected_by"]` 非空）**不是真实用户发言**，
+        # 整个剔出——单点过滤同时修三件事：
+        #   1) `has_user_message` 不再被注入消息点亮 → USER 候选的降级保护恢复。
+        #      否则工具输出里的一句注入指令，只要窗口里存在任何带 `injected_by`
+        #      的用户消息（如同错熔断的纠偏消息），LLM 就能把它洗成 USER 作用域
+        #      （跨会话存活）的记忆，并在此后每个 session 的 SystemMessage 里回灌。
+        #   2) LLM 抽取的 transcript 不再出现运行时样板文本（`_clip_events` 的输入）。
+        #   3) 纯规则路径不再可能把样板文案当"用户偏好"抽出。
+        # 用**我们自己的结构化标记**判定，不做"内容像不像注入"的启发式猜测。
+        events = [e for e in events if not _is_runtime_injected(e)]
         if not events:
             return ExtractionOutcome()
         try:
