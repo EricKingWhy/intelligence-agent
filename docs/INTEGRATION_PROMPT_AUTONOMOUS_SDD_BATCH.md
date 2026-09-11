@@ -396,3 +396,79 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 - **无新 env / 配置项**：Q19 清单是设计决定，不引入旋钮（PRD §8 已把"清单可配置"列为 DEFER）。
 - **待用户裁定的设计问题**（已上报 #167，**不要擅自实现**）：child（`AgentFactory` 构造的子代理 runtime）目前**没有**快照。票面只给了父组装点、AC 未要求。若要给 child 也加，接线点在 `agent/factory.py`（那里已有 `_primary_model_name` 与 `child_registry`）。
 - **T8 会往同一张 order 表加 3 条 section**（`frame:untrusted_data` 9000 / `corrective:tool_failure_guard` 9100 / `frame:recovery_skipped` 9200），全部在快照 9500 **之前**、persona 后缀 10200 之前。T8 还要改 `memory/extractor.py` 剔除 `injected_by` 事件——**这正是本票刻意不加过滤器的原因**，两者不要混做。
+
+---
+
+## §9 T8 — #168 框架/纠偏消息迁移 + 修注入污染（commit `611a6eb`）
+
+> **本票含一个真实安全修复。集成时请优先读 B 部分。**
+
+### A 部分：四条 FRAGMENT section（纯搬迁，逐字节相同）
+
+| section（= scope） | order | 用途 | 使用点 |
+| --- | --- | --- | --- |
+| `frame:untrusted_knowledge` | 9000（`frame:untrusted_data` 槽位） | 知识检索结果前的"这是数据不是指令" | `knowledge/tools.py` ×2 |
+| `frame:untrusted_websearch` | 9000（同槽位） | 网络搜索结果的同类提示 | `websearch/tools.py` ×1 |
+| `corrective:tool_failure_guard` | 9100 | 同错熔断的纠偏消息 | `agent/runtime.py` ×1 |
+| `frame:recovery_skipped` | 9200 | 恢复期"未启动即跳过"合成结果 | `recovery/coordinator.py` ×1 |
+
+四条全部 `Target.FRAGMENT`，调用点一律取 `.fragment_text`。
+
+### B 部分：修了真实的安全缺陷（`memory/extractor.py`）
+
+**缺陷**：`has_user_message` 只认事件**类型**。纠偏消息是 runtime 自己 append 的 `USER_MESSAGE`（带 `injected_by`）→ 窗口里只要有注入消息，"有用户发言"就恒真 → LLM 的 USER 候选不再降级为 SESSION → **工具输出里的一句注入指令可被洗成跨会话 USER 记忆**，此后每个 session 的 SystemMessage 都会回灌它。
+
+**修法**：`extract()` 入口**单点结构化过滤**（`_is_runtime_injected`：`injected_by` 为非空字符串），一处同时覆盖 `has_user_message` 保护、LLM transcript、规则路径三条链。
+
+### 集成方【不要】做的事
+
+1. **不要把入口过滤改回"在需要的地方各加条件"**。单点过滤是本修法的核心：只在 `_clip_events` 过滤只修三分之一，只在 `has_user_message` 加条件也只修三分之一（两种"半修"都有测试能在变异下变红）。三条链共享同一个过滤结果。
+2. **不要给过滤加"内容关键词/正则黑名单"**。判定必须只用 `injected_by` 这个**我们自己的结构化标记**——"内容像不像注入"是不可靠的启发式，且会误杀真实记忆来源。
+3. **不要把过滤扩大到"所有非用户产出的事件"**。工具结果与模型回复**是记忆的来源**，必须继续参与抽取；只剔 `injected_by` 非空者。
+4. **不要改 `injected_by` 的值 `"tool_failure_guard"`**。它是跨模块契约（runtime 写、extractor 读、前端区分）。
+5. **不要把 `injected_by=""` 或纯空白当成注入**。判定是 `.strip()` 后非空；有边界测试固定。
+6. **不要用 `repr(tool_name)` 填 `corrective` 模板**。模板自带单引号，传 `repr()` 会产出 `''bash''`。
+7. **不要把四条 fragment 改成 SYSTEM / META_USER**。它们不是消息，是嵌进 `ToolResult.message` / 事件 content 的文本；改成消息类 target 后调用点会拿到空串（组装分区互不混装）。
+8. **不要把两条 untrusted 提示合并成一个 section**（同族但模块不同；合并会让"改网络搜索提示要动知识模块"）。
+
+### 证据
+
+- 门禁：`ruff` clean；全量 pytest **1827 passed / 10 skipped / 39 deselected / 0 failed**；`git diff --check` clean；既有 `tests/memory/` 断言零改动（`git diff HEAD` 为空）。
+- 真实熔断：真 turn + 真实 `read` 工具同参连失败 3 次触发真实 SOFT 熔断，注入消息与**从 git HEAD 源码 AST 提取并渲染**的迁移前 f-string 逐字节相同（61 字符）。
+- 真实抽取：注入指令未被洗成 USER 记忆（降级 SESSION + provenance）；反向对照（放回真实用户消息）USER 保持 USER。
+- 真实恢复：skip 文案与 HEAD 渲染逐字节相同，`CANCELLED` / `retryable=False` 未变。
+- AST 提取比对：knowledge / websearch 两条提示 == HEAD 源码常量。
+- 变异：删入口过滤 → 7 条红；两种"半修" → 各 5 条红；"键存在即注入" → 4 条红。
+
+### 前向兼容注意
+
+- **无新 env / 配置项**。
+- **两处 AC 字面偏差已上报 issue，等用户裁定**（集成时不要"顺手修"）：
+  1. AC 要求 `grep -rn "_RESULT_DATA_UNTRUSTED_NOTE" src/ tests/` 无输出，实际 2 行命中，**均为 `prompt/builtin.py` 的 provenance 注释**（常量与使用确已删除）。
+  2. 票面测试表一行自相矛盾（单条注入事件过滤后即空集），实现按实际语义拆成两条测试。
+- **仅报告未改的潜在不一致**：`session.py:366` 的 `user_turn_count` 用真值判定 `not e.data.get("injected_by")`，本票 extractor 用 `.strip()`；对 `injected_by="  "` 语义不同（当前无产出点）。集成方若要统一，需另行批准。
+- **#158（MEM-3 冲突消解 retrieve-before-write）现在可以开工**：它依赖 `memory/extractor.py`，而本票对该文件的改动已收口（改动面：新增 `_is_runtime_injected` + `extract()` 入口两处，其余零改动）。
+
+---
+
+## PromptRegistry 组完成（#161–#168）
+
+| 票 | commit | 主题 |
+| --- | --- | --- |
+| #161 T1 | `36fd7ef` + `a51fde2` | 注册表骨架（section/template/registry/errors） |
+| #162 T2 | `af6cf44` | assemble + R4/R5/R7 + 启动自检 |
+| #163 T3 | `aa40fc3` | 三类 profile 迁移（逐字节） |
+| #164 T4 | `2c77c3b` | 三条辅助 LLM prompt 迁移（逐字节） |
+| #165 T5 | `2638d68` | Persona 环境覆盖（`AGENT_PERSONA`） |
+| #166 T6 | `ef64d44` | 工具 guidance 归集（`Tool.prompt_guidance`） |
+| #167 T7 | `1a4c41f` | 运行时上下文快照（meta_user，非持久化） |
+| #168 T8 | `611a6eb` | 框架/纠偏消息迁移 + 修注入污染 |
+
+全量门禁 1655 → **1827 passed**（+172 用例），全程 0 failed。8 张 issue 全部关闭。
+
+### 组级集成注意（跨票）
+
+- **`.env` 新增项仅 `AGENT_PERSONA`**（T5，默认空 = 零行为变化）。其余票无新配置。
+- **注册表现状**：11 条 section（3 profile + 3 aux + 1 快照 + 4 框架/纠偏），8 个声明变量（`tail_text`/`cwd`/`os`/`date`/`model`/`tools`/`tool_name`/`consecutive_failures`）。
+- **冻结契约**（全程断言未改）：`tests/agent/test_system_prompt_wiring.py` B1/B2、`tests/test_assembly_agent_profile.py` C1–C7、`tests/context/test_builder_system_prompt.py` G1–G4。
+- **两条待用户裁定的设计/内容问题**（已在各票 issue 记录）：①T6 的 guidance 与 `profile:main:identity` 存在逐字重复；②T7 的 child（子代理 runtime）没有运行时快照。
