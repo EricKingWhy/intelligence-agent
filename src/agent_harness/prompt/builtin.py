@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from agent_harness.prompt.persona import PersonaConfig, persona_sections
 from agent_harness.prompt.registry import PromptRegistry, run_self_check
 from agent_harness.prompt.section import SECTION_ORDERS, PromptSection, Target
 
@@ -145,22 +146,25 @@ _AUX_SECTIONS: tuple[PromptSection, ...] = (
 )
 
 
-def build_registry() -> PromptRegistry:
-    """构建内置注册表（无参 → 确定性，不读环境）。
+def build_registry(persona: PersonaConfig | None = None) -> PromptRegistry:
+    """构建内置注册表（不读环境——`persona` 由装配点显式传入）。
 
     **公开**：T4/T5 在其上扩展；测试用 `build_registry()` 拿确定性实例。
-    T5 的 persona 走 `build_registry(persona=…)` 这个装配点注入，**不改**
-    `DEFAULT_REGISTRY`（§4.4：默认注册表永不读环境）。
+    persona 走**装配点**注入，**不改** `DEFAULT_REGISTRY`（§4.4：默认注册表永不读环境）。
 
     顺序不可颠倒：先 `variable()` 再 `register()`——`register` 会校验
     `requires ⊆ declared_variables()`，反过来第一个带变量的 section 就会抛
-    `undefined_variable`。
+    `undefined_variable`。persona 正文若含未声明的 `{{x}}`，同样在注册期响亮失败
+    （这不是 bug：坏配置不该被静默渲染成空串）。
     """
     registry = PromptRegistry()
     for name, description in _DECLARED_VARIABLES:
         registry.variable(name, description=description)
     for section in _BUILTIN_SECTIONS + _AUX_SECTIONS:
         registry.register(section)
+    if persona is not None:
+        for section in persona_sections(persona):
+            registry.register(section)
     return registry
 
 

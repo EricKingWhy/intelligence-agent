@@ -32,6 +32,7 @@ from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
+from agent_harness.prompt import apply_persona, build_registry, parse_persona_config
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
@@ -157,6 +158,12 @@ async def build_runtime(
         from agent_harness.agent.profiles import BUILTIN_PROFILES
         profile_spec = BUILTIN_PROFILES[agent_profile]
 
+    # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
+    # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
+    # DEFAULT_REGISTRY 不读环境（§4.4），所以这里显式按 settings 构建一次。
+    persona = parse_persona_config(settings.agent_persona)
+    persona_registry = build_registry(persona)
+
     config = (ModelConfig.from_settings(settings) if model_name is None
               else ModelConfig.from_catalog(settings, model_name))
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
@@ -252,6 +259,7 @@ async def build_runtime(
                 stream_total_timeout=settings.model_stream_total_timeout,
                 model_call_gate=model_call_gate,
                 observability_sink=get_observability_sink(settings),
+                persona=persona,
             ),
             source_registry=registry,
             session_store=session_store,
@@ -277,7 +285,15 @@ async def build_runtime(
             context_providers=_select_context_providers(
                 wiring.context_providers, context_providers,
             ),
-            system_prompt=(profile_spec.system_prompt if profile_spec is not None else None),
+            # 有 profile → 走注册表组装：persona section 的 order（0 / 10200）由容器
+            # 排序，persona 为空时该 scope 只有一条 section，T2 保证产物逐字节等于
+            # 原文（C5/C7 因此保持绿）。无 profile → 没有可组装的 scope，直接对
+            # base=None 做 persona 包裹。
+            system_prompt=(
+                persona_registry.assemble(f"profile:{agent_profile}").system_text
+                if profile_spec is not None
+                else apply_persona(None, persona)
+            ),
         ),
         memory_writer=wiring.memory_writer,
         fallback_model=fallback_model,

@@ -1430,3 +1430,27 @@ persona 由装配点 `build_registry(persona=…)` 注入）矛盾。若按我�
 **已在 T3 内修正注释与 docstring**（无行为变化），并把
 `test_default_registry_equals_build_registry_in_p0` 重述为**该不变量的机器化表达**。
 **归属：后端**。
+
+### OBS-9.6 【后端·潜在顺序隐患，未触发】`harness:identity` 的 order 早于 `persona:prefix`
+
+`SECTION_ORDERS` 里 `harness:identity = -1000`，而 `persona:prefix = 0`。父路径走
+`registry.assemble()`（按 order 排序）时 harness 段本应在 persona 前缀**之前**；
+但 child 路径走 `apply_persona(base, persona)`，它把 persona 前缀硬放在最前。
+
+今天不会出问题：`harness:identity` 是**预留键**，`_BUILTIN_SECTIONS` 里没有这条
+section，所以父/子两条路径一致（`test_apply_persona_matches_registry_order` 绿）。
+
+若将来有人为 profile scope 注册 `harness:identity`，**漂移守卫会立刻变红**——这正是
+那条守卫的主要未来价值（它比较的是活的注册表，不是硬编码期望值）。届时需要决定：
+让 `apply_persona` 也感知 order，或把 harness 段移出 persona 包裹范围。
+**归属：后端（T5 已知边界）**。
+
+### OBS-9.7 【文档·命名漂移】交接文档 §4.5 的 `compose_agent_prompt` 与实现名不一致
+
+`docs/HANDOFF_PROMPT_REGISTRY.md` §4.5 写 persona 拼接用
+`compose_agent_prompt(base, persona, guidance_text)`，实际交付的是
+`apply_persona(base, persona)`（#165 票面本身 prescribed 这个名字，票面优先）。
+
+T6 加 tool guidance（order 2000）时**无需改 `apply_persona`**：它包裹的是**已组装完**
+的 profile 文本，guidance 已含在 base 里，顺序天然正确。§4.5 的名称与三参签名已过期。
+**归属：文档**。

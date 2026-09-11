@@ -21,6 +21,7 @@ from typing import Any
 
 from agent_harness.agent.profiles import AgentSpec
 from agent_harness.agent.runtime import AgentRuntime
+from agent_harness.prompt import PersonaConfig, apply_persona
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class AgentFactory:
         stream_total_timeout: float = 0.0,
         model_call_gate: Any | None = None,
         observability_sink: Any | None = None,
+        persona: PersonaConfig | None = None,
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
@@ -55,6 +57,9 @@ class AgentFactory:
         # 进程级并发闸（#89）：assembly 传入共享实例，child runtime 同闸。
         self._model_call_gate = model_call_gate
         self._observability_sink = observability_sink
+        # T5：persona 由装配点传入，child 与 parent 同样被前后缀包裹。
+        # 默认 None → `apply_persona` 逐字节返回原值（B2 契约零变化）。
+        self._persona = persona
 
     def create(
         self,
@@ -102,5 +107,7 @@ class AgentFactory:
             observability_sink=self._observability_sink,
             # ADR-0020a：child 拿它 spec 的 system_prompt（与 parent 路径一致），
             # 经 AgentRuntime 内部的 ContextBuilder 注入为列表首条 SystemMessage。
-            system_prompt=spec.system_prompt,
+            # T5：persona 由装配点传入，child 与 parent 同样被前后缀包裹
+            # （`apply_persona(base, None)` 逐字节返回 base，故未配置时零变化）。
+            system_prompt=apply_persona(spec.system_prompt, self._persona),
         )

@@ -5,8 +5,14 @@
 
 from __future__ import annotations
 
-from agent_harness.prompt.builtin import DEFAULT_REGISTRY
+from agent_harness.prompt.builtin import DEFAULT_REGISTRY, build_registry
 from agent_harness.prompt.errors import PromptError
+from agent_harness.prompt.persona import (
+    PersonaConfig,
+    apply_persona,
+    parse_persona_config,
+    persona_sections,
+)
 from agent_harness.prompt.registry import (
     AssembledPrompt,
     PromptRegistry,
@@ -19,11 +25,16 @@ __all__ = [
     "DEFAULT_REGISTRY",
     "SECTION_ORDERS",
     "AssembledPrompt",
+    "PersonaConfig",
     "PromptError",
     "PromptRegistry",
     "PromptSection",
     "Target",
+    "apply_persona",
+    "build_registry",
     "extract_variables",
+    "parse_persona_config",
+    "persona_sections",
     "render",
     "run_self_check",
 ]

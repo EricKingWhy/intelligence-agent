@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from agent_harness.prompt import DEFAULT_REGISTRY, run_self_check
+from agent_harness.prompt import DEFAULT_REGISTRY, PersonaConfig, run_self_check
 from agent_harness.prompt.builtin import _declared_scopes, build_registry
 
 _PROFILE_SCOPES = ["profile:coding", "profile:main", "profile:research_review"]
@@ -48,16 +48,20 @@ def test_build_registry_is_deterministic() -> None:
     assert first == second
 
 
-def test_default_registry_equals_build_registry_in_p0() -> None:
-    """`DEFAULT_REGISTRY` 必须等于一次**全新确定性构建**——即它不读环境。
+def test_default_registry_is_zero_config_baseline() -> None:
+    """`DEFAULT_REGISTRY` 必须等于一次**全新零配置构建**——即它不读环境。
 
     交接文档 §4.4：`DEFAULT_REGISTRY = build_registry()`，**永不读环境变量**；
     persona 由装配点 `build_registry(persona=…)` 注入，不在默认注册表上变形。
-    这条断言就是那条不变量的机器化表达：谁哪天把 env 派生的 section 塞进
-    `DEFAULT_REGISTRY`，这里立刻红。
+    这条断言就是那条不变量的机器化表达——两半缺一不可：
+    ① 与零配置构建相等（谁把 env 派生 section 塞进 DEFAULT_REGISTRY，这里红）；
+    ② 与带 persona 的构建**不**相等（证明 persona 确实只在装配点注入）。
     """
-    assert [(s.name, s.order, s.text) for s in DEFAULT_REGISTRY.available()] == [
-        (s.name, s.order, s.text) for s in build_registry().available()
+    baseline = [(s.name, s.order, s.text) for s in build_registry().available()]
+    assert [(s.name, s.order, s.text) for s in DEFAULT_REGISTRY.available()] == baseline
+    assert baseline != [
+        (s.name, s.order, s.text)
+        for s in build_registry(PersonaConfig(prefix="P")).available()
     ]
 
 
