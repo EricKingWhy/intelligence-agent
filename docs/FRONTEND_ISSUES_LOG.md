@@ -1370,3 +1370,54 @@ KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
 - 所有服务端复现都在**健康会话的临时副本**上做（靶子用完即删，删前核对）；探针 15 条 `model/changed` 全部落在靶子上，用户会话 `dd983104` 始终保持 7 行。
 - 浏览器侧用**独立无头 Chromium**，未干扰用户已打开的页面，也未向其会话写入任何事件。
 - 现场没有服务端访问日志（应用日志只记了 19:02 的孤儿回收），因此「两个请求」由浏览器侧历史网络记录 + `from_* = null` 反证，而非服务端计数。
+
+---
+
+## 第九轮（2026-09-12）：PromptRegistry 迁移期的后端观察（自主 SDD 批次）
+
+本轮在 `feat/backend` 自主推进 #150 + #161–#168 + #149–#160。迁移类票的验收靠
+**逐字节等价**，所以下面的观察全部是"后端 / 文档"性质，无前端问题。
+
+### OBS-9.1 【后端·已修】`--help` 曾被单实例锁挡住（#150）
+
+`cli.main()` 最初无条件取锁，导致服务在跑时 `agent-harness --help` 也会以 rc=2 被拒。
+`--help` 不触碰 session root（argparse 直接打印帮助退出），不该被锁挡住。
+**修复**：`-h/--help` 走豁免路径，但仍守 ADR-0018 D3 的 `flush_process_sink` 契约
+（既有测试 `test_cli_main_flushes_on_normal_exit` 正是这条契约的裁判——修复时它先红，
+证明该测试有效）。**归属：后端**。
+
+### OBS-9.2 【后端·设计约束，非缺陷】Windows 区间锁是 mandatory 的
+
+`msvcrt.locking` 锁住某个字节区间后，**同进程的另一个句柄**读该区间也会被拒
+（`PermissionError`）。若锁 byte 0，锁文件里写的 `pid=` / 诊断信息就再也读不出来，
+第二进程的错误信息会退化成"未知占用者"。
+**处置**：锁区间取在载荷之外的偏移（`1 << 20`），载荷区保持可读。
+**归属：后端**（POSIX `flock` 是 advisory，无此问题）。
+
+### OBS-9.3 【后端·flaky，未定位】`test_disconnect_leaves_run_running_and_cancel_stops_it` 曾单次失败
+
+2026-09-12 的全量跑中出现一次失败，随后**同一 commit 连续两轮全量全绿**、单跑绿、
+整文件跑绿（28 passed）。当时起点附近有被取消/中断的 pytest 进程，怀疑与负载或残留状态有关。
+**未定位，本轮不追**（§8 Scope Lock；且无法复现）。记录备查：若后续再现，按
+"断开后 run 仍在跑 + cancel 停止"的时序竞态方向查。
+**归属：后端（测试稳定性）**。
+
+### OBS-9.4 【文档·已报告未改】PRD §10.7 / §10.2 与实现不一致
+
+- §10.7 的 `AssembledPrompt` 代码块只列 2 字段，§10.4 与交接文档 §4.2 要求 3 段
+  （含 `fragment_text`）；#162 票面自身 step 1 亦为 3 字段。
+- §10.2 导出清单缺 `run_self_check`（T2 引入）与 `DEFAULT_REGISTRY`（T3 引入）。
+- §10.8 把"模板语法"列为自检职责，实际由 `register`（R3a）承担。
+按交接文档 §2「不要自行改两边」，**只报告不改**。
+**归属：文档**。
+
+### OBS-9.5 【后端·本 Agent 自己的错误说法，已修正】T5 与 `DEFAULT_REGISTRY` 的关系
+
+T3 落地时我在 `builtin.py` 注释与两个测试 docstring 里写了"T5 会让 `DEFAULT_REGISTRY`
+带上 persona"——这与交接文档 §4.4（`DEFAULT_REGISTRY = build_registry()` **永不读环境**、
+persona 由装配点 `build_registry(persona=…)` 注入）矛盾。若按我原来的说法实现 T5，
+`_builtin_prompt` 会变成环境相关，`profile:*:identity` 的逐字节断言会在设了
+`AGENT_PERSONA` 的机器上红。
+**已在 T3 内修正注释与 docstring**（无行为变化），并把
+`test_default_registry_equals_build_registry_in_p0` 重述为**该不变量的机器化表达**。
+**归属：后端**。
