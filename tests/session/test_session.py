@@ -20,6 +20,7 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
+from agent_harness.session.errors import SessionNotFound
 
 
 @pytest.fixture
@@ -139,7 +140,9 @@ class TestSessionResume:
         ]
 
     def test_resume_nonexistent_session_raises(self, store: JsonlSessionStore):
-        with pytest.raises(ValueError, match="不存在"):
+        # 类型化领域异常（BUG-011）：不再是裸 ValueError——web 层据此翻译成 404，
+        # 不再需要 `except ValueError → SessionNotFound` 这种一刀切。
+        with pytest.raises(SessionNotFound, match="不存在"):
             Session.resume(store, "fake-session-id")
 
     def test_resume_repair_dangling_tool_call(self, store: JsonlSessionStore):

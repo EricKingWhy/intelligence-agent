@@ -57,6 +57,7 @@ from agent_harness.session.service import (
     InvalidSessionId,
     QueueItemNotFound,
     RecoveryConflict,
+    SeqConflict,
     SessionNotFound,
     SessionService,
     SteerTargetNotFound,
@@ -1087,6 +1088,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             ActiveRunConflict,
             RecoveryConflict,
+            SeqConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留需人工裁决的 UNKNOWN
             # tool_call，不伪造结果（不变量 #14）。
@@ -1185,9 +1187,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         service = SessionService(app.state.agent)
         try:
             events = await service.recover(session_id)
-        except (InvalidSessionId, SessionNotFound, RecoveryConflict) as e:
+        except (InvalidSessionId, SessionNotFound, RecoveryConflict, SeqConflict) as e:
             # RecoveryConflict → 409：RUNNING/UNKNOWN 需人工裁决，不伪造不盲跑
-            # （不变量 #14）。
+            # （不变量 #14）。SeqConflict → 409：日志 seq 冲突（BUG-011）。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 
@@ -1211,7 +1213,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 provider=req.provider,
                 model_id=req.model_id,
             )
-        except (InvalidSessionId, SessionNotFound, UnknownModel) as e:
+        except (InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict) as e:
             raise http_error(e) from e
         # 回传规范 model_id（service 解析出的 picker id）：catalog 条目名，或默认链
         # 的默认模型名——不能回显请求值，否则上游 model_name / "default" 别名会与
@@ -1266,6 +1268,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             RecoveryConflict,
             QueueItemNotFound,
             SteerTargetNotFound,
+            SeqConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
@@ -1303,7 +1306,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             cancelled = await service.cancel_queue(
                 session_id=session_id, queue_id=queue_id
             )
-        except (InvalidSessionId, SessionNotFound, QueueItemNotFound) as e:
+        except (InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict) as e:
             raise http_error(e) from e
         return {"status": "cancelled" if cancelled else "already_consumed"}
 

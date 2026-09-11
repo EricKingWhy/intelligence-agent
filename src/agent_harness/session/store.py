@@ -1,10 +1,14 @@
 """JsonlSessionStore：SessionEvent 的薄 IO 层（JSONL append-only）。
 
-只负责两件事：
+只负责三件事：
     1. read_events(session_id) — 读取一个 Session 的全部有效事件
     2. append_event(session_id, event) — 向一个 Session 追加一条事件
+    3. 守卫 seq 单调性（BUG-011）——重复 / 回退 seq 拒写（``SeqConflict``）
 
-不持有业务状态、不做 seq 分配（那是 Session 聚合根的职责）。
+seq **分配**仍是 Session 聚合根的职责（``_next_seq``）；本层负责把每会话的
+「读已落盘最大 seq → 判定 → 写」串成临界区，并拒写违反单调性的 seq
+（写者跨线程：事件循环的 ``Session.append`` 与恢复扫描的工作线程都会进来）。
+保证范围是**同一进程内**——跨进程没有文件锁，见 ``__init__`` 的边界说明。
 """
 
 from __future__ import annotations
@@ -12,10 +16,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from agent_harness.session.errors import SeqConflict
 from agent_harness.session.event import RUN_TERMINAL_TYPES, USER_MESSAGE, SessionEvent
 
 logger = logging.getLogger("agent_harness.session.store")
@@ -58,6 +64,22 @@ class JsonlSessionStore:
 
     def __init__(self, root: str | Path = ".agent/sessions") -> None:
         self._root = Path(root)
+        # ── seq 守卫的进程内状态（BUG-011）──
+        # 每会话一把锁：把「读已落盘最大 seq → 写」串成临界区。写者跨线程
+        # （事件循环的 Session.append + 恢复扫描下放的工作线程），故用
+        # threading.Lock，不能用 asyncio.Lock。
+        self._seq_locks: dict[str, threading.Lock] = {}
+        # 每会话「已落盘最大 seq」缓存 + 观测到的文件戳（size, mtime_ns）。
+        # 缓存只用于省掉每次 append 的 O(n) 全量读；戳变化 = 文件被本实例之外
+        # 的写者动过（另一 store 实例 / 另一进程，CLI 与 server 共用同一 sessions
+        # 目录）→ 重新以磁盘为准。缓存与锁表的结构由 _state_guard 保护。
+        #
+        # 边界（不得夸大为「跨进程安全」）：本层没有文件锁，跨进程**同时**追加仍可能
+        # 各自通过检查（检查与写入之间的窗口跨进程不互斥）。戳只能察觉「已经落盘」的
+        # 外部追加。同一进程内（真实缺陷 BUG-011 的现场：一个 server 的两个并发请求）
+        # 由 _lock_for + 本检查共同保证严格单调。
+        self._last_seq: dict[str, tuple[int, int, int]] = {}
+        self._state_guard = threading.Lock()
 
     def _session_dir(self, session_id: str) -> Path:
         return self._root / session_id
@@ -65,20 +87,71 @@ class JsonlSessionStore:
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
 
+    def _lock_for(self, session_id: str) -> threading.Lock:
+        """取得该会话的写锁（懒创建；表结构由 _state_guard 保护）。
+
+        这把锁是**守卫原子性的一部分**，不是可有可无的优化：`append_event` 的
+        「读已落盘最大 seq → 判定 → 写」若不在同一临界区内，两个线程可能都读到同一
+        last_seq、都通过判定、都落盘 → 重复 seq。写者跨线程（事件循环的
+        `Session.append` + 恢复扫描下放的工作线程），故是 threading.Lock。
+        """
+        with self._state_guard:
+            lock = self._seq_locks.get(session_id)
+            if lock is None:
+                lock = self._seq_locks[session_id] = threading.Lock()
+            return lock
+
+    def _last_seq_on_disk(self, session_id: str) -> int:
+        """已落盘最大 seq（无文件 = -1）。带文件戳校验的缓存，必须在会话写锁内调用。
+
+        戳变化即回读磁盘，因此外部（另一实例 / 另一进程）**已经落盘**的追加一定会被
+        看见；它不能防的是跨进程**同时**写入（无文件锁），见 ``__init__`` 的边界说明。
+        """
+        path = self._events_path(session_id)
+        try:
+            stat = path.stat()
+        except OSError:
+            return -1
+        stamp = (stat.st_size, stat.st_mtime_ns)
+        with self._state_guard:
+            cached = self._last_seq.get(session_id)
+        if cached is not None and cached[1:] == stamp:
+            return cached[0]
+        last = max((e.seq for e in self.read_events(session_id)), default=-1)
+        with self._state_guard:
+            self._last_seq[session_id] = (last, *stamp)
+        return last
+
     def append_event(self, session_id: str, event: SessionEvent) -> None:
         """向 Session 的 JSONL 追加一条事件（整行 + flush + fsync）。
 
         fsync 是断电不丢的底线（用户拍板的耐久性决策）：flush 只把进程缓冲
         推到 OS page cache，断电即失；fsync 才真正落盘。代价是每次 append
         一次磁盘同步——事件流是恢复的唯一真相源，宁慢不丢。
+
+        seq 守卫（BUG-011）：seq ≤ 已落盘最大 seq 是**拒写**而不是写入。
+        否则并发取号会留下重复 seq，使该会话此后任何构造聚合的路径
+        （``Session.load`` / ``resume``）永久失败。
         """
         path = self._events_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+        with self._lock_for(session_id):
+            last = self._last_seq_on_disk(session_id)
+            if event.seq <= last:
+                raise SeqConflict(
+                    f"Session '{session_id}' 事件 seq 冲突: seq={event.seq} 已被占用"
+                    f"（已落盘最大 seq={last}）——并发写入或日志已损坏，拒绝落盘"
+                )
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            stat = path.stat()
+            with self._state_guard:
+                self._last_seq[session_id] = (
+                    event.seq, stat.st_size, stat.st_mtime_ns,
+                )
 
     @staticmethod
     def _parse_event_line(raw_line: str, path_name: str, lineno: int) -> SessionEvent | None:

@@ -31,6 +31,7 @@ from agent_harness.session.derive import (
     derive_messages,
     detect_dangling,
 )
+from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     EVENT_TYPES,
     RUN_COMPLETED,
@@ -46,6 +47,30 @@ from agent_harness.session.event import (
 from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
+
+
+def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
+    """校验 seq 严格递增（不容忍重复或回退）——该校验规则的唯一 owner。
+
+    ``Session.load``（加载即校验）与 ``service.change_model``（已自行读过快照，
+    不再重复读盘）共用同一判据。
+
+    违反 → ``SeqConflict``，**不是** ``SessionNotFound``：日志确实存在、只是损坏。
+    见 BUG-011——旧实现抛裸 ``ValueError``，被 ``service`` 一刀切翻成 404
+    「会话不存在」，于是真机会话 ``dd983104`` 的日志损坏（两条 seq=5）显示成
+    ``续聊失败：Send failed: 404``。
+    """
+    seen_seqs: set[int] = set()
+    prev_seq = -1
+    for event in events:
+        if event.seq in seen_seqs:
+            raise SeqConflict(f"Session '{session_id}' 事件 seq 重复: {event.seq}")
+        if event.seq <= prev_seq:
+            raise SeqConflict(
+                f"Session '{session_id}' 事件 seq 回退: {event.seq}（前一条: {prev_seq}）"
+            )
+        seen_seqs.add(event.seq)
+        prev_seq = event.seq
 
 
 class Session:
@@ -162,10 +187,14 @@ class Session:
         tool/result，破坏 tool_call/result 配对（不变量 #7）。本入口只做
         「加载 + 追加」；run_id / agent_id / step_id 透传事件信封（T8 #138 的
         ``run/interrupted`` 要挂到被中断的 run 上）。
+
+        加载后同样校验 seq（BUG-011）：损坏日志在这里也要报 ``SeqConflict``，不能
+        一边说日志已坏、一边继续往上追加（排队消息 / 中断标记等旁路写者）。
         """
         events = store.read_events(session_id)
         if not events:
-            raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+            raise SessionNotFound(f"Session '{session_id}' 不存在或事件日志为空")
+        validate_event_seq(session_id, events)
         session = cls(session_id, store, events)
         return session.append(
             event_type, dict(data),
@@ -188,30 +217,15 @@ class Session:
         """
         events = store.read_events(session_id)
         if not events:
-            raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+            raise SessionNotFound(f"Session '{session_id}' 不存在或事件日志为空")
 
         sandbox = (
             workspace_registry.get(session_id)
             if workspace_registry is not None
             else None
         )
-        session = cls(session_id, store, events, sandbox=sandbox)
-
-        # 校验 seq 严格递增（不容忍重复或回退）；计数器据此在构造时取 max+1
-        seen_seqs: set[int] = set()
-        prev_seq = -1
-        for event in session._events:
-            if event.seq in seen_seqs:
-                raise ValueError(
-                    f"Session '{session_id}' 事件 seq 重复: {event.seq}"
-                )
-            if event.seq <= prev_seq:
-                raise ValueError(
-                    f"Session '{session_id}' 事件 seq 回退: {event.seq}（前一条: {prev_seq}）"
-                )
-            seen_seqs.add(event.seq)
-            prev_seq = event.seq
-        return session
+        validate_event_seq(session_id, events)
+        return cls(session_id, store, events, sandbox=sandbox)
 
     @classmethod
     def resume(
