@@ -157,25 +157,27 @@ class TestListSessions:
 
     @pytest.mark.asyncio
     async def test_carries_terminal_trace_id(self, app_state, existing_session):
-        """OBS-010：列表行回填最近一次 run 终结事件的 trace_id。"""
+        """OBS-010 + ARCH-4b：列表行回填最近一次 run 终结事件的 trace_id 与 trace_url。"""
         session = Session.resume(app_state.store, existing_session)
         run_id, _ = session.begin_run()
         session.append(USER_MESSAGE, {"content": "hi"}, run_id=run_id)
         session.end_run(run_id, status="completed", final_text="ok",
-                        trace_id="tr-list")
+                        trace_id="tr-list",
+                        trace_url="https://lf.example/trace/tr-list")
 
         service = SessionService(app_state)
         result = await service.list_sessions()
         row = next(r for r in result if r.session_id == existing_session)
-        assert row.trace_id == "tr-list"
+        assert (row.trace_id, row.trace_url) == (
+            "tr-list", "https://lf.example/trace/tr-list")
 
     @pytest.mark.asyncio
     async def test_trace_id_none_without_terminal_event(self, app_state, existing_session):
-        """只有 session/started（无 run 终态）→ trace_id 为 None，不伪造。"""
+        """只有 session/started（无 run 终态）→ trace_id / trace_url 都为 None，不伪造。"""
         service = SessionService(app_state)
         result = await service.list_sessions()
         row = next(r for r in result if r.session_id == existing_session)
-        assert row.trace_id is None
+        assert (row.trace_id, row.trace_url) == (None, None)
 
 
 # ── cancel ───────────────────────────────────────────────────────────

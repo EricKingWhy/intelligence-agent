@@ -293,9 +293,13 @@ class SessionSummary(BaseModel):
     # 非终结（run 在途，或上一轮已完成后新轮的 user/message/run-started 垫在末尾）
     # 或未配置可观测性时为 null——绝不伪造，前端显示「未追踪」。
     # 有意只认末事件（不回溯）以保住列表页快路径，取舍见
-    # `JsonlSessionStore._terminal_trace_id`；不变量 #21：可观测性缺席
+    # `JsonlSessionStore._terminal_trace_field`；不变量 #21：可观测性缺席
     # 不致命也不造假。
     trace_id: str | None = None
+    # ARCH-4b：与 `trace_id` 同源（同一个 run 终结事件、同一套守卫）的可点击
+    # Langfuse URL（契约 2d7f87a / ADR-0018 D7）。前端 `types.ts::SessionSummary`
+    # 把该字段声明为**非可选** `string | null`——本字段存在即让那条声明为真。
+    trace_url: str | None = None
 
 
 class AppState:
@@ -741,6 +745,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 last_event_time=s.last_event_time,
                 first_user_message=s.first_user_message,
                 trace_id=s.trace_id,
+                trace_url=s.trace_url,
             )
             for s in summaries
         ]

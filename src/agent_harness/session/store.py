@@ -14,7 +14,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from agent_harness.session.event import RUN_TERMINAL_TYPES, USER_MESSAGE, SessionEvent
 
@@ -44,6 +44,9 @@ class SessionSummaryStats:
     #: 未配置可观测性时终结事件里本就是 null → 这里也是 None（不变量 #21：可观测性
     #: 缺席既不致命也不伪造）。
     trace_id: str | None = None
+    #: ARCH-4b：同一终结事件的 `trace_url`（人类可点击的 Langfuse URL，契约 2d7f87a
+    #: / ADR-0018 D7）。与 `trace_id` 同源、同一套守卫；未配置可观测性时为 None。
+    trace_url: str | None = None
 
 
 class JsonlSessionStore:
@@ -195,19 +198,27 @@ class JsonlSessionStore:
             first_event_time=first_time,
             last_event_time=last_event.time if last_event is not None else None,
             first_user_message=first_user_message,
-            trace_id=self._terminal_trace_id(last_event),
+            trace_id=self._terminal_trace_field(last_event, "trace_id"),
+            trace_url=self._terminal_trace_field(last_event, "trace_url"),
         )
 
     @staticmethod
-    def _terminal_trace_id(event: SessionEvent | None) -> str | None:
-        """从 run 终结事件取 trace_id；非终结 / null / 非字符串 → None（OBS-010）。
+    def _terminal_trace_field(
+        event: SessionEvent | None, key: Literal["trace_id", "trace_url"]
+    ) -> str | None:
+        """从 run 终结事件取 trace 关联字段（`trace_id` / `trace_url`）——取值规则唯一 owner。
 
-        只认 run 终结事件：trace_id 是 **per-run** 事实（`run/completed|failed|
+        只认 run 终结事件：trace 关联是 **per-run** 事实（`run/completed|failed|
         interrupted` 的 data 里），会话可能有多次 run，末端那次才是列表页要展示的。
+        非终结类型 / 缺键 / null / 空串 / 非字符串 → None（不把磁盘上被改坏的值塞进
+        API 契约，也不伪造占位串，不变量 #21）。
 
-        `trace_id` 的取值规则由本方法唯一拥有：快路径与 `_summary_fallback` 各自把
-        自己的末事件传进来，所以**这条规则**在两条路径上的一致性是结构性的，而非
-        两份实现靠约定对齐。（`last_event_time` 仍是两条各自取值的路径，只由
+        两个键（`trace_id` 机器可读 / `trace_url` 人类可点击，ADR-0018 D7 契约、
+        互不替代）由本方法**同一套守卫**取——共用实现而非两份约定对齐，所以两者
+        不会出现「一个有值一个漏填」的漂移。
+
+        快路径与 `_summary_fallback` 各自把自己的末事件传进来，所以**这条规则**在两条
+        路径上的一致性是结构性的。（`last_event_time` 仍是两条各自取值的路径，只由
         `test_fast_path_agrees_with_full_parse_on_clean_session` 断言相等。）
 
         已知边界（有意取舍）：末事件不是 run 终结事件即返回 None——包括
@@ -219,7 +230,7 @@ class JsonlSessionStore:
         """
         if event is None or event.type not in RUN_TERMINAL_TYPES:
             return None
-        value = event.data.get("trace_id")
+        value = event.data.get(key)
         return value if isinstance(value, str) and value else None
 
     def _summary_fallback(self, session_id: str) -> SessionSummaryStats | None:
@@ -246,7 +257,8 @@ class JsonlSessionStore:
             last_event_time=events[-1].time,
             first_user_message=first_user_message,
             # 与快路径同口径：只看最后一个事件（保证两条路径严格一致）。
-            trace_id=self._terminal_trace_id(events[-1]),
+            trace_id=self._terminal_trace_field(events[-1], "trace_id"),
+            trace_url=self._terminal_trace_field(events[-1], "trace_url"),
         )
 
     def list_session_ids(self) -> list[str]:
