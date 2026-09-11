@@ -140,6 +140,39 @@ export function deriveRunPulse(
   }
 }
 
+// ── FE-01（#148）：停顿等待提示——展示层观察，不是会话事实 ──
+
+/** 停顿提示阈值（秒）。口径是**空闲**：距上一次收到新事件的时间。 */
+export const WAIT_HINT_IDLE_SEC = 30;
+
+/** 该不该出现等待提示：模型正在思考 **且** 流仍挂着。
+ *
+ *  两个条件缺一不可，各自挡掉一种失真的提示：
+ *  - 脉冲不是 thinking（工具执行 / 审批等待 → 'tool'）挡掉自相矛盾——顶栏不能一边
+ *    写「执行工具」一边写「仍在等待模型」；终态同理（没有停顿可言）。
+ *  - 流已脱离挡掉「我们根本没在听」——重连额度耗尽或会话已收口时，那句「仍在等待」
+ *    是断线条 / 恢复入口的语义地盘，不是这句旁注的。 */
+export function shouldShowWaitHint(pulseState: RunPulseState, streaming: boolean): boolean {
+  return pulseState === 'thinking' && streaming;
+}
+
+/** 空闲 idleSec 秒后的等待说明；未到阈值返回 null（渲染零变化）。
+ *
+ *  为什么锚「空闲」而不是「流开了多久」：健康的长时间生成里流龄一路增长，用它
+ *  当阈值会把正常慢任务报成停顿。文案只陈述已观测到的事实（多久没有新进展），
+ *  不含进度/ETA/回退预测——后端此刻并没有发出任何「正在回退」的事实，等待态是
+ *  展示层状态（不变量 #4：Event ≠ Diagnostic Log；#22：Web UI 不造第二套真相）。
+ *
+ *  阈值依据：本仓 `docs/FRONTEND_ISSUES_LOG.md`「停顿提示阈值」小节（可复现的实测方法
+ *  与分布，n=13：p50 4.6s / max 61.0s，>30s 占 2/13）；参照实现的 idle 看门狗对照见
+ *  后端仓 `docs/RESEARCH_STREAM_STALL_HANDLING.md`。本提示是**展示层旁注、不中止任何
+ *  东西**，所以刻意比三方的看门狗（本项目 60s / dsh 300s / ZCode 600s）都早出现。
+ *  非有限值不产文案（畸形计时不得被渲染成句子）。 */
+export function waitingHintText(idleSec: number): string | null {
+  if (!Number.isFinite(idleSec) || idleSec < WAIT_HINT_IDLE_SEC) return null;
+  return `已 ${Math.floor(idleSec)}s 没有新进展，仍在等待模型`;
+}
+
 // ── Inspector Overview 的 Run 摘要（状态 + 时长） ──
 
 /** 把脉冲的细粒度状态粗化成 Inspector 想显示的那一档。
