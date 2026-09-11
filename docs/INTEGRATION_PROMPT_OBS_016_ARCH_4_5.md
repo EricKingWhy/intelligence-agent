@@ -131,12 +131,36 @@ GitHub issue **#141 已关闭**（§14.12，comment 内含两个 clone 的分支
 
 ---
 
-## 3. ARCH-4（#143）：`list_sessions` 去 dict 中转 —— ⏳ 在途
+## 3. ARCH-4（#143）：`list_sessions` 去 dict 中转 —— ✅ 已完成
 
-`SessionService.list_sessions` 现返回 `list[dict[str, Any]]`，应由领域 dataclass
-（`SessionSummaryStats`）直接承载，去掉 web 层的字符串键中转。
+**commit `2ea83d4`**（`feat/backend`）
 
-**完成时本节补齐**：commit、门禁数字、行为保持证据（既有 payload 测试零改动通过）。
+同一个 summary 事实原本有三种形状在传递：store 的 frozen dataclass
+`SessionSummaryStats` → service 的 `dict[str, Any]`（纯机械复述、无校验无行为）→ web 的
+Pydantic `SessionSummary`。中间那层 untyped dict 是前端契约静默漂移逃过类型检查的位点。
+
+| 文件 | 改动 |
+| --- | --- |
+| `session/store.py` | `SessionSummaryStats` 增加 `session_id: str`（行的身份，与统计字段同属列表页所需）；3 个构造点（快路径 + fallback 两处）补字段。 |
+| `session/service.py` | `list_sessions` 签名 `list[dict[str, Any]]` → `list[SessionSummaryStats]`，删除 dict 拼装。 |
+| `web/app.py` | `/api/sessions` 改读 dataclass 属性（显式映射保留）。 |
+| `tests/session/test_service.py` | 4 处 dict 下标改属性访问 + 新增 `test_returns_domain_dataclass_not_dict`。 |
+
+**前提说明**：`SessionSummaryStats` 原本没有 `session_id`（issue 的「影响面」未列出）——
+行身份必须随行携带才能去掉 dict，故加在**既有** dataclass 上（未引入新类型，符合边界）。
+
+- 行为不变证据：`tests/test_web_api.py` **零改动通过**（走 HTTP 的列表契约用例）。
+- 门禁：ruff clean；全量 pytest **1564 passed / 10 skipped / 39 deselected / 0 failed**。
+- 变异验证：`summaries.append(stats)` → `vars(stats)` → **7 例转红**（含新锁与 3 个 web 列表契约用例），已还原。
+- 两轴 code-review：Spec 轴四条件全满足、零 scope creep；Standards 轴 5 项 judgement call，
+  采纳 3（去前向引用叙事、删冗余断言），未采纳 2 并留理由（不改名 `SessionSummaryRow`；
+  不用 `model_validate(from_attributes=True)`——显式映射字段漂移时响亮失败）。
+- **未改**：`get_events` 的返回；未引入新类型别名/包装类。
+- **关单**：GitHub issue #143 已关闭。
+
+**⚠ 合并注意**：本票把 `/api/sessions` 的字段定义收拢到领域 dataclass。§2 的 ARCH-4b
+（`trace_url`）落在**同一处**，两票都会改 `session/store.py` + `session/service.py` + `web/app.py`
+的重叠区域——若两票分两次合入，第二次遇到冲突属预期内，需按 §14.7 逐文件分析（不是机械取一侧）。
 
 ---
 
