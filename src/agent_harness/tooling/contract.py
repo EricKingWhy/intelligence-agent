@@ -215,6 +215,25 @@ class Tool(ABC):
         """
         return ReconcileHint(verifiable=False)
 
+    @property
+    def prompt_guidance(self) -> str | None:
+        """该工具希望进入 agent **system prompt** 的使用指引（ADR-0023 D11）。
+
+        与 `description` 的分工：
+        - `description` 进 tool JSON Schema，回答"这个工具是什么、参数怎么填"；
+        - `prompt_guidance` 进 system prompt，回答"什么时候该用/不该用它、
+          与其他工具如何取舍、有什么预算或限制"。
+
+        默认 None = 不贡献任何文本（多数工具不需要）。本字段**不是**
+        abstractmethod：既有工具实现一律无需改动。
+
+        【约束】本字段是**静态自然语言**，不得包含 `{{}}` 模板占位符——注册表的
+        变量声明是模块级的（`_DECLARED_VARIABLES`），工具 guidance 无处声明变量，
+        含 `{{x}}` 会在注册期抛 `undefined_variable`。需要动态内容时，用 property
+        动态生成**整段**文本（如 bash.py 按 sandbox shell 生成 description 那样）。
+        """
+        return None
+
     def args_identity(self, args: dict[str, object]) -> str:
         """Return the stable identity persisted for one Operation's arguments."""
         return json.dumps(args, sort_keys=True, ensure_ascii=False)

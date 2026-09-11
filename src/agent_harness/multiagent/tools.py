@@ -115,6 +115,19 @@ class DelegateTool(Tool):
             suggested_action="重复同一委派会得到新 child 会话；换措辞或亲自验证。",
         )
 
+    @property
+    def prompt_guidance(self) -> str:
+        """委派机制的操作事实（ADR-0023 D11）——不进 tool schema，它不是参数说明。
+
+        写的是**代码里的既有事实**：预算默认值、child 的可见性、失败如何回填。
+        这些只在 delegate 确实注册时才该出现（工具缺席 → 说明缺席）。
+        """
+        return (
+            f"委派须知：每次 run 最多委派 {self._max_delegations} 次，超出会明确失败，"
+            "请预留收尾余量；子代理看不到你们的对话历史，task 描述必须自洽；"
+            "子代理失败会原样回填（含它的结构化结果），是否重试由你决定。"
+        )
+
     async def execute(self, args: _DelegateArgs) -> ToolResult:
         budget_failure = self._budget_check()
         if budget_failure is not None:

@@ -21,6 +21,7 @@ from agent_harness.prompt.section import SECTION_ORDERS, PromptSection, Target
 __all__ = [
     "PersonaConfig",
     "apply_persona",
+    "compose_agent_prompt",
     "parse_persona_config",
     "persona_sections",
 ]
@@ -111,8 +112,38 @@ def persona_sections(persona: PersonaConfig) -> list[PromptSection]:
     return sections
 
 
+def compose_agent_prompt(
+    base: str | None,
+    persona: PersonaConfig | None,
+    guidance_text: str | None = None,
+) -> str | None:
+    """按 order 顺序拼 agent prompt：persona 前缀 → base → tool guidance → persona 后缀。
+
+    对应注册表 order：`persona:prefix` 0、`profile:identity` 100、`tool` 2000、
+    `persona:suffix` 10200。父路径走 `build_registry(persona,
+    tool_sections=…).assemble(f"profile:{name}")`（有 profile 时）；child 路径与
+    **无 profile 的父路径**走本函数——两条路径的产物由
+    `test_compose_matches_registry_order` 固定一致，child 与父不漂移。
+
+    guidance 插在**后缀之前**：后缀是用户声明的"最终落点"，永远在最后。
+
+    - `base=None` 且 persona 空且无 guidance → `None`（保持"无 system prompt"语义）
+    - 单侧为空时**不 append 空串**，否则产物会变成 `"\\n\\nBASE"`，破坏逐字节相等
+    """
+    parts: list[str] = []
+    if persona is not None and persona.prefix.strip():
+        parts.append(persona.prefix)
+    if base is not None:
+        parts.append(base)
+    if guidance_text is not None and guidance_text.strip():
+        parts.append(guidance_text)
+    if persona is not None and persona.suffix.strip():
+        parts.append(persona.suffix)
+    return _SEPARATOR.join(parts) if parts else None
+
+
 def apply_persona(base: str | None, persona: PersonaConfig | None) -> str | None:
-    """把 persona 前后缀包在 `base` 外（child 路径用；父路径走注册表组装）。
+    """T5 的等价形式（无 guidance）——保留为薄封装，T5 的签名与语义不变。
 
     与 `build_registry(persona).assemble("profile:…")` 的产物顺序一致
     （prefix 0 → profile identity 100 → suffix 10200），一致性由
@@ -122,14 +153,4 @@ def apply_persona(base: str | None, persona: PersonaConfig | None) -> str | None
     - `base=None` 且 persona 非空 → 只有前后缀（用户显式配置就该生效）
     - 单侧为空时**不 append 空串**，否则产物会变成 `"\\n\\nBASE"`，破坏逐字节相等
     """
-    parts: list[str] = []
-    if persona is not None:
-        if persona.prefix.strip():
-            parts.append(persona.prefix)
-        if base is not None:
-            parts.append(base)
-        if persona.suffix.strip():
-            parts.append(persona.suffix)
-    elif base is not None:
-        parts.append(base)
-    return _SEPARATOR.join(parts) if parts else None
+    return compose_agent_prompt(base, persona)

@@ -10,6 +10,7 @@ from agent_harness.prompt.errors import PromptError
 from agent_harness.prompt.persona import (
     PersonaConfig,
     apply_persona,
+    compose_agent_prompt,
     parse_persona_config,
     persona_sections,
 )
@@ -20,6 +21,7 @@ from agent_harness.prompt.registry import (
 )
 from agent_harness.prompt.section import SECTION_ORDERS, PromptSection, Target
 from agent_harness.prompt.template import extract_variables, render
+from agent_harness.prompt.tool_sections import join_guidance, tool_guidance_sections
 
 __all__ = [
     "DEFAULT_REGISTRY",
@@ -32,9 +34,12 @@ __all__ = [
     "Target",
     "apply_persona",
     "build_registry",
+    "compose_agent_prompt",
     "extract_variables",
+    "join_guidance",
     "parse_persona_config",
     "persona_sections",
     "render",
     "run_self_check",
+    "tool_guidance_sections",
 ]
