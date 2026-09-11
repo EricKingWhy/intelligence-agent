@@ -157,14 +157,9 @@ class TestWebWiringCoexistence:
             capability = object()
             writeback = object()
 
-            class _Relay:
-                def start(self): pass
-                async def stop(self): pass
-            relay = _Relay()
-
         monkeypatch.setattr(
             "agent_harness.capability.factories.build_memory_components",
-            lambda settings: _FakeMemory(),
+            lambda settings, *, provider="builtin": _FakeMemory(),
         )
         _make_skill(tmp_path)
 
@@ -237,7 +232,7 @@ class TestDegradation:
     async def test_factory_failure_degrades_and_base_agent_still_runs(self, tmp_path, monkeypatch):
         """OPTIONAL provider 构造失败 → 装配跳过（optional() None）→ 基础 Agent 照常运行。"""
 
-        def _boom(settings):
+        def _boom(settings, *, provider="builtin"):
             raise RuntimeError("simulated milvus outage")
 
         monkeypatch.setattr(

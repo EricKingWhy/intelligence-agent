@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from agent_harness.capability import factories
 from agent_harness.capability.base import (
     CapabilityDescriptor,
     CapabilityError,
@@ -76,16 +77,21 @@ class CapabilityWiring:
 async def _wire_memory(
     registry: CapabilityRegistry, cfg: ProviderConfig, settings: Settings, wiring: CapabilityWiring,
 ) -> None:
-    from agent_harness.capability.factories import build_memory_components
     from agent_harness.memory.context_provider import MemoryContextProvider
 
-    components = build_memory_components(settings)
+    # cfg.provider 必须**真的**决定构造哪个 provider（ADR-0024 / ticket #149）：
+    # 否则下面的 provider_name=cfg.provider 会让描述符对外声称一个并未生效的实现。
+    # 走 `factories.<name>` 属性查找（而非 from-import 绑名），既保持装配期惰性
+    # 构造，也让单测能 patch 模块属性换掉 provider。
+    components = factories.build_memory_components(settings, provider=cfg.provider)
     if components is None:
         # 配置不齐 → OPTIONAL_RUNTIME 降级：不注册、不注入（与 Phase 6 行为一致）。
         return
     try:
+        # 只调 provider 自己的生命周期入口（ADR-0024 D6）：包内有几个组件、什么顺序，
+        # 都是 provider 的实现细节——装配方伸手去 components.relay.start() 的话，
+        # 一个不带 `.relay` 的 provider 会被 AttributeError 降级成"没有记忆"。
         await components.initialize()
-        components.relay.start()
     except Exception:
         # 半初始化失败（Milvus 连上后 schema/探测挂）时，已构造的 gRPC channel /
         # httpx client 必须显式关闭——外层 wire_capabilities 只会降级跳过，不会
@@ -413,11 +419,12 @@ _BUILTIN_WIRING: dict[str, tuple[Any, Degradation]] = {
 
 
 #: 每个 capability 接受的 provider 名。`"builtin"` 恒合法（= 该能力的内置 factory）；
-# 其余是 factory 认的显式别名（memory 的内置 factory 即 LangMem 实现）。config 写了
-# 既非 builtin 也非已知别名的 provider 时显式失败（08 §5：不允许"接受但静默忽略"）
-# ——注意这是装配期直接抛错，不走降级：配置写错属于用户必须修的错误。
-_KNOWN_PROVIDERS: dict[str, set[str]] = {
-    "memory": {"builtin", "langmem"},
+# 其余是 factory 认的显式别名。config 写了既非 builtin 也非已知别名的 provider 时
+# 显式失败（08 §5：不允许"接受但静默忽略"）——注意这是装配期直接抛错，不走降级：
+# 配置写错属于用户必须修的错误。
+#: **memory 不在这张表里**：它的白名单直接问 factory 分派表（`_known_providers()`，
+#: ADR-0024），使「接受的 provider 名」与「真有实现的 provider 名」结构上是同一集合。
+_STATIC_KNOWN_PROVIDERS: dict[str, set[str]] = {
     "skills": {"builtin"},
     "ticker": {"builtin"},
     "mcp": {"builtin"},
@@ -425,6 +432,22 @@ _KNOWN_PROVIDERS: dict[str, set[str]] = {
     "websearch": {"builtin"},
     "multiagent": {"builtin"},
 }
+
+
+def _known_providers(capability: str) -> set[str]:
+    """该 capability 接受的 provider 名集合（装配期白名单的唯一查询入口）。"""
+    if capability == "memory":
+        return factories.memory_provider_names()
+    known = _STATIC_KNOWN_PROVIDERS.get(capability)
+    if known is None:
+        # 两张按 capability 名索引的表（_BUILTIN_WIRING / _STATIC_KNOWN_PROVIDERS）
+        # 必须同键。漏登记时返回空集会让报错变成 "known: []"（把装配表漏项说成
+        # "这个 provider 不存在"）——直接指认装配表不一致。
+        raise CapabilityError(
+            f"capability '{capability}' 有 wiring 但没有 provider 白名单（装配表不一致）",
+            code="init_failed",
+        )
+    return known
 
 
 async def wire_capabilities(
@@ -450,10 +473,10 @@ async def wire_capabilities(
                 f"(known: {sorted(_BUILTIN_WIRING)})",
                 code="init_failed",
             )
-        if cfg.provider not in _KNOWN_PROVIDERS[name]:
+        if cfg.provider not in _known_providers(name):
             raise CapabilityError(
                 f"unknown provider '{cfg.provider}' for capability '{name}' "
-                f"(known: {sorted(_KNOWN_PROVIDERS[name])})",
+                f"(known: {sorted(_known_providers(name))})",
                 code="init_failed",
             )
         factory, degradation = entry

@@ -67,18 +67,17 @@ def _memory_settings(tmp_path, *, ready: bool) -> Settings:
 
 
 class _FakeMemoryComponents:
+    """provider seam 的 Fake（ADR-0024 D6）：只需 capability / writeback / 生命周期。
+
+    刻意**不带** `relay` / `records` / `vectors` 之类的内部组件——契约就是"装配方只调
+    `initialize()` / `close()`"，所以一个合法的 provider 不需要暴露任何内部结构。
+    """
+
     def __init__(self):
         self.initialized = False
-        self.relay_started = False
         self.closed = False
         self.capability = object()
         self.writeback = object()
-
-        class _Relay:
-            def start(self): self.owner.relay_started = True  # type: ignore[attr-defined]
-            async def stop(self): pass
-        self.relay = _Relay()
-        self.relay.owner = self
 
     async def initialize(self): self.initialized = True
     async def close(self): self.closed = True
@@ -128,7 +127,7 @@ class TestWireCapabilities:
         fake = _FakeMemoryComponents()
         monkeypatch.setattr(
             "agent_harness.capability.factories.build_memory_components",
-            lambda settings: fake,
+            lambda settings, *, provider="builtin": fake,
         )
         registry = CapabilityRegistry()
         wiring = await wire_capabilities(
@@ -138,7 +137,7 @@ class TestWireCapabilities:
         assert registry.descriptor("memory").provider_name == "langmem"
         assert registry.descriptor("memory").degradation is Degradation.OPTIONAL_RUNTIME
         assert registry.get("memory") is fake.capability
-        assert fake.initialized and fake.relay_started
+        assert fake.initialized and not fake.closed
         assert len(wiring.context_providers) == 1
         assert wiring.memory_writer is fake.writeback
         assert wiring.memory is fake
@@ -148,7 +147,7 @@ class TestWireCapabilities:
         called = []
         monkeypatch.setattr(
             "agent_harness.capability.factories.build_memory_components",
-            lambda settings: called.append(1),
+            lambda settings, *, provider="builtin": called.append(1),
         )
         registry = CapabilityRegistry()
         await wire_capabilities(
