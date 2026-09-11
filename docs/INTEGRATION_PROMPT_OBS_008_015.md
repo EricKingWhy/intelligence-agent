@@ -33,7 +33,7 @@ uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带�
 | OBS-012 | P2 | ✅ 完成 | `d9bef3a` | bash 工具描述声明真实解释器（POSIX/容器=sh，Windows=cmd.exe），不再谎称 bash |
 | OBS-016 | P2 | 🆕 待定 | — | **本轮新发现（同源缺陷，Scope 外）**：`tools/read.py:140` 超长行提示仍教模型用 POSIX 专有 `sed`/`head -c`/`tail -c` |
 | OBS-013 | P2 | ✅ 已评估（登记风险） | — | 限时护栏已存在/启用/已测（600s total）；无代码改动 |
-| OBS-009/014 | — | ⏳ 待做 | — | TIMEOUT `retryable` 语义 + 文案矛盾 |
+| OBS-009/014 | — | ✅ 完成 | `9807928` | 超时文案与实际 `retryable` 对齐（MUTATING 不再教盲重跑）；纯文案 |
 | OBS-008 | — | ⏳ 待做 | — | model/failed 吞 traceback |
 | OBS-010 | low | ⏳ 待做 | — | `GET /api/sessions` 的 `trace_id` 恒 null |
 
@@ -339,3 +339,72 @@ text/delta」定为 durable，禁止的是 per-token 行）。所以一次退化
 1. **接受本项为已知风险登记**（无需改代码）；把「≤600s + 自动 fallback + 用户可停」写进
    已知风险清单。
 2. 若要进一步收紧：**单独立项**决定 `max_tokens`（含按模型选值与截断策略），不要塞进本批次。
+
+---
+
+## 7. OBS-009/014：TIMEOUT 的 `retryable` 语义 + 文案矛盾
+
+**状态**：✅ 完成，commit `9807928`（分支 `feat/backend`，未 push）。**纯文案修复，零重试行为改动。**
+
+### 现象（前端实机记录 OBS-009/014）
+
+`bash {"command": "sleep 10 && echo MARKER-A1"}` → `tool/result`：
+`{"ok":false,"error_code":"TIMEOUT","retryable":false,"metadata":{"attempt":1,"max_attempts":3,"duration_ms":10002.6}}`。
+`sleep 10` 与 `Tool.timeout_seconds` 默认 **10.0s** 贴边，必然越界。前端指出两点：
+① `retryable:false` 对超时是否合适；② message 写「可稍后重试」而 `retryable:false`，「读起来略冲突」。
+
+### 结论一：`retryable` 语义**本来就是对的**，且**已被既有测试锁定**（无需改）
+
+`retryable = tool.side_effect is not ToolSideEffect.MUTATING`（`executor.py`）：
+
+| 工具类型 | 超时后 `retryable` | 理由 |
+| --- | --- | --- |
+| READ_ONLY | **True** | 超时是暂时的，重跑无副作用风险 |
+| MUTATING（bash 即此类） | **False** | 第 1 次尝试的**副作用状态未知**（进程可能仍在跑、写可能已落盘）→ 不盲重跑（不变量 #14） |
+
+既有用例 `tests/tooling/test_executor.py::test_mutating_tool_timeout_is_not_auto_retried`
+已断言「MUTATING → False 且 `attempt==1`」「READ_ONLY → True」。所以前端的第一点是**设计取舍，
+不是缺陷**：TIMEOUT 并非「一律不重试」，而是按副作用分类。
+
+### 结论二：真正的缺陷是**文案**——已修
+
+旧文案对 MUTATING 也说「可稍后重试」，而 `retryable=False`。这不只是「读起来冲突」：它是
+**模型可见的指令**，等于教模型盲重跑一个副作用状态未知的命令（违反不变量 #14）。实机观测到的
+「长命令超时 → 反复重试 / 退化」正被这句话推动（与 OBS-013 组合失效）。
+
+修法（`executor.py` 的 `except TimeoutError`）：
+
+- READ_ONLY（可重试）→ 保留「可能是外部依赖暂时无响应，可稍后重试。」
+- MUTATING（不可重试）→ 改为：该工具被判定为**有副作用**（bash 无法静态区分只读、远端工具的
+  影响也可能不在 workspace 内）、本次执行的**副作用状态未知**（命令可能仍在运行，或已部分
+  生效）、**不要直接重跑**，并给安全纠错路径（先确认当前状态，或把操作拆成不超过 `limit` 秒的
+  更短步骤）。`limit` 用变量插值，将来调超时会自动跟着更新。
+- 措辞**不写死「会改动 workspace」**：MUTATING 是保守分类（bash 即使 `ls` 也是 MUTATING），
+  且 MCP 工具的副作用可能在远端（如 GitHub）——对本机只读命令与远端工具都是假陈述
+  （按独立复核 P3-1 修正）。
+- 注释里对 Recovery 的类比也修正了：run 内超时按终态 `FAILED` 落盘、**不**产生
+  `NEED_RECONCILE`；`UNKNOWN` / `ReconcileCallback` 是**崩溃恢复**侧的对应机制（同源不同触发面）。
+
+### 交付物与门禁
+
+| 项 | 内容 |
+| --- | --- |
+| `src/agent_harness/tooling/executor.py` | 超时文案按 `retryable` 分支（唯一产品改动） |
+| `tests/tooling/test_executor.py` | 新增 `test_timeout_message_matches_the_retry_decision`；只读对照组提升为模块级 `_SlowReadTimeoutTool`（消重） |
+| 门禁 | ruff clean；全量 pytest **1538 passed / 10 skipped / 39 deselected / 0 failed** |
+
+**变异验证**：把 hint 改成不分支（还原旧行为）→ 新用例变红。独立复核另跑两向变异（只读文案
+无条件化 / MUTATING 文案无条件化）均变红，并验证强制 `retryable=True` 会让两个超时用例同时变红。
+
+**独立 code-review**：**SOUND / 零 P0/P1/P2**。确认 message-only（无重试行为变化）、文案无下游
+依赖（前端 `toolShapes.ts` / `projection.ts` 只读 `error_code`，不解析 message），并确认
+`retryable=False` 是正确设计而非缺陷。3 项 P3 处置 2 项（措辞 + 注释），第 3 项即本文档收尾。
+
+### 未改（Scope 外，建议单独立项）
+
+**`Tool.timeout_seconds` 默认 10.0s 与 sandbox `DEFAULT_EXEC_TIMEOUT` 60.0s 不一致，且前者生效**
+（`asyncio.timeout(tool.timeout_seconds)` 包住 `execute`，sandbox 的 60s 对 bash 经 Executor 实际不可达）。
+对安装/构建/`pytest` 这类合法长命令**偏紧**——一个 coding agent 跑不了超过 10 秒的测试是真实能力限制。
+但放宽会拉长挂死命令的最坏停顿（且 MUTATING 调用会串行化整批），属**产品/行为决策**，
+应单独立项（`BashTool.timeout_seconds` 覆写为多少、是否随 sandbox 走），不塞进本次文案修复。
+取消路径本身是安全的（`bash.py` 在 `CancelledError` 时置 `cancel_event`，`local.py` 击杀进程树）。
