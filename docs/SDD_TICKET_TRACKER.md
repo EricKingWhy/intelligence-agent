@@ -23,7 +23,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 本批 commit | `71e605b` |
+| 本批 commit | `71e605b`（代码）+ `949d4ad`/`f06cfbd`（docs） |
 | 门禁 | tsc ✓ / vitest **519 passed**（29 文件）/ oxlint **37w 0e**（基线持平）/ playwright **130 passed**（`--workers=2`）/ vite build ✓ |
 | 触发 | 真机报障「续聊失败：Send failed: 404」，会话 `dd983104`（根因在后端，本批只做前端触发面 + 回归锁） |
 | 交付 | ① `ModelPicker.tsx`：新增 `commitSelection`（默认链 + 目录项两处 `onSelect` 统一入口），**弹层已关（`!open`）即丢弃选中**——第一次选中后浮层进入 `--dur-out`(150ms) 退出动画，节点仍在 DOM 可命中，第二次 click 由此丢弃；② `e2e/fixtures.ts`：`onModelPost` 注入点 + 缺省 200 处理器（计数/延迟响应）；③ 新增 `e2e/q-model-dedupe.spec.ts`（3 条锁 × 2 视口）。 |
