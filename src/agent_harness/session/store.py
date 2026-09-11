@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_harness.session.event import USER_MESSAGE, SessionEvent
+from agent_harness.session.event import RUN_TERMINAL_TYPES, USER_MESSAGE, SessionEvent
 
 logger = logging.getLogger("agent_harness.session.store")
 
@@ -35,6 +35,10 @@ class SessionSummaryStats:
     first_event_time: str | None
     last_event_time: str | None
     first_user_message: str | None
+    #: OBS-010：最近一次 run 的 Langfuse trace_id（末事件是 run 终结事件时才有）。
+    #: 未配置可观测性时终结事件里本就是 null → 这里也是 None（不变量 #21：可观测性
+    #: 缺席既不致命也不伪造）。
+    trace_id: str | None = None
 
 
 class JsonlSessionStore:
@@ -181,7 +185,40 @@ class JsonlSessionStore:
             first_event_time=first_time,
             last_event_time=last_time,
             first_user_message=first_user_message,
+            trace_id=self._terminal_trace_id_from_tail(tail),
         )
+
+    @staticmethod
+    def _terminal_trace_id(event: SessionEvent | None) -> str | None:
+        """从 run 终结事件取 trace_id；非终结 / null / 非字符串 → None（OBS-010）。
+
+        只认 run 终结事件：trace_id 是 **per-run** 事实（`run/completed|failed|
+        interrupted` 的 data 里），会话可能有多次 run，末端那次才是列表页要展示的。
+        """
+        if event is None or event.type not in RUN_TERMINAL_TYPES:
+            return None
+        value = event.data.get("trace_id")
+        return value if isinstance(value, str) and value else None
+
+    def _terminal_trace_id_from_tail(
+        self, tail: deque[tuple[int, str]],
+    ) -> str | None:
+        """快路径版本：只看**最后一个事件**。
+
+        刻意与 `_summary_fallback` 同口径（那里也只看 `events[-1]`），否则
+        「扫描路径与全量严格一致」的契约会破。
+
+        已知边界（有意取舍）：末事件不是 run 终结事件即返回 None——包括
+        「上一轮已 completed，但新轮的 user/message 或 run/started 成了末事件」。
+        此时更早那个已完成的 trace 不回填。不向历史回溯是因为那需要逐行
+        `json.loads` 直到 EOF，正好抵消本方法所在的快路径（见
+        `read_session_summary` docstring：列表页从秒级全量解析压到几十 ms）。
+        在途/新轮返回「未追踪」也属诚实降级：那是尚无最终 trace 的 run。
+        """
+        if not tail:
+            return None
+        event = self._parse_event_line(tail[-1][1], "events.jsonl", tail[-1][0])
+        return self._terminal_trace_id(event)
 
     def _last_event_time_from_tail(
         self, tail: deque[tuple[int, str]],
@@ -214,6 +251,8 @@ class JsonlSessionStore:
             first_event_time=events[0].time,
             last_event_time=events[-1].time,
             first_user_message=first_user_message,
+            # 与快路径同口径：只看最后一个事件（保证两条路径严格一致）。
+            trace_id=self._terminal_trace_id(events[-1]),
         )
 
     def list_session_ids(self) -> list[str]:
