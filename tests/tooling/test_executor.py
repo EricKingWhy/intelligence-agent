@@ -919,6 +919,18 @@ class _SlowMutatingTimeoutTool(Tool):
         return ToolResult.success("done")
 
 
+class _SlowReadTimeoutTool(_SlowMutatingTimeoutTool):
+    """与上同类但 READ_ONLY：超时重跑无副作用风险，应保持 retryable=True。"""
+
+    @property
+    def name(self) -> str:
+        return "slow_read"
+
+    @property
+    def side_effect(self) -> ToolSideEffect:
+        return ToolSideEffect.READ_ONLY
+
+
 @pytest.mark.asyncio
 async def test_mutating_tool_timeout_is_not_auto_retried():
     """MUTATING 工具超时 → retryable 必须为 False（不自动重试）。
@@ -938,16 +950,34 @@ async def test_mutating_tool_timeout_is_not_auto_retried():
     assert execution.result.metadata["attempt"] == 1  # 只尝试一次
 
     # 对照组：READ_ONLY 超时仍可重试（原有语义）。
-    class _SlowReadTool(_SlowMutatingTimeoutTool):
-        @property
-        def name(self) -> str:
-            return "slow_read"
-
-        @property
-        def side_effect(self) -> ToolSideEffect:
-            return ToolSideEffect.READ_ONLY
-
-    registry.register(_SlowReadTool())
+    registry.register(_SlowReadTimeoutTool())
     read_exec = await executor.execute({"id": "c2", "name": "slow_read", "args": {}})
     assert read_exec.result.error_code == ErrorCode.TIMEOUT
     assert read_exec.result.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_timeout_message_matches_the_retry_decision():
+    """超时文案必须与实际 retryable 一致（OBS-009/014 的「文案矛盾」）。
+
+    旧版对 MUTATING 也说「可稍后重试」，而 retryable=False——等于**教模型盲重跑
+    副作用状态未知的命令**（违反不变量 #14）。实机观测到的「长命令超时 → 反复
+    重试/退化」正被这句话推动。READ_ONLY 仍应鼓励重试（重跑无副作用风险）。
+
+    这是纯文案契约，不改任何重试行为（行为由上面那个用例锁定）。
+    """
+    registry = ToolRegistry()
+    registry.register(_SlowMutatingTimeoutTool())
+    executor = ToolExecutor(registry)
+
+    mutating = await executor.execute({"id": "c1", "name": "slow_mutating", "args": {}})
+    assert mutating.result.retryable is False
+    assert "可稍后重试" not in mutating.result.message, "不可重试却说可重试 = 误导模型盲重跑"
+    assert "副作用状态未知" in mutating.result.message
+    assert "不要直接重跑" in mutating.result.message
+
+    registry.register(_SlowReadTimeoutTool())
+    read = await executor.execute({"id": "c2", "name": "slow_read", "args": {}})
+    assert read.result.retryable is True
+    assert "可稍后重试" in read.result.message
+    assert "副作用状态未知" not in read.result.message

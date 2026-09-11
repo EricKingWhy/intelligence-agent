@@ -738,19 +738,36 @@ class ToolExecutor:
                     result = await tool.execute(validated)
             except TimeoutError:
                 # asyncio.timeout 到点把 execute 掐断，抛出 TimeoutError。
-                # message 写清工具名 + 超时上限，给模型"外部依赖可能暂时无响应"的纠错线索；
                 # error_code 取 TIMEOUT（result.py 里该码语义即"超时 → 可重试"）；
                 # retryable：READ_ONLY 超时是暂时的、重跑安全 → True；MUTATING 超时
                 # 意味着第 1 次尝试的副作用状态未知（进程可能仍在跑、写可能已落盘）
-                # ——与 Recovery 对 UNKNOWN 副作用要求人工 reconcile 同一语义
-                # （不变量 #14）：不自动重试，交模型决定是否重发。
+                # ——不自动重试，交模型决定是否重发（不变量 #14：UNKNOWN 高风险工具
+                # 不盲重跑）。注意本路径**不**产生 NEED_RECONCILE：run 内该操作按终态
+                # FAILED 落盘；UNKNOWN / ReconcileCallback 是**崩溃恢复**侧的对应机制
+                # （recovery/coordinator.py）——两者同源（未知副作用不盲重跑）不同触发面。
+                retryable = tool.side_effect is not ToolSideEffect.MUTATING
+                limit = tool.timeout_seconds
+                if retryable:
+                    hint = "可能是外部依赖暂时无响应，可稍后重试。"
+                else:
+                    # 文案必须与实际 retryable 一致：旧版对 MUTATING 也说"可稍后重试"，
+                    # 而 retryable=False——等于**教模型盲重跑副作用状态未知的命令**
+                    # （违反不变量 #14；实机观测到的"长命令超时 → 反复重试/退化"正被
+                    # 这句话推动）。改为给安全的纠错路径：先确认现状再决定，或拆短。
+                    # 措辞不写死"改动 workspace"：MUTATING 是保守分类（bash 无法静态
+                    # 判定只读），且 MCP 工具的副作用可能在**远端**（如 GitHub）——
+                    # 说"会改动 workspace"对这两类都是假陈述。
+                    hint = (
+                        "该工具被判定为有副作用（bash 命令无法静态区分只读，"
+                        "远端工具的影响也可能不在 workspace 内），"
+                        "本次执行的副作用状态未知"
+                        "（命令可能仍在运行，或已部分生效）——不要直接重跑；"
+                        f"请先确认当前状态，或把操作拆成不超过 {limit} 秒的更短步骤。"
+                    )
                 result = ToolResult.failure(
-                    message=(
-                        f"工具 '{name}' 执行超时（上限 {tool.timeout_seconds} 秒），"
-                        "可能是外部依赖暂时无响应，可稍后重试。"
-                    ),
+                    message=f"工具 '{name}' 执行超时（上限 {limit} 秒），{hint}",
                     error_code=ErrorCode.TIMEOUT,
-                    retryable=tool.side_effect is not ToolSideEffect.MUTATING,
+                    retryable=retryable,
                 )
             except Exception as e:  # noqa: BLE001
                 # 宽捕获理由同 Task 2：工具是开放世界，无法预知会抛什么。
