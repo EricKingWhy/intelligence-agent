@@ -308,3 +308,52 @@ merge 后追加。这是本批的协议偏离，记录在案。
 **第四轮新 spec 的独立审查**：0 个 P0/P1/P2，6 项 P3 **全部已修**（头注释挂载条件、合成滚动划界、显式 `aria-expanded`、数值化可滚动断言、`toHaveCSS` 断生效样式、作废指针），并按修改后版本**重跑三处变异**（均红）。详见登记簿「第四轮收尾」。
 
 **本轮审查（`l-auth-banner.spec.ts`）**：0 个 P0/P1，1 项 **P2** + 4 项 P3，**全部已处置**。P2 是**注释谎报覆盖**——我写「`api.test.ts` 测 401 分类」，实则全 `src` 测试树零个 401 引用（该缝当时**无单测**）。已把谎报改成事实：`api.test.ts` 新增 3 例（401→`UnauthorizedError`、广播 detail、**body 非 JSON 的回退文案**）。P3 中一项揭示了**真实行为被我注释说反**：关闭**不是**永久忽略（`App.tsx:148` 每次广播都会重新显示），故 e2e 改为走「配置令牌」真实路径断言**横幅重新出现**（变异验证：删掉 `refreshSessions()` → 两视口都红）。
+
+
+---
+
+## 第六轮（2026-09-11）：真实浏览器全量验收 + BUG-008
+
+**环境前提（本轮结论必须带这条读）**：:8000 = **`feat/backend` worktree 的后端**（其 `.env` 的
+`CAPABILITIES` **只启用 `websearch`**），5173 = 前端 dev server。前几轮跑的是 **main worktree 的后端**
+（`.env` 里 `websearch` + **`multiagent`** 都开），所以两轮看到的语料与能力集**本来就不同**。
+
+**刷新一致性复验（新增证据）**：会话 `3b35b83d`（35 事件·中断态）在 balanced 与 detailed 两档下，
+刷新前后 `document.body.innerText` 指纹**逐字节相同**（`2235:1645848761` / `2309:2105849635`），
+按钮指纹（74 键 `2032:3401835054`）、滚动位、tab 选中态、`ahi.selectedSession` 全部一致。
+**视图状态**（tab / 滚动 / 折叠）刷新不保留——与既有冻结边界（Inspector 属视图状态、DSH 语义）一致，
+**非缺陷**；本轮为「内容一致 + 视图状态不保留」补了并存的实测证据。
+
+**BUG-008（已修，commit `365fbee`）**：后端序列化省略值为 null 的字段 → 无步号事件的 `step_id`
+是**键缺失**（`'step_id' in e === false`），而三处消费点用严格 `!== null`：
+- `StepDetail.tsx::formatEventTooltip` → hover 浮层渲染字面量 `step undefined`
+- `StepDetail.tsx` 事件详情 Overview → 空值 `step` 幽灵行
+- `eventKind.ts::streamKeyFromEvent` → 伪造 key `step:undefined`（违背它自己的「无 step → null」契约）
+三处统一改宽松 `!= null`（与 `projection.ts::resolveStep` 既有口径一致）；明确否决「改后端」与
+「在 `eventValidate` 归一化」。两文件各补「键缺失」红灯用例（TDD 先红后绿）。
+**真机复验**：无 step 行浮层只剩时间戳、带 step 行仍显 `step 1`；幽灵行消失；跳转 pulse 正/负对照 1 / 0。
+
+**本轮新增真机通过**：事件详情 io-tabs ×4 + `复制 JSON`/`复制 JSON`/`复制 Raw`（剪贴板 165/165/490 字，
+均为 JSON）；工具详情 4 tabs（默认 Output）+ `复制 JSON`(32)/`复制输出`(85)/**两个 `复制 Raw`**(446 call,
+685 result)；Timeline hover 浮层；**全局 Esc 取消**（fetch 记录器捕获 `POST …/cancel`，脉冲 `已取消`
+中性通道，非红色失败）；代码块 `自动换行`↔`不换行` 往返 + `复制代码`（22 字与渲染正文**逐字相等**）；
+中断会话的工具详情**零伪造**（无 tool/result 时不渲染 Output tab、Raw 只 1 个复制键）。
+
+**本轮不可达（配置/语料原因，非产品缺陷）**：委派/子会话 5 项、`加载更早 N 条`、Trace 三件套、
+四个 picker 搜索框、Context picker。其中委派 5 项与 `加载更早` **已在其他轮次真机点过**（第二轮
+第 38/61 项；第三轮「加载更早 200→410」用的是 410 事件的 fork child `1fdac9b9`，属 main 后端语料）。
+**真正的产品不可达只有 Trace 三件套**（需 Langfuse 启用）。详见登记簿 OBS-016。
+
+**两条过程自查（值得记住）**：① **图标按钮必须按 `aria-label` 定位**——`CopyButton` 的 `innerText`
+为空，按可见文本 `^复制` 找会得出「按钮不存在」的**误报**；② **门禁链路 `| tail` 会吞掉退出码**——
+本轮一次 `1 failed` 被掩盖成「成功」，改用 `set -o pipefail` 后复跑 5 次全绿（那次失败**不可复现**，
+已如实登记，不计为通过）。
+
+**门禁（实跑）**：tsc 0 · vitest **507 passed / 0 failed**（28 文件）· oxlint **35 warnings / 0 errors**
+· playwright **118 passed**（`--workers=2`）· vite build 0。
+
+**观察（后端/provider，本轮未改）**：真实 run 中默认链 `deepseek-v4-flash-0731` **停顿 50s+ 且 token
+零增长**，随后**模型回退按设计生效**（不变量 #9），由 `glm-4.5-air` 完成（时间线 `model/completed
+glm-4.5-air · 6907 tok` → `run/completed 13873 tok`）。停顿期间 UI 全程只显示诚实的 `思考中 · Ns`
+（不伪造进度、不假报错），但**没有任何「正在等待模型/即将回退」的中间态提示，且阈值偏长**——
+建议后端更早发 fallback 事件（前端已有渲染通道）。

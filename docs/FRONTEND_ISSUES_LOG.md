@@ -1098,6 +1098,26 @@ research_review…」）里，**模型自己说没有这个工具**，并列出�
 `feat/backend` 的 `.env` 里给 `CAPABILITIES` 增加 multiagent 项。这是**改运行配置**（会改变产品
 实际行为，不只是测试开关），按 §9.1 属需要用户确认的范围，故**只登记建议、不改**。
 
+**决定性补充（两个 worktree 的 `.env` 差异——也解释了前几轮为何能点委派）**：
+
+| worktree | `CAPABILITIES` |
+| --- | --- |
+| `D:\intelligence-agent`（main） | `websearch` **+ `multiagent`（enabled）** |
+| `D:\intelligence-agent-backend`（feat/backend） | **仅 `websearch`** |
+
+`.env` 按 §13.1.6 属**不在 worktree 之间同步**的本地文件，所以两个 worktree 的能力集天然可能不同。
+这同时解释了另外两件此前看起来矛盾的事：
+1. **前几轮的委派/子会话真机结论成立**（第二轮第 38/61 项）——当时 :8000 上跑的是 **main 的
+   后端**（multiagent 开），所以 `delegate` 在册；本轮跑的是 **feat/backend 后端**（multiagent 关）。
+2. **第三轮「加载更早 200→410」也是真机点过的**——那需要一个 >200 事件的会话（fork child
+   `1fdac9b9`，410 事件），它属于 main 那次后端的语料库；本轮 feat/backend 语料 11 个会话最大
+   35 事件，**`加载更早 N 条`（阈值 >200）在本轮语料下不可达**，但**并非产品不可达**。
+
+**结论口径修正**：本轮称「不可达」的控件（委派 5 项、`加载更早`、Trace 三件套、四个 picker 搜索框、
+Context picker）**全部是「本轮运行配置/语料下不可达」，不是产品缺陷**；其中委派 5 项、`加载更早`、
+picker 搜索框均**已在其他轮次真机点过并有 e2e/单测回归锁**。真正的产品不可达只有「Trace 三件套」
+（需 Langfuse 启用，本部署未配）。
+
 ### 本轮新增真机覆盖（第二批：真实 run 路径）
 
 | 控件 | 结果 |
