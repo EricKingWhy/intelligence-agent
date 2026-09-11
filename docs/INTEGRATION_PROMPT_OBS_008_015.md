@@ -607,8 +607,16 @@ uv run ruff check src/ tests/ && uv run pytest -q
 
 ## 10. 架构深化三连（批次收尾时新增，**纯结构重构、行为不变**）
 
-**状态**：✅ 三项全部完成。来源是批次收尾的架构扫描（报告为临时产物，
-未入库）。三项都是 behavior-preserving 重构，**不改任何线上契约**。
+**状态**：✅ 三项全部完成，✅ **已同步 `origin/main`，等待集成**。
+
+同步记录（§14.6 先回后正）：`origin/main`（`63db650`，35 个提交）已合入
+feat/backend，**零冲突**，merge commit **`f9c3675`**。合并后门禁逐字不变：
+ruff clean、pytest **1563 passed / 10 skipped / 39 deselected / 0 failed**；依赖未变
+（无需 `uv sync`）；main 侧未改任何 `src/` 文件 → 三个重构与集成基线无源码交集。
+**集成方请以 `f9c3675` 为合并对象**（而非 `81c5633`）。
+
+来源是批次收尾的架构扫描（报告为临时产物，未入库）。三项都是
+behavior-preserving 重构，**不改任何线上契约**。
 
 | 候选 | commit | 改动 | 一句话 |
 | --- | --- | --- | --- |
