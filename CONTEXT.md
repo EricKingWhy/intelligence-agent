@@ -558,4 +558,3 @@ _Avoid_: 为 persona 单独引入配置文件加载器（项目无此先例）
 **Prompt 不变量校验（Prompt Invariants）**:
 R1 名唯一 / R2 scope 合法 / R3 变量名合法（注册期）；R4 变量有值 / R5 每 scope 恰有一条 identity / R7 产物非空（组装期）；R6 排序确定性由 `(order, name)` 稳定排序保证（非校验）；另加**进程启动自检**对全部 scope 跑一次空组装 fail-fast。此项超出全部参考实现（dsh 的 invariant 插件仅覆盖 R1/R3 类）。
 _Avoid_: 把必需 section 清单拍脑袋堆大（只有 identity 是全部 profile 都有的事实）, 只在组装期才发现悬空引用
-
