@@ -472,3 +472,55 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 - **注册表现状**：11 条 section（3 profile + 3 aux + 1 快照 + 4 框架/纠偏），8 个声明变量（`tail_text`/`cwd`/`os`/`date`/`model`/`tools`/`tool_name`/`consecutive_failures`）。
 - **冻结契约**（全程断言未改）：`tests/agent/test_system_prompt_wiring.py` B1/B2、`tests/test_assembly_agent_profile.py` C1–C7、`tests/context/test_builder_system_prompt.py` G1–G4。
 - **两条待用户裁定的设计/内容问题**（已在各票 issue 记录）：①T6 的 guidance 与 `profile:main:identity` 存在逐字重复；②T7 的 child（子代理 runtime）没有运行时快照。
+
+---
+
+## §10 ARCH-6 — #149 记忆 provider seam（commit `4a4372f`）
+
+### 做了什么
+
+让 `provider` 配置**名副其实**：新增 per-provider 分派表，`build_memory_components` 按 provider
+分派，装配期白名单从分派表派生，未知 provider 装配期硬失败。并修掉一个 AC6 暴露的真实缺陷
+（装配方伸手调 `components.relay.start()`，使不带 `.relay` 的 provider 静默降级成"没有记忆"）。
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/agent_harness/capability/factories.py` | `_MEMORY_PROVIDER_FACTORIES` 分派表、`memory_provider_names()`、`build_memory_components(settings, *, provider="builtin")`；原函数体整体改名 `build_builtin_memory_components`（**逐字节不变**）；`_DEPRECATED_MEMORY_PROVIDERS`；`MemoryComponents.initialize()` 现在负责 `relay.start()` |
+| `src/agent_harness/capability/wiring.py` | `_KNOWN_PROVIDERS` → `_STATIC_KNOWN_PROVIDERS`（memory 移出）+ `_known_providers()`（memory 查分派表）；`_wire_memory` 传 `provider=cfg.provider` 且**不再**碰 `components.relay` |
+| `docs/adr/0024-memory-provider-seam.md` | 新增 ADR：seam 选 A（整个 `MemoryComponents` 包）、命名收口、生命周期归 provider |
+| `tests/capability/test_memory_provider_seam.py` | 新增 15 例 |
+| `tests/capability/test_wiring.py`、`test_phase7_gate.py` | 三处 fake 摘掉 relay 脚手架 + 4 处 monkeypatch 适配新关键字参数 |
+
+### 集成方【不要】做的事
+
+- **不要**改 `_STATIC_KNOWN_PROVIDERS` 来加 memory 的 provider——memory 的白名单**派生**自
+  `factories._MEMORY_PROVIDER_FACTORIES`；往静态表里塞 `"memory"` 只会被忽略（并可能误导下一个人）。
+- **不要**把 `components.relay.start()` 之类的调用搬回 `_wire_memory`——契约是"装配方只调
+  `initialize()` / `close()`"。这条现在有测试守着（`TestBuiltinProviderOwnLifecycle`）。
+- **不要**为了让"AC 字面更漂亮"而删掉 `langmem` 别名：它是**已弃用但接受**的别名，删掉会把
+  既有 `.env` 的升级变成装配期硬失败。
+
+### 证据
+
+- 门禁：ruff clean；全量 pytest **1842 passed / 10 skipped / 39 deselected / 0 failed**；
+  `git diff --check` clean。
+- 七组变异（各目标用例均变红、源码逐字节还原）：白名单硬编码化 / 装配层丢 `provider` /
+  去 warning / 去未知 provider 硬失败 / `relay.start` 搬回装配方 / `builtin` 不启动 relay /
+  close 顺序反转。
+- 真机（真 `.env` + 真 Milvus + 真 embedding，走 `assemble_wiring`）：`builtin` 与 `langmem`
+  注册成功且描述符 `provider_name` 分别为 `builtin`/`langmem`；`langmem` 实打弃用 warning；
+  `mem0` 装配期 `CapabilityError(init_failed)` 且零网络请求；`enabled=false` 零注册。
+  真 web app（uvicorn :8791）lifespan 启停干净。
+- 双轴独立审查：Spec 轴 AC 1–6 **全部 met**；Standards 轴修后**零硬违规**。
+
+### 前向兼容注意
+
+- **新增 provider 的正确做法**：`_MEMORY_PROVIDER_FACTORIES` 加一行 + 写一个返回
+  `MemoryComponents` 形态（含 `capability` / `writeback` / `initialize()` / `close()`）的 builder。
+  装配侧零改动，白名单自动接受。
+- **新错误码**：factory 层未知 provider 用 `init_failed`（复用 ADR-0010 Q3 冻结的四个码）；
+  装配层先是白名单拦截（同样是 `init_failed`）。
+- **`.env` 无新增项**；若集成方本地 `.env` 的 `CAPABILITIES` 写着 `"provider": "langmem"`，
+  启动时会看到一条弃用 warning（预期行为，建议改为 `"builtin"`，两者行为完全相同）。
+- **无行为变化**：`builtin`（含缺省）路径与原实现逐字节相同，relay 启动时机不变
+  （仍在两个存储就绪之后），只是执行位置从装配方挪进 provider。
