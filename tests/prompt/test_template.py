@@ -61,6 +61,13 @@ def test_render_rejects_orphan_close() -> None:
     assert err.value.code == "template_syntax"
 
 
+def test_render_rejects_orphan_close_before_a_variable() -> None:
+    """孤立 `}}` 出现在 `{{` **之前**也要拦——那是与尾部检查不同的另一条分支。"""
+    with pytest.raises(PromptError) as err:
+        render("}} {{a}}", {"a": "x"})
+    assert err.value.code == "template_syntax"
+
+
 def test_render_does_not_rescan_substituted_value() -> None:
     """替换值里的 `{{b}}` 原样输出——不展开、不报错（不重扫）。"""
     assert render("{{a}}", {"a": "{{b}}"}) == "{{b}}"

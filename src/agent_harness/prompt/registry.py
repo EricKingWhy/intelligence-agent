@@ -21,9 +21,21 @@ _SCOPE_RE = re.compile(r"^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$")
 #: 变量名
 _VARIABLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
-#: `*` 只覆盖 agent profile——见 `_matches`。
+#: `*` 只覆盖 agent profile——见 `PromptRegistry._matches`。
 _WILDCARD = "*"
 _PROFILE_PREFIX = "profile:"
+
+
+def _require_valid_scope(scope: str, *, context: str) -> None:
+    """scope 判据的**唯一落点**（PRD §10.5）：`<段>:<段>` 或字面量 `*`。
+
+    注册期校验各 section 的 scopes、查询期校验 `sections(scope)` 的参数，用的是
+    同一条规则——分两处写迟早漂移，所以只留这一个函数。
+    """
+    if scope != _WILDCARD and not _SCOPE_RE.match(scope):
+        raise PromptError(
+            f"{context}（需 `<段>:<段>` 或 `*`）：{scope!r}", code="invalid_scope"
+        )
 
 
 @dataclass(frozen=True)
@@ -67,11 +79,7 @@ class PromptRegistry:
                 code="invalid_scope",
             )
         for scope in sorted(section.scopes):
-            if scope != _WILDCARD and not _SCOPE_RE.match(scope):
-                raise PromptError(
-                    f"section {section.name!r} 的 scope 非法（需 `<段>:<段>` 或 `*`）：{scope!r}",
-                    code="invalid_scope",
-                )
+            _require_valid_scope(scope, context=f"section {section.name!r} 的 scope 非法")
         # R3a —— 模板语法（坏模板在注册期拦下，不留到运行时）
         required = extract_variables(section.text)
         # R3b —— 引用到的变量必须已声明
@@ -99,7 +107,7 @@ class PromptRegistry:
 
     def sections(self, scope: str) -> list[PromptSection]:
         """该 scope 命中的 section，按 `(order, name)` 稳定排序。"""
-        self._validate_scope(scope)
+        _require_valid_scope(scope, context="scope 非法")
         included = [s for s in self._sections.values() if self._matches(s, scope)]
         return sorted(included, key=lambda s: (s.order, s.name))
 
@@ -121,10 +129,3 @@ class PromptRegistry:
         if scope in section.scopes:
             return True
         return _WILDCARD in section.scopes and scope.startswith(_PROFILE_PREFIX)
-
-    @staticmethod
-    def _validate_scope(scope: str) -> None:
-        if scope != _WILDCARD and not _SCOPE_RE.match(scope):
-            raise PromptError(
-                f"scope 非法（需 `<段>:<段>` 或 `*`）：{scope!r}", code="invalid_scope"
-            )
