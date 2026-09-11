@@ -206,6 +206,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: var(--color-hover);
   border-color: var(--border-subtle);
 }
+/* 中断 ≠ 完成也 ≠ 失败：进程重启打断（OBS-007），同中性色域，无动画。
+   复用既有语义 token，不新增 :root 变量（§15 无需补亮色覆盖）。 */
+.run-pulse.pulse-interrupted {
+  color: var(--text-secondary);
+  background: var(--color-hover);
+  border-color: var(--border-subtle);
+}
 
 /* ── Buttons ── */
 .btn-primary {
@@ -507,6 +514,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   flex-direction: column;
   gap: var(--space-xl);
+  /* 关掉浏览器滚动锚定：容器内是虚拟化绝对定位行（动态测高，流式期间 spacer
+     高度连续变化），锚定会在测高跳变时替用户重设 scrollTop —— 表现为「往上
+     顶回去」。跟随逻辑由 lib/followLatest 显式掌管，不要浏览器再猜一次。 */
+  overflow-anchor: none;
   /* 沉浸式滚动条：静止透明，悬停才浮现 */
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
@@ -2798,6 +2809,15 @@ button.json-row {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
+}
+/* 恢复成功状态条——与 interrupt-banner 同族（状态条，非错误）。复用既有
+   --success（index.css 暗/亮两套都有定义），不引入新 token（§15）。 */
+.recover-done {
+  padding: var(--space-sm) var(--space-xl);
+  font-size: var(--text-sm);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 /* ── Workspace 模式条（Phase 1d 方案 B）──

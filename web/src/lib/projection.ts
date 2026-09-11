@@ -54,6 +54,7 @@ function newTurn(step_id: number): Turn {
     status: 'streaming',
     reasoningById: {},
     turn_index: null,
+    user_message_seq: null,
   };
 }
 
@@ -196,6 +197,11 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
   withTurnAt(state, step, (turn) => {
     touchTurn(turn, event);
     turn.user_message = String(event.data.content ?? '');
+    // BUG-001：fork 锚点需要 user/message 的 seq（持久事实），
+    // 而非 turn.step_id（resolveStep 合成值）。null-seq 帧不入册。
+    if (event.seq !== null) {
+      turn.user_message_seq = event.seq;
+    }
     // Phase 12（ADR-0014 #69）：failure-guard soft 注入的纠正消息带
     // injected_by 标记——渲染层据此显示为系统提示条而非用户气泡。
     if (typeof event.data.injected_by === 'string' && event.data.injected_by) {
@@ -206,6 +212,11 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
 
 function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   state.run_status = 'running';
+  // OBS-007：新 run 开始 = 用户已经接着往下跑了，「上次运行…中断」这条提示随之
+  // 过期——不清掉的话它会挂到会话生命结束，与后续 run 的真实结局（比如绿色
+  // 「已完成」）同屏打架。清空后 `run_interrupted` 的语义收窄为「**最近一个** run
+  // 以中断收口」，deriveRunPulse 也就据此给出中性的「已中断」而不是「已完成」。
+  state.run_interrupted = null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -1102,6 +1113,37 @@ export function deriveChain(turn: Turn): ChainNode[] {
 /** Rebuild full conversation from a history of durable events (on page load). */
 export function projectHistory(session_id: string, events: AgentEvent[]): ConversationState {
   return events.reduce(applyEvent, initConversation(session_id));
+}
+
+/** 最早可分叉的那一轮的数组下标；没有可分叉的轮时返回 -1。
+ *
+ *  = `user_message_seq` 最小的真实用户轮。判据必须是 seq，不是数组顺序：
+ *   - harness 注入的纠正消息（`injected_by`）不是真人说的话、不渲染分叉按钮，
+ *     若它排在前面就会把「本轮之前没有历史」的提示错误地挪给下一轮；
+ *   - 投影按事件顺序建轮，理论上 seq 递增，但畸形日志可能乱序，取最小 seq 才
+ *     真等价于「最早的用户消息」。
+ *  `user_message_seq === null` 的轮不可分叉（旧版后端未带 seq），跳过。 */
+export function firstForkableTurnIndex(turns: Turn[]): number {
+  let bestIdx = -1;
+  let bestSeq = Number.POSITIVE_INFINITY;
+  turns.forEach((t, i) => {
+    if (t.injected_by || t.user_message_seq === null) return;
+    if (t.user_message_seq < bestSeq) {
+      bestSeq = t.user_message_seq;
+      bestIdx = i;
+    }
+  });
+  return bestIdx;
+}
+
+/** 能挂「child 会话将是空会话」提示的那一轮：只有第 0 轮可分叉时才是它，否则 -1。
+ *
+ *  分叉按该轮的 `user_message_seq` 播种，**排在它前面的事件都会进 child**。
+ *  被 `firstForkableTurnIndex` 跳过的注入轮 / 无锚点轮（旧版后端）虽不参与分叉，
+ *  它们的事件仍排在锚点之前——把提示挪给下一轮就是说谎，故这里返回 -1（干脆不给
+ *  提示），而不是直接返回那个「最早可分叉轮」。 */
+export function emptyChildTurnIndex(turns: Turn[]): number {
+  return firstForkableTurnIndex(turns) === 0 ? 0 : -1;
 }
 
 /** Extract a session-title string from a single event if it's a user/message

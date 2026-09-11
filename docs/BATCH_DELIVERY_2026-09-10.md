@@ -6,9 +6,11 @@
 **目标**：合入 `main`（当前 `ebb2d68`）——`ahead 8 / behind 6`，实测**无冲突**
 
 > **本文件是本批次交付的权威入口。** 细节分文档见：
+> - `docs/integration/MERGE_EXECUTION_ORDER.md` —— **独立合并执行单**（自包含、可直接照做）
 > - `docs/integration/FRONTEND_INTEGRATION_PROMPT.md` —— **给集成 AI 的执行指令**（含实测拓扑与冲突预判）
 > - `docs/integration/verify-before-merge.sh` —— **集成前预检脚本**（只读、每次重新实测，全绿才 merge）
-> - `docs/CODE_REVIEW_FIXES_2026-09-10.md` —— code-review 发现与修复详情
+> - `docs/CODE_REVIEW_FIXES_2026-09-10.md` —— 第一轮 code-review（代码）发现与修复详情
+> - `docs/CODE_REVIEW_FIXES_2026-09-10b.md` —— 第二轮 code-review（交接文档）发现与修复详情
 > - `docs/T9_TURN_INDEX_DELIVERY.md` —— T9 专项说明（per-turn `turn_index` 的设计推理与核实过程）
 >
 > ⚠️ **哈希均为快照，集成时以 `git ls-remote` 实测为准。** 预检脚本已内置该纪律。

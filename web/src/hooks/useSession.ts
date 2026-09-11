@@ -23,11 +23,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
-import { EventType } from '../types';
-import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, NotFoundError, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
+import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
+import { forgetResumeAttempt, maxEventSeq, nextResumeAttempt, readStoredSessionId, writeStoredSessionId, type ResumeAttempts } from '../lib/sessionRestore';
 
 /** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
  *
@@ -51,18 +52,37 @@ export function shouldApplyStreamFrame(mode: SessionMode, event: AgentEvent): bo
   return mode.sessionId === eventSid;
 }
 
-/** Recover 入口的三态视图状态（200 成功回到 idle——重建视图即成功反馈）。 */
+/** Recover 入口的视图状态。
+ *
+ * `done` 是**成功后的落地态**，不是过场动画：崩溃会话常常已经被后端启动
+ * 扫描修完了，此时 recover 是一次真 no-op、投影逐字不变——若成功也回到
+ * `idle`，「修好了」与「按钮坏了」在界面上完全同形（用户实测：「点了什么
+ * 反应也没有」，连点 15 次）。`repaired` 给出这次到底补了几条工具结果，
+ * 0 就是「无可修复项」——两者都是诚实的成功。 */
 export interface RecoverState {
-  status: 'idle' | 'pending' | 'error';
+  status: 'idle' | 'pending' | 'done' | 'error';
   /** 409 裁决原因 / 404·网络错误的具体信息。 */
   message: string | null;
   /** 409 = 存在需人工裁决的高风险操作（展示态，非普通失败）。 */
   conflict: boolean;
+  /** status === 'done' 时：本次恢复补上的 tool/result 条数。 */
+  repaired: number;
+  /** status === 'done' 时：本次恢复补上了缺失的 run 终态。
+   *  与 `repaired` 分开计数——只报工具回填会把「补齐终态」说成「无可修复项」。 */
+  terminalRepaired: boolean;
+  /** status === 'done' 时：恢复后**投影**仍未收口的两项原因（分开传，见
+   *  runState.recoverDoneMessage——压成一个布尔会把原因说错）。 */
+  stillUnterminated: boolean;
+  stillDangling: boolean;
 }
 
-/** Recover 三态的 idle 初值——三处复用（useState 初值 / mode 迁移重置 / 200
- *  成功回位）。对象只被整体替换、从不就地修改，共享引用安全。 */
-const RECOVER_IDLE: RecoverState = { status: 'idle', message: null, conflict: false };
+/** Recover 的 idle 初值——两处复用（useState 初值 / mode 迁移重置）。
+ *  对象只被整体替换、从不就地修改，共享引用安全。retry 直接置 `pending`，
+ *  不经这里（这也是它区别于初值的地方：重试不该先闪一下 idle）。 */
+const RECOVER_IDLE: RecoverState = {
+  status: 'idle', message: null, conflict: false, repaired: 0,
+  terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+};
 
 /** Recover 响应落地守护（不变量 #22，shouldApplyStreamFrame 的姊妹契约）。
  *
@@ -210,7 +230,21 @@ export const CONTINUE_PARAMS_ERROR_TEXT = '续聊参数无效（422）：请刷�
 
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [mode, setMode] = useState<SessionMode>({ kind: 'idle' });
+  /** 首屏即从 localStorage 恢复上次选中的会话（BUG-005）。
+   *
+   *  用惰性初值，而不是「列表回来后再 setMode」的 effect：① 首帧就是
+   *  `viewing(sid)`，直接进「正在加载历史…」，不会先闪一下空态再跳到会话；
+   *  ② 选中态本来就是用户上次留下的持久值——它**是**初始值，不是对某次
+   *  变更的响应，所以不该由 effect 产生（effect 里同步 setState 也会多一条
+   *  lint 告警）。
+   *
+   *  该 id 可能已经失效（会话被删 / 换过后端实例）：装载报 404 时按
+   *  NotFoundError 分支安静回到空态并清键，不做「先查列表再决定」的预校验
+   *  ——那要等列表、多一次往返，且仍要处理竞态。 */
+  const [mode, setMode] = useState<SessionMode>(() => {
+    const stored = readStoredSessionId();
+    return stored ? { kind: 'viewing', sessionId: stored } : { kind: 'idle' };
+  });
   const [conversation, setConversation] = useState<ConversationState | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -251,11 +285,19 @@ export function useSession() {
   // submitTask 闭包内的停摆检查（依赖 gen/coalescer 等闭包状态）——
   // hook 级心跳与 visibilitychange 经此触达当前活跃流。
   const stallCheckRef = useRef<(() => void) | null>(null);
+  // 恢复实时流的入口镜像——历史装载 effect 在 hook 上方，而 resumeLiveStream
+  // 定义在下方（它依赖 attachLiveStream）。与 stallCheckRef 同一处理：跨
+  // 区块调用经 ref 触达，**在 effect 里镜像**（见下方定义处；render 期写 ref
+  // 违反 refs 规则，曾据此改过一次，别改回去）。
+  const resumeLiveStreamRef = useRef<
+    ((sid: string, afterSeq: number, initialConv: ConversationState) => void) | null
+  >(null);
   const [reconnecting, setReconnecting] = useState(false);
 
-  // Recover 三态（df4f7d8 §1.1）：idle → pending → 200 成功（回到 idle，整表
-  // 重建）/ 404·409·网络错误 → error。409 是"需人工裁决"（conflict=true），
-  // 本期只展示原因，不做裁决交互（不变量 #14：不伪造、不盲跑）。
+  // Recover 四态（df4f7d8 §1.1 + 本次修复）：idle → pending → 200 成功落 `done`
+  // （整表重建 + 明确的成功反馈，原因见 RecoverState 注释）/ 404·409·网络错误
+  // → error。409 是"需人工裁决"（conflict=true），本期只展示原因，不做裁决
+  // 交互（不变量 #14：不伪造、不盲跑）。
   const [recoverState, setRecoverState] = useState<RecoverState>(RECOVER_IDLE);
 
   // Derived, so the UI can never observe a mismatch between them.
@@ -290,6 +332,16 @@ export function useSession() {
     refreshSessions();
   }, [refreshSessions]);
 
+  // 记住选中的会话（BUG-005）：刷新后要能回到同一个会话，内容与刷新前一致。
+  // 落点选在 mode 上——它是选中态的唯一真相（selectedId 由它派生），所以
+  // 「何时记住」不需要在 selectSession / 分叉 / 新任务三处各写一遍。
+  // idle ⇒ 显式忘记：用户点了「新建会话」就不该在刷新后被拉回旧会话。
+  // live(null)（已提交、首帧还没带 sid）不写也不清——等 sid 到。
+  useEffect(() => {
+    if (mode.kind === 'idle') writeStoredSessionId(null);
+    else if (mode.sessionId) writeStoredSessionId(mode.sessionId);
+  }, [mode]);
+
   // History loading: viewing mode reads the durable log; live mode lets the
   // stream paint (a stale/partial disk read would overwrite in-flight state);
   // idle owns no conversation.
@@ -314,13 +366,28 @@ export function useSession() {
     getSessionEvents(sid)
       .then((events: AgentEvent[]) => {
         if (cancelled) return;
-        setConversation(projectHistory(sid, events));
+        const projected = projectHistory(sid, events);
+        setConversation(projected);
         // 从真实事件流投影首条用户消息作为行标题（无则空串，回退短 ID）。
         const title = deriveSessionTitle(events);
         if (title) setTitlesById((m) => (m[sid] === title ? m : { ...m, [sid]: title }));
+        // BUG-006：这个 run 在服务端可能仍在跑（刷新/重连后最常见的那种会话）。
+        // 历史照旧渲染（用户马上看到内容），随后接回实时流继续长；
+        // 若其实已经收口，onStreamEnd 的零帧分支静默退回 viewing，不报错。
+        if (hasUnterminatedRun(events)) {
+          resumeLiveStreamRef.current?.(sid, maxEventSeq(events), projected);
+        }
       })
       .catch((e) => {
-        if (!cancelled) setError(`加载历史事件失败：${(e as Error).message}`);
+        if (cancelled) return;
+        // 记住的选中会话已不存在（被删 / 换后端）：清键 + 安静回空态。
+        // 每次刷新都弹「加载历史事件失败：会话不存在」是用户无法处理的错误。
+        if (e instanceof NotFoundError) {
+          writeStoredSessionId(null);
+          setMode({ kind: 'idle' });
+          return;
+        }
+        setError(`加载历史事件失败：${(e as Error).message}`);
       })
       .finally(() => {
         if (!cancelled) setLoadingHistory(false);
@@ -368,14 +435,18 @@ export function useSession() {
   /** SSE 流消费机器——submitTask 和 sendMessage 共用。
    *  P1-3 合帧 + T7 后台降渲染 + T4 重连状态机全部内联于此。
    *  initialConv：新会话传 null（首帧惰性初始化）；续聊传当前 conversation（追加）。
-   *  gen：流代际（submit/sendMessage 入口已自增并捕获），旧流全部回调凭此失效。 */
+   *  gen：流代际（submit/sendMessage 入口已自增并捕获），旧流全部回调凭此失效。
+   *  opts.resume（BUG-006）：这条流是**刷新后恢复**时接上去的，不是新提交。
+   *    差别只在 onStreamEnd 的零帧收流分支——见那里的注释。 */
   const attachLiveStream = useCallback(
-    (res: Response, gen: number, initialConv: ConversationState | null) => {
+    (res: Response, gen: number, initialConv: ConversationState | null, opts?: { resume?: boolean }) => {
         // P1-3 合帧 + T7 后台降渲染：窗口内多 delta 一次提交；隐藏期挂起、
         // 回前台 flush 对账。折叠逐帧即时（真相不延迟），延迟的只是通知。
         // T4：conv 由重连路径与 live 帧共享——同一折叠累积器，重放帧经
         // seenSeqs 去重吸收（无缝无重复的关键在 T1 去重门 + seq 游标本地记账）。
         let conv: ConversationState | null = initialConv;
+        /** 本代际收到的帧数（含重放帧）——只给 resume 的零帧判定用。 */
+        let framesSeen = 0;
         const coalescer = createCommitCoalescer(
           () => {
             if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
@@ -400,6 +471,7 @@ export function useSession() {
           // 不变量 #22 守护：cancel / selectSession / error 之后才到达的
           // 在途帧不再具有权威——若放行会用旧流残留覆盖刚加载的目标视图。
           if (!shouldApplyStreamFrame(modeRef.current, event)) return;
+          framesSeen += 1; // 恢复探测用：见 onStreamEnd 的「零帧收流」
           lastFrameAtRef.current = Date.now();
           // T4 控制帧先于投影（seq=null 不入轮次）：backlog>1000 → 全量重建。
           // 'stream/truncated' 是 web 层控制帧（app.py 内联构造，不在 event.py
@@ -419,7 +491,7 @@ export function useSession() {
             scheduleReconnect(liveSidRef.current, 'seq gap');
             return;
           }
-          if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
+          if (RUN_TERMINAL_TYPES.has(event.type)) {
             terminalSeenRef.current = true;
           }
           const sid = event.session_id ?? null;
@@ -449,7 +521,7 @@ export function useSession() {
             if (content) setTitlesById((m) => (m[sid] ? m : { ...m, [sid]: content }));
           }
           // 终态事件立即 flush（尾帧不得延迟到下一窗口）；中间帧合帧提交。
-          if (event.type === EventType.RUN_COMPLETED || event.type === EventType.RUN_FAILED) {
+          if (RUN_TERMINAL_TYPES.has(event.type)) {
             coalescer.flush();
           } else {
             coalescer.schedule();
@@ -461,6 +533,18 @@ export function useSession() {
           // 写进新视图（modeRef live 守卫在同代际内失效）。
           if (streamGenRef.current !== gen) return;
           coalescer.flush(); // 尾帧不丢（P1-3）
+          // 恢复流的零帧收流 = **服务端已经没有在跑的 run**（实测：
+          // `GET /stream?after_seq=<max>` 对空闲会话立即 200 + 空 body 关闭，
+          // 5ms）。这不是「连接异常关闭」，重连只会重试到一个空流、耗尽额度后
+          // 给用户一条假的「连接中断」错误横幅。静默退回 viewing 即可——
+          // 历史已在恢复时装载过，界面无变化。
+          if (opts?.resume && framesSeen === 0 && !terminalSeenRef.current) {
+            coalescerRef.current = null;
+            setReconnecting(false);
+            const sid = liveSidRef.current;
+            setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
+            return;
+          }
           // 终态已见 = 自然终结（含重放收到终态）；未终态 = 服务端提前收流
           //（契约推荐重连时机①：连接异常关闭）。
           if (terminalSeenRef.current) {
@@ -530,6 +614,8 @@ export function useSession() {
                 if (streamRes.status === 404) {
                   coalescerRef.current = null;
                   setReconnecting(false);
+                  // 不在这里清 localStorage：live→viewing 会重跑历史装载，那条
+                  // 404 → NotFoundError → 清键 + 回 idle，才是落得住的清理点。
                   setMode({ kind: 'viewing', sessionId: sid as string });
                   setError('会话不存在（404）——流已终止');
                   refreshSessions();
@@ -623,6 +709,80 @@ export function useSession() {
     },
     [refreshSessions, attachLiveStream],
   );
+
+  /** 刷新后接回**仍在服务端运行的** run（BUG-006）。
+   *
+   *  场景：用户盯着一个正在流式的会话按了 F5（或标签页被重载/崩溃后恢复）。
+   *  后端是 detached-run（ADR-0016）——run 不因订阅断开而停；`GET /stream?
+   *  after_seq=N` 的契约是「先重放 after_seq 之后的 durable 事件，再接续在途
+   *  流，无缝无重复」。所以恢复只需：拿已装载事件的最大 seq 当游标接回去，
+   *  同一套 `attachLiveStream` 累积器与 seenSeqs 去重门吸收重放帧。
+   *
+   *  两个必要的副作用：
+   *   - `setMode(live)`：让 modeRef 立刻成为这条流的权威消费者
+   *     （`shouldApplyStreamFrame` 与合帧提交都读它），否则帧会被守卫丢掉。
+   *   - `resume: true`：告诉 onStreamEnd，零帧收流不是断线而是「服务端没有在跑
+   *     的 run」——静默退回 viewing，不重连、不报假错。
+   *
+   *  守卫：同一 sid 已有恢复尝试在途就跳过。StrictMode 的 effect 双跑由装载
+   *  路径的 `cancelled` 挡住（第一次装载必在第二次之前被 cleanup 取消），但
+   *  「同一会话的重叠装载」（例如连点已选中的行）确实可能双双走到这里——
+   *  两次 attach 会让第一条流失去 sseRef 引用而泄漏，后端也多一个订阅者。 */
+  /** 本页面会话里，各 sid 上次自动接流试到的游标（见 nextResumeAttempt 的注释）。
+   *
+   *  为什么必须记：零帧收流会把 mode 退回 `viewing(sid)`，而历史装载 effect 以
+   *  mode 为依赖——它会重新装载、又看到 `hasUnterminatedRun` 为真、再发起一次
+   *  恢复，形成「viewing → 接流 → 空流 → viewing」的死循环（每轮两次请求）。
+   *  按 (sid, 游标) 记账即斩断回路：空流不带来新事件，游标不变，第二次被拦下。
+   *  刷新页面 = 新的页面会话，记录清空——下次刷新照常再试一次。 */
+  const resumeAttemptedRef = useRef<ResumeAttempts>(new Map());
+  const resumeLiveStream = useCallback(
+    async (sid: string, afterSeq: number, initialConv: ConversationState) => {
+      const nextAttempted = nextResumeAttempt(resumeAttemptedRef.current, sid, afterSeq);
+      if (!nextAttempted) return; // 同一游标已试过：零帧结论仍成立，重试无意义
+      // 记账放在 await **之前**（故意的，别挪到成功分支后面）：失败路径同样会
+      // setMode(live) → setMode(viewing)，mode 每变一次历史 effect 就重跑一次，
+      // 于是「失败 → 回 viewing → 重跑 → 再失败」会变成无上限重试（每轮两条请求）。
+      // 代价是同一游标下的自动重试额度被这次失败用掉——错误横幅已告知用户，
+      // 用户重新点一次该会话行即经 selectSession → forgetResumeAttempt 重新武装。
+      resumeAttemptedRef.current = nextAttempted;
+      sseRef.current?.cancel();
+      liveSidRef.current = sid;
+      lastAppliedSeqRef.current = afterSeq;
+      terminalSeenRef.current = false;
+      lastFrameAtRef.current = Date.now();
+      reconnectRef.current.reset();
+      streamGenRef.current += 1;
+      const gen = streamGenRef.current;
+      setMode({ kind: 'live', sessionId: sid });
+      try {
+        const res = await streamSession(sid, afterSeq);
+        if (streamGenRef.current !== gen) return; // 期间切走/取消：丢弃
+        if (res.status === 404) {
+          // 会话在装载与接流之间消失。这里**不写** writeStoredSessionId(null)：
+          // 马上要回到 viewing(sid)，持久化 effect 会立刻把 sid 写回去，清了也是
+          // 白清。真正已被删的会话由下面这一步兜住——mode 变更会重跑历史装载，
+          // getSessionEvents 404 → NotFoundError → 清键 + 回 idle，那次落得住。
+          setMode({ kind: 'viewing', sessionId: sid });
+          return;
+        }
+        if (!res.ok || !res.body) throw new Error(`resume ${res.status}`);
+        attachLiveStream(res, gen, initialConv, { resume: true });
+      } catch (e) {
+        if (streamGenRef.current !== gen) return;
+        // 历史已渲染，这里只报告「继续接收」失败——不把视图打回空态。
+        setMode({ kind: 'viewing', sessionId: sid });
+        setError(`继续接收失败：${(e as Error).message}`);
+      }
+    },
+    [attachLiveStream],
+  );
+  useEffect(() => {
+    resumeLiveStreamRef.current = resumeLiveStream;
+  }, [resumeLiveStream]);
+  // 镜像给上方历史装载 effect 用（跨区块调用，与 stallCheckRef 同一手法）。
+  // 放在 effect 里赋值而不是 render 期：refs 规则禁止 render 期读写 ref，
+  // 而这里没有时序风险——历史装载的 .then 在 fetch 之后才跑，远晚于本 effect。
 
   /** 续聊：向已有会话发消息（PRD §5.3）。
    *  空闲会话 → 后端 launched 直驱新 run（同形 SSE）→ attachLiveStream 续接。
@@ -723,6 +883,9 @@ export function useSession() {
    *  T5（#98）语义修订：切走只是 unsubscribe（detached-run 契约），run 服务端
    *  继续跑到终态——切会话不再等于取消 run；流上残留订阅随 abort 清理。 */
   const selectSession = useCallback((id: string | null) => {
+    // 用户显式切到某个会话 = 明确要看它：忘掉自动接流的去重记账，让「切走
+    // 再切回来」照常再接一次（自动重入的死循环不经过这里，断点仍在）。
+    if (id) resumeAttemptedRef.current = forgetResumeAttempt(resumeAttemptedRef.current, id);
     streamGenRef.current += 1;
     stallCheckRef.current = null;
     setReconnecting(false);
@@ -733,31 +896,66 @@ export function useSession() {
     setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
 
-  /** 恢复中断会话（POST /recover，幂等）。200 → 整表重建：响应是与 GET events
+  /** 恢复中断会话（POST /recover）。200 → 整表重建：响应是与 GET events
    *  同构的全量事件数组，走同一 projectHistory 管线（不变量 #22——不引入第二套
-   *  会话真相）；404/409 → 三态 error（409 附裁决原因，conflict=true）。
-   *  落地前先过 shouldApplyRecoverResult 守护：pending 期间切走即丢弃。 */
+   *  会话真相）；404/409 → error（409 附裁决原因，conflict=true）。
+   *  落地前先过 shouldApplyRecoverResult 守护：pending 期间切走即丢弃。
+   *
+   *  成功落 `done` 而非回 `idle`：崩溃会话往往已被后端启动扫描修完，recover
+   *  是一次真 no-op、投影逐字不变；回 idle 会让「修好了」与「按钮坏了」同形。
+   *  `repaired` = 恢复前 dangling 的 tool_call 里、恢复后已配上的条数
+   *  （append-only 日志下集合只减不增，差集即本次修复量）；`terminalRepaired`
+   *  = 恢复前缺 run 终态、恢复后补上了。两者分开——只看 `repaired` 会把一次
+   *  真实的终态修复报成「无可修复项」。
+   *
+   *  守护覆盖**全部**状态写入，不只 setConversation：`done`/`error` 都是用户看得见
+   *  的反馈，晚到的响应若落到已切走的会话上，等于把 A 会话的恢复结论贴在 B 会话
+   *  界面（同族的 stale-write）。同理 `unpairedBefore` 只在该响应确实属于当前视图
+   *  时才用来算差集——否则它取自别的会话，`repaired` 就是个凭空造出来的数字。 */
   const recover = useCallback(
     async (sid: string) => {
-      setRecoverState({ status: 'pending', message: null, conflict: false });
+      setRecoverState({
+        status: 'pending', message: null, conflict: false, repaired: 0,
+        terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+      });
+      const viewed = conversationRef.current;
+      const mineBefore = viewed?.session_id === sid ? viewed.events : null;
+      const unpairedBefore = mineBefore === null ? null : unpairedToolCallIds(mineBefore);
+      const unterminatedBefore = mineBefore === null ? false : hasUnterminatedRun(mineBefore);
       try {
         const events = await recoverSession(sid);
-        // stale-write 守护（不变量 #22）：pending 期间用户可能已切走——
-        // 晚到的 200 响应不得覆盖目标会话视图（viewing 会由持久事件源重建）。
-        if (shouldApplyRecoverResult(modeRef.current, sid)) {
-          setConversation(projectHistory(sid, events));
-        }
-        setRecoverState(RECOVER_IDLE);
+        // 会话列表的计数要跟着更新，与"当前看的是哪个会话"无关。
         void refreshSessions();
+        if (!shouldApplyRecoverResult(modeRef.current, sid)) return;
+        const unpairedAfter = unpairedToolCallIds(events);
+        const repaired = unpairedBefore === null
+          ? 0
+          : [...unpairedBefore].filter((id) => !unpairedAfter.has(id)).length;
+        const terminalRepaired = unterminatedBefore && !hasUnterminatedRun(events);
+        setConversation(projectHistory(sid, events));
+        setRecoverState({
+          status: 'done', message: null, conflict: false, repaired, terminalRepaired,
+          // 原因分开算：isRecoverableRun 是 OR，压回一个布尔就会把原因说错。
+          stillUnterminated: hasUnterminatedRun(events),
+          stillDangling: unpairedAfter.size > 0,
+        });
       } catch (e) {
+        if (!shouldApplyRecoverResult(modeRef.current, sid)) return;
         if (e instanceof RecoverError) {
           setRecoverState({
             status: 'error',
             message: e.message,
             conflict: e.status === 409,
+            repaired: 0,
+            terminalRepaired: false,
+            stillUnterminated: false,
+            stillDangling: false,
           });
         } else {
-          setRecoverState({ status: 'error', message: (e as Error).message, conflict: false });
+          setRecoverState({
+            status: 'error', message: (e as Error).message, conflict: false,
+            repaired: 0, terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+          });
         }
       }
     },

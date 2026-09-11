@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, deriveChain, deriveSessionTitle, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
+import { applyEvent, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -272,6 +272,29 @@ describe('applyEvent — resolveStep 边界契约', () => {
     expect(s.turns[0].user_message).toBe('你是谁');
     expect(s.turns[0].model.text).toBe('我是 Qwen');
     expect(s.turns[0].step_id).toBe(1);
+  });
+
+  // ── 回归：分叉锚点 = user/message 的持久 seq（BUG-001） ──
+  // 真实信封里 user/message 的 step_id 恒为 null，step 号由 resolveStep 合成。
+  // 把合成的 step 号当 from_seq 发给后端会被 422 拒（只有 seq 是合法锚点）。
+  it('user/message 的持久 seq 落到 turn.user_message_seq（不写合成 step 号）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.USER_MESSAGE,
+      data: { content: 'hi' },
+      seq: 30,
+      step_id: undefined,
+    }));
+    expect(s.turns[0].step_id).toBe(1); // resolveStep 合成值
+    expect(s.turns[0].user_message_seq).toBe(30); // 真实锚点
+  });
+
+  it('seq 缺失（null）的 user/message 不写入 user_message_seq（不伪造锚点）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.USER_MESSAGE,
+      data: { content: 'hi' },
+      seq: null,
+    }));
+    expect(s.turns[0].user_message_seq).toBeNull();
   });
 
   // ── 回归：MODEL_COMPLETED 无前置 MODEL_STARTED 时须补 model activity ──
@@ -918,6 +941,20 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(s.run_status).toBe('completed');
     expect(s.run_interrupted).toEqual({ step_id: 3, interrupted_seq: 42, reason: 'process_restart' });
     expect(summarizeEvent(ev({ type: EventType.RUN_INTERRUPTED, data: {}, step_id: 3 }))).toBe('第 3 步中断');
+  });
+
+  it('OBS-007 RUN_STARTED 清空中断标记：提示不跨 run 存活', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({
+      type: EventType.RUN_INTERRUPTED,
+      data: { interrupted_seq: 42, reason: 'process_restart' },
+      step_id: 3,
+    }));
+    expect(s.run_interrupted).not.toBeNull();
+    // 用户接着往下跑：新 run 一开始，「上次运行…中断」这条提示就过期了
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    expect(s.run_interrupted).toBeNull();
+    expect(s.run_status).toBe('running');
   });
 
   it('T9 #139 RUN_STARTED：turn_index 落到当轮 turn（per-turn 事实）', () => {
@@ -1691,5 +1728,107 @@ describe('T-contract — text/delta 词汇 + envelope block_id（#116，后端�
     expect(s.turns[0].model.text).toBe('部分回答');
     expect(s.turns[0].activities.some((a) => a.kind === 'model')).toBe(true);
     expect(s.run_cancelled).toBe(true);
+  });
+});
+
+describe('firstForkableTurnIndex — 「最早可分叉的那一轮」锚点选择', () => {
+  it('两个真实用户轮：返回第一轮（seq 最小）', () => {
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '一', step: 1 }, seq: 2 }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '二', step: 2 }, seq: 5 }),
+    ]);
+    expect(firstForkableTurnIndex(s.turns)).toBe(0);
+  });
+
+  it('空会话：返回 -1（没有可分叉的轮）', () => {
+    expect(firstForkableTurnIndex([])).toBe(-1);
+  });
+
+  it('注入轮排在前面时跳过它，锚点落在第一个真人轮', () => {
+    // 注入消息（failure-guard 纠正）虽在最前、且 seq 更小，但不是真人输入、
+    // 不渲染分叉按钮——锚点必须是后面的真实用户轮。（结果与按数组顺序取第一个
+    // 非空锚点相同，本用例是行为记录；区分两者的是下面的乱序用例。）
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '纠正', step: 1, injected_by: 'failure-guard' }, seq: 2 }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '真人', step: 2 }, seq: 5 }),
+    ]);
+    expect(s.turns[0].injected_by).toBe('failure-guard');
+    expect(firstForkableTurnIndex(s.turns)).toBe(1);
+  });
+
+  it('首轮无锚点（旧版后端未带 seq）时跳过它，不在它上面标「空会话」', () => {
+    // 行为记录（**不是**回归锁）：跳过后返回 1——与「按数组顺序取第一个非空锚点」
+    // 的旧实现同结果，本用例区分不了两者。真正能区分的是下面的乱序用例。
+    // 注意它记录的后果：`Conversation` 只在结果 === 0 时才挂「child 是空会话」
+    // 提示，所以这里返回 1 意味着第 1 轮拿到的是普通「从此处分叉」——turn 0 的
+    // 事件排在锚点之前，说「空会话」就是谎报。
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '旧帧', step: 1 }, seq: null }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '新帧', step: 2 }, seq: 5 }),
+    ]);
+    expect(s.turns[0].user_message_seq).toBeNull();
+    expect(firstForkableTurnIndex(s.turns)).toBe(1);
+  });
+
+  it('全部轮都无锚点：返回 -1（一个分叉入口都不渲染）', () => {
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'a', step: 1 }, seq: null }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'b', step: 2 }, seq: null }),
+    ]);
+    expect(firstForkableTurnIndex(s.turns)).toBe(-1);
+  });
+
+  it('畸形日志 seq 乱序：取 seq 最小的轮，而非数组第一个', () => {
+    // 投影按事件顺序建轮，理论上 seq 递增；乱序日志下必须仍指向最早的用户消息。
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '后到', step: 1 }, seq: 9 }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '先发', step: 2 }, seq: 3 }),
+    ]);
+    expect(firstForkableTurnIndex(s.turns)).toBe(1);
+  });
+});
+
+describe('emptyChildTurnIndex — 「child 会话将是空会话」提示只给第 0 轮', () => {
+  // 回归锁：修复前直接复用 firstForkableTurnIndex 当 isFirstUserTurn，于是
+  // 「注入轮 / 无锚点轮排在最前」时把提示挪给了下一轮——而那一轮之前明明还有
+  // 事件（它们会进 child），提示是谎报。这里锁「不是第 0 轮 ⇒ -1（不给提示）」。
+  it('两个真实用户轮 → 0（第 0 轮可分叉，提示成立）', () => {
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '一', step: 1 }, seq: 2 }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '二', step: 2 }, seq: 5 }),
+    ]);
+    expect(emptyChildTurnIndex(s.turns)).toBe(0);
+  });
+
+  it('注入轮排在最前 → -1（提示不得挪给第 1 轮）', () => {
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '纠正', step: 1, injected_by: 'failure-guard' }, seq: 2 }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '真人', step: 2 }, seq: 5 }),
+    ]);
+    expect(emptyChildTurnIndex(s.turns)).toBe(-1);
+  });
+
+  it('第 0 轮无锚点（旧版后端）→ -1（不得挪给第 1 轮）', () => {
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '旧帧', step: 1 }, seq: null }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '新帧', step: 2 }, seq: 5 }),
+    ]);
+    expect(emptyChildTurnIndex(s.turns)).toBe(-1);
+  });
+
+  it('空会话 / 全部无锚点 → -1', () => {
+    expect(emptyChildTurnIndex([])).toBe(-1);
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'a', step: 1 }, seq: null }),
+    ]);
+    expect(emptyChildTurnIndex(s.turns)).toBe(-1);
+  });
+
+  it('乱序 seq 且最小 seq 不在第 0 轮 → -1（保守不给提示）', () => {
+    const s = projectHistory('s', [
+      ev({ type: EventType.USER_MESSAGE, data: { content: '后到', step: 1 }, seq: 9 }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: '先发', step: 2 }, seq: 3 }),
+    ]);
+    expect(emptyChildTurnIndex(s.turns)).toBe(-1);
   });
 });

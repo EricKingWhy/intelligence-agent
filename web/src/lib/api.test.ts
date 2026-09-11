@@ -2,7 +2,8 @@
  *  fetch 全局 mock；auth.getToken 在 node 下走 try/catch 兜底（无 localStorage）。 */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModels, sendMessage, startSession } from './api';
+import { getModels, getSessionEvents, NotFoundError, UnauthorizedError, sendMessage, startSession } from './api';
+import { onUnauthorized } from './auth';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
 function captureFetch(
@@ -170,5 +171,56 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
       reasoning_effort: 'deep',
       context_providers: ['memory'],
     });
+  });
+});
+
+describe('getSessionEvents — 404 归类为 NotFoundError（BUG-005 陈旧会话自愈）', () => {
+  it('404 → 抛 NotFoundError（调用方据此清持久化键 + 静默回空态，不弹错误）', async () => {
+    captureFetch(404, { detail: 'session not found' });
+    await expect(getSessionEvents('gone')).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('500 → 抛普通 Error（真正的故障仍要显示错误横幅，不能被当成「会话已删除」吞掉）', async () => {
+    captureFetch(500, { detail: 'boom' });
+    const err = await getSessionEvents('x').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(NotFoundError);
+  });
+
+  it('200 → 原样返回事件数组', async () => {
+    const events = [{ seq: 1, type: 'run/started' }];
+    captureFetch(200, events);
+    await expect(getSessionEvents('ok')).resolves.toEqual(events);
+  });
+});
+
+/** auth_seam 的前端对侧（`lib/auth.ts` 文档：配了 JWT_SECRET 的部署匿名 → 401）。
+ *  401 必须**同时**做两件事：分类成 UnauthorizedError（调用方据此走鉴权引导，
+ *  而不是当成普通故障），并广播 detail（App 横幅据此显示）。两者此前都无单测；
+ *  本组补齐——`e2e/l-auth-banner.spec.ts` 只覆盖广播之后的 UI，不覆盖这一层。 */
+describe('401 → UnauthorizedError + onUnauthorized 广播', () => {
+  it('401 → 抛 UnauthorizedError（既不是 NotFoundError，也不是普通 Error）', async () => {
+    captureFetch(401, { detail: 'Missing identity token' });
+    const err = await getSessionEvents('s').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnauthorizedError);
+    expect(err).not.toBeInstanceOf(NotFoundError);
+  });
+
+  it('401 → 广播后端 detail（App 订阅后据此显示引导横幅）', async () => {
+    const seen: string[] = [];
+    const off = onUnauthorized((d) => seen.push(d));
+    captureFetch(401, { detail: 'Missing identity token' });
+    await expect(getSessionEvents('s')).rejects.toBeInstanceOf(UnauthorizedError);
+    off();
+    expect(seen).toEqual(['Missing identity token']);
+  });
+
+  it('401 且 body 不是 JSON → 广播回退文案（readErrorDetail 失败不得吞掉广播）', async () => {
+    const seen: string[] = [];
+    const off = onUnauthorized((d) => seen.push(d));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('not json', { status: 401 })));
+    await expect(getSessionEvents('s')).rejects.toBeInstanceOf(UnauthorizedError);
+    off();
+    expect(seen).toEqual(['Missing identity token']);
   });
 });
