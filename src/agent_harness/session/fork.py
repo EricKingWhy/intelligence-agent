@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from langchain_core.messages import HumanMessage
 
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
@@ -94,12 +95,9 @@ class TailSummarizer:
 
     async def summarize(self, tail_text: str) -> str:
         tail_text = tail_text[-self._max_tail_chars :]
-        prompt = (
-            "以下是一个 agent 会话在分叉切点之后被放弃的对话片段。请用不超过"
-            "150 字总结这条被放弃的路线尝试了什么、进行到哪一步、得出了什么"
-            "结论，供新分支参考。只输出总结正文，不要寒暄。\n\n"
-            f"{tail_text}"
-        )
+        prompt = DEFAULT_REGISTRY.assemble(
+            "aux:fork_tail", {"tail_text": tail_text}
+        ).meta_user_text
         response = await self._model.ainvoke([HumanMessage(content=prompt)])
         return str(response.content)
 

@@ -1394,12 +1394,21 @@ KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
 **处置**：锁区间取在载荷之外的偏移（`1 << 20`），载荷区保持可读。
 **归属：后端**（POSIX `flock` 是 advisory，无此问题）。
 
-### OBS-9.3 【后端·flaky，未定位】`test_disconnect_leaves_run_running_and_cancel_stops_it` 曾单次失败
+### OBS-9.3 【后端·flaky·已确认与本次改动无关】`test_disconnect_leaves_run_running_and_cancel_stops_it`
 
-2026-09-12 的全量跑中出现一次失败，随后**同一 commit 连续两轮全量全绿**、单跑绿、
-整文件跑绿（28 passed）。当时起点附近有被取消/中断的 pytest 进程，怀疑与负载或残留状态有关。
-**未定位，本轮不追**（§8 Scope Lock；且无法复现）。记录备查：若后续再现，按
-"断开后 run 仍在跑 + cancel 停止"的时序竞态方向查。
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`
+（WebSocket 断开 / cancel，5s 超时）在全量跑中**间歇性失败**：
+
+- 2026-09-12 T3 期间全量跑出现 1 次失败 → 同 commit 重跑两轮全绿，单跑绿，整文件跑绿（28 passed）。
+- T4 的独立审查者（只读子代理）在**同一份代码上跑 5 次：2 次失败 / 3 次通过**，
+  并验证 **clean HEAD 归档同样通过**、`test_web_api.py` **不在本批任何 diff 里**。
+- 本 Agent 的 T4 全量跑一次通过（1706 passed / 0 failed）。
+
+**结论**：与本批 PromptRegistry 改动无关，属既有 flaky（n=5 命中率约 40%，样本小）。
+**未定位，本轮不追**（§8 Scope Lock：scope 外问题只报告不顺手修）。
+若后续修：方向是"客户端断开后 run 应继续 + cancel 应停住"的时序竞态
+（websocket 断开与 `RunManager.cancel` 的先后），建议先加确定性同步点再断言，
+**不要靠放宽超时**——那只会把竞态藏得更深。
 **归属：后端（测试稳定性）**。
 
 ### OBS-9.4 【文档·已报告未改】PRD §10.7 / §10.2 与实现不一致

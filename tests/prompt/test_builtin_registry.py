@@ -13,7 +13,17 @@ _PROFILE_SCOPES = ["profile:coding", "profile:main", "profile:research_review"]
 
 
 def test_builtin_registry_has_three_profile_sections() -> None:
-    assert [s.name for s in build_registry().available()] == [
+    """只统计 `profile:` 前缀 scope 的 section——`aux:*`（T4 起）不计入。
+
+    刻意**不**断言"总数 == N"：每加一条辅助/框架 prompt 都要改这个数字，那是
+    无意义的摩擦。总数另有 `test_aux_prompts.py` 的当票断言管。
+    """
+    profile_sections = [
+        s
+        for s in build_registry().available()
+        if any(scope.startswith("profile:") for scope in s.scopes)
+    ]
+    assert [s.name for s in profile_sections] == [
         "profile:coding:identity",
         "profile:main:identity",
         "profile:research_review:identity",
@@ -51,10 +61,22 @@ def test_default_registry_equals_build_registry_in_p0() -> None:
     ]
 
 
-def test_declared_variables_is_empty_in_p0() -> None:
-    assert build_registry().declared_variables() == frozenset()
+def test_declared_variables_are_exactly_tail_text() -> None:
+    """T4 起注册表只声明 `tail_text`（`aux:fork_tail` 用）。
+
+    断言**精确集合**而不是 `"tail_text" in ...`：多声明一个没人用的变量说明
+    `_DECLARED_VARIABLES` 被写脏了，值得红。
+    """
+    assert build_registry().declared_variables() == frozenset({"tail_text"})
 
 
-def test_declared_scopes_excludes_wildcard_and_covers_all_profiles() -> None:
-    """自检 scope 集 = 注册表里所有非 `*` 的 scope（T4 加 aux:* 时自动覆盖）。"""
-    assert _declared_scopes(build_registry()) == _PROFILE_SCOPES
+def test_declared_scopes_covers_every_non_wildcard_scope() -> None:
+    """自检 scope 集 = 注册表里所有非 `*` 的 scope（T4 起含 `aux:*`）。"""
+    assert _declared_scopes(build_registry()) == [
+        "aux:compaction",
+        "aux:fork_tail",
+        "aux:memory_extraction",
+        "profile:coding",
+        "profile:main",
+        "profile:research_review",
+    ]
