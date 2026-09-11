@@ -318,3 +318,43 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 
 - `.env` 新增项 `AGENT_PERSONA`（默认空）——集成方需在真实 `.env` 里同步（若需要），空值零影响。
 - 已知边界 OBS-9.6：`harness:identity`(order −1000) 若将来注册，会与 `persona:prefix`(0) 产生顺序歧义，届时漂移守卫会先变红，需先决策再注册。**当前无该 section，行为不受影响。**
+
+---
+
+## §7 T6 — #166 工具 guidance 归集（commit `ef64d44`）
+
+### 做了什么
+
+建立第三条 prompt 通道：**工具自带 guidance**，只在工具确实注册时才进 system prompt（ADR-0023 D11）。
+
+| 文件 | 变化 |
+| --- | --- |
+| `src/agent_harness/tooling/contract.py` | `Tool` 加可选 property `prompt_guidance`（默认 `None`） |
+| `src/agent_harness/prompt/tool_sections.py` | **新增**：`tool_guidance_sections` + `join_guidance` |
+| `src/agent_harness/prompt/builtin.py` | `build_registry(persona=None, *, tool_sections=())` |
+| `src/agent_harness/prompt/persona.py` | **新增** `compose_agent_prompt`；`apply_persona` 转薄封装 |
+| `src/agent_harness/assembly.py` | 注入收窄后 registry 的 guidance；factory 传 `include_tool_guidance=True` |
+| `src/agent_harness/agent/factory.py` | `include_tool_guidance`（默认 `False`），guidance 取 `child_registry` |
+| `src/agent_harness/multiagent/tools.py` | `DelegateTool.prompt_guidance` |
+| 3 个新测试文件 | 30 个用例 |
+
+### 集成方【不要】做的事
+
+1. **不要给 `include_tool_guidance` 改默认值为 `True`**。B2 契约（`tests/agent/test_system_prompt_wiring.py`）断言 `child.system_prompt == spec.system_prompt`；默认开启会让它变成"靠 `ReadTool` 恰好没有 guidance 才绿"。生产装配点已显式传 `True`，改动默认值只会破坏契约而不增加功能。
+2. **不要让 child 的 guidance 改读 `source_registry`**。必须是 `child_registry`（已按 `spec.tool_scope` 收窄），否则 child 会看到它无权使用的工具的操作说明（越权信息泄漏）。
+3. **不要给任何工具 guidance 写 `{{x}}`**。注册表的变量声明是模块级的（`_DECLARED_VARIABLES`），工具 guidance 无处声明变量，含 `{{x}}` 会在装配期抛 `undefined_variable`。需要动态内容就用 property 动态生成**整段**文本（`DelegateTool` 就是先例：f-string 注入 `_max_delegations`）。
+4. **不要把 `prompt/tool_sections.py` 改成 import `agent_harness.tooling`**。它用 `Protocol` 结构类型接工具，是为保持 prompt 包无下游依赖（有测试 `test_tool_sections_does_not_import_tooling` 固定）。
+5. **不要为了"省一次计算"给 `profile_spec is None` 分支加条件**。该分支也构建 `prompt_registry`（虽只用它的 `join_guidance` 那条），是工单骨架的刻意形状，开销可忽略。
+6. **不要用 `join_guidance` 的返回值判空后再拼**。它无 guidance 时返回 `None`，这是刻意的——返回 `""` 会让 prompt 多出一个空段落，破坏逐字节断言。
+
+### 证据
+
+- 门禁：`ruff` clean；全量 pytest **1769 passed / 10 skipped / 39 deselected / 0 failed**；`git diff --check` clean。
+- 冻结契约：`git diff HEAD -- tests/agent/test_system_prompt_wiring.py tests/test_assembly_agent_profile.py tests/context/test_builder_system_prompt.py` **输出为空**（断言逐字未改）。
+- 真实验证：真实装配链 + 真实 `AgentRuntime` 跑真 turn（含真实 delegate 委派，3 次模型调用），父提示含「委派须知」且在身份文本之后，child（coding）不含，guidance 未进 tool schema。
+
+### 前向兼容注意
+
+- **无新 env / 配置项**：`include_tool_guidance` 是构造参数，装配点固定传 `True`；集成方无需改 `.env`。
+- **待用户裁定的文本重复**（已上报 #166，**不是 bug，不要顺手删**）：`子代理看不到你们的对话历史` 出现在 4 处（`profile:main:identity`、`DelegateTool.prompt_guidance`、`_DelegateArgs.task` description、`DelegateTool.description`）。删除方案已列在 issue comment，动 profile 正文会连带改 T3 逐字节基线。
+- T7（运行时上下文快照，order 9500）与 T8（纠偏/框架消息，order 9000~9200）都会往同一张 order 表加 section，**在 persona 后缀 10200 之前**，与本票的 2000 无冲突。
