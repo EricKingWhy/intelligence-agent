@@ -38,11 +38,14 @@ class MemoryWriteback:
                     # 把记忆质量降到"关键词 + 终答"的正则水平，此前只在日志里留痕、
                     # 事件流毫无痕迹。reason 只含阶段 + 异常类型名（脱敏不变量同上）。
                     logger.warning("Memory extraction degraded: %s", outcome.degraded_reason)
-                    session.append(
-                        MEMORY_DEGRADED,
-                        {"operation": "extraction", "reason": outcome.degraded_reason},
-                        run_id=next((e.run_id for e in events if e.run_id), None),
-                    )
+                    try:
+                        session.append(
+                            MEMORY_DEGRADED,
+                            {"operation": "extraction", "reason": outcome.degraded_reason},
+                            run_id=next((e.run_id for e in events if e.run_id), None),
+                        )
+                    except Exception:  # noqa: BLE001 — 观测写失败不得吞掉候选（降级只在质量）
+                        logger.warning("Memory degradation event persistence unavailable")
                 stored, failed = 0, 0
                 for scope, content, metadata in candidates:
                     try:
