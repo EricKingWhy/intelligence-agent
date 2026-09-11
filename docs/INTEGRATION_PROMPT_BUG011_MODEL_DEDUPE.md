@@ -175,6 +175,26 @@ cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --wo
 # 期望：0 error（oxlint 37 warning 为既有基线）；vitest 519 passed；playwright 130 passed
 ```
 
+### 5.4 真机端到端验收结果（**本批已实测**，2026-09-11）
+
+用**真实 uvicorn**（`WORKSPACE_DIR` 指向临时目录，**未触碰任何真实会话**）+ 项目自身 API 造的会话实测：
+
+| 步骤 | 命令/做法 | 结果 |
+| --- | --- | --- |
+| 并发写（复原后） | 同一会话 **6 路并发** `POST /model`（原始触发形状） | 6×`200`；落盘 seq `0..9` **严格递增、无重复**（事件流 `session/started, user/message, run/started, run/completed, model/changed ×5`） |
+| 并发写（**去掉守卫**的变异对照） | 同一 6 路并发 | **落盘出现重复 `seq=6`**（`0..6,6`，非严格递增），另有 2 个请求 409（读时发现冲突）→ **证明该检查不是空转**（已还原） |
+| ② 语义（用户实际报障端点） | 手工注入重复 seq 后 `POST /api/sessions/{id}/messages`（续聊） | **409** + `{"detail":"Session '…' 事件 seq 重复: 3"}`（修复前是误导性的 **404**） |
+| ② 语义（换模型端点） | 同一损坏会话 `POST /model` | **409** + 同一 detail |
+| ② 语义（对照：非目录内模型） | `POST /model` 传 catalog 外的 provider/model_id | **422**（catalog 校验仍生效，未被本次改动波及） |
+
+结论：**①（不再写坏日志）②（损坏/冲突给出独立语义而非伪装 404）在真实服务端均成立**；
+③④ 由前端 e2e（真实浏览器 + 变异验证）覆盖。
+
+**顺带确认的边界（Scope 外，仅报告）**：会话**有 JSONL 但缺 workspace 映射文件**时，
+`Session.resume → load → registry.get` 抛 `KeyError`（发生在 seq 校验**之前**）→ **500**，
+不走 409/404。正常会话不会进入该状态（`Session.start` 会同时写两份），只有手工构造或半删除才会；
+属另一张票，本次未改（已记入前端登记簿）。
+
 ---
 
 ## 6. PHASE_STATUS 登记
