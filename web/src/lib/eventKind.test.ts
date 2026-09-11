@@ -115,6 +115,13 @@ describe('streamKeyFromEvent — Inspector → 中间主区定位 key', () => {
     expect(streamKeyFromEvent({ content: 'hi' }, null)).toBeNull();
   });
 
+  it('stepId 键缺失（undefined）→ 仍返回 null，绝不产出伪造 key "step:undefined"', () => {
+    // 后端序列化省略值为 null 的字段：无步号事件（session/started 等）的 step_id
+    // 是**键缺失**而非 null，而 AgentEvent.step_id 声明为 number | null。
+    // 实测 GET /api/sessions/<id>/events 的 seq 0/1/2 均 'step_id' in e === false。
+    expect(streamKeyFromEvent({}, undefined as unknown as null)).toBeNull();
+  });
+
   it('tool_call_id 非字符串（畸形）→ 按 step 回退', () => {
     expect(streamKeyFromEvent({ tool_call_id: 42 }, 7)).toBe('step:7');
   });
