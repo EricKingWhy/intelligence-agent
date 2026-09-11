@@ -1,10 +1,14 @@
-# 集成提示词：data_inspection_failed 可读失败消息（feat/backend `41cc5de`）
+# 集成提示词：data_inspection_failed 可读失败消息（feat/backend，2 个 commit）
+
+> **给 Git Integrator 的批次提示词。** 本单只覆盖「内容审查可读失败消息」这一批。
+> `feat/backend` 当前 tip 上还叠着其他会话的批次（见 §5 拓扑），每批有自己的
+> `docs/integration/INTEGRATION_PROMPT_*.md`，请逐批对账，不要把本单当成全量执行单。
 
 ## 给 Git Integrator 的一句话
 
-`feat/backend` 新增一个 commit（`41cc5de`）：provider 内容审查拒绝（阿里云
-`data_inspection_failed`）时，失败事件从裸类型名 `BadRequestError` 升级为
-已分类 reason + 固定可读文案。纯加性改动，无契约破坏，可直接合入。
+`feat/backend` 上本批共 **2 个 commit**（`41cc5de` + review 跟进 `9fe4dd9`）：
+provider 内容审查拒绝（阿里云 `data_inspection_failed`）时，失败事件从裸类型名
+`BadRequestError` 升级为已分类 reason + 固定可读文案。纯加性改动，无契约破坏。
 
 ## 背景（为什么）
 
@@ -25,34 +29,56 @@
 
 | 文件 | 改动 |
 | --- | --- |
-| `src/agent_harness/agent/runtime.py` | 新增 `_classify_provider_failure()` + 常量 `CONTENT_MODERATION_REASON`/`CONTENT_MODERATION_MESSAGE`；异常臂分类后向 `model/failed` 传 `readable_message`、向 `run/failed` 传 `reason`+`message` |
+| `src/agent_harness/agent/runtime.py` | 新增 `_classify_provider_failure()` + 常量 `CONTENT_MODERATION_REASON`/`CONTENT_MODERATION_MESSAGE`；异常臂分类后向 `model/failed` 传 `readable_message`、向 `run/failed` 传 `reason`+`message`。**review 修复（`9fe4dd9`）**：分类前先判 `terminal.model_call_open`（模型调用在途窗口）——顶层异常臂同时兜底工具/执行器异常，工具阶段错误文本不得误标；提取 `moderation_message` 局部变量 |
 | `src/agent_harness/session/session.py` | `Session.end_run` 增加 failed 语义的 `message: str \| None = None` 参数（缺省不落键） |
-| `tests/agent/test_runtime_failure_paths.py` | +4 测试：run/run_stream 双路径分类断言、model/failed 可读+脱敏断言（provider 回显原文不得进任何事件）、未分类错误回归锁 |
+| `docs/BACKEND_CONTRACT_STREAMING_UI.md` | §4 `run/failed.data.reason` 枚举补登记：`provider_content_moderation` + 顺带补记此前漏记的 `identical_tool_failure_loop`、`context_window_exceeded` |
+| `tests/agent/test_runtime_failure_paths.py` | +5 测试：run/run_stream 双路径分类断言（含 stream 的 model/failed 镜像断言）、model/failed 可读+脱敏断言（provider 回显原文不得进任何事件）、未分类错误回归锁、**工具阶段含错误码不误判回归锁**（篡改 `session.append` 在 tool/call 写盘时抛含错误码异常） |
 | `tests/agent/test_run_finalizer.py` | +2 测试：`append_model_failed` readable_message 覆盖、`failure_terminal` reason+message 成对落盘 |
 
 ## 契约变化（加性）
 
 - `run/failed.data.reason` 新增枚举值 `"provider_content_moderation"`
   （既有：`cancelled` / `orphaned` / `identical_tool_failure_loop` /
-  上下文超限；合同文档本就是非穷举枚举，与 `identical_tool_failure_loop`
-  同模式，故未改合同文档）。
+  `context_window_exceeded`）。**已登记进合同文档 §4**（`9fe4dd9`）。
 - `run/failed.data.message` / `model/failed.data.message` 新增已分类故障的
   固定可读文案（中文）。前端 `runState.ts` 只特判 `reason === 'cancelled'`，
   未知 reason 自然落入 failed 分支——**无前端破坏**。
 - 后续可选前端票：事件检查器/会话列表把该 message 直接渲染出来（本次只
   做后端，前端未动）。
 
-## 不变量守护（review 已确认）
+## 不变量守护（两轴 code-review 已确认）
 
 - 脱敏不变量不松动：事件只带本项目常量，provider 回显原文仍只进结构化
   日志（`_log(exc_info=True)`）。测试断言 `inappropriate` /
   `chatcmpl-*` 不出现在任何持久化事件 data。
 - 未分类错误字节级行为不变（类型名消息、run/failed 不落 reason/message 键，
-  有回归锁）。
-- 取消臂不受影响（`readable_message` 默认 None）。
+  有回归锁）；取消臂不受影响（`readable_message` 默认 None）。
+- 分类限定模型调用在途（`model_call_open`），工具阶段含错误码文本不误判
+  （有回归锁）。
+- Standards 轴零硬违规；「reason/message 成对未提取为值对象」的 smell 按
+  §8 有意推迟到第二类分类出现时（judgement call，非遗留缺陷）。
 
 ## 门禁证据
 
 - `ruff check src/ tests/`：All checks passed。
-- 全量 pytest：**1612 passed / 10 skipped / 0 failed**（基线 1606 + 新增 6）。
-- commit：`41cc5de`（feat/backend，未 push，§16.4 由集成 AI 处理）。
+- 全量 pytest：**1618 passed / 10 skipped / 0 failed**（review 修复后第 4 轮）。
+  备注：中间 2 轮出现漂移的 web 传输层失败（16/24 个），逐项排查判定为
+  **并行 AI 会话共用本 worktree 实时写文件/并发跑测试**造成的负载型 flaky
+  （幻影文件名、失败集合逐轮不同、隔离运行全绿、同 commit 收集数漂移），
+  非本批引入——集成后建议正常复跑一次全量确认。
+- commit：`41cc5de` + `9fe4dd9`（feat/backend，未 push，§16.4 由集成处理）。
+
+## §5 集成拓扑提醒（2026-09-12 实测）
+
+- `feat/backend` tip = `3c7263e`（另一会话的 prompt-registry docs，非本批）。
+  本批 2 个 commit 在其祖先链上：`4e71d49` → `9fe4dd9` → `c66488f` → `41cc5de`。
+- `feat/backend` 相对 `origin/main`（`63db650`）：**领先 32 / 落后 0**——
+  含多个会话的多批工作（BUG-011/P0-002、BUG-012、ARCH-4/4b/5、OBS-016、
+  research docs、本批、prompt-registry），每批有自己的集成提示词可对账。
+- **对象库独立**：`D:\intelligence-agent`（main 仓库）不认识 feat/backend 的
+  commit（`--git-common-dir` 各自是独立 `.git`，非共享 worktree）。集成时
+  必须先传对象：`git -C D:\intelligence-agent fetch
+  D:\intelligence-agent-backend feat/backend`（本地路径 fetch）或先 push
+  GitHub 再 fetch。历史先例见 `docs/integration/MERGE_EXECUTION_ORDER.md` §1.1。
+- merge 与 push 均需用户明确批准（§14.4）；PHASE_STATUS 同位追加冲突按
+  §14.7「多条全保留」先例处理。
