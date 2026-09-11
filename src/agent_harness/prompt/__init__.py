@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 from agent_harness.prompt.errors import PromptError
-from agent_harness.prompt.registry import AssembledPrompt, PromptRegistry
+from agent_harness.prompt.registry import (
+    AssembledPrompt,
+    PromptRegistry,
+    run_self_check,
+)
 from agent_harness.prompt.section import SECTION_ORDERS, PromptSection, Target
 from agent_harness.prompt.template import extract_variables, render
 
@@ -19,4 +23,5 @@ __all__ = [
     "Target",
     "extract_variables",
     "render",
+    "run_self_check",
 ]

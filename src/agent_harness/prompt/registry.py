@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from agent_harness.prompt.errors import PromptError
-from agent_harness.prompt.section import PromptSection
-from agent_harness.prompt.template import extract_variables
+from agent_harness.prompt.section import PromptSection, Target
+from agent_harness.prompt.template import extract_variables, render
 
-__all__ = ["AssembledPrompt", "PromptRegistry"]
+__all__ = ["AssembledPrompt", "PromptRegistry", "run_self_check"]
 
 #: section 名：至少两段（`^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*)+$`）
 _SECTION_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*)+$")
@@ -115,6 +116,48 @@ class PromptRegistry:
         """全量 section（"一处看全貌"的视图），同样按 `(order, name)` 排序。"""
         return sorted(self._sections.values(), key=lambda s: (s.order, s.name))
 
+    def assemble(
+        self, scope: str, variables: Mapping[str, str] | None = None
+    ) -> AssembledPrompt:
+        """组装一个 scope 的 prompt（PRD §10.7）。
+
+        拼接分隔符固定 `"\\n\\n"`；scope 只命中一条 section 时产物 = 该 section
+        原文逐字节（无多余前后缀）——这是 T3「逐字节等价搬迁」成立的前提。
+
+        三个 target **各自独立分区**，绝不混装：FRAGMENT 若被并进 `system_text`，
+        调用方会把"以下内容是语料数据"这类片段当系统提示装错位置。
+        """
+        variables = dict(variables or {})
+        included = self.sections(scope)  # 筛选 + 按 (order, name) 排序，不在此重复实现
+        if not included:  # R7
+            raise PromptError(
+                f"scope '{scope}' 组装产物为空（无任何 section 被纳入）",
+                code="empty_assembly",
+            )
+        if scope.startswith(_PROFILE_PREFIX):  # R5：只对 profile scope 要求 identity
+            identity_name = f"{scope}:identity"
+            ids = [s for s in included if s.name == identity_name]
+            # `!= 1` 而非 `== 0`：`_sections` 以 name 为 key，同名 section 注册期就被
+            # R1 拒了，所以 >1 结构上不可达；保留 `!= 1` 是为了与 PRD §10.7 一致，
+            # 也防止将来换成分层注册时静默放行。
+            if len(ids) != 1:
+                raise PromptError(
+                    f"scope '{scope}' 需要恰好一条 '{identity_name}'，实际 {len(ids)} 条",
+                    code="missing_identity",
+                )
+        # R4 不在这里重复实现：render 已对未提供值的变量抛 missing_variable。
+        return AssembledPrompt(
+            system_text="\n\n".join(
+                render(s.text, variables) for s in included if s.target is Target.SYSTEM
+            ),
+            meta_user_text="\n\n".join(
+                render(s.text, variables) for s in included if s.target is Target.META_USER
+            ),
+            fragment_text="\n\n".join(
+                render(s.text, variables) for s in included if s.target is Target.FRAGMENT
+            ),
+        )
+
     def declared_variables(self) -> frozenset[str]:
         return frozenset(self._variables)
 
@@ -129,3 +172,22 @@ class PromptRegistry:
         if scope in section.scopes:
             return True
         return _WILDCARD in section.scopes and scope.startswith(_PROFILE_PREFIX)
+
+
+def run_self_check(registry: PromptRegistry, scopes: Iterable[str]) -> None:
+    """对每个 scope 跑一次组装，配置错误在进程启动时 fail-fast（PRD §10.8）。
+
+    变量用**空字符串占位**（取自各 section 自动推导的 `requires`），因此本函数只验证
+    **结构完整性**——section 名 / scope 合法性、identity 唯一性、产物非空、模板语法——
+    **不验证变量是否会被调用方真正提供**（静态不可判定）。
+
+    为什么是"自动填空串"而不是传 `{}`：含变量的 scope（如 `aux:fork_tail` 的
+    `{{tail_text}}`）在 `{}` 下会抛 `missing_variable`，那是**误报**，会让人以为
+    配置坏了。自动填充让「注册表里出现的每个 scope 都必须能组装成功」成为一句
+    无例外的规则，新增 section 不需要维护自检豁免名单。
+
+    不捕获任何异常：`PromptError` 直接上抛，让 import / 启动失败——吞掉就等于没做。
+    """
+    for scope in scopes:
+        names = {name for section in registry.sections(scope) for name in section.requires}
+        registry.assemble(scope, dict.fromkeys(names, ""))
