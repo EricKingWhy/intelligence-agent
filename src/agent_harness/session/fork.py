@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Protocol
 from langchain_core.messages import HumanMessage
 
 from agent_harness.prompt import DEFAULT_REGISTRY
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
@@ -174,9 +175,12 @@ async def fork_session(
 
     # 校验全部通过后才落盘：先建 child，再做 workspace 物理复制，再移植
     # seed 与 provenance/索引（copy 失败属基础设施故障，原样上抛）。
+    # WS-1 #151 AC4：child 的 cwd **显式继承自 parent**（不靠"反正目录是复制来的"
+    # 隐式成立）。父无 cwd（历史遗留）→ child 也不写该字段，父子的未分组状态一致。
     child = Session.start(
         store, agent_id=agent_id, session_id=child_session_id,
         workspace_registry=workspace_registry,
+        cwd=session_cwd(parent_events),
     )
     if workspace_registry is not None:
         _copy_workspace(workspace_registry, parent_session_id, child)

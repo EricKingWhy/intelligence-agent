@@ -374,6 +374,17 @@ class SessionService:
         session = Session.start(
             self._state.store, session_id=session_id,
             started_data=initial_model_data or None,
+            # WS-1 #151：会话侧 cwd 锚由**创建者**赋予（这里），与 build_runtime
+            # 写进映射表的 workspace_root 是同一路径、同一套规范化（AC5）。
+            #
+            # AC6「会话先落盘、之后才 attach 到项目」的两半：① cwd 与会话同在第一
+            # 条事件里，所以"存在但没有 cwd 的会话"结构上不可能（这一半已成立）；
+            # ② attach 本身是 WS-2 的 attachSession，尚不存在。上面的 build_runtime
+            # 先写了 sandbox 映射表，但那张表不是 attach（它是 sandbox 生命周期
+            # 记录，R6-6 刻意让它先于会话落盘，避免组装失败留下孤儿 session）——
+            # WS-2 的 attachSession 必须自己按会话 header 的规范 cwd 校验，不得
+            # 反过来信任映射表。
+            cwd=workspace,
         )
 
         # 交互式审批：把真实 session 注入 callback 闭包

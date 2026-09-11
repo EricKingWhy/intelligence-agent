@@ -202,7 +202,7 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
             max_steps=10, auto_approve=True,
             session_store=store,
         )
-        session = Session.start(store, session_id=session_id)
+        session = Session.start(store, session_id=session_id, cwd=workspace)
         # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
         # （ingest_document 的 sandbox 解析）需要可信 session id。
         session_token = memory_session_var.set(session.session_id)
