@@ -1605,6 +1605,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .approval-deny:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
 }
+/* OBS-015: 审批失败提示——danger 淡染底 + 左侧 2px 实条，
+ * 让用户一眼看到「这次审批没有生效」。 */
+.approval-error {
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-destructive) 8%, transparent);
+  border-left: 2px solid var(--color-destructive);
+  color: var(--color-destructive);
+  font-size: var(--text-xs);
+}
 
 /* ── Composer：Floating Command Dock（视觉中心） ──
  * elevation 提到最高档：它是空闲时唯一的动作焦点，值得浮在 workspace 之上；

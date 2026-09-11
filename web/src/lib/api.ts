@@ -279,8 +279,9 @@ export async function streamSession(sessionId: string, afterSeq: number): Promis
 /** POST /api/sessions/{id}/approve — interactive approval decision (#37, PRD §2.2).
  *  Backend resolves the pending approval via PendingApprovalQueue.resolve().
  *  Response (200): {"status":"resolved","approval_id":"...","decision":"approve_once"}
- *  409 = already resolved (idempotent success → AlreadyResolvedError);
- *  other non-ok = real failure (decision did NOT reach backend).
+ *  409 = already resolved; 404 with "already resolved" detail = same semantics.
+ *  Both are idempotent successes → AlreadyResolvedError.
+ *  Other non-ok = real failure (decision did NOT reach backend) → plain Error.
  *  OBS-015 fix: the caller must distinguish these two — flipping the card to
  *  "decided" on a network error is a dangerous false positive for security. */
 export async function postApproval(

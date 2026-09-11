@@ -19,7 +19,17 @@
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
-### 最近一批：瞬态三键 + 401 缝 + 审批卡两键（覆盖账目收口到 45/45，2026-09-11）
+### 最近一批：OBS-015 修复——审批卡区分幂等已决(409)与真失败(5xx)（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `cb0e008` |
+| 门禁 | tsc ✓ / vitest **501 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **116 passed**（`--workers=2`）/ vite build ✓ |
+| 交付 | ① `api.ts` 新增 `AlreadyResolvedError`；`postApproval` 在 HTTP 409 时抛它，其它非 ok 抛普通 `Error`。② `ApprovalCard.tsx` 修复 catch：`AlreadyResolvedError`(409) → 幂等成功翻卡片；其它错误 → 保持 pending + 显示可见错误(`role="alert"`) + 按钮重新可用可重试。③ 回归锁 `e2e/n-approval-card.spec.ts` +2 用例 ×2 视口 = 4 例。④ `.approval-error` CSS 规则（danger 淡染底 + 左侧 2px 实条）。⑤ 单测 `api.test.ts` +4 例（200 ok / 409 AlreadyResolvedError / 500 plain Error / 422 plain Error）。 |
+| 变异验证 | 两处全部生效：① 还原 ApprovalCard 旧行为（任何错误都翻卡片）→ POST 500 用例变红（`Expected: "需要审批" / Received: "已批准"`）。② 禁用 AlreadyResolvedError 分支 → POST 409 用例变红（卡片不再翻「已批准」）。 |
+| code-review | Standards 轴 0 hard violations、2 minor smells（均 acceptable）。Spec 轴发现 4 项：① 404 幂等语义未处理 → 经核实后端契约 404 = approval 不存在（不是「已解析」），409 才是幂等已决，当前代码正确。② 失败文案需更明确 → 已在 error message 中体现。③ `.approval-error` 无 CSS → 已补。④ tracker 未更新 → 本批更新。 |
+
+### 上一批：瞬态三键 + 401 缝 + 审批卡两键（覆盖账目收口到 45/45，2026-09-11）
 
 | 项 | 值 |
 | --- | --- |
