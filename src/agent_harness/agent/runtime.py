@@ -187,7 +187,9 @@ class _RunFinalizer:
         """模型在途失败/取消 → model/failed，把故障归因到具体一步。
 
         异常消息可能含 Provider 回显的敏感文本——事件只带类型名（与
-        memory/writeback 的脱敏不变量一致），完整消息只进结构化日志。
+        memory/writeback 的脱敏不变量一致），完整消息**与调用栈**只进结构化日志
+        （OBS-008：`_log(..., exc_info=True)` 落 `stack_trace(调用栈)`；此前只记类型名，
+        排障无从下手）。
         """
         if cancelled:
             message = "model call cancelled"
@@ -293,7 +295,8 @@ class _TerminalContext:
         """model/failed 归因 + tracer 收口（ctx_span / generation / run_failed）。
 
         ``cancelled`` 区分取消臂（True）与异常臂（False）的 model/failed 消息；
-        ``error_type`` 只落类型名（脱敏不变量，完整消息只进结构化日志）。
+        ``error_type`` 只落类型名（脱敏不变量）；完整消息与调用栈只进结构化日志
+        （见 `_log` 的 `exc_info`，OBS-008）。
         """
         events: list[SessionEvent] = []
         if self.terminal.model_call_open:
@@ -1010,7 +1013,7 @@ class AgentRuntime:
                 self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
                           error=str(terminal_error),
-                          error_type=type(terminal_error).__name__)
+                          error_type=type(terminal_error).__name__, exc_info=True)
             self._log("task_failed", "Agent Loop 被取消（客户端断连？）",
                       span_id=run_span, outcome="cancelled")
             raise
@@ -1022,7 +1025,7 @@ class AgentRuntime:
             # task_failed 与正常结束的 task_completed 成对（logging.EVENT_TYPES 白名单）。
             self._log("task_failed", "Agent Loop 异常终止", span_id=run_span,
                       outcome="error", error=str(error),
-                      error_type=type(error).__name__)
+                      error_type=type(error).__name__, exc_info=True)
             # 终结事件写入自身也可能失败（例如存储故障）：逐段防护，保证
             # result_holder 一定拿到终态结果——"run() 必返回失败结果"的契约
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
@@ -1055,7 +1058,7 @@ class AgentRuntime:
                 self._log("task_failed", "失败兜底事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
                           error=str(terminal_error),
-                          error_type=type(terminal_error).__name__)
+                          error_type=type(terminal_error).__name__, exc_info=True)
             result_holder.append(
                 AgentRunResult(status=STATUS_FAILED, final_text="", steps=steps),
             )
@@ -1141,8 +1144,20 @@ class AgentRuntime:
                 session.session_id,
             )
 
-    def _log(self, event_type: str, message: str, **fields: Any) -> None:
-        """打一条结构化日志；无 handler 时静默 no-op（不污染未配日志的调用方/测试）。"""
+    def _log(self, event_type: str, message: str, *, exc_info: bool = False,
+             **fields: Any) -> None:
+        """打一条结构化日志；无 handler 时静默 no-op（不污染未配日志的调用方/测试）。
+
+        `exc_info=True`（须在 except 块内调用）让 JSONL 落 `stack_trace(调用栈)`：
+        durable 的 `model/failed` 事件按脱敏不变量**只带异常类型名**，完整消息与调用栈
+        必须由日志承载；否则排障只剩一个类型名，「哪一帧、哪个 SDK 调用挂的」全丢
+        （OBS-008：模型调用失败时 traceback 被吞）。
+
+        ⚠ 调用栈含**绝对路径（含宿主用户名）、源码行、以及链式异常（`__cause__`/
+        `__context__`）的消息**——比原先只记的 `error=str(...)` 更多。诊断 JSONL 是
+        本地未脱敏详情汇聚处（不变量 #4：Event ≠ Diagnostic Log），但**不要原样附到
+        issue / 上传**；需要外发时先脱敏。
+        """
         if not logger.hasHandlers():
             return
-        log_event(logger, event_type, message, **fields)
+        log_event(logger, event_type, message, exc_info=exc_info, **fields)

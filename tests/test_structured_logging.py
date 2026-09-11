@@ -138,7 +138,12 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
 async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
     """模型调用失败：runtime 补 model/failed + run/failed 终结事件，日志链
     干净收尾（task_failed outcome=error）；cli.run 不抛异常（失败由终结事件
-    承载，返回空 final_text 供 main() 转 SystemExit(1)）。"""
+    承载，返回空 final_text 供 main() 转 SystemExit(1)）。
+
+    OBS-008：durable 的 model/failed 只带类型名（脱敏），因此**调用栈必须落在
+    结构化日志里**——否则排障只剩「model call failed: TimeoutError」一个类型名，
+    看不到具体是哪一帧/哪个 SDK 调用挂的。断言 stack_trace 存在且含真实调用栈。
+    """
     from langchain_core.messages import AIMessageChunk
 
     class FailingModel:
@@ -169,6 +174,11 @@ async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
     task_failed = entries[-1]
     assert task_failed["outcome(结果)"] == "error"
     assert task_failed["error_type(错误类型)"] == "TimeoutError"
+    # OBS-008：调用栈必须落盘（此前只有类型名，traceback 被吞）。
+    stack_trace = task_failed.get("stack_trace(调用栈)")
+    assert stack_trace, "模型调用失败的调用栈必须写进结构化日志（OBS-008）"
+    assert "Traceback (most recent call last)" in stack_trace
+    assert "TimeoutError" in stack_trace
     assert len({entry["trace_id(追踪ID)"] for entry in entries}) == 1
 
 
