@@ -13,7 +13,9 @@
 | Branch | `feat/frontend` |
 | 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` v1 |
 | 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
-| 集成交接提示词 | 本轮：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md`；上一批：`docs/integration/FRONTEND_RECOVER_FORK_SCROLL_INTEGRATION_PROMPT.md` |
+| 集成交接提示词 | 本轮：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md`（**集成 AI 的唯一入口**，§0 是可执行摘要）；上一批：`docs/integration/FRONTEND_RECOVER_FORK_SCROLL_INTEGRATION_PROMPT.md` |
+| 本批交接手册 | `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（做了什么 + 8 个坑点 + 未决项 + 复核命令） |
+| 下一批提示词 | `docs/PROMPT_FRONTEND_NEXT_BATCH.md`（可直接复制给前端 Agent：OBS-015 修复为主） |
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 

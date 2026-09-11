@@ -1,10 +1,82 @@
-# 前端集成交接提示词 —— 刷新一致性（BUG-005 / BUG-006）
+# 前端集成交接提示词 —— 刷新一致性 + 控制面清点 + 审批卡覆盖（本批）
 
-> **分支**：`feat/frontend` @ `D:\intelligence-agent-frontend`
-> **起始 commit**：`cf8f3a7`
-> **本批 commit**：`138b056`（代码 + 文档 + 测试同批）
-> **门禁**：tsc ✓ · vitest **490 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线持平）· playwright **96 passed** · vite build ✓
-> **禁止推送远程**：本分支只做本地 commit，`git push` / merge 由集成 AI 执行（AGENTS.md §13.2 / §14.4）
+> 本文件是**集成 AI 的唯一入口**：§0 是要执行的动作，§8.x 是证据与移交细节。
+> 上一批的分支级细节见 `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（交接手册）与 `docs/FRONTEND_ISSUES_LOG.md`（问题台账）。
+
+---
+
+## 0. 集成执行摘要（先读这一节）
+
+### 0.1 实测拓扑（2026-09-11，`git fetch origin --prune` 之后）
+
+| 项 | 值 |
+| --- | --- |
+| 分支 | `feat/frontend` @ `e215ec8` |
+| 本地 `main` | `ebb2d68`（**滞后**） |
+| `origin/main` | `7a55de4` |
+| merge-base | `ebb2d68` |
+| feat/frontend 领先本地 main | **28 个 commit** |
+| feat/frontend 落后 origin/main | **23 个 commit** |
+| 本批新增 commit（本次交付） | `35cd0a1`（控制面清点 + 401 缝）· `8ed86f0`（瞬态三键）· `1a75c3a`（tracker）· `c9dcf2a`（审批卡 + 联调车道）· `e215ec8`（tracker） |
+
+### 0.2 按「先回后正」执行（AGENTS.md §14.6，勿在 main 上解冲突）
+
+```bash
+# ① 反向合入（在 feature 分支上解冲突、跑门禁）
+cd D:/intelligence-agent-backend/../intelligence-agent-frontend   # 即本 worktree
+git fetch origin --prune
+git merge origin/main        # ← 需用户批准
+# ② 门禁复跑（§0.4）
+# ③ 正向合入：feat/frontend → main（先本地，验证后再 push；push 需用户单独批准）
+```
+
+### 0.3 冲突预判：**只读实测=零冲突**（已在合并结果上核验产物）
+
+```
+git merge-tree --write-tree feat/frontend origin/main
+→ exit 0（clean，无冲突文件）
+→ merged tree 254c10ff42a401442915fa475841a58009388883
+```
+
+已在 **合并后的 tree** 上逐项核验（只读，未落盘）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `web/e2e/n-approval-card.spec.ts` / `web/e2e-live/approval-live.spec.ts` / `web/playwright.live.config.ts` | 均在合并结果中（OK） |
+| `web/e2e/fixtures.ts` 的 `onApprovePost` | 2 处命中（接口字段 + 路由分支），**存活** |
+| `web/vitest.config.ts` 的 `e2e-live/**` 排除 | 2 处命中，**存活** |
+| `web/src/lib/projection.ts` 的 `projectPermissionResolved` | 2 处命中，**存活** |
+| `web/src/components/ApprovalCard.tsx` 的两个按钮 | 均有，**未受 main 影响**（main 对此文件 0 次改动） |
+
+**20 个文件两侧都动过**（`docs/*` 与 `web/{e2e,src}`）；逐项查证后确认大部分是**先前已集成进 main 的前端 commit 的重复包含**（同一 commit 同时在两侧），故文本与语义风险都低。`origin/main` 本批的实际新内容集中在**后端**（`reasoning_effort` 线格式 P0 修复、`step_id` session 级递增 P0 修复、架构深化收尾、`.gitattributes` 钉 CRLF）与 `docs/PHASE_STATUS.md`。
+
+> ⚠ 若在 main 上遇到 `docs/PHASE_STATUS.md` 的「两侧各自追加」冲突，按 §14.7 **两条都保留**（这是既有惯例，见 `origin/main` 的 `7a55de4` / `4fd5716` 提交信息）。
+
+### 0.4 合并后必须复跑（§14.10 门禁）
+
+```bash
+cd web
+npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
+```
+
+期望：tsc exit 0 · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线不得升高）· playwright **112 passed** · vite build ✓。
+
+`--workers=2` 是硬要求（4 worker 有资源竞争型抖动）。**联调车道（`e2e-live/`）不在门禁内**，不要因为把它扫进来而误判失败——`playwright.config.ts` 的 `testDir` 是 `./e2e`、`vitest.config.ts` 的 `exclude` 含 `e2e-live/**`，两侧都已核验。
+
+### 0.5 本批风险画像：**未改任何生产源码**
+
+```
+git diff --name-only 35cd0a1^..e215ec8 -- web/src/ | grep -v "\.test\."   # → 空
+```
+
+本批只动了 **测试、测试配置、文档**（13 个文件：4 个新 spec/配置、`fixtures.ts` 加一个 mock 钩子、`vitest.config.ts` 加一行排除、`api.test.ts` 加 3 例、6 份文档）。**没有 UI 行为变化**，因此集成后不需要重新做视觉/交互验收；但 §0.4 的门禁必须实跑。
+
+### 0.6 需要集成 AI 做的事
+
+1. **合入本批**（§0.2 先回后正 + §0.4 门禁 + 本地 main 验证后再 push，push 需用户批准）。
+2. **转交后端**：`OBS-008 ~ OBS-014`（含根因文件行号）——见 **§8.7** 与 `docs/FRONTEND_ISSUES_LOG.md`。要点：`sandbox/local.py:166-167` 用 `errors="replace"` 把 cmd.exe 的 GBK 输出按 UTF-8 解码 → **乱码被固化进 append-only JSONL**（有原始字节级铁证）；`local.py:161` 的 `shell=True` 使 `bash` 工具在 Windows 实为 cmd.exe；bash 工具 10s 硬超时且 `retryable:false`；provider 退化重复。
+3. **转交产品决策**：**OBS-015**（`ApprovalCard.tsx:26-33` 的 `catch` 对任何错误都翻「已批准/已拒绝」，与注释相反 → 审批 POST 失败时是乐观假象）。另：是否把交互式审批做成默认档位（现在需用户显式选权限档位才会出现审批卡）。
+4. **纠正一条已过时的登记**：审批卡此前登记为「产品不可达」——**已证伪**（`session/service.py:348` 的 `permission_mode_explicit` 才是门）。若其他文档/issue 里有该旧结论，请一并订正。
 
 ---
 
