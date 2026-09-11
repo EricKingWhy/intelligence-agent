@@ -95,7 +95,9 @@ _Avoid_: 未知变量静默渲染为空（pi / ZCode 的行为，正是要避免
 
 **为什么不分层覆盖**：`CapabilityRegistry` 的契约是"重名即抛错"，而 scoped-overrides-global 需要允许重名——两套语义不能在项目里共存。作用域的真实需求只是"不同 agent 拿不同 section 组合"，筛选即可满足，且不引入"同名谁赢"的歧义。
 
-_Avoid_: 覆盖层语义（与既有注册表契约冲突）；把 prompt 当安全边界。
+**通配 `"*"` 只匹配 `profile:<name>` scope**，不匹配 `aux:*` 等辅助/基础设施 scope。`*` 的语义是"所有 agent profile"——`aux:*` 是辅助 LLM 的一次性指令，不是 agent 身份；若 `*` 覆盖全部 scope，则设了 persona 就会改掉压缩/抽取 prompt 的文本，P1 的"文本等价搬迁"破产。这条边界靠 scope 前缀判定，是**结构性**的：新增辅助 prompt 的人不可能忘记排除 persona。需要进入 `aux:*` 的 section 必须显式写出该 scope 名。
+
+_Avoid_: 覆盖层语义（与既有注册表契约冲突）；把 prompt 当安全边界；让 `*` 覆盖一切（persona/框架段会静默泄漏进摘要器与抽取器的指令）。
 
 ### D4 — 边界：管理"我们创作的、模型可见的自然语言文本"
 
@@ -188,11 +190,13 @@ _Avoid_: 把工具 guidance 集中到 prompt 模块（反向翻代码问题）�
 
 ### D12 — 装配点：注册表作为 `ContextBuilder` 的上游
 
-P0 阶段 `assembly.py` 调 `registry.assemble(profile=…)` 得到文本，仍经既有 `ContextBuilder(system_prompt=…)` 注入。
+P0 阶段由注册表产出正文，仍经既有 `ContextBuilder(system_prompt=…)` 注入。
 
 理由：`tests/agent/test_system_prompt_wiring.py` 与 `tests/context/test_builder_system_prompt.py` 已锁定"system_prompt 是 runtime context、计入预算、不落 JSONL"的契约。D12 完整保留这些契约，使 P0 成为**纯文本来源替换、零行为变化**。等 P2 引入 `meta_user` 目标时再评估升级。
 
-_Avoid_: P0 就改 `ContextBuilder` 构造签名（把机制上线与契约变更耦在一票，回归难归因）。
+**实现期修正（T3 落地前发现）**：接线的**具体位置**由「`assembly.py` 调 `assemble()`」改为「`agent/profiles.py` 里 `BUILTIN_PROFILES` 的 `system_prompt` 从注册表取」。原因：`assembly.py:280`（parent）与 `agent/factory.py:105`（child）都只是转发 `AgentSpec.system_prompt`，把来源接到 `AgentSpec` 的构造处即可让两条路径零改动一致，避免两处调用点漂移；且 `AgentSpec.system_prompt` 仍是普通字段，自定义 profile 与既有 B2 契约不受影响。代价是新增 `agent` → `prompt` 单向依赖（`builtin.py` 内禁止 import `agent.*`）。决策意图不变，仅装配点收敛为一处。
+
+_Avoid_: P0 就改 `ContextBuilder` 构造签名（把机制上线与契约变更耦在一票，回归难归因）；在 `assembly.py` 与 `agent/factory.py` 各调一次 `assemble()`（两个来源，后续必漂移）。
 
 ### D13 — 分阶段落地
 
