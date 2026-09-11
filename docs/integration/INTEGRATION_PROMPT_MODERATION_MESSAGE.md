@@ -68,17 +68,24 @@ provider 内容审查拒绝（阿里云 `data_inspection_failed`）时，失败�
   非本批引入——集成后建议正常复跑一次全量确认。
 - commit：`41cc5de` + `9fe4dd9`（feat/backend，未 push，§16.4 由集成处理）。
 
-## §5 集成拓扑提醒（2026-09-12 实测）
+## §5 集成拓扑提醒
 
-- `feat/backend` tip = `3c7263e`（另一会话的 prompt-registry docs，非本批）。
-  本批 2 个 commit 在其祖先链上：`4e71d49` → `9fe4dd9` → `c66488f` → `41cc5de`。
-- `feat/backend` 相对 `origin/main`（`63db650`）：**领先 32 / 落后 0**——
-  含多个会话的多批工作（BUG-011/P0-002、BUG-012、ARCH-4/4b/5、OBS-016、
-  research docs、本批、prompt-registry），每批有自己的集成提示词可对账。
-- **对象库独立**：`D:\intelligence-agent`（main 仓库）不认识 feat/backend 的
-  commit（`--git-common-dir` 各自是独立 `.git`，非共享 worktree）。集成时
-  必须先传对象：`git -C D:\intelligence-agent fetch
-  D:\intelligence-agent-backend feat/backend`（本地路径 fetch）或先 push
-  GitHub 再 fetch。历史先例见 `docs/integration/MERGE_EXECUTION_ORDER.md` §1.1。
-- merge 与 push 均需用户明确批准（§14.4）；PHASE_STATUS 同位追加冲突按
-  §14.7「多条全保留」先例处理。
+> **本节的数字已过期，请以批次手册为准**：
+> `docs/integration/INTEGRATION_PROMPT_FEAT_BACKEND_PENDING_BATCH.md`（2026-09-12 重新 fetch 后实测）。
+> 那份手册覆盖 `feat/backend` 上**全部在途 commit**（含本批这 2 个），并给出实测冲突预测。
+>
+> 刷新后的关键数字（2026-09-12，fetch 后）：
+>
+> - `origin/main` = **`bf81346`**（此前本节写的 `63db650` 已过期）
+> - `feat/backend` tip = **`81833e7`**
+> - `feat/backend` 相对 `origin/main`：**领先 12 / 落后 35**（此前写的"领先 32 / 落后 0"已过期——
+>   那 32 个里有 26 个已由集成 AI 合入 main，包含本批 2 个 commit）
+> - 实测冲突：**恰好 2 个文档**（`docs/PHASE_STATUS.md` 追加冲突、`docs/RESEARCH_PROJECT_MULTISESSION_AND_MEMORY_PLUGGABILITY.md` add/add），**零源码冲突**
+>
+> **对象库独立**这一条仍然成立且关键：`D:\intelligence-agent`（main 仓库）不认识 feat/backend 的
+> commit（两边 `--git-common-dir` 各自是独立 `.git`，非共享 worktree）。集成时必须先传对象：
+> `git -C D:/intelligence-agent fetch D:/intelligence-agent-backend feat/backend:refs/remotes/local/feat-backend`
+> （本地路径 fetch，不必 push GitHub），自检 `git -C D:/intelligence-agent cat-file -t 81833e7`。
+> 历史先例见 `docs/integration/MERGE_EXECUTION_ORDER.md` §1.1。
+>
+> merge 与 push 均需用户明确批准（§14.4）；PHASE_STATUS 同位追加冲突按 §14.7「多条全保留」先例处理。
