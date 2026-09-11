@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from langchain_core.messages import AIMessage
 
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.fallback import (
     FallbackTransition,
     ModelFallbackCoordinator,
@@ -179,6 +182,67 @@ class TestCoordinatorAinvoke:
             from_model="primary-model", to_model="fallback-model",
             reason="TimeoutError",
         )]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "reason"),
+        [
+            (TimeoutError("t"), "TimeoutError"),
+            # 真实事故的错误形状：provider 5xx（按 status_code 判瞬时）
+            (_OpenAIStyleError(500), "_OpenAIStyleError"),
+        ],
+    )
+    async def test_ainvoke_fallback_retry_reacquires_concurrency_slot(self, error, reason):
+        """回归（真实事故 2026-09-11）：**带并发闸时**回退重试必须能再拿一次槽位。
+
+        事故形状：`ainvoke` 把 `gate.slot()` 的返回值（`@asynccontextmanager` 产物）
+        复用给第二次 `async with`。那是**一次性** CM，二次进入抛
+        `AttributeError: '_AsyncGeneratorContextManager' object has no attribute 'args'`
+        → 非流式 run（`runtime.py` 的 `if stream:` else 分支，含 delegate 子会话）
+        在主模型瞬断时**永远回退不了**，直接 `model/failed` + `run/failed`。
+
+        为什么既有用例一直是绿的：`gate=None` 时走 `nullcontext`，而 `nullcontext`
+        可重复进入；生产恒带闸（`model_max_concurrency` 默认 3）。本用例是**唯一**
+        覆盖「闸 + ainvoke 回退重试」组合的地方，且两种错误形状都要覆盖——5xx 走
+        `status_code` 分支判瞬时，若哪天包装层丢掉该属性，子会话会静默不再回退。
+        """
+        gate = ModelCallGate(limit=1)
+        primary = _FlakyModel(_answer("unused"), 1, error)
+        coordinator = ModelFallbackCoordinator(
+            primary=primary, fallback=_answer("from fallback"),
+            primary_name="primary-model", fallback_name="fallback-model",
+            gate=gate,
+        )
+        ai = await coordinator.ainvoke([])
+        assert ai.content == "from fallback"
+        assert coordinator.drain_transitions() == [FallbackTransition(
+            from_model="primary-model", to_model="fallback-model", reason=reason,
+        )]
+        # 槽位不得泄漏：两次尝试都必须已释放，否则并发上限被永久吃掉。
+        # 这是**前向守卫**（原缺陷在取槽前就抛，故它抓不到原缺陷本身）；
+        # limit=1 时真泄漏会在这里拿不到槽位而超时。
+        async with asyncio.timeout(1):
+            async with gate.slot():
+                pass
+
+    @pytest.mark.asyncio
+    async def test_ainvoke_retry_once_when_fallback_also_fails(self):
+        """回退也瞬时失败：只重试一次、上抛回退的异常，且两个 arm 都不泄漏槽位。"""
+        gate = ModelCallGate(limit=1)
+        primary = _FlakyModel(_answer("unused"), 1, TimeoutError("primary down"))
+        fallback = _FlakyModel(_answer("unused"), 1, TimeoutError("fallback down"))
+        coordinator = ModelFallbackCoordinator(
+            primary=primary, fallback=fallback,
+            primary_name="primary-model", fallback_name="fallback-model",
+            gate=gate,
+        )
+        with pytest.raises(TimeoutError, match="fallback down"):
+            await coordinator.ainvoke([])
+        assert primary.calls == 1, "primary 只应尝试一次"
+        assert fallback.calls == 1, "fallback 只应尝试一次（不无限重试）"
+        async with asyncio.timeout(1):
+            async with gate.slot():
+                pass
 
     @pytest.mark.asyncio
     async def test_non_transient_failure_reraises(self):
