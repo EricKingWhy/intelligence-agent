@@ -282,3 +282,39 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 `tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`
 被独立审查者在**同一份代码**上 5 跑 2 失败，clean HEAD 亦通过，且该文件不在本批
 任何 diff 内。已按 §8 记入 `docs/FRONTEND_ISSUES_LOG.md` **OBS-9.3**，未顺手修。
+
+---
+
+## §6 T5 — #165 Persona 环境覆盖（commit `2638d68`）
+
+### 做了什么
+
+新增一层 **persona 覆盖**：`AGENT_PERSONA` 环境变量（JSON）可给 system prompt 加前缀/后缀，parent 与 child 一致。
+
+| 文件 | 变化 |
+| --- | --- |
+| `src/agent_harness/prompt/persona.py` | **新增**：`PersonaConfig` / `parse_persona_config` / `persona_sections` / `apply_persona` |
+| `src/agent_harness/prompt/builtin.py` | `build_registry(persona=None)` 注入 `persona:prefix`(0) / `persona:suffix`(10200) |
+| `src/agent_harness/assembly.py` | 解析 env → registry 组装父 prompt → persona 透传 Factory |
+| `src/agent_harness/agent/factory.py` | `create()` 用 `apply_persona(spec.system_prompt, persona)` 包裹 child prompt |
+| `src/agent_harness/config.py` | 新增 `agent_persona: str = ""`（紧跟 `capabilities`） |
+| `tests/prompt/test_persona.py`、`tests/test_assembly_persona.py` | **新增**：约 32 个用例 |
+
+### 集成方【不要】做的事
+
+1. **不要给 `DEFAULT_REGISTRY` 加 persona 读取**。它是**零配置基线**，永远不读环境。persona 只经 `build_registry(persona)` 这条显式路径进入。测试同时断言它「等于零配置构建」且「不等于 persona 构建」——两向都锁了。
+2. **不要把 config 默认值从 `""` 改成 `None`**。`agent_persona` 与 `capabilities` 同形制（原始 `str`），`parse_persona_config("")` 即空 persona。
+3. **不要用 `apply_persona` 去处理 aux prompt**。`"*"` scope 只匹配 `profile:<name>`，这是**结构性边界**（保护压缩/记忆提取等辅助调用不被 persona 污染）。若把 aux 也包上 persona，是在破坏规格而非修 bug。
+4. **不要为了「统一」把 `apply_persona` 改名成 `compose_agent_prompt`**。交接文档 §4.5 的旧名与三参签名已过期；票面 prescribed `apply_persona(base, persona)`。
+5. **T6 加 tool guidance 时不要改 `apply_persona`**。guidance 的 order(2000) 在 persona 后缀(10200) 之前，且 `apply_persona` 包裹的是**已组装完**的 profile 文本，顺序天然正确。
+
+### 证据
+
+- 门禁：`ruff` clean；全量 pytest **1739 passed / 10 skipped / 39 deselected / 0 failed**；`git diff --check` clean。
+- 不动点：零配置产物逐字节等于 T3/T4 迁移后文本；K1/K2/K3 冻结契约与 profile 接线用例**零改动**通过。
+- 真实验证：真实 `.env` → `Settings` → `assembly` 四场景（空/前缀/前后缀/坏键），坏键响亮失败不降级。
+
+### 前向兼容注意
+
+- `.env` 新增项 `AGENT_PERSONA`（默认空）——集成方需在真实 `.env` 里同步（若需要），空值零影响。
+- 已知边界 OBS-9.6：`harness:identity`(order −1000) 若将来注册，会与 `persona:prefix`(0) 产生顺序歧义，届时漂移守卫会先变红，需先决策再注册。**当前无该 section，行为不受影响。**
