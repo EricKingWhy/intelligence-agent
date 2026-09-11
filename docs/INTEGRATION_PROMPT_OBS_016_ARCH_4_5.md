@@ -121,13 +121,67 @@ GitHub issue **#141 已关闭**（§14.12，comment 内含两个 clone 的分支
 
 ---
 
-## 2. ARCH-4b（#142）：`/api/sessions` 补 `trace_url` —— ⏳ 在途
+## 2. ARCH-4b（#142）：`/api/sessions` 补 `trace_url` —— ✅ 已完成（跨端）
 
-后端列表契约缺 `trace_url`（前端 `types.ts::SessionSummary` 已按契约 `2d7f87a` 声明为必填
-`string | null`）。计划：让 `read_session_summary` 的终结事件取值同时产出 `trace_id` 与
-`trace_url`，`list_sessions` + `/api/sessions` 透传；核实 Langfuse 开/关两态。
+### 2.1 问题
 
-**完成时本节补齐**：commit、门禁数字、变异验证、前端类型核实结论。
+前端 `types.ts::SessionSummary` 把 `trace_url` 声明为**非可选** `string | null`（契约
+`2d7f87a` / ADR-0018 D7），但后端列表 `SessionSummary` 从不返回该键 → 运行时 `undefined`，
+违反自己声明的类型。当前无可见影响（`SessionList.tsx` 未消费 trace 字段）→ **潜伏**漂移。
+根因：`2d7f87a` 只把 `trace_url` 落到 **run 终结事件**（`data.trace_url`），列表页从未接线；
+OBS-010 只补了 `trace_id`。
+
+### 2.2 后端改动（`D:\intelligence-agent-backend` @ `feat/backend`）—— commit `a0f86a4`
+
+同一个 run 终结事件里 `trace_id` 与 `trace_url` 本就并列（`session.end_run` 对称写入，
+`session.py:399-400`），所以列表取值路径与 OBS-010 **完全同源**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `session/store.py` | `SessionSummaryStats` 增加 `trace_url`；`_terminal_trace_id(event)` → **`_terminal_trace_field(event, key)`**——两个键共用**同一套守卫**（非终结类型 / 缺键 / null / 空串 / 非字符串 → None），共用实现而非两份约定对齐，故不会一个漏填。`key` 收窄为 `Literal["trace_id","trace_url"]`（写错键名是类型错误，不是静默 None）。 |
+| `web/app.py` | `SessionSummary` 增加 `trace_url` + 端点映射 `trace_url=s.trace_url`。 |
+| `session/service.py` | **零改动** —— #143 的 dataclass 直通让新增字段自动透传（ARCH-4 的收益）。 |
+
+- 门禁：ruff clean；全量 pytest **1575 passed / 10 skipped / 39 deselected / 0 failed**（= 1564 基线 + 11 新增）。
+- 变异验证（均隔离复跑并还原）：①去掉 web 映射 → web 用例红（值是 null）；②交叉接线
+  （trace_url 读 `"trace_id"` 键）→ 8 例红（含同源锁与两路径同口径）；③去掉守卫 → 8 例红；
+  ④键名打错成 `"trac_url"` → web 值断言红（`Literal` 同时让它是类型错误）。
+- 两轴 code-review：Standards 轴无 hard violation，采纳其 `Literal` 加固；有意不采纳
+  NamedTuple 返回对（两处相邻两行未到抽取阈值，「同事件」已由共享 helper + 测试锁住）。
+  Spec 轴认定 AC1/2/3/5 满足、零 scope creep，并指出 **AC#3 值断言缺口**（原只有
+  `trace_id` 被锁）——已补 `test_trace_id_none_when_terminal_is_not_last_event` 对
+  `trace_url` 的值断言。
+
+### 2.3 前端改动（`D:\intelligence-agent-frontend` @ `feat/frontend`）—— commit `4c38c69`
+
+| 文件 | 改动 |
+| --- | --- |
+| `web/src/lib/api.test.ts` | 新增 `listSessions` 契约块（`trace_url` 原样透传 + 未追踪保持 null）；canonical fixture 用 `SessionSummary` **类型注解**锁编译期一致性——类型新增必填字段 → fixture 缺键 → `tsc -b` 红；fixture 多出未声明键 → 多余属性检查红。 |
+| `web/e2e/*.spec.ts`（6 文件 10 行） | 会话行 mock 补 `trace_url: null`，与真实后端 payload 对齐——旧 mock 照抄了「后端不返回该键」的坏形状，会让前端永远看不到它。 |
+
+- **`types.ts` 零改动**（本就声明正确）。
+- 门禁：tsc ✓ / vitest **504 passed**（28 文件）/ oxlint **35w 0e** / playwright **118 passed**
+  （`--workers=2`）/ vite build ✓。
+- 变异验证：从 canonical fixture 删掉必填 `trace_url` → `tsc -b` 报 **TS2741** 红（已还原）。
+- 后端侧权威锁（断言**值**，能抓「键在但值是 null」的漏映射）：
+  `tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`。
+
+### 2.4 验收标准核对
+
+| # | 标准 | 状态 |
+| --- | --- | --- |
+| 1 | Langfuse 开启时 `trace_url` 与同一 run 的 `run/completed.data.trace_url` 同值 | ✅ 值断言 + 回填用例 |
+| 2 | Langfuse 未启用时两者都为 null | ✅ robustness + web 两侧 |
+| 3 | 末事件非 run 终结时两者都为 null | ✅ 已补 `trace_url` 值断言（Spec 轴发现的缺口） |
+| 4 | 前端 `types.ts` 声明与运行时一致 | ✅ 类型零改动 + 编译期注解锁 + 透传锁 + e2e mock 对齐 |
+| 5 | 后端 ruff + 全量 pytest 绿；前端门禁绿 | ✅ |
+
+### 2.5 合并要点
+
+- 本票与 §3（ARCH-4）落在**同一处代码**（`session/store.py` + `web/app.py` 的重叠区域）。
+  若两票分两次合入，第二次遇冲突属预期内，需按 §14.7 逐文件分析（**不是**机械取一侧）：
+  两者是「增加字段」与「改返回类型」的正交改动，正确合并结果应同时保留。
+- **关单**：GitHub issue #142 已关闭。
 
 ---
 
