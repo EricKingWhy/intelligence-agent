@@ -32,7 +32,7 @@ uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带�
 | OBS-015 | P2 | ✅ 完成 | `cb0e008`+`4580a69`+`274afcf`（**feat/frontend**） | 审批卡 catch 不再乐观翻转；404 语义订正 + fail-safe 回归锁 |
 | OBS-012 | P2 | ✅ 完成 | `d9bef3a` | bash 工具描述声明真实解释器（POSIX/容器=sh，Windows=cmd.exe），不再谎称 bash |
 | OBS-016 | P2 | 🆕 待定 | — | **本轮新发现（同源缺陷，Scope 外）**：`tools/read.py:140` 超长行提示仍教模型用 POSIX 专有 `sed`/`head -c`/`tail -c` |
-| OBS-013 | P2 | ⏳ 待做 | — | provider 退化重复：护栏或登记已知风险 |
+| OBS-013 | P2 | ✅ 已评估（登记风险） | — | 限时护栏已存在/启用/已测（600s total）；无代码改动 |
 | OBS-009/014 | — | ⏳ 待做 | — | TIMEOUT `retryable` 语义 + 文案矛盾 |
 | OBS-008 | — | ⏳ 待做 | — | model/failed 吞 traceback |
 | OBS-010 | low | ⏳ 待做 | — | `GET /api/sessions` 的 `trace_id` 恒 null |
@@ -272,3 +272,70 @@ Use bash with 'sed -n '{start}p' <file> | head -c {_READ_MAX_BYTES}' plus 'tail 
 **建议的最小修法**（交给集成 AI 排期）：把该提示改成后端无关的表述（如「用 shell 工具按
 字节/行切片读取后续内容」），或按 `sandbox.shell_description` 给对应平台的示例；若采用后者，
 需同步 `docs/HANDOFF_FRONTEND_SYNC.md:46`。
+
+---
+
+## 6. OBS-013：模型退化重复循环（**登记为已知风险，无代码改动**）
+
+**状态**：✅ 评估完成 → **登记为已知风险**（交接单给的第二个选项：「或登记为已知风险 +
+用户可见停止路径」）。**本轮无产品代码改动**，故无 ruff/pytest/code-review 适用于本项——
+这里给出的是证据化的结论与建议，不伪造门禁。
+
+### 现象（原始记录，`docs/FRONTEND_ISSUES_LOG.md` OBS-013）
+
+会话 `7d5a6f24` 一轮生成 **2,868 个 `text/delta`、共 186,507 字符**，内容为
+`"Let me run the command."` 的无限重复，**始终未发出工具调用**，持续 **3.5 分钟**后由用户
+点「停止」收口（`model/failed: model call cancelled`）。同语料另有多次
+`model/fallback: deepseek-v4-flash-0731 → glm-4.5-air · InternalServerError`。
+
+### 评估结论：**限时护栏已存在、已启用、且已按同一病理测过**——本次没触发是因为没到阈值
+
+| 问题 | 证据 |
+| --- | --- |
+| 有无限长护栏？ | **有**。`model/stall.py::stream_with_stall_guard` 双守卫：`idle`（N 秒无新 chunk）与 **`total`（整条流总时限）**。模块 docstring 明确写了 `total` 就是为「chunk 间隔只有 ~2s、idle 永远不触发」的慢滴漏而设。 |
+| 生产启用了吗？ | **是**。`config.py:31-32` 默认 `model_stream_idle_timeout=60.0`、**`model_stream_total_timeout=600.0`**；`assembly.py:251-252,284-285` 注入 `AgentFactory` 与 `AgentRuntime`（生产装配路径，非测试专供）。 |
+| 为什么这次没拦住？ | **3.5 分钟（210s）< 600s**。退化重复是**持续有 chunk 到达**的流，所以 60s 的 idle 永不触发（每个 delta 都重置它），只有 600s 的 total 能治——它没到期，用户先手动停了。 |
+| 这个病理测过吗？ | **测过，且正是同一形状**。`tests/model/test_stall_watchdog.py::TestTotalDeadlineGuard`：`test_slow_drip_hits_total_deadline`（每 0.05s 滴一个 chunk、永不结束 → total 到期抛 `ModelStallError(kind="total")`）、`test_slow_drip_primary_switches_to_fallback`（**断流后 fallback 接管，transition reason=ModelStallError**）。 |
+| 有用户可见停止路径吗？ | **有，且本次实测有效**：用户点「停止」→ run 以 `model/failed: model call cancelled` 收口。Web 侧走 `POST /api/sessions/{id}/cancel`。 |
+| 有可观测信号吗？ | **有**：`MODEL_FALLBACK` 是 durable 事件；stall 中断会记 fallback transition（`reason=ModelStallError`），JSONL 可检索。 |
+
+**因此暴露面是有界的**：最坏情况 = 至多 600s 的退化输出，然后 total 到期 → 判为瞬时 →
+**fallback 接管**（换模型，对「退化重复」恰好是对症的——另一个模型通常不会同样复读）；
+若 fallback 链也退化到超时，run 以失败收口。期间用户随时可停。
+
+### 为什么不按「重复护栏」实现一个内容级启发式
+
+1. **误杀风险**：合法的长输出天然含重复模式（大表格、重复样板代码、逐行日志）。按「重复率」
+   中断会误杀正常生成，而这类误杀的代价（截断用户要的产物）通常高于一次可手动停止的复读。
+2. **层次错误**：退化重复是 **provider/模型行为**，在 Agent Loop 里加内容特判违反本项目
+   「不为 provider 行为在 Loop 里开特判」的一贯原则（不变量 #18 同族）。
+3. **已有更对的层**：真要收紧，位置是 provider 请求参数（见下），不是 Loop 启发式。
+
+### 唯一确认的**真实缺口**（建议，未实施——需产品/运维决策）
+
+`create_chat_model`（`model/provider.py:106-113`）显式声明了 `request_timeout=300`、
+`max_retries=0`，但**全仓没有任何 `max_tokens`**（`grep max_tokens src/` 为空）。即：
+**生成长度本身无上限**，唯一的界是 600s 的**时间**上限。
+
+- 可选加固：给 `create_chat_model` 传 `max_tokens`（最好来自 Settings，缺省不设 = 行为不变）。
+- **为什么不当场改**：① 需要按模型选值（各 provider 语义/上限不同，`max_tokens` 与
+  `max_completion_tokens` 还不通用）；② 值定小了会把「写一个长文件」这类**合法**长输出截断，
+  属产品行为变更；③ 属 §9.1「显著改变行为」的决策，应由用户/集成 AI 拍板，不在本项 scope 内
+  顺手加。
+- 另一个可选旋钮：把 `model_stream_total_timeout` 从 600s 调低（纯配置，无需改代码）——
+  代价同样是可能打断合法长生成（这正是 V1 明确不做 ainvoke 总时限的原因，见 `stall.py`
+  docstring；流式路径才选了 600s 这个折中）。**不建议默认调低**，建议留给运维按需覆盖。
+
+### 记录在案的副作用（非缺陷）
+
+退化输出会被**持久化**：`TEXT_DELTA` 在 `EVENT_TYPES` 内（ADR-0016 §3.1 把「合帧后的
+text/delta」定为 durable，禁止的是 per-token 行）。所以一次退化 run 会往 append-only JSONL
+写入约 O(100KB) 的重复文本，且**不可逆**。这是**有意设计**（回放保真，不变量 #22：不制造
+第二套不可对账的真相），不是 bug；它的界同样只有 600s 超时。若要避免，应连同上面的
+「长度上限」一起决策，而不是单独截断 durable 事件（那会破坏回放对账）。
+
+### 给集成 AI 的行动项
+
+1. **接受本项为已知风险登记**（无需改代码）；把「≤600s + 自动 fallback + 用户可停」写进
+   已知风险清单。
+2. 若要进一步收紧：**单独立项**决定 `max_tokens`（含按模型选值与截断策略），不要塞进本批次。
