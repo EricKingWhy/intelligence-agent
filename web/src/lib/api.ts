@@ -279,8 +279,13 @@ export async function streamSession(sessionId: string, afterSeq: number): Promis
 /** POST /api/sessions/{id}/approve — interactive approval decision (#37, PRD §2.2).
  *  Backend resolves the pending approval via PendingApprovalQueue.resolve().
  *  Response (200): {"status":"resolved","approval_id":"...","decision":"approve_once"}
- *  409 = already resolved; 404 with "already resolved" detail = same semantics.
- *  Both are idempotent successes → AlreadyResolvedError.
+ *  409 (`ApprovalAlreadyResolved`) = 幂等已决 → AlreadyResolvedError → 调用方翻卡片。
+ *  ⚠ 404 **不是**幂等已决：后端 404 有四个来源（session 不存在 / 审批队列缺失 /
+ *    `approval_id` 不在队列 / 事件过期；`web/app.py:1157-1166`），**无法**与
+ *    「已解析且已出队」区分。把它当成功 = 决策其实没生效却显示「已批准」的
+ *    安全假象，正是 OBS-015 要消灭的那类 bug。故 404 与其它非 2xx 同级 →
+ *    plain Error → 卡片保持 pending + 可重试。
+ *    真已决的兜底不靠错误码：`permission/resolved` 投影事件会把卡片移出待决队列。
  *  Other non-ok = real failure (decision did NOT reach backend) → plain Error.
  *  OBS-015 fix: the caller must distinguish these two — flipping the card to
  *  "decided" on a network error is a dangerous false positive for security. */

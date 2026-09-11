@@ -199,3 +199,39 @@ test('POST 409 → 幂等成功，卡片翻「已批准」', async ({ page }) =>
   await expect(card.locator('.approval-actions')).toHaveCount(0);
   expect(approveCalls).toHaveLength(1);
 });
+
+/** POST /approve 返回 404 → **保持 pending**（404 不是幂等已决）。
+ *
+ *  与最初交接提示词的期望**相反**，此处按后端真实语义钉死：404 有四个来源
+ *  （session 不存在 / 审批队列缺失 / `approval_id` 不在队列 / 事件过期，
+ *  `web/app.py:1157-1166`），**无法**与「已解析且已出队」区分。若把 404 当成功，
+ *  就会出现「决策其实没生效、UI 却显示已批准」的安全假象——正是 OBS-015 本身。
+ *  真已决由 `permission/resolved` 投影事件移除卡片（上一用例已锁），不靠 404。 */
+test('POST 404 → 保持「需要审批」+ 错误提示（404 不是幂等已决）', async ({ page }) => {
+  const approveCalls: unknown[] = [];
+  const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
+  routeApi(page, {
+    onSessionPost: (route) => fulfillSse(route, frames),
+    onApprovePost: async (route) => {
+      approveCalls.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 404,
+        body: JSON.stringify({ detail: 'approval not found' }),
+        contentType: 'application/json',
+      });
+    },
+    events: frames,
+  });
+  await page.goto('/');
+  await submitTask(page, '写个文件');
+
+  const card = page.locator('.approval-card');
+  await expect(card).toBeVisible();
+
+  await card.locator('.approval-approve').click();
+  await expect(card.locator('.approval-title')).toHaveText('需要审批');
+  await expect(card.locator('.approval-error')).toBeVisible();
+  await expect(card.locator('.approval-error')).toContainText('404');
+  await expect(card.locator('.approval-approve')).toBeEnabled();
+  expect(approveCalls).toHaveLength(1);
+});
