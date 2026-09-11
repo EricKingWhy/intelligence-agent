@@ -1344,9 +1344,26 @@ max 61.0s；>15s 占 3/13，>30s 占 2/13**。样本：0.8 / 1.3 / 1.4 / 2.3 / 2
   3. 前端：模型项加 in-flight 去重（或在弹层关闭后立即 `pointer-events:none`），双击不再发出第二个请求；
   4. 回归锁：服务端并发 `/model` 不得产生重复 seq（pytest，TDD 先红）；前端双击只允许一个 `POST`（e2e 计数）。
 
-### 观察（未验证，仅登记）
+### 观察：事件文件在、工作区映射缺失 → 500（**已用真实服务端验证**，Scope 外仅登记）
 
-用**合成副本**（同内容、改 session_id、无 `workspaces/<id>.json`）复现时，`POST /messages` 返回的是 **500** 而非现场的 404。合成态本身不受支持（缺工作区注册文件），故**不作为结论**；但它提示「事件文件在、工作区文件缺失」这类状态可能未走受控错误路径，值得单独验证。
+原记录（合成副本复现时 `POST /messages` 返回 500 而非现场 404）当时**不作为结论**；修完 BUG-011 后用真实
+uvicorn（`WORKSPACE_DIR` 指向临时目录）复测，**已确认并拿到 traceback**：
+
+```text
+File "src/agent_harness/session/session.py", line 242, in resume
+    session = cls.load(store, session_id, workspace_registry=workspace_registry)
+File "src/agent_harness/session/session.py", line 223, in load
+    workspace_registry.get(session_id)
+File "src/agent_harness/sandbox/registry.py", line 73, in get
+    raise KeyError(f"Session '{session_id}' 没有对应的 workspace 映射记录。")
+KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
+```
+
+**判读**：这是 `KeyError` 而非领域异常，没有进 `domain_errors.py` 的表 → **500「Internal Server Error」**。
+且它发生在 **seq 校验之前**（`registry.get` 在 `load` 的更早位置），所以这类会话走不到 409。
+**属另一张票**（健康日志 + 缺工作区映射的状态应走受控错误路径，如 404/409 或可恢复提示），本次**未改**（§8 Scope Lock）。
+注意：正常会话不会进入该状态——`Session.start(..., workspace_registry=...)` 会同时写 JSONL 与映射文件；
+只有手工构造 / 半删除（事件文件在、映射文件丢）才会出现。
 
 ### 方法备注（代价与边界）
 
