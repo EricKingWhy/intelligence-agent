@@ -85,6 +85,7 @@ def test_smoke_pipeline_with_injected_fake_runtime(tmp_path: Path, monkeypatch):
         "fallback_model_provider": "", "fallback_model_name": "",
         "langfuse_public_key": "", "langfuse_secret_key": "",
         "langfuse_base_url": "", "langfuse_trace_content": "full",
+        "langfuse_tracing_environment": "development", "langfuse_release": "",
     })()
 
     def factory(_task: str) -> AgentRuntime:
@@ -136,6 +137,7 @@ def test_smoke_builds_runtime_with_fallback_config(tmp_path: Path, monkeypatch):
         "fallback_model_base_url": "https://fallback.example.com",
         "langfuse_public_key": SecretStr(""), "langfuse_secret_key": SecretStr(""),
         "langfuse_base_url": "", "langfuse_trace_content": "full",
+        "langfuse_tracing_environment": "development", "langfuse_release": "",
     })()
 
     def fake_create(config):

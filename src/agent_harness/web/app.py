@@ -87,7 +87,11 @@ from agent_harness.web.serialization import (
 # description。两边引用同一份常量 → 加新档位只改一处，validator 与清单永不漂移。
 # 与 PERMISSION_MODE_DESCRIPTIONS（tooling/contract.py）同模式（Reuse First §6）。
 
-#: reasoning_effort 三档（已运行时消费——经 create_chat_model 注入 model_kwargs）。
+#: reasoning_effort 三档（已运行时消费——经 create_chat_model 注入）。
+#: key 是 **harness 语义档位**，不是 provider 线格式枚举：翻译在
+#: model/provider.py 的 REASONING_EFFORT_WIRE（两处键集由
+#: tests/model/test_reasoning_effort.py G5 锁住）。不要把这里的 key 直接
+#: 改成 'medium'/'high'——那是线格式词汇，会让前端清单与产品语义脱节。
 REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "minimal": {
         "display_name": "轻量",
@@ -99,7 +103,7 @@ REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
     "deep": {
         "display_name": "深度",
-        "description": "最多推理开销，较慢但最深入。",
+        "description": "较高推理开销，较慢但更深入。",
     },
 }
 
@@ -867,8 +871,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     async def list_reasoning_efforts() -> dict[str, Any]:
         """列出 reasoning_effort 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
 
-        reasoning_effort 已被运行时真实消费（经 create_chat_model 注入
-        model_kwargs → extra_body 传给 API）；本端点暴露「后端认识哪些档位」。
+        reasoning_effort 已被运行时真实消费：harness 语义档位经
+        create_chat_model 翻译为 provider 线格式枚举后注入（翻译表在
+        model/provider.py）；本端点暴露「后端认识哪些档位」。
         字段与 /api/permission-modes 同模式（{id, display_name, description}），
         单一事实源是模块级 REASONING_EFFORT_DESCRIPTIONS（validator 与清单
         引用同一份 → 永不漂移）。

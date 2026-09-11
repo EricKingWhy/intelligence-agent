@@ -13,10 +13,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
 
 from agent_harness.config import Settings
+from agent_harness.session.amend import AmendOptions
 from agent_harness.session.event import (
     MODEL_CHANGED,
     SESSION_STARTED,
@@ -24,8 +25,7 @@ from agent_harness.session.event import (
 )
 from agent_harness.session.session import Session
 
-if TYPE_CHECKING:
-    from agent_harness.session.service import AmendOptions
+logger = logging.getLogger("agent_harness.session.model_switch")
 
 
 def current_model_selection(events: list[SessionEvent]) -> tuple[str | None, str | None]:
@@ -63,24 +63,11 @@ def amend_with_session_model(
     from agent_harness.model.config import find_catalog_entry
 
     if find_catalog_entry(settings, provider or "", model_id) is None:
-        _logger().warning(
+        logger.warning(
             "会话当前模型 %s/%s 已不在 catalog，本轮回落默认链", provider, model_id
         )
         return amend
-    return replace(amend or _amend_options(), model=model_id)
-
-
-def _amend_options() -> AmendOptions:
-    """延迟导入 AmendOptions，避免 model 模块 <- service 的循环导入。"""
-    from agent_harness.session.service import AmendOptions
-
-    return AmendOptions()
-
-
-def _logger():
-    import logging
-
-    return logging.getLogger("agent_harness.session.service")
+    return replace(amend or AmendOptions(), model=model_id)
 
 
 def default_model_id(settings: Settings) -> str:

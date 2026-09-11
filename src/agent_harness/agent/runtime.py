@@ -482,6 +482,13 @@ class AgentRuntime:
         # 没有可终结的 run；run_span / steps / usage_total 同理需要初值。
         run_id: str | None = None
         steps = 0
+        # session 级 step 基数（前端 turn 定位键的单调性来源）。事件信封的
+        # step_id 必须 session 级唯一递增，续聊 run 若再从 1 编号，第二轮的
+        # model/* 会与首轮冲突——前端 withTurnAt 折叠进首轮 turn，首轮回答被
+        # 清空、次轮回答错位（TICKET_STEP_ID_COLLISION_MULTI_TURN）。
+        # 注意 steps 仍是 run 内轮次计数（max_steps 保险丝与 AgentRunResult.steps
+        # 依赖它逐 run 从 0 起算），全局编号一律走 step_base + steps。
+        step_base = 0
         # Langfuse 旁路（ADR-0018 D5/D7）：begin_run 后创建；六条终态臂统一
         # 经它收口 trace 并回填 trace_id。begin_run 之前异常 = 无 run 可观测。
         tracer: Any = None
@@ -510,6 +517,12 @@ class AgentRuntime:
         try:
             # 写入 user 消息事件
             memory_event_start = session.mark()
+            # 本 run 的 step 基数 = 前端此刻已分配的 turn 数，取两者较大：
+            # max_step_id 覆盖前轮正常产出的步号；user_turn_count 覆盖前轮在
+            # 首个 model 事件之前就终结（失败/取消/上下文超限）留下的空轮——
+            # 只按 max_step_id 会让这种情况下第二轮再次与首轮撞号。
+            # 必须在 append 本轮 user 消息之前算：本轮消息不计入基数。
+            step_base = max(session.max_step_id, session.user_turn_count)
             user_event = session.append(USER_MESSAGE, {"content": user_input})
             yield to_agent_event(user_event)
             # USER_ACCEPTED 稳定边界：user/message 已持久化。
@@ -560,7 +573,7 @@ class AgentRuntime:
                         RUN_FAILED, {"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": str(error),
                                      "trace_id": tracer.trace_id if tracer else None,
                                      "trace_url": tracer.trace_url if tracer else None},
-                        run_id=run_id, step_id=steps,
+                        run_id=run_id, step_id=step_base + steps,
                     )
                     terminal.mark_terminal_written()
                     yield to_agent_event(failed)
@@ -609,8 +622,8 @@ class AgentRuntime:
                     # 都是 durable 事实：断连重连按 seq 重放即可恢复（ADR-0016）。
                     yield AgentEvent(
                         type=MODEL_STARTED,
-                        data={"step": steps + 1},
-                        run_id=run_id, step_id=steps + 1,
+                        data={"step": step_base + steps + 1},
+                        run_id=run_id, step_id=step_base + steps + 1,
                     )
                     assert streamer is not None
                     collected: list[AIMessageChunk] = []
@@ -619,17 +632,17 @@ class AgentRuntime:
                         reasoning_text = _extract_reasoning(chunk)
                         if reasoning_text:
                             for streamed in streamer.offer_reasoning(
-                                reasoning_text, step=steps + 1,
+                                reasoning_text, step=step_base + steps + 1,
                             ):
                                 yield to_agent_event(streamed)
                         delta_text = _extract_text(chunk.content)
                         if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
                             for streamed in streamer.offer_text(
-                                delta_text, step=steps + 1,
+                                delta_text, step=step_base + steps + 1,
                             ):
                                 yield to_agent_event(streamed)
                     # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
-                    for streamed in streamer.end_step(step=steps + 1):
+                    for streamed in streamer.end_step(step=step_base + steps + 1):
                         yield to_agent_event(streamed)
                     # 聚合 chunks 成完整 AIMessage：用 reduce 风格 + 累加。
                     # 空流（模型没吐任何 chunk）退化成空 content。
@@ -714,7 +727,7 @@ class AgentRuntime:
                              "to_model": transition.to_model,
                              "reason": transition.reason,
                              **({"usage": usage} if usage else {})},
-                            run_id=run_id, step_id=steps + 1,
+                            run_id=run_id, step_id=step_base + steps + 1,
                         )
                         yield to_agent_event(fallback_event)
                     llm_log_fields.update(
@@ -755,7 +768,7 @@ class AgentRuntime:
                         MODEL_COMPLETED,
                         model_data,
                         run_id=run_id,
-                        step_id=steps + 1,
+                        step_id=step_base + steps + 1,
                     )
                     yield to_agent_event(model_event)
                     # MODEL_COMPLETED 稳定边界：本轮模型回复已持久化（无 tool_calls 或
@@ -817,7 +830,7 @@ class AgentRuntime:
                 for call in calls:
                     call_event = self.executor.emit_call_event(
                         session, tool_call_id=call.id, tool_name=call.name,
-                        args=call.args, run_id=run_id, step_id=steps,
+                        args=call.args, run_id=run_id, step_id=step_base + steps,
                     )
                     yield to_agent_event(call_event)
                 tool_event_start = session.mark()
@@ -832,7 +845,7 @@ class AgentRuntime:
                             run_id=run_id,
                             agent_id=self._agent_id,
                         ),
-                        step_id=steps,
+                        step_id=step_base + steps,
                     )
                 except Exception as error:  # noqa: BLE001
                     tool_error = error
@@ -847,7 +860,7 @@ class AgentRuntime:
                         MODEL_COMPLETED,
                         model_data,
                         run_id=run_id,
-                        step_id=steps,
+                        step_id=step_base + steps,
                     )
                     yield to_agent_event(model_event)
                     # MODEL_COMPLETED 稳定边界：延迟写入的 model/completed 已持久化。
@@ -865,12 +878,12 @@ class AgentRuntime:
                     for persisted_event in self.executor.emit_pending_events(
                         session,
                         pending_events=execution.pending_events,
-                        run_id=run_id, step_id=steps,
+                        run_id=run_id, step_id=step_base + steps,
                     ):
                         yield to_agent_event(persisted_event)
                     yield to_agent_event(self.executor.emit_result_event(
                         session, tool_call_id=execution.tool_call_id,
-                        content=content, run_id=run_id, step_id=steps,
+                        content=content, run_id=run_id, step_id=step_base + steps,
                     ))
 
                     self._log("tool_operation", f"工具回复 {outcome}",
@@ -908,7 +921,7 @@ class AgentRuntime:
                              "tool_name": worst_signal.tool_name,
                              "fingerprint": worst_signal.fingerprint,
                              "consecutive_failures": worst_signal.consecutive_failures},
-                            run_id=run_id, step_id=steps,
+                            run_id=run_id, step_id=step_base + steps,
                         )
                         yield to_agent_event(soft_event)
                         corrective = session.append(
@@ -922,7 +935,7 @@ class AgentRuntime:
                              # runtime 注入的纠正消息不是真实用户发言——标记来源
                              # 供前端投影/审计区分（不变量 #22 边缘）。
                              "injected_by": "tool_failure_guard"},
-                            run_id=run_id, step_id=steps,
+                            run_id=run_id, step_id=step_base + steps,
                         )
                         yield to_agent_event(corrective)
                         self._log("agent_decision", "同错熔断软触发",
@@ -938,7 +951,7 @@ class AgentRuntime:
                              "tool_name": worst_signal.tool_name,
                              "fingerprint": worst_signal.fingerprint,
                              "consecutive_failures": worst_signal.consecutive_failures},
-                            run_id=run_id, step_id=steps,
+                            run_id=run_id, step_id=step_base + steps,
                         )
                         yield to_agent_event(hard_event)
                         self._log("agent_decision", "同错熔断硬触发，强制终止 run",
@@ -952,7 +965,7 @@ class AgentRuntime:
                         if tracer is not None:
                             tracer.run_failed(STATUS_IDENTICAL_TOOL_FAILURE_LOOP)
                         end_event = terminal.failure_terminal(
-                            steps=steps,
+                            steps=step_base + steps,
                             reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
                             trace_id=(tracer.trace_id if tracer else None),
                             trace_url=(tracer.trace_url if tracer else None),
@@ -975,7 +988,7 @@ class AgentRuntime:
             # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
             try:
                 ctx = _TerminalContext(
-                    session=session, run_id=run_id, steps=steps,
+                    session=session, run_id=run_id, steps=step_base + steps,
                     terminal=terminal, streamer=streamer, model_coord=model_coord,
                     tracer=tracer, ctx_span=ctx_span, generation=generation,
                 )
@@ -988,7 +1001,7 @@ class AgentRuntime:
                     error_type=None, reason=cancel_reason, cancelled=True,
                 )
                 terminal.cancelled_terminal(
-                    steps=steps,
+                    steps=step_base + steps,
                     reason=cancel_reason,
                     trace_id=(tracer.trace_id if tracer else None),
                     trace_url=(tracer.trace_url if tracer else None),
@@ -1015,7 +1028,7 @@ class AgentRuntime:
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
             try:
                 ctx = _TerminalContext(
-                    session=session, run_id=run_id, steps=steps,
+                    session=session, run_id=run_id, steps=step_base + steps,
                     terminal=terminal, streamer=streamer, model_coord=model_coord,
                     tracer=tracer, ctx_span=ctx_span, generation=generation,
                 )
@@ -1032,7 +1045,7 @@ class AgentRuntime:
                 # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
                 # 已写入的事件保持原样，失败只能由日志承载。
                 end_event = terminal.failure_terminal(
-                    steps=steps,
+                    steps=step_base + steps,
                     trace_id=(tracer.trace_id if tracer else None),
                     trace_url=(tracer.trace_url if tracer else None),
                 )
