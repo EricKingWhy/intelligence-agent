@@ -80,3 +80,53 @@ async def test_fallback_candidates_are_still_stored(tmp_path):
     await writer.drain()
 
     assert [content for _, content, _ in capability.stored] == ["decision-x"]
+
+
+@pytest.mark.asyncio
+async def test_degraded_event_carries_run_id_for_attribution(tmp_path):
+    """MEMORY_DEGRADED 必须能归因到那个 run（R3-7）——抽取路径此前无覆盖。"""
+    from agent_harness.session import SessionEvent
+
+    class FallbackExtractor:
+        async def extract(self, events):
+            return ExtractionOutcome([], degraded_reason="heuristic_fallback: TimeoutError")
+
+    session = make_session(tmp_path)
+    run_event = SessionEvent(seq=1, type="run/started", session_id=session.session_id,
+                             run_id="run-attr-1", data={"turn_index": 1})
+    writer = MemoryWriteback(RecordingCapability(), FallbackExtractor())
+    writer.submit(session, [run_event])
+    await writer.drain()
+
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert len(degraded) == 1
+    assert degraded[0].run_id == "run-attr-1"
+
+
+@pytest.mark.asyncio
+async def test_observability_write_failure_does_not_drop_candidates(tmp_path):
+    """降级只在**质量**不在可用性：观测事件写不下去时，候选照样要落库。
+
+    （code-review P2：append 与存储循环同在一个 try 内，append 抛异常会整段跳过。）
+    """
+    class FallbackExtractor:
+        async def extract(self, events):
+            return ExtractionOutcome([(MemoryScope.USER, "keep-me", {"importance": 0.7})],
+                                     degraded_reason="heuristic_fallback: ValidationError")
+
+    capability = RecordingCapability()
+    session = make_session(tmp_path)
+    original_append = session.append
+
+    def flaky_append(event_type, data, **kwargs):
+        if event_type == "memory/degraded":
+            raise RuntimeError("ledger-unavailable")
+        return original_append(event_type, data, **kwargs)
+
+    session.append = flaky_append  # type: ignore[method-assign]
+    writer = MemoryWriteback(capability, FallbackExtractor())
+    writer.submit(session, session.events)
+    await writer.drain()
+
+    assert [content for _, content, _ in capability.stored] == ["keep-me"]
+    assert not [e for e in session.events if e.type == "memory/degraded"]

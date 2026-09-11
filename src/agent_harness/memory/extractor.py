@@ -31,13 +31,8 @@ _MAX_EXTRACT_EVENTS = 50
 
 #: markdown 代码围栏（模型爱把 JSON 包起来），首尾各剥一次。
 _JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", flags=re.IGNORECASE)
-#: 全角/弯引号 → ASCII（中文模型把 JSON 分隔符写成全角是常态，不是"答错格式"）。
-_CURLY_TO_STRAIGHT = str.maketrans({
-    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
-    "\u2018": "'", "\u2019": "'",
-})
-#: 尾随逗号（`[...,]` / `{...,}`）。
-_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+#: 引号族：ASCII 双引号 + 全角/弯引号。全角引号是中文模型写 JSON 分隔符的常态。
+_QUOTE_CHARS = frozenset({'"', "\u201c", "\u201d", "\u201e", "\u201f"})
 
 
 class _Candidate(BaseModel):
@@ -65,11 +60,71 @@ class ExtractionOutcome:
 def _repair_json(text: str) -> str:
     """字符级修复常见的 LLM 非严格 JSON（不保证可解析，调用方必须重校验）。
 
-    不做结构猜测：修完仍要过 schema 校验，修不好就回退——"降级"优于"静默篡改"。
+    **字符串感知**是这里的关键：内容里本来就可能出现 `,]` 或全角引号
+    （`"content":"他说“你好”"`）。无差别全局替换会**静默篡改内容**——那正是本修复
+    要消灭的失败模式：`"content":"use [1, 2, ] then stop"` 的 `,]` 会被当成尾逗号删掉，
+    重校验照样通过，于是改坏的数据被当成功候选存下去（code-review 实测复现）。
+    所以：围栏只在首尾剥；引号只在**字符串外**（当分隔符用）转 ASCII；尾逗号只在
+    **字符串外**删；字符串内的字符一律逐字保留（含全角引号、逗号、撇号）。
+
+    字符串内出现全角引号时会提前闭合、大概率产出非法 JSON → 回退。
+    "修不好就降级"是本函数的契约：宁可回退，不可静默篡改。
     """
-    repaired = _JSON_FENCE_RE.sub("", text.strip())
-    repaired = repaired.translate(_CURLY_TO_STRAIGHT)
-    return _TRAILING_COMMA_RE.sub(r"\1", repaired)
+    stripped = _JSON_FENCE_RE.sub("", text.strip())
+    out: list[str] = []
+    in_string = False
+    index = 0
+    length = len(stripped)
+    while index < length:
+        ch = stripped[index]
+        if in_string:
+            if ch == "\\" and index + 1 < length:  # 转义对整体保留
+                out.append(ch)
+                out.append(stripped[index + 1])
+                index += 2
+                continue
+            if ch in _QUOTE_CHARS:  # 引号族任意一个都视为字符串结束（全角即分隔符）
+                out.append('"')
+                in_string = False
+                index += 1
+                continue
+            out.append(ch)  # 字符串内容逐字保留
+            index += 1
+            continue
+        if ch in _QUOTE_CHARS:
+            out.append('"')
+            in_string = True
+            index += 1
+            continue
+        if ch == ",":
+            look = index + 1
+            while look < length and stripped[look] in " \t\r\n":
+                look += 1
+            if look < length and stripped[look] in "]}":  # 字符串外的尾随逗号
+                index += 1
+                continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+def _diagnostic_detail(error: Exception) -> str:
+    """异常类型 + （pydantic）schema 层错误码，**绝不含入参或原始消息**。
+
+    规格 12 §2 要求降级原因可诊断，但校验异常的 ``str()`` 里嵌着模型原始输出
+    （= 会话内容），不得进事件流/日志（与 reason 脱敏同一不变量）。取
+    ``ValidationError.errors()`` 的 ``type`` 字段（如 ``json_invalid`` /
+    ``literal_error``）既够定位，又不带一个字符的数据。
+    """
+    codes = getattr(error, "errors", None)
+    if callable(codes):
+        try:
+            kinds = sorted({str(item.get("type")) for item in codes() if isinstance(item, dict)})
+        except Exception:  # noqa: BLE001 — 诊断辅助，取不到就退回类型名
+            kinds = []
+        if kinds:
+            return f"{type(error).__name__}({','.join(kinds)})"
+    return type(error).__name__
 
 
 class MemoryExtractor:
@@ -105,15 +160,21 @@ class MemoryExtractor:
                 results.append((scope, c.content, metadata))
             return ExtractionOutcome(results)
         except Exception as error:  # noqa: BLE001 — 结构/模型失败走纯规则，异常文本不持久化。
-            error_type = type(error).__name__
-            logger.warning("Memory extraction degraded to heuristic: %s", error_type)
+            detail = _diagnostic_detail(error)
+            # debug 级：调用方（writeback）会用 warning + memory/degraded 事件上报，
+            # 这里再 warning 一次只会让同一次回退在日志里出现两遍。
+            logger.debug("Memory extraction degraded to heuristic: %s", detail)
             try:
                 return ExtractionOutcome(
-                    self._heuristic_extract(events), f"heuristic_fallback: {error_type}"
+                    self._heuristic_extract(events), f"heuristic_fallback: {detail}"
                 )
-            except Exception:  # 规则路径也失败 → 空结果（不伪造候选）
+            except Exception as heuristic_error:  # 规则路径也失败 → 空结果（不伪造候选）
+                # 归因必须指向**规则路径自己**的异常：带上 LLM 阶段的类型名会
+                # 把"正则抽不出来"说成"模型输出有问题"，正好毁掉本次修复的可信度。
                 logger.exception("Memory heuristic extraction failed")
-                return ExtractionOutcome([], f"heuristic_unavailable: {error_type}")
+                return ExtractionOutcome(
+                    [], f"heuristic_unavailable: {type(heuristic_error).__name__}"
+                )
 
     @staticmethod
     def _parse_candidates(content: Any) -> list[_Candidate]:
