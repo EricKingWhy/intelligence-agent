@@ -13,7 +13,8 @@
 | #150 ARCH-7 单实例锁 | DONE | `9a45a20`（+ 流程锚点 `f3224d9`） |
 | #161 PromptRegistry T1 | DONE | `36fd7ef` + `a51fde2` |
 | #162 PromptRegistry T2 | DONE | `af6cf44` |
-| #163–#168 | TODO | |
+| #163 PromptRegistry T3 | DONE | `aa40fc3` |
+| #164–#168 | TODO | |
 | #149 / #151–#160 | TODO | |
 
 ---
@@ -162,3 +163,55 @@ PRD `docs/PRD_PROMPT_REGISTRY.md` **§10.7** 的 `AssembledPrompt` 代码块只�
   含变量 scope 自检不误报。
 - `tests/prompt/` 48 passed；ruff clean；`git diff --check` clean。
 - 全量 pytest `1676 passed / 10 skipped / 39 deselected / 0 failed`。
+
+---
+
+## 4. #163 PromptRegistry T3 三类 profile 迁移（逐字节相同）
+
+**commit**：`aa40fc3`
+
+### 改了什么
+
+- **新建** `src/agent_harness/prompt/builtin.py`：三条 `profile:*:identity` section
+  （文本与迁移前逐字节相同）、公开的 `build_registry()`、`_DECLARED_VARIABLES`、
+  `_declared_scopes()`、`DEFAULT_REGISTRY`，以及 import 期的 `run_self_check`。
+- `prompt/__init__.py`：导出 `DEFAULT_REGISTRY`。
+- `agent/profiles.py`：**只在 `_builtin_prompt(name)` 一处接线**（ADR-0023 D12）。
+  diff 仅 import + helper + 三处 `system_prompt=`，其余字段逐字未动。
+- **`assembly.py` / `agent/factory.py` 零改动**；既有契约测试断言未改。
+- 新增 `tests/prompt/test_profiles_migration.py`（9）、`test_builtin_registry.py`（8）。
+
+### 为什么是单点接线（别在集成时"改回 PRD 字面"）
+
+`agent/profiles.py` 一处接注册表后：parent 走 `assembly.py` 的
+`profile_spec.system_prompt`、child 走 `factory.py` 的 `spec.system_prompt`，
+两条路径**零改动**即一致，不存在两个调用点漂移的可能。若改成"在 factory 里按
+`spec.name` 查注册表"，自定义 `AgentSpec`（B2 契约）与
+`multiagent/provider.py` 传入的自定义 profiles 字典会被内置文案覆盖。
+
+### ⚠ 给 T5 的关键约束（本 Agent 此前注释写错，已修正）
+
+交接文档 **§4.4**：`DEFAULT_REGISTRY = build_registry()` **永不读环境变量**；
+persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_prompt` 读
+`DEFAULT_REGISTRY` 拿到的永远是**不含 persona 的 base 文本**——profile 的逐字节
+断言在 T5 之后依然成立。**不要**把 persona 塞进 `DEFAULT_REGISTRY`：那会让
+`profile:*:identity` 的等价断言在设了 `AGENT_PERSONA` 的机器上红。
+`test_default_registry_equals_build_registry_in_p0` 就是这条不变量的机器化表达。
+
+### 给 T4 的交接
+
+- `_declared_scopes()` 自动覆盖 `aux:*`（不含 `*`），所以 T4 新增 aux section 后
+  自检自动覆盖，**无需维护豁免名单**。
+- 新 section 只要正文含 `{{var}}`，**必须**先登记进 `_DECLARED_VARIABLES`
+  （先 `variable()` 后 `register()`），否则 import 期抛 `undefined_variable`。
+
+### 验证证据
+
+- **逐字节等价**：基线取自 `git show HEAD:src/agent_harness/agent/profiles.py`
+  的 `ast` 抽取（**非手抄**），main(143) / coding(93) / research_review(87) 三条
+  与注册表组装产物 `==` 为 True（`——`、全角 `（）`、拼接处空格全保留）；
+  两轴 code-review 独立复算通过。
+- **真实端到端**：装配真实 runtime → 跑真实 turn → 捕获**模型实际收到的
+  SystemMessage** → 与注册表文本比对，三条 profile 全部 `True`。
+- 三条冻结契约测试 16 passed 且未出现在 diff 中；ruff clean；`git diff --check` clean。
+- 全量 pytest `1693 passed / 10 skipped / 39 deselected / 0 failed`。
