@@ -15,8 +15,7 @@ import threading
 
 from pydantic import BaseModel, Field
 
-from agent_harness.sandbox import Sandbox
-from agent_harness.sandbox.base import ShellFamily
+from agent_harness.sandbox import Sandbox, ShellFamily
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.result import ErrorCode

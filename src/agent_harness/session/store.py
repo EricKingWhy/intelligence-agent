@@ -198,8 +198,10 @@ class JsonlSessionStore:
         只认 run 终结事件：trace_id 是 **per-run** 事实（`run/completed|failed|
         interrupted` 的 data 里），会话可能有多次 run，末端那次才是列表页要展示的。
 
-        快路径与 `_summary_fallback` 共用本方法（各自传自己的末事件），所以
-        「扫描路径与全量严格一致」是结构性的，而非两份实现靠约定对齐。
+        `trace_id` 的取值规则由本方法唯一拥有：快路径与 `_summary_fallback` 各自把
+        自己的末事件传进来，所以**这条规则**在两条路径上的一致性是结构性的，而非
+        两份实现靠约定对齐。（`last_event_time` 仍是两条各自取值的路径，只由
+        `test_fast_path_agrees_with_full_parse_on_clean_session` 断言相等。）
 
         已知边界（有意取舍）：末事件不是 run 终结事件即返回 None——包括
         「上一轮已 completed，但新轮的 user/message 或 run/started 成了末事件」。
