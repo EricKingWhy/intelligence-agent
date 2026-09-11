@@ -735,12 +735,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         summaries = await service.list_sessions()
         return [
             SessionSummary(
-                session_id=s["session_id"],
-                event_count=s["event_count"],
-                first_event_time=s["first_event_time"],
-                last_event_time=s["last_event_time"],
-                first_user_message=s["first_user_message"],
-                trace_id=s["trace_id"],
+                session_id=s.session_id,
+                event_count=s.event_count,
+                first_event_time=s.first_event_time,
+                last_event_time=s.last_event_time,
+                first_user_message=s.first_user_message,
+                trace_id=s.trace_id,
             )
             for s in summaries
         ]

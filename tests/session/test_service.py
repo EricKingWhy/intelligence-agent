@@ -28,6 +28,7 @@ from agent_harness.session.service import (
     SessionServiceError,
     WorkspaceNameInvalid,
 )
+from agent_harness.session.store import SessionSummaryStats
 
 # ── 异常层级 ──────────────────────────────────────────────────────────
 
@@ -144,8 +145,15 @@ class TestListSessions:
         service = SessionService(app_state)
         result = await service.list_sessions()
         assert len(result) == 1
-        assert result[0]["session_id"] == existing_session
-        assert result[0]["event_count"] >= 1
+        assert result[0].session_id == existing_session
+        assert result[0].event_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_returns_domain_dataclass_not_dict(self, app_state, existing_session):
+        """ARCH-4：列表行是领域 dataclass（不再是 dict 中转）——类型系统能抓住字段漂移。"""
+        service = SessionService(app_state)
+        result = await service.list_sessions()
+        assert isinstance(result[0], SessionSummaryStats)
 
     @pytest.mark.asyncio
     async def test_carries_terminal_trace_id(self, app_state, existing_session):
@@ -158,16 +166,16 @@ class TestListSessions:
 
         service = SessionService(app_state)
         result = await service.list_sessions()
-        row = next(r for r in result if r["session_id"] == existing_session)
-        assert row["trace_id"] == "tr-list"
+        row = next(r for r in result if r.session_id == existing_session)
+        assert row.trace_id == "tr-list"
 
     @pytest.mark.asyncio
     async def test_trace_id_none_without_terminal_event(self, app_state, existing_session):
         """只有 session/started（无 run 终态）→ trace_id 为 None，不伪造。"""
         service = SessionService(app_state)
         result = await service.list_sessions()
-        row = next(r for r in result if r["session_id"] == existing_session)
-        assert row["trace_id"] is None
+        row = next(r for r in result if r.session_id == existing_session)
+        assert row.trace_id is None
 
 
 # ── cancel ───────────────────────────────────────────────────────────

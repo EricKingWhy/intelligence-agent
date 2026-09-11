@@ -28,8 +28,14 @@ _SUMMARY_HEAD_PARSE_LIMIT = 200
 
 @dataclass(frozen=True)
 class SessionSummaryStats:
-    """read_session_summary 的产出：列表页所需的最小字段集。"""
+    """read_session_summary 的产出：列表页所需的最小字段集。
 
+    `session_id` 是这一行的身份，与统计字段同属列表页所需——它在这里自洽后，
+    `service.list_sessions` 可原样返回本 dataclass：列表行的字段因此只有一个带类型的
+    定义点，新增字段漏改会被构造点/类型检查暴露，而不是静默丢在契约之外。
+    """
+
+    session_id: str
     event_count: int
     first_event_time: str | None
     last_event_time: str | None
@@ -184,6 +190,7 @@ class JsonlSessionStore:
             return self._summary_fallback(session_id)
 
         return SessionSummaryStats(
+            session_id=session_id,
             event_count=event_count,
             first_event_time=first_time,
             last_event_time=last_event.time if last_event is not None else None,
@@ -220,6 +227,7 @@ class JsonlSessionStore:
         events = self.read_events(session_id)
         if not events:
             return SessionSummaryStats(
+                session_id=session_id,
                 event_count=0, first_event_time=None,
                 last_event_time=None, first_user_message=None,
             )
@@ -232,6 +240,7 @@ class JsonlSessionStore:
         if first_user_message is not None:
             first_user_message = first_user_message.strip()[:128]
         return SessionSummaryStats(
+            session_id=session_id,
             event_count=len(events),
             first_event_time=events[0].time,
             last_event_time=events[-1].time,

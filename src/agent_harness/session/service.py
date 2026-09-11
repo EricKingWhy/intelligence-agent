@@ -80,7 +80,7 @@ from agent_harness.session.model_switch import (
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session
-from agent_harness.session.store import JsonlSessionStore
+from agent_harness.session.store import JsonlSessionStore, SessionSummaryStats
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalResponse,
@@ -243,31 +243,21 @@ class SessionService:
 
     # ── 只读操作 ─────────────────────────────────────────────────────
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
+    async def list_sessions(self) -> list[SessionSummaryStats]:
         """列出所有 session 摘要（按最近活动倒序）。
 
-        返回 list of dict（与 SessionSummary 字段一致），
-        由调用方映射为 API response model。
+        直接返回领域 dataclass（`SessionSummaryStats` 自带 `session_id`），不拼一层
+        只做形状复述、没有校验与行为的 dict 中转——列表行的字段因此在领域层就有带类型的
+        唯一定义点。由调用方（`web/app.py`）映射为 API response model。
         """
         store = self._state.store
         ids = await anyio.to_thread.run_sync(store.list_session_ids)
-        summaries: list[dict[str, Any]] = []
+        summaries: list[SessionSummaryStats] = []
         for sid in ids:
             stats = await anyio.to_thread.run_sync(store.read_session_summary, sid)
             if stats is None or stats.event_count == 0:
                 continue
-            summaries.append(
-                {
-                    "session_id": sid,
-                    "event_count": stats.event_count,
-                    "first_event_time": stats.first_event_time,
-                    "last_event_time": stats.last_event_time,
-                    "first_user_message": stats.first_user_message,
-                    # OBS-010：最近一次 run 的 trace_id（末事件是 run 终结事件时才有；
-                    # 未配置可观测性时为 None）。
-                    "trace_id": stats.trace_id,
-                }
-            )
+            summaries.append(stats)
         return summaries
 
     async def get_events(self, session_id: str) -> list:
