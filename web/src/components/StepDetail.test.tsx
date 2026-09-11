@@ -154,13 +154,14 @@ describe('formatEventTooltip（C4）', () => {
     expect(lines).toEqual(['step 0']);
   });
 
-  it('step_id 键缺失（后端省略 null 字段的真实线上形状）：不产出 step 行，绝不渲染 "undefined"', () => {
-    // 后端序列化省略值为 null 的字段 —— 'step_id' 整个键不存在，不是 step_id: null。
+  it('step_id 键缺失（GET 历史事件省略 null 键的真实线上形状）：不产出 step 行，绝不渲染 "undefined"', () => {
+    // GET /events 走 SessionEvent.to_dict：值为 None 的字段整个键省略（不是 null）。
     // 实测 GET /api/sessions/<id>/events 的 seq 0/1/2 均 'step_id' in e === false。
-    const e = {
+    // 编译期锁：该字面量刻意不带 step_id——类型若改回必填，tsc 在此变红。
+    const e: AgentEvent = {
       type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', session_id: 's',
-    } as unknown as Parameters<typeof formatEventTooltip>[0];
-    expect('step_id' in (e as object)).toBe(false);
+    };
+    expect('step_id' in e).toBe(false);
     expect(formatEventTooltip(e)).toEqual([]);
     const withTime = formatEventTooltip({ ...e, time: '2026-09-05T13:17:06.288+08:00' });
     expect(withTime).toHaveLength(1);
@@ -181,11 +182,11 @@ describe('EventInspector Overview（BUG-008）', () => {
       onFocusTool: noop,
       onFocusEvent: noop,
     })).replaceAll('<!-- -->', '');
-  const baseEvent = { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', session_id: 's', event_id: 'e1' };
-  const withStep = (step_id: number | null) => ({ ...baseEvent, step_id }) as unknown as AgentEvent;
+  const baseEvent: AgentEvent = { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', session_id: 's', event_id: 'e1' };
+  const withStep = (step_id: number | null) => ({ ...baseEvent, step_id });
 
   it('step_id 键缺失：不渲染空的 step 幽灵行（否则出现「step」后跟空值）', () => {
-    const html = renderEvent(baseEvent as unknown as AgentEvent);
+    const html = renderEvent(baseEvent);
     expect(html).not.toContain('>step<');
     // 阳性对照——面板整体确实渲染了（避免「整个面板没渲染」这种空洞绿）
     expect(html).toContain('run/started');
