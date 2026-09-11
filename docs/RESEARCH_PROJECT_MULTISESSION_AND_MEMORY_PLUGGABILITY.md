@@ -219,3 +219,62 @@ workspace = (
 - **每次 append 加文件锁**：慢，且治不了重复执行副作用——那是 run 归属问题，不是 IO 问题。
 - **项目硬删除 / 上传导入 / 目录浏览器**：见 §2.2 与 #155 非目标；目录浏览器若要做需新的宿主侧端点，单独立项。
 - **`additionalDirectories` 式多项目归属**：DSH 里一个会话结构上至多属于一个 workspace，本需求不需要多归属。
+
+---
+
+## 7 记忆生命周期（update / delete / forget / 冲突消解）决策与票
+
+§6 把"capability 面偏窄"列为独立议题——本节是它的结论。用户 2026-09-11 明确要求实现这四项。
+
+### 7.1 关键发现：上游本来就支持，是我们关了四处
+
+| # | 位置 | 现状 |
+| --- | --- | --- |
+| 1 | `memory/langmem_capability.py` | `actions_permitted=("create",)`（上游默认 `('create','update','delete')`） |
+| 2 | 同文件 | `enable_deletes=False` |
+| 3 | `memory/base_store_adapter.py` | `if op.value is None: raise NotImplementedError("Memory delete/TTL is not enabled")`——LangGraph 的 `PutOp(value=None)` **就是删除** |
+| 4 | `langmem_capability.py` | **没传 `query_model`** → `langmem/knowledge/extraction.py:892` 才启用查询生成 → manager 永不检索既有记忆，默认 prompt 的 "Compare & Update / Remove incorrect or redundant" **全程空转** |
+
+→ 所以"冲突消解"缺的是**流程**（retrieve-before-write），不是 provider 能力。
+
+### 7.2 seam A 与这四项的关系（分轴）
+
+| 轴 | 归谁 | A 的作用 |
+| --- | --- | --- |
+| 契约面（update/forget 动词） | 我们 | 不变 |
+| 机制面（tombstone / outbox 操作类型 / 向量删除） | 我们 | 不变 |
+| 流程面（retrieve-before-write） | 我们 | 不变 |
+| 策略面（什么该合并/取代） | **provider 专有** | **A 让它可行** |
+
+**A 是必要不充分**：它让"采纳一个已经会做这些的 provider"成为可能，本身不提供这四项。**B 在这里有害**：会把 Mem0/Zep 的冲突策略逼进我们那个三动词的窄接口里重新实现。
+
+### 7.3 用户决策（2026-09-11）
+
+| 议题 | 决策 |
+| --- | --- |
+| 遗忘入口 | **用户 API/UI + 模型工具，且模型工具必须走 Runtime 审批**（不变量 #11，不靠 prompt） |
+| 冲突消解默认策略 | **LLM 决定合并 / 取代**（质量优先，接受"每次写入多一次检索 + 一次 LLM 调用"） |
+| 删除语义 | **硬删**（真删行与索引） |
+| 审计位置 | **不进会话事件流**，落 memory 侧 / 结构化日志（记忆是 Capability，不是会话真相；不变量 #16/#22） |
+
+### 7.4 已知陷阱（已定位，写进票里钉死）
+
+`SqliteMemoryRecordStore.pending()` 是 **JOIN 驱动**（`memory_records r JOIN memory_outbox o`）。选硬删后，先删记录行再读 outbox —— **JOIN 会把这个 id 过滤掉，删除永远传播不到 Milvus**，向量索引永久残留。outbox 必须能脱离记录行独立驱动。
+
+### 7.5 票与依赖
+
+```text
+#156 MEM-1 契约+机制（update/forget、outbox operation、硬删端到端）  ← 共同前置
+   ├─▶ #157 MEM-2 解禁 LangMem（value=None→delete、actions_permitted、enable_deletes）
+   ├─▶ #158 MEM-3 冲突消解 retrieve-before-write（LLM 决策）   ← 强依赖 #157
+   └─▶ #159 MEM-4 遗忘入口（模型工具 DANGER+审批、用户 API）
+          └─▶ #160 MEM-5 前端记忆管理 UI（跨端，前端半）
+```
+
+### 7.6 过程记录：并发会话共用 worktree 导致提交落错分支（已按用户批准归位）
+
+本批次提交期间，另一个并行会话在**同一 worktree**（`D:/intelligence-agent-backend`）从 `ee2977e` 建了 `feat/FixBUG` 并切过去，导致本批 4 个 commit 落到 `feat/FixBUG` 上；随后 worktree 被切回 `feat/backend`，本批工作一度不在预期分支。这正是 AGENTS.md §13.3 明令禁止的情形（并行会话不得共用 worktree）。
+
+**处置（用户明确批准 cherry-pick）**：先机械验证"本批 4 个 commit 的路径集"与"另一会话未提交的改动路径集"**零交集**（避免一旦冲突 abort 会连带毁掉对方未提交工作），再执行 `git cherry-pick ee2977e..feat/FixBUG`。结果：feat/backend 得到 4 个新 commit（`9a9b467` / `c65efc2` / `9d0f0c4` / `92f2682`），且 **`git diff feat/FixBUG feat/backend` 为空**（树逐字节一致，证明内容无偏差），另一会话的 4 个改动文件原样保留、未受影响。`feat/FixBUG` 上的旧 commit 保留不删。
+
+**教训**：同一 worktree 上任何 git 写操作前，先 `git rev-parse --abbrev-ref HEAD` 确认分支归属；并行会话应各自使用独立 worktree（§13.1 的固定目录分工）。
