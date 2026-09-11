@@ -43,7 +43,11 @@
     `[Showing lines 1-2000 of 5000. Use offset=2001 to continue.]`，
     并新增 `total_lines` 字段；`offset` 是 read 的新参数（1-based 起始行）。
     UI 可把标记渲染成"续读"提示/按钮（填充下一次 tool call 的 offset）。
-  - 超长单行：`[Line 1 truncated at 51200 bytes. Use bash with 'sed -n ...']`（不可续读）。
+  - 超长单行：`[Line N truncated at 51200 bytes. …]`（不可续读）。**解析只认前缀
+    `[Line {n} truncated at {bytes} bytes` 与结尾 `]`，中间措辞可变**——OBS-016 后
+    正文已改为解释器无关的表述（旧文案教模型用 `sed`/`head -c`，在 Windows cmd.exe
+    下不存在）；而**历史会话里仍是旧文案**，`LINE_TRUNCATED_RE` 的 `[^\]]*` 必须
+    同时容忍两种。
   - 空文件：`content: ""` + `total_lines: 0`（正常成功）。
 - **grep 工具**：匹配行可能以 `... [truncated]` 结尾（单行 >500 字符被截）。
 - **bash 工具**：`data` 可能新增 `"cancelled": true`（命令被超时/断连取消，
