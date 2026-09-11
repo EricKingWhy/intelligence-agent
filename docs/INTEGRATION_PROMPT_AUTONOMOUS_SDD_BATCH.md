@@ -14,7 +14,8 @@
 | #161 PromptRegistry T1 | DONE | `36fd7ef` + `a51fde2` |
 | #162 PromptRegistry T2 | DONE | `af6cf44` |
 | #163 PromptRegistry T3 | DONE | `aa40fc3` |
-| #164–#168 | TODO | |
+| #164 PromptRegistry T4 | DONE | `2c77c3b` |
+| #165–#168 | TODO | |
 | #149 / #151–#160 | TODO | |
 
 ---
@@ -215,3 +216,69 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
   SystemMessage** → 与注册表文本比对，三条 profile 全部 `True`。
 - 三条冻结契约测试 16 passed 且未出现在 diff 中；ruff clean；`git diff --check` clean。
 - 全量 pytest `1693 passed / 10 skipped / 39 deselected / 0 failed`。
+
+---
+
+## 5. #164 PromptRegistry T4 三条辅助 prompt 迁移
+
+**commit**：`2c77c3b`
+
+### 改了什么（三处调用点各只改 1 处）
+
+| 现状 | 迁移后 |
+| --- | --- |
+| `context/compactor.py` 模块常量 `_SIX_SECTION_PROMPT`（**已删**） | `assemble("aux:compaction").system_text`（SYSTEM，**保留结尾 `\n`**） |
+| `memory/extractor.py` 内联 SystemMessage 正文 | `assemble("aux:memory_extraction").system_text`（SYSTEM） |
+| `session/fork.py` f-string | `assemble("aux:fork_tail", {"tail_text": …}).meta_user_text`（**META_USER**） |
+
+`builtin.py` 追加 `_AUX_SECTIONS` 三条 + `_DECLARED_VARIABLES` 登记 `tail_text`。
+新增 `tests/prompt/test_aux_prompts.py`（13）。
+
+### 必须守住的三点（集成时别"顺手修"）
+
+1. `aux:memory_extraction` 正文里的 `[{scope, content, importance}]` 是**单层花括号
+   字面量**，不是模板变量。改成 `{{…}}` 会凭空引入一个无人赋值的必填变量 →
+   **import 期就崩**。
+2. `aux:compaction` 正文**结尾有一个 `\n`**（组装不做 strip）。删掉它，"逐字节相同"
+   就是假的；`test_compaction_prompt_preserves_trailing_newline` 专门盯这个
+   （T3 的 profile 正文首尾无空白，测不出这类 bug）。
+3. `aux:fork_tail` 是 `META_USER`（现状是单条 `HumanMessage`）。target 的判据是
+   **消息角色**，与"是否持久化"无关。
+
+### 既有测试改动 3 条（票面只预告 1 条，另 2 条是同类强制改动）
+
+全在 `tests/prompt/`，**均不在 PRD §10.9 保护清单内**；都是 T3 写下、pinned 到 P0
+状态的断言，T4 后必然变化，且改后**更严格**：
+`test_builtin_registry_has_three_profile_sections`（→ 按 `profile:` 前缀过滤，不再钉总数）、
+`test_declared_variables_is_empty_in_p0`（→ 精确集合 `{tail_text}`）、
+`test_declared_scopes_excludes_wildcard_and_covers_all_profiles`（→ 精确列表 6 项）。
+三条保护清单测试**未出现在 diff 中**。
+
+**⚠ 注意**：`test_builtin_registry_has_six_sections`（精确 6）是票面要求的，
+后续每张票加 section 都会顶到它。若集成方觉得摩擦大，可放宽为按 scope 前缀分类计数
+——但那是改票面要求，需你决定。
+
+### AC 字面偏差（如实记录，未擅自"补齐"）
+
+票面 AC 要求 `grep -rn "_SIX_SECTION_PROMPT" src/ tests/` 为空；实际返回 2 行
+**注释**（`builtin.py` 与 `test_aux_prompts.py` 各一处，写明该文本迁移前的出处）。
+**无任何代码残留或依赖**，故保留这两处 provenance 注释。若集成方坚持字面达标，
+删掉这两行注释即可。
+
+### 验证证据
+
+- **逐字节等价**：三条 `LEGACY_*` 基线取自 `git show HEAD:<path>` 的 ast 抽取
+  （非手抄、非反向拷贝）——compaction 263 字符且尾 `\n` 保留 / extraction 256 /
+  fork head 93 + 变量；两轴 review 独立复算全部 PASS。
+- **真实端到端**（真类 + 脚本化模型）：`TailSummarizer.summarize` 单条 HumanMessage
+  等价；`MemoryExtractor.extract` SystemMessage 等价且花括号保留；
+  `ContextCompactor.compact` **真实触发压缩**（`fallback_used=False`、产出摘要），
+  发给模型的 system 指令等价且尾换行保留。
+- `tests/prompt/` 77 passed；ruff clean；`git diff --check` clean。
+- 全量 pytest `1706 passed / 10 skipped / 39 deselected / 0 failed`。
+
+### 既有 flaky（与本批无关，别算到本批头上）
+
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`
+被独立审查者在**同一份代码**上 5 跑 2 失败，clean HEAD 亦通过，且该文件不在本批
+任何 diff 内。已按 §8 记入 `docs/FRONTEND_ISSUES_LOG.md` **OBS-9.3**，未顺手修。
