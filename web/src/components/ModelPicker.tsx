@@ -23,7 +23,7 @@
 
 import * as Popover from '@radix-ui/react-popover';
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from 'cmdk';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Check, ChevronDown, Cpu, Search } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
 
@@ -59,6 +59,24 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
   );
   const effectiveSelectedModel = selectedEntry?.name ?? null;
   const triggerLabel = selectedEntry?.name ?? '默认链';
+
+  /** BUG-011：**弹层已关就不再接受选中**。
+   *
+   * 第一次选中后 `setOpen(false)`，但浮层在 `--dur-out`（150ms）退出动画期间节点
+   * 仍留在 DOM 且可命中——真机上人类双击的第二次 `click`（实测间隔 ≤120ms 都会
+   * 命中）会再次进入 `onSelect`，发出第二个 `POST /model`；后端两个请求各自基于
+   * 同一份快照取号，写出重复 `seq`，该会话此后恒 404。
+   * 关闭态下的选中一律丢弃——实测 `dblclick()`（一次手势两下点击）与
+   * `page.mouse.click` ×2 都只产生一个请求：两次 click 之间 React 已提交
+   * `open=false`，第二次进来必然看到关闭态。回归锁见 e2e/q-model-dedupe.spec.ts。 */
+  const commitSelection = useCallback(
+    (value: string) => {
+      if (!open) return;
+      onModelChange(value === DEFAULT_VALUE ? null : value);
+      setOpen(false);
+    },
+    [open, onModelChange],
+  );
 
   // 端点缺席：不渲染（不伪造列表）。调用方靠这个降级隐藏入口。
   if (models.length === 0) return null;
@@ -109,10 +127,7 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
                 <CommandItem
                   value={DEFAULT_VALUE}
                   className={`model-picker-item ${effectiveSelectedModel === null ? 'sel' : ''}`}
-                  onSelect={(value) => {
-                    onModelChange(value === DEFAULT_VALUE ? null : value);
-                    setOpen(false);
-                  }}
+                  onSelect={commitSelection}
                 >
                   <span className="model-picker-item-label">默认链</span>
                   <span className="model-picker-item-meta">系统自动选</span>
@@ -127,10 +142,7 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
                       value={m.name}
                       keywords={[m.provider, m.model].filter((s): s is string => Boolean(s?.length))}
                       className={`model-picker-item ${effectiveSelectedModel === m.name ? 'sel' : ''}`}
-                      onSelect={(value) => {
-                        onModelChange(value);
-                        setOpen(false);
-                      }}
+                      onSelect={commitSelection}
                     >
                       <span className="model-picker-item-label">{m.name}</span>
                       <span className="model-picker-item-meta">

@@ -53,6 +53,11 @@ export interface ApiMock {
   contextProviders?: unknown[];
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/model（T7 #137 模型切换；缺省 200 → 回传请求的
+   *  provider/model_id，即真实端点的「规范 model_id」形状）。
+   *  注入此回调即可**计数**或延迟响应（BUG-011 回归锁：双击只允许一个请求；
+   *  延迟响应用来撑开「首个请求还没回来就又点了一下」这个窗口）。 */
+  onModelPost?: (route: Route) => Promise<void> | void;
   /** POST /api/sessions/{id}/forks（T7 #137 分叉；缺省 200 → 派生 child）。
    *  注入此回调即可断言请求体（BUG-001 回归锁：from_seq 必须是 user/message 的
    *  seq，不是 turn.step_id）或伪造 422。 */
@@ -102,6 +107,19 @@ export function routeApi(page: Page, mock: ApiMock): void {
     }
     if (path === '/api/context-providers') {
       return route.fulfill({ status: 200, body: JSON.stringify({ providers: mock.contextProviders ?? [] }), contentType: 'application/json' });
+    }
+    if (/^\/api\/sessions\/[^/]+\/model$/.test(path) && req.method() === 'POST') {
+      if (mock.onModelPost) return mock.onModelPost(route);
+      const body = (req.postDataJSON() ?? {}) as { provider?: string; model_id?: string };
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({
+          status: 'changed',
+          provider: body.provider ?? '',
+          model_id: body.model_id ?? '',
+        }),
+        contentType: 'application/json',
+      });
     }
     if (/^\/api\/sessions\/[^/]+\/messages$/.test(path) && req.method() === 'POST') {
       if (mock.onMessagesPost) return mock.onMessagesPost(route);

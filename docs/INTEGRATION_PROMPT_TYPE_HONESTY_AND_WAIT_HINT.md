@@ -80,11 +80,11 @@ npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 &&
 3. **停顿提示的可达窗口与前端自己的重连 give-up 重叠**：提示在空闲 30s 出现，而客户端
    `RECONNECT_STALL_MS(10s) × MAX_RECONNECT_ATTEMPTS(3)` 约在 30–40s 走 give-up
    （`streaming=false` → 提示让位给断线横幅）。即真实停顿里提示的窗口约 10s；这是**有意的
-   升级顺序**（旁注 → 断线横幅 → 恢复入口），但若产品希望「停顿期间始终有说明」，需要重新
-   设计 give-up 与提示的关系（改 `shouldShowWaitHint` 的门或调阈值）。
+   升级顺序**（旁注 → 断线横幅 → 恢复入口）。**用户决定（2026-09-11）：不需要改**，按现状保留。
 4. **同屏两个计时数字语义不同**：脉冲 `思考中 · Ns` 是**流龄**且重连成功后重置，提示的秒数是
    **跨重连累计的空闲**（真机见到 26s vs 101s）。这是脉冲既有语义、非本票引入；最小消除办法是
-   提示可见时隐藏脉冲秒数，但那会动到 #148 AC 要求保留的既有计时显示，故**只登记未改**。
+   提示可见时隐藏脉冲秒数，但那会动到 #148 AC 要求保留的既有计时显示。**用户决定
+   （2026-09-11）：保留计时显示，不改。**
 5. **e2e 的时钟是虚拟的**：`o-wait-hint.spec.ts` 用 `page.clock` 快进（浏览器/渲染/断言都是真的，
    只有时钟被替换）。真实的 30s 等待由第 4 节的真机观测覆盖，不靠这条 e2e。
 
@@ -107,6 +107,6 @@ npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 &&
   · vite build ✓；后端本轮零改动。
   关单：#147、#148 已关闭（证据见 issue comment）。集成提示词：
   `docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。
-  残留：`step_id` 模板字符串写法仍可通过 tsc（见提示词第 5 节）；停顿提示与重连 give-up
-  的窗口重叠属有意升级顺序。
+  残留：`step_id` 模板字符串写法仍可通过 tsc（见提示词第 5 节，唯一未闭合项）；停顿提示与
+  重连 give-up 的窗口重叠、同屏两个计时数字语义不同**均已由用户确认按现状保留**。
 ```
