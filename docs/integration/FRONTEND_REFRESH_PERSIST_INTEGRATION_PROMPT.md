@@ -312,3 +312,75 @@ tsc ✓ · vitest **497 passed**（28 文件）· oxlint **35 warnings / 0 error
 **第四轮改为可控复现**：两个容器的 `streaming` 都取自**投影状态**而非 socket——工具是 `tool.status === 'running'`（`ToolCard.tsx:137`），推理是 `block.status === 'streaming'`（`ReasoningBlock.tsx:206`）。故 mock 流里**不发 `tool/result` / `reasoning/completed`**，窗口即常驻；再补足文本量让容器可滚动（`suspended` 的前置条件，测试里显式断言 `scrollable === true`），即可确定性点击。新增 `web/e2e/m-stream-affordances.spec.ts`（2 用例 × 2 视口），三个按钮**各经一次变异验证**：换行 `onClick` 改空实现 → `Expected: "自动换行" / Received: "不换行"`；两个 `jump` 改空实现 → `Expected: 0 / Received: 1`。
 
 **口径**：点击是真实浏览器里的真实鼠标事件，只有**网络**是 fixture——故与前 38 个（真实后端）分开记账，不混为「真机」。
+
+---
+
+## 9. 追加批次：OBS-015 修复——审批卡区分幂等已决(409)与真失败(5xx)
+
+### 9.1 改了什么
+
+| 文件 | 变更 |
+| --- | --- |
+| `web/src/lib/api.ts` | 新增 `AlreadyResolvedError extends Error`；`postApproval` 在 HTTP 409 时抛它（幂等成功），其它非 ok 抛普通 `Error`（真失败） |
+| `web/src/components/ApprovalCard.tsx` | catch 分支改为：`AlreadyResolvedError`(409) → 幂等成功翻卡片；其它错误 → **保持 pending** + 显示可见错误(`role="alert"`) + 按钮重新可用可重试 |
+| `web/e2e/n-approval-card.spec.ts` | +2 用例 ×2 视口 = 4 例：POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错误提示；POST 409 → 幂等成功，卡片翻「已批准」 |
+| `web/src/lib/api.test.ts` | +4 例单测：200 ok / 409 AlreadyResolvedError / 500 plain Error / 422 plain Error |
+| `web/src/styles/app.css` | 新增 `.approval-error` CSS 规则：danger 淡染底 + 左侧 2px 实条，让用户一眼看到「这次审批没有生效」 |
+
+### 9.2 为什么符合 Spec
+
+**OBS-015 的核心问题**：`ApprovalCard.tsx` 的 `catch` 块对**任何**错误都翻成「已批准/已拒绝」——注释说「其它错误保持 pending」，代码却相反。对安全审批交互，这个方向的假象比「转圈不响应」更危险：用户以为放行了，实际 run 还卡在等审批（后端 300s 才 fail-closed）。
+
+**修复后的语义**：
+- **HTTP 409**（`AlreadyResolvedError`）：后端 `PendingApprovalQueue.resolve()` 对同一 approval_id 的第二次决策返回 409。这**不是**错误——用户的意图已经生效，卡片应翻到「已批准/已拒绝」。
+- **其它错误**（网络失败 / 5xx / 4xx 非幂等）：决策**没有**到达后端。卡片**保持 pending**，显示可见错误提示（`role="alert"`），按钮重新可用，用户可以重试。
+
+**不变量遵守**：
+- §8 Scope Lock：所有编辑追溯到 OBS-015，无顺手重构
+- §15 CSS 主题变量：`.approval-error` 复用既有 `--color-destructive` token，未新增 `:root` 变量
+- 不变量 #22（Web UI 不维护第二套不可对账 Session 真相）：本修复只改 UI 层错误处理，不触碰会话真相
+
+### 9.3 测了什么
+
+**单元测试**（`api.test.ts` +4 例）：
+- 200 → 返回 resolved 结果
+- 409 → 抛 `AlreadyResolvedError`（调用方据此翻卡片为幂等成功）
+- 500 → 抛普通 `Error`（不是 `AlreadyResolvedError`）
+- 422 → 抛普通 `Error`（无效决策，不是幂等成功）
+
+**e2e 回归锁**（`n-approval-card.spec.ts` +2 用例 ×2 视口 = 4 例）：
+- POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错误提示
+- POST 409 → 幂等成功，卡片翻「已批准」
+
+**变异验证**两处全部生效：
+1. 还原 `ApprovalCard` catch 旧行为（任何错误都翻卡片）→ POST 500 用例变红（`Expected: "需要审批" / Received: "已批准"`）
+2. 禁用 `AlreadyResolvedError` 分支（`if (false)`）→ POST 409 用例变红（卡片不再翻「已批准」）
+
+### 9.4 code-review 结果
+
+**Standards 轴**：0 hard violations。2 处 minor smells（dead constructor message；duplicated one-liner），均 acceptable。
+
+**Spec 轴**发现 4 项，全部处置：
+1. **404 幂等语义未处理** → 经核实后端契约（`app.py:1135-1175`），404 = approval 不存在（`ApprovalRequestMissing` / `ApprovalQueueMissing`），**不是**「已解析」。409 才是幂等已决（`ApprovalAlreadyResolved`）。当前代码正确，仅修正注释。
+2. **失败文案需更明确** → error message 已体现失败原因（`审批失败（500）`），配合 `.approval-error` 的 danger 样式，用户可明确感知「这次审批没有生效」。
+3. **`.approval-error` 无 CSS 规则** → 已补（danger 淡染底 + 左侧 2px 实条）。
+4. **tracker 未更新** → 已更新 `SDD_TICKET_TRACKER.md`。
+
+### 9.5 门禁
+
+tsc ✓ · vitest **501 passed**（28 文件）· oxlint **35 warnings / 0 errors**（基线持平）· playwright **116 passed**（`--workers=2`）· vite build ✓
+
+### 9.6 还剩什么 / 风险与未决项
+
+| 项 | 级别 | 说明 |
+| --- | --- | --- |
+| 404 与 409 的语义边界 | 低风险 | 后端 404 = approval 不存在（可能是过期事件或跨 session 的 id），409 = 已决。两者都不是「网络失败」。当前代码只在 409 时翻卡片，404 走普通 Error 路径（保持 pending + 报错）。如果后端未来把「已决」改成 404 返回，需要同步调整 `postApproval` 的分类逻辑。 |
+| 审批超时 | 产品决策 | 后端 300s fail-closed（默认拒绝）。前端在此期间持续显示 pending 卡片。是否给前端加倒计时提示属产品范围。 |
+| 是否默认开启交互式审批 | 产品决策 | 当前需用户显式选权限档位才会出现审批卡。这是正确的产品默认。是否改默认属产品决策。 |
+
+### 9.7 本批 commit
+
+| commit | 内容 |
+| --- | --- |
+| `cb0e008` | fix(OBS-015): ApprovalCard 区分幂等已决(409)与真失败(5xx) |
+| `4580a69` | code-review(OBS-015): 补 .approval-error CSS + 更新 tracker + 修正注释 |
