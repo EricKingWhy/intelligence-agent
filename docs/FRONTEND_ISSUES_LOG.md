@@ -748,7 +748,7 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 
 `sleep 30 && echo resume-test-done`、`ping -n 45 127.0.0.1` 均以 `TIMEOUT`（`retryable:false`）失败；`ping -n 4` / `sleep 9` 正常。即单条命令**上限 10.0s**，长任务必须由模型自行切分。结合 OBS-013 会出现「想跑长命令 → 超时 → 反复重试/退化」的组合失效。
 
-#### OBS-015 审批卡的 `catch` 把「任何错误」都当成已决——注释与行为相反（P2，预存在，**本轮由独立审查发现**）
+#### OBS-015 审批卡的 `catch` 把「任何错误」都当成已决——注释与行为相反（P2，**已修复**）
 
 **位置**：`web/src/components/ApprovalCard.tsx:26-33`。
 
@@ -763,11 +763,22 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 
 **证据（本轮反驳「UI 变了 = 决策成功」的直接原因）**：把 `/approve` 改成恒返回 404，UI 依旧显示「已批准」、按钮消失、请求体依旧正确——**只有查后端 `permission/resolved` 才能区分**。故联调车道的判决断言改为轮询后端事件（`e2e-live/approval-live.spec.ts`）。
 
-**建议（需产品决策，本轮未改代码，§8 Scope Lock）**：区分 `409/404 已决`（幂等成功，翻已决）与**其它**传输/服务错误（**保持 pending + 报错提示**，让用户可重试）。至少应先把注释改成与代码一致，避免下一个人再被误导。
+---
 
-**回归锁现状**：`e2e/n-approval-card.spec.ts` 只覆盖**成功路径**（mock 返回 200）。失败路径**无覆盖**——修 OBS-015 时应补一条「POST 500 → 卡片保持 pending」的用例。
+**处置结果（2026-09-11 修复）**：
 
-**本轮门禁**：tsc ✓ · vitest **494 passed** · oxlint **35 warnings / 0 errors** · playwright **100 passed**（+2）· vite build ✓。
+1. **`api.ts` 新增 `AlreadyResolvedError`**：`postApproval` 在 HTTP 409 时抛 `AlreadyResolvedError`，其它非 ok 抛普通 `Error`。这样调用方可以区分「幂等已决」（409）与「真失败」（5xx/网络）。
+2. **`ApprovalCard.tsx` 修复 `decide` 的 catch**：
+   - `AlreadyResolvedError`（409）→ 视为幂等成功，翻卡片为「已批准/已拒绝」。
+   - 其它错误 → **保持 pending**，显示可见错误提示（`role="alert"`），按钮重新可用，用户可重试。
+3. **回归锁**（`e2e/n-approval-card.spec.ts` 新增 2 用例 × 2 视口 = 4 例）：
+   - **POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错误提示**。
+   - **POST 409 → 幂等成功，卡片翻「已批准」**。
+4. **变异验证**（两处各一次，全部生效）：
+   - 把 `ApprovalCard` 的 catch 还原为旧行为（任何错误都翻卡片）→ POST 500 用例变红（`Expected: "需要审批" / Received: "已批准"`）。
+   - 把 `AlreadyResolvedError` 分支改为 `if (false)` → POST 409 用例变红（卡片不再翻「已批准」）。
+
+**门禁**：tsc ✓ · vitest **501 passed** · oxlint **35 warnings / 0 errors** · playwright **116 passed** · vite build ✓。
 
 ### 本轮审查（对新增的 `l-auth-banner.spec.ts`）：0 个 P0/P1，1 项 **P2** + 4 项 P3——全部已处置
 

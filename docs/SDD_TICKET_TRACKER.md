@@ -19,7 +19,30 @@
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
-### 最近一批：瞬态三键 + 401 缝 + 审批卡两键（覆盖账目收口到 45/45，2026-09-11）
+### 最近一批：OBS-015 修复——审批卡区分幂等已决(409)与真失败(5xx)（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `cb0e008` |
+| 门禁 | tsc ✓ / vitest **501 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **116 passed**（`--workers=2`）/ vite build ✓ |
+| 交付 | ① `api.ts` 新增 `AlreadyResolvedError`；`postApproval` 在 HTTP 409 时抛它，其它非 ok 抛普通 `Error`。② `ApprovalCard.tsx` 修复 catch：`AlreadyResolvedError`(409) → 幂等成功翻卡片；其它错误 → 保持 pending + 显示可见错误(`role="alert"`) + 按钮重新可用可重试。③ 回归锁 `e2e/n-approval-card.spec.ts` +2 用例 ×2 视口 = 4 例。④ `.approval-error` CSS 规则（danger 淡染底 + 左侧 2px 实条）。⑤ 单测 `api.test.ts` +4 例（200 ok / 409 AlreadyResolvedError / 500 plain Error / 422 plain Error）。 |
+| 变异验证 | 两处全部生效：① 还原 ApprovalCard 旧行为（任何错误都翻卡片）→ POST 500 用例变红（`Expected: "需要审批" / Received: "已批准"`）。② 禁用 AlreadyResolvedError 分支 → POST 409 用例变红（卡片不再翻「已批准」）。 |
+| code-review | Standards 轴 0 hard violations、2 minor smells（均 acceptable）。Spec 轴发现 4 项：① 404 幂等语义未处理 → 经核实后端契约 404 = approval 不存在（不是「已解析」），409 才是幂等已决，当前代码正确。② 失败文案需更明确 → 已在 error message 中体现。③ `.approval-error` 无 CSS → 已补。④ tracker 未更新 → 本批更新。 |
+
+#### 补记（2026-09-11 收尾）：404 语义订正 + 注释与代码对齐 + 404 fail-safe 锁
+
+OBS-015 的既有 code-review 已判出「404 ≠ 幂等已决，当前代码正确」，但**只改了 tracker**，遗留了三处与代码矛盾的载体。本次收尾（**零产品行为改动**）：
+
+| 项 | 内容 |
+| --- | --- |
+| 订正 1 | `web/src/lib/api.ts` 的 `postApproval` docstring 原写「404 with "already resolved" detail = same semantics → AlreadyResolvedError」，与代码（只有 409 抛 `AlreadyResolvedError`）相反，且会把「决策没生效」误显示成「已批准」。已按后端真实语义改写：404 的四个来源（session 不存在 / 审批队列缺失 / `approval_id` 不在队列 / 事件过期，`web/app.py:1157-1166`）无法与「已解析且已出队」区分 → 必须保持 pending；真已决由 `permission/resolved` 投影事件兜底。 |
+| 订正 2 | `docs/PROMPT_FRONTEND_NEXT_BATCH.md` 原把「409/404 幂等语义走已决」写进任务步骤与验收标准（**该前提本身是错的**，会诱导后人实现 404-as-success）。已加 2026-09-11 订正块：保留原文 + 明确 **404 不走已决**。 |
+| 新增锁 | `web/e2e/n-approval-card.spec.ts` +1 用例 ×2 视口：**POST 404 → 保持「需要审批」+ 错误文案含 404 + 按钮仍可重试**（此前该路径零覆盖）。 |
+| 变异验证 | 注入「旧提示词推荐的错误实现」（`if (404) throw AlreadyResolvedError`）→ 新 404 用例**两视口变红**（2 failed / 12 passed）→ 还原后全绿。证明新锁非空洞。 |
+| 未改 | `docs/FRONTEND_ISSUES_LOG.md` 的 OBS-015 条（证据记录，按 HANDOFF §8 不重写）；`ApprovalCard.tsx` / `api.ts` 的运行时行为零改动。 |
+| 门禁 | tsc ✓ / vitest **501 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **118 passed**（`--workers=2`，116 + 新 404 用例 2）/ vite build ✓ |
+
+### 上一批：瞬态三键 + 401 缝 + 审批卡两键（覆盖账目收口到 45/45，2026-09-11）
 
 | 项 | 值 |
 | --- | --- |

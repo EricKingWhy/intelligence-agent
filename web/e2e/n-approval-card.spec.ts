@@ -8,7 +8,10 @@
  * 真机证据见 `docs/FRONTEND_ISSUES_LOG.md` OBS-006 订正条（含 JSONL seq 与 decision）。
  *
  * 本 spec 用同一形状的 fixture 锁**前端契约**（事件 → 卡片 → POST /approve 请求体
- * → 决后 UI），与网络真实与否解耦，故可进标准门禁。 */
+ * → 决后 UI），与网络真实与否解耦，故可进标准门禁。
+ *
+ * OBS-015 回归锁：POST 500 → 卡片保持 pending + 按钮仍可用 + 出现错误提示；
+ * POST 409 → 视为幂等成功，翻「已批准」。 */
 
 import { expect, test } from '@playwright/test';
 import { RUN, SID, T, routeApi, fulfillSse, submitTask, type FrameSpec } from './fixtures';
@@ -124,4 +127,111 @@ test('permission/resolved 把卡片从待决队列移除（不渲染）', async 
 
   await expect(page.locator('.approval-card')).toHaveCount(0);
   expect(sent).toEqual([]); // 无待决项 → 不该有决策请求
+});
+
+// ── OBS-015 回归锁：错误处理 ──────────────────────────────────────
+
+/** POST /approve 返回 500 → 卡片保持 pending + 按钮仍可用 + 出现错误提示。
+ *  这是 OBS-015 的核心断言：真失败时不能翻成「已批准」。 */
+test('POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错误提示', async ({ page }) => {
+  const approveCalls: unknown[] = [];
+  const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
+  routeApi(page, {
+    onSessionPost: (route) => fulfillSse(route, frames),
+    onApprovePost: async (route) => {
+      approveCalls.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 500,
+        body: JSON.stringify({ detail: 'Internal Server Error' }),
+        contentType: 'application/json',
+      });
+    },
+    events: frames,
+  });
+  await page.goto('/');
+  await submitTask(page, '写个文件');
+
+  const card = page.locator('.approval-card');
+  await expect(card).toBeVisible();
+  await expect(card.locator('.approval-title')).toHaveText('需要审批');
+
+  // 点批准 → 500 → 保持 pending
+  await card.locator('.approval-approve').click();
+  await expect(card.locator('.approval-title')).toHaveText('需要审批');
+  await expect(card.locator('.approval-error')).toBeVisible();
+  await expect(card.locator('.approval-approve')).toBeEnabled();
+  await expect(card.locator('.approval-deny')).toBeEnabled();
+  expect(approveCalls).toHaveLength(1);
+
+  // 重试：第二次点批准 → 仍然 500 → 仍然 pending
+  await card.locator('.approval-approve').click();
+  await expect(card.locator('.approval-title')).toHaveText('需要审批');
+  await expect(card.locator('.approval-error')).toBeVisible();
+  expect(approveCalls).toHaveLength(2);
+});
+
+/** POST /approve 返回 409 → 幂等成功，翻「已批准」。
+ *  后端对同一 approval_id 的第二次决策返回 409。 */
+test('POST 409 → 幂等成功，卡片翻「已批准」', async ({ page }) => {
+  const approveCalls: unknown[] = [];
+  const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
+  routeApi(page, {
+    onSessionPost: (route) => fulfillSse(route, frames),
+    onApprovePost: async (route) => {
+      approveCalls.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 409,
+        body: JSON.stringify({ detail: 'Approval already resolved' }),
+        contentType: 'application/json',
+      });
+    },
+    events: frames,
+  });
+  await page.goto('/');
+  await submitTask(page, '写个文件');
+
+  const card = page.locator('.approval-card');
+  await expect(card).toBeVisible();
+
+  // 点批准 → 409 → 幂等成功
+  await card.locator('.approval-approve').click();
+  await expect(card.locator('.approval-title')).toHaveText('已批准');
+  await expect(card.locator('.approval-actions')).toHaveCount(0);
+  expect(approveCalls).toHaveLength(1);
+});
+
+/** POST /approve 返回 404 → **保持 pending**（404 不是幂等已决）。
+ *
+ *  与最初交接提示词的期望**相反**，此处按后端真实语义钉死：404 有四个来源
+ *  （session 不存在 / 审批队列缺失 / `approval_id` 不在队列 / 事件过期，
+ *  `web/app.py:1157-1166`），**无法**与「已解析且已出队」区分。若把 404 当成功，
+ *  就会出现「决策其实没生效、UI 却显示已批准」的安全假象——正是 OBS-015 本身。
+ *  真已决由 `permission/resolved` 投影事件移除卡片（上一用例已锁），不靠 404。 */
+test('POST 404 → 保持「需要审批」+ 错误提示（404 不是幂等已决）', async ({ page }) => {
+  const approveCalls: unknown[] = [];
+  const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
+  routeApi(page, {
+    onSessionPost: (route) => fulfillSse(route, frames),
+    onApprovePost: async (route) => {
+      approveCalls.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 404,
+        body: JSON.stringify({ detail: 'approval not found' }),
+        contentType: 'application/json',
+      });
+    },
+    events: frames,
+  });
+  await page.goto('/');
+  await submitTask(page, '写个文件');
+
+  const card = page.locator('.approval-card');
+  await expect(card).toBeVisible();
+
+  await card.locator('.approval-approve').click();
+  await expect(card.locator('.approval-title')).toHaveText('需要审批');
+  await expect(card.locator('.approval-error')).toBeVisible();
+  await expect(card.locator('.approval-error')).toContainText('404');
+  await expect(card.locator('.approval-approve')).toBeEnabled();
+  expect(approveCalls).toHaveLength(1);
 });
