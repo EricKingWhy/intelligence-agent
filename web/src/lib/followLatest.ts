@@ -57,3 +57,32 @@ export function useFollowResetOnStop(
     }
   }, [streaming, setSuspended]);
 }
+
+/** 一次上滚（deltaY < 0）折合成需要被消费的像素。
+ *
+ *  `deltaMode` 只保证 `0` 是像素：Firefox 用 `1`（行）、少数路径用 `2`（页）。
+ *  行按 16px、页按视口高折算——**估小的一侧永远安全**：估小了偏向「判定为没吃下
+ *  → 释放跟随」，代价只是浮标多出现一次；估大了会误判成「嵌套容器吃下了」，
+ *  于是外层已经被拽动、`following` 却仍为真，下一次 delta 把视口拉回底部
+ *  （这正是 BUG-003 的原症状）。 */
+export function wheelDeltaPixels(deltaY: number, deltaMode: number, viewportHeight: number): number {
+  const raw = Math.max(0, -deltaY);
+  if (deltaMode === 1) return raw * 16;
+  if (deltaMode !== 0) return raw * viewportHeight;
+  return raw;
+}
+
+/** 嵌套滚动链能否吃下这次上滚。
+ *
+ *  浏览器把一次 wheel 从最内层往外依次喂给各级滚动容器，只要它们**合计**的
+ *  余量够，外层容器就不动。所以要累加链上各 scroller 的 `scrollTop`（各自还能
+ *  继续上滚的余量）再和位移比——两种单容器判据都是错的：只看最内层会在内外层
+ *  分担时误判「外层要动」（实际没动）而误脱离；「遇到第一个有余量的就算吃下」
+ *  会在外层确实被推动时误判为不动（原症状）。
+ *  `headrooms` 由组件层按 DOM 走链收集（此处不碰 DOM，便于锁测试）。
+ *  外层容器自身的余量**不计入**：链吃不完的部分必然推动外层，就该释放跟随。 */
+export function nestedChainAbsorbs(headrooms: number[], need: number): boolean {
+  let available = 0;
+  for (const h of headrooms) available += h;
+  return available >= need;
+}

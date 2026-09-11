@@ -257,6 +257,9 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
 
 ## 5. 集成步骤
 
+> 📄 **若要一份自包含、可直接照做的执行单**，见 **`docs/integration/MERGE_EXECUTION_ORDER.md`**
+> （含取值纪律、FAIL 处置表、手验通过标准、回滚指令）。本节是其精简版。
+
 ```text
 1. 前置检查（**在待合并侧前端仓库执行**，推荐用脚本，它每次重新实测）
    bash docs/integration/verify-before-merge.sh

@@ -19,10 +19,9 @@ import {
   Hash, Layers, ListTree, Package, TerminalSquare,
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
-import { EventType } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { summarizeEvent } from '../lib/projection';
-import { deriveRunPulse } from '../lib/runState';
+import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { CopyButton } from './CopyButton';
 import { JsonTree } from './JsonTree';
@@ -219,19 +218,11 @@ export function ChatTab({
   /** 工具行点击回调——子会话视图等只读场景缺省：行渲染为静态行（假按钮≠诚实）。 */
   onFocusTool?: (tool: ToolCall) => void;
 }) {
-  const runStart = conversation.events.find((e) => e.type === EventType.RUN_STARTED)?.time;
-  const runEnd = conversation.events.find((e) => e.type === EventType.RUN_COMPLETED || e.type === EventType.RUN_FAILED)?.time;
-  const runDuration = formatDuration(runStart, runEnd);
-  // v2 PRD §10.4 Overview 保留可增补：状态 + tokens 两行（事件真值，缺失「—」）。
-  const runStatusLabel = conversation.run_cancelled
-    ? '已取消'
-    : conversation.run_status === 'running'
-      ? '运行中'
-      : conversation.run_status === 'completed'
-        ? '已完成'
-        : conversation.run_status === 'failed'
-          ? '失败'
-          : '空闲';
+  // Run 状态 + 时长由 lib/runState 的 deriveRunSummary 单一提供：粗标签的
+  // 「取消 ≠ 失败」语义、以及「终态集合必须含 run/interrupted」这条与顶栏脉冲
+  // 共用同一份判据（此处原先自己再分支一次 run_cancelled/run_status，规则一变
+  // Inspector 就会与顶栏说法不一致——T8 加 run/interrupted 时正是三处集体漂移）。
+  const { label: runStatusLabel, startedAt: runStart, duration: runDuration } = deriveRunSummary(conversation);
 
   return (
     <>

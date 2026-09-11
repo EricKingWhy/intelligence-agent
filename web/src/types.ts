@@ -196,6 +196,11 @@ export interface Turn {
    *  per-turn 事实——同轮所有事件共享，供 TurnView 渲染「第 N 轮」标签。
    *  null = 该轮未携带该字段（旧版后端 / 非 run 起始路径）。 */
   turn_index: number | null;
+  /** BUG-001 fix：user/message 事件的 seq（持久事实），用作 fork 锚点。
+   *  后端 POST /forks 要求 from_seq 是 user/message 的 seq；
+   *  此前传 turn.step_id（resolveStep 合成值）→ 422。
+   *  null = 该轮没有 user/message 事件（不应该出现，但防御性处理）。 */
+  user_message_seq: number | null;
   /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
    *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
   reasoningById?: Record<string, ReasoningBlock>;
@@ -299,7 +304,13 @@ export interface ConversationState {
    *  Empty array = no pending approval (auto-approve or already resolved). */
   pending_approvals: PendingApproval[];
   /** Every event that flowed through the projection, in arrival order (verbatim).
-   *  Timeline tab truth source — never filtered or reshaped (invariant #22). */
+   *  Timeline tab truth source — never filtered or reshaped (invariant #22).
+   *
+   *  ⚠ NOT a snapshot: `applyEvent` pushes into this very array in place, so an
+   *  older `ConversationState` value shares it and its `events` keeps growing
+   *  (deliberate hot-path trade-off — see the contract at `projection.ts`).
+   *  Never key a `useMemo`/`useEffect` on `events` identity, and never stash it as
+   *  a frozen "before": copy it, or derive what you need, before the next append. */
   events: AgentEvent[];
   /** Events whose type didn't match any known case (UnknownSurfaceNode 协议,
    *  冻结决策第 69 行 "unknown 事件渲染为 raw 行兜底，永不静默丢弃")。
@@ -325,7 +336,9 @@ export interface ConversationState {
    *  字段缺失（形状不完整）时不记录（零伪造）；后续 model 已切 to_model。 */
   model_fallback: { from_model: string; to_model: string; reason: string } | null;
   /** T8 #138：最近一次 run/interrupted 事件的信息。null = 无中断。
-   *  来自事件真值，用于 UI 显示「上次运行在第 N 步中断」。 */
+   *  来自事件真值。`step_id` 可为 null 且那是真值：进程在该 run 的首个带步号
+   *  事件之前就死了（run/started 不带 step，检测器只能沿用后续事件的 step_id）
+   *  ——UI 应说「首个步骤开始前中断」，不要渲染成「第 ? 步」。 */
   run_interrupted: { step_id: number | null; interrupted_seq: number | null; reason: string } | null;
   /** T9 #139：当前 run 的轮次索引（1-based）。来自 RUN_STARTED.data.turn_index。
    *  null = 尚未收到 RUN_STARTED 或字段缺失。UI 可据此显示「第 N 轮」。 */

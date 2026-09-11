@@ -9,6 +9,10 @@
 export interface CommandItem {
   id: string;
   label: string;
+  /** 不显示的可搜索别名（英文术语 / 同义说法）。`label` 是中文（与工具栏一致），
+   *  但 `Toggle Theme` / `Copy Run ID` / `Compact` 这些英文说法要照样搜得到——
+   *  否则用英文肌肉记忆输入的老用户会以为命令没了。 */
+  keywords?: string;
   /** 右侧弱化提示：快捷键 / 事件类型 / 状态。 */
   hint?: string;
   group: 'actions' | 'density' | 'events';
@@ -39,11 +43,21 @@ export function fuzzyScore(query: string, text: string): number | null {
 }
 
 /** 过滤 + 排序：命中项按分数降序（稳定——同分保持原序，事件按时间新→旧自然可读）。
- *  空 query 原序返回。 */
+ *  空 query 原序返回。
+ *
+ *  匹配的 haystack 是 `label + keywords`。label 在前，所以**只按 label 命中的那条
+ *  打分逐字不变**（追加文本不会移动 label 字符的贪心下标，已穷举 3 字符以内 query
+ *  验证：0 个既有命中失分或改分）。但**跨命令仍按分数比大小**：一条命令靠 keywords
+ *  命中、打的分数高于另一条靠 label 命中的，它就会排到前面（例：query `to` 下
+ *  `切换主题` 经 keyword `toggle theme` 高于 `切换 Run Inspector` 的 `Inspector`）。
+ *  这是可接受的——`keywords` 的存在就是为了让中文 label 命令仍能被英文搜到。 */
 export function filterCommands(items: readonly CommandItem[], query: string): CommandItem[] {
   if (!query.trim()) return [...items];
   return items
-    .map((item) => ({ item, score: fuzzyScore(query, item.label) }))
+    .map((item) => ({
+      item,
+      score: fuzzyScore(query, item.keywords ? `${item.label} ${item.keywords}` : item.label),
+    }))
     .filter((x): x is { item: CommandItem; score: number } => x.score !== null)
     .sort((a, b) => b.score - a.score)
     .map((x) => x.item);

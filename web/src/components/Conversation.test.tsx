@@ -229,21 +229,23 @@ describe('ChainNodeView — DelegationNode 委派节点（Phase 13，v2 PRD §10
   });
 });
 
-describe('TurnView — T9 #139 轮次标签', () => {
-  function turn(over: Partial<Turn> = {}): Turn {
-    return {
-      step_id: 1,
-      user_message: 'hi',
-      model: { text: 'ok', status: 'done' },
-      segments: [],
-      tools: [],
-      activities: [{ kind: 'model', index: 0 }],
-      status: 'done',
-      turn_index: 1,
-      ...over,
-    };
-  }
+/** TurnView 的最小 Turn 夹具——两个 describe 共用（模块级，避免各自复制漂移）。 */
+function turn(over: Partial<Turn> = {}): Turn {
+  return {
+    step_id: 1,
+    user_message: 'hi',
+    model: { text: 'ok', status: 'done' },
+    segments: [],
+    tools: [],
+    activities: [{ kind: 'model', index: 0 }],
+    status: 'done',
+    turn_index: 1,
+    user_message_seq: 1,
+    ...over,
+  };
+}
 
+describe('TurnView — T9 #139 轮次标签', () => {
   it('turnIndex 为正整数时渲染「第 N 轮」', () => {
     const html = renderToStaticMarkup(
       <TurnView turn={turn()} turnIndex={3} model={null} density="balanced" />,
@@ -279,5 +281,58 @@ describe('TurnView — T9 #139 轮次标签', () => {
     expect(first).toContain('第 1 轮');
     expect(second).toContain('第 2 轮');
     expect(first).not.toContain('第 2 轮');
+  });
+});
+
+// ── BUG-001：分叉入口的锚点与可见性 ──
+// 交互断言（实际发出的 from_seq、422 的可见性）在 e2e/b-fork.spec.ts（真浏览器 +
+// route 拦截）；这里锁 SSR 契约：什么时候该有按钮、文案说什么。
+
+describe('TurnView — 分叉入口（BUG-001）', () => {
+  const onFork = () => undefined;
+
+  it('有 onFork 且该轮有 user_message_seq → 渲染分叉按钮', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn({ user_message_seq: 30 })} model={null} density="balanced" onFork={onFork} />,
+    );
+    expect(html).toContain('fork-btn');
+    expect(html).toContain('分叉');
+  });
+
+  it('无锚点（user_message_seq 为 null）→ 不渲染按钮（不造假入口）', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn({ user_message_seq: null })} model={null} density="balanced" onFork={onFork} />,
+    );
+    expect(html).not.toContain('fork-btn');
+  });
+
+  it('未注入 onFork（只读场景）→ 不渲染按钮', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn()} model={null} density="balanced" />,
+    );
+    expect(html).not.toContain('fork-btn');
+  });
+
+  it('流式中的轮次不渲染按钮（历史未 settled，后端会 409）', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn({ status: 'streaming' })} model={null} density="balanced" onFork={onFork} />,
+    );
+    expect(html).not.toContain('fork-btn');
+  });
+
+  it('第 1 轮：提示 child 将是空会话（锚点消息不进 seed，之前无历史）', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn()} model={null} density="balanced" onFork={onFork} isFirstUserTurn />,
+    );
+    expect(html).toContain('fork-btn');
+    expect(html).toContain('空会话');
+  });
+
+  it('非第 1 轮：沿用常规标题（不出现空会话提示）', () => {
+    const html = renderToStaticMarkup(
+      <TurnView turn={turn({ user_message_seq: 30 })} model={null} density="balanced" onFork={onFork} />,
+    );
+    expect(html).toContain('从此处分叉新会话');
+    expect(html).not.toContain('空会话');
   });
 });

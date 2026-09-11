@@ -14,6 +14,20 @@ const BASE = ''; // relative — Vite proxy handles /api → :8000
 /** Thrown for any 401 (after auth.onUnauthorized has broadcast the detail). */
 export class UnauthorizedError extends Error {}
 
+/** 404 = 目标资源不存在（会话已被删除 / 属于另一个后端实例）。
+ *
+ *  与「加载失败」区分开：调用方据此**清理记住的选中会话**并安静回到空态，
+ *  而不是弹一条用户无法处理、每次刷新都会重演的错误横幅（BUG-005 的
+ *  陈旧 id 分支）。 */
+export class NotFoundError extends Error {}
+
+/** 409 = 审批已决（幂等成功）——OBS-015 修复引入。
+ *
+ *  后端 `PendingApprovalQueue.resolve()` 对同一 approval_id 的第二次决策返回 409。
+ *  这**不是**错误：用户的意图已经生效，卡片应翻到「已批准/已拒绝」。
+ *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
+export class AlreadyResolvedError extends Error {}
+
 /** FastAPI 错误体 {detail} 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（两处 401/409 消费共享的单一实现）。 */
 async function readErrorDetail(res: Response): Promise<string> {
@@ -53,6 +67,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
 
 export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
+  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
   if (!res.ok) throw new Error(`get events ${res.status}`);
   return res.json();
 }
@@ -264,8 +279,16 @@ export async function streamSession(sessionId: string, afterSeq: number): Promis
 /** POST /api/sessions/{id}/approve — interactive approval decision (#37, PRD §2.2).
  *  Backend resolves the pending approval via PendingApprovalQueue.resolve().
  *  Response (200): {"status":"resolved","approval_id":"...","decision":"approve_once"}
- *  404 = approval_id not found; 409 = already resolved; 422 = invalid decision.
- *  Idempotent for already-resolved (409 is non-fatal for UI). */
+ *  409 (`ApprovalAlreadyResolved`) = 幂等已决 → AlreadyResolvedError → 调用方翻卡片。
+ *  ⚠ 404 **不是**幂等已决：后端 404 有四个来源（session 不存在 / 审批队列缺失 /
+ *    `approval_id` 不在队列 / 事件过期；`web/app.py:1157-1166`），**无法**与
+ *    「已解析且已出队」区分。把它当成功 = 决策其实没生效却显示「已批准」的
+ *    安全假象，正是 OBS-015 要消灭的那类 bug。故 404 与其它非 2xx 同级 →
+ *    plain Error → 卡片保持 pending + 可重试。
+ *    真已决的兜底不靠错误码：`permission/resolved` 投影事件会把卡片移出待决队列。
+ *  Other non-ok = real failure (decision did NOT reach backend) → plain Error.
+ *  OBS-015 fix: the caller must distinguish these two — flipping the card to
+ *  "decided" on a network error is a dangerous false positive for security. */
 export async function postApproval(
   sessionId: string,
   approvalId: string,
@@ -280,7 +303,8 @@ export async function postApproval(
       decision: approved ? 'approve_once' : 'deny',
     }),
   });
-  if (!res.ok) throw new Error(`approve ${res.status}`);
+  if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
+  if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }
 
@@ -430,7 +454,12 @@ export async function forkSession(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ from_seq: fromSeq }),
   });
-  if (!res.ok) throw new Error(`fork ${res.status}`);
+  if (!res.ok) {
+    // BUG-001 fix：解析后端 detail 给用户看（可用边界列表等）。
+    let detail = '';
+    try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
+    throw new Error(detail || `fork ${res.status}`);
+  }
   return res.json();
 }
 

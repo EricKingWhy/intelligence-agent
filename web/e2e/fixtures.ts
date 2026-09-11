@@ -53,6 +53,17 @@ export interface ApiMock {
   contextProviders?: unknown[];
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/forks（T7 #137 分叉；缺省 200 → 派生 child）。
+   *  注入此回调即可断言请求体（BUG-001 回归锁：from_seq 必须是 user/message 的
+   *  seq，不是 turn.step_id）或伪造 422。 */
+  onForkPost?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/recover（T8 #138 恢复；缺省 200 → 返回 mock.events）。
+   *  真实语义：响应是与 GET events 同构的全量事件数组。 */
+  onRecoverPost?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/approve（#37 交互式审批决策；缺省 200 → {status,approval_id,decision}）。
+   *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
+   *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
+  onApprovePost?: (route: Route) => Promise<void> | void;
 }
 
 export function routeApi(page: Page, mock: ApiMock): void {
@@ -95,6 +106,32 @@ export function routeApi(page: Page, mock: ApiMock): void {
     if (/^\/api\/sessions\/[^/]+\/messages$/.test(path) && req.method() === 'POST') {
       if (mock.onMessagesPost) return mock.onMessagesPost(route);
       return route.abort('aborted');
+    }
+    if (/^\/api\/sessions\/[^/]+\/forks$/.test(path) && req.method() === 'POST') {
+      if (mock.onForkPost) return mock.onForkPost(route);
+      const body = (req.postDataJSON() ?? {}) as { from_seq?: number };
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ session_id: `${SID}-fork-${body.from_seq ?? 0}`, from_seq: body.from_seq ?? 0 }),
+        contentType: 'application/json',
+      });
+    }
+    if (/^\/api\/sessions\/[^/]+\/recover$/.test(path) && req.method() === 'POST') {
+      if (mock.onRecoverPost) return mock.onRecoverPost(route);
+      return route.fulfill({ status: 200, body: JSON.stringify(mock.events ?? []), contentType: 'application/json' });
+    }
+    if (/^\/api\/sessions\/[^/]+\/approve$/.test(path) && req.method() === 'POST') {
+      if (mock.onApprovePost) return mock.onApprovePost(route);
+      const body = (req.postDataJSON() ?? {}) as { approval_id?: string; decision?: string };
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({
+          status: 'resolved',
+          approval_id: body.approval_id ?? '',
+          decision: body.decision ?? '',
+        }),
+        contentType: 'application/json',
+      });
     }
     return route.fulfill({ status: 404, body: '{"detail":"not mocked in e2e"}', contentType: 'application/json' });
   });
