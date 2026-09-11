@@ -19,7 +19,21 @@
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
-### 最近一批：ARCH-4b 前端——SessionSummary.trace_url 契约锁 + e2e mock 同步（2026-09-11）
+### 最近一批：BUG-011 前端半——模型项双击不再发第二个 `POST /model`（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `71e605b` |
+| 门禁 | tsc ✓ / vitest **519 passed**（29 文件）/ oxlint **37w 0e**（基线持平）/ playwright **130 passed**（`--workers=2`）/ vite build ✓ |
+| 触发 | 真机报障「续聊失败：Send failed: 404」，会话 `dd983104`（根因在后端，本批只做前端触发面 + 回归锁） |
+| 交付 | ① `ModelPicker.tsx`：新增 `commitSelection`（默认链 + 目录项两处 `onSelect` 统一入口），**弹层已关（`!open`）即丢弃选中**——第一次选中后浮层进入 `--dur-out`(150ms) 退出动画，节点仍在 DOM 可命中，第二次 click 由此丢弃；② `e2e/fixtures.ts`：`onModelPost` 注入点 + 缺省 200 处理器（计数/延迟响应）；③ 新增 `e2e/q-model-dedupe.spec.ts`（3 条锁 × 2 视口）。 |
+| 变异验证 | 去掉 `!open` 守卫 → 两例全红，失败信息即原始 bug 指纹（`Expected: 1 / Received: 2`；另一例 `Received length: 3` 且三个 payload 完全相同）。已还原。 |
+| 取舍（实测驱动） | 最初设想在 `useSession.changeModel` 加「同目标在途复用 Promise」。探针实测该层**永不生效**：`dblclick()`（一次手势两下点击）与 `page.mouse.click` ×2 都是两次 click 之间 React 已提交 `open=false`，第二个请求到不了 hook——删掉该层前后探针结果完全相同（`dblclick=1` / `mouseclick_x2=1`）。故**只留入口一层**（等价于计划里的「弹层关闭后立即 `pointer-events:none`」），hook 恢复直通、仅留注释指明真正 seam，防止后人加错层。 |
+| 跨端配对 | 后端半在 `D:\intelligence-agent-backend` `feat/backend`：`4b8eee4`（① `store.append_event` 每会话写锁 + seq 单调性守卫；② `SeqConflict → 409` 独立语义 + `change_model` 有界重试 3 次；删除 `except ValueError → SessionNotFound` 一刀切；`tests/web/test_web_seq_conflict.py` 4 例）。**后端门禁**：ruff ✓ / pytest **1596 passed**。**集成必须先后端后前端**（AGENTS.md §14.9），后端 seq 守卫是安全网，前端去重是堵源头。 |
+| code-review | 两轴（Standards + Spec）各派 subagent：Spec 轴指出「永久 applied 幂等缓存超出计划且不可失效（外部改过模型后无法再选回）+ 依赖响应回显请求值」→ 已删除该设计；Standards 轴指出「测试无法证明第二次点击真的落到节点上（可能因节点已消失而假绿）」→ 已由变异验证补齐该证据并写进 spec 文件头。 |
+| 未决/边界 | 跨进程并发写（多进程共享同一 JSONL）无文件锁——后端 `store.py` 文档已如实标注；历史遗留的损坏日志不自愈（读时 409）。 |
+
+### 上一批：ARCH-4b 前端——SessionSummary.trace_url 契约锁 + e2e mock 同步（2026-09-11）
 
 | 项 | 值 |
 | --- | --- |
