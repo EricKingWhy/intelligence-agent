@@ -19,7 +19,7 @@ const ROW = {
   first_event_time: T,
   last_event_time: T,
   first_user_message: '崩溃前的问题',
-  trace_id: null,
+  trace_id: null, trace_url: null,
 };
 
 /** 崩溃会话：run 无终态 + 一条未配对 tool/call → isRecoverableRun 为真。

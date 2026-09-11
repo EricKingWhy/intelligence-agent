@@ -36,7 +36,7 @@ const EVENTS: FrameSpec[] = [
   { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
 ];
 
-const ROW = { session_id: SID, event_count: 6, first_event_time: T, last_event_time: T, first_user_message: '滚动验证', trace_id: null };
+const ROW = { session_id: SID, event_count: 6, first_event_time: T, last_event_time: T, first_user_message: '滚动验证', trace_id: null, trace_url: null };
 
 test('滚动容器关闭浏览器滚动锚定（虚拟化动态测高会与锚定打架）', async ({ page }) => {
   routeApi(page, { sessions: [ROW], events: EVENTS });

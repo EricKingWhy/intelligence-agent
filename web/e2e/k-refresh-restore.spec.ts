@@ -19,7 +19,7 @@ const KEY = 'ahi.selectedSession';
 
 /** 会话行 fixture（同一份，避免各用例复制漂移）。 */
 const SESSIONS = [
-  { session_id: SID, event_count: 4, first_event_time: T, last_event_time: T, first_user_message: '刷新前就发出的任务', trace_id: null },
+  { session_id: SID, event_count: 4, first_event_time: T, last_event_time: T, first_user_message: '刷新前就发出的任务', trace_id: null, trace_url: null },
 ];
 
 /** run 已开始但**未收口**（末尾无 run 终态）→ `hasUnterminatedRun` 为真 → 触发接流。 */
@@ -59,7 +59,7 @@ test('BUG-005 写入路径：真实点击会话行 → 写键 → 不带种子�
   routeApi(page, {
     sessions: [
       ...SESSIONS,
-      { session_id: `${SID}-B`, event_count: 5, first_event_time: T, last_event_time: T, first_user_message: '另一个会话', trace_id: null },
+      { session_id: `${SID}-B`, event_count: 5, first_event_time: T, last_event_time: T, first_user_message: '另一个会话', trace_id: null, trace_url: null },
     ],
     events: [
       ...IN_FLIGHT,
@@ -123,7 +123,7 @@ test('子会话 id 与普通会话同一持久化/恢复路径：非首行真实
   routeApi(page, {
     sessions: [
       ...SESSIONS,
-      { session_id: CHILD, event_count: 5, first_event_time: T, last_event_time: T, first_user_message: '委派给 research_review 的子任务', trace_id: null },
+      { session_id: CHILD, event_count: 5, first_event_time: T, last_event_time: T, first_user_message: '委派给 research_review 的子任务', trace_id: null, trace_url: null },
     ],
   });
   // 后注册的路由优先：按请求的 session id 返回**各自**的事件，内容一致性才有鉴别力
