@@ -167,7 +167,8 @@ async def test_degraded_reason_is_exception_type_only_and_leaks_nothing():
     outcome = await MemoryExtractor(ScriptedModel([AIMessage(content=payload)])).extract(
         [user("我偏好 Rust")]
     )
-    assert outcome.degraded_reason == "heuristic_fallback: ValidationError"
+    # 带上 schema 层错误码（可诊断），但不含一个字符的模型输出
+    assert outcome.degraded_reason == "heuristic_fallback: ValidationError(json_invalid)"
     assert secret not in str(outcome.degraded_reason)
 
 
@@ -180,3 +181,41 @@ async def test_timeout_reports_degraded_reason():
     outcome = await MemoryExtractor(Hanging(), timeout_seconds=0.01).extract([user("nothing useful")])
     assert outcome.candidates == []
     assert outcome.degraded_reason == "heuristic_fallback: TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_string_content_that_looks_like_json_is_never_rewritten():
+    """字符串感知修复（code-review P1）：内容里本来就有的 `,]` 不是尾随逗号。
+
+    无差别全局替换会把它删掉、重校验照样通过 → 改坏的数据被当成功候选存下去，
+    正是 BUG-012 要消灭的"静默"。这条用例在全局替换实现下必红。
+    """
+    payload = '[{"scope":"user","content":"use [1, 2, ] then stop","importance":0.5},]'
+    outcome = await MemoryExtractor(ScriptedModel([AIMessage(content=payload)])).extract([user("hi")])
+    assert outcome.degraded_reason is None
+    assert outcome.candidates == [
+        (MemoryScope.USER, "use [1, 2, ] then stop", {"importance": 0.5}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_curly_apostrophe_inside_content_survives_repair():
+    """全角撇号是**内容**不是分隔符：修复不得把它 ASCII 化（don’t ≠ don't）。"""
+    payload = '[{“scope”: “user”, “content”: “I don’t like tabs”, “importance”: 0.4}]'
+    outcome = await MemoryExtractor(ScriptedModel([AIMessage(content=payload)])).extract([user("hi")])
+    assert outcome.degraded_reason is None
+    assert outcome.candidates[0][1] == "I don’t like tabs"
+
+
+@pytest.mark.asyncio
+async def test_heuristic_unavailable_reports_the_heuristic_stage_failure(monkeypatch):
+    """归因必须指向失败的那一层：规则路径自己崩了，不能记成 LLM 阶段的异常类型。"""
+    def boom(_events):
+        raise RuntimeError("heuristic-broken")
+
+    monkeypatch.setattr(MemoryExtractor, "_heuristic_extract", staticmethod(boom))
+    outcome = await MemoryExtractor(ScriptedModel([AIMessage(content="bad JSON")])).extract(
+        [user("我偏好 Rust")]
+    )
+    assert outcome.candidates == []
+    assert outcome.degraded_reason == "heuristic_unavailable: RuntimeError"
