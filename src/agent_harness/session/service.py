@@ -52,6 +52,7 @@ from agent_harness.session.errors import (
     InvalidSessionId,
     QueueItemNotFound,
     RecoveryConflict,
+    SeqConflict,
     SessionNotFound,
     SessionServiceError,
     SteerTargetNotFound,
@@ -79,7 +80,7 @@ from agent_harness.session.model_switch import (
     amend_with_session_model as _amend_with_session_model,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
-from agent_harness.session.session import Session
+from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import JsonlSessionStore, SessionSummaryStats
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -107,6 +108,12 @@ logger = logging.getLogger(__name__)
 #: 反斜杠段在 win32 上可越出 sessions 根目录，盘符段可整体替换基路径。
 #: 字符集与 S3ArtifactStore 的 key 段规则一致。
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+#: 非 live 追加路径撞上 seq 冲突时的重试次数（BUG-011）。
+#: 「读快照 → 取号 → append」不是原子的：并发写者可能在本请求读完之后落盘同号，
+#: 此时 store 的 seq 守卫拒写。重读快照即可拿到新号——3 次足够覆盖真实并发度
+#: （真机现场是双击产生的两个请求），持续竞争则把 SeqConflict 抛给上层。
+_WRITE_CONFLICT_ATTEMPTS = 3
 
 
 def validate_session_id(session_id: str) -> str:
@@ -409,27 +416,30 @@ class SessionService:
         if self._state.run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
 
-        try:
-            # T8 #138：崩溃遗留（悬空 tool_call / 无终态 run）必须走 Ledger
-            # reconcile——Session.resume 的 dangling 兜底对 RUNNING/UNKNOWN 的
-            # tool_call 一律伪造「结果未知」，等于替高风险副作用猜结论
-            # （不变量 #13/#14）。recover() 是唯一恢复入口：UNKNOWN 无 callback
-            # 时安全拒绝（→ 409），确定性项精确回填后再 load 继续跑。
-            if detect_dangling(existing) or detect_unterminated_runs(existing):
-                await self.recover(session_id)
-                session = Session.load(
-                    self._state.store,
-                    session_id,
-                    workspace_registry=self._state.workspace_registry,
-                )
-            else:
-                session = Session.resume(
-                    self._state.store,
-                    session_id,
-                    workspace_registry=self._state.workspace_registry,
-                )
-        except ValueError as error:
-            raise SessionNotFound(str(error)) from error
+        # T8 #138：崩溃遗留（悬空 tool_call / 无终态 run）必须走 Ledger
+        # reconcile——Session.resume 的 dangling 兜底对 RUNNING/UNKNOWN 的
+        # tool_call 一律伪造「结果未知」，等于替高风险副作用猜结论
+        # （不变量 #13/#14）。recover() 是唯一恢复入口：UNKNOWN 无 callback
+        # 时安全拒绝（→ 409），确定性项精确回填后再 load 继续跑。
+        #
+        # 不在这里 catch ValueError → SessionNotFound（BUG-011 移除）：会话存在性
+        # 已在上方 `if not existing` 判定过，此后的异常都不是「不存在」。旧映射把
+        # `Session.load` 的 seq 冲突（数据完整性）一律谎报成 404，客户端只能显示
+        # `Send failed: 404`。现在 load/resume 抛类型化领域异常（SeqConflict /
+        # SessionNotFound），由端点各自的 except 元组精确翻译。
+        if detect_dangling(existing) or detect_unterminated_runs(existing):
+            await self.recover(session_id)
+            session = Session.load(
+                self._state.store,
+                session_id,
+                workspace_registry=self._state.workspace_registry,
+            )
+        else:
+            session = Session.resume(
+                self._state.store,
+                session_id,
+                workspace_registry=self._state.workspace_registry,
+            )
 
         workspace = self._state.workspaces_root / session_id
         workspace.mkdir(parents=True, exist_ok=True)
@@ -800,10 +810,34 @@ class SessionService:
         assert_model_resolvable(self._state.settings, target)
         # 在途 run 存在时用它的 Session 聚合追加（seq 不撞号 + listener 实时广播）；
         # 否则只读加载一个聚合。两条路径都只 append，不走 resume。
-        live = self._live_session(session_id) or Session(
-            session_id, self._state.store, existing
-        )
-        return append_model_change(live, target)
+        #
+        # 冲突重试（BUG-011）：非 live 路径的「读快照 → 取号 → append」不是原子的
+        # ——并发写者（真机现场是模型项被双击的两个请求）可能在本请求读完之后落盘
+        # 同号，此时 store 的 seq 守卫拒写。重新读快照再试即可拿到新号，from_* 也
+        # 随之从新快照重算。live 路径由事件循环串行化、且该聚合不可重建，不重试。
+        #
+        # 存在性与 seq 校验放在**循环内**、append 的 try 之外：重试期间会话可能消失
+        # （→404）或日志暴露损坏（→409）。校验抛出的 SeqConflict 是**终态**（日志已
+        # 损坏、重读同一文件无用），不能被下面的 except 当成可重试的写时冲突吞掉。
+        attempts_left = _WRITE_CONFLICT_ATTEMPTS
+        while True:
+            attempts_left -= 1
+            live = self._live_session(session_id)
+            if live is not None:
+                return append_model_change(live, target)
+            if not existing:
+                raise SessionNotFound(f"session '{session_id}' not found")
+            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
+            try:
+                return append_model_change(
+                    Session(session_id, self._state.store, existing), target
+                )
+            except SeqConflict:
+                if attempts_left <= 0:
+                    raise
+                existing = await anyio.to_thread.run_sync(
+                    self._state.store.read_events, session_id
+                )
 
     async def fork(
         self, *, session_id: str, from_seq: int, with_tail_summary: bool = False

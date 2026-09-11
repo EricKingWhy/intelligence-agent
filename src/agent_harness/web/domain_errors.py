@@ -12,13 +12,13 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `GET /api/sessions/{id}/events` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions` | WorkspaceNameInvalid, InvalidDecision |
 | `GET /api/sessions/{id}/stream` | InvalidSessionId, SessionNotFound |
-| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict |
+| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/approve` | InvalidSessionId, SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, InvalidDecision, ApprovalAlreadyResolved |
-| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, RecoveryConflict |
-| `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel |
-| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound |
-| `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound |
+| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, RecoveryConflict, SeqConflict |
+| `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
+| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict |
+| `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
 | `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
@@ -28,6 +28,12 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
   ApprovalRequestMissing 都是 404）——OBS-015 的结论，客户端无法从状态码区分，属有意为之；
 - `ApprovalAlreadyResolved` 是 **409（幂等已决）而非 404**——与上面三个 404 分开，
   因此「审批已决」是可区分的。
+
+**BUG-011 追加**：`SeqConflict` → **409**（seq 冲突：并发写者抢先落盘，或日志已损坏）。
+旧行为是 `service.resume_and_launch` 把 `ValueError` 一刀切翻成 `SessionNotFound`（404），
+使真机会话 `dd983104` 的日志损坏被显示成 `续聊失败：Send failed: 404`。上表中 5 个
+「会构造/追加 Session 聚合」的端点各自声明了它；上方的 37 个 except 臂是 ARCH-5 当时的
+历史审计记录，不在本次补记范围内。
 
 ## 设计取舍（为什么不再往前一步）
 
@@ -54,6 +60,7 @@ from agent_harness.session.errors import (
     InvalidSessionId,
     QueueItemNotFound,
     RecoveryConflict,
+    SeqConflict,
     SessionNotFound,
     SessionServiceError,
     SteerTargetNotFound,
@@ -63,7 +70,7 @@ from agent_harness.session.errors import (
 
 #: 领域异常 → HTTP status 的**唯一**映射源（ARCH-5）。新增领域异常只改这里；
 #: 需要用它的端点再在自己的 except 元组里声明。状态码口径见模块 docstring 的审计表。
-#: 覆盖全部 13 个 `SessionServiceError` 子类——由
+#: 覆盖全部 `SessionServiceError` 子类——由
 #: `tests/web/test_domain_error_mapping.py` 双向钉住（漏登记先红、值漂移先红）。
 _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 422：入参/引用非法（客户端 bug，不是冲突）
@@ -77,11 +84,14 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     ApprovalQueueMissing: 404,
     ApprovalRequestMissing: 404,
     QueueItemNotFound: 404,
-    # 409：状态冲突（含幂等已决与需人工裁决的崩溃遗留）
+    # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     RecoveryConflict: 409,
     ApprovalAlreadyResolved: 409,
     SteerTargetNotFound: 409,
+    # BUG-011：seq 冲突是「资源当前状态与请求冲突」，**不是**「资源不存在」——
+    # 旧行为把它翻成 404（`send_message` 的 `Send failed: 404`），掩盖了日志损坏。
+    SeqConflict: 409,
 }
 
 

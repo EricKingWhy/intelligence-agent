@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from agent_harness.session import Session
+from agent_harness.session.errors import SessionNotFound
 from agent_harness.session.event import (
     MODEL_COMPLETED,
     RUN_COMPLETED,
@@ -181,7 +182,7 @@ async def test_failed_fork_leaves_no_child_artifacts(tmp_path) -> None:
             boundary_user_message_seq=parent.events[4].seq,
             child_session_id="orphan",
         )
-    with pytest.raises(ValueError, match="不存在"):
+    with pytest.raises(SessionNotFound, match="不存在"):
         Session.resume(store, "orphan")
     assert await meta.get("orphan") is None
 

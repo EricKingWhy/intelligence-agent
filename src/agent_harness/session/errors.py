@@ -3,6 +3,10 @@
 调用方（Web handler / CLI）负责把领域异常翻译为 HTTP status / CLI 错误消息。
 所有异常都继承 ``SessionServiceError``，便于调用方统一 catch。
 
+抛出点不限于 ``SessionService``：``session/session.py``（聚合加载校验）与
+``session/store.py``（落盘守卫）也抛 ``SeqConflict``——它描述的是「会话事件流的
+seq 纪律」，属会话领域、与传输层无关；基类名沿用历史命名，不再另立层级。
+
 本模块无行为变化——异常类逐字搬移，``service.py`` 重新导出以保持所有既有
 导入路径（``from agent_harness.session.service import SessionNotFound``）不变。
 """
@@ -44,6 +48,23 @@ class InvalidDecision(SessionServiceError):
 
 class RecoveryConflict(SessionServiceError):
     """恢复需要人工裁决（UNKNOWN 工具状态）。"""
+
+
+class SeqConflict(SessionServiceError):
+    """事件 seq 与已落盘日志冲突（重复 / 回退），或日志本身已不满足单调性。
+
+    两种触发面（消息里区分，状态码同为 409——都是「资源当前状态与请求冲突」，
+    而不是「资源不存在」）：
+
+    - **写时冲突**：并发写者各自基于同一份快照取号，后一个的 seq 已被占用。
+      调用方可重新读取快照后重试（``service.change_model`` 即如此）。
+    - **读时冲突**：日志里已存在重复 / 回退 seq（历史损坏，如真机会话
+      ``dd983104`` 的两条 seq=5）——不可自愈，需人工处置。
+
+    BUG-011 前这两种情况要么被静默写坏（重复 seq 落盘），要么被
+    ``service.resume_and_launch`` 的 ``except ValueError`` 一刀切翻译成
+    ``SessionNotFound``（HTTP 404，把数据完整性问题谎报成「会话不存在」）。
+    """
 
 
 class WorkspaceNameInvalid(SessionServiceError):

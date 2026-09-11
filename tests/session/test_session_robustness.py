@@ -17,6 +17,7 @@ from agent_harness.session import (
     Session,
     SessionEvent,
 )
+from agent_harness.session.errors import SeqConflict
 
 
 @pytest.fixture
@@ -175,7 +176,11 @@ class TestIncrementalSeqCounter:
         assert event.seq == 7
 
     def test_resume_rejects_seq_regression(self, store: JsonlSessionStore):
-        """resume 校验 seq 严格递增：回退的损坏历史直接拒绝，不容忍。"""
+        """resume 校验 seq 严格递增：回退的损坏历史直接拒绝，不容忍。
+
+        抛 SeqConflict（**不是** SessionNotFound）：日志存在、只是损坏——旧行为是
+        裸 ValueError，被 service 一刀切翻成 404「会话不存在」（BUG-011）。
+        """
         sid = "seq-regression"
         _write_events_file(
             store,
@@ -186,7 +191,26 @@ class TestIncrementalSeqCounter:
                 _good_line(sid, 1, USER_MESSAGE),
             ],
         )
-        with pytest.raises(ValueError, match="回退"):
+        with pytest.raises(SeqConflict, match="回退"):
+            Session.resume(store, sid)
+
+    def test_resume_rejects_duplicate_seq(self, store: JsonlSessionStore):
+        """BUG-011 现场形态：重复 seq 必须被拒。
+
+        真机会话 `dd983104` 就是两条 seq=5（模型项被双击 → 两个并发 POST /model），
+        此后该会话任何续聊恒 404。这里钉住加载侧必须拒它，且错误类型是 seq 冲突。
+        """
+        sid = "seq-duplicate"
+        _write_events_file(
+            store,
+            sid,
+            [
+                _good_line(sid, 0, SESSION_STARTED),
+                _good_line(sid, 1, USER_MESSAGE),
+                _good_line(sid, 1, USER_MESSAGE),
+            ],
+        )
+        with pytest.raises(SeqConflict, match="重复"):
             Session.resume(store, sid)
 
 
