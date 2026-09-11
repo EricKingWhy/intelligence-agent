@@ -38,7 +38,7 @@ const PARENT_ROW = {
   first_event_time: T,
   last_event_time: T,
   first_user_message: '第一轮问题',
-  trace_id: null,
+  trace_id: null, trace_url: null,
 };
 
 /** 进入会话：列表 → 点行 → 等两轮都投影进 DOM。 */
@@ -65,7 +65,7 @@ test('B1 回归锁：第 2 轮分叉传 user/message 的 seq（30），不是 tu
         first_event_time: T,
         last_event_time: T,
         first_user_message: null,
-        trace_id: null,
+        trace_id: null, trace_url: null,
       });
       await route.fulfill({
         status: 200,

@@ -13,7 +13,7 @@ test('palette 键盘唤起与关闭；Composer 键盘提交', async ({ page }) =
   ];
   // 终态后 viewing 迁移重读历史（#22 对账）——sessions/events fixture 提供同一真相
   routeApi(page, {
-    sessions: [{ session_id: 'e2e-session-0002', event_count: 4, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '键盘提交', trace_id: null }],
+    sessions: [{ session_id: 'e2e-session-0002', event_count: 4, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '键盘提交', trace_id: null, trace_url: null }],
     events: frames,
     onSessionPost: (route) => fulfillSse(route, frames),
   });
@@ -42,7 +42,7 @@ test('palette 的 Copy Run ID 复制 run id，而不是 session id', async ({ pa
     { type: 'run/completed', data: {}, seq: 5, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
   ];
   routeApi(page, {
-    sessions: [{ session_id: 'e2e-session-0002', event_count: 5, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '复制 run id', trace_id: null }],
+    sessions: [{ session_id: 'e2e-session-0002', event_count: 5, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '复制 run id', trace_id: null, trace_url: null }],
     events: frames,
   });
   await page.goto('/');

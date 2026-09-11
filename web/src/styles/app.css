@@ -214,6 +214,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: var(--border-subtle);
 }
 
+/* 停顿等待提示（FE-01/#148）：只是「等久了」的旁注，不是告警——三级文字色、
+   无底色无描边，避免与胶囊体的状态通道抢注意力。复用既有语义 token，
+   不新增 :root 变量（§15 无需补亮色覆盖）。 */
+.wait-hint {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
 /* ── Buttons ── */
 .btn-primary {
   display: inline-flex;

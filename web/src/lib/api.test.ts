@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getModels,
   getSessionEvents,
+  listSessions,
   NotFoundError,
   UnauthorizedError,
   AlreadyResolvedError,
@@ -13,6 +14,7 @@ import {
   startSession,
 } from './api';
 import { onUnauthorized } from './auth';
+import type { SessionSummary } from '../types';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
 function captureFetch(
@@ -139,8 +141,41 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
   });
 });
 
-describe('startSession — create 路径的有值才带（归一化单一执行点）', () => {
-  it('全空控制字段 → payload 只有 task + 显式传入的 max_steps/auto_approve', async () => {
+describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () => {
+  /** 后端 `GET /api/sessions` 一行的 canonical 形状，与
+   *  `src/agent_harness/web/app.py::SessionSummary` 逐字段对齐。
+   *
+   *  两件事由**类型注解**在编译期锁住（无需运行时断言）：
+   *  ① 类型新增必填字段 → 本 fixture 缺键 → `tsc -b` 红；
+   *  ② fixture 多出类型没声明的键 → 对象字面量多余属性检查 → 红。
+   *  后端侧权威锁（断言**值**，能抓住「键在但值是 null」的漏映射）：
+   *  `tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`。
+   */
+  const CANONICAL_ROW: SessionSummary = {
+    session_id: 's1',
+    event_count: 6,
+    first_event_time: '2026-09-07T00:00:00Z',
+    last_event_time: '2026-09-07T00:00:00Z',
+    first_user_message: '标题',
+    trace_id: 'tr-1',
+    trace_url: 'https://lf.example/trace/tr-1',
+  };
+
+  it('原样保留 trace_url（fetch 层不重排/不丢键/不重命名）', async () => {
+    captureFetch(200, [CANONICAL_ROW]);
+    const rows = await listSessions();
+    expect(rows[0].trace_url).toBe('https://lf.example/trace/tr-1');
+  });
+
+  it('未追踪会话：trace_url 保持 null（不伪造占位串，不变量 #21）', async () => {
+    captureFetch(200, [{ ...CANONICAL_ROW, trace_id: null, trace_url: null }]);
+    const rows = await listSessions();
+    expect(rows[0].trace_id).toBeNull();
+    expect(rows[0].trace_url).toBeNull();
+  });
+});
+
+describe('startSession — create 路径的有值才带（归一化单一执行点）', () => {  it('全空控制字段 → payload 只有 task + 显式传入的 max_steps/auto_approve', async () => {
     const cap = captureFetch();
     await startSession({ task: '干活', max_steps: 10, auto_approve: true });
     expect(cap.calls[0].url).toBe('/api/sessions');

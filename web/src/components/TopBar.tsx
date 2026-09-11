@@ -7,10 +7,10 @@
  */
 
 import { Activity, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
-import { deriveRunPulse } from '../lib/runState';
+import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
 import type { ConversationState } from '../types';
 
@@ -70,6 +70,36 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   const PulseIcon = pulse.Icon;
   const active = pulse.state === 'thinking' || pulse.state === 'tool';
 
+  // 停顿提示（FE-01/#148）：锚**空闲**（距上次新事件），不是流龄——健康的长任务里
+  // 流龄一路涨，用它当阈值会把正常慢任务报成停顿。events.length 是投影真值的进度
+  // 信号；只在「流已挂上且模型正在思考」时计时：说明文字断言的是「等待模型」，所以在
+  // 工具执行（pulse 'tool'，含审批等待）与 run 已收口时都不能出现——那样顶栏会一边写
+  // 「执行工具」一边写「仍在等待模型」，自相矛盾。
+  //
+  // 进度信号走 ref 而不是 effect 依赖：依赖它会让**每个 delta** 都 teardown/重建一次
+  // interval（快速流里每秒成百次）。这里 interval 只在 waiting 翻转时重建，每个事件只
+  // 写一次 ref；同时把已显示的 idleSec 归零，免得新 chunk 到了还挂着上一轮的秒数。
+  const progressKey = conversation?.events.length ?? 0;
+  const progressAtRef = useRef(0);
+  const [idleSec, setIdleSec] = useState(0);
+  useEffect(() => {
+    progressAtRef.current = Date.now();
+    setIdleSec(0);
+  }, [progressKey]);
+
+  const waiting = shouldShowWaitHint(pulse.state, streaming);
+  useEffect(() => {
+    if (!waiting) {
+      setIdleSec(0);
+      return;
+    }
+    const timer = setInterval(
+      () => setIdleSec(Math.floor((Date.now() - progressAtRef.current) / 1000)),
+      1000,
+    );
+    return () => clearInterval(timer);
+  }, [waiting]);
+
   return (
     <header className="appbar">
       <div className="appbar-left">
@@ -94,6 +124,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
             <span className="num"> · {conversation.usage_total.total_tokens.toLocaleString()} tok</span>
           )}
         </span>
+        {waiting && <WaitingHint idleSec={idleSec} />}
       </div>
 
       <div className="appbar-right">
@@ -179,6 +210,18 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       )}
     </header>
   );
+}
+
+/** 生成态里「等太久了」的诚实说明（FE-01/#148）。
+ *
+ *  纯展示：只吃一个秒数入参（上游读的是投影真值 `events.length`），不发
+ *  SessionEvent、不落库——刷新即消失，因此不构成第二套会话真相（不变量 #22）。
+ *  判定用 `shouldShowWaitHint`、文案用 `waitingHintText`（两者的真相与依据都在
+ *  `runState.ts`）；阈值以下的正常生成一个节点都不多渲染。 */
+export function WaitingHint({ idleSec }: { idleSec: number }) {
+  const text = waitingHintText(idleSec);
+  if (text === null) return null;
+  return <span className="wait-hint">{text}</span>;
 }
 
 const DENSITY_LABEL: Record<TraceDensity, string> = {

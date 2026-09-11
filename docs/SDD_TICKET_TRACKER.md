@@ -19,7 +19,43 @@
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
-### 最近一批：OBS-015 修复——审批卡区分幂等已决(409)与真失败(5xx)（2026-09-11）
+### 最近一批：BUG-011 前端半——模型项双击不再发第二个 `POST /model`（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `71e605b`（代码）+ `949d4ad`/`f06cfbd`（docs） |
+| 门禁 | tsc ✓ / vitest **519 passed**（29 文件）/ oxlint **37w 0e**（基线持平）/ playwright **130 passed**（`--workers=2`）/ vite build ✓ |
+| 触发 | 真机报障「续聊失败：Send failed: 404」，会话 `dd983104`（根因在后端，本批只做前端触发面 + 回归锁） |
+| 交付 | ① `ModelPicker.tsx`：新增 `commitSelection`（默认链 + 目录项两处 `onSelect` 统一入口），**弹层已关（`!open`）即丢弃选中**——第一次选中后浮层进入 `--dur-out`(150ms) 退出动画，节点仍在 DOM 可命中，第二次 click 由此丢弃；② `e2e/fixtures.ts`：`onModelPost` 注入点 + 缺省 200 处理器（计数/延迟响应）；③ 新增 `e2e/q-model-dedupe.spec.ts`（3 条锁 × 2 视口）。 |
+| 变异验证 | 去掉 `!open` 守卫 → 两例全红，失败信息即原始 bug 指纹（`Expected: 1 / Received: 2`；另一例 `Received length: 3` 且三个 payload 完全相同）。已还原。 |
+| 取舍（实测驱动） | 最初设想在 `useSession.changeModel` 加「同目标在途复用 Promise」。探针实测该层**永不生效**：`dblclick()`（一次手势两下点击）与 `page.mouse.click` ×2 都是两次 click 之间 React 已提交 `open=false`，第二个请求到不了 hook——删掉该层前后探针结果完全相同（`dblclick=1` / `mouseclick_x2=1`）。故**只留入口一层**（等价于计划里的「弹层关闭后立即 `pointer-events:none`」），hook 恢复直通、仅留注释指明真正 seam，防止后人加错层。 |
+| 跨端配对 | 后端半在 `D:\intelligence-agent-backend` `feat/backend`：`4b8eee4`（① `store.append_event` 每会话写锁 + seq 单调性守卫；② `SeqConflict → 409` 独立语义 + `change_model` 有界重试 3 次；删除 `except ValueError → SessionNotFound` 一刀切；`tests/web/test_web_seq_conflict.py` 4 例）。**后端门禁**：ruff ✓ / pytest **1596 passed**。**集成必须先后端后前端**（AGENTS.md §14.9），后端 seq 守卫是安全网，前端去重是堵源头。 |
+| code-review | 两轴（Standards + Spec）各派 subagent：Spec 轴指出「永久 applied 幂等缓存超出计划且不可失效（外部改过模型后无法再选回）+ 依赖响应回显请求值」→ 已删除该设计；Standards 轴指出「测试无法证明第二次点击真的落到节点上（可能因节点已消失而假绿）」→ 已由变异验证补齐该证据并写进 spec 文件头。 |
+| 未决/边界 | 跨进程并发写（多进程共享同一 JSONL）无文件锁——后端 `store.py` 文档已如实标注；历史遗留的损坏日志不自愈（读时 409）。 |
+
+### 上一批：ARCH-4b 前端——SessionSummary.trace_url 契约锁 + e2e mock 同步（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `4c38c69` |
+| 门禁 | tsc ✓ / vitest **504 passed**（28 文件，+2）/ oxlint **35w 0e**（基线持平）/ playwright **118 passed**（`--workers=2`）/ vite build ✓ |
+| 交付 | **类型声明零改动**（`types.ts` 本就正确声明 `trace_url: string \| null`）。① `src/lib/api.test.ts` 新增 `listSessions` 契约块：`trace_url` 原样透传（URL）+ 未追踪保持 null（不伪造，不变量 #21）；canonical fixture 用 `SessionSummary` **类型注解**锁**编译期**一致性——类型新增必填字段 → fixture 缺键 → `tsc -b` 红；fixture 多出未声明键 → 多余属性检查红。② `e2e/*.spec.ts`（6 文件 10 行）会话行 mock 补 `trace_url: null`——旧 mock 照抄了「后端不返回该键」的坏形状，会让前端永远看不到它。 |
+| 变异验证 | 从 canonical fixture 删掉必填 `trace_url` → `tsc -b` 报 **TS2741** `Property 'trace_url' is missing ... but required in type 'SessionSummary'` 红（已还原）。 |
+| 跨端配对 | 后端半在 `D:\intelligence-agent-backend` `feat/backend`：`a0f86a4`（`store.py` 的 `_terminal_trace_field` 两键共用守卫 + `web/app.py` 映射；`session/service.py` 零改动）。**后端侧权威锁**（断言**值**，能抓「键在但值是 null」的漏映射）：`tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`。 |
+| code-review | 两轴：Standards 轴无 hard violation（采纳 `Literal` 键加固，不采纳 NamedTuple 返回对）；Spec 轴 AC1/2/3/5 满足、零 scope creep，指出 AC#3 值断言缺口已由后端补上。 |
+
+### 上一批：OBS-016 前端同步——超长单行标记文案（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `1fac807` |
+| 门禁 | tsc ✓ / vitest **502 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **118 passed**（`--workers=2`）/ vite build ✓ |
+| 交付 | 纯跨端同步，**解析逻辑零改动**（`LINE_TRUNCATED_RE` 的 `[^\]]*` 本就吞尾部）。① `web/src/lib/toolShapes.test.ts`：新增「新文案（OBS-016）」用例；原用例改标「旧文案（历史会话已落盘）」并**保留**——历史 JSONL 事件仍是旧文案，两种都要能解。② `docs/HANDOFF_FRONTEND_SYNC.md` §1.3：订正为「形状契约 + 措辞可变 + 历史文案兼容」。 |
+| 变异验证 | 把 `LINE_TRUNCATED_RE` 改成仅匹配旧文案（追加 `\. Use bash`）→「新文案」用例变红、「旧文案」用例仍绿（已还原）。证明新增用例非空转，且旧用例仍锁住向后兼容。 |
+| 跨端配对 | 后端半在 `D:\intelligence-agent-backend` `feat/backend`：`aa29562`（`read.py` 正文改点名真实工具标识符 bash/grep）。本 clone 是独立 clone，`web/` 与 `docs/HANDOFF_FRONTEND_SYNC.md` 相对 `origin/main` **零漂移**，故本批**未做 merge**（`feat/frontend` @`274afcf` 是 `origin/main` @`63db650` 的严格祖先，如需同步可 ff）。 |
+| code-review | 本批为测试/文档同步，无解析逻辑改动；后端半的两轴 review 已发现并修复初版「the shell tool」指向不存在工具的问题。 |
+
+### 上一批：OBS-015 修复——审批卡区分幂等已决(409)与真失败(5xx)（2026-09-11）
 
 | 项 | 值 |
 | --- | --- |
@@ -286,3 +322,82 @@ merge 后追加。这是本批的协议偏离，记录在案。
 **第四轮新 spec 的独立审查**：0 个 P0/P1/P2，6 项 P3 **全部已修**（头注释挂载条件、合成滚动划界、显式 `aria-expanded`、数值化可滚动断言、`toHaveCSS` 断生效样式、作废指针），并按修改后版本**重跑三处变异**（均红）。详见登记簿「第四轮收尾」。
 
 **本轮审查（`l-auth-banner.spec.ts`）**：0 个 P0/P1，1 项 **P2** + 4 项 P3，**全部已处置**。P2 是**注释谎报覆盖**——我写「`api.test.ts` 测 401 分类」，实则全 `src` 测试树零个 401 引用（该缝当时**无单测**）。已把谎报改成事实：`api.test.ts` 新增 3 例（401→`UnauthorizedError`、广播 detail、**body 非 JSON 的回退文案**）。P3 中一项揭示了**真实行为被我注释说反**：关闭**不是**永久忽略（`App.tsx:148` 每次广播都会重新显示），故 e2e 改为走「配置令牌」真实路径断言**横幅重新出现**（变异验证：删掉 `refreshSessions()` → 两视口都红）。
+
+
+---
+
+## 第六轮（2026-09-11）：真实浏览器全量验收 + BUG-008
+
+**环境前提（本轮结论必须带这条读）**：:8000 = **`feat/backend` worktree 的后端**（其 `.env` 的
+`CAPABILITIES` **只启用 `websearch`**），5173 = 前端 dev server。前几轮跑的是 **main worktree 的后端**
+（`.env` 里 `websearch` + **`multiagent`** 都开），所以两轮看到的语料与能力集**本来就不同**。
+
+**刷新一致性复验（新增证据）**：会话 `3b35b83d`（35 事件·中断态）在 balanced 与 detailed 两档下，
+刷新前后 `document.body.innerText` 指纹**逐字节相同**（`2235:1645848761` / `2309:2105849635`），
+按钮指纹（74 键 `2032:3401835054`）、滚动位、tab 选中态、`ahi.selectedSession` 全部一致。
+**视图状态**（tab / 滚动 / 折叠）刷新不保留——与既有冻结边界（Inspector 属视图状态、DSH 语义）一致，
+**非缺陷**；本轮为「内容一致 + 视图状态不保留」补了并存的实测证据。
+
+**BUG-008（已修，commit `365fbee`）**：后端序列化省略值为 null 的字段 → 无步号事件的 `step_id`
+是**键缺失**（`'step_id' in e === false`），而三处消费点用严格 `!== null`：
+- `StepDetail.tsx::formatEventTooltip` → hover 浮层渲染字面量 `step undefined`
+- `StepDetail.tsx` 事件详情 Overview → 空值 `step` 幽灵行
+- `eventKind.ts::streamKeyFromEvent` → 伪造 key `step:undefined`（违背它自己的「无 step → null」契约）
+三处统一改宽松 `!= null`（与 `projection.ts::resolveStep` 既有口径一致）；明确否决「改后端」与
+「在 `eventValidate` 归一化」。两文件各补「键缺失」红灯用例（TDD 先红后绿）。
+**真机复验**：无 step 行浮层只剩时间戳、带 step 行仍显 `step 1`；幽灵行消失；跳转 pulse 正/负对照 1 / 0。
+
+**本轮新增真机通过**：事件详情 io-tabs ×4 + `复制 JSON`/`复制 JSON`/`复制 Raw`（剪贴板 165/165/490 字，
+均为 JSON）；工具详情 4 tabs（默认 Output）+ `复制 JSON`(32)/`复制输出`(85)/**两个 `复制 Raw`**(446 call,
+685 result)；Timeline hover 浮层；**全局 Esc 取消**（fetch 记录器捕获 `POST …/cancel`，脉冲 `已取消`
+中性通道，非红色失败）；代码块 `自动换行`↔`不换行` 往返 + `复制代码`（22 字与渲染正文**逐字相等**）；
+中断会话的工具详情**零伪造**（无 tool/result 时不渲染 Output tab、Raw 只 1 个复制键）。
+
+**本轮不可达（配置/语料原因，非产品缺陷）**：委派/子会话 5 项、`加载更早 N 条`、Trace 三件套、
+四个 picker 搜索框、Context picker。其中委派 5 项与 `加载更早` **已在其他轮次真机点过**（第二轮
+第 38/61 项；第三轮「加载更早 200→410」用的是 410 事件的 fork child `1fdac9b9`，属 main 后端语料）。
+**真正的产品不可达只有 Trace 三件套**（需 Langfuse 启用）。详见登记簿 OBS-016。
+
+**两条过程自查（值得记住）**：① **图标按钮必须按 `aria-label` 定位**——`CopyButton` 的 `innerText`
+为空，按可见文本 `^复制` 找会得出「按钮不存在」的**误报**；② **门禁链路 `| tail` 会吞掉退出码**——
+本轮一次 `1 failed` 被掩盖成「成功」，改用 `set -o pipefail` 后复跑 5 次全绿（那次失败**不可复现**，
+已如实登记，不计为通过）。
+
+**门禁（实跑）**：tsc 0 · vitest **507 passed / 0 failed**（28 文件）· oxlint **35 warnings / 0 errors**
+· playwright **118 passed**（`--workers=2`）· vite build 0。
+
+**观察（后端/provider，本轮未改）**：真实 run 中默认链 `deepseek-v4-flash-0731` **停顿 50s+ 且 token
+零增长**，随后**模型回退按设计生效**（不变量 #9），由 `glm-4.5-air` 完成（时间线 `model/completed
+glm-4.5-air · 6907 tok` → `run/completed 13873 tok`）。停顿期间 UI 全程只显示诚实的 `思考中 · Ns`
+（不伪造进度、不假报错），但**没有任何「正在等待模型/即将回退」的中间态提示，且阈值偏长**——
+建议后端更早发 fallback 事件（前端已有渲染通道）。
+
+---
+
+## 第七轮（2026-09-11）：类型诚实化（#147）+ 停顿提示（#148）+ `加载更早` 覆盖锁
+
+| commit | 内容 |
+| --- | --- |
+| `ec2a961` | BUG-010/#147：`AgentEvent.step_id`/`run_id` 放宽为可选——类型不再对「键缺失」撒谎 |
+| `9517e5d` | FE-01/#148：停顿提示（展示层旁注，不新增 SessionEvent） |
+| `051aff6` | e2e：`加载更早 N 条` 真实点击锁（唯一零自动化覆盖的控件） |
+
+**grill 轮的四个决策用户未作答** → 按各题推荐项执行（放宽类型 / `step_id`+`run_id` 同票 /
+前端本地观察式 / 超时默认一律不改），已在 issue 正文与 commit message 里标注为
+「未获用户确认的默认值」，用户可事后否决。
+
+**门禁（末次实跑）**：tsc 0 · vitest **519 passed**（29 文件）· oxlint **0 errors**（37 warnings）
+· playwright **126 passed**（`--workers=2`）· vite build ✓。
+
+**真机证据**：真实后端 + 真实模型（Reasoning Effort=Deep）在一次 31s 首 token 等待上验证
+停顿提示（出现时机、秒数语义、give-up 让位、重连后累计），完整时间线见
+`docs/FRONTEND_ISSUES_LOG.md` 第七轮。
+
+**关单**：#147、#148 均已关闭（comment 内含 AC 逐条证据与残留观察）。**未 push**。
+
+**过程自查（值得记住）**：门禁的 playwright 与我另外两次 ad-hoc e2e **并发**跑，两个进程
+写同一个 `test-results/` → `ENOENT ... .playwright-artifacts-*` → 门禁假失败 4 例
+（其中 3 例是无关用例）。清掉并发、`rm -rf test-results` 后重跑全绿。**同一 worktree 里
+不要并行跑两个 playwright。**
+
+**集成提示词**：`docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。

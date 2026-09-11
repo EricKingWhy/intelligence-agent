@@ -59,7 +59,23 @@ describe('parseReadShape — read 续读标记', () => {
 });
 
 describe('parseReadShape — 单行超长截断标记（不可续读）', () => {
-  it('解析并从正文剥离', () => {
+  // OBS-016：正文措辞改过（后端去掉 POSIX 专有命令 `sed` / `head -c` / `tail -c`），
+  // 但前缀 `[Line {n} truncated at {bytes} bytes` 与结尾 `]` 是解析契约，形状不变。
+  // 旧文案仍躺在历史会话的落盘事件里，两种都必须能解——别删旧用例。
+  it('新文案（OBS-016）：解析并从正文剥离', () => {
+    const s = parseReadShape({
+      content:
+        'data\n[Line 2 truncated at 51200 bytes. This single line alone exceeds the read limit, ' +
+        'so it cannot be returned in full. Use the bash tool to read a further byte range, ' +
+        'or the grep tool to locate the part you need.]',
+      total_lines: 2,
+    });
+    expect(s!.lineTruncated).toEqual({ line: 2, bytes: 51200 });
+    expect(s!.content).toBe('data');
+    expect(s!.continuation).toBeNull();
+  });
+
+  it('旧文案（历史会话已落盘）：同样解析并从正文剥离', () => {
     const s = parseReadShape({
       content: "data\n[Line 2 truncated at 51200 bytes. Use bash with 'sed -n ...']",
       total_lines: 2,

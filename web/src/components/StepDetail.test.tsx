@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import { EventType } from '../types';
-import type { ConversationState } from '../types';
+import type { AgentEvent, ConversationState } from '../types';
 import { initConversation, applyEvent } from '../lib/projection';
 import { TimelineTab, TIMELINE_WINDOW_DEFAULT, TIMELINE_WINDOW_STEP } from './StepDetail';
 
@@ -152,6 +152,54 @@ describe('formatEventTooltip（C4）', () => {
       type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', step_id: 0, session_id: 's', time: undefined,
     } as Parameters<typeof formatEventTooltip>[0]);
     expect(lines).toEqual(['step 0']);
+  });
+
+  it('step_id 键缺失（GET 历史事件省略 null 键的真实线上形状）：不产出 step 行，绝不渲染 "undefined"', () => {
+    // GET /events 走 SessionEvent.to_dict：值为 None 的字段整个键省略（不是 null）。
+    // 实测 GET /api/sessions/<id>/events 的 seq 0/1/2 均 'step_id' in e === false。
+    // 编译期锁：该字面量刻意不带 step_id——类型若改回必填，tsc 在此变红。
+    const e: AgentEvent = {
+      type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', session_id: 's',
+    };
+    expect('step_id' in e).toBe(false);
+    expect(formatEventTooltip(e)).toEqual([]);
+    const withTime = formatEventTooltip({ ...e, time: '2026-09-05T13:17:06.288+08:00' });
+    expect(withTime).toHaveLength(1);
+    expect(withTime[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/);
+    expect(withTime.join(' ')).not.toContain('undefined');
+  });
+});
+
+// ── BUG-008：事件详情 Overview 的 step 行必须按「可能缺失」处理 ──
+
+describe('EventInspector Overview（BUG-008）', () => {
+  const renderEvent = (event: AgentEvent) =>
+    renderToString(createElement(StepDetail, {
+      conversation: initConversation('b'),
+      streaming: false,
+      focus: { kind: 'event', event },
+      onFocusRun: noop,
+      onFocusTool: noop,
+      onFocusEvent: noop,
+    })).replaceAll('<!-- -->', '');
+  const baseEvent: AgentEvent = { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', session_id: 's', event_id: 'e1' };
+  const withStep = (step_id: number | null) => ({ ...baseEvent, step_id });
+
+  it('step_id 键缺失：不渲染空的 step 幽灵行（否则出现「step」后跟空值）', () => {
+    const html = renderEvent(baseEvent);
+    expect(html).not.toContain('>step<');
+    // 阳性对照——面板整体确实渲染了（避免「整个面板没渲染」这种空洞绿）
+    expect(html).toContain('run/started');
+    expect(html).toContain('>seq<');
+  });
+
+  it('同一渲染点的相邻语义：number 渲染 step 行（含值 7），null 哨兵不渲染（0 与数值不是哨兵）', () => {
+    const withStepHtml = renderEvent(withStep(7));
+    expect(withStepHtml).toContain('>step<');
+    expect(withStepHtml).toContain('>7<');
+    expect(renderEvent(withStep(0))).toContain('>step<');
+    expect(renderEvent(withStep(0))).toContain('>0<');
+    expect(renderEvent(withStep(null))).not.toContain('>step<');
   });
 });
 

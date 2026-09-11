@@ -968,7 +968,14 @@ export function useSession() {
    * - 响应回传规范 model_id，不回显请求值
    * - 404 = session 不存在；422 = provider/model_id 不在 catalog
    *
-   * 错误向上抛——调用方决定是否展示。 */
+   * 错误向上抛——调用方决定是否展示。
+   *
+   * 本层**不做**去重：一次用户意图只对应一个请求这条契约由选档入口保证
+   * （ModelPicker.commitSelection：弹层已关即忽略选中）——模型项被双击时第二次
+   * `click` 落在「弹层已关、节点仍在退出动画中可命中」的窗口里，入口丢弃它即可
+   * （实测 `dblclick` 与 ≤120ms 双击都拦得住）。放在这里做「同目标在途复用
+   * Promise」是测不到的死层：两次 click 之间 React 已提交 `open=false`，
+   * 第二个请求根本到不了本函数。 */
   const changeModel = useCallback(
     async (sessionId: string, provider: string, modelId: string) => {
       return changeSessionModel(sessionId, provider, modelId);

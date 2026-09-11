@@ -12,6 +12,31 @@
 
 > **本轮（第三轮 · 控制面清点）新增的后端问题 OBS-011～OBS-014 与两项覆盖缺口，正文在文末「第三轮」章节**（含根因文件行号与原始字节级证据）——它们不在下方历史清单里，勿以为遗漏。
 
+### BUG-011 双击模型项 → 两个 `POST /model` 并发写同一 seq → 会话日志损坏 → 续聊永久 404【P0 · 后端根因 · 已修复】
+
+**发现时间**：2026-09-11 真实浏览器验收（用户报「续聊失败：Send failed: 404」，会话 `dd983104-733c-44e9-baa0-7807b86c9f58`）
+
+**一句话**：模型选择器**双击**会发出两个并发 `POST /model`；后端 `change_model` 是「读快照 → 取号 → append」的读-改-写，**两次都取到同一个 seq，且都返回 200**，事件日志出现重复 seq；此后任何构造 `Session` 聚合的路径（含续聊）抛 `ValueError`，被 `service.py:431` 一刀切映射成 **404「会话不存在」**。**根因在后端**（并发写无序列化 + 错误码错配）；前端双击不去重是触发条件。
+
+**完整证据链、复现实验与待决策项：见文末「第八轮」章节。**
+
+**修复（2026-09-11，用户批准后按序实施）**：
+
+| 步 | 侧 | 内容 | commit |
+| --- | --- | --- | --- |
+| ① | 后端 | 每会话写锁 + seq 单调性守卫：`store.append_event` 在任何写者落盘前校验 `seq > 已落盘最大 seq`（`threading.Lock`，因为写者跨线程：事件循环与恢复扫描的工作线程），违反抛 `SeqConflict` | `4b8eee4` |
+| ② | 后端 | 冲突错误语义独立：`SeqConflict → 409`（不再假装 404）；`change_model` 写时冲突有界重试（3 次）后仍冲突才 409；删掉 `except ValueError → SessionNotFound` 的一刀切 | `4b8eee4` |
+| ③ | 前端 | 选档入口 `ModelPicker.commitSelection`：**弹层已关（`!open`）即丢弃选中**——第一次选中后浮层进入 `--dur-out`(150ms) 退出动画，节点仍在 DOM 中可命中，第二次 click 会被这里丢弃 | `71e605b` |
+| ④ | 前端 | 回归锁 `web/e2e/q-model-dedupe.spec.ts`（3 条 × 2 视口）：在途窗口内重复点击 / 已返回后双击同一项 / 换目标照常发 | `71e605b` |
+
+**③ 的实现取舍（有实测依据，非按最初设想照抄）**：最初设想在 `useSession.changeModel` 加「同目标在途复用 Promise」。探针实测该层**永不生效**——`dblclick()`（一次手势两下点击）与 `page.mouse.click` ×2 都是「两次 click 之间 React 已提交 `open=false`」，第二个请求根本到不了 hook；删掉该层前后探针结果完全相同（`dblclick=1` / `mouseclick_x2=1`）。因此只保留入口一层（计划里「或在弹层关闭后立即 `pointer-events:none`」的等价做法），hook 处仅留注释指明真正的 seam，避免后人把守卫加在错误的层。
+
+**④ 反「假绿」**：去掉 `!open` 守卫重跑 → 两例全红，且失败信息就是原始 bug 指纹（`Expected: 1 / Received: 2`；另一例 `Received length: 3`，三个 payload 完全相同）。证明绿不是「第二次点击根本没落到节点上」。
+
+**未决/边界**：跨进程并发写（多进程共享同一 JSONL）仍未加文件锁——`store.py` 文档已如实标注该边界；读时发现的日志损坏（历史遗留）不可自愈，直接 409。
+
+---
+
 ### BUG-007 命令面板 11 条静态命令的 label 全是英文，中文查询零命中（中文 UI 里的本地化缺口）【P2 · 已修复】
 
 **发现时间**：2026-09-11 真实浏览器逐按钮巡检（Ctrl+K）
@@ -931,3 +956,417 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 **审查方排除的误报**（记录以免后人重复怀疑）：fixture 与后端 `approval.py:56-72` **逐字段一致**（含 `allowed_decisions: ['deny','approve_once']`）；`fixtures.ts` 新分支不影响任何既有 spec（无其它 spec 命中该路径，catch-all 仍在最后）；联调车道不会进主门禁；点击类断言均**非空洞**（三轮变异可证）；`service.py:348` 的引用**准确**。
 
 **审查方另指出（预存在，未改）**：`tsconfig.app.json` 只含 `src`、`tsconfig.node.json` 只含 `vite.config.ts` → **e2e spec 与 Playwright 配置都不被 `tsc -b` 类型检查**，`onApprovePost` 之类的接线错误无编译期兜底（靠 playwright 运行时加载与 oxlint 解析）。属既有结构，登记备查。
+
+---
+
+## 第六轮：全量真实浏览器验收（2026-09-11，真实 dev server 5173 + 真实后端 8000）
+
+> 起因：用户要求「前端的每个功能都要测试一遍，每个按钮都要点一下，遇到任何问题实时写入本文档」。
+> 本轮在**当前 `feat/backend` 后端（源码树启动，非 main worktree 的旧进程）+ `feat/frontend` 前端**上重建验收面：
+> 先复验刷新一致性，再逐个点过此前未覆盖的控件，最后跑真实模型 run。
+
+### 本轮刷新一致性复验（新增证据，结论与 BUG-005 一致）
+
+在会话 `3b35b83d-dcae-476f-8343-9912e40e77d7`（35 事件 · 中断态）上做**同函数**前后对比
+（`document.body.innerText` 的 djb2 `${len}:${hash}` + 按钮指纹 + 滚动位 + tab 选中态）：
+
+| 量 | balanced 档 | detailed 档 |
+| --- | --- | --- |
+| 内容指纹 | `2235:1645848761`（刷新前后**逐字节相同**） | `2309:2105849635`（同） |
+| 按钮指纹（74 键） | `2032:3401835054`（同） | 同 |
+| 滚动位 | `session-items 0/822`、`detail-body 0/860`（同） | 同 |
+| `ahi.selectedSession` | 恢复为该会话 | 同 |
+
+**视图状态（非内容）刷新不保留**：切到 Overview tab、`.detail-body` 滚到 105.5、思考区折叠
+→ 刷新后回到 Timeline / `scrollTop 0` / 展开。**这与「真机验证（2026-09-11 追加）」记录的冻结边界一致**
+（Inspector 是视图状态、DSH 语义、刻意不持久化），**不是缺陷**；本轮为它补了
+「内容一致 + 视图状态不保留」并存的实测证据。`ahi.theme` / `ahi.traceDensity` 两个 localStorage
+键按设计跨刷新保留（density 手动切 detailed 后刷新仍为 detailed）。
+
+### 本轮真机点过并确认正常（新增覆盖）
+
+| 控件 | 结果 |
+| --- | --- |
+| Inspector 运行级 5 个 icon tab | ✓ 每个 21×21，label span `display:none`，名称经 `title`（如 `title="Timeline"`）；点击切换正确 |
+| 事件详情 io-tabs Overview/Input/Output/Raw | ✓ 四段内容各自正确（Input 出 args、Raw 出完整事件 JSON）；`返回 Timeline` 复位 |
+| 事件 Input/Output `复制 JSON`、Raw `复制 Raw` | ✓ 剪贴板实得 165 / 165 / 490 字符，均为 JSON；按钮 `aria-label` 1.6s 内翻 `已复制` |
+| 工具详情 4 tabs（默认 Output） | ✓ `bash echo smoke-ok`：Overview 出 status/duration；Input `复制 JSON`→`{"command":"echo smoke-ok"}`(32)；Output `复制输出`→`{"exit_code":0,"stdout":"smoke-ok\n",…}`(85)；Raw **两个** `复制 Raw`→seq 4(446) / seq 5(685) = tool/call + tool/result |
+| 中断会话的工具详情零伪造 | ✓ `delegate` 无 tool/result 时**不渲染 Output tab**、Raw 只有 1 个复制键（`hasOutput`/`hasRaw` 判定正确） |
+| Timeline 行 hover 浮层 | ✓ 出现 `role=tooltip` 且带完整时间戳（毫秒）——**但文案发现 BUG-008** |
+| 会话切换（rail 行） | ✓ 点 `b46a6029` → 头显示 `已完成 · 5,922 tok`，`ahi.selectedSession` 同步 |
+| `返回 Timeline` | ✓ 事件/工具视图下点击后返回键消失、运行级 tabs 恢复 |
+
+**方法说明（诚实口径）**：Inspector 内的点击用**页面内 `.click()`**（React `onClick` 正常触发）；
+Radix 浮层 / `Esc` 类依赖真实指针与按键事件者，沿用既有的 MCP/CDP 真实序列
+（「合成事件假象清单」不变）。**本轮两处自曝误报已排除**：(1) 我最初用
+`innerText` 匹配 `^复制` 找复制键，得出「事件详情没有复制按钮」的**错误**结论——
+`CopyButton` 是纯图标按钮（`aria-label`/`title` 承载名称、`innerText` 为空），换
+`button.copy-btn` 选择器后三个键全部存在且工作；(2) 曾怀疑「事件 Output 段与 Input 段显示同一份
+JSON」是 bug——读源码 `:807`/`:818` 确认两者都 render `event.data`，**是事件级视图的既定语义**
+（事件没有 call/result 两段，只有 data），非缺陷。
+
+### BUG-008 Timeline 浮层渲染字面量 `step undefined`，事件详情出现空的 `step` 幽灵行【P2 · 已修复（见下方修复条）】
+
+**发现时间**：2026-09-11 第六轮真机 hover。
+
+**现象（两处，同一根因）**：
+1. 悬停 Timeline 第 1 行（seq 0 `session/started`）→ 浮层文字为
+   `2026-09-06 05:57:19.553 step undefined`（**字面量 `undefined`**）。
+2. 点开该行事件详情 → Overview 段多出一行 `step` 但**值为空**。实测 `.detail-row` =
+   `[{seq:"0"},{time:"2026-09-05T21:57:19.553+00:00"},{step:""},{event_id:"034292cf-2c13-41"}]`。
+
+**根因（文件行号）**：
+- 后端序列化**省略值为 null 的字段**——实测 `GET /api/sessions/b46a6029-…/events` 的 seq 0/1/2
+  均为 `'step_id' in e === False`（**键整个不存在**，不是 `step_id: null`）。
+- 前端 `components/StepDetail.tsx:478` 用**严格判等**：
+  ``if (e.step_id !== null) lines.push(`step ${e.step_id}`)`` —— `undefined !== null` 为真
+  → 推出模板串 `step undefined`。
+- 同文件 `:783` ``{event.step_id !== null && (<div className="detail-row">step {event.step_id}</div>)}``
+  同理，且 `<span>{undefined}</span>` 被 React 渲染为空 → **幽灵行**。
+
+**为什么别处没中招（对照，证明是渲染层疏漏而非契约问题）**：
+`lib/projection.ts:1024` 用宽松判断 ``if (event.step_id != null)``；`:453` 对派生字段做
+``event.step_id ?? null``；`App.tsx:679` 读的是已归一的 `conversation.run_interrupted.step_id`，
+故中断横幅文案（「第 N 步」/「首个步骤开始前」）**不受影响**。
+
+> ⚠ **初版结论已订正（对 reviewer 的 Spec 轴自查）**：初版写「只有 `StepDetail.tsx` 这两处」是**错的**。
+> 同一 bug 类**还有第三处**：`lib/eventKind.ts::streamKeyFromEvent` 也是严格 ``stepId !== null``，
+> 入参由 `App.tsx:223` 直接传 `event.step_id`（同样是可能缺失的键）。键缺失时它返回**伪造 key
+> `step:undefined`**——违背它自己文档里写明的「无 step 且非工具/委派域 → 返回 null（无可定位目标）」
+> 契约，并让 `App.tsx:222` 的 `if (key)` 把一个不存在的定位目标当真。**诚实的后果评估**：
+> `Conversation.tsx:126-127` 的兜底 `turns.findIndex(...)` 会得到 `-1` 并 `return`，**当前不产生
+> 任何可见差异**（无 step 的事件本来就无处可跳）；所以这一处的价值是**契约正确性 + 不伪造 key**，
+> 不是修复一个可见症状。三处均已修，且各自有测试锁。
+
+**归因：前端（渲染判空）**。后端「省略 null 字段」是既定序列化约定（Raw 档"完整源事件原样透传"，
+见 `projection.ts:313` 注释），改后端会改动 Raw 真相源形状，不作首选。
+
+**测试缺口**：`StepDetail.test.tsx` 的 5 个 `formatEventTooltip` 用例只覆盖
+`step_id: 9 / 2 / null / null / 0`，**没有「键缺失（undefined）」这一真实线上形状**——所以它一直绿。
+`eventKind.test.ts` 的 `streamKeyFromEvent` 6 个用例同理：只测 `null`，不测 `undefined`
+（第 113-116 行「无 tool_call_id 且无 step → null」用的正是 `null`，所以第三处的伪造 key 也一直是绿的）。
+
+**为什么定 P2 而非 P1**：不影响会话内容、不阻断任何操作；但确实是用户可见的**伪造文本**
+（不变量 #21 精神：缺席不得被渲染成一个看似有值的占位）。
+
+### BUG-008 修复条（2026-09-11）
+
+**思路**：三处都是**渲染/构造层用严格判等读一个线上可能缺失的键**，统一改为宽松判空
+（``!= null``）——与仓库既有口径一致：`projection.ts:1024` 的 `resolveStep` 早就这么写，
+且它的注释记录了**同一 bug 类此前已造成过一次回归**。**明确否决的两个替代方案**：
+① 改后端让 `step_id` 总是出现——会改动 Raw 档「完整源事件原样透传」的形状（`projection.ts:313`），
+且后端省略 null 字段是既定约定；② 在 `lib/eventValidate.ts::validateEvent` 统一归一化——
+它的 docstring 明确把归一化范围限定为缺失的 `data`/`seq`（「只守可辨、不崩」），
+把业务字段塞进去等于扩权该层。两轴 reviewer 独立得出同一结论：修在消费点、保持一致。
+
+**改动（3 文件）**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `web/src/components/StepDetail.tsx` | `:481` `formatEventTooltip` 的 ``e.step_id !== null`` → ``!= null``；`:788` 事件详情 Overview 的 `step` 行同改。docstring 补齐「缺失或 null」语义，行内注释收敛为一句指针（消除两处重复注释的漂移风险） |
+| `web/src/lib/eventKind.ts` | `streamKeyFromEvent` 的 ``stepId !== null`` → ``!= null``（第三处，见上方订正块）；docstring 写明为何必须宽松 |
+| `web/src/components/StepDetail.test.tsx`<br>`web/src/lib/eventKind.test.ts` | 各补「键缺失（undefined）」红灯用例（TDD：先见 ``["step undefined"]`` / ``"step:undefined"`` 再修）；Overview 的相邻语义用例补 `withStep(0)` 并改名（原名把 `null` 说成「缺失」，措辞不准） |
+
+**验证**：
+
+1. **红灯→绿灯**：修复前 `formatEventTooltip` 实收 ``["step undefined"]``、SSR HTML 里确有
+   ``<span class="detail-key">step</span><span class="detail-val num"></span>``、
+   `streamKeyFromEvent` 实收 ``"step:undefined"``；修复后三处全绿（`StepDetail` 16 + `eventKind` 19）。
+2. **真实浏览器复验**（dev 5173，会话 `b46a6029`）：
+   - 无 step 的行 hover → 浮层 `2026-09-06 05:57:19.553`（**无 `undefined`**）；带 step 的 `tool/call` 行 → `…21.816 step 1`（正对照）。
+   - 事件详情 Overview 的 `.detail-row` 由 `[seq, time, step(空), event_id]` 变为 `[seq, time, event_id]`。
+   - 跳转路径正/负对照：点 `session/started`（无 step）`stream-jump-pulse` **0** 个；点 `tool/call`（有 step）**1** 个、pulse 落在工具行——**修复没有破坏跳转**。
+3. **门禁**：`tsc -b` 0 · `vitest run` **507 passed / 0 failed**（28 文件）· `oxlint` **35 warnings / 0 errors**（基线未变）· `playwright test --workers=2` **118 passed** · `vite build` 0。
+
+**过程自查（两条，值得记住）**：
+- 我最初的探针用 `innerText` 匹配 `^复制` 找 Inspector 的复制键，得出「事件详情没有复制按钮」的
+  **错误**结论；`CopyButton` 是纯图标按钮（名称在 `aria-label`/`title`）。**教训：图标按钮必须按
+  `aria-label` 定位，不能按可见文本**。
+- 本轮的第一次全量门禁我把 vitest 输出接了 `| tail`，**管道退出码掩盖了 `1 failed`**，命令链继续
+  跑完并报「成功」。发现后重跑：**连续 5 次全量均只失败我当时故意留的红灯**，那次失败**不可复现**。
+  **教训：门禁链路必须用 `set -o pipefail`（或 `${PIPESTATUS[0]}`），任何 `| tail` 都会吞掉失败。**
+  那次未复现的失败已如实记录在此，不当作已通过。
+
+### OBS-016 委派/子会话整块 UI 在当前后端配置下**不可达**（multiagent capability 未启用）【配置 · 非缺陷 · 验收环境缺口】
+
+**发现时间**：2026-09-11 第六轮真实 run（为验收委派节点而发起）。
+
+**现实现象**：我发起的真实 run（新会话 `a39876d7`，提示词就是「用 delegate 工具把任务委派给
+research_review…」）里，**模型自己说没有这个工具**，并列出它实际可见的工具表：
+`read / write / edit / apply_patch / bash / glob / grep / git_status / git_diff / inspect_artifact / web_search`
+——**有 `inspect_artifact` 但没有 `delegate`**，随后它自行改用 `web_search` 完成任务（自适应行为正确）。
+
+**证据链（三层，互相印证）**：
+1. `GET /api/capabilities` → **只返回 1 个能力 `websearch`**，无 `multiagent`。
+2. 后端启动配置 `CAPABILITIES` = 仅 `websearch`（`"enabled": true`）——`multiagent` 是
+   **ADR-0015 的显式 opt-in capability**，未列即不激活。
+3. 装配层 `assembly.py:211-221`：capability 贡献的 delegate 工具只在 multiagent 启用时进 registry，
+   且 `session_store is None` 时还会「降级缺席」并打 warning——
+   即 **delegate 缺席是设计内的 optional-capability 语义**（不变量 #21：可选能力缺席不得拖垮 Core）。
+
+**归因：既不是前端 bug 也不是后端 bug，是运行配置。**
+- 前端正确：委派 UI（`DelegationNode`、`复制子会话 ID`、`Inspect 子会话`、`打开子会话`、child 视图
+  `Run` 返回）**只由真实事件驱动渲染**，无事件就不渲染——零伪造，符合不变量 #21。
+- 后端正确：`main` profile 的 `tool_scope`（`agent/profiles.py:58`）确实含 `delegate`，
+  但 capacity 未启用时 registry 里根本没有它；`main` profile 不做过滤（`assembly.py:224`），
+  所以不是被 scope 收窄掉的。
+
+**本轮覆盖后果（诚实登记）**：以下 **5 个控件在本轮配置下无法真机点击**，故本轮不宣称覆盖：
+`委派行按钮（委派 → target）`、`复制子会话 ID`、`Inspect 子会话`、`打开子会话`、`child 视图 Run（child-back-btn）`。
+它们**已有上两轮的真机结论**（第二轮第 38/61 项：展开、复制子会话 ID 实测剪贴板、Inspect 子会话、
+打开子会话切到 child `2515a128`；`k-refresh-restore.spec.ts` 还锁了 child 会话刷新），
+**e2e 回归锁也在**（`k-refresh-restore.spec.ts` 的 `.session-item[title^="${CHILD} "]`）。
+本轮追加的语料核查：**当前 11 个会话里只有 `3b35b83d` 出现过 `tool/call delegate`，且它没有任何
+`child_session_id`**（那次的委派在 run 被中断前没跑起来）——所以库里**确实不存在**可钻取的子会话。
+
+**建议（需用户决定，我没有擅自改）**：若要在这条验收车道上真机覆盖委派/子会话，需要在
+`feat/backend` 的 `.env` 里给 `CAPABILITIES` 增加 multiagent 项。这是**改运行配置**（会改变产品
+实际行为，不只是测试开关），按 §9.1 属需要用户确认的范围，故**只登记建议、不改**。
+
+**决定性补充（两个 worktree 的 `.env` 差异——也解释了前几轮为何能点委派）**：
+
+| worktree | `CAPABILITIES` |
+| --- | --- |
+| `D:\intelligence-agent`（main） | `websearch` **+ `multiagent`（enabled）** |
+| `D:\intelligence-agent-backend`（feat/backend） | **仅 `websearch`** |
+
+`.env` 按 §13.1.6 属**不在 worktree 之间同步**的本地文件，所以两个 worktree 的能力集天然可能不同。
+这同时解释了另外两件此前看起来矛盾的事：
+1. **前几轮的委派/子会话真机结论成立**（第二轮第 38/61 项）——当时 :8000 上跑的是 **main 的
+   后端**（multiagent 开），所以 `delegate` 在册；本轮跑的是 **feat/backend 后端**（multiagent 关）。
+2. **第三轮「加载更早 200→410」也是真机点过的**——那需要一个 >200 事件的会话（fork child
+   `1fdac9b9`，410 事件），它属于 main 那次后端的语料库；本轮 feat/backend 语料 11 个会话最大
+   35 事件，**`加载更早 N 条`（阈值 >200）在本轮语料下不可达**，但**并非产品不可达**。
+
+**结论口径修正**：本轮称「不可达」的控件（委派 5 项、`加载更早`、Trace 三件套、四个 picker 搜索框、
+Context picker）**全部是「本轮运行配置/语料下不可达」，不是产品缺陷**；其中委派 5 项、`加载更早`、
+picker 搜索框均**已在其他轮次真机点过并有 e2e/单测回归锁**。真正的产品不可达只有「Trace 三件套」
+（需 Langfuse 启用，本部署未配）。
+
+### 本轮新增真机覆盖（第二批：真实 run 路径）
+
+| 控件 | 结果 |
+| --- | --- |
+| `Escape`（全局，R3） | ✓ **决定性证据**：真实 CDP 按键后 fetch 记录器立刻捕获 `POST /api/sessions/a39876d7-…/cancel`；脉冲 `思考中 · 2s` → **`已取消`（中性通道）**；停止键消失、发送键复位、四个控制选择器恢复、无错误横幅。与 Composer 停止键行为一致 |
+| 流式期的 Composer 状态 | ✓ run 中：`[aria-label="停止"]` 在场、发送键消失、`.composer-control/.composer-model` 四个选择器 `disabled`；结束/取消后全部复位 |
+| 顶栏 Run Pulse（观察项） | ✓ 忠实反映真实阶段：`思考中 · Ns` → `执行工具 · Ns` → `已完成 · N tok` / `已取消`；无伪造进度 |
+| 代码块 `自动换行`/`不换行`（markdown.tsx:61） | ✓ `.md-code` ↔ `.md-code md-code-wrap`，标签 `代码自动换行` ↔ `代码不换行` 往返一致 |
+| 代码块 `复制代码`（markdown.tsx:69） | ✓ 剪贴板实得 22 字符 `print("Hello, World!")`，与 `.md-code code` 的 `textContent` **逐字相等**（非截断版），反馈翻 `已复制` |
+
+**真实 run 的模型行为观察（后端/provider，非缺陷）**：本次「写 hello world 代码块」的 run 在
+`思考中` 停留 **50s+ 且 token 零增长**（默认链 `deepseek-v4-flash-0731` 停顿），随后**模型回退
+按设计生效**（不变量 #9：Model Fallback 与 Tool Retry 分离）——时间线落
+`model/completed glm-4.5-air · 6907 tok`，由 glm-4.5-air 完成，`run/completed 13873 tok`。
+**UI 全程诚实**：期间只显示 `思考中 · Ns` 实时计时、不伪造进度、不报假错误、也不假装卡死；
+用户可随时用停止键/Esc 取消（本轮已实测）。这与 `3b35b83d` 里
+`model/fallback deepseek-v4-flash-0731 → glm-4.5-air · ModelStallError` 是同一现象。
+**建议（供后端参考，不在本轮前端范围）**：停顿检测的阈值约 50s 偏长，且停顿期间 UI 没有任何
+「正在等待模型/即将回退」的中间态提示——可考虑让后端更早发出 fallback 事件，前端已有渲染通道。
+
+### BUG-009 非流式 run 的 Model Fallback 在带并发闸时**必崩**（`AttributeError`）【P1 · 后端 · 已修复】
+
+**发现时间**：2026-09-11 第六轮验收——把 `multiagent` 加进 `feat/backend` 的 `.env` 后跑真实委派，
+**委派子会话 `run/failed`**，而父会话正常完成。这属于用户问的「判断是前端还是后端的问题」的典型：
+**后端**，前端只是把后端的真实失败如实渲染出来。
+
+**症状（真实事件，非推断）**：child `1f2c2af4` 的事件序列
+```
+3 model/fallback {"from_model":"deepseek-v4-flash-0731","to_model":"glm-4.5-air","reason":"InternalServerError"}
+4 model/failed   {"message":"model call failed: AttributeError"}
+5 run/failed     {"trace_id":null,"trace_url":null}
+```
+
+**根因（后端服务端日志 traceback 逐字）**：
+```
+File ".../agent_harness/agent/runtime.py", line 663, in _drive
+File ".../agent_harness/model/fallback.py",  line 176, in ainvoke
+File ".../contextlib.py",                    line 212, in __aenter__
+AttributeError: '_AsyncGeneratorContextManager' object has no attribute 'args'
+```
+
+`fallback.py::ainvoke` 把 `slot = self._gate.slot() if self._gate is not None else nullcontext(None)`
+**只取一次**，然后在「首次尝试」和「回退重试」两处 `async with slot:` **复用同一个 CM**。
+`ModelCallGate.slot()` 带 `@asynccontextmanager`（`concurrency.py:52`），其产物是**一次性**的——
+contextlib 退出时执行 `del self.args, self.kwds, self.func`（CPython 源码注释原话：
+"only needed for recreation, **which is not possible anymore**"），二次进入即抛 `AttributeError`。
+
+**影响面（不变量 #9 被破坏）**：`runtime.py` 的 `if stream:` **else 分支**（`:663`）走 `ainvoke`。
+`run()` 传 `stream=False`（`:432`），`run_stream()` 传 `True`（`:455`）；delegate 派生的子会话走
+`child_runtime.run(...)`（`multiagent/provider.py:229`）→ **非流式**。所以
+**所有非流式 run（含全部 delegate 子会话）在主模型瞬断时永远回退不了**，直接 `model/failed` + `run/failed`。
+生产恒带闸（`model_max_concurrency` 默认 3）故必然触发。
+
+**为什么既有测试长期没抓到（精确的覆盖缺口）**：`tests/test_model_fallback.py::TestCoordinatorAinvoke`
+的用例**全部 `gate=None`**——此时走 `contextlib.nullcontext`，而 `nullcontext` **可以重复进入**，
+所以那条 `async with slot` 第二次进入是合法的。**「闸 + ainvoke 回退重试」这个组合此前零覆盖。**
+
+**修复**：新增 `_slot()` 帮助方法（每次调用取**新** CM），两处尝试各自调用它。
+改 `src/agent_harness/model/fallback.py`，并补回归锁 2 例（含 5xx 形状参数化与「回退也失败」的
+重试一次边界）。**变异验证**：把 `ainvoke` 改回复用同一个 CM → 只有新用例变红（红灯非空洞）。
+
+**真实 A/B 实证（同一触发形状、不同结局）**：
+| | 触发 | 结局 |
+| --- | --- | --- |
+| 修复前 child `1f2c2af4` | `model/fallback … reason: InternalServerError` | `model/failed(AttributeError)` → `run/failed` |
+| 修复后 child `6eed381f` | `model/fallback … reason: InternalServerError`（**同形**） | `model/completed` → `tool/result` → **`run/completed`**，`final_text` = "Python 官网网址是 https://www.python.org" |
+
+父会话 `7cf291d1` 也 `run/completed`，`final_text` = "子代理 `research_review` 已成功完成任务：…"。
+
+**门禁**：`ruff check src/ tests/` 干净 · `pytest -q` 全绿。**登记归因：后端**（前端无需改动）。
+**另记**：`fallback.py::_guarded_stream` 末尾有一处**重复的 `return stream`（死代码，非本次引入）**，
+按 §8 Scope Lock 只报告、不顺手改。
+
+---
+
+## 第七轮（2026-09-11）：停顿提示（FE-01/#148）——阈值依据 + 真机时间线
+
+### 停顿提示阈值：可复现的测量
+
+方法（可重跑）：对 `GET /api/sessions` 前 20 个会话，各取 `GET /api/sessions/<id>/events`，
+找**首个带 `time` 的 `user/message`** 到其后**首个模型活动事件**（`model/started` /
+`text/delta` / `reasoning/started` / `tool/call`）的 `time` 差，作为「首事件延迟」的代理
+（它量的是「提交 → 模型开始动弹」，不是 SSE 首帧的网络延迟）。
+
+实测（本机 `:8000`，脚本见本条记录时的 `/tmp/lat.py`）：**n=13，min 0.8s，p50 4.6s，
+max 61.0s；>15s 占 3/13，>30s 占 2/13**。样本：0.8 / 1.3 / 1.4 / 2.3 / 2.3 / 4.6 / 4.6 /
+11.3 / 12.3 / 13.5 / 23.2 / 60.5（s）。
+
+结论：30s 阈值落在真实分布的长尾上（历史上约 15% 的 run 会触发），而提示文案只陈述
+「已经多久没有新进展」这一已观测事实，所以长尾触发时它说的是真话，不是误报。
+
+### 真机时间线（真实后端 + 真实模型，Reasoning Effort=Deep）
+
+`.wait-hint` 用 250ms 采样器记录（页面内 `window.__obs`）：
+
+| 时刻（自提交） | 脉冲 | 提示 |
+| --- | --- | --- |
+| 0.3–20.3s | `思考中 · 11s` → `思考中 · 31s` | 无 |
+| **20.5s** | `思考中 · 31s` | **`已 30s 没有新进展，仍在等待模型`**（首次出现） |
+| 21.5s–24.5s | `思考中 · 32s` → `35s` | `已 31s…` → `已 34s…`（逐秒递增） |
+| ~65s | `思考中`（无秒数） | 无（**断线横幅接管**：`连接中断（connection stalled）：重试 3 次未成功` → `连接中断，正在重连…`） |
+| ~70s+ | `思考中 · 4s`（重连成功后**流龄重置**） | `已 79s 没有新进展，仍在等待模型`（空闲是**跨重连累计**的） |
+
+**三条结论**：
+1. **AC7「真机出现该说明」成立**——首 token 等了 31s 的真实 run 上，提示在空闲 30s 时
+   出现并逐秒递增；且提示秒数（30）**小于**同屏脉冲秒数（31），正是「锚空闲而非流龄」的
+   现场证明（e2e 里把这条做成了决定性断言）。
+2. **降级路径是对的**：客户端自己 give-up 时 `streaming=false`，提示让位给断线横幅/恢复
+   入口（`思考中` 无秒数 + 横幅），重连成功后提示带着累计空闲秒数回来。三种信号不互相
+   冒充，符合「等待态是展示层状态」的设计。
+3. **观察（未改，§8 Scope Lock）**：脉冲的 `思考中 · Ns` 是**流龄**、重连成功后会重置
+   （上表 `4s`），而提示的秒数是**跨重连累计的空闲**（`79s`）——两个数字可以相差很大，
+   同屏看会以为是矛盾。这是脉冲既有语义（不是本票引入）；若要消除，最小改法是提示可见
+   时隐藏脉冲秒数，但那会改动本票 AC 明确要求保留的既有计时显示，故**只登记不动**，
+   交用户决定。
+   **用户决定（2026-09-11）：保留计时显示，不改。**（观察闭合，不再挂「待决定」。）
+
+### 停顿提示与重连 give-up 的窗口关系（用户已决定：不改）
+
+提示在空闲 30s 出现，而客户端 `RECONNECT_STALL_MS(10s) × MAX_RECONNECT_ATTEMPTS(3)`
+约在 30–40s 走 give-up（`streaming=false` → 提示让位给断线横幅），因此真实停顿里提示的
+可见窗口约 10s，之后由断线横幅 / 恢复入口接管。**用户决定（2026-09-11）：不需要改**——
+保留「旁注 → 断线横幅 → 恢复入口」这个升级顺序。
+
+### 过程自查（值得记住）
+
+- **假绿一次**：给「工具执行中不提示」写的第一版 e2e，用 `route.fulfill` 的**有限响应体**
+  mock 流 → 流立刻结束 → 重连额度（3 次）十几秒内耗尽走 give-up → `streaming` 先变 false
+  → 「有提示」和「无提示」两个变体都不显示，用例**因错误的原因通过**（变异验证时抓到：
+  把相位门改回 `active` 依然全绿）。结论：**这类相位门必须在纯函数层锁**（`shouldShowWaitHint`
+  单测，变异后 2 处变红），不能靠有限体 mock 的 e2e。
+- **真实后端与 mock 的差异**：真机 `/stream` 在途会话是长连接（所以不会连锁 give-up），
+  已收口会话回放完即关（实测 237ms/21831B 正常退出）。mock 的有限体两头都不像，是上一条
+  假绿的根因。
+
+---
+
+## 第八轮（2026-09-11）：续聊 `Send failed: 404` 根因（BUG-011 / 后端·已定位待修）
+
+**触发**：用户报「续聊失败：Send failed: 404」（会话 `dd983104-733c-44e9-baa0-7807b86c9f58`）。
+按 `diagnosing-bugs` 协议执行（先建可复现环 → 再假设）；除方法说明外无任何代码改动。
+
+### 现场证据（全部来自真实进程，未做任何写入于用户会话）
+
+| # | 证据 | 内容 |
+| --- | --- | --- |
+| 1 | 浏览器历史网络记录（page 2，保留请求） | `reqid=966 POST /sessions/dd983104…/model [200]` 与 `reqid=967 POST …/model [200]` **相邻**（中间无任何其它请求），紧接着 `reqid=970 POST …/messages [404]` |
+| 2 | 失败响应体 | `{"detail":"Session 'dd983104-…' 事件 seq 重复: 5"}` |
+| 3 | 事件流（7 行） | seq 0 `session/started`、1 `user/message`、2 `run/started`、3 `model/failed`、4 `run/failed`，然后 **两条 seq=5 的 `model/changed`**（11:21:54.297 / .400） |
+| 4 | 两条 seq=5 的 payload | **完全相同**：`from_provider=null, from_model_id=null, to_provider=qwen, to_model_id=qwen3.8-27b` |
+| 5 | 只读本地复现（`JsonlSessionStore` + `Session.load`） | 存储层 `read_events` 正常返回 7 条（故 `GET /events` 仍 200、UI 仍显示该会话）；**聚合层 `Session.load` 抛 `ValueError: … 事件 seq 重复: 5`** |
+
+**证据 4 是关键**：两条 `from_*` 都是 `null`，说明**两次写入各自基于「变更前」快照**（若第二次读到了第一条，`from_model_id` 必然是 `qwen3.8-27b`，且不会撞号）。即两个聚合各取到 seq 5。`103ms` 只是第一条的同步 `fsync` 阻塞事件循环后第二条才被调度，**不代表两次点击相隔 103ms**。
+
+### 复现实验
+
+**(a) 服务端：并发两次 `POST /model` → 重复 seq（靶 = 健康会话的临时副本，用完即删）**
+
+| 错开量 | 3 次试验中撞号 |
+| --- | --- |
+| 0ms | **3/3**（首轮另一组 2/3） |
+| 20ms | 1/3 |
+| 50 / 100 / 200ms | 0/3 |
+
+单请求耗时 26–46ms（`append` 走整行写 + flush + fsync，**fsync 阻塞事件循环**正是竞态窗口来源）。两次请求均返回 **200**，无任何冲突检测。两请求同时刻提交时，两条 append 时间戳相差 4ms（正常串行时反而 22ms）——反证现场 103ms 是循环被阻塞所致。
+
+**(b) 前端：是「单击」还是「双击」发出两个请求（无头 Chromium 打真实 5173 + 真实 8000，会话指向临时副本）**
+
+| 手势 | `POST /model` 次数 |
+| --- | --- |
+| **单击** | **1** |
+| `dblclick`（两次点击间隔 0ms） | 2（间隔 7ms） |
+| 两次真实点击、间隔 20 / 50 / 80 / 120ms | **均为 2**（弹层视觉已关，但第二次点击在 ~150ms 内仍命中模型项） |
+| 间隔 200ms | 1 |
+
+**结论**：前端**单次点击不会重复发送**（cmdk 的 `CommandItem` 一次点击只触发一次 `onSelect`；`changeModel` 全仓只有 `App.tsx:285` 一个调用点、`api.ts` 无重试、无 effect 重复触发）。重复来自**双击**——一次人类双击（实测 ≤120ms）即可发出两个并发请求。附带发现：**弹层关闭后约 150ms 内模型项仍在 DOM 中可被命中**，这是双击能穿透的直接原因。
+
+### 根因链（三环，缺一不可）
+
+1. **后端并发写不序列化（根因）**：`service.change_model`（`service.py:788-806`）先 `await read_events` 取快照，再 `Session(...)` 取号 `_next_seq = max(seq)+1`（`session.py:66`），最后 append（`:275-290`）。两个请求各自的**读**都早于对方的**写**时，双双取到同一 seq，且**都不检测冲突、都回 200**。任何两个并发写该会话的请求（双击模型项、两个标签页、客户端重试）都能把会话写死。
+2. **错误码错配（放大伤害）**：重复 seq 在聚合层是 `ValueError`（`session.py:206`），而 `service.py:431-432` 把该 try 块内的 `ValueError` **一刀切**转成 `SessionNotFound` → HTTP **404**。于是「日志损坏」被报成「会话不存在」：前端只能显示无从下手的 `Send failed: 404`，运维也无法从状态码判断真因。
+3. **前端双击不去重（触发条件）**：`handleModelChange` 无 in-flight 门（`void changeModel(...)`，失败静默），双击直接产生两个请求。severity 上它是「触发」，不是「根因」——因为第 1 环不修，任何并发写都能损坏日志。
+
+**影响面**：一旦撞号，该会话**永久不可续聊**（`/messages` 恒 404）；`GET /events` 仍 200 故 UI 仍显示会话，用户看到的是「会话在，但一续聊就 404」。是否影响 fork/recover/approve 未逐一实测（它们同样构造聚合，按第 2 环推断同为 404）。
+
+### 未做与待决策（按 §8 Scope Lock 只报告）→ 已于 2026-09-11 全部处置
+
+- **用户决定**：① 删除损坏会话 `dd983104`（删前已逐字节记录：7 条事件 + 工作区注册文件 + 空工作区目录）；② 按上述顺序实施 ①②③④ 四步修复。
+- 四步均已落地（见文件头 BUG-011 的修复表：后端 `4b8eee4`、前端 `71e605b`），前置说明保留在下方，方法备注仍然有效。
+
+### 原「未做与待决策」记录（保留原貌）
+
+- **未改任何代码**：用户此次是提问式报障，交付物是根因判定；修复方案见下，等指令再动。
+- **未改动 `dd983104` 的任何字节**：该会话日志已损坏（重复 seq 5），原样保留（7 行）。它**不会自愈**，续聊会持续 404。
+- **待用户决定（数据处置）**：① 重编号修复（把第二条 seq 5 改成 6，会话复活）；② 隔离/备份后删除；③ 暂不处理（只修后端，避免以后复发）。**我未擅自改写用户数据。**
+- **待用户决定（修复范围，建议按序）**：
+  1. 后端：按会话串行化 append（per-session 锁，或把取号放进 `append_event` 的临界区），使并发写不再撞号；
+  2. 后端：撞号时给出**独立错误语义**（冲突重试或 409），而不是伪装成 404；`ValueError` 的兜底不应再无条件等于 `SessionNotFound`；
+  3. 前端：模型项加 in-flight 去重（或在弹层关闭后立即 `pointer-events:none`），双击不再发出第二个请求；
+  4. 回归锁：服务端并发 `/model` 不得产生重复 seq（pytest，TDD 先红）；前端双击只允许一个 `POST`（e2e 计数）。
+
+### 观察：事件文件在、工作区映射缺失 → 500（**已用真实服务端验证**，Scope 外仅登记）
+
+原记录（合成副本复现时 `POST /messages` 返回 500 而非现场 404）当时**不作为结论**；修完 BUG-011 后用真实
+uvicorn（`WORKSPACE_DIR` 指向临时目录）复测，**已确认并拿到 traceback**：
+
+```text
+File "src/agent_harness/session/session.py", line 242, in resume
+    session = cls.load(store, session_id, workspace_registry=workspace_registry)
+File "src/agent_harness/session/session.py", line 223, in load
+    workspace_registry.get(session_id)
+File "src/agent_harness/sandbox/registry.py", line 73, in get
+    raise KeyError(f"Session '{session_id}' 没有对应的 workspace 映射记录。")
+KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
+```
+
+**判读**：这是 `KeyError` 而非领域异常，没有进 `domain_errors.py` 的表 → **500「Internal Server Error」**。
+且它发生在 **seq 校验之前**（`registry.get` 在 `load` 的更早位置），所以这类会话走不到 409。
+**属另一张票**（健康日志 + 缺工作区映射的状态应走受控错误路径，如 404/409 或可恢复提示），本次**未改**（§8 Scope Lock）。
+注意：正常会话不会进入该状态——`Session.start(..., workspace_registry=...)` 会同时写 JSONL 与映射文件；
+只有手工构造 / 半删除（事件文件在、映射文件丢）才会出现。
+
+### 方法备注（代价与边界）
+
+- 所有服务端复现都在**健康会话的临时副本**上做（靶子用完即删，删前核对）；探针 15 条 `model/changed` 全部落在靶子上，用户会话 `dd983104` 始终保持 7 行。
+- 浏览器侧用**独立无头 Chromium**，未干扰用户已打开的页面，也未向其会话写入任何事件。
+- 现场没有服务端访问日志（应用日志只记了 19:02 的孤儿回收），因此「两个请求」由浏览器侧历史网络记录 + `from_* = null` 反证，而非服务端计数。

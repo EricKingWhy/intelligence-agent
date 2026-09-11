@@ -14,7 +14,7 @@ test('历史重放：会话列表 → 点击行 → projectHistory 重建文本�
     { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
   ];
   routeApi(page, {
-    sessions: [{ session_id: SID, event_count: 6, first_event_time: T, last_event_time: T, first_user_message: '历史会话的标题', trace_id: null }],
+    sessions: [{ session_id: SID, event_count: 6, first_event_time: T, last_event_time: T, first_user_message: '历史会话的标题', trace_id: null, trace_url: null }],
     events,
   });
 
