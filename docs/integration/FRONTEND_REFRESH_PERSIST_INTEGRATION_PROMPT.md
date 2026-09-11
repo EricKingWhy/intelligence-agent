@@ -23,7 +23,7 @@
 
 ```bash
 # ① 反向合入（在 feature 分支上解冲突、跑门禁）
-cd D:/intelligence-agent-backend/../intelligence-agent-frontend   # 即本 worktree
+cd D:/intelligence-agent-frontend      # 即本 worktree
 git fetch origin --prune
 git merge origin/main        # ← 需用户批准
 # ② 门禁复跑（§0.4）
@@ -34,15 +34,17 @@ git merge origin/main        # ← 需用户批准
 
 ```
 git merge-tree --write-tree feat/frontend origin/main
-→ exit 0（clean，无冲突文件）
-→ merged tree 254c10ff42a401442915fa475841a58009388883
+→ exit 0（clean，无冲突文件名输出）
 ```
+
+> 该命令的 tree hash 随分支 tip 变化（每次加 commit 都会变），故只记「exit 0 / 无冲突文件」这个结论；**合并前请自己重跑一次**，别引用旧 hash。
 
 已在 **合并后的 tree** 上逐项核验（只读，未落盘）：
 
 | 检查 | 结果 |
 | --- | --- |
 | `web/e2e/n-approval-card.spec.ts` / `web/e2e-live/approval-live.spec.ts` / `web/playwright.live.config.ts` | 均在合并结果中（OK） |
+| `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md` / `docs/PROMPT_FRONTEND_NEXT_BATCH.md` | 均在合并结果中（OK） |
 | `web/e2e/fixtures.ts` 的 `onApprovePost` | 2 处命中（接口字段 + 路由分支），**存活** |
 | `web/vitest.config.ts` 的 `e2e-live/**` 排除 | 2 处命中，**存活** |
 | `web/src/lib/projection.ts` 的 `projectPermissionResolved` | 2 处命中，**存活** |
