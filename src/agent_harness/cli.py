@@ -34,6 +34,7 @@ from agent_harness.assembly import (
 )
 from agent_harness.config import Settings
 from agent_harness.identity import IdentityContext
+from agent_harness.instance_lock import InstanceLock, InstanceLockError
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.config import ModelConfig
@@ -218,9 +219,30 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
 
 
 def main() -> None:
+    # ARCH-7（#150）：CLI 与 Web 并发使用同一 session root 被**有意拒绝**——
+    # 无保护的跨进程多写者会产出重复 seq / 交错写，且 run 归属共识只在进程内
+    # 有效。这里不吞异常：响亮失败 + 明确错误信息（锁路径 / 占用者 / 逃生门）。
+    # `--help` / `-h` 不触碰该根（argparse 直接打印帮助退出），不该被锁挡住；
+    # 但它仍是"退出路径"，flush 契约（ADR-0018 D3）照旧要守。
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        try:
+            _main_dispatch()
+        finally:
+            flush_process_sink()
+        return
+    settings = Settings()
+    # 先配日志再取锁：逃生门降级时那条 WARNING 才落得进 agent.jsonl（AC7）。
+    # setup_logging 幂等（子命令内重复调用只清一次 handlers）。
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        lock = InstanceLock(settings.workspace_dir).acquire()
+    except InstanceLockError as error:
+        print(error, file=sys.stderr)
+        raise SystemExit(2) from error
     try:
         _main_dispatch()
     finally:
+        lock.release()
         # 旁路收尾（ADR-0018 D3）：任何退出路径（正常/异常/SystemExit）都尽力
         # 发送剩余 Langfuse span；未配置/未装配时零开销 no-op。
         flush_process_sink()

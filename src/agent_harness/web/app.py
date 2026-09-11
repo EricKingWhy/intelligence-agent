@@ -34,6 +34,7 @@ from agent_harness.identity import (
     identity_context_var,
     set_identity_context,
 )
+from agent_harness.instance_lock import InstanceLock
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import (
     PROVIDER_PRESETS,
@@ -659,29 +660,40 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
         # web 之前漏接）。幂等（重复调用先清 handlers）。
         setup_logging(settings.log_level, settings.workspace_dir)
-        # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
-        # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
-        # 不该让服务起不来），但必须响亮落日志。
+        # ARCH-7（#150）：启动期单实例锁。同一 session root 的第二个进程必须
+        # 响亮失败——跨进程同时 append 会话 JSONL 会产出重复 seq / 交错写，
+        # RunManager 的 run 归属共识也只在进程内有效；CLI 与 Web 并发同样被
+        # 拒绝（有意行为，见 instance_lock 模块 docstring）。取在 setup_logging
+        # **之后**：逃生门降级时那条 WARNING 才能落进 agent.jsonl，而不是只掉到
+        # stderr（AC7 要求逃生门在日志里显著留痕）。
+        instance_lock = InstanceLock(settings.workspace_dir).acquire()
         try:
-            from agent_harness.session.service import SessionService
+            # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
+            # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
+            # 不该让服务起不来），但必须响亮落日志。
+            try:
+                from agent_harness.session.service import SessionService
 
-            scan_results = await SessionService(state).scan_interrupted()
-            for result in scan_results:
-                logging.getLogger("agent_harness.web").warning(
-                    "启动崩溃扫描：session=%s recovery=%s detail=%s",
-                    result.session_id, result.recovery, result.detail,
+                scan_results = await SessionService(state).scan_interrupted()
+                for result in scan_results:
+                    logging.getLogger("agent_harness.web").warning(
+                        "启动崩溃扫描：session=%s recovery=%s detail=%s",
+                        result.session_id, result.recovery, result.detail,
+                    )
+            except Exception:
+                logging.getLogger("agent_harness.web").exception(
+                    "启动崩溃扫描失败（不阻塞启动）"
                 )
-        except Exception:
-            logging.getLogger("agent_harness.web").exception(
-                "启动崩溃扫描失败（不阻塞启动）"
-            )
-        try:
-            yield
+            try:
+                yield
+            finally:
+                await state.shutdown()
+                # 旁路收尾（ADR-0018 D3）：服务停机前尽力发送剩余 Langfuse span
+                # （有超时上限，不阻塞退出）。
+                flush_process_sink()
         finally:
-            await state.shutdown()
-            # 旁路收尾（ADR-0018 D3）：服务停机前尽力发送剩余 Langfuse span
-            # （有超时上限，不阻塞退出）。
-            flush_process_sink()
+            # 放在 shutdown 之后：仍在关连接时不该让第二个进程进来接手。
+            instance_lock.release()
 
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
