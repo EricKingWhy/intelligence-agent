@@ -15,7 +15,7 @@ import threading
 
 from pydantic import BaseModel, Field
 
-from agent_harness.sandbox import Sandbox
+from agent_harness.sandbox import Sandbox, ShellFamily
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.result import ErrorCode
@@ -48,18 +48,18 @@ class BashTool(Tool):
         （本机实证：cmd.exe 对 bash 语法报「此时不应有 i。」）。解释器名取自 Sandbox
         的事实声明，**不用 `os.name` 猜**（宿主 Windows 时容器内仍是 sh）。
         """
-        shell = self._sandbox.shell_description
-        if "bash" in shell.lower():
+        env = self._sandbox.shell_environment
+        if env.family is ShellFamily.BASH:
             # 后端真的用 bash 时不否认（当前无此后端，但 API 允许——避免出现
             # 「实际解释器是 bash（不是 bash）」的自相矛盾）。
-            lead = f"在 workspace 内执行 shell 命令。实际解释器是 {shell}。"
+            lead = f"在 workspace 内执行 shell 命令。实际解释器是 {env.name}。"
         else:
             lead = (
                 "在 workspace 内执行 shell 命令。注意：工具名 bash 是历史名称，"
-                f"实际解释器是 {shell}（不是 bash），请按该解释器的语法书写命令。"
+                f"实际解释器是 {env.name}（不是 bash），请按该解释器的语法书写命令。"
             )
         parts = [lead]
-        if "cmd" in shell.lower():
+        if env.family is ShellFamily.CMD:
             parts.append(
                 "Windows cmd.exe 注意事项：单引号不是引用符、$VAR 不展开、"
                 "cat/ls/grep 等 Unix 命令通常不可用（用 type/dir/findstr 代替）、"

@@ -20,7 +20,12 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from agent_harness.sandbox.base import ExecResult, Sandbox
+from agent_harness.sandbox.base import (
+    ExecResult,
+    Sandbox,
+    ShellEnvironment,
+    ShellFamily,
+)
 from agent_harness.sandbox.decoding import StreamDecoder, platform_fallback_encoding
 
 #: LocalSubprocess 的默认命令超时（秒）。None 表示不超时。
@@ -136,19 +141,22 @@ class LocalSubprocessSandbox(Sandbox):
         return self._workspace_root
 
     @property
-    def shell_description(self) -> str:
-        """`shell=True` 实际用的解释器（OBS-012）。
+    def shell_environment(self) -> ShellEnvironment:
+        """`shell=True` 实际用的解释器 + 家族（OBS-012）。
 
         CPython 的 `shell=True` 在 Windows 用 `%COMSPEC%`（缺省 `cmd.exe`），
-        在 POSIX 用 `/bin/sh`——**都不是 bash**。这里报告真实解释器名（取 basename，
-        避免把 `C:\\Windows\\system32\\cmd.exe` 整条路径塞进模型可见的工具描述）。
+        在 POSIX 用 `/bin/sh`——**都不是 bash**。名字取 basename，避免把
+        `C:\\Windows\\system32\\cmd.exe` 整条路径塞进模型可见的工具描述；
+        家族与 `exec` 的真实机制一致（Windows = cmd，POSIX = sh）。
         """
         if os.name == "nt":
             # COMSPEC 可能被引号包住（部分环境写成 "\"C:\\...\\cmd.exe\""），
             # 不剥引号会让模型可见描述出现 `cmd.exe"`。空值则回落到 cmd.exe。
             comspec = os.environ.get("COMSPEC", "cmd.exe").strip().strip('"')
-            return Path(comspec).name or "cmd.exe"
-        return "/bin/sh"
+            return ShellEnvironment(
+                name=Path(comspec).name or "cmd.exe", family=ShellFamily.CMD,
+            )
+        return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
         """no-op：本机进程总在，无需启动。幂等。"""
