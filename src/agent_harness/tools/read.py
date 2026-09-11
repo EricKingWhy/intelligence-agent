@@ -115,8 +115,8 @@ class ReadTool(Tool):
                 truncated = True
                 break
             if not kept and line_bytes > _READ_MAX_BYTES:
-                # 首行自身超字节帽：硬截该行（无法按行续读），标记改用 bash 建议
-                # ——pi-mono 同款策略：给模型"可执行的下一步"（sed/head 取片段）。
+                # 首行自身超字节帽：硬截该行（无法按行续读），标记里给模型一个
+                # **解释器无关**的下一步（见下方 giant_line 分支）。
                 kept.append(
                     line.encode("utf-8")[:_READ_MAX_BYTES].decode("utf-8", errors="replace")
                 )
@@ -135,10 +135,17 @@ class ReadTool(Tool):
         text = "\n".join(kept)
         end_line = start + len(kept) - 1
         if giant_line:
+            # OBS-016：曾经教模型用 `sed -n … | head -c …` / `tail -c +N`——POSIX
+            # 专有命令在本机（Windows → cmd.exe）不存在，模型照做会整次调用作废。
+            # 改为点名**真实存在的工具标识符**（bash / grep），不点名任何命令：
+            # 解释器与陷阱由各工具自己的描述声明（OBS-012）。
+            # ⚠ 前缀 `[Line {n} truncated at {bytes} bytes` 与结尾 `]` 是前端
+            # toolShapes.ts::LINE_TRUNCATED_RE 的解析契约，改措辞可以，改形状不行。
             text += (
                 f"\n[Line {start} truncated at {_READ_MAX_BYTES} bytes. "
-                f"Use bash with 'sed -n '{start}p' <file> | head -c {_READ_MAX_BYTES}' "
-                f"plus 'tail -c +N' to read further segments.]"
+                "This single line alone exceeds the read limit, so it cannot be "
+                "returned in full. Use the bash tool to read a further byte range, "
+                "or the grep tool to locate the part you need.]"
             )
         elif truncated:
             text += (

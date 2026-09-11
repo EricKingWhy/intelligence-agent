@@ -9,6 +9,7 @@ ToolExecutor.execute()，断言 ToolResult 形状。复用 tests/tooling/test_ex
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -553,13 +554,33 @@ class TestReadOutputBudget:
     async def test_byte_cap_truncates_giant_single_line(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """单行 200KB：字节帽（50KB）先于行帽生效，同样给续读标记。"""
+        """单行 200KB：字节帽（50KB）先于行帽生效，同样给续读标记。
+
+        OBS-016：标记里的续读指引**不得**点名 POSIX 专有命令——本机真实解释器是
+        cmd.exe（Windows），`sed` / `head -c` / `tail -c` 都不存在，模型照做会拿到
+        `'sed' is not recognized` 而整次调用作废（与 OBS-012 同一缺陷类）；同时必须
+        点名一个**真实存在的工具标识符**，否则等于把模型指向不存在的东西。
+        """
         sandbox.write_text("one_line.txt", "x" * 200_000 + "\n")
         result = await executor.execute(_tool_call("read", {"path": "one_line.txt"}))
 
         content = result.result.data["content"]
         assert len(content) < 100_000, "字节帽未生效"
         assert "truncated" in content, "超长单行截断必须显式标记（不能续读）"
+
+        marker = content.split("\n")[-1]
+        # 前端 LINE_TRUNCATED_RE 的解析契约：`[Line (\d+) truncated at (\d+) bytes` + 结尾 ']'
+        parsed = re.search(r"\[Line (\d+) truncated at (\d+) bytes", marker)
+        assert parsed is not None, "标记前缀形状变了，前端 parseReadShape 会失效"
+        assert (int(parsed.group(1)), int(parsed.group(2))) == (1, 51200)
+        assert marker.endswith("]")
+        # 不得教 POSIX 专有命令（词边界匹配：不能误伤 used/closed/based 之类）
+        for posix_only in ("sed", "head", "tail"):
+            assert not re.search(rf"\b{posix_only}\b", marker), (
+                f"续读指引教了 POSIX 专有命令：{posix_only}"
+            )
+        # 必须指向真实存在的工具标识符（read.py 里注册的是 bash / grep）
+        assert re.search(r"\b(bash|grep)\b", marker), "提示未点名任何真实存在的工具"
 
     @pytest.mark.asyncio
     async def test_offset_beyond_end_is_invalid(

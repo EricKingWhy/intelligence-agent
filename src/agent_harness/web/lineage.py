@@ -34,6 +34,7 @@ from agent_harness.session.service import (
     SessionNotFound,
     SessionService,
 )
+from agent_harness.web.domain_errors import http_error
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -121,14 +122,13 @@ def register_lineage_routes(
             child_id = await service.fork(
                 session_id=session_id, from_seq=req.from_seq
             )
-        except InvalidSessionId as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        except SessionNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        except ActiveRunConflict as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
-        except InvalidForkBoundary as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ActiveRunConflict,
+            InvalidForkBoundary,
+        ) as e:
+            raise http_error(e) from e
         return {"session_id": child_id, "from_seq": req.from_seq}
 
 
