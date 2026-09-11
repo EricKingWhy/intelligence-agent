@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_harness.sandbox import LocalSubprocessSandbox
+from agent_harness.sandbox import (
+    LocalSubprocessSandbox,
+    ShellEnvironment,
+    ShellFamily,
+)
 from agent_harness.tooling import (
     ErrorCode,
     ToolExecutor,
@@ -201,14 +205,14 @@ class TestBashTool:
 
 
 class _ShellStub(LocalSubprocessSandbox):
-    """只覆写 shell_description 的替身：让 cmd / 非 cmd 两条描述分支在任何平台都可测。"""
+    """只覆写 shell_environment 的替身：让各 family 的描述分支在任何平台都可测。"""
 
-    def __init__(self, workspace_root: Path, shell: str) -> None:
+    def __init__(self, workspace_root: Path, shell: ShellEnvironment) -> None:
         super().__init__(workspace_root=workspace_root)
         self._shell = shell
 
     @property
-    def shell_description(self) -> str:
+    def shell_environment(self) -> ShellEnvironment:
         return self._shell
 
 
@@ -225,14 +229,16 @@ class TestBashToolShellHonesty:
     ):
         description = BashTool(sandbox).description
 
-        assert sandbox.shell_description in description
+        assert sandbox.shell_environment.name in description
         assert "不是 bash" in description
 
     @pytest.mark.skipif(os.name != "nt", reason="shell=True 走 COMSPEC 仅 Windows")
     def test_local_sandbox_reports_cmd_exe_on_windows(
         self, sandbox: LocalSubprocessSandbox
     ):
-        assert sandbox.shell_description.lower().endswith("cmd.exe")
+        env = sandbox.shell_environment
+        assert env.name.lower().endswith("cmd.exe")
+        assert env.family is ShellFamily.CMD
 
     @pytest.mark.skipif(os.name != "nt", reason="shell=True 走 COMSPEC 仅 Windows")
     def test_local_sandbox_shell_comes_from_comspec_not_a_literal(
@@ -246,23 +252,29 @@ class TestBashToolShellHonesty:
         """
         monkeypatch.setenv("COMSPEC", r'"C:\opt\weird\mystery-shell.exe"')
 
-        assert LocalSubprocessSandbox(
-            workspace_root=tmp_path
-        ).shell_description == "mystery-shell.exe"
+        env = LocalSubprocessSandbox(workspace_root=tmp_path).shell_environment
+        assert env.name == "mystery-shell.exe"
+        assert env.family is ShellFamily.CMD
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX 上 shell=True 用 /bin/sh")
     def test_local_sandbox_reports_posix_sh(self, sandbox: LocalSubprocessSandbox):
-        assert sandbox.shell_description == "/bin/sh"
+        env = sandbox.shell_environment
+        assert env.name == "/bin/sh"
+        assert env.family is ShellFamily.POSIX_SH
 
     def test_description_warns_about_cmd_pitfalls_for_cmd_like_shell(self, tmp_path):
-        description = BashTool(_ShellStub(tmp_path, "cmd.exe")).description
+        stub = _ShellStub(tmp_path, ShellEnvironment("cmd.exe", ShellFamily.CMD))
+
+        description = BashTool(stub).description
 
         assert "单引号" in description
         assert "$VAR" in description
         assert "2>/dev/null" in description
 
     def test_description_omits_cmd_pitfalls_for_posix_shell(self, tmp_path):
-        description = BashTool(_ShellStub(tmp_path, "/bin/sh")).description
+        stub = _ShellStub(tmp_path, ShellEnvironment("/bin/sh", ShellFamily.POSIX_SH))
+
+        description = BashTool(stub).description
 
         assert "/bin/sh" in description
         assert "不是 bash" in description
@@ -272,10 +284,28 @@ class TestBashToolShellHonesty:
         self, tmp_path
     ):
         """后端真用 bash 时不得出现「实际解释器是 bash（不是 bash）」的自相矛盾。"""
-        description = BashTool(_ShellStub(tmp_path, "bash")).description
+        stub = _ShellStub(tmp_path, ShellEnvironment("bash", ShellFamily.BASH))
+
+        description = BashTool(stub).description
 
         assert "实际解释器是 bash" in description
         assert "不是 bash" not in description
+
+    def test_family_drives_guidance_not_the_name(self, tmp_path):
+        """家族决定语法提示，名字只用于显示——子串嗅探已被结构性取代。
+
+        旧实现按 `"cmd" in name` / `"bash" in name` 判定，这两种声明都会被它判错：
+        名字像 cmd 但家族是 POSIX 会给错陷阱；名字古怪但家族是 CMD 会漏掉陷阱。
+        """
+        posix_with_cmd_name = BashTool(_ShellStub(
+            tmp_path, ShellEnvironment("cmd.exe", ShellFamily.POSIX_SH),
+        )).description
+        assert "单引号" not in posix_with_cmd_name
+
+        cmd_with_odd_name = BashTool(_ShellStub(
+            tmp_path, ShellEnvironment("mystery-shell.exe", ShellFamily.CMD),
+        )).description
+        assert "单引号" in cmd_with_odd_name
 
     def test_docker_backend_declares_posix_sh(self):
         """容器后端声明 /bin/sh（与 exec 的 [\"/bin/sh\", \"-lc\", ...] 一致）。
@@ -285,20 +315,24 @@ class TestBashToolShellHonesty:
         """
         from agent_harness.sandbox.docker import DockerSandbox
 
-        assert DockerSandbox.shell_description.fget(None) == "/bin/sh"
+        assert DockerSandbox.shell_environment.fget(None) == ShellEnvironment(
+            name="/bin/sh", family=ShellFamily.POSIX_SH,
+        )
 
     def test_base_declaration_is_not_abstract(self):
-        """`shell_description` 必须**保持非抽象**：抽象化会让既有/第三方后端无法实例化
+        """`shell_environment` 必须**保持非抽象**：抽象化会让既有/第三方后端无法实例化
         （ADR-0001 冻结 6 个抽象方法，加后端不应被迫改实现）。"""
         from agent_harness.sandbox.base import Sandbox
 
-        assert "shell_description" not in Sandbox.__abstractmethods__
+        assert "shell_environment" not in Sandbox.__abstractmethods__
 
     def test_base_contract_default_is_posix_sh(self):
         """基类默认（第三方后端未覆写时）必须是保守的 POSIX sh，而不是 bash。"""
         from agent_harness.sandbox.base import Sandbox
 
-        assert Sandbox.shell_description.fget(None) == "sh"
+        assert Sandbox.shell_environment.fget(None) == ShellEnvironment(
+            name="sh", family=ShellFamily.POSIX_SH,
+        )
 
 
 # ============================================================================

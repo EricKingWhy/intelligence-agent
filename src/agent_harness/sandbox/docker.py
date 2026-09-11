@@ -11,7 +11,12 @@ from pathlib import Path, PurePosixPath
 from time import perf_counter
 from uuid import uuid4
 
-from agent_harness.sandbox.base import ExecResult, Sandbox
+from agent_harness.sandbox.base import (
+    ExecResult,
+    Sandbox,
+    ShellEnvironment,
+    ShellFamily,
+)
 from agent_harness.sandbox.local import DEFAULT_EXEC_TIMEOUT
 
 
@@ -55,9 +60,9 @@ class DockerSandbox(Sandbox):
         return PurePosixPath("/workspace")
 
     @property
-    def shell_description(self) -> str:
+    def shell_environment(self) -> ShellEnvironment:
         """容器内固定用 `/bin/sh -lc`（见 exec）——OBS-012：是 sh，不是 bash。"""
-        return "/bin/sh"
+        return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
         if self._container is not None:
