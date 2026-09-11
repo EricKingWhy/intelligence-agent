@@ -24,9 +24,13 @@ uv run pytest tests/agent/test_phase5_runtime.py -q         # OBS-011 的连带�
 
 - **OBS-011**：sandbox 解码路径 + 测试。`LocalSubprocessSandbox` 构造签名新增可选参数
   `fallback_encoding`（默认 `None` → 自动探测），既有调用方无需改动。
-- **OBS-012**：`sandbox/base.py` 新增非抽象 property `shell_description`（不进冻结的
-  6 个抽象契约）+ local/docker 覆写 + `tools/bash.py` 描述合成。第三方 Sandbox 后端
-  不覆写也能实例化（基类默认 `"sh"`）。
+- **OBS-012 + 深化候选 3**：`sandbox/base.py` 新增非抽象 property
+  **`shell_environment`**（返回 `ShellEnvironment(name, family)`，不进冻结的
+  6 个抽象契约）+ local/docker 覆写 + `tools/bash.py` 按 `family` 分支。
+  第三方 Sandbox 后端不覆写也能实例化（基类默认 `("sh", POSIX_SH)`）。
+  ⚠ **该 property 在深化提交 `9fe0809` 里由 `shell_description: str` 改名而来**
+  （两步都在本分支内、均未合入 main，故无外部消费方）——若你手上是旧版交接单/旧
+  分支，请以 `shell_environment` 为准。
 - **OBS-009/014**：`tooling/executor.py` 超时文案分支（纯文案，无重试行为变化）。
 - **OBS-008**：`agent/runtime.py` 的 `_log` 新增 keyword-only `exc_info`（12 处调用
   已核零碰撞）+ 三处失败臂传 `True`。
@@ -224,23 +228,32 @@ npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 &&
 
 ### 修法（不改执行语义，只让声明与真相一致）
 
-1. `Sandbox` 新增**非抽象** property `shell_description`（**不进 ADR-0001 冻结的
-   6 个抽象方法契约**——抽象化会让既有/第三方后端无法实例化）。基类保守默认 `"sh"`。
+> ⚠ 本节最初写的是 property `shell_description: str`（commit `d9bef3a`）。**深化提交
+> `9fe0809` 已把它改名为 `shell_environment: ShellEnvironment(name, family)`**——名字
+> 与语法家族必须一起声明，否则消费方只能靠 `"cmd" in name` 子串嗅探重新推导行为
+> （知识漏过 seam），且「名字是 cmd、家族按 POSIX」的不一致无法表达。下面按**最终**
+> 形状记录；历史形状见 `d9bef3a`。
+
+1. `Sandbox` 新增**非抽象** property `shell_environment`（**不进 ADR-0001 冻结的
+   6 个抽象方法契约**——抽象化会让既有/第三方后端无法实例化）。基类保守默认
+   `ShellEnvironment(name="sh", family=ShellFamily.POSIX_SH)`。
 2. `LocalSubprocessSandbox` → `%COMSPEC%` 的 basename（剥离可能的引号、空值回落
-   `cmd.exe`）；`DockerSandbox` → `/bin/sh`（与 exec 一致）。
-3. `BashTool.description` 按 Sandbox 的声明如实写出解释器名并否认 bash；声明为 cmd 系时
-   追加 cmd 专有陷阱（单引号非引用符 / `$VAR` 不展开 / `cat`·`ls` 不可用 / `2>/dev/null` 无效）。
+   `cmd.exe`）+ `family=CMD`；`DockerSandbox` → `("/bin/sh", POSIX_SH)`（与 exec 一致）。
+3. `BashTool.description` 按 Sandbox 的声明如实写出解释器名并否认 bash；**按
+   `family is CMD`（不是子串）**追加 cmd 专有陷阱（单引号非引用符 / `$VAR` 不展开 /
+   `cat`·`ls` 不可用 / `2>/dev/null` 无效）。
    **不用 `os.name` 猜**：宿主是 Windows 时 Docker 容器内仍是 sh。
 
 ### 交付物
 
 | 文件 | 性质 |
 | --- | --- |
-| `src/agent_harness/sandbox/base.py` | 新增非抽象 property `shell_description` |
-| `src/agent_harness/sandbox/local.py` | 覆写：COMSPEC basename / `/bin/sh` |
-| `src/agent_harness/sandbox/docker.py` | 覆写：`/bin/sh` |
-| `src/agent_harness/tools/bash.py` | `description` 据声明合成（含 cmd 陷阱） |
-| `tests/tools/test_coding_tools.py` | 新增 `TestBashToolShellHonesty`（10 例，1 例平台跳过） |
+| `src/agent_harness/sandbox/base.py` | 新增 `ShellFamily` / `ShellEnvironment` + 非抽象 property `shell_environment` |
+| `src/agent_harness/sandbox/local.py` | 覆写：COMSPEC basename + `CMD` / `("/bin/sh", POSIX_SH)` |
+| `src/agent_harness/sandbox/docker.py` | 覆写：`("/bin/sh", POSIX_SH)` |
+| `src/agent_harness/sandbox/__init__.py` | 包级导出 `ShellEnvironment` / `ShellFamily` |
+| `src/agent_harness/tools/bash.py` | `description` 按 `family` 合成（含 cmd 陷阱） |
+| `tests/tools/test_coding_tools.py` | `TestBashToolShellHonesty`（11 例，1 例平台跳过，含 family-not-name 锁） |
 | `tests/agent/test_context_runtime.py` | `Mock(spec=Sandbox)` 显式声明 shell（假件补全） |
 
 ### 门禁与证据
@@ -283,7 +296,8 @@ Use bash with 'sed -n '{start}p' <file> | head -c {_READ_MAX_BYTES}' plus 'tail 
 当作契约引用，改它需要跨端同步。**独立复核也建议只报告不修**。
 
 **建议的最小修法**（交给集成 AI 排期）：把该提示改成后端无关的表述（如「用 shell 工具按
-字节/行切片读取后续内容」），或按 `sandbox.shell_description` 给对应平台的示例；若采用后者，
+字节/行切片读取后续内容」），或按 `sandbox.shell_environment`（`name` 显示 / `family`
+决定语法）给对应平台的示例；若采用后者，
 需同步 `docs/HANDOFF_FRONTEND_SYNC.md:46`。
 
 ---
@@ -507,7 +521,7 @@ Langfuse trace id）。字段存在、真值存在，中间缺一根接线：列
 
 | 文件 | 改动 |
 | --- | --- |
-| `session/store.py` | `SessionSummaryStats` 新增 `trace_id`；新增 `_terminal_trace_id`（取值 + 守卫）与 `_terminal_trace_id_from_tail`（快路径）；`read_session_summary` 快路径与 `_summary_fallback` 同口径 |
+| `session/store.py` | `SessionSummaryStats` 新增 `trace_id`；新增 `_terminal_trace_id`（取值 + 守卫，快路径与 `_summary_fallback` **共用**）——深化提交 `08d92f5` 又删掉了临时的 `_terminal_trace_id_from_tail` / `_last_event_time_from_tail`（前者被共用方法取代，后者不可达），并把末行解析收敛为一次 |
 | `session/service.py` | `list_sessions` 每行透传 `trace_id` |
 | `web/app.py` | `SessionSummary.trace_id` 映射 + docstring 订正 |
 
@@ -517,8 +531,14 @@ Langfuse trace id）。字段存在、真值存在，中间缺一根接线：列
 
 ### 两条路径同口径（不变量：扫描与全量严格一致）
 
-- 快路径 `_terminal_trace_id_from_tail`：只看 `tail[-1]`。
-- 全量回退 `_summary_fallback`：只看 `events[-1]`（`read_events` 已剔除坏行）。
+- 快路径：末行**只解析一次**得到 `last_event`，`last_event_time` 与 `trace_id`
+  同源于它（`08d92f5` 起）。
+- 全量回退 `_summary_fallback`：取 `events[-1]`（`read_events` 已剔除坏行）。
+- `trace_id` 的规则由单一方法 `_terminal_trace_id` 拥有，两条路径各自把末事件传给
+  它——所以**该规则**的一致性是结构性的（`test_fast_path_agrees_with_full_parse_on_clean_session`
+  与 `test_each_line_is_parsed_at_most_once` 直接锁住）。
+  `last_event_time` 仍是两条独立取值路径（各自取「末事件的时间」），由同一个测试
+  断言其相等，而非共用实现——不要把它读成「所有字段都结构共享」。
 - 两者都只认**末事件**，这是有意的（见下）。
 
 ### ⚠ 已知边界 = 有意的性能取舍（**不要「顺手修」成全量扫描**）
@@ -536,7 +556,7 @@ Langfuse trace id）。字段存在、真值存在，中间缺一根接线：列
 第二行是两轴 code-review 共同指出的张力点：若产品希望「上一轮的 trace 在新轮期间
 仍可点」，需要一张**独立**的票来权衡（把快路径改回全量解析，或引入每会话末次
 trace 的侧车存储）——**不要**在 OBS-010 里偷偷改成回溯扫描。取舍已写进
-`_terminal_trace_id_from_tail` docstring 与对应测试注释。
+`_terminal_trace_id` docstring（`08d92f5` 起该方法即唯一 owner）与对应测试注释。
 
 ### 测试（15 例）
 
@@ -581,4 +601,53 @@ trace 的侧车存储）——**不要**在 OBS-010 里偷偷改成回溯扫描�
 uv run pytest tests/session/test_session_robustness.py tests/session/test_service.py tests/test_web_api.py -q -k "trace_id"
 # 或全量
 uv run ruff check src/ tests/ && uv run pytest -q
+```
+
+---
+
+## 10. 架构深化三连（批次收尾时新增，**纯结构重构、行为不变**）
+
+**状态**：✅ 三项全部完成。来源是批次收尾的架构扫描（报告为临时产物，
+未入库）。三项都是 behavior-preserving 重构，**不改任何线上契约**。
+
+| 候选 | commit | 改动 | 一句话 |
+| --- | --- | --- | --- |
+| 1. summary 快路径的末行只解析一次 | `08d92f5` | `session/store.py`（+ `web/app.py` 1 行注释） | 删掉不可达的 `reversed(tail)` 分支与 `deque(maxlen=2)`；`_terminal_trace_id` 成为唯一取值 owner |
+| 3. 执行环境事实 = (名字, 家族) | `9fe0809` | `sandbox/{base,local,docker,__init__}.py` + `tools/bash.py` | `shell_description: str` → `shell_environment: ShellEnvironment`；BashTool 不再子串嗅探 |
+| 2. 失败映射收成值对象 | `7113d06` | `tooling/executor.py` | `_ToolFailure`（error_code+retryable+message 同源）；重试循环两个 except 臂各一行 |
+
+**合并冲突面**：候选 3 **改了一个 property 名**（`shell_description` →
+`shell_environment`，新类型 `ShellFamily` / `ShellEnvironment` 从 `sandbox` 包级导出）。
+两步（`d9bef3a` 引入 / `9fe0809` 改名）都在本分支内、**均未合入 main**，所以不存在
+外部消费方；但若你的交接单/笔记里写的是 `shell_description`，以 `shell_environment`
+为准（本文件 §0/§4/§5 已同步订正）。
+
+**门禁**：ruff clean；三连之后全量 pytest **1563 passed / 10 skipped / 39 deselected /
+0 failed**（= OBS 批次基线 1553 + 候选1 两例 + 候选3 一例 + 候选2 七例）。
+
+**双轴 code-review 结论（Standards + Spec 独立子代理）**：**零 P0/P1/P2**；
+`message` 文案逐字节不变、`error_code`/`retryable` 取值不变、既有用例零改动通过
+（这就是「行为不变」的证据）。两条**有意未采纳**的建议在此留痕，避免下轮重复提出：
+
+1. *「失败值对象应连 attempt 记录一起产出」*——**不采纳**：attempt 记录对**每次**
+   尝试都写（含成功），失败值对象不覆盖成功路径；且它逐字段复制
+   `result.error_code` / `result.retryable`，本身不可能与结果不一致。把计时/观测塞进
+   纯映射会把职责搞混。
+2. *「应新增 `_TailView` 类」*——**不采纳**：候选的收益（parse-once、删死支、
+   两路径同口径可测）已用局部变量 + 共享的 `_terminal_trace_id` 全部拿到，并由
+   `test_each_line_is_parsed_at_most_once` / `test_fast_path_agrees_with_full_parse_on_clean_session`
+   锁住；再包一个只有两个字段、零行为的类属投机抽象（§9.2）。
+
+**已知边界（候选 1 遗留，非缺陷）**：`last_event_time` 仍是两条各自取值的路径
+（快路径取末行时间 / 全量取 `events[-1].time`），只由上面那个「两路径相等」的用例
+断言，而非共用实现——不要把 `_terminal_trace_id` 的「结构性一致」误读成所有字段都
+结构共享（docstring 已按此措辞订正）。
+
+### 集成后建议核对
+
+```bash
+uv run ruff check src/ tests/ && uv run pytest -q
+# 深化三连的聚焦回归（108 passed / 1 skipped）
+uv run pytest tests/session/test_session_robustness.py tests/tooling/test_executor.py \
+  tests/tools/test_coding_tools.py tests/agent/test_context_runtime.py -q
 ```
