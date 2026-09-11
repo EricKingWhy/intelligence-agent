@@ -19,7 +19,18 @@
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
 
-### 最近一批：OBS-016 前端同步——超长单行标记文案（2026-09-11）
+### 最近一批：ARCH-4b 前端——SessionSummary.trace_url 契约锁 + e2e mock 同步（2026-09-11）
+
+| 项 | 值 |
+| --- | --- |
+| 本批 commit | `4c38c69` |
+| 门禁 | tsc ✓ / vitest **504 passed**（28 文件，+2）/ oxlint **35w 0e**（基线持平）/ playwright **118 passed**（`--workers=2`）/ vite build ✓ |
+| 交付 | **类型声明零改动**（`types.ts` 本就正确声明 `trace_url: string \| null`）。① `src/lib/api.test.ts` 新增 `listSessions` 契约块：`trace_url` 原样透传（URL）+ 未追踪保持 null（不伪造，不变量 #21）；canonical fixture 用 `SessionSummary` **类型注解**锁**编译期**一致性——类型新增必填字段 → fixture 缺键 → `tsc -b` 红；fixture 多出未声明键 → 多余属性检查红。② `e2e/*.spec.ts`（6 文件 10 行）会话行 mock 补 `trace_url: null`——旧 mock 照抄了「后端不返回该键」的坏形状，会让前端永远看不到它。 |
+| 变异验证 | 从 canonical fixture 删掉必填 `trace_url` → `tsc -b` 报 **TS2741** `Property 'trace_url' is missing ... but required in type 'SessionSummary'` 红（已还原）。 |
+| 跨端配对 | 后端半在 `D:\intelligence-agent-backend` `feat/backend`：`a0f86a4`（`store.py` 的 `_terminal_trace_field` 两键共用守卫 + `web/app.py` 映射；`session/service.py` 零改动）。**后端侧权威锁**（断言**值**，能抓「键在但值是 null」的漏映射）：`tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`。 |
+| code-review | 两轴：Standards 轴无 hard violation（采纳 `Literal` 键加固，不采纳 NamedTuple 返回对）；Spec 轴 AC1/2/3/5 满足、零 scope creep，指出 AC#3 值断言缺口已由后端补上。 |
+
+### 上一批：OBS-016 前端同步——超长单行标记文案（2026-09-11）
 
 | 项 | 值 |
 | --- | --- |
