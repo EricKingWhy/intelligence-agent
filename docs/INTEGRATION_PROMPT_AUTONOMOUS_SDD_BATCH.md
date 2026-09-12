@@ -807,7 +807,11 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 
 ---
 
-## 15. #155（WS-5）项目分组 UI —— 跨端票的**前端半**（commit `f015a60` + 文档 `c224724`）
+## 15. #155（WS-5）项目分组 UI —— 跨端票的**前端半**（代码 `f015a60` → review 修复 `8db0e5f`；文档 `c224724` + `637bc89`）
+
+> **集成前请以最新 commit 为准**：`f015a60` 是初版；两轴 code-review 后有一轮修复
+> **`8db0e5f`**（+ 前端文档 `637bc89`）。下面「review 修复」一节列出的都是**语义级**变化
+> （mock 顺序、`workspace` 消费、422 detail、竞态守卫），集成时不要只看初版。
 
 ### 交付位置
 
@@ -832,9 +836,10 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 
 ### 三条契约/语义决定（前端侧）
 
-1. **不维护第二套成员名单**：分组只由 `GET /api/projects.session_ids`（账本手工序）与
-   `GET /api/sessions.workspace` 派生；**绝不因为分组丢掉任何一行**——未出现在账本里的
-   会话（含 `workspace` 引用已失效项目的孤儿行、子代理子会话）一律落到「未分组」区。
+1. **不维护第二套成员名单**：分组只由 `GET /api/projects.session_ids`（账本手工序）派生；
+   `GET /api/sessions.workspace` **不参与判定归属**，只用于解释孤儿行（自称属于某项目、
+   但该项目不在当前列表里 → 该行落未分组并带 `staleProject` 注解）。**绝不因为分组丢掉
+   任何一行**——未出现在账本里的会话（含子代理子会话）一律落到「未分组」区。
 2. **内部子代理子会话**（#152 AC14 收窄②、第九轮登记待 #155 决策）**如实显示在未分组区**：
    后端给它的 `workspace` 就是 `null`（它确实不属于项目），前端不折叠、不隐藏、不从
    id/标题猜 `agent_id`。若将来要在视觉上区分，正确路径是**先加契约字段**
@@ -843,12 +848,37 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
    `SessionSummary` 不暴露会话 cwd → 前端**无法判定**哪些未分组会话属于该目录，
    盲 attach 只会得到一堆 409。改为逐行「加入项目…」，后端 409 的 `detail` 原样显示。
 
-### 门禁（末次实跑，最终 revision）
+### 门禁（末次实跑，最终 revision = `8db0e5f`）
 
-`npx tsc -b` ✅ · `npx vitest run` **556 passed**（30 文件；本票 +36）·
+`npx tsc -b` ✅ · `npx vitest run` **561 passed**（30 文件；本票 +41）·
 `npx oxlint` **0 errors**（37 warnings 全为既有规则，本票 10 文件 0 warning）·
-`npx playwright test --workers=2` **142 passed**（本票 +12）· `npx vite build` ✅ ·
+`npx playwright test --workers=2` **144 passed**（本票 +14）· `npx vite build` ✅ ·
 `impeccable detect` 对改动文件 **0 findings**（`app.css` 的 4 条 `side-tab` 全在既有行号）。
+
+### review 修复（commit `8db0e5f`；两轴独立只读 review 的发现，零 finding 后才收）
+
+**两条会在真机/流式下真实发生的 P2**：
+
+1. **e2e mock 的 attach 顺序与真实后端相反**——mock 推队尾，后端 `attach_session` 写的是
+   `[session_id, *kept]`（**前插**；`tests/web/test_projects_api.py` 锁着）。也就是说那条
+   AC4 用例在真机后端下**必然失败**。已把 mock（`unshift`）与断言（`['s3','s1','s2']`）改为前插。
+   *教训*：hermetic e2e 的绿灯只证明"前端与假后端一致"；凡由后端定义的**顺序/归属/幂等**
+   语义，mock 必须逐条对着后端源码与后端测试写。
+2. **`App.tsx` 的 `onRetryProjects` 是内联箭头**→ `SessionList`（`memo`）props 每帧都变，
+   流式 delta 期间整片 Session Rail 重渲染（本仓库对同名字段有明文规则）。已 `useCallback`。
+
+**其余（P3，逐条已修）**：`SessionSummary.workspace` 由"只在注释里被消费"变成真的消费
+（项目不在当前列表里时未分组行带 `staleProject` 注解，并把注释改写成真实分工：成员/顺序只认
+账本）；**Pydantic 422 的 `detail` 是数组**，只认字符串会把「path must be an absolute path」
+降级成「注册项目失败（422）」→ `readErrorDetail` 两种形状都认并剥掉 `Value error, ` 前缀，
+输入补 `maxLength`（后端 200 / path 4096）；`useProjects` 补乱序响应 generation 守卫 +
+in-flight 合并（写后 `refetch` 有意绕过合并）；拖拽落点只在来源项目内亮；Enter 提交补
+`pending` 守卫；删掉 rail/选择列表上不成立的 `role=list`、折叠时的悬空 `aria-controls`、
+`<p>` 里塞 `<ul>` 的非法 HTML；空项目提示删掉一条**不可达**引导；mock 的 order 端点补
+自锚点 no-op（缺它会插错账本位置）；删掉不可达的 `/api/projects/resolve` mock 分支与
+无人使用的 `onProjectPost`；AC3 断言改打在**后端原始串**（`WinError 3` + 路径）上以证明透传；
+**新增 409 e2e**（`onAttachPost` 拦截口：cwd 不一致 → 后端原因就地显示、归属不变）；
+`playwright.config.ts` 固定 `workers: 2`（§16.6）；`gui-test-screenshots/` 进 `.gitignore`。
 
 ### 真机验收（真 uvicorn 8000 + 真 `.env`/`harness.db` + 真浏览器 5173，无 mock）
 
