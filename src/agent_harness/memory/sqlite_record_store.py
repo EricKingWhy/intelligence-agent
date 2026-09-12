@@ -73,6 +73,33 @@ def _enqueue(entry_id: str, revision: str, operation: MemoryOperation, *,
     """, (entry_id, revision, operation.value, tenant_id, user_id, scope, namespace))
 
 
+def _namespace_matches(namespace_json: str, scope: str, identity: IdentityContext) -> bool:
+    """记录行上的 namespace 是否就是 identity 授权的那个。
+
+    只在"行确实存在"时调用：`MemoryNamespace.of` 负责授权与 SESSION 绑定校验，不匹配
+    （含绑到别的 session）即 False。`get`/`delete` 共用它——写成两套序列化比较（一边
+    比 json 串、一边比解析后的 list）在 `as_json` 有任何改动时会静默分叉。
+    """
+    expected = MemoryNamespace.of(MemoryScope(scope), identity).as_tuple()
+    return json.loads(namespace_json) == list(expected)
+
+
+def _parse_operation(row: aiosqlite.Row) -> MemoryOperation:
+    """outbox 的 operation 列 → 枚举；不认识的值按"期望状态 = 不存在"处理。
+
+    不能假设磁盘上的值一定合法（见 `_migrate_outbox` 的 CHECK 说明）：这里直接抛错会
+    让 `pending()` 每轮都失败，而 relay 把异常当"outbox 不可用"咽掉——索引静默停止收敛。
+    脏值先告警，再按删除处理（与"记录行已不在"的自愈同一个方向）；记录行不受影响，
+    下一次写入会重新同步。
+    """
+    try:
+        return MemoryOperation(row["operation"])
+    except ValueError:
+        logger.warning("Memory outbox entry %s has unknown operation %r; treating as delete",
+                       row["memory_id"], row["operation"])
+        return MemoryOperation.DELETE
+
+
 def _routing_identity(row: aiosqlite.Row) -> IdentityContext:
     """outbox 行 → relay 用的身份。
 
@@ -108,8 +135,11 @@ class SqliteMemoryRecordStore:
         每轮都失败——迁移期丢弃并告警（`indexed` 对一个不存在的记录行也无意义）。
 
         列可空性：迁移来的列可空（`ALTER TABLE ADD COLUMN` 没法"先空后填"再收紧），
-        新建库不可空——新库只由本模块写入，永远有真实值。操作类型的 CHECK 两边一致：
-        SQLite 允许在 `ADD COLUMN` 上带 CHECK 且真的执行它，所以迁移库不会被漏掉。
+        新建库不可空——新库只由本模块写入，永远有真实值。操作类型的 CHECK 只在**这一
+        次**补列时装上（SQLite 允许 `ADD COLUMN` 带 CHECK 并真的执行它）；已经带着一个
+        无 CHECK 的 operation 列的库补不上约束——SQLite 不支持给既有列追加 CHECK，重建
+        整张表来装一个防自己写错的约束不值得。那条路径的兜底是 `_parse_operation` 的
+        自愈 + 告警，不是约束。
         """
         async with connection.execute("PRAGMA table_info(memory_outbox)") as cursor:
             columns = {row[1] for row in await cursor.fetchall()}
@@ -178,7 +208,7 @@ class SqliteMemoryRecordStore:
             if row is None:
                 await connection.commit()  # 无写操作；幂等地报告"没有这条"
                 return False
-            if row["namespace"] != MemoryNamespace.of(MemoryScope(row["scope"]), identity).as_json():
+            if not _namespace_matches(row["namespace"], row["scope"], identity):
                 raise PermissionError("Memory belongs to a different namespace")
             await connection.execute("DELETE FROM memory_records WHERE memory_id=?", (memory_id,))
             await connection.execute(*_enqueue(
@@ -196,7 +226,7 @@ class SqliteMemoryRecordStore:
                 row = await cursor.fetchone()
         if row is None:
             raise KeyError(memory_id)
-        if json.loads(row["namespace"]) != list(MemoryNamespace.of(MemoryScope(row["scope"]), identity).as_tuple()):
+        if not _namespace_matches(row["namespace"], row["scope"], identity):
             raise KeyError(memory_id)
         return self._entry(row)
 
@@ -240,7 +270,7 @@ class SqliteMemoryRecordStore:
     @staticmethod
     def _change(row: aiosqlite.Row) -> PendingMemory:
         namespace = MemoryNamespace(tuple(json.loads(row["namespace"])))
-        operation = MemoryOperation(row["operation"])
+        operation = _parse_operation(row)
         entry = None
         if operation is MemoryOperation.UPSERT:
             if row["content"] is None:

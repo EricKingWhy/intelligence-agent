@@ -337,7 +337,7 @@ async def test_initialize_migrates_legacy_outbox_and_backfills_routing_facts(tmp
 
 
 @pytest.mark.asyncio
-async def test_initialize_completes_a_half_migrated_outbox(tmp_path):
+async def test_initialize_completes_a_half_migrated_outbox(tmp_path, caplog):
     """迁移本身必须可重入：SQLite 的 DDL 逐条提交，"加完 operation 列、还没回填"时
     进程被杀就是这个形状（legacy schema + 只有 operation 列）。
 
@@ -369,3 +369,21 @@ async def test_initialize_completes_a_half_migrated_outbox(tmp_path):
     assert changes[0].revision == "rev-1"
     assert changes[0].entry is not None and changes[0].entry.content == "secret"
     assert await records.acknowledge(changes[0]) is True
+
+    # 这条路径**补不上** CHECK（SQLite 不支持给既有列追加约束，见 `_migrate_outbox`），
+    # 所以约束缺席时的兜底是 `_parse_operation` 的自愈：脏值不得让 `pending()` 每轮抛错
+    # （那会被 relay 当"outbox 不可用"咽掉 → 索引静默停止收敛），而是按"期望状态 =
+    # 不存在"处理并留痕。记录行与路由事实都在，所以这条断言确实区分了"自愈为删除"与
+    # "当 upsert"（后者会带着 secret 去写索引）。
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO memory_outbox"
+                   " (memory_id, revision, operation, tenant_id, user_id, scope, namespace)"
+                   " VALUES ('m1', 'rev-2', 'bogus', 'acme', 'alice', 'user',"
+                   "         '[\"memories\", \"acme\", \"alice\", \"user\"]')")
+        db.commit()
+    with caplog.at_level(logging.WARNING, logger=RECORD_STORE_LOGGER):
+        healed = await records.pending()
+    assert [change.operation for change in healed] == [MemoryOperation.DELETE]
+    assert "unknown operation" in caplog.text and "m1" in caplog.text
+    assert (await records.get("m1", ALICE)).content == "secret"  # 记录行不受脏值影响
+

@@ -177,12 +177,13 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
 async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_residue(gate_settings, tmp_path):
     """MEM-1（#156）AC4 的真实后端验收：`forget` 必须真的从向量索引里消失。
 
-    两个容易骗过自己的点，所以断言按"不能骗自己"的方式写：
-    1. `search` 检索不到 **不等于** 没有残留（命中会受相似度/limit 影响）——所以判定
-       残留用 `query(output_fields=["count(*)"])` 的**真实 count**，不用
+    三个容易骗过自己的点，所以断言按"不能骗自己"的方式写：
+    1. `search` 检索不到 **不等于** 没有残留（命中受相似度/limit 影响）——判定残留用
+       `query(output_fields=["count(*)"])` 的**真实 count**，不用
        `get_collection_stats`（它是惰性陈旧值）；
-    2. 单独一个 0 不能证明 filter 写对了——所以留一条**对照组**记忆，它必须一直是 1。
-    忘掉目标后目标变 0、对照仍 1，才是"删对了那一条"的证据。
+    2. 单独一个 0 不能证明 filter 写对了——所以留一条**对照组**记忆，它必须一直是 1；
+    3. USER 全绿不能代替 SESSION：带 session_id 的那段 filter 是另一条路由，所以再加
+       一组 SESSION 记忆（对照组 + 跨 session 的删除必须被拒）。
     """
     from langchain_openai import OpenAIEmbeddings
 
@@ -190,6 +191,7 @@ async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_res
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
     from agent_harness.memory.outbox_relay import OutboxRelay
     from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
+    from agent_harness.memory.types import memory_session_var
 
     if not gate_settings.embedding_api_key.get_secret_value() or not gate_settings.embedding_model:
         pytest.skip("Real embedding model is not configured")
@@ -204,8 +206,10 @@ async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_res
     await records.initialize()
     capability = LangMemMemoryCapability(records, vectors)
     relay = OutboxRelay(records, vectors)
-    alice = IdentityContext("gate_forget_" + uuid4().hex, "alice", ["user"])
+    alice = IdentityContext("gate_forget_" + uuid4().hex, "alice", ["user", "session"])
     token = set_identity_context(alice)
+    session_a = "gate_session_a_" + uuid4().hex
+    session_b = "gate_session_b_" + uuid4().hex
 
     async def drain() -> int:
         """真实 embedding 服务有瞬态失败；outbox 的保证是"失败保留、下轮重试"，
@@ -218,9 +222,9 @@ async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_res
                     return acknowledged
                 await asyncio.sleep(2)
 
-    async def real_count(memory_id: str) -> int:
+    async def real_count(memory_id: str, scope: MemoryScope) -> int:
         """查询一条记忆在当前 filter 下的**真实**行数（Strong 一致性，不用 stats）。"""
-        expression, params = MilvusVectorStore._filter(alice, MemoryScope.USER)
+        expression, params = MilvusVectorStore._filter(alice, scope)
         rows = await vectors._call(
             "query", collection_name=gate_settings.milvus_collection,
             filter=expression + " AND memory_id == {memory}",
@@ -234,8 +238,8 @@ async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_res
         control = await capability.store(MemoryScope.USER, "鲸鱼是生活在海洋中的哺乳动物。", {"importance": 0.1})
         await drain()
         assert await records.pending() == []
-        assert await real_count(doomed) == 1
-        assert await real_count(control) == 1
+        assert await real_count(doomed, MemoryScope.USER) == 1
+        assert await real_count(control, MemoryScope.USER) == 1
         # 真实向量检索返回的是 `limit` 个最近邻、**没有相似度下限**：两条记忆都在索引里，
         # 于是这一问会同时返回两条（目标在前、对照在后）。所以"命中"只能按 id 成员断言，
         # 不能假设"不相关的那条不会被返回"。
@@ -249,13 +253,46 @@ async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_res
         assert await vectors.get(doomed, alice, MemoryScope.USER) is None
         remaining = await capability.search(MemoryScope.USER, "Rust 解析器", 5)
         assert [hit.id for hit in remaining] == [control]  # 目标不再出现在检索结果里
-        assert await real_count(doomed) == 0  # 真值：索引里这一条已不存在
-        assert await real_count(control) == 1  # filter 与清理范围都正确（对照组还在）
+        assert await real_count(doomed, MemoryScope.USER) == 0  # 真值：索引里这一条已不存在
+        assert await real_count(control, MemoryScope.USER) == 1  # filter 与清理范围都正确
         assert await capability.forget(doomed) is False  # 幂等
+
+        # SESSION scope：另一条路由（filter 里多了 session_id 段），单独验一遍。
+        session_token = memory_session_var.set(session_a)
+        try:
+            doomed_s = await capability.store(MemoryScope.SESSION, "会话内临时偏好：解析器用 Rust 写。",
+                                              {"importance": 0.6})
+            control_s = await capability.store(MemoryScope.SESSION, "会话内临时事实：鲸鱼是哺乳动物。",
+                                               {"importance": 0.1})
+            await drain()
+            assert await real_count(doomed_s, MemoryScope.SESSION) == 1
+            assert await real_count(control_s, MemoryScope.SESSION) == 1
+
+            # 绑到别的 session 的上下文里：这条记忆既不可见，也不可删（跨 namespace）。
+            memory_session_var.set(session_b)
+            assert await capability.search(MemoryScope.SESSION, "Rust", 5) == []
+            with pytest.raises(PermissionError):
+                await capability.forget(doomed_s)
+
+            memory_session_var.set(session_a)
+            assert await real_count(doomed_s, MemoryScope.SESSION) == 1  # 被拒的删除没改动任何东西
+            assert await capability.forget(doomed_s) is True
+            await drain()
+            assert await vectors.get(doomed_s, alice, MemoryScope.SESSION) is None
+            assert await real_count(doomed_s, MemoryScope.SESSION) == 0
+            assert await real_count(control_s, MemoryScope.SESSION) == 1
+        finally:
+            memory_session_var.reset(session_token)
     finally:
         try:
             for entry in await records.list_by_scope(MemoryScope.USER, alice, 100):
                 await capability.forget(entry.id)
+            session_token = memory_session_var.set(session_a)
+            try:
+                for entry in await records.list_by_scope(MemoryScope.SESSION, alice, 100):
+                    await capability.forget(entry.id)
+            finally:
+                memory_session_var.reset(session_token)
             await drain()
             created = vectors.created_collection
             await vectors.drop_created_collection()
