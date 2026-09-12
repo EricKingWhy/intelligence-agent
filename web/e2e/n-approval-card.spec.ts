@@ -41,6 +41,10 @@ function approvalRequestedFrame(approvalId: string, seq: number): FrameSpec {
   };
 }
 
+/** 「决后再按快捷键无第二个请求」的静默观察窗（对齐 q-model-dedupe 的写法）：
+ *  absence 断言没法 poll，只能等一个有限窗口确认没有新调用。 */
+const NO_SECOND_REQUEST_WAIT_MS = 300;
+
 const HEAD: FrameSpec[] = [
   { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
   { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
@@ -135,10 +139,35 @@ test('Ctrl+Backspace → POST decision=deny；决后快捷键失效', async ({ p
 
   // 决后再按快捷键：监听已卸载 → 无新请求
   await page.keyboard.press('Control+Enter');
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(NO_SECOND_REQUEST_WAIT_MS);
   expect(sent).toEqual([
     { path: `/api/sessions/${SID}/approve`, body: { approval_id: 'ap-1', approved: false, decision: 'deny' } },
   ]);
+});
+
+/** U-1 review P1 回归锁：多卡并存时快捷键**只决第一张**——
+ *  每张卡各自挂 document 监听的话，一次 Ctrl+Enter 会向 N 个 approval_id
+ *  各发一 POST = 一次按键批量批准多个危险操作。门控：仅 autoFocus 卡挂监听。 */
+test('双卡并存 → Ctrl+Enter 只 POST 第一张（不批量批准）', async ({ page }) => {
+  const sent: unknown[] = [];
+  const second = approvalRequestedFrame('ap-2', 5);
+  second.data = { ...second.data, approval_id: 'ap-2', title: 'write (workspace-write) #2' };
+  await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4), second], sent);
+
+  const cards = page.locator('.approval-card');
+  await expect(cards).toHaveCount(2);
+  await expect(cards.first()).toBeFocused();
+
+  await page.keyboard.press('Control+Enter');
+  await expect(cards.first().locator('.approval-title')).toHaveText('已批准');
+  await page.waitForTimeout(NO_SECOND_REQUEST_WAIT_MS);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toEqual({
+    path: `/api/sessions/${SID}/approve`,
+    body: { approval_id: 'ap-1', approved: true, decision: 'approve_once' },
+  });
+  // 第二张保持 pending，可继续决策
+  await expect(cards.nth(1).locator('.approval-title')).toHaveText('需要审批');
 });
 
 /** UI-01 ⑤：审批 pending 期间 composer 锁定（textarea disabled + 锁定提示）。 */

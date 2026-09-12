@@ -71,8 +71,11 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
 
   // 键盘路径（UI-01 ③）：仅 pending 且非 busy 时挂在 document 上；
   // decision/busy 变化即重挂/移除，决后快捷键失效。
+  // 安全约束（U-1 review P1）：**只有 autoFocus 卡（第一张 pending 卡）挂全局
+  // 监听**——否则 N 卡并存时一次 Ctrl+Enter 会向 N 个 approval_id 各发一 POST，
+  // 等于一次按键批量批准多个危险操作。
   useEffect(() => {
-    if (decision !== 'pending' || busy) return;
+    if (!autoFocus || decision !== 'pending' || busy) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.repeat) return;
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -87,7 +90,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
     return () => document.removeEventListener('keydown', onKey);
     // decide 闭包内的 busy 守卫由本 effect 的依赖（busy）保证新鲜。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [decision, busy]);
+  }, [autoFocus, decision, busy]);
 
   const preview = classifyPreviewArgs(approval.arguments_preview);
   const desc = approval.description || approval.reason || '';

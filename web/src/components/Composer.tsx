@@ -1,12 +1,13 @@
 /** Composer — task input at the bottom of the conversation column.
  *
- * Submits on Cmd/Ctrl+Enter. Disabled while streaming.
+ * Submits on Cmd/Ctrl+Enter. Disabled while streaming or when an approval is pending.
  * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
 import { memo, useEffect, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Layers, Shield, Square, User } from 'lucide-react';
 import type { PresetTask } from '../types';
+import { modKey } from '../lib/platform';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { ControlPicker } from './ControlPicker';
@@ -73,6 +74,8 @@ export const Composer = memo(function Composer({
 
   // UI-01：审批待决 = 运行被阻塞，与 streaming 同一禁用通道（不建第二状态源）。
   const locked = streaming || approvalPending;
+  // 锁定提示只表达「审批阻塞」这一种原因；纯 streaming 有自己的 affordances（停止键/Esc 提示）。
+  const showLock = approvalPending && !streaming;
 
   // 外部示例任务注入（引用变化即触发；每次点击 chip 生成新对象）
   useEffect(() => {
@@ -105,18 +108,12 @@ export const Composer = memo(function Composer({
     <div className="composer-wrap">
       <div className="composer-dock surface-floating">
         {/* UI-01：审批待决时给出锁定原因（置灰不是隐形）。 */}
-        {approvalPending && !streaming && (
-          <div className="composer-locked-hint">运行被阻塞：等待审批决策后再继续</div>
-        )}
+        {showLock && <div className="composer-locked-hint">等待审批决策后再继续</div>}
         <textarea
           id="composer-input"
           name="task"
           className="composer"
-          placeholder={
-            approvalPending && !streaming
-              ? '运行被阻塞：等待审批决策…'
-              : `描述一个任务…（${modKey()}+Enter 发送）`
-          }
+          placeholder={showLock ? '等待审批决策…' : `描述一个任务…（${modKey()}+Enter 发送）`}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
@@ -195,4 +192,3 @@ export const Composer = memo(function Composer({
     </div>
   );
 });
-import { modKey } from '../lib/platform';

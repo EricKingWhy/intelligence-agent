@@ -148,7 +148,7 @@ export function modKey(ua?: string): string {
 - 既有全部门禁（10px 改动面广，重点盯 `h-density`、`picker-search-visibility`、`control-row`）。
 
 ### 涉及文件
-`src/index.css`、`src/styles/app.css`、`e2e/t-contrast.spec.ts`(新)、（删除）`web/audit-screenshots.mjs`、`web/audit-dom-evidence.mjs`。
+`src/index.css`、`src/styles/app.css`、`e2e/t-contrast.spec.ts`(新)。两个 audit 脚本按 PRD §8.5 在**全部 ticket 完成后**统一删除（非本票内）。
 
 ---
 

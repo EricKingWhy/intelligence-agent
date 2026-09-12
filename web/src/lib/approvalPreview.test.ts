@@ -57,6 +57,22 @@ describe('classifyPreviewArgs — 审批参数结构化分类（UI-01）', () =>
     expect(c.rest).toEqual({ old: 'only-old' });
   });
 
+  it('空串已知键不消费（留 rest 走兜底，信息不静默消失）', () => {
+    const c = classifyPreviewArgs({ command: '', content: '', path: '', old: 'a', new: '' });
+    expect(c.path).toBeNull();
+    expect(c.command).toBeUndefined();
+    expect(c.content).toBeUndefined();
+    expect(c.diff).toBeUndefined();
+    expect(c.rest).toEqual({ command: '', content: '', path: '', old: 'a', new: '' });
+  });
+
+  it('原型链形状键（JSON.parse 产物）按自有属性处理，不炸不误伤', () => {
+    const raw = JSON.parse('{"constructor":"x","hasOwnProperty":1,"command":"ls"}') as Record<string, unknown>;
+    const c = classifyPreviewArgs(raw);
+    expect(c.command).toBe('ls');
+    expect(c.rest).toEqual({ constructor: 'x', hasOwnProperty: 1 });
+  });
+
   it('undefined / 空 preview → 全空分类', () => {
     expect(classifyPreviewArgs(undefined)).toEqual({ path: null, rest: {} });
     expect(classifyPreviewArgs({})).toEqual({ path: null, rest: {} });

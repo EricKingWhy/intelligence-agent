@@ -78,8 +78,51 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | Ticket | 状态 | Commit | 备注 |
 | --- | --- | --- | --- |
 | 批次 0 规范固化 | done | `cd107a2` | DESIGN.md/PRD/TICKETS/tracker 登记 |
-| UI-01 | done（待 U-1 批量审查） | `<u1>` | 审批卡重塑：结构化参数+diff 复用+焦点/aria+快捷键+composer 锁定+材质违例修复 |
-| UI-02 | done（待 U-1 批量审查） | `<u1>` | token 三改（暗 tertiary 0.52 / 亮 **0.63 实测修正**）+28 处 10px 升档+tl-type 去 accent+对比度回归锁 |
+| UI-01 | done | `1ae3bf2` | 审批卡重塑：结构化参数+diff 复用+焦点/aria+快捷键+composer 锁定+材质违例修复 |
+| UI-02 | done | `1ae3bf2` | token 三改（暗 tertiary 0.52 / 亮 **0.63 实测修正**）+28 处 10px 升档+tl-type 去 accent+对比度回归锁 |
+
+#### U-1 批量两轴审查（fixed point `cd107a2` → `1ae3bf2`，双 Explore subagent）
+
+**Spec 轴 10 finding（0P0/0P1/3P2/7P3）+ Standards 轴 14 finding（2P1/3P2/9P3）**，合并去重后逐条处置：
+
+| # | 级 | finding | 处置 |
+| --- | --- | --- | --- |
+| 1 | **P1** | **多卡并存快捷键双发**：每张 pending 卡各挂 document keydown → 一次 Ctrl+Enter 向 N 个 approval_id 各发一 POST = 批量批准（两轴共认，本批最重） | **修**：keydown effect 加 `autoFocus` 门控（仅第一张 pending 卡挂监听，决后第二张升为 index 0 自然接管）；+双卡 e2e 回归锁（Ctrl+Enter 只 POST ap-1，第二张保持 pending）；变异验证：去掉门控 → 双卡用例红（2 failed）→ 还原绿 |
+| 2 | **P1** | **三处新 UI 亮色 AA 不达标**：`.approval-chip`(~2.8:1)/`.approval-deny .approval-kbd`(~2.5:1)/`.composer-locked-hint`(~3.2:1) 沿用 warning/danger-on-tint 配方 | **修**：三处改 ink 调和——chip/hint 用 `color-mix(warning 45%, text-primary)`，deny kbd 用专属 `color-mix(destructive 60%, text-primary)` + 16% 淡染底；t-contrast 新增第 5 组断言（三选择器 × 两主题 ≥4.5） |
+| 3 | P2 | `.tl-type` 回归断言弱（not.toBe 两个硬编码字面量，改任意其它颜色恒绿）且只测暗色 | **修**：改等值断言（== 探针解析的 `--color-muted-foreground` 计算值）+ 补亮色主题 |
+| 4 | P2 | t-contrast parse() 未知颜色格式静默回退白底 → 可能假绿（本次 4.1226 假象的根因之一：`color(srgb …)` 未解析） | **修**：未知格式一律 throw（oklab + color(srgb) 两分支显式解析，注释声明 CSS Color 4 语义）；「无不透明祖先底」同样 throw |
+| 5 | P2 | measure 局限未声明（backdrop-filter/opacity 不建模）+ 暗色 canvas 硬编码 fallback | **修**：文件头补「已知测量局限」注释；fallback 全部改 throw；placeholder 的 `18 *` 硬编码改显式 throw |
+| 6 | P2 | tracker 缺规格要求的记录物（10px 分类表 / accent 审计清单 / 变异验证台账 / approval-tool 覆盖标注 / commit hash 占位未填） | **修**：本节下方补三张台账 |
+| 7 | P3 | Composer `import { modKey }` 落在文件末尾 | **修**：移至顶部 import 区（`../types` 之后） |
+| 8 | P3 | classifyPreviewArgs 空串被消费但渲染真值丢弃 → 信息静默消失 + 空容器 | **修**：分类器只消费非空字符串（空串留 rest 走 JSON 兜底）；+回归用例 |
+| 9 | P3 | 原型链键（constructor/hasOwnProperty/__proto__）行为未锁 | **修**（用例）：+JSON.parse 形状回归用例（分类器本身安全，spread 落自有属性） |
+| 10 | P3 | Composer 锁定提示文案与触发条件偏离 ticket 字面（`!streaming` 条件 + 文案多前缀） | **修**：收敛为 ticket 文案（`等待审批决策后再继续` / placeholder `等待审批决策…`）；`showLock` 派生变量消除三处重复；顶部 doc 注释补审批锁语义 |
+| 11 | P3 | waitForTimeout(300) 裸魔数 | **修**：常量 `NO_SECOND_REQUEST_WAIT_MS` + 注释（对齐 q-model-dedupe 惯例） |
+| 12 | P3 | approved/denied 死规则 `box-shadow:none`（基态辉光已删） | **修**：删除 |
+| 13 | P3 | commit message「e2e +18」与静态 +9 口径矛盾 | **订正记录**：+18 是 Playwright **实例数**（视口矩阵 ×2），+9 是 test 函数数；两个口径都对，tracker 以实例数为准（与历史门禁数字同口径） |
+| 14 | P3 | PRD 写 oxlint 基线 35w，实测自 B-1 起为 38w | **订正**：PRD §4.2 改 38w（本批新文件 0 warning，基线不增） |
+| 15 | P3 | UI-02 ticket「涉及文件」把 audit 脚本标（删除）与 PRD §8.5「全部完成后删」冲突 | **修**：ticket 措辞改为「按 PRD §8.5 全部 ticket 完成后统一删除」 |
+| 16 | P3 | platform iPad 桌面 UA 语义未锁 | **修**（用例）：+iPad 桌面 UA → ⌘ 用例 |
+| 17 | P3 | focus-visible 挂载聚焦启发式多数场景不点亮 | 不改（防御性规则无害；要常亮需用 ：focus，引入非键盘 outline，取舍留档） |
+| 18 | P3 | aria id 内插 approval_id（空格/引号会失效） | 不改（后端 id 形如 ap-1；如需防护属后端契约议题，登记 issues log） |
+| 19 | P3 | chip/kbd 魔数 line-height（18px/16px） | 不改（与周边 badge 体系一致性属审美重构，§8） |
+| 20 | P3 | classifyPreviewArgs 每渲染重跑 | 不改（成本极小；ApprovalCard 不在流式热路径高频区） |
+| 21 | P3 | `.rail-section-count`(12px) 大于所属标题(10px micro-label) 的观感 | 不改（micro-label 是「面板眉标」语义不是标题层级；g-visual-qa 已过） |
+| 22 | P3 | 同帧双 keydown 理论双 POST（busy 闭包竞态） | 不改（人手触发概率极低；根治需请求在途同步标志，登记 issues log 备查） |
+| 23 | P3 | `.approval-desc` margin-top 4px / `.approval-path` canvas-mix 底 与 ticket 字面差异 | 不改（flex gap 承担间距 / 视觉等价，登记即处置） |
+| 24 | P3 | AC#5 渲染级断言缺（old/new→DiffBlock、command→cmd 块只有分类级单测） | 部分修：t-contrast 的审批 fixture 覆盖 path/content 渲染；DiffBlock 分支由既有 `.diff-block` 组件测试与 ToolCard 路径间接覆盖，补渲染级断言 defer 到 UI-03 批次一并做（登记） |
+
+**修复后门禁（实跑）**：tsc 0 · vitest **604 passed**（34 文件，+3：空串/原型键/iPad）· oxlint 38w/0e · playwright **188 passed**（--workers=2；t-contrast 5→8 test、n-approval 11→12 test，×2 视口）· vite build ✓。
+
+#### UI-02 台账（规格要求的记录物）
+
+**10px 分类表（30 处）**：28 处改 `var(--text-xs)`——`.rail-section-count` / `.rail-project-count` / `.rail-project-missing` / `.rail-drop-tail` / `.project-pick-path` / `.memory-scope` / `.memory-degraded-hint code` / `.system-notice-badge` / `.notice-strip-badge` / `.deleg-child-label` / `.deleg-overflow-chip` / `.child-ev-row .detail-key` / `.act-inspect-chip` / `.act-args-compact` / `.act-raw-label` / `[data-density='compact'] .act-args` / `.slice-line-chip` / `.composer-esc-hint kbd` / `.tl-tooltip` / `.json-count` / `.json-more` / `.io-raw-label` / `.palette-item-hint` / `.palette-footer span` / `.reasoning-source` / `.tool-out-chip` / `.md-code-wrap-btn` / `.model-picker-item-meta`；**2 处保留**（合法 micro-label：大写+0.08em 字距）——`.rail-section-label`(530) / `.model-picker-group-label`(4659)。豁免 0 处（预算 ≤5 未用满）。
+
+**accent 文字审计（26 个 `color: var(--accent/--color-accent)` 站点）**：**整改 2**——`.tl-type`（时间线事件类型名→muted-foreground）、`.diff-archived-hint code`（非交互行内代码→muted-foreground）；另有 `.approval-tool code` 已由 UI-01 覆盖（accent-secondary→text-primary，**单次修改无重复**，UI-02 C.2 条款据此跳过）。**保留 24**（交互/状态）：appbar-toggle-active、run-pulse-thinking、rail-project-toggle:hover、rail-drop-tail.active、project-pick-pending（状态）、memory-scope.scope-user（scope 语义 chip）、msg-avatar-model（delegation 签名）、fork-btn:hover、model-kind-thinking、run-badge-running/thinking、detail-tab.sel、detail-terminal-row:hover、workspace-mode.sel、read-continue-code（可点继续阅读）、reasoning-icon（live 呼吸）、composer-model:hover、composer-control:hover、model-picker sel/check/checkbox、detail-section-title svg（面板标识，边界项登记备查）、workspace-scaffold-tag（诚实占位标记，边界项登记备查）。
+
+**变异验证台账（本批 5 处，全部红→绿闭环）**：① 键盘监听删除（MUTATION-A：onKey 清空）→ Ctrl+Enter/Ctrl+Backspace 4 实例红；② composer 锁定通道拆除（textarea 回 `disabled={streaming}`，MUTATION-B）→ 锁定用例红——**首版变异假绿已订正**：原 fixture 无 run/completed，streaming 恒 true 掩盖审批锁，补终态帧后变异才红；③ 暗 tertiary 0.42 回退 → [dark] 对比度 4 failed；④ tl-type 回染 accent → 2 failed；⑤ 键盘门控拆除（MUTATION-C：去 autoFocus 条件）→ 双卡用例红。
+
+**测试有效性备注**：t-contrast 排查中发现并修复两个测量层假信号——Playwright test 上下文 `colorScheme` 默认 light（[dark] 用例必须 localStorage 显式引导主题）；同一 color-mix 在该 Chromium 两条计算路径输出 oklab / color(srgb) 两种格式（解析器双分支 + 未知格式 throw）。
 | UI-03 | 未开始 | — | |
 | UI-04 | 未开始 | — | |
 | UI-05 | 未开始 | — | |

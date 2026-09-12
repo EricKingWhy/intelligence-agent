@@ -26,24 +26,26 @@ export function classifyPreviewArgs(preview: Record<string, unknown> | undefined
   const rest: Record<string, unknown> = { ...args };
   const out: ClassifiedPreview = { path: null, rest };
 
+  // 空串不算消费（U-1 review P3）：`{command:''}` 留在 rest 里走 JSON 兜底，
+  // 信息不静默消失；渲染层的真值判断也就不会出现空容器。
   for (const key of PATH_KEYS) {
     const value = args[key];
-    if (typeof value === 'string') {
+    if (typeof value === 'string' && value.length > 0) {
       out.path = value;
       delete rest[key];
       break;
     }
   }
 
-  if (typeof args.command === 'string') {
+  if (typeof args.command === 'string' && args.command.length > 0) {
     out.command = args.command;
     delete rest.command;
   }
-  if (typeof args.content === 'string') {
+  if (typeof args.content === 'string' && args.content.length > 0) {
     out.content = args.content;
     delete rest.content;
   }
-  if (typeof args.old === 'string' && typeof args.new === 'string') {
+  if (typeof args.old === 'string' && args.old.length > 0 && typeof args.new === 'string' && args.new.length > 0) {
     out.diff = { before: args.old, after: args.new, truncated: false };
     delete rest.old;
     delete rest.new;

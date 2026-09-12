@@ -1766,3 +1766,15 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
 工作）：(1) 给真实集成用例的首次 `connect()` 加预热/重试（gate 脚本本次就是这么绕过的）；
 (2) 更根本地把"冷握手超时"与"真实故障"在错误分类上区分开（例如超时单列一个 category），
 否则生产启动期的首连抖动会被误报成 `unavailable`。**归属：后端（memory 真机测试稳定性）**。
+
+---
+
+## UI Polish 批次登记（2026-09-12，U-1 批量审查 defer 项）
+
+来源：U-1 批量两轴 code-review（diff `cd107a2..1ae3bf2` + 修复）。以下三项**有意 defer**（非遗漏）：
+
+1. **UIP-DEFER-1（P3，安全边界）**：ApprovalCard 同帧双 keydown 理论双 POST——`decide` 的 busy 是异步 setState，同一帧内两次独立 keydown 会复用旧 `busy=false` 闭包。人手触发概率极低（需同帧两次独立按键事件）；根治方案 = decide 内加请求在途同步标志（ref）。键盘路径已由「仅 autoFocus 卡挂监听」把暴露面收窄到单卡。
+2. **UIP-DEFER-2（P3，a11y 边界）**：`aria-labelledby/describedby` 直接内插 `approval_id`——id 含空格/引号时引用失效。后端 id 形如 `ap-…` 安全；若后端未来放宽 id 生成规则，需在前端做 id sanitize（或改用 ref + setAttribute）。
+3. **UIP-DEFER-3（P3，测试缺口）**：审批卡 `{old,new}→DiffBlock`、`{command}→approval-cmd` 的**渲染级**断言（浏览器 DOM 级）未补——现有覆盖 = 分类级单测 + path/content 形状的 t-contrast 渲染断言。计划 UI-03 批次动 StepDetail 时顺带补（同一审批 fixture 基建）。
+
+另登记两个**边界项备案**（R1 accent 审计中的两处留用，非交互但语义特殊）：`detail-section-title svg`（面板标识 icon）与 `workspace-scaffold-tag`（Split/Preview 诚实占位标记）——若后续 review 认为违反 One Voice Rule，整改点在此。

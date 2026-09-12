@@ -17,6 +17,9 @@ describe('isApplePlatform — 苹果系平台判定（含 iOS）', () => {
   it('Windows UA → false', () => {
     expect(isApplePlatform(WIN)).toBe(false);
   });
+  it('iPadOS 13+ 桌面模式 UA（报 Macintosh）→ true：有硬件键盘时 ⌘ 存在，方向正确', () => {
+    expect(isApplePlatform(MAC)).toBe(true);
+  });
 });
 
 describe('modKey — 修饰键文案：macOS ⌘ / 其余 Ctrl', () => {

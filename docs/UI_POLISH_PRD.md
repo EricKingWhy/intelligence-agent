@@ -73,7 +73,7 @@
    ```bash
    cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
    ```
-   - oxlint 基线 **35 warnings / 0 errors**，不得增加。
+   - oxlint 基线 **38 warnings / 0 errors**（B-1 批起为 38；本批新增文件 0 warning，基线不增加）。
    - Playwright **必须 `--workers=2`**（4 worker 有资源竞争抖动）。
 3. **变异验证**：每个新增断言必须证明有效——故意改坏实现 → 该断言变红 → 还原 → 变绿。记录进 ticket 完成笔记。
 4. **§15 亮色同步**：凡动 `:root` token，必须检查 `:root[data-theme='light']` 是否需要同步覆盖；DESIGN.md 的 Colors 节若受影响也要同步。

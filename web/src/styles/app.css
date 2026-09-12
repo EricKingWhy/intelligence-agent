@@ -2383,13 +2383,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: color-mix(in srgb, var(--color-success) 28%, transparent);
   border-left-color: var(--color-success);
   background: color-mix(in srgb, var(--color-success) 6%, transparent);
-  box-shadow: none;
 }
 .approval-card.denied {
   border-color: color-mix(in srgb, var(--color-destructive) 28%, transparent);
   border-left-color: var(--color-destructive);
   background: color-mix(in srgb, var(--color-destructive) 6%, transparent);
-  box-shadow: none;
 }
 .approval-header {
   display: flex;
@@ -2432,7 +2430,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 6px;
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--color-warning) 14%, transparent);
-  color: var(--color-warning);
+  /* U-1 review P1：warning-on-warning-tint 亮色实测 ~2.8:1 不达 AA——
+   * 文字改 warning×text-primary 的 ink 调和（暗色更亮 / 亮色更深，两主题实测过线）。 */
+  color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
   line-height: 18px;
 }
@@ -2490,7 +2490,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: auto;
   max-height: 200px;
 }
-/* UI-01：快捷键标注（12px Floor——kbd 是可读文本，不降 10px）。 */
+/* UI-01：快捷键标注（12px Floor——kbd 是可读文本，不降 10px）。
+ * U-1 review P1：deny 键上的 kbd 继承 danger 文字在亮色下 ~2.5:1——
+ * 给 deny 场景专属 ink（danger×text-primary 调和 + danger 淡染底），
+ * approve 键（深色 success 实底）保持继承白字。 */
 .approval-kbd {
   margin-left: var(--space-xs);
   padding: 0 5px;
@@ -2499,6 +2502,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: 16px;
+}
+.approval-deny .approval-kbd {
+  color: color-mix(in srgb, var(--color-destructive) 60%, var(--text-primary));
+  background: color-mix(in srgb, var(--color-destructive) 16%, transparent);
 }
 .approval-actions {
   display: flex;
@@ -2580,7 +2587,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 2px var(--space-sm);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--color-warning) 12%, transparent);
-  color: var(--color-warning);
+  /* U-1 review P1：同 .approval-chip 的 ink 处理（亮色 ~3.2:1 → 达 AA）。 */
+  color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
   width: fit-content;
 }
