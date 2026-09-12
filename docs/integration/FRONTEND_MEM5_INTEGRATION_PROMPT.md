@@ -14,7 +14,7 @@
 | 分支 | `feat/frontend` |
 | 本批 commit | 功能 `5eb4fed` → 文档回填 `decc7be` → **批次审查修复 `45227dc`（当前 HEAD）**；fixed point = `637bc89` |
 | 后端依赖 | **已就绪且已关单**：MEM-4 #159（`feat/backend`，`GET /api/memories` + `DELETE /api/memories/{id}`）。本批**没有**任何后端改动——无需等后端 |
-| 集成动作 | ① 把 `feat/frontend` 合入本地 `main`（§14.9：一次只合一条分支；后端已先行完成）② 真机跑一遍 §3 的 5 步 ③ `main` 上跑 §4 门禁 ④ 关 #160（comment 已写好，见 §5）⑤ push |
+| 集成动作 | ① 把 `feat/frontend` 合入本地 `main`（§14.9：一次只合一条分支；后端已先行完成）② 真机跑一遍 §3 的 5 步 ③ `main` 上跑 §4 门禁 ④ 关 #160（comment **已发**在 issue 上，见 §5）⑤ push |
 | 最终全量 review | v2 §1.3 的处置见 `docs/SDD_TICKET_TRACKER.md`「批次台账 → 最终全量 review」：本分支相对 `main` 落后且 `main` 侧全是后端文件，唯一未审增量 `637bc89..HEAD` 已由 B-1 覆盖——**是否再跑 `main...HEAD` 留给集成 AI 决策** |
 | 冲突预判 | 本批只动 `web/**` + 两个 docs 文件；与后端 `src/**`/`tests/**` 无交集。**唯一需注意**：`docs/SDD_WORKFLOW_PROTOCOL.md` 本批把它同步成了 v2（与 `feat/backend` 侧**逐字节相同**）——若 `feat/backend` 已合入 `main`，该文件在第二次 merge 时是 identical-change，**不构成冲突**；`docs/SDD_TICKET_TRACKER.md` 两侧都追加了各自章节，**可能冲突**（按 §14.7 分析，两边内容可同时保留：后端记后端批次、前端记前端批次） |
 | 关单 | **#160 不关**（跨端票的前端半 + 代码未合入 `main`），comment 见 §5 |
@@ -157,6 +157,7 @@ AC 逐条：
 | 种子脚本 | `.scratch/seed_real_memories.py`（后端 worktree，`.scratch/` 不入库）；种的是**假事实**，验收后须删 |
 | 实测环境观察 | 种子写入时 Zilliz/embedding 不健康 → 3 条都 `degraded=consolidation_failed: VectorStoreError`（按 #158 设计降级为无条件 insert，记录行照落）——**外部依赖问题，非本票缺陷**，记录在案 |
 | 协议文件同步 | 本批把 `docs/SDD_WORKFLOW_PROTOCOL.md` 同步为 v2（与 feat/backend 逐字节相同）；其 §4「剩余 Ticket 清单」仍是旧内容（FE-T7/T8/T9，早已 done）——不在本批范围 |
+| `docs/PHASE_STATUS.md` | 按前端协议（§16.6）本 worktree 只记 `docs/SDD_TICKET_TRACKER.md`，**未**写 `PHASE_STATUS.md`——该文件既有条目均为「合入 main 后回填」，请集成 AI 在 merge 后按 tracker 的第十二轮小节追加（这是既有的、已记录的协议偏离） |
 
 ---
 
