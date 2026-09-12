@@ -6,7 +6,16 @@
  * thrown as UnauthorizedError so callers surface the guidance path.
  */
 
-import type { AgentEvent, Project, ProjectDeleted, ProjectStatus, SessionSummary } from '../types';
+import type {
+  AgentEvent,
+  MemoryDeleted,
+  MemoryScope,
+  MemorySummary,
+  Project,
+  ProjectDeleted,
+  ProjectStatus,
+  SessionSummary,
+} from '../types';
 import { emitUnauthorized, getToken } from './auth';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
@@ -618,6 +627,97 @@ export async function reorderProjectSession(
 async function projectError(res: Response, fallback: string): Promise<ProjectError> {
   const detail = await readErrorDetail(res);
   return new ProjectError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 记忆请求失败：状态码 + 后端 detail 原文（detail 优先，是 AC 要展示的那句话）。 */
+export class MemoryError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 记忆列表（GET /api/memories，**按创建时间倒序**分页）。
+ *
+ *  `limit` 由后端夹在 1..200（本函数不猜上界，越界由后端 422 说话）；`offset` 是
+ *  「跳过的条数」——"加载更多"传已显示的条数。空数组 ≠ 出错：调用方据此显示
+ *  「还没有记忆」而不是错误横幅（与 `listProjects` 同一条纪律）。
+ *
+ *  形状不符的单条**丢弃但不牵连其余**：一条坏行不能把整页变成"加载失败"。
+ */
+export async function listMemories(limit = 50, offset = 0): Promise<MemorySummary[]> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const res = await apiFetch(`/api/memories?${params.toString()}`);
+  if (!res.ok) throw await memoryError(res, '加载记忆失败');
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) return [];
+  return body.flatMap((raw) => {
+    const memory = parseMemory(raw);
+    return memory ? [memory] : [];
+  });
+}
+
+/** 硬删一条记忆（DELETE /api/memories/{id}）——**不可恢复**，调用方必须先二次确认。
+ *
+ *  状态码语义（后端 `web/memory.py` 的契约，前端不合并它们）：
+ *    200 `{id, deleted:true}` / 404 id 不存在 / 403 不属于当前入口 / 503 记忆未装配。
+ *  404 与 403 都**不**当成功：用户对着具体一条点删除，"已经不在了"与"不给删"是
+ *  两种不同结果，UI 要分别说（这也是前端不维护第二套真相的必然要求——本地删掉
+ *  而后端拒绝会直接违背不变量 #22）。
+ */
+export async function deleteMemory(memoryId: string): Promise<MemoryDeleted> {
+  const res = await apiFetch(`/api/memories/${encodeURIComponent(memoryId)}`, { method: 'DELETE' });
+  if (!res.ok) throw await memoryError(res, '删除记忆失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<MemoryDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : memoryId,
+    deleted: body.deleted === true,
+  };
+}
+
+/** 非 2xx → MemoryError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
+async function memoryError(res: Response, fallback: string): Promise<MemoryError> {
+  const detail = await readErrorDetail(res);
+  return new MemoryError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 记忆能力未装配（503）——**配置状态，不是故障**：UI 要显示「记忆未启用」而不是
+ *  "加载失败/重试"，否则用户会一直点重试去修一个不存在的故障（不变量 #21）。 */
+export function isMemoryDisabled(error: unknown): boolean {
+  return error instanceof MemoryError && error.status === 503;
+}
+
+/** 记忆错误 → 展示文案：MemoryError 的 message 就是后端 detail（或兜底前缀），
+ *  其余异常（网络层 TypeError 等）用 message 或 fallback。与 `describeProjectError`
+ *  同构但**分开**：两个能力各自演进，共用一个会让某一侧的语义渗到另一侧。 */
+export function describeMemoryError(error: unknown, fallback: string): string {
+  if (error instanceof MemoryError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
+}
+
+/** 窄化解析一条记忆（零伪造）：id/content/created_at 必须是非空字符串、scope 必须是
+ *  已知取值、metadata 必须是对象；任一不符 → null。**不补默认值**：`scope` 猜错会让
+ *  用户以为这条记在别的名下，`created_at` 补空串会让"记于何时"变成谎言。 */
+function parseMemory(raw: unknown): MemorySummary | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  const { id, content, created_at: createdAt, scope, metadata } = row;
+  if (typeof id !== 'string' || !id) return null;
+  if (typeof content !== 'string') return null;
+  if (typeof createdAt !== 'string' || !createdAt) return null;
+  if (scope !== 'user' && scope !== 'session') return null;
+  return {
+    id,
+    content,
+    scope: scope as MemoryScope,
+    metadata: typeof metadata === 'object' && metadata !== null
+      ? (metadata as Record<string, unknown>)
+      : {},
+    created_at: createdAt,
+  };
 }
 
 /** 窄化解析项目（零伪造）：id/path/title/session_ids 形状不符 → null（调用方丢弃该条）。

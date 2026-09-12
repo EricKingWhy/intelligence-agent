@@ -5,12 +5,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   attachSessionToProject,
   createProject,
+  deleteMemory,
   deleteProject,
+  describeMemoryError,
   detachSessionFromProject,
   getModels,
   getSessionEvents,
+  isMemoryDisabled,
+  listMemories,
   listProjects,
   listSessions,
+  MemoryError,
   NotFoundError,
   ProjectError,
   UnauthorizedError,
@@ -22,7 +27,7 @@ import {
   startSession,
 } from './api';
 import { onUnauthorized } from './auth';
-import type { Project, SessionSummary } from '../types';
+import type { MemorySummary, Project, SessionSummary } from '../types';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
 function captureFetch(
@@ -544,5 +549,118 @@ describe('projects — WS-4 端点契约（#154；窄化解析 + 状态码归类
     expect(err).toBeInstanceOf(ProjectError);
     expect((err as ProjectError).status).toBe(502);
     expect((err as ProjectError).message).toContain('502');
+  });
+});
+
+// ── Memories（MEM-4 / #159 契约，MEM-5 / #160 前端消费）──
+
+describe('memories — 列表/硬删端点契约（#160；ARCH-4b 类型注解 + 状态码语义）', () => {
+  /** 后端 `web/memory.py::MemorySummary` 的 canonical 形状。
+   *  类型注解在编译期锁一致性（与 SessionSummary / Project 同一手法）：后端加必填
+   *  字段、或此处多出类型未声明的键 → `tsc -b` 红。后端侧权威锁在
+   *  `tests/web/test_memory_api.py`（断言值，能抓住"键在但值是 null"的漏映射）。 */
+  const CANONICAL_MEMORY: MemorySummary = {
+    id: 'm-1',
+    content: '用户偏好简洁的中文回答，不要客套话。',
+    scope: 'user',
+    metadata: { source: 'conversation' },
+    created_at: '2026-09-12T08:30:00Z',
+  };
+
+  it('listMemories：全字段解析（content/scope/created_at 原样，不解析时间）', async () => {
+    captureProjectFetch(200, [CANONICAL_MEMORY]);
+    const rows = await listMemories();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(CANONICAL_MEMORY);
+    // 时间不做 Date 解析（展示层才格式化）：字符串原样带回。
+    expect(rows[0].created_at).toBe('2026-09-12T08:30:00Z');
+  });
+
+  it('listMemories：limit/offset 进查询串（分页由后端执行，前端不本地切片）', async () => {
+    const { calls } = captureProjectFetch(200, []);
+    await listMemories(20, 40);
+    expect(calls[0].method).toBe('GET');
+    expect(calls[0].url).toBe('/api/memories?limit=20&offset=40');
+  });
+
+  it('listMemories：畸形单条剔除、其余保留（一条坏行不得让整页变"加载失败"）', async () => {
+    captureProjectFetch(200, [
+      CANONICAL_MEMORY,
+      { ...CANONICAL_MEMORY, id: 'no-content', content: undefined }, // 缺 content
+      { ...CANONICAL_MEMORY, id: 'no-time', created_at: null }, // 缺创建时间
+      { ...CANONICAL_MEMORY, id: 'weird-scope', scope: 'global' }, // 未知 scope
+      { ...CANONICAL_MEMORY, id: '' }, // 空 id
+      'garbage',
+      null,
+    ]);
+    const rows = await listMemories();
+    expect(rows.map((r) => r.id)).toEqual(['m-1']);
+  });
+
+  it('listMemories：metadata 非对象 → 空对象兜底（列表仍可见，AC1 只消费三个字段）', async () => {
+    // metadata 不是 AC1 的展示字段，形状异常不值得把整条记忆藏起来——但也不伪造内容。
+    captureProjectFetch(200, [{ ...CANONICAL_MEMORY, metadata: 'not-an-object' }]);
+    const rows = await listMemories();
+    expect(rows[0].metadata).toEqual({});
+    expect(rows[0].content).toBe(CANONICAL_MEMORY.content);
+  });
+
+  it('listMemories：顶层不是数组 → 空数组（调用方显示"还没有记忆"，不是错误）', async () => {
+    captureProjectFetch(200, { memories: [] });
+    expect(await listMemories()).toEqual([]);
+  });
+
+  it('listMemories：503（能力未装配）→ MemoryError(503) + 后端 detail；isMemoryDisabled 为真', async () => {
+    const detail = 'memory capability 未启用：请在 CAPABILITIES 中配置 memory。';
+    captureProjectFetch(503, { detail });
+    const err = await listMemories().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MemoryError);
+    expect((err as MemoryError).status).toBe(503);
+    expect((err as MemoryError).message).toBe(detail);
+    // 降级通道判定：面板据此显示"记忆未启用"而非"加载失败 + 重试"。
+    expect(isMemoryDisabled(err)).toBe(true);
+  });
+
+  it('listMemories：500 → MemoryError(500)，但**不是**降级态（真故障要可重试）', async () => {
+    captureProjectFetch(500, { detail: 'boom' });
+    const err = await listMemories().catch((e: unknown) => e);
+    expect((err as MemoryError).status).toBe(500);
+    expect(isMemoryDisabled(err)).toBe(false);
+  });
+
+  it('deleteMemory：DELETE /api/memories/{id}（id 编码）+ 200 回执', async () => {
+    const { calls } = captureProjectFetch(200, { id: 'm/1', deleted: true });
+    const result = await deleteMemory('m/1');
+    expect(calls[0].method).toBe('DELETE');
+    expect(calls[0].url).toBe('/api/memories/m%2F1');
+    expect(result).toEqual({ id: 'm/1', deleted: true });
+  });
+
+  it('deleteMemory：200 但 body 是 null → deleted=false（不抛 TypeError，不谎称删掉了）', async () => {
+    captureProjectFetch(200, null);
+    const result = await deleteMemory('m-1');
+    expect(result).toEqual({ id: 'm-1', deleted: false });
+  });
+
+  it('deleteMemory：404（id 不存在）→ MemoryError(404)，不当成功', async () => {
+    captureProjectFetch(404, { detail: 'memory not found: m-1' });
+    const err = await deleteMemory('m-1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MemoryError);
+    expect((err as MemoryError).status).toBe(404);
+    expect((err as MemoryError).message).toBe('memory not found: m-1');
+  });
+
+  it('deleteMemory：403（不属于当前入口，含 SESSION 行）→ MemoryError(403)，与 404 分开', async () => {
+    captureProjectFetch(403, { detail: 'memory 不属于当前身份' });
+    const err = await deleteMemory('m-1').catch((e: unknown) => e);
+    expect((err as MemoryError).status).toBe(403);
+    expect((err as MemoryError).message).toBe('memory 不属于当前身份');
+  });
+
+  it('describeMemoryError：MemoryError 用后端 detail；非 MemoryError 用 message / fallback', () => {
+    expect(describeMemoryError(new MemoryError(403, '不给删'), '删除记忆失败')).toBe('不给删');
+    expect(describeMemoryError(new Error('网络断了'), '删除记忆失败')).toBe('网络断了');
+    expect(describeMemoryError(new Error(''), '删除记忆失败')).toBe('删除记忆失败');
+    expect(describeMemoryError(null, '删除记忆失败')).toBe('删除记忆失败');
   });
 });

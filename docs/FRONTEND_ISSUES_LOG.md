@@ -1573,3 +1573,54 @@ await self._persist_ledger(record.id, [session_id, *kept])   # 前插
 顺带把 `--workers=2`（§16.6 硬要求）写进 `playwright.config.ts`：以前只有门禁命令带这个
 参数，裸跑 `npx playwright test` 会默认 4 worker —— 那正是"门禁绿、本地红"这类
 反复消耗排查时间的来源之一。
+
+---
+
+## 第十二轮（2026-09-12）：MEM-5 #160 记忆管理 UI —— 交付 + e2e 逮到的真 bug + 真机验收
+
+**范围**：跨端票 MEM-5 的前端半（后端半 #159 已关单）。前端用户入口从「只有 API」变成
+「看得见 + 删得掉」。契约来源：`src/agent_harness/web/memory.py`（`MemorySummary` /
+`MemoryDeleted` / `GET /api/memories` 分页 / `DELETE` 的 200·404·403·503 语义）。
+
+### 一、e2e 逮到的一个真 bug（本票唯一产品缺陷，已修）
+
+| 项 | 内容 |
+| --- | --- |
+| 症状 | 读取失败（HTTP 500 / 网络断）时，面板**同时**渲染「还没有记忆」与错误条 |
+| 根因 | 状态分支写成 `disabled → loading → visible.length === 0 → 空态 → 列表`，末条**漏了** `loadError === null`。于是"一条都没读到 + 读取失败"落进空态分支 —— 正是 AC4 明令禁止的「把读不到伪装成没有」（不变量 #21 同族） |
+| 证据 | `e2e/s-memories.spec.ts` 的 500 用例断言 `.memory-empty` count 必须为 0 → **首版两视口都红**（也正是这条用例逼出该缺陷，不是事后补的） |
+| 修复 | 空态条件改为 `visible.length === 0 && loadError === null`；「0 行 + 失败」只留错误条 + 重试 |
+| 教训 | 「空 / 错 / 降级」三态是**互斥**的语义，不是"优先级排队"——分支链里任何一个 `&&` 漏写，就会把一种状态说成另一种 |
+
+### 二、真机验收（真 .env / 真模型 / 真 Zilliz / 真 sqlite / 真浏览器 5173+8000）
+
+种子数据走生产同一条装配 + `consolidate()` 契约（脚本 `.scratch/seed_real_memories.py`，
+后端 worktree，不入库）。**实测三条都 `degraded=consolidation_failed: VectorStoreError`**：
+外部向量服务当时不健康 → 按 #158「不丢写」设计降级为无条件 insert（记录行仍落盘，故列表有内容）。
+这是**如实记录的环境事实**，不是本票缺陷。
+
+| 验收项 | 真机结果 |
+| --- | --- |
+| 列表渲染 | 点顶栏 Brain 按钮 → 面板列出 3 条真记忆（content + `用户` chip + 本地化时间；`已全部加载`） |
+| 二次确认文案 | 行内确认条：「这是硬删除，**删除不可恢复**——没有回收站，删掉后模型不会再想起这条。」 |
+| 删除成功 | 确认后行消失 → `curl` 后端只剩 2 行 → 日志 `memory forget via api: forgotten` → **整页刷新**后再开面板该条仍不在（= 后端权威，不是本地隐藏） |
+| 删除失败回滚 | **杀后端**后点确认 → 行**回到列表** + 「删除记忆失败（502）」+ 面板错误条「加载记忆失败（502）」+ 重试；重启后端点重试 → 列表恢复一致 |
+| 真空态 | 经界面删光 → 「还没有记忆」（非降级态、无错误条）；`curl` 复查 0 行 |
+| 503 降级契约 | `CAPABILITIES={}` 的另一实例（:8001）：真 GET/DELETE 都回 503 + `memory capability 未启用：请在 CAPABILITIES 中配置 memory。` —— 与 e2e mock **逐字一致** |
+| 视觉 | 暗/亮两色 + 确认条截图复核；新增样式全部复用既有 token（无 §15 亮色遗漏问题） |
+| 环境还原 | 种子记忆已全部经界面删除（真记忆库不留假事实，避免被模型当真召回）；dev server 已停（含残留 uvicorn 占 `.instance.lock` 的已知坑） |
+
+### 三、门禁（实跑）
+
+`npx tsc -b` ✅ · `npx vitest run` **580 passed**（31 文件）· `npx oxlint` **0 errors**
+（38 warnings：37 既有 + 1 条本票同类）· `npx playwright test --workers=2` **160 passed**
+（本票 +16 = 8 用例 × 2 视口）· `npx vite build` ✅。
+
+### 四、过程自查
+
+- **StrictMode 双跑会把"只失败一次"的 mock 立刻覆盖成成功**：首版 500 用例用 `failures -= 1`
+  计数器，dev 下挂载 effect 跑两遍 → 第二个请求 200 → 错误条从未出现（用例假红）。
+  改为「失败保持到测试显式关掉」。同理 `requested[1] === '?limit=50&offset=50'` 这种
+  **按请求序号断言**在 StrictMode 下不稳（序号里混着重复的首屏请求）→ 改成
+  「翻页前**所有**请求 offset=0；翻页后**存在** offset=50」。
+  （这两个都是 mock 侧的测试写法问题，不是产品缺陷。）

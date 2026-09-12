@@ -21,6 +21,7 @@ import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
+import { MemoryPanel } from './components/MemoryPanel';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
@@ -453,6 +454,8 @@ export default function App() {
 
   // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
+  const [memoriesOpen, setMemoriesOpen] = useState(false);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {
@@ -548,6 +551,14 @@ export default function App() {
         group: 'actions',
         run: () => document.getElementById('composer-input')?.focus(),
       },
+      {
+        id: 'manage-memories',
+        label: '管理记忆',
+        keywords: 'memory memories forget delete 记忆 遗忘 删除 忘记',
+        hint: '记忆库',
+        group: 'actions',
+        run: () => setMemoriesOpen(true),
+      },
     ];
     // trace_id 缺则 Copy Trace ID 不出现；trace_url 缺则 Open Trace 不出现
     // （Langfuse 未启用时两者都 null，两个命令都移除；启用时 Copy 恒在、Open 看 trace_url）。
@@ -612,6 +623,7 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         authRequired={authRequired}
+        onOpenMemories={() => setMemoriesOpen(true)}
       />
 
       <main className={`app-regions ${inspectorOpen ? '' : 'inspector-closed'}`}>
@@ -796,6 +808,7 @@ export default function App() {
       </main>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} items={paletteItems} />
+      <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
     </div>
   );
 }

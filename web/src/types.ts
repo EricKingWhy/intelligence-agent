@@ -79,6 +79,37 @@ export interface ProjectDeleted {
   detail: string;
 }
 
+/** 记忆归属范围（后端 `memory/types.py::MemoryScope`）。
+ *
+ *  `session` 的记忆按**会话**归属；HTTP 用户入口只暴露 `user`（浏览会话记忆需要
+ *  可信的会话绑定，MEM-4 明确不在范围）。类型上保留两者：模型工具侧与未来入口
+ *  都可能出现 session 行，管理面必须能如实渲染而不是把未知值当 user。 */
+export type MemoryScope = 'user' | 'session';
+
+/** 一条记忆（后端 `web/memory.py::MemorySummary`，GET /api/memories 的元素）。
+ *
+ *  `content` 是**权威记录里的正文**（不是向量检索的投影——管理界面要的是"我记住
+ *  了什么"，不是"哪几条最像某个 query"）。`metadata` 已由后端剥掉 provider 内部
+ *  载荷（`public_metadata`），前端只渲染 `content` / `created_at` / `scope`。
+ *  `created_at` 是后端给的 ISO 字符串，前端零解析、零改写（格式化只在展示层）。 */
+export interface MemorySummary {
+  id: string;
+  content: string;
+  scope: MemoryScope;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+/** DELETE /api/memories/{id} 的响应（硬删成功）。
+ *
+ *  **硬删不可恢复**（不是软删/回收站）：后端 `forget` 真的移除记录行与索引。
+ *  失败语义在后端是**显式**的：id 不存在 → 404、不属于当前入口 → 403、
+ *  记忆能力未装配 → 503（前端据此区分"没了"/"不给删"/"未启用"）。 */
+export interface MemoryDeleted {
+  id: string;
+  deleted: boolean;
+}
+
 /** Session summary from GET /api/sessions. */
 export interface SessionSummary {
   session_id: string;

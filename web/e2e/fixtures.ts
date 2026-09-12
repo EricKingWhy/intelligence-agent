@@ -86,6 +86,21 @@ export interface ApiMock {
    *  与 `projectMissingPaths` 的分工：那个改的是"哪些路径不存在"，这个改的是
    *  "attach 这条请求本身回什么"。 */
   onAttachPost?: (route: Route) => Promise<boolean> | boolean;
+  // ── MEM-5 / #160 记忆管理 ──
+  /** 记忆 fixture（缺省 = 空列表 → 面板显示"还没有记忆"）。
+   *
+   *  **有状态**：DELETE 真的从这份状态里摘掉条目（见 `routeApi` 的 memories 分支），
+   *  所以"删掉后关掉面板再打开，该条不在"断言的是真语义，而不是界面自己的本地隐藏。
+   *  分页也按真实端点走（`limit`/`offset` 切片），"加载更多"因此可被真的驱动。 */
+  memories?: MemoryFixture[];
+  /** 记忆能力未装配 → GET/DELETE 都回 503 + 该 detail（AC4 降级态）。
+   *  刻意用真实后端那句话（`web/memory.py`）：前端把"未启用"与"没有记忆"分开显示。 */
+  memoryDisabled?: string;
+  /** 这些 id 的 DELETE 回 403（`web/memory.py` 的"不属于当前入口"）——AC3 的
+   *  失败回滚路径（真机上要构造一条 SESSION 记忆才自然出现）。 */
+  memoryDeniedIds?: string[];
+  /** GET /api/memories 的拦截口（断言分页参数或伪造 500）；返回 true = 已处理。 */
+  onMemoriesGet?: (route: Route) => Promise<boolean> | boolean;
 }
 
 /** 项目 fixture（形状 = 后端 `web/projects.py::Project`，时间戳由 fixtures 补）。 */
@@ -96,6 +111,15 @@ export interface ProjectFixture {
   /** 账本手工序。 */
   session_ids: string[];
   status?: 'ok' | 'missing-dir';
+}
+
+/** 记忆 fixture（形状 = 后端 `web/memory.py::MemorySummary`，时间戳由 fixtures 补）。 */
+export interface MemoryFixture {
+  id: string;
+  content: string;
+  scope?: 'user' | 'session';
+  metadata?: Record<string, unknown>;
+  created_at?: string;
 }
 
 /** 会话行 fixture：只带 WS-5 相关字段，其余由调用方按需补（旧 spec 的裸对象同样可用）。 */
@@ -127,6 +151,8 @@ export function routeApi(page: Page, mock: ApiMock): void {
     ...p,
     session_ids: [...p.session_ids],
   }));
+  /** 记忆状态：DELETE 真的摘条目（"删掉后再打开面板看不到"才是真语义）。 */
+  const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
 
   /** 后端 `web/projects.py::Project` 的响应形状（时间戳不是本车道断言的对象）。 */
   const projectView = (p: ProjectFixture) => ({
@@ -235,6 +261,39 @@ export function routeApi(page: Page, mock: ApiMock): void {
         }),
         contentType: 'application/json',
       });
+    }
+
+    // ── MEM-5 / #160 记忆端点（有状态 mock：语义对齐后端 `web/memory.py`）──
+    if (path === '/api/memories' && req.method() === 'GET') {
+      if (mock.onMemoriesGet && (await mock.onMemoriesGet(route))) return;
+      if (mock.memoryDisabled) return json(route, { detail: mock.memoryDisabled }, 503);
+      const params = new URL(req.url()).searchParams;
+      const limit = Number(params.get('limit') ?? '50');
+      const offset = Number(params.get('offset') ?? '0');
+      // 按后端语义切片（`web/memory.py` 的 limit/offset 分页）——"加载更多"因此
+      // 真的会拿到下一页，而不是界面自己把一份全量数组切两半。
+      const page = memoryState.slice(offset, offset + limit).map((m) => ({
+        id: m.id,
+        content: m.content,
+        scope: m.scope ?? 'user',
+        metadata: m.metadata ?? {},
+        created_at: m.created_at ?? T,
+      }));
+      return json(route, page);
+    }
+    const memoryMatch = /^\/api\/memories\/([^/]+)$/.exec(path);
+    if (memoryMatch && req.method() === 'DELETE') {
+      if (mock.memoryDisabled) return json(route, { detail: mock.memoryDisabled }, 503);
+      const memoryId = decodeURIComponent(memoryMatch[1]);
+      // 403 = 领域层的归属校验（`MemoryRecordStore.delete` 的 namespace 匹配）：
+      // 与 404「这条不在了」分开——AC3 的失败回滚就靠这条。
+      if ((mock.memoryDeniedIds ?? []).includes(memoryId)) {
+        return json(route, { detail: `memory ${memoryId} 不能由当前入口删除` }, 403);
+      }
+      const at = memoryState.findIndex((m) => m.id === memoryId);
+      if (at < 0) return json(route, { detail: `memory not found: ${memoryId}` }, 404);
+      memoryState.splice(at, 1); // 硬删：记录真的没了（不是软删/回收站）
+      return json(route, { id: memoryId, deleted: true });
     }
 
     // ── WS-5 / #155 项目端点（有状态 mock：语义对齐后端 `web/projects.py`）──

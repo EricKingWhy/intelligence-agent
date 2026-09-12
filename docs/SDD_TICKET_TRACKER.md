@@ -11,13 +11,41 @@
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
-| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` v1 |
+| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（批量审查循环；v1 的「每票一次 /code-review」已作废） |
 | 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
 | 集成交接提示词 | 本轮：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md`（**集成 AI 的唯一入口**，§0 是可执行摘要）；上一批：`docs/integration/FRONTEND_RECOVER_FORK_SCROLL_INTEGRATION_PROMPT.md` |
 | 本批交接手册 | `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（做了什么 + 8 个坑点 + 未决项 + 复核命令） |
 | 下一批提示词 | `docs/PROMPT_FRONTEND_NEXT_BATCH.md`（可直接复制给前端 Agent：OBS-015 修复为主） |
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
+
+---
+
+## ⚠️ 流程切换 + 批次记录（v2 批量审查循环，2026-09-12）
+
+**自愈条款（先读这段）**：任何时候你发现自己（a）不确定当前在循环哪一步，（b）不记得批量审查的
+fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **第一动作 = 立即重读
+`docs/SDD_WORKFLOW_PROTOCOL.md` + 本文件恢复状态；禁止凭记忆猜测流程继续施工。**
+
+| 项 | 值 |
+| --- | --- |
+| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（本 worktree 已同步为 v2；v1 作废） |
+| 切换日期 | 2026-09-12（切换动作发生在后端 worktree；v2 协议文件随本批同步到本 worktree） |
+| 本 worktree 的批次起点 | `637bc89`（`feat/frontend` HEAD）= **B-1 的 fixed point** |
+| 过渡条款 | 该点之前已完成并 commit 的前端批次**一律承认有效**（旧循环的每票 / 每批 review 视为已覆盖），不补审、不重跑 |
+
+### 批次台账
+
+| 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
+| --- | --- | --- | --- | --- |
+| B-1 | #160（MEM-5 前端半） | `637bc89` | 见第十二轮末尾「批次审查」 | 待填 |
+
+> 为什么单票成批：v2 §1.2 允许「遇到依赖链断点等自然分界提前收批」。#160 是 MEM-5 跨端票的
+> 前端半、也是本轮唯一剩余票（MEM 链末端）→ 自然断点，单票即收批；
+> 本批 diff = `637bc89..<#160 commit>`。
+>
+> 协议文件 §4「剩余 Ticket 清单」是旧内容（FE-T7/T8/T9 早已 done）——本轮**不动它**：
+> 该文件跨 worktree 共用，保持与 feat/backend 侧逐字节一致可避免制造无谓的 merge 冲突。
 
 ### 最近一批：BUG-011 前端半——模型项双击不再发第二个 `POST /model`（2026-09-11）
 
@@ -460,3 +488,57 @@ detach/重排/软删除全走通，**结束时会话归属与项目账本与开�
 ②注册项目不批量回溯 attach（契约不暴露会话 cwd，前端无法判定，不猜）；
 ③项目端点之外的 CORS `*`（后端既有）；
 ④窄屏 56px 折叠轨看不见会话行（既有规则，本票只追加了项目 chrome 到同一 hide 列表）。
+
+
+---
+
+## 第十二轮（2026-09-12）：MEM-5 #160 前端记忆管理 UI（跨端票的前端半）
+
+**背景**：MEM-4（#159，后端半，已关单）给了用户侧两个入口（`GET /api/memories` 列表 +
+`DELETE /api/memories/{id}` 硬删），但没有界面。用户看不到记忆库里有什么，也就无从判断该删哪条
+——所以「用户入口」若只有 API 就等于没有（issue #160 的原话）。
+
+| 交付 | 位置 |
+| --- | --- |
+| 契约层：`MemoryScope` / `MemorySummary` / `MemoryDeleted` + 2 个端点 + `MemoryError` / `isMemoryDisabled` / `describeMemoryError` + 窄化 `parseMemory` | `src/types.ts` / `src/lib/api.ts` |
+| 纯展示逻辑：`scopeLabel` / `formatMemoryTime`（解析失败原样返回，不伪造）/ `hasMoreAfter` / `withoutIds` | `src/lib/memory.ts`（+ `memory.test.ts` 7 例） |
+| 数据与动作：`useMemories`（打开时拉取 / 分页 / 乐观删除 + 两结局都重拉权威 / 503 降级与错误分流） | `src/hooks/useMemories.ts` |
+| 浮层：列表（content + scope + 创建时间 + 长正文展开）+ 行内二次确认（「删除不可恢复」）+ 降级 / 空 / 错误 / 分页四态 | `src/components/MemoryPanel.tsx` |
+| 入口 ×2：顶栏 Brain 按钮 + 命令面板「管理记忆」 | `src/components/TopBar.tsx` / `src/App.tsx` |
+| 样式：浮层材质与项目浮层共用 + 记忆专属 26 条规则（纯新增） | `src/styles/app.css` |
+| 契约测试：canonical fixture **类型注解**（ARCH-4b）+ 11 例（分页参数 / 畸形行剔除 / 404·403·503 分流 / 回执缺字段） | `src/lib/api.test.ts` |
+| e2e：7 用例 × 2 视口 = **16 例**（列表渲染与翻页 / 长正文展开 / 二次确认 + 后端权威 / 失败回滚 / 503 降级 / 真空态 / 500 错误重试 / 命令面板入口） | `e2e/s-memories.spec.ts` + `e2e/fixtures.ts`（**有状态** memory mock） |
+
+**门禁（实跑）**：`npx tsc -b` ✅ · `npx vitest run` **580 passed**（31 文件，+19）·
+`npx oxlint` **0 errors**（38 warnings：37 既有 + 1 条本票与既有同类的 `set-state-in-effect`）·
+`npx playwright test --workers=2` **160 passed**（+16 例）· `npx vite build` ✅。
+
+**e2e 逮到的真 bug（值得记住）**：列表读取失败（500/网络）时，`visible.length === 0` 分支先命中
+→ 面板会**同时**显示「还没有记忆」与错误条——正是 AC4 禁止的「把读不到伪装成没有」。
+首版实现的判空顺序漏了 `loadError === null` 这一项；`s-memories.spec.ts` 的 500 用例
+（`.memory-empty` 必须 count 0）把它钉死。修复：空态只在「确实读到空列表」时渲染，
+「0 行 + 读取失败」只留错误条 + 重试。
+
+**真机验收（真 .env / 真模型 / 真 Zilliz / 真 sqlite / 真浏览器）**：
+
+| 步骤 | 结果 |
+| --- | --- |
+| 种子数据 | `.scratch/seed_real_memories.py`（后端 worktree，**不入库**）：走生产同一条 `build_builtin_memory_components` + `capability.consolidate()` 写入 3 条真实记忆。**实测 3 条都 `degraded=consolidation_failed: VectorStoreError`** —— 当时 Zilliz/embedding 不健康，按 #158 的「不丢写」设计降级成无条件 insert（记录行照样落盘，所以列表有内容） |
+| 列表 | 真 `GET /api/memories` 返回 3 行；浏览器点开面板渲染 content / `用户` chip / 本地化时间 |
+| 二次确认 | 真实点击：行内出现「这是硬删除，**删除不可恢复**——没有回收站，删掉后模型不会再想起这条。」+ 取消 / 确认删除 |
+| 删除成功 | 真实点击确认 → 行消失；`curl` 复查后端只剩 2 行；后端日志 `memory forget via api: forgotten`（MEM-4 的结构化审计）；**整页刷新后再打开面板**该条依然不在（证明不是本地隐藏） |
+| 删除失败回滚 | **杀掉真后端**后在界面上点确认删除 → 行**回到列表**（回滚）+ 该行确认条显示「删除记忆失败（502）」+ 面板错误条「加载记忆失败（502）」+ 重试；重启后端点「重试」→ 列表恢复一致（2 行） |
+| 真空态 | 经界面把两条种子记忆都真删掉 → 面板显示「还没有记忆」（**不是**降级态、无错误条）；`curl` 复查后端 0 行 |
+| 降级契约 | 另起一个 `CAPABILITIES={}` 的实例（:8001）：真 `GET`/`DELETE /api/memories` 都回 **503** + `memory capability 未启用：请在 CAPABILITIES 中配置 memory。` —— 与 e2e mock 里那句**逐字一致**（mock 的降级文案不是编的） |
+| 视觉 | 暗 / 亮两色 + 行内确认条各截图复核：scope chip、时间、危险色确认条、按钮对比度在亮色下均可读（新增样式全部复用既有 token，无 §15 双份同步问题） |
+| 环境还原 | 种子记忆**已全部经界面删掉**（真记忆库里不留假事实——否则模型会把「用户使用 Windows 11」当真的召回）；两个 dev server 已停（避免残留 uvicorn 占 `.instance.lock`，那是已知会打红 `test_web_lifespan_flushes_on_shutdown` 的坑） |
+
+**关单**：#160 **不关**（见 integration prompt §5 / issue comment）：按票面「跨端 ticket 的前端半」
++ §14.12，用 comment 记录已完成部分与剩余项（剩余 = 合入 `main`，由集成 AI 执行）。
+本 worktree 与 #155 同一处置。
+
+**未做 / 交后续**（Scope Lock，只登记不顺手做）：
+① 记忆**编辑** UI（票面非目标；后端入口本票也没有）；② 批量清空 / 回收站 / 恢复（非目标）；
+③ 冲突可视化（LLM 决策只体现在最终条目上，非目标）；④ 记忆条目的**检索/搜索**（本票只做分页列表，
+用户要的是"看得见 + 删得掉"）；⑤ 真机侧没法自然构造 `403`（需要一条 SESSION scope 记忆，而 HTTP
+入口只列 USER 行）——该路径由 e2e 的 `memoryDeniedIds` 拦截口覆盖（伪造的是**真后端会回的那句话**）。
