@@ -126,7 +126,7 @@ components:
 
 ### Neutral
 - **Canvas** (#0c0c0f)：应用画布/环境底。**Chrome** (#101014)：顶栏/Rail/Inspector。**Workspace** (#121217)：主内容区（最亮）。**Elevated** (#17171d)：内嵌卡与终端基座。**Overlay** (#262b34)：浮层。
-- 文字三档：primary 0.92 / secondary 0.64 / tertiary 0.52 alpha（亮色同结构 0.92/0.62/0.55）。**tertiary 不得低于 4.5:1 实测对比度。**
+- 文字三档：primary 0.92 / secondary 0.64 / tertiary 0.52 alpha（亮色同结构 0.92/0.62/**0.63**——UI-02 实测定值：0.55 在白底仅 4.12:1、0.60 在选中染底 4.46:1，均不达 AA）。**tertiary 不得低于 4.5:1 实测对比度。**
 - 边：subtle 0.075 / strong 0.13 alpha（亮色 0.08/0.14）。
 - **Terminal**（#0d0d0f 底 #d4d4d4 字）：跨主题恒定，不进主题变量组。
 

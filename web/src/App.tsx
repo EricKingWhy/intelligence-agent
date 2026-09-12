@@ -764,6 +764,8 @@ export default function App() {
           />
           <Composer
             streaming={streaming}
+            /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。 */
+            approvalPending={(conversation?.pending_approvals.length ?? 0) > 0}
             onSubmit={handleSubmit}
             onCancel={cancelStream}
             presetTask={presetTask}

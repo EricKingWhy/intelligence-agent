@@ -111,7 +111,7 @@ export function modKey(ua?: string): string {
 **A. token 改动**（`index.css`，含 §15 双块同步）：
 1. `:root` `--text-xs: 11px` → **`12px`**（亮色块无字号 token，无需同步字号）。
 2. `:root` `--text-tertiary: rgba(255,255,255,0.42)` → **`rgba(255,255,255,0.52)`**。
-3. `:root[data-theme='light']` `--text-tertiary: rgba(18,18,24,0.42)` → **`rgba(18,18,24,0.55)`**。
+3. `:root[data-theme='light']` `--text-tertiary: rgba(18,18,24,0.42)` → **`rgba(18,18,24,0.63)`**（实施修正：规格原估 0.55，实测白底 4.12:1 / 染底 4.46:1 均不达 AA，0.63 才过线——估算让位实测）。
 4. 改完在两块注释里补一行「UI-02 2026-09-12：地板 12px / tertiary 提对比（PRD D3）」。
 
 **B. 10px 清理**（`app.css` 全量 `font-size: 10px` 逐处分类，结果表追加到 tracker）：

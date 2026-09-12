@@ -12,7 +12,7 @@
 |---|------|------|
 | D1 | 范围 | 五个评审 issue **全部做**，按 P0 → P1 排版 → P1 Inspector → P2 → P2 分批 SDD 循环；每批独立 code-review + 全量门禁 + 本地 commit |
 | D2 | 基调 | **Refinement**：冻结视觉世界不换（粉色 accent、暗色优先、材质模型、radius 阶梯全部不动）；同时把「accent 使用性质」补成成文规则（进 DESIGN.md，见 §2） |
-| D3 | 排版 | `--text-xs` 11→12px；`--text-tertiary` 暗 0.42→0.52 alpha、亮 0.42→0.55 alpha；10px 仅保留给全大写 micro-label（按 AGENTS.md §15 双块同步纪律执行） |
+| D3 | 排版 | `--text-xs` 11→12px；`--text-tertiary` 暗 0.42→0.52 alpha、亮 0.42→0.55 alpha；10px 仅保留给全大写 micro-label（按 AGENTS.md §15 双块同步纪律执行）。**实施修正（UI-02 实测）**：亮色 0.55 实测仅 4.12:1（白底）/ 0.60 实测 4.46:1（选中染底），均不达 AA → 亮色最终落地 **0.63**（白底 ≈5.4、染底 ≈5.0），估算让位实测（R3 纪律） |
 | D4 | 审批 | 升级项 ①结构化参数呈现 ②焦点/aria 管理 ③键盘快捷键 ⑤pending 期间 Composer 置灰 **做**；④fail-closed 倒计时 **缓做**——必须先核实后端是否下发超时时间戳（不允许前端硬编码 300s，违反「Web UI 不维护第二套真相」不变量）；核实结果与后续决定记入 `docs/FRONTEND_ISSUES_LOG.md` |
 | D5 | 规范 | 先生成根目录 `DESIGN.md`（已生成，含 `.impeccable/design.json` sidecar）再动代码；之后每批 code-review 以 DESIGN.md 为基准之一 |
 | D6 | 交付质量 | PRD 与 tickets 必须详细到「另一个 AI 接手零歧义」（用户原话要求） |

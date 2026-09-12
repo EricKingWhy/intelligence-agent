@@ -61,7 +61,7 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | `45227dc` |
-| **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`<U-1 起点见下节>`** | 未审 | — |
+| **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`cd107a2`**（批次 0 文档 commit） | 未审 | — |
 | U-2 | UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态） | U-1 修复 commit | 未审 | — |
 | U-3 | UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词更新） | U-2 修复 commit | 未审 | — |
 
@@ -77,9 +77,9 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 
 | Ticket | 状态 | Commit | 备注 |
 | --- | --- | --- | --- |
-| 批次 0 规范固化 | done | `<batch0>` | DESIGN.md/PRD/TICKETS/tracker 登记 |
-| UI-01 | 未开始 | — | |
-| UI-02 | 未开始 | — | |
+| 批次 0 规范固化 | done | `cd107a2` | DESIGN.md/PRD/TICKETS/tracker 登记 |
+| UI-01 | done（待 U-1 批量审查） | `<u1>` | 审批卡重塑：结构化参数+diff 复用+焦点/aria+快捷键+composer 锁定+材质违例修复 |
+| UI-02 | done（待 U-1 批量审查） | `<u1>` | token 三改（暗 tertiary 0.52 / 亮 **0.63 实测修正**）+28 处 10px 升档+tl-type 去 accent+对比度回归锁 |
 | UI-03 | 未开始 | — | |
 | UI-04 | 未开始 | — | |
 | UI-05 | 未开始 | — | |
