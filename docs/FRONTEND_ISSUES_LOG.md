@@ -1454,3 +1454,30 @@ section，所以父/子两条路径一致（`test_apply_persona_matches_registry
 T6 加 tool guidance（order 2000）时**无需改 `apply_persona`**：它包裹的是**已组装完**
 的 profile 文本，guidance 已含在 base 里，顺序天然正确。§4.5 的名称与三参签名已过期。
 **归属：文档**。
+
+## 第十轮（2026-09-12）：Memory 生命周期（#156 MEM-1）期间的后端观察（自主 SDD 批次）
+
+### OBS-10.1 【后端·既有 flaky 升级为"本机确定性失败"·已确认与本票无关】OBS-9.3 那条用例
+
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it` 本轮从
+"约 40% 命中率的 flaky"变成**本机 3/3 确定性失败**（隔离跑、整文件跑都失败；10s 上下）。
+定位到的根因（与 OBS-9.3 的猜测不同，不是断连时序竞态）：
+
+1. 失败断言是 `_DisconnectingASGI` 的 `"app 未在 5s 内响应 disconnect"`；
+2. 抓到的 traceback 停在一个 **TLS 读**上（`anyio/streams/tls.py` → `_ssl_object.read`），
+   而该 await 属于 `POST /api/sessions` 的**端点处理路径**（`starlette/routing.py` 的
+   `dependant.call` 之下），即请求路径里真的有外部 HTTPS 调用；
+3. 该外部调用来自 `.env` 里启用的 capability 装配（本机 `CAPABILITIES` 含 `memory`，
+   provider `builtin`）→ 首次装配会 `MilvusVectorStore.initialize()` 真连 Zilliz；
+4. 实测本机冷启动成本：**Milvus 冷 connect 2.01s**（热 0.29s）＋ **langmem 冷 import 1.32s**，
+   再加会话创建与其余装配，冷路径突破该用例 **5s** 的预算。
+
+**不是本票引入**（用 stash 证明）：把 #156 的全部工作区改动 `git stash` 掉、在**同一个
+commit（f70ebe7）**上复跑，该用例**同样失败**；而该 commit 今天早些时候的全量跑是绿的 —
+即失败随**机器/网络负载**漂移，不由本票代码决定。本票 diff 只在 `memory/` + 测试 + ADR。
+
+**本轮不修**（§8 Scope Lock：scope 外问题只报告）。若后续修，按 OBS-9.3 的原判断**不要
+放宽超时**，正确方向是让计时块不再包含冷装配：在计时块**之前**预热 capability 装配
+（只读探针或显式 `await app.state...initialize()`），或让该用例显式密封 `CAPABILITIES`
+（本仓 `tests/conftest.py` 只清洗 Settings 的**环境变量**，`.env` 文件仍会被 `Settings()`
+读到——这是同一根因的另一条已知路径）。**归属：后端（测试稳定性 / 装配期外部依赖）**。

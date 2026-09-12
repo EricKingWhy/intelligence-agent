@@ -903,3 +903,68 @@ in-flight 合并（写后 `refetch` 有意绕过合并）；拖拽落点只在�
    后端 `/approve` 返回 200 且决策落库、工具如实 failed，但 UI 卡片未在 10s 内翻到「已拒绝」；
    判断为真实模型在同一 run 内**再次请求审批**导致定位到新的 pending 卡片。与本票 diff 无关
    （未触碰 `ApprovalCard` / `postApproval` / 投影），门禁内 `n-approval-card.spec.ts` 全绿。
+
+---
+
+## 16. #156（MEM-1）记忆生命周期契约与机制 —— 纯后端，无前端改动
+
+**提交**（均在本 worktree 的 `feat/backend`，未 push）：`61abcb6` 实现 → `aa775d8` review 一轮 →
+`f70ebe7` review 二轮 → `fad0e3c` review 三轮。ADR：`docs/adr/0026-memory-lifecycle-hard-delete-outbox-operations.md`（新）。
+
+### 16.1 集成分歧点：**本票会改已存在的 `memory.db` 磁盘 schema**
+
+`memory_outbox` 从 `(memory_id, revision)` 升到 `(memory_id, revision, operation, tenant_id, user_id, scope, namespace)`。
+升级发生在 `SqliteMemoryRecordStore.initialize()`（装配期，无需人工迁移脚本）：
+逐列补缺（SQLite 的 DDL 不参与驱动事务，所以判据是"列缺不缺 + 路由列有没有空值"，**可重入**）、
+从 `memory_records` 回填路由事实、**不可路由的孤儿行丢弃并带 id 告警**（老库里若留下这类行，日志里会看到
+`Dropped N unroutable legacy memory outbox row(s)`——这是预期行为，不是错误）。
+`operation` 的 CHECK 只在**本次补列**时装上（SQLite 不能给既有列追加约束）；无 CHECK 的老库靠代码自愈兜底。
+
+**集成时若已有开发库**：直接启动即可（自动迁移）。若要复现"零迁移"路径，删掉本地 `memory.db` 让它重建。
+**没有任何 workspace / SessionEvent 变更**（不变量 #16/#22：记忆是 Capability，不进会话真相）。
+
+### 16.2 契约变化（都被契约测试与三个 fake 同步锁住）
+
+- `MemoryCapability` 新增 `update(memory_id, scope, content, metadata) -> str`（**按 id 覆盖写 = upsert by id**：
+  id 不存在即新建；"该不该更新、更新哪一条"是 #158 的策略，本层只给机制）与 `forget(memory_id) -> bool`（**硬删**：
+  id 不存在 → 幂等 `False`；跨 namespace → `PermissionError`；SESSION 绑定不符 → `PermissionError`，无绑定 → `ValueError`，
+  且**仅当这条记忆确实存在时**才做归属/绑定校验）。
+- `MemoryRecordStore` 新增 `delete(memory_id, identity) -> bool`：同一 `BEGIN IMMEDIATE` 事务里"摘记录行 + 写一条删除意图"。
+- `VectorIndexStore` 协议加 `delete` 与 `get`（`get` 是"无残留"的验收入口；`search` 只能证明检索不到）。
+- **并发语义（写进 `record_store.py` 模块 docstring）**：内容在 namespace 内 last-write-wins；outbox 的 `revision` 是
+  **索引同步的乐观令牌**（ack 只清它同步的那个 revision，陈旧 ack 吞不掉新版本）；**刻意不加** `updated_at`/`version`。
+- **outbox = 每个 id 一行的"索引期望状态"**（不是事件日志）：要读待同步变更请用 `pending()`/`acknowledge()`，
+  不要假设 outbox 里能重放历史。
+
+### 16.3 验收证据（都在本 worktree 可复跑）
+
+- **真机（真 Zilliz + 真 embedding + 真 count）22/22 全绿**：`.scratch/run_forget_gate.py`（一次性脚本，**不入库**）。
+  要点：`forget` 前后**真实 count 1 → 0**、对照组恒 1（证明 filter 与清理范围正确）、`vectors.get` → `None`、
+  重复 forget 幂等；**SESSION scope 单独一组**（另一条带 `session_id` 的路由）：跨 session 不可见、删除被
+  `PermissionError` 拒绝且被拒的删除没改动任何东西。
+  *踩坑记录*：真实向量检索返回 `limit` 个最近邻、**没有相似度下限**，"命中"只能按 id 成员断言。
+- **integration 用例**（默认 deselected，`-m integration` 且 `.env` 指向 `memory_gate_test` 才跑）：
+  `tests/integration/test_phase6_memory_e2e.py::test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_residue`
+  （USER + SESSION 两段；判定残留用 `query(output_fields=["count(*)"])`，**不用** `get_collection_stats`）。
+- **变异验证 15/15 KILLED**（`.scratch/mutate156.py`，逐字节 sha256 还原）：含"pending 退回 JOIN 驱动"、
+  "delete 不记意图"、"ack 丢 revision"、"迁移哨兵回退"、"脏 operation 不自愈"、"自愈方向翻回删除"。
+- **门禁**：`ruff check src/ tests/` clean；`tests/memory` 128 passed；全量 pytest **2003 passed / 1 failed**。
+  那 1 failed 是**既有、与本票无关**的 `tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`
+  ——已用 `git stash` 把本票全部改动拿掉、在**同一 commit** 上复现同样失败；根因是该用例 5s 预算覆盖了
+  `/api/sessions` 的冷路径（真实 Milvus 冷 connect 实测 2.01s + langmem 冷 import 实测 1.32s + 其余装配），
+  详见 `docs/FRONTEND_ISSUES_LOG.md` **OBS-10.1**。**集成方跑全量前请知道这一条**：它在本机是确定性失败，
+  与本票 diff 无关；建议按 OBS-10.1 的方向（计时块外预热 / 密封 `CAPABILITIES`）另行处理，**不要放宽超时**。
+
+### 16.4 本票**未做**（已按 §8 Scope Lock 报告，未顺手改）
+
+1. LangMem 的 update/delete **仍未解禁**（`actions_permitted=("create",)` / `enable_deletes=False` 原样）——那是 #157。
+2. 冲突消解策略（retrieve-before-write）——#158；模型工具与用户 API——#159；前端记忆 UI——#160。
+3. `metadata`/`namespace` 列若被**带外**写坏，`json.loads` 会抛出 `pending()` 而被 relay 当"outbox 不可用"咽掉
+   （outbox 保留、`indexed=FALSE`、向量未动 → **不是静默丢失**；需带外破坏 `NOT NULL` 列才触发）。可选加固，未改。
+4. 既有 CORS `*` 洞（#154 已登记为独立票候选）、窄屏折叠轨、`POST /api/sessions` 单段 workspace 三块仍未动。
+
+### 16.5 下一张
+
+#157（MEM-2 解禁 LangMem 的 update/delete）——**前置已完成**：`LangMemMemoryCapability` 的 `update`/`forget` 现在直写权威记录，
+#157 要做的是把上游 `manage_memory` 的 `actions_permitted`/`enable_deletes` 打开、经 `base_store_adapter` 把 `PutOp(value=None)` 映射到
+`MemoryRecordStore.delete`，并保证"模型发起删除"仍走同一条 outbox/relay 路径（不得绕过）。
