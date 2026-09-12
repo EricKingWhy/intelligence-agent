@@ -36,13 +36,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
+from agent_harness.sandbox.paths import is_absolute_path
 from agent_harness.session.errors import SessionServiceError
 from agent_harness.session.projects import ProjectService
 from agent_harness.web.domain_errors import http_error, workspace_http_error
@@ -90,8 +90,10 @@ def _require_absolute_path(value: str) -> str:
         raise ValueError("path must not be blank")
     if "\x00" in value:
         raise ValueError("path must not contain NUL")
-    # 与 `_validate_workspace_name` 同一手法：PureWindowsPath 让盘符/根判定在 POSIX 上也生效。
-    if not PureWindowsPath(value).is_absolute():
+    # 平台分支的绝对形态判定收在 `sandbox.paths.is_absolute_path`（#170 批次抽出）：
+    # 此处原先写 `PureWindowsPath(value).is_absolute()`，在 POSIX 上会把合法绝对路径
+    # （`/home/x`，无 drive → False）一律拒掉；Windows 口径逐字不变（仍要求盘符 + 根）。
+    if not is_absolute_path(value):
         raise ValueError("path must be an absolute path")
     return value
 

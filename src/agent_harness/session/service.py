@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
@@ -35,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from agent_harness.assembly import build_runtime
-from agent_harness.sandbox.paths import canonical_workspace_path
+from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
 from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
     InteractiveCallbackHolder as _InteractiveCallbackHolder,
@@ -1002,19 +1003,33 @@ class SessionService:
         顺序即契约（PRD §4.1 第 2–4 行）：绝对形态 → 存在 → 是目录。绝对形态必须
         在 `realpath` **之前**判：`os.path.realpath("relative/dir")` 会按**进程当前
         工作目录**解析，把一次用户笔误变成"会话落在服务器启动目录"的静默锚定
-        （与 `web/projects.py::_require_absolute_path` 同一类防护）。
+        （与 `web/projects.py::_require_absolute_path` 同一类防护，共用
+        `sandbox.paths.is_absolute_path`——平台分支只在这里定义一次）。
 
-        存在性检查用 `os.path.exists` 而不是 `Path.exists`，与 `realpath` 的字符串
-        形态对齐（Windows 大小写/分隔符归一后仍指向同一路径）；**不代创建**——路径
-        不存在是用户的输入错误，不是"帮他把目录建出来"的信号（只有 `workspace`
-        名字那条路才由 Harness 创建目录）。
+        形态判定之后用 `os.stat` 而不是 `os.path.exists` / `isdir`：后两者把
+        `PermissionError` 之类**吞成 False**，于是一个"存在但读不到"的目录会被报成
+        "目录不存在"（不诚实的 4xx 文案）；`os.stat` 让每种 errno 走到自己的分支。
+        **不代创建**——路径不存在是用户的输入错误，不是"帮他把目录建出来"的信号
+        （只有 `workspace` 名字那条路才由 Harness 创建目录）。
         """
-        if not PureWindowsPath(cwd).is_absolute():
+        if not is_absolute_path(cwd):
             raise WorkspacePathInvalid(f"cwd 必须是绝对路径：{cwd!r}")
+        if "\x00" in cwd:
+            # 必须在 realpath 之前挡：POSIX 的 `realpath` 遇到 NUL 抛 `ValueError`
+            # （不是 OSError），会穿透到 500。`_require_absolute_path` 早已有这道闸。
+            raise WorkspacePathInvalid(f"cwd 含非法字符（NUL）：{cwd!r}")
         canonical = canonical_workspace_path(cwd)
-        if not os.path.exists(canonical):
-            raise WorkspacePathInvalid(f"目录不存在：{canonical}")
-        if not os.path.isdir(canonical):
+        try:
+            mode = os.stat(canonical).st_mode
+        except FileNotFoundError as error:
+            raise WorkspacePathInvalid(f"目录不存在：{canonical}") from error
+        except PermissionError as error:
+            raise WorkspacePathInvalid(f"无权限访问：{canonical}") from error
+        except OSError as error:
+            # 裸 OSError：非法字符 / 超长路径等（EINVAL / ENAMETOOLONG）。作者可控的
+            # 路径换来 500 不诚实——这类 errno 本身就是"你给的路径不可用"。
+            raise WorkspacePathInvalid(f"cwd 路径不可用：{canonical}") from error
+        if not stat.S_ISDIR(mode):
             raise WorkspacePathInvalid(f"不是目录：{canonical}")
         return Path(canonical)
 

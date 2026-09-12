@@ -86,6 +86,9 @@ def test_lists_only_direct_subdirectories_sorted(tmp_path: Path) -> None:
     assert Path(body["parent"]) == base.resolve().parent
     assert [e["name"] for e in body["entries"]] == ["Alpha", "beta", "zeta"]
     assert all(Path(e["path"]).is_dir() for e in body["entries"])
+    # 条目 path = 父目录 + 名字**拼出**（不是 realpath 展开，见 AC6）
+    for entry in body["entries"]:
+        assert entry["path"] == os.path.join(str(base.resolve()), entry["name"])
     assert body["truncated"] is False
 
 
@@ -98,6 +101,19 @@ def test_truncates_and_flags_when_over_limit(tmp_path: Path, monkeypatch) -> Non
 
     body = _get(client, str(base))
     assert body["truncated"] is True
+    assert [e["name"] for e in body["entries"]] == ["d1", "d2"]
+
+
+def test_exactly_at_the_limit_is_not_truncated(tmp_path: Path, monkeypatch) -> None:
+    """边界锁：`truncated` 是 `> 上限`，恰好等于上限不算截断。"""
+    client = _client(tmp_path)
+    base = tmp_path / "exact"
+    base.mkdir()
+    _mkdirs(base, "d1", "d2")
+    monkeypatch.setattr(host_dirs, "MAX_ENTRIES", 2)
+
+    body = _get(client, str(base))
+    assert body["truncated"] is False
     assert [e["name"] for e in body["entries"]] == ["d1", "d2"]
 
 
@@ -149,6 +165,9 @@ def test_symlinked_directory_is_listed_once_without_expansion(tmp_path: Path) ->
 
     body = _get(client, str(base))
     assert [e["name"] for e in body["entries"]] == ["link"]
+    # AC6：条目 path 是"父目录 + 条目名"拼出的**链接本身**，不是 realpath 后的目标
+    assert body["entries"][0]["path"] == os.path.join(str(base.resolve()), "link")
+    assert body["entries"][0]["path"] != str(target.resolve())
 
     inside = _get(client, str(link))
     assert [e["name"] for e in inside["entries"]] == ["inside"]
@@ -174,6 +193,31 @@ def test_error_matrix(tmp_path: Path) -> None:
     resp = client.get("/api/host/dirs", params={"path": str(a_file)})
     assert resp.status_code == 422, resp.text
     assert resp.json()["detail"] == f"不是目录：{os.path.realpath(a_file)}"
+
+
+def test_nul_path_is_422_not_500(tmp_path: Path) -> None:
+    """含 NUL 的路径必须在 realpath 之前挡住（POSIX 的 realpath 对 NUL 抛 ValueError）。"""
+    client = _client(tmp_path)
+    nul = f"{tmp_path}{os.sep}x\x00y"
+    resp = client.get("/api/host/dirs", params={"path": nul})
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == "path 含非法字符（NUL）"
+
+
+def test_missing_directory_race_is_404_not_500(tmp_path: Path, monkeypatch) -> None:
+    """TOCTOU：检查通过后目录被删 → `listdir` 抛 FileNotFoundError，也必须走 404。
+
+    只抓 `PermissionError` 的话这类 errno 会冒成 500，与本端点"不冒 500"的契约冲突。
+    """
+    client = _client(tmp_path)
+
+    def boom(_path: str) -> list[str]:
+        raise FileNotFoundError(2, "gone")
+
+    monkeypatch.setattr(host_dirs.os, "listdir", boom)
+    resp = client.get("/api/host/dirs", params={"path": str(tmp_path)})
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == f"目录不存在：{os.path.realpath(tmp_path)}"
 
 
 def test_permission_error_is_403_not_500(tmp_path: Path, monkeypatch) -> None:

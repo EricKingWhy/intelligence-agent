@@ -415,6 +415,33 @@ class TestLedger:
         headers.add("legacy", None)
         assert await index.attach_session("legacy") is None
 
+    async def test_attach_matching_keeps_members_with_unreadable_header(
+        self, tmp_path: Path
+    ) -> None:
+        """#169 批次审查 P2：**暂时读不到** header 的既有成员不能被顺手剪掉。
+
+        账本位置一旦丢了就再也回不来（`_visible_ids` 只看账本）——会话会静默永久变成
+        Ungrouped。AC6 只要求"缺 header 的候选**本次**不算成员"，不是"除名"。
+        """
+        headers = _FakeHeaders()
+        index = _index(tmp_path, headers)
+        await index.initialize()
+        project = _project(tmp_path, "proj")
+        workspace = await index.create(project)
+        for sid in ("s1", "s2"):
+            headers.add(sid, _canon(project))
+            await index.attach_session(sid)
+
+        headers.add("s3", _canon(project))
+        headers.add("s4", _canon(project))
+        headers.unreadable.add("s2")  # 模拟日志被占用：这次读不到
+
+        adopted = await index.attach_matching_sessions(workspace.id)
+        assert adopted == 2, "只该归入 s3/s4；s2 这次读不到，不算成员也不算新归入"
+
+        headers.unreadable.discard("s2")  # 恢复可读
+        assert set(index.get(workspace.id).session_ids) == {"s1", "s2", "s3", "s4"}
+
     async def test_membership_requires_matching_header_cwd(self, tmp_path: Path) -> None:
         """AC6：账本有 id 但 header cwd 不匹配 → **永不返回**。"""
         headers = _FakeHeaders()

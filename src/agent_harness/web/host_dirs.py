@@ -19,15 +19,15 @@ Web UI 的「目录选择器」绕不开一个平台事实：浏览器拿不到�
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Callable
-from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING
 
 import anyio
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from agent_harness.sandbox.paths import canonical_workspace_path
+from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
 from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
@@ -100,36 +100,55 @@ def _roots_listing() -> DirListing:
                       entries=_sorted(ROOTS_PROVIDER()))
 
 
+def _os_error(canonical: str, error: OSError) -> HTTPException:
+    """文件系统 errno → HTTP（**每个 errno 走自己的分支**，绝不冒 500）。
+
+    与 `web/domain_errors._WORKSPACE_ERROR_STATUS` 同一口径（PermissionError 403 /
+    FileNotFoundError 404 / 其余 OSError 422），只是 detail 换成 PRD §4.4 的中文文案。
+    """
+    if isinstance(error, FileNotFoundError):
+        return HTTPException(status_code=404, detail=f"目录不存在：{canonical}")
+    if isinstance(error, PermissionError):
+        # 明确 403：**不**降级成空列表——"看不见"与"这里没有子目录"必须可区分。
+        return HTTPException(status_code=403, detail=f"无权限访问：{canonical}")
+    if isinstance(error, NotADirectoryError):
+        return HTTPException(status_code=422, detail=f"不是目录：{canonical}")
+    return HTTPException(status_code=422, detail=f"路径不可用：{canonical}")
+
+
 def _directory_listing(path: str) -> DirListing:
     """给定目录的一层列举（同步 I/O；由 handler 卸载到 worker 线程）。"""
-    if not PureWindowsPath(path).is_absolute():
+    if not is_absolute_path(path):
         # 与 `POST /api/projects` 的 `_require_absolute_path` 同款：必须在 realpath
         # **之前**挡住形态——`realpath(".")` 会解析成进程当前工作目录，把一次笔误
-        # 变成"列举服务器碰巧启动的目录"。
+        # 变成"列举服务器碰巧启动的目录"。平台分支见 `sandbox.paths.is_absolute_path`。
         raise HTTPException(status_code=422, detail="path 必须是绝对路径")
+    if "\x00" in path:
+        # POSIX 的 realpath 遇 NUL 抛 ValueError（不是 OSError）→ 会穿透成 500。
+        raise HTTPException(status_code=422, detail="path 含非法字符（NUL）")
     canonical = canonical_workspace_path(path)
-    if not os.path.exists(canonical):
-        raise HTTPException(status_code=404, detail=f"目录不存在：{canonical}")
-    if not os.path.isdir(canonical):
+    try:
+        # `os.stat` 而不是 `os.path.exists`/`isdir`：后两者把 PermissionError 吞成
+        # False，会把"存在但读不到"报成"目录不存在"（也与 ADR-0028"不降级"冲突）。
+        mode = os.stat(canonical).st_mode
+    except OSError as error:
+        raise _os_error(canonical, error) from error
+    if not stat.S_ISDIR(mode):
         raise HTTPException(status_code=422, detail=f"不是目录：{canonical}")
 
     try:
         names = os.listdir(canonical)
-    except PermissionError as error:
-        # 明确 403，不降级成空列表——"看不见"与"这里没有子目录"必须可区分。
-        raise HTTPException(status_code=403, detail=f"无权限访问：{canonical}") from error
+    except OSError as error:
+        # 检查与列举之间有 TOCTOU 窗口（目录被删/被换成文件/断连网络盘）。这些 errno
+        # 各有自己的状态码，不能只抓 PermissionError 让其余的冒成 500。
+        raise _os_error(canonical, error) from error
 
     entries: list[DirEntry] = []
     for name in names:
         full = os.path.join(canonical, name)
-        try:
-            # `isdir` 跟随符号链接 → 指向目录的链接照列一个条目（AC6）；
-            # 指向文件/断链的链接不是目录，不列。
-            if not os.path.isdir(full):
-                continue
-        except OSError:
-            # 单个条目 stat 失败（断链、权限、超长名）不该让整页失败：跳过它，
-            # 其余条目照常返回。
+        # `isdir` 跟随符号链接 → 指向目录的链接照列一个条目（AC6）；指向文件/断链的
+        # 链接不是目录，不列（`isdir` 自身不抛，stat 失败一律按"不是目录"处理）。
+        if not os.path.isdir(full):
             continue
         entries.append(DirEntry(name=name, path=full))
 
@@ -149,15 +168,23 @@ def register_host_dir_routes(app: FastAPI) -> None:
 
     @app.get("/api/host/dirs")
     async def list_host_dirs(
-        path: str | None = Query(default=None, max_length=4096),
+        path: str | None = Query(default=None),
         _: None = Depends(require_trusted_origin),
     ) -> DirListing:
         """列盘符根（`path` 缺省）或某个目录的**直接子目录**（只读，一层）。
 
-        错误矩阵（不冒 500）：非绝对 → 422 / 不存在 → 404 / 是文件 → 422 / 无权限 → 403。
+        错误矩阵（不冒 500）：非绝对 → 422 `path 必须是绝对路径` / 不存在 → 404
+        `目录不存在：<规范路径>` / 是文件 → 422 `不是目录：<规范路径>` / 无权限 → 403
+        `无权限访问：<规范路径>`。
+
+        `path` **不设** `max_length`：超长是 OS 层问题（ENAMETOOLONG → 422 的中文 detail），
+        交给 FastAPI 参数校验会在矩阵外多出一种 **list 形状**的 `detail`（前端要原样显示
+        detail，形状不一致等于没契约）。
         """
         if path is None:
-            return _roots_listing()
+            # 根枚举也是系统调用（3.11 无 `os.listdrives` 时是 26 次 `exists`）：同样
+            # 卸载到 worker——一个断连的映射网络盘不该挂住整个事件循环。
+            return await anyio.to_thread.run_sync(_roots_listing)
         # 目录可能很大，`listdir` 是阻塞系统调用：卸载到 worker 线程（与 #153 的列表
         # 路径同款）。`HTTPException` 从线程里抛出后照常由 FastAPI 处理。
         return await anyio.to_thread.run_sync(_directory_listing, path)

@@ -66,6 +66,23 @@ Harness 的 scratch 目录），（b）**像桌面应用那样点选目录**而�
 | 5 | `cwd` 合法 | `Path.resolve()`（realpath 语义）→ 作为会话 workspace root → **自动入组**（见下） |
 | 6 | 都缺省 | 现行为逐字节不变（`workspaces_root/<session_id>`） |
 
+**矩阵外但已实现、不静默**（B-2 批次审查补记，测试逐条钉住）：
+
+- `cwd` 为空白串（`""` / `"   "`）→ 422 `cwd 必须是绝对路径：''`（形态判定先于 `realpath`；
+  **不**当作"字段缺省"——显式传的字段必须给出明确形态错误）；
+- `cwd` 含 NUL → 422 `cwd 含非法字符（NUL）：'<原值>'`（必须在 `realpath` 之前挡：
+  POSIX 的 `realpath` 对 NUL 抛 `ValueError`，会穿透成 500）；
+- `cwd` 存在但读不到（父目录无权限）→ 422 `无权限访问：<规范路径>`；其余 OS 层非法
+  （EINVAL / ENAMETOOLONG）→ 422 `cwd 路径不可用：<规范路径>`。实现用 `os.stat` 而非
+  `os.path.exists`/`isdir`——后两者把 `PermissionError` 吞成 False，会把"读不到"报成
+  "不存在"（不诚实的 4xx）。
+
+**绝对形态判定跨平台**：三处形态闸（本端点、`POST /api/projects`、`GET /api/host/dirs`）
+共用 `sandbox/paths.py::is_absolute_path`——Windows 要求盘符 + 根（口径与既有
+`_validate_workspace_name` 逐字一致），POSIX 用 `os.path.isabs`。**不要**再用
+`PureWindowsPath(v).is_absolute()` 判本平台路径：`PureWindowsPath("/home/x")` 无 drive →
+False，会把 POSIX 上一切合法绝对路径拒掉（B-2 修掉的真实缺陷）。
+
 **自动入组（幂等）**：规范化路径若尚未注册 → `create` 进项目注册表（title = 目录末段名）；
 然后 attach 该会话（已在账本则 no-op）。两条入口（`POST /api/projects` 与"带 cwd 建会话"）
 共用同一注册/attach 机制，**不会**造出重复项目条目。
@@ -130,8 +147,15 @@ workspace-write"会造出两种语义；若将来要，另立 ADR）。默认档
   不在测试里真扫盘符。Python ≥3.12 走 `os.listdrives()`（零 I/O，避免断连网络盘挂住请求）。
 - 错误矩阵（**不许冒成 500**）：`path` 非绝对 → 422 `path 必须是绝对路径`；不存在 → 404
   `目录不存在：<规范路径>`；是文件 → 422 `不是目录：<规范路径>`；`PermissionError` → 403
-  `无权限访问：<规范路径>`（明确 403，不降级成空列表）。
-- 闸：`require_trusted_origin`（与项目/记忆端点同一份实现，不复制）。
+  `无权限访问：<规范路径>`（明确 403，不降级成空列表）。矩阵外但已实现：含 NUL → 422
+  `path 含非法字符（NUL）`；其余 OS 层非法（EINVAL / ENAMETOOLONG）→ 422 `路径不可用：<规范路径>`。
+  检查与列举之间的 TOCTOU（目录被删/换成文件）同样按 errno 走 404 / 422，**不冒 500**。
+  实现用 `os.stat`（不是 `exists`/`isdir`——它们把 PermissionError 吞成 False，
+  会把"读不到"报成"不存在"）。**不设** `max_length`：超长交给 OS errno，否则 FastAPI
+  会产出矩阵外的 **list 形状** `detail`，破坏"前端原样显示 detail"的前提。
+- 闸：`require_trusted_origin`（与项目/记忆端点同一份实现，不复制）。该闸的 403 文案
+  在本票改为「宿主侧 API（项目 / 目录列举）只接受本机来源」——它现在服务两类端点，
+  原「项目 API」对目录列举是事实错误（无测试/前端依赖该字符串，已 grep 确认）。
 - 不做：文件列举、内容读取、搜索/通配、写语义、symlink 展开（symlink 目录照列一个条目，
   进入时按真实目标解析，仍是一层列举）。
 

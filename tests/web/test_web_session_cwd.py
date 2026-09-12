@@ -140,6 +140,41 @@ def test_cwd_must_be_a_directory(tmp_path: Path) -> None:
     assert resp.json()["detail"] == f"不是目录：{os.path.realpath(a_file)}"
 
 
+def test_blank_and_nul_cwd_are_rejected_not_silently_ignored(tmp_path: Path) -> None:
+    """矩阵外的两条形态分支（PRD §4.1 末尾补记）：显式传的字段必须报错，不能当缺省。
+
+    空白 cwd 若被当成"没给"，用户会得到一个落在默认 scratch 目录的会话，而他明明
+    传了 cwd——静默忽略是最坏的一种宽容。含 NUL 的路径必须在 realpath 之前挡住：
+    POSIX 的 `realpath` 对 NUL 抛 `ValueError`（不是 OSError），会穿透成 500。
+    """
+    client = _client(tmp_path)
+
+    resp = client.post("/api/sessions", json={"task": "hi", "cwd": ""})
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == "cwd 必须是绝对路径：''"
+
+    nul = f"{tmp_path}{os.sep}x\x00y"
+    resp = client.post("/api/sessions", json={"task": "hi", "cwd": nul})
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == f"cwd 含非法字符（NUL）：{nul!r}"
+
+
+def test_cwd_is_canonicalized_to_realpath(tmp_path: Path) -> None:
+    """AC2 的规范化必须真的发生：用含 `..` 的写法请求，落盘值 = realpath（**字符串**相等）。
+
+    为什么专门这一条：只断言 `Path(x) == proj.resolve()` 是**假绿**——`Path.__eq__` 在
+    Windows 上大小写不敏感且会归一分隔符，实现即使原样存了未规范化的输入也能通过。
+    """
+    client = _client(tmp_path)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    messy = f"{proj}{os.sep}..{os.sep}proj"
+
+    session_id = _create_session(client, cwd=messy)
+
+    assert _started_cwd(client, session_id) == os.path.realpath(proj)
+
+
 # ── 合法 cwd：真实目录 + 自动入组（AC2/AC3）──
 
 
@@ -249,3 +284,23 @@ def test_register_project_counts_only_its_own_path(tmp_path: Path) -> None:
     assert resp.status_code == 200, resp.text
     assert resp.json()["sessions_attached"] == 0, "cwd 不匹配的会话不得被拉进来"
     assert _row_of(client, sid_a)["workspace"] is None
+
+
+def test_register_project_adopts_several_sessions_at_once(tmp_path: Path) -> None:
+    """N>1 的批量归入（`sessions_attached` 不只是 0/1 两个取值）。
+
+    同时锁住新进成员的**顺序口径**：与 bootstrap 的 AC14 一致，最新的排前面。
+    """
+    client = _client(tmp_path)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    sid1 = _create_session(client, cwd=str(proj))
+    sid2 = _create_session(client, cwd=str(proj))
+    client.delete(f"/api/projects/{_projects(client)[0]['id']}")
+
+    resp = client.post("/api/projects", json={"path": str(proj)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sessions_attached"] == 2
+    # 账本 = 新归入者（最新在前）+ 原有成员；两者都在，且都是这 2 个
+    assert sorted(body["session_ids"]) == sorted([sid1, sid2])

@@ -308,18 +308,39 @@ class WorkspaceIndex:
         闭环由此补齐）。未知 id → `UnknownWorkspace`（`_require`）——编程错误，不是
         用户输入错误。
 
-        幂等：已在账本里的会话不重复计入。判定基于 `_visible_ids`（成员资格过滤后的
-        成员），所以"在账本里但 header 已不匹配"的悬空候选不算成员，本次会顺势剪掉。
+        幂等：已在账本里的会话不重复计入。
+
+        **剪枝只剪"读到且明确不属于"的候选**：本方法会扫全库读 header，而 header 可能
+        暂时读不到（Windows 文件占用在本仓真实出现过，`_read_header` 有意降级为
+        `None`）。`_visible_ids` 的过滤视图无法区分"cwd 不匹配"与"这次读不到"——直接拿
+        它重写账本会把后者**永久**删掉（`_visible_ids` 只看账本，位置丢了就再也回不来，
+        会话静默变成 Ungrouped）；而 AC6 只要求"缺 header 的候选本次不算成员"。所以这
+        里自己分类：读不到 → 原样保留；读到且不匹配/内部子代理 → 剪掉（D3 的持久修剪）。
         """
         async with self._write_lock:
             self._require_initialized()
             record = self._require(workspace_id)
-            current = await anyio.to_thread.run_sync(self._visible_ids, workspace_id)
-            known = set(current)
+
+            # 第一遍：账本现有候选分类（剪"明确不属于"、留"这次读不到"）
+            kept: list[str] = []
+            visible: set[str] = set()
+            for session_id in self._ledger.get(record.id, []):
+                header = await anyio.to_thread.run_sync(self._read_header, session_id)
+                if header is None:
+                    kept.append(session_id)
+                    continue
+                if not header.cwd or header.cwd != record.path:
+                    continue
+                if _is_internal_child(header):
+                    continue
+                kept.append(session_id)
+                visible.add(session_id)
+
+            # 第二遍：全库找 cwd 匹配、当前不是成员的会话
             candidates = await anyio.to_thread.run_sync(self._headers.list_session_ids)
             adopted: list[tuple[str, str]] = []
             for session_id in candidates:
-                if session_id in known:
+                if session_id in visible:
                     continue
                 header = await anyio.to_thread.run_sync(self._read_header, session_id)
                 if header is None or not header.cwd or header.cwd != record.path:
@@ -332,8 +353,13 @@ class WorkspaceIndex:
             # 最新的排前面（与 bootstrap AC14 同一口径）：重注册后补进来的历史会话，
             # 顺序不该由文件系统枚举顺序决定。
             adopted.sort(key=lambda item: item[0], reverse=True)
+            fresh = {session_id for _, session_id in adopted}
             await self._persist_ledger(
-                record.id, [*(sid for _, sid in adopted), *current]
+                record.id,
+                [
+                    *(session_id for _, session_id in adopted),
+                    *(session_id for session_id in kept if session_id not in fresh),
+                ],
             )
             return len(adopted)
 
