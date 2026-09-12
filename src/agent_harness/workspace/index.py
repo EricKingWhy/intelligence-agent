@@ -300,6 +300,43 @@ class WorkspaceIndex:
             # `_records[id]`（新 `updated_at`），只有重新取缓存才拿到**提交后**的值。
             return await anyio.to_thread.run_sync(self.get, record.id)
 
+    async def attach_matching_sessions(self, workspace_id: str) -> int:
+        """AC5（#169）：把 header cwd 等于本项目 path 的既有会话全部归入；返回**新归入**数。
+
+        与 `bootstrap` 的分工：bootstrap 只在首次启动跑一次、会**新建**项目；本方法只
+        服务**已注册**项目（不建项目），可在每次注册时重复调用（软删除 → 重注册的
+        闭环由此补齐）。未知 id → `UnknownWorkspace`（`_require`）——编程错误，不是
+        用户输入错误。
+
+        幂等：已在账本里的会话不重复计入。判定基于 `_visible_ids`（成员资格过滤后的
+        成员），所以"在账本里但 header 已不匹配"的悬空候选不算成员，本次会顺势剪掉。
+        """
+        async with self._write_lock:
+            self._require_initialized()
+            record = self._require(workspace_id)
+            current = await anyio.to_thread.run_sync(self._visible_ids, workspace_id)
+            known = set(current)
+            candidates = await anyio.to_thread.run_sync(self._headers.list_session_ids)
+            adopted: list[tuple[str, str]] = []
+            for session_id in candidates:
+                if session_id in known:
+                    continue
+                header = await anyio.to_thread.run_sync(self._read_header, session_id)
+                if header is None or not header.cwd or header.cwd != record.path:
+                    continue
+                if _is_internal_child(header):
+                    continue
+                adopted.append((header.created_at or "", session_id))
+            if not adopted:
+                return 0
+            # 最新的排前面（与 bootstrap AC14 同一口径）：重注册后补进来的历史会话，
+            # 顺序不该由文件系统枚举顺序决定。
+            adopted.sort(key=lambda item: item[0], reverse=True)
+            await self._persist_ledger(
+                record.id, [*(sid for _, sid in adopted), *current]
+            )
+            return len(adopted)
+
     async def detach_session(self, session_id: str) -> None:
         """AC7：把会话移出账本（幂等）。不在账本上 → 无写操作（除修剪外）。
 

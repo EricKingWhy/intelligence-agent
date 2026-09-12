@@ -196,6 +196,10 @@ class CreateSessionRequest(_AmendValueValidators):
     # 无上限时一个多 MB 请求体就能写爆日志 + 撑爆 context。
     task: str = Field(min_length=1, max_length=100_000)
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
+    # ADR-0027 / #169：任意**已存在**的绝对目录，会话直接以它为操作目录（不创建、
+    # 不复制），并自动注册为项目 + 归组。与 `workspace` 互斥（同时非空 → 422）。
+    # 形态/存在性/是否目录的校验在 SessionService._resolve_cwd（领域层，与 CLI 共用）。
+    cwd: str | None = None
     max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
     # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
     # PermissionPolicy；未知值 → 422。permission_mode 决定 ToolExecutor 的 policy
@@ -1003,6 +1007,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             result = await service.create_and_launch(
                 task=req.task,
                 workspace_name=req.workspace,
+                cwd=req.cwd,
                 max_steps=req.max_steps,
                 permission_mode=permission_mode,
                 permission_mode_explicit=permission_mode_explicit,

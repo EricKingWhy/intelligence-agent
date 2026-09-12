@@ -94,6 +94,14 @@ workspace-write"会造出两种语义；若将来要，另立 ADR）。默认档
   3. 任务输入框（多行）+「开始任务」按钮（空任务禁用）。
 - 提交 = `POST /api/sessions { task, cwd: <项目路径>, permission_mode }` → 走既有 SSE 流接线
   （选中该会话、跟随流）。创建失败（如项目目录已被移走 → 422）时错误**留在确认面**可重试。
+- **坑点（默认档必须不发 `permission_mode`）**：后端语义是"显式传了非 DANGER 档 → 切交互式
+  审批"（`service.create_and_launch` 的 `permission_mode_explicit` 判定 + `session/approval.py`
+  三分支；真机实测：不传该字段 → 工具直接执行，`tool/result` 出现在流里无需审批）。所以
+  确认面必须：用户**留在默认档**时 payload **不含** `permission_mode`（= 默认
+  workspace-write + auto-approve）；只有用户主动改档才发该字段（改档 = 要逐次审批，这正是
+  交互式的意义）。既有 `web/src/lib/api.ts` 的参数映射已是这个形状
+  （`p.permission_mode ? ['permission_mode', p.permission_mode] : null`），照用即可——
+  **别为了"显式"把默认档也塞进 payload**，那会让每个工具调用都弹审批卡。
 - 项目 `status=missing-dir` 时入口照常出现，点击后由后端 422 明示（前端不预判）。
 - 未分组会话既有的「加入项目…」保留不动（历史会话仍靠它归组）。
 

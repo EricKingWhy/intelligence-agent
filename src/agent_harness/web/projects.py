@@ -168,6 +168,18 @@ class ReorderSessionRequest(BaseModel):
     before: str | None = None
 
 
+class ProjectCreated(Project):
+    """`POST /api/projects` 的响应 = 项目 + 本次新归入的会话数（AC5 / #169）。
+
+    为什么要多这个字段：注册是"确保这个目录下的会话都归这儿"的动作，调用方需要知道
+    它**实际**改动了什么（软删除 → 重注册后补回 N 个；幂等重放为 0），而不是自己去
+    比对注册前后的账本——那正是"前端猜后端语义"。
+    """
+
+    #: 本次调用新 attach 进来的会话数（幂等重放 → 0）。
+    sessions_attached: int
+
+
 class ProjectDeleted(BaseModel):
     """`DELETE /api/projects/{id}` 的响应：**软删除**结果。
 
@@ -223,14 +235,18 @@ def register_project_routes(app: FastAPI) -> None:
     @app.post("/api/projects")
     async def create_project(
         req: CreateProjectRequest, _: None = Depends(require_trusted_origin)
-    ) -> Project:
-        """注册**已存在**的目录为项目。
+    ) -> ProjectCreated:
+        """注册**已存在**的目录为项目，并归入 cwd 匹配的既有会话（AC5 / #169）。
 
         同一规范路径 → 返回既有实体（不重建、不重复入序，AC5）；路径不存在 → 404、
         存在但不是目录 → 422（AC2/AC3）；两种情况都**不**在磁盘上留下痕迹。
+        响应里的 `sessions_attached` = 本次**新**归入的会话数（幂等重放 → 0）。
         """
         async with _translated():
-            return _project(await _service().create(req.path, req.title))
+            project, attached = await _service().create(req.path, req.title)
+        return ProjectCreated(
+            **_project(project).model_dump(), sessions_attached=attached
+        )
 
     @app.get("/api/projects")
     async def list_projects(_: None = Depends(require_trusted_origin)) -> list[Project]:

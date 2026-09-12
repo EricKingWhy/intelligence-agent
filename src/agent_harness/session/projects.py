@@ -69,14 +69,23 @@ class ProjectService:
 
     # —— 端点背后的事实 ——
 
-    async def create(self, path: str, title: str | None = None) -> Workspace:
-        """注册**已存在**的目录为项目（同一规范路径幂等）。
+    async def create(self, path: str, title: str | None = None) -> tuple[Workspace, int]:
+        """注册**已存在**的目录为项目（同一规范路径幂等），并补齐归入匹配的既有会话。
+
+        返回（项目, 本次新归入的会话数）。AC5（#169）：注册后（**含幂等命中既有项目**）
+        把所有 header cwd 等于该目录、却不在账本里的会话 attach 进来——软删除 →
+        重注册的闭环由此补齐；幂等重放时计数为 0。判定在后端做（只有它知道每个会话
+        的 cwd），前端不猜。
 
         `WorkspaceIndex.create` 原样传出 `FileNotFoundError` / `NotADirectoryError`——
         由 HTTP 层翻译（404 / 422），本层不吞。
         """
         index = await self._index()
-        return await index.create(path, title)
+        project = await index.create(path, title)
+        attached = await index.attach_matching_sessions(project.id)
+        # attach 之后重新读：`index.create` 返回的视图是 attach **之前**的成员表，
+        # 直接用它会让响应里的 session_ids 少掉刚补进来的会话。
+        return await self._read(project.id), attached
 
     async def list(self) -> list[Workspace]:
         """全部项目，**注册表顺序**（新建前插）。"""
