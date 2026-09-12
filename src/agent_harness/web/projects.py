@@ -56,7 +56,7 @@ _LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def require_trusted_origin(request: Request) -> None:
-    """项目端点的来源闸（ADR-0025 D1 的 (b)）。
+    """宿主侧端点的来源闸（ADR-0025 D1 的 (b)；ADR-0028 D2 起 `GET /api/host/dirs` 复用同一份）。
 
     只在未配置 `jwt_secret`（本地信任模式）时生效；无 `Origin` 或本机 `Origin` 放行。
     `Origin: null`（sandboxed iframe / `file://`）没有 hostname → 拒绝。
@@ -72,8 +72,8 @@ def require_trusted_origin(request: Request) -> None:
         raise HTTPException(
             status_code=403,
             detail=(
-                f"拒绝跨源访问：Origin={origin!r}。项目 API 只接受本机来源"
-                "（配置 JWT_SECRET 后由认证层接管）。"
+                f"拒绝跨源访问：Origin={origin!r}。宿主侧 API（项目 / 目录列举）"
+                "只接受本机来源（配置 JWT_SECRET 后由认证层接管）。"
             ),
         )
 

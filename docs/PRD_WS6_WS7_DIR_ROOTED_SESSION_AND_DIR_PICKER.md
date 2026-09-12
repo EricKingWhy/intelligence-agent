@@ -111,19 +111,26 @@ workspace-write"会造出两种语义；若将来要，另立 ADR）。默认档
 
 ```json
 {
-  "path": "D:\\data",          // 规范化后的当前目录；path 缺省时为根 pseudo 条目
-  "parent": "D:\\",            // 上一级；根为 null
+  "path": "D:\\data",          // 规范化后的当前目录；根模式（path 缺省）时为 null
+  "parent": "D:\\",            // 上一级；盘根（D:\ 或 /）与根模式为 null
   "truncated": false,          // 子目录数超过 500 时 true，且 entries 被截到 500
   "entries": [ { "name": "repos", "path": "D:\\data\\repos" } ]   // 仅目录，按 name 排序
 }
 ```
 
+- **根模式**（`path` 缺省）→ `path: null`、`parent: null`，`entries` = 盘符/根列表；
+  每个根条目的 `name` 与 `path` 都是根路径本身（Windows `"C:\\"`、POSIX `"/"`）。
+  前端据 `path === null` 判定"当前在根"，据此禁用「向上」。
+- 排序口径（根模式与子目录列举**同一套**）：按 `name` 的大小写不敏感序（Windows 惯例），
+  同键再按原名兜底 → 结果跨平台确定；`truncated` 截的是**排序后**的前缀。
+- 单个条目的 `path` = 父目录 + 名字拼出，**不做 realpath 展开**（symlink 目录照列）；
+  只有请求参数 `path` 本身会被规范化（realpath）。
 - `path` 缺省 → 列**根**：Windows = 存在的盘符根（`C:\`…，大小写与系统一致），POSIX = `["/"]`；
-  此时 `parent` 为 `null`。根枚举做成**可注入 provider**（生产实现 + 测试假根），不在测试里
-  真扫盘符。
+  根枚举做成**可注入 provider**（`web/host_dirs.py::ROOTS_PROVIDER`，生产实现 + 测试假根），
+  不在测试里真扫盘符。Python ≥3.12 走 `os.listdrives()`（零 I/O，避免断连网络盘挂住请求）。
 - 错误矩阵（**不许冒成 500**）：`path` 非绝对 → 422 `path 必须是绝对路径`；不存在 → 404
   `目录不存在：<规范路径>`；是文件 → 422 `不是目录：<规范路径>`；`PermissionError` → 403
-  `无权限访问：<规范路径>`。
+  `无权限访问：<规范路径>`（明确 403，不降级成空列表）。
 - 闸：`require_trusted_origin`（与项目/记忆端点同一份实现，不复制）。
 - 不做：文件列举、内容读取、搜索/通配、写语义、symlink 展开（symlink 目录照列一个条目，
   进入时按真实目标解析，仍是一层列举）。

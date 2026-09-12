@@ -712,6 +712,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_memory_routes(app)
 
+    # WS-7 / #170 宿主只读目录列举（目录选择器的唯一可行路径，ADR-0028）
+    from agent_harness.web.host_dirs import register_host_dir_routes
+
+    register_host_dir_routes(app)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
