@@ -130,6 +130,16 @@ ADR-0008（Memory Capability 架构）、ADR-0009（Memory namespace 与 scope �
 1. **硬删不可恢复**：误删不可逆（无墓碑、无回收站）。这是用户明确选择，但它把"确认/审批"
    的责任推给了入口层（#159 的模型工具必须是 DANGER + 审批；用户 API 需要显式确认）。
    本 ADR 记录这条依赖：**谁都不许在无确认路径上直接调 `forget`**。
+
+   > **2026-09-12 重新裁决（#157 交付后）**：上面这条"无确认路径不得删除"被放宽在**一个受控
+   > 例外**上——LangMem 的固化/整合路径（`writeback` → manager）现在会自主硬删。放宽的理由与
+   > 边界：**(a)** manager 只能删**它自己检索回来的 id**，trustcall 的校验器会直接拒掉不在本次
+   > 检索集合里的文档 id（真机证据：指名去删别人的 doc id 时校验报错并列出可用 id）；**(b)** 这些
+   > id 必然落在调用者自己的 namespace 内，adapter 的 `authorize` 再拒一次跨归属删除（真机证据：
+   > 同租户跨 user 与跨 tenant 两种形状都被 `PermissionError` 拒掉，对方记录与索引都原样在）；
+   > **(c)** 触发场景是"整合刚学到的内容时发现旧记忆过时"，属于非交互的后台路径，没有可询问的对象。
+   > 因此**面向用户的显式遗忘入口仍然必须有确认**（#159 的 DANGER + 审批、#160 的 UI 二次确认）——
+   > 被放宽的只是"后台整合路径"，不是"用户说忘就忘"。
 2. 删除变更没有记录行 → `indexed` 标志对删除无意义（ack 时的 `UPDATE` 命中 0 行，幂等）。
 3. 迁移列可空使新旧库的磁盘 schema 不完全一致（见 D5）。
 4. 删除的传播是异步的：`forget` 返回后短时间内检索仍可能命中（直到 relay 跑完一轮）。
@@ -139,6 +149,7 @@ ADR-0008（Memory Capability 架构）、ADR-0009（Memory namespace 与 scope �
 
 ## 非目标
 
-不解禁 LangMem 的 `update` / `delete`（#157）；不做 retrieve-before-write / 冲突消解策略
-（#158）；不做模型工具与用户 API（#159 / #160）；不改 scope 集合；不新增任何记忆相关的
-`SessionEvent`。
+不解禁 LangMem 的 `update` / `delete`（该非目标已由 #157 于 2026-09-12 交付：adapter 把
+`PutOp(value=None)` 映射为硬删、manager 打开 `enable_deletes`，见 Consequences ① 的重新裁决）；
+不做 retrieve-before-write / 冲突消解策略（#158）；不做模型工具与用户 API（#159 / #160）；
+不改 scope 集合；不新增任何记忆相关的 `SessionEvent`。

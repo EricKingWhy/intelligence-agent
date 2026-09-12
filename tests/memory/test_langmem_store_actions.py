@@ -17,13 +17,12 @@ Remove 真的落到记录库与向量索引上。
 """
 
 import logging
-import uuid
 
 import pytest
 import pytest_asyncio
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from langgraph.store.base import PutOp
+from pydantic import Field
 
 from agent_harness.identity import (
     IdentityContext,
@@ -40,6 +39,7 @@ from agent_harness.memory.types import (
     MemoryNamespace,
     MemoryScope,
 )
+from tests.langmem_doubles import AlwaysHitVectorStore, ScriptedChatModel, stable_doc_id
 
 ALICE = IdentityContext("acme", "alice", ["user", "session"])
 BOB = IdentityContext("acme", "bob", ["user"])
@@ -61,52 +61,12 @@ def namespace_of(identity: IdentityContext = ALICE) -> tuple[str, ...]:
 
 
 def stable_id(memory_id: str, identity: IdentityContext = ALICE) -> str:
-    """LangMem 认的文档 id（`MemoryStoreManager._stable_id` 的同一公式）。
-
-    manager 只允许删"它自己检索回来的那些 id"，检索结果以这个 uuid5 为键，
-    所以脚本化 `RemoveDoc` / `PatchDoc` 时必须给出同一个值。
-    """
-    return uuid.uuid5(uuid.NAMESPACE_DNS, str((*namespace_of(identity), memory_id))).hex
+    """LangMem 认的文档 id（`MemoryStoreManager._stable_id` 的同一公式，见共享模块）。"""
+    return stable_doc_id(memory_id, namespace_of(identity))
 
 
-class AlwaysHitVectorStore(FakeVectorStore):
-    """`search` 命中本 namespace 的**全部** key（真实 embedding 语义匹配的替身）。
-
-    manager 内部的检索查询是**对话窗口文本**（`get_dialated_windows`），真实 embedding 下它与既有
-    记忆是语义匹配；`FakeVectorStore` 是单向字面匹配（query ⊆ content），长窗口查询永远命中不了短
-    记忆，会把"删除/更新链路"堵在检索那一步（而"检索得到既有记忆"正是这两条路径的前提：trustcall
-    只在 `existing` 非空时才绑定 RemoveDoc，`PatchDoc` 也只在既有文档里找得到目标）。
-    查询生成与检索策略是 #158 的范围，这里只让"检索得到"成立，其余（RemoveDoc 的 id 校验、
-    adelete/aput → adapter → 记录库）全部走真实实现。
-
-    副作用需要显式容忍：命中集合会包含"记录行已删、索引还没收敛"的 id —— 这正是 provider 删除被
-    解禁后新出现的窗口，生产代码在 adapter 的 SearchOp 与能力层的检索里都跳过这类行（见
-    `TestSearchTolerance`）。
-    """
-
-    async def search(self, query, identity, scope, limit):  # type: ignore[override]
-        if not query:
-            return []
-        namespace = MemoryNamespace.of(scope, identity).as_tuple()
-        return [(key, 1.0) for (ns, key) in self._rows if ns == namespace][: max(0, limit)]
-
-
-class ScriptedModel(FakeMessagesListChatModel):
-    """按序吐脚本化响应的假模型。
-
-    `bind_tools` 必须无副作用（trustcall 会 bind 自己的工具集，真模型换成假模型后不能真去
-    改什么），并且 `bound` 指回自身：trustcall 在"**存在既有文档**"的分支里做的是
-    `self.bound.bound.bind_tools(...)`（它假设 `bind_tools` 返回 `RunnableBinding`，
-    `.bound` 才是底层模型）——而"存在既有文档"恰恰是删除/更新路径必经的分支，
-    所以只有删除/更新用例会撞上这个形状。
-    """
-
-    def bind_tools(self, tools, **kwargs):
-        return self
-
-    @property
-    def bound(self):
-        return self
+class ScriptedModel(ScriptedChatModel):
+    """按序吐脚本化响应的假模型（trustcall 形状见 `tests.langmem_doubles`）。"""
 
 
 @pytest_asyncio.fixture
@@ -187,6 +147,24 @@ class TestPutOpShapeMapping:
             await adapter.abatch([PutOp(namespace_of(), "m1", payload("secret"), ttl=60)])
 
     @pytest.mark.asyncio
+    async def test_delete_shape_with_a_ttl_is_rejected_and_has_no_side_effect(self, rig):
+        """畸形组合 `value=None, ttl=...`（既删又过期）也必须被拒——分支顺序与文档一致。
+
+        公开 API 不可达（`supports_ttl=False` + `adelete` 传 `ttl=None`），但 `abatch` 是公开
+        方法，边界检查就该盖住整个边界：一个"先判 value 再判 ttl"的实现会把它当成普通删除静默
+        放行，于是"带 TTL 的写入一律拒绝"这条契约在**组合形状**上被绕过。
+        """
+        records, _, adapter = rig
+        await adapter.abatch([PutOp(namespace_of(), "m1", payload("secret"))])
+
+        with pytest.raises(NotImplementedError, match="TTL"):
+            await adapter.abatch([PutOp(namespace_of(), "m1", None, ttl=60)])
+
+        # 更关键的一层：被拒的畸形 op 不得已经造成副作用（那才是"静默删除"的真实伤害）。
+        assert (await records.get("m1", ALICE)).content == "secret"
+        assert [c.operation for c in await records.pending()] == [MemoryOperation.UPSERT]
+
+    @pytest.mark.asyncio
     async def test_value_at_an_existing_key_is_an_update_not_a_new_row(self, rig):
         """AC4 的 update 面（adapter 层）：同 key 覆盖 → 内容为新值、`indexed` 重置、重新入 outbox。
 
@@ -218,6 +196,22 @@ async def _langmem_capability(tmp_path, vectors, responses):
     await records.initialize()
     capability = LangMemMemoryCapability(records, vectors, ScriptedModel(responses=responses))
     return records, capability
+
+
+def _tool_name(tool) -> str:
+    if isinstance(tool, dict):  # 提取阶段会把 schema 以字典形式交给模型
+        return tool.get("function", {}).get("name") or tool.get("name") or str(tool)
+    return getattr(tool, "name", None) or getattr(tool, "__name__", str(tool))
+
+
+class ToolRecordingModel(ScriptedChatModel):
+    """额外记录每次 `bind_tools` 施加上来的工具名——两个开关改的正是这个工具面。"""
+
+    bound_tool_names: list[list[str]] = Field(default_factory=list)
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tool_names.append([_tool_name(tool) for tool in tools])
+        return self
 
 
 class TestManagerActions:
@@ -368,9 +362,91 @@ class TestManagerActions:
             identity_context_var.reset(token)
 
         changes = await records.pending()
-        assert [c.operation for c in changes] != [MemoryOperation.DELETE]
+        # 关键：**不得出现幽灵删除**。断言 `!= [DELETE]` 是假的——这条路径总会退回
+        # "照常写入"，于是 changes 里必有一个 UPSERT，该断言永远成立。
+        assert MemoryOperation.DELETE not in {c.operation for c in changes}
         # 上游此路径退回"照常写入"（fallback 到 manage 工具），记录行确实存在。
         assert len(await records.list_by_scope(MemoryScope.USER, ALICE, 10)) == 1
+
+
+class TestSwitchCombinations:
+    """AC4：`enable_inserts` / `enable_deletes` 是两个**独立**开关（上游默认都开，我们此前关了删除）。
+
+    capability 在生产上永远全开、不暴露开关，所以组合语义只能直接钉在 manager 上。
+    实测语义（先跑探针再写断言）：两个开关改的是**施加给模型的工具面**（`bind_tools`），
+    而不是写路径上的强制——把 insert 关掉之后，一个"仍然发出插入工具调用"的模型照样会被 manager
+    接受写入。所以"关掉 insert 就等于不会新增记忆"不是上游保证，不能写成断言；这里只钉两个可被
+    证伪的事实：工具面差异，以及删除行为本身。
+    """
+
+    async def _run(self, tmp_path, *, enable_inserts, enable_deletes, script):
+        """真 manager + 真 adapter + 真 trustcall：预置一条既有记忆，跑一次脚本化动作。
+
+        返回（记录库, 向量, 模型, manager 的返回值）。
+        """
+        pytest.importorskip("langmem")
+        from langmem import create_memory_store_manager
+
+        from agent_harness.memory.langmem_capability import MemoryPayload
+
+        records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+        await records.initialize()
+        vectors = AlwaysHitVectorStore()
+        adapter = SqliteMilvusBaseStore(records, vectors)
+        model = ToolRecordingModel(responses=script)
+        manager = create_memory_store_manager(
+            model, schemas=[MemoryPayload], namespace=namespace_of(), store=adapter,
+            enable_inserts=enable_inserts, enable_deletes=enable_deletes)
+        token = set_identity_context(ALICE)
+        try:
+            await records.store(entry("m1", "alice 喜欢 Python"), ALICE)
+            assert await OutboxRelay(records, vectors).flush() == 1
+            outcome = await manager.ainvoke(
+                {"messages": [{"role": "user", "content": "把过时的偏好删掉"}], "max_steps": 1})
+        finally:
+            identity_context_var.reset(token)
+        return records, vectors, model, outcome
+
+    @staticmethod
+    def _remove_existing() -> list[AIMessage]:
+        return [AIMessage(content="", tool_calls=[{
+            "name": "RemoveDoc", "args": {"json_doc_id": stable_id("m1")}, "id": "remove-one"}])]
+
+    @pytest.mark.asyncio
+    async def test_delete_survives_disabled_inserts(self, tmp_path):
+        """关掉插入不得连坐删除：`enable_inserts=False` + `enable_deletes=True` 下，
+        对既有记忆的 RemoveDoc 照常落到记录行。"""
+        records, _, model, outcome = await self._run(
+            tmp_path, enable_inserts=False, enable_deletes=True, script=self._remove_existing())
+
+        assert outcome == []  # 删除意图没有被回吐成写入
+        assert await records.list_by_scope(MemoryScope.USER, ALICE, 10) == []
+        with pytest.raises(KeyError):
+            await records.get("m1", ALICE)
+        # 工具面就是开关的作用面：提供 RemoveDoc 的那次 bind 里不再有插入工具，而删除工具仍在。
+        manage = next(names for names in model.bound_tool_names if "RemoveDoc" in names)
+        assert "MemoryPayload" not in manage
+
+    @pytest.mark.asyncio
+    async def test_disabled_deletes_turn_a_removal_into_a_no_op(self, tmp_path):
+        """反向组合：`enable_inserts=True` + `enable_deletes=False` 时，模型发出的删除请求被安全
+        忽略——既有记忆还在，且不抛异常。关掉删除既不能变成报错，也不能变成"照样删"。"""
+        records, _, model, outcome = await self._run(
+            tmp_path, enable_inserts=True, enable_deletes=False, script=self._remove_existing())
+
+        assert outcome == []
+        assert (await records.get("m1", ALICE)).content == "alice 喜欢 Python"
+        assert not any("RemoveDoc" in names for names in model.bound_tool_names)
+
+    @pytest.mark.asyncio
+    async def test_both_switches_on_offer_insert_and_delete_together(self, tmp_path):
+        """对照组（上游默认组合）：插入与删除工具出现在同一个工具面上，且删除真的生效。"""
+        records, _, model, _ = await self._run(
+            tmp_path, enable_inserts=True, enable_deletes=True, script=self._remove_existing())
+
+        manage = next(names for names in model.bound_tool_names if "RemoveDoc" in names)
+        assert "MemoryPayload" in manage
+        assert await records.list_by_scope(MemoryScope.USER, ALICE, 10) == []
 
 
 class TestSearchTolerance:

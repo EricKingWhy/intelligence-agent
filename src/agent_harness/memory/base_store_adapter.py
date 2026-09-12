@@ -45,21 +45,25 @@ class SqliteMilvusBaseStore(BaseStore):
             scope = self._scope(namespace)
             identity = get_identity_context()
             if isinstance(op, PutOp):
+                # TTL 一律先拒（含 `value=None, ttl=...` 这种既删又过期的畸形组合）：
+                # TTL（到点自动过期）是另一套语义，本票不实现，静默忽略它会承诺一个永远不会
+                # 兑现的过期。今天它在公开 API 层就被 LangGraph 拒掉（`supports_ttl=False`），
+                # 所以这里是防御性边界而非热路径——正因为它离热路径远，才要求分支顺序与
+                # 文档写的一致，而不是"恰好也不会有人这么传"。
+                if op.ttl is not None:
+                    raise NotImplementedError("Memory TTL is not enabled")
                 if op.value is None:
                     # LangGraph 的删除形状：`store.adelete(ns, key)` 等价于
                     # `PutOp(namespace, key, None)`。硬删（#156 的机制），namespace 授权与归属
                     # 校验都在 records.delete 内——provider 的删除动作碰不到别人的记忆。
                     if not await self.records.delete(op.key, identity):
-                        # 幂等，但**不得静默**（BUG-012 契约）：一次什么都没删掉的删除意图
-                        # 必须留痕，否则"模型说删了、其实什么都没发生"无法被发现。
+                        # 幂等，但**不得静默**：一次什么都没删掉的删除意图要留痕，否则
+                        # "模型说删了、其实什么都没发生"无法被发现。级别是 warning 日志而不是
+                        # `memory/degraded` 事件——后者表示"降级/失败"，幂等空操作不是失败，
+                        # 且 ADR-0026 明令记忆审计不进会话事件流。
                         logger.warning("LangMem delete for %s matched no record row", op.key)
                     results.append(None)
                     continue
-                if op.ttl is not None:
-                    # TTL（到点自动过期）是另一套语义，本票不实现：静默忽略它会承诺一个永远
-                    # 不会兑现的过期。今天它在公开 API 层就被 LangGraph 拒掉
-                    # （`supports_ttl=False`），所以这里是防御性边界而非热路径。
-                    raise NotImplementedError("Memory TTL is not enabled")
                 payload = op.value.get("content")
                 if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
                     raise TypeError("Expected structured Memory content")

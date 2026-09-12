@@ -73,8 +73,9 @@ class LangMemMemoryCapability:
         """按 id 覆盖写（#156 的**机制**）。
 
         写权威记录本身，索引由 outbox/relay 异步跟进。**刻意不**把 update 交给 LangMem
-        的 manager/工具：上游的 `actions_permitted` / `enable_deletes` 开关是 #157 的范围
-        （本票非目标），而"记录主权在项目内"意味着这条路不需要 SDK 参与。
+        的 manager/工具：上游的 update/delete 能力已在 #157 解禁，但那是"模型自己决定改哪条"
+        的路径（走 manager → adapter）；本条是**调用方指定 id** 的确定性覆盖写，
+        "记录主权在项目内"意味着它不需要 SDK 参与，也不该受模型决策影响。
         """
         entry = MemoryEntry(id=memory_id, content=content, metadata=metadata, scope=scope,
                             created_at=datetime.now(UTC).isoformat())

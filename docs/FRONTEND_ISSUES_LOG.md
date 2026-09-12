@@ -1457,10 +1457,14 @@ T6 加 tool guidance（order 2000）时**无需改 `apply_persona`**：它包裹
 
 ## 第十轮（2026-09-12）：Memory 生命周期（#156 MEM-1）期间的后端观察（自主 SDD 批次）
 
-### OBS-10.1 【后端·既有 flaky 升级为"本机确定性失败"·已确认与本票无关】OBS-9.3 那条用例
+### OBS-10.1 【后端·既有 flaky，负载相关·已确认与本票无关】OBS-9.3 那条用例
 
-`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it` 本轮从
-"约 40% 命中率的 flaky"变成**本机 3/3 确定性失败**（隔离跑、整文件跑都失败；10s 上下）。
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it` 本轮先表现为
+"约 40% 命中率的 flaky"，随后出现**本机 3/3 连续失败**（隔离跑、整文件跑都失败；10s 上下），
+再之后又回到**时好时坏**。**2026-09-12 #157 复核（同一份工作区代码连跑 3 次：pass / fail /
+pass；stash 掉全部工作区改动后在 commit `ff57700` 上跑：pass）——所以它既不是确定性失败，
+也不由本票代码决定。** 下面记录的根因与冷路径成本仍然成立，只是"确定性"这个措辞要撤回：
+它是**负载相关的间歇失败**。
 定位到的根因（与 OBS-9.3 的猜测不同，不是断连时序竞态）：
 
 1. 失败断言是 `_DisconnectingASGI` 的 `"app 未在 5s 内响应 disconnect"`；

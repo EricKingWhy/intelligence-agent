@@ -302,3 +302,145 @@ async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_res
             await relay.stop()
             await vectors.close()
             identity_context_var.reset(token)
+
+
+async def test_real_langmem_manager_delete_and_update_reach_milvus(gate_settings, tmp_path):
+    """MEM-2（#157）AC2/AC4 的真实后端验收：**上游 manager 的删除/更新**真的改到真索引。
+
+    与 #156 那条（走项目自己的 `forget`/`update` 动词）分工不同：这条验的是**上游路径**——
+    脚本化模型发 `RemoveDoc` / `PatchDoc`（真 trustcall 绑定与校验）→ 真 adapter → 真记录库 →
+    outbox/relay → 真 Milvus。只有"模型决定删哪条/改成什么"是脚本化的（真模型决策不确定，
+    脚本化才能断言）；而"检索得到既有记忆"靠**真实 embedding 语义匹配**成立——这正是删除/更新
+    路径的前提，也是 `FakeVectorStore` 的字面匹配盖不住的那一段。
+
+    隔离性用最坏形状：指名道姓去删**别人**的文档 id。两道边界都必须守住：trustcall 的校验器只
+    接受"它自己检索回来的那些 id"，adapter 还有一道 namespace 授权。
+    """
+    from langchain_core.messages import AIMessage
+    from langchain_openai import OpenAIEmbeddings
+
+    from agent_harness.identity import identity_context_var, set_identity_context
+    from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+    from agent_harness.memory.outbox_relay import OutboxRelay
+    from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
+    from agent_harness.memory.types import MemoryNamespace
+    from tests.langmem_doubles import ScriptedChatModel, stable_doc_id
+
+    if not gate_settings.embedding_api_key.get_secret_value() or not gate_settings.embedding_model:
+        pytest.skip("Real embedding model is not configured")
+
+    embeddings = OpenAIEmbeddings(
+        model=gate_settings.embedding_model, base_url=gate_settings.embedding_base_url,
+        api_key=gate_settings.embedding_api_key, check_embedding_ctx_length=False,
+        dimensions=gate_settings.embedding_dimensions, request_timeout=30, max_retries=3,
+    )
+    vectors = MilvusVectorStore(gate_settings, embeddings)
+    records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await records.initialize()
+    relay = OutboxRelay(records, vectors)
+    alice = IdentityContext("gate_langmem_" + uuid4().hex, "alice", ["user"])
+    bob = IdentityContext(alice.tenant_id, "bob", ["user"])
+    token = set_identity_context(alice)
+
+    def capability(script):
+        return LangMemMemoryCapability(records, vectors, ScriptedChatModel(responses=script))
+
+    def doc_id(memory_id: str, identity: IdentityContext) -> str:
+        return stable_doc_id(memory_id, MemoryNamespace.of(MemoryScope.USER, identity).as_tuple())
+
+    async def drain() -> None:
+        """真实 embedding 服务有瞬态失败；outbox 的保证是"失败保留、下轮重试"。"""
+        async with asyncio.timeout(240):
+            while True:
+                await relay.flush()
+                if not await records.pending():
+                    return
+                await asyncio.sleep(2)
+
+    async def real_count(memory_id: str, identity: IdentityContext) -> int:
+        expression, params = MilvusVectorStore._filter(identity, MemoryScope.USER)
+        rows = await vectors._call(
+            "query", collection_name=gate_settings.milvus_collection,
+            filter=expression + " AND memory_id == {memory}",
+            filter_params={**params, "memory": memory_id},
+            output_fields=["count(*)"], consistency_level="Strong")
+        return int(rows[0]["count(*)"])
+
+    try:
+        await vectors.initialize()
+
+        creator = capability([AIMessage(content="", tool_calls=[{
+            "name": "MemoryPayload",
+            "args": {"content": "alice 喜欢用 Python 写数据处理脚本",
+                     "metadata": {"importance": 0.7}},
+            "id": "create-target"}])])
+        target = await creator.store(MemoryScope.USER, "alice 喜欢用 Python 写数据处理脚本",
+                                     {"importance": 0.7})
+        control = await creator.store(MemoryScope.USER, "鲸鱼是生活在海洋中的哺乳动物",
+                                      {"importance": 0.1})
+        bob_token = set_identity_context(bob)
+        try:
+            bob_memory = await LangMemMemoryCapability(records, vectors).store(
+                MemoryScope.USER, "bob 的私人偏好：喜欢用 C++", {"importance": 0.5})
+        finally:
+            identity_context_var.reset(bob_token)
+        await drain()
+        assert await real_count(target, alice) == 1
+        assert await real_count(control, alice) == 1
+        assert await real_count(bob_memory, bob) == 1  # 隔离性的对照组
+
+        # 真删除（上游路径）：模型发 RemoveDoc，删的是它**检索回来**的那条 id。
+        remover = capability([AIMessage(content="", tool_calls=[{
+            "name": "RemoveDoc", "args": {"json_doc_id": doc_id(target, alice)},
+            "id": "remove-target"}])])
+        await remover.store(MemoryScope.USER, "alice 改用 Rust 重写了脚本", {"importance": 0.6})
+        await drain()
+        assert await records.pending() == []
+        with pytest.raises(KeyError):
+            await records.get(target, alice)
+        assert await vectors.get(target, alice, MemoryScope.USER) is None
+        assert await real_count(target, alice) == 0  # 真值：索引里这条已不存在
+        assert await real_count(control, alice) == 1  # 删对了那一条
+        assert target not in {hit.id for hit in await remover.search(
+            MemoryScope.USER, "Python 数据处理", 5)}
+
+        # 真更新（上游路径）：PatchDoc 落到同一个 id 上，indexed 重置后由 relay 收敛。
+        patcher = capability([AIMessage(content="", tool_calls=[{
+            "name": "PatchDoc",
+            "args": {"json_doc_id": doc_id(control, alice),
+                     "planned_edits": "把对照记忆改写为更精确的表述",
+                     "patches": [{"op": "replace", "path": "/content",
+                                  "value": "鲸鱼是生活在海洋中的哺乳动物，用肺呼吸"}]},
+            "id": "patch-control"}])])
+        await patcher.store(MemoryScope.USER, "鲸鱼用肺呼吸", {"importance": 0.1})
+        stored = await records.get(control, alice)
+        assert stored.content == "鲸鱼是生活在海洋中的哺乳动物，用肺呼吸"
+        assert stored.indexed is False  # 被改过 → 必须重新同步索引
+        await drain()
+        row = await vectors.get(control, alice, MemoryScope.USER)
+        assert row is not None and "用肺呼吸" in row["content"]
+        assert await real_count(control, alice) == 1  # 更新不是删除
+
+        # 隔离性：指名要删 bob 的文档 id —— 既碰不到记录行，也碰不到索引。
+        attacker = capability([AIMessage(content="", tool_calls=[{
+            "name": "RemoveDoc", "args": {"json_doc_id": doc_id(bob_memory, bob)},
+            "id": "remove-foreign"}])])
+        await attacker.store(MemoryScope.USER, "alice 的一次无关写入", {"importance": 0.2})
+        await drain()
+        assert (await records.get(bob_memory, bob)).content == "bob 的私人偏好：喜欢用 C++"
+        assert await real_count(bob_memory, bob) == 1
+    finally:
+        try:
+            for entry in await records.list_by_scope(MemoryScope.USER, alice, 100):
+                await records.delete(entry.id, alice)
+            for entry in await records.list_by_scope(MemoryScope.USER, bob, 100):
+                await records.delete(entry.id, bob)
+            await drain()
+            created = vectors.created_collection
+            await vectors.drop_created_collection()
+            if created:
+                assert gate_settings.milvus_collection not in await vectors.connect()
+        finally:
+            await relay.stop()
+            await vectors.close()
+            identity_context_var.reset(token)

@@ -159,3 +159,70 @@ async def test_failing_candidate_write_is_recorded_as_degraded_not_silent(tmp_pa
     assert len(degraded) == 1
     assert degraded[0].data["operation"] == "writeback"
     assert degraded[0].data["reason"] == "partial: 1/1 candidates failed"
+
+
+@pytest.mark.asyncio
+async def test_real_langmem_delete_failure_is_recorded_as_degraded(tmp_path):
+    """AC5 的真身：**真** LangMem 链路上的删除失败必须落 `memory/degraded`（不得静默）。
+
+    与上一条（合成 capability）的区别是走了完整链路：脚本化模型发 RemoveDoc → 真
+    manager/trustcall → 真 adapter → 记录层 `delete` 抛错（存储不可用）。#157 解禁 provider
+    的删除之后，"模型让删、删除却失败"成为真实可达的路径；用户侧绝不能因此以为那条过时记忆
+    已经被忘掉——事件流里必须留下 `partial: 1/1`，且 reason 只带数量（脱敏不变量）。
+    """
+    pytest.importorskip("langmem")
+    from langchain_core.messages import AIMessage
+
+    from agent_harness.identity import (
+        IdentityContext,
+        identity_context_var,
+        set_identity_context,
+    )
+    from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+    from agent_harness.memory.outbox_relay import OutboxRelay
+    from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
+    from agent_harness.memory.types import MemoryEntry, MemoryNamespace
+    from tests.langmem_doubles import (
+        AlwaysHitVectorStore,
+        ScriptedChatModel,
+        stable_doc_id,
+    )
+
+    alice = IdentityContext("acme", "alice", ["user"])
+
+    class FailingDelete(SqliteMemoryRecordStore):
+        """底层存储不可用：删除一律失败（真路径上的失败，而不是被调用的假对象）。"""
+
+        async def delete(self, memory_id, identity):
+            raise ConnectionError("storage unavailable")
+
+    class OneCandidate:
+        async def extract(self, events):
+            return ExtractionOutcome([(MemoryScope.USER, "alice 现在用 Rust", {"importance": 0.5})])
+
+    records = FailingDelete(tmp_path / "memory.db")
+    await records.initialize()
+    vectors = AlwaysHitVectorStore()
+    model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{
+        "name": "RemoveDoc",
+        "args": {"json_doc_id": stable_doc_id(
+            "m1", MemoryNamespace.of(MemoryScope.USER, alice).as_tuple())},
+        "id": "remove-one"}])])
+    capability = LangMemMemoryCapability(records, vectors, model)
+    session = make_session(tmp_path)
+
+    token = set_identity_context(alice)
+    try:
+        await records.store(MemoryEntry(id="m1", content="alice 喜欢 Python", metadata={},
+                                       scope=MemoryScope.USER,
+                                       created_at="2026-09-04T00:00:00+00:00"), alice)
+        assert await OutboxRelay(records, vectors).flush() == 1
+        writer = MemoryWriteback(capability, OneCandidate())
+        writer.submit(session, session.events)
+        await writer.drain()
+    finally:
+        identity_context_var.reset(token)
+
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert [(e.data["operation"], e.data["reason"]) for e in degraded] == [
+        ("writeback", "partial: 1/1 candidates failed")]
