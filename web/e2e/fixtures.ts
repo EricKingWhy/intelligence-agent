@@ -183,6 +183,8 @@ export function routeApi(page: Page, mock: ApiMock): void {
   }));
   /** 记忆状态：DELETE 真的摘条目（"删掉后再打开面板看不到"才是真语义）。 */
   const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
+  /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
+  const sessionEvents = new Map<string, FrameSpec[]>();
 
   /** 后端 `web/projects.py::Project` 的响应形状（时间戳不是本车道断言的对象）。 */
   const projectView = (p: ProjectFixture) => ({
@@ -251,16 +253,40 @@ export function routeApi(page: Page, mock: ApiMock): void {
         }),
       );
       project.session_ids.unshift(sid); // 账本前插（与 attach 语义一致）
-      return fulfillSse(route, [
-        // session/started.data.cwd 是 AC2 的既有机制（#151）：规范化后的绝对路径。
+      const frames: FrameSpec[] = [
+        // 帧序照真后端（#151 的机制）：session/started → run/started → user/message
+        // → model/started → text/delta → model/completed → run/completed。
+        // 缺 user/message 或 model/* 会让"回答真的渲染出来了"这条断言测不到东西。
         { type: 'session/started', data: { cwd }, seq: 1, session_id: sid, run_id: RUN, time: T },
         { type: 'run/started', seq: 2, session_id: sid, run_id: RUN, time: T },
-        { type: 'text/delta', data: { delta: '好，我先看看这个目录。' }, seq: 3, session_id: sid, run_id: RUN, step_id: 1, time: T },
-        { type: 'run/completed', data: {}, seq: 4, session_id: sid, run_id: RUN, time: T },
-      ]);
+        {
+          type: 'user/message',
+          data: { content: typeof body.task === 'string' ? body.task : '新任务' },
+          seq: 3,
+          session_id: sid,
+          run_id: RUN,
+          step_id: 1,
+          time: T,
+        },
+        { type: 'model/started', data: { model: 'e2e-model' }, seq: 4, session_id: sid, run_id: RUN, step_id: 1, time: T },
+        { type: 'text/delta', data: { delta: '好，我先看看这个目录。' }, seq: 5, session_id: sid, run_id: RUN, step_id: 1, time: T },
+        { type: 'model/completed', data: { model: 'e2e-model' }, seq: 6, session_id: sid, run_id: RUN, step_id: 1, time: T },
+        { type: 'run/completed', data: {}, seq: 7, session_id: sid, run_id: RUN, time: T },
+      ];
+      sessionEvents.set(sid, frames); // durable log = 刚才流的那些帧（见 /events 分支）
+      return fulfillSse(route, frames);
     }
     if (/^\/api\/sessions\/[^/]+\/events$/.test(path)) {
-      return route.fulfill({ status: 200, body: JSON.stringify(mock.events ?? []), contentType: 'application/json' });
+      // 带 cwd 建的会话：它的 durable log **就是**刚才流出来的那些帧（真后端同理——
+      // run 收尾后前端会回读日志对账）。不给这份日志，流的结论会被下一次回读清空，
+      // "回答真的渲染出来了"就永远测不到（mock 语义与真机不一致的另一种形态）。
+      const sid = decodeURIComponent(path.split('/')[3] ?? '');
+      const streamed = sessionEvents.get(sid);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify(streamed ?? mock.events ?? []),
+        contentType: 'application/json',
+      });
     }
     if (/^\/api\/sessions\/[^/]+\/stream$/.test(path)) {
       if (mock.onStreamGet) return mock.onStreamGet(route);

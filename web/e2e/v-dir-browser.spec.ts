@@ -98,7 +98,9 @@ test('AC8/AC9/AC10 打开即列根（无当前目录 → 两个按钮禁用）�
   await expect(browser(page).locator('.dir-browser-item-name')).toHaveText(['data', 'repos']);
 });
 
-test('AC10 手改上方输入框回车 → 浏览器跳到该路径（反方向同步）', async ({ page }) => {
+test('AC10 手改上方输入框回车 → 浏览器跳到该路径（反方向同步）；浏览器自己的路径条同理', async ({
+  page,
+}) => {
   routeApi(page, baseMock());
   await openCreateDialog(page);
 
@@ -108,6 +110,23 @@ test('AC10 手改上方输入框回车 → 浏览器跳到该路径（反方向�
   await expect(currentDir(page)).toHaveText(/D:\\repos\\my-project$/);
   await expect(browser(page).locator('.dir-browser-item-name')).toHaveText(['src', 'tests']);
   // 跳转成功后的路径条显示当前目录（editing 状态已清掉）
+  await expect(browserPath(page)).toHaveValue('D:\\repos\\my-project');
+
+  // 浏览器**自己的**路径条也是同一套语义（两条入口都要能用，不只表单那一侧）
+  await browserPath(page).fill('D:\\data');
+  await browserPath(page).press('Enter');
+  await expect(currentDir(page)).toHaveText(/D:\\data$/);
+  await expect(browserPath(page)).toHaveValue('D:\\data');
+  await expect(formPath(page)).toHaveValue('D:\\data'); // 反向跳转同样回填表单
+
+  // 回归锁（批次审查 P2）：先跳到 D:\repos，再往条里打字（**不回车**），然后改走
+  // "点子目录"这条导航——条不能停留在刚打的旧文本上：条上写 A、下面列 B 自相矛盾。
+  await browserPath(page).fill('D:\\repos');
+  await browserPath(page).press('Enter');
+  await expect(currentDir(page)).toHaveText(/D:\\repos$/);
+  await browserPath(page).fill('D:\\data');
+  await enterDir(page, 'my-project');
+  await expect(currentDir(page)).toHaveText(/D:\\repos\\my-project$/);
   await expect(browserPath(page)).toHaveValue('D:\\repos\\my-project');
 });
 
@@ -157,12 +176,13 @@ test('AC12 截断如实提示：超过上限时列出前 N 条并说明只列了
   await expect(browser(page).locator('.dir-browser-truncated')).toContainText('只列出了前一部分');
 });
 
-test('AC12 403/404 就地显示后端 detail 原文（不翻译成"加载失败"）', async ({ page }) => {
+test('AC12 403/404/422 就地显示后端 detail 原文（不翻译成"加载失败"）', async ({ page }) => {
   routeApi(
     page,
     baseMock({
       hostDirsErrors: {
         'D:\\secret': { status: 403, detail: '无权限访问：D:\\secret' },
+        'D:\\data\\a-file.txt': { status: 422, detail: '不是目录：D:\\data\\a-file.txt' },
       },
     }),
   );
@@ -179,4 +199,11 @@ test('AC12 403/404 就地显示后端 detail 原文（不翻译成"加载失败"
   await formPath(page).fill('D:\\nope');
   await formPath(page).press('Enter');
   await expect(browser(page).locator('.dir-browser-error')).toHaveText('目录不存在：D:\\nope');
+
+  // 422：路径存在但是文件（后端矩阵里"是文件"走 422，不是 404——两者别合并）
+  await formPath(page).fill('D:\\data\\a-file.txt');
+  await formPath(page).press('Enter');
+  await expect(browser(page).locator('.dir-browser-error')).toHaveText(
+    '不是目录：D:\\data\\a-file.txt',
+  );
 });

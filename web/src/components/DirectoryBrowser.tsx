@@ -7,7 +7,10 @@
  *
  *  纯呈现组件：数据与请求在 `useDirectoryListing`（可复用），这里只负责画和转发。
  *  路径条用"受控 + editing 覆盖"而不是 effect 同步 props：`editing === null` 时显示
- *  当前目录，用户一输入就切到自己的文本，回车跳转后清掉 editing 又跟着当前目录走。
+ *  当前目录，用户一输入就切到自己的文本，**任何一次导航（回车/向上/点子目录）都清掉
+ *  editing** ——"你在哪"这一行只能显示真正列出来的那个目录，不能停留在刚打了一半的
+ *  字符串上（否则条上写 A、下面列的是 B）。代价：输入一个不存在的路径报错后，条上
+ *  回到原目录（用户输入不保留）——上面表单的路径输入框保留着用户原文，主要动作不受影响。
  *
  *  「当前目录高亮」落在路径条那一行（`dir-browser-current`，accent 色 + FolderOpen）：
  *  列表里都是**子目录**，当前目录本身不在其中，所以"你在哪"只能由这一行回答。
@@ -15,7 +18,7 @@
  *  向上：`listing.parent === null` 表示已在盘根（或根模式），按钮禁用而不是猜一个
  *  上一级（Windows 驱动器相对路径的歧义不值得在这里赌）。 */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ArrowUp, Folder, FolderCheck, FolderOpen, Loader } from 'lucide-react';
 import type { HostDirsListing } from '../types';
 
@@ -38,12 +41,23 @@ export function DirectoryBrowser({ listing, loading, error, onGoto, onPick }: Pr
   const [picked, setPicked] = useState<string | null>(null);
   const current = listing?.path ?? null;
   const barValue = editing ?? current ?? '';
+  /** 列表/向上导航后，被按下的条目会被卸载 → 焦点掉回 <body>，键盘用户每进一层
+   *  都要从页首重新 Tab。导航起点在列表里时，把焦点收进浏览器容器（它不卸载），
+   *  下一次 Tab 就落到路径条。从路径条回车触发时不收焦点（否则正在输入的光标被抢走）。 */
+  const rootRef = useRef<HTMLElement>(null);
 
-  const jump = () => {
-    const target = barValue.trim();
+  /** 唯一的导航出口：清掉"用户正在输入"与"刚选择"两种本地态，再交给上游。
+   *  三条路径（条上回车 / 向上 / 点子目录）都走它——只清其中一条会出现
+   *  "条上还写着上一个目录、列表已经变了"的自相矛盾。 */
+  const nav = (path: string | null, fromList = false) => {
     setEditing(null);
-    if (target) onGoto(target);
+    setPicked(null);
+    onGoto(path);
+    if (fromList) rootRef.current?.focus();
   };
+
+  /** 条上回车：空串 = 列根（与占位文案「留空 = 盘符/根」一致）。 */
+  const jump = () => nav(barValue.trim() || null);
 
   const pick = () => {
     if (!current) return;
@@ -52,11 +66,11 @@ export function DirectoryBrowser({ listing, loading, error, onGoto, onPick }: Pr
   };
 
   return (
-    <section className="dir-browser" aria-label="宿主目录浏览器">
+    <section className="dir-browser" aria-label="宿主目录浏览器" ref={rootRef} tabIndex={-1}>
       <div className="dir-browser-bar">
         <button
           className="icon-btn"
-          onClick={() => onGoto(listing?.parent ?? null)}
+          onClick={() => nav(listing?.parent ?? null, true)}
           disabled={!listing?.parent}
           aria-label="向上一级"
           title={listing?.parent ? `向上一级：${listing.parent}` : '已经是根目录'}
@@ -120,7 +134,7 @@ export function DirectoryBrowser({ listing, loading, error, onGoto, onPick }: Pr
             <button
               key={entry.path}
               className="dir-browser-item"
-              onClick={() => onGoto(entry.path)}
+              onClick={() => nav(entry.path, true)}
               title={entry.path}
             >
               <Folder size={13} aria-hidden="true" />

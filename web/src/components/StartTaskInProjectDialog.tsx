@@ -101,7 +101,7 @@ function StartTaskForm({
   };
 
   return (
-    <Dialog.Content className="project-dialog project-dialog-task" aria-label="在此项目中新建任务">
+    <Dialog.Content className="project-dialog" aria-label="在此项目中新建任务">
       <div className="project-dialog-head">
         <Dialog.Title className="project-dialog-title">
           <Shield size={14} aria-hidden="true" /> 在此项目中新建任务

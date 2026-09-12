@@ -104,11 +104,16 @@ test('AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限�
 
   const box = dialog(page);
   await expect(box).toBeVisible();
-  // AC10①：路径明示行逐字出现（路径本身也在——用户要确认的正是"哪个目录"）
+  // AC10①：路径明示行**逐字**出现——标签与路径必须连续（拆成两条断言的话，
+  // "把路径挪到别的元素里、两段之间插入别的话"也能通过，那就不叫逐字了）
   const callout = box.locator('.project-path-callout');
-  await expect(callout).toContainText('Agent 将直接读写该目录：');
-  await expect(callout).toContainText(ALPHA);
-  // AC10②：权限档三选，默认档 = 工作区写入（后端默认 workspace-write + 自动执行）
+  await expect(callout).toContainText(`Agent 将直接读写该目录：${ALPHA}`);
+  // AC10②：权限档是**三选**（默认档之外两档也必须真的可选，否则"三选"只是文案）
+  await box.locator('.composer-control[aria-label="权限模式"]').click();
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  await expect(listbox.getByRole('option')).toHaveCount(3);
+  await expect(listbox.getByRole('option', { name: /工作区写入/ })).toBeVisible();
+  await page.keyboard.press('Escape');
   await expect(box.locator('.composer-control[aria-label="权限模式"]')).toContainText('工作区写入');
   // AC10③：空任务禁用 → 填了才可提交
   const start = box.getByRole('button', { name: '开始任务' });
@@ -137,6 +142,10 @@ test('AC11 默认档提交：请求体带 cwd、不带 permission_mode，会话�
 
   // AC11 落组：新会话出现在「项目 alpha」下（mock 按真语义改了账本 + 行的 workspace）
   await expect(project(page, '项目 alpha').locator('.session-item-id')).toHaveCount(1);
+  // AC11「选中该会话、跟随流」：这一行处于选中态，且流里的回答已渲染出来
+  // （只断言"落组"会漏掉"提交完还得用户自己点一下才看到"的实现）
+  await expect(project(page, '项目 alpha').locator('.session-item.selected')).toHaveCount(1);
+  await expect(page.getByText('好，我先看看这个目录。')).toBeVisible();
   // 确认面关闭：用户接下来要看着那条流（不是停在浮层里）
   await expect(dialog(page)).toHaveCount(0);
 });
@@ -179,8 +188,9 @@ test('AC12 422 留在确认面：后端 detail 原样可见、不关对话框、
 
   // 后端 detail 原样出现在浮层里——而且**不是** Composer 那条 422 旧语义
   // （「模型不可用（422）」），cwd 校验失败必须让后端那句话说话。
-  await expect(box.locator('.project-error')).toContainText(`目录不存在：${ALPHA}`);
-  await expect(box.locator('.project-error')).not.toContainText('模型不可用');
+  // 用 toHaveText（整串相等）而不是 toContainText：前缀是「提交失败：」+ 后端原文，
+  // 后半段一旦被改写（哪怕改成更"友好"的话）这条断言必须变红。
+  await expect(box.locator('.project-error')).toHaveText(`提交失败：目录不存在：${ALPHA}`);
   await expect(box).toBeVisible();
   await expect(page.locator('.app-error')).toHaveCount(0); // 不弹全局横幅
 
