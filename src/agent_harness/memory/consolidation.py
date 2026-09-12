@@ -113,26 +113,34 @@ class BoundedSearchStore:
 
     async def aput(self, namespace: tuple[str, ...], key: str, value: Any,
                    *args: Any, **kwargs: Any) -> Any:
-        return await self._inner.aput(namespace, key,
-                                     await self._without_truncated_projection(namespace, key, value),
-                                     *args, **kwargs)
+        prepared, repaired = await self._without_truncated_projection(namespace, key, value)
+        result = await self._inner.aput(namespace, key, prepared, *args, **kwargs)
+        # 只有**真的写下去**才记"修过一次"：写失败时那次修复没有落盘，记了就是虚报（AC3）。
+        if repaired:
+            self.stats.repaired_items += 1
+        return result
 
     async def _without_truncated_projection(self, namespace: tuple[str, ...], key: str,
-                                            value: Any) -> Any:
-        """回写值若是本代理的截断投影，换成该行的权威全文（拿不到 / 形状不符则原样返回）。"""
+                                            value: Any) -> tuple[Any, bool]:
+        """回写值若是本代理的截断投影，换成该行的权威全文；返回 `(写入值, 是否修过)`。
+
+        **读不到权威正文时抛错，而不是原样写入**（code-review P0）：原样写入等于把
+        "前 1000 字符 + 标记"当成事实落盘——正是本修复要消灭的静默截尾，读失败时"猜投影就是
+        正文"更是毫无依据。抛出去由 `consolidate` 的降级边界接住：整条候选另起一行新增，
+        既有行原封不动（宁可多一条，不可少一截）。
+        """
         content = _payload_content(value)
         if not isinstance(content, str) or not content.endswith(TRUNCATION_MARKER):
-            return value
+            return value, False
         head = content[: -len(TRUNCATION_MARKER)]
-        try:
-            existing = await self._inner.aget(namespace, key)
-        except Exception:  # noqa: BLE001 — 读不到现有行不是"可以猜正文"的理由
-            return value
+        if not head:
+            # 正文恰好只有标记：空串恒为前缀，会把**任何**既有行顶掉。不猜（P2）。
+            return value, False
+        existing = await self._inner.aget(namespace, key)  # 读失败 → 抛，交降级边界
         stored = _payload_content(getattr(existing, "value", None))
         if isinstance(stored, str) and len(stored) > len(head) and stored.startswith(head):
-            self.stats.repaired_items += 1
-            return {**value, "content": {**value["content"], "content": stored}}
-        return value
+            return {**value, "content": {**value["content"], "content": stored}}, True
+        return value, False
 
     def __getattr__(self, name: str) -> Any:
         # adelete / aget / abatch…：原样透传给真 store。

@@ -87,8 +87,15 @@ class LangMemMemoryCapability:
             # 设条数/字符上界并计数（AC3/AC4），以及把回写的截断投影还原成权威全文
             # （P0：它同时是 trustcall 的 patch 基线，见 `consolidation.py` 的类文档）。
             bounded = BoundedSearchStore(self._store, max_items=self._query_limit)
+            # `query_model`（AC1 明确给出的选项）：不给它时上游走 `get_dialated_windows`——
+            # 拿**最近消息本身**当 query 去检索，语义对立的旧记忆（"我改用 Go 了" vs "我喜欢
+            # TypeScript"）实测召回不到（真机 `retrieved=0`）；给了它，上游改成"先生成一条
+            # 与当前对话相关的**假想记忆**再检索"，这才是 AC7-1"新旧立场收敛"能成立的前提。
+            # 代价是多一次 LLM 调用（用户已决策：质量优先、接受成本），这次调用也在
+            # `memory_consolidated` 的 `queries=list 长度` 里可见。
             manager = self._manager(self._model, schemas=[MemoryPayload], namespace=namespace,
-                                    store=bounded, enable_deletes=True, query_limit=self._query_limit)
+                                    store=bounded, enable_deletes=True,
+                                    query_model=self._model, query_limit=self._query_limit)
             started = asyncio.get_running_loop().time()
             budget = self._consolidation_timeout if budget_seconds is None else min(
                 budget_seconds, self._consolidation_timeout)
@@ -108,9 +115,16 @@ class LangMemMemoryCapability:
                 self._log_consolidation(bounded, puts=puts, started=started, status="ok")
                 return puts[0]["key"]
             # provider 判 no-op（没有工具调用）：没有变化时复用既有记忆；没有匹配时精确保留
-            # 抽取候选。这次兜底检索同样是真实开销，记账后再发事件（否则 AC3 系统性低报）。
-            previous = await self.search(scope, content, 1)
+            # 抽取候选。这次兜底检索同样是真实开销，所以：①计数在 await **之前**（与 `asearch`
+            # 同一口径——检索抛错也必须记成一次）；②失败路径也发事件（AC3 的"失败也记"，
+            # 否则这条路上"决策跑过 + 又检索了一次"全部不可见）。
             bounded.stats.fallback_searches += 1
+            try:
+                previous = await self.search(scope, content, 1)
+            except BaseException as error:
+                self._log_consolidation(bounded, puts=None, started=started,
+                                        status="failed", error=type(error).__name__)
+                raise
             self._log_consolidation(bounded, puts=puts, started=started, status="ok")
             if previous and previous[0].content == content and previous[0].metadata == metadata:
                 return previous[0].id

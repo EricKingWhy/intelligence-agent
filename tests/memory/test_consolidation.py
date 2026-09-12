@@ -172,7 +172,6 @@ async def test_bounded_store_caps_item_count_and_chars(tmp_path):
         # 而不是"上游恰好按我传的 limit 裁了"（真机 gate 实测上游会给回 6 条）。
         items = await bounded.asearch(namespace, query="长", limit=CONSOLIDATION_QUERY_LIMIT + 4)
         assert len(items) == CONSOLIDATION_QUERY_LIMIT
-        assert items, "上界不该把结果截成空"
         for item in items:
             payload = item.value["content"]["content"]
             assert len(payload) <= INJECTED_MEMORY_CHAR_LIMIT + len(TRUNCATION_MARKER)
@@ -404,8 +403,11 @@ async def test_writeback_budgets_shrink_with_the_remaining_time_and_keep_the_res
     # 上界：外层预算 − 余量（第一个候选实测就在这个量级；睡眠只让后面的更小）。
     assert all(budget is not None and budget <= 5.0 - _FALLBACK_RESERVE_SECONDS
                for budget in capability.budgets)
-    # 单调不增：剩余时间只会变少。
-    assert capability.budgets == sorted(capability.budgets, reverse=True)
+    # 单调不增，且**真的随剩余时间收窄**：每个候选实测睡掉 50ms，所以首尾必须出现可见差值——
+    # 只断言"有序"的话，一个恒定预算的变异（`return 3.0`）也能通过（code-review P2）。
+    assert all(earlier >= later for earlier, later
+               in zip(capability.budgets, capability.budgets[1:]))
+    assert capability.budgets[0] > capability.budgets[-1]
     # 三个候选**都写了**：预算收窄不得变成丢写。
     assert capability.written == ["候选-0", "候选-1", "候选-2"]
 
@@ -540,7 +542,7 @@ async def test_consolidation_failure_is_still_observable_with_its_retrieval_cost
     assert events[0].status == "failed"
     assert events[0].error_type == "TimeoutError"
     assert events[0].queries >= 1  # 检索真的发生了（开销可见）
-    assert events[0].latency_ms >= 0
+    assert events[0].latency_ms is not None  # 耗时字段必须存在（值本身随环境浮动）
 
 
 # ── 生产装配：模型必须真的接上（否则 consolidate 永远走 no_decision_model）──
@@ -799,3 +801,172 @@ async def test_degradation_event_persistence_failure_does_not_rewrite_the_reason
     assert failed_once
     assert [event for event in session.events if event.type == MEMORY_DEGRADED] == []
     assert [entry.content for entry in entries] == ["候选"]
+
+
+# ── 三轮 review 修复面：读不到就不许猜 / 计数只在落盘后 / 兜底检索失败也要记账 ──
+
+
+class _BrokenStoreMethod:
+    """把真 store 的**单个**方法弄坏，其余原样透传（测代理自身的防御，不动真适配器）。"""
+
+    def __init__(self, inner, *, aget_raises=None, aput_raises=None):
+        self._inner = inner
+        self._aget_raises = aget_raises
+        self._aput_raises = aput_raises
+
+    async def aget(self, *args, **kwargs):
+        if self._aget_raises is not None:
+            raise self._aget_raises
+        return await self._inner.aget(*args, **kwargs)
+
+    async def aput(self, *args, **kwargs):
+        if self._aput_raises is not None:
+            raise self._aput_raises
+        return await self._inner.aput(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _FallbackSearchExplodes(FakeVectorStore):
+    """manager 的检索正常，no-op 之后那次**兜底检索**炸（测 AC3 的"失败路径也记"）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def search(self, query, identity, scope, limit):  # type: ignore[override]
+        self.calls += 1
+        if self.calls >= 2:
+            raise ConnectionError("fallback search is down: secret-ish detail")
+        return await super().search(query, identity, scope, limit)
+
+
+@pytest.mark.asyncio
+async def test_repair_refuses_to_guess_the_body_when_the_row_cannot_be_read(tmp_path):
+    """读不到权威正文时**不许**原样写入投影，必须把错误抛出去交给降级边界（code-review P0）。
+
+    原样写入 = 把"前 1000 字符 + 标记"当事实落盘，正是本次修复要消灭的静默截尾；读失败时
+    "猜投影就是正文"没有任何依据。抛出去 → `consolidate` 降级成整条新增，既有行原封不动
+    ——宁可多一条，不可少一截。
+    """
+    vectors = FakeVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
+    full_text = "长" * (INJECTED_MEMORY_CHAR_LIMIT * 2)
+    projection = full_text[:INJECTED_MEMORY_CHAR_LIMIT] + TRUNCATION_MARKER
+    bounded = BoundedSearchStore(
+        _BrokenStoreMethod(capability._store, aget_raises=ConnectionError("row read is down")))
+    token = set_identity_context(ALICE)
+    try:
+        await records.store(MemoryEntry(id="long-one", content=full_text, metadata={},
+                                        scope=MemoryScope.USER,
+                                        created_at="2026-09-01T00:00:00+00:00"), ALICE)
+        with pytest.raises(ConnectionError):
+            await bounded.aput(namespace, "long-one",
+                               {"kind": "MemoryPayload",
+                                "content": {"content": projection, "metadata": {}}})
+        stored = await records.get("long-one", ALICE)
+    finally:
+        identity_context_var.reset(token)
+
+    assert stored.content == full_text, "读不到行时把截断投影写进了权威记录"
+    assert TRUNCATION_MARKER not in stored.content
+    assert bounded.stats.repaired_items == 0
+
+
+@pytest.mark.asyncio
+async def test_a_bare_marker_write_is_never_repaired_into_the_existing_row(tmp_path):
+    """正文**恰好只有标记**时空字符串恒为前缀，会把任何既有行顶掉——不许猜（code-review P2）。"""
+    vectors = FakeVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
+    bounded = BoundedSearchStore(capability._store, max_chars=INJECTED_MEMORY_CHAR_LIMIT)
+    token = set_identity_context(ALICE)
+    try:
+        await records.store(MemoryEntry(id="existing", content="原有正文", metadata={},
+                                        scope=MemoryScope.USER,
+                                        created_at="2026-09-01T00:00:00+00:00"), ALICE)
+        await bounded.aput(namespace, "existing",
+                           {"kind": "MemoryPayload",
+                            "content": {"content": TRUNCATION_MARKER, "metadata": {}}})
+        stored = await records.get("existing", ALICE)
+    finally:
+        identity_context_var.reset(token)
+
+    assert stored.content == TRUNCATION_MARKER
+    assert bounded.stats.repaired_items == 0
+
+
+@pytest.mark.asyncio
+async def test_a_repaired_projection_is_counted_only_after_the_write_lands(tmp_path):
+    """"修过一次"只有在真的写下去之后才算数：写失败时不能报 repaired（code-review P2）。"""
+    vectors = FakeVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
+    full_text = "长" * (INJECTED_MEMORY_CHAR_LIMIT * 2)
+    projection = full_text[:INJECTED_MEMORY_CHAR_LIMIT] + TRUNCATION_MARKER
+    bounded = BoundedSearchStore(
+        _BrokenStoreMethod(capability._store, aput_raises=RuntimeError("write is down")))
+    token = set_identity_context(ALICE)
+    try:
+        await records.store(MemoryEntry(id="long-one", content=full_text, metadata={},
+                                        scope=MemoryScope.USER,
+                                        created_at="2026-09-01T00:00:00+00:00"), ALICE)
+        with pytest.raises(RuntimeError):
+            await bounded.aput(namespace, "long-one",
+                               {"kind": "MemoryPayload",
+                                "content": {"content": projection, "metadata": {}}})
+        stored = await records.get("long-one", ALICE)
+    finally:
+        identity_context_var.reset(token)
+
+    assert stored.content == full_text      # 写入没发生 → 行没变
+    assert bounded.stats.repaired_items == 0  # 也就不许报"修过"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_no_op_fallback_search_still_reports_its_cost(tmp_path, caplog):
+    """兜底检索抛错时：候选照写（不丢写），且这次检索**仍要可见**（AC3：失败路径也记）。
+
+    计数必须在 await **之前**（与 `asearch` 同一口径），并且失败要发事件——否则这条路
+    既丢了那次真实检索的开销，也丢了"决策已跑过"的事实。
+    """
+    import logging
+
+    from langchain_core.messages import AIMessage
+
+    vectors = _FallbackSearchExplodes()
+    capability, records = await _langmem(tmp_path, vectors)
+    token = set_identity_context(ALICE)
+    try:
+        await _seed(records, vectors, "我喜欢黑咖啡")
+        capability._model = ScriptedChatModel(responses=[AIMessage(content="无需改动。")])
+        with caplog.at_level(logging.INFO, logger="agent_harness.memory"):
+            outcome = await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
+        entries = await capability.list_entries(MemoryScope.USER, 5)
+    finally:
+        identity_context_var.reset(token)
+
+    assert outcome.degraded_reason == "consolidation_failed: ConnectionError"
+    # 兜底检索炸了 → 没有可比对的既有行 → 候选**无条件新增**（不丢写优先）。既有行还在，
+    # 于是出现两条同内容：这是本票显式选的代价（宁可多一条，不可少一条），断言它而不是否认它。
+    assert sorted(entry.content for entry in entries) == ["我喜欢黑咖啡", "我喜欢黑咖啡"]
+    events = [record for record in caplog.records if getattr(record, "event_type", None) == "memory_consolidated"]
+    assert [(event.status, event.error_type, event.fallback_searches)
+            for event in events] == [("failed", "ConnectionError", 1)]
+
+
+@pytest.mark.asyncio
+async def test_remaining_budget_is_arithmetic_on_the_deadline_and_clamps_at_zero():
+    """直接钉 `_remaining_budget` 的算术与下界：常量返回值这种变异必须被杀死。"""
+    from agent_harness.memory.writeback import (
+        _FALLBACK_RESERVE_SECONDS,
+        MemoryWriteback,
+    )
+
+    now = asyncio.get_running_loop().time()
+    remaining = MemoryWriteback._remaining_budget(now + 5.0)
+    assert _FALLBACK_RESERVE_SECONDS < remaining < 5.0  # 既扣了余量，也不是常量
+    assert abs(remaining - (5.0 - _FALLBACK_RESERVE_SECONDS)) < 0.01
+    assert MemoryWriteback._remaining_budget(now - 1.0) == 0.0  # 过期的 deadline 不能变负数

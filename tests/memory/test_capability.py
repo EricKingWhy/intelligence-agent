@@ -12,7 +12,7 @@ from agent_harness.memory.fake_vector_store import FakeVectorStore
 from agent_harness.memory.outbox_relay import OutboxRelay
 from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
 from agent_harness.memory.types import MemoryScope
-from tests.langmem_doubles import BoundSelfMixin
+from tests.langmem_doubles import ScriptedChatModel
 
 
 @pytest.mark.asyncio
@@ -169,17 +169,12 @@ async def test_capability_forget_cannot_cross_identity(tmp_path, backend):
 @pytest.mark.asyncio
 async def test_langmem_manager_forms_memory_through_owned_store(tmp_path):
     pytest.importorskip("langmem")
-    from langchain_core.language_models.fake_chat_models import (
-        FakeMessagesListChatModel,
-    )
     from langchain_core.messages import AIMessage
 
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
 
-    class Model(BoundSelfMixin, FakeMessagesListChatModel):
-        pass
-
-    model = Model(responses=[AIMessage(content="", tool_calls=[{
+    # 用共享替身：它按生产形状应答"生成检索 query"那次调用，让下面的 responses 只对应决策。
+    model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{
         "name": "MemoryPayload", "args": {"content": "TypeScript preference", "metadata": {"importance": 0.8}},
         "id": "extract-one",
     }]), AIMessage(content="Existing preference is unchanged")])
@@ -217,14 +212,9 @@ async def test_basestore_rejects_foreign_namespace_and_ignores_untrusted_index_i
 @pytest.mark.asyncio
 async def test_nearest_memory_does_not_replace_a_different_new_candidate(tmp_path):
     pytest.importorskip("langmem")
-    from langchain_core.language_models.fake_chat_models import (
-        FakeMessagesListChatModel,
-    )
     from langchain_core.messages import AIMessage
 
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
-    class NoChanges(BoundSelfMixin, FakeMessagesListChatModel):
-        pass
     class Nearest(FakeVectorStore):
         async def search(self, *args):
             return [(old_id, 0.1)]
@@ -233,7 +223,8 @@ async def test_nearest_memory_does_not_replace_a_different_new_candidate(tmp_pat
     vector = Nearest()
     capability = LangMemMemoryCapability(records, vector)
     old_id = await capability.store(MemoryScope.USER, "I prefer Python", {})
-    capability = LangMemMemoryCapability(records, vector, NoChanges(responses=[AIMessage(content="No changes")]))
+    capability = LangMemMemoryCapability(
+        records, vector, ScriptedChatModel(responses=[AIMessage(content="No changes")]))
     new_id = await capability.store(MemoryScope.USER, "I prefer TypeScript", {})
     assert new_id != old_id
 

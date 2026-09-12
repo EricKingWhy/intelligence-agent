@@ -11,11 +11,24 @@ trustcall 在"**存在既有文档**"的分支里访问 `self.bound.bound.bind_t
 """
 
 import uuid
+from typing import ClassVar
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from agent_harness.memory.fake_vector_store import FakeVectorStore
 from agent_harness.memory.types import MemoryNamespace
+
+#: `langmem` 生成检索 query 那次调用的 prompt 特征（`extraction.py` 的 `query_gen` 分支）。
+#: 给了 `query_model` 才有这次调用；它产出的是**搜索工具调用**，不是记忆决策。
+QUERY_GENERATION_MARKER = "Use parallel tool calling"
+
+
+def _is_query_generation(messages) -> bool:
+    """这次调用是"生成检索 query"（而非"决策 insert/update/delete"）吗？"""
+    return any(QUERY_GENERATION_MARKER in str(getattr(message, "content", ""))
+               for message in messages)
 
 
 class BoundSelfMixin:
@@ -32,21 +45,55 @@ class BoundSelfMixin:
         return self
 
 
-class ScriptedChatModel(BoundSelfMixin, FakeMessagesListChatModel):
-    """按序吐预置响应的 LangChain 假模型；`responses=` 语义同基类。"""
+class QueryGenerationMixin:
+    """自动应答"生成检索 query"那次调用，让脚本响应仍然只对应**决策**阶段。
+
+    `#158` 起 manager 用**同一个模型**生成检索 query（`query_model=model`，AC1 选的路线），
+    于是每次写入有两段 LLM 调用：①生成"假想记忆"当 query（`query_gen` 分支）→ ②拿检索结果
+    做决策。假模型若不给①一个形状正确的回答，脚本响应就会被①吃掉，测试测的就不是生产路径
+    （实测：错位后①把决策的参数当成搜索参数传下去，直接 `TypeError`）。
+
+    上游只取 `tc["args"]`（不校验工具名），所以这里返回一条带 `query` 的搜索工具调用即可。
+    """
+
+    _QUERY_GENERATION_TOOL_CALL: ClassVar[dict] = {
+        "name": "search_memory",
+        "args": {"query": "与当前对话相关的用户长期记忆"},
+        "id": "query-gen",
+    }
+
+    def _query_generation_result(self) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(
+            content="", tool_calls=[dict(self._QUERY_GENERATION_TOOL_CALL)]))])
 
 
-class HangingChatModel(BoundSelfMixin, FakeMessagesListChatModel):
-    """决策阶段**永久卡住**的假模型。
+class ScriptedChatModel(QueryGenerationMixin, BoundSelfMixin, FakeMessagesListChatModel):
+    """按序吐预置响应的 LangChain 假模型；`responses=` 语义同基类（只对应**决策**阶段）。"""
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        if _is_query_generation(messages):
+            return self._query_generation_result()
+        return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        if _is_query_generation(messages):
+            return self._query_generation_result()
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+class HangingChatModel(QueryGenerationMixin, BoundSelfMixin, FakeMessagesListChatModel):
+    """**决策阶段**永久卡住的假模型（检索 query 生成照常应答）。
 
     #158 的"预算到期 → 降级写入"路径需要它在**检索之后**卡住：检索已经发生（开销已付出），
     决策还没返回。空 `responses=` 的 `ScriptedChatModel` 达不到这个形状——它立刻 IndexError，
-    预算根本到不了期。
+    预算根本到不了期；而检索 query 生成若也卡住，则连检索都不会发生，测的是另一个形状。
     """
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
         import asyncio
 
+        if _is_query_generation(messages):
+            return self._query_generation_result()
         await asyncio.sleep(30)
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
