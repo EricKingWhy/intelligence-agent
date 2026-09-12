@@ -106,6 +106,31 @@ export interface ApiMock {
   memoryVanishedIds?: string[];
   /** GET /api/memories 的拦截口（断言分页参数或伪造 500）；返回 true = 已处理。 */
   onMemoriesGet?: (route: Route) => Promise<boolean> | boolean;
+  // ── WS-6 / #169 项目内新建任务 ──
+  /** 带 `cwd` 建会话时伪造失败（AC12：422 留在确认面）。spec 可以先设它、断言错误
+   *  在浮层里，再设回 undefined 并重试——同一条路径因此能覆盖"可重试"。
+   *  不设 = 按真后端语义成功（见 routeApi 的 POST /api/sessions 分支）。 */
+  cwdSessionError?: { status: number; detail: string };
+  // ── WS-7 / #170 宿主目录列举 ──
+  /** 假目录树（`GET /api/host/dirs`）。**不设 = 空的根列举**（不是错误）：浏览器是
+   *  新建项目对话框的一部分，不关心它的 spec 不该因此多出一条红色错误盒。
+   *  错误矩阵由 `hostDirsErrors`（403/404/422 + detail）或假树里没有的路径显式构造。
+   *
+   *  spec 只声明"每个目录下有哪些子目录名"，`path`/`parent` 由 fixture 按目录结构
+   *  **拼**出来（与真后端 `host_dirs.py` 同一口径：条目的 path = 父路径 + 名字，
+   *  不做 realpath 展开；排序按 name 大小写不敏感）。这样 mock 里不会出现第二套
+   *  路径拼接逻辑被 spec 抄一遍而悄悄写歪（#155 轮栽过 mock 语义与真机相反）。 */
+  hostDirs?: {
+    /** 键 = 目录绝对路径（分隔符可 `\` 或 `/`，与请求参数逐字符相等才命中）；
+     *  值 = 该目录下的子目录名（顺序不限，fixture 排序）。 */
+    tree: Record<string, string[]>;
+    /** 根模式（`path` 缺省）的盘符/根列表。 */
+    roots?: string[];
+    /** 单个目录最多列举多少条（缺省 500 = 后端 `MAX_ENTRIES`）；超出 → truncated。 */
+    maxEntries?: number;
+  };
+  /** 这些路径的列举直接回错误（错误矩阵就地显示：403 无权限 / 404 / 422 不是目录）。 */
+  hostDirsErrors?: Record<string, { status: number; detail: string }>;
 }
 
 /** 项目 fixture（形状 = 后端 `web/projects.py::Project`，时间戳由 fixtures 补）。 */
@@ -199,7 +224,40 @@ export function routeApi(page: Page, mock: ApiMock): void {
     }
     if (path === '/api/sessions' && req.method() === 'POST') {
       if (mock.onSessionPost) return mock.onSessionPost(route);
-      return route.abort('aborted');
+      const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
+      const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+      if (!cwd) return route.abort('aborted');
+      // ── WS-6 / #169：带 cwd 建会话 —— 按真后端语义（ADR-0027 D2/D3）真的改状态：
+      //  会话诞生在该目录、自动入组（未注册的 cwd 自动注册为项目，title = 目录末段名），
+      //  于是"新会话落在该项目分组下"这条断言考的是界面跟着后端语义走，
+      //  而不是"界面读了我们塞的假值"（fixture 的既有纪律）。
+      if (mock.cwdSessionError) {
+        return json(route, { detail: mock.cwdSessionError.detail }, mock.cwdSessionError.status);
+      }
+      const sid = `cwd-${sessionState.length + 1}`;
+      let project = projectState.find((p) => p.path === cwd);
+      if (!project) {
+        project = {
+          id: `p-${projectState.length + 1}`,
+          path: cwd,
+          title: cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || cwd,
+          session_ids: [],
+        };
+        projectState.unshift(project);
+      }
+      sessionState.unshift(
+        sessionRow(sid, { id: project.id, title: project.title }, {
+          first_user_message: typeof body.task === 'string' ? body.task : '新任务',
+        }),
+      );
+      project.session_ids.unshift(sid); // 账本前插（与 attach 语义一致）
+      return fulfillSse(route, [
+        // session/started.data.cwd 是 AC2 的既有机制（#151）：规范化后的绝对路径。
+        { type: 'session/started', data: { cwd }, seq: 1, session_id: sid, run_id: RUN, time: T },
+        { type: 'run/started', seq: 2, session_id: sid, run_id: RUN, time: T },
+        { type: 'text/delta', data: { delta: '好，我先看看这个目录。' }, seq: 3, session_id: sid, run_id: RUN, step_id: 1, time: T },
+        { type: 'run/completed', data: {}, seq: 4, session_id: sid, run_id: RUN, time: T },
+      ]);
     }
     if (/^\/api\/sessions\/[^/]+\/events$/.test(path)) {
       return route.fulfill({ status: 200, body: JSON.stringify(mock.events ?? []), contentType: 'application/json' });
@@ -413,8 +471,70 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return json(route, projectView(project));
     }
 
+    // ── WS-7 / #170：宿主目录列举（`path` 缺省 = 根模式）──
+    if (path === '/api/host/dirs') {
+      const tree = mock.hostDirs;
+      // 缺省 = 空的**根**列举（不是 404）：浏览器是新项目对话框的一部分，
+      // 不关心它的 spec（r-project-groups）不该因此多出一条红色错误盒。
+      // 错误矩阵由 `hostDirsErrors` / 假树里没有的路径显式构造。
+      if (!tree) {
+        return json(route, { path: null, parent: null, truncated: false, entries: [] });
+      }
+      const target = new URL(req.url()).searchParams.get('path');
+      if (target !== null && mock.hostDirsErrors?.[target]) {
+        const err = mock.hostDirsErrors[target];
+        return json(route, { detail: err.detail }, err.status);
+      }
+      const cap = tree.maxEntries ?? 500;
+      if (target === null) {
+        // 根模式：path/parent 都是 null（前端据此禁用「向上」「选择此目录」）。
+        const roots = [...(tree.roots ?? [])].sort(compareNames);
+        return json(route, {
+          path: null,
+          parent: null,
+          truncated: false,
+          entries: roots.map((r) => ({ name: r, path: r })),
+        });
+      }
+      const names = tree.tree[target];
+      if (!names) return json(route, { detail: `目录不存在：${target}` }, 404);
+      const shown = [...names].sort(compareNames).slice(0, cap);
+      return json(route, {
+        path: target,
+        parent: parentPath(target),
+        truncated: names.length > cap,
+        entries: shown.map((name) => ({ name, path: joinPath(target, name) })),
+      });
+    }
+
     return route.fulfill({ status: 404, body: '{"detail":"not mocked in e2e"}', contentType: 'application/json' });
   });
+}
+
+/** 排序口径 = 后端 `host_dirs.py::_sorted`：name 大小写不敏感，同键按原名兜底。 */
+function compareNames(a: string, b: string): number {
+  const la = a.toLowerCase();
+  const lb = b.toLowerCase();
+  if (la !== lb) return la < lb ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** 子条目 path = 父路径 + 名字（**不**做 realpath 展开，ADR-0028 D3）。 */
+function joinPath(base: string, name: string): string {
+  const sep = base.includes('\\') ? '\\' : '/';
+  return `${base.replace(/[\\/]+$/, '')}${sep}${name}`;
+}
+
+/** 上一级；盘根与无分隔符的路径没有上一级（后端 `parent in ("", canonical)` 同规则）。 */
+function parentPath(target: string): string | null {
+  const trimmed = target.replace(/[\\/]+$/, '');
+  const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (at < 0) return null;
+  const sep = trimmed.includes('\\') ? '\\' : '/';
+  let parent = trimmed.slice(0, at);
+  if (parent.endsWith(':')) parent += sep; // 'D:' → 'D:\'（盘根照列）
+  else if (parent === '') parent = sep; // '/home' → '/'
+  return parent === trimmed ? null : parent;
 }
 
 /** 提交一个任务（Composer 填写 + 发送）。 */

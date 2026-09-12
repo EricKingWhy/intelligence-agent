@@ -13,6 +13,8 @@ import { useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { FolderPlus, TriangleAlert, X } from 'lucide-react';
 import { describeProjectError } from '../lib/api';
+import { useDirectoryListing } from '../hooks/useDirectoryListing';
+import { DirectoryBrowser } from './DirectoryBrowser';
 import type { Project, ProjectDeleted } from '../types';
 
 interface CreateProps {
@@ -44,6 +46,9 @@ function CreateProjectForm({ onOpenChange, onCreate, existing }: CreateProps) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // WS-7 / #170：内嵌目录浏览器。它的列举结果**回填** path（浏览 → 输入框），
+  // 于是"浏览到哪"与"要注册哪个目录"永远是同一个值（不维护第二份路径真相）。
+  const browser = useDirectoryListing({ onPathChange: setPath });
 
   const submit = async () => {
     const value = path.trim();
@@ -106,13 +111,15 @@ function CreateProjectForm({ onOpenChange, onCreate, existing }: CreateProps) {
           maxLength={4096}
           autoFocus
           onKeyDown={(e) => {
-            // pending 时不再受理 Enter：按钮已 disabled，但 Enter 走的是
-            // 这条独立路径——不挡就会在第一次请求还没回来时再发一次。
-            if (e.key === 'Enter' && !pending) void submit();
+            // Enter = 在下方浏览器里打开这个路径（PRD §4.5 的双向同步：手改输入框
+            // 回车 → 浏览器跳转）。注册动作由「注册项目」按钮明确触发——先看见目录
+            // 里有什么，再决定注册它，这条路径本来就不该一个回车就走完。
+            if (e.key === 'Enter' && !pending) browser.goto(path.trim() || null);
           }}
         />
         <span className="project-field-hint">
           必须是绝对路径；目录需要已经存在（不会替你创建，路径不存在会明确报错）。
+          回车 = 在下方浏览该目录；确认无误后点「注册项目」。
         </span>
       </label>
 
@@ -130,6 +137,17 @@ function CreateProjectForm({ onOpenChange, onCreate, existing }: CreateProps) {
           }}
         />
       </label>
+
+      {/* WS-7 / #170：内嵌浏览器（浏览 → 回填上面的路径输入框；上面回车 → 跳到这里）。
+          放在表单下方而不是替换输入框：手写路径与点选目录两条路都要留着——熟练用户
+          粘贴一个长路径比逐层点快得多。 */}
+      <DirectoryBrowser
+        listing={browser.listing}
+        loading={browser.loading}
+        error={browser.error}
+        onGoto={browser.goto}
+        onPick={setPath}
+      />
 
       {notice && (
         <div className="project-notice" role="status">

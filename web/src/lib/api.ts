@@ -8,6 +8,7 @@
 
 import type {
   AgentEvent,
+  HostDirsListing,
   MemoryDeleted,
   MemoryScope,
   MemorySummary,
@@ -101,6 +102,14 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
 export interface StartSessionPayload {
   task: string;
   workspace?: string;
+  /** 目录根会话（WS-6 / #169，ADR-0027 D2）：会话直接在**这个已存在的绝对路径**
+   *  下运行，它同时成为会话的 workspace root（工具的相对路径都相对它解析），
+   *  并在后端自动注册为项目 + attach（幂等）。
+   *
+   *  与 `workspace`（workspaces_root 下的单段名字，ADR-0025 D8 的旧语义）
+   *  **互斥**：两个都传 → 422 `workspace 与 cwd 只能二选一`。前端入口一次只用一种，
+   *  这条互斥在后端兜底而不是在这里猜（谁先谁后是可观测契约，见 PRD §4.1）。 */
+  cwd?: string;
   max_steps?: number;
   auto_approve?: boolean;
   /** 可选模型选择（T10 #103，契约 C6）：GET /api/models 的 name；不传 = 默认
@@ -216,6 +225,7 @@ function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<s
 const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
+  cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
   max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
   auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
   model: (p) => (p.model ? ['model', p.model] : null),
@@ -237,6 +247,16 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildBody(payload, START_SESSION_FIELDS)),
   });
+}
+
+/** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
+ *
+ *  单独开这个缝的原因：「在此项目中新建任务」确认面（#169 AC12）要把后端 detail
+ *  **原样**留在浮层里，而 useSession 的失败通道是给用户看的一句话——它还带着
+ *  "422 = 未知模型"的旧语义（App 据那句话刷新模型目录）。两者混在一起会让
+ *  「cwd 目录不存在」被显示成「模型不可用」。由调用方自己读，两条语义各自成立。 */
+export async function startSessionErrorDetail(res: Response): Promise<string> {
+  return readErrorDetail(res);
 }
 
 /** POST /api/sessions/{id}/messages（PRD §5.3 续聊入口）。
@@ -627,6 +647,41 @@ export async function reorderProjectSession(
 async function projectError(res: Response, fallback: string): Promise<ProjectError> {
   const detail = await readErrorDetail(res);
   return new ProjectError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+// ── 宿主侧目录列举（WS-7 / #170，ADR-0028）──
+
+/** GET /api/host/dirs —— 宿主侧目录列举：只读、一层、仅目录（ADR-0028 D3–D5）。
+ *
+ *  `path` 省略 = 列**根**（Windows 盘符 / POSIX `/`），响应的 `path` 为 null。
+ *  失败时抛 `ProjectError`（detail 优先）：403 无权限 / 404 不存在 / 422 不是目录
+ *  等全部由后端 detail 说明，界面**原样显示**——PRD §4.4 的错误矩阵就是按"前端不
+ *  翻译"设计的，这里多加一句自己的话就会把矩阵里的措辞盖掉。
+ *
+ *  形状窄化：非法条目丢弃但**不牵连其余**（与 listProjects / listMemories 同一条
+ *  纪律）；`path`/`parent` 只认字符串，其余一律当"没有"（那时界面显示的是"没有当前
+ *  目录"而不是一个编造的路径）。 */
+export async function getHostDirs(path?: string | null): Promise<HostDirsListing> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : '';
+  const res = await apiFetch(`/api/host/dirs${query}`);
+  if (!res.ok) throw await projectError(res, '加载目录失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const entries = Array.isArray(body.entries)
+    ? body.entries.flatMap((raw) => {
+        if (typeof raw !== 'object' || raw === null) return [];
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry.name !== 'string' || !entry.name) return [];
+        if (typeof entry.path !== 'string' || !entry.path) return [];
+        return [{ name: entry.name, path: entry.path }];
+      })
+    : [];
+  return {
+    path: typeof body.path === 'string' && body.path ? body.path : null,
+    parent: typeof body.parent === 'string' && body.parent ? body.parent : null,
+    truncated: body.truncated === true,
+    entries,
+  };
 }
 
 /** 记忆请求失败：状态码 + 后端 detail 原文（detail 优先，是 AC 要展示的那句话）。 */
