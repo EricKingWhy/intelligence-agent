@@ -209,7 +209,7 @@ web/src/**
 **合并后必须复核它们仍在**：
 
 ```bash
-git -C D:/intelligence-agent diff --name-status origin/main...HEAD | grep '^D' 
+git -C D:/intelligence-agent diff --name-status origin/main...HEAD | grep '^D'
 # 期望：只有 docs/PHASE_STATUS.md 一类"正常被合并提交改写"的路径，不含上面这批
 ```
 
