@@ -15,6 +15,7 @@ from langchain_core.messages import (
 )
 
 from agent_harness.context.tokens import estimate_message_tokens
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.event import SessionEvent
 
 
@@ -35,31 +36,8 @@ class CompactionResult:
     summary: str | None = None
 
 
-#: T4 (#134)：六段式摘要 prompt（Pi 风格结构化 Markdown）。
-_SIX_SECTION_PROMPT = """\
-你是会话压缩器。把下面的历史对话压缩成六段式结构化 Markdown 摘要，
-替代被压缩的原始事件。严格按以下格式输出，不要输出任何其他内容：
-
-## 目标
-用户在本轮对话中想要达成的目标（1-3 句）。
-
-## 约束
-用户明确或隐含提出的约束条件（每条一行）。
-
-## 进展
-已完成的关键步骤和中间结果（每条一行）。
-
-## 决策
-做出的重要技术或设计决策（每条一行）。
-
-## 下一步
-尚未完成、正在等待或需要继续的工作（每条一行）。
-
-## 关键上下文
-对理解当前状态至关重要的其他信息（每条一行）。
-
-历史对话如下：
-"""
+#: T4 (#134)：六段式摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
+#: （section `aux:compaction`）——改文案开那一个文件。
 
 
 class ContextCompactor:
@@ -102,7 +80,9 @@ class ContextCompactor:
             if count > self._hard_limit:
                 raise ContextWindowExceededError("No complete early turn can be compacted")
             return CompactionResult(list(messages), 0, count, False)
-        prompt = SystemMessage(content=_SIX_SECTION_PROMPT)
+        prompt = SystemMessage(
+            content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
+        )
         transcript = HumanMessage(content=json.dumps(
             [message.model_dump(mode="json") for message in early], ensure_ascii=False,
         ))

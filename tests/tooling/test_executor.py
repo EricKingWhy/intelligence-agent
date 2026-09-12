@@ -41,7 +41,7 @@ from agent_harness.tooling import (
     ToolResult,
     ToolSideEffect,
 )
-from agent_harness.tooling.executor import MAX_ATTEMPTS
+from agent_harness.tooling.executor import MAX_ATTEMPTS, _ToolFailure
 from tests.scripted_model import ScriptedModel
 
 # ============================================================================
@@ -919,6 +919,18 @@ class _SlowMutatingTimeoutTool(Tool):
         return ToolResult.success("done")
 
 
+class _SlowReadTimeoutTool(_SlowMutatingTimeoutTool):
+    """与上同类但 READ_ONLY：超时重跑无副作用风险，应保持 retryable=True。"""
+
+    @property
+    def name(self) -> str:
+        return "slow_read"
+
+    @property
+    def side_effect(self) -> ToolSideEffect:
+        return ToolSideEffect.READ_ONLY
+
+
 @pytest.mark.asyncio
 async def test_mutating_tool_timeout_is_not_auto_retried():
     """MUTATING 工具超时 → retryable 必须为 False（不自动重试）。
@@ -938,16 +950,103 @@ async def test_mutating_tool_timeout_is_not_auto_retried():
     assert execution.result.metadata["attempt"] == 1  # 只尝试一次
 
     # 对照组：READ_ONLY 超时仍可重试（原有语义）。
-    class _SlowReadTool(_SlowMutatingTimeoutTool):
-        @property
-        def name(self) -> str:
-            return "slow_read"
-
-        @property
-        def side_effect(self) -> ToolSideEffect:
-            return ToolSideEffect.READ_ONLY
-
-    registry.register(_SlowReadTool())
+    registry.register(_SlowReadTimeoutTool())
     read_exec = await executor.execute({"id": "c2", "name": "slow_read", "args": {}})
     assert read_exec.result.error_code == ErrorCode.TIMEOUT
     assert read_exec.result.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_timeout_message_matches_the_retry_decision():
+    """超时文案必须与实际 retryable 一致（OBS-009/014 的「文案矛盾」）。
+
+    旧版对 MUTATING 也说「可稍后重试」，而 retryable=False——等于**教模型盲重跑
+    副作用状态未知的命令**（违反不变量 #14）。实机观测到的「长命令超时 → 反复
+    重试/退化」正被这句话推动。READ_ONLY 仍应鼓励重试（重跑无副作用风险）。
+
+    这是纯文案契约，不改任何重试行为（行为由上面那个用例锁定）。
+    """
+    registry = ToolRegistry()
+    registry.register(_SlowMutatingTimeoutTool())
+    executor = ToolExecutor(registry)
+
+    mutating = await executor.execute({"id": "c1", "name": "slow_mutating", "args": {}})
+    assert mutating.result.retryable is False
+    assert "可稍后重试" not in mutating.result.message, "不可重试却说可重试 = 误导模型盲重跑"
+    assert "副作用状态未知" in mutating.result.message
+    assert "不要直接重跑" in mutating.result.message
+
+    registry.register(_SlowReadTimeoutTool())
+    read = await executor.execute({"id": "c2", "name": "slow_read", "args": {}})
+    assert read.result.retryable is True
+    assert "可稍后重试" in read.result.message
+    assert "副作用状态未知" not in read.result.message
+
+
+# ============================================================================
+# _ToolFailure：失败映射的唯一构造入口（架构深化候选 2）
+# ============================================================================
+#
+# 为什么直接单测它：message ⇔ error_code ⇔ retryable 的一致性是 OBS-009/014 的
+# 缺陷类（文案教模型盲重跑副作用状态未知的命令）。旧实现里三者在不同分支各自
+# 拼装，只能靠「慢工具端到端」才观察得到矛盾；收成值对象后可直接表驱动，
+# 不需要 sleep、不需要 Sandbox、不需要 event loop。
+
+
+class TestToolFailureMapping:
+    def test_timeout_shares_one_source_for_message_and_retryable(self):
+        """超时的文案与 retryable 同源：可重试才允许出现「可稍后重试」。"""
+        for tool, expected_retryable in (
+            (_SlowMutatingTimeoutTool(), False),
+            (_SlowReadTimeoutTool(), True),
+        ):
+            failure = _ToolFailure.from_timeout(tool, tool.name)
+
+            assert failure.retryable is expected_retryable
+            assert failure.error_code == ErrorCode.TIMEOUT
+            assert ("可稍后重试" in failure.message) is expected_retryable
+            assert ("不要直接重跑" in failure.message) is not expected_retryable
+
+    def test_timeout_message_carries_the_actual_limit(self):
+        """文案里的秒数取自工具的 timeout_seconds，不是写死的字面量。"""
+        tool = _SlowMutatingTimeoutTool()
+
+        failure = _ToolFailure.from_timeout(tool, tool.name)
+
+        assert f"上限 {tool.timeout_seconds} 秒" in failure.message
+
+    @pytest.mark.parametrize("error,expected_code,expected_retryable", [
+        (PermissionError("denied"), ErrorCode.PERMISSION_DENIED, False),
+        (ConnectionError("flaky"), ErrorCode.TRANSIENT_ERROR, True),
+        (ValueError("boom"), ErrorCode.TOOL_EXECUTION_ERROR, False),
+    ])
+    def test_exception_classification_is_type_based(
+        self, error, expected_code, expected_retryable
+    ):
+        """分类是确定性类型判断（不解析错误字符串）；未命中即内部错误、不重试。"""
+        failure = _ToolFailure.from_exception(error, "t")
+
+        assert failure.error_code == expected_code
+        assert failure.retryable is expected_retryable
+        assert type(error).__name__ in failure.message
+
+    def test_subclass_of_classified_exception_is_matched(self):
+        """isinstance 连子类一起认（与旧实现同语义，收进值对象后必须自证）。"""
+        class _SubPermission(PermissionError):
+            pass
+
+        failure = _ToolFailure.from_exception(_SubPermission("x"), "t")
+
+        assert failure.error_code == ErrorCode.PERMISSION_DENIED
+        assert failure.retryable is False
+
+    def test_result_is_a_faithful_projection(self):
+        """to_result 只是投影：三字段逐一对应，不额外改写。"""
+        failure = _ToolFailure.from_timeout(_SlowMutatingTimeoutTool(), "t")
+
+        result = failure.to_result()
+
+        assert result.ok is False
+        assert (result.error_code, result.retryable, result.message) == (
+            failure.error_code, failure.retryable, failure.message,
+        )

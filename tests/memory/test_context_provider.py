@@ -15,6 +15,7 @@ from agent_harness.identity import (
     set_identity_context,
 )
 from agent_harness.memory.context_provider import MemoryContextProvider
+from agent_harness.memory.extractor import ExtractionOutcome
 from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.types import MemoryEntry, MemoryScope, memory_session_var
 from agent_harness.memory.writeback import MemoryWriteback
@@ -121,7 +122,8 @@ async def test_background_writeback_is_nonblocking_and_captures_identity(tmp_pat
         async def extract(self, events):
             await release.wait()
             captured.append([e.data["content"] for e in events if e.type == USER_MESSAGE])
-            return [(MemoryScope.USER, "TypeScript", {}), (MemoryScope.SESSION, "decision", {})]
+            return ExtractionOutcome([(MemoryScope.USER, "TypeScript", {}),
+                                      (MemoryScope.SESSION, "decision", {})])
 
     capability = FakeMemoryCapability()
     writer = MemoryWriteback(capability, Extractor())
@@ -300,11 +302,11 @@ async def test_writeback_isolates_per_candidate_failures(tmp_path):
 
     class StaticExtractor:
         async def extract(self, events):
-            return [
+            return ExtractionOutcome([
                 (MemoryScope.SESSION, "good-1", {"importance": 0.5}),
                 (MemoryScope.SESSION, "boom-candidate", {"importance": 0.5}),
                 (MemoryScope.SESSION, "good-2", {"importance": 0.5}),
-            ]
+            ])
 
     session = make_session(tmp_path)
     writer = MemoryWriteback(FlakyStore(), StaticExtractor())
@@ -339,7 +341,7 @@ async def test_close_drains_pending_writeback(tmp_path):
 
     class StaticExtractor:
         async def extract(self, events):
-            return [(MemoryScope.SESSION, "drained-candidate", {"importance": 0.5})]
+            return ExtractionOutcome([(MemoryScope.SESSION, "drained-candidate", {"importance": 0.5})])
 
     session = make_session(tmp_path)
     writer = MemoryWriteback(SlowStore(), StaticExtractor())

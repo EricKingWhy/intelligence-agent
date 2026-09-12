@@ -21,6 +21,7 @@ from typing import Any
 
 from agent_harness.agent.profiles import AgentSpec
 from agent_harness.agent.runtime import AgentRuntime
+from agent_harness.prompt import PersonaConfig, compose_agent_prompt, join_guidance
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,8 @@ class AgentFactory:
         stream_total_timeout: float = 0.0,
         model_call_gate: Any | None = None,
         observability_sink: Any | None = None,
+        persona: PersonaConfig | None = None,
+        include_tool_guidance: bool = False,
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
@@ -55,6 +58,13 @@ class AgentFactory:
         # 进程级并发闸（#89）：assembly 传入共享实例，child runtime 同闸。
         self._model_call_gate = model_call_gate
         self._observability_sink = observability_sink
+        # T5：persona 由装配点传入，child 与 parent 同样被前后缀包裹。
+        # 默认 None → `compose_agent_prompt` 逐字节返回原值（B2 契约零变化）。
+        self._persona = persona
+        # T6：child 的工具 guidance 必须**显式开启**（装配点开）。默认 False 是为了让
+        # B2 契约（child.system_prompt == spec.system_prompt）的成立与"工具恰好没有
+        # guidance"脱钩——否则有人给 ReadTool 加 guidance，B2 会莫名变红。
+        self._include_tool_guidance = include_tool_guidance
 
     def create(
         self,
@@ -87,6 +97,10 @@ class AgentFactory:
         child_registry = source_registry.filtered(effective)
         executor = (self._executor_factory(child_registry) if self._executor_factory
                     else ToolExecutor(child_registry))
+        # T6：guidance 取**收窄后**的 child_registry，不是 source_registry——
+        # 否则 child 会看到它无权使用的工具的操作说明（越权信息泄漏）。
+        guidance_text = (join_guidance(child_registry.list())
+                         if self._include_tool_guidance else None)
         return AgentRuntime(
             model=self._model,
             registry=child_registry,
@@ -102,5 +116,10 @@ class AgentFactory:
             observability_sink=self._observability_sink,
             # ADR-0020a：child 拿它 spec 的 system_prompt（与 parent 路径一致），
             # 经 AgentRuntime 内部的 ContextBuilder 注入为列表首条 SystemMessage。
-            system_prompt=spec.system_prompt,
+            # T5/T6：persona 前后缀与工具 guidance 由装配点传入，child 与 parent
+            # 同样被包裹（未配置/未开启时 `compose_agent_prompt` 逐字节返回 base，
+            # 故 B2 契约零变化）。
+            system_prompt=compose_agent_prompt(
+                spec.system_prompt, self._persona, guidance_text,
+            ),
         )

@@ -20,15 +20,23 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from agent_harness.sandbox.base import ExecResult, Sandbox
+from agent_harness.sandbox.base import (
+    ExecResult,
+    Sandbox,
+    ShellEnvironment,
+    ShellFamily,
+)
+from agent_harness.sandbox.decoding import StreamDecoder, platform_fallback_encoding
 
 #: LocalSubprocess 的默认命令超时（秒）。None 表示不超时。
 DEFAULT_EXEC_TIMEOUT: float = 60.0
 
 logger = logging.getLogger("agent_harness.sandbox.local")
 
-#: 捕获流读取块大小（字符）。
-_DRAIN_CHUNK_CHARS = 65536
+#: 捕获流读取块大小（字节——流以 text=False 打开，解码见 sandbox/decoding.py）。
+#: ⚠ 必须 <= decoding.PROBE_LIMIT：单次喂入超过剩余探测预算会让「已满上限的
+#: 合法 UTF-8 + 同段坏字节」被判成兜底编码（与坏字节落在下一段的结果不一致）。
+_DRAIN_CHUNK_BYTES = 65536
 
 
 class _CappedCapture:
@@ -113,10 +121,14 @@ class LocalSubprocessSandbox(Sandbox):
         max_capture_chars: int = 2_000_000,
         env_allowlist: tuple[str, ...] | None = None,
         passthrough_env: bool = False,
+        fallback_encoding: str | None = None,
     ) -> None:
         self._workspace_root = Path(workspace_root).resolve()
         self._workspace_root.mkdir(parents=True, exist_ok=True)
         self._max_capture_chars = max_capture_chars
+        # 输出解码的兜底编码（UTF-8 试探失败时用）：缺省取宿主控制台代码页。
+        # 显式传参是测试缝——让 GBK 回退路径可以在任何平台上被测（OBS-011）。
+        self._fallback_encoding = fallback_encoding or platform_fallback_encoding()
         # passthrough_env=True 是显式逃生门（本地调试）；默认过滤。
         if passthrough_env:
             self._env: dict[str, str] | None = None
@@ -127,6 +139,24 @@ class LocalSubprocessSandbox(Sandbox):
     @property
     def workspace_root(self) -> Path:
         return self._workspace_root
+
+    @property
+    def shell_environment(self) -> ShellEnvironment:
+        """`shell=True` 实际用的解释器 + 家族（OBS-012）。
+
+        CPython 的 `shell=True` 在 Windows 用 `%COMSPEC%`（缺省 `cmd.exe`），
+        在 POSIX 用 `/bin/sh`——**都不是 bash**。名字取 basename，避免把
+        `C:\\Windows\\system32\\cmd.exe` 整条路径塞进模型可见的工具描述；
+        家族与 `exec` 的真实机制一致（Windows = cmd，POSIX = sh）。
+        """
+        if os.name == "nt":
+            # COMSPEC 可能被引号包住（部分环境写成 "\"C:\\...\\cmd.exe\""），
+            # 不剥引号会让模型可见描述出现 `cmd.exe"`。空值则回落到 cmd.exe。
+            comspec = os.environ.get("COMSPEC", "cmd.exe").strip().strip('"')
+            return ShellEnvironment(
+                name=Path(comspec).name or "cmd.exe", family=ShellFamily.CMD,
+            )
+        return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
         """no-op：本机进程总在，无需启动。幂等。"""
@@ -148,8 +178,11 @@ class LocalSubprocessSandbox(Sandbox):
         self.ensure_started()
         effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
 
-        # encoding/errors：Windows 中文系统默认 GBK，模型跑的命令可能输出 UTF-8 或 GBK；
-        # 用 errors="replace" 保证任何字节序列都不会让 subprocess 解码崩掉。
+        # 输出解码（OBS-011）：子进程写的是**原始字节**，编码取决于产出方——
+        # GNU 工具多为 UTF-8，cmd.exe 内建报错是宿主控制台代码页（中文 Windows=GBK）。
+        # 固定任一编码都会把另一侧解成乱码，而乱码会固化进 append-only JSONL。
+        # 故走 StreamDecoder：优先 UTF-8，遇到确凿非法序列整体回退宿主编码。
+        # 注意：这里必须 text=False 自己解，不能让 Popen 的 TextIOWrapper 定死编码。
         t0 = perf_counter()
         # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀；
         # Windows 不支持该参数（走 taskkill /T，见 _kill_process_tree）。
@@ -162,9 +195,7 @@ class LocalSubprocessSandbox(Sandbox):
             cwd=self._workspace_root,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            text=False,  # 字节流：解码由 StreamDecoder 负责（见上）
             env=self._env,
             **popen_kwargs,
         )
@@ -172,10 +203,12 @@ class LocalSubprocessSandbox(Sandbox):
         stderr_cap = _CappedCapture(self._max_capture_chars)
         readers = [
             threading.Thread(target=self._drain_stream,
-                             args=(process.stdout, stdout_cap, "stdout", on_output),
+                             args=(process.stdout, stdout_cap, "stdout", on_output,
+                                   self._output_decoder()),
                              daemon=True),
             threading.Thread(target=self._drain_stream,
-                             args=(process.stderr, stderr_cap, "stderr", on_output),
+                             args=(process.stderr, stderr_cap, "stderr", on_output,
+                                   self._output_decoder()),
                              daemon=True),
         ]
         for reader in readers:
@@ -272,23 +305,48 @@ class LocalSubprocessSandbox(Sandbox):
             except ProcessLookupError:  # 进程组已退出，无须再杀
                 process.kill()
 
+    def _output_decoder(self) -> StreamDecoder:
+        """每条流一个解码器（stdout/stderr 各自独立判定，互不影响）。"""
+        return StreamDecoder(self._fallback_encoding)
+
     @staticmethod
     def _drain_stream(stream, cap: _CappedCapture, channel: str,
-                      on_output=None) -> None:
+                      on_output=None, decoder: StreamDecoder | None = None) -> None:
         """后台排空一条捕获流；超限后只读不存，保证子进程不被管道背压卡死。
+
+        流是**字节**流（Popen text=False），这里经 decoder 增量解码后交给 cap
+        与 on_output——解码策略见 `sandbox/decoding.py`（OBS-011）。
 
         on_output 提供时逐段回调 (channel, chunk)——在 reader 线程上下文执行，
         回调异常只落 debug 日志（捕获完整性优先，流式是附加通道不是数据面）。
         """
+        if decoder is None:  # 防御：无解码器时按 UTF-8 宽松解（等价旧行为）
+            decoder = StreamDecoder("utf-8")
         try:
-            while chunk := stream.read(_DRAIN_CHUNK_CHARS):
+            while raw := stream.read(_DRAIN_CHUNK_BYTES):
+                chunk = decoder.feed(raw)
+                if not chunk:
+                    continue
                 cap.append(chunk)
-                if on_output is not None and chunk:
+                if on_output is not None:
                     try:
                         on_output(channel, chunk)
                     except Exception as error:  # noqa: BLE001 — 流式回调故障不损捕获
                         logger.debug("on_output callback failed: %s",
                                      type(error).__name__)
+            tail = decoder.flush()
+            if tail:
+                cap.append(tail)
+                if on_output is not None:
+                    try:
+                        on_output(channel, tail)
+                    except Exception as error:  # noqa: BLE001 — 同上
+                        logger.debug("on_output callback failed: %s",
+                                     type(error).__name__)
+            # 记录本次解码判定（OBS-011 可审计性）：日后质疑乱码时，可直接看出
+            # 这条输出是按 UTF-8 还是按宿主代码页解的。
+            logger.debug("captured %s decoded as %s (decided=%s)",
+                         channel, decoder.encoding, decoder.decided)
         except Exception as error:  # noqa: BLE001 — 流被随 kill 关闭属正常路径
             logger.debug("capture stream closed during drain: %s", type(error).__name__)
         finally:

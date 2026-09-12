@@ -34,6 +34,7 @@ from agent_harness.assembly import (
 )
 from agent_harness.config import Settings
 from agent_harness.identity import IdentityContext
+from agent_harness.instance_lock import InstanceLock, InstanceLockError
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.config import ModelConfig
@@ -185,10 +186,12 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
     with log_context(LogContext.create(service="agent-harness", env="local")):
         workspace_root = Path(settings.workspace_dir)
         _, wiring = await assemble_wiring(settings)
-        stores = recovery_stores(workspace_root / "harness.db")
+        store = JsonlSessionStore(root=workspace_root / "sessions")
+        # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
+        # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
+        stores = recovery_stores(workspace_root / "harness.db", workspace_headers=store)
         await initialize_stores(stores)
         workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
-        store = JsonlSessionStore(root=workspace_root / "sessions")
         # 崩溃扫描**不**在 CLI 里跑：在途 run 只存在于持有它的进程内存中，
         # 短命命令无法区分「别的进程在跑」与「崩溃遗留」，误标会撞 seq
         # （见 recovery/scan.py 单进程假设）。扫描归属长驻会话宿主（web lifespan）。
@@ -201,7 +204,7 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
             max_steps=10, auto_approve=True,
             session_store=store,
         )
-        session = Session.start(store, session_id=session_id)
+        session = Session.start(store, session_id=session_id, cwd=workspace)
         # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
         # （ingest_document 的 sandbox 解析）需要可信 session id。
         session_token = memory_session_var.set(session.session_id)
@@ -218,9 +221,30 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
 
 
 def main() -> None:
+    # ARCH-7（#150）：CLI 与 Web 并发使用同一 session root 被**有意拒绝**——
+    # 无保护的跨进程多写者会产出重复 seq / 交错写，且 run 归属共识只在进程内
+    # 有效。这里不吞异常：响亮失败 + 明确错误信息（锁路径 / 占用者 / 逃生门）。
+    # `--help` / `-h` 不触碰该根（argparse 直接打印帮助退出），不该被锁挡住；
+    # 但它仍是"退出路径"，flush 契约（ADR-0018 D3）照旧要守。
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        try:
+            _main_dispatch()
+        finally:
+            flush_process_sink()
+        return
+    settings = Settings()
+    # 先配日志再取锁：逃生门降级时那条 WARNING 才落得进 agent.jsonl（AC7）。
+    # setup_logging 幂等（子命令内重复调用只清一次 handlers）。
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        lock = InstanceLock(settings.workspace_dir).acquire()
+    except InstanceLockError as error:
+        print(error, file=sys.stderr)
+        raise SystemExit(2) from error
     try:
         _main_dispatch()
     finally:
+        lock.release()
         # 旁路收尾（ADR-0018 D3）：任何退出路径（正常/异常/SystemExit）都尽力
         # 发送剩余 Langfuse span；未配置/未装配时零开销 no-op。
         flush_process_sink()

@@ -30,6 +30,7 @@ from agent_harness.session.service import (
     ActiveRunConflict,
     AmendOptions,
     InvalidForkBoundary,
+    SeqConflict,
     SessionNotFound,
     SessionService,
     UnknownModel,
@@ -59,6 +60,7 @@ def _state(tmp_path) -> MagicMock:
     state.store = JsonlSessionStore(root=tmp_path / "sessions")
     state.workspaces_root = tmp_path
     state.workspace_registry = None
+    state.workspace_index = None  # WS-2：项目索引未接线（本文件测模型继承）
     state.run_manager = MagicMock()
     state.run_manager.get_active = MagicMock(return_value=None)
     state.run_manager.launch = MagicMock(
@@ -485,6 +487,89 @@ class TestChangeModelDoesNotResume:
         )
 
         assert seen[-1].type == MODEL_CHANGED
+
+
+class TestConcurrentModelChange:
+    """BUG-011：两个并发 ``POST /model`` 不得把会话写死。
+
+    真机现场：模型项被双击 → 两个并发请求各自基于同一份快照取号 → 两条 seq=5 落盘
+    → 此后任何构造聚合的路径（``Session.load`` / ``resume``）永久失败 → 续聊恒
+    404（``Send failed: 404``，会话 ``dd983104``）。契约：并发下两个切换都要生效、
+    seq 严格单调、会话仍可 resume。
+
+    并发读的时序靠调度太不稳定（变异验证时抓到「有时红、有时假绿」），故用**冻结
+    快照**注入确定性：前两次 ``read_events`` 返回同一份「变更前」快照——正好是
+    ``change_model`` 每轮取的那一次快照，两个写者同号即 BUG-011 的机制本身。
+    之后回真实磁盘：重试路径据此拿到新号。两个变异都能稳定变红（见 commit 说明）：
+    去掉 store 守卫 → 重复 seq；去掉重试 → SeqConflict 直接抛出。
+    """
+
+    def test_parallel_changes_keep_seq_strictly_increasing(self, tmp_path, monkeypatch):
+        state = _state(tmp_path)
+        _seed_session(state, provider="deepseek", model_id="gpt-4o")
+        real_read = state.store.read_events
+        frozen = real_read("sid")
+        reads: list[int] = []
+
+        def read_with_frozen_first_snapshot(session_id: str):
+            if len(reads) < 2:  # 两个并发写者各读到一次「变更前」
+                reads.append(1)
+                return list(frozen)
+            return real_read(session_id)
+
+        monkeypatch.setattr(state.store, "read_events", read_with_frozen_first_snapshot)
+
+        async def run_both():
+            return await asyncio.gather(
+                SessionService(state).change_model(
+                    session_id="sid", provider="zhipu", model_id="glm-4.5"
+                ),
+                SessionService(state).change_model(
+                    session_id="sid", provider="deepseek", model_id="gpt-4o"
+                ),
+            )
+
+        changes = asyncio.run(run_both())
+
+        events = real_read("sid")
+        seqs = [e.seq for e in events]
+        assert len(seqs) == len(set(seqs)), f"seq 重复：{seqs}"
+        assert seqs == sorted(seqs)
+        model_changes = [e for e in events if e.type == MODEL_CHANGED]
+        # 两个切换都生效——不是「第二个被静默丢掉」
+        assert len(model_changes) == 2
+        assert {c.to_model_id for c in changes} == {"glm-4.5", "gpt-4o"}
+        # 后一条的 from_* 必须看到前一条的结果（冲突后重新取快照，不沿用旧快照）
+        assert (
+            model_changes[1].data["from_model_id"]
+            == model_changes[0].data["to_model_id"]
+        )
+        # 「没写死」的判据：会话仍能被 resume
+        assert Session.resume(state.store, "sid") is not None
+
+    def test_retry_is_bounded_and_surfaces_persistent_conflict(self, tmp_path, monkeypatch):
+        """持续冲突（重试用尽）→ 抛 SeqConflict，且重试次数有界。
+
+        断言尝试次数而不是只断言异常类型：否则「零重试」的实现也能通过（假绿）。
+        """
+        state = _state(tmp_path)
+        _seed_session(state, provider="deepseek", model_id="gpt-4o")
+        attempts: list[int] = []
+
+        def always_conflict(session_id: str, event):
+            attempts.append(1)
+            raise SeqConflict("注入：持续冲突")
+
+        monkeypatch.setattr(state.store, "append_event", always_conflict)
+
+        with pytest.raises(SeqConflict):
+            asyncio.run(
+                SessionService(state).change_model(
+                    session_id="sid", provider="zhipu", model_id="glm-4.5"
+                )
+            )
+
+        assert len(attempts) == 3, f"重试次数应为 3（有界），实际 {len(attempts)}"
 
 
 class TestFork:

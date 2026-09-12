@@ -16,7 +16,9 @@ from agent_harness.capability.base import (
 from agent_harness.capability.config import ProviderConfig, parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
-from agent_harness.tooling import Tool, ToolResult
+from agent_harness.memory.fake_capability import FakeMemoryCapability
+from agent_harness.memory.types import MemoryScope
+from agent_harness.tooling import Tool, ToolPermission, ToolResult, ToolSideEffect
 
 
 class TestParseConfig:
@@ -67,18 +69,19 @@ def _memory_settings(tmp_path, *, ready: bool) -> Settings:
 
 
 class _FakeMemoryComponents:
+    """provider seam 的 Fake（ADR-0024 D6）：只需 capability / writeback / 生命周期。
+
+    刻意**不带** `relay` / `records` / `vectors` 之类的内部组件——契约就是"装配方只调
+    `initialize()` / `close()`"，所以一个合法的 provider 不需要暴露任何内部结构。
+    """
+
     def __init__(self):
         self.initialized = False
-        self.relay_started = False
         self.closed = False
-        self.capability = object()
+        # 真 capability（不是占位 object）——这样"贡献出来的工具绑的是这个 seam capability"
+        # 可以用行为证明（写一条进去、经工具删掉），而不用伸进工具的私有属性。
+        self.capability = FakeMemoryCapability()
         self.writeback = object()
-
-        class _Relay:
-            def start(self): self.owner.relay_started = True  # type: ignore[attr-defined]
-            async def stop(self): pass
-        self.relay = _Relay()
-        self.relay.owner = self
 
     async def initialize(self): self.initialized = True
     async def close(self): self.closed = True
@@ -128,7 +131,7 @@ class TestWireCapabilities:
         fake = _FakeMemoryComponents()
         monkeypatch.setattr(
             "agent_harness.capability.factories.build_memory_components",
-            lambda settings: fake,
+            lambda settings, *, provider="builtin": fake,
         )
         registry = CapabilityRegistry()
         wiring = await wire_capabilities(
@@ -138,17 +141,51 @@ class TestWireCapabilities:
         assert registry.descriptor("memory").provider_name == "langmem"
         assert registry.descriptor("memory").degradation is Degradation.OPTIONAL_RUNTIME
         assert registry.get("memory") is fake.capability
-        assert fake.initialized and fake.relay_started
+        assert fake.initialized and not fake.closed
         assert len(wiring.context_providers) == 1
         assert wiring.memory_writer is fake.writeback
         assert wiring.memory is fake
+
+    @pytest.mark.asyncio
+    async def test_memory_contributes_the_forget_tool_via_the_contract(self, tmp_path, monkeypatch):
+        """AC4：遗忘工具走 **ContributesTools 收集循环**，且依赖**契约**而非具体 provider。
+
+        四条一起钉住：
+        1. 工具真的进了 `wiring.tools`（装配侧随后注册进唯一 ToolRegistry，不变量 #7）；
+        2. 它拿到的依赖是注册的那个 capability 对象（provider 可替换：换 fake 也成立）；
+        3. 权限分类是 DANGER + MUTATING（声明面；执行期的审批闸门在
+           `tests/memory/test_forget_tool.py` 用真 Executor 验）；
+        4. 工具贡献**不改变**描述符注册的 provider（仍是 capability 本身，seam 契约不被动摇）。
+        """
+        fake = _FakeMemoryComponents()
+        monkeypatch.setattr(
+            "agent_harness.capability.factories.build_memory_components",
+            lambda settings, *, provider="builtin": fake,
+        )
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(
+            registry, parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+            settings=_memory_settings(tmp_path, ready=True),
+        )
+
+        forget = [tool for tool in wiring.tools if tool.name == "forget_memory"]
+        assert len(forget) == 1
+        assert forget[0].permission is ToolPermission.DANGER
+        assert forget[0].side_effect is ToolSideEffect.MUTATING
+        assert registry.get("memory") is fake.capability
+        # 依赖注入用**行为**证明（不伸进私有属性）：这个工具删掉的就是这个 seam capability
+        # 里的那条记忆。
+        memory_id = await fake.capability.store(MemoryScope.USER, "wiring 注入证据", {})
+        result = await forget[0].execute(forget[0].args_schema(memory_id=memory_id))
+        assert result.ok is True
+        assert await fake.capability.list_entries(MemoryScope.USER, 10) == []
 
     @pytest.mark.asyncio
     async def test_disabled_entry_is_skipped(self, tmp_path, monkeypatch):
         called = []
         monkeypatch.setattr(
             "agent_harness.capability.factories.build_memory_components",
-            lambda settings: called.append(1),
+            lambda settings, *, provider="builtin": called.append(1),
         )
         registry = CapabilityRegistry()
         await wire_capabilities(

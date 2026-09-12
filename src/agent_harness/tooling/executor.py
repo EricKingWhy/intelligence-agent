@@ -39,6 +39,7 @@ import json
 import logging
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -90,6 +91,84 @@ _EXCEPTION_CLASSIFICATION: dict[type[Exception], tuple[ErrorCode, bool]] = {
     PermissionError: (ErrorCode.PERMISSION_DENIED, False),
     ConnectionError: (ErrorCode.TRANSIENT_ERROR, True),
 }
+
+
+@dataclass(frozen=True)
+class _ToolFailure:
+    """一次尝试失败的**单一事实**：error_code / retryable / message 同源产出。
+
+    为什么要有它：这三者在旧实现里由各自的分支分别拼装，OBS-009/014 的缺陷正是
+    文案（对 MUTATING 也写「可稍后重试」）与 `retryable=False` 矛盾——而失败文案是
+    **模型可见指令**，等于教模型盲重跑副作用状态未知的命令（不变量 #14）。收成一个
+    值对象后，三者由构造入口一次性决定，`ToolResult` 只是它的投影（`to_result`）；
+    要制造矛盾必须先绕过本类型，而不再是「两个分支各写各的」。
+
+    与行为无关：分类仍是确定性的**类型判断**，绝不解析错误字符串。
+
+    为什么 timeout 的 retryable 看 `tool.side_effect` 而不是错误码：超时后副作用
+    状态未知，是否可重跑取决于工具是否有副作用，同一 TIMEOUT 码因此有两种取值。
+    """
+
+    error_code: ErrorCode
+    retryable: bool
+    message: str
+
+    def to_result(self) -> ToolResult:
+        """投影成对外 ToolResult（唯一出口）。"""
+        return ToolResult.failure(
+            message=self.message,
+            error_code=self.error_code,
+            retryable=self.retryable,
+        )
+
+    @classmethod
+    def from_timeout(cls, tool: Tool, name: str) -> _ToolFailure:
+        """`asyncio.timeout` 到点：READ_ONLY 超时是暂时的、重跑安全 → 可重试；
+        MUTATING 超时意味着第 1 次尝试的副作用状态未知（进程可能仍在跑、写可能已
+        落盘）——不自动重试，交模型决定是否重发（不变量 #14：UNKNOWN 高风险工具
+        不盲重跑）。
+
+        注意本路径**不**产生 NEED_RECONCILE：run 内该操作按终态 FAILED 落盘；
+        UNKNOWN / ReconcileCallback 是**崩溃恢复**侧的对应机制
+        （recovery/coordinator.py）——两者同源（未知副作用不盲重跑）不同触发面。
+        """
+        retryable = tool.side_effect is not ToolSideEffect.MUTATING
+        limit = tool.timeout_seconds
+        if retryable:
+            message = (
+                f"工具 '{name}' 执行超时（上限 {limit} 秒），"
+                "可能是外部依赖暂时无响应，可稍后重试。"
+            )
+        else:
+            # 文案与实际 retryable 一致：不可重试就绝不写「可稍后重试」。
+            # 措辞不写死「改动 workspace」：MUTATING 是保守分类（bash 无法静态判定
+            # 只读），且 MCP 工具的副作用可能在**远端**（如 GitHub）——对这两类
+            # 说「会改动 workspace」都是假陈述。
+            message = (
+                f"工具 '{name}' 执行超时（上限 {limit} 秒），"
+                "该工具被判定为有副作用（bash 命令无法静态区分只读，"
+                "远端工具的影响也可能不在 workspace 内），"
+                "本次执行的副作用状态未知"
+                "（命令可能仍在运行，或已部分生效）——不要直接重跑；"
+                f"请先确认当前状态，或把操作拆成不超过 {limit} 秒的更短步骤。"
+            )
+        return cls(error_code=ErrorCode.TIMEOUT, retryable=retryable, message=message)
+
+    @classmethod
+    def from_exception(cls, error: Exception, name: str) -> _ToolFailure:
+        """查确定性类型分类表；未命中即工具内部错误、默认不重试。"""
+        error_code, retryable = ErrorCode.TOOL_EXECUTION_ERROR, False
+        for exc_type, (mapped_code, mapped_retryable) in (
+            _EXCEPTION_CLASSIFICATION.items()
+        ):
+            if isinstance(error, exc_type):
+                error_code, retryable = mapped_code, mapped_retryable
+                break
+        return cls(
+            error_code=error_code,
+            retryable=retryable,
+            message=f"工具 '{name}' 执行异常: {type(error).__name__}: {error}",
+        )
 
 
 class ToolExecution(BaseModel):
@@ -737,36 +816,13 @@ class ToolExecutor:
                 async with asyncio.timeout(tool.timeout_seconds):
                     result = await tool.execute(validated)
             except TimeoutError:
-                # asyncio.timeout 到点把 execute 掐断，抛出 TimeoutError。
-                # message 写清工具名 + 超时上限，给模型"外部依赖可能暂时无响应"的纠错线索；
-                # error_code 取 TIMEOUT（result.py 里该码语义即"超时 → 可重试"）；
-                # retryable：READ_ONLY 超时是暂时的、重跑安全 → True；MUTATING 超时
-                # 意味着第 1 次尝试的副作用状态未知（进程可能仍在跑、写可能已落盘）
-                # ——与 Recovery 对 UNKNOWN 副作用要求人工 reconcile 同一语义
-                # （不变量 #14）：不自动重试，交模型决定是否重发。
-                result = ToolResult.failure(
-                    message=(
-                        f"工具 '{name}' 执行超时（上限 {tool.timeout_seconds} 秒），"
-                        "可能是外部依赖暂时无响应，可稍后重试。"
-                    ),
-                    error_code=ErrorCode.TIMEOUT,
-                    retryable=tool.side_effect is not ToolSideEffect.MUTATING,
-                )
+                # asyncio.timeout 到点把 execute 掐断——映射细节（含 retryable 为何
+                # 取决于 side_effect）集中在 _ToolFailure.from_timeout。
+                result = _ToolFailure.from_timeout(tool, name).to_result()
             except Exception as e:  # noqa: BLE001
                 # 宽捕获理由同 Task 2：工具是开放世界，无法预知会抛什么。
-                # 区别是现在先查分类表（isinstance 连子类一起认），查不到再兜底。
-                error_code, retryable = ErrorCode.TOOL_EXECUTION_ERROR, False
-                for exc_type, (mapped_code, mapped_retryable) in (
-                    _EXCEPTION_CLASSIFICATION.items()
-                ):
-                    if isinstance(e, exc_type):
-                        error_code, retryable = mapped_code, mapped_retryable
-                        break
-                result = ToolResult.failure(
-                    message=f"工具 '{name}' 执行异常: {type(e).__name__}: {e}",
-                    error_code=error_code,
-                    retryable=retryable,
-                )
+                # 分类表查找（isinstance 连子类一起认）在 _ToolFailure.from_exception。
+                result = _ToolFailure.from_exception(e, name).to_result()
 
             duration_ms = round((perf_counter() - t0) * 1000, 1)
             total_ms += duration_ms

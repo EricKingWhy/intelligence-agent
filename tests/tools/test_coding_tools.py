@@ -8,11 +8,17 @@ ToolExecutor.execute()，断言 ToolResult 形状。复用 tests/tooling/test_ex
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 import pytest
 
-from agent_harness.sandbox import LocalSubprocessSandbox
+from agent_harness.sandbox import (
+    LocalSubprocessSandbox,
+    ShellEnvironment,
+    ShellFamily,
+)
 from agent_harness.tooling import (
     ErrorCode,
     ToolExecutor,
@@ -197,6 +203,137 @@ class TestBashTool:
         assert "out" in result.result.data["stdout"]
         assert "err" in result.result.data["stderr"]
         assert "duration_ms" in result.result.data
+
+
+class _ShellStub(LocalSubprocessSandbox):
+    """只覆写 shell_environment 的替身：让各 family 的描述分支在任何平台都可测。"""
+
+    def __init__(self, workspace_root: Path, shell: ShellEnvironment) -> None:
+        super().__init__(workspace_root=workspace_root)
+        self._shell = shell
+
+    @property
+    def shell_environment(self) -> ShellEnvironment:
+        return self._shell
+
+
+class TestBashToolShellHonesty:
+    """OBS-012：工具名叫 bash，但**没有任何后端真的用 bash**——描述必须声明真相。
+
+    为什么值得一个专类：模型按工具名写 bash 语法，在 Windows（cmd.exe）会被解析器
+    直接拒绝（本机实证报错「此时不应有 i。」，见 OBS-011 的复现），整次工具调用作废。
+    工具描述是模型唯一的线索来源，所以「声明与真相一致」本身就是要锁的契约。
+    """
+
+    def test_description_declares_the_real_shell_and_denies_bash(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        description = BashTool(sandbox).description
+
+        assert sandbox.shell_environment.name in description
+        assert "不是 bash" in description
+
+    @pytest.mark.skipif(os.name != "nt", reason="shell=True 走 COMSPEC 仅 Windows")
+    def test_local_sandbox_reports_cmd_exe_on_windows(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        env = sandbox.shell_environment
+        assert env.name.lower().endswith("cmd.exe")
+        assert env.family is ShellFamily.CMD
+
+    @pytest.mark.skipif(os.name != "nt", reason="shell=True 走 COMSPEC 仅 Windows")
+    def test_local_sandbox_shell_comes_from_comspec_not_a_literal(
+        self, tmp_path, monkeypatch
+    ):
+        """必须真的读 COMSPEC——硬编码 "cmd.exe" 会在这里变红。
+
+        本机 COMSPEC 恰好就是 cmd.exe，所以「与 COMSPEC 相等」的断言无法区分硬编码；
+        这里注入一个**带引号的、独一份的**值，一并锁住引号剥离（否则模型可见描述会
+        出现 `mystery-shell.exe"`）。
+        """
+        monkeypatch.setenv("COMSPEC", r'"C:\opt\weird\mystery-shell.exe"')
+
+        env = LocalSubprocessSandbox(workspace_root=tmp_path).shell_environment
+        assert env.name == "mystery-shell.exe"
+        assert env.family is ShellFamily.CMD
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX 上 shell=True 用 /bin/sh")
+    def test_local_sandbox_reports_posix_sh(self, sandbox: LocalSubprocessSandbox):
+        env = sandbox.shell_environment
+        assert env.name == "/bin/sh"
+        assert env.family is ShellFamily.POSIX_SH
+
+    def test_description_warns_about_cmd_pitfalls_for_cmd_like_shell(self, tmp_path):
+        stub = _ShellStub(tmp_path, ShellEnvironment("cmd.exe", ShellFamily.CMD))
+
+        description = BashTool(stub).description
+
+        assert "单引号" in description
+        assert "$VAR" in description
+        assert "2>/dev/null" in description
+
+    def test_description_omits_cmd_pitfalls_for_posix_shell(self, tmp_path):
+        stub = _ShellStub(tmp_path, ShellEnvironment("/bin/sh", ShellFamily.POSIX_SH))
+
+        description = BashTool(stub).description
+
+        assert "/bin/sh" in description
+        assert "不是 bash" in description
+        assert "单引号" not in description
+
+    def test_description_does_not_deny_bash_when_backend_really_uses_bash(
+        self, tmp_path
+    ):
+        """后端真用 bash 时不得出现「实际解释器是 bash（不是 bash）」的自相矛盾。"""
+        stub = _ShellStub(tmp_path, ShellEnvironment("bash", ShellFamily.BASH))
+
+        description = BashTool(stub).description
+
+        assert "实际解释器是 bash" in description
+        assert "不是 bash" not in description
+
+    def test_family_drives_guidance_not_the_name(self, tmp_path):
+        """家族决定语法提示，名字只用于显示——子串嗅探已被结构性取代。
+
+        旧实现按 `"cmd" in name` / `"bash" in name` 判定，这两种声明都会被它判错：
+        名字像 cmd 但家族是 POSIX 会给错陷阱；名字古怪但家族是 CMD 会漏掉陷阱。
+        """
+        posix_with_cmd_name = BashTool(_ShellStub(
+            tmp_path, ShellEnvironment("cmd.exe", ShellFamily.POSIX_SH),
+        )).description
+        assert "单引号" not in posix_with_cmd_name
+
+        cmd_with_odd_name = BashTool(_ShellStub(
+            tmp_path, ShellEnvironment("mystery-shell.exe", ShellFamily.CMD),
+        )).description
+        assert "单引号" in cmd_with_odd_name
+
+    def test_docker_backend_declares_posix_sh(self):
+        """容器后端声明 /bin/sh（与 exec 的 [\"/bin/sh\", \"-lc\", ...] 一致）。
+
+        不构造实例：`DockerSandbox.__init__` 需要能连上 Docker daemon。该 property
+        不读 self，故直接用类级 getter 取值。
+        """
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        assert DockerSandbox.shell_environment.fget(None) == ShellEnvironment(
+            name="/bin/sh", family=ShellFamily.POSIX_SH,
+        )
+
+    def test_base_declaration_is_not_abstract(self):
+        """`shell_environment` 必须**保持非抽象**：抽象化会让既有/第三方后端无法实例化
+        （ADR-0001 冻结 6 个抽象方法，加后端不应被迫改实现）。"""
+        from agent_harness.sandbox.base import Sandbox
+
+        assert "shell_environment" not in Sandbox.__abstractmethods__
+
+    def test_base_contract_default_is_posix_sh(self):
+        """基类默认（第三方后端未覆写时）必须是保守的 POSIX sh，而不是 bash。"""
+        from agent_harness.sandbox.base import Sandbox
+
+        assert Sandbox.shell_environment.fget(None) == ShellEnvironment(
+            name="sh", family=ShellFamily.POSIX_SH,
+        )
 
 
 # ============================================================================
@@ -417,13 +554,33 @@ class TestReadOutputBudget:
     async def test_byte_cap_truncates_giant_single_line(
         self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
     ):
-        """单行 200KB：字节帽（50KB）先于行帽生效，同样给续读标记。"""
+        """单行 200KB：字节帽（50KB）先于行帽生效，同样给续读标记。
+
+        OBS-016：标记里的续读指引**不得**点名 POSIX 专有命令——本机真实解释器是
+        cmd.exe（Windows），`sed` / `head -c` / `tail -c` 都不存在，模型照做会拿到
+        `'sed' is not recognized` 而整次调用作废（与 OBS-012 同一缺陷类）；同时必须
+        点名一个**真实存在的工具标识符**，否则等于把模型指向不存在的东西。
+        """
         sandbox.write_text("one_line.txt", "x" * 200_000 + "\n")
         result = await executor.execute(_tool_call("read", {"path": "one_line.txt"}))
 
         content = result.result.data["content"]
         assert len(content) < 100_000, "字节帽未生效"
         assert "truncated" in content, "超长单行截断必须显式标记（不能续读）"
+
+        marker = content.split("\n")[-1]
+        # 前端 LINE_TRUNCATED_RE 的解析契约：`[Line (\d+) truncated at (\d+) bytes` + 结尾 ']'
+        parsed = re.search(r"\[Line (\d+) truncated at (\d+) bytes", marker)
+        assert parsed is not None, "标记前缀形状变了，前端 parseReadShape 会失效"
+        assert (int(parsed.group(1)), int(parsed.group(2))) == (1, 51200)
+        assert marker.endswith("]")
+        # 不得教 POSIX 专有命令（词边界匹配：不能误伤 used/closed/based 之类）
+        for posix_only in ("sed", "head", "tail"):
+            assert not re.search(rf"\b{posix_only}\b", marker), (
+                f"续读指引教了 POSIX 专有命令：{posix_only}"
+            )
+        # 必须指向真实存在的工具标识符（read.py 里注册的是 bash / grep）
+        assert re.search(r"\b(bash|grep)\b", marker), "提示未点名任何真实存在的工具"
 
     @pytest.mark.asyncio
     async def test_offset_beyond_end_is_invalid(

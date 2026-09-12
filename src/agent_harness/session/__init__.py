@@ -4,6 +4,7 @@ Phase 1 完整导出：SessionEvent DTO、JsonlSessionStore、derive_messages、
 """
 
 from agent_harness.session.context import run_context_var
+from agent_harness.session.cwd import cwd_event_data, session_cwd
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
     derive_messages,
@@ -46,6 +47,7 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
 )
+from agent_harness.session.header import StartedHeader
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 
@@ -88,8 +90,11 @@ __all__ = [
     "JsonlSessionStore",
     "Session",
     "SessionEvent",
+    "StartedHeader",
+    "cwd_event_data",
     "derive_messages",
     "detect_dangling",
     "run_context_var",
+    "session_cwd",
 ]
 

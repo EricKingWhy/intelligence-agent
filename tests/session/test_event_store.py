@@ -16,6 +16,7 @@ from agent_harness.session import (
     Session,
     SessionEvent,
 )
+from agent_harness.session.errors import SeqConflict
 
 # ── SessionEvent DTO ──
 
@@ -223,6 +224,126 @@ class TestJsonlSessionStore:
 
         assert len(store.read_events("s1")) == 2
         assert len(store.read_events("s2")) == 1
+
+
+class TestSeqMonotonicityGuard:
+    """append-only 的 seq 守卫：重复 / 回退 seq 只能拒写，不能落盘（BUG-011）。
+
+    两个写者各自基于同一份快照取号时，后一个的 seq 会 ≤ 已落盘最大 seq。真机会话
+    `dd983104` 就是这么坏的：两条 seq=5 → 任何构造 Session 聚合的路径（load/resume）
+    永久失败 → 续聊恒 404（`Send failed: 404`）。规格要求 seq 在单 Session 内严格
+    单调（`03_SESSION_EVENT_MODEL.md` §2），故契约是「拒写 + SeqConflict」，而不是
+    把重复 seq 静默写进日志。
+    """
+
+    def test_duplicate_seq_is_rejected_without_writing(self, tmp_path: Path):
+        store = JsonlSessionStore(root=tmp_path)
+        store.append_event("s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1"))
+
+        with pytest.raises(SeqConflict):
+            store.append_event("s1", SessionEvent(seq=0, type=USER_MESSAGE, session_id="s1"))
+
+        assert [e.seq for e in store.read_events("s1")] == [0], "重复 seq 被写进了日志"
+
+    def test_regressed_seq_is_rejected(self, tmp_path: Path):
+        store = JsonlSessionStore(root=tmp_path)
+        store.append_event("s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1"))
+        store.append_event("s1", SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1"))
+
+        with pytest.raises(SeqConflict):
+            store.append_event("s1", SessionEvent(seq=0, type=USER_MESSAGE, session_id="s1"))
+
+        assert [e.seq for e in store.read_events("s1")] == [0, 1]
+
+    def test_sequential_appends_still_pass(self, tmp_path: Path):
+        """正向：max+1 正常通过——守卫不得拦住正常追加。"""
+        store = JsonlSessionStore(root=tmp_path)
+        store.append_event("s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1"))
+        store.append_event("s1", SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1"))
+
+        assert [e.seq for e in store.read_events("s1")] == [0, 1]
+
+    def test_fresh_store_instance_takes_disk_as_truth(self, tmp_path: Path):
+        """新实例（新进程）必须重新以磁盘为准——进程内缓存不能替磁盘说话。"""
+        JsonlSessionStore(root=tmp_path).append_event(
+            "s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1")
+        )
+        other = JsonlSessionStore(root=tmp_path)
+
+        with pytest.raises(SeqConflict):
+            other.append_event("s1", SessionEvent(seq=0, type=USER_MESSAGE, session_id="s1"))
+
+    def test_external_append_invalidates_cached_last_seq(self, tmp_path: Path):
+        """另一实例先追加 seq=1：本实例缓存陈旧（0），也必须拦住撞号的 seq=1。
+
+        缓存只能加速，不能替磁盘判「这个 seq 还空着」。CLI 与 server 共用同一
+        `settings.workspace_dir/sessions`，缓存缝隙漏进来的就是重复 seq。
+        """
+        store = JsonlSessionStore(root=tmp_path)
+        store.append_event("s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1"))
+        JsonlSessionStore(root=tmp_path).append_event(
+            "s1", SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1")
+        )
+
+        with pytest.raises(SeqConflict):
+            store.append_event("s1", SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1"))
+
+        assert [e.seq for e in store.read_events("s1")] == [0, 1]
+
+    def test_seq_after_external_append_is_accepted(self, tmp_path: Path):
+        """同上场景的放行侧：外部追加 seq=1 后，本实例追 seq=2 必须成功。"""
+        store = JsonlSessionStore(root=tmp_path)
+        store.append_event("s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1"))
+        JsonlSessionStore(root=tmp_path).append_event(
+            "s1", SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1")
+        )
+
+        store.append_event("s1", SessionEvent(seq=2, type=USER_MESSAGE, session_id="s1"))
+
+        assert [e.seq for e in store.read_events("s1")] == [0, 1, 2]
+
+    def test_guard_does_not_leak_between_sessions(self, tmp_path: Path):
+        """每会话独立：s2 的 seq 不受 s1 进度影响。"""
+        store = JsonlSessionStore(root=tmp_path)
+        store.append_event("s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1"))
+        store.append_event("s1", SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1"))
+
+        store.append_event("s2", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s2"))
+
+        assert len(store.read_events("s1")) == 2
+        assert len(store.read_events("s2")) == 1
+
+    def test_append_event_is_mutually_exclusive_per_session(self, tmp_path: Path):
+        """守卫的「读已落盘最大 seq → 判定 → 写」必须在同一临界区内。
+
+        没有这把锁，两个线程可能都读到同一 last_seq、都通过判定、都落盘——守卫
+        本身就不是原子的（这是 BUG-011 修复里锁承重的原因）。直接验证互斥：
+        持锁期间另一个线程的 append 不得完成；释放后正常完成。
+        """
+        import threading
+
+        store = JsonlSessionStore(root=tmp_path)
+        store.append_event("s1", SessionEvent(seq=0, type=SESSION_STARTED, session_id="s1"))
+        started = threading.Event()
+        done = threading.Event()
+
+        def worker() -> None:
+            started.set()
+            store.append_event("s1", SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1"))
+            done.set()
+
+        lock = store._lock_for("s1")
+        lock.acquire()
+        try:
+            thread = threading.Thread(target=worker)
+            thread.start()
+            assert started.wait(timeout=5), "工作线程未启动"
+            assert not done.wait(timeout=0.3), "append 未持锁：检查与写入之间有窗口"
+            assert [e.seq for e in store.read_events("s1")] == [0], "被锁挡住却已落盘"
+        finally:
+            lock.release()
+        assert done.wait(timeout=5), "释放锁后 append 未完成"
+        assert [e.seq for e in store.read_events("s1")] == [0, 1]
 
 
 def test_append_event_fsyncs_for_power_loss_durability(tmp_path, monkeypatch):

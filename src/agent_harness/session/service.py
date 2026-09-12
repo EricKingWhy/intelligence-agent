@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
@@ -52,11 +52,13 @@ from agent_harness.session.errors import (
     InvalidSessionId,
     QueueItemNotFound,
     RecoveryConflict,
+    SeqConflict,
     SessionNotFound,
     SessionServiceError,
     SteerTargetNotFound,
     UnknownModel,
     WorkspaceNameInvalid,
+    WorkspaceNotFound,
 )
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
@@ -79,8 +81,12 @@ from agent_harness.session.model_switch import (
     amend_with_session_model as _amend_with_session_model,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
-from agent_harness.session.session import Session
-from agent_harness.session.store import JsonlSessionStore
+from agent_harness.session.session import Session, validate_event_seq
+from agent_harness.session.store import (
+    JsonlSessionStore,
+    SessionSummaryStats,
+    WorkspaceRef,
+)
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalResponse,
@@ -93,6 +99,7 @@ if TYPE_CHECKING:
     from agent_harness.recovery.scan import InterruptionScanResult
     from agent_harness.web.app import AppState
     from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
+    from agent_harness.workspace.index import WorkspaceIndex
 
 
 logger = logging.getLogger(__name__)
@@ -107,6 +114,12 @@ logger = logging.getLogger(__name__)
 #: 反斜杠段在 win32 上可越出 sessions 根目录，盘符段可整体替换基路径。
 #: 字符集与 S3ArtifactStore 的 key 段规则一致。
 _SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+#: 非 live 追加路径撞上 seq 冲突时的重试次数（BUG-011）。
+#: 「读快照 → 取号 → append」不是原子的：并发写者可能在本请求读完之后落盘同号，
+#: 此时 store 的 seq 守卫拒写。重读快照即可拿到新号——3 次足够覆盖真实并发度
+#: （真机现场是双击产生的两个请求），持续竞争则把 SeqConflict 抛给上层。
+_WRITE_CONFLICT_ATTEMPTS = 3
 
 
 def validate_session_id(session_id: str) -> str:
@@ -243,29 +256,79 @@ class SessionService:
 
     # ── 只读操作 ─────────────────────────────────────────────────────
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
-        """列出所有 session 摘要（按最近活动倒序）。
+    async def list_sessions(
+        self, *, workspace_id: str | None = None
+    ) -> list[SessionSummaryStats]:
+        """列出 session 摘要。
 
-        返回 list of dict（与 SessionSummary 字段一致），
-        由调用方映射为 API response model。
+        - **默认**：全部会话，按**最近活动**倒序（既有契约不变；未分组会话照旧在列表里
+          可见，AC5）。
+        - **`workspace_id` 给出时**：只列该项目的会话，顺序 = **账本的手工序**
+          （AC4——活动时间永不重排，否则用户手工拖过的顺序每次刷新就丢）；项目未注册
+          → `WorkspaceNotFound`（404），**不**伪装成空列表。
+
+        每行回填 `workspace`（AC1/AC2）：未分组 → `None`，绝不伪造。项目归属只来自
+        `WorkspaceIndex`（账本 ∩ header cwd），**不读** sandbox 的 `WorkspaceRegistry`
+        映射表——那是沙箱生命周期记录，不是成员资格真源（#152 的交接约束）。
+
+        直接返回领域 dataclass（`SessionSummaryStats` 自带 `session_id`），不拼一层
+        只做形状复述、没有校验与行为的 dict 中转——列表行的字段因此在领域层就有带类型的
+        唯一定义点。由调用方（`web/app.py`）映射为 API response model。
         """
+        await self._state.ensure_stores()
         store = self._state.store
-        ids = await anyio.to_thread.run_sync(store.list_session_ids)
-        summaries: list[dict[str, Any]] = []
+        index = self._state.workspace_index
+
+        if workspace_id is not None:
+            # `index.get()` 经 `_view → _visible_ids → _filter_visible → _read_header`
+            # 真读每个账本候选的 `events.jsonl` 头部——该读取有意**不缓存**
+            # （见 `WorkspaceIndex._read_header` 的 AC6 理由）。与下面的
+            # `read_session_summary` 同理：同步磁盘 I/O 必须离开事件循环，否则一次
+            # 列表请求就阻塞整个 asyncio loop（该处文档承诺"同步磁盘 I/O 仍走
+            # to_thread 卸载"，本行必须与之一致）。
+            workspace = (
+                await anyio.to_thread.run_sync(index.get, workspace_id)
+                if index is not None
+                else None
+            )
+            if workspace is None:
+                raise WorkspaceNotFound(f"workspace '{workspace_id}' not found")
+            ids: list[str] = list(workspace.session_ids)
+            fixed_ref = WorkspaceRef(id=workspace.id, title=workspace.title)
+            refs: dict[str, WorkspaceRef] = {}
+        else:
+            ids = await anyio.to_thread.run_sync(store.list_session_ids)
+            fixed_ref = None
+            # 一次 list() 建出全量 {session_id: 项目引用} 映射：逐行调
+            # `workspace_of_session` 会是 O(行数 × 项目数 × 账本长度)。`list()` 每条
+            # 账本只读一次 header，且 session_ids 已过成员资格过滤。
+            # `run_sync` 只接位置参数；读 header 同样是同步 I/O，一并卸载。
+            refs = await anyio.to_thread.run_sync(
+                self._workspace_refs_by_session, index
+            )
+
+        summaries: list[SessionSummaryStats] = []
         for sid in ids:
             stats = await anyio.to_thread.run_sync(store.read_session_summary, sid)
             if stats is None or stats.event_count == 0:
                 continue
-            summaries.append(
-                {
-                    "session_id": sid,
-                    "event_count": stats.event_count,
-                    "first_event_time": stats.first_event_time,
-                    "last_event_time": stats.last_event_time,
-                    "first_user_message": stats.first_user_message,
-                }
-            )
+            ref = fixed_ref if workspace_id is not None else refs.get(sid)
+            summaries.append(replace(stats, workspace=ref) if ref is not None else stats)
         return summaries
+
+    @staticmethod
+    def _workspace_refs_by_session(
+        index: WorkspaceIndex | None,
+    ) -> dict[str, WorkspaceRef]:
+        """`{session_id: 项目引用}`（`index` 为 None → 空映射 = 全部未分组）。"""
+        if index is None:
+            return {}
+        refs: dict[str, WorkspaceRef] = {}
+        for workspace in index.list():
+            ref = WorkspaceRef(id=workspace.id, title=workspace.title)
+            for session_id in workspace.session_ids:
+                refs[session_id] = ref
+        return refs
 
     async def get_events(self, session_id: str) -> list:
         """读取 session 的完整事件历史（只读，不 mutate）。
@@ -374,7 +437,27 @@ class SessionService:
         session = Session.start(
             self._state.store, session_id=session_id,
             started_data=initial_model_data or None,
+            # WS-1 #151：会话侧 cwd 锚由**创建者**赋予（这里），与 build_runtime
+            # 写进映射表的 workspace_root 是同一路径、同一套规范化（AC5）。
+            #
+            # AC6「会话先落盘、之后才 attach 到项目」的两半：① cwd 与会话同在第一
+            # 条事件里，所以"存在但没有 cwd 的会话"结构上不可能（这一半已成立）；
+            # ② attach 本身是 WS-2 的 attachSession，尚不存在。上面的 build_runtime
+            # 先写了 sandbox 映射表，但那张表不是 attach（它是 sandbox 生命周期
+            # 记录，R6-6 刻意让它先于会话落盘，避免组装失败留下孤儿 session）——
+            # WS-2 的 attachSession 必须自己按会话 header 的规范 cwd 校验，不得
+            # 反过来信任映射表。
+            cwd=workspace,
         )
+
+        # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
+        # "先建会话再 attach"）。只对**显式命名**的 workspace 做：未命名时目录是
+        # workspaces_root/<session_id>（"用户没选项目"的实现痕迹），把它注册成项目会
+        # 给每个未命名会话凭空造出一个项目（ADR-0025 D6）。
+        # 项目实体由 create 幂等建立（同名 workspace 的多会话共享同一 path → 同一项目）。
+        if workspace_name is not None and self._state.workspace_index is not None:
+            await self._state.workspace_index.create(workspace, title=workspace_name)
+            await self._state.workspace_index.attach_session(session_id)
 
         # 交互式审批：把真实 session 注入 callback 闭包
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
@@ -416,27 +499,30 @@ class SessionService:
         if self._state.run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
 
-        try:
-            # T8 #138：崩溃遗留（悬空 tool_call / 无终态 run）必须走 Ledger
-            # reconcile——Session.resume 的 dangling 兜底对 RUNNING/UNKNOWN 的
-            # tool_call 一律伪造「结果未知」，等于替高风险副作用猜结论
-            # （不变量 #13/#14）。recover() 是唯一恢复入口：UNKNOWN 无 callback
-            # 时安全拒绝（→ 409），确定性项精确回填后再 load 继续跑。
-            if detect_dangling(existing) or detect_unterminated_runs(existing):
-                await self.recover(session_id)
-                session = Session.load(
-                    self._state.store,
-                    session_id,
-                    workspace_registry=self._state.workspace_registry,
-                )
-            else:
-                session = Session.resume(
-                    self._state.store,
-                    session_id,
-                    workspace_registry=self._state.workspace_registry,
-                )
-        except ValueError as error:
-            raise SessionNotFound(str(error)) from error
+        # T8 #138：崩溃遗留（悬空 tool_call / 无终态 run）必须走 Ledger
+        # reconcile——Session.resume 的 dangling 兜底对 RUNNING/UNKNOWN 的
+        # tool_call 一律伪造「结果未知」，等于替高风险副作用猜结论
+        # （不变量 #13/#14）。recover() 是唯一恢复入口：UNKNOWN 无 callback
+        # 时安全拒绝（→ 409），确定性项精确回填后再 load 继续跑。
+        #
+        # 不在这里 catch ValueError → SessionNotFound（BUG-011 移除）：会话存在性
+        # 已在上方 `if not existing` 判定过，此后的异常都不是「不存在」。旧映射把
+        # `Session.load` 的 seq 冲突（数据完整性）一律谎报成 404，客户端只能显示
+        # `Send failed: 404`。现在 load/resume 抛类型化领域异常（SeqConflict /
+        # SessionNotFound），由端点各自的 except 元组精确翻译。
+        if detect_dangling(existing) or detect_unterminated_runs(existing):
+            await self.recover(session_id)
+            session = Session.load(
+                self._state.store,
+                session_id,
+                workspace_registry=self._state.workspace_registry,
+            )
+        else:
+            session = Session.resume(
+                self._state.store,
+                session_id,
+                workspace_registry=self._state.workspace_registry,
+            )
 
         workspace = self._state.workspaces_root / session_id
         workspace.mkdir(parents=True, exist_ok=True)
@@ -807,10 +893,34 @@ class SessionService:
         assert_model_resolvable(self._state.settings, target)
         # 在途 run 存在时用它的 Session 聚合追加（seq 不撞号 + listener 实时广播）；
         # 否则只读加载一个聚合。两条路径都只 append，不走 resume。
-        live = self._live_session(session_id) or Session(
-            session_id, self._state.store, existing
-        )
-        return append_model_change(live, target)
+        #
+        # 冲突重试（BUG-011）：非 live 路径的「读快照 → 取号 → append」不是原子的
+        # ——并发写者（真机现场是模型项被双击的两个请求）可能在本请求读完之后落盘
+        # 同号，此时 store 的 seq 守卫拒写。重新读快照再试即可拿到新号，from_* 也
+        # 随之从新快照重算。live 路径由事件循环串行化、且该聚合不可重建，不重试。
+        #
+        # 存在性与 seq 校验放在**循环内**、append 的 try 之外：重试期间会话可能消失
+        # （→404）或日志暴露损坏（→409）。校验抛出的 SeqConflict 是**终态**（日志已
+        # 损坏、重读同一文件无用），不能被下面的 except 当成可重试的写时冲突吞掉。
+        attempts_left = _WRITE_CONFLICT_ATTEMPTS
+        while True:
+            attempts_left -= 1
+            live = self._live_session(session_id)
+            if live is not None:
+                return append_model_change(live, target)
+            if not existing:
+                raise SessionNotFound(f"session '{session_id}' not found")
+            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
+            try:
+                return append_model_change(
+                    Session(session_id, self._state.store, existing), target
+                )
+            except SeqConflict:
+                if attempts_left <= 0:
+                    raise
+                existing = await anyio.to_thread.run_sync(
+                    self._state.store.read_events, session_id
+                )
 
     async def fork(
         self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
@@ -848,6 +958,12 @@ class SessionService:
         except ForkBoundaryError as error:
             raise InvalidForkBoundary(str(error)) from error
         inherit_parent_model(child, existing)
+        # WS-2 / #152：fork child 继承了父的 header cwd（#151 AC4），所以它应当出现在
+        # 父所属的项目里。attach 只加入**已注册**的项目：父是未命名会话（其目录未注册）
+        # → child 也保持 Ungrouped，与父一致。SubAgent 子会话不走这里（内部子代理
+        # 不进项目列表，见 ADR-0025 D6 说明）。
+        if self._state.workspace_index is not None:
+            await self._state.workspace_index.attach_session(child.session_id)
         return child.session_id
 
     # ── 内部方法 ─────────────────────────────────────────────────────

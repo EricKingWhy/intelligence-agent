@@ -47,6 +47,7 @@ import aiosqlite
 from pydantic import ValidationError
 
 from agent_harness.logging import log_event
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import (
@@ -145,10 +146,9 @@ class SkipPendingPolicy(PendingPolicy):
 
     def result_for(self, operation: Operation) -> ToolResult:
         return ToolResult.failure(
-            message=(
-                f"操作 '{operation.tool_name}' 在进程崩溃前尚未启动，"
-                "恢复时按策略跳过，未自动重新执行。"
-            ),
+            message=DEFAULT_REGISTRY.assemble(
+                "frame:recovery_skipped", {"tool_name": operation.tool_name},
+            ).fragment_text,
             error_code=ErrorCode.CANCELLED,
             retryable=False,
         )

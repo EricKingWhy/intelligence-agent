@@ -11,7 +11,12 @@ from pathlib import Path, PurePosixPath
 from time import perf_counter
 from uuid import uuid4
 
-from agent_harness.sandbox.base import ExecResult, Sandbox
+from agent_harness.sandbox.base import (
+    ExecResult,
+    Sandbox,
+    ShellEnvironment,
+    ShellFamily,
+)
 from agent_harness.sandbox.local import DEFAULT_EXEC_TIMEOUT
 
 
@@ -53,6 +58,11 @@ class DockerSandbox(Sandbox):
     @property
     def workspace_root(self) -> PurePosixPath:
         return PurePosixPath("/workspace")
+
+    @property
+    def shell_environment(self) -> ShellEnvironment:
+        """容器内固定用 `/bin/sh -lc`（见 exec）——OBS-012：是 sh，不是 bash。"""
+        return ShellEnvironment(name="/bin/sh", family=ShellFamily.POSIX_SH)
 
     def ensure_started(self) -> None:
         if self._container is not None:
@@ -135,6 +145,9 @@ class DockerSandbox(Sandbox):
             raise holder["error"]
         result = holder["result"]
         stdout_bytes, stderr_bytes = result.output
+        # 这里**刻意**保持固定 UTF-8（与 LocalSubprocessSandbox 的 StreamDecoder 不同）：
+        # 产出方是 Linux 容器内的进程，不是宿主控制台——宿主代码页（中文 Windows=GBK）
+        # 与容器输出编码无关，套用只会引入错误。OBS-011 的宿主乱码不适用于本后端。
         return ExecResult(
             exit_code=result.exit_code,
             stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),

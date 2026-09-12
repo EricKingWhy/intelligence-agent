@@ -157,14 +157,9 @@ class TestWebWiringCoexistence:
             capability = object()
             writeback = object()
 
-            class _Relay:
-                def start(self): pass
-                async def stop(self): pass
-            relay = _Relay()
-
         monkeypatch.setattr(
             "agent_harness.capability.factories.build_memory_components",
-            lambda settings: _FakeMemory(),
+            lambda settings, *, provider="builtin": _FakeMemory(),
         )
         _make_skill(tmp_path)
 
@@ -177,7 +172,10 @@ class TestWebWiringCoexistence:
         assert [d.name for d in registry.available()] == ["memory", "skills", "ticker"]
         assert wiring.memory_writer is not None
         assert len(wiring.context_providers) == 2  # MemoryContextProvider + SkillCatalogContextProvider
-        assert [tool.name for tool in wiring.tools] == ["load_skill", "tick"]
+        # #159 起 memory 经契约贡献遗忘工具（收集循环的第二来源）——这个共存网关必须看见它，
+        # 否则"记忆工具真的接进了统一 ToolRegistry"就没有证据。断言**集合**而不是顺序：收集
+        # 顺序是实现细节，不是这个网关要守的行为。
+        assert {tool.name for tool in wiring.tools} == {"load_skill", "tick", "forget_memory"}
 
 
 class TestGate2SkillsProgressiveDisclosure:
@@ -237,7 +235,7 @@ class TestDegradation:
     async def test_factory_failure_degrades_and_base_agent_still_runs(self, tmp_path, monkeypatch):
         """OPTIONAL provider 构造失败 → 装配跳过（optional() None）→ 基础 Agent 照常运行。"""
 
-        def _boom(settings):
+        def _boom(settings, *, provider="builtin"):
             raise RuntimeError("simulated milvus outage")
 
         monkeypatch.setattr(

@@ -15,7 +15,9 @@ web 与 CLI 是它的两个 adapter（两个 adapter = 真实 seam）；capabili
 from __future__ import annotations
 
 import logging
+import platform
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,14 @@ from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
+from agent_harness.prompt import (
+    DEFAULT_REGISTRY,
+    build_registry,
+    compose_agent_prompt,
+    join_guidance,
+    parse_persona_config,
+    tool_guidance_sections,
+)
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
@@ -57,34 +67,57 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
+from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
+from agent_harness.workspace.index import SessionHeaders
 
 
 @dataclass
 class RecoveryStores:
     """恢复子系统三 Store（同一 SQLite 文件，ADR-0004 布局）。
 
-    AppState 与 CLI 各自构造实例、共享生命周期所有权；factory 只消费。"""
+    AppState 与 CLI 各自构造实例、共享生命周期所有权；factory 只消费。
+
+    `workspace_index` 是 ADR-0025 的 Workspace 实体 + 有序会话账本（WS-2 / #152），
+    同库不同表。它是**可选**成员：它需要会话 header 来源，而大量单测只调
+    `recovery_stores(path)` 不接会话存储——那些场景不需要项目索引，保持 `None`。"""
 
     operation_ledger: SqliteOperationLedger
     checkpoint_store: SqliteCheckpointStore
     session_meta_store: SqliteSessionMetaStore
+    workspace_index: WorkspaceIndex | None = None
 
 
-def recovery_stores(database_path: str | Path) -> RecoveryStores:
-    """构造恢复三 Store（同一 harness.db；未初始化——initialize_stores 幂等初始化）。"""
+def recovery_stores(
+    database_path: str | Path, *, workspace_headers: SessionHeaders | None = None
+) -> RecoveryStores:
+    """构造恢复 Store 束（同一 harness.db；未初始化——initialize_stores 幂等初始化）。
+
+    `workspace_headers` 给定时才装配 `workspace_index`（见 `RecoveryStores` 说明）。
+    """
     path = Path(database_path)
     return RecoveryStores(
         operation_ledger=SqliteOperationLedger(path),
         checkpoint_store=SqliteCheckpointStore(path),
         session_meta_store=SqliteSessionMetaStore(path),
+        workspace_index=(
+            WorkspaceIndex(SqliteWorkspaceStore(path), workspace_headers)
+            if workspace_headers is not None
+            else None
+        ),
     )
 
 
 async def initialize_stores(stores: RecoveryStores) -> None:
-    """恢复三 Store 幂等初始化（并发首请求由调用方的 once 语义守护）。"""
+    """Store 束幂等初始化（并发首请求由调用方的 once 语义守护）。
+
+    `workspace_index.initialize()` 顺带完成首次 bootstrap（AC14–16）——那一步需要
+    读会话 header，所以只在装了 index 的进程里发生。
+    """
     await stores.operation_ledger.initialize()
     await stores.checkpoint_store.initialize()
     await stores.session_meta_store.initialize()
+    if stores.workspace_index is not None:
+        await stores.workspace_index.initialize()
 
 
 async def assemble_wiring(
@@ -157,6 +190,11 @@ async def build_runtime(
         from agent_harness.agent.profiles import BUILTIN_PROFILES
         profile_spec = BUILTIN_PROFILES[agent_profile]
 
+    # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
+    # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
+    # DEFAULT_REGISTRY 不读环境（§4.4），所以这里显式按 settings 构建一次。
+    persona = parse_persona_config(settings.agent_persona)
+
     config = (ModelConfig.from_settings(settings) if model_name is None
               else ModelConfig.from_catalog(settings, model_name))
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
@@ -228,6 +266,14 @@ async def build_runtime(
     if profile_spec is not None and agent_profile != "main":
         registry = registry.filtered(profile_spec.tool_scope)
 
+    # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
+    # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。
+    # 内容边界由这个 registry 决定——coding 收窄后没有 delegate，所以它的 prompt
+    # 拿不到委派说明（工具缺席 → 说明缺席，这是本票的核心性质）。
+    prompt_registry = build_registry(
+        persona, tool_sections=tool_guidance_sections(registry.list()),
+    )
+
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
     # 同一审批面（决策 11 权限传递）。
@@ -252,12 +298,42 @@ async def build_runtime(
                 stream_total_timeout=settings.model_stream_total_timeout,
                 model_call_gate=model_call_gate,
                 observability_sink=get_observability_sink(settings),
+                persona=persona,
+                # child 的 guidance 来自它自己收窄后的 registry——这里显式开开关。
+                # Factory 默认 False：B2 契约（child.system_prompt == spec.system_prompt）
+                # 的成立必须与"工具恰好没有 guidance"无关。
+                include_tool_guidance=True,
             ),
             source_registry=registry,
             session_store=session_store,
             workspace_registry=workspace_registry,
             parent_session_id=session_id,
         )
+
+    def _render_runtime_context() -> str:
+        """渲染运行时上下文快照（T7 / ADR-0023 D8）——每次 build 调用一次。
+
+        事实来源全部取**当前**值，不缓存：
+        - `cwd`：当前进程工作目录；
+        - `os`：`platform.system()` + `release()`；
+        - `date`：本地日期，只到日（用 `datetime.now()` 会让每次 build 文本都变，
+          既毁 prefix cache 又难断言）；
+        - `model`：`config.model_name`（本次**实际**模型），不是 `settings.model_name`
+          ——用户用 `model_name` 参数选目录里的模型时后者可能为空；
+        - `tools`：**收窄后** registry 的工具名——coding profile 不该在快照里列出
+          它用不了的工具（与 T6 收集 guidance 同一原则）。
+
+        产物落 `meta_user`：快照是 user-role 消息，不是 system-role。
+        """
+        return DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
+            "cwd": str(Path.cwd()),
+            "os": f"{platform.system()} {platform.release()}",
+            # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
+            # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
+            "date": date.today().isoformat(),  # noqa: DTZ011
+            "model": config.model_name,
+            "tools": ", ".join(sorted(tool.name for tool in registry.list())),
+        }).meta_user_text
 
     return AgentRuntime(
         model=model,
@@ -277,7 +353,19 @@ async def build_runtime(
             context_providers=_select_context_providers(
                 wiring.context_providers, context_providers,
             ),
-            system_prompt=(profile_spec.system_prompt if profile_spec is not None else None),
+            # 有 profile → 走注册表组装：persona（0 / 10200）与工具 guidance（2000）
+            # 的 order 由容器排序，persona 为空且无 guidance 时该 scope 只有一条
+            # section，T2 保证产物逐字节等于原文（C5/C7 因此保持绿）。
+            # 无 profile → 没有可组装的 scope，直接文本包裹（guidance 仍拼进去：
+            # 它是"怎么用工具"的操作信息，与身份无关；两者皆空时返回 None，C4 保持）。
+            system_prompt=(
+                prompt_registry.assemble(f"profile:{agent_profile}").system_text
+                if profile_spec is not None
+                else compose_agent_prompt(None, persona, join_guidance(registry.list()))
+            ),
+            # T7：快照**不**拼进 system_prompt（那会破坏 T5/T6 与 C4/C5/C7 的逐字节
+            # 契约），而是走独立通道，由 builder 按 meta_user 语义插到当前用户消息前。
+            runtime_context_provider=_render_runtime_context,
         ),
         memory_writer=wiring.memory_writer,
         fallback_model=fallback_model,

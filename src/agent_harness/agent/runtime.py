@@ -54,6 +54,7 @@ from agent_harness.model.fallback import (
     TwoLevelFallbackPolicy,
 )
 from agent_harness.observability.tracer import RunTracer
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import (
     CONTEXT_COMPACTED,
     MODEL_COMPLETED,
@@ -93,6 +94,25 @@ _MEMORY_EXCLUDED_EVENT_TYPES = frozenset({
 })
 
 _DSML_MARKUP_MARKER = "<｜DSML｜"
+
+# provider 内容审查拒绝分类（阿里云 data_inspection_failed，2026-09-11 真实
+# 案例：百炼端点对含检索网页文本的二次调用 400）。识别后失败事件升级为固定
+# 可读文案，消费者（UI 事件检查器）无需翻服务端日志。只做分类——provider
+# 回显原文绝不进事件（脱敏不变量，见 append_model_failed）。
+CONTENT_MODERATION_REASON = "provider_content_moderation"
+CONTENT_MODERATION_MESSAGE = "provider 内容审查拒绝输入（可能因检索到的网页文本）"
+_CONTENT_MODERATION_MARKER = "data_inspection_failed"
+
+
+def _classify_provider_failure(error: BaseException) -> str | None:
+    """错误文本含内容审查错误码 → 返回分类 reason，否则 None（保持原行为）。
+
+    按文本匹配而不是 SDK 异常属性：openai SDK 对 SSE 形状的错误响应
+    （``data: {...}``）解析不出结构化 body，错误码只存在于 str(error) 里。
+    """
+    if _CONTENT_MODERATION_MARKER in str(error):
+        return CONTENT_MODERATION_REASON
+    return None
 
 
 def _usage_from_response(ai: Any) -> dict[str, int] | None:
@@ -183,16 +203,21 @@ class _RunFinalizer:
 
     def append_model_failed(
         self, *, step: int, cancelled: bool, error_type: str | None = None,
+        readable_message: str | None = None,
     ) -> SessionEvent:
         """模型在途失败/取消 → model/failed，把故障归因到具体一步。
 
         异常消息可能含 Provider 回显的敏感文本——事件只带类型名（与
-        memory/writeback 的脱敏不变量一致），完整消息只进结构化日志。
+        memory/writeback 的脱敏不变量一致），完整消息**与调用栈**只进结构化日志
+        （OBS-008：`_log(..., exc_info=True)` 落 `stack_trace(调用栈)`；此前只记类型名，
+        排障无从下手）。
+        ``readable_message`` 是**已分类故障**的固定可读文案（如内容审查拒绝）——
+        调用方只传本项目常量、绝不透传 provider 原文，脱敏边界不变。
         """
         if cancelled:
             message = "model call cancelled"
         else:
-            message = f"model call failed: {error_type}"
+            message = readable_message or f"model call failed: {error_type}"
         return self._session.append(
             MODEL_FAILED,
             {"message": message},
@@ -224,13 +249,16 @@ class _RunFinalizer:
         return event
 
     def failure_terminal(
-        self, *, steps: int, reason: str | None = None, trace_id: str | None = None,
+        self, *, steps: int, reason: str | None = None,
+        message: str | None = None, trace_id: str | None = None,
         trace_url: str | None = None,
     ) -> SessionEvent | None:
         """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。
 
         reason 落事件 data（如 identical_tool_failure_loop）——消费者区分失败
-        原因，与取消臂的 reason=cancelled 同一语义层。
+        原因，与取消臂的 reason=cancelled 同一语义层。message 是已分类故障的
+        固定可读文案（reason+message 成对，与上下文超限路径的 RUN_FAILED
+        形状一致）；缺省两者都不落键（合同：缺省 = 模型/执行器异常）。
         """
         if self.run_id is None or self._terminal_written:
             return None
@@ -238,6 +266,7 @@ class _RunFinalizer:
             self.run_id, status="failed",
             usage_total=dict(self._usage_total) or None,
             reason=reason,
+            message=message,
             trace_id=trace_id,
             trace_url=trace_url,
         )
@@ -289,16 +318,20 @@ class _TerminalContext:
 
     def close_observability(
         self, *, error_type: str | None, reason: str, cancelled: bool = False,
+        readable_message: str | None = None,
     ) -> list[SessionEvent]:
         """model/failed 归因 + tracer 收口（ctx_span / generation / run_failed）。
 
         ``cancelled`` 区分取消臂（True）与异常臂（False）的 model/failed 消息；
-        ``error_type`` 只落类型名（脱敏不变量，完整消息只进结构化日志）。
+        ``error_type`` 只落类型名（脱敏不变量）；完整消息与调用栈只进结构化日志
+        （见 `_log` 的 `exc_info`，OBS-008）。``readable_message`` 是已分类故障
+        的固定可读文案，透传给 model/failed（见 append_model_failed）。
         """
         events: list[SessionEvent] = []
         if self.terminal.model_call_open:
             events.append(self.terminal.append_model_failed(
                 step=self.steps, cancelled=cancelled, error_type=error_type,
+                readable_message=readable_message,
             ))
         if self.tracer is not None:
             if self.ctx_span is not None:
@@ -926,14 +959,20 @@ class AgentRuntime:
                         yield to_agent_event(soft_event)
                         corrective = session.append(
                             USER_MESSAGE,
-                            {"content": (
-                                f"同一调用 {worst_signal.tool_name!r} 已连续失败 "
-                                f"{worst_signal.consecutive_failures} 次。请改变策略"
-                                "（换参数、换工具或向用户说明遇到的具体困难），不要再"
-                                "以相同方式重试。"
-                            ),
+                            {"content": DEFAULT_REGISTRY.assemble(
+                                "corrective:tool_failure_guard",
+                                {
+                                    "tool_name": worst_signal.tool_name,
+                                    "consecutive_failures": str(
+                                        worst_signal.consecutive_failures
+                                    ),
+                                },
+                            ).fragment_text,
                              # runtime 注入的纠正消息不是真实用户发言——标记来源
-                             # 供前端投影/审计区分（不变量 #22 边缘）。
+                             # 供前端投影/审计区分（不变量 #22 边缘），**并供记忆
+                             # 抽取剔除**（memory/extractor.py 按此标记单点过滤：
+                             # 注入消息一旦被当成真实用户发言，工具输出里的注入指令
+                             # 就能被洗成跨会话 USER 记忆）。
                              "injected_by": "tool_failure_guard"},
                             run_id=run_id, step_id=step_base + steps,
                         )
@@ -1010,7 +1049,7 @@ class AgentRuntime:
                 self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
                           error=str(terminal_error),
-                          error_type=type(terminal_error).__name__)
+                          error_type=type(terminal_error).__name__, exc_info=True)
             self._log("task_failed", "Agent Loop 被取消（客户端断连？）",
                       span_id=run_span, outcome="cancelled")
             raise
@@ -1022,7 +1061,7 @@ class AgentRuntime:
             # task_failed 与正常结束的 task_completed 成对（logging.EVENT_TYPES 白名单）。
             self._log("task_failed", "Agent Loop 异常终止", span_id=run_span,
                       outcome="error", error=str(error),
-                      error_type=type(error).__name__)
+                      error_type=type(error).__name__, exc_info=True)
             # 终结事件写入自身也可能失败（例如存储故障）：逐段防护，保证
             # result_holder 一定拿到终态结果——"run() 必返回失败结果"的契约
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
@@ -1034,18 +1073,35 @@ class AgentRuntime:
                 )
                 # 本臂允许 yield——收尾事件（部分内容 + interrupted + 切换事实 +
                 # model/failed）逐条镜像给流消费者（与取消臂的唯一差异）。
+                # provider 内容审查拒绝（data_inspection_failed）→ 已分类 reason
+                # + 固定可读文案（run/failed 与 model/failed 成对升级，形状同
+                # 上下文超限路径）；其余异常保持类型名原行为。
+                # 分类只在**模型调用在途**时进行（model_call_open 正是 model/failed
+                # 的归因窗口）：本臂同时兜底工具/执行器异常，其错误文本可能恰好
+                # 引用该错误码（如抓取阿里云文档），不得误标为内容审查。
+                moderation_reason = (
+                    _classify_provider_failure(error)
+                    if terminal.model_call_open
+                    else None
+                )
+                moderation_message = (
+                    CONTENT_MODERATION_MESSAGE if moderation_reason else None
+                )
                 for streamed in ctx.interrupt_streams():
                     yield to_agent_event(streamed)
                 for streamed in ctx.close_observability(
                     error_type=type(error).__name__,
-                    reason=type(error).__name__,
+                    reason=moderation_reason or type(error).__name__,
                     cancelled=False,
+                    readable_message=moderation_message,
                 ):
                     yield to_agent_event(streamed)
                 # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
                 # 已写入的事件保持原样，失败只能由日志承载。
                 end_event = terminal.failure_terminal(
                     steps=step_base + steps,
+                    reason=moderation_reason,
+                    message=moderation_message,
                     trace_id=(tracer.trace_id if tracer else None),
                     trace_url=(tracer.trace_url if tracer else None),
                 )
@@ -1055,7 +1111,7 @@ class AgentRuntime:
                 self._log("task_failed", "失败兜底事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
                           error=str(terminal_error),
-                          error_type=type(terminal_error).__name__)
+                          error_type=type(terminal_error).__name__, exc_info=True)
             result_holder.append(
                 AgentRunResult(status=STATUS_FAILED, final_text="", steps=steps),
             )
@@ -1141,8 +1197,20 @@ class AgentRuntime:
                 session.session_id,
             )
 
-    def _log(self, event_type: str, message: str, **fields: Any) -> None:
-        """打一条结构化日志；无 handler 时静默 no-op（不污染未配日志的调用方/测试）。"""
+    def _log(self, event_type: str, message: str, *, exc_info: bool = False,
+             **fields: Any) -> None:
+        """打一条结构化日志；无 handler 时静默 no-op（不污染未配日志的调用方/测试）。
+
+        `exc_info=True`（须在 except 块内调用）让 JSONL 落 `stack_trace(调用栈)`：
+        durable 的 `model/failed` 事件按脱敏不变量**只带异常类型名**，完整消息与调用栈
+        必须由日志承载；否则排障只剩一个类型名，「哪一帧、哪个 SDK 调用挂的」全丢
+        （OBS-008：模型调用失败时 traceback 被吞）。
+
+        ⚠ 调用栈含**绝对路径（含宿主用户名）、源码行、以及链式异常（`__cause__`/
+        `__context__`）的消息**——比原先只记的 `error=str(...)` 更多。诊断 JSONL 是
+        本地未脱敏详情汇聚处（不变量 #4：Event ≠ Diagnostic Log），但**不要原样附到
+        issue / 上传**；需要外发时先脱敏。
+        """
         if not logger.hasHandlers():
             return
-        log_event(logger, event_type, message, **fields)
+        log_event(logger, event_type, message, exc_info=exc_info, **fields)

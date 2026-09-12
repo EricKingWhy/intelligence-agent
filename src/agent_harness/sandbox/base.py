@@ -13,7 +13,39 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
+
+
+class ShellFamily(str, Enum):
+    """解释器家族——决定**语法能力**，而不只是名字（OBS-012 深化）。
+
+    为什么是 str Enum：与 `ToolSideEffect` / `ErrorCode` 同理，日志可读、可序列化。
+
+    只有真的会被区分对待的家族：`BASH`（不能否认自己是 bash）、`CMD`（cmd.exe
+    专有陷阱）、`POSIX_SH`（其余 POSIX 兼容 sh 的保守归类）。刻意不加 `UNKNOWN`——
+    没有消费者的枚举值是投机抽象；后端未覆写时基类默认就是 POSIX sh，与它声明的
+    名字 `sh` 自洽。
+    """
+
+    POSIX_SH = "posix_sh"
+    BASH = "bash"
+    CMD = "cmd"
+
+
+@dataclass(frozen=True)
+class ShellEnvironment:
+    """该后端执行 `command` 时**实际**使用的解释器事实。
+
+    `name` 是模型可见的解释器名，`family` 决定语法能力。两者**必须一起声明**——
+    这正是本类型存在的理由：只给名字时，消费方（`BashTool`）只能靠
+    `"cmd" in name` 子串嗅探重新推导行为，等于把 Sandbox 一侧的知识漏过了 seam；
+    而「名字是 cmd.exe、家族却按 POSIX 处理」这种静默不一致在只给名字的接口下
+    根本无法表达。
+    """
+
+    name: str
+    family: ShellFamily
 
 
 @dataclass(frozen=True)
@@ -130,3 +162,23 @@ class Sandbox(ABC):
     @abstractmethod
     def workspace_root(self) -> Path:
         """workspace 根目录的绝对路径（路径边界的基准）。"""
+
+    # —— 执行环境事实（供模型可见的工具描述声明真相） ——
+
+    @property
+    def shell_environment(self) -> ShellEnvironment:
+        """该后端执行 `command` 时的**实际**解释器事实（名 + 家族）。
+
+        OBS-012：`BashTool` 的名字叫 bash，但**没有任何后端真的用 bash**——
+        LocalSubprocessSandbox 走 `subprocess` 的平台默认（POSIX = `/bin/sh`，
+        Windows = `cmd.exe`），DockerSandbox 硬编码 `["/bin/sh", "-lc", command]`。
+        模型按工具名以为是 bash，就会写出该解释器不认的语法（本机实证：cmd.exe 对
+        bash 语法报「此时不应有 i。」）。工具描述据此声明真相——**不要**让 Tool 层
+        自己用 `os.name` 猜：宿主是 Windows 时 Docker 容器内仍是 sh。
+
+        非抽象（**不并入 ADR-0001 冻结的 6 个抽象方法契约**，避免破坏既有/第三方后端
+        实现）：基类给保守的 POSIX sh 默认，子类应覆写为真实解释器 + 家族。
+        未覆写的第三方后端会得到 POSIX sh 行为——这是非抽象默认的固有代价，
+        已在此声明；两个具体后端都覆写。
+        """
+        return ShellEnvironment(name="sh", family=ShellFamily.POSIX_SH)

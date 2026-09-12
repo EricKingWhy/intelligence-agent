@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import nullcontext
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -159,21 +159,31 @@ class ModelFallbackCoordinator:
         return stream
         return stream
 
+    def _slot(self) -> AbstractAsyncContextManager[None]:
+        """取一个**新**的并发槽位——每次尝试都必须新取一个。
+
+        `ModelCallGate.slot()` 是 `@asynccontextmanager` 产物，**一次性**：退出时
+        contextlib 会 `del self.args`，复用同一个 CM 二次进入抛 `AttributeError`
+        （2026-09-11 真实事故：非流式 run 回退重试必崩；回归锁见
+        `tests/test_model_fallback.py::TestCoordinatorAinvoke::
+        test_ainvoke_fallback_retry_reacquires_concurrency_slot`）。
+        """
+        return self._gate.slot() if self._gate is not None else nullcontext(None)
+
     async def ainvoke(self, messages: list[AnyMessage]) -> Any:
         """非流式调用：primary 瞬时失败 → 切 fallback 重试一次。
 
         V1 看门狗不覆盖 ainvoke（总时限会误杀合法长推理）——socket 级
         read-timeout 仍是底线，见 model/stall.py 模块 docstring。
-        并发闸同样生效（非流式调用占一个槽位）。
+        并发闸同样生效（非流式调用占一个槽位，两次尝试各占一次）。
         """
-        slot = self._gate.slot() if self._gate is not None else nullcontext(None)
         try:
-            async with slot:
+            async with self._slot():
                 return await self.current.ainvoke(messages)
         except Exception as error:
             if not self._try_switch(error):
                 raise
-            async with slot:
+            async with self._slot():
                 return await self.current.ainvoke(messages)
 
     async def astream(

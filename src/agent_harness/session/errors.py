@@ -3,6 +3,10 @@
 调用方（Web handler / CLI）负责把领域异常翻译为 HTTP status / CLI 错误消息。
 所有异常都继承 ``SessionServiceError``，便于调用方统一 catch。
 
+抛出点不限于 ``SessionService``：``session/session.py``（聚合加载校验）与
+``session/store.py``（落盘守卫）也抛 ``SeqConflict``——它描述的是「会话事件流的
+seq 纪律」，属会话领域、与传输层无关；基类名沿用历史命名，不再另立层级。
+
 本模块无行为变化——异常类逐字搬移，``service.py`` 重新导出以保持所有既有
 导入路径（``from agent_harness.session.service import SessionNotFound``）不变。
 """
@@ -46,8 +50,52 @@ class RecoveryConflict(SessionServiceError):
     """恢复需要人工裁决（UNKNOWN 工具状态）。"""
 
 
+class SeqConflict(SessionServiceError):
+    """事件 seq 与已落盘日志冲突（重复 / 回退），或日志本身已不满足单调性。
+
+    两种触发面（消息里区分，状态码同为 409——都是「资源当前状态与请求冲突」，
+    而不是「资源不存在」）：
+
+    - **写时冲突**：并发写者各自基于同一份快照取号，后一个的 seq 已被占用。
+      调用方可重新读取快照后重试（``service.change_model`` 即如此）。
+    - **读时冲突**：日志里已存在重复 / 回退 seq（历史损坏，如真机会话
+      ``dd983104`` 的两条 seq=5）——不可自愈，需人工处置。
+
+    BUG-011 前这两种情况要么被静默写坏（重复 seq 落盘），要么被
+    ``service.resume_and_launch`` 的 ``except ValueError`` 一刀切翻译成
+    ``SessionNotFound``（HTTP 404，把数据完整性问题谎报成「会话不存在」）。
+    """
+
+
 class WorkspaceNameInvalid(SessionServiceError):
     """workspace 名字不合法（路径逃逸风险）。"""
+
+
+class WorkspaceNotFound(SessionServiceError):
+    """workspace_id 不存在（项目未注册 / 装配里没有 workspace 索引）。
+
+    WS-3 / #153：按项目列会话时，未注册的项目**不能**伪装成"空列表"——那是在谎报
+    "这个项目没有会话"（不变量 #21 同族：缺席不造假）。由
+    `SessionService.list_sessions` 把 workspace 层的 `UnknownWorkspace` 翻成本异常
+    （同一套"下层异常翻译成本层词汇"的既有做法，见 `ForkBoundaryError` →
+    `InvalidForkBoundary`）。
+    """
+
+
+class WorkspaceMoveInvalid(SessionServiceError):
+    """请求的会话↔项目移动在当前状态下不成立（WS-4 / #154，AC7 的对应物）。
+
+    三种来源，都是**状态冲突**而不是"参数写错"，所以是 409 而非 422：
+
+    1. 会话 header 没有 cwd 锚（历史遗留）——无法判定它属于哪个目录，写进账本会留下
+       "账本有 id 但会话无 cwd"的中间态；
+    2. 会话的 cwd 指向的项目 ≠ 请求里的项目——项目归属由**目录**决定（ADR-0025 D1），
+       不能凭调用方指定；
+    3. 重排的会话或锚点不在该项目的可见成员里——账本序只在项目内定义。
+
+    与 `WorkspaceNameInvalid`（名字形态非法 → 422）刻意分开：那条是"请求本身不合法"，
+    这条是"请求合法但当前状态不允许"。
+    """
 
 
 class QueueItemNotFound(SessionServiceError):

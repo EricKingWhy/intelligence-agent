@@ -24,13 +24,17 @@ from langchain_core.messages import AnyMessage
 from agent_harness.sandbox.base import Sandbox
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_harness.sandbox.registry import WorkspaceRegistry
 
+from agent_harness.session.cwd import cwd_event_data
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
     derive_messages,
     detect_dangling,
 )
+from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     EVENT_TYPES,
     RUN_COMPLETED,
@@ -46,6 +50,30 @@ from agent_harness.session.event import (
 from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
+
+
+def validate_event_seq(session_id: str, events: list[SessionEvent]) -> None:
+    """校验 seq 严格递增（不容忍重复或回退）——该校验规则的唯一 owner。
+
+    ``Session.load``（加载即校验）与 ``service.change_model``（已自行读过快照，
+    不再重复读盘）共用同一判据。
+
+    违反 → ``SeqConflict``，**不是** ``SessionNotFound``：日志确实存在、只是损坏。
+    见 BUG-011——旧实现抛裸 ``ValueError``，被 ``service`` 一刀切翻成 404
+    「会话不存在」，于是真机会话 ``dd983104`` 的日志损坏（两条 seq=5）显示成
+    ``续聊失败：Send failed: 404``。
+    """
+    seen_seqs: set[int] = set()
+    prev_seq = -1
+    for event in events:
+        if event.seq in seen_seqs:
+            raise SeqConflict(f"Session '{session_id}' 事件 seq 重复: {event.seq}")
+        if event.seq <= prev_seq:
+            raise SeqConflict(
+                f"Session '{session_id}' 事件 seq 回退: {event.seq}（前一条: {prev_seq}）"
+            )
+        seen_seqs.add(event.seq)
+        prev_seq = event.seq
 
 
 class Session:
@@ -119,6 +147,7 @@ class Session:
         session_id: str | None = None,
         workspace_registry: WorkspaceRegistry | None = None,
         started_data: dict | None = None,
+        cwd: str | Path | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
@@ -129,17 +158,29 @@ class Session:
         started_data（T7 #137，加法字段）：会话级初始配置写进 session/started——
         目前用于记录创建时选定的模型（provider / model_id），使"当前模型"可从
         事件流派生。
+        cwd（WS-1 #151，加法字段）：会话侧工作目录锚，**由创建者赋予**（不由
+        WorkspaceRegistry 反向灌给会话）。经 `canonical_workspace_path` 规范化后
+        写进 session/started，此后不可变；None = 不写该字段（历史遗留语义）。
+        `started_data` 里若夹带 `cwd` 键会被丢弃并记一条 warning——写侧只认本参数，
+        否则那条路径会绕过 AC5 的"唯一一套规范化"。
         """
         session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
             sandbox = workspace_registry.create(session_id)
         session = cls(session_id, store, sandbox=sandbox)
-        session.append(
-            SESSION_STARTED,
-            dict(started_data) if started_data else {},
-            agent_id=agent_id,
-        )
+        data = dict(started_data) if started_data else {}
+        # cwd 只认显式参数：started_data 里夹带的同名键会**绕过**唯一一套规范化
+        # （AC5），静默写出一个未规范化/相对的 cwd。删掉它，再按参数写入。
+        if "cwd" in data:
+            logger.warning(
+                "Session.start 忽略了 started_data['cwd']=%r：cwd 只由 cwd 参数"
+                "赋予（WS-1 #151），否则会绕过规范化",
+                data["cwd"],
+            )
+        data.pop("cwd", None)
+        data.update(cwd_event_data(cwd))
+        session.append(SESSION_STARTED, data, agent_id=agent_id)
         return session
 
     @classmethod
@@ -162,10 +203,14 @@ class Session:
         tool/result，破坏 tool_call/result 配对（不变量 #7）。本入口只做
         「加载 + 追加」；run_id / agent_id / step_id 透传事件信封（T8 #138 的
         ``run/interrupted`` 要挂到被中断的 run 上）。
+
+        加载后同样校验 seq（BUG-011）：损坏日志在这里也要报 ``SeqConflict``，不能
+        一边说日志已坏、一边继续往上追加（排队消息 / 中断标记等旁路写者）。
         """
         events = store.read_events(session_id)
         if not events:
-            raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+            raise SessionNotFound(f"Session '{session_id}' 不存在或事件日志为空")
+        validate_event_seq(session_id, events)
         session = cls(session_id, store, events)
         return session.append(
             event_type, dict(data),
@@ -188,30 +233,15 @@ class Session:
         """
         events = store.read_events(session_id)
         if not events:
-            raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
+            raise SessionNotFound(f"Session '{session_id}' 不存在或事件日志为空")
 
         sandbox = (
             workspace_registry.get(session_id)
             if workspace_registry is not None
             else None
         )
-        session = cls(session_id, store, events, sandbox=sandbox)
-
-        # 校验 seq 严格递增（不容忍重复或回退）；计数器据此在构造时取 max+1
-        seen_seqs: set[int] = set()
-        prev_seq = -1
-        for event in session._events:
-            if event.seq in seen_seqs:
-                raise ValueError(
-                    f"Session '{session_id}' 事件 seq 重复: {event.seq}"
-                )
-            if event.seq <= prev_seq:
-                raise ValueError(
-                    f"Session '{session_id}' 事件 seq 回退: {event.seq}（前一条: {prev_seq}）"
-                )
-            seen_seqs.add(event.seq)
-            prev_seq = event.seq
-        return session
+        validate_event_seq(session_id, events)
+        return cls(session_id, store, events, sandbox=sandbox)
 
     @classmethod
     def resume(
@@ -377,6 +407,7 @@ class Session:
         trace_id: str | None = None,
         trace_url: str | None = None,
         reason: str | None = None,
+        message: str | None = None,
     ) -> SessionEvent:
         """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
 
@@ -388,7 +419,9 @@ class Session:
         对称终态：completed 与 failed 都下发 trace_id / trace_url——失败 run 在
         Langfuse 也有可见 trace，跳转有排查价值。reason 仅 failed 语义使用
         （如 identical_tool_failure_loop），落事件 data——消费者可区分失败原因
-        （取消路径的 reason=cancelled 同款先例）。
+        （取消路径的 reason=cancelled 同款先例）。message 同仅 failed：已分类
+        故障的固定可读文案（如内容审查拒绝），与上下文超限路径直接 append 的
+        reason+message 形状一致；只接受调用方常量，绝不透传 provider 回显原文。
         """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}
@@ -400,6 +433,8 @@ class Session:
         data["trace_url"] = trace_url
         if status != "completed" and reason:
             data["reason"] = reason
+        if status != "completed" and message:
+            data["message"] = message
         return self.append(
             event_type,
             data,

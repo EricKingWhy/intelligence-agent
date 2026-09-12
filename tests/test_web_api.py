@@ -108,6 +108,68 @@ def test_list_sessions_carries_first_user_message(tmp_path):
     assert by_id[empty.session_id]["first_user_message"] is None
 
 
+def test_list_sessions_carries_terminal_trace_id(tmp_path):
+    """OBS-010：列表 payload 回填最近一次 run 终结事件的 trace_id。
+
+    run 在途（末事件非终结）时为 null——前端据此显示「未追踪」，不伪造。
+    """
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+
+    session = Session.start(store)
+    run_id, _ = session.begin_run()
+    session.append(event_type=USER_MESSAGE, data={"content": "hi"}, run_id=run_id)
+    session.end_run(run_id, status="completed", final_text="ok", trace_id="tr-web")
+
+    in_flight = Session.start(store)  # 只有 session/started，run 尚未收口
+
+    client = TestClient(app)
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    by_id = {row["session_id"]: row for row in resp.json()}
+    assert by_id[session.session_id]["trace_id"] == "tr-web"
+    assert by_id[in_flight.session_id]["trace_id"] is None
+
+
+def test_list_sessions_carries_terminal_trace_url(tmp_path):
+    """ARCH-4b：列表 payload 必须回填 trace_url，且与 trace_id 同源。
+
+    前端 `types.ts::SessionSummary` 把 `trace_url` 声明为**非可选** `string | null`
+    （契约 2d7f87a）——后端过去从不映射它，运行时是 undefined、违反自己的类型。
+    本用例断言**值**（不只看键存在）：Pydantic 的默认值会让键恒在，所以只有
+    「有终结 trace 的行拿到真实 URL」才能抓住漏映射。
+    """
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    store = app.state.agent.store
+
+    session = Session.start(store)
+    run_id, _ = session.begin_run()
+    session.append(event_type=USER_MESSAGE, data={"content": "hi"}, run_id=run_id)
+    session.end_run(run_id, status="completed", final_text="ok",
+                    trace_id="tr-web", trace_url="https://lf.example/trace/tr-web")
+
+    # Langfuse 未启用形状：终结事件里两个字段本就是 null。
+    untraced = Session.start(store)
+    run_id2, _ = untraced.begin_run()
+    untraced.end_run(run_id2, status="completed", final_text="ok",
+                     trace_id=None, trace_url=None)
+
+    in_flight = Session.start(store)  # run 尚未收口
+
+    client = TestClient(app)
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    by_id = {row["session_id"]: row for row in resp.json()}
+    assert by_id[session.session_id]["trace_url"] == "https://lf.example/trace/tr-web"
+    # 键恒在（前端类型声明为非可选）：null 也要序列化成显式 null，不能省略键
+    assert by_id[untraced.session_id]["trace_url"] is None
+    assert by_id[in_flight.session_id]["trace_url"] is None
+    for row in resp.json():
+        assert "trace_url" in row
+
+
 # ── session events ──
 
 
