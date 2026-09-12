@@ -27,6 +27,7 @@ import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
+import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
@@ -54,21 +55,9 @@ const WORKSPACE_MODES: readonly { id: WorkspaceMode; label: string; icon: typeof
 
 /** 分叉请求的兜底超时。`forkInFlightRef` 只在 `finally` 里复位——请求若既不
  *  resolve 也不 reject（socket 挂死），按钮会被永久静默禁用，正是本 ticket 要
- *  消灭的那类「点了没反应」。api 层没有统一超时（其余请求同病），这里只兜 fork
- *  这一处；代价是极端情况下后端其实已建好 child、客户端却报超时（用户重试会多
- *  一个 child），比死按钮可接受。 */
+ *  消灭的那类「点了没反应」。超时实现见 `lib/timeout`（记忆删除也用同一份，
+ *  两个用途的语义提醒都写在那里）；api 层没有统一超时（其余请求同病）。 */
 const FORK_TIMEOUT_MS = 30_000;
-
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer = 0;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(
-      () => reject(new Error(`${label}超时（${Math.round(ms / 1000)}s）`)),
-      ms,
-    );
-  });
-  return Promise.race([p, timeout]).finally(() => window.clearTimeout(timer));
-}
 
 export default function App() {
   // ── Workspace 模式（Phase 1d，方案 B）──

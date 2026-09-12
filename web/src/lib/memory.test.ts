@@ -4,7 +4,15 @@
  *  取值与格式化规则（不需要 DOM）。 */
 
 import { describe, expect, it } from 'vitest';
-import { MEMORY_PAGE_SIZE, formatMemoryTime, hasMoreAfter, scopeLabel, withoutIds } from './memory';
+import {
+  MEMORY_MAX_LIMIT,
+  MEMORY_PAGE_SIZE,
+  formatMemoryTime,
+  hasMoreAfter,
+  refetchLimit,
+  scopeLabel,
+  withoutIds,
+} from './memory';
 import type { MemorySummary } from '../types';
 
 const row = (id: string): MemorySummary => ({
@@ -58,5 +66,22 @@ describe('withoutIds', () => {
       'a',
       'c',
     ]);
+  });
+});
+
+describe('refetchLimit', () => {
+  it('少于/等于一页 → 至少一页（重拉不要退化成 0 条）', () => {
+    expect(refetchLimit(0)).toBe(MEMORY_PAGE_SIZE);
+    expect(refetchLimit(3)).toBe(MEMORY_PAGE_SIZE);
+    expect(refetchLimit(MEMORY_PAGE_SIZE)).toBe(MEMORY_PAGE_SIZE);
+  });
+
+  it('已加载多页 → 保留已加载的条数（重拉不把用户已看过的内容缩回第一页）', () => {
+    expect(refetchLimit(120)).toBe(120);
+  });
+
+  it('不越过后端硬上界 200（越界就是 422：回滚重拉与"重试"会永久失败）', () => {
+    expect(refetchLimit(250)).toBe(MEMORY_MAX_LIMIT);
+    expect(refetchLimit(10_000)).toBe(MEMORY_MAX_LIMIT);
   });
 });

@@ -643,18 +643,20 @@ describe('memories — 列表/硬删端点契约（#160；ARCH-4b 类型注解 +
   });
 
   it('deleteMemory：404（id 不存在）→ MemoryError(404)，不当成功', async () => {
-    captureProjectFetch(404, { detail: 'memory not found: m-1' });
+    // detail 用真后端的原文（`MemoryNotFound` → `记忆不存在：<id>`）。
+    captureProjectFetch(404, { detail: '记忆不存在：m-1' });
     const err = await deleteMemory('m-1').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MemoryError);
     expect((err as MemoryError).status).toBe(404);
-    expect((err as MemoryError).message).toBe('memory not found: m-1');
+    expect((err as MemoryError).message).toBe('记忆不存在：m-1');
   });
 
   it('deleteMemory：403（不属于当前入口，含 SESSION 行）→ MemoryError(403)，与 404 分开', async () => {
-    captureProjectFetch(403, { detail: 'memory 不属于当前身份' });
+    // detail 用真后端的原文（`PermissionError` → 英文原句，`str(exc)` 直通）。
+    captureProjectFetch(403, { detail: 'Memory belongs to a different namespace' });
     const err = await deleteMemory('m-1').catch((e: unknown) => e);
     expect((err as MemoryError).status).toBe(403);
-    expect((err as MemoryError).message).toBe('memory 不属于当前身份');
+    expect((err as MemoryError).message).toBe('Memory belongs to a different namespace');
   });
 
   it('describeMemoryError：MemoryError 用后端 detail；非 MemoryError 用 message / fallback', () => {

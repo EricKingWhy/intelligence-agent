@@ -12,6 +12,23 @@ import type { MemoryScope, MemorySummary } from '../types';
  *  既慢又白耗内存。 */
 export const MEMORY_PAGE_SIZE = 50;
 
+/** 后端单页**硬上界**（`web/memory.py::_MAX_LIMIT`：`Query(50, ge=1, le=200)`）。
+ *
+ *  前端必须知道这个数：重拉时如果照抄"用户已加载的条数"，加载超过 200 条后
+ *  （4 次"加载更多"）请求就带 `limit=250` → 后端 **422** → 删除失败后的回滚重拉
+ *  与"重试"按钮**永久失败**，列表再也回不到权威状态（AC3）。 */
+export const MEMORY_MAX_LIMIT = 200;
+
+/** 重拉（删除后对账 / 用户点重试）时的 `limit`：保留用户已加载的页数
+ *  （**不能**一重拉就缩回第一页——那会凭空没收用户已经看到的内容），
+ *  但不越过后端硬上界（越过就是 422，见 `MEMORY_MAX_LIMIT`）。
+ *
+ *  代价（明知且可接受）：已加载超过 200 条时，重拉只带回前 200 条，
+ *  多出来的部分要靠用户再点一次"加载更多"——比"永久失败"好，且不撒谎。 */
+export function refetchLimit(loaded: number): number {
+  return Math.min(Math.max(loaded, MEMORY_PAGE_SIZE), MEMORY_MAX_LIMIT);
+}
+
 /** scope → 界面文案。`session` 也如实渲染：HTTP 用户入口今天只返回 USER 行
  *  （`web/memory.py` 的边界），但类型上保留两者，管理面不能把未知值当 user
  *  展示——那会把"这条记在某个会话名下"说成"记在你名下"。 */

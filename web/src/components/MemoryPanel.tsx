@@ -54,8 +54,12 @@ function MemoryPanelBody() {
       // 成功后该行已从权威列表消失——确认条随之作废。
       setConfirmId((cur) => (cur === id ? null : cur));
     } catch (error) {
-      // 失败：hook 已把列表回滚成权威状态；错误留在**这一行**的确认条里，
+      // 失败：hook 已把列表回滚成权威状态；错误优先留在**这一行**的确认条里，
       // 用户能立刻看到"哪条没删掉、为什么"。
+      //
+      // 但有一类失败会让那一行**根本不在权威列表里**：404（这条已被别处删掉）。
+      // 此时按 id 挂在行上的错误无处渲染 → 界面上等于把失败吞了。所以下面还有一条
+      // 面板级错误条：行在 → 行内显示；行不在 → 面板级显示（同一个错误，只有一个来源）。
       setDeleteError({ id, message: describeMemoryError(error, '删除记忆失败') });
     }
   };
@@ -148,6 +152,19 @@ function MemoryPanelBody() {
             <span>{loadError}</span>
             <button className="memory-retry" onClick={() => void memories.retry()}>
               重试
+            </button>
+          </div>
+        )}
+
+        {/* 删除失败但**那一行已不在权威列表里**（404：这条已被别处删掉）：
+            行内错误条随行一起没了，这里补一条面板级错误条，否则失败被界面吞掉
+            （批次审查发现）。与 `loadError` 分开：一个是"列表读不到"，一个是
+            "你刚点的那条删不掉"。 */}
+        {deleteError !== null && !visible.some((memory) => memory.id === deleteError.id) && (
+          <div className="memory-error" role="alert">
+            <span>{deleteError.message}</span>
+            <button className="memory-retry" onClick={() => setDeleteError(null)}>
+              知道了
             </button>
           </div>
         )}

@@ -38,7 +38,7 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 
 | 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
-| B-1 | #160（MEM-5 前端半） | `637bc89` | 见本文件「第十二轮」末的批次审查小节 | 待填（审查后回填） |
+| B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | 见修复 commit（下方回填） |
 
 > 为什么单票成批：v2 §1.2 允许「遇到依赖链断点等自然分界提前收批」。#160 是 MEM-5 跨端票的
 > 前端半、也是本轮唯一剩余票（MEM 链末端）→ 自然断点，单票即收批；
@@ -538,6 +538,32 @@ detach/重排/软删除全走通，**结束时会话归属与项目账本与开�
 **关单**：#160 **不关**（见 integration prompt §5 / issue comment）：按票面「跨端 ticket 的前端半」
 + §14.12，用 comment 记录已完成部分与剩余项（剩余 = 合入 `main`，由集成 AI 执行）。
 本 worktree 与 #155 同一处置。
+
+### 批次审查（B-1，v2 §1.2；fixed point `637bc89`）
+
+两轴（Spec + Standards）各派一个 read-only subagent，各审 `git diff 637bc89...decc7be` 全量
+（16 文件 / +1780 行）。**Spec 轴 6 finding + Standards 轴 7 finding**，逐条处置：
+
+| # | 轴 | finding | 处置 |
+| --- | --- | --- | --- |
+| 1 | 两轴一致 | **重拉的 `limit` 会越过后端硬上界**：`Math.max(rows.length, 50)` 在加载 >200 条后送 `limit=250` → 后端 422 → **删除失败的回滚重拉与"重试"永久失败**（AC3 直接破） | 修：`lib/memory.ts` 新增 `MEMORY_MAX_LIMIT=200` + `refetchLimit(loaded)`（`min(max(loaded,50),200)`），hook 三处调用点改用它；+3 单测（0/3/50 → 50；120 → 120；250/10000 → 200）。已登记的代价：>200 条时重拉只带回前 200，需再点"加载更多"（比永久失败诚实） |
+| 2 | Spec | **404 删除失败被界面吞掉**：`deleteError` 按行 id 渲染，而 404（这条已被别处删掉）后重拉里那一行不在 → 错误无处渲染（AC3「失败要报错」不成立） | 修：`MemoryPanel` 增面板级错误条（同一错误唯一来源：行在 → 行内；行不在 → 面板级 + 「知道了」）；e2e 新增 `memoryVanishedIds` 接缝 + 1 用例 ×2 视口锁住 |
+| 3 | Standards | **e2e 的 403 detail 是我编的中文**，真后端是 `PermissionError("Memory belongs to a different namespace")`（`sqlite_record_store.py:195` → `str(exc)` 直通）；AC3 的失败用例因此是自我实现 | 修：mock 与断言都改成真后端原文；404 同样照抄 `记忆不存在：<id>`；`api.test.ts` 两处 detail 也换真实原文（顺带当契约文档）。**这就是 #155 轮「mock 语义与真机相反」同一类坑** |
+| 4 | Spec | **DELETE 挂死无超时**：行已乐观隐藏、确认条两按钮都 disabled → 行"点了删除就消失"，界面再也点不动（AC3 的失败路径缺失） | 修：新增 `lib/timeout.ts`（`withTimeout`，App.tsx 原先的私有实现迁入共用，fork 行为不变）+ `DELETE_TIMEOUT_MS=30s`；超时走与失败**相同**的回滚/对账路径；+4 单测（含"落地后清定时器"）。语义提醒写在模块头：超时 ≠ 对端没执行 |
+| 5 | Spec | ARCH-4b 的说法**过强**（fixture 只能锁前端类型，锁不住后端加字段） | 修文档：集成提示词 §2 改写为「前端侧漂移 → tsc 红；后端侧权威锁 = `tests/web/test_memory_api.py`」 |
+| 6 | Spec | AC4 的"检索不可用"在后端契约里**没有独立状态**（列表读权威记录；检索故障会走 500） | 只登记不改代码：503 = 未装配（降级态）；5xx = 读取失败（错误条 + 重试 = 事实上的"暂不可用"）。AC4 的两个词组分别由这两条通道承担 |
+| 7 | Standards | `MemoriesState.rows` 导出但无消费方 | 修：去掉该导出（只留 `visible`），并在接口注释里写明为何不导出原始列表 |
+| 8 | Standards | `remove` 未复用 `useProjects` 的 `after()` 包装，且未说明 | 修：加注释说明语义不同（`after` = 跑写 → 重拉 → 抛错；这里要"乐观隐藏 → 两个结局都重拉 → 失败先取消隐藏再抛"），**不**硬套 |
+| 9 | Standards | `.project-dialog-*` 类名被记忆面板复用（Mysterious Name） | **不改**：改名要连带动 ProjectDialogs + app.css + 既有 e2e 选择器，属跨模块审美重构（§8 Scope Lock），已在 app.css 注明共用材质 |
+| 10 | Standards | `describeMemoryError` 与 `describeProjectError` 同形（Duplicated Code） | **不改**：注释已声明刻意分开（两个能力各自演进，共用会让一侧语义渗到另一侧）；属判断项 |
+| 11 | Standards | 协议 v2 §1.1 与 `AGENTS.md` §16.1（每票 review）并存矛盾 | **不改 AGENTS.md**（跨 worktree 共用文件，改了徒增 §16 那条已知冲突面）；以用户 2026-09-12 指令为最高优先级，v2 覆盖 §16.1，本工作树以本文件 + 协议文件为准 |
+| 12 | Standards | `tsc` / `oxlint` 基线核对 | 实测：tsc 0；oxlint 38 warnings / 0 errors，**新增 1 条**（`useMemories.ts:99` 的 `set-state-in-effect`，与既有 37 条同类；挂载即拉取不可避免） |
+
+**修复后门禁（实跑）**：tsc ✅ · vitest **587 passed**（+7：refetchLimit 3 + withTimeout 4）·
+oxlint 0 errors（38 warnings）· playwright **162 passed**（+2：404 用例 ×2 视口）· vite build ✅。
+**修复后真机复验**（真后端 + 真 Zilliz + 真浏览器）：种 3 条 → 经界面真删 1 条 → 后端 `curl` 剩 2 条
+（DELETE 已走新的 `withTimeout` 包装，零错误条）→ 再删 2 条 → 后端 0 条 + 面板显示「还没有记忆」；
+dev server 已停、真记忆库已清空（不留假事实）。
 
 **未做 / 交后续**（Scope Lock，只登记不顺手做）：
 ① 记忆**编辑** UI（票面非目标；后端入口本票也没有）；② 批量清空 / 回收站 / 恢复（非目标）；

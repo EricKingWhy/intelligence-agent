@@ -135,8 +135,12 @@ test('AC3：删除失败 → UI 回滚（该行仍在）+ 显示后端拒绝原�
   await target.getByRole('button', { name: '确认删除' }).click();
 
   // 403 = 领域层归属校验：错误留在**这一行**的确认条里（不是整面横幅），
-  // 且原文是后端 detail（前端不翻译成自己的话）。
-  await expect(target.locator('.project-error')).toContainText('不能由当前入口删除');
+  // 且原文是后端 detail（前端不翻译成自己的话）。断言用真后端那句英文原文
+  // （`PermissionError("Memory belongs to a different namespace")`）——mock 的
+  // detail 编错会让这条用例变成"前端与我的假后端一致"的自我实现。
+  await expect(target.locator('.project-error')).toContainText(
+    'Memory belongs to a different namespace',
+  );
   await expect(target).toBeVisible(); // 回滚：行没有被隐藏掉
   await expect(target.locator('.memory-confirm')).toBeVisible(); // 确认条留在原地可重试
 
@@ -144,6 +148,29 @@ test('AC3：删除失败 → UI 回滚（该行仍在）+ 显示后端拒绝原�
   await closeMemories(page);
   await openMemories(page);
   await expect(row(page, '不要客套话')).toBeVisible();
+});
+
+test('AC3：这条在别处已被删（DELETE 404）→ 行随之消失，但失败必须报出来（不能被界面吞掉）', async ({
+  page,
+}) => {
+  routeApi(page, { memories: [SHORT, OTHER], memoryVanishedIds: ['m-1'] });
+  await page.goto('/');
+  await openMemories(page);
+
+  const target = row(page, '不要客套话');
+  await target.getByRole('button', { name: '删除这条记忆' }).click();
+  await target.getByRole('button', { name: '确认删除' }).click();
+
+  // 权威列表里它确实没了（别处已删 → 收敛到"不在"），所以行内错误条随行一起消失。
+  await expect(page.locator('.memory-row', { hasText: '不要客套话' })).toHaveCount(0);
+  // 但**失败本身**必须可见：404 的后端原文出现在面板级错误条里。
+  // 少了这条通道，用户点删除就"什么都没发生"（批次审查发现）。
+  const panelError = panel(page).locator('.memory-error');
+  await expect(panelError).toContainText('记忆不存在：m-1');
+  await expect(row(page, 'D:/repos')).toBeVisible(); // 另一条不受影响
+
+  await panelError.getByRole('button', { name: '知道了' }).click();
+  await expect(panelError).toHaveCount(0);
 });
 
 test('AC4：记忆未装配（503）→ 如实说"记忆未启用"，不伪造空列表、不给无意义的重试', async ({ page }) => {

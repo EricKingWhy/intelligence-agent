@@ -1624,3 +1624,17 @@ await self._persist_ledger(record.id, [session_id, *kept])   # 前插
   **按请求序号断言**在 StrictMode 下不稳（序号里混着重复的首屏请求）→ 改成
   「翻页前**所有**请求 offset=0；翻页后**存在** offset=50」。
   （这两个都是 mock 侧的测试写法问题，不是产品缺陷。）
+
+### 五、批次审查（B-1，两轴 subagent）发现并修掉的问题
+
+| 问题 | 性质 | 处置 |
+| --- | --- | --- |
+| 重拉 `limit` 越过后端硬上界（>4 页后 422）→ 回滚重拉与"重试"永久失败 | **真缺陷（AC3 破）** | `MEMORY_MAX_LIMIT` + `refetchLimit()` 夹取 + 3 单测 |
+| 404（别处已删）的删除失败被界面吞掉 | **真缺陷（AC3 破）** | 面板级错误条 + e2e `memoryVanishedIds` + 1 用例 ×2 视口 |
+| e2e 的 403 detail 是编的中文（真后端是 `Memory belongs to a different namespace`） | **测试保真度缺陷** | mock / e2e / 单测统一改用真后端原文 |
+| DELETE 挂死无超时 → 行隐藏 + 按钮永久禁用 | **真缺陷（"点了没反应"）** | `lib/timeout.ts` + `DELETE_TIMEOUT_MS=30s` + 4 单测 |
+| `MemoriesState.rows` 无消费方 | 判断项 | 去掉导出 |
+| `.project-dialog-*` 类名复用 / `describeMemoryError` 与 `describeProjectError` 同形 / v2 与 §16.1 的协议矛盾 / AC4"检索不可用"在后端无独立状态 | 判断项 + 只登记 | 3 条说明理由不改（§8 Scope Lock）；1 条只登记（503=未装配、5xx=读取失败即事实上的"暂不可用"） |
+
+**修复后门禁**：tsc 0 · vitest **587** · oxlint 0 error（38w）· playwright **162** · vite build ✅；
+**修复后真机复验**：3 条 → 界面真删 1 条 → 后端剩 2 条 → 再删 2 条 → 后端 0 条 + 面板「还没有记忆」。

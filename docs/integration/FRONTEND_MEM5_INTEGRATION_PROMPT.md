@@ -66,7 +66,11 @@
 | `MemoryDeleted {id, deleted}` | `MemoryDeleted` |
 | `GET /api/memories?limit=50&offset=0` → 数组（按 `created_at` 倒序） | `list_memories`（`limit` 1..200 由后端夹） |
 | `DELETE /api/memories/{id}` → 200 `{id, deleted:true}` / **404** 不存在 / **403** 不属于当前入口（含 SESSION 行）/ **503** 未装配 | `forget_memory`（含 `record_forget` 审计：`memory forget via api: forgotten`） |
-| 编译期锁：`api.test.ts` 的 `CANONICAL_MEMORY: MemorySummary` 类型注解 fixture（ARCH-4b 套路）——后端加必填字段 → `tsc -b` 红 | 后端侧权威锁（断言**值**）：`tests/web/test_memory_api.py` |
+| 编译期锁：`api.test.ts` 的 `CANONICAL_MEMORY: MemorySummary` 类型注解 fixture（ARCH-4b 套路）——**只锁前端侧漂移**（`types.ts` 加必填字段 → fixture 缺键 → `tsc -b` 红）；它**锁不住后端加字段** | 后端侧权威锁（断言**值**，抓"键在但值是 null"）：`tests/web/test_memory_api.py` |
+
+**错误 detail 的真实原文**（e2e mock 与单测都用它们，不是编的）：
+403 `Memory belongs to a different namespace`（`sqlite_record_store.py:195` 的 `PermissionError` →
+`domain_errors.py::memory_http_error` 用 `str(exc)` 直通）、404 `记忆不存在：<id>`（`memory/errors.py`）。
 
 **实测核对的 503 文案**（e2e mock 里那句不是编的）：
 `memory capability 未启用：请在 CAPABILITIES 中配置 memory。`
@@ -106,9 +110,9 @@ cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --wo
 | 门禁 | 本批结果 |
 | --- | --- |
 | `npx tsc -b` | 0 error |
-| `npx vitest run` | **580 passed**（31 文件；本批 +19：api 11 + memory 7 + 既有基线） |
+| `npx vitest run` | **587 passed**（31 文件；本批 +26：api 11 + memory 10 + timeout 4 + 既有基线） |
 | `npx oxlint` | **0 error**（38 warnings：37 既有 + 1 条本批与既有同类的 `set-state-in-effect`） |
-| `npx playwright test --workers=2` | **160 passed**（本批 +16 = 8 用例 × 2 视口） |
+| `npx playwright test --workers=2` | **162 passed**（本批 +18 = 9 用例 × 2 视口） |
 | `npx vite build` | OK（仅既有 chunk-size 提示） |
 
 ---
@@ -130,9 +134,9 @@ AC 逐条：
 4. 空态与降级：✅ 三分（503"记忆未启用"不给重试 / 读取失败错误条+重试 / 真空态"还没有记忆"）；
    真机核对 503 原文与 mock 逐字一致；e2e 锁定"500 时不得显示空态"
 5. 契约同步：✅ types.ts + api.test.ts 的 CANONICAL_MEMORY 类型注解 fixture（ARCH-4b）
-6. e2e 回归锁（--workers=2）：✅ 8 用例 × 2 视口 = 16 例（列表/展开/二次确认+后端权威/失败回滚/
-   503 降级/真空态/500 重试/命令面板入口）
-7. 门禁：✅ tsc 0 · vitest 580 · oxlint 0 error · playwright 160 · vite build OK
+6. e2e 回归锁（--workers=2）：✅ 9 用例 × 2 视口 = 18 例（列表+翻页/展开/二次确认+后端权威/403 失败回滚/
+   404 已别处删除仍需报错/503 降级/真空态/500 重试/命令面板入口）
+7. 门禁：✅ tsc 0 · vitest 587 · oxlint 0 error（38w）· playwright 162 · vite build OK
 
 剩余项：合入 main（由集成 AI 执行，见 docs/integration/FRONTEND_MEM5_INTEGRATION_PROMPT.md）。
 按 §14.12 本票不自行关闭。
@@ -152,3 +156,31 @@ AC 逐条：
 | 种子脚本 | `.scratch/seed_real_memories.py`（后端 worktree，`.scratch/` 不入库）；种的是**假事实**，验收后须删 |
 | 实测环境观察 | 种子写入时 Zilliz/embedding 不健康 → 3 条都 `degraded=consolidation_failed: VectorStoreError`（按 #158 设计降级为无条件 insert，记录行照落）——**外部依赖问题，非本票缺陷**，记录在案 |
 | 协议文件同步 | 本批把 `docs/SDD_WORKFLOW_PROTOCOL.md` 同步为 v2（与 feat/backend 逐字节相同）；其 §4「剩余 Ticket 清单」仍是旧内容（FE-T7/T8/T9，早已 done）——不在本批范围 |
+
+---
+
+## 7. 批次审查（B-1，v2 §1.2）—— findings 与修复
+
+两轴独立 subagent 审 `git diff 637bc89...<本批 HEAD>`。**Spec 轴 6 条（3 条真问题）+
+Standards 轴 7 条**。按 v2 §1.2 全部"一眼能定位" → 直接最小修复 + 跑测试，不重跑全量 review。
+
+| finding | 为什么是真问题 | 修复 |
+| --- | --- | --- |
+| 重拉的 `limit` 越过后端硬上界 200（加载 >4 页后送 `limit=250` → **422**） | 删除失败的回滚重拉与"重试"**永久失败**，列表回不到权威状态（AC3 破） | `MEMORY_MAX_LIMIT=200` + `refetchLimit(loaded)`（+3 单测）。已登记代价：>200 条时重拉只带回前 200 条，需再点"加载更多" |
+| 404（这条已被别处删掉）的失败被界面**吞掉** | 行内错误条按行 id 渲染，而重拉后那行不在 → 失败无人呈现（AC3「失败要报错」破） | 面板级错误条（行在 → 行内；行不在 → 面板级）+ e2e `memoryVanishedIds` 接缝 + 1 用例 ×2 视口 |
+| e2e 的 403 detail 是编的中文，真后端是英文原句 | AC3 的失败用例变成"前端与我的假后端一致"的自我实现（#155 轮同一类坑） | mock / e2e / 单测统一改成真后端原文（见 §2） |
+| DELETE 挂死无超时：行已隐藏、按钮全 disabled | 用户看到"点了删除就消失"，且界面再也点不动（本仓库最忌讳的"点了没反应"） | `lib/timeout.ts`（App 的 fork 超时实现迁入共用）+ `DELETE_TIMEOUT_MS=30s`，超时走与失败相同的对账路径；+4 单测 |
+| ARCH-4b 的说法过强 | fixture 只锁前端类型 | 本文档 §2 已改写 |
+| AC4 的"检索不可用"在后端契约里没有独立状态 | 列表读权威记录；检索故障表现为 5xx，不是 503 | 只登记不改：503 = 未装配（降级态）；5xx = 读取失败（错误条 + 重试 = 事实上的"暂不可用"） |
+| `MemoriesState.rows` 无消费方 | Speculative Generality | 去掉导出（只留 `visible`） |
+| `remove` 未复用 `useProjects.after()` 且未说明 | 判断项 | 加注释说明语义不同，**不**硬套 |
+| `.project-dialog-*` 类名复用（Mysterious Name） | 判断项 | **不改**：连带 ProjectDialogs + app.css + e2e 选择器，属跨模块审美重构（§8） |
+| `describeMemoryError` 与 `describeProjectError` 同形 | 判断项 | **不改**：注释已声明刻意分开 |
+| v2 §1.1 与 `AGENTS.md` §16.1（每票 review）矛盾 | 文档不一致 | **不改 AGENTS.md**（跨 worktree 共用文件，改了徒增 §16 已知冲突面）；以用户 2026-09-12 指令为最高优先级，v2 覆盖 §16.1 |
+
+**修复后**：tsc ✅ · vitest **587** · oxlint 0 error（38w）· playwright **162** · vite build ✅。
+**修复后真机复验**：种 3 条 → 经界面真删 1 条（走新的超时包装）→ 后端剩 2 条 → 再删 2 条 →
+后端 0 条 + 面板「还没有记忆」；dev server 停、真记忆库清空。
+
+**新增文件**：`web/src/lib/timeout.ts` + `web/src/lib/timeout.test.ts`（可移植小工具，与
+`App.tsx` 的 fork 超时共用——合并时请留意这份 diff 也动了 `App.tsx` 顶部那 10 行）。

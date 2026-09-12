@@ -99,6 +99,11 @@ export interface ApiMock {
   /** 这些 id 的 DELETE 回 403（`web/memory.py` 的"不属于当前入口"）——AC3 的
    *  失败回滚路径（真机上要构造一条 SESSION 记忆才自然出现）。 */
   memoryDeniedIds?: string[];
+  /** 这些 id 模拟「列表拉取之后、点删除之前被别处删掉」：DELETE 回 404（真后端那句
+   *  `记忆不存在：<id>`）**并且**把它从状态里摘掉——于是随后的重拉里那一行不在，
+   *  行内错误条无处渲染。真机上这是一个并发窗口，只能在 mock 里构造；
+   *  它锁的是"失败被界面吞掉"这条缺陷（批次审查发现）。 */
+  memoryVanishedIds?: string[];
   /** GET /api/memories 的拦截口（断言分页参数或伪造 500）；返回 true = 已处理。 */
   onMemoriesGet?: (route: Route) => Promise<boolean> | boolean;
 }
@@ -287,11 +292,22 @@ export function routeApi(page: Page, mock: ApiMock): void {
       const memoryId = decodeURIComponent(memoryMatch[1]);
       // 403 = 领域层的归属校验（`MemoryRecordStore.delete` 的 namespace 匹配）：
       // 与 404「这条不在了」分开——AC3 的失败回滚就靠这条。
+      //
+      // detail **逐字照抄**真后端：`web/domain_errors.py::memory_http_error` 用
+      // `str(exc)`，而 `sqlite_record_store.py:195` 抛的是
+      // `PermissionError("Memory belongs to a different namespace")`（英文原句）。
+      // 自己编一句中文会让门槛内的绿灯只证明"前端与我的假后端一致"（#155 轮已
+      // 栽过同一个坑：mock 语义与真机相反）。
       if ((mock.memoryDeniedIds ?? []).includes(memoryId)) {
-        return json(route, { detail: `memory ${memoryId} 不能由当前入口删除` }, 403);
+        return json(route, { detail: 'Memory belongs to a different namespace' }, 403);
       }
       const at = memoryState.findIndex((m) => m.id === memoryId);
-      if (at < 0) return json(route, { detail: `memory not found: ${memoryId}` }, 404);
+      // 404 的 detail 同样照抄：`memory/errors.py::MemoryNotFound` → `记忆不存在：<id>`。
+      if ((mock.memoryVanishedIds ?? []).includes(memoryId)) {
+        if (at >= 0) memoryState.splice(at, 1); // "别处已删"：重拉时这一行没了
+        return json(route, { detail: `记忆不存在：${memoryId}` }, 404);
+      }
+      if (at < 0) return json(route, { detail: `记忆不存在：${memoryId}` }, 404);
       memoryState.splice(at, 1); // 硬删：记录真的没了（不是软删/回收站）
       return json(route, { id: memoryId, deleted: true });
     }

@@ -11,13 +11,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MemoryError, deleteMemory, isMemoryDisabled, listMemories } from '../lib/api';
-import { MEMORY_PAGE_SIZE, hasMoreAfter, withoutIds } from '../lib/memory';
+import { MEMORY_PAGE_SIZE, hasMoreAfter, refetchLimit, withoutIds } from '../lib/memory';
+import { withTimeout } from '../lib/timeout';
 import type { MemorySummary } from '../types';
 
 export interface MemoriesState {
-  /** 最近一次权威响应（含在途删除中被暂时藏起来的行）。 */
-  rows: MemorySummary[];
-  /** 面板应渲染的行（`rows` 减去在途/已确认删除但重拉未落地的行）。 */
+  /** 面板应渲染的行（最近一次权威响应，减去在途/已确认删除但重拉未落地的行）。
+   *  **不导出原始 `rows`**：消费方只需要"该显示什么"，导出原始列表会诱使调用方
+   *  绕过隐藏集合自己算一份视图（批次审查发现的未使用导出）。 */
   visible: MemorySummary[];
   /** 首次加载中。 */
   loading: boolean;
@@ -36,6 +37,12 @@ export interface MemoriesState {
   /** 重新拉取（保留已加载的页数，不把列表缩回第一页）。 */
   retry: () => Promise<void>;
 }
+
+/** 删除请求的兜底超时。api 层没有统一超时（其余请求同病，见 lib/timeout.ts 头注释），
+ *  这里必须兜：DELETE 挂死时行已经乐观隐藏、确认条两个按钮都 disabled——用户会看到
+ *  一条"点了删除于是消失"的记忆，且再也点不动任何东西。超时后走与失败**相同**的回滚
+ *  路径（重新对账，不是假设删除失败：请求可能已经在后端完成，只是响应没回来）。 */
+const DELETE_TIMEOUT_MS = 30_000;
 
 export function useMemories(): MemoriesState {
   const [rows, setRows] = useState<MemorySummary[]>([]);
@@ -100,7 +107,7 @@ export function useMemories(): MemoriesState {
   }, [refetch]);
 
   const retry = useCallback(
-    () => refetch(Math.max(rowsRef.current.length, MEMORY_PAGE_SIZE)),
+    () => refetch(refetchLimit(rowsRef.current.length)),
     [refetch],
   );
 
@@ -136,7 +143,10 @@ export function useMemories(): MemoriesState {
       setPending((prev) => new Set(prev).add(memoryId));
       let deleted = false;
       try {
-        const result = await deleteMemory(memoryId);
+        // 不复用 useProjects 的 `after()`：那个包装是"跑写操作 → 重拉 → 抛错"，而这里
+        // 需要的是"乐观隐藏 → 写 → **两个结局都重拉** → 失败时先取消隐藏再抛"。语义不同，
+        // 硬套只会把回滚路径塞进一个为别的场景写的包装里。
+        const result = await withTimeout(deleteMemory(memoryId), DELETE_TIMEOUT_MS, '删除请求');
         // 200 但 `deleted` 不为 true = 后端没确认删掉：不能凭状态码就假装它没了。
         if (!result.deleted) throw new MemoryError(200, '后端未确认删除，该条记忆仍在。');
         deleted = true;
@@ -147,7 +157,7 @@ export function useMemories(): MemoriesState {
           next.delete(memoryId);
           return next;
         });
-        await refetch(Math.max(rowsRef.current.length, MEMORY_PAGE_SIZE));
+        await refetch(refetchLimit(rowsRef.current.length));
         throw error;
       } finally {
         setPending((prev) => {
@@ -158,7 +168,7 @@ export function useMemories(): MemoriesState {
       }
       // 成功：重拉权威列表。重拉失败也不取消隐藏——200 已经证明这条不存在了，
       // 再把它显示回来才是伪造；loadError 会提示列表可能不是最新（可重试）。
-      if (deleted) await refetch(Math.max(rowsRef.current.length, MEMORY_PAGE_SIZE));
+      if (deleted) await refetch(refetchLimit(rowsRef.current.length));
     },
     [pending, refetch],
   );
@@ -166,7 +176,6 @@ export function useMemories(): MemoriesState {
   const visible = useMemo(() => withoutIds(rows, hiddenIds), [rows, hiddenIds]);
 
   return {
-    rows,
     visible,
     loading,
     loadingMore,
