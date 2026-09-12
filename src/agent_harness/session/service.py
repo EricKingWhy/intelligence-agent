@@ -26,7 +26,9 @@ HTTP 是传输层，不进本模块；领域异常由调用方翻译为 HTTP/CLI
 from __future__ import annotations
 
 import logging
+import os
 import re
+import stat
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
@@ -34,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from agent_harness.assembly import build_runtime
+from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
 from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
     InteractiveCallbackHolder as _InteractiveCallbackHolder,
@@ -59,6 +62,7 @@ from agent_harness.session.errors import (
     UnknownModel,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
+    WorkspacePathInvalid,
 )
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
@@ -359,6 +363,7 @@ class SessionService:
         *,
         task: str,
         workspace_name: str | None = None,
+        cwd: str | None = None,
         max_steps: int = 10,
         permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
         permission_mode_explicit: bool = False,
@@ -374,20 +379,36 @@ class SessionService:
 
         组装顺序（R6-6）：先建 workspace + runtime，最后才 Session.start 落盘，
         避免 runtime 组装失败时留下只含 session/started 的孤儿 session。
+
+        `workspace_name` 与 `cwd` 二选一（ADR-0027）：
+        - `workspace_name`（旧契约，逐字节不变）：单个目录名，目录在
+          `workspaces_root` 下由 Harness **创建**；
+        - `cwd`（#169 新增）：**已存在**的绝对目录，会话直接以它为操作目录
+          （不创建、不复制），并自动注册为项目 + 归组。
         """
         from uuid import uuid4
 
         from agent_harness.model.config import ConfigError, ModelConfig
 
+        # 校验顺序即契约（PRD §4.1）：先"二选一"（两个都给了就没有优先级问题可言），
+        # 再各走各的形态校验。"非空"按 strip 后的内容判；只给了一个但内容空白（如
+        # `cwd=""`）**不**当作缺省——显式传的字段必须给出明确的形态错误，静默忽略是
+        # 最坏的一种"宽容"（`_resolve_cwd` / `_validate_workspace_name` 各自报出）。
+        has_cwd = cwd is not None and bool(cwd.strip())
+        has_workspace = workspace_name is not None and bool(workspace_name.strip())
+        if has_cwd and has_workspace:
+            raise WorkspacePathInvalid("workspace 与 cwd 只能二选一")
         workspace_name = self._validate_workspace_name(workspace_name)
 
         session_id = str(uuid4())
-        workspace = (
-            self._state.workspaces_root / workspace_name
-            if workspace_name is not None
-            else self._state.workspaces_root / session_id
-        )
-        workspace.mkdir(parents=True, exist_ok=True)
+        if cwd is not None:
+            workspace = self._resolve_cwd(cwd)
+        elif workspace_name is not None:
+            workspace = self._state.workspaces_root / workspace_name
+            workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            workspace = self._state.workspaces_root / session_id
+            workspace.mkdir(parents=True, exist_ok=True)
 
         # 模型 catalog 校验（在落盘前，避免孤儿）；合法则记为会话初始模型，
         # 使后续 run 不传 amend 也能从事件流派生出「当前模型」（T7 #137）。
@@ -451,11 +472,13 @@ class SessionService:
         )
 
         # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
-        # "先建会话再 attach"）。只对**显式命名**的 workspace 做：未命名时目录是
+        # "先建会话再 attach"）。只对**显式选定了目录**的会话做：未命名/未给 cwd 时目录是
         # workspaces_root/<session_id>（"用户没选项目"的实现痕迹），把它注册成项目会
         # 给每个未命名会话凭空造出一个项目（ADR-0025 D6）。
-        # 项目实体由 create 幂等建立（同名 workspace 的多会话共享同一 path → 同一项目）。
-        if workspace_name is not None and self._state.workspace_index is not None:
+        # 项目实体由 create 幂等建立（同路径的多会话共享同一项目）。
+        # #169：`cwd` 走同一条路（title=None → `Workspace.default_title` 取目录末段名）。
+        explicit_dir = workspace_name is not None or cwd is not None
+        if explicit_dir and self._state.workspace_index is not None:
             await self._state.workspace_index.create(workspace, title=workspace_name)
             await self._state.workspace_index.attach_session(session_id)
 
@@ -972,6 +995,43 @@ class SessionService:
     def _validate_session_id(session_id: str) -> None:
         """委托公开函数 validate_session_id（保持调用方 self._validate_session_id 不变）。"""
         validate_session_id(session_id)
+
+    @staticmethod
+    def _resolve_cwd(cwd: str) -> Path:
+        """校验并规范化 `cwd`（ADR-0027 / #169 AC1），返回会话的操作目录。
+
+        顺序即契约（PRD §4.1 第 2–4 行）：绝对形态 → 存在 → 是目录。绝对形态必须
+        在 `realpath` **之前**判：`os.path.realpath("relative/dir")` 会按**进程当前
+        工作目录**解析，把一次用户笔误变成"会话落在服务器启动目录"的静默锚定
+        （与 `web/projects.py::_require_absolute_path` 同一类防护，共用
+        `sandbox.paths.is_absolute_path`——平台分支只在这里定义一次）。
+
+        形态判定之后用 `os.stat` 而不是 `os.path.exists` / `isdir`：后两者把
+        `PermissionError` 之类**吞成 False**，于是一个"存在但读不到"的目录会被报成
+        "目录不存在"（不诚实的 4xx 文案）；`os.stat` 让每种 errno 走到自己的分支。
+        **不代创建**——路径不存在是用户的输入错误，不是"帮他把目录建出来"的信号
+        （只有 `workspace` 名字那条路才由 Harness 创建目录）。
+        """
+        if not is_absolute_path(cwd):
+            raise WorkspacePathInvalid(f"cwd 必须是绝对路径：{cwd!r}")
+        if "\x00" in cwd:
+            # 必须在 realpath 之前挡：POSIX 的 `realpath` 遇到 NUL 抛 `ValueError`
+            # （不是 OSError），会穿透到 500。`_require_absolute_path` 早已有这道闸。
+            raise WorkspacePathInvalid(f"cwd 含非法字符（NUL）：{cwd!r}")
+        canonical = canonical_workspace_path(cwd)
+        try:
+            mode = os.stat(canonical).st_mode
+        except FileNotFoundError as error:
+            raise WorkspacePathInvalid(f"目录不存在：{canonical}") from error
+        except PermissionError as error:
+            raise WorkspacePathInvalid(f"无权限访问：{canonical}") from error
+        except OSError as error:
+            # 裸 OSError：非法字符 / 超长路径等（EINVAL / ENAMETOOLONG）。作者可控的
+            # 路径换来 500 不诚实——这类 errno 本身就是"你给的路径不可用"。
+            raise WorkspacePathInvalid(f"cwd 路径不可用：{canonical}") from error
+        if not stat.S_ISDIR(mode):
+            raise WorkspacePathInvalid(f"不是目录：{canonical}")
+        return Path(canonical)
 
     def _validate_workspace_name(self, workspace: str | None) -> str | None:
         """workspace 名字校验（路径逃逸防护）。

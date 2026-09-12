@@ -11,8 +11,16 @@ Coding / Knowledge / Research 等能力通过 Capability / Provider / Tool 可�
 _Avoid_: container, executor, environment
 
 **Workspace**:
-Sandbox 内部允许 Coding Tool 读写的唯一目录；越界访问会被 Sandbox 拒绝。
+会话的**操作系统工作目录**——Coding Tool 的起始 cwd 与相对路径的解析基准。默认由 Harness 创建；也可指向**用户指定的已存在目录**（ADR-0027）。注意：权限档（READ_ONLY / WORKSPACE_WRITE / DANGER）是**工具级**授权闸，不做路径校验——目录不是硬围墙。
 _Avoid_: working dir, project folder, bind mount, volume
+
+**Project**:
+用户**注册**的一个已存在目录在产品层的名字（DSH 模型：项目 = 目录）。是会话的分组单位；归属判定 = 会话工作目录与项目目录一致（账本 + cwd 双重校验，ADR-0025）。
+_Avoid_: workspace（本代码库早期把项目实体叫 workspace，现已正名）, folder, repo
+
+**Directory-rooted Session（目录会话）**:
+工作目录指向**用户真实目录**（通常是某个项目）的会话——与默认的「Harness 工作区会话」（`workspaces_root` 下自动创建的 scratch 目录）相对。创建时界面必须明示"Agent 将直接读写该目录"（ADR-0027）。
+_Avoid_: project session（与 Project 撞词）, attached session
 
 **Coding Tool**:
 在 Sandbox 内执行、按 `Tool` 契约暴露给模型的工具（read / write / edit / bash）。

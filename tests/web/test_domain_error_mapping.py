@@ -57,6 +57,10 @@ def test_status_map_is_the_audited_contract():
         "InvalidSessionId": 422,
         "SessionNotFound": 404,
         "WorkspaceNameInvalid": 422,
+        # WS-6 / #169：`cwd` 形态/存在性非法（非绝对 / 不存在 / 不是目录）——与
+        # workspace 名字非法同一个 422 语义（detail 文案区分）。它是
+        # WorkspaceNameInvalid 的**子类**，但本表是**精确类型**索引，必须自己登记。
+        "WorkspacePathInvalid": 422,
         "InvalidDecision": 422,
         "UnknownModel": 422,
         "InvalidForkBoundary": 422,

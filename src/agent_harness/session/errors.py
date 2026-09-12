@@ -71,6 +71,15 @@ class WorkspaceNameInvalid(SessionServiceError):
     """workspace 名字不合法（路径逃逸风险）。"""
 
 
+class WorkspacePathInvalid(WorkspaceNameInvalid):
+    """`cwd` 路径不合法（ADR-0027 / #169 AC1）：非绝对路径 / 不存在 / 不是目录。
+
+    继承 `WorkspaceNameInvalid`：HTTP 层同一 422 语义（detail 文案区分），handler 的
+    `except WorkspaceNameInvalid` 天然覆盖。**不能**只靠父类——领域错误表是精确类型
+    索引，子类必须自己登记（`web/domain_errors.py`）。
+    """
+
+
 class WorkspaceNotFound(SessionServiceError):
     """workspace_id 不存在（项目未注册 / 装配里没有 workspace 索引）。
 

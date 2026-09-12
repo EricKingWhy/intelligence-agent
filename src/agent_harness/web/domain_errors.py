@@ -10,7 +10,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | 端点 | 翻译的领域异常 |
 | --- | --- |
 | `GET /api/sessions/{id}/events` | InvalidSessionId, SessionNotFound |
-| `POST /api/sessions` | WorkspaceNameInvalid, InvalidDecision |
+| `POST /api/sessions` | WorkspaceNameInvalid（含子类 WorkspacePathInvalid）, InvalidDecision |
 | `GET /api/sessions/{id}/stream` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
@@ -51,6 +51,11 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 「会构造/追加 Session 聚合」的端点各自声明了它；上方的 37 个 except 臂是 ARCH-5 当时的
 历史审计记录，不在本次补记范围内。
 
+**WS-6 追加（#169）**：新增 `WorkspacePathInvalid: 422`——`POST /api/sessions` 的 `cwd`
+形态/存在性非法（非绝对 / 不存在 / 不是目录）。它**继承** `WorkspaceNameInvalid`，所以
+handler 的 `except` 元组一行不用改；但本表是**精确类型**索引（`http_error` 直接查表、
+不回退到父类），子类必须在这里自己登记，否则命中时 KeyError。
+
 ## 设计取舍（为什么不再往前一步）
 
 - **不用 FastAPI 全局 `exception_handler`**：那会把整张表应用到每个端点，使一个本来
@@ -85,6 +90,7 @@ from agent_harness.session.errors import (
     WorkspaceMoveInvalid,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
+    WorkspacePathInvalid,
 )
 from agent_harness.workspace import UnknownLedgerEntry, UnknownWorkspace
 
@@ -96,6 +102,7 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 422：入参/引用非法（客户端 bug，不是冲突）
     InvalidSessionId: 422,
     WorkspaceNameInvalid: 422,
+    WorkspacePathInvalid: 422,
     InvalidDecision: 422,
     UnknownModel: 422,
     InvalidForkBoundary: 422,

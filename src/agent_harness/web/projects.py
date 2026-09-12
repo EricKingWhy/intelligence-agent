@@ -36,13 +36,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
+from agent_harness.sandbox.paths import is_absolute_path
 from agent_harness.session.errors import SessionServiceError
 from agent_harness.session.projects import ProjectService
 from agent_harness.web.domain_errors import http_error, workspace_http_error
@@ -56,7 +56,7 @@ _LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def require_trusted_origin(request: Request) -> None:
-    """项目端点的来源闸（ADR-0025 D1 的 (b)）。
+    """宿主侧端点的来源闸（ADR-0025 D1 的 (b)；ADR-0028 D2 起 `GET /api/host/dirs` 复用同一份）。
 
     只在未配置 `jwt_secret`（本地信任模式）时生效；无 `Origin` 或本机 `Origin` 放行。
     `Origin: null`（sandboxed iframe / `file://`）没有 hostname → 拒绝。
@@ -72,8 +72,8 @@ def require_trusted_origin(request: Request) -> None:
         raise HTTPException(
             status_code=403,
             detail=(
-                f"拒绝跨源访问：Origin={origin!r}。项目 API 只接受本机来源"
-                "（配置 JWT_SECRET 后由认证层接管）。"
+                f"拒绝跨源访问：Origin={origin!r}。宿主侧 API（项目 / 目录列举）"
+                "只接受本机来源（配置 JWT_SECRET 后由认证层接管）。"
             ),
         )
 
@@ -90,8 +90,10 @@ def _require_absolute_path(value: str) -> str:
         raise ValueError("path must not be blank")
     if "\x00" in value:
         raise ValueError("path must not contain NUL")
-    # 与 `_validate_workspace_name` 同一手法：PureWindowsPath 让盘符/根判定在 POSIX 上也生效。
-    if not PureWindowsPath(value).is_absolute():
+    # 平台分支的绝对形态判定收在 `sandbox.paths.is_absolute_path`（#170 批次抽出）：
+    # 此处原先写 `PureWindowsPath(value).is_absolute()`，在 POSIX 上会把合法绝对路径
+    # （`/home/x`，无 drive → False）一律拒掉；Windows 口径逐字不变（仍要求盘符 + 根）。
+    if not is_absolute_path(value):
         raise ValueError("path must be an absolute path")
     return value
 
@@ -168,6 +170,18 @@ class ReorderSessionRequest(BaseModel):
     before: str | None = None
 
 
+class ProjectCreated(Project):
+    """`POST /api/projects` 的响应 = 项目 + 本次新归入的会话数（AC5 / #169）。
+
+    为什么要多这个字段：注册是"确保这个目录下的会话都归这儿"的动作，调用方需要知道
+    它**实际**改动了什么（软删除 → 重注册后补回 N 个；幂等重放为 0），而不是自己去
+    比对注册前后的账本——那正是"前端猜后端语义"。
+    """
+
+    #: 本次调用新 attach 进来的会话数（幂等重放 → 0）。
+    sessions_attached: int
+
+
 class ProjectDeleted(BaseModel):
     """`DELETE /api/projects/{id}` 的响应：**软删除**结果。
 
@@ -223,14 +237,18 @@ def register_project_routes(app: FastAPI) -> None:
     @app.post("/api/projects")
     async def create_project(
         req: CreateProjectRequest, _: None = Depends(require_trusted_origin)
-    ) -> Project:
-        """注册**已存在**的目录为项目。
+    ) -> ProjectCreated:
+        """注册**已存在**的目录为项目，并归入 cwd 匹配的既有会话（AC5 / #169）。
 
         同一规范路径 → 返回既有实体（不重建、不重复入序，AC5）；路径不存在 → 404、
         存在但不是目录 → 422（AC2/AC3）；两种情况都**不**在磁盘上留下痕迹。
+        响应里的 `sessions_attached` = 本次**新**归入的会话数（幂等重放 → 0）。
         """
         async with _translated():
-            return _project(await _service().create(req.path, req.title))
+            project, attached = await _service().create(req.path, req.title)
+        return ProjectCreated(
+            **_project(project).model_dump(), sessions_attached=attached
+        )
 
     @app.get("/api/projects")
     async def list_projects(_: None = Depends(require_trusted_origin)) -> list[Project]:

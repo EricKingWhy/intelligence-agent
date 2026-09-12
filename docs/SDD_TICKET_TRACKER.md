@@ -23,9 +23,23 @@
 | 批次 | 本批 tickets | fixed point（累计 diff 起点） | 审查结论 | 修复 commit（下一批 fixed point） |
 | --- | --- | --- | --- | --- |
 | B-1 | 待定（下一票 = #160 MEM-5 前端记忆管理 UI） | **`28c35e7`**（#158 收尾 commit——切换时的在途票据，其旧版两轴 review 已完成并修复，**不计入本批审查范围**；本批从 `28c35e7` 之后的新 ticket 起算） | 未审 | — |
+| B-2 | **#169 WS-6 后端半 + #170 WS-7 后端半**（同一张 PRD/ADR 的两个端点，依赖链自然收批） | **`80d49e1`**（merge main → feat/backend，本批第一行代码之前） | **已审**：Spec 轴 `NEEDS-FIX`（1×P1 + 5×P3）+ Standards 轴 `NEEDS-FIX`（3×P2 + 3×P3）→ 全部处置（修 / 文档化 / 有据不改） | **`9c158c9`**（下一批 fixed point） |
 
 **批次边界规则（v2 §1.2）**：每攒满 2–3 个 ticket（或遇到依赖链断点）即收批；收批时对
 `git diff <fixed point>..HEAD` 跑一次两轴 `/code-review`（Standards + Spec，两个独立只读子代理）。
+
+#### B-2 交付与审查记录（2026-09-12，后端 worktree）
+
+| 项 | 值 |
+| --- | --- |
+| Tickets | #169（WS-6 会话 `cwd` 契约 + 自动入组 / `sessions_attached`）、#170（WS-7 `GET /api/host/dirs` 只读目录列举）——**跨端票，只做完后端半，均未关单** |
+| Commits | `50e96a4`（ADR-0027/0028 + PRD + CONTEXT 正名）、`561b553`（WS-6）、`21c0b06`（WS-7）、`9c158c9`（B-2 审查收口） |
+| 门禁 | ruff **clean**；全量 pytest **2109 passed / 10 skipped / 42 deselected / 0 failed** |
+| 真机 | 真 uvicorn（隔离 `WORKSPACE_DIR`，未触碰真 `harness.db`）：WS-6 cwd=真实目录 → `read` 工具以**相对路径**读到真实文件并逐字复述；校验矩阵 4+2 条 detail 逐字一致；软删除→重注册 `sessions_attached=2`、幂等重放 0、目录/文件原样。WS-7 根模式真实盘符、一层列举（无文件/无嵌套/排序）、501→500+truncated、3 条错误 + NUL、跨源 403 / localhost 200 |
+| Spec 轴 findings | **P1** 三处形态闸用 `PureWindowsPath(...).is_absolute()` → POSIX 上拒掉一切合法绝对路径（#170 AC1 明文要求 POSIX）→ 抽 `is_absolute_path` 平台分支并共用。**P3** 空白 `cwd` 语义自相矛盾 / 矩阵外分支未登记 → PRD 补记 + 测试钉住；403 文案静默变更 → PRD 记明；`max_length` 造出矩阵外 list 形状 detail → 去掉；ADR-0028 D1 与 PRD 对条目 `path` 措辞冲突 → 改 ADR；`started.cwd` 的 realpath 断言与 symlink 条目 `path` 断言属**假绿** → 补强 |
+| Standards 轴 findings | **P2** `attach_matching_sessions` 用过滤视图重写账本会**永久**删掉 header 暂时读不到的成员（会话静默变 Ungrouped）→ 改为"读到且不匹配才剪，读不到保留"+ 回归锁 + 变异验证（改回旧行为 → 1 failed，sha256 还原）。**P2** host_dirs 只抓 `PermissionError` → 其余 OSError（TOCTOU/断连盘）冒 500 → `os.stat` + errno 分派。**P2** 根模式在事件循环上跑同步 I/O（3.11 fallback 26 次 `exists`）→ 同样卸载 worker。**P3** NUL 未拒（POSIX 上 `realpath` 抛 `ValueError` → 500）→ 两处补闸；`exists`/`isdir` 吞权限错误 → 改 `os.stat`；测试缺口（N>1 归入、边界截断、NUL）→ 补 |
+| 有据不改（已记录理由） | ① `MAX_ENTRIES` 全量物化后才截断：截断契约本身要求"排序后的前缀"，改 `scandir` 早停会破坏确定性；要限内存只能改契约（分页），收益不抵代价。② `PureWindowsPath` 判 `C:\x`：Windows 侧与既有口径一致，单方收紧会造两套形态语义。③ `ROOTS_PROVIDER` 模块级可替换 seam：可接受的测试 seam，不引入 DI 容器 |
+| 残留 / 交接 | 前端半（#169 AC9–AC14、#170 AC8–AC13）未做 → 两票**保持 OPEN**；下一批 fixed point = `9c158c9`；集成提示词 `docs/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md` |
 
 ## 当前状态
 
