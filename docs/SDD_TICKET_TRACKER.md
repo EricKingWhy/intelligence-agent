@@ -38,7 +38,24 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 
 | 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
-| B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | 见修复 commit（下方回填） |
+| B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | `45227dc` |
+
+### 最终全量 review（v2 §1.3）的处置——**已披露的偏离**
+
+v2 §1.3 要求「全部 ticket 完成后对整条分支跑一次最终全量 /code-review，fixed point = main」。
+本 worktree 的处置与理由如下（**不是静默跳过，是显式记录**）：
+
+1. 本分支相对 `main` **落后 13 个 commit / ahead 14**（见 `docs/integration/BRANCH_TOPOLOGY_AUDIT.md`），
+   且 `main` 侧的变更全在 `src/**`、`tests/**`（后端），与 `web/**` 无交集。以 `main` 为 fixed point
+   的 diff 里，绝大多数是**别人的代码**，对前端审查没有信息量。
+2. 本分支**切换 v2 之前**的 13 个前端 commit，已在各自轮次做过两轴 review（见本文件各「批次」小节 +
+   `docs/FRONTEND_ISSUES_LOG.md` 各轮）。用户 2026-09-12 的过渡条款明确：「旧版循环下已完成并 commit
+   的 tickets 一律承认有效，不再补审、不重跑」。
+3. 因此**唯一未被审过的增量 = `637bc89..HEAD`**，已由 B-1 审查覆盖（新版本循环的 fixed point 语义）。
+
+结论：本 worktree 认为 v2 §1.3 的**目的**（"切换后新增的代码全被审过"）已达成；字面执行
+`main...HEAD` 只会重审已承认有效的内容。**留给集成 AI 决策**：若仍要跑，建议在 `main` 合入本分支后
+再跑（那时 fixed point = 合并前的 main，diff 才等于本分支的真实增量）。
 
 > 为什么单票成批：v2 §1.2 允许「遇到依赖链断点等自然分界提前收批」。#160 是 MEM-5 跨端票的
 > 前端半、也是本轮唯一剩余票（MEM 链末端）→ 自然断点，单票即收批；
