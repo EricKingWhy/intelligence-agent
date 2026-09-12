@@ -77,6 +77,43 @@ DSH 注册的是**任意已存在目录**的 `realpath`。用户 2026-09-11 拍�
 (b) 加同源/CSRF 防护；(c) 在部署上明确限定 localhost-only 且把该假设写成部署约束。
 在那之前，"用户明确授权"这句话只在上述前提成立时才严格成立。
 
+**WS-4 (#154) 的落实（D1 补充，2026-09-12）**：选了 **(b) 同源/CSRF 防护**，实现为
+`web/projects.py::require_trusted_origin` —— 挂在**所有项目端点（读 + 写，9 条全挂）**上的
+FastAPI 依赖。最初只挂写端点，review 指出**读端点也漏信息**（项目列表/详情里全是用户的
+绝对路径，CORS `*` 下"能被读"就等于"能被任意网页枚举"），已改成全挂：
+
+- 未配置 `jwt_secret`（本地信任模式）时，**带 `Origin` 且 hostname 不是本机**
+  （`localhost` / `127.0.0.1` / `::1`）→ **403**，请求不落任何盘；`Origin: null`
+  （sandboxed iframe / `file://`）没有 hostname → 同样 403；
+- **无 `Origin`** 的请求放行：非浏览器发起（CLI / curl / 服务端）无法被第三方网页驱动，
+  这是 Origin 校验的标准边界；
+- 配置了 `jwt_secret` 时整体跳过：这时请求已过 `AuthSeamMiddleware`（fail-closed），
+  跨源网页拿不到签名 token，认证层才是边界。
+
+为什么不做 (a)：本地单用户默认不配密钥，要求配置密钥等于把默认部署变成"用不了"；为什么
+不做 (c)：绑定 localhost **挡不住浏览器**（恶意网页的请求就是从用户的浏览器发往
+127.0.0.1 的），它只是把假设写下来，而 (b) 直接掐掉那个向量。
+
+**`path` 收的是绝对路径（新增校验）**：`web/projects.py::_require_absolute_path` 在
+`canonical_workspace_path` **之前**拒绝空白 / `.` / `..` / 相对写法 / NUL。理由：
+`realpath("")`、`realpath(".")` 返回**进程当前工作目录**、`realpath("..")` 返回**盘根**——
+放行就等于让"注册我的项目"变成"把服务器碰巧启动的目录、甚至整块盘当成项目"（WS-1 已就
+`realpath("")` 记过同一类静默锚定）。**盘根/家目录本身不额外拒绝**：它们确实是"已存在的
+目录"（AC2 的字面要求），注册它们是用户的显式动作，且本票的 `DELETE` 是**软删除**
+（不触碰 `WorkspaceRegistry.delete` 的 `rmtree` 路径），所以不构成新的破坏面；但沙箱根会
+随之变成整块盘，这是用户可见的选择（UI 显示 path），不是提权。
+
+**残留下来、本票未修（重要）**：这个闸只保护**本票新增的项目端点**。
+`allow_origins=["*"]` 让**既有**端点（含 `POST /api/sessions` → 能起 agent 跑工具）
+在今天就能被任意网页调用——那是 #154 之前就存在的洞，范围远超本票（`AGENTS.md §8`：
+范围外只报告不顺手修）。要真正关掉它，正确做法是把 CORS 收紧到本机 origin（或默认
+`jwt_secret` fail-closed），**这是独立的一张票**。
+
+**放行 no-Origin 的前提（部署约束，必须写下来）**：Origin 校验只挡浏览器。若服务绑到
+`0.0.0.0` 且未配 `jwt_secret`，任何能直连该端口的网络客户端都可以不带 `Origin` 调用项目
+写端点。因此**本票的默认部署前提是"服务只绑 loopback"**（`dev.sh` / 验收文档都是
+127.0.0.1）；对外暴露必须配 `jwt_secret`（走 (a) 的认证层）。
+
 **一个被这次改动放大的既有能力（记录，不在本票修）**：`LocalSubprocessSandbox.delete` /
 `WorkspaceRegistry.delete` 会 `shutil.rmtree(workspace_root)`。原来 root 必然是
 `workspaces_root` 下的一层，所以 rmtree 的范围有界；换成"任意已存在目录"之后，如果这个

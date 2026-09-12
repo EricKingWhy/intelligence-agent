@@ -719,3 +719,88 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
    若将来成为热点，正确方向是 index 内部缓存，**不是**放弃 AC6。
 3. `AppState.ensure_stores()` 是列表读的**前置**（否则索引未初始化 → 每行都被判成未分组）。
    这是 load-bearing，不是防御性代码。
+
+---
+
+## 14. #154（WS-4）项目 CRUD API（软删除语义）
+
+### 交付
+
+| 文件 | 变化 |
+| --- | --- |
+| `session/projects.py`（新） | `ProjectService`：装配前置（`ensure_stores` + 索引存在性）、AC7 前置校验、把 workspace 词汇翻译成会话层词汇 |
+| `web/projects.py`（新） | 9 条端点 + `require_trusted_origin` 来源闸 + 绝对路径校验 + Pydantic 契约模型 |
+| `session/errors.py` | `WorkspaceMoveInvalid`（409）——无 cwd 锚 / cwd 不属于该项目 / 重排目标不在该项目账本 |
+| `web/domain_errors.py` | 第二张表 `_WORKSPACE_ERROR_STATUS` + `workspace_http_error`（404 / 409 / 422 / 403），审计表 + 覆盖测试同步 |
+| `web/app.py` | 注册项目 router（一行接入）；**删除**死副本 `_validate_workspace_name`（#152 交接项 3 的下半） |
+| `workspace/index.py` | `attach_session`/`detach_session`/`insert_session_before` 的同步 header 读卸载到 worker（#153 review 同款标准）；写方法返回值改用**提交后**视图 |
+| `tests/web/test_projects_api.py`（新，26 条） | AC1–AC7 + 来源闸（逐端点）+ 路径形态 + 幂等严格性 + 日志字节不变 |
+| `tests/workspace/test_view_freshness.py`（新，1 条） | 写方法的返回值 == 随后 `get()`（`updated_at` 不陈旧） |
+| `tests/web/test_domain_error_mapping.py` | 第二张表：覆盖 `WorkspaceError` 子类 + OS 错误 + 逐条状态码契约 |
+| `docs/adr/0025-workspace-entity-registry.md` | D1 落实记录（(b) 来源闸 / 绝对路径 / loopback 前提 / 残留） |
+
+### 端点集（9 条，全部过来源闸）
+
+| 方法 + 路径 | 语义 |
+| --- | --- |
+| `POST /api/projects` | 注册**已存在**的目录（**绝对路径**）；同一规范路径幂等返回既有实体；不存在 → 404、不是目录 → 422、非法字符/超长 → 422、无权访问 → 403 |
+| `GET /api/projects` | 全部项目，**注册表顺序**（新建前插） |
+| `POST /api/projects/resolve` | 按路径解析，**不注册**；未注册 → 404 |
+| `GET /api/projects/{id}` | 单个项目；未知 id → 404 |
+| `PATCH /api/projects/{id}` | `setTitle`（空/纯空白标题 → 422） |
+| `DELETE /api/projects/{id}` | **软删除**；响应含 `sessions_detached` 与明确文案"目录、用户文件与会话日志均未删除" |
+| `POST /api/projects/{id}/sessions` | attach（AC7：会话须存在且 cwd 指向本项目；已是成员 → 直接返回，不重排） |
+| `DELETE /api/projects/{id}/sessions/{sid}` | detach（幂等；URL 项目不是归属 → 无操作，不动别人账本） |
+| `POST /api/projects/{id}/sessions/{sid}/order` | 账本内重排（`before=null` → 追加尾部；`before==sid` → no-op；跨项目 → 409） |
+
+### 集成方需要知道的行为
+
+- **来源闸覆盖读端点**：未配 `jwt_secret` 时，`Origin` hostname 不是 `localhost` /
+  `127.0.0.1` / `::1` → **403**（读也 403——响应里是用户的绝对路径）。本机 Vite dev
+  （5173）与同源部署照常；**无 `Origin`** 的 CLI/curl 照常。**部署前提：服务只绑 loopback**
+  （对外暴露必须配 `jwt_secret`，那时闸自动让位给认证层）。
+- **`create` 只收绝对路径**：`""` / 空白 / `.` / `..` / 相对写法 / NUL → 422。这是新增校验：
+  放行的话 `realpath(".")` 会把"注册项目"变成"注册服务器碰巧启动的目录"。
+- **软删除可逆**：删除后同一目录可重新注册（得到**新 id**），会话回到未分组且日志逐字节未变。
+- **`create` 不回溯 attach**：注册一个目录**不会**把"cwd 已指向该目录"的历史会话自动接进项目
+  （真机实测：注册后 `session_ids` 为空，需显式 attach）。首次启动的 bootstrap 扫描是唯一
+  一次自动归组。**#155 若希望"注册后目录里的老会话自动出现"，需要在 UI 侧决定是否批量 attach。**
+- **`POST /api/sessions` 的 `workspace` 名字语义不变**（单段名 → `workspaces_root/<name>`）；
+  路径形态走 `/api/projects`。`web/app.py` 删掉的是**死副本**（活实现一直在 `SessionService`）。
+- **`.env` / 依赖**：零新增、零删除。
+
+### 门禁与验收
+
+- `ruff check .` clean；`git diff --check` clean；全量 pytest **1972 passed / 10 skipped /
+  39 deselected / 0 failed**。
+- **25 组单行变异**：22 被杀、3 个预期存活（等价性已写进脚本与本节：服务层锚点校验与索引
+  内部拒法同为 409；`UnknownWorkspace` 登记在当前路径不可达；rename 两层各自都能给 404）。
+  另重跑 #152 的 18+11 组、#153 的 10 组，全部按预期处置（2 处 anchor 随本次 index 改动更新）。
+- 真机（真 `.env` / 真 uvicorn :8792 / 真 `harness.db` / 真 JSONL / 真业务数据 28 会话）：
+  注册/幂等/解析/404/422、跨源 403 与本机 200、attach（日志 sha 未变）、AC7 负例 409、
+  detach（日志 sha 未变 + 列表变未分组 + 幂等）、reorder（真改序 + 追加复原到与原始序**完全一致**
+  + 跨项目 409 且另一项目账本未动）、软删除（目录/文件/日志逐字节不变、会话仍可见且
+  `workspace: null`、`GET` → 404、`workspaces`/`workspace_order`/`workspace_sessions`/
+  `workspace_changes` 该 id 行数**全为 0**）。测试后已把运行时状态还原到测试前基线。
+- **双轴 review 的收口**：Spec 轴 LOOKS-GOOD（6 条 P2）、Standards 轴 NEEDS-FIX（1 条 P1 +
+  4 条 P2）。全部已修并复验，其中三条值得集成方知悉：
+  1. **P1 路径必须是绝对路径**（Standards 实测 `{"path": "."}` → 200 且注册了进程 CWD、
+     `{"path": ".."}` → 注册盘根）→ 新增 `_require_absolute_path`（含 NUL / 空白 / 相对写法）。
+  2. **裸 `OSError` → 500**（`C:\bad<name>`、超长路径：`os.stat` 抛 EINVAL / ENAMETOOLONG）
+     → 表里加 `OSError: 422`、`PermissionError: 403`，并把 `OSError` 加进 `_translated` 的捕获
+     元组（只加表不加捕获是**到不了的**——首轮修复就踩了这个坑，靠变异 M18/M19 抓出来）。
+  3. **`attach` 不是真幂等**（重复 attach 把用户拖过的位置重置到队首）+ **索引返回值
+     `updated_at` 陈旧**（`_persist_ledger` 后仍用旧 `record` 建视图）→ 分别加真幂等短路与
+     `get()` 重取；两条都补了判别性用例（后者暴露了"重 attach 队首会话"这种**弱构造**：
+     前插队首本来就不改变顺序，变异存活后才改成重 attach 队尾）。
+
+### 需要后续票知悉（范围外，未修）
+
+1. **既有 CORS `*` 洞仍在**：`allow_origins=["*"]` + 未配 `jwt_secret` ⇒ 任意网页可调
+   **既有**端点。review 独立实测：跨源 `POST /api/sessions`（带合法 body）→ **200 且起 run**。
+   严重度高于本票，属既有问题（ADR-0025 D1 已记录），**应独立开票**（收紧 CORS 或默认 fail-closed）。
+2. `WorkspaceRegistry.delete` / `LocalSubprocessSandbox.delete` 的 `shutil.rmtree(workspace_root)`
+   在"任意已存在目录"模型下范围无界；本票的 `DELETE` 是**软删除**，**不碰**这条路径。
+3. 盘根/家目录可以注册（AC2 字面允许的"任意已存在目录"）——沙箱根会随之变成整块盘；
+   review 建议评估显式拒绝，本票**评估后保留**（是用户的显式动作 + 软删除不破坏数据），
+   已写入 ADR D1 补充。

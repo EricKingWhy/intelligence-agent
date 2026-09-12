@@ -35,6 +35,16 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 伪装成"项目没有会话"）。上表已补该端点行，`_DOMAIN_ERROR_STATUS` 的 404 组同步
 新增 `WorkspaceNotFound`。
 
+**WS-4 追加（#154）**：新增 `/api/projects` 系列端点（`web/projects.py`），共 9 条：
+`POST /api/projects`（注册已存在目录，幂等）、`GET /api/projects`（注册表序）、
+`POST /api/projects/resolve`（按路径解析，不注册）、`GET|PATCH|DELETE
+/api/projects/{id}`（软删除）、`POST /api/projects/{id}/sessions`（attach）、
+`DELETE /api/projects/{id}/sessions/{sid}`（detach，幂等）、
+`POST /api/projects/{id}/sessions/{sid}/order`（账本内重排）。
+这些端点同时翻译**两张表**：会话层词汇走 `http_error`（`WorkspaceNotFound` 404 /
+`WorkspaceMoveInvalid` 409 / `InvalidSessionId` 422 / `SessionNotFound` 404），
+`workspace` 包与 OS 词汇走下面的 `workspace_http_error`。
+
 **BUG-011 追加**：`SeqConflict` → **409**（seq 冲突：并发写者抢先落盘，或日志已损坏）。
 旧行为是 `service.resume_and_launch` 把 `ValueError` 一刀切翻成 `SessionNotFound`（404），
 使真机会话 `dd983104` 的日志损坏被显示成 `续聊失败：Send failed: 404`。上表中 5 个
@@ -71,9 +81,11 @@ from agent_harness.session.errors import (
     SessionServiceError,
     SteerTargetNotFound,
     UnknownModel,
+    WorkspaceMoveInvalid,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
 )
+from agent_harness.workspace import UnknownLedgerEntry, UnknownWorkspace
 
 #: 领域异常 → HTTP status 的**唯一**映射源（ARCH-5）。新增领域异常只改这里；
 #: 需要用它的端点再在自己的 except 元组里声明。状态码口径见模块 docstring 的审计表。
@@ -97,10 +109,55 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     RecoveryConflict: 409,
     ApprovalAlreadyResolved: 409,
     SteerTargetNotFound: 409,
+    # WS-4 / #154：会话↔项目的移动在当前状态下不成立（无 cwd 锚 / cwd 不属于该项目 /
+    # 重排目标不在该项目账本里）。是"请求合法但状态不允许"，与 422 的名字形态非法分开。
+    WorkspaceMoveInvalid: 409,
     # BUG-011：seq 冲突是「资源当前状态与请求冲突」，**不是**「资源不存在」——
     # 旧行为把它翻成 404（`send_message` 的 `Send failed: 404`），掩盖了日志损坏。
     SeqConflict: 409,
 }
+
+#: workspace 包 / 文件系统异常 → HTTP status 的第二张表（WS-4 / #154）。
+#:
+#: 为什么单独一张：`_DOMAIN_ERROR_STATUS` 的键必须是 `SessionServiceError` 子类，而
+#: `UnknownWorkspace` / `UnknownLedgerEntry` 是 `workspace` 包的词汇（该包不依赖
+#: session 层，不能反向继承）。这张表兜住**直接**从索引冒出来的那些异常 +
+#: `create()` 有意原样透传的 OS 错误。
+#:
+#: **刻意不登记**：`WorkspaceRegistryCorrupt`（RuntimeError）——索引损坏是服务端完整性
+#: 故障，500 才是诚实状态码，不是客户端的错。
+#:
+#: `UnknownWorkspace` 的**当下可达性**：本表要求每个 `WorkspaceError` 子类都有状态码
+#: （覆盖测试双向钉住），但当前 HTTP 路径不会触达它——索引的读方法返回 `None`
+#: （`ProjectService` 翻成 `WorkspaceNotFound`），写方法抛 `UnknownLedgerEntry`。它的
+#: 价值是**注册表完备性**：将来某个索引调用点直接冒出该异常时是 404，不是 500。
+_WORKSPACE_ERROR_STATUS: dict[type[Exception], int] = {
+    # 404：目标不存在
+    UnknownWorkspace: 404,
+    FileNotFoundError: 404,
+    # 409：账本序请求与账本当前状态冲突（会话/锚点不在该项目账本里）
+    UnknownLedgerEntry: 409,
+    # 422：路径存在但不是目录（`require_existing_directory` 的原样透传）——入参非法
+    NotADirectoryError: 422,
+    # 422：**裸 `OSError`**——非法字符 / 超长路径等（`os.stat` 抛 EINVAL / ENAMETOOLONG，
+    # 实测 `C:\bad<name>` 与 `"\t"` 都是这一类）。客户端可控的路径换来 500 不诚实；
+    # 这类 errno 就是"你给的路径不合法"。注意 `workspace_http_error` 按 `type(exc)` 精确
+    # 查表，所以这条不会吞掉上面 FileNotFoundError / NotADirectoryError 的专有项。
+    OSError: 422,
+    # 403：路径存在但服务端无权访问（文件系统权限，不是"参数写错"）。
+    PermissionError: 403,
+}
+
+
+def workspace_http_error(exc: Exception) -> HTTPException:
+    """workspace 包 / OS 异常 → `HTTPException`；状态码取自 `_WORKSPACE_ERROR_STATUS`。
+
+    与 `http_error` 同款：直接索引（不 `.get` 回退），未登记类型是编码错误，由
+    `tests/web/test_domain_error_mapping.py` 的覆盖测试先红挡住。
+    """
+    return HTTPException(
+        status_code=_WORKSPACE_ERROR_STATUS[type(exc)], detail=str(exc)
+    )
 
 
 def http_error(exc: SessionServiceError) -> HTTPException:

@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+import anyio
+
 from agent_harness.sandbox.paths import canonical_workspace_path
 from agent_harness.workspace.models import StartedHeader, Workspace
 from agent_harness.workspace.store import (
@@ -278,19 +280,25 @@ class WorkspaceIndex:
 
         只加入**已注册**的项目：没有 cwd / cwd 不匹配任何项目 → `None`（不隐式创建）。
         "未指定项目的默认会话"因此天然保持 Ungrouped（其目录不注册）。
+
+        #154 起本方法是 HTTP 写路径：内部的 header 读（`_read_header` / `_filter_visible`
+        / `_view`）都是**同步磁盘 I/O**，一律卸载到 worker 线程——与
+        `SessionService.list_sessions` 同款（#153 review 的 P2-1）。
         """
         async with self._write_lock:
             self._require_initialized()
-            header = self._read_header(session_id)
+            header = await anyio.to_thread.run_sync(self._read_header, session_id)
             if header is None or not header.cwd:
                 return None
             record = self._record_by_path(header.cwd)
             if record is None:
                 return None
             current = [sid for sid in self._ledger.get(record.id, ()) if sid != session_id]
-            kept = self._filter_visible(record, current)
+            kept = await anyio.to_thread.run_sync(self._filter_visible, record, current)
             await self._persist_ledger(record.id, [session_id, *kept])
-            return self.get(record.id)
+            # `self.get`（而不是用上面那份 `record`）：`_persist_ledger` 刚替换了
+            # `_records[id]`（新 `updated_at`），只有重新取缓存才拿到**提交后**的值。
+            return await anyio.to_thread.run_sync(self.get, record.id)
 
     async def detach_session(self, session_id: str) -> None:
         """AC7：把会话移出账本（幂等）。不在账本上 → 无写操作（除修剪外）。
@@ -303,8 +311,12 @@ class WorkspaceIndex:
                 if session_id not in ids:
                     continue
                 record = self._records[workspace_id]
-                kept = [sid for sid in self._filter_visible(record, ids) if sid != session_id]
-                await self._persist_ledger(workspace_id, kept)
+                kept = await anyio.to_thread.run_sync(
+                    self._filter_visible, record, ids
+                )
+                await self._persist_ledger(
+                    workspace_id, [sid for sid in kept if sid != session_id]
+                )
 
     async def insert_session_before(
         self, session_id: str, before: str | None = None
@@ -322,7 +334,9 @@ class WorkspaceIndex:
                     f"会话 '{session_id}' 不在任何项目账本里，无法重排"
                 )
             record = self._records[workspace_id]
-            ordered = list(self._filter_visible(record, self._ledger[workspace_id]))
+            ordered = await anyio.to_thread.run_sync(
+                self._filter_visible, record, self._ledger[workspace_id]
+            )
             if session_id not in ordered:
                 raise UnknownLedgerEntry(
                     f"会话 '{session_id}' 的 header cwd 与项目 '{record.title}' 不符（已被剪枝）"
@@ -337,7 +351,7 @@ class WorkspaceIndex:
                     )
                 ordered.insert(ordered.index(before), session_id)
             await self._persist_ledger(workspace_id, ordered)
-            view = self.get(workspace_id)
+            view = await anyio.to_thread.run_sync(self.get, workspace_id)
             assert view is not None  # 刚写过账本，记录必然在
             return view
 

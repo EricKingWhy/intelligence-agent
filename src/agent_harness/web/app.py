@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -195,7 +195,7 @@ class CreateSessionRequest(_AmendValueValidators):
     # max_length 封顶：task 会逐字持久化进 JSONL（user/message）并整体进模型上下文，
     # 无上限时一个多 MB 请求体就能写爆日志 + 撑爆 context。
     task: str = Field(min_length=1, max_length=100_000)
-    workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（见 _validate_workspace_name）
+    workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
     max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
     # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
     # PermissionPolicy；未知值 → 422。permission_mode 决定 ToolExecutor 的 policy
@@ -495,40 +495,6 @@ async def _validate_amend_for_existing_session(
             raise HTTPException(status_code=422, detail=str(error)) from error
 
 
-def _validate_workspace_name(state: AppState, workspace: str | None) -> str | None:
-    """校验请求里的 workspace 字段——V1 安全边界：它是名字，不是路径。
-
-    客户端若能直接传路径（"C:\\Users\\me"、"../../.."），Bash / Write 等工具
-    就会以任意宿主目录为 sandbox 根执行（路径逃逸漏洞）。V1 采用最简单的
-    安全规则：只接受单个路径段的目录名——
-    - None → 返回 None（调用方用默认 session_id 目录，向后兼容）；
-    - 单段相对名（"my-task"）→ 返回该名字，目录建在 workspaces_root 下；
-    - 绝对路径 / 盘符 / 含 / 或 \\ 的多段名 / "." ".." → 422 拒绝。
-
-    必须在任何 mkdir / Session 落盘之前调用：被拒请求不能留下任何痕迹。
-    """
-    if workspace is None:
-        return None
-    # PureWindowsPath 让盘符检查在非 Windows 平台上也生效（"C:foo" 在 POSIX
-    # 是合法单段名，但语义上是 Windows 盘符相对路径——一律拒绝）。
-    candidate = PureWindowsPath(workspace)
-    if (workspace.strip() in ("", ".", "..")
-            or candidate.drive or candidate.root or candidate.is_absolute()
-            or "/" in workspace or "\\" in workspace):
-        raise HTTPException(
-            status_code=422,
-            detail=f"workspace 只接受单个目录名（不接受路径）：{workspace!r}",
-        )
-    # 双保险：解析后的候选目录必须仍落在 workspaces_root 内（防符号链接逃逸）。
-    resolved_root = state.workspaces_root.resolve()
-    if not (resolved_root / workspace).resolve().is_relative_to(resolved_root):
-        raise HTTPException(
-            status_code=422,
-            detail=f"workspace 越出 workspaces_root：{workspace!r}",
-        )
-    return workspace
-
-
 #: 重放 backlog 阈值（durable 事件数，ADR-0016 §2.3）：after_seq 落后超过
 #: 该值 → 单帧 stream/truncated 控制事件后收流，客户端走 GET /events 全量
 #: 重建后带 after_seq=latest_seq 重连（02 §10.4 简化版；snapshot 层 DEFER）。
@@ -731,6 +697,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     from agent_harness.web.lineage import register_lineage_routes
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
+
+    # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
+    from agent_harness.web.projects import register_project_routes
+
+    register_project_routes(app)
 
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须

@@ -8,7 +8,15 @@ except 臂。本测试把「审计结论」钉成契约：状态码只允许在
 from __future__ import annotations
 
 from agent_harness.session.errors import SessionNotFound, SessionServiceError
-from agent_harness.web.domain_errors import _DOMAIN_ERROR_STATUS, http_error
+from agent_harness.web.domain_errors import (
+    _DOMAIN_ERROR_STATUS,
+    _WORKSPACE_ERROR_STATUS,
+    http_error,
+    workspace_http_error,
+)
+from agent_harness.workspace import (
+    WorkspaceError,
+)
 
 
 def _all_subclasses(cls: type) -> set[type]:
@@ -57,6 +65,9 @@ def test_status_map_is_the_audited_contract():
         # WS-3 / #153：按项目列会话时未注册的 workspace_id——与「项目存在但没有会话」
         # 必须可区分，所以是 404 而不是「空列表」（不变量 #21 同族：缺席不造假）。
         "WorkspaceNotFound": 404,
+        # WS-4 / #154：会话↔项目的移动在当前状态下不成立（无 cwd 锚 / cwd 不属于该项目 /
+        # 重排目标不在该项目账本里）——状态冲突而非入参非法，与 422 分开。
+        "WorkspaceMoveInvalid": 409,
         # BUG-011：seq 冲突（并发写者抢先落盘 / 日志已损坏）——冲突不是「不存在」，
         # 必须与 SessionNotFound 的 404 区分开（旧行为把它翻成 404 掩蔽了日志损坏）。
         "SeqConflict": 409,
@@ -68,3 +79,57 @@ def test_http_error_reads_status_from_the_single_map():
     http = http_error(SessionNotFound("session 'x' not found"))
     assert http.status_code == 404
     assert http.detail == "session 'x' not found"
+
+
+# ── WS-4 / #154：第二张表（workspace 包 / OS 词汇）──
+
+
+def test_workspace_map_covers_every_workspace_exception():
+    """`workspace` 包的每个领域异常都必须显式登记（`workspace_http_error` 直接索引）。"""
+    missing = _all_subclasses(WorkspaceError) - set(_WORKSPACE_ERROR_STATUS)
+    assert not missing, (
+        "以下 workspace 领域异常未登记 HTTP 状态码："
+        f"{sorted(c.__name__ for c in missing)}"
+    )
+
+
+def test_workspace_map_is_the_audited_contract():
+    """WS-4 的项目端点审计结论——状态码不得漂移。
+
+    关键区分：**未知目标**（无该项目 / 路径不存在）= 404；**路径存在但不是目录** =
+    422（入参非法）；**账本序请求与账本现状冲突**（会话/锚点不在该项目账本里）= 409；
+    **OS 拒绝该路径**（非法字符 EINVAL / 超长 ENAMETOOLONG，裸 `OSError`）= 422；
+    **无权访问** = 403。
+    `WorkspaceRegistryCorrupt` **刻意不登记**：索引损坏是服务端完整性故障，500 才诚实。
+    """
+    assert {c.__name__: s for c, s in _WORKSPACE_ERROR_STATUS.items()} == {
+        "UnknownWorkspace": 404,
+        "FileNotFoundError": 404,
+        "UnknownLedgerEntry": 409,
+        "NotADirectoryError": 422,
+        "OSError": 422,
+        "PermissionError": 403,
+    }
+
+
+def test_workspace_map_covers_the_os_errors_create_can_raise():
+    """`create()` 会原样透传的 OS 错误必须都有状态码——否则客户端可控路径换来 500。
+
+    上一例只能枚举 `WorkspaceError` 子类，**发现不了"代码会抛的 OS 异常没登记"**，
+    所以这条显式钉住：`os.stat` 的 EINVAL/ENAMETOOLONG 是裸 `OSError`、权限问题是
+    `PermissionError`、目标不存在是 `FileNotFoundError`、不是目录是 `NotADirectoryError`。
+    """
+    for exc in (
+        OSError(22, "Invalid argument"),
+        PermissionError(13, "denied"),
+        FileNotFoundError(2, "missing"),
+        NotADirectoryError(20, "not a dir"),
+    ):
+        http = workspace_http_error(exc)
+        assert 400 <= http.status_code < 500, f"{type(exc).__name__} → {http.status_code}"
+
+
+def test_workspace_http_error_preserves_detail():
+    http = workspace_http_error(NotADirectoryError(20, "不是目录", "D:/x"))
+    assert http.status_code == 422
+    assert http.detail  # str(OSError) 原样透传，文案由异常自己带
