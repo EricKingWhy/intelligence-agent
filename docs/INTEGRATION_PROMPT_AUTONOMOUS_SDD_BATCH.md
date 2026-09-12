@@ -1025,3 +1025,82 @@ in-flight 合并（写后 `refetch` 有意绕过合并）；拖拽落点只在�
 
 #159（MEM-4 遗忘入口：模型可调用的遗忘工具 DANGER + 审批 / 用户 API）。#157 已把"删除真的会到达索引"这条
 机制验收完毕，#159 只做**入口与确认**；`#158`（retrieve-before-write 冲突消解）排在其后。
+
+## 18. #159（MEM-4）遗忘入口（后端）—— 模型 `forget_memory`（DANGER + 审批）+ 用户遗忘 API
+
+**提交**（均在本 worktree 的 `feat/backend`，未 push）：`af3db7a` 实现 → `19d51fc` 两轴 review 修复轮。
+零前端改动（前端记忆管理 UI 是 #160）。新增文件：`memory/tools.py`、`memory/audit.py`、`memory/errors.py`、
+`web/memory.py`。
+
+### 18.1 集成分歧点：**不需要迁移**，但有三处契约面变化要知会
+
+无新表/新列/无 SessionEvent（审计刻意走结构化日志）。不需要任何手工步骤。
+
+1. **`MemoryCapability` 契约新增 `list_entries(scope, limit, offset)`**（读权威记录、不走 embedding）。
+   三个测试替身（`fake_capability` / `test_memory_provider_seam._InMemoryCapability` / langmem 实现）
+   都已实现，seam 测试已钉住——将来加 provider 必须一并实现。
+   **命名不是风格问题**：**不能**叫 `list`（在 Protocol 类体里定义会遮蔽内建 `list`，同类体内后续的
+   `list[MemoryEntry]` 注解在**类创建期**就 `TypeError`）。集成时若看到别名 `list`，那是错的。
+2. **一处语义改判（#156 期行为 → 现在）**：`MemoryRecordStore.get`/`delete` 命中 **SESSION 行**、
+   而当前上下文**没有可信会话绑定**时，`delete` 抛出的异常从 `ValueError` 变成 `PermissionError`
+   （`row_namespace_matches` 把"这一行的 namespace 解析不出调用方有权操作的那一个"统一判为"不是你的记忆"）；
+   `get` 是同一个判据但**口径不同**——读路径把"不是你的"伪装成 `KeyError`（不泄露存在性），
+   这条现在也有用例钉住。另外 "缺会话绑定" 已**类型化**为 `SessionBindingMissing(ValueError)`
+   （在 `memory/errors.py`，**刻意不是 `MemoryDomainError`**，所以不需要 HTTP 状态码；`of()` 抛它、
+   `row_namespace_matches` 只捕获它，不再裸接 `ValueError`——将来 `of()` 里无关的 ValueError 不会被误吞）。
+   两条 #156 期 store 层用例的期望随之更新并就地写明理由
+   （`tests/memory/test_record_store.py::test_delete_rejects_a_session_bound_from_another_session`、
+   `tests/memory/test_memory_lifecycle.py::test_delete_requires_the_bound_session_for_session_scope`）。
+   **#156 的 AC2 未被削弱**（它只要求"按 namespace 校验归属、不得跨 tenant/user/scope 删"）；
+   `store()` / `list_by_scope()` 在**调用方自己**缺绑定时**依旧** `ValueError`（有测试钉住），
+   所以真正的上下文 bug 不会变安静。判据是 **行**的 scope 解析失败 ≠ **调用方**的 scope 解析失败。
+3. **`CapabilityWiring.tool_contributors`（新字段）**：memory 的工具贡献走
+   **`ContributesTools` 收集循环**的第二来源（描述符注册的仍是契约对象本身，`registry.get("memory")` 不变）。
+   `wire_capabilities` 末尾只剩**一个**收集循环（已合并原先两个近似重复的循环）；没有任何地方直接往
+   `wiring.tools` append——将来接新能力时保持这条。
+
+### 18.2 集成方需要知道的行为口径
+
+- **用户 API 只暴露 USER scope**：`POST`/`GET` 都不接受 namespace 参数（由身份解析）。
+  因此两个"客户端可构造的输入"边界是**明确的 4xx**，集成时不要把它们当 500：
+  身份缺 `user` scope → `GET /api/memories` **403**；HTTP 删一条 **SESSION** 记忆（HTTP 没有可信会话绑定）
+  → **403** 且记录行完好。两者都由 `row_namespace_matches` 在领域层收口，模型工具侧对应
+  `ErrorCode.PERMISSION_DENIED` 的**可读拒绝结果**（不是异常）。
+- **删除语义 = 硬删**（继承 MEM-1）：删掉 → 200；未知 id → **404**；别人的 / 本入口删不了的 → **403**
+  （**不伪装成 404**，与 MEM-1 的既定取舍一致）。领域层的 `forget` 仍是幂等 `False`（后台路径契约），
+  404 是**入口层**对它的显式化。
+- **审计**：`memory_forget` 结构化日志（入口 `tool`/`api` + `outcome` 三态 + 身份 + id，**不带记忆正文**），
+  **不写 SessionEvent**（不变量 #16/#22）。`logging.EVENT_TYPES` 只新增了日志词汇，**会话事件词汇表未动**
+  （有测试守卫：出现 `forget`/`delet`/`memory/update` 类会话事件会红）。
+
+### 18.3 验收证据（都在本 worktree 可复跑）
+
+- **门禁**：`ruff check` clean；全量 pytest **2058 passed / 2 skipped / 42 deselected / 0 failed**。
+- **真机 19/19**：`.scratch/run_forget_entry_gate.py`（一次性脚本，**不入库**；真 uvicorn + 真 JWT +
+  真 Zilliz + 真 embedding + **真实 count**）。要点：列表只含自己；越权删除 403 且对方真实 count 仍 1；
+  **缺 `user` scope 的 GET/DELETE 都 403（非 500）**；**HTTP 删会话记忆 403 且记录行完好**；
+  真删 200 且目标真实 count 收敛 0、检索不再命中；重复删除 404；无审批回调被拒且 count 不变；
+  审批通过真的删掉。
+- **真 Milvus 集成 6/6**：`tests/integration/test_phase6_memory_e2e.py`（`-m integration`；该门禁 fixture
+  要求 `.env` 的 `MILVUS_COLLECTION=memory_gate_test`，本次是临时改一行、跑完按 sha256 原样还原）。
+- **变异 20/20 KILLED**：`.scratch/mutate159.py`（跑完 sha256 逐字节还原）。M16–M18 钉第一轮修复
+  （把"解析不出这一行"当匹配、去掉 GET 的 403 翻译、`public_metadata` 不剥内部载荷），
+  M19/M20 钉第二轮的类型化异常两侧（捕获侧漏掉 `SessionBindingMissing` / 抛出侧退回裸 `ValueError`
+  ——两条都会让"HTTP 删会话记忆"重新变成 500）。
+- **两轴 review**：首轮两轴**各自独立复现同一个 major**（客户端输入冒 500），修复后见 18.1/18.2。
+
+### 18.4 交接给 #160（前端记忆管理 UI）的契约面
+
+- 路由挂载点：`web/app.py` 里 `register_memory_routes(app)`（与 `register_project_routes` 同形）；
+  `CAPABILITIES` 无 memory 时两个端点都 **503**（配置状态，不是"资源不存在"）。
+- `GET /api/memories?limit=&offset=` → `[{id, content, scope, metadata, created_at}]`；`limit` 1..200
+  （默认 50），`offset ≥ 0`，越界 → **422**；倒序口径 = `created_at` 降序（tie-break 是 id，前端**不要**
+  依赖同一时间戳内的顺序）。`metadata` 已剥掉 provider 内部载荷。
+- `DELETE /api/memories/{id}` → 200 `{id, deleted: true}` / **404**（不在了）/ **403**（不是你的、或本入口删不了）
+  / **503**（`CAPABILITIES` 里没有 memory）。
+- 两条路由共用项目 API 的 `require_trusted_origin` 来源闸（未配 jwt 时拒绝跨源；配了 jwt 由认证层接管）。
+- 二次确认是 UI 的义务（硬删不可逆）；后端不提供 `delete_all` / 软删 / 回收站 / 编辑入口（本票非目标）。
+
+### 18.5 下一张
+
+#158（MEM-3 冲突消解 retrieve-before-write）→ #160（前端记忆管理 UI，跨端票的前端半）。

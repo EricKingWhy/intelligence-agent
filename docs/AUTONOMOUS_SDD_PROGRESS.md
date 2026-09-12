@@ -78,7 +78,7 @@
 | #156 | DONE | `61abcb6`+`aa775d8`+`f70ebe7`+`fad0e3c` | 是（两轴三轮 review，终验双轴 zero findings；真机 22/22；变异 15/15） |
 | #157 | DONE | `ff57700`+`f3c80de`+`faf525f`+`090f07c` | 是（两轴四轮 review 终验：Spec 五 AC 全 met、Standards zero findings；真机 gate 16/16；真 Milvus 集成 5/5；变异 9/9） |
 | #158 | TODO | | |
-| #159 | TODO | | |
+| #159 | DONE | `af3db7a`+`19d51fc`+`d0647fa` | 是（两轴：首轮同一 major 被独立复现——客户端输入冒 500；二轮 2 条文档/一致性 minor 全修；Spec 终验 9 AC met、Standards zero findings；20/20 变异 KILLED；真机 gate 19/19；真 Milvus 集成 6/6） |
 | #160 | TODO | | |
 
 ## 4. 门禁（每票必跑）
