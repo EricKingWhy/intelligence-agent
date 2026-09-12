@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from agent_harness.identity import IdentityContext
 from agent_harness.memory.fake_record_store import FakeMemoryRecordStore
-from agent_harness.memory.record_store import MemoryOperation
+from agent_harness.memory.record_store import MemoryOperation, PendingMemory
 from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
 from agent_harness.memory.types import (
     MemoryEntry,
@@ -271,3 +271,23 @@ async def test_record_store_methods_route_through_connect(tmp_path, monkeypatch)
     await store.list_by_scope(MemoryScope.USER, owner, 5)
     await store.pending()
     assert len(used) >= 5, "所有连接必须经 _connect（busy_timeout 在其中设置）"
+
+
+def test_pending_memory_rejects_inconsistent_shapes():
+    """`PendingMemory` 的构造不变量：operation 与 entry 必须一致；upsert 的 entry 的
+    scope 必须等于路由用的 scope。
+
+    两个 scope 各自可写（内容带一个、路由带一个），错配"内容来自 A、索引写进 B"不会被
+    类型系统拦下，也不会有任何现成用例自然覆盖——只能在这里明确拒绝。
+    """
+    identity = IdentityContext("acme", "alice", ["user"])
+    with pytest.raises(ValueError, match="delete change must not carry an entry"):
+        PendingMemory(operation=MemoryOperation.DELETE, memory_id="m1", identity=identity,
+                      scope=MemoryScope.USER, session_id=None, revision="r", entry=entry())
+    with pytest.raises(ValueError, match="upsert change requires an entry"):
+        PendingMemory(operation=MemoryOperation.UPSERT, memory_id="m1", identity=identity,
+                      scope=MemoryScope.USER, session_id=None, revision="r")
+    with pytest.raises(ValueError, match="entry scope must match the routing scope"):
+        PendingMemory(operation=MemoryOperation.UPSERT, memory_id="m1", identity=identity,
+                      scope=MemoryScope.SESSION, session_id="s1", revision="r",
+                      entry=entry())

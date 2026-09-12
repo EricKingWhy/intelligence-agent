@@ -9,6 +9,7 @@ relay 却永远看不见，向量索引留下永久残留。所以本文件的�
 读 outbox，而不是只看 `delete()` 的返回值。
 """
 
+import asyncio
 import logging
 import sqlite3
 
@@ -264,6 +265,36 @@ async def test_acknowledge_only_clears_the_revision_it_synced(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_writers_converge_on_one_row_and_one_index_state(tmp_path):
+    """AC6 的并发面：同一 id 的两个并发写者（不是"陈旧 ack"那半边）。
+
+    冻结语义（record_store 模块文档）：内容在 namespace 内 last-write-wins——
+    SQLite 单写者 + `BEGIN IMMEDIATE` 把两个事务串行化，输家不留半个更新；outbox 每个
+    memory_id 只有**一行**（它是"索引期望状态"而不是历史），relay 收敛后索引内容必须
+    等于权威记录里的那一个赢家，输家的内容不可被检索到（否则就是"两条记忆"）。
+    """
+    records = await _store(tmp_path)
+    vectors = FakeVectorStore()
+    relay = OutboxRelay(records, vectors)
+
+    await asyncio.gather(records.store(entry(content="first"), ALICE),
+                         records.store(entry(content="second"), ALICE))
+
+    assert len(await records.list_by_scope(MemoryScope.USER, ALICE, 10)) == 1
+    changes = await records.pending()
+    assert [change.memory_id for change in changes] == ["m1"]  # 一行，不重放历史
+    winner = (await records.get("m1", ALICE)).content
+    assert winner in {"first", "second"}
+
+    assert await relay.flush() == 1
+    assert (await vectors.get("m1", ALICE, MemoryScope.USER))["content"] == winner
+    loser = "second" if winner == "first" else "first"
+    assert await vectors.search(loser, ALICE, MemoryScope.USER, 5) == []
+    assert await vectors.search(winner, ALICE, MemoryScope.USER, 5) == [("m1", 1.0)]
+    assert await records.pending() == []
+
+
+@pytest.mark.asyncio
 async def test_initialize_migrates_legacy_outbox_and_backfills_routing_facts(tmp_path, caplog):
     """升级路径：老库的 `memory_outbox` 只有 (memory_id, revision)。
 
@@ -294,7 +325,47 @@ async def test_initialize_migrates_legacy_outbox_and_backfills_routing_facts(tmp
     assert changes[0].entry is not None and changes[0].entry.content == "secret"
     assert "ghost" in caplog.text  # 不可路由的孤儿行被丢弃并留痕
 
+    # 迁移后的库与新建库同约束：`ADD COLUMN` 上的 CHECK 是真的生效的，不是装饰
+    with sqlite3.connect(path) as db, pytest.raises(sqlite3.IntegrityError):
+        db.execute("INSERT INTO memory_outbox (memory_id, revision, operation)"
+                   " VALUES ('x', 'rev-x', 'bogus')")
+
     # 迁移后照常工作：ack + 新的删除变更都走新 schema
     assert await records.acknowledge(changes[0]) is True
     assert await records.delete("m1", ALICE) is True
     assert [change.operation for change in await records.pending()] == [MemoryOperation.DELETE]
+
+
+@pytest.mark.asyncio
+async def test_initialize_completes_a_half_migrated_outbox(tmp_path):
+    """迁移本身必须可重入：SQLite 的 DDL 逐条提交，"加完 operation 列、还没回填"时
+    进程被杀就是这个形状（legacy schema + 只有 operation 列）。
+
+    旧的哨兵（`if "operation" in columns: return`）会永久跳过这种库 → 四个路由列全是
+    NULL → 此后每次 `pending()` 都在 `MemoryNamespace(json.loads(None))` 上抛错，而
+    relay 把异常当作"索引不可用"咽掉，表现成"索引永远不更新"。所以断言分两半：
+    迁移要补齐并回填，且重复 `initialize()` 不得破坏已迁移的库。
+    """
+    path = tmp_path / "memory.db"
+    with sqlite3.connect(path) as db:
+        db.executescript(LEGACY_SCHEMA)
+        db.execute("ALTER TABLE memory_outbox ADD COLUMN operation TEXT NOT NULL"
+                   " DEFAULT 'upsert'")
+        db.execute("INSERT INTO memory_records VALUES (?,?,?,?,?,?,?,?,FALSE)",
+                   ("m1", "acme", "alice", "user", '["memories", "acme", "alice", "user"]',
+                    "secret", '{"importance": 0.5}', "2026-09-04T00:00:00+00:00"))
+        db.execute("INSERT INTO memory_outbox (memory_id, revision, operation)"
+                   " VALUES ('m1', 'rev-1', 'upsert')")
+        db.commit()
+
+    records = SqliteMemoryRecordStore(path)
+    await records.initialize()
+    await records.initialize()  # 可重入：第二次不得丢列、丢行或重复告警
+
+    changes = await records.pending()
+    assert [change.memory_id for change in changes] == ["m1"]
+    assert (changes[0].identity.tenant_id, changes[0].identity.user_id) == ("acme", "alice")
+    assert changes[0].scope is MemoryScope.USER
+    assert changes[0].revision == "rev-1"
+    assert changes[0].entry is not None and changes[0].entry.content == "secret"
+    assert await records.acknowledge(changes[0]) is True

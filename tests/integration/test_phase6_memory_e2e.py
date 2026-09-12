@@ -172,3 +172,96 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
             await vectors.close()
             memory_session_var.reset(session_token)
             identity_context_var.reset(identity_token)
+
+
+async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_residue(gate_settings, tmp_path):
+    """MEM-1（#156）AC4 的真实后端验收：`forget` 必须真的从向量索引里消失。
+
+    两个容易骗过自己的点，所以断言按"不能骗自己"的方式写：
+    1. `search` 检索不到 **不等于** 没有残留（命中会受相似度/limit 影响）——所以判定
+       残留用 `query(output_fields=["count(*)"])` 的**真实 count**，不用
+       `get_collection_stats`（它是惰性陈旧值）；
+    2. 单独一个 0 不能证明 filter 写对了——所以留一条**对照组**记忆，它必须一直是 1。
+    忘掉目标后目标变 0、对照仍 1，才是"删对了那一条"的证据。
+    """
+    from langchain_openai import OpenAIEmbeddings
+
+    from agent_harness.identity import identity_context_var, set_identity_context
+    from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+    from agent_harness.memory.outbox_relay import OutboxRelay
+    from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
+
+    if not gate_settings.embedding_api_key.get_secret_value() or not gate_settings.embedding_model:
+        pytest.skip("Real embedding model is not configured")
+
+    embeddings = OpenAIEmbeddings(
+        model=gate_settings.embedding_model, base_url=gate_settings.embedding_base_url,
+        api_key=gate_settings.embedding_api_key, check_embedding_ctx_length=False,
+        dimensions=gate_settings.embedding_dimensions, request_timeout=30, max_retries=3,
+    )
+    vectors = MilvusVectorStore(gate_settings, embeddings)
+    records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await records.initialize()
+    capability = LangMemMemoryCapability(records, vectors)
+    relay = OutboxRelay(records, vectors)
+    alice = IdentityContext("gate_forget_" + uuid4().hex, "alice", ["user"])
+    token = set_identity_context(alice)
+
+    async def drain() -> int:
+        """真实 embedding 服务有瞬态失败；outbox 的保证是"失败保留、下轮重试"，
+        所以按该保证重试排空（同时也在验证这条保证本身）。"""
+        acknowledged = 0
+        async with asyncio.timeout(240):
+            while True:
+                acknowledged += await relay.flush()
+                if not await records.pending():
+                    return acknowledged
+                await asyncio.sleep(2)
+
+    async def real_count(memory_id: str) -> int:
+        """查询一条记忆在当前 filter 下的**真实**行数（Strong 一致性，不用 stats）。"""
+        expression, params = MilvusVectorStore._filter(alice, MemoryScope.USER)
+        rows = await vectors._call(
+            "query", collection_name=gate_settings.milvus_collection,
+            filter=expression + " AND memory_id == {memory}",
+            filter_params={**params, "memory": memory_id},
+            output_fields=["count(*)"], consistency_level="Strong")
+        return int(rows[0]["count(*)"])
+
+    try:
+        await vectors.initialize()
+        doomed = await capability.store(MemoryScope.USER, "我喜欢用 Rust 写解析器。", {"importance": 0.7})
+        control = await capability.store(MemoryScope.USER, "鲸鱼是生活在海洋中的哺乳动物。", {"importance": 0.1})
+        await drain()
+        assert await records.pending() == []
+        assert await real_count(doomed) == 1
+        assert await real_count(control) == 1
+        # 真实向量检索返回的是 `limit` 个最近邻、**没有相似度下限**：两条记忆都在索引里，
+        # 于是这一问会同时返回两条（目标在前、对照在后）。所以"命中"只能按 id 成员断言，
+        # 不能假设"不相关的那条不会被返回"。
+        hits = await capability.search(MemoryScope.USER, "Rust 解析器", 5)
+        assert hits[0].id == doomed and {hit.id for hit in hits} == {doomed, control}
+
+        assert await capability.forget(doomed) is True
+        await drain()
+        assert await records.pending() == []
+
+        assert await vectors.get(doomed, alice, MemoryScope.USER) is None
+        remaining = await capability.search(MemoryScope.USER, "Rust 解析器", 5)
+        assert [hit.id for hit in remaining] == [control]  # 目标不再出现在检索结果里
+        assert await real_count(doomed) == 0  # 真值：索引里这一条已不存在
+        assert await real_count(control) == 1  # filter 与清理范围都正确（对照组还在）
+        assert await capability.forget(doomed) is False  # 幂等
+    finally:
+        try:
+            for entry in await records.list_by_scope(MemoryScope.USER, alice, 100):
+                await capability.forget(entry.id)
+            await drain()
+            created = vectors.created_collection
+            await vectors.drop_created_collection()
+            if created:
+                assert gate_settings.milvus_collection not in await vectors.connect()
+        finally:
+            await relay.stop()
+            await vectors.close()
+            identity_context_var.reset(token)

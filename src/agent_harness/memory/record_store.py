@@ -65,6 +65,10 @@ class PendingMemory:
     `operation is DELETE` ⟺ `entry is None`。路由事实（identity/scope/session）与
     记录行无关，全部来自 outbox 自己——这是"删掉记录行后变更仍能驱动 relay"的前提
     （旧实现的 `pending()` 以 records JOIN outbox 驱动，记录行一删变更就永远消失）。
+
+    `scope` 是路由事实的唯一来源（relay 拿它调 `vectors.upsert/delete`）；upsert 的
+    `entry` 只提供内容与 metadata，它的 `scope` 必须与之一致——否则"路由到 A 的
+    namespace、内容取自 B 的 scope"是一种无法被类型系统拦下的静默错配。
     """
 
     operation: MemoryOperation
@@ -80,6 +84,8 @@ class PendingMemory:
             raise ValueError("delete change must not carry an entry")
         if self.operation is MemoryOperation.UPSERT and self.entry is None:
             raise ValueError("upsert change requires an entry")
+        if self.entry is not None and self.entry.scope != self.scope:
+            raise ValueError("entry scope must match the routing scope")
 
 
 class MemoryOutbox(Protocol):

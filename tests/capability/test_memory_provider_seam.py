@@ -66,6 +66,20 @@ class _InMemoryCapability:
         )
         return memory_id
 
+    async def update(self, memory_id: str, scope: MemoryScope, content: str,
+                     metadata: dict) -> str:
+        """upsert by id（契约：id 不存在即新建，id 由调用方给定）。"""
+        existing = self.entries.get(memory_id)
+        self.entries[memory_id] = MemoryEntry(
+            id=memory_id, content=content, metadata=metadata,
+            created_at=existing.created_at if existing else datetime.now(UTC).isoformat(),
+            scope=scope,
+        )
+        return memory_id
+
+    async def forget(self, memory_id: str) -> bool:
+        return self.entries.pop(memory_id, None) is not None
+
     async def recall(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
         return [e for e in self.entries.values() if e.scope is scope][:limit]
 

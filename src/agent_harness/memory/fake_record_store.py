@@ -39,11 +39,16 @@ class FakeMemoryRecordStore:
                 sorted(entries, key=lambda entry: (entry.created_at, entry.id), reverse=True)[:max(0, limit)]]
 
     async def delete(self, memory_id: str, identity: IdentityContext) -> bool:
-        """硬删（与 `SqliteMemoryRecordStore.delete` 同一组验收，见 test_record_store.py）。
+        """硬删的**记录行半边**（与 `SqliteMemoryRecordStore.delete` 同一组验收，
+        见 test_record_store.py 的参数化用例）。
 
         `scope_to_namespace(row 的 scope, identity)` 同时覆盖 tenant/user 与 SESSION
         绑定两层校验：不匹配即"不是你的记忆" → `PermissionError`（不是 `False`——
         静默 False 会让调用方以为删掉了）。
+
+        本 fake 不实现 outbox（`pending`/`acknowledge`）：跨"记录行 + 索引意图"的原子性
+        与 ack/revision 语义由 sqlite 实现的测试覆盖，fake 只保证内存记录的删除语义与
+        它一致。
         """
         row = self._records.get(memory_id)
         if row is None:

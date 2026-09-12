@@ -94,6 +94,44 @@ async def test_capability_update_and_forget_contract(tmp_path, backend):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["fake", "langmem"])
+async def test_capability_update_on_an_absent_id_creates_it(tmp_path, backend):
+    """AC1 的语义面：`update` 是**按 id 的覆盖写（upsert by id）**——id 不存在时按新
+    记忆写入，与 `store` 的唯一区别是 id 由调用方给定。
+
+    契约原文如此，所以把实现改回"不存在就报错"必须让本用例变红：#158 的冲突消解要用
+    同一个动词表达"更新我已定位到的那一条"，而它检索到的 id 理论上可能刚被别处删掉。
+    """
+    relay = None
+    if backend == "fake":
+        capability = FakeMemoryCapability()
+    else:
+        pytest.importorskip("langmem")
+        from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+        records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+        await records.initialize()
+        vectors = FakeVectorStore()
+        relay = OutboxRelay(records, vectors)
+        capability = LangMemMemoryCapability(records, vectors)
+    token = set_identity_context(IdentityContext("acme", "alice", ["user"]))
+    try:
+        assert await capability.update("chosen-id", MemoryScope.USER, "记住这条", {"importance": 0.4}) == "chosen-id"
+        if relay:
+            await relay.flush()
+        hits = await capability.search(MemoryScope.USER, "记住这条", 5)
+        assert [hit.id for hit in hits] == ["chosen-id"]
+        assert hits[0].content == "记住这条"
+        assert hits[0].metadata["importance"] == 0.4
+
+        assert await capability.forget("chosen-id") is True
+        if relay:
+            await relay.flush()
+        assert await capability.search(MemoryScope.USER, "记住这条", 5) == []
+    finally:
+        identity_context_var.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["fake", "langmem"])
 async def test_capability_forget_cannot_cross_identity(tmp_path, backend):
     """AC2 从 capability 面看：别人的记忆删不掉。
 

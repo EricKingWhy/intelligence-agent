@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS memory_outbox (
 #: `memory_outbox` 在 #156 之前只有 (memory_id, revision)。升级时按需补列 + 回填。
 _OUTBOX_ROUTING_COLUMNS = ("tenant_id", "user_id", "scope", "namespace")
 
+#: 迁移回填的完成判据：四个路由列全非空。半迁移（DDL 逐条提交、进程被杀）过的库
+#: 会命中它，从而重跑回填 / 清理。
+_UNROUTED = " OR ".join(f"{column} IS NULL" for column in _OUTBOX_ROUTING_COLUMNS)
+
 
 @asynccontextmanager
 async def _connect(database_path: Path):
@@ -69,6 +73,15 @@ def _enqueue(entry_id: str, revision: str, operation: MemoryOperation, *,
     """, (entry_id, revision, operation.value, tenant_id, user_id, scope, namespace))
 
 
+def _routing_identity(row: aiosqlite.Row) -> IdentityContext:
+    """outbox 行 → relay 用的身份。
+
+    relay 只把 (tenant_id, user_id) 交给存储后端；`scopes` 用这条变更自己的 scope 填充，
+    它是写入时已完成的那次授权校验的副本，不是在这里重新授权。
+    """
+    return IdentityContext(row["tenant_id"], row["user_id"], [row["scope"]])
+
+
 class SqliteMemoryRecordStore:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
@@ -85,34 +98,49 @@ class SqliteMemoryRecordStore:
     async def _migrate_outbox(connection: aiosqlite.Connection) -> None:
         """把 #156 之前的 outbox（只有 memory_id/revision）就地升到带操作类型与路由列。
 
+        必须**可重入**：SQLite 的 DDL 不参与驱动事务（每条 `ALTER TABLE` 各自提交），
+        所以"看到 operation 列就认为迁移完了"的哨兵会让"加完第一列、还没回填"时被杀的
+        进程永久停在半迁移状态——路由列全 NULL，此后 `pending()` 每轮都失败。这里逐列
+        补齐缺的列，并且只要还有路由列为空的行就重跑回填与清理；重复执行幂等。
+
         旧行的路由事实只能来自它对应的记录行；记录行已不在的孤儿行**不可路由**
         （没有 tenant/user/scope 可用于调 `vectors.delete`），留着会让 `pending()`
         每轮都失败——迁移期丢弃并告警（`indexed` 对一个不存在的记录行也无意义）。
 
         列可空性：迁移来的列可空（`ALTER TABLE ADD COLUMN` 没法"先空后填"再收紧），
-        新建库不可空——新库只由本模块写入，永远有真实值。
+        新建库不可空——新库只由本模块写入，永远有真实值。操作类型的 CHECK 两边一致：
+        SQLite 允许在 `ADD COLUMN` 上带 CHECK 且真的执行它，所以迁移库不会被漏掉。
         """
         async with connection.execute("PRAGMA table_info(memory_outbox)") as cursor:
             columns = {row[1] for row in await cursor.fetchall()}
-        if "operation" in columns:
-            return
-        await connection.execute(
-            "ALTER TABLE memory_outbox ADD COLUMN operation TEXT NOT NULL DEFAULT 'upsert'")
+        if "operation" not in columns:
+            await connection.execute(
+                "ALTER TABLE memory_outbox ADD COLUMN operation TEXT NOT NULL DEFAULT 'upsert'"
+                " CHECK (operation IN ('upsert', 'delete'))")
         for column in _OUTBOX_ROUTING_COLUMNS:
-            await connection.execute(f"ALTER TABLE memory_outbox ADD COLUMN {column} TEXT")
-        await connection.execute("""
+            if column not in columns:
+                await connection.execute(f"ALTER TABLE memory_outbox ADD COLUMN {column} TEXT")
+        async with connection.execute(
+            f"SELECT COUNT(*) FROM memory_outbox WHERE {_UNROUTED}"
+        ) as cursor:
+            (unrouted,) = await cursor.fetchone()
+        if not unrouted:
+            return
+        # 单条 UPDATE 是原子的：不会留下"填了一半路由列"的行。
+        await connection.execute(f"""
             UPDATE memory_outbox SET
                 tenant_id=(SELECT tenant_id FROM memory_records WHERE memory_id=memory_outbox.memory_id),
                 user_id=(SELECT user_id FROM memory_records WHERE memory_id=memory_outbox.memory_id),
                 scope=(SELECT scope FROM memory_records WHERE memory_id=memory_outbox.memory_id),
                 namespace=(SELECT namespace FROM memory_records WHERE memory_id=memory_outbox.memory_id)
+            WHERE {_UNROUTED}
         """)
         async with connection.execute(
-            "SELECT memory_id FROM memory_outbox WHERE tenant_id IS NULL"
+            f"SELECT memory_id FROM memory_outbox WHERE {_UNROUTED}"
         ) as cursor:
             orphans = [row[0] for row in await cursor.fetchall()]
         if orphans:
-            await connection.execute("DELETE FROM memory_outbox WHERE tenant_id IS NULL")
+            await connection.execute(f"DELETE FROM memory_outbox WHERE {_UNROUTED}")
             # 留痕带 id（只报数量无法对账；截断到 20 个避免单行日志过长）。
             listed = ", ".join(orphans[:20]) + (" …" if len(orphans) > 20 else "")
             logger.warning("Dropped %d unroutable legacy memory outbox row(s) "
@@ -211,6 +239,7 @@ class SqliteMemoryRecordStore:
 
     @staticmethod
     def _change(row: aiosqlite.Row) -> PendingMemory:
+        namespace = MemoryNamespace(tuple(json.loads(row["namespace"])))
         operation = MemoryOperation(row["operation"])
         entry = None
         if operation is MemoryOperation.UPSERT:
@@ -223,11 +252,10 @@ class SqliteMemoryRecordStore:
             else:
                 entry = MemoryEntry(id=row["memory_id"], content=row["content"],
                                     metadata=json.loads(row["metadata"]), created_at=row["created_at"],
-                                    scope=row["scope"], indexed=bool(row["indexed"]))
-        namespace = MemoryNamespace(tuple(json.loads(row["namespace"])))
+                                    scope=namespace.scope, indexed=bool(row["indexed"]))
         return PendingMemory(operation=operation, memory_id=row["memory_id"],
-                             identity=IdentityContext(row["tenant_id"], row["user_id"], [row["scope"]]),
-                             scope=namespace.scope, session_id=namespace.session_id,
+                             identity=_routing_identity(row), scope=namespace.scope,
+                             session_id=namespace.session_id,
                              revision=str(row["revision"]), entry=entry)
 
     async def acknowledge(self, change: PendingMemory) -> bool:
