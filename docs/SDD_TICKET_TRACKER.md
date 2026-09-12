@@ -418,9 +418,30 @@ glm-4.5-air · 6907 tok` → `run/completed 13873 tok`）。停顿期间 UI 全�
 | e2e：6 用例 × 2 视口 + 有状态项目 mock | `e2e/r-project-groups.spec.ts` / `e2e/fixtures.ts` |
 | 真机：无 mock 的真后端流程 + 基线逐字段比对 | `e2e-live/project-groups-live.spec.ts` |
 
-**门禁（末次实跑，最终 revision）**：tsc 0 · vitest **556 passed**（30 文件）· oxlint
+**门禁（末次实跑，最终 revision）**：tsc 0 · vitest **561 passed**（30 文件）· oxlint
 **0 errors**（37 warnings，均为既有规则；本票 10 个文件 0 warning）· playwright
-**142 passed**（`--workers=2`，本票新增 12 例）· vite build ✓。
+**144 passed**（`--workers=2`，本票新增 14 例）· vite build ✓。
+
+**两轴 code-review 后修复（commit `8db0e5f`，零 finding 后才收）**：独立 Spec / Standards
+两轴 review 的发现里，有两条是**会在真机或流式下真实发生**的，值得记住：
+
+- **mock 与真机语义相反**：e2e 的 attach 推队尾，真实后端写的是 `[session_id, *kept]`
+  （**前插**，`workspace/index.py` + `tests/web/test_projects_api.py` 都锁着）。也就是说
+  这条 AC4 用例在**真机后端下必然失败**——围栏里的绿灯不能证明契约一致，只能证明
+  "前端与我的假后端一致"。已把 mock 与断言都改成前插。
+- **memo 被内联箭头破功**：`onRetryProjects` 每次渲染新建 → 流式期间整片 Session Rail
+  跟着每个 delta 重渲染（本仓库明文规则，`handleSelect` 一列同样处理）。已 useCallback。
+
+其余修复：`SessionSummary.workspace` 从"只在注释里被消费"变成真的消费（项目不在列表里
+时未分组行带 `staleProject` 注解，AC6 的字面要求）；Pydantic **422 的 detail 是数组**，
+只认字符串会把"path must be an absolute path"降级成"注册项目失败（422）"；`useProjects`
+补乱序响应守卫与 in-flight 合并；拖拽落点只在来源项目内亮；Enter 提交补 pending 守卫；
+删掉 rail/选择列表上不成立的 `role=list`、折叠时的悬空 `aria-controls`、`<p>` 里塞 `<ul>`
+的非法 HTML；空项目提示去掉一条**不可达**的引导（单段 workspace 建不出项目内会话）；
+mock 的 order 端点补自锚点 no-op（缺它会插错位置）；新增 409 用例（cwd 不一致 → 后端原因
+就地显示、归属不变）；AC3 断言改为打在**后端原始串**（`WinError 3` + 路径）上以证明透传。
+`playwright.config.ts` 固定 `workers: 2`（§16.6 硬要求，避免"门禁绿、本地红"）。
+`gui-test-screenshots/` 进 `.gitignore`（真机截图是本地证据，不进版本库）。
 
 **真机**：真 uvicorn 8000 + 真 `.env`/`harness.db` + 真浏览器 5173，无 mock；注册/改名/attach/
 detach/重排/软删除全走通，**结束时会话归属与项目账本与开测前逐字段相等**（状态已还原）。

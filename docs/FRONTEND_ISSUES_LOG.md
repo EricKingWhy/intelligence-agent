@@ -1502,3 +1502,74 @@ detector（`impeccable detect`）对本次改动文件：**0 findings**；`app.c
 `npx tsc -b` ✅ · `npx vitest run` **556 passed**（30 文件；本票新增 36 条：18 分组/锚点 + 18 契约）·
 `npx oxlint` **0 errors**（37 warnings，全部既有规则；本票 10 个文件 0 warning）·
 `npx playwright test --workers=2` **142 passed**（本票新增 12 例）· `npx vite build` ✅。
+
+---
+
+## 第十一轮（2026-09-12）：#155 两轴 code-review 的发现与修复（commit `8db0e5f`）
+
+独立 Spec / Standards 两轴 review（只读、不看我的自述）一共给出 2 个 P2 + 若干 P3。
+**两条 P2 都不是"代码不好看"，而是"会在真机或流式下真实发生"**，记在这里。
+
+### P2-1：mock 的语义与真机**相反**——围栏绿灯证明不了契约一致
+
+`e2e/fixtures.ts` 的 attach 把会话 `push` 到账本**队尾**，AC4 也因此断言
+`['s1','s2','s3']`。真实后端写的是：
+
+```python
+# src/agent_harness/workspace/index.py::attach_session
+await self._persist_ledger(record.id, [session_id, *kept])   # 前插
+```
+
+`tests/web/test_projects_api.py` 也用 `assert ids == [second, first]` 锁住"新建项目前插"。
+**后果**：这条用例在真机后端下必然失败（我自己的 live spec 恰好只 attach 了单成员项目，
+顺序不可观测，所以没暴露）。已把 mock 改为 `unshift`、断言改为 `['s3','s1','s2']`，
+并在两处写明"顺序由后端账本决定，mock 必须跟它一致"。
+
+**教训**：hermetic e2e 的绿灯只证明"前端与我的假后端一致"。凡是"顺序/归属/幂等"
+这类由后端定义的语义，mock 必须逐条对着后端源码与后端测试写，否则围栏会**保护**
+一个错误实现。以后写有状态 mock 时，先在后端找到锁住该语义的测试，再决定 mock 怎么写。
+
+### P2-2：内联箭头破掉 memo → 流式期间整片侧栏重渲染
+
+`App.tsx` 的 `onRetryProjects={() => {…}}` 每次渲染新建函数 → `SessionList`（`memo`）
+的 props 每帧都变，流式 delta 期间整片 Session Rail 重渲染。本仓库对同名字段
+（`handleSelect` 一列）有明文规则，这里是纯粹的遗漏。已改 `useCallback`。
+
+### 其他修复（P3）
+
+| 发现 | 处理 |
+| --- | --- |
+| `SessionSummary.workspace` 只在注释里"被消费"（注释声称两个真相源） | 真的消费它：项目不在当前列表里时未分组行带 `staleProject` 注解；注释改写成真实分工 |
+| Pydantic **422 的 detail 是数组**，只认字符串 → "path must be an absolute path" 被降级成"注册项目失败（422）" | `readErrorDetail` 两种形状都认，剥掉 `Value error, ` 前缀；标题输入补 `maxLength`（后端 200 / path 4096） |
+| `useProjects` 可能被乱序响应覆盖（旧列表盖新真相）；挂载 + 会话列表到位两次 GET 重复 | generation 守卫 + in-flight 合并；写操作后的 `refetch` 绕过合并（合并到一个写前发出的请求会让列表停在写前） |
+| 拖拽落点提示在**别的项目**里也亮（跨项目拖动不是重排） | 记来源项目，落点只在来源项目内亮；跨项目 drop 直接忽略 |
+| Enter 提交绕过 `disabled={pending}` → 双发 | 三处提交路径补 `if (pending) return` |
+| `role="list"` 容器里混着非 `listitem` 子节点；`button` 被标成 `listitem` 丢"可按"语义;折叠时 `aria-controls` 悬空;`<p>` 里塞 `<ul>` | 删掉不成立的 list 角色；`aria-controls` 仅在展开时输出；`Dialog.Description asChild` + `div` 包列表 |
+| 空项目提示引导"在该目录下新建会话"——**不可达**（`POST /api/sessions` 只接单段 workspace，建不出项目内会话） | 改文案：指向"加入项目…"并说明前提是会话 cwd 与项目路径一致 |
+| 项目列表请求失败时仍显示"还没有项目"（与错误条自相矛盾） | 只在确实知道为空时才说 |
+| mock 的 order 端点没有自锚点 no-op → "先删后 indexOf 插"会插到倒数第二位，凭空改账本 | 补 no-op（真实后端 `ProjectService.reorder` 显式挡下） |
+| 不可达的 `/api/projects/resolve` mock 分支 + 无人使用的 `onProjectPost` 接缝 | 删掉（不可达的 mock 会让人以为那条路被测过） |
+| AC3 的 404 detail 是我自己编的字符串，证明不了"透传" | mock 改用真实后端的 `[WinError 3] …` 原文，断言打在 `WinError 3` + 路径上 |
+| attach 的 409 路径完全没有覆盖 | 新增 `onAttachPost` 拦截口 + 一条 e2e：后端原因就地显示、归属不变 |
+| 56px 轨会隐藏 `staleProject` 注解（body 的既有 hide 规则） | **不改**：与行标题/事件数同一规则，窄屏只剩点是既有降级 |
+| 软删除成功后的兜底文案丢了"什么都没删" | 补全（AC5 的安全感不能只留在后端文案里） |
+| 因改版而死的 `.session-group*` 样式（4 条规则） | 删掉（本次改动产生的孤儿） |
+
+### 视觉复核（新增的 `staleProject` 注解）
+
+用真浏览器（hermetic mock 复现"项目列表 502"这一唯一会显示注解的状态）截了暗/亮两色：
+注解在 meta 下方、斜体、三级灰、长标题省略号截断（全文在 tooltip 里），亮色下对比度可读；
+未分组的正常行（`workspace=null`）**不带**注解——"孤儿"与"真的没选项目"在视觉上分得开。
+窄屏（420px）注解随 `session-item-body` 一起隐藏，符合既有规则。
+
+### 门禁（末次实跑，最终 revision）
+
+`npx tsc -b` ✅ · `npx vitest run` **561 passed**（30 文件；本轮 +5：3 条 workspace 消费
++ 2 条 422 数组/null 回执）· `npx oxlint` **0 errors**（37 warnings，与改版前同数）·
+`npx playwright test --workers=2` **144 passed**（本轮 +2：409 用例 × 2 视口）·
+`npx vite build` ✅。`impeccable detect` 对本次改动 **0 新增**发现（4 条 `side-tab` 告警
+落在既有规则上，按 Scope Lock 未动）。
+
+顺带把 `--workers=2`（§16.6 硬要求）写进 `playwright.config.ts`：以前只有门禁命令带这个
+参数，裸跑 `npx playwright test` 会默认 4 worker —— 那正是"门禁绿、本地红"这类
+反复消耗排查时间的来源之一。
