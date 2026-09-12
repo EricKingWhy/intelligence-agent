@@ -28,12 +28,29 @@ export class NotFoundError extends Error {}
  *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
 export class AlreadyResolvedError extends Error {}
 
-/** FastAPI 错误体 {detail} 读取：形状不符或 JSON 解析失败返回 ''——
- *  错误处理路径自身不再产生新错误（两处 401/409 消费共享的单一实现）。 */
+/** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
+ *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
+ *
+ *  `detail` 有**两种合法形状**，两者都要认：
+ *  - `string`：端点自己 `raise HTTPException(detail=…)` —— 后端的可行动中文原因；
+ *  - `Array<{loc, msg, type}>`：Pydantic 请求体校验失败的固定形状（422）。不认它
+ *    就会把"path 必须是绝对路径"降级成"注册项目失败（422）"，把最该看懂的一条
+ *    提示扔在门外。只取 `msg` 并剥掉 Pydantic 自己的 `Value error, ` 前缀——
+ *    用户要看的是规则的结论，不是校验器的转述层。 */
 async function readErrorDetail(res: Response): Promise<string> {
   try {
-    const j = await res.json();
-    return j && typeof j.detail === 'string' ? j.detail : '';
+    const j = (await res.json()) as { detail?: unknown } | null;
+    const detail = j?.detail;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .flatMap((item) => {
+          const msg = (item as { msg?: unknown } | null)?.msg;
+          return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
+        })
+        .join('；');
+    }
+    return '';
   } catch {
     return '';
   }
@@ -538,7 +555,10 @@ export async function deleteProject(projectId: string): Promise<ProjectDeleted> 
     method: 'DELETE',
   });
   if (!res.ok) throw await projectError(res, '删除项目失败');
-  const body = (await res.json()) as Partial<ProjectDeleted>;
+  // 形状防御：非对象（null / 数组 / 字符串）一律当"没给"处理，别让读字段抛
+  // TypeError——那时调用方拿到的是"读属性失败"，而不是"软删除成功了但回执为空"。
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProjectDeleted>;
   return {
     id: typeof body.id === 'string' ? body.id : projectId,
     deleted: body.deleted === true,

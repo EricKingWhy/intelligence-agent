@@ -81,8 +81,11 @@ export interface ApiMock {
   /** `POST /api/projects` 里**不存在**的路径集合 → 404（真实后端不 mkdir）。
    *  用来锁"路径不存在时有清晰错误"这条 AC。 */
   projectMissingPaths?: string[];
-  /** POST /api/projects 的拦截口（计数 / 伪造其它状态码用）；返回 true = 已处理。 */
-  onProjectPost?: (route: Route) => Promise<boolean> | boolean;
+  /** POST /api/projects/{id}/sessions 的拦截口（伪造 409「会话 cwd 与项目路径
+   *  不一致」等**只能在真机上才自然出现**的拒绝）；返回 true = 已处理。
+   *  与 `projectMissingPaths` 的分工：那个改的是"哪些路径不存在"，这个改的是
+   *  "attach 这条请求本身回什么"。 */
+  onAttachPost?: (route: Route) => Promise<boolean> | boolean;
 }
 
 /** 项目 fixture（形状 = 后端 `web/projects.py::Project`，时间戳由 fixtures 补）。 */
@@ -243,7 +246,11 @@ export function routeApi(page: Page, mock: ApiMock): void {
       const body = (req.postDataJSON() ?? {}) as { path?: string; title?: string };
       const target = body.path ?? '';
       if ((mock.projectMissingPaths ?? []).includes(target)) {
-        return json(route, { detail: `目录不存在：${target}` }, 404);
+        // 逐字照抄真实后端在 Windows 上的 detail（`FileNotFoundError` 的
+        // `str(exc)`）：**故意不做美化**——AC3 要证明的是"后端说了什么，界面就
+        // 显示什么"，所以断言打在 `WinError 3` 与路径上；如果前端把它翻译成
+        // 自己的话或吞掉原串，这条用例必须变红。
+        return json(route, { detail: `[WinError 3] 系统找不到指定的路径。: '${target}'` }, 404);
       }
       const existing = projectState.find((p) => p.path === target);
       if (existing) return json(route, projectView(existing)); // 幂等：同规范路径
@@ -282,6 +289,7 @@ export function routeApi(page: Page, mock: ApiMock): void {
     }
     const attachMatch = /^\/api\/projects\/([^/]+)\/sessions$/.exec(path);
     if (attachMatch && req.method() === 'POST') {
+      if (mock.onAttachPost && (await mock.onAttachPost(route))) return;
       const project = findProject(decodeURIComponent(attachMatch[1]));
       if (!project) return json(route, { detail: '项目不存在' }, 404);
       const body = (req.postDataJSON() ?? {}) as { session_id?: string };
@@ -290,7 +298,10 @@ export function routeApi(page: Page, mock: ApiMock): void {
         return json(route, { detail: `会话不存在：${sessionId}` }, 404);
       }
       if (!project.session_ids.includes(sessionId)) {
-        project.session_ids.push(sessionId); // attach 幂等：已在账本里就不动
+        // **前插**：真实后端 `workspace/index.py` 的 attach_session 写的是
+        // `[session_id, *kept]`（`tests/web/test_projects_api.py` 锁住了这个顺序）。
+        // 这里推队尾会让 e2e 在真机后端下必然失败——mock 的语义必须跟账本一致。
+        project.session_ids.unshift(sessionId); // attach 幂等：已在账本里就不动
         setWorkspace(sessionId, project);
       }
       return json(route, projectView(project));
@@ -314,6 +325,10 @@ export function routeApi(page: Page, mock: ApiMock): void {
       const before = body.before ?? null;
       const from = project.session_ids.indexOf(sessionId);
       if (from < 0) return json(route, { detail: '会话不在该项目账本里' }, 409);
+      // 自锚点是**无操作**（`ProjectService.reorder` 显式挡下：DOM 意义上"把
+      // 自己插到自己前面"什么都没变）。不先判它，下面的"先删后按 indexOf 插"
+      // 会因为锚点已被删掉而 indexOf = -1 → 插到倒数第二位，凭空改掉账本。
+      if (before === sessionId) return json(route, projectView(project));
       if (before !== null && !project.session_ids.includes(before)) {
         return json(route, { detail: '锚点不在该项目账本里' }, 409);
       }
@@ -321,12 +336,6 @@ export function routeApi(page: Page, mock: ApiMock): void {
       if (before === null) project.session_ids.push(sessionId);
       else project.session_ids.splice(project.session_ids.indexOf(before), 0, sessionId);
       return json(route, projectView(project));
-    }
-    if (path === '/api/projects/resolve' && req.method() === 'POST') {
-      const body = (req.postDataJSON() ?? {}) as { path?: string };
-      const hit = projectState.find((p) => p.path === body.path);
-      if (!hit) return json(route, { detail: '项目不存在' }, 404);
-      return json(route, projectView(hit));
     }
 
     return route.fulfill({ status: 404, body: '{"detail":"not mocked in e2e"}', contentType: 'application/json' });

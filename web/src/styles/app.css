@@ -402,21 +402,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   flex-direction: column;
   gap: 2px;
 }
-.session-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: var(--space-sm);
-}
-.session-group-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-tertiary);
-  font-weight: 600;
-  padding: 0 var(--space-md) 2px;
-  user-select: none;
-}
 .empty-hint {
   padding: var(--space-md);
   color: var(--text-tertiary);
@@ -506,6 +491,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-tertiary);
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
+}
+/* 「自称属于某项目、但该项目不在当前列表里」的注解（AC6）：比 meta 更安静——
+ * 它是解释，不是状态；换行截断而不是撑宽行（长标题不能把侧栏顶开）。 */
+.session-item-stale {
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  opacity: 0.85;
 }
 
 /* ═══ WS-5 / #155：项目 → 会话层级 + 未分组区 ═══
@@ -2958,9 +2956,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .session-items {
     align-items: center;
     padding-top: var(--space-sm);
-  }
-  .session-group {
-    margin-top: 0;
   }
   .appbar-center {
     display: none;

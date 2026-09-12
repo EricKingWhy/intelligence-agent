@@ -100,6 +100,38 @@ describe('buildRailModel', () => {
     const model = buildRailModel(sessions, [project('other', [])]);
     expect(model.ungrouped.map((s) => s.session_id)).toEqual(['gone']);
   });
+
+  // ── SessionSummary.workspace 的**唯一**运行时用途：解释孤儿行（AC6）──
+
+  it('项目不在列表里（列表为空/请求失败）→ 行带 staleProject 注解', () => {
+    const sessions = [
+      session('s1', { id: 'p1', title: '项目 p1' }),
+      session('free-1'),
+    ];
+    const model = buildRailModel(sessions, []);
+
+    expect(model.ungrouped.map((s) => s.session_id)).toEqual(['s1', 'free-1']);
+    expect(model.ungrouped[0].staleProject).toEqual({ id: 'p1', title: '项目 p1' });
+    // workspace = null 的行**不带**注解：未分组就是未分组，不该被标成"孤儿"
+    expect(model.ungrouped[1].staleProject).toBeUndefined();
+  });
+
+  it('项目在列表里但账本没点到（成员资格被过滤）→ 不注解：列表已经回答了归属', () => {
+    const sessions = [session('s1', { id: 'p1', title: '项目 p1' })];
+    const model = buildRailModel(sessions, [project('p1', [])]);
+
+    expect(model.ungrouped.map((s) => s.session_id)).toEqual(['s1']);
+    expect(model.ungrouped[0].staleProject).toBeUndefined();
+  });
+
+  it('注解不改变归属判定：workspace 指向的项目存在时，行仍由账本决定去处', () => {
+    // s1 的 workspace 说它在 p1，但 p1 的账本没点它 → 落未分组，且**不**因为
+    // workspace 而"自动归位"（那是第二套真相）。staleProject 只在项目不可见时出现。
+    const sessions = [session('s1', { id: 'p1', title: '项目 p1' })];
+    const model = buildRailModel(sessions, [project('p1', ['s2'])]);
+    expect(model.groups[0].sessions).toEqual([]);
+    expect(model.ungrouped.map((s) => s.session_id)).toEqual(['s1']);
+  });
 });
 
 describe('moveAnchor', () => {

@@ -9,7 +9,7 @@
  *  别处改动）都意味着**本地看到的状态已经过期**，刷新让 UI 立刻追上真相，而不是让
  *  用户对着一个永远失败的按钮重试。 */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   attachSessionToProject,
   createProject,
@@ -46,14 +46,47 @@ export function useProjects(): ProjectsState {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  // 两个守卫解决**不同**的问题，都需要：
+  //  - inflight：启动时调用方会在 `sessions` 一到位后再刷一次（effect 依赖它），
+  //    与挂载那次重叠。合并并发请求省一次 GET，也免得"两次响应的先后"决定列表。
+  //  - generation：两次**不重叠**但乱序返回的刷新（写操作后的重新拉取 vs 用户点
+  //    「重试」）只允许最后一次落地——先发后到的旧列表不能覆盖新真相。
+  const inflight = useRef<Promise<void> | null>(null);
+  const generation = useRef(0);
+
+  const start = useCallback(async () => {
+    const gen = ++generation.current;
     try {
-      setProjects(await listProjects());
+      const list = await listProjects();
+      if (gen !== generation.current) return; // 已有更新的请求发出，丢弃本次结果
+      setProjects(list);
       setLoadError(null);
     } catch (e) {
+      if (gen !== generation.current) return;
       setLoadError((e as Error).message || '加载项目失败');
     }
   }, []);
+
+  /** 后台刷新（挂载 / 会话列表变化 / 用户点重试）：并发调用合并成一次请求。 */
+  const refresh = useCallback(async () => {
+    if (!inflight.current) {
+      // `.finally` 只在"没有更新的请求顶上"时清标记：否则一个旧请求收尾会把
+      // 新请求在飞的标记抹掉（`refetch` 之后紧跟一次 `refresh` 就会走到这条）。
+      let pending: Promise<void>;
+      pending = start().finally(() => {
+        if (inflight.current === pending) inflight.current = null;
+      });
+      inflight.current = pending;
+    }
+    return inflight.current;
+  }, [start]);
+
+  /** 写操作后的重新拉取：**绕过合并**——正在飞的那个请求可能是写之前发出的，
+   *  复用它会把列表停在被写操作改掉之前的状态（先发后到的旧响应）。 */
+  const refetch = useCallback(async () => {
+    inflight.current = null;
+    return start();
+  }, [start]);
 
   /** 写操作 → 拉取最新真相；失败同样拉取（见文件头注释），再把错误抛给调用方
    *  （由对话框或项目区错误条负责显示——hook 自己不弹 UI）。 */
@@ -61,14 +94,14 @@ export function useProjects(): ProjectsState {
     async <T,>(run: () => Promise<T>): Promise<T> => {
       try {
         const result = await run();
-        await refresh();
+        await refetch();
         return result;
       } catch (e) {
-        await refresh().catch(() => undefined);
+        await refetch().catch(() => undefined);
         throw e;
       }
     },
-    [refresh],
+    [refetch],
   );
 
   const actions = useMemo<ProjectActions>(

@@ -56,10 +56,15 @@ function CreateProjectForm({ onOpenChange, onCreate, existing }: CreateProps) {
     const strip = (p: string) => p.replace(/[\\/]+$/, '');
     const hit = existing.find((p) => strip(p.path) === strip(value));
     if (hit) {
-      setNotice(`该目录已经是项目「${hit.title}」——没有重复注册，它就在侧栏里。`);
+      setNotice(
+        hit.status === 'missing-dir'
+          ? `该目录已经是项目「${hit.title}」——没有重复注册，它就在侧栏里（后端当前报告该目录不存在）。`
+          : `该目录已经是项目「${hit.title}」——没有重复注册，它就在侧栏里。`,
+      );
       setError(null);
       return;
     }
+    if (pending) return;
     setPending(true);
     setError(null);
     setNotice(null);
@@ -98,9 +103,12 @@ function CreateProjectForm({ onOpenChange, onCreate, existing }: CreateProps) {
           onChange={(e) => setPath(e.target.value)}
           placeholder="D:\repos\my-project"
           aria-label="目录绝对路径"
+          maxLength={4096}
           autoFocus
           onKeyDown={(e) => {
-            if (e.key === 'Enter') void submit();
+            // pending 时不再受理 Enter：按钮已 disabled，但 Enter 走的是
+            // 这条独立路径——不挡就会在第一次请求还没回来时再发一次。
+            if (e.key === 'Enter' && !pending) void submit();
           }}
         />
         <span className="project-field-hint">
@@ -116,8 +124,9 @@ function CreateProjectForm({ onOpenChange, onCreate, existing }: CreateProps) {
           onChange={(e) => setTitle(e.target.value)}
           placeholder="缺省取目录名"
           aria-label="项目名"
+          maxLength={200}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') void submit();
+            if (e.key === 'Enter' && !pending) void submit();
           }}
         />
       </label>
@@ -185,12 +194,18 @@ function DeleteProjectForm({
   const [done, setDone] = useState<string | null>(null);
 
   const confirm = async () => {
+    if (pending) return;
     setPending(true);
     setError(null);
     try {
       const result = await onConfirm(project.id);
       // 后端写好的那句话在这里原样出现——它明确说了「会话与目录都没删」（AC5）。
-      setDone(result.detail || '项目已从注册表移除，会话回到未分组。');
+      // 兜底句也把「什么都没删」说全：软删除的确认如果只留在后端文案里，后端哪天
+      // 简化了那句话，界面就会退回"项目没了但不知道文件还在不在"。
+      setDone(
+        result.detail ||
+          '项目已从注册表移除，会话回到未分组。目录、用户文件与会话日志均未删除。',
+      );
     } catch (e) {
       setError(describeProjectError(e, '删除项目失败'));
     } finally {
@@ -218,18 +233,22 @@ function DeleteProjectForm({
           {done}
         </div>
       ) : (
-        <Dialog.Description className="project-dialog-desc">
-          这是<strong>软删除</strong>：只把项目从注册表移除。
-          <ul className="project-dialog-list">
-            <li>
-              {count > 0
-                ? `${count} 个会话回到「未分组」，仍可打开与继续对话`
-                : '当前项目内没有会话'}
-            </li>
-            <li>目录与其中的文件<strong>不会</strong>被删除</li>
-            <li>会话日志<strong>不会</strong>被删除，历史一条不少</li>
-          </ul>
-          之后可以重新注册同一个目录。
+        // asChild + div：Radix 的 Description 默认渲染 <p>，而下面是一个列表——
+        // <p> 里放 <ul> 是非法 HTML（浏览器会把 <p> 提前闭合，DOM 与代码不一致）。
+        <Dialog.Description asChild>
+          <div className="project-dialog-desc">
+            这是<strong>软删除</strong>：只把项目从注册表移除。
+            <ul className="project-dialog-list">
+              <li>
+                {count > 0
+                  ? `${count} 个会话回到「未分组」，仍可打开与继续对话`
+                  : '当前项目内没有会话'}
+              </li>
+              <li>目录与其中的文件<strong>不会</strong>被删除</li>
+              <li>会话日志<strong>不会</strong>被删除，历史一条不少</li>
+            </ul>
+            之后可以重新注册同一个目录。
+          </div>
         </Dialog.Description>
       )}
 
@@ -304,6 +323,7 @@ function AttachForm({
   const [pendingId, setPendingId] = useState<string | null>(null);
 
   const pick = async (projectId: string) => {
+    if (pendingId !== null) return;
     setPendingId(projectId);
     setError(null);
     try {
@@ -331,21 +351,28 @@ function AttachForm({
         （原因会显示在这里）——归属由会话自己的 cwd 决定，不由界面决定。
       </Dialog.Description>
 
-      <div className="project-pick-list" role="list">
-        {projects.map((p) => (
-          <button
-            key={p.id}
-            role="listitem"
-            className="project-pick-item"
-            onClick={() => void pick(p.id)}
-            disabled={pendingId !== null}
-          >
-            <span className="project-pick-title">{p.title}</span>
-            <span className="project-pick-path mono">{p.path}</span>
-            {pendingId === p.id && <span className="project-pick-pending">加入中…</span>}
-          </button>
-        ))}
-      </div>
+      {projects.length === 0 ? (
+        <div className="project-notice" role="status">
+          还没有项目。先用侧栏右上角的「新建项目」注册一个目录，再回来把会话加进去。
+        </div>
+      ) : (
+        // 不用 role="list"/"listitem"：这些是按钮，把 button 标成 listitem 会让
+        // 读屏丢掉"可按"的语义——这里的信息层级靠标题与顺序表达就够了。
+        <div className="project-pick-list">
+          {projects.map((p) => (
+            <button
+              key={p.id}
+              className="project-pick-item"
+              onClick={() => void pick(p.id)}
+              disabled={pendingId !== null}
+            >
+              <span className="project-pick-title">{p.title}</span>
+              <span className="project-pick-path mono">{p.path}</span>
+              {pendingId === p.id && <span className="project-pick-pending">加入中…</span>}
+            </button>
+          ))}
+        </div>
+      )}
 
       {error && (
         <div className="project-error" role="alert">
@@ -380,6 +407,7 @@ export function InlineRename({
       value={value}
       onChange={(e) => setValue(e.target.value)}
       aria-label="项目名"
+      maxLength={200}
       autoFocus
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {

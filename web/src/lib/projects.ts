@@ -1,9 +1,17 @@
 /** 项目分组与账本重排的纯函数（WS-5 / #155）。
  *
- *  **单一真相**（不变量 #22）：分组结果只从两个后端真相源派生——
- *  `GET /api/sessions` 的 `SessionSummary.workspace` 与 `GET /api/projects` 的
- *  `session_ids`（账本手工序）。前端不维护"项目有哪些会话"的第二份名单：
- *  它只做投影，投影错了刷新一次就自愈。
+ *  **单一真相**（不变量 #22）：前端不维护"项目有哪些会话"的第二份名单，只做投影，
+ *  投影错了刷新一次就自愈。两个后端真相源的分工是**刻意不对称**的：
+ *
+ *  - **成员与顺序**（谁在项目里、排第几）只看 `GET /api/projects` 的
+ *    `session_ids`（账本手工序）。它是唯一权威：`?workspace_id=` 端点、
+ *    bootstrap、成员资格过滤都以它为准。
+ *  - **`SessionSummary.workspace` 只用于"解释孤儿"**：一行会话若自称属于某个项目，
+ *    而该项目**不在本次渲染的项目列表里**（项目列表刷新滞后、项目刚被软删除、
+ *    或列表请求失败），该行落进未分组并带上 `staleProject` 说明。**它不参与判定
+ *    成员资格**——`workspace` 非 null 不代表该会话在当前账本上（`e2dc33b6`
+ *    这类内部子代理子会话就恰好相反：`workspace` 为 null 但需要按 `null` 处理），
+ *    用它反推归属会造出第二套真相。
  *
  *  两条被刻意选择的失效方向：
  *  1. **绝不因为分组而丢掉一行**。未出现在任何账本里的会话（含 `workspace` 非
@@ -29,7 +37,17 @@ export interface ProjectGroup {
 export interface RailModel {
   groups: ProjectGroup[];
   /** 不属于任何已渲染项目的会话（保持后端给的活动时间序）。 */
-  ungrouped: SessionSummary[];
+  ungrouped: UngroupedRow[];
+}
+
+/** 未分组的行，外加"它自称属于谁"这条只读注解。 */
+export interface UngroupedRow extends SessionSummary {
+  /** 会话自己的 `workspace` 指向一个**这次没渲染**的项目时的说明（悬空引用）。
+   *  出现的两种情形都值得说给用户听：项目列表请求失败（左侧已有错误条），
+   *  或项目已被软删除/在别处被摘掉而列表尚未刷新。
+   *  **不带操作**：挂回项目要走账本的 attach（有 cwd 校验，可能 409），
+   *  这里只是解释，不是第二个入口。 */
+  staleProject?: { id: string; title: string };
 }
 
 /** 把会话列表投影成「项目 → 会话」+「未分组」。 */
@@ -58,10 +76,18 @@ export function buildRailModel(
     return { project, sessions: rows, missing };
   });
 
-  return {
-    groups,
-    ungrouped: sessions.filter((s) => !claimed.has(s.session_id)),
-  };
+  // 只有**已渲染的项目**才算"认得出"——列表为空或缺该项目时，`workspace`
+  // 指向的 id 就是悬空的（见文件头注释：它只解释孤儿，不判定成员资格）。
+  const renderedIds = new Set(projects.map((p) => p.id));
+  const ungrouped = sessions
+    .filter((s) => !claimed.has(s.session_id))
+    .map((s): UngroupedRow => {
+      const ref = s.workspace;
+      if (!ref || renderedIds.has(ref.id)) return s;
+      return { ...s, staleProject: { id: ref.id, title: ref.title } };
+    });
+
+  return { groups, ungrouped };
 }
 
 /** `POST /api/projects/{id}/sessions/{sid}/order` 的请求体语义：

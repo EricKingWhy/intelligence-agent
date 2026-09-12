@@ -12,6 +12,12 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,
+  // §16.6 硬要求：e2e 一律 2 worker。4 worker 全量并行存在资源竞争型抖动，
+  // 且同一 worktree 里并行跑两个 playwright 会争用 test-results/ 产生
+  // `ENOENT … .playwright-artifacts-*` 式的假失败。写进配置让裸跑
+  // `npx playwright test` 与门禁命令（`--workers=2`）等价，免得"门禁绿、
+  // 本地红"反复消耗排查时间。（e2e-live/ 用独立配置，不受这里影响。）
+  workers: 2,
   reporter: [['list']],
   use: {
     baseURL: 'http://localhost:5173',

@@ -7,9 +7,10 @@
  *  三条不变量：
  *  1. **不丢行**：分组由 `lib/projects.ts` 的 `buildRailModel` 派生，未出现在任何账本
  *     里的会话（含 workspace 引用已失效项目的孤儿行）一律落进未分组区。
- *  2. **不改真相**：顺序与归属都来自后端（`GET /api/projects` 的 `session_ids`、
- *     `GET /api/sessions` 的 `workspace`）；本组件不维护影子成员名单，每次写操作后
- *     重新拉取（`ProjectActions` 内部 refresh + `onSessionsChanged`）。
+ *  2. **不改真相**：顺序与归属都来自后端账本（`GET /api/projects` 的 `session_ids`）；
+ *     `GET /api/sessions` 的 `workspace` 只用来解释"自称属于某项目、但该项目不在
+ *     当前列表里"的孤儿行（`staleProject`），不参与判定成员资格。本组件不维护影子
+ *     成员名单，每次写操作后重新拉取（`ProjectActions` 内部 refresh + `onSessionsChanged`）。
  *  3. **失败要说话**：项目写操作失败时把后端 detail 原样贴在侧栏顶部（`rail-error`），
  *     而不是静默或只留一个禁用的按钮。
  *
@@ -35,6 +36,7 @@ import type { Project, SessionSummary } from '../types';
 import { formatRelativeTime } from '../lib/format';
 import { useTickingNow } from '../hooks/useTickingNow';
 import { buildRailModel, dropAnchor, moveAnchor } from '../lib/projects';
+import type { UngroupedRow } from '../lib/projects';
 import { describeProjectError } from '../lib/api';
 import type { ProjectActions } from '../hooks/useProjects';
 import {
@@ -90,8 +92,9 @@ export const SessionList = memo(function SessionList({
   const [attachFor, setAttachFor] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
-  // 拖拽重排（HTML5 DnD）：dragId = 被拖的会话；dropTarget = 落点（before=null → 队尾）。
-  const [dragId, setDragId] = useState<string | null>(null);
+  // 拖拽重排（HTML5 DnD）：记**来源项目**而不只是被拖的会话 id——跨项目拖动
+  // 不是重排（那是 attach，有 cwd 校验），落点提示只能在来源项目内亮。
+  const [drag, setDrag] = useState<{ projectId: string; sessionId: string } | null>(null);
   const [dropTarget, setDropTarget] = useState<{ projectId: string; before: string | null } | null>(
     null,
   );
@@ -132,26 +135,28 @@ export const SessionList = memo(function SessionList({
   };
 
   const resetDrag = () => {
-    setDragId(null);
+    setDrag(null);
     setDropTarget(null);
   };
 
   /** 拖放落定：`before` = 放到这一行前面，null = 放到该项目队尾。 */
   const handleDrop = (projectId: string, before: string | null) => {
-    const sessionId = dragId;
+    const dragged = drag;
     resetDrag();
-    if (!sessionId) return;
-    const ids = ledgerOf(projectId);
+    if (!dragged) return;
     // 只支持**项目内**拖动重排：未分组的行拖到项目上等于 attach，而 attach 有
-    // cwd 校验（可能 409）——那条路径走"加入项目…"，这里不猜。
-    if (!ids.includes(sessionId)) return;
-    const anchor = dropAnchor(ids, sessionId, before);
+    // cwd 校验（可能 409）——那条路径走"加入项目…"，这里不猜。跨项目同理。
+    if (dragged.projectId !== projectId) return;
+    const ids = ledgerOf(projectId);
+    if (!ids.includes(dragged.sessionId)) return;
+    const anchor = dropAnchor(ids, dragged.sessionId, before);
     if (!anchor) return;
-    void runOp('调整顺序失败', () => projectActions.reorder(projectId, sessionId, anchor.before));
+    void runOp('调整顺序失败', () =>
+      projectActions.reorder(projectId, dragged.sessionId, anchor.before),
+    );
   };
 
   const showEmpty = sessions.length === 0 && projects.length === 0;
-  const draggingInProject = dragId !== null && projects.some((p) => p.session_ids.includes(dragId));
 
   return (
     <aside className="session-rail">
@@ -207,6 +212,8 @@ export const SessionList = memo(function SessionList({
                 const expanded = isExpanded(project);
                 const listId = `rail-project-${project.id}`;
                 const renaming = renamingId === project.id;
+                // 落点提示只在本项目内亮：跨项目拖动不是重排（见 handleDrop）。
+                const dropEnabled = drag?.projectId === project.id;
                 return (
                   <section className="rail-project" key={project.id}>
                     <div className="rail-project-head">
@@ -234,7 +241,7 @@ export const SessionList = memo(function SessionList({
                           className="rail-project-toggle"
                           onClick={() => toggle(project.id)}
                           aria-expanded={expanded}
-                          aria-controls={listId}
+                          aria-controls={expanded ? listId : undefined}
                           title={expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}
                         >
                           <ChevronRight
@@ -290,10 +297,10 @@ export const SessionList = memo(function SessionList({
                     </div>
 
                     {expanded && (
-                      <div className="rail-project-rows" role="list" id={listId}>
+                      <div className="rail-project-rows" id={listId}>
                         {rows.length === 0 && (
                           <div className="rail-project-empty">
-                            还没有会话。在该目录下新建会话，或从未分组会话的「加入项目…」里选它。
+                            还没有会话。从未分组会话的「加入项目…」里选它——加进来的前提是那个会话的工作目录正好是这个路径。
                           </div>
                         )}
                         {rows.map((s) => (
@@ -306,7 +313,8 @@ export const SessionList = memo(function SessionList({
                             now={now}
                             projectId={project.id}
                             ledger={project.session_ids}
-                            dragging={dragId === s.session_id}
+                            dragging={drag?.sessionId === s.session_id}
+                            dropEnabled={dropEnabled}
                             dropBefore={
                               dropTarget?.projectId === project.id &&
                               dropTarget.before === s.session_id
@@ -320,7 +328,9 @@ export const SessionList = memo(function SessionList({
                             }
                             onAttachPick={setAttachFor}
                             onOpenCreate={() => setCreateOpen(true)}
-                            onDragStartRow={setDragId}
+                            onDragStartRow={(sessionId) =>
+                              setDrag({ projectId: project.id, sessionId })
+                            }
                             onDragEndRow={resetDrag}
                             onDragOverRow={(before) =>
                               setDropTarget({ projectId: project.id, before })
@@ -328,7 +338,7 @@ export const SessionList = memo(function SessionList({
                             onDropRow={(before) => handleDrop(project.id, before)}
                           />
                         ))}
-                        {draggingInProject && dragId && rows.length > 0 && (
+                        {dropEnabled && rows.length > 0 && (
                           <div
                             className={`rail-drop-tail${
                               dropTarget?.projectId === project.id && dropTarget.before === null
@@ -363,7 +373,10 @@ export const SessionList = memo(function SessionList({
               })}
             </>
           ) : (
-            !showEmpty && (
+            // 「还没有项目」只在**确实知道**项目为空时说：列表请求失败时 `projects`
+            // 也是空的，这时说"还没有项目"是一句与错误条自相矛盾的话（用户可能注册过）。
+            !showEmpty &&
+            !projectsError && (
               <div className="rail-project-empty rail-project-empty-first">
                 还没有项目。用右上角的「新建项目」把一个已存在的目录注册进来，同目录的会话就会归到一起。
               </div>
@@ -379,7 +392,7 @@ export const SessionList = memo(function SessionList({
           {model.ungrouped.length === 0 && projects.length > 0 && (
             <div className="rail-project-empty">所有会话都已归入项目。</div>
           )}
-          <div role="list">
+          <div>
             {model.ungrouped.map((s) => (
               <SessionRow
                 key={s.session_id}
@@ -391,6 +404,7 @@ export const SessionList = memo(function SessionList({
                 projectId={null}
                 ledger={[]}
                 dragging={false}
+                dropEnabled={false}
                 dropBefore={false}
                 onSelect={onSelect}
                 onMove={handleMove}
@@ -444,7 +458,7 @@ export const SessionList = memo(function SessionList({
 });
 
 interface RowProps {
-  session: SessionSummary;
+  session: UngroupedRow;
   title: string;
   selected: boolean;
   live: boolean;
@@ -454,6 +468,8 @@ interface RowProps {
   /** 所在项目账本（判边界：首条不能上移、末条不能下移）；未分组传空数组。 */
   ledger: readonly string[];
   dragging: boolean;
+  /** 本行是否接受拖放（= 拖拽来源就在本项目）。跨项目拖动不是重排，不接受落点。 */
+  dropEnabled: boolean;
   dropBefore: boolean;
   onSelect: (id: string) => void;
   onMove: (projectId: string, sessionId: string, dir: 'up' | 'down') => void;
@@ -477,6 +493,7 @@ function SessionRow({
   projectId,
   ledger,
   dragging,
+  dropEnabled,
   dropBefore,
   onSelect,
   onMove,
@@ -492,7 +509,6 @@ function SessionRow({
   const index = ledger.indexOf(s.session_id);
   return (
     <div
-      role="listitem"
       className={`session-row${inProject ? ' session-row-in-project' : ''}${dragging ? ' dragging' : ''}`}
       draggable={inProject}
       onDragStart={(e) => {
@@ -503,7 +519,7 @@ function SessionRow({
       }}
       onDragEnd={onDragEndRow}
       onDragOver={(e) => {
-        if (!inProject || dragging) return;
+        if (!inProject || !dropEnabled || dragging) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         onDragOverRow(s.session_id);
@@ -511,7 +527,7 @@ function SessionRow({
       onDrop={(e) => {
         // 落点在行的上半/下半不做区分：统一「放到这一行前面」+ 队尾放置区，
         // 少一个模糊点，也少一类"以为放到后面、结果插到前面"的意外。
-        if (!inProject) return;
+        if (!inProject || !dropEnabled) return;
         e.preventDefault();
         e.stopPropagation();
         onDropRow(s.session_id);
@@ -533,6 +549,14 @@ function SessionRow({
           <div className="session-item-meta num">
             {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
           </div>
+          {s.staleProject && (
+            <div
+              className="session-item-stale"
+              title={`这个会话记录的项目 id 是 ${s.staleProject.id}，但它不在当前项目列表里——项目列表可能还没刷新，或该项目已被移除。归属仍以项目账本为准。`}
+            >
+              所属项目「{s.staleProject.title}」未在列表中
+            </div>
+          )}
         </div>
       </button>
       <DropdownMenu.Root>

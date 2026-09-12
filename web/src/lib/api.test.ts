@@ -439,6 +439,35 @@ describe('projects — WS-4 端点契约（#154；窄化解析 + 状态码归类
     captureProjectFetch(422, { detail: 'path must be an absolute path' });
     const err = await createProject('relative/dir').catch((e: unknown) => e);
     expect((err as ProjectError).status).toBe(422);
+    expect((err as ProjectError).message).toBe('path must be an absolute path');
+  });
+
+  it('createProject：Pydantic 422（detail 是数组）→ 取出 msg 并剥掉 "Value error, " 前缀', async () => {
+    // 真后端对非绝对路径走的是**请求体校验器**，FastAPI 回的 detail 不是字符串而是
+    // 数组。只认字符串会把最该看懂的一条提示降级成"注册项目失败（422）"。
+    captureProjectFetch(422, {
+      detail: [
+        {
+          type: 'value_error',
+          loc: ['body', 'path'],
+          msg: "Value error, path must be an absolute path: 'relative/dir'",
+        },
+      ],
+    });
+    const err = await createProject('relative/dir').catch((e: unknown) => e);
+    expect((err as ProjectError).status).toBe(422);
+    expect((err as ProjectError).message).toBe(
+      "path must be an absolute path: 'relative/dir'",
+    );
+  });
+
+  it('deleteProject：200 但 body 是 null → 不抛 TypeError，按"没给回执"处理', async () => {
+    captureProjectFetch(200, null);
+    const result = await deleteProject('p1');
+    expect(result.id).toBe('p1');
+    expect(result.deleted).toBe(false);
+    expect(result.sessions_detached).toBe(0);
+    expect(result.detail).toBe('');
   });
 
   it('renameProject：PATCH /api/projects/{id} + body.title', async () => {

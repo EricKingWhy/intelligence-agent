@@ -99,8 +99,10 @@ export default function App() {
   } = useSession();
 
   // ── 项目（WS-5 / #155）──
-  // 侧栏"项目 → 会话"层级的数据源：项目列表来自 GET /api/projects（注册表序 + 账本序），
-  // 归属来自每行的 SessionSummary.workspace——两份都是后端真相，前端只做投影（不变量 #22）。
+  // 侧栏"项目 → 会话"层级的数据源：**成员与顺序只有项目账本一个真相**
+  // （GET /api/projects 的 session_ids，注册表序 + 手工序）；每行的
+  // SessionSummary.workspace 只用来解释"自称属于某项目、但该项目不在列表里"的孤儿行，
+  // 不参与判定归属（详见 lib/projects.ts 文件头注释）。前端只做投影（不变量 #22）。
   //
   // 为什么跟着 sessions 变：新会话（命名 workspace）、fork child、recover 都可能在
   // 后端**顺带**改变项目归属（#152 的 attach 接线），而它们唯一的信号就是会话列表被
@@ -115,6 +117,14 @@ export default function App() {
   useEffect(() => {
     void refreshProjects();
   }, [sessions, refreshProjects]);
+
+  // 「重试」同时重拉两个列表：项目列表失败时会话列表很可能也失败过（同一次网络
+  // 抖动），只修一个会留下一个"半新鲜"的侧栏。必须 useCallback——SessionList 是
+  // memo 组件，内联箭头会让它在每次流式 delta 上整片重渲染（同 handleSelect 一列）。
+  const handleRetryProjects = useCallback(() => {
+    void refreshProjects();
+    void refreshSessions();
+  }, [refreshProjects, refreshSessions]);
 
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
   // 401 由 api.ts 统一拦截并广播；这里只负责展示引导横幅。配置 token 后
@@ -616,10 +626,7 @@ export default function App() {
           projectActions={projectActions}
           onSessionsChanged={refreshSessions}
           projectsError={projectsError}
-          onRetryProjects={() => {
-            void refreshProjects();
-            void refreshSessions();
-          }}
+          onRetryProjects={handleRetryProjects}
         />
 
         <section className="app-workspace">

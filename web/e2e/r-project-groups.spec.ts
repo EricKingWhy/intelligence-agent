@@ -119,10 +119,13 @@ test('AC3：新建项目输入绝对路径；路径不存在 → 就地给出清
   const dialog = page.locator('.project-dialog');
   await expect(dialog).toBeVisible();
 
-  // 路径不存在：错误留在对话框里，对话框不关（用户能改完再试）
+  // 路径不存在：错误留在对话框里，对话框不关（用户能改完再试）。
+  // 断言打在**后端原始串**上（WinError 3 + 路径）——AC3 要的是"后端说了什么就显示
+  // 什么"，把原因翻译成"操作失败"或换成自己的措辞都会让这条变红。
   await dialog.getByLabel('目录绝对路径').fill('D:/nope/missing');
   await dialog.getByRole('button', { name: '注册项目' }).click();
-  await expect(dialog.locator('.project-error')).toContainText('目录不存在');
+  await expect(dialog.locator('.project-error')).toContainText('WinError 3');
+  await expect(dialog.locator('.project-error')).toContainText('D:/nope/missing');
   await expect(dialog).toBeVisible();
 
   // 合法路径 + 自定义标题 → 注册成功，关闭并出现在侧栏（新项目前插）
@@ -167,11 +170,52 @@ test('AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排', as
   await expect.poll(() => railOrder(page, '改名后的项目')).toEqual(['s1', 's2']);
   await expect.poll(() => ungrouped(page).locator('.session-item-id').allTextContents()).toContain('s3');
 
-  // 加入项目：s3 再从对话框选回来（attached 落到账本尾部 + 行的 workspace 同步）
+  // 加入项目：s3 再从对话框选回来。落点在账本**头部**——真实后端 attach 写的是
+  // `[session_id, *kept]`（前插），不是追加队尾（`tests/web/test_projects_api.py`
+  // 锁住了这个顺序；mock 与本断言都必须跟它一致，否则真机上会红）。
   await openSessionMenu(page, 's3');
   await page.getByRole('menuitem', { name: '加入项目…' }).click();
   await page.locator('.project-pick-item').filter({ hasText: '改名后的项目' }).click();
-  await expect.poll(() => railOrder(page, '改名后的项目')).toEqual(['s1', 's2', 's3']);
+  await expect.poll(() => railOrder(page, '改名后的项目')).toEqual(['s3', 's1', 's2']);
+});
+
+test('加入项目被后端拒绝时（409 会话 cwd 与项目路径不一致）就地显示后端原因，归属不变', async ({
+  page,
+}) => {
+  // 这条是"归属由 cwd 决定"的证明：会话不能靠界面被塞进一个它不属于的项目。
+  // 真机上 409 由后端给出（自由会话的 cwd 与项目路径不同），e2e 用拦截口伪造。
+  const detail = "会话 'free-1' 的工作目录与项目「项目 alpha」不一致（账本按会话 cwd 判定成员资格）";
+  routeApi(page, {
+    sessions: baseSessions(),
+    projects: [P1],
+    onAttachPost: async (route) => {
+      await route.fulfill({
+        status: 409,
+        body: JSON.stringify({ detail }),
+        contentType: 'application/json',
+      });
+      return true;
+    },
+  });
+  await page.goto('/');
+
+  await openSessionMenu(page, 'free-1');
+  await page.getByRole('menuitem', { name: '加入项目…' }).click();
+  await page.locator('.project-pick-item').filter({ hasText: '项目 alpha' }).click();
+
+  // 后端 detail 原样留在对话框里（不翻译成"操作失败"），对话框不关
+  const dialog = page.locator('.project-dialog');
+  await expect(dialog.locator('.project-error')).toContainText('工作目录与项目');
+  await expect(dialog).toBeVisible();
+
+  // 归属不变：free-1 仍在未分组（s3 本来就不属于 P1，也仍在未分组——它的项目
+  // p2 不在本用例的项目列表里，所以还带一条"未在列表中"的注解）。
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect.poll(() => railOrder(page, '项目 alpha')).toEqual(['s2', 's1']);
+  expect(await ungrouped(page).locator('.session-item-id').allTextContents()).toEqual([
+    's3',
+    'free-1',
+  ]);
 });
 
 test('AC5：删除项目明示"只解除分组"，删除后会话仍在且落到未分组', async ({ page }) => {
@@ -226,6 +270,15 @@ test('项目列表端点失败时不隐藏会话：全部落到未分组 + 一�
     'free-1',
   ]);
   await expect(page.getByRole('button', { name: '重试' })).toBeVisible();
+
+  // AC6：`SessionSummary.workspace` 的唯一运行时用途就在这里——解释"自称属于某项目、
+  // 但那个项目不在当前列表里"的行。三条（s1/s2→alpha、s3→beta）带注解，未分组的
+  // free-1（workspace=null）**不带**：不是所有未分组行都该被标成"孤儿"。
+  await expect(ungrouped(page).locator('.session-item-stale')).toHaveCount(3);
+  await expect(ungrouped(page).locator('.session-item-stale').first()).toContainText('项目 alpha');
+  await expect(
+    ungrouped(page).locator('.session-row').filter({ hasText: 'free-1' }).locator('.session-item-stale'),
+  ).toHaveCount(0);
 });
 
 test('会话行不因进入项目而看到假的"已分组"：行 tooltip 区分未分组', async ({ page }) => {
