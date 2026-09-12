@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     # Capability / Plugin 显式配置（spec 08 §6 V1）：JSON 字符串，
     # 形状 {"<name>": {"provider": "...", "enabled": bool, "options": {...}}}。
     capabilities: str = ""
+    # Persona（ADR-0023 D10）：env JSON，形如 {"prefix":"…","suffix":"…"}；
+    # 空 = 无 persona = 零行为变化。与 capabilities 同形制（原始 str，
+    # 解析器负责校验并显式失败）。
+    agent_persona: str = ""
     # Skills 全局目录（spec 09 §2）；项目目录是 <workspace>/skills/。
     skill_global_dir: str = ""
 

@@ -24,8 +24,11 @@ from langchain_core.messages import AnyMessage
 from agent_harness.sandbox.base import Sandbox
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_harness.sandbox.registry import WorkspaceRegistry
 
+from agent_harness.session.cwd import cwd_event_data
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
     derive_messages,
@@ -144,6 +147,7 @@ class Session:
         session_id: str | None = None,
         workspace_registry: WorkspaceRegistry | None = None,
         started_data: dict | None = None,
+        cwd: str | Path | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
@@ -154,17 +158,29 @@ class Session:
         started_data（T7 #137，加法字段）：会话级初始配置写进 session/started——
         目前用于记录创建时选定的模型（provider / model_id），使"当前模型"可从
         事件流派生。
+        cwd（WS-1 #151，加法字段）：会话侧工作目录锚，**由创建者赋予**（不由
+        WorkspaceRegistry 反向灌给会话）。经 `canonical_workspace_path` 规范化后
+        写进 session/started，此后不可变；None = 不写该字段（历史遗留语义）。
+        `started_data` 里若夹带 `cwd` 键会被丢弃并记一条 warning——写侧只认本参数，
+        否则那条路径会绕过 AC5 的"唯一一套规范化"。
         """
         session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
             sandbox = workspace_registry.create(session_id)
         session = cls(session_id, store, sandbox=sandbox)
-        session.append(
-            SESSION_STARTED,
-            dict(started_data) if started_data else {},
-            agent_id=agent_id,
-        )
+        data = dict(started_data) if started_data else {}
+        # cwd 只认显式参数：started_data 里夹带的同名键会**绕过**唯一一套规范化
+        # （AC5），静默写出一个未规范化/相对的 cwd。删掉它，再按参数写入。
+        if "cwd" in data:
+            logger.warning(
+                "Session.start 忽略了 started_data['cwd']=%r：cwd 只由 cwd 参数"
+                "赋予（WS-1 #151），否则会绕过规范化",
+                data["cwd"],
+            )
+        data.pop("cwd", None)
+        data.update(cwd_event_data(cwd))
+        session.append(SESSION_STARTED, data, agent_id=agent_id)
         return session
 
     @classmethod

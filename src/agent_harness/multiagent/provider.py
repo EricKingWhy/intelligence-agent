@@ -29,7 +29,7 @@ from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import BUILTIN_PROFILES, AgentSpec
 from agent_harness.agent.runtime import AgentRunResult
 from agent_harness.sandbox import WorkspaceRegistry
-from agent_harness.session import SESSION_STARTED, Session
+from agent_harness.session import SESSION_STARTED, Session, cwd_event_data, session_cwd
 from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger(__name__)
@@ -163,6 +163,11 @@ class InProcessSubagentProvider:
         self._max_active_children = 0
         # 子会话观测挂点（未来 Agent Hub / lineage 消费；测试断言共享 sandbox）。
         self.last_child_sessions: list[Session] = []
+        # 父 cwd 缓存（WS-1 #151）：写后不可变 → 同一个父只读一次，不重读父 JSONL。
+        # 用独立的 loaded 标志而不是 `None` 哨兵：`None`（父确实没有 cwd）是合法
+        # 缓存值，读失败则**不缓存**（瞬时 I/O 故障不该把子会话永久钉成未分组）。
+        self._parent_cwd_cache: str | None = None
+        self._parent_cwd_loaded = False
 
     def activate(
         self,
@@ -188,7 +193,41 @@ class InProcessSubagentProvider:
         self._active_children = (
             asyncio.Semaphore(max_active_children) if max_active_children > 0 else None
         )
+        # 重复激活（docstring 承诺"覆盖"）可能换父会话：缓存必须跟着作废，
+        # 否则子会话会继承**上一个**父的 cwd。
+        self._parent_cwd_cache = None
+        self._parent_cwd_loaded = False
         self._activated = True
+
+    def _parent_cwd(self) -> str | None:
+        """父会话的会话侧 cwd 锚（WS-1 #151）；读不到 → None（子会话按未分组处理）。
+
+        父的 cwd 写后不可变，所以同一个父只读一次并缓存——一次委派不该为此重读
+        整份父 JSONL。读是**同步**的，与 `session/fork.py` 读父 JSONL 同一形态
+        （本仓 `read_events` 就在事件循环里直接调用）；这里刻意不引第二个挂起点：
+        并发 spawn 的子会话若在拿到第一条模型消息前多一次 `await`，彼此之间的
+        调度顺序就会变——那是"个别 child 失败不影响同批其他 child"这类既有断言的
+        隐含前提。只读，**不** `Session.resume`（那会往父日志追加
+        `session/resumed`）；失败只记 warning，归属元数据缺失不该拖垮委派。
+        """
+        if not self._parent_cwd_loaded:
+            value, failed = self._read_parent_cwd()
+            if not failed:
+                self._parent_cwd_cache = value
+                self._parent_cwd_loaded = True
+            return value
+        return self._parent_cwd_cache
+
+    def _read_parent_cwd(self) -> tuple[str | None, bool]:
+        """→ (cwd, 是否读取失败)。失败不缓存：换一次 spawn 再试，别把子会话钉死。"""
+        if self._session_store is None or self._parent_session_id is None:
+            return None, False
+        try:
+            events = self._session_store.read_events(self._parent_session_id)
+            return session_cwd(events), False
+        except Exception:  # 归属元数据缺失不该拖垮委派
+            logger.warning("读取父会话 cwd 失败，子会话按未分组处理", exc_info=True)
+            return None, True
 
     def profile(self, target: str) -> AgentSpec:
         try:
@@ -221,7 +260,14 @@ class InProcessSubagentProvider:
             session_id=str(uuid4()), store=self._session_store,
             sandbox=parent_sandbox,
         )
-        child_session.append(SESSION_STARTED, {}, agent_id=spec.name)
+        # WS-1 #151：子会话的 cwd 与 fork 同一规则——显式继承父会话的会话侧锚。
+        # 不写的话每个子代理都会作为"未分组"会话出现在会话列表里（它们与父同属
+        # 一个项目）。父无锚（历史遗留 / 父会话日志不在）→ 不写该字段，与父一致。
+        child_session.append(
+            SESSION_STARTED,
+            cwd_event_data(self._parent_cwd()),
+            agent_id=spec.name,
+        )
         # spawn 即注册（hub/lineage 语义：子代理在 spawn 时可见，不等完成）
         self.last_child_sessions.append(child_session)
 

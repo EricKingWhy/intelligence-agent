@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from langchain_core.messages import HumanMessage
 
+from agent_harness.prompt import DEFAULT_REGISTRY
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
@@ -94,12 +96,9 @@ class TailSummarizer:
 
     async def summarize(self, tail_text: str) -> str:
         tail_text = tail_text[-self._max_tail_chars :]
-        prompt = (
-            "以下是一个 agent 会话在分叉切点之后被放弃的对话片段。请用不超过"
-            "150 字总结这条被放弃的路线尝试了什么、进行到哪一步、得出了什么"
-            "结论，供新分支参考。只输出总结正文，不要寒暄。\n\n"
-            f"{tail_text}"
-        )
+        prompt = DEFAULT_REGISTRY.assemble(
+            "aux:fork_tail", {"tail_text": tail_text}
+        ).meta_user_text
         response = await self._model.ainvoke([HumanMessage(content=prompt)])
         return str(response.content)
 
@@ -176,9 +175,12 @@ async def fork_session(
 
     # 校验全部通过后才落盘：先建 child，再做 workspace 物理复制，再移植
     # seed 与 provenance/索引（copy 失败属基础设施故障，原样上抛）。
+    # WS-1 #151 AC4：child 的 cwd **显式继承自 parent**（不靠"反正目录是复制来的"
+    # 隐式成立）。父无 cwd（历史遗留）→ child 也不写该字段，父子的未分组状态一致。
     child = Session.start(
         store, agent_id=agent_id, session_id=child_session_id,
         workspace_registry=workspace_registry,
+        cwd=session_cwd(parent_events),
     )
     if workspace_registry is not None:
         _copy_workspace(workspace_registry, parent_session_id, child)

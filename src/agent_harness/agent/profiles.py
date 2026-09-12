@@ -16,6 +16,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from agent_harness.prompt import DEFAULT_REGISTRY
+
+
+def _builtin_prompt(name: str) -> str:
+    """内置 profile 的 system prompt **唯一来源 = 注册表**（ADR-0023 D1/D12）。
+
+    只在这一处接线：parent 走 `assembly.py` 的 `profile_spec.system_prompt`，
+    child 走 `factory.py` 的 `spec.system_prompt`——两条路径因此零改动即一致，
+    不存在两个调用点漂移的可能。
+
+    刻意**不**改成"按 `spec.name` 查注册表"：`AgentSpec.system_prompt` 必须继续
+    是普通字段，否则自定义 spec（以及 `multiagent/provider.py` 传入的自定义
+    profiles 字典）的 prompt 会被内置文案覆盖。
+    """
+    return DEFAULT_REGISTRY.assemble(f"profile:{name}").system_text
+
 
 @dataclass(frozen=True)
 class AgentSpec:
@@ -58,16 +74,12 @@ _RESEARCH_TOOLS = frozenset({
 _MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | {"delegate", "inspect_artifact"}
 
 #: 三内置 profile（出厂设定，非用户自定义面——文件发现机制 DEFER）。
+#: `system_prompt` 的正文在 `agent_harness.prompt.builtin`（改文案开那一个文件）。
 BUILTIN_PROFILES: dict[str, AgentSpec] = {
     "main": AgentSpec(
         name="main",
         description="Supervisor：理解目标、拆解委派、必要时亲自查证与综合。",
-        system_prompt=(
-            "你是主协调 agent。简单任务直接完成；需要并行/专项深入时用 "
-            "delegate 工具把 scoped task 派给合适的子代理（coding=写代码，"
-            "research_review=调研与审查），并综合它们的结构化结果。委派时给"
-            "出完整自洽的任务描述——子代理看不到你们的对话历史。"
-        ),
+        system_prompt=_builtin_prompt("main"),
         tool_scope=_MAIN_TOOLS,
         max_steps=20,
         max_depth=1,
@@ -76,22 +88,14 @@ BUILTIN_PROFILES: dict[str, AgentSpec] = {
     "coding": AgentSpec(
         name="coding",
         description="编码子代理：在共享 workspace 内读写代码并运行验证。",
-        system_prompt=(
-            "你是编码 agent，在给定 workspace 内完成 scoped task：读写文件、"
-            "运行命令、验证结果。结束时给出简明总结：做了什么、改了哪些文件、"
-            "验证结果，以及任何未解决事项。"
-        ),
+        system_prompt=_builtin_prompt("coding"),
         tool_scope=_CODING_TOOLS,
         max_steps=10,
     ),
     "research_review": AgentSpec(
         name="research_review",
         description="调研/审查子代理：只读检索本地文件、知识库与网络证据。",
-        system_prompt=(
-            "你是调研审查 agent，只读地收集证据（本地文件、知识语料、网络）"
-            "并给出带引用的结论。结束时给出简明总结：结论、引用（citation）、"
-            "以及任何未解决事项。你没有写权限。"
-        ),
+        system_prompt=_builtin_prompt("research_review"),
         tool_scope=_RESEARCH_TOOLS,
         max_steps=10,
     ),

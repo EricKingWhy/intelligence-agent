@@ -25,6 +25,7 @@ from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
 from agent_harness.sandbox.local import LocalSubprocessSandbox
+from agent_harness.sandbox.paths import canonical_workspace_path
 
 
 class WorkspaceRegistry:
@@ -46,15 +47,25 @@ class WorkspaceRegistry:
         workspace_root 允许调用方指定实际工作目录（web 层的命名 workspace）；
         缺省用 <root>/workspaces/<session_id>。映射里记录真实目录——
         RecoveryCoordinator 据此恢复（R8-1）。
+
+        映射里的路径是**规范化后**的（`canonical_workspace_path`，WS-1 AC5）：
+        先 mkdir 是这里原本的行为（确保 workspace 目录存在），随后按 `fs.realpath`
+        语义规范化，所以已存在的链接会被解析到目标。会话侧 `session/started` 的
+        `cwd` 走同一个函数，故"日志里的路径"与"映射里的路径"对同一物理目录必然
+        逐字符相等。
         """
         if session_id in self._cache:
             return self._cache[session_id]
 
         mapping = self._build_mapping(session_id)
-        if workspace_root is not None:
-            mapping["workspace_root"] = str(workspace_root)
-        workspace_root = Path(mapping["workspace_root"])
+        requested = (
+            Path(workspace_root) if workspace_root is not None
+            else Path(mapping["workspace_root"])
+        )
+        requested.mkdir(parents=True, exist_ok=True)
+        workspace_root = Path(canonical_workspace_path(requested))
         workspace_root.mkdir(parents=True, exist_ok=True)
+        mapping["workspace_root"] = str(workspace_root)
 
         sandbox = self._instantiate_sandbox(mapping)
         sandbox.ensure_started()

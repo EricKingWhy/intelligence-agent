@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -34,6 +34,7 @@ from agent_harness.identity import (
     identity_context_var,
     set_identity_context,
 )
+from agent_harness.instance_lock import InstanceLock
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import (
     PROVIDER_PRESETS,
@@ -63,6 +64,7 @@ from agent_harness.session.service import (
     SteerTargetNotFound,
     UnknownModel,
     WorkspaceNameInvalid,
+    WorkspaceNotFound,
     resolve_model_target,
     validate_session_id,
 )
@@ -82,6 +84,7 @@ from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
 )
+from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 
 # ── Staged amend 字段的人类可读描述（Phase 5 + Ticket B1）──────────────
 # 这些 dict 是 POST /api/sessions validator 与 GET 清单端点的**单一事实源**：
@@ -192,7 +195,7 @@ class CreateSessionRequest(_AmendValueValidators):
     # max_length 封顶：task 会逐字持久化进 JSONL（user/message）并整体进模型上下文，
     # 无上限时一个多 MB 请求体就能写爆日志 + 撑爆 context。
     task: str = Field(min_length=1, max_length=100_000)
-    workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（见 _validate_workspace_name）
+    workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
     max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
     # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
     # PermissionPolicy；未知值 → 422。permission_mode 决定 ToolExecutor 的 policy
@@ -280,6 +283,17 @@ class SendMessageRequest(_AmendValueValidators):
     model: str | None = None
 
 
+class WorkspaceRef(BaseModel):
+    """会话摘要里的项目引用（WS-3 / #153 AC2）：`id` 做请求/重命名，`title` 做显示。
+
+    形状由实现者定、但**必须写死在契约里**（票面 AC2）；前端 `types.ts::WorkspaceRef`
+    用同一个形状做编译期锁。
+    """
+
+    id: str
+    title: str
+
+
 class SessionSummary(BaseModel):
     """GET /api/sessions 返回的单条摘要。"""
 
@@ -302,6 +316,16 @@ class SessionSummary(BaseModel):
     # Langfuse URL（契约 2d7f87a / ADR-0018 D7）。前端 `types.ts::SessionSummary`
     # 把该字段声明为**非可选** `string | null`——本字段存在即让那条声明为真。
     trace_url: str | None = None
+    # WS-3 / #153：会话所属项目；未分组（历史遗留 / 未命名 workspace / 装配里没有
+    # workspace 索引）为 `None`，**绝不伪造**（不变量 #21 同族）。
+    #
+    # 刻意**不给默认值**：给了默认值的话，将来某个构造点漏传 `workspace=` 会静默
+    # 变成"未分组"——那是一条假事实。必填 → 构造响应时漏传**响亮失败**。
+    # 注意本字段锁住的是**构造点**，不是"服务层忘了回填"：领域层
+    # `SessionSummaryStats.workspace` 仍有 `= None` 默认值，服务层漏查映射照样会
+    # 序列化成 null。真正抓漏映射的是断言**值**的测试
+    # （`tests/web/test_session_list_workspace.py::test_rows_carry_real_workspace_and_ungrouped_is_null`）。
+    workspace: WorkspaceRef | None
 
 
 class AppState:
@@ -343,6 +367,11 @@ class AppState:
         self.workspace_registry = WorkspaceRegistry(
             root=Path(settings.workspace_dir), backend="local"
         )
+        # WS-2 / ADR-0025：项目实体 + 有序会话账本（同 harness.db 的另 5 张表）。
+        # 只构造一次：它持有内存缓存（AC10 同步读），每次 stores 属性都新建会丢掉缓存。
+        self.workspace_index = WorkspaceIndex(
+            SqliteWorkspaceStore(self.harness_db), self.store
+        )
         self._stores_lock = asyncio.Lock()
         self._stores_ready = False
         # Capability 装配：只在首次使用时执行（含 Memory / Skills / demo 等）。
@@ -370,6 +399,7 @@ class AppState:
             operation_ledger=self.operation_ledger,
             checkpoint_store=self.checkpoint_store,
             session_meta_store=self.session_meta_store,
+            workspace_index=self.workspace_index,
         )
 
     async def get_wiring(self) -> tuple[CapabilityRegistry, CapabilityWiring]:
@@ -463,40 +493,6 @@ async def _validate_amend_for_existing_session(
             ModelConfig.from_catalog(state.settings, amend.model)
         except ConfigError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-
-
-def _validate_workspace_name(state: AppState, workspace: str | None) -> str | None:
-    """校验请求里的 workspace 字段——V1 安全边界：它是名字，不是路径。
-
-    客户端若能直接传路径（"C:\\Users\\me"、"../../.."），Bash / Write 等工具
-    就会以任意宿主目录为 sandbox 根执行（路径逃逸漏洞）。V1 采用最简单的
-    安全规则：只接受单个路径段的目录名——
-    - None → 返回 None（调用方用默认 session_id 目录，向后兼容）；
-    - 单段相对名（"my-task"）→ 返回该名字，目录建在 workspaces_root 下；
-    - 绝对路径 / 盘符 / 含 / 或 \\ 的多段名 / "." ".." → 422 拒绝。
-
-    必须在任何 mkdir / Session 落盘之前调用：被拒请求不能留下任何痕迹。
-    """
-    if workspace is None:
-        return None
-    # PureWindowsPath 让盘符检查在非 Windows 平台上也生效（"C:foo" 在 POSIX
-    # 是合法单段名，但语义上是 Windows 盘符相对路径——一律拒绝）。
-    candidate = PureWindowsPath(workspace)
-    if (workspace.strip() in ("", ".", "..")
-            or candidate.drive or candidate.root or candidate.is_absolute()
-            or "/" in workspace or "\\" in workspace):
-        raise HTTPException(
-            status_code=422,
-            detail=f"workspace 只接受单个目录名（不接受路径）：{workspace!r}",
-        )
-    # 双保险：解析后的候选目录必须仍落在 workspaces_root 内（防符号链接逃逸）。
-    resolved_root = state.workspaces_root.resolve()
-    if not (resolved_root / workspace).resolve().is_relative_to(resolved_root):
-        raise HTTPException(
-            status_code=422,
-            detail=f"workspace 越出 workspaces_root：{workspace!r}",
-        )
-    return workspace
 
 
 #: 重放 backlog 阈值（durable 事件数，ADR-0016 §2.3）：after_seq 落后超过
@@ -659,29 +655,40 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # tool_operation / task_failed 审计链路整条消失（cli.py 有 setup_logging，
         # web 之前漏接）。幂等（重复调用先清 handlers）。
         setup_logging(settings.log_level, settings.workspace_dir)
-        # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
-        # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
-        # 不该让服务起不来），但必须响亮落日志。
+        # ARCH-7（#150）：启动期单实例锁。同一 session root 的第二个进程必须
+        # 响亮失败——跨进程同时 append 会话 JSONL 会产出重复 seq / 交错写，
+        # RunManager 的 run 归属共识也只在进程内有效；CLI 与 Web 并发同样被
+        # 拒绝（有意行为，见 instance_lock 模块 docstring）。取在 setup_logging
+        # **之后**：逃生门降级时那条 WARNING 才能落进 agent.jsonl，而不是只掉到
+        # stderr（AC7 要求逃生门在日志里显著留痕）。
+        instance_lock = InstanceLock(settings.workspace_dir).acquire()
         try:
-            from agent_harness.session.service import SessionService
+            # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
+            # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
+            # 不该让服务起不来），但必须响亮落日志。
+            try:
+                from agent_harness.session.service import SessionService
 
-            scan_results = await SessionService(state).scan_interrupted()
-            for result in scan_results:
-                logging.getLogger("agent_harness.web").warning(
-                    "启动崩溃扫描：session=%s recovery=%s detail=%s",
-                    result.session_id, result.recovery, result.detail,
+                scan_results = await SessionService(state).scan_interrupted()
+                for result in scan_results:
+                    logging.getLogger("agent_harness.web").warning(
+                        "启动崩溃扫描：session=%s recovery=%s detail=%s",
+                        result.session_id, result.recovery, result.detail,
+                    )
+            except Exception:
+                logging.getLogger("agent_harness.web").exception(
+                    "启动崩溃扫描失败（不阻塞启动）"
                 )
-        except Exception:
-            logging.getLogger("agent_harness.web").exception(
-                "启动崩溃扫描失败（不阻塞启动）"
-            )
-        try:
-            yield
+            try:
+                yield
+            finally:
+                await state.shutdown()
+                # 旁路收尾（ADR-0018 D3）：服务停机前尽力发送剩余 Langfuse span
+                # （有超时上限，不阻塞退出）。
+                flush_process_sink()
         finally:
-            await state.shutdown()
-            # 旁路收尾（ADR-0018 D3）：服务停机前尽力发送剩余 Langfuse span
-            # （有超时上限，不阻塞退出）。
-            flush_process_sink()
+            # 放在 shutdown 之后：仍在关连接时不该让第二个进程进来接手。
+            instance_lock.release()
 
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
@@ -690,6 +697,16 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     from agent_harness.web.lineage import register_lineage_routes
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
+
+    # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
+    from agent_harness.web.projects import register_project_routes
+
+    register_project_routes(app)
+
+    # MEM-4 / #159 记忆入口（列出 / 硬删；同为独立 router）
+    from agent_harness.web.memory import register_memory_routes
+
+    register_memory_routes(app)
 
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
@@ -729,8 +746,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         return {"status": "ok"}
 
     @app.get("/api/sessions")
-    async def list_sessions() -> list[SessionSummary]:
-        """列历史 session（按最近活动倒序）。
+    async def list_sessions(workspace_id: str | None = None) -> list[SessionSummary]:
+        """列历史 session。
+
+        - 不带参数：全部会话，按**最近活动**倒序（既有契约与快路径取舍不变）。
+        - `?workspace_id=<项目 id>`：只列该项目的会话，顺序 = **账本的手工序**
+          （AC4：不按活动时间重排）；项目未注册 → 404（不伪装成空列表）。
+        每行都带 `workspace`（`null` = 未分组）。
 
         列表页只需摘要字段——store.read_session_summary 单趟流式扫描
         （头部早退 + 末行），不再全量解析每个 JSONL（30 会话 × 2000 事件
@@ -738,7 +760,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
         service = SessionService(app.state.agent)
-        summaries = await service.list_sessions()
+        try:
+            summaries = await service.list_sessions(workspace_id=workspace_id)
+        except WorkspaceNotFound as e:
+            raise http_error(e) from e
         return [
             SessionSummary(
                 session_id=s.session_id,
@@ -748,6 +773,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 first_user_message=s.first_user_message,
                 trace_id=s.trace_id,
                 trace_url=s.trace_url,
+                # 领域值对象 → 传输模型（两者刻意同名不同物：前者无校验、不依赖
+                # Pydantic；后者是契约与 OpenAPI schema 的定义点）。
+                workspace=(
+                    WorkspaceRef(id=s.workspace.id, title=s.workspace.title)
+                    if s.workspace is not None
+                    else None
+                ),
             )
             for s in summaries
         ]

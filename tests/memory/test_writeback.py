@@ -14,12 +14,20 @@ from tests.conftest import make_session
 
 
 class RecordingCapability:
+    """契约合规的替身：#158 之后写入入口是 `consolidate`（未降级时 reason=None）。"""
+
     def __init__(self) -> None:
         self.stored: list[tuple[MemoryScope, str, dict]] = []
 
-    async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str:
+    async def store(self, scope: MemoryScope, content: str, metadata: dict, *,
+                    budget_seconds: float | None = None) -> str:
         self.stored.append((scope, content, metadata))
         return f"mem-{len(self.stored)}"
+
+    async def consolidate(self, scope, content, metadata, *, budget_seconds=None):
+        from agent_harness.memory.capability import MemoryWriteOutcome
+
+        return MemoryWriteOutcome(await self.store(scope, content, metadata))
 
     async def search(self, scope, query, limit):  # pragma: no cover — 本文件不用
         return []
@@ -130,3 +138,110 @@ async def test_observability_write_failure_does_not_drop_candidates(tmp_path):
 
     assert [content for _, content, _ in capability.stored] == ["keep-me"]
     assert not [e for e in session.events if e.type == "memory/degraded"]
+
+
+@pytest.mark.asyncio
+async def test_failing_candidate_write_is_recorded_as_degraded_not_silent(tmp_path):
+    """#157 AC5：provider 侧（含它发起的删除/更新）失败**不得静默**。
+
+    `_write` 逐候选隔离并把失败计数落成 `memory/degraded`/`writeback` 的 `partial: N/M`——
+    这条路径一直存在，却从未被测试钉过；#157 解禁 provider 删除后，"模型让删、删除却失败"
+    会真的走到这里，所以现在必须证明它不静默：候选失败 → 事件流里有一条带数量的降级记录。
+    事件 reason 只带类型名/数量（脱敏不变量），根因只进日志。
+    """
+
+    class ExplodingCapability:
+        """写入入口（契约的 `consolidate`）整体不可用：连降级写入都失败。"""
+
+        async def store(self, scope, content, metadata):
+            raise ConnectionError("milvus down")
+
+        async def consolidate(self, scope, content, metadata, *, budget_seconds=None):
+            raise ConnectionError("milvus down")
+
+    class OneCandidate:
+        async def extract(self, events):
+            return ExtractionOutcome([(MemoryScope.USER, "会失败的一条", {"importance": 0.5})])
+
+    session = make_session(tmp_path)
+    writer = MemoryWriteback(ExplodingCapability(), OneCandidate())
+    writer.submit(session, session.events)
+    await writer.drain()
+
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert len(degraded) == 1
+    assert degraded[0].data["operation"] == "writeback"
+    assert degraded[0].data["reason"] == "partial: 1/1 candidates failed"
+
+
+@pytest.mark.asyncio
+async def test_real_langmem_delete_failure_degrades_but_never_drops_the_candidate(tmp_path):
+    """AC5 的真身：**真** LangMem 链路上的删除失败必须落 `memory/degraded`，且候选不丢。
+
+    与上一条（合成 capability）的区别是走了完整链路：脚本化模型发 RemoveDoc → 真
+    manager/trustcall → 真 adapter → 记录层 `delete` 抛错（存储不可用）。
+
+    #158 把写入入口换成 `consolidate` 之后，这条路径的语义**变强**了：消解失败不再让候选
+    一起失败（旧的 `partial: 1/1`），而是降级成"只新增"——所以这里同时断言两件事：
+    ``consolidation`` 降级可见（不静默）+ 候选真的落盘（不丢写）。reason 只带类型名。
+    """
+    pytest.importorskip("langmem")
+    from langchain_core.messages import AIMessage
+
+    from agent_harness.identity import (
+        IdentityContext,
+        identity_context_var,
+        set_identity_context,
+    )
+    from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+    from agent_harness.memory.outbox_relay import OutboxRelay
+    from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
+    from agent_harness.memory.types import MemoryEntry, MemoryNamespace
+    from tests.langmem_doubles import (
+        AlwaysHitVectorStore,
+        ScriptedChatModel,
+        stable_doc_id,
+    )
+
+    alice = IdentityContext("acme", "alice", ["user"])
+
+    class FailingDelete(SqliteMemoryRecordStore):
+        """底层存储不可用：删除一律失败（真路径上的失败，而不是被调用的假对象）。"""
+
+        async def delete(self, memory_id, identity):
+            raise ConnectionError("storage unavailable")
+
+    class OneCandidate:
+        async def extract(self, events):
+            return ExtractionOutcome([(MemoryScope.USER, "alice 现在用 Rust", {"importance": 0.5})])
+
+    records = FailingDelete(tmp_path / "memory.db")
+    await records.initialize()
+    vectors = AlwaysHitVectorStore()
+    model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{
+        "name": "RemoveDoc",
+        "args": {"json_doc_id": stable_doc_id(
+            "m1", MemoryNamespace.of(MemoryScope.USER, alice).as_tuple())},
+        "id": "remove-one"}])])
+    capability = LangMemMemoryCapability(records, vectors, model)
+    session = make_session(tmp_path)
+
+    token = set_identity_context(alice)
+    try:
+        await records.store(MemoryEntry(id="m1", content="alice 喜欢 Python", metadata={},
+                                       scope=MemoryScope.USER,
+                                       created_at="2026-09-04T00:00:00+00:00"), alice)
+        assert await OutboxRelay(records, vectors).flush() == 1
+        writer = MemoryWriteback(capability, OneCandidate())
+        writer.submit(session, session.events)
+        await writer.drain()
+        written = [entry.content for entry in await records.list_by_scope(MemoryScope.USER, alice, 10)]
+    finally:
+        identity_context_var.reset(token)
+
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert len(degraded) == 1
+    assert degraded[0].data["operation"] == "consolidation"
+    assert degraded[0].data["reason"].startswith("consolidation_failed: ")
+    assert "storage unavailable" not in degraded[0].data["reason"]
+    assert "alice 现在用 Rust" in written

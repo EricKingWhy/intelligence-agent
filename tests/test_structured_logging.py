@@ -81,7 +81,10 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
             return self
 
         async def astream(self, messages, **kwargs):
-            assert messages[0].content == "只回复 ok"
+            # 用户消息是**最后**一条：T7 起 meta_user 运行时快照会插在它之前
+            # （ADR-0023 D8）。断言最后一条既保住"用户输入到达模型"的原意，
+            # 又顺带钉住快照的位置契约。
+            assert messages[-1].content == "只回复 ok"
             yield AIMessageChunk(
                 content="ok",
                 id="lc_run--internal-id",

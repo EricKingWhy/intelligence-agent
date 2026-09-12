@@ -54,6 +54,7 @@ from agent_harness.model.fallback import (
     TwoLevelFallbackPolicy,
 )
 from agent_harness.observability.tracer import RunTracer
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import (
     CONTEXT_COMPACTED,
     MODEL_COMPLETED,
@@ -958,14 +959,20 @@ class AgentRuntime:
                         yield to_agent_event(soft_event)
                         corrective = session.append(
                             USER_MESSAGE,
-                            {"content": (
-                                f"同一调用 {worst_signal.tool_name!r} 已连续失败 "
-                                f"{worst_signal.consecutive_failures} 次。请改变策略"
-                                "（换参数、换工具或向用户说明遇到的具体困难），不要再"
-                                "以相同方式重试。"
-                            ),
+                            {"content": DEFAULT_REGISTRY.assemble(
+                                "corrective:tool_failure_guard",
+                                {
+                                    "tool_name": worst_signal.tool_name,
+                                    "consecutive_failures": str(
+                                        worst_signal.consecutive_failures
+                                    ),
+                                },
+                            ).fragment_text,
                              # runtime 注入的纠正消息不是真实用户发言——标记来源
-                             # 供前端投影/审计区分（不变量 #22 边缘）。
+                             # 供前端投影/审计区分（不变量 #22 边缘），**并供记忆
+                             # 抽取剔除**（memory/extractor.py 按此标记单点过滤：
+                             # 注入消息一旦被当成真实用户发言，工具输出里的注入指令
+                             # 就能被洗成跨会话 USER 记忆）。
                              "injected_by": "tool_failure_guard"},
                             run_id=run_id, step_id=step_base + steps,
                         )

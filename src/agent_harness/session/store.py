@@ -22,7 +22,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from agent_harness.session.errors import SeqConflict
-from agent_harness.session.event import RUN_TERMINAL_TYPES, USER_MESSAGE, SessionEvent
+from agent_harness.session.event import (
+    RUN_TERMINAL_TYPES,
+    SESSION_STARTED,
+    USER_MESSAGE,
+    SessionEvent,
+)
+from agent_harness.session.header import StartedHeader
 
 logger = logging.getLogger("agent_harness.session.store")
 
@@ -30,6 +36,19 @@ logger = logging.getLogger("agent_harness.session.store")
 #: 会话最初几条事件里；超过此数仍未找到则放弃（返回 None，前端有
 #: events 扫描降级路径）。只约束"解析几条"，不约束行计数（O(1)/行）。
 _SUMMARY_HEAD_PARSE_LIMIT = 200
+
+
+@dataclass(frozen=True)
+class WorkspaceRef:
+    """会话摘要里的**项目引用**（WS-3 / #153 AC1–AC2）：id 做请求/重命名，title 做显示。
+
+    放在 session 层而不是 `agent_harness.workspace`：依赖方向是 session ← workspace
+    （`workspace/models.py` 本来就 import 本层），反向 import 会成环。本类只是**值对象**
+    ——它就是"会话摘要里那一格"的形状，不含任何项目领域行为（那些在 `WorkspaceIndex`）。
+    """
+
+    id: str
+    title: str
 
 
 @dataclass(frozen=True)
@@ -53,6 +72,11 @@ class SessionSummaryStats:
     #: ARCH-4b：同一终结事件的 `trace_url`（人类可点击的 Langfuse URL，契约 2d7f87a
     #: / ADR-0018 D7）。与 `trace_id` 同源、同一套守卫；未配置可观测性时为 None。
     trace_url: str | None = None
+    #: WS-3 / #153：会话所属项目；**未分组**（历史遗留 / 未命名 workspace / 装配里
+    #: 没有 workspace 索引）时为 None，绝不伪造（不变量 #21 同族）。
+    #: store 层不认识项目，只提供这个带类型的落点；值由 `SessionService.list_sessions`
+    #: 从 `WorkspaceIndex` 回填（AC1 要求三处契约同时有该字段，这是其中之一）。
+    workspace: WorkspaceRef | None = None
 
 
 class JsonlSessionStore:
@@ -356,3 +380,37 @@ class JsonlSessionStore:
         # 按修改时间倒序（最近在前）
         ids.sort(key=lambda x: x[1], reverse=True)
         return [sid for sid, _ in ids]
+
+    def read_started_header(self, session_id: str) -> StartedHeader | None:
+        """只读会话 header（WS-2 / #152 AC14）：第一条 `session/started` 即停。
+
+        **不读事件正文**——workspace 首次引导只允许看 header（id / cwd / createdAt），
+        所以这里流式读、命中即返回，正文多长都不碰。区别于 `read_session_summary`
+        （那个要数到文件尾才知道事件数）。
+
+        形状非法（没有 events.jsonl / 没有 session/started）→ None，不抛错：引导面对
+        的是历史日志，一条坏数据不该拖垮整个启动（与 `read_events` 的容错同款）。
+        """
+        path = self._events_path(session_id)
+        if not path.exists():
+            return None
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for lineno, raw_line in enumerate(handle, start=1):
+                if not raw_line.strip():
+                    continue
+                event = self._parse_event_line(raw_line, path.name, lineno)
+                if event is None:
+                    continue
+                if event.type != SESSION_STARTED:
+                    # header 正常就是第一条；遇到别的说明日志形状异常，不再往下翻
+                    # （继续翻就等于读正文了）。
+                    return None
+                data = event.data or {}
+                cwd = data.get("cwd")
+                return StartedHeader(
+                    session_id=session_id,
+                    cwd=cwd if isinstance(cwd, str) and cwd else None,
+                    created_at=event.time,
+                    agent_id=event.agent_id,
+                )
+        return None

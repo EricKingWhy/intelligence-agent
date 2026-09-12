@@ -1370,3 +1370,133 @@ KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
 - 所有服务端复现都在**健康会话的临时副本**上做（靶子用完即删，删前核对）；探针 15 条 `model/changed` 全部落在靶子上，用户会话 `dd983104` 始终保持 7 行。
 - 浏览器侧用**独立无头 Chromium**，未干扰用户已打开的页面，也未向其会话写入任何事件。
 - 现场没有服务端访问日志（应用日志只记了 19:02 的孤儿回收），因此「两个请求」由浏览器侧历史网络记录 + `from_* = null` 反证，而非服务端计数。
+
+---
+
+## 第九轮（2026-09-12）：PromptRegistry 迁移期的后端观察（自主 SDD 批次）
+
+本轮在 `feat/backend` 自主推进 #150 + #161–#168 + #149–#160。迁移类票的验收靠
+**逐字节等价**，所以下面的观察全部是"后端 / 文档"性质，无前端问题。
+
+### OBS-9.1 【后端·已修】`--help` 曾被单实例锁挡住（#150）
+
+`cli.main()` 最初无条件取锁，导致服务在跑时 `agent-harness --help` 也会以 rc=2 被拒。
+`--help` 不触碰 session root（argparse 直接打印帮助退出），不该被锁挡住。
+**修复**：`-h/--help` 走豁免路径，但仍守 ADR-0018 D3 的 `flush_process_sink` 契约
+（既有测试 `test_cli_main_flushes_on_normal_exit` 正是这条契约的裁判——修复时它先红，
+证明该测试有效）。**归属：后端**。
+
+### OBS-9.2 【后端·设计约束，非缺陷】Windows 区间锁是 mandatory 的
+
+`msvcrt.locking` 锁住某个字节区间后，**同进程的另一个句柄**读该区间也会被拒
+（`PermissionError`）。若锁 byte 0，锁文件里写的 `pid=` / 诊断信息就再也读不出来，
+第二进程的错误信息会退化成"未知占用者"。
+**处置**：锁区间取在载荷之外的偏移（`1 << 20`），载荷区保持可读。
+**归属：后端**（POSIX `flock` 是 advisory，无此问题）。
+
+### OBS-9.3 【后端·flaky·已确认与本次改动无关】`test_disconnect_leaves_run_running_and_cancel_stops_it`
+
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`
+（WebSocket 断开 / cancel，5s 超时）在全量跑中**间歇性失败**：
+
+- 2026-09-12 T3 期间全量跑出现 1 次失败 → 同 commit 重跑两轮全绿，单跑绿，整文件跑绿（28 passed）。
+- T4 的独立审查者（只读子代理）在**同一份代码上跑 5 次：2 次失败 / 3 次通过**，
+  并验证 **clean HEAD 归档同样通过**、`test_web_api.py` **不在本批任何 diff 里**。
+- 本 Agent 的 T4 全量跑一次通过（1706 passed / 0 failed）。
+
+**结论**：与本批 PromptRegistry 改动无关，属既有 flaky（n=5 命中率约 40%，样本小）。
+**未定位，本轮不追**（§8 Scope Lock：scope 外问题只报告不顺手修）。
+若后续修：方向是"客户端断开后 run 应继续 + cancel 应停住"的时序竞态
+（websocket 断开与 `RunManager.cancel` 的先后），建议先加确定性同步点再断言，
+**不要靠放宽超时**——那只会把竞态藏得更深。
+**归属：后端（测试稳定性）**。
+
+### OBS-9.4 【文档·已报告未改】PRD §10.7 / §10.2 与实现不一致
+
+- §10.7 的 `AssembledPrompt` 代码块只列 2 字段，§10.4 与交接文档 §4.2 要求 3 段
+  （含 `fragment_text`）；#162 票面自身 step 1 亦为 3 字段。
+- §10.2 导出清单缺 `run_self_check`（T2 引入）与 `DEFAULT_REGISTRY`（T3 引入）。
+- §10.8 把"模板语法"列为自检职责，实际由 `register`（R3a）承担。
+按交接文档 §2「不要自行改两边」，**只报告不改**。
+**归属：文档**。
+
+### OBS-9.5 【后端·本 Agent 自己的错误说法，已修正】T5 与 `DEFAULT_REGISTRY` 的关系
+
+T3 落地时我在 `builtin.py` 注释与两个测试 docstring 里写了"T5 会让 `DEFAULT_REGISTRY`
+带上 persona"——这与交接文档 §4.4（`DEFAULT_REGISTRY = build_registry()` **永不读环境**、
+persona 由装配点 `build_registry(persona=…)` 注入）矛盾。若按我原来的说法实现 T5，
+`_builtin_prompt` 会变成环境相关，`profile:*:identity` 的逐字节断言会在设了
+`AGENT_PERSONA` 的机器上红。
+**已在 T3 内修正注释与 docstring**（无行为变化），并把
+`test_default_registry_equals_build_registry_in_p0` 重述为**该不变量的机器化表达**。
+**归属：后端**。
+
+### OBS-9.6 【后端·潜在顺序隐患，未触发】`harness:identity` 的 order 早于 `persona:prefix`
+
+`SECTION_ORDERS` 里 `harness:identity = -1000`，而 `persona:prefix = 0`。父路径走
+`registry.assemble()`（按 order 排序）时 harness 段本应在 persona 前缀**之前**；
+但 child 路径走 `apply_persona(base, persona)`，它把 persona 前缀硬放在最前。
+
+今天不会出问题：`harness:identity` 是**预留键**，`_BUILTIN_SECTIONS` 里没有这条
+section，所以父/子两条路径一致（`test_apply_persona_matches_registry_order` 绿）。
+
+若将来有人为 profile scope 注册 `harness:identity`，**漂移守卫会立刻变红**——这正是
+那条守卫的主要未来价值（它比较的是活的注册表，不是硬编码期望值）。届时需要决定：
+让 `apply_persona` 也感知 order，或把 harness 段移出 persona 包裹范围。
+**归属：后端（T5 已知边界）**。
+
+### OBS-9.7 【文档·命名漂移】交接文档 §4.5 的 `compose_agent_prompt` 与实现名不一致
+
+`docs/HANDOFF_PROMPT_REGISTRY.md` §4.5 写 persona 拼接用
+`compose_agent_prompt(base, persona, guidance_text)`，实际交付的是
+`apply_persona(base, persona)`（#165 票面本身 prescribed 这个名字，票面优先）。
+
+T6 加 tool guidance（order 2000）时**无需改 `apply_persona`**：它包裹的是**已组装完**
+的 profile 文本，guidance 已含在 base 里，顺序天然正确。§4.5 的名称与三参签名已过期。
+**归属：文档**。
+
+## 第十轮（2026-09-12）：Memory 生命周期（#156 MEM-1）期间的后端观察（自主 SDD 批次）
+
+### OBS-10.1 【后端·既有 flaky，负载相关·已确认与本票无关】OBS-9.3 那条用例
+
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it` 本轮先表现为
+"约 40% 命中率的 flaky"，随后出现**本机 3/3 连续失败**（隔离跑、整文件跑都失败；10s 上下），
+再之后又回到**时好时坏**。**2026-09-12 #157 复核（同一份工作区代码连跑 3 次：pass / fail /
+pass；stash 掉全部工作区改动后在 commit `ff57700` 上跑：pass）——所以它既不是确定性失败，
+也不由本票代码决定。** 下面记录的根因与冷路径成本仍然成立，只是"确定性"这个措辞要撤回：
+它是**负载相关的间歇失败**。
+定位到的根因（与 OBS-9.3 的猜测不同，不是断连时序竞态）：
+
+1. 失败断言是 `_DisconnectingASGI` 的 `"app 未在 5s 内响应 disconnect"`；
+2. 抓到的 traceback 停在一个 **TLS 读**上（`anyio/streams/tls.py` → `_ssl_object.read`），
+   而该 await 属于 `POST /api/sessions` 的**端点处理路径**（`starlette/routing.py` 的
+   `dependant.call` 之下），即请求路径里真的有外部 HTTPS 调用；
+3. 该外部调用来自 `.env` 里启用的 capability 装配（本机 `CAPABILITIES` 含 `memory`，
+   provider `builtin`）→ 首次装配会 `MilvusVectorStore.initialize()` 真连 Zilliz；
+4. 实测本机冷启动成本：**Milvus 冷 connect 2.01s**（热 0.29s）＋ **langmem 冷 import 1.32s**，
+   再加会话创建与其余装配，冷路径突破该用例 **5s** 的预算。
+
+**不是本票引入**（用 stash 证明）：把 #156 的全部工作区改动 `git stash` 掉、在**同一个
+commit（f70ebe7）**上复跑，该用例**同样失败**；而该 commit 今天早些时候的全量跑是绿的 —
+即失败随**机器/网络负载**漂移，不由本票代码决定。本票 diff 只在 `memory/` + 测试 + ADR。
+
+**本轮不修**（§8 Scope Lock：scope 外问题只报告）。若后续修，按 OBS-9.3 的原判断**不要
+放宽超时**，正确方向是让计时块不再包含冷装配：在计时块**之前**预热 capability 装配
+（只读探针或显式 `await app.state...initialize()`），或让该用例显式密封 `CAPABILITIES`
+（本仓 `tests/conftest.py` 只清洗 Settings 的**环境变量**，`.env` 文件仍会被 `Settings()`
+读到——这是同一根因的另一条已知路径）。**归属：后端（测试稳定性 / 装配期外部依赖）**。
+
+### OBS-10.2 【后端·真机集成用例的冷 connect 抖动·#157 期间观察】同一个冷路径也在真机集成用例上出现
+
+`tests/integration/test_phase6_memory_e2e.py::test_real_connection_and_missing_collection`
+（#156 期加入）在 #157 的复核里**偶发失败**：整文件跑（5 条，热机）时它挂了，单独重跑
+**3.11s 通过**。同一轮里 `.scratch/run_langmem_actions_gate.py` 也撞到过一次同样的形状——
+`MilvusVectorStore._call` 的 SDK `timeout=15` 被**冷握手**吃掉（实测单次 `list_collections`
+冷启 16.7s），归类成 `VectorStoreError("unavailable")`，与"集合不存在/凭证错误"这些真实故障
+无法从错误类型上区分开。
+
+隔离结论：与 #157 的改动无关（该用例只 `connect()` 与查一个不存在的集合，不碰
+drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方向（都属 #156/#157 之外的稳定性
+工作）：(1) 给真实集成用例的首次 `connect()` 加预热/重试（gate 脚本本次就是这么绕过的）；
+(2) 更根本地把"冷握手超时"与"真实故障"在错误分类上区分开（例如超时单列一个 category），
+否则生产启动期的首连抖动会被误报成 `unavailable`。**归属：后端（memory 真机测试稳定性）**。

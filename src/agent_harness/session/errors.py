@@ -71,6 +71,33 @@ class WorkspaceNameInvalid(SessionServiceError):
     """workspace 名字不合法（路径逃逸风险）。"""
 
 
+class WorkspaceNotFound(SessionServiceError):
+    """workspace_id 不存在（项目未注册 / 装配里没有 workspace 索引）。
+
+    WS-3 / #153：按项目列会话时，未注册的项目**不能**伪装成"空列表"——那是在谎报
+    "这个项目没有会话"（不变量 #21 同族：缺席不造假）。由
+    `SessionService.list_sessions` 把 workspace 层的 `UnknownWorkspace` 翻成本异常
+    （同一套"下层异常翻译成本层词汇"的既有做法，见 `ForkBoundaryError` →
+    `InvalidForkBoundary`）。
+    """
+
+
+class WorkspaceMoveInvalid(SessionServiceError):
+    """请求的会话↔项目移动在当前状态下不成立（WS-4 / #154，AC7 的对应物）。
+
+    三种来源，都是**状态冲突**而不是"参数写错"，所以是 409 而非 422：
+
+    1. 会话 header 没有 cwd 锚（历史遗留）——无法判定它属于哪个目录，写进账本会留下
+       "账本有 id 但会话无 cwd"的中间态；
+    2. 会话的 cwd 指向的项目 ≠ 请求里的项目——项目归属由**目录**决定（ADR-0025 D1），
+       不能凭调用方指定；
+    3. 重排的会话或锚点不在该项目的可见成员里——账本序只在项目内定义。
+
+    与 `WorkspaceNameInvalid`（名字形态非法 → 422）刻意分开：那条是"请求本身不合法"，
+    这条是"请求合法但当前状态不允许"。
+    """
+
+
 class QueueItemNotFound(SessionServiceError):
     """排队消息不存在 / 已消费 / 已取消。"""
 

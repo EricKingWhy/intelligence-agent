@@ -287,6 +287,11 @@ async def test_pending_operation_skipped_without_execution(tmp_path: Path) -> No
     assert "call-1" in results
     skipped = ToolResult.model_validate_json(results["call-1"])
     assert skipped.ok is False
+    # 跳过文案必须真的在场（T8 迁移到 frame:recovery_skipped）——取错组装分区
+    # （.system_text 在 FRAGMENT scope 下恒为空串）会让 message 变空串而不报错，
+    # 这条断言就是那个回归的探测器。
+    assert "尚未启动" in skipped.message
+    assert "跳过" in skipped.message
     # 未自动执行：没有真实工具被调用（这里用执行计数恒 0 表达——policy 只被咨询，
     # 不触发任何 Tool.execute；execution_count 记录的是决策次数）。
     assert execution_count == 1
