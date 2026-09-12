@@ -1404,3 +1404,101 @@ KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
   按 `agent_id` 另行标注"子代理"？还是彻底不显示？契约层目前只给了 `null`，
   如果 #155 需要区分，`SessionSummary` 要再加一个字段（例如 `agent_id` 或 `parent_session_id`），
   那是 #155 的契约变更，不要在前端靠猜。
+
+---
+
+## 第十轮（2026-09-12）：WS-5 #155 项目分组 UI —— 交付 + 真机验收 + 第九轮待决策项的答案
+
+**交付**（前端半；后端半 #153 / #154 已在 feat/backend）：会话侧栏「项目 → 会话」层级 +
+未分组区 + 项目 CRUD（新建 / 重命名 / 加入 / 移出 / 项目内重排 / 软删除）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `src/types.ts` | `Project` / `ProjectStatus` / `ProjectDeleted`（后端 `web/projects.py` 逐字段对齐） |
+| `src/lib/api.ts` | 7 个项目端点 + `ProjectError(status, message)` + `describeProjectError`（后端 detail 优先）+ 窄化解析 |
+| `src/lib/projects.ts` | 纯函数：`buildRailModel`（分组投影）+ `moveAnchor` / `dropAnchor`（重排锚点） |
+| `src/hooks/useProjects.ts` | 项目列表 + 动作；每次写操作后重拉（**不维护前端影子成员名单**，不变量 #22） |
+| `src/components/SessionList.tsx` | 改版：项目块（折叠 / 行内重命名 / ⋯菜单）+ 行（点选 / ⋯菜单 / 拖拽重排）/ 未分组区 |
+| `src/components/ProjectDialogs.tsx` | 新建 / 删除确认（**明示只解除分组**）/ 加入项目 三个 Radix Dialog + 行内重命名 |
+| `e2e/r-project-groups.spec.ts` | 6 用例 × 2 视口（AC1–AC5 + 端点失败降级） |
+| `e2e/fixtures.ts` | 项目端点的**有状态** mock（create/rename/attach/detach/order/软删除都真改状态） |
+
+### 第九轮待决策项的答案（内部子代理子会话怎么显示）
+
+**决定：照契约如实显示在「未分组」区，不折叠进父项目、不隐藏、不前端猜 `agent_id`。**
+理由：#152 的 AC14 收窄明确「内部子代理不算项目成员」，所以后端给它的 `workspace` 就是
+`null`——这是**真值**（它确实不属于任何项目）。前端把它藏起来才是制造第二套真相（不变量
+#22）：同一个会话在"项目视图"里没有、在"列表视图"里也不该凭空消失。若将来要在视觉上
+区分"子代理子会话"与"用户没选项目"，正确做法是**先加契约字段**（`SessionSummary.agent_id`
+或 `parent_session_id`）再改 UI，不在前端从 id/标题猜——已作为后续票候选记录。
+
+### 注册项目为什么不批量回溯 attach 该目录下的历史会话
+
+**做不到，且不猜。** `attach` 的后端校验是「会话的 `session/started.cwd` == 项目规范路径」，
+而 `SessionSummary` **不暴露会话 cwd** —— 前端无法判断"哪些未分组会话属于这个新项目"。
+盲 attach 全部未分组会话只会得到一堆 409（还会把失败原因冲成噪音）。
+**当前做法**：逐行「加入项目…」显式选择；后端 409 的 `detail` 原样显示（说明是 cwd 不一致）。
+**建议**：若要"注册即归拢"，应由后端提供一个按目录匹配的端点（或在 `SessionSummary` 暴露
+`cwd`），属新票。
+
+### 🔴 用户原始诉求的最后一块缺口（不是 #155 的 AC，必须单独立票）
+
+用户的原话是"怎么才能做到一个项目下多个会话"。目前：①项目能注册任意已存在的目录 ✅；
+②分组/管理 UI ✅；③**但没有"在某个项目目录里新建会话"的入口** ❌ ——
+`POST /api/sessions` 的 `workspace` 字段仍然只接受**单段目录名**（
+`SessionService._validate_workspace_name` 拒绝绝对路径），会话的 cwd 永远落在
+`workspaces_root/<name>`；而项目路径来自 bootstrap（`workspaces_root/<name>`，可 attach）
+或用户注册的任意目录（**没有任何路径能产出 cwd 等于它的会话**，fork 除外）。
+**后果**：用户注册 `D:\my-repo` 后，这个项目永远拿不到新会话。修法明确（让 create 接受
+绝对路径并把 cwd 定为该目录，cwd 的写侧唯一规范化已存在于 `sandbox/paths.py`），
+但**属后端契约变更，不在 #155 范围**。
+
+### 真机验收（真 uvicorn 127.0.0.1:8000 + 真 `.env` + 真 SQLite + 真浏览器 5173，无任何 mock）
+
+| 检查 | 结果 |
+| --- | --- |
+| 真实项目渲染顺序 = 注册表序（`ws2-e2e` → `ws1-e2e`） | ✅ 2 个项目 |
+| 项目内会话数 = 账本长度（3 / 5） | ✅ |
+| 未分组区行数 | ✅ 22 条（该次运行共 30 个会话，其中 8 条已分组；截图轮的 24 是因为随后两次真模型用例又新增了会话） |
+| 注册临时目录（`.scratch/ws5-live-project`） | ✅ 标题默认取目录名 → 行内重命名生效 |
+| 软删除（0 会话） | ✅ 确认文案含"不会/会话日志"；成功提示用后端原文（含"可重新注册同一目录"） |
+| 注册真实目录 `workspaces/ws-delete-me` + 真会话 attach | ✅ 会话进入项目（cwd 相等后端放行） |
+| detach → 再 attach → 软删除（1 会话） | ✅ 提示"1 个会话回到未分组"；会话仍在未分组、目录仍在盘上 |
+| 真项目内重排 | ✅ 上移后后端账本序真的变（读 API 验证），下移后**精确还原** |
+| **基线比对** | ✅ 项目（含账本序）与会话归属与开测前**逐字段相等**（30 条会话） |
+
+截图：`web/gui-test-screenshots/ws5/`（01–06 真机流程、10–16 暗/亮/中/窄四态）。
+**本地留存、未入库**：截图是运行时产物（1.3MB），与既有各轮一致不进版本库；跑
+`e2e-live/project-groups-live.spec.ts` 或按上表步骤可复现同一组图。
+
+### 视觉检查（impeccable）逮到并修复的 1 个真 bug
+
+侧栏菜单（`.rail-menu`）最初复用了命令面板的 `palette-in` 关键帧，而那组关键帧带
+`translateX(-50%)`（面板居中才需要）→ **菜单被永久左移自身宽度的一半**。
+Hermetic e2e **全绿**（Playwright 点元素真实位置，位移不影响点击），只有人眼看截图才发现。
+已改为独立的 `rail-menu-in`（只做 opacity + scale，并用 Radix 的
+`--radix-dropdown-menu-content-transform-origin` 作为缩放原点）。
+**教训**：跨组件复用 `@keyframes` 前先看它有没有把定位也写进关键帧里。
+
+detector（`impeccable detect`）对本次改动文件：**0 findings**；`app.css` 里 4 条 `side-tab`
+告警全部落在**既有**组件（行号 1584 / 2091 / 2169 / 3885，非本票插入段），按 Scope Lock 未动。
+
+### 其它观察（都不改，记录在案）
+
+1. **CORS `*`（后端既有）**：跨源 `POST /api/sessions` 实测 200 并真的起 run。项目端点本身
+   已过来源闸（ADR-0025 D1 (b)），但会话端点没有。**建议后端单独立票**。
+2. **56px 折叠轨下侧栏只剩图标按钮**：`.session-item-dot` / `.session-item-body` 的
+   `display:none` 是**既有**规则（本票只往同一个 hide 列表里追加了项目 chrome），
+   所以窄屏"看不见会话行"不是本票引入；要修应是独立票（例如窄屏显示首字母）。
+3. `approval-live.spec.ts`（联调车道、非门禁）的「LIVE 拒绝」用例本轮连续 2 次失败：
+   点拒绝后卡片未在 10s 内翻到「已拒绝」，但后端 `/approve` 日志是 **200**（决策已落库、
+   工具后续如实 failed）。判断为**真实模型在同一 run 里再次请求审批**导致定位到新的 pending
+   卡片（该用例自身的注释就写明"结果非确定，只作真机取证"）。**与本票 diff 无关**：
+   本票未触碰 `ApprovalCard` / `api.postApproval` / 投影管线，门禁内的
+   `e2e/n-approval-card.spec.ts`（真正的回归锁）全绿。
+
+### 门禁（末次实跑，最终 revision）
+
+`npx tsc -b` ✅ · `npx vitest run` **556 passed**（30 文件；本票新增 36 条：18 分组/锚点 + 18 契约）·
+`npx oxlint` **0 errors**（37 warnings，全部既有规则；本票 10 个文件 0 warning）·
+`npx playwright test --workers=2` **142 passed**（本票新增 12 例）· `npx vite build` ✅。

@@ -401,3 +401,41 @@ glm-4.5-air · 6907 tok` → `run/completed 13873 tok`）。停顿期间 UI 全�
 不要并行跑两个 playwright。**
 
 **集成提示词**：`docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。
+
+## 第八轮（2026-09-12）：WS-5 #155 项目分组 UI（跨端票的前端半）
+
+**背景**：用户诉求「一个项目下多个会话，和 zcode 一样」。后端 #152/#153/#154（feat/backend）
+已交付 Workspace 实体、列表 `workspace` 契约与 9 个项目 CRUD 端点；本票做**可见性**。
+
+| 交付 | 位置 |
+| --- | --- |
+| 契约层：`Project` / `ProjectStatus` / `ProjectDeleted` + 7 个端点 + `ProjectError` | `src/types.ts` / `src/lib/api.ts` |
+| 纯函数：分组投影 `buildRailModel` + 重排锚点 `moveAnchor` / `dropAnchor` | `src/lib/projects.ts` |
+| 数据与动作：`useProjects`（写后重拉，不维护影子名单） | `src/hooks/useProjects.ts` |
+| 侧栏改版：项目块（折叠/行内重命名/菜单）+ 行（点选/菜单/拖拽）+ 未分组区 | `src/components/SessionList.tsx` |
+| 三个浮层：新建 / 删除确认（明示只解除分组）/ 加入项目 + 行内重命名 | `src/components/ProjectDialogs.tsx` |
+| 样式：层级导轨、菜单、拖放落点、错误条、浮层 | `src/styles/app.css`（纯新增 562 行） |
+| e2e：6 用例 × 2 视口 + 有状态项目 mock | `e2e/r-project-groups.spec.ts` / `e2e/fixtures.ts` |
+| 真机：无 mock 的真后端流程 + 基线逐字段比对 | `e2e-live/project-groups-live.spec.ts` |
+
+**门禁（末次实跑，最终 revision）**：tsc 0 · vitest **556 passed**（30 文件）· oxlint
+**0 errors**（37 warnings，均为既有规则；本票 10 个文件 0 warning）· playwright
+**142 passed**（`--workers=2`，本票新增 12 例）· vite build ✓。
+
+**真机**：真 uvicorn 8000 + 真 `.env`/`harness.db` + 真浏览器 5173，无 mock；注册/改名/attach/
+detach/重排/软删除全走通，**结束时会话归属与项目账本与开测前逐字段相等**（状态已还原）。
+截图 `web/gui-test-screenshots/ws5/`（本地留存、未入库：运行时产物，与既有各轮一致）。
+
+**视觉检查逮到 1 个 e2e 抓不到的 bug**：`.rail-menu` 复用 `palette-in` 关键帧（含
+`translateX(-50%)`）→ 菜单永久左移半宽；Playwright 点真实位置所以全绿，人眼一看就歪。
+已改为独立 `rail-menu-in`（opacity + scale，配 Radix 的 transform-origin 变量）。
+
+**关单**：#155 **不关**（跨端票：后端半在 feat/backend 尚未合入 main；按 §14.12 以 comment
+记录已完成部分与剩余项）。
+
+**未做 / 交后续票**（详见 `docs/FRONTEND_ISSUES_LOG.md` 第十轮）：
+①`POST /api/sessions` 仍只接受单段 workspace 名 → **任意目录的项目拿不到"新建会话"入口**
+（用户原始诉求的最后一块缺口，需后端契约变更）；
+②注册项目不批量回溯 attach（契约不暴露会话 cwd，前端无法判定，不猜）；
+③项目端点之外的 CORS `*`（后端既有）；
+④窄屏 56px 折叠轨看不见会话行（既有规则，本票只追加了项目 chrome 到同一 hide 列表）。
