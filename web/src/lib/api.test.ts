@@ -141,7 +141,7 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
   });
 });
 
-describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () => {
+describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url / WS-3 #153：workspace）', () => {
   /** 后端 `GET /api/sessions` 一行的 canonical 形状，与
    *  `src/agent_harness/web/app.py::SessionSummary` 逐字段对齐。
    *
@@ -149,7 +149,9 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () =
    *  ① 类型新增必填字段 → 本 fixture 缺键 → `tsc -b` 红；
    *  ② fixture 多出类型没声明的键 → 对象字面量多余属性检查 → 红。
    *  后端侧权威锁（断言**值**，能抓住「键在但值是 null」的漏映射）：
-   *  `tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`。
+   *  `tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`
+   *  与 `tests/web/test_session_list_workspace.py::
+   *  test_rows_carry_real_workspace_and_ungrouped_is_null`。
    */
   const CANONICAL_ROW: SessionSummary = {
     session_id: 's1',
@@ -159,6 +161,7 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () =
     first_user_message: '标题',
     trace_id: 'tr-1',
     trace_url: 'https://lf.example/trace/tr-1',
+    workspace: { id: 'w1', title: '项目甲' },
   };
 
   it('原样保留 trace_url（fetch 层不重排/不丢键/不重命名）', async () => {
@@ -172,6 +175,18 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () =
     const rows = await listSessions();
     expect(rows[0].trace_id).toBeNull();
     expect(rows[0].trace_url).toBeNull();
+  });
+
+  it('原样保留 workspace（嵌套对象不被 fetch 层拍平/改名）', async () => {
+    captureFetch(200, [CANONICAL_ROW]);
+    const rows = await listSessions();
+    expect(rows[0].workspace).toEqual({ id: 'w1', title: '项目甲' });
+  });
+
+  it('未分组会话：workspace 保持 null（绝不伪造项目，不变量 #21）', async () => {
+    captureFetch(200, [{ ...CANONICAL_ROW, workspace: null }]);
+    const rows = await listSessions();
+    expect(rows[0].workspace).toBeNull();
   });
 });
 

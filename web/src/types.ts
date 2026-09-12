@@ -42,6 +42,13 @@ export interface AgentEvent {
   block_id?: string;
 }
 
+/** 项目引用（WS-3 / #153；后端 `src/agent_harness/web/app.py::WorkspaceRef`）。
+ *  `id` 用于请求与重命名，`title` 用于显示——两者都由后端给，前端零推导。 */
+export interface WorkspaceRef {
+  id: string;
+  title: string;
+}
+
 /** Session summary from GET /api/sessions. */
 export interface SessionSummary {
   session_id: string;
@@ -59,6 +66,10 @@ export interface SessionSummary {
    *  trace_id 与 trace_url 并列不互替：前者机器可读（Copy 命令），后者人类
    *  可点击（详情面板超链接）。未启用 Langfuse 两者都 null。 */
   trace_url: string | null;
+  /** 会话所属项目（WS-3 / #153，后端 `SessionSummary.workspace`）。
+   *  **未分组 = null**（历史遗留 / 未命名 workspace / 装配里没有项目索引）——
+   *  后端绝不伪造（不变量 #21 同族）。分组 UI 按 `null` = 未分组渲染（#155）。 */
+  workspace: WorkspaceRef | null;
 }
 
 /**
