@@ -14,12 +14,19 @@ from tests.conftest import make_session
 
 
 class RecordingCapability:
+    """契约合规的替身：#158 之后写入入口是 `consolidate`（未降级时 reason=None）。"""
+
     def __init__(self) -> None:
         self.stored: list[tuple[MemoryScope, str, dict]] = []
 
     async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str:
         self.stored.append((scope, content, metadata))
         return f"mem-{len(self.stored)}"
+
+    async def consolidate(self, scope, content, metadata, *, budget_seconds=None):
+        from agent_harness.memory.capability import MemoryWriteOutcome
+
+        return MemoryWriteOutcome(await self.store(scope, content, metadata))
 
     async def search(self, scope, query, limit):  # pragma: no cover — 本文件不用
         return []
@@ -143,7 +150,12 @@ async def test_failing_candidate_write_is_recorded_as_degraded_not_silent(tmp_pa
     """
 
     class ExplodingCapability:
+        """写入入口（契约的 `consolidate`）整体不可用：连降级写入都失败。"""
+
         async def store(self, scope, content, metadata):
+            raise ConnectionError("milvus down")
+
+        async def consolidate(self, scope, content, metadata, *, budget_seconds=None):
             raise ConnectionError("milvus down")
 
     class OneCandidate:
@@ -162,13 +174,15 @@ async def test_failing_candidate_write_is_recorded_as_degraded_not_silent(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_real_langmem_delete_failure_is_recorded_as_degraded(tmp_path):
-    """AC5 的真身：**真** LangMem 链路上的删除失败必须落 `memory/degraded`（不得静默）。
+async def test_real_langmem_delete_failure_degrades_but_never_drops_the_candidate(tmp_path):
+    """AC5 的真身：**真** LangMem 链路上的删除失败必须落 `memory/degraded`，且候选不丢。
 
     与上一条（合成 capability）的区别是走了完整链路：脚本化模型发 RemoveDoc → 真
-    manager/trustcall → 真 adapter → 记录层 `delete` 抛错（存储不可用）。#157 解禁 provider
-    的删除之后，"模型让删、删除却失败"成为真实可达的路径；用户侧绝不能因此以为那条过时记忆
-    已经被忘掉——事件流里必须留下 `partial: 1/1`，且 reason 只带数量（脱敏不变量）。
+    manager/trustcall → 真 adapter → 记录层 `delete` 抛错（存储不可用）。
+
+    #158 把写入入口换成 `consolidate` 之后，这条路径的语义**变强**了：消解失败不再让候选
+    一起失败（旧的 `partial: 1/1`），而是降级成"只新增"——所以这里同时断言两件事：
+    ``consolidation`` 降级可见（不静默）+ 候选真的落盘（不丢写）。reason 只带类型名。
     """
     pytest.importorskip("langmem")
     from langchain_core.messages import AIMessage
@@ -220,9 +234,13 @@ async def test_real_langmem_delete_failure_is_recorded_as_degraded(tmp_path):
         writer = MemoryWriteback(capability, OneCandidate())
         writer.submit(session, session.events)
         await writer.drain()
+        written = [entry.content for entry in await records.list_by_scope(MemoryScope.USER, alice, 10)]
     finally:
         identity_context_var.reset(token)
 
     degraded = [e for e in session.events if e.type == "memory/degraded"]
-    assert [(e.data["operation"], e.data["reason"]) for e in degraded] == [
-        ("writeback", "partial: 1/1 candidates failed")]
+    assert len(degraded) == 1
+    assert degraded[0].data["operation"] == "consolidation"
+    assert degraded[0].data["reason"].startswith("consolidation_failed: ")
+    assert "storage unavailable" not in degraded[0].data["reason"]
+    assert "alice 现在用 Rust" in written

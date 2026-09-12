@@ -36,6 +36,23 @@ class ScriptedChatModel(BoundSelfMixin, FakeMessagesListChatModel):
     """按序吐预置响应的 LangChain 假模型；`responses=` 语义同基类。"""
 
 
+class HangingChatModel(BoundSelfMixin, FakeMessagesListChatModel):
+    """决策阶段**永久卡住**的假模型。
+
+    #158 的"预算到期 → 降级写入"路径需要它在**检索之后**卡住：检索已经发生（开销已付出），
+    决策还没返回。空 `responses=` 的 `ScriptedChatModel` 达不到这个形状——它立刻 IndexError，
+    预算根本到不了期。
+    """
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        import asyncio
+
+        await asyncio.sleep(30)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        raise RuntimeError("HangingChatModel 只用于异步路径")
+
+
 class AlwaysHitVectorStore(FakeVectorStore):
     """`search` 命中本 namespace 的**全部** key（真实 embedding 语义匹配的替身）。
 

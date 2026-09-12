@@ -1,7 +1,9 @@
 """LangMem Formation/Consolidation 与工具读写，存储权威留在项目内。"""
 
 import asyncio
+import contextlib
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -9,6 +11,14 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from agent_harness.identity import get_identity_context
+from agent_harness.logging import log_event
+from agent_harness.memory.capability import NO_DECISION_MODEL, MemoryWriteOutcome
+from agent_harness.memory.consolidation import (
+    CONSOLIDATION_DEGRADED_PREFIX,
+    CONSOLIDATION_QUERY_LIMIT,
+    CONSOLIDATION_TIMEOUT_SECONDS,
+    BoundedSearchStore,
+)
 from agent_harness.memory.record_store import MemoryRecordStore
 from agent_harness.memory.types import (
     MemoryEntry,
@@ -18,6 +28,19 @@ from agent_harness.memory.types import (
 )
 from agent_harness.memory.vector_store import VectorIndexStore
 
+logger = logging.getLogger("agent_harness.memory")
+
+
+def _warn_safely(message: str, *args: Any) -> None:
+    """降级路径上的日志：观测面故障**不得吞掉恢复动作**。
+
+    自定义 `Handler.emit` 抛异常会穿出 `logging`（CPython 不替它兜底），`extra` 里撞上
+    LogRecord 保留字段还会让 `makeRecord` 抛 `KeyError`。这些调用都在 except 块里——
+    不兜底就意味着"降级写入"这个不丢写的恢复动作被一条日志打断。
+    """
+    with contextlib.suppress(Exception):
+        logger.warning(message, *args)
+
 
 class MemoryPayload(BaseModel):
     content: str
@@ -25,7 +48,9 @@ class MemoryPayload(BaseModel):
 
 
 class LangMemMemoryCapability:
-    def __init__(self, records: MemoryRecordStore, vectors: VectorIndexStore, model: Any = None) -> None:
+    def __init__(self, records: MemoryRecordStore, vectors: VectorIndexStore, model: Any = None,
+                 *, query_limit: int = CONSOLIDATION_QUERY_LIMIT,
+                 consolidation_timeout: float = CONSOLIDATION_TIMEOUT_SECONDS) -> None:
         from langmem import (
             create_manage_memory_tool,
             create_memory_store_manager,
@@ -40,26 +65,101 @@ class LangMemMemoryCapability:
         self._search = create_search_memory_tool
         self._manager = create_memory_store_manager
         self._model = model
+        # #158：注入 prompt 的条数上界（字符上界由 `BoundedSearchStore` 管）与单次决策预算。
+        self._query_limit = query_limit
+        self._consolidation_timeout = consolidation_timeout
 
-    async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str:
+    async def store(self, scope: MemoryScope, content: str, metadata: dict,
+                    *, budget_seconds: float | None = None) -> str:
+        """写入一条记忆：有决策模型时由 provider 的 manager 决定 insert/update/delete，
+        否则无条件插入（`_insert`）。"检索后决策"的策略入口见 `consolidate`。
+
+        `budget_seconds` 是本次决策的时间预算（调用方按自己的外层预算给），None 用默认值。
+        """
         namespace = MemoryNamespace.of(scope, get_identity_context()).as_tuple()
         if self._model is not None:
             # #157：解禁上游本来就有的删除能力——models 判"这条过时了"时会发 RemoveDoc，
             # manager 转成 `store.adelete(ns, key)`，落进 adapter 的 `PutOp(value=None)` 分支。
             # 只作用于本 namespace：manager 只能删它自己检索回来的 id，adapter 再校验一次归属。
+            #
+            # #158：`store=` 传 `BoundedSearchStore`——manager 自己检索既有记忆（这就是
+            # "retrieve-before-write" 的唯一路径），我们只保证它**看到的**东西有上界、且这次
+            # 检索**可观测**；`query_limit` 是条数上界（upstream 两条分支都用它截断结果集）。
+            bounded = BoundedSearchStore(self._store, max_items=self._query_limit)
             manager = self._manager(self._model, schemas=[MemoryPayload], namespace=namespace,
-                                    store=self._store, enable_deletes=True)
-            async with asyncio.timeout(15):
-                puts = await manager.ainvoke({"messages": [{"role": "user", "content": json.dumps({
-                    "content": content, "metadata": metadata}, ensure_ascii=False)}], "max_steps": 1})
+                                    store=bounded, enable_deletes=True, query_limit=self._query_limit)
+            started = asyncio.get_running_loop().time()
+            budget = self._consolidation_timeout if budget_seconds is None else min(
+                budget_seconds, self._consolidation_timeout)
+            try:
+                async with asyncio.timeout(budget):
+                    puts = await manager.ainvoke({"messages": [{"role": "user", "content": json.dumps({
+                        "content": content, "metadata": metadata}, ensure_ascii=False)}], "max_steps": 1})
+            except BaseException as error:
+                # 失败/取消也要留下**开销**痕迹（AC3）：这次多出来的检索其实已经发生，
+                # 但超时那一刻我们没有机会记成功事件。只补日志，不改传播语义
+                # （CancelledError 必须继续向外，否则外层预算失效）。
+                self._log_consolidation(bounded, puts=None, started=started,
+                                        status="failed", error=type(error).__name__)
+                raise
+            # 观测（#158 AC3）：这次写入多出来的检索 + 一次决策 LLM 调用都要看得见。
+            self._log_consolidation(bounded, puts=puts, started=started, status="ok")
             if puts:
                 return puts[0]["key"]
             # 没有变化时复用既有记忆；没有匹配时精确保留抽取候选。
             previous = await self.search(scope, content, 1)
             if previous and previous[0].content == content and previous[0].metadata == metadata:
                 return previous[0].id
-        # 与上游默认一致（#157）：本处调用只传 content、action 默认 create，所以放开 update/
-        # delete 不会让这条直调变成破坏性动作；放开是为了不再对外声称一个被我们收窄的能力。
+        return await self._insert(scope, content, metadata)
+
+    @staticmethod
+    def _log_consolidation(bounded: BoundedSearchStore, *, puts: list | None,
+                           started: float, status: str, error: str | None = None) -> None:
+        """记一条消解开销事件（AC3）。**绝不抛**：它在异常处理路径上被调用。
+
+        第三方 logging handler 抛异常会一路穿出 `log_event`（CPython 不替自定义 emit 兜底），
+        那会把真正的降级原因换成 handler 的异常类型——观测面故障不得改写功能语义。
+        """
+        try:
+            log_event(logger, "memory_consolidated", "memory consolidation ran",
+                      status=status, error_type=error,
+                      queries=bounded.stats.searches, retrieved=bounded.stats.retrieved_items,
+                      truncated=bounded.stats.truncated_items, dropped=bounded.stats.dropped_items,
+                      decisions=None if puts is None else len(puts),
+                      latency_ms=round((asyncio.get_running_loop().time() - started) * 1000))
+        except Exception:  # noqa: BLE001 — 观测失败不得改变写入/降级语义
+            _warn_safely("Memory consolidation event dropped: %s", status)
+
+    async def consolidate(self, scope: MemoryScope, content: str,
+                          metadata: dict, *, budget_seconds: float | None = None) -> MemoryWriteOutcome:
+        """#158 的写入入口：先检索（provider 内部完成）→ 决策 → 落 #156 的机制。
+
+        **不丢写**：决策/检索阶段任何失败都降级成一条无条件写入，并把脱敏后的原因交给调用方
+        （writeback 据此落 `memory/degraded`）。所以"本方法返回 ⟹ 已有记忆落盘"——这条保证正是
+        本票存在的意义之一：否则 Milvus 一抖动就变成静默丢记忆。
+
+        `budget_seconds` 由调用方按外层预算给（见 `MemoryWriteback._remaining_budget`）：
+        预算耗尽 → 这里超时 → 降级写入，而不是被外层取消。
+        """
+        if self._model is None:
+            return MemoryWriteOutcome(await self._insert(scope, content, metadata),
+                                      degraded_reason=NO_DECISION_MODEL)
+        try:
+            return MemoryWriteOutcome(await self.store(scope, content, metadata,
+                                                      budget_seconds=budget_seconds))
+        except Exception as error:  # noqa: BLE001 — 降级边界：绝不因为决策失败丢候选
+            # 只带类型名：原始异常消息可能含用户数据/凭据（脱敏不变量，同 extractor）。
+            _warn_safely("Memory consolidation degraded (%s); falling back to insert",
+                         type(error).__name__)
+            return MemoryWriteOutcome(
+                await self._insert(scope, content, metadata),
+                degraded_reason=f"{CONSOLIDATION_DEGRADED_PREFIX}: {type(error).__name__}",
+            )
+
+    async def _insert(self, scope: MemoryScope, content: str, metadata: dict) -> str:
+        """**无条件**写入（不经检索/决策）：`store` 在没有决策模型时的路径，也是 `consolidate`
+        的降级目标。与上游默认一致（#157）：只传 content，action 默认 create。"""
+        namespace = MemoryNamespace.of(scope, get_identity_context()).as_tuple()
         tool = self._manage(namespace=namespace, schema=MemoryPayload,
                             actions_permitted=("create", "update", "delete"), store=self._store)
         result = await tool.ainvoke({"content": {"content": content, "metadata": metadata}})

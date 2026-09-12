@@ -91,9 +91,13 @@ def build_builtin_memory_components(settings: Settings) -> MemoryComponents | No
 
     records = SqliteMemoryRecordStore(Path(settings.workspace_dir) / "memory.db")
     vectors = MilvusVectorStore(settings, create_embeddings(settings))
-    capability = LangMemMemoryCapability(records, vectors)
+    # #158：**必须**把决策模型喂给 capability——此前这里不传模型，于是"检索既有记忆后
+    # 决定 insert/update/delete"这条路径在生产里根本没执行过（写入只能新增的真正机制）。
+    # 一个模型实例喂两处（抽取 + 消解），避免建两个客户端。
+    model = create_chat_model(ModelConfig.from_settings(settings))
+    capability = LangMemMemoryCapability(records, vectors, model)
     relay = OutboxRelay(records, vectors)
-    writeback = MemoryWriteback(capability, MemoryExtractor(create_chat_model(ModelConfig.from_settings(settings))))
+    writeback = MemoryWriteback(capability, MemoryExtractor(model))
     return MemoryComponents(
         capability=capability,
         records=records,

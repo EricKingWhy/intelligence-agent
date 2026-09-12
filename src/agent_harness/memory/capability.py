@@ -24,15 +24,57 @@
   subscriptable"（本票实现时真踩过）。
 - 并发与版本：见 `record_store` 模块文档（内容 last-write-wins；outbox `revision` 是
   索引同步的乐观令牌）。
+
+# 冲突消解（retrieve-before-write，#158 MEM-3）
+
+- `consolidate`：**#158 的写入入口**——写入前先检索本 namespace 的既有记忆，把它们与本次候选
+  一起交给 **provider** 决策（insert / update / delete / no-op），决策结果一律落 #156 的机制
+  （`store`/`update`/`forget` 走的同一条记录 + outbox 路径）。**策略属 provider**（不变量 #18）：
+  Core 不内置"同 key 覆盖 / importance 比较"之类的冲突启发式。
+- **只有一条路径**：检索发生在 provider 内部（LangMem 的 manager 自己按 provider 的方式检索），
+  Core 侧不再另做一次 `recall` 注入——两套检索并存迟早对不上账。
+- **注入有界**（provider 的责任，实现见 `consolidation.py`）：既有记忆注进 prompt 的条数与
+  每条字符数都有上界，与 `extractor._clip_events` 同一思路。
+- **不丢写**：决策或检索阶段任何失败都**降级为一条无条件写入**，并把脱敏原因放进
+  `MemoryWriteOutcome.degraded_reason`（调用方据此落 `memory/degraded`）。因此
+  `consolidate` 返回即代表"已有记忆落盘"；不写的情况只有两种：降级写入自己也失败，或
+  调用方的**外层**预算先把这次写入取消掉（`CancelledError` 越过降级边界——所以 writeback
+  会按外层剩余时间给每次调用一个更小的 `budget_seconds`，让"预算不足"表现为降级而不是取消，
+  见 `writeback._FALLBACK_RESERVE_SECONDS`）。
+- **预算是调用方的**：`budget_seconds` 是可选上限（None = provider 自己的默认值）；provider
+  取 `min(给定值, 自己的默认值)`，不因为调用方给了大预算就无限等下去。
 """
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from agent_harness.memory.types import MemoryEntry, MemoryScope
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryWriteOutcome:
+    """一次"检索后写入"的结果（#158）。
+
+    - `id`：**一定**有一条记忆落盘——候选不会因为决策/检索失败而丢失。
+    - `degraded_reason`：`None` = 决策路径跑通（provider 已按其策略消解过冲突）；
+      非 `None` = 策略没能跑、已降级为无条件写入。原因**只含阶段 + 异常类型名**
+      （脱敏：原始异常消息可能含用户数据或密钥，不得进日志/事件流）。
+    """
+
+    id: str
+    degraded_reason: str | None = None
+
+
+#: 没配决策模型时的降级原因。这是**配置事实**（生产装配总是传模型），
+#: 不是运行期故障——但仍如实报告，避免"看起来消解了、其实只做了插入"。
+NO_DECISION_MODEL = "no_decision_model"
+
+
 class MemoryCapability(Protocol):
-    async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str: ...
+    async def store(self, scope: MemoryScope, content: str, metadata: dict, *,
+                    budget_seconds: float | None = None) -> str: ...
+    async def consolidate(self, scope: MemoryScope, content: str, metadata: dict, *,
+                          budget_seconds: float | None = None) -> MemoryWriteOutcome: ...
     async def update(self, memory_id: str, scope: MemoryScope, content: str, metadata: dict) -> str: ...
     async def forget(self, memory_id: str) -> bool: ...
     async def list_entries(self, scope: MemoryScope, limit: int,
