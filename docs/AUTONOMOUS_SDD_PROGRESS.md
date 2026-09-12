@@ -77,7 +77,7 @@
 | #155 | 前端半 DONE（不关单，跨端） | `f015a60`+`8db0e5f`(前端代码)+`c224724`+`637bc89`(前端文档)，均在 feat/frontend | 否——后端半 #153/#154 未合入 main（§14.12）；comment 记录已完成部分 + 4 项后续票候选 |
 | #156 | DONE | `61abcb6`+`aa775d8`+`f70ebe7`+`fad0e3c` | 是（两轴三轮 review，终验双轴 zero findings；真机 22/22；变异 15/15） |
 | #157 | DONE | `ff57700`+`f3c80de`+`faf525f`+`090f07c` | 是（两轴四轮 review 终验：Spec 五 AC 全 met、Standards zero findings；真机 gate 16/16；真 Milvus 集成 5/5；变异 9/9） |
-| #158 | DONE | `b687804`+`5276777` | 是（两轴：Standards 抓到 P0 截断投影回写——已复现+修复+回归，5 条 P2 全修；Spec 轴 AC1/3/4/5/6 met、AC2/AC7-2 部分满足（provider LLM 判断，已如实记录）；26/26 变异 KILLED；真机 gate 15/15 PASS） |
+| #158 | DONE | `b687804`+`5276777`+`c6cbd12` | 是（三轴轮次收口：首轮 Standards 抓 P0 截断投影回写、次轮 P0 读失败仍写投影 + 4 条 P2、Spec 轴抓出"AC7-1 未达成"的真因（没传 `query_model`）——已修并真机复验；Spec 终验 AC1–AC6 met、AC7-1 真机达成、AC7-2 实测收敛但记为 provider 概率行为；31/31 变异 KILLED；真机 gate 16/16 PASS） |
 | #159 | DONE | `af3db7a`+`19d51fc`+`d0647fa` | 是（两轴：首轮同一 major 被独立复现——客户端输入冒 500；二轮 2 条文档/一致性 minor 全修；Spec 终验 9 AC met、Standards zero findings；20/20 变异 KILLED；真机 gate 19/19；真 Milvus 集成 6/6） |
 | #160 | TODO | | |
 

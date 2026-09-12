@@ -1107,7 +1107,8 @@ in-flight 合并（写后 `refetch` 有意绕过合并）；拖拽落点只在�
 
 ## 19. #158（MEM-3）冲突消解 retrieve-before-write —— 纯后端，无前端改动
 
-**提交**（均在本 worktree 的 `feat/backend`，未 push）：`b687804` 实现 → `5276777` 两轴 review 修复轮。
+**提交**（均在本 worktree 的 `feat/backend`，未 push）：`b687804` 实现 → `5276777` 两轴 review 修复轮
+→ `c6cbd12` 三轮收口（读不到就不许猜 + `query_model` 让 AC7-1 真机达成）。
 新增文件：`src/agent_harness/memory/consolidation.py`、`tests/memory/test_consolidation.py`。
 
 ### 19.1 集成到 main 的注意点：**不需要迁移**，但有三处契约面变化
@@ -1122,17 +1123,24 @@ in-flight 合并（写后 `refetch` 有意绕过合并）；拖拽落点只在�
    `partial: N/M` 兜底而不是消解降级事件）。
 2. **`store()` 新增可选 `budget_seconds`**（关键字参数，默认 `None`）：既有调用点零改动。
 3. **生产装配真的把模型喂给了 memory capability**（`factories.build_builtin_memory_components`）。
-   行为变化：从此每次记忆写入多一次**检索 + 一次 LLM 决策调用**（实测 2–19s/次，最长 30s 预算）。
-   这正是本票的目的（质量优先、接受成本），但意味着：**`.env` 的 MODEL 配置现在也影响记忆写入延迟**；
-   若集成环境模型很慢，写入会按预算降级成"只新增"（有 `memory_consolidated` 日志与 `memory/degraded` 事件可查）。
+   行为变化：从此每次记忆写入多一次**检索 + 一次 LLM 决策调用**（实测 2–19s/次，最长 30s 预算），
+   并且该模型同时作为 **`query_model`** 传给 manager（AC1 的选项，见 §19.4）——每次写入再多一次
+   生成检索 query 的 LLM 调用。这正是本票的目的（质量优先、接受成本），但意味着：**`.env` 的 MODEL
+   配置现在也影响记忆写入延迟**；若集成环境模型很慢，写入会按预算降级成"只新增"（有
+   `memory_consolidated` 日志与 `memory/degraded` 事件可查）。
 
 ### 19.2 票据归因的一处**修正**（请同步到 ADR/文档，已在两处加勘误）
 
 票面（与 ADR-0026 Context ④、PHASE_STATUS 的 #156 条目）说"没传 `query_model`，所以 manager 的
-Compare&Update 全程空转"。**实测不成立**：`langmem/knowledge/extraction.py` 在 `query_model is None`
+Compare&Update 全程空转"。**前半句不成立**：`langmem/knowledge/extraction.py` 在 `query_model is None`
 时走 `else` 分支，用 `get_dialated_windows(...)` 生成的 query 照样 `store.asearch`。真正的缺口是
 生产装配**没给 capability 传 `model`**，于是 `store()` 里被 `if self._model is not None` 守卫的 manager
-分支从未执行。**不要**为了"修空转"去传 `query_model`——那会多一次 LLM 调用且不是缺口的病因。
+分支从未执行——**传 `model` 是"让决策跑起来"的修复**。
+
+**但三轮 review 补上了后半句的实质**：不传 `query_model` 时，检索用的是"最近消息本身"当 query，
+**语义对立的旧记忆召回不到**（真机 `retrieved=0`），AC7-1 的"新旧收敛"因此不成立；传 `query_model`
+后按"假想记忆"检索才召回得到（真机 `retrieved≥1` → 最终只剩一条 Go）。所以两件事都要做：
+①传 `model` 让决策跑起来；②传 `query_model` 让检索**有效**。不要只做一半。
 
 ### 19.3 关键设计（评审与后续改动请先读）
 
@@ -1149,23 +1157,46 @@ Compare&Update 全程空转"。**实测不成立**：`langmem/knowledge/extracti
 - **预算嵌套**：`CONSOLIDATION_TIMEOUT_SECONDS(30) + _FALLBACK_RESERVE_SECONDS(2) <= WRITEBACK_TIMEOUT_SECONDS(60)`，
   writeback 给每个候选的预算是"外层剩余 − 2s 余量"，所以尾部候选**降级**而不是被取消。改这三个常量请保持该顺序。
 
-### 19.4 AC7-2 的**部分满足**（请勿在集成报告里写成"完全满足"）
+### 19.4 AC7-1 / AC7-2 的口径（请按此写集成报告，不要放大）
 
-"重复记忆 → 不产生重复条目"取决于 provider 的 LLM 判断：
-- **我们确定性保证**：同一段文本不会留下两条**逐字相同**的行（provider 的 `final_puts` 与我们 no-op 兜底都按逐字比较）；
-  逐字重复写第二遍时若 provider 无操作，我们复用既有 id（有单测）。
-- **不保证**：provider 每次改写正文并新建时，3 次重复写实测可以是 1 条也可以是 3 条（两轮真机 gate 各出现一次）。
-- **为什么不加确定性去重**：AC6 明确"策略归 provider"；在 Core 加"包含即去重"这类规则会把"恰好是候选子串的
-  不同事实"一起吞掉——那是丢写，比重复严重。若产品要求更强去重，应作为 provider 侧策略（prompt/规则）另开票。
+**AC7-1（TypeScript → Go 最终只剩 Go）：真机达成**——前提是 manager 必须拿到 `query_model`。
+不给它时上游用 `get_dialated_windows`（拿最近消息本身当 query），语义对立的旧记忆实测召回不到
+（`retrieved=0`），于是新旧并存；给了它（AC1 明确列出的选项），上游改成"先生成一条与当前对话
+相关的假想记忆再检索"，真机连续多轮都召回得到旧立场并收敛：
+
+```
+[PASS] 1c 检索到旧立场后，旧立场不独立成行 — retrieved=1 stale=[] total=1
+       两次写入落到同一个 id（update 路径），最终只剩一条 Go
+```
+
+代价是每次写入多一次 LLM 调用（生成 query），用户已决策"质量优先、接受成本"。
+
+**AC7-2（重复记忆不产生重复条目）：实测变好，但仍属 provider 的 LLM 判断，不是我们的确定性保证**：
+- 传了 `query_model` 后真机实测"同一偏好写 3 次 → 1 条"（provider 看见了既有记忆并合并）。
+- **不保证**：provider 每次改写正文并新建时仍可能是多条（早期轮次实测 3 条）。
+  "不产生重复条目"最终取决于 provider 的决策，把它写成"我们保证去重"是过度承诺。
+- **为什么不在 Core 加确定性去重**：AC6 明确"策略归 provider"；在 Core 加"包含即去重"会把
+  "恰好是候选子串的不同事实"一起吞掉——那是丢写，比重复严重。若要更强去重，应作为 provider 侧
+  策略（prompt/规则）另开票。
+
+**AC1 的两处实现选择**（AC1 原文允许实现者选定并写进契约）：①builtin/langmem 路径选"传
+`query_model` 让 manager 自己查"；②自研 provider 走 `capability.consolidate`（改写契约面，
+见 §19.1 的三处契约变化）。
 
 ### 19.5 复现与验收证据（本地）
 
 ```bash
 .venv/Scripts/python.exe -m ruff check src/ tests/          # clean
-.venv/Scripts/python.exe -m pytest -q                       # 全量：2081 passed / 2 skipped / 42 deselected
-.venv/Scripts/python.exe .scratch/run_consolidation_gate.py  # 真机：15/15 PASS（真模型 + 真 Zilliz）
-.venv/Scripts/python.exe .scratch/mutate158.py               # 变异：26/26 KILLED（自动 sha256 还原）
+.venv/Scripts/python.exe -m pytest -q                       # 全量：2086 passed / 2 skipped / 42 deselected
+.venv/Scripts/python.exe .scratch/run_consolidation_gate.py  # 真机：16/16 PASS（真模型 + 真 Zilliz）
+.venv/Scripts/python.exe .scratch/mutate158.py               # 变异：31/31 KILLED（自动 sha256 还原）
 ```
+
+**gate 的取样隔离（第二轮修正）**：脚本每轮用**独立集合名**（`memory_gate_test_<pid>`），
+不再依赖"能删掉上一轮"——实测 Zilliz 的 `drop_collection` 会偶发 `Retry timeout: 20s`
+（`create`/`list`/`describe` 正常），而残留向量会污染"provider 到底召回了什么"的判断。
+收尾清理是**尽力而为**（删不掉只留个空集合，不影响断言）；裸 `memory_gate_test` 留给 pytest 的
+真 Milvus 集成测试，脚本只扫 `memory_gate_test_<pid>` 形状的遗留集合。
 
 `run_consolidation_gate.py` 会显式把 collection 指到 `memory_gate_test` 并自建/删除它（**不碰 `.env`
 与生产集合 `agent_memory`**）；`gate` 与"真 Milvus 集成测试"**共用 `memory_gate_test`**，两者不可并发跑。
