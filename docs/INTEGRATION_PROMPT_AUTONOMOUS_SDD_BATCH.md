@@ -968,3 +968,60 @@ in-flight 合并（写后 `refetch` 有意绕过合并）；拖拽落点只在�
 #157（MEM-2 解禁 LangMem 的 update/delete）——**前置已完成**：`LangMemMemoryCapability` 的 `update`/`forget` 现在直写权威记录，
 #157 要做的是把上游 `manage_memory` 的 `actions_permitted`/`enable_deletes` 打开、经 `base_store_adapter` 把 `PutOp(value=None)` 映射到
 `MemoryRecordStore.delete`，并保证"模型发起删除"仍走同一条 outbox/relay 路径（不得绕过）。
+
+---
+
+## 17. #157（MEM-2）解禁 LangMem 的 update/delete —— 纯后端，无前端改动
+
+**提交**（均在本 worktree 的 `feat/backend`，未 push）：`ff57700` 接线 → `f3c80de` review 一轮 →
+`faf525f` review 二轮 → `090f07c` review 三轮。ADR 改动：`docs/adr/0026-...md`（重新裁决 Consequences ①，并把"不解禁 LangMem update/delete"这条非目标标记为已由本票交付）。
+
+### 17.1 集成分歧点：**不需要迁移、不动 schema、不动装配契约**
+
+本票只改两个 `src` 文件、且都是**接线**，没有新表/新列/新 SessionEvent。集成时不需要任何手工步骤；
+`#156` 的 outbox 磁盘 schema 迁移结论（§16.1）仍然适用，无新增。
+
+- `src/agent_harness/memory/base_store_adapter.py`：`PutOp` 分支现在 **TTL 先拒**（含畸形组合
+  `PutOp(ns, key, None, ttl=...)`）→ 再判 `value is None`（LangGraph 的 `adelete` 形状）→ 否则 upsert。
+  **行为变化只有一处**：过去 `PutOp(value=None)` 抛 `NotImplementedError("Memory delete/TTL is not enabled")`，
+  现在映射到 `MemoryRecordStore.delete`（真删除，走 #156 的 outbox DELETE 意图 → relay 收敛索引）。
+- `src/agent_harness/memory/langmem_capability.py`：manager `enable_deletes=True`；manage 工具
+  `actions_permitted=("create","update","delete")`；`search()` 容忍"索引里还挂着、记录行已删"的行（`except KeyError: continue`，
+  与 adapter 的 SearchOp 分支同构）。
+- **对 #156 既有语义零破坏**：`MemoryCapability.update`/`forget`（调用方指定 id 的确定性路径）仍是直写权威记录，
+  不经 SDK；LangMem 的自主删除是**另一条**路径（模型决定改/删哪条 → manager → adapter）。
+
+### 17.2 集成方需要知道的**实测语义**（避免写错断言）
+
+`enable_inserts` / `enable_deletes` **改的是施加给模型的工具面（`bind_tools`），不是写路径上的强制**：
+实测把 `enable_inserts=False` 时，一个"仍然发出插入工具调用"的模型照样会被 manager 校验并写入。
+所以"关掉 insert 就等于不会新增记忆"**不是上游保证**，不要据此写测试或产品假设（本票的开关组合用例只断言
+工具面差异 + 观察到的删除行为，见 `TestSwitchCombinations`）。
+
+### 17.3 验收证据（都在本 worktree 可复跑）
+
+- **真机 16/16**：`.scratch/run_langmem_actions_gate.py`（一次性脚本，**不入库**，真 Zilliz + 真 embedding +
+  真 trustcall）。要点：脚本化模型发 `RemoveDoc` → 目标**真实 count 1→0**、对照恒 1、`vectors.get` → `None`、
+  记录行消失；发 `PatchDoc` → 同 id 覆盖、`indexed` 重置、索引收敛到新内容且 count 仍为 1；
+  **跨归属删除两种形状**（同租户另一个 user / 另一个 tenant）都被 `PermissionError` 拒绝且对方记录与索引原样在；
+  manager 路径指名删别人的 doc id 也无效（trustcall 校验器只接受本次检索到的 id）。
+- **真 Milvus 集成 5/5**：`tests/integration/test_phase6_memory_e2e.py`（`-m integration`）。新增
+  `test_real_langmem_manager_delete_and_update_reach_milvus`；**注意该门禁 fixture 要求 `.env` 的
+  `MILVUS_COLLECTION=memory_gate_test`**（专用集合，避免动生产集合）——本次验收是临时改 `.env` 一行、
+  跑完按 sha256 原样还原。
+- **变异 9/9 KILLED**：`.scratch/mutate157.py`（含 M4b 专门钉 TTL/删除的**分支顺序**；跑完 sha256 逐字节还原）。
+- **门禁**：`ruff check` clean；`tests/memory` **146 passed**；全量 **2021 passed / 1 failed / 10 skipped /
+  41 deselected**，唯一失败是既有负载相关 flaky `tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`
+  （`docs/FRONTEND_ISSUES_LOG.md` OBS-10.1；同一代码连跑 pass/fail/pass、stash 后 pass，与本票无关）。
+
+### 17.4 集成分歧点：**ADR-0026 的删除确认边界被重新裁决**
+
+`#157` 之前 ADR-0026 写着"谁都不许在无确认路径上直接调 `forget`"。现在 writeback 内 LangMem 会**自主硬删**，
+故把该条改判为一个**受控例外**：删除目标只可能是 manager 本次检索回来的 id、且必然落在调用者自己的 namespace 内
+（两道边界都有真机证据），触发场景是非交互的后台整合路径。**面向用户的显式遗忘入口（#159 的模型工具 DANGER + 审批、
+#160 的 UI 二次确认）仍然必须有确认**——集成方不要把这条例外读成"遗忘确认可以省"。
+
+### 17.5 下一张
+
+#159（MEM-4 遗忘入口：模型可调用的遗忘工具 DANGER + 审批 / 用户 API）。#157 已把"删除真的会到达索引"这条
+机制验收完毕，#159 只做**入口与确认**；`#158`（retrieve-before-write 冲突消解）排在其后。

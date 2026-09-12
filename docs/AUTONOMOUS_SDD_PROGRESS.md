@@ -76,7 +76,7 @@
 | #154 | DONE | `711ea3e` | 是（两轴 review 收口：P1 绝对路径闸门 + 6 条 P2；CORS `*` 洞另立票） |
 | #155 | 前端半 DONE（不关单，跨端） | `f015a60`+`8db0e5f`(前端代码)+`c224724`+`637bc89`(前端文档)，均在 feat/frontend | 否——后端半 #153/#154 未合入 main（§14.12）；comment 记录已完成部分 + 4 项后续票候选 |
 | #156 | DONE | `61abcb6`+`aa775d8`+`f70ebe7`+`fad0e3c` | 是（两轴三轮 review，终验双轴 zero findings；真机 22/22；变异 15/15） |
-| #157 | TODO | | |
+| #157 | DONE | `ff57700`+`f3c80de`+`faf525f`+`090f07c` | 是（两轴四轮 review 终验：Spec 五 AC 全 met、Standards zero findings；真机 gate 16/16；真 Milvus 集成 5/5；变异 9/9） |
 | #158 | TODO | | |
 | #159 | TODO | | |
 | #160 | TODO | | |
