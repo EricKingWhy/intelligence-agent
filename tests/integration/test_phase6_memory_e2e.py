@@ -142,13 +142,7 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
         other_id = await capability.store(MemoryScope.USER, "鲸鱼是生活在海洋中的哺乳动物。", {"importance": 0.2})
         # 真实 embedding 服务存在瞬态失败；outbox 语义保证失败条目被保留、
         # 下轮 flush 重新 upsert。这里按该保证重试排空——同时验证持久 outbox 本身。
-        async with asyncio.timeout(240):
-            acknowledged = 0
-            while True:
-                acknowledged += await relay.flush()
-                if not await records.pending():
-                    break
-                await asyncio.sleep(2)
+        acknowledged = await _drain(relay, records)
         assert acknowledged == 2
         assert await records.pending() == []
         stored = await vectors.get(preference.id, alice, MemoryScope.USER)

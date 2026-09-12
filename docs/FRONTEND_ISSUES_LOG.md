@@ -1485,3 +1485,18 @@ commit（f70ebe7）**上复跑，该用例**同样失败**；而该 commit 今�
 （只读探针或显式 `await app.state...initialize()`），或让该用例显式密封 `CAPABILITIES`
 （本仓 `tests/conftest.py` 只清洗 Settings 的**环境变量**，`.env` 文件仍会被 `Settings()`
 读到——这是同一根因的另一条已知路径）。**归属：后端（测试稳定性 / 装配期外部依赖）**。
+
+### OBS-10.2 【后端·真机集成用例的冷 connect 抖动·#157 期间观察】同一个冷路径也在真机集成用例上出现
+
+`tests/integration/test_phase6_memory_e2e.py::test_real_connection_and_missing_collection`
+（#156 期加入）在 #157 的复核里**偶发失败**：整文件跑（5 条，热机）时它挂了，单独重跑
+**3.11s 通过**。同一轮里 `.scratch/run_langmem_actions_gate.py` 也撞到过一次同样的形状——
+`MilvusVectorStore._call` 的 SDK `timeout=15` 被**冷握手**吃掉（实测单次 `list_collections`
+冷启 16.7s），归类成 `VectorStoreError("unavailable")`，与"集合不存在/凭证错误"这些真实故障
+无法从错误类型上区分开。
+
+隔离结论：与 #157 的改动无关（该用例只 `connect()` 与查一个不存在的集合，不碰
+drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方向（都属 #156/#157 之外的稳定性
+工作）：(1) 给真实集成用例的首次 `connect()` 加预热/重试（gate 脚本本次就是这么绕过的）；
+(2) 更根本地把"冷握手超时"与"真实故障"在错误分类上区分开（例如超时单列一个 category），
+否则生产启动期的首连抖动会被误报成 `unavailable`。**归属：后端（memory 真机测试稳定性）**。
