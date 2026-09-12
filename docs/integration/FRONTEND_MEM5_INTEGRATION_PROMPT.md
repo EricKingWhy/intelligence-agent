@@ -12,7 +12,7 @@
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | 分支 | `feat/frontend` |
-| 本批 commit | `<本文件落盘后回填>`（HEAD，父 commit = `637bc89`） |
+| 本批 commit | `5eb4fed`（`feat/frontend` HEAD；父 commit `637bc89` = 本批 fixed point） |
 | 后端依赖 | **已就绪且已关单**：MEM-4 #159（`feat/backend`，`GET /api/memories` + `DELETE /api/memories/{id}`）。本批**没有**任何后端改动——无需等后端 |
 | 集成动作 | ① 把 `feat/frontend` 合入本地 `main`（§14.9：一次只合一条分支；后端已先行完成）② 真机跑一遍 §3 的 5 步 ③ `main` 上跑 §4 门禁 ④ 关 #160（comment 已写好，见 §5）⑤ push |
 | 冲突预判 | 本批只动 `web/**` + 两个 docs 文件；与后端 `src/**`/`tests/**` 无交集。**唯一需注意**：`docs/SDD_WORKFLOW_PROTOCOL.md` 本批把它同步成了 v2（与 `feat/backend` 侧**逐字节相同**）——若 `feat/backend` 已合入 `main`，该文件在第二次 merge 时是 identical-change，**不构成冲突**；`docs/SDD_TICKET_TRACKER.md` 两侧都追加了各自章节，**可能冲突**（按 §14.7 分析，两边内容可同时保留：后端记后端批次、前端记前端批次） |
@@ -119,7 +119,7 @@ cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --wo
 部分与剩余项」；本 worktree 与 #155 同一处置）。建议 comment：
 
 ```text
-前端半已在 feat/frontend 完成（commit <SHA>，父 637bc89），未 push。后端半 MEM-4 #159 已关单。
+前端半已在 feat/frontend 完成（commit `5eb4fed`，父 `637bc89`），未 push。后端半 MEM-4 #159 已关单。
 
 AC 逐条：
 1. 列表视图（content + scope + 创建时间 + 分页"加载更多"）：✅ MemoryPanel + useMemories（offset 分页，
