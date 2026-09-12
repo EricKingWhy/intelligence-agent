@@ -2793,9 +2793,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding-bottom: var(--space-sm);
 }
 .run-badge {
+  /* UI-06 徽章收敛：与顶栏 .run-pulse 同族视觉参数（3px 内边距药丸，
+     radius/字号/字重一致）；颜色语义各自保留。 */
   font-size: var(--text-xs);
   font-weight: 500;
-  padding: 2px var(--space-md);
+  padding: 3px var(--space-md);
   border-radius: var(--radius-full);
   background: var(--color-hover);
   border: 1px solid var(--border-subtle);

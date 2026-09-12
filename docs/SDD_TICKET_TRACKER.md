@@ -62,8 +62,8 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | --- | --- | --- | --- | --- |
 | B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | `45227dc` |
 | **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`cd107a2`**（批次 0 文档 commit） | Spec 10 + Standards 14 findings → 全部处置（2 P1 修 + 3 P2 修 + 9 P3 修 + 8 说明不改/登记，见下方处置表） | `236049f` |
-| **U-2** | **UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态）** | **`236049f`**（U-1 修复 commit） | 未审 | — |
-| U-3 | UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词更新） | U-2 修复 commit | 未审 | — |
+| **U-2** | **UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态）** | **`236049f`**（U-1 修复 commit） | Spec 3P1/3P2/3P3 + Standards 1P1/5P2/6P3 → 全部处置（含 **Rules of Hooks 崩溃**、空态自相矛盾、交错 run 序数、断言假绿） | `e543ae1` |
+| **U-3** | **UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词）** | **`e543ae1`**（U-2 修复 commit） | 4 项处置（e2e 真实渲染断言升级 + 2 处变异红→绿） | 本批尾 commit |
 
 **UI Polish 批次总纲**：需求事实源 = `docs/UI_POLISH_PRD.md`（含用户 2026-09-12 grill-me 决策记录 D1-D6，不可违约）；逐票施工规格 = `docs/UI_POLISH_TICKETS.md`；视觉规范基准 = 根目录 `DESIGN.md`（本批新增，含 `.impeccable/design.json` sidecar）。评审出处：impeccable critique 24/40（快照 `.impeccable/critique/2026-09-12T14-05-30Z__web-src.md`）。
 
@@ -124,10 +124,46 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 
 **测试有效性备注**：t-contrast 排查中发现并修复两个测量层假信号——Playwright test 上下文 `colorScheme` 默认 light（[dark] 用例必须 localStorage 显式引导主题）；同一 color-mix 在该 Chromium 两条计算路径输出 oklab / color(srgb) 两种格式（解析器双分支 + 未知格式 throw）。
 
-| UI-03 | done | `e83a1c6`（U-2 批量 commit） | Inspector run 分组头 + 全会话序号 + tab 计数 + 头标对齐。**与票面偏离（已记录）**：五个 Inspector 图标是「视图 tab」不是「事件 kind 过滤器」，票面意图以 tab 计数徽标实现（`.detail-tab-count`）；时间线 kind 过滤 chips 按票面 Out-of-scope 不做 |
-| UI-04 | done | `e83a1c6`（U-2 批量 commit） | projection 三摘要（forked/审批请求/审批已决）+ formatShortDuration（<50ms 不造 1ms 假精度）+ ReasoningBlock <1s 措辞（0 秒→<1s，中断于 <1s） |
-| UI-05 | done | `e83a1c6`（U-2 批量 commit） | Rail 真空态文字按钮（新建项目/新建会话）+ 空态文案带行动链接（注册项目目录 →） |
-| UI-06 | 未开始 | — | |
+| UI-03 | done | `522602d`（U-2 批量） | Inspector run 分组头 + 全会话序号 + tab 计数 + 头标对齐。**与票面偏离（已记录）**：五个 Inspector 图标是「视图 tab」不是「事件 kind 过滤器」，票面意图以 tab 计数徽标实现（`.detail-tab-count`）；时间线 kind 过滤 chips 按票面 Out-of-scope 不做 |
+| UI-04 | done | `522602d`（U-2 批量） | projection 三摘要（forked/审批请求/审批已决）+ formatShortDuration（<50ms 不造 1ms 假精度）+ ReasoningBlock <1s 措辞（0 秒→<1s，中断于 <1s） |
+| UI-05 | done | `522602d`（U-2 批量） | Rail 真空态文字按钮（新建项目/新建会话）+ 空态文案带行动链接（注册项目目录 →） |
+| UI-06 | done | 本批尾 commit | Composer 平台键位 UI-01 已覆盖（标注跳过）；CJK 间距「切换到 Raw」+ 主题 hint 去箭头（i-keyboard 新 e2e 锁）；run-badge padding 2px→3px 向 .run-pulse 收敛；Split/Preview 与半截 ID 明确不做（登记） |
+
+#### U-2 批量两轴审查（fixed point `236049f` → `522602d`，双 Explore subagent）
+
+**Spec 轴 3P1/3P2/3P3 + Standards 轴 1P1/5P2/6P3**，合并去重后全部处置（修复 commit `e543ae1`）：
+
+| # | 级 | finding | 处置 |
+| --- | --- | --- | --- |
+| 1 | **P1** | **Rules of Hooks 违例**：runIdList useMemo 挂在 StepDetail 三个 early-return 之后 → 从事件详情分支切回 run 级时 hook 数不一致 → **点开会话整页崩溃**（'Rendered more hooks than during the previous render'，真浏览器复现；e2e 的 g-visual-qa/p-earlier-window 全量假红即此） | 修：useMemo 上提到组件顶部（conversation 可空守卫 `?? []`）；变异=把 hook 移回原位即崩，真机探针复验 tabs 恢复 |
+| 2 | **P1** | g-visual-qa 新 e2e：T0 在 ROW2 之后声明 → TDZ ReferenceError（e2e 不进 tsconfig，tsc 抓不到）；同用例计数断言 3 事件实为 4（session/started 归入 r1 组） | 修：声明上提 + 断言 3→4 事件 |
+| 3 | **P1** | ReasoningBlock：中断 ≥1s 被改成「持续了 N 秒」→ 中断语义塌缩成 completed（票面只要求修 N===0） | 修：恢复「中断于 N 秒」≥1s 分支；SSR 用例回改并加 18 秒断言 |
+| 4 | P2 | SessionList 空态文案挂 `!showEmpty` → **真·空态（sessions=0 且 projects=0）时文案整段被吞**，与同屏文字按钮自相矛盾（正是 UI-05 要消灭的断点；两轴各命中一次） | 修：只留 `!projectsError`（502 错误态仍只显错误条，真机探针双验证：空态=文案+链接渲染，502=仅错误条） |
+| 5 | P2 | timelineGroups：交错 run_id（r1,r2,r1）组序数按组序 1/2/3 编，与 countRuns 的「2 runs」矛盾（首现顺序票面定义） | 修：ordinalOfRun Map 按首现编号（回段仍叫 Run 1）；变异（ordinal 常数 1）→ 4 红 |
+| 6 | P2 | formatDuration 重构丢了负值 clamp（时钟倒挂显 '-5ms'）；formatShortDuration 无 Number.isFinite 守卫 | 修：双口径守卫（负值→'' / formatDuration→null，调用方不渲染行）；+用例；变异（守卫移除）→ 1 红 |
+| 7 | P2 | StepDetail.test 分组计数断言 `>3</span>` 实际命中 tl-seq 行（假绿，计数断了也绿） | 修：改打 `.tl-run-count` 上的 '4 事件'（regex 锚定组头） |
+| 8 | P2 | rail-empty 文字按钮 ~20px 高，低于 ticket 规格 28px（PRD 命中区下限 32px 列为「明确不动」清单的边界） | 修：min-height 28px（ticket 字面值） |
+| 9 | P2 | routeApi 无 projects 键的空态形状风险 | 探针验证通过，不改 |
+| 10 | P3 | .tl-run-header role="separator"（内容承载元素非法 ARIA） | 修：移除 |
+| 11 | P3 | window-bar 后首个组头双分隔线（:first-child 不生效） | 修：`.timeline-window-bar + .tl-run-header` 兄弟选择器 |
+| 12 | P3 | groupEventsByRun/tabCounts 每渲染重跑 + title 内联重建 distinct-run 集（两套遍历同数据） | 修：runGroups/runIdList useMemo（events 引用不变即跳过）；title 复用 runIdList |
+| 13 | P3 | detail-run-id 类名不再含 run id；.detail-tab-count line-height 16px 魔数；format.test import 空格 | 修：类名保留（e2e 依赖账未列改名成本，注释注明语义）；line-height 1.2+padding；import 修 |
+| 14 | P3 | **detail-tab 无 aria-label**：计数徽标成为 tab 唯一文本内容后，窄面板 icon-only 下 getByRole(tab,'Timeline') 变 name '4' → p-earlier-window e2e 假红（UI-03 引入的回归，g-visual-qa 同理） | 修：tab 加 aria-label（徽标 aria-hidden）；194/194 全绿 |
+
+**修复后门禁（实跑）**：tsc 0 · vitest **622 passed** · oxlint 38w/0e · playwright **194 passed**（--workers=2）· vite build ✓。变异：MUTATION-D（ordinal 常数）4 红 / MUTATION-E'（format 守卫移除）1 红 / MUTATION-F'（空态分支拆除）e2e 2 红，均还原。
+
+#### U-3 批量审查（fixed point `e543ae1` → 本批尾）
+
+范围：UI-06（CJK 间距 / hint 箭头 / run-badge 收敛）+ 收尾（删 3 个未入库临时脚本）。**处置**：
+
+| # | finding | 处置 |
+| --- | --- | --- |
+| 1 | commands.test 新断言是内联 fixture（App.tsx 改坏它不红） | 升级为 e2e 真实渲染断言（i-keyboard 新用例：查询「切换到」断言 `.palette-item-label` 文本 = 「切换到 紧凑」/「切换到 Raw」；「切换主题」断言 hint 无箭头）；单测保留作为形状文档 |
+| 2 | e2e 上下文默认 light 主题，主题 hint 期望值写成 '亮色'（实为 '暗色'） | 修：断言 '暗色'（目标档位），注释说明 |
+| 3 | 变异验证 | ① hint 回灌箭头 → 2 红；② label 去空格 → 6 红；均还原（grep 0 残留） |
+| 4 | run-badge padding 2px→3px 与 .run-pulse 同族（字重/字号/radius 已一致） | 修（computed 值对齐） |
+
+**U-3 尾门禁（实跑）**：tsc 0 · vitest **623 passed** · oxlint 38w/0e · playwright **196 passed**（--workers=2）· vite build ✓。临时审计脚本（web/audit-screenshots.mjs / audit-dom-evidence.mjs / dbg2.mjs）已删除。
 
 ### 最终全量 review（v2 §1.3）的处置——**已披露的偏离**
 

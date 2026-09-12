@@ -528,7 +528,8 @@ export default function App() {
         label: '切换主题',
         keywords: 'toggle theme dark light 暗色 亮色',
         // hint 也走中文：它是**显示文本**，langfuse 那种专有名词才保留英文（BUG-007 同一类）。
-        hint: theme === 'dark' ? '→ 亮色' : '→ 暗色',
+        // UI-06：箭头是方向装饰不是信息——「当前是什么、将切成什么」由 label+hint 联合表达。
+        hint: theme === 'dark' ? '亮色' : '暗色',
         group: 'actions',
         run: toggleTheme,
       },
@@ -567,7 +568,8 @@ export default function App() {
     for (const d of ['compact', 'balanced', 'detailed', 'raw'] as const) {
       items.push({
         id: `density-${d}`,
-        label: `切换到${DENSITY_CN[d]}`,
+        // UI-06 CJK 间距：中文与英文/数字间加半角空格（Raw 是产品术语保留）。
+        label: `切换到 ${DENSITY_CN[d]}`,
         // 末尾不再重复一次 ${d}：实测「重复的尾 token」会让大量无意义的 3 字符
         // query（如 aac/aca）只靠这层重复命中，纯增噪，而正当匹配一次都不受益。
         keywords: `switch to ${d} density 密度`,
