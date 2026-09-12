@@ -39,8 +39,11 @@ class LangMemMemoryCapability:
     async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str:
         namespace = MemoryNamespace.of(scope, get_identity_context()).as_tuple()
         if self._model is not None:
+            # #157：解禁上游本来就有的删除能力——models 判"这条过时了"时会发 RemoveDoc，
+            # manager 转成 `store.adelete(ns, key)`，落进 adapter 的 `PutOp(value=None)` 分支。
+            # 只作用于本 namespace：manager 只能删它自己检索回来的 id，adapter 再校验一次归属。
             manager = self._manager(self._model, schemas=[MemoryPayload], namespace=namespace,
-                                    store=self._store, enable_deletes=False)
+                                    store=self._store, enable_deletes=True)
             async with asyncio.timeout(15):
                 puts = await manager.ainvoke({"messages": [{"role": "user", "content": json.dumps({
                     "content": content, "metadata": metadata}, ensure_ascii=False)}], "max_steps": 1})
@@ -50,7 +53,10 @@ class LangMemMemoryCapability:
             previous = await self.search(scope, content, 1)
             if previous and previous[0].content == content and previous[0].metadata == metadata:
                 return previous[0].id
-        tool = self._manage(namespace=namespace, schema=MemoryPayload, actions_permitted=("create",), store=self._store)
+        # 与上游默认一致（#157）：本处调用只传 content、action 默认 create，所以放开 update/
+        # delete 不会让这条直调变成破坏性动作；放开是为了不再对外声称一个被我们收窄的能力。
+        tool = self._manage(namespace=namespace, schema=MemoryPayload,
+                            actions_permitted=("create", "update", "delete"), store=self._store)
         result = await tool.ainvoke({"content": {"content": content, "metadata": metadata}})
         # SDK 返回形如 "created memory <uuid>"。校验后缀确为 UUID 形状；
         # 形状不符时降级为按 namespace 查最近一条同内容记录（不把任意文本当记录 ID）。
@@ -86,7 +92,13 @@ class LangMemMemoryCapability:
         serialized = await tool.ainvoke({"query": query, "limit": limit})
         result = []
         for row in json.loads(serialized):
-            entry = await self._store.records.get(row["key"], get_identity_context())
+            try:
+                entry = await self._store.records.get(row["key"], get_identity_context())
+            except KeyError:
+                # 索引里还挂着、记录行已被删掉：解禁 provider 删除后这是**可达**状态
+                # （删除先落记录行，向量由 relay 异步收敛）。跳过这一条而不是让整次检索炸掉
+                # ——adapter 的 SearchOp 分支一直是这么容忍的，能力层不该比它更脆。
+                continue
             result.append(entry.model_copy(update={"score": row.get("score"),
                                                    "metadata": {k: v for k, v in entry.metadata.items() if k != "_langmem_value"}}))
         return result

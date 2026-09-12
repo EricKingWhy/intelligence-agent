@@ -14,6 +14,23 @@ from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
 from agent_harness.memory.types import MemoryScope
 
 
+class _BoundSelfModel:
+    """假模型的 `bind_tools` 必须无副作用，且 `bound` 指回自身。
+
+    trustcall 在"**存在既有文档**"的分支里访问 `self.bound.bound.bind_tools(...)`
+    （它假设 `bind_tools` 返回 `RunnableBinding`，`.bound` 才是底层模型）。该分支只有在
+    `enable_deletes=True`（#157 解禁删除）且检索命中既有记忆时才走到——真实模型天然满足这个形状，
+    假模型必须显式模拟，否则删除/更新路径会在假模型上 AttributeError，而生产完全正常。
+    """
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    @property
+    def bound(self):
+        return self
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["fake", "langmem"])
 async def test_capability_store_recall_and_identity_isolation(tmp_path, backend):
@@ -175,9 +192,8 @@ async def test_langmem_manager_forms_memory_through_owned_store(tmp_path):
 
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
 
-    class Model(FakeMessagesListChatModel):
-        def bind_tools(self, tools, **kwargs):
-            return self
+    class Model(_BoundSelfModel, FakeMessagesListChatModel):
+        pass
 
     model = Model(responses=[AIMessage(content="", tool_calls=[{
         "name": "MemoryPayload", "args": {"content": "TypeScript preference", "metadata": {"importance": 0.8}},
@@ -223,9 +239,8 @@ async def test_nearest_memory_does_not_replace_a_different_new_candidate(tmp_pat
     from langchain_core.messages import AIMessage
 
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
-    class NoChanges(FakeMessagesListChatModel):
-        def bind_tools(self, tools, **kwargs):
-            return self
+    class NoChanges(_BoundSelfModel, FakeMessagesListChatModel):
+        pass
     class Nearest(FakeVectorStore):
         async def search(self, *args):
             return [(old_id, 0.1)]

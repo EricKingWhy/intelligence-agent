@@ -1,6 +1,12 @@
-"""LangGraph BaseStore adapter；仅由可选 LangMem Provider 导入。"""
+"""LangGraph BaseStore adapter；仅由可选 LangMem Provider 导入。
+
+`PutOp` 的三种形状对应三个动作（LangGraph 的删除就是 `value=None`）：
+`value` 为 dict → 写入/覆盖（同 id 即更新），`value is None` → **硬删**（#157 解禁，
+落到 `MemoryRecordStore.delete`），`ttl` 非空 → 仍拒绝（另一套语义，见下文）。
+"""
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 
 from langgraph.store.base import BaseStore, GetOp, Item, PutOp, SearchItem, SearchOp
@@ -9,6 +15,8 @@ from agent_harness.identity import get_identity_context
 from agent_harness.memory.record_store import MemoryRecordStore
 from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
 from agent_harness.memory.vector_store import VectorIndexStore
+
+logger = logging.getLogger(__name__)
 
 
 class SqliteMilvusBaseStore(BaseStore):
@@ -37,8 +45,21 @@ class SqliteMilvusBaseStore(BaseStore):
             scope = self._scope(namespace)
             identity = get_identity_context()
             if isinstance(op, PutOp):
-                if op.value is None or op.ttl is not None:
-                    raise NotImplementedError("Memory delete/TTL is not enabled")
+                if op.value is None:
+                    # LangGraph 的删除形状：`store.adelete(ns, key)` 等价于
+                    # `PutOp(namespace, key, None)`。硬删（#156 的机制），namespace 授权与归属
+                    # 校验都在 records.delete 内——provider 的删除动作碰不到别人的记忆。
+                    if not await self.records.delete(op.key, identity):
+                        # 幂等，但**不得静默**（BUG-012 契约）：一次什么都没删掉的删除意图
+                        # 必须留痕，否则"模型说删了、其实什么都没发生"无法被发现。
+                        logger.warning("LangMem delete for %s matched no record row", op.key)
+                    results.append(None)
+                    continue
+                if op.ttl is not None:
+                    # TTL（到点自动过期）是另一套语义，本票不实现：静默忽略它会承诺一个永远
+                    # 不会兑现的过期。今天它在公开 API 层就被 LangGraph 拒掉
+                    # （`supports_ttl=False`），所以这里是防御性边界而非热路径。
+                    raise NotImplementedError("Memory TTL is not enabled")
                 payload = op.value.get("content")
                 if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
                     raise TypeError("Expected structured Memory content")

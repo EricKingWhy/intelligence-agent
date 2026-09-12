@@ -130,3 +130,32 @@ async def test_observability_write_failure_does_not_drop_candidates(tmp_path):
 
     assert [content for _, content, _ in capability.stored] == ["keep-me"]
     assert not [e for e in session.events if e.type == "memory/degraded"]
+
+
+@pytest.mark.asyncio
+async def test_failing_candidate_write_is_recorded_as_degraded_not_silent(tmp_path):
+    """#157 AC5：provider 侧（含它发起的删除/更新）失败**不得静默**。
+
+    `_write` 逐候选隔离并把失败计数落成 `memory/degraded`/`writeback` 的 `partial: N/M`——
+    这条路径一直存在，却从未被测试钉过；#157 解禁 provider 删除后，"模型让删、删除却失败"
+    会真的走到这里，所以现在必须证明它不静默：候选失败 → 事件流里有一条带数量的降级记录。
+    事件 reason 只带类型名/数量（脱敏不变量），根因只进日志。
+    """
+
+    class ExplodingCapability:
+        async def store(self, scope, content, metadata):
+            raise ConnectionError("milvus down")
+
+    class OneCandidate:
+        async def extract(self, events):
+            return ExtractionOutcome([(MemoryScope.USER, "会失败的一条", {"importance": 0.5})])
+
+    session = make_session(tmp_path)
+    writer = MemoryWriteback(ExplodingCapability(), OneCandidate())
+    writer.submit(session, session.events)
+    await writer.drain()
+
+    degraded = [e for e in session.events if e.type == "memory/degraded"]
+    assert len(degraded) == 1
+    assert degraded[0].data["operation"] == "writeback"
+    assert degraded[0].data["reason"] == "partial: 1/1 candidates failed"
