@@ -71,7 +71,7 @@
 | #168 | DONE | `611a6eb` | 是 |
 | #149 | DONE | `4a4372f` | 是 |
 | #151 | DONE | `9144631` | 是（AC6 写侧 met，attach 半交 #152） |
-| #152 | TODO | | |
+| #152 | DONE | `e3b81a6`+review 收口 | 是（两处 AC14 收窄 + validator 替换延后 #154 已记录） |
 | #153 | TODO | | |
 | #154 | TODO | | |
 | #155 | TODO | | |

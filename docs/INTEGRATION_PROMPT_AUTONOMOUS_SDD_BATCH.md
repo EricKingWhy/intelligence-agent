@@ -580,3 +580,87 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 - `AppState._wiring` 是进程级缓存，`InProcessSubagentProvider` 在多会话并发启动下会被
   反复 `activate()`——既有形状，非本票引入。
 
+
+---
+
+## §12 WS-2 — #152 Workspace 实体 + 有序账本 + 意图日志原子性 + 首次引导（commit `e3b81a6` + review 收口）
+
+### 一句话
+
+「项目 → 多会话」从**存储层能跑**升级为**可见、可枚举、可重建索引**：新增 Workspace 实体
+（uuid id + 规范路径）与每个项目的有序会话账本（手工序、活动时间永不重排），用**意图日志**
+保证 create/delete 两次写入之间崩溃可恢复，并在首次启动时**仅凭会话 header** 把历史会话按
+目录归组。**没有新 HTTP 端点、没有新事件类型、没有新配置项、模型不可见。**
+
+### 新增 / 改动
+
+| 位置 | 内容 |
+| --- | --- |
+| `src/agent_harness/workspace/`（新包） | `WorkspaceIndex`（语义层）、`SqliteWorkspaceStore`（持久层）、`Workspace`/`StartedHeader`（模型） |
+| `harness.db` 新 5 张表 | `workspaces` / `workspace_order` / `workspace_sessions` / `workspace_changes` / `workspace_meta` |
+| `session/header.py`（新）、`session/store.py` | `StartedHeader` + `JsonlSessionStore.read_started_header()`（读到第一条 `session/started` 即停，**不读事件正文**） |
+| `assembly.py` | `RecoveryStores.workspace_index`（**可选**）；`initialize_stores` 顺带完成首次引导 |
+| `web/app.py`、`cli.py` | 各建一份 `WorkspaceIndex`（持有内存缓存） |
+| `session/service.py` | 命名 workspace 的会话创建后 `create + attach`；`fork` 的 child 也 attach |
+| `docs/adr/0025-workspace-entity-registry.md`（新，Accepted） | 授权模型 / 账本=索引 / 5 张表 / 意图日志 / 引导 / 命名 / 路径校验替换计划 |
+
+### 集成方需要知道的行为
+
+- **`POST /api/sessions` 的既有契约不变**：`workspace` 仍是**单段名字**（旧校验原样保留），
+  只是创建后多了一步"注册进账本 + 前插会话"。任意路径的注册（`create(path)`）属于 #154 的
+  `POST /api/projects`，本票只在领域层提供能力。
+- **首次启动会写 `harness.db`**：第一次成功启动时执行一次性 bootstrap（读所有会话 header，
+  按目录建项目、写账本、最后写 `bootstrap_done` 标记）。中断可安全续跑，之后只读标记。
+- **未分组会话照旧存在**：无 cwd 的历史会话、未命名 workspace 的会话都不进任何项目。
+- **两处显式 AC14 收窄（ADR-0025 D6，需集成方知悉）**：
+  1. **默认每会话目录**（目录名 == 会话 id，即 `workspaces_root/<session_id>`）不归组；
+  2. **内部子代理子会话**（`session/started.agent_id != "default"`，如 `coding`）不算项目
+     成员，也不会让它所在的目录成为项目。判据只看 header 信封，不读正文。
+  反向开关都是**一个具名谓词**（`_collect_header_groups` / `_filter_visible` 里各一处），
+  产品若要"子代理会话也进项目列表"，删掉即可。
+- **损坏时拒绝启动**：没有待定标记却出现"记录无顺序 / 顺序无记录 / 有账本无记录"→ 抛
+  `WorkspaceRegistryCorrupt` 拒绝启动（AC13 有意为之，不静默修补）。若线上真撞上，需要人工
+  检查 `harness.db` 的三张表，而不是让服务带病运行。
+- **`.env` / 依赖**：零新增、零删除。
+
+### 门禁与验收
+
+- `ruff check` clean；`git diff --check` clean；全量 pytest **1932 passed / 10 skipped /
+  39 deselected**（唯一 1 failed 是既有 flake，见下）。
+- **27 组单行变异**（原 18 组 + 本轮 9 组：写锁 / 纯 INSERT / 孤立账本 / 未初始化闸 /
+  header 降级 / touch 失败 / 子代会话排除×2）全部被目标用例杀死，源码逐字节还原。
+- 真机（真 `.env` / 真 uvicorn）：bootstrap 对真实历史会话只建出既有项目、账本每条 header
+  cwd 都等于项目 path、同名 workspace 复用同一项目、未命名不建项目、真 fork 加入父项目、
+  软删除后目录与会话日志逐字节不变、重启不重复引导。
+- **已知 flake（既有，非本票引入）**：`tests/test_web_api.py::test_disconnect_leaves_run_
+  running_and_cancel_stops_it` —— SSE 断连被 `EventSourceResponse` 翻译成 producer 取消的
+  时序竞争，5s 预算内偶发悬挂。实测：把本票新增的 index 初始化关掉后**仍会失败**
+  （4/5 通过），本票新增的启动开销只有 **≈54ms**（冷启动 `initialize_stores`），
+  与 5s 超时不在一个量级；随机器负载变化。**不属于 #152，也未在本票修改。**
+
+### 交接给 #153（WS-3 列表契约）的硬约束
+
+1. 有序读用 `WorkspaceIndex.list()[i].session_ids`（已按成员资格过滤 + 手工序），
+   **不要**再按活动时间排序（AC4 会因此丢用户拖过的顺序）。
+2. `workspace_of_session()` 是 O(项目数 × 账本长度)；N 条摘要请**先调一次 `list()`** 建
+   `{session_id: workspace}` 映射，不要对每条摘要各调一次。
+3. `RecoveryStores.workspace_index` 是**可选**的（CLI / 无 header 的装配为 `None`）→ 契约里
+   `workspace` 必须是 `null` 而不是崩。
+4. 读之前先 `ensure_stores()`：未初始化的 `WorkspaceIndex` 现在**响亮失败**（不是返回空）。
+5. 成员资格只能走 index（header cwd），**不得**读 sandbox 的 `WorkspaceRegistry` 映射表。
+
+### 交接给 #154（WS-4 项目 CRUD）的硬约束
+
+1. 领域操作已齐备（`create/get/list/set_title/attach_session/detach_session/
+   insert_session_before/delete/resolve_by_path`），需要把 `UnknownWorkspace` /
+   `UnknownLedgerEntry` / `FileNotFoundError` / `NotADirectoryError` /
+   `WorkspaceRegistryCorrupt` 映射进 `domain_errors.py`，否则会成为 500。
+2. `attach_session()` 对"会话不存在/无 header/无 cwd"与"cwd 不匹配任何项目"都返回 `None`
+   → AC7 要求前者**报错**，端点需要先校验再调用。
+3. `_validate_workspace_name` 的替换：删 `web/app.py` 死副本 + 收窄 `service.py`，并把
+   `create(path)` 暴露成端点。
+4. **暴露 `POST /api/projects` 之前必须先解决来源可信性**（ADR-0025 D1 末尾）：当前默认
+   部署是"未配置 `jwt_secret` 即本地信任 + CORS `*`"，等于把 agent API 开放给任意网页。
+   要么鉴权、要么同源/CSRF、要么明确 localhost-only 部署约束。
+5. `delete(id)` 是**软删除**：响应必须说明"会话没被删除、只是回到未分组"，并通过 #153 的
+   契约让它们仍可见。
