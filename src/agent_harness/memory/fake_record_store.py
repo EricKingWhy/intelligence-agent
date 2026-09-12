@@ -37,3 +37,18 @@ class FakeMemoryRecordStore:
         entries = [entry for ns, entry in self._records.values() if ns == namespace]
         return [entry.model_copy(deep=True) for entry in
                 sorted(entries, key=lambda entry: (entry.created_at, entry.id), reverse=True)[:max(0, limit)]]
+
+    async def delete(self, memory_id: str, identity: IdentityContext) -> bool:
+        """硬删（与 `SqliteMemoryRecordStore.delete` 同一组验收，见 test_record_store.py）。
+
+        `scope_to_namespace(row 的 scope, identity)` 同时覆盖 tenant/user 与 SESSION
+        绑定两层校验：不匹配即"不是你的记忆" → `PermissionError`（不是 `False`——
+        静默 False 会让调用方以为删掉了）。
+        """
+        row = self._records.get(memory_id)
+        if row is None:
+            return False
+        if row[0] != scope_to_namespace(row[1].scope, identity):
+            raise PermissionError("Memory belongs to a different namespace")
+        del self._records[memory_id]
+        return True

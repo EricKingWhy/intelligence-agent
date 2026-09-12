@@ -1,6 +1,7 @@
 """SQLite 权威记录。记录与 outbox 在同一事务中提交。"""
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -8,13 +9,36 @@ from uuid import uuid4
 import aiosqlite
 
 from agent_harness.identity import IdentityContext
-from agent_harness.memory.record_store import PendingMemory
+from agent_harness.memory.record_store import MemoryOperation, PendingMemory
 from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
+
+logger = logging.getLogger(__name__)
 
 #: 每操作新连接模式下的连接级 PRAGMA（与 storage/sqlite.py R4-5 同款）：
 #: writeback 的 store 与 relay 的 pending/ack 并发写（BEGIN IMMEDIATE），
 #: 默认 busy_timeout=0 会立刻抛 "database is locked" 而不是等锁。
 _BUSY_TIMEOUT_MS = 10_000
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_records (
+    memory_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL, scope TEXT NOT NULL, namespace TEXT NOT NULL,
+    content TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL,
+    indexed BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS memory_owner
+    ON memory_records(tenant_id, user_id, scope);
+CREATE TABLE IF NOT EXISTS memory_outbox (
+    memory_id TEXT PRIMARY KEY, revision TEXT NOT NULL,
+    operation TEXT NOT NULL DEFAULT 'upsert'
+        CHECK (operation IN ('upsert', 'delete')),
+    tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+    scope TEXT NOT NULL, namespace TEXT NOT NULL
+);
+"""
+
+#: `memory_outbox` 在 #156 之前只有 (memory_id, revision)。升级时按需补列 + 回填。
+_OUTBOX_ROUTING_COLUMNS = ("tenant_id", "user_id", "scope", "namespace")
 
 
 @asynccontextmanager
@@ -28,6 +52,23 @@ async def _connect(database_path: Path):
         await connection.close()
 
 
+def _enqueue(entry_id: str, revision: str, operation: MemoryOperation, *,
+             tenant_id: str, user_id: str, scope: str, namespace: str) -> tuple[str, tuple]:
+    """outbox 的写入语句：**每个 memory_id 一行**，表达"该 id 的索引期望状态"。
+
+    同 id 后来的写覆盖前一版本（含 upsert↔delete 互相覆盖）——索引只需收敛到最新
+    期望，不必重放历史；`revision` 变化同时是 relay 的重试预算重置信号。
+    """
+    return ("""
+        INSERT INTO memory_outbox
+            (memory_id, revision, operation, tenant_id, user_id, scope, namespace)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(memory_id) DO UPDATE SET revision=excluded.revision,
+            operation=excluded.operation, tenant_id=excluded.tenant_id,
+            user_id=excluded.user_id, scope=excluded.scope, namespace=excluded.namespace
+    """, (entry_id, revision, operation.value, tenant_id, user_id, scope, namespace))
+
+
 class SqliteMemoryRecordStore:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
@@ -36,20 +77,46 @@ class SqliteMemoryRecordStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
-            await connection.executescript("""
-                CREATE TABLE IF NOT EXISTS memory_records (
-                    memory_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL, scope TEXT NOT NULL, namespace TEXT NOT NULL,
-                    content TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL,
-                    indexed BOOLEAN NOT NULL DEFAULT FALSE
-                );
-                CREATE INDEX IF NOT EXISTS memory_owner
-                    ON memory_records(tenant_id, user_id, scope);
-                CREATE TABLE IF NOT EXISTS memory_outbox (
-                    memory_id TEXT PRIMARY KEY, revision TEXT NOT NULL
-                );
-            """)
+            await connection.executescript(_SCHEMA)
+            await self._migrate_outbox(connection)
             await connection.commit()
+
+    @staticmethod
+    async def _migrate_outbox(connection: aiosqlite.Connection) -> None:
+        """把 #156 之前的 outbox（只有 memory_id/revision）就地升到带操作类型与路由列。
+
+        旧行的路由事实只能来自它对应的记录行；记录行已不在的孤儿行**不可路由**
+        （没有 tenant/user/scope 可用于调 `vectors.delete`），留着会让 `pending()`
+        每轮都失败——迁移期丢弃并告警（`indexed` 对一个不存在的记录行也无意义）。
+
+        列可空性：迁移来的列可空（`ALTER TABLE ADD COLUMN` 没法"先空后填"再收紧），
+        新建库不可空——新库只由本模块写入，永远有真实值。
+        """
+        async with connection.execute("PRAGMA table_info(memory_outbox)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "operation" in columns:
+            return
+        await connection.execute(
+            "ALTER TABLE memory_outbox ADD COLUMN operation TEXT NOT NULL DEFAULT 'upsert'")
+        for column in _OUTBOX_ROUTING_COLUMNS:
+            await connection.execute(f"ALTER TABLE memory_outbox ADD COLUMN {column} TEXT")
+        await connection.execute("""
+            UPDATE memory_outbox SET
+                tenant_id=(SELECT tenant_id FROM memory_records WHERE memory_id=memory_outbox.memory_id),
+                user_id=(SELECT user_id FROM memory_records WHERE memory_id=memory_outbox.memory_id),
+                scope=(SELECT scope FROM memory_records WHERE memory_id=memory_outbox.memory_id),
+                namespace=(SELECT namespace FROM memory_records WHERE memory_id=memory_outbox.memory_id)
+        """)
+        async with connection.execute(
+            "SELECT memory_id FROM memory_outbox WHERE tenant_id IS NULL"
+        ) as cursor:
+            orphans = [row[0] for row in await cursor.fetchall()]
+        if orphans:
+            await connection.execute("DELETE FROM memory_outbox WHERE tenant_id IS NULL")
+            # 留痕带 id（只报数量无法对账；截断到 20 个避免单行日志过长）。
+            listed = ", ".join(orphans[:20]) + (" …" if len(orphans) > 20 else "")
+            logger.warning("Dropped %d unroutable legacy memory outbox row(s) "
+                           "(no record row to derive tenant/user/scope): %s", len(orphans), listed)
 
     async def store(self, entry: MemoryEntry, identity: IdentityContext) -> str:
         namespace = MemoryNamespace.of(entry.scope, identity).as_json()
@@ -65,12 +132,32 @@ class SqliteMemoryRecordStore:
                     metadata=excluded.metadata, indexed=FALSE
             """, (entry.id, identity.tenant_id, identity.user_id, entry.scope.value, namespace,
                   entry.content, json.dumps(entry.metadata, ensure_ascii=False), entry.created_at))
-            await connection.execute("""
-                INSERT INTO memory_outbox(memory_id, revision) VALUES (?, ?)
-                ON CONFLICT(memory_id) DO UPDATE SET revision=excluded.revision
-            """, (entry.id, str(uuid4())))
+            await connection.execute(*_enqueue(
+                entry.id, str(uuid4()), MemoryOperation.UPSERT, tenant_id=identity.tenant_id,
+                user_id=identity.user_id, scope=entry.scope.value, namespace=namespace))
             await connection.commit()
         return entry.id
+
+    async def delete(self, memory_id: str, identity: IdentityContext) -> bool:
+        """硬删：摘记录行 + 记一条 `DELETE` 索引意图，同事务（契约见 Protocol）。"""
+        async with _connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            connection.row_factory = aiosqlite.Row
+            async with connection.execute(
+                "SELECT scope, namespace FROM memory_records WHERE memory_id=?", (memory_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                await connection.commit()  # 无写操作；幂等地报告"没有这条"
+                return False
+            if row["namespace"] != MemoryNamespace.of(MemoryScope(row["scope"]), identity).as_json():
+                raise PermissionError("Memory belongs to a different namespace")
+            await connection.execute("DELETE FROM memory_records WHERE memory_id=?", (memory_id,))
+            await connection.execute(*_enqueue(
+                memory_id, str(uuid4()), MemoryOperation.DELETE, tenant_id=identity.tenant_id,
+                user_id=identity.user_id, scope=row["scope"], namespace=row["namespace"]))
+            await connection.commit()
+        return True
 
     async def get(self, memory_id: str, identity: IdentityContext) -> MemoryEntry:
         async with _connect(self.database_path) as connection:
@@ -103,27 +190,55 @@ class SqliteMemoryRecordStore:
                            created_at=row["created_at"], scope=row["scope"], indexed=bool(row["indexed"]))
 
     async def pending(self, limit: int = 100, after_id: str = "") -> list[PendingMemory]:
-        """仅 relay 调用的系统级 outbox 读取，不暴露给模型/请求。"""
+        """仅 relay 调用的系统级 outbox 读取，不暴露给模型/请求。
+
+        **以 outbox 为驱动表**（`LEFT JOIN` 记录行）：删除变更没有记录行可依赖，
+        以记录行为驱动会把刚删掉的 id 直接过滤掉——变更永远到不了索引。路由事实
+        全部读 outbox 自己的列。
+        """
         async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             async with connection.execute("""
-                SELECT r.*, o.revision FROM memory_records r JOIN memory_outbox o
-                    ON r.memory_id=o.memory_id WHERE r.memory_id > ? ORDER BY r.memory_id LIMIT ?
+                SELECT o.memory_id AS memory_id, o.revision AS revision, o.operation AS operation,
+                       o.tenant_id AS tenant_id, o.user_id AS user_id, o.scope AS scope,
+                       o.namespace AS namespace, r.content AS content, r.metadata AS metadata,
+                       r.created_at AS created_at, r.indexed AS indexed
+                FROM memory_outbox o LEFT JOIN memory_records r ON r.memory_id = o.memory_id
+                WHERE o.memory_id > ? ORDER BY o.memory_id LIMIT ?
             """, (after_id, max(0, limit))) as cursor:
                 rows = await cursor.fetchall()
-        return [PendingMemory(self._entry(row),
-                              IdentityContext(row["tenant_id"], row["user_id"], [row["scope"]]),
-                              MemoryNamespace(tuple(json.loads(row["namespace"]))).session_id,
-                              str(row["revision"])) for row in rows]
+        return [self._change(row) for row in rows]
+
+    @staticmethod
+    def _change(row: aiosqlite.Row) -> PendingMemory:
+        operation = MemoryOperation(row["operation"])
+        entry = None
+        if operation is MemoryOperation.UPSERT:
+            if row["content"] is None:
+                # 记录行已不在（升级前遗留 / 绕过契约的删除）：没有内容可索引，但索引里
+                # 可能留着残留——按"期望状态 = 不存在"处理，把残留清掉。
+                logger.warning("Memory outbox entry %s has no record row; treating as delete",
+                               row["memory_id"])
+                operation = MemoryOperation.DELETE
+            else:
+                entry = MemoryEntry(id=row["memory_id"], content=row["content"],
+                                    metadata=json.loads(row["metadata"]), created_at=row["created_at"],
+                                    scope=row["scope"], indexed=bool(row["indexed"]))
+        namespace = MemoryNamespace(tuple(json.loads(row["namespace"])))
+        return PendingMemory(operation=operation, memory_id=row["memory_id"],
+                             identity=IdentityContext(row["tenant_id"], row["user_id"], [row["scope"]]),
+                             scope=namespace.scope, session_id=namespace.session_id,
+                             revision=str(row["revision"]), entry=entry)
 
     async def acknowledge(self, change: PendingMemory) -> bool:
         async with _connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute("DELETE FROM memory_outbox WHERE memory_id=? AND revision=?",
-                                              (change.entry.id, change.revision))
+                                              (change.memory_id, change.revision))
             matched = cursor.rowcount == 1
             if matched:
+                # 删除变更此时已无记录行 → 这条 UPDATE 命中 0 行（幂等）。
                 await connection.execute("UPDATE memory_records SET indexed=TRUE WHERE memory_id=?",
-                                         (change.entry.id,))
+                                         (change.memory_id,))
             await connection.commit()
         return matched

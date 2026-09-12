@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -28,6 +29,7 @@ class LangMemMemoryCapability:
 
         from agent_harness.memory.base_store_adapter import SqliteMilvusBaseStore
 
+        self._records = records
         self._store = SqliteMilvusBaseStore(records, vectors)
         self._manage = create_manage_memory_tool
         self._search = create_search_memory_tool
@@ -60,6 +62,21 @@ class LangMemMemoryCapability:
             if recent and recent[0].content == content:
                 return recent[0].id
             raise RuntimeError(f"memory tool returned unexpected shape: {result!r}") from None
+
+    async def update(self, memory_id: str, scope: MemoryScope, content: str, metadata: dict) -> str:
+        """按 id 覆盖写（#156 的**机制**）。
+
+        写权威记录本身，索引由 outbox/relay 异步跟进。**刻意不**把 update 交给 LangMem
+        的 manager/工具：上游的 `actions_permitted` / `enable_deletes` 开关是 #157 的范围
+        （本票非目标），而"记录主权在项目内"意味着这条路不需要 SDK 参与。
+        """
+        entry = MemoryEntry(id=memory_id, content=content, metadata=metadata, scope=scope,
+                            created_at=datetime.now(UTC).isoformat())
+        return await self._records.store(entry, get_identity_context())
+
+    async def forget(self, memory_id: str) -> bool:
+        """硬删（记录行 + 异步传播到向量索引），契约见 `capability.py`。"""
+        return await self._records.delete(memory_id, get_identity_context())
 
     async def search(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
         namespace = MemoryNamespace.of(scope, get_identity_context()).as_tuple()

@@ -49,6 +49,85 @@ async def test_capability_store_recall_and_identity_isolation(tmp_path, backend)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["fake", "langmem"])
+async def test_capability_update_and_forget_contract(tmp_path, backend):
+    """AC1：`update`（按 id 覆盖写）与 `forget`（硬删）在两个可替换实现上同一套语义。
+
+    `update` 是**机制**：同 namespace 内按 id 覆盖，last-write-wins；"该不该更新、
+    更新哪一条"是冲突消解（#158）的策略。`forget` 对不存在的 id 是幂等 `False`。
+    """
+    relay = None
+    if backend == "fake":
+        capability = FakeMemoryCapability()
+    else:
+        pytest.importorskip("langmem")
+        from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+        records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+        await records.initialize()
+        vectors = FakeVectorStore()
+        relay = OutboxRelay(records, vectors)
+        capability = LangMemMemoryCapability(records, vectors)
+    token = set_identity_context(IdentityContext("acme", "alice", ["user"]))
+    try:
+        memory_id = await capability.store(MemoryScope.USER, "I prefer Python", {"importance": 0.3})
+        if relay:
+            await relay.flush()
+
+        assert await capability.update(memory_id, MemoryScope.USER,
+                                       "I prefer TypeScript", {"importance": 0.9}) == memory_id
+        if relay:
+            await relay.flush()
+        hits = await capability.search(MemoryScope.USER, "TypeScript", 5)
+        assert [hit.id for hit in hits] == [memory_id]
+        assert hits[0].content == "I prefer TypeScript"
+        assert hits[0].metadata["importance"] == 0.9
+        assert await capability.search(MemoryScope.USER, "Python", 5) == []
+
+        assert await capability.forget(memory_id) is True
+        assert await capability.forget(memory_id) is False  # 幂等
+        if relay:
+            await relay.flush()
+        assert await capability.search(MemoryScope.USER, "TypeScript", 5) == []
+    finally:
+        identity_context_var.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["fake", "langmem"])
+async def test_capability_forget_cannot_cross_identity(tmp_path, backend):
+    """AC2 从 capability 面看：别人的记忆删不掉。
+
+    语义是 `PermissionError` 而不是静默 `False`——静默 False 会让调用方以为"忘了"，
+    而那条记忆其实还在。
+    """
+    relay = None
+    if backend == "fake":
+        capability = FakeMemoryCapability()
+    else:
+        pytest.importorskip("langmem")
+        from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+        records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+        await records.initialize()
+        vectors = FakeVectorStore()
+        relay = OutboxRelay(records, vectors)
+        capability = LangMemMemoryCapability(records, vectors)
+    owner_token = set_identity_context(IdentityContext("acme", "alice", ["user"]))
+    try:
+        memory_id = await capability.store(MemoryScope.USER, "alice 的偏好", {})
+        if relay:
+            await relay.flush()
+    finally:
+        identity_context_var.reset(owner_token)
+    other_token = set_identity_context(IdentityContext("acme", "bob", ["user"]))
+    try:
+        with pytest.raises(PermissionError):
+            await capability.forget(memory_id)
+        assert await capability.search(MemoryScope.USER, "偏好", 5) == []
+    finally:
+        identity_context_var.reset(other_token)
+
+
+@pytest.mark.asyncio
 async def test_langmem_manager_forms_memory_through_owned_store(tmp_path):
     pytest.importorskip("langmem")
     from langchain_core.language_models.fake_chat_models import (

@@ -17,6 +17,15 @@ class FakeMemoryCapability:
                             created_at=datetime.now(UTC).isoformat())
         return await self._records.store(entry, get_identity_context())
 
+    async def update(self, memory_id: str, scope: MemoryScope, content: str, metadata: dict) -> str:
+        """按 id 覆盖写（生命周期契约见 `capability.py`）。"""
+        entry = MemoryEntry(id=memory_id, content=content, metadata=metadata, scope=scope,
+                            created_at=datetime.now(UTC).isoformat())
+        return await self._records.store(entry, get_identity_context())
+
+    async def forget(self, memory_id: str) -> bool:
+        return await self._records.delete(memory_id, get_identity_context())
+
     async def search(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
         entries = await self._records.list_by_scope(scope, get_identity_context(), 10000)
         return [entry.model_copy(update={"score": 1.0}) for entry in entries

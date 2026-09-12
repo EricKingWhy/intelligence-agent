@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from agent_harness.identity import IdentityContext
 from agent_harness.memory.fake_record_store import FakeMemoryRecordStore
+from agent_harness.memory.record_store import MemoryOperation
 from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
 from agent_harness.memory.types import (
     MemoryEntry,
@@ -139,6 +140,92 @@ async def test_session_scope_does_not_cross_sessions(store):
         memory_session_var.reset(token)
     with pytest.raises(ValueError):
         await store.store(scoped, owner)
+
+
+# ── #156 MEM-1：delete（硬删）契约——SQLite 与 Fake 同一组验收（AC2/AC7）──
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_the_record(store):
+    identity = IdentityContext("acme", "alice", ["user"])
+    await store.store(entry(), identity)
+    assert await store.delete("m1", identity) is True
+    with pytest.raises(KeyError):
+        await store.get("m1", identity)
+    assert await store.list_by_scope(MemoryScope.USER, identity, 10) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_of_an_unknown_id_is_idempotent(store):
+    """幂等：忘了又忘不是错误（调用方重试不得变成失败）。"""
+    identity = IdentityContext("acme", "alice", ["user"])
+    assert await store.delete("never-existed", identity) is False
+    await store.store(entry(), identity)
+    assert await store.delete("m1", identity) is True
+    assert await store.delete("m1", identity) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other", [IdentityContext("other", "alice", ["user"]),
+                                  IdentityContext("acme", "bob", ["user"])])
+async def test_delete_cannot_remove_another_owners_memory(store, other):
+    owner = IdentityContext("acme", "alice", ["user"])
+    await store.store(entry(), owner)
+    with pytest.raises(PermissionError):
+        await store.delete("m1", other)
+    assert await store.get("m1", owner) == entry()
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_a_session_bound_from_another_session(store):
+    """SESSION 绑定的记忆：无绑定 → ValueError；绑定到别的 session → PermissionError；
+    绑定正确 → 删除。删除后同一个 id 的再次删除落回幂等 False（没有行可校验）。"""
+    owner = IdentityContext("acme", "alice", ["user", "session"])
+    scoped = entry().model_copy(update={"scope": MemoryScope.SESSION})
+    token = memory_session_var.set("session-a")
+    try:
+        await store.store(scoped, owner)
+    finally:
+        memory_session_var.reset(token)
+    with pytest.raises(ValueError):
+        await store.delete("m1", owner)
+    token = memory_session_var.set("session-b")
+    try:
+        with pytest.raises(PermissionError):
+            await store.delete("m1", owner)
+    finally:
+        memory_session_var.reset(token)
+    token = memory_session_var.set("session-a")
+    try:
+        assert await store.delete("m1", owner) is True
+        assert await store.delete("m1", owner) is False
+    finally:
+        memory_session_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_delete_commits_record_removal_and_outbox_together(tmp_path):
+    """删除的两次写入（摘记录行 + 记删除意图）必须同事务：outbox 写失败时
+    记录行不许单独消失（否则既查不到、也修不好索引残留）。"""
+    import aiosqlite
+
+    path = tmp_path / "memory.db"
+    store = SqliteMemoryRecordStore(path)
+    await store.initialize()
+    identity = IdentityContext("acme", "alice", ["user"])
+    await store.store(entry(), identity)
+    async with aiosqlite.connect(path) as db:
+        await db.execute("""CREATE TRIGGER fail_outbox BEFORE INSERT ON memory_outbox
+                         BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END""")
+        await db.commit()
+    with pytest.raises(aiosqlite.IntegrityError):
+        await store.delete("m1", identity)
+    assert await store.get("m1", identity) == entry()
+    async with aiosqlite.connect(path) as db:
+        await db.execute("DROP TRIGGER fail_outbox")
+        await db.commit()
+    assert await store.delete("m1", identity) is True
+    assert [change.operation for change in await store.pending()] == [MemoryOperation.DELETE]
 
 
 # ── Round 9 审计修复：连接级并发 PRAGMA（与 storage/sqlite.py R4-5 同款）──
