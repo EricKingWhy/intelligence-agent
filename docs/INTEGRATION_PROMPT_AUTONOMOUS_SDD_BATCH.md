@@ -664,3 +664,58 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
    要么鉴权、要么同源/CSRF、要么明确 localhost-only 部署约束。
 5. `delete(id)` 是**软删除**：响应必须说明"会话没被删除、只是回到未分组"，并通过 #153 的
    契约让它们仍可见。
+
+---
+
+## 13. #153（WS-3）会话列表契约补 `workspace` + 按项目列会话
+
+### 交付
+
+| 文件 | 变化 |
+| --- | --- |
+| `session/store.py` | `WorkspaceRef(id, title)` 值对象；`SessionSummaryStats.workspace` |
+| `session/service.py` | `list_sessions(*, workspace_id=None)`；项目视图走账本手工序；两处索引读 `anyio.to_thread.run_sync` |
+| `session/errors.py` | `WorkspaceNotFound` |
+| `web/app.py` | `SessionSummary.workspace`（**必填**，无默认值）；`GET /api/sessions?workspace_id=` |
+| `web/domain_errors.py` | `WorkspaceNotFound → 404`；审计表补 `GET /api/sessions` 行 |
+| `tests/web/test_session_list_workspace.py`（新，8 条） | 契约值 / 必填 / 404 / 序 / 空串边界 / 索引读不在事件循环 |
+| 前端 `web/src/types.ts` | `WorkspaceRef` + `workspace: WorkspaceRef \| null`（非可选） |
+| 前端 `web/src/lib/api.test.ts` | canonical fixture 用类型注解（删键 → `tsc` TS2741）+ 2 条运行时断言 |
+
+`§12 交接给 #153 的 5 条硬约束全部落地`：账本手工序不重排 ✓、先一次 `list()` 建映射 ✓、
+索引可选时 `null` 而非崩 ✓、读前 `ensure_stores()` ✓、成员资格只走 index（不读 sandbox 映射表）✓。
+
+### 集成方需要知道的行为
+
+- **`GET /api/sessions` 的响应多了一个必填字段**：`workspace: {id, title} | null`。对严格校验
+  响应 schema 的客户端，这是**破坏性变更**（字段恒发送，变化的是"必填"语义）；本仓所有消费者
+  （CLI / Web / 测试）已核对无破坏。
+- **`?workspace_id=<未注册 id>` → 404**（不是空列表）。"项目存在但会话日志都没了"才是 `[]`。
+- **默认列表顺序不变**（最近活动倒序）；项目视图是**账本手工序**，从不按活动时间重排。
+- **索引不存在**（CLI 装配）→ 全部 `null`，不报错、不伪造。
+- 这是**读出**能力，**不写任何 SessionEvent**（workspace 对模型不可见）。
+- **`.env` / 依赖**：零新增、零删除。
+
+### 门禁与验收
+
+- `ruff check` clean；`git diff --check` clean；全量 pytest **1941 passed / 10 skipped /
+  39 deselected / 0 failed**。
+- **10 组单行变异**全部被目标用例杀死并逐字节还原（sha256）。其中"所有会话都报第一个项目的
+  引用"首轮**存活**——暴露的正是项目视图用例的构造弱点（只有一个项目、没有未分组会话），
+  加固后才被杀；如实记录，不粉饰。
+- 真机（真 `.env` / 真 uvicorn / 真业务数据）：28 行全带 `workspace`；8 行归入 `ws1-e2e` /
+  `ws2-e2e`；20 行为 `null` 且**仍在列表里**；项目视图顺序 == `workspace_sessions.position`；
+  未注册 id / 空 `workspace_id=` → 404；OpenAPI `SessionSummary.required` 含 `workspace`。
+- 前端门禁（该 revision 实测 sha256 `83156433e14b` / `f98fa7b312f8`）：`tsc -b` 0 错、
+  vitest 521 passed、oxlint 0 error、playwright 130/130（`--workers=2`）、`vite build` ✓。
+
+### 需要后续票知悉
+
+1. **内部子代理子会话怎么显示**：#152 的 AC14 收窄②使 `agent_id != "default"` 的子会话不进
+   项目账本，因此它在**项目视图里不出现**、却仍在**默认列表里以未分组出现**（真机已复现，
+   该子会话 `agent_id == "coding"`）。**#155（前端分组 UI）需决定显示口径**。
+2. **每次列表请求新增 O(账本) 次 header 读**：`WorkspaceIndex._read_header` 有意不缓存（AC6），
+   默认列表路径因此每请求读一遍账本内候选的首行。已卸载到 worker 线程、不阻塞事件循环；
+   若将来成为热点，正确方向是 index 内部缓存，**不是**放弃 AC6。
+3. `AppState.ensure_stores()` 是列表读的**前置**（否则索引未初始化 → 每行都被判成未分组）。
+   这是 load-bearing，不是防御性代码。
