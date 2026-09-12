@@ -642,6 +642,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: var(--space-xs);
 }
 .rail-empty-btn-primary {
+  min-height: 28px;
   padding: 3px 10px;
   border: none;
   border-radius: var(--radius-sm);
@@ -655,6 +656,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .rail-empty-btn-ghost {
+  min-height: 28px;
   padding: 3px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -2841,7 +2843,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding-top: var(--space-sm);
   border-top: 1px dashed var(--border-strong);
 }
-.tl-run-header:first-child {
+.tl-run-header:first-child,
+.timeline-window-bar + .tl-run-header {
   margin-top: 0;
   padding-top: 0;
   border-top: none;
@@ -2859,12 +2862,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 /* UI-03：视图 tab 条目计数（识别而非回忆）——icon+label 旁的小数字徽章。 */
 .detail-tab-count {
-  padding: 0 5px;
+  padding: 1px 5px;
   border-radius: var(--radius-full);
   background: var(--color-hover);
   color: var(--text-tertiary);
   font-size: var(--text-xs);
-  line-height: 16px;
+  line-height: 1.2;
 }
 .detail-tab.sel .detail-tab-count {
   color: var(--text-secondary);

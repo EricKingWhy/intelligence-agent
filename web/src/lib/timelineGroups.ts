@@ -32,19 +32,24 @@ const TERMINAL_STATUS: Partial<Record<string, RunGroupStatus>> = {
 
 export function groupEventsByRun(events: AgentEvent[]): RunGroup[] {
   const groups: RunGroup[] = [];
+  // 序数 = run 在会话中**首次出现**的次序（跨交错段稳定：r1,r2,r1 都叫 Run 1）。
+  const ordinalOfRun = new Map<string, number>();
   let current: RunGroup | null = null;
 
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     const runId = e.run_id ?? null;
     if (!current || (runId !== null && current.runId !== runId)) {
-      current = {
-        runId,
-        ordinal: runId !== null ? groups.filter((g) => g.runId !== null).length + 1 : 0,
-        status: 'running',
-        count: 0,
-        start: i,
-      };
+      let ordinal = 0;
+      if (runId !== null) {
+        let next = ordinalOfRun.get(runId);
+        if (next === undefined) {
+          next = ordinalOfRun.size + 1;
+          ordinalOfRun.set(runId, next);
+        }
+        ordinal = next;
+      }
+      current = { runId, ordinal, status: 'running', count: 0, start: i };
       groups.push(current);
     }
     current.count += 1;

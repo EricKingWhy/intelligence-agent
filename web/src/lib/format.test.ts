@@ -1,7 +1,7 @@
 /** format.ts 时间/数值格式化测试。 */
 
 import { describe, expect, it } from 'vitest';
-import { formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay , formatShortDuration } from './format';
+import { formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay, formatShortDuration } from './format';
 
 describe('formatDuration', () => {
   it('缺 started/completed 任一（running 中）返回 null', () => {
@@ -114,6 +114,13 @@ describe('formatShortDuration — 亚秒时长不再给假精度（UI-04 信任�
   it('50-999ms 显整 ms', () => {
     expect(formatShortDuration(50)).toBe('50ms');
     expect(formatShortDuration(999)).toBe('999ms');
+  });
+  it('非有限 / 负值（时钟倒挂）不显数字：负值返回空串、formatDuration 返回 null', () => {
+    expect(formatShortDuration(-5)).toBe('');
+    expect(formatShortDuration(NaN)).toBe('');
+    expect(formatShortDuration(Infinity)).toBe('');
+    const t = '2026-09-12T00:00:10Z';
+    expect(formatDuration(t, '2026-09-12T00:00:05Z')).toBeNull(); // completedAt < startedAt
   });
   it('≥1s 显一位小数秒', () => {
     expect(formatShortDuration(1000)).toBe('1.0s');

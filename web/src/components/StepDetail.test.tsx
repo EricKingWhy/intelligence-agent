@@ -248,7 +248,8 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     expect(html).toContain('Run 2');
     expect(html).toContain('run-badge-completed');
     expect(html).toContain('run-badge-running');
-    expect(html).toContain('>3</span>'); // 第一组 3 事件
+    // 第一组 4 事件（session/started 归入 r1 组）；打在 .tl-run-count 上防 tl-seq 误命中
+    expect(html).toMatch(/tl-run-header[^]*?tl-run-count[^>]*>4 事件</);
   });
 
   it(`尾窗裁剪（窗口 ${TIMELINE_WINDOW_DEFAULT}）：窗口外的组头不渲染，窗口内组头保留`, () => {

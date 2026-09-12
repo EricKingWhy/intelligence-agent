@@ -80,11 +80,11 @@ test('Composer control row 在浅色模式下可见', async ({ page }) => {
 });
 
 test('Inspector 时间线 run 分组头 + 头标对齐（UI-03）', async ({ page }) => {
+  const T0 = '2026-09-12T00:00:00Z';
   const ROW2 = {
     session_id: 'e2e-two-run', event_count: 7, first_event_time: T0, last_event_time: T0,
     first_user_message: '两轮任务', trace_id: null, trace_url: null,
   };
-  const T0 = '2026-09-12T00:00:00Z';
   const EVENTS2 = [
     { type: 'session/started', seq: 1, session_id: 'e2e-two-run', run_id: 'r1', time: T0 },
     { type: 'run/started', seq: 2, session_id: 'e2e-two-run', run_id: 'r1', time: T0 },
@@ -111,7 +111,7 @@ test('Inspector 时间线 run 分组头 + 头标对齐（UI-03）', async ({ pag
   await expect(headers).toHaveCount(2);
   await expect(headers.first()).toContainText('Run 1');
   await expect(headers.first()).toContainText('已完成');
-  await expect(headers.first()).toContainText('3 事件');
+  await expect(headers.first()).toContainText('4 事件');
   await expect(headers.nth(1)).toContainText('Run 2');
   await expect(headers.nth(1)).toContainText('进行中');
 

@@ -2,17 +2,20 @@
 
 /** 短时长语义（UI-04 信任裂缝）：<50ms 显 '<50ms'——测不到的就说测不到，
  *  不再造「1ms」这类假精度（mock/真实快事件都会撞上）；<1s 显整 ms；
- *  否则一位小数秒。 */
+ *  否则一位小数秒。非有限 / 负值（时钟倒挂）同样不显数字，返回空串交给调用方隐藏。 */
 export function formatShortDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
   if (ms < 50) return '<50ms';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-/** duration 格式化：走 formatShortDuration 同一语义。无完成时间（running 中）返回 null。 */
+/** duration 格式化：走 formatShortDuration 同一语义（时钟倒挂返回 null，
+ *  调用方不渲染该行——与 ReasoningBlock 的 ms<0 守卫同一口径）。无完成时间（running 中）返回 null。 */
 export function formatDuration(startedAt?: string, completedAt?: string): string | null {
   if (!startedAt || !completedAt) return null;
   const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
   return formatShortDuration(ms);
 }
 

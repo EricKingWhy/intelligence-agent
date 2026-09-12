@@ -23,14 +23,14 @@ describe('groupEventsByRun — 按 run_id 首现顺序分组', () => {
     expect(groups[1]).toMatchObject({ runId: 'r2', ordinal: 2, status: 'running', count: 2, start: 3 });
   });
 
-  it('交错 run_id 不合并：r1 出现后再回 r2 再回 r1 → 各成新组（首现顺序编号）', () => {
+  it('交错 run_id 不合并：r1 出现后再回 r2 再回 r1 → 各成新组；序数按首次出现（回段仍叫 Run 1）', () => {
     const groups = groupEventsByRun([
       e(EventType.RUN_STARTED, 1, 'r1'),
       e(EventType.RUN_STARTED, 2, 'r2'),
       e(EventType.RUN_STARTED, 3, 'r1'),
     ]);
     expect(groups.map((g) => g.runId)).toEqual(['r1', 'r2', 'r1']);
-    expect(groups.map((g) => g.ordinal)).toEqual([1, 2, 3]);
+    expect(groups.map((g) => g.ordinal)).toEqual([1, 2, 1]);
   });
 
   it('run_id 缺失事件：有打开组时归属当前组；无组时进领头 null 组（ordinal 0）', () => {

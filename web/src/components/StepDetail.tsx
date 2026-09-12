@@ -12,7 +12,7 @@
  * 顶部返回按钮回 Timeline（无弹窗——"上下文 Inspector"）。
  */
 
-import { Fragment, memo, useEffect, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import {
   AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
-import { countRuns, groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
+import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
@@ -76,6 +76,13 @@ interface Props {
 
 export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
+  /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——useMemo 不许
+   * 出现在下方任何 early-return 之后（Rules of Hooks：focus/tool 分支返回的渲染
+   * 不跑这些 hook，先后两次渲染的 hook 数就会不一致 → React 崩溃）。 */
+  const runIdList = useMemo(
+    () => [...new Set((conversation?.events ?? []).flatMap((e) => (e.run_id ? [e.run_id] : [])))],
+    [conversation?.events],
+  );
 
   if (!conversation) {
     return (
@@ -176,9 +183,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
         {conversation.events.length > 0 && (
           <span
             className="detail-run-id mono num"
-            title={`runs: ${[...new Set(conversation.events.flatMap((e) => (e.run_id ? [e.run_id] : [])))].join(', ')}`}
+            title={`runs: ${runIdList.join(', ')}`}
           >
-            {countRuns(conversation.events)} runs · {conversation.events.length} 事件
+            {runIdList.length} runs · {conversation.events.length} 事件
           </span>
         )}
       </div>
@@ -196,10 +203,18 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
               className={`detail-tab ${tab === t.id ? 'sel' : ''}`}
               onClick={() => setTab(t.id)}
               title={t.label}
+              /* 计数徽标是 tab 的真实文本内容：窄面板 label 隐藏（容器查询
+                 icon-only）后它就成了唯一可访问名，getByRole(tab, 'Timeline')
+                 会变成 name '4'。aria-label 钉住语义名，不受徽标/显隐影响。 */
+              aria-label={t.label}
             >
               <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
               <span className="detail-tab-label">{t.label}</span>
-              {count !== undefined && <span className="detail-tab-count num">{count}</span>}
+              {count !== undefined && (
+                <span className="detail-tab-count num" aria-hidden="true">
+                  {count}
+                </span>
+              )}
             </button>
           );
         })}
@@ -522,6 +537,8 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream }: { co
   const [tip, setTip] = useState<TipState | null>(null);
   const visibleRef = useRef<AgentEvent[]>([]);
   const lastRowRef = useRef<HTMLElement | null>(null);
+  /* run 分组派生：events 引用不变则不重算（流式每帧 delta 不触发全量重分组）。 */
+  const runGroups = useMemo(() => groupEventsByRun(conversation.events), [conversation.events]);
 
   // 滚动/缩放即隐藏（fixed 定位不随容器滚动，留着会错位）。
   useEffect(() => {
@@ -586,7 +603,7 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream }: { co
       {/* UI-03：run 分组头——按 run_id 首现顺序插入分隔行（序数取自**全会话**
           遍历，尾窗裁剪后组号不重排）；组与窗口的交集非空才渲染头。
           data-tl-i 仍是 visible 窗口内下标（hover 反查契约不变）。 */}
-      {groupEventsByRun(conversation.events).map((g) => {
+      {runGroups.map((g) => {
         const from = Math.max(g.start, hidden);
         const to = Math.min(g.start + g.count, total);
         if (from >= to) return null;
@@ -594,7 +611,6 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream }: { co
           <Fragment key={g.start}>
             <div
               className="tl-run-header"
-              role="separator"
               title={g.runId ? `run ${g.runId}` : '会话开场（无 run 归属）'}
             >
               <span className="tl-run-name">{g.runId ? `Run ${g.ordinal}` : '会话'}</span>

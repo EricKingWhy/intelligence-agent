@@ -387,9 +387,11 @@ export const SessionList = memo(function SessionList({
               })}
             </>
           ) : (
-            // 「还没有项目」只在**确实知道**项目为空时说：列表请求失败时 `projects`
-            // 也是空的，这时说"还没有项目"是一句与错误条自相矛盾的话（用户可能注册过）。
-            !showEmpty &&
+            // 「还没有项目」在项目区为空时显示（UI-05 的空态文案 + 行动链接）。
+            // projectsError 已单独兜住「列表请求失败」的情形（上方错误条），
+            // 这里不再需要第二个条件——此前挂的 `!showEmpty` 恰好把真·空态
+            // （sessions 与 projects 都为 0）下的文案整段吞掉，与文字按钮指涉
+            // 自相矛盾，正是本票要消灭的断点。
             !projectsError && (
               <div className="rail-project-empty rail-project-empty-first">
                 还没有项目。注册一个已存在的目录，同目录的会话就会归到一起。
