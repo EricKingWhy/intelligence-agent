@@ -85,19 +85,25 @@ def _namespace_matches(namespace_json: str, scope: str, identity: IdentityContex
 
 
 def _parse_operation(row: aiosqlite.Row) -> MemoryOperation:
-    """outbox 的 operation 列 → 枚举；不认识的值按"期望状态 = 不存在"处理。
+    """outbox 的 operation 列 → 枚举；不认识的值按 **UPSERT** 处理（非破坏性方向）。
 
     不能假设磁盘上的值一定合法（见 `_migrate_outbox` 的 CHECK 说明）：这里直接抛错会
     让 `pending()` 每轮都失败，而 relay 把异常当"outbox 不可用"咽掉——索引静默停止收敛。
-    脏值先告警，再按删除处理（与"记录行已不在"的自愈同一个方向）；记录行不受影响，
-    下一次写入会重新同步。
+    脏值先告警，再**按记录行的权威内容重新索引**：
+
+    - 记录行还在 → 索引被写回正确内容，自愈（唯一受损的是"这个值看不懂"这件事本身）；
+    - 记录行已不在 → `_change` 既有的 "content is None → DELETE" 路径照旧收敛为删除。
+
+    刻意**不**按删除处理：对一条还活着的记录，删除会先清掉索引里的正确内容，随后
+    `acknowledge` 又对残留的记录行写上 `indexed=TRUE` 并移除 outbox 行——记忆变得既搜不到
+    又声称已索引、且没有任何待办意图去修，那是静默丢失，比"停在一个看得见的坏状态"糟。
     """
     try:
         return MemoryOperation(row["operation"])
     except ValueError:
-        logger.warning("Memory outbox entry %s has unknown operation %r; treating as delete",
+        logger.warning("Memory outbox entry %s has unknown operation %r; treating as upsert",
                        row["memory_id"], row["operation"])
-        return MemoryOperation.DELETE
+        return MemoryOperation.UPSERT
 
 
 def _routing_identity(row: aiosqlite.Row) -> IdentityContext:

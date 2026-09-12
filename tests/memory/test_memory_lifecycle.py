@@ -372,9 +372,10 @@ async def test_initialize_completes_a_half_migrated_outbox(tmp_path, caplog):
 
     # 这条路径**补不上** CHECK（SQLite 不支持给既有列追加约束，见 `_migrate_outbox`），
     # 所以约束缺席时的兜底是 `_parse_operation` 的自愈：脏值不得让 `pending()` 每轮抛错
-    # （那会被 relay 当"outbox 不可用"咽掉 → 索引静默停止收敛），而是按"期望状态 =
-    # 不存在"处理并留痕。记录行与路由事实都在，所以这条断言确实区分了"自愈为删除"与
-    # "当 upsert"（后者会带着 secret 去写索引）。
+    # （那会被 relay 当"outbox 不可用"咽掉 → 索引静默停止收敛）。方向必须是**非破坏性
+    # 的 upsert**：记录行还在，就按权威内容把索引写回去。按删除处理会先清掉索引里的
+    # 正确内容，随后 `acknowledge` 又给残留的记录行写上 `indexed=TRUE` 并移除 outbox 行
+    # ——记忆搜不到、还声称已索引、且没有任何待办意图去修（静默丢失）。
     with sqlite3.connect(path) as db:
         db.execute("INSERT INTO memory_outbox"
                    " (memory_id, revision, operation, tenant_id, user_id, scope, namespace)"
@@ -383,7 +384,14 @@ async def test_initialize_completes_a_half_migrated_outbox(tmp_path, caplog):
         db.commit()
     with caplog.at_level(logging.WARNING, logger=RECORD_STORE_LOGGER):
         healed = await records.pending()
-    assert [change.operation for change in healed] == [MemoryOperation.DELETE]
+    assert [change.operation for change in healed] == [MemoryOperation.UPSERT]
+    assert healed[0].entry is not None and healed[0].entry.content == "secret"
     assert "unknown operation" in caplog.text and "m1" in caplog.text
     assert (await records.get("m1", ALICE)).content == "secret"  # 记录行不受脏值影响
+
+    # 走一遍 relay，证明自愈真的是"重新索引"而不是"清掉"：索引里有内容、记录行未被
+    # 谎报为已索引（按删除自愈过的实现会在这里变成 search 空 + indexed=TRUE）。
+    vectors = FakeVectorStore()
+    assert await OutboxRelay(records, vectors).flush() == 1
+    assert await vectors.search("secret", ALICE, MemoryScope.USER, 5) == [("m1", 1.0)]
 

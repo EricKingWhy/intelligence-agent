@@ -85,6 +85,13 @@ ADR-0008（Memory Capability 架构）、ADR-0009（Memory namespace 与 scope �
 - `pending()` 改为**以 outbox 为驱动表**（`LEFT JOIN memory_records`）。
 - **孤儿自愈**：outbox 说 upsert、记录行却已不在（升级前遗留 / 绕过契约的删除）→ 按"期望
   状态 = 不存在"处理并记 warning。索引里可能正留着残留，这是唯一能清掉它的机会。
+- **脏 `operation` 自愈（方向 = 非破坏性的 upsert）**：`operation` 值不认识时不能抛错——会让
+  `pending()` 每轮失败、被 relay 当"outbox 不可用"咽掉 → 索引静默停止收敛；也不能按删除
+  处理：对一条还活着的记录，删除先清掉索引里的正确内容，`acknowledge` 随后又给残留的记录行
+  写上 `indexed=TRUE` 并移除 outbox 行 → 记忆搜不到、还声称已索引、且无待办意图去修（静默
+  丢失，比"停在看得见的坏状态"更糟）。按 upsert 两个方向都收敛且不丢数据：记录行还在 → 用
+  权威内容重新索引；记录行已不在 → 由上一条孤儿自愈收敛为删除。CHECK 只在补列时装（SQLite
+  不能给既有列追加约束），所以这条兜底是无 CHECK 老库上的唯一防线。
 
 ### D4. 并发：内容 last-write-wins，`revision` 是索引同步的乐观令牌
 
