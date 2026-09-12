@@ -920,6 +920,43 @@ class TestBootstrap:
         assert [w.title for w in listed] == ["proj"]
         assert listed[0].session_ids == ("user-1",), "内部子代理不该被引导收进项目"
 
+    async def test_internal_child_in_ledger_is_not_a_member(self, tmp_path: Path) -> None:
+        """账本里**已有**的内部子代理同样不算成员（账本是候选列表，成员资格现算）。
+
+        这条堵的是"只在引导处过滤"的半套规则：那样一来，任何别处（历史数据、外部
+        写入、以后新增的会话种类）把子会话放进账本，它就会作为成员冒出来。
+        """
+        headers = _FakeHeaders()
+        project = _project(tmp_path, "proj")
+        headers.add("user-1", _canon(project), agent_id="default")
+        index = _index(tmp_path, headers)
+        await index.initialize()
+        workspace = await index.create(project)
+        headers.add("child-1", _canon(project), agent_id="coding")
+
+        # 外部手段把子会话塞进账本（绕过 attach 的成员校验）
+        await _store(tmp_path).replace_session_order(workspace.id, ["child-1", "user-1"])
+
+        reborn = _index(tmp_path, headers)
+        await reborn.initialize()
+        assert reborn.list()[0].session_ids == ("user-1",)
+        assert reborn.workspace_of_session("child-1") is None
+
+    async def test_only_children_directory_mints_no_project(self, tmp_path: Path) -> None:
+        """只装着内部子代理的目录**不产生项目**。
+
+        成员资格过滤（`_filter_visible`）已经保证子会话不算成员；引导这一层的过滤是
+        为了不"凭空建一个永远空的项目"——父会话日志没了、只剩子会话的历史目录就是
+        这种形状。两条规则各管一件事，所以各有各的用例。
+        """
+        headers = _FakeHeaders()
+        project = _project(tmp_path, "child-only")
+        headers.add("child-1", _canon(project), agent_id="coding")
+        headers.add("child-2", _canon(project), agent_id="research_review")
+        index = _index(tmp_path, headers)
+        await index.initialize()
+        assert index.list() == [], "只装着内部子代理的目录不该凭空成为一个项目"
+
     async def test_bootstrap_runs_only_once(self, tmp_path: Path) -> None:
         """AC16：引导只发生一次；此后新建会话只能通过 attachSession 加入。"""
         headers = _FakeHeaders()

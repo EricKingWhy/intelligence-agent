@@ -401,11 +401,12 @@ class WorkspaceIndex:
             if header is None or not header.cwd:
                 continue
             if _is_internal_child(header):
-                # 内部子代理不进项目账本：运行期**没有**任何路径 attach 它们
-                # （`multiagent/provider.py` 直接 `Session(...)` + append，
-                # 只有 `SessionService.create_and_launch`/`fork` 会 attach），
-                # 所以若引导把它们收进账本，"同一类会话是否出现在项目里"就取决于
-                # 它生于引导标记之前还是之后——这是同一份数据两种答案。
+                # 内部子代理**不进项目账本**（成员资格也在 `_filter_visible` 里挡，
+                # 这里挡是为了不给"只装着子会话的目录"凭空建一个空项目）。
+                # 运行期没有任何路径 attach 它们（`multiagent/provider.py` 直接
+                # `Session(...)` + append，只有 `SessionService.create_and_launch`/
+                # `fork` 会 attach），所以若引导把它们收进账本，"同一类会话是否出现
+                # 在项目里"就取决于它生于引导标记之前还是之后——同一份数据两种答案。
                 continue
             cwd = header.cwd
             if not os.path.isabs(cwd) or canonical_workspace_path(cwd) != cwd:
@@ -468,12 +469,21 @@ class WorkspaceIndex:
             return None
 
     def _filter_visible(self, record: Workspace, ids: list[str]) -> list[str]:
+        """成员资格过滤（AC6）：候选只有在"属于这个项目"时才返回。
+
+        三道闸，缺一不可：有 header、header cwd 逐字符等于项目 path、**不是内部子代理
+        子会话**。账本因此是**候选列表**而不是成员列表——这是 D3"账本=索引"的落地：
+        索引可以多存（历史遗留、外部写入、以后新增的会话种类），成员资格永远在这里
+        现算。
+        """
         kept: list[str] = []
         for session_id in ids:
             header = self._read_header(session_id)
             if header is None or not header.cwd:
                 continue
             if header.cwd != record.path:
+                continue
+            if _is_internal_child(header):
                 continue
             kept.append(session_id)
         return kept
