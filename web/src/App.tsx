@@ -15,16 +15,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Columns2, Eye, KeyRound, MessageSquare, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
+import { useProjects } from './hooks/useProjects';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
+import { MemoryPanel } from './components/MemoryPanel';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
+import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
@@ -52,21 +55,9 @@ const WORKSPACE_MODES: readonly { id: WorkspaceMode; label: string; icon: typeof
 
 /** 分叉请求的兜底超时。`forkInFlightRef` 只在 `finally` 里复位——请求若既不
  *  resolve 也不 reject（socket 挂死），按钮会被永久静默禁用，正是本 ticket 要
- *  消灭的那类「点了没反应」。api 层没有统一超时（其余请求同病），这里只兜 fork
- *  这一处；代价是极端情况下后端其实已建好 child、客户端却报超时（用户重试会多
- *  一个 child），比死按钮可接受。 */
+ *  消灭的那类「点了没反应」。超时实现见 `lib/timeout`（记忆删除也用同一份，
+ *  两个用途的语义提醒都写在那里）；api 层没有统一超时（其余请求同病）。 */
 const FORK_TIMEOUT_MS = 30_000;
-
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer = 0;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(
-      () => reject(new Error(`${label}超时（${Math.round(ms / 1000)}s）`)),
-      ms,
-    );
-  });
-  return Promise.race([p, timeout]).finally(() => window.clearTimeout(timer));
-}
 
 export default function App() {
   // ── Workspace 模式（Phase 1d，方案 B）──
@@ -96,6 +87,34 @@ export default function App() {
     changeModel,
     fork,
   } = useSession();
+
+  // ── 项目（WS-5 / #155）──
+  // 侧栏"项目 → 会话"层级的数据源：**成员与顺序只有项目账本一个真相**
+  // （GET /api/projects 的 session_ids，注册表序 + 手工序）；每行的
+  // SessionSummary.workspace 只用来解释"自称属于某项目、但该项目不在列表里"的孤儿行，
+  // 不参与判定归属（详见 lib/projects.ts 文件头注释）。前端只做投影（不变量 #22）。
+  //
+  // 为什么跟着 sessions 变：新会话（命名 workspace）、fork child、recover 都可能在
+  // 后端**顺带**改变项目归属（#152 的 attach 接线），而它们唯一的信号就是会话列表被
+  // 重新拉取。所以"列表刷新 ⇒ 项目重拉"是保持两个视图一致的最小机制；sessions 只在
+  // refreshSessions 里换引用，不会随流式 delta 变化，不构成每帧请求。
+  const {
+    projects,
+    loadError: projectsError,
+    refresh: refreshProjects,
+    actions: projectActions,
+  } = useProjects();
+  useEffect(() => {
+    void refreshProjects();
+  }, [sessions, refreshProjects]);
+
+  // 「重试」同时重拉两个列表：项目列表失败时会话列表很可能也失败过（同一次网络
+  // 抖动），只修一个会留下一个"半新鲜"的侧栏。必须 useCallback——SessionList 是
+  // memo 组件，内联箭头会让它在每次流式 delta 上整片重渲染（同 handleSelect 一列）。
+  const handleRetryProjects = useCallback(() => {
+    void refreshProjects();
+    void refreshSessions();
+  }, [refreshProjects, refreshSessions]);
 
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
   // 401 由 api.ts 统一拦截并广播；这里只负责展示引导横幅。配置 token 后
@@ -424,6 +443,8 @@ export default function App() {
 
   // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
+  const [memoriesOpen, setMemoriesOpen] = useState(false);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {
@@ -519,6 +540,14 @@ export default function App() {
         group: 'actions',
         run: () => document.getElementById('composer-input')?.focus(),
       },
+      {
+        id: 'manage-memories',
+        label: '管理记忆',
+        keywords: 'memory memories forget delete 记忆 遗忘 删除 忘记',
+        hint: '记忆库',
+        group: 'actions',
+        run: () => setMemoriesOpen(true),
+      },
     ];
     // trace_id 缺则 Copy Trace ID 不出现；trace_url 缺则 Open Trace 不出现
     // （Langfuse 未启用时两者都 null，两个命令都移除；启用时 Copy 恒在、Open 看 trace_url）。
@@ -583,16 +612,22 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         authRequired={authRequired}
+        onOpenMemories={() => setMemoriesOpen(true)}
       />
 
       <main className={`app-regions ${inspectorOpen ? '' : 'inspector-closed'}`}>
         <SessionList
           sessions={sessions}
+          projects={projects}
           selectedId={selectedId}
           liveSessionId={streaming ? selectedId : null}
           titlesById={titlesById}
           onSelect={handleSelect}
           onNew={handleNew}
+          projectActions={projectActions}
+          onSessionsChanged={refreshSessions}
+          projectsError={projectsError}
+          onRetryProjects={handleRetryProjects}
         />
 
         <section className="app-workspace">
@@ -762,6 +797,7 @@ export default function App() {
       </main>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} items={paletteItems} />
+      <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
     </div>
   );
 }

@@ -6,7 +6,16 @@
  * thrown as UnauthorizedError so callers surface the guidance path.
  */
 
-import type { AgentEvent, SessionSummary } from '../types';
+import type {
+  AgentEvent,
+  MemoryDeleted,
+  MemoryScope,
+  MemorySummary,
+  Project,
+  ProjectDeleted,
+  ProjectStatus,
+  SessionSummary,
+} from '../types';
 import { emitUnauthorized, getToken } from './auth';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
@@ -28,12 +37,29 @@ export class NotFoundError extends Error {}
  *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
 export class AlreadyResolvedError extends Error {}
 
-/** FastAPI 错误体 {detail} 读取：形状不符或 JSON 解析失败返回 ''——
- *  错误处理路径自身不再产生新错误（两处 401/409 消费共享的单一实现）。 */
+/** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
+ *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
+ *
+ *  `detail` 有**两种合法形状**，两者都要认：
+ *  - `string`：端点自己 `raise HTTPException(detail=…)` —— 后端的可行动中文原因；
+ *  - `Array<{loc, msg, type}>`：Pydantic 请求体校验失败的固定形状（422）。不认它
+ *    就会把"path 必须是绝对路径"降级成"注册项目失败（422）"，把最该看懂的一条
+ *    提示扔在门外。只取 `msg` 并剥掉 Pydantic 自己的 `Value error, ` 前缀——
+ *    用户要看的是规则的结论，不是校验器的转述层。 */
 async function readErrorDetail(res: Response): Promise<string> {
   try {
-    const j = await res.json();
-    return j && typeof j.detail === 'string' ? j.detail : '';
+    const j = (await res.json()) as { detail?: unknown } | null;
+    const detail = j?.detail;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .flatMap((item) => {
+          const msg = (item as { msg?: unknown } | null)?.msg;
+          return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
+        })
+        .join('；');
+    }
+    return '';
   } catch {
     return '';
   }
@@ -461,5 +487,277 @@ export async function forkSession(
     throw new Error(detail || `fork ${res.status}`);
   }
   return res.json();
+}
+
+// ── Projects（WS-4 / #154 端点，WS-5 / #155 前端消费）──
+
+/** 项目操作失败——带 HTTP 状态码，调用方据此给**具体**原因而不是"操作失败"。
+ *
+ *  状态码语义（后端 `domain_errors.py` 两张表 + `web/projects.py`）：
+ *  - 403：跨源被来源闸拒绝（ADR-0025 D1）——本地信任模式下非本机 Origin；
+ *  - 404：项目 id 不存在 / 注册的路径不存在（create 不会 mkdir）；
+ *  - 409：请求与账本现状冲突——attach 时会话 cwd 与项目路径不一致，
+ *    或重排锚点不在该项目账本里；
+ *  - 422：入参形态非法——非绝对路径 / 该路径不是目录 / 标题空白。
+ *
+ *  `detail` 是后端给的中文原因（可能为空）：调用方优先显示它。 */
+export class ProjectError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 把项目写操作的异常翻成给用户看的一句话（对话框与侧栏错误条共用）。
+ *
+ *  `ProjectError` 优先用**后端 detail**——409 会给出"会话 cwd 与项目路径不一致"
+ *  这类可行动原因，翻译成"操作失败"等于把它扔掉；其余异常用 `message`；都没有才
+ *  用调用方的兜底文案。 */
+export function describeProjectError(error: unknown, fallback: string): string {
+  if (error instanceof ProjectError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
+}
+
+/** 按路径把目录注册为项目（幂等：同规范路径 → 返回既有实体）。
+ *  路径不存在 → ProjectError(404)；非绝对路径 → ProjectError(422)。 */
+export async function createProject(path: string, title?: string | null): Promise<Project> {
+  const res = await apiFetch('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(title ? { path, title } : { path }),
+  });
+  if (!res.ok) throw await projectError(res, '注册项目失败');
+  return requireProject(await res.json());
+}
+
+/** 全部项目（**注册表顺序**，新建项目前插）。空数组 ≠ 出错：调用方据此显示
+ *  「还没有项目」而不是错误横幅。 */
+export async function listProjects(): Promise<Project[]> {
+  const res = await apiFetch('/api/projects');
+  if (!res.ok) throw await projectError(res, '加载项目失败');
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) return [];
+  // 形状不符的单条丢弃（零伪造）——但**不因此丢掉其余项目**。
+  return body.flatMap((raw) => {
+    const p = parseProject(raw);
+    return p ? [p] : [];
+  });
+}
+
+/** 重命名项目（`setTitle`）。 */
+export async function renameProject(projectId: string, title: string): Promise<Project> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw await projectError(res, '重命名失败');
+  return requireProject(await res.json());
+}
+
+/** **软删除**项目：只摘注册记录与账本，目录/用户文件/会话日志一概不动，
+ *  成员会话回到未分组。响应 `detail` 必须原样展示给用户（AC5）。 */
+export async function deleteProject(projectId: string): Promise<ProjectDeleted> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await projectError(res, '删除项目失败');
+  // 形状防御：非对象（null / 数组 / 字符串）一律当"没给"处理，别让读字段抛
+  // TypeError——那时调用方拿到的是"读属性失败"，而不是"软删除成功了但回执为空"。
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProjectDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : projectId,
+    deleted: body.deleted === true,
+    sessions_detached:
+      typeof body.sessions_detached === 'number' ? body.sessions_detached : 0,
+    detail: typeof body.detail === 'string' ? body.detail : '',
+  };
+}
+
+/** 把会话加入项目（幂等）。会话不存在/无 cwd → 404；cwd 与项目路径不一致 → 409。 */
+export async function attachSessionToProject(
+  projectId: string,
+  sessionId: string,
+): Promise<Project> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) throw await projectError(res, '加入项目失败');
+  return requireProject(await res.json());
+}
+
+/** 把会话移出项目（幂等：不在本项目 → 无写操作；会话日志逐字节不动）。 */
+export async function detachSessionFromProject(
+  projectId: string,
+  sessionId: string,
+): Promise<Project> {
+  const res = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE' },
+  );
+  if (!res.ok) throw await projectError(res, '移出项目失败');
+  return requireProject(await res.json());
+}
+
+/** 项目内重排（DOM `insertBefore` 语义：`before=null` → 追加尾部）。
+ *  锚点不在该项目账本里 → ProjectError(409)。 */
+export async function reorderProjectSession(
+  projectId: string,
+  sessionId: string,
+  before: string | null,
+): Promise<Project> {
+  const res = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/order`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ before }),
+    },
+  );
+  if (!res.ok) throw await projectError(res, '调整顺序失败');
+  return requireProject(await res.json());
+}
+
+/** 非 2xx → ProjectError（detail 优先，缺失时用调用方给的兜底前缀 + 状态码）。 */
+async function projectError(res: Response, fallback: string): Promise<ProjectError> {
+  const detail = await readErrorDetail(res);
+  return new ProjectError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 记忆请求失败：状态码 + 后端 detail 原文（detail 优先，是 AC 要展示的那句话）。 */
+export class MemoryError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 记忆列表（GET /api/memories，**按创建时间倒序**分页）。
+ *
+ *  `limit` 由后端夹在 1..200（本函数不猜上界，越界由后端 422 说话）；`offset` 是
+ *  「跳过的条数」——"加载更多"传已显示的条数。空数组 ≠ 出错：调用方据此显示
+ *  「还没有记忆」而不是错误横幅（与 `listProjects` 同一条纪律）。
+ *
+ *  形状不符的单条**丢弃但不牵连其余**：一条坏行不能把整页变成"加载失败"。
+ */
+export async function listMemories(limit = 50, offset = 0): Promise<MemorySummary[]> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const res = await apiFetch(`/api/memories?${params.toString()}`);
+  if (!res.ok) throw await memoryError(res, '加载记忆失败');
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) return [];
+  return body.flatMap((raw) => {
+    const memory = parseMemory(raw);
+    return memory ? [memory] : [];
+  });
+}
+
+/** 硬删一条记忆（DELETE /api/memories/{id}）——**不可恢复**，调用方必须先二次确认。
+ *
+ *  状态码语义（后端 `web/memory.py` 的契约，前端不合并它们）：
+ *    200 `{id, deleted:true}` / 404 id 不存在 / 403 不属于当前入口 / 503 记忆未装配。
+ *  404 与 403 都**不**当成功：用户对着具体一条点删除，"已经不在了"与"不给删"是
+ *  两种不同结果，UI 要分别说（这也是前端不维护第二套真相的必然要求——本地删掉
+ *  而后端拒绝会直接违背不变量 #22）。
+ */
+export async function deleteMemory(memoryId: string): Promise<MemoryDeleted> {
+  const res = await apiFetch(`/api/memories/${encodeURIComponent(memoryId)}`, { method: 'DELETE' });
+  if (!res.ok) throw await memoryError(res, '删除记忆失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<MemoryDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : memoryId,
+    deleted: body.deleted === true,
+  };
+}
+
+/** 非 2xx → MemoryError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
+async function memoryError(res: Response, fallback: string): Promise<MemoryError> {
+  const detail = await readErrorDetail(res);
+  return new MemoryError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 记忆能力未装配（503）——**配置状态，不是故障**：UI 要显示「记忆未启用」而不是
+ *  "加载失败/重试"，否则用户会一直点重试去修一个不存在的故障（不变量 #21）。 */
+export function isMemoryDisabled(error: unknown): boolean {
+  return error instanceof MemoryError && error.status === 503;
+}
+
+/** 记忆错误 → 展示文案：MemoryError 的 message 就是后端 detail（或兜底前缀），
+ *  其余异常（网络层 TypeError 等）用 message 或 fallback。与 `describeProjectError`
+ *  同构但**分开**：两个能力各自演进，共用一个会让某一侧的语义渗到另一侧。 */
+export function describeMemoryError(error: unknown, fallback: string): string {
+  if (error instanceof MemoryError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
+}
+
+/** 窄化解析一条记忆（零伪造）：id/content/created_at 必须是非空字符串、scope 必须是
+ *  已知取值、metadata 必须是对象；任一不符 → null。**不补默认值**：`scope` 猜错会让
+ *  用户以为这条记在别的名下，`created_at` 补空串会让"记于何时"变成谎言。 */
+function parseMemory(raw: unknown): MemorySummary | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  const { id, content, created_at: createdAt, scope, metadata } = row;
+  if (typeof id !== 'string' || !id) return null;
+  if (typeof content !== 'string') return null;
+  if (typeof createdAt !== 'string' || !createdAt) return null;
+  if (scope !== 'user' && scope !== 'session') return null;
+  return {
+    id,
+    content,
+    scope: scope as MemoryScope,
+    metadata: typeof metadata === 'object' && metadata !== null
+      ? (metadata as Record<string, unknown>)
+      : {},
+    created_at: createdAt,
+  };
+}
+
+/** 窄化解析项目（零伪造）：id/path/title/session_ids 形状不符 → null（调用方丢弃该条）。
+ *
+ *  `status` 是**例外**：只有明确等于 `'missing-dir'` 才取该值，其余（含未知字符串、
+ *  缺失）一律 `'ok'`。理由——它是"目录可能不见了"的**告警标志**，不是存在性断言；
+ *  把未知值当告警会让每条项目都亮黄点（假告警），而把项目整条丢掉更糟：项目会从
+ *  UI 消失、它的会话被误判成未分组。未知状态值不值得付出这两个代价。 */
+function parseProject(raw: unknown): Project | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== 'string' || !r.id) return null;
+  if (typeof r.path !== 'string' || !r.path) return null;
+  if (typeof r.title !== 'string') return null;
+  const sessionIds = Array.isArray(r.session_ids)
+    ? r.session_ids.filter((v): v is string => typeof v === 'string' && v.length > 0)
+    : [];
+  return {
+    id: r.id,
+    path: r.path,
+    title: r.title,
+    status: normalizeProjectStatus(r.status),
+    session_ids: sessionIds,
+    created_at: typeof r.created_at === 'string' ? r.created_at : '',
+    updated_at: typeof r.updated_at === 'string' ? r.updated_at : '',
+  };
+}
+
+/** 单实体端点：200 但形状不符 → **响亮失败**而不是返回伪造项目。
+ *  （列表端点相反：丢掉坏条目、保留其余，见 `listProjects`——一条坏数据不该让整
+ *  个侧栏空掉，但一个"注册成功"的假实体更糟：它会让 UI 显示一个后端并不存在的项目。） */
+function requireProject(raw: unknown): Project {
+  const project = parseProject(raw);
+  if (!project) {
+    throw new Error('项目响应形状不符（后端契约可能已变更）');
+  }
+  return project;
+}
+
+function normalizeProjectStatus(raw: unknown): ProjectStatus {
+  return raw === 'missing-dir' ? 'missing-dir' : 'ok';
 }
 

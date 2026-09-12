@@ -3,18 +3,31 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  attachSessionToProject,
+  createProject,
+  deleteMemory,
+  deleteProject,
+  describeMemoryError,
+  detachSessionFromProject,
   getModels,
   getSessionEvents,
+  isMemoryDisabled,
+  listMemories,
+  listProjects,
   listSessions,
+  MemoryError,
   NotFoundError,
+  ProjectError,
   UnauthorizedError,
   AlreadyResolvedError,
   postApproval,
+  renameProject,
+  reorderProjectSession,
   sendMessage,
   startSession,
 } from './api';
 import { onUnauthorized } from './auth';
-import type { SessionSummary } from '../types';
+import type { MemorySummary, Project, SessionSummary } from '../types';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
 function captureFetch(
@@ -141,7 +154,7 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
   });
 });
 
-describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () => {
+describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url / WS-3 #153：workspace）', () => {
   /** 后端 `GET /api/sessions` 一行的 canonical 形状，与
    *  `src/agent_harness/web/app.py::SessionSummary` 逐字段对齐。
    *
@@ -149,7 +162,9 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () =
    *  ① 类型新增必填字段 → 本 fixture 缺键 → `tsc -b` 红；
    *  ② fixture 多出类型没声明的键 → 对象字面量多余属性检查 → 红。
    *  后端侧权威锁（断言**值**，能抓住「键在但值是 null」的漏映射）：
-   *  `tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`。
+   *  `tests/test_web_api.py::test_list_sessions_carries_terminal_trace_url`
+   *  与 `tests/web/test_session_list_workspace.py::
+   *  test_rows_carry_real_workspace_and_ungrouped_is_null`。
    */
   const CANONICAL_ROW: SessionSummary = {
     session_id: 's1',
@@ -159,6 +174,7 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () =
     first_user_message: '标题',
     trace_id: 'tr-1',
     trace_url: 'https://lf.example/trace/tr-1',
+    workspace: { id: 'w1', title: '项目甲' },
   };
 
   it('原样保留 trace_url（fetch 层不重排/不丢键/不重命名）', async () => {
@@ -172,6 +188,18 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url）', () =
     const rows = await listSessions();
     expect(rows[0].trace_id).toBeNull();
     expect(rows[0].trace_url).toBeNull();
+  });
+
+  it('原样保留 workspace（嵌套对象不被 fetch 层拍平/改名）', async () => {
+    captureFetch(200, [CANONICAL_ROW]);
+    const rows = await listSessions();
+    expect(rows[0].workspace).toEqual({ id: 'w1', title: '项目甲' });
+  });
+
+  it('未分组会话：workspace 保持 null（绝不伪造项目，不变量 #21）', async () => {
+    captureFetch(200, [{ ...CANONICAL_ROW, workspace: null }]);
+    const rows = await listSessions();
+    expect(rows[0].workspace).toBeNull();
   });
 });
 
@@ -299,3 +327,342 @@ describe('postApproval — 409 幂等 vs 500 真失败（OBS-015）', () => {
   });
 });
 
+
+// ── Projects（WS-4 / #154 契约，WS-5 / #155 前端消费）──
+
+/** 项目端点用：记录 method + url + body，并可回一个带 detail 的错误体。
+ *  （与顶部 captureFetch 的区别：那个不带 method，而本组要断言动词与子路径。） */
+function captureProjectFetch(
+  status = 200,
+  body: unknown = {},
+): { calls: { method: string; url: string; body: Record<string, unknown> }[] } {
+  const calls: { method: string; url: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        method: init?.method ?? 'GET',
+        url: String(url),
+        body:
+          typeof init?.body === 'string'
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : {},
+      });
+      return new Response(JSON.stringify(body), { status });
+    }),
+  );
+  return { calls };
+}
+
+describe('projects — WS-4 端点契约（#154；窄化解析 + 状态码归类）', () => {
+  /** 后端 `web/projects.py::Project` 的 canonical 形状。
+   *  类型注解在编译期锁一致性（与 SessionSummary 同一手法）：后端加必填字段、
+   *  或此处多出类型未声明的键 → `tsc -b` 红。 */
+  const CANONICAL_PROJECT: Project = {
+    id: 'p1',
+    path: 'D:/repos/alpha',
+    title: 'alpha',
+    status: 'ok',
+    session_ids: ['s1', 's2'],
+    created_at: '2026-09-12T00:00:00Z',
+    updated_at: '2026-09-12T00:00:00Z',
+  };
+
+  it('listProjects：解析全部字段，账本序原样保留（前端不重排）', async () => {
+    captureProjectFetch(200, [
+      CANONICAL_PROJECT,
+      { ...CANONICAL_PROJECT, id: 'p2', session_ids: [] },
+    ]);
+    const projects = await listProjects();
+    expect(projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    expect(projects[0].session_ids).toEqual(['s1', 's2']);
+    expect(projects[0].path).toBe('D:/repos/alpha');
+  });
+
+  it('listProjects：畸形条目剔除、其余保留（一条坏数据不得让整列表消失）', async () => {
+    captureProjectFetch(200, [
+      { id: 'ok', path: 'D:/x', title: 'x', session_ids: ['s1'], status: 'ok' },
+      { path: 'D:/no-id', title: 'no id' }, // 缺 id → 剔除
+      { id: 'no-path', title: 'no path' }, // 缺 path → 剔除
+      { id: 'no-title', path: 'D:/y' }, // 缺 title → 剔除
+      'garbage',
+      null,
+    ]);
+    const projects = await listProjects();
+    expect(projects.map((p) => p.id)).toEqual(['ok']);
+  });
+
+  it('listProjects：session_ids 非字符串元素过滤；缺失 → 空账本', async () => {
+    captureProjectFetch(200, [
+      { id: 'p1', path: 'D:/x', title: 'x', session_ids: ['a', 7, null, '', 'b'] },
+      { id: 'p2', path: 'D:/y', title: 'y' },
+    ]);
+    const projects = await listProjects();
+    expect(projects[0].session_ids).toEqual(['a', 'b']);
+    expect(projects[1].session_ids).toEqual([]);
+  });
+
+  it('listProjects：status 只认 missing-dir，未知值按 ok（告警标志不得整条丢项目）', async () => {
+    captureProjectFetch(200, [
+      { ...CANONICAL_PROJECT, id: 'miss', status: 'missing-dir' },
+      { ...CANONICAL_PROJECT, id: 'weird', status: 'something-else' },
+      { ...CANONICAL_PROJECT, id: 'absent' },
+    ]);
+    const projects = await listProjects();
+    expect(projects.map((p) => p.status)).toEqual(['missing-dir', 'ok', 'ok']);
+  });
+
+  it('listProjects：顶层不是数组 → 空数组（降级为"没有项目"，会话仍全部可见）', async () => {
+    captureProjectFetch(200, { projects: [] });
+    expect(await listProjects()).toEqual([]);
+  });
+
+  it('createProject：只带 path（无标题）→ body 不含 title 键', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await createProject('D:/repos/alpha');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('/api/projects');
+    expect(calls[0].body).toEqual({ path: 'D:/repos/alpha' });
+  });
+
+  it('createProject：带标题 → body 含 title；返回实体原样解析', async () => {
+    const { calls } = captureProjectFetch(200, { ...CANONICAL_PROJECT, title: '自定义' });
+    const p = await createProject('D:/repos/alpha', '自定义');
+    expect(calls[0].body).toEqual({ path: 'D:/repos/alpha', title: '自定义' });
+    expect(p.title).toBe('自定义');
+  });
+
+  it('createProject：路径不存在（404）→ ProjectError(404) 且带后端 detail', async () => {
+    captureProjectFetch(404, { detail: '目录不存在' });
+    const err = await createProject('D:/nope').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProjectError);
+    expect((err as ProjectError).status).toBe(404);
+    expect((err as ProjectError).message).toBe('目录不存在');
+  });
+
+  it('createProject：非绝对路径（422）→ ProjectError(422)，不被当成"路径不存在"', async () => {
+    captureProjectFetch(422, { detail: 'path must be an absolute path' });
+    const err = await createProject('relative/dir').catch((e: unknown) => e);
+    expect((err as ProjectError).status).toBe(422);
+    expect((err as ProjectError).message).toBe('path must be an absolute path');
+  });
+
+  it('createProject：Pydantic 422（detail 是数组）→ 取出 msg 并剥掉 "Value error, " 前缀', async () => {
+    // 真后端对非绝对路径走的是**请求体校验器**，FastAPI 回的 detail 不是字符串而是
+    // 数组。只认字符串会把最该看懂的一条提示降级成"注册项目失败（422）"。
+    captureProjectFetch(422, {
+      detail: [
+        {
+          type: 'value_error',
+          loc: ['body', 'path'],
+          msg: "Value error, path must be an absolute path: 'relative/dir'",
+        },
+      ],
+    });
+    const err = await createProject('relative/dir').catch((e: unknown) => e);
+    expect((err as ProjectError).status).toBe(422);
+    expect((err as ProjectError).message).toBe(
+      "path must be an absolute path: 'relative/dir'",
+    );
+  });
+
+  it('deleteProject：200 但 body 是 null → 不抛 TypeError，按"没给回执"处理', async () => {
+    captureProjectFetch(200, null);
+    const result = await deleteProject('p1');
+    expect(result.id).toBe('p1');
+    expect(result.deleted).toBe(false);
+    expect(result.sessions_detached).toBe(0);
+    expect(result.detail).toBe('');
+  });
+
+  it('renameProject：PATCH /api/projects/{id} + body.title', async () => {
+    const { calls } = captureProjectFetch(200, { ...CANONICAL_PROJECT, title: '改名' });
+    const p = await renameProject('p1', '改名');
+    expect(calls[0].method).toBe('PATCH');
+    expect(calls[0].url).toBe('/api/projects/p1');
+    expect(calls[0].body).toEqual({ title: '改名' });
+    expect(p.title).toBe('改名');
+  });
+
+  it('deleteProject：DELETE + 逐字保留后端 detail（AC5 的那句"会话没被删"）', async () => {
+    const detail = '项目「甲」已从注册表移除，2 个会话回到未分组。目录、用户文件与会话日志均未删除（软删除，可重新注册同一目录）。';
+    const { calls } = captureProjectFetch(200, {
+      id: 'p1',
+      deleted: true,
+      sessions_detached: 2,
+      detail,
+    });
+    const result = await deleteProject('p1');
+    expect(calls[0].method).toBe('DELETE');
+    expect(calls[0].url).toBe('/api/projects/p1');
+    expect(result.sessions_detached).toBe(2);
+    expect(result.detail).toBe(detail);
+  });
+
+  it('deleteProject：detail 缺失 → 空串（调用方据此跳过提示，不编文案）', async () => {
+    captureProjectFetch(200, { id: 'p1', deleted: true });
+    const result = await deleteProject('p1');
+    expect(result.detail).toBe('');
+    expect(result.sessions_detached).toBe(0);
+  });
+
+  it('attach：POST /api/projects/{id}/sessions，body.session_id', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await attachSessionToProject('p1', 's9');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('/api/projects/p1/sessions');
+    expect(calls[0].body).toEqual({ session_id: 's9' });
+  });
+
+  it('attach：cwd 不一致（409）→ ProjectError(409)，与"不存在"（404）分开', async () => {
+    captureProjectFetch(409, { detail: '会话 cwd 与项目路径不一致' });
+    const err = await attachSessionToProject('p1', 's9').catch((e: unknown) => e);
+    expect((err as ProjectError).status).toBe(409);
+    expect((err as ProjectError).message).toBe('会话 cwd 与项目路径不一致');
+  });
+
+  it('detach：DELETE 子路径（id / session_id 都编码）', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await detachSessionFromProject('p 1', 's/9');
+    expect(calls[0].method).toBe('DELETE');
+    expect(calls[0].url).toBe('/api/projects/p%201/sessions/s%2F9');
+  });
+
+  it('reorder：POST .../order，before=null（追加队尾）与具体锚点都原样透传', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await reorderProjectSession('p1', 's2', null);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('/api/projects/p1/sessions/s2/order');
+    expect(calls[0].body).toEqual({ before: null });
+
+    const second = captureProjectFetch(200, CANONICAL_PROJECT);
+    await reorderProjectSession('p1', 's2', 's1');
+    expect(second.calls[0].body).toEqual({ before: 's1' });
+  });
+
+  it('错误体不是 JSON / 无 detail → 兜底文案带状态码（错误路径自身不再抛错）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>502</html>', { status: 502 })),
+    );
+    const err = await listProjects().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProjectError);
+    expect((err as ProjectError).status).toBe(502);
+    expect((err as ProjectError).message).toContain('502');
+  });
+});
+
+// ── Memories（MEM-4 / #159 契约，MEM-5 / #160 前端消费）──
+
+describe('memories — 列表/硬删端点契约（#160；ARCH-4b 类型注解 + 状态码语义）', () => {
+  /** 后端 `web/memory.py::MemorySummary` 的 canonical 形状。
+   *  类型注解在编译期锁一致性（与 SessionSummary / Project 同一手法）：后端加必填
+   *  字段、或此处多出类型未声明的键 → `tsc -b` 红。后端侧权威锁在
+   *  `tests/web/test_memory_api.py`（断言值，能抓住"键在但值是 null"的漏映射）。 */
+  const CANONICAL_MEMORY: MemorySummary = {
+    id: 'm-1',
+    content: '用户偏好简洁的中文回答，不要客套话。',
+    scope: 'user',
+    metadata: { source: 'conversation' },
+    created_at: '2026-09-12T08:30:00Z',
+  };
+
+  it('listMemories：全字段解析（content/scope/created_at 原样，不解析时间）', async () => {
+    captureProjectFetch(200, [CANONICAL_MEMORY]);
+    const rows = await listMemories();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(CANONICAL_MEMORY);
+    // 时间不做 Date 解析（展示层才格式化）：字符串原样带回。
+    expect(rows[0].created_at).toBe('2026-09-12T08:30:00Z');
+  });
+
+  it('listMemories：limit/offset 进查询串（分页由后端执行，前端不本地切片）', async () => {
+    const { calls } = captureProjectFetch(200, []);
+    await listMemories(20, 40);
+    expect(calls[0].method).toBe('GET');
+    expect(calls[0].url).toBe('/api/memories?limit=20&offset=40');
+  });
+
+  it('listMemories：畸形单条剔除、其余保留（一条坏行不得让整页变"加载失败"）', async () => {
+    captureProjectFetch(200, [
+      CANONICAL_MEMORY,
+      { ...CANONICAL_MEMORY, id: 'no-content', content: undefined }, // 缺 content
+      { ...CANONICAL_MEMORY, id: 'no-time', created_at: null }, // 缺创建时间
+      { ...CANONICAL_MEMORY, id: 'weird-scope', scope: 'global' }, // 未知 scope
+      { ...CANONICAL_MEMORY, id: '' }, // 空 id
+      'garbage',
+      null,
+    ]);
+    const rows = await listMemories();
+    expect(rows.map((r) => r.id)).toEqual(['m-1']);
+  });
+
+  it('listMemories：metadata 非对象 → 空对象兜底（列表仍可见，AC1 只消费三个字段）', async () => {
+    // metadata 不是 AC1 的展示字段，形状异常不值得把整条记忆藏起来——但也不伪造内容。
+    captureProjectFetch(200, [{ ...CANONICAL_MEMORY, metadata: 'not-an-object' }]);
+    const rows = await listMemories();
+    expect(rows[0].metadata).toEqual({});
+    expect(rows[0].content).toBe(CANONICAL_MEMORY.content);
+  });
+
+  it('listMemories：顶层不是数组 → 空数组（调用方显示"还没有记忆"，不是错误）', async () => {
+    captureProjectFetch(200, { memories: [] });
+    expect(await listMemories()).toEqual([]);
+  });
+
+  it('listMemories：503（能力未装配）→ MemoryError(503) + 后端 detail；isMemoryDisabled 为真', async () => {
+    const detail = 'memory capability 未启用：请在 CAPABILITIES 中配置 memory。';
+    captureProjectFetch(503, { detail });
+    const err = await listMemories().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MemoryError);
+    expect((err as MemoryError).status).toBe(503);
+    expect((err as MemoryError).message).toBe(detail);
+    // 降级通道判定：面板据此显示"记忆未启用"而非"加载失败 + 重试"。
+    expect(isMemoryDisabled(err)).toBe(true);
+  });
+
+  it('listMemories：500 → MemoryError(500)，但**不是**降级态（真故障要可重试）', async () => {
+    captureProjectFetch(500, { detail: 'boom' });
+    const err = await listMemories().catch((e: unknown) => e);
+    expect((err as MemoryError).status).toBe(500);
+    expect(isMemoryDisabled(err)).toBe(false);
+  });
+
+  it('deleteMemory：DELETE /api/memories/{id}（id 编码）+ 200 回执', async () => {
+    const { calls } = captureProjectFetch(200, { id: 'm/1', deleted: true });
+    const result = await deleteMemory('m/1');
+    expect(calls[0].method).toBe('DELETE');
+    expect(calls[0].url).toBe('/api/memories/m%2F1');
+    expect(result).toEqual({ id: 'm/1', deleted: true });
+  });
+
+  it('deleteMemory：200 但 body 是 null → deleted=false（不抛 TypeError，不谎称删掉了）', async () => {
+    captureProjectFetch(200, null);
+    const result = await deleteMemory('m-1');
+    expect(result).toEqual({ id: 'm-1', deleted: false });
+  });
+
+  it('deleteMemory：404（id 不存在）→ MemoryError(404)，不当成功', async () => {
+    // detail 用真后端的原文（`MemoryNotFound` → `记忆不存在：<id>`）。
+    captureProjectFetch(404, { detail: '记忆不存在：m-1' });
+    const err = await deleteMemory('m-1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MemoryError);
+    expect((err as MemoryError).status).toBe(404);
+    expect((err as MemoryError).message).toBe('记忆不存在：m-1');
+  });
+
+  it('deleteMemory：403（不属于当前入口，含 SESSION 行）→ MemoryError(403)，与 404 分开', async () => {
+    // detail 用真后端的原文（`PermissionError` → 英文原句，`str(exc)` 直通）。
+    captureProjectFetch(403, { detail: 'Memory belongs to a different namespace' });
+    const err = await deleteMemory('m-1').catch((e: unknown) => e);
+    expect((err as MemoryError).status).toBe(403);
+    expect((err as MemoryError).message).toBe('Memory belongs to a different namespace');
+  });
+
+  it('describeMemoryError：MemoryError 用后端 detail；非 MemoryError 用 message / fallback', () => {
+    expect(describeMemoryError(new MemoryError(403, '不给删'), '删除记忆失败')).toBe('不给删');
+    expect(describeMemoryError(new Error('网络断了'), '删除记忆失败')).toBe('网络断了');
+    expect(describeMemoryError(new Error(''), '删除记忆失败')).toBe('删除记忆失败');
+    expect(describeMemoryError(null, '删除记忆失败')).toBe('删除记忆失败');
+  });
+});

@@ -33,13 +33,58 @@
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
-| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` v1 |
+| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（批量审查循环；v1 的「每票一次 /code-review」已作废） |
 | 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
 | 集成交接提示词 | 本轮：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md`（**集成 AI 的唯一入口**，§0 是可执行摘要）；上一批：`docs/integration/FRONTEND_RECOVER_FORK_SCROLL_INTEGRATION_PROMPT.md` |
 | 本批交接手册 | `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（做了什么 + 8 个坑点 + 未决项 + 复核命令） |
 | 下一批提示词 | `docs/PROMPT_FRONTEND_NEXT_BATCH.md`（可直接复制给前端 Agent：OBS-015 修复为主） |
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
+
+---
+
+## ⚠️ 流程切换 + 批次记录（v2 批量审查循环，2026-09-12）
+
+**自愈条款（先读这段）**：任何时候你发现自己（a）不确定当前在循环哪一步，（b）不记得批量审查的
+fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **第一动作 = 立即重读
+`docs/SDD_WORKFLOW_PROTOCOL.md` + 本文件恢复状态；禁止凭记忆猜测流程继续施工。**
+
+| 项 | 值 |
+| --- | --- |
+| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（本 worktree 已同步为 v2；v1 作废） |
+| 切换日期 | 2026-09-12（切换动作发生在后端 worktree；v2 协议文件随本批同步到本 worktree） |
+| 本 worktree 的批次起点 | `637bc89`（`feat/frontend` HEAD）= **B-1 的 fixed point** |
+| 过渡条款 | 该点之前已完成并 commit 的前端批次**一律承认有效**（旧循环的每票 / 每批 review 视为已覆盖），不补审、不重跑 |
+
+### 批次台账
+
+| 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
+| --- | --- | --- | --- | --- |
+| B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | `45227dc` |
+
+### 最终全量 review（v2 §1.3）的处置——**已披露的偏离**
+
+v2 §1.3 要求「全部 ticket 完成后对整条分支跑一次最终全量 /code-review，fixed point = main」。
+本 worktree 的处置与理由如下（**不是静默跳过，是显式记录**）：
+
+1. 本分支相对 `main` **落后 13 个 commit / ahead 14**（见 `docs/integration/BRANCH_TOPOLOGY_AUDIT.md`），
+   且 `main` 侧的变更全在 `src/**`、`tests/**`（后端），与 `web/**` 无交集。以 `main` 为 fixed point
+   的 diff 里，绝大多数是**别人的代码**，对前端审查没有信息量。
+2. 本分支**切换 v2 之前**的 13 个前端 commit，已在各自轮次做过两轴 review（见本文件各「批次」小节 +
+   `docs/FRONTEND_ISSUES_LOG.md` 各轮）。用户 2026-09-12 的过渡条款明确：「旧版循环下已完成并 commit
+   的 tickets 一律承认有效，不再补审、不重跑」。
+3. 因此**唯一未被审过的增量 = `637bc89..HEAD`**，已由 B-1 审查覆盖（新版本循环的 fixed point 语义）。
+
+结论：本 worktree 认为 v2 §1.3 的**目的**（"切换后新增的代码全被审过"）已达成；字面执行
+`main...HEAD` 只会重审已承认有效的内容。**留给集成 AI 决策**：若仍要跑，建议在 `main` 合入本分支后
+再跑（那时 fixed point = 合并前的 main，diff 才等于本分支的真实增量）。
+
+> 为什么单票成批：v2 §1.2 允许「遇到依赖链断点等自然分界提前收批」。#160 是 MEM-5 跨端票的
+> 前端半、也是本轮唯一剩余票（MEM 链末端）→ 自然断点，单票即收批；
+> 本批 diff = `637bc89..<#160 commit>`。
+>
+> 协议文件 §4「剩余 Ticket 清单」是旧内容（FE-T7/T8/T9 早已 done）——本轮**不动它**：
+> 该文件跨 worktree 共用，保持与 feat/backend 侧逐字节一致可避免制造无谓的 merge 冲突。
 
 ### 最近一批：BUG-011 前端半——模型项双击不再发第二个 `POST /model`（2026-09-11）
 
@@ -423,3 +468,144 @@ glm-4.5-air · 6907 tok` → `run/completed 13873 tok`）。停顿期间 UI 全�
 不要并行跑两个 playwright。**
 
 **集成提示词**：`docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。
+
+## 第八轮（2026-09-12）：WS-5 #155 项目分组 UI（跨端票的前端半）
+
+**背景**：用户诉求「一个项目下多个会话，和 zcode 一样」。后端 #152/#153/#154（feat/backend）
+已交付 Workspace 实体、列表 `workspace` 契约与 9 个项目 CRUD 端点；本票做**可见性**。
+
+| 交付 | 位置 |
+| --- | --- |
+| 契约层：`Project` / `ProjectStatus` / `ProjectDeleted` + 7 个端点 + `ProjectError` | `src/types.ts` / `src/lib/api.ts` |
+| 纯函数：分组投影 `buildRailModel` + 重排锚点 `moveAnchor` / `dropAnchor` | `src/lib/projects.ts` |
+| 数据与动作：`useProjects`（写后重拉，不维护影子名单） | `src/hooks/useProjects.ts` |
+| 侧栏改版：项目块（折叠/行内重命名/菜单）+ 行（点选/菜单/拖拽）+ 未分组区 | `src/components/SessionList.tsx` |
+| 三个浮层：新建 / 删除确认（明示只解除分组）/ 加入项目 + 行内重命名 | `src/components/ProjectDialogs.tsx` |
+| 样式：层级导轨、菜单、拖放落点、错误条、浮层 | `src/styles/app.css`（纯新增 562 行） |
+| e2e：6 用例 × 2 视口 + 有状态项目 mock | `e2e/r-project-groups.spec.ts` / `e2e/fixtures.ts` |
+| 真机：无 mock 的真后端流程 + 基线逐字段比对 | `e2e-live/project-groups-live.spec.ts` |
+
+**门禁（末次实跑，最终 revision）**：tsc 0 · vitest **561 passed**（30 文件）· oxlint
+**0 errors**（37 warnings，均为既有规则；本票 10 个文件 0 warning）· playwright
+**144 passed**（`--workers=2`，本票新增 14 例）· vite build ✓。
+
+**两轴 code-review 后修复（commit `8db0e5f`，零 finding 后才收）**：独立 Spec / Standards
+两轴 review 的发现里，有两条是**会在真机或流式下真实发生**的，值得记住：
+
+- **mock 与真机语义相反**：e2e 的 attach 推队尾，真实后端写的是 `[session_id, *kept]`
+  （**前插**，`workspace/index.py` + `tests/web/test_projects_api.py` 都锁着）。也就是说
+  这条 AC4 用例在**真机后端下必然失败**——围栏里的绿灯不能证明契约一致，只能证明
+  "前端与我的假后端一致"。已把 mock 与断言都改成前插。
+- **memo 被内联箭头破功**：`onRetryProjects` 每次渲染新建 → 流式期间整片 Session Rail
+  跟着每个 delta 重渲染（本仓库明文规则，`handleSelect` 一列同样处理）。已 useCallback。
+
+其余修复：`SessionSummary.workspace` 从"只在注释里被消费"变成真的消费（项目不在列表里
+时未分组行带 `staleProject` 注解，AC6 的字面要求）；Pydantic **422 的 detail 是数组**，
+只认字符串会把"path must be an absolute path"降级成"注册项目失败（422）"；`useProjects`
+补乱序响应守卫与 in-flight 合并；拖拽落点只在来源项目内亮；Enter 提交补 pending 守卫；
+删掉 rail/选择列表上不成立的 `role=list`、折叠时的悬空 `aria-controls`、`<p>` 里塞 `<ul>`
+的非法 HTML；空项目提示去掉一条**不可达**的引导（单段 workspace 建不出项目内会话）；
+mock 的 order 端点补自锚点 no-op（缺它会插错位置）；新增 409 用例（cwd 不一致 → 后端原因
+就地显示、归属不变）；AC3 断言改为打在**后端原始串**（`WinError 3` + 路径）上以证明透传。
+`playwright.config.ts` 固定 `workers: 2`（§16.6 硬要求，避免"门禁绿、本地红"）。
+`gui-test-screenshots/` 进 `.gitignore`（真机截图是本地证据，不进版本库）。
+
+**真机**：真 uvicorn 8000 + 真 `.env`/`harness.db` + 真浏览器 5173，无 mock；注册/改名/attach/
+detach/重排/软删除全走通，**结束时会话归属与项目账本与开测前逐字段相等**（状态已还原）。
+截图 `web/gui-test-screenshots/ws5/`（本地留存、未入库：运行时产物，与既有各轮一致）。
+
+**视觉检查逮到 1 个 e2e 抓不到的 bug**：`.rail-menu` 复用 `palette-in` 关键帧（含
+`translateX(-50%)`）→ 菜单永久左移半宽；Playwright 点真实位置所以全绿，人眼一看就歪。
+已改为独立 `rail-menu-in`（opacity + scale，配 Radix 的 transform-origin 变量）。
+
+**关单**：#155 **不关**（跨端票：后端半在 feat/backend 尚未合入 main；按 §14.12 以 comment
+记录已完成部分与剩余项）。
+
+**未做 / 交后续票**（详见 `docs/FRONTEND_ISSUES_LOG.md` 第十轮）：
+①`POST /api/sessions` 仍只接受单段 workspace 名 → **任意目录的项目拿不到"新建会话"入口**
+（用户原始诉求的最后一块缺口，需后端契约变更）；
+②注册项目不批量回溯 attach（契约不暴露会话 cwd，前端无法判定，不猜）；
+③项目端点之外的 CORS `*`（后端既有）；
+④窄屏 56px 折叠轨看不见会话行（既有规则，本票只追加了项目 chrome 到同一 hide 列表）。
+
+
+---
+
+## 第十二轮（2026-09-12）：MEM-5 #160 前端记忆管理 UI（跨端票的前端半）
+
+**本批 commit**：`5eb4fed`（`feat/frontend`；父 commit `637bc89` = B-1 的 fixed point）。
+
+**背景**：MEM-4（#159，后端半，已关单）给了用户侧两个入口（`GET /api/memories` 列表 +
+`DELETE /api/memories/{id}` 硬删），但没有界面。用户看不到记忆库里有什么，也就无从判断该删哪条
+——所以「用户入口」若只有 API 就等于没有（issue #160 的原话）。
+
+| 交付 | 位置 |
+| --- | --- |
+| 契约层：`MemoryScope` / `MemorySummary` / `MemoryDeleted` + 2 个端点 + `MemoryError` / `isMemoryDisabled` / `describeMemoryError` + 窄化 `parseMemory` | `src/types.ts` / `src/lib/api.ts` |
+| 纯展示逻辑：`scopeLabel` / `formatMemoryTime`（解析失败原样返回，不伪造）/ `hasMoreAfter` / `withoutIds` | `src/lib/memory.ts`（+ `memory.test.ts` 7 例） |
+| 数据与动作：`useMemories`（打开时拉取 / 分页 / 乐观删除 + 两结局都重拉权威 / 503 降级与错误分流） | `src/hooks/useMemories.ts` |
+| 浮层：列表（content + scope + 创建时间 + 长正文展开）+ 行内二次确认（「删除不可恢复」）+ 降级 / 空 / 错误 / 分页四态 | `src/components/MemoryPanel.tsx` |
+| 入口 ×2：顶栏 Brain 按钮 + 命令面板「管理记忆」 | `src/components/TopBar.tsx` / `src/App.tsx` |
+| 样式：浮层材质与项目浮层共用 + 记忆专属 26 条规则（纯新增） | `src/styles/app.css` |
+| 契约测试：canonical fixture **类型注解**（ARCH-4b）+ 11 例（分页参数 / 畸形行剔除 / 404·403·503 分流 / 回执缺字段） | `src/lib/api.test.ts` |
+| e2e：7 用例 × 2 视口 = **16 例**（列表渲染与翻页 / 长正文展开 / 二次确认 + 后端权威 / 失败回滚 / 503 降级 / 真空态 / 500 错误重试 / 命令面板入口） | `e2e/s-memories.spec.ts` + `e2e/fixtures.ts`（**有状态** memory mock） |
+
+**门禁（实跑）**：`npx tsc -b` ✅ · `npx vitest run` **580 passed**（31 文件，+19）·
+`npx oxlint` **0 errors**（38 warnings：37 既有 + 1 条本票与既有同类的 `set-state-in-effect`）·
+`npx playwright test --workers=2` **160 passed**（+16 例）· `npx vite build` ✅。
+
+**e2e 逮到的真 bug（值得记住）**：列表读取失败（500/网络）时，`visible.length === 0` 分支先命中
+→ 面板会**同时**显示「还没有记忆」与错误条——正是 AC4 禁止的「把读不到伪装成没有」。
+首版实现的判空顺序漏了 `loadError === null` 这一项；`s-memories.spec.ts` 的 500 用例
+（`.memory-empty` 必须 count 0）把它钉死。修复：空态只在「确实读到空列表」时渲染，
+「0 行 + 读取失败」只留错误条 + 重试。
+
+**真机验收（真 .env / 真模型 / 真 Zilliz / 真 sqlite / 真浏览器）**：
+
+| 步骤 | 结果 |
+| --- | --- |
+| 种子数据 | `.scratch/seed_real_memories.py`（后端 worktree，**不入库**）：走生产同一条 `build_builtin_memory_components` + `capability.consolidate()` 写入 3 条真实记忆。**实测 3 条都 `degraded=consolidation_failed: VectorStoreError`** —— 当时 Zilliz/embedding 不健康，按 #158 的「不丢写」设计降级成无条件 insert（记录行照样落盘，所以列表有内容） |
+| 列表 | 真 `GET /api/memories` 返回 3 行；浏览器点开面板渲染 content / `用户` chip / 本地化时间 |
+| 二次确认 | 真实点击：行内出现「这是硬删除，**删除不可恢复**——没有回收站，删掉后模型不会再想起这条。」+ 取消 / 确认删除 |
+| 删除成功 | 真实点击确认 → 行消失；`curl` 复查后端只剩 2 行；后端日志 `memory forget via api: forgotten`（MEM-4 的结构化审计）；**整页刷新后再打开面板**该条依然不在（证明不是本地隐藏） |
+| 删除失败回滚 | **杀掉真后端**后在界面上点确认删除 → 行**回到列表**（回滚）+ 该行确认条显示「删除记忆失败（502）」+ 面板错误条「加载记忆失败（502）」+ 重试；重启后端点「重试」→ 列表恢复一致（2 行） |
+| 真空态 | 经界面把两条种子记忆都真删掉 → 面板显示「还没有记忆」（**不是**降级态、无错误条）；`curl` 复查后端 0 行 |
+| 降级契约 | 另起一个 `CAPABILITIES={}` 的实例（:8001）：真 `GET`/`DELETE /api/memories` 都回 **503** + `memory capability 未启用：请在 CAPABILITIES 中配置 memory。` —— 与 e2e mock 里那句**逐字一致**（mock 的降级文案不是编的） |
+| 视觉 | 暗 / 亮两色 + 行内确认条各截图复核：scope chip、时间、危险色确认条、按钮对比度在亮色下均可读（新增样式全部复用既有 token，无 §15 双份同步问题） |
+| 环境还原 | 种子记忆**已全部经界面删掉**（真记忆库里不留假事实——否则模型会把「用户使用 Windows 11」当真的召回）；两个 dev server 已停（避免残留 uvicorn 占 `.instance.lock`，那是已知会打红 `test_web_lifespan_flushes_on_shutdown` 的坑） |
+
+**关单**：#160 **不关**（见 integration prompt §5 / issue comment）：按票面「跨端 ticket 的前端半」
++ §14.12，用 comment 记录已完成部分与剩余项（剩余 = 合入 `main`，由集成 AI 执行）。
+本 worktree 与 #155 同一处置。
+
+### 批次审查（B-1，v2 §1.2；fixed point `637bc89`）
+
+两轴（Spec + Standards）各派一个 read-only subagent，各审 `git diff 637bc89...decc7be` 全量
+（16 文件 / +1780 行）。**Spec 轴 6 finding + Standards 轴 7 finding**，逐条处置：
+
+| # | 轴 | finding | 处置 |
+| --- | --- | --- | --- |
+| 1 | 两轴一致 | **重拉的 `limit` 会越过后端硬上界**：`Math.max(rows.length, 50)` 在加载 >200 条后送 `limit=250` → 后端 422 → **删除失败的回滚重拉与"重试"永久失败**（AC3 直接破） | 修：`lib/memory.ts` 新增 `MEMORY_MAX_LIMIT=200` + `refetchLimit(loaded)`（`min(max(loaded,50),200)`），hook 三处调用点改用它；+3 单测（0/3/50 → 50；120 → 120；250/10000 → 200）。已登记的代价：>200 条时重拉只带回前 200，需再点"加载更多"（比永久失败诚实） |
+| 2 | Spec | **404 删除失败被界面吞掉**：`deleteError` 按行 id 渲染，而 404（这条已被别处删掉）后重拉里那一行不在 → 错误无处渲染（AC3「失败要报错」不成立） | 修：`MemoryPanel` 增面板级错误条（同一错误唯一来源：行在 → 行内；行不在 → 面板级 + 「知道了」）；e2e 新增 `memoryVanishedIds` 接缝 + 1 用例 ×2 视口锁住 |
+| 3 | Standards | **e2e 的 403 detail 是我编的中文**，真后端是 `PermissionError("Memory belongs to a different namespace")`（`sqlite_record_store.py:195` → `str(exc)` 直通）；AC3 的失败用例因此是自我实现 | 修：mock 与断言都改成真后端原文；404 同样照抄 `记忆不存在：<id>`；`api.test.ts` 两处 detail 也换真实原文（顺带当契约文档）。**这就是 #155 轮「mock 语义与真机相反」同一类坑** |
+| 4 | Spec | **DELETE 挂死无超时**：行已乐观隐藏、确认条两按钮都 disabled → 行"点了删除就消失"，界面再也点不动（AC3 的失败路径缺失） | 修：新增 `lib/timeout.ts`（`withTimeout`，App.tsx 原先的私有实现迁入共用，fork 行为不变）+ `DELETE_TIMEOUT_MS=30s`；超时走与失败**相同**的回滚/对账路径；+4 单测（含"落地后清定时器"）。语义提醒写在模块头：超时 ≠ 对端没执行 |
+| 5 | Spec | ARCH-4b 的说法**过强**（fixture 只能锁前端类型，锁不住后端加字段） | 修文档：集成提示词 §2 改写为「前端侧漂移 → tsc 红；后端侧权威锁 = `tests/web/test_memory_api.py`」 |
+| 6 | Spec | AC4 的"检索不可用"在后端契约里**没有独立状态**（列表读权威记录；检索故障会走 500） | 只登记不改代码：503 = 未装配（降级态）；5xx = 读取失败（错误条 + 重试 = 事实上的"暂不可用"）。AC4 的两个词组分别由这两条通道承担 |
+| 7 | Standards | `MemoriesState.rows` 导出但无消费方 | 修：去掉该导出（只留 `visible`），并在接口注释里写明为何不导出原始列表 |
+| 8 | Standards | `remove` 未复用 `useProjects` 的 `after()` 包装，且未说明 | 修：加注释说明语义不同（`after` = 跑写 → 重拉 → 抛错；这里要"乐观隐藏 → 两个结局都重拉 → 失败先取消隐藏再抛"），**不**硬套 |
+| 9 | Standards | `.project-dialog-*` 类名被记忆面板复用（Mysterious Name） | **不改**：改名要连带动 ProjectDialogs + app.css + 既有 e2e 选择器，属跨模块审美重构（§8 Scope Lock），已在 app.css 注明共用材质 |
+| 10 | Standards | `describeMemoryError` 与 `describeProjectError` 同形（Duplicated Code） | **不改**：注释已声明刻意分开（两个能力各自演进，共用会让一侧语义渗到另一侧）；属判断项 |
+| 11 | Standards | 协议 v2 §1.1 与 `AGENTS.md` §16.1（每票 review）并存矛盾 | **不改 AGENTS.md**（跨 worktree 共用文件，改了徒增 §16 那条已知冲突面）；以用户 2026-09-12 指令为最高优先级，v2 覆盖 §16.1，本工作树以本文件 + 协议文件为准 |
+| 12 | Standards | `tsc` / `oxlint` 基线核对 | 实测：tsc 0；oxlint 38 warnings / 0 errors，**新增 1 条**（`useMemories.ts:99` 的 `set-state-in-effect`，与既有 37 条同类；挂载即拉取不可避免） |
+
+**修复后门禁（实跑）**：tsc ✅ · vitest **587 passed**（+7：refetchLimit 3 + withTimeout 4）·
+oxlint 0 errors（38 warnings）· playwright **162 passed**（+2：404 用例 ×2 视口）· vite build ✅。
+**修复后真机复验**（真后端 + 真 Zilliz + 真浏览器）：种 3 条 → 经界面真删 1 条 → 后端 `curl` 剩 2 条
+（DELETE 已走新的 `withTimeout` 包装，零错误条）→ 再删 2 条 → 后端 0 条 + 面板显示「还没有记忆」；
+dev server 已停、真记忆库已清空（不留假事实）。
+
+**未做 / 交后续**（Scope Lock，只登记不顺手做）：
+① 记忆**编辑** UI（票面非目标；后端入口本票也没有）；② 批量清空 / 回收站 / 恢复（非目标）；
+③ 冲突可视化（LLM 决策只体现在最终条目上，非目标）；④ 记忆条目的**检索/搜索**（本票只做分页列表，
+用户要的是"看得见 + 删得掉"）；⑤ 真机侧没法自然构造 `403`（需要一条 SESSION scope 记忆，而 HTTP
+入口只列 USER 行）——该路径由 e2e 的 `memoryDeniedIds` 拦截口覆盖（伪造的是**真后端会回的那句话**）。

@@ -1373,6 +1373,272 @@ KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
 
 ---
 
+## 第九轮（2026-09-12）：WS-3 #153 会话列表 `workspace` 契约——真机验收 + 一条待 #155 决策的可见行为
+
+**背景**：后端 #152 建了「项目实体 + 有序账本」，#153 把它暴露进列表契约：
+`GET /api/sessions` 每行新增 `workspace: {id, title} | null`（未分组 = `null`），
+`GET /api/sessions?workspace_id=<id>` 返回该项目会话、顺序 = 账本手工序（非活动时间序）。
+
+**真机验收（真 uvicorn 127.0.0.1:8792 + 真 `.env` + 真 SQLite + 真盘上 28 个会话）**
+
+| 检查 | 结果 |
+| --- | --- |
+| 每行都带 `workspace` 键 | ✅ 28/28 |
+| 分组会话的项目值 | ✅ 8 行分别指向真项目 `ws1-e2e` / `ws2-e2e`（id 与 `harness.db` 逐字段一致） |
+| 未分组会话 | ✅ 20 行 `workspace: null`，且**仍在列表里可见**（AC5） |
+| `?workspace_id=<id>` 顺序 | ✅ 与 `workspace_sessions.position` **逐项一致**（ws2-e2e 3/3） |
+| 未注册 id | ✅ **404** `workspace '…' not found`（不是空列表——空列表会谎报「这个项目没有会话」） |
+| `?workspace_id=`（空串） | ✅ 404（不静默退化成"全部会话"） |
+| OpenAPI | ✅ `SessionSummary.required` 含 `workspace`；类型为 `WorkspaceRef \| null`，`WorkspaceRef.required=['id','title']` |
+
+### 观察到的一条可见行为（不是 bug，需 #155 决策）
+
+`ws1-e2e` 的账本有 **6** 条，API 只返回 **5** 条。差额是 `e2dc33b6`——它的
+`session/started.agent_id == "coding"`，即**内部子代理子会话**。#152 的 ADR-0025 D6 显式收窄：
+内部子代理**不算项目成员**（运行期没有任何路径 attach 它们；纳入会让"同一类会话在不在项目里"
+取决于它生于引导标记前后）。**后果**：这类子会话在**默认列表里仍会出现，但 `workspace` 是 `null`**
+——即它与"用户真的没选项目"的会话在契约上**无法区分**。
+
+- 与 #151 源码注释「子会话继承父 cwd 是为了不显示成未分组」**相反**（#152 交接时明确选了"过滤"）；
+- #153 不改这个语义（不是它的 AC），**#155 做分组 UI 时必须决定**：折叠进父项目？
+  按 `agent_id` 另行标注"子代理"？还是彻底不显示？契约层目前只给了 `null`，
+  如果 #155 需要区分，`SessionSummary` 要再加一个字段（例如 `agent_id` 或 `parent_session_id`），
+  那是 #155 的契约变更，不要在前端靠猜。
+
+---
+
+## 第十轮（2026-09-12）：WS-5 #155 项目分组 UI —— 交付 + 真机验收 + 第九轮待决策项的答案
+
+**交付**（前端半；后端半 #153 / #154 已在 feat/backend）：会话侧栏「项目 → 会话」层级 +
+未分组区 + 项目 CRUD（新建 / 重命名 / 加入 / 移出 / 项目内重排 / 软删除）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `src/types.ts` | `Project` / `ProjectStatus` / `ProjectDeleted`（后端 `web/projects.py` 逐字段对齐） |
+| `src/lib/api.ts` | 7 个项目端点 + `ProjectError(status, message)` + `describeProjectError`（后端 detail 优先）+ 窄化解析 |
+| `src/lib/projects.ts` | 纯函数：`buildRailModel`（分组投影）+ `moveAnchor` / `dropAnchor`（重排锚点） |
+| `src/hooks/useProjects.ts` | 项目列表 + 动作；每次写操作后重拉（**不维护前端影子成员名单**，不变量 #22） |
+| `src/components/SessionList.tsx` | 改版：项目块（折叠 / 行内重命名 / ⋯菜单）+ 行（点选 / ⋯菜单 / 拖拽重排）/ 未分组区 |
+| `src/components/ProjectDialogs.tsx` | 新建 / 删除确认（**明示只解除分组**）/ 加入项目 三个 Radix Dialog + 行内重命名 |
+| `e2e/r-project-groups.spec.ts` | 6 用例 × 2 视口（AC1–AC5 + 端点失败降级） |
+| `e2e/fixtures.ts` | 项目端点的**有状态** mock（create/rename/attach/detach/order/软删除都真改状态） |
+
+### 第九轮待决策项的答案（内部子代理子会话怎么显示）
+
+**决定：照契约如实显示在「未分组」区，不折叠进父项目、不隐藏、不前端猜 `agent_id`。**
+理由：#152 的 AC14 收窄明确「内部子代理不算项目成员」，所以后端给它的 `workspace` 就是
+`null`——这是**真值**（它确实不属于任何项目）。前端把它藏起来才是制造第二套真相（不变量
+#22）：同一个会话在"项目视图"里没有、在"列表视图"里也不该凭空消失。若将来要在视觉上
+区分"子代理子会话"与"用户没选项目"，正确做法是**先加契约字段**（`SessionSummary.agent_id`
+或 `parent_session_id`）再改 UI，不在前端从 id/标题猜——已作为后续票候选记录。
+
+### 注册项目为什么不批量回溯 attach 该目录下的历史会话
+
+**做不到，且不猜。** `attach` 的后端校验是「会话的 `session/started.cwd` == 项目规范路径」，
+而 `SessionSummary` **不暴露会话 cwd** —— 前端无法判断"哪些未分组会话属于这个新项目"。
+盲 attach 全部未分组会话只会得到一堆 409（还会把失败原因冲成噪音）。
+**当前做法**：逐行「加入项目…」显式选择；后端 409 的 `detail` 原样显示（说明是 cwd 不一致）。
+**建议**：若要"注册即归拢"，应由后端提供一个按目录匹配的端点（或在 `SessionSummary` 暴露
+`cwd`），属新票。
+
+### 🔴 用户原始诉求的最后一块缺口（不是 #155 的 AC，必须单独立票）
+
+用户的原话是"怎么才能做到一个项目下多个会话"。目前：①项目能注册任意已存在的目录 ✅；
+②分组/管理 UI ✅；③**但没有"在某个项目目录里新建会话"的入口** ❌ ——
+`POST /api/sessions` 的 `workspace` 字段仍然只接受**单段目录名**（
+`SessionService._validate_workspace_name` 拒绝绝对路径），会话的 cwd 永远落在
+`workspaces_root/<name>`；而项目路径来自 bootstrap（`workspaces_root/<name>`，可 attach）
+或用户注册的任意目录（**没有任何路径能产出 cwd 等于它的会话**，fork 除外）。
+**后果**：用户注册 `D:\my-repo` 后，这个项目永远拿不到新会话。修法明确（让 create 接受
+绝对路径并把 cwd 定为该目录，cwd 的写侧唯一规范化已存在于 `sandbox/paths.py`），
+但**属后端契约变更，不在 #155 范围**。
+
+### 真机验收（真 uvicorn 127.0.0.1:8000 + 真 `.env` + 真 SQLite + 真浏览器 5173，无任何 mock）
+
+| 检查 | 结果 |
+| --- | --- |
+| 真实项目渲染顺序 = 注册表序（`ws2-e2e` → `ws1-e2e`） | ✅ 2 个项目 |
+| 项目内会话数 = 账本长度（3 / 5） | ✅ |
+| 未分组区行数 | ✅ 22 条（该次运行共 30 个会话，其中 8 条已分组；截图轮的 24 是因为随后两次真模型用例又新增了会话） |
+| 注册临时目录（`.scratch/ws5-live-project`） | ✅ 标题默认取目录名 → 行内重命名生效 |
+| 软删除（0 会话） | ✅ 确认文案含"不会/会话日志"；成功提示用后端原文（含"可重新注册同一目录"） |
+| 注册真实目录 `workspaces/ws-delete-me` + 真会话 attach | ✅ 会话进入项目（cwd 相等后端放行） |
+| detach → 再 attach → 软删除（1 会话） | ✅ 提示"1 个会话回到未分组"；会话仍在未分组、目录仍在盘上 |
+| 真项目内重排 | ✅ 上移后后端账本序真的变（读 API 验证），下移后**精确还原** |
+| **基线比对** | ✅ 项目（含账本序）与会话归属与开测前**逐字段相等**（30 条会话） |
+
+截图：`web/gui-test-screenshots/ws5/`（01–06 真机流程、10–16 暗/亮/中/窄四态）。
+**本地留存、未入库**：截图是运行时产物（1.3MB），与既有各轮一致不进版本库；跑
+`e2e-live/project-groups-live.spec.ts` 或按上表步骤可复现同一组图。
+
+### 视觉检查（impeccable）逮到并修复的 1 个真 bug
+
+侧栏菜单（`.rail-menu`）最初复用了命令面板的 `palette-in` 关键帧，而那组关键帧带
+`translateX(-50%)`（面板居中才需要）→ **菜单被永久左移自身宽度的一半**。
+Hermetic e2e **全绿**（Playwright 点元素真实位置，位移不影响点击），只有人眼看截图才发现。
+已改为独立的 `rail-menu-in`（只做 opacity + scale，并用 Radix 的
+`--radix-dropdown-menu-content-transform-origin` 作为缩放原点）。
+**教训**：跨组件复用 `@keyframes` 前先看它有没有把定位也写进关键帧里。
+
+detector（`impeccable detect`）对本次改动文件：**0 findings**；`app.css` 里 4 条 `side-tab`
+告警全部落在**既有**组件（行号 1584 / 2091 / 2169 / 3885，非本票插入段），按 Scope Lock 未动。
+
+### 其它观察（都不改，记录在案）
+
+1. **CORS `*`（后端既有）**：跨源 `POST /api/sessions` 实测 200 并真的起 run。项目端点本身
+   已过来源闸（ADR-0025 D1 (b)），但会话端点没有。**建议后端单独立票**。
+2. **56px 折叠轨下侧栏只剩图标按钮**：`.session-item-dot` / `.session-item-body` 的
+   `display:none` 是**既有**规则（本票只往同一个 hide 列表里追加了项目 chrome），
+   所以窄屏"看不见会话行"不是本票引入；要修应是独立票（例如窄屏显示首字母）。
+3. `approval-live.spec.ts`（联调车道、非门禁）的「LIVE 拒绝」用例本轮连续 2 次失败：
+   点拒绝后卡片未在 10s 内翻到「已拒绝」，但后端 `/approve` 日志是 **200**（决策已落库、
+   工具后续如实 failed）。判断为**真实模型在同一 run 里再次请求审批**导致定位到新的 pending
+   卡片（该用例自身的注释就写明"结果非确定，只作真机取证"）。**与本票 diff 无关**：
+   本票未触碰 `ApprovalCard` / `api.postApproval` / 投影管线，门禁内的
+   `e2e/n-approval-card.spec.ts`（真正的回归锁）全绿。
+
+### 门禁（末次实跑，最终 revision）
+
+`npx tsc -b` ✅ · `npx vitest run` **556 passed**（30 文件；本票新增 36 条：18 分组/锚点 + 18 契约）·
+`npx oxlint` **0 errors**（37 warnings，全部既有规则；本票 10 个文件 0 warning）·
+`npx playwright test --workers=2` **142 passed**（本票新增 12 例）· `npx vite build` ✅。
+
+---
+
+## 第十一轮（2026-09-12）：#155 两轴 code-review 的发现与修复（commit `8db0e5f`）
+
+独立 Spec / Standards 两轴 review（只读、不看我的自述）一共给出 2 个 P2 + 若干 P3。
+**两条 P2 都不是"代码不好看"，而是"会在真机或流式下真实发生"**，记在这里。
+
+### P2-1：mock 的语义与真机**相反**——围栏绿灯证明不了契约一致
+
+`e2e/fixtures.ts` 的 attach 把会话 `push` 到账本**队尾**，AC4 也因此断言
+`['s1','s2','s3']`。真实后端写的是：
+
+```python
+# src/agent_harness/workspace/index.py::attach_session
+await self._persist_ledger(record.id, [session_id, *kept])   # 前插
+```
+
+`tests/web/test_projects_api.py` 也用 `assert ids == [second, first]` 锁住"新建项目前插"。
+**后果**：这条用例在真机后端下必然失败（我自己的 live spec 恰好只 attach 了单成员项目，
+顺序不可观测，所以没暴露）。已把 mock 改为 `unshift`、断言改为 `['s3','s1','s2']`，
+并在两处写明"顺序由后端账本决定，mock 必须跟它一致"。
+
+**教训**：hermetic e2e 的绿灯只证明"前端与我的假后端一致"。凡是"顺序/归属/幂等"
+这类由后端定义的语义，mock 必须逐条对着后端源码与后端测试写，否则围栏会**保护**
+一个错误实现。以后写有状态 mock 时，先在后端找到锁住该语义的测试，再决定 mock 怎么写。
+
+### P2-2：内联箭头破掉 memo → 流式期间整片侧栏重渲染
+
+`App.tsx` 的 `onRetryProjects={() => {…}}` 每次渲染新建函数 → `SessionList`（`memo`）
+的 props 每帧都变，流式 delta 期间整片 Session Rail 重渲染。本仓库对同名字段
+（`handleSelect` 一列）有明文规则，这里是纯粹的遗漏。已改 `useCallback`。
+
+### 其他修复（P3）
+
+| 发现 | 处理 |
+| --- | --- |
+| `SessionSummary.workspace` 只在注释里"被消费"（注释声称两个真相源） | 真的消费它：项目不在当前列表里时未分组行带 `staleProject` 注解；注释改写成真实分工 |
+| Pydantic **422 的 detail 是数组**，只认字符串 → "path must be an absolute path" 被降级成"注册项目失败（422）" | `readErrorDetail` 两种形状都认，剥掉 `Value error, ` 前缀；标题输入补 `maxLength`（后端 200 / path 4096） |
+| `useProjects` 可能被乱序响应覆盖（旧列表盖新真相）；挂载 + 会话列表到位两次 GET 重复 | generation 守卫 + in-flight 合并；写操作后的 `refetch` 绕过合并（合并到一个写前发出的请求会让列表停在写前） |
+| 拖拽落点提示在**别的项目**里也亮（跨项目拖动不是重排） | 记来源项目，落点只在来源项目内亮；跨项目 drop 直接忽略 |
+| Enter 提交绕过 `disabled={pending}` → 双发 | 三处提交路径补 `if (pending) return` |
+| `role="list"` 容器里混着非 `listitem` 子节点；`button` 被标成 `listitem` 丢"可按"语义;折叠时 `aria-controls` 悬空;`<p>` 里塞 `<ul>` | 删掉不成立的 list 角色；`aria-controls` 仅在展开时输出；`Dialog.Description asChild` + `div` 包列表 |
+| 空项目提示引导"在该目录下新建会话"——**不可达**（`POST /api/sessions` 只接单段 workspace，建不出项目内会话） | 改文案：指向"加入项目…"并说明前提是会话 cwd 与项目路径一致 |
+| 项目列表请求失败时仍显示"还没有项目"（与错误条自相矛盾） | 只在确实知道为空时才说 |
+| mock 的 order 端点没有自锚点 no-op → "先删后 indexOf 插"会插到倒数第二位，凭空改账本 | 补 no-op（真实后端 `ProjectService.reorder` 显式挡下） |
+| 不可达的 `/api/projects/resolve` mock 分支 + 无人使用的 `onProjectPost` 接缝 | 删掉（不可达的 mock 会让人以为那条路被测过） |
+| AC3 的 404 detail 是我自己编的字符串，证明不了"透传" | mock 改用真实后端的 `[WinError 3] …` 原文，断言打在 `WinError 3` + 路径上 |
+| attach 的 409 路径完全没有覆盖 | 新增 `onAttachPost` 拦截口 + 一条 e2e：后端原因就地显示、归属不变 |
+| 56px 轨会隐藏 `staleProject` 注解（body 的既有 hide 规则） | **不改**：与行标题/事件数同一规则，窄屏只剩点是既有降级 |
+| 软删除成功后的兜底文案丢了"什么都没删" | 补全（AC5 的安全感不能只留在后端文案里） |
+| 因改版而死的 `.session-group*` 样式（4 条规则） | 删掉（本次改动产生的孤儿） |
+
+### 视觉复核（新增的 `staleProject` 注解）
+
+用真浏览器（hermetic mock 复现"项目列表 502"这一唯一会显示注解的状态）截了暗/亮两色：
+注解在 meta 下方、斜体、三级灰、长标题省略号截断（全文在 tooltip 里），亮色下对比度可读；
+未分组的正常行（`workspace=null`）**不带**注解——"孤儿"与"真的没选项目"在视觉上分得开。
+窄屏（420px）注解随 `session-item-body` 一起隐藏，符合既有规则。
+
+### 门禁（末次实跑，最终 revision）
+
+`npx tsc -b` ✅ · `npx vitest run` **561 passed**（30 文件；本轮 +5：3 条 workspace 消费
++ 2 条 422 数组/null 回执）· `npx oxlint` **0 errors**（37 warnings，与改版前同数）·
+`npx playwright test --workers=2` **144 passed**（本轮 +2：409 用例 × 2 视口）·
+`npx vite build` ✅。`impeccable detect` 对本次改动 **0 新增**发现（4 条 `side-tab` 告警
+落在既有规则上，按 Scope Lock 未动）。
+
+顺带把 `--workers=2`（§16.6 硬要求）写进 `playwright.config.ts`：以前只有门禁命令带这个
+参数，裸跑 `npx playwright test` 会默认 4 worker —— 那正是"门禁绿、本地红"这类
+反复消耗排查时间的来源之一。
+
+---
+
+## 第十二轮（2026-09-12）：MEM-5 #160 记忆管理 UI —— 交付 + e2e 逮到的真 bug + 真机验收
+
+**范围**：跨端票 MEM-5 的前端半（后端半 #159 已关单）。前端用户入口从「只有 API」变成
+「看得见 + 删得掉」。契约来源：`src/agent_harness/web/memory.py`（`MemorySummary` /
+`MemoryDeleted` / `GET /api/memories` 分页 / `DELETE` 的 200·404·403·503 语义）。
+
+### 一、e2e 逮到的一个真 bug（本票唯一产品缺陷，已修）
+
+| 项 | 内容 |
+| --- | --- |
+| 症状 | 读取失败（HTTP 500 / 网络断）时，面板**同时**渲染「还没有记忆」与错误条 |
+| 根因 | 状态分支写成 `disabled → loading → visible.length === 0 → 空态 → 列表`，末条**漏了** `loadError === null`。于是"一条都没读到 + 读取失败"落进空态分支 —— 正是 AC4 明令禁止的「把读不到伪装成没有」（不变量 #21 同族） |
+| 证据 | `e2e/s-memories.spec.ts` 的 500 用例断言 `.memory-empty` count 必须为 0 → **首版两视口都红**（也正是这条用例逼出该缺陷，不是事后补的） |
+| 修复 | 空态条件改为 `visible.length === 0 && loadError === null`；「0 行 + 失败」只留错误条 + 重试 |
+| 教训 | 「空 / 错 / 降级」三态是**互斥**的语义，不是"优先级排队"——分支链里任何一个 `&&` 漏写，就会把一种状态说成另一种 |
+
+### 二、真机验收（真 .env / 真模型 / 真 Zilliz / 真 sqlite / 真浏览器 5173+8000）
+
+种子数据走生产同一条装配 + `consolidate()` 契约（脚本 `.scratch/seed_real_memories.py`，
+后端 worktree，不入库）。**实测三条都 `degraded=consolidation_failed: VectorStoreError`**：
+外部向量服务当时不健康 → 按 #158「不丢写」设计降级为无条件 insert（记录行仍落盘，故列表有内容）。
+这是**如实记录的环境事实**，不是本票缺陷。
+
+| 验收项 | 真机结果 |
+| --- | --- |
+| 列表渲染 | 点顶栏 Brain 按钮 → 面板列出 3 条真记忆（content + `用户` chip + 本地化时间；`已全部加载`） |
+| 二次确认文案 | 行内确认条：「这是硬删除，**删除不可恢复**——没有回收站，删掉后模型不会再想起这条。」 |
+| 删除成功 | 确认后行消失 → `curl` 后端只剩 2 行 → 日志 `memory forget via api: forgotten` → **整页刷新**后再开面板该条仍不在（= 后端权威，不是本地隐藏） |
+| 删除失败回滚 | **杀后端**后点确认 → 行**回到列表** + 「删除记忆失败（502）」+ 面板错误条「加载记忆失败（502）」+ 重试；重启后端点重试 → 列表恢复一致 |
+| 真空态 | 经界面删光 → 「还没有记忆」（非降级态、无错误条）；`curl` 复查 0 行 |
+| 503 降级契约 | `CAPABILITIES={}` 的另一实例（:8001）：真 GET/DELETE 都回 503 + `memory capability 未启用：请在 CAPABILITIES 中配置 memory。` —— 与 e2e mock **逐字一致** |
+| 视觉 | 暗/亮两色 + 确认条截图复核；新增样式全部复用既有 token（无 §15 亮色遗漏问题） |
+| 环境还原 | 种子记忆已全部经界面删除（真记忆库不留假事实，避免被模型当真召回）；dev server 已停（含残留 uvicorn 占 `.instance.lock` 的已知坑） |
+
+### 三、门禁（实跑）
+
+`npx tsc -b` ✅ · `npx vitest run` **580 passed**（31 文件）· `npx oxlint` **0 errors**
+（38 warnings：37 既有 + 1 条本票同类）· `npx playwright test --workers=2` **160 passed**
+（本票 +16 = 8 用例 × 2 视口）· `npx vite build` ✅。
+
+### 四、过程自查
+
+- **StrictMode 双跑会把"只失败一次"的 mock 立刻覆盖成成功**：首版 500 用例用 `failures -= 1`
+  计数器，dev 下挂载 effect 跑两遍 → 第二个请求 200 → 错误条从未出现（用例假红）。
+  改为「失败保持到测试显式关掉」。同理 `requested[1] === '?limit=50&offset=50'` 这种
+  **按请求序号断言**在 StrictMode 下不稳（序号里混着重复的首屏请求）→ 改成
+  「翻页前**所有**请求 offset=0；翻页后**存在** offset=50」。
+  （这两个都是 mock 侧的测试写法问题，不是产品缺陷。）
+
+### 五、批次审查（B-1，两轴 subagent）发现并修掉的问题
+
+| 问题 | 性质 | 处置 |
+| --- | --- | --- |
+| 重拉 `limit` 越过后端硬上界（>4 页后 422）→ 回滚重拉与"重试"永久失败 | **真缺陷（AC3 破）** | `MEMORY_MAX_LIMIT` + `refetchLimit()` 夹取 + 3 单测 |
+| 404（别处已删）的删除失败被界面吞掉 | **真缺陷（AC3 破）** | 面板级错误条 + e2e `memoryVanishedIds` + 1 用例 ×2 视口 |
+| e2e 的 403 detail 是编的中文（真后端是 `Memory belongs to a different namespace`） | **测试保真度缺陷** | mock / e2e / 单测统一改用真后端原文 |
+| DELETE 挂死无超时 → 行隐藏 + 按钮永久禁用 | **真缺陷（"点了没反应"）** | `lib/timeout.ts` + `DELETE_TIMEOUT_MS=30s` + 4 单测 |
+| `MemoriesState.rows` 无消费方 | 判断项 | 去掉导出 |
+| `.project-dialog-*` 类名复用 / `describeMemoryError` 与 `describeProjectError` 同形 / v2 与 §16.1 的协议矛盾 / AC4"检索不可用"在后端无独立状态 | 判断项 + 只登记 | 3 条说明理由不改（§8 Scope Lock）；1 条只登记（503=未装配、5xx=读取失败即事实上的"暂不可用"） |
+
+**修复后门禁**：tsc 0 · vitest **587** · oxlint 0 error（38w）· playwright **162** · vite build ✅；
+**修复后真机复验**：3 条 → 界面真删 1 条 → 后端剩 2 条 → 再删 2 条 → 后端 0 条 + 面板「还没有记忆」。
+
 ## 第九轮（2026-09-12）：PromptRegistry 迁移期的后端观察（自主 SDD 批次）
 
 本轮在 `feat/backend` 自主推进 #150 + #161–#168 + #149–#160。迁移类票的验收靠

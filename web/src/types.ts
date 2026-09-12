@@ -42,6 +42,74 @@ export interface AgentEvent {
   block_id?: string;
 }
 
+/** 项目引用（WS-3 / #153；后端 `src/agent_harness/web/app.py::WorkspaceRef`）。
+ *  `id` 用于请求与重命名，`title` 用于显示——两者都由后端给，前端零推导。 */
+export interface WorkspaceRef {
+  id: string;
+  title: string;
+}
+
+/** 项目目录状态（WS-4 / #154，后端 `web/projects.py::Project.status`）。
+ *  `missing-dir` = 注册时存在、现在被移走/改名——后端**只如实上报，不改记录**，
+ *  所以前端也不能据此隐藏项目（那会把用户注册过的东西变没）。 */
+export type ProjectStatus = 'ok' | 'missing-dir';
+
+/** 项目实体（WS-4 / #154，后端 `web/projects.py::Project`）。
+ *
+ *  `session_ids` 是**账本手工序**（用户拖出来的顺序，后端已过滤成员资格）——
+ *  前端按它渲染项目内顺序，**不按活动时间重排**（WS-3 的契约立场）。 */
+export interface Project {
+  id: string;
+  path: string;
+  title: string;
+  status: ProjectStatus;
+  session_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** DELETE /api/projects/{id} 的响应（软删除结果）。
+ *
+ *  `detail` 是后端写好的中文文案，**必须原样展示**：它明确说「会话与目录都没删」，
+ *  是 AC5 要的那句「不让人误以为会话连坐消失」的唯一权威来源（前端不自己编）。 */
+export interface ProjectDeleted {
+  id: string;
+  deleted: boolean;
+  sessions_detached: number;
+  detail: string;
+}
+
+/** 记忆归属范围（后端 `memory/types.py::MemoryScope`）。
+ *
+ *  `session` 的记忆按**会话**归属；HTTP 用户入口只暴露 `user`（浏览会话记忆需要
+ *  可信的会话绑定，MEM-4 明确不在范围）。类型上保留两者：模型工具侧与未来入口
+ *  都可能出现 session 行，管理面必须能如实渲染而不是把未知值当 user。 */
+export type MemoryScope = 'user' | 'session';
+
+/** 一条记忆（后端 `web/memory.py::MemorySummary`，GET /api/memories 的元素）。
+ *
+ *  `content` 是**权威记录里的正文**（不是向量检索的投影——管理界面要的是"我记住
+ *  了什么"，不是"哪几条最像某个 query"）。`metadata` 已由后端剥掉 provider 内部
+ *  载荷（`public_metadata`），前端只渲染 `content` / `created_at` / `scope`。
+ *  `created_at` 是后端给的 ISO 字符串，前端零解析、零改写（格式化只在展示层）。 */
+export interface MemorySummary {
+  id: string;
+  content: string;
+  scope: MemoryScope;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+/** DELETE /api/memories/{id} 的响应（硬删成功）。
+ *
+ *  **硬删不可恢复**（不是软删/回收站）：后端 `forget` 真的移除记录行与索引。
+ *  失败语义在后端是**显式**的：id 不存在 → 404、不属于当前入口 → 403、
+ *  记忆能力未装配 → 503（前端据此区分"没了"/"不给删"/"未启用"）。 */
+export interface MemoryDeleted {
+  id: string;
+  deleted: boolean;
+}
+
 /** Session summary from GET /api/sessions. */
 export interface SessionSummary {
   session_id: string;
@@ -59,6 +127,10 @@ export interface SessionSummary {
    *  trace_id 与 trace_url 并列不互替：前者机器可读（Copy 命令），后者人类
    *  可点击（详情面板超链接）。未启用 Langfuse 两者都 null。 */
   trace_url: string | null;
+  /** 会话所属项目（WS-3 / #153，后端 `SessionSummary.workspace`）。
+   *  **未分组 = null**（历史遗留 / 未命名 workspace / 装配里没有项目索引）——
+   *  后端绝不伪造（不变量 #21 同族）。分组 UI 按 `null` = 未分组渲染（#155）。 */
+  workspace: WorkspaceRef | null;
 }
 
 /**
