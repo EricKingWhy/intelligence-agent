@@ -38,6 +38,7 @@ import { useTickingNow } from '../hooks/useTickingNow';
 import { buildRailModel, dropAnchor, moveAnchor } from '../lib/projects';
 import type { UngroupedRow } from '../lib/projects';
 import { describeProjectError } from '../lib/api';
+import type { CatalogEntry } from '../lib/api';
 import type { ProjectActions } from '../hooks/useProjects';
 import {
   AttachToProjectDialog,
@@ -45,6 +46,7 @@ import {
   DeleteProjectDialog,
   InlineRename,
 } from './ProjectDialogs';
+import { StartTaskInProjectDialog } from './StartTaskInProjectDialog';
 
 interface Props {
   sessions: SessionSummary[];
@@ -64,6 +66,15 @@ interface Props {
    *  隐藏项目会把所有会话误显示成未分组，比显示一条错误糟）。 */
   projectsError: string | null;
   onRetryProjects: () => void;
+  /** 「在此项目中新建任务」（WS-6 / #169）：以项目目录为 cwd 起一个会话。
+   *  resolve `null` = 已开始流式；否则为**给用户看的原因**（留在确认面里）。 */
+  onStartTask: (
+    project: Project,
+    task: string,
+    permissionMode: string | null,
+  ) => Promise<string | null>;
+  /** 权限档清单（GET /api/permission-modes）——确认面三选一的数据源。 */
+  permissionModes: CatalogEntry[];
 }
 
 // memo：流式期间本组件 props（sessions/projects/selectedId/titlesById/回调）全部引用
@@ -80,6 +91,8 @@ export const SessionList = memo(function SessionList({
   onSessionsChanged,
   projectsError,
   onRetryProjects,
+  onStartTask,
+  permissionModes,
 }: Props) {
   const now = useTickingNow();
   // 「项目有哪些会话」= 账本投影，不另存一份（不变量 #22）。
@@ -90,6 +103,8 @@ export const SessionList = memo(function SessionList({
   const [createOpen, setCreateOpen] = useState(false);
   const [deleting, setDeleting] = useState<Project | null>(null);
   const [attachFor, setAttachFor] = useState<string | null>(null);
+  /** 「在此项目中新建任务」的目标项目（null = 确认面关闭）。 */
+  const [startTaskFor, setStartTaskFor] = useState<Project | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
   // 拖拽重排（HTML5 DnD）：记**来源项目**而不只是被拖的会话 id——跨项目拖动
@@ -293,6 +308,15 @@ export const SessionList = memo(function SessionList({
                         </DropdownMenu.Trigger>
                         <DropdownMenu.Portal>
                           <DropdownMenu.Content className="rail-menu" align="end" sideOffset={4}>
+                            {/* 第一项：本票的主入口（AC9）。放在最前是因为它是这个项目
+                                行最常用、也最不容易误伤的操作——重命名/删除在它下面。 */}
+                            <DropdownMenu.Item
+                              className="rail-menu-item"
+                              onSelect={() => setStartTaskFor(project)}
+                            >
+                              在此项目中新建任务
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Separator className="rail-menu-sep" />
                             <DropdownMenu.Item
                               className="rail-menu-item"
                               onSelect={() => setRenamingId(project.id)}
@@ -313,8 +337,17 @@ export const SessionList = memo(function SessionList({
                     {expanded && (
                       <div className="rail-project-rows" id={listId}>
                         {rows.length === 0 && (
+                          // 空项目不再引导用户"去未分组找 cwd 匹配的会话"——WS-6 之后
+                          // 在项目里直接开任务就是最短路径，旧文案的语义已被本入口取代
+                          // （AC10：占位区替换为该入口按钮）。
                           <div className="rail-project-empty">
-                            还没有会话。从未分组会话的「加入项目…」里选它——加进来的前提是那个会话的工作目录正好是这个路径。
+                            这个项目还没有会话。
+                            <button
+                              className="rail-empty-action"
+                              onClick={() => setStartTaskFor(project)}
+                            >
+                              在此项目中新建任务 →
+                            </button>
                           </div>
                         )}
                         {rows.map((s) => (
@@ -471,6 +504,14 @@ export const SessionList = memo(function SessionList({
           await projectActions.attach(projectId, sessionId);
           onSessionsChanged();
         }}
+      />
+      <StartTaskInProjectDialog
+        project={startTaskFor}
+        permissionModes={permissionModes}
+        onOpenChange={(open) => {
+          if (!open) setStartTaskFor(null);
+        }}
+        onStart={onStartTask}
       />
     </aside>
   );

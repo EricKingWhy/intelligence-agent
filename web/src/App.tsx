@@ -42,7 +42,7 @@ import {
 } from './lib/api';
 import { summarizeEvent } from './lib/projection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
-import type { ToolCall, PresetTask, AgentEvent } from './types';
+import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
 import './styles/app.css';
 
 /** Workspace 模式 —— Chat 常驻；Split/Preview 为后续 Phase 预留的空架子。 */
@@ -359,6 +359,31 @@ export default function App() {
     [submitTask, sendMessage, focusRun, selectedId, streaming, composerControls],
   );
 
+  /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 起一个会话，
+   *  复用 submitTask 的同一条 SSE 接线——新会话因此会被选中并跟随流，而不是另造
+   *  一条"提交后就撒手"的路径（不变量 #22：会话真相只有一条）。
+   *
+   *  `ownError: true`：失败原因**返回给确认面**在浮层里就地显示（AC12），不打到
+   *  Workspace 区的全局横幅上；同时那条路径里的 422 不套用「未知模型」旧语义，
+   *  所以「目录不存在：…」这类后端 detail 会原样出现在用户眼前。
+   *
+   *  `permissionMode === null`（默认档）→ 不进 payload → api 层不发键 → 后端
+   *  默认 workspace-write + auto-approve（见 StartTaskInProjectDialog 文件头）。 */
+  const handleStartTaskInProject = useCallback(
+    (project: Project, task: string, permissionMode: string | null) =>
+      submitTask(
+        {
+          task,
+          cwd: project.path,
+          max_steps: 10,
+          auto_approve: true,
+          ...(permissionMode ? { permission_mode: permissionMode } : {}),
+        },
+        { ownError: true },
+      ),
+    [submitTask],
+  );
+
   /** T7 #137：从历史用户消息 seq 派生 child session，成功后跳转到 child。
    *
    *  分叉是异步的，而它的两个结局都会动用户视野（跳 child / 弹错误条），
@@ -630,6 +655,8 @@ export default function App() {
           onSessionsChanged={refreshSessions}
           projectsError={projectsError}
           onRetryProjects={handleRetryProjects}
+          onStartTask={handleStartTaskInProject}
+          permissionModes={permissionModes}
         />
 
         <section className="app-workspace">

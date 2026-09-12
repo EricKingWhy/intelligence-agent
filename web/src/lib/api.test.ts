@@ -9,6 +9,7 @@ import {
   deleteProject,
   describeMemoryError,
   detachSessionFromProject,
+  getHostDirs,
   getModels,
   getSessionEvents,
   isMemoryDisabled,
@@ -243,6 +244,81 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
       reasoning_effort: 'deep',
       context_providers: ['memory'],
     });
+  });
+
+  // ── WS-6 / #169：cwd 与「默认权限档不发键」的坑 ──
+
+  it('cwd 有值 → 带键（目录根会话）；缺省 → 不发键（旧 workspace/default 语义不变）', async () => {
+    const cap = captureFetch();
+    await startSession({ task: 't', cwd: 'D:/repos/alpha' });
+    expect(cap.calls[0].body.cwd).toBe('D:/repos/alpha');
+    expect(cap.calls[0].body).not.toHaveProperty('workspace');
+
+    await startSession({ task: 't' });
+    expect(cap.calls[1].body).not.toHaveProperty('cwd');
+  });
+
+  it('「在此项目中新建任务」默认档：只发 cwd，**不发** permission_mode', async () => {
+    // 后端语义：显式传了非 danger-full-access 的档 → 切交互式审批（每个工具调用
+    // 都要人工批）。默认档必须靠"不发键"表达，否则这条路径会退化成"每步弹卡"。
+    // 这条断言红了要改的是调用方（不要为了"显式"把默认档塞进 payload），不是这里。
+    const cap = captureFetch();
+    await startSession({ task: '读一下 README', cwd: 'D:/repos/alpha', max_steps: 10 });
+    expect(cap.calls[0].body).toEqual({
+      task: '读一下 README',
+      cwd: 'D:/repos/alpha',
+      max_steps: 10,
+    });
+    expect(cap.calls[0].body).not.toHaveProperty('permission_mode');
+  });
+});
+
+describe('getHostDirs — WS-7 / #170 目录列举（ADR-0028）', () => {
+  it('缺省 path → 请求不带查询串（列根）；有值时编码进查询串', async () => {
+    const roots = captureFetch(200, { path: null, parent: null, truncated: false, entries: [] });
+    await getHostDirs();
+    expect(roots.calls[0].url).toBe('/api/host/dirs');
+
+    const inDir = captureFetch(200, {
+      path: 'D:\\repos',
+      parent: 'D:\\',
+      truncated: false,
+      entries: [],
+    });
+    await getHostDirs('D:\\repos');
+    expect(inDir.calls[0].url).toBe('/api/host/dirs?path=D%3A%5Crepos');
+  });
+
+  it('解析 path/parent/entries/truncated；path 为 null（根模式）原样保留', async () => {
+    captureFetch(200, {
+      path: 'D:\\data',
+      parent: 'D:\\',
+      truncated: true,
+      entries: [
+        { name: 'repos', path: 'D:\\data\\repos' },
+        { name: 'bad' }, // 形状不符的单条丢弃，不牵连其余
+      ],
+    });
+    await expect(getHostDirs('D:\\data')).resolves.toEqual({
+      path: 'D:\\data',
+      parent: 'D:\\',
+      truncated: true,
+      entries: [{ name: 'repos', path: 'D:\\data\\repos' }],
+    });
+  });
+
+  it('403/404/422 → ProjectError 且 message = 后端 detail 原文（界面不翻译）', async () => {
+    for (const [status, detail] of [
+      [403, '无权限访问：D:\\secret'],
+      [404, '目录不存在：D:\\nope'],
+      [422, '不是目录：D:\\a-file.txt'],
+    ] as const) {
+      captureFetch(status, { detail });
+      const err = await getHostDirs('D:\\x').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ProjectError);
+      expect((err as ProjectError).status).toBe(status);
+      expect((err as Error).message).toBe(detail);
+    }
   });
 });
 
