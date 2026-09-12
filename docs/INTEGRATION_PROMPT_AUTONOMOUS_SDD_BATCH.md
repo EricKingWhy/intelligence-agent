@@ -804,3 +804,72 @@ persona 由装配点 `build_registry(persona=…)` 注入。因此 `_builtin_pro
 3. 盘根/家目录可以注册（AC2 字面允许的"任意已存在目录"）——沙箱根会随之变成整块盘；
    review 建议评估显式拒绝，本票**评估后保留**（是用户的显式动作 + 软删除不破坏数据），
    已写入 ADR D1 补充。
+
+---
+
+## 15. #155（WS-5）项目分组 UI —— 跨端票的**前端半**（commit `f015a60` + 文档 `c224724`）
+
+### 交付位置
+
+**全部在 `D:\intelligence-agent-frontend`（feat/frontend）**：本票没有后端改动。
+后端半是已交付的 #153（列表 `workspace` 契约）与 #154（项目 CRUD API），二者在
+`feat/backend`，**尚未合入 main** —— 所以 `#155` 按 §14.12 **不关单**（跨端票只完成一端）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/types.ts` | `Project` / `ProjectStatus` / `ProjectDeleted`（与 `web/projects.py::Project` 逐字段对齐） |
+| `web/src/lib/api.ts` | 7 个项目端点 + `ProjectError(status, message)` + `describeProjectError` + 窄化解析 |
+| `web/src/lib/projects.ts`（新） | 纯函数：`buildRailModel`（分组投影）/ `moveAnchor` / `dropAnchor`（insertBefore 锚点） |
+| `web/src/lib/projects.test.ts`（新） | 18 条：账本序 vs 活动序、孤儿行不丢、重复 id、锚点边界 |
+| `web/src/hooks/useProjects.ts`（新） | 项目列表 + 8 动作；写后重拉（失败也重拉） |
+| `web/src/components/SessionList.tsx` | 改版：项目块（折叠/行内重命名/菜单）+ 行（点选/菜单/拖拽）+ 未分组区 |
+| `web/src/components/ProjectDialogs.tsx`（新） | 新建 / 删除确认（明示只解除分组）/ 加入项目 + 行内重命名 |
+| `web/src/App.tsx` | 接线 + "会话列表刷新即重拉项目"（新会话/fork/recover 都可能顺带改归属） |
+| `web/src/styles/app.css` | 纯新增 562 行（层级导轨 / 菜单 / 拖放落点 / 错误条 / 浮层） |
+| `web/e2e/r-project-groups.spec.ts`（新） | 6 用例 × 2 视口（AC1–AC5 + 端点失败降级） |
+| `web/e2e/fixtures.ts` | 项目端点的**有状态** mock |
+| `web/e2e-live/project-groups-live.spec.ts`（新） | 无 mock 真机流程 + 基线逐字段比对 |
+
+### 三条契约/语义决定（前端侧）
+
+1. **不维护第二套成员名单**：分组只由 `GET /api/projects.session_ids`（账本手工序）与
+   `GET /api/sessions.workspace` 派生；**绝不因为分组丢掉任何一行**——未出现在账本里的
+   会话（含 `workspace` 引用已失效项目的孤儿行、子代理子会话）一律落到「未分组」区。
+2. **内部子代理子会话**（#152 AC14 收窄②、第九轮登记待 #155 决策）**如实显示在未分组区**：
+   后端给它的 `workspace` 就是 `null`（它确实不属于项目），前端不折叠、不隐藏、不从
+   id/标题猜 `agent_id`。若将来要在视觉上区分，正确路径是**先加契约字段**
+   （`SessionSummary.agent_id` / `parent_session_id`）再改 UI。
+3. **注册项目不批量回溯 attach**：`attach` 校验「会话 cwd == 项目路径」，而
+   `SessionSummary` 不暴露会话 cwd → 前端**无法判定**哪些未分组会话属于该目录，
+   盲 attach 只会得到一堆 409。改为逐行「加入项目…」，后端 409 的 `detail` 原样显示。
+
+### 门禁（末次实跑，最终 revision）
+
+`npx tsc -b` ✅ · `npx vitest run` **556 passed**（30 文件；本票 +36）·
+`npx oxlint` **0 errors**（37 warnings 全为既有规则，本票 10 文件 0 warning）·
+`npx playwright test --workers=2` **142 passed**（本票 +12）· `npx vite build` ✅ ·
+`impeccable detect` 对改动文件 **0 findings**（`app.css` 的 4 条 `side-tab` 全在既有行号）。
+
+### 真机验收（真 uvicorn 8000 + 真 `.env`/`harness.db` + 真浏览器 5173，无 mock）
+
+注册临时目录 → 行内重命名 → 软删除（0 会话）；注册真实目录 `workspaces/ws-delete-me`
+→ attach 真会话（cwd 相等放行）→ detach → 再 attach → **软删除（1 会话）**：会话回到
+未分组、目录仍在盘上；真项目内重排（上移/下移，读 API 验证账本序变化与**精确还原**）；
+结束时会话归属与项目账本与开测前**逐字段相等**（30 条会话）。截图
+`web/gui-test-screenshots/ws5/`（本地留存、未入库）。
+
+### 需要后续票知悉
+
+1. **`POST /api/sessions` 仍只接受单段 workspace 名**（`SessionService._validate_workspace_name`
+   拒绝绝对路径）→ 用户注册的任意目录项目**拿不到"新建会话"入口**（只有 fork 子会话能继承
+   cwd 进入）。这是用户原始诉求（"一个项目下多个会话"）的**最后一块缺口**，需后端契约变更：
+   让 create 接受绝对路径并把 cwd 定为该目录（写侧唯一规范化 `sandbox/paths.py:canonical_workspace_path`
+   已存在）。**建议单独立票**。
+2. **CORS `*`**（#154 集成提示词已登记的既有洞）在本票真机验收里再次可见：项目端点已过
+   来源闸，会话端点没有。
+3. 窄屏 56px 折叠轨看不见会话行（`.session-item-dot` / `.session-item-body` 的
+   `display:none` 是既有规则，本票只把项目 chrome 追加进同一 hide 列表）。
+4. `e2e-live/approval-live.spec.ts` 的「LIVE 拒绝」用例本轮连续失败（非门禁、结果非确定）：
+   后端 `/approve` 返回 200 且决策落库、工具如实 failed，但 UI 卡片未在 10s 内翻到「已拒绝」；
+   判断为真实模型在同一 run 内**再次请求审批**导致定位到新的 pending 卡片。与本票 diff 无关
+   （未触碰 `ApprovalCard` / `postApproval` / 投影），门禁内 `n-approval-card.spec.ts` 全绿。
