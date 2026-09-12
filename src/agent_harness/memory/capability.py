@@ -7,10 +7,12 @@
   时按新记忆写入（与 `store` 的区别只是 id 由调用方给定）。这一层只提供**机制**：
   "该不该更新、更新哪一条"是冲突消解（#158）的策略，不要写进本层。
 - `forget`：**硬删**（记录行与向量都真的消失，不留墓碑）。id 不存在 → `False`（幂等，
-  "忘了又忘"不是错误）；存在但属于别的 tenant/user/scope → `PermissionError`（与
-  `store` 同源；静默 False 会让调用方以为删掉了）；SESSION 绑定的记忆要求当前上下文
-  绑定同一 session（与 `store`/`get` 同款），没有绑定时 `ValueError`——**仅当这条记忆
-  确实存在时**才做归属/绑定校验，不存在的 id 一律幂等 `False`。
+  "忘了又忘"不是错误）；存在但**该行的 namespace 不能由当前上下文解析成调用方有权操作的
+  那一个** → `PermissionError`（#159 起统一口径：属于别的 tenant/user/scope、SESSION 行绑到
+  别的 session、SESSION 行完全没有绑定、scope 未实现，都是这一种；静默 False 会让调用方以为
+  删掉了）。读路径刻意不同款：`get` 把它伪装成 `KeyError`（不泄露存在性），`delete`/`forget`
+  如实拒绝，入口层据此给 403 而不是 500。**仅当这条记忆确实存在时**才做归属/绑定校验，
+  不存在的 id 一律幂等 `False`。
 - 索引是**异步**跟进的：`store`/`update`/`forget` 只保证权威记录与 outbox 意图落盘，
   向量索引由 relay 收敛（失败保留意图、下轮重试，见 `record_store` 与 `outbox_relay`）。
   调用方不得假设"方法返回 ⟹ 检索已更新"。

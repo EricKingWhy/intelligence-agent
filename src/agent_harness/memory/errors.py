@@ -14,6 +14,17 @@ class MemoryDomainError(Exception):
     """memory 领域异常基类（web 层按类型精确映射状态码）。"""
 
 
+class SessionBindingMissing(ValueError):
+    """SESSION scope 需要可信会话绑定，而当前上下文没有。
+
+    **刻意是 `ValueError`**（#156 起的语义：这是"调用方少给了一个绑定"，不是归属判定），
+    并且**刻意不是 `MemoryDomainError`**——它不需要被翻译成 HTTP 状态码，所以不该进
+    `web/domain_errors.py` 的映射表。唯一需要区分它的地方是 `types.row_namespace_matches`：
+    那里"这一行的 namespace 解析不出"要转成归属拒绝（→ `PermissionError`）。类型化之后那个
+    `except` 不必再裸接 `ValueError`（否则 `of()` 里将来任何无关的 ValueError 都会被静默吞掉）。
+    """
+
+
 class MemoryNotFound(MemoryDomainError):
     """按 id 操作的目标不存在（`forget` 返回 False 在入口层的显式化）。"""
 

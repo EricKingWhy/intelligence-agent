@@ -112,7 +112,7 @@ class SqliteMilvusBaseStore(BaseStore):
 
     @staticmethod
     def _item(entry: MemoryEntry, namespace, search=False):
-        value = entry.metadata.get("_langmem_value", {"kind": "MemoryPayload", "content": {
+        value = entry.metadata.get(LANGMEM_INTERNAL_METADATA_KEY, {"kind": "MemoryPayload", "content": {
             "content": entry.content, "metadata": entry.metadata,
         }})
         timestamp = datetime.fromisoformat(entry.created_at)

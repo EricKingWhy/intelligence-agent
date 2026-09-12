@@ -48,8 +48,13 @@ class MemoryRecordStore(Protocol):
           namespace，无法安全地清理索引，所以也不产生索引意图）；
         - 存在但属于别的 namespace → `PermissionError`（与 `store` 同源：跨
           tenant/user/scope 的删除是权限违规，不是"没有这条"）；
-        - SESSION 绑定的记忆要求当前上下文绑定同一 session，否则 `PermissionError`
-          （与 `get`/`store` 一致）；完全没有绑定时 `ValueError`。
+        - **该行的 namespace 不能由当前上下文解析成调用方有权操作的那一个** → 统一是
+          `PermissionError`（#159 定的口径，见 `types.row_namespace_matches`）：属于别的
+          tenant/user/scope、SESSION 行绑到了别的 session、SESSION 行完全没有绑定、该行 scope
+          未实现，都归这一种。**与 `get` 口径不同是刻意的**——`get` 把"不是你的"伪装成
+          `KeyError`（读路径不泄露存在性），`delete` 如实拒绝（入口层据此给 403，而不是 500）。
+          **调用方自己**的 scope 解析（`store`/`list_by_scope` 走 `scope_to_namespace`）在缺
+          绑定时仍是 `ValueError`：那是"少给了一个绑定"的调用方错误，不是归属判定。
 
         "先看行是否存在、再校验归属"这个顺序是有意的：归属校验需要行本身（scope 从行里
         读），而且不存在时必须是幂等 `False`——否则"忘一条已经不存在的记忆"会因为当前

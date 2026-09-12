@@ -177,6 +177,36 @@ async def test_delete_cannot_remove_another_owners_memory(store, other):
 
 
 @pytest.mark.asyncio
+async def test_get_of_a_session_memory_uses_the_same_namespace_check(store):
+    """`get` 与 `delete` 共用 `row_namespace_matches`，但**口径不同**：读路径把"不是你的"
+    伪装成 `KeyError`（不泄露存在性），删除路径如实 `PermissionError`（见上一条用例）。
+
+    这条同时钉住 #159 的改判：SESSION 行在**没有绑定**时，`get` 以前会抛 `ValueError`
+    （解析不出那一行），现在归入"不是你的" → `KeyError`；不再是异常冒泡。
+    """
+    owner = IdentityContext("acme", "alice", ["user", "session"])
+    scoped = entry().model_copy(update={"scope": MemoryScope.SESSION})
+    token = memory_session_var.set("session-a")
+    try:
+        await store.store(scoped, owner)
+    finally:
+        memory_session_var.reset(token)
+    with pytest.raises(KeyError):
+        await store.get("m1", owner)  # 无绑定：解析不出这一行，与"不存在"同等对待
+    token = memory_session_var.set("session-b")
+    try:
+        with pytest.raises(KeyError):
+            await store.get("m1", owner)  # 绑到别的 session：不是你的
+    finally:
+        memory_session_var.reset(token)
+    token = memory_session_var.set("session-a")
+    try:
+        assert (await store.get("m1", owner)).id == "m1"  # 绑定正确：读得到
+    finally:
+        memory_session_var.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_delete_rejects_a_session_bound_from_another_session(store):
     """SESSION 绑定的记忆：绑定不上（无绑定、或绑到别的 session）→ PermissionError；
     绑定正确 → 删除。删除后同一个 id 的再次删除落回幂等 False（没有行可校验）。

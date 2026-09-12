@@ -11,6 +11,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from agent_harness.identity import IdentityContext
+from agent_harness.memory.errors import SessionBindingMissing
 
 memory_session_var: ContextVar[str | None] = ContextVar("memory_session", default=None)
 
@@ -78,7 +79,7 @@ class MemoryNamespace:
         if scope is MemoryScope.SESSION:
             bound = session_id or memory_session_var.get()
             if not bound:
-                raise ValueError("SESSION scope requires a trusted session binding")
+                raise SessionBindingMissing("SESSION scope requires a trusted session binding")
             return cls((NAMESPACE_ROOT, identity.tenant_id, identity.user_id, scope.value, bound))
         return cls((NAMESPACE_ROOT, identity.tenant_id, identity.user_id, scope.value))
 
@@ -136,9 +137,9 @@ def row_namespace_matches(
     "这一行的 namespace 没法被当前调用方建立成可操作的 namespace"：
 
     - `PermissionError`：调用方没被授予该 scope；
-    - `ValueError`：该行是 SESSION 记忆，而当前上下文没有可信会话绑定——HTTP 入口就是这种
-      情况（`memory_session_var` 只在 detached run 里设置），所以用户 API 按 id 删会话记忆
-      必须得到明确的拒绝，而不是 500；
+    - `SessionBindingMissing`（`ValueError` 子类）：该行是 SESSION 记忆，而当前上下文没有可信
+      会话绑定——HTTP 入口就是这种情况（`memory_session_var` 只在 detached run 里设置），所以
+      用户 API 按 id 删会话记忆必须得到明确的拒绝，而不是 500；
     - `NotImplementedError`：该行的 scope 本项目尚未实现（只可能来自带外写入的脏值）。
 
     这**不是**把异常吞掉：调用方**自己**的 scope 解析（`store`/`list_by_scope` 走的
@@ -146,6 +147,6 @@ def row_namespace_matches(
     """
     try:
         expected = MemoryNamespace.of(scope, identity).as_tuple()
-    except (PermissionError, ValueError, NotImplementedError):
+    except (PermissionError, SessionBindingMissing, NotImplementedError):
         return False
     return row_namespace == expected
