@@ -85,6 +85,17 @@ class LangMemMemoryCapability:
         """硬删（记录行 + 异步传播到向量索引），契约见 `capability.py`。"""
         return await self._records.delete(memory_id, get_identity_context())
 
+    async def list_entries(self, scope: MemoryScope, limit: int, offset: int = 0) -> list[MemoryEntry]:
+        """按 namespace 分页列出（契约见 `capability.py`）。
+
+        刻意**不走 embedding 检索**：用户管理界面要的是"我的记忆全都有哪些"，不是
+        "哪几条最像某个 query"。读权威记录，先取 `limit + offset` 再切片（与 adapter 的
+        SearchOp 同款做法）。
+        """
+        limit, offset = max(0, limit), max(0, offset)
+        entries = await self._records.list_by_scope(scope, get_identity_context(), limit + offset)
+        return entries[offset:offset + limit]
+
     async def search(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
         namespace = MemoryNamespace.of(scope, get_identity_context()).as_tuple()
         if not query or limit <= 0:

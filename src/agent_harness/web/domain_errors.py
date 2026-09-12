@@ -66,6 +66,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.session.errors import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -157,6 +158,37 @@ def workspace_http_error(exc: Exception) -> HTTPException:
     """
     return HTTPException(
         status_code=_WORKSPACE_ERROR_STATUS[type(exc)], detail=str(exc)
+    )
+
+
+#: memory 领域 / 归属异常 → HTTP status 的第三张表（MEM-4 / #159）。
+#:
+#: 为什么又是单独一张：`_DOMAIN_ERROR_STATUS` 的键必须是 `SessionServiceError` 子类
+#: （记忆不是会话服务），`_WORKSPACE_ERROR_STATUS` 的键是 workspace 包词汇。记忆有自己的
+#: 领域异常（`memory/errors.py`），一个包一张表，键域各自自洽。
+#:
+#: **刻意不登记 `ValueError`**：它从 `MemoryNamespace.of` 冒出来只有一种情形——"要了
+#: SESSION scope 却没有可信 session 绑定"，而本票的用户 API **只暴露 USER scope**
+#: （namespace 由服务端按请求身份解析，不接受参数）。真冒出 ValueError 说明是**我们自己**
+#: 的上下文处理写错了，500 才是诚实状态码，不该拿 422 盖住（同 `WorkspaceRegistryCorrupt`
+#: 的取舍）。
+_MEMORY_ERROR_STATUS: dict[type[Exception], int] = {
+    # 404：目标不存在（`forget` 返回 False 在入口层的显式化——对着一个具体 id 说"删了"，
+    # 结果显示"这条不存在"，比静默成功更诚实）。
+    MemoryNotFound: 404,
+    # 403：存在但不属于当前 tenant/user/scope。**不是 404**——静默当成"不存在"会让
+    # 越权探测变成没有反馈的猜谜，而领域层的归属校验本来就拒绝了，如实报 403。
+    PermissionError: 403,
+}
+
+
+def memory_http_error(exc: Exception) -> HTTPException:
+    """memory 领域 / 归属异常 → `HTTPException`；状态码取自 `_MEMORY_ERROR_STATUS`。
+
+    与另外两张表同款：直接索引，未登记类型由覆盖测试先红挡住。
+    """
+    return HTTPException(
+        status_code=_MEMORY_ERROR_STATUS[type(exc)], detail=str(exc)
     )
 
 

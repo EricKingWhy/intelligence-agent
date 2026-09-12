@@ -26,6 +26,11 @@ class FakeMemoryCapability:
     async def forget(self, memory_id: str) -> bool:
         return await self._records.delete(memory_id, get_identity_context())
 
+    async def list_entries(self, scope: MemoryScope, limit: int, offset: int = 0) -> list[MemoryEntry]:
+        """按 namespace 分页列出（契约见 `capability.py`）——与真实现同款先取后切。"""
+        entries = await self._records.list_by_scope(scope, get_identity_context(), max(0, limit) + max(0, offset))
+        return entries[max(0, offset):max(0, offset) + max(0, limit)]
+
     async def search(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
         entries = await self._records.list_by_scope(scope, get_identity_context(), 10000)
         return [entry.model_copy(update={"score": 1.0}) for entry in entries

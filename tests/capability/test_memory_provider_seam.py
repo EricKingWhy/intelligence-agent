@@ -80,6 +80,11 @@ class _InMemoryCapability:
     async def forget(self, memory_id: str) -> bool:
         return self.entries.pop(memory_id, None) is not None
 
+    async def list_entries(self, scope: MemoryScope, limit: int, offset: int = 0) -> list[MemoryEntry]:
+        """契约方法（#159）：按 namespace 分页列出——与真实现同款"先取后切"。"""
+        scoped = [e for e in self.entries.values() if e.scope is scope]
+        return scoped[max(0, offset):max(0, offset) + max(0, limit)]
+
     async def recall(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:
         return [e for e in self.entries.values() if e.scope is scope][:limit]
 

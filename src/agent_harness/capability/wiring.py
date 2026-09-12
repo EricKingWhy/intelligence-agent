@@ -21,6 +21,8 @@ from agent_harness.capability.base import (
 )
 from agent_harness.capability.config import ProviderConfig
 from agent_harness.config import Settings
+from agent_harness.memory.capability import MemoryCapability
+from agent_harness.memory.tools import ForgetMemoryTool
 from agent_harness.sandbox import WorkspaceRegistry
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,10 @@ class CapabilityWiring:
     # handler 层 422 校验也走裸 list + getattr(p, "name")。
     context_providers: list[Any] = field(default_factory=list)
     tools: list[Any] = field(default_factory=list)
+    #: 工具贡献的第二来源（#159）：当"注册的 provider 必须是契约对象本身"时（memory 的
+    #: 描述符注册的就是 `MemoryCapability`，由 seam 测试钉住），不能把注册项换成 wrapper，
+    #: 于是在这里挂 wrapper，仍由 `wire_capabilities` 末尾的同一个收集循环收进 `tools`。
+    tool_contributors: list[Any] = field(default_factory=list)
     memory_writer: Any | None = None
     memory: Any | None = None  # MemoryComponents 生命周期包（relay/writeback），由 aclose 关闭
     # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 aclose 关闭。
@@ -114,6 +120,8 @@ async def _wire_memory(
     wiring.context_providers.append(MemoryContextProvider(components.capability))
     wiring.memory_writer = components.writeback
     wiring.memory = components
+    # #159：遗忘工具经契约（MemoryCapability）贡献，收集走末尾的统一循环。
+    wiring.tool_contributors.append(_MemoryCapabilityProvider(components.capability))
 
 
 def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
@@ -313,6 +321,25 @@ class _WebSearchCapabilityProvider:
         return list(self._tools)
 
 
+class _MemoryCapabilityProvider:
+    """ContributesTools 适配（memory，#159 AC4）。
+
+    为什么需要一个**额外的** wrapper 而不是把 `contributes_tools` 塞进
+    `LangMemMemoryCapability`：工具的落点必须是"契约 + 唯一执行路径（不变量 #7）"，
+    而具体 provider 是可替换的（seam A / ARCH-6）——工具塞进 LangMem 实现就把"遗忘入口"
+    绑死在一个 provider 上了。websearch 的做法是把 wrapper **当成**注册的 provider；
+    memory 不能照抄：`registry.optional("memory")` 必须**是** capability 本身
+    （`test_memory_provider_seam` 钉住这条），所以这个 wrapper 走 `CapabilityWiring.tool_contributors`
+    这条**同一个收集循环**的第二个来源（见 `wire_capabilities` 末尾），而不是偷塞进 `wiring.tools`。
+    """
+
+    def __init__(self, capability: MemoryCapability) -> None:
+        self._capability = capability
+
+    def contributes_tools(self) -> list[Any]:
+        return [ForgetMemoryTool(self._capability)]
+
+
 class _MultiagentCapabilityProvider:
     """ContributesTools 适配（multiagent）：贡献 delegate 工具。"""
 
@@ -504,4 +531,10 @@ async def wire_capabilities(
         provider = registry.optional(descriptor.name)
         if isinstance(provider, ContributesTools):
             wiring.tools.extend(provider.contributes_tools())
+    # 第二来源（#159）：注册项必须是契约对象本身的能力（memory）在这里贡献工具。
+    # 语义与上面完全一致（ContributesTools + 同一个循环 + 零旁路）：没有任何地方直接往
+    # wiring.tools 里 append。
+    for contributor in wiring.tool_contributors:
+        if isinstance(contributor, ContributesTools):
+            wiring.tools.extend(contributor.contributes_tools())
     return wiring

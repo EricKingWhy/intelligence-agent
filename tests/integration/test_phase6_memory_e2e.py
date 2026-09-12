@@ -439,3 +439,97 @@ async def test_real_langmem_manager_delete_and_update_reach_milvus(gate_settings
             await relay.stop()
             await vectors.close()
             identity_context_var.reset(token)
+
+
+async def test_real_forget_tool_reaches_milvus_and_listing_sees_the_authority(
+    gate_settings, tmp_path
+):
+    """MEM-4（#159）真实验收：遗忘**工具**真的改到真索引，`list_entries` 读的是权威记录。
+
+    分工说明：#159 的用户 API 用真 uvicorn + 真 HTTP 的 gate 脚本验收
+    （`.scratch/run_forget_entry_gate.py`）；这里钉的是**不用起服务**也能跑的那半——
+    工具的审批闸门 + 真删除 + 真实 count（AC9 的口径：`query(count(*))`，不用
+    `get_collection_stats`），以及契约方法 `list_entries` 在真 provider 上的行为。
+    """
+    from langchain_openai import OpenAIEmbeddings
+
+    from agent_harness.identity import identity_context_var, set_identity_context
+    from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+    from agent_harness.memory.outbox_relay import OutboxRelay
+    from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
+    from agent_harness.memory.tools import ForgetMemoryTool, _ForgetMemoryArgs
+    from agent_harness.tooling import (
+        ApprovalRequest,
+        ApprovalResponse,
+        ErrorCode,
+        PermissionPolicy,
+        ToolExecutor,
+        ToolRegistry,
+    )
+
+    if not gate_settings.embedding_api_key.get_secret_value() or not gate_settings.embedding_model:
+        pytest.skip("Real embedding model is not configured")
+
+    embeddings = OpenAIEmbeddings(
+        model=gate_settings.embedding_model, base_url=gate_settings.embedding_base_url,
+        api_key=gate_settings.embedding_api_key, check_embedding_ctx_length=False,
+        dimensions=gate_settings.embedding_dimensions, request_timeout=30, max_retries=3,
+    )
+    vectors = MilvusVectorStore(gate_settings, embeddings)
+    records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await records.initialize()
+    relay = OutboxRelay(records, vectors)
+    capability = LangMemMemoryCapability(records, vectors)
+    alice = IdentityContext("gate_forget_tool_" + uuid4().hex, "alice", ["user"])
+    token = set_identity_context(alice)
+    registry = ToolRegistry()
+    registry.register(ForgetMemoryTool(capability))
+
+    async def approved(_req: ApprovalRequest) -> ApprovalResponse:
+        return ApprovalResponse(approved=True, reason="gate")
+
+    try:
+        await vectors.initialize()
+        doomed = await capability.store(MemoryScope.USER, "alice 的旧偏好：喜欢用 Python", {})
+        control = await capability.store(MemoryScope.USER, "鲸鱼是生活在海洋中的哺乳动物", {})
+        await _drain(relay, records)
+        assert await _real_count(vectors, gate_settings, doomed, alice) == 1
+
+        # `list_entries` 读权威记录（不走 embedding）：两条都在，属于自己。
+        listed = await capability.list_entries(MemoryScope.USER, 10)
+        assert {entry.id for entry in listed} == {doomed, control}
+        assert await capability.list_entries(MemoryScope.USER, 1) != []  # 分页参数在真 provider 上也成立
+
+        # 没有审批回调 → DANGER 工具被拒（安全默认值），真实 count 不变。
+        denied = (await ToolExecutor(registry, policy=PermissionPolicy.WORKSPACE_WRITE)
+                  .execute({"id": "c1", "name": "forget_memory", "args": {"memory_id": doomed}})).result
+        assert denied.ok is False and denied.error_code is ErrorCode.PERMISSION_DENIED
+        assert await _real_count(vectors, gate_settings, doomed, alice) == 1
+
+        # 审批通过 → 工具真的删：真实 count 1 → 0，对照组仍是 1。
+        executor = ToolExecutor(registry, policy=PermissionPolicy.WORKSPACE_WRITE,
+                                approval_callback=approved)
+        result = (await executor.execute(
+            {"id": "c2", "name": "forget_memory", "args": {"memory_id": doomed}})).result
+        assert result.ok is True and result.data["forgotten"] is True
+        await _drain(relay, records)
+        assert await _real_count(vectors, gate_settings, doomed, alice) == 0
+        assert await _real_count(vectors, gate_settings, control, alice) == 1
+        assert doomed not in {entry.id for entry in await capability.list_entries(MemoryScope.USER, 10)}
+
+        # 幂等：再忘一次说的是"不存在"，不是错误。
+        again = await ForgetMemoryTool(capability).execute(_ForgetMemoryArgs(memory_id=doomed))
+        assert again.ok is True and again.data["forgotten"] is False
+    finally:
+        try:
+            for entry in await records.list_by_scope(MemoryScope.USER, alice, 100):
+                await records.delete(entry.id, alice)
+            await _drain(relay, records)
+            created = vectors.created_collection
+            await vectors.drop_created_collection()
+            if created:
+                assert gate_settings.milvus_collection not in await vectors.connect()
+        finally:
+            await relay.stop()
+            await vectors.close()
+            identity_context_var.reset(token)

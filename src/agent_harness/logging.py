@@ -35,6 +35,9 @@ EVENT_TYPES = frozenset(
         "error",
         "task_completed",
         "task_failed",
+        # 记忆内容变更的审计（#159）：记忆是 Capability，变更痕迹只落结构化日志，
+        # 不进 SessionEvent（ADR-0026 / 不变量 #16、#22）。
+        "memory_forget",
         "system_log",
     }
 )

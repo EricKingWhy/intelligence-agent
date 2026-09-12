@@ -236,3 +236,46 @@ async def test_nearest_memory_does_not_replace_a_different_new_candidate(tmp_pat
     capability = LangMemMemoryCapability(records, vector, NoChanges(responses=[AIMessage(content="No changes")]))
     new_id = await capability.store(MemoryScope.USER, "I prefer TypeScript", {})
     assert new_id != old_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["fake", "langmem"])
+async def test_capability_list_entries_paginates_within_the_namespace(tmp_path, backend):
+    """#159 AC5 的机制面：`list_entries` 是"按 namespace 分页列出"。
+
+    与 `search` 的分工：它**不经过 embedding**，读权威记录，所以"列出来的就是全部"
+    （而不是"最像的那几条"）。分页用 offset/limit 切片，别人的记忆一律看不见。
+    """
+    relay = None
+    if backend == "fake":
+        capability = FakeMemoryCapability()
+    else:
+        pytest.importorskip("langmem")
+        from agent_harness.memory.langmem_capability import LangMemMemoryCapability
+        records = SqliteMemoryRecordStore(tmp_path / "memory.db")
+        await records.initialize()
+        vectors = FakeVectorStore()
+        relay = OutboxRelay(records, vectors)
+        capability = LangMemMemoryCapability(records, vectors)
+
+    bob_token = set_identity_context(IdentityContext("acme", "bob", ["user"]))
+    try:
+        await capability.store(MemoryScope.USER, "bob 的秘密", {})
+    finally:
+        identity_context_var.reset(bob_token)
+
+    token = set_identity_context(IdentityContext("acme", "alice", ["user"]))
+    try:
+        ids = [await capability.store(MemoryScope.USER, f"alice 的第 {i} 条", {}) for i in range(3)]
+        if relay:
+            await relay.flush()
+        listed = await capability.list_entries(MemoryScope.USER, 10)
+        assert [entry.id for entry in listed] == list(reversed(ids))  # 创建时间倒序
+        assert [entry.id for entry in await capability.list_entries(MemoryScope.USER, 2)] == ids[::-1][:2]
+        assert [entry.id for entry in await capability.list_entries(MemoryScope.USER, 2, 2)] == ids[::-1][2:]
+        assert await capability.list_entries(MemoryScope.USER, 2, 10) == []
+        assert await capability.list_entries(MemoryScope.USER, 0) == []
+        # 对照：别人的记忆不在列表里（namespace 由身份解析，不是查询参数）。
+        assert "bob 的秘密" not in {entry.content for entry in listed}
+    finally:
+        identity_context_var.reset(token)

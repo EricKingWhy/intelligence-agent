@@ -172,7 +172,9 @@ class TestWebWiringCoexistence:
         assert [d.name for d in registry.available()] == ["memory", "skills", "ticker"]
         assert wiring.memory_writer is not None
         assert len(wiring.context_providers) == 2  # MemoryContextProvider + SkillCatalogContextProvider
-        assert [tool.name for tool in wiring.tools] == ["load_skill", "tick"]
+        # #159 起 memory 经契约贡献遗忘工具（收集循环的第二来源，排在末尾）——
+        # 这个共存网关必须看见它，否则"记忆工具真的接进了统一 ToolRegistry"就没有证据。
+        assert [tool.name for tool in wiring.tools] == ["load_skill", "tick", "forget_memory"]
 
 
 class TestGate2SkillsProgressiveDisclosure:

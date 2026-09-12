@@ -7,11 +7,16 @@ except 臂。本测试把「审计结论」钉成契约：状态码只允许在
 
 from __future__ import annotations
 
+import pytest
+
+from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.session.errors import SessionNotFound, SessionServiceError
 from agent_harness.web.domain_errors import (
     _DOMAIN_ERROR_STATUS,
+    _MEMORY_ERROR_STATUS,
     _WORKSPACE_ERROR_STATUS,
     http_error,
+    memory_http_error,
     workspace_http_error,
 )
 from agent_harness.workspace import (
@@ -133,3 +138,33 @@ def test_workspace_http_error_preserves_detail():
     http = workspace_http_error(NotADirectoryError(20, "不是目录", "D:/x"))
     assert http.status_code == 422
     assert http.detail  # str(OSError) 原样透传，文案由异常自己带
+
+
+# ── MEM-4 / #159：第三张表（memory 领域 / 归属词汇）──
+
+
+def test_memory_map_is_the_audited_contract():
+    """记忆端点的错误语义——状态码不得漂移。
+
+    关键区分：**未知记忆 id** = 404（用户对着一个具体 id 点删除，"这条不在了"要报出来，
+    不是静默成功）；**存在但属于别人** = 403（领域层的归属校验如实上报，不伪装成 404）。
+    `ValueError`（"要了 SESSION scope 却没有可信绑定"）**刻意不登记**：本票的用户 API 只暴露
+    USER scope，真冒出它说明是我们自己的上下文处理写错了，500 才诚实。
+    """
+    assert {c.__name__: s for c, s in _MEMORY_ERROR_STATUS.items()} == {
+        "MemoryNotFound": 404,
+        "PermissionError": 403,
+    }
+
+
+def test_memory_http_error_preserves_detail_and_rejects_unregistered_types():
+    error = MemoryNotFound("mem-1")
+    http = memory_http_error(error)
+    assert http.status_code == 404
+    assert "mem-1" in http.detail
+
+    assert memory_http_error(PermissionError("不属于当前用户")).status_code == 403
+
+    # 未登记类型是编码错误：直接索引 → KeyError（由覆盖测试先红挡住），不静默 500。
+    with pytest.raises(KeyError):
+        memory_http_error(ValueError("session binding missing"))

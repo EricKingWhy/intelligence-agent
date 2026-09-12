@@ -703,6 +703,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_project_routes(app)
 
+    # MEM-4 / #159 记忆入口（列出 / 硬删；同为独立 router）
+    from agent_harness.web.memory import register_memory_routes
+
+    register_memory_routes(app)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。

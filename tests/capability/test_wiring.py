@@ -16,7 +16,7 @@ from agent_harness.capability.base import (
 from agent_harness.capability.config import ProviderConfig, parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
-from agent_harness.tooling import Tool, ToolResult
+from agent_harness.tooling import Tool, ToolPermission, ToolResult, ToolSideEffect
 
 
 class TestParseConfig:
@@ -141,6 +141,35 @@ class TestWireCapabilities:
         assert len(wiring.context_providers) == 1
         assert wiring.memory_writer is fake.writeback
         assert wiring.memory is fake
+
+    @pytest.mark.asyncio
+    async def test_memory_contributes_the_forget_tool_via_the_contract(self, tmp_path, monkeypatch):
+        """AC4：遗忘工具走 **ContributesTools 收集循环**，且依赖**契约**而非具体 provider。
+
+        四条一起钉住：
+        1. 工具真的进了 `wiring.tools`（装配侧随后注册进唯一 ToolRegistry，不变量 #7）；
+        2. 它拿到的依赖是注册的那个 capability 对象（provider 可替换：换 fake 也成立）；
+        3. 权限分类是 DANGER + MUTATING（声明面；执行期的审批闸门在
+           `tests/memory/test_forget_tool.py` 用真 Executor 验）；
+        4. 工具贡献**不改变**描述符注册的 provider（仍是 capability 本身，seam 契约不被动摇）。
+        """
+        fake = _FakeMemoryComponents()
+        monkeypatch.setattr(
+            "agent_harness.capability.factories.build_memory_components",
+            lambda settings, *, provider="builtin": fake,
+        )
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(
+            registry, parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+            settings=_memory_settings(tmp_path, ready=True),
+        )
+
+        forget = [tool for tool in wiring.tools if tool.name == "forget_memory"]
+        assert len(forget) == 1
+        assert forget[0].permission is ToolPermission.DANGER
+        assert forget[0].side_effect is ToolSideEffect.MUTATING
+        assert forget[0]._capability is fake.capability
+        assert registry.get("memory") is fake.capability
 
     @pytest.mark.asyncio
     async def test_disabled_entry_is_skipped(self, tmp_path, monkeypatch):
