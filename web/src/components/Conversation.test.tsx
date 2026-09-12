@@ -165,7 +165,7 @@ describe('ChainNodeView — ReasoningBlock（#95，规格 03 §7）', () => {
     expect(html).not.toContain('正在思考');
   });
 
-  it('interrupted：中断于 + 已聚合文本保留（PRD §16.4 不擦除）', () => {
+  it('interrupted：≥1s 仍显「持续了 N 秒」+ 已聚合文本保留（PRD §16.4 不擦除；UI-04 后 <1s 才显「中断于」）', () => {
     const html = renderToStaticMarkup(
       <ChainNodeView
         node={rNode({
@@ -177,7 +177,8 @@ describe('ChainNodeView — ReasoningBlock（#95，规格 03 §7）', () => {
         density="balanced"
       />,
     );
-    expect(html).toContain('中断于');
+    expect(html).toContain('持续了');
+    expect(html).toContain('18 秒');
     expect(html).toContain('部分内容');
   });
 

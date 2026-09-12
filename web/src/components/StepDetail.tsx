@@ -12,7 +12,7 @@
  * 顶部返回按钮回 Timeline（无弹窗——"上下文 Inspector"）。
  */
 
-import { memo, useEffect, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import {
   AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
+import { countRuns, groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { summarizeEvent } from '../lib/projection';
 import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
@@ -153,18 +154,31 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
 
   const tools = conversation.turns.flatMap((t) => t.tools);
   const pulse = deriveRunPulse(conversation, streaming);
+  /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
+   * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应
+   * Tab 组件内的 filter 逐字一致。 */
+  const tabCounts: Partial<Record<Tab, number>> = {
+    timeline: conversation.events.length,
+    changes: tools.filter((t) => t.diff).length,
+    terminal: tools.filter((t) => t.name === 'bash').length,
+    artifacts: tools.filter((t) => t.artifact).length,
+  };
 
   return (
     <aside className="step-detail">
       <div className="detail-header">
         <span className="panel-label">Run Inspector</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
-        {/* PRD §8.2：Run ID 常驻头部（短码，完整 ID 在 Overview）。
-            code-review P0 修正：此前误用 session_id 冒充 Run ID——run_id 是
-            projection 从事件真值捕获的运行归属，缺失（尚无事件）即隐藏该位。 */}
-        {conversation.run_id && (
-          <span className="detail-run-id mono num" title={`run ${conversation.run_id}`}>
-            {conversation.run_id.slice(0, 8)}
+        {/* UI-03 头标对齐：时间线平铺全会话事件，头标就得描述全会话范围
+            （N runs · M 事件）——此前显示单个 run_id 短码，与列表范围自相矛盾
+            （原 PRD §8.2 短码方案随本票退役，完整 run_id 回到分组头 title 与
+            Overview 的 run 行）。 */}
+        {conversation.events.length > 0 && (
+          <span
+            className="detail-run-id mono num"
+            title={`runs: ${[...new Set(conversation.events.flatMap((e) => (e.run_id ? [e.run_id] : [])))].join(', ')}`}
+          >
+            {countRuns(conversation.events)} runs · {conversation.events.length} 事件
           </span>
         )}
       </div>
@@ -172,6 +186,8 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       <div className="detail-tabs" role="tablist" aria-label="Inspector 视图">
         {TABS.map((t) => {
           const Icon = TAB_ICONS[t.id];
+          /* UI-03：识别而非回忆——每个视图 tab 带条目计数（Overview 是摘要页无计数）。 */
+          const count = tabCounts[t.id];
           return (
             <button
               key={t.id}
@@ -183,6 +199,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
             >
               <Icon size={13} className="detail-tab-icon" aria-hidden="true" />
               <span className="detail-tab-label">{t.label}</span>
+              {count !== undefined && <span className="detail-tab-count num">{count}</span>}
             </button>
           );
         })}
@@ -207,6 +224,14 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     </aside>
   );
 }
+
+/** UI-03：run 分组头状态徽章文案（与 run-badge-<state> 色域一一对应）。 */
+const RUN_GROUP_STATUS_LABEL: Record<RunGroupStatus, string> = {
+  completed: '已完成',
+  failed: '失败',
+  interrupted: '已中断',
+  running: '进行中',
+};
 
 // ── Chat tab：Run 级摘要（真数据区块 + 空槽标注） ──
 
@@ -558,17 +583,45 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream }: { co
           </span>
         </div>
       )}
-      {visible.map((e, i) => (
-        /* key = 数组绝对下标：稳定性依赖 P0-1 的 append-only 事件契约
-         * （events 只追加不重排/删除，见 HANDOFF_PERF_FRONTEND §9 P0-1）。 */
-        <TimelineRow
-          key={hidden + i}
-          index={i}
-          event={e}
-          onFocusEvent={onFocusEvent}
-          onJumpToStream={onJumpToStream}
-        />
-      ))}
+      {/* UI-03：run 分组头——按 run_id 首现顺序插入分隔行（序数取自**全会话**
+          遍历，尾窗裁剪后组号不重排）；组与窗口的交集非空才渲染头。
+          data-tl-i 仍是 visible 窗口内下标（hover 反查契约不变）。 */}
+      {groupEventsByRun(conversation.events).map((g) => {
+        const from = Math.max(g.start, hidden);
+        const to = Math.min(g.start + g.count, total);
+        if (from >= to) return null;
+        return (
+          <Fragment key={g.start}>
+            <div
+              className="tl-run-header"
+              role="separator"
+              title={g.runId ? `run ${g.runId}` : '会话开场（无 run 归属）'}
+            >
+              <span className="tl-run-name">{g.runId ? `Run ${g.ordinal}` : '会话'}</span>
+              {g.runId && (
+                <span className={`run-badge run-badge-${g.status}`}>
+                  {RUN_GROUP_STATUS_LABEL[g.status]}
+                </span>
+              )}
+              <span className="tl-run-count num">{g.count} 事件</span>
+            </div>
+            {Array.from({ length: to - from }, (_, k) => {
+              const abs = from + k;
+              /* key = 数组绝对下标：稳定性依赖 P0-1 的 append-only 事件契约
+               * （events 只追加不重排/删除，见 HANDOFF_PERF_FRONTEND §9 P0-1）。 */
+              return (
+                <TimelineRow
+                  key={abs}
+                  index={abs - hidden}
+                  event={conversation.events[abs]}
+                  onFocusEvent={onFocusEvent}
+                  onJumpToStream={onJumpToStream}
+                />
+              );
+            })}
+          </Fragment>
+        );
+      })}
       {tip && (
         <div className="tl-tooltip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
           {tip.lines.map((l, i) => (

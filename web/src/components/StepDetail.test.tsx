@@ -18,6 +18,21 @@ function bigConversation(n: number): ConversationState {
   return s;
 }
 
+/** UI-03：双 run 会话（run1 完成 3 事件 + run2 进行中 2 事件）。 */
+function twoRunConversation(): ConversationState {
+  let s = initConversation('two-run');
+  const evts: AgentEvent[] = [
+    { type: EventType.SESSION_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'two-run' },
+    { type: EventType.RUN_STARTED, data: {}, seq: 2, run_id: 'r1', session_id: 'two-run' },
+    { type: EventType.USER_MESSAGE, data: { content: '第一轮' }, seq: 3, run_id: 'r1', step_id: 1, session_id: 'two-run' },
+    { type: EventType.RUN_COMPLETED, data: {}, seq: 4, run_id: 'r1', session_id: 'two-run' },
+    { type: EventType.RUN_STARTED, data: {}, seq: 5, run_id: 'r2', session_id: 'two-run' },
+    { type: EventType.MODEL_DELTA, data: { delta: 'x' }, seq: 6, run_id: 'r2', step_id: 1, session_id: 'two-run' },
+  ];
+  for (const ev of evts) s = applyEvent(s, ev);
+  return s;
+}
+
 const noop = () => {};
 const rowCount = (html: string) => (html.match(/timeline-row/g) || []).length;
 const renderTab = (conv: ConversationState) =>
@@ -221,5 +236,36 @@ describe('StepDetail child focus（v2 PRD §10.5 委派钻取）', () => {
     expect(html).toContain('子会话');
     expect(html).toContain('research_review');
     expect(html).toContain('child-back-btn');
+  });
+});
+
+describe('TimelineTab run 分组头（UI-03）', () => {
+  it('双 run 会话：两个分组头，序数/状态徽章/计数正确', () => {
+    const html = renderTab(twoRunConversation());
+    const headers = (html.match(/tl-run-header/g) || []).length;
+    expect(headers).toBe(2);
+    expect(html).toContain('Run 1');
+    expect(html).toContain('Run 2');
+    expect(html).toContain('run-badge-completed');
+    expect(html).toContain('run-badge-running');
+    expect(html).toContain('>3</span>'); // 第一组 3 事件
+  });
+
+  it(`尾窗裁剪（窗口 ${TIMELINE_WINDOW_DEFAULT}）：窗口外的组头不渲染，窗口内组头保留`, () => {
+    // 双 run 会话仅 6 事件 < 窗口——先造一个尾部大 run 的长会话：
+    // run1 完整（3 事件，落在窗口外）+ run2 追加大量事件占满窗口
+    let s = initConversation('long');
+    s = applyEvent(s, { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'long' });
+    s = applyEvent(s, { type: EventType.RUN_COMPLETED, data: {}, seq: 2, run_id: 'r1', session_id: 'long' });
+    for (let i = 0; i < TIMELINE_WINDOW_DEFAULT; i++) {
+      s = applyEvent(s, { type: EventType.MODEL_DELTA, data: { delta: 'x' }, seq: 3 + i, run_id: 'r2', step_id: 1, session_id: 'long' });
+    }
+    const html = renderTab(s);
+    // r1 的两条已滚出窗口 → 其组头不渲染；r2 组头在场且**保留真序号 Run 2**
+    //（序数来自全会话遍历——滚掉前面的 run 后把 r2 重标成 Run 1 正是本票要防的事故）
+    expect(html).not.toContain('run-badge-completed');
+    expect(html).toContain('tl-run-header');
+    expect(html).toContain('>Run 2</span>');
+    expect(html).not.toContain('>Run 1</span>');
   });
 });

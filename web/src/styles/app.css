@@ -634,6 +634,56 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   line-height: 1.5;
   color: var(--text-tertiary);
 }
+
+/* ── UI-05：真空态的文字按钮 + 行动链接 ──
+ *  空态是转化率最高的教学时刻：按钮带文字、文案里给可点的行动链接，
+ *  不再让用户去「右上角」找一个不存在文字实体的 icon。 */
+.rail-empty-actions {
+  gap: var(--space-xs);
+}
+.rail-empty-btn-primary {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.rail-empty-btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.rail-empty-btn-ghost {
+  padding: 3px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.rail-empty-btn-ghost:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.rail-empty-action {
+  display: block;
+  margin-top: var(--space-xs);
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  text-align: left;
+}
+.rail-empty-action:hover {
+  color: var(--accent-strong);
+}
+
 .rail-project-empty-first {
   padding: var(--space-sm) var(--space-md);
   border: 1px dashed var(--border-subtle);
@@ -2773,6 +2823,52 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: color-mix(in srgb, var(--danger) 32%, transparent);
 }
 .run-badge-idle { color: var(--text-tertiary); }
+/* 中断 = 中性第四态（OBS-007：取消 ≠ 失败，与顶栏 pulse 同语言）。 */
+.run-badge-interrupted {
+  color: var(--text-secondary);
+  background: var(--color-hover);
+  border-color: var(--border-subtle);
+}
+
+/* ── UI-03：Timeline run 分组头（run_id 首现顺序分隔行）──
+ *  组间呼吸 + 顶部虚线（沿用 .timeline-window-bar 的分隔语言）；
+ *  状态徽章复用 .run-badge 色域；计数 tabular-nums。 */
+.tl-run-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px dashed var(--border-strong);
+}
+.tl-run-header:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.tl-run-name {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.tl-run-count {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+/* UI-03：视图 tab 条目计数（识别而非回忆）——icon+label 旁的小数字徽章。 */
+.detail-tab-count {
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--color-hover);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+.detail-tab.sel .detail-tab-count {
+  color: var(--text-secondary);
+}
 
 /* ── Inspector 五 tab（Phase 5，Brief "V1 Tabs"） ── */
 /* ── Inspector tab 条：分段控件（segmented control）──

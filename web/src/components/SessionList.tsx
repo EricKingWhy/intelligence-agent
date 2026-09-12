@@ -162,19 +162,33 @@ export const SessionList = memo(function SessionList({
     <aside className="session-rail">
       <div className="session-list-header">
         <span className="panel-label">会话</span>
-        <div className="session-list-actions">
-          <button
-            className="icon-btn"
-            onClick={() => setCreateOpen(true)}
-            aria-label="新建项目"
-            title="新建项目：注册一个已存在的目录"
-          >
-            <FolderPlus size={14} />
-          </button>
-          <button className="icon-btn new-session-btn" onClick={onNew} aria-label="新建会话">
-            <Plus size={14} />
-          </button>
-        </div>
+        {/* UI-05：真空态下两个 icon 按钮切换为**带文字**的按钮——空态文案引导
+            「右上角的『新建项目』」时，用户必须能在右上角看到一个叫这个名字的东西
+            （识别而非回忆：全 Rail icon-only 时该文案指涉的文字实体不存在）。 */}
+        {showEmpty ? (
+          <div className="session-list-actions rail-empty-actions">
+            <button className="rail-empty-btn-primary" onClick={() => setCreateOpen(true)}>
+              新建项目
+            </button>
+            <button className="rail-empty-btn-ghost" onClick={onNew}>
+              新会话
+            </button>
+          </div>
+        ) : (
+          <div className="session-list-actions">
+            <button
+              className="icon-btn"
+              onClick={() => setCreateOpen(true)}
+              aria-label="新建项目"
+              title="新建项目：注册一个已存在的目录"
+            >
+              <FolderPlus size={14} />
+            </button>
+            <button className="icon-btn new-session-btn" onClick={onNew} aria-label="新建会话">
+              <Plus size={14} />
+            </button>
+          </div>
+        )}
       </div>
 
       {opError ? (
@@ -378,7 +392,10 @@ export const SessionList = memo(function SessionList({
             !showEmpty &&
             !projectsError && (
               <div className="rail-project-empty rail-project-empty-first">
-                还没有项目。用右上角的「新建项目」把一个已存在的目录注册进来，同目录的会话就会归到一起。
+                还没有项目。注册一个已存在的目录，同目录的会话就会归到一起。
+                <button className="rail-empty-action" onClick={() => setCreateOpen(true)}>
+                  注册项目目录 →
+                </button>
               </div>
             )
           )}

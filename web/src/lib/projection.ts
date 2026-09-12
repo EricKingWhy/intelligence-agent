@@ -179,9 +179,26 @@ function emptySummary(): string {
   return '';
 }
 
-/** 前端未定义语义的事件摘要（未知类型 / 词汇表内未接线的类型）。 */
-function unknownSummary(event: AgentEvent): string {
-  return `未知事件 · ${JSON.stringify(event.data).slice(0, 40)}`;
+/** 前端未定义语义的事件摘要（未知类型 / 词汇表内未接线的类型）。
+ *  UI-04 信任裂缝：不再把 payload JSON 切片甩给用户（行标签已是 type，
+ *  原始 payload 在事件详情/UnknownSurface 兜底里 verbatim 可查）。 */
+function unknownSummary(_event: AgentEvent): string {
+  return '未接线的类型（payload 已保留，点行看详情）';
+}
+
+/** UI-04：forked / 审批族的单行语义（此前落「未知事件」）。 */
+function summarizeForked(_event: AgentEvent): string {
+  return '已分叉';
+}
+
+function summarizeApprovalRequested(event: AgentEvent): string {
+  const name = event.data.tool_name;
+  return typeof name === 'string' && name ? `等待审批 · ${name}` : '等待审批';
+}
+
+function summarizePermissionResolved(event: AgentEvent): string {
+  const decision = event.data.decision;
+  return typeof decision === 'string' && decision ? `审批已决（${decision}）` : '审批已决';
 }
 
 /** 增量类事件共用摘要（model/delta、text/delta、tool/output_delta、
@@ -782,10 +799,8 @@ function summarizeModelChanged(event: AgentEvent): string {
 const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.SESSION_STARTED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.SESSION_RESUMED]: { apply: noopProjection, summarize: emptySummary },
-  // session/forked 是已知生命周期事件——但摘要目前落进「未知事件」文案
-  // （pre-existing：summarizeEvent 的已知无摘要名单里没有它）。本批只做
-  // 等价迁移，不改文案；已作为发现登记，待确认后再定它的单行语义。
-  [EventType.SESSION_FORKED]: { apply: noopProjection, summarize: unknownSummary },
+  // session/forked：单行语义 = 已分叉（UI-04 定案；child 指针进详情，不做截断 id）。
+  [EventType.SESSION_FORKED]: { apply: noopProjection, summarize: summarizeForked },
   [EventType.RUN_STARTED]: { apply: projectRunStarted, summarize: emptySummary },
   [EventType.RUN_COMPLETED]: { apply: projectRunCompleted, summarize: summarizeRunCompleted },
   [EventType.RUN_FAILED]: { apply: projectRunFailed, summarize: emptySummary },
@@ -838,9 +853,9 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   },
   [EventType.TOOL_APPROVAL_REQUESTED]: {
     apply: projectToolApprovalRequested,
-    summarize: unknownSummary,
+    summarize: summarizeApprovalRequested,
   },
-  [EventType.PERMISSION_RESOLVED]: { apply: projectPermissionResolved, summarize: unknownSummary },
+  [EventType.PERMISSION_RESOLVED]: { apply: projectPermissionResolved, summarize: summarizePermissionResolved },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,

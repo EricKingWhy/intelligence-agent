@@ -61,8 +61,8 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | `45227dc` |
-| **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`cd107a2`**（批次 0 文档 commit） | 未审 | — |
-| U-2 | UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态） | U-1 修复 commit | 未审 | — |
+| **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`cd107a2`**（批次 0 文档 commit） | Spec 10 + Standards 14 findings → 全部处置（2 P1 修 + 3 P2 修 + 9 P3 修 + 8 说明不改/登记，见下方处置表） | `236049f` |
+| **U-2** | **UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态）** | **`236049f`**（U-1 修复 commit） | 未审 | — |
 | U-3 | UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词更新） | U-2 修复 commit | 未审 | — |
 
 **UI Polish 批次总纲**：需求事实源 = `docs/UI_POLISH_PRD.md`（含用户 2026-09-12 grill-me 决策记录 D1-D6，不可违约）；逐票施工规格 = `docs/UI_POLISH_TICKETS.md`；视觉规范基准 = 根目录 `DESIGN.md`（本批新增，含 `.impeccable/design.json` sidecar）。评审出处：impeccable critique 24/40（快照 `.impeccable/critique/2026-09-12T14-05-30Z__web-src.md`）。
@@ -123,9 +123,10 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 **变异验证台账（本批 5 处，全部红→绿闭环）**：① 键盘监听删除（MUTATION-A：onKey 清空）→ Ctrl+Enter/Ctrl+Backspace 4 实例红；② composer 锁定通道拆除（textarea 回 `disabled={streaming}`，MUTATION-B）→ 锁定用例红——**首版变异假绿已订正**：原 fixture 无 run/completed，streaming 恒 true 掩盖审批锁，补终态帧后变异才红；③ 暗 tertiary 0.42 回退 → [dark] 对比度 4 failed；④ tl-type 回染 accent → 2 failed；⑤ 键盘门控拆除（MUTATION-C：去 autoFocus 条件）→ 双卡用例红。
 
 **测试有效性备注**：t-contrast 排查中发现并修复两个测量层假信号——Playwright test 上下文 `colorScheme` 默认 light（[dark] 用例必须 localStorage 显式引导主题）；同一 color-mix 在该 Chromium 两条计算路径输出 oklab / color(srgb) 两种格式（解析器双分支 + 未知格式 throw）。
-| UI-03 | 未开始 | — | |
-| UI-04 | 未开始 | — | |
-| UI-05 | 未开始 | — | |
+
+| UI-03 | done | `e83a1c6`（U-2 批量 commit） | Inspector run 分组头 + 全会话序号 + tab 计数 + 头标对齐。**与票面偏离（已记录）**：五个 Inspector 图标是「视图 tab」不是「事件 kind 过滤器」，票面意图以 tab 计数徽标实现（`.detail-tab-count`）；时间线 kind 过滤 chips 按票面 Out-of-scope 不做 |
+| UI-04 | done | `e83a1c6`（U-2 批量 commit） | projection 三摘要（forked/审批请求/审批已决）+ formatShortDuration（<50ms 不造 1ms 假精度）+ ReasoningBlock <1s 措辞（0 秒→<1s，中断于 <1s） |
+| UI-05 | done | `e83a1c6`（U-2 批量 commit） | Rail 真空态文字按钮（新建项目/新建会话）+ 空态文案带行动链接（注册项目目录 →） |
 | UI-06 | 未开始 | — | |
 
 ### 最终全量 review（v2 §1.3）的处置——**已披露的偏离**

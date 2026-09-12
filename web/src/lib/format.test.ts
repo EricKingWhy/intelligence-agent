@@ -1,7 +1,7 @@
 /** format.ts 时间/数值格式化测试。 */
 
 import { describe, expect, it } from 'vitest';
-import { formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay } from './format';
+import { formatDuration, formatRelativeTime, formatTimestamp, truncateForDisplay , formatShortDuration } from './format';
 
 describe('formatDuration', () => {
   it('缺 started/completed 任一（running 中）返回 null', () => {
@@ -10,10 +10,10 @@ describe('formatDuration', () => {
     expect(formatDuration(undefined, '2026-09-04T00:00:00Z')).toBeNull();
   });
 
-  it('小于 1s 用 ms 表达，最小 1ms', () => {
+  it('小于 1s 用 ms 表达；<50ms 显 <50ms（UI-04 改约：不再造 1ms 假精度）', () => {
     const t0 = '2026-09-04T00:00:00.000Z';
     expect(formatDuration(t0, '2026-09-04T00:00:00.082Z')).toBe('82ms');
-    expect(formatDuration(t0, '2026-09-04T00:00:00.000Z')).toBe('1ms');
+    expect(formatDuration(t0, '2026-09-04T00:00:00.000Z')).toBe('<50ms');
   });
 
   it('大于等于 1s 用一位小数秒', () => {
@@ -102,5 +102,26 @@ describe('truncateForDisplay — 不可信大输出渲染截断', () => {
     const out = truncateForDisplay('abcdef', 5);
     expect(out.startsWith('abcde')).toBe(true);
     expect(out).toContain('已截断');
+  });
+});
+
+describe('formatShortDuration — 亚秒时长不再给假精度（UI-04 信任裂缝）', () => {
+  it('<50ms 显 <50ms（测不到的就说测不到，不显 1ms/13ms 假精度）', () => {
+    expect(formatShortDuration(0)).toBe('<50ms');
+    expect(formatShortDuration(13)).toBe('<50ms');
+    expect(formatShortDuration(49)).toBe('<50ms');
+  });
+  it('50-999ms 显整 ms', () => {
+    expect(formatShortDuration(50)).toBe('50ms');
+    expect(formatShortDuration(999)).toBe('999ms');
+  });
+  it('≥1s 显一位小数秒', () => {
+    expect(formatShortDuration(1000)).toBe('1.0s');
+    expect(formatShortDuration(12340)).toBe('12.3s');
+  });
+  it('formatDuration 走同一短时长语义', () => {
+    const t = '2026-09-12T00:00:00Z';
+    expect(formatDuration(t, new Date(new Date(t).getTime() + 13).toISOString())).toBe('<50ms');
+    expect(formatDuration(t, new Date(new Date(t).getTime() + 1500).toISOString())).toBe('1.5s');
   });
 });

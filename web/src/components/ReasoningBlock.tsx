@@ -52,9 +52,14 @@ function TerminalDuration({
   if (!startedAt || !completedAt) return null;
   const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
   if (!Number.isFinite(ms) || ms < 0) return null;
+  /* UI-04 信任裂缝：秒级向下取整对亚秒思考显「持续了 0 秒」是自相矛盾——
+   * <1s 改说 <1s（不再出现 0 秒）；≥1s 保持「持续了 N 秒」。 */
+  const seconds = Math.floor(ms / 1000);
   return (
     <span className="reasoning-duration num">
-      {' '}· {interrupted ? '中断于' : '持续了'} {Math.floor(ms / 1000)} 秒
+      {' '}
+      ·{' '}
+      {seconds >= 1 ? `持续了 ${seconds} 秒` : interrupted ? '中断于 <1s' : '持续 <1s'}
     </span>
   );
 }

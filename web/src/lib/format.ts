@@ -1,11 +1,19 @@
 /** 展示层格式化工具——跨组件共享的时间/数值形状。 */
 
-/** duration 格式化：<1s 用 ms，否则一位小数秒。无完成时间（running 中）返回 null。 */
+/** 短时长语义（UI-04 信任裂缝）：<50ms 显 '<50ms'——测不到的就说测不到，
+ *  不再造「1ms」这类假精度（mock/真实快事件都会撞上）；<1s 显整 ms；
+ *  否则一位小数秒。 */
+export function formatShortDuration(ms: number): string {
+  if (ms < 50) return '<50ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** duration 格式化：走 formatShortDuration 同一语义。无完成时间（running 中）返回 null。 */
 export function formatDuration(startedAt?: string, completedAt?: string): string | null {
   if (!startedAt || !completedAt) return null;
   const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
-  if (ms < 1000) return `${Math.max(1, ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  return formatShortDuration(ms);
 }
 
 /** 全时间戳（本地时区，含毫秒）：'YYYY-MM-DD HH:mm:ss.fff'。
