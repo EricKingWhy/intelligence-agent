@@ -60,6 +60,7 @@ def _state(tmp_path) -> MagicMock:
     state.store = JsonlSessionStore(root=tmp_path / "sessions")
     state.workspaces_root = tmp_path
     state.workspace_registry = None
+    state.workspace_index = None  # WS-2：项目索引未接线（本文件测模型继承）
     state.run_manager = MagicMock()
     state.run_manager.get_active = MagicMock(return_value=None)
     state.run_manager.launch = MagicMock(

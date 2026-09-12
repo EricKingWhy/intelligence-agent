@@ -67,34 +67,57 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
+from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
+from agent_harness.workspace.index import SessionHeaders
 
 
 @dataclass
 class RecoveryStores:
     """恢复子系统三 Store（同一 SQLite 文件，ADR-0004 布局）。
 
-    AppState 与 CLI 各自构造实例、共享生命周期所有权；factory 只消费。"""
+    AppState 与 CLI 各自构造实例、共享生命周期所有权；factory 只消费。
+
+    `workspace_index` 是 ADR-0025 的 Workspace 实体 + 有序会话账本（WS-2 / #152），
+    同库不同表。它是**可选**成员：它需要会话 header 来源，而大量单测只调
+    `recovery_stores(path)` 不接会话存储——那些场景不需要项目索引，保持 `None`。"""
 
     operation_ledger: SqliteOperationLedger
     checkpoint_store: SqliteCheckpointStore
     session_meta_store: SqliteSessionMetaStore
+    workspace_index: WorkspaceIndex | None = None
 
 
-def recovery_stores(database_path: str | Path) -> RecoveryStores:
-    """构造恢复三 Store（同一 harness.db；未初始化——initialize_stores 幂等初始化）。"""
+def recovery_stores(
+    database_path: str | Path, *, workspace_headers: SessionHeaders | None = None
+) -> RecoveryStores:
+    """构造恢复 Store 束（同一 harness.db；未初始化——initialize_stores 幂等初始化）。
+
+    `workspace_headers` 给定时才装配 `workspace_index`（见 `RecoveryStores` 说明）。
+    """
     path = Path(database_path)
     return RecoveryStores(
         operation_ledger=SqliteOperationLedger(path),
         checkpoint_store=SqliteCheckpointStore(path),
         session_meta_store=SqliteSessionMetaStore(path),
+        workspace_index=(
+            WorkspaceIndex(SqliteWorkspaceStore(path), workspace_headers)
+            if workspace_headers is not None
+            else None
+        ),
     )
 
 
 async def initialize_stores(stores: RecoveryStores) -> None:
-    """恢复三 Store 幂等初始化（并发首请求由调用方的 once 语义守护）。"""
+    """Store 束幂等初始化（并发首请求由调用方的 once 语义守护）。
+
+    `workspace_index.initialize()` 顺带完成首次 bootstrap（AC14–16）——那一步需要
+    读会话 header，所以只在装了 index 的进程里发生。
+    """
     await stores.operation_ledger.initialize()
     await stores.checkpoint_store.initialize()
     await stores.session_meta_store.initialize()
+    if stores.workspace_index is not None:
+        await stores.workspace_index.initialize()
 
 
 async def assemble_wiring(

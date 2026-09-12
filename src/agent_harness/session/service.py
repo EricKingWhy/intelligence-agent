@@ -387,6 +387,15 @@ class SessionService:
             cwd=workspace,
         )
 
+        # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
+        # "先建会话再 attach"）。只对**显式命名**的 workspace 做：未命名时目录是
+        # workspaces_root/<session_id>（"用户没选项目"的实现痕迹），把它注册成项目会
+        # 给每个未命名会话凭空造出一个项目（ADR-0025 D6）。
+        # 项目实体由 create 幂等建立（同名 workspace 的多会话共享同一 path → 同一项目）。
+        if workspace_name is not None and self._state.workspace_index is not None:
+            await self._state.workspace_index.create(workspace, title=workspace_name)
+            await self._state.workspace_index.attach_session(session_id)
+
         # 交互式审批：把真实 session 注入 callback 闭包
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
@@ -886,6 +895,12 @@ class SessionService:
         except ForkBoundaryError as error:
             raise InvalidForkBoundary(str(error)) from error
         inherit_parent_model(child, existing)
+        # WS-2 / #152：fork child 继承了父的 header cwd（#151 AC4），所以它应当出现在
+        # 父所属的项目里。attach 只加入**已注册**的项目：父是未命名会话（其目录未注册）
+        # → child 也保持 Ungrouped，与父一致。SubAgent 子会话不走这里（内部子代理
+        # 不进项目列表，见 ADR-0025 D6 说明）。
+        if self._state.workspace_index is not None:
+            await self._state.workspace_index.attach_session(child.session_id)
         return child.session_id
 
     # ── 内部方法 ─────────────────────────────────────────────────────

@@ -83,6 +83,7 @@ from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
 )
+from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 
 # ── Staged amend 字段的人类可读描述（Phase 5 + Ticket B1）──────────────
 # 这些 dict 是 POST /api/sessions validator 与 GET 清单端点的**单一事实源**：
@@ -344,6 +345,11 @@ class AppState:
         self.workspace_registry = WorkspaceRegistry(
             root=Path(settings.workspace_dir), backend="local"
         )
+        # WS-2 / ADR-0025：项目实体 + 有序会话账本（同 harness.db 的另 5 张表）。
+        # 只构造一次：它持有内存缓存（AC10 同步读），每次 stores 属性都新建会丢掉缓存。
+        self.workspace_index = WorkspaceIndex(
+            SqliteWorkspaceStore(self.harness_db), self.store
+        )
         self._stores_lock = asyncio.Lock()
         self._stores_ready = False
         # Capability 装配：只在首次使用时执行（含 Memory / Skills / demo 等）。
@@ -371,6 +377,7 @@ class AppState:
             operation_ledger=self.operation_ledger,
             checkpoint_store=self.checkpoint_store,
             session_meta_store=self.session_meta_store,
+            workspace_index=self.workspace_index,
         )
 
     async def get_wiring(self) -> tuple[CapabilityRegistry, CapabilityWiring]:

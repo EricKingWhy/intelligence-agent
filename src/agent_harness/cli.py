@@ -186,10 +186,12 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
     with log_context(LogContext.create(service="agent-harness", env="local")):
         workspace_root = Path(settings.workspace_dir)
         _, wiring = await assemble_wiring(settings)
-        stores = recovery_stores(workspace_root / "harness.db")
+        store = JsonlSessionStore(root=workspace_root / "sessions")
+        # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
+        # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
+        stores = recovery_stores(workspace_root / "harness.db", workspace_headers=store)
         await initialize_stores(stores)
         workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
-        store = JsonlSessionStore(root=workspace_root / "sessions")
         # 崩溃扫描**不**在 CLI 里跑：在途 run 只存在于持有它的进程内存中，
         # 短命命令无法区分「别的进程在跑」与「崩溃遗留」，误标会撞 seq
         # （见 recovery/scan.py 单进程假设）。扫描归属长驻会话宿主（web lifespan）。

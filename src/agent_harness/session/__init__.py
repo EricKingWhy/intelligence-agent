@@ -47,6 +47,7 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
 )
+from agent_harness.session.header import StartedHeader
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 
@@ -89,6 +90,7 @@ __all__ = [
     "JsonlSessionStore",
     "Session",
     "SessionEvent",
+    "StartedHeader",
     "cwd_event_data",
     "derive_messages",
     "detect_dangling",

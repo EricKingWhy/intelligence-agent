@@ -22,7 +22,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from agent_harness.session.errors import SeqConflict
-from agent_harness.session.event import RUN_TERMINAL_TYPES, USER_MESSAGE, SessionEvent
+from agent_harness.session.event import (
+    RUN_TERMINAL_TYPES,
+    SESSION_STARTED,
+    USER_MESSAGE,
+    SessionEvent,
+)
+from agent_harness.session.header import StartedHeader
 
 logger = logging.getLogger("agent_harness.session.store")
 
@@ -356,3 +362,37 @@ class JsonlSessionStore:
         # 按修改时间倒序（最近在前）
         ids.sort(key=lambda x: x[1], reverse=True)
         return [sid for sid, _ in ids]
+
+    def read_started_header(self, session_id: str) -> StartedHeader | None:
+        """只读会话 header（WS-2 / #152 AC14）：第一条 `session/started` 即停。
+
+        **不读事件正文**——workspace 首次引导只允许看 header（id / cwd / createdAt），
+        所以这里流式读、命中即返回，正文多长都不碰。区别于 `read_session_summary`
+        （那个要数到文件尾才知道事件数）。
+
+        形状非法（没有 events.jsonl / 没有 session/started）→ None，不抛错：引导面对
+        的是历史日志，一条坏数据不该拖垮整个启动（与 `read_events` 的容错同款）。
+        """
+        path = self._events_path(session_id)
+        if not path.exists():
+            return None
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for lineno, raw_line in enumerate(handle, start=1):
+                if not raw_line.strip():
+                    continue
+                event = self._parse_event_line(raw_line, path.name, lineno)
+                if event is None:
+                    continue
+                if event.type != SESSION_STARTED:
+                    # header 正常就是第一条；遇到别的说明日志形状异常，不再往下翻
+                    # （继续翻就等于读正文了）。
+                    return None
+                data = event.data or {}
+                cwd = data.get("cwd")
+                return StartedHeader(
+                    session_id=session_id,
+                    cwd=cwd if isinstance(cwd, str) and cwd else None,
+                    created_at=event.time,
+                    agent_id=event.agent_id,
+                )
+        return None
