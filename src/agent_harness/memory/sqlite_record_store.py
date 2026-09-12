@@ -10,7 +10,12 @@ import aiosqlite
 
 from agent_harness.identity import IdentityContext
 from agent_harness.memory.record_store import MemoryOperation, PendingMemory
-from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
+from agent_harness.memory.types import (
+    MemoryEntry,
+    MemoryNamespace,
+    MemoryScope,
+    row_namespace_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +79,12 @@ def _enqueue(entry_id: str, revision: str, operation: MemoryOperation, *,
 
 
 def _namespace_matches(namespace_json: str, scope: str, identity: IdentityContext) -> bool:
-    """记录行上的 namespace 是否就是 identity 授权的那个。
+    """记录行上的 namespace 是否就是 identity 授权的那个（比较语义见 `row_namespace_matches`）。
 
-    只在"行确实存在"时调用：`MemoryNamespace.of` 负责授权与 SESSION 绑定校验，不匹配
-    （含绑到别的 session）即 False。`get`/`delete` 共用它——写成两套序列化比较（一边
-    比 json 串、一边比解析后的 list）在 `as_json` 有任何改动时会静默分叉。
+    只在"行确实存在"时调用。`get`/`delete` 共用它，且比较本身也收在一处——写成两套序列化
+    比较（一边比 json 串、一边比解析后的 list）在 `as_json` 有任何改动时会静默分叉。
     """
-    expected = MemoryNamespace.of(MemoryScope(scope), identity).as_tuple()
-    return json.loads(namespace_json) == list(expected)
+    return row_namespace_matches(tuple(json.loads(namespace_json)), MemoryScope(scope), identity)
 
 
 def _parse_operation(row: aiosqlite.Row) -> MemoryOperation:

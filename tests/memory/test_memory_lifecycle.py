@@ -108,9 +108,17 @@ async def test_delete_cannot_cross_namespace(tmp_path):
 async def test_delete_requires_the_bound_session_for_session_scope(tmp_path):
     """AC2 的 scope 部分：SESSION 绑定的记忆只在绑定同一 session 的上下文里可删。
 
-    无绑定 → `ValueError`（确实存在这条记忆，但定位不到 namespace）；绑定到别的
-    session → `PermissionError`（跨 scope 删除是权限违规）。删除之后同一个 id 的再次
-    删除落回幂等 `False`——没有行可校验时不再要求 binding（否则"忘了又忘"会变成报错）。
+    AC2 要的是"按 namespace 校验归属、不得跨 tenant/user/scope 删"，所以**绑定不上**
+    （无绑定、或绑到别的 session）都是 `PermissionError`：行确实存在，但它的 namespace
+    解析不出"这个调用方有权操作的那一个"，就等同于"不是你的记忆"。
+
+    "无绑定"从 #159 起由 `ValueError` 改判 `PermissionError`（`row_namespace_matches` 的
+    既定语义）：HTTP 入口没有可信会话绑定，按 id 删到会话记忆必须得到明确拒绝而不是 500；
+    顺带让模型工具也走"可读的拒绝结果"而不是把异常抛出执行器。调用方**自己**的 scope 解析
+    不受影响——`store()` 缺绑定时依旧 `ValueError`。
+
+    删除之后同一个 id 的再次删除落回幂等 `False`——没有行可校验时不再要求 binding
+    （否则"忘了又忘"会变成报错）。
     """
     records = await _store(tmp_path)
     token = memory_session_var.set("session-a")
@@ -118,7 +126,7 @@ async def test_delete_requires_the_bound_session_for_session_scope(tmp_path):
         await records.store(entry(scope=MemoryScope.SESSION), ALICE)
     finally:
         memory_session_var.reset(token)
-    with pytest.raises(ValueError):
+    with pytest.raises(PermissionError):
         await records.delete("m1", ALICE)
     token = memory_session_var.set("session-b")
     try:

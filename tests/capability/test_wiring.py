@@ -16,6 +16,8 @@ from agent_harness.capability.base import (
 from agent_harness.capability.config import ProviderConfig, parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.memory.fake_capability import FakeMemoryCapability
+from agent_harness.memory.types import MemoryScope
 from agent_harness.tooling import Tool, ToolPermission, ToolResult, ToolSideEffect
 
 
@@ -76,7 +78,9 @@ class _FakeMemoryComponents:
     def __init__(self):
         self.initialized = False
         self.closed = False
-        self.capability = object()
+        # 真 capability（不是占位 object）——这样"贡献出来的工具绑的是这个 seam capability"
+        # 可以用行为证明（写一条进去、经工具删掉），而不用伸进工具的私有属性。
+        self.capability = FakeMemoryCapability()
         self.writeback = object()
 
     async def initialize(self): self.initialized = True
@@ -168,8 +172,13 @@ class TestWireCapabilities:
         assert len(forget) == 1
         assert forget[0].permission is ToolPermission.DANGER
         assert forget[0].side_effect is ToolSideEffect.MUTATING
-        assert forget[0]._capability is fake.capability
         assert registry.get("memory") is fake.capability
+        # 依赖注入用**行为**证明（不伸进私有属性）：这个工具删掉的就是这个 seam capability
+        # 里的那条记忆。
+        memory_id = await fake.capability.store(MemoryScope.USER, "wiring 注入证据", {})
+        result = await forget[0].execute(forget[0].args_schema(memory_id=memory_id))
+        assert result.ok is True
+        assert await fake.capability.list_entries(MemoryScope.USER, 10) == []
 
     @pytest.mark.asyncio
     async def test_disabled_entry_is_skipped(self, tmp_path, monkeypatch):

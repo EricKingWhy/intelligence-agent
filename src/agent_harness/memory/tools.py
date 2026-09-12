@@ -13,18 +13,20 @@ tenant_id/user_id"这类调用直接变成 INVALID_ARGUMENT，而不是被静默
 
 from __future__ import annotations
 
-import logging
-
 from pydantic import BaseModel, ConfigDict, Field
 
-from agent_harness.memory.audit import ENTRY_TOOL, record_forget
+from agent_harness.memory.audit import (
+    ENTRY_TOOL,
+    OUTCOME_ABSENT,
+    OUTCOME_DENIED,
+    OUTCOME_FORGOTTEN,
+    record_forget,
+)
 from agent_harness.memory.capability import MemoryCapability
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
-
-logger = logging.getLogger(__name__)
 
 
 class _ForgetMemoryArgs(BaseModel):
@@ -87,7 +89,7 @@ class ForgetMemoryTool(Tool):
         except PermissionError:
             # 领域层的归属校验拒绝了（别人的 tenant/user/scope）——返回"可读的拒绝结果"，
             # 不抛异常、也不假装成功。记忆完好无损由领域层保证。
-            record_forget(entry_point=ENTRY_TOOL, memory_id=args.memory_id, outcome="denied")
+            record_forget(entry_point=ENTRY_TOOL, memory_id=args.memory_id, outcome=OUTCOME_DENIED)
             return ToolResult.failure(
                 message=f"记忆 {args.memory_id} 不属于当前用户，未删除。",
                 error_code=ErrorCode.PERMISSION_DENIED,
@@ -95,13 +97,13 @@ class ForgetMemoryTool(Tool):
 
         if not forgotten:
             # 幂等：不存在的 id 不是错误（`forget` 契约），但审计仍要留痕。
-            record_forget(entry_point=ENTRY_TOOL, memory_id=args.memory_id, outcome="absent")
+            record_forget(entry_point=ENTRY_TOOL, memory_id=args.memory_id, outcome=OUTCOME_ABSENT)
             return ToolResult.success(
                 message=f"记忆 {args.memory_id} 不存在（可能已被遗忘），无需处理。",
                 data={"memory_id": args.memory_id, "forgotten": False},
             )
 
-        record_forget(entry_point=ENTRY_TOOL, memory_id=args.memory_id, outcome="forgotten")
+        record_forget(entry_point=ENTRY_TOOL, memory_id=args.memory_id, outcome=OUTCOME_FORGOTTEN)
         return ToolResult.success(
             message=f"已遗忘记忆 {args.memory_id}（硬删，不可恢复）。",
             data={"memory_id": args.memory_id, "forgotten": True},

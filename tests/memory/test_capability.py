@@ -270,9 +270,15 @@ async def test_capability_list_entries_paginates_within_the_namespace(tmp_path, 
         if relay:
             await relay.flush()
         listed = await capability.list_entries(MemoryScope.USER, 10)
-        assert [entry.id for entry in listed] == list(reversed(ids))  # 创建时间倒序
-        assert [entry.id for entry in await capability.list_entries(MemoryScope.USER, 2)] == ids[::-1][:2]
-        assert [entry.id for entry in await capability.list_entries(MemoryScope.USER, 2, 2)] == ids[::-1][2:]
+        assert {entry.id for entry in listed} == set(ids)  # 只有这三条，且都是自己的
+        # 倒序契约：created_at 单调不增（按 `created_at` 直接断言，不依赖同一微秒内的
+        # id tie-break——那正是随机 uuid，靠它推出的顺序会变成偶发 flake）。
+        stamps = [entry.created_at for entry in listed]
+        assert stamps == sorted(stamps, reverse=True)
+        # 分页 = **同一个口径**的连续切片。
+        newest_first = [entry.id for entry in listed]
+        assert [e.id for e in await capability.list_entries(MemoryScope.USER, 2)] == newest_first[:2]
+        assert [e.id for e in await capability.list_entries(MemoryScope.USER, 2, 2)] == newest_first[2:]
         assert await capability.list_entries(MemoryScope.USER, 2, 10) == []
         assert await capability.list_entries(MemoryScope.USER, 0) == []
         # 对照：别人的记忆不在列表里（namespace 由身份解析，不是查询参数）。

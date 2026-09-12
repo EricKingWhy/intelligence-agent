@@ -524,17 +524,16 @@ async def wire_capabilities(
             )
             continue
 
-    # 收集所有已注册 provider 的工具贡献（demo capability 走这条路）。
-    for descriptor in registry.available():
-        if not descriptor.enabled:
-            continue
-        provider = registry.optional(descriptor.name)
-        if isinstance(provider, ContributesTools):
-            wiring.tools.extend(provider.contributes_tools())
-    # 第二来源（#159）：注册项必须是契约对象本身的能力（memory）在这里贡献工具。
-    # 语义与上面完全一致（ContributesTools + 同一个循环 + 零旁路）：没有任何地方直接往
-    # wiring.tools 里 append。
-    for contributor in wiring.tool_contributors:
+    # 收集工具贡献：已启用的 provider（demo capability 走这条）**加上**第二来源
+    # `tool_contributors`（#159）。一个循环、一条 `isinstance` 规则、零旁路——没有任何
+    # 地方直接往 `wiring.tools` 里 append。
+    contributors: list[Any] = [
+        registry.optional(descriptor.name)
+        for descriptor in registry.available()
+        if descriptor.enabled
+    ]
+    contributors.extend(wiring.tool_contributors)
+    for contributor in contributors:
         if isinstance(contributor, ContributesTools):
             wiring.tools.extend(contributor.contributes_tools())
     return wiring

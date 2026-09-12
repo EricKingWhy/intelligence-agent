@@ -36,6 +36,21 @@ class MemoryEntry(BaseModel):
     indexed: bool = False
 
 
+#: LangMem 原始载荷在 `MemoryEntry.metadata` 里的键（由 `base_store_adapter` 写入）。
+#: 它是 **provider 内部细节**：跨能力边界（检索结果、用户 API）之前一律剥掉。写在一处，
+#: 免得"写入方 / 检索方 / 用户界面"各留一份字面量、改名时静默只剩一处生效。
+LANGMEM_INTERNAL_METADATA_KEY = "_langmem_value"
+
+
+def public_metadata(metadata: dict) -> dict:
+    """剥掉 provider 内部载荷后的用户可见 metadata（返回新 dict，不改原对象）。"""
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key != LANGMEM_INTERNAL_METADATA_KEY
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryNamespace:
     """Memory namespace 值对象：("memories", tenant_id, user_id, scope[, session_id])。
@@ -107,3 +122,30 @@ class MemoryNamespace:
 def scope_to_namespace(scope: MemoryScope, identity: IdentityContext) -> tuple[str, ...]:
     """兼容入口：等价于 MemoryNamespace.of(scope, identity).as_tuple()。"""
     return MemoryNamespace.of(scope, identity).as_tuple()
+
+
+def row_namespace_matches(
+    row_namespace: tuple[str, ...], scope: MemoryScope, identity: IdentityContext,
+) -> bool:
+    """记录行上的 namespace 是否就是 identity 从**当前上下文**有权操作的那一个。
+
+    只在"行确实存在"时调用。`MemoryRecordStore.get`/`delete` 的归属校验共用它——收在一处
+    而不是每个实现各写一套比较，`as_json` 有任何改动时才不会静默分叉。
+
+    `MemoryNamespace.of` 的三种失败在这里**都**等价于"不是这一行"，因为它们都表示
+    "这一行的 namespace 没法被当前调用方建立成可操作的 namespace"：
+
+    - `PermissionError`：调用方没被授予该 scope；
+    - `ValueError`：该行是 SESSION 记忆，而当前上下文没有可信会话绑定——HTTP 入口就是这种
+      情况（`memory_session_var` 只在 detached run 里设置），所以用户 API 按 id 删会话记忆
+      必须得到明确的拒绝，而不是 500；
+    - `NotImplementedError`：该行的 scope 本项目尚未实现（只可能来自带外写入的脏值）。
+
+    这**不是**把异常吞掉：调用方**自己**的 scope 解析（`store`/`list_by_scope` 走的
+    `scope_to_namespace`）不经过这里，真正的上下文 bug 依旧就地炸出来。
+    """
+    try:
+        expected = MemoryNamespace.of(scope, identity).as_tuple()
+    except (PermissionError, ValueError, NotImplementedError):
+        return False
+    return row_namespace == expected

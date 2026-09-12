@@ -178,8 +178,15 @@ async def test_delete_cannot_remove_another_owners_memory(store, other):
 
 @pytest.mark.asyncio
 async def test_delete_rejects_a_session_bound_from_another_session(store):
-    """SESSION 绑定的记忆：无绑定 → ValueError；绑定到别的 session → PermissionError；
-    绑定正确 → 删除。删除后同一个 id 的再次删除落回幂等 False（没有行可校验）。"""
+    """SESSION 绑定的记忆：绑定不上（无绑定、或绑到别的 session）→ PermissionError；
+    绑定正确 → 删除。删除后同一个 id 的再次删除落回幂等 False（没有行可校验）。
+
+    "无绑定"从 #159 起也归 PermissionError（原为 ValueError）：按 id 删除时，**行**的
+    namespace 解析不出"这个调用方有权操作的那一个"就等同于"不是你的记忆"，与绑错 session
+    同义——HTTP 入口没有可信会话绑定，按 id 删到会话记忆必须是明确拒绝而不是 500。
+    调用方**自己**的 scope 解析不受影响：`store()` 缺绑定时依旧 ValueError（上一个用例），
+    真正的上下文 bug 仍会就地炸出来。
+    """
     owner = IdentityContext("acme", "alice", ["user", "session"])
     scoped = entry().model_copy(update={"scope": MemoryScope.SESSION})
     token = memory_session_var.set("session-a")
@@ -187,7 +194,7 @@ async def test_delete_rejects_a_session_bound_from_another_session(store):
         await store.store(scoped, owner)
     finally:
         memory_session_var.reset(token)
-    with pytest.raises(ValueError):
+    with pytest.raises(PermissionError):
         await store.delete("m1", owner)
     token = memory_session_var.set("session-b")
     try:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_harness.memory.errors import MemoryNotFound
+from agent_harness.memory.errors import MemoryDomainError, MemoryNotFound
 from agent_harness.session.errors import SessionNotFound, SessionServiceError
 from agent_harness.web.domain_errors import (
     _DOMAIN_ERROR_STATUS,
@@ -143,13 +143,27 @@ def test_workspace_http_error_preserves_detail():
 # ── MEM-4 / #159：第三张表（memory 领域 / 归属词汇）──
 
 
+def test_memory_map_covers_every_domain_exception():
+    """`memory` 包的每个领域异常都必须显式登记（`memory_http_error` 直接索引）。
+
+    与另外两张表同款的**正确性前提**：漏登记的类型一旦被端点捕获就是 KeyError，所以在这里
+    先红，而不是等到线上把一个 404 变成 500。
+    """
+    missing = _all_subclasses(MemoryDomainError) - set(_MEMORY_ERROR_STATUS)
+    assert not missing, (
+        "以下 memory 领域异常未登记 HTTP 状态码："
+        f"{sorted(c.__name__ for c in missing)}"
+    )
+
+
 def test_memory_map_is_the_audited_contract():
     """记忆端点的错误语义——状态码不得漂移。
 
     关键区分：**未知记忆 id** = 404（用户对着一个具体 id 点删除，"这条不在了"要报出来，
     不是静默成功）；**存在但属于别人** = 403（领域层的归属校验如实上报，不伪装成 404）。
-    `ValueError`（"要了 SESSION scope 却没有可信绑定"）**刻意不登记**：本票的用户 API 只暴露
-    USER scope，真冒出它说明是我们自己的上下文处理写错了，500 才诚实。
+    `ValueError`（"要了 SESSION scope 却没有可信绑定"）**刻意不登记**：按 id 操作到会话记忆
+    已由 `row_namespace_matches` 归入"不是你的记忆"，真冒出它说明是我们自己的上下文处理
+    写错了，500 才诚实。
     """
     assert {c.__name__: s for c, s in _MEMORY_ERROR_STATUS.items()} == {
         "MemoryNotFound": 404,

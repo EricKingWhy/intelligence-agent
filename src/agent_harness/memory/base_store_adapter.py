@@ -13,7 +13,12 @@ from langgraph.store.base import BaseStore, GetOp, Item, PutOp, SearchItem, Sear
 
 from agent_harness.identity import get_identity_context
 from agent_harness.memory.record_store import MemoryRecordStore
-from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
+from agent_harness.memory.types import (
+    LANGMEM_INTERNAL_METADATA_KEY,
+    MemoryEntry,
+    MemoryNamespace,
+    MemoryScope,
+)
 from agent_harness.memory.vector_store import VectorIndexStore
 
 logger = logging.getLogger(__name__)
@@ -67,7 +72,7 @@ class SqliteMilvusBaseStore(BaseStore):
                 payload = op.value.get("content")
                 if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
                     raise TypeError("Expected structured Memory content")
-                metadata = {**payload.get("metadata", {}), "_langmem_value": {
+                metadata = {**payload.get("metadata", {}), LANGMEM_INTERNAL_METADATA_KEY: {
                     "kind": op.value.get("kind", "MemoryPayload"), "content": payload,
                 }}
                 await self.records.store(MemoryEntry(id=op.key, content=payload["content"], metadata=metadata,

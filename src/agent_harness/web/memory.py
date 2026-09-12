@@ -22,10 +22,16 @@ from typing import TYPE_CHECKING
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from agent_harness.memory.audit import ENTRY_API, record_forget
+from agent_harness.memory.audit import (
+    ENTRY_API,
+    OUTCOME_ABSENT,
+    OUTCOME_DENIED,
+    OUTCOME_FORGOTTEN,
+    record_forget,
+)
 from agent_harness.memory.capability import MemoryCapability
 from agent_harness.memory.errors import MemoryNotFound
-from agent_harness.memory.types import MemoryEntry, MemoryScope
+from agent_harness.memory.types import MemoryEntry, MemoryScope, public_metadata
 from agent_harness.web.domain_errors import memory_http_error
 from agent_harness.web.projects import require_trusted_origin
 
@@ -34,10 +40,6 @@ if TYPE_CHECKING:
 
 #: 单页上限：记忆正文可能很长，列表必须有闸（客户端可传更小值）。
 _MAX_LIMIT = 200
-
-#: Provider 内部载荷（LangMem 的原始 value）——不属用户可见的 metadata，
-#: 列表与检索都要丢掉它（检索侧的同一处理见 `LangMemMemoryCapability.search`）。
-_INTERNAL_METADATA_KEY = "_langmem_value"
 
 
 class MemorySummary(BaseModel):
@@ -58,9 +60,8 @@ class MemoryDeleted(BaseModel):
 
 
 def _summary(entry: MemoryEntry) -> MemorySummary:
-    metadata = {key: value for key, value in entry.metadata.items() if key != _INTERNAL_METADATA_KEY}
     return MemorySummary(id=entry.id, content=entry.content, scope=entry.scope,
-                         metadata=metadata, created_at=entry.created_at)
+                         metadata=public_metadata(entry.metadata), created_at=entry.created_at)
 
 
 def register_memory_routes(app: FastAPI) -> None:
@@ -87,9 +88,16 @@ def register_memory_routes(app: FastAPI) -> None:
         """列出**当前身份**的记忆（USER scope，分页）。
 
         读的是权威记录而不是向量检索：管理界面要的是"我的记忆都有哪些"，不是"哪几条最像
-        某个 query"（`MemoryCapability.list` 的契约）。
+        某个 query"（`MemoryCapability.list_entries` 的契约）。
         """
-        entries = await (await _capability()).list_entries(MemoryScope.USER, limit, offset)
+        capability = await _capability()
+        try:
+            entries = await capability.list_entries(MemoryScope.USER, limit, offset)
+        except PermissionError as error:
+            # 认证通过但身份没有 "user" scope（`MemoryNamespace.of` 的授权校验）。不翻译就会
+            # 以未登记领域异常的形状冒成 500——AC6 要的是明确状态码；同一身份的 DELETE 也是
+            # 403，两个入口必须给同一个答案。
+            raise memory_http_error(error) from error
         return [_summary(entry) for entry in entries]
 
     @app.delete("/api/memories/{memory_id}")
@@ -99,21 +107,23 @@ def register_memory_routes(app: FastAPI) -> None:
         """硬删一条记忆（不可恢复；与模型工具同一个领域动词）。
 
         状态码语义：删掉 → 200；id 不存在 → **404**（不是幂等 204：用户对着一个具体 id 点
-        删除，"这条已经不在了"是要报出来的结果）；存在但属于别人 → **403**（领域层的归属校验
-        如实上报，不伪装成 404）。领域层的 `forget` 仍是幂等 False——那是对后台路径的契约，
-        入口层在这里把它显式化成结果。
+        删除，"这条已经不在了"是要报出来的结果）；存在但不能由**这个入口**删除 → **403**
+        （领域层的归属校验如实上报，不伪装成 404）。"不能由这个入口删"包含两种：属于别人，
+        以及属于当前身份但 scope 是 SESSION——HTTP 请求没有可信会话绑定，按 id 解析不出那一行
+        （`row_namespace_matches` 的既定语义），本票的用户 API 只暴露 USER scope。领域层的
+        `forget` 仍是幂等 False——那是对后台路径的契约，入口层在这里把它显式化成结果。
         """
         capability = await _capability()
         try:
             forgotten = await capability.forget(memory_id)
         except PermissionError as error:
-            record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome="denied")
+            record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_DENIED)
             raise memory_http_error(error) from error
 
         if not forgotten:
-            record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome="absent")
+            record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_ABSENT)
             error = MemoryNotFound(memory_id)
             raise memory_http_error(error) from error
 
-        record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome="forgotten")
+        record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_FORGOTTEN)
         return MemoryDeleted(id=memory_id, deleted=True)

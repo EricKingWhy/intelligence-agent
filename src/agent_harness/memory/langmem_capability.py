@@ -10,7 +10,12 @@ from pydantic import BaseModel, Field
 
 from agent_harness.identity import get_identity_context
 from agent_harness.memory.record_store import MemoryRecordStore
-from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
+from agent_harness.memory.types import (
+    MemoryEntry,
+    MemoryNamespace,
+    MemoryScope,
+    public_metadata,
+)
 from agent_harness.memory.vector_store import VectorIndexStore
 
 
@@ -111,8 +116,8 @@ class LangMemMemoryCapability:
                 # （删除先落记录行，向量由 relay 异步收敛）。跳过这一条而不是让整次检索炸掉
                 # ——adapter 的 SearchOp 分支一直是这么容忍的，能力层不该比它更脆。
                 continue
-            result.append(entry.model_copy(update={"score": row.get("score"),
-                                                   "metadata": {k: v for k, v in entry.metadata.items() if k != "_langmem_value"}}))
+            result.append(entry.model_copy(update={
+                "score": row.get("score"), "metadata": public_metadata(entry.metadata)}))
         return result
 
     async def recall(self, scope: MemoryScope, query: str, limit: int) -> list[MemoryEntry]:

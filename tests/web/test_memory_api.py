@@ -22,13 +22,18 @@ from agent_harness.identity import (
     set_identity_context,
 )
 from agent_harness.memory.fake_capability import FakeMemoryCapability
-from agent_harness.memory.types import MemoryScope
+from agent_harness.memory.types import MemoryScope, memory_session_var
 from agent_harness.session.event import EVENT_TYPES as SESSION_EVENT_TYPES
 from agent_harness.web.app import create_app
 
 _SECRET = "memory-api-test-signing-secret-at-least-32"
 _ALICE = IdentityContext("acme", "alice", ["user"])
 _BOB = IdentityContext("acme", "bob", ["user"])
+#: 认证通过但**没有** "user" scope：`MemoryNamespace.of` 的 scope 授权会拒绝。
+_NO_USER_SCOPE = IdentityContext("acme", "carol", ["session"])
+#: 带 "session" scope 的 alice：HTTP 请求没有可信 session 绑定（`memory_session_var`
+#: 只在 detached run 里设置），所以按 id 去删会话记忆时解析不出该行的 namespace。
+_SESSION_ALICE = IdentityContext("acme", "alice", ["user", "session"])
 
 
 class _FakeMemoryComponents:
@@ -84,12 +89,19 @@ def memory_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 async def _seed(components: _FakeMemoryComponents, identity: IdentityContext,
-                content: str, metadata: dict | None = None) -> str:
-    """在指定身份下直接经能力写一条记忆（等价于后台抽取写进来的那条）。"""
+                content: str, metadata: dict | None = None, *,
+                scope: MemoryScope = MemoryScope.USER, session_id: str | None = None) -> str:
+    """在指定身份下直接经能力写一条记忆（等价于后台抽取写进来的那条）。
+
+    `scope=SESSION` 时必须给 `session_id`：namespace 解析要求可信的会话绑定。
+    """
     token = set_identity_context(identity)
+    binding = memory_session_var.set(session_id) if session_id is not None else None
     try:
-        return await components.capability.store(MemoryScope.USER, content, metadata or {})
+        return await components.capability.store(scope, content, metadata or {})
     finally:
+        if binding is not None:
+            memory_session_var.reset(binding)
         identity_context_var.reset(token)
 
 
@@ -136,7 +148,14 @@ async def test_list_paginates_and_clamps(memory_app):
         await _seed(components, _ALICE, f"第 {index} 条")
 
     page = client.get("/api/memories?limit=2&offset=1", headers=_auth(_ALICE)).json()
-    assert [item["content"] for item in page] == ["第 1 条", "第 0 条"]  # 创建时间倒序
+    full = client.get("/api/memories?limit=50", headers=_auth(_ALICE)).json()
+    assert {item["content"] for item in full} == {"第 0 条", "第 1 条", "第 2 条"}
+    # 分页 = **同一个倒序口径**的连续切片（写成切片比较而不是硬编码顺序：同一微秒内的
+    # 排序 tie-break 是随机 uuid，靠它推出来的固定顺序会变成偶发 flake）。
+    assert page == full[1:3]
+    # 倒序契约本身：created_at 单调不增。
+    stamps = [item["created_at"] for item in full]
+    assert stamps == sorted(stamps, reverse=True)
 
     assert client.get("/api/memories?limit=0", headers=_auth(_ALICE)).status_code == 422
     assert client.get("/api/memories?limit=10000", headers=_auth(_ALICE)).status_code == 422
@@ -181,6 +200,50 @@ async def test_deleting_someone_elses_memory_is_403_and_changes_nothing(memory_a
     assert resp.status_code == 403, resp.text
     assert await _contents(components, _BOB) == ["bob 的秘密"]
     assert await _contents(components, _ALICE) == []
+
+
+@pytest.mark.asyncio
+async def test_list_without_user_scope_is_403_not_500(memory_app):
+    """AC6：身份认证通过但缺 "user" scope → **403**，不是 500。
+
+    scope 授权由 `MemoryNamespace.of` 拒绝；不翻译就会以未登记领域异常的形状冒成 500，
+    正是 AC6 要挡的。归属校验不依赖 "user" scope，所以同一个身份拿别人的 id 去删也是 403
+    ——两个入口给出同一类明确状态码，且对方的记忆完好。
+    """
+    client, components = memory_app
+    alice_memory = await _seed(components, _ALICE, "alice 的偏好")
+
+    listing = client.get("/api/memories", headers=_auth(_NO_USER_SCOPE))
+    assert listing.status_code == 403, listing.text
+
+    deleting = client.delete(f"/api/memories/{alice_memory}", headers=_auth(_NO_USER_SCOPE))
+    assert deleting.status_code == 403, deleting.text
+    assert await _contents(components, _ALICE) == ["alice 的偏好"]
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_session_scoped_memory_is_403_not_500(memory_app):
+    """AC6：HTTP 入口只暴露 USER scope，会话记忆不能用 500 冒出去，也不能被它删掉。
+
+    alice 的 token 带 "session" scope，但 HTTP 请求没有可信的会话绑定，所以按 id 解析那一行的
+    namespace 会失败。领域层的归属比较把"这个上下文解析不出这一行"判定为"不是你能动的" →
+    403（跨用户那条也是 403，语义一致）；记忆完好由随后的带绑定读取证明。
+    """
+    client, components = memory_app
+    memory_id = await _seed(components, _SESSION_ALICE, "会话内的临时偏好",
+                           scope=MemoryScope.SESSION, session_id="sess-1")
+
+    resp = client.delete(f"/api/memories/{memory_id}", headers=_auth(_SESSION_ALICE))
+
+    assert resp.status_code == 403, resp.text
+    token = set_identity_context(_SESSION_ALICE)
+    binding = memory_session_var.set("sess-1")
+    try:
+        remaining = await components.capability.list_entries(MemoryScope.SESSION, 10)
+    finally:
+        memory_session_var.reset(binding)
+        identity_context_var.reset(token)
+    assert [entry.content for entry in remaining] == ["会话内的临时偏好"]
 
 
 @pytest.mark.asyncio

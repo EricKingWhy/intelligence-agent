@@ -1,7 +1,12 @@
 """测试用权威记录；复制值以模拟持久化的对象隔离。"""
 
 from agent_harness.identity import IdentityContext
-from agent_harness.memory.types import MemoryEntry, MemoryScope, scope_to_namespace
+from agent_harness.memory.types import (
+    MemoryEntry,
+    MemoryScope,
+    row_namespace_matches,
+    scope_to_namespace,
+)
 
 
 class FakeMemoryRecordStore:
@@ -26,7 +31,7 @@ class FakeMemoryRecordStore:
         row = self._records.get(memory_id)
         if row is None or row[0][1:3] != (identity.tenant_id, identity.user_id):
             raise KeyError(memory_id)
-        if row[0] != scope_to_namespace(row[1].scope, identity):
+        if not row_namespace_matches(row[0], row[1].scope, identity):
             raise KeyError(memory_id)
         return row[1].model_copy(deep=True)
 
@@ -42,9 +47,9 @@ class FakeMemoryRecordStore:
         """硬删的**记录行半边**（与 `SqliteMemoryRecordStore.delete` 同一组验收，
         见 test_record_store.py 的参数化用例）。
 
-        `scope_to_namespace(row 的 scope, identity)` 同时覆盖 tenant/user 与 SESSION
-        绑定两层校验：不匹配即"不是你的记忆" → `PermissionError`（不是 `False`——
-        静默 False 会让调用方以为删掉了）。
+        `row_namespace_matches(row 的 scope, identity)` 同时覆盖 tenant/user 与 SESSION
+        绑定两层校验：不匹配（含"当前上下文解析不出这一行的 namespace"）即"不是你的记忆"
+        → `PermissionError`（不是 `False`——静默 False 会让调用方以为删掉了）。
 
         本 fake 不实现 outbox（`pending`/`acknowledge`）：跨"记录行 + 索引意图"的原子性
         与 ack/revision 语义由 sqlite 实现的测试覆盖，fake 只保证内存记录的删除语义与
@@ -53,7 +58,7 @@ class FakeMemoryRecordStore:
         row = self._records.get(memory_id)
         if row is None:
             return False
-        if row[0] != scope_to_namespace(row[1].scope, identity):
+        if not row_namespace_matches(row[0], row[1].scope, identity):
             raise PermissionError("Memory belongs to a different namespace")
         del self._records[memory_id]
         return True

@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 ENTRY_TOOL = "tool"
 ENTRY_API = "api"
 
+#: 审计结果的三态。两个入口**共用**这三个常量，免得各写一套字面量而漂移出两套对不上账的
+#: 记录；取值本身是对外可见的日志字段，所以测试按字符串断言。
+OUTCOME_FORGOTTEN = "forgotten"
+OUTCOME_ABSENT = "absent"
+OUTCOME_DENIED = "denied"
+
 
 def record_forget(*, entry_point: str, memory_id: str, outcome: str) -> None:
     """记一条遗忘审计（结构化日志）。

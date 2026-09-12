@@ -498,7 +498,8 @@ async def test_real_forget_tool_reaches_milvus_and_listing_sees_the_authority(
         # `list_entries` 读权威记录（不走 embedding）：两条都在，属于自己。
         listed = await capability.list_entries(MemoryScope.USER, 10)
         assert {entry.id for entry in listed} == {doomed, control}
-        assert await capability.list_entries(MemoryScope.USER, 1) != []  # 分页参数在真 provider 上也成立
+        # 分页参数在真 provider 上也成立：limit=1 只返回一条（`!= []` 会漏掉"忽略 limit"）。
+        assert len(await capability.list_entries(MemoryScope.USER, 1)) == 1
 
         # 没有审批回调 → DANGER 工具被拒（安全默认值），真实 count 不变。
         denied = (await ToolExecutor(registry, policy=PermissionPolicy.WORKSPACE_WRITE)

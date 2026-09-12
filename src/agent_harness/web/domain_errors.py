@@ -168,16 +168,17 @@ def workspace_http_error(exc: Exception) -> HTTPException:
 #: 领域异常（`memory/errors.py`），一个包一张表，键域各自自洽。
 #:
 #: **刻意不登记 `ValueError`**：它从 `MemoryNamespace.of` 冒出来只有一种情形——"要了
-#: SESSION scope 却没有可信 session 绑定"，而本票的用户 API **只暴露 USER scope**
-#: （namespace 由服务端按请求身份解析，不接受参数）。真冒出 ValueError 说明是**我们自己**
-#: 的上下文处理写错了，500 才是诚实状态码，不该拿 422 盖住（同 `WorkspaceRegistryCorrupt`
-#: 的取舍）。
+#: SESSION scope 却没有可信 session 绑定"。本票的用户 API **只暴露 USER scope**，而按 id
+#: 操作到会话记忆的情形已由领域层的 `row_namespace_matches` 归入"不是你的记忆"
+#: （→ `PermissionError` → 403），所以真冒出 ValueError 说明是**我们自己**的上下文处理
+#: 写错了，500 才是诚实状态码，不该拿 422 盖住（同 `WorkspaceRegistryCorrupt` 的取舍）。
 _MEMORY_ERROR_STATUS: dict[type[Exception], int] = {
     # 404：目标不存在（`forget` 返回 False 在入口层的显式化——对着一个具体 id 说"删了"，
     # 结果显示"这条不存在"，比静默成功更诚实）。
     MemoryNotFound: 404,
-    # 403：存在但不属于当前 tenant/user/scope。**不是 404**——静默当成"不存在"会让
-    # 越权探测变成没有反馈的猜谜，而领域层的归属校验本来就拒绝了，如实报 403。
+    # 403：存在但不能由当前身份/入口操作（归属不符，或 SESSION 行在本上下文解析不出绑定）。
+    # **不是 404**——静默当成"不存在"会让越权探测变成没有反馈的猜谜，而领域层的归属校验
+    # 本来就拒绝了，如实报 403。
     PermissionError: 403,
 }
 
