@@ -39,6 +39,19 @@ _SUMMARY_HEAD_PARSE_LIMIT = 200
 
 
 @dataclass(frozen=True)
+class WorkspaceRef:
+    """会话摘要里的**项目引用**（WS-3 / #153 AC1–AC2）：id 做请求/重命名，title 做显示。
+
+    放在 session 层而不是 `agent_harness.workspace`：依赖方向是 session ← workspace
+    （`workspace/models.py` 本来就 import 本层），反向 import 会成环。本类只是**值对象**
+    ——它就是"会话摘要里那一格"的形状，不含任何项目领域行为（那些在 `WorkspaceIndex`）。
+    """
+
+    id: str
+    title: str
+
+
+@dataclass(frozen=True)
 class SessionSummaryStats:
     """read_session_summary 的产出：列表页所需的最小字段集。
 
@@ -59,6 +72,11 @@ class SessionSummaryStats:
     #: ARCH-4b：同一终结事件的 `trace_url`（人类可点击的 Langfuse URL，契约 2d7f87a
     #: / ADR-0018 D7）。与 `trace_id` 同源、同一套守卫；未配置可观测性时为 None。
     trace_url: str | None = None
+    #: WS-3 / #153：会话所属项目；**未分组**（历史遗留 / 未命名 workspace / 装配里
+    #: 没有 workspace 索引）时为 None，绝不伪造（不变量 #21 同族）。
+    #: store 层不认识项目，只提供这个带类型的落点；值由 `SessionService.list_sessions`
+    #: 从 `WorkspaceIndex` 回填（AC1 要求三处契约同时有该字段，这是其中之一）。
+    workspace: WorkspaceRef | None = None
 
 
 class JsonlSessionStore:

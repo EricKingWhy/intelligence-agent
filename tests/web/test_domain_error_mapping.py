@@ -54,6 +54,9 @@ def test_status_map_is_the_audited_contract():
         "ApprovalQueueMissing": 404,
         "ApprovalRequestMissing": 404,
         "QueueItemNotFound": 404,
+        # WS-3 / #153：按项目列会话时未注册的 workspace_id——与「项目存在但没有会话」
+        # 必须可区分，所以是 404 而不是「空列表」（不变量 #21 同族：缺席不造假）。
+        "WorkspaceNotFound": 404,
         # BUG-011：seq 冲突（并发写者抢先落盘 / 日志已损坏）——冲突不是「不存在」，
         # 必须与 SessionNotFound 的 404 区分开（旧行为把它翻成 404 掩蔽了日志损坏）。
         "SeqConflict": 409,

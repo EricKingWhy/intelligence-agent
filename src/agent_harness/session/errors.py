@@ -71,6 +71,17 @@ class WorkspaceNameInvalid(SessionServiceError):
     """workspace 名字不合法（路径逃逸风险）。"""
 
 
+class WorkspaceNotFound(SessionServiceError):
+    """workspace_id 不存在（项目未注册 / 装配里没有 workspace 索引）。
+
+    WS-3 / #153：按项目列会话时，未注册的项目**不能**伪装成"空列表"——那是在谎报
+    "这个项目没有会话"（不变量 #21 同族：缺席不造假）。由
+    `SessionService.list_sessions` 把 workspace 层的 `UnknownWorkspace` 翻成本异常
+    （同一套"下层异常翻译成本层词汇"的既有做法，见 `ForkBoundaryError` →
+    `InvalidForkBoundary`）。
+    """
+
+
 class QueueItemNotFound(SessionServiceError):
     """排队消息不存在 / 已消费 / 已取消。"""
 

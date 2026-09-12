@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +58,7 @@ from agent_harness.session.errors import (
     SteerTargetNotFound,
     UnknownModel,
     WorkspaceNameInvalid,
+    WorkspaceNotFound,
 )
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
@@ -81,7 +82,11 @@ from agent_harness.session.model_switch import (
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
-from agent_harness.session.store import JsonlSessionStore, SessionSummaryStats
+from agent_harness.session.store import (
+    JsonlSessionStore,
+    SessionSummaryStats,
+    WorkspaceRef,
+)
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalResponse,
@@ -94,6 +99,7 @@ if TYPE_CHECKING:
     from agent_harness.recovery.scan import InterruptionScanResult
     from agent_harness.web.app import AppState
     from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
+    from agent_harness.workspace.index import WorkspaceIndex
 
 
 logger = logging.getLogger(__name__)
@@ -250,22 +256,79 @@ class SessionService:
 
     # ── 只读操作 ─────────────────────────────────────────────────────
 
-    async def list_sessions(self) -> list[SessionSummaryStats]:
-        """列出所有 session 摘要（按最近活动倒序）。
+    async def list_sessions(
+        self, *, workspace_id: str | None = None
+    ) -> list[SessionSummaryStats]:
+        """列出 session 摘要。
+
+        - **默认**：全部会话，按**最近活动**倒序（既有契约不变；未分组会话照旧在列表里
+          可见，AC5）。
+        - **`workspace_id` 给出时**：只列该项目的会话，顺序 = **账本的手工序**
+          （AC4——活动时间永不重排，否则用户手工拖过的顺序每次刷新就丢）；项目未注册
+          → `WorkspaceNotFound`（404），**不**伪装成空列表。
+
+        每行回填 `workspace`（AC1/AC2）：未分组 → `None`，绝不伪造。项目归属只来自
+        `WorkspaceIndex`（账本 ∩ header cwd），**不读** sandbox 的 `WorkspaceRegistry`
+        映射表——那是沙箱生命周期记录，不是成员资格真源（#152 的交接约束）。
 
         直接返回领域 dataclass（`SessionSummaryStats` 自带 `session_id`），不拼一层
         只做形状复述、没有校验与行为的 dict 中转——列表行的字段因此在领域层就有带类型的
         唯一定义点。由调用方（`web/app.py`）映射为 API response model。
         """
+        await self._state.ensure_stores()
         store = self._state.store
-        ids = await anyio.to_thread.run_sync(store.list_session_ids)
+        index = self._state.workspace_index
+
+        if workspace_id is not None:
+            # `index.get()` 经 `_view → _visible_ids → _filter_visible → _read_header`
+            # 真读每个账本候选的 `events.jsonl` 头部——该读取有意**不缓存**
+            # （见 `WorkspaceIndex._read_header` 的 AC6 理由）。与下面的
+            # `read_session_summary` 同理：同步磁盘 I/O 必须离开事件循环，否则一次
+            # 列表请求就阻塞整个 asyncio loop（该处文档承诺"同步磁盘 I/O 仍走
+            # to_thread 卸载"，本行必须与之一致）。
+            workspace = (
+                await anyio.to_thread.run_sync(index.get, workspace_id)
+                if index is not None
+                else None
+            )
+            if workspace is None:
+                raise WorkspaceNotFound(f"workspace '{workspace_id}' not found")
+            ids: list[str] = list(workspace.session_ids)
+            fixed_ref = WorkspaceRef(id=workspace.id, title=workspace.title)
+            refs: dict[str, WorkspaceRef] = {}
+        else:
+            ids = await anyio.to_thread.run_sync(store.list_session_ids)
+            fixed_ref = None
+            # 一次 list() 建出全量 {session_id: 项目引用} 映射：逐行调
+            # `workspace_of_session` 会是 O(行数 × 项目数 × 账本长度)。`list()` 每条
+            # 账本只读一次 header，且 session_ids 已过成员资格过滤。
+            # `run_sync` 只接位置参数；读 header 同样是同步 I/O，一并卸载。
+            refs = await anyio.to_thread.run_sync(
+                self._workspace_refs_by_session, index
+            )
+
         summaries: list[SessionSummaryStats] = []
         for sid in ids:
             stats = await anyio.to_thread.run_sync(store.read_session_summary, sid)
             if stats is None or stats.event_count == 0:
                 continue
-            summaries.append(stats)
+            ref = fixed_ref if workspace_id is not None else refs.get(sid)
+            summaries.append(replace(stats, workspace=ref) if ref is not None else stats)
         return summaries
+
+    @staticmethod
+    def _workspace_refs_by_session(
+        index: WorkspaceIndex | None,
+    ) -> dict[str, WorkspaceRef]:
+        """`{session_id: 项目引用}`（`index` 为 None → 空映射 = 全部未分组）。"""
+        if index is None:
+            return {}
+        refs: dict[str, WorkspaceRef] = {}
+        for workspace in index.list():
+            ref = WorkspaceRef(id=workspace.id, title=workspace.title)
+            for session_id in workspace.session_ids:
+                refs[session_id] = ref
+        return refs
 
     async def get_events(self, session_id: str) -> list:
         """读取 session 的完整事件历史（只读，不 mutate）。

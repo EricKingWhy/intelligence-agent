@@ -64,6 +64,7 @@ from agent_harness.session.service import (
     SteerTargetNotFound,
     UnknownModel,
     WorkspaceNameInvalid,
+    WorkspaceNotFound,
     resolve_model_target,
     validate_session_id,
 )
@@ -282,6 +283,17 @@ class SendMessageRequest(_AmendValueValidators):
     model: str | None = None
 
 
+class WorkspaceRef(BaseModel):
+    """会话摘要里的项目引用（WS-3 / #153 AC2）：`id` 做请求/重命名，`title` 做显示。
+
+    形状由实现者定、但**必须写死在契约里**（票面 AC2）；前端 `types.ts::WorkspaceRef`
+    用同一个形状做编译期锁。
+    """
+
+    id: str
+    title: str
+
+
 class SessionSummary(BaseModel):
     """GET /api/sessions 返回的单条摘要。"""
 
@@ -304,6 +316,16 @@ class SessionSummary(BaseModel):
     # Langfuse URL（契约 2d7f87a / ADR-0018 D7）。前端 `types.ts::SessionSummary`
     # 把该字段声明为**非可选** `string | null`——本字段存在即让那条声明为真。
     trace_url: str | None = None
+    # WS-3 / #153：会话所属项目；未分组（历史遗留 / 未命名 workspace / 装配里没有
+    # workspace 索引）为 `None`，**绝不伪造**（不变量 #21 同族）。
+    #
+    # 刻意**不给默认值**：给了默认值的话，将来某个构造点漏传 `workspace=` 会静默
+    # 变成"未分组"——那是一条假事实。必填 → 构造响应时漏传**响亮失败**。
+    # 注意本字段锁住的是**构造点**，不是"服务层忘了回填"：领域层
+    # `SessionSummaryStats.workspace` 仍有 `= None` 默认值，服务层漏查映射照样会
+    # 序列化成 null。真正抓漏映射的是断言**值**的测试
+    # （`tests/web/test_session_list_workspace.py::test_rows_carry_real_workspace_and_ungrouped_is_null`）。
+    workspace: WorkspaceRef | None
 
 
 class AppState:
@@ -748,8 +770,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         return {"status": "ok"}
 
     @app.get("/api/sessions")
-    async def list_sessions() -> list[SessionSummary]:
-        """列历史 session（按最近活动倒序）。
+    async def list_sessions(workspace_id: str | None = None) -> list[SessionSummary]:
+        """列历史 session。
+
+        - 不带参数：全部会话，按**最近活动**倒序（既有契约与快路径取舍不变）。
+        - `?workspace_id=<项目 id>`：只列该项目的会话，顺序 = **账本的手工序**
+          （AC4：不按活动时间重排）；项目未注册 → 404（不伪装成空列表）。
+        每行都带 `workspace`（`null` = 未分组）。
 
         列表页只需摘要字段——store.read_session_summary 单趟流式扫描
         （头部早退 + 末行），不再全量解析每个 JSONL（30 会话 × 2000 事件
@@ -757,7 +784,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
         service = SessionService(app.state.agent)
-        summaries = await service.list_sessions()
+        try:
+            summaries = await service.list_sessions(workspace_id=workspace_id)
+        except WorkspaceNotFound as e:
+            raise http_error(e) from e
         return [
             SessionSummary(
                 session_id=s.session_id,
@@ -767,6 +797,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 first_user_message=s.first_user_message,
                 trace_id=s.trace_id,
                 trace_url=s.trace_url,
+                # 领域值对象 → 传输模型（两者刻意同名不同物：前者无校验、不依赖
+                # Pydantic；后者是契约与 OpenAPI schema 的定义点）。
+                workspace=(
+                    WorkspaceRef(id=s.workspace.id, title=s.workspace.title)
+                    if s.workspace is not None
+                    else None
+                ),
             )
             for s in summaries
         ]

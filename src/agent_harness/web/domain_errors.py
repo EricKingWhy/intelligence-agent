@@ -20,6 +20,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
 | `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary |
+| `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
 两个特例写进契约、不得「顺手统一」：
@@ -28,6 +29,11 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
   ApprovalRequestMissing 都是 404）——OBS-015 的结论，客户端无法从状态码区分，属有意为之；
 - `ApprovalAlreadyResolved` 是 **409（幂等已决）而非 404**——与上面三个 404 分开，
   因此「审批已决」是可区分的。
+
+**WS-3 追加（#153）**：`GET /api/sessions` 开始翻译 `WorkspaceNotFound`——
+`?workspace_id=<未注册 id>` 返回 **404**，而不是空列表（空列表会把"项目不存在"
+伪装成"项目没有会话"）。上表已补该端点行，`_DOMAIN_ERROR_STATUS` 的 404 组同步
+新增 `WorkspaceNotFound`。
 
 **BUG-011 追加**：`SeqConflict` → **409**（seq 冲突：并发写者抢先落盘，或日志已损坏）。
 旧行为是 `service.resume_and_launch` 把 `ValueError` 一刀切翻成 `SessionNotFound`（404），
@@ -66,6 +72,7 @@ from agent_harness.session.errors import (
     SteerTargetNotFound,
     UnknownModel,
     WorkspaceNameInvalid,
+    WorkspaceNotFound,
 )
 
 #: 领域异常 → HTTP status 的**唯一**映射源（ARCH-5）。新增领域异常只改这里；
@@ -84,6 +91,7 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     ApprovalQueueMissing: 404,
     ApprovalRequestMissing: 404,
     QueueItemNotFound: 404,
+    WorkspaceNotFound: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     RecoveryConflict: 409,
