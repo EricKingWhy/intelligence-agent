@@ -64,6 +64,82 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`cd107a2`**（批次 0 文档 commit） | Spec 10 + Standards 14 findings → 全部处置（2 P1 修 + 3 P2 修 + 9 P3 修 + 8 说明不改/登记，见下方处置表） | `236049f` |
 | **U-2** | **UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态）** | **`236049f`**（U-1 修复 commit） | 未审 | — |
 | U-3 | UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词更新） | U-2 修复 commit | 未审 | — |
+| **B-2** | **#169（WS-6 前端半：项目内新建任务 / cwd）+ #170（WS-7 前端半：新建项目内嵌目录浏览器）** | **`522602d`**（= 本分支 base。注意它**正是 U-2 的功能 commit**，U-2 的审查修复还没落在它上面——见 §B-2 的集成顺序） | 两轴各一 subagent；**零 P0/P1**，5 条 P2 + 6 条测试缺口 → 全部处置 | `51fc68c` |
+
+### B-2：WS-6/WS-7 前端半（#169 / #170，隔离 worktree）
+
+**为什么是隔离 worktree**：`D:\intelligence-agent-frontend` 当时有并行会话在编辑（10 个文件 2–4 分钟前刚改过，
+另有未跟踪审计脚本）。按 `AGENTS.md` §13.1「并行 AI 会话不能使用同一个 Worktree」+ §11「修改前先检查
+git diff，避免覆盖其他 Agent 未提交工作」，本批在
+**worktree `D:\intelligence-agent-frontend-ws6` / branch `feat/frontend-ws6-ws7`（base `522602d`）** 施工。
+
+| 项 | 值 |
+| --- | --- |
+| 契约事实源 | `D:\intelligence-agent-backend\docs\PRD_WS6_WS7_DIR_ROOTED_SESSION_AND_DIR_PICKER.md` §4.3/§4.5（后端半在 `feat/backend`：`561b553`/`21c0b06`/`9c158c9`）+ ADR-0027/0028 |
+| 功能 commit | `f3849ac`（14 files, +1378） |
+| 审查修复 commit | `51fc68c`（5 files, +100/−23） |
+| 涉及 AC | #169 AC9–AC14（前端半）；#170 AC8–AC13（前端半） |
+
+**交付**：
+- #169：项目行 kebab 第一项「在此项目中新建任务」+ 空项目占位区替换为该入口按钮；确认面（路径逐字
+  「Agent 将直接读写该目录：<路径>」+ 权限档三选 + 任务输入空禁用）；提交复用 `submitTask` **同一条**
+  SSE 接线（选中会话、跟随流），payload 带 `cwd`；**默认档不发 `permission_mode`**（后端语义：显式传非
+  danger 档 → 切交互式审批）；失败留在确认面可重试（`submitTask` 新增 `{ ownError }`，该路径不写全局
+  横幅、422 不套用「未知模型」旧语义，`api.startSessionErrorDetail` 让后端 detail 原文出场）。
+- #170：`api.getHostDirs`（形状窄化 + `ProjectError` 保 detail 原文）+ `hooks/useDirectoryListing`
+  （请求代号作废迟到响应；`onChange` 走 ref 防首跳重放）+ `components/DirectoryBrowser`
+  （路径条回车跳转 / 向上 / 一层子目录 / 选择此目录 / 截断提示 / 403·404·422 就地显示 detail）
+  + 内嵌「新建项目」对话框 + 双向同步。
+
+**门禁（实跑）**：`tsc` ✅ · `vitest` **626 passed**（+7：cwd/permission_mode 缺省不发键 + getHostDirs
+形状与错误矩阵）· `oxlint` **0 errors**（38 warnings 全为既有，新文件零新增）· `playwright --workers=2`
+**208 passed / 6 failed**（本轮修复后 207 passed / 7 failed，见下）· `vite build` ✅。
+
+**e2e 的 6 条失败 = 3 个既有用例 ×2 视口**（已在 pristine 基线 `git stash` 掉本批全部改动后、同一隔离端口
+复现）：`g-visual-qa:82`（UI-03 时间线 run 分组头）、`p-earlier-window:32`（加载更早）、
+`r-project-groups:295`（UI-05 真空态文案）——属 `feat/frontend` 在途工作（U-2/U-3），**不是本批引入**。
+另有 1 条偶发：`k-refresh-restore:159` 单视口失败，隔离复跑 **3/3 全绿（每次 12 passed）**，
+属仓库已登记的 SSE 时序类抖动（本 diff 不触碰 refresh/reconnect 路径）。
+
+**⚠️ 5173 复用坑（写给后续所有人）**：`playwright.config.ts` 是 `5173 + reuseExistingServer: !CI`，
+它会**静默复用**任何已监听 5173 的 dev server。本机并行 worktree 有会话在跑时，e2e 跑的是**别人的代码**
+（本轮实测踩到：本票新增的菜单项"不存在"）。本批所有 e2e 证据用**临时隔离端口配置**产出
+（10 行：`baseURL` + `webServer.command = npm run dev -- --port 5273 --strictPort` + `reuseExistingServer: false`），
+该配置**跑完即删、未入库**。集成方若发现 5173 被占用，同一手法换端口再跑即可。
+
+**真机验收**（真 uvicorn `feat/backend` + 真模型 `glm-4.5-air` + 真浏览器；`WORKSPACE_DIR` 指向隔离临时
+目录，未触碰仓库真 `harness.db`；临时服务与目录已清理）：
+- #169：kebab 第一项与空项目入口都点通；确认面逐字显示真实路径、默认档显示"工作区写入"；任务
+  「用 read 工具以相对路径读取 hello.txt」→ 事件 `tool/call read {"path":"hello.txt"}` 成功并逐字复述
+  `REAL-MARKER-7731`（**相对路径能读到 = cwd 真的生效**）；会话落在项目分组下；**全程无审批卡**
+  （证明默认档确实没发 `permission_mode`）；把项目目录改名 → 提交 → 浮层内就地显示
+  `提交失败：目录不存在：D:\...`（后端 422 原文、不弹全局横幅、不关对话框），目录改回后同一按钮
+  **重试成功**并落组。
+- #170：真盘符根列表（`C:\` / `D:\`，根模式两个按钮禁用）；`D:\` 一层 67 个真实子目录（仅目录、按名排序）；
+  进入路径后**两个输入框同步回填**；手改输入框回车反向跳转；「选择此目录」回执 + 注册成功。
+
+**批次两轴审查（fixed point `522602d`，两个独立只读 subagent）**：**零 P0/P1**。处置：
+1. 路径条"说谎"（两轴各自独立发现，最有价值的一条）：导航只清 `editing` 一处，导致"条上写 A、下面列 B"
+   → 新增唯一导航出口 `nav()` 统一清 `editing` + 「已选择」回执。
+2. 条上回车空串无动作，但占位文案承诺「留空 = 盘符/根」→ 空串 = 列根（与表单侧同语义）。
+3. 「选择此目录」回执在导航后仍挂着 → `nav` 清回执。
+4. 键盘焦点在进入子目录后掉回 `<body>`（条目卸载）→ 列表/向上触发的导航把焦点收进浏览器容器
+   （`tabIndex=-1`，不卸载），路径条回车触发时不收焦点。
+5. 死类 `project-dialog-task`（无 CSS、无选择器引用）→ 删除（§9.3）。
+6. 测试缺口 6 条全补：逐字文案改**连续串**断言、三档都在、AC11「选中 + 跟随流」、AC12 错误改
+   `toHaveText` 整串、WS-7 补浏览器**自己**路径条回车 + 条上打字后改走点子目录的回归锁 + 422 就地显示；
+   顺带修正 mock 保真度：带 cwd 建会话的 durable log（`GET /events`）= 刚流出的那些帧（此前回 `[]`，
+   run 收尾后的回读会把流的结论清空 → "回答真的渲染出来了"这条断言测不到东西）。
+
+**未决 / 交后续（Scope Lock，只登记）**：
+① 浏览器路径条在"输入了不存在的路径"报错后回到原目录（用户输入不保留）——上面表单的路径输入框保留原文，
+主要动作不受影响，已在组件头注释说明；若要保留，需要 post-render 的输入态管理（超出本票最小改动预算）。
+② 真机侧没有自然构造 `403`（Windows 需要 ACL 拒绝目录，会改系统状态）——该渲染由 e2e 的 `hostDirsErrors`
+拦截口覆盖（伪造的是真后端会回的那句话）；后端 403 矩阵已在其真机验收里 curl 逐条验过。
+③ `D:\intelligence-agent` 的 `main` 集成时，本分支 base 是 U-2 功能 commit，而 U-2/U-3 的修复尚在
+`feat/frontend` 未提交工作中 → **文件重叠面**：`app.css`（我方 hunk 在 ~1004/1025/1108+；对方在
+642/656/2843/2862）、`SessionList.tsx`（我方动项目行 kebab + 空项目占位；对方动 Rail 真空态）——预计
+可干净合并，但**必须真跑一遍**再判定。
 
 **UI Polish 批次总纲**：需求事实源 = `docs/UI_POLISH_PRD.md`（含用户 2026-09-12 grill-me 决策记录 D1-D6，不可违约）；逐票施工规格 = `docs/UI_POLISH_TICKETS.md`；视觉规范基准 = 根目录 `DESIGN.md`（本批新增，含 `.impeccable/design.json` sidecar）。评审出处：impeccable critique 24/40（快照 `.impeccable/critique/2026-09-12T14-05-30Z__web-src.md`）。
 
