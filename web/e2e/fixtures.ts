@@ -69,9 +69,91 @@ export interface ApiMock {
    *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
    *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
   onApprovePost?: (route: Route) => Promise<void> | void;
+  // ── WS-5 / #155 项目分组 ──
+  /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
+   *
+   *  **有状态**：fixtures 在内存里真的改这份状态并按后端语义回响应（见
+   *  `routeApi` 里的 projects 分支）——create 前插注册表、rename 改标题、
+   *  attach/detach 改账本**并同步改会话行的 workspace**、软删除摘记录**并把
+   *  成员会话的 workspace 清成 null**、order 按 insertBefore 语义重排。
+   *  这样 e2e 断言的是"界面真的跟着后端的语义走"，而不是"界面读了我们塞的假值"。 */
+  projects?: ProjectFixture[];
+  /** `POST /api/projects` 里**不存在**的路径集合 → 404（真实后端不 mkdir）。
+   *  用来锁"路径不存在时有清晰错误"这条 AC。 */
+  projectMissingPaths?: string[];
+  /** POST /api/projects 的拦截口（计数 / 伪造其它状态码用）；返回 true = 已处理。 */
+  onProjectPost?: (route: Route) => Promise<boolean> | boolean;
+}
+
+/** 项目 fixture（形状 = 后端 `web/projects.py::Project`，时间戳由 fixtures 补）。 */
+export interface ProjectFixture {
+  id: string;
+  path: string;
+  title: string;
+  /** 账本手工序。 */
+  session_ids: string[];
+  status?: 'ok' | 'missing-dir';
+}
+
+/** 会话行 fixture：只带 WS-5 相关字段，其余由调用方按需补（旧 spec 的裸对象同样可用）。 */
+export function sessionRow(
+  sessionId: string,
+  workspace: { id: string; title: string } | null = null,
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    session_id: sessionId,
+    event_count: 3,
+    first_event_time: T,
+    last_event_time: T,
+    first_user_message: `任务 ${sessionId}`,
+    trace_id: null,
+    trace_url: null,
+    workspace,
+    ...over,
+  };
 }
 
 export function routeApi(page: Page, mock: ApiMock): void {
+  // ── WS-5 #155：可变状态（每测试一份，互不串味）──
+  // 注意 sessions **持有调用方数组的引用**，不拷贝：既有 spec 的约定是"fork 成功后
+  // 往自己的 sessions 数组里 push child，下一次 GET 就能看到"（b-fork.spec.ts 依赖
+  // 这一点）。所以本车道只在原地改行的 `workspace` 字段，既不新增也不删除行。
+  const sessionState: unknown[] = mock.sessions ?? [];
+  const projectState: ProjectFixture[] = (mock.projects ?? []).map((p) => ({
+    ...p,
+    session_ids: [...p.session_ids],
+  }));
+
+  /** 后端 `web/projects.py::Project` 的响应形状（时间戳不是本车道断言的对象）。 */
+  const projectView = (p: ProjectFixture) => ({
+    id: p.id,
+    path: p.path,
+    title: p.title,
+    status: p.status ?? 'ok',
+    session_ids: p.session_ids,
+    created_at: T,
+    updated_at: T,
+  });
+  const findProject = (id: string) => projectState.find((p) => p.id === id);
+  const json = (route: Route, body: unknown, status = 200) =>
+    route.fulfill({ status, body: JSON.stringify(body), contentType: 'application/json' });
+  /** 把某会话的 workspace 引用同步成"它现在属于谁"——与真实后端一致
+   *  （attach/detach/软删除后 GET /api/sessions 的行立刻变）。
+   *  替换而非改原对象：调用方的 fixture 行是**字面量常量**，就地改会污染同一文件里
+   *  其它用例的期望（各 spec 之间共享模块级常量）。 */
+  const setWorkspace = (sessionId: string, project: ProjectFixture | null) => {
+    const at = sessionState.findIndex(
+      (s) => (s as Record<string, unknown>)['session_id'] === sessionId,
+    );
+    if (at >= 0) {
+      sessionState[at] = {
+        ...(sessionState[at] as Record<string, unknown>),
+        workspace: project ? { id: project.id, title: project.title } : null,
+      };
+    }
+  };
+
   void page.route('**/api/**', async (route) => {
     const req = route.request();
     const path = new URL(req.url()).pathname;
@@ -79,7 +161,7 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return route.fulfill({ status: 200, body: '{"status":"ok"}', contentType: 'application/json' });
     }
     if (path === '/api/sessions' && req.method() === 'GET') {
-      return route.fulfill({ status: 200, body: JSON.stringify(mock.sessions ?? []), contentType: 'application/json' });
+      return json(route, sessionState);
     }
     if (path === '/api/sessions' && req.method() === 'POST') {
       if (mock.onSessionPost) return mock.onSessionPost(route);
@@ -151,6 +233,102 @@ export function routeApi(page: Page, mock: ApiMock): void {
         contentType: 'application/json',
       });
     }
+
+    // ── WS-5 / #155 项目端点（有状态 mock：语义对齐后端 `web/projects.py`）──
+    if (path === '/api/projects' && req.method() === 'GET') {
+      return json(route, projectState.map(projectView));
+    }
+    if (path === '/api/projects' && req.method() === 'POST') {
+      if (mock.onProjectPost && (await mock.onProjectPost(route))) return;
+      const body = (req.postDataJSON() ?? {}) as { path?: string; title?: string };
+      const target = body.path ?? '';
+      if ((mock.projectMissingPaths ?? []).includes(target)) {
+        return json(route, { detail: `目录不存在：${target}` }, 404);
+      }
+      const existing = projectState.find((p) => p.path === target);
+      if (existing) return json(route, projectView(existing)); // 幂等：同规范路径
+      const created: ProjectFixture = {
+        id: `p-${projectState.length + 1}`,
+        path: target,
+        title: body.title || target.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '项目',
+        session_ids: [],
+      };
+      projectState.unshift(created); // 注册表顺序：新建项目前插
+      return json(route, projectView(created));
+    }
+    const projectMatch = /^\/api\/projects\/([^/]+)$/.exec(path);
+    if (projectMatch) {
+      const project = findProject(decodeURIComponent(projectMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      if (req.method() === 'PATCH') {
+        const body = (req.postDataJSON() ?? {}) as { title?: string };
+        project.title = body.title ?? project.title;
+        for (const id of project.session_ids) setWorkspace(id, project);
+        return json(route, projectView(project));
+      }
+      if (req.method() === 'DELETE') {
+        // 软删除：只摘注册记录与账本；成员会话的 workspace 清成 null（会话本体不动）。
+        const detached = project.session_ids.length;
+        for (const id of project.session_ids) setWorkspace(id, null);
+        projectState.splice(projectState.indexOf(project), 1);
+        return json(route, {
+          id: project.id,
+          deleted: true,
+          sessions_detached: detached,
+          detail: `项目「${project.title}」已从注册表移除，${detached} 个会话回到未分组。目录、用户文件与会话日志均未删除（软删除，可重新注册同一目录）。`,
+        });
+      }
+      return json(route, { detail: 'method not allowed' }, 405);
+    }
+    const attachMatch = /^\/api\/projects\/([^/]+)\/sessions$/.exec(path);
+    if (attachMatch && req.method() === 'POST') {
+      const project = findProject(decodeURIComponent(attachMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      const body = (req.postDataJSON() ?? {}) as { session_id?: string };
+      const sessionId = body.session_id ?? '';
+      if (!sessionState.some((s) => s['session_id'] === sessionId)) {
+        return json(route, { detail: `会话不存在：${sessionId}` }, 404);
+      }
+      if (!project.session_ids.includes(sessionId)) {
+        project.session_ids.push(sessionId); // attach 幂等：已在账本里就不动
+        setWorkspace(sessionId, project);
+      }
+      return json(route, projectView(project));
+    }
+    const detachMatch = /^\/api\/projects\/([^/]+)\/sessions\/([^/]+)$/.exec(path);
+    if (detachMatch && req.method() === 'DELETE') {
+      const project = findProject(decodeURIComponent(detachMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      const sessionId = decodeURIComponent(detachMatch[2]);
+      const at = project.session_ids.indexOf(sessionId);
+      if (at >= 0) project.session_ids.splice(at, 1); // 不在本项目 → 幂等 no-op
+      setWorkspace(sessionId, null);
+      return json(route, projectView(project));
+    }
+    const orderMatch = /^\/api\/projects\/([^/]+)\/sessions\/([^/]+)\/order$/.exec(path);
+    if (orderMatch && req.method() === 'POST') {
+      const project = findProject(decodeURIComponent(orderMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      const sessionId = decodeURIComponent(orderMatch[2]);
+      const body = (req.postDataJSON() ?? {}) as { before?: string | null };
+      const before = body.before ?? null;
+      const from = project.session_ids.indexOf(sessionId);
+      if (from < 0) return json(route, { detail: '会话不在该项目账本里' }, 409);
+      if (before !== null && !project.session_ids.includes(before)) {
+        return json(route, { detail: '锚点不在该项目账本里' }, 409);
+      }
+      project.session_ids.splice(from, 1); // insertBefore 语义
+      if (before === null) project.session_ids.push(sessionId);
+      else project.session_ids.splice(project.session_ids.indexOf(before), 0, sessionId);
+      return json(route, projectView(project));
+    }
+    if (path === '/api/projects/resolve' && req.method() === 'POST') {
+      const body = (req.postDataJSON() ?? {}) as { path?: string };
+      const hit = projectState.find((p) => p.path === body.path);
+      if (!hit) return json(route, { detail: '项目不存在' }, 404);
+      return json(route, projectView(hit));
+    }
+
     return route.fulfill({ status: 404, body: '{"detail":"not mocked in e2e"}', contentType: 'application/json' });
   });
 }

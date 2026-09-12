@@ -508,6 +508,552 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-variant-numeric: tabular-nums;
 }
 
+/* ═══ WS-5 / #155：项目 → 会话层级 + 未分组区 ═══
+ *
+ * 层级只靠三样东西表达（不加大色块）：缩进 + 一条发丝导轨 + 字重差。
+ * 侧栏是 chrome（低对比导航面），项目头与行都必须比中间工作区安静。 */
+
+.session-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.rail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-sm);
+}
+.rail-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  font-weight: 600;
+  padding: 0 var(--space-md) 2px;
+  user-select: none;
+}
+.rail-section-count {
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--text-tertiary);
+  background: var(--surface-2);
+  border-radius: var(--radius-full);
+  padding: 0 6px;
+}
+
+/* ── 项目头（可折叠 + 行内重命名 + 操作菜单） ── */
+.rail-project {
+  display: flex;
+  flex-direction: column;
+}
+.rail-project-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.rail-project-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 5px var(--space-sm) 5px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-out) var(--ease-apple), color var(--dur-out) var(--ease-apple);
+}
+.rail-project-toggle:hover {
+  background: var(--color-hover);
+  color: var(--text-primary);
+}
+/* 重命名时同一布局但不响应点击（内含 input，不能是 button）。 */
+.rail-project-toggle-static {
+  cursor: default;
+}
+.rail-project-toggle-static:hover {
+  background: transparent;
+}
+.rail-project-chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-expand) var(--ease-apple);
+}
+.rail-project-chevron.open {
+  transform: rotate(90deg);
+}
+.rail-project-icon {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+.rail-project-toggle:hover .rail-project-icon {
+  color: var(--accent);
+}
+.rail-project-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 550;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-project-warn {
+  flex-shrink: 0;
+  color: var(--warning);
+}
+.rail-project-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  background: var(--surface-2);
+  border-radius: var(--radius-full);
+  min-width: 16px;
+  padding: 0 5px;
+  text-align: center;
+}
+.rail-project-rows {
+  /* 导轨 + 缩进 = 层级；比嵌套卡片轻，比纯缩进清楚。 */
+  margin: 1px 0 2px 15px;
+  padding-left: 5px;
+  border-left: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.rail-project-empty {
+  padding: 4px var(--space-sm) 6px;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.rail-project-empty-first {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  margin-top: 2px;
+}
+.rail-project-missing {
+  padding: 2px var(--space-sm) 4px;
+  font-size: 10px;
+  color: var(--warning);
+}
+
+/* ── 行：主按钮 + 操作菜单（未分组与项目内共用） ── */
+.session-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.session-row .session-item {
+  flex: 1;
+  min-width: 0;
+}
+.session-row-in-project .session-item {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.session-row.dragging {
+  opacity: 0.45;
+}
+/* 操作按钮默认隐藏（侧栏默认要安静），hover / 键盘聚焦 / 菜单打开时出现。
+ * `:focus-visible` 单独一条：仅靠 opacity 隐藏不能让键盘用户失去入口。 */
+.rail-menu-btn {
+  flex-shrink: 0;
+  opacity: 0;
+  width: 22px;
+  height: 22px;
+  transition: opacity var(--dur-out) var(--ease-apple);
+}
+.session-row:hover .rail-menu-btn,
+.session-row:focus-within .rail-menu-btn,
+.rail-project-head:hover .rail-menu-btn,
+.rail-project-head:focus-within .rail-menu-btn,
+.rail-menu-btn:focus-visible,
+.rail-menu-btn[data-state='open'] {
+  opacity: 1;
+}
+
+/* ── 拖拽重排的落点反馈 ── */
+.rail-drop-indicator {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 55%, transparent);
+  pointer-events: none;
+}
+.rail-drop-tail {
+  margin: 2px 0 1px;
+  padding: 3px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.rail-drop-tail.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-soft);
+}
+
+/* ── 侧栏错误条（项目写操作 / 项目列表加载失败） ── */
+.rail-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  margin: 0 var(--space-sm) var(--space-sm);
+  padding: 6px var(--space-sm);
+  background: var(--surface-danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.rail-error-text {
+  flex: 1;
+  min-width: 0;
+  /* 后端 detail 可能很长（点名 cwd 与项目路径）——允许换行但限制在三条以内，
+   * 完整文本仍在 title 上可悬停查看。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rail-error-close,
+.rail-error-retry {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 0 2px;
+  font-size: var(--text-xs);
+  color: var(--danger);
+  cursor: pointer;
+}
+.rail-error-close {
+  font-size: var(--text-base);
+  line-height: 1;
+}
+.rail-error-retry {
+  text-decoration: underline;
+}
+
+/* ── 项目内的行内重命名输入 ── */
+.project-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--radius-xs);
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.project-rename-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 0;
+}
+
+/* ── 行 / 项目菜单（Radix DropdownMenu 浮层） ── */
+.rail-menu {
+  min-width: 168px;
+  padding: var(--space-xs);
+  background: var(--surface-overlay);
+  backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-1)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+  z-index: 60;
+  /* 动画**不能**复用 palette-in：那组的关键帧带 `translateX(-50%)`（命令面板是居中
+   * 定位才需要的），套到这里会把菜单永久左移自身宽度的一半——而 Playwright 点的是
+   * 元素真实位置，e2e 全绿、人眼一看就歪（本轮视觉检查逮到的正是这一条）。
+   * 只做 opacity + scale，并按 Radix 给的落点原点缩放。 */
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+  animation: rail-menu-in var(--dur-palette) var(--ease-apple);
+}
+@keyframes rail-menu-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .rail-menu {
+    background: color-mix(in srgb, var(--surface-overlay) 88%, var(--bg-app, #000));
+  }
+}
+.rail-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px var(--space-sm);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+.rail-menu-item[data-highlighted] {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.rail-menu-item[data-disabled] {
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+.rail-menu-item-danger {
+  color: var(--danger);
+}
+.rail-menu-item-danger[data-highlighted] {
+  background: var(--surface-danger);
+}
+.rail-menu-sep {
+  height: 1px;
+  margin: var(--space-xs) 0;
+  background: var(--border-subtle);
+}
+
+/* ═══ WS-5 / #155：项目浮层（新建 / 删除确认 / 加入项目） ═══
+ * 与命令面板同一套浮层材质（glass 仅浮层可用，冻结视觉原则）；
+ * 居中而非顶部对齐：这三个动作都是"停下来做一件事"，不是快速搜索。 */
+
+.project-dialog {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(520px, calc(100vw - 48px));
+  max-height: min(560px, calc(100vh - 80px));
+  overflow-y: auto;
+  padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  background: var(--surface-overlay);
+  backdrop-filter: blur(var(--glass-blur-2)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-2)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--edge-light), var(--shadow-popover);
+  z-index: 51;
+  animation: project-dialog-in var(--dur-palette) var(--ease-apple);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .project-dialog {
+    background: color-mix(in srgb, var(--surface-overlay) 92%, var(--bg-app, #000));
+  }
+}
+@keyframes project-dialog-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.project-dialog[data-state='closed'] {
+  animation: palette-out var(--dur-out) var(--ease-apple);
+}
+.project-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.project-dialog-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.project-dialog-title-danger {
+  color: var(--danger);
+}
+.project-dialog-close {
+  flex-shrink: 0;
+}
+.project-dialog-desc {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.project-dialog-desc strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.project-dialog-list {
+  margin: var(--space-sm) 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.project-dialog-done {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+.project-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.project-field-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.project-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 7px var(--space-sm);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  transition: border-color var(--dur-out) var(--ease-apple);
+}
+.project-input.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.project-input:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.project-input::placeholder {
+  color: var(--text-tertiary);
+}
+.project-field-hint {
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.project-error {
+  padding: 6px var(--space-sm);
+  background: var(--surface-danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.project-notice {
+  padding: 6px var(--space-sm);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.project-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+.project-btn {
+  padding: 6px var(--space-md);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--dur-out) var(--ease-apple), color var(--dur-out) var(--ease-apple);
+}
+.project-btn:hover {
+  background: var(--color-hover);
+  color: var(--text-primary);
+}
+.project-btn-primary {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--text-primary);
+}
+.project-btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.project-btn-danger {
+  background: var(--surface-danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--danger);
+}
+.project-btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+.project-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.project-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.project-pick-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: 7px var(--space-sm);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-out) var(--ease-apple), border-color var(--dur-out) var(--ease-apple);
+}
+.project-pick-item:hover {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.project-pick-title {
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  font-weight: 550;
+  color: var(--text-primary);
+}
+.project-pick-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 路径太长时保留尾部（目录名）而不是开头 */
+  text-align: left;
+}
+.project-pick-pending {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+
 /* ── Conversation（中：Agent Workspace） ── */
 .conversation {
   flex: 1;
@@ -2392,6 +2938,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .new-session-btn,
   .session-group-label {
     display: none;
+  }
+  /* WS-5 #155：56px 图标轨里放不下层级 chrome——项目头/区标题/菜单/空态一律收起，
+   * 只留下每个会话的点（与改版前"只看到点"的窄屏行为一致）。层级信息在窄屏丢失
+   * 是刻意的降级：这个宽度下任何折叠态都表达不了两层结构。 */
+  .rail-section-label,
+  .rail-project-head,
+  .rail-project-empty,
+  .rail-project-missing,
+  .rail-menu-btn,
+  .rail-error {
+    display: none;
+  }
+  .rail-project-rows {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: none;
   }
   .session-items {
     align-items: center;

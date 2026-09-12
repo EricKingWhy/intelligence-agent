@@ -49,6 +49,36 @@ export interface WorkspaceRef {
   title: string;
 }
 
+/** 项目目录状态（WS-4 / #154，后端 `web/projects.py::Project.status`）。
+ *  `missing-dir` = 注册时存在、现在被移走/改名——后端**只如实上报，不改记录**，
+ *  所以前端也不能据此隐藏项目（那会把用户注册过的东西变没）。 */
+export type ProjectStatus = 'ok' | 'missing-dir';
+
+/** 项目实体（WS-4 / #154，后端 `web/projects.py::Project`）。
+ *
+ *  `session_ids` 是**账本手工序**（用户拖出来的顺序，后端已过滤成员资格）——
+ *  前端按它渲染项目内顺序，**不按活动时间重排**（WS-3 的契约立场）。 */
+export interface Project {
+  id: string;
+  path: string;
+  title: string;
+  status: ProjectStatus;
+  session_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** DELETE /api/projects/{id} 的响应（软删除结果）。
+ *
+ *  `detail` 是后端写好的中文文案，**必须原样展示**：它明确说「会话与目录都没删」，
+ *  是 AC5 要的那句「不让人误以为会话连坐消失」的唯一权威来源（前端不自己编）。 */
+export interface ProjectDeleted {
+  id: string;
+  deleted: boolean;
+  sessions_detached: number;
+  detail: string;
+}
+
 /** Session summary from GET /api/sessions. */
 export interface SessionSummary {
   session_id: string;

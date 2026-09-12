@@ -3,18 +3,26 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  attachSessionToProject,
+  createProject,
+  deleteProject,
+  detachSessionFromProject,
   getModels,
   getSessionEvents,
+  listProjects,
   listSessions,
   NotFoundError,
+  ProjectError,
   UnauthorizedError,
   AlreadyResolvedError,
   postApproval,
+  renameProject,
+  reorderProjectSession,
   sendMessage,
   startSession,
 } from './api';
 import { onUnauthorized } from './auth';
-import type { SessionSummary } from '../types';
+import type { Project, SessionSummary } from '../types';
 
 /** 捕获 fetch 调用（url + 已解析 body）并返回可配置响应——请求体契约断言用。 */
 function captureFetch(
@@ -314,3 +322,198 @@ describe('postApproval — 409 幂等 vs 500 真失败（OBS-015）', () => {
   });
 });
 
+
+// ── Projects（WS-4 / #154 契约，WS-5 / #155 前端消费）──
+
+/** 项目端点用：记录 method + url + body，并可回一个带 detail 的错误体。
+ *  （与顶部 captureFetch 的区别：那个不带 method，而本组要断言动词与子路径。） */
+function captureProjectFetch(
+  status = 200,
+  body: unknown = {},
+): { calls: { method: string; url: string; body: Record<string, unknown> }[] } {
+  const calls: { method: string; url: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        method: init?.method ?? 'GET',
+        url: String(url),
+        body:
+          typeof init?.body === 'string'
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : {},
+      });
+      return new Response(JSON.stringify(body), { status });
+    }),
+  );
+  return { calls };
+}
+
+describe('projects — WS-4 端点契约（#154；窄化解析 + 状态码归类）', () => {
+  /** 后端 `web/projects.py::Project` 的 canonical 形状。
+   *  类型注解在编译期锁一致性（与 SessionSummary 同一手法）：后端加必填字段、
+   *  或此处多出类型未声明的键 → `tsc -b` 红。 */
+  const CANONICAL_PROJECT: Project = {
+    id: 'p1',
+    path: 'D:/repos/alpha',
+    title: 'alpha',
+    status: 'ok',
+    session_ids: ['s1', 's2'],
+    created_at: '2026-09-12T00:00:00Z',
+    updated_at: '2026-09-12T00:00:00Z',
+  };
+
+  it('listProjects：解析全部字段，账本序原样保留（前端不重排）', async () => {
+    captureProjectFetch(200, [
+      CANONICAL_PROJECT,
+      { ...CANONICAL_PROJECT, id: 'p2', session_ids: [] },
+    ]);
+    const projects = await listProjects();
+    expect(projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    expect(projects[0].session_ids).toEqual(['s1', 's2']);
+    expect(projects[0].path).toBe('D:/repos/alpha');
+  });
+
+  it('listProjects：畸形条目剔除、其余保留（一条坏数据不得让整列表消失）', async () => {
+    captureProjectFetch(200, [
+      { id: 'ok', path: 'D:/x', title: 'x', session_ids: ['s1'], status: 'ok' },
+      { path: 'D:/no-id', title: 'no id' }, // 缺 id → 剔除
+      { id: 'no-path', title: 'no path' }, // 缺 path → 剔除
+      { id: 'no-title', path: 'D:/y' }, // 缺 title → 剔除
+      'garbage',
+      null,
+    ]);
+    const projects = await listProjects();
+    expect(projects.map((p) => p.id)).toEqual(['ok']);
+  });
+
+  it('listProjects：session_ids 非字符串元素过滤；缺失 → 空账本', async () => {
+    captureProjectFetch(200, [
+      { id: 'p1', path: 'D:/x', title: 'x', session_ids: ['a', 7, null, '', 'b'] },
+      { id: 'p2', path: 'D:/y', title: 'y' },
+    ]);
+    const projects = await listProjects();
+    expect(projects[0].session_ids).toEqual(['a', 'b']);
+    expect(projects[1].session_ids).toEqual([]);
+  });
+
+  it('listProjects：status 只认 missing-dir，未知值按 ok（告警标志不得整条丢项目）', async () => {
+    captureProjectFetch(200, [
+      { ...CANONICAL_PROJECT, id: 'miss', status: 'missing-dir' },
+      { ...CANONICAL_PROJECT, id: 'weird', status: 'something-else' },
+      { ...CANONICAL_PROJECT, id: 'absent' },
+    ]);
+    const projects = await listProjects();
+    expect(projects.map((p) => p.status)).toEqual(['missing-dir', 'ok', 'ok']);
+  });
+
+  it('listProjects：顶层不是数组 → 空数组（降级为"没有项目"，会话仍全部可见）', async () => {
+    captureProjectFetch(200, { projects: [] });
+    expect(await listProjects()).toEqual([]);
+  });
+
+  it('createProject：只带 path（无标题）→ body 不含 title 键', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await createProject('D:/repos/alpha');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('/api/projects');
+    expect(calls[0].body).toEqual({ path: 'D:/repos/alpha' });
+  });
+
+  it('createProject：带标题 → body 含 title；返回实体原样解析', async () => {
+    const { calls } = captureProjectFetch(200, { ...CANONICAL_PROJECT, title: '自定义' });
+    const p = await createProject('D:/repos/alpha', '自定义');
+    expect(calls[0].body).toEqual({ path: 'D:/repos/alpha', title: '自定义' });
+    expect(p.title).toBe('自定义');
+  });
+
+  it('createProject：路径不存在（404）→ ProjectError(404) 且带后端 detail', async () => {
+    captureProjectFetch(404, { detail: '目录不存在' });
+    const err = await createProject('D:/nope').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProjectError);
+    expect((err as ProjectError).status).toBe(404);
+    expect((err as ProjectError).message).toBe('目录不存在');
+  });
+
+  it('createProject：非绝对路径（422）→ ProjectError(422)，不被当成"路径不存在"', async () => {
+    captureProjectFetch(422, { detail: 'path must be an absolute path' });
+    const err = await createProject('relative/dir').catch((e: unknown) => e);
+    expect((err as ProjectError).status).toBe(422);
+  });
+
+  it('renameProject：PATCH /api/projects/{id} + body.title', async () => {
+    const { calls } = captureProjectFetch(200, { ...CANONICAL_PROJECT, title: '改名' });
+    const p = await renameProject('p1', '改名');
+    expect(calls[0].method).toBe('PATCH');
+    expect(calls[0].url).toBe('/api/projects/p1');
+    expect(calls[0].body).toEqual({ title: '改名' });
+    expect(p.title).toBe('改名');
+  });
+
+  it('deleteProject：DELETE + 逐字保留后端 detail（AC5 的那句"会话没被删"）', async () => {
+    const detail = '项目「甲」已从注册表移除，2 个会话回到未分组。目录、用户文件与会话日志均未删除（软删除，可重新注册同一目录）。';
+    const { calls } = captureProjectFetch(200, {
+      id: 'p1',
+      deleted: true,
+      sessions_detached: 2,
+      detail,
+    });
+    const result = await deleteProject('p1');
+    expect(calls[0].method).toBe('DELETE');
+    expect(calls[0].url).toBe('/api/projects/p1');
+    expect(result.sessions_detached).toBe(2);
+    expect(result.detail).toBe(detail);
+  });
+
+  it('deleteProject：detail 缺失 → 空串（调用方据此跳过提示，不编文案）', async () => {
+    captureProjectFetch(200, { id: 'p1', deleted: true });
+    const result = await deleteProject('p1');
+    expect(result.detail).toBe('');
+    expect(result.sessions_detached).toBe(0);
+  });
+
+  it('attach：POST /api/projects/{id}/sessions，body.session_id', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await attachSessionToProject('p1', 's9');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('/api/projects/p1/sessions');
+    expect(calls[0].body).toEqual({ session_id: 's9' });
+  });
+
+  it('attach：cwd 不一致（409）→ ProjectError(409)，与"不存在"（404）分开', async () => {
+    captureProjectFetch(409, { detail: '会话 cwd 与项目路径不一致' });
+    const err = await attachSessionToProject('p1', 's9').catch((e: unknown) => e);
+    expect((err as ProjectError).status).toBe(409);
+    expect((err as ProjectError).message).toBe('会话 cwd 与项目路径不一致');
+  });
+
+  it('detach：DELETE 子路径（id / session_id 都编码）', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await detachSessionFromProject('p 1', 's/9');
+    expect(calls[0].method).toBe('DELETE');
+    expect(calls[0].url).toBe('/api/projects/p%201/sessions/s%2F9');
+  });
+
+  it('reorder：POST .../order，before=null（追加队尾）与具体锚点都原样透传', async () => {
+    const { calls } = captureProjectFetch(200, CANONICAL_PROJECT);
+    await reorderProjectSession('p1', 's2', null);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('/api/projects/p1/sessions/s2/order');
+    expect(calls[0].body).toEqual({ before: null });
+
+    const second = captureProjectFetch(200, CANONICAL_PROJECT);
+    await reorderProjectSession('p1', 's2', 's1');
+    expect(second.calls[0].body).toEqual({ before: 's1' });
+  });
+
+  it('错误体不是 JSON / 无 detail → 兜底文案带状态码（错误路径自身不再抛错）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>502</html>', { status: 502 })),
+    );
+    const err = await listProjects().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProjectError);
+    expect((err as ProjectError).status).toBe(502);
+    expect((err as ProjectError).message).toContain('502');
+  });
+});

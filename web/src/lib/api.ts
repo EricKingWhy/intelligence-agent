@@ -6,7 +6,7 @@
  * thrown as UnauthorizedError so callers surface the guidance path.
  */
 
-import type { AgentEvent, SessionSummary } from '../types';
+import type { AgentEvent, Project, ProjectDeleted, ProjectStatus, SessionSummary } from '../types';
 import { emitUnauthorized, getToken } from './auth';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
@@ -461,5 +461,183 @@ export async function forkSession(
     throw new Error(detail || `fork ${res.status}`);
   }
   return res.json();
+}
+
+// ── Projects（WS-4 / #154 端点，WS-5 / #155 前端消费）──
+
+/** 项目操作失败——带 HTTP 状态码，调用方据此给**具体**原因而不是"操作失败"。
+ *
+ *  状态码语义（后端 `domain_errors.py` 两张表 + `web/projects.py`）：
+ *  - 403：跨源被来源闸拒绝（ADR-0025 D1）——本地信任模式下非本机 Origin；
+ *  - 404：项目 id 不存在 / 注册的路径不存在（create 不会 mkdir）；
+ *  - 409：请求与账本现状冲突——attach 时会话 cwd 与项目路径不一致，
+ *    或重排锚点不在该项目账本里；
+ *  - 422：入参形态非法——非绝对路径 / 该路径不是目录 / 标题空白。
+ *
+ *  `detail` 是后端给的中文原因（可能为空）：调用方优先显示它。 */
+export class ProjectError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 把项目写操作的异常翻成给用户看的一句话（对话框与侧栏错误条共用）。
+ *
+ *  `ProjectError` 优先用**后端 detail**——409 会给出"会话 cwd 与项目路径不一致"
+ *  这类可行动原因，翻译成"操作失败"等于把它扔掉；其余异常用 `message`；都没有才
+ *  用调用方的兜底文案。 */
+export function describeProjectError(error: unknown, fallback: string): string {
+  if (error instanceof ProjectError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
+}
+
+/** 按路径把目录注册为项目（幂等：同规范路径 → 返回既有实体）。
+ *  路径不存在 → ProjectError(404)；非绝对路径 → ProjectError(422)。 */
+export async function createProject(path: string, title?: string | null): Promise<Project> {
+  const res = await apiFetch('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(title ? { path, title } : { path }),
+  });
+  if (!res.ok) throw await projectError(res, '注册项目失败');
+  return requireProject(await res.json());
+}
+
+/** 全部项目（**注册表顺序**，新建项目前插）。空数组 ≠ 出错：调用方据此显示
+ *  「还没有项目」而不是错误横幅。 */
+export async function listProjects(): Promise<Project[]> {
+  const res = await apiFetch('/api/projects');
+  if (!res.ok) throw await projectError(res, '加载项目失败');
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) return [];
+  // 形状不符的单条丢弃（零伪造）——但**不因此丢掉其余项目**。
+  return body.flatMap((raw) => {
+    const p = parseProject(raw);
+    return p ? [p] : [];
+  });
+}
+
+/** 重命名项目（`setTitle`）。 */
+export async function renameProject(projectId: string, title: string): Promise<Project> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw await projectError(res, '重命名失败');
+  return requireProject(await res.json());
+}
+
+/** **软删除**项目：只摘注册记录与账本，目录/用户文件/会话日志一概不动，
+ *  成员会话回到未分组。响应 `detail` 必须原样展示给用户（AC5）。 */
+export async function deleteProject(projectId: string): Promise<ProjectDeleted> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await projectError(res, '删除项目失败');
+  const body = (await res.json()) as Partial<ProjectDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : projectId,
+    deleted: body.deleted === true,
+    sessions_detached:
+      typeof body.sessions_detached === 'number' ? body.sessions_detached : 0,
+    detail: typeof body.detail === 'string' ? body.detail : '',
+  };
+}
+
+/** 把会话加入项目（幂等）。会话不存在/无 cwd → 404；cwd 与项目路径不一致 → 409。 */
+export async function attachSessionToProject(
+  projectId: string,
+  sessionId: string,
+): Promise<Project> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) throw await projectError(res, '加入项目失败');
+  return requireProject(await res.json());
+}
+
+/** 把会话移出项目（幂等：不在本项目 → 无写操作；会话日志逐字节不动）。 */
+export async function detachSessionFromProject(
+  projectId: string,
+  sessionId: string,
+): Promise<Project> {
+  const res = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE' },
+  );
+  if (!res.ok) throw await projectError(res, '移出项目失败');
+  return requireProject(await res.json());
+}
+
+/** 项目内重排（DOM `insertBefore` 语义：`before=null` → 追加尾部）。
+ *  锚点不在该项目账本里 → ProjectError(409)。 */
+export async function reorderProjectSession(
+  projectId: string,
+  sessionId: string,
+  before: string | null,
+): Promise<Project> {
+  const res = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/order`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ before }),
+    },
+  );
+  if (!res.ok) throw await projectError(res, '调整顺序失败');
+  return requireProject(await res.json());
+}
+
+/** 非 2xx → ProjectError（detail 优先，缺失时用调用方给的兜底前缀 + 状态码）。 */
+async function projectError(res: Response, fallback: string): Promise<ProjectError> {
+  const detail = await readErrorDetail(res);
+  return new ProjectError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 窄化解析项目（零伪造）：id/path/title/session_ids 形状不符 → null（调用方丢弃该条）。
+ *
+ *  `status` 是**例外**：只有明确等于 `'missing-dir'` 才取该值，其余（含未知字符串、
+ *  缺失）一律 `'ok'`。理由——它是"目录可能不见了"的**告警标志**，不是存在性断言；
+ *  把未知值当告警会让每条项目都亮黄点（假告警），而把项目整条丢掉更糟：项目会从
+ *  UI 消失、它的会话被误判成未分组。未知状态值不值得付出这两个代价。 */
+function parseProject(raw: unknown): Project | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== 'string' || !r.id) return null;
+  if (typeof r.path !== 'string' || !r.path) return null;
+  if (typeof r.title !== 'string') return null;
+  const sessionIds = Array.isArray(r.session_ids)
+    ? r.session_ids.filter((v): v is string => typeof v === 'string' && v.length > 0)
+    : [];
+  return {
+    id: r.id,
+    path: r.path,
+    title: r.title,
+    status: normalizeProjectStatus(r.status),
+    session_ids: sessionIds,
+    created_at: typeof r.created_at === 'string' ? r.created_at : '',
+    updated_at: typeof r.updated_at === 'string' ? r.updated_at : '',
+  };
+}
+
+/** 单实体端点：200 但形状不符 → **响亮失败**而不是返回伪造项目。
+ *  （列表端点相反：丢掉坏条目、保留其余，见 `listProjects`——一条坏数据不该让整
+ *  个侧栏空掉，但一个"注册成功"的假实体更糟：它会让 UI 显示一个后端并不存在的项目。） */
+function requireProject(raw: unknown): Project {
+  const project = parseProject(raw);
+  if (!project) {
+    throw new Error('项目响应形状不符（后端契约可能已变更）');
+  }
+  return project;
+}
+
+function normalizeProjectStatus(raw: unknown): ProjectStatus {
+  return raw === 'missing-dir' ? 'missing-dir' : 'ok';
 }
 

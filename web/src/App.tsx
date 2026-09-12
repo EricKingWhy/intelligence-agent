@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Columns2, Eye, KeyRound, MessageSquare, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
+import { useProjects } from './hooks/useProjects';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
 import { Conversation } from './components/Conversation';
@@ -96,6 +97,24 @@ export default function App() {
     changeModel,
     fork,
   } = useSession();
+
+  // ── 项目（WS-5 / #155）──
+  // 侧栏"项目 → 会话"层级的数据源：项目列表来自 GET /api/projects（注册表序 + 账本序），
+  // 归属来自每行的 SessionSummary.workspace——两份都是后端真相，前端只做投影（不变量 #22）。
+  //
+  // 为什么跟着 sessions 变：新会话（命名 workspace）、fork child、recover 都可能在
+  // 后端**顺带**改变项目归属（#152 的 attach 接线），而它们唯一的信号就是会话列表被
+  // 重新拉取。所以"列表刷新 ⇒ 项目重拉"是保持两个视图一致的最小机制；sessions 只在
+  // refreshSessions 里换引用，不会随流式 delta 变化，不构成每帧请求。
+  const {
+    projects,
+    loadError: projectsError,
+    refresh: refreshProjects,
+    actions: projectActions,
+  } = useProjects();
+  useEffect(() => {
+    void refreshProjects();
+  }, [sessions, refreshProjects]);
 
   // ── Auth 接缝（df4f7d8 §1.2 fail-closed）──
   // 401 由 api.ts 统一拦截并广播；这里只负责展示引导横幅。配置 token 后
@@ -588,11 +607,19 @@ export default function App() {
       <main className={`app-regions ${inspectorOpen ? '' : 'inspector-closed'}`}>
         <SessionList
           sessions={sessions}
+          projects={projects}
           selectedId={selectedId}
           liveSessionId={streaming ? selectedId : null}
           titlesById={titlesById}
           onSelect={handleSelect}
           onNew={handleNew}
+          projectActions={projectActions}
+          onSessionsChanged={refreshSessions}
+          projectsError={projectsError}
+          onRetryProjects={() => {
+            void refreshProjects();
+            void refreshSessions();
+          }}
         />
 
         <section className="app-workspace">
