@@ -91,8 +91,10 @@ class LangMemMemoryCapability:
             # 拿**最近消息本身**当 query 去检索，语义对立的旧记忆（"我改用 Go 了" vs "我喜欢
             # TypeScript"）实测召回不到（真机 `retrieved=0`）；给了它，上游改成"先生成一条
             # 与当前对话相关的**假想记忆**再检索"，这才是 AC7-1"新旧立场收敛"能成立的前提。
-            # 代价是多一次 LLM 调用（用户已决策：质量优先、接受成本），这次调用也在
-            # `memory_consolidated` 的 `queries=list 长度` 里可见。
+            # 代价是多一次 LLM 调用（用户已决策：质量优先、接受成本）。注意**口径**：这次
+            # 调用发生在 langmem 内部，我们的计数里没有它——`queries` 是 `asearch` 次数
+            # （query 模型一次工具都没发时会是 0），这次 LLM 调用只能从事件的
+            # `latency_ms` 与"事件确实产生"侧面看出（真机实测事件里 queries=1..2）。
             manager = self._manager(self._model, schemas=[MemoryPayload], namespace=namespace,
                                     store=bounded, enable_deletes=True,
                                     query_model=self._model, query_limit=self._query_limit)

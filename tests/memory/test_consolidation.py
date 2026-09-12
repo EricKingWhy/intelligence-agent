@@ -970,3 +970,89 @@ async def test_remaining_budget_is_arithmetic_on_the_deadline_and_clamps_at_zero
     assert _FALLBACK_RESERVE_SECONDS < remaining < 5.0  # 既扣了余量，也不是常量
     assert abs(remaining - (5.0 - _FALLBACK_RESERVE_SECONDS)) < 0.01
     assert MemoryWriteback._remaining_budget(now - 1.0) == 0.0  # 过期的 deadline 不能变负数
+
+
+@pytest.mark.asyncio
+async def test_the_manager_is_wired_with_a_query_model_and_the_limits(tmp_path, monkeypatch):
+    """**AC1/AC7-1 的载荷点**：manager 必须同时拿到 `query_model` 与 `query_limit`。
+
+    只传 `model` 时上游走 `get_dialated_windows`（拿最近消息本身当 query），语义对立的旧记忆
+    真机召回不到（`retrieved=0`）；传了 `query_model` 才改成"先生成假想记忆再检索"，这是 AC7-1
+    "新旧立场收敛"能成立的前提。这条接线只靠真机 gate 兜底是不够的（gate 依赖外部服务），
+    所以在这里用**构造缝**（`_manager` 是注入的工厂）把它钉住：删掉 `query_model=` 本用例即红。
+    """
+    from langchain_core.messages import AIMessage
+
+    vectors = AlwaysHitVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    model = ScriptedChatModel(responses=[AIMessage(content="无需改动。")])
+    capability._model = model
+    captured: dict = {}
+    original = capability._manager
+
+    def recording_manager(bound_model, **kwargs):
+        captured["model"] = bound_model
+        captured.update(kwargs)
+        return original(bound_model, **kwargs)
+
+    monkeypatch.setattr(capability, "_manager", recording_manager)
+    token = set_identity_context(ALICE)
+    try:
+        await _seed(records, vectors, "我喜欢黑咖啡")
+        await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
+    finally:
+        identity_context_var.reset(token)
+
+    assert captured["model"] is model
+    assert captured["query_model"] is model          # 少了它 → 召回不到旧立场（AC7-1 塌）
+    assert captured["query_limit"] == CONSOLIDATION_QUERY_LIMIT
+    assert captured["store"] is not None and captured["enable_deletes"] is True
+
+
+@pytest.mark.asyncio
+async def test_repair_read_failure_degrades_end_to_end_without_losing_either_row(tmp_path):
+    """P0 修复的**另一半**：读不到权威正文 → 抛出去 → `consolidate` 降级整条新增。
+
+    代理边界那半条已由 `test_repair_refuses_to_guess_the_body_when_the_row_cannot_be_read`
+    钉住；这里补端到端：既有行**原封不动**（全文、无标记），候选**另起一行落盘**（不丢写）。
+    """
+    vectors = FakeVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    full_text = "长" * (INJECTED_MEMORY_CHAR_LIMIT * 2)
+    capability._store = _BrokenStoreMethod(capability._store, aget_raises=ConnectionError("read down"))
+    token = set_identity_context(ALICE)
+    try:
+        await records.store(MemoryEntry(id="long-one", content=full_text, metadata={},
+                                        scope=MemoryScope.USER,
+                                        created_at="2026-09-01T00:00:00+00:00"), ALICE)
+        outcome = await capability.consolidate(MemoryScope.USER, "新候选", {"importance": 0.5})
+        existing = await records.get("long-one", ALICE)
+        entries = await capability.list_entries(MemoryScope.USER, 10)
+    finally:
+        identity_context_var.reset(token)
+
+    assert outcome.degraded_reason is not None and outcome.id
+    assert existing.content == full_text and TRUNCATION_MARKER not in existing.content
+    assert sorted(entry.content for entry in entries) == ["新候选", full_text]
+
+
+def test_the_fake_model_never_mistakes_a_decision_call_for_query_generation():
+    """替身的相位判别必须结构可靠：候选正文里恰好含 query 生成的标志词时也不能认错。
+
+    （`QueryGenerationMixin` 按 prompt 文本判别；若只做正向匹配，一条内容里带那句话的记忆
+    会让**决策**调用被当成 query 生成 → 测试测到的是别的相位，而且是静默的。）
+    """
+    from langchain_core.messages import HumanMessage
+
+    from tests.langmem_doubles import _is_query_generation
+
+    query_prompt = HumanMessage(content=(
+        "Use parallel tool calling to search for distinct memories relevant to this conversation:"
+        "\n\n<convo>\n用户说了一句\n</convo>."))
+    decision_prompt = HumanMessage(content=(
+        "You are a memory subroutine for an AI.\n\nGenerate JSONPatches to update the existing "
+        'memories.\n{"content": "Use parallel tool calling 这句话出现在候选正文里", '
+        '"metadata": {}}'))
+
+    assert _is_query_generation([query_prompt]) is True
+    assert _is_query_generation([decision_prompt]) is False

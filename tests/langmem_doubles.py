@@ -24,11 +24,16 @@ from agent_harness.memory.types import MemoryNamespace
 #: 给了 `query_model` 才有这次调用；它产出的是**搜索工具调用**，不是记忆决策。
 QUERY_GENERATION_MARKER = "Use parallel tool calling"
 
+#: 决策阶段（trustcall）prompt 的特征。**必须做反向判别**：候选正文整段会被塞进决策 prompt，
+#: 一条内容里恰好带上面那句话的记忆，会让只做正向匹配的判别把**决策**调用认成 query 生成
+#: ——测试就静默地测了别的相位（code-review N2）。
+DECISION_PROMPT_MARKER = "memory subroutine"
+
 
 def _is_query_generation(messages) -> bool:
     """这次调用是"生成检索 query"（而非"决策 insert/update/delete"）吗？"""
-    return any(QUERY_GENERATION_MARKER in str(getattr(message, "content", ""))
-               for message in messages)
+    text = " ".join(str(getattr(message, "content", "")) for message in messages)
+    return QUERY_GENERATION_MARKER in text and DECISION_PROMPT_MARKER not in text
 
 
 class BoundSelfMixin:

@@ -1156,6 +1156,12 @@ Compare&Update 全程空转"。**前半句不成立**：`langmem/knowledge/extra
   已知限度：模型**重写**正文时以投影为基线，尾部无从还原（"注入有界"与"允许 provider 改写"共同决定）。
 - **预算嵌套**：`CONSOLIDATION_TIMEOUT_SECONDS(30) + _FALLBACK_RESERVE_SECONDS(2) <= WRITEBACK_TIMEOUT_SECONDS(60)`，
   writeback 给每个候选的预算是"外层剩余 − 2s 余量"，所以尾部候选**降级**而不是被取消。改这三个常量请保持该顺序。
+- **接线要一起改的三处**（少一处就有真实后果）：`model`（决策跑起来）、`query_model`（检索**有效**，
+  否则召回不到语义对立的旧立场 → AC7-1 塌）、`enable_deletes=True`（provider 才能执行 RemoveDoc）。
+  三者都由 `test_the_manager_is_wired_with_a_query_model_and_the_limits` 用构造缝钉住（变异 M32/M33）。
+- **延迟信号**：真机 case 4（6 条 3000 字既有记忆）里那次决策**用满了 90s 的放宽预算**才降级
+  （`retrieved=5 truncated=5`）——生产默认 30s，所以这种形状在生产里会降级成"只新增"（不丢写，AC5）。
+  要更快只能调 provider 侧（模型/`max_steps`/检索条数），属性能话题。
 
 ### 19.4 AC7-1 / AC7-2 的口径（请按此写集成报告，不要放大）
 
@@ -1187,10 +1193,12 @@ Compare&Update 全程空转"。**前半句不成立**：`langmem/knowledge/extra
 
 ```bash
 .venv/Scripts/python.exe -m ruff check src/ tests/          # clean
-.venv/Scripts/python.exe -m pytest -q                       # 全量：2086 passed / 2 skipped / 42 deselected
+.venv/Scripts/python.exe -m pytest -q                       # 全量：2081 passed / 10 skipped / 42 deselected
 .venv/Scripts/python.exe .scratch/run_consolidation_gate.py  # 真机：16/16 PASS（真模型 + 真 Zilliz）
-.venv/Scripts/python.exe .scratch/mutate158.py               # 变异：31/31 KILLED（自动 sha256 还原）
+.venv/Scripts/python.exe .scratch/mutate158.py               # 变异：33/33 KILLED（自动 sha256 还原）
 ```
+
+**关于 skipped 数**：末次全量 10 skipped = 8 条 Docker daemon 不可用（`tests/sandbox/*`）+ 1 条 POSIX-only（`tests/tools/test_coding_tools.py:260`）+ 1 条最小 Core 口径（`tests/orchestration/test_seam.py:45`）；Docker 起着的机器上应为 2 skipped。与 #158 的改动无关。
 
 **gate 的取样隔离（第二轮修正）**：脚本每轮用**独立集合名**（`memory_gate_test_<pid>`），
 不再依赖"能删掉上一轮"——实测 Zilliz 的 `drop_collection` 会偶发 `Retry timeout: 20s`
@@ -1198,11 +1206,16 @@ Compare&Update 全程空转"。**前半句不成立**：`langmem/knowledge/extra
 收尾清理是**尽力而为**（删不掉只留个空集合，不影响断言）；裸 `memory_gate_test` 留给 pytest 的
 真 Milvus 集成测试，脚本只扫 `memory_gate_test_<pid>` 形状的遗留集合。
 
-`run_consolidation_gate.py` 会显式把 collection 指到 `memory_gate_test` 并自建/删除它（**不碰 `.env`
-与生产集合 `agent_memory`**）；`gate` 与"真 Milvus 集成测试"**共用 `memory_gate_test`**，两者不可并发跑。
-`.scratch/` 不入库。
+`run_consolidation_gate.py` **不碰 `.env`、也不碰生产集合 `agent_memory`**（settings 里显式覆盖
+collection）。`.scratch/` 不入库。
 
 **gate 的读取口径（重要）**：外部 embedding/Zilliz 实测会间歇性不可用（本票期间断了多轮），脚本已
 ①bootstrap 重试；②外部依赖生病导致 happy path 降级时**作废该轮**（退出码 3）由 runner 换健康窗口重跑——
 断言本身不软化，只是不在生病窗口下取样。用例 1c（"检索到旧立场才断言收敛"）在 provider 真的没召回旧行
-时以 `[NOTE]` 呈现，**不硬判**：这是 provider 的向量召回/LLM 决策（AC6 策略归 provider）。
+时以 `[NOTE]` 呈现，**不硬判**：那是 provider 的检索/决策（AC6 策略归 provider）。用例 2a 只断言
+**逐字**不重复——它弱于 AC7-2 原文，条数以测量值打印，不要在集成报告里把它当成"AC7-2 由我们保证"。
+
+**AC3 的观测口径（别读错）**：`queries` 是 **`asearch` 次数**（provider 真的发了几次检索），
+**不是** LLM 调用次数；`query_model` 那次"生成检索 query"的 LLM 调用发生在 langmem 内部，
+我们的计数里没有它——只能从事件的 `latency_ms` 与"事件确实产生"侧面看出。要精确计 LLM 调用
+需要另开票（langmem 不接受鸭子类型代理，`query_model` 必须是真 `BaseChatModel`）。
