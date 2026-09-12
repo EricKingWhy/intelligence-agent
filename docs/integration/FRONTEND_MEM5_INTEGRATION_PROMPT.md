@@ -17,7 +17,7 @@
 | 集成动作 | ① 把 `feat/frontend` 合入本地 `main`（§14.9：一次只合一条分支；后端已先行完成）② 真机跑一遍 §3 的 5 步 ③ `main` 上跑 §4 门禁 ④ 关 #160（comment **已发**在 issue 上，见 §5）⑤ push |
 | 最终全量 review | v2 §1.3 的处置见 `docs/SDD_TICKET_TRACKER.md`「批次台账 → 最终全量 review」：本分支相对 `main` 落后且 `main` 侧全是后端文件，唯一未审增量 `637bc89..HEAD` 已由 B-1 覆盖——**是否再跑 `main...HEAD` 留给集成 AI 决策** |
 | 冲突预判 | 本批只动 `web/**` + 两个 docs 文件；与后端 `src/**`/`tests/**` 无交集。**唯一需注意**：`docs/SDD_WORKFLOW_PROTOCOL.md` 本批把它同步成了 v2（与 `feat/backend` 侧**逐字节相同**）——若 `feat/backend` 已合入 `main`，该文件在第二次 merge 时是 identical-change，**不构成冲突**；`docs/SDD_TICKET_TRACKER.md` 两侧都追加了各自章节，**可能冲突**（按 §14.7 分析，两边内容可同时保留：后端记后端批次、前端记前端批次） |
-| 关单 | **#160 不关**（跨端票的前端半 + 代码未合入 `main`），comment 见 §5 |
+| 关单 | **#160 已关**（reason=completed，2026-09-12 用户指示「完成了就关闭」；AC 证据与核实 comment 已发在 issue 上，见 §5）。你只剩 §0 的 ①②③⑤ |
 
 ---
 
@@ -120,8 +120,9 @@ cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --wo
 
 ## 5. #160 的 comment 与关单
 
-**本批不关单**（票面明写「跨端 ticket 的前端半 → 按 §14.12 只完成一端不关单，用 comment 记录已完成
-部分与剩余项」；本 worktree 与 #155 同一处置）。建议 comment：
+**已关单**（2026-09-12，用户指示「完成了就关闭」；两端齐备后 §14.12 的「只完成一端不关单」前提不再成立）。
+两条 comment 已发在 issue 上：① 完整 AC 逐条证据；② 关单核实（分支/commit/门禁/真机/移交项）。
+下面保留**当时的**草稿作历史记录——集成 AI 无需再操作关单：
 
 ```text
 前端半已在 feat/frontend 完成（commit `5eb4fed` 功能 + `45227dc` 批次审查修复，fixed point `637bc89`），未 push。后端半 MEM-4 #159 已关单。
