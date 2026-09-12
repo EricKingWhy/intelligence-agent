@@ -1,12 +1,13 @@
 /** Composer — task input at the bottom of the conversation column.
  *
- * Submits on Cmd/Ctrl+Enter. Disabled while streaming.
+ * Submits on Cmd/Ctrl+Enter. Disabled while streaming or when an approval is pending.
  * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
 import { memo, useEffect, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Layers, Shield, Square, User } from 'lucide-react';
 import type { PresetTask } from '../types';
+import { modKey } from '../lib/platform';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { ControlPicker } from './ControlPicker';
@@ -14,6 +15,9 @@ import { ContextProviderPicker } from './ContextProviderPicker';
 
 interface Props {
   streaming: boolean;
+  /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
+   *  与审批互斥，不允许两条修复路径同时开放（评审 Riley 红旗）。 */
+  approvalPending?: boolean;
   onSubmit: (task: string) => void;
   onCancel: () => void;
   presetTask?: PresetTask | null;
@@ -46,6 +50,7 @@ interface Props {
 // 输入框不随对话区每个 delta 重渲染。
 export const Composer = memo(function Composer({
   streaming,
+  approvalPending = false,
   onSubmit,
   onCancel,
   presetTask,
@@ -67,6 +72,11 @@ export const Composer = memo(function Composer({
 }: Props) {
   const [value, setValue] = useState('');
 
+  // UI-01：审批待决 = 运行被阻塞，与 streaming 同一禁用通道（不建第二状态源）。
+  const locked = streaming || approvalPending;
+  // 锁定提示只表达「审批阻塞」这一种原因；纯 streaming 有自己的 affordances（停止键/Esc 提示）。
+  const showLock = approvalPending && !streaming;
+
   // 外部示例任务注入（引用变化即触发；每次点击 chip 生成新对象）
   useEffect(() => {
     if (presetTask) setValue(presetTask.text);
@@ -74,7 +84,7 @@ export const Composer = memo(function Composer({
 
   const submit = () => {
     const trimmed = value.trim();
-    if (!trimmed || streaming) return;
+    if (!trimmed || locked) return;
     onSubmit(trimmed);
     setValue('');
   };
@@ -97,16 +107,18 @@ export const Composer = memo(function Composer({
   return (
     <div className="composer-wrap">
       <div className="composer-dock surface-floating">
+        {/* UI-01：审批待决时给出锁定原因（置灰不是隐形）。 */}
+        {showLock && <div className="composer-locked-hint">等待审批决策后再继续</div>}
         <textarea
           id="composer-input"
           name="task"
           className="composer"
-          placeholder="描述一个任务…（⌘+Enter 发送）"
+          placeholder={showLock ? '等待审批决策…' : `描述一个任务…（${modKey()}+Enter 发送）`}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
           rows={2}
-          disabled={streaming}
+          disabled={locked}
           aria-label="Agent 任务"
         />
         {hasControls && (
@@ -115,7 +127,7 @@ export const Composer = memo(function Composer({
               models={models}
               selectedModel={selectedModel}
               onModelChange={onModelChange ?? (() => {})}
-              disabled={streaming}
+              disabled={locked}
             />
             <ControlPicker
               ariaLabel="权限模式"
@@ -124,7 +136,7 @@ export const Composer = memo(function Composer({
               onChange={onPermissionModeChange ?? (() => {})}
               icon={Shield}
               placeholder="权限"
-              disabled={streaming}
+              disabled={locked}
             />
             <ControlPicker
               ariaLabel="Agent Profile"
@@ -133,7 +145,7 @@ export const Composer = memo(function Composer({
               onChange={onAgentProfileChange ?? (() => {})}
               icon={User}
               placeholder="Agent"
-              disabled={streaming}
+              disabled={locked}
             />
             <ControlPicker
               ariaLabel="Reasoning Effort"
@@ -142,7 +154,7 @@ export const Composer = memo(function Composer({
               onChange={onReasoningEffortChange ?? (() => {})}
               icon={Brain}
               placeholder="推理"
-              disabled={streaming}
+              disabled={locked}
             />
             <ContextProviderPicker
               ariaLabel="Context Providers"
@@ -151,7 +163,7 @@ export const Composer = memo(function Composer({
               onChange={onContextProvidersChange ?? (() => {})}
               icon={Layers}
               placeholder="Context"
-              disabled={streaming}
+              disabled={locked}
             />
           </div>
         )}
@@ -169,9 +181,9 @@ export const Composer = memo(function Composer({
           <button
             className="composer-send"
             onClick={submit}
-            disabled={!value.trim()}
+            disabled={locked || !value.trim()}
             aria-label="发送"
-            title="发送（⌘+Enter）"
+            title={`发送（${modKey()}+Enter）`}
           >
             <ArrowUp size={16} />
           </button>

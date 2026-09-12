@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, startSession, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, NotFoundError, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, NotFoundError, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
@@ -682,9 +682,19 @@ export function useSession() {
 
   /** Submit a new task. Creates a fresh session and streams the response.
    *  The conversation is reset first — a live stream never folds into the
-   *  previously viewed session's turns. */
+   *  previously viewed session's turns.
+   *
+   *  返回值：`null` = 请求已被接受、流已接上；否则 = **给用户看的失败原因**。
+   *  默认同时写进全局 error 横幅（Composer 路径的历史行为，App 还据那句话识别
+   *  「未知模型」并刷新模型目录）。传 `{ ownError: true }` 时**不**写横幅、只返回
+   *  原因——「在此项目中新建任务」确认面（#169 AC12）要把它留在浮层里，而且需要
+   *  后端 detail 原文（如「目录不存在：…」），所以那条路径连 422 也不套用
+   *  「未知模型」的旧语义。 */
   const submitTask = useCallback(
-    async (payload: StartSessionPayload) => {
+    async (
+      payload: StartSessionPayload,
+      opts?: { ownError?: boolean },
+    ): Promise<string | null> => {
       setError(null);
       setConversation(null);
       liveSidRef.current = null;
@@ -697,14 +707,25 @@ export function useSession() {
       setMode({ kind: 'live', sessionId: null });
       try {
         const res = await startSession(payload);
-        if (res.status === 422) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
-        if (!res.ok || !res.body) throw new Error(`Start failed: ${res.status}`);
+        // 422 的旧语义：Composer 唯一的 422 来源是"模型不可用"，App 据这句话刷新
+        // 模型目录 —— 保持逐字节不变。确认面（ownError）里 422 更可能是 cwd 校验
+        // 失败，必须让后端 detail 说话（它才是可行动的那句）。
+        if (res.status === 422 && !opts?.ownError) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
+        if (!res.ok || !res.body) {
+          const detail = await startSessionErrorDetail(res);
+          throw new Error(detail || `Start failed: ${res.status}`);
+        }
         attachLiveStream(res, gen, null);
+        return null;
       } catch (e) {
-        if (streamGenRef.current !== gen) return; // 过期请求迟到失败：丢弃，不污染新会话
+        // 过期请求迟到失败：丢弃，不污染新会话（调用方也不该当成功——返回一句
+        // 话让它知道这次提交没有生效）。
+        if (streamGenRef.current !== gen) return '提交已被新的会话取代';
         streamGenRef.current += 1;
         setMode({ kind: 'idle' });
-        setError(`提交失败：${(e as Error).message}`);
+        const message = `提交失败：${(e as Error).message}`;
+        if (!opts?.ownError) setError(message);
+        return message;
       }
     },
     [refreshSessions, attachLiveStream],

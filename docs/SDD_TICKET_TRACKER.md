@@ -75,6 +75,185 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | `45227dc` |
+| **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`cd107a2`**（批次 0 文档 commit） | Spec 10 + Standards 14 findings → 全部处置（2 P1 修 + 3 P2 修 + 9 P3 修 + 8 说明不改/登记，见下方处置表） | `236049f` |
+| **U-2** | **UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态）** | **`236049f`**（U-1 修复 commit） | Spec 3P1/3P2/3P3 + Standards 1P1/5P2/6P3 → 全部处置（含 **Rules of Hooks 崩溃**、空态自相矛盾、交错 run 序数、断言假绿） | `e543ae1` |
+| **U-3** | **UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词）** | **`e543ae1`**（U-2 修复 commit） | 4 项处置（e2e 真实渲染断言升级 + 2 处变异红→绿） | 本批尾 commit |
+| **B-2** | **#169（WS-6 前端半：项目内新建任务 / cwd）+ #170（WS-7 前端半：新建项目内嵌目录浏览器）** | **`522602d`**（= 本分支 base。注意它**正是 U-2 的功能 commit**，U-2 的审查修复还没落在它上面——见 §B-2 的集成顺序） | 两轴各一 subagent；**零 P0/P1**，5 条 P2 + 6 条测试缺口 → 全部处置 | `51fc68c` |
+
+### B-2：WS-6/WS-7 前端半（#169 / #170，隔离 worktree）
+
+**为什么是隔离 worktree**：`D:\intelligence-agent-frontend` 当时有并行会话在编辑（10 个文件 2–4 分钟前刚改过，
+另有未跟踪审计脚本）。按 `AGENTS.md` §13.1「并行 AI 会话不能使用同一个 Worktree」+ §11「修改前先检查
+git diff，避免覆盖其他 Agent 未提交工作」，本批在
+**worktree `D:\intelligence-agent-frontend-ws6` / branch `feat/frontend-ws6-ws7`（base `522602d`）** 施工。
+
+| 项 | 值 |
+| --- | --- |
+| 契约事实源 | `D:\intelligence-agent-backend\docs\PRD_WS6_WS7_DIR_ROOTED_SESSION_AND_DIR_PICKER.md` §4.3/§4.5（后端半在 `feat/backend`：`561b553`/`21c0b06`/`9c158c9`）+ ADR-0027/0028 |
+| 功能 commit | `f3849ac`（14 files, +1378） |
+| 审查修复 commit | `51fc68c`（5 files, +100/−23） |
+| 涉及 AC | #169 AC9–AC14（前端半）；#170 AC8–AC13（前端半） |
+
+**交付**：
+- #169：项目行 kebab 第一项「在此项目中新建任务」+ 空项目占位区替换为该入口按钮；确认面（路径逐字
+  「Agent 将直接读写该目录：<路径>」+ 权限档三选 + 任务输入空禁用）；提交复用 `submitTask` **同一条**
+  SSE 接线（选中会话、跟随流），payload 带 `cwd`；**默认档不发 `permission_mode`**（后端语义：显式传非
+  danger 档 → 切交互式审批）；失败留在确认面可重试（`submitTask` 新增 `{ ownError }`，该路径不写全局
+  横幅、422 不套用「未知模型」旧语义，`api.startSessionErrorDetail` 让后端 detail 原文出场）。
+- #170：`api.getHostDirs`（形状窄化 + `ProjectError` 保 detail 原文）+ `hooks/useDirectoryListing`
+  （请求代号作废迟到响应；`onChange` 走 ref 防首跳重放）+ `components/DirectoryBrowser`
+  （路径条回车跳转 / 向上 / 一层子目录 / 选择此目录 / 截断提示 / 403·404·422 就地显示 detail）
+  + 内嵌「新建项目」对话框 + 双向同步。
+
+**门禁（实跑）**：`tsc` ✅ · `vitest` **626 passed**（+7：cwd/permission_mode 缺省不发键 + getHostDirs
+形状与错误矩阵）· `oxlint` **0 errors**（38 warnings 全为既有，新文件零新增）· `playwright --workers=2`
+**208 passed / 6 failed**（本轮修复后 207 passed / 7 failed，见下）· `vite build` ✅。
+
+**e2e 的 6 条失败 = 3 个既有用例 ×2 视口**（已在 pristine 基线 `git stash` 掉本批全部改动后、同一隔离端口
+复现）：`g-visual-qa:82`（UI-03 时间线 run 分组头）、`p-earlier-window:32`（加载更早）、
+`r-project-groups:295`（UI-05 真空态文案）——属 `feat/frontend` 在途工作（U-2/U-3），**不是本批引入**。
+另有 1 条偶发：`k-refresh-restore:159` 单视口失败，隔离复跑 **3/3 全绿（每次 12 passed）**，
+属仓库已登记的 SSE 时序类抖动（本 diff 不触碰 refresh/reconnect 路径）。
+
+**⚠️ 5173 复用坑（写给后续所有人）**：`playwright.config.ts` 是 `5173 + reuseExistingServer: !CI`，
+它会**静默复用**任何已监听 5173 的 dev server。本机并行 worktree 有会话在跑时，e2e 跑的是**别人的代码**
+（本轮实测踩到：本票新增的菜单项"不存在"）。本批所有 e2e 证据用**临时隔离端口配置**产出
+（10 行：`baseURL` + `webServer.command = npm run dev -- --port 5273 --strictPort` + `reuseExistingServer: false`），
+该配置**跑完即删、未入库**。集成方若发现 5173 被占用，同一手法换端口再跑即可。
+
+**真机验收**（真 uvicorn `feat/backend` + 真模型 `glm-4.5-air` + 真浏览器；`WORKSPACE_DIR` 指向隔离临时
+目录，未触碰仓库真 `harness.db`；临时服务与目录已清理）：
+- #169：kebab 第一项与空项目入口都点通；确认面逐字显示真实路径、默认档显示"工作区写入"；任务
+  「用 read 工具以相对路径读取 hello.txt」→ 事件 `tool/call read {"path":"hello.txt"}` 成功并逐字复述
+  `REAL-MARKER-7731`（**相对路径能读到 = cwd 真的生效**）；会话落在项目分组下；**全程无审批卡**
+  （证明默认档确实没发 `permission_mode`）；把项目目录改名 → 提交 → 浮层内就地显示
+  `提交失败：目录不存在：D:\...`（后端 422 原文、不弹全局横幅、不关对话框），目录改回后同一按钮
+  **重试成功**并落组。
+- #170：真盘符根列表（`C:\` / `D:\`，根模式两个按钮禁用）；`D:\` 一层 67 个真实子目录（仅目录、按名排序）；
+  进入路径后**两个输入框同步回填**；手改输入框回车反向跳转；「选择此目录」回执 + 注册成功。
+
+**批次两轴审查（fixed point `522602d`，两个独立只读 subagent）**：**零 P0/P1**。处置：
+1. 路径条"说谎"（两轴各自独立发现，最有价值的一条）：导航只清 `editing` 一处，导致"条上写 A、下面列 B"
+   → 新增唯一导航出口 `nav()` 统一清 `editing` + 「已选择」回执。
+2. 条上回车空串无动作，但占位文案承诺「留空 = 盘符/根」→ 空串 = 列根（与表单侧同语义）。
+3. 「选择此目录」回执在导航后仍挂着 → `nav` 清回执。
+4. 键盘焦点在进入子目录后掉回 `<body>`（条目卸载）→ 列表/向上触发的导航把焦点收进浏览器容器
+   （`tabIndex=-1`，不卸载），路径条回车触发时不收焦点。
+5. 死类 `project-dialog-task`（无 CSS、无选择器引用）→ 删除（§9.3）。
+6. 测试缺口 6 条全补：逐字文案改**连续串**断言、三档都在、AC11「选中 + 跟随流」、AC12 错误改
+   `toHaveText` 整串、WS-7 补浏览器**自己**路径条回车 + 条上打字后改走点子目录的回归锁 + 422 就地显示；
+   顺带修正 mock 保真度：带 cwd 建会话的 durable log（`GET /events`）= 刚流出的那些帧（此前回 `[]`，
+   run 收尾后的回读会把流的结论清空 → "回答真的渲染出来了"这条断言测不到东西）。
+
+**未决 / 交后续（Scope Lock，只登记）**：
+① 浏览器路径条在"输入了不存在的路径"报错后回到原目录（用户输入不保留）——上面表单的路径输入框保留原文，
+主要动作不受影响，已在组件头注释说明；若要保留，需要 post-render 的输入态管理（超出本票最小改动预算）。
+② 真机侧没有自然构造 `403`（Windows 需要 ACL 拒绝目录，会改系统状态）——该渲染由 e2e 的 `hostDirsErrors`
+拦截口覆盖（伪造的是真后端会回的那句话）；后端 403 矩阵已在其真机验收里 curl 逐条验过。
+③ `D:\intelligence-agent` 的 `main` 集成时，本分支 base 是 U-2 功能 commit，而 U-2/U-3 的修复尚在
+`feat/frontend` 未提交工作中 → **文件重叠面**：`app.css`（我方 hunk 在 ~1004/1025/1108+；对方在
+642/656/2843/2862）、`SessionList.tsx`（我方动项目行 kebab + 空项目占位；对方动 Rail 真空态）——预计
+可干净合并，但**必须真跑一遍**再判定。
+
+**UI Polish 批次总纲**：需求事实源 = `docs/UI_POLISH_PRD.md`（含用户 2026-09-12 grill-me 决策记录 D1-D6，不可违约）；逐票施工规格 = `docs/UI_POLISH_TICKETS.md`；视觉规范基准 = 根目录 `DESIGN.md`（本批新增，含 `.impeccable/design.json` sidecar）。评审出处：impeccable critique 24/40（快照 `.impeccable/critique/2026-09-12T14-05-30Z__web-src.md`）。
+
+### UI Polish 批次（2026-09-12 启动）：设计优化六票
+
+**批次 0（规范固化）交付**：`DESIGN.md` + `.impeccable/design.json` + `docs/UI_POLISH_PRD.md` + `docs/UI_POLISH_TICKETS.md` + 本节登记。审查工具脚本 `web/audit-screenshots.mjs` / `web/audit-dom-evidence.mjs` 为**未入库临时产物**（UI-02 固化对比度回归锁后删除）。
+
+**执行顺序**（依赖关系见 PRD §3）：UI-01 → UI-02 →（批量审查 U-1）→ UI-03 → UI-04 → UI-05 →（批量审查 U-2）→ UI-06 →（批量审查 U-3）→ 收尾。
+
+**每票状态**（完成一票追加一行）：
+
+| Ticket | 状态 | Commit | 备注 |
+| --- | --- | --- | --- |
+| 批次 0 规范固化 | done | `cd107a2` | DESIGN.md/PRD/TICKETS/tracker 登记 |
+| UI-01 | done | `1ae3bf2` | 审批卡重塑：结构化参数+diff 复用+焦点/aria+快捷键+composer 锁定+材质违例修复 |
+| UI-02 | done | `1ae3bf2` | token 三改（暗 tertiary 0.52 / 亮 **0.63 实测修正**）+28 处 10px 升档+tl-type 去 accent+对比度回归锁 |
+
+#### U-1 批量两轴审查（fixed point `cd107a2` → `1ae3bf2`，双 Explore subagent）
+
+**Spec 轴 10 finding（0P0/0P1/3P2/7P3）+ Standards 轴 14 finding（2P1/3P2/9P3）**，合并去重后逐条处置：
+
+| # | 级 | finding | 处置 |
+| --- | --- | --- | --- |
+| 1 | **P1** | **多卡并存快捷键双发**：每张 pending 卡各挂 document keydown → 一次 Ctrl+Enter 向 N 个 approval_id 各发一 POST = 批量批准（两轴共认，本批最重） | **修**：keydown effect 加 `autoFocus` 门控（仅第一张 pending 卡挂监听，决后第二张升为 index 0 自然接管）；+双卡 e2e 回归锁（Ctrl+Enter 只 POST ap-1，第二张保持 pending）；变异验证：去掉门控 → 双卡用例红（2 failed）→ 还原绿 |
+| 2 | **P1** | **三处新 UI 亮色 AA 不达标**：`.approval-chip`(~2.8:1)/`.approval-deny .approval-kbd`(~2.5:1)/`.composer-locked-hint`(~3.2:1) 沿用 warning/danger-on-tint 配方 | **修**：三处改 ink 调和——chip/hint 用 `color-mix(warning 45%, text-primary)`，deny kbd 用专属 `color-mix(destructive 60%, text-primary)` + 16% 淡染底；t-contrast 新增第 5 组断言（三选择器 × 两主题 ≥4.5） |
+| 3 | P2 | `.tl-type` 回归断言弱（not.toBe 两个硬编码字面量，改任意其它颜色恒绿）且只测暗色 | **修**：改等值断言（== 探针解析的 `--color-muted-foreground` 计算值）+ 补亮色主题 |
+| 4 | P2 | t-contrast parse() 未知颜色格式静默回退白底 → 可能假绿（本次 4.1226 假象的根因之一：`color(srgb …)` 未解析） | **修**：未知格式一律 throw（oklab + color(srgb) 两分支显式解析，注释声明 CSS Color 4 语义）；「无不透明祖先底」同样 throw |
+| 5 | P2 | measure 局限未声明（backdrop-filter/opacity 不建模）+ 暗色 canvas 硬编码 fallback | **修**：文件头补「已知测量局限」注释；fallback 全部改 throw；placeholder 的 `18 *` 硬编码改显式 throw |
+| 6 | P2 | tracker 缺规格要求的记录物（10px 分类表 / accent 审计清单 / 变异验证台账 / approval-tool 覆盖标注 / commit hash 占位未填） | **修**：本节下方补三张台账 |
+| 7 | P3 | Composer `import { modKey }` 落在文件末尾 | **修**：移至顶部 import 区（`../types` 之后） |
+| 8 | P3 | classifyPreviewArgs 空串被消费但渲染真值丢弃 → 信息静默消失 + 空容器 | **修**：分类器只消费非空字符串（空串留 rest 走 JSON 兜底）；+回归用例 |
+| 9 | P3 | 原型链键（constructor/hasOwnProperty/__proto__）行为未锁 | **修**（用例）：+JSON.parse 形状回归用例（分类器本身安全，spread 落自有属性） |
+| 10 | P3 | Composer 锁定提示文案与触发条件偏离 ticket 字面（`!streaming` 条件 + 文案多前缀） | **修**：收敛为 ticket 文案（`等待审批决策后再继续` / placeholder `等待审批决策…`）；`showLock` 派生变量消除三处重复；顶部 doc 注释补审批锁语义 |
+| 11 | P3 | waitForTimeout(300) 裸魔数 | **修**：常量 `NO_SECOND_REQUEST_WAIT_MS` + 注释（对齐 q-model-dedupe 惯例） |
+| 12 | P3 | approved/denied 死规则 `box-shadow:none`（基态辉光已删） | **修**：删除 |
+| 13 | P3 | commit message「e2e +18」与静态 +9 口径矛盾 | **订正记录**：+18 是 Playwright **实例数**（视口矩阵 ×2），+9 是 test 函数数；两个口径都对，tracker 以实例数为准（与历史门禁数字同口径） |
+| 14 | P3 | PRD 写 oxlint 基线 35w，实测自 B-1 起为 38w | **订正**：PRD §4.2 改 38w（本批新文件 0 warning，基线不增） |
+| 15 | P3 | UI-02 ticket「涉及文件」把 audit 脚本标（删除）与 PRD §8.5「全部完成后删」冲突 | **修**：ticket 措辞改为「按 PRD §8.5 全部 ticket 完成后统一删除」 |
+| 16 | P3 | platform iPad 桌面 UA 语义未锁 | **修**（用例）：+iPad 桌面 UA → ⌘ 用例 |
+| 17 | P3 | focus-visible 挂载聚焦启发式多数场景不点亮 | 不改（防御性规则无害；要常亮需用 ：focus，引入非键盘 outline，取舍留档） |
+| 18 | P3 | aria id 内插 approval_id（空格/引号会失效） | 不改（后端 id 形如 ap-1；如需防护属后端契约议题，登记 issues log） |
+| 19 | P3 | chip/kbd 魔数 line-height（18px/16px） | 不改（与周边 badge 体系一致性属审美重构，§8） |
+| 20 | P3 | classifyPreviewArgs 每渲染重跑 | 不改（成本极小；ApprovalCard 不在流式热路径高频区） |
+| 21 | P3 | `.rail-section-count`(12px) 大于所属标题(10px micro-label) 的观感 | 不改（micro-label 是「面板眉标」语义不是标题层级；g-visual-qa 已过） |
+| 22 | P3 | 同帧双 keydown 理论双 POST（busy 闭包竞态） | 不改（人手触发概率极低；根治需请求在途同步标志，登记 issues log 备查） |
+| 23 | P3 | `.approval-desc` margin-top 4px / `.approval-path` canvas-mix 底 与 ticket 字面差异 | 不改（flex gap 承担间距 / 视觉等价，登记即处置） |
+| 24 | P3 | AC#5 渲染级断言缺（old/new→DiffBlock、command→cmd 块只有分类级单测） | 部分修：t-contrast 的审批 fixture 覆盖 path/content 渲染；DiffBlock 分支由既有 `.diff-block` 组件测试与 ToolCard 路径间接覆盖，补渲染级断言 defer 到 UI-03 批次一并做（登记） |
+
+**修复后门禁（实跑）**：tsc 0 · vitest **604 passed**（34 文件，+3：空串/原型键/iPad）· oxlint 38w/0e · playwright **188 passed**（--workers=2；t-contrast 5→8 test、n-approval 11→12 test，×2 视口）· vite build ✓。
+
+#### UI-02 台账（规格要求的记录物）
+
+**10px 分类表（30 处）**：28 处改 `var(--text-xs)`——`.rail-section-count` / `.rail-project-count` / `.rail-project-missing` / `.rail-drop-tail` / `.project-pick-path` / `.memory-scope` / `.memory-degraded-hint code` / `.system-notice-badge` / `.notice-strip-badge` / `.deleg-child-label` / `.deleg-overflow-chip` / `.child-ev-row .detail-key` / `.act-inspect-chip` / `.act-args-compact` / `.act-raw-label` / `[data-density='compact'] .act-args` / `.slice-line-chip` / `.composer-esc-hint kbd` / `.tl-tooltip` / `.json-count` / `.json-more` / `.io-raw-label` / `.palette-item-hint` / `.palette-footer span` / `.reasoning-source` / `.tool-out-chip` / `.md-code-wrap-btn` / `.model-picker-item-meta`；**2 处保留**（合法 micro-label：大写+0.08em 字距）——`.rail-section-label`(530) / `.model-picker-group-label`(4659)。豁免 0 处（预算 ≤5 未用满）。
+
+**accent 文字审计（26 个 `color: var(--accent/--color-accent)` 站点）**：**整改 2**——`.tl-type`（时间线事件类型名→muted-foreground）、`.diff-archived-hint code`（非交互行内代码→muted-foreground）；另有 `.approval-tool code` 已由 UI-01 覆盖（accent-secondary→text-primary，**单次修改无重复**，UI-02 C.2 条款据此跳过）。**保留 24**（交互/状态）：appbar-toggle-active、run-pulse-thinking、rail-project-toggle:hover、rail-drop-tail.active、project-pick-pending（状态）、memory-scope.scope-user（scope 语义 chip）、msg-avatar-model（delegation 签名）、fork-btn:hover、model-kind-thinking、run-badge-running/thinking、detail-tab.sel、detail-terminal-row:hover、workspace-mode.sel、read-continue-code（可点继续阅读）、reasoning-icon（live 呼吸）、composer-model:hover、composer-control:hover、model-picker sel/check/checkbox、detail-section-title svg（面板标识，边界项登记备查）、workspace-scaffold-tag（诚实占位标记，边界项登记备查）。
+
+**变异验证台账（本批 5 处，全部红→绿闭环）**：① 键盘监听删除（MUTATION-A：onKey 清空）→ Ctrl+Enter/Ctrl+Backspace 4 实例红；② composer 锁定通道拆除（textarea 回 `disabled={streaming}`，MUTATION-B）→ 锁定用例红——**首版变异假绿已订正**：原 fixture 无 run/completed，streaming 恒 true 掩盖审批锁，补终态帧后变异才红；③ 暗 tertiary 0.42 回退 → [dark] 对比度 4 failed；④ tl-type 回染 accent → 2 failed；⑤ 键盘门控拆除（MUTATION-C：去 autoFocus 条件）→ 双卡用例红。
+
+**测试有效性备注**：t-contrast 排查中发现并修复两个测量层假信号——Playwright test 上下文 `colorScheme` 默认 light（[dark] 用例必须 localStorage 显式引导主题）；同一 color-mix 在该 Chromium 两条计算路径输出 oklab / color(srgb) 两种格式（解析器双分支 + 未知格式 throw）。
+
+| UI-03 | done | `522602d`（U-2 批量） | Inspector run 分组头 + 全会话序号 + tab 计数 + 头标对齐。**与票面偏离（已记录）**：五个 Inspector 图标是「视图 tab」不是「事件 kind 过滤器」，票面意图以 tab 计数徽标实现（`.detail-tab-count`）；时间线 kind 过滤 chips 按票面 Out-of-scope 不做 |
+| UI-04 | done | `522602d`（U-2 批量） | projection 三摘要（forked/审批请求/审批已决）+ formatShortDuration（<50ms 不造 1ms 假精度）+ ReasoningBlock <1s 措辞（0 秒→<1s，中断于 <1s） |
+| UI-05 | done | `522602d`（U-2 批量） | Rail 真空态文字按钮（新建项目/新建会话）+ 空态文案带行动链接（注册项目目录 →） |
+| UI-06 | done | 本批尾 commit | Composer 平台键位 UI-01 已覆盖（标注跳过）；CJK 间距「切换到 Raw」+ 主题 hint 去箭头（i-keyboard 新 e2e 锁）；run-badge padding 2px→3px 向 .run-pulse 收敛；Split/Preview 与半截 ID 明确不做（登记） |
+
+#### U-2 批量两轴审查（fixed point `236049f` → `522602d`，双 Explore subagent）
+
+**Spec 轴 3P1/3P2/3P3 + Standards 轴 1P1/5P2/6P3**，合并去重后全部处置（修复 commit `e543ae1`）：
+
+| # | 级 | finding | 处置 |
+| --- | --- | --- | --- |
+| 1 | **P1** | **Rules of Hooks 违例**：runIdList useMemo 挂在 StepDetail 三个 early-return 之后 → 从事件详情分支切回 run 级时 hook 数不一致 → **点开会话整页崩溃**（'Rendered more hooks than during the previous render'，真浏览器复现；e2e 的 g-visual-qa/p-earlier-window 全量假红即此） | 修：useMemo 上提到组件顶部（conversation 可空守卫 `?? []`）；变异=把 hook 移回原位即崩，真机探针复验 tabs 恢复 |
+| 2 | **P1** | g-visual-qa 新 e2e：T0 在 ROW2 之后声明 → TDZ ReferenceError（e2e 不进 tsconfig，tsc 抓不到）；同用例计数断言 3 事件实为 4（session/started 归入 r1 组） | 修：声明上提 + 断言 3→4 事件 |
+| 3 | **P1** | ReasoningBlock：中断 ≥1s 被改成「持续了 N 秒」→ 中断语义塌缩成 completed（票面只要求修 N===0） | 修：恢复「中断于 N 秒」≥1s 分支；SSR 用例回改并加 18 秒断言 |
+| 4 | P2 | SessionList 空态文案挂 `!showEmpty` → **真·空态（sessions=0 且 projects=0）时文案整段被吞**，与同屏文字按钮自相矛盾（正是 UI-05 要消灭的断点；两轴各命中一次） | 修：只留 `!projectsError`（502 错误态仍只显错误条，真机探针双验证：空态=文案+链接渲染，502=仅错误条） |
+| 5 | P2 | timelineGroups：交错 run_id（r1,r2,r1）组序数按组序 1/2/3 编，与 countRuns 的「2 runs」矛盾（首现顺序票面定义） | 修：ordinalOfRun Map 按首现编号（回段仍叫 Run 1）；变异（ordinal 常数 1）→ 4 红 |
+| 6 | P2 | formatDuration 重构丢了负值 clamp（时钟倒挂显 '-5ms'）；formatShortDuration 无 Number.isFinite 守卫 | 修：双口径守卫（负值→'' / formatDuration→null，调用方不渲染行）；+用例；变异（守卫移除）→ 1 红 |
+| 7 | P2 | StepDetail.test 分组计数断言 `>3</span>` 实际命中 tl-seq 行（假绿，计数断了也绿） | 修：改打 `.tl-run-count` 上的 '4 事件'（regex 锚定组头） |
+| 8 | P2 | rail-empty 文字按钮 ~20px 高，低于 ticket 规格 28px（PRD 命中区下限 32px 列为「明确不动」清单的边界） | 修：min-height 28px（ticket 字面值） |
+| 9 | P2 | routeApi 无 projects 键的空态形状风险 | 探针验证通过，不改 |
+| 10 | P3 | .tl-run-header role="separator"（内容承载元素非法 ARIA） | 修：移除 |
+| 11 | P3 | window-bar 后首个组头双分隔线（:first-child 不生效） | 修：`.timeline-window-bar + .tl-run-header` 兄弟选择器 |
+| 12 | P3 | groupEventsByRun/tabCounts 每渲染重跑 + title 内联重建 distinct-run 集（两套遍历同数据） | 修：runGroups/runIdList useMemo（events 引用不变即跳过）；title 复用 runIdList |
+| 13 | P3 | detail-run-id 类名不再含 run id；.detail-tab-count line-height 16px 魔数；format.test import 空格 | 修：类名保留（e2e 依赖账未列改名成本，注释注明语义）；line-height 1.2+padding；import 修 |
+| 14 | P3 | **detail-tab 无 aria-label**：计数徽标成为 tab 唯一文本内容后，窄面板 icon-only 下 getByRole(tab,'Timeline') 变 name '4' → p-earlier-window e2e 假红（UI-03 引入的回归，g-visual-qa 同理） | 修：tab 加 aria-label（徽标 aria-hidden）；194/194 全绿 |
+
+**修复后门禁（实跑）**：tsc 0 · vitest **622 passed** · oxlint 38w/0e · playwright **194 passed**（--workers=2）· vite build ✓。变异：MUTATION-D（ordinal 常数）4 红 / MUTATION-E'（format 守卫移除）1 红 / MUTATION-F'（空态分支拆除）e2e 2 红，均还原。
+
+#### U-3 批量审查（fixed point `e543ae1` → 本批尾）
+
+范围：UI-06（CJK 间距 / hint 箭头 / run-badge 收敛）+ 收尾（删 3 个未入库临时脚本）。**处置**：
+
+| # | finding | 处置 |
+| --- | --- | --- |
+| 1 | commands.test 新断言是内联 fixture（App.tsx 改坏它不红） | 升级为 e2e 真实渲染断言（i-keyboard 新用例：查询「切换到」断言 `.palette-item-label` 文本 = 「切换到 紧凑」/「切换到 Raw」；「切换主题」断言 hint 无箭头）；单测保留作为形状文档 |
+| 2 | e2e 上下文默认 light 主题，主题 hint 期望值写成 '亮色'（实为 '暗色'） | 修：断言 '暗色'（目标档位），注释说明 |
+| 3 | 变异验证 | ① hint 回灌箭头 → 2 红；② label 去空格 → 6 红；均还原（grep 0 残留） |
+| 4 | run-badge padding 2px→3px 与 .run-pulse 同族（字重/字号/radius 已一致） | 修（computed 值对齐） |
+
+**U-3 尾门禁（实跑）**：tsc 0 · vitest **623 passed** · oxlint 38w/0e · playwright **196 passed**（--workers=2）· vite build ✓。临时审计脚本（web/audit-screenshots.mjs / audit-dom-evidence.mjs / dbg2.mjs）已删除。
 
 ### 最终全量 review（v2 §1.3）的处置——**已披露的偏离**
 
@@ -623,3 +802,18 @@ dev server 已停、真记忆库已清空（不留假事实）。
 ③ 冲突可视化（LLM 决策只体现在最终条目上，非目标）；④ 记忆条目的**检索/搜索**（本票只做分页列表，
 用户要的是"看得见 + 删得掉"）；⑤ 真机侧没法自然构造 `403`（需要一条 SESSION scope 记忆，而 HTTP
 入口只列 USER 行）——该路径由 e2e 的 `memoryDeniedIds` 拦截口覆盖（伪造的是**真后端会回的那句话**）。
+
+---
+
+## 关单补记（2026-09-12，用户指示「完成了就关闭」）
+
+| 票 | 处置 | 证据 |
+| --- | --- | --- |
+| #160（MEM-5 前端半） | **已关**（reason=completed） | comment：完整 AC 证据（上一条）+ 关单核实（分支/commit/门禁/真机/移交项）；后端半 #159 已关并随 `165fe9d` 入 `main` |
+| #155（WS-5 前端半） | **已关**（reason=completed） | comment：AC1–AC8 逐条证据 + commit 链（`f015a60`→`8db0e5f`→`637bc89`/`dca3ede`）+ 4 条 scope 外剩余项登记；后端半 #153/#154 已关并入 `main` |
+
+核实要点：`main` 已由集成方合入后端批次（`165fe9d`）并回合 `feat/frontend`（`2b51914`，**未动 `web/**`**，
+故本文件上方的门禁数字对合并后 HEAD 仍有效）；仓库 **OPEN issue 归零**。
+移交集成 AI：`feat/frontend` → `main` 合并 + push + `docs/PHASE_STATUS.md` 回填。
+此前各节写的「本票不关单」是当时的 §14.12 处置（跨端票只完成一端），随两端齐备 + 用户指示而更新，
+历史小节按「当时事实」保留不改。

@@ -52,9 +52,16 @@ function TerminalDuration({
   if (!startedAt || !completedAt) return null;
   const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
   if (!Number.isFinite(ms) || ms < 0) return null;
+  /* UI-04 信任裂缝：秒级向下取整对亚秒思考显「持续了 0 秒」是自相矛盾——
+   * N===0 改说 <1s（不再出现 0 秒）；N≥1 保持既有措辞（中断显「中断于 N 秒」，与 run 徽标的
+   * 中立第四态一致，不把中断塌缩成 completed）。 */
+  const seconds = Math.floor(ms / 1000);
+  const interruptedLabel = interrupted ? `中断于 ${seconds} 秒` : `持续了 ${seconds} 秒`;
   return (
     <span className="reasoning-duration num">
-      {' '}· {interrupted ? '中断于' : '持续了'} {Math.floor(ms / 1000)} 秒
+      {' '}
+      ·{' '}
+      {seconds >= 1 ? interruptedLabel : interrupted ? '中断于 <1s' : '持续 <1s'}
     </span>
   );
 }

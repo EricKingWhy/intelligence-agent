@@ -79,6 +79,30 @@ export interface ProjectDeleted {
   detail: string;
 }
 
+/** 一个子目录条目（`GET /api/host/dirs`，ADR-0028 D2）。
+ *
+ *  `path` 是宿主侧的**真实绝对路径**——这正是该端点存在的理由：浏览器拿不到真实
+ *  路径（`<input type=file>` 只给 `C:\fakepath\…`，Web 平台没有目录路径 API），
+ *  所以候选路径只能由宿主端列举出来。`name` 与 `path` 都由后端给，前端零拼接。 */
+export interface HostDirEntry {
+  name: string;
+  path: string;
+}
+
+/** 目录列举结果（`GET /api/host/dirs`，ADR-0028 D3/D4）。
+ *
+ *  `path === null` = **根模式**（请求没带 `path`）：`entries` 是盘符/根列表。
+ *  此时"当前目录"并不存在——界面据此禁用「向上」与「选择此目录」，而不是假装
+ *  当前在某个路径上。
+ *  `truncated` = 子目录数超过后端上限（500），`entries` 只含**排序后**的前 500
+ *  条：必须如实提示，否则用户会以为"这个目录里就这么多"。 */
+export interface HostDirsListing {
+  path: string | null;
+  parent: string | null;
+  truncated: boolean;
+  entries: HostDirEntry[];
+}
+
 /** 记忆归属范围（后端 `memory/types.py::MemoryScope`）。
  *
  *  `session` 的记忆按**会话**归属；HTTP 用户入口只暴露 `user`（浏览会话记忆需要

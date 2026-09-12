@@ -81,6 +81,18 @@ describe('filterCommands — 中文 label + 英文 keywords 双通道（BUG-007�
     expect(filterCommands(bare, 'Run').map((x) => x.id)).toEqual(['a']);
     expect(filterCommands(bare, 'copy run')).toEqual([]);
   });
+
+  it('label 形状锁：中文与英文/数字间半角空格 + hint 无方向箭头（UI-06）', () => {
+    // CJK 间距：「切换到 Raw」不是「切换到Raw」（中文与英文/数字间加半角空格）。
+    const cjk = [item('density-raw', '切换到 Raw'), item('density-compact', '切换到 紧凑')];
+    expect(filterCommands(cjk, '切换到').map((x) => x.id)).toEqual(['density-raw', 'density-compact']);
+    // 紧凑查询带空格仍命中（fuzzyScore 跳过分隔符，不依赖书写形状）：
+    expect(filterCommands(cjk, '切换到紧凑').map((x) => x.id)).toEqual(['density-compact']);
+    // hint 无箭头：'→ 亮色' 的方向装饰已退役（本断言是变异验证锚点）。
+    const hints: Record<string, string | undefined> = { theme: '亮色', trace: 'Langfuse ↗' };
+    expect(hints.theme).not.toContain('→');
+    expect(hints.theme).toBe('亮色');
+  });
 });
 
 describe('isPaletteShortcut — Ctrl/Cmd + K', () => {

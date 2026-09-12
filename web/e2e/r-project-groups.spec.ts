@@ -291,3 +291,40 @@ test('会话行不因进入项目而看到假的"已分组"：行 tooltip 区分
     /未分组/,
   );
 });
+
+test('UI-05：真空态 → Rail 头部是文字按钮 + 空态文案带行动链接（不再指路到不存在的实体）', async ({ page }) => {
+  // 真·空态：无会话、无项目（与空态文案自洽，不复现「请求失败也算空」的矛盾）
+  routeApi(page, { sessions: [], projects: [] });
+  await page.goto('/');
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // 头部出现的是**带文字**的按钮（可见文本，不是 icon-only + aria-label）
+  const createBtn = page.locator('.rail-empty-btn-primary', { hasText: '新建项目' });
+  const newBtn = page.locator('.rail-empty-btn-ghost', { hasText: '新会话' });
+  await expect(createBtn).toBeVisible();
+  await expect(newBtn).toBeVisible();
+
+  // 空态文案 + 行动链接
+  await expect(page.locator('.rail-project-empty')).toContainText('还没有项目');
+  const link = page.locator('.rail-empty-action', { hasText: '注册项目目录' });
+  await expect(link).toBeVisible();
+
+  // 「新建项目」文字按钮与链接都打开创建对话框
+  await createBtn.click();
+  await expect(page.locator('.project-dialog')).toBeVisible();
+  await page.locator('.project-dialog-close').click();
+  await expect(page.locator('.project-dialog')).toHaveCount(0);
+  await link.click();
+  await expect(page.locator('.project-dialog')).toBeVisible();
+
+  // 非空态回退 icon 按钮（文字按钮不残留）
+  await page.locator('.project-dialog-close').click();
+});
+
+test('UI-05：有会话或项目时回退 icon-only 按钮（aria-label 定位）', async ({ page }) => {
+  routeApi(page, { sessions: baseSessions(), projects: [P1] });
+  await page.goto('/');
+  await expect(page.locator('.rail-empty-btn-primary')).toHaveCount(0);
+  await expect(page.locator('button[aria-label="新建项目"]')).toBeVisible();
+  await expect(page.locator('.rail-empty-action')).toHaveCount(0);
+});

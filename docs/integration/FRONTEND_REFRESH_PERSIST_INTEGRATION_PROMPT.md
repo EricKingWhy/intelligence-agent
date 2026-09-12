@@ -384,3 +384,54 @@ tsc ✓ · vitest **501 passed**（28 文件）· oxlint **35 warnings / 0 error
 | --- | --- |
 | `cb0e008` | fix(OBS-015): ApprovalCard 区分幂等已决(409)与真失败(5xx) |
 | `4580a69` | code-review(OBS-015): 补 .approval-error CSS + 更新 tracker + 修正注释 |
+
+---
+
+## 10. 追加批次：UI Polish 六票（2026-09-12/13）——设计优化批（本文件最新批次）
+
+> 本节取代上文各节的「本批」地位：UI Polish 批次是 2026-09-12 用户 grill-me 决策（D1-D6）后的
+> 六票设计优化，需求事实源 = `docs/UI_POLISH_PRD.md`，逐票规格 = `docs/UI_POLISH_TICKETS.md`，
+> 视觉规范基准 = 根目录 `DESIGN.md`（+ `.impeccable/design.json` sidecar）。
+
+### 10.1 本批 commit 链
+
+| commit | 内容 |
+| --- | --- |
+| `cd107a2` | 批次 0：DESIGN.md + design.json + PRD + TICKETS + tracker 登记 |
+| `1ae3bf2` | U-1：UI-01 审批卡重塑（结构化参数/DiffBlock 复用/焦点/aria/快捷键/composer 锁定）+ UI-02 排版地板（--text-xs 12px、--text-tertiary 暗 0.52/亮 0.63 实测、28 处 10px 升档、tl-type 去 accent） |
+| `236049f` | U-1 双轴 review 修复（多卡快捷键双发 autoFocus 门控、三处亮色 AA 不达标 ink 调和、t-contrast 解析器 throw 化等 24 项处置） |
+| `522602d` | U-2：UI-03 Inspector run 分组（timelineGroups 纯函数 + 分组头/序号/tab 计数）+ UI-04 信任裂缝（forked/审批摘要 + formatShortDuration <50ms）+ UI-05 Rail 空态文字按钮 |
+| `e543ae1` | U-2 双轴 review 修复（**hooks 崩溃**、空态自相矛盾、交错 run 序数、负时长 clamp、断言假绿、detail-tab aria-label 等） |
+| （本批尾） | U-3：UI-06 minor（CJK 间距「切换到 Raw」、主题 hint 去箭头、run-badge 视觉参数向 .run-pulse 收敛）+ 删临时审计脚本 |
+
+### 10.2 集成 AI 必须知道的行为变化
+
+1. **审批卡交互**（UI-01）：Ctrl/Cmd+Enter=批准、Ctrl/Cmd+Backspace=拒绝（仅第一张 pending 卡挂监听）；审批期间 Composer 锁定（placeholder「等待审批决策…」）。
+2. **Inspector Timeline**（UI-03）：时间线按 run_id 分组渲染，组头「Run N + 状态徽标 + 事件数」；序数按**首次出现**（全会话范围，尾窗裁剪不重排）；头部「N runs · M 事件」；五个视图 tab 带条目计数徽标。
+3. **时长语义**（UI-04）：<50ms 显 `<50ms`（不再造 1ms 假精度）；ReasoningBlock <1s 显「持续 <1s」/「中断于 <1s」（不再有「持续了 0 秒」）。
+4. **摘要文案**（UI-04）：`session/forked`→「已分叉」、`tool/approval-requested`→「等待审批 · {tool}」、`permission/resolved`→「审批已决（{decision}）」（不再落「未知事件」）。
+5. **Rail 空态**（UI-05）：真空态出文字按钮（新建项目/新会话）+ 空态文案带「注册项目目录 →」行动链接；列表失败仍只显错误条（不矛盾）。
+6. **CommandPalette**（UI-06）：密度条目「切换到 Raw」（CJK 半角空格）；主题 hint 无方向箭头。
+7. **token 三改**（UI-02）：`--text-xs` 11→12px；`--text-tertiary` 暗 0.42→0.52、亮 0.63（实测 AA）；10px 仅存 2 处合法 micro-label。
+
+### 10.3 门禁（U-3 尾末次实跑）
+
+tsc 0 · vitest **623 passed**（35 文件）· oxlint **38 warnings / 0 errors**（基线持平）·
+playwright **196 passed**（`--workers=2`）· vite build ✓。
+
+变异验证台账（本批累计）：U-1 5 处 + U-2 3 处 + U-3 2 处（palette CJK 间距 6 红 / hint 箭头 2 红），全部红→绿闭环后还原。
+
+### 10.4 未修 / 遗留（明确披露）
+
+| 项 | 处置 |
+| --- | --- |
+| Split/Preview 空架子（评审 Minor ⑤） | 不做——诚实设计（工作区未实现时的诚实占位），登记 issues log |
+| 半截 run/session ID（评审 Minor ⑥） | 不做——信息架构取舍（完整 ID 已在分组头 title 与 Overview），登记 issues log |
+| 时间线 kind 过滤 chips（UI-03 票面原意） | 以 tab 计数徽标实现（五个图标是视图 tab 不是 kind 过滤器），偏离已记录于 tracker |
+| 审批 fail-closed 倒计时（q4-④） | 用户决策 defer——需先核实后端是否发超时时间戳，不硬编码 300s（不变量 #22） |
+
+### 10.5 审查产物
+
+- U-1 双轴：Spec 10 + Standards 14 findings → 24 项处置表（tracker「U-1 批量两轴审查」节）。
+- U-2 双轴：Spec 3P1/3P2/3P3 + Standards 1P1/5P2/6P3 → 全部处置（commit `e543ae1` message）。
+- U-3 收尾审查：见 tracker 对应小节。
