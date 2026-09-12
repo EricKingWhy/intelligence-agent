@@ -1104,3 +1104,74 @@ in-flight 合并（写后 `refetch` 有意绕过合并）；拖拽落点只在�
 ### 18.5 下一张
 
 #158（MEM-3 冲突消解 retrieve-before-write）→ #160（前端记忆管理 UI，跨端票的前端半）。
+
+## 19. #158（MEM-3）冲突消解 retrieve-before-write —— 纯后端，无前端改动
+
+**提交**（均在本 worktree 的 `feat/backend`，未 push）：`b687804` 实现 → `5276777` 两轴 review 修复轮。
+新增文件：`src/agent_harness/memory/consolidation.py`、`tests/memory/test_consolidation.py`。
+
+### 19.1 集成到 main 的注意点：**不需要迁移**，但有三处契约面变化
+
+无新表 / 新列 / 新 SessionEvent（审计刻意走结构化日志）。不需要任何手工步骤。
+
+1. **`MemoryCapability` 契约新增 `consolidate(scope, content, metadata, *, budget_seconds=None) -> MemoryWriteOutcome`**。
+   这是**调用方的写入契约**；`store()` 保留但退为 provider 侧原语（文档已写明它**不带**不丢写保证）。
+   实现者：`LangMemMemoryCapability`、`FakeMemoryCapability`；测试替身：`tests/capability/test_memory_provider_seam.py`
+   的 `_InMemoryCapability`、`tests/memory/test_writeback.py` 的 `RecordingCapability`（都已补齐）。
+   若你手上有别的 worktree 里的 `MemoryCapability` 实现/替身，需要加这个方法（没有它，writeback 会走
+   `partial: N/M` 兜底而不是消解降级事件）。
+2. **`store()` 新增可选 `budget_seconds`**（关键字参数，默认 `None`）：既有调用点零改动。
+3. **生产装配真的把模型喂给了 memory capability**（`factories.build_builtin_memory_components`）。
+   行为变化：从此每次记忆写入多一次**检索 + 一次 LLM 决策调用**（实测 2–19s/次，最长 30s 预算）。
+   这正是本票的目的（质量优先、接受成本），但意味着：**`.env` 的 MODEL 配置现在也影响记忆写入延迟**；
+   若集成环境模型很慢，写入会按预算降级成"只新增"（有 `memory_consolidated` 日志与 `memory/degraded` 事件可查）。
+
+### 19.2 票据归因的一处**修正**（请同步到 ADR/文档，已在两处加勘误）
+
+票面（与 ADR-0026 Context ④、PHASE_STATUS 的 #156 条目）说"没传 `query_model`，所以 manager 的
+Compare&Update 全程空转"。**实测不成立**：`langmem/knowledge/extraction.py` 在 `query_model is None`
+时走 `else` 分支，用 `get_dialated_windows(...)` 生成的 query 照样 `store.asearch`。真正的缺口是
+生产装配**没给 capability 传 `model`**，于是 `store()` 里被 `if self._model is not None` 守卫的 manager
+分支从未执行。**不要**为了"修空转"去传 `query_model`——那会多一次 LLM 调用且不是缺口的病因。
+
+### 19.3 关键设计（评审与后续改动请先读）
+
+- **只有一条检索路径**：检索发生在 provider 的 manager 内部（`store=BoundedSearchStore`），Core 侧不做
+  二次 `recall` 注入；`consolidate` 之后那次 `self.search` 只是 no-op 的复用查找，不喂给决策。
+- **不丢写**：检索/决策失败（含超时、含 Milvus 不可用、含预算耗尽）→ 降级为一条无条件写入，
+  原因脱敏（只含 `阶段:异常类型名`）。三种形态都有测试 + 真机 gate 覆盖。
+- **有界注入（AC4）**：条数 + 每条 1000 字符都在我们的代理里执行（真机实测上游会给回超过条数上界的结果），
+  超界丢弃/截断/修复都有计数。
+- **截断投影回写的 P0 修复（重要）**：代理不只用于 prompt——manager 把同一批 item 当 patch 基线，
+  所以 **任何** 写入经代理回写时都会做"投影 → 全文"还原（`aput`）。不变量：**截断标记永不出现在任何
+  权威记录里**（真机 gate 用例 5 扫全部 sqlite 库，单测 `test_a_metadata_only_patch_never_persists_the_truncated_projection` 先红后绿）。
+  已知限度：模型**重写**正文时以投影为基线，尾部无从还原（"注入有界"与"允许 provider 改写"共同决定）。
+- **预算嵌套**：`CONSOLIDATION_TIMEOUT_SECONDS(30) + _FALLBACK_RESERVE_SECONDS(2) <= WRITEBACK_TIMEOUT_SECONDS(60)`，
+  writeback 给每个候选的预算是"外层剩余 − 2s 余量"，所以尾部候选**降级**而不是被取消。改这三个常量请保持该顺序。
+
+### 19.4 AC7-2 的**部分满足**（请勿在集成报告里写成"完全满足"）
+
+"重复记忆 → 不产生重复条目"取决于 provider 的 LLM 判断：
+- **我们确定性保证**：同一段文本不会留下两条**逐字相同**的行（provider 的 `final_puts` 与我们 no-op 兜底都按逐字比较）；
+  逐字重复写第二遍时若 provider 无操作，我们复用既有 id（有单测）。
+- **不保证**：provider 每次改写正文并新建时，3 次重复写实测可以是 1 条也可以是 3 条（两轮真机 gate 各出现一次）。
+- **为什么不加确定性去重**：AC6 明确"策略归 provider"；在 Core 加"包含即去重"这类规则会把"恰好是候选子串的
+  不同事实"一起吞掉——那是丢写，比重复严重。若产品要求更强去重，应作为 provider 侧策略（prompt/规则）另开票。
+
+### 19.5 复现与验收证据（本地）
+
+```bash
+.venv/Scripts/python.exe -m ruff check src/ tests/          # clean
+.venv/Scripts/python.exe -m pytest -q                       # 全量：2081 passed / 2 skipped / 42 deselected
+.venv/Scripts/python.exe .scratch/run_consolidation_gate.py  # 真机：15/15 PASS（真模型 + 真 Zilliz）
+.venv/Scripts/python.exe .scratch/mutate158.py               # 变异：26/26 KILLED（自动 sha256 还原）
+```
+
+`run_consolidation_gate.py` 会显式把 collection 指到 `memory_gate_test` 并自建/删除它（**不碰 `.env`
+与生产集合 `agent_memory`**）；`gate` 与"真 Milvus 集成测试"**共用 `memory_gate_test`**，两者不可并发跑。
+`.scratch/` 不入库。
+
+**gate 的读取口径（重要）**：外部 embedding/Zilliz 实测会间歇性不可用（本票期间断了多轮），脚本已
+①bootstrap 重试；②外部依赖生病导致 happy path 降级时**作废该轮**（退出码 3）由 runner 换健康窗口重跑——
+断言本身不软化，只是不在生病窗口下取样。用例 1c（"检索到旧立场才断言收敛"）在 provider 真的没召回旧行
+时以 `[NOTE]` 呈现，**不硬判**：这是 provider 的向量召回/LLM 决策（AC6 策略归 provider）。

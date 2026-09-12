@@ -24,6 +24,14 @@ ADR-0008（Memory Capability 架构）、ADR-0009（Memory namespace 与 scope �
 其 prompt 里的 "Compare & Update / Remove incorrect or redundant" 全程空转。
 前三条属于 #157 的"解禁"，本条 ADR 处理的是**我们自己的权威层缺的机制**。
 
+> **勘误（2026-09-12，由 #158 实测更正）**：④ 的机制归因**不成立**。`langmem/knowledge/extraction.py`
+> 只在 `query_model is not None` 时启用查询生成；`query_model is None` 时走 `else` 分支，用
+> `get_dialated_windows(...)` 生成的 query 照样执行 `store.asearch`（即检索一直在跑）。
+> 真正的缺口是**生产装配没给 capability 传 `model`**（`LangMemMemoryCapability(records, vectors)`），
+> 而 manager 分支由 `if self._model is not None` 守卫 → 该分支从未执行。修复见 #158
+> （`factories.build_builtin_memory_components` 传入同一个模型给消解与抽取）。
+> 本 ADR 的 D1–D6 决策不受影响；仅此机制陈述更正，避免后续票为一个不存在的病因去传 `query_model`。
+
 ### 缺的机制（本票要补）
 
 - `MemoryCapability` 只有 `store/recall/search`，没有 update/forget 动词。
