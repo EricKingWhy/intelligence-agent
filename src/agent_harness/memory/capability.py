@@ -31,6 +31,9 @@
   一起交给 **provider** 决策（insert / update / delete / no-op），决策结果一律落 #156 的机制
   （`store`/`update`/`forget` 走的同一条记录 + outbox 路径）。**策略属 provider**（不变量 #18）：
   Core 不内置"同 key 覆盖 / importance 比较"之类的冲突启发式。
+  **调用方的写入契约就是这个方法**——`store` 是 provider 侧的原语（manager/工具用它落盘），
+  它不带"不丢写"保证：决策/检索失败时会抛异常，候选会丢。只有 `consolidate` 保证
+  "返回 ⟹ 已落盘"。
 - **只有一条路径**：检索发生在 provider 内部（LangMem 的 manager 自己按 provider 的方式检索），
   Core 侧不再另做一次 `recall` 注入——两套检索并存迟早对不上账。
 - **注入有界**（provider 的责任，实现见 `consolidation.py`）：既有记忆注进 prompt 的条数与

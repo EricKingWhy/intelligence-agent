@@ -30,7 +30,12 @@ from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.fake_vector_store import FakeVectorStore
 from agent_harness.memory.outbox_relay import OutboxRelay
 from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
-from agent_harness.memory.types import MemoryEntry, MemoryNamespace, MemoryScope
+from agent_harness.memory.types import (
+    MemoryEntry,
+    MemoryNamespace,
+    MemoryScope,
+    public_metadata,
+)
 from tests.langmem_doubles import (
     AlwaysHitVectorStore,
     HangingChatModel,
@@ -55,13 +60,19 @@ class _HangingSearchStore(FakeVectorStore):
         await asyncio.sleep(30)
 
 
-async def _langmem(tmp_path, vectors):
+async def _langmem(tmp_path, vectors, *, model=None, consolidation_timeout=None, query_limit=None):
+    """真 capability + 真 adapter；模型/预算走**构造参数**（不 poke 私有属性）。"""
     pytest.importorskip("langmem")
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
 
     records = SqliteMemoryRecordStore(tmp_path / "memory.db")
     await records.initialize()
-    return LangMemMemoryCapability(records, vectors), records
+    kwargs = {}
+    if consolidation_timeout is not None:
+        kwargs["consolidation_timeout"] = consolidation_timeout
+    if query_limit is not None:
+        kwargs["query_limit"] = query_limit
+    return LangMemMemoryCapability(records, vectors, model, **kwargs), records
 
 
 # ── AC5：降级不得丢写 ──
@@ -89,9 +100,9 @@ async def test_retrieval_failure_degrades_to_insert_without_losing_the_candidate
 
     没有这条保证，#158 就是"让 Milvus 抖动变成静默丢记忆"。
     """
-    capability, _ = await _langmem(tmp_path, _ExplodingSearchStore())
     # 给了模型才会走"检索 + 决策"这条路（AC1）；检索在这里必炸。
-    capability._model = ScriptedChatModel(responses=[])
+    capability, _ = await _langmem(tmp_path, _ExplodingSearchStore(),
+                                   model=ScriptedChatModel(responses=[]))
     token = set_identity_context(ALICE)
     try:
         outcome = await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {"importance": 0.5})
@@ -110,9 +121,9 @@ async def test_retrieval_timeout_degrades_to_insert_without_losing_the_candidate
     这条是与"外层 writeback 预算"配套的：`consolidate` 必须自己先到期并降级，
     否则取消会越过降级边界（CancelledError 不是 Exception）。
     """
-    capability, _records = await _langmem(tmp_path, _HangingSearchStore())
-    capability._model = ScriptedChatModel(responses=[])
-    capability._consolidation_timeout = 0.05
+    capability, _records = await _langmem(tmp_path, _HangingSearchStore(),
+                                          model=ScriptedChatModel(responses=[]),
+                                          consolidation_timeout=0.05)
     token = set_identity_context(ALICE)
     try:
         outcome = await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
@@ -126,8 +137,8 @@ async def test_retrieval_timeout_degrades_to_insert_without_losing_the_candidate
 @pytest.mark.asyncio
 async def test_degradation_reason_carries_only_the_exception_type(tmp_path):
     """脱敏：原因里不得出现原始异常消息（它可能含用户数据/凭据）。"""
-    capability, _ = await _langmem(tmp_path, _ExplodingSearchStore())
-    capability._model = ScriptedChatModel(responses=[])
+    capability, _ = await _langmem(tmp_path, _ExplodingSearchStore(),
+                                   model=ScriptedChatModel(responses=[]))
     token = set_identity_context(ALICE)
     try:
         outcome = await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
@@ -224,18 +235,21 @@ async def test_consolidate_retrieves_the_existing_memory_then_applies_the_decisi
     from langchain_core.messages import AIMessage
 
     vectors = AlwaysHitVectorStore()
-    capability, records = await _langmem(tmp_path, vectors)
+    # 模型是"决策替身"：真正要断言的 doc id 依赖播种出来的 memory_id，所以先占位、
+    # 播种后再把响应换掉（`responses` 是可替换的列表）。
+    model = ScriptedChatModel(responses=[])
+    capability, records = await _langmem(tmp_path, vectors, model=model)
     namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
     token = set_identity_context(ALICE)
     try:
         memory_id = await _seed(records, vectors, "我喜欢用 TypeScript 写后端")
-        capability._model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{
+        model.responses = [AIMessage(content="", tool_calls=[{
             "name": "PatchDoc",
             "args": {"json_doc_id": stable_doc_id(memory_id, namespace),
                      "planned_edits": "用户改用 Go 了",
                      "patches": [{"op": "replace", "path": "/content",
                                   "value": "我现在用 Go 写后端"}]},
-            "id": "patch-one"}])])
+            "id": "patch-one"}])]
         with caplog.at_level(logging.INFO, logger="agent_harness.memory"):
             outcome = await capability.consolidate(
                 MemoryScope.USER, "我现在改用 Go 了，不再用 TypeScript", {"importance": 0.7})
@@ -262,11 +276,12 @@ async def test_consolidate_no_op_decision_does_not_create_a_duplicate_row(tmp_pa
     from langchain_core.messages import AIMessage
 
     vectors = AlwaysHitVectorStore()
-    capability, records = await _langmem(tmp_path, vectors)
+    capability, records = await _langmem(tmp_path, vectors,
+                                         model=ScriptedChatModel(
+                                             responses=[AIMessage(content="这条记忆已经存在，无需改动。")]))
     token = set_identity_context(ALICE)
     try:
         memory_id = await _seed(records, vectors, "我喜欢黑咖啡")
-        capability._model = ScriptedChatModel(responses=[AIMessage(content="这条记忆已经存在，无需改动。")])
         outcome = await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
         entries = await capability.list_entries(MemoryScope.USER, 10)
     finally:
@@ -304,7 +319,6 @@ async def test_writeback_records_degraded_consolidation(tmp_path):
         assert [entry.content for entry in await capability.list_entries(MemoryScope.USER, 5)] == ["候选"]
     finally:
         identity_context_var.reset(token)
-    assert tmp_path  # 夹具保留：与本用例的 tmp 无关，显式避免未使用告警
 
 
 class _OneCandidate:
@@ -430,8 +444,8 @@ async def test_provider_takes_the_smaller_of_the_caller_budget_and_its_own_defau
     不生效的那一边会让耗时落到自己的预算上（1.0s / 5.0s），远大于 0.5s 的判据。
     """
     loop = asyncio.get_running_loop()
-    capability, _records = await _langmem(tmp_path, _HangingSearchStore())
-    capability._model = ScriptedChatModel(responses=[])
+    capability, _records = await _langmem(tmp_path, _HangingSearchStore(),
+                                          model=ScriptedChatModel(responses=[]))
     token = set_identity_context(ALICE)
 
     async def _timed(budget: float) -> tuple[float, str | None]:
@@ -472,8 +486,8 @@ async def test_a_broken_log_handler_cannot_rewrite_the_degradation_reason(tmp_pa
     """
     import logging
 
-    capability, _records = await _langmem(tmp_path, _ExplodingSearchStore())
-    capability._model = ScriptedChatModel(responses=[])
+    capability, _records = await _langmem(tmp_path, _ExplodingSearchStore(),
+                                          model=ScriptedChatModel(responses=[]))
 
     class _BrokenHandler(logging.Handler):
         def emit(self, record):
@@ -506,10 +520,10 @@ async def test_consolidation_failure_is_still_observable_with_its_retrieval_cost
     """
     import logging
 
-    capability, _records = await _langmem(tmp_path, AlwaysHitVectorStore())
     # 卡在**决策**阶段（检索已完成）：这才是"检索开销已付出、决策还没回来"的真实形状。
-    capability._model = HangingChatModel(responses=[])
-    capability._consolidation_timeout = 0.05
+    capability, _records = await _langmem(tmp_path, AlwaysHitVectorStore(),
+                                          model=HangingChatModel(responses=[]),
+                                          consolidation_timeout=0.05)
     token = set_identity_context(ALICE)
     try:
         with caplog.at_level(logging.INFO, logger="agent_harness.memory"):
@@ -571,3 +585,217 @@ def test_builtin_memory_wiring_passes_a_decision_model(tmp_path, monkeypatch):
         )
     )
     assert captured["model"] == "sentinel-model"
+
+
+# ── P0 回归：截断投影**不得**被回写进权威记录（Standards review 抓到）──
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_only_patch_never_persists_the_truncated_projection(tmp_path):
+    """上界是"给模型看的投影"，不是"该落盘的内容"：只改 metadata 的决策不得把正文截断写回。
+
+    机制：manager 拿到的既有记忆既是 prompt，**也是** trustcall 打 patch 的基线
+    （`langmem/knowledge/extraction.py`：`store_based` 来自 `store_map`，`final_puts` 在
+    value 变化时 `store.aput(...)`）。如果不处理，一次只动 metadata 的 PatchDoc 会把
+    "前 1000 字符 + …[已截断]" 当成新正文写回权威记录——静默吃掉长记忆的尾部。
+    """
+    from langchain_core.messages import AIMessage
+
+    vectors = AlwaysHitVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
+    full_text = "用户的长期偏好记录。" * (INJECTED_MEMORY_CHAR_LIMIT // 4)
+    assert len(full_text) > INJECTED_MEMORY_CHAR_LIMIT * 2
+    token = set_identity_context(ALICE)
+    try:
+        memory_id = await _seed(records, vectors, full_text)
+        capability._model = ScriptedChatModel(responses=[AIMessage(content="", tool_calls=[{
+            "name": "PatchDoc",
+            "args": {"json_doc_id": stable_doc_id(memory_id, namespace),
+                     "planned_edits": "只补一个 metadata 字段",
+                     "patches": [{"op": "add", "path": "/metadata/seen", "value": True}]},
+            "id": "patch-metadata"}])])  # 私有替身：doc id 需要播种后的 id，只能晚绑定
+        outcome = await capability.consolidate(
+            MemoryScope.USER, "顺手记一下：我们聊过这个偏好", {"importance": 0.5})
+        stored = await records.get(memory_id, ALICE)
+    finally:
+        identity_context_var.reset(token)
+
+    assert outcome.degraded_reason is None
+    assert stored.content == full_text, "截断投影被写进了权威记录"
+    assert TRUNCATION_MARKER not in stored.content
+    assert stored.metadata.get("seen") is True  # 决策本身仍然落盘
+
+
+# ── code-review 修复面：截断投影修复 / 成本记账 / 观测兜底 ──
+
+
+@pytest.mark.asyncio
+async def test_write_back_repair_only_touches_our_truncated_projection(tmp_path):
+    """`aput` 只修"确实是本代理截断出来的那一份投影"，其余写入原样透传。
+
+    三种不该动的形状：①短内容（没有标记）；②内容自带标记但**那一行**的正文并不以它为前缀
+    （别的文本）；③行根本不存在（新建）。猜错等于静默改坏 provider 的写。
+    """
+    vectors = FakeVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
+    bounded = BoundedSearchStore(capability._store, max_chars=INJECTED_MEMORY_CHAR_LIMIT)
+    token = set_identity_context(ALICE)
+    try:
+        payload = {"kind": "MemoryPayload", "content": {"content": "短内容", "metadata": {}}}
+        await bounded.aput(namespace, "no-marker", payload)
+        assert (await records.get("no-marker", ALICE)).content == "短内容"
+
+        # ② 既有行的正文与"投影前缀"对不上：必须原样写入（不能被既有正文顶掉）
+        await records.store(MemoryEntry(id="unrelated-row", content="原有正文", metadata={},
+                                        scope=MemoryScope.USER,
+                                        created_at="2026-09-01T00:00:00+00:00"), ALICE)
+        marked_but_unrelated = f"完全不同的正文{TRUNCATION_MARKER}"
+        await bounded.aput(namespace, "unrelated-row",
+                           {"kind": "MemoryPayload",
+                            "content": {"content": marked_but_unrelated, "metadata": {}}})
+        assert (await records.get("unrelated-row", ALICE)).content == marked_but_unrelated
+
+        # ③ 行不存在（新建）：带标记也不猜
+        await bounded.aput(namespace, "brand-new",
+                           {"kind": "MemoryPayload",
+                            "content": {"content": f"新记忆{TRUNCATION_MARKER}", "metadata": {}}})
+        assert (await records.get("brand-new", ALICE)).content == f"新记忆{TRUNCATION_MARKER}"
+
+        assert bounded.stats.repaired_items == 0  # 没有一条被"修"过
+    finally:
+        identity_context_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_still_forwards_delete_and_get_to_the_real_store(tmp_path):
+    """代理不得改变 provider 的写/读路径：`adelete`/`aget` 原样透传（#157 的删除链路）。
+
+    manager 判"这条过时了"时走的就是 `store.adelete`——代理吞掉它，删除就静默失效。
+    """
+    vectors = FakeVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
+    bounded = BoundedSearchStore(capability._store)
+    token = set_identity_context(ALICE)
+    try:
+        await records.store(MemoryEntry(id="doomed", content="等着被删", metadata={},
+                                        scope=MemoryScope.USER,
+                                        created_at="2026-09-01T00:00:00+00:00"), ALICE)
+        assert (await bounded.aget(namespace, "doomed")) is not None
+        await bounded.adelete(namespace, "doomed")
+        with pytest.raises(KeyError):
+            await records.get("doomed", ALICE)
+    finally:
+        identity_context_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_write_back_repair_restores_the_full_body_and_is_counted(tmp_path):
+    """正例：投影 + metadata 变化 → 正文恢复全文，metadata 更新，并且**被计数**（AC3）。"""
+    vectors = FakeVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    namespace = MemoryNamespace.of(MemoryScope.USER, ALICE).as_tuple()
+    full_text = "长" * (INJECTED_MEMORY_CHAR_LIMIT * 2)
+    bounded = BoundedSearchStore(capability._store, max_chars=INJECTED_MEMORY_CHAR_LIMIT)
+    token = set_identity_context(ALICE)
+    try:
+        await records.store(MemoryEntry(id="long-one", content=full_text, metadata={"seen": False},
+                                        scope=MemoryScope.USER,
+                                        created_at="2026-09-01T00:00:00+00:00"), ALICE)
+        projection = full_text[:INJECTED_MEMORY_CHAR_LIMIT] + TRUNCATION_MARKER
+        await bounded.aput(namespace, "long-one",
+                           {"kind": "MemoryPayload",
+                            "content": {"content": projection, "metadata": {"seen": True}}})
+        restored = await records.get("long-one", ALICE)
+        assert restored.content == full_text
+        # 行里除了用户 metadata 还挂着 provider 的内部载荷（`_langmem_value`）：
+        # 这里读的是"用户可见"的那一层。
+        assert public_metadata(restored.metadata) == {"seen": True}
+        assert bounded.stats.repaired_items == 1
+    finally:
+        identity_context_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_retrieval_failure_is_counted_as_a_search(tmp_path, caplog):
+    """AC3：检索**抛错**也要记成一次检索（计数在 await 之前），否则不可用路径永远 queries=0。"""
+    import logging
+
+    capability, _records = await _langmem(tmp_path, _ExplodingSearchStore(),
+                                          model=ScriptedChatModel(responses=[]))
+    token = set_identity_context(ALICE)
+    try:
+        with caplog.at_level(logging.INFO, logger="agent_harness.memory"):
+            await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
+    finally:
+        identity_context_var.reset(token)
+
+    events = [record for record in caplog.records if getattr(record, "event_type", None) == "memory_consolidated"]
+    assert [(event.status, event.queries) for event in events] == [("failed", 1)]
+
+
+@pytest.mark.asyncio
+async def test_no_op_fallback_search_is_counted_in_the_same_event(tmp_path, caplog):
+    """AC3：no-op 之后那次兜底检索也要记进同一事件（`fallback_searches`）。"""
+    import logging
+
+    from langchain_core.messages import AIMessage
+
+    vectors = AlwaysHitVectorStore()
+    capability, records = await _langmem(tmp_path, vectors)
+    token = set_identity_context(ALICE)
+    try:
+        await _seed(records, vectors, "我喜欢黑咖啡")
+        capability._model = ScriptedChatModel(responses=[AIMessage(content="无需改动。")])
+        with caplog.at_level(logging.INFO, logger="agent_harness.memory"):
+            await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
+    finally:
+        identity_context_var.reset(token)
+
+    events = [record for record in caplog.records if getattr(record, "event_type", None) == "memory_consolidated"]
+    assert len(events) == 1
+    assert events[0].queries == 1          # manager 的检索
+    assert events[0].fallback_searches == 1  # no-op 之后的兜底检索
+    assert events[0].decisions == 0
+
+
+@pytest.mark.asyncio
+async def test_degradation_event_persistence_failure_does_not_rewrite_the_reason(tmp_path):
+    """降级事件的 append 失败不得把 `consolidation_failed` 顶成 `writeback / unavailable`。
+
+    （code-review P2：消解降级分支的 append 此前没有同款保护，与紧邻的抽取分支不一致。）
+    """
+    from agent_harness.memory.writeback import MemoryWriteback
+    from agent_harness.session.event import MEMORY_DEGRADED
+    from tests.conftest import make_session
+
+    capability = FakeMemoryCapability(consolidation_degraded_reason="consolidation_failed: VectorStoreError")
+    session = make_session(tmp_path)
+    original_append = session.append
+    failed_once = False
+
+    def flaky_append(event_type, data, **kwargs):
+        nonlocal failed_once
+        # **只炸第一次**：这样"没兜底"的版本会走到外层处理器再 append 一次（成功），
+        # 事件流里就会多出一条 `writeback / unavailable: RuntimeError`——本用例正是判这个。
+        if event_type == MEMORY_DEGRADED and not failed_once:
+            failed_once = True
+            raise RuntimeError("ledger-unavailable")
+        return original_append(event_type, data, **kwargs)
+
+    session.append = flaky_append  # type: ignore[method-assign]
+    writer = MemoryWriteback(capability, _OneCandidate())
+    token = set_identity_context(ALICE)
+    try:
+        writer.submit(session, session.events)
+        await writer.drain()
+        entries = await capability.list_entries(MemoryScope.USER, 5)
+    finally:
+        identity_context_var.reset(token)
+
+    # 观测写失败 → 该条事件丢掉（不重试），但**不得**被改写成别的降级语义；候选照写。
+    assert failed_once
+    assert [event for event in session.events if event.type == MEMORY_DEGRADED] == []
+    assert [entry.content for entry in entries] == ["候选"]

@@ -57,7 +57,8 @@ class _InMemoryCapability:
         self.entries: dict[str, MemoryEntry] = {}
         self._next = 0
 
-    async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str:
+    async def store(self, scope: MemoryScope, content: str, metadata: dict, *,
+                    budget_seconds: float | None = None) -> str:
         self._next += 1
         memory_id = f"fake-{self._next}"
         self.entries[memory_id] = MemoryEntry(
@@ -65,6 +66,13 @@ class _InMemoryCapability:
             created_at=datetime.now(UTC).isoformat(), scope=scope,
         )
         return memory_id
+
+    async def consolidate(self, scope: MemoryScope, content: str, metadata: dict, *,
+                          budget_seconds: float | None = None):
+        """#158 的写入入口：替身不做冲突消解（无降级），但仍要满足协议形状。"""
+        from agent_harness.memory.capability import MemoryWriteOutcome
+
+        return MemoryWriteOutcome(await self.store(scope, content, metadata))
 
     async def update(self, memory_id: str, scope: MemoryScope, content: str,
                      metadata: dict) -> str:

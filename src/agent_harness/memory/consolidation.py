@@ -47,19 +47,33 @@ class ConsolidationStats:
     #: 结果集，交给 manager 的结果可能更多（实测一次检索回来 6 条、上限 5），所以条数上界
     #: 必须在这里真正执行，否则 AC4 的"条数有界"依赖上游内部实现。
     dropped_items: int = 0
+    #: 决策之后那次兜底检索（no-op 时按 id 复用既有记忆）的次数与取回条数——它同样是
+    #: 一次真实的 embedding + 向量查询，不记进观测面就是系统性低报（code-review P2）。
+    fallback_searches: int = 0
+    #: 被"截断投影修复"救回来的回写次数（见 `aput`）。
+    repaired_items: int = 0
 
 
 class BoundedSearchStore:
-    """包住 provider 用的 BaseStore：**检索结果有界 + 计数**，其余原样透传。
+    """包住 provider 用的 BaseStore：**检索结果有界 + 计数**，写路径带截断投影修复。
 
-    只覆盖 `asearch`——它是"既有记忆进 prompt"的唯一入口；写/读/删经 `__getattr__` 透传，
-    保证"决策结果落 #156 的机制"这条路径不会因为包了一层而变形（`aput`/`adelete` 仍是
-    原对象，namespace 授权与归属校验一点没少）。
+    覆盖两个方法：
+    - `asearch`：既有记忆进 prompt 的唯一入口 → 条数（`max_items`）与每条字符数
+      （`max_chars`）两个上界都在这里执行，并计数（AC3/AC4）。
+    - `aput`：manager 的回写入口 → **把截断投影还原成权威全文**（见下）。
+    其余（`adelete`/`aget`/`abatch`…）经 `__getattr__` 原样透传，namespace 授权与归属校验
+    一点没少。
 
-    两个上界都在这里执行：**条数**（`max_items`）与**每条字符数**（`max_chars`）。
+    **为什么必须处理 `aput`（code-review P0，已复现）**：manager 检索回来的 item 既是 prompt
+    *也是* trustcall 打 patch 的基线（`langmem/knowledge/extraction.py` 的 `store_map` →
+    `store_based` → `final_puts`）。若不处理，一次**只改 metadata** 的 PatchDoc 也会因为
+    "value 变了"把"前 1000 字符 + …[已截断]"当成新正文回写，静默吃掉长记忆的尾部。所以回写时
+    若正文是我们的截断投影（以标记结尾、且被截断行仍以该投影开头），就用行内全文替换它：
+    上界只影响**模型看到的投影**，不影响**落盘的事实**。
 
-    形状不认识的值（不是 `{"content": {...}}` 这种 MemoryPayload）**原样放过**：不认识不等于
-    可以改——猜错的截断会静默改坏 provider 看到的内容。
+    已知限度（不修，属方案的固有代价）：模型**重写**正文时（不以标记结尾）以投影为基线，
+    尾部无从还原——它只能改写自己看见的部分。这是"注入有界"与"允许 provider 改写"共同决定
+    的，已在集成提示词里记为限度。
     """
 
     def __init__(self, inner: Any, *, max_chars: int = INJECTED_MEMORY_CHAR_LIMIT,
@@ -72,9 +86,11 @@ class BoundedSearchStore:
     async def asearch(self, namespace_prefix: tuple[str, ...], /, *, query: str | None = None,
                       filter: dict | None = None, limit: int = 10,
                       offset: int = 0, **kwargs: Any) -> list:
+        # 计数在 await **之前**：检索抛错时 AC3 也必须看得见"这次检索发生过"（否则超时/
+        # 不可用路径的 queries 永远是 0，成本被系统性低报——code-review P2）。
+        self.stats.searches += 1
         items = await self._inner.asearch(namespace_prefix, query=query, filter=filter,
                                          limit=limit, offset=offset, **kwargs)
-        self.stats.searches += 1
         self.stats.retrieved_items += len(items)
         if len(items) > self._max_items:
             self.stats.dropped_items += len(items) - self._max_items
@@ -83,8 +99,7 @@ class BoundedSearchStore:
 
     def _bounded(self, item: Any) -> Any:
         value = getattr(item, "value", None)
-        payload = value.get("content") if isinstance(value, dict) else None
-        content = payload.get("content") if isinstance(payload, dict) else None
+        content = _payload_content(value)
         if not isinstance(content, str) or len(content) <= self._max_chars:
             return item
         self.stats.truncated_items += 1
@@ -92,9 +107,39 @@ class BoundedSearchStore:
         # （`SearchItem` 的 `score`、子类等）而不 import langgraph —— 本模块由此不越
         # 不变量 #20 的 seam（`tests/orchestration/test_seam.py` 全 src 树扫描）。
         bounded = copy.copy(item)
-        bounded.value = {**value, "content": {**payload, "content": content[:self._max_chars] + TRUNCATION_MARKER}}
+        bounded.value = {**value, "content": {**value["content"],
+                                             "content": content[:self._max_chars] + TRUNCATION_MARKER}}
         return bounded
 
+    async def aput(self, namespace: tuple[str, ...], key: str, value: Any,
+                   *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.aput(namespace, key,
+                                     await self._without_truncated_projection(namespace, key, value),
+                                     *args, **kwargs)
+
+    async def _without_truncated_projection(self, namespace: tuple[str, ...], key: str,
+                                            value: Any) -> Any:
+        """回写值若是本代理的截断投影，换成该行的权威全文（拿不到 / 形状不符则原样返回）。"""
+        content = _payload_content(value)
+        if not isinstance(content, str) or not content.endswith(TRUNCATION_MARKER):
+            return value
+        head = content[: -len(TRUNCATION_MARKER)]
+        try:
+            existing = await self._inner.aget(namespace, key)
+        except Exception:  # noqa: BLE001 — 读不到现有行不是"可以猜正文"的理由
+            return value
+        stored = _payload_content(getattr(existing, "value", None))
+        if isinstance(stored, str) and len(stored) > len(head) and stored.startswith(head):
+            self.stats.repaired_items += 1
+            return {**value, "content": {**value["content"], "content": stored}}
+        return value
+
     def __getattr__(self, name: str) -> Any:
-        # aput / adelete / aget / abatch…：原样透传给真 store。
+        # adelete / aget / abatch…：原样透传给真 store。
         return getattr(self._inner, name)
+
+
+def _payload_content(value: Any) -> Any:
+    """`{"content": {"content": ...}}`（MemoryPayload）里的正文；形状不符返回 `None`。"""
+    payload = value.get("content") if isinstance(value, dict) else None
+    return payload.get("content") if isinstance(payload, dict) else None

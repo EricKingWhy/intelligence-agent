@@ -19,7 +19,8 @@ class RecordingCapability:
     def __init__(self) -> None:
         self.stored: list[tuple[MemoryScope, str, dict]] = []
 
-    async def store(self, scope: MemoryScope, content: str, metadata: dict) -> str:
+    async def store(self, scope: MemoryScope, content: str, metadata: dict, *,
+                    budget_seconds: float | None = None) -> str:
         self.stored.append((scope, content, metadata))
         return f"mem-{len(self.stored)}"
 

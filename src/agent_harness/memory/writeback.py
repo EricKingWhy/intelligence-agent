@@ -11,6 +11,20 @@ from agent_harness.session.event import MEMORY_DEGRADED
 
 logger = logging.getLogger("agent_harness.memory")
 
+
+def _append_degraded(session: Session, events: list[SessionEvent], data: dict) -> None:
+    """落一条 `memory/degraded`；**观测写失败不得改写降级语义**。
+
+    这几处 append 都在"降级已经发生、候选已经落盘"之后：若它抛出去，外层 except 会把事件流
+    改写成 `writeback / unavailable: <TypeError>`，真实原因（`consolidation_failed: X`）与
+    `partial: N/M` 一起被顶掉。与抽取分支的既有保护同款。
+    """
+    try:
+        session.append(MEMORY_DEGRADED, data,
+                       run_id=next((e.run_id for e in events if e.run_id), None))
+    except Exception:  # noqa: BLE001 — 观测写失败不得吞掉候选（降级只在质量）
+        logger.warning("Memory degradation event persistence unavailable")
+
 #: 单次写回（抽取 + 全部候选）的运行级预算。必须**大于** provider 侧的默认决策预算
 #: （`consolidation.CONSOLIDATION_TIMEOUT_SECONDS`），否则外层取消会抢在"超时 → 降级写"
 #: 之前发生——见 `_remaining_budget`。
@@ -84,20 +98,18 @@ class MemoryWriteback:
                     # 与抽取回退同一约定：只留脱敏后的 reason（阶段 + 异常类型名），
                     # 不把检索到的记忆内容或原始异常消息写进事件流。
                     distinct = sorted(set(degraded))
-                    session.append(
-                        MEMORY_DEGRADED,
+                    _append_degraded(
+                        session, events,
                         {"operation": "consolidation",
                          "reason": distinct[0] if len(distinct) == 1 else f"mixed: {', '.join(distinct)}"},
-                        run_id=next((e.run_id for e in events if e.run_id), None),
                     )
                 if failed:
                     # 部分失败诚实记录：数量 + 阶段可观察（类型名脱敏，与
                     # writeback 脱敏不变量一致）。已成功的候选不受影响。
-                    session.append(
-                        MEMORY_DEGRADED,
+                    _append_degraded(
+                        session, events,
                         {"operation": "writeback",
                          "reason": f"partial: {failed}/{len(candidates)} candidates failed"},
-                        run_id=next((e.run_id for e in events if e.run_id), None),
                     )
         except Exception as error:
             # 根因（类型 + 消息 + 堆栈）只进日志；事件 reason 仅带异常类型名——

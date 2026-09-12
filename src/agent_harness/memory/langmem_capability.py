@@ -83,8 +83,9 @@ class LangMemMemoryCapability:
             # 只作用于本 namespace：manager 只能删它自己检索回来的 id，adapter 再校验一次归属。
             #
             # #158：`store=` 传 `BoundedSearchStore`——manager 自己检索既有记忆（这就是
-            # "retrieve-before-write" 的唯一路径），我们只保证它**看到的**东西有上界、且这次
-            # 检索**可观测**；`query_limit` 是条数上界（upstream 两条分支都用它截断结果集）。
+            # "retrieve-before-write" 的唯一路径）。这个代理做两件事：给模型**看到的**既有记忆
+            # 设条数/字符上界并计数（AC3/AC4），以及把回写的截断投影还原成权威全文
+            # （P0：它同时是 trustcall 的 patch 基线，见 `consolidation.py` 的类文档）。
             bounded = BoundedSearchStore(self._store, max_items=self._query_limit)
             manager = self._manager(self._model, schemas=[MemoryPayload], namespace=namespace,
                                     store=bounded, enable_deletes=True, query_limit=self._query_limit)
@@ -102,12 +103,15 @@ class LangMemMemoryCapability:
                 self._log_consolidation(bounded, puts=None, started=started,
                                         status="failed", error=type(error).__name__)
                 raise
-            # 观测（#158 AC3）：这次写入多出来的检索 + 一次决策 LLM 调用都要看得见。
-            self._log_consolidation(bounded, puts=puts, started=started, status="ok")
             if puts:
+                # 观测（#158 AC3）：这次写入多出来的检索 + 一次决策 LLM 调用都要看得见。
+                self._log_consolidation(bounded, puts=puts, started=started, status="ok")
                 return puts[0]["key"]
-            # 没有变化时复用既有记忆；没有匹配时精确保留抽取候选。
+            # provider 判 no-op（没有工具调用）：没有变化时复用既有记忆；没有匹配时精确保留
+            # 抽取候选。这次兜底检索同样是真实开销，记账后再发事件（否则 AC3 系统性低报）。
             previous = await self.search(scope, content, 1)
+            bounded.stats.fallback_searches += 1
+            self._log_consolidation(bounded, puts=puts, started=started, status="ok")
             if previous and previous[0].content == content and previous[0].metadata == metadata:
                 return previous[0].id
         return await self._insert(scope, content, metadata)
@@ -125,6 +129,8 @@ class LangMemMemoryCapability:
                       status=status, error_type=error,
                       queries=bounded.stats.searches, retrieved=bounded.stats.retrieved_items,
                       truncated=bounded.stats.truncated_items, dropped=bounded.stats.dropped_items,
+                      fallback_searches=bounded.stats.fallback_searches,
+                      repaired=bounded.stats.repaired_items,
                       decisions=None if puts is None else len(puts),
                       latency_ms=round((asyncio.get_running_loop().time() - started) * 1000))
         except Exception:  # noqa: BLE001 — 观测失败不得改变写入/降级语义
