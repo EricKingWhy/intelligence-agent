@@ -61,6 +61,29 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | 批次 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | B-1 | #160（MEM-5 前端半） | `637bc89` | 两轴各一 subagent；Spec 6 + Standards 7 findings → 9 修 / 2 说明不改 / 1 只登记（详见第十二轮「批次审查」） | `45227dc` |
+| **U-1** | **UI-01（P0 审批卡重塑）+ UI-02（P1 排版地板+对比度）** | **`<U-1 起点见下节>`** | 未审 | — |
+| U-2 | UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态） | U-1 修复 commit | 未审 | — |
+| U-3 | UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词更新） | U-2 修复 commit | 未审 | — |
+
+**UI Polish 批次总纲**：需求事实源 = `docs/UI_POLISH_PRD.md`（含用户 2026-09-12 grill-me 决策记录 D1-D6，不可违约）；逐票施工规格 = `docs/UI_POLISH_TICKETS.md`；视觉规范基准 = 根目录 `DESIGN.md`（本批新增，含 `.impeccable/design.json` sidecar）。评审出处：impeccable critique 24/40（快照 `.impeccable/critique/2026-09-12T14-05-30Z__web-src.md`）。
+
+### UI Polish 批次（2026-09-12 启动）：设计优化六票
+
+**批次 0（规范固化）交付**：`DESIGN.md` + `.impeccable/design.json` + `docs/UI_POLISH_PRD.md` + `docs/UI_POLISH_TICKETS.md` + 本节登记。审查工具脚本 `web/audit-screenshots.mjs` / `web/audit-dom-evidence.mjs` 为**未入库临时产物**（UI-02 固化对比度回归锁后删除）。
+
+**执行顺序**（依赖关系见 PRD §3）：UI-01 → UI-02 →（批量审查 U-1）→ UI-03 → UI-04 → UI-05 →（批量审查 U-2）→ UI-06 →（批量审查 U-3）→ 收尾。
+
+**每票状态**（完成一票追加一行）：
+
+| Ticket | 状态 | Commit | 备注 |
+| --- | --- | --- | --- |
+| 批次 0 规范固化 | done | `<batch0>` | DESIGN.md/PRD/TICKETS/tracker 登记 |
+| UI-01 | 未开始 | — | |
+| UI-02 | 未开始 | — | |
+| UI-03 | 未开始 | — | |
+| UI-04 | 未开始 | — | |
+| UI-05 | 未开始 | — | |
+| UI-06 | 未开始 | — | |
 
 ### 最终全量 review（v2 §1.3）的处置——**已披露的偏离**
 
