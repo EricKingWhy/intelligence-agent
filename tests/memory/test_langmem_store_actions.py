@@ -43,6 +43,7 @@ from tests.langmem_doubles import AlwaysHitVectorStore, ScriptedChatModel, stabl
 
 ALICE = IdentityContext("acme", "alice", ["user", "session"])
 BOB = IdentityContext("acme", "bob", ["user"])
+OTHER_TENANT = IdentityContext("other", "alice", ["user"])
 ADAPTER_LOGGER = "agent_harness.memory.base_store_adapter"
 
 
@@ -115,24 +116,31 @@ class TestPutOpShapeMapping:
         assert "ghost" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_delete_cannot_cross_namespace(self, rig):
+    @pytest.mark.parametrize(("foreign", "secret"), [
+        (BOB, "bob 的秘密"),
+        (OTHER_TENANT, "另一个租户的秘密"),
+    ], ids=["other-user-same-tenant", "other-tenant"])
+    async def test_delete_cannot_cross_namespace(self, rig, foreign, secret):
         """AC2 的隔离面：provider 的删除动作碰不到别的 tenant/user 的记忆。
 
         直接以"外来 namespace + 别人的 key"构造最坏形状：授权校验必须拒绝，
         且对方记录与向量**都还在**（对照断言，防"拒绝了但已经删掉"）。
+
+        两个形状都要试：换 user 与换 tenant 都走 `MemoryNamespace.authorize`，但过滤表达式
+        不同（tenant_id 也在 filter 里），只测其中一个等于放过另一段。
         """
         records, vectors, adapter = rig
-        await records.store(entry("m1", "bob 的秘密"), BOB)  # 尚未 flush：outbox 里留着 UPSERT
+        await records.store(entry("m1", secret), foreign)  # 尚未 flush：outbox 里留着 UPSERT
         assert [c.operation for c in await records.pending()] == [MemoryOperation.UPSERT]
 
         with pytest.raises(PermissionError):
-            await adapter.abatch([PutOp(namespace_of(BOB), "m1", None)])
+            await adapter.abatch([PutOp(namespace_of(foreign), "m1", None)])
 
         # 被拒的删除**什么都没动**：outbox 仍是那条 UPSERT（没被替换成 DELETE）。
         assert [c.operation for c in await records.pending()] == [MemoryOperation.UPSERT]
-        assert (await records.get("m1", BOB)).content == "bob 的秘密"
+        assert (await records.get("m1", foreign)).content == secret
         await OutboxRelay(records, vectors).flush()
-        assert (await vectors.get("m1", BOB, MemoryScope.USER))["content"] == "bob 的秘密"
+        assert (await vectors.get("m1", foreign, MemoryScope.USER))["content"] == secret
 
     @pytest.mark.asyncio
     async def test_ttl_is_still_rejected(self, rig):

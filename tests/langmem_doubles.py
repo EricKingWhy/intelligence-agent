@@ -1,4 +1,4 @@
-"""langmem / trustcall 测试替身的共用形状（`tests/memory` 下多个文件复用，避免副本各自漂移）。
+"""langmem / trustcall 测试替身的共用形状（`tests/` 下多个文件复用，避免副本各自漂移）。
 
 trustcall 在"**存在既有文档**"的分支里访问 `self.bound.bound.bind_tools(...)`：它假设
 `bind_tools` 返回 `RunnableBinding`，`.bound` 才是底层模型。该分支只有在

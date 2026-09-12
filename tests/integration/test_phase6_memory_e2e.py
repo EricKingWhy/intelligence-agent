@@ -25,6 +25,34 @@ def gate_settings():
     return settings
 
 
+async def _drain(relay, records) -> int:
+    """真实 embedding 服务有瞬态失败；outbox 的保证是"失败保留、下轮重试"，
+    所以按该保证重试排空（同时也在验证这条保证本身）。返回本轮确认的总条数。"""
+    acknowledged = 0
+    async with asyncio.timeout(240):
+        while True:
+            acknowledged += await relay.flush()
+            if not await records.pending():
+                return acknowledged
+            await asyncio.sleep(2)
+
+
+async def _real_count(vectors, gate_settings, memory_id: str, identity: IdentityContext,
+                      scope: MemoryScope = MemoryScope.USER) -> int:
+    """查询一条记忆在当前 filter 下的**真实**行数（Strong 一致性，不用 stats）。
+
+    这个查询是"无残留"这类断言的证据本身（`get_collection_stats` 是惰性陈旧值），
+    所以只留这一份实现——两份副本一旦漂移，等于悄悄改掉验收断言的语义。
+    """
+    expression, params = MilvusVectorStore._filter(identity, scope)
+    rows = await vectors._call(
+        "query", collection_name=gate_settings.milvus_collection,
+        filter=expression + " AND memory_id == {memory}",
+        filter_params={**params, "memory": memory_id},
+        output_fields=["count(*)"], consistency_level="Strong")
+    return int(rows[0]["count(*)"])
+
+
 async def test_real_connection_and_missing_collection(gate_settings):
     vectors = MilvusVectorStore(gate_settings)
     try:
@@ -212,25 +240,10 @@ async def test_real_forget_propagates_to_milvus_and_a_real_count_confirms_no_res
     session_b = "gate_session_b_" + uuid4().hex
 
     async def drain() -> int:
-        """真实 embedding 服务有瞬态失败；outbox 的保证是"失败保留、下轮重试"，
-        所以按该保证重试排空（同时也在验证这条保证本身）。"""
-        acknowledged = 0
-        async with asyncio.timeout(240):
-            while True:
-                acknowledged += await relay.flush()
-                if not await records.pending():
-                    return acknowledged
-                await asyncio.sleep(2)
+        return await _drain(relay, records)
 
     async def real_count(memory_id: str, scope: MemoryScope) -> int:
-        """查询一条记忆在当前 filter 下的**真实**行数（Strong 一致性，不用 stats）。"""
-        expression, params = MilvusVectorStore._filter(alice, scope)
-        rows = await vectors._call(
-            "query", collection_name=gate_settings.milvus_collection,
-            filter=expression + " AND memory_id == {memory}",
-            filter_params={**params, "memory": memory_id},
-            output_fields=["count(*)"], consistency_level="Strong")
-        return int(rows[0]["count(*)"])
+        return await _real_count(vectors, gate_settings, memory_id, alice, scope)
 
     try:
         await vectors.initialize()
@@ -349,22 +362,10 @@ async def test_real_langmem_manager_delete_and_update_reach_milvus(gate_settings
         return stable_doc_id(memory_id, MemoryNamespace.of(MemoryScope.USER, identity).as_tuple())
 
     async def drain() -> None:
-        """真实 embedding 服务有瞬态失败；outbox 的保证是"失败保留、下轮重试"。"""
-        async with asyncio.timeout(240):
-            while True:
-                await relay.flush()
-                if not await records.pending():
-                    return
-                await asyncio.sleep(2)
+        await _drain(relay, records)
 
     async def real_count(memory_id: str, identity: IdentityContext) -> int:
-        expression, params = MilvusVectorStore._filter(identity, MemoryScope.USER)
-        rows = await vectors._call(
-            "query", collection_name=gate_settings.milvus_collection,
-            filter=expression + " AND memory_id == {memory}",
-            filter_params={**params, "memory": memory_id},
-            output_fields=["count(*)"], consistency_level="Strong")
-        return int(rows[0]["count(*)"])
+        return await _real_count(vectors, gate_settings, memory_id, identity)
 
     try:
         await vectors.initialize()
