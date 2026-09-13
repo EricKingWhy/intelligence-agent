@@ -49,7 +49,7 @@
 | Branch | `feat/frontend` |
 | 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（批量审查循环；v1 的「每票一次 /code-review」已作废） |
 | 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
-| 集成交接提示词 | 本轮：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md`（**集成 AI 的唯一入口**，§0 是可执行摘要）；上一批：`docs/integration/FRONTEND_RECOVER_FORK_SCROLL_INTEGRATION_PROMPT.md` |
+| 集成交接提示词 | 本轮：`docs/integration/FRONTEND_SESSION_HARD_DELETE_INTEGRATION_PROMPT.md`（#172 前端半，**集成 AI 的唯一入口**，§0 是可执行摘要）；上一批（**已入 main `593dcda`**）：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md` |
 | 本批交接手册 | `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（做了什么 + 8 个坑点 + 未决项 + 复核命令） |
 | 下一批提示词 | `docs/PROMPT_FRONTEND_NEXT_BATCH.md`（可直接复制给前端 Agent：OBS-015 修复为主） |
 
@@ -68,6 +68,54 @@
 | 门禁复跑（前端 worktree，同步后的树上实跑） | tsc 0 · vitest **628 passed**（35 文件；首轮 1 例假红复跑消失，两轮全绿）· oxlint 38w/0e · playwright **216 passed**（`--workers=2`；一次 215→复跑 216，与回执数字一致）· vite build ✓ |
 | 回执 §5.4 答案落地 | **审批倒计时不做**：`tool/approval-requested` 无超时字段，硬编码 300s 违反不变量 #22 + 用户决策 D4 → UIP-DEFER 关闭（回执已记录）；「渲染超时拒绝 reason」为加性小改进，待立票 |
 | 本 worktree 下批工作项（待产品/用户拍板后立票） | ① §4.1 permission_mode 语义 gap（改档只影响新会话）——等产品决策加端点还是 UI 提示；② 渲染「审批超时按 fail-closed 拒绝」的 `permission/resolved` reason（加性零契约变更）；③ 回执 §5.5 的 5173 复用坑继续有效：跑 playwright 前确认 5173 是哪个 worktree 的 dev server |
+
+---
+
+## 第十三轮（2026-09-13）：会话硬删 #172 前端半（跨端票的前端半）
+
+**本批 commit**：`57dd028`（`feat/frontend`；父 `11ff129` = 本批 fixed point）。
+**前置**：后端半在 `feat/backend`（`4109b08` + docs `92135a5`），**尚未入 `main`**。本半按用户
+2026-09-13 的分工（「你先做你的，做完了我再让前端 ai 动手，这样就不会冲突」）动手；两端串行，
+合并顺序见本轮集成提示词 §2（**后端半先进 `main`，再合前端半**，§14.9 一次一支）。
+
+**背景**：后端给了 `DELETE /api/sessions/{id}`（硬删，无墓碑 / 无回收站），界面上却没有任何入口。
+ADR-0029 的 Consequences 逐字写着「误删不可逆，且没有任何技术兜底。风险全部由**入口层**的显式
+确认承担」——所以本票的实质不是"能删掉"，而是"删之前说清、删之后收敛干净"。
+
+| 交付 | 位置 |
+| --- | --- |
+| 契约层：`SessionDeleted`（`deleted: true` 字面量）+ `deleteSession` + `SessionError(status)` + `describeSessionError` | `src/types.ts` / `src/lib/api.ts` |
+| 回执文案纯函数（`events` 缺数时不报数） | `src/lib/sessionDelete.ts`（+4 例） |
+| 收敛：`removeSession`（成功 / 404 → 重拉 + 必要时 `selectSession(null)`；409 → 列表原样） | `src/hooks/useSession.ts` |
+| 入口：会话行 kebab 末尾「删除会话…」（两分支共用；**不**对 live 行禁用——忙不忙只有后端知道） | `src/components/SessionList.tsx` |
+| 确认面：不可恢复措辞 + 会话标识（标题 + id 片段）+ 回执留在浮层 | `src/components/DeleteSessionDialog.tsx` |
+| 样式：复用 `.project-dialog` 家族 + 身份块 3 条规则（零新 token，§15 不触发） | `src/styles/app.css` |
+| 单测 +11（状态码映射 / 回执透传 / 404 不归 `NotFoundError` / 回执文案 4 分支） | `src/lib/api.test.ts` / `src/lib/sessionDelete.test.ts` |
+| e2e +8（4 用例 × 2 视口） | `e2e/w-session-delete.spec.ts` + `e2e/fixtures.ts`（**有状态** DELETE mock） |
+
+**门禁（实跑）**：tsc 0 · vitest **639 passed**（36 文件；+11）· oxlint **38w/0e**（基线未动）·
+playwright **224 passed**（`--workers=2`；+8）· vite build ✓。
+
+**两轴 review（双 Explore subagent）**：Spec 轴 **0 P1/P2** + 4×P3；Standards 轴 **0 P1/P2** + 7×P3。
+第二轮 delta 复核：4 项修复全部 VERIFIED、3 项 decline 全部 SAFE。处置：
+
+| # | 轴 | finding | 处置 |
+| --- | --- | --- | --- |
+| 1 | S | mock 注释声称后端「日志为空也是 404」但代码没实现（mock 与真机语义相反是本仓明确的缺陷类） | 修：`events === 0` 早返回 404 且**什么都不删**（对齐 `service.py` 守卫②） |
+| 2 | S | 强制 404 分支只摘会话行、不摘项目账本 → rail 会渲染一条「n 条会话日志缺失」的**假缺失** | 修：抽出 `detachFromLedgers`，成功与 404 两分支共用 |
+| 3 | S | `events` 缺失（0）时回执会写「已删除 0 条事件记录」——一句可能为假的话，还与「不可恢复」同句 | 修：0 当「回执没给数」→ 不报数；+2 断言（0×0 与 0×2 两形态） |
+| 4 | S | `.mono` 在本仓**没有独立规则**（只有 `.project-input.mono`），挂在元素上是空类名 | 修：`.project-dialog-target-id` 直接写 `font-family: var(--font-mono)`（token 只在暗色 `:root` 定义、亮色不重定义字体 → §15 不触发） |
+| 5 | S | e2e 注释把回执断言说过头（mock 两处同源，区分不了「读响应」与「偷读行」） | 修注释：写明真实保证链（`DeleteSessionTarget` 不含事件数 + `api.test.ts` 透传断言） |
+| 6 | B | 404 也触发收敛，而票面只要求「成功后的收敛」 | **有据不改**：404 = 本地这行已过期（后端刻意不伪装成"又删了一次"），不收敛会让用户对着幽灵行反复重试；且 404 绝不显示成功回执 |
+| 7 | B | `detached_from_projects === 0` 写成「它不在任何项目里」而非字面「从 0 个项目解除」 | **有据不改**：信息未丢，字面写法反而像故障腔；单测钉住这个刻意选择 |
+| 8 | B | `refreshSessions` 无代际守卫（慢的旧 GET 可能把删掉的行带回来） | **有据不改**：既有属性、窗口窄，本次未触碰该函数（§8 Scope Lock：只登记不顺手修） |
+
+**变异验证**（逐条断→红→还原→绿，`grep -c MUTATION` = 0）：回执 `deleted` 改读 body → 单测 1 红；
+回执 `detached=0` 分支拆除 → 1 红；`events=0` 报数 → 1 红；成功不收敛 / 404 不收敛 / 无条件清视图
+→ e2e 各 1 红（且 409 用例保持绿）；错误文案换成自编句 → 409 与 404 两用例红；不可恢复措辞与
+按钮名拆除 → 4 用例红。
+
+**关单**：#172 **不关**（跨端票只完成前端半，§14.12）。**未 push、未 merge**（集成 AI 执行）。
 
 ---
 
@@ -93,6 +141,7 @@ fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **
 | **U-2** | **UI-03（Inspector run 分组）+ UI-04（信任裂缝）+ UI-05（Rail 空态）** | **`236049f`**（U-1 修复 commit） | Spec 3P1/3P2/3P3 + Standards 1P1/5P2/6P3 → 全部处置（含 **Rules of Hooks 崩溃**、空态自相矛盾、交错 run 序数、断言假绿） | `e543ae1` |
 | **U-3** | **UI-06（minor 打磨）+ 收尾（删临时脚本 / 集成提示词）** | **`e543ae1`**（U-2 修复 commit） | 4 项处置（e2e 真实渲染断言升级 + 2 处变异红→绿） | 本批尾 commit |
 | **B-2** | **#169（WS-6 前端半：项目内新建任务 / cwd）+ #170（WS-7 前端半：新建项目内嵌目录浏览器）** | **`522602d`**（= 本分支 base。注意它**正是 U-2 的功能 commit**，U-2 的审查修复还没落在它上面——见 §B-2 的集成顺序） | 两轴各一 subagent；**零 P0/P1**，5 条 P2 + 6 条测试缺口 → 全部处置 | `51fc68c` |
+| **W-1** | **#172（会话硬删前端半：不可逆确认 + 删除后收敛）** | **`11ff129`**（集成回执核验 commit） | 两轴各一 subagent；**零 P0/P1/P2**（Spec 4×P3 + Standards 7×P3）→ 修 4 / 有据不改 3；第二轮 delta 复核 4 项修复全 VERIFIED、3 项 decline 全 SAFE | **`57dd028`**（本批） |
 
 ### B-2：WS-6/WS-7 前端半（#169 / #170，隔离 worktree）
 
