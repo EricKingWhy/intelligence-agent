@@ -1904,3 +1904,60 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
 - **`workspaces/ws-delete-me/` 不是垃圾**：它是会话 `43e7b46e` 的 `cwd`
   （`session/started.cwd = …\workspaces\ws-delete-me`），来自更早一轮 #172 测试语料；
   它不在 `GET /api/projects` 里是**正确**的（不是项目，只是会话工作目录）。**不要当成遗留目录清掉**。
+
+### 第十一轮 · 修复收口（2026-09-13，本轮 finding 的落地状态）
+
+> 与上面各 finding 的正文配套读：这里是**每条 finding 现在的状态 + commit**（母票 #173 AC6 要求）。
+> 前端修复全部在 `D:\intelligence-agent-frontend`（`feat/frontend`）落地——本 worktree 的 `web/`
+> 是旧快照（见 SID-04 与文件末尾的"集成安全警示"），在那改送不到前端。spec 修复在 `feat/backend`。
+
+#### P1
+
+| ID | 状态 | commit（分支） | 真机/测试证据 |
+| --- | --- | --- | --- |
+| **ART-01** | **已修复** | `47b2644`（feat/frontend） | `artifact/externalized` 接线到 Artifacts 页签；真机会话有产物时页签有内容、`unknown_events` 为空；门禁 224 e2e 绿 |
+| **MOD-01** | **已修复** | `65c8b7b`（feat/frontend） | 真机 `fb3619c6`：选 `glm-5.3-flash` → JSONL `seq8 {to=glm-5.3-flash}`；再选「默认链」→ `seq9 {from=glm-5.3-flash, to=None}`，覆盖被真的清空（修复前零请求）。新增 `lib/modelSelection.ts`（取默认条目名提交）+ 5 条单测 |
+| **APR-01** | **已修复** | `2c5adbd`（feat/frontend） | 真机 `d51bdf05`（JSONL seq11 审批 + seq12 `run/interrupted`）：卡片 `approval-card pending invalid`、标题「审批已失效」、批准/拒绝均 disabled、**零 `/approve` 请求**；并且 composer 解锁（打字后发送键可用）。修复前是永久死局：卡点不动 + 输入框禁用，这个会话再也发不出消息 |
+
+#### P2（后端侧，早于前端批次，`164fbc2` on feat/backend）
+
+| ID | 状态 | 证据 |
+| --- | --- | --- |
+| **API-01** | 已修复 | `POST /api/projects` 的 422 detail 与 `GET /api/host/dirs` 同款策展文案（新增 `os_error_detail()`）；测试断言两处 detail 逐字一致 |
+| **API-02** | 已修复 | 相对路径/空路径/含 NUL 路径全部中文文案（`path 必须是绝对路径` 等）；全量 pytest 2130 passed |
+| **SID-03** | 已修复 | `docs/ACCEPTANCE_LANE_ENV.md` §2 期望能力集 2 → 3（补 `memory`），与真机 `/api/capabilities` 对齐 |
+| **SID-04** | 已处置 | 登记簿在两侧 worktree 已分叉：集成 AI 在 **main** 侧把第十一轮拆成「（前端侧）/（后端侧）」并加头注；本 worktree 保留**后端侧**副本。后续每轮新章节只在本侧追加，不再假设两侧同名章节同一内容 |
+
+#### P2（前端侧）
+
+| ID（旧 → 本轮编号） | 状态 | commit | 证据 |
+| --- | --- | --- | --- |
+| **SID-01** → FE-R11-09 窄屏删除入口不可达 | **已修复** | `8e8f0ab` | `≤820px` 不再收起 `.rail-menu-btn`；槽位共享（空闲=会话点、hover/聚焦=⋯，⋯ 绝对定位不挤可点面积）。真机 800px 实测：`focusInCmdkRoot`/`dot` 切换正确、`itemW≥24`；e2e 800px 视口跑完删除确认全流程。**同时发现同一条规则误伤 `.session-item-dot`**（注释声称"只留下点"实际把点也藏了 → 行是空条），已一并修正 |
+| **SID-02** → FE-R11-10 危险弹窗初焦 | **已修复** | `8e8f0ab` | 删除确认弹窗初焦从右上「关闭(X)」改为「取消」（回车 = 零请求安全取消）；e2e 断言 `toBeFocused()` + 零 DELETE |
+| **MOD-F1** → FE-R11-04 picker 键盘导航 | **已修复** | `59673ef` | 短目录搜索框隐藏时把初焦交给 listbox（cmdk 的 keydown 承接者在 `[cmdk-root]` 内）；**变异验证**：去掉修复该用例报 `focusInCmdkRoot=false` 失败。真机实证：打开后 `activeElement` 已在 root 内、Enter 直接提交高亮项 |
+| **MOD-F2** → FE-R11-05 单选无"未选"入口 | **已修复** | `59673ef` | 首项「默认（未选）」提交 `null`；真机实键选回后 trigger 回到 placeholder；e2e 锁住往返 |
+| **MOD-F4** → FE-R11-06 勾选态对 AT 不可见 | **已修复** | `59673ef` | cmdk 硬写 `aria-selected`（=高亮），故勾选态改挂 `role="option"` 的 `aria-checked` + listbox `aria-multiselectable`；e2e 断言 true/false 往返 |
+| **MOD-F6** → FE-R11-07 幽灵 selectedIds | **已修复** | `59673ef` | `selectedIds ∩ entries` 后再计数与 toggle；单测两条（含全幽灵 → 回 placeholder） |
+| **PRJ-F3** → FE-R11-08 空白重命名静默丢弃 | **已修复** | `8e8f0ab` | Enter 遇空白就地拦下：可见提示 + 保留编辑态 + `aria-invalid`/`aria-describedby`；补字后正常提交。e2e 三段锁住 |
+| **MOD-F5** → FE-R11-11 Split/Preview 占位 | **未修（待产品决策）** | — | 已开 **#180**：改「未实现」态（disabled + title）还是本轮做真副面板。**没有自行改**——它是产品可见的能力声明，按 §9.1 停下报告 |
+
+#### 本轮新发现（修复过程中冒出来，不是原 finding）
+
+| ID | 归属 | 级别 | 摘要 | 处置 |
+| --- | --- | --- | --- | --- |
+| **MOD-F7** | 前端 | P2 | `≤820px` 时 `.rail-project-head` 整块收起 → **项目级操作**（重命名项目 / 删除项目 / 新建会话）在窄屏没有任何入口（与 SID-01 同源，但作用在项目层；那一块的注释只说"层级信息丢失是刻意降级"，没提"操作不可达"是副作用） | 已开 **#179** 待决策；本轮**未改**（改法涉及窄屏项目行是否保留一个槽位，属产品取舍） |
+| **方法学** | 测试基建 | P2 | `pickControl` 在 Escape 后不等退出动画卸载就再次 open → 选中静默失效（只在连续两次调用时复现） | 已修：helper 末尾等 `[role="listbox"]` 卸载（`59673ef`），并在注释里写明成因 |
+
+#### spec 侧（母票 #173 的 T1–T5）
+
+| 子票 | 状态 | commit | 说明 |
+| --- | --- | --- | --- |
+| **T3**（#176） | **已交付并关单** | `4a261c2` | `checkpoint/saved` 移出事件表 + 新增 §3.1 存储层分层说明 |
+| **T2**（#175） | **已交付并关单** | `d134c21` | 4 个历史名 → 实装名映射表（§3.2）+ 表内行内注记；脚本核对无"裸契约行" |
+| **T4**（#177） | **已交付并关单** | `b43f1b1` | `step/started`/`step/completed`/`context/built` → §3.3「设计草案，勿按此实现」 |
+| **T1**（#174） | **已交付并关单** | `88fbd46` | §3 按实装重写：**38** 个类型（36 持久化 + 2 仅广播），脚本比对与 `event.py` 集合相等 |
+| **T5**（#178） | **未交付（待决策）** | — | 票面自己写明"两条路线需 Primary Developer 选一条，本票不得自行决定"：① spec §3 表允许被机器解析（加守卫测试）② 权威副本生成到代码侧、spec 只引用。**已按票面停下**，等选定后一条 commit 可完成 |
+
+**两处数量订正（按代码为准，已在 #174 评论区说明）**：实装类型是 **38** 不是 37（母票两处清单都漏了
+`tool/output_delta`）；母票 AC1 把 `text/delta`、`reasoning/delta`、`tool/output_delta` 举例为"仅广播"，
+与 `STREAM_ONLY_TYPES` 和 ADR-0016 §3.1 相反——它们都是**持久化**的合帧 chunk。
