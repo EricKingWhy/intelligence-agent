@@ -338,6 +338,10 @@ def test_minio_load_namespaces_key_by_store_session(monkeypatch: pytest.MonkeyPa
     assert artifact.content == content
     assert client.requests[0]["Key"] == f"sess-b/{artifact_id}"
     assert client.requests[0]["Bucket"] == "b"
+    # AC4：MinIO 的 save 没有持久化元数据，load 必须如实给 None，不能伪造成空串。
+    assert artifact.source_tool is None
+    assert artifact.tool_call_id is None
+    assert artifact.created_at is None
 
 
 def test_minio_load_maps_missing_object_to_key_error(

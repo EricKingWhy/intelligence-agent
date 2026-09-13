@@ -141,9 +141,11 @@ class MinioArtifactStore(ArtifactStore):
             session_id=self._session_id,
             size=len(body),
             mime_type=response.get("ContentType", "application/octet-stream"),
-            source_tool="",
-            tool_call_id="",
-            created_at="",
+            # save 未持久化这三项（对象上只有内容和 ContentType），所以 load 无法恢复：
+            # 如实给 None，而不是伪造 ""（#185 AC4）。
+            source_tool=None,
+            tool_call_id=None,
+            created_at=None,
             content=content,
         )
 

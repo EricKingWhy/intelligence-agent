@@ -37,9 +37,12 @@ class Artifact(BaseModel):
     session_id: str
     size: int
     mime_type: str
-    source_tool: str
-    tool_call_id: str
-    created_at: str
+    # 元数据"缺失即 None"，不得伪造成空串/默认值（#185 AC4）：MinIO 实现的 save 不
+    # 持久化这三项，load 也无从恢复——填 "" 会让调用方以为"产物来自某工具，只是 id
+    # 为空"。None 才是"本存储没存这一项"的如实表达。
+    source_tool: str | None = None
+    tool_call_id: str | None = None
+    created_at: str | None = None
     content: str | None = None  # load() 时填充；inspect() 不填充
 
 
