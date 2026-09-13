@@ -914,3 +914,43 @@ dev server 已停、真记忆库已清空（不留假事实）。
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit，不 push）；
 成功后回填 `docs/PHASE_STATUS.md`。合并顺序：先 `feat/backend`（含 spec #173 T1–T4 的 4 个 commit），
 再 `feat/frontend`（本表 4 个 commit）——详见 `docs/INTEGRATION_PROMPT_SPEC_173_T1_T5.md`（backend worktree）。
+
+---
+
+## 第十四轮：#179 / #180（2026-09-13，前端侧 · 在途记录）
+
+> 来源：backend agent 在第十一轮真机验收里开的两张**决策票**（#179/#180）。用户 2026-09-13 裁决：
+> #180 走**路线 A（诚实占位）**；#179 走票面**选项 1（项目行保留槽位）**。
+
+| 票 | commit | 内容 | 回归锁 |
+| --- | --- | --- | --- |
+| **#179**（P1） | `4fe1ab8` | ≤820px 不再收起 `.rail-project-head`——项目级操作（重命名/删除项目/在此项目中新建任务）恢复入口。沿用会话行槽位交换语义（文件夹图标 ↔ ⋯）；标题/计数/箭头收起，项目名进 `.rail-project-toggle` 的 `aria-label`（`display:none` 会把它从可访问性树摘掉）；行内重命名在编辑态向右溢出（否则 56px 轨里只剩 ~40px，能开不能用） | `r-project-groups.spec.ts` 新增窄屏 describe（800×900）：⋯ 可达 + 菜单项与宽屏逐字一致 + 删除确认面；重命名 **PATCH 后刷新重取仍在** + 量输入框宽度 >100px |
+| **#180**（P1） | `4fe1ab8` | Split/Preview 从"可点但只插提示条"收敛为**诚实占位**：`disabled` + `aria-disabled` + `title`，说明文本同时进 accessible name；删掉 `workspaceMode` 状态、`.workspace-scaffold*` 样式与分支；Chat 成唯一可选（`aria-pressed`）模式 | 新增 `workspace-modes.spec.ts`：disabled/aria-disabled/title/说明文本、`force` 点击不选中、无 `.workspace-scaffold` 残留、恰好一个 `sel` |
+
+**门禁**（`feat/frontend` HEAD `4fe1ab8`，含新增 3 条 e2e）：
+`npx tsc -b` 干净 / `npx vitest run` **659 passed（38 文件）** / `npx oxlint` 0 error /
+`npx playwright test --workers=2` **240 passed** / `npx vite build` 绿。
+
+**⚠ 订正上一节的"226 e2e 全绿"**：那条是 `59673ef` **之前**的跑分，之后没有重跑全量，所以
+`8e8f0ab` 的全量 e2e **实际是红的**——`u-project-task.spec.ts:114` 仍断言权限档 `toHaveCount(3)`，
+而同一批 commit 给单选 picker 加了首项「默认（未选）」（=1+3=4）。本轮全量跑把它暴露出来，已改为
+逐档断言三档都存在（保留 AC10②「三档都真的可选」的本意）。教训：**改了共享控件就要重跑全量**，
+只跑"受影响的那几个 spec"会漏掉按数量断言的下游用例。
+
+**同时修正的测试脆弱写法**：`r-project-groups.spec.ts` 里对行内重命名的 Enter 改用
+`page.keyboard.press`。行内输入的 Enter 处理器会立刻提交并**卸载自己**，而 `locator.press` 在
+keydown 之后还要对同一元素补发 keyup——元素已不在就会重新解析定位符并等到 30s 超时（失败快照里
+改名其实已经成功）。该失败在全量并行下偶发（单独重跑 6/6 通过），属测试写法问题，非产品缺陷。
+
+**新发现（已开票，未修）**：
+- **#181**：窄屏的 ⋯ 依赖 `hover` / `focus-within` 让位——**触摸设备**（无 hover、iOS 上
+  `button` 默认不聚焦）可能仍然拿不到菜单。会话级（FE-R11-09）与项目级（#179）同款问题，
+  已开票等产品裁决（推荐 `@media (hover: none)` 下常显 ⋯）。
+
+**两轴 code-review（Standards + Spec）结论**：Standards 轴 1 条硬 finding（spec §3 仍写死
+"38 = 36 + 2" 与仅广播名单，与"不再手工维护枚举"的前提自相矛盾）→ 已改为"以生成物为准"并写明
+本文件 MUST NOT 写死名字/数量；另 2 条 judgement call（行格式写入端/读取端重复、生成器校验
+理由未写明）→ 已抽 `format_row()` + 加往返测试 + 补注释。Spec 轴 1 条（#173 AC6 的状态文档
+未随交付更新）→ 已同步登记簿/PHASE_STATUS。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
