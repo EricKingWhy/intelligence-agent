@@ -1080,3 +1080,58 @@ AC5 ✅e2e 断言无输入类元素、无"运行"键、无光标 / AC6 ✅7 条�
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
 集成提示词见 `docs/INTEGRATION_PROMPT_PANEL_190.md`。
+
+## 第十七轮：#184（2026-09-14，前端侧 · 在途记录）
+
+**交付**：`3a57924`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。票面
+`docs/WORKSPACE_PANEL_TICKETS.md` § #184；母 PRD §3.6。票面 2026-09-14 修订后本票**只剩
+PERMISSION 段**（原"ARTIFACTS run 级段"已取消——Artifacts 由清单 tab 承担）。
+
+**做了什么**：Inspector 从"5 段 + CHECKPOINT 诚实占位"补上没有的 PERMISSION 段。
+**零新 API**——全部来自事件流投影。
+
+**关键判断（权限档从哪来）**：`permission_mode` 不在任何 SessionEvent 里，也没有 GET
+接口（后端只在 `POST /sessions` 收它用于构造 PermissionPolicy，`SendMessage` 不带它 ⇒
+档位在会话创建时定死）。所以"这个 run 选了哪一档"前端**根本无从得知**；唯一带运行时证据
+的是审批请求里的 `policy`。结论：整个会话无审批事件就显示 `—` + 说明原因，
+**不拿 composer 里"下次运行的选择"冒充会话事实**（那是另一个语义，画上去就是假事实）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/types.ts` | `approval_decisions`（裁决留痕）+ `permission_policy`（逐事件折叠） |
+| `web/src/lib/projection.ts` | 决议留痕（幂等）+ 权限档折叠；`pending_approvals` 队列语义不变 |
+| `web/src/lib/permission.ts`（新） | 段内措辞与语义色档（`decisionLabel` / `verdictTone` / `permissionView`） |
+| `web/src/components/StepDetail.tsx` | `PermissionSection`（MODEL 与 CHECKPOINT 之间）+ `onJumpToApproval` |
+| `web/src/components/Conversation.tsx` | 审批卡加 `data-approval-key` 落点；jump 查询多一个命名空间 |
+| `web/src/App.tsx` | `jumpToApproval`（key 前缀 `approval:`，与 `tool:`/`step:`/`delegation:` 不相交） |
+| `web/src/styles/app.css` | `.detail-permission-*` + `.permission-verdict-allow/-deny` |
+| `web/e2e/x-permission-section.spec.ts`（新） | 3 条 × 2 视口 |
+
+**门禁（全绿）**：`tsc -b` 0；`vitest` **717 passed**（+16：投影 7 + 措辞 9）；
+`oxlint` 0 error（41 warnings 全为既有，新文件零 warning）；`playwright --workers=2`
+**272 passed**（+6）；`vite build` 0。
+
+**自审（两轴）修掉的三处，都在本票新代码里**：
+
+| finding | 处置 |
+| --- | --- |
+| **P2** 只读行复用 `.detail-tool-row-static`，但同特异度下后出现的 `.detail-permission-row` 的 `cursor: pointer` 会胜出 → 静态行显示成**假按钮**（正是本批一直在守的诚实规则） | 改专属 `.detail-permission-row-static`，并把"必须排在其后"的顺序原因写进 CSS 注释 |
+| **P2** 缺失/未知决策会被涂成**绿色**（绿 = 已批准，是一条断言） | 新增 `verdictTone`，只有真的 `approve*` 涂绿，未知/缺失一律 neutral；加单测 |
+| **P3** 我加了一层纯透传的 `derivePermission`（只是把三个字段抄一遍） | 删掉，`permissionView` 直接读投影状态 |
+
+**AC 逐条**：1 ✅（三段齐）／2 ✅（零待审批说「无待审批」，段不消失）／3 ✅（**未**新增
+ARTIFACTS run 级段，CHECKPOINT 保持诚实占位）／4 ✅（`—` + 原因，不填 0）／5 ✅（投影与措辞
+单测 16 条 + e2e 3 条，e2e 含"点待审批行 → 滚到审批卡并 pulse"）／6 ✅（未改 POST /approve）。
+
+**顺带发现（未修，非本票引入，已升级为待用户决策项）**：**artifact 写入侧从未接上**。
+生产里唯一的外置写入者是 `ArtifactOverflowHandler`，而它在 `assembly.py` 只在
+`artifact_store_*`（S3）分支被创建（`minio_*` 分支只注册**读**工具 `ReadArtifactTool`，
+没有写入者），这与 `config.py:69-72` 自己的注释（"MinIO 用于 tool result 外置"）**相反**。
+且 `D:\intelligence-agent`（用户实际运行的那份）`.env` 里 ARTIFACT/MINIO/S3 键**一个都没有**
+⇒ `overflow_handler=None` ⇒ 什么都不外置。后果：#185 的读取接口在真机上只会回 503，
+#186「artifact 内容可见」落地后也会**看不到内容**。规格 06 §3 写明默认 Provider 是
+"Local filesystem：开发/小型部署"，而 `storage/` 下**没有** Local 实现——这是规格 Gap，
+不是新需求。**已报告用户等待决策，未擅自实现**（§8/§9.1）。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
+`docs/INTEGRATION_PROMPT_PANEL_184.md`。
