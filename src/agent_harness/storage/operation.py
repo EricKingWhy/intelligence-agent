@@ -86,3 +86,14 @@ class OperationLedger(ABC):
     @abstractmethod
     async def list_for_session(self, session_id: str) -> list[Operation]:
         """List a Session's Operations in creation order."""
+
+    @abstractmethod
+    async def delete_for_session(self, session_id: str) -> int:
+        """Remove every Operation of a Session; return how many rows went away.
+
+        会话硬删的一部分（ADR-0029）：append-only 事件日志（唯一真相源）被删除后，
+        台账行描述的对象已不存在，也没有任何东西可供 reconcile——留着它只剩
+        "会话不存在却有台账"这一种解释。
+
+        幂等：未知 / 已清理干净的 session 返回 0、不抛错（重跑即自愈，ADR-0029 D3）。
+        """

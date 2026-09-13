@@ -21,6 +21,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
 | `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary |
 | `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
+| `DELETE /api/sessions/{id}`（会话硬删 / #172 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict, SessionHasChildren |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
 两个特例写进契约、不得「顺手统一」：
@@ -56,6 +57,11 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 handler 的 `except` 元组一行不用改；但本表是**精确类型**索引（`http_error` 直接查表、
 不回退到父类），子类必须在这里自己登记，否则命中时 KeyError。
 
+**会话硬删追加（#172 / ADR-0029）**：新增 `SessionHasChildren: 409`——会话是别的会话的
+fork 父时不删（不级联、不静默 orphan），detail 带子会话数量。它既不是 422（请求形态没
+错）也不是 404（父明明存在），所以只有 409 诚实。上表已补该端点行；该端点的 `404`
+与 `409 ActiveRunConflict` 都是既有条目，复用不新增。
+
 ## 设计取舍（为什么不再往前一步）
 
 - **不用 FastAPI 全局 `exception_handler`**：那会把整张表应用到每个端点，使一个本来
@@ -83,6 +89,7 @@ from agent_harness.session.errors import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
     SteerTargetNotFound,
@@ -117,6 +124,9 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     RecoveryConflict: 409,
     ApprovalAlreadyResolved: 409,
     SteerTargetNotFound: 409,
+    # #172 / ADR-0029：会话是 fork 父——删它会连带处置用户没选中的子会话（级联），
+    # 或留一个悬空来源链接（orphan），两者都不接受，所以是"状态不允许"而非入参非法。
+    SessionHasChildren: 409,
     # WS-4 / #154：会话↔项目的移动在当前状态下不成立（无 cwd 锚 / cwd 不属于该项目 /
     # 重排目标不在该项目账本里）。是"请求合法但状态不允许"，与 422 的名字形态非法分开。
     WorkspaceMoveInvalid: 409,

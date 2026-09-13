@@ -245,6 +245,15 @@ class SqliteOperationLedger(OperationLedger):
             rows = await cursor.fetchall()
         return [self._to_operation(row) for row in rows]
 
+    async def delete_for_session(self, session_id: str) -> int:
+        async with _connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "DELETE FROM operations WHERE session_id = ?", (session_id,)
+            )
+            removed = cursor.rowcount or 0
+            await connection.commit()
+        return removed
+
     @staticmethod
     def _to_operation(row: aiosqlite.Row) -> Operation:
         return Operation.model_validate(dict(row))
@@ -339,6 +348,15 @@ class SqliteCheckpointStore(CheckpointStore):
             )
             rows = await cursor.fetchall()
         return [self._to_checkpoint(row) for row in rows]
+
+    async def delete_for_session(self, session_id: str) -> int:
+        async with _connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "DELETE FROM checkpoints WHERE session_id = ?", (session_id,)
+            )
+            removed = cursor.rowcount or 0
+            await connection.commit()
+        return removed
 
     async def latest(self, session_id: str) -> Checkpoint | None:
         async with _connect(self.database_path) as connection:
@@ -468,6 +486,21 @@ class SqliteSessionMetaStore(SessionMetaStore):
         loaded = await self.get(session_id)
         assert loaded is not None
         return loaded
+
+    async def clear_delegation_parent(self, parent_session_id: str) -> int:
+        """见 `SessionMetaStore.clear_delegation_parent`（#172 / ADR-0029 D5）。"""
+        async with _connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE session_meta
+                SET parent_session_id = NULL, origin = NULL
+                WHERE parent_session_id = ? AND origin = 'delegation'
+                """,
+                (parent_session_id,),
+            )
+            repaired = cursor.rowcount or 0
+            await connection.commit()
+        return repaired
 
     async def cleanup(self, session_id: str) -> None:
         async with _connect(self.database_path) as connection:

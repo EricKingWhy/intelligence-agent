@@ -30,6 +30,14 @@ class ActiveRunConflict(SessionServiceError):
     """session 已有在途 run，不允许并发。"""
 
 
+class SessionHasChildren(SessionServiceError):
+    """会话是别的会话的 fork 父，不能删（ADR-0029 D4）。
+
+    刻意**不级联**：静默删掉用户没选中的子会话不可接受；也刻意**不静默 orphan**：
+    子会话会带着一个悬空来源链接（lineage 显示 "(parent missing)"）。所以拒绝，
+    并把子会话数量写进 detail，由用户先处理子会话。"""
+
+
 class ApprovalQueueMissing(SessionServiceError):
     """session 没有交互式审批队列（permission_mode 非交互，或 run 已结束）。"""
 

@@ -80,6 +80,9 @@ def test_status_map_is_the_audited_contract():
         # BUG-011：seq 冲突（并发写者抢先落盘 / 日志已损坏）——冲突不是「不存在」，
         # 必须与 SessionNotFound 的 404 区分开（旧行为把它翻成 404 掩蔽了日志损坏）。
         "SeqConflict": 409,
+        # #172 / ADR-0029：会话是别的会话的 fork 父——不级联（删掉用户没选中的子会话）、
+        # 不 orphan（留悬空来源链接），所以只有 409 诚实：请求形态没错、父也确实存在。
+        "SessionHasChildren": 409,
     }
 
 

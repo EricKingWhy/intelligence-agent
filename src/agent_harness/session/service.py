@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from agent_harness.assembly import build_runtime
+from agent_harness.logging import log_event
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
 from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
@@ -56,6 +57,7 @@ from agent_harness.session.errors import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
     SteerTargetNotFound,
@@ -212,6 +214,22 @@ class SendMessageResult:
         if self.status == "steered" and self.steer_request is not None:
             return {"status": "steered", "steer_id": self.steer_request.steer_id}
         return {"status": self.status}
+
+
+@dataclass(frozen=True)
+class SessionDeletionStats:
+    """`delete_session` 的结果束（#172 / ADR-0029）：删了什么，可核对。
+
+    计数不是装饰：前端要拿它写"已删除 N 条事件、从 M 个项目解除"的确认回执；
+    也因为七个删除步骤全是幂等的，"删了 0 条事件"必须能被看见（重跑自愈时）。
+    """
+
+    session_id: str
+    #: 删除前日志里的事件条数（取自 `read_session_summary`，与列表页同一条判据）。
+    events: int
+    #: 本次**真的**从多少个账本里摘掉了这个会话——直接取 `detach_session` 的返回值
+    #: （它修剪的是原始账本）。正常 0/1；账本里重复收录同一 id 时会 >1。
+    detached_from_projects: int
 
 
 # ── SessionService ───────────────────────────────────────────────────
@@ -756,6 +774,138 @@ class SessionService:
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
         return self._state.run_manager.cancel(session_id)
+
+    # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
+
+    async def delete_session(self, session_id: str) -> SessionDeletionStats:
+        """用户显式硬删会话：事件日志 + 辅助 DB 行 + harness 自造的沙箱工件。
+
+        与项目**软删除**口径的对照：删会话就是删会话（ADR-0029 D1——无墓碑、无回收站、
+        不可恢复），项目只是"用户想留着的目录"，所以两者语义不同是有意的。
+
+        **五条守卫，顺序即契约**（D4）：
+
+        1. 422 `InvalidSessionId`：形态非法——路径穿越防线，必须最先（后面每条都要用
+           `session_id` 拼路径），且必须比 404 先判（否则 `../x` 会先变成一个"不存在"）。
+        2. 404 `SessionNotFound`：摘要读不出内容（与 `GET /api/sessions` 同一条判据），
+           所以"删得掉"与"看得见"永远一致，不给出一个列表里没有的 id 的删除假回执。
+        3. 409 `ActiveRunConflict`：在途 run——用 `RunManager.is_busy` 而不是 `get_active`。
+           `get_active` 把"task 已 done / terminal 未及置位"的收尾窗口视为**非**在途
+           （那是重连续传的正确判据），而那个窗口恰恰是 finalizer 还在写盘的瞬间：
+           删除不许在别人还在写日志时抽走地面。
+        4. 409 `ActiveRunConflict`：有挂起审批。审批队列由 run 的 done-callback 回收，
+           那个回调可能滞后于 task 收尾（#172 要求这道与上一道**都要**——只靠 ③ 会在
+           滞后窗口里把"还有人等着被批准"的会话判成可删）。
+        5. 409 `SessionHasChildren`：有 **fork** 子会话（`session_meta`）。
+           刻意不级联（用户没选中的子会话不能静默消失）、刻意不 orphan（子会话会带着
+           悬空来源链接），由用户先处理子会话。**委派**子会话不在此列（D5）：它是内部
+           构造，且边由父日志承载、只是被 lineage 索引进 `session_meta`（下面的补偿步
+           读的就是那份索引）——若也拒绝，任何用过子 Agent 的会话将永远删不掉。
+
+        **删除顺序**（D3）：先 DB 行、后文件，每步幂等。列表是**文件系统驱动**的
+        （`list_session_ids` 扫 `<root>/<sid>/events.jsonl`），所以"DB 已删、文件还在"是
+        唯一可自愈的崩溃窗口——用户再删一次即收敛；反过来（文件先删）会留下无法自愈的
+        孤儿 `session_meta` 行（lineage 里的幽灵父节点）。
+
+        其中 DB 段多一步**跨会话的补偿**（D5）：`clear_delegation_parent` 会把"父是被删
+        会话的委派子行"的父链接清空——委派子会话不阻止删除，但也不许留下指着死父的悬空
+        链接。它动的是**别人**的行，所以行数照实计数并写进审计日志
+        （`repaired_delegation_links`），前端响应体里不带它（#172 锁定的形状只有 id /
+        deleted / events / detached_from_projects）。
+
+        **删除面是白名单**（D2）：只删 harness 用 `workspace_dir + session_id` 自己拼出的
+        `sessions/<sid>/`、`workspaces/<sid>.json`、`workspaces/<sid>/`，**永不读**沙箱映射
+        里的 `workspace_root`——ADR-0027 之后它可以是用户的真实仓库（回归锁：
+        `test_cwd_session_delete_never_touches_the_user_directory`）。也因此不必怕
+        `resume_and_launch` 把 cwd 会话的映射改写成默认目录（见 ADR-0029 D2 末段）：
+        删除目标是由 id 算出来的，与映射此刻写着什么无关。
+
+        **并发**：本方法不加锁。每一步都幂等，删除面又是由 id 唯一确定的固定三条路径，
+        所以并发的两次删除最坏也只是各自删掉同一批字节的一部分，永远碰不到白名单之外的
+        东西；随后再删一次是 404（文件已不在，`test_second_delete_after_success_is_404`）。
+        """
+        # ① 形态
+        self._validate_session_id(session_id)
+        await self._state.ensure_stores()
+        store = self._state.store
+
+        # ② 存在性 + 事件数（要删多少，在删之前就必须知道——删完就只能编了）
+        summary = await anyio.to_thread.run_sync(
+            store.read_session_summary, session_id
+        )
+        if summary is None or summary.event_count == 0:
+            raise SessionNotFound(f"session '{session_id}' not found")
+
+        # ③ 在途 run
+        if self._state.run_manager.is_busy(session_id):
+            raise ActiveRunConflict(
+                f"session '{session_id}' has a run in flight; cancel it first"
+            )
+
+        # ④ 挂起审批
+        queue = self._state.approval_queues.get(session_id)
+        if queue is not None and queue.pending_ids():
+            raise ActiveRunConflict(
+                f"session '{session_id}' has a pending approval; resolve it first"
+            )
+
+        # ⑤ fork 子会话（`origin != "delegation"`：NULL 也当 fork 处理——保守拒绝，
+        #    宁可让用户先去处理子会话，也不留一个悬空父链接）
+        metas = await self._state.session_meta_store.list_all()
+        children = [
+            m.session_id
+            for m in metas
+            if m.parent_session_id == session_id and m.origin != "delegation"
+        ]
+        if children:
+            raise SessionHasChildren(
+                f"session '{session_id}' is the fork parent of {len(children)} "
+                f"session(s): delete the child session(s) first"
+            )
+
+        # ⑥ DB 行（先）——四张含 session_id 的表各自清自己的行。跨 Store 级联由调用方
+        #    编排，不让任一 Store 隐式拥有别人的写语义（`SessionMetaStore.cleanup` 的原话）。
+        #    解除计数用 `detach_session` 的返回值：它修剪的是原始账本，是**实际发生**的
+        #    动作；自己再扫一遍 `list()` 只会得到一个近似值，还多一次同步磁盘 I/O。
+        detached = await self._state.workspace_index.detach_session(session_id)
+        # 委派子行的父链接要一起清：委派子会话放行（D5），但不许留下指着死父的悬空链接
+        # （`build_lineage_tree` 会渲染成 `(parent missing)`，而那条边永远无法自愈）。
+        repaired_links = await self._state.session_meta_store.clear_delegation_parent(
+            session_id
+        )
+        await self._state.session_meta_store.cleanup(session_id)
+        await self._state.checkpoint_store.delete_for_session(session_id)
+        await self._state.operation_ledger.delete_for_session(session_id)
+
+        # ⑦ 文件（后）——白名单三条路径；同步磁盘 I/O 一律离开事件循环。
+        await anyio.to_thread.run_sync(store.delete_session, session_id)
+        await anyio.to_thread.run_sync(
+            self._state.workspace_registry.discard_session_artifacts, session_id
+        )
+
+        # ⑧ 进程内残留——排队消息与审批队列都按 session_id 索引，会话没了它们永远等不到
+        #    消费者，且会让同 id 重建的会话继承上一世的队列。
+        await self._state.message_queues.cleanup(session_id)
+        self._state.approval_queues.pop(session_id, None)
+
+        # ⑨ 审计：领域数据里不留墓碑（D1/D7），"它存在过"只在结构化日志里可查。
+        #    只带 id 与计数——删除不可撤销，审计要能回答"谁在何时删了哪个会话"，
+        #    但不需要（也不该）带走会话内容。`repaired_delegation_links` 是这次删除
+        #    **动过的别人的行**（委派子会话的父链接），属于"删除的副作用"里最该被看见的一项。
+        log_event(
+            logger,
+            "session_delete",
+            f"session hard-deleted: {session_id}",
+            session_id=session_id,
+            events=summary.event_count,
+            detached_from_projects=detached,
+            repaired_delegation_links=repaired_links,
+        )
+        return SessionDeletionStats(
+            session_id=session_id,
+            events=summary.event_count,
+            detached_from_projects=detached,
+        )
 
     # ── 审批 ─────────────────────────────────────────────────────────
 
