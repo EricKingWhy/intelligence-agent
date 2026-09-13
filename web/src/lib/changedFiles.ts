@@ -39,6 +39,8 @@ export interface FileChangeEdit {
   truncated: boolean;
   archived: boolean;
   artifactId?: string;
+  /** marker 里后端建议的读回工具名（#186 AC4）——透传给 `DiffBlock` 回显/复制。 */
+  artifactTool?: string;
 }
 
 export interface FileChange {
@@ -103,6 +105,7 @@ function readEdit(tool: ToolCall): FileChangeEdit | null {
     truncated: diff.truncated === true,
     archived: diff.archived === true,
     ...(diff.artifactId !== undefined ? { artifactId: diff.artifactId } : {}),
+    ...(diff.artifactTool !== undefined ? { artifactTool: diff.artifactTool } : {}),
   };
 }
 

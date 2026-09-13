@@ -1208,7 +1208,7 @@ describe('applyEvent — da394a9 新语义', () => {
     expect(s.run_cancelled).toBe(false);
   });
 
-  it('diff before 内嵌 inspect_artifact marker → archived=true + artifactId', () => {
+  it('diff before 内嵌 marker → archived=true + artifactId + artifactTool', () => {
     let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
     const summary = '文件过大已归档。use inspect_artifact(abc-123) 查看全文';
     s = applyEvent(s, ev({
@@ -1218,6 +1218,23 @@ describe('applyEvent — da394a9 新语义', () => {
     }));
     expect(s.turns[0].tools[0].diff).toEqual({
       before: '', after: summary, truncated: true, archived: true, artifactId: 'abc-123',
+      artifactTool: 'inspect_artifact',
+    });
+  });
+
+  /* 默认部署（Local / MinIO）发的 marker 用 `read_artifact`。此前正则只认
+     inspect_artifact ⇒ 默认部署上 diff.archived 永远不成立（#186 AC4）。 */
+  it('diff 内嵌 read_artifact marker（默认部署）也认，并原样带下工具名', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
+    const summary = '文件过大已归档。use read_artifact(0123456789abcdef) to view]';
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, data: { before: summary, after: '', truncated: true } }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].diff).toEqual({
+      before: summary, after: '', truncated: true, archived: true,
+      artifactId: '0123456789abcdef', artifactTool: 'read_artifact',
     });
   });
 

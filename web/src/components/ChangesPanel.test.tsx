@@ -116,6 +116,22 @@ describe('#189 AC5/AC6 + 不伪造：不可得与空态', () => {
     assertAllStatsUnavailable(html);
   });
 
+  /* #186 AC4：marker 里的读回工具名要**原样透到界面**——默认部署（Local / MinIO）
+     配的是 `read_artifact`，写死 `inspect_artifact` 会让用户照着复制出一句调不通的
+     提示。这里同时覆盖「changedFiles → ChangesPanel → DiffBlock」这条透传链。 */
+  it('归档占位回显 marker 里的工具名（read_artifact 不被偷换成 inspect_artifact）', () => {
+    const html = render([
+      editTool('t1', 'big.txt', 'b', 'a', {
+        diff: {
+          before: 'b', after: 'a', truncated: false, archived: true,
+          artifactId: '0123456789abcdef', artifactTool: 'read_artifact',
+        },
+      }),
+    ]);
+    expect(html).toContain('read_artifact');
+    expect(html).not.toContain('inspect_artifact');
+  });
+
   it('无改动：空态文案逐字（AC6/AC8——不是空列表，也不是"加载中"）', () => {
     const html = render([]);
     expect(html).toContain('本次会话未改动任何文件');

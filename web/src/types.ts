@@ -218,14 +218,17 @@ export interface ToolCall {
    *  running（进行中）| success（成功）| failed（失败）| stopped（被中断，≠ error）。 */
   status: 'running' | 'success' | 'failed' | 'stopped';
   result?: unknown;
-  /** da394a9 批：before/after 内嵌 "use inspect_artifact(<id>)" marker 时
-   *  archived=true + artifactId——diff 内容已归档到 artifact，视图渲染占位态。 */
+  /** before/after 内嵌 "use <读回工具>(<id>)" marker 时 archived=true + artifactId
+   *  ——diff 内容已归档到 artifact，视图渲染占位态。
+   *  `artifactTool` 是 marker 里**后端实际建议**的读回工具名（S3 → `inspect_artifact`，
+   *  MinIO / Local → `read_artifact`）：回显与复制都用它，不在前端替换（#186 AC4）。 */
   diff?: {
     before: string;
     after: string;
     truncated: boolean;
     archived?: boolean;
     artifactId?: string;
+    artifactTool?: string;
   };
   started_at?: string;
   completed_at?: string;

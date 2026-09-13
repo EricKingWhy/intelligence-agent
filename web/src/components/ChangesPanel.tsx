@@ -127,6 +127,9 @@ export function ChangesPanel({ tools }: { tools: readonly ToolCall[] }) {
                           truncated: edit.truncated,
                           ...(edit.archived ? { archived: true as const } : {}),
                           ...(edit.artifactId !== undefined ? { artifactId: edit.artifactId } : {}),
+                          ...(edit.artifactTool !== undefined
+                            ? { artifactTool: edit.artifactTool }
+                            : {}),
                         }}
                       />
                     </div>

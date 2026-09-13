@@ -367,21 +367,24 @@ function projectToolResult(state: ConversationState, event: AgentEvent): void {
     tool.result = parsedData ?? parsed?.message ?? data.content;
     // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
     // directly into ToolResult.data — not nested under data.diff. Detect them here.
-    // da394a9 批：>2000 字符的 before/after 变为截断摘要并内嵌
-    // "use inspect_artifact(<id>)" marker——diff 已归档，视图渲染占位态而非
-    // 把 marker 当 diff 内容。
+    // >2000 字符的 before/after 变为截断摘要并内嵌 "use <读回工具>(<id>)" marker
+    // ——diff 已归档，视图渲染占位态而非把 marker 当 diff 内容。工具名两个都认
+    // （S3 → inspect_artifact，MinIO / Local → read_artifact），并**原样带下去**：
+    // 面板要按这个部署真实可调的那个名字回显与复制（#186 AC4）。
     if (
       parsedData &&
       typeof parsedData.before === 'string' &&
       typeof parsedData.after === 'string'
     ) {
-      const artifactId =
+      const marker =
         parseArtifactMarker(parsedData.before) ?? parseArtifactMarker(parsedData.after);
       tool.diff = {
         before: parsedData.before,
         after: parsedData.after,
         truncated: parsedData.truncated === true,
-        ...(artifactId !== null ? { archived: true as const, artifactId } : {}),
+        ...(marker !== null
+          ? { archived: true as const, artifactId: marker.artifactId, artifactTool: marker.toolName }
+          : {}),
       };
     }
     tool.completed_at = event.time ?? new Date().toISOString();
