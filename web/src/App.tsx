@@ -82,6 +82,7 @@ export default function App() {
     submitTask,
     sendMessage,
     cancelStream,
+    removeSession,
     recover,
     refreshSessions,
     changeModel,
@@ -657,6 +658,10 @@ export default function App() {
           onRetryProjects={handleRetryProjects}
           onStartTask={handleStartTaskInProject}
           permissionModes={permissionModes}
+          /* 会话硬删（#172 / ADR-0029）：removeSession 自己负责成功/404 后的状态
+             收敛（清视图 + 重拉列表），确认面只消费它的回执与异常。传引用稳定的
+             hook 回调，SessionList 的 memo 才不会因它失效。 */
+          onDeleteSession={removeSession}
         />
 
         <section className="app-workspace">

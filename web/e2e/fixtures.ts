@@ -69,6 +69,18 @@ export interface ApiMock {
    *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
    *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
   onApprovePost?: (route: Route) => Promise<void> | void;
+  // ── #172 / ADR-0029 会话硬删 ──
+  /** 指定 id 的 DELETE /api/sessions/{id} 直接回这个错误——用来构造只在真机上才会
+   *  自然出现的拒绝：409（有在途 run / 有挂起审批 / 是 fork 父会话；**状态码相同**，
+   *  只有 detail 原句不同）与 404（"这个会话本就不在了"，第二次删除）。
+   *
+   *  status 404 的条目会**同时**把它从会话状态里摘掉：真后端在那一刻它确实不在，
+   *  留着会让重拉之后那一行又冒出来——mock 语义与真机相反（#155 轮栽过这个坑）。
+   *
+   *  不设 = 按真后端语义**成功**：真的从会话列表与项目账本里摘掉它，`events` 取行上
+   *  的 `event_count`（真后端也是删之前取），`detached_from_projects` 数它进过几个
+   *  账本。所以"删完行没了、项目计数也掉了"考的是界面跟着后端走，不是本地隐藏。 */
+  sessionDeleteErrors?: Record<string, { status: number; detail: string }>;
   // ── WS-5 / #155 项目分组 ──
   /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
    *
@@ -175,7 +187,9 @@ export function routeApi(page: Page, mock: ApiMock): void {
   // ── WS-5 #155：可变状态（每测试一份，互不串味）──
   // 注意 sessions **持有调用方数组的引用**，不拷贝：既有 spec 的约定是"fork 成功后
   // 往自己的 sessions 数组里 push child，下一次 GET 就能看到"（b-fork.spec.ts 依赖
-  // 这一点）。所以本车道只在原地改行的 `workspace` 字段，既不新增也不删除行。
+  // 这一点）。除 #172 的硬删分支外，本车道只在原地改行的 `workspace` 字段，既不新增
+  // 也不删除行；硬删是**真的**删（`splice`）——那正是它的语义，调用方的数组也跟着变
+  // （spec 据此断言"删完重拉就没有这一行了"）。
   const sessionState: unknown[] = mock.sessions ?? [];
   const projectState: ProjectFixture[] = (mock.projects ?? []).map((p) => ({
     ...p,
@@ -197,6 +211,21 @@ export function routeApi(page: Page, mock: ApiMock): void {
     updated_at: T,
   });
   const findProject = (id: string) => projectState.find((p) => p.id === id);
+  /** 从项目账本里摘掉这个会话，返回**实际摘掉几个账本**（真后端
+   *  `WorkspaceIndex.detach_session` 的返回值就是它，`detached_from_projects` 用它）。
+   *  硬删的成功分支与 404 分支共用——404 那条（"别处已经删了"）在真后端里账本也早
+   *  就解除了，留着会让 rail 报一条"n 条会话日志缺失"的假缺失。 */
+  const detachFromLedgers = (sessionId: string): number => {
+    let detached = 0;
+    for (const p of projectState) {
+      const at = p.session_ids.indexOf(sessionId);
+      if (at >= 0) {
+        p.session_ids.splice(at, 1);
+        detached += 1;
+      }
+    }
+    return detached;
+  };
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({ status, body: JSON.stringify(body), contentType: 'application/json' });
   /** 把某会话的 workspace 引用同步成"它现在属于谁"——与真实后端一致
@@ -275,6 +304,40 @@ export function routeApi(page: Page, mock: ApiMock): void {
       ];
       sessionEvents.set(sid, frames); // durable log = 刚才流的那些帧（见 /events 分支）
       return fulfillSse(route, frames);
+    }
+    // ── #172 / ADR-0029 会话硬删（有状态 mock：语义对齐 `web/app.py::delete_session`）──
+    const sessionDeleteMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);
+    if (sessionDeleteMatch && req.method() === 'DELETE') {
+      const sid = decodeURIComponent(sessionDeleteMatch[1]);
+      const forced = mock.sessionDeleteErrors?.[sid];
+      if (forced) {
+        // 404 的条目**同时**摘掉这一行与它在项目账本里的条目：真后端在那一刻它确实
+        // 不在（第二次删除就是这个），而用户走完一次真删时账本也已经解除过了——
+        // 留在状态里会让重拉之后那行又冒出来、还带一条"n 条会话日志缺失"的假缺失。
+        if (forced.status === 404) {
+          const at404 = sessionState.findIndex(
+            (s) => (s as Record<string, unknown>)['session_id'] === sid,
+          );
+          if (at404 >= 0) sessionState.splice(at404, 1);
+          detachFromLedgers(sid);
+        }
+        return json(route, { detail: forced.detail }, forced.status);
+      }
+      const at = sessionState.findIndex(
+        (s) => (s as Record<string, unknown>)['session_id'] === sid,
+      );
+      if (at < 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      const row = sessionState[at] as Record<string, unknown>;
+      // 事件数在**删之前**取：删完只剩文件系统，无从统计（真后端同一顺序）。
+      const events = typeof row['event_count'] === 'number' ? row['event_count'] : 0;
+      // 真后端的第二条判据：日志为空（event_count == 0）也是 404——"删得掉"与"看得见"
+      // 永远一致，不给出一个列表里没有内容的 id 的删除假回执。**什么都不删**。
+      if (events === 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      sessionState.splice(at, 1);
+      // 项目账本真的摘掉它，并按实际摘掉的账本数报 `detached_from_projects`——
+      // "删完项目计数也掉了"这条断言因此考的是界面跟着后端语义走，而不是本地把行藏起来。
+      const detached = detachFromLedgers(sid);
+      return json(route, { id: sid, deleted: true, events, detached_from_projects: detached });
     }
     if (/^\/api\/sessions\/[^/]+\/events$/.test(path)) {
       // 带 cwd 建的会话：它的 durable log **就是**刚才流出来的那些帧（真后端同理——

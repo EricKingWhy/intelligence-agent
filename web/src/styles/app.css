@@ -966,6 +966,33 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   line-height: 1.6;
   color: var(--text-primary);
 }
+/* 待删对象的身份块（会话硬删确认面，#172）：标题 + id 片段——用户据此确认"我点的
+ * 是这一条"。材质沿用 .project-input（surface-2 + border-subtle + radius-sm），
+ * 不引入新 token：§15 的双主题同步只对新增/改动 token 有要求，这里一个都没动。 */
+.project-dialog-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.project-dialog-target-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  /* 标题可达 128 字符（后端截断值）：换行，别把浮层撑破（长句无空格也要断）。 */
+  overflow-wrap: anywhere;
+}
+.project-dialog-target-id {
+  /* 会话 id 片段是技术标识，用等宽——这里显式写 font-family 而不是靠 `mono` 类：
+     本仓没有独立的 `.mono` 规则（只有 `.project-input.mono` 这种复合选择器），
+     挂一个空类名只会让人以为字号/字体已经被处理过了。 */
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
 .project-field {
   display: flex;
   flex-direction: column;

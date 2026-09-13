@@ -32,7 +32,7 @@ import {
   Plus,
   TriangleAlert,
 } from 'lucide-react';
-import type { Project, SessionSummary } from '../types';
+import type { Project, SessionDeleted, SessionSummary } from '../types';
 import { formatRelativeTime } from '../lib/format';
 import { useTickingNow } from '../hooks/useTickingNow';
 import { buildRailModel, dropAnchor, moveAnchor } from '../lib/projects';
@@ -46,6 +46,7 @@ import {
   DeleteProjectDialog,
   InlineRename,
 } from './ProjectDialogs';
+import { DeleteSessionDialog, type DeleteSessionTarget } from './DeleteSessionDialog';
 import { StartTaskInProjectDialog } from './StartTaskInProjectDialog';
 
 interface Props {
@@ -75,6 +76,10 @@ interface Props {
   ) => Promise<string | null>;
   /** 权限档清单（GET /api/permission-modes）——确认面三选一的数据源。 */
   permissionModes: CatalogEntry[];
+  /** 硬删一个会话（#172 / ADR-0029，**不可恢复**）：失败原因抛给确认面显示，
+   *  成功后的状态收敛（清当前视图 / 重拉列表）由 useSession.removeSession 负责
+   *  ——本组件不碰会话状态，只把用户点的那一行交出去。 */
+  onDeleteSession: (sessionId: string) => Promise<SessionDeleted>;
 }
 
 // memo：流式期间本组件 props（sessions/projects/selectedId/titlesById/回调）全部引用
@@ -93,6 +98,7 @@ export const SessionList = memo(function SessionList({
   onRetryProjects,
   onStartTask,
   permissionModes,
+  onDeleteSession,
 }: Props) {
   const now = useTickingNow();
   // 「项目有哪些会话」= 账本投影，不另存一份（不变量 #22）。
@@ -102,6 +108,9 @@ export const SessionList = memo(function SessionList({
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [createOpen, setCreateOpen] = useState(false);
   const [deleting, setDeleting] = useState<Project | null>(null);
+  /** 待硬删的会话（null = 确认面关闭）——与项目软删分开一个状态：两者的后果与
+   *  文案都不同（一个只摘注册记录，一个不可恢复），共用会让"点错了哪一类"没法表达。 */
+  const [deletingSession, setDeletingSession] = useState<DeleteSessionTarget | null>(null);
   const [attachFor, setAttachFor] = useState<string | null>(null);
   /** 「在此项目中新建任务」的目标项目（null = 确认面关闭）。 */
   const [startTaskFor, setStartTaskFor] = useState<Project | null>(null);
@@ -383,6 +392,7 @@ export const SessionList = memo(function SessionList({
                               setDropTarget({ projectId: project.id, before })
                             }
                             onDropRow={(before) => handleDrop(project.id, before)}
+                            onDelete={setDeletingSession}
                           />
                         ))}
                         {dropEnabled && rows.length > 0 && (
@@ -467,6 +477,7 @@ export const SessionList = memo(function SessionList({
                 onDragEndRow={resetDrag}
                 onDragOverRow={() => undefined}
                 onDropRow={() => undefined}
+                onDelete={setDeletingSession}
               />
             ))}
           </div>
@@ -493,6 +504,13 @@ export const SessionList = memo(function SessionList({
           onSessionsChanged();
           return result;
         }}
+      />
+      <DeleteSessionDialog
+        target={deletingSession}
+        onOpenChange={(open) => {
+          if (!open) setDeletingSession(null);
+        }}
+        onConfirm={onDeleteSession}
       />
       <AttachToProjectDialog
         sessionId={attachFor}
@@ -542,6 +560,8 @@ interface RowProps {
   onDragOverRow: (before: string) => void;
   /** 在本行落下 → 插入到本行之前。 */
   onDropRow: (before: string) => void;
+  /** 打开本行的硬删确认面（真正删在前端最上层的 onDeleteSession 里）。 */
+  onDelete: (target: DeleteSessionTarget) => void;
 }
 
 function SessionRow({
@@ -564,6 +584,7 @@ function SessionRow({
   onDragEndRow,
   onDragOverRow,
   onDropRow,
+  onDelete,
 }: RowProps) {
   const inProject = projectId !== null;
   const index = ledger.indexOf(s.session_id);
@@ -664,6 +685,19 @@ function SessionRow({
                 </DropdownMenu.Item>
               </>
             )}
+            <DropdownMenu.Separator className="rail-menu-sep" />
+            {/* 硬删（#172 / ADR-0029）——两分支共用、永远最后一项：不可恢复的动作
+                不夹在"上移/加入项目"中间，位置本身就是一道缓冲。
+                刻意**不**对 live 行禁用：会话是否"忙"（在途 run / 挂起审批）只有
+                后端知道，前端据 live 猜一个禁用态就是第二套真相（不变量 #22），
+                猜错时留给用户的是一个点了没反应的灰按钮。让后端拒绝并显示它的
+                detail（409 的三种原因，见 DeleteSessionDialog）。 */}
+            <DropdownMenu.Item
+              className="rail-menu-item rail-menu-item-danger"
+              onSelect={() => onDelete({ id: s.session_id, title })}
+            >
+              删除会话…
+            </DropdownMenu.Item>
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>

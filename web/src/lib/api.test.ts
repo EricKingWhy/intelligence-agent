@@ -7,7 +7,9 @@ import {
   createProject,
   deleteMemory,
   deleteProject,
+  deleteSession,
   describeMemoryError,
+  describeSessionError,
   detachSessionFromProject,
   getHostDirs,
   getModels,
@@ -19,6 +21,7 @@ import {
   MemoryError,
   NotFoundError,
   ProjectError,
+  SessionError,
   UnauthorizedError,
   AlreadyResolvedError,
   postApproval,
@@ -740,5 +743,87 @@ describe('memories — 列表/硬删端点契约（#160；ARCH-4b 类型注解 +
     expect(describeMemoryError(new Error('网络断了'), '删除记忆失败')).toBe('网络断了');
     expect(describeMemoryError(new Error(''), '删除记忆失败')).toBe('删除记忆失败');
     expect(describeMemoryError(null, '删除记忆失败')).toBe('删除记忆失败');
+  });
+});
+
+describe('deleteSession — 会话硬删端点契约（#172 / ADR-0029；状态码语义 + 回执窄化）', () => {
+  it('200：DELETE /api/sessions/{id}，回执两个计数原样透传（前端不自己数）', async () => {
+    const { calls } = captureProjectFetch(200, {
+      id: 's-1',
+      deleted: true,
+      events: 42,
+      detached_from_projects: 1,
+    });
+    const result = await deleteSession('s-1');
+    expect(calls[0].method).toBe('DELETE');
+    expect(calls[0].url).toBe('/api/sessions/s-1');
+    expect(result).toEqual({
+      id: 's-1',
+      deleted: true,
+      events: 42,
+      detached_from_projects: 1,
+    });
+  });
+
+  it('id 走 encodeURIComponent（路径参数不是字符串拼接）', async () => {
+    const { calls } = captureProjectFetch(200, { id: 'a b/c', deleted: true, events: 1, detached_from_projects: 0 });
+    await deleteSession('a b/c');
+    expect(calls[0].url).toBe('/api/sessions/a%20b%2Fc');
+  });
+
+  it('200 但 body 是 null → deleted 仍为 true、计数归 0（不抛 TypeError，也不谎报"没删"）', async () => {
+    captureProjectFetch(200, null);
+    const result = await deleteSession('s-1');
+    // 与 deleteProject 的 null body（deleted:false）**刻意不同**：那边 200 只是"软删
+    // 回执没给"，这边 200 就是东西没了（后端 schema `Literal[True]`）——报 false 会把
+    // "已经删掉了"说成"没删成"，比少两个计数严重得多。
+    expect(result.deleted).toBe(true);
+    expect(result.id).toBe('s-1');
+    expect(result.events).toBe(0);
+    expect(result.detached_from_projects).toBe(0);
+  });
+
+  it('409 的三种原因（在途 run / 挂起审批 / fork 父会话）→ SessionError(409) + detail 原文', async () => {
+    // 三种原因**状态码相同**，只有 detail 能区分——所以逐条用真后端的原句
+    // （`session/service.py::delete_session` 的 f-string）锁"原样透传、不编文案"。
+    const details = [
+      "session 's-1' has a run in flight; cancel it first",
+      "session 's-1' has a pending approval; resolve it first",
+      "session 's-1' is the fork parent of 2 session(s): delete the child session(s) first",
+    ];
+    for (const detail of details) {
+      captureProjectFetch(409, { detail });
+      const err = await deleteSession('s-1').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SessionError);
+      expect((err as SessionError).status).toBe(409);
+      // fork 那条自带的子会话数量（2）必须还在——前端盖掉就是把它说糊了。
+      expect((err as SessionError).message).toBe(detail);
+    }
+  });
+
+  it('404（第二次删除）→ SessionError(404)，**不是** NotFoundError（调用方要按状态码收敛）', async () => {
+    captureProjectFetch(404, { detail: "session 's-1' not found" });
+    const err = await deleteSession('s-1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SessionError);
+    expect((err as SessionError).status).toBe(404);
+    expect((err as SessionError).message).toBe("session 's-1' not found");
+    // 复用 NotFoundError 会让"用户想删的东西本就不在了"与"加载路径拿不到内容"
+    // 混成一个信号（且它不带状态码，调用方没法只对 404 收敛）。
+    expect(err).not.toBeInstanceOf(NotFoundError);
+  });
+
+  it('detail 缺失 → 兜底文案带状态码（不留一句没有下文的"删除会话失败"）', async () => {
+    captureProjectFetch(502, {});
+    const err = await deleteSession('s-1').catch((e: unknown) => e);
+    expect((err as SessionError).status).toBe(502);
+    expect((err as SessionError).message).toContain('502');
+    expect((err as SessionError).message).toContain('删除会话失败');
+  });
+
+  it('describeSessionError：SessionError 用后端 detail；非 SessionError 用 message / fallback', () => {
+    expect(describeSessionError(new SessionError(409, '有在途 run'), '删除会话失败')).toBe('有在途 run');
+    expect(describeSessionError(new Error('网络断了'), '删除会话失败')).toBe('网络断了');
+    expect(describeSessionError(new Error(''), '删除会话失败')).toBe('删除会话失败');
+    expect(describeSessionError(null, '删除会话失败')).toBe('删除会话失败');
   });
 });
