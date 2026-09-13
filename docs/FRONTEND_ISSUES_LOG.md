@@ -1851,7 +1851,12 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
   `tests/test_event_types_generated.py`——**契约源一直存在，只是 spec §3 没被任何检查覆盖**；
   `checkpoint/saved` 更严重：`agent/runtime.py:1165` 与 `storage/checkpoint.py:4` 明令它
   **永不进 SessionEvent**（ADR-0004 Round 5），spec 却把它列在事件表里。
-  **状态：待施工（不在本轮验收范围，spec 由 Primary Developer 定案）。**
+  **状态：已交付（2026-09-13）**。T1–T4 已关单（#174–#177）；T5 由用户 2026-09-13 选定
+  **路线 B** 并落地（#178）：spec §3 的事件表**整体移除**，改为「生成物 + 守卫」——
+  `docs/EVENT_VOCABULARY.md` 由 `scripts/gen_event_vocabulary.py` 从 `session/event.py` 生成，
+  `tests/test_event_vocabulary_generated.py` 与事实源双向比对（缺名 / 多名 / 分节归属错都红）。
+  spec §3 从此只留语义、分层与契约源指向链，MUST NOT 再写死事件名或数量。
+  订正：上文"重写实装 37 个"按票面原数记录；T1 实测为 **38**（票面两处清单都漏了 `tool/output_delta`）。
 
 ### 第十一轮 · Subagent 扫描汇总（2 个 subagent，真机点击，2026-09-13）
 
