@@ -116,3 +116,19 @@
 4. **不要用 `git pull`**——`git fetch origin --prune` + 显式 `git merge`（§14.5）。
 5. **不要删除任何分支 / worktree / 不要 `reset --hard` / `rebase`**（§14.4）。
 6. **不要顺手改代码**——发现规格冲突或范围外问题，报告并停下来（§8）。
+
+---
+
+## 7. 集成期追加修复：OBS-10.1 断连用例假红（**仅测试，无生产代码变更**）
+
+集成时 `main` 后端全量门禁的**唯一红点**就是 OBS-10.1 这条
+（`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`）。
+根因早已登记（冷装配：Milvus 冷 connect 2.01s + langmem 冷 import 1.32s + 其余装配撑破 5s 预算），
+处置方向也已写明（**计时块之外预热，不要放宽超时**）；本轮把该修法落地：
+
+- 改动文件：`tests/test_web_api.py`（**只有测试**，`src/` 零变更）。
+- 做法：`_DisconnectingASGI` 增 `budget_s` 参数（默认 5.0 不变，测量请求仍用 5s）；
+  测量前先发一次**预热请求**（`_ImmediateRuntime` + `budget_s=60`）付掉一次性冷装配。
+- 证据：预热 6.546s（冷）→ 测量 0.005s；全新冷进程连跑 **4/4 passed**（修复前同条件 4/4 failed）；
+  全量 **2135 passed / 0 failed**（修复前 `2134 passed / 1 failed`）。
+- 对集成的影响：**只有测试稳定性**，不改任何运行语义。你重新跑门禁时应直接绿。
