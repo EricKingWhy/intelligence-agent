@@ -1135,3 +1135,64 @@ ARTIFACTS run 级段，CHECKPOINT 保持诚实占位）／4 ✅（`—` + 原因
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
 `docs/INTEGRATION_PROMPT_PANEL_184.md`。
+
+---
+
+## 第十八轮：#183（2026-09-14，前端侧 · 在途记录）
+
+**交付**：`6426a55`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。票面
+`docs/WORKSPACE_PANEL_TICKETS.md` § #183；母 PRD §3.0（Linear/Notion/VS Code 三条
+peek 范式）、§3.1（键位表）、§3.7。
+
+**做了什么**：Inspector 从"清单**或**详情"变成"清单**+**详情"。此前 `focus` 非 run 时
+组件在最上面早退成"只有详情"，Timeline 清单整个消失——而 Timeline 好用的原因正是
+"清单与详情同框"。这是本票唯一的**结构性**改动，其余都是它的配套（键位、钉住、整页、
+拖宽）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/lib/inspectorPanel.ts`（新） | 纯逻辑：拖宽夹取 / ↑↓ 边界 / Space 阈值 / Esc 三层 / 行身份（eventKey·toolKey） |
+| `web/src/components/StepDetail.tsx` | 去早退分支 → `.detail-body` 清单+peek 双滚动区；面板键位；头部三键 + 拖宽手柄；行 `aria-current`；Timeline 按需扩窗；Output 段改走 `ToolOutputStream` |
+| `web/src/App.tsx` | 面板视图状态（pinned/expanded/width/peekOpen）+ `onPanelAction` 单入口；栅格 `--inspector-w`；整页 class；命令面板整页项；未钉住切会话收起 |
+| `web/src/styles/app.css` | `.detail-resizer` / `.detail-ctrl` / `.detail-peek(-head/-body)` / `.timeline-row.sel` / `.detail-terminal-row.sel` / `.inspector-fullpage` |
+| `web/e2e/y-inspector-peek.spec.ts`（新） | 7 条 × 2 视口 |
+| `web/src/components/StepDetail.peek.test.tsx`（新） | 结构契约 13 条（同框 / 关闭不卸载 / aria / 单一渲染器） |
+
+**AC 逐条**：1 ✅（点一行即预览；↑↓ 移动选中，详情跟随且清单不消失，只有一行
+`aria-current`；两端不环绕）／2 ✅（Esc 关预览但面板与清单都在、DOM 里仍在；Space 快按
+保持打开、按住 450ms 松手关闭）／3 ✅（点击即选中即预览，键盘只是加速）／4 ✅（钉住 →
+切会话不收起；未钉住 → 离开会话才收起，首次进入不算离开；不持久化，刷新回 false）／
+5 ✅（面板按钮 + 命令面板两个入口；Esc 先退回整页）／6 ✅（320→480 夹取、中心列 ≥360、
+刷新回 320）／7 ✅（三键 `aria-label` + `aria-pressed`；拖宽手柄 `separator` + 左右键
+16px/Shift 64px）／8 ✅（e2e 7 条覆盖 ↑↓/Esc/Space/钉住跨会话/整页往返/拖宽不持久化/
+键盘可达）／9 ✅（Inspector 工具 Output 段改走中心列同一个 `ToolOutputStream`；
+ChangesTab 的 `.diff-cols` 收敛属 #186 AC3，本票不动）。
+
+**门禁（全绿）**：`tsc -b` 0；`vitest` **749 passed**（+32：inspectorPanel 19 +
+peek 结构 13）；`oxlint` 0 error（**44** warnings = 基线，新文件零 warning、新代码
+零 warning）；`playwright --workers=2` **286 passed**（+14 = 7 条 × 2 视口）；`vite build` 0。
+
+**三处设计决定（记录理由，避免"看起来能用"）**：
+
+| 决定 | 理由 |
+| --- | --- |
+| **钉住 = 面板跨会话保持展开**（未钉住时"离开正在看的会话"才收起面板，首次进入不算离开） | AC4 的"钉住后切换会话/选中不自动收起"只有这条读法能让 pin 有可测的差异；另两种读法都会自相矛盾——"peek 跨会话存活"会拿 A 会话的事件站在 B 会话里（违反 #22），"选中即收起面板"直接违反 AC1/AC3。首次进入必须豁免，否则"点开第一个会话"会把手动打开的面板关掉 |
+| **Esc 三层（整页 → 预览 → 收起面板）** | 一层都不分层会撞 AC1/AC5：整页时 Esc 若直接收起面板，"退回"就只剩按钮一条路；有预览时 Esc 若要收起面板，用户"关掉这层"的意图会被解释成"关掉整个面板"。面板内的 Esc `stopPropagation`，面板外仍归全局"中断流式"（既有行为不变，e2e 未回归） |
+| **拖宽 `available` 用实测的「中心列 + 面板」宽度**，不在 CSS 里给中心列兜 min-width | rail 在 <820px 变 56px，用常量算上限会在断点上算错；而给中心列加 `minmax(360px,1fr)` 在空间不够时会让栅格溢出，`.app-regions` 是 `overflow:hidden` ⇒ 直接裁掉（比压窄更糟） |
+
+**自审（两轴）修掉的三处，都在本票新代码里**：
+
+| finding | 处置 |
+| --- | --- |
+| **P1**（e2e 抓到）`.detail-peek` 的 `display:flex` **盖过** UA 的 `[hidden]{display:none}` ⇒ 预览"关掉"后照常占位显示 | 补 `.detail-peek[hidden]{display:none}`，并在注释里指向同款老账 `.workspace-panel[hidden]` |
+| **P2** 窄面板（<360px，**默认 320 就在此区间**）隐藏 `.detail-ctrl-label` 后，三键的可访问名会变成空（icon 是 `aria-hidden`） | 三键补显式 `aria-label`（名说"是什么"、`aria-pressed` 说状态） |
+| **P2** `ToolEventSections` 的默认段用 `useState` 初值 ⇒ 选中项移动时旧段不存在 → 预览空白（AC1 的"实时跟随"当场破功） | 渲染期收窄（同 #182 `resolveActiveTab` 口径）；另修 Timeline 扩窗从 effect-setState 改为渲染期派生（消掉 `react(set-state-in-effect)`） |
+
+**顺带发现（未修，非本票引入，留痕）**：`tabCounts.terminal` 用 `t.name === 'bash'`，
+而 `TerminalTab` 的行用 `lib/commandOutput.isCommand`——两处判据不同（注释却写着"逐字
+一致"），badge 计数与列表行数在非 bash 命令工具上会对不上。**不在本票范围**（#183 只
+要求"清单里能移动选中"，本票的 `listTargets` 用的是**行自己**的判据 `isCommand`，与
+所见一致），交后续票据或用户决定。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
+`docs/INTEGRATION_PROMPT_PANEL_183.md`。
