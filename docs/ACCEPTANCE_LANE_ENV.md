@@ -16,17 +16,23 @@
 
 ## 2. 期望能力集（`/api/capabilities` 是唯一判据）
 
-启动后先查一次，期望至少：
+启动后先查一次，期望**三个**：
 
 ```bash
 curl -s http://127.0.0.1:8000/api/capabilities
-# 期望 count=2: websearch + multiagent
+# 期望 count=3: websearch + multiagent + memory
 ```
 
 - **`websearch`**：`web_search` 工具、Context Provider 目录等。
 - **`multiagent`**：**`delegate` 工具**。缺它则委派/子会话整块前端 UI **按设计不渲染**
   （零伪造，符合不变量 #21），于是这 5 个控件不可达：委派行展开、`复制子会话 ID`、
   `Inspect 子会话`、`打开子会话`、child 视图 `Run` 返回。
+- **`memory`**：`memory` Context Provider + 「记忆管理」面板（`GET /api/memories`）。
+  2026-09-13 复核：本部署实际返回 **3**（SID-03 修正；此前本文写 count=2，
+  是 #159 MEM-4 接入 `memory` **之前**的旧口径）。缺它则记忆面板按设计不渲染。
+
+三者当前都只声明 `surfaces: {chat, timeline}`、`actions: {}`（无 permissions/stop/retry/resume）
+——验收时不要拿"某个 capability 没给 stop 动作"当缺陷，那是如实声明（不变量 #21）。
 
 ## 3. 两个 worktree 的 `.env` 差异（本文件存在的原因）
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -380,6 +381,29 @@ class JsonlSessionStore:
         # 按修改时间倒序（最近在前）
         ids.sort(key=lambda x: x[1], reverse=True)
         return [sid for sid, _ in ids]
+
+    def delete_session(self, session_id: str) -> bool:
+        """删除该会话的事件日志目录（**唯一真相源**）。返回它是否曾经存在。
+
+        硬删（ADR-0029）里"删掉会话"的实质就是这一句：`list_session_ids` 是按目录扫出来的，
+        目录没了会话就从所有列表里消失。
+
+        **安全边界**：只删 `<root>/<session_id>` 这一层——两个成分都是本 store 自己用
+        root 与 session_id 拼的，且调用方必须先过 `validate_session_id`（拒绝分隔符）。
+        本方法**不读任何外部映射**，因此不可能像 `WorkspaceRegistry.delete` 那样
+        `rmtree` 到用户的真实目录（ADR-0029 D2）。
+
+        幂等：目录不存在 → `False`，不抛错（重跑即自愈，ADR-0029 D3）。
+        """
+        session_dir = self._session_dir(session_id)
+        if not session_dir.exists():
+            return False
+        shutil.rmtree(session_dir, ignore_errors=True)
+        # 进程内 seq 缓存与锁表要一起清——否则同 id 再次出现时会带着旧的 last_seq。
+        with self._state_guard:
+            self._last_seq.pop(session_id, None)
+            self._seq_locks.pop(session_id, None)
+        return True
 
     def read_started_header(self, session_id: str) -> StartedHeader | None:
         """只读会话 header（WS-2 / #152 AC14）：第一条 `session/started` 即停。
