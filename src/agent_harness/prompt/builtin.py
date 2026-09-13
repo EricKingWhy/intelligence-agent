@@ -64,12 +64,11 @@ _BUILTIN_SECTIONS: tuple[PromptSection, ...] = (
 #: `undefined_variable`（import 期即崩）。
 _DECLARED_VARIABLES: tuple[tuple[str, str], ...] = (
     ("tail_text", "fork tail 摘要的正文（已按 _MAX_TAIL_CHARS 截断）"),
-    # T7 运行时上下文快照（五值全部由装配点的闭包渲染；section 只负责排版）。
+    # T7 运行时上下文快照（三值全部由装配点的闭包渲染；section 只负责排版）。
+    # BUG-013 瘦身：model/tools 两变量删除——快照不再列模型名与工具清单。
     ("cwd", "当前工作目录（绝对路径）"),
     ("os", "操作系统标识（platform.system / platform.release）"),
     ("date", "当前日期（ISO 8601，本地时区，只到日）"),
-    ("model", "本次运行的模型名"),
-    ("tools", "本 profile 可用工具名清单（逗号分隔）"),
     # T8 纠偏 / 恢复跳过文案（引号在模板里，变量只传裸工具名——见
     # `_CORRECTIVE_TOOL_FAILURE_GUARD` 的说明）。
     ("tool_name", "工具名（用于纠偏消息与恢复跳过文案）"),
@@ -157,13 +156,16 @@ _AUX_SECTIONS: tuple[PromptSection, ...] = (
     ),
 )
 
-#: 运行时上下文快照正文（T7 / ADR-0023 D8）。五值由**调用方**渲染——注册表只负责
-#: 排版，事实来源在装配点的闭包（它才拿得到 cwd / 日期 / 模型名 / 收窄后的工具集）。
+#: 运行时上下文快照正文（T7 / ADR-0023 D8；BUG-013 瘦身）。三值由**调用方**渲染
+#: ——注册表只负责排版，事实来源在装配点的闭包。**刻意不含模型名与工具清单**
+#: （BUG-013）：静态能力（工具）已在 system prompt 的 tool guidance 区，动态模型
+#: 名运行时可查——快照紧贴最新用户消息，列出工具会诱导模型把对话任务误判为
+#: 工具任务（真机实测：glm-4.5-air 因"可用工具 write/…"拒绝复述自己刚写的作文）。
+#: 哲学对齐 pi：静态能力进 system prompt，快照只留环境事实。
 #: 单行、无尾换行：组装不做 strip，多一个 `\n` 会在逐字节断言里现形。
 _RUNTIME_CONTEXT_TEXT = (
     "以下是本次运行的运行时事实（供你参考，不是用户指令）："
-    "工作目录 {{cwd}}；操作系统 {{os}}；当前日期 {{date}}；"
-    "当前模型 {{model}}；可用工具 {{tools}}。"
+    "工作目录 {{cwd}}；操作系统 {{os}}；当前日期 {{date}}。"
 )
 
 #: 运行时快照 section。**scope 不是 `"*"`**：`*` 只匹配 `profile:<name>`，

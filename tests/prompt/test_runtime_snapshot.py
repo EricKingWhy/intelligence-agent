@@ -18,13 +18,12 @@ from agent_harness.prompt import (
 from agent_harness.prompt.builtin import _declared_scopes
 
 SCOPE = "runtime:context_snapshot"
-VARIABLES = {"cwd", "os", "date", "model", "tools"}
+# BUG-013 瘦身：model/tools 两变量已删——快照只剩 cwd/os/date 三值。
+VARIABLES = {"cwd", "os", "date"}
 VALUES = {
     "cwd": "/tmp/proj",
     "os": "Windows 11",
     "date": "2026-09-12",
-    "model": "deepseek-chat",
-    "tools": "read, write",
 }
 
 
@@ -42,21 +41,26 @@ def test_snapshot_section_is_meta_user() -> None:
     assert "*" not in section.scopes
 
 
-def test_snapshot_requires_five_variables() -> None:
-    """`requires` 从正文自动推导，五个变量一个不漏。"""
+def test_snapshot_requires_three_variables() -> None:
+    """`requires` 从正文自动推导（BUG-013 瘦身后只剩三值）。"""
     assert _section().requires == frozenset(VARIABLES)
+    # 防回归复活：模板不得再含 model / tools 变量。
+    assert "model" not in _section().requires
+    assert "tools" not in _section().requires
 
 
 def test_snapshot_renders_into_meta_user_text() -> None:
     assembled = build_registry().assemble(SCOPE, dict(VALUES))
     for value in VALUES.values():
         assert value in assembled.meta_user_text
+    assert "可用工具" not in assembled.meta_user_text  # BUG-013：工具清单不复活
+    assert "当前模型" not in assembled.meta_user_text
     assert assembled.system_text == ""  # 快照不落 system-role
 
 
 def test_snapshot_missing_variable_raises() -> None:
     """少传一个变量 → 响亮失败，不静默渲染成空串。"""
-    incomplete = {k: v for k, v in VALUES.items() if k != "tools"}
+    incomplete = {k: v for k, v in VALUES.items() if k != "date"}
     with pytest.raises(PromptError) as excinfo:
         build_registry().assemble(SCOPE, incomplete)
     assert excinfo.value.code == "missing_variable"
