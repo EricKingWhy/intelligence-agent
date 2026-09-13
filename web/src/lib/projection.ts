@@ -28,6 +28,8 @@ export function initConversation(session_id: string): ConversationState {
     compactions: [],
     reconcile_queue: [],
     pending_approvals: [],
+    approval_decisions: [],
+    permission_policy: null,
     events: [],
     unknown_events: [],
     model: null,
@@ -365,21 +367,24 @@ function projectToolResult(state: ConversationState, event: AgentEvent): void {
     tool.result = parsedData ?? parsed?.message ?? data.content;
     // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
     // directly into ToolResult.data — not nested under data.diff. Detect them here.
-    // da394a9 批：>2000 字符的 before/after 变为截断摘要并内嵌
-    // "use inspect_artifact(<id>)" marker——diff 已归档，视图渲染占位态而非
-    // 把 marker 当 diff 内容。
+    // >2000 字符的 before/after 变为截断摘要并内嵌 "use <读回工具>(<id>)" marker
+    // ——diff 已归档，视图渲染占位态而非把 marker 当 diff 内容。工具名两个都认
+    // （S3 → inspect_artifact，MinIO / Local → read_artifact），并**原样带下去**：
+    // 面板要按这个部署真实可调的那个名字回显与复制（#186 AC4）。
     if (
       parsedData &&
       typeof parsedData.before === 'string' &&
       typeof parsedData.after === 'string'
     ) {
-      const artifactId =
+      const marker =
         parseArtifactMarker(parsedData.before) ?? parseArtifactMarker(parsedData.after);
       tool.diff = {
         before: parsedData.before,
         after: parsedData.after,
         truncated: parsedData.truncated === true,
-        ...(artifactId !== null ? { archived: true as const, artifactId } : {}),
+        ...(marker !== null
+          ? { archived: true as const, artifactId: marker.artifactId, artifactTool: marker.toolName }
+          : {}),
       };
     }
     tool.completed_at = event.time ?? new Date().toISOString();
@@ -488,11 +493,14 @@ function attachArtifactToTool(state: ConversationState, data: Record<string, unk
   const prevTurn = state.turns[turnIdx];
   const toolIdx = prevTurn.tools.findIndex((tc) => tc.tool_call_id === toolCallId);
   const tool = cloneTool(prevTurn.tools[toolIdx]);
+  /* 元数据缺了就留 `null`（#186 AC5 / #185 AC4）：MinIO 不持久化 `source_tool`，
+     一个编出来的 `''`/`0`/`'application/octet-stream'` 会变成界面上一个假的字节数与
+     假的类型。`artifact_id` 是必有的（没它就没有这个产物，找不到宿主时上面已早退）。 */
   tool.artifact = {
     artifact_id: String(data.artifact_id ?? ''),
-    size: Number(data.size ?? 0),
-    mime_type: String(data.mime_type ?? 'application/octet-stream'),
-    source_tool: String(data.source_tool ?? ''),
+    size: typeof data.size === 'number' ? data.size : null,
+    mime_type: typeof data.mime_type === 'string' ? data.mime_type : null,
+    source_tool: typeof data.source_tool === 'string' ? data.source_tool : null,
   };
   const turn = cloneTurn(prevTurn);
   turn.tools[toolIdx] = tool; // cloneTurn 已给出新 tools 数组，原位替换即可
@@ -557,6 +565,10 @@ function projectToolApprovalRequested(state: ConversationState, event: AgentEven
   const data = event.data;
   const approvalId = String(data.approval_id ?? '');
   if (!approvalId) return; // 契约必有 approval_id
+  // 生效阈值逐事件折叠（最后一条胜）——放在幂等早退**之前**：重放时它仍是同一个值，
+  // 但这样就不依赖"请求只到达一次"这个假设。
+  const policy = String(data.policy ?? '');
+  if (policy) state.permission_policy = policy;
   // 幂等：重放已存在的 approval_id 不重复入队
   if (state.pending_approvals.some((a) => a.approval_id === approvalId)) return;
   state.pending_approvals = [
@@ -580,13 +592,34 @@ function projectToolApprovalRequested(state: ConversationState, event: AgentEven
   ];
 }
 
-/** #37 审批已决——从 pending_approvals 移除。 */
+/** #37 审批已决——从 pending_approvals 移出队列，**同时留痕到 `approval_decisions`**
+ *  （#184 Inspector PERMISSION 段要回答"裁决结果"，而队列语义是"决议即消失"）。
+ *
+ *  `tool_name` 在移除**之前**从同 id 的请求上取——队列是这条信息的唯一来源，先删就
+ *  取不到了。配不上对（事件窗口从中间开始 / 未知 id）时留空，由渲染层显示 `—`；
+ *  不编造工具名，也不为了"看起来完整"去 pending 之外再猜一次。 */
 function projectPermissionResolved(state: ConversationState, event: AgentEvent): void {
   const approvalId = String(event.data.approval_id ?? '');
-  if (approvalId) {
-    state.pending_approvals = state.pending_approvals.filter((a) => a.approval_id !== approvalId);
-  }
+  if (!approvalId) return; // 契约必有 approval_id
+  const request = state.pending_approvals.find((a) => a.approval_id === approvalId);
+  state.pending_approvals = state.pending_approvals.filter((a) => a.approval_id !== approvalId);
+  // 幂等：重放同一 approval_id 的决议不重复留痕（JSONL 回放会重放全部事件）。
+  if (state.approval_decisions.some((d) => d.approval_id === approvalId)) return;
+  state.approval_decisions = [
+    ...state.approval_decisions,
+    {
+      approval_id: approvalId,
+      decision: String(event.data.decision ?? ''),
+      reason: String(event.data.reason ?? ''),
+      tool_name: request?.tool_name,
+      time: event.time,
+    },
+  ];
 }
+
+/** Inspector PERMISSION 段（#184）的三个真相在投影状态上，由 `lib/permission.ts` 的
+ *  `permissionView` 组装成渲染视图——这里**不再加一层纯透传**（review 删掉了那层：
+ *  它只是把三个字段抄一遍，多一层就多一处要同步的地方）。 */
 
 /** Phase 12 白盒透明（ADR-0014 #69）：#69 RepeatedToolFailureGuard——连续同错
  *  工具调用熔断。soft 已由后端注入 user-role 纠正消息（injected_by 标记，见
@@ -1151,6 +1184,15 @@ function touchTurn(turn: Turn, event: AgentEvent): void {
   if (turn.started_at === undefined) {
     turn.started_at = event.time ?? new Date().toISOString();
   }
+}
+
+/** 本会话全部工具调用，按到达顺序（跨 turn 展平）。
+ *
+ *  单一走法：Inspector 的 run 级清单与中心列「输出」面都从这一份取（#190）。各写一遍
+ *  `turns.flatMap((t) => t.tools)` 看着无害，但一旦给"工具调用"加过滤（比如只取已终态的），
+ *  两份就会悄悄分叉。 */
+export function allTools(state: ConversationState): ToolCall[] {
+  return state.turns.flatMap((t) => t.tools);
 }
 
 /** Expand a turn's execution chain into render nodes in true event order

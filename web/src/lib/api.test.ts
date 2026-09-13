@@ -25,6 +25,7 @@ import {
   UnauthorizedError,
   AlreadyResolvedError,
   ApprovalGoneError,
+  getArtifactContent,
   postApproval,
   renameProject,
   reorderProjectSession,
@@ -847,5 +848,40 @@ describe('deleteSession — 会话硬删端点契约（#172 / ADR-0029；状态�
     expect(describeSessionError(new Error('网络断了'), '删除会话失败')).toBe('网络断了');
     expect(describeSessionError(new Error(''), '删除会话失败')).toBe('删除会话失败');
     expect(describeSessionError(null, '删除会话失败')).toBe('删除会话失败');
+  });
+});
+
+describe('getArtifactContent — artifact 切片解析（#185/#186，缺字段必须报错而不是编）', () => {
+  it('200 合法 body：逐字段解析，行内截断标记如实带上', async () => {
+    captureFetch(200, {
+      artifact_id: 'a1b2c3d4e5f60718',
+      lines: [
+        { line_number: 1, text: 'hello' },
+        { line_number: 2, text: 'xxxx', truncated: true, full_length: 9000 },
+      ],
+      total_lines: 40,
+      returned_lines: 2,
+      truncated: true,
+      query: { keyword: null, max_lines: 200 },
+    });
+    const slice = await getArtifactContent('s-1', 'a1b2c3d4e5f60718');
+    expect(slice.total_lines).toBe(40);
+    expect(slice.returned_lines).toBe(2);
+    expect(slice.truncated).toBe(true);
+    expect(slice.lines[1]).toEqual({ line_number: 2, text: 'xxxx', truncated: true, full_length: 9000 });
+    // 行内不超长的行**不**带 truncated/full_length（缺失即不编）
+    expect(slice.lines[0]).toEqual({ line_number: 1, text: 'hello' });
+  });
+
+  it('缺 total_lines / returned_lines → 抛错（此前静默填 0，界面会显示"共 0 行"的假空产物）', async () => {
+    captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', lines: [] });
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+  });
+
+  it('缺 artifact_id 或 lines → 抛错（形状不符不走"空内容"）', async () => {
+    captureFetch(200, { lines: [], total_lines: 0, returned_lines: 0 });
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+    captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', total_lines: 0, returned_lines: 0 });
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
   });
 });

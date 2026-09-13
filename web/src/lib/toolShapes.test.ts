@@ -108,15 +108,42 @@ describe('grep 截断尾巴', () => {
 // ── da394a9 批：diff 归档 marker / MCP 工具名拆解 ──
 
 describe('parseArtifactMarker', () => {
-  it('从截断摘要提取 artifact id', () => {
-    expect(parseArtifactMarker('内容过大已归档。use inspect_artifact(abc-123) 查看全文')).toBe('abc-123');
+  it('从截断摘要提取 artifact id 与读回工具名', () => {
+    expect(parseArtifactMarker('内容过大已归档。use inspect_artifact(abc-123) 查看全文')).toEqual({
+      artifactId: 'abc-123',
+      toolName: 'inspect_artifact',
+    });
   });
+
+  /* #186 AC4：后端按"与本 store 配对的读回工具"决定 marker 里写哪个名字——
+     S3 → inspect_artifact，MinIO / Local → read_artifact，而 Local 是**默认** Provider。
+     此前这里只认 inspect_artifact，于是默认部署的 marker 一个都解析不出来：
+     archived 永远为 false，归档占位与"统计不可得"全成了死路径。 */
+  it('两个工具名都认（read_artifact 是默认部署发的那个）', () => {
+    expect(parseArtifactMarker('use read_artifact(0123456789abcdef) to view]')).toEqual({
+      artifactId: '0123456789abcdef',
+      toolName: 'read_artifact',
+    });
+  });
+
+  it('工具名原样保留，不被前端替换成另一个', () => {
+    expect(parseArtifactMarker('use inspect_artifact(deadbeefdeadbeef)')?.toolName).toBe(
+      'inspect_artifact',
+    );
+  });
+
   it('无 marker → null', () => {
     expect(parseArtifactMarker('普通 diff 内容')).toBeNull();
     expect(parseArtifactMarker('')).toBeNull();
   });
+
   it('marker 空 id → null（零伪造）', () => {
     expect(parseArtifactMarker('use inspect_artifact()')).toBeNull();
+    expect(parseArtifactMarker('use read_artifact()')).toBeNull();
+  });
+
+  it('认不出的工具名 → null（不把别的调用当归档引用）', () => {
+    expect(parseArtifactMarker('use some_other_tool(abc-123)')).toBeNull();
   });
 });
 

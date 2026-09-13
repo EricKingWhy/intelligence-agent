@@ -218,14 +218,17 @@ export interface ToolCall {
    *  running（进行中）| success（成功）| failed（失败）| stopped（被中断，≠ error）。 */
   status: 'running' | 'success' | 'failed' | 'stopped';
   result?: unknown;
-  /** da394a9 批：before/after 内嵌 "use inspect_artifact(<id>)" marker 时
-   *  archived=true + artifactId——diff 内容已归档到 artifact，视图渲染占位态。 */
+  /** before/after 内嵌 "use <读回工具>(<id>)" marker 时 archived=true + artifactId
+   *  ——diff 内容已归档到 artifact，视图渲染占位态。
+   *  `artifactTool` 是 marker 里**后端实际建议**的读回工具名（S3 → `inspect_artifact`，
+   *  MinIO / Local → `read_artifact`）：回显与复制都用它，不在前端替换（#186 AC4）。 */
   diff?: {
     before: string;
     after: string;
     truncated: boolean;
     archived?: boolean;
     artifactId?: string;
+    artifactTool?: string;
   };
   started_at?: string;
   completed_at?: string;
@@ -253,12 +256,40 @@ export interface ToolOutputChunk {
 }
 
 /** Large tool output offloaded to the ArtifactStore (Phase 5, spec 06 §15).
- *  The model only sees a summary + this ref; the full content lives in storage. */
+ *  The model only sees a summary + this ref; the full content lives in storage.
+ *
+ *  三个元数据字段**可空**（#186 AC5 / #185 AC4）：`size` / `mime_type` /
+ *  `source_tool` 由 `ArtifactStore` 决定是否持久化——MinIO 不持久化
+ *  `source_tool`，S3 持久化。缺了就是 `null`，**不填默认值**：一个编出来的
+ *  `'application/octet-stream'` 或 `0` 会让界面显示一个并不存在的字节数。 */
 export interface ArtifactRef {
   artifact_id: string;
-  size: number;
-  mime_type: string;
-  source_tool: string;
+  size: number | null;
+  mime_type: string | null;
+  source_tool: string | null;
+}
+
+/** #186：`GET /api/sessions/{sid}/artifacts/{aid}` 的一行（后端 `ArtifactSlice.lines`）。
+ *
+ *  `truncated`/`full_length` 只在**该行超长被截断**时出现——原行保留在 artifact 里，
+ *  视图据此如实标记"此行有省略"，不把半截行当完整行。 */
+export interface ArtifactSliceLine {
+  line_number: number;
+  text: string;
+  truncated?: boolean;
+  full_length?: number;
+}
+
+/** #186：外置产物的**局部**读取结果（后端 `ArtifactSlice`，`storage/artifact.py`）。
+ *
+ *  `truncated` 是"返回内容不完整"的并集（行数截断 ∪ 字符截断）——界面必须如实显示，
+ *  否则用户会以为这就是全文。`total_lines` 是全文行数（不是返回行数）。 */
+export interface ArtifactSlice {
+  artifact_id: string;
+  lines: ArtifactSliceLine[];
+  total_lines: number;
+  returned_lines: number;
+  truncated: boolean;
 }
 
 export interface ModelSegment {
@@ -418,6 +449,23 @@ export interface PendingApproval {
   stale?: boolean;
 }
 
+/** 已裁决的审批 —— `permission/resolved` 事件（#184，Inspector PERMISSION 段）。
+ *
+ *  为什么需要单独一条：`pending_approvals` 是**队列**（决议即移出），所以"裁决结果"
+ *  在投影里无处可查。Inspector 要如实回答"这个会话批过什么"，就必须把决议留痕。
+ *
+ *  `tool_name` / `policy` 从**同一 approval_id 的请求**带过来（请求必先于决议到达）；
+ *  配不上对（例如事件窗口从中间开始）时留空 → 渲染 `—`，不猜。 */
+export interface ApprovalDecision {
+  approval_id: string;
+  /** deny / approve_once / approve_session / approve_policy（后端 PermissionDecision）。 */
+  decision: string;
+  reason: string;
+  /** 同 approval_id 请求里的工具名；配不上对时 undefined（不猜）。 */
+  tool_name?: string;
+  time?: string;
+}
+
 export interface ConversationState {
   session_id: string;
   turns: Turn[];
@@ -434,6 +482,19 @@ export interface ConversationState {
    *  tool/approval-requested adds to this list; permission/resolved removes.
    *  Empty array = no pending approval (auto-approve or already resolved). */
   pending_approvals: PendingApproval[];
+  /** 已裁决的审批（`permission/resolved`，到达顺序）。与 `pending_approvals` 互补：
+   *  两者合计 = 本会话出现过的全部审批。Inspector PERMISSION 段据此显示"裁决结果"
+   *  （#184）。决议事件**不改写**任何 `pending_approvals` 之外的状态。 */
+  approval_decisions: ApprovalDecision[];
+  /** 本会话生效的审批阈值（`tool/approval-requested.data.policy`，逐事件折叠）。
+   *
+   *  为什么折叠而不是渲染时扫事件：扫描要 O(events)（"整个会话没有审批"是**最坏**情况，
+   *  必须扫完），而这段在 Inspector 打开时每次渲染都会跑。折叠成字段后每事件 O(1)——
+   *  与 `model` / `usage_total` 同一路数（投影的职责就是增量折叠）。
+   *
+   *  为什么这是唯一来源：`permission_mode` 不在任何 SessionEvent 里、也没有 GET 接口，
+   *  审批请求携带的 `policy` 才是 ToolExecutor 当时实际用的阈值。无审批事件 → null。 */
+  permission_policy: string | null;
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22).
    *
