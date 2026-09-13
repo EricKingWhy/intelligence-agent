@@ -14,7 +14,8 @@ describe('initConversation', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
-      compactions: [], reconcile_queue: [], pending_approvals: [], events: [], unknown_events: [],
+      compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
+      permission_policy: null, events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       run_interrupted: null, turn_index: null,
@@ -1987,5 +1988,92 @@ describe('事件摘要的单行语义（UI-04 信任裂缝）', () => {
     const summary = summarizeEvent(s.events[s.events.length - 1]);
     expect(summary).not.toContain('{');
     expect(summary).not.toContain('"');
+  });
+});
+
+// ── #184 Inspector PERMISSION 段：审批请求 → 队列，决议 → 留痕 + 权限档派生 ──
+
+describe('审批投影 — 权限档（permission_policy）/ 待审批 / 裁决留痕（#184）', () => {
+  const T = '2026-01-01T00:00:00Z';
+  const base = { session_id: 's', time: T };
+
+  const requested = (approvalId: string, seq: number, policy: string, toolName = 'write') =>
+    ev({
+      ...base, type: EventType.TOOL_APPROVAL_REQUESTED, seq, run_id: 'r', step_id: 1,
+      data: {
+        approval_id: approvalId, tool_name: toolName, tool_call_id: `tc-${approvalId}`,
+        action_type: 'workspace-write', title: 't', description: 'd', arguments_preview: {},
+        permission: 'workspace-write', policy, reason: 'r', allowed_decisions: ['deny', 'approve_once'],
+      },
+    });
+
+  const resolved = (approvalId: string, seq: number, decision: string, reason = '') =>
+    ev({
+      ...base, type: EventType.PERMISSION_RESOLVED, seq, run_id: 'r',
+      data: { approval_id: approvalId, decision, reason },
+    });
+
+  it('无审批事件：权限档 null（渲染层显示 —，不拿 composer 选择冒充会话事实）', () => {
+    const s = applyEvent(initConversation('p'), ev({ ...base, type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }));
+    expect(s.permission_policy).toBeNull();
+    expect(s.pending_approvals).toEqual([]);
+    expect(s.approval_decisions).toEqual([]);
+  });
+
+  it('审批请求在队：权限档 = 该请求的生效阈值', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    expect(s.permission_policy).toBe('read-only');
+    expect(s.pending_approvals).toHaveLength(1);
+    expect(s.approval_decisions).toEqual([]);
+  });
+
+  it('决议 → 出队 + 留痕（含工具名），权限档仍可得（不因出队而丢）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'approve_once', '用户批准'));
+    expect(s.pending_approvals).toEqual([]);
+    expect(s.approval_decisions).toEqual([
+      { approval_id: 'ap-1', decision: 'approve_once', reason: '用户批准', tool_name: 'write', time: T },
+    ]);
+    // 关键：请求已出队，但权限档仍在（折叠在状态上，不是从队列临时读的）
+    expect(s.permission_policy).toBe('read-only');
+  });
+
+  it('多次审批：权限档取**最近一次请求**（事件序，不是队列/裁决表的拼接顺序）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'deny'));
+    s = applyEvent(s, requested('ap-2', 3, 'workspace-write', 'bash'));
+    expect(s.permission_policy).toBe('workspace-write');
+    expect(s.pending_approvals.map((a) => a.approval_id)).toEqual(['ap-2']);
+    expect(s.approval_decisions.map((d) => d.approval_id)).toEqual(['ap-1']);
+  });
+
+  it('决议重放幂等：同一 approval_id 再来一次决议不重复留痕', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'deny'));
+    s = applyEvent(s, resolved('ap-1', 3, 'deny'));
+    expect(s.approval_decisions).toHaveLength(1);
+  });
+
+  it('配不上对的决议（事件窗口从中间开始）：留痕但 tool_name 为空——不猜', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, resolved('ap-orphan', 1, 'deny', '无对应请求'));
+    expect(s.approval_decisions).toEqual([
+      { approval_id: 'ap-orphan', decision: 'deny', reason: '无对应请求', tool_name: undefined, time: T },
+    ]);
+    // 没有请求事件 → 权限档无从得知（不是空串，是 null）
+    expect(s.permission_policy).toBeNull();
+  });
+
+  it('缺 approval_id 的决议事件被忽略（契约必有该字段，不制造空 id 的假记录）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, ev({
+      ...base, type: EventType.PERMISSION_RESOLVED, seq: 1, run_id: 'r',
+      data: { decision: 'deny', reason: '缺 id' },
+    }));
+    expect(s.approval_decisions).toEqual([]);
   });
 });

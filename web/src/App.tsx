@@ -264,6 +264,13 @@ export default function App() {
     const key = streamKeyFromEvent(event.data, event.step_id);
     if (key) setJumpRequest({ key, nonce: Date.now() });
   }, []);
+  /* #184：Inspector PERMISSION 段点待审批行 → 中间主区滚动定位审批卡。
+   * 复用同一条 jumpRequest 通道（nonce 保证连点同一张卡也重新触发）。key 前缀
+   * `approval:` 与 `tool:`/`step:`/`delegation:` 不相交；审批卡**不在**虚拟化轮次
+   * 列表里（它挂在列表之后，必须始终可见），所以它有自己的 data 属性。 */
+  const jumpToApproval = useCallback((approvalId: string) => {
+    setJumpRequest({ key: `approval:${approvalId}`, nonce: Date.now() });
+  }, []);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
   const onPresetTask = useCallback((text: string) => setPresetTask({ text, id: Date.now() }), []);
@@ -876,6 +883,7 @@ export default function App() {
           onFocusTool={focusTool}
           onFocusEvent={focusEvent}
           onJumpToStream={jumpToStream}
+          onJumpToApproval={jumpToApproval}
         />
       </main>
 

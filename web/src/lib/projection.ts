@@ -28,6 +28,8 @@ export function initConversation(session_id: string): ConversationState {
     compactions: [],
     reconcile_queue: [],
     pending_approvals: [],
+    approval_decisions: [],
+    permission_policy: null,
     events: [],
     unknown_events: [],
     model: null,
@@ -557,6 +559,10 @@ function projectToolApprovalRequested(state: ConversationState, event: AgentEven
   const data = event.data;
   const approvalId = String(data.approval_id ?? '');
   if (!approvalId) return; // 契约必有 approval_id
+  // 生效阈值逐事件折叠（最后一条胜）——放在幂等早退**之前**：重放时它仍是同一个值，
+  // 但这样就不依赖"请求只到达一次"这个假设。
+  const policy = String(data.policy ?? '');
+  if (policy) state.permission_policy = policy;
   // 幂等：重放已存在的 approval_id 不重复入队
   if (state.pending_approvals.some((a) => a.approval_id === approvalId)) return;
   state.pending_approvals = [
@@ -580,13 +586,34 @@ function projectToolApprovalRequested(state: ConversationState, event: AgentEven
   ];
 }
 
-/** #37 审批已决——从 pending_approvals 移除。 */
+/** #37 审批已决——从 pending_approvals 移出队列，**同时留痕到 `approval_decisions`**
+ *  （#184 Inspector PERMISSION 段要回答"裁决结果"，而队列语义是"决议即消失"）。
+ *
+ *  `tool_name` 在移除**之前**从同 id 的请求上取——队列是这条信息的唯一来源，先删就
+ *  取不到了。配不上对（事件窗口从中间开始 / 未知 id）时留空，由渲染层显示 `—`；
+ *  不编造工具名，也不为了"看起来完整"去 pending 之外再猜一次。 */
 function projectPermissionResolved(state: ConversationState, event: AgentEvent): void {
   const approvalId = String(event.data.approval_id ?? '');
-  if (approvalId) {
-    state.pending_approvals = state.pending_approvals.filter((a) => a.approval_id !== approvalId);
-  }
+  if (!approvalId) return; // 契约必有 approval_id
+  const request = state.pending_approvals.find((a) => a.approval_id === approvalId);
+  state.pending_approvals = state.pending_approvals.filter((a) => a.approval_id !== approvalId);
+  // 幂等：重放同一 approval_id 的决议不重复留痕（JSONL 回放会重放全部事件）。
+  if (state.approval_decisions.some((d) => d.approval_id === approvalId)) return;
+  state.approval_decisions = [
+    ...state.approval_decisions,
+    {
+      approval_id: approvalId,
+      decision: String(event.data.decision ?? ''),
+      reason: String(event.data.reason ?? ''),
+      tool_name: request?.tool_name,
+      time: event.time,
+    },
+  ];
 }
+
+/** Inspector PERMISSION 段（#184）的三个真相在投影状态上，由 `lib/permission.ts` 的
+ *  `permissionView` 组装成渲染视图——这里**不再加一层纯透传**（review 删掉了那层：
+ *  它只是把三个字段抄一遍，多一层就多一处要同步的地方）。 */
 
 /** Phase 12 白盒透明（ADR-0014 #69）：#69 RepeatedToolFailureGuard——连续同错
  *  工具调用熔断。soft 已由后端注入 user-role 纠正消息（injected_by 标记，见

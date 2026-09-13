@@ -418,6 +418,23 @@ export interface PendingApproval {
   stale?: boolean;
 }
 
+/** 已裁决的审批 —— `permission/resolved` 事件（#184，Inspector PERMISSION 段）。
+ *
+ *  为什么需要单独一条：`pending_approvals` 是**队列**（决议即移出），所以"裁决结果"
+ *  在投影里无处可查。Inspector 要如实回答"这个会话批过什么"，就必须把决议留痕。
+ *
+ *  `tool_name` / `policy` 从**同一 approval_id 的请求**带过来（请求必先于决议到达）；
+ *  配不上对（例如事件窗口从中间开始）时留空 → 渲染 `—`，不猜。 */
+export interface ApprovalDecision {
+  approval_id: string;
+  /** deny / approve_once / approve_session / approve_policy（后端 PermissionDecision）。 */
+  decision: string;
+  reason: string;
+  /** 同 approval_id 请求里的工具名；配不上对时 undefined（不猜）。 */
+  tool_name?: string;
+  time?: string;
+}
+
 export interface ConversationState {
   session_id: string;
   turns: Turn[];
@@ -434,6 +451,19 @@ export interface ConversationState {
    *  tool/approval-requested adds to this list; permission/resolved removes.
    *  Empty array = no pending approval (auto-approve or already resolved). */
   pending_approvals: PendingApproval[];
+  /** 已裁决的审批（`permission/resolved`，到达顺序）。与 `pending_approvals` 互补：
+   *  两者合计 = 本会话出现过的全部审批。Inspector PERMISSION 段据此显示"裁决结果"
+   *  （#184）。决议事件**不改写**任何 `pending_approvals` 之外的状态。 */
+  approval_decisions: ApprovalDecision[];
+  /** 本会话生效的审批阈值（`tool/approval-requested.data.policy`，逐事件折叠）。
+   *
+   *  为什么折叠而不是渲染时扫事件：扫描要 O(events)（"整个会话没有审批"是**最坏**情况，
+   *  必须扫完），而这段在 Inspector 打开时每次渲染都会跑。折叠成字段后每事件 O(1)——
+   *  与 `model` / `usage_total` 同一路数（投影的职责就是增量折叠）。
+   *
+   *  为什么这是唯一来源：`permission_mode` 不在任何 SessionEvent 里、也没有 GET 接口，
+   *  审批请求携带的 `policy` 才是 ToolExecutor 当时实际用的阈值。无审批事件 → null。 */
+  permission_policy: string | null;
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22).
    *

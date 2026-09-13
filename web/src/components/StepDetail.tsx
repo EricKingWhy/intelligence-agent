@@ -16,12 +16,13 @@ import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import {
   AlertTriangle, ArrowLeft, ChevronRight, Clock, Database, FileCheck2, FileDiff,
-  Hash, Layers, ListTree, Package, TerminalSquare,
+  Hash, Layers, ListTree, Package, ShieldCheck, TerminalSquare,
 } from 'lucide-react';
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { allTools, summarizeEvent } from '../lib/projection';
+import { permissionView } from '../lib/permission';
 import { commandResult, isCommand } from '../lib/commandOutput';
 import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
@@ -73,9 +74,11 @@ interface Props {
   onFocusEvent: (event: AgentEvent) => void;
   /** PRD §9.2 反向联动：点 Timeline 行 → 中间主区滚动定位对应事件。 */
   onJumpToStream?: (event: AgentEvent) => void;
+  /** #184 反向联动：点 PERMISSION 段的待审批行 → 中间主区滚动定位审批卡。 */
+  onJumpToApproval?: (approvalId: string) => void;
 }
 
-export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream }: Props) {
+export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
   /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——useMemo 不许
    * 出现在下方任何 early-return 之后（Rules of Hooks：focus/tool 分支返回的渲染
@@ -225,7 +228,14 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       {/* 结构分层：header/tabs 钉在面板顶部，只有内容滚动（用户反馈 2026-09-06：
           长内容把 tabs 滚出视口后无法切换）。 */}
       <div className="detail-body">
-        {tab === 'chat' && <ChatTab conversation={conversation} tools={tools} onFocusTool={onFocusTool} />}
+        {tab === 'chat' && (
+          <ChatTab
+            conversation={conversation}
+            tools={tools}
+            onFocusTool={onFocusTool}
+            onJumpToApproval={onJumpToApproval}
+          />
+        )}
         {tab === 'timeline' && (
           <TimelineTab
             key={conversation.session_id}
@@ -253,12 +263,15 @@ const RUN_GROUP_STATUS_LABEL: Record<RunGroupStatus, string> = {
 // ── Chat tab：Run 级摘要（真数据区块 + 空槽标注） ──
 
 export function ChatTab({
-  conversation, tools, onFocusTool,
+  conversation, tools, onFocusTool, onJumpToApproval,
 }: {
   conversation: ConversationState;
   tools: ToolCall[];
   /** 工具行点击回调——子会话视图等只读场景缺省：行渲染为静态行（假按钮≠诚实）。 */
   onFocusTool?: (tool: ToolCall) => void;
+  /** 待审批行点击 → 中间主区滚动定位到审批卡（#184）。与 `onFocusTool` 同规则：
+   *  缺省时行渲染为静态行，不画一个点不动的按钮。 */
+  onJumpToApproval?: (approvalId: string) => void;
 }) {
   // Run 状态 + 时长由 lib/runState 的 deriveRunSummary 单一提供：粗标签的
   // 「取消 ≠ 失败」语义、以及「终态集合必须含 run/interrupted」这条与顶栏脉冲
@@ -476,6 +489,7 @@ export function ChatTab({
           </div>
         </div>
       )}
+      <PermissionSection conversation={conversation} onJumpToApproval={onJumpToApproval} />
       <div className="detail-section detail-reserved">
         <div className="detail-section-title">
           <Database size={14} /> CHECKPOINT
@@ -483,6 +497,82 @@ export function ChatTab({
         <div className="detail-empty-hint">后端未暴露（无 API，集成阶段处理）</div>
       </div>
     </>
+  );
+}
+
+/** PERMISSION 段（#184，PRD §12）。
+ *
+ *  数据全部来自事件流投影（`tool/approval-requested` → 队列；`permission/resolved`
+ *  → 裁决留痕），**没有新 API**。权限档是唯一需要解释的字段：`permission_mode` 不在
+ *  任何事件里、也没有 GET 接口，能证明的只有审批请求携带的 `policy`（ToolExecutor
+ *  当时实际用的阈值）——所以整段措辞都在 `lib/permission.ts` 里定，这里只接线。
+ *
+ *  两处刻意的"不消失"：零待审批 → 显示「无待审批」；零裁决 → 「尚无裁决」。段本身
+ *  永远渲染（除非 conversation 为空）——段消失会被读成"这个会话没有权限概念"。 */
+function PermissionSection({
+  conversation, onJumpToApproval,
+}: {
+  conversation: ConversationState;
+  onJumpToApproval?: (approvalId: string) => void;
+}) {
+  const view = permissionView(conversation);
+  return (
+    <div className="detail-section" data-section="permission">
+      <div className="detail-section-title">
+        <ShieldCheck size={14} /> PERMISSION
+      </div>
+      <div className="detail-row">
+        <span className="detail-key">权限档</span>
+        <span className="detail-val detail-val-mono">
+          {view.policy ?? <span className="detail-val-muted">—</span>}
+        </span>
+      </div>
+      {view.policy === null && (
+        // AC4：拿不到就说明为什么——「—」不带理由会被读成"没有权限约束"。
+        <div className="detail-empty-hint">本会话无审批事件，生效阈值无从得知</div>
+      )}
+      <div className="detail-row">
+        <span className="detail-key">待审批</span>
+        {/* 零待审批 → 明说（AC2），但仍用静音色：这是"没有"，不是计数 0。 */}
+        <span className={`detail-val${view.pending.length === 0 ? ' detail-val-muted' : ''}`}>
+          {view.pendingLabel}
+        </span>
+      </div>
+      {view.pending.map((a) =>
+        onJumpToApproval ? (
+          <button
+            key={a.approval_id}
+            className="detail-permission-row"
+            onClick={() => onJumpToApproval(a.approval_id)}
+          >
+            <ChevronRight size={14} />
+            <span className="detail-tool-name">{a.tool_name || '—'}</span>
+            <span className="detail-permission-action">{a.action_type || '—'}</span>
+            {/* 失效是事实，不是错误：run 已终结 → 决策永不可能再提交（APR-01）。 */}
+            {a.stale === true && <span className="detail-val-tag">已失效</span>}
+          </button>
+        ) : (
+          <div key={a.approval_id} className="detail-permission-row detail-permission-row-static">
+            <span className="detail-tool-name">{a.tool_name || '—'}</span>
+            <span className="detail-permission-action">{a.action_type || '—'}</span>
+            {a.stale === true && <span className="detail-val-tag">已失效</span>}
+          </div>
+        ),
+      )}
+      <div className="detail-row">
+        <span className="detail-key">已裁决</span>
+        <span className={`detail-val${view.decisions.length === 0 ? ' detail-val-muted' : ''}`}>
+          {view.decisionsLabel}
+        </span>
+      </div>
+      {view.decisions.map((d) => (
+        <div key={d.approval_id} className="detail-permission-decision">
+          <span className={`detail-val-tag permission-verdict-${d.tone}`}>{d.verdict}</span>
+          <span className="detail-tool-name">{d.toolName}</span>
+          {d.reason && <span className="detail-permission-reason" title={d.reason}>{d.reason}</span>}
+        </div>
+      ))}
+    </div>
   );
 }
 

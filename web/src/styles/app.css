@@ -3538,6 +3538,64 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: inset 2px 0 0 0 var(--accent),
     inset 0 0 0 0.5px color-mix(in srgb, var(--color-accent) 24%, transparent);
 }
+
+/* PERMISSION 段（#184）：待审批行复刻工具行的视觉语言（同样是"点进去"的行），
+ * 裁决行是纯信息行（不可点）——两者不做假按钮。 */
+.detail-permission-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-foreground);
+  font: 500 var(--text-sm) var(--font-ui);
+  text-align: left;
+  width: 100%;
+  transition: background var(--dur-fast) var(--ease-apple);
+}
+.detail-permission-row:hover { background: var(--color-hover); }
+.detail-permission-row:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+/* 只读场景（子会话视图缺省回调）：行不点得动，就不许显得点得动。
+   必须排在 `.detail-permission-row` **之后**——同特异度下后者胜，
+   复用 `.detail-tool-row-static` 会被 `cursor: pointer` 盖掉（假按钮）。 */
+.detail-permission-row-static {
+  cursor: default;
+}
+.detail-permission-action {
+  color: var(--text-tertiary);
+  font: 400 var(--text-xs) var(--font-ui);
+  margin-left: auto;
+}
+.detail-permission-decision {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+}
+.detail-permission-reason {
+  color: var(--text-tertiary);
+  font: 400 var(--text-xs) var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* 裁决语义分色：绿 = 已批准（断言），红 = 拒绝；**未知/缺失决策不涂色**——
+   neutral 落在 `.detail-val-tag` 的默认外观上，不冒充任何一种裁决。 */
+.permission-verdict-allow {
+  background: color-mix(in srgb, var(--color-success) 14%, transparent);
+  color: var(--color-success);
+}
+.permission-verdict-deny {
+  background: color-mix(in srgb, var(--color-destructive) 14%, transparent);
+  color: var(--color-destructive);
+}
 .tool-status-dot {
   width: 6px;
   height: 6px;

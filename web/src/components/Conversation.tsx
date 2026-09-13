@@ -118,9 +118,17 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
       el.classList.add('stream-jump-pulse');
       window.setTimeout(() => el.classList.remove('stream-jump-pulse'), 900);
     };
+    /* 三个 key 命名空间互不相交：`tool:`/`step:`（事件→轮次内定位）、`delegation:`、
+     *  `approval:`（#184 审批卡——它在虚拟化列表**之外**，必须始终可见，所以有自己的
+     *  data 属性）。一次查询按序试，命中即停。 */
+    const key = jumpRequest.key;
+    const approvalKey = key.startsWith('approval:') ? key.slice('approval:'.length) : null;
     const el =
-      root.querySelector<HTMLElement>(`[data-stream-key="${jumpRequest.key}"]`) ??
-      root.querySelector<HTMLElement>(`[data-step-key="${jumpRequest.key}"]`);
+      root.querySelector<HTMLElement>(`[data-stream-key="${key}"]`) ??
+      root.querySelector<HTMLElement>(`[data-step-key="${key}"]`) ??
+      (approvalKey === null
+        ? null
+        : root.querySelector<HTMLElement>(`[data-approval-key="${approvalKey}"]`));
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       pulse(el);
@@ -350,16 +358,19 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
          *  - 不参与虚拟化窗口（审批卡必须始终可见）
          *  - 瞬时贴底（scrollTop = scrollHeight）会把审批卡包含进来 */}
         {conversation.pending_approvals.map((a, i) => (
-          <ApprovalCard
-            key={a.approval_id}
-            sessionId={conversation.session_id}
-            approval={a}
-            /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
-            invalid={a.stale === true || goneApprovalIds?.has(a.approval_id) === true}
-            onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
-            /* UI-01：多卡并存只有第一张自动聚焦（alertdialog 焦点不打架）。 */
-            autoFocus={i === 0}
-          />
+          /* `data-approval-key` 是 Inspector PERMISSION 段（#184）反向联动的落点：
+             点那一行的"待审批"→ jumpRequest key `approval:<id>` → 滚到这里 + pulse。 */
+          <div key={a.approval_id} data-approval-key={a.approval_id}>
+            <ApprovalCard
+              sessionId={conversation.session_id}
+              approval={a}
+              /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
+              invalid={a.stale === true || goneApprovalIds?.has(a.approval_id) === true}
+              onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
+              /* UI-01：多卡并存只有第一张自动聚焦（alertdialog 焦点不打架）。 */
+              autoFocus={i === 0}
+            />
+          </div>
         ))}
       </div>
       {/* Follow-mode 浮标（pi-mono "jump to latest"）：在**投影上仍是 running 的
