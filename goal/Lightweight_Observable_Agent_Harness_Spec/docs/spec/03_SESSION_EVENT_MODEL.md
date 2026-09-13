@@ -60,7 +60,6 @@ tool/result
 context/built
 context/compacted
 
-checkpoint/saved
 operation/reconcile-required
 artifact/created
 
@@ -72,6 +71,22 @@ approval/resolved
 ```
 
 `ModelDelta` 可以实时 Event 流发送，但默认不要求每个 token 永久 JSONL，以避免日志爆炸。完整 AIMessage MUST 持久化。
+
+## 3.1 与 SessionEvent **分层**的存储层概念（不是事件）
+
+下面这些概念属于**存储层**，MUST NOT 作为 SessionEvent 写入事件流 / JSONL，
+也 MUST NOT 出现在上面的事件表里。分层的理由是同一条：事件流记的是「**对话里发生过什么**」
+（`derive_messages` 要读的事实），而这些是「**存储层怎么恢复**」的实现辅助——混进事件流
+会让 replay 语义被存储细节污染（ADR-0004 Round 5 Q16）。
+
+| 概念 | 存放位置 | 为什么不是 SessionEvent |
+| --- | --- | --- |
+| **Checkpoint**（`checkpoint/saved`） | 存储层（见 `07_STORAGE_PERSISTENCE_RECOVERY.md`） | checkpoint 是恢复辅助状态，不是对话事实；`derive_messages` 不需要它。**`checkpoint/saved` 永远不进 SessionEvent**（ADR-0004 Round 5 Q16；实现侧硬约束见 `agent/runtime.py` 与 `storage/checkpoint.py` 顶部注释） |
+| **Operation Ledger** | SQLite `operations` 表（`operation_id = tool_call_id`，ADR-0004 Round 5 Q17） | Ledger 记的是**副作用账本**（配合 reconcile 与恢复），不是对话内容。它不参与 `derive_messages`，只被 `RecoveryCoordinator` 读。（`operation/reconcile-required` 是**事件**——那一条是「模型该知道上次有个 operation 进了 NEED_RECONCILE」的对话事实，由 RecoveryCoordinator append。） |
+| **Artifact 大内容** | Local / MinIO / S3 兼容存储（spec 06） | 事件里只留 **ref**（`artifact/created` / `artifact/externalized` 携带 `artifact_id` + `size` + `mime_type`），模型只拿 summary + ref，正文不进事件流也不进上下文 |
+
+判据一句话：**会不会改变"模型该看到什么"**。会 → 事件；只是"重启后怎么接着跑"的辅助 →
+存储层，不进事件流。
 
 ## 4. Derive Messages
 
