@@ -46,9 +46,6 @@ run/failed
 
 user/message
 
-step/started
-step/completed
-
 model/started
 model/delta        # 是否持久化逐 delta 可配置
 model/completed
@@ -57,7 +54,6 @@ model/failed
 tool/call
 tool/result
 
-context/built
 context/compacted
 
 operation/reconcile-required
@@ -88,6 +84,19 @@ approval/resolved          # 历史名 → 实装 permission/resolved（见 §3.
 判据：事件名的唯一事实源是 `src/agent_harness/session/event.py`；前端词汇表由
 `scripts/gen_event_types.py` 从它生成（`web/src/generated/event-types.ts`），有守卫测试
 `tests/test_event_types_generated.py`。
+
+## 3.3 未实现的设计草案（**勿按此实现**）
+
+下面三个名字来自早期模型草案，`src/` 与 `tests/` 全目录 **0 命中**（既无常量也无可疑发射点），
+且当前设计已用别的机制表达了同一件事——所以它们**不是**"待补的漏实现"。
+若要真的引入，必须另开实现票（写清 payload / 不变量 / 谁发射 / 是否持久化）并链回 #173；
+在开会之前，MUST NOT 按这些名字实现或匹配。
+
+| 草案名 | 结论 | 当前用什么表达同一件事 |
+| --- | --- | --- |
+| `step/started` | **草案，不实现** | step 边界由**信封上的 `step_id`** 表达（`session/event.py` 的 EventEnvelope 字段；运行时每条事件都带 `step_id`）。再发一对 step 生命周期事件等于给同一事实造第二个来源，违反单一事实源 |
+| `step/completed` | **草案，不实现** | 同上。判读"某步是否结束"用该步事件的存在性与终态（`run/completed` / `run/failed` / `run/interrupted` + 信封 `step_id`），不引入新的成对事件 |
+| `context/built` | **草案，不实现** | 上下文装配的结果由 `context/compacted`（压缩后摘要）+ `compaction/start` / `compaction/end`（replay 确定性 bracket）+ `model/completed` 的 usage 共同表达。逐次装配的完整 prompt 不进事件流（体积与冗余，且模型只看得到结果） |
 
 ## 3.1 与 SessionEvent **分层**的存储层概念（不是事件）
 
