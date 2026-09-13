@@ -131,21 +131,32 @@ describe('#182 AC2/AC3：中心列 tab 集', () => {
   });
 
   it('声明为 true 但尚无实现的面**不渲染**（不给"点了没事发生"的 tab）', () => {
-    const surfaces = deriveSurfaces([capability({ changes: true, terminal: true })]);
+    // `changes`（「文件/改动」）是**仅剩**的未实现面（#189）。
+    const surfaces = deriveSurfaces([capability({ changes: true })]);
     expect(centerTabs(surfaces).map((t) => t.key)).toEqual(['chat']);
   });
 
-  it('实现落地后同一份声明就会渲染出该面（#189/#190 的接口形状）', () => {
+  it('已实现的面如实跟随声明：为真就出现，为假就消失（#190 的「输出」）', () => {
+    expect(centerTabs(deriveSurfaces([capability({ terminal: true })])).map((t) => t.key)).toEqual([
+      'chat',
+      'terminal',
+    ]);
+    expect(centerTabs(deriveSurfaces([capability({ terminal: false })])).map((t) => t.key)).toEqual([
+      'chat',
+    ]);
+  });
+
+  it('实现落地后同一份声明就会渲染出该面（#189 落地时 `changes` 的形状）', () => {
     const registry: SurfaceDescriptor[] = SURFACES.map((s) =>
-      s.key === 'terminal' ? { ...s, implemented: true } : s,
+      s.key === 'changes' ? { ...s, implemented: true } : s,
     );
-    const surfaces = deriveSurfaces([capability({ terminal: true })]);
-    expect(centerTabs(surfaces, registry).map((t) => t.label)).toEqual(['Chat', '输出']);
+    const surfaces = deriveSurfaces([capability({ changes: true })]);
+    expect(centerTabs(surfaces, registry).map((t) => t.label)).toEqual(['Chat', '文件/改动']);
   });
 
   it('tab 顺序稳定：登记顺序即渲染顺序，与能力返回顺序无关', () => {
     const registry: SurfaceDescriptor[] = SURFACES.map((s) =>
-      ['changes', 'terminal'].includes(s.key) ? { ...s, implemented: true } : s,
+      s.key === 'changes' ? { ...s, implemented: true } : s,
     );
     const surfaces = deriveSurfaces([capability({ terminal: true, changes: true })]);
     expect(centerTabs(surfaces, registry).map((t) => t.key)).toEqual([

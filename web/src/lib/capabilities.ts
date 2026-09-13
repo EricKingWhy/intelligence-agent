@@ -43,7 +43,9 @@ export interface SurfaceDescriptor {
 export const SURFACES: readonly SurfaceDescriptor[] = [
   { key: 'chat', label: 'Chat', implemented: true, always: true },
   { key: 'changes', label: '文件/改动', implemented: false },
-  { key: 'terminal', label: '输出', implemented: false },
+  // 「输出」面（#190 已实现）：`implemented: true` 与 App.tsx 里 `terminal` 分支的
+  // `<OutputPanel>` 是**成对**的——少任何一半都会得到一个空面板。
+  { key: 'terminal', label: '输出', implemented: true },
 ];
 
 /** 保守缺省（PRD §3.2，与后端 `app.py:918-927` 同一口径）：能力数据拿不到时用。

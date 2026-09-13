@@ -24,6 +24,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
+import { OutputPanel } from './components/OutputPanel';
 import {
   centerTabs,
   deriveSurfaces,
@@ -49,7 +50,7 @@ import {
   type CatalogEntry,
   type ModelCatalogEntry,
 } from './lib/api';
-import { awaitingApproval, summarizeEvent } from './lib/projection';
+import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
 import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
@@ -181,6 +182,8 @@ export default function App() {
    *  不存在面板、再靠 effect 纠正（那会闪一帧空面板）。 */
   const [selectedSurface, setSelectedSurface] = useState<SurfaceKey>('chat');
   const activeTab = resolveActiveTab(tabs, selectedSurface);
+  // 本会话全部工具调用：与 Inspector 的 run 级清单共用 `allTools`（#190 单一走法）。
+  const tools = useMemo(() => (conversation ? allTools(conversation) : []), [conversation]);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -852,10 +855,15 @@ export default function App() {
                   />
                 </>
               ) : null}
-              {/* 「文件/改动」/「输出」的内容由 #189 / #190 补上：`centerTabs` 只在
-                  `implemented` 为 true 时把面放进 `tabs`，所以这里现在取不到其他键——
-                  不写假面板（"声明了却渲染不出来"比不渲染更差）。接内容面时必须**同时**
-                  改登记表的 `implemented` 与这里的渲染，只改一处会得到一个空面板。 */}
+              {tab.key === 'terminal' ? (
+                /* 「输出」面（#190）：聚合本会话命令输出，只读如实——面内明示"无交互终端"。
+                   与对话里的工具卡共用 `ToolOutputStream`（同一渲染器，AC9）。 */
+                <OutputPanel tools={tools} />
+              ) : null}
+              {/* 「文件/改动」的内容由 #189 补上：`centerTabs` 只在 `implemented` 为 true
+                  时把面放进 `tabs`，所以这里现在取不到 `changes`——不写假面板（"声明了却
+                  渲染不出来"比不渲染更差）。接内容面时必须**同时**改登记表的 `implemented`
+                  与这里的渲染，只改一处会得到一个空面板。 */}
             </div>
           ))}
         </section>

@@ -21,7 +21,8 @@ import {
 import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
-import { summarizeEvent } from '../lib/projection';
+import { allTools, summarizeEvent } from '../lib/projection';
+import { commandResult, isCommand } from '../lib/commandOutput';
 import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { CopyButton } from './CopyButton';
@@ -159,7 +160,8 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     );
   }
 
-  const tools = conversation.turns.flatMap((t) => t.tools);
+  // 单一走法（#190）：与中心列「输出」面共用 projection.allTools。
+  const tools = allTools(conversation);
   const pulse = deriveRunPulse(conversation, streaming);
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应
@@ -715,25 +717,17 @@ function ChangesTab({ tools }: { tools: ToolCall[] }) {
 
 // ── Terminal tab：bash 调用聚合（命令执行面） ──
 
-/** bash ToolResult 的后端形状（spec 04：exit_code + stdout）。形状不符返回 null。 */
-function bashResult(tool: ToolCall): { exit_code?: number; stdout?: string } | null {
-  if (typeof tool.result !== 'object' || tool.result === null) return null;
-  const r = tool.result as Record<string, unknown>;
-  return {
-    exit_code: typeof r.exit_code === 'number' ? r.exit_code : undefined,
-    stdout: typeof r.stdout === 'string' ? r.stdout : undefined,
-  };
-}
-
 function TerminalTab({ tools, onFocusTool }: { tools: ToolCall[]; onFocusTool: (t: ToolCall) => void }) {
-  const bashes = tools.filter((t) => t.name === 'bash');
+  // 判定与读取都来自 lib/commandOutput（票面 AC2）：
+  // "什么算一次命令"只允许有一处答案——两边各写一份会各自演化。
+  const bashes = tools.filter(isCommand);
   if (bashes.length === 0) {
     return <TabEmpty hint="本次会话未执行命令。" icon={TerminalSquare} />;
   }
   return (
     <>
       {bashes.map((t) => {
-        const result = bashResult(t);
+        const result = commandResult(t);
         return (
           <button key={t.tool_call_id} className="detail-terminal-row" onClick={() => onFocusTool(t)}>
             <div className="detail-terminal-cmd">

@@ -1153,6 +1153,15 @@ function touchTurn(turn: Turn, event: AgentEvent): void {
   }
 }
 
+/** 本会话全部工具调用，按到达顺序（跨 turn 展平）。
+ *
+ *  单一走法：Inspector 的 run 级清单与中心列「输出」面都从这一份取（#190）。各写一遍
+ *  `turns.flatMap((t) => t.tools)` 看着无害，但一旦给"工具调用"加过滤（比如只取已终态的），
+ *  两份就会悄悄分叉。 */
+export function allTools(state: ConversationState): ToolCall[] {
+  return state.turns.flatMap((t) => t.tools);
+}
+
 /** Expand a turn's execution chain into render nodes in true event order
  *  (Trace Ladder — signature #2). Pure view over `activities` — no filtering
  *  or collapsing; empty/done segments are a rendering concern (Conversation). */

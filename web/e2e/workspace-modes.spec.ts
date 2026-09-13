@@ -49,17 +49,13 @@ test('AC2/AC3：能力目录为空（后端 CAPABILITIES=""）→ 恰好只剩 C
   await expect(chat).toHaveAttribute('tabindex', '0');
 });
 
-test('AC4 + 端点真被消费：声明为 true 的面今天不渲染，但声明确实被读了', async ({ page }) => {
-  // 后端把 changes / terminal 都声明为真——按声明它们"该出现"，但「文件/改动」与
-  // 「输出」的实现在 #189 / #190，今天还没有。
-  //
-  // 这条用例同时回答一个**不能靠 tab 集回答**的问题：前端到底有没有调这个端点？
-  // 今天三种 mock（空目录 / 声明为真 / 端点 404）渲染出来的 tab 集**都是** `['Chat']`，
-  // 所以"压根没调 / 响应被忽略"这类回归会让整套用例照绿——必须数请求。
-  //
-  // ⚠ 这条守卫**只对当前交付状态成立**：#189 / #190 落地后必须把它改成"出现"
-  //    （票面 #189/#190 已记这一条），否则就是在保护一个已经变假的事实。它今天拦住的
-  //    是相反的错：有人先把 tab 接上、面板却还没实现（那正是"看着像功能、点了没反应"）。
+test('AC4 + 端点真被消费：未实现的面（`changes`）声明为真也不渲染；已实现的（`terminal`）跟随声明', async ({
+  page,
+}) => {
+  // 这条用例同时回答一个**不能只靠 Chat 回答**的问题：前端到底有没有调这个端点？
+  // `changes`（「文件/改动」）的实现还在 #189 —— 它声明为真也不该出现（渲染一个没有
+  // 实现的 tab 就是"点了没事发生"）。而 `terminal` 在 #190 已实现，所以它**必须**出现
+  // ——这正是 #182 骨架期守卫翻转后的形态（当时本用例断言两个面都不出现）。
   let calls = 0;
   routeApi(page, {
     capabilities: [
@@ -72,7 +68,7 @@ test('AC4 + 端点真被消费：声明为 true 的面今天不渲染，但声�
   });
   await page.goto('/');
 
-  expect(await tabLabels(page)).toEqual(['Chat']);
+  expect(await tabLabels(page)).toEqual(['Chat', '输出']);
   // StrictMode 在 dev 下会双调用 effect（React 既定行为），所以**不锁精确次数**；
   // 锁两件真事：(a) 端点确实被消费了；(b) 消费完之后没有继续重拉——依赖写错会变成
   // 请求循环，而那种 bug 靠 tab 集看不出来。
@@ -82,11 +78,10 @@ test('AC4 + 端点真被消费：声明为 true 的面今天不渲染，但声�
   expect(calls).toBe(settled);
 });
 
-test('AC6（骨架期口径）：tab 集恰好等于"声明为真 **且有实现**"的面', async ({ page }) => {
-  // 票面 AC6 要求"两组 mock（真/假）各断言 tab 集**恰好**符合声明"。今天只有 Chat
-  // 有实现，所以"符合声明"的可观测形式是：**声明为真但无实现 → 不出现**；
-  // 完整的"声明为真 → 出现"要等 #189 / #190（票面已记）。这里把两组显式并排，
-  // 让这个差别的**唯一原因是 implemented 标记**这件事一眼可查。
+test('AC6：tab 集恰好等于"声明为真 **且有实现**"的面', async ({ page }) => {
+  // 票面 AC6 要求"两组 mock（真/假）各断言 tab 集**恰好**符合声明"。
+  // `terminal` 已在 #190 落地，所以这一条现在是**完整的**端到端证明：声明为假就不出现、
+  // 声明为真就出现，两组只差这一个布尔值。
   routeApi(page, {
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: false, terminal: false })],
   });
@@ -95,13 +90,13 @@ test('AC6（骨架期口径）：tab 集恰好等于"声明为真 **且有实现
 
   await page.unroute('**/api/**');
   routeApi(page, {
-    capabilities: [capabilityFixture({ chat: true, timeline: true, changes: true, terminal: true })],
+    capabilities: [capabilityFixture({ chat: true, timeline: true, changes: false, terminal: true })],
   });
   await page.goto('/');
   const declaredTrue = await tabLabels(page);
 
   expect(declaredFalse).toEqual(['Chat']);
-  expect(declaredTrue).toEqual(['Chat']); // 同一答案 —— 因为两个面都还没有实现
+  expect(declaredTrue).toEqual(['Chat', '输出']);
 });
 
 test('AC3：能力接口不可用 → 降级为缺省语义，Chat 永不消失', async ({ page }) => {
