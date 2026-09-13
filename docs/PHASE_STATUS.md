@@ -352,3 +352,14 @@
   **门禁现象（非本票引入，如实登记）**：同一份代码连跑 5 次，其中一次出现 **22 个 web 用例失败**（`test_web_stream`/`test_web_ws_relay` 等），另四次 2152 全绿；把这两个文件单独连跑 3 轮均通过。已登记 `docs/FRONTEND_ISSUES_LOG.md` OBS-11.1。
 
   **写入侧阻塞（scope 外，已报告用户待决策）**：本接口"读得到"的前提是**有东西被写进去**。外置写入只在 `assembly.build_runtime` 的 **S3 分支**（`artifact_store_*` 配齐）创建 `ArtifactOverflowHandler`；`D:\intelligence-agent`（实际跑完整项目的 main clone）与 frontend clone 的 `.env` **一组都没配** → 永不外置 → 本接口恒 503；且仓库里**只有 Fake / S3 / MinIO 三个 store，规格不变量 #15 写的 "Local" 那半从未实装**。发现路径本身是通的：外置时会写 `artifact/externalized` 事件（带 `artifact_id`/`size`/`mime_type`），`ToolResult.artifact_ref` 也带 id，前端可由事件折叠枚举 + 本接口读内容。
+- 2026-09-14：**ticket #192 接通外置写入（`LocalArtifactStore` = spec 06 §3 默认 Provider + 修 MinIO 只读半截接线）**。commit `b31b9f3`（feat/backend）。测试：ruff clean；全量 pytest **2198 passed / 10 skipped / 42 deselected / 0 failed**（+46）。关单：是。集成提示词：`docs/INTEGRATION_PROMPT_ARTIFACT_192.md`。
+
+  **背景（Gap，非新需求）**：#185 补的是 artifact 的**读**接口，写入侧从未接通——唯一的外置写入者 `ArtifactOverflowHandler` 只在 `assembly` 的 `artifact_store_*`（S3）分支被创建，`minio_*` 分支只注册读工具（与 `config.py` 自己的注释"MinIO 用于 tool result 外置"相反），而规格 06 §3 写明的默认 Provider「Local filesystem：开发/小型部署」**从未实现**。于是在没有对象存储的部署（含 `D:\intelligence-agent`，其 `.env` 里 ARTIFACT/MINIO/S3 键一个都没有）什么都不外置 ⇒ #185 的接口恒 503、#186 的界面永远看不到内容。
+
+  **三个设计问题的依据（用户 2026-09-14 授权自行决定，要求"有依据不拍脑袋"）**：① **落盘位置** = `.agent/artifacts/<session_id>/<artifact_id>`（新 setting `artifact_dir`）——与对象存储键 `{session_id}/{artifact_id}` 逐段同构（三 Provider 同形、读接口 Provider 无关）；`.gitignore` 已整目录忽略 `.agent/`（运行时产物）；与 `workspace_dir` 同族；**不能**放 `workspace_root` 底下（ADR-0027 之后它可能是用户真实仓库，ADR-0029 D2 禁止删非 harness 自拼路径）。② **保留策略 = 会话生命周期、不做自动 TTL**——ADR-0004 明确不做自动 TTL，ADR-0029 Non-Goals 同款，spec 06 §1「完整事实记录不得删除」，spec 07 的恢复用 `result_json/artifact_ref` 重建 ToolResult（删活会话的 artifact 会造出悬空引用 = 正确性故障，磁盘占用不是）。③ **硬删联动**用窄方法而非给 `ArtifactStore` ABC 加 delete（ADR-0029 D6 的"级联"超出本票，且会给 2/3 实现抛 NotImplementedError）；两条记录在案的边界：配了对象存储时远端对象不删；fork 子会话继承的引用在父会话硬删后不可解析（ADR-0029 D1/D5 已接受）。
+
+  **顺带收敛**：session 键段规则收敛为一份定义（`storage/artifact.py::SESSION_KEY_PATTERN`）——`session/service.py` 的注释本来就写着"字符集与 S3ArtifactStore 的 key 段规则一致"，同一条规则不该有两个正则字面量；本地 Provider 要把它拼进文件系统路径。
+
+  **自审修掉的一处自身缺陷（P1）**：`artifact_dir` 置空（**文档化的关闭本地外置**方式）会让 `LocalArtifactStore` 构造抛 ValueError → 建会话 500。外置是大输出的优化不是 Core 必需品（不变量 21），改为 fail-open（无写入者，与 #192 之前同行为）并加测试钉住（`test_blank_artifact_dir_disables_local_externalization_without_breaking_session`）。
+
+  **契约语义变更（已在测试里写明）**：未配对象存储不再等于"没有存储"，而是"用本地存储"，故 `GET .../artifacts/{id}` 从 503 变为 404（产物不存在）。503 只留给两种真的没有可读存储的情形：`artifact_dir` 显式置空、对象存储**半配置**（配错不许静默降级到本地——那会让运维以为产物进了对象存储）。
