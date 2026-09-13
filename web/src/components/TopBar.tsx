@@ -6,7 +6,7 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
+import { Activity, Brain, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
@@ -27,9 +27,11 @@ interface Props {
   onToggleTheme: () => void;
   /** 401 已发生（App 广播）——钥匙图标加提示点，引导配置 token。 */
   authRequired: boolean;
+  /** 打开记忆管理浮层（MEM-5 / #160）。低频管理动作，放在 App Bar 右簇。 */
+  onOpenMemories: () => void;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -162,6 +164,14 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           title="API 身份令牌（Bearer）——仅配置了 JWT_SECRET 的后端需要"
         >
           <KeyRound size={16} />
+        </button>
+        <button
+          className="icon-btn"
+          onClick={onOpenMemories}
+          aria-label="记忆管理"
+          title="记忆管理——查看并删除系统记住的长期事实"
+        >
+          <Brain size={16} />
         </button>
         <button
           className="icon-btn"

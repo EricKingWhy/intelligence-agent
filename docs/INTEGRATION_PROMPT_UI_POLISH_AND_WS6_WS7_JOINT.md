@@ -133,20 +133,20 @@ git -C D:/intelligence-agent-frontend merge-tree --write-tree --name-only feat/f
 #   web/src/App.tsx / web/src/components/SessionList.tsx / web/src/styles/app.css 均为 Auto-merging（文本零冲突）
 ```
 
-冲突形态（两边都在**同一张 `### 批次台账` 表**的 U-1 行之后插入）：
+冲突形态（两边都在**同一张 `### 批次台账` 表**的 U-1 行之后插入）。下面这几行标记**行首刻意留了一个空格**——否则本文件会被 `git diff --check` 和「全仓扫描冲突标记」的集成脚本**永久误判为"未解决的冲突"**（本文件初版正是踩了这个坑，合入 main 后被复查抓到）：
 
 ```text
-<<<<<<< our（feat/frontend）
+ <<<<<<< our（feat/frontend）
  | **U-2** | ...（含 U-2 审查结论 `e543ae1`）|
  | **U-3** | ...（UI-06 + 收尾）|
-=======
+ =======
  | **U-2** | ...（旧的「未审」副本）|
  | U-3 | ...（旧的「未审」副本）|
  | **B-2** | **#169/#170 前端半** | **`522602d`**（= 本分支 base）| 零 P0/P1，5 P2 + 6 测试缺口全处置 | `51fc68c` |
 
 ### B-2：WS-6/WS-7 前端半（#169 / #170，隔离 worktree）
  ...（整节：隔离缘由 / 门禁 / 5173 复用坑 / 真机证据 / 审查处置 / 未决项）
->>>>>>> their（feat/frontend-ws6-ws7）
+ >>>>>>> their（feat/frontend-ws6-ws7）
 ```
 
 **解决规则（唯一正确解，禁止 `--ours` / `--theirs` 一刀切，§14.7）**：

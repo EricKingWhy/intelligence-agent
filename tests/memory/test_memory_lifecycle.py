@@ -402,4 +402,3 @@ async def test_initialize_completes_a_half_migrated_outbox(tmp_path, caplog):
     vectors = FakeVectorStore()
     assert await OutboxRelay(records, vectors).flush() == 1
     assert await vectors.search("secret", ALICE, MemoryScope.USER, 5) == [("m1", 1.0)]
-

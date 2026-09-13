@@ -1832,3 +1832,48 @@ describe('emptyChildTurnIndex — 「child 会话将是空会话」提示只给�
     expect(emptyChildTurnIndex(s.turns)).toBe(-1);
   });
 });
+
+describe('事件摘要的单行语义（UI-04 信任裂缝）', () => {
+  const T = '2026-09-12T00:00:00Z';
+  const base = { session_id: 's', time: T };
+
+  it('session/forked → 「已分叉」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
+    const s = applyEvent(initConversation('f'), {
+      ...base, type: EventType.SESSION_FORKED, seq: 1, run_id: 'r',
+      data: { from_seq: 3, child_session_id: 'child-1' },
+    });
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已分叉');
+  });
+
+  it('tool/approval-requested → 「等待审批 · {tool_name}」', () => {
+    let s = initConversation('a');
+    s = applyEvent(s, {
+      ...base, type: EventType.TOOL_APPROVAL_REQUESTED, seq: 1, run_id: 'r', step_id: 1,
+      data: { approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'workspace-write', title: 't', description: 'd', arguments_preview: {}, permission: 'p', policy: 'pol', reason: 'r', allowed_decisions: [] },
+    });
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('等待审批 · write');
+  });
+
+  it('permission/resolved → 「审批已决（{decision}）」', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, {
+      ...base, type: EventType.TOOL_APPROVAL_REQUESTED, seq: 1, run_id: 'r', step_id: 1,
+      data: { approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'w', title: 't', description: 'd', arguments_preview: {}, permission: 'p', policy: 'pol', reason: 'r', allowed_decisions: [] },
+    });
+    s = applyEvent(s, {
+      ...base, type: EventType.PERMISSION_RESOLVED, seq: 2, run_id: 'r',
+      data: { approval_id: 'ap-1', decision: 'approve_once', reason: '' },
+    });
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('审批已决（approve_once）');
+  });
+
+  it('真正未接线的类型：摘要不含 JSON 片段（无 { 无 引号）', () => {
+    const s = applyEvent(initConversation('u'), {
+      ...base, type: EventType.OPERATION_RECONCILE_REQUIRED, seq: 1, run_id: 'r',
+      data: { ledger_id: 'op-1', reason: 'x' },
+    });
+    const summary = summarizeEvent(s.events[s.events.length - 1]);
+    expect(summary).not.toContain('{');
+    expect(summary).not.toContain('"');
+  });
+});

@@ -28,7 +28,7 @@
   --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
 
   /* ── Type scale (dev-tool density) ── */
-  --text-xs: 11px;
+  --text-xs: 12px;  /* UI-02（PRD D3）：可读文本地板 11→12px；10px 仅限全大写 micro-label */
   --text-sm: 13px;
   --text-base: 14px;
   --text-md: 15px;
@@ -122,10 +122,12 @@
   --border-subtle: rgba(255, 255, 255, 0.075);
   --border-strong: rgba(255, 255, 255, 0.13);
 
-  /* Text: primary > secondary > tertiary (SDD 02 §4.1) */
+  /* Text: primary > secondary > tertiary (SDD 02 §4.1)
+   * UI-02（PRD D3/R3）：tertiary 0.42→0.52——暗色实测 3.96-4.09:1 不达 AA，
+   * 提档后 ≈4.9:1。禁止低于 4.5:1（两主题实测纪律）。 */
   --text-primary:   rgba(255, 255, 255, 0.92);
   --text-secondary: rgba(255, 255, 255, 0.64);
-  --text-tertiary:  rgba(255, 255, 255, 0.42);
+  --text-tertiary:  rgba(255, 255, 255, 0.52);
 
   /* Accent: restrained pale pink signature (frozen decision 08 #14, SDD 02 §4.1).
    * Not AI purple, not the prior cool cyan — the product's own quiet tint. */
@@ -200,7 +202,9 @@
 
   --text-primary:   rgba(18, 18, 24, 0.92);
   --text-secondary: rgba(18, 18, 24, 0.62);
-  --text-tertiary:  rgba(18, 18, 24, 0.42);
+  /* UI-02（PRD D3/R3）：0.42→0.63。实测纪律：0.55 在白底只有 4.12:1、0.60 在
+   * 粉色选中染底上 4.46:1，均不达 AA——估算让位实测；0.63 → 白底 ≈5.4、染底 ≈5.0。 */
+  --text-tertiary:  rgba(18, 18, 24, 0.63);
 
   --accent:        #c96990;
   --accent-strong: #b95680;

@@ -69,9 +69,152 @@ export interface ApiMock {
    *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
    *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
   onApprovePost?: (route: Route) => Promise<void> | void;
+  // ── WS-5 / #155 项目分组 ──
+  /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
+   *
+   *  **有状态**：fixtures 在内存里真的改这份状态并按后端语义回响应（见
+   *  `routeApi` 里的 projects 分支）——create 前插注册表、rename 改标题、
+   *  attach/detach 改账本**并同步改会话行的 workspace**、软删除摘记录**并把
+   *  成员会话的 workspace 清成 null**、order 按 insertBefore 语义重排。
+   *  这样 e2e 断言的是"界面真的跟着后端的语义走"，而不是"界面读了我们塞的假值"。 */
+  projects?: ProjectFixture[];
+  /** `POST /api/projects` 里**不存在**的路径集合 → 404（真实后端不 mkdir）。
+   *  用来锁"路径不存在时有清晰错误"这条 AC。 */
+  projectMissingPaths?: string[];
+  /** POST /api/projects/{id}/sessions 的拦截口（伪造 409「会话 cwd 与项目路径
+   *  不一致」等**只能在真机上才自然出现**的拒绝）；返回 true = 已处理。
+   *  与 `projectMissingPaths` 的分工：那个改的是"哪些路径不存在"，这个改的是
+   *  "attach 这条请求本身回什么"。 */
+  onAttachPost?: (route: Route) => Promise<boolean> | boolean;
+  // ── MEM-5 / #160 记忆管理 ──
+  /** 记忆 fixture（缺省 = 空列表 → 面板显示"还没有记忆"）。
+   *
+   *  **有状态**：DELETE 真的从这份状态里摘掉条目（见 `routeApi` 的 memories 分支），
+   *  所以"删掉后关掉面板再打开，该条不在"断言的是真语义，而不是界面自己的本地隐藏。
+   *  分页也按真实端点走（`limit`/`offset` 切片），"加载更多"因此可被真的驱动。 */
+  memories?: MemoryFixture[];
+  /** 记忆能力未装配 → GET/DELETE 都回 503 + 该 detail（AC4 降级态）。
+   *  刻意用真实后端那句话（`web/memory.py`）：前端把"未启用"与"没有记忆"分开显示。 */
+  memoryDisabled?: string;
+  /** 这些 id 的 DELETE 回 403（`web/memory.py` 的"不属于当前入口"）——AC3 的
+   *  失败回滚路径（真机上要构造一条 SESSION 记忆才自然出现）。 */
+  memoryDeniedIds?: string[];
+  /** 这些 id 模拟「列表拉取之后、点删除之前被别处删掉」：DELETE 回 404（真后端那句
+   *  `记忆不存在：<id>`）**并且**把它从状态里摘掉——于是随后的重拉里那一行不在，
+   *  行内错误条无处渲染。真机上这是一个并发窗口，只能在 mock 里构造；
+   *  它锁的是"失败被界面吞掉"这条缺陷（批次审查发现）。 */
+  memoryVanishedIds?: string[];
+  /** GET /api/memories 的拦截口（断言分页参数或伪造 500）；返回 true = 已处理。 */
+  onMemoriesGet?: (route: Route) => Promise<boolean> | boolean;
+  // ── WS-6 / #169 项目内新建任务 ──
+  /** 带 `cwd` 建会话时伪造失败（AC12：422 留在确认面）。spec 可以先设它、断言错误
+   *  在浮层里，再设回 undefined 并重试——同一条路径因此能覆盖"可重试"。
+   *  不设 = 按真后端语义成功（见 routeApi 的 POST /api/sessions 分支）。 */
+  cwdSessionError?: { status: number; detail: string };
+  // ── WS-7 / #170 宿主目录列举 ──
+  /** 假目录树（`GET /api/host/dirs`）。**不设 = 空的根列举**（不是错误）：浏览器是
+   *  新建项目对话框的一部分，不关心它的 spec 不该因此多出一条红色错误盒。
+   *  错误矩阵由 `hostDirsErrors`（403/404/422 + detail）或假树里没有的路径显式构造。
+   *
+   *  spec 只声明"每个目录下有哪些子目录名"，`path`/`parent` 由 fixture 按目录结构
+   *  **拼**出来（与真后端 `host_dirs.py` 同一口径：条目的 path = 父路径 + 名字，
+   *  不做 realpath 展开；排序按 name 大小写不敏感）。这样 mock 里不会出现第二套
+   *  路径拼接逻辑被 spec 抄一遍而悄悄写歪（#155 轮栽过 mock 语义与真机相反）。 */
+  hostDirs?: {
+    /** 键 = 目录绝对路径（分隔符可 `\` 或 `/`，与请求参数逐字符相等才命中）；
+     *  值 = 该目录下的子目录名（顺序不限，fixture 排序）。 */
+    tree: Record<string, string[]>;
+    /** 根模式（`path` 缺省）的盘符/根列表。 */
+    roots?: string[];
+    /** 单个目录最多列举多少条（缺省 500 = 后端 `MAX_ENTRIES`）；超出 → truncated。 */
+    maxEntries?: number;
+  };
+  /** 这些路径的列举直接回错误（错误矩阵就地显示：403 无权限 / 404 / 422 不是目录）。 */
+  hostDirsErrors?: Record<string, { status: number; detail: string }>;
+}
+
+/** 项目 fixture（形状 = 后端 `web/projects.py::Project`，时间戳由 fixtures 补）。 */
+export interface ProjectFixture {
+  id: string;
+  path: string;
+  title: string;
+  /** 账本手工序。 */
+  session_ids: string[];
+  status?: 'ok' | 'missing-dir';
+}
+
+/** 记忆 fixture（形状 = 后端 `web/memory.py::MemorySummary`，时间戳由 fixtures 补）。 */
+export interface MemoryFixture {
+  id: string;
+  content: string;
+  scope?: 'user' | 'session';
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+}
+
+/** 会话行 fixture：只带 WS-5 相关字段，其余由调用方按需补（旧 spec 的裸对象同样可用）。 */
+export function sessionRow(
+  sessionId: string,
+  workspace: { id: string; title: string } | null = null,
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    session_id: sessionId,
+    event_count: 3,
+    first_event_time: T,
+    last_event_time: T,
+    first_user_message: `任务 ${sessionId}`,
+    trace_id: null,
+    trace_url: null,
+    workspace,
+    ...over,
+  };
 }
 
 export function routeApi(page: Page, mock: ApiMock): void {
+  // ── WS-5 #155：可变状态（每测试一份，互不串味）──
+  // 注意 sessions **持有调用方数组的引用**，不拷贝：既有 spec 的约定是"fork 成功后
+  // 往自己的 sessions 数组里 push child，下一次 GET 就能看到"（b-fork.spec.ts 依赖
+  // 这一点）。所以本车道只在原地改行的 `workspace` 字段，既不新增也不删除行。
+  const sessionState: unknown[] = mock.sessions ?? [];
+  const projectState: ProjectFixture[] = (mock.projects ?? []).map((p) => ({
+    ...p,
+    session_ids: [...p.session_ids],
+  }));
+  /** 记忆状态：DELETE 真的摘条目（"删掉后再打开面板看不到"才是真语义）。 */
+  const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
+  /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
+  const sessionEvents = new Map<string, FrameSpec[]>();
+
+  /** 后端 `web/projects.py::Project` 的响应形状（时间戳不是本车道断言的对象）。 */
+  const projectView = (p: ProjectFixture) => ({
+    id: p.id,
+    path: p.path,
+    title: p.title,
+    status: p.status ?? 'ok',
+    session_ids: p.session_ids,
+    created_at: T,
+    updated_at: T,
+  });
+  const findProject = (id: string) => projectState.find((p) => p.id === id);
+  const json = (route: Route, body: unknown, status = 200) =>
+    route.fulfill({ status, body: JSON.stringify(body), contentType: 'application/json' });
+  /** 把某会话的 workspace 引用同步成"它现在属于谁"——与真实后端一致
+   *  （attach/detach/软删除后 GET /api/sessions 的行立刻变）。
+   *  替换而非改原对象：调用方的 fixture 行是**字面量常量**，就地改会污染同一文件里
+   *  其它用例的期望（各 spec 之间共享模块级常量）。 */
+  const setWorkspace = (sessionId: string, project: ProjectFixture | null) => {
+    const at = sessionState.findIndex(
+      (s) => (s as Record<string, unknown>)['session_id'] === sessionId,
+    );
+    if (at >= 0) {
+      sessionState[at] = {
+        ...(sessionState[at] as Record<string, unknown>),
+        workspace: project ? { id: project.id, title: project.title } : null,
+      };
+    }
+  };
+
   void page.route('**/api/**', async (route) => {
     const req = route.request();
     const path = new URL(req.url()).pathname;
@@ -79,14 +222,71 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return route.fulfill({ status: 200, body: '{"status":"ok"}', contentType: 'application/json' });
     }
     if (path === '/api/sessions' && req.method() === 'GET') {
-      return route.fulfill({ status: 200, body: JSON.stringify(mock.sessions ?? []), contentType: 'application/json' });
+      return json(route, sessionState);
     }
     if (path === '/api/sessions' && req.method() === 'POST') {
       if (mock.onSessionPost) return mock.onSessionPost(route);
-      return route.abort('aborted');
+      const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
+      const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+      if (!cwd) return route.abort('aborted');
+      // ── WS-6 / #169：带 cwd 建会话 —— 按真后端语义（ADR-0027 D2/D3）真的改状态：
+      //  会话诞生在该目录、自动入组（未注册的 cwd 自动注册为项目，title = 目录末段名），
+      //  于是"新会话落在该项目分组下"这条断言考的是界面跟着后端语义走，
+      //  而不是"界面读了我们塞的假值"（fixture 的既有纪律）。
+      if (mock.cwdSessionError) {
+        return json(route, { detail: mock.cwdSessionError.detail }, mock.cwdSessionError.status);
+      }
+      const sid = `cwd-${sessionState.length + 1}`;
+      let project = projectState.find((p) => p.path === cwd);
+      if (!project) {
+        project = {
+          id: `p-${projectState.length + 1}`,
+          path: cwd,
+          title: cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || cwd,
+          session_ids: [],
+        };
+        projectState.unshift(project);
+      }
+      sessionState.unshift(
+        sessionRow(sid, { id: project.id, title: project.title }, {
+          first_user_message: typeof body.task === 'string' ? body.task : '新任务',
+        }),
+      );
+      project.session_ids.unshift(sid); // 账本前插（与 attach 语义一致）
+      const frames: FrameSpec[] = [
+        // 帧序照真后端（#151 的机制）：session/started → run/started → user/message
+        // → model/started → text/delta → model/completed → run/completed。
+        // 缺 user/message 或 model/* 会让"回答真的渲染出来了"这条断言测不到东西。
+        { type: 'session/started', data: { cwd }, seq: 1, session_id: sid, run_id: RUN, time: T },
+        { type: 'run/started', seq: 2, session_id: sid, run_id: RUN, time: T },
+        {
+          type: 'user/message',
+          data: { content: typeof body.task === 'string' ? body.task : '新任务' },
+          seq: 3,
+          session_id: sid,
+          run_id: RUN,
+          step_id: 1,
+          time: T,
+        },
+        { type: 'model/started', data: { model: 'e2e-model' }, seq: 4, session_id: sid, run_id: RUN, step_id: 1, time: T },
+        { type: 'text/delta', data: { delta: '好，我先看看这个目录。' }, seq: 5, session_id: sid, run_id: RUN, step_id: 1, time: T },
+        { type: 'model/completed', data: { model: 'e2e-model' }, seq: 6, session_id: sid, run_id: RUN, step_id: 1, time: T },
+        { type: 'run/completed', data: {}, seq: 7, session_id: sid, run_id: RUN, time: T },
+      ];
+      sessionEvents.set(sid, frames); // durable log = 刚才流的那些帧（见 /events 分支）
+      return fulfillSse(route, frames);
     }
     if (/^\/api\/sessions\/[^/]+\/events$/.test(path)) {
-      return route.fulfill({ status: 200, body: JSON.stringify(mock.events ?? []), contentType: 'application/json' });
+      // 带 cwd 建的会话：它的 durable log **就是**刚才流出来的那些帧（真后端同理——
+      // run 收尾后前端会回读日志对账）。不给这份日志，流的结论会被下一次回读清空，
+      // "回答真的渲染出来了"就永远测不到（mock 语义与真机不一致的另一种形态）。
+      const sid = decodeURIComponent(path.split('/')[3] ?? '');
+      const streamed = sessionEvents.get(sid);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify(streamed ?? mock.events ?? []),
+        contentType: 'application/json',
+      });
     }
     if (/^\/api\/sessions\/[^/]+\/stream$/.test(path)) {
       if (mock.onStreamGet) return mock.onStreamGet(route);
@@ -151,8 +351,216 @@ export function routeApi(page: Page, mock: ApiMock): void {
         contentType: 'application/json',
       });
     }
+
+    // ── MEM-5 / #160 记忆端点（有状态 mock：语义对齐后端 `web/memory.py`）──
+    if (path === '/api/memories' && req.method() === 'GET') {
+      if (mock.onMemoriesGet && (await mock.onMemoriesGet(route))) return;
+      if (mock.memoryDisabled) return json(route, { detail: mock.memoryDisabled }, 503);
+      const params = new URL(req.url()).searchParams;
+      const limit = Number(params.get('limit') ?? '50');
+      const offset = Number(params.get('offset') ?? '0');
+      // 按后端语义切片（`web/memory.py` 的 limit/offset 分页）——"加载更多"因此
+      // 真的会拿到下一页，而不是界面自己把一份全量数组切两半。
+      const page = memoryState.slice(offset, offset + limit).map((m) => ({
+        id: m.id,
+        content: m.content,
+        scope: m.scope ?? 'user',
+        metadata: m.metadata ?? {},
+        created_at: m.created_at ?? T,
+      }));
+      return json(route, page);
+    }
+    const memoryMatch = /^\/api\/memories\/([^/]+)$/.exec(path);
+    if (memoryMatch && req.method() === 'DELETE') {
+      if (mock.memoryDisabled) return json(route, { detail: mock.memoryDisabled }, 503);
+      const memoryId = decodeURIComponent(memoryMatch[1]);
+      // 403 = 领域层的归属校验（`MemoryRecordStore.delete` 的 namespace 匹配）：
+      // 与 404「这条不在了」分开——AC3 的失败回滚就靠这条。
+      //
+      // detail **逐字照抄**真后端：`web/domain_errors.py::memory_http_error` 用
+      // `str(exc)`，而 `sqlite_record_store.py:195` 抛的是
+      // `PermissionError("Memory belongs to a different namespace")`（英文原句）。
+      // 自己编一句中文会让门槛内的绿灯只证明"前端与我的假后端一致"（#155 轮已
+      // 栽过同一个坑：mock 语义与真机相反）。
+      if ((mock.memoryDeniedIds ?? []).includes(memoryId)) {
+        return json(route, { detail: 'Memory belongs to a different namespace' }, 403);
+      }
+      const at = memoryState.findIndex((m) => m.id === memoryId);
+      // 404 的 detail 同样照抄：`memory/errors.py::MemoryNotFound` → `记忆不存在：<id>`。
+      if ((mock.memoryVanishedIds ?? []).includes(memoryId)) {
+        if (at >= 0) memoryState.splice(at, 1); // "别处已删"：重拉时这一行没了
+        return json(route, { detail: `记忆不存在：${memoryId}` }, 404);
+      }
+      if (at < 0) return json(route, { detail: `记忆不存在：${memoryId}` }, 404);
+      memoryState.splice(at, 1); // 硬删：记录真的没了（不是软删/回收站）
+      return json(route, { id: memoryId, deleted: true });
+    }
+
+    // ── WS-5 / #155 项目端点（有状态 mock：语义对齐后端 `web/projects.py`）──
+    if (path === '/api/projects' && req.method() === 'GET') {
+      return json(route, projectState.map(projectView));
+    }
+    if (path === '/api/projects' && req.method() === 'POST') {
+      if (mock.onProjectPost && (await mock.onProjectPost(route))) return;
+      const body = (req.postDataJSON() ?? {}) as { path?: string; title?: string };
+      const target = body.path ?? '';
+      if ((mock.projectMissingPaths ?? []).includes(target)) {
+        // 逐字照抄真实后端在 Windows 上的 detail（`FileNotFoundError` 的
+        // `str(exc)`）：**故意不做美化**——AC3 要证明的是"后端说了什么，界面就
+        // 显示什么"，所以断言打在 `WinError 3` 与路径上；如果前端把它翻译成
+        // 自己的话或吞掉原串，这条用例必须变红。
+        return json(route, { detail: `[WinError 3] 系统找不到指定的路径。: '${target}'` }, 404);
+      }
+      const existing = projectState.find((p) => p.path === target);
+      if (existing) return json(route, projectView(existing)); // 幂等：同规范路径
+      const created: ProjectFixture = {
+        id: `p-${projectState.length + 1}`,
+        path: target,
+        title: body.title || target.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '项目',
+        session_ids: [],
+      };
+      projectState.unshift(created); // 注册表顺序：新建项目前插
+      return json(route, projectView(created));
+    }
+    const projectMatch = /^\/api\/projects\/([^/]+)$/.exec(path);
+    if (projectMatch) {
+      const project = findProject(decodeURIComponent(projectMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      if (req.method() === 'PATCH') {
+        const body = (req.postDataJSON() ?? {}) as { title?: string };
+        project.title = body.title ?? project.title;
+        for (const id of project.session_ids) setWorkspace(id, project);
+        return json(route, projectView(project));
+      }
+      if (req.method() === 'DELETE') {
+        // 软删除：只摘注册记录与账本；成员会话的 workspace 清成 null（会话本体不动）。
+        const detached = project.session_ids.length;
+        for (const id of project.session_ids) setWorkspace(id, null);
+        projectState.splice(projectState.indexOf(project), 1);
+        return json(route, {
+          id: project.id,
+          deleted: true,
+          sessions_detached: detached,
+          detail: `项目「${project.title}」已从注册表移除，${detached} 个会话回到未分组。目录、用户文件与会话日志均未删除（软删除，可重新注册同一目录）。`,
+        });
+      }
+      return json(route, { detail: 'method not allowed' }, 405);
+    }
+    const attachMatch = /^\/api\/projects\/([^/]+)\/sessions$/.exec(path);
+    if (attachMatch && req.method() === 'POST') {
+      if (mock.onAttachPost && (await mock.onAttachPost(route))) return;
+      const project = findProject(decodeURIComponent(attachMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      const body = (req.postDataJSON() ?? {}) as { session_id?: string };
+      const sessionId = body.session_id ?? '';
+      if (!sessionState.some((s) => s['session_id'] === sessionId)) {
+        return json(route, { detail: `会话不存在：${sessionId}` }, 404);
+      }
+      if (!project.session_ids.includes(sessionId)) {
+        // **前插**：真实后端 `workspace/index.py` 的 attach_session 写的是
+        // `[session_id, *kept]`（`tests/web/test_projects_api.py` 锁住了这个顺序）。
+        // 这里推队尾会让 e2e 在真机后端下必然失败——mock 的语义必须跟账本一致。
+        project.session_ids.unshift(sessionId); // attach 幂等：已在账本里就不动
+        setWorkspace(sessionId, project);
+      }
+      return json(route, projectView(project));
+    }
+    const detachMatch = /^\/api\/projects\/([^/]+)\/sessions\/([^/]+)$/.exec(path);
+    if (detachMatch && req.method() === 'DELETE') {
+      const project = findProject(decodeURIComponent(detachMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      const sessionId = decodeURIComponent(detachMatch[2]);
+      const at = project.session_ids.indexOf(sessionId);
+      if (at >= 0) project.session_ids.splice(at, 1); // 不在本项目 → 幂等 no-op
+      setWorkspace(sessionId, null);
+      return json(route, projectView(project));
+    }
+    const orderMatch = /^\/api\/projects\/([^/]+)\/sessions\/([^/]+)\/order$/.exec(path);
+    if (orderMatch && req.method() === 'POST') {
+      const project = findProject(decodeURIComponent(orderMatch[1]));
+      if (!project) return json(route, { detail: '项目不存在' }, 404);
+      const sessionId = decodeURIComponent(orderMatch[2]);
+      const body = (req.postDataJSON() ?? {}) as { before?: string | null };
+      const before = body.before ?? null;
+      const from = project.session_ids.indexOf(sessionId);
+      if (from < 0) return json(route, { detail: '会话不在该项目账本里' }, 409);
+      // 自锚点是**无操作**（`ProjectService.reorder` 显式挡下：DOM 意义上"把
+      // 自己插到自己前面"什么都没变）。不先判它，下面的"先删后按 indexOf 插"
+      // 会因为锚点已被删掉而 indexOf = -1 → 插到倒数第二位，凭空改掉账本。
+      if (before === sessionId) return json(route, projectView(project));
+      if (before !== null && !project.session_ids.includes(before)) {
+        return json(route, { detail: '锚点不在该项目账本里' }, 409);
+      }
+      project.session_ids.splice(from, 1); // insertBefore 语义
+      if (before === null) project.session_ids.push(sessionId);
+      else project.session_ids.splice(project.session_ids.indexOf(before), 0, sessionId);
+      return json(route, projectView(project));
+    }
+
+    // ── WS-7 / #170：宿主目录列举（`path` 缺省 = 根模式）──
+    if (path === '/api/host/dirs') {
+      const tree = mock.hostDirs;
+      // 缺省 = 空的**根**列举（不是 404）：浏览器是新项目对话框的一部分，
+      // 不关心它的 spec（r-project-groups）不该因此多出一条红色错误盒。
+      // 错误矩阵由 `hostDirsErrors` / 假树里没有的路径显式构造。
+      if (!tree) {
+        return json(route, { path: null, parent: null, truncated: false, entries: [] });
+      }
+      const target = new URL(req.url()).searchParams.get('path');
+      if (target !== null && mock.hostDirsErrors?.[target]) {
+        const err = mock.hostDirsErrors[target];
+        return json(route, { detail: err.detail }, err.status);
+      }
+      const cap = tree.maxEntries ?? 500;
+      if (target === null) {
+        // 根模式：path/parent 都是 null（前端据此禁用「向上」「选择此目录」）。
+        const roots = [...(tree.roots ?? [])].sort(compareNames);
+        return json(route, {
+          path: null,
+          parent: null,
+          truncated: false,
+          entries: roots.map((r) => ({ name: r, path: r })),
+        });
+      }
+      const names = tree.tree[target];
+      if (!names) return json(route, { detail: `目录不存在：${target}` }, 404);
+      const shown = [...names].sort(compareNames).slice(0, cap);
+      return json(route, {
+        path: target,
+        parent: parentPath(target),
+        truncated: names.length > cap,
+        entries: shown.map((name) => ({ name, path: joinPath(target, name) })),
+      });
+    }
+
     return route.fulfill({ status: 404, body: '{"detail":"not mocked in e2e"}', contentType: 'application/json' });
   });
+}
+
+/** 排序口径 = 后端 `host_dirs.py::_sorted`：name 大小写不敏感，同键按原名兜底。 */
+function compareNames(a: string, b: string): number {
+  const la = a.toLowerCase();
+  const lb = b.toLowerCase();
+  if (la !== lb) return la < lb ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** 子条目 path = 父路径 + 名字（**不**做 realpath 展开，ADR-0028 D3）。 */
+function joinPath(base: string, name: string): string {
+  const sep = base.includes('\\') ? '\\' : '/';
+  return `${base.replace(/[\\/]+$/, '')}${sep}${name}`;
+}
+
+/** 上一级；盘根与无分隔符的路径没有上一级（后端 `parent in ("", canonical)` 同规则）。 */
+function parentPath(target: string): string | null {
+  const trimmed = target.replace(/[\\/]+$/, '');
+  const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (at < 0) return null;
+  const sep = trimmed.includes('\\') ? '\\' : '/';
+  let parent = trimmed.slice(0, at);
+  if (parent.endsWith(':')) parent += sep; // 'D:' → 'D:\'（盘根照列）
+  else if (parent === '') parent = sep; // '/home' → '/'
+  return parent === trimmed ? null : parent;
 }
 
 /** 提交一个任务（Composer 填写 + 发送）。 */

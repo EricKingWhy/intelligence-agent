@@ -26,3 +26,7 @@ dist-ssr
 # Playwright artifacts（T8 #101）
 test-results
 playwright-report
+tmp-shots
+
+# 真机浏览器验收截图（本地证据，不进版本库：二进制、体积大，且随时可重跑）
+gui-test-screenshots

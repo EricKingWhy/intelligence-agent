@@ -345,11 +345,13 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
          *  位于虚拟化轮次列表之后、列表末尾之前，确保：
          *  - 不参与虚拟化窗口（审批卡必须始终可见）
          *  - 瞬时贴底（scrollTop = scrollHeight）会把审批卡包含进来 */}
-        {conversation.pending_approvals.map((a) => (
+        {conversation.pending_approvals.map((a, i) => (
           <ApprovalCard
             key={a.approval_id}
             sessionId={conversation.session_id}
             approval={a}
+            /* UI-01：多卡并存只有第一张自动聚焦（alertdialog 焦点不打架）。 */
+            autoFocus={i === 0}
           />
         ))}
       </div>
