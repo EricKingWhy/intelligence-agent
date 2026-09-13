@@ -917,7 +917,6 @@ describe('applyEvent — df4f7d8 新形状', () => {
 
   it('未接线类型仍进 unknown_events（显式登记，行为与重构前一致）', () => {
     for (const type of [
-      EventType.ARTIFACT_EXTERNALIZED,
       EventType.COMPACTION_START,
       EventType.COMPACTION_END,
       EventType.MESSAGE_QUEUED,
@@ -928,6 +927,47 @@ describe('applyEvent — df4f7d8 新形状', () => {
       const s = applyEvent(initConversation('s'), ev({ type }));
       expect(s.unknown_events, `${type} 应落 unknown_events`).toHaveLength(1);
     }
+  });
+
+  // ART-01（第十一轮真机验收）：运行时只发 artifact/externalized，此前前端只接了
+  // 规格里的 artifact/created → 有产物的会话里 Artifacts 页签恒空、还写"未产生 Artifact"。
+  it('ARTIFACT_EXTERNALIZED：挂到产出它的 tool 上（与 created 同一投影）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 'tc1', tool_name: 'bash', args: {} },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: {
+        artifact_id: '197e88d95cd917b9',
+        session_id: 's',
+        source_tool: 'bash',
+        tool_call_id: 'tc1',
+        size: 39600,
+        mime_type: 'text/plain',
+      },
+    }));
+
+    const tool = s.turns.flatMap((t) => t.tools).find((t) => t.tool_call_id === 'tc1');
+    expect(tool?.artifact).toEqual({
+      artifact_id: '197e88d95cd917b9',
+      size: 39600,
+      mime_type: 'text/plain',
+      source_tool: 'bash',
+    });
+    expect(s.unknown_events).toHaveLength(0); // 已接线：不再算"未知事件"
+  });
+
+  it('ARTIFACT_EXTERNALIZED：找不到宿主 tool_call 时不静默（落 unknown_events）', () => {
+    // 与 created 的唯一差别：externalized 自带 artifact_id，是"确实有产物"的独立事实。
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: { artifact_id: 'orphan', tool_call_id: 'nope', size: 1, mime_type: 'text/plain' },
+    }));
+
+    expect(s.unknown_events).toHaveLength(1);
   });
 
   it('RUN_INTERRUPTED：终态 + run_interrupted 真值 + Timeline 摘要', () => {

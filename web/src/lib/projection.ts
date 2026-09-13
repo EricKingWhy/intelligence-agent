@@ -475,12 +475,16 @@ function projectRunInterrupted(state: ConversationState, event: AgentEvent): voi
 }
 
 /** Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
- *  Attach the ref to the producing tool call so the Inspector can fetch it. */
-function projectArtifactCreated(state: ConversationState, event: AgentEvent): void {
-  const data = event.data;
+ *  Attach the ref to the producing tool call so the Inspector can fetch it.
+ *
+ *  `artifact/created` 与 `artifact/externalized` **共用**这段：两者的 payload 同构
+ *  （artifact_id / tool_call_id / size / mime_type / source_tool），只是历史上一个是
+ *  规格里的名字、一个是运行时真正发的名字（详见 #173）。返回 false = 找不到宿主
+ *  tool_call，由调用方决定兜底。 */
+function attachArtifactToTool(state: ConversationState, data: Record<string, unknown>): boolean {
   const toolCallId = String(data.tool_call_id ?? '');
   const turnIdx = state.turns.findIndex((t) => t.tools.some((tc) => tc.tool_call_id === toolCallId));
-  if (turnIdx === -1) return;
+  if (turnIdx === -1) return false;
   const prevTurn = state.turns[turnIdx];
   const toolIdx = prevTurn.tools.findIndex((tc) => tc.tool_call_id === toolCallId);
   const tool = cloneTool(prevTurn.tools[toolIdx]);
@@ -493,6 +497,26 @@ function projectArtifactCreated(state: ConversationState, event: AgentEvent): vo
   const turn = cloneTurn(prevTurn);
   turn.tools[toolIdx] = tool; // cloneTurn 已给出新 tools 数组，原位替换即可
   replaceTurnAt(state, turnIdx, turn);
+  return true;
+}
+
+/** 历史行为不变：找不到宿主就静默（该类型此前的语义就是如此）。 */
+function projectArtifactCreated(state: ConversationState, event: AgentEvent): void {
+  attachArtifactToTool(state, event.data);
+}
+
+/** 运行时**真正**发出的外置事件（`artifact/externalized`，见 `tooling/overflow.py`）。
+ *
+ *  此前它被登记为「词汇表内但前端尚未接线」→ 落 `unknown_events`，导致有产物的会话里
+ *  Artifacts 页签恒空、页面还写「本次会话未产生 Artifact。」（第十一轮真机验收 ART-01）。
+ *
+ *  与 `artifact/created` 的**唯一**差别：找不到宿主 tool_call 时**不静默**——externalized
+ *  自带 artifact_id，是"这里确实有一个外置产物"的独立事实，静默丢弃会让用户既看不到产物、
+ *  TRACE 里也不再有任何痕迹。 */
+function projectArtifactExternalized(state: ConversationState, event: AgentEvent): void {
+  if (!attachArtifactToTool(state, event.data)) {
+    unhandledProjection(state, event);
+  }
 }
 
 /** Context window exceeded → older turns summarized (Phase 5, spec 06).
@@ -820,8 +844,12 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectArtifactCreated,
     summarize: summarizeArtifactCreated,
   },
+  // 运行时真正发的外置事件（#173 前它是"未接线"）——与 created 同一投影、同一摘要。
+  [EventType.ARTIFACT_EXTERNALIZED]: {
+    apply: projectArtifactExternalized,
+    summarize: summarizeArtifactCreated,
+  },
   // 词汇表内但前端尚未接线——显式登记，保持既有兜底行为（进 unknown_events）。
-  [EventType.ARTIFACT_EXTERNALIZED]: { apply: unhandledProjection, summarize: unknownSummary },
   [EventType.CONTEXT_COMPACTED]: {
     apply: projectContextCompacted,
     summarize: summarizeContextCompacted,
