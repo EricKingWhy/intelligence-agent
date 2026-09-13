@@ -33,70 +33,42 @@ source_event_ids?
 
 ## 3. 核心 Event Vocabulary
 
-**实装全量 = 38 个类型：36 个持久化 + 2 个仅广播。**
+**实装全量以生成物为准**：`docs/EVENT_VOCABULARY.md`（由 `scripts/gen_event_vocabulary.py`
+从 `event.py` 生成，人工可读 + 机器可解析，勿手改；类型总数与「持久化 / 仅广播」的分节计数
+都写在它的头部合计行里）。本文件 MUST NOT 写死事件名清单或类型数量——§3 的旧表正是这样烂掉的
+（母票 #173 实测：那张 24 个名字的表里，**21 个实装名从未入表**，另有 **8 个表内名在实现里不存在**
+——改名 4 / 列错 1 / 未实现 3）。本文档只负责**语义与分层**（§3–§3.3 保留判据，不保留名字清单）。
 
-本表是 `src/agent_harness/session/event.py` 的**人类可读视图**（契约源指向链与漂移守卫见子票 #178）：
-名字逐字符取自该文件的常量，持久化/仅广播取自 `EVENT_TYPES` 与 `STREAM_ONLY_TYPES` 两个 frozenset。
-本表**不是**第二份契约——两者不一致时以 `event.py` 为准。
+本文件里出现的名字都是**例子或指代**，不是清单；清单只有生成物一份。
 
-「持久化」= 进 append-only JSONL，`replay` / `fork` / `derive_messages` 可见；
-「仅广播」= 流式瞬时信号，MUST NOT 落盘（不变量 #4：Event ≠ Diagnostic Log）。
+契约源指向链（**单向，左侧为准**）：
 
-| 事件类型 | 持久化 | 族 |
-| --- | --- | --- |
-| `session/started` | 持久化 | Session 生命周期 |
-| `session/resumed` | 持久化 | 〃 |
-| `session/forked` | 持久化 | 〃 |
-| `run/started` | 持久化 | Run 生命周期 |
-| `run/completed` | 持久化 | 〃 |
-| `run/failed` | 持久化 | 〃 |
-| `run/interrupted` | 持久化 | 〃 |
-| `user/message` | 持久化 | 消息 / 队列 / 引导 / 文本流 |
-| `message/queued` | 持久化 | 〃 |
-| `queue/cancelled` | 持久化 | 〃 |
-| `steer/requested` | 持久化 | 〃 |
-| `steer/applied` | 持久化 | 〃 |
-| `text/delta` | 持久化 | 〃 |
-| `model/started` | 仅广播 | 模型调用 |
-| `model/delta` | 仅广播 | 〃 |
-| `model/completed` | 持久化 | 〃 |
-| `model/failed` | 持久化 | 〃 |
-| `model/fallback` | 持久化 | 〃 |
-| `model/changed` | 持久化 | 〃 |
-| `reasoning/started` | 持久化 | 推理（reasoning） |
-| `reasoning/delta` | 持久化 | 〃 |
-| `reasoning/completed` | 持久化 | 〃 |
-| `reasoning/interrupted` | 持久化 | 〃 |
-| `tool/call` | 持久化 | 工具 / 审批 |
-| `tool/result` | 持久化 | 〃 |
-| `tool/output_delta` | 持久化 | 〃 |
-| `tool/failure-guard` | 持久化 | 〃 |
-| `tool/approval-requested` | 持久化 | 〃 |
-| `permission/resolved` | 持久化 | 〃 |
-| `context/compacted` | 持久化 | 上下文 / 压缩 |
-| `compaction/start` | 持久化 | 〃 |
-| `compaction/end` | 持久化 | 〃 |
-| `operation/reconcile-required` | 持久化 | 恢复信号 / Artifact |
-| `artifact/created` | 持久化 | 〃 |
-| `artifact/externalized` | 持久化 | 〃 |
-| `agent/delegation-started` | 持久化 | 多智能体委派 |
-| `agent/delegation-finished` | 持久化 | 〃 |
-| `memory/degraded` | 持久化 | 记忆 |
+```text
+src/agent_harness/session/event.py                  ← 唯一事实源
+                                                       （常量 + EVENT_TYPES / STREAM_ONLY_TYPES）
+  ├─ scripts/gen_event_vocabulary.py ─→ docs/EVENT_VOCABULARY.md         ← 本文 §3 指向的权威枚举
+  └─ scripts/gen_event_types.py ─────→ web/src/generated/event-types.ts   ← 前端词汇表
 
-说明：
-- `model/delta`、`model/started` 是仅有的两个**仅广播**类型。`model/started` 只用来让 UI 立刻出现"正在生成"，
-  `model/delta` 是**合帧后**的增量（ADR-0016 §3.1：禁止的是 per-token 行，不是合帧 chunk 本身）；
-  完整 AIMessage 由 `model/completed` 持久化。
+守卫生成物不漂移：tests/test_event_vocabulary_generated.py
+                  tests/test_event_types_generated.py
+                  （缺名 / 多名 / 改了 event.py 没重新生成 → 测试红）
+```
+
+语义口径：
+- 「持久化」= 进 append-only JSONL，`replay` / `fork` / `derive_messages` 可见；
+  「仅广播」= 流式瞬时信号，MUST NOT 落盘（不变量 #4：Event ≠ Diagnostic Log）。
+- **仅广播**类型（如 `model/started`、`model/delta`，完整名单见生成物的「仅广播」一节）只承载
+  **合帧后**的流式信号：`model/started` 让 UI 立刻出现"正在生成"，`model/delta` 是增量
+  （ADR-0016 §3.1：禁止的是 per-token 行，不是合帧 chunk 本身）；完整 AIMessage 由
+  `model/completed` 持久化，它属于「持久化」一节。
 - 逐 token 的原始增量 MUST NOT 永久写入 JSONL（日志爆炸），聚合粒度由运行时按 ADR-0016 决定。
 - 事件信封字段（`event_id` / `seq` / `run_id` / `step_id` / `time` …）见 §2；`step` 边界由信封上的
   `step_id` 表达，没有独立的 step 事件（见 §3.3）。
-- 事件名的唯一事实源是 `event.py`；前端词汇表 `web/src/generated/event-types.ts` 由
-  `scripts/gen_event_types.py` 生成，`tests/test_event_types_generated.py` 守卫生成物不漂移。
 
 ## 3.1 与 SessionEvent **分层**的存储层概念（不是事件）
 
 下面这些概念属于**存储层**，MUST NOT 作为 SessionEvent 写入事件流 / JSONL，
-也 MUST NOT 出现在上面的事件表里。分层的理由是同一条：事件流记的是「**对话里发生过什么**」
+也 MUST NOT 出现在事件词汇表（`docs/EVENT_VOCABULARY.md`，§3）里。分层的理由是同一条：事件流记的是「**对话里发生过什么**」
 （`derive_messages` 要读的事实），而这些是「**存储层怎么恢复**」的实现辅助——混进事件流
 会让 replay 语义被存储细节污染（ADR-0004 Round 5 Q16）。
 
