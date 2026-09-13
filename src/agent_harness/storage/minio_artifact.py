@@ -21,6 +21,7 @@ from typing import Any
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
+    SESSION_KEY_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
@@ -38,6 +39,10 @@ class MinioArtifactStore(ArtifactStore):
     """
 
     def __init__(self, settings: Settings, *, session_id: str) -> None:
+        # 键段形态与 S3/Local 共用一份定义（`storage/artifact.py`）：三个 Provider 的键
+        # 都是 `{session_id}/{artifact_id}`，"同一条规则"不该有一处不校验（#192 批 1 审查）。
+        if not SESSION_KEY_PATTERN.fullmatch(session_id):
+            raise ValueError("session_id must be a single safe key segment")
         access_key = settings.minio_access_key.get_secret_value()
         secret_key = settings.minio_secret_key.get_secret_value()
         if not all(

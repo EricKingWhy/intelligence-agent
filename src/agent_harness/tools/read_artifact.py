@@ -1,14 +1,18 @@
 """ReadArtifactTool: model reads externalized large tool results by ref.
 
 Phase Multiturn T5 (#135): when a tool result exceeds the overflow threshold,
-the raw content is externalized to MinIO. The session keeps only a truncated
+the raw content is externalized and the session keeps only a truncated
 summary + ``artifact_ref``. This tool lets the model read back local slices
 of the externalized artifact by ``artifact_ref`` (from ``ToolResult.artifact_ref``
 or the ``ARTIFACT_EXTERNALIZED`` event).
 
-Distinct from ``InspectArtifactTool`` (which reads S3-backed artifacts saved
-by the generic ``S3ArtifactStore``): this tool reads MinIO-backed artifacts
-saved by the T5 overflow path.
+与哪个 store 配对由 `storage/artifact_select.py` 决定（选 store 的地方同时定它与哪个
+读回工具配对）：本工具服务 T5 **外置链路**所用的 store —— MinIO（#135）与 Local
+（#192，spec 06 §3 的默认 Provider）。
+
+Distinct from ``InspectArtifactTool`` (which pairs with the generic
+``S3ArtifactStore``): 两者最终都调 ``ArtifactStore.inspect``，所以这个分工是历史配对，
+不是能力差异。
 """
 
 from __future__ import annotations

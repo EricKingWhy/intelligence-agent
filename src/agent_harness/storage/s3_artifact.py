@@ -2,12 +2,12 @@
 
 import importlib
 import json
-import re
 from datetime import UTC, datetime
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
+    SESSION_KEY_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
@@ -20,7 +20,9 @@ class S3ArtifactStore(ArtifactStore):
     """绑定 Session 命名空间，无需内存索引即可恢复 artifact_id 的 S3 key。"""
 
     def __init__(self, settings: Settings, *, session_id: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        # 键段形态用共享定义（`storage/artifact.py`）：这条规则三个 Provider 与
+        # session 层共用一份，各写一个正则字面量迟早漂移（#192 审查发现这里曾是第二份）。
+        if not SESSION_KEY_PATTERN.fullmatch(session_id):
             raise ValueError("session_id must be a single safe key segment")
         # SecretStr('') 为 falsy（truthiness 基于密钥值长度）："是否已配置"
         # 判断可直接用字段本身（与 str 时代语义一致）。

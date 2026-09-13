@@ -50,7 +50,7 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
-from agent_harness.storage.s3_artifact import S3ArtifactStore
+from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
@@ -63,7 +63,6 @@ from agent_harness.tools import (
     GitStatusTool,
     GlobTool,
     GrepTool,
-    InspectArtifactTool,
     ReadTool,
     WriteTool,
 )
@@ -220,46 +219,16 @@ async def build_runtime(
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
-    # 优先级 S3 → MinIO → Local：显式配置的对象存储永远优先，Local 是兜底
-    # （spec 06 §3 把 Local 定为"开发/小型部署"的默认 Provider）。
-    #
-    # 修的两个既有缺口（#192）：
-    # ① Local 从未实现 ⇒ 未配对象存储的部署外置不出任何 artifact（读取接口永远 503）；
-    # ② MinIO 分支原本只注册读工具、**没有写入者**——与 `config.py` 注释
-    #    "MinIO 用于 tool result 外置"相反。两个分支现在都写得出、读得回。
+    # 选择口径（优先级 + 半配置判定）收敛在 `storage/artifact_select.py`，读路径
+    # （`web/artifacts.py`）用同一个函数——两处各写一遍 if 级联就等于给漂移留门
+    # （#192 批 1 审查发现）。
     overflow_handler = None
-    if any((settings.artifact_store_endpoint, settings.artifact_store_bucket,
-            settings.artifact_store_access_key, settings.artifact_store_secret_key,
-            settings.artifact_store_region)):
-        artifact_store = S3ArtifactStore(settings, session_id=session_id)
-        registry.register(InspectArtifactTool(artifact_store))
-        overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
-    elif any((settings.minio_endpoint, settings.minio_bucket,
-              settings.minio_access_key.get_secret_value(),
-              settings.minio_secret_key.get_secret_value())):
-        from agent_harness.storage.minio_artifact import MinioArtifactStore
-        from agent_harness.tools.read_artifact import ReadArtifactTool
-
-        minio_store = MinioArtifactStore(settings, session_id=session_id)
-        registry.register(ReadArtifactTool(minio_store))
-        overflow_handler = ArtifactOverflowHandler(minio_store, settings.artifact_overflow_chars)
-    else:
-        from agent_harness.storage.local_artifact import LocalArtifactStore
-        from agent_harness.tools.read_artifact import ReadArtifactTool
-
-        # `artifact_dir` 显式置空 = 关掉本地外置（与 `minio_*` 的"空值 = 未配置"同语义）。
-        # 这种**显式关闭**不许让建会话失败：外置是大输出的优化，不是 Core 的必需品
-        # ——不变量 21（可选能力故障不能拖垮 Core）。没有写入者时工具结果保持原样，
-        # 与 #192 之前"未配存储"的行为一致（fail-open）。
-        try:
-            local_store = LocalArtifactStore(settings, session_id=session_id)
-        except ValueError:
-            local_store = None
-        if local_store is not None:
-            registry.register(ReadArtifactTool(local_store))
-            overflow_handler = ArtifactOverflowHandler(
-                local_store, settings.artifact_overflow_chars
-            )
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        registry.register(selection.read_tool(selection.store))
+        overflow_handler = ArtifactOverflowHandler(
+            selection.store, settings.artifact_overflow_chars
+        )
 
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。

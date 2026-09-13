@@ -101,20 +101,12 @@ class LocalArtifactStore(ArtifactStore):
         # 永久不可读（不自愈）。同目录 rename 在两种平台都原子。
         self._dir.mkdir(parents=True, exist_ok=True)
         self._write_atomic(self._content_path(artifact.artifact_id), body)
+        # 元数据直接由 `Artifact` 序列化（去掉 content）：手抄一份字段表会在 `Artifact`
+        # 加字段时静默漂移（#192 批 1 审查）。
+        meta = artifact.model_dump(exclude={"content"})
         self._write_atomic(
             self._meta_path(artifact.artifact_id),
-            json.dumps(
-                {
-                    "artifact_id": artifact.artifact_id,
-                    "session_id": session_id,
-                    "size": artifact.size,
-                    "mime_type": mime_type,
-                    "source_tool": source_tool,
-                    "tool_call_id": tool_call_id,
-                    "created_at": artifact.created_at,
-                },
-                ensure_ascii=False,
-            ).encode("utf-8"),
+            json.dumps(meta, ensure_ascii=False).encode("utf-8"),
         )
         return artifact
 

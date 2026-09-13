@@ -5,15 +5,13 @@
 ——那是**写路径**的装配点。把"读 store 怎么造"独立出来，路由才有一个可被测试替换的
 接缝（与 `assembly.build_runtime` 的补丁口径一致）。
 
-**store 选择口径**（按优先级，与写路径**逐条对应**）：
+**store 选择口径**：**不在这里判断**——`storage/artifact_select.py::select_artifact_store`
+是唯一选择器，写路径（`assembly.build_runtime`）与这里调用的是同一个函数。此前这里与
+写路径各有一份 if 级联，审查（#192 批 1）按"必须逐条对应却靠人工保持同步"把它收成一份：
+两份级联只要有一处漏改，就会出现"写进了 A、从 B 读"的静默错配。
 
-1. 配了 `artifact_store_*`（S3 兼容）→ `S3ArtifactStore`。
-2. 只配了 `minio_*` → `MinioArtifactStore`。
-3. 都没配 → `LocalArtifactStore`（spec 06 §3 的默认 Provider，`.agent/artifacts`）。
-4. `artifact_dir` 配成空串等构造失败 → `None`。调用方据此**如实**返回 503，不得伪装成 404。
-
-写路径（`assembly.build_runtime`）用的是同一条优先级、同一个 `{session_id}/{artifact_id}`
-键约定，所以"写进去的那个 store"就是"这里读出来的那个 store"。
+`None` = 这个部署确实没有可用的 store（未配置对象存储、`artifact_dir` 置空、或对象存储
+**半配置**）。调用方据此**如实**返回 503，不得伪装成 404。
 
 **artifact_id 是内容哈希**（`sha256(content)[:16]`），跨会话可重复：所以归属只能由
 URL 里的 `session_id` 决定（provider 的 key 前缀是 `{session_id}/{artifact_id}`）。
@@ -23,6 +21,7 @@ from __future__ import annotations
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, ArtifactStore
+from agent_harness.storage.artifact_select import select_artifact_store
 
 #: 单次响应的服务端上限：客户端给多大都会夹到这个范围内（响应体积可控）。
 MAX_LINES_CAP = 1000
@@ -38,50 +37,13 @@ __all__ = [
 
 
 def build_read_artifact_store(settings: Settings, session_id: str) -> ArtifactStore | None:
-    """按会话构造只读 artifact store；连本地兜底都构造不出来时才返回 None。
+    """按会话构造只读 artifact store；本部署没有可用 store 时返回 `None`。
 
-    "半配置"的对象存储一律返回 None（**继续往下一级落是错的**——配错了对象存储却
-    静默改用本地，会让运维以为产物进了 S3）：provider 的构造器要求**整组**字段齐全，
-    而这里的判据是"任意一个字段非空"。若只填了 endpoint 没填 bucket，构造器会抛
-    ValueError——那是部署配置问题，应当以 503（"本部署没配好存储"）如实上报，
-    而不是变成 500，也不是悄悄降级到本地。
-
-    最后一级是 Local：它是"未配对象存储"时的**兜底**，所以只有显式配置都不可用时才用，
-    与写路径一致（写路径同样把 Local 放在 else 分支）。
+    只取选择器里的 `store`：读路径不注册工具（那是写路径装配的事），所以这里不需要
+    `read_tool`。选择逻辑与其优先级/半配置判定全部由 `select_artifact_store` 承担。
     """
-    if any((
-        settings.artifact_store_endpoint,
-        settings.artifact_store_bucket,
-        settings.artifact_store_access_key.get_secret_value(),
-        settings.artifact_store_secret_key.get_secret_value(),
-        settings.artifact_store_region,
-    )):
-        from agent_harness.storage.s3_artifact import S3ArtifactStore
-
-        try:
-            return S3ArtifactStore(settings, session_id=session_id)
-        except ValueError:
-            return None
-    if any((
-        settings.minio_endpoint,
-        settings.minio_bucket,
-        settings.minio_access_key.get_secret_value(),
-        settings.minio_secret_key.get_secret_value(),
-    )):
-        from agent_harness.storage.minio_artifact import MinioArtifactStore
-
-        try:
-            return MinioArtifactStore(settings, session_id=session_id)
-        except ValueError:
-            return None
-    from agent_harness.storage.local_artifact import LocalArtifactStore
-
-    try:
-        return LocalArtifactStore(settings, session_id=session_id)
-    except ValueError:
-        # artifact_dir 为空（显式关掉本地落盘）或 session_id 形态非法（路由已 422，
-        # 这里只是不把非法值带进路径拼接）。
-        return None
+    selection = select_artifact_store(settings, session_id)
+    return None if selection is None else selection.store
 
 
 def clamp_to_cap(value: int, cap: int) -> int:

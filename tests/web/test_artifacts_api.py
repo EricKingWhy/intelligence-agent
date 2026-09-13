@@ -271,6 +271,161 @@ def test_blank_artifact_dir_returns_503(tmp_path: Path) -> None:
     assert "存储" in resp.json()["detail"]
 
 
+def test_reads_a_locally_written_artifact_over_http(tmp_path: Path) -> None:
+    """真实 Local Provider 的 HTTP 200 通路：**不替换工厂**，东西真落在磁盘上。
+
+    此前所有 200 断言都建立在 `_FACTORY` 补丁上——那只证明"路由层会把切片拼成
+    响应"，不证明"默认 Provider 写下去的东西读取接口读得到"。这一条把写路径
+    （`LocalArtifactStore.save`，与 `assembly.build_runtime` 同一个 store 类型）
+    与读路径接成端到端证据（默认 Provider 就是 Local，见 spec 06 §3）。
+    """
+    artifact_dir = tmp_path / "artifacts"
+    client = _client(tmp_path, artifact_dir=str(artifact_dir))
+    session_id = _create_session(client)
+
+    from agent_harness.storage.local_artifact import LocalArtifactStore
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+        artifact_dir=str(artifact_dir),
+    )
+    writer = LocalArtifactStore(settings, session_id=session_id)
+    artifact = asyncio.run(
+        writer.save(
+            session_id,
+            "alpha\nbeta\n",
+            mime_type="text/plain",
+            source_tool="bash",
+            tool_call_id="tc-1",
+        )
+    )
+
+    resp = client.get(f"/api/sessions/{session_id}/artifacts/{artifact.artifact_id}")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [ln["text"] for ln in body["lines"]] == ["alpha", "beta"]
+    assert body["total_lines"] == 2
+    assert body["truncated"] is False
+
+
+def test_local_artifact_of_another_session_is_404(tmp_path: Path) -> None:
+    """本地 Provider 上真的跨会话隔离：同一 artifact_id 在另一个会话读不到。
+
+    `FakeArtifactStore` 不按会话分区，所以在替身上断言"读不到别人的"只会测出假象
+    （见模块 docstring）。Local 是**默认** Provider，它的 `{session_id}/{artifact_id}`
+    布局有没有真的生效，必须在这一层用**真实的两个会话**证明。
+    """
+    artifact_dir = tmp_path / "artifacts"
+    client = _client(tmp_path, artifact_dir=str(artifact_dir))
+    session_a = _create_session(client)
+    session_b = _create_session(client)
+    assert session_a != session_b
+
+    from agent_harness.storage.local_artifact import LocalArtifactStore
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+        artifact_dir=str(artifact_dir),
+    )
+    artifact = asyncio.run(
+        LocalArtifactStore(settings, session_id=session_a).save(
+            session_a, "secret\n", mime_type="text/plain", source_tool="bash",
+            tool_call_id="tc-1",
+        )
+    )
+
+    own = client.get(f"/api/sessions/{session_a}/artifacts/{artifact.artifact_id}")
+    other = client.get(f"/api/sessions/{session_b}/artifacts/{artifact.artifact_id}")
+
+    assert own.status_code == 200, own.text
+    assert other.status_code == 404, (
+        "artifact_id 是内容哈希、跨会话可重复；隔离只能靠 store 的会话前缀"
+    )
+
+
+def test_runtime_overflow_writes_a_readable_artifact(tmp_path: Path) -> None:
+    """AC9 端到端：**真 runtime 的溢出**（不是手工 new 一个 handler）落盘并可读回。
+
+    `test_local_store_writes_to_disk_and_reads_back` 是直接构造
+    `ArtifactOverflowHandler(LocalArtifactStore(...))`——那证明的是"store 能写"，
+    不证明"`build_runtime` 真的把写入者接上了"。两者的差别正是 #192 的病根：
+    此前 `ArtifactOverflowHandler` 只在 S3 分支存在，未配对象存储的部署**没有任何
+    写入者**，于是产物一个都不产生（界面永远空的，日志里一切正常）。
+
+    这条把整条链路走完：真 workspace 里的大文件 → read 工具 → 真 runtime 溢出 →
+    `artifact/externalized` + ToolResult 只带 `artifact_ref`（不变量 #15：模型只拿
+    summary + ref）→ 磁盘上有一份**逐字节完整**的原件 → HTTP 200 读得回来。
+    """
+    artifact_dir = tmp_path / "artifacts"
+    # 远超 artifact_overflow_chars（默认 2000），但**同时**在 read 工具的两道预算内
+    # （2000 行 / 50KB）——否则工具自己先截断，磁盘上存的就不是原件，这条断言会
+    # 退化成"验证两个截断叠在一起"。300 行 × 29 字符 ≈ 8.7KB，落在两者之间。
+    body = "HEAD_MARKER\n" + ("x" * 28 + "\n") * 300 + "TAIL_MARKER\n"
+    (tmp_path / "big.txt").write_text(body, encoding="utf-8")
+
+    client = _client(tmp_path, artifact_dir=str(artifact_dir))
+    script = [
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "tc-read-1",
+                "name": "read",
+                "args": {"path": "big.txt"},
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(content="done"),
+    ]
+    with patch(
+        "agent_harness.assembly.create_chat_model", return_value=ScriptedModel(script)
+    ):
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "读大文件", "cwd": str(tmp_path), "max_steps": 4},
+        )
+    assert resp.status_code == 200, resp.text
+    frames = [
+        json.loads(line[len(_DATA_PREFIX) :].strip())
+        for line in resp.text.splitlines()
+        if line.startswith(_DATA_PREFIX)
+    ]
+    session_id = next((f["session_id"] for f in frames if f.get("session_id")), None)
+    assert session_id, f"SSE 流里没有 session_id：{frames[:3]}"
+
+    events = client.get(f"/api/sessions/{session_id}/events").json()
+    externalized = [e for e in events if e["type"] == "artifact/externalized"]
+    assert externalized, (
+        "真 runtime 的溢出没有产出 artifact/externalized——写入者没接上（#192 的病根）"
+    )
+    data = externalized[0]["data"]
+    artifact_id = data["artifact_id"]
+    assert data["source_tool"] == "read"
+    assert data["tool_call_id"] == "tc-read-1"
+
+    # 模型侧只拿摘要 + ref：完整的 6000 字符不回到事件流里（否则外置等于没做）。
+    results = [e for e in events if e["type"] == "tool/result"]
+    assert results, "没有 tool/result 事件"
+    payload = json.loads(results[0]["data"]["content"])
+    assert payload["artifact_ref"] == artifact_id
+    assert body not in json.dumps(results[0]["data"]), "完整内容不得留在会话事件里"
+
+    # 磁盘上是**逐字节完整**的原件（"完整保存 ≠ 完整注入"）。
+    stored = artifact_dir / session_id / artifact_id
+    assert stored.read_text(encoding="utf-8") == body
+
+    got = client.get(f"/api/sessions/{session_id}/artifacts/{artifact_id}")
+    assert got.status_code == 200, got.text
+    texts = [ln["text"] for ln in got.json()["lines"]]
+    assert texts[0] == "HEAD_MARKER"
+    assert "TAIL_MARKER" in texts[-1]
+    assert got.json()["truncated"] is False
+
+
 class _FakeBody:
     """最小 S3 body 替身（`async with response["Body"] as stream`）。"""
 

@@ -1249,9 +1249,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         - 404 → 会话不存在，或该 artifact 不在这个会话的命名空间里。**别的会话的
           产物也走这条**：`artifact_id` 是内容哈希、跨会话可重复，区分"不存在"与
           "存在但不可读"只会把归属变成可探测的信息；
-        - 503 → 本部署未配置 artifact 存储（**如实上报**，不假装成 404——那会让用户
-          以为"这个产物不存在"）；
+        - 503 → 本部署**确实没有可读取的存储**（`artifact_dir` 置空、或对象存储半配置）
+          ——**如实上报**，不假装成 404：那会让用户以为"这个产物不存在"；
         - 200 → 切片，`truncated` 如实表示返回内容是否完整。
+
+        ⚠ #192 之后 404 的含义变宽了：未配对象存储的部署现在走**本地**默认 Provider
+        （spec 06 §3），它**能读**，只是里面没有这个 id ⇒ 404。503 只留给"真的没有可读
+        存储"这一种情形。
 
         隔离靠"**用 URL 里的 session_id 构造 store**"：provider 的 key 前缀是
         `{session_id}/{artifact_id}`，而 artifact_id 不携带归属，归属只能由
@@ -1289,7 +1293,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "本部署未配置 artifact 存储：外置内容不会被创建，也没有可读取的存储"
+                    "本部署没有可读取的 artifact 存储：artifact_dir 为空，或对象存储只配了一半"
                 ),
             )
         try:
