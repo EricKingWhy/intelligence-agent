@@ -1196,3 +1196,65 @@ peek 结构 13）；`oxlint` 0 error（**44** warnings = 基线，新文件零 w
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
 `docs/INTEGRATION_PROMPT_PANEL_183.md`。
+
+---
+
+## 第十九轮：#189（2026-09-14，前端侧 · 在途记录）
+
+**交付**：`3e9b150`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。票面
+`docs/WORKSPACE_PANEL_TICKETS.md` § #189。
+
+**做了什么**：把中心列的「文件/改动」面从"声明了但渲染不出来"补成真的能看。既有能力
+接口一直把 `changes` 声明为 true，但登记表里 `implemented: false`（骨架期刻意压住），
+因为中心列没有对应内容。本票补数据投影 + 面板 + CSS，并把登记表翻到 `true`。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/lib/changedFiles.ts`（新） | 纯逻辑：写工具白名单 / net 行差 / 归档或截断 → `null` / 按 path 聚合 |
+| `web/src/components/ChangesPanel.tsx`（新） | 左清单 + 右逐次改动（每次一个 `DiffBlock`）；只读；空态文案 |
+| `web/src/lib/capabilities.ts` | `changes` → `implemented: true`（成对标记注释） |
+| `web/src/App.tsx` | `tab.key === 'changes'` → `<ChangesPanel tools={tools} />` |
+| `web/src/styles/app.css` | `.changes-*`（两栏 grid / 选中态 / 统计徽章 / 窄容器堆叠） |
+| `web/e2e/z-changes-panel.spec.ts`（新） | 3 条 × 2 视口 |
+| `web/src/components/ChangesPanel.test.tsx`（新） | 10 条（含 AC4 只读断言） |
+| `web/src/lib/changedFiles.test.ts`（新） | 19 条 |
+
+**AC 逐条**：1 ✅（只列本会话真的改过的文件；工具名白名单与后端 `_WRITE_TOOL_NAMES`
+对齐）／2 ✅（同一文件多次改动聚合成一行，右侧按时间序全部列出）／3 ✅（点文件名 →
+右侧显示各次改动，每次一个 `DiffBlock`，复用既有唯一 diff 渲染器，不新写）／4 ✅（无
+`<input>`/`<textarea>`/`contenteditable`，无保存/应用/撤销按钮，SSR 测试断言）／5 ✅
+（内容归档 → 统计渲染 `—` 并给 title 说明，不给假数字）／6 ✅（无改动 → 空态文案逐字
+「本次会话未改动任何文件。」）／7 ✅（清单行 `aria-current`，键盘可达）／8 ✅（e2e 3 条
+× 2 视口：两次改动一行 + 点选切换 + 归档 `—` + 空态）。
+
+**门禁（全绿）**：`tsc -b` 0；`vitest` **778 passed**（+29：changedFiles 19 +
+ChangesPanel 10）；`oxlint` 0 error（**44** warnings = 基线，新文件零 warning）；`playwright
+--workers=2` **292 passed**（+6 = 3 条 × 2 视口）；`vite build` OK。
+
+**三处口径决定（记录理由，避免"看起来能用"）**：
+
+| 决定 | 理由 |
+| --- | --- |
+| **统计口径是 net（首版 before → 末版 after 的行多重集差），不是各次相加** | 改 3 行再加回 3 行显示 `±0`，而不是 `+3/-3`。相加口径会把"改完又改回"渲染成"改动很大"，是假热度；用户看这个面想知道的是"这个文件现在跟原版差多少" |
+| **归档 / 截断时 `added/removed` 为 `null`，UI 渲染 `—` + title** | 内容已经不在事件里（转 artifact 或超 50KB 截断），任何数字都是编的。宁可说"不可得" |
+| **没有 path 的改动计入 `unattributed` 并在脚注提示** | 静默丢弃会让"列出的文件"与实际改动不符；计数 + 脚注是唯一诚实的做法 |
+
+**实现过程中被测试抓到的一个真缺陷（已修）**：`tool/call` 投影读的是 `data.tool_name`
+而不是 `data.name`（后端事件字段就是 `tool_name`）。我的 e2e fixture 一开始写了 `name`，
+结果工具名解析成 `unknown` → 不进写工具白名单 → **0 行文件、测试全绿**（因为断言写的是
+"空态"）。修 fixture 后才真正跑通。顺手把 `y-inspector-peek.spec.ts` 里同一个字段也
+改正（那条用例不依赖工具名，所以没暴露）。教训：e2e fixture 的字段名写错会"静默降级成
+另一种合法状态"。
+
+**登记表翻转的连带修复**：`capabilities.test.ts` 原有一条骨架期守卫断言"`changes` 声明
+为真也不渲染"。`changes` 落地后这条守卫失去对象，改为**注入一个未实现的 `artifacts`
+面**来继续覆盖同一条规则（"声明为真但无实现 → 不渲染"），另两条强行 `implemented: true`
+的用例简化成直接用真实 `SURFACES`。`workspace-modes` AC4/AC6 的期望 tab 集同步更新。
+
+**顺带发现（未修，非本票引入，留痕）**：见第十八轮末尾 `tabCounts.terminal` 用
+`t.name === 'bash'` 与 `lib/commandOutput.isCommand` 判据不一致的问题——**本票也没修**
+（Scope Lock），但本票在 `ChangesPanel` 侧统一走 `lib/changedFiles` 的单一判据，没有
+复制第二份。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
+`docs/INTEGRATION_PROMPT_PANEL_189.md`。
