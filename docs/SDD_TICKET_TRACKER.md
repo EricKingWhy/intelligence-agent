@@ -117,6 +117,34 @@ playwright **224 passed**（`--workers=2`；+8）· vite build ✓。
 
 **关单**：#172 **不关**（跨端票只完成前端半，§14.12）。**未 push、未 merge**（集成 AI 执行）。
 
+#### 关单补记（2026-09-13，用户明确许可）：#172 **已关**
+
+上一行「不关」是写它当时的处置（前端半刚完成、两端都还没入 `main`）。两端齐备后按 §14.12 + 用户
+「同步 → 重跑门禁 → 通过就关」的许可关单，**核实过实际状态**（非凭进度文档）：
+
+| 项 | 事实 |
+| --- | --- |
+| 后端半入 main | `4109b08` / `92135a5` ← `d6c5fff merge: feat/backend → main` |
+| 前端半入 main | `57dd028` / `5d56038` ← `f6c9d65 merge(frontend): 第十一轮 …（含 #172 前端半）→ main` |
+| 前端内容核对 | 逐文件比对：`sessionDelete.ts` / `sessionDelete.test.ts` / `useSession.ts` / 集成提示词**逐字未改**；其余文件差异全是纯新增（0 删除）；关键标记（`onDeleteSession` 接线 / `删除会话…` / `不可恢复` + `永久删除（不可恢复）` / `convergeAfterDelete` / `sessionDeletedMessage`）逐个在 `main` 上 grep 到 |
+| 真机验收 | `c6426395`：「#172 硬删全链路通过」——DELETE 200 精确回执、列表/对话区/Inspector/localStorage 全收敛、三路径+四表清空、审计只带 id 与计数、刷新前后 body 哈希一致 |
+| 同轮发现的 2 条入口问题 | `8e8f0ab` 修复 + 补回归锁：SID-01 窄视口 ≤820px 删除入口 **`display:none` 不可达**（同规则还误伤行上绿点）；SID-02 确认面初焦落在「关闭(X)」→ 改落「取消」。两者已由 `w-session-delete.spec.ts` 新增 2 例覆盖 |
+| 本次在合并后的树上实跑门禁 | 先 `git merge origin/main`（**零冲突**）→ HEAD `1d6f481`；合并后 `web/**` 与 `origin/main` 逐字一致（唯一差异是并行会话未推送的 `web/PRODUCT.md`）。tsc 0 · vitest **659 passed** · oxlint 41w/0e（**本票链路文件零警告**；38→41 的增量来自同期并入的其他工作）· `w-session-delete` **12 passed**（6 例 × 2 视口）· vite build ✓ |
+| 关单 | `gh issue close 172 --reason completed`（CLOSED 2026-09-13T16:02:58Z，附完整证据 comment） |
+
+**本轮学到的运维坑（值得写下来，别只留在报告里）**：跑 e2e 前 5173 上同时挂着**两个** vite——
+`127.0.0.1:5173` 是本 worktree 的、`[::1]:5173` 是 **main worktree** 的（`netstat` 里是两行，
+很容易只看到一行就以为"只有一个、是本树的"）。Playwright 探的是 `http://localhost:5173`，
+Windows 上优先解析 IPv6 → `reuseExistingServer` 会**静默复用 main 的 server**，跑出来的绿是
+**别人的树**的绿。判据：两个都清掉，让 playwright 的 webServer 自己从本 worktree 起。
+
+**登记未做（留给各自的票）**：Memory/Artifact 不级联（ADR-0029 D6）；`resume_and_launch` 改写
+cwd 会话映射的坑（ADR-0029 D2 记录未修）；`refreshSessions` 无代际守卫；会话域 409/404 detail
+仍为英文（既有房风格，本票按票面"原样展示"）。#171（归档）是另一刀。
+
+**未 push**：本次只做本地 `merge` + 门禁 + 关单 comment；`feat/frontend` → `main` 的 push 归集成 AI
+（注意本分支上还压着一个并行会话未推送的 `4fd7e41 docs(panel)`）。
+
 ---
 
 ## ⚠️ 流程切换 + 批次记录（v2 批量审查循环，2026-09-12）
