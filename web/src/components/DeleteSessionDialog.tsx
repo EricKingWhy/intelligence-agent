@@ -12,7 +12,7 @@
  *  的状态收敛（清掉当前视图 / 重拉会话列表）由调用方负责，与 DeleteProjectDialog
  *  同一分工（那边也是 onConfirm 抛出、调用方刷新）。 */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { TriangleAlert, X } from 'lucide-react';
 import { describeSessionError } from '../lib/api';
@@ -70,6 +70,8 @@ function DeleteSessionForm({
   /** 成功回执：浮层**不自动关**——回执要留在原地被读到，用户点「完成」才走
    *  （与 DeleteProjectDialog 的成功态同一约定）。 */
   const [done, setDone] = useState<string | null>(null);
+  /** FE-R11-10：初焦落在「取消」而不是右上「关闭(X)」。 */
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   const confirm = async () => {
     if (pending) return;
@@ -88,7 +90,19 @@ function DeleteSessionForm({
   };
 
   return (
-    <Dialog.Content className="project-dialog">
+    <Dialog.Content
+      className="project-dialog"
+      /* FE-R11-10：Radix 默认把初焦给 Content 里第一个可聚焦元素——本弹窗里那是
+         右上角的「关闭(X)」图标按钮：读屏只念得出"关闭"，回车即退出，而键盘用户
+         落地第一眼看到的是全场最不该先碰的控件。一次不可逆删除的确认面，初焦应该
+         落在安全的出口上：「取消」（回车 = 安全取消）。回执态没有「取消」按钮，
+         交回 Radix 默认处理。 */
+      onOpenAutoFocus={(e) => {
+        if (!cancelRef.current) return;
+        e.preventDefault();
+        cancelRef.current.focus();
+      }}
+    >
       <div className="project-dialog-head">
         <Dialog.Title className="project-dialog-title project-dialog-title-danger">
           <TriangleAlert size={14} aria-hidden="true" /> 删除会话
@@ -146,7 +160,9 @@ function DeleteSessionForm({
         ) : (
           <>
             <Dialog.Close asChild>
-              <button className="project-btn">取消</button>
+              <button className="project-btn" ref={cancelRef}>
+                取消
+              </button>
             </Dialog.Close>
             {/* 按钮文字不写「删除」两个字就完事：这是本票唯一的不可逆动作，
                 「永久」「不可恢复」必须出现在**按下之前**（ADR-0029 入口层责任）。 */}

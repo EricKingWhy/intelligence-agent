@@ -69,6 +69,67 @@ function countSessionDeletes(page: Page): { urls: string[] } {
   return { urls };
 }
 
+/** FE-R11-09 回归锁：≤820px 的 56px 图标轨里，删除入口必须仍然可达。
+ *
+ *  窄屏下每行只剩一个 24px 槽位（`.session-item-body` 收起），行菜单是到达
+ *  「重命名 / 移出项目 / 删除会话」的唯一路径；此前 `.rail-menu-btn` 与项目头
+ *  一起 `display:none`，这些操作在窄屏彻底消失且没有替代入口。
+ *  同一条规则还误伤了 `.session-item-dot`（那块注释声称"只留下点"，实际把点也藏了
+ *  → 行是空条），现在点与 ⋯ 共用槽位：空闲显示点，hover/聚焦换成 ⋯ 且不挤占
+ *  会话的可点面积（⋯ 绝对定位，不参与布局）。 */
+test.describe('窄屏（≤820px）删除入口', () => {
+  test.use({ viewport: { width: 800, height: 900 } });
+
+  test('窄屏：槽位默认是会话点，聚焦后换成 ⋯，且能走完删除确认流程', async ({ page }) => {
+    routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
+    await page.goto('/');
+
+    const row = rowOf(page, 's2');
+    const dot = row.locator('.session-item-dot');
+    const btn = row.locator('.rail-menu-btn');
+
+    // 指针挪开侧栏 → 真·空闲态：点必须在场（否则这一行什么也看不见）
+    await page.mouse.move(0, 0);
+    await expect(dot).toBeVisible();
+    await expect(dot).toHaveCSS('opacity', '1');
+    // ⋯ 默认安静，键盘聚焦必须让它现身（:focus-visible 那条规则不能在窄屏失效）
+    await btn.focus();
+    await expect(btn).toBeVisible();
+    await expect.poll(() => btn.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+    // 同槽位不叠两团东西：⋯ 浮现时点让位
+    await expect(dot).toHaveCSS('opacity', '0');
+
+    // 会话的可点面积没被 ⋯ 挤掉（⋯ 绝对定位，不参与布局）
+    const itemW = await row
+      .locator('.session-item')
+      .evaluate((el) => Math.round(el.getBoundingClientRect().width));
+    expect(itemW).toBeGreaterThanOrEqual(24);
+
+    await btn.click();
+    await page.getByRole('menuitem', { name: '删除会话…' }).click();
+    await expect(dialog(page)).toBeVisible();
+    await expect(dialog(page)).toContainText('不可恢复');
+  });
+});
+
+/** FE-R11-10 回归锁：确认面的初始焦点落在「取消」，不是右上「关闭(X)」。
+ *  一次不可逆删除的确认面上，键盘用户落地第一眼看到的控件应该是安全的出口。 */
+test('删除确认弹窗：初始焦点在「取消」，Enter 即安全取消', async ({ page }) => {
+  routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
+  const deletes = countSessionDeletes(page);
+  await page.goto('/');
+
+  await openDeleteConfirm(page, 's2');
+  const cancel = dialog(page).getByRole('button', { name: '取消' });
+  await expect(cancel).toBeFocused();
+  await expect(dialog(page).getByRole('button', { name: '关闭' })).not.toBeFocused();
+
+  // 初焦在取消 → 直接回车 = 取消（零请求），而不是落在危险的「永久删除」上
+  await page.keyboard.press('Enter');
+  await expect(dialog(page)).toBeHidden();
+  expect(deletes.urls).toEqual([]);
+});
+
 test('确认面说清不可恢复 + 取消零请求 + 确认后行消失/项目计数掉/当前会话被清空', async ({ page }) => {
   routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
   const deletes = countSessionDeletes(page);

@@ -152,6 +152,22 @@ test('AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排', as
   await rename.press('Enter');
   await expect(project(page, '改名后的项目')).toBeVisible();
 
+  // FE-R11-08：纯空白标题按 Enter 不许静默丢弃——之前编辑态直接关掉、没有请求、
+  // 也没有任何提示，用户以为改名成功了。现在就地拦下：留下编辑态 + 可见提示。
+  await openProjectMenu(page, '改名后的项目');
+  await page.getByRole('menuitem', { name: '重命名项目' }).click();
+  const rename2 = page.getByLabel('项目名');
+  await rename2.fill('   ');
+  await rename2.press('Enter');
+  await expect(page.locator('.project-rename-error')).toBeVisible();
+  await expect(rename2).toBeVisible(); // 编辑态还在，用户能直接补字
+  await expect(rename2).toHaveAttribute('aria-invalid', 'true');
+  // 补上字再提交 → 正常改名（提示消失、Enter 这次真的提交）
+  await rename2.fill('改名后的项目');
+  await expect(page.locator('.project-rename-error')).toHaveCount(0);
+  await rename2.press('Enter');
+  await expect(project(page, '改名后的项目')).toBeVisible();
+
   // 重排：s3 上移一格 → [s1, s3, s2]
   await openSessionMenu(page, 's3');
   await page.getByRole('menuitem', { name: '上移' }).click();

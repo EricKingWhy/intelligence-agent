@@ -814,6 +814,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: var(--text-sm);
   color: var(--text-primary);
 }
+/* FE-R11-08：空白标题提交时的就地提示。窄栏里不给长句——用「不能为空」压住宽度，
+ * 完整语义由 input 的 aria-label（项目名）+ aria-describedby 拼给辅助技术。 */
+.project-rename-error {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--color-destructive);
+  white-space: nowrap;
+}
+.rail-project-toggle-static .project-rename-input[aria-invalid='true'] {
+  border-color: var(--color-destructive);
+}
 .project-rename-input:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: 0;
@@ -3644,7 +3655,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
   .session-list-header .panel-label,
   .session-item-body,
-  .session-item-dot,
   .new-session-btn,
   .session-group-label {
     display: none;
@@ -3656,9 +3666,47 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .rail-project-head,
   .rail-project-empty,
   .rail-project-missing,
-  .rail-menu-btn,
   .rail-error {
     display: none;
+  }
+  /* FE-R11-09：上一行的收起清单里**不含** `.rail-menu-btn`（原来含，是个漏配）——
+   * 窄屏下行里只剩这一个 24px 槽位，菜单是到达重命名/移出项目/删除会话的**唯一**
+   * 路径，跟着一起藏掉等于这些操作彻底不可达。
+   *
+   * 槽位是共享的：默认显示「会话点」，hover / 键盘聚焦（focus-within）时换成 ⋯。
+   * 之前把 `.session-item-dot` 和 `.rail-menu-btn` 一起 display:none，结果这一块
+   * 注释声称的"只留下每个会话的点"从未成立（行是空条，既看不出有几个会话，也没有
+   * 任何入口）；现在两个都回到这条 24px 槽里，且**不互相挤**——⋯ 绝对定位在槽心，
+   * 不占布局宽度，否则 20px 按钮会把会话的可点区域压到 4px（实测）。
+   *
+   * 仍未解决（已记入登记簿，需产品决策）：窄屏下 `.rail-project-head` 整块收起，
+   * 因此**项目级**操作（重命名/删除项目/新建会话）在 ≤820px 没有入口。层级信息
+   * 在窄屏丢失是本块刻意的降级，但"操作不可达"是它的副作用，不在本票范围。 */
+  .session-row {
+    position: relative;
+  }
+  /* 不动行内边距：`.session-items` 在窄屏是 `align-items: center`，行宽由内容决定，
+   * 而内容（会话点 5px）几乎不占宽度——那圈 padding 就是这一行的**可点面积**。
+   * 收掉它会把会话的可点区域从 24px 压到 9px（实测），等于修好菜单却毁了选会话。 */
+  .session-row .session-item {
+    justify-content: center;
+  }
+  .session-row .rail-menu-btn {
+    position: absolute;
+    top: 50%;
+    /* 居中压在会话点上：right:50% + translate 与 justify-content:center 同一槽心 */
+    right: 50%;
+    transform: translate(50%, -50%);
+    width: 20px;
+    height: 20px;
+  }
+  .session-row .session-item-dot {
+    transition: opacity var(--dur-out) var(--ease-apple);
+  }
+  /* 菜单浮现时点让位：同一槽位不叠两团东西 */
+  .session-row:hover .session-item-dot,
+  .session-row:focus-within .session-item-dot {
+    opacity: 0;
   }
   .rail-project-rows {
     margin-left: 0;

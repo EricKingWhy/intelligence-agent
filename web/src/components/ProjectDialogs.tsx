@@ -408,7 +408,13 @@ function AttachForm({
 }
 
 /** 行内重命名输入（不起浮层：项目标题就在侧栏里，就地改名最短路径）。
- *  Enter 提交 / Esc 取消 / 失焦提交——三条路径都由调用方传入的回调收口。 */
+ *  Enter 提交 / Esc 取消 / 失焦提交——三条路径都由调用方传入的回调收口。
+ *
+ *  FE-R11-08：空白标题此前被**静默丢弃**——Enter 直接把 `''` 交给调用方，
+ *  调用方的 `if (title)` 一过滤，编辑态关闭、没有请求、也没有任何提示，
+ *  用户以为改名成功了。现在 Enter 遇到空白就地拦下：给可见提示 + 保持编辑态
+ *  （输入框里还是那串空白，用户可以直接补字或按 Esc 走人）。
+ *  失焦仍按取消处理——用户已经离开这块界面，名字原样留在那里本身就是反馈。 */
 export function InlineRename({
   initial,
   onCommit,
@@ -419,25 +425,45 @@ export function InlineRename({
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+  const errorId = 'rename-error';
   return (
-    <input
-      className="project-rename-input"
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      aria-label="项目名"
-      maxLength={200}
-      autoFocus
-      onClick={(e) => e.stopPropagation()}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if (e.key === 'Enter') onCommit(value.trim());
-        else if (e.key === 'Escape') onCancel();
-      }}
-      onBlur={() => {
-        const next = value.trim();
-        if (next && next !== initial) onCommit(next);
-        else onCancel();
-      }}
-    />
+    <>
+      <input
+        className="project-rename-input"
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          if (error) setError(null); // 一动手就撤提示，不用等提交
+        }}
+        aria-label="项目名"
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
+        maxLength={200}
+        autoFocus
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') {
+            const next = value.trim();
+            if (!next) {
+              setError('项目名不能为空');
+              return;
+            }
+            onCommit(next);
+          } else if (e.key === 'Escape') onCancel();
+        }}
+        onBlur={() => {
+          const next = value.trim();
+          if (next && next !== initial) onCommit(next);
+          else onCancel();
+        }}
+      />
+      {error && (
+        <span className="project-rename-error" id={errorId} role="alert">
+          不能为空
+        </span>
+      )}
+    </>
   );
 }
