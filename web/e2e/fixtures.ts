@@ -727,6 +727,10 @@ export async function pickControl(
   await page.keyboard.press('Enter');
   await expect(trigger).toContainText(expected);
   await page.keyboard.press('Escape');
+  // 退出动画期间 listbox 仍在 DOM 且可命中（与上方 `:visible` 注释同一成因）。
+  // 不等它真正卸载，下一次 open 的 Enter 会撞在正在关闭的浮层上——表现为
+  // 「浮层像是开了，选中却没生效」，且只在连续两次调用时复现（探针实测）。
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
 }
 
 /** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。

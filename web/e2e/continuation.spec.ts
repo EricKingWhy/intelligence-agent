@@ -91,9 +91,10 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
 
   // 选模型：目录第一行（catalog 里 default: true 的项）
   await pickFirstModel(page);
-  // Agent Profile → coding（第二项）；Reasoning Effort → deep（第三项）
-  await pickControl(page, 'Agent Profile', 1, 'Coding');
-  await pickControl(page, 'Reasoning Effort', 2, 'Deep');
+  // Agent Profile → coding（第二项；下压 2 次，首项是「默认（未选）」）
+  // Reasoning Effort → deep（第三项；下压 3 次）
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
 
   // 续聊发第二条
   await submitTask(page, '第二条消息');
