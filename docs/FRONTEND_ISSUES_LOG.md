@@ -1757,6 +1757,18 @@ commit（f70ebe7）**上复跑，该用例**同样失败**；而该 commit 今�
 （本仓 `tests/conftest.py` 只清洗 Settings 的**环境变量**，`.env` 文件仍会被 `Settings()`
 读到——这是同一根因的另一条已知路径）。**归属：后端（测试稳定性 / 装配期外部依赖）**。
 
+**2026-09-13 已修（集成期 `feat/backend`）：按上述规定的方向落地——计时块**之前**预热，
+**未放宽 5s 预算**。** `_DisconnectingASGI` 增加 `budget_s` 参数（默认仍 5.0，测量请求沿用它）；
+测试在测量请求前先发一次**预热请求**（`_ImmediateRuntime` + `budget_s=60`），把
+`POST /api/sessions` 的一次性冷装配在测量窗外付掉。选预热**真实请求**而不是
+`await app.state...initialize()` 的理由：被测成本就落在这条端点路径上（`get_wiring` 缓存 +
+能力装配），预热同一条路径最忠实，且对"冷 connect 到 Zilliz"这类外部耗时一并免疫。
+**独立实测（本机 2026-09-13）**：预热请求 **6.546s**（冷）→ 测量请求 **0.005s**；
+Python 层 socket 埋点（`getaddrinfo` / `create_connection`）**零调用**，说明这段冷成本走的是
+C 扩展的 gRPC/TLS 通道，与上面记录的 `anyio/streams/tls.py` TLS 读、Milvus 冷 connect 2.01s 相互印证。
+**验证**：单测在**全新冷进程**连跑 4 次 **4/4 passed**（修复前同条件 4/4 failed）；
+全量 **2135 passed / 0 failed**（修复前 `2134 passed / 1 failed`）。
+
 ### OBS-10.2 【后端·真机集成用例的冷 connect 抖动·#157 期间观察】同一个冷路径也在真机集成用例上出现
 
 `tests/integration/test_phase6_memory_e2e.py::test_real_connection_and_missing_collection`
