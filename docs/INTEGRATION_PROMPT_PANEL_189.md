@@ -73,12 +73,25 @@ npx vite build                        # 0
 
 - **无契约变更**：不改 `GET /api/capabilities`，不改任何后端返回结构。`ChangesPanel`
   的输入是既有 `ToolCall[]` 投影。
-- **一处用户可见变化**：中心列 tab 集会多出「文件/改动」（此前能力接口声明为 true 但
-  被登记表压住）。这是本票的目的，`workspace-modes` AC4/AC6 的期望值已同步更新。
+- **⚠ 订正（2026-09-14 总门禁两轴审查发现，本节此前写错）**：原文写"此前能力接口声明为
+  true 但被登记表压住"——**后端从未把 `changes` 声明为 true**。`web/app.py:918-927` 的
+  投影规则是"descriptor 未声明 `surfaces` → `changes`/`terminal`/`artifacts` 一律
+  **false**"，而 `capability/wiring.py` 里 7 个 descriptor（memory / skills / mcp /
+  knowledge / multiagent / websearch / ticker）**没有一个填 `surfaces`**；
+  `ProviderConfig` 是 strict 模型且只有 provider/enabled/options，配置路径也填不了。
+  ⇒ **真实部署里 `GET /api/capabilities` 恒返回 `changes:false, terminal:false`**，
+  本票与 #190 的两个面在 `centerTabs` 里被过滤掉，**用户看不到**。
+  这不是本票的实现缺陷（票面 AC 的"声明为真 → 出现"已逐条满足，e2e 用显式声明钉住），
+  缺的是**声明侧**：把 Core 工具集（bash / write / edit / apply_patch / git diff）能产出
+  的面声明为 true。该工作原属 Phase 6 "capability surfaces 装配"（`PHASE_STATUS.md`
+  记为延后项），已开票 **#193** 跟踪——**合并本批不等于用户能看见这两个面**。
+- **一处用户可见变化**：在"能力声明为 true"的前提下，中心列 tab 集会多出「文件/改动」。
+  `workspace-modes` AC4/AC6 的期望值已同步更新。
 - **未做的相邻项（Scope Lock）**：`StepDetail.tsx` 内 `ChangesTab` 的 `.diff-cols` →
   `DiffBlock` 的收敛属 **#186 AC3**（本票的 `ChangesPanel` 已直接用 `DiffBlock`，没有
-  复制第二套 diff 渲染）。`tabCounts.terminal` 用 `t.name === 'bash'` 而 `TerminalTab`
-  行用 `isCommand` 的既有不一致，本票同样未改，已在 tracker 留痕。
+  复制第二套 diff 渲染）。~~`tabCounts.terminal` 用 `t.name === 'bash'` 而 `TerminalTab`
+  行用 `isCommand` 的既有不一致~~ —— 该处已在总门禁修复中收敛为 `isCommand`（两者本
+  同形，收敛只为不让"什么算一次命令"有两个答案）。
 - **不建议只合本票**：本批按 v2 批量循环审查（**#183 + #189 一起**，fixed point
   `2ae4e38`）。集成 AI 应按批合并。
 

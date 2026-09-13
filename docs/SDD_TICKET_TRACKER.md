@@ -1458,3 +1458,88 @@ feat/frontend → main   （#186 的消费侧）
 
 **交给集成 AI**：按上面的顺序合并与 push。集成提示词见
 `docs/INTEGRATION_PROMPT_PANEL_186.md`。
+
+---
+
+## 第二十一轮：总门禁（前端对 `main` 全量两轴审查 · 2026-09-14，前端侧 · 在途记录）
+
+**范围**：`git diff 00d7f95...HEAD`（= 本批 19 个 commit、**52 文件 / +7498 −457**），
+覆盖 #182 / #183 / #184 / #189 / #190 / #186。两轴（Standards + Spec）各派一个
+read-only subagent **独立**审全量 diff（不是只看我改过的地方）。
+
+**修复 commit**：`09afbe5`（代码）+ 本文件与提示词（文档）。
+
+### 结论摘要
+
+交付内容在单元/e2e 层面是实的（AC 逐条可证），但本轮查出**一条 P0 属"用户看不到"**：
+
+| # | 轴 | 严重度 | finding | 处置 |
+| --- | --- | --- | --- | --- |
+| 1 | Spec（两轴交叉验证） | **P0** | **中心列两个新面在真实部署里不可达**：`centerTabs` 要求"声明为 true **且**已实现"，实现侧两半都在（`implemented:true` + `App.tsx` 面板），但**声明侧永远不为 true**——`web/app.py:918-927` 对未声明 `surfaces` 的 descriptor 一律给 `changes/terminal/artifacts = false`，而 `capability/wiring.py` 里 7 个 descriptor（memory/skills/mcp/knowledge/multiagent/websearch/ticker）**没有一个填 `surfaces`**，`ProviderConfig` 是 strict 无该字段 ⇒ 配置也填不进。`workspace-modes` / `x-output-panel` / `z-changes-panel` 能看到是因为 e2e **注入了 `changes/terminal: true`**——后端发不出这种载荷 | **不按代码缺陷修**（见下"为什么不改代码"），改为：订正 `INTEGRATION_PROMPT_PANEL_189.md` 的错述 + 开票 **#193** 跟踪声明侧 |
+| 2 | Standards | P1 | **Inspector「Output」段取数反转**：只要留过流式块就用 `tool.output`，无视已到达的 `result`（>512 块还可能被投影合并/重排）⇒ 同一个 bash 调用在 Inspector 与中心列/「输出」面显示**不同文本**。`#190 AC7`（"不得改变 Inspector 侧既有行为"）与 `#183 AC9`（同一数据一个渲染器）都在这条上 | **修**（`09afbe5`）：命令走 `lib/commandOutput.ts` 的终态优先级；**只在有流式块时纠正**（无块时保留原"结果树"，那里还有 `exit_code`/`cancelled`）。变异验证：还原 → 用例红 |
+| 3 | Standards | P2 | `parseArtifactSlice` 注释说"缺字段抛错"，实现给 `total_lines/returned_lines` 填 **0** ⇒ 形状不符时渲染"共 0 行"的**假空产物** | **修**：两者改为必须在场；+3 单测（含变异验证） |
+| 4 | Standards | P2 | `ArtifactViewer.retry()` 丢弃 `load()` 的清理函数 ⇒ 存活标记恒 true，重试在飞时卸载仍 setState | **修**：改 ref，且臂化/释放在同一 effect（**单独一个"仅卸载置 false"的 effect 会被 `StrictMode` 的模拟卸载永久关掉**——`main.tsx:13` 确是 StrictMode，故按此形状写） |
+| 5 | Standards/Spec | P2 | `tabCounts.terminal` 用字面量 `t.name === 'bash'`，`TerminalTab`/`listTargets` 用 `isCommand`（今天同形，但"什么算一次命令"有两个答案，撞 #190 AC2） | **修**：收敛为 `isCommand` |
+| 6 | Standards | P2 | `ChildSessionView` 又写了一遍 `turns.flatMap((t) => t.tools)`，而 `allTools` 正是本轮为此建的单走法 | **修**：改 `allTools(conversation)` |
+| 7 | Standards | P2 | 新增 CSS 用 legacy `--color-*` 别名（20 处），`index.css:150` 明写"新代码别用" | **修**：换回原始 token。别名一对一映射、两主题都有定义 ⇒ **视觉零变化** |
+| 8 | Spec | P2 | "Inspector 纯文本段仍与自己一套 `<pre>` 渲染"（#183 AC9 的残余） | **部分修**：命令路径已收敛（第 2 条）；**非命令工具的 JsonTree vs `TruncationAwarePre` 的呈现差异保留**并在此登记为 AC9 残余（详见下） |
+| 9 | Spec | P2 | `workspace-modes` AC6 / `fixtures.ts` 注释过期（"今天没有任何非 Chat 面实现"） | **修**：`fixtures.ts` 注释重写为"真实后端默认仍为 false，见 #193"；#182 AC6 的骨架期口径保留（当时事实） |
+| 10 | Spec | P2 | `z-changes-panel.spec.ts:120` 用 S3 marker（`inspect_artifact`），而默认 Provider 是 Local（`read_artifact`） | **不修**：核对该用例**没有**声称"默认部署"；两种拼写都有覆盖，且 `z-artifact-content.spec.ts` AC4 专门断言 `read_artifact` 被认出、`inspect_artifact` 不出现 |
+| 11 | Spec | P2 | Artifacts **Inspector tab** 不走能力声明（与中心列的闸门不对称） | **不修**：该 tab 是既有面（#182 只给中心列上闸门），且 #184 AC3 / #186 AC1 都以"该 tab 恒在"为前提。属登记项，不属本批缺陷 |
+
+### 为什么不按代码缺陷修 P0（决策记录）
+
+三条路都评估过：
+
+1. **前端把 `changes`/`terminal` 默认翻 true**——会推翻用户已批准的语义（PRD §3.2 / Q4：
+   "tab 集 = chat + **当前能力声明为 true** 的面"），并让 `workspace-modes.spec.ts:42`
+   那条"后端真实默认响应 → 只有 Chat"的**刻意断言**失去意义。属产品决策，不擅自改。
+2. **后端给某个 capability descriptor 填 `surfaces`**——7 个 descriptor 分别是
+   memory/skills/mcp/knowledge/multiagent/websearch/ticker，**没有任何一个**产出
+   `changes`/`terminal`（那两个面由**内置工具** bash/write/edit/apply_patch/git diff 产出）。
+   挂在插件上等于如实性倒退（不变量 #21）。
+3. **开票 + 订正文档**——`PHASE_STATUS.md` 2026-09-07 已把"capability surfaces 装配"
+   记为**延后到 Phase 6** 的既有计划项；补声明属该阶段工作，不属本批（§8 Scope Lock
+   不提前做未来 Phase）。故：订正错述 + 开 **#193**（含两个候选方向与验收建议）。
+
+**票面 AC 与"用户可见"的区分**：#182 AC6 / #189 AC8 / #190 AC6 要求的是
+"声明为真 → 出现"（已逐条满足，e2e 用显式声明钉住），本批**没有** AC 要求
+"默认配置下用户可见"。所以这是**声明侧的缺口**，不是本批实现缺陷——但它决定了
+交付物是否被真实用户看到，必须显式记账（先前 `INTEGRATION_PROMPT_PANEL_189.md` 写
+"此前能力接口声明为 true 但被登记表压住"，**与事实相反**，已订正）。
+
+### AC9 残余（如实登记，不改）
+
+`#183 AC9` 要求"同一数据不得两份独立渲染"。本批收敛了 **diff 路径**（全走 `DiffBlock`）
+与**命令输出路径**（全走 `ToolOutputStream` + `commandOutputs`）。残余：**非命令工具**的
+Output 段，Inspector 用 `JsonTree` / `<pre>{truncateForDisplay(...)}</pre>`，中心列
+`GenericBlock` 用 `TruncationAwarePre(truncateForDisplay(stringifyForDisplay(result)))`。
+保留理由：① 底层格式化已共用（`truncateForDisplay` 同一份），差异是**呈现形态**
+（树 vs 文本）；② `TruncationAwarePre` 的诉求（高亮 grep 的截断后缀）只对文本结果有意义；
+③ Inspector 的 Output 段是"语义入口"、JsonTree 更贴它的角色；④ 改它要动已被本轮审过的
+面，收益是形态统一、风险是回归——不值得在总门禁这一轮做。若产品要统一，单独开票。
+
+### 门禁（全绿，`09afbe5`）
+
+| 项 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 干净 |
+| `npx vitest run` | **813 passed / 48 files**（+3：本次新增的解析用例） |
+| `npx oxlint` | **0 error** / 44 warnings（全部既有类别：e2e 未用导入、`set-state-in-effect`、`only-export-components`、`refs`） |
+| `npx playwright test --workers=2` | **302 passed**（5.9m） |
+| `npx vite build` | 绿（仅 chunk >500kB 的既有提示） |
+
+**门禁抓到的回归（值得记）**：第 2 条修复的第一版把**所有**命令的输出段都换成
+`ToolOutputStream`，`StepDetail.test.tsx`「有 result 时默认 Output 选中」当场红——
+bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门禁要有全量单测的理由：
+新用例（AC9）绿、旧用例（exit_code 可见）红，两者共同把形状钉成"只在有流式块时纠正"。
+
+### 关单与移交
+
+- #183 / #186 / #189：**代码完成、门禁全绿，但未合入 main**。按 §14.12 关单 comment
+  写明分支（`feat/frontend`）与 commit（`09afbe5` / 本文件 commit），并注明集成由
+  集成 AI 执行；#189 的 comment 必须同时指向 **#193**（声明侧，未完成前用户看不到该面）。
+- **#193 保持 OPEN**（后端声明侧，本批不做）。
+- 移交集成 AI：先 `feat/backend` → `main`（#185 的路由只在那条分支，否则前端"查看完整
+  内容"404），再 `feat/frontend` → `main`，然后按集成提示词冒烟。
+  提示词：`docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md`。
