@@ -4463,6 +4463,11 @@ button.json-row {
   flex: 1;
   flex-direction: column;
   min-height: 0;
+  /* #189：中心列的面按**自己的宽度**降级（拖窄 Inspector / 窄屏时两栏挤在一起谁都
+     读不了）。容器查询锚点放在面容器上，而不是 `.app-workspace`——面才是"宽度行为"
+     的主体，且 `inline-size` 只做行内轴包含，不改变纵向由父级决定的事实。 */
+  container-type: inline-size;
+  container-name: workspace;
 }
 /* 非激活的面留在 DOM 里（切回来时滚动位置与内部状态都还在），但必须**真的藏起来**：
  * `hidden` 属性的 UA 规则是 `[hidden] { display: none }`，而**作者样式里的
@@ -4564,6 +4569,139 @@ button.json-row {
 }
 .tool-out-expand-btn:hover {
   text-decoration: underline;
+}
+
+/* ── 中心列「文件/改动」面（#189）──
+ *   左侧改动文件列表 + 右侧选中文件的逐文件 diff（PRD §3.3 / §3.0 的 Claude Code 桌面版
+ *   与 VS Code Changes panel 形态）。只读；diff 渲染复用 `.diff-block`（DiffBlock）。 */
+.changes-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.changes-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  /* 左列表 240–320px，右 diff 占满剩余：改动文件列表要能扫，diff 要能宽读。 */
+  grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
+}
+.changes-files {
+  margin: 0;
+  padding: var(--space-sm);
+  list-style: none;
+  overflow-y: auto;
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.changes-file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-foreground);
+  font: 400 var(--text-sm) var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-apple);
+}
+.changes-file-row:hover {
+  background: var(--color-hover);
+}
+.changes-file-row:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+/* 选中项：左侧 accent 竖条 + 淡底——与 `.timeline-row.sel` / `.detail-tool-row.sel`
+ * 同一视觉语言（全站"这是当前项"只有一种说法）。 */
+.changes-file-row.sel {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+.changes-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;      /* 长路径从**尾部**省略：文件名比前缀重要（VS Code 同做法） */
+  text-align: left;
+}
+.changes-file-count {
+  flex: 0 0 auto;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.changes-stat {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.changes-added {
+  color: var(--success);
+}
+.changes-removed {
+  color: var(--danger);
+}
+.changes-stat-limited {
+  color: var(--text-tertiary);
+}
+.changes-detail {
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-md) var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.changes-detail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-bottom: var(--space-xs);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.changes-detail-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+.changes-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.changes-edit-head {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+.changes-footnote {
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+/* 窄容器（面板被拖窄或窄屏）：列表转到 diff 上方，两栏挤在一起谁都读不了。 */
+@container workspace (max-width: 560px) {
+  .changes-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
+  }
+  .changes-files {
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+  }
 }
 
 /* ── 工具新形状：bash 已取消 / grep 截断尾巴 / read 专用块 ── */

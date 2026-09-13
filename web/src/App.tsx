@@ -26,6 +26,7 @@ import { MemoryPanel } from './components/MemoryPanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
+import { ChangesPanel } from './components/ChangesPanel';
 import {
   centerTabs,
   deriveSurfaces,
@@ -950,10 +951,11 @@ export default function App() {
                    与对话里的工具卡共用 `ToolOutputStream`（同一渲染器，AC9）。 */
                 <OutputPanel tools={tools} />
               ) : null}
-              {/* 「文件/改动」的内容由 #189 补上：`centerTabs` 只在 `implemented` 为 true
-                  时把面放进 `tabs`，所以这里现在取不到 `changes`——不写假面板（"声明了却
-                  渲染不出来"比不渲染更差）。接内容面时必须**同时**改登记表的 `implemented`
-                  与这里的渲染，只改一处会得到一个空面板。 */}
+              {tab.key === 'changes' ? (
+                /* 「文件/改动」面（#189）：本会话改动过的文件 + 逐文件 diff。
+                   数据是事件的投影（`allTools` → `ToolCall.diff`），不另存一份。 */
+                <ChangesPanel tools={tools} />
+              ) : null}
             </div>
           ))}
         </section>

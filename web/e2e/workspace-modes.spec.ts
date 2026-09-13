@@ -49,13 +49,14 @@ test('AC2/AC3：能力目录为空（后端 CAPABILITIES=""）→ 恰好只剩 C
   await expect(chat).toHaveAttribute('tabindex', '0');
 });
 
-test('AC4 + 端点真被消费：未实现的面（`changes`）声明为真也不渲染；已实现的（`terminal`）跟随声明', async ({
+test('AC4 + 端点真被消费：已实现的面跟随声明出现（`changes` #189 / `terminal` #190）', async ({
   page,
 }) => {
   // 这条用例同时回答一个**不能只靠 Chat 回答**的问题：前端到底有没有调这个端点？
-  // `changes`（「文件/改动」）的实现还在 #189 —— 它声明为真也不该出现（渲染一个没有
-  // 实现的 tab 就是"点了没事发生"）。而 `terminal` 在 #190 已实现，所以它**必须**出现
-  // ——这正是 #182 骨架期守卫翻转后的形态（当时本用例断言两个面都不出现）。
+  // `changes`（「文件/改动」）与 `terminal`（「输出」）都已落地实现，所以声明为真时
+  // **必须**出现——这正是 #182 骨架期守卫翻转后的形态（当时本用例断言两个面都不出现，
+  // 因为那时它们还没有实现）。"声明为真但没有实现 → 不渲染"这条守卫仍在：见 AC6 的
+  // 假声明组（声明为假永不出现）。
   let calls = 0;
   routeApi(page, {
     capabilities: [
@@ -68,7 +69,7 @@ test('AC4 + 端点真被消费：未实现的面（`changes`）声明为真也�
   });
   await page.goto('/');
 
-  expect(await tabLabels(page)).toEqual(['Chat', '输出']);
+  expect(await tabLabels(page)).toEqual(['Chat', '文件/改动', '输出']);
   // StrictMode 在 dev 下会双调用 effect（React 既定行为），所以**不锁精确次数**；
   // 锁两件真事：(a) 端点确实被消费了；(b) 消费完之后没有继续重拉——依赖写错会变成
   // 请求循环，而那种 bug 靠 tab 集看不出来。
@@ -79,9 +80,9 @@ test('AC4 + 端点真被消费：未实现的面（`changes`）声明为真也�
 });
 
 test('AC6：tab 集恰好等于"声明为真 **且有实现**"的面', async ({ page }) => {
-  // 票面 AC6 要求"两组 mock（真/假）各断言 tab 集**恰好**符合声明"。
-  // `terminal` 已在 #190 落地，所以这一条现在是**完整的**端到端证明：声明为假就不出现、
-  // 声明为真就出现，两组只差这一个布尔值。
+  // 票面 AC6 要求"各组 mock（真/假）各断言 tab 集**恰好**符合声明"。
+  // `changes`（#189）与 `terminal`（#190）都已落地，所以这一条现在是**完整的**端到端
+  // 证明：三个面各自"声明为假就不出现、声明为真就出现"，三组之间只差布尔值。
   routeApi(page, {
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: false, terminal: false })],
   });
@@ -95,8 +96,17 @@ test('AC6：tab 集恰好等于"声明为真 **且有实现**"的面', async ({ 
   await page.goto('/');
   const declaredTrue = await tabLabels(page);
 
+  await page.unroute('**/api/**');
+  routeApi(page, {
+    capabilities: [capabilityFixture({ chat: true, timeline: true, changes: true, terminal: false })],
+  });
+  await page.goto('/');
+  const changesOnly = await tabLabels(page);
+
   expect(declaredFalse).toEqual(['Chat']);
   expect(declaredTrue).toEqual(['Chat', '输出']);
+  // changes 单独声明为真 → 恰好只有它出现（与 terminal 互不牵连）
+  expect(changesOnly).toEqual(['Chat', '文件/改动']);
 });
 
 test('AC3：能力接口不可用 → 降级为缺省语义，Chat 永不消失', async ({ page }) => {

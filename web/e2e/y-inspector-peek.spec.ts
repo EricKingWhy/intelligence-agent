@@ -18,7 +18,7 @@ const EVENTS: FrameSpec[] = [
   { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
   { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
   { type: 'user/message', data: { content: '看看这个' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
-  { type: 'tool/call', data: { tool_call_id: 'tc-1', name: 'bash', args: { command: 'ls' } }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
+  { type: 'tool/call', data: { tool_call_id: 'tc-1', tool_name: 'bash', args: { command: 'ls' } }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
   { type: 'tool/result', data: { tool_call_id: 'tc-1', content: '{"ok":true}' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
   { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
 ];

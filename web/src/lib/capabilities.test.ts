@@ -131,9 +131,15 @@ describe('#182 AC2/AC3：中心列 tab 集', () => {
   });
 
   it('声明为 true 但尚无实现的面**不渲染**（不给"点了没事发生"的 tab）', () => {
-    // `changes`（「文件/改动」）是**仅剩**的未实现面（#189）。
-    const surfaces = deriveSurfaces([capability({ changes: true })]);
-    expect(centerTabs(surfaces).map((t) => t.key)).toEqual(['chat']);
+    // 这条规则不依赖"恰好还有一个没实现的面"：#189 落地后中心列三个面全部有实现，
+    // 所以用**注入的**未实现面（`artifacts` 属于 Inspector，不在中心列登记表里）证明
+    // `centerTabs` 仍然守着它——`registry` 参数存在的理由就是这个。
+    const registry: SurfaceDescriptor[] = [
+      ...SURFACES,
+      { key: 'artifacts', label: 'Artifacts', implemented: false },
+    ];
+    const surfaces = deriveSurfaces([capability({ changes: true, artifacts: true })]);
+    expect(centerTabs(surfaces, registry).map((t) => t.key)).toEqual(['chat', 'changes']);
   });
 
   it('已实现的面如实跟随声明：为真就出现，为假就消失（#190 的「输出」）', () => {
@@ -146,20 +152,19 @@ describe('#182 AC2/AC3：中心列 tab 集', () => {
     ]);
   });
 
-  it('实现落地后同一份声明就会渲染出该面（#189 落地时 `changes` 的形状）', () => {
-    const registry: SurfaceDescriptor[] = SURFACES.map((s) =>
-      s.key === 'changes' ? { ...s, implemented: true } : s,
-    );
-    const surfaces = deriveSurfaces([capability({ changes: true })]);
-    expect(centerTabs(surfaces, registry).map((t) => t.label)).toEqual(['Chat', '文件/改动']);
+  it('已实现的面如实跟随声明（#189 的「文件/改动」）：为真就出现，为假就消失', () => {
+    expect(centerTabs(deriveSurfaces([capability({ changes: true })])).map((t) => t.key)).toEqual([
+      'chat',
+      'changes',
+    ]);
+    expect(centerTabs(deriveSurfaces([capability({ changes: false })])).map((t) => t.key)).toEqual([
+      'chat',
+    ]);
   });
 
   it('tab 顺序稳定：登记顺序即渲染顺序，与能力返回顺序无关', () => {
-    const registry: SurfaceDescriptor[] = SURFACES.map((s) =>
-      s.key === 'changes' ? { ...s, implemented: true } : s,
-    );
     const surfaces = deriveSurfaces([capability({ terminal: true, changes: true })]);
-    expect(centerTabs(surfaces, registry).map((t) => t.key)).toEqual([
+    expect(centerTabs(surfaces).map((t) => t.key)).toEqual([
       'chat',
       'changes',
       'terminal',

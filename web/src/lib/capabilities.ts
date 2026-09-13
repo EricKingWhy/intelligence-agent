@@ -42,7 +42,9 @@ export interface SurfaceDescriptor {
 /** 中心列的面（登记顺序 = 渲染顺序，与后端返回顺序无关）。 */
 export const SURFACES: readonly SurfaceDescriptor[] = [
   { key: 'chat', label: 'Chat', implemented: true, always: true },
-  { key: 'changes', label: '文件/改动', implemented: false },
+  // 「文件/改动」面（#189 已实现）：`implemented: true` 与 App.tsx 里 `changes` 分支的
+  // `<ChangesPanel>` 是**成对**的——少任何一半都会得到一个空面板。
+  { key: 'changes', label: '文件/改动', implemented: true },
   // 「输出」面（#190 已实现）：`implemented: true` 与 App.tsx 里 `terminal` 分支的
   // `<OutputPanel>` 是**成对**的——少任何一半都会得到一个空面板。
   { key: 'terminal', label: '输出', implemented: true },
