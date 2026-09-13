@@ -3,7 +3,10 @@
 > 母 PRD：`docs/WORKSPACE_PANEL_PRD.md`。
 > 工作区：**前端票在 `D:\intelligence-agent-frontend`（feat/frontend）**；**后端票在 `D:\intelligence-agent-backend`（feat/backend）**。
 > 门禁：前端 `cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build`；后端 `uv run ruff check . && uv run pytest -q`。
-> 建议顺序：**#185 → #190 → #184 → #183 → #182 → #189 → #186**。
+> 建议顺序：**#185 → #182 → #190 → #184 → #183 → #189 → #186**。
+> （原写的 `#185 → #190 → … → #182 → …` 与下面的依赖图矛盾：**#190 / #189 都依赖 #182**
+> 的能力显隐骨架——先做内容面会得到一个"没有 tab 可挂"的面板，或先把 tab 条写一遍再被
+> #182 取代。以依赖图为准。）
 
 ---
 
@@ -20,6 +23,13 @@
 4. 声明为 false 的面**不渲染**；面的名称与声明键的对应关系在代码里**显式登记**（禁止"声明 terminal、却渲染成 Terminal 面板"这类名不符实）。
 5. `aria-selected` 如实、可 Tab 到达、方向键可在 tab 间移动。
 6. 新增 e2e：capabilities mock 两组（真/假）各断言 tab 集**恰好**符合声明。
+   - **骨架期口径（交付时如实记）**：今天没有任何非 Chat 的面有实现，所以"符合声明"的
+     可观测形式是「声明为真**且有实现** → 出现」。用例把真/假两组并排断言，差别只在
+     `implemented` 标记；**完整的"声明为真 → 出现"必须等 #189 / #190**（它们落地时
+     要翻转 `e2e/workspace-modes.spec.ts` 的骨架期守卫，票面已记）。
+   - 另有一条**不能靠 tab 集回答**的断言：三种 mock（空目录 / 声明为真 / 端点 404）
+     渲染出的 tab 集都是 `['Chat']`，所以"前端压根没调这个端点"会让整套用例照绿——
+     `onCapabilitiesGet` 计数把"端点确实被消费且没有请求循环"钉住。
 7. 不改三区几何（`app.css:35` 的 `240px | 1fr | 320px`）与 Conversation/Composer 行为。
 
 ---
@@ -112,6 +122,9 @@
 6. 无改动时如实显示"本会话未改动任何文件"。
 7. 数据必须是事件的投影，不得成为第二真相。
 8. e2e：两次改动同一文件 → 断言只有一行且统计正确；点文件名 → diff 可见；无改动 → 空态文案逐字。
+   - **落地时必须同时改两处**（只改一处会得到一个空面板）：`lib/capabilities.ts` 登记表的
+     `implemented: true`，以及在 `App.tsx` 里为 `changes` 渲染面板内容；并翻转
+     `e2e/workspace-modes.spec.ts` 的"骨架期守卫"（见 #182 AC6 与 #190 AC6）。
 
 ---
 
@@ -128,6 +141,10 @@
 4. 能力声明为 false 时**不渲染**（非编码会话）。
 5. **不得**出现任何暗示可输入的元素（无输入框、无"运行"按钮、无光标）。
 6. e2e：有输出时出现且断言不存在输入类元素；能力为假时不渲染。
+   - **落地时必须同时改两处**（只改一处会得到一个空面板）：`lib/capabilities.ts` 登记表的
+     `implemented: true`，以及在 `App.tsx` 里为 `terminal` 渲染面板内容。
+   - **并翻转 `e2e/workspace-modes.spec.ts` 的"骨架期守卫"**：该用例今天断言"声明为真也
+     不渲染"（因为面还没实现），本票落地后要改成"出现"——#182 交付时已把这一条记在这里。
 7. 抽出 `TerminalTab` 的聚合逻辑时不得改变 Inspector 侧既有行为（#183 会继续用它）。
 
 ---

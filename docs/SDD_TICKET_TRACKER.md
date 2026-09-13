@@ -982,3 +982,46 @@ keydown 之后还要对同一元素补发 keyup——元素已不在就会重新
 未随交付更新）→ 已同步登记簿/PHASE_STATUS。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
+
+## 第十五轮：#182（2026-09-13，前端侧 · 在途记录）
+
+**交付**：`9320e72`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。票面
+`docs/WORKSPACE_PANEL_TICKETS.md` § #182；母 PRD `docs/WORKSPACE_PANEL_PRD.md` §2/§3.2。
+
+**做了什么**：中心列从"固定模式条"换成**能力声明显隐**的 tab 集（`GET /api/capabilities`
+此前前端**零消费**）。Split / Preview（#180 的 disabled 诚实占位）按 Brief 与
+BENCHMARK_SYNTHESIS 的取舍删除。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/lib/capabilities.ts`（新） | 声明键 → 可见名的**唯一登记处**；解析；显隐派生；tab 集派生；方向键目标键 |
+| `web/src/components/WorkspaceTabs.tsx`（新） | `role="tablist"` + roving tabindex，键盘只接回纯函数 |
+| `web/src/App.tsx` | 删模式条残留；加能力拉取（失败降级）；每个可见面一个稳定 id 的 tabpanel |
+| `web/src/styles/app.css` | `.workspace-mode*` → `.workspace-tab*`；`.workspace-panel[hidden]` 显式覆盖 |
+| `web/src/lib/api.ts` | `getCapabilities()` |
+| `web/e2e/fixtures.ts` | capabilities mock + 错误注入 + `onCapabilitiesGet` 计数口 |
+| `web/e2e/workspace-modes.spec.ts` | 改写为守卫（7 条用例 × 2 视口） |
+
+**门禁（全绿）**：`tsc -b` 0；`vitest` **690 passed**（+31：能力语义 27 + tab 条 ARIA 4）；
+`oxlint` 0 error（41 warnings 全为既有）；`playwright --workers=2` **252 passed**；
+`vite build` 0。
+
+**两轴 code-review 的处置（4 项实修 + 1 项保留并说明）**：
+
+| finding | 处置 |
+| --- | --- |
+| **P1** AC6 无端到端证明：三种 mock 都塌成 `['Chat']`，"压根没调端点"也会照绿 | 加 `onCapabilitiesGet` 计数断言（≥1 且不再增长=无请求循环）；AC6 的完整口径（声明为真 → 出现）**如实记为待 #189/#190**，并写进两张票面 |
+| **P2** 每个 tab 的 `aria-controls` 会悬空（单 panel 换 id），单测还把悬空引用钉死 | 改成一个面一个**稳定 id** 的 tabpanel（非激活 `hidden`，不卸载），`aria-controls` 全部可解析 |
+| **P2** 注释称"只改 `implemented: true` 即可"，照做会得到空白面板 | 注释与票面均写明：**必须同时**接 `App.tsx` 的面板渲染 |
+| **P3** 解析了不消费的 `display_name` | 从 DTO 删掉（只留 `surfaces` + `id`） |
+| **P3** `centerTabs` 的 `registry` 参数只被单测用到 | **保留**并说明：它是纯函数的入参，单测用它验证"实现落地后同一函数即渲染"这条规则；生产调用不传（默认值即真实登记表）。§8 的担忧是"为未来造抽象"，这里换来的是规则可测 |
+
+**顺带订正的两处文档矛盾**：票面与 PRD 的"建议顺序"原写 `#185 → #190 → … → #182 → …`，
+与两处依赖图（#189 / #190 依赖 #182 的骨架）矛盾——已订正为
+`#185 → #182 → #190 → #184 → #183 → #189 → #186` 并写明理由（先做内容面会把 tab 条写两遍，
+或写出一个挂不上去的面板）。
+
+**发现的既有测试现象（未修，非本票引入）**：无。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
+集成提示词见 `docs/INTEGRATION_PROMPT_PANEL_182.md`。
