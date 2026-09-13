@@ -85,16 +85,23 @@ def _require_absolute_path(value: str) -> str:
     解析成**进程当前工作目录**、把 `".."` 解析成**盘根**——于是"注册我的项目"变成"把服务器
     碰巧启动的目录、甚至整个盘当成项目"。这是 WS-1 已就 `realpath("")` 记录过的同一类
     **静默锚定**错误，必须在规范化**之前**挡住形态。
+
+    文案（API-02，2026-09-13 真机验收）：三句都走**中文**，与同层的
+    `host_dirs._directory_listing`（`path 必须是绝对路径` / `path 含非法字符（NUL）`）和
+    `SessionService._resolve_cwd`（`cwd 必须是绝对路径：…`）同一口径。此前这里是英文
+    （`path must be an absolute path`），而前端 `readErrorDetail()` 只剥掉 Pydantic 的
+    `Value error, ` 前缀、把 msg 原样渲染——中文界面里直接蹦出一句英文。
+    改的是**我们自己写**的 msg（不是 Pydantic 内建文案），所以不引入全局 localizer。
     """
     if not value.strip():
-        raise ValueError("path must not be blank")
+        raise ValueError("path 不能为空")
     if "\x00" in value:
-        raise ValueError("path must not contain NUL")
+        raise ValueError("path 含非法字符（NUL）")
     # 平台分支的绝对形态判定收在 `sandbox.paths.is_absolute_path`（#170 批次抽出）：
     # 此处原先写 `PureWindowsPath(value).is_absolute()`，在 POSIX 上会把合法绝对路径
     # （`/home/x`，无 drive → False）一律拒掉；Windows 口径逐字不变（仍要求盘符 + 根）。
     if not is_absolute_path(value):
-        raise ValueError("path must be an absolute path")
+        raise ValueError("path 必须是绝对路径")
     return value
 
 
@@ -127,7 +134,8 @@ class CreateProjectRequest(BaseModel):
     @classmethod
     def _reject_blank_title(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
-            raise ValueError("title must not be blank")
+            # 同 API-02 口径：我们自己写的 msg 一律中文（前端原样渲染 msg）。
+            raise ValueError("title 不能为空")
         return value
 
 
@@ -151,7 +159,7 @@ class RenameProjectRequest(BaseModel):
     @classmethod
     def _reject_blank_title(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("title must not be blank")
+            raise ValueError("title 不能为空")
         return value
 
 

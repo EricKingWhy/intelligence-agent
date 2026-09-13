@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -137,6 +138,56 @@ def test_create_rejects_a_regular_file_with_422(tmp_path: Path) -> None:
     resp = client.post("/api/projects", json={"path": str(f)})
     assert resp.status_code == 422, resp.text
     assert client.get("/api/projects").json() == []
+
+
+def test_create_file_path_detail_matches_the_directory_browser(tmp_path: Path) -> None:
+    """同一个路径在"注册项目"与"目录浏览"必须说**同一句话**（API-01，2026-09-13 真机验收）。
+
+    此前这里是裸 `str(OSError)`：`[Errno 20] 不是目录: '…\\a-file.txt'`
+    （errno 前缀 + 反斜杠双重转义），而目录浏览器给的是 `不是目录：<规范路径>`。
+    """
+    client = TestClient(_app(tmp_path))
+    f = tmp_path / "a-file.txt"
+    f.write_text("x", encoding="utf-8")
+    canonical = os.path.realpath(f)
+
+    from_browser = client.get("/api/host/dirs", params={"path": str(f)})
+    from_register = client.post("/api/projects", json={"path": str(f)})
+
+    assert from_browser.status_code == from_register.status_code == 422, from_register.text
+    assert from_register.json()["detail"] == f"不是目录：{canonical}"
+    assert from_register.json()["detail"] == from_browser.json()["detail"]
+
+
+def test_create_relative_path_speaks_chinese(tmp_path: Path) -> None:
+    """相对路径 → 422，且 msg 是我们写的**中文**（API-02）。
+
+    前端 `readErrorDetail()` 只剥掉 Pydantic 的 `Value error, ` 前缀、把 msg 原样渲染，
+    所以这里断言的这句就是用户在对话框里看到的那句。
+    """
+    client = TestClient(_app(tmp_path))
+
+    resp = client.post("/api/projects", json={"path": r"not-absolute\dir"})
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    msg = detail[0]["msg"] if isinstance(detail, list) else str(detail)
+    assert "path 必须是绝对路径" in msg, msg
+    assert "must be" not in msg, msg
+
+
+def test_create_blank_title_speaks_chinese(tmp_path: Path) -> None:
+    """空白标题 → 422 `title 不能为空`（同 API-02 口径：我们自己写的 msg 一律中文）。"""
+    client = TestClient(_app(tmp_path))
+    target = tmp_path / "a-dir"
+    target.mkdir()
+
+    resp = client.post("/api/projects", json={"path": str(target), "title": "   "})
+
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    msg = detail[0]["msg"] if isinstance(detail, list) else str(detail)
+    assert "title 不能为空" in msg, msg
 
 
 # ── AC1：端点集（list / get / resolve / rename / delete / attach / detach / reorder）──

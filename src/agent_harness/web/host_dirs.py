@@ -28,6 +28,7 @@ from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
+from agent_harness.web.domain_errors import workspace_http_error
 from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
@@ -103,17 +104,12 @@ def _roots_listing() -> DirListing:
 def _os_error(canonical: str, error: OSError) -> HTTPException:
     """文件系统 errno → HTTP（**每个 errno 走自己的分支**，绝不冒 500）。
 
-    与 `web/domain_errors._WORKSPACE_ERROR_STATUS` 同一口径（PermissionError 403 /
-    FileNotFoundError 404 / 其余 OSError 422），只是 detail 换成 PRD §4.4 的中文文案。
+    状态码与文案都收在 `web/domain_errors.workspace_http_error`（同一张表 + 同一份
+    中文文案）：`POST /api/projects` 也用它，所以同一个路径在"目录浏览"和"注册项目"
+    两处给出**逐字相同**的一句话（API-01，2026-09-13）。
+    `canonical` 传进去是为了让 detail 里的路径是规范化后的形态。
     """
-    if isinstance(error, FileNotFoundError):
-        return HTTPException(status_code=404, detail=f"目录不存在：{canonical}")
-    if isinstance(error, PermissionError):
-        # 明确 403：**不**降级成空列表——"看不见"与"这里没有子目录"必须可区分。
-        return HTTPException(status_code=403, detail=f"无权限访问：{canonical}")
-    if isinstance(error, NotADirectoryError):
-        return HTTPException(status_code=422, detail=f"不是目录：{canonical}")
-    return HTTPException(status_code=422, detail=f"路径不可用：{canonical}")
+    return workspace_http_error(error, path=canonical)
 
 
 def _directory_listing(path: str) -> DirListing:

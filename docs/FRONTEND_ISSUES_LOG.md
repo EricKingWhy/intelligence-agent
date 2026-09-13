@@ -1620,3 +1620,279 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
    Escape 与 kebab 都踩过这个坑，两次都由"真机复验"纠正）。
 3. 危险词（删除/清空/永久/重置/移除）与会起 run 的词（发送/新建会话/分叉）**不进自动撒点**，
    逐个手点并单独验证。
+
+### 第十一轮 · 追加二（2026-09-13，同轮继续）
+
+#### 已通过（证据登记）
+
+- **`SID-P0d` fork 父会话删除 → 409 守卫真机通过，且零副作用**。语料：`7c681c45`（6 事件）
+  是 `40ee6420` 的 fork 父（`GET /api/sessions/7c681c45…/lineage` → `children[0].origin="fork"`）。
+  路径：kebab → `删除会话…` → 弹窗 → 真实点击 `永久删除（不可恢复）`。
+  实测结果：
+  | 断言 | 期望 | 实测 |
+  | --- | --- | --- |
+  | HTTP 状态 | 409 | 409 |
+  | 弹窗内错误文案 | 后端 detail 原文 | `session '7c681c45-…' is the fork parent of 1 session(s): delete the child session(s) first` |
+  | 弹窗状态 | 保持打开（不静默关闭） | 保持打开 |
+  | 会话列表条数 | 不变（32） | 32 |
+  | 父/子目录 | 都在 | 都在（`.agent/workspace/sessions/…`） |
+  | 子的血缘 | 父链不断 | `ancestors=["7c681c45"]` |
+  **⚠️ 安全提示**：这一步是**不可逆操作的真机演练**，执行前必须先把父、子两个会话目录
+  `cp -r` 到临时目录留底（本轮已做），确认守卫生效后再删备份；否则守卫若失效就直接毁掉语料。
+- **`ACT-01` 工具卡 `Inspect` → Step Detail 全链路有反应**（会话 `a39876d7`，280 事件）：
+  点 `Inspect`（`.act-inspect-chip`）后出现 `.step-detail`（头部 `返回 Timeline` + 工具名 + 耗时），
+  子页签 `Input` / `Output` / `Raw` 分别渲染出 `{query, k}` / 原始 `output` 字符串 / 同 Output 的 raw 视图；
+  点 `返回 Timeline` 回到时间线。对话内同时出现 `.act-detail-inline`（INPUT/OUTPUT 内联块，4 个）。
+- **`ACT-02` 对话区 32 个控件全部枚举完毕**（`.conversation` 内可见可点元素）：
+  4× `分叉` + 8× `折叠`/展开 + 6× `思考`头 + 6× `复制回答` + 4× `act-node` + 4× `Inspect` + 2× json 折叠。
+  `分叉` 的 `title` 会按上下文区分：本轮之前无历史时 = `本轮之前没有历史：child 会话将是空会话`，
+  否则 = `从此处分叉新会话`（正确反映 fork 语义差异，不是文案 bug）。
+
+#### 委派 / 分叉 / 审批 控件逐个点击结果（真机）
+
+| 控件 | 语料 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| `展开结果摘要`（`.deleg-row-expandable`） | `7cf291d1` | **通过** | 展开后节点内出现子代理结论「Python 官网网址是 https://www.python.org。」 |
+| `复制子会话 ID`（`.deleg-child-row .copy-btn`） | 同上 | **通过** | `class="copy-btn"` → `"copy-btn copied"`，`aria-label`/`title` 由 `复制子会话 ID` → `已复制`，图标 Copy→Check |
+| `复制回答`（`.copy-btn`） | 同上 | **通过** | 同上（`aria-label=已复制`） |
+| `Inspect 子会话`（`.deleg-open-btn`） | 同上 | **通过** | Inspector 头由 `Run Inspector` → `Run / 子会话 · research_review / 6eed381f`，面板内容切到 child 的 run（`7d845d27`、2 轮、9 事件、`web_search`），**父会话时间线仍在**（与 title 承诺一致） |
+| `打开子会话`（`.deleg-open-btn`） | 同上 | **通过** | `ahi.selectedSession` 由 `7cf291d1…` → `6eed381f…`，主窗切换 |
+| child 视图 `Run` 返回（`.child-back-btn`） | 同上 | **通过** | 头由 `Run / 子会话…` → `Run Inspector / 1 runs · 59 事件`（会话 `7cf291d1`），回到父视图 |
+| `加载更早 N 条`（`.timeline-earlier`，在 **Inspector 的 Timeline 页签**内，不在对话区） | `a39876d7`（280 事件） | **通过** | 提示行 `显示最近 200 / 共 280 条（前段已折叠，真相完整保留）`；点一次 → 行数 `200 → 280`，按钮消失（已全加载） |
+| `分叉`（`.fork-btn`） | `34276f99` | **通过** | 会话数 `32 → 33`，`ahi.selectedSession` 跳到新 child `e82249fc…`，头部 `空闲`，无错误条；child 事件流 = `session/started` + `session/forked`（`parent_session_id=34276f99…`），`/lineage` 确认 `ancestors=[34276f99…]` |
+| 硬删（对**分叉 child** 复用一次） | `e82249fc` | **通过** | 回执「已永久删除 2 条事件记录（不可恢复）；它不在任何项目里。」→ 列表 `33 → 32`，选中态清空（`null`） |
+
+**⚠️ 分叉无二次确认（记录为设计观察，非缺陷）**：`App.tsx:399 handleFork` 点一次**立即**调
+`POST /api/sessions/{id}/fork` 并跳转到 child，没有确认弹窗。判断：这是**创建**语义（非破坏性）、
+且有 tooltip 说明 child 会是什么（`本轮之前没有历史：child 会话将是空会话` / `从此处分叉新会话`），
+连点也有 `forkInFlightRef` 挡住同一 origin 的在途请求。故不登记为缺陷；若产品希望"一键不可撤销创建"
+收敛，再另开票。
+
+**⚠️ ADR-0029 D2（永不删 `workspace_root`）在分叉场景得到真机验证**：fork child 的
+`session/started.cwd` 指向的是**父会话的** workspace 目录
+（`…\workspaces\34276f99-…`）。删掉这个 child 后实测：
+`child 会话目录 = 已消失`、`父会话目录 = 完好`、`父 workspace 目录 = 完好`、会话总数回到 32。
+即删除只按 `<root>/<sid>` 与 `<workspaces>/<sid>*` 两个自有路径动手，**没有**顺着映射去删父目录。
+这条是"删 child 顺手把父的工作区一起删了"这类灾难的最低成本防线，值得保持。
+
+#### 刷新一致性（用户点名项）· 第二轮：富语料 + **运行中刷新**
+
+**A. 视图态刷新前后对照（会话 `a39876d7`，280 事件，`density=detailed`，页签=Changes）**
+
+| 指标 | 刷新前 | 刷新后 | 结论 |
+| --- | --- | --- | --- |
+| `ahi.selectedSession` | `a39876d7…` | `a39876d7…` | ✅ 一致 |
+| `ahi.traceDensity` | `detailed` | `detailed` | ✅ 一致 |
+| 轮次数量 / 工具卡数量 | 4 / 4 | 4 / 4 | ✅ 内容一致 |
+| Inspector 激活页签 | **`Changes1`** | **`Timeline280`** | ⚠️ **丢失**（回默认页签） |
+| Timeline 尾窗 | 280 行（已点过「加载更早」） | 200 行（按钮重新出现） | ⚠️ **丢失**（回默认窗口） |
+
+→ **观察·P2（非阻断）**：Inspector 的**视图态**（当前页签、Timeline 尾窗大小）不跨刷新保留，
+而选中会话/密度/主题是保留的（都在 localStorage）。用户点名的"刷新后会话要和刷新前一致"
+指的是**会话内容**——这一条**成立**；页签/窗口回默认属于"视图态未持久化"，是否要一起持久化
+由产品定，本轮不当作 bug。
+
+**B. 运行中刷新（真正的危险路径）· 会话 `43e7b46e`**
+
+步骤：composer 输入 `只回复：ok` → 点发送 →（`发送` 立刻变 `停止`，5 个 picker 全部
+`disabled`——与清单 §A 第 189 行一致）→ **运行途中真实刷新页面**（reload）。
+
+结果（刷新后 14 秒内三次采样，状态稳定）：
+
+| 断言 | 实测 |
+| --- | --- |
+| 选中会话 | 仍是 `43e7b46e…`（未跳走、未回空态） |
+| 消息是否丢失/重复 | 事件流 `user/message` **= 2**（原有 1 + 新增 1），**无重复**；`run/started`/`run/completed` 各 2 |
+| 后端是否继续把这一轮跑完 | **是**：`run/completed`，`final_text="\nok"`，并伴随 `model/fallback`（`deepseek-v4-flash-0731 → glm-4.5-air`，`reason=InternalServerError`） |
+| 刷新后 UI 是否与事件流一致 | **是**：对话区 `第 1 轮 / 第 2 轮`，两条都是 `ok`，模型徽标 `glm-4.5-air`，第 2 轮有思考块 |
+| 失败/降级是否可见 | **是**：Inspector Overview 的 MODEL 区显示 `已切换 deepseek-v4-flash-0731 → glm-4.5-air · InternalServerError` + `用量 3,400 tok（3,355 + 45）` |
+| 是否卡在"停止"态 | 否，刷新后 `发送` 可用（无悬挂 streaming） |
+
+源码侧机制（与真机一致）：`hooks/useSession.ts:366-379` 加载历史后
+`if (hasUnterminatedRun(events)) resumeLiveStreamRef.current?.(sid, maxEventSeq(events), projected)`
+——即"先渲染历史，再按未收口 run 接回实时流"（注释直指 BUG-006）。另外
+`hooks/useSession.ts:383-388`：记住的选中会话若已不存在（被删/换后端）→ 清 key + 静默回空态，
+不弹无法处理的错误（与"删掉当前选中会话后 `ahi.selectedSession=null`"的实测一致）。
+
+**结论**：刷新一致性在"内容"这一层**真机通过**（含运行中刷新的续跑与对账）；仅"视图态"未持久化。
+
+#### MOD-01 【前端·P1】composer 选「默认链」**不发请求**：界面说「默认链」，会话实际仍跑上一个非默认模型（同屏自相矛盾）
+
+> 来源：Subagent（composer 扫描）静态定位 F3 → **本 Agent 动态复现并确认为真**（subagent 为保护真实数据主动回避了动态验证）。
+
+- **语料**：`fb3619c6-9817-487c-9a10-59bd3716ad1a`（cwd `ws2-e2e`，6 事件，原本无任何 `model/changed`）。
+- **真机步骤与硬证据**（判据是**会话 JSONL 里有没有新的 `model/changed` 事件**，不靠 UI 自述）：
+  1. 选中 `fb3619c6` → composer 模型 picker 显示 `默认链`。选 **`glm-5.3-flash`** →
+     **新增** `seq 6 model/changed {from=None → to=glm-5.3-flash}`（POST 生效）。
+  2. 再选 **`默认链`** → trigger 变回 `默认链`，**但 JSONL 事件总数仍是 7、`model/changed` 仍只有 seq 6**
+     → 会话当前模型**仍是 `glm-5.3-flash`**。
+  3. **同屏自相矛盾**：此时同一页面里，composer 说 `默认链`，而右侧 Inspector 的 MODEL 区说
+     `模型 glm-5.3-flash`。
+  4. **刷新不纠错**：reload 后 picker 仍显示 `默认链`（前端不从会话事件反推 picker，picker 只反映本地 state）。
+     → 用户此后每次发送都会**带着 glm-5.3-flash 跑**，而界面从头到尾告诉他"默认链"。
+- **根因（前后端契约对齐后判定：前端没按契约调用）**：
+  - 后端契约（`session/model_switch.py:97-132`）：`ModelTarget.model_id=None` = 切回默认链，
+    **`effective_model_id` 是 picker 应显示的 id**；而进入这条分支的合法入参是
+    **`GET /api/models` 里 `is_default=true` 那个条目的名字**（`is_default_selection()` 命中即视为"清覆盖"）。
+  - 前端（`components/ModelPicker.tsx:73-79` `commitSelection`）：把 `DEFAULT_VALUE` 映射成
+    **`null`** 再回调 → `App.tsx:297-317 handleModelChange` 的 `if (selectedId && name)` 因 `name===null`
+    **直接跳过 POST**，只 `setSelectedModel(null)`。
+  - `web/src/lib/api.ts:528` 的注释本身就写明"`GET /api/models` 的默认条目（is_default=true）
+    也是合法 POST target = 切回默认链"——即**契约要求传默认条目名**，UI 传了 `null`。
+  - 注意 picker 里**另有一个** `deepseek-v4-flash-0731 默认` 选项：选它**会** POST 并清覆盖。
+    两个看起来都像"用默认"的选项，只有一个真的清覆盖——这正是容易漏掉的原因。
+- **修复可行性（已实测，无需后端改动）**：选 `deepseek-v4-flash-0731 默认` →
+  新增 `seq 7 model/changed {from=glm-5.3-flash → to=None}`，覆盖被清空、会话回到默认链。
+  → 前端最小修复：`DEFAULT_VALUE` 应解析为 `models.find(m => m.is_default)?.name`（有 selectedId 时）
+  再走同一条 POST 路径；若该条目缺失则退化为当前行为并给出可见提示。
+- **数据收尾**：`fb3619c6` 已被显式切回默认链（seq 7 `to=None`），无遗留脏模型。
+
+#### ART-01 【跨端·P1】`artifact/externalized` 前端未接线 → **Artifacts 页签恒空**，且在有产物的会话里给出**错误结论**
+
+- **现象（真机）**：会话 `a39876d7` 有 2 条 `artifact/externalized` 事件：
+  - `artifact_id=87d71b1befad2f76`（`source_tool=web_search`，`size=8578`）
+  - `artifact_id=197e88d95cd917b9`（`source_tool=bash`，`size=39600`）
+  时间线里也能看到模型调过 `inspect_artifact artifact_id="197e88d95cd917b9…"`。
+  但 Run Inspector 的 **Artifacts 页签**显示 `Artifacts0`，面板正文写
+  **「本次会话未产生 Artifact。」**；同时 Overview 的 TRACE 区块出现 **`未知事件 2`**（= 这 2 条）。
+  → 同一份数据在两处给出互相矛盾的结论，且 Artifacts 页签的那句是**事实错误**。
+- **根因（三处对齐后判定）**：
+  1. **后端运行时只发 `artifact/externalized`**：`assembly.py:227`
+     `ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)` 用默认
+     `externalize_event_type=ARTIFACT_EXTERNALIZED`（`tooling/overflow.py:47`）；
+     全仓检索**没有任何运行时发射点**发 `artifact/created`（只有 `cli.py` 的展示判断、
+     `multiagent/provider.py` 的透传、`session/event.py` 的定义）。
+     `tests/tooling/test_overflow.py:46-51,128` 已把 `artifact/externalized` 锁成既定行为。
+  2. **规格事件表只列 `artifact/created`**：`03_SESSION_EVENT_MODEL.md` §3 的事件清单里有
+     `artifact/created`，**没有** `artifact/externalized`（`grep externalized` 在该 spec 目录下 0 命中）。
+     → 这是**规格 ↔ 实现的事件名分歧**，不是前端单方面写错。
+  3. **前端按规格接线**：`lib/projection.ts:820` 把 `ARTIFACT_CREATED` 接到
+     `projectArtifactCreated`（写 `tool.artifact`），而
+     `lib/projection.ts:824` 把 `ARTIFACT_EXTERNALIZED` 登记为 `unhandledProjection`
+     （源码注释：「词汇表内但前端尚未接线——显式登记，保持既有兜底行为（进 unknown_events）」）。
+     Artifacts 页签的数据源是 `tools.filter(t => t.artifact)`（`StepDetail.tsx:171,762`），
+     而 `artifact/externalized` **压根不进这个字段** → 该页签在生产路径上**永不可能有内容**。
+- **字段可用性**（说明前端侧修复成本很低）：`artifact/externalized` 的 payload 已带
+  `artifact_id / session_id / source_tool / tool_call_id / size / mime_type`，
+  与 `projectArtifactCreated` 消费的字段**完全同构**——把 `ARTIFACT_EXTERNALIZED` 指向同一投影即可，
+  无需后端改契约。
+- **归属与建议**：
+  - **前端（最小修复，可自主做）**：`ARTIFACT_EXTERNALIZED` 改为复用 `projectArtifactCreated`
+    （或等价地在该投影入口同时接受两种 type）。副作用是「未知事件」计数同时归零，
+    TRACE 区块不再有假告警。需补 `projection.test.ts` 用例。
+  - **后端 / 规格（只报告，不擅自改，AGENTS.md §8/§9.1）**：事件名分歧要由规格侧定案——
+    要么规格事件表补 `artifact/externalized`（并与 `artifact/created` 的关系写清），
+    要么后端统一到规格名（但会动已落盘 JSONL 与冻结契约，风险更高）。
+    **本轮不动后端、不动 spec**，只登记为待决策项。
+- **为什么不是 P0**：主链路（对话 / 工具卡 / 审批 / 委派 / 删除）全部正常，Artifacts 是边缘页签；
+  但它在**确实存在产物**时会给出错误结论，所以也不止于 P2。
+
+#### APR-01 【前端·P1】进程重启后遗留的未决审批卡**永久残留**，且点了只会拿到 404（无失效态、无忽略路径）
+
+- **语料**：会话 `d51bdf05-4b80-4652-b2d0-a954e1836305`。事件流里 `tool/approval-requested`
+  **2 条**、`permission/resolved` **1 条** → 有 **1 条审批永不配对**（`bash`，`action_type=danger`，
+  `approval_id=9ce3a0b31d8f4d70bc3fa1ae6d3f9bfa`），且该会话最后是
+  `run/interrupted`（原因 `process_restart`）+ `session/resumed`。
+- **真机现象**：
+  1. 对话区仍渲染一张 `approval-card pending`（`需要审批`），工具行 `bash danger read-only`，
+     命令原文 `$ dir live-deny.txt 2>nul & echo --- & type live-deny.txt 2>nul`，
+     按钮 `批准 Ctrl+⏎` / `拒绝 Ctrl+⌫` **可点**；
+  2. 上方同时有提示「上次运行在第 2 步中断（原因：process_restart）」——**与卡片的"等你决策"语义互相矛盾**；
+  3. 点 `拒绝` → `POST /api/sessions/d51bdf05…/approve` → **404** → 卡面出现
+     `审批失败（404）`，卡片回到 `pending`，两个按钮**仍然可点**；再点还是 404。
+- **根因（两端对齐，后端无过）**：
+  - 后端：`approval_queues` 是**纯内存**的（`session/service.py:934`，
+    缺队列 → `ApprovalQueueMissing` → 404；`app.py:1236-1240` 已把
+    "approval_id 不存在 → 404（前端过期事件）"写进契约文档），且 run 终结时
+    `_attach_approval_queue_gc` 直接 `pop`（`service.py:1233-1241`）。
+    **恢复链路（`recovery/`）完全不碰 approval** → 重启后这条审批**永远不可能再被 resolve**。
+    后端行为符合已冻结契约，**不是后端 bug**。
+  - 前端：`ConversationState.pending_approvals` 由事件投影得出（`requested` 未配对 `resolved`），
+    `ApprovalCard` **不看 run 是否已 interrupted**，也不区分 404 与网络失败
+    （`ApprovalCard.tsx:58-69` 只把 409 当幂等成功，其余一律"保留 pending + 显示错误 + 允许重试"）。
+    → 对一条**已死**的审批，"允许重试"这个策略本身就是错的：重试永远不会成功。
+- **为什么算 P1**：`run/interrupted` 是 T8 #138 崩溃恢复**明确支持**的场景，不是异常边角；
+  每次进程重启都会在受影响会话里留下**无法消除**的假交互，且文案在骗用户（"需要审批"）。
+  对用户的实际伤害：被卡在一个不可能完成的操作上，反复点击只得 404。
+- **归属与建议（前端）**：
+  1. **主修**：run 处于中断/终态且该 `approval_id` 无后续 `permission/resolved` 时，
+     把卡片渲染为**只读失效态**（例如标题改「审批已失效」+ 禁用按钮 + 说明"运行已中断，该决策无法再提交"）。
+     判据可以完全来自事件流（`run/interrupted` / `run/completed` / `run/failed` 之后仍 pending 的审批）。
+  2. **辅修**：把 404 从"可重试错误"里分出来，文案改为"该审批已失效（运行已中断或服务已重启）"，
+     不再暗示重试。仍保留 5xx/网络错误时的可重试行为（OBS-015 的原意）。
+  3. 若要"重新发起审批"，那是**新功能**（需要后端在 resume 时重放 approval），不在本票范围。
+
+#### DOC-01 【规格·P2】`03_SESSION_EVENT_MODEL.md` §3 事件表与实现已大面积对不上（与 ART-01 同源）
+
+- **做法**：把 spec §3 事件清单（24 个名字）与前端 `generated/event-types.ts`（37 个，由后端契约生成）
+  做集合差。
+- **结论**：
+  - **spec 有、实现没有（8 个）**：`agent/completed`、`agent/delegated`、`approval/requested`、
+    `approval/resolved`、`checkpoint/saved`、`context/built`、`step/completed`、`step/started`。
+  - **实现有、spec 没有（21 个）**：`agent/delegation-started`/`-finished`、`artifact/externalized`、
+    `compaction/start`/`end`、`memory/degraded`、`message/queued`、`model/changed`、`model/fallback`、
+    `permission/resolved`、`queue/cancelled`、`reasoning/started`/`delta`/`completed`/`interrupted`、
+    `run/interrupted`、`steer/requested`/`applied`、`text/delta`、`tool/approval-requested`、
+    `tool/failure-guard`。
+  - 抽查 7 个实现侧名字（`agent/delegation-started`、`reasoning/started`、`text/delta`、
+    `tool/approval-requested`、`permission/resolved`、`model/fallback`、`run/interrupted`）
+    在整个 `docs/spec/` 目录下 **0 命中** —— 即 spec 里根本没有这些名字的落点。
+- **为什么重要**：ART-01 就是这条分歧的**具体受害者**——前端照 spec 的 `artifact/created` 接线，
+  运行时却只发未收录的 `artifact/externalized`，于是页签恒空。同理 `approval/requested` 对应的是
+  实现里的 `tool/approval-requested`，照 spec 找会找不到。
+- **归属**：规格（Primary Developer 维护）+ 后端契约。**本轮只报告，不改 spec、不改后端**
+  （AGENTS.md §1.1：代码与规格冲突应报 Gap，不得反向覆盖冻结需求；§8 Scope Lock）。
+- **建议**：集成时把 §3 事件表按**实现的实际名字**重写（并标明哪些是持久化、哪些是广播），
+  或明确标注该表是"概念速写、非契约"，把契约指向 `generated/event-types.ts` 的来源。
+
+### 第十一轮 · Subagent 扫描汇总（2 个 subagent，真机点击，2026-09-13）
+
+> 两个 subagent 各自 `new_page` 独占一页（pageId 2 / 3），与我的 pageId 1 隔离；
+> 全程真实 CDP 点击 + DOM/网络/console/截图判据。原始报告留在验收现场
+> （`docs/.round11_subagent_composer.md`、`docs/.round11_subagent_sidebar.md`，**未提交**，
+> 属现场证据不进版本库）；可执行项已全部落进下面的 finding 表与集成提示词。
+
+#### 通过（证据登记，节选；两个 subagent 合计真实点击 46 个控件，0 个"点了没反应"）
+
+- **Composer / 空态 / 记忆面板 15 个控件全部 reacted**：模型 picker（5 项，当前值带 `sel`+Check）、
+  权限模式（3 项）、Agent Profile（3 项）、Reasoning Effort（3 项）、Context Providers（多选，勾选态
+  `☑/☐` 往返）、发送按钮 gating（纯空格不解禁）、Chat/Split/Preview 三态 `aria-pressed`、
+  记忆管理（`GET /api/memories` 200 + 诚实空态「不是加载失败，是真的没有」）、新建会话（空态 + 3 个
+  example-chip，**不发 `POST /api/sessions`**）、3 个快速提示 chip（只回填 textarea，**不起 run**）。
+- **侧栏 / 项目管理 31/32 项 reacted**：目录浏览器四种情形（200 只列目录 / 404 `目录不存在：` /
+  422 `不是目录：` / 403 `无权限访问：`）UI **逐字**显示后端 detail；注册项目（默认标题取 basename）、
+  重命名（PATCH 200）、软删除（DELETE 200 + 四条承诺 + 回执 `sessions_detached:0`）全程
+  **磁盘零改动**、`GET /api/sessions` 恒 32、未分组恒 24；attach 冲突 409 的 dialog `role=alert`
+  逐字显示、浮层不关闭；拖拽机制（`.dragging` / `.rail-drop-tail` "放到最后" / `.rail-drop-indicator`）
+  正常且 no-op 落点**不发请求**。
+
+#### 新增 finding（subagent 提出，本 Agent 复核归属）
+
+| ID | 归属 | 级别 | 摘要 | 位置（只读定位） |
+| --- | --- | --- | --- | --- |
+| **API-01** | **后端** | P2 | `POST /api/projects` 的 422 detail 是**裸 OSError**：`[Errno 20] 不是目录: 'D:\...\readme.txt'`（反斜杠双重转义可见），与 `GET /api/host/dirs` 同场景的策展文案 `不是目录：<path>` 不一致 | `web/domain_errors.py:170-178 workspace_http_error()` 用 `detail=str(exc)` |
+| **API-02** | **后端** | P2 | 注册项目填相对路径 → 中文界面里冒出英文 `path must be an absolute path`（Pydantic 校验原文） | 前端 `readErrorDetail()` 已正确解析 detail 数组并剥 `Value error, `，问题在文案本身 |
+| **MOD-F1** | 前端 | P2 | 模型/权限/Agent/推理 picker **键盘导航失效**（条目 ≤5 时搜索框 `hidden` → 焦点落在 Radix content，`cmdk-root` 的 `onKeyDown` 收不到事件）；对纯键盘用户是功能不可用 | `components/ModelPicker.tsx:7` 注释宣称"方向键/Enter 由 cmdk 内置"与实测矛盾 |
+| **MOD-F2** | 前端 | P2 | 单选 ControlPicker（权限/Agent/推理）选了之后**没有任何回到"未选（默认）"的入口** | `components/ControlPicker.tsx` 只渲染 `entries` |
+| **MOD-F4** | 前端 | P2 | Context Providers 的勾选态画在 `aria-hidden="true"` 的 span 上，辅助技术读不到；`role=option` 的 `aria-selected` 只表示 cmdk 高亮 | — |
+| **MOD-F5** | 前端 | P2 | Split / Preview **并不真正分栏**，只插一条 `workspace-scaffold` 提示条（UI 自标"未来升级点"） | 若产品本轮就要求副面板，则升级为 P1 |
+| **MOD-F6** | 前端 | P2 | `selectedIds` 未与 `entries` 对账 → entries 变化后可能出现"已选但不可见/不可取消"的幽灵项（静态结论，未动态复现） | `ContextProviderPicker.tsx:47-49` |
+| **PRJ-F3** | 前端 | P3 | 项目重命名输入**纯空白**时静默丢弃（无请求、无提示、编辑态退出），用户易误以为改名成功 | `ProjectDialogs.tsx:434-436` → `SessionList.tsx:270-276` |
+
+**未覆盖 / 环境限制（须记入，避免被误判为缺陷）**：
+
+- **PRJ-F4【方法限制】**"真·重排后顺序改变并刷新保持"、「移出项目」导致 `sessions_detached>0`、
+  项目内会话的写项（上移/下移/移出/删除）**本轮不可达**：唯一创建会话的路径
+  `POST /api/sessions` 总是 `create_and_launch()`（`app.py:1013-1046`）→ 造一条自己的会话必须起一次
+  LLM run（被本轮硬约束禁止），而 attach 真实会话会改用户可见分组。**这三项仍待验**。
+- **PRJ-F5【环境噪声】**`localStorage.ahi.selectedSession` 是**同源单键**：三个页面并发时互相覆盖
+  （subagent 页面顶栏/选中行是 `d51bdf05`，读到的键却是别的 id）。单标签用户无感，
+  **不能**作为前端缺陷判定；但它也解释了"刷新恢复被别的标签页带偏"的现象。
+- **`<后端>\web\` 是旧快照（集成安全警示）**：本工作区 `feat/backend` 的 `web/` 里**没有**
+  前端 `57dd028` 的会话硬删对话框（grep `永久删除` 零命中），即 backend 分支的前端树**落后于**
+  frontend worktree。集成时**不要用 backend 分支的 `web/` 去覆盖 frontend 的 `web/`**；
+  本轮所有前端 finding 均**不在本工作区改**（改了也送不到 frontend worktree，只会再造一份分叉副本，
+  见 SID-04）。前端修复另出提示词交付。
+- **`workspaces/ws-delete-me/` 不是垃圾**：它是会话 `43e7b46e` 的 `cwd`
+  （`session/started.cwd = …\workspaces\ws-delete-me`），来自更早一轮 #172 测试语料；
+  它不在 `GET /api/projects` 里是**正确**的（不是项目，只是会话工作目录）。**不要当成遗留目录清掉**。

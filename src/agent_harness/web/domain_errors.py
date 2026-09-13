@@ -163,18 +163,53 @@ _WORKSPACE_ERROR_STATUS: dict[type[Exception], int] = {
     # 查表，所以这条不会吞掉上面 FileNotFoundError / NotADirectoryError 的专有项。
     OSError: 422,
     # 403：路径存在但服务端无权访问（文件系统权限，不是"参数写错"）。
+    # 目录浏览场景下这条**不降级成空列表**——"看不见"与"这里没有子目录"必须可区分。
     PermissionError: 403,
 }
 
 
-def workspace_http_error(exc: Exception) -> HTTPException:
+def os_error_detail(exc: Exception, *, path: str | None = None) -> str:
+    """文件系统异常 → **策展中文** detail（与 `GET /api/host/dirs` 同一套文案）。
+
+    为什么不再 `str(exc)`：同一个路径在"注册项目"与"目录浏览"两处会被用户看到——
+    `str(OSError)` 是 `[Errno 20] 不是目录: 'D:\\x\\readme.txt'`（带 errno、反斜杠双重
+    转义），而目录浏览器给的是 `不是目录：D:\\x\\readme.txt`。同一事实两种说法，
+    用户会以为遇到了两种问题（API-01，2026-09-13 真机验收）。
+
+    路径取舍：调用方给的 `path`（已规范化的 canonical）优先，否则取
+    `OSError.filename`——`os.stat` / `realpath` 抛出的 OSError 都带它，
+    `pydantic` / 手写的异常则可能没有；都没有时**退回 `str(exc)`**，
+    宁可文案粗糙也不丢信息。
+
+    **只策展 `OSError`**：`workspace_http_error` 也接 `WorkspaceError`（`UnknownWorkspace`
+    / `UnknownLedgerEntry`），那些异常自带完整中文消息且**未必与路径有关**——给它们套
+    "路径不可用：" 模板会把"账本里没这条"说成"路径不可用"，是更糟的谎。非 OS 异常原样透传。
+    """
+    if not isinstance(exc, OSError):
+        return str(exc)
+    target = path or getattr(exc, "filename", None) or ""
+    if isinstance(exc, FileNotFoundError):
+        return f"目录不存在：{target}" if target else str(exc)
+    if isinstance(exc, PermissionError):
+        return f"无权限访问：{target}" if target else str(exc)
+    if isinstance(exc, NotADirectoryError):
+        return f"不是目录：{target}" if target else str(exc)
+    return f"路径不可用：{target}" if target else str(exc)
+
+
+def workspace_http_error(exc: Exception, *, path: str | None = None) -> HTTPException:
     """workspace 包 / OS 异常 → `HTTPException`；状态码取自 `_WORKSPACE_ERROR_STATUS`。
 
     与 `http_error` 同款：直接索引（不 `.get` 回退），未登记类型是编码错误，由
     `tests/web/test_domain_error_mapping.py` 的覆盖测试先红挡住。
+
+    detail 走 `os_error_detail`（策展中文，**唯一一份**文案）；`host_dirs._os_error`
+    也复用本函数，所以"注册项目 / 目录浏览 / 会话 cwd"三处对同一个 errno 说同一句话。
+    `path` 是给调用方传 canonical 路径的（`OSError.filename` 在少数构造方式下为空）。
     """
     return HTTPException(
-        status_code=_WORKSPACE_ERROR_STATUS[type(exc)], detail=str(exc)
+        status_code=_WORKSPACE_ERROR_STATUS[type(exc)],
+        detail=os_error_detail(exc, path=path),
     )
 
 
