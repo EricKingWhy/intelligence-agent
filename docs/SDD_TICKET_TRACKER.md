@@ -1025,3 +1025,58 @@ BENCHMARK_SYNTHESIS 的取舍删除。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
 集成提示词见 `docs/INTEGRATION_PROMPT_PANEL_182.md`。
+
+## 第十六轮：#190（2026-09-14，前端侧 · 在途记录）
+
+**交付**：`8605668`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。票面
+`docs/WORKSPACE_PANEL_TICKETS.md` § #190；母 PRD `docs/WORKSPACE_PANEL_PRD.md` §3.5。
+依赖 #182 的骨架已就位，故本轮把「输出」面接上。
+
+**做了什么**：中心列新增第二个面「输出」（能力 `terminal` 显隐）。**不叫 Terminal**——
+本项目没有 PTY（`sandbox/local.py` 是一次性 `subprocess.Popen`），叫 Terminal 等于承诺一个
+不存在的输入能力；只读输出的业界先例都叫 Console / Logs（Replit 把 Console 只读与 Shell
+可输入拆成两个东西），故命名「输出」并在面内明示能力边界。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/lib/commandOutput.ts`（新） | `isCommand` / `commandResult` / `commandOutputs` / `commandOutputText`——"什么算一次命令"的唯一答案 |
+| `web/src/lib/commandOutput.test.ts`（新） | 10 条：判定、结果优先于活块、空串不成块、stdout+stderr 合并 |
+| `web/src/components/ToolOutputStream.tsx`（新） | 从 `ToolCard.tsx` **原样搬移**；新增 `showCaret` / `expandable` 两个开关 |
+| `web/src/components/OutputPanel.tsx`（新） | 只读说明（**两个分支都有**）+ 按工具调用分组 + 就地展开 + `等待输出…` |
+| `web/src/lib/projection.ts` | `allTools` 单一走法（Inspector 与「输出」面共用） |
+| `web/src/components/StepDetail.tsx` | `TerminalTab` 改用 `isCommand` / `commandResult`（**渲染零变化**） |
+| `web/src/lib/capabilities.ts` | `terminal.implemented = true`（与 `App.tsx` 的渲染成对） |
+| `web/src/App.tsx` | `tab.key === 'terminal'` → `<OutputPanel tools={tools} />` |
+| `web/e2e/x-output-panel.spec.ts`（新） | 7 条 × 2 视口；#182 骨架期守卫按票面注释**翻转** |
+
+**门禁（全绿）**：`tsc -b` 0；`vitest` **701 passed**（+11：#190 命令聚合 10 + 登记表 1）；
+`oxlint` 0 error（41 warnings 全为既有，新文件零 warning）；`playwright --workers=2`
+**266 passed**（+14）；`vite build` 0。
+
+**两轴 code-review 的处置（1×P1 + 5×P2/P3 全修）**：
+
+| finding | 处置 |
+| --- | --- |
+| **P1** 运行中的命令会画出 `.stream-caret`，正撞 AC5"不得出现光标" | `ToolOutputStream` 加 `showCaret` 开关，「输出」面传 `false`；新增专门用例断言 `.stream-caret` 计数为 0 |
+| **P2** 运行中且尚无输出时写"这次命令没有输出。"（假事实） | 改 `等待输出…`，并加用例反断言不出现"没有输出" |
+| **P2** 我曾另写一份并行读取器，偏离 AC2"复用既有聚合逻辑" | 抽出 `isCommand` / `commandResult`，`TerminalTab` 反向改用它们（一条走法） |
+| **P2** AC3 只做了截断、没有"就地折叠" | `expandable`：工具条出现「展开全部（共 N 字符）/ 收起」，e2e 用头尾标记证明"展开前头部不在 DOM" |
+| **P2** 嵌套滚动条（面板 + 输出体各滚一次） | CSS 覆盖：`.output-list` 独占滚动，`.tool-out-body` 取消 200px 上限 |
+| **P3** 同一段输出两个复制按钮；空态缺只读说明；终端样式图标 | 删头部复制键；只读说明提到两个分支之前；`TerminalSquare` → `ScrollText` |
+
+**AC 逐条对照**：AC1 ✅面内明示 / AC2 ✅分组+复制（**复用**既有逻辑，反向收敛为单一实现）/
+AC3 ✅就地展开（与 #186 同策略：就地、不新开导航面、单一渲染器）/ AC4 ✅能力为假不渲染 /
+AC5 ✅e2e 断言无输入类元素、无"运行"键、无光标 / AC6 ✅7 条用例 / AC7 ✅`TerminalTab`
+渲染逐字未变（它此前只渲染 stdout、漏 stderr，属**既有**缺口，AC7 明令不动故本票不改）。
+
+**顺带**：修了我自己在本轮引入的一处孤立注释（`bashResult` 删除后其文档注释悬在
+`TerminalTab` 上）；并订正了一次 commit message——初版写成"TerminalTab 补上 stderr"，
+与 AC7 事实不符，已 amend（未 push，故安全）。
+
+**发现的既有测试现象（未修，非本票引入）**：Inspector 的 `TerminalTab` 只读
+`result.stdout`、不显示 `stderr`；「输出」面经 `ToolOutputStream` 是通道保真的。两处差异
+本身是 AC7 的必然结果，但"同一个概念两处看到的不一样"值得单独记一笔（建议在 #183 里决定
+是否对齐）。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
+集成提示词见 `docs/INTEGRATION_PROMPT_PANEL_190.md`。
