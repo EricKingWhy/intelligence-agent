@@ -1,0 +1,369 @@
+"""#185：`GET /api/sessions/{session_id}/artifacts/{artifact_id}` —— 外置内容只读读取。
+
+外置（overflow）产物是**被截断的大工具输出 / 大 diff**，内容落在对象存储里；
+模型侧靠 `read_artifact` / `inspect_artifact` 读回，本路由把**同一个读入口**
+（`ArtifactStore.inspect`）暴露给 Web。
+
+契约矩阵
+--------
+
+| 条件 | 结果 |
+| --- | --- |
+| `session_id` 形态非法（含 `.` / `/`） | 422 `InvalidSessionId` |
+| `artifact_id` 形态非法（非 16 位小写十六进制） | 422 |
+| 会话不存在 | 404 `SessionNotFound` |
+| **本部署未配置 artifact 存储** | 503（如实：不是"没有这个 artifact"） |
+| artifact 不存在（含"它属于别的会话"） | 404 |
+| 正常 | 200（`lines`/`total_lines`/`returned_lines`/`truncated`/`query`） |
+
+跨会话隔离的测法
+----------------
+
+真实 store（S3 / MinIO）用 `{session_id}/{artifact_id}` 前缀做命名空间，所以隔离性
+来自两件事：**用 URL 里的 session_id 构造 store**，以及 **provider 真的把它拼进 key**。
+
+- 前者在路由层测（`test_store_is_built_with_the_url_session_id` 断言工厂收到的参数）；
+- 后者在 store 层测（`test_minio_load_namespaces_key_...` 断言发出的请求 key）。
+
+内存替身（`FakeArtifactStore`）不按会话分区，所以在替身上断言"读不到别的会话"只会测出
+一个假象——那两条断言都放在了真正承担该职责的那一层。
+
+`max_lines` / `max_chars_per_line` 是**服务端上限**：客户端给多大都会被夹到上限内，
+并在 `query` 里回显实际生效值（响应体积可控）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING, Self
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
+
+from agent_harness.config import Settings
+from agent_harness.storage.artifact import FakeArtifactStore, compute_artifact_id
+from agent_harness.web.app import create_app
+from tests.scripted_model import ScriptedModel
+
+if TYPE_CHECKING:
+    from agent_harness.storage.minio_artifact import MinioArtifactStore
+
+_DATA_PREFIX = "data:"
+
+#: 工厂的补丁目标：app.py 通过模块属性调用，才能这样替换（与既有
+#: `agent_harness.session.service.build_runtime` 的补丁口径一致）。
+_FACTORY = "agent_harness.web.artifacts.build_read_artifact_store"
+
+
+def _client(tmp_path: Path, **overrides) -> TestClient:
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+        **overrides,
+    )
+    return TestClient(create_app(settings, enable_cors=False))
+
+
+def _create_session(client: TestClient) -> str:
+    """建一个真会话（真 runtime + 替身模型），返回 session_id。"""
+    with patch(
+        "agent_harness.assembly.create_chat_model",
+        return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
+    ):
+        resp = client.post("/api/sessions", json={"task": "hi", "max_steps": 1})
+    assert resp.status_code == 200, resp.text
+    frames = [
+        json.loads(line[len(_DATA_PREFIX) :].strip())
+        for line in resp.text.splitlines()
+        if line.startswith(_DATA_PREFIX)
+    ]
+    session_id = next((f["session_id"] for f in frames if f.get("session_id")), None)
+    assert session_id, f"SSE 流里没有 session_id：{frames[:3]}"
+    return str(session_id)
+
+
+def _seeded_store(session_id: str, content: str) -> tuple[FakeArtifactStore, str]:
+    """把一个外置产物塞进内存 store，返回 (store, artifact_id)。"""
+    store = FakeArtifactStore()
+    artifact = asyncio.run(
+        store.save(
+            session_id,
+            content,
+            mime_type="text/plain",
+            source_tool="bash",
+            tool_call_id="tc-1",
+        )
+    )
+    return store, artifact.artifact_id
+
+
+class _SpyFactory:
+    """记录工厂被谁调用（守"用 URL 的 session_id 构造 store"这条接缝）。"""
+
+    def __init__(self, store: FakeArtifactStore) -> None:
+        self._store = store
+        self.calls: list[str] = []
+
+    def __call__(self, settings: Settings, session_id: str) -> FakeArtifactStore:
+        self.calls.append(session_id)
+        return self._store
+
+
+def test_reads_slice_and_reports_truncation(tmp_path: Path) -> None:
+    """正常读取：返回切片与**如实**的截断标记（不是"给你 2 行还说完整"）。"""
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    store, artifact_id = _seeded_store(session_id, "l1\nl2\nl3\n")
+
+    with patch(_FACTORY, return_value=store):
+        resp = client.get(
+            f"/api/sessions/{session_id}/artifacts/{artifact_id}",
+            params={"max_lines": 2},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["artifact_id"] == artifact_id
+    assert [ln["text"] for ln in body["lines"]] == ["l1", "l2"]
+    assert [ln["line_number"] for ln in body["lines"]] == [1, 2]
+    assert body["total_lines"] == 3
+    assert body["returned_lines"] == 2
+    assert body["truncated"] is True
+    assert body["query"]["max_lines"] == 2
+
+
+def test_keyword_filter_selects_matching_lines(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    store, artifact_id = _seeded_store(session_id, "alpha\nbeta\nalpha again\n")
+
+    with patch(_FACTORY, return_value=store):
+        resp = client.get(
+            f"/api/sessions/{session_id}/artifacts/{artifact_id}",
+            params={"keyword": "alpha"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    contents = [ln["text"] for ln in resp.json()["lines"]]
+    assert contents == ["alpha", "alpha again"]
+    assert resp.json()["total_lines"] == 3
+
+
+def test_max_lines_is_capped_by_the_server(tmp_path: Path) -> None:
+    """体积上限由服务端兜底：客户端要 10 万行也只给上限，并回显实际值。"""
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    store, artifact_id = _seeded_store(session_id, "x\n")
+
+    with patch(_FACTORY, return_value=store):
+        resp = client.get(
+            f"/api/sessions/{session_id}/artifacts/{artifact_id}",
+            params={"max_lines": 100_000},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["query"]["max_lines"] == 1000, "传 10 万行的契约就是夹到上限"
+
+
+def test_session_id_shape_is_rejected(tmp_path: Path) -> None:
+    """id 形态非法 → 422（与 DELETE 会话同一口径），不是 404。"""
+    client = _client(tmp_path)
+    resp = client.get("/api/sessions/bad.id/artifacts/0123456789abcdef")
+    assert resp.status_code == 422, resp.text
+
+
+def test_artifact_id_shape_is_rejected(tmp_path: Path) -> None:
+    """artifact_id 必须是 16 位小写十六进制；'ZZZZ…' 这种 → 422。"""
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    resp = client.get(f"/api/sessions/{session_id}/artifacts/ZZZZZZZZZZZZZZZZ")
+    assert resp.status_code == 422, resp.text
+
+
+def test_unknown_session_is_404(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    resp = client.get("/api/sessions/nosuchsession/artifacts/0123456789abcdef")
+    assert resp.status_code == 404, resp.text
+
+
+def test_unknown_artifact_is_404(tmp_path: Path) -> None:
+    """store 抛 KeyError（三实现统一的 not-found 契约）→ 404。"""
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    store, _ = _seeded_store(session_id, "l1\n")
+
+    with patch(_FACTORY, return_value=store):
+        resp = client.get(f"/api/sessions/{session_id}/artifacts/0123456789abcdef")
+
+    assert resp.status_code == 404, resp.text
+
+
+def test_store_is_built_with_the_url_session_id(tmp_path: Path) -> None:
+    """隔离接缝的上半截：store 必须用 URL 里的 session_id 构造。
+
+    真实 provider 的命名空间是 `{session_id}/{artifact_id}`，"能不能读到别的会话的
+    产物"首先取决于这一点。这里**不断言响应码**：内存替身不按会话分区，它会照样
+    返回 200——在替身上断言 200/404 都是在测假象（下半截见下面的 store 层测试）。
+    """
+    client = _client(tmp_path)
+    session_a = _create_session(client)
+    session_b = _create_session(client)
+    assert session_a != session_b
+    store, artifact_id = _seeded_store(session_a, "secret\n")
+    spy = _SpyFactory(store)
+
+    with patch(_FACTORY, spy):
+        client.get(f"/api/sessions/{session_b}/artifacts/{artifact_id}")
+
+    assert spy.calls == [session_b], (
+        "store 必须按 URL 的 session_id 构造，否则真实 provider 会读到别的会话的产物"
+    )
+
+
+def test_line_bounds_below_one_are_rejected(tmp_path: Path) -> None:
+    """`start_line=0` / 负值 → 422。
+
+    `_slice_lines` 内部是 `s = (start_line or 1) - 1`，放进去就会变成 `indexed[-2:]`
+    这类**从尾部倒着读**的切片——静默给错内容的响应比 422 危险得多。
+    """
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    store, artifact_id = _seeded_store(session_id, "l1\nl2\nl3\n")
+
+    with patch(_FACTORY, return_value=store):
+        for params in ({"start_line": 0}, {"start_line": -2}, {"end_line": 0}):
+            resp = client.get(
+                f"/api/sessions/{session_id}/artifacts/{artifact_id}", params=params
+            )
+            assert resp.status_code == 422, f"{params} → {resp.status_code}"
+
+
+def test_without_configured_store_returns_503(tmp_path: Path) -> None:
+    """本部署没配对象存储 → 503 + 如实说明，**不伪装成 404**。
+
+    这条不是假想场景：两个 clone 的 `.env` 里 `artifact_store_*` 与 `minio_*`
+    全为空，此时 `assembly.build_runtime` 根本不会创建 overflow handler，
+    产物一个都不会产生。接口若把它报成 404，用户会以为是"这个产物不存在"。
+    """
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    resp = client.get(f"/api/sessions/{session_id}/artifacts/0123456789abcdef")
+    assert resp.status_code == 503, resp.text
+    assert "存储" in resp.json()["detail"]
+
+
+class _FakeBody:
+    """最小 S3 body 替身（`async with response["Body"] as stream`）。"""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def read(self) -> bytes:
+        return self._data
+
+
+class _FakeS3Client:
+    """记录请求的 s3 客户端替身：不发网络，就能断言真实 key。"""
+
+    def __init__(self, *, error: Exception | None = None, payload: bytes = b"") -> None:
+        self.requests: list[dict] = []
+        self._error = error
+        self._payload = payload
+
+    async def get_object(self, **kwargs: object) -> dict:
+        self.requests.append(kwargs)
+        if self._error is not None:
+            raise self._error
+        return {"Body": _FakeBody(self._payload), "ContentType": "text/plain"}
+
+
+class _FakeSDKSession:
+    def __init__(self, client: _FakeS3Client) -> None:
+        self._client = client
+
+    def client(self, _service: str, **_kwargs: object):
+        client = self._client
+
+        class _ClientCM:
+            async def __aenter__(self) -> _FakeS3Client:
+                return client
+
+            async def __aexit__(self, *exc: object) -> bool:
+                return False
+
+        return _ClientCM()
+
+
+def _minio_store(session_id: str) -> MinioArtifactStore:
+    pytest.importorskip("aioboto3")
+    from agent_harness.storage.minio_artifact import MinioArtifactStore
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=".",
+        model_api_key="sk-test",
+        minio_endpoint="http://127.0.0.1:9000",
+        minio_bucket="b",
+        minio_access_key="k",
+        minio_secret_key="s",
+    )
+    return MinioArtifactStore(settings, session_id=session_id)
+
+
+def test_minio_load_namespaces_key_by_store_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离接缝的下半截：读回用的 key 必须是 `{session_id}/{artifact_id}`。
+
+    路由层只能证明"工厂拿到了 URL 的 session_id"；**"读不到别的会话"这件事只有
+    在真实 provider 上才成立**，所以断言放在了发出请求的这一层。
+    """
+    content = "hello\n"
+    artifact_id = compute_artifact_id(content)
+    store = _minio_store("sess-b")
+    client = _FakeS3Client(payload=content.encode())
+    monkeypatch.setattr(store, "_sdk_session", _FakeSDKSession(client))
+
+    artifact = asyncio.run(store.load(artifact_id))
+
+    assert artifact.content == content
+    assert client.requests[0]["Key"] == f"sess-b/{artifact_id}"
+    assert client.requests[0]["Bucket"] == "b"
+
+
+def test_minio_load_maps_missing_object_to_key_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """对象不存在 → KeyError（与 S3 / Fake 同一契约），不是把 SDK 异常漏成 500。
+
+    此前 MinIO 的 `load` 没有这层转换，真实 MinIO 部署下"产物已被删/从未写过"会
+    返回 500 而不是 404。
+    """
+    store = _minio_store("sess-b")
+    missing = store._client_error({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+    monkeypatch.setattr(
+        store, "_sdk_session", _FakeSDKSession(_FakeS3Client(error=missing))
+    )
+
+    with pytest.raises(KeyError):
+        asyncio.run(store.load("0123456789abcdef"))
+
+
+@pytest.mark.parametrize("bad", ["", "zz", "0123456789ABCDEF", "0123456789abcde", "../etc/passwd"])
+def test_minio_store_rejects_malformed_artifact_id_without_network(bad: str) -> None:
+    """MinIO 实现必须像 S3 一样先校验 id 形态（此前它没有这层校验）。
+
+    校验发生在任何客户端调用之前，所以这条断言在离线也能跑——不会被网络拖成 flaky。
+    """
+    store = _minio_store("sess")
+    with pytest.raises(KeyError):
+        asyncio.run(store.load(bad))

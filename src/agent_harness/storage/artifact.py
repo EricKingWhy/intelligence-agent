@@ -19,9 +19,15 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
+
+#: artifact_id 的唯一形态：`sha256(content)[:16]`，16 位小写十六进制。
+#: 两个远端 provider（S3 / MinIO）与 web 读接口共用这一份定义——此前 S3 内联正则、
+#: MinIO 干脆不校验，两边行为不一致（#185 AC3）。
+ARTIFACT_ID_PATTERN = re.compile(r"[0-9a-f]{16}")
 
 
 class Artifact(BaseModel):

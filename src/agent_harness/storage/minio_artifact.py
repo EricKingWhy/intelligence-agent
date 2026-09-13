@@ -20,6 +20,7 @@ from typing import Any
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
+    ARTIFACT_ID_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
@@ -101,14 +102,34 @@ class MinioArtifactStore(ArtifactStore):
         return artifact
 
     async def load(self, artifact_id: str) -> Artifact:
+        # 形态校验必须与 S3ArtifactStore 一致（#185 AC3）：此前这里直接拿 id 拼 key
+        # 去请求对象存储，畸形 id 会以 SDK 异常的形状外泄——错误契约不统一。
+        # 与 S3 一致地先判形态，再走网络，统一以 KeyError 表示"不存在/不可读"。
+        if not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            raise KeyError(f"Artifact '{artifact_id}' does not exist")
         async with self._sdk_session.client("s3", **self._client_kwargs) as client:
-            response = await client.get_object(
-                Bucket=self._bucket,
-                Key=f"{self._session_id}/{artifact_id}",
-            )
+            try:
+                response = await client.get_object(
+                    Bucket=self._bucket,
+                    Key=f"{self._session_id}/{artifact_id}",
+                )
+            except self._client_error as error:
+                # 与 S3ArtifactStore 一致：对象不存在是**契约内的 not-found**，统一成
+                # KeyError；否则它会以 SDK 异常的形状漏到 HTTP 层变成 500（#185 审查 P1）。
+                if error.response.get("Error", {}).get("Code") == "NoSuchKey":
+                    raise KeyError(f"Artifact '{artifact_id}' does not exist") from error
+                raise
             async with response["Body"] as stream:
                 body = await stream.read()
-        content = body.decode("utf-8")
+        try:
+            content = body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            # 与 S3 同口径：损坏/截断的对象不得以 UnicodeDecodeError 外泄（会变 500），
+            # 也不得静默当成合法内容——统一 KeyError → 404。
+            raise KeyError(
+                f"Artifact '{artifact_id}' is not valid UTF-8 "
+                "(object modified or corrupted out-of-band)"
+            ) from error
         # Content-addressable verification: artifact_id is sha256(content)[:16].
         if compute_artifact_id(content) != artifact_id:
             raise KeyError(

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
+    ARTIFACT_ID_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
@@ -69,7 +70,7 @@ class S3ArtifactStore(ArtifactStore):
         return artifact
 
     async def load(self, artifact_id: str) -> Artifact:
-        if not re.fullmatch(r"[0-9a-f]{16}", artifact_id):
+        if not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
             raise KeyError(f"Artifact '{artifact_id}' does not exist")
         async with self._sdk_session.client("s3", **self._client_kwargs) as client:
             try:
