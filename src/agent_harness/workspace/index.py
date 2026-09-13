@@ -363,11 +363,17 @@ class WorkspaceIndex:
             )
             return len(adopted)
 
-    async def detach_session(self, session_id: str) -> None:
+    async def detach_session(self, session_id: str) -> int:
         """AC7：把会话移出账本（幂等）。不在账本上 → 无写操作（除修剪外）。
 
         **永不触碰会话自身的日志**——只改账本。
+
+        :returns: 本次**真的摘掉了它**的账本数（#172 硬删的回执要用："从几个项目里
+            解除"必须是实际发生的动作，不能是调用方另算一遍的近似值——`list()` 给的是
+            **可见成员**视图，而本方法修剪的是**原始账本**，两者在"记录了但不可见"的
+            行上会不一致）。遍历的是全部账本，所以同一 id 被重复收录时会 >1。
         """
+        detached = 0
         async with self._write_lock:
             self._require_initialized()
             for workspace_id, ids in list(self._ledger.items()):
@@ -380,6 +386,8 @@ class WorkspaceIndex:
                 await self._persist_ledger(
                     workspace_id, [sid for sid in kept if sid != session_id]
                 )
+                detached += 1
+        return detached
 
     async def insert_session_before(
         self, session_id: str, before: str | None = None

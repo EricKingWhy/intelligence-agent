@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -122,8 +123,6 @@ class WorkspaceRegistry:
                 # 没有映射记录——清理可能残留的孤儿 workspace 目录后返回。
                 workspace_dir = self._workspaces_dir / session_id
                 if workspace_dir.exists():
-                    import shutil
-
                     shutil.rmtree(workspace_dir, ignore_errors=True)
                 return
             sandbox = self._instantiate_sandbox(mapping)
@@ -132,6 +131,37 @@ class WorkspaceRegistry:
         mapping_file = self._mapping_path(session_id)
         if mapping_file.exists():
             mapping_file.unlink()
+
+    def discard_session_artifacts(self, session_id: str) -> None:
+        """硬删会话时丢弃 harness 自己造的两样沙箱工件。**绝不解引用映射**。幂等。
+
+        只删本注册表用 `root + session_id` 自己拼出来的路径：
+
+        - `<root>/workspaces/<session_id>.json`（映射记录）
+        - `<root>/workspaces/<session_id>/`（默认形态的会话工作区）
+
+        第二条为什么不需要再判"确实是默认形态"（#172 的原话）：这个路径**就是**默认形态
+        的定义——它由本注册表用 root 与 session_id 拼成，只有 harness 会往里写（
+        `create` 的默认分支、`resume_and_launch` 的无条件 mkdir 都写在同一个位置），
+        用户自己的目录永远不在这个前缀下。判定因此是"写死的构造规则"，不是"读映射再
+        决定删什么"——后者才会删到用户仓库。
+
+        **为什么不用 `delete()`**（ADR-0029 D2）：`delete()` 走 `Sandbox.delete()`，
+        本地后端是 `shutil.rmtree(self._workspace_root)`；而 ADR-0027 之后
+        `workspace_root` 可能是**用户的真实目录**（cwd 会话），映射里就写着
+        `D:\\some\\repo`。任何用它做硬删的路径都会删掉用户的仓库——所以那条路径
+        今天不能有生产调用方（`docs/PHASE_STATUS.md` 已登记），本方法就是它的安全替代。
+
+        映射指向别处时，只删映射文件本身，**不碰 `workspace_root`**（这是刻意的：
+        用户目录不归 harness 处置）。
+        """
+        mapping_file = self._mapping_path(session_id)
+        if mapping_file.exists():
+            mapping_file.unlink()
+        default_workspace = self._workspaces_dir / session_id
+        if default_workspace.is_dir():
+            shutil.rmtree(default_workspace, ignore_errors=True)
+        self._cache.pop(session_id, None)
 
     # —— 内部方法 ——
 

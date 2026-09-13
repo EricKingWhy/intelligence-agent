@@ -489,7 +489,11 @@ class TestLedger:
         assert [row[0] for row in rows] == ["third", "fresh"], "剪枝没有落盘"
 
     async def test_detach_is_idempotent(self, tmp_path: Path) -> None:
-        """AC7：移除幂等；不在账本上是无写操作。"""
+        """AC7：移除幂等；不在账本上是无写操作。
+
+        返回值是 #172 硬删回执的计数源，一并钉住：**实际摘掉了几个账本**（第一次 1、
+        第二次 0）——`list()` 给的是可见成员视图，用它自己再数一遍会得到近似值。
+        """
         headers = _FakeHeaders()
         index = _index(tmp_path, headers)
         await index.initialize()
@@ -498,11 +502,11 @@ class TestLedger:
         headers.add("s1", _canon(project))
         await index.attach_session("s1")
 
-        await index.detach_session("s1")
+        assert await index.detach_session("s1") == 1
         assert index.get(workspace.id).session_ids == ()  # type: ignore[union-attr]
 
         marker = (tmp_path / "harness.db").stat().st_mtime_ns
-        await index.detach_session("s1")  # 第二次：无写操作
+        assert await index.detach_session("s1") == 0  # 第二次：无写操作
         assert (tmp_path / "harness.db").stat().st_mtime_ns == marker
 
     async def test_insert_session_before_reorders(self, tmp_path: Path) -> None:

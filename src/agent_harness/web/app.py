@@ -12,10 +12,10 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import jwt
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -59,6 +59,7 @@ from agent_harness.session.service import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionHasChildren,
     SessionNotFound,
     SessionService,
     SteerTargetNotFound,
@@ -330,6 +331,23 @@ class SessionSummary(BaseModel):
     # 序列化成 null。真正抓漏映射的是断言**值**的测试
     # （`tests/web/test_session_list_workspace.py::test_rows_carry_real_workspace_and_ungrouped_is_null`）。
     workspace: WorkspaceRef | None
+
+
+class SessionDeleted(BaseModel):
+    """`DELETE /api/sessions/{id}` 的成功响应（#172 / ADR-0029）。
+
+    与项目软删除的 `ProjectDeleted` 刻意不同形：那个要带 `sessions_detached` 与
+    `detail`（向用户解释"会话没被删"），这里 `deleted=True` 就是字面意思——**东西没了**。
+    """
+
+    id: str
+    #: 走到 200 就一定是真删了（不存在 → 404、形态非法 → 422、状态冲突 → 409），
+    #: 所以这里没有"半删"可表达。字面量 `True` 让这件事在 schema 里就成立。
+    deleted: Literal[True] = True
+    #: 删除前日志里的事件条数。前端用它写确认回执（"已删除 N 条事件"）。
+    events: int
+    #: 本次从多少个项目的账本里摘掉了它（正常 0/1）。
+    detached_from_projects: int
 
 
 class AppState:
@@ -703,7 +721,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     register_lineage_routes(app, validate_session_id=validate_session_id)
 
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
-    from agent_harness.web.projects import register_project_routes
+    # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
+    # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
+    from agent_harness.web.projects import (
+        register_project_routes,
+        require_trusted_origin,
+    )
 
     register_project_routes(app)
 
@@ -1169,6 +1192,38 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
         return {"status": "cancelling" if cancelled else "no_active_run"}
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(
+        session_id: str, _: None = Depends(require_trusted_origin)
+    ) -> SessionDeleted:
+        """硬删会话（#172 / ADR-0029）：不可撤销，无墓碑。
+
+        用户显式要求的删除——与「系统不得静默丢弃历史」（spec 03 §Full SessionEvent
+        History）不冲突：那条约束管的是**系统**不许偷删，不是用户不许删自己的会话。
+
+        语义：200 → 事件日志 + 辅助行 + harness 自造的沙箱工件都清了，回执带事件数与
+        解除的项目数；404 → 没有这个会话（第二次删除即此，不伪装成"又删了一次"）；
+        409 → 有在途 run，或有 fork 子会话（detail 带子会话数量）；422 → id 形态非法。
+        项目归属只解账本，**项目本身与目录一个字不动**（与软删项目的口径一致）。
+
+        来源闸（ADR-0025 D1）：删除是宿主侧不可逆操作，只接受本机来源。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            stats = await service.delete_session(session_id)
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ActiveRunConflict,
+            SessionHasChildren,
+        ) as e:
+            raise http_error(e) from e
+        return SessionDeleted(
+            id=stats.session_id,
+            events=stats.events,
+            detached_from_projects=stats.detached_from_projects,
+        )
 
     @app.post("/api/sessions/{session_id}/approve")
     async def approve_tool_call(session_id: str, req: ApproveRequest) -> dict[str, str]:

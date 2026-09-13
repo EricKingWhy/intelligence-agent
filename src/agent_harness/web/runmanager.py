@@ -233,6 +233,26 @@ class RunManager:
             return None
         return run
 
+    def is_busy(self, session_id: str) -> bool:
+        """这个会话此刻是否还有"活没干完"的 run——破坏性操作（如硬删，ADR-0029）的前置。
+
+        **与 `get_active` 的区别是刻意的，不是笔误**：`get_active` 把"task 已 done /
+        terminal 旗标未及置位（finally 在途）"的收尾窗口**视为非在途**——对取消/重连
+        是对的（见它的 docstring），但对"能不能把这个会话的地面抽走"是错的：那个窗口
+        正是 finalizer（Checkpoint 落盘 / 记忆回写）还在跑的时刻。
+
+        所以本判据只问「run 存在且它的 task 未 done」：
+        - 没有 run → 不忙；
+        - task 已 done → 不忙（终态收尾已完成）；
+        - task 未 done（含 terminal 已置位的收尾窗口）→ 忙；
+        - task 尚未挂上（`launch` 与赋值之间）→ **保守视为忙**。
+        """
+        run = self._runs.get(session_id)
+        if run is None:
+            return False
+        task = run.task
+        return task is None or not task.done()
+
     def cancel(self, session_id: str) -> bool:
         """显式取消：有在途 run → task.cancel()（取消臂收尾）；否则 False。"""
         run = self.get_active(session_id)

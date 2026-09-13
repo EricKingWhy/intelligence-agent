@@ -20,6 +20,7 @@ from agent_harness.web.domain_errors import (
     workspace_http_error,
 )
 from agent_harness.workspace import (
+    UnknownLedgerEntry,
     WorkspaceError,
 )
 
@@ -80,6 +81,9 @@ def test_status_map_is_the_audited_contract():
         # BUG-011：seq 冲突（并发写者抢先落盘 / 日志已损坏）——冲突不是「不存在」，
         # 必须与 SessionNotFound 的 404 区分开（旧行为把它翻成 404 掩蔽了日志损坏）。
         "SeqConflict": 409,
+        # #172 / ADR-0029：会话是别的会话的 fork 父——不级联（删掉用户没选中的子会话）、
+        # 不 orphan（留悬空来源链接），所以只有 409 诚实：请求形态没错、父也确实存在。
+        "SessionHasChildren": 409,
     }
 
 
@@ -138,10 +142,52 @@ def test_workspace_map_covers_the_os_errors_create_can_raise():
         assert 400 <= http.status_code < 500, f"{type(exc).__name__} → {http.status_code}"
 
 
-def test_workspace_http_error_preserves_detail():
-    http = workspace_http_error(NotADirectoryError(20, "不是目录", "D:/x"))
-    assert http.status_code == 422
-    assert http.detail  # str(OSError) 原样透传，文案由异常自己带
+def test_workspace_http_error_curates_the_os_detail():
+    """detail 是**策展中文**（API-01，2026-09-13 真机验收）。
+
+    此前 `str(exc)` 原样透传，于是同一个路径在"注册项目"里显示
+    `[Errno 20] 不是目录: 'D:\\x\\readme.txt'`、在"目录浏览"里显示
+    `不是目录：D:\\x\\readme.txt`——同一事实两种说法。现在两处共用本函数。
+    """
+    cases = [
+        (NotADirectoryError(20, "不是目录", "D:/x"), 422, "不是目录：D:/x"),
+        (FileNotFoundError(2, "missing", "D:/y"), 404, "目录不存在：D:/y"),
+        (PermissionError(13, "denied", "D:/z"), 403, "无权限访问：D:/z"),
+        (OSError(22, "Invalid argument", "C:/bad<name>"), 422, "路径不可用：C:/bad<name>"),
+    ]
+    for exc, status, detail in cases:
+        http = workspace_http_error(exc)
+        assert http.status_code == status, f"{type(exc).__name__} → {http.status_code}"
+        assert http.detail == detail, f"{type(exc).__name__} → {http.detail!r}"
+
+
+def test_workspace_http_error_prefers_the_callers_canonical_path():
+    """调用方给的 canonical 优先于 `OSError.filename`（host/dirs 用这条保证路径已规范化）。"""
+    http = workspace_http_error(NotADirectoryError(20, "不是目录", "D:/raw"), path="D:/canonical")
+    assert http.detail == "不是目录：D:/canonical"
+
+
+def test_workspace_http_error_keeps_str_when_the_path_is_unknown():
+    """两个路径来源都拿不到时**退回 `str(exc)`**：宁可文案粗糙，也不丢信息。
+
+    `OSError.filename` 并非总有（手写异常、某些包装层）；这条钉住"退路不丢信息"。
+    """
+    bare = OSError(22, "Invalid argument")
+    assert workspace_http_error(bare).detail == str(bare)
+
+
+def test_workspace_http_error_does_not_dress_domain_errors_as_path_errors():
+    """`WorkspaceError`（非 OS 异常）**原样透传**，不被套上"路径不可用："模板。
+
+    同一个入口也接 `UnknownWorkspace` / `UnknownLedgerEntry`——它们的消息自带语义
+    （"账本里没这条"），套路径模板会把事实说错。
+    """
+    ledger = UnknownLedgerEntry("会话不在该项目账本里：s-1")
+
+    http = workspace_http_error(ledger)
+
+    assert http.status_code == 409
+    assert http.detail == str(ledger)
 
 
 # ── MEM-4 / #159：第三张表（memory 领域 / 归属词汇）──
