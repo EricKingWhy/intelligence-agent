@@ -177,8 +177,7 @@ class LangMemMemoryCapability:
                                                           budget_seconds=budget_seconds))
             except Exception as error:  # noqa: BLE001 — 降级边界：绝不因为决策失败丢候选
                 if attempt == 0 and _is_retryable(error):
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(CONSOLIDATION_RETRY_BACKOFF_SECONDS)
+                    await asyncio.sleep(CONSOLIDATION_RETRY_BACKOFF_SECONDS)
                     retry_marker = "after_1_retry"
                     continue
                 # 只带类型名：原始异常消息可能含用户数据/凭据（脱敏不变量，同 extractor）。
