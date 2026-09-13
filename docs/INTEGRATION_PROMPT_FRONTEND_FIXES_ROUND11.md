@@ -109,8 +109,15 @@
   `checkpoint/saved`、`context/built`、`step/started`、`step/completed`），实现有 spec 没有 21 个
   （含 `artifact/externalized`、`tool/approval-requested`、`permission/resolved`、`reasoning/*`、
   `run/interrupted`、`model/fallback`、`steer/*` 等）；抽查 7 个实现侧名字在 `docs/spec/` 下 **0 命中**。
-  → **由 Primary Developer 决定**改 spec 还是改契约（改事件名会动已落盘 JSONL，风险更高）。
-  **FE-R11-01 就是这条分歧的受害者**（前端照 spec 接线→页签恒空），所以先按 §1 前端兼容，等规格定案。
+  → **已按用户指示升级为正式流程**：母票 **#173** + 子票 **#174–#178**
+  （T1 重写实装 37 个 / T2 改名映射 / T3 移出 `checkpoint/saved` / T4 三个未实现名定性 /
+  T5 契约源指向 + 漂移守卫）。**不改事件名**（会动已落盘 JSONL，风险更高）。
+  补充事实：契约源其实一直存在——`generated/event-types.ts` 由 `scripts/gen_event_types.py`
+  从 `session/event.py` 生成，且 `tests/test_event_types_generated.py` 已在守卫生成物；
+  只是 spec §3 表没被任何检查覆盖。`checkpoint/saved` 更严重：实现明令它**永不进 SessionEvent**
+  （ADR-0004 Round 5），spec 却把它列在事件表里。
+  **FE-R11-01 就是这条分歧的受害者**（前端照 spec 接线 → 页签恒空），所以先按 §1 在前端侧兼容，
+  等 spec 重写完再决定是否收敛掉双事件名。
 - **未覆盖的验收缺口（需产品/环境决策才能补）**：①项目内"真·拖拽重排后顺序改变 + 刷新保持"、
   ②「移出项目」导致的 `sessions_detached > 0`、③项目内会话的写项（上移/下移/移出/删除）——
   三者都要求**存在一条属于该项目的会话**，而当前唯一创建路径 `POST /api/sessions` 总是

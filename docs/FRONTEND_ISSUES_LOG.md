@@ -1844,6 +1844,14 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
   （AGENTS.md §1.1：代码与规格冲突应报 Gap，不得反向覆盖冻结需求；§8 Scope Lock）。
 - **建议**：集成时把 §3 事件表按**实现的实际名字**重写（并标明哪些是持久化、哪些是广播），
   或明确标注该表是"概念速写、非契约"，把契约指向 `generated/event-types.ts` 的来源。
+- **已升级为正式流程（2026-09-13，用户批准重写并要求先走 issue/ticket）**：
+  母票 **#173**，子票 **#174–#178**（T1 重写实装 37 个 / T2 改名映射 / T3 移出 `checkpoint/saved` /
+  T4 三个未实现名定性 / T5 契约源指向 + 漂移守卫）。补充事实：`generated/event-types.ts` 由
+  `scripts/gen_event_types.py` 从 `session/event.py` 生成，且有守卫测试
+  `tests/test_event_types_generated.py`——**契约源一直存在，只是 spec §3 没被任何检查覆盖**；
+  `checkpoint/saved` 更严重：`agent/runtime.py:1165` 与 `storage/checkpoint.py:4` 明令它
+  **永不进 SessionEvent**（ADR-0004 Round 5），spec 却把它列在事件表里。
+  **状态：待施工（不在本轮验收范围，spec 由 Primary Developer 定案）。**
 
 ### 第十一轮 · Subagent 扫描汇总（2 个 subagent，真机点击，2026-09-13）
 

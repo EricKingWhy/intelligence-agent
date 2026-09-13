@@ -131,4 +131,4 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE \
 cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
 ```
 
-另有一项**需要 Primary Developer 定案**的事，不在本次合并范围：spec `03_SESSION_EVENT_MODEL.md` §3 事件表与实现已大面积不一致（spec 有实现没有 8 个、实现有 spec 没有 21 个）。我已按用户要求开 issue + ticket 走流程，见 GitHub。
+另有一项**需要 Primary Developer 定案**的事，不在本次合并范围：spec `03_SESSION_EVENT_MODEL.md` §3 事件表与实现已大面积不一致（spec 有实现没有 8 个、实现有 spec 没有 21 个）。已开 **issue #173**（母票）+ **#174–#178**（T1–T5 子票），其中 T5 有一条需主开发者裁决的分叉（spec 是否允许机器解析）。本次合并**不需要**处理这些 issue。
