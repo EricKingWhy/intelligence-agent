@@ -12,7 +12,8 @@
 - 跨 Session 理论上可共享（相同内容同 hash），但 Phase 5 按 session 隔离 key。
 
 物理位置：Runtime 域存储，不经过 Sandbox（spec 06 §3 + ADR-0006）。
-默认 Provider：S3ArtifactStore（七牛云 Kodo S3 兼容）。
+默认 Provider：LocalArtifactStore（spec 06 §3：Local filesystem，开发/小型部署）。
+远端 Provider：S3ArtifactStore（七牛云 Kodo S3 兼容）/ MinioArtifactStore。
 测试 Provider：FakeArtifactStore（内存 dict）。
 """
 
@@ -28,6 +29,14 @@ from pydantic import BaseModel
 #: 两个远端 provider（S3 / MinIO）与 web 读接口共用这一份定义——此前 S3 内联正则、
 #: MinIO 干脆不校验，两边行为不一致（#185 AC3）。
 ARTIFACT_ID_PATTERN = re.compile(r"[0-9a-f]{16}")
+
+#: artifact 存储键里 session 段的安全形态：**单个名字段，不是路径**。
+#: 三个 Provider 的键都是 `{session_id}/{artifact_id}`；本地 Provider 要把它拼进文件
+#: 系统路径，不校验时 `..` / 反斜杠段 / 盘符段都能越出 artifact 根目录（ADR-0029 D2
+#: 的"路径穿越防护"同款问题）。
+#: 规则本体放这里而不是 session 层：`session/service.py` 的 `_SESSION_ID_PATTERN`
+#: 注释写的就是"字符集与 S3ArtifactStore 的 key 段规则一致"——同一条规则，一份定义。
+SESSION_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
 
 class Artifact(BaseModel):

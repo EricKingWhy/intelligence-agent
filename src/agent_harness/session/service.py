@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import stat
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
@@ -93,6 +92,8 @@ from agent_harness.session.store import (
     SessionSummaryStats,
     WorkspaceRef,
 )
+from agent_harness.storage.artifact import SESSION_KEY_PATTERN
+from agent_harness.storage.local_artifact import discard_local_artifacts
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalResponse,
@@ -118,8 +119,9 @@ logger = logging.getLogger(__name__)
 #: session_id 安全校验正则——名字段，不是路径。
 #: store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时
 #: 反斜杠段在 win32 上可越出 sessions 根目录，盘符段可整体替换基路径。
-#: 字符集与 S3ArtifactStore 的 key 段规则一致。
-_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+#: 规则本体在 `storage/artifact.py`（artifact 存储键的 session 段是同一条规则，
+#: 那边要把它拼进 artifact 根目录的路径——一份定义，两处使用）。
+_SESSION_ID_PATTERN = SESSION_KEY_PATTERN
 
 #: 非 live 追加路径撞上 seq 冲突时的重试次数（BUG-011）。
 #: 「读快照 → 取号 → append」不是原子的：并发写者可能在本请求读完之后落盘同号，
@@ -881,6 +883,12 @@ class SessionService:
         await anyio.to_thread.run_sync(store.delete_session, session_id)
         await anyio.to_thread.run_sync(
             self._state.workspace_registry.discard_session_artifacts, session_id
+        )
+        # 本地 artifact 目录（#192）：与 sandbox 工件同一条纪律——只删 harness 用
+        # setting + session_id 自己拼出来的路径，**不读映射**（ADR-0029 D2）。配了对象
+        # 存储时远端对象不在此列（那些 Provider 没有 delete，记录为已知边界）。
+        await anyio.to_thread.run_sync(
+            discard_local_artifacts, self._state.settings, session_id
         )
 
         # ⑧ 进程内残留——排队消息与审批队列都按 session_id 索引，会话没了它们永远等不到

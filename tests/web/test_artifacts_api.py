@@ -243,14 +243,28 @@ def test_line_bounds_below_one_are_rejected(tmp_path: Path) -> None:
             assert resp.status_code == 422, f"{params} → {resp.status_code}"
 
 
-def test_without_configured_store_returns_503(tmp_path: Path) -> None:
-    """本部署没配对象存储 → 503 + 如实说明，**不伪装成 404**。
+def test_unconfigured_object_store_now_reads_from_local(tmp_path: Path) -> None:
+    """本部署没配对象存储 → 走**本地**默认 Provider，产物不存在就是 404（#192）。
 
-    这条不是假想场景：两个 clone 的 `.env` 里 `artifact_store_*` 与 `minio_*`
-    全为空，此时 `assembly.build_runtime` 根本不会创建 overflow handler，
-    产物一个都不会产生。接口若把它报成 404，用户会以为是"这个产物不存在"。
+    语义在 #192 变了：此前"没配存储"等于"没有存储"（503）；现在它等于"用本地存储"
+    （spec 06 §3 的默认 Provider）。于是同一个请求的诚实答案从"本部署没配好存储"
+    变成"这个产物不存在"——本地 store 是**能读**的，只是里面没有这个 id。
+    仍然返回 503 的场景见 `test_blank_artifact_dir_returns_503`。
     """
     client = _client(tmp_path)
+    session_id = _create_session(client)
+    resp = client.get(f"/api/sessions/{session_id}/artifacts/0123456789abcdef")
+    assert resp.status_code == 404, resp.text
+    assert "不在会话" in resp.json()["detail"]
+
+
+def test_blank_artifact_dir_returns_503(tmp_path: Path) -> None:
+    """`artifact_dir` 显式置空（且无对象存储）→ 503 + 如实说明，**不伪装成 404**。
+
+    这是"这个部署确实没有可读存储"的剩余场景：接口若报 404，用户会以为是
+    "产物不存在"，而事实是"这里根本存不下也读不到产物"。
+    """
+    client = _client(tmp_path, artifact_dir="")
     session_id = _create_session(client)
     resp = client.get(f"/api/sessions/{session_id}/artifacts/0123456789abcdef")
     assert resp.status_code == 503, resp.text
@@ -371,3 +385,85 @@ def test_minio_store_rejects_malformed_artifact_id_without_network(bad: str) -> 
     store = _minio_store("sess")
     with pytest.raises(KeyError):
         asyncio.run(store.load(bad))
+
+
+class TestBuildReadArtifactStoreSelection:
+    """读 store 的选择口径必须与写路径（`assembly.build_runtime`）逐条对应（#192）。
+
+    对不上就会出现"写进了 A、从 B 读"的静默错配：界面永远空着，而日志里一切正常。
+    """
+
+    def test_local_is_the_default_when_nothing_is_configured(self, tmp_path: Path) -> None:
+        """未配任何对象存储 → Local（spec 06 §3 的默认 Provider），**不是** None。
+
+        这一条就是 #192 的核心：此前未配对象存储的部署读取接口永远 503，
+        因为既没有写入者、也没有可读的 store。
+        """
+        from agent_harness.storage.local_artifact import LocalArtifactStore
+        from agent_harness.web.artifacts import build_read_artifact_store
+
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            artifact_dir=str(tmp_path / "artifacts"),
+        )
+        store = build_read_artifact_store(settings, "sess-1")
+        assert isinstance(store, LocalArtifactStore)
+
+    def test_blank_artifact_dir_yields_none(self, tmp_path: Path) -> None:
+        """artifact_dir 显式置空 = 关掉本地落盘 → 如实 None（路由据此回 503）。"""
+        from agent_harness.web.artifacts import build_read_artifact_store
+
+        settings = Settings(_env_file=None, workspace_dir=str(tmp_path), artifact_dir="  ")
+        assert build_read_artifact_store(settings, "sess-1") is None
+
+    def test_half_configured_object_store_yields_none_not_local(self, tmp_path: Path) -> None:
+        """只填了 S3 endpoint（缺 bucket/密钥）→ None，**不得**降级到本地。
+
+        降级会让运维以为产物进了对象存储——这是"配置错误被伪装成正常工作"。
+        """
+        from agent_harness.web.artifacts import build_read_artifact_store
+
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            artifact_dir=str(tmp_path / "artifacts"),
+            artifact_store_endpoint="https://example.invalid",
+        )
+        assert build_read_artifact_store(settings, "sess-1") is None
+
+    def test_path_traversal_session_id_yields_none(self, tmp_path: Path) -> None:
+        """非法 session 段不得进入路径拼接——构造期就挡住（纵深防御）。"""
+        from agent_harness.web.artifacts import build_read_artifact_store
+
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            artifact_dir=str(tmp_path / "artifacts"),
+        )
+        assert build_read_artifact_store(settings, "../../escape") is None
+
+    def test_local_roundtrip_through_the_read_store(self, tmp_path: Path) -> None:
+        """写路径落盘 → 读路径读回：端到端证明两侧用的是同一个键约定。"""
+        from agent_harness.storage.local_artifact import LocalArtifactStore
+        from agent_harness.web.artifacts import build_read_artifact_store
+
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            artifact_dir=str(tmp_path / "artifacts"),
+        )
+        writer = LocalArtifactStore(settings, session_id="sess-1")
+        artifact = asyncio.run(
+            writer.save(
+                "sess-1",
+                "alpha\nbeta\n",
+                mime_type="text/plain",
+                source_tool="bash",
+                tool_call_id="tc-1",
+            )
+        )
+        reader = build_read_artifact_store(settings, "sess-1")
+        assert reader is not None
+        slice_ = asyncio.run(reader.inspect(artifact.artifact_id, start_line=2))
+        assert [entry["text"] for entry in slice_.lines] == ["beta"]

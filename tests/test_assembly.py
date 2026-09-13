@@ -231,3 +231,113 @@ def test_recovery_stores_bundle_holds_three_stores(tmp_path: Path):
     assert stores.operation_ledger is not None
     assert stores.checkpoint_store is not None
     assert stores.session_meta_store is not None
+
+
+# ── #192：artifact 外置写入必须与"写得出/读得回"成对 ──────────────────────
+
+
+async def _runtime_with(tmp_path, settings: Settings, session_id: str = "sess-art"):
+    """按给定 settings 装配 runtime（替身模型，不发起真实调用）。"""
+    _, wiring = await assemble_wiring(settings)
+    stores = _stores(tmp_path)
+    await initialize_stores(stores)
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModelFactory()):
+        return await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+            session_id=session_id,
+            workspace=tmp_path / "workspaces" / session_id,
+            max_steps=10,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+        )
+
+
+def _tool_names(runtime) -> set[str]:
+    return {tool.name for tool in runtime.registry.list()}
+
+
+@pytest.mark.asyncio
+async def test_local_store_is_the_default_externalizer(tmp_path):
+    """什么都没配 → Local 兜底：既**写得出**（有 overflow handler），也**读得回**
+    （read_artifact 在册）。#192 之前这两件事都不成立——未配对象存储的部署
+    既不外置，也没有可读的 store。"""
+    from agent_harness.storage.local_artifact import LocalArtifactStore
+    from agent_harness.tooling.overflow import ArtifactOverflowHandler
+
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
+                        model_api_key="sk-test",
+                        artifact_dir=str(tmp_path / "artifacts"))
+    runtime = await _runtime_with(tmp_path, settings)
+
+    handler = runtime.executor._overflow_handler
+    assert isinstance(handler, ArtifactOverflowHandler)
+    assert isinstance(handler._store, LocalArtifactStore)
+    assert "read_artifact" in _tool_names(runtime)
+
+
+@pytest.mark.asyncio
+async def test_minio_config_gets_a_writer_too(tmp_path, monkeypatch):
+    """配了 minio_* → 读工具与写入者都到位（#192 修的半截接线）。
+
+    此前该分支只注册 `ReadArtifactTool`：模型有个读不存在的产物的工具，
+    而没有任何东西会把产物写进去——与 `config.py` "MinIO 用于 tool result 外置"
+    的注释直接矛盾。
+    """
+    from agent_harness.storage.minio_artifact import MinioArtifactStore
+    from agent_harness.tooling.overflow import ArtifactOverflowHandler
+
+    monkeypatch.setattr(
+        MinioArtifactStore, "__init__", lambda self, settings, *, session_id: None
+    )
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
+                        model_api_key="sk-test",
+                        minio_endpoint="https://minio.invalid",
+                        minio_bucket="b", minio_access_key="k", minio_secret_key="s")
+    runtime = await _runtime_with(tmp_path, settings)
+
+    handler = runtime.executor._overflow_handler
+    assert isinstance(handler, ArtifactOverflowHandler)
+    assert isinstance(handler._store, MinioArtifactStore)
+    assert "read_artifact" in _tool_names(runtime)
+
+
+@pytest.mark.asyncio
+async def test_blank_artifact_dir_disables_local_externalization_without_breaking_session(tmp_path):
+    """`artifact_dir` 置空 = 显式关掉本地外置：**建会话必须照常成功**（fail-open）。
+
+    外置是大输出的优化，不是 Core 的必需品（不变量 21）。这里没有写入者，
+    与 #192 之前"未配存储"的行为一致；若把"关掉"实现成构造期抛错，
+    一个可选优化就会让所有会话建不起来。
+    """
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
+                        model_api_key="sk-test", artifact_dir="")
+    runtime = await _runtime_with(tmp_path, settings)
+
+    assert runtime.executor._overflow_handler is None
+    assert "read_artifact" not in _tool_names(runtime)
+    # 核心工具仍在册——关掉外置不影响任何 coding 能力
+    assert "bash" in _tool_names(runtime)
+
+
+@pytest.mark.asyncio
+async def test_s3_config_still_wins_over_local(tmp_path, monkeypatch):
+    """S3 配置在场时不被 Local 抢走（显式配置优先）；且 S3 分支仍用 inspect_artifact。"""
+    from agent_harness.storage.s3_artifact import S3ArtifactStore
+    from agent_harness.tooling.overflow import ArtifactOverflowHandler
+
+    monkeypatch.setattr(
+        S3ArtifactStore, "__init__", lambda self, settings, *, session_id=None: None
+    )
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
+                        model_api_key="sk-test",
+                        artifact_dir=str(tmp_path / "artifacts"),
+                        artifact_store_endpoint="https://s3.invalid",
+                        artifact_store_bucket="b",
+                        artifact_store_access_key="k", artifact_store_secret_key="s")
+    runtime = await _runtime_with(tmp_path, settings)
+
+    handler = runtime.executor._overflow_handler
+    assert isinstance(handler, ArtifactOverflowHandler)
+    assert isinstance(handler._store, S3ArtifactStore)
+    assert "inspect_artifact" in _tool_names(runtime)

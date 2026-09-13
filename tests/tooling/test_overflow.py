@@ -127,3 +127,36 @@ async def test_diff_view_fields_are_overflow_covered(tmp_path):
     assert compact.data["path"] == "x.txt" and compact.data["truncated"] is False
     assert deferred and deferred[0][0] == "artifact/externalized"
     assert session.events == events_before, "延迟事件由 Runtime 在 tool/call 后追加，handler 不落盘"
+
+
+@pytest.mark.asyncio
+async def test_local_store_writes_to_disk_and_reads_back(tmp_path):
+    """外置链路落到**本地 Provider**（#192）：阈值 → 磁盘 → 按 ref 读回全量。
+
+    用真实文件系统而不是 Fake：本地 Provider 是未配对象存储时的默认路径，
+    而它此前根本不存在——所以"产物真的落了盘、并且能读回来"这件事必须被
+    真文件系统证明一次（原子写、键形态、读回切片都在真盘上）。
+    """
+    from agent_harness.config import Settings
+    from agent_harness.storage.local_artifact import LocalArtifactStore
+
+    session = make_session(tmp_path)
+    settings = Settings(_env_file=None, artifact_dir=str(tmp_path / "artifacts"))
+    store = LocalArtifactStore(settings, session_id=session.session_id)
+    raw = "\n".join(f"line {i}" for i in range(3000))
+    result = ToolResult.success("ok", data={"stdout": raw, "exit_code": 0})
+
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call-1", "bash", result,
+    )
+
+    artifact_id = compact.artifact_ref
+    assert artifact_id is not None
+    # 落盘形态：<artifact_dir>/<session_id>/<artifact_id>
+    on_disk = tmp_path / "artifacts" / session.session_id / artifact_id
+    assert on_disk.read_text(encoding="utf-8") == raw
+    assert deferred[0][0] == "artifact/externalized"
+    # 模型侧读回：全量可分片取回（这里取尾部一行证明不是只读了摘要）
+    slice_ = await store.inspect(artifact_id, start_line=3000)
+    assert slice_.lines[0]["text"] == "line 2999"
+    assert slice_.total_lines == 3000
