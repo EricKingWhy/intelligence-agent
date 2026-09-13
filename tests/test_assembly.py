@@ -319,6 +319,34 @@ async def test_minio_config_gets_a_writer_too(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_missing_artifact_extra_does_not_break_session_creation(tmp_path, monkeypatch):
+    """配了对象存储但**没装 `[artifact]` extra** ⇒ 建会话照常成功（不变量 21）。
+
+    构造 store 时抛的是 `RuntimeError`（可选依赖缺失），不是 `ValueError`。选择器此前
+    只兜 `ValueError`，于是它沿 `build_runtime` 冒到建会话 → 每次建会话 500。一个**可选
+    的外置优化**把 Core 拖垮，正是这条不变量要防的事，也是选择器存在的理由之一。
+    """
+    from agent_harness.storage.s3_artifact import S3ArtifactStore
+
+    def _boom(self, settings, *, session_id=None):
+        raise RuntimeError("S3ArtifactStore requires pip install 'intelligence-agent[artifact]'")
+
+    monkeypatch.setattr(S3ArtifactStore, "__init__", _boom)
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
+                        model_api_key="sk-test",
+                        artifact_dir=str(tmp_path / "artifacts"),
+                        artifact_store_endpoint="https://s3.invalid",
+                        artifact_store_bucket="b",
+                        artifact_store_access_key="k", artifact_store_secret_key="s")
+    runtime = await _runtime_with(tmp_path, settings)
+
+    # 没有写入者（不外置），但 runtime 建起来了、核心工具在册
+    assert runtime.executor._overflow_handler is None
+    assert "bash" in _tool_names(runtime)
+    assert "inspect_artifact" not in _tool_names(runtime)
+
+
+@pytest.mark.asyncio
 async def test_blank_artifact_dir_disables_local_externalization_without_breaking_session(tmp_path):
     """`artifact_dir` 置空 = 显式关掉本地外置：**建会话必须照常成功**（fail-open）。
 

@@ -25,8 +25,8 @@ from agent_harness.storage.artifact import (
     Artifact,
     ArtifactSlice,
     ArtifactStore,
-    _slice_lines,
     compute_artifact_id,
+    slice_artifact,
 )
 
 
@@ -166,25 +166,12 @@ class MinioArtifactStore(ArtifactStore):
     ) -> ArtifactSlice:
         artifact = await self.load(artifact_id)
         assert artifact.content is not None
-        all_lines = artifact.content.splitlines()
-        lines, truncated = _slice_lines(
-            all_lines,
+        return slice_artifact(
+            artifact_id,
+            artifact.content,
             start_line=start_line,
             end_line=end_line,
             keyword=keyword,
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
-        )
-        return ArtifactSlice(
-            artifact_id=artifact_id,
-            lines=lines,
-            total_lines=len(all_lines),
-            returned_lines=len(lines),
-            truncated=truncated,
-            query={
-                "start_line": start_line,
-                "end_line": end_line,
-                "keyword": keyword,
-                "max_lines": max_lines,
-            },
         )

@@ -122,7 +122,7 @@ def _slice_lines(
     max_lines: int,
     max_chars_per_line: int = 2000,
 ) -> tuple[list[dict[str, int | str | bool]], bool]:
-    """通用切片逻辑：供 FakeArtifactStore 和 S3ArtifactStore 共享。
+    """通用切片逻辑：四个 Provider（Fake / S3 / MinIO / Local）共享这一份。
 
     返回 (行列表, truncated)。truncated 是行数截断与字符截断的并集——
     任一发生即 True（spec 06 §4：大 Artifact 不完整灌回 Context）。
@@ -157,6 +157,47 @@ def _slice_lines(
 
     truncated = char_truncated or len(filtered) > max_lines
     return capped[:max_lines], truncated
+
+
+def slice_artifact(
+    artifact_id: str,
+    content: str,
+    *,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    keyword: str | None = None,
+    max_lines: int = 200,
+    max_chars_per_line: int = 2000,
+) -> ArtifactSlice:
+    """`inspect()` 的整段实现：切片 + 组装 ArtifactSlice。
+
+    四个 Provider 的 `inspect()` 差别只在"怎么拿到 content"（内存 dict / S3 / MinIO /
+    本地文件），拿到之后这一段逐字相同。此前四份各自复制，`query` 回显字段与
+    `total_lines` 的语义就有四处各自演化的空间——现在只有这里一份，
+    Provider 只负责 `load()` 后把 content 交进来。
+    """
+    all_lines = content.splitlines()
+    lines, truncated = _slice_lines(
+        all_lines,
+        start_line=start_line,
+        end_line=end_line,
+        keyword=keyword,
+        max_lines=max_lines,
+        max_chars_per_line=max_chars_per_line,
+    )
+    return ArtifactSlice(
+        artifact_id=artifact_id,
+        lines=lines,
+        total_lines=len(all_lines),
+        returned_lines=len(lines),
+        truncated=truncated,
+        query={
+            "start_line": start_line,
+            "end_line": end_line,
+            "keyword": keyword,
+            "max_lines": max_lines,
+        },
+    )
 
 
 class FakeArtifactStore(ArtifactStore):
@@ -208,25 +249,12 @@ class FakeArtifactStore(ArtifactStore):
         if artifact_id not in self._artifacts:
             raise KeyError(f"Artifact '{artifact_id}' does not exist")
         _meta, content = self._artifacts[artifact_id]
-        all_lines = content.splitlines()
-        lines, truncated = _slice_lines(
-            all_lines,
+        return slice_artifact(
+            artifact_id,
+            content,
             start_line=start_line,
             end_line=end_line,
             keyword=keyword,
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
-        )
-        return ArtifactSlice(
-            artifact_id=artifact_id,
-            lines=lines,
-            total_lines=len(all_lines),
-            returned_lines=len(lines),
-            truncated=truncated,
-            query={
-                "start_line": start_line,
-                "end_line": end_line,
-                "keyword": keyword,
-                "max_lines": max_lines,
-            },
         )

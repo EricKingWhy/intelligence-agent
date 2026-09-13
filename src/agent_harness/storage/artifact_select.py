@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -25,6 +26,18 @@ from agent_harness.storage.artifact import ArtifactStore
 from agent_harness.tooling import Tool
 
 __all__ = ["ArtifactStoreSelection", "select_artifact_store"]
+
+logger = logging.getLogger("agent_harness.storage.artifact_select")
+
+#: 构造 store 时可预期的失败类型——**都表示"这个部署没有可用 store"**，不是 bug：
+#: - `ValueError`：配置不完整（半配置对象存储、`artifact_dir` 为空）；
+#: - `OSError`：本地路径在本平台非法（win32 非法字符）/ 不可创建；
+#: - `RuntimeError`：**可选依赖缺失**（`pip install 'intelligence-agent[artifact]'`）。
+#:   这一条曾漏掉，而它恰恰是最要紧的：把对象存储配好了但没装 `[artifact]` extra 的部署，
+#:   构造期会抛 `RuntimeError`，沿 `build_runtime` 冒到建会话 → **每次建会话 500**，
+#:   读接口也会 500 而不是 503。那违反不变量 21（可选能力故障不许拖垮 Core）——
+#:   而这个函数的存在理由之一就是兜住它。其它异常类型一律照旧上抛（真 bug 不该被吞）。
+_UNUSABLE_STORE = (ValueError, OSError, RuntimeError)
 
 
 @dataclass(frozen=True)
@@ -79,7 +92,8 @@ def select_artifact_store(settings: Settings, session_id: str) -> ArtifactStoreS
                 read_tool=InspectArtifactTool,
                 provider="s3",
             )
-        except ValueError:
+        except _UNUSABLE_STORE as error:
+            logger.warning("artifact store 's3' 不可用，本会话不外置：%s", error)
             return None
     if _minio_configured(settings):
         from agent_harness.storage.minio_artifact import MinioArtifactStore
@@ -91,7 +105,8 @@ def select_artifact_store(settings: Settings, session_id: str) -> ArtifactStoreS
                 read_tool=ReadArtifactTool,
                 provider="minio",
             )
-        except ValueError:
+        except _UNUSABLE_STORE as error:
+            logger.warning("artifact store 'minio' 不可用，本会话不外置：%s", error)
             return None
     from agent_harness.storage.local_artifact import LocalArtifactStore
     from agent_harness.tools.read_artifact import ReadArtifactTool
@@ -102,7 +117,13 @@ def select_artifact_store(settings: Settings, session_id: str) -> ArtifactStoreS
             read_tool=ReadArtifactTool,
             provider="local",
         )
-    except (ValueError, OSError):
+    except _UNUSABLE_STORE as error:
         # `artifact_dir` 为空 = 显式关掉本地落盘；`OSError` 覆盖 `Path.resolve()` 在
         # 非法路径上的失败（win32 的非法字符）。两者都表示"这个部署没有可用 store"。
+        # 空 `artifact_dir` 是**合法配置**（写了就是"别落盘"），不该每次建会话都刷一条
+        # warning——那会把真正的部署故障淹掉；只有"配了 dir 却用不了"才值得留痕。
+        if isinstance(error, ValueError) and not settings.artifact_dir.strip():
+            logger.debug("本地 artifact 落盘已关闭（artifact_dir 为空）")
+        else:
+            logger.warning("artifact store 'local' 不可用，本会话不外置：%s", error)
         return None

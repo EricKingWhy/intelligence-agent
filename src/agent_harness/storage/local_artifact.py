@@ -44,8 +44,8 @@ from agent_harness.storage.artifact import (
     Artifact,
     ArtifactSlice,
     ArtifactStore,
-    _slice_lines,
     compute_artifact_id,
+    slice_artifact,
 )
 
 #: 旁挂元数据的后缀。用后缀而不是把元数据塞进内容头部：内容必须**逐字节**等于
@@ -69,11 +69,6 @@ class LocalArtifactStore(ArtifactStore):
         self._root = Path(root).resolve()
         self._session_id = session_id
         self._dir = self._root / session_id
-
-    @property
-    def root(self) -> Path:
-        """本会话的 artifact 目录（`<artifact_dir>/<session_id>`）。"""
-        return self._dir
 
     async def save(
         self,
@@ -164,28 +159,14 @@ class LocalArtifactStore(ArtifactStore):
     ) -> ArtifactSlice:
         artifact = await self.load(artifact_id)
         assert artifact.content is not None
-        all_lines = artifact.content.splitlines()
-        # 切片语义复用共享实现（早先 S3 / MinIO 各写一份就会各自演化）。
-        lines, truncated = _slice_lines(
-            all_lines,
+        return slice_artifact(
+            artifact_id,
+            artifact.content,
             start_line=start_line,
             end_line=end_line,
             keyword=keyword,
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
-        )
-        return ArtifactSlice(
-            artifact_id=artifact_id,
-            lines=lines,
-            total_lines=len(all_lines),
-            returned_lines=len(lines),
-            truncated=truncated,
-            query={
-                "start_line": start_line,
-                "end_line": end_line,
-                "keyword": keyword,
-                "max_lines": max_lines,
-            },
         )
 
     # —— 内部方法 ——

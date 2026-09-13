@@ -587,6 +587,45 @@ class TestBuildReadArtifactStoreSelection:
         )
         assert build_read_artifact_store(settings, "sess-1") is None
 
+    def test_half_configured_minio_yields_none_not_local(self, tmp_path: Path) -> None:
+        """MinIO 半配置同样 → None（此前只有 S3 那条被钉住，MinIO 分支没测到）。"""
+        from agent_harness.web.artifacts import build_read_artifact_store
+
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            artifact_dir=str(tmp_path / "artifacts"),
+            minio_endpoint="http://127.0.0.1:9000",
+        )
+        assert build_read_artifact_store(settings, "sess-1") is None
+
+    def test_missing_artifact_extra_yields_none_not_a_crash(self, tmp_path: Path, monkeypatch) -> None:
+        """**可选依赖缺失**必须 fail-open，而不是把建会话一起拖垮（不变量 21）。
+
+        把对象存储配好但没装 `[artifact]` extra 的部署，构造期抛的是 `RuntimeError`
+        （不是 `ValueError`）。这个类型此前没被兜住 ⇒ `build_runtime` 把它冒出去 ⇒
+        **每次建会话 500**，读接口也是 500 而不是 503。这里直接让构造期抛
+        `RuntimeError` 来钉住"可预期的失败都返回 None"这条契约。
+        """
+        from agent_harness.storage.s3_artifact import S3ArtifactStore
+        from agent_harness.web.artifacts import build_read_artifact_store
+
+        def _boom(self, settings, *, session_id=None):
+            raise RuntimeError("S3ArtifactStore requires pip install 'intelligence-agent[artifact]'")
+
+        monkeypatch.setattr(S3ArtifactStore, "__init__", _boom)
+        settings = Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            artifact_dir=str(tmp_path / "artifacts"),
+            artifact_store_endpoint="https://s3.invalid",
+            artifact_store_bucket="b",
+            artifact_store_access_key="k",
+            artifact_store_secret_key="s",
+        )
+        # 读路径：如实说"没有可读存储"（503 的来源），而不是抛出去变 500
+        assert build_read_artifact_store(settings, "sess-1") is None
+
     def test_path_traversal_session_id_yields_none(self, tmp_path: Path) -> None:
         """非法 session 段不得进入路径拼接——构造期就挡住（纵深防御）。"""
         from agent_harness.web.artifacts import build_read_artifact_store
