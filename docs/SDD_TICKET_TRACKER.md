@@ -57,6 +57,20 @@
 
 ---
 
+## 集成回执核验（2026-09-13，前端 worktree）
+
+收到 `D:\intelligence-agent\docs\INTEGRATION_REPORT_WS6_WS7_UI_POLISH.md`（Integrator 回执）。前端侧核验结果：
+
+| 项 | 结论 |
+| --- | --- |
+| 合入确认 | UI Polish 六票 + WS-6/WS-7 前端半（B-2）已全部进 `origin/main` = `593dcda`；本分支已 `git merge origin/main --ff-only` 同步（领先/落后均 0） |
+| tracker 终态 | main 上 U-1/U-2/U-3/B-2 四行齐备 + B-2 整节——按回执 §5.2 **不再动它** |
+| 门禁复跑（前端 worktree，同步后的树上实跑） | tsc 0 · vitest **628 passed**（35 文件；首轮 1 例假红复跑消失，两轮全绿）· oxlint 38w/0e · playwright **216 passed**（`--workers=2`；一次 215→复跑 216，与回执数字一致）· vite build ✓ |
+| 回执 §5.4 答案落地 | **审批倒计时不做**：`tool/approval-requested` 无超时字段，硬编码 300s 违反不变量 #22 + 用户决策 D4 → UIP-DEFER 关闭（回执已记录）；「渲染超时拒绝 reason」为加性小改进，待立票 |
+| 本 worktree 下批工作项（待产品/用户拍板后立票） | ① §4.1 permission_mode 语义 gap（改档只影响新会话）——等产品决策加端点还是 UI 提示；② 渲染「审批超时按 fail-closed 拒绝」的 `permission/resolved` reason（加性零契约变更）；③ 回执 §5.5 的 5173 复用坑继续有效：跑 playwright 前确认 5173 是哪个 worktree 的 dev server |
+
+---
+
 ## ⚠️ 流程切换 + 批次记录（v2 批量审查循环，2026-09-12）
 
 **自愈条款（先读这段）**：任何时候你发现自己（a）不确定当前在循环哪一步，（b）不记得批量审查的
