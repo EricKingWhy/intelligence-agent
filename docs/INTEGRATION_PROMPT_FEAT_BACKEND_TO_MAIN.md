@@ -23,6 +23,11 @@
 | main 侧改动 | 67 个文件，其中 `web/` **54 个文件 +7890 行**（UI Polish / WS-6 / WS-7 那一批） |
 | **两侧都改过的文件** | **只有 2 个**：`docs/PHASE_STATUS.md`、`docs/FRONTEND_ISSUES_LOG.md` |
 
+> ⚠️ **别被旧 ref 骗了**：实测 `D:\intelligence-agent-frontend` 那个 clone 里
+> `origin/main` 还停在 `593dcda`（比真实远端落后 1 个 commit），因为它**没有 fetch**。
+> GitHub 上的 main 已经是 `b28e856`。在任何"main 有多少、差哪些"的判断之前，
+> 先 `git fetch origin --prune`，否则你会在一个过期的基线上做冲突分析。
+
 本分支领先 `origin/main` 的 commit（新→旧，**含本文档自身那个 commit**——它的 sha 在写这段时还不存在，
 用 `git log --oneline origin/main..feat/backend` 取最新的那个）：
 
