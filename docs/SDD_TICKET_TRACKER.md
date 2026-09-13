@@ -1351,3 +1351,110 @@ npx vite build                        # 0
   （路径折叠 1 条 + ChangesTab 3 条），恢复修复即 44/44 转绿——第 1/2 条确实被新用例
   锁住，不是"看起来覆盖了"。其余 diff 逐行自查。
 - 仍未修/转为下一票的：第 9/10/11 条 + 上表两条自述纠正中列出的跨端 marker 缺陷（#186）。
+
+---
+
+## 第二十轮：#186（2026-09-14，跨端：后端 `d925899` + 前端在途记录）
+
+**交付**：后端 `d925899`（`feat/backend`）+ 前端两个 commit（`feat/frontend`，均**未合入
+main、未 push**）。票面 `docs/WORKSPACE_PANEL_TICKETS.md` #186；依赖 #185（已 CLOSED，
+路由在 `feat/backend`，**尚未在 main 上**——见下"集成顺序"）。
+
+**为什么这票是跨端的**：AC4 说"统一 marker 文案（两端同步）"。查下来这不是文案偏好，
+而是一处**两端都对不上**的真实缺陷（详见下）。
+
+### AC 逐条
+
+| AC | 状态 | 证据 |
+| --- | --- | --- |
+| 1. Artifacts 清单保留并可读；三态如实，失败显示后端 detail 原文 | ✅ | `ArtifactViewer.tsx`（加载/拿不到/拿到）；503 与 404 **分开说**（`api.ts` 的 `ArtifactContentError.kind`）；SSR 11 条 + e2e 4 条（含真网络 503/404） |
+| 2. 被截断处就地展开，与清单同一渲染器 | ✅ | 归档 diff → `DiffBlock` 内的 `ArtifactViewer`；命令输出外置 → 工具卡 L2 的同一个 `ArtifactViewer`（判据是投影的 `tool.artifact`，不在视图里解析 marker）；不新开导航面（e2e 断言无 dialog/浮层） |
+| 3. diff 收敛为唯一渲染器 | ✅ | **已在批 2 完成**（`868e05e`），本票不再动 |
+| 4. marker 两端同步 + 加测试 | ✅ | 见下"跨端缺陷" |
+| 5. types.ts 补齐内容字段（含**元数据可空**） | ✅ | `ArtifactSlice`/`ArtifactSliceLine` 新增；`ArtifactRef` 三个元数据字段改为**可空**并停止填默认值 |
+| 6. 测试（含 e2e 至少一条"外置 diff → 就地展开 → 可见"） | ✅ | e2e `z-artifact-content.spec.ts` 5 条 × 2 视口；SSR `ArtifactViewer` 11 条 + `DiffBlock` 4 条 + `ToolCard` 4 条 |
+| 7. 内容面板不得成为第二真相 | ✅ | 内容按需取、只存"这次请求的状态"，**不写回** `ConversationState`；切换会话/artifact 即重取 |
+
+### 跨端缺陷（AC4 的实质）：marker 两端的工具名对不上
+
+后端外置摘要在 `tooling/overflow.py` 里写死 `use read_artifact(<id>)`，前端
+`toolShapes.ts` 却只认 `use inspect_artifact\(...\)`。**两端都对不上**，后果不是显示难看，
+而是：
+
+```
+parseArtifactMarker → null ⇒ diff.archived / artifactId 永不置上
+⇒ DiffBlock 的归档占位、#189 面板的"统计不可得"在生产里全是死路径
+```
+
+（这套 UI 此前只在 e2e 里活着——因为 fixture 用的是前端自己那个拼法。）
+
+**根因不止"文案不一致"**：读回工具是**与 store 成对**的，配对表在
+`storage/artifact_select.py`：
+
+```
+S3    → inspect_artifact
+MinIO → read_artifact
+Local → read_artifact     （Local 是 spec 06 §3 的默认 Provider）
+```
+
+所以"统一成一个名字"是**错的**——S3 部署上摘要会指向一个没注册的工具名。正确做法是
+**让摘要点名它自己那个部署配对的工具**，前端两个名字都认、并把名字原样带下去：
+
+- 后端 `d925899`：`ArtifactOverflowHandler` 收 `read_tool_name`，`assembly` 从选择器
+  **实例化出的那个工具**上取 `.name`（不在 assembly 再写字面量，否则配对知识有了第二处）。
+- 前端第一段：`parseArtifactMarker` 返回 `{artifactId, toolName}` 且两个名字都认；
+  `toolName` 经 projection → `tool.diff.artifactTool` → `changedFiles` → `DiffBlock`
+  一路透传；`DiffBlock` 的提示与复制按钮用 marker 里的名字（前端不知道、也不该猜这个
+  部署用哪个 store）。
+
+回归守卫：`tests/test_assembly.py` 三个 Provider 分支各断言摘要点名的工具名（S3 那条是
+本缺陷的守卫）；**变异验证**——把 marker 改回写死 `read_artifact`，S3 用例即失败。
+
+### 内容可见（AC1/AC2）的取舍
+
+| 决定 | 理由 |
+| --- | --- |
+| 拆成 `ArtifactContentView`（纯渲染）+ `ArtifactViewer`（取数） | 本仓组件测试是 SSR（无 jsdom）⇒ 异步取数在测试里不会 resolve。拆开后三态可逐条断言，取数交给 e2e 走真网络 |
+| 只在**展开后**才请求 | 未展开就请求 = 替用户读了他没要的东西（且会让清单渲染 N 个请求） |
+| 归档 diff 处**抑制**通用 `tool.artifact` 渲染 | 归档 diff 的 `tool.diff` 与 `tool.artifact` 指向**同一个** artifact；两处都渲染会出现两个同名同效的按钮（e2e 的 strict mode 先抓到了它） |
+| 工具卡的展开判据用投影的 `tool.artifact`，不解析 marker | 标记长什么样是后端的事；用投影 = 一份真相（AC7），且同时覆盖命令输出与通用结果两条外置路径，不必各写一遍 |
+| 元数据缺失显示"未知"而不是默认值 | #185 AC4 明令"缺失即 null/省略，不得伪造成空串或默认值"；编一个 `0 B`/`application/octet-stream` 是在替后端撒谎（AC5 的"元数据可空"）
+
+### 门禁（全绿）
+
+```
+# 后端
+ruff check src tests                  # All checks passed
+pytest -q                             # 2203 passed / 10 skipped / 42 deselected
+
+# 前端（cd web）
+npx tsc -b                            # 0
+npx vitest run                        # 809 passed
+npx oxlint                            # 0 error / 44 warnings（= 基线）
+npx playwright test --workers=2       # 302 passed
+npx vite build                        # 0
+```
+
+### 集成顺序（重要）
+
+`#185` 的内容路由**只在 `feat/backend` 上，main 上还没有**（main 的最新日志自己写着
+"backend 在途 #185 不并入"）。所以集成必须：
+
+```
+feat/backend  → main   （#185 路由 + #192 外置链路 + d925899 的 marker 配对）
+feat/frontend → main   （#186 的消费侧）
+```
+
+**顺序反了的话，前端的"查看内容"会 404**——不是前端 bug，是端点还没进 main。
+
+### 未做 / 转交
+
+- **归档 diff 的"就地展开"在 URI 上是"会话级"**：`ArtifactViewer` 只按
+  `(session_id, artifact_id)` 取，这是 #185 路由的契约，没有别的取法。
+- `tabCounts.terminal` 与 `TerminalTab` 行判据不一致（第十八轮留痕）、`--color-warning`
+  这类 legacy 别名在旧代码里的用法——**都不是本票引入**，未动（Scope Lock）。
+- 真机联调未做（本 worktree 无可用后端进程）；e2e 全程 mock，`#185` 的真实响应形状
+  以 `web/app.py:1229-1330` 的 `ArtifactSlice.model_dump()` 为准。
+
+**交给集成 AI**：按上面的顺序合并与 push。集成提示词见
+`docs/INTEGRATION_PROMPT_PANEL_186.md`。
