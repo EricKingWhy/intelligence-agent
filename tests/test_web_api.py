@@ -495,8 +495,9 @@ class _DisconnectingASGI:
     receive/send 参数按 ASGI 签名保留但弃用——替身内部自产自销这两个通道。
     """
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, budget_s: float = 5.0) -> None:
         self._app = app
+        self._budget_s = budget_s
 
     async def __call__(self, scope: dict) -> None:
         request_sent = asyncio.Event()
@@ -520,14 +521,23 @@ class _DisconnectingASGI:
 
         app_task = asyncio.create_task(self._app(scope, downstream_receive, upstream_send))
         try:
-            await asyncio.wait_for(app_task, timeout=5.0)
+            await asyncio.wait_for(app_task, timeout=self._budget_s)
         except TimeoutError:
             app_task.cancel()
             with contextlib.suppress(BaseException):
                 await app_task
             raise AssertionError(
-                "app 未在 5s 内响应 disconnect——EventSourceResponse 没有正确取消 producer"
+                f"app 未在 {self._budget_s:g}s 内响应 disconnect——"
+                "EventSourceResponse 没有正确取消 producer"
             )
+
+
+class _ImmediateRuntime:
+    """预热用替身：立刻结束，只为把进程一次性冷启动成本在测量窗外付掉。"""
+
+    async def run_stream(self, session: Any, task: str,
+                         cancel_reason_supplier=None) -> AsyncIterator[AgentEvent]:
+        yield AgentEvent(type=RUN_STARTED)
 
 
 @pytest.mark.asyncio
@@ -559,16 +569,24 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
 
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/sessions",
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
+        "query_string": b"",
+    }
+
+    # 预热线：下面 5s 预算衡量的是「断连后 app 多快返回」，不该把**进程一次性
+    # 冷启动**算进去——能力装配是惰性的，首个请求才 import 记忆能力（langmem 等）
+    # 并建 wiring。实测冷 6.2s / 同进程第二次 0.009s，于是同一 commit 会随机器
+    # 磁盘缓存冷热时绿时红。这里用宽预算把一次性成本付掉，测量请求才谈得上 5s 锐度。
+    with patch("agent_harness.session.service.build_runtime", return_value=_ImmediateRuntime()):
+        await _DisconnectingASGI(app, budget_s=60.0)(scope)
+
     hanging = HangingRuntime()
     with patch("agent_harness.session.service.build_runtime", return_value=hanging):
         transport = _DisconnectingASGI(app)
-        scope = {
-            "type": "http",
-            "method": "POST",
-            "path": "/api/sessions",
-            "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
-            "query_string": b"",
-        }
         await transport(scope)
 
     # 断言 1（D-A 反转核心）：断连后 run task 仍在途——SSE generator 被取消，
