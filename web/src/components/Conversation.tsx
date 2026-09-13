@@ -349,6 +349,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
                 onInspectChild={onInspectChild}
                 onFork={onFork}
                 isFirstUserTurn={vi.index === emptyChildTurnIdx}
+                sessionId={conversation.session_id}
               />
             </div>
           ))}
@@ -403,7 +404,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean }) {
+export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -507,6 +508,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                     onFocusTool={onFocusTool}
                     onOpenSession={onOpenSession}
                     onInspectChild={onInspectChild}
+                    sessionId={sessionId}
                   />
                 ))}
               </div>
@@ -552,6 +554,8 @@ interface ChainRenderCtx {
   onFocusTool?: (tool: ToolCall) => void;
   onOpenSession?: (sessionId: string) => void;
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
+  /** #186：这条链属于哪个会话——工具卡的归档 diff 要按会话读 artifact 内容。 */
+  sessionId?: string;
 }
 
 /** 每种 kind 的渲染器只接收窄化后的 node 类型（Extract 按 kind 收紧）。 */
@@ -560,7 +564,7 @@ type RendererFor<K extends ChainNode['kind']> = (
 ) => ReactNode;
 
 const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
-  tool: ({ node, density, disclosure, onFocusTool }) => {
+  tool: ({ node, density, disclosure, onFocusTool, sessionId }) => {
     const key = toolEventKey(node.tool.tool_call_id);
     const cycle = disclosure
       ? () => disclosure.setLevel(key, nextLevel(disclosure.levelFor(key, density)))
@@ -572,6 +576,7 @@ const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
         level={disclosure ? disclosure.levelFor(key, density) : undefined}
         onCycleLevel={cycle}
         onFocus={onFocusTool}
+        sessionId={sessionId}
       />
     );
   },

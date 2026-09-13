@@ -62,6 +62,13 @@ export interface ApiMock {
   capabilities?: unknown[];
   /** capabilities 端点直接回错误（老后端 404 / 服务异常）→ 前端降级为缺省语义。 */
   capabilitiesError?: { status: number; detail: string };
+  // ── #185 路由 / #186 消费：GET /api/sessions/{id}/artifacts/{aid} ──
+  /** 内容切片（形状 = 后端 `ArtifactSlice.model_dump()`）。 */
+  artifactContent?: unknown;
+  /** 直接回错误（404 不在本会话 / 503 没配存储 / 422 形态非法）。 */
+  artifactContentError?: { status: number; detail: string };
+  /** 拦截口（计数 / 按 artifact_id 给不同内容）；返回 true = 已处理。 */
+  onArtifactGet?: (route: Route, artifactId: string) => Promise<boolean> | boolean;
   /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
    *  为什么要这个口子：**今天没有任何非 Chat 的面实现**，所以"声明为真"与"声明为假"
    *  渲染出来的 tab 集是同一个 `['Chat']`——不数请求的话，"前端压根没调这个端点"这种
@@ -320,6 +327,18 @@ export function routeApi(page: Page, mock: ApiMock): void {
       ];
       sessionEvents.set(sid, frames); // durable log = 刚才流的那些帧（见 /events 分支）
       return fulfillSse(route, frames);
+    }
+    // ── #185 / #186：artifact 内容读取（只读端点）──
+    const artifactMatch = /^\/api\/sessions\/([^/]+)\/artifacts\/([^/]+)$/.exec(path);
+    if (artifactMatch && req.method() === 'GET') {
+      const aid = decodeURIComponent(artifactMatch[2]);
+      if (mock.onArtifactGet) {
+        const handled = await mock.onArtifactGet(route, aid);
+        if (handled) return undefined;
+      }
+      const forced = mock.artifactContentError;
+      if (forced) return json(route, { detail: forced.detail }, forced.status);
+      return json(route, mock.artifactContent ?? { artifact_id: aid, lines: [], total_lines: 0, returned_lines: 0, truncated: false });
     }
     // ── #172 / ADR-0029 会话硬删（有状态 mock：语义对齐 `web/app.py::delete_session`）──
     const sessionDeleteMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);

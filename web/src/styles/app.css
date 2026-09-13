@@ -4843,6 +4843,132 @@ button.json-row {
   color: var(--text-secondary);
 }
 
+/* ── Artifact 内容查看器（#186：Artifacts 清单 + 归档 diff 的「就地展开」共用） ──
+ *  两处入口同一份渲染，所以样式也只在这里定义一次。只读面：没有输入类元素。 */
+.artifact-viewer {
+  margin-top: var(--space-sm);
+}
+.artifact-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font: 500 var(--text-xs) var(--font-ui);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.artifact-toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.artifact-content {
+  margin-top: var(--space-xs);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+}
+.artifact-content-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: 4px var(--space-sm);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.artifact-content-id {
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+/* 行号用 grid，不靠等宽空格对齐——长行折行后行号仍与首行齐平。 */
+.artifact-content-lines {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--space-sm) 0;
+  font: var(--text-xs) / 1.5 var(--font-mono);
+}
+.artifact-line {
+  display: grid;
+  grid-template-columns: 3.5em minmax(0, 1fr);
+  gap: var(--space-sm);
+  padding: 0 var(--space-sm);
+}
+.artifact-line-no {
+  color: var(--text-tertiary);
+  text-align: right;
+  user-select: none;
+}
+.artifact-line-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere; /* 长行不把面板撑出横向滚动条 */
+}
+.artifact-line-cut {
+  margin-left: 4px;
+  /* 用原始 token：`--color-warning` 是 index.css 里标注
+     "legacy aliases … do not use in new code" 的旧别名。 */
+  color: var(--warning);
+  font-size: var(--text-xs);
+}
+.artifact-content-loading,
+.artifact-content-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  margin-top: var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.artifact-spin {
+  animation: artifact-spin 1s linear infinite;
+}
+@keyframes artifact-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.artifact-content-error {
+  padding: var(--space-md);
+  margin-top: var(--space-xs);
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+}
+.artifact-content-error-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font: 550 var(--text-sm) var(--font-ui);
+  color: var(--text-primary);
+}
+.artifact-content-error-hint,
+.artifact-content-detail {
+  margin-top: 4px;
+  color: var(--text-secondary);
+}
+/* 后端 detail 原文——等宽，便于用户原文照抄去查部署日志 */
+.artifact-content-detail {
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+.artifact-retry {
+  margin-top: var(--space-xs);
+  padding: 2px 8px;
+  font: 500 var(--text-xs) var(--font-ui);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
 /* ── Command Palette（PRD §15，Ctrl/Cmd+K）：中心浮层，keyboard-first，
  *    backdrop blur 只用于该浮层区域（冻结视觉原则：glass 仅浮层可用） ── */
 .palette-overlay {

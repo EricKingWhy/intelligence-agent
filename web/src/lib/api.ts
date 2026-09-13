@@ -8,6 +8,7 @@
 
 import type {
   AgentEvent,
+  ArtifactSlice,
   HostDirsListing,
   MemoryDeleted,
   MemoryScope,
@@ -432,6 +433,105 @@ export async function cancelSession(sessionId: string): Promise<{ status: string
   });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
   return res.json();
+}
+
+// ── Artifact 内容读取（#185 路由 / #186 消费）──
+
+/** artifact 内容为什么拿不到——**三态分开**，因为对用户是三句不同的话。
+ *
+ *  - `gone`（404）：这个 id 不在本会话的命名空间里（不存在，或属于别的会话）。
+ *    后端刻意不区分这两者——`artifact_id` 是内容哈希、跨会话可重复，区分"不存在"与
+ *    "存在但不可读"会把归属变成可探测的信息（`web/app.py` 的 404 注释）。
+ *  - `no-storage`（503）：本部署**确实没有可读的存储**。不能降级成"不存在"——
+ *    那会让用户以为产物丢了，而其实是这个部署没配存储。
+ *  - `error`：其它失败（5xx / 网络 / 形状不符）。`detail` 是后端原文。
+ *
+ *  `detail` 一律是后端 `{detail}` 原文（读不到时为空串）——界面照原样显示，
+ *  这比前端替它翻译一句更短的错误更有用（同 `describeSessionError` 的既有口径）。 */
+export type ArtifactContentFailure = 'gone' | 'no-storage' | 'error';
+
+export class ArtifactContentError extends Error {
+  readonly kind: ArtifactContentFailure;
+  readonly detail: string;
+  readonly status: number;
+  constructor(kind: ArtifactContentFailure, detail: string, status: number) {
+    super(detail || `artifact content ${status}`);
+    this.kind = kind;
+    this.detail = detail;
+    this.status = status;
+  }
+}
+
+/** 后端 422：`session_id` / `artifact_id` 形态非法，或 `start_line < 1`。
+ *  属于客户端 bug（不是冲突），单独成一个 kind 便于测试与诊断。 */
+export class ArtifactQueryError extends ArtifactContentError {
+  constructor(detail: string, status: number) {
+    super('error', detail, status);
+  }
+}
+
+export interface ArtifactContentQuery {
+  startLine?: number;
+  endLine?: number;
+  keyword?: string;
+  maxLines?: number;
+}
+
+/** 只解析**后端真的会发的字段**，缺字段就抛错而不是填默认值——形状不符时编一个
+ *  空的切片出来，界面会显示"内容为空"，那是在替后端撒谎（同 `parseCapabilities`
+ *  的口径：解析失败必须让调用方看得见）。 */
+function parseArtifactSlice(raw: unknown): ArtifactSlice {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const artifactId = typeof o.artifact_id === 'string' ? o.artifact_id : '';
+  const lines = Array.isArray(o.lines) ? o.lines : null;
+  if (!artifactId || lines === null) throw new Error('artifact content: 响应形状不符');
+  return {
+    artifact_id: artifactId,
+    lines: lines.flatMap((item) => {
+      const l = (item ?? {}) as Record<string, unknown>;
+      if (typeof l.line_number !== 'number' || typeof l.text !== 'string') return [];
+      return [
+        {
+          line_number: l.line_number,
+          text: l.text,
+          ...(l.truncated === true ? { truncated: true as const } : {}),
+          ...(typeof l.full_length === 'number' ? { full_length: l.full_length } : {}),
+        },
+      ];
+    }),
+    total_lines: typeof o.total_lines === 'number' ? o.total_lines : 0,
+    returned_lines: typeof o.returned_lines === 'number' ? o.returned_lines : 0,
+    truncated: o.truncated === true,
+  };
+}
+
+/** GET /api/sessions/{sid}/artifacts/{aid} —— 外置产物的局部内容（#185）。
+ *
+ *  `session_id` 走 URL 而不是查询串：`artifact_id` 是内容哈希、跨会话可重复，
+ *  归属**只能**由 session 决定（后端据此构造 store 命名空间）。 */
+export async function getArtifactContent(
+  sessionId: string,
+  artifactId: string,
+  query: ArtifactContentQuery = {},
+): Promise<ArtifactSlice> {
+  const params = new URLSearchParams();
+  if (query.startLine !== undefined) params.set('start_line', String(query.startLine));
+  if (query.endLine !== undefined) params.set('end_line', String(query.endLine));
+  if (query.keyword) params.set('keyword', query.keyword);
+  if (query.maxLines !== undefined) params.set('max_lines', String(query.maxLines));
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}` +
+      (qs ? `?${qs}` : ''),
+  );
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    if (res.status === 404) throw new ArtifactContentError('gone', detail, 404);
+    if (res.status === 503) throw new ArtifactContentError('no-storage', detail, 503);
+    if (res.status === 422) throw new ArtifactQueryError(detail, 422);
+    throw new ArtifactContentError('error', detail, res.status);
+  }
+  return parseArtifactSlice(await res.json());
 }
 
 // ── Session hard delete（#172 / ADR-0029：用户显式硬删，不可恢复）──

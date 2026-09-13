@@ -187,6 +187,10 @@ export default function App() {
   const activeTab = resolveActiveTab(tabs, selectedSurface);
   // 本会话全部工具调用：与 Inspector 的 run 级清单共用 `allTools`（#190 单一走法）。
   const tools = useMemo(() => (conversation ? allTools(conversation) : []), [conversation]);
+  /* #186：归档 diff 的「就地展开」按会话读 artifact 内容。`tools` 为空数组时这个面
+     本来就没有内容可展开，所以 `null` 与"没有会话"是同一件事——给 `undefined`，
+     `DiffBlock` 据此不渲染展开入口（不伪造一个读不到的会话）。 */
+  const sessionId = conversation?.session_id;
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -952,7 +956,7 @@ export default function App() {
               {tab.key === 'changes' ? (
                 /* 「文件/改动」面（#189）：本会话改动过的文件 + 逐文件 diff。
                    数据是事件的投影（`allTools` → `ToolCall.diff`），不另存一份。 */
-                <ChangesPanel tools={tools} />
+                <ChangesPanel tools={tools} sessionId={sessionId} />
               ) : null}
             </div>
           ))}

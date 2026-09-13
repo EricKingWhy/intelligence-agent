@@ -60,7 +60,14 @@ function UnattributedFootnote({ count }: { count: number }) {
   );
 }
 
-export function ChangesPanel({ tools }: { tools: readonly ToolCall[] }) {
+export function ChangesPanel({
+  tools,
+  sessionId,
+}: {
+  tools: readonly ToolCall[];
+  /** #186 AC2：归档 diff 的「就地展开」要按会话读 artifact 内容。 */
+  sessionId?: string;
+}) {
   const { files, unattributed } = changedFiles(tools);
   const [wanted, setWanted] = useState<string | null>(null);
   /* 渲染期收窄（同 #182 `resolveActiveTab` / #183 的 peek 口径）：选中的文件可能已经
@@ -121,6 +128,7 @@ export function ChangesPanel({ tools }: { tools: readonly ToolCall[] }) {
                         </div>
                       )}
                       <DiffBlock
+                        sessionId={sessionId}
                         diff={{
                           before: edit.before,
                           after: edit.after,

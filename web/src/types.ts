@@ -256,12 +256,40 @@ export interface ToolOutputChunk {
 }
 
 /** Large tool output offloaded to the ArtifactStore (Phase 5, spec 06 §15).
- *  The model only sees a summary + this ref; the full content lives in storage. */
+ *  The model only sees a summary + this ref; the full content lives in storage.
+ *
+ *  三个元数据字段**可空**（#186 AC5 / #185 AC4）：`size` / `mime_type` /
+ *  `source_tool` 由 `ArtifactStore` 决定是否持久化——MinIO 不持久化
+ *  `source_tool`，S3 持久化。缺了就是 `null`，**不填默认值**：一个编出来的
+ *  `'application/octet-stream'` 或 `0` 会让界面显示一个并不存在的字节数。 */
 export interface ArtifactRef {
   artifact_id: string;
-  size: number;
-  mime_type: string;
-  source_tool: string;
+  size: number | null;
+  mime_type: string | null;
+  source_tool: string | null;
+}
+
+/** #186：`GET /api/sessions/{sid}/artifacts/{aid}` 的一行（后端 `ArtifactSlice.lines`）。
+ *
+ *  `truncated`/`full_length` 只在**该行超长被截断**时出现——原行保留在 artifact 里，
+ *  视图据此如实标记"此行有省略"，不把半截行当完整行。 */
+export interface ArtifactSliceLine {
+  line_number: number;
+  text: string;
+  truncated?: boolean;
+  full_length?: number;
+}
+
+/** #186：外置产物的**局部**读取结果（后端 `ArtifactSlice`，`storage/artifact.py`）。
+ *
+ *  `truncated` 是"返回内容不完整"的并集（行数截断 ∪ 字符截断）——界面必须如实显示，
+ *  否则用户会以为这就是全文。`total_lines` 是全文行数（不是返回行数）。 */
+export interface ArtifactSlice {
+  artifact_id: string;
+  lines: ArtifactSliceLine[];
+  total_lines: number;
+  returned_lines: number;
+  truncated: boolean;
 }
 
 export interface ModelSegment {

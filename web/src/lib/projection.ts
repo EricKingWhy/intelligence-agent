@@ -493,11 +493,14 @@ function attachArtifactToTool(state: ConversationState, data: Record<string, unk
   const prevTurn = state.turns[turnIdx];
   const toolIdx = prevTurn.tools.findIndex((tc) => tc.tool_call_id === toolCallId);
   const tool = cloneTool(prevTurn.tools[toolIdx]);
+  /* 元数据缺了就留 `null`（#186 AC5 / #185 AC4）：MinIO 不持久化 `source_tool`，
+     一个编出来的 `''`/`0`/`'application/octet-stream'` 会变成界面上一个假的字节数与
+     假的类型。`artifact_id` 是必有的（没它就没有这个产物，找不到宿主时上面已早退）。 */
   tool.artifact = {
     artifact_id: String(data.artifact_id ?? ''),
-    size: Number(data.size ?? 0),
-    mime_type: String(data.mime_type ?? 'application/octet-stream'),
-    source_tool: String(data.source_tool ?? ''),
+    size: typeof data.size === 'number' ? data.size : null,
+    mime_type: typeof data.mime_type === 'string' ? data.mime_type : null,
+    source_tool: typeof data.source_tool === 'string' ? data.source_tool : null,
   };
   const turn = cloneTurn(prevTurn);
   turn.tools[toolIdx] = tool; // cloneTurn 已给出新 tools 数组，原位替换即可

@@ -34,6 +34,7 @@ import {
 } from '../lib/toolShapes';
 import { CopyButton } from './CopyButton';
 import { ToolOutputStream } from './ToolOutputStream';
+import { ArtifactViewer } from './ArtifactViewer';
 import { DiffBlock } from './DiffBlock';
 import { JsonTree } from './JsonTree';
 
@@ -46,11 +47,13 @@ interface Props {
   onCycleLevel?: () => void;
   /** hover Inspect chip 点击 → 进 Inspector。缺省时点击行为回退（旧：onFocus / 本地展开）。 */
   onFocus?: (tool: ToolCall) => void;
+  /** #186：归档 diff 的「就地展开」要按会话读 artifact 内容。缺省 = 不提供展开入口。 */
+  sessionId?: string;
 }
 
 // memo：投影层 copy-on-write 保证未触及的 tool 引用稳定——同 turn 内其它工具卡
 // 在本工具更新时跳过重渲染（配合 App 层 useCallback 稳定的回调）。
-export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLevel, onFocus }: Props) {
+export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLevel, onFocus, sessionId }: Props) {
   const isBash = tool.name === 'bash';
   const isDiffTool = ['edit', 'apply_patch', 'write'].includes(tool.name);
   const slice = tool.name === 'inspect_artifact' ? tryParseSlice(tool.result) : null;
@@ -172,10 +175,25 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
       {effectiveLevel >= 2 && (
         <div className="tool-card-body">
           {isBash && <BashBlock tool={tool} />}
-          {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} />}
+          {isDiffTool && tool.diff && <DiffBlock diff={tool.diff} sessionId={sessionId} />}
           {slice && <ArtifactSliceBlock slice={slice} />}
           {readShape && <ReadBlock shape={readShape} />}
           {!isBash && !isDiffTool && !slice && !readShape && <GenericBlock tool={tool} />}
+          {/* 被截断处的「就地展开」（#186 AC2）：判据用**投影**挂上的 `tool.artifact`
+              （来自 `artifact/externalized`），不在视图里解析 marker——标记长什么样是
+              后端的事，前端只认投影这一份真相（AC7 / 不变量 #22）。与 Artifacts 清单
+              共用 `ArtifactViewer`，不新开导航面。
+              这里同时覆盖命令输出与通用结果两条外置路径（不需要各写一遍）。
+
+              归档 diff 例外：那一份已经由上面的 `DiffBlock` 给了展开入口（`tool.diff`
+              归档时，内容就是同一个 artifact），再渲染一次会变成两个同名同效的按钮。 */}
+          {tool.artifact && sessionId && !(isDiffTool && tool.diff?.archived) && (
+            <ArtifactViewer
+              sessionId={sessionId}
+              artifactId={tool.artifact.artifact_id}
+              label="查看完整内容"
+            />
+          )}
         </div>
       )}
       {effectiveLevel >= 2 && (tool.raw_call || tool.raw_result) && (

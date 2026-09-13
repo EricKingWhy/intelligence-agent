@@ -961,6 +961,24 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(s.unknown_events).toHaveLength(0); // 已接线：不再算"未知事件"
   });
 
+  it('元数据缺失 → null，**不**填默认值（AC5 / #185 AC4：MinIO 不持久化 source_tool）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'x' } }, step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_CREATED,
+      // 只给 id：这是 MinIO 那类"元数据不持久化"的 store 的真实形态
+      data: { artifact_id: 'only-id', session_id: 's', tool_call_id: 't1' },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].artifact).toEqual({
+      artifact_id: 'only-id',
+      size: null,
+      mime_type: null,
+      source_tool: null,
+    });
+  });
+
   it('ARTIFACT_EXTERNALIZED：找不到宿主 tool_call 时不静默（落 unknown_events）', () => {
     // 与 created 的唯一差别：externalized 自带 artifact_id，是"确实有产物"的独立事实。
     const s = applyEvent(initConversation('s'), ev({

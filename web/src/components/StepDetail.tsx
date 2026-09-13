@@ -31,6 +31,7 @@ import {
 } from '../lib/inspectorPanel';
 import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
+import { ArtifactViewer } from './ArtifactViewer';
 import { CopyButton } from './CopyButton';
 import { DiffBlock } from './DiffBlock';
 import { JsonTree } from './JsonTree';
@@ -162,6 +163,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
 
   // 单一走法（#190）：与中心列「输出」面共用 projection.allTools。
   const tools = allTools(conversation);
+  // #186：归档 diff 的「就地展开」要按会话读 artifact 内容——归属只能由 session 决定
+  // （artifact_id 是内容哈希，跨会话可重名），所以从投影的会话 id 取，不另存一份。
+  const sessionId = conversation.session_id;
   const pulse = deriveRunPulse(conversation, streaming);
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应
@@ -435,11 +439,11 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
               selectedKey={selectedKey}
             />
           )}
-          {tab === 'changes' && <ChangesTab tools={tools} />}
+          {tab === 'changes' && <ChangesTab tools={tools} sessionId={sessionId} />}
           {tab === 'terminal' && (
             <TerminalTab tools={tools} onFocusTool={onFocusTool} selectedKey={selectedKey} />
           )}
-          {tab === 'artifacts' && <ArtifactsTab tools={tools} />}
+          {tab === 'artifacts' && <ArtifactsTab tools={tools} sessionId={sessionId} />}
         </div>
 
         {/* AC2：peek 关掉只是 `hidden`（**不卸载**）——内部标签条与滚动位置留着，
@@ -1043,7 +1047,7 @@ const TimelineRow = memo(function TimelineRow({
 
 /** 导出供 SSR 测试直接渲染（同 `TimelineTab` / `ToolEventSections`：`tab` 是内部
  *  状态，从 `StepDetail` 外面进不到这个面）。 */
-export function ChangesTab({ tools }: { tools: ToolCall[] }) {
+export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?: string }) {
   const diffs = tools.filter((t) => t.diff);
   if (diffs.length === 0) {
     return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
@@ -1060,7 +1064,7 @@ export function ChangesTab({ tools }: { tools: ToolCall[] }) {
               `use read_artifact(<id>)` marker 摘要时，会把 marker 原文当 diff 正文
               渲染出来，即"显示了一段并不存在的文件内容"）。收敛到 `DiffBlock`
               （#183 AC9 / #186 AC3）后归档占位态与中心列逐字一致。 */}
-          <DiffBlock diff={t.diff!} />
+          <DiffBlock diff={t.diff!} sessionId={sessionId} />
         </div>
       ))}
     </>
@@ -1106,7 +1110,7 @@ function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; o
 
 // ── Artifacts tab：artifact 聚合页（工具挂载 ref，单一投影源——不变量 #22） ──
 
-function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
+function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionId: string }) {
   // Artifacts only reach this tab through the projection attaching an ArtifactRef
   // to the producing ToolCall (lib/projection.ts ARTIFACT_CREATED case). If an
   // artifact/created event's tool isn't found by the projection, that's a
@@ -1127,14 +1131,28 @@ function ArtifactsTab({ tools }: { tools: ToolCall[] }) {
             <span className="detail-key">ID</span>
             <code className="detail-val detail-val-mono">{t.artifact!.artifact_id.slice(0, 16)}</code>
           </div>
+          {/* 元数据可空（AC5）：缺了就说"未知"，不拿默认值冒充。
+              真后端里 size/mime_type 由 store 决定是否持久化（MinIO 不持久化
+              source_tool），编一个 `0 B` / `application/octet-stream` 是在替它撒谎。 */}
           <div className="detail-row">
             <span className="detail-key">大小</span>
-            <span className="detail-val">{formatBytes(t.artifact!.size)}</span>
+            <span className="detail-val">
+              {t.artifact!.size === null ? '未知' : formatBytes(t.artifact!.size)}
+            </span>
           </div>
           <div className="detail-row">
             <span className="detail-key">类型</span>
-            <span className="detail-val detail-val-mono">{t.artifact!.mime_type}</span>
+            <span className="detail-val detail-val-mono">
+              {t.artifact!.mime_type ?? '未知'}
+            </span>
           </div>
+          {/* 内容按需读取（#186 AC1）——地址是 #185 的只读端点，会话归属由 URL 的
+              session_id 决定（artifact_id 是内容哈希，跨会话可重名）。 */}
+          <ArtifactViewer
+            sessionId={sessionId}
+            artifactId={t.artifact!.artifact_id}
+            label="查看内容"
+          />
         </div>
       ))}
     </>
