@@ -1258,3 +1258,96 @@ ChangesPanel 10）；`oxlint` 0 error（**44** warnings = 基线，新文件零 
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
 `docs/INTEGRATION_PROMPT_PANEL_189.md`。
+
+---
+
+## 批 2 审查：#183 + #189（fixed point `2ae4e38`，2026-09-14）
+
+两轴独立审（Standards = 仓库规范 §7/§8/§9/§15/§16.6 + Fowler smell 基线；Spec = #183/#189
+票面 + PRD §3.0/§3.1/§3.3/§3.4 + 本 tracker 的 AC 自述当成**待核实的声明**），
+累计 diff 19 文件 / +2556 −123。**修复 commit `868e05e`**（本批审查状态推进到这里）。
+
+### 两轴收敛到同一处
+
+两个轴**各自独立**指出：Inspector 的 `ChangesTab` 仍内联 `.diff-cols`，与中心列的
+`DiffBlock` 是同一份 before/after 的两套渲染。这不只是重复——Spec 轴同时算出它的**后果**：
+那套内联渲染**认不出归档态**，会把 marker 摘要当文件正文显示出来，即"显示了一段并不存在
+的文件内容"。这是本轮唯一一条**用户可见的错误数据**，因此即使它形式上属 #186 AC3
+（本批的下一票），也在本批直接修掉：AC9 是 #183 自己的验收项，不能带着"部分满足"关批。
+
+### findings 与处置
+
+| # | finding | 轴 | 处置 |
+| --- | --- | --- | --- |
+| 1 | `ChangesTab` 内联 `.diff-cols`，与 `DiffBlock` 双重渲染；且认不出归档态（**显示假内容**） | 两轴 | **已修** → 改为调用 `DiffBlock`；+4 条 SSR 用例（含"marker 原文不得出现在正文"） |
+| 2 | `./src/a.ts` 与 `src/a.ts` 落成两行，违反 AC2"不得一个文件多行" | Spec | **已修** → 折前导 `./`（可证等价）；大小写/分隔符**刻意不折**并写明理由；+2 条用例（折 / 不折各一） |
+| 3 | `changedFiles` 重载：数组形态只有测试在用，注释声称的理由（"最常见调用点"）不成立 | Standards（Speculative Generality） | **已修** → 单一返回形状 + 调用点与 7 处测试同步 |
+| 4 | `ChangesPanel` 同一脚注 JSX 写了两份 | Standards（Duplicated Code） | **已修** → `UnattributedFootnote` |
+| 5 | `App.tsx` 的 `default: return cur` 在闭合联合上不可达 | Standards | **已修** → 删除；tsc 确认穷尽性成立 |
+| 6 | `ChangesPanel.test` 只查"没有 `+N`"，伪造的 `-M` 不会被抓到 | Standards（测试不过硬） | **已修** → 提取统计徽标的可见文本逐个断言；**不**拿整页 HTML 匹配 `-\d`（属性值会命中，那测的是标记） |
+| 7 | e2e AC6 号称覆盖 `CENTER_MIN_W`，但默认视口下永远到不了那条分支 | Standards + Spec | **已修（改断言落点，不假造覆盖）** → 见下"结构性发现" |
+| 8 | `apply_patch` 零覆盖：漏掉它会让这类改动整类从面板消失 | Standards | **已修** → 新增逐名断言三个写工具都在集合里 |
+| 9 | `--inspector-w` 的 CSS 回退值 `320px` 与 `INSPECTOR_MIN_W` 可漂移 | Standards | **不改**，理由见下 |
+| 10 | 写工具集合与后端 `_WRITE_TOOL_NAMES` 跨语言复制，没有测试能抓漂移 | Standards | **不改**（本 worktree 读不到后端源码）；已核对两端当前一致，记为已知风险 |
+| 11 | 非 chunks 的纯文本输出回退仍是自己的 `<pre>`，比中心列少了 grep 截断尾巴的标记 | Spec（AC9 partial） | **不改**，转 #186（需把 `TruncationAwarePre` 从 ToolCard 抽出） |
+
+### 两条**必须纠正的自述**（原 tracker 把它们记成 ✅，与事实不符）
+
+1. **#183 AC9 不是"已完成"**，而是"diff 与 chunks 输出已收敛，纯文本回退未收敛"。
+   第 1 条已修（diff 侧现在真的是单一渲染器），第 11 条仍未收敛——它**不是本批引入**
+   （`!hasChunks` 回退是既有代码，本批只加了 `hasChunks` 分支），但 AC9 的文字没有
+   限定范围，所以记 ✅ 是overclaim。
+2. **#189 AC5 的"归档 → 统计不可得"在生产里走不通**。投影把
+   `archived`/`artifactId` 设在 `parseArtifactMarker` 成功之后，而前端正则抓的是
+   `use inspect_artifact\(([^)]+)\)`，后端 `tooling/overflow.py:118` 发的却是
+   `use read_artifact({artifact_id})`——**两端对不上**。所以 `archived` 永远是 false，
+   `DiffBlock` 的归档占位与 #189 的 `—` 统计都是**死路径**，e2e 用合成 fixture 才走通
+   （那条用例测的是前端自己的正则，不是端到端）。这正是 **#186 AC4**，已列为
+   Ticket D 的**首要**修复项（它同时决定 #186 AC2 的"就地展开"能不能被触发）。
+
+### 结构性发现（因此第 7 条不能靠 e2e 覆盖）
+
+三栏栅格只在 **≥1201px** 生效，那里 `available = viewport − 240 ≥ 961`，
+`available − CENTER_MIN_W` 恒 > 480 ⇒ **`CENTER_MIN_W` 在当前布局下永不生效**，
+上限恒为 `INSPECTOR_MAX_W`。`<1200px` 的折叠分支把面板列写死成 280px，所以 e2e
+**构造不出**"上限真的咬住"的宽度。结论：该保护是**防御性**夹取（换 rail 宽度、加第四栏、
+或提高 `INSPECTOR_MAX_W` 时才会生效），**只由单元测试**覆盖
+（`clampInspectorWidth(480, 700) === 340`）。已在 `inspectorPanel.ts` 写明，并提醒
+改布局的人；e2e 的注释也改成只声称它真正锁住的东西（接线：拖拽确实走到夹取、中心列没被挤没）。
+
+### 未改的三条与理由（不是遗漏）
+
+- **第 9 条**（CSS 回退值）：`var(--inspector-w, 320px)` 的回退值在任何渲染路径上都被
+  `App.tsx` 的内联 `--inspector-w` 覆盖，即它本身不可达；为它加测试要绕开"CSS 不进
+  vitest"这件事，收益低于成本。真正的漂移保护是注释（已有）。
+- **第 10 条**：前端 worktree 里没有后端源码，e2e 又全程 mock API ⇒ 端内没有能
+  "抓漂移"的测试位置。当前两端逐字一致已人工核对。**若后端改这三个名字，前端会静默
+  少文件**——这条风险建议在集成时由集成 AI 复核一次。
+- **第 11 条**：转 #186。抽 `TruncationAwarePre` 是动一个本批未触碰的文件，
+  且属 #186 明写的"单一渲染器"范围，放在本批做会把 diff 扩到票据之外。
+
+### 门禁（全绿）
+
+```
+cd web
+npx tsc -b                            # 0
+npx vitest run                        # 785 passed（+7）
+npx oxlint                            # 0 error / 44 warnings（= 基线）
+npx playwright test --workers=2       # 292 passed
+npx vite build                        # 0
+```
+
+**抖动留痕**：修复后首次全量 e2e 有 1 条失败（`r-project-groups.spec.ts` AC4 项目内重排）。
+单独跑该 spec **22/22 通过**，全量重跑 **292 passed**。判为已知的 `--workers=2`
+资源竞争型抖动（本批改动只碰 Inspector 的 Changes 面 / 中心列「文件/改动」面，与该 spec
+的项目分组无关）。**未**顺手改该 spec（Scope Lock）。
+
+### 本批状态
+
+- 批 2 审查**结束于 `868e05e`**（修复 commit）——下一批的 fixed point。
+- 修复触及 `ChangesTab` 的渲染契约与 `changedFiles` 的聚合语义，按流程做**增量复查**
+  （只复查上轮 findings）+ **变异验证**（不只看"修完是绿的"）：把 `ChangesTab` 换回
+  内联 `.diff-cols`、把聚合键换回原始路径后，新增用例**4 条转红**
+  （路径折叠 1 条 + ChangesTab 3 条），恢复修复即 44/44 转绿——第 1/2 条确实被新用例
+  锁住，不是"看起来覆盖了"。其余 diff 逐行自查。
+- 仍未修/转为下一票的：第 9/10/11 条 + 上表两条自述纠正中列出的跨端 marker 缺陷（#186）。
