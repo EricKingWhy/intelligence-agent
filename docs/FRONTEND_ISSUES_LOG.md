@@ -1500,3 +1500,123 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
 工作）：(1) 给真实集成用例的首次 `connect()` 加预热/重试（gate 脚本本次就是这么绕过的）；
 (2) 更根本地把"冷握手超时"与"真实故障"在错误分类上区分开（例如超时单列一个 category），
 否则生产启动期的首连抖动会被误报成 `unavailable`。**归属：后端（memory 真机测试稳定性）**。
+
+---
+
+## 第十一轮（2026-09-13）：会话硬删（#172 / ADR-0029）真机验收 + 全功能点击（后端 AI 独立执行）
+
+**车道**：前端 `D:\intelligence-agent-frontend`（`feat/frontend`，含 #172 前端半 `57dd028`）dev server `:5173`；
+后端 `D:\intelligence-agent-backend`（`feat/backend`，含 #172 后端半 `4109b08`）uvicorn `:8000`；
+浏览器 Chrome DevTools（CDP），视口 **1440×900**。
+
+> ⚠️ **环境前置（不是缺陷，但会让人误判）**：本轮开始时的浏览器视口 **< 820px**，会话行的 kebab
+> 菜单被媒体查询整块 `display:none`，于是「删除会话…」看起来"不存在"。**验收必须在 ≥820px 视口做**，
+> 否则会把响应式隐藏当成功能缺失。已把视口固定为 1440×900 后复测（见 SID-02 的窄视口结论）。
+
+### 已通过（作为证据登记，非问题）
+
+- **`SID-P0` 会话硬删全链路（#172 前端半 + 后端半）真机通过**。步骤与证据：
+  1. 用 UI 新建一个一次性会话（`6d2f6b90-8d6d-4c57-a513-2a0f45fda034`，任务「只回复两个字：OK」，
+     15 事件；`model/fallback deepseek-v4-flash-0731 → glm-4.5-air` 是设计内回退）。
+  2. kebab → 菜单三项（加入项目… / 新建项目… / 删除会话…）→ 「删除会话…」→ 确认弹窗：
+     文案含「**硬删除，不可恢复**」「没有回收站、没有撤销」，并显示标题 + id 片段；确认按钮写
+     「永久删除（不可恢复）」。
+  3. **取消路径零请求**：点「取消」后 `role="dialog"` 消失、行仍在，网络面板无任何 `DELETE`（只有之前的 GET/POST）。
+  4. 确认删除 → `DELETE /api/sessions/6d2f6b90-…` → **200**，响应体与 ADR-0029 契约逐字一致：
+     `{"id":"6d2f6b90-…","deleted":true,"events":17,"detached_from_projects":0}`。
+  5. 前端收敛（实测）：行从 33 → 32 消失；对话区回到「暂无对话」空态；**RUN INSPECTOR 面板整体消失**；
+     `localStorage` 清空（记住的会话 id 已清，刷新不会被拉回死会话）；URL 无死 id；随后自动重拉
+     `GET /api/sessions` + `GET /api/projects`。
+  6. 后端收敛（实测）：`sessions/<sid>/`、`workspaces/<sid>/`、`workspaces/<sid>.json` 三条路径全部不存在；
+     `session_meta` / `operations` / `checkpoints` / `workspace_sessions` 四表该 id 计数全为 0；
+     `GET /api/sessions` 32 条不含它；`GET /api/sessions/<sid>/events` → **404**。
+  7. 审计（实测）：`.agent/logs/agent.jsonl` 恰有 1 条 `session_delete`，字段只有
+     `session_id` / `events=17` / `detached_from_projects=0` / `repaired_delegation_links=0` + 时间戳，
+     **不含任何会话内容**（ADR-0029 D7）。
+- **列表 `事件数` 与删除回执 `events` 可以不一致，且这是对的**：列表行显示 15、回执 17。差值是 run
+  完成**之后**由 memory capability 追加的 2 条事件——列表是拉取时的快照，回执是删除前现取的真值。
+  前端半刻意**不**把列表里的 `event_count` 放进确认弹窗（`DeleteSessionTarget` 不含事件数），
+  正是为了不拿二手值当事实陈述。此处前后端口径一致，非缺陷。
+
+### 问题清单（本轮）
+
+#### SID-01 【前端·P2·设计确认项】≤820px 视口下删除会话入口彻底不可达
+
+- **现象**：视口 < 820px 时，会话行的 kebab（`.rail-menu-btn`）被 `@media (max-width: 820px)` 置为
+  `display: none`，且会话行内部**没有替代入口**（无右键菜单、无长按菜单、无行内删除）。删除会话
+  这个功能在窄窗口/小屏上**物理上无法触达**。
+- **证据**：`getComputedStyle(kebab) → {display: none, opacity: 0, rect: all-zero}`；
+  CSS 规则实测为 `.rail-menu-btn { opacity: 0; width:22px; height:22px }` +
+  `.session-row:hover .rail-menu-btn, .session-row:focus-within .rail-menu-btn, … { opacity: 1 }` +
+  `@media (max-width: 820px) { … .rail-menu-btn { display: none } }`。
+- **注意**：同一媒体查询也隐藏 `项目` 分组头菜单（`.rail-project-head`），所以窄视口下**项目重命名/软删
+  也不可达**——这是既有设计（不是 #172 引入的），但 #172 让"不可达的后果"从"不能整理"升级成"不能删数据"。
+- **建议**：要么把 820px 断点下移/允许横向滚动，要么在窄视口给一个替代入口（行内 `…` 或长按）。
+- **归属**：前端。**修之前先确认产品是否支持窄视口**（当前更像桌面工具，若明确不支持则本项标 `不改（理由）`）。
+
+#### SID-02 【前端·P2】删除确认弹窗的初始焦点落在「关闭(X)」
+
+- **现象**：弹窗打开后焦点在右上角 `关闭` 按钮（`uid=8_2` / `11_2`，`focusable focused`），而不是
+  「取消」。键盘用户回车/空格会直接关闭弹窗（后果无害），但焦点位置与"危险操作默认落在安全项"的
+  通行做法相反；风险点是**键盘用户按 Tab 的落点顺序**（关闭 → 取消 → 永久删除），而不是误删。
+- **建议**：Radix `onOpenAutoFocus` 指到「取消」。
+- **归属**：前端。
+
+#### SID-03 【文档·P2】`docs/ACCEPTANCE_LANE_ENV.md` §2 的"期望能力集"已过期
+
+- **现象**：文档写「期望 count=2: websearch + multiagent」，实测 `GET /api/capabilities` 返回 **3**：
+  `websearch` + `multiagent` + **`memory`**（#159 MEM-4 之后接入的）。
+- **影响**：接手验收的人按文档核对会以为多出来的 `memory` 是异常，或反之漏检。
+- **建议**：§2 期望值改为 3（并说明 memory 提供什么面）。
+- **归属**：文档（后端侧维护）。
+
+#### SID-04 【流程·P2】`docs/FRONTEND_ISSUES_LOG.md` 在两个 worktree 之间已**分叉**
+
+- **现象**：同一路径下两份内容不同——`feat/backend` 工作区 1502 行（末轮=第十轮），
+  `feat/frontend` 工作区 1780 行；**两边都有「第九轮」但内容不同**（后端侧=PromptRegistry 迁移观察，
+  前端侧=WS-3 #153 列表契约）。合并时必然撞车，且"第十一轮"这个编号在两侧会指向不同东西。
+- **本轮的处置**：按 AGENTS.md §13.1.3（不共用一个 worktree）**只写本工作区（feat/backend）这一份**，
+  不动前端工作区那份。
+- **建议**：集成 AI 在合并时把两侧各轮**按时间顺序保留并在冲突处重新编号**（append-only 日志不允许
+  丢任何一轮），此后约定"谁改哪个 worktree 就往哪份写"或统一收敛成一份。
+- **归属**：集成。
+
+### 第十一轮 · 追加（同一轮继续，2026-09-13）
+
+#### 已通过（证据登记）
+
+- **`SID-P0b` 删除成功后的回执态**：确认删除后弹窗**不立即关闭**，而是切成回执：`role="status"`
+  实时区播报「已永久删除 17 条事件记录（不可恢复）；它不在任何项目里。」+「完成」按钮。
+  两个数字都取自后端响应（`events` / `detached_from_projects`），与 ADR-0029 的回执意图一致。
+- **`SID-P0c` 刷新一致性（用户点名项）真机通过，且是逐字节一致**。同一会话 `7cf291d1`（59 事件、
+  含 delegate 委派）刷新前后指纹完全相同：
+  | 指标 | 刷新前 | 刷新后 |
+  | --- | --- | --- |
+  | `body.innerText` 哈希 | `1507534181` | `1507534181` |
+  | 正文字符数 | 4339 | 4339 |
+  | 选中会话（`ahi.selectedSession`） | `7cf291d1-…` | `7cf291d1-…`（同一行仍带 selected） |
+  | Inspector 页签 | `Timeline59 / Overview / Changes0 / Terminal0 / Artifacts0` | 完全一致 |
+  | 委派内容（Tavily/委派行） | 在 | 在 |
+  机制：`lib/sessionRestore.ts`（`ahi.selectedSession` + 恢复游标），源码注释写明它就是为
+  BUG-005「刷新后选中的会话与全部内容消失」修的——本轮实测确认该修复在真机上成立。
+  **附注（非缺陷）**：选中会话**不进 URL**（无路由 / 无 hash），所以不能靠链接直达或分享某个会话；
+  刷新恢复完全依赖 localStorage（清掉 localStorage 或换浏览器即回到空态）。若将来要"可分享链接"，
+  这是要新做的功能，不是当前 bug。
+- **密度四档（紧凑/均衡/详细/Raw）全部有反应**：正文长度 4339 → 4281 / 4339 / 4691 / 6440（Raw 最全），
+  切换即生效且**跨刷新保持**（`ahi.traceDensity`）。
+- **思考块展开 / 运行折叠：有反应**（+3 / −424 字符）。
+- **Run Inspector 五个页签全部有反应**：Overview / Changes / Terminal / Artifacts 均切换出对应面板
+  （Timeline 点第二次无变化属正确——它本来就是选中页签，重复点击是幂等的）。
+- **`Esc` 关闭令牌浮层：有效**。⚠️ 过程记录：用页面内合成 `KeyboardEvent('Escape')` 关不掉它，
+  一度误判为"浮层关不掉"；改用**真实按键**（CDP `press_key`）后立刻关闭。结论：那是合成事件的
+  限制（Radix 只信真实按键），**不是产品缺陷**——记在这里以免下次有人重踩。
+
+#### 方法学备注（写给下一轮验收的人）
+
+1. **视口必须 ≥820px**，否则 `.rail-menu-btn` / `.rail-project-head` 被媒体查询整块隐藏（见 SID-01）。
+2. **页面内合成 `.click()` 对 React `onClick` 有效，对 Radix 触发器无效**（Radix 菜单/弹层要
+   `pointerdown` 序列）。所以：批量撒点可以用合成点击做**初筛**（筛出"没反应"的候选），
+   但每个候选必须再用**真实点击**复验后才能登记成缺陷——否则会把合成事件限制误报成 bug（本轮
+   Escape 与 kebab 都踩过这个坑，两次都由"真机复验"纠正）。
+3. 危险词（删除/清空/永久/重置/移除）与会起 run 的词（发送/新建会话/分叉）**不进自动撒点**，
+   逐个手点并单独验证。
