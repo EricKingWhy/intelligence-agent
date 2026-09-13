@@ -79,6 +79,7 @@ from agent_harness.tooling.contract import (
     PERMISSION_MODE_DESCRIPTIONS,
     PermissionPolicy,
 )
+from agent_harness.web import artifacts
 from agent_harness.web.domain_errors import http_error
 from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
@@ -1224,6 +1225,97 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             events=stats.events,
             detached_from_projects=stats.detached_from_projects,
         )
+
+    @app.get("/api/sessions/{session_id}/artifacts/{artifact_id}")
+    async def read_artifact_content(
+        session_id: str,
+        artifact_id: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        keyword: str | None = None,
+        max_lines: int = artifacts.MAX_LINES_CAP,
+        max_chars_per_line: int = artifacts.MAX_CHARS_PER_LINE_CAP,
+    ) -> dict[str, Any]:
+        """读取外置 artifact 的局部内容（#185）。
+
+        外置产物是**被截断的大工具输出 / 大 diff**：工具结果超过
+        `artifact_overflow_chars` 时原文落到对象存储，会话里只留"摘要 + ref"（不变量
+        #15：大内容外置，模型只拿 summary + ref）。本端点把模型侧同一个读入口
+        （`ArtifactStore.inspect`）暴露给 Web，让界面能真的看到那段内容。
+
+        状态码语义：
+
+        - 422 → `session_id` 或 `artifact_id` 形态非法（客户端 bug，不是冲突）；
+        - 404 → 会话不存在，或该 artifact 不在这个会话的命名空间里。**别的会话的
+          产物也走这条**：`artifact_id` 是内容哈希、跨会话可重复，区分"不存在"与
+          "存在但不可读"只会把归属变成可探测的信息；
+        - 503 → 本部署**确实没有可读取的存储**（`artifact_dir` 置空、或对象存储半配置）
+          ——**如实上报**，不假装成 404：那会让用户以为"这个产物不存在"；
+        - 200 → 切片，`truncated` 如实表示返回内容是否完整。
+
+        ⚠ #192 之后 404 的含义变宽了：未配对象存储的部署现在走**本地**默认 Provider
+        （spec 06 §3），它**能读**，只是里面没有这个 id ⇒ 404。503 只留给"真的没有可读
+        存储"这一种情形。
+
+        隔离靠"**用 URL 里的 session_id 构造 store**"：provider 的 key 前缀是
+        `{session_id}/{artifact_id}`，而 artifact_id 不携带归属，归属只能由
+        session_id 决定。
+
+        体积上限由**服务端**兜底：客户端给再大也会被夹进上限。`max_lines` 夹取后的
+        **实际生效值**在 `query.max_lines` 里回显；`max_chars_per_line` 同样按服务端
+        上限执行（`ArtifactSlice.query` 不携带该字段，故不回显）。行号从 1 开始，
+        `start_line` / `end_line` < 1 一律 422——与模型侧 `inspect_artifact` 的
+        schema（`ge=1`）保持同一口径。
+        """
+        state = app.state.agent
+        try:
+            validate_session_id(session_id)
+        except InvalidSessionId as e:
+            raise http_error(e) from e
+        if not artifacts.ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "artifact_id 必须是 16 位小写十六进制（内容哈希前 16 位）："
+                    f"{artifact_id!r}"
+                ),
+            )
+        for name, value in (("start_line", start_line), ("end_line", end_line)):
+            if value is not None and value < 1:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{name} 必须 >= 1（行号从 1 开始计数）：{value}",
+                )
+        if not await SessionService(state).has_session(session_id):
+            raise http_error(SessionNotFound(f"session '{session_id}' not found"))
+        store = artifacts.build_read_artifact_store(state.settings, session_id)
+        if store is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "本部署没有可读取的 artifact 存储：artifact_dir 为空，或对象存储只配了一半"
+                ),
+            )
+        try:
+            slice_ = await store.inspect(
+                artifact_id,
+                start_line=start_line,
+                end_line=end_line,
+                keyword=keyword,
+                max_lines=artifacts.clamp_to_cap(max_lines, artifacts.MAX_LINES_CAP),
+                max_chars_per_line=artifacts.clamp_to_cap(
+                    max_chars_per_line, artifacts.MAX_CHARS_PER_LINE_CAP
+                ),
+            )
+        except KeyError as e:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"artifact {artifact_id!r} 不在会话 {session_id!r} 的命名空间里"
+                    "（不存在，或属于别的会话）"
+                ),
+            ) from e
+        return slice_.model_dump()
 
     @app.post("/api/sessions/{session_id}/approve")
     async def approve_tool_call(session_id: str, req: ApproveRequest) -> dict[str, str]:
