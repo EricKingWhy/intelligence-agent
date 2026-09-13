@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
@@ -475,12 +475,16 @@ function projectRunInterrupted(state: ConversationState, event: AgentEvent): voi
 }
 
 /** Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
- *  Attach the ref to the producing tool call so the Inspector can fetch it. */
-function projectArtifactCreated(state: ConversationState, event: AgentEvent): void {
-  const data = event.data;
+ *  Attach the ref to the producing tool call so the Inspector can fetch it.
+ *
+ *  `artifact/created` 与 `artifact/externalized` **共用**这段：两者的 payload 同构
+ *  （artifact_id / tool_call_id / size / mime_type / source_tool），只是历史上一个是
+ *  规格里的名字、一个是运行时真正发的名字（详见 #173）。返回 false = 找不到宿主
+ *  tool_call，由调用方决定兜底。 */
+function attachArtifactToTool(state: ConversationState, data: Record<string, unknown>): boolean {
   const toolCallId = String(data.tool_call_id ?? '');
   const turnIdx = state.turns.findIndex((t) => t.tools.some((tc) => tc.tool_call_id === toolCallId));
-  if (turnIdx === -1) return;
+  if (turnIdx === -1) return false;
   const prevTurn = state.turns[turnIdx];
   const toolIdx = prevTurn.tools.findIndex((tc) => tc.tool_call_id === toolCallId);
   const tool = cloneTool(prevTurn.tools[toolIdx]);
@@ -493,6 +497,26 @@ function projectArtifactCreated(state: ConversationState, event: AgentEvent): vo
   const turn = cloneTurn(prevTurn);
   turn.tools[toolIdx] = tool; // cloneTurn 已给出新 tools 数组，原位替换即可
   replaceTurnAt(state, turnIdx, turn);
+  return true;
+}
+
+/** 历史行为不变：找不到宿主就静默（该类型此前的语义就是如此）。 */
+function projectArtifactCreated(state: ConversationState, event: AgentEvent): void {
+  attachArtifactToTool(state, event.data);
+}
+
+/** 运行时**真正**发出的外置事件（`artifact/externalized`，见 `tooling/overflow.py`）。
+ *
+ *  此前它被登记为「词汇表内但前端尚未接线」→ 落 `unknown_events`，导致有产物的会话里
+ *  Artifacts 页签恒空、页面还写「本次会话未产生 Artifact。」（第十一轮真机验收 ART-01）。
+ *
+ *  与 `artifact/created` 的**唯一**差别：找不到宿主 tool_call 时**不静默**——externalized
+ *  自带 artifact_id，是"这里确实有一个外置产物"的独立事实，静默丢弃会让用户既看不到产物、
+ *  TRACE 里也不再有任何痕迹。 */
+function projectArtifactExternalized(state: ConversationState, event: AgentEvent): void {
+  if (!attachArtifactToTool(state, event.data)) {
+    unhandledProjection(state, event);
+  }
 }
 
 /** Context window exceeded → older turns summarized (Phase 5, spec 06).
@@ -820,8 +844,12 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectArtifactCreated,
     summarize: summarizeArtifactCreated,
   },
+  // 运行时真正发的外置事件（#173 前它是"未接线"）——与 created 同一投影、同一摘要。
+  [EventType.ARTIFACT_EXTERNALIZED]: {
+    apply: projectArtifactExternalized,
+    summarize: summarizeArtifactCreated,
+  },
   // 词汇表内但前端尚未接线——显式登记，保持既有兜底行为（进 unknown_events）。
-  [EventType.ARTIFACT_EXTERNALIZED]: { apply: unhandledProjection, summarize: unknownSummary },
   [EventType.CONTEXT_COMPACTED]: {
     apply: projectContextCompacted,
     summarize: summarizeContextCompacted,
@@ -1041,6 +1069,33 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
   return state.turns.length + 1;
 }
 
+/** 是否还有**真正欠用户决策**的审批。
+ *
+ *  失效审批（`stale`，见 `markPendingApprovalsStale`）不算：它所在 run 已终结，
+ *  没有任何东西在等这个决策。若把它算进去，会话就被**永久锁死**——卡片只读、
+ *  composer 也一直禁用，用户在这个会话里再也发不出一句话（APR-01 真机就是
+ *  这个死局：卡点不动、点也只换来 404、刷新还在）。 */
+export function awaitingApproval(approvals: readonly PendingApproval[]): boolean {
+  return approvals.some((a) => !a.stale);
+}
+
+/** run 终结（completed/failed/interrupted）时仍未配对的审批 = 永久失效。
+ *
+ *  `approval_queues` 是**纯内存**的（`session/service.py:934`），run 结束时即被 GC
+ *  （`service.py:1233-1241`），恢复链路（`recovery/`）完全不复现审批 →
+ *  重启/中断后这条审批**不可能再被 resolve**，而它的 `tool/approval-requested` 事件
+ *  永久留在 JSONL 里，于是刷新多少次都会重新渲染出来（APR-01 真机：点了只有 404）。
+ *  在投影层一次判定，渲染层不必自己拼事件顺序。
+ *
+ *  正常流程不受影响：run 会停在审批上等待决策，只有 run 已经结束还在 pending 的
+ *  才是孤儿（即 `permission/resolved` 事件缺失的那种）。 */
+function markPendingApprovalsStale(state: ConversationState): void {
+  if (!state.pending_approvals.some((a) => !a.stale)) return;
+  state.pending_approvals = state.pending_approvals.map((a) =>
+    a.stale ? a : { ...a, stale: true },
+  );
+}
+
 /** Mark a run as finished and settle every in-flight turn.
  *
  * RUN_COMPLETED and RUN_FAILED share the same sweep — only the terminal
@@ -1051,6 +1106,7 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
 function finalizeRun(state: ConversationState, status: 'completed' | 'failed', time?: string): void {
   state.run_status = status;
   state.active_step_id = null;
+  markPendingApprovalsStale(state);
   const turnStatus = status === 'failed' ? 'failed' : 'done';
   let changed = false;
   const turns = [...state.turns];

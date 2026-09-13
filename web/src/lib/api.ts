@@ -15,6 +15,7 @@ import type {
   Project,
   ProjectDeleted,
   ProjectStatus,
+  SessionDeleted,
   SessionSummary,
 } from '../types';
 import { emitUnauthorized, getToken } from './auth';
@@ -37,6 +38,14 @@ export class NotFoundError extends Error {}
  *  这**不是**错误：用户的意图已经生效，卡片应翻到「已批准/已拒绝」。
  *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
 export class AlreadyResolvedError extends Error {}
+
+/** 404 = 审批队列里没有这个 approval_id：进程重启或 run 终结后队列已被 GC，
+ *  这条审批**永远不可能再被 resolve**（`app.py:1236-1240` 已把它写进契约）。
+ *
+ *  不复用 NotFoundError：与 deleteSession 的 404 是同一取舍（`api.test.ts:804`）——
+ *  「用户想提交的东西本就不在了」与「加载路径拿不到内容」对调用方的含义不同。
+ *  也不是可重试错误：重试多少次都是 404。 */
+export class ApprovalGoneError extends Error {}
 
 /** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
@@ -350,6 +359,7 @@ export async function postApproval(
     }),
   });
   if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
+  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（运行已中断或服务已重启）');
   if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }
@@ -405,6 +415,80 @@ export async function cancelSession(sessionId: string): Promise<{ status: string
   });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
   return res.json();
+}
+
+// ── Session hard delete（#172 / ADR-0029：用户显式硬删，不可恢复）──
+
+/** 会话删除失败：状态码 + 后端 detail 原文。
+ *
+ *  与 `ProjectError` / `MemoryError` 同构但**分开**（同 describeMemoryError 的理由：
+ *  能力各自演进，共用一个会让一侧的语义渗到另一侧）。这里的 `status` 是调用方真的
+ *  会分支的字段——404（这个会话已经不存在了）与 409（后端拒绝删）导向**不同**的
+ *  界面收敛，见 `deleteSession` 的注释。
+ *
+ *  刻意**不**复用 `NotFoundError`：那个是"加载路径拿不到内容"的信号（历史装载据此
+ *  清掉记住的会话并安静回空态），而删除的 404 是"用户想删的东西本就不在了"——
+ *  两者对界面的含义不同，且这里必须带上状态码。 */
+export class SessionError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 硬删会话（DELETE /api/sessions/{id}，ADR-0029）——**不可恢复**：无墓碑、无回收站。
+ *  调用方必须先拿到用户的显式二次确认：ADR-0029 把"误删不可逆"的全部风险明确压在
+ *  **入口层**，运行时不提供任何技术兜底。
+ *
+ *  状态码语义（后端 `web/app.py::delete_session` 的契约，前端不合并它们）：
+ *    200 `{id, deleted:true, events, detached_from_projects}` —— 真删了；
+ *    404 —— 这个会话不存在（**第二次删除就是这个**：后端刻意不伪装成"又删了一次"，
+ *           所以调用方要按"列表已过期"收敛，而不是当作一次成功的删除）；
+ *    409 —— 三种原因状态码相同、**只能靠 `detail` 区分**：有在途 run / 有挂起审批 /
+ *           是 fork 父会话（detail 里带**真实**子会话数量）。因此这里原样保留 detail、
+ *           绝不自己编文案——编了就会把"有 2 个 fork 子会话"说成一个泛泛的失败；
+ *    422 —— id 形态非法（正常路径不会触发：id 来自行数据，不是用户输入）；
+ *    403 —— 非本机 Origin（宿主侧不可逆操作只接受本机来源，ADR-0025 D1）。
+ *
+ *  跨会话的副作用后端已自洽：被删会话若被**委派**子会话指着，那条父链接会被清掉
+ *  （家谱图不会出现 `(parent missing)`），前端不需要为此做任何兼容。 */
+export async function deleteSession(sessionId: string): Promise<SessionDeleted> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await sessionError(res, '删除会话失败');
+  // 形状防御：非对象（null / 数组 / 字符串）一律当"没给"处理，别让读字段抛
+  // TypeError——那时调用方拿到的是"读属性失败"，而不是"删掉了但回执为空"。
+  // `deleted` 不从 body 读：走到 200 就是真删了（见 SessionDeleted 类型注释），
+  // 后端 schema 也是 `Literal[True]`——这里没有可窄化的第二种取值。
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<SessionDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : sessionId,
+    deleted: true,
+    // 事件数缺失时给 0（与 deleteProject 的 sessions_detached 同一纪律）：这两个
+    // 计数只用于回执文案，编不出真值时宁可少说，也不去猜一个像样的数字——回执那边
+    // 把 events 的 0 当"没给数"处理（见 lib/sessionDelete.ts）。
+    events: typeof body.events === 'number' ? body.events : 0,
+    detached_from_projects:
+      typeof body.detached_from_projects === 'number' ? body.detached_from_projects : 0,
+  };
+}
+
+/** 非 2xx → SessionError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
+async function sessionError(res: Response, fallback: string): Promise<SessionError> {
+  const detail = await readErrorDetail(res);
+  return new SessionError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 会话删除错误 → 展示文案：SessionError 的 message 就是后端 detail（或兜底前缀），
+ *  其余异常（网络层 TypeError 等）用 message 或 fallback。与 `describeProjectError`
+ *  / `describeMemoryError` 同构但分开——三处各自演进。 */
+export function describeSessionError(error: unknown, fallback: string): string {
+  if (error instanceof SessionError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
 }
 
 // ── Recover（后端新端点，df4f7d8 §1.1）──

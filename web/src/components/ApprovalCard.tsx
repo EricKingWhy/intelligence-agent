@@ -10,7 +10,15 @@
  * OBS-015 fix: the catch block used to flip the card to "approved/denied"
  * on ANY error — a dangerous false positive for security interactions.
  * Now: 409 (AlreadyResolvedError) → idempotent success, flip card;
+ * 404 (ApprovalGoneError) → 只读失效态（重试无意义）;
  * other errors → keep card pending, show error message, allow retry.
+ *
+ * APR-01 fix（第十一轮真机）：`approval_queues` 是纯内存、run 终结即 GC，而
+ * `tool/approval-requested` 永留 JSONL → 重启后这张卡**每次刷新都会重演**，
+ * 点了只有 404、也没有关闭路径。现在投影层把「run 已终结仍 pending」的审批
+ * 标 `stale`（`projection.ts::markPendingApprovalsStale`），卡片渲染只读失效态：
+ * 标题「审批已失效」+ 禁用按钮 + 说明，且不挂全局快捷键（一次 Ctrl+Enter
+ * 不该只换来一个 404）。"重新发起审批"需后端在 resume 时重放 approval，不在本票范围。
  *
  * UI-01 重塑（PRD §UI-01，用户决策 D4：①②③⑤；倒计时 ④ 缓做）：
  *  - 结构化参数呈现（R7）：path 置顶可复制、command/content 原文块、
@@ -23,7 +31,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ShieldAlert, Check, X } from 'lucide-react';
 import type { PendingApproval } from '../types';
-import { postApproval, AlreadyResolvedError } from '../lib/api';
+import { postApproval, AlreadyResolvedError, ApprovalGoneError } from '../lib/api';
 import { classifyPreviewArgs } from '../lib/approvalPreview';
 import { modKey } from '../lib/platform';
 import { CopyButton } from './CopyButton';
@@ -34,13 +42,21 @@ interface Props {
   approval: PendingApproval;
   /** 多卡并存时只有第一张（Conversation 传 index===0）自动聚焦。 */
   autoFocus?: boolean;
+  /** 只读失效态：投影判定（run 已终结的孤儿）或后端实证（提交回 404）。
+   *  由 App 统一计算并同时驱动 composer 解锁——卡内不留第二份真相。 */
+  invalid?: boolean;
+  /** 提交时后端回 404 → 上报 approval_id，让 App 记下这条审批已失效。 */
+  onGone?: () => void;
 }
 
-export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) {
+export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: invalidProp = false, onGone }: Props) {
   const [decision, setDecision] = useState<'pending' | 'approved' | 'denied'>('pending');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
+  // `decision === 'pending'` 是前提：已批准的卡不该因为之后又来一个 run 终结事件
+  // 而丢掉「已批准」字样（失效只描述"还能不能提交决策"）。
+  const invalid = decision === 'pending' && invalidProp;
 
   // 挂载聚焦一次即可：决策后不抢回焦点（用户可能已在别处操作）。
   useEffect(() => {
@@ -49,7 +65,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
   }, []);
 
   const decide = async (approved: boolean) => {
-    if (busy) return;
+    if (busy || invalid) return;
     setBusy(true);
     setError(null);
     try {
@@ -59,6 +75,10 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
       if (e instanceof AlreadyResolvedError) {
         // 409 = another tab or retry already resolved it; treat as our intent succeeding.
         setDecision(approved ? 'approved' : 'denied');
+      } else if (e instanceof ApprovalGoneError) {
+        // 404 = 后端队列里没有这条审批（重启/run 终结已 GC）——重试无意义。
+        // 失效事实上报给 App（它同时管着 composer 锁），本卡只读下来。
+        onGone?.();
       } else {
         // Network failure / 5xx / etc.: decision did NOT reach backend.
         // Keep card pending so user can retry; show visible error.
@@ -74,8 +94,9 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
   // 安全约束（U-1 review P1）：**只有 autoFocus 卡（第一张 pending 卡）挂全局
   // 监听**——否则 N 卡并存时一次 Ctrl+Enter 会向 N 个 approval_id 各发一 POST，
   // 等于一次按键批量批准多个危险操作。
+  // 失效卡同样不挂：一次 Ctrl+Enter 只该得到 404，不该发送请求。
   useEffect(() => {
-    if (!autoFocus || decision !== 'pending' || busy) return;
+    if (!autoFocus || decision !== 'pending' || busy || invalid) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.repeat) return;
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -106,7 +127,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
   return (
     <div
       ref={cardRef}
-      className={`approval-card ${decision}`}
+      className={`approval-card ${decision}${invalid ? ' invalid' : ''}`}
       role="alertdialog"
       aria-modal="false"
       aria-labelledby={titleId}
@@ -116,9 +137,10 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
       <div className="approval-header">
         <ShieldAlert size={16} className="approval-icon" />
         <span className="approval-title" id={titleId}>
-          {decision === 'pending' && '需要审批'}
-          {decision === 'approved' && '已批准'}
-          {decision === 'denied' && '已拒绝'}
+          {invalid && '审批已失效'}
+          {!invalid && decision === 'pending' && '需要审批'}
+          {!invalid && decision === 'approved' && '已批准'}
+          {!invalid && decision === 'denied' && '已拒绝'}
         </span>
       </div>
       {desc && (
@@ -152,7 +174,12 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
           )}
         </div>
       )}
-      {error && (
+      {invalid && (
+        <p className="approval-invalid-note" role="status">
+          该审批已失效——所在运行已结束或服务已重启，决策无法再提交。
+        </p>
+      )}
+      {error && !invalid && (
         <div className="approval-error" role="alert">
           {error}
         </div>
@@ -161,17 +188,17 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false }: Props) 
         <div className="approval-actions">
           <button
             className="btn-primary approval-approve"
-            disabled={busy}
+            disabled={busy || invalid}
             onClick={() => decide(true)}
           >
-            <Check size={14} /> 批准 <kbd className="approval-kbd">{mod}+⏎</kbd>
+            <Check size={14} /> 批准 {!invalid && <kbd className="approval-kbd">{mod}+⏎</kbd>}
           </button>
           <button
             className="btn-ghost approval-deny"
-            disabled={busy}
+            disabled={busy || invalid}
             onClick={() => decide(false)}
           >
-            <X size={14} /> 拒绝 <kbd className="approval-kbd">{mod}+⌫</kbd>
+            <X size={14} /> 拒绝 {!invalid && <kbd className="approval-kbd">{mod}+⌫</kbd>}
           </button>
         </div>
       )}

@@ -157,6 +157,24 @@ export interface SessionSummary {
   workspace: WorkspaceRef | null;
 }
 
+/** `DELETE /api/sessions/{id}` 的成功响应（硬删回执，#172 / ADR-0029）。
+ *
+ *  与 `ProjectDeleted`（软删）**刻意不同形**：那个带 `sessions_detached` 与 `detail`
+ *  来解释"会话没被删"，这里走到 200 就是**东西没了**——没有墓碑、没有回收站，
+ *  也没有"半删"状态可表达。后端 schema 用 `Literal[True]` 把这件事钉死
+ *  （`web/app.py::SessionDeleted`），前端类型照抄同一个字面量：调用方因此写不出
+ *  一个无意义的 `if (receipt.deleted)`（那问题在客户端根本不存在）。
+ *
+ *  `events` = 删除前事件日志的条数（**删除前**取——删完只剩文件系统，无从统计）；
+ *  `detached_from_projects` = 本次从几个项目账本里摘掉了它（正常 0/1）。两者是
+ *  确认回执的唯一数据来源：前端不自己数，也不猜。 */
+export interface SessionDeleted {
+  id: string;
+  deleted: true;
+  events: number;
+  detached_from_projects: number;
+}
+
 /**
  * Token 用量形状——model/completed.data.usage 与 run/completed.data.usage_total
  * （后端 Gap 1）。AgentEvent.data 是宽松 Record<string, unknown>，此接口是
@@ -393,6 +411,11 @@ export interface PendingApproval {
   reason: string;
   allowed_decisions: string[];
   time?: string;
+  /** 该审批所在 run 已终结（completed/failed/interrupted）仍未被 permission/resolved
+   *  配对 → 后端审批队列已随 run GC（session/service.py:1233-1241），决策永不可能
+   *  再提交（POST /approve → 404）。判据全部来自事件流，无需新 API。
+   *  ApprovalCard 据此渲染只读失效态，不再提供必然失败的批准/拒绝按钮。 */
+  stale?: boolean;
 }
 
 export interface ConversationState {

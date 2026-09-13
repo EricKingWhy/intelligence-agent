@@ -814,6 +814,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: var(--text-sm);
   color: var(--text-primary);
 }
+/* FE-R11-08：空白标题提交时的就地提示。窄栏里不给长句——用「不能为空」压住宽度，
+ * 完整语义由 input 的 aria-label（项目名）+ aria-describedby 拼给辅助技术。 */
+.project-rename-error {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--color-destructive);
+  white-space: nowrap;
+}
+.rail-project-toggle-static .project-rename-input[aria-invalid='true'] {
+  border-color: var(--color-destructive);
+}
 .project-rename-input:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: 0;
@@ -965,6 +976,33 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: var(--text-sm);
   line-height: 1.6;
   color: var(--text-primary);
+}
+/* 待删对象的身份块（会话硬删确认面，#172）：标题 + id 片段——用户据此确认"我点的
+ * 是这一条"。材质沿用 .project-input（surface-2 + border-subtle + radius-sm），
+ * 不引入新 token：§15 的双主题同步只对新增/改动 token 有要求，这里一个都没动。 */
+.project-dialog-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.project-dialog-target-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  /* 标题可达 128 字符（后端截断值）：换行，别把浮层撑破（长句无空格也要断）。 */
+  overflow-wrap: anywhere;
+}
+.project-dialog-target-id {
+  /* 会话 id 片段是技术标识，用等宽——这里显式写 font-family 而不是靠 `mono` 类：
+     本仓没有独立的 `.mono` 规则（只有 `.project-input.mono` 这种复合选择器），
+     挂一个空类名只会让人以为字号/字体已经被处理过了。 */
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
 }
 .project-field {
   display: flex;
@@ -2773,6 +2811,24 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--color-destructive);
   font-size: var(--text-xs);
 }
+/* APR-01: 失效态（run 已终结仍 pending → 后端队列已 GC，决策永不可能提交）。
+ * 不用 danger 红——这不是"出错了"，而是一个已经翻篇的历史事实；用中性描边 +
+ * 降饱和说明"这张卡还在，但它已经不能动了"。 */
+.approval-card.invalid {
+  opacity: 0.72;
+  border-color: color-mix(in srgb, var(--text-primary) 18%, transparent);
+}
+.approval-invalid-note {
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.approval-card.invalid .approval-actions button {
+  cursor: not-allowed;
+}
 
 /* ── Composer：Floating Command Dock（视觉中心） ──
  * elevation 提到最高档：它是空闲时唯一的动作焦点，值得浮在 workspace 之上；
@@ -3599,21 +3655,103 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
   .session-list-header .panel-label,
   .session-item-body,
-  .session-item-dot,
   .new-session-btn,
   .session-group-label {
     display: none;
   }
-  /* WS-5 #155：56px 图标轨里放不下层级 chrome——项目头/区标题/菜单/空态一律收起，
-   * 只留下每个会话的点（与改版前"只看到点"的窄屏行为一致）。层级信息在窄屏丢失
-   * 是刻意的降级：这个宽度下任何折叠态都表达不了两层结构。 */
+  /* WS-5 #155：56px 图标轨里放不下层级 chrome——区标题/空态/错误条一律收起，
+   * 只留下每个会话的点 + 每个项目的文件夹（与改版前"只看到点"的窄屏行为一致）。
+   * 层级信息在窄屏丢失是刻意的降级：这个宽度下任何折叠态都表达不了两层结构。 */
   .rail-section-label,
-  .rail-project-head,
   .rail-project-empty,
   .rail-project-missing,
-  .rail-menu-btn,
   .rail-error {
     display: none;
+  }
+  /* FE-R11-09：上一行的收起清单里**不含** `.rail-menu-btn`（原来含，是个漏配）——
+   * 窄屏下行里只剩这一个 24px 槽位，菜单是到达重命名/移出项目/删除会话的**唯一**
+   * 路径，跟着一起藏掉等于这些操作彻底不可达。
+   *
+   * 槽位是共享的：默认显示「会话点」，hover / 键盘聚焦（focus-within）时换成 ⋯。
+   * 之前把 `.session-item-dot` 和 `.rail-menu-btn` 一起 display:none，结果这一块
+   * 注释声称的"只留下每个会话的点"从未成立（行是空条，既看不出有几个会话，也没有
+   * 任何入口）；现在两个都回到这条 24px 槽里，且**不互相挤**——⋯ 绝对定位在槽心，
+   * 不占布局宽度，否则 20px 按钮会把会话的可点区域压到 4px（实测）。
+   *
+   * 项目层当时是同源但范围外的问题（#179：窄屏下 `.rail-project-head` 整块收起，
+   * 项目级操作没有入口），现已一并修复，规则见下面 `.rail-project-head` 那段。 */
+  /* #179：项目头不再整块收起——窄屏同样需要**项目级**操作的锚点（重命名项目 /
+   * 删除项目 / 在此项目中新建任务都只挂在它的菜单里），而"层级信息降级"与
+   * "操作不可达"是两件事。做法与会话行同一套槽位交换语义：默认显示文件夹图标
+   * （项目身份），hover / focus-within 时让位给 ⋯ 菜单。标题 / 计数 / 箭头在窄屏
+   * 收起（放不下），项目名改由 `.rail-project-toggle` 的 `aria-label` 提供——
+   * `display:none` 会把标题从可访问性树里摘掉，不能只靠"视觉上还有个图标"。 */
+  .rail-project-head {
+    position: relative;
+  }
+  /* 同 `.session-row` 的理由：窄屏轨里这圈 padding 就是这一行的可点面积，不能收。 */
+  .rail-project-toggle {
+    justify-content: center;
+    padding: 6px 0;
+  }
+  .rail-project-chevron,
+  .rail-project-title,
+  .rail-project-count {
+    display: none;
+  }
+  .rail-project-head .rail-menu-btn {
+    position: absolute;
+    top: 50%;
+    right: 50%;
+    transform: translate(50%, -50%);
+    width: 20px;
+    height: 20px;
+  }
+  .rail-project-icon,
+  .rail-project-warn {
+    transition: opacity var(--dur-out) var(--ease-apple);
+  }
+  /* 菜单浮现时图标让位：同一槽位不叠两团东西 */
+  .rail-project-head:hover .rail-project-icon,
+  .rail-project-head:focus-within .rail-project-icon,
+  .rail-project-head:hover .rail-project-warn,
+  .rail-project-head:focus-within .rail-project-warn {
+    opacity: 0;
+  }
+  /* 行内重命名在这条窄轨里本来只剩 ~40px，压成那样等于"能打开、没法用"。
+     重命名是瞬态编辑态，让它向右溢出盖住正文（`.app-regions` 有 overflow:hidden，
+     但正文栏在同一盒子里，不会被裁掉）——这是这一档唯一真的能改名的形状。 */
+  .rail-project-toggle-static .project-rename-input {
+    position: absolute;
+    left: 2px;
+    min-width: 180px;
+    z-index: 2;
+  }
+  .session-row {
+    position: relative;
+  }
+  /* 不动行内边距：`.session-items` 在窄屏是 `align-items: center`，行宽由内容决定，
+   * 而内容（会话点 5px）几乎不占宽度——那圈 padding 就是这一行的**可点面积**。
+   * 收掉它会把会话的可点区域从 24px 压到 9px（实测），等于修好菜单却毁了选会话。 */
+  .session-row .session-item {
+    justify-content: center;
+  }
+  .session-row .rail-menu-btn {
+    position: absolute;
+    top: 50%;
+    /* 居中压在会话点上：right:50% + translate 与 justify-content:center 同一槽心 */
+    right: 50%;
+    transform: translate(50%, -50%);
+    width: 20px;
+    height: 20px;
+  }
+  .session-row .session-item-dot {
+    transition: opacity var(--dur-out) var(--ease-apple);
+  }
+  /* 菜单浮现时点让位：同一槽位不叠两团东西 */
+  .session-row:hover .session-item-dot,
+  .session-row:focus-within .session-item-dot {
+    opacity: 0;
   }
   .rail-project-rows {
     margin-left: 0;
@@ -4118,31 +4256,16 @@ button.json-row {
     display: none;
   }
 }
-/* Split/Preview 空架子占位条：轻量、表明"未来升级点"，不伪装功能。 */
-.workspace-scaffold {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-xs) var(--space-lg);
-  border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
+/* 预留位（Split/Preview，#180 路线 A）：可见但不可选中——保留路线图可读性，
+ * 同时不再伪装成可用功能。禁用态沿用本文件既有口径（opacity 0.45 + not-allowed，
+ * 见 `.btn-primary:disabled`）。 */
+.workspace-mode.reserved,
+.workspace-mode.reserved:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
-.workspace-scaffold-tag {
-  font: 550 var(--text-xs) var(--font-ui);
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: var(--radius-full);
-  padding: 1px var(--space-sm);
-  flex-shrink: 0;
-}
-.workspace-scaffold-text {
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.workspace-mode.reserved:active {
+  transform: none;
 }
 
 /* ── 工具新形状：bash 已取消 / grep 截断尾巴 / read 专用块 ── */

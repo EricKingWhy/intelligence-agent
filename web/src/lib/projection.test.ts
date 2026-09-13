@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
+import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -917,7 +917,6 @@ describe('applyEvent — df4f7d8 新形状', () => {
 
   it('未接线类型仍进 unknown_events（显式登记，行为与重构前一致）', () => {
     for (const type of [
-      EventType.ARTIFACT_EXTERNALIZED,
       EventType.COMPACTION_START,
       EventType.COMPACTION_END,
       EventType.MESSAGE_QUEUED,
@@ -928,6 +927,47 @@ describe('applyEvent — df4f7d8 新形状', () => {
       const s = applyEvent(initConversation('s'), ev({ type }));
       expect(s.unknown_events, `${type} 应落 unknown_events`).toHaveLength(1);
     }
+  });
+
+  // ART-01（第十一轮真机验收）：运行时只发 artifact/externalized，此前前端只接了
+  // 规格里的 artifact/created → 有产物的会话里 Artifacts 页签恒空、还写"未产生 Artifact"。
+  it('ARTIFACT_EXTERNALIZED：挂到产出它的 tool 上（与 created 同一投影）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 'tc1', tool_name: 'bash', args: {} },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: {
+        artifact_id: '197e88d95cd917b9',
+        session_id: 's',
+        source_tool: 'bash',
+        tool_call_id: 'tc1',
+        size: 39600,
+        mime_type: 'text/plain',
+      },
+    }));
+
+    const tool = s.turns.flatMap((t) => t.tools).find((t) => t.tool_call_id === 'tc1');
+    expect(tool?.artifact).toEqual({
+      artifact_id: '197e88d95cd917b9',
+      size: 39600,
+      mime_type: 'text/plain',
+      source_tool: 'bash',
+    });
+    expect(s.unknown_events).toHaveLength(0); // 已接线：不再算"未知事件"
+  });
+
+  it('ARTIFACT_EXTERNALIZED：找不到宿主 tool_call 时不静默（落 unknown_events）', () => {
+    // 与 created 的唯一差别：externalized 自带 artifact_id，是"确实有产物"的独立事实。
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: { artifact_id: 'orphan', tool_call_id: 'nope', size: 1, mime_type: 'text/plain' },
+    }));
+
+    expect(s.unknown_events).toHaveLength(1);
   });
 
   it('RUN_INTERRUPTED：终态 + run_interrupted 真值 + Timeline 摘要', () => {
@@ -941,6 +981,78 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(s.run_status).toBe('completed');
     expect(s.run_interrupted).toEqual({ step_id: 3, interrupted_seq: 42, reason: 'process_restart' });
     expect(summarizeEvent(ev({ type: EventType.RUN_INTERRUPTED, data: {}, step_id: 3 }))).toBe('第 3 步中断');
+  });
+
+  // APR-01（第十一轮真机）：`approval_queues` 纯内存、run 终结即 GC，而
+  // `tool/approval-requested` 永留 JSONL → 孤儿审批每次刷新都重演，点了只有 404。
+  // 判据完全来自事件流（运行先于审批结束 ⇒ 这条审批不可能再被 resolve）。
+  describe('APR-01 孤儿审批在 run 终结时标 stale', () => {
+    const requested = (approvalId = 'ap-1') =>
+      ev({
+        type: EventType.TOOL_APPROVAL_REQUESTED,
+        data: {
+          approval_id: approvalId, tool_name: 'bash', tool_call_id: 'tc-1',
+          action_type: 'danger', title: 't', description: 'd', arguments_preview: {},
+          permission: 'p', policy: 'pol', reason: 'r', allowed_decisions: [],
+        },
+        step_id: 2,
+      });
+
+    it('run/interrupted 后仍 pending 的审批 → stale', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      expect(s.pending_approvals[0].stale).toBeUndefined(); // 中断前：正常待决
+
+      s = applyEvent(s, ev({
+        type: EventType.RUN_INTERRUPTED,
+        data: { interrupted_seq: 9, reason: 'process_restart' },
+        step_id: 2,
+      }));
+      expect(s.pending_approvals).toHaveLength(1); // 卡还在（事件不可删）
+      expect(s.pending_approvals[0].stale).toBe(true); // 但已不可提交
+    });
+
+    it('run 还活着时审批保持可提交（不误伤正常流程）', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } })); // 后续事件
+      expect(s.pending_approvals[0].stale).toBeUndefined();
+    });
+
+    it('正常已决的审批不会被后续 run 终结牵连（已从队列移除）', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      s = applyEvent(s, ev({
+        type: EventType.PERMISSION_RESOLVED,
+        data: { approval_id: 'ap-1', decision: 'approve_once', reason: '' },
+      }));
+      s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, data: {} }));
+      expect(s.pending_approvals).toHaveLength(0);
+    });
+
+    it('run/completed 与 run/failed 同样终结孤儿审批（后端同一处 GC）', () => {
+      for (const type of [EventType.RUN_COMPLETED, EventType.RUN_FAILED]) {
+        let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+        s = applyEvent(s, requested());
+        s = applyEvent(s, ev({ type, data: {} }));
+        expect(s.pending_approvals[0].stale, `${type} 应标 stale`).toBe(true);
+      }
+    });
+
+    /** 死锁回归锁：失效审批若继续算作「欠决策」，会话就永久发不出消息
+     *  （卡片只读 + composer 禁用，两条路都堵死）。 */
+    it('awaitingApproval：失效审批不锁 composer，未失效的才锁', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      expect(awaitingApproval(s.pending_approvals)).toBe(true); // run 活着 → 真的欠一个决策
+
+      s = applyEvent(s, ev({
+        type: EventType.RUN_INTERRUPTED,
+        data: { interrupted_seq: 9, reason: 'process_restart' },
+      }));
+      expect(awaitingApproval(s.pending_approvals)).toBe(false); // 孤儿 → 不锁死会话
+      expect(awaitingApproval([])).toBe(false);
+    });
   });
 
   it('OBS-007 RUN_STARTED 清空中断标记：提示不跨 run 存活', () => {

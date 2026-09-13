@@ -22,8 +22,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ConversationState, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, NotFoundError, RecoverError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
+import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
@@ -917,6 +917,48 @@ export function useSession() {
     setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
 
+  /** 用户显式硬删会话（#172 / ADR-0029）——**不可恢复**：无墓碑、无回收站、无撤销。
+   *
+   *  入口层（`DeleteSessionDialog`）负责拿到显式二次确认，本函数负责"确认之后收敛"
+   *  ——三件事缺一项都会留下"删了还看得见"的假象：
+   *   1. 重拉会话列表（行才会消失）。App 跟着 `sessions` 重拉项目列表，所以"它属于
+   *      哪个项目"也一并跟上——归属真相在项目账本里，前端不本地掰一份。
+   *   2. 被删的正是当前打开的会话时 `selectSession(null)`：它自增流代际、取消 SSE
+   *      订阅、回 idle——历史装载 effect 随即清空对话区，持久化 effect 清掉记住的
+   *      会话 id（刷新页面不会被拉回一个已经不存在的会话）。
+   *   3. 失败时**不动**列表。409（有在途 run / 有挂起审批 / fork 父会话）是后端明确
+   *      拒绝：列表必须保持原样——乐观地抹掉它才是真正的假象。404 相反：那是"这个
+   *      会话本就不在了"（第二次删除就是这个，后端刻意不伪装成"又删了一次"），
+   *      说明本地这行已过期，再收敛一次让它消失，否则用户会对着一个永远删不掉的
+   *      幽灵行反复重试。
+   *
+   *  异常原样抛给调用方（确认面据此把后端 detail 留在原地）。 */
+  const convergeAfterDelete = useCallback(
+    (sessionId: string) => {
+      // 只在"当前看的正是它"时离开视图：用户可能已经切到别的会话，那时不该把他的
+      // 视野拽走（同 shouldApplyStreamFrame 的 stale-write 纪律，用 mode 的实时
+      // 镜像而非闭包快照——本回调在请求之后才跑）。
+      const current = modeRef.current;
+      if (current.kind !== 'idle' && current.sessionId === sessionId) selectSession(null);
+      void refreshSessions();
+    },
+    [selectSession, refreshSessions],
+  );
+
+  const removeSession = useCallback(
+    async (sessionId: string): Promise<SessionDeleted> => {
+      try {
+        const receipt = await deleteSession(sessionId);
+        convergeAfterDelete(sessionId);
+        return receipt;
+      } catch (e) {
+        if (e instanceof SessionError && e.status === 404) convergeAfterDelete(sessionId);
+        throw e;
+      }
+    },
+    [convergeAfterDelete],
+  );
+
   /** 恢复中断会话（POST /recover）。200 → 整表重建：响应是与 GET events
    *  同构的全量事件数组，走同一 projectHistory 管线（不变量 #22——不引入第二套
    *  会话真相）；404/409 → error（409 附裁决原因，conflict=true）。
@@ -1032,6 +1074,7 @@ export function useSession() {
     submitTask,
     sendMessage: sendFollowUp,
     cancelStream,
+    removeSession,
     recover,
     refreshSessions,
     changeModel,

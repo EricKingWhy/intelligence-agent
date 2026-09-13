@@ -4,7 +4,10 @@
  * menu 是动作菜单，不是可搜索的选项列表。F2 升级为 Popover + cmdk Command：
  *   - cmdk 注入 `role="listbox"`（List）、`role="combobox"`（Input）、
  *     `role="option"`（Item），匹配 SDD §11「Combobox/Command-like」；
- *   - 方向键 / Home / End / Enter 由 cmdk 内置（无需自造 ArrowDown 拦截）；
+ *   - 方向键 / Home / End / Enter 由 cmdk 内置，**但前提是焦点在 `[cmdk-root]`
+ *     内部**（它的 onKeyDown 只能靠冒泡到达）——短目录时搜索框 display:none，
+ *     焦点必须显式交给 listbox，否则方向键/Enter 全哑（FE-R11-04，
+ *     见 `lib/pickerFocus.ts`）；
  *   - 搜索过滤走 cmdk 的 command-score（同时匹配 name/provider/model），
  *     通过 keywords 字段把 provider 和 model 也纳入打分；
  *   - Radix Popover 负责 portal 定位 + 外点关闭 + Esc 关闭（与 DropdownMenu 等价）。
@@ -23,9 +26,10 @@
 
 import * as Popover from '@radix-ui/react-popover';
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from 'cmdk';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Cpu, Search } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
+import { focusPickerListOnOpen } from '../lib/pickerFocus';
 
 interface Props {
   models: ModelCatalogEntry[];
@@ -59,6 +63,9 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
   );
   const effectiveSelectedModel = selectedEntry?.name ?? null;
   const triggerLabel = selectedEntry?.name ?? '默认链';
+  // 默认链算一条（阈值与 CSS 契约 picker-search-visibility 一致）
+  const searchHidden = models.length + 1 <= 5;
+  const listRef = useRef<HTMLDivElement>(null);
 
   /** BUG-011：**弹层已关就不再接受选中**。
    *
@@ -104,6 +111,8 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
           side="top"
           align="end"
           sideOffset={6}
+          // FE-R11-04：短目录搜索框不可见 → 焦点交给 listbox，键盘导航才有效
+          onOpenAutoFocus={focusPickerListOnOpen(listRef, searchHidden)}
           // 高度上限 + 滚动由 CSS 处理（避免目录长时顶出视口）
         >
           <Command
@@ -117,11 +126,11 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
               return haystack.includes(q) ? 1 : 0;
             }}
           >
-            <div className={`model-picker-search-wrap${models.length + 1 > 5 ? '' : ' hidden'}`}>
+            <div className={`model-picker-search-wrap${searchHidden ? ' hidden' : ''}`}>
               <Search size={13} aria-hidden="true" />
               <CommandInput placeholder="搜索模型" className="model-picker-search" />
             </div>
-            <CommandList>
+            <CommandList ref={listRef}>
               {/* 默认链永远在顶部（null 提交——后端按默认链行为） */}
               <CommandGroup>
                 <CommandItem
