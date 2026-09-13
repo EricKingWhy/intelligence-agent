@@ -161,24 +161,31 @@ describe('#183 AC7 面板控制键的可访问性语义', () => {
 });
 
 describe('#183 AC9 单一渲染器：Inspector 的命令输出走中心列同一个 ToolOutputStream', () => {
+  /* 取数判据是"终态优先"（`lib/commandOutput.ts` 的优先级：有 result 就以 result 为准）。
+     所以 fixture **故意让流式块与终态不同**：块里是半截（大输出还可能被投影合并/重排），
+     result 才是权威终态文本。此前 fixture 让两者逐字相同（都是 `'hi\n'`），
+     于是"渲染的是 result 还是 chunks"根本测不出来——把实现改回 `chunks={tool.output}`
+     也照绿。 */
   const bashTool: ToolCall = {
     tool_call_id: 'tc1',
     name: 'bash',
     args: { command: 'echo hi' },
     status: 'success',
-    result: { exit_code: 0, stdout: 'hi\n' },
-    output: [{ channel: 'stdout', text: 'hi\n' }],
+    result: { exit_code: 0, stdout: 'AUTHORITATIVE-TAIL\n' },
+    output: [{ channel: 'stdout', text: 'stale-partial-frame\n' }],
     started_at: '2026-09-05T10:00:00Z',
     completed_at: '2026-09-05T10:00:01Z',
   };
 
-  it('有 output chunks 的工具：Output 段是 ToolOutputStream（不是第二套 pre）', () => {
+  it('有 chunks 也有终态：Output 段是 ToolOutputStream，且内容是**终态**（不是半截流式块）', () => {
     const html = renderStepDetail({
       conversation: threeEventConversation(),
       focus: { kind: 'tool', tool: bashTool },
     });
     expect(html).toContain('tool-out-stream');
-    expect(html).toContain('>hi\n<');
+    expect(html).toContain('AUTHORITATIVE-TAIL');
+    // 流式块的半截文本不得作为内容出现——它只该在 result 缺失时才顶上
+    expect(html).not.toContain('stale-partial-frame');
   });
 
   it('无 chunks 的工具（read/add 这类非命令工具）：仍走结果树，不伪造空输出流', () => {

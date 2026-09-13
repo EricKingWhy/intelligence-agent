@@ -484,7 +484,15 @@ function parseArtifactSlice(raw: unknown): ArtifactSlice {
   const o = (raw ?? {}) as Record<string, unknown>;
   const artifactId = typeof o.artifact_id === 'string' ? o.artifact_id : '';
   const lines = Array.isArray(o.lines) ? o.lines : null;
-  if (!artifactId || lines === null) throw new Error('artifact content: 响应形状不符');
+  /* `total_lines` / `returned_lines` 也**必须在场**：后端 `ArtifactSlice` 是必填模型字段
+     （`storage/artifact.py`），缺失只可能是形状不符。此前静默填 0 → 界面渲染
+     "共 0 行 / 没有可显示的内容"——一个编出来的"空产物"，比报错更坏（同本函数头的
+     口径：不替后端撒谎）。 */
+  const totalLines = typeof o.total_lines === 'number' ? o.total_lines : null;
+  const returnedLines = typeof o.returned_lines === 'number' ? o.returned_lines : null;
+  if (!artifactId || lines === null || totalLines === null || returnedLines === null) {
+    throw new Error('artifact content: 响应形状不符');
+  }
   return {
     artifact_id: artifactId,
     lines: lines.flatMap((item) => {
@@ -499,8 +507,8 @@ function parseArtifactSlice(raw: unknown): ArtifactSlice {
         },
       ];
     }),
-    total_lines: typeof o.total_lines === 'number' ? o.total_lines : 0,
-    returned_lines: typeof o.returned_lines === 'number' ? o.returned_lines : 0,
+    total_lines: totalLines,
+    returned_lines: returnedLines,
     truncated: o.truncated === true,
   };
 }

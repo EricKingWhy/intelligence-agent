@@ -18,7 +18,7 @@
  *  做成纯函数就能逐态断言，而取数那一层由 e2e 覆盖。
  */
 import { AlertTriangle, ChevronDown, ChevronRight, Loader2, Package } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArtifactContentError, getArtifactContent } from '../lib/api';
 import type { ArtifactSlice } from '../types';
 
@@ -144,15 +144,25 @@ export function ArtifactViewer({
 
   /* 取数本身**不**同步改状态：初始态已是 loading，而在 effect 里同步 setState
      会多一次渲染（且被 react-hooks 的 set-state-in-effect 判为多余）。
-     "重新变回 loading"只发生在用户点重试这个事件里。 */
+     "重新变回 loading"只发生在用户点重试这个事件里。
+
+     存活标记放在 ref 里而不是闭包局部变量：`retry()` 也发起请求，但它拿不到 `load()`
+     的清理函数（事件处理器没有卸载钩子），闭包里的 `alive` 就永远为 true——重试在飞时
+     组件卸载，回调仍会 setState 到已卸载实例上。ref 让两条路径共用同一个门。
+
+     开关都在**同一个 effect** 里臂化/释放（不是单独一个"只在卸载时置 false"的 effect）：
+     本应用是 `StrictMode`（`main.tsx:13`），开发期 effect 会被清理后重跑一次；若只有
+     卸载置 false，模拟卸载会把它永久关掉，首次真实取数的结果就被丢掉（面板卡在
+     "加载中"）。 */
+  const aliveRef = useRef(true);
+
   const load = useCallback(() => {
-    let alive = true;
     getArtifactContent(sessionId, artifactId)
       .then((slice) => {
-        if (alive) setState({ status: 'ready', slice });
+        if (aliveRef.current) setState({ status: 'ready', slice });
       })
       .catch((err: unknown) => {
-        if (!alive) return;
+        if (!aliveRef.current) return;
         if (err instanceof ArtifactContentError) {
           setState({ status: 'error', kind: err.kind, detail: err.detail });
         } else {
@@ -163,15 +173,17 @@ export function ArtifactViewer({
           });
         }
       });
-    return () => {
-      alive = false;
-    };
   }, [sessionId, artifactId]);
 
   // 只在**真的展开**时取数：没展开就请求等于替用户读了他没要的东西。
+  // 换一个产物（`artifactId` 变）时 `load` 是新函数，effect 随之重跑。
   useEffect(() => {
     if (!open) return;
-    return load();
+    aliveRef.current = true;
+    load();
+    return () => {
+      aliveRef.current = false;
+    };
   }, [open, load]);
 
   const retry = () => {

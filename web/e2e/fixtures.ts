@@ -70,9 +70,12 @@ export interface ApiMock {
   /** 拦截口（计数 / 按 artifact_id 给不同内容）；返回 true = 已处理。 */
   onArtifactGet?: (route: Route, artifactId: string) => Promise<boolean> | boolean;
   /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
-   *  为什么要这个口子：**今天没有任何非 Chat 的面实现**，所以"声明为真"与"声明为假"
-   *  渲染出来的 tab 集是同一个 `['Chat']`——不数请求的话，"前端压根没调这个端点"这种
-   *  回归会让整套用例照样全绿（声明就成了装饰品）。返回 false 走下面的默认分支。 */
+   *  为什么要这个口子：#182 落地时**没有任何非 Chat 的面有实现**，而 #189/#190 落地后
+   *  **真实后端的默认响应仍然是 `changes:false, terminal:false`**（`web/app.py:918-927`
+   *  的保守默认，7 个 capability descriptor 没有一个声明 `surfaces`——见 issue #193），
+   *  所以"后端真实默认"这条路径渲染出来依旧只有 `['Chat']`。要让"声明为真 → 出现"可观测，
+   *  用例必须自己注入声明；不数请求的话，"前端压根没调这个端点"这种回归会让整套用例照样
+   *  全绿（声明就成了装饰品）。返回 false 走下面的默认分支。 */
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;

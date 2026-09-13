@@ -24,7 +24,7 @@ import { formatDuration, formatTimestamp, stringifyForDisplay, truncateForDispla
 import { groupEventsByRun, type RunGroupStatus } from '../lib/timelineGroups';
 import { allTools, summarizeEvent } from '../lib/projection';
 import { permissionView } from '../lib/permission';
-import { commandResult, isCommand } from '../lib/commandOutput';
+import { commandOutputs, commandResult, isCommand } from '../lib/commandOutput';
 import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
   clampInspectorWidth, escAction, eventKey, nextSelectionIndex, spaceReleaseCloses, toolKey,
@@ -173,7 +173,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
   const tabCounts: Partial<Record<Tab, number>> = {
     timeline: conversation.events.length,
     changes: tools.filter((t) => t.diff).length,
-    terminal: tools.filter((t) => t.name === 'bash').length,
+    terminal: tools.filter(isCommand).length,
     artifacts: tools.filter((t) => t.artifact).length,
   };
 
@@ -1296,7 +1296,18 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
      保真、尾窗预算、换行切换、复制口径全都会各自演化。
      `showCaret=false`（同 #190 AC5 的理由）：Inspector 是复盘面，不是对话流；
      一个闪动光标在这里读起来像"第二条正在跑的流"。 */
+  /* 命令的**取数口径**也走那唯一一份（`lib/commandOutput.ts` 的终态优先级：
+     有 result 就以 result 为准，没有才回落流式块）。此前这里直接拿 `tool.output`
+     ——只要留过流式块就无视已到达的 result，于是同一个 bash 调用在 Inspector 里显示
+     分块（大输出还可能被投影合并/重排过）、在中心列与「输出」面显示权威终态文本。
+     **只在确有流式块时才需要这次纠正**：没有块的工具维持原有的"结果树"呈现——那棵树
+     还带着 `exit_code` / `cancelled` 等字段，而 `ToolOutputStream` 只呈现 stdout/stderr
+     文本（把它套到无块的工具上，会把 exit code 从 Inspector 里弄丢）。 */
   const hasChunks = (tool.output?.length ?? 0) > 0;
+  const commandChunks = isCommand(tool) && hasChunks
+    ? (commandOutputs([tool])[0]?.chunks ?? [])
+    : null;
+  const outputChunks = commandChunks ?? (tool.output ?? []);
   const [wantTab, setTab] = useState<IoTab>(hasOutput ? 'output' : 'overview');
 
   const tabs: readonly { id: IoTab; label: string }[] = [
@@ -1379,16 +1390,16 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           </div>
         </div>
       )}
-      {tab === 'output' && hasOutput && hasChunks && (
-        // 有 chunks：中心列同一个渲染器（自带标签条/复制/换行与尾窗预算），
+      {tab === 'output' && hasOutput && outputChunks.length > 0 && (
+        // 有输出块：中心列同一个渲染器（自带标签条/复制/换行与尾窗预算），
         // 不在外面再套一层 CopyButton——那会出现两个"复制"按钮说同一件事。
         <ToolOutputStream
-          chunks={tool.output!}
+          chunks={outputChunks}
           streaming={tool.status === 'running'}
           showCaret={false}
         />
       )}
-      {tab === 'output' && hasOutput && !hasChunks && (
+      {tab === 'output' && hasOutput && outputChunks.length === 0 && (
         <div className="detail-code-wrap">
           <CopyButton text={outputText} label="复制输出" />
           {resultIsObject ? (
@@ -1470,7 +1481,7 @@ function ChildSessionView({ childSessionId }: { childSessionId: string }) {
   }
   return (
     <>
-      <ChatTab conversation={conversation} tools={conversation.turns.flatMap((t) => t.tools)} />
+      <ChatTab conversation={conversation} tools={allTools(conversation)} />
       <ChildTimeline events={conversation.events} />
     </>
   );

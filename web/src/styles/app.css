@@ -3054,10 +3054,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .detail-resizer:hover,
 .detail-resizer:focus-visible,
 .step-detail[data-resizing='true'] .detail-resizer {
-  background: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .detail-resizer:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
 .detail-body {
@@ -3143,18 +3143,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     background var(--dur-fast) var(--ease-apple);
 }
 .detail-ctrl:hover {
-  background: var(--color-hover);
-  color: var(--color-foreground);
+  background: var(--surface-hover);
+  color: var(--text-primary);
 }
 .detail-ctrl:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
 /* 选中态（钉住/整页已开）与既有状态语言同族：accent tint + 边框。 */
 .detail-ctrl.sel {
   color: var(--accent);
   background: var(--accent-muted);
-  border-color: color-mix(in srgb, var(--color-accent) 32%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 .detail-header {
   display: flex;
@@ -3487,7 +3487,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* #183：被选中（详情正在显示它）的行。与 `.detail-tool-row.sel` 同一视觉语言——
    左侧 accent 竖条 + 淡底，全站"这是当前项"只有一种说法。 */
 .timeline-row.sel {
-  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
   box-shadow: inset 2px 0 0 0 var(--accent);
 }
 .tl-seq {
@@ -3545,7 +3545,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* #183：选中态——终端行的底色是 terminal-bg，淡底会看不出，所以只用 accent 边框
    + 左竖条（与 `.timeline-row.sel` / `.detail-tool-row.sel` 同一含义）。 */
 .detail-terminal-row.sel {
-  border-color: var(--color-accent);
+  border-color: var(--accent);
   box-shadow: inset 2px 0 0 0 var(--accent);
 }
 .detail-terminal-cmd {
@@ -3698,15 +3698,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   background: transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  color: var(--color-foreground);
+  color: var(--text-primary);
   font: 500 var(--text-sm) var(--font-ui);
   text-align: left;
   width: 100%;
   transition: background var(--dur-fast) var(--ease-apple);
 }
-.detail-permission-row:hover { background: var(--color-hover); }
+.detail-permission-row:hover { background: var(--surface-hover); }
 .detail-permission-row:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 /* 只读场景（子会话视图缺省回调）：行不点得动，就不许显得点得动。
@@ -3737,12 +3737,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* 裁决语义分色：绿 = 已批准（断言），红 = 拒绝；**未知/缺失决策不涂色**——
    neutral 落在 `.detail-val-tag` 的默认外观上，不冒充任何一种裁决。 */
 .permission-verdict-allow {
-  background: color-mix(in srgb, var(--color-success) 14%, transparent);
-  color: var(--color-success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
 }
 .permission-verdict-deny {
-  background: color-mix(in srgb, var(--color-destructive) 14%, transparent);
-  color: var(--color-destructive);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 .tool-status-dot {
   width: 6px;
@@ -4538,7 +4538,7 @@ button.json-row {
 }
 .output-item-status {
   flex: none;
-  color: var(--color-warning);
+  color: var(--warning);
   font-size: var(--text-xs);
 }
 .output-item-empty {
@@ -4606,23 +4606,23 @@ button.json-row {
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
-  color: var(--color-foreground);
+  color: var(--text-primary);
   font: 400 var(--text-sm) var(--font-ui);
   text-align: left;
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-apple);
 }
 .changes-file-row:hover {
-  background: var(--color-hover);
+  background: var(--surface-hover);
 }
 .changes-file-row:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 /* 选中项：左侧 accent 竖条 + 淡底——与 `.timeline-row.sel` / `.detail-tool-row.sel`
  * 同一视觉语言（全站"这是当前项"只有一种说法）。 */
 .changes-file-row.sel {
-  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
   box-shadow: inset 2px 0 0 0 var(--accent);
 }
 .changes-file-path {
