@@ -225,9 +225,15 @@ async def build_runtime(
     overflow_handler = None
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
-        registry.register(selection.read_tool(selection.store))
+        read_tool = selection.read_tool(selection.store)
+        registry.register(read_tool)
+        # 摘要里的读回提示点名**这个**工具（#186 AC4）：S3 配 `inspect_artifact`，
+        # MinIO / Local 配 `read_artifact`。名字从选择器**实例化出来的那个工具**上取，
+        # 不在这里再填一个字面量——那样等于把"配对关系"这份知识写了第二遍。
         overflow_handler = ArtifactOverflowHandler(
-            selection.store, settings.artifact_overflow_chars
+            selection.store,
+            settings.artifact_overflow_chars,
+            read_tool_name=read_tool.name,
         )
 
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
