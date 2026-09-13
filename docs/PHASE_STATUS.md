@@ -375,3 +375,13 @@
   **修复后的验证（按协议第 5 条：不重跑全量 review，跑测试 + 自查 diff）**：ruff clean；全量 pytest **2201 passed / 10 skipped / 42 deselected / 0 failed**。测试适配 1 处：`tests/test_web_phase5.py` 通过补丁 `assembly.S3ArtifactStore` 注入内存替身，选择器迁移后该命名空间不再有此类 ⇒ 补丁目标改为 `storage.s3_artifact.S3ArtifactStore`（选择逻辑与接线仍走真实路径，仅 store 换替身）。**该失败是全量门禁抓到的**——单跑 #192 相关文件时不可见，说明批内不能只跑聚焦用例。
 
   **未采纳（记录在案）**：审查提出"给 `ArtifactStore` ABC 加 `delete` 统一远端/本地删除"——超出本票与 ADR-0029 D6 的范围（ADR 已把远端级联列为另开票），且会给 2/3 未实现 delete 的 Provider 抛 `NotImplementedError`。属 Scope Lock（§8）外，仅报告不改。
+
+- 2026-09-14：**总门禁 code-review（后端，`feat/backend` 对 `main` 全量两轴）+ 修复收口**。修复 commit `228ed8c`。审查范围：`git diff f9358b2...d925899`（8 commit / 23 文件 / +2060）。两轴（Standards + Spec）各一个 read-only subagent 独立审，**两轴各自独立命中同一条 P1**。修复后门禁：ruff check 通过；全量 pytest **2206 passed / 10 skipped / 42 deselected / 0 failed**（190.74s）。关单：本轮无新票（修的是已交付 ticket 的 finding）。
+
+  **P1（两轴一致，违反不变量 21 fail-open 不完整）**：`select_artifact_store` 只兜 `ValueError`，但"配好对象存储却没装 `[artifact]` extra"的部署构造 store 抛 `RuntimeError`（`s3_artifact.py:38` / `minio_artifact.py:60`）⇒ 沿 `assembly.build_runtime` 冒到 `session/service.py` 的建会话路径 → **每次建会话 500**；读接口也 500 而不是 503。一个**可选的外置优化**把 Core 拖垮，而兜住它正是这个选择器存在的理由之一。**修**：捕获面具名为 `_UNUSABLE_STORE = (ValueError, OSError, RuntimeError)`（三个类型分别对应"配置不完整 / 本地路径非法 / 可选依赖缺失"，注释逐条写明为何都属于"本部署没有可用 store"而非 bug；其它异常类型照旧上抛），三个分支各加一条 `logger.warning` 留痕——顺带让此前**无人读取**的 `ArtifactSelection.provider` 字段真正用上。**空 `artifact_dir` 例外**：它是文档化的合法配置（写了就是"别落盘"），走 `logger.debug` 不刷 warning，否则每次建会话一条会把真正的部署故障淹掉。**RuntimeError 的捕获面已核实够窄**：三个 store 的构造路径里 `raise RuntimeError` 只有那两处可选依赖，无其它来源（`grep raise RuntimeError storage/*.py`）。**变异验证**：把捕获面还原成 `except ValueError` → `2 failed, 37 passed`（新增的两条 fail-open 用例），恢复后全绿——证明新用例不是自证。
+
+  **Spec 轴其余 findings**：① artifact 外置摘要的读回工具名（#186 AC4）已在本批前一条 commit `d925899` 处理（marker 点名配对工具，前端认两种拼写）。② `Artifact` DTO 三字段改 `str | None` 属"元数据不得伪造"（#185 AC4）的**要求**而非本票扩张——`MinioArtifactStore.load` 曾把没存的三项填 `""`，那是假值。判定：**保留**，不属 scope creep。
+
+  **Standards 轴其余 findings**：③ 四个 Provider 的 `inspect()` 各有一份逐字相同的 8 行信封（切片 + 组装 `ArtifactSlice`；`_slice_lines` 本身早已共享，重复的是外层与 `query` 回显）⇒ 抽 `storage/artifact.py::slice_artifact` 为唯一实现，Fake / S3 / MinIO / Local 只负责 `load()` 后交 content。④ `LocalArtifactStore.root` 属性零引用（唯一相似命中 `session/service.py:1205` 的 `candidate.root` 是 `PureWindowsPath.root`，与它无关）⇒ 删除。⑤ `overflow.py` 的 `read_tool_name="read_artifact"` 默认值重新编码了配对知识 ⇒ **保留**（有 docstring 说明它只服务直接构造 handler 的测试，生产路径一律经选择器显式传入）。
+
+  **明确保留的 judgement call（记录在案，不改）**：⑥ `session/service.py` 从 `storage/artifact.py` 引入 `SESSION_KEY_PATTERN` —— 两个调用点注释均写明"同一条规则，一份定义"，反过来在本层复制字面量才是指出的问题；跨层引入一个正则常量不值得为此新增中立模块（§8 Scope Lock）。⑦ `Artifact` 字段可空（见上）。
