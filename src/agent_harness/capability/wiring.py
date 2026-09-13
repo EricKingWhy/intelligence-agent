@@ -117,7 +117,11 @@ async def _wire_memory(
         ),
         components.capability,
     )
-    wiring.context_providers.append(MemoryContextProvider(components.capability))
+    # BUG-014：检索外层超时从写死 5s 改为 Settings 注入（默认 10s）——代理转发
+    # 场景下 5s 比 embedding SDK 的 15s 还紧，必然超时（真机 TimeoutError 实证）。
+    wiring.context_providers.append(MemoryContextProvider(
+        components.capability, timeout_seconds=settings.memory_search_timeout_seconds,
+    ))
     wiring.memory_writer = components.writeback
     wiring.memory = components
     # #159：遗忘工具经契约（MemoryCapability）贡献，收集走末尾的统一循环。

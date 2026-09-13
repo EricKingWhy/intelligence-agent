@@ -20,7 +20,9 @@ class MemoryContextProvider:
     # /api/context-providers 清单端点也按此投影。改这个值会破坏现有请求兼容。
     name: str = "memory"
 
-    def __init__(self, capability: MemoryCapability, timeout_seconds: float = 5.0) -> None:
+    def __init__(self, capability: MemoryCapability, timeout_seconds: float = 10.0) -> None:
+        # BUG-014：默认 5s→10s（此前比 embedding SDK 的 15s 还紧，代理场景必超时）；
+        # 生产路径由 wiring 传 Settings.memory_search_timeout_seconds，默认值兜底。
         self._capability = capability
         self._timeout = timeout_seconds
 

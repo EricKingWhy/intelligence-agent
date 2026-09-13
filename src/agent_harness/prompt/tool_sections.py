@@ -16,7 +16,22 @@ from typing import Protocol
 
 from agent_harness.prompt.section import SECTION_ORDERS, PromptSection, Target
 
-__all__ = ["GuidanceSource", "join_guidance", "tool_guidance_sections"]
+__all__ = [
+    "TOOL_USE_DISCLAIMER",
+    "GuidanceSource",
+    "join_guidance",
+    "tool_guidance_sections",
+]
+
+
+#: BUG-013：工具澄清句——「有工具」不等于「任何任务都要用工具」。真机实测：
+#: 快照紧贴用户消息列出工具时，模型会把「写作文」误判为需要写作工具的任务，
+#: 进而拒认自己刚写过的内容。澄清句与工具 guidance 同源（本模块产出）：
+#: 只有 registry 里**确实存在**贡献 guidance 的工具时才出现——无工具的 agent
+#: prompt 不出现（与"工具缺席 → 说明缺席"同一边界）。
+TOOL_USE_DISCLAIMER = (
+    "以上工具按需调用即可；简单问答、对话与写作类任务直接回答，无需调用工具。"
+)
 
 
 class GuidanceSource(Protocol):
@@ -51,6 +66,20 @@ def tool_guidance_sections(tools: Iterable[GuidanceSource]) -> list[PromptSectio
                 target=Target.SYSTEM,
                 text=guidance,
                 description=f"{tool.name} 工具的使用指引",
+            )
+        )
+    # BUG-013：澄清句追加在全部工具 guidance 之后。它**不是**某个工具的 guidance
+    # ——独立 frame（order 2100 > tool 2000），名不占 `tool:<name>` 命名空间；
+    # 只有至少一个工具贡献了 guidance 才加——无工具（join 为空）时不出现。
+    if sections:
+        sections.append(
+            PromptSection(
+                name="frame:tool_disclaimer",
+                order=SECTION_ORDERS["frame:tool_disclaimer"],
+                scopes=frozenset({"*"}),
+                target=Target.SYSTEM,
+                text=TOOL_USE_DISCLAIMER,
+                description="工具使用澄清（按需调用，简单任务直接回答）",
             )
         )
     return sections

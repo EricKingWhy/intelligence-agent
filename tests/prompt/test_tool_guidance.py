@@ -73,7 +73,7 @@ def test_whitespace_guidance_produces_no_section():
 def test_guidance_produces_tool_section():
     sections = tool_guidance_sections([FakeTool("bash", "G")])
 
-    assert len(sections) == 1
+    assert len(sections) == 2  # guidance + BUG-013 澄清句
     section = sections[0]
     assert section.name == "tool:bash"
     assert section.order == SECTION_ORDERS["tool"] == 2000
@@ -82,11 +82,21 @@ def test_guidance_produces_tool_section():
     assert section.text == "G"
 
 
+def test_disclaimer_appended_after_guidance():
+    """BUG-013：澄清句在全部工具 guidance 之后，仅当有 guidance 时出现。"""
+    from agent_harness.prompt.tool_sections import TOOL_USE_DISCLAIMER
+
+    assert tool_guidance_sections([FakeTool("t")]) == []  # 无 guidance → 无澄清句
+    sections = tool_guidance_sections([FakeTool("a", "A"), FakeTool("b", "B")])
+    assert [s.name for s in sections] == ["tool:a", "tool:b", "frame:tool_disclaimer"]
+    assert sections[-1].text == TOOL_USE_DISCLAIMER
+
+
 def test_multiple_tools_produce_multiple_sections():
     sections = tool_guidance_sections(
         [FakeTool("a", "A"), FakeTool("b"), FakeTool("c", "C")],
     )
-    assert [s.name for s in sections] == ["tool:a", "tool:c"]
+    assert [s.name for s in sections] == ["tool:a", "tool:c", "frame:tool_disclaimer"]
 
 
 def test_tool_default_prompt_guidance_is_none():
@@ -98,7 +108,8 @@ def test_tool_default_prompt_guidance_is_none():
 
 def test_join_guidance_sorted_by_name():
     """order 相同 → 按 section 名排序，与注册表 `(order, name)` 一致。"""
-    assert join_guidance([FakeTool("bash", "B"), FakeTool("apply_patch", "A")]) == "A\n\nB"
+    assert join_guidance([FakeTool("bash", "B"), FakeTool("apply_patch", "A")]) \
+        == "A\n\nB\n\n以上工具按需调用即可；简单问答、对话与写作类任务直接回答，无需调用工具。"
 
 
 def test_join_guidance_returns_none_when_empty():
@@ -107,7 +118,11 @@ def test_join_guidance_returns_none_when_empty():
 
 
 def test_join_guidance_uses_double_newline():
-    assert join_guidance([FakeTool("a", "A"), FakeTool("b", "B")]) == "A\n\nB"
+    text = join_guidance([FakeTool("a", "A"), FakeTool("b", "B")])
+    assert text is not None
+    assert "A\n\nB" in text
+    # 分隔符仍是 "\n\n"（澄清句也用同一分隔符拼接）
+    assert "\n\n\n" not in text
 
 
 # —— 父路径组装 ——
@@ -122,11 +137,13 @@ def test_tool_section_enters_profile_scope():
 
 
 def test_tool_section_does_not_enter_aux_scope():
-    """`*` 只匹配 profile scope → 工具 section 不得污染 aux prompt（逐字节不变）。"""
+    """`*` 只匹配 profile scope → 工具 section（含澄清句）不得污染 aux prompt。"""
     registry = build_registry(tool_sections=tool_guidance_sections([FakeTool("bash", "G")]))
 
     for scope in ("aux:compaction", "aux:memory_extraction"):
-        assert registry.assemble(scope).system_text == build_registry().assemble(scope).system_text
+        assembled = registry.assemble(scope).system_text
+        assert "按需调用即可" not in assembled  # 澄清句也不进 aux
+        assert assembled == build_registry().assemble(scope).system_text
 
 
 def test_tool_section_order_is_2000():
@@ -137,8 +154,9 @@ def test_tool_section_order_is_2000():
     text = registry.assemble("profile:coding").system_text
 
     identity = build_registry().assemble("profile:coding").system_text
-    assert text.index("P") < text.index(identity) < text.index("G") < text.index("S")
-    assert text == f"P\n\n{identity}\n\nG\n\nS"
+    disclaimer = "以上工具按需调用即可；简单问答、对话与写作类任务直接回答，无需调用工具。"
+    assert text.index("P") < text.index(identity) < text.index("G") < text.index(disclaimer) < text.index("S")
+    assert text == f"P\n\n{identity}\n\nG\n\n{disclaimer}\n\nS"
 
 
 def test_unregistered_tool_has_no_guidance():
@@ -170,8 +188,10 @@ def test_compose_matches_registry_order():
     base = build_registry().assemble("profile:coding").system_text
     persona = PersonaConfig(prefix="P", suffix="S")
     sections = tool_guidance_sections([FakeTool("t", "G")])
+    disclaimer = "以上工具按需调用即可；简单问答、对话与写作类任务直接回答，无需调用工具。"
 
-    assert compose_agent_prompt(base, persona, "G") == (
+    # child 路径的 join_guidance 含澄清句（与父路径同源）——两边都含才不漂移。
+    assert compose_agent_prompt(base, persona, f"G\n\n{disclaimer}") == (
         build_registry(persona, tool_sections=sections).assemble("profile:coding").system_text
     )
 
