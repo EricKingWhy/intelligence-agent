@@ -16,8 +16,10 @@ from agent_harness.memory.capability import NO_DECISION_MODEL, MemoryWriteOutcom
 from agent_harness.memory.consolidation import (
     CONSOLIDATION_DEGRADED_PREFIX,
     CONSOLIDATION_QUERY_LIMIT,
+    CONSOLIDATION_RETRY_BACKOFF_SECONDS,
     CONSOLIDATION_TIMEOUT_SECONDS,
     BoundedSearchStore,
+    _is_retryable,
 )
 from agent_harness.memory.record_store import MemoryRecordStore
 from agent_harness.memory.types import (
@@ -166,17 +168,30 @@ class LangMemMemoryCapability:
         if self._model is None:
             return MemoryWriteOutcome(await self._insert(scope, content, metadata),
                                       degraded_reason=NO_DECISION_MODEL)
-        try:
-            return MemoryWriteOutcome(await self.store(scope, content, metadata,
-                                                      budget_seconds=budget_seconds))
-        except Exception as error:  # noqa: BLE001 — 降级边界：绝不因为决策失败丢候选
-            # 只带类型名：原始异常消息可能含用户数据/凭据（脱敏不变量，同 extractor）。
-            _warn_safely("Memory consolidation degraded (%s); falling back to insert",
-                         type(error).__name__)
-            return MemoryWriteOutcome(
-                await self._insert(scope, content, metadata),
-                degraded_reason=f"{CONSOLIDATION_DEGRADED_PREFIX}: {type(error).__name__}",
-            )
+        # BUG-014：瞬时错误退避重试 1 次（同 extractor）——4xx 语义不重试直接降级。
+        # 重试计入既有 budget_seconds（外层 writeback 剩余预算），不新增外层预算。
+        retry_marker = ""
+        for attempt in (0, 1):
+            try:
+                return MemoryWriteOutcome(await self.store(scope, content, metadata,
+                                                          budget_seconds=budget_seconds))
+            except Exception as error:  # noqa: BLE001 — 降级边界：绝不因为决策失败丢候选
+                if attempt == 0 and _is_retryable(error):
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(CONSOLIDATION_RETRY_BACKOFF_SECONDS)
+                    retry_marker = "after_1_retry"
+                    continue
+                # 只带类型名：原始异常消息可能含用户数据/凭据（脱敏不变量，同 extractor）。
+                reason = type(error).__name__
+                if retry_marker:
+                    reason = f"{reason}({retry_marker})"
+                _warn_safely("Memory consolidation degraded (%s); falling back to insert",
+                             reason)
+                return MemoryWriteOutcome(
+                    await self._insert(scope, content, metadata),
+                    degraded_reason=f"{CONSOLIDATION_DEGRADED_PREFIX}: {reason}",
+                )
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def _insert(self, scope: MemoryScope, content: str, metadata: dict) -> str:
         """**无条件**写入（不经检索/决策）：`store` 在没有决策模型时的路径，也是 `consolidate`

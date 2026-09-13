@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")
     embedding_dimensions: int = Field(default=1024, gt=0)
+    # BUG-014：记忆检索外层超时（此前 context provider 写死 5s，比 embedding SDK
+    # 的 15s 还紧——代理转发场景必超时）。Settings 注入式，与既有超时字段同风格。
+    memory_search_timeout_seconds: float = Field(default=10.0, gt=0)
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
