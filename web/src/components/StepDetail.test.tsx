@@ -134,7 +134,7 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
 
 // ── C4：Timeline 行 hover 时间戳浮层 ──
 
-import { formatEventTooltip, StepDetail } from './StepDetail';
+import { ChangesTab, formatEventTooltip, StepDetail } from './StepDetail';
 
 describe('formatEventTooltip（C4）', () => {
   it('time + step 齐全：两行（完整时间戳含毫秒 + step）', () => {
@@ -276,5 +276,65 @@ describe('TimelineTab run 分组头（UI-03）', () => {
     expect(html).toContain('tl-run-header');
     expect(html).toContain('>Run 2</span>');
     expect(html).not.toContain('>Run 1</span>');
+  });
+});
+
+// ── #183 AC9 / #186 AC3：Inspector 的 Changes tab 与中心列共用同一个 diff 渲染器 ──
+
+describe('ChangesTab 使用 DiffBlock（diff 只有一份渲染器）', () => {
+  const editTool = (over: Partial<ToolCall>): ToolCall => ({
+    tool_call_id: 'tc-diff',
+    name: 'edit',
+    args: { path: 'src/a.ts' },
+    status: 'success',
+    result: { ok: true },
+    diff: { before: 'old\n', after: 'new\n', truncated: false },
+    ...over,
+  });
+
+  const renderChanges = (tools: ToolCall[]) =>
+    renderToString(createElement(ChangesTab, { tools })).replaceAll('<!-- -->', '');
+
+  it('普通 diff：走 DiffBlock 的结构（.diff-block + .diff-cols），不是自己内联的裸 .diff-cols', () => {
+    const html = renderChanges([editTool({})]);
+    expect(html).toContain('diff-block');
+    expect(html).toContain('变更前');
+    expect(html).toContain('变更后');
+    expect(html).toContain('old');
+    expect(html).toContain('new');
+  });
+
+  it('归档 diff：渲染归档占位，**不把 marker 原文当文件内容**（收敛前这里会显示假内容）', () => {
+    const marker = '内容过大已归档。use read_artifact(0123456789abcdef) 查看全文';
+    const html = renderChanges([
+      editTool({
+        diff: {
+          before: marker,
+          after: marker,
+          truncated: false,
+          archived: true,
+          artifactId: '0123456789abcdef',
+        },
+      }),
+    ]);
+    expect(html).toContain('diff-archived');
+    expect(html).toContain('Diff 内容已归档');
+    // 关键断言：marker 那段文字不得出现在 diff 正文里
+    expect(html).not.toContain('查看全文');
+    expect(html).not.toContain('>变更前<');
+  });
+
+  it('截断 diff：给出"已截断"标记（与中心列同一文案）', () => {
+    const html = renderChanges([
+      editTool({ diff: { before: 'a\n', after: 'b\n', truncated: true } }),
+    ]);
+    expect(html).toContain('内容过长，已截断显示');
+  });
+
+  it('无 diff 的工具不进这个面（bash 的输出不是文件变更）', () => {
+    const html = renderChanges([
+      { tool_call_id: 'b', name: 'bash', args: { command: 'echo hi' }, status: 'success' } as ToolCall,
+    ]);
+    expect(html).toContain('本次会话未产生文件变更');
   });
 });

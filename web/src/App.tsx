@@ -349,8 +349,6 @@ export default function App() {
           return cur.peekOpen ? cur : { ...cur, peekOpen: true };
         case 'close-peek':
           return cur.peekOpen ? { ...cur, peekOpen: false } : cur;
-        default:
-          return cur;
       }
     });
   }, []);

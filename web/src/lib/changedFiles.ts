@@ -115,9 +115,26 @@ function pathOf(tool: ToolCall): string | null {
   return path === '' ? null : path;
 }
 
+/** 聚合用的路径键：`./src/a.ts` 与 `src/a.ts` 是**同一个文件**，必须落成一行（AC2）。
+ *
+ *  只折掉前导 `./`——这一条在任何文件系统上都**可证等价**，没有猜测成分。
+ *  刻意**不**做的两件事：
+ *  - **不折大小写**：`Src/a.ts` 与 `src/a.ts` 在区分大小写的文件系统上是两个文件，
+ *    合并会让"两个文件"显示成"一个文件改了两处"，比分成两行更假；
+ *  - **不折分隔符**：POSIX 下 `src\a.ts` 是合法且独立的文件名。
+ *  两行总好过一行谎话——真出现这种写法，用户看到的路径本身就能说明问题。
+ *
+ *  显示用的路径仍是**首次出现时的原文**（改写的只是比对键，不是给用户看的东西）。 */
+function pathKey(path: string): string {
+  let key = path;
+  while (key.startsWith('./')) key = key.slice(2);
+  return key === '' ? path : key;
+}
+
 function buildFiles(tools: readonly ToolCall[]): { files: FileChange[]; unattributed: number } {
   const order: string[] = [];
-  const byPath = new Map<string, FileChangeEdit[]>();
+  const byKey = new Map<string, FileChangeEdit[]>();
+  const displayPath = new Map<string, string>();
   let unattributed = 0;
   for (const tool of tools) {
     const edit = readEdit(tool);
@@ -128,17 +145,19 @@ function buildFiles(tools: readonly ToolCall[]): { files: FileChange[]; unattrib
       unattributed += 1;
       continue;
     }
-    if (!byPath.has(path)) {
-      byPath.set(path, []);
-      order.push(path);
+    const key = pathKey(path);
+    if (!byKey.has(key)) {
+      byKey.set(key, []);
+      displayPath.set(key, path);
+      order.push(key);
     }
-    byPath.get(path)!.push(edit);
+    byKey.get(key)!.push(edit);
   }
-  const files = order.map((path) => {
-    const edits = byPath.get(path)!;
+  const files = order.map((key) => {
+    const edits = byKey.get(key)!;
     const { stat, limited } = netStatOf(edits);
     return {
-      path,
+      path: displayPath.get(key)!,
       edits,
       added: stat?.added ?? null,
       removed: stat?.removed ?? null,
@@ -148,20 +167,13 @@ function buildFiles(tools: readonly ToolCall[]): { files: FileChange[]; unattrib
   return { files, unattributed };
 }
 
-/** 本次会话改动过的文件（按文件聚合，首次出现顺序）。
+/** 本次会话改动过的文件（按文件聚合，首次出现顺序）+ 归属不了文件的改动次数。
  *
- *  `withUnattributed` 用于需要"有改动但归属不了文件"这条信息的调用方（面板的空态与
- *  脚注）——默认形态是数组，让最常见的调用点少一层解包。
- */
-export function changedFiles(tools: readonly ToolCall[]): FileChange[];
-export function changedFiles(
-  tools: readonly ToolCall[],
-  options: { withUnattributed: true },
-): { files: FileChange[]; unattributed: number };
-export function changedFiles(
-  tools: readonly ToolCall[],
-  options?: { withUnattributed?: boolean },
-): FileChange[] | { files: FileChange[]; unattributed: number } {
-  const built = buildFiles(tools);
-  return options?.withUnattributed === true ? built : built.files;
+ *  只有一个返回值形状：调用方（面板）同时需要 `files` 与 `unattributed`（空态与脚注
+ *  都要用），所以不提供"只要数组"的重载——那层解包省不掉任何东西，只会多一种形状。 */
+export function changedFiles(tools: readonly ToolCall[]): {
+  files: FileChange[];
+  unattributed: number;
+} {
+  return buildFiles(tools);
 }

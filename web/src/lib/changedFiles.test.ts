@@ -107,7 +107,7 @@ describe('changedFiles — 按文件聚合（AC2：一个文件一行）', () =>
       editTool('t2', 'src/b.ts', 'x\n', 'x\ny\n'),
       editTool('t3', 'src/a.ts', 'a\nb\n', 'a\nb\nc\n'),
     ];
-    const files = changedFiles(tools);
+    const { files } = changedFiles(tools);
     expect(files.map((f) => f.path)).toEqual(['src/a.ts', 'src/b.ts']);
     expect(files[0].edits.map((e) => e.toolCallId)).toEqual(['t1', 't3']);
     // 净变化：原文 a → 最终 a,b,c = +2
@@ -121,12 +121,12 @@ describe('changedFiles — 按文件聚合（AC2：一个文件一行）', () =>
       editTool('t2', 'a.txt', 'a', 'b'),
       editTool('t3', 'z.txt', 'b', 'c'),
     ];
-    expect(changedFiles(tools).map((f) => f.path)).toEqual(['z.txt', 'a.txt']);
+    expect(changedFiles(tools).files.map((f) => f.path)).toEqual(['z.txt', 'a.txt']);
   });
 
   it('write 新建文件（before 为空）：+N −0，且不把空 before 当成"缺数据"', () => {
     const tools = [editTool('t1', 'new.txt', '', 'l1\nl2\n', { name: 'write' })];
-    const files = changedFiles(tools);
+    const { files } = changedFiles(tools);
     expect(files[0].added).toBe(2);
     expect(files[0].removed).toBe(0);
     expect(files[0].edits[0].toolName).toBe('write');
@@ -137,22 +137,53 @@ describe('changedFiles — 按文件聚合（AC2：一个文件一行）', () =>
       { tool_call_id: 'b', name: 'bash', args: { command: 'rm -rf /' }, status: 'success' } as ToolCall,
       { tool_call_id: 'r', name: 'read', args: { path: 'x' }, status: 'success', result: { content: 'x' } } as ToolCall,
     ];
-    expect(changedFiles(tools)).toEqual([]);
+    expect(changedFiles(tools).files).toEqual([]);
+  });
+
+  it('三个写工具**都**在集合里：write / edit / apply_patch（漏掉任何一个，那种改动就整类消失）', () => {
+    // 这份集合是"什么算文件改动"的**唯一**判据（与后端 `_WRITE_TOOL_NAMES` 同答案）。
+    // 逐名断言而不是只测 write/edit：`apply_patch` 是三个里最容易在重构中被漏掉的
+    // （它不在任何 mock fixture 的默认路径上），而漏掉的表现是"面板静默少了文件"。
+    const tools = ['write', 'edit', 'apply_patch'].map((name, i) =>
+      editTool(`t${i}`, `${name}.txt`, 'a\n', 'a\nb\n', { name }),
+    );
+    const { files } = changedFiles(tools);
+    expect(files.map((f) => f.path)).toEqual(['write.txt', 'edit.txt', 'apply_patch.txt']);
+    expect(files.every((f) => f.added === 1)).toBe(true);
+  });
+
+  it('`./src/a.ts` 与 `src/a.ts` 是同一个文件 → 一行（前导 `./` 可证等价，折掉）', () => {
+    const tools = [
+      editTool('t1', './src/a.ts', 'a\n', 'a\nb\n'),
+      editTool('t2', 'src/a.ts', 'a\nb\n', 'a\nb\nc\n'),
+    ];
+    const { files } = changedFiles(tools);
+    expect(files).toHaveLength(1);
+    // 显示的是**首次出现时的原文**（改写的是比对键，不是给用户看的路径）
+    expect(files[0].path).toBe('./src/a.ts');
+    expect(files[0].edits.map((e) => e.toolCallId)).toEqual(['t1', 't2']);
+    expect(files[0].added).toBe(2);
+  });
+
+  it('大小写不同**不**合并：区分大小写的文件系统上那是两个文件（宁可两行，不谎报一行）', () => {
+    const tools = [
+      editTool('t1', 'Src/a.ts', 'a\n', 'a\nb\n'),
+      editTool('t2', 'src/a.ts', 'a\n', 'a\nc\n'),
+    ];
+    expect(changedFiles(tools).files.map((f) => f.path)).toEqual(['Src/a.ts', 'src/a.ts']);
   });
 
   it('写工具但缺 path：不静默丢——计入 unattributed，界面如实说明', () => {
     const tools = [editTool('t1', '', 'a', 'b')];
-    const files = changedFiles(tools);
-    expect(files).toEqual([]);
-    // 单独的返回值承载"有改动但归属不了文件"
-    expect(changedFiles(tools, { withUnattributed: true })).toEqual({ files: [], unattributed: 1 });
+    // unattributed 与 files 同一个返回值——不允许"丢了但没处说"
+    expect(changedFiles(tools)).toEqual({ files: [], unattributed: 1 });
   });
 
   it('没有 diff 字段的写工具（结果还没回来）不算改动', () => {
     const pending: ToolCall = {
       tool_call_id: 'p', name: 'write', args: { path: 'x' }, status: 'running',
     };
-    expect(changedFiles([pending])).toEqual([]);
+    expect(changedFiles([pending]).files).toEqual([]);
   });
 
   it('归档/截断的文件：仍出现在清单里（它确实被改过），只是统计不可得', () => {
@@ -161,7 +192,7 @@ describe('changedFiles — 按文件聚合（AC2：一个文件一行）', () =>
         diff: { before: 'b', after: 'a', truncated: false, archived: true, artifactId: '0123456789abcdef' },
       }),
     ];
-    const files = changedFiles(tools);
+    const { files } = changedFiles(tools);
     expect(files).toHaveLength(1);
     expect(files[0].added).toBeNull();
     expect(files[0].limited).toBe('archived');

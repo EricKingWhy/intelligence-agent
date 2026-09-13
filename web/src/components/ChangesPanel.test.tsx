@@ -35,6 +35,19 @@ const render = (tools: readonly ToolCall[]) =>
 
 const rowCount = (html: string) => (html.match(/changes-file-row/g) || []).length;
 
+/** 取出所有统计徽标的**可见文本**（`<span class="changes-stat…">…</span>`）。
+ *  断言必须落在徽标上，不能拿整页 HTML 去匹配 `-\d`——HTML 里的属性值也会命中，
+ *  那样的断言测的是标记而不是"有没有编数字"。 */
+const statTexts = (html: string): string[] =>
+  [...html.matchAll(/<span class="changes-stat[^"]*"[^>]*>([\s\S]*?)<\/span>/g)].map((m) => m[1]);
+
+/** 所有统计徽标都在说"不可得"（`—`），没有任何一个是数字。 */
+function assertAllStatsUnavailable(html: string): void {
+  const stats = statTexts(html);
+  expect(stats.length).toBeGreaterThan(0);
+  expect(stats.filter((s) => s !== '—')).toEqual([]);
+}
+
 describe('#189 AC1/AC2：文件列表', () => {
   it('一个文件一行（改两次也是一行），带路径与净统计', () => {
     const html = render([
@@ -90,8 +103,9 @@ describe('#189 AC5/AC6 + 不伪造：不可得与空态', () => {
     expect(html).toContain('已归档');
     // DiffBlock 的归档占位（同一渲染器）在场
     expect(html).toContain('diff-archived');
-    // 不得出现编出来的统计
-    expect(html).not.toMatch(/[+]\d/);
+    // 不得出现编出来的统计：**每一个**徽标（左清单行 + 右详情头）都必须说"不可得"，
+    // 而不是各自编一个 +N/−M。按属性断言而不是按个数——多一个徽标不该让用例失效。
+    assertAllStatsUnavailable(html);
   });
 
   it('内容被截断（>50KB）：同样说"不可得"并给出原因', () => {
@@ -99,6 +113,7 @@ describe('#189 AC5/AC6 + 不伪造：不可得与空态', () => {
       editTool('t1', 'big.txt', 'a', 'b', { diff: { before: 'a', after: 'b', truncated: true } }),
     ]);
     expect(html).toContain('已截断');
+    assertAllStatsUnavailable(html);
   });
 
   it('无改动：空态文案逐字（AC6/AC8——不是空列表，也不是"加载中"）', () => {

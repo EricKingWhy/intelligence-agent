@@ -50,8 +50,18 @@ function StatBadge({ file }: { file: FileChange }) {
   );
 }
 
+/** 归属不了文件的改动次数：空态与有文件两种版式下都要说同一句话，所以只有一份。 */
+function UnattributedFootnote({ count }: { count: number }) {
+  if (count === 0) return null;
+  return (
+    <div className="changes-footnote">
+      另有 {count} 次改动无法归属到文件（事件里没有路径）。
+    </div>
+  );
+}
+
 export function ChangesPanel({ tools }: { tools: readonly ToolCall[] }) {
-  const { files, unattributed } = changedFiles(tools, { withUnattributed: true });
+  const { files, unattributed } = changedFiles(tools);
   const [wanted, setWanted] = useState<string | null>(null);
   /* 渲染期收窄（同 #182 `resolveActiveTab` / #183 的 peek 口径）：选中的文件可能已经
    * 不在清单里（会话切换、或那次改动被后续事件改写），此时落回第一个文件——绝不留在
@@ -64,11 +74,7 @@ export function ChangesPanel({ tools }: { tools: readonly ToolCall[] }) {
         <div className="detail-tab-empty">
           <FileDiff size={24} className="detail-empty-icon" aria-hidden="true" />
           <div className="detail-empty-hint">本次会话未改动任何文件。</div>
-          {unattributed > 0 && (
-            <div className="changes-footnote">
-              另有 {unattributed} 次改动无法归属到文件（事件里没有路径）。
-            </div>
-          )}
+          <UnattributedFootnote count={unattributed} />
         </div>
       ) : (
         <>
@@ -129,11 +135,7 @@ export function ChangesPanel({ tools }: { tools: readonly ToolCall[] }) {
               )}
             </div>
           </div>
-          {unattributed > 0 && (
-            <div className="changes-footnote">
-              另有 {unattributed} 次改动无法归属到文件（事件里没有路径）。
-            </div>
-          )}
+          <UnattributedFootnote count={unattributed} />
         </>
       )}
     </div>

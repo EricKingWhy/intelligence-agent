@@ -32,6 +32,7 @@ import {
 import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { CopyButton } from './CopyButton';
+import { DiffBlock } from './DiffBlock';
 import { JsonTree } from './JsonTree';
 import { ToolOutputStream } from './ToolOutputStream';
 
@@ -1038,9 +1039,11 @@ const TimelineRow = memo(function TimelineRow({
   );
 });
 
-// ── Changes tab：diff 双栏聚合（复用 ToolCard diff 形态的数据与 .diff-cols 形状） ──
+// ── Changes tab：文件 diff 聚合（渲染复用 `DiffBlock`——diff 只有一份渲染器） ──
 
-function ChangesTab({ tools }: { tools: ToolCall[] }) {
+/** 导出供 SSR 测试直接渲染（同 `TimelineTab` / `ToolEventSections`：`tab` 是内部
+ *  状态，从 `StepDetail` 外面进不到这个面）。 */
+export function ChangesTab({ tools }: { tools: ToolCall[] }) {
   const diffs = tools.filter((t) => t.diff);
   if (diffs.length === 0) {
     return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
@@ -1052,17 +1055,12 @@ function ChangesTab({ tools }: { tools: ToolCall[] }) {
           <div className="detail-section-title">
             <FileDiff size={14} /> {t.name}: {String(t.args.path ?? '')}
           </div>
-          <div className="diff-cols">
-            <div className="diff-col diff-before">
-              <div className="diff-col-label">变更前</div>
-              <pre>{t.diff!.before || '（空）'}</pre>
-            </div>
-            <div className="diff-col diff-after">
-              <div className="diff-col-label">变更后</div>
-              <pre>{t.diff!.after || '（空）'}</pre>
-            </div>
-          </div>
-          {t.diff!.truncated && <div className="detail-empty-hint">内容过长，已截断</div>}
+          {/* 这里此前自己内联一份 `.diff-cols`——同一份 before/after 在 Inspector 与
+              中心列各有一套渲染，且这套**认不出归档态**（before/after 已被换成
+              `use read_artifact(<id>)` marker 摘要时，会把 marker 原文当 diff 正文
+              渲染出来，即"显示了一段并不存在的文件内容"）。收敛到 `DiffBlock`
+              （#183 AC9 / #186 AC3）后归档占位态与中心列逐字一致。 */}
+          <DiffBlock diff={t.diff!} />
         </div>
       ))}
     </>

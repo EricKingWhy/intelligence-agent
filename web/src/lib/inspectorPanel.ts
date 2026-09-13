@@ -30,6 +30,12 @@ export const PEEK_TAP_MS = 250;
  *
  * 可用空间小到连下限都保不住时**下限优先**：面板本身必须可用；那种宽度下
  * 外层的窄屏折叠（<1200px）已经在管这件事，把一个 200px 的面板交出去只会更难用。
+ *
+ * ⚠ **这个上限在当前布局下恒等于 `INSPECTOR_MAX_W`**：三栏栅格只在 ≥1201px 生效，
+ * 那里 `available = viewport − 240 ≥ 961`，`available − CENTER_MIN_W > 480`。
+ * 所以中心列保护是一道**防御性**的夹取（换 rail 宽度、加第四栏、或提高
+ * `INSPECTOR_MAX_W` 时它就会生效），目前**只由单元测试**覆盖——e2e 到不了那个宽度
+ * （<1200px 的折叠分支把面板列写死成 280px）。改布局的人请同时看这条。
  */
 export function clampInspectorWidth(desired: number, available: number): number {
   const ceiling = Math.min(INSPECTOR_MAX_W, available - CENTER_MIN_W);

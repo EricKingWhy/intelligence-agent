@@ -211,7 +211,14 @@ test('AC6：可拖宽 320→480，夹取到上限且不压垮中心列；刷新�
     await page.mouse.up();
   };
 
-  // 拖到远超上限的位置：夹取到 480（下限由可用宽度保护，见 lib/inspectorPanel）
+  // 拖到远超上限的位置：夹取到 480。
+  //
+  // 注意这条用例**证明不了**"上限会被中心列压低"（AC6 的 `CENTER_MIN_W`）：三栏栅格
+  // 只在 ≥1201px 生效，那里 available = viewport − 240 ≥ 961，`available − 360`
+  // 恒 > 480 ⇒ 上限恒为 480。要构造"上限真的咬住"的宽度得先改布局（<1200px 的折叠
+  // 分支把面板列写死成 280px）。所以这里锁的是**接线**（拖拽确实走到夹取、中心列没被
+  // 挤没），而夹取公式本身由 `src/lib/inspectorPanel.test.ts` 的
+  // `clampInspectorWidth(480, 700) === 340` 锁住——两处各管一段，别互相冒充。
   await dragBy(600);
   await expect(resizer).toHaveAttribute('aria-valuenow', '480');
   // 中心列没被压垮（AC6 的"不得压垮"）
