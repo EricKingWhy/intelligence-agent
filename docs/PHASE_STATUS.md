@@ -363,3 +363,15 @@
   **自审修掉的一处自身缺陷（P1）**：`artifact_dir` 置空（**文档化的关闭本地外置**方式）会让 `LocalArtifactStore` 构造抛 ValueError → 建会话 500。外置是大输出的优化不是 Core 必需品（不变量 21），改为 fail-open（无写入者，与 #192 之前同行为）并加测试钉住（`test_blank_artifact_dir_disables_local_externalization_without_breaking_session`）。
 
   **契约语义变更（已在测试里写明）**：未配对象存储不再等于"没有存储"，而是"用本地存储"，故 `GET .../artifacts/{id}` 从 503 变为 404（产物不存在）。503 只留给两种真的没有可读存储的情形：`artifact_dir` 显式置空、对象存储**半配置**（配错不许静默降级到本地——那会让运维以为产物进了对象存储）。
+
+- 2026-09-14：**批 1 code-review（后端，覆盖 ticket #192）**。批内累计 diff 的双轴审查（Standards + Spec；fixed point `0296956` = 批前基线）。修复 commit `9086642`（+ 本 ADR/进度文档 commit）。审查状态推进到：批 1 已收口，下一批 fixed point = `9086642`。
+
+  **Standards 轴 findings（全部修复）**：① **重复的 store 选择逻辑**——写路径（`assembly`）与读路径（`web/artifacts.py`）各有一份 S3→MinIO→Local 的 if 级联，靠人工保持同步 ⇒ 收敛为唯一选择器 `storage/artifact_select.py::select_artifact_store`，并**成对返回** store 与配对的读回工具（这个"哪个 store 配哪个读工具"的知识也曾经散落）。② **"一份定义"的注释是假的**——`SESSION_KEY_PATTERN` 声称三 Provider 共用，实际只有 S3 内联正则与 session 层注释引用，MinIO 不校验、Local 另写一份 ⇒ 现由 S3 / MinIO / Local / session 层共用，MinIO 补上构造期校验。③ **sidecar 元数据手抄字段表**（`local_artifact.py`）⇒ 改 `Artifact.model_dump(exclude={"content"})`。④ 遗漏的 `OSError`：Local 构造在 win32 非法路径上会抛 `OSError` 而不是 `ValueError` ⇒ 捕获面扩为两者。
+
+  **Spec 轴 findings（AC 证据缺口，全部补齐）**：⑤ **AC9 缺端到端证据**——原 `test_local_store_writes_to_disk_and_reads_back` 是直接 `new ArtifactOverflowHandler(LocalArtifactStore(...))`，证明的是"store 能写"，**证不了 `build_runtime` 真的接上了写入者**——而"没有写入者"正是 #192 的病根。新增 `test_runtime_overflow_writes_a_readable_artifact`：真 workspace 大文件 → read 工具 → 真 runtime 溢出 → `artifact/externalized` + ToolResult 只带 `artifact_ref` → 磁盘逐字节完整原件 → HTTP 200 读回；**该测试已用"断开写入者"变异探针验证过它确实会失败**（否则它不是证据）。⑥ **AC7 缺 HTTP 200 的真实通路**——此前所有 200 断言都建立在 `FakeArtifactStore` 补丁上，只证明"路由会把切片拼成响应"；新增 `test_reads_a_locally_written_artifact_over_http`（不替换工厂）与 `test_local_artifact_of_another_session_is_404`（默认 Provider 上的真实跨会话隔离——替身 store 不按会话分区，在它身上断言只能测出假象）。
+
+  **文档一致性（同批修复）**：⑦ ADR-0029 D6/Non-Goals 与 #192 的实际落地相矛盾（D6 写"Artifact 级联删除不在本票"，Non-Goals 写"artifact 要先加 delete"，但本地那一半已落地）⇒ D6 加 2026-09-14 修订注（说明它为何**不**属于 D6 的"级联"：不读映射、只删自拼路径）+ Non-Goals 拆成 Memory / **远端** Artifact 两条。⑧ `web/app.py` 的 503 路由文档与 detail 文案是 #192 之前的语义（未配存储已不再等于 503）⇒ 重写 503 分支说明 + 新增"#192 之后 404 的含义变宽了"提示；`ReadArtifactTool` 的 docstring 自称"MinIO-backed"，实际配对已覆盖 MinIO 与 Local ⇒ 改为指向 `artifact_select.py`。
+
+  **修复后的验证（按协议第 5 条：不重跑全量 review，跑测试 + 自查 diff）**：ruff clean；全量 pytest **2201 passed / 10 skipped / 42 deselected / 0 failed**。测试适配 1 处：`tests/test_web_phase5.py` 通过补丁 `assembly.S3ArtifactStore` 注入内存替身，选择器迁移后该命名空间不再有此类 ⇒ 补丁目标改为 `storage.s3_artifact.S3ArtifactStore`（选择逻辑与接线仍走真实路径，仅 store 换替身）。**该失败是全量门禁抓到的**——单跑 #192 相关文件时不可见，说明批内不能只跑聚焦用例。
+
+  **未采纳（记录在案）**：审查提出"给 `ArtifactStore` ABC 加 `delete` 统一远端/本地删除"——超出本票与 ADR-0029 D6 的范围（ADR 已把远端级联列为另开票），且会给 2/3 未实现 delete 的 Provider 抛 `NotImplementedError`。属 Scope Lock（§8）外，仅报告不改。
