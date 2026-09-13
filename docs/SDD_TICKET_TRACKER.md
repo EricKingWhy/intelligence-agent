@@ -880,3 +880,37 @@ dev server 已停、真记忆库已清空（不留假事实）。
 移交集成 AI：`feat/frontend` → `main` 合并 + push + `docs/PHASE_STATUS.md` 回填。
 此前各节写的「本票不关单」是当时的 §14.12 处置（跨端票只完成一端），随两端齐备 + 用户指示而更新，
 历史小节按「当时事实」保留不改。
+
+---
+
+## 第十一轮验收修复（2026-09-13，前端侧 · 在途记录）
+
+> 来源：`docs/FRONTEND_ISSUES_LOG.md` 第十一轮（后端 AI 在验收车道真机逐控件点击后提出的前端项）。
+> 本轮**没有 GitHub ticket**（finding 记在登记簿），故进度记在这里；合入 `main` 后由集成 AI 回填
+> `docs/PHASE_STATUS.md`。分支 `feat/frontend`。
+
+| 修复 | commit | 内容 | 回归锁 |
+| --- | --- | --- | --- |
+| **ART-01**（P1） | `47b2644` | `artifact/externalized` 接线到 Artifacts 页签（此前只接了 spec 里的 `artifact/created` → 生产路径上页签恒空且给错误结论） | `projection.test.ts` 两条 + 真机 |
+| **MOD-01**（P1） | `65c8b7b` | 选「默认链」改为提交默认条目名（新增 `lib/modelSelection.ts`）；真机 `fb3619c6` 写出 `seq9 {to=None}` | `modelSelection.test.ts` 5 条 + 真机 |
+| **APR-01**（P1） | `2c5adbd` | 孤儿审批（run 终结仍 pending）转只读失效态 + **解锁 composer**；404 → `ApprovalGoneError`（不再当可重试错误） | `projection.test.ts` 5 条 / `api.test.ts` 2 条 / `ApprovalCard.test.tsx` 4 条 / e2e 2 条 + 真机 |
+| **FE-R11-04**（P2） | `59673ef` | 短目录搜索框隐藏时把初焦交给 listbox（cmdk 的方向键承接者在 `[cmdk-root]` 内）；新增 `lib/pickerFocus.ts` | e2e「短目录键盘导航（不手动聚焦 listbox）」**变异验证过** |
+| **FE-R11-05**（P2） | `59673ef` | 单选 ControlPicker 首项「默认（未选）」（提交 `null`） | e2e 往返 + `pickControl` 下标顺延 |
+| **FE-R11-06**（P2） | `59673ef` | 勾选态从 `aria-hidden` 的 ☑ 移到 `role="option"` 的 `aria-checked` + listbox `aria-multiselectable` | e2e 断言 true/false 往返 |
+| **FE-R11-07**（P2） | `59673ef` | `selectedIds ∩ entries` 后再计数与 toggle（幽灵项） | 单测 2 条 |
+| **FE-R11-08**（P2） | `8e8f0ab` | 空白重命名就地拦截（提示 + 保留编辑态 + `aria-invalid`） | e2e AC4 三段 |
+| **FE-R11-09**（P2） | `8e8f0ab` | 窄屏 ≤820px 删除入口恢复（槽位共享：会话点 ↔ ⋯，⋯ 绝对定位不挤可点面积）；顺带修正被同一规则误伤的 `.session-item-dot` | e2e 800px 视口全流程 + 槽位切换断言 |
+| **FE-R11-10**（P2） | `8e8f0ab` | 删除确认弹窗初焦从「关闭(X)」改为「取消」 | e2e 焦点断言 + 零 DELETE |
+| **测试基建** | `59673ef` | `pickControl` 退出动画竞态（Escape 后不等卸载再 open → 选中静默失效） | helper 内注释 + 探针复现记录 |
+
+**门禁**（每次 commit 前跑，最后一次：`feat/frontend` HEAD `8e8f0ab`）：
+`npx tsc -b` 干净 / `npx vitest run` **659 passed（38 文件）** / `npx oxlint` 0 error /
+`npx playwright test --workers=2` **226 passed** / `npx vite build` 绿。
+
+**未修（需产品决策，已开 issue）**：
+- **#180** Split/Preview 占位模式（现状可点但只插提示条）——收敛为「诚实未实现」态还是做真副面板；
+- **#179** 窄屏 ≤820px 项目级操作（重命名/删除项目/新建会话）无入口（与 FE-R11-09 同源但作用在项目层）。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit，不 push）；
+成功后回填 `docs/PHASE_STATUS.md`。合并顺序：先 `feat/backend`（含 spec #173 T1–T4 的 4 个 commit），
+再 `feat/frontend`（本表 4 个 commit）——详见 `docs/INTEGRATION_PROMPT_SPEC_173_T1_T5.md`（backend worktree）。
