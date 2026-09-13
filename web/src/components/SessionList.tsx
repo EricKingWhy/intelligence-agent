@@ -280,6 +280,10 @@ export const SessionList = memo(function SessionList({
                           onClick={() => toggle(project.id)}
                           aria-expanded={expanded}
                           aria-controls={expanded ? listId : undefined}
+                          // 窄屏（≤820px）标题与计数被 CSS 收起，而 display:none 会把
+                          // 它们从可访问性树里摘掉——不补 aria-label 这个按钮在窄屏
+                          // 就是无名控件（#179）。
+                          aria-label={`${project.title}：${expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}`}
                           title={expanded ? '收起项目' : `展开项目（${rows.length} 个会话）`}
                         >
                           <ChevronRight
