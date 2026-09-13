@@ -41,6 +41,7 @@ import {
   type ModelCatalogEntry,
 } from './lib/api';
 import { summarizeEvent } from './lib/projection';
+import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
 import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
 import './styles/app.css';
@@ -299,13 +300,21 @@ export default function App() {
       setSelectedModel(name);
       // T7 #137：已有会话时，模型选择触发 POST /model 切换会话当前模型。
       // 新会话（无 selectedId）只更新本地状态——startSession 时携带 model。
-      if (selectedId && name) {
-        const entry = models.find((m) => m.name === name);
+      //
+      // FE-R11-02（第十一轮真机验收）：`null` = 选了「默认链」，在**已有会话**上必须也 POST
+      // ——后端清「会话级覆盖」的合法入参是 is_default 条目的名字（见 lib/modelSelection.ts）。
+      // 此前 `if (selectedId && name)` 把 null 一并跳过，导致界面显示「默认链」而会话继续跑
+      // 上一个非默认模型（真机：选 glm-5.3-flash 后选「默认链」，JSONL 不新增 model/changed）。
+      const target = modelChangeTarget(name, models);
+      if (selectedId && target) {
+        const entry = models.find((m) => m.name === target);
         if (entry?.provider) {
-          void changeModel(selectedId, entry.provider, name)
+          void changeModel(selectedId, entry.provider, target)
             .then((result) => {
-              // 用响应里的规范 model_id 更新本地状态（不回显请求值）
-              setSelectedModel(result.model_id);
+              // 用响应里的规范 model_id 更新本地状态（不回显请求值）。
+              // 例外：选「默认链」时保持 null——trigger 要显示「默认链」而不是被回填成
+              // 具体模型名（那会和用户刚点的选项不一致）。
+              if (name !== null) setSelectedModel(result.model_id);
             })
             .catch(() => {
               // 切换失败静默——用户可重试；不阻塞主流程
