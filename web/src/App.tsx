@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { KeyRound, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
@@ -22,7 +23,7 @@ import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
-import { StepDetail, type InspectorFocus } from './components/StepDetail';
+import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import {
@@ -35,6 +36,7 @@ import {
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
+import { INSPECTOR_MIN_W } from './lib/inspectorPanel';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
@@ -242,9 +244,29 @@ export default function App() {
   // 全部 useCallback：下游 SessionList/Composer/Conversation/StepDetail 的 memo
   // 依赖引用稳定的回调，普通函数每次渲染新引用会让 memo 全部失效。
   const [focus, setFocus] = useState<InspectorFocus>({ kind: 'run' });
-  const focusRun = useCallback(() => setFocus({ kind: 'run' }), []);
-  const focusTool = useCallback((tool: ToolCall) => setFocus({ kind: 'tool', tool }), []);
-  const focusEvent = useCallback((event: AgentEvent) => setFocus({ kind: 'event', event }), []);
+  /* #183 面板视图状态：钉住 / 整页 / 宽度 / 选中项详情（peek）是否展开。
+   * 全部是**视图状态、不持久化**（不变量 #22）。状态归 App 而不是 StepDetail：
+   * 宽度与整页要改的是 `.app-regions` 的栅格（App 渲染），StepDetail 只是消费方。 */
+  const [panel, setPanel] = useState({
+    pinned: false,
+    expanded: false,
+    width: INSPECTOR_MIN_W,
+    peekOpen: false,
+  });
+  /* 选中即预览（AC3：鼠标点击即选中即预览）。reducer 里改 peekOpen 会让"选一个新
+   * 目标"变成"必须先开预览"——那是键盘才能做的动作，鼠标用户点一行就该看到详情。 */
+  const focusRun = useCallback(() => {
+    setFocus({ kind: 'run' });
+    setPanel((cur) => (cur.peekOpen ? { ...cur, peekOpen: false } : cur));
+  }, []);
+  const focusTool = useCallback((tool: ToolCall) => {
+    setFocus({ kind: 'tool', tool });
+    setPanel((cur) => (cur.peekOpen ? cur : { ...cur, peekOpen: true }));
+  }, []);
+  const focusEvent = useCallback((event: AgentEvent) => {
+    setFocus({ kind: 'event', event });
+    setPanel((cur) => (cur.peekOpen ? cur : { ...cur, peekOpen: true }));
+  }, []);
   // Phase 13 委派钻取（v2 PRD §10.5）：委派节点 Inspect → 右栏原位展开 child
   // 会话；深层钻取是显式意图——Inspector 关着时一并打开（不同于 hover Inspect）。
   const focusChild = useCallback(
@@ -301,6 +323,37 @@ export default function App() {
     setInspectorOpen((v) => !v);
   };
 
+  /** #183 面板动作的唯一入口（pin/expand/resize/peek 开关/关闭）。
+   *
+   *  `close` 单独一条路而不是塞进 `setPanel` 的 updater：它要同时改另一个 state
+   *  （`inspectorOpen`）。在 updater 里调 `setInspectorOpen` 是"在状态更新函数里做
+   *  副作用"——StrictMode 下 updater 会被双调用，那条路径的正确性就得靠"恰好幂等"
+   *  来保证。 */
+  const onPanelAction = useCallback((action: InspectorPanelAction) => {
+    if (action.type === 'close') {
+      userToggledRef.current = true; // 手动关闭后不被窄屏断点立刻改回来（既有一致口径）
+      setInspectorOpen(false);
+      setPanel((cur) => (cur.peekOpen ? { ...cur, peekOpen: false } : cur));
+      return;
+    }
+    setPanel((cur) => {
+      switch (action.type) {
+        case 'pin':
+          return cur.pinned === action.value ? cur : { ...cur, pinned: action.value };
+        case 'expand':
+          return cur.expanded === action.value ? cur : { ...cur, expanded: action.value };
+        case 'resize':
+          return cur.width === action.width ? cur : { ...cur, width: action.width };
+        case 'open-peek':
+          return cur.peekOpen ? cur : { ...cur, peekOpen: true };
+        case 'close-peek':
+          return cur.peekOpen ? { ...cur, peekOpen: false } : cur;
+        default:
+          return cur;
+      }
+    });
+  }, []);
+
   /** 当前选中会话的 ref 镜像——异步回调（分叉落地）需要「落地时的当下值」，
    *  而闭包里的 selectedId 只是发起时的快照。镜像在 effect 里同步（render 期写
    *  ref 会被 react-hooks lint 判为 "Cannot update ref value during render"），
@@ -316,13 +369,21 @@ export default function App() {
     selectedIdRef.current = null;
     selectSession(null);
     focusRun();
-  }, [selectSession, focusRun]);
+    // #183 AC4：未钉住时**离开一个正在看的会话** = 收起面板（钉住的用途正是
+    // "切换会话时它还开着"）。首次进入（原本没有会话）不算离开——那会把"点开第一个
+    // 会话"也变成"面板自己关掉"。
+    if (!panel.pinned && selectedId !== null) setInspectorOpen(false);
+  }, [selectSession, focusRun, panel.pinned, selectedId]);
 
   const handleSelect = useCallback((id: string) => {
+    const leaving = selectedId !== null && selectedId !== id;
     selectedIdRef.current = id;
     selectSession(id);
+    // 选中项属于它所在的会话：换会话必须清选中（否则面板会拿着 A 会话的事件
+    // 站在 B 会话里——跨会话的"第二真相"，不变量 #22）。
     focusRun();
-  }, [selectSession, focusRun]);
+    if (!panel.pinned && leaving) setInspectorOpen(false);
+  }, [selectSession, focusRun, panel.pinned, selectedId]);
 
   useEffect(() => {
     void fetchModels();
@@ -548,6 +609,20 @@ export default function App() {
         },
       },
       {
+        /* #183 AC5：整页打开的**第二个入口**（第一个是面板头部按钮）。键位留白的
+           那一处就是这里——命令面板不占浏览器快捷键，长 trace / 大 diff 宽读不用
+           先找到那个 ⤢ 图标。 */
+        id: 'toggle-inspector-fullpage',
+        label: panel.expanded ? '退出 Inspector 整页' : '整页打开 Inspector',
+        keywords: 'full page inspector maximize 整页 宽读',
+        hint: '面板',
+        group: 'actions',
+        run: () => {
+          setInspectorOpen(true);
+          onPanelAction({ type: 'expand', value: !panel.expanded });
+        },
+      },
+      {
         id: 'jump-latest',
         label: '跳到最新事件',
         keywords: 'jump to latest event 定位',
@@ -670,7 +745,7 @@ export default function App() {
       });
     }
     return items;
-  }, [conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen]);
+  }, [conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction]);
 
   return (
     <div className="app-frame">
@@ -687,7 +762,15 @@ export default function App() {
         onOpenMemories={() => setMemoriesOpen(true)}
       />
 
-      <main className={`app-regions ${inspectorOpen ? '' : 'inspector-closed'}`}>
+      <main
+        className={
+          `app-regions ${inspectorOpen ? '' : 'inspector-closed'}` +
+          (panel.expanded && inspectorOpen ? ' inspector-fullpage' : '')
+        }
+        /* #183 AC6：面板宽度是**视图状态**（不持久化）——用 CSS 变量喂给栅格，
+           `.app-regions` 的第三列读它。窄屏（<1200px）仍由既有断点接管。 */
+        style={{ '--inspector-w': `${panel.width}px` } as CSSProperties}
+      >
         <SessionList
           sessions={sessions}
           projects={projects}
@@ -884,6 +967,8 @@ export default function App() {
           onFocusEvent={focusEvent}
           onJumpToStream={jumpToStream}
           onJumpToApproval={jumpToApproval}
+          panel={panel}
+          onPanelAction={onPanelAction}
         />
       </main>
 

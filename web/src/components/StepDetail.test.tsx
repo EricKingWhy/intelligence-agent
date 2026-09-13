@@ -34,6 +34,12 @@ function twoRunConversation(): ConversationState {
 }
 
 const noop = () => {};
+/** #183：StepDetail 新增面板视图状态 + 动作入口（状态归 App）。本文件的用例不关心
+ *  面板几何，给一份缺省（未钉住/未整页/320px/预览开）。 */
+const panelProps = {
+  panel: { pinned: false, expanded: false, width: 320, peekOpen: true },
+  onPanelAction: noop,
+} as const;
 const rowCount = (html: string) => (html.match(/timeline-row/g) || []).length;
 const renderTab = (conv: ConversationState) =>
   // SSR 会在插值文本节点间插入 <!-- --> 分隔注释——断言前剥离，避免误报
@@ -196,6 +202,7 @@ describe('EventInspector Overview（BUG-008）', () => {
       onFocusRun: noop,
       onFocusTool: noop,
       onFocusEvent: noop,
+      ...panelProps,
     })).replaceAll('<!-- -->', '');
   const baseEvent: AgentEvent = { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r', session_id: 's', event_id: 'e1' };
   const withStep = (step_id: number | null) => ({ ...baseEvent, step_id });
@@ -232,6 +239,7 @@ describe('StepDetail child focus（v2 PRD §10.5 委派钻取）', () => {
       onFocusRun: noop,
       onFocusTool: noop,
       onFocusEvent: noop,
+      ...panelProps,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('子会话');
     expect(html).toContain('research_review');

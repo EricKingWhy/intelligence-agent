@@ -32,7 +32,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .app-regions {
   flex: 1;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 320px;
+  /* #183 AC6：第三列宽度由 `--inspector-w` 给（App 的视图状态，320→480，不持久化）。
+     回退值 320 与常量 INSPECTOR_MIN_W 一致——两端各写一个数正是漂移的起点。 */
+  grid-template-columns: 240px minmax(0, 1fr) var(--inspector-w, 320px);
   min-height: 0;
   /* SDD §9: chrome quieter than workspace. The container is the quietest
    * tone (canvas) so the rail/inspector (chrome) and workspace sit on top
@@ -66,6 +68,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: none;
   overflow: hidden;
   visibility: hidden;
+}
+
+/* #183 AC5：整页——面板占满工作区宽度，长 trace / 大 diff 宽读。
+   与 `inspector-closed` 同一取舍：rail 与 workspace 收成 0 宽 + 可见性隐藏，
+   **仍在 DOM 里**（不卸载，滚动位置与内部状态留着），所以退回是瞬时的。 */
+.app-regions.inspector-fullpage {
+  grid-template-columns: 0px 0px minmax(0, 1fr);
+}
+.app-regions.inspector-fullpage .session-rail,
+.app-regions.inspector-fullpage .app-workspace {
+  overflow: hidden;
+  visibility: hidden;
+  border: none;
 }
 
 /* ── Workspace（中：Agent Workspace） ── */
@@ -3014,16 +3029,132 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: var(--space-lg);
   min-width: 0;
   min-height: 0;
+  /* #183：拖宽手柄绝对定位在面板左缘，需要它做包含块（`container-type` 只给
+     容器查询建立包含块，不保证绝对定位的包含块）。 */
+  position: relative;
   /* 容器查询锚点：让 .detail-tabs 等 Inspector 内部元素按面板宽度
      （而非视口）响应窄模式（spec 02 §12 narrow panels）。 */
   container-type: inline-size;
   container-name: inspector;
+}
+/* #183 AC6：拖宽手柄——压在面板与工作区的分界线上（6px 命中区比 1px 边框好抓，
+   又不遮住内容）。`touch-action: none` 让触屏上的拖拽不被滚动吃掉。 */
+.detail-resizer {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease-apple);
+}
+.detail-resizer:hover,
+.detail-resizer:focus-visible,
+.step-detail[data-resizing='true'] .detail-resizer {
+  background: color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+.detail-resizer:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
 }
 .detail-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* ── #183：清单 + 选中项详情（peek）同框 ──
+   没有预览时 `.detail-body` 就是原来的单一滚动区（既有行为逐字不变）；
+   预览打开时切成上下两块**各自滚动**：清单保住自己的滚动位置，详情跟着选中项
+   换内容（AC1 "不丢滚动位置"的落地方式就是让两者不是同一个滚动容器）。 */
+.detail-body[data-has-peek='on'] {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 44%);
+  overflow: hidden;
+}
+.detail-body[data-has-peek='on'] .detail-list {
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+.detail-peek {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-top: 1px solid var(--border-subtle);
+}
+/* 同 `.workspace-panel[hidden]` 那条（2026-09-06 踩过一次）：`hidden` 的 UA 规则是
+   `[hidden] { display: none }`，会被作者样式的 `display: flex` 盖过——不显式写这条，
+   "关掉"的预览会照常占位（e2e 一眼看穿：DOM 已是 `hidden`，视觉上还在）。 */
+.detail-peek[hidden] {
+  display: none;
+}
+.detail-peek-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  /* 钉在预览区顶部：详情很长时"关闭预览"仍在手边（同 header/tabs 的分层理由）。 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--space-xs) 0;
+  background: var(--bg-inspector);
+}
+.detail-peek-kind {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-peek-close {
+  flex: 0 0 auto;
+}
+
+/* ── #183 头部控制：钉住 / 整页 / 关闭（均为开关或动作按钮，aria 如实） ── */
+.detail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.detail-ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px var(--space-xs);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font: 500 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-apple),
+    background var(--dur-fast) var(--ease-apple);
+}
+.detail-ctrl:hover {
+  background: var(--color-hover);
+  color: var(--color-foreground);
+}
+.detail-ctrl:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+/* 选中态（钉住/整页已开）与既有状态语言同族：accent tint + 边框。 */
+.detail-ctrl.sel {
+  color: var(--accent);
+  background: var(--accent-muted);
+  border-color: color-mix(in srgb, var(--color-accent) 32%, transparent);
 }
 .detail-header {
   display: flex;
@@ -3207,6 +3338,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
     flex: 0 0 auto;
     padding: var(--space-xs);
   }
+  /* #183：面板窄到 360 以下时，头部三个控制（钉住/整页/关闭）降级为 icon-only
+     ——同一条容器查询口径（拖窄不是"变了个窗口"，是这个面板自己的宽度行为）。 */
+  .detail-ctrl-label {
+    display: none;
+  }
 }
 
 /* ── Tab 空状态：icon + 一句话（Impeccable："teach the interface, not 'nothing here'"）── */
@@ -3348,6 +3484,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
+/* #183：被选中（详情正在显示它）的行。与 `.detail-tool-row.sel` 同一视觉语言——
+   左侧 accent 竖条 + 淡底，全站"这是当前项"只有一种说法。 */
+.timeline-row.sel {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
 .tl-seq {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -3399,6 +3541,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .detail-terminal-row:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
+}
+/* #183：选中态——终端行的底色是 terminal-bg，淡底会看不出，所以只用 accent 边框
+   + 左竖条（与 `.timeline-row.sel` / `.detail-tool-row.sel` 同一含义）。 */
+.detail-terminal-row.sel {
+  border-color: var(--color-accent);
+  box-shadow: inset 2px 0 0 0 var(--accent);
 }
 .detail-terminal-cmd {
   display: flex;
