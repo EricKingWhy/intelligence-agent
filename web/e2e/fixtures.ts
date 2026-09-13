@@ -51,6 +51,22 @@ export interface ApiMock {
   reasoningEfforts?: unknown[];
   /** GET /api/context-providers（Context Provider 清单；当前诚实返空） */
   contextProviders?: unknown[];
+  // ── #182 能力声明显隐 ──
+  /** GET /api/capabilities 的条目（形状 = 后端 `web/app.py:934-943`；用
+   *  `capabilityFixture` 造）。
+   *
+   *  **缺省 = 空列表**——这正是后端 `CAPABILITIES=""` 时的真实响应（`{"capabilities":[]}`），
+   *  前端据此落到 PRD 缺省语义（chat + timeline）。这里**不**给一个"默认全 true"的
+   *  省事值：声明是能力的事，mock 给什么就该渲染什么（否则绿灯只证明"前端与我的假
+   *  后端一致"——本仓已栽过这个坑）。 */
+  capabilities?: unknown[];
+  /** capabilities 端点直接回错误（老后端 404 / 服务异常）→ 前端降级为缺省语义。 */
+  capabilitiesError?: { status: number; detail: string };
+  /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
+   *  为什么要这个口子：**今天没有任何非 Chat 的面实现**，所以"声明为真"与"声明为假"
+   *  渲染出来的 tab 集是同一个 `['Chat']`——不数请求的话，"前端压根没调这个端点"这种
+   *  回归会让整套用例照样全绿（声明就成了装饰品）。返回 false 走下面的默认分支。 */
+  onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
   /** POST /api/sessions/{id}/model（T7 #137 模型切换；缺省 200 → 回传请求的
@@ -371,6 +387,17 @@ export function routeApi(page: Page, mock: ApiMock): void {
     if (path === '/api/context-providers') {
       return route.fulfill({ status: 200, body: JSON.stringify({ providers: mock.contextProviders ?? [] }), contentType: 'application/json' });
     }
+    if (path === '/api/capabilities') {
+      if (mock.onCapabilitiesGet && (await mock.onCapabilitiesGet(route))) return;
+      if (mock.capabilitiesError) {
+        return json(route, { detail: mock.capabilitiesError.detail }, mock.capabilitiesError.status);
+      }
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ capabilities: mock.capabilities ?? [] }),
+        contentType: 'application/json',
+      });
+    }
     if (/^\/api\/sessions\/[^/]+\/model$/.test(path) && req.method() === 'POST') {
       if (mock.onModelPost) return mock.onModelPost(route);
       const body = (req.postDataJSON() ?? {}) as { provider?: string; model_id?: string };
@@ -663,6 +690,25 @@ export const CONTEXT_PROVIDERS = [
   { id: 'memory', display_name: 'Memory', description: 'Inject relevant recalled memories scoped to the user into the model context.' },
   { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
 ];
+
+/** 能力条目 fixture（形状 = 后端 `web/app.py:934-943`）。
+ *
+ *  `surfaces` **只写要断言的键**：省略的键前端按"未声明 → 保守取假"处理
+ *  （与后端"未声明 surfaces 的 capability 只保证 chat/timeline"同方向）。
+ *  传 `actions` 无意义（本批不消费），省略。 */
+export function capabilityFixture(
+  surfaces: Record<string, boolean>,
+  id = 'coding',
+): Record<string, unknown> {
+  return {
+    id,
+    display_name: id,
+    version: '1',
+    provider_name: 'builtin',
+    surfaces,
+    actions: {},
+  };
+}
 
 // ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 >5 条）──
 // 阈值速查（源码）：ModelPicker 用 `models.length + 1 > 5`（默认链算 1 条）；

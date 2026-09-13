@@ -19,6 +19,7 @@ import type {
   SessionSummary,
 } from '../types';
 import { emitUnauthorized, getToken } from './auth';
+import { parseCapabilities, type CapabilityDescriptor } from './capabilities';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
 
@@ -399,6 +400,22 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
       },
     ];
   });
+}
+
+// ── 能力 manifest（#182 / PRD §3.2）──
+
+/** GET /api/capabilities（SDD 03 §17）。
+ *
+ *  契约已存在但前端此前**零消费**（`src/agent_harness/web/app.py:903-943`）：
+ *  `{"capabilities":[{"id":…,"surfaces":{chat,timeline,changes,terminal,artifacts},…}]}`。
+ *
+ *  失败 / 端点缺席（老后端 404）时**抛错**，由调用方降级为 PRD 缺省语义——这里不
+ *  静默返回缺省值：那样调用方就分不清"能力都没声明"与"压根没拿到数据"，而 PRD 要求
+ *  两种情况落同一份缺省、**且 Chat 永不消失**（降级是消费方的策略，见 `App.tsx`）。 */
+export async function getCapabilities(): Promise<CapabilityDescriptor[]> {
+  const res = await apiFetch('/api/capabilities');
+  if (!res.ok) throw new Error(`capabilities ${res.status}`);
+  return parseCapabilities(await res.json());
 }
 
 // ── Cancel（后端契约回执 §3，T5 #98：detached-run 显式中断唯一入口）──

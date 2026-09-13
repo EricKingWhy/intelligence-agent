@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Columns2, Eye, KeyRound, MessageSquare, RotateCcw, X } from 'lucide-react';
+import { KeyRound, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
 import { TopBar } from './components/TopBar';
@@ -23,6 +23,14 @@ import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { StepDetail, type InspectorFocus } from './components/StepDetail';
+import { WorkspaceTabs } from './components/WorkspaceTabs';
+import {
+  centerTabs,
+  deriveSurfaces,
+  resolveActiveTab,
+  type CapabilityDescriptor,
+  type SurfaceKey,
+} from './lib/capabilities';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
@@ -33,6 +41,7 @@ import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
   getAgentProfiles,
+  getCapabilities,
   getContextProviders,
   getModels,
   getPermissionModes,
@@ -45,27 +54,6 @@ import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
 import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
 import './styles/app.css';
-
-/** Workspace 模式 —— Chat 常驻；Split/Preview 是 Phase 1d 的预留位，**尚未实现**。
- *  #180 决策（路线 A「诚实占位」）：预留位 MUST NOT 接受选中——它们此前可点，点完
- *  只插一条"未来升级点"提示条，属于"看着像功能、点了没反应"的最差一档。真副面板
- *  是新功能，要另开实现票；在那之前这里不存在"选中却什么也没发生"的状态。 */
-type WorkspaceMode = 'chat' | 'split' | 'preview';
-const WORKSPACE_MODES: readonly {
-  id: WorkspaceMode;
-  label: string;
-  icon: typeof MessageSquare;
-  /** 预留位：渲染为 disabled 且不可选中（真实现落地时去掉本标记）。 */
-  reserved?: true;
-}[] = [
-  { id: 'chat', label: 'Chat', icon: MessageSquare },
-  { id: 'split', label: 'Split', icon: Columns2, reserved: true },
-  { id: 'preview', label: 'Preview', icon: Eye, reserved: true },
-];
-
-/** 预留位不可聚焦（disabled），所以"为什么不能点"必须挂进 accessible name：
- *  title 对键盘用户和多数屏幕阅读器都读不到。 */
-const RESERVED_MODE_NOTE = 'Phase 1d 预留，尚未实现';
 
 /** 分叉请求的兜底超时。`forkInFlightRef` 只在 `finally` 里复位——请求若既不
  *  resolve 也不 reject（socket 挂死），按钮会被永久静默禁用，正是本 ticket 要
@@ -173,6 +161,26 @@ export default function App() {
       setContextProviders([]);
     }
   }, []);
+  // ── #182 能力声明显隐（PRD §3.2；数据源 GET /api/capabilities）──
+  // 中心列的面由能力声明决定：为真的面出现，为假的面**不渲染**。
+  // `null` = 没拿到/拉取失败（老后端 404 也走这条）→ `deriveSurfaces` 落到 PRD 缺省
+  // 语义（chat + timeline），**Chat 永不因此消失**（AC3）。不在这里静默填缺省值：
+  // 那样就分不清"能力没声明"与"没拿到数据"，而这两种情况都要求同一份降级。
+  const [capabilities, setCapabilities] = useState<CapabilityDescriptor[] | null>(null);
+  const fetchCapabilities = useCallback(async () => {
+    try {
+      setCapabilities(await getCapabilities());
+    } catch {
+      setCapabilities(null); // 降级为缺省语义——非关键能力，不打扰用户
+    }
+  }, []);
+  const surfaces = useMemo(() => deriveSurfaces(capabilities), [capabilities]);
+  const tabs = useMemo(() => centerTabs(surfaces), [surfaces]);
+  /** 用户选中的面。渲染用 `activeTab`（下面一轮 `resolveActiveTab`）：能力翻假时
+   *  那个面会从 `tabs` 里消失，**渲染必须当场落到仍可见的面**，而不是先渲染一个
+   *  不存在面板、再靠 effect 纠正（那会闪一帧空面板）。 */
+  const [selectedSurface, setSelectedSurface] = useState<SurfaceKey>('chat');
+  const activeTab = resolveActiveTab(tabs, selectedSurface);
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -182,8 +190,9 @@ export default function App() {
         void refreshSessions();
         void fetchModels(); // T10：模型目录同样吃鉴权缝——配置 token 后补拉
         void fetchControlCatalogs(); // 控制目录也走 apiFetch 认证缝——补拉
+        void fetchCapabilities(); // 能力 manifest 也走 apiFetch——补拉
       }),
-    [refreshSessions, fetchModels, fetchControlCatalogs],
+    [refreshSessions, fetchModels, fetchControlCatalogs, fetchCapabilities],
   );
 
   // 密度四档（冻结决策）：状态在 App（TopBar 切换、Conversation 消费），persist 由 lib/density 负责。
@@ -308,7 +317,8 @@ export default function App() {
   useEffect(() => {
     void fetchModels();
     void fetchControlCatalogs();
-  }, [fetchModels, fetchControlCatalogs]);
+    void fetchCapabilities();
+  }, [fetchModels, fetchControlCatalogs, fetchCapabilities]);
 
   const handleModelChange = useCallback(
     (name: string | null) => {
@@ -775,73 +785,79 @@ export default function App() {
               （原因：{conversation.run_interrupted.reason}）
             </div>
           )}
-          {/* Workspace 模式条（Phase 1d 方案 B）：Chat 是唯一可选模式（冻结决策：
-              它永远是主阅读面）；Split/Preview 是 disabled 的预留位（#180 路线 A）。 */}
-          <div className="workspace-mode-bar" role="toolbar" aria-label="Workspace 模式">
-            {WORKSPACE_MODES.map((m) => {
-              const Icon = m.icon;
-              const reserved = m.reserved === true;
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  disabled={reserved}
-                  aria-disabled={reserved || undefined}
-                  aria-pressed={reserved ? undefined : true}
-                  aria-label={reserved ? `${m.label}（${RESERVED_MODE_NOTE}）` : m.label}
-                  className={`workspace-mode${reserved ? ' reserved' : ' sel'}`}
-                  title={reserved ? `${RESERVED_MODE_NOTE}（当前只有 Chat）` : m.label}
-                >
-                  <Icon size={13} className="workspace-mode-icon" aria-hidden="true" />
-                  <span className="workspace-mode-label">{m.label}</span>
-                </button>
-              );
-            })}
-          </div>
-          <Conversation
-            conversation={conversation}
-            loadingHistory={loadingHistory}
-            density={density}
-            disclosure={disclosure}
-            reasoningDisclosure={reasoningDisclosure}
-            jumpRequest={jumpRequest}
-            onPresetTask={onPresetTask}
-            onFocusTool={focusTool}
-            onOpenSession={handleSelect}
-            onInspectChild={focusChild}
-            onFork={handleFork}
-            goneApprovalIds={goneApprovalIds}
-            onApprovalGone={onApprovalGone}
-          />
-          <Composer
-            streaming={streaming}
-            /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
-               APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
-               都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
-            approvalPending={awaitingApproval(
-              (conversation?.pending_approvals ?? []).filter(
-                (a) => !goneApprovalIds.has(a.approval_id),
-              ),
-            )}
-            onSubmit={handleSubmit}
-            onCancel={cancelStream}
-            presetTask={presetTask}
-            models={models}
-            selectedModel={selectedModel}
-            onModelChange={handleModelChange}
-            permissionModes={permissionModes}
-            selectedPermissionMode={selectedPermissionMode}
-            onPermissionModeChange={setSelectedPermissionMode}
-            agentProfiles={agentProfiles}
-            selectedAgentProfile={selectedAgentProfile}
-            onAgentProfileChange={setSelectedAgentProfile}
-            reasoningEfforts={reasoningEfforts}
-            selectedReasoningEffort={selectedReasoningEffort}
-            onReasoningEffortChange={setSelectedReasoningEffort}
-            contextProviders={contextProviders}
-            selectedContextProviders={selectedContextProviders}
-            onContextProvidersChange={setSelectedContextProviders}
-          />
+          {/* 中心列 tab 集（#182）：`Chat` 恒存在 + 能力声明为真的面（PRD §2.1）。
+              Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏
+              （BENCHMARK_SYNTHESIS 明确不采纳让步链三栏 shell）。面名统一由
+              `lib/capabilities.ts` 的登记表给出（声明 `terminal`、渲染成「输出」）。 */}
+          <WorkspaceTabs tabs={tabs} active={activeTab} onSelect={setSelectedSurface} />
+          {/* **每个可见面各有一个 panel**，非激活的用 `hidden` 藏起来（不卸载——切回来
+              时滚动位置与内部状态还在，与 Inspector "折叠 ≠ 卸载"同一取舍）。
+              为什么不渲染"单个会换 id 的 panel"：那样每个 tab 的 `aria-controls` 里
+              只有当前这个能解析到元素，其余全是指向不存在 id 的空引用（读屏据此找不到
+              面板）；一个面一个稳定 id 才对得上。 */}
+          {tabs.map((tab) => (
+            <div
+              key={tab.key}
+              className="workspace-panel"
+              id={`workspace-panel-${tab.key}`}
+              role="tabpanel"
+              aria-labelledby={`workspace-tab-${tab.key}`}
+              hidden={tab.key !== activeTab}
+            >
+              {tab.key === 'chat' ? (
+                <>
+                  <Conversation
+                    conversation={conversation}
+                    loadingHistory={loadingHistory}
+                    density={density}
+                    disclosure={disclosure}
+                    reasoningDisclosure={reasoningDisclosure}
+                    jumpRequest={jumpRequest}
+                    onPresetTask={onPresetTask}
+                    onFocusTool={focusTool}
+                    onOpenSession={handleSelect}
+                    onInspectChild={focusChild}
+                    onFork={handleFork}
+                    goneApprovalIds={goneApprovalIds}
+                    onApprovalGone={onApprovalGone}
+                  />
+                  <Composer
+                    streaming={streaming}
+                    /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
+                       APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
+                       都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
+                    approvalPending={awaitingApproval(
+                      (conversation?.pending_approvals ?? []).filter(
+                        (a) => !goneApprovalIds.has(a.approval_id),
+                      ),
+                    )}
+                    onSubmit={handleSubmit}
+                    onCancel={cancelStream}
+                    presetTask={presetTask}
+                    models={models}
+                    selectedModel={selectedModel}
+                    onModelChange={handleModelChange}
+                    permissionModes={permissionModes}
+                    selectedPermissionMode={selectedPermissionMode}
+                    onPermissionModeChange={setSelectedPermissionMode}
+                    agentProfiles={agentProfiles}
+                    selectedAgentProfile={selectedAgentProfile}
+                    onAgentProfileChange={setSelectedAgentProfile}
+                    reasoningEfforts={reasoningEfforts}
+                    selectedReasoningEffort={selectedReasoningEffort}
+                    onReasoningEffortChange={setSelectedReasoningEffort}
+                    contextProviders={contextProviders}
+                    selectedContextProviders={selectedContextProviders}
+                    onContextProvidersChange={setSelectedContextProviders}
+                  />
+                </>
+              ) : null}
+              {/* 「文件/改动」/「输出」的内容由 #189 / #190 补上：`centerTabs` 只在
+                  `implemented` 为 true 时把面放进 `tabs`，所以这里现在取不到其他键——
+                  不写假面板（"声明了却渲染不出来"比不渲染更差）。接内容面时必须**同时**
+                  改登记表的 `implemented` 与这里的渲染，只改一处会得到一个空面板。 */}
+            </div>
+          ))}
         </section>
 
         <StepDetail

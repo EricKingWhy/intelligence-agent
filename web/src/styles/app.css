@@ -4201,17 +4201,18 @@ button.json-row {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-/* ── Workspace 模式条（Phase 1d 方案 B）──
- *   复刻 Inspector 分段控件语言（视觉一致 > 惊喜）。Chat 永远是主阅读面，
- *   条本身靠右、体积克制，不喧宾夺主。Split/Preview 当前为空架子。 */
-.workspace-mode-bar {
+/* ── 中心列 tab 条（#182 取代 Phase 1d 的 Workspace 模式条）──
+ *   沿用那条分段控件的视觉语言（视觉一致 > 惊喜）：靠右、体积克制、不喧宾夺主。
+ *   语义已换成**能力声明显隐**（PRD §3.2）——面由声明决定，不是固定三个按钮；
+ *   tab 集恒含 Chat（主阅读面），其余面声明为真时出现。 */
+.workspace-tabs {
   display: flex;
   justify-content: flex-end;
   gap: 2px;
   padding: var(--space-xs) var(--space-lg);
   border-bottom: 1px solid var(--border-subtle);
 }
-.workspace-mode {
+.workspace-tab {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4227,45 +4228,42 @@ button.json-row {
   transition: color var(--dur-out) var(--ease-apple),
     background var(--dur-out) var(--ease-apple);
 }
-.workspace-mode:hover {
+.workspace-tab:hover {
   color: var(--text-secondary);
 }
-.workspace-mode.sel {
+.workspace-tab[aria-selected='true'] {
   color: var(--text-primary);
   font-weight: 600;
   background: var(--surface-workspace);
   box-shadow: inset 0 0 0 0.5px var(--border-subtle);
 }
-.workspace-mode.sel .workspace-mode-icon {
-  color: var(--accent);
-}
-.workspace-mode:focus-visible {
+.workspace-tab:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
-.workspace-mode:active {
+.workspace-tab:active {
   transform: scale(0.97);
 }
 @media (prefers-reduced-motion: reduce) {
-  .workspace-mode:active {
+  .workspace-tab:active {
     transform: none;
   }
 }
-@media (max-width: 360px) {
-  .workspace-mode-label {
-    display: none;
-  }
+/* 选中面的容器：把 `.app-workspace` 的 flex 纵向布局原样传给 Conversation / Composer
+ *  （它们是 `flex:1` + `min-height:0` 的子元素，多这一层不能改变它们的尺寸）。
+ *   切面只换内容，不改三区几何（#182 AC7）。 */
+.workspace-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
-/* 预留位（Split/Preview，#180 路线 A）：可见但不可选中——保留路线图可读性，
- * 同时不再伪装成可用功能。禁用态沿用本文件既有口径（opacity 0.45 + not-allowed，
- * 见 `.btn-primary:disabled`）。 */
-.workspace-mode.reserved,
-.workspace-mode.reserved:hover {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.workspace-mode.reserved:active {
-  transform: none;
+/* 非激活的面留在 DOM 里（切回来时滚动位置与内部状态都还在），但必须**真的藏起来**：
+ * `hidden` 属性的 UA 规则是 `[hidden] { display: none }`，而**作者样式里的
+ * `display: flex` 会盖过它**（作者源优先于 UA 源，与选择器权重无关）——不显式写这条，
+ * 被"隐藏"的面会照常占位显示。 */
+.workspace-panel[hidden] {
+  display: none;
 }
 
 /* ── 工具新形状：bash 已取消 / grep 截断尾巴 / read 专用块 ── */
