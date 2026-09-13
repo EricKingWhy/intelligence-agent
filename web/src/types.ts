@@ -411,6 +411,11 @@ export interface PendingApproval {
   reason: string;
   allowed_decisions: string[];
   time?: string;
+  /** 该审批所在 run 已终结（completed/failed/interrupted）仍未被 permission/resolved
+   *  配对 → 后端审批队列已随 run GC（session/service.py:1233-1241），决策永不可能
+   *  再提交（POST /approve → 404）。判据全部来自事件流，无需新 API。
+   *  ApprovalCard 据此渲染只读失效态，不再提供必然失败的批准/拒绝按钮。 */
+  stale?: boolean;
 }
 
 export interface ConversationState {

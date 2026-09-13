@@ -24,6 +24,7 @@ import {
   SessionError,
   UnauthorizedError,
   AlreadyResolvedError,
+  ApprovalGoneError,
   postApproval,
   renameProject,
   reorderProjectSession,
@@ -403,6 +404,27 @@ describe('postApproval — 409 幂等 vs 500 真失败（OBS-015）', () => {
     const err = await postApproval('s1', 'ap-1', true).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(AlreadyResolvedError);
+  });
+});
+
+/** APR-01：404 = 后端审批队列里没有这条 approval_id（进程重启 / run 终结已 GC）。
+ *  它不是可重试错误——重试多少次都是 404——所以必须与 5xx 分开归类，
+ *  卡片据此转只读失效态而不是提示「重试」。
+ *  也不复用 NotFoundError（同 deleteSession 的 404 取舍，见 api.test.ts:804）。 */
+describe('postApproval — 404 失效审批（APR-01）', () => {
+  it('404 → 抛 ApprovalGoneError，且**不是** NotFoundError（变异路径不复用加载语义）', async () => {
+    captureFetch(404, { detail: 'approval_id 不存在（该审批已随运行结束失效）' });
+    const err = await postApproval('s1', 'ap-gone', false).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApprovalGoneError);
+    expect(err).not.toBeInstanceOf(NotFoundError);
+    expect(err).not.toBeInstanceOf(AlreadyResolvedError);
+  });
+
+  it('404 的文案说「已失效」，不暗示重试', async () => {
+    captureFetch(404, { detail: 'approval_id 不存在' });
+    const err = await postApproval('s1', 'ap-gone', false).catch((e: unknown) => e);
+    expect((err as Error).message).toContain('已失效');
+    expect((err as Error).message).not.toContain('重试');
   });
 });
 

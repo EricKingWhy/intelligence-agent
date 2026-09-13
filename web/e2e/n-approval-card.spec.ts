@@ -170,8 +170,48 @@ test('双卡并存 → Ctrl+Enter 只 POST 第一张（不批量批准）', asyn
   await expect(cards.nth(1).locator('.approval-title')).toHaveText('需要审批');
 });
 
-/** UI-01 ⑤：审批 pending 期间 composer 锁定（textarea disabled + 锁定提示）。 */
-test('审批 pending → composer 锁定；permission/resolved 后解锁', async ({ page }) => {
+/** APR-01（第十一轮真机）：run 终结后仍 pending 的审批 = 孤儿（后端队列随 run GC，
+ *  决策永不可能提交）。此前这种卡既点不动（点了只有 404）又把 composer 一起锁死 →
+ *  **会话永久发不出消息**，且刷新多少次都重演。现在：卡转只读失效态，composer 解锁。
+ *
+ *  fixture 补 run/completed 同时让 streaming=false，于是「composer 可用」这条断言
+ *  只能来自「失效审批不参与锁定」——变异验证不会假绿。 */
+test('run 终结仍 pending（孤儿审批）→ 卡片只读失效 + composer 不再锁死', async ({ page }) => {
+  const sent: unknown[] = [];
+  const done: FrameSpec = {
+    type: 'run/completed',
+    data: {},
+    seq: 5,
+    session_id: SID,
+    run_id: RUN,
+    time: T,
+  };
+  await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4), done], sent);
+
+  const card = page.locator('.approval-card');
+  await expect(card).toBeVisible();
+  await expect(card.locator('.approval-title')).toHaveText('审批已失效');
+  await expect(card.locator('.approval-invalid-note')).toContainText('决策无法再提交');
+  await expect(card.locator('.approval-approve')).toBeDisabled();
+  await expect(card.locator('.approval-deny')).toBeDisabled();
+
+  // 关键：失效审批不该继续锁 composer（否则这个会话再也发不出话）
+  const textarea = page.locator('#composer-input');
+  await expect(textarea).toBeEnabled();
+  await expect(page.locator('.composer-locked-hint')).toHaveCount(0);
+  // 空输入框的发送键本来就是禁用的——打上字才证明真的能用（不是被锁住）
+  await textarea.fill('还能继续发消息');
+  await expect(page.locator('.composer-send')).toBeEnabled();
+
+  // 失效卡不可点 → 一个请求都不该发出
+  await card.locator('.approval-approve').click({ force: true }).catch(() => {});
+  await page.waitForTimeout(NO_SECOND_REQUEST_WAIT_MS);
+  expect(sent).toHaveLength(0);
+});
+
+/** UI-01 ⑤：permission/resolved 清空队列 → composer 解锁（同一 projection 状态驱动，
+ *  无第二真相源）。真待决审批的锁定断言在「POST 500」票里（那里卡必须保持可决策）。 */
+test('permission/resolved 后卡片消失 + composer 解锁', async ({ page }) => {
   const sent: unknown[] = [];
   const resolved: FrameSpec = {
     type: 'permission/resolved',
@@ -182,30 +222,9 @@ test('审批 pending → composer 锁定；permission/resolved 后解锁', async
     step_id: 1,
     time: T,
   };
-  // 无 permission/resolved：卡在 pending → 锁定。
-  // fixture 补 run/completed：让 streaming=false，textarea 的禁用只能来自
-  // 审批锁（否则断言落在 streaming=true 窗口里，变异验证会假绿）。
-  // 现实对应：刷新恢复后 replay 出待决审批、流未挂载（streaming=false）的场景。
-  const done: FrameSpec = {
-    type: 'run/completed',
-    data: {},
-    seq: 5,
-    session_id: SID,
-    run_id: RUN,
-    time: T,
-  };
-  await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4), done], sent);
-  const textarea = page.locator('#composer-input');
-  await expect(page.locator('.approval-card')).toBeVisible();
-  await expect(textarea).toBeDisabled();
-  await expect(page.locator('.composer-locked-hint')).toBeVisible();
-  await expect(page.locator('.composer-send')).toBeDisabled();
-
-  // 有 permission/resolved：队列清空 → 解锁（同一 projection 状态驱动，无第二真相源）
-  const sent2: unknown[] = [];
-  await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4), resolved], sent2);
+  await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4), resolved], sent);
   await expect(page.locator('.approval-card')).toHaveCount(0);
-  await expect(textarea).toBeEnabled();
+  await expect(page.locator('#composer-input')).toBeEnabled();
   await expect(page.locator('.composer-locked-hint')).toHaveCount(0);
 });
 
@@ -330,14 +349,17 @@ test('POST 409 → 幂等成功，卡片翻「已批准」', async ({ page }) =>
   expect(approveCalls).toHaveLength(1);
 });
 
-/** POST /approve 返回 404 → **保持 pending**（404 不是幂等已决）。
+/** POST /approve 返回 404 → 只读失效态（**不是**幂等成功，也不再提示重试）。
  *
  *  与最初交接提示词的期望**相反**，此处按后端真实语义钉死：404 有四个来源
  *  （session 不存在 / 审批队列缺失 / `approval_id` 不在队列 / 事件过期，
- *  `web/app.py:1157-1166`），**无法**与「已解析且已出队」区分。若把 404 当成功，
- *  就会出现「决策其实没生效、UI 却显示已批准」的安全假象——正是 OBS-015 本身。
- *  真已决由 `permission/resolved` 投影事件移除卡片（上一用例已锁），不靠 404。 */
-test('POST 404 → 保持「需要审批」+ 错误提示（404 不是幂等已决）', async ({ page }) => {
+ *  `web/app.py:1157-1166`）。它们在当前实现下都不可能再变回可提交——审批队列是
+ *  纯内存的，进程重启或 run 终结即 GC（`session/service.py:1233-1241`），没有任何
+ *  路径把它放回来。所以 404 既不能当成功（「决策其实没生效、UI 却显示已批准」
+ *  正是 OBS-015 本身），也不该提示重试（重试多少次都是 404）。
+ *  **「不是已批准」这条不变量仍然锁在这里**；真已决由 `permission/resolved`
+ *  投影事件移除卡片（上一用例已锁），不靠 404。 */
+test('POST 404 → 只读失效态（404 不是幂等已决，也不是可重试错误）', async ({ page }) => {
   const approveCalls: unknown[] = [];
   const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
   routeApi(page, {
@@ -359,9 +381,17 @@ test('POST 404 → 保持「需要审批」+ 错误提示（404 不是幂等已�
   await expect(card).toBeVisible();
 
   await card.locator('.approval-approve').click();
-  await expect(card.locator('.approval-title')).toHaveText('需要审批');
-  await expect(card.locator('.approval-error')).toBeVisible();
-  await expect(card.locator('.approval-error')).toContainText('404');
-  await expect(card.locator('.approval-approve')).toBeEnabled();
+  // 关键不变量：404 ≠ 成功，绝不能翻「已批准」
+  await expect(card.locator('.approval-title')).toHaveText('审批已失效');
+  await expect(card.locator('.approval-invalid-note')).toBeVisible();
+  await expect(card.locator('.approval-approve')).toBeDisabled();
+  await expect(card.locator('.approval-deny')).toBeDisabled();
+  await expect(card.locator('.approval-error')).toHaveCount(0); // 不走可重试错误通道
+  expect(approveCalls).toHaveLength(1);
+
+  // 失效即不再阻塞会话；快捷键已撤 → 不会发出第二个请求
+  await expect(page.locator('#composer-input')).toBeEnabled();
+  await page.keyboard.press('Control+Enter');
+  await page.waitForTimeout(NO_SECOND_REQUEST_WAIT_MS);
   expect(approveCalls).toHaveLength(1);
 });

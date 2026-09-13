@@ -54,6 +54,10 @@ interface Props {
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
   /** T7 #137：从指定用户消息 seq 分叉新会话。 */
   onFork?: (fromSeq: number) => void;
+  /** APR-01：审批卡提交时后端回 404（队列已 GC）→ 把该 approval_id 上报为失效。
+   *  失效事实由 App 持有（同时驱动 composer 解锁与卡片只读），卡内不存第二份。 */
+  goneApprovalIds?: ReadonlySet<string>;
+  onApprovalGone?: (approvalId: string) => void;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -64,7 +68,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork }: Props) {
+export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, goneApprovalIds, onApprovalGone }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -350,6 +354,9 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
             key={a.approval_id}
             sessionId={conversation.session_id}
             approval={a}
+            /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
+            invalid={a.stale === true || goneApprovalIds?.has(a.approval_id) === true}
+            onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
             /* UI-01：多卡并存只有第一张自动聚焦（alertdialog 焦点不打架）。 */
             autoFocus={i === 0}
           />

@@ -39,6 +39,14 @@ export class NotFoundError extends Error {}
  *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
 export class AlreadyResolvedError extends Error {}
 
+/** 404 = 审批队列里没有这个 approval_id：进程重启或 run 终结后队列已被 GC，
+ *  这条审批**永远不可能再被 resolve**（`app.py:1236-1240` 已把它写进契约）。
+ *
+ *  不复用 NotFoundError：与 deleteSession 的 404 是同一取舍（`api.test.ts:804`）——
+ *  「用户想提交的东西本就不在了」与「加载路径拿不到内容」对调用方的含义不同。
+ *  也不是可重试错误：重试多少次都是 404。 */
+export class ApprovalGoneError extends Error {}
+
 /** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
  *
@@ -351,6 +359,7 @@ export async function postApproval(
     }),
   });
   if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
+  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（运行已中断或服务已重启）');
   if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }

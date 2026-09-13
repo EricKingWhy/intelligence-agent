@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UsageStats } from '../types';
 import { EventType } from '../types';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
@@ -1069,6 +1069,33 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
   return state.turns.length + 1;
 }
 
+/** 是否还有**真正欠用户决策**的审批。
+ *
+ *  失效审批（`stale`，见 `markPendingApprovalsStale`）不算：它所在 run 已终结，
+ *  没有任何东西在等这个决策。若把它算进去，会话就被**永久锁死**——卡片只读、
+ *  composer 也一直禁用，用户在这个会话里再也发不出一句话（APR-01 真机就是
+ *  这个死局：卡点不动、点也只换来 404、刷新还在）。 */
+export function awaitingApproval(approvals: readonly PendingApproval[]): boolean {
+  return approvals.some((a) => !a.stale);
+}
+
+/** run 终结（completed/failed/interrupted）时仍未配对的审批 = 永久失效。
+ *
+ *  `approval_queues` 是**纯内存**的（`session/service.py:934`），run 结束时即被 GC
+ *  （`service.py:1233-1241`），恢复链路（`recovery/`）完全不复现审批 →
+ *  重启/中断后这条审批**不可能再被 resolve**，而它的 `tool/approval-requested` 事件
+ *  永久留在 JSONL 里，于是刷新多少次都会重新渲染出来（APR-01 真机：点了只有 404）。
+ *  在投影层一次判定，渲染层不必自己拼事件顺序。
+ *
+ *  正常流程不受影响：run 会停在审批上等待决策，只有 run 已经结束还在 pending 的
+ *  才是孤儿（即 `permission/resolved` 事件缺失的那种）。 */
+function markPendingApprovalsStale(state: ConversationState): void {
+  if (!state.pending_approvals.some((a) => !a.stale)) return;
+  state.pending_approvals = state.pending_approvals.map((a) =>
+    a.stale ? a : { ...a, stale: true },
+  );
+}
+
 /** Mark a run as finished and settle every in-flight turn.
  *
  * RUN_COMPLETED and RUN_FAILED share the same sweep — only the terminal
@@ -1079,6 +1106,7 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
 function finalizeRun(state: ConversationState, status: 'completed' | 'failed', time?: string): void {
   state.run_status = status;
   state.active_step_id = null;
+  markPendingApprovalsStale(state);
   const turnStatus = status === 'failed' ? 'failed' : 'done';
   let changed = false;
   const turns = [...state.turns];

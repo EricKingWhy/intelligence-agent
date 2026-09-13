@@ -40,7 +40,7 @@ import {
   type CatalogEntry,
   type ModelCatalogEntry,
 } from './lib/api';
-import { summarizeEvent } from './lib/projection';
+import { awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
 import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
@@ -247,6 +247,13 @@ export default function App() {
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
   const onPresetTask = useCallback((text: string) => setPresetTask({ text, id: Date.now() }), []);
+  // APR-01：提交审批时后端回 404 的 approval_id——后端队列是纯内存的，404 即
+  // "这条审批不存在了"，不存在任何会把它放回来的路径。失效事实在这里单点持有，
+  // 同时驱动卡片只读与 composer 解锁（否则卡点不动、输入框也一直禁用 = 死局）。
+  const [goneApprovalIds, setGoneApprovalIds] = useState<ReadonlySet<string>>(() => new Set());
+  const onApprovalGone = useCallback((approvalId: string) => {
+    setGoneApprovalIds((prev) => (prev.has(approvalId) ? prev : new Set(prev).add(approvalId)));
+  }, []);
   // Inspector 折叠是视图状态：收起不卸载（DSH 语义，冻结决策）。
   // 窄屏（<1200px）默认收起；用户手动切换后以手动值优先（仅本会话内，不持久化）。
   const [inspectorOpen, setInspectorOpen] = useState(
@@ -804,11 +811,19 @@ export default function App() {
             onOpenSession={handleSelect}
             onInspectChild={focusChild}
             onFork={handleFork}
+            goneApprovalIds={goneApprovalIds}
+            onApprovalGone={onApprovalGone}
           />
           <Composer
             streaming={streaming}
-            /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。 */
-            approvalPending={(conversation?.pending_approvals.length ?? 0) > 0}
+            /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
+               APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
+               都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
+            approvalPending={awaitingApproval(
+              (conversation?.pending_approvals ?? []).filter(
+                (a) => !goneApprovalIds.has(a.approval_id),
+              ),
+            )}
             onSubmit={handleSubmit}
             onCancel={cancelStream}
             presetTask={presetTask}
