@@ -63,14 +63,31 @@ context/compacted
 operation/reconcile-required
 artifact/created
 
-agent/delegated
-agent/completed
+agent/delegated            # 历史名 → 实装 agent/delegation-started（见 §3.2）
+agent/completed            # 历史名 → 实装 agent/delegation-finished（见 §3.2）
 
-approval/requested
-approval/resolved
+approval/requested         # 历史名 → 实装 tool/approval-requested（见 §3.2）
+approval/resolved          # 历史名 → 实装 permission/resolved（见 §3.2）
 ```
 
 `ModelDelta` 可以实时 Event 流发送，但默认不要求每个 token 永久 JSONL，以避免日志爆炸。完整 AIMessage MUST 持久化。
+
+## 3.2 历史名 → 实装名映射（**旧名不是契约**）
+
+本表是为了让按早期 spec 名字检索的人能找到落点。**契约只有一个方向：实装名。**
+旧名是历史/概念名，MUST NOT 被当成有效事件名去实现或匹配（改的是文档，不改事件名——
+见母票 #173 §4 非目标）。
+
+| spec 历史名 | 实装名（唯一契约） | 证据 |
+| --- | --- | --- |
+| `agent/delegated` | `agent/delegation-started` | `src/agent_harness/session/event.py`（`AGENT_DELEGATION_STARTED`） |
+| `agent/completed` | `agent/delegation-finished` | `src/agent_harness/session/event.py`（`AGENT_DELEGATION_FINISHED`） |
+| `approval/requested` | `tool/approval-requested` | `src/agent_harness/session/event.py`（`TOOL_APPROVAL_REQUESTED`）；`web/app.py` 的广播注释亦写作 `tool/approval-requested`（durable） |
+| `approval/resolved` | `permission/resolved` | `src/agent_harness/session/event.py`（`PERMISSION_RESOLVED` + `PermissionResolvedData`，见本文 §9） |
+
+判据：事件名的唯一事实源是 `src/agent_harness/session/event.py`；前端词汇表由
+`scripts/gen_event_types.py` 从它生成（`web/src/generated/event-types.ts`），有守卫测试
+`tests/test_event_types_generated.py`。
 
 ## 3.1 与 SessionEvent **分层**的存储层概念（不是事件）
 
