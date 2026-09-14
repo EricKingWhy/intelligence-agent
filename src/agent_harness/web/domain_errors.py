@@ -95,6 +95,7 @@ from agent_harness.session.errors import (
     SessionNotFound,
     SessionServiceError,
     SteerTargetNotFound,
+    SupersedeTargetInvalid,
     UnknownModel,
     WorkspaceMoveInvalid,
     WorkspaceNameInvalid,
@@ -126,6 +127,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     RecoveryConflict: 409,
     ApprovalAlreadyResolved: 409,
     SteerTargetNotFound: 409,
+    # ADR-0030 §4.6（#196）：supersede 目标不合法（不存在 / 非用户消息 / 是注入
+    # 消息 / 已被取代 / 不是最新一条）。会话是存在的，是这次编辑按当前状态不允许
+    # ——所以不谎报 404（那会让前端以为会话没了），用 409。
+    SupersedeTargetInvalid: 409,
     # #172 / ADR-0029：会话是 fork 父——删它会连带处置用户没选中的子会话（级联），
     # 或留一个悬空来源链接（orphan），两者都不接受，所以是"状态不允许"而非入参非法。
     SessionHasChildren: 409,

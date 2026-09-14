@@ -68,6 +68,7 @@ from agent_harness.session.service import (
     SessionNotFound,
     SessionService,
     SteerTargetNotFound,
+    SupersedeTargetInvalid,
     UnknownModel,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
@@ -282,11 +283,21 @@ class SendMessageRequest(_AmendValueValidators):
         （不抢断不丢消息，下个 run 自然消费）。
       * ``steer``——仅在途 run 时合法：注入引导请求，被当前 step 边界
         的 run 读取（不重启 run、不改写历史事件）。
+
+    编辑语义（ADR-0030 §4.4，两个可选字段，默认 None = 现有行为逐字不变）：
+
+      * ``supersedes_seq``——取代 seq 为它的那条 user/message **及其整轮**（只
+        影响模型可见投影与界面，历史事件照旧保留）。目标必须是本会话最新一条
+        非注入用户消息，否则 409。与 ``mode`` 正交：取代之后新内容按 mode 投递。
+      * ``queue_id``——本条内容**替换**某条排队项：旧项被取消
+        （``queue/cancelled``），新内容按 ``mode`` 重新投递。
     """
 
     content: str = Field(min_length=1, max_length=100_000)
     mode: str = Field(default="queue", pattern="^(queue|steer)$")
     max_steps: int = Field(default=10, ge=1, le=200)
+    supersedes_seq: int | None = Field(default=None, ge=0)
+    queue_id: str | None = None
     # staged amend 字段（可选，None = 默认行为）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
@@ -388,18 +399,28 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
+        # 必须在 RunManager **之前**建：下面的 on_run_terminal 回调要用它（闭包按
+        # 引用捕获 self，顺序其实无妨，但先建可读性更好）。
+        self.message_queues = MessageQueueManager()
         # detached-run 托管（ADR-0016 §2.1，D-A）：run 生命周期与 HTTP 请求
-        # 解耦——SSE 订阅者离开只 unsubscribe，取消只经 POST /cancel 或孤儿
-        # 回收（宽限期 Settings.run_disconnect_grace_seconds）。
+        # 解耦——SSE 订阅者离开只 unsubscribe，取消只经 POST /cancel 或
+        # 孤儿回收（宽限期 Settings.run_disconnect_grace_seconds）。
+        #
+        # on_run_terminal（ADR-0030 D4）：run 收口后接力投递下一条未投递输入。
+        # 回调**唯一**实现点是 SessionService.on_run_terminal（Web/CLI 不各写一份）；
+        # 这里用 lambda 延迟构造 service——AppState 构造期还没有 app，而 service
+        # 只需要一个带 store/run_manager/message_queues 的 state 对象（就是 self）。
         self.run_manager = RunManager(
             disconnect_grace_seconds=settings.run_disconnect_grace_seconds,
+            on_run_terminal=lambda session_id: SessionService(self).on_run_terminal(
+                session_id
+            ),
         )
         # Phase 5：会话级待审批队列——当 permission_mode 非 danger-full-access
         # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
         # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
         self.approval_queues: dict[str, PendingApprovalQueue] = {}
-        # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
-        self.message_queues = MessageQueueManager()
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -722,6 +743,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             except Exception:
                 logging.getLogger("agent_harness.web").exception(
                     "启动崩溃扫描失败（不阻塞启动）"
+                )
+            # Phase Multiturn（ADR-0030 §4.8 / D5）：按事件流重建"未投递输入"的
+            # 内存镜像。**不自动起 run**：刚启动没有订阅者，起了会被 orphan 回收，
+            # 用户回来时会话已被跑掉（用户不在场时自动消耗 token 更不可接受）。
+            # 用户在界面上看到「待发送 N」，点「立即发送」走 POST /queue/flush。
+            try:
+                from agent_harness.session.service import SessionService
+
+                rebuilt = await SessionService(state).rebuild_message_queues()
+                if rebuilt:
+                    logging.getLogger("agent_harness.web").info(
+                        "启动重建未投递输入：%d 个会话有待发送项", rebuilt,
+                    )
+            except Exception:
+                # 失败同样不阻塞启动：未投递输入的事实仍在事件流里，用户随时能让
+                # 它重新投递（flush 读的是事件流，不依赖这份镜像），所以降级安全。
+                logging.getLogger("agent_harness.web").exception(
+                    "启动重建未投递输入失败（不阻塞启动）"
                 )
             try:
                 yield
@@ -1526,6 +1565,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 mode=req.mode,
                 max_steps=req.max_steps,
                 amend=amend,
+                supersedes_seq=req.supersedes_seq,
+                queue_id=req.queue_id,
             )
         except (
             InvalidSessionId,
@@ -1534,31 +1575,103 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             RecoveryConflict,
             QueueItemNotFound,
             SteerTargetNotFound,
+            SupersedeTargetInvalid,
             SeqConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
+            # SupersedeTargetInvalid → 409（ADR-0030 §4.6）：目标不对，不是会话不存在。
             raise http_error(e) from e
 
         if result.status == "launched":
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
-            run = result.run
-            subscriber = result.subscriber
-            state = app.state.agent
-
-            async def event_generator():
-                try:
-                    while True:
-                        event = await subscriber.queue.get()
-                        if event is state.run_manager.DONE:
-                            break
-                        yield _event_to_sse_dict(event, session_id)
-                finally:
-                    run.unsubscribe(subscriber)
-
-            return EventSourceResponse(event_generator())
+            return _launched_response(app, result, session_id)
         # queued / steered：JSON 确认（不打开流——前端订阅既有 SSE/WS）。
         return result.to_response()
+
+    def _launched_response(
+        app: FastAPI, result, session_id: str
+    ) -> EventSourceResponse:
+        """launched 分支的统一 SSE 响应（/messages 与 /queue/flush 共用）。
+
+        两处必须是**同一段代码**：ADR-0030 §4.6 要求 flush 与 messages 的
+        launched 语义完全一致（打开同样的 detached-run 流），各写一遍就会在
+        「谁 unsubscribe、谁处理 DONE」这类细节上漂移。
+        """
+        run = result.run
+        subscriber = result.subscriber
+        state = app.state.agent
+
+        async def event_generator():
+            try:
+                while True:
+                    event = await subscriber.queue.get()
+                    if event is state.run_manager.DONE:
+                        break
+                    yield _event_to_sse_dict(event, session_id)
+            finally:
+                run.unsubscribe(subscriber)
+
+        return EventSourceResponse(event_generator())
+
+    @app.get("/api/sessions/{session_id}/queue")
+    async def get_session_queue(session_id: str) -> dict[str, list[dict[str, str]]]:
+        """待发送输入（ADR-0030 §4.6 / D11）。
+
+        数据源是**事件流**而非内存队列：只有事件流跨崩溃存活、也只有它同时
+        看得见 queue 与 steer 的到达顺序（§4.8 / §5.2 的"事件流是唯一事实"）。
+        前端用它做首屏 / 重连补齐，实时增量仍由 SSE 事件流驱动。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            pending = await service.list_undelivered_inputs(session_id)
+        except (InvalidSessionId, SessionNotFound, SeqConflict) as e:
+            raise http_error(e) from e
+        return {
+            "items": [
+                {
+                    "queue_id": item.input_id,
+                    "content": item.content,
+                    "created_at": item.created_at,
+                }
+                for item in pending
+                if item.kind == "queue"
+            ],
+            "steers": [
+                {
+                    "steer_id": item.input_id,
+                    "content": item.content,
+                    "created_at": item.created_at,
+                }
+                for item in pending
+                if item.kind != "queue"
+            ],
+        }
+
+    @app.post("/api/sessions/{session_id}/queue/flush")
+    async def flush_session_queue(session_id: str):
+        """立刻投递队首的待发送输入（ADR-0030 §4.6）。
+
+        空队列 → ``{"status": "idle"}``（幂等，不报错）；有 → 与 `/messages` 的
+        launched 分支**同一段代码**返回 SSE 流。用途：① 前端在会话恢复时主动投递；
+        ② 重启后手动投递（§4.8 说不自动起 run，就靠这个入口）。
+
+        只投递**一条**：后续输入在下一个 run 终态继续接力（§4.5.5）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            launched = await service.deliver_next_undelivered(session_id=session_id)
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ActiveRunConflict,
+            RecoveryConflict,
+            SeqConflict,
+        ) as e:
+            raise http_error(e) from e
+        if launched is None:
+            return {"status": "idle"}
+        return _launched_response(app, launched, session_id)
 
     @app.post("/api/sessions/{session_id}/queue/{queue_id}/cancel")
     async def cancel_queue_item(session_id: str, queue_id: str) -> dict[str, str]:

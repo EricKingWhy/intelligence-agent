@@ -41,6 +41,8 @@ export const EventType = {
   QUEUE_CANCELLED: 'queue/cancelled',
   STEER_REQUESTED: 'steer/requested',
   STEER_APPLIED: 'steer/applied',
+  QUEUE_CONSUMED: 'queue/consumed',
+  MESSAGE_SUPERSEDED: 'message/superseded',
   MODEL_CHANGED: 'model/changed',
 } as const;
 

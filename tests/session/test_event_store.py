@@ -81,6 +81,9 @@ class TestSessionEventDTO:
             "compaction/end",
             # Phase Multiturn T7 (#137)：同 session 内模型切换
             "model/changed",
+            # ADR-0030 (#196)：在途输入通道的消费侧——已消费 / 已被取代
+            "queue/consumed",
+            "message/superseded",
         }
         assert EVENT_TYPES == expected
 

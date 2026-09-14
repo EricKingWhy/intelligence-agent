@@ -90,6 +90,17 @@ QUEUE_CANCELLED = "queue/cancelled"
 STEER_REQUESTED = "steer/requested"
 STEER_APPLIED = "steer/applied"
 
+# ── ADR-0030（#196）：在途 run 输入通道的**消费侧**事件 ────────────────────
+# 上面四个事件描述"请求已登记"，下面两个描述"请求已被处理/已被取代"——补齐消费侧
+# 的可对账事实（不变量 #4：事件是运行事实，不是诊断日志）：
+#   * queue/consumed    : {queue_id, run_id} 某排队项已被消费成一次 run。
+#     重启重建时需要它区分"还没投递"与"早就投过了"（只有 message/queued 是分不清的）。
+#   * message/superseded: {superseded_seq, carrier} seq 为 superseded_seq 的
+#     user/message 及其**整轮**被取代（编辑语义）。只影响投影派生（不变量 #7：
+#     完整保存 ≠ 完整注入），从不改写历史事件（不变量 #3：append-only）。
+QUEUE_CONSUMED = "queue/consumed"
+MESSAGE_SUPERSEDED = "message/superseded"
+
 # ── Phase Multiturn T7（#137）：同 session 内模型切换 ────────────────────
 # 切换是会话事实（durable）：后续 run 从事件流派生"当前模型"，不依赖创建时
 # 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id。
@@ -138,6 +149,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         QUEUE_CANCELLED,
         STEER_REQUESTED,
         STEER_APPLIED,
+        # ADR-0030 (#196)：输入通道消费侧——已消费 / 已被取代
+        QUEUE_CONSUMED,
+        MESSAGE_SUPERSEDED,
         # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
         COMPACTION_START,
         COMPACTION_END,

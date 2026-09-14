@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
@@ -44,7 +45,12 @@ from agent_harness.session.approval import (
 from agent_harness.session.approval import (
     build_approval_callback as _build_approval_callback_impl,
 )
-from agent_harness.session.derive import detect_dangling
+from agent_harness.session.derive import (
+    KIND_QUEUE,
+    UndeliveredInput,
+    detect_dangling,
+    undelivered_inputs,
+)
 from agent_harness.session.errors import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -60,6 +66,7 @@ from agent_harness.session.errors import (
     SessionNotFound,
     SessionServiceError,
     SteerTargetNotFound,
+    SupersedeTargetInvalid,
     UnknownModel,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
@@ -67,9 +74,13 @@ from agent_harness.session.errors import (
 )
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
+    MESSAGE_SUPERSEDED,
     QUEUE_CANCELLED,
+    QUEUE_CONSUMED,
+    STEER_APPLIED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
+    USER_MESSAGE,
     _utc_now_iso,
 )
 from agent_harness.session.interrupt import detect_unterminated_runs
@@ -506,6 +517,7 @@ class SessionService:
             permission_mode=permission_mode,
             approval_callback=approval_callback,
             session_store=self._state.store,
+            steer_source=self._state.message_queues,
             **amend_kwargs(amend),
         )
         session = Session.start(
@@ -615,6 +627,7 @@ class SessionService:
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             approval_callback=None,
             session_store=self._state.store,
+            steer_source=self._state.message_queues,
             **amend_kwargs(amend),
         )
         run, subscriber = self._state.run_manager.launch(session, runtime, task)
@@ -685,6 +698,8 @@ class SessionService:
         mode: str = "queue",
         max_steps: int = 10,
         amend: AmendOptions | None = None,
+        supersedes_seq: int | None = None,
+        queue_id: str | None = None,
     ) -> SendMessageResult:
         """续聊消息入口（统一 CLI / Web 续聊路径）。
 
@@ -700,15 +715,37 @@ class SessionService:
             ``STEER_REQUESTED`` 事件，返回 ``status="steered"``；无在途 run →
             ``SteerTargetNotFound``（409）。
 
+        编辑语义（ADR-0030 §4.4，两个可选字段，默认 None = 现有行为逐字不变）：
+
+          * ``queue_id``——本条内容**替换**某条排队项：先取消旧项
+            （``QUEUE_CANCELLED``），再按 mode 投递新内容。排队项的编辑不需要新
+            事件类型：cancel(旧) + queued(新) 已足够表达，前端按 queue_id 过滤。
+          * ``supersedes_seq``——本条内容**取代** seq 为它的那条 user/message 及其
+            整轮（只改投影，不改历史事件，D3）。目标必须是本会话最新一条非注入的
+            用户消息，否则 ``SupersedeTargetInvalid``（409）。
+
+        顺序硬约束（§4.4）：**先投递 B、后写 ``message/superseded``**。若在两步之间
+        崩溃，最坏结果是"B 未投递、A 已被取代"（该轮为空，用户看得见、可重发）；
+        反过来则会得到"A 被取代但 B 从未被接受"——用户无从恢复。
+
         staged amend 字段透传给 ``resume_and_launch``（idle 分支），
         与 create 路径对齐。默认 None = 当前行为不变。
 
         不抢断、不改写历史事件（不变量 #3 / #22）；queue 与 steer 的消费由
-        run 边界 / runtime 自身驱动，本方法只做注册与 durable 记录。
+        run 边界（``on_run_terminal``）/ runtime 循环头驱动，本方法只做注册与
+        durable 记录。
         """
         self._validate_session_id(session_id)
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
+
+        # 第 1 步：编辑排队项时先取消旧项（用户可见动作，写 QUEUE_CANCELLED）。
+        # 取代已落盘消息时先校验目标——校验失败要在**投递之前**抛，不能先投了
+        # B 再说"目标不合法"（那会留下一条用户以为已经替换成功、其实没有的新消息）。
+        if queue_id is not None:
+            await self.cancel_queue(session_id=session_id, queue_id=queue_id)
+        elif supersedes_seq is not None:
+            await self._assert_supersedable(session_id, supersedes_seq)
 
         active_run = self._state.run_manager.get_active(session_id)
 
@@ -717,10 +754,13 @@ class SessionService:
                 raise SteerTargetNotFound(
                     "steer requires an active run; use mode='queue' to enqueue"
                 )
+            # run_id 可能尚未落盘（launch 与 run/started 之间）——等一小会儿，
+            # 拿不到就登记 None：runtime 侧对"run_id 未知"的 steer 一律丢弃
+            # （不会注入错误的 run），该请求仍会被终态驱动当普通输入投递。
             steer_req = await self._state.message_queues.register_steer(
                 session_id=session_id,
                 content=content,
-                run_id=active_run.run_id,
+                run_id=await active_run.wait_run_id(),
                 created_at=_utc_now_iso(),
             )
             self._append_session_event(
@@ -729,32 +769,70 @@ class SessionService:
                 content=content,
                 run_id=steer_req.run_id,
             )
-            return SendMessageResult(status="steered", steer_request=steer_req)
-
-        # mode == "queue"
-        if active_run is None:
+            result = SendMessageResult(status="steered", steer_request=steer_req)
+        elif active_run is None:
             # idle → 直接拉起新 run（同 resume 路径）。
             launched = await self.resume_and_launch(
                 session_id=session_id, task=content, max_steps=max_steps,
                 amend=amend,
             )
-            return SendMessageResult(
+            result = SendMessageResult(
                 status="launched",
                 session=launched.session,
                 run=launched.run,
                 subscriber=launched.subscriber,
             )
+        else:
+            # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
+            queued = await self._state.message_queues.enqueue(
+                session_id=session_id, content=content, created_at=_utc_now_iso()
+            )
+            self._append_session_event(
+                session_id, MESSAGE_QUEUED,
+                queue_id=queued.queue_id,
+                content=content,
+            )
+            result = SendMessageResult(status="queued", queued_message=queued)
 
-        # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
-        queued = await self._state.message_queues.enqueue(
-            session_id=session_id, content=content, created_at=_utc_now_iso()
+        # 第 3 步（§4.4）：B 已经登记成功，现在才宣告 A 被取代。
+        if supersedes_seq is not None:
+            self._append_session_event(
+                session_id, MESSAGE_SUPERSEDED,
+                superseded_seq=supersedes_seq,
+                carrier=mode,
+            )
+        return result
+
+    async def _assert_supersedable(self, session_id: str, superseded_seq: int) -> None:
+        """校验 supersede 目标（ADR-0030 §4.4 第 1 步 / D8）。不合法 → 409。"""
+        events = await anyio.to_thread.run_sync(
+            self._state.store.read_events, session_id
         )
-        self._append_session_event(
-            session_id, MESSAGE_QUEUED,
-            queue_id=queued.queue_id,
-            content=content,
+        target = next((e for e in events if e.seq == superseded_seq), None)
+        if target is None or target.type != USER_MESSAGE:
+            raise SupersedeTargetInvalid(
+                f"seq {superseded_seq} 不是本会话的 user/message"
+            )
+        if target.data.get("injected_by"):
+            raise SupersedeTargetInvalid(
+                f"seq {superseded_seq} 是运行时注入的消息，用户不可编辑"
+            )
+        if any(
+            e.type == MESSAGE_SUPERSEDED and e.data.get("superseded_seq") == superseded_seq
+            for e in events
+        ):
+            # 已被取代：拒绝而不是幂等放行。放行意味着还要再投递一次 B——
+            # 那会在排队场景里堆出两条同样的待发送消息，比一个 409 糟得多。
+            # 投影侧的幂等（同一 seq 被取代两次以最早一条为准）在 derive_messages
+            # 里独立成立，与这里的写侧校验不矛盾（ADR-0030 §4.2.3）。
+            raise SupersedeTargetInvalid(f"seq {superseded_seq} 已被取代过")
+        latest_user_seq = max(
+            (e.seq for e in events if e.type == USER_MESSAGE), default=None
         )
-        return SendMessageResult(status="queued", queued_message=queued)
+        if latest_user_seq != superseded_seq:
+            raise SupersedeTargetInvalid(
+                f"seq {superseded_seq} 不是最新一条用户消息（最新为 {latest_user_seq}）"
+            )
 
     async def cancel_queue(self, *, session_id: str, queue_id: str) -> bool:
         """取消尚未消费的排队消息（PRD §5.3）。
@@ -762,6 +840,11 @@ class SessionService:
         幂等失败语义：queue_id 已取消 / 已消费 / 不存在 →
         ``QueueItemNotFound``（前端 404）；取消成功 → 写一条
         ``QUEUE_CANCELLED`` SessionEvent，返回 True。
+
+        判据**不只看内存镜像**（D5：事件流是唯一事实）：镜像只是缓存，重启后
+        "编辑排队项"请求照常合法——按事件流上的未投递集合校验（同
+        `list_undelivered_inputs` 的口径），命中即取消（镜像里没有就只写事件，
+        缓存由重建/摘除语义对齐）。
         """
         self._validate_session_id(session_id)
         if not await self.has_session(session_id):
@@ -770,34 +853,103 @@ class SessionService:
             session_id=session_id, queue_id=queue_id
         )
         if not cancelled:
-            raise QueueItemNotFound(
-                f"queue item '{queue_id}' not found, already consumed, or cancelled"
-            )
+            # 镜像未命中：按事件流复核（重启后镜像为空 / 该项从未进过本进程缓存）。
+            # 只有事件流判定"确实不存在/已取消/已消费"才 404。
+            pending = await self.list_undelivered_inputs(session_id)
+            if not any(p.kind == KIND_QUEUE and p.input_id == queue_id for p in pending):
+                raise QueueItemNotFound(
+                    f"queue item '{queue_id}' not found, already consumed, or cancelled"
+                )
         self._append_session_event(session_id, QUEUE_CANCELLED, queue_id=queue_id)
         return True
 
-    async def drain_queued_message(
+    # ── 未投递输入：投递驱动（ADR-0030 D4 / D7 / §4.7）────────────────
+
+    async def list_undelivered_inputs(self, session_id: str) -> list[UndeliveredInput]:
+        """本会话尚未变成 run 的输入，按到达顺序（seq）——`GET /queue` 与投递共用。
+
+        判据全在事件流上（``derive.undelivered_inputs``），**不读内存队列**：
+        只有事件流同时看得见 queue 与 steer 的到达顺序，也只有它跨崩溃存活
+        （D5）。内存那份 `MessageQueueManager` 是缓存，不是事实来源。
+        """
+        self._validate_session_id(session_id)
+        if not await self.has_session(session_id):
+            raise SessionNotFound(f"session '{session_id}' not found")
+        events = await anyio.to_thread.run_sync(
+            self._state.store.read_events, session_id
+        )
+        return undelivered_inputs(events)
+
+    async def deliver_next_undelivered(
         self,
         *,
         session_id: str,
         max_steps: int = 10,
         amend: AmendOptions | None = None,
     ) -> LaunchResult | None:
-        """run 结束后自动消费下一条排队消息（PRD §5.3 FIFO 续聊链）。
+        """取 1 条未投递输入接力开新 run（ADR-0030 §4.5.5）。None = 无待投递。
 
-        无排队或全部已取消 → 返回 None（调用方静默收尾）；有可用消息 →
-        drain 出来 + ``resume_and_launch`` 拉起下一轮 run。此方法是
-        「续聊链接力」的唯一驱动入口，避免 Web / CLI 各自实现而漂移。
-        staged amend 字段透传给 ``resume_and_launch``。
+        **一次只投递一条**：投递会开新 run，后续输入在下一个终态继续接力——
+        否则一次终态会并行开出 N 个 run。
+
+        消费事实在**投递成功之后**才写（``queue/consumed`` / ``steer/applied``）：
+        崩溃窗口的两种坏结果不对称——"已消费但没投递"= 消息永久静默丢失
+        （用户看不见、无从恢复），"已投递但没记消费"= 重启后再投一次
+        （重复回答，用户看得见）。选后者（同 §4.4 的取舍方向）。
+
+        `ActiveRunConflict` 直接上抛：调用方（HTTP flush）翻 409；终态驱动侧
+        自己吞掉并记日志——此时输入仍在事件流里，下一个终态会再试（不会丢）。
         """
-        self._validate_session_id(session_id)
-        msg = await self._state.message_queues.drain_next(session_id)
-        if msg is None:
+        pending = await self.list_undelivered_inputs(session_id)
+        if not pending:
             return None
-        return await self.resume_and_launch(
-            session_id=session_id, task=msg.content, max_steps=max_steps,
-            amend=amend,
+        nxt = pending[0]
+        launched = await self.resume_and_launch(
+            session_id=session_id, task=nxt.content, max_steps=max_steps, amend=amend,
         )
+        # run_id 拿不到（超时）不阻塞投递：消费判据是 input_id，run_id 只是归因。
+        run_id = await launched.run.wait_run_id()
+        if nxt.kind == KIND_QUEUE:
+            await self._state.message_queues.take_queue_item(
+                session_id=session_id, queue_id=nxt.input_id,
+            )
+            self._append_session_event(
+                session_id, QUEUE_CONSUMED, queue_id=nxt.input_id, run_id=run_id,
+            )
+        else:
+            await self._state.message_queues.take_steer(
+                session_id=session_id, steer_id=nxt.input_id,
+            )
+            self._append_session_event(
+                session_id, STEER_APPLIED,
+                steer_id=nxt.input_id, applied_seq=None, run_id=run_id,
+            )
+        return launched
+
+    async def on_run_terminal(self, session_id: str) -> None:
+        """run 终态后的唯一驱动点（ADR-0030 D4 / §4.7）——接力投递下一条输入。
+
+        幂等：无待投递输入、或已有别的入口拉起了在途 run 时都是 no-op。后者是
+        竞态护栏：用户手动发消息（`/messages` 的 idle 分支）与终态驱动可能同时
+        想开 run，先到者赢，另一方不重复开（输入留在事件流里等下一个终态）。
+
+        由 `RunManager` 在 run 收口后调用（Web 层接线）；CLI 未接线时本方法
+        不被调用，行为与接线前一致。
+        """
+        if self._state.run_manager.get_active(session_id) is not None:
+            return  # 已有在途 run（用户手动开了）：不要双驱
+        try:
+            await self.deliver_next_undelivered(session_id=session_id)
+        except ActiveRunConflict:
+            # 心跳式竞态：另一个入口在同一刻拉起 run。不丢事实——输入仍在事件流，
+            # 下一个终态会再次尝试（这里刻意不 requeue：我们从没把它弹出内存镜像，
+            # 投递决策读的是事件流，见 deliver_next_undelivered 的说明）。
+            logger.info(
+                "终态驱动遇在途 run 竞态（session=%s）——输入留在事件流待下次接力",
+                session_id,
+            )
+        except SessionNotFound:
+            logger.warning("终态驱动：session=%s 不存在，跳过接力", session_id)
 
     # ── 取消 ─────────────────────────────────────────────────────────
 
@@ -1149,6 +1301,70 @@ class SessionService:
             database_path=self._state.harness_db,
         )
         return results
+
+    async def rebuild_message_queues(self) -> int:
+        """按事件流重建内存队列镜像（ADR-0030 §4.8，D5）。返回重建的会话数。
+
+        **不自动起 run**：进程刚起、没有客户端订阅，起了会被孤儿回收；用户不在场
+        时自动跑 token 更不可接受。用户回到会话后前端据 `GET /queue` 显示「待发送 N」，
+        点「立即发送」→ `POST /queue/flush`（或直接在会话里发消息，走同一条投递路径）。
+
+        幂等：`restore` 是替换语义，重复执行得到同一集合。跨崩溃存活由事件流保证
+        ——`message/queued` 本身就是 durable 事实，"队列还在"不依赖任何内存快照。
+
+        代价与边界：这里对每个会话做一次全量事件读取（`list_session_ids` 的顺序即
+        最近修改倒序）。重建只在启动时跑一次，耗时随会话总量线性增长。
+        """
+        await self._state.ensure_stores()
+        session_ids = await anyio.to_thread.run_sync(self._state.store.list_session_ids)
+        started = time.monotonic()
+        rebuilt = 0
+        for session_id in session_ids:
+            events = await anyio.to_thread.run_sync(
+                self._state.store.read_events, session_id
+            )
+            if not events:
+                continue
+            pending = undelivered_inputs(events)
+            if not pending:
+                continue
+            queue_items = [
+                QueuedMessage(
+                    queue_id=item.input_id,
+                    content=item.content,
+                    session_id=session_id,
+                    created_at=item.created_at,
+                )
+                for item in pending
+                if item.kind == KIND_QUEUE
+            ]
+            steers = [
+                SteerRequest(
+                    steer_id=item.input_id,
+                    content=item.content,
+                    session_id=session_id,
+                    run_id=item.run_id,
+                    created_at=item.created_at,
+                )
+                for item in pending
+                if item.kind != KIND_QUEUE
+            ]
+            await self._state.message_queues.restore(
+                session_id=session_id, queue_items=queue_items, steers=steers,
+            )
+            rebuilt += 1
+            logger.info(
+                "重启重建未投递输入：session=%s queue=%d steer=%d",
+                session_id, len(queue_items), len(steers),
+            )
+        elapsed = time.monotonic() - started
+        if session_ids:
+            # 启动路径上的线性成本要可见：会话多了之后这里是最可能被感知的慢点。
+            logger.info(
+                "未投递输入重建完成：扫描 %d 个会话，命中 %d 个，耗时 %.2fs",
+                len(session_ids), rebuilt, elapsed,
+            )
+        return rebuilt
 
     # ── 模型切换 / Fork（T7 #137）────────────────────────────────────
 

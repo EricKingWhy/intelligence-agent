@@ -69,6 +69,8 @@ from agent_harness.session import (
     SessionEvent,
     run_context_var,
 )
+from agent_harness.session.event import STEER_APPLIED
+from agent_harness.session.queue import SteerRequest, SteerSource
 from agent_harness.storage import (
     CheckpointBoundary,
     CheckpointPolicy,
@@ -378,9 +380,13 @@ class AgentRuntime:
         model_call_gate: ModelCallGate | None = None,
         agent_id: str = "default",
         observability_sink: Any | None = None,
+        steer_source: SteerSource | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
+        # steer 注入源（ADR-0030 D2 / §4.3）：None = 不注入，行为逐字不变
+        # （CLI 与绝大多数单测走这条路径）。
+        self._steer_source = steer_source
         # 同错熔断护栏（ADR-0014 #69）：可选注入；默认每 run 一个新实例
         # （计数不跨 run 累积——每个 run 的循环各自干净起步）。
         self._failure_guard = failure_guard
@@ -448,6 +454,63 @@ class AgentRuntime:
                 self._fallback_model = fallback_model.bind_tools(definitions)
             else:
                 self._fallback_model = fallback_model
+
+    async def _inject_steers(
+        self, session: Session, run_id: str, step_id: int,
+    ) -> list[SessionEvent]:
+        """把待注入的 steer 追加成本 run 的 user/message（ADR-0030 §4.3）。
+
+        返回**已持久化**的事件列表（调用方逐个 yield 镜像 AgentEvent）——本方法
+        只做 append，不负责广播，避免生成器嵌套里再嵌一层 yield。
+
+        三条硬性要求（都有具体故障模式，不是风格问题）：
+
+        1. 用**本 run 自己的** ``session`` 实例 append：两个 Session 各自推算 seq
+           会撞号，写出重复 seq 让会话不可 resume。
+        2. steer 消息带 ``steer_id``、**绝不**带 ``injected_by``：后者是"runtime
+           注入的文案"，标记它会让用户自己的话被记忆抽取排除
+           （`memory/extractor.py`）并从 `user_turn_count` 里漏计。
+        3. 陈旧请求（run_id 不匹配 / run_id 未知）**丢弃并记日志**，不注入——给
+           错误的 run 注入等于让用户的话出现在无关的上下文里；丢弃是安全的，
+           因为该 `steer/requested` 仍未被 `steer/applied` 收口，终态驱动会把它
+           当普通输入投递（不变量 #7：事件还在，投递晚一点而已）。
+        """
+        if self._steer_source is None:  # pragma: no cover - 调用方已判
+            return []
+        drained = await self._steer_source.drain_steers(session.session_id)
+        if not drained:
+            return []
+        appended: list[SessionEvent] = []
+        for steer in self._applicable_steers(drained, run_id):
+            user_event = session.append(
+                USER_MESSAGE,
+                {"content": steer.content, "steer_id": steer.steer_id},
+                run_id=run_id, step_id=step_id,
+            )
+            applied = session.append(
+                STEER_APPLIED,
+                {"steer_id": steer.steer_id, "applied_seq": user_event.seq, "run_id": run_id},
+                run_id=run_id, step_id=step_id,
+            )
+            appended.extend((user_event, applied))
+        return appended
+
+    @staticmethod
+    def _applicable_steers(
+        drained: list[SteerRequest], run_id: str,
+    ) -> list[SteerRequest]:
+        """筛掉陈旧 steer（顺序保持队列内 FIFO）。"""
+        applicable: list[SteerRequest] = []
+        for steer in drained:
+            if steer.run_id == run_id:
+                applicable.append(steer)
+            else:
+                logger.warning(
+                    "丢弃陈旧 steer（steer_id=%s，目标 run=%s，当前 run=%s）"
+                    "——它仍未被 steer/applied 收口，由终态驱动当普通输入投递",
+                    steer.steer_id, steer.run_id, run_id,
+                )
+        return applicable
 
     async def run(self, session: Session, user_input: str) -> AgentRunResult:
         """跑完整条 Agent Loop，返回 AgentRunResult。
@@ -590,6 +653,16 @@ class AgentRuntime:
                       outcome="started", agent_name="agent_runtime")
 
             while True:
+                # 第 0 步（ADR-0030 D2）：steer 注入。位置固定在 ContextBuilder
+                # 之前——那是模型可见投影的唯一入口，注入必须发生在投影之前才
+                # 会被本轮模型调用看到；轮次边界（而不是"边答边改"）是物理约束：
+                # 已发出的请求无法改写，已流出的 token 收不回来（ADR §1.3）。
+                if self._steer_source is not None:
+                    for steer_event in await self._inject_steers(
+                        session, run_id, step_base + steps,
+                    ):
+                        yield to_agent_event(steer_event)
+
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
                 ctx_span = (

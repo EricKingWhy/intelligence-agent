@@ -167,6 +167,7 @@ async def build_runtime(
     reasoning_effort: str | None = None,
     agent_profile: str | None = None,
     context_providers: list[str] | None = None,
+    steer_source: Any | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -179,6 +180,8 @@ async def build_runtime(
     硬墙——policy 决定哪些工具 needs_approval，审批结果仍由 callback 决定）。
     approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
     式审批 callback（见 web 层 PendingApprovalQueue）。
+    steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
+    MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
@@ -373,4 +376,5 @@ async def build_runtime(
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
         observability_sink=get_observability_sink(settings),
+        steer_source=steer_source,
     )
