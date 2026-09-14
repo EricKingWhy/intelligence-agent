@@ -239,10 +239,18 @@ def test_archive_creates_the_meta_row_lazily_and_missing_row_means_not_archived(
 
 
 def test_archive_unknown_session_is_404(tmp_path: Path) -> None:
-    """不存在（没有日志）→ 404，两个动词同一口径。"""
+    """不存在（没有日志）→ 404，两个动词同一口径。
+
+    **detail 逐字断言**（不只是状态码）：前端 `web/e2e/fixtures.ts` 的归档分支把
+    这句话**照抄**进 mock 当"后端原句"用，那边的 e2e 也逐字断言它。后端若改词而这里
+    只断状态码，两侧会各自绿着悄悄漂开——集成时才发现"界面显示的原文"根本不是后端
+    现在说的那句。文案来自 `SessionNotFound.__str__` 的 `session '<id>' not found`。
+    """
     client = _client(tmp_path)
-    assert client.post("/api/sessions/no-such-session/archive").status_code == 404
-    assert client.delete("/api/sessions/no-such-session/archive").status_code == 404
+    for method in (client.post, client.delete):
+        resp = method("/api/sessions/no-such-session/archive")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "session 'no-such-session' not found"
 
 
 def test_invalid_session_id_is_422(tmp_path: Path) -> None:
@@ -254,7 +262,11 @@ def test_invalid_session_id_is_422(tmp_path: Path) -> None:
 
 
 def test_archive_refuses_while_a_run_is_in_flight(tmp_path: Path, monkeypatch) -> None:
-    """AC1：在途 run → 409，且**什么都没发生**（不是"写了一半才发现忙"）。"""
+    """AC1：在途 run → 409，且**什么都没发生**（不是"写了一半才发现忙"）。
+
+    detail 同样逐字断言（理由见 404 那条）：前端 e2e fixture 复制的就是这句话，
+    包括 `archive it after it finishes` 这半句——它同时是给用户看的**下一步**
+    （等它跑完再归档），改词等于改产品文案。"""
     client = _client(tmp_path)
     session_id = _create_session(client)
     before = _meta_archived(client, session_id)  # 建会话可能已懒补过一行 ⇒ 比"不变"
@@ -262,6 +274,9 @@ def test_archive_refuses_while_a_run_is_in_flight(tmp_path: Path, monkeypatch) -
 
     resp = client.post(f"/api/sessions/{session_id}/archive")
     assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == (
+        f"session '{session_id}' has a run in flight; archive it after it finishes"
+    )
     assert _meta_archived(client, session_id) == before, "拒绝必须不留任何写痕迹"
     assert _ids(client) == {session_id}
 
