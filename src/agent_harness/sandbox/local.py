@@ -92,7 +92,7 @@ def _glob_match(rel_path: str, pattern: str) -> bool:
 class LocalSubprocessSandbox(Sandbox):
     """本机子进程 Sandbox：命令在本机 subprocess 里跑，文件读写落在 workspace 目录。
 
-    workspace_root 在构造时确定；所有路径操作都经过 _resolve_within_workspace 校验。
+    workspace_root 在构造时确定；所有路径操作都经过 resolve_within_workspace 校验。
     进程不存在"启动"概念，ensure_started 是 no-op；stop 也不需要清理（幂等空操作）。
     """
 
@@ -379,7 +379,7 @@ class LocalSubprocessSandbox(Sandbox):
         newline=""：字节透传，不做 universal-newlines 折叠——否则 CRLF 文件读出
         变 LF，edit 回写即产生整文件 diff（EOL 破坏用户工作区）。
         """
-        resolved = self._resolve_within_workspace(path)
+        resolved = self.resolve_within_workspace(path)
         # open() 而非 Path.read_text()：newline="" 关键字参数在 Python 3.12+
         # 才加入 pathlib（PEP 436 backport），3.11 上会 TypeError。
         with open(resolved, "r", encoding="utf-8", newline="") as f:
@@ -394,7 +394,7 @@ class LocalSubprocessSandbox(Sandbox):
         - temp + os.replace 原子落盘：truncate-in-place 在进程被 kill 的写中途
           不可逆损毁原文件；同目录 rename 在 POSIX/Windows 上都是原子操作。
         """
-        resolved = self._resolve_within_workspace(path)
+        resolved = self.resolve_within_workspace(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         tmp = resolved.with_name(f".{resolved.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
         try:
@@ -407,7 +407,7 @@ class LocalSubprocessSandbox(Sandbox):
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
         """把宿主文件/目录拷入 workspace 内指定位置。workspace_path 越界抛 PermissionError。"""
-        resolved = self._resolve_within_workspace(workspace_path)
+        resolved = self.resolve_within_workspace(workspace_path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         host = Path(host_path)
         if host.is_dir():

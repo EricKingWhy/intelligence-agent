@@ -113,7 +113,7 @@ def compute_artifact_id(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
-def _slice_lines(
+def slice_lines(
     all_lines: list[str],
     *,
     start_line: int | None,
@@ -122,13 +122,17 @@ def _slice_lines(
     max_lines: int,
     max_chars_per_line: int = 2000,
 ) -> tuple[list[dict[str, int | str | bool]], bool]:
-    """通用切片逻辑：四个 Provider（Fake / S3 / MinIO / Local）共享这一份。
+    """通用行切片逻辑：**artifact 的四个 Provider（Fake / S3 / MinIO / Local）+ Web 工作区文件读取**共用这一份。
+
+    （原为模块私有 `_slice_lines`；#191 的 `GET .../workspace/file` 需要同一套
+    "从第 N 行起 / 最多 N 行 / 单行超长怎么标"的语义 ⇒ 提升为公开函数——
+    与其在 web 层再写一份切片，不如让两处消费同一个实现。）
 
     返回 (行列表, truncated)。truncated 是行数截断与字符截断的并集——
     任一发生即 True（spec 06 §4：大 Artifact 不完整灌回 Context）。
 
-    每个超长行按 max_chars_per_line 截断，原文始终完整保留在 Artifact 里。
-    截断行额外携带 truncated=True 与 full_length 字段，模型可凭 line_number
+    每个超长行按 max_chars_per_line 截断，原文始终完整保留在 Artifact / 文件里。
+    截断行额外携带 truncated=True 与 full_length 字段，调用方可凭 line_number
     重新定位（如经 max_chars_per_line 参数放宽上限继续读）。
     """
     indexed = [{"line_number": i + 1, "text": line} for i, line in enumerate(all_lines)]
@@ -177,7 +181,7 @@ def slice_artifact(
     Provider 只负责 `load()` 后把 content 交进来。
     """
     all_lines = content.splitlines()
-    lines, truncated = _slice_lines(
+    lines, truncated = slice_lines(
         all_lines,
         start_line=start_line,
         end_line=end_line,

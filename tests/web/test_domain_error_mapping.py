@@ -112,7 +112,8 @@ def test_workspace_map_is_the_audited_contract():
     关键区分：**未知目标**（无该项目 / 路径不存在）= 404；**路径存在但不是目录** =
     422（入参非法）；**账本序请求与账本现状冲突**（会话/锚点不在该项目账本里）= 409；
     **OS 拒绝该路径**（非法字符 EINVAL / 超长 ENAMETOOLONG，裸 `OSError`）= 422；
-    **无权访问** = 403。
+    **无权访问** = 403；**路径是目录但调用方要文件**（#191 读工作区文件，POSIX 的
+    `IsADirectoryError`）= 422。
     `WorkspaceRegistryCorrupt` **刻意不登记**：索引损坏是服务端完整性故障，500 才诚实。
     """
     assert {c.__name__: s for c, s in _WORKSPACE_ERROR_STATUS.items()} == {
@@ -120,6 +121,7 @@ def test_workspace_map_is_the_audited_contract():
         "FileNotFoundError": 404,
         "UnknownLedgerEntry": 409,
         "NotADirectoryError": 422,
+        "IsADirectoryError": 422,
         "OSError": 422,
         "PermissionError": 403,
     }

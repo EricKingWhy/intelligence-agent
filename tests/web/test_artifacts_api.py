@@ -228,7 +228,7 @@ def test_store_is_built_with_the_url_session_id(tmp_path: Path) -> None:
 def test_line_bounds_below_one_are_rejected(tmp_path: Path) -> None:
     """`start_line=0` / 负值 → 422。
 
-    `_slice_lines` 内部是 `s = (start_line or 1) - 1`，放进去就会变成 `indexed[-2:]`
+    `slice_lines` 内部是 `s = (start_line or 1) - 1`，放进去就会变成 `indexed[-2:]`
     这类**从尾部倒着读**的切片——静默给错内容的响应比 422 危险得多。
     """
     client = _client(tmp_path)

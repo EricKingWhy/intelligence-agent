@@ -745,6 +745,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_host_dir_routes(app)
 
+    # #191 会话工作区只读浏览（列文件 / 读文件 / git status / 单文件 diff）。
+    # 同样是独立 router + 一行接入：路径边界与来源闸都用既有的那一份（Sandbox /
+    # `require_trusted_origin`），本模块不新造校验。
+    from agent_harness.web.workspace_files import register_workspace_file_routes
+
+    register_workspace_file_routes(app, validate_session_id=validate_session_id)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。

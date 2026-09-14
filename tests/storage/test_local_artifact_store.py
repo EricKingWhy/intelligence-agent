@@ -168,7 +168,7 @@ class TestInspect:
         assert [entry["line_number"] for entry in sl.lines] == [2]
 
     async def test_long_line_truncation_carries_full_length(self, tmp_path: Path) -> None:
-        # 与 _slice_lines 共享实现：超长单行被截断并携带 truncated/full_length
+        # 与 slice_lines 共享实现：超长单行被截断并携带 truncated/full_length
         long_line = "x" * 5000
         s = store(tmp_path)
         artifact = await s.save(
