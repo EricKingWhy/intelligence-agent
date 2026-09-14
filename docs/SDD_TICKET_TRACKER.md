@@ -89,6 +89,10 @@ Standards 轴 2×P2 + 8×P3 → 全部处置完毕**（修复 commit 见台账�
 不回工具数）、一级底部「管理模型」
 入口（#203 交付物，位已由 `.picker-foot` 预留）。
 
+**B-3 集成交接提示词**：`docs/INTEGRATION_PROMPT_FRONTEND_B3_WEB_UI.md`（集成 AI 的唯一入口；§0 是可执行
+摘要，§2 列出「本次没碰」的契约，§3 是本批残余，§4 是踩过的坑）。ticket 关单状态：#194/#197 **已关**
+（代码完成未合入 main，按 §14.12）；#199/#201 **保持 OPEN**（各有冻结 AC 因缺后端数据未落地，comment 已记）。
+
 **B-3 设计依据**：`docs/design/WEB_UI_BATCH_REDESIGN.md`（本 worktree 已镜像一份，来源
 `feat/backend fd16de3`）+ 票面 `## 最终实现契约（已冻结）`。本批**不推远程**（AGENTS §13.2/§14.4）。
 
