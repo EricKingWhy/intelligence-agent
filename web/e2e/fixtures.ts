@@ -102,6 +102,12 @@ export interface ApiMock {
    *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
    *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
   onApprovePost?: (route: Route) => Promise<void> | void;
+  // ── ADR-0030 #195/#196 多轮投递通道 ──
+  /** GET /api/sessions/{id}/queue（待发送输入首屏补齐；缺省 200 → 空队列）。
+   *  #195 队列条 AC：注入此回调即可构造「重启后仍有未投递输入」的首屏。 */
+  onQueueGet?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/queue/{qid}/cancel（取消排队项；缺省 200 → cancelled）。 */
+  onQueueCancelPost?: (route: Route) => Promise<void> | void;
   // ── #172 / ADR-0029 会话硬删 ──
   /** 指定 id 的 DELETE /api/sessions/{id} 直接回这个错误——用来构造只在真机上才会
    *  自然出现的拒绝：409（有在途 run / 有挂起审批 / 是 fork 父会话；**状态码相同**，
@@ -524,6 +530,22 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return route.fulfill({
         status: 200,
         body: JSON.stringify({ session_id: `${SID}-fork-${body.from_seq ?? 0}`, from_seq: body.from_seq ?? 0 }),
+        contentType: 'application/json',
+      });
+    }
+    if (/^\/api\/sessions\/[^/]+\/queue$/.test(path) && req.method() === 'GET') {
+      if (mock.onQueueGet) return mock.onQueueGet(route);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ items: [], steers: [] }),
+        contentType: 'application/json',
+      });
+    }
+    if (/^\/api\/sessions\/[^/]+\/queue\/[^/]+\/cancel$/.test(path) && req.method() === 'POST') {
+      if (mock.onQueueCancelPost) return mock.onQueueCancelPost(route);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ status: 'cancelled' }),
         contentType: 'application/json',
       });
     }

@@ -1806,6 +1806,75 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: var(--color-accent);
 }
 
+/* ── ADR-0030 §5.3 用户消息动作行（#195）：复制 / 编辑 / 分叉 ──
+ * 紧贴用户气泡右对齐的一行小动作；编辑在非最新消息上置灰（disabled）。
+ * 全部使用双主题语义 token（§15：两个 [data-theme] 块都定义了这些别名）。 */
+.msg-actions {
+  margin-top: var(--space-xs);
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+.msg-action-btn {
+  padding: 2px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.msg-action-btn:hover:not(:disabled) {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.msg-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 编辑态：原地输入（该条消息变成 textarea + 保存/取消），不弹模态。 */
+.msg-editing {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-xs);
+}
+.msg-edit-input {
+  width: min(560px, 90%);
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-base);
+  font-family: inherit;
+  color: var(--color-foreground);
+  background: var(--color-hover);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-lg);
+  resize: vertical;
+}
+.msg-edit-input:focus {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  outline-offset: 1px;
+}
+.msg-edit-actions {
+  display: inline-flex;
+  gap: var(--space-xs);
+}
+.msg-edit-btn {
+  padding: 2px var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--color-foreground);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.msg-edit-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 /* ── Phase 12 白盒透明（ADR-0014）：failure-guard / 注入纠正消息 ──
  * 系统注入条：harness 的 user-role 纠正消息不是真人输入——居中中性条，
  * 与用户气泡（右对齐）和模型输出（左对齐）三态分明。 */
@@ -2922,6 +2991,89 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: color-mix(in srgb, var(--color-warning) 45%, var(--text-primary));
   font-size: var(--text-xs);
   width: fit-content;
+}
+
+/* ── ADR-0030 §5.2 队列条（#195）：Composer 输入框正上方 ──
+ * 每项 = 徽标（排队/引导）+ 1 行截断摘要 + 编辑/立即/取消三动作。
+ * 空队列不渲染（不占位不闪烁）。全部双主题语义 token（§15）。 */
+.queue-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: var(--space-sm) 0 var(--space-xs);
+  padding: var(--space-xs);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-hover) 60%, transparent);
+}
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-sm);
+}
+.queue-item-badge {
+  flex-shrink: 0;
+  padding: 1px var(--space-sm);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: var(--color-hover);
+}
+/* steer 项的徽标用 accent 区分（引导 ≠ 排队：一眼可辨两条投递通道）。 */
+.queue-item-steer .queue-item-badge {
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+.queue-item-content {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--color-foreground);
+}
+.queue-item-actions {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.queue-item-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  font-size: var(--text-xs);
+  color: var(--color-muted-foreground);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.queue-item-btn:hover:not(:disabled) {
+  color: var(--color-accent);
+  border-color: var(--border-subtle);
+}
+.queue-item-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* 「立即发送全部」按钮：整行右对齐的带字按钮，比逐项图标更醒目。 */
+.queue-flush-btn {
+  align-self: flex-end;
+  padding: 2px var(--space-sm);
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+  border-radius: var(--radius-full);
+}
+.queue-flush-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
 }
 .composer-dock {
   position: relative;

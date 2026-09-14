@@ -370,6 +370,11 @@ export interface Turn {
    *  此前传 turn.step_id（resolveStep 合成值）→ 422。
    *  null = 该轮没有 user/message 事件（不应该出现，但防御性处理）。 */
   user_message_seq: number | null;
+  /** ADR-0030（#196）§4.5.1：该轮的问句被编辑取代（`message/superseded` 收到后
+   *  投影置位）——渲染层据此把**整轮**从视图中移除（§4.5.1：旧回答段直接删掉
+   *  不显示，不加"已改写"标记；用户裁定）。事件照旧保留在 events 日志（不变量
+   *  #3 append-only），只影响视图。 */
+  superseded?: boolean;
   /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
    *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
   reasoningById?: Record<string, ReasoningBlock>;
@@ -552,4 +557,22 @@ export interface ConversationState {
    *  绝不整体替换。null-seq 帧不入册——ephemeral 流式信号（model/delta 等）
    *  按契约永不持久化也永不去重。 */
   seenSeqs: Set<number>;
+  /** ADR-0030（#196）§5.2：未投递输入（排队项 + 未生效的 steer），到达顺序。
+   *
+   *  **事件流是唯一事实**（`message/queued` / `queue/cancelled` / `steer/requested`
+   *  / `queue/consumed` / `steer/applied` 逐事件折叠）；`GET /queue` 只做首屏/重连
+   *  补齐（`restoreUndeliveredFromQueue`），不维护第二份真相。
+   *  空数组 = 队列条不渲染（§5.2：不占位不闪烁）。 */
+  undelivered: UndeliveredInput[];
+}
+
+/** ADR-0030 §2 术语表的前端镜像：queue（等下个 run）与 steer（同 run 注入 /
+ *  降级投递）两种载体。`kind` 决定投递边界；id 是 queue_id（queue）或
+ *  steer_id（steer），供「立即 / 取消 / 编辑」动作定位。 */
+export interface UndeliveredInput {
+  kind: 'queue' | 'steer';
+  id: string;
+  content: string;
+  seq: number;
+  created_at: string;
 }

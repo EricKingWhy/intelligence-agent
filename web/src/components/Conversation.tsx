@@ -14,7 +14,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Activity } from 'lucide-react';
 import type { ChainNode } from '../lib/projection';
-import { deriveChain, emptyChildTurnIndex } from '../lib/projection';
+import { deriveChain, emptyChildTurnIndex, latestEditableTurn } from '../lib/projection';
 import type { TraceDensity } from '../lib/density';
 import type { Disclosure } from '../lib/disclosure';
 import { nextLevel, toolEventKey } from '../lib/disclosure';
@@ -54,6 +54,9 @@ interface Props {
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
   /** T7 #137：从指定用户消息 seq 分叉新会话。 */
   onFork?: (fromSeq: number) => void;
+  /** ADR-0030（#195）§5.3：编辑最新一条用户消息（supersede 语义）。
+   *  保存即发 POST /messages {supersedes_seq}；编辑态在 TurnView 原地。 */
+  onEditTurn?: (fromSeq: number, newContent: string) => void;
   /** APR-01：审批卡提交时后端回 404（队列已 GC）→ 把该 approval_id 上报为失效。
    *  失效事实由 App 持有（同时驱动 composer 解锁与卡片只读），卡内不存第二份。 */
   goneApprovalIds?: ReadonlySet<string>;
@@ -68,7 +71,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, goneApprovalIds, onApprovalGone }: Props) {
+export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -99,6 +102,13 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
   // emptyChildTurnIndex 的注释（只有第 0 轮可分叉时才是它，否则不给提示）。
   // turns 数组每个投影提交都会换引用，所以这趟扫描跟着重算（O(turns)）。
   const emptyChildTurnIdx = useMemo(() => emptyChildTurnIndex(turns), [turns]);
+
+  // ADR-0030（#195）§5.3：最新一条用户消息可编辑（supersede 只允许最新一条，D8）。
+  // 传给 TurnView 的 seq 用于动作行的启用/禁用判定。
+  const latestEditableSeq = useMemo(
+    () => latestEditableTurn(turns)?.user_message_seq ?? null,
+    [turns],
+  );
 
   // PRD §9.2 反向联动：Inspector Timeline 点行 → 中间滚动定位 + 短促 pulse。
   // 目标可能是工具行（data-stream-key）或轮次容器（data-step-key）。
@@ -350,6 +360,9 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
                 onFork={onFork}
                 isFirstUserTurn={vi.index === emptyChildTurnIdx}
                 sessionId={conversation.session_id}
+                latestEditableSeq={latestEditableSeq}
+                onEditTurn={onEditTurn}
+                isSupersededTurn={turns[vi.index].superseded === true}
               />
             </div>
           ))}
@@ -404,7 +417,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string }) {
+export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string) => void; isSupersededTurn?: boolean }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -426,6 +439,17 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
     ? `完成于 ${new Date(turn.completed_at).toLocaleString()}`
     : undefined;
 
+  // ADR-0030 §5.3 编辑态：原地输入（该条消息变成 textarea + 保存/取消），不弹模态。
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState('');
+  // D8：编辑只在**最新一条**用户消息上可用；其余置灰 + title 说明（禁用而不是
+  // 隐藏：让用户知道能力存在）。被取代的轮不在 latestEditableTurn 里（自然禁用）。
+  const editable =
+    onEditTurn != null &&
+    turn.user_message_seq !== null &&
+    !turn.injected_by &&
+    turn.user_message_seq === latestEditableSeq;
+
   return (
     <div className={`turn turn-${turn.status}`} data-step-key={`step:${turn.step_id}`}>
       {/* T9 #139：轮次标签——turn_index 为 per-turn 事实（run/started 携带）。
@@ -433,6 +457,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
       {turnIndex != null && turnIndex > 0 && (
         <div className="turn-index-label">第 {turnIndex} 轮</div>
       )}
+      {/* ADR-0030 §4.5.1：被取代的轮**整段从视图移除**（用户裁定：旧回答段直接
+          删掉不显示，不加"已改写"标记）。由 `message/superseded` 驱动（投影层
+          applySupersedeShadow 置位），不靠前端猜；事件照旧在 events 日志。 */}
+      {isSupersededTurn ? null : (
+        <>
       {/* User message — minimal, right-aligned；harness 注入的纠正消息
           （failure-guard soft）渲染为系统提示条而非用户气泡（不是真人说的话） */}
       {turn.user_message &&
@@ -446,24 +475,93 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
               <span className="system-notice-text">{turn.user_message}</span>
             </div>
           </div>
+        ) : editing ? (
+          <div className="msg msg-user msg-editing">
+            <textarea
+              className="msg-edit-input"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  const trimmed = editValue.trim();
+                  if (!trimmed || turn.user_message_seq === null) return;
+                  onEditTurn?.(turn.user_message_seq, trimmed);
+                  setEditing(false);
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setEditing(false);
+                }
+              }}
+              rows={2}
+              autoFocus
+              aria-label="编辑消息"
+            />
+            <div className="msg-edit-actions">
+              <button
+                className="msg-edit-btn"
+                onClick={() => {
+                  const trimmed = editValue.trim();
+                  if (!trimmed || turn.user_message_seq === null) return;
+                  onEditTurn?.(turn.user_message_seq, trimmed);
+                  setEditing(false);
+                }}
+                aria-label="保存修改"
+              >
+                保存
+              </button>
+              <button
+                className="msg-edit-btn"
+                onClick={() => setEditing(false)}
+                aria-label="取消编辑"
+              >
+                取消
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="msg msg-user">
             <div className="msg-bubble-user">{turn.user_message}</div>
-            {onFork && turn.status !== 'streaming' && turn.user_message_seq !== null && (
+            {/* §5.3 动作行：复制 / 编辑 / 分叉（对齐 Codex 的三图标）。
+                编辑在最新一条用户消息上可用；其余禁用（置灰 + title 说明），
+                因为 supersede 只允许最新一条（D8）。 */}
+            <span className="msg-actions">
+              {turn.user_message && <CopyButton text={turn.user_message} label="复制消息" />}
               <button
-                className="fork-btn"
+                className="msg-action-btn"
+                onClick={() => {
+                  setEditValue(turn.user_message);
+                  setEditing(true);
+                }}
+                disabled={!editable}
                 title={
-                  isFirstUserTurn
-                    ? '本轮之前没有历史：child 会话将是空会话'
-                    : '从此处分叉新会话'
+                  editable
+                    ? '编辑这条消息（旧的一轮会被新内容取代）'
+                    : '只有最新一条消息可以编辑'
                 }
-                onClick={() => onFork(turn.user_message_seq!)}
+                aria-label={editable ? '编辑消息' : '编辑消息（仅最新一条可用）'}
               >
-                分叉
+                编辑
               </button>
-            )}
+              {onFork && turn.status !== 'streaming' && turn.user_message_seq !== null && (
+                <button
+                  className="fork-btn"
+                  title={
+                    isFirstUserTurn
+                      ? '本轮之前没有历史：child 会话将是空会话'
+                      : '从此处分叉新会话'
+                  }
+                  onClick={() => onFork(turn.user_message_seq!)}
+                >
+                  分叉
+                </button>
+              )}
+            </span>
           </div>
         ))}
+        </>
+      )}
 
       {/* Phase 12 白盒透明：failure-guard 事件条——soft 提示 / hard 终止标记 */}
       {turn.notices?.map((n, i) => (

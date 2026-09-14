@@ -20,6 +20,7 @@ describe('initConversation', () => {
       model_fallback: null,
       run_interrupted: null, turn_index: null,
       seenSeqs: new Set(),
+      undelivered: [],
     });
   });
 });
@@ -920,15 +921,15 @@ describe('applyEvent — df4f7d8 新形状', () => {
     for (const type of [
       EventType.COMPACTION_START,
       EventType.COMPACTION_END,
-      EventType.MESSAGE_QUEUED,
-      EventType.QUEUE_CANCELLED,
-      EventType.STEER_REQUESTED,
-      EventType.STEER_APPLIED,
     ]) {
       const s = applyEvent(initConversation('s'), ev({ type }));
       expect(s.unknown_events, `${type} 应落 unknown_events`).toHaveLength(1);
     }
   });
+
+  // #195（ADR-0030 §5.4）：队列/引导五类型已接线——投影进 undelivered 折叠
+  // / 摘除（不再落 unknown_events），行为由本文件与 useSession.test.ts 的
+  // queue/steer 用例锁定。此处只留 COMPACTION 两条仍是兜底。
 
   // ART-01（第十一轮真机验收）：运行时只发 artifact/externalized，此前前端只接了
   // 规格里的 artifact/created → 有产物的会话里 Artifacts 页签恒空、还写"未产生 Artifact"。

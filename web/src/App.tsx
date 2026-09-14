@@ -56,7 +56,10 @@ import {
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
-import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
+import type { ToolCall, PresetTask, AgentEvent, Project, UndeliveredInput } from './types';
+
+// 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
+const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
 import './styles/app.css';
 
 /** 分叉请求的兜底超时。`forkInFlightRef` 只在 `finally` 里复位——请求若既不
@@ -89,6 +92,9 @@ export default function App() {
     refreshSessions,
     changeModel,
     fork,
+    sendSteer,
+    flushQueue,
+    cancelItem,
   } = useSession();
 
   // ── 项目（WS-5 / #155）──
@@ -538,6 +544,73 @@ export default function App() {
     [selectedId, fork, selectSession, refreshSessions],
   );
 
+  // Ctrl/Cmd+Enter = steer（ADR-0030 D10 键位）：复用 steer 提交路径。
+  const handleSteer = useCallback(
+    (task: string) => {
+      if (!selectedId) return;
+      void sendSteer(selectedId, task);
+    },
+    [sendSteer, selectedId],
+  );
+
+  // ADR-0030 §4.6「立即发送全部」：POST /queue/flush，launched 流经
+  // flushQueue 接消费机器（queue/consumed 帧经增量通道摘除条目）。
+  const handleFlush = useCallback(
+    () => {
+      if (!selectedId) return;
+      void flushQueue(selectedId);
+    },
+    [flushQueue, selectedId],
+  );
+
+  /** ADR-0030 §5.3 编辑最新一条用户消息 → supersede（POST /messages 带
+   *  supersedes_seq）。只传 fromSeq（新内容由 Composer 的 textarea 已 trim）；
+   *  409（非最新/已取代）走 sendMessage 的既有错误通道。 */
+  const handleEditTurn = useCallback(
+    (fromSeq: number, newContent: string) => {
+      if (!selectedId) return;
+      void sendMessage(selectedId, newContent, {
+        maxSteps: 10,
+        amend: { supersedes_seq: fromSeq },
+      });
+    },
+    [sendMessage, selectedId],
+  );
+
+  // ── ADR-0030 §5.2 队列条动作（#195）──
+  // 四个 handler 都必须 useCallback：Composer 是 memo，内联箭头会让队列条
+  // 在每个流式 delta 上整片重渲染。
+  // 「立即」= steer item：POST /messages mode:steer（先取消原排队项，后端
+  // send_message 的 steer 分支语义），成功后原条目经 steer/applied 摘除。
+  const handleSteerItem = useCallback(
+    (item: UndeliveredInput) => {
+      if (!selectedId) return;
+      void sendMessage(selectedId, item.content, { maxSteps: 10, amend: { mode: 'steer' } });
+    },
+    [sendMessage, selectedId],
+  );
+
+  // 「取消」= POST /queue/{id}/cancel；条目摘除由 queue/cancelled 事件驱动
+  // （事件流是唯一事实，不变量 #22——这里不本地摘）。
+  const handleCancelItem = useCallback(
+    (item: UndeliveredInput) => {
+      if (!selectedId) return;
+      void cancelItem(selectedId, item.id);
+    },
+    [cancelItem, selectedId],
+  );
+
+  // 「编辑」= 就地编辑排队项：复用队列条自身的编辑态（Composer 内 useState），
+  // App 这里提供的是「把该项内容回填到输入框」的最小实现——取消原项 + 预填。
+  const handleEditItem = useCallback(
+    (item: UndeliveredInput) => {
+      if (!selectedId) return;
+      onPresetTask(item.content);
+      void cancelItem(selectedId, item.id);
+    },
+    [cancelItem, selectedId],
+  );
+
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
   // 同步刷新控制目录并清除死选中值（permission_mode / agent_profile /
@@ -921,6 +994,7 @@ export default function App() {
                     onOpenSession={handleSelect}
                     onInspectChild={focusChild}
                     onFork={handleFork}
+                    onEditTurn={handleEditTurn}
                     goneApprovalIds={goneApprovalIds}
                     onApprovalGone={onApprovalGone}
                   />
@@ -935,7 +1009,13 @@ export default function App() {
                       ),
                     )}
                     onSubmit={handleSubmit}
+                    onSteer={handleSteer}
                     onCancel={cancelStream}
+                    undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
+                    onSteerItem={handleSteerItem}
+                    onCancelItem={handleCancelItem}
+                    onEditItem={handleEditItem}
+                    onFlush={handleFlush}
                     presetTask={presetTask}
                     models={models}
                     selectedModel={selectedModel}

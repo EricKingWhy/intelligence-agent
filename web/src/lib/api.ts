@@ -304,6 +304,13 @@ export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
   max_steps?: number;
+  /** 编辑语义（ADR-0030 §4.4，后端 #196 起接受；默认缺省不发键 = 现有行为不变）：
+   *  - supersedes_seq：取代 seq 为它的那条 user/message **及其整轮**（只影响
+   *    模型可见投影与界面，历史事件照旧保留）。目标必须是最新一条非注入用户
+   *    消息，否则 409 `SupersedeTargetInvalid`。与 mode 正交。
+   *  - queue_id：本条内容**替换**某条排队项（旧项被取消，新内容按 mode 投递）。 */
+  supersedes_seq?: number;
+  queue_id?: string;
   /** 续聊 amend 字段（后端 Q2 批次起 /messages 接受，与 create 路径同词汇）：
    *  - model: GET /api/models 的 name；
    *  - agent_profile: GET /api/agent-profiles 的 id；
@@ -329,6 +336,13 @@ const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
   max_steps: (p) => ['max_steps', p.max_steps ?? 10],
+  // 编辑语义（ADR-0030）：与 amend 四项同款「有值才带键」，缺省不发键 = 后端
+  // 默认 None = 现有行为逐字不变。
+  supersedes_seq: (p) =>
+    typeof p.supersedes_seq === 'number' && Number.isFinite(p.supersedes_seq)
+      ? ['supersedes_seq', p.supersedes_seq]
+      : null,
+  queue_id: (p) => (p.queue_id ? ['queue_id', p.queue_id] : null),
   model: (p) => (p.model ? ['model', p.model] : null),
   agent_profile: (p) => (p.agent_profile ? ['agent_profile', p.agent_profile] : null),
   reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
@@ -458,6 +472,61 @@ export async function cancelSession(sessionId: string): Promise<{ status: string
   });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
   return res.json();
+}
+
+// ── 在途输入队列（ADR-0030 §4.6 / §5.2，后端 #196）──
+
+/** `GET /api/sessions/{id}/queue` 的条目形状。
+ *  数据源是**事件流**（不是内存队列）：只有它跨崩溃存活、也只有它同时看得见
+ *  queue 与 steer 的到达顺序。前端用它做首屏/重连补齐，实时增量仍由 SSE 事件
+ *  流驱动（不变量 #22：事件流是唯一事实，本端点只做补齐）。 */
+export interface QueueItem {
+  queue_id: string;
+  content: string;
+  created_at: string;
+}
+
+export interface SteerItem {
+  steer_id: string;
+  content: string;
+  created_at: string;
+}
+
+export interface SessionQueue {
+  items: QueueItem[];
+  steers: SteerItem[];
+}
+
+/** GET /api/sessions/{id}/queue —— 待发送输入（ADR-0030 D11）。
+ *  404 = 会话不存在。非 2xx 抛 Error（调用方静默降级：首屏补齐失败不影响
+ *  实时增量通道）。 */
+export async function listSessionQueue(sessionId: string): Promise<SessionQueue> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/queue`);
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`queue ${res.status}`);
+  return res.json();
+}
+
+/** POST /api/sessions/{id}/queue/flush —— 立刻投递队首的待发送输入（ADR-0030 §4.6）。
+ *  空队列 → `{"status":"idle"}`；有 → 与 `/messages` 的 launched 分支同形的 SSE 流
+ *  （返回原始 Response 供 consumeSSE 消费）。
+ *  409 = 在途 run（轮询重试是调用方的职责：flush 的 idle 回执与在途状态不是
+ *  幂等回执——投递会开新 run）。 */
+export async function flushSessionQueue(sessionId: string): Promise<Response> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/queue/flush`, {
+    method: 'POST',
+  });
+}
+
+/** POST /api/sessions/{id}/queue/{queue_id}/cancel —— 取消尚未消费的排队项。
+ *  200 `{"status":"cancelled"}`；404 = 已取消/已消费/不存在（幂等失败语义，
+ *  防覆盖式重置）。非 2xx 抛 Error。 */
+export async function cancelQueueItem(sessionId: string, queueId: string): Promise<void> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}/cancel`,
+    { method: 'POST' },
+  );
+  if (!res.ok) throw new Error(`queue cancel ${res.status}`);
 }
 
 // ── Artifact 内容读取（#185 路由 / #186 消费）──
