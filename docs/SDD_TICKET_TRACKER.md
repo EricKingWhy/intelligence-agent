@@ -24,7 +24,7 @@
 | --- | --- | --- | --- | --- |
 | B-1 | 待定（下一票 = #160 MEM-5 前端记忆管理 UI） | **`28c35e7`**（#158 收尾 commit——切换时的在途票据，其旧版两轴 review 已完成并修复，**不计入本批审查范围**；本批从 `28c35e7` 之后的新 ticket 起算） | 未审 | — |
 | B-2 | **#169 WS-6 后端半 + #170 WS-7 后端半**（同一张 PRD/ADR 的两个端点，依赖链自然收批） | **`80d49e1`**（merge main → feat/backend，本批第一行代码之前） | **已审**：Spec 轴 `NEEDS-FIX`（1×P1 + 5×P3）+ Standards 轴 `NEEDS-FIX`（3×P2 + 3×P3）→ 全部处置（修 / 文档化 / 有据不改） | **`9c158c9`**（下一批 fixed point） |
-| B-3 | **#194 + #197 + #199 + #201**（用户报障的纯前端 UI 批；#194/#197 已交付，#199/#201 在途） | **`c00604e`**（本批第一行代码之前——文档镜像 commit） | 未审（攒满 4 票收批后跑两轴） | — |
+| B-3 | **#194 + #197 + #199 + #201**（用户报障的纯前端 UI 批；4 票全部已交付 → 收批） | **`c00604e`**（本批第一行代码之前——文档镜像 commit） | 待跑两轴（`git diff c00604e..HEAD`） | — |
 
 **批次边界规则（v2 §1.2）**：每攒满 2–3 个 ticket（或遇到依赖链断点）即收批；收批时对
 `git diff <fixed point>..HEAD` 跑一次两轴 `/code-review`（Standards + Spec，两个独立只读子代理）。
@@ -48,6 +48,35 @@
 | --- | --- | --- | --- |
 | #197 Inspector 拖宽方向 + 默认 340 | 已交付（未关单，待集成） | `5cfb6ff` | tsc 干净；vitest `inspectorPanel.test.ts` 22 passed；playwright `y-inspector-peek` + `workspace-modes` 32 passed |
 | #194 Esc 提示移到右侧动作簇 | 已交付（未关单，待集成） | `0221080` | tsc 干净；新 spec `composer-stream-actions` 6 passed；受 composer DOM 影响的 8 个既有 spec 100 passed |
+| #201 三档位下拉合并 OptionPicker + 删多选 Context providers | 已交付（未关单，待集成） | `4ddec6b`（与 #199 同一 commit，见下「为何合一个 commit」） | OptionPicker 单测 8 passed；`control-row`(5) + `picker-search-visibility`(3) + `continuation`(4) 两 viewport 全绿；`amend.test.ts` 5 passed |
+| #199 模型选择器两级飞出（provider → model） | 已交付（未关单，待集成） | `4ddec6b` | `model-picker` 重写 4 条 × 2 viewport **连跑 3 次全绿**；`q-model-dedupe`（BUG-011 去重锁）2 条 × 2 viewport 全绿 |
+
+**#201 + #199 为何合一个 commit**：两票共用新行实现（`ModelPicker` 二级行直接复用
+`OptionPicker.OptionRowContent`），且 `ControlPicker` 的删除与 `ModelPicker` 的重写落在同一批文件上
+——拆成两个 commit 会产生「中间态编译不过」的历史。两票的验收与测试各自独立记在上表。
+
+**#199/#201 期间被探针推翻 / 坐实的两个判断（留证，防下次误判）**：
+
+1. 「Radix 菜单打开后第一次 `↓` 会丢」是**假象**：Radix 的 roving focus 在 `setTimeout` 里移焦
+   （`react-roving-focus` 的 `Item.onKeyDown` 末尾 `setTimeout(() => focusFirst(...))`），而 e2e 里
+   「按键后立刻读 `document.activeElement`」读到的是**旧值**。判别实验：把同一个 keydown 直接派发到
+   聚焦元素上并等 50ms → 焦点必移动；连按三次 `↓` 的落点是第 1→2→3 项、一步不多不少。
+   修法 = 断言改轮询（`fixtures.pressMenuItemKey`），**不是**改产品代码。
+2. 「退出动画窗口内再开浮层会被吞」是**真的**：探针 gap=0 时目标浮层 `aria-expanded` 恒为 false、
+   listbox 不出现；gap=400ms 正常；鼠标路径因 Playwright 的可操作性重试而免疫。成因是 Radix 的
+   modal 菜单在退场期间仍持有 `body{pointer-events:none}` 并把焦点抓回自己的残留节点。
+   修法 = helper 首尾各等一次「菜单已卸载」（与 `pickControl` 既有尾等待同一手法）。
+
+**视觉验收（`impeccable`：一批一次性检查，未逐票重复）**：暗/亮两主题各截一级菜单、二级子菜单
+（选中态）、长目录档位下拉（含搜索过滤）、短目录下拉已选态；并用计算盒校验定位——`align="end"` 下
+一级菜单右缘 362 == trigger 右缘 362，`align="start"` 下档位浮层左缘 366 == trigger 左缘 366，
+二级子菜单锚在 provider 行（+6px sideOffset）而不是面板边缘；`--surface-1/2` 两主题均不同值
+（暗 `#17171d`/`#1f232b`，亮 `#ffffff`/`#f1f1f3`），二级靠 surface-2 + 更浅阴影分层。
+
+**B-3 未落地项（无数据源，不编占位；已写进交付说明与代码注释）**：per-option 图标槽（目录契约
+无 per-option 图标）、provider 不可用置灰 + 行尾 reason（`is_available`/`unavailable_reason` 属
+#203）、档位收窄「N/M 个工具」提示（`GET /api/agent-profiles` 不回工具数）、一级底部「管理模型」
+入口（#203 交付物，位已由 `.picker-foot` 预留）。
 
 **B-3 设计依据**：`docs/design/WEB_UI_BATCH_REDESIGN.md`（本 worktree 已镜像一份，来源
 `feat/backend fd16de3`）+ 票面 `## 最终实现契约（已冻结）`。本批**不推远程**（AGENTS §13.2/§14.4）。
