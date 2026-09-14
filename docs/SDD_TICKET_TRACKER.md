@@ -974,6 +974,7 @@ keydown 之后还要对同一元素补发 keyup——元素已不在就会重新
 - **#181**：窄屏的 ⋯ 依赖 `hover` / `focus-within` 让位——**触摸设备**（无 hover、iOS 上
   `button` 默认不聚焦）可能仍然拿不到菜单。会话级（FE-R11-09）与项目级（#179）同款问题，
   已开票等产品裁决（推荐 `@media (hover: none)` 下常显 ⋯）。
+  → **已修**：第二十三轮（按推荐方案 1 落地，纯 CSS + 触摸 e2e 锁）。
 
 **两轴 code-review（Standards + Spec）结论**：Standards 轴 1 条硬 finding（spec §3 仍写死
 "38 = 36 + 2" 与仅广播名单，与"不再手工维护枚举"的前提自相矛盾）→ 已改为"以生成物为准"并写明
@@ -1619,3 +1620,79 @@ bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门�
   （跨端，含合并顺序、真端点验收、两条必须传下去的口径、风险 1 的同类隐患提示）。
 - 上一轮（#183 / #186 / #189）的提示词 `docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md` 仍然有效，
   但它里面"#193 未完成 ⇒ 两个面用户看不到"的告警**在本票合并后作废**。
+
+## 第二十三轮：#181（2026-09-14，前端侧 · 在途记录）
+
+票：#181「[窄屏+触摸] ⋯ 菜单依赖 hover/focus-within：≤820px 触摸设备上会话级与项目级
+操作可能仍不可达」。来源是第十一轮修复的两轴 review residual（FE-R11-09 / #179 的
+触摸盲区）。**纯前端、纯 CSS**，无 JS 改动。
+
+**交付**：`5f3a18e`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。
+
+### 做了什么
+
+`@media (max-width: 820px) and (hover: none)`（issue 推荐方案 1）：⋯ 常显，装饰性的
+会话点 / 文件夹图标退到背景。鼠标档（`hover: hover`）与 >820px **零变化**。
+让位用 `opacity: 0` 而非 `display: none`——`.session-item-dot` 是行里唯一的在流内容，
+抽掉它这一行连同可点面积一起塌（既有注释记录过 "24px → 9px"）。
+
+两个**状态**信号在触摸档修复前本来是**可见**的（绿点 / 黄三角），跟着槽位一起消失
+就是一次信息丢失 ⇒ 改挂在 ⋯ 的颜色上（`:has()` 取同一行里的状态类）：
+`session-item-dot-live` → `--success`；`rail-project-warn` → `--warning`。
+刻意**不**复用 `breathe`（会把槽里唯一的入口周期性淡到 .55，与"提升可发现性"抵消）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/styles/app.css` | 新增 `@media (max-width: 820px) and (hover: none)` 块（+40，含取舍与代价的注释） |
+| `web/e2e/touch-rail.spec.ts`（新） | 2 条 × 2 视口；`hasTouch + isMobile` 触摸上下文 |
+| `web/e2e/fixtures.ts` | `rowOf` 收敛到共享处（w-session-delete 同步改用，不再各留一份） |
+| `docs/E2E_SCENARIO_MAP.md` | 计数校准（见下）+ 新场景行 |
+
+### 门禁（全绿，串行跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 干净 |
+| `npx vitest run` | **813 passed / 48 files** |
+| `npx oxlint` | **0 error / 44 warnings**（全为既有类别，本票新增 0） |
+| `npx playwright test --workers=2` | **310 passed**（8.2m；上一轮 306 ⇒ +4 = 新 spec 2 条 × 2 视口） |
+| `npx vite build` | 绿 |
+
+### 测试强度（变异验证，不是"看起来绿"）
+
+| 变异 | 结果 |
+| --- | --- |
+| 把新 `@media` 块改成永不匹配（= 修复前） | 两条用例**都红** |
+| 只删两条 `:has()` 状态色规则 | 状态信号那条红 |
+| 让位改 `opacity: 0` → `display: none` | "点必须仍在布局里"那条红 |
+
+修复前首次跑就是红的（`opacity` expected "1" / received "0"）——这正是选这个断言的
+理由：Playwright 的可见性判据**不看 `opacity`**，`opacity: 0` 的元素 `tap()` 照样命中，
+所以"点得到"从来不是缺口，"看不见"才是（AC1 的"触发"按**可见性**验）。
+
+### 两轴 code-review 的处置（1 项硬 + 6 项 judgement，全部落地）
+
+| finding | 处置 |
+| --- | --- |
+| **硬**：`E2E_SCENARIO_MAP.md` 的计数与场景表未随测试增删更新（该文件自己写了这条规矩） | 校准为命令输出的口径（vitest 813/48、playwright 310 = 155×2 / 36 spec），补新场景行，并把漂移史续到"第五次" |
+| **硬**：本票完成未记 tracker | 本轮（本段）+ 关单 comment + 集成提示词 |
+| **judgement**：`rowOf` 从 `w-session-delete` 复制而来（本仓 fixtures 顶部写明"多个 spec 共用同一份，避免各自复制后静默漂移"） | 收敛到 `fixtures.ts`，两处 spec 共用 |
+| **judgement**：`style()` 的联合类型里有没人用的 `backgroundColor` | 删掉；顺带把两个 helper 命名改实（`computedStyle` / `resolveToken`） |
+| **judgement**：新块与 820 块重复声明同一批选择器（未来改动要改两处） | **保留**（两块编码的是**不同状态**：hover 驱动的交换 vs 无 hover 的常显），但补一句"本块只管谁在槽里，定位与节奏仍归上面那块" |
+| **judgement**：e2e 文件没有字母前缀，违反 `E2E_SCENARIO_MAP.md` 的命名注意 | **不成立**：该文件的"命名注意"说的是**字母前缀=增量序号**（与场景字母 A–I 不是一套），且仓内已有 8 个无前缀 spec（`workspace-modes` / `context-providers` / `continuation` …），本票随既有的一支 |
+| **Spec**：状态等价不成立（选中行的点其实是 accent；颜色比实心圆点弱）；`breathe` 加在唯一入口上适得其反 | 见上：只借颜色、去掉呼吸；取舍与"不是等价替换"如实写进 CSS 注释与集成提示词 §3 |
+
+### 如实划下的三条残余（都在集成提示词 §3/§4 传下去）
+
+1. **身份可辨认性变弱**：触摸档两层只剩同一个 ⋯ 芯片，"这是会话还是项目"比"点 vs
+   文件夹"更难分辨——issue 收尾要求确认的正是这一点；按方案 1 落地，未自行改槽位模型
+   （issue 写明这类改动要一次性定案）。
+2. **宽屏触摸（≥820px）与"主指针是鼠标 + 有触摸屏"的设备**仍够不到 ⋯：AC1 字面就是
+   `(max-width: 820px) and (hover: none)`，本票没动；`(hover: none)` 只看**主指针**。
+3. **窄屏行只有 29px 宽、⋯ 芯片 20px 压住中央** ⇒ "点行中央选会话"不可用。这是**修复前
+   就有**的既成事实（`elementFromPoint` 实测：`opacity: 0` 的 ⋯ 照样接收指针事件，
+   所以修复前点行中央会开一个**看不见**的菜单，反而更怪）；本票只是把它变成看得见的
+   入口，没有引入这个重叠。要真修得改槽位模型（行不再收缩成内容宽），建议与 ① 一起定案。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
+集成提示词见 `docs/INTEGRATION_PROMPT_181_TOUCH_RAIL.md`。
