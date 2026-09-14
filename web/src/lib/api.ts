@@ -17,6 +17,7 @@ import type {
   ProjectDeleted,
   ProjectStatus,
   SessionDeleted,
+  SessionArchived,
   SessionSummary,
 } from '../types';
 import { emitUnauthorized, getToken } from './auth';
@@ -97,8 +98,26 @@ export async function getHealth(): Promise<{ status: string }> {
   return res.json();
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
-  const res = await apiFetch('/api/sessions');
+/** 列会话摘要。
+ *
+ *  `includeArchived` 默认 `false`——**与后端默认逐字一致**（#171 AC3：不带参数就不返回
+ *  已归档会话）。包装层不偷偷改默认值，否则"调了同一个函数"在不同调用方手里含义不同。
+ *
+ *  界面侧**显式**要 `true`（`useSession.refreshSessions`），理由与后端的默认并不矛盾，
+ *  是分层分工：
+ *  - 后端那条默认值服务**别的客户端**（CLI / 脚本 / 未来的集成），它们只要"能用的会话"；
+ *  - 本界面需要**完整一份**：归档开关要能立刻切换可见性（不重拉、不闪屏），每行要能画
+ *    出「已归档」徽标，而**项目视图尤其不能缺行**——`buildRailModel` 把"账本里有 id、
+ *    列表里没有"如实报成「n 条会话日志缺失」（`lib/projects.ts`），只请求默认列表会把
+ *    已归档的成员说成"日志丢了"，那是假话。
+ *
+ *  于是可见性过滤落在**投影层**（`buildRailModel` 的 `includeArchived`）：一份载荷 +
+ *  一个开关 = 一处真相（不变量 #22）。 */
+export async function listSessions(
+  options: { includeArchived?: boolean } = {},
+): Promise<SessionSummary[]> {
+  const query = options.includeArchived ? '?include_archived=true' : '';
+  const res = await apiFetch(`/api/sessions${query}`);
   if (!res.ok) throw new Error(`list sessions ${res.status}`);
   return res.json();
 }
@@ -607,6 +626,57 @@ export async function deleteSession(sessionId: string): Promise<SessionDeleted> 
 async function sessionError(res: Response, fallback: string): Promise<SessionError> {
   const detail = await readErrorDetail(res);
   return new SessionError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 归档一个会话（#171）：把它从默认列表里收起来，**可逆**，不删任何东西。
+ *
+ *  与 `deleteSession`（硬删）刻意是两个函数：归档只写 `session_meta.archived` 一个标记
+ *  ——事件日志、项目账本、checkpoint 全部原样保留，所以界面**不做二次确认**（可逆的动作
+ *  压确认面只会让人麻木；硬删才需要 ADR-0026 那套确认）。
+ *
+ *  错误矩阵（后端 `web/app.py::archive_session`）：
+ *    404 —— 没有这个会话（别处已删/从未存在）；
+ *    409 —— 有在途 run（`detail` 就是给用户看的原因，原样上抛，不自己编）；
+ *    422 / 403 —— id 形态非法 / 非本机来源（正常路径不会触发）。
+ *  走到 200 就是归档态成立，回执的 `archived` 是**动作后**的真值。 */
+export async function archiveSession(sessionId: string): Promise<SessionArchived> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw await sessionError(res, '归档会话失败');
+  return readArchiveReceipt(res, sessionId, true);
+}
+
+/** 取消归档（#171）：把会话放回默认列表。与 `archiveSession` 对称，**没有 409**
+ *  ——把行放回列表不破坏任何人的前提，在途 run 也无所谓。 */
+export async function unarchiveSession(sessionId: string): Promise<SessionArchived> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await sessionError(res, '取消归档失败');
+  return readArchiveReceipt(res, sessionId, false);
+}
+
+/** 归档回执的形状防御（与 deleteSession 同一纪律）：非 2xx 已在上游抛掉，这里只防
+ *  "200 但形状不对"。`archived` 是**布尔语义**——缺失时**不**用请求侧的意图去填
+ *  （那会把"后端没确认"伪装成"确认了"）：直接抛，让调用方看见契约被破坏。
+ *
+ *  `requestedArchived` **只进诊断串、不参与判定**：名字刻意不叫 `expected`——回执
+ *  里的 `archived` 是权威（后端在幂等重放/竞态下可能与请求意图不同，以它为准），
+ *  所以这里**不校验**两者相等，只把它写进异常里帮人定位是哪一次调用出的问题。 */
+async function readArchiveReceipt(
+  res: Response,
+  sessionId: string,
+  requestedArchived: boolean,
+): Promise<SessionArchived> {
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<SessionArchived>;
+  if (typeof body.archived !== 'boolean') {
+    throw new Error(
+      `归档回执缺少 archived 布尔（请求意图 ${String(requestedArchived)}，会话 ${sessionId}）`,
+    );
+  }
+  return { id: typeof body.id === 'string' ? body.id : sessionId, archived: body.archived };
 }
 
 /** 会话删除错误 → 展示文案：SessionError 的 message 就是后端 detail（或兜底前缀），

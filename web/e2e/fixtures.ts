@@ -36,6 +36,11 @@ export interface ApiMock {
   sessions?: unknown[];
   /** GET /api/sessions/{id}/events（历史重放） */
   events?: FrameSpec[];
+  /** 第 N 次之后的 `GET /api/sessions` 直接回 500（N 从 1 数）。
+   *  用途：构造"归档写成功了、但随后的列表重拉失败"这个只在真机上偶发的窗口——
+   *  界面此刻的行还是旧状态，必须**说出来**而不是沉默（#171 AC9 的就地报错）。
+   *  不设 = 永远成功。 */
+  sessionsListFailAfter?: number;
   /** GET /api/models（模型目录；缺省 = 空目录 → 选择器降级隐藏） */
   models?: unknown[];
   /** POST /api/sessions（live 流） */
@@ -109,6 +114,25 @@ export interface ApiMock {
    *  的 `event_count`（真后端也是删之前取），`detached_from_projects` 数它进过几个
    *  账本。所以"删完行没了、项目计数也掉了"考的是界面跟着后端走，不是本地隐藏。 */
   sessionDeleteErrors?: Record<string, { status: number; detail: string }>;
+  // ── #171 会话归档（可逆标记）──
+  /** 指定 id 的 POST/DELETE `/api/sessions/{id}/archive` 直接回这个错误——用来构造
+   *  真机上才有自然来源的拒绝：409（**只在归档方向上**：有在途 run / 挂起审批，
+   *  见后端 `SessionService.set_archived`）与 404（元数据/日志都在的会话才会走到这里，
+   *  所以 404 只能这么造）。
+   *
+   *  与硬删的同类字段一样：不设 = 按真后端语义**成功**（真的改行的 `archived` 字段）。 */
+  sessionArchiveErrors?: Record<string, { status: number; detail: string }>;
+  /** 这些 id 视为"忙"（有在途 run）→ 归档回 409，但 `sessionArchiveErrors` 优先。
+   *  与硬删的差别是有意的：后端只在**归档**方向挡 409，取消归档永远允许
+   *  （否则一个正在跑的会话一旦被归档就再也没法取消归档了）。 */
+  sessionArchiveBusyIds?: string[];
+  /** POST/DELETE `/api/sessions/{id}/archive` 的拦截口（计数 / 断言请求形状）；
+   *  `archived` = 动作后的目标态（POST → true、DELETE → false）。返回 true = 已处理。 */
+  onArchiveRequest?: (
+    route: Route,
+    sessionId: string,
+    archived: boolean,
+  ) => Promise<boolean> | boolean;
   // ── WS-5 / #155 项目分组 ──
   /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
    *
@@ -207,6 +231,10 @@ export function sessionRow(
     trace_id: null,
     trace_url: null,
     workspace,
+    // #171：后端 `SessionSummary.archived` 是**必填布尔**（没有 meta 行 = false），
+    // 所以 mock 也给一个字面量默认值——前端类型把它声明成可选就会让"漏读"变成
+    // `undefined`（静默假），这条默认值让 mock 与真后端的形状一致。
+    archived: false,
     ...over,
   };
 }
@@ -235,6 +263,8 @@ export function routeApi(page: Page, mock: ApiMock): void {
   const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
   /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
   const sessionEvents = new Map<string, FrameSpec[]>();
+  /** `GET /api/sessions` 的次数（`sessionsListFailAfter` 用；见该分支注释）。 */
+  let listCalls = 0;
 
   /** 后端 `web/projects.py::Project` 的响应形状（时间戳不是本车道断言的对象）。 */
   const projectView = (p: ProjectFixture) => ({
@@ -287,7 +317,19 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return route.fulfill({ status: 200, body: '{"status":"ok"}', contentType: 'application/json' });
     }
     if (path === '/api/sessions' && req.method() === 'GET') {
-      return json(route, sessionState);
+      // `sessionsListFailAfter`：先数够 N 次成功，之后一律 500（构造"归档后重拉失败"）。
+      listCalls += 1;
+      if (mock.sessionsListFailAfter !== undefined && listCalls > mock.sessionsListFailAfter) {
+        return json(route, { detail: '会话列表暂时不可用' }, 500);
+      }
+      // #171 AC3：`include_archived` 是**后端**的契约（不带 = 不返回已归档行）。
+      // mock 照真后端过滤，于是"UI 总是显式要全量"这条设计能被真的考到：漏掉那个
+      // 参数时，开关打开也看不到归档行（前端本地过滤救不了它）。
+      const includeArchived = new URL(req.url()).searchParams.get('include_archived') === 'true';
+      const rows = includeArchived
+        ? sessionState
+        : sessionState.filter((s) => (s as Record<string, unknown>)['archived'] !== true);
+      return json(route, rows);
     }
     if (path === '/api/sessions' && req.method() === 'POST') {
       if (mock.onSessionPost) return mock.onSessionPost(route);
@@ -352,6 +394,35 @@ export function routeApi(page: Page, mock: ApiMock): void {
       const forced = mock.artifactContentError;
       if (forced) return json(route, { detail: forced.detail }, forced.status);
       return json(route, mock.artifactContent ?? { artifact_id: aid, lines: [], total_lines: 0, returned_lines: 0, truncated: false });
+    }
+    // ── #171 会话归档（有状态 mock：语义对齐 `web/app.py::archive_session`）──
+    const sessionArchiveMatch = /^\/api\/sessions\/([^/]+)\/archive$/.exec(path);
+    if (sessionArchiveMatch && (req.method() === 'POST' || req.method() === 'DELETE')) {
+      const sid = decodeURIComponent(sessionArchiveMatch[1]);
+      const target = req.method() === 'POST'; // POST = 归档 true；DELETE = 取消归档 false
+      if (mock.onArchiveRequest && (await mock.onArchiveRequest(route, sid, target))) return undefined;
+      const forced = mock.sessionArchiveErrors?.[sid];
+      if (forced) return json(route, { detail: forced.detail }, forced.status);
+      const at = sessionState.findIndex(
+        (s) => (s as Record<string, unknown>)['session_id'] === sid,
+      );
+      // 404 的 detail 照抄后端 `SessionService._require_existing_session` 抛出的那句
+      // （`session 'x' not found`）：自己编一句中文会让门槛内的绿灯只证明
+      // "前端与我的假后端一致"。
+      if (at < 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      // 409 **只在归档方向**：后端 `set_archived` 的守卫顺序是「存在 → 在途 run」，
+      // 而 `archived and run_manager.get_active(...)` 这个连词意味着取消归档永不 409。
+      if (target && (mock.sessionArchiveBusyIds ?? []).includes(sid)) {
+        // detail 逐字照抄后端 `service.py::set_archived` 抛的 `ActiveRunConflict` 原句。
+        return json(
+          route,
+          { detail: `session '${sid}' has a run in flight; archive it after it finishes` },
+          409,
+        );
+      }
+      // 幂等：重复归档仍是 true（后端用 upsert/set_archived，不是"翻转"）。
+      sessionState[at] = { ...(sessionState[at] as Record<string, unknown>), archived: target };
+      return json(route, { id: sid, archived: target });
     }
     // ── #172 / ADR-0029 会话硬删（有状态 mock：语义对齐 `web/app.py::delete_session`）──
     const sessionDeleteMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);

@@ -23,7 +23,13 @@ test('401 → 引导横幅出现；可点「关闭提示」关掉；再有 401 �
   // 后注册的路由优先：会话列表**始终** 401，复现「后端要求令牌」的持续状态。
   // 不搞「先 401 后 200」的开关——那会让「关闭后不再复现」变成一句空断言
   // （实测横幅出现后到关闭前**没有任何** /api/sessions 请求，200 分支根本不会执行）。
-  await page.route('**/api/sessions', (route) =>
+  //
+  // 尾部的 `*` 不是可有可无的：Playwright 的 glob 是**整串**匹配，`**/api/sessions`
+  // 匹配不了带查询串的 URL。而列表请求自 #171 起恒带 `?include_archived=true`
+  // （前端总是要全量、可见性交给投影层），少了这个 `*` 本用例会静默走 routeApi 的
+  // 200 分支 → 横幅永不出现、断言红在一个与 401 毫无关系的地方。`*` = `[^/]*`，
+  // 所以它只多吃查询串，不会把 `/api/sessions/{id}/…` 这些端点也吞进来。
+  await page.route('**/api/sessions*', (route) =>
     route.fulfill({ status: 401, contentType: 'application/json', body: UNAUTHORIZED_BODY }),
   );
 

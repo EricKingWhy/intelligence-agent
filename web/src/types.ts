@@ -155,6 +155,18 @@ export interface SessionSummary {
    *  **未分组 = null**（历史遗留 / 未命名 workspace / 装配里没有项目索引）——
    *  后端绝不伪造（不变量 #21 同族）。分组 UI 按 `null` = 未分组渲染（#155）。 */
   workspace: WorkspaceRef | null;
+  /** #171：是否已归档。**非可选**——与 `workspace` 同款理由：后端把它声明为必填
+   *  （`web/app.py::SessionSummary.archived`），前端声明成可选就会让"漏读"变成
+   *  `undefined`，于是已归档的行静默丢掉徽标、也躲过归档开关的过滤。
+   *  这是「已归档」徽标与归档可见性过滤**唯一**的数据源。 */
+  archived: boolean;
+}
+
+/** `POST/DELETE /api/sessions/{id}/archive` 的成功回执（#171）。
+ *  `archived` 是**动作后**的真值（幂等：重复归档仍是 true）。 */
+export interface SessionArchived {
+  id: string;
+  archived: boolean;
 }
 
 /** `DELETE /api/sessions/{id}` 的成功响应（硬删回执，#172 / ADR-0029）。

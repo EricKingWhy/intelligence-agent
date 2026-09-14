@@ -507,6 +507,28 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
 }
+/* 「已归档」徽标（#171）：只在打开「显示已归档」时已归档行才会被渲染出来（默认视图
+ * 里它们整个不渲染），所以徽标要做的是**解释这一行为什么还在列表里**——因此用低调的
+ * 边框 chip 而不是告警色：归档是正常操作，不是异常状态。与同一栏的
+ * `.session-item-stale`（那条解释的是"归属引用悬空了"）分开：一个说"它还活着"，
+ * 一个说"它的引用对不上了"。 */
+.session-item-archived {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 0 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  background: var(--surface-2, transparent);
+}
+/* 「显示已归档」开关（#171）的按下态：icon-only 按钮没有文字，状态只能靠颜色与
+ * `aria-pressed`（无障碍树）双重表达。 */
+.rail-archived-toggle.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
 /* 「自称属于某项目、但该项目不在当前列表里」的注解（AC6）：比 meta 更安静——
  * 它是解释，不是状态；换行截断而不是撑宽行（长标题不能把侧栏顶开）。 */
 .session-item-stale {

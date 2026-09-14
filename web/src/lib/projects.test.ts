@@ -7,7 +7,11 @@ import { describe, expect, it } from 'vitest';
 import { buildRailModel, dropAnchor, moveAnchor } from './projects';
 import type { Project, SessionSummary } from '../types';
 
-function session(id: string, workspace: SessionSummary['workspace'] = null): SessionSummary {
+function session(
+  id: string,
+  workspace: SessionSummary['workspace'] = null,
+  archived = false,
+): SessionSummary {
   return {
     session_id: id,
     event_count: 1,
@@ -17,6 +21,7 @@ function session(id: string, workspace: SessionSummary['workspace'] = null): Ses
     trace_id: null,
     trace_url: null,
     workspace,
+    archived,
   };
 }
 
@@ -131,6 +136,61 @@ describe('buildRailModel', () => {
     const model = buildRailModel(sessions, [project('p1', ['s2'])]);
     expect(model.groups[0].sessions).toEqual([]);
     expect(model.ungrouped.map((s) => s.session_id)).toEqual(['s1']);
+  });
+});
+
+describe('buildRailModel —— 归档可见性（#171）', () => {
+  /* 这一组的关键不是"藏起来了"（那太容易实现），而是**藏起来的那些行不许被算成
+     `missing`**：`missing` 的文案是「n 条会话日志缺失」，对一条已归档会话说这句话
+     是假话——日志好端端在磁盘上，只是被开关收起来了。 */
+
+  it('默认不渲染已归档行（项目内与未分组都算）', () => {
+    const sessions = [
+      session('s1', { id: 'p1', title: '项目 p1' }, true),
+      session('s2', { id: 'p1', title: '项目 p1' }),
+      session('free-1', null, true),
+      session('free-2'),
+    ];
+    const model = buildRailModel(sessions, [project('p1', ['s1', 's2'])]);
+
+    expect(model.groups[0].sessions.map((s) => s.session_id)).toEqual(['s2']);
+    expect(model.ungrouped.map((s) => s.session_id)).toEqual(['free-2']);
+  });
+
+  it('已归档行**不计入** missing——日志没丢，只是被开关收起来了', () => {
+    const sessions = [
+      session('s1', { id: 'p1', title: '项目 p1' }, true),
+      session('s2', { id: 'p1', title: '项目 p1' }),
+    ];
+    const model = buildRailModel(sessions, [project('p1', ['s1', 's2'])]);
+
+    expect(model.groups[0].missing).toBe(0);
+    // 真·日志缺失仍如实计数（否则上面那条断言可能只是把计数关了）
+    const withGone = buildRailModel(sessions, [project('p1', ['s1', 's2', 'gone'])]);
+    expect(withGone.groups[0].missing).toBe(1);
+  });
+
+  it('includeArchived=true 时照常渲染，且行上带 archived 真值（徽标的数据源）', () => {
+    const sessions = [
+      session('s1', { id: 'p1', title: '项目 p1' }, true),
+      session('s2', { id: 'p1', title: '项目 p1' }),
+      session('free-1', null, true),
+    ];
+    const model = buildRailModel(sessions, [project('p1', ['s1', 's2'])], {
+      includeArchived: true,
+    });
+
+    expect(model.groups[0].sessions.map((s) => s.session_id)).toEqual(['s1', 's2']);
+    expect(model.groups[0].sessions[0].archived).toBe(true);
+    expect(model.ungrouped.map((s) => s.session_id)).toEqual(['free-1']);
+  });
+
+  it('被账本认领但收起不渲染的行，不会再从「未分组」冒出来', () => {
+    const sessions = [session('s1', { id: 'p1', title: '项目 p1' }, true)];
+    const model = buildRailModel(sessions, [project('p1', ['s1'])]);
+
+    expect(model.groups[0].sessions).toEqual([]);
+    expect(model.ungrouped).toEqual([]);
   });
 });
 

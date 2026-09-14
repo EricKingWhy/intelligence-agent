@@ -44,6 +44,7 @@ import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
+  describeSessionError,
   getAgentProfiles,
   getCapabilities,
   getContextProviders,
@@ -84,6 +85,7 @@ export default function App() {
     sendMessage,
     cancelStream,
     removeSession,
+    setArchived,
     recover,
     refreshSessions,
     changeModel,
@@ -493,6 +495,23 @@ export default function App() {
     [submitTask],
   );
 
+  /* 归档 / 取消归档（#171 AC9）：把**失败原因**交回给 SessionList 就地显示，
+   * 而不是走 useSession 的 `error`（那是流级通道，会把一次列表操作渲染成主区横幅）。
+   * 成功 resolve `null`——包括"归档一个已经归档的会话"（后端幂等，200 + archived=true），
+   * 因为用户看到的结局确实是他要的那个。
+   * 必须 useCallback：SessionList 是 memo，内联箭头会让它在每个流式 delta 上整片重渲染。 */
+  const handleSetArchived = useCallback(
+    async (sessionId: string, archived: boolean): Promise<string | null> => {
+      try {
+        await setArchived(sessionId, archived);
+        return null;
+      } catch (e) {
+        return describeSessionError(e, archived ? '归档失败' : '取消归档失败');
+      }
+    },
+    [setArchived],
+  );
+
   /** T7 #137：从历史用户消息 seq 派生 child session，成功后跳转到 child。
    *
    *  分叉是异步的，而它的两个结局都会动用户视野（跳 child / 弹错误条），
@@ -792,6 +811,7 @@ export default function App() {
              收敛（清视图 + 重拉列表），确认面只消费它的回执与异常。传引用稳定的
              hook 回调，SessionList 的 memo 才不会因它失效。 */
           onDeleteSession={removeSession}
+          onSetArchived={handleSetArchived}
         />
 
         <section className="app-workspace">

@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
@@ -305,9 +305,17 @@ export function useSession() {
   const streaming = mode.kind === 'live';
 
   // Load session list on mount.
-  const refreshSessions = useCallback(async () => {
+  /** 重新拉取会话列表。返回**是否成功**——`sessions` 的唯一写入者，所以调用方
+   *  （`setArchived`）需要知道"界面现在是不是已经反映了新状态"。
+   *  返回值对既有调用方（`void refreshSessions()` / `onSessionsChanged`）无影响：
+   *  它们忽略它，失败处理仍走 `error` 那条既有通道（`<T> void` 语义不变）。 */
+  const refreshSessions = useCallback(async (): Promise<boolean> => {
     try {
-      const list = await listSessions();
+      // #171：**总是**要全量（含已归档）。可见性由 UI 的开关决定，不由请求决定——
+      // 否则「已归档」开关一开就得再发一次请求，而两次响应之间列表是两套真相
+      // （不变量 #22）。后端默认仍是不带参数就隐藏（其他客户端照旧），这里只是
+      // 显式说明「这份 UI 要自己过滤」，也让投影层能对归档行给出真实徽标与计数。
+      const list = await listSessions({ includeArchived: true });
       setSessions(list);
       // 后端 Gap 3：列表 payload 携带首条用户消息（截断 128）——零额外请求预填
       // 标题缓存。events 扫描（viewing 路径）保留为后端未返回时的 fallback；
@@ -323,8 +331,10 @@ export function useSession() {
         }
         return changed ? next : m;
       });
+      return true;
     } catch (e) {
       setError(`加载会话列表失败：${(e as Error).message}`);
+      return false;
     }
   }, []);
 
@@ -959,6 +969,35 @@ export function useSession() {
     [convergeAfterDelete],
   );
 
+  /** 归档 / 取消归档（#171）。
+   *
+   *  **不动视野**：与硬删（`convergeAfterDelete`）刻意相反。硬删之后会话已经没了，
+   *  留在原地等于展示一个幻影；归档只是列表可见性标记——事件、lineage、resume 在
+   *  后端照旧可用（#171 AC5 把这点钉成契约），所以「我正在读的会话被归档」不该把我
+   *  从内容里踢出去，那是在为一个可逆的标记付不可逆的代价。
+   *
+   *  开关关着时归档会让当前选中行从侧栏消失（主区仍显示内容）——这是可见性过滤的
+   *  正常结果，不是不一致：两份视图读的是同一份真值（不变量 #22）。
+   *
+   *  成功后整表重建：`refreshSessions` 是唯一写 `sessions` 的路径，所以这里只 await
+   *  它，不自己拼一个乐观行——回执的 `archived` 才是动作后的真值，请求参数的意图
+   *  不是（幂等重放时两者同形，但只有响应能证明）。失败**不吞**：抛给调用方显示
+   *  后端 detail（404 / 409 在途 run）。
+   *
+   *  **列表刷新失败也要抛**（不是"归档成功就算成功"）：那一刻后端已经写好了标记、
+   *  而界面上的行还是旧状态——沉默会让用户以为动作没生效，再点一次。抛出的这句
+   *  只描述**界面**的处境（"已生效但没刷新出来"），不冒充后端 detail。 */
+  const setArchived = useCallback(
+    async (sessionId: string, archived: boolean) => {
+      if (archived) await archiveSession(sessionId);
+      else await unarchiveSession(sessionId);
+      if (!(await refreshSessions())) {
+        throw new Error('归档已生效，但会话列表刷新失败——请刷新页面查看最新状态');
+      }
+    },
+    [refreshSessions],
+  );
+
   /** 恢复中断会话（POST /recover）。200 → 整表重建：响应是与 GET events
    *  同构的全量事件数组，走同一 projectHistory 管线（不变量 #22——不引入第二套
    *  会话真相）；404/409 → error（409 附裁决原因，conflict=true）。
@@ -1075,6 +1114,7 @@ export function useSession() {
     sendMessage: sendFollowUp,
     cancelStream,
     removeSession,
+    setArchived,
     recover,
     refreshSessions,
     changeModel,
