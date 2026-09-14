@@ -397,3 +397,19 @@
   **双轴 code-review findings（全部处理）**：Standards 轴 ① `x-output-panel.spec.ts` 有一处**孤儿 JSDoc**（描述的"不注入声明"那组已被删掉，注释现在贴在 `DISABLED` 上方，与自己正下方那条自相矛盾）⇒ 合并重写。② 三处 e2e 注释自称"**端到端证明**"是**过头话**：Playwright 拦了 `/api/capabilities`，请求不出网，它证不了"后端真发 core"⇒ 改为如实口径（锁的是前端消费侧；后端那一半由 `tests/web/test_web_phase2_endpoints.py::TestCapabilities` 真走 HTTP 端点锁）。③ `app.py` 的"条目形状只在 manifest.py 定义一次"是**跨仓**保证的口吻，而前端 `SURFACE_KEYS`/`DEFAULT_SURFACES`/e2e `CORE_CAPABILITY` 是手工镜像 ⇒ 收窄为"后端侧一份 + 前端镜像及其两端测试分别在哪"。Spec 轴 ④ AC2"用真后端形状的载荷"只能做到**逐值镜像**（跨仓无共享来源；后端改值前端测试不会红）⇒ 在 `fixtures.ts` 把这条链**为什么断、由谁守**写清楚，并作为残余项记入集成提示词（合并后按 `ACCEPTANCE_LANE_ENV.md` §2 跑一次真实端点对齐两侧）。⑤ AC4 的反例守卫语义**已被并集改变**（core 恒在 + 前端取并集 ⇒ 插件写 `changes:false` 不再能让面消失，那是"这个插件不产出"而非"会话产不出"）⇒ 不当作退化：闸门仍由不含 core 的载荷证明（`capabilities: []` → 只剩 Chat；AC6 逐面矩阵），并把这条正确读法写进 `ACCEPTANCE_LANE_ENV.md` §2，避免验收方照旧票面文字误判。⑥ 声明是**部署级**不是 profile 级（端点无 session 上下文，读不到 `tool_scope`；某 profile 收窄掉 `bash` 时「输出」面仍出现空态而非消失）⇒ 记为有意取舍 + 另一张票的范围，写进 manifest 模块 docstring 与验收文档。
 
   **未采纳（记录在案）**：Spec 轴提出"core 的 `actions` 属 scope creep（无消费方）"——**保留**：字段在契约里（SDD 03 §17），值被测试钉在真实路由上，且对 core 写全 false 是假话；已在 `CORE_ACTIONS` 注释里写明"当前无消费方 + 将来做动作 UI 该读会话级路由状态，不要把这里的布尔当授权"。
+
+- 2026-09-14：**#191 会话工作区只读浏览 API（后端，`feat/backend`）**。commit `7f00377`。票：[面板 T8][后端·后续] 开放工作区文件读取（列文件 / 读内容 / git 状态）——PRD（`WORKSPACE_PANEL_PRD.md` §3.3 + §6 票 8）里「文件/改动」面之外的后续票。门禁：ruff check 全绿；全量 pytest **2239 passed / 10 skipped / 42 deselected / 0 failed**（356.93s）。
+
+  **交付**：四条只读路由（`GET /api/sessions/{id}/workspace/{files,file,git/status,git/diff}`），挂在会话下。PRD 的「文件/改动」面回答"这次 agent 改过哪些文件"（会话真相，来自事件流），本票补的是"工作区现在有什么、某个文件是什么"（**文件系统真相**）——两者刻意分开，本模块不参与"哪些文件是 agent 改的"的判断（不变量 #22）。**没有前端改动**：这是新供给面，消费它的 UI 是另一张票。
+
+  **访问控制（票面点名的主要风险面）三道闸，一道都不新造**：① 来源闸 `require_trusted_origin`（ADR-0028 D2 同一份实现）；② 路径边界 `Sandbox.resolve_within_workspace`（ADR-0001 唯一强制点）；③ 会话归属 = 该会话的 workspace 映射（`WorkspaceRegistry.get`），不接客户端给的根目录。
+
+  **双轴 code-review 抓到一条 P0（两轴独立命中，已修 + 变异验证）**：git 的操作范围是**仓库**而不是 workspace，默认布局 `<workspace_dir>/workspaces/<sid>` 只要落在某个仓库内（开发机上几乎必然），工作区就嵌在那个仓库里。实测修复前：裸 `git status` 会列出 workspace **之外**的改动文件；**裸 `git diff` 直接吐出 workspace 之外文件的 diff 正文**；`git diff -- ../../secret.txt` 同样穿透（`_SAFE_PATHSPEC` 允许 `.` 与 `/`）。⇒ 修法两件缺一不可：① git 的 path/pathspec **先过 Sandbox 边界**（越界 403，不交给 git 去解释——它不会替我们守 workspace 边界）；② 给命令一个**路径围栏**：没给 pathspec 时补 `.`，给了就以它为准。**不能两个都加**——多个 pathspec 取并集，`-- . "a.py"` 会退化成整个子树（过滤器失效，实测踩到并已修）。**变异探针**：去掉围栏 → 3 条用例红；去掉边界校验 → 穿越用例红；恢复后 32 条全绿。
+
+  **同批修掉的其余 findings**：③ 含 NUL 的路径 —— `Path.resolve()` 抛 `ValueError`（不是 OSError）⇒ 穿透成 500 ⇒ 改 422 + 策展文案（`host_dirs` 对同一形态有同样的守卫）。④ `next_offset` 语义：只有末行被字符上限截断时该行行号已用掉，指针必须 null，否则调用方去读不存在的行。⑤ 两处"同口径"的字面量上限改为**引用** artifact 读数端同一组常量（`MAX_LINES_CAP` / `MAX_CHARS_PER_LINE_CAP`）——注释保证不了多久。⑥ 模块 docstring 的"响应不含宿主绝对路径"过宽：git 的 `stdout`/`stderr` 是原样透传的（porcelain 路径相对仓库根），把例外与理由写明（ADR-0002 不许改写 git 输出）。
+
+  **支撑性改动（均在 Scope Lock 内、可追溯到票面）**：`storage/artifact.py` 私有 `_slice_lines` → 公开 `slice_lines`（web 文件读取共用同一套切片语义，不再写第二份）；`tools/git.py` 抽出 `git_status_command`/`git_diff_command`/`run_git_command` 供工具与路由共用（AC3 明令"复用既有语义，不要另写一套"，白名单因此只有一处，路由不可能漏校验）；`sandbox/base.py` 的 `_resolve_within_workspace` 公开为 `resolve_within_workspace`（边界强制点成为公开 seam，供 web 层"只校验不读"——与其在 web 层再写一份路径校验，不如公开边界本身）；`web/domain_errors.py` 登记 `IsADirectoryError: 422`（POSIX 把目录当文件读，不登记会 KeyError→500）+ `noun` 参数让"文件不存在"与"目录不存在"共用同一份策展实现。
+
+  **如实划界的已知限制（记在模块 docstring，属另一张票）**：读文件是"全量读入再切片"（与 artifact 的 `inspect` 同一取舍），按字节有界读要给 Sandbox ABC 加参数；`files` 非流式列举，一次请求走完整棵工作区树（`list_files` 的既有契约是"返回全部匹配"）。
+
+  **未决移交**：无新增。剩余 OPEN 票见 §「当前工作焦点」的收尾清单（#181 窄屏触摸可达 / #171 会话归档）。
