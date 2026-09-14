@@ -1892,3 +1892,26 @@ tsc ✓ / vitest 828 ✓ / oxlint 0 err（44 warnings 既有）/ e2e 334 ✓ / b
 前端半完成、后端半已完成（3d9dc28）→ **跨端票两半齐**，待本批两轴 review 后
 由用户决定关单时机（本 worktree 不关单：集成顺序 feat/backend → feat/frontend →
 main 由集成 AI 执行）。
+
+### 两轴 code-review 的处置（Batch ②，2026-09-15）
+
+并行 subagent 两轴审查（Standards + Spec），全部落地（`d20cc3c`）：
+
+| 轴 | finding | 处置 |
+| --- | --- | --- |
+| Standards P1 | Composer/编辑态无 IME composition 守卫——中文输入法确认拼音的 Enter 误提交 | `isComposing`/`keyCode 229` 守卫（两处） |
+| Spec P1 | 被取代轮只删问句块、回答段（.msg-model）仍渲染（§4.5.1 问与答整段删除） | 回答段纳入 shadow；e2e fixture 补 model 输出帧 + `.msg-model` 消失断言 |
+| Standards P2 | send_message 双字段（queue_id+supersedes_seq）时 elif 跳过取代校验 | 后端 `706fb2e`：校验任何分支都跑 + 测试锁 |
+| Standards P2 | 后端 latest_user_seq 未排除 injected_by——前端给按钮、后端必 409 | 后端 `706fb2e`：排除注入（与前端同判据）+ 测试锁 |
+| Spec P2 | T12「立即/取消」摘除断言零覆盖 + 单测声明不实 | 补 projectUndelivered 摘除四条单测 + 订正注释 |
+| Standards P2 | supersedeRanges `Math.max(...spread)` 超长会话栈溢出 | 改 reduce |
+| Spec P3 | 校验失败（409）时 cancel 已执行、排队项丢失 | 后端 `706fb2e`：校验先于 cancel |
+| Standards P3 | cancelItem 吞所有错误（网络失败静默） | 404 幂等静默，其余上浮 error 通道 |
+| Spec P3 | injected_by 目标 409 用例缺失 | 后端补一例 |
+
+未修（有据，P3）：multiturn_delivery `sleep(0.3)` 时序猜测；flushQueue 先改 ref；TurnView 编辑态虚拟化复用旧值；restoreUndeliveredFromQueue seq 用 MAX_SAFE_INTEGER（仅显示顺序）。
+
+**关单**：#196（纯后端）/ #195（跨端两半齐）均已关闭（comment 带两端 commit + 门禁数字）。
+**交给集成 AI**：feat/backend → feat/frontend → main 合并顺序（§14.9）；
+集成提示词 `docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`（feat/backend，契约冻结）+
+`docs/INTEGRATION_PROMPT_FRONTEND_195_MULTITURN.md`（feat/backend，前端半交付清单）。
