@@ -407,8 +407,10 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
 
 /** GET /api/capabilities（SDD 03 §17）。
  *
- *  契约已存在但前端此前**零消费**（`src/agent_harness/web/app.py:903-943`）：
+ *  契约已存在但前端此前**零消费**（`src/agent_harness/web/app.py::list_capabilities`
+ *  投影，条目形状定义在 `src/agent_harness/capability/manifest.py`）：
  *  `{"capabilities":[{"id":…,"surfaces":{chat,timeline,changes,terminal,artifacts},…}]}`。
+ *  返回的列表**恒含一条 `core`**（内置工具集的声明，#193）——由后端保证，前端不补。
  *
  *  失败 / 端点缺席（老后端 404）时**抛错**，由调用方降级为 PRD 缺省语义——这里不
  *  静默返回缺省值：那样调用方就分不清"能力都没声明"与"压根没拿到数据"，而 PRD 要求

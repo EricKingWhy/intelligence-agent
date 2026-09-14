@@ -52,13 +52,17 @@ export interface ApiMock {
   /** GET /api/context-providers（Context Provider 清单；当前诚实返空） */
   contextProviders?: unknown[];
   // ── #182 能力声明显隐 ──
-  /** GET /api/capabilities 的条目（形状 = 后端 `web/app.py:934-943`；用
-   *  `capabilityFixture` 造）。
+  /** GET /api/capabilities 的条目（形状 = 后端 `capability/manifest.py::manifest_entry`；
+   *  用 `capabilityFixture` 造插件条目）。
    *
-   *  **缺省 = 空列表**——这正是后端 `CAPABILITIES=""` 时的真实响应（`{"capabilities":[]}`），
-   *  前端据此落到 PRD 缺省语义（chat + timeline）。这里**不**给一个"默认全 true"的
-   *  省事值：声明是能力的事，mock 给什么就该渲染什么（否则绿灯只证明"前端与我的假
-   *  后端一致"——本仓已栽过这个坑）。 */
+   *  **缺省 = `[CORE_CAPABILITY]`**（#193）：真实后端在 `CAPABILITIES=""` 时返回的正是
+   *  "只有 core 一条"——core 是**内置工具集**的声明，恒在，且声明
+   *  `changes`/`terminal` 为 true（那两个面由 `write`/`edit`/`apply_patch`/`bash` 产出，
+   *  不由任何插件产出）。此前缺省是空列表，那是 #193 修掉之前的事实；空列表那条路径
+   *  仍有意义（老后端 / 显式 mock），所以想覆盖它就在用例里显式传 `capabilities: []`。
+   *
+   *  这里**不**给"默认全 true"的省事值：声明是能力的事，mock 给什么就渲染什么
+   *  （否则绿灯只证明"前端与我的假后端一致"——本仓已栽过这个坑）。 */
   capabilities?: unknown[];
   /** capabilities 端点直接回错误（老后端 404 / 服务异常）→ 前端降级为缺省语义。 */
   capabilitiesError?: { status: number; detail: string };
@@ -70,12 +74,10 @@ export interface ApiMock {
   /** 拦截口（计数 / 按 artifact_id 给不同内容）；返回 true = 已处理。 */
   onArtifactGet?: (route: Route, artifactId: string) => Promise<boolean> | boolean;
   /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
-   *  为什么要这个口子：#182 落地时**没有任何非 Chat 的面有实现**，而 #189/#190 落地后
-   *  **真实后端的默认响应仍然是 `changes:false, terminal:false`**（`web/app.py:918-927`
-   *  的保守默认，7 个 capability descriptor 没有一个声明 `surfaces`——见 issue #193），
-   *  所以"后端真实默认"这条路径渲染出来依旧只有 `['Chat']`。要让"声明为真 → 出现"可观测，
-   *  用例必须自己注入声明；不数请求的话，"前端压根没调这个端点"这种回归会让整套用例照样
-   *  全绿（声明就成了装饰品）。返回 false 走下面的默认分支。 */
+   *  为什么要这个口子：**"端点没被调用"这类回归不会改变 tab 集**（缺省 payload 与
+   *  "拿到真 payload" 都会渲染出面），所以只断言 tab 集会漏掉"前端压根没调这个端点"
+   *  这种 bug——`onCapabilitiesGet` 计数把"端点确实被消费且没有请求循环"钉住。
+   *  返回 false 走下面的默认分支。 */
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
@@ -416,7 +418,7 @@ export function routeApi(page: Page, mock: ApiMock): void {
       }
       return route.fulfill({
         status: 200,
-        body: JSON.stringify({ capabilities: mock.capabilities ?? [] }),
+        body: JSON.stringify({ capabilities: mock.capabilities ?? [CORE_CAPABILITY] }),
         contentType: 'application/json',
       });
     }
@@ -713,7 +715,7 @@ export const CONTEXT_PROVIDERS = [
   { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
 ];
 
-/** 能力条目 fixture（形状 = 后端 `web/app.py:934-943`）。
+/** 能力条目 fixture（形状 = 后端 `capability/manifest.py::manifest_entry`）。
  *
  *  `surfaces` **只写要断言的键**：省略的键前端按"未声明 → 保守取假"处理
  *  （与后端"未声明 surfaces 的 capability 只保证 chat/timeline"同方向）。
@@ -731,6 +733,35 @@ export function capabilityFixture(
     actions: {},
   };
 }
+
+/** **core 条目**（后端恒发的那一条，#193）——`routeApi` 缺省 capabilities 用的就是它。
+ *
+ *  值必须与 `src/agent_harness/capability/manifest.py` 的 `CORE_SURFACES` /
+ *  `CORE_ACTIONS` 一致：`changes`/`terminal` = true（内置工具产出的两个面）、
+ *  `artifacts` = false（要部署配了 store 才读得到，不是无条件能力）、
+ *  `retry` = false（后端没有该入口）。
+ *
+ *  漂移风险如实说明——**这是一份手工镜像，不是同源**：
+ *  1. 后端改值 → 前端测试**不会**变红（这条链断在跨仓，本仓没有后端代码可读）；
+ *  2. 只有"改这个 mock 且改错"才会红（`workspace-modes.spec.ts` 的"真实默认 → 三个面
+ *     出现"＋`capabilities.test.ts` 的键集断言）。
+ *  所以后端那一半必须由后端自己的测试锁（`tests/web/test_web_phase2_endpoints.py::
+ *  TestCapabilities` 真走 HTTP 端点）。两侧一起改是唯一的同步手段；集成 AI 合并后请跑
+ *  一次真实端点（`docs/ACCEPTANCE_LANE_ENV.md` §2）确认两侧同值。 */
+export const CORE_CAPABILITY: Record<string, unknown> = {
+  id: 'core',
+  display_name: '内置工具',
+  version: '1.0.0',
+  provider_name: 'builtin',
+  surfaces: {
+    chat: true,
+    timeline: true,
+    changes: true,
+    terminal: true,
+    artifacts: false,
+  },
+  actions: { permissions: true, stop: true, retry: false, resume: true },
+};
 
 // ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 >5 条）──
 // 阈值速查（源码）：ModelPicker 用 `models.length + 1 > 5`（默认链算 1 条）；

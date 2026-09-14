@@ -29,8 +29,10 @@ const FRAMES: FrameSpec[] = [
   { type: 'run/completed', data: {}, seq: 9, session_id: SID, run_id: RUN, time: T },
 ];
 
-/** 能力声明 terminal 为真 → 「输出」这一面可见（这是 #182 骨架期守卫翻转后的形态）。 */
-const ENABLED = [capabilityFixture({ chat: true, timeline: true, terminal: true })];
+/** 声明为假 → 整面不渲染（AC4）：显式换掉缺省载荷（**故意不含 core**）。
+ *  若只把插件的 `terminal` 写成 false、又挂着 core，面照样会出现——那是"取并集"语义
+ *  （见 `workspace-modes.spec.ts` 的同名用例）。
+ *  其余用例**不注入声明**：`routeApi` 的缺省载荷就是真实后端那份（`[CORE_CAPABILITY]`）。 */
 const DISABLED = [capabilityFixture({ chat: true, timeline: true, terminal: false })];
 
 const outputTab = (page: import('@playwright/test').Page) =>
@@ -40,7 +42,6 @@ test('AC1/AC2：面内明示只读；命令按工具调用分组，stdout/stderr
   page,
 }) => {
   routeApi(page, {
-    capabilities: ENABLED,
     onSessionPost: (route) => fulfillSse(route, FRAMES),
     events: FRAMES,
   });
@@ -80,7 +81,6 @@ test('AC5：面内不存在任何暗示可输入的元素（无输入框 / 无"�
   page,
 }) => {
   routeApi(page, {
-    capabilities: ENABLED,
     onSessionPost: (route) => fulfillSse(route, FRAMES),
     events: FRAMES,
   });
@@ -126,7 +126,6 @@ test('空态如实：能力为真但本会话没跑过命令 → 说明原因，
     { type: 'run/completed', data: {}, seq: 4, session_id: SID, run_id: RUN, time: T },
   ];
   routeApi(page, {
-    capabilities: ENABLED,
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });
@@ -151,7 +150,6 @@ test('AC3：长输出就地折叠，点开即得全文（不新开导航面）',
     { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
   ];
   routeApi(page, {
-    capabilities: ENABLED,
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });
@@ -181,7 +179,6 @@ test('AC5：运行中的命令也不画光标——"还在跑"用文字说，不
     { type: 'tool/output_delta', data: { tool_call_id: 'tc-1', channel: 'stdout', delta: 'collected 3 items' + NL }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
   ];
   routeApi(page, {
-    capabilities: ENABLED,
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });
@@ -204,7 +201,6 @@ test('运行中但还没有输出 → 说"等待输出…"，不说"没有输出
     { type: 'tool/call', data: { tool_call_id: 'tc-1', tool_name: 'bash', args: { command: 'sleep 30' } }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
   ];
   routeApi(page, {
-    capabilities: ENABLED,
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });
