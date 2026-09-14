@@ -507,6 +507,28 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
 }
+/* 「已归档」徽标（#171）：只在打开「显示已归档」时已归档行才会被渲染出来（默认视图
+ * 里它们整个不渲染），所以徽标要做的是**解释这一行为什么还在列表里**——因此用低调的
+ * 边框 chip 而不是告警色：归档是正常操作，不是异常状态。与同一栏的
+ * `.session-item-stale`（那条解释的是"归属引用悬空了"）分开：一个说"它还活着"，
+ * 一个说"它的引用对不上了"。 */
+.session-item-archived {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 0 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  background: var(--surface-2, transparent);
+}
+/* 「显示已归档」开关（#171）的按下态：icon-only 按钮没有文字，状态只能靠颜色与
+ * `aria-pressed`（无障碍树）双重表达。 */
+.rail-archived-toggle.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
 /* 「自称属于某项目、但该项目不在当前列表里」的注解（AC6）：比 meta 更安静——
  * 它是解释，不是状态；换行截断而不是撑宽行（长标题不能把侧栏顶开）。 */
 .session-item-stale {
@@ -3970,6 +3992,46 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   }
   .appbar-center {
     display: none;
+  }
+}
+
+/* ── #181：触摸设备（无 hover）上的同一槽位 ──
+ * 上面那套"默认显示点 / hover 换成 ⋯"的前提是 hover 存在。触摸没有 hover；iOS Safari
+ * 上点 `button` 也不进 `:focus-within`——于是 ⋯ 可能永远不显形，FE-R11-09（会话级）与
+ * #179（项目级）担保的入口在手机上不可达（桌面输入的脚本验证覆盖不到这一档）。
+ * `(hover: none)` 是标准判据；与 `(max-width: 820px)` 取交集，只动窄屏触摸这一档。
+ * 本块只管"谁在槽里"（可见性），定位与让位节奏仍归上面那一块。 */
+@media (max-width: 820px) and (hover: none) {
+  /* 取舍（#181 选定方案 1，纯 CSS）：⋯ 常显，让出槽位的换成**装饰性**的那一半——
+     会话点与文件夹图标退到背景。身份 / 层级信息在这一档本来就是刻意降级。
+     代价如实记下：两层在触摸档只剩同一个 ⋯ 芯片，比"点 vs 文件夹"更难一眼分辨
+     "这是会话还是项目"——这正是 issue 收尾要求确认的那一点。 */
+  .session-row .rail-menu-btn,
+  .rail-project-head .rail-menu-btn {
+    opacity: 1;
+  }
+  /* 让位用 opacity 不用 display：`.session-item-dot` 是行里唯一的在流内容，抽掉它
+     这一行会塌成 0 高（连同可点面积一起没，见上面那段"padding 就是可点面积"）。 */
+  .session-row .session-item-dot,
+  .rail-project-head .rail-project-icon,
+  .rail-project-head .rail-project-warn {
+    opacity: 0;
+  }
+  /* 但两个**状态**信号不是装饰——触摸档修复前它们在场上（点与黄三角都是可见的），
+     跟着槽位一起消失就是一次信息丢失。槽里只剩 ⋯ 一个可见元素，状态就改挂在它身上
+     （`:has()` 取同一行里的状态类，与上面 `:hover` 取 `.session-item-dot` 是同一层
+     结构）：
+       - 会话在跑（原本绿点）→ ⋯ 用 --success；
+       - 项目目录不存在（原本黄三角，`aria-label` 仍在可访问性树里）→ ⋯ 用 --warning。
+     ⚠ 只借颜色、**不**复用 `breathe`：呼吸会把槽里唯一的入口周期性淡到 .55，与
+     "提升可发现性"互相抵消。强度也确实弱于原来的实心圆点——这是"一个槽只放一个可见
+     元素"这条既有约束下的取舍，不是等价替换。
+     选中态不走颜色——`.session-item.selected` 的左侧 accent 条继续表达"当前会话"。 */
+  .session-row:has(.session-item-dot-live) .rail-menu-btn {
+    color: var(--success);
+  }
+  .rail-project-head:has(.rail-project-warn) .rail-menu-btn {
+    color: var(--warning);
   }
 }
 

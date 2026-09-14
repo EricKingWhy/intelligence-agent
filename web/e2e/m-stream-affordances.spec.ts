@@ -1,9 +1,9 @@
 /** 场景 M：流式容器里的三个「跟随/换行」按钮——此前**唯一没能真机点过**的三个控件。
  *
  * 三个控件的挂载条件并不相同，别混为一谈：
- * - `tool-out-wrap-btn`：只要输出尾窗存在就在（`ToolCard.tsx:301`，自身无 streaming 条件），
- *   而尾窗的挂载条件是 `tool.output.length > 0 && (status === 'running' || !tool.result)`
- *   （`ToolCard.tsx:136`）；
+ * - `tool-out-wrap-btn`：只要输出尾窗存在就在（`ToolOutputStream.tsx` 的 `.tool-out-bar`，
+ *   自身无 streaming 条件），而尾窗的挂载条件是 `tool.output.length > 0 &&
+ *   (status === 'running' || !tool.result)`（`ToolCard.tsx` 里的 `ToolOutputStream` 调用点）；
  * - `tool-out-jump` / `reasoning-jump`：在上一行基础上**再**要求 `suspended`，即
  *   「流式中 + 容器被上滚离开底部」（`lib/followLatest.ts:33-38`，渲染于
  *   `ToolCard.tsx:322` / `ReasoningBlock.tsx:255`）。
@@ -44,14 +44,22 @@ test('工具输出尾窗：自动换行可切换；上滚出「↓ 最新」，�
   await page.goto('/');
   await submitTask(page, '跑个长命令');
 
-  const body = page.locator('.tool-out-body');
+  /* 三条 locator 都必须**限定在对话面里**（#193）：`ToolOutputStream` 是对话卡与中心列
+     「输出」面共用的那一个渲染器（#190 AC9），而 `#193` 让「输出」面在真实默认载荷下
+     真的存在了——它还带着同一个工具的一份输出（`hidden` 面板，不卸载，见 `App.tsx:889`）。
+     于是裸类名 `.tool-out-body` / `.tool-out-wrap-btn` 会同时命中两处（strict mode 直接报
+     两个元素），而且**藏起来那份**参与不了滚动（`scrollHeight === 0`），下面的可滚动前置
+     断言会假失败。本用例要验的是对话里那张工具卡（`ToolCard` 调用的实例），所以按面板 id
+     收窄——这也让"测的是哪一处"从偶然变得确定。 */
+  const chat = page.locator('#workspace-panel-chat');
+  const body = chat.locator('.tool-out-body');
   await expect(body).toBeVisible();
   // 窗口里确实是 fixture 的增量内容（否则「窗口存在」可能来自别处，断言会变得空洞）
   await expect(body).toContainText('LINE-001');
   await expect(body).toContainText('LINE-120');
 
   // ── 按钮 1：自动换行 / 不换行（初始 wrap=true → 按钮文案是「不换行」，即「点了就换行」）──
-  const wrap = page.locator('.tool-out-wrap-btn');
+  const wrap = chat.locator('.tool-out-wrap-btn');
   await expect(wrap).toBeVisible();
   await expect(wrap).toHaveText('不换行');
   await expect(body).toHaveCSS('white-space', 'pre-wrap');
@@ -66,7 +74,7 @@ test('工具输出尾窗：自动换行可切换；上滚出「↓ 最新」，�
   await expect(body).toHaveCSS('white-space', 'pre-wrap');
 
   // ── 按钮 2：↓ 最新（上滚 suspended 才出现）──
-  await expect(page.locator('.tool-out-jump')).toHaveCount(0);
+  await expect(chat.locator('.tool-out-jump')).toHaveCount(0);
   // 前置条件：容器确实可滚动，否则下面 scrollTop=0 是空操作、jump 断言会**假通过**
   const gaps = await body.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight }));
   expect(gaps.scroll, '容器必须可滚动（scrollHeight 应显著大于 clientHeight）').toBeGreaterThan(gaps.client + 5);
@@ -74,7 +82,7 @@ test('工具输出尾窗：自动换行可切换；上滚出「↓ 最新」，�
     el.scrollTop = 0;
     el.dispatchEvent(new Event('scroll', { bubbles: true }));
   });
-  const jump = page.locator('.tool-out-jump');
+  const jump = chat.locator('.tool-out-jump');
   await expect(jump).toBeVisible();
 
   await jump.click();

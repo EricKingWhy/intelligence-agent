@@ -1,7 +1,11 @@
 /** 能力声明显隐的**语义层**（#182 / PRD §3.2）。
  *
- *  数据来源：`GET /api/capabilities`（后端契约已存在，`web/app.py:903-943`）——本
- *  前端此前**零消费**，所以"能力为真的面才出现"一直是 PRD 里的一句空话。
+ *  数据来源：`GET /api/capabilities`（条目形状在后端 `capability/manifest.py` 定义
+ *  一次，由 `web/app.py::list_capabilities` 投影）——本前端此前**零消费**，所以
+ *  "能力为真的面才出现"一直是 PRD 里的一句空话。
+ *
+ *  **不写后端的行号**：那个端点 #193 刚被重写，行号引用当场就过期了。后端函数名 /
+ *  模块名才是稳定坐标（本仓其余跨仓引用同理）。
  *
  *  分工：
  *  - 本文件是纯函数层（无 DOM、无 React）：解析响应、把声明折成"每个面是否可见"、
@@ -9,7 +13,7 @@
  *  - `components/WorkspaceTabs.tsx` 只负责把 DOM 事件接到这里的决策函数上。
  */
 
-/** 后端会声明的五个面（`web/app.py:922-927` 的键集，**一个都不能少**）。 */
+/** 后端会声明的五个面（`capability/manifest.py::CORE_SURFACES` 的键集，**一个都不能少**）。 */
 export const SURFACE_KEYS = [
   'chat',
   'timeline',
@@ -50,7 +54,8 @@ export const SURFACES: readonly SurfaceDescriptor[] = [
   { key: 'terminal', label: '输出', implemented: true },
 ];
 
-/** 保守缺省（PRD §3.2，与后端 `app.py:918-927` 同一口径）：能力数据拿不到时用。
+/** 保守缺省（PRD §3.2，与后端 `capability/manifest.py` 里未声明 `surfaces` 的条目
+ *  取同一份缺省）：能力数据拿不到时用。
  *  `timeline` 是 Inspector 的面，这里保留它是为了**如实反映声明全集**——
  *  本批中心列只消费其中的 `chat` / `changes` / `terminal`。 */
 export const DEFAULT_SURFACES: Readonly<Record<SurfaceKey, boolean>> = {

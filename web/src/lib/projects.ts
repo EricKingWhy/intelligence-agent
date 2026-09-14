@@ -28,9 +28,13 @@ export interface ProjectGroup {
   project: Project;
   /** 该项目账本里**确实存在**的会话摘要，顺序 = 账本手工序（不按活动时间重排）。 */
   sessions: SessionSummary[];
-  /** 账本里有 id、但列表里没有对应会话的条数（日志被删 / 成员资格过滤）。
+  /** 账本里有 id、但列表里**确实没有**这个会话的条数（日志被删 / 成员资格过滤）。
    *  如实上报给用户，不静默吞掉——`GET /api/sessions?workspace_id=` 对这种情况
-   *  也返回 `[]`，两边口径一致。 */
+   *  也返回 `[]`，两边口径一致。
+   *
+   *  **被归档开关藏起来的行不算在内**（#171）：它们好端端在列表载荷里，只是投影时
+   *  不渲染。把它们计进来会让界面说「n 条会话日志缺失」——对一条已归档会话说这句话
+   *  是假话，而假话比沉默糟得多。 */
   missing: number;
 }
 
@@ -50,12 +54,26 @@ export interface UngroupedRow extends SessionSummary {
   staleProject?: { id: string; title: string };
 }
 
-/** 把会话列表投影成「项目 → 会话」+「未分组」。 */
+/** 把会话列表投影成「项目 → 会话」+「未分组」。
+ *
+ *  `includeArchived`（#171，默认 false）决定**已归档的行渲不渲染**：归档只改列表
+ *  可见性，不改任何事实，所以过滤发生在这里（投影层）而不是请求侧——载荷始终是完整
+ *  一份，一个开关就能立刻切换（见 `lib/api.ts::listSessions` 的分层说明）。
+ *
+ *  一条容易写错的边界：**被开关藏起来的行不能算 `missing`**。`missing` 的文案是
+ *  「n 条会话日志缺失」，而归档行的日志就在磁盘上；`byId` 因此建在**全量**列表上，
+ *  `missing` 只在"列表里真的没有这个 id"时 +1。
+ */
 export function buildRailModel(
   sessions: readonly SessionSummary[],
   projects: readonly Project[],
+  options: { includeArchived?: boolean } = {},
 ): RailModel {
+  const includeArchived = options.includeArchived ?? false;
   const byId = new Map(sessions.map((s) => [s.session_id, s]));
+  /** 这个 id 在列表里存在、只是被归档开关收起来了（≠ 日志缺失）。 */
+  const hiddenByFilter = (summary: SessionSummary | undefined): boolean =>
+    summary !== undefined && !includeArchived && summary.archived;
   // 全局占用表：同一会话理论上只属于一个项目，但脏数据（或两次刷新之间的竞态）
   // 可能让两个账本都点到它——只渲染第一次出现的位置，第二处计为 missing。
   const claimed = new Set<string>();
@@ -70,8 +88,9 @@ export function buildRailModel(
       }
       claimed.add(id);
       const summary = byId.get(id);
-      if (summary) rows.push(summary);
-      else missing += 1;
+      if (summary === undefined) missing += 1;
+      else if (!hiddenByFilter(summary)) rows.push(summary);
+      // 归档被收起：既不入 rows（这个开关就是干这个的），也不计 missing（日志没丢）
     }
     return { project, sessions: rows, missing };
   });
@@ -80,7 +99,7 @@ export function buildRailModel(
   // 指向的 id 就是悬空的（见文件头注释：它只解释孤儿，不判定成员资格）。
   const renderedIds = new Set(projects.map((p) => p.id));
   const ungrouped = sessions
-    .filter((s) => !claimed.has(s.session_id))
+    .filter((s) => !claimed.has(s.session_id) && !hiddenByFilter(s))
     .map((s): UngroupedRow => {
       const ref = s.workspace;
       if (!ref || renderedIds.has(ref.id)) return s;

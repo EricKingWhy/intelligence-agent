@@ -10,7 +10,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { SID, T, capabilityFixture, fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
+import { SID, T, fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
 
 /** 一次 write/edit 的 tool/call + tool/result 对（data 形状同后端 `_diff_data`）。 */
 function writePair(
@@ -51,10 +51,15 @@ const HEAD: FrameSpec[] = [
   { type: 'user/message', data: { content: '改两个文件' }, seq: 3, session_id: SID, run_id: 'run-189', step_id: 1, time: T },
 ];
 
-/** 打开「文件/改动」面（能力声明为真 → 面出现）。 */
+/** 打开「文件/改动」面。
+ *
+ *  **不注入能力声明**：用 `routeApi` 的缺省载荷（`[CORE_CAPABILITY]`——逐值镜像
+ *  `capability/manifest.py`，即后端 `CAPABILITIES=""` 时恒发的 core 条目）。#193 起 core
+ *  就声明了 `changes`，所以"面出现"由真实载荷驱动，不再靠用例自己造声明。
+ *  镜像不等于同源：后端改值这里不会自动跟（后端侧由
+ *  `tests/web/test_web_phase2_endpoints.py::TestCapabilities` 锁）。 */
 async function openChanges(page: import('@playwright/test').Page, frames: FrameSpec[]) {
   routeApi(page, {
-    capabilities: [capabilityFixture({ chat: true, timeline: true, changes: true, terminal: true })],
     sessions: [{
       session_id: SID, event_count: frames.length, first_event_time: T, last_event_time: T,
       first_user_message: '改两个文件', trace_id: null, trace_url: null,

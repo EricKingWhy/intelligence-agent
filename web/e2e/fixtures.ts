@@ -36,6 +36,11 @@ export interface ApiMock {
   sessions?: unknown[];
   /** GET /api/sessions/{id}/events（历史重放） */
   events?: FrameSpec[];
+  /** 第 N 次之后的 `GET /api/sessions` 直接回 500（N 从 1 数）。
+   *  用途：构造"归档写成功了、但随后的列表重拉失败"这个只在真机上偶发的窗口——
+   *  界面此刻的行还是旧状态，必须**说出来**而不是沉默（#171 AC9 的就地报错）。
+   *  不设 = 永远成功。 */
+  sessionsListFailAfter?: number;
   /** GET /api/models（模型目录；缺省 = 空目录 → 选择器降级隐藏） */
   models?: unknown[];
   /** POST /api/sessions（live 流） */
@@ -52,13 +57,17 @@ export interface ApiMock {
   /** GET /api/context-providers（Context Provider 清单；当前诚实返空） */
   contextProviders?: unknown[];
   // ── #182 能力声明显隐 ──
-  /** GET /api/capabilities 的条目（形状 = 后端 `web/app.py:934-943`；用
-   *  `capabilityFixture` 造）。
+  /** GET /api/capabilities 的条目（形状 = 后端 `capability/manifest.py::manifest_entry`；
+   *  用 `capabilityFixture` 造插件条目）。
    *
-   *  **缺省 = 空列表**——这正是后端 `CAPABILITIES=""` 时的真实响应（`{"capabilities":[]}`），
-   *  前端据此落到 PRD 缺省语义（chat + timeline）。这里**不**给一个"默认全 true"的
-   *  省事值：声明是能力的事，mock 给什么就该渲染什么（否则绿灯只证明"前端与我的假
-   *  后端一致"——本仓已栽过这个坑）。 */
+   *  **缺省 = `[CORE_CAPABILITY]`**（#193）：真实后端在 `CAPABILITIES=""` 时返回的正是
+   *  "只有 core 一条"——core 是**内置工具集**的声明，恒在，且声明
+   *  `changes`/`terminal` 为 true（那两个面由 `write`/`edit`/`apply_patch`/`bash` 产出，
+   *  不由任何插件产出）。此前缺省是空列表，那是 #193 修掉之前的事实；空列表那条路径
+   *  仍有意义（老后端 / 显式 mock），所以想覆盖它就在用例里显式传 `capabilities: []`。
+   *
+   *  这里**不**给"默认全 true"的省事值：声明是能力的事，mock 给什么就渲染什么
+   *  （否则绿灯只证明"前端与我的假后端一致"——本仓已栽过这个坑）。 */
   capabilities?: unknown[];
   /** capabilities 端点直接回错误（老后端 404 / 服务异常）→ 前端降级为缺省语义。 */
   capabilitiesError?: { status: number; detail: string };
@@ -70,12 +79,10 @@ export interface ApiMock {
   /** 拦截口（计数 / 按 artifact_id 给不同内容）；返回 true = 已处理。 */
   onArtifactGet?: (route: Route, artifactId: string) => Promise<boolean> | boolean;
   /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
-   *  为什么要这个口子：#182 落地时**没有任何非 Chat 的面有实现**，而 #189/#190 落地后
-   *  **真实后端的默认响应仍然是 `changes:false, terminal:false`**（`web/app.py:918-927`
-   *  的保守默认，7 个 capability descriptor 没有一个声明 `surfaces`——见 issue #193），
-   *  所以"后端真实默认"这条路径渲染出来依旧只有 `['Chat']`。要让"声明为真 → 出现"可观测，
-   *  用例必须自己注入声明；不数请求的话，"前端压根没调这个端点"这种回归会让整套用例照样
-   *  全绿（声明就成了装饰品）。返回 false 走下面的默认分支。 */
+   *  为什么要这个口子：**"端点没被调用"这类回归不会改变 tab 集**（缺省 payload 与
+   *  "拿到真 payload" 都会渲染出面），所以只断言 tab 集会漏掉"前端压根没调这个端点"
+   *  这种 bug——`onCapabilitiesGet` 计数把"端点确实被消费且没有请求循环"钉住。
+   *  返回 false 走下面的默认分支。 */
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
@@ -107,6 +114,25 @@ export interface ApiMock {
    *  的 `event_count`（真后端也是删之前取），`detached_from_projects` 数它进过几个
    *  账本。所以"删完行没了、项目计数也掉了"考的是界面跟着后端走，不是本地隐藏。 */
   sessionDeleteErrors?: Record<string, { status: number; detail: string }>;
+  // ── #171 会话归档（可逆标记）──
+  /** 指定 id 的 POST/DELETE `/api/sessions/{id}/archive` 直接回这个错误——用来构造
+   *  真机上才有自然来源的拒绝：409（**只在归档方向上**：有在途 run / 挂起审批，
+   *  见后端 `SessionService.set_archived`）与 404（元数据/日志都在的会话才会走到这里，
+   *  所以 404 只能这么造）。
+   *
+   *  与硬删的同类字段一样：不设 = 按真后端语义**成功**（真的改行的 `archived` 字段）。 */
+  sessionArchiveErrors?: Record<string, { status: number; detail: string }>;
+  /** 这些 id 视为"忙"（有在途 run）→ 归档回 409，但 `sessionArchiveErrors` 优先。
+   *  与硬删的差别是有意的：后端只在**归档**方向挡 409，取消归档永远允许
+   *  （否则一个正在跑的会话一旦被归档就再也没法取消归档了）。 */
+  sessionArchiveBusyIds?: string[];
+  /** POST/DELETE `/api/sessions/{id}/archive` 的拦截口（计数 / 断言请求形状）；
+   *  `archived` = 动作后的目标态（POST → true、DELETE → false）。返回 true = 已处理。 */
+  onArchiveRequest?: (
+    route: Route,
+    sessionId: string,
+    archived: boolean,
+  ) => Promise<boolean> | boolean;
   // ── WS-5 / #155 项目分组 ──
   /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
    *
@@ -205,9 +231,21 @@ export function sessionRow(
     trace_id: null,
     trace_url: null,
     workspace,
+    // #171：后端 `SessionSummary.archived` 是**必填布尔**（没有 meta 行 = false），
+    // 所以 mock 也给一个字面量默认值——前端类型把它声明成可选就会让"漏读"变成
+    // `undefined`（静默假），这条默认值让 mock 与真后端的形状一致。
+    archived: false,
     ...over,
   };
 }
+
+/** 按会话 id 定位侧栏里的一行（行内 id 文本是 `session_id.slice(0, 12)`，所以短 id
+ *  才匹配得上）。放在这里而不是各 spec 各写一份：窄屏 / 删会话 / 触摸可达几个车道都
+ *  用同一条定位（见本文件顶部"多个 spec 共用同一份，避免各自复制后静默漂移"）。 */
+export const rowOf = (page: Page, sessionId: string) =>
+  page
+    .locator('.session-row')
+    .filter({ has: page.locator('.session-item-id', { hasText: sessionId }) });
 
 export function routeApi(page: Page, mock: ApiMock): void {
   // ── WS-5 #155：可变状态（每测试一份，互不串味）──
@@ -225,6 +263,8 @@ export function routeApi(page: Page, mock: ApiMock): void {
   const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
   /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
   const sessionEvents = new Map<string, FrameSpec[]>();
+  /** `GET /api/sessions` 的次数（`sessionsListFailAfter` 用；见该分支注释）。 */
+  let listCalls = 0;
 
   /** 后端 `web/projects.py::Project` 的响应形状（时间戳不是本车道断言的对象）。 */
   const projectView = (p: ProjectFixture) => ({
@@ -277,7 +317,19 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return route.fulfill({ status: 200, body: '{"status":"ok"}', contentType: 'application/json' });
     }
     if (path === '/api/sessions' && req.method() === 'GET') {
-      return json(route, sessionState);
+      // `sessionsListFailAfter`：先数够 N 次成功，之后一律 500（构造"归档后重拉失败"）。
+      listCalls += 1;
+      if (mock.sessionsListFailAfter !== undefined && listCalls > mock.sessionsListFailAfter) {
+        return json(route, { detail: '会话列表暂时不可用' }, 500);
+      }
+      // #171 AC3：`include_archived` 是**后端**的契约（不带 = 不返回已归档行）。
+      // mock 照真后端过滤，于是"UI 总是显式要全量"这条设计能被真的考到：漏掉那个
+      // 参数时，开关打开也看不到归档行（前端本地过滤救不了它）。
+      const includeArchived = new URL(req.url()).searchParams.get('include_archived') === 'true';
+      const rows = includeArchived
+        ? sessionState
+        : sessionState.filter((s) => (s as Record<string, unknown>)['archived'] !== true);
+      return json(route, rows);
     }
     if (path === '/api/sessions' && req.method() === 'POST') {
       if (mock.onSessionPost) return mock.onSessionPost(route);
@@ -342,6 +394,35 @@ export function routeApi(page: Page, mock: ApiMock): void {
       const forced = mock.artifactContentError;
       if (forced) return json(route, { detail: forced.detail }, forced.status);
       return json(route, mock.artifactContent ?? { artifact_id: aid, lines: [], total_lines: 0, returned_lines: 0, truncated: false });
+    }
+    // ── #171 会话归档（有状态 mock：语义对齐 `web/app.py::archive_session`）──
+    const sessionArchiveMatch = /^\/api\/sessions\/([^/]+)\/archive$/.exec(path);
+    if (sessionArchiveMatch && (req.method() === 'POST' || req.method() === 'DELETE')) {
+      const sid = decodeURIComponent(sessionArchiveMatch[1]);
+      const target = req.method() === 'POST'; // POST = 归档 true；DELETE = 取消归档 false
+      if (mock.onArchiveRequest && (await mock.onArchiveRequest(route, sid, target))) return undefined;
+      const forced = mock.sessionArchiveErrors?.[sid];
+      if (forced) return json(route, { detail: forced.detail }, forced.status);
+      const at = sessionState.findIndex(
+        (s) => (s as Record<string, unknown>)['session_id'] === sid,
+      );
+      // 404 的 detail 照抄后端 `SessionService._require_existing_session` 抛出的那句
+      // （`session 'x' not found`）：自己编一句中文会让门槛内的绿灯只证明
+      // "前端与我的假后端一致"。
+      if (at < 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      // 409 **只在归档方向**：后端 `set_archived` 的守卫顺序是「存在 → 在途 run」，
+      // 而 `archived and run_manager.get_active(...)` 这个连词意味着取消归档永不 409。
+      if (target && (mock.sessionArchiveBusyIds ?? []).includes(sid)) {
+        // detail 逐字照抄后端 `service.py::set_archived` 抛的 `ActiveRunConflict` 原句。
+        return json(
+          route,
+          { detail: `session '${sid}' has a run in flight; archive it after it finishes` },
+          409,
+        );
+      }
+      // 幂等：重复归档仍是 true（后端用 upsert/set_archived，不是"翻转"）。
+      sessionState[at] = { ...(sessionState[at] as Record<string, unknown>), archived: target };
+      return json(route, { id: sid, archived: target });
     }
     // ── #172 / ADR-0029 会话硬删（有状态 mock：语义对齐 `web/app.py::delete_session`）──
     const sessionDeleteMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);
@@ -416,7 +497,7 @@ export function routeApi(page: Page, mock: ApiMock): void {
       }
       return route.fulfill({
         status: 200,
-        body: JSON.stringify({ capabilities: mock.capabilities ?? [] }),
+        body: JSON.stringify({ capabilities: mock.capabilities ?? [CORE_CAPABILITY] }),
         contentType: 'application/json',
       });
     }
@@ -713,7 +794,7 @@ export const CONTEXT_PROVIDERS = [
   { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
 ];
 
-/** 能力条目 fixture（形状 = 后端 `web/app.py:934-943`）。
+/** 能力条目 fixture（形状 = 后端 `capability/manifest.py::manifest_entry`）。
  *
  *  `surfaces` **只写要断言的键**：省略的键前端按"未声明 → 保守取假"处理
  *  （与后端"未声明 surfaces 的 capability 只保证 chat/timeline"同方向）。
@@ -731,6 +812,35 @@ export function capabilityFixture(
     actions: {},
   };
 }
+
+/** **core 条目**（后端恒发的那一条，#193）——`routeApi` 缺省 capabilities 用的就是它。
+ *
+ *  值必须与 `src/agent_harness/capability/manifest.py` 的 `CORE_SURFACES` /
+ *  `CORE_ACTIONS` 一致：`changes`/`terminal` = true（内置工具产出的两个面）、
+ *  `artifacts` = false（要部署配了 store 才读得到，不是无条件能力）、
+ *  `retry` = false（后端没有该入口）。
+ *
+ *  漂移风险如实说明——**这是一份手工镜像，不是同源**：
+ *  1. 后端改值 → 前端测试**不会**变红（这条链断在跨仓，本仓没有后端代码可读）；
+ *  2. 只有"改这个 mock 且改错"才会红（`workspace-modes.spec.ts` 的"真实默认 → 三个面
+ *     出现"＋`capabilities.test.ts` 的键集断言）。
+ *  所以后端那一半必须由后端自己的测试锁（`tests/web/test_web_phase2_endpoints.py::
+ *  TestCapabilities` 真走 HTTP 端点）。两侧一起改是唯一的同步手段；集成 AI 合并后请跑
+ *  一次真实端点（`docs/ACCEPTANCE_LANE_ENV.md` §2）确认两侧同值。 */
+export const CORE_CAPABILITY: Record<string, unknown> = {
+  id: 'core',
+  display_name: '内置工具',
+  version: '1.0.0',
+  provider_name: 'builtin',
+  surfaces: {
+    chat: true,
+    timeline: true,
+    changes: true,
+    terminal: true,
+    artifacts: false,
+  },
+  actions: { permissions: true, stop: true, retry: false, resume: true },
+};
 
 // ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 >5 条）──
 // 阈值速查（源码）：ModelPicker 用 `models.length + 1 > 5`（默认链算 1 条）；
