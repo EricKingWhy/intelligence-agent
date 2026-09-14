@@ -24,6 +24,7 @@
 | --- | --- | --- | --- | --- |
 | B-1 | 待定（下一票 = #160 MEM-5 前端记忆管理 UI） | **`28c35e7`**（#158 收尾 commit——切换时的在途票据，其旧版两轴 review 已完成并修复，**不计入本批审查范围**；本批从 `28c35e7` 之后的新 ticket 起算） | 未审 | — |
 | B-2 | **#169 WS-6 后端半 + #170 WS-7 后端半**（同一张 PRD/ADR 的两个端点，依赖链自然收批） | **`80d49e1`**（merge main → feat/backend，本批第一行代码之前） | **已审**：Spec 轴 `NEEDS-FIX`（1×P1 + 5×P3）+ Standards 轴 `NEEDS-FIX`（3×P2 + 3×P3）→ 全部处置（修 / 文档化 / 有据不改） | **`9c158c9`**（下一批 fixed point） |
+| B-3 | **#194 + #197 + #199 + #201**（用户报障的纯前端 UI 批；#194/#197 已交付，#199/#201 在途） | **`c00604e`**（本批第一行代码之前——文档镜像 commit） | 未审（攒满 4 票收批后跑两轴） | — |
 
 **批次边界规则（v2 §1.2）**：每攒满 2–3 个 ticket（或遇到依赖链断点）即收批；收批时对
 `git diff <fixed point>..HEAD` 跑一次两轴 `/code-review`（Standards + Spec，两个独立只读子代理）。
@@ -40,6 +41,16 @@
 | Standards 轴 findings | **P2** `attach_matching_sessions` 用过滤视图重写账本会**永久**删掉 header 暂时读不到的成员（会话静默变 Ungrouped）→ 改为"读到且不匹配才剪，读不到保留"+ 回归锁 + 变异验证（改回旧行为 → 1 failed，sha256 还原）。**P2** host_dirs 只抓 `PermissionError` → 其余 OSError（TOCTOU/断连盘）冒 500 → `os.stat` + errno 分派。**P2** 根模式在事件循环上跑同步 I/O（3.11 fallback 26 次 `exists`）→ 同样卸载 worker。**P3** NUL 未拒（POSIX 上 `realpath` 抛 `ValueError` → 500）→ 两处补闸；`exists`/`isdir` 吞权限错误 → 改 `os.stat`；测试缺口（N>1 归入、边界截断、NUL）→ 补 |
 | 有据不改（已记录理由） | ① `MAX_ENTRIES` 全量物化后才截断：截断契约本身要求"排序后的前缀"，改 `scandir` 早停会破坏确定性；要限内存只能改契约（分页），收益不抵代价。② `PureWindowsPath` 判 `C:\x`：Windows 侧与既有口径一致，单方收紧会造两套形态语义。③ `ROOTS_PROVIDER` 模块级可替换 seam：可接受的测试 seam，不引入 DI 容器 |
 | 残留 / 交接 | 前端半（#169 AC9–AC14、#170 AC8–AC13）未做 → 两票**保持 OPEN**；下一批 fixed point = `9c158c9`；集成提示词 `docs/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md` |
+
+#### B-3 交付记录（2026-09-13，前端 worktree）
+
+| ticket | 状态 | commit | 门禁 / 证据 |
+| --- | --- | --- | --- |
+| #197 Inspector 拖宽方向 + 默认 340 | 已交付（未关单，待集成） | `5cfb6ff` | tsc 干净；vitest `inspectorPanel.test.ts` 22 passed；playwright `y-inspector-peek` + `workspace-modes` 32 passed |
+| #194 Esc 提示移到右侧动作簇 | 已交付（未关单，待集成） | `0221080` | tsc 干净；新 spec `composer-stream-actions` 6 passed；受 composer DOM 影响的 8 个既有 spec 100 passed |
+
+**B-3 设计依据**：`docs/design/WEB_UI_BATCH_REDESIGN.md`（本 worktree 已镜像一份，来源
+`feat/backend fd16de3`）+ 票面 `## 最终实现契约（已冻结）`。本批**不推远程**（AGENTS §13.2/§14.4）。
 
 ## 当前状态
 
