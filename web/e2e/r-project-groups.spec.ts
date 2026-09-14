@@ -145,11 +145,33 @@ test('AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排', as
   expect(await railOrder(page, '项目 alpha')).toEqual(['s1', 's2', 's3']);
 
   // 重命名：行内输入，Enter 提交
+  //
+  // ⚠ Enter 一律走 `page.keyboard.press`，不用 `locator.press`：行内输入的 Enter
+  // 处理器会立刻提交并**卸载自己**，而 `locator.press` 在 keydown 之后还要对同一个
+  // 定位符补发 keyup——元素已不在，它就会重新解析定位符并一直等下去（本用例曾在
+  // 全量并行下偶发 30s 超时，页面快照却显示改名已经成功）。键盘按下不持有元素引用，
+  // 因此对"提交即卸载"的输入是稳定的。
   await openProjectMenu(page, '项目 alpha');
   await page.getByRole('menuitem', { name: '重命名项目' }).click();
   const rename = page.getByLabel('项目名');
   await rename.fill('改名后的项目');
-  await rename.press('Enter');
+  await page.keyboard.press('Enter');
+  await expect(project(page, '改名后的项目')).toBeVisible();
+
+  // FE-R11-08：纯空白标题按 Enter 不许静默丢弃——之前编辑态直接关掉、没有请求、
+  // 也没有任何提示，用户以为改名成功了。现在就地拦下：留下编辑态 + 可见提示。
+  await openProjectMenu(page, '改名后的项目');
+  await page.getByRole('menuitem', { name: '重命名项目' }).click();
+  const rename2 = page.getByLabel('项目名');
+  await rename2.fill('   ');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.project-rename-error')).toBeVisible();
+  await expect(rename2).toBeVisible(); // 编辑态还在，用户能直接补字
+  await expect(rename2).toHaveAttribute('aria-invalid', 'true');
+  // 补上字再提交 → 正常改名（提示消失、Enter 这次真的提交）
+  await rename2.fill('改名后的项目');
+  await expect(page.locator('.project-rename-error')).toHaveCount(0);
+  await page.keyboard.press('Enter');
   await expect(project(page, '改名后的项目')).toBeVisible();
 
   // 重排：s3 上移一格 → [s1, s3, s2]
@@ -327,4 +349,64 @@ test('UI-05：有会话或项目时回退 icon-only 按钮（aria-label 定位�
   await expect(page.locator('.rail-empty-btn-primary')).toHaveCount(0);
   await expect(page.locator('button[aria-label="新建项目"]')).toBeVisible();
   await expect(page.locator('.rail-empty-action')).toHaveCount(0);
+});
+
+/** #179：窄屏（≤820px）项目级操作可达性。
+ *
+ *  背景：WS-5 #155 的窄屏降级把 `.rail-project-head` 整块 `display:none`——层级信息
+ *  丢失是刻意的取舍，但"**项目级操作**（重命名 / 删除项目 / 在此项目中新建任务）只在
+ *  那一行的菜单里"意味着它们在窄屏彻底不可达（FE-R11-09 修的是会话级的同源问题）。
+ *  本 describe 锁住修复后的两条底线：菜单**能打开**，且**菜单项与宽屏一致**。
+ *
+ *  为什么用真窄视口而不是只断言 CSS：菜单在窄屏是"文件夹图标 ↔ ⋯"的槽位交换，
+ *  只要 `.rail-project-head` 仍被收起（或 ⋯ 被一起藏掉），`click` 就会因为元素不可
+ *  交互而失败——这条断言只有"真的可达"才拿得到。 */
+test.describe('窄屏 ≤820px：项目级操作（#179）', () => {
+  test.use({ viewport: { width: 800, height: 900 } });
+
+  test('项目头不再整块收起：⋯ 菜单可达且菜单项与宽屏一致', async ({ page }) => {
+    routeApi(page, { sessions: baseSessions(), projects: [P1] });
+    await page.goto('/');
+
+    const head = project(page, '项目 alpha').locator('.rail-project-head');
+    await expect(head).toBeVisible();
+    // 窄屏收起的是标题/计数/箭头，不是整行——标题在可访问性树里换成 aria-label
+    // （display:none 会把它摘掉，无名控件等于没有入口）。
+    await expect(head.locator('.rail-project-title')).toBeHidden();
+    await expect(head.locator('.rail-project-count')).toBeHidden();
+    await expect(head.locator('.rail-project-toggle')).toHaveAttribute(
+      'aria-label',
+      /项目 alpha：/,
+    );
+
+    await openProjectMenu(page, '项目 alpha');
+    // AC2：与宽屏同一套动作、同一个确认面（三个菜单项逐字一致）。
+    await expect(page.getByRole('menuitem', { name: '在此项目中新建任务' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: '重命名项目' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: '删除项目…' })).toBeVisible();
+    // 破坏性动作仍走自己的确认面（不是"窄屏简化成直接删"）。
+    await page.getByRole('menuitem', { name: '删除项目…' }).click();
+    await expect(page.getByRole('dialog', { name: /删除项目/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /只移除项目（不删会话）/ })).toBeVisible();
+  });
+
+  test('窄屏重命名真的落到后端（PATCH 后重取仍在，不是本地改名）', async ({ page }) => {
+    routeApi(page, { sessions: baseSessions(), projects: [P1] });
+    await page.goto('/');
+
+    await openProjectMenu(page, '项目 alpha');
+    await page.getByRole('menuitem', { name: '重命名项目' }).click();
+    // 窄屏没有横向空间，输入框向右溢出（CSS）——这里**量宽度**而不是只 `fill`：
+    // Playwright 对"布局存在但被裁掉"的元素照样能 fill，只断言能输入等于没锁住可用性。
+    const rename = page.getByLabel('项目名');
+    const box = await rename.boundingBox();
+    expect(box?.width ?? 0).toBeGreaterThan(100);
+    await rename.fill('窄屏改的名');
+    await page.keyboard.press('Enter');
+
+    // 刷新后重取 `/api/projects`：mock 只有在真的走过 PATCH 分支时才会返回新标题
+    // （fixtures 的 projects 是**有状态**的），所以这条断言排除了"界面本地改了个名"。
+    await page.reload();
+    await expect(project(page, '窄屏改的名')).toBeVisible();
+  });
 });

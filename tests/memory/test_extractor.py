@@ -169,6 +169,8 @@ async def test_degraded_reason_is_exception_type_only_and_leaks_nothing():
     )
     # 带上 schema 层错误码（可诊断），但不含一个字符的模型输出
     assert outcome.degraded_reason == "heuristic_fallback: ValidationError(json_invalid)"
+    # 密钥不外泄的意图不变：reason 不含 payload 任何字符。
+    assert secret not in str(outcome.degraded_reason)
     assert secret not in str(outcome.degraded_reason)
 
 
@@ -180,7 +182,8 @@ async def test_timeout_reports_degraded_reason():
 
     outcome = await MemoryExtractor(Hanging(), timeout_seconds=0.01).extract([user("nothing useful")])
     assert outcome.candidates == []
-    assert outcome.degraded_reason == "heuristic_fallback: TimeoutError"
+    # BUG-014：超时是瞬时错误 → 恰好重试 1 次后降级，原因带标记
+    assert outcome.degraded_reason == "heuristic_fallback: TimeoutError(after_1_retry)"
 
 
 @pytest.mark.asyncio

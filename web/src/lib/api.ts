@@ -8,6 +8,7 @@
 
 import type {
   AgentEvent,
+  ArtifactSlice,
   HostDirsListing,
   MemoryDeleted,
   MemoryScope,
@@ -15,9 +16,11 @@ import type {
   Project,
   ProjectDeleted,
   ProjectStatus,
+  SessionDeleted,
   SessionSummary,
 } from '../types';
 import { emitUnauthorized, getToken } from './auth';
+import { parseCapabilities, type CapabilityDescriptor } from './capabilities';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
 
@@ -37,6 +40,14 @@ export class NotFoundError extends Error {}
  *  这**不是**错误：用户的意图已经生效，卡片应翻到「已批准/已拒绝」。
  *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
 export class AlreadyResolvedError extends Error {}
+
+/** 404 = 审批队列里没有这个 approval_id：进程重启或 run 终结后队列已被 GC，
+ *  这条审批**永远不可能再被 resolve**（`app.py:1236-1240` 已把它写进契约）。
+ *
+ *  不复用 NotFoundError：与 deleteSession 的 404 是同一取舍（`api.test.ts:804`）——
+ *  「用户想提交的东西本就不在了」与「加载路径拿不到内容」对调用方的含义不同。
+ *  也不是可重试错误：重试多少次都是 404。 */
+export class ApprovalGoneError extends Error {}
 
 /** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
@@ -350,6 +361,7 @@ export async function postApproval(
     }),
   });
   if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
+  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（运行已中断或服务已重启）');
   if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }
@@ -391,6 +403,22 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
   });
 }
 
+// ── 能力 manifest（#182 / PRD §3.2）──
+
+/** GET /api/capabilities（SDD 03 §17）。
+ *
+ *  契约已存在但前端此前**零消费**（`src/agent_harness/web/app.py:903-943`）：
+ *  `{"capabilities":[{"id":…,"surfaces":{chat,timeline,changes,terminal,artifacts},…}]}`。
+ *
+ *  失败 / 端点缺席（老后端 404）时**抛错**，由调用方降级为 PRD 缺省语义——这里不
+ *  静默返回缺省值：那样调用方就分不清"能力都没声明"与"压根没拿到数据"，而 PRD 要求
+ *  两种情况落同一份缺省、**且 Chat 永不消失**（降级是消费方的策略，见 `App.tsx`）。 */
+export async function getCapabilities(): Promise<CapabilityDescriptor[]> {
+  const res = await apiFetch('/api/capabilities');
+  if (!res.ok) throw new Error(`capabilities ${res.status}`);
+  return parseCapabilities(await res.json());
+}
+
 // ── Cancel（后端契约回执 §3，T5 #98：detached-run 显式中断唯一入口）──
 
 /** POST /api/sessions/{id}/cancel。200 {"status":"cancelling"|"no_active_run"}
@@ -405,6 +433,187 @@ export async function cancelSession(sessionId: string): Promise<{ status: string
   });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
   return res.json();
+}
+
+// ── Artifact 内容读取（#185 路由 / #186 消费）──
+
+/** artifact 内容为什么拿不到——**三态分开**，因为对用户是三句不同的话。
+ *
+ *  - `gone`（404）：这个 id 不在本会话的命名空间里（不存在，或属于别的会话）。
+ *    后端刻意不区分这两者——`artifact_id` 是内容哈希、跨会话可重复，区分"不存在"与
+ *    "存在但不可读"会把归属变成可探测的信息（`web/app.py` 的 404 注释）。
+ *  - `no-storage`（503）：本部署**确实没有可读的存储**。不能降级成"不存在"——
+ *    那会让用户以为产物丢了，而其实是这个部署没配存储。
+ *  - `error`：其它失败（5xx / 网络 / 形状不符）。`detail` 是后端原文。
+ *
+ *  `detail` 一律是后端 `{detail}` 原文（读不到时为空串）——界面照原样显示，
+ *  这比前端替它翻译一句更短的错误更有用（同 `describeSessionError` 的既有口径）。 */
+export type ArtifactContentFailure = 'gone' | 'no-storage' | 'error';
+
+export class ArtifactContentError extends Error {
+  readonly kind: ArtifactContentFailure;
+  readonly detail: string;
+  readonly status: number;
+  constructor(kind: ArtifactContentFailure, detail: string, status: number) {
+    super(detail || `artifact content ${status}`);
+    this.kind = kind;
+    this.detail = detail;
+    this.status = status;
+  }
+}
+
+/** 后端 422：`session_id` / `artifact_id` 形态非法，或 `start_line < 1`。
+ *  属于客户端 bug（不是冲突），单独成一个 kind 便于测试与诊断。 */
+export class ArtifactQueryError extends ArtifactContentError {
+  constructor(detail: string, status: number) {
+    super('error', detail, status);
+  }
+}
+
+export interface ArtifactContentQuery {
+  startLine?: number;
+  endLine?: number;
+  keyword?: string;
+  maxLines?: number;
+}
+
+/** 只解析**后端真的会发的字段**，缺字段就抛错而不是填默认值——形状不符时编一个
+ *  空的切片出来，界面会显示"内容为空"，那是在替后端撒谎（同 `parseCapabilities`
+ *  的口径：解析失败必须让调用方看得见）。 */
+function parseArtifactSlice(raw: unknown): ArtifactSlice {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const artifactId = typeof o.artifact_id === 'string' ? o.artifact_id : '';
+  const lines = Array.isArray(o.lines) ? o.lines : null;
+  /* `total_lines` / `returned_lines` 也**必须在场**：后端 `ArtifactSlice` 是必填模型字段
+     （`storage/artifact.py`），缺失只可能是形状不符。此前静默填 0 → 界面渲染
+     "共 0 行 / 没有可显示的内容"——一个编出来的"空产物"，比报错更坏（同本函数头的
+     口径：不替后端撒谎）。 */
+  const totalLines = typeof o.total_lines === 'number' ? o.total_lines : null;
+  const returnedLines = typeof o.returned_lines === 'number' ? o.returned_lines : null;
+  if (!artifactId || lines === null || totalLines === null || returnedLines === null) {
+    throw new Error('artifact content: 响应形状不符');
+  }
+  return {
+    artifact_id: artifactId,
+    lines: lines.flatMap((item) => {
+      const l = (item ?? {}) as Record<string, unknown>;
+      if (typeof l.line_number !== 'number' || typeof l.text !== 'string') return [];
+      return [
+        {
+          line_number: l.line_number,
+          text: l.text,
+          ...(l.truncated === true ? { truncated: true as const } : {}),
+          ...(typeof l.full_length === 'number' ? { full_length: l.full_length } : {}),
+        },
+      ];
+    }),
+    total_lines: totalLines,
+    returned_lines: returnedLines,
+    truncated: o.truncated === true,
+  };
+}
+
+/** GET /api/sessions/{sid}/artifacts/{aid} —— 外置产物的局部内容（#185）。
+ *
+ *  `session_id` 走 URL 而不是查询串：`artifact_id` 是内容哈希、跨会话可重复，
+ *  归属**只能**由 session 决定（后端据此构造 store 命名空间）。 */
+export async function getArtifactContent(
+  sessionId: string,
+  artifactId: string,
+  query: ArtifactContentQuery = {},
+): Promise<ArtifactSlice> {
+  const params = new URLSearchParams();
+  if (query.startLine !== undefined) params.set('start_line', String(query.startLine));
+  if (query.endLine !== undefined) params.set('end_line', String(query.endLine));
+  if (query.keyword) params.set('keyword', query.keyword);
+  if (query.maxLines !== undefined) params.set('max_lines', String(query.maxLines));
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}` +
+      (qs ? `?${qs}` : ''),
+  );
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    if (res.status === 404) throw new ArtifactContentError('gone', detail, 404);
+    if (res.status === 503) throw new ArtifactContentError('no-storage', detail, 503);
+    if (res.status === 422) throw new ArtifactQueryError(detail, 422);
+    throw new ArtifactContentError('error', detail, res.status);
+  }
+  return parseArtifactSlice(await res.json());
+}
+
+// ── Session hard delete（#172 / ADR-0029：用户显式硬删，不可恢复）──
+
+/** 会话删除失败：状态码 + 后端 detail 原文。
+ *
+ *  与 `ProjectError` / `MemoryError` 同构但**分开**（同 describeMemoryError 的理由：
+ *  能力各自演进，共用一个会让一侧的语义渗到另一侧）。这里的 `status` 是调用方真的
+ *  会分支的字段——404（这个会话已经不存在了）与 409（后端拒绝删）导向**不同**的
+ *  界面收敛，见 `deleteSession` 的注释。
+ *
+ *  刻意**不**复用 `NotFoundError`：那个是"加载路径拿不到内容"的信号（历史装载据此
+ *  清掉记住的会话并安静回空态），而删除的 404 是"用户想删的东西本就不在了"——
+ *  两者对界面的含义不同，且这里必须带上状态码。 */
+export class SessionError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 硬删会话（DELETE /api/sessions/{id}，ADR-0029）——**不可恢复**：无墓碑、无回收站。
+ *  调用方必须先拿到用户的显式二次确认：ADR-0029 把"误删不可逆"的全部风险明确压在
+ *  **入口层**，运行时不提供任何技术兜底。
+ *
+ *  状态码语义（后端 `web/app.py::delete_session` 的契约，前端不合并它们）：
+ *    200 `{id, deleted:true, events, detached_from_projects}` —— 真删了；
+ *    404 —— 这个会话不存在（**第二次删除就是这个**：后端刻意不伪装成"又删了一次"，
+ *           所以调用方要按"列表已过期"收敛，而不是当作一次成功的删除）；
+ *    409 —— 三种原因状态码相同、**只能靠 `detail` 区分**：有在途 run / 有挂起审批 /
+ *           是 fork 父会话（detail 里带**真实**子会话数量）。因此这里原样保留 detail、
+ *           绝不自己编文案——编了就会把"有 2 个 fork 子会话"说成一个泛泛的失败；
+ *    422 —— id 形态非法（正常路径不会触发：id 来自行数据，不是用户输入）；
+ *    403 —— 非本机 Origin（宿主侧不可逆操作只接受本机来源，ADR-0025 D1）。
+ *
+ *  跨会话的副作用后端已自洽：被删会话若被**委派**子会话指着，那条父链接会被清掉
+ *  （家谱图不会出现 `(parent missing)`），前端不需要为此做任何兼容。 */
+export async function deleteSession(sessionId: string): Promise<SessionDeleted> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await sessionError(res, '删除会话失败');
+  // 形状防御：非对象（null / 数组 / 字符串）一律当"没给"处理，别让读字段抛
+  // TypeError——那时调用方拿到的是"读属性失败"，而不是"删掉了但回执为空"。
+  // `deleted` 不从 body 读：走到 200 就是真删了（见 SessionDeleted 类型注释），
+  // 后端 schema 也是 `Literal[True]`——这里没有可窄化的第二种取值。
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<SessionDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : sessionId,
+    deleted: true,
+    // 事件数缺失时给 0（与 deleteProject 的 sessions_detached 同一纪律）：这两个
+    // 计数只用于回执文案，编不出真值时宁可少说，也不去猜一个像样的数字——回执那边
+    // 把 events 的 0 当"没给数"处理（见 lib/sessionDelete.ts）。
+    events: typeof body.events === 'number' ? body.events : 0,
+    detached_from_projects:
+      typeof body.detached_from_projects === 'number' ? body.detached_from_projects : 0,
+  };
+}
+
+/** 非 2xx → SessionError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
+async function sessionError(res: Response, fallback: string): Promise<SessionError> {
+  const detail = await readErrorDetail(res);
+  return new SessionError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 会话删除错误 → 展示文案：SessionError 的 message 就是后端 detail（或兜底前缀），
+ *  其余异常（网络层 TypeError 等）用 message 或 fallback。与 `describeProjectError`
+ *  / `describeMemoryError` 同构但分开——三处各自演进。 */
+export function describeSessionError(error: unknown, fallback: string): string {
+  if (error instanceof SessionError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
 }
 
 // ── Recover（后端新端点，df4f7d8 §1.1）──

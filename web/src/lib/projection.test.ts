@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
 import { EventType } from '../types';
-import { applyEvent, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
+import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -14,7 +14,8 @@ describe('initConversation', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
-      compactions: [], reconcile_queue: [], pending_approvals: [], events: [], unknown_events: [],
+      compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
+      permission_policy: null, events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       run_interrupted: null, turn_index: null,
@@ -917,7 +918,6 @@ describe('applyEvent — df4f7d8 新形状', () => {
 
   it('未接线类型仍进 unknown_events（显式登记，行为与重构前一致）', () => {
     for (const type of [
-      EventType.ARTIFACT_EXTERNALIZED,
       EventType.COMPACTION_START,
       EventType.COMPACTION_END,
       EventType.MESSAGE_QUEUED,
@@ -928,6 +928,65 @@ describe('applyEvent — df4f7d8 新形状', () => {
       const s = applyEvent(initConversation('s'), ev({ type }));
       expect(s.unknown_events, `${type} 应落 unknown_events`).toHaveLength(1);
     }
+  });
+
+  // ART-01（第十一轮真机验收）：运行时只发 artifact/externalized，此前前端只接了
+  // 规格里的 artifact/created → 有产物的会话里 Artifacts 页签恒空、还写"未产生 Artifact"。
+  it('ARTIFACT_EXTERNALIZED：挂到产出它的 tool 上（与 created 同一投影）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 'tc1', tool_name: 'bash', args: {} },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: {
+        artifact_id: '197e88d95cd917b9',
+        session_id: 's',
+        source_tool: 'bash',
+        tool_call_id: 'tc1',
+        size: 39600,
+        mime_type: 'text/plain',
+      },
+    }));
+
+    const tool = s.turns.flatMap((t) => t.tools).find((t) => t.tool_call_id === 'tc1');
+    expect(tool?.artifact).toEqual({
+      artifact_id: '197e88d95cd917b9',
+      size: 39600,
+      mime_type: 'text/plain',
+      source_tool: 'bash',
+    });
+    expect(s.unknown_events).toHaveLength(0); // 已接线：不再算"未知事件"
+  });
+
+  it('元数据缺失 → null，**不**填默认值（AC5 / #185 AC4：MinIO 不持久化 source_tool）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'x' } }, step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_CREATED,
+      // 只给 id：这是 MinIO 那类"元数据不持久化"的 store 的真实形态
+      data: { artifact_id: 'only-id', session_id: 's', tool_call_id: 't1' },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].artifact).toEqual({
+      artifact_id: 'only-id',
+      size: null,
+      mime_type: null,
+      source_tool: null,
+    });
+  });
+
+  it('ARTIFACT_EXTERNALIZED：找不到宿主 tool_call 时不静默（落 unknown_events）', () => {
+    // 与 created 的唯一差别：externalized 自带 artifact_id，是"确实有产物"的独立事实。
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: { artifact_id: 'orphan', tool_call_id: 'nope', size: 1, mime_type: 'text/plain' },
+    }));
+
+    expect(s.unknown_events).toHaveLength(1);
   });
 
   it('RUN_INTERRUPTED：终态 + run_interrupted 真值 + Timeline 摘要', () => {
@@ -941,6 +1000,78 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(s.run_status).toBe('completed');
     expect(s.run_interrupted).toEqual({ step_id: 3, interrupted_seq: 42, reason: 'process_restart' });
     expect(summarizeEvent(ev({ type: EventType.RUN_INTERRUPTED, data: {}, step_id: 3 }))).toBe('第 3 步中断');
+  });
+
+  // APR-01（第十一轮真机）：`approval_queues` 纯内存、run 终结即 GC，而
+  // `tool/approval-requested` 永留 JSONL → 孤儿审批每次刷新都重演，点了只有 404。
+  // 判据完全来自事件流（运行先于审批结束 ⇒ 这条审批不可能再被 resolve）。
+  describe('APR-01 孤儿审批在 run 终结时标 stale', () => {
+    const requested = (approvalId = 'ap-1') =>
+      ev({
+        type: EventType.TOOL_APPROVAL_REQUESTED,
+        data: {
+          approval_id: approvalId, tool_name: 'bash', tool_call_id: 'tc-1',
+          action_type: 'danger', title: 't', description: 'd', arguments_preview: {},
+          permission: 'p', policy: 'pol', reason: 'r', allowed_decisions: [],
+        },
+        step_id: 2,
+      });
+
+    it('run/interrupted 后仍 pending 的审批 → stale', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      expect(s.pending_approvals[0].stale).toBeUndefined(); // 中断前：正常待决
+
+      s = applyEvent(s, ev({
+        type: EventType.RUN_INTERRUPTED,
+        data: { interrupted_seq: 9, reason: 'process_restart' },
+        step_id: 2,
+      }));
+      expect(s.pending_approvals).toHaveLength(1); // 卡还在（事件不可删）
+      expect(s.pending_approvals[0].stale).toBe(true); // 但已不可提交
+    });
+
+    it('run 还活着时审批保持可提交（不误伤正常流程）', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } })); // 后续事件
+      expect(s.pending_approvals[0].stale).toBeUndefined();
+    });
+
+    it('正常已决的审批不会被后续 run 终结牵连（已从队列移除）', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      s = applyEvent(s, ev({
+        type: EventType.PERMISSION_RESOLVED,
+        data: { approval_id: 'ap-1', decision: 'approve_once', reason: '' },
+      }));
+      s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, data: {} }));
+      expect(s.pending_approvals).toHaveLength(0);
+    });
+
+    it('run/completed 与 run/failed 同样终结孤儿审批（后端同一处 GC）', () => {
+      for (const type of [EventType.RUN_COMPLETED, EventType.RUN_FAILED]) {
+        let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+        s = applyEvent(s, requested());
+        s = applyEvent(s, ev({ type, data: {} }));
+        expect(s.pending_approvals[0].stale, `${type} 应标 stale`).toBe(true);
+      }
+    });
+
+    /** 死锁回归锁：失效审批若继续算作「欠决策」，会话就永久发不出消息
+     *  （卡片只读 + composer 禁用，两条路都堵死）。 */
+    it('awaitingApproval：失效审批不锁 composer，未失效的才锁', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      expect(awaitingApproval(s.pending_approvals)).toBe(true); // run 活着 → 真的欠一个决策
+
+      s = applyEvent(s, ev({
+        type: EventType.RUN_INTERRUPTED,
+        data: { interrupted_seq: 9, reason: 'process_restart' },
+      }));
+      expect(awaitingApproval(s.pending_approvals)).toBe(false); // 孤儿 → 不锁死会话
+      expect(awaitingApproval([])).toBe(false);
+    });
   });
 
   it('OBS-007 RUN_STARTED 清空中断标记：提示不跨 run 存活', () => {
@@ -1095,7 +1226,7 @@ describe('applyEvent — da394a9 新语义', () => {
     expect(s.run_cancelled).toBe(false);
   });
 
-  it('diff before 内嵌 inspect_artifact marker → archived=true + artifactId', () => {
+  it('diff before 内嵌 marker → archived=true + artifactId + artifactTool', () => {
     let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
     const summary = '文件过大已归档。use inspect_artifact(abc-123) 查看全文';
     s = applyEvent(s, ev({
@@ -1105,6 +1236,23 @@ describe('applyEvent — da394a9 新语义', () => {
     }));
     expect(s.turns[0].tools[0].diff).toEqual({
       before: '', after: summary, truncated: true, archived: true, artifactId: 'abc-123',
+      artifactTool: 'inspect_artifact',
+    });
+  });
+
+  /* 默认部署（Local / MinIO）发的 marker 用 `read_artifact`。此前正则只认
+     inspect_artifact ⇒ 默认部署上 diff.archived 永远不成立（#186 AC4）。 */
+  it('diff 内嵌 read_artifact marker（默认部署）也认，并原样带下工具名', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
+    const summary = '文件过大已归档。use read_artifact(0123456789abcdef) to view]';
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, data: { before: summary, after: '', truncated: true } }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].diff).toEqual({
+      before: summary, after: '', truncated: true, archived: true,
+      artifactId: '0123456789abcdef', artifactTool: 'read_artifact',
     });
   });
 
@@ -1875,5 +2023,92 @@ describe('事件摘要的单行语义（UI-04 信任裂缝）', () => {
     const summary = summarizeEvent(s.events[s.events.length - 1]);
     expect(summary).not.toContain('{');
     expect(summary).not.toContain('"');
+  });
+});
+
+// ── #184 Inspector PERMISSION 段：审批请求 → 队列，决议 → 留痕 + 权限档派生 ──
+
+describe('审批投影 — 权限档（permission_policy）/ 待审批 / 裁决留痕（#184）', () => {
+  const T = '2026-01-01T00:00:00Z';
+  const base = { session_id: 's', time: T };
+
+  const requested = (approvalId: string, seq: number, policy: string, toolName = 'write') =>
+    ev({
+      ...base, type: EventType.TOOL_APPROVAL_REQUESTED, seq, run_id: 'r', step_id: 1,
+      data: {
+        approval_id: approvalId, tool_name: toolName, tool_call_id: `tc-${approvalId}`,
+        action_type: 'workspace-write', title: 't', description: 'd', arguments_preview: {},
+        permission: 'workspace-write', policy, reason: 'r', allowed_decisions: ['deny', 'approve_once'],
+      },
+    });
+
+  const resolved = (approvalId: string, seq: number, decision: string, reason = '') =>
+    ev({
+      ...base, type: EventType.PERMISSION_RESOLVED, seq, run_id: 'r',
+      data: { approval_id: approvalId, decision, reason },
+    });
+
+  it('无审批事件：权限档 null（渲染层显示 —，不拿 composer 选择冒充会话事实）', () => {
+    const s = applyEvent(initConversation('p'), ev({ ...base, type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }));
+    expect(s.permission_policy).toBeNull();
+    expect(s.pending_approvals).toEqual([]);
+    expect(s.approval_decisions).toEqual([]);
+  });
+
+  it('审批请求在队：权限档 = 该请求的生效阈值', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    expect(s.permission_policy).toBe('read-only');
+    expect(s.pending_approvals).toHaveLength(1);
+    expect(s.approval_decisions).toEqual([]);
+  });
+
+  it('决议 → 出队 + 留痕（含工具名），权限档仍可得（不因出队而丢）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'approve_once', '用户批准'));
+    expect(s.pending_approvals).toEqual([]);
+    expect(s.approval_decisions).toEqual([
+      { approval_id: 'ap-1', decision: 'approve_once', reason: '用户批准', tool_name: 'write', time: T },
+    ]);
+    // 关键：请求已出队，但权限档仍在（折叠在状态上，不是从队列临时读的）
+    expect(s.permission_policy).toBe('read-only');
+  });
+
+  it('多次审批：权限档取**最近一次请求**（事件序，不是队列/裁决表的拼接顺序）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'deny'));
+    s = applyEvent(s, requested('ap-2', 3, 'workspace-write', 'bash'));
+    expect(s.permission_policy).toBe('workspace-write');
+    expect(s.pending_approvals.map((a) => a.approval_id)).toEqual(['ap-2']);
+    expect(s.approval_decisions.map((d) => d.approval_id)).toEqual(['ap-1']);
+  });
+
+  it('决议重放幂等：同一 approval_id 再来一次决议不重复留痕', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'deny'));
+    s = applyEvent(s, resolved('ap-1', 3, 'deny'));
+    expect(s.approval_decisions).toHaveLength(1);
+  });
+
+  it('配不上对的决议（事件窗口从中间开始）：留痕但 tool_name 为空——不猜', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, resolved('ap-orphan', 1, 'deny', '无对应请求'));
+    expect(s.approval_decisions).toEqual([
+      { approval_id: 'ap-orphan', decision: 'deny', reason: '无对应请求', tool_name: undefined, time: T },
+    ]);
+    // 没有请求事件 → 权限档无从得知（不是空串，是 null）
+    expect(s.permission_policy).toBeNull();
+  });
+
+  it('缺 approval_id 的决议事件被忽略（契约必有该字段，不制造空 id 的假记录）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, ev({
+      ...base, type: EventType.PERMISSION_RESOLVED, seq: 1, run_id: 'r',
+      data: { decision: 'deny', reason: '缺 id' },
+    }));
+    expect(s.approval_decisions).toEqual([]);
   });
 });

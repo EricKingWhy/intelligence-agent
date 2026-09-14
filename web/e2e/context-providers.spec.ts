@@ -50,19 +50,33 @@ test('ContextProviderPicker：目录非空 → 渲染；键盘 toggle + POST str
   await expect(listbox).toBeVisible();
   // 两个 option 在场
   await expect(page.locator('[role="option"]')).toHaveCount(2);
-  // 焦点显式落到 listbox：打开后 activeElement 是 popover 容器（DIV[role=dialog]），
-  // 键盘事件不落到 cmdk 的方向键承接者 → Enter 不会选中（探针实测）。
+  // FE-R11-06：多选列表要自报多选语义，否则 AT 会把 aria-selected 当单选高亮读
+  await expect(listbox).toHaveAttribute('aria-multiselectable', 'true');
+  // FE-R11-04 修复后开箱即落在 cmdk root 内（旧代码这里需要手动 focus 兜底）。
+  // 仍显式 focus 一次：本用例后续连按 Enter/ArrowDown，多一层保险不亏。
+  await expect
+    .poll(() =>
+      page.evaluate(() => !!document.activeElement?.closest('[cmdk-root]')),
+    )
+    .toBe(true);
   await listbox.focus();
+
+  // 勾选态对 AT 可见（FE-R11-06）：画在 aria-hidden checkbox 上的 ☑ 读不到，
+  // 状态必须落在 role="option" 的 aria-checked 上——cmdk 只硬写 aria-selected。
+  const firstOption = page.locator('[role="option"]').first();
+  await expect(firstOption).toHaveAttribute('aria-checked', 'false');
 
   // Enter 选中第一项（memory）——多选模式不关闭 popover
   await page.keyboard.press('Enter');
   // trigger 显示选中数量
   await expect(ctxTrigger).toContainText('Context · 1');
+  await expect(firstOption).toHaveAttribute('aria-checked', 'true');
 
   // ArrowDown 移到第二项（skills），Enter 选中
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   await expect(ctxTrigger).toContainText('Context · 2');
+  await expect(page.locator('[role="option"]').nth(1)).toHaveAttribute('aria-checked', 'true');
 
   // Esc 关闭浮层
   await page.keyboard.press('Escape');

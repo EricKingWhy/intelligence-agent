@@ -33,6 +33,7 @@ SECTION_ORDERS: dict[str, int] = {
     "profile:extra": 200,  # profile:<name>:<其他> 用此值
     "output:summary": 1000,
     "tool": 2000,  # 工具 guidance 的基准；同 order 内按 section 名排序
+    "frame:tool_disclaimer": 2100,  # BUG-013：工具澄清句，恒在全部工具 guidance 之后
     "aux:compaction": 3000,
     "aux:memory_extraction": 3100,
     "aux:fork_tail": 3200,

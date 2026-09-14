@@ -109,10 +109,14 @@ test('AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限�
   const callout = box.locator('.project-path-callout');
   await expect(callout).toContainText(`Agent 将直接读写该目录：${ALPHA}`);
   // AC10②：权限档是**三选**（默认档之外两档也必须真的可选，否则"三选"只是文案）
+  // FE-R11-05 之后单选 picker 多了一个首项「默认（未选）」（提交 `null` = 用默认档），
+  // 所以这里是 1 + 3。三档**逐档**断言存在，不靠总数——总数只是"多了一项"的护栏。
   await box.locator('.composer-control[aria-label="权限模式"]').click();
   const listbox = page.locator('[role="listbox"]:visible').last();
-  await expect(listbox.getByRole('option')).toHaveCount(3);
-  await expect(listbox.getByRole('option', { name: /工作区写入/ })).toBeVisible();
+  await expect(listbox.getByRole('option')).toHaveCount(4);
+  for (const mode of ['只读', '工作区写入', '完全访问']) {
+    await expect(listbox.getByRole('option', { name: mode })).toBeVisible();
+  }
   await page.keyboard.press('Escape');
   await expect(box.locator('.composer-control[aria-label="权限模式"]')).toContainText('工作区写入');
   // AC10③：空任务禁用 → 填了才可提交

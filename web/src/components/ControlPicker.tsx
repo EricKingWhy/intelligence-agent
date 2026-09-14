@@ -6,7 +6,8 @@
  * 与 ModelPicker 的差异：
  *   - 数据源是 CatalogEntry（{id, display_name, description}），不是 ModelCatalogEntry；
  *   - 没有 provider 分组——清单短，扁平展示即可；
- *   - 没有「默认链」item——null 选中态由 trigger placeholder 文本表达；
+ *   - 首项是「默认（未选）」：单选控件必须能回到"没选"，
+ *     否则选了就再也退不回来（只能整页 reload），见 FE-R11-05；
  *   - trigger 显示 display_name，不是 id。
  *
  * 契约向后兼容：
@@ -16,9 +17,10 @@
 
 import * as Popover from '@radix-ui/react-popover';
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from 'cmdk';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, type LucideIcon } from 'lucide-react';
 import type { CatalogEntry } from '../lib/api';
+import { focusPickerListOnOpen } from '../lib/pickerFocus';
 
 interface Props {
   /** aria-label，也是 trigger title 的一部分。 */
@@ -36,6 +38,9 @@ interface Props {
   disabled?: boolean;
 }
 
+/** cmdk Item value 必须唯一、稳定（不依赖 textContent）。null 选中态用 sentinel。 */
+const DEFAULT_VALUE = '__default__';
+
 export function ControlPicker({
   ariaLabel,
   entries,
@@ -51,6 +56,8 @@ export function ControlPicker({
     [entries, selectedId],
   );
   const triggerLabel = selectedEntry?.display_name ?? placeholder;
+  const searchHidden = entries.length <= 5; // 阈值与 picker-search-visibility 契约一致（不因新增默认项而改）
+  const listRef = useRef<HTMLDivElement>(null);
 
   // 端点缺席：不渲染（不伪造列表）。调用方靠这个降级隐藏入口。
   if (entries.length === 0) return null;
@@ -77,6 +84,8 @@ export function ControlPicker({
           side="top"
           align="start"
           sideOffset={6}
+          // FE-R11-04：短目录搜索框不可见 → 焦点交给 listbox，键盘导航才有效
+          onOpenAutoFocus={focusPickerListOnOpen(listRef, searchHidden)}
         >
           <Command
             label={ariaLabel}
@@ -88,12 +97,27 @@ export function ControlPicker({
               return haystack.includes(q) ? 1 : 0;
             }}
           >
-            <div className={`model-picker-search-wrap${entries.length > 5 ? '' : ' hidden'}`}>
+            <div className={`model-picker-search-wrap${searchHidden ? ' hidden' : ''}`}>
               <Icon size={13} aria-hidden="true" />
               <CommandInput placeholder="搜索…" className="model-picker-search" />
             </div>
-            <CommandList>
+            <CommandList ref={listRef}>
               <CommandGroup>
+                {/* FE-R11-05：单选控件必须能回到「没选」——否则选了就再也退不回来
+                    （只能整页 reload）。提交 null，与 trigger placeholder 同义。 */}
+                <CommandItem
+                  value={DEFAULT_VALUE}
+                  keywords={['默认', '未选', 'default', 'none']}
+                  className={`model-picker-item ${selectedId === null ? 'sel' : ''}`}
+                  onSelect={() => {
+                    onChange(null);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="model-picker-item-label">默认（未选）</span>
+                  <span className="model-picker-item-meta">用后端默认值</span>
+                  {selectedId === null && <Check size={13} className="model-picker-check" aria-hidden="true" />}
+                </CommandItem>
                 {entries.map((e) => (
                   <CommandItem
                     key={e.id}

@@ -54,6 +54,10 @@ interface Props {
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
   /** T7 #137：从指定用户消息 seq 分叉新会话。 */
   onFork?: (fromSeq: number) => void;
+  /** APR-01：审批卡提交时后端回 404（队列已 GC）→ 把该 approval_id 上报为失效。
+   *  失效事实由 App 持有（同时驱动 composer 解锁与卡片只读），卡内不存第二份。 */
+  goneApprovalIds?: ReadonlySet<string>;
+  onApprovalGone?: (approvalId: string) => void;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -64,7 +68,7 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork }: Props) {
+export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, goneApprovalIds, onApprovalGone }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -114,9 +118,17 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
       el.classList.add('stream-jump-pulse');
       window.setTimeout(() => el.classList.remove('stream-jump-pulse'), 900);
     };
+    /* 三个 key 命名空间互不相交：`tool:`/`step:`（事件→轮次内定位）、`delegation:`、
+     *  `approval:`（#184 审批卡——它在虚拟化列表**之外**，必须始终可见，所以有自己的
+     *  data 属性）。一次查询按序试，命中即停。 */
+    const key = jumpRequest.key;
+    const approvalKey = key.startsWith('approval:') ? key.slice('approval:'.length) : null;
     const el =
-      root.querySelector<HTMLElement>(`[data-stream-key="${jumpRequest.key}"]`) ??
-      root.querySelector<HTMLElement>(`[data-step-key="${jumpRequest.key}"]`);
+      root.querySelector<HTMLElement>(`[data-stream-key="${key}"]`) ??
+      root.querySelector<HTMLElement>(`[data-step-key="${key}"]`) ??
+      (approvalKey === null
+        ? null
+        : root.querySelector<HTMLElement>(`[data-approval-key="${approvalKey}"]`));
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       pulse(el);
@@ -337,6 +349,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
                 onInspectChild={onInspectChild}
                 onFork={onFork}
                 isFirstUserTurn={vi.index === emptyChildTurnIdx}
+                sessionId={conversation.session_id}
               />
             </div>
           ))}
@@ -346,13 +359,19 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
          *  - 不参与虚拟化窗口（审批卡必须始终可见）
          *  - 瞬时贴底（scrollTop = scrollHeight）会把审批卡包含进来 */}
         {conversation.pending_approvals.map((a, i) => (
-          <ApprovalCard
-            key={a.approval_id}
-            sessionId={conversation.session_id}
-            approval={a}
-            /* UI-01：多卡并存只有第一张自动聚焦（alertdialog 焦点不打架）。 */
-            autoFocus={i === 0}
-          />
+          /* `data-approval-key` 是 Inspector PERMISSION 段（#184）反向联动的落点：
+             点那一行的"待审批"→ jumpRequest key `approval:<id>` → 滚到这里 + pulse。 */
+          <div key={a.approval_id} data-approval-key={a.approval_id}>
+            <ApprovalCard
+              sessionId={conversation.session_id}
+              approval={a}
+              /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
+              invalid={a.stale === true || goneApprovalIds?.has(a.approval_id) === true}
+              onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
+              /* UI-01：多卡并存只有第一张自动聚焦（alertdialog 焦点不打架）。 */
+              autoFocus={i === 0}
+            />
+          </div>
         ))}
       </div>
       {/* Follow-mode 浮标（pi-mono "jump to latest"）：在**投影上仍是 running 的
@@ -385,7 +404,7 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
-export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean }) {
+export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string }) {
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -489,6 +508,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                     onFocusTool={onFocusTool}
                     onOpenSession={onOpenSession}
                     onInspectChild={onInspectChild}
+                    sessionId={sessionId}
                   />
                 ))}
               </div>
@@ -534,6 +554,8 @@ interface ChainRenderCtx {
   onFocusTool?: (tool: ToolCall) => void;
   onOpenSession?: (sessionId: string) => void;
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
+  /** #186：这条链属于哪个会话——工具卡的归档 diff 要按会话读 artifact 内容。 */
+  sessionId?: string;
 }
 
 /** 每种 kind 的渲染器只接收窄化后的 node 类型（Extract 按 kind 收紧）。 */
@@ -542,7 +564,7 @@ type RendererFor<K extends ChainNode['kind']> = (
 ) => ReactNode;
 
 const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
-  tool: ({ node, density, disclosure, onFocusTool }) => {
+  tool: ({ node, density, disclosure, onFocusTool, sessionId }) => {
     const key = toolEventKey(node.tool.tool_call_id);
     const cycle = disclosure
       ? () => disclosure.setLevel(key, nextLevel(disclosure.levelFor(key, density)))
@@ -554,6 +576,7 @@ const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
         level={disclosure ? disclosure.levelFor(key, density) : undefined}
         onCycleLevel={cycle}
         onFocus={onFocusTool}
+        sessionId={sessionId}
       />
     );
   },

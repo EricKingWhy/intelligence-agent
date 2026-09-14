@@ -56,15 +56,15 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
   await page.keyboard.press('Enter');
   // 浮层已开——listbox 恒可见（combobox 在短目录下会随搜索框隐藏，见 F-DEFER-1）
   await expect(page.locator('[role="listbox"]')).toBeVisible();
-  // option 角色在场——至少 3 个（auto/ask/deny）
-  await expect(page.locator('[role="option"]')).toHaveCount(3);
+  // option 角色在场——默认（未选）+ auto/ask/deny = 4（FE-R11-05 加的回到未选入口）
+  await expect(page.locator('[role="option"]')).toHaveCount(4);
 
   // Esc 关闭浮层（§19）
   await page.keyboard.press('Escape');
   await expect(page.locator('[role="listbox"]')).toBeHidden();
 
-  // 再次打开 + Enter 选第一个 option → trigger 文本更新
-  await pickControl(page, '权限模式', 0, 'Auto Approve');
+  // 再次打开 + Enter 选第一个真实档位（ArrowDown 1 次越过「默认（未选）」）
+  await pickControl(page, '权限模式', 1, 'Auto Approve');
 });
 
 test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', async ({ page }) => {
@@ -88,12 +88,70 @@ test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', 
   // 长目录（6 > 5）→ 搜索框可见、可交互
   const combo = page.getByRole('combobox', { name: '权限模式' });
   await expect(combo).toBeVisible();
-  await expect(page.locator('[role="option"]')).toHaveCount(6);
+  // 6 条目录 + 「默认（未选）」= 7
+  await expect(page.locator('[role="option"]')).toHaveCount(7);
 
-  // 搜索过滤：键入「ask」只剩匹配项
+  // 搜索过滤：键入「ask」只剩匹配项（「默认（未选）」的 keywords 不含 ask）
   await page.keyboard.type('ask');
   await expect(page.locator('[role="option"]')).toHaveCount(1);
   await expect(page.locator('[role="option"]')).toContainText('Ask Each Time');
+});
+
+/** FE-R11-05 回归锁：单选控件选了之后必须能回到「未选」。
+ *  此前只能整页 reload——目录里没有任何表达"没选"的条目，触发文本却显示 placeholder。 */
+test('Composer control row：单选档位可以选回「默认（未选）」', async ({ page }) => {
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await expect(trigger).toContainText('权限'); // 未选 → placeholder（文案是「权限」）
+
+  // 先选一个真实档位
+  await pickControl(page, '权限模式', 1, 'Auto Approve');
+  await expect(trigger).toContainText('Auto Approve');
+
+  // 再选回「默认（未选）」——首项，Enter 零次下压即命中
+  await pickControl(page, '权限模式', 0, '权限');
+  await expect(trigger).not.toContainText('Auto Approve');
+});
+
+/** FE-R11-04 回归锁：短目录（搜索框 display:none）下**纯键盘**必须能选档。
+ *
+ *  此前的洞：cmdk 把方向键/Enter 的处理挂在 `[cmdk-root]` 上，只能靠冒泡到达；
+ *  搜索框一藏，root 里没有可聚焦元素 → Radix 把焦点放到 Content（在 root 之外）
+ *  → 方向键无反应、Enter 不提交。鼠标路径正常，所以只有键盘用户会撞上。
+ *  本用例**不手动 focus listbox**（那是旧 helper 的绕行），只依赖打开时的初焦——
+ *  修复前这里必然失败。 */
+test('Composer control row：短目录键盘导航（不手动聚焦 listbox）', async ({ page }) => {
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES, // 3 条 ≤ 5 → 搜索框隐藏
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
+
+  // 焦点必须在 cmdk 的 root 内，否则按键根本到不了承接者
+  const focusInCmdkRoot = await page.evaluate(() => {
+    const a = document.activeElement as HTMLElement | null;
+    return !!a?.closest('[cmdk-root]');
+  });
+  expect(focusInCmdkRoot).toBe(true);
+
+  // 零下压 = 首项「默认（未选）」；下压一次 → 第一个真实档位
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText('Auto Approve');
 });
 
 test('Composer control row：提交 payload 字段名对齐后端契约', async ({ page }) => {
@@ -122,9 +180,10 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   await page.goto('/');
 
   // 选 Permission Mode → auto / Agent Profile → coding / Reasoning Effort → deep
-  await pickControl(page, '权限模式', 0, 'Auto Approve');
-  await pickControl(page, 'Agent Profile', 1, 'Coding');
-  await pickControl(page, 'Reasoning Effort', 2, 'Deep');
+  // （每个控件首项都是「默认（未选）」，故下压次数 = 条目下标 + 1）
+  await pickControl(page, '权限模式', 1, 'Auto Approve');
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
 
   // 提交任务
   await page.getByLabel('Agent 任务').fill('payload 测试');

@@ -77,4 +77,37 @@ describe('ContextProviderPicker（多选 Radix Popover 契约）', () => {
     ).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
   });
+
+  /** FE-R11-07：selectedIds 未与 entries 对账时，会出现"已选但列表里没有、也取消
+   *  不掉"的幽灵项——计数还把它算进去（用户看到 Context · 2 却只勾着一个）。
+   *  渲染前求交，让"能勾的"与"算进去的"永远是同一集合。 */
+  it('selectedIds 含目录里没有的 id → 计数与列表都只认真实条目（幽灵项不算）', () => {
+    const html = renderToString(
+      createElement(ContextProviderPicker, {
+        ariaLabel: 'Context Providers',
+        entries: ENTRIES,
+        selectedIds: ['memory', '已下线的-provider'],
+        onChange: () => {},
+        icon: Layers,
+        placeholder: 'Context',
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('Context · 1'); // 不是 · 2
+    expect(html).not.toContain('Context · 2');
+  });
+
+  it('selectedIds 全是幽灵 id → 回到 placeholder（计数 0 不显示「· 0」）', () => {
+    const html = renderToString(
+      createElement(ContextProviderPicker, {
+        ariaLabel: 'Context Providers',
+        entries: ENTRIES,
+        selectedIds: ['已下线-a', '已下线-b'],
+        onChange: () => {},
+        icon: Layers,
+        placeholder: 'Context',
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('>Context<');
+    expect(html).not.toContain('· 0');
+  });
 });

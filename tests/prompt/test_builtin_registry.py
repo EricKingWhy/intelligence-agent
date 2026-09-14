@@ -65,15 +65,15 @@ def test_default_registry_is_zero_config_baseline() -> None:
     ]
 
 
-def test_declared_variables_are_exactly_the_eight_used() -> None:
-    """T4 `tail_text`；T7 快照五值；T8 `tool_name` / `consecutive_failures`。
+def test_declared_variables_are_exactly_the_six_used() -> None:
+    """T4 `tail_text`；T7 快照三值（BUG-013 瘦身后 model/tools 已删）；T8 两值。
 
     断言**精确集合**而不是 `"tail_text" in ...`：多声明一个没人用的变量说明
-    `_DECLARED_VARIABLES` 被写脏了，值得红。
+    `_DECLARED_VARIABLES` 被写脏了，值得红。BUG-013 删除快照的 model/tools 后，
+    也不得残留这两个声明（防回归复活）。
     """
     assert build_registry().declared_variables() == frozenset(
-        {"tail_text", "cwd", "os", "date", "model", "tools",
-         "tool_name", "consecutive_failures"}
+        {"tail_text", "cwd", "os", "date", "tool_name", "consecutive_failures"}
     )
 
 

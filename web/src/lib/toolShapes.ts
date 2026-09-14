@@ -102,14 +102,33 @@ export function parseErrorShape(result: unknown): ErrorShape | null {
 }
 
 
-const INSPECT_ARTIFACT_RE = /use inspect_artifact\(([^)]+)\)/;
+/** 后端外置摘要里的读回提示（#186 AC4）。
+ *
+ *  **两个工具名都要认**：后端按"与本 store 配对的读回工具"决定用哪个名字
+ *  （`storage/artifact_select.py`：S3 → `inspect_artifact`，MinIO / Local →
+ *  `read_artifact`，而 Local 是默认 Provider）。此前这里只认 `inspect_artifact`，
+ *  于是**默认部署**的 marker 一个都解析不出来 ⇒ `archived` 永远为 false ⇒ 界面上的
+ *  归档占位与"统计不可得"全是死路径（批 2 审查发现）。只认一个名字，等于在前端把
+ *  "这个部署用哪个 store"又猜了一遍。
+ *
+ *  捕获组：1 = 工具名（**原样保留**，回显与复制都用它，模型才调得到对的那个），
+ *  2 = artifact_id。 */
+const ARTIFACT_MARKER_RE = /use (inspect_artifact|read_artifact)\(([^)]+)\)/;
 
-/** 从 diff 截断摘要中提取归档 artifact id（后端 >2000 字符时内嵌 marker）。
+export interface ArtifactMarker {
+  /** 后端建议的读回工具名——照抄，不要在前端替换成另一个。 */
+  toolName: string;
+  artifactId: string;
+}
+
+/** 从 diff / 工具结果的截断摘要中提取归档引用（后端 >2000 字符时内嵌 marker）。
  *  无 marker 返回 null——零伪造，不猜 id。 */
-export function parseArtifactMarker(text: string): string | null {
-  const m = INSPECT_ARTIFACT_RE.exec(text);
-  const id = m?.[1]?.trim();
-  return id ? id : null;
+export function parseArtifactMarker(text: string): ArtifactMarker | null {
+  const m = ARTIFACT_MARKER_RE.exec(text);
+  const artifactId = m?.[2]?.trim();
+  const toolName = m?.[1];
+  if (!toolName || !artifactId) return null;
+  return { artifactId, toolName };
 }
 
 export interface McpToolName {

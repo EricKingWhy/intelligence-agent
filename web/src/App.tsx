@@ -13,7 +13,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Columns2, Eye, KeyRound, MessageSquare, RotateCcw, X } from 'lucide-react';
+import type { CSSProperties } from 'react';
+import { KeyRound, RotateCcw, X } from 'lucide-react';
 import { isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
 import { TopBar } from './components/TopBar';
@@ -22,10 +23,21 @@ import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
-import { StepDetail, type InspectorFocus } from './components/StepDetail';
+import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
+import { WorkspaceTabs } from './components/WorkspaceTabs';
+import { OutputPanel } from './components/OutputPanel';
+import { ChangesPanel } from './components/ChangesPanel';
+import {
+  centerTabs,
+  deriveSurfaces,
+  resolveActiveTab,
+  type CapabilityDescriptor,
+  type SurfaceKey,
+} from './lib/capabilities';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
+import { INSPECTOR_MIN_W } from './lib/inspectorPanel';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
@@ -33,6 +45,7 @@ import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
   getAgentProfiles,
+  getCapabilities,
   getContextProviders,
   getModels,
   getPermissionModes,
@@ -40,18 +53,11 @@ import {
   type CatalogEntry,
   type ModelCatalogEntry,
 } from './lib/api';
-import { summarizeEvent } from './lib/projection';
+import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
+import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
 import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
 import './styles/app.css';
-
-/** Workspace 模式 —— Chat 常驻；Split/Preview 为后续 Phase 预留的空架子。 */
-type WorkspaceMode = 'chat' | 'split' | 'preview';
-const WORKSPACE_MODES: readonly { id: WorkspaceMode; label: string; icon: typeof MessageSquare }[] = [
-  { id: 'chat', label: 'Chat', icon: MessageSquare },
-  { id: 'split', label: 'Split', icon: Columns2 },
-  { id: 'preview', label: 'Preview', icon: Eye },
-];
 
 /** 分叉请求的兜底超时。`forkInFlightRef` 只在 `finally` 里复位——请求若既不
  *  resolve 也不 reject（socket 挂死），按钮会被永久静默禁用，正是本 ticket 要
@@ -60,11 +66,6 @@ const WORKSPACE_MODES: readonly { id: WorkspaceMode; label: string; icon: typeof
 const FORK_TIMEOUT_MS = 30_000;
 
 export default function App() {
-  // ── Workspace 模式（Phase 1d，方案 B）──
-  // Chat = 常驻阅读面，永不切换走（用户冻结决策）。
-  // Split / Preview = 后续 Phase 升级的副面板，当前仅空架子（占位条），
-  // 表明 Workspace 有自己的结构扩展点，但内容不由 tab 与 Inspector 抢走。
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('chat');
   // BUG-001 fix：fork 失败的本地错误状态（useSession 的 error 是流级通道）。
   const [forkError, setForkError] = useState<{ sessionId: string; message: string } | null>(null);
 
@@ -82,6 +83,7 @@ export default function App() {
     submitTask,
     sendMessage,
     cancelStream,
+    removeSession,
     recover,
     refreshSessions,
     changeModel,
@@ -163,6 +165,32 @@ export default function App() {
       setContextProviders([]);
     }
   }, []);
+  // ── #182 能力声明显隐（PRD §3.2；数据源 GET /api/capabilities）──
+  // 中心列的面由能力声明决定：为真的面出现，为假的面**不渲染**。
+  // `null` = 没拿到/拉取失败（老后端 404 也走这条）→ `deriveSurfaces` 落到 PRD 缺省
+  // 语义（chat + timeline），**Chat 永不因此消失**（AC3）。不在这里静默填缺省值：
+  // 那样就分不清"能力没声明"与"没拿到数据"，而这两种情况都要求同一份降级。
+  const [capabilities, setCapabilities] = useState<CapabilityDescriptor[] | null>(null);
+  const fetchCapabilities = useCallback(async () => {
+    try {
+      setCapabilities(await getCapabilities());
+    } catch {
+      setCapabilities(null); // 降级为缺省语义——非关键能力，不打扰用户
+    }
+  }, []);
+  const surfaces = useMemo(() => deriveSurfaces(capabilities), [capabilities]);
+  const tabs = useMemo(() => centerTabs(surfaces), [surfaces]);
+  /** 用户选中的面。渲染用 `activeTab`（下面一轮 `resolveActiveTab`）：能力翻假时
+   *  那个面会从 `tabs` 里消失，**渲染必须当场落到仍可见的面**，而不是先渲染一个
+   *  不存在面板、再靠 effect 纠正（那会闪一帧空面板）。 */
+  const [selectedSurface, setSelectedSurface] = useState<SurfaceKey>('chat');
+  const activeTab = resolveActiveTab(tabs, selectedSurface);
+  // 本会话全部工具调用：与 Inspector 的 run 级清单共用 `allTools`（#190 单一走法）。
+  const tools = useMemo(() => (conversation ? allTools(conversation) : []), [conversation]);
+  /* #186：归档 diff 的「就地展开」按会话读 artifact 内容。`tools` 为空数组时这个面
+     本来就没有内容可展开，所以 `null` 与"没有会话"是同一件事——给 `undefined`，
+     `DiffBlock` 据此不渲染展开入口（不伪造一个读不到的会话）。 */
+  const sessionId = conversation?.session_id;
   const [authRequired, setAuthRequired] = useState(false);
   useEffect(() => onUnauthorized(() => setAuthRequired(true)), []);
   useEffect(
@@ -172,8 +200,9 @@ export default function App() {
         void refreshSessions();
         void fetchModels(); // T10：模型目录同样吃鉴权缝——配置 token 后补拉
         void fetchControlCatalogs(); // 控制目录也走 apiFetch 认证缝——补拉
+        void fetchCapabilities(); // 能力 manifest 也走 apiFetch——补拉
       }),
-    [refreshSessions, fetchModels, fetchControlCatalogs],
+    [refreshSessions, fetchModels, fetchControlCatalogs, fetchCapabilities],
   );
 
   // 密度四档（冻结决策）：状态在 App（TopBar 切换、Conversation 消费），persist 由 lib/density 负责。
@@ -220,9 +249,29 @@ export default function App() {
   // 全部 useCallback：下游 SessionList/Composer/Conversation/StepDetail 的 memo
   // 依赖引用稳定的回调，普通函数每次渲染新引用会让 memo 全部失效。
   const [focus, setFocus] = useState<InspectorFocus>({ kind: 'run' });
-  const focusRun = useCallback(() => setFocus({ kind: 'run' }), []);
-  const focusTool = useCallback((tool: ToolCall) => setFocus({ kind: 'tool', tool }), []);
-  const focusEvent = useCallback((event: AgentEvent) => setFocus({ kind: 'event', event }), []);
+  /* #183 面板视图状态：钉住 / 整页 / 宽度 / 选中项详情（peek）是否展开。
+   * 全部是**视图状态、不持久化**（不变量 #22）。状态归 App 而不是 StepDetail：
+   * 宽度与整页要改的是 `.app-regions` 的栅格（App 渲染），StepDetail 只是消费方。 */
+  const [panel, setPanel] = useState({
+    pinned: false,
+    expanded: false,
+    width: INSPECTOR_MIN_W,
+    peekOpen: false,
+  });
+  /* 选中即预览（AC3：鼠标点击即选中即预览）。reducer 里改 peekOpen 会让"选一个新
+   * 目标"变成"必须先开预览"——那是键盘才能做的动作，鼠标用户点一行就该看到详情。 */
+  const focusRun = useCallback(() => {
+    setFocus({ kind: 'run' });
+    setPanel((cur) => (cur.peekOpen ? { ...cur, peekOpen: false } : cur));
+  }, []);
+  const focusTool = useCallback((tool: ToolCall) => {
+    setFocus({ kind: 'tool', tool });
+    setPanel((cur) => (cur.peekOpen ? cur : { ...cur, peekOpen: true }));
+  }, []);
+  const focusEvent = useCallback((event: AgentEvent) => {
+    setFocus({ kind: 'event', event });
+    setPanel((cur) => (cur.peekOpen ? cur : { ...cur, peekOpen: true }));
+  }, []);
   // Phase 13 委派钻取（v2 PRD §10.5）：委派节点 Inspect → 右栏原位展开 child
   // 会话；深层钻取是显式意图——Inspector 关着时一并打开（不同于 hover Inspect）。
   const focusChild = useCallback(
@@ -242,9 +291,23 @@ export default function App() {
     const key = streamKeyFromEvent(event.data, event.step_id);
     if (key) setJumpRequest({ key, nonce: Date.now() });
   }, []);
+  /* #184：Inspector PERMISSION 段点待审批行 → 中间主区滚动定位审批卡。
+   * 复用同一条 jumpRequest 通道（nonce 保证连点同一张卡也重新触发）。key 前缀
+   * `approval:` 与 `tool:`/`step:`/`delegation:` 不相交；审批卡**不在**虚拟化轮次
+   * 列表里（它挂在列表之后，必须始终可见），所以它有自己的 data 属性。 */
+  const jumpToApproval = useCallback((approvalId: string) => {
+    setJumpRequest({ key: `approval:${approvalId}`, nonce: Date.now() });
+  }, []);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
   const onPresetTask = useCallback((text: string) => setPresetTask({ text, id: Date.now() }), []);
+  // APR-01：提交审批时后端回 404 的 approval_id——后端队列是纯内存的，404 即
+  // "这条审批不存在了"，不存在任何会把它放回来的路径。失效事实在这里单点持有，
+  // 同时驱动卡片只读与 composer 解锁（否则卡点不动、输入框也一直禁用 = 死局）。
+  const [goneApprovalIds, setGoneApprovalIds] = useState<ReadonlySet<string>>(() => new Set());
+  const onApprovalGone = useCallback((approvalId: string) => {
+    setGoneApprovalIds((prev) => (prev.has(approvalId) ? prev : new Set(prev).add(approvalId)));
+  }, []);
   // Inspector 折叠是视图状态：收起不卸载（DSH 语义，冻结决策）。
   // 窄屏（<1200px）默认收起；用户手动切换后以手动值优先（仅本会话内，不持久化）。
   const [inspectorOpen, setInspectorOpen] = useState(
@@ -265,6 +328,35 @@ export default function App() {
     setInspectorOpen((v) => !v);
   };
 
+  /** #183 面板动作的唯一入口（pin/expand/resize/peek 开关/关闭）。
+   *
+   *  `close` 单独一条路而不是塞进 `setPanel` 的 updater：它要同时改另一个 state
+   *  （`inspectorOpen`）。在 updater 里调 `setInspectorOpen` 是"在状态更新函数里做
+   *  副作用"——StrictMode 下 updater 会被双调用，那条路径的正确性就得靠"恰好幂等"
+   *  来保证。 */
+  const onPanelAction = useCallback((action: InspectorPanelAction) => {
+    if (action.type === 'close') {
+      userToggledRef.current = true; // 手动关闭后不被窄屏断点立刻改回来（既有一致口径）
+      setInspectorOpen(false);
+      setPanel((cur) => (cur.peekOpen ? { ...cur, peekOpen: false } : cur));
+      return;
+    }
+    setPanel((cur) => {
+      switch (action.type) {
+        case 'pin':
+          return cur.pinned === action.value ? cur : { ...cur, pinned: action.value };
+        case 'expand':
+          return cur.expanded === action.value ? cur : { ...cur, expanded: action.value };
+        case 'resize':
+          return cur.width === action.width ? cur : { ...cur, width: action.width };
+        case 'open-peek':
+          return cur.peekOpen ? cur : { ...cur, peekOpen: true };
+        case 'close-peek':
+          return cur.peekOpen ? { ...cur, peekOpen: false } : cur;
+      }
+    });
+  }, []);
+
   /** 当前选中会话的 ref 镜像——异步回调（分叉落地）需要「落地时的当下值」，
    *  而闭包里的 selectedId 只是发起时的快照。镜像在 effect 里同步（render 期写
    *  ref 会被 react-hooks lint 判为 "Cannot update ref value during render"），
@@ -280,31 +372,48 @@ export default function App() {
     selectedIdRef.current = null;
     selectSession(null);
     focusRun();
-  }, [selectSession, focusRun]);
+    // #183 AC4：未钉住时**离开一个正在看的会话** = 收起面板（钉住的用途正是
+    // "切换会话时它还开着"）。首次进入（原本没有会话）不算离开——那会把"点开第一个
+    // 会话"也变成"面板自己关掉"。
+    if (!panel.pinned && selectedId !== null) setInspectorOpen(false);
+  }, [selectSession, focusRun, panel.pinned, selectedId]);
 
   const handleSelect = useCallback((id: string) => {
+    const leaving = selectedId !== null && selectedId !== id;
     selectedIdRef.current = id;
     selectSession(id);
+    // 选中项属于它所在的会话：换会话必须清选中（否则面板会拿着 A 会话的事件
+    // 站在 B 会话里——跨会话的"第二真相"，不变量 #22）。
     focusRun();
-  }, [selectSession, focusRun]);
+    if (!panel.pinned && leaving) setInspectorOpen(false);
+  }, [selectSession, focusRun, panel.pinned, selectedId]);
 
   useEffect(() => {
     void fetchModels();
     void fetchControlCatalogs();
-  }, [fetchModels, fetchControlCatalogs]);
+    void fetchCapabilities();
+  }, [fetchModels, fetchControlCatalogs, fetchCapabilities]);
 
   const handleModelChange = useCallback(
     (name: string | null) => {
       setSelectedModel(name);
       // T7 #137：已有会话时，模型选择触发 POST /model 切换会话当前模型。
       // 新会话（无 selectedId）只更新本地状态——startSession 时携带 model。
-      if (selectedId && name) {
-        const entry = models.find((m) => m.name === name);
+      //
+      // FE-R11-02（第十一轮真机验收）：`null` = 选了「默认链」，在**已有会话**上必须也 POST
+      // ——后端清「会话级覆盖」的合法入参是 is_default 条目的名字（见 lib/modelSelection.ts）。
+      // 此前 `if (selectedId && name)` 把 null 一并跳过，导致界面显示「默认链」而会话继续跑
+      // 上一个非默认模型（真机：选 glm-5.3-flash 后选「默认链」，JSONL 不新增 model/changed）。
+      const target = modelChangeTarget(name, models);
+      if (selectedId && target) {
+        const entry = models.find((m) => m.name === target);
         if (entry?.provider) {
-          void changeModel(selectedId, entry.provider, name)
+          void changeModel(selectedId, entry.provider, target)
             .then((result) => {
-              // 用响应里的规范 model_id 更新本地状态（不回显请求值）
-              setSelectedModel(result.model_id);
+              // 用响应里的规范 model_id 更新本地状态（不回显请求值）。
+              // 例外：选「默认链」时保持 null——trigger 要显示「默认链」而不是被回填成
+              // 具体模型名（那会和用户刚点的选项不一致）。
+              if (name !== null) setSelectedModel(result.model_id);
             })
             .catch(() => {
               // 切换失败静默——用户可重试；不阻塞主流程
@@ -503,6 +612,20 @@ export default function App() {
         },
       },
       {
+        /* #183 AC5：整页打开的**第二个入口**（第一个是面板头部按钮）。键位留白的
+           那一处就是这里——命令面板不占浏览器快捷键，长 trace / 大 diff 宽读不用
+           先找到那个 ⤢ 图标。 */
+        id: 'toggle-inspector-fullpage',
+        label: panel.expanded ? '退出 Inspector 整页' : '整页打开 Inspector',
+        keywords: 'full page inspector maximize 整页 宽读',
+        hint: '面板',
+        group: 'actions',
+        run: () => {
+          setInspectorOpen(true);
+          onPanelAction({ type: 'expand', value: !panel.expanded });
+        },
+      },
+      {
         id: 'jump-latest',
         label: '跳到最新事件',
         keywords: 'jump to latest event 定位',
@@ -625,7 +748,7 @@ export default function App() {
       });
     }
     return items;
-  }, [conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen]);
+  }, [conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction]);
 
   return (
     <div className="app-frame">
@@ -642,7 +765,15 @@ export default function App() {
         onOpenMemories={() => setMemoriesOpen(true)}
       />
 
-      <main className={`app-regions ${inspectorOpen ? '' : 'inspector-closed'}`}>
+      <main
+        className={
+          `app-regions ${inspectorOpen ? '' : 'inspector-closed'}` +
+          (panel.expanded && inspectorOpen ? ' inspector-fullpage' : '')
+        }
+        /* #183 AC6：面板宽度是**视图状态**（不持久化）——用 CSS 变量喂给栅格，
+           `.app-regions` 的第三列读它。窄屏（<1200px）仍由既有断点接管。 */
+        style={{ '--inspector-w': `${panel.width}px` } as CSSProperties}
+      >
         <SessionList
           sessions={sessions}
           projects={projects}
@@ -657,6 +788,10 @@ export default function App() {
           onRetryProjects={handleRetryProjects}
           onStartTask={handleStartTaskInProject}
           permissionModes={permissionModes}
+          /* 会话硬删（#172 / ADR-0029）：removeSession 自己负责成功/404 后的状态
+             收敛（清视图 + 重拉列表），确认面只消费它的回执与异常。传引用稳定的
+             hook 回调，SessionList 的 memo 才不会因它失效。 */
+          onDeleteSession={removeSession}
         />
 
         <section className="app-workspace">
@@ -746,74 +881,85 @@ export default function App() {
               （原因：{conversation.run_interrupted.reason}）
             </div>
           )}
-          {/* Workspace 模式条（Phase 1d 方案 B）：Chat 永远是主阅读面，
-              Split/Preview 为后续 Phase 预留的空架子。条本身克制——
-              只在选中非 chat 时渲染下方占位行；Chat 模式下完全不占垂直空间。 */}
-          <div className="workspace-mode-bar" role="toolbar" aria-label="Workspace 模式">
-            {WORKSPACE_MODES.map((m) => {
-              const Icon = m.icon;
-              const sel = workspaceMode === m.id;
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  aria-pressed={sel}
-                  className={`workspace-mode ${sel ? 'sel' : ''}`}
-                  onClick={() => setWorkspaceMode(m.id)}
-                  title={m.label}
-                >
-                  <Icon size={13} className="workspace-mode-icon" aria-hidden="true" />
-                  <span className="workspace-mode-label">{m.label}</span>
-                </button>
-              );
-            })}
-          </div>
-          {workspaceMode !== 'chat' && (
-            <div className="workspace-scaffold" role="note">
-              <span className="workspace-scaffold-tag">未来升级点</span>
-              <span className="workspace-scaffold-text">
-                {workspaceMode === 'split'
-                  ? 'Split：副面板显示同一会话的另一视图（代码 diff / 预览）。当前仍以 Chat 为主阅读面。'
-                  : 'Preview：副面板渲染当前会话产出的 Artifact（文档 / 图表 / 页面）。当前仍以 Chat 为主阅读面。'}
-              </span>
+          {/* 中心列 tab 集（#182）：`Chat` 恒存在 + 能力声明为真的面（PRD §2.1）。
+              Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏
+              （BENCHMARK_SYNTHESIS 明确不采纳让步链三栏 shell）。面名统一由
+              `lib/capabilities.ts` 的登记表给出（声明 `terminal`、渲染成「输出」）。 */}
+          <WorkspaceTabs tabs={tabs} active={activeTab} onSelect={setSelectedSurface} />
+          {/* **每个可见面各有一个 panel**，非激活的用 `hidden` 藏起来（不卸载——切回来
+              时滚动位置与内部状态还在，与 Inspector "折叠 ≠ 卸载"同一取舍）。
+              为什么不渲染"单个会换 id 的 panel"：那样每个 tab 的 `aria-controls` 里
+              只有当前这个能解析到元素，其余全是指向不存在 id 的空引用（读屏据此找不到
+              面板）；一个面一个稳定 id 才对得上。 */}
+          {tabs.map((tab) => (
+            <div
+              key={tab.key}
+              className="workspace-panel"
+              id={`workspace-panel-${tab.key}`}
+              role="tabpanel"
+              aria-labelledby={`workspace-tab-${tab.key}`}
+              hidden={tab.key !== activeTab}
+            >
+              {tab.key === 'chat' ? (
+                <>
+                  <Conversation
+                    conversation={conversation}
+                    loadingHistory={loadingHistory}
+                    density={density}
+                    disclosure={disclosure}
+                    reasoningDisclosure={reasoningDisclosure}
+                    jumpRequest={jumpRequest}
+                    onPresetTask={onPresetTask}
+                    onFocusTool={focusTool}
+                    onOpenSession={handleSelect}
+                    onInspectChild={focusChild}
+                    onFork={handleFork}
+                    goneApprovalIds={goneApprovalIds}
+                    onApprovalGone={onApprovalGone}
+                  />
+                  <Composer
+                    streaming={streaming}
+                    /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
+                       APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
+                       都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
+                    approvalPending={awaitingApproval(
+                      (conversation?.pending_approvals ?? []).filter(
+                        (a) => !goneApprovalIds.has(a.approval_id),
+                      ),
+                    )}
+                    onSubmit={handleSubmit}
+                    onCancel={cancelStream}
+                    presetTask={presetTask}
+                    models={models}
+                    selectedModel={selectedModel}
+                    onModelChange={handleModelChange}
+                    permissionModes={permissionModes}
+                    selectedPermissionMode={selectedPermissionMode}
+                    onPermissionModeChange={setSelectedPermissionMode}
+                    agentProfiles={agentProfiles}
+                    selectedAgentProfile={selectedAgentProfile}
+                    onAgentProfileChange={setSelectedAgentProfile}
+                    reasoningEfforts={reasoningEfforts}
+                    selectedReasoningEffort={selectedReasoningEffort}
+                    onReasoningEffortChange={setSelectedReasoningEffort}
+                    contextProviders={contextProviders}
+                    selectedContextProviders={selectedContextProviders}
+                    onContextProvidersChange={setSelectedContextProviders}
+                  />
+                </>
+              ) : null}
+              {tab.key === 'terminal' ? (
+                /* 「输出」面（#190）：聚合本会话命令输出，只读如实——面内明示"无交互终端"。
+                   与对话里的工具卡共用 `ToolOutputStream`（同一渲染器，AC9）。 */
+                <OutputPanel tools={tools} />
+              ) : null}
+              {tab.key === 'changes' ? (
+                /* 「文件/改动」面（#189）：本会话改动过的文件 + 逐文件 diff。
+                   数据是事件的投影（`allTools` → `ToolCall.diff`），不另存一份。 */
+                <ChangesPanel tools={tools} sessionId={sessionId} />
+              ) : null}
             </div>
-          )}
-          <Conversation
-            conversation={conversation}
-            loadingHistory={loadingHistory}
-            density={density}
-            disclosure={disclosure}
-            reasoningDisclosure={reasoningDisclosure}
-            jumpRequest={jumpRequest}
-            onPresetTask={onPresetTask}
-            onFocusTool={focusTool}
-            onOpenSession={handleSelect}
-            onInspectChild={focusChild}
-            onFork={handleFork}
-          />
-          <Composer
-            streaming={streaming}
-            /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。 */
-            approvalPending={(conversation?.pending_approvals.length ?? 0) > 0}
-            onSubmit={handleSubmit}
-            onCancel={cancelStream}
-            presetTask={presetTask}
-            models={models}
-            selectedModel={selectedModel}
-            onModelChange={handleModelChange}
-            permissionModes={permissionModes}
-            selectedPermissionMode={selectedPermissionMode}
-            onPermissionModeChange={setSelectedPermissionMode}
-            agentProfiles={agentProfiles}
-            selectedAgentProfile={selectedAgentProfile}
-            onAgentProfileChange={setSelectedAgentProfile}
-            reasoningEfforts={reasoningEfforts}
-            selectedReasoningEffort={selectedReasoningEffort}
-            onReasoningEffortChange={setSelectedReasoningEffort}
-            contextProviders={contextProviders}
-            selectedContextProviders={selectedContextProviders}
-            onContextProvidersChange={setSelectedContextProviders}
-          />
+          ))}
         </section>
 
         <StepDetail
@@ -824,6 +970,9 @@ export default function App() {
           onFocusTool={focusTool}
           onFocusEvent={focusEvent}
           onJumpToStream={jumpToStream}
+          onJumpToApproval={jumpToApproval}
+          panel={panel}
+          onPanelAction={onPanelAction}
         />
       </main>
 

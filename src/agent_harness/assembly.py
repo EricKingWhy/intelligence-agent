@@ -310,17 +310,17 @@ async def build_runtime(
         )
 
     def _render_runtime_context() -> str:
-        """渲染运行时上下文快照（T7 / ADR-0023 D8）——每次 build 调用一次。
+        """渲染运行时上下文快照（T7 / ADR-0023 D8；BUG-013 瘦身）——每次 build 一次。
 
         事实来源全部取**当前**值，不缓存：
         - `cwd`：当前进程工作目录；
         - `os`：`platform.system()` + `release()`；
         - `date`：本地日期，只到日（用 `datetime.now()` 会让每次 build 文本都变，
-          既毁 prefix cache 又难断言）；
-        - `model`：`config.model_name`（本次**实际**模型），不是 `settings.model_name`
-          ——用户用 `model_name` 参数选目录里的模型时后者可能为空；
-        - `tools`：**收窄后** registry 的工具名——coding profile 不该在快照里列出
-          它用不了的工具（与 T6 收集 guidance 同一原则）。
+          既毁 prefix cache 又难断言）。
+
+        BUG-013 瘦身：**不再渲染 `model` / `tools`**——工具清单已在 system prompt
+        的 tool guidance 区（静态能力），模型名运行时可查；快照紧贴最新用户消息，
+        列工具会诱导模型把对话任务误判为工具任务。
 
         产物落 `meta_user`：快照是 user-role 消息，不是 system-role。
         """
@@ -330,8 +330,6 @@ async def build_runtime(
             # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
-            "model": config.model_name,
-            "tools": ", ".join(sorted(tool.name for tool in registry.list())),
         }).meta_user_text
 
     return AgentRuntime(

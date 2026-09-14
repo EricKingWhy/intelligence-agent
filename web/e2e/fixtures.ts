@@ -51,6 +51,32 @@ export interface ApiMock {
   reasoningEfforts?: unknown[];
   /** GET /api/context-providers（Context Provider 清单；当前诚实返空） */
   contextProviders?: unknown[];
+  // ── #182 能力声明显隐 ──
+  /** GET /api/capabilities 的条目（形状 = 后端 `web/app.py:934-943`；用
+   *  `capabilityFixture` 造）。
+   *
+   *  **缺省 = 空列表**——这正是后端 `CAPABILITIES=""` 时的真实响应（`{"capabilities":[]}`），
+   *  前端据此落到 PRD 缺省语义（chat + timeline）。这里**不**给一个"默认全 true"的
+   *  省事值：声明是能力的事，mock 给什么就该渲染什么（否则绿灯只证明"前端与我的假
+   *  后端一致"——本仓已栽过这个坑）。 */
+  capabilities?: unknown[];
+  /** capabilities 端点直接回错误（老后端 404 / 服务异常）→ 前端降级为缺省语义。 */
+  capabilitiesError?: { status: number; detail: string };
+  // ── #185 路由 / #186 消费：GET /api/sessions/{id}/artifacts/{aid} ──
+  /** 内容切片（形状 = 后端 `ArtifactSlice.model_dump()`）。 */
+  artifactContent?: unknown;
+  /** 直接回错误（404 不在本会话 / 503 没配存储 / 422 形态非法）。 */
+  artifactContentError?: { status: number; detail: string };
+  /** 拦截口（计数 / 按 artifact_id 给不同内容）；返回 true = 已处理。 */
+  onArtifactGet?: (route: Route, artifactId: string) => Promise<boolean> | boolean;
+  /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。
+   *  为什么要这个口子：#182 落地时**没有任何非 Chat 的面有实现**，而 #189/#190 落地后
+   *  **真实后端的默认响应仍然是 `changes:false, terminal:false`**（`web/app.py:918-927`
+   *  的保守默认，7 个 capability descriptor 没有一个声明 `surfaces`——见 issue #193），
+   *  所以"后端真实默认"这条路径渲染出来依旧只有 `['Chat']`。要让"声明为真 → 出现"可观测，
+   *  用例必须自己注入声明；不数请求的话，"前端压根没调这个端点"这种回归会让整套用例照样
+   *  全绿（声明就成了装饰品）。返回 false 走下面的默认分支。 */
+  onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
   /** POST /api/sessions/{id}/model（T7 #137 模型切换；缺省 200 → 回传请求的
@@ -69,6 +95,18 @@ export interface ApiMock {
    *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
    *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
   onApprovePost?: (route: Route) => Promise<void> | void;
+  // ── #172 / ADR-0029 会话硬删 ──
+  /** 指定 id 的 DELETE /api/sessions/{id} 直接回这个错误——用来构造只在真机上才会
+   *  自然出现的拒绝：409（有在途 run / 有挂起审批 / 是 fork 父会话；**状态码相同**，
+   *  只有 detail 原句不同）与 404（"这个会话本就不在了"，第二次删除）。
+   *
+   *  status 404 的条目会**同时**把它从会话状态里摘掉：真后端在那一刻它确实不在，
+   *  留着会让重拉之后那一行又冒出来——mock 语义与真机相反（#155 轮栽过这个坑）。
+   *
+   *  不设 = 按真后端语义**成功**：真的从会话列表与项目账本里摘掉它，`events` 取行上
+   *  的 `event_count`（真后端也是删之前取），`detached_from_projects` 数它进过几个
+   *  账本。所以"删完行没了、项目计数也掉了"考的是界面跟着后端走，不是本地隐藏。 */
+  sessionDeleteErrors?: Record<string, { status: number; detail: string }>;
   // ── WS-5 / #155 项目分组 ──
   /** 项目 fixture（缺省 = 无项目 → 所有会话都在未分组区）。
    *
@@ -175,7 +213,9 @@ export function routeApi(page: Page, mock: ApiMock): void {
   // ── WS-5 #155：可变状态（每测试一份，互不串味）──
   // 注意 sessions **持有调用方数组的引用**，不拷贝：既有 spec 的约定是"fork 成功后
   // 往自己的 sessions 数组里 push child，下一次 GET 就能看到"（b-fork.spec.ts 依赖
-  // 这一点）。所以本车道只在原地改行的 `workspace` 字段，既不新增也不删除行。
+  // 这一点）。除 #172 的硬删分支外，本车道只在原地改行的 `workspace` 字段，既不新增
+  // 也不删除行；硬删是**真的**删（`splice`）——那正是它的语义，调用方的数组也跟着变
+  // （spec 据此断言"删完重拉就没有这一行了"）。
   const sessionState: unknown[] = mock.sessions ?? [];
   const projectState: ProjectFixture[] = (mock.projects ?? []).map((p) => ({
     ...p,
@@ -197,6 +237,21 @@ export function routeApi(page: Page, mock: ApiMock): void {
     updated_at: T,
   });
   const findProject = (id: string) => projectState.find((p) => p.id === id);
+  /** 从项目账本里摘掉这个会话，返回**实际摘掉几个账本**（真后端
+   *  `WorkspaceIndex.detach_session` 的返回值就是它，`detached_from_projects` 用它）。
+   *  硬删的成功分支与 404 分支共用——404 那条（"别处已经删了"）在真后端里账本也早
+   *  就解除了，留着会让 rail 报一条"n 条会话日志缺失"的假缺失。 */
+  const detachFromLedgers = (sessionId: string): number => {
+    let detached = 0;
+    for (const p of projectState) {
+      const at = p.session_ids.indexOf(sessionId);
+      if (at >= 0) {
+        p.session_ids.splice(at, 1);
+        detached += 1;
+      }
+    }
+    return detached;
+  };
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({ status, body: JSON.stringify(body), contentType: 'application/json' });
   /** 把某会话的 workspace 引用同步成"它现在属于谁"——与真实后端一致
@@ -276,6 +331,52 @@ export function routeApi(page: Page, mock: ApiMock): void {
       sessionEvents.set(sid, frames); // durable log = 刚才流的那些帧（见 /events 分支）
       return fulfillSse(route, frames);
     }
+    // ── #185 / #186：artifact 内容读取（只读端点）──
+    const artifactMatch = /^\/api\/sessions\/([^/]+)\/artifacts\/([^/]+)$/.exec(path);
+    if (artifactMatch && req.method() === 'GET') {
+      const aid = decodeURIComponent(artifactMatch[2]);
+      if (mock.onArtifactGet) {
+        const handled = await mock.onArtifactGet(route, aid);
+        if (handled) return undefined;
+      }
+      const forced = mock.artifactContentError;
+      if (forced) return json(route, { detail: forced.detail }, forced.status);
+      return json(route, mock.artifactContent ?? { artifact_id: aid, lines: [], total_lines: 0, returned_lines: 0, truncated: false });
+    }
+    // ── #172 / ADR-0029 会话硬删（有状态 mock：语义对齐 `web/app.py::delete_session`）──
+    const sessionDeleteMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);
+    if (sessionDeleteMatch && req.method() === 'DELETE') {
+      const sid = decodeURIComponent(sessionDeleteMatch[1]);
+      const forced = mock.sessionDeleteErrors?.[sid];
+      if (forced) {
+        // 404 的条目**同时**摘掉这一行与它在项目账本里的条目：真后端在那一刻它确实
+        // 不在（第二次删除就是这个），而用户走完一次真删时账本也已经解除过了——
+        // 留在状态里会让重拉之后那行又冒出来、还带一条"n 条会话日志缺失"的假缺失。
+        if (forced.status === 404) {
+          const at404 = sessionState.findIndex(
+            (s) => (s as Record<string, unknown>)['session_id'] === sid,
+          );
+          if (at404 >= 0) sessionState.splice(at404, 1);
+          detachFromLedgers(sid);
+        }
+        return json(route, { detail: forced.detail }, forced.status);
+      }
+      const at = sessionState.findIndex(
+        (s) => (s as Record<string, unknown>)['session_id'] === sid,
+      );
+      if (at < 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      const row = sessionState[at] as Record<string, unknown>;
+      // 事件数在**删之前**取：删完只剩文件系统，无从统计（真后端同一顺序）。
+      const events = typeof row['event_count'] === 'number' ? row['event_count'] : 0;
+      // 真后端的第二条判据：日志为空（event_count == 0）也是 404——"删得掉"与"看得见"
+      // 永远一致，不给出一个列表里没有内容的 id 的删除假回执。**什么都不删**。
+      if (events === 0) return json(route, { detail: `session '${sid}' not found` }, 404);
+      sessionState.splice(at, 1);
+      // 项目账本真的摘掉它，并按实际摘掉的账本数报 `detached_from_projects`——
+      // "删完项目计数也掉了"这条断言因此考的是界面跟着后端语义走，而不是本地把行藏起来。
+      const detached = detachFromLedgers(sid);
+      return json(route, { id: sid, deleted: true, events, detached_from_projects: detached });
+    }
     if (/^\/api\/sessions\/[^/]+\/events$/.test(path)) {
       // 带 cwd 建的会话：它的 durable log **就是**刚才流出来的那些帧（真后端同理——
       // run 收尾后前端会回读日志对账）。不给这份日志，流的结论会被下一次回读清空，
@@ -307,6 +408,17 @@ export function routeApi(page: Page, mock: ApiMock): void {
     }
     if (path === '/api/context-providers') {
       return route.fulfill({ status: 200, body: JSON.stringify({ providers: mock.contextProviders ?? [] }), contentType: 'application/json' });
+    }
+    if (path === '/api/capabilities') {
+      if (mock.onCapabilitiesGet && (await mock.onCapabilitiesGet(route))) return;
+      if (mock.capabilitiesError) {
+        return json(route, { detail: mock.capabilitiesError.detail }, mock.capabilitiesError.status);
+      }
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ capabilities: mock.capabilities ?? [] }),
+        contentType: 'application/json',
+      });
     }
     if (/^\/api\/sessions\/[^/]+\/model$/.test(path) && req.method() === 'POST') {
       if (mock.onModelPost) return mock.onModelPost(route);
@@ -601,6 +713,25 @@ export const CONTEXT_PROVIDERS = [
   { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
 ];
 
+/** 能力条目 fixture（形状 = 后端 `web/app.py:934-943`）。
+ *
+ *  `surfaces` **只写要断言的键**：省略的键前端按"未声明 → 保守取假"处理
+ *  （与后端"未声明 surfaces 的 capability 只保证 chat/timeline"同方向）。
+ *  传 `actions` 无意义（本批不消费），省略。 */
+export function capabilityFixture(
+  surfaces: Record<string, boolean>,
+  id = 'coding',
+): Record<string, unknown> {
+  return {
+    id,
+    display_name: id,
+    version: '1',
+    provider_name: 'builtin',
+    surfaces,
+    actions: {},
+  };
+}
+
 // ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 >5 条）──
 // 阈值速查（源码）：ModelPicker 用 `models.length + 1 > 5`（默认链算 1 条）；
 // ControlPicker / ContextProviderPicker 用 `entries.length > 5`。
@@ -664,6 +795,10 @@ export async function pickControl(
   await page.keyboard.press('Enter');
   await expect(trigger).toContainText(expected);
   await page.keyboard.press('Escape');
+  // 退出动画期间 listbox 仍在 DOM 且可命中（与上方 `:visible` 注释同一成因）。
+  // 不等它真正卸载，下一次 open 的 Enter 会撞在正在关闭的浮层上——表现为
+  // 「浮层像是开了，选中却没生效」，且只在连续两次调用时复现（探针实测）。
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
 }
 
 /** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。
