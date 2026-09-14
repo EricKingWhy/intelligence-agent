@@ -9,11 +9,11 @@
 
 | 车道 | 内容 | 触发 |
 | --- | --- | --- |
-| vitest 默认 | 纯函数/投影/SSR 契约（472 用例 / 27 文件） | 每次提交；e2e/** 已排除 |
-| Playwright 本骨架 | mock SSE 终态矩阵（86 用例 = 43×2 档，16 个 spec） | `pnpm exec playwright test --workers=2`（手动/夜间） |
+| vitest 默认 | 纯函数/投影/SSR 契约（813 用例 / 48 文件） | 每次提交；e2e/** 已排除 |
+| Playwright 本骨架 | mock SSE 终态矩阵（310 用例 = 155×2 档，36 个 spec） | `pnpm exec playwright test --workers=2`（手动/夜间） |
 | 联调车道 | 真模型、鉴权、流式中间态、长稳 | 后端集成后（spec 03 §21 完整矩阵） |
 
-> 计数随测试增删同步更新——漂过四次（351→430→443→472 / 12→80→86），改测试时顺手改这里。
+> 计数随测试增删同步更新——漂过五次（351→430→443→472→813 / 12→80→86→310，最近一次是 #181 顺手校准），改测试时顺手改这里。
 > 口径以命令输出为准：`npx vitest run` 的 `Tests` 行与 `npx playwright test --list` 的条数。
 
 ## 场景映射（spec 01 §22 A-I）
@@ -29,6 +29,7 @@
 | 分叉（T7 #137） | `e2e/b-fork.spec.ts` | from_seq = user/message 的 **seq**（非 turn 序号）、422 detail 可见、第 1 轮「空会话」提示、注入消息无入口 | BUG-001 回归锁；夹具 `user/message` 不写 step_id（真实信封形状） |
 | 恢复 + 中断横幅（T8 #138） | `e2e/d-recover.spec.ts` | 成功反馈不被 `canRecover` 门回收、`repaired=0` 两义区分、409 需人工裁决、中断横幅 null/非 null 文案 | 恢复成功是**门外的**提示——挂门内会被入口卸载一并带走 |
 | 滚动跟随（#95） | `e2e/j-scroll.spec.ts` | `overflow-anchor: none`、空闲态无「↓ 最新」浮标、**真实滚轮**上滚后浮现浮标且位置不被拽回、点浮标回底并恢复跟随 | 末条用真实 `page.mouse.wheel`（浏览器事件）驱动，覆盖「上滚脱离」路径；「每个 delta 到达时是否拽回」依赖帧到达时序，仍按 HANDOFF §C.5 在真机验证 |
+| 窄屏触摸可达（#181） | `e2e/touch-rail.spec.ts` | `(hover: none)` 档：会话行与项目行的 ⋯ 在**空闲态**即 `opacity:1` 且 `tap()` 能开菜单（两层同款）；槽位让给 ⋯ 后「在跑」与「目录缺失」两个状态信号仍挂在 ⋯ 上 | 触摸上下文 = `hasTouch + isMobile`（桌面输入的窄屏用例 `w-session-delete` / `r-project-groups` 覆盖不到这一档） |
 | B/D/G | 未建 | B（多轮上下文）/D（compact 降档）/G（长会话性能）——真模型/长跑场景 | 联调车道 |
 
 > 命名注意：文件名前缀（`b-fork` / `d-recover` / `j-scroll`）是**增量序号**，与

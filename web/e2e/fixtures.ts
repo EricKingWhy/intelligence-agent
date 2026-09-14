@@ -211,6 +211,14 @@ export function sessionRow(
   };
 }
 
+/** 按会话 id 定位侧栏里的一行（行内 id 文本是 `session_id.slice(0, 12)`，所以短 id
+ *  才匹配得上）。放在这里而不是各 spec 各写一份：窄屏 / 删会话 / 触摸可达几个车道都
+ *  用同一条定位（见本文件顶部"多个 spec 共用同一份，避免各自复制后静默漂移"）。 */
+export const rowOf = (page: Page, sessionId: string) =>
+  page
+    .locator('.session-row')
+    .filter({ has: page.locator('.session-item-id', { hasText: sessionId }) });
+
 export function routeApi(page: Page, mock: ApiMock): void {
   // ── WS-5 #155：可变状态（每测试一份，互不串味）──
   // 注意 sessions **持有调用方数组的引用**，不拷贝：既有 spec 的约定是"fork 成功后

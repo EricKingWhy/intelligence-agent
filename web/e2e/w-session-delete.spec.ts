@@ -18,7 +18,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { RUN, T, routeApi, sessionRow, type FrameSpec } from './fixtures';
+import { RUN, T, routeApi, rowOf, sessionRow, type FrameSpec } from './fixtures';
 
 /** `lib/sessionRestore.ts::SELECTED_SESSION_KEY`（记住选中的会话，BUG-005）。 */
 const KEY = 'ahi.selectedSession';
@@ -44,9 +44,6 @@ const HISTORY: FrameSpec[] = [
  *  `api.test.ts` 对回执的透传断言。这里锁的是"这句话以正确的数字出现"。 */
 const projectSession = () => sessionRow('s2', { id: 'p1', title: '项目 alpha' }, { event_count: 42 });
 const freeSession = () => sessionRow('s1', null, { event_count: 7 });
-
-const rowOf = (page: Page, sessionId: string) =>
-  page.locator('.session-row').filter({ has: page.locator('.session-item-id', { hasText: sessionId }) });
 
 const dialog = (page: Page) => page.locator('.project-dialog');
 const project = (page: Page) => page.locator('.rail-project').filter({ hasText: '项目 alpha' });
