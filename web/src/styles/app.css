@@ -33,8 +33,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   flex: 1;
   display: grid;
   /* #183 AC6：第三列宽度由 `--inspector-w` 给（App 的视图状态，320→480，不持久化）。
-     回退值 320 与常量 INSPECTOR_MIN_W 一致——两端各写一个数正是漂移的起点。 */
-  grid-template-columns: 240px minmax(0, 1fr) var(--inspector-w, 320px);
+     回退值 = 初始宽度 `INSPECTOR_DEFAULT_W`（340，#197），不是下限 320——App 首帧就
+     内联了这个变量，但若两者不等，任何"变量没写上"的降级路径都会先画成 320 再跳
+     20px。取值范围与初始值是两个数，别把回退值当成"安全的那个下限"。 */
+  grid-template-columns: 240px minmax(0, 1fr) var(--inspector-w, 340px);
   min-height: 0;
   /* SDD §9: chrome quieter than workspace. The container is the quietest
    * tone (canvas) so the rail/inspector (chrome) and workspace sit on top

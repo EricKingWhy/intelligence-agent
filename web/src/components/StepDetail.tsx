@@ -276,7 +276,10 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     if (!drag) return;
     onPanelAction({
       type: 'resize',
-      width: clampInspectorWidth(drag.startW + (e.clientX - drag.startX), drag.available),
+      /* 面板位于三栏布局的最右列，手柄挂在它的**左缘**：指针向右移动 ⇒ 中心列变宽
+         ⇒ 面板变窄。所以宽度 = `startW − Δ`（#197 曾写成 `+`：右拖变宽，与"拖动手柄"
+         的直觉相反）。 */
+      width: clampInspectorWidth(drag.startW - (e.clientX - drag.startX), drag.available),
     });
   };
   const onResizeEnd = (e: ReactPointerEvent<HTMLElement>) => {
@@ -286,7 +289,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
   /** 拖宽手柄的键盘通路（AC7：面板控制要么键鼠双通，要么别做成分隔条——
-   *  一个 `role="separator"` 不能被键盘操作是**假**的可访问性声明）。 */
+   *  一个 `role="separator"` 不能被键盘操作是**假**的可访问性声明）。
+   *  方向与指针路径**同源**（#197）：ArrowRight = 把"手柄"向右推 ⇒ 面板变窄。
+   *  只翻转拖拽、不翻转键盘，等于在同一根分隔条上留下两套矛盾方向。 */
   const onResizeKeyDown = (e: ReactKeyboardEvent<HTMLElement>) => {
     const step = e.shiftKey ? 64 : 16;
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -294,7 +299,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     e.stopPropagation(); // 与清单 ↑/↓ 分开：这里左右调宽度
     const workspace = panelRef.current?.parentElement?.querySelector<HTMLElement>('.app-workspace');
     const available = (workspace?.clientWidth ?? 0) + panel.width;
-    const next = panel.width + (e.key === 'ArrowRight' ? step : -step);
+    const next = panel.width + (e.key === 'ArrowRight' ? -step : step);
     onPanelAction({ type: 'resize', width: clampInspectorWidth(next, available) });
   };
 

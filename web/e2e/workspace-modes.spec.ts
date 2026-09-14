@@ -175,14 +175,17 @@ test('AC7：三区几何不变，Chat 的对话与输入框照常渲染', async 
   routeApi(page, {});
   await page.goto('/');
 
-  // 中心列多出的那一层（tabpanel 容器）不得改动三区几何：仍是 240 | 1fr | 320。
+  // 中心列多出的那一层（tabpanel 容器）不得改动三区几何：仍是 240 | 1fr | 面板默认宽。
+  // 第三轨是 App 内联的 `--inspector-w`（初始 340，#197），不是下限 320——这里锁的是
+  // "多了一层容器没把栅格改样"，第三轨的**具体值**由 inspectorPanel.test.ts 的
+  // INSPECTOR_DEFAULT_W 断言负责，别把两件事混成一条。
   const columns = await page
     .locator('.app-regions')
     .evaluate((el) => getComputedStyle(el).gridTemplateColumns);
   const tracks = columns.split(' ').filter((t) => t.endsWith('px'));
   expect(tracks).toHaveLength(3);
   expect(tracks[0]).toBe('240px');
-  expect(tracks[2]).toBe('320px');
+  expect(tracks[2]).toBe('340px');
 
   // Conversation 与 Composer 都还在（新容器必须把 flex 纵向布局原样传给它们）。
   await expect(page.getByLabel('Agent 任务')).toBeVisible();

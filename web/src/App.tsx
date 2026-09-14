@@ -37,7 +37,7 @@ import {
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
-import { INSPECTOR_MIN_W } from './lib/inspectorPanel';
+import { INSPECTOR_DEFAULT_W } from './lib/inspectorPanel';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
@@ -257,7 +257,7 @@ export default function App() {
   const [panel, setPanel] = useState({
     pinned: false,
     expanded: false,
-    width: INSPECTOR_MIN_W,
+    width: INSPECTOR_DEFAULT_W,
     peekOpen: false,
   });
   /* 选中即预览（AC3：鼠标点击即选中即预览）。reducer 里改 peekOpen 会让"选一个新
