@@ -1840,3 +1840,55 @@ e2e 里"归档行不算缺失"必须带反向对照（账本里放一个**真**�
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
 集成提示词见 `docs/INTEGRATION_PROMPT_171_SESSION_ARCHIVE.md`（在 `feat/backend`，与后端半
 同一份——跨端票合成一个入口，含合并顺序、契约要点与残余）。
+
+---
+
+## 第二十五轮：#195（2026-09-15，跨端：后端 `3d9dc28` + 前端 `3d3e591`）
+
+**票**：用户消息动作行 + 编辑（含流式输入解锁）。后端半已在 `feat/backend`
+`3d9dc28`（契约冻结见 `docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`），
+本 worktree 完成前端半。
+
+### 做了什么
+
+- **Composer**：`locked = approvalPending`（D10：streaming 不再禁用输入——
+  「本页有活流」≠「服务端有在途 run」，#196 根因）；Enter=queue /
+  Ctrl/Cmd+Enter=steer / Shift+Enter 换行；队列条（排队/引导徽标 + 1 行截断摘要 +
+  编辑/立即/取消 + 「立即发送全部」= POST /queue/flush，仅非 streaming 渲染）。
+- **Conversation**：用户消息动作行（复制 CopyButton / 编辑 / 分叉，§5.3 三图标）；
+  编辑仅**最新一条**用户消息可用（D8：`latestEditableTurn` 排除 superseded/injected/
+  无 seq 轮；其余置灰 + title「只有最新一条消息可以编辑」）；编辑态 = 原地 textarea
+  （Ctrl/Cmd+Enter 保存 / Esc 取消）；被取代轮整段不渲染（§4.5.1，由
+  `message/superseded` → `applySupersedeShadow` 驱动，Timeline 事件照旧）。
+- **useSession**：历史装载后 `GET /queue` 首屏补齐（`restoreUndeliveredFromQueue`
+  替换语义，失败静默降级）；`sendSteer`（复用 /messages mode:steer）；`flushQueue`
+  （409 轮询 3 次后报「仍有在途 run」）；`cancelItem`（404 幂等静默，摘除由
+  queue/cancelled 事件驱动——事件流是唯一事实）。
+- **App**：`handleEditTurn` → sendMessage 带 `supersedes_seq`；队列条四动作接线
+  （「编辑」= 取消原项 + 预填输入框的最小实现）。
+- **projection**（前置 commit 已带）：`supersedeRanges`/`applySupersedeShadow`/
+  `projectUndelivered`；EVENT_SEMANTICS 五条新类型注册（MESSAGE_QUEUED/
+  QUEUE_CANCELLED/STEER_REQUESTED/STEER_APPLIED/QUEUE_CONSUMED → projectUndelivered；
+  MESSAGE_SUPERSEDED → noop + shadow）；「未接线类型」测试对齐（只留 COMPACTION 两条）。
+- **e2e**：`multiturn-queue.spec.ts` 8 条（T11 编辑旧段消失 + supersedes_seq=seq 非
+  step_id / T11b 非最新置灰 / T12 queued JSON 不报错且空队列不渲染 / T12b 首屏补齐
+  队列条 + 中文 aria）；fixtures 补 queue/cancel 端点 mock。
+
+### 测试
+
+tsc ✓ / vitest 828 ✓ / oxlint 0 err（44 warnings 既有）/ e2e 334 ✓ / build ✓。
+
+### 排查记录（供后人）
+
+- T11 首版失败三连：① `events: []` + run/completed → 流收尾后 viewing 重读事件流
+  把对话清空（fixtures 必须提供全量日志，且要用**可变引用**让 POST 后补帧）；
+  ② mock 未发 `message/superseded` → shadow 永不生效；③ 两帧 user/message 同
+  `step_id:1` → 投影按 step 键合并成同一轮、旧问句被新内容覆盖（turn 数组只剩一轮且
+  被标 superseded）——**测试数据问题，非产品 bug**（真后端每 run 生成新 step）。
+- `getByText` 严格模式违规：气泡与 Timeline 摘要行同文 → 定位器收紧到 `.msg-bubble-user`。
+
+### 关单
+
+前端半完成、后端半已完成（3d9dc28）→ **跨端票两半齐**，待本批两轴 review 后
+由用户决定关单时机（本 worktree 不关单：集成顺序 feat/backend → feat/frontend →
+main 由集成 AI 执行）。
