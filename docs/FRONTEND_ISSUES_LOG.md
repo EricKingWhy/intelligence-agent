@@ -2395,3 +2395,42 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
 → 契约字段映射、**与消息编辑无关**，别被名字误导。
 
 **状态**：两条**均未修**（用户明确「你不要执行」）。等用户发来**第二个修复点**，一并收编排期后开工。
+
+---
+
+## 用户报障批次 2（2026-09-14）：Inspector 拖拽方向 + 「模型说没有写工具」（**仅登记，未修**）
+
+用户第二批真机报障。同样**只登记 + 开 issue，不动代码**。完整证据链在 issue 正文里。
+
+### UX-03（issue #197）Inspector 水平拖拽方向反了
+
+**现象**：向右拖把手，右侧面板反而**变大**（直觉应为变小）。
+**需求**：向右拖 = 面板缩小；向左拖 = 面板放大。仅改拖拽方向，保留原样式与 `↔` 控件，不碰面板业务代码。
+
+**根因（定位到行）**：面板右侧停靠、手柄在**面板左缘**，指针右移 `dx>0` 应减小宽度，代码却**加** `dx`——
+`web/src/components/StepDetail.tsx:279` `clampInspectorWidth(drag.startW + (e.clientX - drag.startX), …)`。
+**同源反转**：键盘通路 `:297` 的 `ArrowRight` 也是加宽（同一 `role="separator"` 上键鼠必须同语义）。
+**会红的既有断言**：`web/e2e/y-inspector-peek.spec.ts` 的 AC6（`:222-234` 向右拖到 480、向左拖到 320、
+向右 `>320`）与 AC7（`:248-251` `ArrowRight → 336`）**逐字锁住反向行为**，必须同步翻转（连用例名一起改，
+commit message 写明"方向翻转 + 断言同步"）。
+**⚠ 易误判点**：`INSPECTOR_MIN_W = 320` 且初始宽度就是 320（e2e `:198-200` 断言 `aria-valuenow/min` 均为 320）
+⇒ 修好后**在默认宽度下向右拖没有任何视觉变化**（已夹在下限），只有向左拖会变大。是否调整初始/下限关系属产品取舍，未定。
+**影响面**：`StepDetail.tsx` 1 行必要 + 1 行待定；`clampInspectorWidth`（`lib/inspectorPanel.ts:40-43`）与 CSS 不动。
+
+### OBS-04（issue #198）「模型说没有 write/edit/apply_patch」无法从日志回溯
+
+**现象**：用户问模型有哪些工具，模型答只有 `read`/`glob`/`grep`/`web_search`，并称没有 `write`/`edit`/`apply_patch`。
+**根因（已定案，非幻觉、非未安装）**：那次会话的 Agent 档位是 **「研究审查」(`research_review`)**，
+按 ADR-0020a 用 `registry.filtered(spec.tool_scope)` 收窄了 registry；`_RESEARCH_TOOLS`（`agent/profiles.py:68-71`）
+**不含任何写工具**；`research_review` 的 system prompt 末句就是「**你没有写权限。**」（`prompt/builtin.py:49`），
+模型是在转述它。内置工具本身在 `assembly.py:212-218` **无条件注册**（唯一收窄途径就是 `agent_profile`）。
+**决定性证据**：会话 `f522d4a9-55dc-42c7-b24d-e20320f5f77b`（`D:\intelligence-agent\.agent\workspace\sessions\`，2145 事件 / 13 轮 / 0 次 tool call）
+—— 模型报的 4 项**精确等于** `_RESEARCH_TOOLS` 减去两个未装配的知识库工具，全量注册表是十几个工具。
+**本票要修的是它暴露的三个缺口（不是上面那条设计）**：
+1. `agent_profile` **不落任何日志**（SessionEvent 0 命中；诊断日志字段里根本没有）；
+2. **每个 run 实际拿到的工具清单不落任何日志**（全仓无 `tools=`/`tool_names`，已 grep 确认）；
+3. UI **不提示档位收窄了工具集**，且前端不持久化档位（`App.tsx:145` 默认 null = 全量），刷新后现象不可复现。
+
+**与 #187 的关系**：BUG-013 当时**移除了 runtime context 里的工具清单**（防模型把写作任务误判为工具任务），
+本现象是同一处改动的另一面代价——模型只能靠 tools 参数自省，自述工具的能力变弱。这条权衡必须在 ADR 里写明。
+**与 #196 的边界**：本票只管"可观测/可解释"，`queue`/`steer` 消费侧死路见 #196，别合并成一个改动。
