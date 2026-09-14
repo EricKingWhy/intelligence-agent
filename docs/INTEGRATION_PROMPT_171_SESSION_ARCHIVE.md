@@ -86,6 +86,8 @@ cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --wo
 - 审计：结构化日志出现 `session_archive`，字段只有 `session_id` / `archived` / `entry_point`——**不含**会话内容；
 - UI：kebab →「归档」→ 行消失（**无**确认弹窗）；顶部图标开关 → 行重现且带「已归档」徽标、菜单项变「取消归档」；刷新后开关状态保留（`ahi.showArchived`）。
 
+**关于抖动（实测记录，避免误判）**：本票验证过程中，首次全量 e2e 里有 `u-project-task.spec.ts`（AC11/AC12）2 例与 `o-wait-hint.spec.ts` 1 例失败；**隔离复跑与最终全量（322/322 passed, EXIT=0）全绿**，判定为时序抖动，与本票改动无关。若在 `main` 上再遇到，先隔离复跑该文件再定性（§16.6 已把 `--workers=2` 固定进配置正是为减少这类抖动）。真正与本票有关的那一例是 `l-auth-banner`（见 §1.3 第 2 条），它**每次必红**、不是抖动。
+
 ---
 
 ## 2. 契约（两端逐字对齐，别再改）
