@@ -2957,11 +2957,43 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   opacity: 0.6;
   cursor: not-allowed;
 }
-.composer-send,
-.composer-stop {
+/* #194：右侧动作簇——发送/停止按钮 +（流式时）Esc 提示，共用一个右锚点。
+   锚点从按钮移到这里：缩进/基线完全沿用旧值，所以按钮单独存在时像素位置不变；
+   提示作为它的左邻出现，不再跑到 dock 左下角去压档位行。 */
+.composer-actions {
   position: absolute;
   right: var(--space-sm);
   bottom: var(--space-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  /* 提示不挡交互（真实绑定在 App 全局键监听）；只有按钮可点。 */
+  pointer-events: none;
+}
+.composer-actions > button {
+  pointer-events: auto;
+}
+/* 动作簇的实测宽度（右缩进 8 + 提示 64 + 间距 4 + 按钮 32 = 108，取 124 留余量——
+   提示文案随字体度量浮动，取小了会重新压回档位行）。
+   **必须定义在 dock 上**：消费方 `.composer-controls` 与 `.composer-actions` 是兄弟，
+   定义在簇里的话档位行读不到，`padding-right` 会在计算值阶段落回 0——本票踩过。 */
+.composer-dock {
+  --composer-actions-w: 124px;
+}
+/* 流式中把档位行的右端让给动作簇。
+   为什么必须留：窄工作区（例如 1280 视口 + Inspector 拖到上限 480）下档位行会顶到
+   右端，而簇比按钮宽——不留位时提示会盖住最后一个档位控件（实测确认）。此时让
+   `flex-wrap` 把放不下的档位换行，而不是让它钻到提示底下。
+   `:has()` 由 DOM 反推「此刻是否流式」，不新增一份与 `streaming` 平行的状态（不变量 #22）。 */
+.composer-dock:has(.composer-esc-hint) .composer-controls {
+  padding-right: var(--composer-actions-w);
+}
+.composer-send,
+.composer-stop {
+  /* 绝对定位交给 .composer-actions（本簇的唯一锚点）；按钮自身回到行内。
+     尺寸/圆角/过渡仍是原来的值。 */
+  position: static;
+  flex: 0 0 auto;
   width: 32px;
   height: 32px;
   display: inline-flex;
@@ -2995,18 +3027,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: #fff;
   animation: breathe 2.2s var(--ease-apple) infinite;
 }
-/* Esc 中断提示（Claude Code "esc to interrupt"）：dock 左下角的 kbd 药丸，
- * pointer-events none——提示不挡交互，真实绑定在 App 全局键监听。 */
+/* Esc 中断提示（Claude Code "esc to interrupt"）：动作簇里位于停止按钮左侧的 kbd
+ * 药丸。**不再绝对定位到 dock 左下角**（#194：那里正是档位行，必然叠字），
+ * pointer-events none 由 `.composer-actions` 统一给出。 */
 .composer-esc-hint {
-  position: absolute;
-  left: var(--space-lg);
-  bottom: var(--space-sm);
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
+  white-space: nowrap;
   color: var(--text-tertiary);
   font-size: var(--text-xs);
-  pointer-events: none;
   user-select: none;
 }
 .composer-esc-hint kbd {

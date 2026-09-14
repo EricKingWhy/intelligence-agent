@@ -167,27 +167,34 @@ export const Composer = memo(function Composer({
             />
           </div>
         )}
-        {streaming ? (
-          <>
-            {/* Esc 中断提示（Claude Code "esc to interrupt" 语言）：键位绑定在 App 全局，这里只做可见性 */}
+        {/* #194：右侧动作簇——发送/停止按钮与 Esc 提示**同一处、同一行**。
+            此前提示绝对定位在 dock 左下角，正好压在档位行（模型选择器）上：同一个
+            动作的两个 affordance 被放在了相反的两侧。现在两者共用一个右锚点，按钮
+            的像素位置与改动前完全一致（right/bottom 同一组值），提示作为它的左邻出现。 */}
+        <div className="composer-actions">
+          {streaming && (
+            /* Esc 中断提示（Claude Code "esc to interrupt" 语言）：键位绑定在 App
+               全局，这里只做可见性——所以整个簇 pointer-events: none，只有按钮可点。 */
             <span className="composer-esc-hint" aria-hidden="true">
               <kbd>Esc</kbd> 停止
             </span>
+          )}
+          {streaming ? (
             <button className="composer-stop" onClick={onCancel} aria-label="停止" title="停止">
               <Square size={14} />
             </button>
-          </>
-        ) : (
-          <button
-            className="composer-send"
-            onClick={submit}
-            disabled={locked || !value.trim()}
-            aria-label="发送"
-            title={`发送（${modKey()}+Enter）`}
-          >
-            <ArrowUp size={16} />
-          </button>
-        )}
+          ) : (
+            <button
+              className="composer-send"
+              onClick={submit}
+              disabled={locked || !value.trim()}
+              aria-label="发送"
+              title={`发送（${modKey()}+Enter）`}
+            >
+              <ArrowUp size={16} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
