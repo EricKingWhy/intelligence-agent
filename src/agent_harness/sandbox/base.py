@@ -145,10 +145,15 @@ class Sandbox(ABC):
 
     # —— 路径安全工具（具体方法，子类复用） ——
 
-    def _resolve_within_workspace(self, path: str) -> Path:
+    def resolve_within_workspace(self, path: str) -> Path:
         """把传入路径 resolve 成 workspace 内绝对路径，越界抛 PermissionError。
 
         这是 ADR-0001 路径边界的唯一强制点：所有子类接受路径的方法都先调它。
+
+        **公开**（原 `_resolve_within_workspace`，#191）：Web 层也需要"只校验、不读"这一动作
+        ——`GET .../workspace/git/status|diff` 的 pathspec 要先过边界才能交给 git。
+        与其在 web 层再写一份路径校验（ADR-0001 明确只该有一处），不如把边界本身公开。
+        调用方拿到的是**解析后的绝对路径**；只想校验时忽略返回值即可。
         """
         workspace = self.workspace_root
         resolved = (workspace / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()

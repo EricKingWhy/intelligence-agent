@@ -8,6 +8,7 @@
 条数上界（`CONSOLIDATION_QUERY_LIMIT`）在本模块真正执行，`query_limit` 只是同时告诉上游"别取太多"。
 """
 
+import asyncio
 import copy
 from dataclasses import dataclass
 from typing import Any
@@ -34,6 +35,35 @@ TRUNCATION_MARKER = "…[已截断]"
 
 #: 降级原因前缀（`MemoryWriteOutcome.degraded_reason`）。只带阶段 + 异常类型名，不带异常消息。
 CONSOLIDATION_DEGRADED_PREFIX = "consolidation_failed"
+
+#: 瞬时错误退避重试（BUG-014）：决策失败后先重试一次再降级——与 extractor 同款。
+#: 预算走既有 budget_seconds（重试计入其中），不新增外层预算。
+CONSOLIDATION_RETRY_BACKOFF_SECONDS = 2.0
+
+
+def _is_retryable(error: BaseException) -> bool:
+    """异常是否值得重试：4xx 语义（认证/权限/请求非法）与**预算超时**不重试。
+
+    与 ``extractor._is_retryable`` 同判据（白名单类型会在换 provider 后静默失效，
+    用"有无 4xx 状态"判定）；判定不了（无状态信息）按瞬时处理。
+    额外排除 ``asyncio.TimeoutError``：consolidation 的超时来自内部
+    ``asyncio.timeout(budget)``——是**预算耗尽**语义，重试注定再超时还白等退避。
+    """
+    if isinstance(error, asyncio.TimeoutError):
+        return False
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        status = getattr(cause, "status_code", None) or getattr(cause, "code", None)
+        if isinstance(status, int) and 400 <= status < 500:
+            return False
+        response = getattr(cause, "response", None)
+        resp_status = getattr(response, "status_code", None) or getattr(response, "status", None)
+        if isinstance(resp_status, int) and 400 <= resp_status < 500:
+            return False
+        cause = cause.__cause__ if cause.__cause__ is not cause else None
+    return True
 
 
 @dataclass

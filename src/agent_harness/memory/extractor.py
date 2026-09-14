@@ -142,6 +142,40 @@ def _is_runtime_injected(event: SessionEvent) -> bool:
     return isinstance(marker, str) and bool(marker.strip())
 
 
+#: 瞬时错误退避重试（BUG-014）：LLM 路径失败后先重试一次再降级。上游 500 大多
+#: 瞬时（真机会话 13 次 memory/degraded 显示每轮抽取都因上游 500 零重试直接掉级）。
+_RETRY_BACKOFF_SECONDS = 2.0
+
+#: 不可重试的异常类型：认证/参数类 4xx 错误重试无意义（密钥错、请求构造错），
+#: 直接降级。判定不了的类型按瞬时处理（宁可多试一次，不多掉一级）。
+#: ValidationError 是**解析**错误：同一响应重试结果必然相同，白试一次。
+_NON_RETRYABLE_TYPES: tuple[type[BaseException], ...] = (ValueError,)
+
+
+def _is_retryable(error: BaseException) -> bool:
+    """异常是否值得重试：4xx 语义（认证/权限/请求非法）不重试，其余重试。
+
+    上游 SDK 异常形状各异（openai 的 ``status_code``、HTTPStatusError 的
+    ``response.status``），用"有无 4xx 状态"判定而不是白名单类型——白名单会
+    在换 provider 后静默失效。判定不了（无状态信息）按瞬时处理。
+    """
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, _NON_RETRYABLE_TYPES):
+            return False
+        status = getattr(cause, "status_code", None) or getattr(cause, "code", None)
+        if isinstance(status, int) and 400 <= status < 500:
+            return False
+        response = getattr(cause, "response", None)
+        resp_status = getattr(response, "status_code", None) or getattr(response, "status", None)
+        if isinstance(resp_status, int) and 400 <= resp_status < 500:
+            return False
+        cause = cause.__cause__ if cause.__cause__ is not cause else None
+    return True
+
+
 class MemoryExtractor:
     def __init__(self, model: Any, timeout_seconds: float = 15.0) -> None:
         self._model = model
@@ -160,48 +194,67 @@ class MemoryExtractor:
         events = [e for e in events if not _is_runtime_injected(e)]
         if not events:
             return ExtractionOutcome()
-        try:
-            async with asyncio.timeout(self._timeout):
-                response = await self._model.ainvoke([
-                    SystemMessage(
-                        content=DEFAULT_REGISTRY.assemble(
-                            "aux:memory_extraction"
-                        ).system_text
-                    ),
-                    HumanMessage(content=json.dumps(self._clip_events(events), ensure_ascii=False)),
-                ])
-            if getattr(response, "tool_calls", None):
-                raise ValueError("Memory extraction cannot call tools")
-            candidates = self._parse_candidates(response.content)
-            # provenance 约束（C4）：窗口内没有任何 user/message 时，LLM 声明的
-            # USER 候选降级为 SESSION——纯工具输出窗口里的注入指令不能被洗成
-            # 跨会话（USER）记忆。降级带显式 provenance 标记，可观察、可追溯。
-            has_user_message = any(e.type == USER_MESSAGE for e in events)
-            results: list[tuple[MemoryScope, str, dict]] = []
-            for c in candidates:
-                metadata = {"importance": c.importance}
-                scope = MemoryScope(c.scope)
-                if scope is MemoryScope.USER and not has_user_message:
-                    scope = MemoryScope.SESSION
-                    metadata["provenance"] = "demoted_no_user_message"
-                results.append((scope, c.content, metadata))
-            return ExtractionOutcome(results)
-        except Exception as error:  # noqa: BLE001 — 结构/模型失败走纯规则，异常文本不持久化。
-            detail = _diagnostic_detail(error)
-            # debug 级：调用方（writeback）会用 warning + memory/degraded 事件上报，
-            # 这里再 warning 一次只会让同一次回退在日志里出现两遍。
-            logger.debug("Memory extraction degraded to heuristic: %s", detail)
+        # BUG-014：瞬时错误退避重试 1 次——4xx 语义（认证/参数）不重试直接降级。
+        # 重试计入既有 asyncio.timeout 预算内，不新增外层预算。
+        retry_marker = ""
+        for attempt in (0, 1):
             try:
-                return ExtractionOutcome(
-                    self._heuristic_extract(events), f"heuristic_fallback: {detail}"
-                )
-            except Exception as heuristic_error:  # 规则路径也失败 → 空结果（不伪造候选）
-                # 归因必须指向**规则路径自己**的异常：带上 LLM 阶段的类型名会
-                # 把"正则抽不出来"说成"模型输出有问题"，正好毁掉本次修复的可信度。
-                logger.exception("Memory heuristic extraction failed")
-                return ExtractionOutcome(
-                    [], f"heuristic_unavailable: {type(heuristic_error).__name__}"
-                )
+                return await self._extract_llm(events)
+            except Exception as error:  # noqa: BLE001 — 结构/模型失败可重试/降级。
+                if attempt == 0 and _is_retryable(error):
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+                    retry_marker = "after_1_retry"
+                    continue
+                return self._degrade(events, error, retry_marker)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _extract_llm(self, events: list[SessionEvent]) -> ExtractionOutcome:
+        async with asyncio.timeout(self._timeout):
+            response = await self._model.ainvoke([
+                SystemMessage(
+                    content=DEFAULT_REGISTRY.assemble(
+                        "aux:memory_extraction"
+                    ).system_text
+                ),
+                HumanMessage(content=json.dumps(self._clip_events(events), ensure_ascii=False)),
+            ])
+        if getattr(response, "tool_calls", None):
+            raise ValueError("Memory extraction cannot call tools")
+        candidates = self._parse_candidates(response.content)
+        # provenance 约束（C4）：窗口内没有任何 user/message 时，LLM 声明的
+        # USER 候选降级为 SESSION——纯工具输出窗口里的注入指令不能被洗成
+        # 跨会话（USER）记忆。降级带显式 provenance 标记，可观察、可追溯。
+        has_user_message = any(e.type == USER_MESSAGE for e in events)
+        results: list[tuple[MemoryScope, str, dict]] = []
+        for c in candidates:
+            metadata = {"importance": c.importance}
+            scope = MemoryScope(c.scope)
+            if scope is MemoryScope.USER and not has_user_message:
+                scope = MemoryScope.SESSION
+                metadata["provenance"] = "demoted_no_user_message"
+            results.append((scope, c.content, metadata))
+        return ExtractionOutcome(results)
+
+    def _degrade(
+        self, events: list[SessionEvent], error: Exception, retry_marker: str,
+    ) -> ExtractionOutcome:
+        detail = _diagnostic_detail(error)
+        if retry_marker:
+            detail = f"{detail}({retry_marker})"
+        # debug 级：调用方（writeback）会用 warning + memory/degraded 事件上报，
+        # 这里再 warning 一次只会让同一次回退在日志里出现两遍。
+        logger.debug("Memory extraction degraded to heuristic: %s", detail)
+        try:
+            return ExtractionOutcome(
+                self._heuristic_extract(events), f"heuristic_fallback: {detail}"
+            )
+        except Exception as heuristic_error:  # 规则路径也失败 → 空结果（不伪造候选）
+            # 归因必须指向**规则路径自己**的异常：带上 LLM 阶段的类型名会
+            # 把"正则抽不出来"说成"模型输出有问题"，正好毁掉本次修复的可信度。
+            logger.exception("Memory heuristic extraction failed")
+            return ExtractionOutcome(
+                [], f"heuristic_unavailable: {type(heuristic_error).__name__}"
+            )
 
     @staticmethod
     def _parse_candidates(content: Any) -> list[_Candidate]:

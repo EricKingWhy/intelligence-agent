@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")
     embedding_dimensions: int = Field(default=1024, gt=0)
+    # BUG-014：记忆检索外层超时（此前 context provider 写死 5s，比 embedding SDK
+    # 的 15s 还紧——代理转发场景必超时）。Settings 注入式，与既有超时字段同风格。
+    memory_search_timeout_seconds: float = Field(default=10.0, gt=0)
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
@@ -93,6 +96,16 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"
+    # artifact 本地落盘根目录（spec 06 §3 的默认 Provider：Local filesystem，
+    # "开发/小型部署"）。落盘形态是 `<artifact_dir>/<session_id>/<artifact_id>`——
+    # 与对象存储的 key 约定 `{session_id}/{artifact_id}` 逐段同构，三个 Provider
+    # 因此同形，读取接口保持 Provider 无关。
+    #
+    # 为什么**独立于** workspace_dir（而不是派生）：ADR-0027 之后 workspace 可能指向
+    # **用户的真实仓库**，artifact 绝不能落进去——那条路径既要能被会话硬删清理
+    # （ADR-0029 D2：只删 harness 自己拼出来的路径），又不能碰用户目录。
+    # 默认值落在 `.agent/` 下与 workspace 同族（.gitignore 已整目录忽略运行时产物）。
+    artifact_dir: str = ".agent/artifacts"
     # detached-run 孤儿回收宽限期（秒，ADR-0016 §2.1）：零订阅者连续超过
     # 该时长 → run 被取消收尾（run/failed(reason=orphaned)）。有订阅者期间
     # 不计时；≤0 = 不回收（不推荐：无人观看的 run 会烧到自然终态）。

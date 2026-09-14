@@ -77,7 +77,12 @@ def test_factory_with_flag_appends_guidance():
         model=ScriptedModel([]), include_tool_guidance=True,
     ).create(spec, source_registry=registry)
 
-    assert child._context_builder.system_prompt == f"{spec.system_prompt}\n\nP"
+    # BUG-013：join_guidance 现在带澄清句（与父路径同源）。
+    from agent_harness.prompt.tool_sections import TOOL_USE_DISCLAIMER
+
+    assert child._context_builder.system_prompt == (
+        f"{spec.system_prompt}\n\nP\n\n{TOOL_USE_DISCLAIMER}"
+    )
 
 
 def test_factory_guidance_comes_from_child_registry():
@@ -107,7 +112,12 @@ def test_factory_child_guidance_respects_persona_order():
         persona=PersonaConfig(suffix="S"),
     ).create(spec, source_registry=registry)
 
-    assert child._context_builder.system_prompt == f"{spec.system_prompt}\n\nG\n\nS"
+    # BUG-013：join_guidance 含澄清句（与父路径同源），五段顺序不漂移。
+    from agent_harness.prompt.tool_sections import TOOL_USE_DISCLAIMER
+
+    assert child._context_builder.system_prompt == (
+        f"{spec.system_prompt}\n\nG\n\n{TOOL_USE_DISCLAIMER}\n\nS"
+    )
 
 
 def test_factory_flag_on_without_guidance_appends_nothing():

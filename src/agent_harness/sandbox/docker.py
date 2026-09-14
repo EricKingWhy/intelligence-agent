@@ -174,7 +174,7 @@ class DockerSandbox(Sandbox):
         return matched
 
     def read_text(self, path: str) -> str:
-        target = self._resolve_within_workspace(path)
+        target = self.resolve_within_workspace(path)
         self.ensure_started()
         docker = importlib.import_module("docker")
         try:
@@ -194,7 +194,7 @@ class DockerSandbox(Sandbox):
             return extracted.read().decode("utf-8")
 
     def write_text(self, path: str, content: str) -> None:
-        target = self._resolve_within_workspace(path)
+        target = self.resolve_within_workspace(path)
         self.ensure_started()
         mkdir_result = self._container.exec_run(["mkdir", "-p", str(target.parent)])
         if mkdir_result.exit_code != 0:
@@ -211,7 +211,7 @@ class DockerSandbox(Sandbox):
             raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
-        target = self._resolve_within_workspace(workspace_path)
+        target = self.resolve_within_workspace(workspace_path)
         source = Path(host_path)
         if not source.exists():
             raise FileNotFoundError(source)
@@ -227,7 +227,7 @@ class DockerSandbox(Sandbox):
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
 
-    def _resolve_within_workspace(self, path: str) -> PurePosixPath:
+    def resolve_within_workspace(self, path: str) -> PurePosixPath:
         """Resolve a model-supplied path with container-native POSIX semantics."""
         root = self.workspace_root
         raw = PurePosixPath(path.replace("\\", "/"))

@@ -50,7 +50,7 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
-from agent_harness.storage.s3_artifact import S3ArtifactStore
+from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
@@ -63,7 +63,6 @@ from agent_harness.tools import (
     GitStatusTool,
     GlobTool,
     GrepTool,
-    InspectArtifactTool,
     ReadTool,
     WriteTool,
 )
@@ -218,24 +217,24 @@ async def build_runtime(
     ):
         registry.register(tool_cls(sandbox))
 
+    # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
+    # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
+    # 选择口径（优先级 + 半配置判定）收敛在 `storage/artifact_select.py`，读路径
+    # （`web/artifacts.py`）用同一个函数——两处各写一遍 if 级联就等于给漂移留门
+    # （#192 批 1 审查发现）。
     overflow_handler = None
-    if any((settings.artifact_store_endpoint, settings.artifact_store_bucket,
-            settings.artifact_store_access_key, settings.artifact_store_secret_key,
-            settings.artifact_store_region)):
-        artifact_store = S3ArtifactStore(settings, session_id=session_id)
-        registry.register(InspectArtifactTool(artifact_store))
-        overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
-
-    # Phase Multiturn T5 (#135): MinIO-backed externalization for large tool results.
-    # When minio_* is configured, register ReadArtifactTool so the model can read
-    # back slices of externalized artifacts by ref.
-    if any((settings.minio_endpoint, settings.minio_bucket,
-            settings.minio_access_key.get_secret_value(),
-            settings.minio_secret_key.get_secret_value())):
-        from agent_harness.storage.minio_artifact import MinioArtifactStore
-        from agent_harness.tools.read_artifact import ReadArtifactTool
-        minio_store = MinioArtifactStore(settings, session_id=session_id)
-        registry.register(ReadArtifactTool(minio_store))
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        read_tool = selection.read_tool(selection.store)
+        registry.register(read_tool)
+        # 摘要里的读回提示点名**这个**工具（#186 AC4）：S3 配 `inspect_artifact`，
+        # MinIO / Local 配 `read_artifact`。名字从选择器**实例化出来的那个工具**上取，
+        # 不在这里再填一个字面量——那样等于把"配对关系"这份知识写了第二遍。
+        overflow_handler = ArtifactOverflowHandler(
+            selection.store,
+            settings.artifact_overflow_chars,
+            read_tool_name=read_tool.name,
+        )
 
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
@@ -311,17 +310,17 @@ async def build_runtime(
         )
 
     def _render_runtime_context() -> str:
-        """渲染运行时上下文快照（T7 / ADR-0023 D8）——每次 build 调用一次。
+        """渲染运行时上下文快照（T7 / ADR-0023 D8；BUG-013 瘦身）——每次 build 一次。
 
         事实来源全部取**当前**值，不缓存：
         - `cwd`：当前进程工作目录；
         - `os`：`platform.system()` + `release()`；
         - `date`：本地日期，只到日（用 `datetime.now()` 会让每次 build 文本都变，
-          既毁 prefix cache 又难断言）；
-        - `model`：`config.model_name`（本次**实际**模型），不是 `settings.model_name`
-          ——用户用 `model_name` 参数选目录里的模型时后者可能为空；
-        - `tools`：**收窄后** registry 的工具名——coding profile 不该在快照里列出
-          它用不了的工具（与 T6 收集 guidance 同一原则）。
+          既毁 prefix cache 又难断言）。
+
+        BUG-013 瘦身：**不再渲染 `model` / `tools`**——工具清单已在 system prompt
+        的 tool guidance 区（静态能力），模型名运行时可查；快照紧贴最新用户消息，
+        列工具会诱导模型把对话任务误判为工具任务。
 
         产物落 `meta_user`：快照是 user-role 消息，不是 system-role。
         """
@@ -331,8 +330,6 @@ async def build_runtime(
             # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
-            "model": config.model_name,
-            "tools": ", ".join(sorted(tool.name for tool in registry.list())),
         }).meta_user_text
 
     return AgentRuntime(

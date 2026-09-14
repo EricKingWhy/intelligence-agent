@@ -10,7 +10,7 @@
   ③ 字段 schema 锁定（契约形态稳定，前端可放心消费）。
 
 契约形态对齐既有 /api/permission-modes（封闭枚举：{id, display_name, description}）
-与 /api/capabilities（动态列表：空就是空，不伪造）。Reuse First（§6）。
+与 /api/capabilities（动态列表，未装配就是空，不伪造）。Reuse First（§6）。
 Scope Lock（§8）：本测试只锁清单端点契约，不验运行时消费（那是独立批次）。
 """
 
@@ -112,7 +112,9 @@ class TestContextProviders:
     def test_empty_by_default_is_honest(self, bare_client):
         """默认未装配任何 context provider → 返回 [] （诚实降级，不伪造）。
 
-        与 /api/capabilities 同原则：空就是空，前端据空列表自行 fallback。
+        与 /api/capabilities 同原则：没有装配就不编条目，前端据空列表自行 fallback。
+        （注意 `/api/capabilities` 现在**不是**空的——它有恒在的 core 条目，见 #193；
+        空列表那条路径留给了"真的什么都没装配"的清单端点。）
         """
         resp = bare_client.get("/api/context-providers")
         assert resp.status_code == 200

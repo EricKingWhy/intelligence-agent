@@ -467,3 +467,39 @@ def test_is_busy_covers_the_finalizer_window_that_get_active_ignores() -> None:
     # task 尚未挂上（launch 与赋值之间）→ 保守视为忙
     rm._runs["s"] = SimpleNamespace(terminal=False, task=None)
     assert rm.is_busy("s") is True
+
+
+def test_hard_delete_discards_local_artifacts(tmp_path: Path) -> None:
+    """硬删连带丢弃该会话的**本地** artifact 目录（#192）。
+
+    与 `sessions/<sid>/`、`workspaces/<sid>/` 同一条纪律（ADR-0029 D2）：删除面是
+    白名单，只删 harness 用 `setting + session_id` 自己拼出来的路径。artifact 根目录
+    完全由 `artifact_dir` 拼成，只有 harness 会往里写，所以这条删除是安全的。
+
+    "同 id 不同会话"是内容哈希寻址下最容易搞错的一点：两个会话可以有**同一个**
+    artifact_id（同内容同哈希），所以删除必须按 session 前缀隔离——删 A 不能碰到 B。
+    """
+    artifacts_root = tmp_path / "artifacts"
+    client = _client(tmp_path, artifact_dir=str(artifacts_root))
+    session_id = _create_session(client)
+
+    mine = artifacts_root / session_id
+    mine.mkdir(parents=True)
+    (mine / "0123456789abcdef").write_text("big output", encoding="utf-8")
+    theirs = artifacts_root / "someone-else"
+    theirs.mkdir(parents=True)
+    (theirs / "0123456789abcdef").write_text("keep me", encoding="utf-8")
+
+    resp = client.delete(f"/api/sessions/{session_id}")
+    assert resp.status_code == 200, resp.text
+
+    assert not mine.exists(), "会话硬删后本地 artifact 目录应当消失（不然只剩不可达残留）"
+    assert (theirs / "0123456789abcdef").read_text(encoding="utf-8") == "keep me"
+
+
+def test_hard_delete_without_artifacts_is_noop(tmp_path: Path) -> None:
+    """没有产物的会话硬删照常成功（幂等）；artifact 根目录不必预先存在。"""
+    client = _client(tmp_path, artifact_dir=str(tmp_path / "artifacts"))
+    session_id = _create_session(client)
+    resp = client.delete(f"/api/sessions/{session_id}")
+    assert resp.status_code == 200, resp.text

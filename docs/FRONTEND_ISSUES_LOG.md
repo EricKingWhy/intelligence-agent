@@ -2152,6 +2152,11 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
   `tests/test_event_vocabulary_generated.py` 与事实源双向比对（缺名 / 多名 / 分节归属错都红）。
   spec §3 从此只留语义、分层与契约源指向链，MUST NOT 再写死事件名或数量。
   订正：上文"重写实装 37 个"按票面原数记录；T1 实测为 **38**（票面两处清单都漏了 `tool/output_delta`）。
+  交付落点（`feat/backend`，母票 #173 AC6 要的 commit）：T3 `4a261c2` → T2 `d134c21` →
+  T4 `b43f1b1` → T1 `88fbd46` → T5 `60c8d05`；收口记录 `2e3dd16` / `a73dd88`。
+  守卫现状（2026-09-14 复跑）：`tests/test_event_vocabulary_generated.py` +
+  `tests/test_event_types_generated.py` **6 passed**；生成物头部合计行 = 38 类型
+  （36 持久化 + 2 仅广播）。
 
 ### 第十一轮 · Subagent 扫描汇总（2 个 subagent，真机点击，2026-09-13）
 
@@ -2261,3 +2266,40 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
 **两处数量订正（按代码为准，已在 #174 评论区说明）**：实装类型是 **38** 不是 37（母票两处清单都漏了
 `tool/output_delta`）；母票 AC1 把 `text/delta`、`reasoning/delta`、`tool/output_delta` 举例为"仅广播"，
 与 `STREAM_ONLY_TYPES` 和 ADR-0016 §3.1 相反——它们都是**持久化**的合帧 chunk。
+
+---
+
+## 第十二轮（后端侧）（2026-09-13）：面板 T4（#185 artifact 只读接口）期间的观察
+
+### OBS-11.1 【后端·全量门禁间歇性·非本票引入·未复现】偶发 22 个 web 用例失败
+
+**现象（2026-09-13）**：`feat/backend` 上**同一份代码**（#185 完成态）连跑 5 次全量 `pytest -q`：
+
+| 轮次 | 结果 | 用时 |
+| --- | --- | --- |
+| 1 | 2152 passed / 0 failed | 317.97s |
+| 2 | **22 failed / 2130 passed** | 326.44s |
+| 3 | 2152 passed / 0 failed | 199.58s |
+| 4 | 2152 passed / 0 failed | 218.05s |
+| 5 | 2152 passed / 0 failed | 289.78s |
+
+失败样本（当轮 tail 里还看得见的两条）：`tests/web/test_web_stream.py::test_replay_backlog_threshold_emits_control_frame`、
+`tests/web/test_web_ws_relay.py::test_ws_multisession_real_snapshots`——都集中在 `tests/web`，
+且都是**真 ASGI / 真 WebSocket 传输**类用例。
+
+**已做的排查**：
+1. 失败那轮的完整输出**没有留存**（只 tail 到 3 行），所以**拿不到 traceback**——这是流程缺陷：
+   本轮之后的全量门禁统一先落 `/tmp/*.log` 再 tail（后 4 次即如此办理）。
+2. 把两个已知失败文件**单独连跑 3 轮**：10 passed / 12-14s，**全绿** → 不是确定性失败。
+3. 排除"与前端 e2e 抢 CPU"：失败轮次当时没有并行前端任务。
+
+**判断：非本票引入**。#185 的 diff 只碰 artifact 读路径（`web/artifacts.py`、`storage/*artifact*.py`、
+`web/app.py` 一条新路由），不触达失败用例的代码路径；且同一份代码多数轮次不可复现。
+
+**未定位的假设（留给下次复现时验证，别当成已排除）**：
+- Windows 上大量 `TestClient` / 真 WS 连接的**临时端口 / TIME_WAIT 压力**（失败集中在传输类用例）；
+- 某个共享外部依赖（Milvus / Langfuse / 模型网关）在那一轮瞬时不可用造成**级联失败**；
+- 失败是否集中在整轮跑的**尾部**（若如此，指向资源累积而不是随机）。
+
+**归属：后端（测试稳定性）**。本轮**不修**（§8 Scope Lock）。下次复现时按上面三条假设取证，
+**不要**用"重跑一次过了"结案。

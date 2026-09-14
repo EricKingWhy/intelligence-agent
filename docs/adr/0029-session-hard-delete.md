@@ -173,6 +173,16 @@ guard，任何用过子 Agent 的会话（很常见）都将永远无法删除�
   且 fork **不复制** artifacts（ADR-0017 D5）→ 删父会让**子会话继承的 artifact 引用悬空**。
   记录为已知限制，不在本票修。
 
+  > **2026-09-14 修订（#192 落地本地那一半）**：新增默认 Provider
+  > `LocalArtifactStore`（spec 06 §3）时，会话硬删第 ⑦ 步**已连带丢弃
+  > `<artifact_dir>/<session_id>/`**（`storage/local_artifact.py::discard_local_artifacts`）。
+  > 它严格遵守 D2 的形状：**不读映射**、只删 harness 用 `artifact_dir + session_id`
+  > 自己拼出来的路径，所以**不是**本 D6 意义上的"级联删除"（不涉及查询索引、也没有
+  > 跨对象图遍历）。仍然**没做**的两件事：① `ArtifactStore` ABC 仍**没有** delete，
+  > 配了 S3/MinIO 时**远端对象不会随会话消失**（留下孤儿对象）；② fork 子会话**继承**
+  > 的引用在父会话硬删后**依然不可解析**（D1/D5 已接受的代价）。
+  > 于是删除行为**随部署而异**（本地删、远端留）——这是记录在案的语义，不是疏漏。
+
 ### D7：审计走结构化日志，不进 `SessionEvent`
 
 新增 `session_delete` 事件（注册进 `logging.py` 的 `EVENT_TYPES`），字段**只含 id 与计数**
@@ -211,8 +221,9 @@ guard，任何用过子 Agent 的会话（很常见）都将永远无法删除�
 
 - 回收站 / undo / 墓碑 / 恢复入口。
 - 自动清理、TTL、按时间或体积的批量删除（ADR-0004 明确不做自动 TTL）。
-- Memory / Artifact 的级联删除（D6，需另开票：memory 要新查询+索引，artifact 要先给
-  `ArtifactStore` 加 delete）。
+- Memory 的级联删除（D6，需另开票：要新查询+索引）。
+- Artifact 的**远端**级联删除（D6，需另开票：要先给 `ArtifactStore` 加 delete，并处理
+  对象存储的删除错误语义）。**本地那一半已于 #192 落地**（见 D6 修订注）。
 - 级联删除 fork 子会话（D4：拒绝而非级联）。
 - 修改 `WorkspaceRegistry.delete()` 的既有语义（只需**不调用**它）。
 - 模型工具入口（若将来要有，按 ADR-0026 同款：DANGER + 审批）。

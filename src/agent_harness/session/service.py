@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import stat
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
@@ -93,6 +92,9 @@ from agent_harness.session.store import (
     SessionSummaryStats,
     WorkspaceRef,
 )
+from agent_harness.storage.artifact import SESSION_KEY_PATTERN
+from agent_harness.storage.local_artifact import discard_local_artifacts
+from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalResponse,
@@ -110,6 +112,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: 归档审计里的入口标识（#171 AC6 的字段之一）。两个路由（归档 / 取消归档）共用同一份
+#: 字面量——审计格式只此一处定义，免得两个入口各写一套、迟早漂移成对不上账的记录
+#: （`memory/audit.py::ENTRY_*` 同款）。
+ARCHIVE_ENTRY_API = "api"
+
 
 # ── 领域异常 ──────────────────────────────────────────────────────────
 # 定义已移至 session/errors.py（候选 2 纯结构重构）；此处重新导出，
@@ -118,8 +125,9 @@ logger = logging.getLogger(__name__)
 #: session_id 安全校验正则——名字段，不是路径。
 #: store.read_events 直接 ``self._root / session_id`` 拼路径：不校验时
 #: 反斜杠段在 win32 上可越出 sessions 根目录，盘符段可整体替换基路径。
-#: 字符集与 S3ArtifactStore 的 key 段规则一致。
-_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+#: 规则本体在 `storage/artifact.py`（artifact 存储键的 session 段是同一条规则，
+#: 那边要把它拼进 artifact 根目录的路径——一份定义，两处使用）。
+_SESSION_ID_PATTERN = SESSION_KEY_PATTERN
 
 #: 非 live 追加路径撞上 seq 冲突时的重试次数（BUG-011）。
 #: 「读快照 → 取号 → append」不是原子的：并发写者可能在本请求读完之后落盘同号，
@@ -279,7 +287,7 @@ class SessionService:
     # ── 只读操作 ─────────────────────────────────────────────────────
 
     async def list_sessions(
-        self, *, workspace_id: str | None = None
+        self, *, workspace_id: str | None = None, include_archived: bool = False
     ) -> list[SessionSummaryStats]:
         """列出 session 摘要。
 
@@ -288,10 +296,17 @@ class SessionService:
         - **`workspace_id` 给出时**：只列该项目的会话，顺序 = **账本的手工序**
           （AC4——活动时间永不重排，否则用户手工拖过的顺序每次刷新就丢）；项目未注册
           → `WorkspaceNotFound`（404），**不**伪装成空列表。
+        - **`include_archived=False`（默认）**：#171 起**不返回**已归档会话；置 true 时
+          照常返回（前端"显示已归档"开关用）。两条路径（默认列表 / 项目视图）用**同一
+          规则**，避免"侧栏藏了、项目里还露着"。
 
         每行回填 `workspace`（AC1/AC2）：未分组 → `None`，绝不伪造。项目归属只来自
         `WorkspaceIndex`（账本 ∩ header cwd），**不读** sandbox 的 `WorkspaceRegistry`
         映射表——那是沙箱生命周期记录，不是成员资格真源（#152 的交接约束）。
+
+        `archived`（#171）来自 `session_meta`，与 `workspace` 一样是服务层回填：列表是
+        **文件系统驱动**的（扫 `<root>/<sid>/events.jsonl`），归档标记在 DB ⇒ 必须 join
+        两边，且 **`session_meta` 无该行一律视为未归档**（AC3 的口径要点）。
 
         直接返回领域 dataclass（`SessionSummaryStats` 自带 `session_id`），不拼一层
         只做形状复述、没有校验与行为的 dict 中转——列表行的字段因此在领域层就有带类型的
@@ -329,14 +344,34 @@ class SessionService:
                 self._workspace_refs_by_session, index
             )
 
+        # #171：归档标记在 DB、列表在文件系统 ⇒ join 两边。一次 `list_all()` 建出
+        # {已归档 id}（逐行 `get()` 是 O(行数) 次 DB 往返）；**无 meta 行的会话不在
+        # 集合里** ⇒ 一律视为未归档（AC3）。过滤放在读摘要之前：已归档的行连日志头
+        # 都不用读。`include_archived=True` 时不过滤，但每行仍带真值徽标。
+        archived_ids = await self._archived_session_ids()
+        if not include_archived:
+            ids = [sid for sid in ids if sid not in archived_ids]
+
         summaries: list[SessionSummaryStats] = []
         for sid in ids:
             stats = await anyio.to_thread.run_sync(store.read_session_summary, sid)
             if stats is None or stats.event_count == 0:
                 continue
+            backfill: dict[str, Any] = {"archived": sid in archived_ids}
             ref = fixed_ref if workspace_id is not None else refs.get(sid)
-            summaries.append(replace(stats, workspace=ref) if ref is not None else stats)
+            if ref is not None:
+                backfill["workspace"] = ref
+            summaries.append(replace(stats, **backfill))
         return summaries
+
+    async def _archived_session_ids(self) -> set[str]:
+        """已归档的 session_id 集合（`session_meta.archived` 为真的行）。
+
+        无 meta 行的会话**不在**集合里 ⇒ 视为未归档（AC3 的口径要点——`session_meta`
+        行由 lineage/fork 懒补，不能假设"每个会话恒有一行"）。
+        """
+        metas = await self._state.session_meta_store.list_all()
+        return {meta.session_id for meta in metas if meta.archived}
 
     @staticmethod
     def _workspace_refs_by_session(
@@ -775,6 +810,85 @@ class SessionService:
             raise SessionNotFound(f"session '{session_id}' not found")
         return self._state.run_manager.cancel(session_id)
 
+    # ── 归档（#171）──────────────────────────────────────────────────
+
+    async def set_archived(
+        self, session_id: str, *, archived: bool, entry_point: str
+    ) -> bool:
+        """归档 / 取消归档一个会话（#171）：只改列表可见性，不动任何事实。
+
+        **只动 `session_meta.archived` 一列**——事件日志一字不改（spec 03 的 Full
+        SessionEvent History 硬约束：系统不许偷删历史），项目账本一个字不动（归档与
+        "在哪个项目"是两个正交轴），沙箱工件、checkpoint、operation ledger 也都不碰。
+        归档可逆，所以入口层不需要二次确认（对比 ADR-0026 对硬删的要求）。
+
+        三条守卫，顺序即契约（之后是两步写：懒补行 → 审计）：
+
+        1. 422 `InvalidSessionId`：形态非法（路径穿越防线）必须最先，且先于 404
+           —— 否则 `../x` 会先变成一个"不存在"。
+        2. 404 `SessionNotFound`：与列表**同一条判据**（`read_session_summary` 读得出
+           内容），所以"归档得掉"与"看得见"永远一致，不会给出一个列表里没有的 id 的
+           假回执。
+        3. 409 `ActiveRunConflict`（**只有归档方向**）：有在途 run 时拒绝。判据是
+           `RunManager.get_active` 而**不是**硬删用的 `is_busy`——后者多出来的那一半覆盖
+           "task 已 done / terminal 旗标未及置位"的 finalizer 窗口，那个窗口对"抽走地面"
+           的删除是致命的（ADR-0029 D4），而归档不删任何东西、只写一行标记，故按票面用
+           `get_active`。取消归档不成冲突：它只是把行放回列表，任何时候都安全。
+
+        ①②③ 与 `delete_session` 的对应三步逐字同形（同一套判据、同一句文案来源），所以
+        抽成 `_require_existing_session`（删除路径还要事件数，故它返回摘要对象）。
+
+        ④ 懒补 `session_meta` 行：那些行只有 lineage 建树 / fork 写 provenance / run 存
+        checkpoint 三处会补，普通会话可能根本没有行（AC3 明说"无行 = 未归档"），而
+        `SessionMetaStore.set_archived` 对不存在的行**抛 `KeyError`**（那是 store 的
+        contract 原文，且被 `tests/storage/test_sqlite_checkpoint_store.py` 钉住——所以
+        不能把"自动建行"塞进 store，那是改一个所有调用方共用的契约）⇒ 没有行时先
+        `upsert` 一行（`created_at` 与 lineage 建行同一口径）。不这么做，真机上"第一次
+        归档一个从没 fork 过的会话"就是 500。
+        ⑤ 审计。
+
+        **已知的窄竞态**：④ 是"先读后写"，与并发的硬删交错时理论上会留下一条孤儿
+        `session_meta` 行（日志已不在）。本票不加锁——`delete_session` 自身也是无锁的
+        （见它的并发说明），且同一窗口在 lineage / checkpoint 两处懒补上本来就有；真要
+        收敛得给 Store 加单语句 upsert，属另一票的范围。
+
+        **幂等**：重复归档 / 重复取消都返回目标状态、不报错，且行数恒为 1（重跑只更新
+        同一行）。审计每次被接受的请求写一条：被审计的事实是"用户动了这条会话"，不是
+        "值变了"——重复归档同样值得留痕。
+        """
+        # ①②③ 存在性与在途 run（存在性那三步与删除共用，见 `_require_existing_session`）
+        await self._require_existing_session(session_id)
+        if archived and self._state.run_manager.get_active(session_id) is not None:
+            raise ActiveRunConflict(
+                f"session '{session_id}' has a run in flight; archive it after it finishes"
+            )
+
+        # ④ 懒补行 → 写标记
+        meta = await self._state.session_meta_store.get(session_id)
+        if meta is None:
+            await self._state.session_meta_store.upsert(
+                SessionMeta(
+                    session_id=session_id,
+                    created_at=_utc_now_iso(),
+                    archived=archived,
+                )
+            )
+        else:
+            await self._state.session_meta_store.set_archived(session_id, archived)
+
+        # ⑤ 审计：归档不是会话真相（不变量 #16/#22），痕迹只落结构化日志。只带 id 与
+        #    动作——会话正文（标题 / 任务文本）是用户数据，进日志只是多余的泄露面
+        #    （`memory/audit.py` 同款取舍）。
+        log_event(
+            logger,
+            "session_archive",
+            f"session archived={archived}: {session_id}",
+            session_id=session_id,
+            archived=archived,
+            entry_point=entry_point,
+        )
+        return archived
+
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
     async def delete_session(self, session_id: str) -> SessionDeletionStats:
@@ -783,7 +897,7 @@ class SessionService:
         与项目**软删除**口径的对照：删会话就是删会话（ADR-0029 D1——无墓碑、无回收站、
         不可恢复），项目只是"用户想留着的目录"，所以两者语义不同是有意的。
 
-        **五条守卫，顺序即契约**（D4）：
+        **五条守卫，顺序即契约**（D4；①② 与归档共用 `_require_existing_session`）：
 
         1. 422 `InvalidSessionId`：形态非法——路径穿越防线，必须最先（后面每条都要用
            `session_id` 拼路径），且必须比 404 先判（否则 `../x` 会先变成一个"不存在"）。
@@ -824,17 +938,10 @@ class SessionService:
         所以并发的两次删除最坏也只是各自删掉同一批字节的一部分，永远碰不到白名单之外的
         东西；随后再删一次是 404（文件已不在，`test_second_delete_after_success_is_404`）。
         """
-        # ① 形态
-        self._validate_session_id(session_id)
-        await self._state.ensure_stores()
+        # ①② 形态 + 存在性（要删多少，在删之前就必须知道——删完就只能编了；
+        #     这两步与归档共用 `_require_existing_session`）
+        summary = await self._require_existing_session(session_id)
         store = self._state.store
-
-        # ② 存在性 + 事件数（要删多少，在删之前就必须知道——删完就只能编了）
-        summary = await anyio.to_thread.run_sync(
-            store.read_session_summary, session_id
-        )
-        if summary is None or summary.event_count == 0:
-            raise SessionNotFound(f"session '{session_id}' not found")
 
         # ③ 在途 run
         if self._state.run_manager.is_busy(session_id):
@@ -881,6 +988,12 @@ class SessionService:
         await anyio.to_thread.run_sync(store.delete_session, session_id)
         await anyio.to_thread.run_sync(
             self._state.workspace_registry.discard_session_artifacts, session_id
+        )
+        # 本地 artifact 目录（#192）：与 sandbox 工件同一条纪律——只删 harness 用
+        # setting + session_id 自己拼出来的路径，**不读映射**（ADR-0029 D2）。配了对象
+        # 存储时远端对象不在此列（那些 Provider 没有 delete，记录为已知边界）。
+        await anyio.to_thread.run_sync(
+            discard_local_artifacts, self._state.settings, session_id
         )
 
         # ⑧ 进程内残留——排队消息与审批队列都按 session_id 索引，会话没了它们永远等不到
@@ -1145,6 +1258,27 @@ class SessionService:
     def _validate_session_id(session_id: str) -> None:
         """委托公开函数 validate_session_id（保持调用方 self._validate_session_id 不变）。"""
         validate_session_id(session_id)
+
+    async def _require_existing_session(self, session_id: str) -> SessionSummaryStats:
+        """形态 + 存在性两道守卫，返回摘要；**顺序即契约**。
+
+        1. 422 `InvalidSessionId` 必须最先，且先于 404——否则 `../x` 会先变成一个
+           "不存在"，把一次路径穿越说成"这个会话没有"。
+        2. 404 `SessionNotFound` 的判据与列表页**同一条**（`read_session_summary` 读得出
+           内容），所以"操作得掉"与"看得见"永远一致。
+
+        硬删（`delete_session`）与归档（`set_archived`）共用本方法：共享的是**契约**
+        （同一判据、同一句文案、同一顺序），不是"省一次 I/O"——两边都要用返回值
+        （删除要事件数）。一处改了另一处不会漂。
+        """
+        self._validate_session_id(session_id)
+        await self._state.ensure_stores()
+        summary = await anyio.to_thread.run_sync(
+            self._state.store.read_session_summary, session_id
+        )
+        if summary is None or summary.event_count == 0:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        return summary
 
     @staticmethod
     def _resolve_cwd(cwd: str) -> Path:

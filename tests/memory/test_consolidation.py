@@ -127,6 +127,7 @@ async def test_retrieval_timeout_degrades_to_insert_without_losing_the_candidate
     token = set_identity_context(ALICE)
     try:
         outcome = await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
+        # BUG-014：预算超时是内部预算耗尽语义，不重试（重试注定再超时）。
         assert outcome.degraded_reason == "consolidation_failed: TimeoutError"
         entries = await capability.list_entries(MemoryScope.USER, 10)
         assert [entry.content for entry in entries] == ["我喜欢黑咖啡"]
@@ -142,7 +143,7 @@ async def test_degradation_reason_carries_only_the_exception_type(tmp_path):
     token = set_identity_context(ALICE)
     try:
         outcome = await capability.consolidate(MemoryScope.USER, "我喜欢黑咖啡", {})
-        assert outcome.degraded_reason == "consolidation_failed: ConnectionError"
+        assert outcome.degraded_reason == "consolidation_failed: ConnectionError(after_1_retry)"
         assert "secret-ish" not in outcome.degraded_reason
     finally:
         identity_context_var.reset(token)
@@ -467,6 +468,7 @@ async def test_provider_takes_the_smaller_of_the_caller_budget_and_its_own_defau
     finally:
         identity_context_var.reset(token)
 
+    # BUG-014：预算超时是内部预算耗尽语义，不重试，无标记。
     assert (reason_a, reason_b) == ("consolidation_failed: TimeoutError",
                                     "consolidation_failed: TimeoutError")
     assert elapsed_a < 0.5, f"provider 默认没生效：{elapsed_a:.2f}s"
@@ -509,7 +511,7 @@ async def test_a_broken_log_handler_cannot_rewrite_the_degradation_reason(tmp_pa
         logger.removeHandler(broken)
         logger.setLevel(previous_level)
 
-    assert outcome.degraded_reason == "consolidation_failed: ConnectionError"
+    assert outcome.degraded_reason == "consolidation_failed: ConnectionError(after_1_retry)"
     assert [entry.content for entry in entries] == ["我喜欢黑咖啡"]
 
 
@@ -735,7 +737,8 @@ async def test_retrieval_failure_is_counted_as_a_search(tmp_path, caplog):
         identity_context_var.reset(token)
 
     events = [record for record in caplog.records if getattr(record, "event_type", None) == "memory_consolidated"]
-    assert [(event.status, event.queries) for event in events] == [("failed", 1)]
+    # BUG-014：ConnectionError 瞬时错误重试 1 次 → 两次 attempt 各发一条事件。
+    assert [(event.status, event.queries) for event in events] == [("failed", 1), ("failed", 1)]
 
 
 @pytest.mark.asyncio
@@ -948,13 +951,16 @@ async def test_a_failing_no_op_fallback_search_still_reports_its_cost(tmp_path, 
     finally:
         identity_context_var.reset(token)
 
-    assert outcome.degraded_reason == "consolidation_failed: ConnectionError"
+    assert outcome.degraded_reason == "consolidation_failed: ConnectionError(after_1_retry)"
     # 兜底检索炸了 → 没有可比对的既有行 → 候选**无条件新增**（不丢写优先）。既有行还在，
     # 于是出现两条同内容：这是本票显式选的代价（宁可多一条，不可少一条），断言它而不是否认它。
     assert sorted(entry.content for entry in entries) == ["我喜欢黑咖啡", "我喜欢黑咖啡"]
     events = [record for record in caplog.records if getattr(record, "event_type", None) == "memory_consolidated"]
-    assert [(event.status, event.error_type, event.fallback_searches)
-            for event in events] == [("failed", "ConnectionError", 1)]
+    # BUG-014：ConnectionError 是瞬时错误 → 重试 1 次后降级（原因带标记），
+    # 两次 attempt 各发一条事件（开销如实计 2 次检索 + 兜底 1 次）。
+    assert [(event.status, event.error_type.replace("(after_1_retry)", ""),
+             event.fallback_searches) for event in events] == [
+        ("failed", "ConnectionError", 1), ("failed", "ConnectionError", 0)]
 
 
 @pytest.mark.asyncio

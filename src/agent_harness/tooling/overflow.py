@@ -44,6 +44,7 @@ class ArtifactOverflowHandler(OverflowHandler):
         store: ArtifactStore,
         overflow_chars: int = 2000,
         *,
+        read_tool_name: str = "read_artifact",
         externalize_event_type: str = ARTIFACT_EXTERNALIZED,
     ) -> None:
         if overflow_chars <= 0:
@@ -51,6 +52,14 @@ class ArtifactOverflowHandler(OverflowHandler):
         self._store = store
         self._overflow_chars = overflow_chars
         self._externalize_event_type = externalize_event_type
+        # 摘要里的读回提示必须点名**与本 store 配对的那个工具**（#186 AC4）：
+        # 配对关系由 `storage/artifact_select.py` 决定——S3 配 `inspect_artifact`，
+        # MinIO / Local 配 `read_artifact`。此前这里写死 `read_artifact`，于是
+        # S3 部署的提示会把模型指向一个**没有注册**（配的是另一个 store）的工具名，
+        # 前端也按同一段文字提取 artifact_id，名字对不上时归档内容永远显示不出来。
+        # 默认值 = **默认 Provider**（Local，spec 06 §3）配对的工具；`assembly` 是唯一
+        # 的生产构造点，永远显式传选择器给出的真实名字，默认值只服务测试。
+        self._read_tool_name = read_tool_name
         # 构造期预算下界校验：截断 marker（含总行数与 artifact_id）不受
         # _summarize 的 head/tail 预算约束——overflow_chars 若小于 marker
         # 本身，head/tail 被压成 0 也压不住它，摘要必然超出预算、悄悄污染
@@ -115,7 +124,7 @@ class ArtifactOverflowHandler(OverflowHandler):
     def _summarize(self, content: str, artifact_id: str) -> str:
         lines = content.splitlines()
         marker = (f"... [truncated, {len(lines)} lines total, "
-                  f"use read_artifact({artifact_id}) to view]")
+                  f"use {self._read_tool_name}({artifact_id}) to view]")
         # 行数限制之外再限制字符数，避免单行日志本身撑爆 Context。
         budget = max(0, (self._overflow_chars - len(marker) - 2) // 2)
         head = "\n".join(lines[:10])[:budget]
