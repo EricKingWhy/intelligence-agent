@@ -2553,3 +2553,56 @@ commit message 写明"方向翻转 + 断言同步"）。
 **未单选**。这不是纯展示改动：接通每模型 `context_window` 后，deepseek 的有效预算从 200k 掉到 64k
 （`model/config.py:35`），**自动压缩会更早触发**（`auto_compact_threshold=0.70`，`config.py:69`），
 即单轮能装下的历史变少——属**运行行为变更**，必须用户口头确认。
+
+---
+
+## 用户答复落实（2026-09-14 第四轮）：记忆工具 / 队列语义 / 供应商管理 / 项目弹窗
+
+用户对上一轮全部问题作答，并追加两项 UI 需求。**仍只登记，未实现**。
+
+### 裁决落点（全部已写进对应 issue 评论）
+
+| 出口 | 裁决 |
+| --- | --- |
+| **#202** 记忆工具 | A1 选方案 (a)：**自动注入完全不动**，`search_memory` 只做精准补充、按 id 去重并标出"哪些已注入"，run 中由模型自行判断是否调用。A2 **做**显式"记住这条"写入工具。用户强调**工具描述与参数必须准确**。 |
+| **#195/#196** steer/编辑 | B1 默认**排队** + 另有「立即」按钮触发 steer。B2 队列**界面可见**（chip 列表，可编辑/可取消，接既有 `queue/{id}/cancel`）。B3 队列**要活过崩溃/重启** ⇒ 从 SessionEvent 日志重建（不做第二份持久化文件）。B4 两种场景分开：**S1 编辑**（A→B，界面只显示 B）；**S2 暂停后另发 B**（A、B 都在，链含两者，最新回答要覆盖两者）。 |
+| **#197** 拖拽 | C1 键盘方向键**一起翻**。C2 初始宽度**调成 340**。 |
+| **#199** 模型菜单 | D1「管理模型」入口**归 #203**（本票只做两级菜单 + 去搜索）。 |
+| **#201** 控制下拉 | D2 合并后**直接删掉** `ContextProviderPicker`。 |
+| **#200** 看板 | 窗口 = 全局 200k（已裁决）；**六类之外是否单列「记忆」行**待确认。 |
+
+### 新增两张 issue
+
+- **#203**（跨端·安全）**自定义模型供应商管理**（仿图1：左列表 + 右详情表单，含 Base URL /
+  API 格式 / API Key 掩码 / 模型列表增删改 / 启用禁用 / 测试连接 / 删除）。
+  核实结论：**这不是 UI 改动而是新功能**——目录只来自 env 的 `AGENT_MODELS` JSON，
+  provider 预设**硬编码**（新增 provider 必须改代码，三处校验/索引耦合：`model/config.py:153,303,317`
+  + `web/app.py:887,906`），无可写配置、无加密落盘、`is_available` 恒 True、
+  **只有一种线协议（OpenAI 兼容）**且图1 的「API 格式」下拉**后端无对应物**、无测试连接端点。
+  安全硬约束：管理端 GET 对密钥**只写不可读**；`/api/models` 的零密钥保证与
+  `tests/web/test_web_models.py:56-58` 的 `sk-` 回归锁必须继续成立。
+- **#204**（跨端）**项目弹窗去掉「任务内容」+ 权限选择器重设计**。
+  阻塞点已查清：`CreateSessionRequest.task` 必填（`web/app.py:204`，空串 422 由
+  `tests/test_web_api.py:297-304` 锁住）且 `POST /api/sessions` **总是** `create_and_launch`
+  ⇒ **HTTP 层不存在"只建会话不跑 run"的路**（domain 层 `Session.start` 支持，
+  `docs/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md:121-125` 早已把"空会话创建入口"点名为产品决策）。
+  连带要定的产品问题：空会话在列表里显示什么（标题取自首条 user/message，为空时只剩短 id）；
+  弹窗选的权限在去掉输入框后作用于谁。
+
+### 本轮查证到的、会影响设计的事实（避免后人重复挖）
+
+1. **队列消费与 steer 注入都缺**（#196）：`drain_steers` / `drain_queued_message` **零生产调用方**，
+   `steer/applied` **零写入者**，WS 上行 `{"type":"steer"}` 无分派分支，前端硬编码 `mode:'queue'`。
+   而 run 循环每轮都重建上下文（`runtime.py:592`）⇒ 只要有人 append 一条 `user/message` 就能生效
+   （工具失败熔断的纠正消息已证明这条通路可用）。
+2. **记忆检索每轮重跑**（#202）：`_with_providers` 在每次 `build()` 里执行、无缓存，
+   但查询词恒为"用户消息尾部 4000 字符"⇒ 同一 run 内 N 次调用查同一个 query。
+   "标出哪些已注入"需要一个 **run 级已注入 id 集合**（照 `run_context_var` 的 contextvar 方式），
+   否则该需求做不出来。
+3. **Inspector 初始宽度与下限共用同一常量**（#197）：`App.tsx:260` 写 `width: INSPECTOR_MIN_W`
+   ⇒ 要"初始 340、下限 320"必须新增 `INSPECTOR_DEFAULT_W`，`clampInspectorWidth` 与单测不动。
+4. **`/api/models` 仍在暴露 deepseek `context_window=64000`**（#200）：窗口已裁决用全局 200k
+   ⇒ 该字段不得被当成预算，UI 要么不用、要么标注"模型声明值（非本机预算）"。
+5. **仓库自研能力的边界**（多票共用）：`retrieve_knowledge` 属 **knowledge** capability，
+   与长期记忆（memory）是两回事；技能有 `load_skill` 按需加载，记忆**没有**对应的读侧工具——
+   这正是 #202 要补的差距。
