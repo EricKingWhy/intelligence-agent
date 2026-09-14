@@ -2501,3 +2501,55 @@ commit message 写明"方向翻转 + 断言同步"）。
 刷新后显示"未选"**是如实的**；加 localStorage 反而会让用户被忘记选过的只读档位困住。
 本仓既有纪律也是"只有视图状态落 localStorage，**会改变运行行为的入参不落**"。
 若用户要"记住档位"属**独立决定**（会改变"未选"的语义），需单独拍板。
+
+---
+
+## 用户报障批次 3 的答复与落实（2026-09-14）：三项裁决 + 一项派生发现（**仍仅登记，未修**）
+
+用户对批次 3 的待定项给出裁决，并追加"能直接拿来用的就直接拿来用，不要手写"的复用要求。
+
+### 裁决已落到 issue
+
+| 出口 | 裁决 |
+| --- | --- |
+| **#199** 模型选择器 | **去掉搜索框**，只做两级（"才几个模型没有必要使用搜索框"）。删搜索相关 tsx/CSS/断言；`默认链` 伪选项与双击去重守卫保留。⚠ `picker-search-visibility.spec.ts` 是**局部删除**（另两个 picker 仍在用搜索）。 |
+| **#201** 三个控制下拉 | **授权合并成一个共享组件**；`aria-label` **不统一为中文**——已核实会碰到 e2e 定位器（`control-row.spec.ts:42-52`、`context-providers.spec.ts:40-94`、`fixtures.ts:889-912`、`e2e-live/approval-live.spec.ts:35`），按用户给的条件维持现状。⚠ 不统一意味着**共享组件不得内置 aria-label 默认值**（否则合并会顺手改名，等于偷偷做了被否掉的事）。图6 头部的「了解更多」本仓无落点 ⇒ 先不放，不造死链。 |
+| **#200** 上下文容量看板 | **必须做，图4 全部元素都要**（含缓存命中率）⇒ 缓存 token 捕获从"可选降级"变成**必做**。**入口替换 composer 的 `Context · N` 药丸**（`ContextProviderPicker` 移除）。 |
+
+### 派生发现（已开 issue #202）：用户对记忆的判断**只成立一半**
+
+用户前提：「记忆不需要点击选择就能注入…模型觉得需要就**可以按需检索**」。
+
+- **成立的一半**：`MemoryContextProvider.select()` 每 run 自动跑（`context/builder.py:230-251`），
+  查询词 = 会话累计用户消息（`memory/context_provider.py:32-34`），注入为 SystemMessage；
+  与 pill 无关。因此"移除 pill"是安全的（缺省即全量注入，`assembly.py:147-148`）。
+- **不成立的一半**：**没有任何模型可调用的记忆检索工具**。memory 只贡献 `forget_memory`（写侧，
+  `memory/tools.py:44-53`）；`search`/`recall` 只是 Protocol 原语（`memory/capability.py:85-86`），
+  `recall` 零调用方。对照：**技能**走的正是用户描述的形态——静态目录注入 + `load_skill` 按需加载
+  （`skills/context_provider.py:19-50` + `skills/tool.py:36-44`）。记忆缺的正是这一半。
+- **派生缺陷**：`forget_memory` 的描述写着"不确定要删哪条时先检索确认"（`memory/tools.py:61`），
+  让模型去用一个**不存在**的工具——与 #187 同类（模型对自身能力认知不可靠）。
+
+### 复用调研结论（Reuse First §6，许可证已核；详见 #200 评论）
+
+- **可直接移植的 MIT/Apache-2.0 代码四段**：dsh `context-occupancy.ts`（百分比 clamp 公式）+
+  `ContextMeter.module.css`（弹层几何与 4px 分段条，含 `min-width:2px`、0% 段不渲染）；
+  opencode `session-context-breakdown.ts`（分类拆解 + **"其他"兜底桶** + **估算超出真实 input 时按比例缩放**的诚实机制）+
+  `session-context-tab.tsx`（bar + swatch 图例版式）；pi 社区扩展（唯一带 Skills 桶的公开实现）；
+  Codex `TokenUsageBreakdown`（cache 感知的字段命名，建议直接对齐）。
+- **分段条不需要任何库**：npm 上"segmented progress bar"只有 RN/控件类，Tremor 只支持单值，
+  Recharts/visx 对一条 4px 的条属杀鸡用牛刀 ⇒ flex div 手写，不引库。
+- **缓存命中率没有现成组件**，只有两种公式口径（dsh 会话平均 vs pi 最近一轮）。
+- ⚠ **dsh 自己的归档笔记是本次最重要的警告**：它明确记录"更细的分类（rules/skills/MCP tools）
+  **Not separable here**，因为 harness 把那些贡献折进了 system text 与 tools list，三分类才是诚实的解"。
+  本仓同样把工具 `prompt_guidance` 折进系统提示词、且**工具 schema 全仓零 token 计数**
+  ⇒ 要拆成图4 的六类，**必须先在后端把桶分开**，否则那几行的数字就是编的（不变量 #21）。
+- 仓库早有记载：`docs/BENCHMARK_SYNTHESIS.md:109-116` 已写明"tokens 消耗量 ❌ 事件 payload 无…
+  要显示真值必须扩后端事件 payload"。
+
+### ⚠ 唯一仍未明确的一项（已在 #200 评论中标为待拍板）
+
+窗口真相。用户原话把三个选项并列抄回（「全局 200k / 接通每模型 context_window（我推荐…）/ 新配置」），
+**未单选**。这不是纯展示改动：接通每模型 `context_window` 后，deepseek 的有效预算从 200k 掉到 64k
+（`model/config.py:35`），**自动压缩会更早触发**（`auto_compact_threshold=0.70`，`config.py:69`），
+即单轮能装下的历史变少——属**运行行为变更**，必须用户口头确认。
