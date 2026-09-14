@@ -44,7 +44,9 @@ function supersedeRanges(events: readonly AgentEvent[]): Array<[number, number]>
   const userSeqs = events
     .filter((e) => e.type === EventType.USER_MESSAGE && e.seq !== null)
     .map((e) => e.seq as number);
-  const lastSeq = Math.max(...events.map((e) => e.seq ?? 0));
+  // reduce 而非 Math.max(...spread)（审查 P2）：超长会话（数万事件）下
+  // spread 会把整个数组当函数参数展开 → RangeError，历史装载直接崩。
+  const lastSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
   const ranges: Array<[number, number]> = [];
   for (const seq of [...supersededSeqs].sort((a, b) => a - b)) {
     const following = userSeqs.find((u) => u > seq && !supersededSeqs.has(u));

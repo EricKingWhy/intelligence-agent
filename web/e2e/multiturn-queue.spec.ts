@@ -14,7 +14,10 @@ const FIRST_FRAMES = [
   { type: 'session/started', seq: 1, session_id: 'mt-session-1', run_id: 'mt-run-1', time: '2026-09-15T00:00:00Z' },
   { type: 'run/started', seq: 2, session_id: 'mt-session-1', run_id: 'mt-run-1', time: '2026-09-15T00:00:00Z' },
   { type: 'user/message', data: { content: '第一版问题' }, seq: 3, session_id: 'mt-session-1', run_id: 'mt-run-1', step_id: 1, time: '2026-09-15T00:00:00Z' },
-  { type: 'run/completed', data: {}, seq: 4, session_id: 'mt-session-1', run_id: 'mt-run-1', time: '2026-09-15T00:00:01Z' },
+  { type: 'model/started', seq: 4, session_id: 'mt-session-1', run_id: 'mt-run-1', step_id: 1, time: '2026-09-15T00:00:00Z' },
+  { type: 'model/delta', data: { delta: '第一版回答' }, seq: 5, session_id: 'mt-session-1', run_id: 'mt-run-1', step_id: 1, time: '2026-09-15T00:00:00Z' },
+  { type: 'model/completed', data: { content: '第一版回答' }, seq: 6, session_id: 'mt-session-1', run_id: 'mt-run-1', step_id: 1, time: '2026-09-15T00:00:01Z' },
+  { type: 'run/completed', data: {}, seq: 7, session_id: 'mt-session-1', run_id: 'mt-run-1', time: '2026-09-15T00:00:01Z' },
 ];
 
 /** 空闲会话前置：第一条消息建会话，等 run 终态。 */
@@ -32,11 +35,11 @@ test('T11：编辑最新一条用户消息 → supersedes_seq 进 payload → �
   const LATER_FRAMES = [
     // §4.6 后端 send_message 的 supersede 分支：先写 message/superseded
     // （取代区间 [3, 下一条未取代 user)），再注入新问句（steer_id）并回答。
-    { type: 'message/superseded', data: { superseded_seq: 3 }, seq: 5, session_id: 'mt-session-1', time: '2026-09-15T00:00:02Z' },
-    { type: 'run/started', seq: 6, session_id: 'mt-session-1', run_id: 'mt-run-2', time: '2026-09-15T00:00:02Z' },
-    { type: 'user/message', data: { content: '第二版问题', steer_id: 'st-1' }, seq: 7, session_id: 'mt-session-1', run_id: 'mt-run-2', step_id: 2, time: '2026-09-15T00:00:02Z' },
-    { type: 'steer/applied', data: { steer_id: 'st-1', applied_seq: 7, run_id: 'mt-run-2' }, seq: 8, session_id: 'mt-session-1', run_id: 'mt-run-2', time: '2026-09-15T00:00:02Z' },
-    { type: 'run/completed', data: {}, seq: 9, session_id: 'mt-session-1', run_id: 'mt-run-2', time: '2026-09-15T00:00:03Z' },
+    { type: 'message/superseded', data: { superseded_seq: 3 }, seq: 8, session_id: 'mt-session-1', time: '2026-09-15T00:00:02Z' },
+    { type: 'run/started', seq: 9, session_id: 'mt-session-1', run_id: 'mt-run-2', time: '2026-09-15T00:00:02Z' },
+    { type: 'user/message', data: { content: '第二版问题', steer_id: 'st-1' }, seq: 10, session_id: 'mt-session-1', run_id: 'mt-run-2', step_id: 2, time: '2026-09-15T00:00:02Z' },
+    { type: 'steer/applied', data: { steer_id: 'st-1', applied_seq: 10, run_id: 'mt-run-2' }, seq: 11, session_id: 'mt-session-1', run_id: 'mt-run-2', time: '2026-09-15T00:00:02Z' },
+    { type: 'run/completed', data: {}, seq: 12, session_id: 'mt-session-1', run_id: 'mt-run-2', time: '2026-09-15T00:00:03Z' },
   ];
   // 历史装载重读事件流（不变量 #22）。**可变引用**：fixtures 持有该数组本身，
   // POST 时补入 run 2 的故事（真后端 append 发生在投递时）——收尾回读会拿到
@@ -47,6 +50,8 @@ test('T11：编辑最新一条用户消息 → supersedes_seq 进 payload → �
     sessions: [],
     events: durableLog,
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    // 编辑保存 → /messages（supersede 分支）：launched SSE（新 run 回答新问句）；
+    // 随后 durable log 追加全量故事（GET /events 回读会拿到它）。
     onMessagesPost: (route) => {
       messagesBody = route.request().postData() ?? '';
       durableLog.push(...LATER_FRAMES);
@@ -57,8 +62,10 @@ test('T11：编辑最新一条用户消息 → supersedes_seq 进 payload → �
   await page.goto('/');
   await openIdleSession(page);
 
-  // 旧问句在场
+  // 旧问句在场；回答段（.msg-model）也在场——为锁 §4.5.1「问与答整段删除」，
+  // FIRST_FRAMES 带 model/delta 输出（见下）。
   await expect(page.locator('.msg-bubble-user', { hasText: '第一版问题' })).toBeVisible();
+  await expect(page.locator('.msg-model').first()).toBeVisible();
 
   // 动作行：最新一条用户消息的「编辑」可用（D8；置灰不是隐形——非最新消息
   // 的编辑按钮 disabled，这里只有一条，必可用）。点它进入编辑态。
@@ -76,10 +83,10 @@ test('T11：编辑最新一条用户消息 → supersedes_seq 进 payload → �
   expect(body.supersedes_seq).toBe(3);
   expect(body.content).toBe('第二版问题');
 
-  // §5.4：旧轮的用户气泡从视图移除（不含"已改写"标记）；新问句可见。
-  // Timeline 摘要行（"N user/message …"）照旧在场——§4.5.1：事件照旧在
-  // events 日志，只有回答段消失；新问句可见。
+  // §5.4 / §4.5.1：旧轮**问与答整段**从视图移除（不含"已改写"标记）；新问句
+  // 可见。Timeline 摘要行照旧在场——§4.5.1：事件照旧在 events 日志。
   await expect(page.locator('.msg-bubble-user', { hasText: '第一版问题' })).toHaveCount(0);
+  await expect(page.locator('.msg-model', { hasText: '第一版回答' })).toHaveCount(0);
   await expect(page.locator('.msg-bubble-user', { hasText: '第二版问题' })).toBeVisible();
 });
 

@@ -1174,7 +1174,13 @@ export function useSession() {
     async (sessionId: string, itemId: string) => {
       try {
         await cancelQueueItem(sessionId, itemId);
-      } catch { /* 404 幂等失败：条目可能已被消费，界面由事件流对账 */ }
+      } catch (e) {
+        // 404 = 已取消/已消费（幂等失败语义）：静默，界面由事件流对账。
+        // 其余失败（网络/服务端）必须上浮——静默会让用户以为已取消、
+        // 请求根本没到服务器（审查 P3）。
+        if (e instanceof NotFoundError) return;
+        setError(`取消排队消息失败：${(e as Error).message}`);
+      }
     },
     [],
   );

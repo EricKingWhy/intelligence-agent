@@ -482,6 +482,9 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
               value={editValue}
               onChange={(e) => setEditValue(e.target.value)}
               onKeyDown={(e) => {
+                // IME composition 守卫（审查 P1，同 Composer）：确认拼音的
+                // Enter（含误带 Ctrl）不得触发保存。
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
                   const trimmed = editValue.trim();
@@ -573,8 +576,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
         </div>
       ))}
 
-      {/* Execution chain — model segments and tools in true event order */}
-      {turn.activities.length > 0 && (
+      {/* Execution chain — model segments and tools in true event order.
+          ADR-0030 §4.5.1：被取代轮的**回答段**同样不渲染（用户裁定是
+          "问与答整段删除"，与后端投影整轮 shadow 同构——Spec 审查 P1：
+          只删问句块会留下孤儿回答，前后端视图不一致）。 */}
+      {!isSupersededTurn && turn.activities.length > 0 && (
         <div className="msg msg-model" title={completedTitle}>
           <div className="msg-body">
             {/* 工具行：折叠按钮（手动选项）+ 模型名小标签（调研 pitfall #6：

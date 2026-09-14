@@ -112,7 +112,10 @@ export const Composer = memo(function Composer({
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
+  // IME composition 守卫（审查 P1）：中文输入法按 Enter 确认拼音时
+  // `isComposing` 为真——此时不提交，否则半截拼音会被当成任务发出。
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       submit('steer');

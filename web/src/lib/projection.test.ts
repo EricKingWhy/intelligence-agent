@@ -2,8 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
-import { EventType } from '../types';
-import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
+import { EventType, type EventTypeValue } from '../types';
+import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, latestEditableTurn, projectHistory, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -928,8 +928,8 @@ describe('applyEvent — df4f7d8 新形状', () => {
   });
 
   // #195（ADR-0030 §5.4）：队列/引导五类型已接线——投影进 undelivered 折叠
-  // / 摘除（不再落 unknown_events），行为由本文件与 useSession.test.ts 的
-  // queue/steer 用例锁定。此处只留 COMPACTION 两条仍是兜底。
+  // / 摘除（不再落 unknown_events）；摘除与 latestEditableTurn 判据由本文件
+  // 末尾「projectUndelivered — 摘除与补齐」describe 块的单测锁。
 
   // ART-01（第十一轮真机验收）：运行时只发 artifact/externalized，此前前端只接了
   // 规格里的 artifact/created → 有产物的会话里 Artifacts 页签恒空、还写"未产生 Artifact"。
@@ -2111,5 +2111,57 @@ describe('审批投影 — 权限档（permission_policy）/ 待审批 / 裁决�
       data: { decision: 'deny', reason: '缺 id' },
     }));
     expect(s.approval_decisions).toEqual([]);
+  });
+});
+
+// ── #195（ADR-0030 §5.2/§8 T12）：projectUndelivered 摘除与 latestEditableTurn ──
+// Spec 审查 P2：此前「未接线类型」测试只锁了投影进 unknown_events 的兜底，
+// 摘除（取消/消费）与「最新可编辑」判据没有单测锁。这里补齐四条。
+
+describe('projectUndelivered — 摘除与补齐（#195）', () => {
+  const T = '2026-09-15T00:00:00Z';
+  const ev = (type: EventTypeValue, data: Record<string, unknown>, seq: number): AgentEvent =>
+    ({ type, seq, session_id: 's', time: T, data }) as unknown as AgentEvent;
+
+  it('message/queued 增量进 undelivered；queue/cancelled 摘除（T12「取消移除」的投影事实）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.MESSAGE_QUEUED, { queue_id: 'q-1', content: '排队一' }, 1));
+    s = applyEvent(s, ev(EventType.MESSAGE_QUEUED, { queue_id: 'q-2', content: '排队二' }, 2));
+    expect(s.undelivered.map((u) => u.id)).toEqual(['q-1', 'q-2']);
+    s = applyEvent(s, ev(EventType.QUEUE_CANCELLED, { queue_id: 'q-1' }, 3));
+    expect(s.undelivered.map((u) => u.id)).toEqual(['q-2']);
+  });
+
+  it('queue/consumed 摘除（消费事实在投递成功后写——投影只认事件）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.MESSAGE_QUEUED, { queue_id: 'q-1', content: '排队' }, 1));
+    s = applyEvent(s, ev(EventType.QUEUE_CONSUMED, { queue_id: 'q-1' }, 2));
+    expect(s.undelivered).toHaveLength(0);
+  });
+
+  it('steer/requested 进 undelivered；steer/applied 摘除（引导收口）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.STEER_REQUESTED, { steer_id: 'st-1', content: '引导' }, 1));
+    expect(s.undelivered).toEqual([
+      { kind: 'steer', id: 'st-1', content: '引导', seq: 1, created_at: T },
+    ]);
+    s = applyEvent(s, ev(EventType.STEER_APPLIED, { steer_id: 'st-1', applied_seq: 2, run_id: 'r' }, 3));
+    expect(s.undelivered).toHaveLength(0);
+  });
+
+  it('latestEditableTurn：只算非取代、非注入、有 seq 的最新用户轮（D8 两端同判据）', () => {
+    // Turn 最小形（model 段由 applyEvent 之外的手工构造补齐）
+    const mkTurn = (seq: number, stepId: number, injectedBy: string | undefined, superseded?: boolean) => ({
+      step_id: stepId, status: 'done' as const, user_message: '问', user_message_seq: seq,
+      injected_by: injectedBy, notices: [], tools: [], segments: [], activities: [],
+      delegations: [], started_at: T, completed_at: T, turn_index: stepId, reasoning: [],
+      model: { text: '', status: 'done' as const },
+      superseded,
+    });
+    const turns = [mkTurn(3, 1, undefined), mkTurn(5, 2, 'failure-guard'), mkTurn(7, 3, undefined)];
+    expect(latestEditableTurn(turns)?.user_message_seq).toBe(7);
+    // 最新轮被取代 → 退回上一条非取代非注入轮（注入轮不算）
+    const superseded = turns.map((t, i) => (i === 2 ? { ...t, superseded: true } : t));
+    expect(latestEditableTurn(superseded)?.user_message_seq).toBe(3);
   });
 });

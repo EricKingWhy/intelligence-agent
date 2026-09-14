@@ -519,13 +519,15 @@ export async function flushSessionQueue(sessionId: string): Promise<Response> {
 }
 
 /** POST /api/sessions/{id}/queue/{queue_id}/cancel —— 取消尚未消费的排队项。
- *  200 `{"status":"cancelled"}`；404 = 已取消/已消费/不存在（幂等失败语义，
- *  防覆盖式重置）。非 2xx 抛 Error。 */
+ *  200 `{"status":"cancelled"}`；404 = 已取消/已消费/不存在 → NotFoundError
+ *  （幂等失败语义，调用方静默）；其余非 2xx 抛 Error（网络/服务端失败必须
+ *  上浮——静默会让用户以为已取消、请求根本没到服务器）。 */
 export async function cancelQueueItem(sessionId: string, queueId: string): Promise<void> {
   const res = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}/cancel`,
     { method: 'POST' },
   );
+  if (res.status === 404) throw new NotFoundError('排队项已取消或已消费');
   if (!res.ok) throw new Error(`queue cancel ${res.status}`);
 }
 
