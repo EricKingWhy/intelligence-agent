@@ -27,6 +27,10 @@ from agent_harness.agent import AgentEvent
 from agent_harness.assembly import RecoveryStores, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
+from agent_harness.capability.manifest import (
+    core_manifest_entry,
+    descriptor_manifest_entry,
+)
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.identity import (
@@ -902,46 +906,35 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/capabilities")
     async def list_capabilities() -> dict[str, Any]:
-        """列出已装配的 capability manifest（SDD 03 §17，Phase 2 加法）。
+        """列出 capability manifest：**内置工具集（core）+ 已装配的插件 capability**（SDD 03 §17）。
 
-        默认 CAPABILITIES="" → registry.available() 为空 → 返回 {"capabilities": []}。
-        前端据空列表自行 fallback 显示 chat/timeline（空就是空，不假装有基础能力）。
+        **core 条目恒在且排在最前**（`capability/manifest.py`）：`changes`（「文件/改动」）与
+        `terminal`（「输出」）两个面由内置工具（`write`/`edit`/`apply_patch`/`bash`）产出，
+        而它们**不由任何插件 capability 产出**——只投影插件 descriptor 时，未声明 `surfaces`
+        的保守默认会让这两个面在**所有**真实部署里被前端 `centerTabs` 滤掉（#193）。
 
-        投影规则：descriptor 无 surfaces 声明 → 保守默认（chat/timeline=true）；
-        descriptor 显式声明 surfaces → 以声明为准。本轮没有 capability 填 surfaces，
-        只搭骨架——具体 surfaces 声明是 Phase 6 的工作。
+        插件条目：无 `surfaces` 声明 → 保守默认（`chat`/`timeline` = true，其余 false）；
+        显式声明 → 以声明为准（局部声明**不补齐**，契约里 `actions` 是可选局部字典）。
+        条目级**不做并集**——取并集是前端的事（`capabilities.ts::deriveSurfaces`），
+        两处都算一遍就等于有两个口径。
+
+        条目形状在**后端侧**只有 `capability/manifest.py` 一份（此前内联在本函数里，
+        core 一加入就会变成两份）。说清楚边界，免得把"一份"当成跨仓保证：
+        前端的键集与缺省（`web/src/lib/capabilities.ts::SURFACE_KEYS` / `DEFAULT_SURFACES`、
+        e2e 的 `web/e2e/fixtures.ts::CORE_CAPABILITY`）是**手工镜像**——跨语言、跨仓，
+        改这里不会自动同步过去。两端各有测试锁着同一份值
+        （后端 `tests/web/test_web_phase2_endpoints.py::TestCapabilities`，
+        前端 `web/src/lib/capabilities.test.ts` + `workspace-modes.spec.ts`），
+        改声明时两边一起改。
         """
         state = app.state.agent
         registry, _wiring = await state.get_wiring()
-        available = registry.available()
-        capabilities: list[dict[str, Any]] = []
-        for descriptor in available:
-            declared_surfaces = descriptor.surfaces or {}
-            # 保守默认：未声明 surfaces 的 capability 只保证 chat + timeline 可用
-            # （其余 surface 按 capability 显式声明）。
-            surfaces = {
-                "chat": declared_surfaces.get("chat", True),
-                "timeline": declared_surfaces.get("timeline", True),
-                "changes": declared_surfaces.get("changes", False),
-                "terminal": declared_surfaces.get("terminal", False),
-                "artifacts": declared_surfaces.get("artifacts", False),
-            }
-            actions = descriptor.actions or {
-                # 保守默认：未声明 actions 的 capability 不主张任何交互动作可用。
-                "permissions": False,
-                "stop": False,
-                "retry": False,
-                "resume": False,
-            }
-            capabilities.append({
-                "id": descriptor.name,
-                "display_name": descriptor.display_name or descriptor.name,
-                "version": descriptor.version,
-                "provider_name": descriptor.provider_name,
-                "surfaces": surfaces,
-                "actions": actions,
-            })
-        return {"capabilities": capabilities}
+        return {
+            "capabilities": [
+                core_manifest_entry(),
+                *[descriptor_manifest_entry(d) for d in registry.available()],
+            ],
+        }
 
     @app.get("/api/reasoning-efforts")
     async def list_reasoning_efforts() -> dict[str, Any]:
@@ -991,8 +984,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         清单端点与 POST /api/sessions 共用同一 id 集合。
 
         未装配任何 capability（bare 配置）→ wiring.context_providers 为空 →
-        返 ``{"providers": []}``（与 /api/capabilities 空目录降级同原则，
-        不伪造基础项）。前端据空列表自行 fallback。
+        返 ``{"providers": []}``（未装配就不编条目，不伪造基础项）。前端据空列表自行 fallback。
+        注意与 ``/api/capabilities`` 的区别：那边**恒有一条 core 条目**（内置工具集的声明，
+        见 `capability/manifest.py` / #193），因为内置工具真的在每个会话里；这里没有对应的
+        "内置 Context Provider"——没装配就是空。
         """
         state = app.state.agent
         _, wiring = await state.get_wiring()
