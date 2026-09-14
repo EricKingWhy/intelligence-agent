@@ -2434,3 +2434,70 @@ commit message 写明"方向翻转 + 断言同步"）。
 **与 #187 的关系**：BUG-013 当时**移除了 runtime context 里的工具清单**（防模型把写作任务误判为工具任务），
 本现象是同一处改动的另一面代价——模型只能靠 tools 参数自省，自述工具的能力变弱。这条权衡必须在 ADR 里写明。
 **与 #196 的边界**：本票只管"可观测/可解释"，`queue`/`steer` 消费侧死路见 #196，别合并成一个改动。
+
+---
+
+## 用户报障批次 3（2026-09-14）：UI 重设计三件 + 上下文容量看板（**仅登记，未修**）
+
+用户第三批报障，主体是 **UI 重设计**（明确要求：**用 `impeccable` skill 设计，品味要高**）+ 一个新看板。
+仍**只登记 + 开 issue，不动代码**。完整需求/证据/受影响断言在 issue 正文里，本节只留索引与关键结论。
+
+### UX-05（issue #199）模型选择器两级重设计
+
+**现象**：当前弹层难看（行距局促、`系统自动选`/`默认` 与勾选散落、层级不清）。
+**要求**：改成 ZCode 式两级——一级 provider（带 `>` 与当前生效 ✓、顶部显示当前选中项、底部 `管理模型`），
+二级悬停/点击侧向飞出该 provider 的模型列表。
+**关键发现（"难看"的第一根因）**：**分组其实早就实现了**（`ModelPicker.tsx:42-51` `groupByProvider` +
+`:147` 每 provider 一个 `CommandGroup`），但 `app.css:5697-5705` 的 `.model-picker-group-label`
+**全仓从未被任何 tsx 引用**（死 CSS），cmdk 实际渲染的 `[cmdk-group-heading]` **没有任何样式规则**
+⇒ 视觉上退化成"平铺一长条"。**数据面不需要后端改动**（`/api/models` 已含 `provider` 字段）。
+**必须保留**：`默认链`（系统自动选）伪选项、`commitSelection` 的双击去重守卫（`q-model-dedupe.spec.ts` 逐字锁）。
+**待定**：两级 + 搜索并存时的行为（建议搜索态扁平化并带 provider 前缀）。
+**会动到的断言**：`model-picker.spec.ts`（"6 个 option"语义会变）、`q-model-dedupe.spec.ts`（按 `.model-picker-item` 定位）、
+`picker-search-visibility.spec.ts`、`ModelPicker.test.tsx`、`fixtures.ts`（`MODELS`/`longCatalog`/`pickFirstModel`）。
+
+### UX-06（issue #200）新增「上下文容量」看板（**跨端，后端数据面基本缺失**）
+
+**要求**：对齐 ZCode 的图4——`上下文容量` + `18.3万/35万（52.2%）` + 分段条 + 六类占比
+（消息 / MCP 工具 / 系统工具 / 其他 / 系统提示词 / 技能）+ 脚注 `平均缓存命中率 99.6%`。
+**结论先行（必须让用户先知道）**：**这六个数字今天后端基本算不出来**，
+且 `平均缓存命中率` **完全不可用**——`_usage_from_response`（`runtime.py:118-135`）只映射三个键、
+**主动丢弃** `input_token_details`（含 `cache_read`），并且**有测试逐字锁住这个丢弃行为**
+（`tests/test_structured_logging.py:95-133`）。SDD 已声明 `cached_tokens?: number`
+（`03_RUNTIME_EVENT_CONTRACT.md:162`）但**未实现**；PRD 亦承认命中率未实测（`PRD_PROMPT_REGISTRY.md:280`）。
+按不变量 #21（不得伪造事实）**不能先填占位数字**。其余：窗口只有全局 `Settings.max_context_tokens=200_000`
+（`config.py:68`）且 builder **忽略**目录里的每模型 `context_window`（deepseek 宣称 64k、实际按 200k 算，既有不一致）；
+分类明细是 builder 的**私有** int（`_system_prompt_tokens` / `_token_estimate_total`，`builder.py:57,198-228`）未暴露；
+**工具 schema 的 token 全仓零计数**（系统工具 / MCP 工具两行无来源）；
+技能/记忆的 provider 代价在 `_with_providers`（`builder.py:244`）算完即丢。
+**无任何** `/usage`、`/stats`、`/context`、`/cost` 端点，WS 也无 stats 帧；前端今天只渲染 `usage_total.total_tokens`。
+**待拍板**：窗口真相（全局 vs 每模型 vs 新配置）、分类集合（照抄图4 还是落到本仓架构含"记忆"）、
+是否明示"这是估算"、触发入口（建议升级 TopBar 已有 tok 读数；
+⚠ **必须与 composer 现存的 `Context · N` 药丸区分**——那个是 context **providers** 选择器，同名即误解）。
+
+### UX-07（issue #201）权限 / Agent 档位 / 深度 三个下拉统一重设计
+
+**要求**：按图6 范式——每行 = **图标 + 标题 + 一句话描述**，选中态整行 accent + 行尾 ✓，
+面板带一句问句式头部（本仓无对应文档 ⇒ **链接先留空，不许造死链**）。
+**好消息**：图6 那种两行结构**数据早已具备**——三份目录的 `description` 全由后端下发
+（`tooling/contract.py:110-121` / `web/app.py:107-120, 123-136`），前端零硬编码；
+"难看"的根因是现在把 description 塞进 `.model-picker-item-meta` 灰字（`app.css:5727-5731`），
+且选项名用了 `--font-mono` + 11px（`app.css:5718-5726`）偏离 type scale。
+**顺带收债**：三个近乎重复的 picker 实现（`DEFAULT_VALUE` 与 cmdk `includes` 回调逐字复制）、
+触发按钮 CSS 双份（`.composer-model` 5519-5575 vs `.composer-control` 5587-5639，仅 max-width 不同）、
+默认项文案/选中指示/搜索阈值/`align`/可访问名（中英混用）五处不一致、多选无法表达"显式清空"。
+**待授权**：是否把三个 picker 合并为一个共享组件（**结构重构**，非纯视觉——但不合并则上述不一致会被抄成三份新样式）。
+**会动到的断言**：`control-row.spec.ts`、`context-providers.spec.ts`、`picker-search-visibility.spec.ts`、
+`u-project-task.spec.ts`（弹窗复用同一 `ControlPicker`）、`e2e-live/approval-live.spec.ts`、
+`g-visual-qa.spec.ts`（`.composer-control` 计数 = 3）、`fixtures.ts`（三份目录 + `pickControl`）。
+
+### UX-08（issue #198 评论）档位收窄工具集的提示 —— 裁决 = 从简披露
+
+用户要求「UI 可以提示一下，具体怎么设计一定要从简，不能突兀」。
+**主方案**：把"该档位不含什么"写进**选项自己的描述**（后端 `AGENT_PROFILE_DESCRIPTIONS` 补一句工具面摘要），
+零新增视觉元素，信息正好出现在做选择的那一刻；**文案必须后端下发**（写前端常量等于把 `tool_scope` 抄第二遍）。
+**次方案**：触发按钮 `title` 补一句（hover 可见、零占位）。**不做**横幅/toast/红点。
+**关于不持久化**：核对后建议**保持现状**——`agent_profile` 是 per-run amend，未选=后端默认=全量，
+刷新后显示"未选"**是如实的**；加 localStorage 反而会让用户被忘记选过的只读档位困住。
+本仓既有纪律也是"只有视图状态落 localStorage，**会改变运行行为的入参不落**"。
+若用户要"记住档位"属**独立决定**（会改变"未选"的语义），需单独拍板。
