@@ -406,6 +406,16 @@
 
   **未采纳（记录在案）**：Spec 轴提出"core 的 `actions` 属 scope creep（无消费方）"——**保留**：字段在契约里（SDD 03 §17），值被测试钉在真实路由上，且对 core 写全 false 是假话；已在 `CORE_ACTIONS` 注释里写明"当前无消费方 + 将来做动作 UI 该读会话级路由状态，不要把这里的布尔当授权"。
 
+- 2026-09-15：**#196 在途输入通道消费侧（queue/steer 闭环，后端，`feat/backend`）**。commit `3d9dc28`。票：[backend] queue/steer 通道「契约在、实现不在」（bug，ADR-0030）。门禁：ruff check 全绿；全量 pytest **2298 passed / 10 skipped / 42 deselected / 0 failed**（285.90s）。
+
+  **交付（ADR-0030 §4 P1 全量）**：① 两个 durable 事件 `queue/consumed` / `message/superseded`；② `derive_messages` supersede 区间（与 compaction bracket 同一条 `is_shadowed`，两个列表保住 summary 下标对齐，dangling 在 shadow 后）；③ runtime 循环头经 `SteerSource` 端口注入 steer（不设 `injected_by`，陈旧 steer 丢弃并留待终态投递）；④ 唯一投递点 `SessionService.deliver_next_undelivered` / `on_run_terminal`（读事件流按到达顺序取 1 条，消费事实在投递成功之后写），`RunManager` 可选 `on_run_terminal` 回调接线；⑤ HTTP：`supersedes_seq`/`queue_id` 字段 + `GET /queue` + `POST /queue/flush`（launched 分支共用同一段 SSE 生成器）+ `SupersedeTargetInvalid` 409；⑥ 启动扫描后 `rebuild_message_queues()` 按事件流重建（不自动起 run）；`cancel_queue` 补事件流复核（镜像只是缓存，D5）。
+
+  **对 ADR-0030 的实现偏离（已定案，合并前记录）**：终态驱动读**事件流**（`undelivered_inputs`）而不是先 drain 内存队列——只有事件流同时看得见 queue 与 steer 的到达顺序（D7），也免掉 ADR §4.7 的 `_requeue_front`（我们从没把输入弹出内存，`ActiveRunConflict` 竞态下输入留在事件流等下一个终态，无丢失窗口）。
+
+  **测试**：T4 投影 11 例（`tests/session/test_derive_supersede.py`，含与 compaction 并存的 summary 错位回归锁）；T1/T2/T3/T9/T10 端到端 8 例（`tests/session/test_multiturn_delivery.py`，真实 AppState + RunManager 终态回调 + ScriptedModel gate，含陈旧 steer 降级投递与记忆抽取不丢）；T5/T8 HTTP 7 例（`tests/web/test_multiturn_queue_http.py`，真实 ASGI 服务器）。T7（真实 provider 冒烟）与 T11/T12（前端 e2e）属后续票/人工项。
+
+  **集成提示词**：`docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`。#195（前端队列条/动作行/shadow 渲染）依赖本票冻结的 `GET /queue` 契约，见该文档 §前端。
+
 - 2026-09-14：**#191 会话工作区只读浏览 API（后端，`feat/backend`）**。commit `7f00377`。票：[面板 T8][后端·后续] 开放工作区文件读取（列文件 / 读内容 / git 状态）——PRD（`WORKSPACE_PANEL_PRD.md` §3.3 + §6 票 8）里「文件/改动」面之外的后续票。门禁：ruff check 全绿；全量 pytest **2239 passed / 10 skipped / 42 deselected / 0 failed**（356.93s）。
 
   **交付**：四条只读路由（`GET /api/sessions/{id}/workspace/{files,file,git/status,git/diff}`），挂在会话下。PRD 的「文件/改动」面回答"这次 agent 改过哪些文件"（会话真相，来自事件流），本票补的是"工作区现在有什么、某个文件是什么"（**文件系统真相**）——两者刻意分开，本模块不参与"哪些文件是 agent 改的"的判断（不变量 #22）。**没有前端改动**：这是新供给面，消费它的 UI 是另一张票。
