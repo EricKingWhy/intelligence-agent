@@ -1696,3 +1696,92 @@ bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门�
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
 集成提示词见 `docs/INTEGRATION_PROMPT_181_TOUCH_RAIL.md`。
+
+---
+
+## 第二十四轮：#171（2026-09-14，跨端：后端 `9e4adc0` + `2b4e677` + 前端在途记录）
+
+票：#171「会话归档：让用户能整理会话列表（归档/取消归档 + 列表过滤）」。跨端票，
+后端半先做（票内顺序），前端半即本轮。
+
+**交付**：`7d6ebb7`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。
+后端半：`feat/backend` `9e4adc0`（实现）+ `2b4e677`（本票 review 追加的 detail 逐字锁）。
+
+### 一条不能"顺手改"的分层决策（先说，因为它长得像冗余）
+
+**载荷始终要完整一份**（`listSessions({ includeArchived: true })`），可见性过滤只发生在
+**投影层**（`buildRailModel` 的 `includeArchived`）；开关**不**重拉列表。
+
+- 若改成"开关驱动请求"（关着就不请求归档行），切换要等一次 round-trip、两次响应之间
+  列表是两套真相（不变量 #22），而且**归档的项目成员会从载荷里消失**——`buildRailModel`
+  只能把它算成 `missing`，界面就会对一条日志好端端躺在磁盘上的会话说「会话日志缺失」。
+- 后端默认（不带参数不返回归档行）**一个字没动**：那是给其他客户端的默认，与"这份 UI
+  要自己过滤"不冲突。前端显式请求全量，是把这句话写进请求而不是靠后端猜。
+
+### 做了什么
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/types.ts` | `SessionSummary.archived: boolean`（**必填**，与后端 schema 同形）+ `SessionArchived` 回执 |
+| `web/src/lib/api.ts` | `listSessions({includeArchived})`；`archiveSession`(POST) / `unarchiveSession`(DELETE)；回执形状防御（缺 `archived` 布尔就抛，**不拿请求意图补**——那是伪造确认） |
+| `web/src/lib/projects.ts` | `buildRailModel(..., {includeArchived})`：**被开关藏起来的行不算 `missing`**（`byId` 建在全量载荷上） |
+| `web/src/lib/railArchive.ts`（新） | 「显示已归档」的 localStorage 读写（`ahi.showArchived`，`'1'` 才算开，异常一律回默认——不能在隐私模式里白屏） |
+| `web/src/components/SessionList.tsx` | kebab 新增「归档/取消归档」（文案随行真值切换；在项目动作之后、硬删之前）；icon 开关（`aria-pressed`）；「已归档」徽标；失败就地报错；空态提示只说真话 |
+| `web/src/hooks/useSession.ts` | `setArchived`（**不动视野**，与硬删的 `convergeAfterDelete` 刻意相反）+ `refreshSessions` 返回是否成功 |
+| `web/src/App.tsx` | `handleSetArchived`：失败原因交回侧栏就地显示（不走流级 `error` 横幅） |
+| `web/e2e/archived.spec.ts`（新） | 6 条 × 2 视口（见下） |
+| `web/e2e/fixtures.ts` | 归档分支（有状态、幂等、409 只在归档方向）+ `GET /api/sessions` 按真语义过滤 `include_archived` + `sessionsListFailAfter` |
+| `docs/E2E_SCENARIO_MAP.md` | 计数校准 + 新场景行 |
+
+### 门禁（全绿，串行跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 干净 |
+| `npx vitest run` | **827 passed / 49 files** |
+| `npx oxlint` | **0 error / 44 warnings**（按文件与 HEAD 逐一比对：改动文件新增 0） |
+| `npx playwright test --workers=2` | **322 passed**（8.4m；`--list` 同口径 322 = 161×2 / 37 spec） |
+| `npx vite build` | 绿 |
+| 后端（`feat/backend`，本仓不可见） | `ruff check` clean；全量 pytest **2260 passed / 2 skipped / 0 failed** |
+
+### 测试强度（变异验证，不是"看起来绿"）
+
+| 变异 | 结果 |
+| --- | --- |
+| `listSessions()` 漏掉 `includeArchived` | 「默认收起」那条**红**（归档行永不出现——前端本地过滤救不了） |
+| 被开关过滤掉的行也算 `missing`（= 本票修掉的假话） | 缺失计数那条**红**（`2 条` vs 期望 `1 条`） |
+| 归档后 `selectSession(null)`（= 把视野拽走） | 「不影响正在阅读的会话」那条**红** |
+
+e2e 里"归档行不算缺失"必须带反向对照（账本里放一个**真**不存在的 id）：否则
+`missing === 0` 与"根本没算过"同形。
+
+### 两轴 code-review 的处置（Standards 4 + Spec 5，全部落地）
+
+| finding | 处置 |
+| --- | --- |
+| **Spec（本票真正的跨端回归）**：`l-auth-banner.spec.ts` 的路由 glob `**/api/sessions` 是**整串**匹配，配不上新增的 `?include_archived=true` ⇒ 该用例静默走 200 分支、401 横幅永不出现 | 改 `**/api/sessions*`（`*` = `[^/]*`，只多吃查询串，不会吞 `/api/sessions/{id}/…`），并在注释里写明为什么这个 `*` 不是装饰 |
+| **两轴都提**：空态提示在"项目已注册但还没有任何会话"时渲染「0 条都已归档」——把"没有会话"说成"都归档了"；且指向一个**屏幕上不存在**的文案（开关是纯图标） | 加两个守卫（`sessions.length > 0` / `!showArchived`），数字改用**真的**归档条数，文案改指"侧栏顶部的图标"；e2e 补一条（含"项目在但无会话时不出声"） |
+| **Spec**：归档写成功但随后列表重拉失败 → 静默（行还是旧状态，用户以为没生效） | `refreshSessions` 返回是否成功；`setArchived` 刷新失败就**抛**（就地说明"已生效但没刷新出来"）；e2e 用 `sessionsListFailAfter` 构造该窗口 |
+| **Spec**：两个动词的差别只有 e2e 锁着，单测断不了 POST vs DELETE | 单测改用记 method 的 capture helper，并补"回执是权威"（与请求意图相反时照抄回执）与"缺布尔就抛"两条 |
+| **Spec**：前端 e2e fixture 逐字复制后端 404/409 detail，但后端只断状态码 ⇒ 后端改词两侧各自绿着漂开 | 后端追加逐字断言（`2b4e677`）——由后端自己的测试锁，跨仓没有更便宜的单一来源 |
+| **Standards**：`readArchiveReceipt` 的 `expected` 参数只进诊断串却像在校验 | 改名 `requestedArchived` + 注释写明"回执是权威、这里不校验相等" |
+
+未采纳（有据）：`.rail-error` 在窄屏被 `display:none` 时不改——属既有的窄屏降级清单
+（`.rail-project-missing` 同组），见残余 ①。
+
+### 如实划下的残余
+
+1. **窄屏 / 触摸档的失败报错看不见**：`@media (max-width: 820px)` 里 `.rail-error` 是
+   `display: none`（WS-5 的既成降级）。#181 刚把 ⋯ 在触摸档变可达 ⇒ 现在窄屏用户**能**
+   触发归档、但失败时看不到那句话。要真修得先定案窄屏的槽位/降级模型（与 #181 残余
+   ①② 同一批决策，不在本票内自己拍）。
+2. **AC11 的可选「轻量提示 + 撤销」没做**：票面写的是"**可**在成功后给一次轻量提示 +
+   撤销"，不是必须；撤销路径存在，入口是菜单里的「取消归档」。
+3. **跨仓文案同源靠两侧各自断言**：后端 `2b4e677` 与前端 e2e fixture 各锁一份原句，
+   没有单一来源（跨仓的代价，已在两侧注释里指明）。
+4. **`/stream` 未在归档态下被 e2e 覆盖**：后端 AC5 已有契约测试（归档后 events /
+   resume / fork / lineage 照旧），而 stream 不读 `session_meta`；属联调车道可补项。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
+集成提示词见 `docs/INTEGRATION_PROMPT_171_SESSION_ARCHIVE.md`（在 `feat/backend`，与后端半
+同一份——跨端票合成一个入口，含合并顺序、契约要点与残余）。
