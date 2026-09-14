@@ -739,13 +739,17 @@ class SessionService:
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
 
-        # 第 1 步：编辑排队项时先取消旧项（用户可见动作，写 QUEUE_CANCELLED）。
-        # 取代已落盘消息时先校验目标——校验失败要在**投递之前**抛，不能先投了
-        # B 再说"目标不合法"（那会留下一条用户以为已经替换成功、其实没有的新消息）。
+        # 第 1 步：取代校验**先于**取消（校验是纯读，无顺序依赖）——Spec 审查
+        # P3：若先 cancel 再发现 supersedes_seq 不合法（409），请求失败却留下了
+        # QUEUE_CANCELLED 副作用，用户排队项丢失。校验通过后才取消旧项。
+        # queue_id 与 supersedes_seq 可同传（取代一条已落盘消息并取消一条排队项
+        # 是两个独立合法动作）；**取代校验在任何分支下都必须跑**——P2 审查缺口：
+        # 原 elif 会因同传 queue_id 而跳过校验，第 3 步照样写 superseded 事件，
+        # 客户端可借排队项捎带绕过 D8。
+        if supersedes_seq is not None:
+            await self._assert_supersedable(session_id, supersedes_seq)
         if queue_id is not None:
             await self.cancel_queue(session_id=session_id, queue_id=queue_id)
-        elif supersedes_seq is not None:
-            await self._assert_supersedable(session_id, supersedes_seq)
 
         active_run = self._state.run_manager.get_active(session_id)
 
@@ -826,8 +830,17 @@ class SessionService:
             # 投影侧的幂等（同一 seq 被取代两次以最早一条为准）在 derive_messages
             # 里独立成立，与这里的写侧校验不矛盾（ADR-0030 §4.2.3）。
             raise SupersedeTargetInvalid(f"seq {superseded_seq} 已被取代过")
+        # D8：与前端 latestEditableTurn 同一判据——「最新**可编辑**用户消息」
+        # 排除 runtime 注入（injected_by）：failure-guard 纠正消息排在最后时，
+        # 若把它算进 latest，用户真实末条将永远 409，而前端却给出编辑按钮
+        # （两端必有一端在说谎）。注入消息本身不可被取代（上面已拒）。
         latest_user_seq = max(
-            (e.seq for e in events if e.type == USER_MESSAGE), default=None
+            (
+                e.seq
+                for e in events
+                if e.type == USER_MESSAGE and not e.data.get("injected_by")
+            ),
+            default=None,
         )
         if latest_user_seq != superseded_seq:
             raise SupersedeTargetInvalid(

@@ -293,6 +293,95 @@ async def test_supersede_repeat_same_seq_409(tmp_path, monkeypatch):
         await _shutdown(server, serve_task)
 
 
+@pytest.mark.asyncio
+async def test_supersede_with_queue_id_still_validated(tmp_path, monkeypatch):
+    """queue_id 与 supersedes_seq 同传：取代校验**必须**照跑（审查 P2 缺口）。
+
+    原 elif 会在同传 queue_id 时跳过 _assert_supersedable，第 3 步照样写
+    message/superseded——客户端可借排队项捎带绕过 D8。修复后对非最新目标
+    必须 409（先于投递抛，错误以 JSON 落地），且不留下 superseded 事件。"""
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        session = await _completed_session(port)
+        sid = session["session_id"]
+        user_seq = next(
+            f["seq"] for f in session["frames"] if f["type"] == "user/message"
+        )
+        # 空闲会话 + 手工写一条排队事实（合法 queue_id，模拟崩溃前的 durable
+        # 事实——与其他排队测试同一手法）；supersedes_seq 指向非最新（第一条
+        # user/message，续聊后的最新不是它——先续聊一条并等收口造"非最新"）。
+        await _collect_stream(
+            port, "POST", f"/api/sessions/{sid}/messages",
+            {"content": "第二条", "mode": "queue"},
+        )
+        await _wait_idle(port, sid)
+        import pathlib
+
+        from agent_harness.session import Session
+        from agent_harness.session.event import MESSAGE_QUEUED
+        from agent_harness.session.store import JsonlSessionStore
+        store = JsonlSessionStore(root=pathlib.Path(tmp_path) / "sessions")
+        Session.append_event(store, sid, MESSAGE_QUEUED,
+                             {"queue_id": "q-piggyback", "content": "排队事实"})
+        first_seq = user_seq
+
+        # 同传：queue_id（存在）+ supersedes_seq=非最新 → 必须 409
+        status, payload = await _post(
+            port, f"/api/sessions/{sid}/messages",
+            {
+                "content": "借排队捎带的取代",
+                "mode": "queue",
+                "queue_id": "q-piggyback",
+                "supersedes_seq": first_seq,
+            },
+        )
+        assert status == 409, f"同传时非最新取代必须仍被拒，实际 {status}: {payload}"
+
+        # 不留下 superseded 事件（校验失败在投递之前抛）
+        events = store.read_events(sid)
+        assert not [e for e in events if e.type == "message/superseded"], (
+            "409 路径不得写 superseded 事件"
+        )
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_supersede_injected_message_409(tmp_path, monkeypatch):
+    """对 injected_by 消息 supersede → 409（ADR-0030 T5：注入消息不可编辑）。
+
+    构造方式与真机一致：failure-guard 纠正消息（服务端在工具失败时注入的
+    user-role 消息带 injected_by）。手工写一条 injected_by user/message 后，
+    对它（以及把它算作"最新"的场景）都断言 409。"""
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        session = await _completed_session(port)
+        sid = session["session_id"]
+        await _wait_idle(port, sid)
+        import pathlib
+
+        from agent_harness.session import Session
+        from agent_harness.session.event import USER_MESSAGE
+        from agent_harness.session.store import JsonlSessionStore
+        store = JsonlSessionStore(root=pathlib.Path(tmp_path) / "sessions")
+        Session.append_event(store, sid, USER_MESSAGE,
+                             {"content": "运行时纠正", "injected_by": "failure-guard"})
+
+        # 注入消息排在最后 ⇒ 它是最新 user/message：对它 supersede → 409（注入不可编辑）
+        events = store.read_events(sid)
+        injected_seq = next(
+            e.seq for e in events
+            if e.type == "user/message" and e.data.get("injected_by")
+        )
+        status, payload = await _post(
+            port, f"/api/sessions/{sid}/messages",
+            {"content": "改注入消息", "mode": "queue", "supersedes_seq": injected_seq},
+        )
+        assert status == 409, f"注入消息必须 409，实际 {status}: {payload}"
+    finally:
+        await _shutdown(server, serve_task)
+
+
 # ── T8：GET /queue + flush + 编辑排队项 ──────────────────────────────
 
 
