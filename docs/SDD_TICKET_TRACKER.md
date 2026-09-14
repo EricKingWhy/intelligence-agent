@@ -1543,3 +1543,79 @@ bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门�
 - 移交集成 AI：先 `feat/backend` → `main`（#185 的路由只在那条分支，否则前端"查看完整
   内容"404），再 `feat/frontend` → `main`，然后按集成提示词冒烟。
   提示词：`docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md`。
+
+## 第二十二轮：#193（2026-09-14，跨端：后端 `21f5427` + 前端在途记录）
+
+票：#193「GET /api/capabilities 未声明 changes/terminal：中心列两个新面在真实部署里不可达」。
+上一轮把它标为「保持 OPEN（后端声明侧）」——本轮后端做完了，前端这一半是**跟着改载荷口径**。
+
+### 后端那一半（`feat/backend`，commit `21f5427`，本仓看不到）
+
+新增 `capability/manifest.py`：条目形状与保守默认收敛到唯一一份 `manifest_entry()`，
+并补一条 `id="core"` / `provider="builtin"` 的条目由端点**恒发且排在最前**——
+`changes`/`terminal` = true（产它们的 `write`/`edit`/`apply_patch`/`bash` 在
+`assembly.build_runtime` 里无条件注册），`artifacts` = false（要部署配了 store 才读得到），
+`actions` 如实（permissions/stop/resume = true 对应三个真路由，retry = false）。
+票面方向 2（给插件 descriptor 填 `surfaces`）被否：那两个面不由任何插件产出，挂上去是假话。
+
+### 前端改了什么（8 文件，+142 / -55；**运行时代码零行为改动**）
+
+1. **e2e 改吃真实默认载荷**（`fixtures.ts` 新增 `CORE_CAPABILITY`，逐值镜像后端的
+   `manifest.py`；`routeApi` 的 capabilities 缺省从 `[]` 改为 `[CORE_CAPABILITY]`）：
+   - `workspace-modes.spec.ts` AC2/AC3 → 「真实默认 → `['Chat','文件/改动','输出']`」；
+     新增 `capabilities: []` 一条覆盖"目录真的为空"（老后端 / 降级路径）；
+     AC4 用真实默认 + 调用计数证明端点确实被消费；
+     新增并集语义用例（core + 插件全 false → 三面仍在）。
+   - `x-output-panel.spec.ts` / `z-changes-panel.spec.ts`：去掉注入，走真实默认。
+   - AC6 的**逐面独立矩阵**保留：故意不含 core，否则 `changes`/`terminal` 无法互不牵连地验。
+2. **`m-stream-affordances.spec.ts` 的严重模式冲突**（本票在前端唯一一处真会被卡住的修）：
+   `ToolOutputStream` 是对话卡与「输出」面共用的那一个渲染器（#190 AC9），#193 之后
+   「输出」面在默认载荷下真的存在了，而它带同一个工具的一份输出（`App.tsx` 的 `hidden`
+   面板，不卸载）⇒ 裸类名 `.tool-out-body` / `.tool-out-wrap-btn` / `.tool-out-jump`
+   同时命中两处（strict mode 报两个元素），而藏起来那份 `scrollHeight === 0`，
+   "容器必须可滚动"的前置断言会**假失败**。三条 locator 按面板 id 收窄到
+   `#workspace-panel-chat`（本用例要验的就是对话里那张工具卡）。
+   顺带订正 `ToolCard.tsx:301` 那条 #190 之后已过期的行号引用。
+3. **注释/文档订正**：`capabilities.ts` / `api.ts` / `capabilities.test.ts` 里指向后端的
+   **行号引用**被本票重写端点时作废 ⇒ 改成函数名/模块名（跨仓行号必漂移，本仓既有惯例就是
+   `web/app.py::SessionSummary` 这种写法）。`CORE_CAPABILITY` 的漂移说明改成如实口径。
+
+### 双轴 code-review（findings 全部处理）
+
+- **Standards ①** `x-output-panel.spec.ts` 一处**孤儿 JSDoc**：它描述的"不注入声明"那组用例
+  已被删掉，注释现在贴在 `DISABLED` 上方、与自己正下方那条自相矛盾 ⇒ 合并重写。
+- **Standards ②** 三处 e2e 注释自称"**端到端证明**"是过头话：Playwright 拦了
+  `/api/capabilities`，**请求不出网**，它证不了"后端真发 core"⇒ 改为如实口径（锁的是
+  **前端消费侧**；后端那一半由 `tests/web/test_web_phase2_endpoints.py::TestCapabilities`
+  真走 HTTP 端点锁）。
+- **Standards ③** 后端 `app.py` 的"条目形状只定义一次"是**跨仓**口吻 ⇒ 后端侧收窄为
+  "后端一份 + 前端镜像"，并点名两端各自的守卫测试（后端那半已同步改）。
+- **Spec ④（AC2 部分达成，记为残余）**："用真后端形状的载荷"只能做到**逐值镜像**——
+  跨仓无共享来源，**后端改值前端测试不会红**。`fixtures.ts` 已把这条链"为什么断、由谁守"
+  写清楚；集成提示词把它列为"合并后按真实端点人工对齐"的必做项。
+- **Spec ⑤（AC4 语义已被并集改变，不当作退化）**：core 恒在 + 前端取并集 ⇒ 插件写
+  `changes: false` 不再能让面消失。那是"这个插件不产出"而非"会话产不出"。闸门仍由
+  **不含 core 的载荷**证明（`capabilities: []` → 只剩 Chat；AC6 逐面矩阵）。正确读法已写进
+  后端 `ACCEPTANCE_LANE_ENV.md` §2，避免验收方照旧票面文字误判。
+- **Spec ⑥**：声明是**部署级**不是 profile 级（端点无 session 上下文，读不到 `tool_scope`；
+  某 profile 收窄掉 `bash` 时「输出」面仍出现空态而非消失）⇒ 有意取舍 + 另开票，已记文档。
+
+### 门禁（前端，串行跑；后端全量 pytest 不与其并发——已知资源竞争型抖动）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 干净 |
+| `npx oxlint` | **0 error** / 44 warnings（全部既有类别） |
+| `npx vitest run` | **813 passed / 48 files** |
+| `npx playwright test --workers=2` | **306 passed**（6.1m；修 2 条 strict-mode 冲突前是 304 passed / 2 failed） |
+| `npx vite build` | 绿 |
+
+### 关单与移交
+
+- **#193 前后端都完成** ⇒ 按 §14.12 关单：comment 写明两端分支（`feat/backend` /
+  `feat/frontend`）与 commit（`21f5427` / `127ecc3`），注明合并由集成 AI 执行。
+- **本批（#193）的集成提示词是后端那份**：
+  `D:\intelligence-agent-backend\docs\INTEGRATION_PROMPT_193_CAPABILITY_SURFACES.md`
+  （跨端，含合并顺序、真端点验收、两条必须传下去的口径、风险 1 的同类隐患提示）。
+- 上一轮（#183 / #186 / #189）的提示词 `docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md` 仍然有效，
+  但它里面"#193 未完成 ⇒ 两个面用户看不到"的告警**在本票合并后作废**。
