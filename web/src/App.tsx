@@ -47,7 +47,6 @@ import {
   describeSessionError,
   getAgentProfiles,
   getCapabilities,
-  getContextProviders,
   getModels,
   getPermissionModes,
   getReasoningEfforts,
@@ -137,34 +136,32 @@ export default function App() {
   }, []);
 
   // ── Phase 2b Composer control row（Ticket F1）──
-  // 四个控制目录（均已运行时消费，非 staged）：permission-modes /
-  // agent-profiles / reasoning-efforts / context-providers。空 → 隐藏控件。
+  // 三个控制目录（均已运行时消费，非 staged）：permission-modes /
+  // agent-profiles / reasoning-efforts。空 → 隐藏控件。
+  // #201：context-providers 目录不再取——多选控件已删除（职责交给看板 #200 与供应商
+  // 管理 #203；记忆是自动注入的，不需要选）。后端 `context_providers` 请求契约**一字
+  // 未动**：不传键 = 全部已装配 provider，正是此前"未选"时的行为。
   const [permissionModes, setPermissionModes] = useState<CatalogEntry[]>([]);
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null);
   const [agentProfiles, setAgentProfiles] = useState<CatalogEntry[]>([]);
   const [selectedAgentProfile, setSelectedAgentProfile] = useState<string | null>(null);
   const [reasoningEfforts, setReasoningEfforts] = useState<CatalogEntry[]>([]);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
-  const [contextProviders, setContextProviders] = useState<CatalogEntry[]>([]);
-  const [selectedContextProviders, setSelectedContextProviders] = useState<string[]>([]);
   const fetchControlCatalogs = useCallback(async () => {
     try {
-      const [modes, profiles, efforts, providers] = await Promise.all([
+      const [modes, profiles, efforts] = await Promise.all([
         getPermissionModes(),
         getAgentProfiles(),
         getReasoningEfforts(),
-        getContextProviders(),
       ]);
       setPermissionModes(modes);
       setAgentProfiles(profiles);
       setReasoningEfforts(efforts);
-      setContextProviders(providers);
     } catch {
       // 降级隐藏——非关键能力
       setPermissionModes([]);
       setAgentProfiles([]);
       setReasoningEfforts([]);
-      setContextProviders([]);
     }
   }, []);
   // ── #182 能力声明显隐（PRD §3.2；数据源 GET /api/capabilities）──
@@ -435,15 +432,8 @@ export default function App() {
       permissionMode: selectedPermissionMode,
       agentProfile: selectedAgentProfile,
       reasoningEffort: selectedReasoningEffort,
-      contextProviders: selectedContextProviders,
     }),
-    [
-      selectedModel,
-      selectedPermissionMode,
-      selectedAgentProfile,
-      selectedReasoningEffort,
-      selectedContextProviders,
-    ],
+    [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
 
   const handleSubmit = useCallback(
@@ -555,12 +545,11 @@ export default function App() {
   useEffect(() => {
     if (!error || !isUnknownModelError(error)) return;
     void (async () => {
-      const [modelList, modes, profiles, efforts, providers] = await Promise.all([
+      const [modelList, modes, profiles, efforts] = await Promise.all([
         getModels().catch(() => [] as ModelCatalogEntry[]),
         getPermissionModes().catch(() => [] as CatalogEntry[]),
         getAgentProfiles().catch(() => [] as CatalogEntry[]),
         getReasoningEfforts().catch(() => [] as CatalogEntry[]),
-        getContextProviders().catch(() => [] as CatalogEntry[]),
       ]);
       setModels(modelList);
       setSelectedModel((prev) => (prev && modelList.some((m) => m.name === prev) ? prev : null));
@@ -570,8 +559,6 @@ export default function App() {
       setSelectedAgentProfile((prev) => (prev && profiles.some((m) => m.id === prev) ? prev : null));
       setReasoningEfforts(efforts);
       setSelectedReasoningEffort((prev) => (prev && efforts.some((m) => m.id === prev) ? prev : null));
-      setContextProviders(providers);
-      setSelectedContextProviders((prev: string[]) => prev.filter((id) => providers.some((p) => p.id === id)));
     })();
   }, [error]);
 
@@ -962,9 +949,6 @@ export default function App() {
                     reasoningEfforts={reasoningEfforts}
                     selectedReasoningEffort={selectedReasoningEffort}
                     onReasoningEffortChange={setSelectedReasoningEffort}
-                    contextProviders={contextProviders}
-                    selectedContextProviders={selectedContextProviders}
-                    onContextProvidersChange={setSelectedContextProviders}
                   />
                 </>
               ) : null}

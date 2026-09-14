@@ -1,10 +1,15 @@
 /** F1（Phase 2b）Composer control row e2e 交互测试。
  *
  * 验收项：
- *   - 四个控件 trigger 在场（ModelPicker + Permission/Agent/Reasoning）
- *   - 空目录隐藏入口（context-providers 返 [] → 控件不渲染）
+ *   - 三个档位控件 trigger 在场（权限 / Agent 档位 / 推理深度，同一个 `OptionPicker`）
+ *   - 目录缺席（端点返空）→ 该控件不渲染（不伪造列表）
  *   - 键盘打开浮层 + 方向键导航 + Enter 选档 → trigger 文本更新
  *   - Esc 关闭浮层（§19）
+ *
+ * #201 之后：三个档位下拉合并为一个共享组件 `OptionPicker`（`ControlPicker` 与多选
+ * `ContextProviderPicker` 均已删除），`aria-label` 也统一成中文——所以下面按
+ * 「权限模式 / Agent 档位 / 推理深度」定位。这是**定位器跟着实现改**，不是断言放宽：
+ * 选档、回到未选、短目录纯键盘、提交 payload 四条原意一条没少。
  *
  * 车道归属：Playwright e2e（同 model-picker.spec.ts 约定）。 */
 
@@ -19,7 +24,7 @@ import {
   routeApi,
 } from './fixtures';
 
-test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async ({ page }) => {
+test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭', async ({ page }) => {
   const frames = [
     { type: 'session/started', seq: 1, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
     { type: 'run/started', seq: 2, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
@@ -38,20 +43,20 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
 
   await page.goto('/');
 
-  // 四个控件 trigger 在场
+  // 三个档位控件 trigger 在场（同一个 OptionPicker，各由调用方传 aria-label）
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
-  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
-  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  const agentTrigger = page.locator('.composer-control[aria-label="Agent 档位"]');
+  const effortTrigger = page.locator('.composer-control[aria-label="推理深度"]');
 
   // ModelPicker 目录空时不渲染——这里没 mock models，所以 model-picker 不在场
   await expect(modelTrigger).toHaveCount(0);
-  // 三个 ControlPicker 在场
+  // 三个档位控件在场
   await expect(permTrigger).toBeVisible();
   await expect(agentTrigger).toBeVisible();
   await expect(effortTrigger).toBeVisible();
 
-  // 键盘打开 Permission Mode 浮层
+  // 键盘打开「权限模式」浮层
   await permTrigger.focus();
   await page.keyboard.press('Enter');
   // 浮层已开——listbox 恒可见（combobox 在短目录下会随搜索框隐藏，见 F-DEFER-1）
@@ -179,11 +184,11 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   await page.goto('/');
 
-  // 选 Permission Mode → auto / Agent Profile → coding / Reasoning Effort → deep
+  // 选 权限模式 → auto / Agent 档位 → coding / 推理深度 → deep
   // （每个控件首项都是「默认（未选）」，故下压次数 = 条目下标 + 1）
   await pickControl(page, '权限模式', 1, 'Auto Approve');
-  await pickControl(page, 'Agent Profile', 2, 'Coding');
-  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
+  await pickControl(page, 'Agent 档位', 2, 'Coding');
+  await pickControl(page, '推理深度', 3, 'Deep');
 
   // 提交任务
   await page.getByLabel('Agent 任务').fill('payload 测试');
@@ -197,6 +202,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   expect(body.permission_mode).toBe('auto');
   expect(body.agent_profile).toBe('coding');
   expect(body.reasoning_effort).toBe('deep');
-  // 未选 context_providers → 不传该字段
+  // #201：多选 context provider 控件已删除，UI 上没有任何入口能设这个键 →
+  // 断言它不出现在 payload（后端仍接受程序化显式传值，见 web/src/lib/amend.ts）。
   expect(body.context_providers).toBeUndefined();
 });

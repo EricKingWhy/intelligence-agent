@@ -789,10 +789,9 @@ export const REASONING_EFFORTS = [
   { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。' },
 ];
 
-export const CONTEXT_PROVIDERS = [
-  { id: 'memory', display_name: 'Memory', description: 'Inject relevant recalled memories scoped to the user into the model context.' },
-  { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
-];
+/* #201：多选 Context provider 控件已删除（前端不再取 `GET /api/context-providers`），
+   配套的 `CONTEXT_PROVIDERS` 目录 fixture 随之删除。`routeApi` 里的该端点 mock 保留：
+   它描述的是一条**仍然存在**的后端契约（`ApiMock.contextProviders`），#200/#203 会再用。 */
 
 /** 能力条目 fixture（形状 = 后端 `capability/manifest.py::manifest_entry`）。
  *
@@ -911,18 +910,71 @@ export async function pickControl(
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
 }
 
-/** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。
+/** 选目录里的**第一个模型**（`MODELS[0]`，provider = `MODELS[0].provider`），
+ *  断言 trigger 文本变成该模型名（#199 两级飞出）。
  *
- * F-DEFER-1：同 pickControl——焦点显式落到 listbox，不碰 0×0 的搜索框。 */
+ * 与旧版的差别是**语义变了，不是断言变松**：一级只列 provider，模型在二级子菜单里，
+ * 所以"下压 N 次"不再能表达目标——必须按 provider 展开再选。鼠标路径（hover 展开）
+ * 与键盘路径（`→` 进二级）都由 Radix Sub 提供，这里走鼠标路径（更短、也给悬停迟滞
+ * 一条真实覆盖）。
+ *
+ * 关闭态的信号是 `[role="menu"]`（菜单语义），不再是 `[role="listbox"]`：两级飞出在
+ * 平台上就是「菜单 + 子菜单」，见 `ModelPicker.tsx` 顶部对语义变更的说明。 */
 export async function pickFirstModel(page: Page): Promise<void> {
-  const trigger = page.locator('.composer-model[aria-label="模型选择"]');
-  const listbox = page.locator('[role="listbox"]:visible').last();
+  await pickModel(page, MODELS[0].provider, MODELS[0].name);
+}
+
+/** 焦点描述，口径统一为 `role|aria-haspopup|文本前 12 字`——供菜单键盘断言/轮询共用。 */
+export async function activeMenuItem(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const a = document.activeElement as HTMLElement | null;
+    return `${a?.getAttribute('role') ?? '-'}|${a?.getAttribute('aria-haspopup') ?? '-'}|${(a?.textContent ?? '').slice(0, 12)}`;
+  });
+}
+
+/** 按一个菜单键，并**等焦点真的移到位**才交还控制权。
+ *
+ * 为什么必须轮询而不是按键后直接读：Radix 的 roving focus 是在 `setTimeout` 里移焦的
+ * （`react-roving-focus` 的 Item.onKeyDown 末尾：`setTimeout(() => focusFirst(candidateNodes))`），
+ * 所以「按键 → 立刻读 `document.activeElement`」拿到的是**旧值**。探针实测：同一个键，
+ * 立刻读会显示焦点没动、隔一帧再读就是新位置；把 keydown 直接派发到聚焦元素上（绕过
+ * CDP 输入管线）并等 50ms 也总能移动。也就是说**按键没有丢，是读得太早**——早先那个
+ * 「第一次 ↓ 丢、第二次才好」的现象就是这个竞态的表象，而不是产品缺陷。
+ * 断言 `expected` 用 `toContain` 语义（形状见 `activeMenuItem`）。 */
+export async function pressMenuItemKey(page: Page, key: string, expected: string): Promise<void> {
+  await page.keyboard.press(key);
+  await expect.poll(() => activeMenuItem(page), { message: `${key} 之后焦点应移到 ${expected}` }).toContain(expected);
+}
+
+/** 打开模型菜单（键盘路径）并等初焦落到菜单项上（同 `pressMenuItemKey` 的延迟移焦成因）。 */
+export async function openModelMenu(page: Page): Promise<void> {
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]').first();
   await trigger.focus();
   await page.keyboard.press('Enter');
-  await expect(listbox).toBeVisible();
-  await listbox.focus();
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(trigger).toContainText(MODELS[0].name);
-  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="menu"]').first()).toBeVisible();
+  await expect.poll(() => activeMenuItem(page)).toContain('menuitem|');
+}
+
+/** 打开模型菜单 → 展开 `provider` 的二级 → 点中 `modelName`，断言 trigger 文本。
+ *
+ * 首尾各一次「菜单已彻底卸载」等待，成因与 `pickControl` 尾部那条完全相同（探针实测）：
+ * Radix 的退出动画期间 menu 节点仍在 DOM，且 modal 菜单层把 `body` 设成
+ * `pointer-events:none`——此时开下一个浮层会被它吞掉（键盘尤其明显：Enter 被正在
+ * 卸载的菜单吃掉，目标浮层根本不出现；鼠标路径因为 Playwright 的可操作性重试天然
+ * 吸收了这段窗口，所以只有键盘路径会炸）。 */
+export async function pickModel(page: Page, provider: string, modelName: string): Promise<void> {
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]').first();
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+  await trigger.click();
+  // 一级的 provider 行 = 带 aria-haspopup 的 menuitem（SubTrigger）
+  const providerRow = page
+    .locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: provider })
+    .first();
+  await providerRow.hover();
+  // 二级的模型行 = menuitemradio（「从这一组里选一个」）
+  const modelRow = page.locator('[role="menuitemradio"]', { hasText: modelName }).first();
+  await modelRow.click();
+  await expect(trigger).toContainText(modelName);
+  // 退出动画走完再交还控制权——否则下一次交互会撞上正在关闭的菜单
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
 }

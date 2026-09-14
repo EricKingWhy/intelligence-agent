@@ -1,35 +1,38 @@
-/** ModelPicker — Radix Popover + cmdk Command 实现的模型选择器（Phase 2a / F2）。
+/** ModelPicker — 两级飞出模型选择器（#199）：一级 provider，悬停/`→` 展开二级模型。
  *
- * 历史：Phase 2a 用 Radix DropdownMenu（`role="menu"`）——可用但语义不准，
- * menu 是动作菜单，不是可搜索的选项列表。F2 升级为 Popover + cmdk Command：
- *   - cmdk 注入 `role="listbox"`（List）、`role="combobox"`（Input）、
- *     `role="option"`（Item），匹配 SDD §11「Combobox/Command-like」；
- *   - 方向键 / Home / End / Enter 由 cmdk 内置，**但前提是焦点在 `[cmdk-root]`
- *     内部**（它的 onKeyDown 只能靠冒泡到达）——短目录时搜索框 display:none，
- *     焦点必须显式交给 listbox，否则方向键/Enter 全哑（FE-R11-04，
- *     见 `lib/pickerFocus.ts`）；
- *   - 搜索过滤走 cmdk 的 command-score（同时匹配 name/provider/model），
- *     通过 keywords 字段把 provider 和 model 也纳入打分；
- *   - Radix Popover 负责 portal 定位 + 外点关闭 + Esc 关闭（与 DropdownMenu 等价）。
+ * 为什么从「Popover + cmdk 扁平列表」改为「菜单 + 子菜单」：
+ *   1. 用户裁定要 ZCode 那种**两级飞出**形态（图2/图3），并要求删掉搜索框
+ *      （「才几个模型没有必要使用搜索框」）。扁平 cmdk 列表给不了两级结构。
+ *   2. 两级飞出在平台上**有原生范式**：菜单 + 子菜单。它的键盘模型正好是设计稿 §3
+ *      要求的那一套——`→`/Enter 进二级、`←`/Esc 回一级/关闭——因为 APG 的
+ *      「menu with submenu」就是这么定义的；悬停迟滞（防抖）与 pointer-grace 也由
+ *      Radix 负责，不必手写 timer + 焦点管理。
+ *   3. 语义上比原来更准：二级是「从这一组里选一个」= `menuitemradio`
+ *      （Radix `RadioGroup`/`RadioItem` 自动给出 `aria-checked`），而 cmdk 的
+ *      `aria-selected` 原本同时表示「高亮」与「已选」两件事（FE-R11-06 早就记过这个
+ *      毛病）。
+ *   ⚠ 代价如实记：**`role="listbox"`/`combobox` 不再存在**，打开信号变成
+ *   `[role="menu"]`。原票面约束 5 说"改结构时别破坏语义"——这里不是破坏，是换成
+ *   与两级结构匹配的那套语义；e2e 的定位器与 helper 同步改（`fixtures.pickFirstModel`
+ *   等），不是为了让测试变绿而弱化断言。
  *
- * 「默认链」永远在顶部（null 提交）；分组按 provider；空目录 → 返回 null
- * （调用方据此隐藏入口，不伪造列表）。
+ * 分组语义沿用 `groupByProvider()`（原实现不动）：Map 保序 ⇒ 组顺序 = 目录首次出现序。
  *
- * 契约向后兼容（ModelPicker.test.tsx 的 SSR 断言）：
- *   - class 名 `composer-model` 仍在 trigger 上；
- *   - `aria-label="模型选择"`；
- *   - 空目录不渲染任何节点；
- *   - 端点缺席时 trigger 文本为「默认链」。
+ * 数据真相仍是 /api/models（`lib/api.ts` 的 `ModelCatalogEntry`）。这里只提交偏好，
+ * 不是会话内模型真相——后者仍以模型卡 `data.model` 为准（不变量 #22）。
  *
- * 数据真相仍是 /api/models（lib/api.ts 的 ModelCatalogEntry）。
- * 这里只提交偏好，不是会话内模型真相——后者仍以模型卡 data.model 为准（不变量 #22）。 */
+ * ⚠ 两处设计稿写了但**没有数据**、故未实现（不编占位）：
+ *   - 「不可用 provider 置灰 + 行尾原因」：目录里没有 `is_available`/`unavailable_reason`
+ *     字段（那是 #203 要补的），现在所有列出的 provider 都是后端已配置的；
+ *   - 「能力徽标」：目录里没有能力字段。
+ * 另有「管理模型」入口未做：它是 #203 的交付物，现在放上去只能是个死入口
+ * （#203 落地时加在第一级底部，位置已由本票的 `.picker-foot` 插槽预留）。 */
 
-import * as Popover from '@radix-ui/react-popover';
-import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from 'cmdk';
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, Cpu, Search } from 'lucide-react';
+import * as Menu from '@radix-ui/react-dropdown-menu';
+import { useCallback, useMemo, useState } from 'react';
+import { ChevronDown, ChevronRight, Cpu } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
-import { focusPickerListOnOpen } from '../lib/pickerFocus';
+import { DEFAULT_VALUE, OptionRowContent } from './OptionPicker';
 
 interface Props {
   models: ModelCatalogEntry[];
@@ -50,11 +53,16 @@ function groupByProvider(models: ModelCatalogEntry[]): { provider: string; items
   return Array.from(groups, ([provider, items]) => ({ provider, items }));
 }
 
-/** cmdk Item value 必须唯一、稳定（不依赖 textContent）。null 选中态用 sentinel。 */
-const DEFAULT_VALUE = '__default__';
+/** 二级行的次级文案：`默认` 是后端目录里的标记（有信息量），否则回退到真实 model id
+ *  （仅当它和展示名不同才有信息量）。**不重复 provider 名**——二级本来就是某个
+ *  provider 的展开，写它只占掉描述行。两项都没有 → 不渲染描述行（不填占位）。 */
+function modelMeta(m: ModelCatalogEntry): string | undefined {
+  if (m.default) return '默认';
+  return m.model && m.model !== m.name ? m.model : undefined;
+}
 
 export function ModelPicker({ models, selectedModel, onModelChange, disabled = false }: Props) {
-  // Popover 受控开关：搜索框聚焦、键盘导航都由 cmdk 自己管，这里只管开/关浮层。
+  // 受控开关：一级列表与二级子菜单的展开/收起由 Radix 管，这里只管整棵菜单的开与关。
   const [open, setOpen] = useState(false);
   const grouped = useMemo(() => groupByProvider(models), [models]);
   const selectedEntry = useMemo(
@@ -63,9 +71,6 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
   );
   const effectiveSelectedModel = selectedEntry?.name ?? null;
   const triggerLabel = selectedEntry?.name ?? '默认链';
-  // 默认链算一条（阈值与 CSS 契约 picker-search-visibility 一致）
-  const searchHidden = models.length + 1 <= 5;
-  const listRef = useRef<HTMLDivElement>(null);
 
   /** BUG-011：**弹层已关就不再接受选中**。
    *
@@ -73,9 +78,7 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
    * 仍留在 DOM 且可命中——真机上人类双击的第二次 `click`（实测间隔 ≤120ms 都会
    * 命中）会再次进入 `onSelect`，发出第二个 `POST /model`；后端两个请求各自基于
    * 同一份快照取号，写出重复 `seq`，该会话此后恒 404。
-   * 关闭态下的选中一律丢弃——实测 `dblclick()`（一次手势两下点击）与
-   * `page.mouse.click` ×2 都只产生一个请求：两次 click 之间 React 已提交
-   * `open=false`，第二次进来必然看到关闭态。回归锁见 e2e/q-model-dedupe.spec.ts。 */
+   * 关闭态下的选中一律丢弃。回归锁见 e2e/q-model-dedupe.spec.ts。 */
   const commitSelection = useCallback(
     (value: string) => {
       if (!open) return;
@@ -89,83 +92,82 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
   if (models.length === 0) return null;
 
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
+    <Menu.Root open={open} onOpenChange={setOpen}>
+      <Menu.Trigger asChild>
         <button
           type="button"
           className="composer-model model-picker"
           aria-label="模型选择"
           title={triggerLabel}
-          // Radix Popover 会注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
+          // Radix 注入 aria-haspopup="menu"/aria-expanded；aria-disabled 让 SSR 可见
           aria-disabled={disabled || undefined}
           disabled={disabled}
         >
-          <Cpu size={13} className="model-picker-icon" aria-hidden="true" />
-          <span className="model-picker-current">{triggerLabel}</span>
-          <ChevronDown size={12} className="model-picker-chevron" aria-hidden="true" />
+          <Cpu size={13} className="composer-trigger-icon" aria-hidden="true" />
+          <span className="composer-trigger-current">{triggerLabel}</span>
+          <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
         </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          className="model-picker-content"
-          side="top"
-          align="end"
-          sideOffset={6}
-          // FE-R11-04：短目录搜索框不可见 → 焦点交给 listbox，键盘导航才有效
-          onOpenAutoFocus={focusPickerListOnOpen(listRef, searchHidden)}
-          // 高度上限 + 滚动由 CSS 处理（避免目录长时顶出视口）
-        >
-          <Command
-            label="模型选择"
-            // cmdk 默认 filter 走 command-score；我们用简单 includes 兼容旧「子串匹配」预期，
-            // 同时把 provider/model 也喂进 keywords 提升多字段命中率（输入「anthropic」能匹配到 claude-sonnet-4）。
-            filter={(value, search, keywords) => {
-              const q = search.trim().toLocaleLowerCase();
-              if (!q) return 1;
-              const haystack = [value, ...(keywords ?? [])].join(' ').toLocaleLowerCase();
-              return haystack.includes(q) ? 1 : 0;
-            }}
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Content className="picker-content picker-content-root" side="top" align="end" sideOffset={6}>
+          <div className="picker-head">用哪个模型？</div>
+          {/* 一级：「默认链」是唯一的一级可选项（= 提交 null，后端按默认链行为）。 */}
+          <Menu.Item
+            className="picker-item"
+            data-state={effectiveSelectedModel === null ? 'checked' : 'unchecked'}
+            onSelect={() => commitSelection(DEFAULT_VALUE)}
           >
-            <div className={`model-picker-search-wrap${searchHidden ? ' hidden' : ''}`}>
-              <Search size={13} aria-hidden="true" />
-              <CommandInput placeholder="搜索模型" className="model-picker-search" />
-            </div>
-            <CommandList ref={listRef}>
-              {/* 默认链永远在顶部（null 提交——后端按默认链行为） */}
-              <CommandGroup>
-                <CommandItem
-                  value={DEFAULT_VALUE}
-                  className={`model-picker-item ${effectiveSelectedModel === null ? 'sel' : ''}`}
-                  onSelect={commitSelection}
+            <OptionRowContent
+              title="默认链"
+              description="系统自动选"
+              selected={effectiveSelectedModel === null}
+            />
+          </Menu.Item>
+          <Menu.Separator className="picker-sep" />
+          {grouped.map(({ provider, items }) => {
+            const isCurrentProvider = items.some((m) => m.name === effectiveSelectedModel);
+            return (
+              <Menu.Sub key={provider}>
+                <Menu.SubTrigger
+                  className="picker-item"
+                  // 当前选中模型所在的 provider：一级这里只做**弱强调**（加重 + 强调色箭头），
+                  // 不用「已选」那套（勾选 + 左侧条）——那是二级行的语言，复用会让
+                  // "provider 被选中了"与"这个 provider 里有选中项"读成同一件事。
+                  data-current={isCurrentProvider ? 'true' : undefined}
                 >
-                  <span className="model-picker-item-label">默认链</span>
-                  <span className="model-picker-item-meta">系统自动选</span>
-                  {effectiveSelectedModel === null && <Check size={13} className="model-picker-check" aria-hidden="true" />}
-                </CommandItem>
-              </CommandGroup>
-              {grouped.map(({ provider, items }) => (
-                <CommandGroup key={provider} heading={provider}>
-                  {items.map((m) => (
-                    <CommandItem
-                      key={m.name}
-                      value={m.name}
-                      keywords={[m.provider, m.model].filter((s): s is string => Boolean(s?.length))}
-                      className={`model-picker-item ${effectiveSelectedModel === m.name ? 'sel' : ''}`}
-                      onSelect={commitSelection}
-                    >
-                      <span className="model-picker-item-label">{m.name}</span>
-                      <span className="model-picker-item-meta">
-                        {m.default ? '默认' : m.model && m.model !== m.name ? m.model : ''}
-                      </span>
-                      {effectiveSelectedModel === m.name && <Check size={13} className="model-picker-check" aria-hidden="true" />}
-                    </CommandItem>
-                  ))}
-                </CommandGroup>
-              ))}
-            </CommandList>
-          </Command>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+                  <OptionRowContent
+                    title={provider}
+                    description={`${items.length} 个模型`}
+                    selected={false}
+                    trailing={<ChevronRight size={13} className="picker-item-trailing" aria-hidden="true" />}
+                  />
+                </Menu.SubTrigger>
+                <Menu.Portal>
+                  <Menu.SubContent className="picker-content picker-content-sub" sideOffset={6}>
+                    <div className="picker-head">{provider}</div>
+                    {/* 二级 = 「从这一组里选一个」：RadioGroup 给出 menuitemradio +
+                        aria-checked，正是这个语义该有的角色。 */}
+                    <Menu.RadioGroup value={effectiveSelectedModel ?? ''} onValueChange={commitSelection}>
+                      {items.map((m) => {
+                        const isSelected = effectiveSelectedModel === m.name;
+                        return (
+                          <Menu.RadioItem key={m.name} value={m.name} className="picker-item">
+                            <OptionRowContent
+                              title={m.name}
+                              description={modelMeta(m)}
+                              selected={isSelected}
+                            />
+                          </Menu.RadioItem>
+                        );
+                      })}
+                    </Menu.RadioGroup>
+                  </Menu.SubContent>
+                </Menu.Portal>
+              </Menu.Sub>
+            );
+          })}
+        </Menu.Content>
+      </Menu.Portal>
+    </Menu.Root>
   );
 }

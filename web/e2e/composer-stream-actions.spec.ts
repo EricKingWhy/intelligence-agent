@@ -21,7 +21,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   AGENT_PROFILES,
-  CONTEXT_PROVIDERS,
   MODELS,
   PERMISSION_MODES,
   REASONING_EFFORTS,
@@ -66,7 +65,6 @@ async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAMES) {
     permissionModes: PERMISSION_MODES,
     agentProfiles: AGENT_PROFILES,
     reasoningEfforts: REASONING_EFFORTS,
-    contextProviders: CONTEXT_PROVIDERS,
     onSessionPost: (route) => fulfillSse(route, frames),
     onStreamGet: (route) => fulfillSse(route, frames),
     events: frames,

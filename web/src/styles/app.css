@@ -1241,7 +1241,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 7px var(--space-sm);
   font-size: var(--text-sm);
 }
-.project-field .composer-control-current {
+.project-field .composer-trigger-current {
   flex: 1;
   text-align: left;
 }
@@ -5538,23 +5538,24 @@ button.json-row {
   }
   /* Spec §18/§21：reduced motion 必须移除新动画的 transform/opacity 入场。
    * Radix 自身已通过 data-state 切换显隐；这里只关掉我们的 keyframe 动画。 */
-  .model-picker-content {
+  .picker-content {
     animation: none;
   }
 }
 
-/* ── T10（#103）模型选择器：dock 内玻璃 chip，与 Esc 提示同族 ── */
-/* ── Composer 模型选择器（Phase 2a：Radix Popover trigger）──
- *   原生 <select> 换成 Radix DropdownMenu 后，trigger 是 <button>。
- *   样式继承原 composer-model（紧凑、底部对齐、克制），但更精细：
- *   icon + 当前模型名 + chevron，参考 Linear/Vercel 的模型切换器。 */
-.composer-model {
+/* ── Composer 触发按钮：模型选择器 + 三个档位下拉**共用一套**（#201）──
+ *   此前 `.composer-model` 与 `.composer-control` 两份规则除 `max-width`
+ *   （220 / 180px）外逐字相同，内部元素也各抄一份——同一份视觉写两遍，改一处必漏
+ *   另一处。现在合并成一条（模型名可能更长，单独把 max-width 提到 220px），
+ *   内部元素统一 `-icon / -current / -chevron`（原 `model-picker-icon|current|chevron`
+ *   只有 ModelPicker 自己用，随合并一起正名）。
+ *   `gap: 5px` 一并回到间距阶梯（--space-xs = 4px）。 */
+.composer-model,
+.composer-control {
   appearance: none;
-  align-self: flex-end;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  max-width: 220px;
+  gap: var(--space-xs);
   padding: 3px var(--space-sm);
   font-size: var(--text-xs);
   font-family: inherit;
@@ -5567,48 +5568,57 @@ button.json-row {
     color var(--dur-fast) var(--ease-apple),
     background var(--dur-fast) var(--ease-apple);
 }
-.model-picker-icon {
+.composer-model {
+  max-width: 220px;
+}
+.composer-control {
+  max-width: 180px;
+}
+.composer-trigger-icon {
   flex-shrink: 0;
   color: var(--text-tertiary);
 }
-.model-picker-current {
+.composer-trigger-current {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 500;
 }
-.model-picker-chevron {
+.composer-trigger-chevron {
   flex-shrink: 0;
   color: var(--text-tertiary);
   transition: transform var(--dur-fast) var(--ease-apple);
 }
-.composer-model[data-state="open"] .model-picker-chevron {
+.composer-model[data-state="open"] .composer-trigger-chevron,
+.composer-control[data-state="open"] .composer-trigger-chevron {
   transform: rotate(180deg);
 }
-
-.composer-model:hover:not(:disabled) {
+.composer-model:hover:not(:disabled),
+.composer-control:hover:not(:disabled) {
   color: var(--text-primary);
   border-color: var(--border-strong);
   background: var(--surface-workspace);
 }
-.composer-model:hover:not(:disabled) .model-picker-icon {
+.composer-model:hover:not(:disabled) .composer-trigger-icon,
+.composer-control:hover:not(:disabled) .composer-trigger-icon {
   color: var(--accent);
 }
-
-.composer-model:focus-visible {
+.composer-model:focus-visible,
+.composer-control:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-
 .composer-model:disabled,
-.composer-model[aria-disabled="true"] {
+.composer-model[aria-disabled="true"],
+.composer-control:disabled,
+.composer-control[aria-disabled="true"] {
   opacity: 0.5;
   cursor: default;
 }
 
 /* ── Phase 2b Composer control row（Ticket F1）──
- *   textarea 下方一行 flex 容器，横向排列 ModelPicker + ControlPicker。
- *   控件复用 .composer-model 同族样式（紧凑、底部对齐、克制）。 */
+ *   textarea 下方一行 flex 容器，横向排列模型选择器 + 三个档位下拉。
+ *   控件共用上面那套 `.composer-*` 触发按钮样式。 */
 .composer-controls {
   display: flex;
   flex-wrap: wrap;
@@ -5616,64 +5626,17 @@ button.json-row {
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
 }
-.composer-control {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 180px;
-  padding: 3px var(--space-sm);
-  font-size: var(--text-xs);
-  font-family: inherit;
-  color: var(--text-secondary);
-  background: var(--surface-elevated);
-  border: 0.5px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-apple),
-    color var(--dur-fast) var(--ease-apple),
-    background var(--dur-fast) var(--ease-apple);
-}
-.composer-control-icon {
-  flex-shrink: 0;
-  color: var(--text-tertiary);
-}
-.composer-control-current {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
-}
-.composer-control-chevron {
-  flex-shrink: 0;
-  color: var(--text-tertiary);
-  transition: transform var(--dur-fast) var(--ease-apple);
-}
-.composer-control[data-state="open"] .composer-control-chevron {
-  transform: rotate(180deg);
-}
-.composer-control:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-  background: var(--surface-workspace);
-}
-.composer-control:hover:not(:disabled) .composer-control-icon {
-  color: var(--accent);
-}
-.composer-control:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.composer-control:disabled,
-.composer-control[aria-disabled="true"] {
-  opacity: 0.5;
-  cursor: default;
-}
-
 /* ── Popover 内容（Radix portal，客户端渲染）──
- *   参照 Linear issue 面板：浅卡片、分组 label 小写大字距、
- *   选中项右侧粉色 check（不是整行高亮）。 */
-.model-picker-content {
+/* ── Picker 浮层（Radix portal，客户端渲染）──
+ *   #201 正名：这层壳原本叫 `model-picker-*`，却同时被权限/档位/深度三个控件共用
+ *   （外加已删除的多选控件）——名字与内容不符正是漂移的温床。共享部分统一 `picker-*`；
+ *   只有模型选择器自己那套触发按钮（`.composer-model` / `.model-picker-icon|current|chevron`）
+ *   保留原名。
+ *
+ *   视觉（设计稿 §4/§7）：行 = 标题（13px）+ 描述（12px，2 行内截断）+ 选中标记；
+ *   层级靠**表面亮度**与 1px 边，不靠阴影堆叠（DESIGN.md 平面分层制）。
+ *   `.picker-content` 同时服务一级与二级：二级换更浅一档的表面 + 单层小阴影。 */
+.picker-content {
   min-width: 240px;
   max-width: 360px;
   max-height: 360px;
@@ -5683,22 +5646,49 @@ button.json-row {
   border: 0.5px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.1);
-  /* Radix 动画钩子 */
-  animation: model-picker-in var(--dur-in) var(--ease-apple);
+  /* Radix / Radix menu 动画钩子 */
+  animation: picker-in var(--dur-in) var(--ease-apple);
   z-index: 1000;
 }
-.model-picker-content[data-state="closed"] {
-  animation: model-picker-out var(--dur-out) var(--ease-apple);
+.picker-content[data-state="closed"] {
+  animation: picker-out var(--dur-out) var(--ease-apple);
 }
-@keyframes model-picker-in {
+@keyframes picker-in {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
-@keyframes model-picker-out {
+@keyframes picker-out {
   from { opacity: 1; transform: translateY(0); }
   to { opacity: 0; transform: translateY(4px); }
 }
-.model-picker-search-wrap {
+/* 二级飞出（模型选择器）：表面换浅一档 + **单层**小阴影。
+   `--surface-2` 在两套主题里都相对 elevated 有一档差（暗色更亮、亮色更灰），
+   所以"更浅一档"这条在双主题下都成立——不用再各写一个值。 */
+.picker-content-sub {
+  background: var(--surface-2);
+  box-shadow: var(--shadow-overlay);
+}
+.picker-head {
+  /* 上留白 > 下留白（craft-floor：标题上方的空白要大于下方）。 */
+  padding: var(--space-sm) var(--space-sm) var(--space-xs);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.picker-foot {
+  margin-top: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border-top: 0.5px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.picker-sep {
+  height: 1px;
+  margin: var(--space-xs) var(--space-sm);
+  background: var(--border-subtle);
+}
+.picker-search-wrap {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
@@ -5711,10 +5701,10 @@ button.json-row {
 }
 /* 短目录（≤5 条）隐藏搜索框。F-DEFER-1：此前 class 已挂但无规则，修复从未生效。
    cmdk 要求 CommandInput 始终留在 DOM，故用 display:none 隐藏，不条件卸载组件。 */
-.model-picker-search-wrap.hidden {
+.picker-search-wrap.hidden {
   display: none;
 }
-.model-picker-search {
+.picker-search {
   width: 100%;
   min-width: 0;
   border: 0;
@@ -5723,71 +5713,104 @@ button.json-row {
   color: var(--text-primary);
   font: var(--text-xs) var(--font-ui);
 }
-.model-picker-search::placeholder {
+.picker-search::placeholder {
   color: var(--text-tertiary);
 }
-.model-picker-group-label {
-  padding: var(--space-xs) var(--space-sm);
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-tertiary);
-  user-select: none;
-}
-.model-picker-item {
+/* 选项行：cmdk 的 CommandItem 与 Radix 的 Item/RadioItem 共用这一个类，
+   所以下面全部按「类 + 状态属性」写，不依赖任何一个库的内部结构。
+
+   状态属性只有两个来源，各自命名不冲突：
+   - `data-highlighted`（Radix 高亮）/ `data-selected`（cmdk 高亮，见 cmdk 源码——
+     它对 CommandItem 硬写 `data-selected`，所以**本仓不能用这个属性表达"已选"**）；
+   - `data-state="checked|unchecked"`：已选。cmdk 不写 `data-state`（由我们传），
+     Radix `RadioItem` 自己写的就是这个值——两边同义。 */
+.picker-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-sm);
   padding: var(--space-xs) var(--space-sm);
-  font-size: var(--text-xs);
   color: var(--text-secondary);
   border-radius: var(--radius-sm);
   cursor: pointer;
   outline: none;
+  user-select: none;
   transition: background var(--dur-out) var(--ease-apple), color var(--dur-out) var(--ease-apple);
 }
-.model-picker-item-label {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-.model-picker-item-meta {
-  flex-shrink: 0;
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
-}
-.model-picker-item[data-highlighted] {
+.picker-item[data-highlighted],
+.picker-item[data-selected="true"] {
   background: var(--surface-workspace);
   color: var(--text-primary);
 }
-.model-picker-item.sel {
+.picker-item[data-state="checked"] {
   color: var(--text-primary);
 }
-.model-picker-item.sel .model-picker-item-label {
-  color: var(--accent);
+.picker-item-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
-.model-picker-check {
-  flex-shrink: 0;
-  color: var(--accent);
+/* 标题回到 type scale：不再用 `font-mono` + 11px（小于 12px 地板、且与产品其它
+   部分不统一——票面点名的那条）。模型名/档位名都是文本，不是代码。 */
+.picker-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.35;
 }
-/* ContextProviderPicker 多选 checkbox 字符——与 model-picker-check 同位，
-   accent 着色选中态，未选中时 tertiary 安静。 */
-.ctx-picker-checkbox {
+.picker-item-desc {
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-tertiary);
+  /* 2 行内截断：描述可能是一句话（权限档位），不折成四行把菜单撑散 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.picker-item-trailing {
   flex-shrink: 0;
-  width: 14px;
-  font-size: 13px;
-  line-height: 1;
   color: var(--text-tertiary);
 }
-.model-picker-item.sel .ctx-picker-checkbox {
+.picker-item-check {
+  flex-shrink: 0;
   color: var(--accent);
 }
-.model-picker-item[data-disabled] {
+/* 选中态第二、三通道：标题加重 + 描述提一档，让"已选"不只靠那个勾。 */
+.picker-item[data-state="checked"] .picker-item-title {
+  font-weight: 600;
+}
+.picker-item[data-state="checked"] .picker-item-desc {
+  color: var(--text-secondary);
+}
+/* 选中态第三通道：左侧 2px accent 条（设计稿 §3/§4 明确要求）。
+   用伪元素而不是 `border-left`：craft-floor 把 >1px 的彩色 border-left 列为默认该拒绝的
+   形态，而 DESIGN.md 允许的同类形态是「accent 半透明 2px 签名条」——这里就是那个形态，
+   半透明 + 与行内容留出内边距，不会读成一张告警卡。 */
+.picker-item[data-state="checked"]::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: var(--space-xs);
+  bottom: var(--space-xs);
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+/* 当前选中模型所在的 provider（一级）：只做弱强调——加重 + 强调色箭头。
+   不套「已选」三通道：那会让"这个 provider 被选中"与"这个 provider 里有选中项"
+   读成同一件事。 */
+.picker-item[data-current="true"] .picker-item-title {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.picker-item[data-current="true"] .picker-item-trailing {
+  color: var(--accent);
+}
+.picker-item[data-disabled] {
   opacity: 0.5;
   cursor: default;
 }

@@ -22,7 +22,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Shield, TriangleAlert, X } from 'lucide-react';
 import type { CatalogEntry } from '../lib/api';
 import type { Project } from '../types';
-import { ControlPicker } from './ControlPicker';
+import { OptionPicker, toCatalogOptions } from './OptionPicker';
 
 /** 默认权限档——与后端 `web/app.py::CreateSessionRequest.permission_mode` 的默认值
  *  同名同义（workspace-write + auto-approve）。它只作为**本地选中态**，不发进请求体：
@@ -131,10 +131,15 @@ function StartTaskForm({
       {permissionModes.length > 0 ? (
         <div className="project-field">
           <span className="project-field-label">权限模式</span>
-          <ControlPicker
+          {/* #201：ControlPicker 已并入 OptionPicker（同一份实现 + 视觉）。这里保持
+              原有语义不变：表单字段形态由 `.project-field` 的 CSS 决定，选中回落到
+              `DEFAULT_PERMISSION_MODE`（对话框里没有"未选"这一档——它是首建会话的
+              权限来源，必须有个确定值）。 */}
+          <OptionPicker
             ariaLabel="权限模式"
-            entries={permissionModes}
-            selectedId={mode}
+            title="工具调用如何批准？"
+            options={toCatalogOptions(permissionModes)}
+            value={mode}
             onChange={(id) => setMode(id ?? DEFAULT_PERMISSION_MODE)}
             icon={Shield}
             placeholder="默认（工作区写入，自动执行）"

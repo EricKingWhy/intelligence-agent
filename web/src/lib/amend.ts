@@ -18,12 +18,15 @@ export interface ComposerControls {
   permissionMode: string | null;
   agentProfile: string | null;
   reasoningEffort: string | null;
-  contextProviders: string[];
 }
 
-/** 续聊 amend 面：四项，不含 `permission_mode`（不在 /messages 契约内）。
+/** 续聊 amend 面：三项，不含 `permission_mode`（不在 /messages 契约内）。
  *  字段集直接取自 `SendMessagePayload` 的 Omit——请求契约增删字段时
- *  这个返回类型会跟着变，不会静默漂移。 */
+ *  这个返回类型会跟着变，不会静默漂移。
+ *
+ *  #201：`context_providers` 随多选控件一并下线（UI 不再提供选择入口）。**不传键 =
+ *  后端默认（全部已装配 provider）**，正是此前"未选"时的行为；`api.ts` 的
+ *  `context_providers` 参数与后端契约一字未动，程序化调用仍可显式传值。 */
 export function toAmendFields(
   c: ComposerControls,
 ): Omit<SendMessagePayload, 'content' | 'mode' | 'max_steps'> {
@@ -31,11 +34,10 @@ export function toAmendFields(
     model: c.model ?? undefined,
     agent_profile: c.agentProfile ?? undefined,
     reasoning_effort: c.reasoningEffort ?? undefined,
-    context_providers: c.contextProviders,
   };
 }
 
-/** 创建会话控制面：amend 四项 + `permission_mode`（该端点独有）。 */
+/** 创建会话控制面：amend 三项 + `permission_mode`（该端点独有）。 */
 export function toCreateControls(
   c: ComposerControls,
 ): Pick<

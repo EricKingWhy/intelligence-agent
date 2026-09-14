@@ -5,13 +5,12 @@
  */
 
 import { memo, useEffect, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Brain, Layers, Shield, Square, User } from 'lucide-react';
+import { ArrowUp, Brain, Shield, Square, User } from 'lucide-react';
 import type { PresetTask } from '../types';
 import { modKey } from '../lib/platform';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
-import { ControlPicker } from './ControlPicker';
-import { ContextProviderPicker } from './ContextProviderPicker';
+import { OptionPicker, toCatalogOptions } from './OptionPicker';
 
 interface Props {
   streaming: boolean;
@@ -40,12 +39,7 @@ interface Props {
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
   onReasoningEffortChange?: (id: string | null) => void;
-  /** GET /api/context-providers 清单。空 → 隐藏控件（不伪造）。多选。 */
-  contextProviders?: CatalogEntry[];
-  selectedContextProviders?: string[];
-  onContextProvidersChange?: (ids: string[]) => void;
 }
-
 // memo：流式期间 props 稳定（streaming 布尔不变、回调由 App useCallback 固定），
 // 输入框不随对话区每个 delta 重渲染。
 export const Composer = memo(function Composer({
@@ -66,9 +60,6 @@ export const Composer = memo(function Composer({
   reasoningEfforts = [],
   selectedReasoningEffort = null,
   onReasoningEffortChange,
-  contextProviders = [],
-  selectedContextProviders = [],
-  onContextProvidersChange,
 }: Props) {
   const [value, setValue] = useState('');
 
@@ -101,8 +92,7 @@ export const Composer = memo(function Composer({
     models.length > 0 ||
     permissionModes.length > 0 ||
     agentProfiles.length > 0 ||
-    reasoningEfforts.length > 0 ||
-    contextProviders.length > 0;
+    reasoningEfforts.length > 0;
 
   return (
     <div className="composer-wrap">
@@ -129,40 +119,38 @@ export const Composer = memo(function Composer({
               onModelChange={onModelChange ?? (() => {})}
               disabled={locked}
             />
-            <ControlPicker
+            {/* #201：三个档位下拉合并为同一个 OptionPicker——同一份实现、同一份视觉、
+                同一套 ARIA（此前三处手抄 + 十条不一致）。`aria-label` 一并统一为中文
+                （原 `Agent Profile` / `Reasoning Effort` 与 `权限模式` 混用中英）；
+                e2e 定位器在同一次改动里同步，没有为了让测试变绿而弱化断言。 */}
+            <OptionPicker
               ariaLabel="权限模式"
-              entries={permissionModes}
-              selectedId={selectedPermissionMode}
+              title="工具调用如何批准？"
+              options={toCatalogOptions(permissionModes)}
+              value={selectedPermissionMode}
               onChange={onPermissionModeChange ?? (() => {})}
               icon={Shield}
               placeholder="权限"
               disabled={locked}
             />
-            <ControlPicker
-              ariaLabel="Agent Profile"
-              entries={agentProfiles}
-              selectedId={selectedAgentProfile}
+            <OptionPicker
+              ariaLabel="Agent 档位"
+              title="这次会话用哪个档位？"
+              options={toCatalogOptions(agentProfiles)}
+              value={selectedAgentProfile}
               onChange={onAgentProfileChange ?? (() => {})}
               icon={User}
               placeholder="Agent"
               disabled={locked}
             />
-            <ControlPicker
-              ariaLabel="Reasoning Effort"
-              entries={reasoningEfforts}
-              selectedId={selectedReasoningEffort}
+            <OptionPicker
+              ariaLabel="推理深度"
+              title="推理深度选哪一档？"
+              options={toCatalogOptions(reasoningEfforts)}
+              value={selectedReasoningEffort}
               onChange={onReasoningEffortChange ?? (() => {})}
               icon={Brain}
               placeholder="推理"
-              disabled={locked}
-            />
-            <ContextProviderPicker
-              ariaLabel="Context Providers"
-              entries={contextProviders}
-              selectedIds={selectedContextProviders}
-              onChange={onContextProvidersChange ?? (() => {})}
-              icon={Layers}
-              placeholder="Context"
               disabled={locked}
             />
           </div>
