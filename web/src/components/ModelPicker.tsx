@@ -21,12 +21,15 @@
  * 数据真相仍是 /api/models（`lib/api.ts` 的 `ModelCatalogEntry`）。这里只提交偏好，
  * 不是会话内模型真相——后者仍以模型卡 `data.model` 为准（不变量 #22）。
  *
- * ⚠ 两处设计稿写了但**没有数据**、故未实现（不编占位）：
- *   - 「不可用 provider 置灰 + 行尾原因」：目录里没有 `is_available`/`unavailable_reason`
- *     字段（那是 #203 要补的），现在所有列出的 provider 都是后端已配置的；
+ * ⚠ 两处设计稿写了但**没有可用数据**、故未实现（不编占位）：
+ *   - 「不可用 provider 置灰 + 行尾原因」：`/api/models` **有** `is_available`，但后端把它
+ *     写死成 `True`（`web/app.py::_render_model_option`：「catalog 无 disabled 概念」），
+ *     而 `unavailable_reason` 确实不存在（那是 #203 要补的）——所以现在**没有任何** provider
+ *     会是不可用态，置灰分支永远不触发；等后端真的能表达不可用时再接。
  *   - 「能力徽标」：目录里没有能力字段。
  * 另有「管理模型」入口未做：它是 #203 的交付物，现在放上去只能是个死入口
- * （#203 落地时加在第一级底部，位置已由本票的 `.picker-foot` 插槽预留）。 */
+ * （#203 落地时应复用共享的 `.picker-foot` 面板底部槽位——本文件现在没有 footer，
+ * .picker-foot 只由 OptionPicker 的 `footer` prop 渲染）。 */
 
 import * as Menu from '@radix-ui/react-dropdown-menu';
 import { useCallback, useMemo, useState } from 'react';
@@ -109,7 +112,7 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
         </button>
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content className="picker-content picker-content-root" side="top" align="end" sideOffset={6}>
+        <Menu.Content className="picker-content" side="top" align="end" sideOffset={6}>
           <div className="picker-head">用哪个模型？</div>
           {/* 一级：「默认链」是唯一的一级可选项（= 提交 null，后端按默认链行为）。 */}
           <Menu.Item

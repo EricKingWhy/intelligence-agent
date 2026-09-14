@@ -91,8 +91,8 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
   await pickFirstModel(page);
   // Agent 档位 → coding（第二项；下压 2 次，首项是「默认（未选）」）
   // 推理深度 → deep（第三项；下压 3 次）
-  await pickControl(page, 'Agent 档位', 2, 'Coding');
-  await pickControl(page, '推理深度', 3, 'Deep');
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
 
   // 续聊发第二条
   await submitTask(page, '第二条消息');

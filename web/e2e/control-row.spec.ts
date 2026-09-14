@@ -1,15 +1,16 @@
 /** F1（Phase 2b）Composer control row e2e 交互测试。
  *
  * 验收项：
- *   - 三个档位控件 trigger 在场（权限 / Agent 档位 / 推理深度，同一个 `OptionPicker`）
+ *   - 三个档位控件 trigger 在场（权限 / Agent Profile / Reasoning Effort，同一个 `OptionPicker`）
  *   - 目录缺席（端点返空）→ 该控件不渲染（不伪造列表）
  *   - 键盘打开浮层 + 方向键导航 + Enter 选档 → trigger 文本更新
  *   - Esc 关闭浮层（§19）
  *
  * #201 之后：三个档位下拉合并为一个共享组件 `OptionPicker`（`ControlPicker` 与多选
- * `ContextProviderPicker` 均已删除），`aria-label` 也统一成中文——所以下面按
- * 「权限模式 / Agent 档位 / 推理深度」定位。这是**定位器跟着实现改**，不是断言放宽：
- * 选档、回到未选、短目录纯键盘、提交 payload 四条原意一条没少。
+ * `ContextProviderPicker` 均已删除）。**`aria-label` 维持原值不变**——「权限模式」是中文，
+ * 另外两个继续是 `Agent Profile` / `Reasoning Effort`：票面冻结结论 B 明确「会影响到 e2e
+ * 定位器就不统一中文」，所以下面按各自原值定位。（曾试图顺手统一成中文，两轴 code-review
+ * 的 Spec 轴按票面结论判为 P1，已回退。）
  *
  * 车道归属：Playwright e2e（同 model-picker.spec.ts 约定）。 */
 
@@ -46,8 +47,8 @@ test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭',
   // 三个档位控件 trigger 在场（同一个 OptionPicker，各由调用方传 aria-label）
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
-  const agentTrigger = page.locator('.composer-control[aria-label="Agent 档位"]');
-  const effortTrigger = page.locator('.composer-control[aria-label="推理深度"]');
+  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
 
   // ModelPicker 目录空时不渲染——这里没 mock models，所以 model-picker 不在场
   await expect(modelTrigger).toHaveCount(0);
@@ -126,6 +127,43 @@ test('Composer control row：单选档位可以选回「默认（未选）」', 
   await expect(trigger).not.toContainText('Auto Approve');
 });
 
+/** #201 验收「选中态 = 勾选 + 加重 + 左侧 2px 高亮条」的**可失败**锁。
+ *
+ *  为什么必须在 e2e：弹层是 Radix portal（SSR 里没有），组件单测断不到；而这三条通道
+ *  只活在 CSS 里——两轴 review 的 Spec 轴指出该 AC 当时**没有任何会红的测试**。
+ *  三条一起断：`data-state="checked"`（第二通道的挂钩）、`.picker-item-check` 图标、
+ *  `::before` 实测宽度 = 2px（第三通道；只断属性不断像素的话，把 accent 条删掉照样绿）。 */
+test('Composer control row：选中行的三通道选中态（勾选 + 加重 + 2px 高亮条）', async ({ page }) => {
+  routeApi(page, { sessions: [], events: [], permissionModes: PERMISSION_MODES });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await trigger.click();
+  // 下压一次到第一个真实档位（Auto Approve），Enter 选中
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  await expect(listbox).toBeVisible();
+  await listbox.focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText('Auto Approve');
+
+  // 重新打开：选中行的三通道同时在场，且只有它一行是 checked
+  await trigger.click();
+  const checked = page.locator('.picker-item[data-state="checked"]');
+  await expect(checked).toHaveCount(1);
+  await expect(checked).toContainText('Auto Approve');
+  await expect(checked.locator('.picker-item-check')).toHaveCount(1);
+  const barWidth = await checked.evaluate(
+    (el) => getComputedStyle(el, '::before').width,
+  );
+  expect(barWidth, '左侧高亮条应为 2px').toBe('2px');
+  // 「默认（未选）」此时是未选中态：同一行**不放勾**（否则"选中"就没有视觉差异）。
+  // 用 hasText 收敛到那一行——未选态本来就有多行（ask / deny 同样 unchecked）。
+  const defaultRow = page.locator('.picker-item[data-state="unchecked"]', { hasText: '默认（未选）' });
+  await expect(defaultRow).toHaveCount(1);
+  await expect(defaultRow.locator('.picker-item-check')).toHaveCount(0);
+});
+
 /** FE-R11-04 回归锁：短目录（搜索框 display:none）下**纯键盘**必须能选档。
  *
  *  此前的洞：cmdk 把方向键/Enter 的处理挂在 `[cmdk-root]` 上，只能靠冒泡到达；
@@ -187,8 +225,8 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   // 选 权限模式 → auto / Agent 档位 → coding / 推理深度 → deep
   // （每个控件首项都是「默认（未选）」，故下压次数 = 条目下标 + 1）
   await pickControl(page, '权限模式', 1, 'Auto Approve');
-  await pickControl(page, 'Agent 档位', 2, 'Coding');
-  await pickControl(page, '推理深度', 3, 'Deep');
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
 
   // 提交任务
   await page.getByLabel('Agent 任务').fill('payload 测试');

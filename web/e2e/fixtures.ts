@@ -841,12 +841,13 @@ export const CORE_CAPABILITY: Record<string, unknown> = {
   actions: { permissions: true, stop: true, retry: false, resume: true },
 };
 
-// ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 >5 条）──
-// 阈值速查（源码）：ModelPicker 用 `models.length + 1 > 5`（默认链算 1 条）；
-// ControlPicker / ContextProviderPicker 用 `entries.length > 5`。
-// 三处 spec 曾各自内联长目录 → 阈值/条数一改就静默漂移，故统一在此构造。
+// ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 > 5 条）──
+// 阈值速查（源码）：#199 之后**只有** `OptionPicker` 还有搜索框，阈值 `options.length > 5`
+// （三处档位下拉共用）。模型选择器已删搜索框，所以下面的长模型目录不再与"搜索框显示"挂钩——
+// 它现在服务的是别的事实：provider 分组条数（4 组）与「多到旧实现必然要搜索」这个对照。
+// 曾各自内联长目录 → 阈值/条数一改就静默漂移，故统一在此构造。
 
-/** 造一个 id/display_name 结构的长目录（映射 ControlPicker / ContextProviderPicker 端点形状）。
+/** 造一个 id/display_name 结构的长目录（形状 = 三个档位端点共用的 `CatalogEntry`）。
  *
  * `highlight` 指定某一项的 display_name（供"键入过滤"类用例断言），默认 `前缀 N`。 */
 export function longCatalog(prefix: string, n: number, highlight?: { index: number; label: string }) {
@@ -857,14 +858,16 @@ export function longCatalog(prefix: string, n: number, highlight?: { index: numb
   }));
 }
 
-/** 长模型目录：MODELS（3）+ 2 条 = 5 条，+1 默认链 = 6 > 5 → 搜索框显示。 */
+/** 长模型目录：MODELS（3）+ 2 条 = 5 条、4 个 provider——供「分组就是导航」用例
+ *  （旧实现在这个规模会显示搜索框，正好当对照）。 */
 export const SEARCHABLE_MODELS = [
   ...MODELS,
   { name: 'gpt-5-mini', provider: 'openai', model: 'gpt-5-mini', default: false },
   { name: 'gemini-3-pro', provider: 'google', model: 'gemini-3-pro', default: false },
 ];
 
-/** 长模型目录 PLUS：MODELS（3）+ 4 条 = 7 条，+1 = 8 > 5（更强的长目录信号，供可见性用例）。 */
+/** 长模型目录 PLUS：MODELS（3）+ 4 条 = 7 条、6 个 provider——比 SEARCHABLE_MODELS 更长的
+ *  目录，供「没有搜索框」用例（目录一长就更该有搜索框 ⇒ 更能证明它被删了）。 */
 export const LONG_MODELS = [
   ...SEARCHABLE_MODELS,
   { name: 'llama-5-70b', provider: 'meta', model: 'llama-5-70b', default: false },
@@ -924,8 +927,22 @@ export async function pickFirstModel(page: Page): Promise<void> {
   await pickModel(page, MODELS[0].provider, MODELS[0].name);
 }
 
+/** 「这个面板里没有搜索入口」的**可失败**口径：任何输入控件 / 搜索语义都算。
+ *
+ * 为什么不能只数某个类名：`#199` 要证明的是「模型选择器没有搜索框」，而旧模型的搜索框类名是
+ * `.model-picker-search-wrap`、新共享组件（`OptionPicker`）才是 `.picker-search-wrap`——
+ * 在模型菜单里数后者永远得 0，那是**恒真命题**（两轴 review 的 Standards 轴把这个假绿挑出来了）。
+ * 按标签/role 数才对实现细节免疫：将来谁把搜索框塞回来，无论挂什么类名都会红。
+ *
+ * `[cmdk-input]` 一并算上：cmdk 的输入框正是 `role="combobox"`，但显式写上让口径不依赖库实现。 */
+export function noSearchInputIn(page: Page, scope: string) {
+  return page.locator(
+    `${scope} input, ${scope} textarea, ${scope} [role="combobox"], ${scope} [role="searchbox"], ${scope} [role="search"], ${scope} [cmdk-input]`,
+  );
+}
+
 /** 焦点描述，口径统一为 `role|aria-haspopup|文本前 12 字`——供菜单键盘断言/轮询共用。 */
-export async function activeMenuItem(page: Page): Promise<string> {
+async function activeMenuItem(page: Page): Promise<string> {
   return page.evaluate(() => {
     const a = document.activeElement as HTMLElement | null;
     return `${a?.getAttribute('role') ?? '-'}|${a?.getAttribute('aria-haspopup') ?? '-'}|${(a?.textContent ?? '').slice(0, 12)}`;
@@ -962,7 +979,7 @@ export async function openModelMenu(page: Page): Promise<void> {
  * `pointer-events:none`——此时开下一个浮层会被它吞掉（键盘尤其明显：Enter 被正在
  * 卸载的菜单吃掉，目标浮层根本不出现；鼠标路径因为 Playwright 的可操作性重试天然
  * 吸收了这段窗口，所以只有键盘路径会炸）。 */
-export async function pickModel(page: Page, provider: string, modelName: string): Promise<void> {
+async function pickModel(page: Page, provider: string, modelName: string): Promise<void> {
   const trigger = page.locator('.composer-model[aria-label="模型选择"]').first();
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
   await trigger.click();

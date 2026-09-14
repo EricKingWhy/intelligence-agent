@@ -18,7 +18,14 @@
  * 车道归属：Playwright（本仓组件测试是 SSR，交互只能真浏览器）。 */
 
 import { expect, test } from '@playwright/test';
-import { MODELS, SEARCHABLE_MODELS, openModelMenu, pressMenuItemKey, routeApi } from './fixtures';
+import {
+  MODELS,
+  SEARCHABLE_MODELS,
+  noSearchInputIn,
+  openModelMenu,
+  pressMenuItemKey,
+  routeApi,
+} from './fixtures';
 
 test('#199：两级结构 + 鼠标悬停展开 + 选中回写 trigger', async ({ page }) => {
   routeApi(page, { sessions: [], events: [], models: MODELS });
@@ -122,8 +129,7 @@ test('#199：Esc 不写回未确认的选择（打开 → 移动 → Esc → tri
 });
 
 test('#199：长目录不再需要搜索框——provider 分组就是导航', async ({ page }) => {
-  // SEARCHABLE_MODELS：5 个模型 / 4 个 provider。旧实现在这个规模会显示搜索框；
-  // 两级结构下一级只有 4 行 provider，扫描成本远低于一长条 6 项。
+  // SEARCHABLE_MODELS：5 个模型 / 4 个 provider。
   routeApi(page, { sessions: [], events: [], models: SEARCHABLE_MODELS });
   await page.goto('/');
 
@@ -131,7 +137,9 @@ test('#199：长目录不再需要搜索框——provider 分组就是导航', a
   await trigger.click();
   const providers = page.locator('[role="menuitem"][aria-haspopup="menu"]');
   await expect(providers).toHaveCount(4);
-  expect(await page.locator('.picker-search-wrap').count()).toBe(0);
+  // 反证口径见 noSearchInputIn：**不能**只数 `.picker-search-wrap`（那是 OptionPicker 的类，
+  // 旧模型选择器用的是 `.model-picker-search-wrap`——数它永远是 0，等于断言了个 vacuous truth）。
+  await expect(noSearchInputIn(page, '[role="menu"]')).toHaveCount(0);
 
   // 一级必须逐字给出每组条数（不堆数据，但也不藏），且各组合计 = 目录长度：
   // 否则"分组"可能只是画面上分了、实际漏掉了模型。

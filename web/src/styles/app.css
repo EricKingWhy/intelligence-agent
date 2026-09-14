@@ -5626,12 +5626,12 @@ button.json-row {
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
 }
-/* ── Popover 内容（Radix portal，客户端渲染）──
 /* ── Picker 浮层（Radix portal，客户端渲染）──
  *   #201 正名：这层壳原本叫 `model-picker-*`，却同时被权限/档位/深度三个控件共用
  *   （外加已删除的多选控件）——名字与内容不符正是漂移的温床。共享部分统一 `picker-*`；
- *   只有模型选择器自己那套触发按钮（`.composer-model` / `.model-picker-icon|current|chevron`）
- *   保留原名。
+ *   触发按钮内部也随之统一（`.composer-model` / `.composer-control` + 共用的
+ *   `.composer-trigger-icon|current|chevron`）——原 `.model-picker-icon|current|chevron`
+ *   与 `.composer-control-icon|current|chevron` 两套并存，正是同一个漂移的另一半。
  *
  *   视觉（设计稿 §4/§7）：行 = 标题（13px）+ 描述（12px，2 行内截断）+ 选中标记；
  *   层级靠**表面亮度**与 1px 边，不靠阴影堆叠（DESIGN.md 平面分层制）。

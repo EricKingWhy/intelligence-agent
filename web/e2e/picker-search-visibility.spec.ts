@@ -26,7 +26,14 @@
  * 车道归属：Playwright e2e（浮层内内容在关闭态不渲染，SSR/单测断不到）。 */
 
 import { expect, test } from '@playwright/test';
-import { LONG_MODELS, PERMISSION_MODES, longCatalog, openModelMenu, routeApi } from './fixtures';
+import {
+  LONG_MODELS,
+  PERMISSION_MODES,
+  longCatalog,
+  noSearchInputIn,
+  openModelMenu,
+  routeApi,
+} from './fixtures';
 
 // 长目录统一来自 fixtures（避免多处内联后静默漂移，见 fixtures.ts「长目录 fixture」段）。
 const LONG_MODES = longCatalog('mode', 6);
@@ -34,10 +41,14 @@ const LONG_MODES = longCatalog('mode', 6);
 const searchWrap = (page: import('@playwright/test').Page) =>
   page.locator('.picker-search-wrap');
 
+/** 「模型菜单里没有搜索框」的可失败口径（按标签/role，不按类名——成因见 fixtures.noSearchInputIn）。 */
+const menuSearchInputs = (page: import('@playwright/test').Page) => noSearchInputIn(page, '[role="menu"]');
+const pickerSearchInputs = (page: import('@playwright/test').Page) => noSearchInputIn(page, '.picker-content');
+
 test('#199：模型选择器没有搜索框（一级与二级都没有）', async ({ page }) => {
   // 用**长**目录：旧实现在长目录下会显示搜索框，所以这条能真正证明搜索框被删掉，
   // 而不是"目录太短所以没显示"（后者是假绿——正是本 spec 要防的那种）。
-  routeApi(page, { sessions: [], events: [], models: LONG_MODELS });
+  routeApi(page, { sessions: [], events: [], models: LONG_MODELS, permissionModes: PERMISSION_MODES });
   await page.goto('/');
 
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');
@@ -48,13 +59,19 @@ test('#199：模型选择器没有搜索框（一级与二级都没有）', asyn
   // 一级打开：菜单语义（两级飞出 = 菜单 + 子菜单）
   const menu = page.locator('[role="menu"]').first();
   await expect(menu).toBeVisible();
-  expect(await searchWrap(page).count()).toBe(0);
+  await expect(menuSearchInputs(page)).toHaveCount(0);
 
-  // 展开二级（悬停 provider 行）：二级也没有搜索框
+  // 展开二级（悬停 provider 行）：二级也没有搜索框（`[role="menu"]` 同时覆盖两级）
   const providerRow = page.locator('[role="menuitem"][aria-haspopup="menu"]').first();
   await providerRow.hover();
   await expect(page.locator('[role="menuitemradio"]').first()).toBeVisible();
-  expect(await searchWrap(page).count()).toBe(0);
+  await expect(menuSearchInputs(page)).toHaveCount(0);
+
+  // 反向对照：同一个口径在档位下拉里必须**数得到**输入框（长目录 6 > 5 → 搜索框在场）。
+  // 没有这条，「数到 0」可能只是选择器写错/扫错容器——那正是本 spec 要防的假绿。
+  await page.keyboard.press('Escape');
+  await page.locator('.composer-control[aria-label="权限模式"]').click();
+  await expect(pickerSearchInputs(page)).toHaveCount(1);
 });
 
 test('短目录：OptionPicker（权限模式）搜索框不可见', async ({ page }) => {

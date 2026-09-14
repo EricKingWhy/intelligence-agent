@@ -67,6 +67,16 @@
    modal 菜单在退场期间仍持有 `body{pointer-events:none}` 并把焦点抓回自己的残留节点。
    修法 = helper 首尾各等一次「菜单已卸载」（与 `pickControl` 既有尾等待同一手法）。
 
+**B-3 的两轴审查（fixed point `c00604e`，两个独立只读子代理）：Spec 轴 1×P1 + 2×P2 + 3×P3，
+Standards 轴 2×P2 + 8×P3 → 全部处置完毕**（修复 commit 见台账本行）。值得单独记下的四条：
+
+| finding | 处置 |
+| --- | --- |
+| **Spec P1**：`aria-label` 被顺手统一成中文（`Agent 档位`/`推理深度`），违反票面冻结结论 B「会影响到 e2e 定位器就不统一中文」 | **回退**：两个 label 及其 e2e 定位器全部还原为 `Agent Profile`/`Reasoning Effort`；`Composer.tsx` 的注释改成写明"刻意维持中英混用、要统一请先改票面结论"，防止下一个人再顺手改一遍 |
+| **Standards P2**：「模型选择器没有搜索框」的回归锁是**假绿**——它数的是 `.picker-search-wrap`，那是 `OptionPicker` 的类，旧模型的类叫 `.model-picker-search-wrap` ⇒ 恒得 0 | 新增 `fixtures.noSearchInputIn(scope)`（按 `input`/`role=combobox`/`[cmdk-input]` 数，对类名免疫），两处断言改用它；并加**反向对照**：同一口径在档位下拉里必须数得到 1 个输入框。变异验证：往模型菜单里塞一个 `<input>` → 目标 3 条测试全红 |
+| **Spec P2**：#201 的「勾选 + 加重 + 左侧 2px 条」此前**没有任何会红的测试**（弹层是 portal，SSR 断不到） | 新增 e2e：选中行 `data-state="checked"` 唯一 + 含 `.picker-item-check` + `getComputedStyle(el,'::before').width === '2px'`；变异验证：删掉 `data-state` → 该条转红 |
+| **Spec P3**：二级行的次级文案（真实 model id / `默认`，而非设计稿写的 provider 名）只在代码注释里说明 | 补进本节「未落地项」：二级行次级文案 = 真实 model id 或 `默认` 标记——provider 名在"某个 provider 的展开"里是冗余信息，不占描述行 |
+
 **视觉验收（`impeccable`：一批一次性检查，未逐票重复）**：暗/亮两主题各截一级菜单、二级子菜单
 （选中态）、长目录档位下拉（含搜索过滤）、短目录下拉已选态；并用计算盒校验定位——`align="end"` 下
 一级菜单右缘 362 == trigger 右缘 362，`align="start"` 下档位浮层左缘 366 == trigger 左缘 366，
@@ -74,8 +84,9 @@
 （暗 `#17171d`/`#1f232b`，亮 `#ffffff`/`#f1f1f3`），二级靠 surface-2 + 更浅阴影分层。
 
 **B-3 未落地项（无数据源，不编占位；已写进交付说明与代码注释）**：per-option 图标槽（目录契约
-无 per-option 图标）、provider 不可用置灰 + 行尾 reason（`is_available`/`unavailable_reason` 属
-#203）、档位收窄「N/M 个工具」提示（`GET /api/agent-profiles` 不回工具数）、一级底部「管理模型」
+无 per-option 图标）、provider 不可用置灰 + 行尾 reason（`/api/models` 有 `is_available` 但后端写死
+`True`、`unavailable_reason` 不存在，均属 #203）、档位收窄「N/M 个工具」提示（`GET /api/agent-profiles`
+不回工具数）、一级底部「管理模型」
 入口（#203 交付物，位已由 `.picker-foot` 预留）。
 
 **B-3 设计依据**：`docs/design/WEB_UI_BATCH_REDESIGN.md`（本 worktree 已镜像一份，来源

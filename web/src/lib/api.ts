@@ -198,7 +198,11 @@ export async function getReasoningEfforts(): Promise<CatalogEntry[]> {
 }
 
 /** GET /api/context-providers —— Context Provider 清单。
- *  当前诚实返空数组（runtime 尚未装配任何 provider）。 */
+ *  当前诚实返空数组（runtime 尚未装配任何 provider）。
+ *
+ *  ⚠ 当前**没有调用方**：`#201` 删掉了多选控件，UI 不再有这个入口。函数保留是因为端点本身
+ *  仍在（`fixtures.ts` 的该端点 mock 也为此保留）——`#200` 看板与 `#203` 供应商管理会再评估
+ *  是否要选 provider；删掉它就得连契约一起忘掉。要清理请连同这个理由一起改。 */
 export async function getContextProviders(): Promise<CatalogEntry[]> {
   const res = await apiFetch('/api/context-providers');
   if (!res.ok) throw new Error(`context-providers ${res.status}`);

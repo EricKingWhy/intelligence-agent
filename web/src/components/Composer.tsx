@@ -120,9 +120,12 @@ export const Composer = memo(function Composer({
               disabled={locked}
             />
             {/* #201：三个档位下拉合并为同一个 OptionPicker——同一份实现、同一份视觉、
-                同一套 ARIA（此前三处手抄 + 十条不一致）。`aria-label` 一并统一为中文
-                （原 `Agent Profile` / `Reasoning Effort` 与 `权限模式` 混用中英）；
-                e2e 定位器在同一次改动里同步，没有为了让测试变绿而弱化断言。 */}
+                同一套 ARIA（此前三处手抄 + 十条不一致）。
+                ⚠ `aria-label` **刻意维持原值的中英混用**（`权限模式` / `Agent Profile` /
+                `Reasoning Effort`）：票面冻结结论 B 明确「会影响到 e2e 定位器就不统一中文」，
+                并点名「不得内置默认值，否则合并本身就会顺手把英文名改掉，等于偷偷做了 B 项」。
+                所以这里传的是各调用点原来的名字——顺手统一会连同 locator 一起改，
+                正是那条冻结结论要防的事。要统一请先改票面结论。 */}
             <OptionPicker
               ariaLabel="权限模式"
               title="工具调用如何批准？"
@@ -134,7 +137,7 @@ export const Composer = memo(function Composer({
               disabled={locked}
             />
             <OptionPicker
-              ariaLabel="Agent 档位"
+              ariaLabel="Agent Profile"
               title="这次会话用哪个档位？"
               options={toCatalogOptions(agentProfiles)}
               value={selectedAgentProfile}
@@ -144,7 +147,7 @@ export const Composer = memo(function Composer({
               disabled={locked}
             />
             <OptionPicker
-              ariaLabel="推理深度"
+              ariaLabel="Reasoning Effort"
               title="推理深度选哪一档？"
               options={toCatalogOptions(reasoningEfforts)}
               value={selectedReasoningEffort}

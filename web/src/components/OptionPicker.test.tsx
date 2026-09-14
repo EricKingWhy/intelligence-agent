@@ -67,9 +67,11 @@ describe('OptionPicker（Radix Popover 契约，#201）', () => {
   });
 
   it('disabled=true → trigger 标记 aria-disabled', () => {
-    expect(render({ options: toCatalogOptions(ENTRIES), disabled: true })).toMatch(
-      /aria-disabled="true"|disabled/,
-    );
+    // 只认 `aria-disabled="true"`：原先写成 `/aria-disabled="true"|disabled/`，而同一个 button
+    // 本来就带原生 `disabled`——那个 `|disabled` 让这条断言在 aria-disabled 被删掉时照样绿，
+    // 而 aria-disabled 正是它在守的东西（两轴 review 的 Standards 轴指出）。
+    const html = render({ options: toCatalogOptions(ENTRIES), disabled: true });
+    expect(html).toContain('aria-disabled="true"');
   });
 
   it('弹层内容不在 SSR HTML 中（Radix portal 是客户端渲染）', () => {

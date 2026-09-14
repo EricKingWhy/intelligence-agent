@@ -37,13 +37,14 @@ export function toAmendFields(
   };
 }
 
-/** 创建会话控制面：amend 三项 + `permission_mode`（该端点独有）。 */
+/** 创建会话控制面：amend 三项 + `permission_mode`（该端点独有）。
+ *
+ * 返回类型里**没有** `context_providers`：函数体已不可能产出它（`toAmendFields` 不产、这里也不加），
+ * 类型上留着会让调用方以为这是本函数承诺的契约——那正是本文件顶部警告的「契约归属漂移」。
+ * （`toAmendFields` 的 `Omit` 里保留该键是另一回事：那是「整份 payload 的既有形状」。） */
 export function toCreateControls(
   c: ComposerControls,
-): Pick<
-  StartSessionPayload,
-  'model' | 'permission_mode' | 'agent_profile' | 'reasoning_effort' | 'context_providers'
-> {
+): Pick<StartSessionPayload, 'model' | 'permission_mode' | 'agent_profile' | 'reasoning_effort'> {
   return {
     ...toAmendFields(c),
     permission_mode: c.permissionMode ?? undefined,
