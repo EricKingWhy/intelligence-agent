@@ -27,6 +27,10 @@ from agent_harness.agent import AgentEvent
 from agent_harness.assembly import RecoveryStores, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
+from agent_harness.capability.manifest import (
+    core_manifest_entry,
+    descriptor_manifest_entry,
+)
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.identity import (
@@ -49,6 +53,7 @@ from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.service import (
+    ARCHIVE_ENTRY_API,
     ActiveRunConflict,
     AmendOptions,
     ApprovalAlreadyResolved,
@@ -332,6 +337,22 @@ class SessionSummary(BaseModel):
     # 序列化成 null。真正抓漏映射的是断言**值**的测试
     # （`tests/web/test_session_list_workspace.py::test_rows_carry_real_workspace_and_ungrouped_is_null`）。
     workspace: WorkspaceRef | None
+    # #171：是否已归档——前端「已归档」徽标的**唯一**来源（`?include_archived=true`
+    # 时那些行必须能被认出来）。与 `workspace` 同样**刻意不给默认值**：默认 `False`
+    # 会让漏映射的构造点把"已归档"谎报成未归档，徽标静默消失（假事实，不变量 #21 同族）。
+    archived: bool
+
+
+class SessionArchived(BaseModel):
+    """`POST/DELETE /api/sessions/{id}/archive` 的成功响应（#171）。
+
+    形状就是领域动作本身：`{id, archived}`——两个动词各自只表达一个终态，
+    `archived` 是**动作后**的真值（幂等：重复归档仍是 `true`）。
+    """
+
+    id: str
+    #: 动作后的状态。归档可逆，没有"半归档"可表达，所以就是一个布尔。
+    archived: bool
 
 
 class SessionDeleted(BaseModel):
@@ -741,6 +762,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_host_dir_routes(app)
 
+    # #191 会话工作区只读浏览（列文件 / 读文件 / git status / 单文件 diff）。
+    # 同样是独立 router + 一行接入：路径边界与来源闸都用既有的那一份（Sandbox /
+    # `require_trusted_origin`），本模块不新造校验。
+    from agent_harness.web.workspace_files import register_workspace_file_routes
+
+    register_workspace_file_routes(app, validate_session_id=validate_session_id)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
@@ -779,13 +807,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         return {"status": "ok"}
 
     @app.get("/api/sessions")
-    async def list_sessions(workspace_id: str | None = None) -> list[SessionSummary]:
+    async def list_sessions(
+        workspace_id: str | None = None, include_archived: bool = False
+    ) -> list[SessionSummary]:
         """列历史 session。
 
         - 不带参数：全部会话，按**最近活动**倒序（既有契约与快路径取舍不变）。
         - `?workspace_id=<项目 id>`：只列该项目的会话，顺序 = **账本的手工序**
           （AC4：不按活动时间重排）；项目未注册 → 404（不伪装成空列表）。
-        每行都带 `workspace`（`null` = 未分组）。
+        - `?include_archived=true`（#171）：把已归档的会话也列出来（前端"显示已归档"
+          开关）。**默认 false 即不列**；两条路径（默认列表 / 项目视图）同一规则。
+          非布尔值 → 422（FastAPI 的 bool query 语义，不自造一套）。
+        每行都带 `workspace`（`null` = 未分组）与 `archived`（徽标真值）。
 
         列表页只需摘要字段——store.read_session_summary 单趟流式扫描
         （头部早退 + 末行），不再全量解析每个 JSONL（30 会话 × 2000 事件
@@ -794,7 +827,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = SessionService(app.state.agent)
         try:
-            summaries = await service.list_sessions(workspace_id=workspace_id)
+            summaries = await service.list_sessions(
+                workspace_id=workspace_id, include_archived=include_archived
+            )
         except WorkspaceNotFound as e:
             raise http_error(e) from e
         return [
@@ -813,6 +848,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     if s.workspace is not None
                     else None
                 ),
+                archived=s.archived,
             )
             for s in summaries
         ]
@@ -902,46 +938,35 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/capabilities")
     async def list_capabilities() -> dict[str, Any]:
-        """列出已装配的 capability manifest（SDD 03 §17，Phase 2 加法）。
+        """列出 capability manifest：**内置工具集（core）+ 已装配的插件 capability**（SDD 03 §17）。
 
-        默认 CAPABILITIES="" → registry.available() 为空 → 返回 {"capabilities": []}。
-        前端据空列表自行 fallback 显示 chat/timeline（空就是空，不假装有基础能力）。
+        **core 条目恒在且排在最前**（`capability/manifest.py`）：`changes`（「文件/改动」）与
+        `terminal`（「输出」）两个面由内置工具（`write`/`edit`/`apply_patch`/`bash`）产出，
+        而它们**不由任何插件 capability 产出**——只投影插件 descriptor 时，未声明 `surfaces`
+        的保守默认会让这两个面在**所有**真实部署里被前端 `centerTabs` 滤掉（#193）。
 
-        投影规则：descriptor 无 surfaces 声明 → 保守默认（chat/timeline=true）；
-        descriptor 显式声明 surfaces → 以声明为准。本轮没有 capability 填 surfaces，
-        只搭骨架——具体 surfaces 声明是 Phase 6 的工作。
+        插件条目：无 `surfaces` 声明 → 保守默认（`chat`/`timeline` = true，其余 false）；
+        显式声明 → 以声明为准（局部声明**不补齐**，契约里 `actions` 是可选局部字典）。
+        条目级**不做并集**——取并集是前端的事（`capabilities.ts::deriveSurfaces`），
+        两处都算一遍就等于有两个口径。
+
+        条目形状在**后端侧**只有 `capability/manifest.py` 一份（此前内联在本函数里，
+        core 一加入就会变成两份）。说清楚边界，免得把"一份"当成跨仓保证：
+        前端的键集与缺省（`web/src/lib/capabilities.ts::SURFACE_KEYS` / `DEFAULT_SURFACES`、
+        e2e 的 `web/e2e/fixtures.ts::CORE_CAPABILITY`）是**手工镜像**——跨语言、跨仓，
+        改这里不会自动同步过去。两端各有测试锁着同一份值
+        （后端 `tests/web/test_web_phase2_endpoints.py::TestCapabilities`，
+        前端 `web/src/lib/capabilities.test.ts` + `workspace-modes.spec.ts`），
+        改声明时两边一起改。
         """
         state = app.state.agent
         registry, _wiring = await state.get_wiring()
-        available = registry.available()
-        capabilities: list[dict[str, Any]] = []
-        for descriptor in available:
-            declared_surfaces = descriptor.surfaces or {}
-            # 保守默认：未声明 surfaces 的 capability 只保证 chat + timeline 可用
-            # （其余 surface 按 capability 显式声明）。
-            surfaces = {
-                "chat": declared_surfaces.get("chat", True),
-                "timeline": declared_surfaces.get("timeline", True),
-                "changes": declared_surfaces.get("changes", False),
-                "terminal": declared_surfaces.get("terminal", False),
-                "artifacts": declared_surfaces.get("artifacts", False),
-            }
-            actions = descriptor.actions or {
-                # 保守默认：未声明 actions 的 capability 不主张任何交互动作可用。
-                "permissions": False,
-                "stop": False,
-                "retry": False,
-                "resume": False,
-            }
-            capabilities.append({
-                "id": descriptor.name,
-                "display_name": descriptor.display_name or descriptor.name,
-                "version": descriptor.version,
-                "provider_name": descriptor.provider_name,
-                "surfaces": surfaces,
-                "actions": actions,
-            })
-        return {"capabilities": capabilities}
+        return {
+            "capabilities": [
+                core_manifest_entry(),
+                *[descriptor_manifest_entry(d) for d in registry.available()],
+            ],
+        }
 
     @app.get("/api/reasoning-efforts")
     async def list_reasoning_efforts() -> dict[str, Any]:
@@ -991,8 +1016,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         清单端点与 POST /api/sessions 共用同一 id 集合。
 
         未装配任何 capability（bare 配置）→ wiring.context_providers 为空 →
-        返 ``{"providers": []}``（与 /api/capabilities 空目录降级同原则，
-        不伪造基础项）。前端据空列表自行 fallback。
+        返 ``{"providers": []}``（未装配就不编条目，不伪造基础项）。前端据空列表自行 fallback。
+        注意与 ``/api/capabilities`` 的区别：那边**恒有一条 core 条目**（内置工具集的声明，
+        见 `capability/manifest.py` / #193），因为内置工具真的在每个会话里；这里没有对应的
+        "内置 Context Provider"——没装配就是空。
         """
         state = app.state.agent
         _, wiring = await state.get_wiring()
@@ -1193,6 +1220,56 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
         return {"status": "cancelling" if cancelled else "no_active_run"}
+
+    @app.post("/api/sessions/{session_id}/archive")
+    async def archive_session(
+        session_id: str, _: None = Depends(require_trusted_origin)
+    ) -> SessionArchived:
+        """归档会话（#171）：把它从默认列表里收起来，**可逆**、不删任何东西。
+
+        与 `DELETE /api/sessions/{id}`（硬删）刻意分成两个动作：归档只写
+        `session_meta.archived` 一个标记——事件日志、项目账本、checkpoint、沙箱工件
+        全部原样（spec 03 的 Full SessionEvent History 约束），所以入口层不需要二次
+        确认；硬删不可逆，才需要确认面。
+
+        语义：200 → `{id, archived: true}`（**幂等**：已归档再归档仍是 200）；
+        404 → 没有这个会话；409 → 有在途 run（`get_active`，详情说明"运行中的会话不能
+        归档"）；422 → id 形态非法。取消归档走 `DELETE`（同路径），且**不**因在途 run
+        拒绝——它只是把行放回列表。
+
+        动词选择：本仓既有会话端点一律显式动词（`resume`/`cancel`/`approve`/`recover`/
+        `model`），不用泛化 PATCH。
+
+        来源闸（ADR-0025 D1）：归档改的是宿主侧列表可见性，只接受本机来源
+        （与项目 / 目录 / 记忆 / 工作区端点同一份实现）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            archived = await service.set_archived(
+                session_id, archived=True, entry_point=ARCHIVE_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
+            raise http_error(e) from e
+        return SessionArchived(id=session_id, archived=archived)
+
+    @app.delete("/api/sessions/{session_id}/archive")
+    async def unarchive_session(
+        session_id: str, _: None = Depends(require_trusted_origin)
+    ) -> SessionArchived:
+        """取消归档（#171）：把会话放回默认列表。
+
+        语义：200 → `{id, archived: false}`（幂等）；404 → 没有这个会话；422 → id
+        形态非法。**没有 409**：把行放回列表不破坏任何人的前提，在途 run 也无所谓
+        （见 `SessionService.set_archived` 里那条非对称的理由）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            archived = await service.set_archived(
+                session_id, archived=False, entry_point=ARCHIVE_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        return SessionArchived(id=session_id, archived=archived)
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(

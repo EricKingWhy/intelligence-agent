@@ -16,13 +16,28 @@
 
 ## 2. 期望能力集（`/api/capabilities` 是唯一判据）
 
-启动后先查一次，期望**三个**：
+启动后先查一次，期望 **4** 条（1 个 core + 3 个插件）：
 
 ```bash
 curl -s http://127.0.0.1:8000/api/capabilities
-# 期望 count=3: websearch + multiagent + memory
+# 期望 count=4: core + websearch + multiagent + memory
 ```
 
+- **`core`**（2026-09-14 起恒在，#193）：**内置工具集**的声明，不是插件。
+  `surfaces` = `chat`/`timeline`/`changes`/`terminal` = true、`artifacts` = false。
+  前端中心列「文件/改动」（`changes`）与「输出」（`terminal`）两个面**靠它才出现**——
+  这两个面由内置工具（`write`/`edit`/`apply_patch`/`bash`）产出，不由任何插件产出；
+  在此之前（端点只投影插件 descriptor）保守默认把它们恒置 false，两个面在**所有**真实
+  部署里都被 `centerTabs` 滤掉。`artifacts` 为 false 是如实的：外置产物要部署配了 store
+  才读得到（没配读接口 503），不是无条件能力。
+- **"声明为假就不出现"的边界**（#193 反例守卫的正确读法）：前端对多条条目取**并集**，
+  而 core 恒在——插件写 `changes: false` **不会**让「文件/改动」面消失。那是"这个插件不
+  产出它"，不是"这个会话产不出它"（内置工具确实产出）。要验闸门语义只能用**不含 core 的
+  载荷**：`capabilities: []` → 只剩「Chat」（前端 `workspace-modes.spec.ts` 的"能力目录
+  真的为空"一条）。真实端点不会返回空列表，这条路径只在"老后端 / 端点被裁剪"的降级场景出现。
+- **声明是部署级的，不是 profile 级**：本端点没有 session 上下文，读不到某个 `agent_profile`
+  的 `tool_scope`。若某 profile 把 `bash` 收窄掉，「输出」面仍会出现（空态）而不是消失——
+  如实的空面优于按 profile 猜。profile 级声明需要另一张票。
 - **`websearch`**：`web_search` 工具、Context Provider 目录等。
 - **`multiagent`**：**`delegate` 工具**。缺它则委派/子会话整块前端 UI **按设计不渲染**
   （零伪造，符合不变量 #21），于是这 5 个控件不可达：委派行展开、`复制子会话 ID`、
@@ -31,8 +46,11 @@ curl -s http://127.0.0.1:8000/api/capabilities
   2026-09-13 复核：本部署实际返回 **3**（SID-03 修正；此前本文写 count=2，
   是 #159 MEM-4 接入 `memory` **之前**的旧口径）。缺它则记忆面板按设计不渲染。
 
-三者当前都只声明 `surfaces: {chat, timeline}`、`actions: {}`（无 permissions/stop/retry/resume）
-——验收时不要拿"某个 capability 没给 stop 动作"当缺陷，那是如实声明（不变量 #21）。
+**插件** capability 当前都只声明 `surfaces: {chat, timeline}`、`actions: {}`
+（无 permissions/stop/retry/resume）——验收时不要拿"某个 capability 没给 stop 动作"当缺陷，
+那是如实声明（不变量 #21）。但 **core 条目的 `actions` 是声明了的**：
+`permissions`/`stop`/`resume` = true（路由分别在 `POST /api/sessions/{id}/approve` /
+`cancel` / `resume`），`retry` = false（后端确实没有该入口）——这是如实值，不是缺省值。
 
 ## 3. 两个 worktree 的 `.env` 差异（本文件存在的原因）
 

@@ -2152,6 +2152,11 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
   `tests/test_event_vocabulary_generated.py` 与事实源双向比对（缺名 / 多名 / 分节归属错都红）。
   spec §3 从此只留语义、分层与契约源指向链，MUST NOT 再写死事件名或数量。
   订正：上文"重写实装 37 个"按票面原数记录；T1 实测为 **38**（票面两处清单都漏了 `tool/output_delta`）。
+  交付落点（`feat/backend`，母票 #173 AC6 要的 commit）：T3 `4a261c2` → T2 `d134c21` →
+  T4 `b43f1b1` → T1 `88fbd46` → T5 `60c8d05`；收口记录 `2e3dd16` / `a73dd88`。
+  守卫现状（2026-09-14 复跑）：`tests/test_event_vocabulary_generated.py` +
+  `tests/test_event_types_generated.py` **6 passed**；生成物头部合计行 = 38 类型
+  （36 持久化 + 2 仅广播）。
 
 ### 第十一轮 · Subagent 扫描汇总（2 个 subagent，真机点击，2026-09-13）
 

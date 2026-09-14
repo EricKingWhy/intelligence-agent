@@ -19,7 +19,7 @@ import re
 
 from pydantic import BaseModel, Field
 
-from agent_harness.sandbox import Sandbox
+from agent_harness.sandbox import ExecResult, Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
@@ -48,6 +48,58 @@ def _checked_pathspec(value: str) -> str:
 def _quoted(value: str) -> str:
     """白名单内的 pathspec 统一双引号包裹：空格路径不再被 shell 拆成多个参数。"""
     return f'"{value}"' if value else ""
+
+
+# ── 命令构造与执行：**工具与 Web 路由的唯一一份**（#191）──
+#
+# `GET .../workspace/git/status` / `.../git/diff` 要"复用 git_status/git_diff 的既有
+# 语义，不要另写一套"（票面 AC3）。所以命令字符串、白名单校验、以及"同步 exec 卸载到
+# 工作线程"这三件事都收在这里，工具与路由各自调这三个函数——校验放行面只有一处，
+# 不存在"路由那条忘了校验 shell 元字符"的可能。
+
+
+def git_status_command(pathspec: str = "", *, scope: str = "") -> str:
+    """`git status --porcelain=v1 [-- scope] [pathspec]`。pathspec 非法抛 ValueError。
+
+    `scope` 是给调用方的**路径围栏**（#191）：git 的操作范围是**仓库**，而仓库可能比
+    workspace 大——workspace 嵌在一个更大的仓库里时（默认布局 `<workspace_dir>/workspaces/<sid>`
+    只要 `workspace_dir` 本身在某个仓库内就是这种情形），裸 `git status` 会列出 workspace
+    **以外**的文件。Web 路由传 `scope="."`（cwd 即 workspace）把输出围回子树。
+    多个 pathspec 是**并集**，所以 scope 必须涵盖 pathspec——调用方必须先保证 pathspec
+    在 workspace 内（越过 Sandbox 的 `resolve_within_workspace`），否则围栏形同虚设。
+    工具不传 scope：Agent 侧的命令语义逐字不变。
+    """
+    checked = _checked_pathspec(pathspec) if pathspec else ""
+    command = "git status --porcelain=v1"
+    return _with_pathspecs(command, scope=scope, pathspec=checked)
+
+
+def git_diff_command(*, staged: bool = False, path: str = "", scope: str = "") -> str:
+    """`git diff [--staged] [-- scope] [path]`。path 非法抛 ValueError（`scope` 同 `git_status_command`）。"""
+    checked = _checked_pathspec(path) if path else ""
+    command = "git diff --staged" if staged else "git diff"
+    return _with_pathspecs(command, scope=scope, pathspec=checked)
+
+
+def _with_pathspecs(command: str, *, scope: str, pathspec: str) -> str:
+    """拼 `-- <pathspec>...`。
+
+    无 pathspec 时**逐字保持**旧形态（工具侧命令不变）；有任何一个才加 `--` 分隔符
+    （scope 是内部固定 token，加分隔符是为了让"这是 pathspec 不是 revision"对 git 无歧义）。
+    """
+    if not scope and not pathspec:
+        return command
+    parts = [command, "--"]
+    if scope:
+        parts.append(_quoted(scope))
+    if pathspec:
+        parts.append(_quoted(pathspec))
+    return " ".join(parts)
+
+
+async def run_git_command(sandbox: Sandbox, command: str) -> ExecResult:
+    """执行一条已构造好的 git 命令（同步 `sandbox.exec` 卸载到工作线程，D10 同款）。"""
+    return await asyncio.to_thread(sandbox.exec, command)
 
 
 class _GitStatusArgs(BaseModel):
@@ -93,17 +145,13 @@ class GitStatusTool(Tool):
     async def execute(self, args: _GitStatusArgs) -> ToolResult:
         """exec 硬编码 git status；ADR-0002：exit_code 非零仍 ok=True。"""
         try:
-            pathspec = _checked_pathspec(args.pathspec) if args.pathspec else ""
+            command = git_status_command(args.pathspec)
         except ValueError as error:
             return ToolResult.failure(
                 message=str(error),
                 error_code=ErrorCode.INVALID_ARGUMENT,
             )
-        command = "git status --porcelain=v1"
-        if pathspec:
-            command += f" {_quoted(pathspec)}"
-        # 同步 sandbox.exec 卸载到工作线程，避免阻塞 event loop（D10）。
-        result = await asyncio.to_thread(self._sandbox.exec, command)
+        result = await run_git_command(self._sandbox, command)
         return ToolResult.success(
             message=f"git status 已执行，exit_code={result.exit_code}。",
             data={
@@ -159,19 +207,13 @@ class GitDiffTool(Tool):
     async def execute(self, args: _GitDiffArgs) -> ToolResult:
         """exec 硬编码 git diff；ADR-0002：exit_code 非零仍 ok=True。"""
         try:
-            path = _checked_pathspec(args.path) if args.path else ""
+            command = git_diff_command(staged=args.staged, path=args.path)
         except ValueError as error:
             return ToolResult.failure(
                 message=str(error),
                 error_code=ErrorCode.INVALID_ARGUMENT,
             )
-        command = "git diff"
-        if args.staged:
-            command += " --staged"
-        if path:
-            command += f" {_quoted(path)}"
-        # 同步 sandbox.exec 卸载到工作线程，避免阻塞 event loop（D10）。
-        result = await asyncio.to_thread(self._sandbox.exec, command)
+        result = await run_git_command(self._sandbox, command)
         return ToolResult.success(
             message=f"git diff 已执行，exit_code={result.exit_code}。",
             data={

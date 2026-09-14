@@ -2,7 +2,8 @@
 
 覆盖：
 - GET /api/permission-modes：返回三个真实 PermissionPolicy + 描述；
-- GET /api/capabilities：默认空（CAPABILITIES=""）→ {"capabilities": []}；
+- GET /api/capabilities：**core 条目恒在**（内置工具集的声明，见 #193）——
+  默认配置下也声明 `changes`/`terminal`，否则前端 `centerTabs` 会把两个面滤掉；
 - GET /api/capabilities：注入 fake descriptor → 投影 manifest（含 surfaces 默认值）。
 """
 
@@ -16,6 +17,7 @@ from agent_harness.capability.base import (
     CapabilityRegistry,
     Degradation,
 )
+from agent_harness.capability.manifest import CORE_CAPABILITY_ID
 from agent_harness.config import Settings
 from agent_harness.web.app import create_app
 
@@ -48,18 +50,57 @@ class TestPermissionModes:
 # ── GET /api/capabilities ──
 
 class TestCapabilities:
-    def test_empty_when_not_configured(self, bare_client):
-        """默认 CAPABILITIES="" → registry 空 → {"capabilities": []}。
+    def test_core_manifest_is_always_there(self, bare_client):
+        """默认 `CAPABILITIES=""`（零插件）也返回 **core 条目**，并声明核心能产出的面。
 
-        空就是空（SDD 决策）：不假装有基础能力，前端据空列表自行 fallback。
+        为什么这条是硬要求（#193）：前端 `centerTabs` 的判据是"能力声明为 true **且**已实现"。
+        `changes`（「文件/改动」）与 `terminal`（「输出」）由**内置工具**产出——
+        `write`/`edit`/`apply_patch`（改动）与 `bash`（命令输出），它们在
+        `assembly.build_runtime` 里**无条件注册**，不由任何插件 capability 产出。
+        此前端点只投影插件 descriptor，而 7 个 descriptor 都没填 `surfaces` ⇒ 保守默认
+        给出 `changes/terminal = false` ⇒ 两个面在**任何真实部署**里都被滤掉（e2e 之所以
+        能看到，是因为它们注入了 `true`——后端发不出那种载荷）。
         """
         resp = bare_client.get("/api/capabilities")
         assert resp.status_code == 200
-        body = resp.json()
-        assert body == {"capabilities": []}
+        caps = resp.json()["capabilities"]
 
-    def test_reflects_registry(self, tmp_path, monkeypatch):
-        """注入一个 fake descriptor → 端点投影出 manifest（含 surfaces 默认值）。"""
+        core = [c for c in caps if c["id"] == CORE_CAPABILITY_ID]
+        assert len(core) == 1, f"core 条目必须恒在且唯一：{[c['id'] for c in caps]}"
+        entry = core[0]
+        assert entry["display_name"], "manifest 条目必须有 display_name"
+        assert entry["surfaces"] == {
+            "chat": True, "timeline": True,
+            "changes": True, "terminal": True,
+            # artifacts 不在 core 的声明里：外置产物取决于**部署是否配了 store**
+            # （没配就 503），不是内置工具集无条件产出的东西。
+            "artifacts": False,
+        }
+        # 交付判据（#193 AC1）——前端取**并集**，所以真正要成立的是"至少一条声明为真"
+        assert any(c["surfaces"]["changes"] for c in caps)
+        assert any(c["surfaces"]["terminal"] for c in caps)
+
+    def test_core_actions_match_really_wired_entry_points(self, bare_client):
+        """core 的 `actions` 如实声明：三个有路由、`retry` 没有。
+
+        不写"保守全 false"是因为那对本条目就是**假话**（路由明明在）：
+        `permissions` → `POST /api/sessions/{id}/approve`，
+        `stop` → `POST /api/sessions/{id}/cancel`，
+        `resume` → `POST /api/sessions/{id}/resume`。
+        `retry` 没有任何后端入口 ⇒ false（前端当前不消费 actions，但声明本身要真）。
+        """
+        caps = bare_client.get("/api/capabilities").json()["capabilities"]
+        actions = next(c for c in caps if c["id"] == CORE_CAPABILITY_ID)["actions"]
+        assert actions == {
+            "permissions": True, "stop": True, "retry": False, "resume": True,
+        }
+
+    def test_reflects_registry_and_keeps_core_first(self, tmp_path, monkeypatch):
+        """core 与插件 descriptor 并存；插件条目仍走**它自己的**保守默认。
+
+        条目级不做并集（那是前端的 `deriveSurfaces` 的活）：这里只保证两件事——
+        core 在、插件条目的投影逐字段不变（既有契约不回归）。
+        """
         fake_descriptor = CapabilityDescriptor(
             name="memory",
             version="1.0.0",
@@ -90,10 +131,9 @@ class TestCapabilities:
 
         resp = client.get("/api/capabilities")
         assert resp.status_code == 200
-        body = resp.json()
-        caps = body["capabilities"]
-        assert len(caps) == 1
-        cap = caps[0]
+        caps = resp.json()["capabilities"]
+        assert [c["id"] for c in caps] == [CORE_CAPABILITY_ID, "memory"]
+        cap = caps[1]
         assert cap["id"] == "memory"
         assert cap["display_name"] == "memory"  # display_name 缺省回落 name
         assert cap["version"] == "1.0.0"
@@ -139,7 +179,8 @@ class TestCapabilities:
 
         resp = client.get("/api/capabilities")
         body = resp.json()
-        cap = body["capabilities"][0]
+        # 按 id 取插件条目：core 条目恒在最前（见上面两条用例），位置断言会脆。
+        cap = next(c for c in body["capabilities"] if c["id"] == "memory")
         # 显式声明覆盖默认：timeline=false（而非默认 true），artifacts=true
         assert cap["surfaces"]["timeline"] is False
         assert cap["surfaces"]["artifacts"] is True

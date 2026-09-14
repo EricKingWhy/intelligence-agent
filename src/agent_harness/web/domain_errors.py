@@ -22,6 +22,8 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary |
 | `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
 | `DELETE /api/sessions/{id}`（会话硬删 / #172 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict, SessionHasChildren |
+| `POST /api/sessions/{id}/archive`（会话归档 / #171 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict |
+| `DELETE /api/sessions/{id}/archive`（取消归档 / #171 追加） | InvalidSessionId, SessionNotFound |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
 两个特例写进契约、不得「顺手统一」：
@@ -157,6 +159,11 @@ _WORKSPACE_ERROR_STATUS: dict[type[Exception], int] = {
     UnknownLedgerEntry: 409,
     # 422：路径存在但不是目录（`require_existing_directory` 的原样透传）——入参非法
     NotADirectoryError: 422,
+    # 422：**路径是目录，但调用方要的是文件**（#191 读工作区文件：`open(dir)` 在 POSIX
+    # 抛这个）。与上一条互为镜像；不登记它的后果是 `workspace_http_error` 精确查表
+    # KeyError → 客户端可控的路径换来 500，而 win32 上同一动作抛 PermissionError（403）
+    # ——同一件事两个平台两种答案，至少两边都不是 500。
+    IsADirectoryError: 422,
     # 422：**裸 `OSError`**——非法字符 / 超长路径等（`os.stat` 抛 EINVAL / ENAMETOOLONG，
     # 实测 `C:\bad<name>` 与 `"\t"` 都是这一类）。客户端可控的路径换来 500 不诚实；
     # 这类 errno 就是"你给的路径不合法"。注意 `workspace_http_error` 按 `type(exc)` 精确
@@ -168,7 +175,9 @@ _WORKSPACE_ERROR_STATUS: dict[type[Exception], int] = {
 }
 
 
-def os_error_detail(exc: Exception, *, path: str | None = None) -> str:
+def os_error_detail(
+    exc: Exception, *, path: str | None = None, noun: str = "目录"
+) -> str:
     """文件系统异常 → **策展中文** detail（与 `GET /api/host/dirs` 同一套文案）。
 
     为什么不再 `str(exc)`：同一个路径在"注册项目"与"目录浏览"两处会被用户看到——
@@ -181,6 +190,10 @@ def os_error_detail(exc: Exception, *, path: str | None = None) -> str:
     `pydantic` / 手写的异常则可能没有；都没有时**退回 `str(exc)`**，
     宁可文案粗糙也不丢信息。
 
+    `noun` 只影响 `FileNotFoundError` 那一句（默认"目录"，因为绝大多数调用方在找目录）：
+    #191 读工作区**文件**时,"目录不存在：README.md"是错的，所以调用方传 `noun="文件"`。
+    参数化而不是另写一句文案——同一张表、同一个函数，"一个 errno 一种说法"这条不破。
+
     **只策展 `OSError`**：`workspace_http_error` 也接 `WorkspaceError`（`UnknownWorkspace`
     / `UnknownLedgerEntry`），那些异常自带完整中文消息且**未必与路径有关**——给它们套
     "路径不可用：" 模板会把"账本里没这条"说成"路径不可用"，是更糟的谎。非 OS 异常原样透传。
@@ -189,27 +202,32 @@ def os_error_detail(exc: Exception, *, path: str | None = None) -> str:
         return str(exc)
     target = path or getattr(exc, "filename", None) or ""
     if isinstance(exc, FileNotFoundError):
-        return f"目录不存在：{target}" if target else str(exc)
+        return f"{noun}不存在：{target}" if target else str(exc)
     if isinstance(exc, PermissionError):
         return f"无权限访问：{target}" if target else str(exc)
     if isinstance(exc, NotADirectoryError):
         return f"不是目录：{target}" if target else str(exc)
+    if isinstance(exc, IsADirectoryError):
+        return f"不是文件：{target}" if target else str(exc)
     return f"路径不可用：{target}" if target else str(exc)
 
 
-def workspace_http_error(exc: Exception, *, path: str | None = None) -> HTTPException:
+def workspace_http_error(
+    exc: Exception, *, path: str | None = None, noun: str = "目录"
+) -> HTTPException:
     """workspace 包 / OS 异常 → `HTTPException`；状态码取自 `_WORKSPACE_ERROR_STATUS`。
 
     与 `http_error` 同款：直接索引（不 `.get` 回退），未登记类型是编码错误，由
     `tests/web/test_domain_error_mapping.py` 的覆盖测试先红挡住。
 
     detail 走 `os_error_detail`（策展中文，**唯一一份**文案）；`host_dirs._os_error`
-    也复用本函数，所以"注册项目 / 目录浏览 / 会话 cwd"三处对同一个 errno 说同一句话。
-    `path` 是给调用方传 canonical 路径的（`OSError.filename` 在少数构造方式下为空）。
+    也复用本函数，所以"注册项目 / 目录浏览 / 会话 cwd / 工作区文件"几处对同一个 errno
+    说同一句话。`path` 是给调用方传 canonical 路径的（`OSError.filename` 在少数构造
+    方式下为空）；`noun` 仅供读文件那条路径把"目录不存在"改成"文件不存在"。
     """
     return HTTPException(
         status_code=_WORKSPACE_ERROR_STATUS[type(exc)],
-        detail=os_error_detail(exc, path=path),
+        detail=os_error_detail(exc, path=path, noun=noun),
     )
 
 

@@ -1,4 +1,4 @@
-"""FakeArtifactStore + compute_artifact_id + _slice_lines 单元测试。
+"""FakeArtifactStore + compute_artifact_id + slice_lines 单元测试。
 
 验证 ArtifactStore 契约：
 - save → load 往返（content-hash 寻址正确）
@@ -17,8 +17,8 @@ from agent_harness.storage.artifact import (
     ArtifactSlice,
     ArtifactStore,
     FakeArtifactStore,
-    _slice_lines,
     compute_artifact_id,
+    slice_lines,
 )
 
 
@@ -140,7 +140,7 @@ class TestSliceLinesCharCap:
     def test_single_long_line_is_truncated(self) -> None:
         """场景 1：单条超长行（十万字符）被默认上限截断，并保留定位信息。"""
         long_line = "x" * 100_000
-        lines, truncated = _slice_lines(
+        lines, truncated = slice_lines(
             [long_line], start_line=None, end_line=None, keyword=None, max_lines=200,
         )
         assert truncated is True
@@ -155,7 +155,7 @@ class TestSliceLinesCharCap:
     def test_multiple_medium_lines_each_truncated(self) -> None:
         """场景 2：多条中长行（各自 5000 字符），每条独立截断并标记。"""
         medium_lines = [("y" * 5000) for _ in range(5)]
-        lines, truncated = _slice_lines(
+        lines, truncated = slice_lines(
             medium_lines, start_line=None, end_line=None, keyword=None, max_lines=200,
         )
         assert truncated is True
@@ -167,7 +167,7 @@ class TestSliceLinesCharCap:
 
     def test_normal_short_lines_unchanged(self) -> None:
         """场景 3：正常短片段——无 char 截断，无额外字段，回归现有契约。"""
-        lines, truncated = _slice_lines(
+        lines, truncated = slice_lines(
             ["short", "another"], start_line=None, end_line=None, keyword=None, max_lines=200,
         )
         assert truncated is False
@@ -179,7 +179,7 @@ class TestSliceLinesCharCap:
     def test_custom_max_chars_per_line(self) -> None:
         """自定义上限：模型可针对特定 artifact 放宽（escalate）以读更多内容。"""
         long_line = "z" * 8000
-        lines, _ = _slice_lines(
+        lines, _ = slice_lines(
             [long_line], start_line=None, end_line=None, keyword=None,
             max_lines=200, max_chars_per_line=5000,
         )
@@ -190,7 +190,7 @@ class TestSliceLinesCharCap:
     def test_row_and_char_truncation_combine(self) -> None:
         """行数截断与字符截断并存时 truncated=True，两者都生效。"""
         many_long = [("w" * 3000) for _ in range(20)]
-        lines, truncated = _slice_lines(
+        lines, truncated = slice_lines(
             many_long, start_line=None, end_line=None, keyword=None, max_lines=5,
         )
         assert truncated is True
