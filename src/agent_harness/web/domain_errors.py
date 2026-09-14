@@ -22,6 +22,8 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary |
 | `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
 | `DELETE /api/sessions/{id}`（会话硬删 / #172 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict, SessionHasChildren |
+| `POST /api/sessions/{id}/archive`（会话归档 / #171 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict |
+| `DELETE /api/sessions/{id}/archive`（取消归档 / #171 追加） | InvalidSessionId, SessionNotFound |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
 两个特例写进契约、不得「顺手统一」：

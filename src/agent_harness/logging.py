@@ -45,6 +45,11 @@ EVENT_TYPES = frozenset(
         # （与 ADR-0026 同款选择），"它曾经存在过"只在结构化日志里可查。只带 id 与
         # 计数，不带任何会话内容。删除**不进 SessionEvent**——那时已没有会话可挂。
         "session_delete",
+        # 会话归档 / 取消归档的审计（#171）：归档只改列表可见性（`session_meta.archived`
+        # 一列），事件日志一字不改，所以它**不是会话真相**，痕迹只落结构化日志
+        # （不变量 #16/#22）。同样只带 id 与动作（archived / entry_point）——会话正文
+        # 是用户数据，进日志只是多余的泄露面（`memory/audit.py` 同款）。
+        "session_archive",
         "system_log",
     }
 )

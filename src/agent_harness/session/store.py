@@ -78,6 +78,12 @@ class SessionSummaryStats:
     #: store 层不认识项目，只提供这个带类型的落点；值由 `SessionService.list_sessions`
     #: 从 `WorkspaceIndex` 回填（AC1 要求三处契约同时有该字段，这是其中之一）。
     workspace: WorkspaceRef | None = None
+    #: #171：会话是否已归档（列表可见性，不是删除）。与 `workspace` 同款分工——store
+    #: 读的是 JSONL，归档标记在 DB（`session_meta.archived`），值由
+    #: `SessionService.list_sessions` 回填。**`session_meta` 无该会话行 = 未归档**
+    #: （行由 lineage/fork 懒补，不是 1:1 恒成立），所以这里的默认值与"无行"同义，
+    #: 不会撒谎；真值只能由服务层的联接给出（AC3）。
+    archived: bool = False
 
 
 class JsonlSessionStore:

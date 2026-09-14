@@ -53,6 +53,7 @@ from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.service import (
+    ARCHIVE_ENTRY_API,
     ActiveRunConflict,
     AmendOptions,
     ApprovalAlreadyResolved,
@@ -336,6 +337,22 @@ class SessionSummary(BaseModel):
     # 序列化成 null。真正抓漏映射的是断言**值**的测试
     # （`tests/web/test_session_list_workspace.py::test_rows_carry_real_workspace_and_ungrouped_is_null`）。
     workspace: WorkspaceRef | None
+    # #171：是否已归档——前端「已归档」徽标的**唯一**来源（`?include_archived=true`
+    # 时那些行必须能被认出来）。与 `workspace` 同样**刻意不给默认值**：默认 `False`
+    # 会让漏映射的构造点把"已归档"谎报成未归档，徽标静默消失（假事实，不变量 #21 同族）。
+    archived: bool
+
+
+class SessionArchived(BaseModel):
+    """`POST/DELETE /api/sessions/{id}/archive` 的成功响应（#171）。
+
+    形状就是领域动作本身：`{id, archived}`——两个动词各自只表达一个终态，
+    `archived` 是**动作后**的真值（幂等：重复归档仍是 `true`）。
+    """
+
+    id: str
+    #: 动作后的状态。归档可逆，没有"半归档"可表达，所以就是一个布尔。
+    archived: bool
 
 
 class SessionDeleted(BaseModel):
@@ -790,13 +807,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         return {"status": "ok"}
 
     @app.get("/api/sessions")
-    async def list_sessions(workspace_id: str | None = None) -> list[SessionSummary]:
+    async def list_sessions(
+        workspace_id: str | None = None, include_archived: bool = False
+    ) -> list[SessionSummary]:
         """列历史 session。
 
         - 不带参数：全部会话，按**最近活动**倒序（既有契约与快路径取舍不变）。
         - `?workspace_id=<项目 id>`：只列该项目的会话，顺序 = **账本的手工序**
           （AC4：不按活动时间重排）；项目未注册 → 404（不伪装成空列表）。
-        每行都带 `workspace`（`null` = 未分组）。
+        - `?include_archived=true`（#171）：把已归档的会话也列出来（前端"显示已归档"
+          开关）。**默认 false 即不列**；两条路径（默认列表 / 项目视图）同一规则。
+          非布尔值 → 422（FastAPI 的 bool query 语义，不自造一套）。
+        每行都带 `workspace`（`null` = 未分组）与 `archived`（徽标真值）。
 
         列表页只需摘要字段——store.read_session_summary 单趟流式扫描
         （头部早退 + 末行），不再全量解析每个 JSONL（30 会话 × 2000 事件
@@ -805,7 +827,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = SessionService(app.state.agent)
         try:
-            summaries = await service.list_sessions(workspace_id=workspace_id)
+            summaries = await service.list_sessions(
+                workspace_id=workspace_id, include_archived=include_archived
+            )
         except WorkspaceNotFound as e:
             raise http_error(e) from e
         return [
@@ -824,6 +848,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     if s.workspace is not None
                     else None
                 ),
+                archived=s.archived,
             )
             for s in summaries
         ]
@@ -1195,6 +1220,56 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
         return {"status": "cancelling" if cancelled else "no_active_run"}
+
+    @app.post("/api/sessions/{session_id}/archive")
+    async def archive_session(
+        session_id: str, _: None = Depends(require_trusted_origin)
+    ) -> SessionArchived:
+        """归档会话（#171）：把它从默认列表里收起来，**可逆**、不删任何东西。
+
+        与 `DELETE /api/sessions/{id}`（硬删）刻意分成两个动作：归档只写
+        `session_meta.archived` 一个标记——事件日志、项目账本、checkpoint、沙箱工件
+        全部原样（spec 03 的 Full SessionEvent History 约束），所以入口层不需要二次
+        确认；硬删不可逆，才需要确认面。
+
+        语义：200 → `{id, archived: true}`（**幂等**：已归档再归档仍是 200）；
+        404 → 没有这个会话；409 → 有在途 run（`get_active`，详情说明"运行中的会话不能
+        归档"）；422 → id 形态非法。取消归档走 `DELETE`（同路径），且**不**因在途 run
+        拒绝——它只是把行放回列表。
+
+        动词选择：本仓既有会话端点一律显式动词（`resume`/`cancel`/`approve`/`recover`/
+        `model`），不用泛化 PATCH。
+
+        来源闸（ADR-0025 D1）：归档改的是宿主侧列表可见性，只接受本机来源
+        （与项目 / 目录 / 记忆 / 工作区端点同一份实现）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            archived = await service.set_archived(
+                session_id, archived=True, entry_point=ARCHIVE_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
+            raise http_error(e) from e
+        return SessionArchived(id=session_id, archived=archived)
+
+    @app.delete("/api/sessions/{session_id}/archive")
+    async def unarchive_session(
+        session_id: str, _: None = Depends(require_trusted_origin)
+    ) -> SessionArchived:
+        """取消归档（#171）：把会话放回默认列表。
+
+        语义：200 → `{id, archived: false}`（幂等）；404 → 没有这个会话；422 → id
+        形态非法。**没有 409**：把行放回列表不破坏任何人的前提，在途 run 也无所谓
+        （见 `SessionService.set_archived` 里那条非对称的理由）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            archived = await service.set_archived(
+                session_id, archived=False, entry_point=ARCHIVE_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        return SessionArchived(id=session_id, archived=archived)
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(
