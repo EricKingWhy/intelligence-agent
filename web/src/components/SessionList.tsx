@@ -22,6 +22,7 @@
 import { memo, useMemo, useState } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
+  Archive,
   ArrowDown,
   ArrowUp,
   ChevronRight,
@@ -36,6 +37,7 @@ import type { Project, SessionDeleted, SessionSummary } from '../types';
 import { formatRelativeTime } from '../lib/format';
 import { useTickingNow } from '../hooks/useTickingNow';
 import { buildRailModel, dropAnchor, moveAnchor } from '../lib/projects';
+import { readShowArchived, writeShowArchived } from '../lib/railArchive';
 import type { UngroupedRow } from '../lib/projects';
 import { describeProjectError } from '../lib/api';
 import type { CatalogEntry } from '../lib/api';
@@ -80,6 +82,10 @@ interface Props {
    *  成功后的状态收敛（清当前视图 / 重拉列表）由 useSession.removeSession 负责
    *  ——本组件不碰会话状态，只把用户点的那一行交出去。 */
   onDeleteSession: (sessionId: string) => Promise<SessionDeleted>;
+  /** 归档 / 取消归档一个会话（#171，**可逆**）：resolve `null` = 成功（列表已刷新）；
+   *  否则是**给用户看的原因**（后端 detail 原文）——就地显示在本栏顶部，不弹全局横幅
+   *  （AC9）。可逆动作因此不需要确认面（AC11）：再点一次「取消归档」就是撤销。 */
+  onSetArchived: (sessionId: string, archived: boolean) => Promise<string | null>;
 }
 
 // memo：流式期间本组件 props（sessions/projects/selectedId/titlesById/回调）全部引用
@@ -99,10 +105,24 @@ export const SessionList = memo(function SessionList({
   onStartTask,
   permissionModes,
   onDeleteSession,
+  onSetArchived,
 }: Props) {
   const now = useTickingNow();
+  /** 「显示已归档」开关（#171 AC10）：**视图状态**，持久化到 localStorage 但**不重拉
+   *  列表**——载荷本来就是完整一份（见 `lib/api.ts::listSessions` 的分层说明），
+   *  开关只改投影，所以切换是瞬时的、不闪屏。 */
+  const [showArchived, setShowArchived] = useState(readShowArchived);
   // 「项目有哪些会话」= 账本投影，不另存一份（不变量 #22）。
-  const model = useMemo(() => buildRailModel(sessions, projects), [sessions, projects]);
+  const model = useMemo(
+    () => buildRailModel(sessions, projects, { includeArchived: showArchived }),
+    [sessions, projects, showArchived],
+  );
+  const visibleCount =
+    model.groups.reduce((n, g) => n + g.sessions.length, 0) + model.ungrouped.length;
+  /** 归档条数取**载荷的真值**，不拿 `sessions.length - visibleCount` 推——两者在
+   *  "项目账本占用了同一 id"等边界下会不等（见 `buildRailModel` 的 claimed 占用表），
+   *  而这句话是在向用户陈述事实。 */
+  const archivedCount = sessions.filter((s) => s.archived).length;
 
   // 折叠状态是**视图**状态（不持久化，与 Inspector 折叠同一立场）。
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -180,6 +200,21 @@ export const SessionList = memo(function SessionList({
     );
   };
 
+  /** 归档 / 取消归档一行：失败原因就地显示（`opError` 那条栏），成功后沿用
+   *  `onSetArchived` 里的列表刷新——本组件不碰会话真相，只把用户的意图交出去
+   *  （与 `onDeleteSession` 同一分工）。 */
+  const handleSetArchived = async (sessionId: string, archived: boolean) => {
+    setOpError(await onSetArchived(sessionId, archived));
+  };
+
+  const toggleArchived = () => {
+    setShowArchived((prev) => {
+      const next = !prev;
+      writeShowArchived(next);
+      return next;
+    });
+  };
+
   const showEmpty = sessions.length === 0 && projects.length === 0;
 
   return (
@@ -200,6 +235,17 @@ export const SessionList = memo(function SessionList({
           </div>
         ) : (
           <div className="session-list-actions">
+            {/* #171：「显示已归档」——`aria-pressed` 是开关的语义（不是两个动作按钮），
+                按下态给 accent 色（CSS）。icon-only 与本栏其余动作一致。 */}
+            <button
+              className={`icon-btn rail-archived-toggle${showArchived ? ' on' : ''}`}
+              aria-pressed={showArchived}
+              onClick={toggleArchived}
+              aria-label="显示已归档会话"
+              title="显示已归档会话（归档只改列表可见性，不删任何东西）"
+            >
+              <Archive size={14} />
+            </button>
             <button
               className="icon-btn"
               onClick={() => setCreateOpen(true)}
@@ -241,6 +287,20 @@ export const SessionList = memo(function SessionList({
 
       <div className="session-items">
         {showEmpty && <div className="empty-hint">暂无会话，提交任务即可开始。</div>}
+        {/* 不是真空态，但开关把**每一行**都收起来了——必须说清楚，否则侧栏看起来像坏了
+            （且给出去处：顶部那个开关）。
+            两个守卫都不能省：
+            - `sessions.length > 0`：项目已注册但还没有任何会话时 `visibleCount` 同样是 0，
+              不加这条会渲染出「0 条都已归档」——把"没有会话"说成"都归档了"（不变量 #21）。
+            - `!showArchived`：开关已经开着还提示"点开关查看"，指向一个已经按下的按钮。
+            数字取真正归档的条数而不是 `sessions.length`：后者把未归档但也看不见的行
+            （理论上不存在的状态）也算进去，是在替数据说话。 */}
+        {!showEmpty && sessions.length > 0 && !showArchived && visibleCount === 0 && (
+          <div className="empty-hint">
+            没有可见的会话：{archivedCount} 条都已归档。点侧栏顶部的
+            <Archive size={12} aria-hidden="true" /> 图标查看。
+          </div>
+        )}
 
         <section className="rail-section" aria-label="项目">
           {projects.length > 0 ? (
@@ -397,6 +457,9 @@ export const SessionList = memo(function SessionList({
                             }
                             onDropRow={(before) => handleDrop(project.id, before)}
                             onDelete={setDeletingSession}
+                            onSetArchived={(sessionId, archived) =>
+                              void handleSetArchived(sessionId, archived)
+                            }
                           />
                         ))}
                         {dropEnabled && rows.length > 0 && (
@@ -482,6 +545,9 @@ export const SessionList = memo(function SessionList({
                 onDragOverRow={() => undefined}
                 onDropRow={() => undefined}
                 onDelete={setDeletingSession}
+                onSetArchived={(sessionId, archived) =>
+                  void handleSetArchived(sessionId, archived)
+                }
               />
             ))}
           </div>
@@ -566,6 +632,9 @@ interface RowProps {
   onDropRow: (before: string) => void;
   /** 打开本行的硬删确认面（真正删在前端最上层的 onDeleteSession 里）。 */
   onDelete: (target: DeleteSessionTarget) => void;
+  /** 本行归档 / 取消归档（#171）。真正落库在 App 侧的 onSetArchived 里；
+   *  本组件只转交意图，不碰会话真相。 */
+  onSetArchived: (sessionId: string, archived: boolean) => void;
 }
 
 function SessionRow({
@@ -589,6 +658,7 @@ function SessionRow({
   onDragOverRow,
   onDropRow,
   onDelete,
+  onSetArchived,
 }: RowProps) {
   const inProject = projectId !== null;
   const index = ledger.indexOf(s.session_id);
@@ -634,6 +704,17 @@ function SessionRow({
           <div className="session-item-meta num">
             {s.event_count} 事件 · {formatRelativeTime(s.last_event_time, now)}
           </div>
+          {/* #171：「已归档」徽标。只有打开「显示已归档」时这一行才会被渲染出来
+              （默认视图里已归档行整个不渲染，见 buildRailModel），所以徽标是**这一行
+              此刻的唯一解释**：它不是被删了、也不是日志丢了，只是收起来了。 */}
+          {s.archived && (
+            <div
+              className="session-item-archived"
+              title="已归档：默认从列表收起，事件日志与项目归属都原样保留"
+            >
+              已归档
+            </div>
+          )}
           {s.staleProject && (
             <div
               className="session-item-stale"
@@ -689,6 +770,18 @@ function SessionRow({
                 </DropdownMenu.Item>
               </>
             )}
+            <DropdownMenu.Separator className="rail-menu-sep" />
+            {/* #171：归档 / 取消归档（**可逆**，不是删除）。位置在项目动作之后、硬删
+                之前——两者之间隔着一个分隔符与整整一组动作，是刻意的：点错"收起来"
+                只是少看一行，点错"删掉"不可恢复。可逆动作**不做二次确认**（AC11），
+                失败就地报错（`opError` 那条栏），撤销 = 再点一次「取消归档」。
+                文案随行的真值切换（`s.archived`），不是两个按钮。 */}
+            <DropdownMenu.Item
+              className="rail-menu-item"
+              onSelect={() => onSetArchived(s.session_id, !s.archived)}
+            >
+              {s.archived ? '取消归档' : '归档'}
+            </DropdownMenu.Item>
             <DropdownMenu.Separator className="rail-menu-sep" />
             {/* 硬删（#172 / ADR-0029）——两分支共用、永远最后一项：不可恢复的动作
                 不夹在"上移/加入项目"中间，位置本身就是一道缓冲。

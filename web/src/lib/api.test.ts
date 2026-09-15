@@ -7,6 +7,7 @@ import {
   createProject,
   deleteMemory,
   deleteProject,
+  archiveSession,
   deleteSession,
   describeMemoryError,
   describeSessionError,
@@ -18,6 +19,7 @@ import {
   listMemories,
   listProjects,
   listSessions,
+  unarchiveSession,
   MemoryError,
   NotFoundError,
   ProjectError,
@@ -181,6 +183,7 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url / WS-3 #1
     trace_id: 'tr-1',
     trace_url: 'https://lf.example/trace/tr-1',
     workspace: { id: 'w1', title: '项目甲' },
+    archived: false,
   };
 
   it('原样保留 trace_url（fetch 层不重排/不丢键/不重命名）', async () => {
@@ -883,5 +886,71 @@ describe('getArtifactContent — artifact 切片解析（#185/#186，缺字段�
     await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
     captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', total_lines: 0, returned_lines: 0 });
     await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+  });
+});
+
+describe('会话归档（#171）—— 请求形状与错误文案', () => {
+  /* 三条口径：
+  1. 默认**不带** `include_archived`（后端默认 false 才是权威过滤；前端显式要求 true
+     是另一个决定，见 `listSessions` 的注释）；
+  2. 归档/取消归档的动词分开（POST / DELETE 同一路径），回执 `{id, archived}` 原样透传；
+  3. 409 的 detail 是三种原因里**唯一可区分**的东西，必须原样上抛——编文案会把
+     "运行中的会话不能归档"说成一个泛泛的失败。 */
+
+  it('listSessions 默认不带 include_archived；显式 true 时带 ?include_archived=true', async () => {
+    const { calls } = captureFetch(200, []);
+    await listSessions();
+    expect(calls[0].url).toBe('/api/sessions');
+
+    const second = captureFetch(200, []);
+    await listSessions({ includeArchived: true });
+    expect(second.calls[0].url).toBe('/api/sessions?include_archived=true');
+  });
+
+  it('archiveSession → POST /api/sessions/{id}/archive，回执 archived:true', async () => {
+    const { calls } = captureProjectFetch(200, { id: 's/1', archived: true });
+    const result = await archiveSession('s/1');
+
+    expect(calls[0].url).toBe('/api/sessions/s%2F1/archive');
+    // 动词是契约的一部分，不是风格：后端**只在归档方向**挡 409 在途 run
+    // （`service.py::set_archived` 的守卫是 `archived and get_active(...)`），
+    // 所以"哪个动词走哪条路"必须被断言，而不是靠"两个函数名不同"推出来。
+    expect(calls[0].method).toBe('POST');
+    expect(result).toEqual({ id: 's/1', archived: true });
+  });
+
+  it('unarchiveSession → DELETE 同一路径，回执 archived:false', async () => {
+    const { calls } = captureProjectFetch(200, { id: 's1', archived: false });
+    const result = await unarchiveSession('s1');
+
+    expect(calls[0].url).toBe('/api/sessions/s1/archive');
+    expect(calls[0].method).toBe('DELETE');
+    expect(result).toEqual({ id: 's1', archived: false });
+  });
+
+  it('回执的 archived 是权威：与请求意图相反时照抄回执，不"纠正"成意图', async () => {
+    // 幂等重放 / 并发下后端可能回一个与请求方向不同的真值（别人已经归档过了）。
+    // 这里锁的是「回执说了算」——前端若拿请求意图覆盖它，界面就会显示一个假状态。
+    captureProjectFetch(200, { id: 's1', archived: false });
+    await expect(archiveSession('s1')).resolves.toEqual({ id: 's1', archived: false });
+  });
+
+  it('回执缺 archived 布尔 → 抛（不拿请求意图补），并带上诊断信息', async () => {
+    // "200 但形状不对"必须说话：用请求意图填进去会把"后端没确认"伪装成"确认了"。
+    captureProjectFetch(200, { id: 's1' });
+    await expect(archiveSession('s1')).rejects.toThrow(/归档回执缺少 archived 布尔/);
+    await expect(archiveSession('s1')).rejects.toThrow('请求意图 true');
+  });
+
+  it('409（运行中）→ 抛 SessionError，message 是后端 detail 原文', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ detail: '运行中的会话不能归档' }), { status: 409 }),
+      ),
+    );
+    await expect(archiveSession('s1')).rejects.toThrow('运行中的会话不能归档');
+    expect(describeSessionError(new Error('x'), '归档失败')).toBe('x');
   });
 });

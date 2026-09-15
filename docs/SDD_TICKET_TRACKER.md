@@ -974,6 +974,7 @@ keydown 之后还要对同一元素补发 keyup——元素已不在就会重新
 - **#181**：窄屏的 ⋯ 依赖 `hover` / `focus-within` 让位——**触摸设备**（无 hover、iOS 上
   `button` 默认不聚焦）可能仍然拿不到菜单。会话级（FE-R11-09）与项目级（#179）同款问题，
   已开票等产品裁决（推荐 `@media (hover: none)` 下常显 ⋯）。
+  → **已修**：第二十三轮（按推荐方案 1 落地，纯 CSS + 触摸 e2e 锁）。
 
 **两轴 code-review（Standards + Spec）结论**：Standards 轴 1 条硬 finding（spec §3 仍写死
 "38 = 36 + 2" 与仅广播名单，与"不再手工维护枚举"的前提自相矛盾）→ 已改为"以生成物为准"并写明
@@ -1543,3 +1544,244 @@ bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门�
 - 移交集成 AI：先 `feat/backend` → `main`（#185 的路由只在那条分支，否则前端"查看完整
   内容"404），再 `feat/frontend` → `main`，然后按集成提示词冒烟。
   提示词：`docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md`。
+
+## 第二十二轮：#193（2026-09-14，跨端：后端 `21f5427` + 前端在途记录）
+
+票：#193「GET /api/capabilities 未声明 changes/terminal：中心列两个新面在真实部署里不可达」。
+上一轮把它标为「保持 OPEN（后端声明侧）」——本轮后端做完了，前端这一半是**跟着改载荷口径**。
+
+### 后端那一半（`feat/backend`，commit `21f5427`，本仓看不到）
+
+新增 `capability/manifest.py`：条目形状与保守默认收敛到唯一一份 `manifest_entry()`，
+并补一条 `id="core"` / `provider="builtin"` 的条目由端点**恒发且排在最前**——
+`changes`/`terminal` = true（产它们的 `write`/`edit`/`apply_patch`/`bash` 在
+`assembly.build_runtime` 里无条件注册），`artifacts` = false（要部署配了 store 才读得到），
+`actions` 如实（permissions/stop/resume = true 对应三个真路由，retry = false）。
+票面方向 2（给插件 descriptor 填 `surfaces`）被否：那两个面不由任何插件产出，挂上去是假话。
+
+### 前端改了什么（8 文件，+142 / -55；**运行时代码零行为改动**）
+
+1. **e2e 改吃真实默认载荷**（`fixtures.ts` 新增 `CORE_CAPABILITY`，逐值镜像后端的
+   `manifest.py`；`routeApi` 的 capabilities 缺省从 `[]` 改为 `[CORE_CAPABILITY]`）：
+   - `workspace-modes.spec.ts` AC2/AC3 → 「真实默认 → `['Chat','文件/改动','输出']`」；
+     新增 `capabilities: []` 一条覆盖"目录真的为空"（老后端 / 降级路径）；
+     AC4 用真实默认 + 调用计数证明端点确实被消费；
+     新增并集语义用例（core + 插件全 false → 三面仍在）。
+   - `x-output-panel.spec.ts` / `z-changes-panel.spec.ts`：去掉注入，走真实默认。
+   - AC6 的**逐面独立矩阵**保留：故意不含 core，否则 `changes`/`terminal` 无法互不牵连地验。
+2. **`m-stream-affordances.spec.ts` 的严重模式冲突**（本票在前端唯一一处真会被卡住的修）：
+   `ToolOutputStream` 是对话卡与「输出」面共用的那一个渲染器（#190 AC9），#193 之后
+   「输出」面在默认载荷下真的存在了，而它带同一个工具的一份输出（`App.tsx` 的 `hidden`
+   面板，不卸载）⇒ 裸类名 `.tool-out-body` / `.tool-out-wrap-btn` / `.tool-out-jump`
+   同时命中两处（strict mode 报两个元素），而藏起来那份 `scrollHeight === 0`，
+   "容器必须可滚动"的前置断言会**假失败**。三条 locator 按面板 id 收窄到
+   `#workspace-panel-chat`（本用例要验的就是对话里那张工具卡）。
+   顺带订正 `ToolCard.tsx:301` 那条 #190 之后已过期的行号引用。
+3. **注释/文档订正**：`capabilities.ts` / `api.ts` / `capabilities.test.ts` 里指向后端的
+   **行号引用**被本票重写端点时作废 ⇒ 改成函数名/模块名（跨仓行号必漂移，本仓既有惯例就是
+   `web/app.py::SessionSummary` 这种写法）。`CORE_CAPABILITY` 的漂移说明改成如实口径。
+
+### 双轴 code-review（findings 全部处理）
+
+- **Standards ①** `x-output-panel.spec.ts` 一处**孤儿 JSDoc**：它描述的"不注入声明"那组用例
+  已被删掉，注释现在贴在 `DISABLED` 上方、与自己正下方那条自相矛盾 ⇒ 合并重写。
+- **Standards ②** 三处 e2e 注释自称"**端到端证明**"是过头话：Playwright 拦了
+  `/api/capabilities`，**请求不出网**，它证不了"后端真发 core"⇒ 改为如实口径（锁的是
+  **前端消费侧**；后端那一半由 `tests/web/test_web_phase2_endpoints.py::TestCapabilities`
+  真走 HTTP 端点锁）。
+- **Standards ③** 后端 `app.py` 的"条目形状只定义一次"是**跨仓**口吻 ⇒ 后端侧收窄为
+  "后端一份 + 前端镜像"，并点名两端各自的守卫测试（后端那半已同步改）。
+- **Spec ④（AC2 部分达成，记为残余）**："用真后端形状的载荷"只能做到**逐值镜像**——
+  跨仓无共享来源，**后端改值前端测试不会红**。`fixtures.ts` 已把这条链"为什么断、由谁守"
+  写清楚；集成提示词把它列为"合并后按真实端点人工对齐"的必做项。
+- **Spec ⑤（AC4 语义已被并集改变，不当作退化）**：core 恒在 + 前端取并集 ⇒ 插件写
+  `changes: false` 不再能让面消失。那是"这个插件不产出"而非"会话产不出"。闸门仍由
+  **不含 core 的载荷**证明（`capabilities: []` → 只剩 Chat；AC6 逐面矩阵）。正确读法已写进
+  后端 `ACCEPTANCE_LANE_ENV.md` §2，避免验收方照旧票面文字误判。
+- **Spec ⑥**：声明是**部署级**不是 profile 级（端点无 session 上下文，读不到 `tool_scope`；
+  某 profile 收窄掉 `bash` 时「输出」面仍出现空态而非消失）⇒ 有意取舍 + 另开票，已记文档。
+
+### 门禁（前端，串行跑；后端全量 pytest 不与其并发——已知资源竞争型抖动）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 干净 |
+| `npx oxlint` | **0 error** / 44 warnings（全部既有类别） |
+| `npx vitest run` | **813 passed / 48 files** |
+| `npx playwright test --workers=2` | **306 passed**（6.1m；修 2 条 strict-mode 冲突前是 304 passed / 2 failed） |
+| `npx vite build` | 绿 |
+
+### 关单与移交
+
+- **#193 前后端都完成** ⇒ 按 §14.12 关单：comment 写明两端分支（`feat/backend` /
+  `feat/frontend`）与 commit（`21f5427` / `127ecc3`），注明合并由集成 AI 执行。
+- **本批（#193）的集成提示词是后端那份**：
+  `D:\intelligence-agent-backend\docs\INTEGRATION_PROMPT_193_CAPABILITY_SURFACES.md`
+  （跨端，含合并顺序、真端点验收、两条必须传下去的口径、风险 1 的同类隐患提示）。
+- 上一轮（#183 / #186 / #189）的提示词 `docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md` 仍然有效，
+  但它里面"#193 未完成 ⇒ 两个面用户看不到"的告警**在本票合并后作废**。
+
+## 第二十三轮：#181（2026-09-14，前端侧 · 在途记录）
+
+票：#181「[窄屏+触摸] ⋯ 菜单依赖 hover/focus-within：≤820px 触摸设备上会话级与项目级
+操作可能仍不可达」。来源是第十一轮修复的两轴 review residual（FE-R11-09 / #179 的
+触摸盲区）。**纯前端、纯 CSS**，无 JS 改动。
+
+**交付**：`5f3a18e`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。
+
+### 做了什么
+
+`@media (max-width: 820px) and (hover: none)`（issue 推荐方案 1）：⋯ 常显，装饰性的
+会话点 / 文件夹图标退到背景。鼠标档（`hover: hover`）与 >820px **零变化**。
+让位用 `opacity: 0` 而非 `display: none`——`.session-item-dot` 是行里唯一的在流内容，
+抽掉它这一行连同可点面积一起塌（既有注释记录过 "24px → 9px"）。
+
+两个**状态**信号在触摸档修复前本来是**可见**的（绿点 / 黄三角），跟着槽位一起消失
+就是一次信息丢失 ⇒ 改挂在 ⋯ 的颜色上（`:has()` 取同一行里的状态类）：
+`session-item-dot-live` → `--success`；`rail-project-warn` → `--warning`。
+刻意**不**复用 `breathe`（会把槽里唯一的入口周期性淡到 .55，与"提升可发现性"抵消）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/styles/app.css` | 新增 `@media (max-width: 820px) and (hover: none)` 块（+40，含取舍与代价的注释） |
+| `web/e2e/touch-rail.spec.ts`（新） | 2 条 × 2 视口；`hasTouch + isMobile` 触摸上下文 |
+| `web/e2e/fixtures.ts` | `rowOf` 收敛到共享处（w-session-delete 同步改用，不再各留一份） |
+| `docs/E2E_SCENARIO_MAP.md` | 计数校准（见下）+ 新场景行 |
+
+### 门禁（全绿，串行跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 干净 |
+| `npx vitest run` | **813 passed / 48 files** |
+| `npx oxlint` | **0 error / 44 warnings**（全为既有类别，本票新增 0） |
+| `npx playwright test --workers=2` | **310 passed**（8.2m；上一轮 306 ⇒ +4 = 新 spec 2 条 × 2 视口） |
+| `npx vite build` | 绿 |
+
+### 测试强度（变异验证，不是"看起来绿"）
+
+| 变异 | 结果 |
+| --- | --- |
+| 把新 `@media` 块改成永不匹配（= 修复前） | 两条用例**都红** |
+| 只删两条 `:has()` 状态色规则 | 状态信号那条红 |
+| 让位改 `opacity: 0` → `display: none` | "点必须仍在布局里"那条红 |
+
+修复前首次跑就是红的（`opacity` expected "1" / received "0"）——这正是选这个断言的
+理由：Playwright 的可见性判据**不看 `opacity`**，`opacity: 0` 的元素 `tap()` 照样命中，
+所以"点得到"从来不是缺口，"看不见"才是（AC1 的"触发"按**可见性**验）。
+
+### 两轴 code-review 的处置（1 项硬 + 6 项 judgement，全部落地）
+
+| finding | 处置 |
+| --- | --- |
+| **硬**：`E2E_SCENARIO_MAP.md` 的计数与场景表未随测试增删更新（该文件自己写了这条规矩） | 校准为命令输出的口径（vitest 813/48、playwright 310 = 155×2 / 36 spec），补新场景行，并把漂移史续到"第五次" |
+| **硬**：本票完成未记 tracker | 本轮（本段）+ 关单 comment + 集成提示词 |
+| **judgement**：`rowOf` 从 `w-session-delete` 复制而来（本仓 fixtures 顶部写明"多个 spec 共用同一份，避免各自复制后静默漂移"） | 收敛到 `fixtures.ts`，两处 spec 共用 |
+| **judgement**：`style()` 的联合类型里有没人用的 `backgroundColor` | 删掉；顺带把两个 helper 命名改实（`computedStyle` / `resolveToken`） |
+| **judgement**：新块与 820 块重复声明同一批选择器（未来改动要改两处） | **保留**（两块编码的是**不同状态**：hover 驱动的交换 vs 无 hover 的常显），但补一句"本块只管谁在槽里，定位与节奏仍归上面那块" |
+| **judgement**：e2e 文件没有字母前缀，违反 `E2E_SCENARIO_MAP.md` 的命名注意 | **不成立**：该文件的"命名注意"说的是**字母前缀=增量序号**（与场景字母 A–I 不是一套），且仓内已有 8 个无前缀 spec（`workspace-modes` / `context-providers` / `continuation` …），本票随既有的一支 |
+| **Spec**：状态等价不成立（选中行的点其实是 accent；颜色比实心圆点弱）；`breathe` 加在唯一入口上适得其反 | 见上：只借颜色、去掉呼吸；取舍与"不是等价替换"如实写进 CSS 注释与集成提示词 §3 |
+
+### 如实划下的三条残余（都在集成提示词 §3/§4 传下去）
+
+1. **身份可辨认性变弱**：触摸档两层只剩同一个 ⋯ 芯片，"这是会话还是项目"比"点 vs
+   文件夹"更难分辨——issue 收尾要求确认的正是这一点；按方案 1 落地，未自行改槽位模型
+   （issue 写明这类改动要一次性定案）。
+2. **宽屏触摸（≥820px）与"主指针是鼠标 + 有触摸屏"的设备**仍够不到 ⋯：AC1 字面就是
+   `(max-width: 820px) and (hover: none)`，本票没动；`(hover: none)` 只看**主指针**。
+3. **窄屏行只有 29px 宽、⋯ 芯片 20px 压住中央** ⇒ "点行中央选会话"不可用。这是**修复前
+   就有**的既成事实（`elementFromPoint` 实测：`opacity: 0` 的 ⋯ 照样接收指针事件，
+   所以修复前点行中央会开一个**看不见**的菜单，反而更怪）；本票只是把它变成看得见的
+   入口，没有引入这个重叠。要真修得改槽位模型（行不再收缩成内容宽），建议与 ① 一起定案。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
+集成提示词见 `docs/INTEGRATION_PROMPT_181_TOUCH_RAIL.md`。
+
+---
+
+## 第二十四轮：#171（2026-09-14，跨端：后端 `9e4adc0` + `2b4e677` + 前端在途记录）
+
+票：#171「会话归档：让用户能整理会话列表（归档/取消归档 + 列表过滤）」。跨端票，
+后端半先做（票内顺序），前端半即本轮。
+
+**交付**：`7d6ebb7`（`feat/frontend`，本地 commit，**未合入 main、未 push**）。
+后端半：`feat/backend` `9e4adc0`（实现）+ `2b4e677`（本票 review 追加的 detail 逐字锁）。
+
+### 一条不能"顺手改"的分层决策（先说，因为它长得像冗余）
+
+**载荷始终要完整一份**（`listSessions({ includeArchived: true })`），可见性过滤只发生在
+**投影层**（`buildRailModel` 的 `includeArchived`）；开关**不**重拉列表。
+
+- 若改成"开关驱动请求"（关着就不请求归档行），切换要等一次 round-trip、两次响应之间
+  列表是两套真相（不变量 #22），而且**归档的项目成员会从载荷里消失**——`buildRailModel`
+  只能把它算成 `missing`，界面就会对一条日志好端端躺在磁盘上的会话说「会话日志缺失」。
+- 后端默认（不带参数不返回归档行）**一个字没动**：那是给其他客户端的默认，与"这份 UI
+  要自己过滤"不冲突。前端显式请求全量，是把这句话写进请求而不是靠后端猜。
+
+### 做了什么
+
+| 文件 | 内容 |
+| --- | --- |
+| `web/src/types.ts` | `SessionSummary.archived: boolean`（**必填**，与后端 schema 同形）+ `SessionArchived` 回执 |
+| `web/src/lib/api.ts` | `listSessions({includeArchived})`；`archiveSession`(POST) / `unarchiveSession`(DELETE)；回执形状防御（缺 `archived` 布尔就抛，**不拿请求意图补**——那是伪造确认） |
+| `web/src/lib/projects.ts` | `buildRailModel(..., {includeArchived})`：**被开关藏起来的行不算 `missing`**（`byId` 建在全量载荷上） |
+| `web/src/lib/railArchive.ts`（新） | 「显示已归档」的 localStorage 读写（`ahi.showArchived`，`'1'` 才算开，异常一律回默认——不能在隐私模式里白屏） |
+| `web/src/components/SessionList.tsx` | kebab 新增「归档/取消归档」（文案随行真值切换；在项目动作之后、硬删之前）；icon 开关（`aria-pressed`）；「已归档」徽标；失败就地报错；空态提示只说真话 |
+| `web/src/hooks/useSession.ts` | `setArchived`（**不动视野**，与硬删的 `convergeAfterDelete` 刻意相反）+ `refreshSessions` 返回是否成功 |
+| `web/src/App.tsx` | `handleSetArchived`：失败原因交回侧栏就地显示（不走流级 `error` 横幅） |
+| `web/e2e/archived.spec.ts`（新） | 6 条 × 2 视口（见下） |
+| `web/e2e/fixtures.ts` | 归档分支（有状态、幂等、409 只在归档方向）+ `GET /api/sessions` 按真语义过滤 `include_archived` + `sessionsListFailAfter` |
+| `docs/E2E_SCENARIO_MAP.md` | 计数校准 + 新场景行 |
+
+### 门禁（全绿，串行跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc -b` | 干净 |
+| `npx vitest run` | **827 passed / 49 files** |
+| `npx oxlint` | **0 error / 44 warnings**（按文件与 HEAD 逐一比对：改动文件新增 0） |
+| `npx playwright test --workers=2` | **322 passed**（8.4m；`--list` 同口径 322 = 161×2 / 37 spec） |
+| `npx vite build` | 绿 |
+| 后端（`feat/backend`，本仓不可见） | `ruff check` clean；全量 pytest **2260 passed / 2 skipped / 0 failed** |
+
+### 测试强度（变异验证，不是"看起来绿"）
+
+| 变异 | 结果 |
+| --- | --- |
+| `listSessions()` 漏掉 `includeArchived` | 「默认收起」那条**红**（归档行永不出现——前端本地过滤救不了） |
+| 被开关过滤掉的行也算 `missing`（= 本票修掉的假话） | 缺失计数那条**红**（`2 条` vs 期望 `1 条`） |
+| 归档后 `selectSession(null)`（= 把视野拽走） | 「不影响正在阅读的会话」那条**红** |
+
+e2e 里"归档行不算缺失"必须带反向对照（账本里放一个**真**不存在的 id）：否则
+`missing === 0` 与"根本没算过"同形。
+
+### 两轴 code-review 的处置（Standards 4 + Spec 5，全部落地）
+
+| finding | 处置 |
+| --- | --- |
+| **Spec（本票真正的跨端回归）**：`l-auth-banner.spec.ts` 的路由 glob `**/api/sessions` 是**整串**匹配，配不上新增的 `?include_archived=true` ⇒ 该用例静默走 200 分支、401 横幅永不出现 | 改 `**/api/sessions*`（`*` = `[^/]*`，只多吃查询串，不会吞 `/api/sessions/{id}/…`），并在注释里写明为什么这个 `*` 不是装饰 |
+| **两轴都提**：空态提示在"项目已注册但还没有任何会话"时渲染「0 条都已归档」——把"没有会话"说成"都归档了"；且指向一个**屏幕上不存在**的文案（开关是纯图标） | 加两个守卫（`sessions.length > 0` / `!showArchived`），数字改用**真的**归档条数，文案改指"侧栏顶部的图标"；e2e 补一条（含"项目在但无会话时不出声"） |
+| **Spec**：归档写成功但随后列表重拉失败 → 静默（行还是旧状态，用户以为没生效） | `refreshSessions` 返回是否成功；`setArchived` 刷新失败就**抛**（就地说明"已生效但没刷新出来"）；e2e 用 `sessionsListFailAfter` 构造该窗口 |
+| **Spec**：两个动词的差别只有 e2e 锁着，单测断不了 POST vs DELETE | 单测改用记 method 的 capture helper，并补"回执是权威"（与请求意图相反时照抄回执）与"缺布尔就抛"两条 |
+| **Spec**：前端 e2e fixture 逐字复制后端 404/409 detail，但后端只断状态码 ⇒ 后端改词两侧各自绿着漂开 | 后端追加逐字断言（`2b4e677`）——由后端自己的测试锁，跨仓没有更便宜的单一来源 |
+| **Standards**：`readArchiveReceipt` 的 `expected` 参数只进诊断串却像在校验 | 改名 `requestedArchived` + 注释写明"回执是权威、这里不校验相等" |
+
+未采纳（有据）：`.rail-error` 在窄屏被 `display:none` 时不改——属既有的窄屏降级清单
+（`.rail-project-missing` 同组），见残余 ①。
+
+### 如实划下的残余
+
+1. **窄屏 / 触摸档的失败报错看不见**：`@media (max-width: 820px)` 里 `.rail-error` 是
+   `display: none`（WS-5 的既成降级）。#181 刚把 ⋯ 在触摸档变可达 ⇒ 现在窄屏用户**能**
+   触发归档、但失败时看不到那句话。要真修得先定案窄屏的槽位/降级模型（与 #181 残余
+   ①② 同一批决策，不在本票内自己拍）。
+2. **AC11 的可选「轻量提示 + 撤销」没做**：票面写的是"**可**在成功后给一次轻量提示 +
+   撤销"，不是必须；撤销路径存在，入口是菜单里的「取消归档」。
+3. **跨仓文案同源靠两侧各自断言**：后端 `2b4e677` 与前端 e2e fixture 各锁一份原句，
+   没有单一来源（跨仓的代价，已在两侧注释里指明）。
+4. **`/stream` 未在归档态下被 e2e 覆盖**：后端 AC5 已有契约测试（归档后 events /
+   resume / fork / lineage 照旧），而 stream 不读 `session_meta`；属联调车道可补项。
+
+**交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
+集成提示词见 `docs/INTEGRATION_PROMPT_171_SESSION_ARCHIVE.md`（在 `feat/backend`，与后端半
+同一份——跨端票合成一个入口，含合并顺序、契约要点与残余）。

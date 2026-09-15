@@ -31,7 +31,10 @@ import {
   type SurfaceKey,
 } from './capabilities';
 
-/** 后端 `GET /api/capabilities` 的条目（形状 = `web/app.py:934-943`）。 */
+/** 后端 `GET /api/capabilities` 的条目（形状 = `capability/manifest.py::manifest_entry`）。
+ *
+ *  `surfaces` 这里写成局部字典——真实条目恒带全部五个键（后端统一补齐），但前端解析
+ *  必须能扛住缺键（老后端 / 未来裁剪），所以 fixture 刻意保留"只写一部分"这条路径。 */
 function capability(surfaces: Partial<Record<SurfaceKey, boolean>>, id = 'coding') {
   return {
     id,
@@ -45,7 +48,7 @@ function capability(surfaces: Partial<Record<SurfaceKey, boolean>>, id = 'coding
 
 describe('#182 AC4：声明键与可见名的登记', () => {
   it('中心列能承载的键都有登记，且只登记一次', () => {
-    // 后端 `app.py:922-927` 声明的五个键（少登记一个就会有声明被静默丢弃）。
+    // 后端 `capability/manifest.py::CORE_SURFACES` 声明的五个键（少登记一个就会有声明被静默丢弃）。
     expect([...SURFACE_KEYS].sort()).toEqual(
       ['artifacts', 'changes', 'chat', 'terminal', 'timeline'].sort(),
     );
