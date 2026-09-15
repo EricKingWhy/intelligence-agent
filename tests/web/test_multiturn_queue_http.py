@@ -111,19 +111,42 @@ async def _collect_stream(port: int, method: str, path: str,
 async def _completed_session(port: int, task: str = "首轮") -> dict:
     """创建一个跑完的会话，返回 {session_id, frames}。
 
-    ⚠ run/completed 帧到达后 run 的收尾 await 还在跑——此刻 flush / messages
-    会撞 ActiveRunConflict（终态驱动同款守卫）。调用方需要立刻投递时先
-    `_wait_idle`。
+    ⚠ run/completed 帧到达后 run 的收尾还在跑（`_drive` finally 才置终态旗标），
+    此刻 flush / messages 会撞 ActiveRunConflict；且该 run 的终态回调还会把
+    "此时才入队"的输入接力掉。需要确定性的「无 run」起点请用 `_empty_session`。
     """
     frames = await _collect_stream(port, "POST", "/api/sessions", {"task": task})
     assert frames and frames[-1]["type"] == "run/completed"
     return {"session_id": frames[0]["session_id"], "frames": frames}
 
 
+async def _empty_session(port: int) -> str:
+    """建一个**空会话**（launch=false，不启动 run），返回 session_id。
+
+    「重启后 flush」类用例需要这样一个起点：会话只有 `session/started`、
+    没有任何在途或已终结的 run。原因见 `test_get_queue_and_flush_roundtrip`
+    的说明——若先跑一个 run 再手工写 queued 事件，会与那个 run 收尾回调的
+    接力行为竞争。空会话没有回调可竞争，是确定性的。
+    """
+    import httpx2
+
+    async with httpx2.AsyncClient(timeout=30) as client:
+        # body 必须是 {}（不是 None）：task 字段可省略，但 CreateSessionRequest
+        # 本身是必填 body，json=None 会被 FastAPI 判 422 missing body。
+        response = await client.post(
+            f"http://127.0.0.1:{port}/api/sessions?launch=false", json={}
+        )
+    assert response.status_code == 200, response.text
+    return response.json()["session_id"]
+
+
 async def _wait_idle(port: int, session_id: str, *, timeout: float = 10.0) -> None:
-    """等该会话真正空闲（无在途 run）——轮询 POST /queue/flush：idle 会话 +
-    无待投递输入 → 200 {"status": "idle"}，在途 → 409。idle 回执本身就是
-    "run 已收口"的可靠信号。"""
+    """等该会话**没有待投递输入**——轮询 POST /queue/flush：无待投递 → 200
+    {"status": "idle"}（有则 200 SSE / 在途 409）。
+
+    ⚠ 它**不**证明"没有在途 run"：`deliver_next_undelivered` 先看有无待投递
+    输入，无则直接返回 idle，根本不看 active。所以 idle ≠ RunManager 已摘掉
+    active；需要"run 已彻底收口"的用例不能只靠它（见 `_empty_session`）。"""
     import time
 
     deadline = time.monotonic() + timeout
@@ -134,45 +157,6 @@ async def _wait_idle(port: int, session_id: str, *, timeout: float = 10.0) -> No
         if time.monotonic() >= deadline:
             raise AssertionError(f"超时 {timeout}s：会话 {session_id} 未空闲")
         await asyncio.sleep(0.05)
-
-
-async def _flush_stream(port: int, session_id: str, tmp_path, *, timeout: float = 10.0) -> list[dict]:
-    """一次性流式 flush（**不得**先用 _post 探测）。
-
-    探测为什么禁止：flush 的 200 是 SSE 流（launched 语义），_post 会把流头
-    消费掉、开出的 run 没有消费者——虽然 run 本身会跑完（detached），但测试
-    断言"flush 的流被消费"就落空了。所以空闲判定改读**事件流**（run 终态
-    落盘 + 无在途接力），空闲后一次性用流式客户端 flush。
-    """
-    import pathlib
-    import time
-
-    from agent_harness.session.store import JsonlSessionStore
-
-    # workspace_dir 即 tmp_path：与 Settings 一致（sessions 在 workspace_dir/sessions）
-    store = JsonlSessionStore(root=pathlib.Path(tmp_path) / "sessions")
-    deadline = time.monotonic() + timeout
-    while True:
-        events = store.read_events(session_id)
-        terminals = [
-            e for e in events if e.type in ("run/completed", "run/failed")
-        ]
-        # 空闲 = 已有终态 run 且最后一个终态之后没有接力 run 的 user/message
-        # （接力 run 会先写 user/message 再写 run/started——终态之后无新输入
-        # 才是真正空闲）。简化：终态后没有 user/message。
-        terminal_seqs = {e.seq for e in terminals}
-        if terminal_seqs:
-            last_terminal = max(terminal_seqs)
-            after = [
-                e for e in events
-                if e.seq > last_terminal and e.type == "user/message"
-            ]
-            if not after:
-                break
-        if time.monotonic() >= deadline:
-            raise AssertionError(f"超时 {timeout}s：会话 {session_id} 未空闲")
-        await asyncio.sleep(0.05)
-    return await _collect_stream(port, "POST", f"/api/sessions/{session_id}/queue/flush")
 
 
 # ── T5：supersede 只允许最新一条 / injected 拒绝 ──────────────────────
@@ -336,6 +320,9 @@ async def test_supersede_with_queue_id_still_validated(tmp_path, monkeypatch):
             },
         )
         assert status == 409, f"同传时非最新取代必须仍被拒，实际 {status}: {payload}"
+        # 断言是**取代校验**拒的，不是在途 run 拒的：两个都返回 409，只断言状态码
+        # 会让 ActiveRunConflict 冒充通过（本用例要锁的正是"同传 queue_id 不跳过校验"）。
+        assert "不是最新一条用户消息" in payload.get("detail", ""), payload
 
         # 不留下 superseded 事件（校验失败在投递之前抛）
         events = store.read_events(sid)
@@ -378,6 +365,8 @@ async def test_supersede_injected_message_409(tmp_path, monkeypatch):
             {"content": "改注入消息", "mode": "queue", "supersedes_seq": injected_seq},
         )
         assert status == 409, f"注入消息必须 409，实际 {status}: {payload}"
+        # 同「同传」用例：区分"注入不可编辑"与"在途 run"两种 409。
+        assert "注入的消息" in payload.get("detail", ""), payload
     finally:
         await _shutdown(server, serve_task)
 
@@ -389,21 +378,17 @@ async def test_supersede_injected_message_409(tmp_path, monkeypatch):
 async def test_get_queue_and_flush_roundtrip(tmp_path, monkeypatch):
     """排队中的项 GET /queue 可见；flush 投递一条并返回 SSE 流；空队列 → idle。
 
-    ⚠ 第一个 run 的 `_drive` 收尾窗口会触发 on_run_terminal——此刻 append 的
-    queued 会被它**接力掉**（这正是 T1 的行为，本测试不想测它）。所以先
-    `_wait_idle`（idle 回执 = 终态回调已跑完、没有待投递输入）再 append。
+    起点必须是**空会话**（`launch=false`）：本用例模拟「重启后手工写一条 queued
+    事实，再 flush 投递」。早先版本先跑一个 run 再 append，会与那个 run 收尾
+    回调的接力（§4.5.5：终态驱动自动投递未消费输入）竞争——回调可能在
+    "append 之后、flush 之前"把这条**接力掉**，于是 flush 正确地返回了
+    `{"status":"idle"}`（无待投递），断言却期望 SSE 流。空会话没有在途/已终结
+    run，就没有回调可竞争。
     """
     server, serve_task, port = await _start_server(tmp_path, monkeypatch)
     try:
-        session = await _completed_session(port)
-        sid = session["session_id"]
-        await _wait_idle(port, sid)
+        sid = await _empty_session(port)
 
-        # 建第二个会话作为"在途 run 的宿主"不必要——直接对 completed 会话入队？
-        # 不行：idle 会话发消息直接拉起新 run。入队需要一个在途 run：
-        # 用 gate 模型太重；这里改为直接测"重启重建后 flush"路径——
-        # 先手工写一条未消费的 message/queued 事件（模拟崩溃前的事实），
-        # flush 应当把它投递出去（它读的是事件流，不依赖内存镜像）。
         import pathlib
 
         from agent_harness.session.event import MESSAGE_QUEUED
@@ -420,9 +405,10 @@ async def test_get_queue_and_flush_roundtrip(tmp_path, monkeypatch):
         assert payload["items"][0]["content"] == "重启前的消息"
         assert payload["steers"] == []
 
-        # flush → SSE 流（launched 语义），投递的就是那条（409 = 接力 run 在途，
-        # 轮询重试；重试轮次没开 run，不会双投）
-        frames = await _flush_stream(port, sid, tmp_path)
+        # flush → SSE 流（launched 语义），投递的就是那条
+        frames = await _collect_stream(
+            port, "POST", f"/api/sessions/{sid}/queue/flush"
+        )
         assert frames, "flush 必须返回 SSE 流"
         assert frames[-1]["type"] in ("run/completed", "run/failed")
         user_contents = [
@@ -454,15 +440,13 @@ async def test_get_queue_unknown_session_404(tmp_path, monkeypatch):
 async def test_edit_queued_item_cancel_old_then_queue_new(tmp_path, monkeypatch):
     """编辑排队项 = queue_id 语义：旧项 cancelled + 新项 queued。
 
-    排队需要一个在途 run——用第一个会话入队后立刻对**它**发第二条（仍在途），
-    不行：入队后马上返回。这里改为直接验证：完成会话 + 手工写 queued 事实 +
-    带 queue_id 的请求替换它。
+    起点用**空会话**（同 `test_get_queue_and_flush_roundtrip`）：先跑一个 run 再
+    手工写 queued 事实，会与该 run 收尾回调的接力竞争——回调可能在 append 之后
+    才投递，使这里期待 200 的请求撞上 ActiveRunConflict 409。
     """
     server, serve_task, port = await _start_server(tmp_path, monkeypatch)
     try:
-        session = await _completed_session(port)
-        sid = session["session_id"]
-        await _wait_idle(port, sid)
+        sid = await _empty_session(port)
         import pathlib
 
         from agent_harness.session import Session
