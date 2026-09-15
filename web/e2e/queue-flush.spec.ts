@@ -169,10 +169,73 @@ test('409：在途 run 未收口 → 重试到回执；三次仍 409 → 如实�
   await openWithQueued(page);
   await page.getByRole('button', FLUSH_BUTTON).click();
 
-  await expect(page.locator('.app-error')).toContainText('投递失败：仍有在途 run，稍后再试', {
+  // 后端 detail 原样转述（409 有两个来源：在途 run 未收口 / 需人工裁决的遗留操作
+  // ——只有后端说得清是哪种，前端不替它编一句）
+  await expect(page.locator('.app-error')).toContainText('投递失败：仍有在途 run', {
     timeout: 10_000,
   });
   expect(flushCalls).toBe(3); // 3 次（1s 间隔）——在途 run 收口前不放弃得太早
+});
+
+test('窗外才落定的 409：不得被吞成无反馈（判别是推断，推断错了要如实说）', async ({ page }) => {
+  let wsCalls = 0;
+  await routeApi(page, {
+    sessions: [],
+    events: FIRST,
+    onSessionPost: (route) => fulfillSse(route, FIRST),
+    onQueueGet: (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(QUEUED) }),
+    // 回执比判别窗口（1200ms）晚到：客户端会先当成 launched 去接流，
+    // 随后必须用真实回执纠正自己——404/409/idle 都不能静默。
+    onFlushPost: async (route) => {
+      await new Promise((r) => setTimeout(r, 1_800));
+      return route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: '存在需人工裁决的高风险操作' }),
+      });
+    },
+    onWs: () => {
+      wsCalls += 1;
+      return { frames: [], hasActiveRun: true, ending: 'keep' };
+    },
+  });
+
+  await page.goto('/');
+  await openWithQueued(page);
+  await page.getByRole('button', FLUSH_BUTTON).click();
+
+  // 后端的 detail 原样转述（409 的两个来源——在途 run / 需人工裁决——只有它说得清）
+  await expect(page.locator('.app-error')).toContainText('投递失败：存在需人工裁决的高风险操作');
+  // 那条「以为是 launched」的接流被收掉，不留服务端订阅
+  await expect(page.getByLabel('Agent 任务')).toBeEnabled();
+  expect(wsCalls).toBe(1);
+});
+
+test('窗外才落定的 idle：静默收流（不弹假「连接中断」）', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [],
+    events: FIRST,
+    onSessionPost: (route) => fulfillSse(route, FIRST),
+    onQueueGet: (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(QUEUED) }),
+    onFlushPost: async (route) => {
+      await new Promise((r) => setTimeout(r, 1_800)); // 同样晚于判别窗口
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'idle' }) });
+    },
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+  });
+
+  await page.goto('/');
+  await openWithQueued(page);
+  await page.getByRole('button', FLUSH_BUTTON).click();
+
+  // 迟到的 idle 若被误判成 launched，就会挂着一条空流 → 停摆 → 假「连接中断」。
+  // 这里等足够久（越过程序化重连的 3 次退避）确认什么都没冒出来。
+  await page.waitForTimeout(6_000);
+  await expect(page.locator('.app-error')).toHaveCount(0);
+  await expect(page.locator('.reconnect-banner')).toBeHidden();
+  await expect(page.getByLabel('Agent 任务')).toBeEnabled();
 });
 
 test('404：会话已不存在 → 明确报错，不静默吞掉', async ({ page }) => {

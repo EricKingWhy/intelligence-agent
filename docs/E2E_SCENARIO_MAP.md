@@ -2,18 +2,21 @@
 
 > 车道：`cd web && pnpm exec playwright test`（`npm run test:e2e`）。Chromium 单引擎
 > （grill Q5 批准范围），1280/1920 两档宽度 project。webServer = vite dev（5173），
-> API 由 `e2e/fixtures.ts` 的 page.route 拦截（mock SSE，帧形状 =
-> docs/BACKEND_CONTRACT_STREAMING_UI.md）——**核心矩阵不依赖真后端**。
+> API 由 `e2e/fixtures.ts` 拦截：**HTTP 用 page.route，实时流用 page.routeWebSocket**
+> （#206）——帧形状 = docs/BACKEND_CONTRACT_STREAMING_UI.md，**核心矩阵不依赖真后端**。
+>
+> ⚠ `routeApi` 是 async 且**必须 `await`**：WS 通道的注册漏了 await 不会报错，只会
+> 不生效（界面悄悄走 SSE 降级），spec 会在"看起来跑了"的情况下考错路径。
 
 ## 车道分层（spec 03 §22 尾注）
 
 | 车道 | 内容 | 触发 |
 | --- | --- | --- |
-| vitest 默认 | 纯函数/投影/SSR 契约（827 用例 / 49 文件） | 每次提交；e2e/** 已排除 |
-| Playwright 本骨架 | mock SSE 终态矩阵（322 用例 = 161×2 档，37 个 spec） | `pnpm exec playwright test --workers=2`（手动/夜间） |
+| vitest 默认 | 纯函数/投影/传输契约（**882 用例 / 50 文件**） | 每次提交；e2e/** 已排除 |
+| Playwright 本骨架 | mock HTTP + WS 终态矩阵（**364 用例 = 182×2 档，41 个 spec**） | `pnpm exec playwright test --workers=2`（手动/夜间） |
 | 联调车道 | 真模型、鉴权、流式中间态、长稳 | 后端集成后（spec 03 §21 完整矩阵） |
 
-> 计数随测试增删同步更新——漂过六次（351→430→443→472→813→827 / 12→80→86→310→322，最近一次是 #171 顺手校准），改测试时顺手改这里。
+> 计数随测试增删同步更新——漂过七次（…→827→882 / …→322→364，最近一次随 #205/#206 的 WS 迁移校准），改测试时顺手改这里。
 > 口径以命令输出为准：`npx vitest run` 的 `Tests` 行与 `npx playwright test --list` 的条数。
 
 ## 场景映射（spec 01 §22 A-I）
@@ -22,7 +25,9 @@
 | --- | --- | --- | --- |
 | A reasoning 流 | `e2e/a-reasoning.spec.ts` | 思考块聚合（envelope block_id）、完成态、最终文本唯一（无重复块） | 零伪造：fixture 有思考才有块 |
 | C 工具输出 | `e2e/c-tool-output.spec.ts` | tool/call 先于执行落盘、终态由 tool/result 校准、折叠行渲染 | 流式分块中间态见下 |
-| E 断连重连 | `e2e/e-reconnect.spec.ts` | 流异常收尾→断线条（800ms 阈值）→`after_seq=lastApplied` 续传（重放零重叠）→终态清条；重放无重复 | T4 #97 契约 §3 |
+| E 断连重连 | `e2e/e-reconnect.spec.ts` | 流异常收尾→断线条（800ms 阈值）→**重新订阅 WS**（快照重放由客户端游标滤掉，零重复）→终态清条 | T4 #97 契约 §3；游标丢失的可观测后果（旧终态被重放 ⇒ 误判已收口 ⇒ 断流不再重连）由 `queue-flush.spec.ts` 的「游标」用例锁 |
+| 队列投递（#195/#205） | `e2e/queue-flush.spec.ts` | flush 的 launched（响应攒包 6s 时回答仍经 WS 提前到达）/ 游标 / idle 静默 / 409 重试三次 / 窗外迟到回执不吞掉 / 404 | ADR-0030 §5.2 D10；ADR-0030 §4.6 |
+| WS 降级 + 重建（#205） | `e2e/stream-fallback.spec.ts` | WS 被拒（零服务帧）→ 降级 `GET /stream` 接流照样建立；降级流收 `stream/truncated` → `GET /events` 全量重建 → 以真实 max seq 续传 | 契约 §3（truncated 只在 SSE 通道发，见该文件头注） |
 | F 历史重放 | `e2e/f-history.spec.ts` | 会话行首条 user/message 标题 → projectHistory 重建 | 不变量 #22 同一管线 |
 | H 密度四档 | `e2e/h-density.spec.ts` | data-density 即时生效 + localStorage（ahi.traceDensity）刷新持久 | 冻结决策 |
 | I 键盘可达 | `e2e/i-keyboard.spec.ts` | Ctrl+K palette 唤起/焦点/Esc 关闭；Composer Ctrl+Enter 提交 | |

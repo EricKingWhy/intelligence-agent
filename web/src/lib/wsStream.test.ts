@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { consumeSSE } from './sse';
-import { discoverNewSessionId, sessionIdBaseline, wsStreamResponse } from './wsStream';
+import { discoverNewSessionId, sessionExists, sessionIdBaseline, wsStreamResponse } from './wsStream';
 import type { AgentEvent } from '../types';
 
 class FakeWebSocket {
@@ -318,6 +318,35 @@ describe('wsStreamResponse — WS 不可用时降级到 HTTP SSE', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('降级流被 cancel() → 真正中断那条 HTTP 请求（不留孤儿订阅）', async () => {
+    // 攒包交付层上这条请求可能吊到 run 结束（实测 41.6s）：只置 closed 不 cancel，
+    // 服务端的 run 订阅就会跟着多活一整轮——与 consumeSSE.cancel() 的契约不一致。
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"type":"run/started","seq":1}\n\n'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })));
+
+    const res = wsStreamResponse(sid);
+    const seen: string[] = [];
+    const handle = consumeSSE(res, (e) => seen.push(e.type), () => {});
+    const sock = FakeWebSocket.instances[0];
+    sock.fireOpen();
+    sock.fireError(); // 零服务帧 → 降级
+    // 等到降级流真的吐了一帧：此刻它正挂在**下一个 read** 上（这才是"cancel 时有
+    // 读在飞"的形态——若在首个 read 之前就 cancel，循环自己的 closed 检查就够，
+    // 测不出 reader 是否被中断）。
+    await vi.waitFor(() => expect(seen).toEqual(['run/started']));
+
+    handle.cancel();
+    await vi.waitFor(() => expect(cancelled).toBe(true));
+  });
+
   it('cancel() 之后 socket 关闭 → 不降级（切走会话不该再发一条 SSE 请求）', async () => {
     const fetchMock = vi.fn(async () => sseResponse(''));
     vi.stubGlobal('fetch', fetchMock);
@@ -372,5 +401,38 @@ describe('sessionIdBaseline / discoverNewSessionId', () => {
     await expect(discoverNewSessionId(new Set(['x']), 300)).rejects.toThrow(
       /未认领到新会话/,
     );
+  });
+});
+
+/** `sessionExists`：重连接流失败时分辨「会话已删（404 语义）」与「瞬时故障」。
+ *  它是 WS 传输下**唯一**口径一致的判据（WS 错误帧不带状态码、HTTP 404 被降级层
+ *  抹平），判错的两个方向都真伤用户：误报已删 = 掐断一条能自愈的重连链 +
+ *  说一句假话；漏报 = 对着已删会话空转重试。 */
+describe('sessionExists — 404 语义的存在性判据', () => {
+  function stubSessions(rows: unknown[] | 'fail'): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        rows === 'fail' ? new Response('boom', { status: 500 }) : new Response(JSON.stringify(rows)),
+      ),
+    );
+  }
+
+  it('在列表里（含**已归档**）→ true', async () => {
+    stubSessions([{ session_id: 's-1', archived: true }, { session_id: 's-2' }]);
+    expect(await sessionExists('s-1')).toBe(true);
+    // 请求必须带 include_archived：漏掉它会把已归档会话误判成已删
+    const call = (vi.mocked(fetch).mock.calls[0] as unknown[])[0] as string;
+    expect(String(call)).toContain('include_archived=true');
+  });
+
+  it('不在列表里 → false（这才是「已删」）', async () => {
+    stubSessions([{ session_id: 'other' }]);
+    expect(await sessionExists('s-1')).toBe(false);
+  });
+
+  it('列表读不到 → **true**（保守：不把一次抖动当成已删）', async () => {
+    stubSessions('fail');
+    expect(await sessionExists('s-1')).toBe(true);
   });
 });

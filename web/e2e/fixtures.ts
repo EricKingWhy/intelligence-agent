@@ -4,6 +4,11 @@
 
 import { expect, type Page, type Route } from '@playwright/test';
 
+/** run 终态词汇（`ending` 缺省推导用）。**刻意自带一份**，不 import
+ *  `src/lib/runState`：mock 若与应用共享同一个集合，应用漏掉某个终态时
+ *  mock 也一起漏，两边同时错就永远测不出来（T8 的 `run/interrupted` 正是这么漏的）。 */
+const RUN_TERMINAL_TYPES = new Set(['run/completed', 'run/failed', 'run/interrupted']);
+
 export const SID = 'e2e-session-0001';
 export const RUN = 'e2e-run-0001';
 export const T = '2026-09-07T00:00:00Z';
@@ -59,13 +64,16 @@ export interface WsScript {
   /** 快照之后逐帧下发（= 在途 run 的增量）。给了它 ⇒ `has_active_run: true`。 */
   frames?: FrameSpec[];
   /** 显式声明快照的 `has_active_run`。缺省 = 有 `frames` 就 true。
-   *  「有在途 run 但本地游标之后暂时没新事件」（模型在思考）要用它——此时连接
-   *  保持、不发 done，界面应维持在生成态。 */
+   *  用例：服务端**有**在途 run、但本地游标之后暂时没有新事件（模型在思考）——
+   *  此时客户端不该把流当成收尾。⚠ 它**只**声明这个字段：要真的维持连接（不发
+   *  `done`）必须同时给 `ending: 'keep'`。 */
   hasActiveRun?: boolean;
-  /** 快照 + frames 之后怎么收场：
-   *  - `done`（缺省）= 送 done 收尾（等价旧 `fulfillSse` 的「帧 + 包体结束」）；
-   *  - `keep` = 连接保持（真后端在 run 未收口时就是这样；考「停摆」「等待提示」
-   *    需要它，`route.fulfill` 给不出长连接）；
+  /** 快照 + frames 之后怎么收场。缺省按**帧内容**推导（真后端只在 run 终态事件后
+   *  下行 `done`，见 `web/websocket.py` 的 `_relay_events`）：末帧是终态 → `done`；
+   *  否则连接保持（`keep`）——「有在途 run 却没有终态帧」时发 done 会把客户端
+   *  推进「流异常收尾 → 重连」的岔路，那种假红很难归因。显式可覆盖：
+   *  - `done` = 送 done 收尾（等价旧 `fulfillSse` 的「帧 + 包体结束」）；
+   *  - `keep` = 连接保持（考「停摆」「等待提示」需要它，`route.fulfill` 给不出长连接）；
    *  - `drop` = 直接断开、**不送 done**（真实网络断线）——重连类用例的起点。 */
   ending?: 'done' | 'keep' | 'drop';
   /** 首次下行前延迟（毫秒）：考「断线条延迟显示」「接流补帧」的时序。 */
@@ -81,8 +89,12 @@ export type WsProvider = (ctx: {
 }) => WsScript | undefined | Promise<WsScript | undefined>;
 
 /** 装 WS 接流 mock（在 `routeApi` 内调用——快照要与 /events 同源，只有那里拿得到
- *  `sessionEvents`）。`page.routeWebSocket` 与 `page.route` 走同一条命令通道，
- *  命令按发出顺序生效，所以 `void` 掉它再 `page.goto` 也不会漏接（spec 无需 await）。 */
+ *  `sessionEvents`）。
+ *
+ *  ⚠ **必须 `await`**：`page.routeWebSocket` 的注册是异步的，`void` 掉再导航
+ *  **不会生效**（实测：同一份 handler，awaited 拦得到、void 的拦不到，而
+ *  `page.on('websocket')` 能看到连接已建立——那种"看起来跑了、实际走的另一条路"
+ *  最难查）。`routeApi` 因此是 async 的，调用点一律 `await`。 */
 async function installWsRoute(
   page: Page,
   mock: ApiMock,
@@ -125,7 +137,8 @@ async function installWsRoute(
         // run 收口 → 服务端 relay task 下行 done（真后端在带终态帧后就是这么收尾的）。
         // `hasActiveRun: true` 而未声明 ending 也照样收尾：脚本没说要保持，就当成
         // 「这些帧之后 run 结束了」——比留一条永远不说话的连接更不容易误导出假绿。
-        const ending = script?.ending ?? 'done';
+        const ending =
+          script?.ending ?? (frames.some((f) => RUN_TERMINAL_TYPES.has(f.type)) ? 'done' : 'keep');
         if (ending === 'drop') {
           ws.close(); // 异常收尾：没有 done（客户端只能靠 terminalSeen 判断）
         } else if (active && ending === 'done') {
@@ -153,6 +166,11 @@ export interface ApiMock {
   /** `GET /api/ws` 的接流剧本（每次 `subscribe` 调用一次；第 N 次 = 第 N 次接流）。
    *  缺省 = 会话无在途 run：快照即全量、立即收尾（见 `WsScript`）。 */
   onWs?: WsProvider;
+  /** `GET /api/sessions/{id}/stream?after_seq=N` —— **只剩两条非主路径**用它：
+   *  ① WS 不可用时的降级兜底（配合 `onWs: () => ({ closeNow: true })`）；
+   *  ② 驱动 `stream/truncated` 控制帧（该帧只在 SSE 通道上发，见 #208）。
+   *  实时流请用 `onWs`。不设 = `route.abort()`（没人 mock 时必然失败，不静默通过）。 */
+  onStreamGet?: (route: Route) => Promise<void> | void;
   // ── Phase 2b Composer control row（Ticket F1/B1）──
   /** GET /api/permission-modes（权限模式清单） */
   permissionModes?: unknown[];
@@ -652,8 +670,10 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       });
     }
     if (/^\/api\/sessions\/[^/]+\/stream$/.test(path)) {
-      // 实时流的 HTTP 通道：界面已改走 WS（#205），这条路只剩降级兜底
-      //（WS 建连失败时前端自己会回来要）。spec 要驱动实时流请用 `onWs`。
+      // 实时流主通道已是 WS（#205）；这条路只剩降级兜底与 `stream/truncated`
+      //（该控制帧只在 SSE 通道发）。没人 mock 时 abort——降级路上的失败是本车道
+      // 的合法一等场景（真机上 WS 也可能被代理拒），但不能是"忘了 mock"的默认。
+      if (mock.onStreamGet) return mock.onStreamGet(route);
       return route.abort('aborted');
     }
     if (path === '/api/models') {

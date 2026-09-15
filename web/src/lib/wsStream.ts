@@ -35,13 +35,27 @@
  *
  * WS 不是所有部署都能用（前置代理可能拒掉 Upgrade 握手）。**建连阶段一个服务帧
  * 都没收到**就失败 = 传输不可用 → 用同一个 `after_seq` 改走
- * `GET /sessions/{id}/stream`，把 SSE 响应体逐字节搬进本流。降级后帧会被交付层
- * 攒到 run 结束（慢，但**能用**：答案照样落进界面），比「连接中断」横幅诚实。
+ * `GET /sessions/{id}/stream`，把 SSE 响应体逐字节搬进本流。
  *
  * 两种失败**不**降级，因为它们恰恰证明 WS 是通的：
  * - 已经收到过服务帧（快照/事件/心跳）后断流 —— 那是流本身的问题，交给上层的
  *   重连状态机（换一条新 WS 更可能成功）；
  * - 服务端 `error` 帧（如会话不存在 / 快照失败）—— 同上。
+ *
+ * ⚠ **降级不是「能用」，是「不静默」**：交付层攒包时，降级流的帧同样要到 run 结束
+ * 才到，而 `useSession` 的停摆检查（`RECONNECT_STALL_MS` = 10s 无帧 → 断开重连）
+ * 会先把它判成停摆 → 重连 3 次 → 如实报「连接中断」。即：用户看到的是**明确失败**，
+ * 不是永远转圈。（要让它「慢但能用」，得让停摆检查认识「已降级的传输」——那是
+ * 传输策略问题，见 #208，不在本模块单方面改。）
+ *
+ * 反向的一个已知落差（#208 一并记）：服务端 WS 快照**没有** backlog 上限、也不发
+ * `stream/truncated` 控制帧（那条保护只在 SSE `GET /stream` 里）——所以切到 WS 之后
+ * 「backlog > 1000 → 全量重建」在 WS 主通道上不可达，该分支只剩降级流还会走到。
+ * 功能不丢（`seenSeqs` 幂等门吸收重复），但超大会话的一次重连会把整段 durable
+ * 日志塞进一个 WS 帧。
+ *
+ * 握手成功但服务端**永不吐帧也不断开**（半死连接）不在本模块加 deadline：那会给
+ * 慢链路引入假降级，而它已经被上层的停摆检查覆盖（10s → 重连 3 次 → 明确报错）。
  */
 
 import type { AgentEvent } from '../types';
@@ -75,6 +89,9 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
   let serverFrames = 0;
   /** 已切到 SSE 降级：旧 socket 的后续事件（error/close 会成对来）一律忽略。 */
   let fallbackStarted = false;
+  /** 降级流的读句柄——`cancel()` 必须真正中断它（否则那条 HTTP 请求会吊到
+   *  交付层放行，服务端的 run 订阅也跟着多活一整轮）。 */
+  let sseReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   const teardown = () => {
     if (terminalTimer !== null) {
@@ -132,15 +149,24 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
           return;
         }
         const reader = res.body.getReader();
+        sseReader = reader;
         try {
           for (;;) {
             const { done, value } = await reader.read();
-            if (done || closed) break;
+            // closed = 上层已 cancel：主动断掉 HTTP 请求（只 break 会把它留在
+            // 后台读到交付层放行，白占一个服务端订阅）
+            if (closed) {
+              void reader.cancel().catch(() => {});
+              return;
+            }
+            if (done) break;
             if (value) emitRaw(value);
           }
           settle();
         } catch (e) {
           settle(e instanceof Error ? e : new Error(String(e)));
+        } finally {
+          sseReader = null;
         }
       };
 
@@ -236,6 +262,11 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
       // 上层 cancel()（导航离开 / 显式断开 / 重连前静默断开）
       closed = true;
       teardown();
+      // 降级流另有一条 HTTP 请求在飞：一并中断，别留下孤儿订阅
+      // （`consumeSSE.cancel()` 对 SSE 响应体就是这么做的，此处同契约）
+      const r = sseReader;
+      sseReader = null;
+      if (r) void r.cancel().catch(() => {});
     },
   });
 
@@ -308,7 +339,10 @@ export async function sessionIdBaseline(): Promise<Set<string> | null> {
  *  在两套传输下口径一致的判据。
  *
  *  列表读不到时返回 `true`（当作还在）：把「读不到」误报成「已删」，会让一次
- *  列表抖动直接掐断一条本来能自愈的重连链。 */
+ *  列表抖动直接掐断一条本来能自愈的重连链。
+ *
+ *  判据口径与 `SessionService.list_sessions` 一致：不带过滤地全量列（含**已归档**，
+ *  后端无分页/上限），所以「不在列表里」等价于「已删」。 */
 export async function sessionExists(sessionId: string): Promise<boolean> {
   try {
     const rows = await listSessions({ includeArchived: true });

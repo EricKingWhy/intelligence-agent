@@ -1280,6 +1280,18 @@ export function useSession() {
         // 会被交付层攥到 run 结束才下发，`await` 它会把这个按钮变成「点了没反应，
         // 直到整轮答案答完」。idle / 409 / 404 都是**完整且极短**的 JSON，攒不住，
         // 短窗内必到——所以「窗外落定」只可能是 launched。
+        //
+        // 409 有**两个**来源（后端 `POST /queue/flush` 的错误面）：ActiveRunConflict
+        // （等 run 收口即可）与 RecoveryConflict（崩溃遗留的 UNKNOWN 高风险操作，
+        // 要人工裁决——重试其实无意义，但重试是既有行为，本票不改）。两者都说得通的
+        // 那句话只有后端的 detail，所以如实转述它，不替后端编一句。
+        const conflictDetail = async (res: Response): Promise<string> => {
+          try {
+            return ((await res.json()) as { detail?: string })?.detail ?? '';
+          } catch {
+            return '';
+          }
+        };
         for (let i = 0; i < 3; i++) {
           const pending = flushSessionQueue(sessionId);
           const res = await raceEarlyResponse(pending);
@@ -1295,9 +1307,25 @@ export function useSession() {
             lastAppliedSeqRef.current = cursor;
             setMode({ kind: 'live', sessionId });
             attachLiveStream(wsStreamResponse(sessionId, cursor), gen, conversationRef.current);
-            // 这条 promise 仍会悬挂到 run 结束；中途 reject（401 / 网络故障）时
-            // 投递其实没被受理，必须说出来——顺带接住 rejection 免得变成 unhandled。
-            void pending.catch((e) => {
+            // 这条 promise 仍会悬挂到 run 结束。**窗外落定必须照样消费**：判别是
+            // 推断（idle/404/409 都是极短 JSON，攒不住），推断错了不能静默——
+            // 迟到的 idle 会白白接流到假「连接中断」，迟到的 409/404 会被吞成
+            // 无反馈（用户以为投出去了）。所以窗外只认「非流式回执 = 判错了」。
+            const lateOutcome = async (late: Response) => {
+              if (streamGenRef.current !== gen) return;
+              const ct = late.headers.get('content-type') ?? '';
+              if (late.ok && ct.includes('text/event-stream')) return; // 真是 launched：流照旧
+              const detail = late.status === 409 ? await conflictDetail(late) : '';
+              if (streamGenRef.current !== gen) return; // 读 detail 期间又换了代际
+              streamGenRef.current += 1;
+              sseRef.current?.cancel(); // 收掉那条接错的流（含服务端订阅）
+              setMode({ kind: 'viewing', sessionId });
+              if (late.ok) return; // 迟到的 idle：空队列，与窗内 idle 同语义（静默）
+              setError(
+                `投递失败：${detail || (late.status === 404 ? '会话不存在' : `flush ${late.status}`)}`,
+              );
+            };
+            void pending.then(lateOutcome).catch((e) => {
               if (streamGenRef.current !== gen) return;
               streamGenRef.current += 1;
               sseRef.current?.cancel(); // 停掉那条接不上的流，别留服务端订阅
@@ -1308,7 +1336,12 @@ export function useSession() {
           }
           if (res.status === 409) {
             // 在途 run 未到终态：等它收口再投（第三次仍是 409 就如实报出来）。
-            if (i === 2) throw new Error('仍有在途 run，稍后再试');
+            if (i === 2) {
+              const detail = await conflictDetail(res);
+              throw new Error(
+                detail || '投递被拒绝（409）：在途 run 未收口，或存在需人工裁决的遗留操作',
+              );
+            }
             await new Promise((r) => setTimeout(r, 1000));
             continue;
           }
