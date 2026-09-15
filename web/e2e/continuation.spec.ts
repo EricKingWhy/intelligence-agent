@@ -42,7 +42,7 @@ test('续聊：第二条消息走 /messages 端点而非新建会话', async ({ 
   let firstPostHit = false;
   let messagesPostHit = false;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => {
@@ -70,7 +70,7 @@ test('续聊：第二条消息走 /messages 端点而非新建会话', async ({ 
 test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 /messages payload', async ({ page }) => {
   let messagesBody: string | null = null;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     models: MODELS,
@@ -117,7 +117,7 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
 test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend 照发', async ({ page }) => {
   let messagesBody: string | null = null;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     models: MODELS,
@@ -148,7 +148,7 @@ test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend �
 });
 
 test('续聊 422：提示「续聊参数无效」而非「未知模型」（handoff §5 P2）', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),

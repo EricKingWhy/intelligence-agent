@@ -59,14 +59,16 @@ const sessionRow = {
 };
 
 async function routeStreaming(page: Page, frames: FrameSpec[] = LIVE_FRAMES) {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [sessionRow],
     models: MODELS,
     permissionModes: PERMISSION_MODES,
     agentProfiles: AGENT_PROFILES,
     reasoningEfforts: REASONING_EFFORTS,
     onSessionPost: (route) => fulfillSse(route, frames),
-    onStreamGet: (route) => fulfillSse(route, frames),
+    // 服务端仍在跑（模型还没吐新内容）：快照即全量、连接保持——这正是「流式中」
+    // 的真相，界面必须维持生成态（停止按钮 / Esc 提示在场）。
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
     events: frames,
   });
 }

@@ -78,7 +78,7 @@ test.describe('窄屏（≤820px）删除入口', () => {
   test.use({ viewport: { width: 800, height: 900 } });
 
   test('窄屏：槽位默认是会话点，聚焦后换成 ⋯，且能走完删除确认流程', async ({ page }) => {
-    routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
+    await routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
     await page.goto('/');
 
     const row = rowOf(page, 's2');
@@ -112,7 +112,7 @@ test.describe('窄屏（≤820px）删除入口', () => {
 /** FE-R11-10 回归锁：确认面的初始焦点落在「取消」，不是右上「关闭(X)」。
  *  一次不可逆删除的确认面上，键盘用户落地第一眼看到的控件应该是安全的出口。 */
 test('删除确认弹窗：初始焦点在「取消」，Enter 即安全取消', async ({ page }) => {
-  routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
+  await routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
   const deletes = countSessionDeletes(page);
   await page.goto('/');
 
@@ -128,7 +128,7 @@ test('删除确认弹窗：初始焦点在「取消」，Enter 即安全取消',
 });
 
 test('确认面说清不可恢复 + 取消零请求 + 确认后行消失/项目计数掉/当前会话被清空', async ({ page }) => {
-  routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
+  await routeApi(page, { sessions: [projectSession(), freeSession()], projects: [P1], events: HISTORY });
   const deletes = countSessionDeletes(page);
   await page.goto('/');
 
@@ -192,7 +192,7 @@ test('确认面说清不可恢复 + 取消零请求 + 确认后行消失/项目�
 test('409（fork 父会话 / 在途 run）：原样显示后端 detail，列表保持原样', async ({ page }) => {
   const forkDetail = "session 's2' is the fork parent of 2 session(s): delete the child session(s) first";
   const busyDetail = "session 's1' has a run in flight; cancel it first";
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [projectSession(), freeSession()],
     projects: [P1],
     // 两种 409 原因：状态码相同、只有 detail 能区分——所以两条都锁，且都要求逐字显示。
@@ -229,7 +229,7 @@ test('409（fork 父会话 / 在途 run）：原样显示后端 detail，列表�
 });
 
 test('404（会话本就不在了）：显示后端 detail，并让这条过期行收敛消失', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [projectSession(), freeSession()],
     projects: [P1],
     // 真机上这是个并发窗口（别处已删 / 另一个标签页删过）；mock 里 404 的条目也会
@@ -250,7 +250,7 @@ test('404（会话本就不在了）：显示后端 detail，并让这条过期�
 
 test('删的不是当前会话：视图与记住的 id 都不被拽走（只收敛被删的那一行）', async ({ page }) => {
   // s1 在项目里（被删的那个），s2 未分组（当前打开的）——删 s1 不该动 s2 的视图。
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [
       sessionRow('s1', { id: 'p1', title: '项目 alpha' }, { event_count: 7 }),
       sessionRow('s2', null, { event_count: 5 }),

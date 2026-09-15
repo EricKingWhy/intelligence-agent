@@ -59,7 +59,7 @@ const HEAD: FrameSpec[] = [
  *  镜像不等于同源：后端改值这里不会自动跟（后端侧由
  *  `tests/web/test_web_phase2_endpoints.py::TestCapabilities` 锁）。 */
 async function openChanges(page: import('@playwright/test').Page, frames: FrameSpec[]) {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [{
       session_id: SID, event_count: frames.length, first_event_time: T, last_event_time: T,
       first_user_message: '改两个文件', trace_id: null, trace_url: null,

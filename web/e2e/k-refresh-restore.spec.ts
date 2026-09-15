@@ -35,7 +35,7 @@ test('BUG-005：刷新后零点击恢复同一个会话与全部内容', async (
     ...IN_FLIGHT,
     { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
   ];
-  routeApi(page, { sessions: SESSIONS, events });
+  await routeApi(page, { sessions: SESSIONS, events });
   await page.addInitScript(([k, v]) => localStorage.setItem(k, v), [KEY, SID]);
 
   await page.goto('/');
@@ -56,7 +56,7 @@ test('BUG-005 写入路径：真实点击会话行 → 写键 → 不带种子�
   // 这条**不用 addInitScript 播种**：addInitScript 会在每次导航（含 reload）重跑，
   // 于是「刷新后还在」只能证明读路径。这里从未选中状态出发，靠真实点击产生写入，
   // 再刷新一次——只有 persist 写路径真的存在才可能通过（删掉写入 effect 这条会红）。
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [
       ...SESSIONS,
       { session_id: `${SID}-B`, event_count: 5, first_event_time: T, last_event_time: T, first_user_message: '另一个会话', trace_id: null, trace_url: null },
@@ -120,7 +120,7 @@ test('子会话 id 与普通会话同一持久化/恢复路径：非首行真实
     { type: 'text/delta', data: { delta: '父会话正文。' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
     { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [
       ...SESSIONS,
       { session_id: CHILD, event_count: 5, first_event_time: T, last_event_time: T, first_user_message: '委派给 research_review 的子任务', trace_id: null, trace_url: null },
@@ -156,21 +156,21 @@ test('子会话 id 与普通会话同一持久化/恢复路径：非首行真实
   await expect(page.locator('.empty-hero')).toBeHidden();
 });
 
-test('BUG-006：刷新时 run 在途 → 以 after_seq 接回流，刷新后的事件继续到达', async ({ page }) => {
-  let streamCalls = 0;
-  const afterReloadReqs: string[] = [];
-  routeApi(page, {
+test('BUG-006：刷新时 run 在途 → 重新接回流，刷新后的事件继续到达', async ({ page }) => {
+  const wsSessions: string[] = [];
+  await routeApi(page, {
     sessions: SESSIONS,
     events: IN_FLIGHT,
-    onStreamGet: async (route) => {
-      streamCalls += 1;
-      if (streamCalls > 1) afterReloadReqs.push(route.request().url());
+    onWs: ({ sessionId, call }) => {
+      wsSessions.push(sessionId);
       // 两次接流给不同标记：只有「刷新之后」那一次才能证明事件是接流送到的
-      const marker = streamCalls === 1 ? 'FIRST-LOAD-增量。' : 'RELOAD-AFTER-增量。';
-      await fulfillSse(route, [
-        { type: 'text/delta', data: { delta: marker }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
-        { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
-      ]);
+      const marker = call === 1 ? 'FIRST-LOAD-增量。' : 'RELOAD-AFTER-增量。';
+      return {
+        frames: [
+          { type: 'text/delta', data: { delta: marker }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
+          { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
+        ],
+      };
     },
   });
   await page.addInitScript(([k, v]) => localStorage.setItem(k, v), [KEY, SID]);
@@ -183,22 +183,25 @@ test('BUG-006：刷新时 run 在途 → 以 after_seq 接回流，刷新后的�
 
   // 零交互：刷新后新增的文本由接流送达
   await expect(page.locator('.model-output').last()).toContainText('RELOAD-AFTER-增量。', { timeout: 10_000 });
-  // 接流游标 = 已加载事件的最大持久 seq（4）——重放区间 (4, cursor] 与已加载内容不重不漏
-  expect(afterReloadReqs).toHaveLength(1);
-  expect(new URL(afterReloadReqs[0]).searchParams.get('after_seq')).toBe('4');
+  // 接流契约：每次装载各接一次、都接同一个会话。快照会重发**全部** durable 事件，
+  // 靠本地游标滤掉 ≤4 的那截——滤错（从头发）这里就会看见两份历史。
+  expect(wsSessions).toEqual([SID, SID]);
+  const text = await page.locator('.model-output').last().innerText();
+  expect(text.match(/刷新前已有的内容。/g)).toHaveLength(1);
   // 正常接流不是「断线重连」，不得出现重连横幅
   await expect(page.locator('.reconnect-banner')).toBeHidden();
 });
 
 test('BUG-006 兜底：接流零帧空流（run 已在刷新窗口内收口）→ 静默停在历史，且不再重试', async ({ page }) => {
-  const streamReqs: string[] = [];
-  routeApi(page, {
+  const wsSessions: string[] = [];
+  await routeApi(page, {
     sessions: SESSIONS,
     events: IN_FLIGHT,
-    // 服务端已无在跑的 run：与真实后端一致，立即 200 + 空 body
-    onStreamGet: async (route) => {
-      streamReqs.push(route.request().url());
-      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' });
+    // 服务端已无在跑的 run：与真实后端一致，快照即全量（has_active_run=false，
+    // 无增量、无 done）——客户端据此静默收尾，不当成断线。
+    onWs: ({ sessionId }) => {
+      wsSessions.push(sessionId);
+      return undefined;
     },
   });
   await page.addInitScript(([k, v]) => localStorage.setItem(k, v), [KEY, SID]);
@@ -211,11 +214,11 @@ test('BUG-006 兜底：接流零帧空流（run 已在刷新窗口内收口）�
 
   // 死循环断点：零帧 → 退回 viewing → 历史重装 → 游标不变 → 不得再发起第二次接流
   await page.waitForTimeout(600);
-  expect(streamReqs).toHaveLength(1);
+  expect(wsSessions).toEqual([SID]);
 });
 
 test('BUG-005 自愈：记住的会话已不存在（404）→ 清键 + 静默回空态，不弹错误', async ({ page }) => {
-  routeApi(page, { sessions: [], events: [] });
+  await routeApi(page, { sessions: [], events: [] });
   // Playwright 后注册的路由优先匹配：这条把上面 fixtures 的 /events 200 覆盖成 404
   await page.route('**/api/sessions/*/events', (route) =>
     route.fulfill({ status: 404, body: '{"detail":"session not found"}', contentType: 'application/json' }),

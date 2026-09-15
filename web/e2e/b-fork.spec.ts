@@ -43,7 +43,7 @@ const PARENT_ROW = {
 
 /** 进入会话：列表 → 点行 → 等两轮都投影进 DOM。 */
 async function openSessionWith(page: Page, mock: ApiMock): Promise<void> {
-  routeApi(page, mock);
+  await routeApi(page, mock);
   await page.goto('/');
   await page.locator('.session-item').first().click();
   await expect(page.locator('.turn')).toHaveCount(2);

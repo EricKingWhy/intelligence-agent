@@ -39,7 +39,7 @@ const EVENTS: FrameSpec[] = [
 const ROW = { session_id: SID, event_count: 6, first_event_time: T, last_event_time: T, first_user_message: '滚动验证', trace_id: null, trace_url: null };
 
 test('滚动容器关闭浏览器滚动锚定（虚拟化动态测高会与锚定打架）', async ({ page }) => {
-  routeApi(page, { sessions: [ROW], events: EVENTS });
+  await routeApi(page, { sessions: [ROW], events: EVENTS });
   await page.goto('/');
   await page.locator('.session-item').first().click();
   await expect(page.locator('.turn')).toHaveCount(1);
@@ -51,7 +51,7 @@ test('滚动容器关闭浏览器滚动锚定（虚拟化动态测高会与锚�
 });
 
 test('非流式态不出现「↓ 最新」浮标（没有「最新」可跳，浮标不得残留）', async ({ page }) => {
-  routeApi(page, { sessions: [ROW], events: EVENTS });
+  await routeApi(page, { sessions: [ROW], events: EVENTS });
   await page.goto('/');
   await page.locator('.session-item').first().click();
   await expect(page.locator('.turn')).toHaveCount(1);
@@ -75,7 +75,7 @@ const RUNNING_EVENTS: FrameSpec[] = [
 ];
 
 test('流式中上滚（真实滚轮）：浮标出现、点浮标回底并恢复跟随', async ({ page }) => {
-  routeApi(page, { sessions: [{ ...ROW, event_count: 4 }], events: RUNNING_EVENTS });
+  await routeApi(page, { sessions: [{ ...ROW, event_count: 4 }], events: RUNNING_EVENTS });
   await page.goto('/');
   await page.locator('.session-item').first().click();
   await expect(page.locator('.turn')).toHaveCount(1);

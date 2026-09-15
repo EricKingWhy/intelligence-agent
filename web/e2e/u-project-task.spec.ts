@@ -92,7 +92,7 @@ function captureSessionPosts(page: Page): { url: string; body: Record<string, un
 test('AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限档默认工作区写入、没有任务输入框', async ({
   page,
 }) => {
-  routeApi(page, baseMock());
+  await routeApi(page, baseMock());
   await page.goto('/');
 
   await openProjectMenu(page, '项目 alpha');
@@ -130,7 +130,7 @@ test('AC11 launch=false 创建：请求带 cwd、不带 task、URL 带 launch=fa
     // 会让"本地值 vs 响应值"不可区分（本地值后到覆盖响应值也能过）。
     emptySessionPermissionOverride: 'read-only',
   });
-  routeApi(page, mock);
+  await routeApi(page, mock);
   const posts = captureSessionPosts(page);
   await page.goto('/');
 
@@ -160,7 +160,7 @@ test('AC11 launch=false 创建：请求带 cwd、不带 task、URL 带 launch=fa
 });
 
 test('AC11 主动改档才发 permission_mode；创建后 pill 与弹窗选择一致', async ({ page }) => {
-  routeApi(page, baseMock());
+  await routeApi(page, baseMock());
   const posts = captureSessionPosts(page);
   await page.goto('/');
 
@@ -188,7 +188,7 @@ test('AC12 422 留在确认面：后端 detail 原样可见、不关对话框、
   const mock = baseMock({
     emptySessionError: { status: 422, detail: `目录不存在：${ALPHA}` },
   });
-  routeApi(page, mock);
+  await routeApi(page, mock);
   await page.goto('/');
 
   await openStartDialog(page, '项目 alpha');
@@ -212,7 +212,7 @@ test('AC12 422 留在确认面：后端 detail 原样可见、不关对话框、
 test('AC9 空项目占位区替换为入口按钮（旧的"去未分组找 cwd 匹配会话"文案不再出现）', async ({
   page,
 }) => {
-  routeApi(page, baseMock());
+  await routeApi(page, baseMock());
   await page.goto('/');
 
   const alpha = project(page, '项目 alpha');

@@ -33,7 +33,7 @@ test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭',
     { type: 'run/completed', data: {}, seq: 4, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
   ];
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES,
@@ -78,7 +78,7 @@ test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', 
   // 长目录来自 fixtures 公共构造，避免内联后与其它 spec 漂移。
   const LONG_MODES = longCatalog('mode', 6, { index: 2, label: 'Ask Each Time' });
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: LONG_MODES,
@@ -106,7 +106,7 @@ test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', 
 /** FE-R11-05 回归锁：单选控件选了之后必须能回到「未选」。
  *  此前只能整页 reload——目录里没有任何表达"没选"的条目，触发文本却显示 placeholder。 */
 test('Composer control row：单选档位可以选回「默认（未选）」', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES,
@@ -134,7 +134,7 @@ test('Composer control row：单选档位可以选回「默认（未选）」', 
  *  三条一起断：`data-state="checked"`（第二通道的挂钩）、`.picker-item-check` 图标、
  *  `::before` 实测宽度 = 2px（第三通道；只断属性不断像素的话，把 accent 条删掉照样绿）。 */
 test('Composer control row：选中行的三通道选中态（勾选 + 加重 + 2px 高亮条）', async ({ page }) => {
-  routeApi(page, { sessions: [], events: [], permissionModes: PERMISSION_MODES });
+  await routeApi(page, { sessions: [], events: [], permissionModes: PERMISSION_MODES });
   await page.goto('/');
 
   const trigger = page.locator('.composer-control[aria-label="权限模式"]');
@@ -172,7 +172,7 @@ test('Composer control row：选中行的三通道选中态（勾选 + 加重 + 
  *  本用例**不手动 focus listbox**（那是旧 helper 的绕行），只依赖打开时的初焦——
  *  修复前这里必然失败。 */
 test('Composer control row：短目录键盘导航（不手动聚焦 listbox）', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES, // 3 条 ≤ 5 → 搜索框隐藏
@@ -207,7 +207,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   let capturedBody: string | null = null;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES,

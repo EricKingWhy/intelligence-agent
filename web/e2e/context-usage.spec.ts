@@ -20,7 +20,7 @@ async function openIdleSession(page: Page): Promise<void> {
 }
 
 test('T6a：空数据 → 「暂无用量数据」，不出现 0% 假话', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -42,7 +42,7 @@ test('T6a：空数据 → 「暂无用量数据」，不出现 0% 假话', async
 });
 
 test('T6b：有数据 → 六桶图例 + 分段条 + 阈值标记 + 缓存命中率', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -92,7 +92,7 @@ test('T6b：有数据 → 六桶图例 + 分段条 + 阈值标记 + 缓存命中
 });
 
 test('T6c：未采集 → 「未采集（提供商未返回缓存明细）」，不显示 0%', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -125,7 +125,7 @@ test('T6c：未采集 → 「未采集（提供商未返回缓存明细）」，
 });
 
 test('T6d：Esc 关闭看板（与既有 picker 一致）', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),

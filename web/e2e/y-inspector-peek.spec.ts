@@ -37,7 +37,7 @@ async function openSession(page: import('@playwright/test').Page, which = 0) {
 }
 
 test('AC1：点一行即预览；↑↓ 移动选中，详情实时跟随且清单不消失', async ({ page }) => {
-  routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
+  await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   const rows = await openSession(page);
 
@@ -71,7 +71,7 @@ test('AC1：点一行即预览；↑↓ 移动选中，详情实时跟随且清�
 });
 
 test('AC2：Esc 关预览但面板与清单都还在（关闭不卸载）', async ({ page }) => {
-  routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
+  await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   const rows = await openSession(page);
 
@@ -94,7 +94,7 @@ test('AC2：Esc 关预览但面板与清单都还在（关闭不卸载）', asyn
 });
 
 test('AC2：Space 快按=保持打开，按住=松手关闭（Linear peek 语义）', async ({ page }) => {
-  routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
+  await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   const rows = await openSession(page);
 
@@ -120,7 +120,7 @@ test('AC2：Space 快按=保持打开，按住=松手关闭（Linear peek 语义
 
 test('AC4：钉住跨会话——未钉住切换会话收起，钉住后保持打开', async ({ page }) => {
   const OTHER = 'e2e-session-0183b';
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [session(SID, '第一个'), session(OTHER, '第二个')],
     events: EVENTS,
   });
@@ -154,7 +154,7 @@ test('AC4：钉住跨会话——未钉住切换会话收起，钉住后保持�
 });
 
 test('AC5：整页往返（面板按钮 + 命令面板两个入口）', async ({ page }) => {
-  routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
+  await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   await openSession(page);
 
@@ -190,7 +190,7 @@ test('AC5：整页往返（面板按钮 + 命令面板两个入口）', async ({
 test('AC6：#197 手柄方向=向右变窄/向左变宽，夹取到 320/480 且不压垮中心列；刷新后回到 340（不持久化）', async ({
   page,
 }) => {
-  routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
+  await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   await openSession(page);
 
@@ -243,7 +243,7 @@ test('AC6：#197 手柄方向=向右变窄/向左变宽，夹取到 320/480 且�
 });
 
 test('AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调宽）', async ({ page }) => {
-  routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
+  await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   await openSession(page);
 

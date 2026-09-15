@@ -72,6 +72,45 @@
   客户端应走 `GET /events` 全量重建，再带 `after_seq=latest_seq` 重连。
 - 推荐重连时机：连接异常关闭（非用户主动 abort）、seq gap 检测、页面恢复前台。
 
+### GET /api/ws（**实时流主通道**，#205 起）— 多路复用 WebSocket
+
+为什么换主通道：部署交付层（CloudStudio Gateway / EdgeOne）会把**整个 HTTP 响应**
+攒到流结束才下发（实测 `POST /api/sessions` 响应头 44.2s、`GET /stream` 41.6s 才到
+≈ run 全长），SSE 通道上的打字机效果不可能存在。WS 是帧协议，攒不住（同一链路实测
+`text/delta` 1.65s→30.35s 逐帧到达）。前端实现见 `web/src/lib/wsStream.ts`。
+
+上行（JSON）：
+```json
+{"type":"subscribe","session_id":"..."}   // 订阅该会话的 live 流
+{"type":"pong"}                            // 应答 server_ping（任意上行都算活性）
+{"type":"send_message","session_id":"...","content":"...","mode":"queue"}
+{"type":"steer","session_id":"...","content":"..."}
+{"type":"cancel","session_id":"..."}
+```
+
+下行（JSON）：
+```json
+{"type":"snapshot","session_id":"...","events":[...],"replay_upto":N,"has_active_run":bool}
+{"type":"event","session_id":"...","event":{...}}   // 增量（信封同 REST 事件）
+{"type":"done","session_id":"..."}                  // run 收口：relay task 结束
+{"type":"error","message":"..."}                    // 订阅未能建立（如 session 非法/快照失败）
+{"type":"server_ping"}                              // 应用层心跳，每 2s；30s 无上行则服务端关闭
+{"type":"launched"|"queued"|"steered"|"cancelled"}  // send_message/cancel 的回执
+```
+
+与 SSE 的**语义差异**（前端必须知道的三条）：
+1. **订阅不带 `after_seq`**：快照总是重发**全部** durable 事件，游标过滤由客户端做
+   （`seq ≤ 本地游标` 的直接丢弃）。所以「接流不重复投影」靠客户端游标，不靠后端。
+2. **`has_active_run: false` ⇒ 快照即全量**：后端此时不起 relay task，**永远不会发
+   `done`**；客户端要自己收流（前端 `wsStream` 读到该字段即 `settle()`）。
+3. **`error` 帧没有状态码**：只有一句 message（`snapshot failed` / id 非法），
+   与 HTTP 的 404/422 不同形。要分辨「会话已不存在」，客户端只能另做存在性判据
+   （前端用 `GET /api/sessions?include_archived=true` 的成员判定）。
+
+已知落差（#208 后端票）：WS 快照**没有** backlog 上限、也不发 `stream/truncated`
+——「backlog > 1000 → 全量重建」这条保护只在 SSE `GET /stream` 上成立。功能不丢
+（客户端按 seq 幂等吸收重复），但超大会话的一次握手会把整段日志塞进一个帧。
+
 ### POST /api/sessions/{id}/cancel（新增，C3）
 - 在途 → `200 {"status":"cancelling"}`；随后 `run/failed` `data.reason="cancelled"` 落盘并经流广播；
 - 无在途 run（已完成/从未跑）→ `200 {"status":"no_active_run"}`——**幂等成功不是错误**（Esc 与"恰好刚终结"的竞态是常态）；

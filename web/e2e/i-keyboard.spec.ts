@@ -12,7 +12,7 @@ test('palette 键盘唤起与关闭；Composer 键盘提交', async ({ page }) =
     { type: 'run/completed', data: {}, seq: 4, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
   ];
   // 终态后 viewing 迁移重读历史（#22 对账）——sessions/events fixture 提供同一真相
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [{ session_id: 'e2e-session-0002', event_count: 4, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '键盘提交', trace_id: null, trace_url: null }],
     events: frames,
     onSessionPost: (route) => fulfillSse(route, frames),
@@ -40,7 +40,7 @@ test('palette 的 Copy Run ID 复制 run id，而不是 session id', async ({ pa
     { type: 'model/completed', data: { content: '好。' }, seq: 4, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', step_id: 1, time: '2026-09-07T00:00:00Z' },
     { type: 'run/completed', data: {}, seq: 5, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [{ session_id: 'e2e-session-0002', event_count: 5, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '复制 run id', trace_id: null, trace_url: null }],
     events: frames,
   });
@@ -71,7 +71,7 @@ test('UI-06：palette 密度条目 CJK 间距 + 主题 hint 无箭头（真实�
     { type: 'user/message', data: { content: '密度' }, seq: 3, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', step_id: 1, time: '2026-09-07T00:00:00Z' },
     { type: 'run/completed', data: {}, seq: 4, session_id: 'e2e-session-0002', run_id: 'e2e-run-0002', time: '2026-09-07T00:00:00Z' },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [{ session_id: 'e2e-session-0002', event_count: 4, first_event_time: '2026-09-07T00:00:00Z', last_event_time: '2026-09-07T00:00:00Z', first_user_message: '键盘提交', trace_id: null, trace_url: null }],
     events: frames,
   });

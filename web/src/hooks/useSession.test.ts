@@ -10,7 +10,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, SessionMode } from '../types';
-import { createCommitCoalescer, decideCancel, decideStreamEnd, isSeqGap, isUnknownModelError, MAX_RECONNECT_ATTEMPTS, parseTruncated, reconnectDelayMs, shouldApplyRecoverResult, shouldApplyStreamFrame, UNKNOWN_MODEL_ERROR_TEXT } from './useSession';
+import { createCommitCoalescer, decideCancel, decideStreamEnd, EARLY_RESPONSE_WINDOW_MS, isSeqGap, isUnknownModelError, MAX_RECONNECT_ATTEMPTS, parseTruncated, raceEarlyResponse, reconnectDelayMs, shouldApplyRecoverResult, shouldApplyStreamFrame, UNKNOWN_MODEL_ERROR_TEXT } from './useSession';
 
 const ev = (type: string, session_id: string | null): AgentEvent => ({
   type,
@@ -292,5 +292,26 @@ describe('isUnknownModelError — 422 具名判定（#103，消魔法子串）',
     expect(isUnknownModelError('加载会话列表失败：422')).toBe(false);
     expect(isUnknownModelError(null)).toBe(false);
     expect(isUnknownModelError(undefined)).toBe(false);
+  });
+});
+
+describe('raceEarlyResponse — 攒包判别（交付层攒响应时区分「立即失败」与「正常流式」）', () => {
+  it('窗口内落定 → 返回该响应（422 / 短 JSON 确认走老语义）', async () => {
+    const res = new Response('{}', { status: 422 });
+    expect(await raceEarlyResponse(Promise.resolve(res), 50)).toBe(res);
+  });
+
+  it('窗外仍未落定 → null（判定为正常流式，调用方改走 WS）', async () => {
+    const never = new Promise<Response>(() => {});
+    expect(await raceEarlyResponse(never, 20)).toBeNull();
+  });
+
+  it('默认窗口即 EARLY_RESPONSE_WINDOW_MS 常量（不散落魔法数）', () => {
+    expect(EARLY_RESPONSE_WINDOW_MS).toBe(1200);
+  });
+
+  it('窗口内 reject → 原样抛出，不被吞成 null（否则真实失败会被当成功）', async () => {
+    const rejected = Promise.reject(new Error('401'));
+    await expect(raceEarlyResponse(rejected, 50)).rejects.toThrow('401');
   });
 });

@@ -23,8 +23,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
+import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
@@ -227,6 +228,30 @@ export function isUnknownModelError(message: string | null | undefined): boolean
  *  后端 detail 不是契约文本（Pydantic 校验与 HTTPException 的形状也不同），
  *  所以不做子串区分，统一提示「刷新选项后重试」。 */
 export const CONTINUE_PARAMS_ERROR_TEXT = '续聊参数无效（422）：请刷新选项后重试';
+
+/** 「立即失败 vs 正常流式」的判别窗口（毫秒）。
+ *
+ *  起因是交付层攒包：正常流式的响应头会被压到 run 结束才下发，而 4xx/422 是
+ *  **完整且极短**的响应，会立刻到达。给一个短窗：窗内返回 = 真失败（要读 detail）；
+ *  窗外才返回 = 正常流式，改走 WebSocket 接流（见 lib/wsStream.ts 的实测数据）。
+ *  取 1200ms：足够覆盖本地/沙箱直连时的正常往返，又不至于让用户多等。 */
+export const EARLY_RESPONSE_WINDOW_MS = 1200;
+
+/** 攒包判别：窗口内落定 → 返回该响应（立即失败 / 短 JSON 确认，按老语义处理）；
+ *  窗外 → 返回 null（判定为「正常流式」，调用方改走 WS）。纯函数便于单测。
+ *
+ *  ⚠ 返回 null **不代表**请求成功：它只说明「响应头还没到」。调用方必须为
+ *  这条悬挂的 promise 接上 rejection 通道（否则既是 unhandled rejection，
+ *  用户也会永远看不到真正的原因）。 */
+export function raceEarlyResponse(
+  pending: Promise<Response>,
+  windowMs: number = EARLY_RESPONSE_WINDOW_MS,
+): Promise<Response | null> {
+  return Promise.race([
+    pending,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), windowMs)),
+  ]);
+}
 
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -466,6 +491,17 @@ export function useSession() {
         let conv: ConversationState | null = initialConv;
         /** 本代际收到的帧数（含重放帧）——只给 resume 的零帧判定用。 */
         let framesSeen = 0;
+        /** 本**次 attach** 收到的帧数（每次接流清零）——给「一帧未投影就失败」
+         *  的判定用：那意味着压根没接上流，而不是半途断流。 */
+        let attachFrames = 0;
+        /** 重连接流已挂上、但**还没有任何证据**表明数据回来了。
+         *
+         *  WS 的接流是同步返回的（不像 HTTP 要等响应头），若照 HTTP 的时点收条，
+         *  「连接中断，正在重连…」会在 800ms 阈值前就被清掉——横幅退化成永不出现
+         *  （而它是这条降级路径上唯一的可见信号：走 SSE 兜底时帧要被攒到 run 结束，
+         *  用户可能几十秒看不到任何东西却毫无提示）。所以把「条」绑到**首帧**上：
+         *  快照/事件到了（或流干净收尾）才算真的接回来。 */
+        let awaitingEvidence = false;
         const coalescer = createCommitCoalescer(
           () => {
             if (conv && modeRef.current.kind === 'live') setConversation({ ...conv });
@@ -475,11 +511,18 @@ export function useSession() {
         );
         coalescerRef.current = coalescer;
 
+        /** 收条，并把「等重连首帧」的证据门一起复位（两者必须同进同出：
+         *  只清条不清门，800ms 后那条延迟计时器会把条又亮回来）。 */
+        const endReconnecting = () => {
+          awaitingEvidence = false;
+          setReconnecting(false);
+        };
+
         /** 正常收尾迁移（终态已达）。 */
         const finishLive = () => {
           coalescer.flush(); // 尾帧不丢（P1-3）
           coalescerRef.current = null;
-          setReconnecting(false);
+          endReconnecting();
           const sid = liveSidRef.current;
           setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
           refreshSessions();
@@ -491,6 +534,9 @@ export function useSession() {
           // 在途帧不再具有权威——若放行会用旧流残留覆盖刚加载的目标视图。
           if (!shouldApplyStreamFrame(modeRef.current, event)) return;
           framesSeen += 1; // 恢复探测用：见 onStreamEnd 的「零帧收流」
+          attachFrames += 1; // 接流是否真的接上过：见 onStreamError
+          // 数据回来了 = 重连真的成了（见 awaitingEvidence 的注释），收条。
+          if (awaitingEvidence) endReconnecting();
           lastFrameAtRef.current = Date.now();
           // T4 控制帧先于投影（seq=null 不入轮次）：backlog>1000 → 全量重建。
           // 'stream/truncated' 是 web 层控制帧（app.py 内联构造，不在 event.py
@@ -559,7 +605,7 @@ export function useSession() {
           // 历史已在恢复时装载过，界面无变化。
           if (opts?.resume && framesSeen === 0 && !terminalSeenRef.current) {
             coalescerRef.current = null;
-            setReconnecting(false);
+            endReconnecting();
             const sid = liveSidRef.current;
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             return;
@@ -581,10 +627,38 @@ export function useSession() {
             finishLive();
             return;
           }
-          scheduleReconnect(liveSidRef.current, (err as Error).message);
+          const sid = liveSidRef.current;
+          const reason = (err as Error).message;
+          // 一帧未投影 = **压根没接上流**，而不是半途断流。这时要分辨
+          // 「会话已不存在」与「瞬时故障」：前者退避重试多少次都是同一结局
+          // （这就是原 HTTP 分支 `status === 404` 的语义）。WS 的错误帧只带一句
+          // message（`snapshot failed`），HTTP SSE 的 404 又被降级层抹成流错误
+          // ——只有**存在性**是两套传输下口径一致的判据。
+          if (sid && attachFrames === 0) {
+            void sessionExists(sid).then((alive) => {
+              if (streamGenRef.current !== gen) return;
+              if (alive) {
+                scheduleReconnect(sid, reason);
+                return;
+              }
+              coalescerRef.current = null;
+              endReconnecting();
+              // 不在这里清 localStorage：live→viewing 会重跑历史装载，那条
+              // 404 → NotFoundError → 清键 + 回 idle，才是落得住的清理点。
+              setMode({ kind: 'viewing', sessionId: sid });
+              setError('会话不存在（404）——流已终止');
+              refreshSessions();
+            });
+            return;
+          }
+          scheduleReconnect(sid, reason);
         };
 
-        const attach = (streamRes: Response) => {
+        const attach = (streamRes: Response, opts?: { awaitingEvidence?: boolean }) => {
+          attachFrames = 0;
+          awaitingEvidence = opts?.awaitingEvidence === true;
+          // 首接流（提交/续聊/恢复）不是「断线重连」：条不该在场，清掉遗留状态。
+          if (!awaitingEvidence) endReconnecting();
           sseRef.current = consumeSSE(streamRes, onEvent, onStreamEnd, onStreamError);
         };
 
@@ -594,9 +668,10 @@ export function useSession() {
         // 实例模式）。额度 / 单飞 / 进展游标三份状态见 lib/reconnect.ts。
 
         /** 重连调度（契约 §3）：指数退避 + 额度上限（decideStreamEnd）。
-         *  404 = 会话不存在，立即放弃不空转。接流成功即释放单飞；额度复位
-         *  以 onEvent 观察到真进展为准（见上）。显式 cancel（T5）不经过这里
-         *  ——cancel-request 分支不 abort 流，终态帧经流广播驱动 finishLive。 */
+         *  会话已不存在由 onStreamError 的存在性探测拦下（不空转）；接流成功即
+         *  释放单飞；额度复位以 onEvent 观察到真进展为准（见上）。显式 cancel
+         *  （T5）不经过这里——cancel-request 分支不 abort 流，终态帧经流广播驱动
+         *  finishLive。 */
         const scheduleReconnect = (sid: string | null, reason: string) => {
           if (streamGenRef.current !== gen) return;
           const req = reconnectRef.current.request({
@@ -611,38 +686,35 @@ export function useSession() {
           }
           if (req.decision === 'give-up') {
             coalescerRef.current = null;
-            setReconnecting(false);
+            endReconnecting();
             setMode(sid ? { kind: 'viewing', sessionId: sid } : { kind: 'idle' });
             setError(`连接中断（${reason}）：重试 ${MAX_RECONNECT_ATTEMPTS} 次未成功`);
             refreshSessions();
             return;
           }
           // 断线状态条延迟显示（spec 03 §20）：瞬时重连不闪条——延迟到期仍
-          // 在挂起中才出现；接流成功即释放单飞，条不显示。
+          // 在挂起中（或在等这条新流给出第一个帧）才出现；数据到了即收条。
           setTimeout(() => {
-            if (streamGenRef.current === gen && reconnectRef.current.isPending) setReconnecting(true);
+            if (
+              streamGenRef.current === gen &&
+              (reconnectRef.current.isPending || awaitingEvidence)
+            ) {
+              setReconnecting(true);
+            }
           }, RECONNECT_BANNER_DELAY_MS);
           setTimeout(() => {
             if (streamGenRef.current !== gen) return;
             void (async () => {
               try {
                 const after = lastAppliedSeqRef.current ?? -1;
-                const streamRes = await streamSession(sid as string, after);
+                // 重连接流走**与首次接流同一条传输**（WS）：断流重连要补的同样是
+                // 「run 还在跑」的长流，用 HTTP SSE 会一并继承交付层攒包的毛病
+                // ——重连成功却要等 run 结束才看到帧。WS 不可用时由
+                // wsStreamResponse 内部降级回 SSE（见 lib/wsStream.ts）。
+                const streamRes = wsStreamResponse(sid as string, after);
                 if (streamGenRef.current !== gen) return;
                 reconnectRef.current.release();
-                if (streamRes.status === 404) {
-                  coalescerRef.current = null;
-                  setReconnecting(false);
-                  // 不在这里清 localStorage：live→viewing 会重跑历史装载，那条
-                  // 404 → NotFoundError → 清键 + 回 idle，才是落得住的清理点。
-                  setMode({ kind: 'viewing', sessionId: sid as string });
-                  setError('会话不存在（404）——流已终止');
-                  refreshSessions();
-                  return;
-                }
-                if (!streamRes.ok || !streamRes.body) throw new Error(`reconnect ${streamRes.status}`);
-                setReconnecting(false);
-                attach(streamRes);
+                attach(streamRes, { awaitingEvidence: true });
               } catch (e) {
                 reconnectRef.current.release(); // 放回调度口（额度仍受 decideStreamEnd 约束）
                 scheduleReconnect(sid, (e as Error).message || reason);
@@ -668,12 +740,13 @@ export function useSession() {
                 if (typeof e.seq === 'number' && (maxSeq === null || e.seq > maxSeq)) maxSeq = e.seq;
               }
               lastAppliedSeqRef.current = maxSeq;
-              const streamRes = await streamSession(sid, maxSeq ?? -1);
+              // 续传同样走 WS：重建之后要补的那一截还是「run 在跑」的长流。
+              // 条交给「首帧」收（重建期间那条由上面的 setReconnecting(true)
+              // 亮着）——续传流若一直不吐帧，条留在场才是对的。
+              const streamRes = wsStreamResponse(sid, maxSeq ?? -1);
               if (streamGenRef.current !== gen) return;
               reconnectRef.current.release();
-              if (!streamRes.ok || !streamRes.body) throw new Error(`reconnect ${streamRes.status}`);
-              setReconnecting(false);
-              attach(streamRes);
+              attach(streamRes, { awaitingEvidence: true });
             } catch (e) {
               reconnectRef.current.release();
               scheduleReconnect(sid, (e as Error).message || 'full rebuild failed');
@@ -725,16 +798,62 @@ export function useSession() {
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId: null });
       try {
-        const res = await startSession(payload);
-        // 422 的旧语义：Composer 唯一的 422 来源是"模型不可用"，App 据这句话刷新
-        // 模型目录 —— 保持逐字节不变。确认面（ownError）里 422 更可能是 cwd 校验
-        // 失败，必须让后端 detail 说话（它才是可行动的那句）。
-        if (res.status === 422 && !opts?.ownError) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
-        if (!res.ok || !res.body) {
-          const detail = await startSessionErrorDetail(res);
-          throw new Error(detail || `Start failed: ${res.status}`);
+        // 交付层（EdgeOne / CloudStudio Gateway）会把整个 SSE 响应攒到**流结束**
+        // 才下发（实测 `POST /api/sessions` 的响应头要 44.2s 才到 ≈ run 全长），
+        // 于是 `await startSession(...)` 在 run 跑完前不 resolve——前端只可能在答案
+        // 答完之后才拿到第一帧，打字机效果不可能出现。
+        // 对策：先取会话 id 基线 → 发出 POST 但**不 await** → 只有「短窗内就返回」
+        // 才当成立即失败（422/4xx 是非流式，会立刻到）→ 否则认领新会话，改用
+        // WebSocket 接流（同一交付链路上实测逐帧到达，见 lib/wsStream.ts）。
+        const baseline = await sessionIdBaseline();
+        const started = startSession(payload);
+        if (baseline === null) {
+          // 会话列表读不到（降级态）：「基线 + 差分」认领新会话的前提就没了。
+          // 退回原行为——老老实实等 POST 响应。交付层攒包时首帧会晚到，但
+          // **接不错会话**；认领错了会把用户的既有会话当新建的接上去。
+          const res = await started;
+          if (res.status === 422 && !opts?.ownError) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
+          if (!res.ok || !res.body) {
+            const detail = await startSessionErrorDetail(res);
+            throw new Error(detail || `Start failed: ${res.status}`);
+          }
+          attachLiveStream(res, gen, null);
+          return null;
         }
-        attachLiveStream(res, gen, null);
+        const res = await raceEarlyResponse(started);
+        if (res) {
+          // 422 的旧语义：Composer 唯一的 422 来源是"模型不可用"，App 据这句话刷新
+          // 模型目录 —— 保持逐字节不变。确认面（ownError）里 422 更可能是 cwd 校验
+          // 失败，必须让后端 detail 说话（它才是可行动的那句）。
+          if (res.status === 422 && !opts?.ownError) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
+          if (!res.ok || !res.body) {
+            const detail = await startSessionErrorDetail(res);
+            throw new Error(detail || `Start failed: ${res.status}`);
+          }
+          attachLiveStream(res, gen, null);
+          return null;
+        }
+        // 窗外落定 = 判定为正常流式。这条 promise 仍会悬挂到 run 结束（成功）
+        // 或中途 reject（401 / 网络故障 / 后端 5xx）——那种失败比「认领超时」
+        // 精确得多，捕获下来供认领失败时报出去；同时也接住 rejection，不让它
+        // 变成 unhandled rejection。（用属性承载而不是普通局部变量：TS 会把
+        // 「初值 null 且只在本作用域读」的 let 收窄成 null，异步写入看不见。）
+        const late = { failure: null as Error | null };
+        started.catch((e) => {
+          late.failure = e instanceof Error ? e : new Error(String(e));
+        });
+        let sid: string;
+        try {
+          sid = await discoverNewSessionId(baseline);
+        } catch (e) {
+          throw late.failure ?? e; // POST 的真实失败原因优先于「认领超时」
+        }
+        if (streamGenRef.current !== gen) return '提交已被新的会话取代';
+        // 认领到 sid 即确立目标：liveSidRef 是重连 / 停摆检查 / 取消的会话锚点，
+        // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为
+        // null，重连决策会把「不认识这个会话」判成 give-up（假错误横幅）。
+        liveSidRef.current = sid;
+        attachLiveStream(wsStreamResponse(sid), gen, null);
         return null;
       } catch (e) {
         // 过期请求迟到失败：丢弃，不污染新会话（调用方也不该当成功——返回一句
@@ -796,18 +915,13 @@ export function useSession() {
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId: sid });
       try {
-        const res = await streamSession(sid, afterSeq);
-        if (streamGenRef.current !== gen) return; // 期间切走/取消：丢弃
-        if (res.status === 404) {
-          // 会话在装载与接流之间消失。这里**不写** writeStoredSessionId(null)：
-          // 马上要回到 viewing(sid)，持久化 effect 会立刻把 sid 写回去，清了也是
-          // 白清。真正已被删的会话由下面这一步兜住——mode 变更会重跑历史装载，
-          // getSessionEvents 404 → NotFoundError → 清键 + 回 idle，那次落得住。
-          setMode({ kind: 'viewing', sessionId: sid });
-          return;
-        }
-        if (!res.ok || !res.body) throw new Error(`resume ${res.status}`);
-        attachLiveStream(res, gen, initialConv, { resume: true });
+        // 交付层把 `GET /stream` 的响应头也压到 run 结束（实测 41.6s）——原实现
+        // `await streamSession(...)` 会让刷新后的用户在整个 run 期间什么都看不到。
+        // sid 与游标都已知 → 直接走 WS（快照按 afterSeq 只补本地缺的那一截）。
+        // 会话已删的 404 语义由历史装载路径兜住：mode 变更会重跑装载，
+        // `getSessionEvents` 404 → NotFoundError → 清键 + 回 idle（见下方原注释）。
+        if (streamGenRef.current !== gen) return;
+        attachLiveStream(wsStreamResponse(sid, afterSeq), gen, initialConv, { resume: true });
       } catch (e) {
         if (streamGenRef.current !== gen) return;
         // 历史已渲染，这里只报告「继续接收」失败——不把视图打回空态。
@@ -854,12 +968,42 @@ export function useSession() {
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId });
       try {
-        const res = await apiSendMessage(sessionId, {
+        // 同 submitTask：launched 分支的 SSE 响应体会被交付层攥到 run 结束，不能干等。
+        // queued/steered 是 JSON 确认（极短）→ 短窗内必返回；窗外 = launched，
+        // 此时 sid 已知，直接用 WS 接流。
+        const pending = apiSendMessage(sessionId, {
           content,
           mode: 'queue',
           max_steps: opts?.maxSteps ?? 10,
           ...(opts?.amend ?? {}),
         });
+        const res = await raceEarlyResponse(pending);
+        if (res === null) {
+          // launched → 直驱新 run，用 WS 消费（同 POST /api/sessions 形状）。
+          //
+          // 游标必须带（不能从头发）：WS 快照会重放**整段历史**，而其中上一轮的
+          // 终态事件会让 onEvent 把 terminalSeenRef 置真（那一步在 seenSeqs 去重门
+          // **之前**，重放的旧终态照样算数）。于是新 run 还没跑完，本地就认为
+          // 「已收口」——中途断流不再重连、停摆检查也失效，用户被静默丢在半路。
+          //
+          // 游标取自**本会话**的对话状态（seq 每会话单调，契约 C5）：不能读
+          // lastAppliedSeqRef——它是跨会话的单个槽位、历史装载不刷新它，读到别的
+          // 会话的游标会把本会话的事件整段跳掉。会话不匹配时退回 -1（从头发，
+          // 由 seenSeqs 幂等门吸收重复）。
+          const conv = conversationRef.current;
+          const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+          lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
+          attachLiveStream(wsStreamResponse(sessionId, cursor), gen, conversationRef.current);
+          // 这条 promise 仍会悬挂到 run 结束；中途 reject（401 / 网络故障）时
+          // 消息其实没被受理，必须说出来——顺带接住 rejection 免得变成 unhandled。
+          void pending.catch((e) => {
+            if (streamGenRef.current !== gen) return;
+            streamGenRef.current += 1;
+            setMode({ kind: 'viewing', sessionId });
+            setError(`续聊失败：${(e as Error).message}`);
+          });
+          return;
+        }
         if (res.status === 422) throw new Error(CONTINUE_PARAMS_ERROR_TEXT);
         if (res.status === 409) {
           // T8 #138：409 = 存在需人工裁决的 UNKNOWN Operation。
@@ -1131,25 +1275,89 @@ export function useSession() {
       const gen = streamGenRef.current;
       try {
         // 最多等 3 次（1s 间隔）：409 = 在途 run 未到终态，等它收口。
-        let res: Response | null = null;
+        //
+        // 每次都用「攒包判别」包住（同 sendFollowUp）：launched 分支的 SSE 响应体
+        // 会被交付层攥到 run 结束才下发，`await` 它会把这个按钮变成「点了没反应，
+        // 直到整轮答案答完」。idle / 409 / 404 都是**完整且极短**的 JSON，攒不住，
+        // 短窗内必到——所以「窗外落定」只可能是 launched。
+        //
+        // 409 有**两个**来源（后端 `POST /queue/flush` 的错误面）：ActiveRunConflict
+        // （等 run 收口即可）与 RecoveryConflict（崩溃遗留的 UNKNOWN 高风险操作，
+        // 要人工裁决——重试其实无意义，但重试是既有行为，本票不改）。两者都说得通的
+        // 那句话只有后端的 detail，所以如实转述它，不替后端编一句。
+        const conflictDetail = async (res: Response): Promise<string> => {
+          try {
+            return ((await res.json()) as { detail?: string })?.detail ?? '';
+          } catch {
+            return '';
+          }
+        };
         for (let i = 0; i < 3; i++) {
-          res = await flushSessionQueue(sessionId);
-          if (res.status !== 409) break;
-          await new Promise((r) => setTimeout(r, 1000));
+          const pending = flushSessionQueue(sessionId);
+          const res = await raceEarlyResponse(pending);
+          if (res === null) {
+            // launched：后端已直驱新 run，改用 WS 接流（交付层攒不住 WS 帧）。
+            //
+            // 游标取**本会话**对话的真实 max seq，理由同 sendFollowUp：WS 快照会
+            // 重放整段历史，其中上一轮的终态事件会让 onEvent 把 terminalSeenRef
+            // 置真（那一步在 seenSeqs 去重门之前），于是新 run 还没跑完本地就认为
+            // 「已收口」——中途断流不再重连、停摆检查失效。
+            const conv = conversationRef.current;
+            const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+            lastAppliedSeqRef.current = cursor;
+            setMode({ kind: 'live', sessionId });
+            attachLiveStream(wsStreamResponse(sessionId, cursor), gen, conversationRef.current);
+            // 这条 promise 仍会悬挂到 run 结束。**窗外落定必须照样消费**：判别是
+            // 推断（idle/404/409 都是极短 JSON，攒不住），推断错了不能静默——
+            // 迟到的 idle 会白白接流到假「连接中断」，迟到的 409/404 会被吞成
+            // 无反馈（用户以为投出去了）。所以窗外只认「非流式回执 = 判错了」。
+            const lateOutcome = async (late: Response) => {
+              if (streamGenRef.current !== gen) return;
+              const ct = late.headers.get('content-type') ?? '';
+              if (late.ok && ct.includes('text/event-stream')) return; // 真是 launched：流照旧
+              const detail = late.status === 409 ? await conflictDetail(late) : '';
+              if (streamGenRef.current !== gen) return; // 读 detail 期间又换了代际
+              streamGenRef.current += 1;
+              sseRef.current?.cancel(); // 收掉那条接错的流（含服务端订阅）
+              setMode({ kind: 'viewing', sessionId });
+              if (late.ok) return; // 迟到的 idle：空队列，与窗内 idle 同语义（静默）
+              setError(
+                `投递失败：${detail || (late.status === 404 ? '会话不存在' : `flush ${late.status}`)}`,
+              );
+            };
+            void pending.then(lateOutcome).catch((e) => {
+              if (streamGenRef.current !== gen) return;
+              streamGenRef.current += 1;
+              sseRef.current?.cancel(); // 停掉那条接不上的流，别留服务端订阅
+              setMode({ kind: 'viewing', sessionId });
+              setError(`投递失败：${(e as Error).message}`);
+            });
+            return;
+          }
+          if (res.status === 409) {
+            // 在途 run 未到终态：等它收口再投（第三次仍是 409 就如实报出来）。
+            if (i === 2) {
+              const detail = await conflictDetail(res);
+              throw new Error(
+                detail || '投递被拒绝（409）：在途 run 未收口，或存在需人工裁决的遗留操作',
+              );
+            }
+            await new Promise((r) => setTimeout(r, 1000));
+            continue;
+          }
+          if (res.status === 404) {
+            throw new NotFoundError('会话不存在');
+          }
+          if (!res.ok || !res.body) throw new Error(`flush ${res.status}`);
+          const ct = res.headers.get('content-type') ?? '';
+          if (ct.includes('text/event-stream')) {
+            // launched SSE：消费机器接管（queue/consumed 帧经增量通道摘除条目）。
+            setMode({ kind: 'live', sessionId });
+            attachLiveStream(res, gen, conversationRef.current);
+          }
+          // status=idle：空队列，静默返回（无动作即无反馈）。
+          return;
         }
-        if (!res) return;
-        if (res.status === 404) {
-          throw new NotFoundError('会话不存在');
-        }
-        if (res.status === 409) throw new Error('仍有在途 run，稍后再试');
-        if (!res.ok || !res.body) throw new Error(`flush ${res.status}`);
-        const ct = res.headers.get('content-type') ?? '';
-        if (ct.includes('text/event-stream')) {
-          // launched SSE：消费机器接管（queue/consumed 帧经增量通道摘除条目）。
-          setMode({ kind: 'live', sessionId });
-          attachLiveStream(res, gen, conversationRef.current);
-        }
-        // status=idle：空队列，静默返回（无动作即无反馈）。
       } catch (e) {
         if (streamGenRef.current !== gen) return;
         streamGenRef.current += 1;

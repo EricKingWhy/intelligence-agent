@@ -60,7 +60,7 @@ async function enterDir(page: Page, name: string) {
 test('AC8/AC9/AC10 打开即列根（无当前目录 → 两个按钮禁用）；点选进入、向上、回填输入框', async ({
   page,
 }) => {
-  routeApi(page, baseMock());
+  await routeApi(page, baseMock());
   await openCreateDialog(page);
 
   // AC8：根模式 —— path/parent 都是 null，"当前在根"，没有可选择的目录
@@ -101,7 +101,7 @@ test('AC8/AC9/AC10 打开即列根（无当前目录 → 两个按钮禁用）�
 test('AC10 手改上方输入框回车 → 浏览器跳到该路径（反方向同步）；浏览器自己的路径条同理', async ({
   page,
 }) => {
-  routeApi(page, baseMock());
+  await routeApi(page, baseMock());
   await openCreateDialog(page);
 
   await formPath(page).fill('D:\\repos\\my-project');
@@ -133,7 +133,7 @@ test('AC10 手改上方输入框回车 → 浏览器跳到该路径（反方向�
 test('AC11 「选择此目录」回执 + 用它注册项目（POST 体的 path 就是这个目录）', async ({
   page,
 }) => {
-  routeApi(page, baseMock());
+  await routeApi(page, baseMock());
   const bodies: Record<string, unknown>[] = [];
   page.on('request', (req) => {
     if (req.method() !== 'POST') return;
@@ -163,7 +163,7 @@ test('AC11 「选择此目录」回执 + 用它注册项目（POST 体的 path �
 });
 
 test('AC12 截断如实提示：超过上限时列出前 N 条并说明只列了一部分', async ({ page }) => {
-  routeApi(page, baseMock({ hostDirs: { ...TREE, maxEntries: 2 } }));
+  await routeApi(page, baseMock({ hostDirs: { ...TREE, maxEntries: 2 } }));
   await openCreateDialog(page);
 
   // 直接跳进 D:\data\logs（3 个子目录，上限 2）——截断的是**这一层**的列举
@@ -177,7 +177,7 @@ test('AC12 截断如实提示：超过上限时列出前 N 条并说明只列了
 });
 
 test('AC12 403/404/422 就地显示后端 detail 原文（不翻译成"加载失败"）', async ({ page }) => {
-  routeApi(
+  await routeApi(
     page,
     baseMock({
       hostDirsErrors: {

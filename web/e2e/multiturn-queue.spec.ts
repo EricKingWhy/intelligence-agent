@@ -46,7 +46,7 @@ test('T11：编辑最新一条用户消息 → supersedes_seq 进 payload → �
   // 全量故事，重放得出「旧轮消失」的同一视图。
   const durableLog = [...FIRST_FRAMES];
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: durableLog,
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -102,7 +102,7 @@ test('T11b：非最新消息的编辑按钮置灰（title 说明），不可点'
     { type: 'run/completed', data: {}, seq: 7, session_id: 'mt-session-1', run_id: 'mt-run-2', time: '2026-09-15T00:00:03Z' },
   ];
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: TWO_TURN_FRAMES,
     onSessionPost: (route) => fulfillSse(route, TWO_TURN_FRAMES),
@@ -126,7 +126,7 @@ test('T11b：非最新消息的编辑按钮置灰（title 说明），不可点'
 /* ── T12：队列条可见可操作（ADR-0030 §5.2）── */
 
 test('T12：排队项显示徽标与摘要；取消后移除；空队列不渲染', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -155,7 +155,7 @@ test('T12：排队项显示徽标与摘要；取消后移除；空队列不渲�
 });
 
 test('T12b：首屏补齐（GET /queue）→ 队列条渲染排队/引导徽标与摘要', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -191,7 +191,7 @@ test('T12b：首屏补齐（GET /queue）→ 队列条渲染排队/引导徽标�
 
 test('T12c：「立即」→ POST /messages 带 mode=steer 且带 queue_id（不重复投递）', async ({ page }) => {
   const bodies: Record<string, unknown>[] = [];
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -231,7 +231,7 @@ test('T12c：「立即」→ POST /messages 带 mode=steer 且带 queue_id（不
 
 test('T12d：「编辑」就地改内容 → POST /messages 带 queue_id + 新内容', async ({ page }) => {
   const bodies: Record<string, unknown>[] = [];
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),

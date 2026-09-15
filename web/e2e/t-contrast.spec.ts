@@ -58,7 +58,7 @@ const EVENTS = [
 ];
 
 async function openWorkspace(page: Page, theme: 'dark' | 'light'): Promise<void> {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [ROW],
     events: EVENTS,
     models: MODELS,
