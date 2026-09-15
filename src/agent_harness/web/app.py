@@ -48,6 +48,7 @@ from agent_harness.model.config import (
     _pick_capabilities,
     parse_model_catalog,
 )
+from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
@@ -87,10 +88,7 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
 )
 from agent_harness.web import artifacts
-from agent_harness.web.context_usage import (
-    build_context_usage_payload,
-    skills_provider_tokens,
-)
+from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import http_error
 from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
@@ -467,17 +465,9 @@ class AppState:
         self._registry: CapabilityRegistry | None = None
         self._wiring: CapabilityWiring | None = None
         # #203 / ADR-0032：自定义供应商存储（全局配置实体，与 env catalog 并存）。
-        # 真实凭据后端（keyring）；测试可经 patch 换 MemoryCredentialStore。
-        from agent_harness.model.config import PROVIDER_PRESETS
-        from agent_harness.model.provider_store import (
-            ProviderStore,
-            SystemCredentialStore,
-        )
-
-        self.provider_store = ProviderStore(
-            Path(settings.provider_store_path), SystemCredentialStore(),
-            builtin_ids=frozenset(PROVIDER_PRESETS),
-        )
+        # 单一构造入口 ProviderStore.for_settings：真实凭据后端（keyring），
+        # 测试可经 patch 换 MemoryCredentialStore。
+        self.provider_store = ProviderStore.for_settings(settings)
         self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
 
     def _cache_context_snapshot(
@@ -597,19 +587,10 @@ async def _validate_amend_for_existing_session(
     """
     await _validate_wired_context_providers(state, amend.context_providers)
     if amend.model is not None:
-        from agent_harness.model.provider_store import (
-            ProviderStore,
-            SystemCredentialStore,
-        )
-
         try:
-            # 终审 P1 修复：统一解析点（catalog + 自定义供应商 fallback）——
-            # /api/models 广告的自定义条目此前在这里被 from_catalog 422。
-            store = ProviderStore(
-                Path(state.settings.provider_store_path),
-                SystemCredentialStore(),
-                builtin_ids=frozenset(),
-            )
+            # 统一解析点（catalog + 自定义供应商 fallback）：/api/models 广告的
+            # 自定义条目必须在这里就能解析，否则"UI 能选、一提交就 422"。
+            store = ProviderStore.for_settings(state.settings)
             ModelConfig.resolve_selection(state.settings, amend.model, store)
         except ConfigError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -619,6 +600,33 @@ async def _validate_amend_for_existing_session(
 #: 该值 → 单帧 stream/truncated 控制事件后收流，客户端走 GET /events 全量
 #: 重建后带 after_seq=latest_seq 重连（02 §10.4 简化版；snapshot 层 DEFER）。
 STREAM_REPLAY_MAX_EVENTS = 1000
+
+
+def _run_stream_response(
+    state: Any, run: Any, subscriber: Any, session_id: str,
+    *, headers: dict[str, str] | None = None,
+) -> EventSourceResponse:
+    """detached run 的 live SSE 响应（**唯一**实现）。
+
+    三个调用点共用：`POST /api/sessions`（创建即跑）、`POST /messages` 的
+    launched 分支、`POST /queue/flush`。语义必须一致（ADR-0030 §4.6 明确要求
+    flush 与 messages 同形），各写一遍就会在「谁 unsubscribe、谁处理 DONE、
+    断连怎么收尾」这些细节上漂移——而这正是上一版留下的三份逐字副本。
+
+    断连时 EventSourceResponse 取消本 generator → finally unsubscribe（run 不受
+    影响，ADR-0016 detached）；run 终结 → DONE 哨兵 → 流干净收尾。
+    """
+    async def event_generator():
+        try:
+            while True:
+                event = await subscriber.queue.get()
+                if event is state.run_manager.DONE:
+                    break
+                yield _event_to_sse_dict(event, session_id)
+        finally:
+            run.unsubscribe(subscriber)
+
+    return EventSourceResponse(event_generator(), headers=headers)
 
 
 def _render_model_option(
@@ -1249,22 +1257,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 },
             )
 
-        async def event_generator():
-            """SSE 事件源：消费订阅队列，转成 SSE 帧。
-
-            断连时 EventSourceResponse 取消本 generator → finally unsubscribe
-            （run 不受影响）；run 终结 → sentinel → 流干净收尾。
-            """
-            try:
-                while True:
-                    event = await subscriber.queue.get()
-                    if event is state.run_manager.DONE:
-                        break
-                    yield _event_to_sse_dict(event, session.session_id)
-            finally:
-                run.unsubscribe(subscriber)
-
-        return EventSourceResponse(event_generator(), headers=headers)
+        return _run_stream_response(
+            state, run, subscriber, session.session_id, headers=headers,
+        )
 
     @app.get("/api/sessions/{session_id}/stream")
     async def stream_session(session_id: str, after_seq: int = -1):
@@ -1361,20 +1356,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
 
         session_id = result.session.session_id
-        run, subscriber = result.run, result.subscriber
-        state = app.state.agent
-
-        async def event_generator():
-            try:
-                while True:
-                    event = await subscriber.queue.get()
-                    if event is state.run_manager.DONE:
-                        break
-                    yield _event_to_sse_dict(event, session_id)
-            finally:
-                run.unsubscribe(subscriber)
-
-        return EventSourceResponse(event_generator())
+        return _run_stream_response(
+            app.state.agent, result.run, result.subscriber, session_id,
+        )
 
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:
@@ -1466,18 +1450,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
 
         # builder 快照 + 工具定义：优先在途 run；run 已终结 ⇒ 收口缓存；都没有
-        # ⇒ no_data（不伪造，也不重建一个假 registry 来算工具桶）。
+        # ⇒ no_data（不伪造，也不重建一个假 registry 来算工具桶）。两者必须同源
+        # 取（同一个 runtime 的 builder + registry），分开取会得到两个真相。
         builder_snapshot = None
         tool_definitions: list[dict[str, Any]] = []
         active = app.state.agent.run_manager.get_active(session_id)
         if active is not None and active.runtime is not None:
             builder = active.runtime._context_builder
             if builder is not None:
-                # 终审 P1 修复：共享 helper（RunManager 收口缓存用同一份）——
-                # 私有副本曾只在这里可见，收口快照的技能桶静默折进残差。
-                skills_tokens = skills_provider_tokens(builder)
-                builder_snapshot = builder.usage_snapshot(
-                    active.session, skills_tokens=skills_tokens)
+                builder_snapshot = builder.usage_snapshot(active.session)
             tool_definitions = active.runtime.registry.export_model_definitions()
         else:
             cached = app.state.agent.context_snapshots.get(session_id)
@@ -1777,25 +1758,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     ) -> EventSourceResponse:
         """launched 分支的统一 SSE 响应（/messages 与 /queue/flush 共用）。
 
-        两处必须是**同一段代码**：ADR-0030 §4.6 要求 flush 与 messages 的
-        launched 语义完全一致（打开同样的 detached-run 流），各写一遍就会在
-        「谁 unsubscribe、谁处理 DONE」这类细节上漂移。
+        与创建端点同一段实现（`_run_stream_response`）：ADR-0030 §4.6 要求 flush
+        与 messages 的 launched 语义完全一致（打开同样的 detached-run 流）。
         """
-        run = result.run
-        subscriber = result.subscriber
-        state = app.state.agent
-
-        async def event_generator():
-            try:
-                while True:
-                    event = await subscriber.queue.get()
-                    if event is state.run_manager.DONE:
-                        break
-                    yield _event_to_sse_dict(event, session_id)
-            finally:
-                run.unsubscribe(subscriber)
-
-        return EventSourceResponse(event_generator())
+        return _run_stream_response(
+            app.state.agent, result.run, result.subscriber, session_id,
+        )
 
     @app.get("/api/sessions/{session_id}/queue")
     async def get_session_queue(session_id: str) -> dict[str, list[dict[str, str]]]:

@@ -285,6 +285,10 @@ class RunManager:
             # #200：run 收口时把 builder 快照缓存下来（最后 build 是当前事实，
             # run 终结后 get_active=None，端点从缓存读——不重建假 registry）。
             self._capture_context_snapshot(run, runtime)
+            # 快照取完即释放 runtime 引用：`_runs` 每会话保留一条 ManagedRun 终身，
+            # 留着 runtime 就等于把模型客户端 / registry / sandbox 句柄一起钉住
+            # （终端 run 的 runtime 再无读者——端点只读在途 run 的）。
+            run.runtime = None
             await self._notify_run_terminal(run.session.session_id)
 
     def _capture_context_snapshot(self, run: ManagedRun, runtime: AgentRuntime) -> None:
@@ -298,16 +302,8 @@ class RunManager:
         if builder is None:
             return
         try:
-            # 终审 P1 修复：收口快照带 skills_tokens——live 端点（app.py）算它，
-            # 收口缓存不算的话技能桶静默折进"其他"残差，六个桶在 live 与缓存两个
-            # 视图里不一致（run 终结后再开看板是常见路径）。同一份 helper（web 层
-            # _skills_provider_tokens 的依赖倒置：RunManager 不认识 app.py，这里
-            # 通过 builder 协议取同一文本）。
-            from agent_harness.web.context_usage import skills_provider_tokens
-
             capture(run.session.session_id,
-                    builder.usage_snapshot(
-                        run.session, skills_tokens=skills_provider_tokens(builder)),
+                    builder.usage_snapshot(run.session),
                     runtime.registry.export_model_definitions())
         except Exception:
             logging.getLogger(__name__).debug(

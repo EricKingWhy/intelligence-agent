@@ -106,16 +106,14 @@ def build_context_usage_payload(
     messages = builder_snapshot["messages"]
     system_prompt = builder_snapshot["system_prompt"]
     skills = builder_snapshot["skills"]
-    # 残差桶（design §3.2"其他"）：builder 记账之外的**非工具**部分（provider
-    # 注入 + 运行期快照 + 未归类）。工具两组是**独立桶**（T4：六桶互斥、
-    # 可求和），不进残差。负值（memo 与投影偏差）如实归 0，不造负数。
+    # 残差桶（design §3.2"其他"）：builder 上报的**非工具**未归类部分（provider
+    # 注入 + 运行期快照）。工具两组是**独立桶**（T4：六桶互斥、可求和），不进残差。
+    # 负值（memo 与投影偏差）如实归 0，不造负数。
     other = max(builder_snapshot["other"], 0)
-    # 求和不变式（T4）：used_tokens = Σ六桶。builder 口径的 used 不含工具
-    # schema（端点层新算），把 used 重标定为六桶之和——差额（若有）并入残差，
-    # 绝不静默丢弃。
+    # 求和不变式（T4）：used_tokens = Σ六桶。builder 口径的 used 不含工具 schema
+    # （端点层新算），故在**这里**把工具两组并入（builder 是唯一知道真实注入的地方，
+    # 它给不出工具桶——工具定义在 registry，属于装配层）。
     tools_total = tools["system"] + tools["mcp"]
-    other += max(builder_snapshot["used_tokens"]
-                 - messages - system_prompt - skills - builder_snapshot["other"], 0)
     used_tokens = messages + system_prompt + skills + other + tools_total
 
     return {
@@ -136,35 +134,3 @@ def build_context_usage_payload(
         "cache": cache_summary(events),
         "state": "ok",
     }
-
-
-def skills_provider_tokens(builder: Any) -> int:
-    """skills provider 注入文本的 token 估算（#200 技能桶，设计稿 §3.2）。
-
-    skills provider 是独立 SystemMessage（`SkillCatalogContextProvider`），
-    目录文本终身不变——按 provider 类型识别（isinstance，不靠 name 猜），
-    对**与 provider.select 同一份文本**（`_DATA_FRAME` + 各条目行）估算。
-    非 skills provider（记忆等）归残差桶，不在这里算。
-
-    终审 P1 修复前这里只有 app.py 的私有副本 `_skills_provider_tokens`（live
-    端点在用），RunManager 的收口缓存调不到——技能桶在 run 终结后静默折进
-    "其他"残差，live 与缓存两个视图不一致。现在两个调用点共用这一份。
-    """
-    from langchain_core.messages import SystemMessage
-
-    from agent_harness.context.tokens import estimate_message_tokens
-    from agent_harness.skills.context_provider import SkillCatalogContextProvider
-
-    for provider in builder.context_providers:
-        if isinstance(provider, SkillCatalogContextProvider):
-            entries = provider._capability.catalog()
-            if not entries:
-                return 0
-            lines = [provider._DATA_FRAME]
-            for e in entries:
-                line = f"- {e.name}: {e.description}"
-                if e.when_to_use:
-                    line += f"（何时用：{e.when_to_use}）"
-                lines.append(line)
-            return estimate_message_tokens([SystemMessage(content="\n".join(lines))])
-    return 0

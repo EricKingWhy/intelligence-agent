@@ -207,15 +207,9 @@ async def build_runtime(
         config = ModelConfig.from_settings(settings)
     else:
         try:
-            # 局部 import 只引 provider_store 三件套——**不**引 pathlib.Path：
-            # 局部 Path 会遮蔽模块级 Path，`_render_runtime_context` 的
-            # `Path.cwd()` 会炸成 NameError（全量回归实证：run 起跑即失败）。
-            from agent_harness.model.provider_store import (
-                ProviderStore,
-                SystemCredentialStore,
-            )
+            from agent_harness.model.provider_store import ProviderStore
 
-            store = ProviderStore(Path(settings.provider_store_path), SystemCredentialStore())
+            store = ProviderStore.for_settings(settings)
             config = ModelConfig.resolve_selection(settings, model_name, store)
         except ConfigError as error:
             raise error from None

@@ -12,6 +12,11 @@
 本模块不 import keyring 的具体后端——真实后端由 `SystemCredentialStore` 在调用
 时经 keyring 门面访问，测试注入 `MemoryCredentialStore`（替换 Fake Provider，
 §9.4 Goal-Driven：加 Provider 至少有替换 Fake 的测试）。
+
+与 `model/config.py` 的依赖方向：config → 本模块（`resolve_selection` 走
+`from_custom_provider`），本模块 → config 的符号（PROVIDER_PRESETS）只在函数内
+局部 import。契约是**不出现模块级互相 import**（会成环）；就近 import 是这条
+单向依赖的落地方式，不是随手为之。
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import re
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 logger = logging.getLogger("agent_harness.model")
@@ -159,8 +165,30 @@ class ProviderStore:
         self._path = Path(path)
         self.credentials = credentials
         # 内置 preset id 集合（ADR-0032 §3.2 合并规则的"同 id = 覆盖内置"判据）。
-        # 由装配层传入（model.config.PROVIDER_PRESETS），本模块不反向 import config。
+        # 默认由 `for_settings` 填 PROVIDER_PRESETS；直接构造（测试）可显式指定。
         self._builtin_ids = frozenset(builtin_ids)
+
+    @classmethod
+    def for_settings(cls, settings: Any, credentials: Credentials | None = None) -> ProviderStore:
+        """按 Settings 构造标准 store——**唯一构造入口**（ADR-0032）。
+
+        `path` 取 `settings.provider_store_path`；`credentials` 缺省为真实
+        keyring 后端（测试注入 `MemoryCredentialStore`）；`builtin_ids` 恒取内置
+        preset 全集。
+
+        此前四处调用点各写一遍 `ProviderStore(Path(settings.provider_store_path), …)`，
+        且 `builtin_ids` 三种取值（全集 / 空集 / 省略）——同一份配置对象在不同路径
+        上语义不同（`kind` 派生、`create()` 的 models 并集都读它）。收敛到这里，
+        装配层与校验闸拿到的是**同一个** store 语义。
+        """
+        from agent_harness.model.config import PROVIDER_PRESETS
+
+        if credentials is None:
+            credentials = SystemCredentialStore()
+        return cls(
+            Path(settings.provider_store_path), credentials,
+            builtin_ids=frozenset(PROVIDER_PRESETS),
+        )
 
     # ── 持久化 ──
 
@@ -269,7 +297,7 @@ class ProviderStore:
             elif isinstance(api_key, str) and api_key:
                 self._require_credential_backend()
                 self.credentials.set(provider_id, api_key)
-            merged["updated_at"] = _now()
+            merged["updated_at"] = utc_now_iso()
             providers[index] = merged
             self._save(providers)
             return self._with_derived(merged)
@@ -325,7 +353,7 @@ class ProviderStore:
                 raise ProviderStoreError("models 每条必须有非空 model_id")
             normalized_models.append({"model_id": model["model_id"],
                                       **({"label": model["label"]} if model.get("label") else {})})
-        now = _now()
+        now = utc_now_iso()
         return {
             "id": provider_id,
             "label": body.get("label") or "",
@@ -361,5 +389,11 @@ def resolve_provider_target(
     return None
 
 
-def _now() -> str:
+def utc_now_iso() -> str:
+    """当前 UTC 时刻（ISO 8601）。
+
+    provider 配置的 `created_at` / `updated_at` 与连接测试的 `last_test.at`
+    共用这一个——两处各写一份 `datetime.now(UTC).isoformat()` 就是给"同一字段
+    两种格式"留门（#203 首版 model_providers 里确有一份私有副本）。
+    """
     return datetime.now(UTC).isoformat()

@@ -307,7 +307,7 @@ def test_t4_sum_invariant():
 
 
 def test_t4_no_negative_residual():
-    """memo 与投影有偏差时残差如实归 0（不造负数）。"""
+    """残差桶如实归 0（不造负数）。"""
     settings = type("S", (), {"max_context_tokens": 200_000,
                               "auto_compact_threshold": 0.70,
                               "hard_guard_threshold": 0.85})()
@@ -318,6 +318,96 @@ def test_t4_no_negative_residual():
         estimate_tokens=_estimate, events=[],
     )
     assert payload["breakdown"]["other"] == 0
+
+
+@pytest.mark.asyncio
+async def test_t4_snapshot_counts_provider_injection(tmp_path):
+    """回归（首版漏报）：provider 注入必须进「其他」桶，used_tokens 是真实总量。
+
+    首版把 used_tokens 取成 builder 的投影 messages 总量（不含 provider 注入与
+    运行期快照），"其他"用"总量减各项"的残差写法 ⇒ 恒为 0：看板把记忆注入整块
+    漏报、总量少报。本测试用真实 ContextBuilder + 一个注入固定文本的 provider
+    钉住：注入的 token 必须出现在 other 里，used_tokens 必须等于真实构建总量。
+    """
+    from langchain_core.messages import SystemMessage
+
+    from agent_harness.context.builder import ContextBuilder
+    from agent_harness.context.tokens import estimate_message_tokens
+    from agent_harness.session import JsonlSessionStore, Session
+    from agent_harness.session.event import USER_MESSAGE
+
+    class _InjectingProvider:
+        name = "memory"
+
+        async def select(self, session, token_budget):
+            return [SystemMessage(content="RECALLED " * 200)]
+
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session("usage-probe", store)
+    session.append(USER_MESSAGE, {"content": "hello " * 20})
+    builder = ContextBuilder(
+        model_provider=object(), max_context_tokens=200_000,
+        context_providers=[_InjectingProvider()],
+        system_prompt="SYSTEM " * 50,
+        runtime_context_provider=lambda: "RUNTIME " * 30,
+    )
+    built = await builder.build(session)
+    snap = builder.usage_snapshot(session)
+
+    # provider 注入（memory）+ 运行期快照都进"其他"；技能桶如实 0（无 skills provider）。
+    assert snap["skills"] == 0
+    assert snap["other"] > 0
+    # used_tokens = 各桶之和，且不小于真实构建总量（构造口径逐条估与快照口径一致）。
+    assert snap["used_tokens"] == (
+        snap["messages"] + snap["system_prompt"] + snap["skills"] + snap["other"]
+    )
+    assert snap["used_tokens"] <= estimate_message_tokens(built)
+    # 注入确实被计到：other 至少要覆盖 provider 注入本身。
+    assert snap["other"] >= estimate_message_tokens([SystemMessage(content="RECALLED " * 200)])
+
+
+@pytest.mark.asyncio
+async def test_t4_snapshot_attributes_skills_separately(tmp_path):
+    """skills provider 的注入成本进"技能"桶（不是"其他"）——按 provider 自称的
+    name 分账，而不是调用方按文本重算（重算会漏预算截断）。"""
+    from langchain_core.messages import SystemMessage
+
+    from agent_harness.context.builder import ContextBuilder
+    from agent_harness.session import JsonlSessionStore, Session
+    from agent_harness.session.event import USER_MESSAGE
+
+    class _SkillsProvider:
+        name = "skills"
+
+        async def select(self, session, token_budget):
+            return [SystemMessage(content="SKILL CATALOG " * 100)]
+
+    class _MemoryProvider:
+        name = "memory"
+
+        async def select(self, session, token_budget):
+            return [SystemMessage(content="MEMORY " * 100)]
+
+    store = JsonlSessionStore(root=tmp_path / "sessions2")
+    session = Session("usage-probe-2", store)
+    session.append(USER_MESSAGE, {"content": "hi"})
+    builder = ContextBuilder(
+        model_provider=object(), max_context_tokens=200_000,
+        context_providers=[_SkillsProvider(), _MemoryProvider()],
+    )
+    await builder.build(session)
+    snap = builder.usage_snapshot(session)
+
+    # skills 桶 == skills provider 的实际注入成本（精确值，不是"非零"）。
+    from agent_harness.context.tokens import estimate_message_tokens
+    expected_skills = estimate_message_tokens(
+        [SystemMessage(content="SKILL CATALOG " * 100)]
+    )
+    assert snap["skills"] == expected_skills
+    # memory provider 的注入**不**进 skills 桶，各自分账。
+    assert snap["other"] >= estimate_message_tokens([SystemMessage(content="MEMORY " * 100)])
+    assert snap["other"] != snap["skills"]
+
 
 
 # ── T5：端点形状（HTTP）───────────────────────────────────────────────

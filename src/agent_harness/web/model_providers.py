@@ -25,6 +25,7 @@ from agent_harness.model.provider_store import (
     CredentialError,
     ProviderStore,
     ProviderStoreError,
+    utc_now_iso,
     validate_base_url,
     validate_provider_id,
 )
@@ -102,13 +103,6 @@ class ProviderUpdatePayload(BaseModel):
         if value is not None and not validate_base_url(value):
             raise ValueError(f"base_url 必须是 http/https URL: {value!r}")
         return value
-
-
-def _now_iso() -> str:
-    """测试时刻（ISO）。last_test.at 是**测试发生时**，不是配置更新时刻。"""
-    from datetime import UTC, datetime
-
-    return datetime.now(UTC).isoformat()
 
 
 def _redact_detail(detail: str) -> str:
@@ -277,7 +271,7 @@ def register_model_provider_routes(app: FastAPI) -> None:
                       outcome="provider_test_failed", provider_id=provider_id,
                       reason=reason, duration_ms=elapsed)
             store.update(provider_id, {"last_test": {
-                "ok": False, "at": _now_iso(), "reason": reason, "detail": detail,
+                "ok": False, "at": utc_now_iso(), "reason": reason, "detail": detail,
             }})
             return {"ok": False, "reason": reason, "detail": detail,
                     "message": _FAILURE_COPY.get(reason, copy), "duration_ms": elapsed}
@@ -285,7 +279,7 @@ def register_model_provider_routes(app: FastAPI) -> None:
         log_event(logger, "system_log", "连接测试通过", component="model_provider",
                   outcome="provider_test_ok", provider_id=provider_id, duration_ms=elapsed)
         store.update(provider_id, {"last_test": {
-            "ok": True, "at": _now_iso(), "detail": f"200 · {elapsed}ms",
+            "ok": True, "at": utc_now_iso(), "detail": f"200 · {elapsed}ms",
         }})
         return {"ok": True, "message": f"连接正常 · {elapsed}ms", "duration_ms": elapsed}
 

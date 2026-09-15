@@ -487,22 +487,15 @@ class SessionService:
 
         # 模型 catalog 校验（在落盘前，避免孤儿）；合法则记为会话初始模型，
         # 使后续 run 不传 amend 也能从事件流派生出「当前模型」（T7 #137）。
-        # 终审 P1 修复：统一解析点 resolve_selection（catalog + 自定义供应商
-        # fallback）——/api/models 广告的自定义条目此前在这里被 from_catalog 422，
-        # feature promise 断裂。
+        # 统一解析点 resolve_selection（catalog + 自定义供应商 fallback）：
+        # /api/models 广告的自定义条目必须在这里也能解析，否则 UI 能选、一提交
+        # 就 422（feature promise 断裂）。
         initial_model_data: dict[str, Any] = {}
         if amend is not None and amend.model is not None:
-            from agent_harness.model.provider_store import (
-                ProviderStore,
-                SystemCredentialStore,
-            )
+            from agent_harness.model.provider_store import ProviderStore
 
             try:
-                store = ProviderStore(
-                    Path(self._state.settings.provider_store_path),
-                    SystemCredentialStore(),
-                    builtin_ids=frozenset(),
-                )
+                store = ProviderStore.for_settings(self._state.settings)
                 initial_model = ModelConfig.resolve_selection(
                     self._state.settings, amend.model, store,
                 )
@@ -1440,18 +1433,11 @@ class SessionService:
                 f"未知模型: provider={provider!r} model_id={model_id!r}，可选: "
                 f"{[(e.provider, e.name) for e in parse_model_catalog(self._state.settings)]}"
             )
-        from agent_harness.model.provider_store import (
-            ProviderStore,
-            SystemCredentialStore,
-        )
+        from agent_harness.model.provider_store import ProviderStore
 
         assert_model_resolvable(
             self._state.settings, target,
-            ProviderStore(
-                Path(self._state.settings.provider_store_path),
-                SystemCredentialStore(),
-                builtin_ids=frozenset(),
-            ),
+            ProviderStore.for_settings(self._state.settings),
         )
         # 在途 run 存在时用它的 Session 聚合追加（seq 不撞号 + listener 实时广播）；
         # 否则只读加载一个聚合。两条路径都只 append，不走 resume。
