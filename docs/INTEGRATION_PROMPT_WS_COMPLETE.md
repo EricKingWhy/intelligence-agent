@@ -25,14 +25,15 @@ git -C D:/intelligence-agent-frontend rev-parse --short integrate/ws-stream   # 
 git -C D:/intelligence-agent          rev-parse --short main                  # 集成目标
 ```
 
-本次写作时的实测：前端 `integrate/ws-stream` = `60da04c`（含 `2dfc5f9`），距 `origin/main`
-**4 个 commit**；`origin/main` = `e4da691`。
+本次写作时的实测：**代码部分止于 `60da04c`**（其下依次 `2dfc5f9` → `afb3254` → `907e10e`），
+本批基点 = `origin/main` = `e4da691`；`60da04c` 之上只有**文档 commit**（tracker 的 B-4 记录 +
+本文件）——那些 commit 不做门禁判定，**以 `60da04c` 或现场 HEAD 的 `git diff --stat` 为准**。
 
 ---
 
 ## 1. 这批改了什么
 
-本分支 = `origin/main` 之上的 **4 个 commit**（`git log origin/main..integrate/ws-stream` 的顺序）：
+本分支 = `origin/main` 之上的 commit 序列（`git log origin/main..integrate/ws-stream` 的顺序）：
 
 | # | commit | 内容 | 说明 |
 | --- | --- | --- | --- |
@@ -40,6 +41,7 @@ git -C D:/intelligence-agent          rev-parse --short main                  # 
 | 2 | `afb3254` | merge `ws-stream-fallback` → `integrate/ws-stream`；冲突仅 `useSession.ts`，解决后相对第二父 +167/−22 | **独立 review 的 6 处修复与新增的 `wsStream.test.ts`（+268）是在这一步落的**（游标 / 悬挂 promise / 空集基线 / 终态集合重复 / `liveSidRef` / 魔法数）——不是机械合并 |
 | 3 | `2dfc5f9` | **#205 + #206** 主体（42 files，+833/−236） | 本批新增工作，见下 |
 | 4 | `60da04c` | 两轴 review 收口（9 files，+396/−28） | 见 §3 |
+| 5 | `b04919d` | 本文件 + `docs/SDD_TICKET_TRACKER.md` 的 B-4 收批记录（纯文档） | 无代码影响 |
 
 > `907e10e` 的父是 `9ce0b47`（更早的 main），但 `9ce0b47` 已是本分支基点的祖先，所以第 1 条
 > commit 实际只带入 `wsStream.ts` 与 `useSession.ts` 两个文件——旧 main 的差别没有被混进来。
@@ -61,16 +63,19 @@ git -C D:/intelligence-agent          rev-parse --short main                  # 
 ### 1.1 合并footprint（vs 当前 main，实测）
 
 ```
-46 files changed, 1841 insertions(+), 255 deletions(-)   （4 A / 42 M）
-  42 M  web/**   = web/e2e/** 40（39 个 spec 各加一处 await + fixtures.ts）
+48 files changed, 2029 insertions(+), 255 deletions(-)   （5 A / 43 M，含 1 个文档 commit）
+  43 M  web/**   = web/e2e/** 40（39 个 spec 各加一处 await + fixtures.ts）
                  + web/src/hooks/useSession.ts + web/src/hooks/useSession.test.ts
+                 + docs/** 2（BACKEND_CONTRACT_STREAMING_UI.md、E2E_SCENARIO_MAP.md）
    4 A  web/e2e/queue-flush.spec.ts
         web/e2e/stream-fallback.spec.ts
         web/src/lib/wsStream.ts
         web/src/lib/wsStream.test.ts
-   2 M  docs/BACKEND_CONTRACT_STREAMING_UI.md   （新增 GET /api/ws 契约章节）
-        docs/E2E_SCENARIO_MAP.md                （车道说明 + 计数 + 两条新 spec 行）
+   1 A  docs/INTEGRATION_PROMPT_WS_COMPLETE.md（本文件）
 ```
+
+> 只看代码影响请用 `git diff --stat origin/main...60da04c`（46 文件，+1841/−255）；
+> `b04919d` 之后的 +188 行全部是文档。
 
 **没有触碰**：后端源码、`tests/`、`AGENTS.md`、`CLAUDE.md`、`docs/PHASE_STATUS.md`。
 
@@ -78,7 +83,7 @@ git -C D:/intelligence-agent          rev-parse --short main                  # 
 
 ```bash
 git -C D:/intelligence-agent-frontend merge-tree --write-tree --name-only origin/main integrate/ws-stream
-# → 只输出 tree hash（e26f682…），无冲突文件名 ⇒ 干净合并
+# → 只输出 tree hash（69d21ab…），无冲突文件名 ⇒ 干净合并
 ```
 
 ---
@@ -124,7 +129,11 @@ npx vite build
 | `vitest run` | **882 passed / 50 files** |
 | `oxlint` | **0 error**（44 warning 为既有 React Compiler 类告警，与 main 同量级） |
 | `playwright --workers=2` | **364 passed / 0 failed**（182 × 2 档，41 个 spec） |
-| `vite build` | ✓ built |
+| `vite build` | ✓ built（1.16s，2112 modules；chunk >500kB 为既有告警） |
+
+> 上表数字在**交接口当天于本分支重新跑过一遍**（不是照抄早先记录）：`tsc -b` exit 0、
+> `vitest` 882 passed / 50 files、`oxlint` 44 warnings / 0 errors、`playwright --workers=2`
+> 364 passed（6.3m）、`vite build` ✓。合并后若数字不同，以**合并后的输出**为准并逐条查明。
 
 ### 3.2 后端（本批未动后端，作回归）
 
