@@ -497,6 +497,9 @@ revert、冲突后的 add、删分支。）
 最终集成统一在 `D:\intelligence-agent` 的 `main` 进行：
 
 ```text
+origin/main
+→ 先把 main 合回你的短分支（§14.6「先回后正」）：冲突与测试都在短分支上解决，
+  不把过期分支直接合进 main
 feature branch
 → diff 检查 + 门禁全绿（§14.10）
 → merge 到本地 main
@@ -514,8 +517,7 @@ feature branch
 合并前可以检查实际改动：
 
 ```bash
-git diff main...feat/backend
-git diff main...feat/frontend
+git diff main...<你当前的短分支>
 ```
 
 `git diff` 只是检查差异；真正进入最终版本需要 `merge` 到 `main`。
