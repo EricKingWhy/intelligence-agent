@@ -23,6 +23,7 @@ import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
+import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
@@ -658,6 +659,8 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
   const [memoriesOpen, setMemoriesOpen] = useState(false);
+  // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
+  const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {
@@ -842,6 +845,8 @@ export default function App() {
         onToggleTheme={toggleTheme}
         authRequired={authRequired}
         onOpenMemories={() => setMemoriesOpen(true)}
+        sessionId={selectedId}
+        onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
       />
 
       <main
@@ -1062,6 +1067,12 @@ export default function App() {
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} items={paletteItems} />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #200：上下文容量看板（TopBar Gauge 入口；Esc / 点击遮罩关闭）。 */}
+      <ContextUsagePanel
+        sessionId={contextUsageOpen ?? ''}
+        open={contextUsageOpen !== null}
+        onClose={() => setContextUsageOpen(null)}
+      />
     </div>
   );
 }

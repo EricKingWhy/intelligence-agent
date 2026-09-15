@@ -108,6 +108,9 @@ export interface ApiMock {
   onQueueGet?: (route: Route) => Promise<void> | void;
   /** POST /api/sessions/{id}/queue/{qid}/cancel（取消排队项；缺省 200 → cancelled）。 */
   onQueueCancelPost?: (route: Route) => Promise<void> | void;
+  /** GET /api/sessions/{id}/context-usage（上下文容量看板；缺省 200 → ok 空桶）。
+   *  #200 看板 AC：注入此回调即可构造有数据/未采集/无数据三种状态。 */
+  onContextUsageGet?: (route: Route) => Promise<void> | void;
   // ── #172 / ADR-0029 会话硬删 ──
   /** 指定 id 的 DELETE /api/sessions/{id} 直接回这个错误——用来构造只在真机上才会
    *  自然出现的拒绝：409（有在途 run / 有挂起审批 / 是 fork 父会话；**状态码相同**，
@@ -546,6 +549,22 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return route.fulfill({
         status: 200,
         body: JSON.stringify({ status: 'cancelled' }),
+        contentType: 'application/json',
+      });
+    }
+    if (/^\/api\/sessions\/[^/]+\/context-usage$/.test(path) && req.method() === 'GET') {
+      if (mock.onContextUsageGet) return mock.onContextUsageGet(route);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({
+          estimated: true,
+          window_tokens: 200000,
+          used_tokens: 0,
+          thresholds: { auto_compact: 0.7, hard_guard: 0.85 },
+          breakdown: { messages: 0, system_prompt: 0, skills: 0, other: 0, tools: { system: 0, mcp: 0 } },
+          cache: { state: 'not_collected', reported_calls: 0, total_calls: 0, avg_hit_rate: null },
+          state: 'no_data',
+        }),
         contentType: 'application/json',
       });
     }

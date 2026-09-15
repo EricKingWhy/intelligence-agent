@@ -6,7 +6,7 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, Brain, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
+import { Activity, Brain, Gauge, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
@@ -29,9 +29,13 @@ interface Props {
   authRequired: boolean;
   /** 打开记忆管理浮层（MEM-5 / #160）。低频管理动作，放在 App Bar 右簇。 */
   onOpenMemories: () => void;
+  /** #200：会话 id（context-usage 看板的数据源）；null = 无会话（按钮不渲染）。 */
+  sessionId: string | null;
+  /** 打开上下文容量看板（#200，设计稿 §5）。 */
+  onOpenContextUsage: (sessionId: string) => void;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, sessionId, onOpenContextUsage }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -165,6 +169,18 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         >
           <KeyRound size={16} />
         </button>
+        {/* #200：上下文容量看板入口（设计稿 §5）。与记忆管理同簇——同为
+            低频管理动作；无会话时不渲染（看板数据按会话取）。 */}
+        {sessionId && (
+          <button
+            className="icon-btn"
+            onClick={() => onOpenContextUsage(sessionId)}
+            aria-label="上下文容量"
+            title="上下文容量——已用/窗口/分类占比/缓存命中率"
+          >
+            <Gauge size={16} />
+          </button>
+        )}
         <button
           className="icon-btn"
           onClick={onOpenMemories}

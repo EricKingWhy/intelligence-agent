@@ -1172,3 +1172,38 @@ function normalizeProjectStatus(raw: unknown): ProjectStatus {
   return raw === 'missing-dir' ? 'missing-dir' : 'ok';
 }
 
+
+// ── 上下文容量看板（#200）──
+
+/** 六桶分类 + 缓存命中率的端点形状（后端 GET /api/sessions/{id}/context-usage）。 */
+export interface ContextUsage {
+  estimated: boolean;
+  window_tokens: number;
+  used_tokens: number;
+  thresholds: { auto_compact: number; hard_guard: number };
+  breakdown: {
+    messages: number;
+    system_prompt: number;
+    skills: number;
+    other: number;
+    tools: { system: number; mcp: number };
+  };
+  cache: {
+    state: 'ok' | 'partial' | 'not_collected';
+    reported_calls: number;
+    total_calls: number;
+    avg_hit_rate: number | null;
+  };
+  state: 'ok' | 'no_data';
+}
+
+/** GET /api/sessions/{id}/context-usage —— 上下文容量（只读，无副作用）。
+ *  404 = 会话不存在；非 2xx 抛 Error（调用方降级为空态，不影响会话）。 */
+export async function getContextUsage(sessionId: string): Promise<ContextUsage> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/context-usage`,
+  );
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`context-usage ${res.status}`);
+  return res.json();
+}
