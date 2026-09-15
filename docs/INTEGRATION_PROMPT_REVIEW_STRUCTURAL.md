@@ -225,6 +225,24 @@ e2e `r-project-groups.spec.ts:139`（单跑恒绿，全量偶发）。
 
 ---
 
+## 6.1 校验期注意：本次合入**有 5 个预期内的文件删除**
+
+合并完成后若做 `git diff --name-status 9ce0b47..HEAD | grep '^D'`，会看到 5 条删除——**均为预期内**，
+来自 #201（三档位下拉合并为 `OptionPicker`），不是误删：
+
+```
+D web/src/components/ContextProviderPicker.tsx
+D web/src/components/ContextProviderPicker.test.tsx
+D web/src/components/ControlPicker.tsx
+D web/src/components/ControlPicker.test.tsx
+D web/e2e/context-providers.spec.ts
+```
+
+已核验：仓库里**没有任何**指向这些模块的 import（`grep -rn "from '.*\(ContextProviderPicker\|ControlPicker\)'"` 为空），
+替代实现 `OptionPicker.tsx` 存在，残留提及全是注释文本。除此之外无其他删除。
+
+---
+
 ## 7. 遗留债务（复审明确记录、**未修**，不阻塞集成；§8 Scope Lock）
 
 - 前端 `web/src/hooks/useSession.ts`：流前置代码 4 处（≈715/786/845/1123 行）——逐处比对**语义实质不同**，非机械重复，轻率合并会改变重放/取消语义，故不动。
