@@ -23,9 +23,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, streamSession, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
-import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle } from '../lib/projection';
+import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
 import { forgetResumeAttempt, maxEventSeq, nextResumeAttempt, readStoredSessionId, writeStoredSessionId, type ResumeAttempts } from '../lib/sessionRestore';
@@ -387,6 +387,21 @@ export function useSession() {
         if (hasUnterminatedRun(events)) {
           resumeLiveStreamRef.current?.(sid, maxEventSeq(events), projected);
         }
+        // ADR-0030 D11 首屏补齐：重启后事件流里的事件都在，但 `GET /queue` 的
+        // 内存镜像才是待发送输入的权威首屏视图（投影的逐事件折叠只覆盖增量
+        // 通道；重启前的 queued 项没有增量帧可折叠）。替换语义幂等；失败静默
+        // 降级——补齐失败不影响实时增量通道。
+        void listSessionQueue(sid)
+          .then((queue) => {
+            if (cancelled) return;
+            setConversation((cur) => {
+              if (!cur || cur.session_id !== sid) return cur;
+              const next = { ...cur };
+              restoreUndeliveredFromQueue(next, queue);
+              return next;
+            });
+          })
+          .catch(() => { /* 首屏补齐失败：实时通道仍是权威，不打断 */ });
       })
       .catch((e) => {
         if (cancelled) return;
@@ -436,12 +451,6 @@ export function useSession() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
 
-/** Submit a new task. Creates a fresh session and streams the response.
-   *  The conversation is reset first — a live stream never folds into the
-   *  previously viewed session's turns.
-   *  T4（#97）：流消费升级为重连状态机——异常关闭 / seq gap / 停摆（含后台
-   *  杀流）触发 GET stream?after_seq=lastApplied 续传；stream/truncated 控制
-   *  帧走 GET /events 全量重建后续传；终态帧已达 → 正常收尾迁移。 */
   /** SSE 流消费机器——submitTask 和 sendMessage 共用。
    *  P1-3 合帧 + T7 后台降渲染 + T4 重连状态机全部内联于此。
    *  initialConv：新会话传 null（首帧惰性初始化）；续聊传当前 conversation（追加）。
@@ -830,8 +839,9 @@ export function useSession() {
       opts?: {
         maxSteps?: number;
         /** 字段集直接取自 /messages 的请求契约——Omit 出 amend 面，不会随
-         *  请求契约增删字段而漂移。 */
-        amend?: Omit<SendMessagePayload, 'content' | 'mode' | 'max_steps'>;
+         *  请求契约增删字段而漂移。mode 可被 amend 覆盖（steer 通道复用同一
+         *  端点，见 sendSteer）。 */
+        amend?: Omit<SendMessagePayload, 'content' | 'max_steps'>;
       },
     ) => {
       setError(null);
@@ -1086,7 +1096,6 @@ export function useSession() {
   );
 
   /** T7 #137：从历史用户消息 seq 派生 child session（POST /api/sessions/{id}/forks）。
-   *
    * - 锚点消息本身不进 child seed
    * - child 继承父会话当前模型
    * - copy-on-fork：父 workspace 整目录复制为 child 的
@@ -1095,6 +1104,77 @@ export function useSession() {
   const fork = useCallback(
     async (sessionId: string, fromSeq: number) => {
       return forkSession(sessionId, fromSeq);
+    },
+    [],
+  );
+
+  /** ADR-0030 D10 键位：Ctrl/Cmd+Enter = steer（循环头注入，不排队）。
+   *  复用 `/messages` 的 mode='steer' 分支——在途 run 在下个循环头消费；
+   *  无在途 run 时后端可能回 launched/错误，与 sendFollowUp 同一条错误通道。 */
+  const sendSteer = useCallback(
+    async (sessionId: string, content: string) => {
+      await sendFollowUp(sessionId, content, { amend: { mode: 'steer' } });
+    },
+    [sendFollowUp],
+  );
+
+  /** ADR-0030 D10：立刻投递队首的待发送输入（POST /queue/flush）。
+   *  有 queued 项 → launched 同形 SSE 流接消费机器；idle（空队列/无在途 run
+   *  需投递）→ 静默；409（在途 run）→ 轮询重试到回执再 attach。 */
+  const flushQueue = useCallback(
+    async (sessionId: string) => {
+      setError(null);
+      liveSidRef.current = sessionId;
+      terminalSeenRef.current = false;
+      reconnectRef.current.reset();
+      streamGenRef.current += 1;
+      const gen = streamGenRef.current;
+      try {
+        // 最多等 3 次（1s 间隔）：409 = 在途 run 未到终态，等它收口。
+        let res: Response | null = null;
+        for (let i = 0; i < 3; i++) {
+          res = await flushSessionQueue(sessionId);
+          if (res.status !== 409) break;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        if (!res) return;
+        if (res.status === 404) {
+          throw new NotFoundError('会话不存在');
+        }
+        if (res.status === 409) throw new Error('仍有在途 run，稍后再试');
+        if (!res.ok || !res.body) throw new Error(`flush ${res.status}`);
+        const ct = res.headers.get('content-type') ?? '';
+        if (ct.includes('text/event-stream')) {
+          // launched SSE：消费机器接管（queue/consumed 帧经增量通道摘除条目）。
+          setMode({ kind: 'live', sessionId });
+          attachLiveStream(res, gen, conversationRef.current);
+        }
+        // status=idle：空队列，静默返回（无动作即无反馈）。
+      } catch (e) {
+        if (streamGenRef.current !== gen) return;
+        streamGenRef.current += 1;
+        setMode({ kind: 'viewing', sessionId });
+        setError(`投递失败：${(e as Error).message}`);
+      }
+    },
+    [attachLiveStream],
+  );
+
+  /** ADR-0030 D11：取消一条尚未消费的排队/引导项。后端写 `queue/cancelled`
+   *  事件 → 经实时流（或下次 viewing 装载）投影摘除；这里不本地摘——事件流
+   *  是唯一事实（不变量 #22），避免双份摘除路径。404 = 已消费/已取消（幂等
+   *  失败语义），静默。 */
+  const cancelItem = useCallback(
+    async (sessionId: string, itemId: string) => {
+      try {
+        await cancelQueueItem(sessionId, itemId);
+      } catch (e) {
+        // 404 = 已取消/已消费（幂等失败语义）：静默，界面由事件流对账。
+        // 其余失败（网络/服务端）必须上浮——静默会让用户以为已取消、
+        // 请求根本没到服务器（审查 P3）。
+        if (e instanceof NotFoundError) return;
+        setError(`取消排队消息失败：${(e as Error).message}`);
+      }
     },
     [],
   );
@@ -1119,5 +1199,8 @@ export function useSession() {
     refreshSessions,
     changeModel,
     fork,
+    sendSteer,
+    flushQueue,
+    cancelItem,
   };
 }

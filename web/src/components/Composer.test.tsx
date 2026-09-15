@@ -46,3 +46,43 @@ describe('Composer 模型选择器（#103 / Phase 2a）', () => {
     expect(html).not.toContain('>默认链<');
   });
 });
+
+describe('Composer 队列条（ADR-0030 §5.2）', () => {
+  const queue = [
+    { kind: 'queue' as const, id: 'q-1', content: '排队的问题', seq: 1, created_at: '' },
+  ];
+
+  it('空队列不渲染队列条（不占位不闪烁）', () => {
+    const html = renderToString(createElement(Composer, { ...base, undelivered: [] }))
+      .replaceAll('<!-- -->', '');
+    expect(html).not.toContain('queue-bar');
+  });
+
+  it('有排队项 → 渲染条目 + 三个中文 aria 动作（编辑/立即/取消）', () => {
+    const html = renderToString(
+      createElement(Composer, {
+        ...base, undelivered: queue,
+        onEditItem: noop, onSteerItem: noop, onCancelItem: noop,
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('queue-bar');
+    expect(html).toContain('排队的问题');
+    expect(html).toContain('aria-label="编辑排队消息"');
+    expect(html).toContain('aria-label="立即发送"');
+    expect(html).toContain('aria-label="取消排队消息"');
+  });
+
+  it('steer 项不渲染三个动作（无后端取消/编辑通道，点了就是静默 404）', () => {
+    const html = renderToString(
+      createElement(Composer, {
+        ...base,
+        undelivered: [{ kind: 'steer' as const, id: 's-1', content: '引导的问题', seq: 2, created_at: '' }],
+        onEditItem: noop, onSteerItem: noop, onCancelItem: noop,
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('引导的问题');
+    expect(html).toContain('引导'); // 徽标仍在（状态可见）
+    expect(html).not.toContain('aria-label="编辑排队消息"');
+    expect(html).not.toContain('aria-label="取消排队消息"');
+  });
+});

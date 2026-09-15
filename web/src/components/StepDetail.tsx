@@ -29,7 +29,7 @@ import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
   clampInspectorWidth, escAction, eventKey, nextSelectionIndex, spaceReleaseCloses, toolKey,
 } from '../lib/inspectorPanel';
-import { deriveRunPulse, deriveRunSummary } from '../lib/runState';
+import { deriveAgentProfile, deriveRunPulse, deriveRunSummary } from '../lib/runState';
 import { useChildConversation } from '../hooks/useChildConversation';
 import { ArtifactViewer } from './ArtifactViewer';
 import { CopyButton } from './CopyButton';
@@ -167,6 +167,8 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
   // （artifact_id 是内容哈希，跨会话可重名），所以从投影的会话 id 取，不另存一份。
   const sessionId = conversation.session_id;
   const pulse = deriveRunPulse(conversation, streaming);
+  // #198：生效档位（最后一个 run/started 携带；旧数据 → null →「档位未知」）。
+  const agentProfile = deriveAgentProfile(conversation.events);
   /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
    * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应
    * Tab 组件内的 filter 逐字一致。 */
@@ -276,7 +278,10 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     if (!drag) return;
     onPanelAction({
       type: 'resize',
-      width: clampInspectorWidth(drag.startW + (e.clientX - drag.startX), drag.available),
+      /* 面板位于三栏布局的最右列，手柄挂在它的**左缘**：指针向右移动 ⇒ 中心列变宽
+         ⇒ 面板变窄。所以宽度 = `startW − Δ`（#197 曾写成 `+`：右拖变宽，与"拖动手柄"
+         的直觉相反）。 */
+      width: clampInspectorWidth(drag.startW - (e.clientX - drag.startX), drag.available),
     });
   };
   const onResizeEnd = (e: ReactPointerEvent<HTMLElement>) => {
@@ -286,7 +291,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
   /** 拖宽手柄的键盘通路（AC7：面板控制要么键鼠双通，要么别做成分隔条——
-   *  一个 `role="separator"` 不能被键盘操作是**假**的可访问性声明）。 */
+   *  一个 `role="separator"` 不能被键盘操作是**假**的可访问性声明）。
+   *  方向与指针路径**同源**（#197）：ArrowRight = 把"手柄"向右推 ⇒ 面板变窄。
+   *  只翻转拖拽、不翻转键盘，等于在同一根分隔条上留下两套矛盾方向。 */
   const onResizeKeyDown = (e: ReactKeyboardEvent<HTMLElement>) => {
     const step = e.shiftKey ? 64 : 16;
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -294,7 +301,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     e.stopPropagation(); // 与清单 ↑/↓ 分开：这里左右调宽度
     const workspace = panelRef.current?.parentElement?.querySelector<HTMLElement>('.app-workspace');
     const available = (workspace?.clientWidth ?? 0) + panel.width;
-    const next = panel.width + (e.key === 'ArrowRight' ? step : -step);
+    const next = panel.width + (e.key === 'ArrowRight' ? -step : step);
     onPanelAction({ type: 'resize', width: clampInspectorWidth(next, available) });
   };
 
@@ -330,6 +337,11 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       <div className="detail-header">
         <span className="panel-label">Run Inspector</span>
         <span className={`run-badge run-badge-${pulse.state}`}>{pulse.label}</span>
+        {/* #198：生效档位徽标——读 run/started.data.agent_profile（后端 #198 起
+            总是写）；旧数据无字段时显示「档位未知」（不伪造 "main"）。 */}
+        <span className="detail-profile-badge mono num" title={`agent_profile: ${agentProfile ?? '未知（旧数据无字段）'}`}>
+          {agentProfile ?? '档位未知'}
+        </span>
         {/* UI-03 头标对齐：时间线平铺全会话事件，头标就得描述全会话范围
             （N runs · M 事件）——此前显示单个 run_id 短码，与列表范围自相矛盾
             （原 PRD §8.2 短码方案随本票退役，完整 run_id 回到分组头 title 与

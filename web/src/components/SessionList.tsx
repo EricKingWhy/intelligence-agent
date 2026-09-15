@@ -69,11 +69,11 @@ interface Props {
    *  隐藏项目会把所有会话误显示成未分组，比显示一条错误糟）。 */
   projectsError: string | null;
   onRetryProjects: () => void;
-  /** 「在此项目中新建任务」（WS-6 / #169）：以项目目录为 cwd 起一个会话。
-   *  resolve `null` = 已开始流式；否则为**给用户看的原因**（留在确认面里）。 */
+  /** 「在此项目中新建任务」（WS-6 / #169；#204 起 launch=false 只建会话不启动 run）：
+   *  以项目目录为 cwd 创建空会话。resolve `null` = 已创建（权限 pill 已用响应回传的
+   *  档位初始化）；否则为**给用户看的原因**（留在确认面里）。 */
   onStartTask: (
     project: Project,
-    task: string,
     permissionMode: string | null,
   ) => Promise<string | null>;
   /** 权限档清单（GET /api/permission-modes）——确认面三选一的数据源。 */
@@ -599,7 +599,7 @@ export const SessionList = memo(function SessionList({
         onOpenChange={(open) => {
           if (!open) setStartTaskFor(null);
         }}
-        onStart={onStartTask}
+        onCreateSession={onStartTask}
       />
     </aside>
   );

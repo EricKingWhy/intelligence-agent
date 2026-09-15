@@ -187,7 +187,7 @@ test('AC5：整页往返（面板按钮 + 命令面板两个入口）', async ({
   await expect(page.locator('.app-workspace')).toBeVisible();
 });
 
-test('AC6：可拖宽 320→480，夹取到上限且不压垮中心列；刷新后回到 320（不持久化）', async ({
+test('AC6：#197 手柄方向=向右变窄/向左变宽，夹取到 320/480 且不压垮中心列；刷新后回到 340（不持久化）', async ({
   page,
 }) => {
   routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
@@ -195,7 +195,9 @@ test('AC6：可拖宽 320→480，夹取到上限且不压垮中心列；刷新�
   await openSession(page);
 
   const resizer = page.locator('.detail-resizer');
-  await expect(resizer).toHaveAttribute('aria-valuenow', '320');
+  // 初始宽度 340（#197）：刻意高于下限 320，否则"向右拖"在默认宽度下就被夹住、
+  // 看不出有没有生效。
+  await expect(resizer).toHaveAttribute('aria-valuenow', '340');
   await expect(resizer).toHaveAttribute('aria-valuemin', '320');
   await expect(resizer).toHaveAttribute('aria-valuemax', '480');
 
@@ -211,7 +213,8 @@ test('AC6：可拖宽 320→480，夹取到上限且不压垮中心列；刷新�
     await page.mouse.up();
   };
 
-  // 拖到远超上限的位置：夹取到 480。
+  // 面板右停靠、手柄在它的**左缘** ⇒ 指针向右 = 手柄把中心列推宽 = 面板变窄。
+  // 这条与"向右拖变大"的旧断言相反，就是 #197 本身（旧行为反直觉）。
   //
   // 注意这条用例**证明不了**"上限会被中心列压低"（AC6 的 `CENTER_MIN_W`）：三栏栅格
   // 只在 ≥1201px 生效，那里 available = viewport − 240 ≥ 961，`available − 360`
@@ -219,22 +222,24 @@ test('AC6：可拖宽 320→480，夹取到上限且不压垮中心列；刷新�
   // 分支把面板列写死成 280px）。所以这里锁的是**接线**（拖拽确实走到夹取、中心列没被
   // 挤没），而夹取公式本身由 `src/lib/inspectorPanel.test.ts` 的
   // `clampInspectorWidth(480, 700) === 340` 锁住——两处各管一段，别互相冒充。
+  // 右拖到远超下限的位置：夹取到 320（下限）。
   await dragBy(600);
-  await expect(resizer).toHaveAttribute('aria-valuenow', '480');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '320');
   // 中心列没被压垮（AC6 的"不得压垮"）
   const workspace = await page.locator('.app-workspace').boundingBox();
   expect(workspace?.width ?? 0).toBeGreaterThanOrEqual(360);
 
-  // 往左拖回去也要有下限
+  // 往左拖 = 变宽，夹到上限 480
   await dragBy(-600);
-  await expect(resizer).toHaveAttribute('aria-valuenow', '320');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '480');
 
-  // 不持久化（不变量 #22）：拖宽后刷新回到 320
-  await dragBy(80);
-  expect(Number(await resizer.getAttribute('aria-valuenow'))).toBeGreaterThan(320);
+  // 不持久化（不变量 #22）：拖到一个**不在夹取边界上**的宽度，刷新后必须回到默认。
+  // 特意避开 320/480：边界值分不清"拖过"与"根本没拖动"，用它证明不了刷新抹掉了改动。
+  await dragBy(100); // 向右变窄：480 − 100 = 380
+  await expect(resizer).toHaveAttribute('aria-valuenow', '380');
   await page.reload();
   await openSession(page);
-  await expect(page.locator('.detail-resizer')).toHaveAttribute('aria-valuenow', '320');
+  await expect(page.locator('.detail-resizer')).toHaveAttribute('aria-valuenow', '340');
 });
 
 test('AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调宽）', async ({ page }) => {
@@ -245,10 +250,12 @@ test('AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调�
   const resizer = page.locator('.detail-resizer');
   await resizer.focus();
   await expect(resizer).toBeFocused();
+  // 键盘与指针**同源**（#197）：ArrowRight 把"手柄"向右推 ⇒ 面板变窄。只翻指针
+  // 会让同一根分隔条上留下两套矛盾方向。
   await page.keyboard.press('ArrowRight');
-  await expect(resizer).toHaveAttribute('aria-valuenow', '336'); // 320 + 16
+  await expect(resizer).toHaveAttribute('aria-valuenow', '324'); // 340 − 16
   await page.keyboard.press('ArrowLeft');
-  await expect(resizer).toHaveAttribute('aria-valuenow', '320');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '340');
 
   // 三个按钮都在 Tab 序列里，且名字可读
   await expect(page.locator('.detail-ctrl[aria-label="钉住"]')).toBeVisible();

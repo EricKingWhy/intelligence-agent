@@ -24,6 +24,7 @@
 | --- | --- | --- | --- | --- |
 | B-1 | 待定（下一票 = #160 MEM-5 前端记忆管理 UI） | **`28c35e7`**（#158 收尾 commit——切换时的在途票据，其旧版两轴 review 已完成并修复，**不计入本批审查范围**；本批从 `28c35e7` 之后的新 ticket 起算） | 未审 | — |
 | B-2 | **#169 WS-6 后端半 + #170 WS-7 后端半**（同一张 PRD/ADR 的两个端点，依赖链自然收批） | **`80d49e1`**（merge main → feat/backend，本批第一行代码之前） | **已审**：Spec 轴 `NEEDS-FIX`（1×P1 + 5×P3）+ Standards 轴 `NEEDS-FIX`（3×P2 + 3×P3）→ 全部处置（修 / 文档化 / 有据不改） | **`9c158c9`**（下一批 fixed point） |
+| B-3 | **#194 + #197 + #199 + #201**（用户报障的纯前端 UI 批；4 票全部已交付并收批） | **`c00604e`**（本批第一行代码之前——文档镜像 commit） | **已审**：Spec 轴 `NEEDS-FIX`（1×P1 + 2×P2 + 3×P3）+ Standards 轴 `NEEDS-FIX`（2×P2 + 8×P3）→ 全部处置（修 / 文档化 / 有据保留） | **`cd3a2b4`**（下一批 fixed point） |
 
 **批次边界规则（v2 §1.2）**：每攒满 2–3 个 ticket（或遇到依赖链断点）即收批；收批时对
 `git diff <fixed point>..HEAD` 跑一次两轴 `/code-review`（Standards + Spec，两个独立只读子代理）。
@@ -40,6 +41,60 @@
 | Standards 轴 findings | **P2** `attach_matching_sessions` 用过滤视图重写账本会**永久**删掉 header 暂时读不到的成员（会话静默变 Ungrouped）→ 改为"读到且不匹配才剪，读不到保留"+ 回归锁 + 变异验证（改回旧行为 → 1 failed，sha256 还原）。**P2** host_dirs 只抓 `PermissionError` → 其余 OSError（TOCTOU/断连盘）冒 500 → `os.stat` + errno 分派。**P2** 根模式在事件循环上跑同步 I/O（3.11 fallback 26 次 `exists`）→ 同样卸载 worker。**P3** NUL 未拒（POSIX 上 `realpath` 抛 `ValueError` → 500）→ 两处补闸；`exists`/`isdir` 吞权限错误 → 改 `os.stat`；测试缺口（N>1 归入、边界截断、NUL）→ 补 |
 | 有据不改（已记录理由） | ① `MAX_ENTRIES` 全量物化后才截断：截断契约本身要求"排序后的前缀"，改 `scandir` 早停会破坏确定性；要限内存只能改契约（分页），收益不抵代价。② `PureWindowsPath` 判 `C:\x`：Windows 侧与既有口径一致，单方收紧会造两套形态语义。③ `ROOTS_PROVIDER` 模块级可替换 seam：可接受的测试 seam，不引入 DI 容器 |
 | 残留 / 交接 | 前端半（#169 AC9–AC14、#170 AC8–AC13）未做 → 两票**保持 OPEN**；下一批 fixed point = `9c158c9`；集成提示词 `docs/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md` |
+
+#### B-3 交付记录（2026-09-13，前端 worktree）
+
+| ticket | 状态 | commit | 门禁 / 证据 |
+| --- | --- | --- | --- |
+| #197 Inspector 拖宽方向 + 默认 340 | 已交付（未关单，待集成） | `5cfb6ff` | tsc 干净；vitest `inspectorPanel.test.ts` 22 passed；playwright `y-inspector-peek` + `workspace-modes` 32 passed |
+| #194 Esc 提示移到右侧动作簇 | 已交付（未关单，待集成） | `0221080` | tsc 干净；新 spec `composer-stream-actions` 6 passed；受 composer DOM 影响的 8 个既有 spec 100 passed |
+| #201 三档位下拉合并 OptionPicker + 删多选 Context providers | 已交付（未关单，待集成） | `4ddec6b`（与 #199 同一 commit，见下「为何合一个 commit」） | OptionPicker 单测 8 passed；`control-row`(5) + `picker-search-visibility`(3) + `continuation`(4) 两 viewport 全绿；`amend.test.ts` 5 passed |
+| #199 模型选择器两级飞出（provider → model） | 已交付（未关单，待集成） | `4ddec6b` | `model-picker` 重写 4 条 × 2 viewport **连跑 3 次全绿**；`q-model-dedupe`（BUG-011 去重锁）2 条 × 2 viewport 全绿 |
+
+**#201 + #199 为何合一个 commit**：两票共用新行实现（`ModelPicker` 二级行直接复用
+`OptionPicker.OptionRowContent`），且 `ControlPicker` 的删除与 `ModelPicker` 的重写落在同一批文件上
+——拆成两个 commit 会产生「中间态编译不过」的历史。两票的验收与测试各自独立记在上表。
+
+**#199/#201 期间被探针推翻 / 坐实的两个判断（留证，防下次误判）**：
+
+1. 「Radix 菜单打开后第一次 `↓` 会丢」是**假象**：Radix 的 roving focus 在 `setTimeout` 里移焦
+   （`react-roving-focus` 的 `Item.onKeyDown` 末尾 `setTimeout(() => focusFirst(...))`），而 e2e 里
+   「按键后立刻读 `document.activeElement`」读到的是**旧值**。判别实验：把同一个 keydown 直接派发到
+   聚焦元素上并等 50ms → 焦点必移动；连按三次 `↓` 的落点是第 1→2→3 项、一步不多不少。
+   修法 = 断言改轮询（`fixtures.pressMenuItemKey`），**不是**改产品代码。
+2. 「退出动画窗口内再开浮层会被吞」是**真的**：探针 gap=0 时目标浮层 `aria-expanded` 恒为 false、
+   listbox 不出现；gap=400ms 正常；鼠标路径因 Playwright 的可操作性重试而免疫。成因是 Radix 的
+   modal 菜单在退场期间仍持有 `body{pointer-events:none}` 并把焦点抓回自己的残留节点。
+   修法 = helper 首尾各等一次「菜单已卸载」（与 `pickControl` 既有尾等待同一手法）。
+
+**B-3 的两轴审查（fixed point `c00604e`，两个独立只读子代理）：Spec 轴 1×P1 + 2×P2 + 3×P3，
+Standards 轴 2×P2 + 8×P3 → 全部处置完毕**（修复 commit 见台账本行）。值得单独记下的四条：
+
+| finding | 处置 |
+| --- | --- |
+| **Spec P1**：`aria-label` 被顺手统一成中文（`Agent 档位`/`推理深度`），违反票面冻结结论 B「会影响到 e2e 定位器就不统一中文」 | **回退**：两个 label 及其 e2e 定位器全部还原为 `Agent Profile`/`Reasoning Effort`；`Composer.tsx` 的注释改成写明"刻意维持中英混用、要统一请先改票面结论"，防止下一个人再顺手改一遍 |
+| **Standards P2**：「模型选择器没有搜索框」的回归锁是**假绿**——它数的是 `.picker-search-wrap`，那是 `OptionPicker` 的类，旧模型的类叫 `.model-picker-search-wrap` ⇒ 恒得 0 | 新增 `fixtures.noSearchInputIn(scope)`（按 `input`/`role=combobox`/`[cmdk-input]` 数，对类名免疫），两处断言改用它；并加**反向对照**：同一口径在档位下拉里必须数得到 1 个输入框。变异验证：往模型菜单里塞一个 `<input>` → 目标 3 条测试全红 |
+| **Spec P2**：#201 的「勾选 + 加重 + 左侧 2px 条」此前**没有任何会红的测试**（弹层是 portal，SSR 断不到） | 新增 e2e：选中行 `data-state="checked"` 唯一 + 含 `.picker-item-check` + `getComputedStyle(el,'::before').width === '2px'`；变异验证：删掉 `data-state` → 该条转红 |
+| **Spec P3**：二级行的次级文案（真实 model id / `默认`，而非设计稿写的 provider 名）只在代码注释里说明 | 补进本节「未落地项」：二级行次级文案 = 真实 model id 或 `默认` 标记——provider 名在"某个 provider 的展开"里是冗余信息，不占描述行 |
+
+**视觉验收（`impeccable`：一批一次性检查，未逐票重复）**：暗/亮两主题各截一级菜单、二级子菜单
+（选中态）、长目录档位下拉（含搜索过滤）、短目录下拉已选态；并用计算盒校验定位——`align="end"` 下
+一级菜单右缘 362 == trigger 右缘 362，`align="start"` 下档位浮层左缘 366 == trigger 左缘 366，
+二级子菜单锚在 provider 行（+6px sideOffset）而不是面板边缘；`--surface-1/2` 两主题均不同值
+（暗 `#17171d`/`#1f232b`，亮 `#ffffff`/`#f1f1f3`），二级靠 surface-2 + 更浅阴影分层。
+
+**B-3 未落地项（无数据源，不编占位；已写进交付说明与代码注释）**：per-option 图标槽（目录契约
+无 per-option 图标）、provider 不可用置灰 + 行尾 reason（`/api/models` 有 `is_available` 但后端写死
+`True`、`unavailable_reason` 不存在，均属 #203）、档位收窄「N/M 个工具」提示（`GET /api/agent-profiles`
+不回工具数）、一级底部「管理模型」
+入口（#203 交付物，位已由 `.picker-foot` 预留）。
+
+**B-3 集成交接提示词**：`docs/INTEGRATION_PROMPT_FRONTEND_B3_WEB_UI.md`（集成 AI 的唯一入口；§0 是可执行
+摘要，§2 列出「本次没碰」的契约，§3 是本批残余，§4 是踩过的坑）。ticket 关单状态：#194/#197 **已关**
+（代码完成未合入 main，按 §14.12）；#199/#201 **保持 OPEN**（各有冻结 AC 因缺后端数据未落地，comment 已记）。
+
+**B-3 设计依据**：`docs/design/WEB_UI_BATCH_REDESIGN.md`（本 worktree 已镜像一份，来源
+`feat/backend fd16de3`）+ 票面 `## 最终实现契约（已冻结）`。本批**不推远程**（AGENTS §13.2/§14.4）。
 
 ## 当前状态
 
@@ -1785,3 +1840,83 @@ e2e 里"归档行不算缺失"必须带反向对照（账本里放一个**真**�
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
 集成提示词见 `docs/INTEGRATION_PROMPT_171_SESSION_ARCHIVE.md`（在 `feat/backend`，与后端半
 同一份——跨端票合成一个入口，含合并顺序、契约要点与残余）。
+
+---
+
+## 第二十五轮：#195（2026-09-15，跨端：后端 `3d9dc28` + 前端 `3d3e591`）
+
+**票**：用户消息动作行 + 编辑（含流式输入解锁）。后端半已在 `feat/backend`
+`3d9dc28`（契约冻结见 `docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`），
+本 worktree 完成前端半。
+
+### 做了什么
+
+- **Composer**：`locked = approvalPending`（D10：streaming 不再禁用输入——
+  「本页有活流」≠「服务端有在途 run」，#196 根因）；Enter=queue /
+  Ctrl/Cmd+Enter=steer / Shift+Enter 换行；队列条（排队/引导徽标 + 1 行截断摘要 +
+  编辑/立即/取消 + 「立即发送全部」= POST /queue/flush，仅非 streaming 渲染）。
+- **Conversation**：用户消息动作行（复制 CopyButton / 编辑 / 分叉，§5.3 三图标）；
+  编辑仅**最新一条**用户消息可用（D8：`latestEditableTurn` 排除 superseded/injected/
+  无 seq 轮；其余置灰 + title「只有最新一条消息可以编辑」）；编辑态 = 原地 textarea
+  （Ctrl/Cmd+Enter 保存 / Esc 取消）；被取代轮整段不渲染（§4.5.1，由
+  `message/superseded` → `applySupersedeShadow` 驱动，Timeline 事件照旧）。
+- **useSession**：历史装载后 `GET /queue` 首屏补齐（`restoreUndeliveredFromQueue`
+  替换语义，失败静默降级）；`sendSteer`（复用 /messages mode:steer）；`flushQueue`
+  （409 轮询 3 次后报「仍有在途 run」）；`cancelItem`（404 幂等静默，摘除由
+  queue/cancelled 事件驱动——事件流是唯一事实）。
+- **App**：`handleEditTurn` → sendMessage 带 `supersedes_seq`；队列条四动作接线
+  （「编辑」= 取消原项 + 预填输入框的最小实现）。
+- **projection**（前置 commit 已带）：`supersedeRanges`/`applySupersedeShadow`/
+  `projectUndelivered`；EVENT_SEMANTICS 五条新类型注册（MESSAGE_QUEUED/
+  QUEUE_CANCELLED/STEER_REQUESTED/STEER_APPLIED/QUEUE_CONSUMED → projectUndelivered；
+  MESSAGE_SUPERSEDED → noop + shadow）；「未接线类型」测试对齐（只留 COMPACTION 两条）。
+- **e2e**：`multiturn-queue.spec.ts` 8 条（T11 编辑旧段消失 + supersedes_seq=seq 非
+  step_id / T11b 非最新置灰 / T12 queued JSON 不报错且空队列不渲染 / T12b 首屏补齐
+  队列条 + 中文 aria）；fixtures 补 queue/cancel 端点 mock。
+
+### 测试
+
+tsc ✓ / vitest 828 ✓ / oxlint 0 err（44 warnings 既有）/ e2e 334 ✓ / build ✓。
+
+### 排查记录（供后人）
+
+- T11 首版失败三连：① `events: []` + run/completed → 流收尾后 viewing 重读事件流
+  把对话清空（fixtures 必须提供全量日志，且要用**可变引用**让 POST 后补帧）；
+  ② mock 未发 `message/superseded` → shadow 永不生效；③ 两帧 user/message 同
+  `step_id:1` → 投影按 step 键合并成同一轮、旧问句被新内容覆盖（turn 数组只剩一轮且
+  被标 superseded）——**测试数据问题，非产品 bug**（真后端每 run 生成新 step）。
+- `getByText` 严格模式违规：气泡与 Timeline 摘要行同文 → 定位器收紧到 `.msg-bubble-user`。
+
+### 关单
+
+前端半完成、后端半已完成（3d9dc28）→ **跨端票两半齐**，待本批两轴 review 后
+由用户决定关单时机（本 worktree 不关单：集成顺序 feat/backend → feat/frontend →
+main 由集成 AI 执行）。
+
+### 两轴 code-review 的处置（Batch ②，2026-09-15）
+
+并行 subagent 两轴审查（Standards + Spec），全部落地（`d20cc3c`）：
+
+| 轴 | finding | 处置 |
+| --- | --- | --- |
+| Standards P1 | Composer/编辑态无 IME composition 守卫——中文输入法确认拼音的 Enter 误提交 | `isComposing`/`keyCode 229` 守卫（两处） |
+| Spec P1 | 被取代轮只删问句块、回答段（.msg-model）仍渲染（§4.5.1 问与答整段删除） | 回答段纳入 shadow；e2e fixture 补 model 输出帧 + `.msg-model` 消失断言 |
+| Standards P2 | send_message 双字段（queue_id+supersedes_seq）时 elif 跳过取代校验 | 后端 `706fb2e`：校验任何分支都跑 + 测试锁 |
+| Standards P2 | 后端 latest_user_seq 未排除 injected_by——前端给按钮、后端必 409 | 后端 `706fb2e`：排除注入（与前端同判据）+ 测试锁 |
+| Spec P2 | T12「立即/取消」摘除断言零覆盖 + 单测声明不实 | 补 projectUndelivered 摘除四条单测 + 订正注释 |
+| Standards P2 | supersedeRanges `Math.max(...spread)` 超长会话栈溢出 | 改 reduce |
+| Spec P3 | 校验失败（409）时 cancel 已执行、排队项丢失 | 后端 `706fb2e`：校验先于 cancel |
+| Standards P3 | cancelItem 吞所有错误（网络失败静默） | 404 幂等静默，其余上浮 error 通道 |
+| Spec P3 | injected_by 目标 409 用例缺失 | 后端补一例 |
+
+未修（有据，P3）：multiturn_delivery `sleep(0.3)` 时序猜测；flushQueue 先改 ref；TurnView 编辑态虚拟化复用旧值；restoreUndeliveredFromQueue seq 用 MAX_SAFE_INTEGER（仅显示顺序）。
+
+**关单**：#196（纯后端）/ #195（跨端两半齐）均已关闭（comment 带两端 commit + 门禁数字）。
+**交给集成 AI**：feat/backend → feat/frontend → main 合并顺序（§14.9）；
+集成提示词 `docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`（feat/backend，契约冻结）+
+`docs/INTEGRATION_PROMPT_FRONTEND_195_MULTITURN.md`（feat/backend，前端半交付清单）。
+- 2026-09-15：**ticket #200 上下文容量看板（前端半，feat/frontend d20cc3c 后续 commit）**。`ContextUsagePanel`（六桶分段条 + 图例 + 70%/85% 阈值标记 + 缓存命中率大字）；空态/未采集**不显示 0%**（用户裁定的诚实口径）；TopBar Gauge 入口（无会话不渲染）；Esc/遮罩关闭；打开拉一次不轮询。小桶 <1.5% 重标定（宽度仍显示，图例不隐藏数据）。e2e context-usage.spec 8 条（fixtures 增 onContextUsageGet）。门禁：tsc ✓ / vitest 832 ✓ / oxlint 0 err / e2e 342 ✓ / build ✓。关单：是（两端完成，#200 已关闭）。后端半与关单证据见 backend PHASE_STATUS。
+- 2026-09-15：**ticket #198 档位披露（前端半，feat/frontend 332d933）**。Inspector 头标档位徽标（deriveAgentProfile 纯函数；旧数据 → 「档位未知」，不伪造 main）；档位下拉 trigger hover title 附后端下发的条目描述（收窄披露，零前端硬编码）；detail-profile-badge CSS（中性色事实标签）。e2e g-visual-qa 回归（mock 无字段旧数据）——曾复用 detail-run-id 定位器撞 strict mode，改独立 class。门禁：tsc ✓ / vitest 835 ✓ / oxlint 0 / e2e 342 ✓ / build ✓。关单：是（#198 两端完成，已关闭）。后端半见 backend PHASE_STATUS。
+- 2026-09-15：**ticket #203 供应商管理（前端半，feat/frontend 597b501）**。ProviderManagerDialog 两栏弹层（列表状态点 + kind 标记 + 表单 + API Key type=password 零回显 + 测试连接内联 + 删除二次确认 + 清除密钥独立动作）；模型选择器底部「管理模型」入口（先关菜单再开弹层）。api.ts 增 provider CRUD/test 函数 + ProviderError。门禁：tsc ✓ / vitest 835 ✓ / oxlint 0 / e2e 342 ✓ / build ✓。关单：是（#203 两端完成，已关闭）。后端半与关单证据见 backend PHASE_STATUS。
+- 2026-09-15：**ticket #204 项目弹窗收窄（前端半，feat/frontend 5e0a396）**。弹窗去掉「任务内容」输入框（裁定 §1）；职责 = 选目录 + 设默认权限 + 创建空会话（createEmptySession 走 POST /api/sessions?launch=false，payload 类型上无 task）；提交守卫只看 pending；按钮「创建会话」；成功后焦点落到 chat 输入框、不自动发起 run。权限 pill 用**创建响应回传的** permission_mode 初始化（review 修复：删弹窗本地值双写——响应值才是事实源，本地值后到会覆盖它）。e2e u-project-task 全面改造（URL launch=false / 请求体无 task / emptySessionPermissionOverride 响应≠请求档位考真值 / focus 断言 / `.composer-dock` 与 `.project-dialog` 前缀分开 pill 与弹窗选择器定位符）。门禁：tsc ✓ / vitest 839 ✓ / oxlint 0 错误 / e2e 342 ✓ (--workers=2) / vite build ✓ / impeccable detect 空。关单：是（#204 两端完成，已关闭，comment 附两端 commit + 门禁数字）。后端半与关单证据见 backend PHASE_STATUS。
+- 2026-09-15：**全分支结构轴复审（前端半，feat/frontend f766848）**。复审轴 = 代码整洁度（重复/死代码/抽象泄漏/注释噪音/真 bug），刻意不重复"票面是否满足"（前一轮终审已覆盖），故**不新增票、不关单**。**真 bug（用户可见）**：①供应商表单把 models **整表替换**为只含 `models[0]` 的一行 → 保存即静默删掉其余模型、`label` 一并丢失（override 内置条目因后端做并集尤其明显；ADR-0032 §8.1 要"可增删行，每行 model_id + 可选 label"）；②create 分支 `api_key` 被两个 spread 重复写入，后者恒覆盖前者；③队列条「立即」未带 `queue_id` → 原排队项仍在队列，终态驱动会把同一句**再投递一次**；④队列条为 **steer 项**也渲染 编辑/立即/取消，但后端只按 `queue_id` 定位（`cancel_queue` 只认 kind=queue）→ 点击即静默 404；⑤「编辑」原为"回填主输入框 + 取消原项"（与 §5.2 就地编辑不符，且取消失败留下"已预填却仍排队"双重状态）。**修法**：多行模型编辑（每行 model_id + label）；`api_key` 收敛为单个条件 spread；「立即」发 `amend:{mode:'steer', queue_id}`；三个操作仅对 `kind==='queue'` 渲染；改为行内编辑态提交 `{content, queue_id}`、不回填主输入框。**去重**：model 规整抽成纯函数 `web/src/lib/providerModels.ts`（vitest 仅 SSR、无 jsdom，纯函数才可直测）+ `providerModels.test.ts` 6 例。**新增测试**：Composer 队列条 3 例（空队列不渲染 / queue 项渲染三个操作 / **steer 项不渲染**）；e2e T12c（立即发送请求体带 queue_id）/T12d（就地编辑不回填主输入框）。**门禁**：tsc ✓ / vitest **848** ✓ (+9) / oxlint **0 error / 43 warnings（均既有，无一来自本批文件）** / e2e **346** ✓ (--workers=2) / vite build ✓。**债务（Scope Lock 未动）**：`useSession.ts` 流前置 4 处（≈715/786/845/1123）实质不同故不重构；`getContextProviders` 导出未使用（端点仍在，保留决定）；本批未新增 CSS token，§15 不涉及。集成提示词：**前后端合并为一篇** → backend clone `docs/INTEGRATION_PROMPT_REVIEW_STRUCTURAL.md`（含仓库拓扑、冲突锚点、集成流程；原来分前后端的两篇已删除）。

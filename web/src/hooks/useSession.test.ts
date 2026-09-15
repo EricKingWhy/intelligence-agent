@@ -151,6 +151,7 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     trace_id: null, trace_url: null, model_fallback: null, run_id: null,
     run_interrupted: null, turn_index: null,
     seenSeqs: new Set<number>(),
+    undelivered: [],
   });
 
   it('同一会话（live 流刚产出完整真相）：后台静默重读，不显示占位符', () => {
