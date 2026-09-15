@@ -86,7 +86,7 @@ clone HEAD **不是** 当前 `origin/main`(`9ce0b47`) 的子孙：main 上有 ba
 
 其后每端还有若干 **docs-only commit**（进度登记 + 本集成提示词），只改 `docs/`，不碰代码。
 
-clone HEAD 相对 `origin/main` 的**完整**增量：backend **22 个 commit**（#196/#195、#200、#202、#198、#203、#204、终审修复、本批复审修复），frontend **28 个 commit**（同批次前端半 + 本批）。即本批是压在这些之上的**增量**，前面各批此前已关单、证据在 `docs/PHASE_STATUS.md` / `docs/SDD_TICKET_TRACKER.md`。
+clone HEAD 相对 `origin/main` 的**完整**增量：backend **约 27 个 commit**（#196/#195、#200、#202、#198、#203、#204、终审修复、本批复审修复及文档），frontend **约 28 个 commit**（同批次前端半 + 本批）——**数量会随后续文档 commit 增长，看内容不看数字**。即本批是压在这些之上的**增量**，前面各批此前已关单、证据在 `docs/PHASE_STATUS.md` / `docs/SDD_TICKET_TRACKER.md`。
 
 ### 1.2 本批性质
 
@@ -129,7 +129,10 @@ git -C $MAIN log --oneline -1 main                    # 确认 backend 成果已
 #    不是 origin/main —— 我们尚未 push，origin/main 还是旧的 9ce0b47。
 cd $FE
 git fetch $MAIN main                     # 把本地 main 取进 FETCH_HEAD
-git merge FETCH_HEAD                     # ← 需要批准；预演为零冲突
+git merge FETCH_HEAD                     # ← 需要批准；预期 2 处冲突（见 §0.1 第 2/3 条）
+# 解法：两篇设计稿均取 backend 侧（HEAD），再：
+#   git checkout --ours docs/design/CONTEXT_CAPACITY_DASHBOARD.md docs/design/WEB_UI_BATCH_REDESIGN.md
+#   git add docs/design/... && git commit
 git diff FETCH_HEAD...feat/frontend --stat | tail -3   # 基于新 main 重看差异
 cd $FE/web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
 
