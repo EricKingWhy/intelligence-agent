@@ -629,3 +629,81 @@ pytest -q                                  # 记录实际数字（不要照抄�
 - 本手册由只读审计产出，**未修改** `AGENTS.md` / `CLAUDE.md` 或任何其他既有文件；
 - 未执行任何 Git 写操作（未 commit / 未 merge / 未 push）；
 - §3 全部数字为 2026-09-15 实测；执行前按 §2 复测。
+
+---
+
+# 勘误（2026-09-16 执行前复测发现；原文保留不动）
+
+> 执行方在动工前重新测量了 §3 基座。**绝大多数数字成立，但有两处结论是错的**，
+> 而且错法一样——都把「工作树字节差异」当成了「内容漂移」。
+> 原文不改（保留当时的记录），但下一个人必须连着本节一起读。
+
+## E-1（推翻 §3.2 第二行 与 §3.4）：三份根规则文件**没有漂移**，只是行尾不同
+
+原文据「哈希不同」判定 main / backend / frontend 的三份 `AGENTS.md`、`CLAUDE.md`「已漂移」。
+实测：**三个仓库的 git blob 完全相同**（`AGENTS.md` = `ad3de0f9…`，`CLAUDE.md` = `0eb8bbdd…`），
+内容逐字节一致。原文引用的两个 sha256（`bfeb1ece…` / `f5859547…`）之差
+**恰好等于每行一个 `\r`**。
+
+根因：main / backend 的 `core.autocrlf=true`（检出 CRLF），frontend 是 `input`（检出 LF）；
+`.gitattributes` 只钉了 `*.sh` 与 `*.ps1`，其余走 git 默认。**比工作树字节必然看到"全文件改写"。**
+
+连带作废的推论：
+
+- §3.4 的「在 backend 修 `AGENTS.md` 不会传播到 main / frontend，**三者已漂移**」——
+  内容没有漂移；传播是 git 机制问题（各仓库各自 merge），不是内容分叉；
+- §10 开放问题 2（main / frontend 副本是否同步、会不会继续分叉）——**前提不成立**：
+  它们本来就是同一份内容，除非有人分别去改。
+
+## E-2（修正 §3.2 第三行）：`web/` 不是「两份拷贝」
+
+原文用「`web/src/index.css` 与前端仓库副本哈希不同」支撑「不能简单删 §15」。
+实测：**`web/` 是一个 tracked 目录在三份 checkout 里的三个不同 commit**，
+不是两份独立维护的拷贝。证据：
+
+- 三个仓库 remote 相同、共享 `origin/main = e4da691c…`；
+- `HEAD:web` tree hash：main 与 backend 同为 `0a49d0d2…`；frontend 为 `98b932bd…`，
+  且恰好是前者的**超集**（多 4 个文件，全部来自 WS 批次）；
+- `index.css` 的 blob 三处同为 `d20da640…`——那 737 行 diff 是 CRLF；
+- `feat/backend` **从未提交过任何 `web/` 改动**（其分支独有 commit 只碰 `docs/` 与后端 Python）。
+
+原文的**结论**（不删 §15）依然成立，但理由变了：不是"规则已分叉"，而是
+用户 2026-09-16 明确「backend 线也可以做前端的事，frontend 线也可以做后端的事」。
+
+## E-3（修正 §3.3 拓扑表）：frontend 不在 `feat/frontend`，现场还有第五个目录
+
+- `D:\intelligence-agent-frontend` 实测在 `integrate/ws-stream`，不是 `feat/frontend`；
+- 现场另有 **`D:\intelligence-agent-frontend-ws6`**（frontend 仓库的 linked worktree，
+  分支 `feat/frontend-ws6-ws7`），不在原文的四行拓扑表里。
+
+## E-4：本手册漏掉、执行时另找到的 11 处缺陷
+
+R1-1~R1-6 未覆盖以下各处：
+
+| # | 位置 | 缺陷 | 本轮处置 |
+| --- | --- | --- | --- |
+| 1 | `CLAUDE.md` §9.6 | 交叉引用「§6 Reuse First / §7 不变量」在本文件指向错误章节（逐字复制内容却没改引用） | 随 §9 薄化移除 |
+| 2 | `CLAUDE.md` §15 | 同样把三个目录称作 worktree，且写 frontend 在 `feat/frontend` | 随薄化移除 |
+| 3 | `AGENTS.md` §13.3 | 合并序列缺 §14.6 的「先把 main 合回 feature 分支」，照字面执行会合并过期分支 | 已重写 |
+| 4 | `AGENTS.md` §13.1 / `CLAUDE.md` §15 | 声称 frontend 在 `feat/frontend`（实测 `integrate/ws-stream`） | 已改 |
+| 5 | `AGENTS.md` §16.6 | 把 `docs/SDD_TICKET_TRACKER.md` 标成「frontend worktree 内」，backend 仓库里也有 | §16.6 已删 |
+| 6 | `AGENTS.md` | 标题层级错乱（§13.2~13.4 是 `###` 挂在 `## 13.1` 下；§15、§16.6 级别与父级不匹配） | 已修 |
+| 7 | `AGENTS.md` §3 表 | `MCP / Skills / RAG / Web` 与 `CLAUDE.md` 的 `Knowledge` 不一致 | 已统一 |
+| 8 | `AGENTS.md` §16.2 | 调用 `/diagnose-bug`，实际 skill 名是 `diagnosing-bugs`（同段括号已自认） | §16 已重写 |
+| 9 | 两份文件共 20 处裸 `docs/spec/` | 全指向流式 UI 规格族，且所引 5 个文件在该目录都不存在 | R1-1 覆盖 |
+| 10 | `AGENTS.md` §10 | `/review` `/investigate` `/cso` `/qa` 不存在，与同节「不存在的命令不要伪造」自我打脸 | R1-5 覆盖 |
+| 11 | `AGENTS.md` §14.3 | `git fetch origin --prune` 被列进「Read-only」代码块 | R1-4 覆盖 |
+
+## E-5：R1-6 的措辞必须改
+
+「三仓库各一份副本、内容可能已漂移」按 E-1 是错的。正确表述：三个仓库各有一份 **checkout**，
+但它们是**同一个 tracked 文件树**，内容由 git 保证一致。把错误的恐惧写进根文件比不写更糟。
+
+## E-6：另需单独决策的遗留项
+
+- **跨 clone 行尾策略**：`.gitattributes` 只钉 `*.sh` / `*.ps1`，其余走默认，于是同一个 blob
+  在 main / backend 检出 CRLF、在 frontend 检出 LF。这不是正确性 bug，但会让**任何跨 clone
+  的字节比较产生假差异**（本手册自己就被它骗了两次）。是否统一行尾留待单独决策。
+- **`docs/spec` 改名**：实测该字面出现在 **38 个 tracked 文件、107 处**（32 处指向流式 UI 族）。
+  改名要动 38 个文件，而 R1-1 已把根文件里的裸路径全部消除、陷阱随之失效——
+  故**本轮不改名**，改为在目录内放 `docs/spec/README.md` 说明；改名若仍要做需单独立票。
