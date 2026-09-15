@@ -130,8 +130,11 @@ git -C $MAIN log --oneline -1 main                    # 确认 backend 成果已
 cd $FE
 git fetch $MAIN main                     # 把本地 main 取进 FETCH_HEAD
 git merge FETCH_HEAD                     # ← 需要批准；预期 2 处冲突（见 §0.1 第 2/3 条）
-# 解法：两篇设计稿均取 backend 侧（HEAD），再：
-#   git checkout --ours docs/design/CONTEXT_CAPACITY_DASHBOARD.md docs/design/WEB_UI_BATCH_REDESIGN.md
+# 解法：两篇设计稿均取 backend 侧。⚠ 注意 --ours/--theirs 的指向：
+#   在 frontend clone 里 HEAD = feat/frontend，ours = feat/frontend（旧镜像快照），
+#   theirs = 刚合进来的 main（含 backend）——所以要取的是 **--theirs**。
+#   （本文件初版此处误写 --ours，集成时已由集成 AI 按 stage 内容实证纠正。）
+#   git checkout --theirs docs/design/CONTEXT_CAPACITY_DASHBOARD.md docs/design/WEB_UI_BATCH_REDESIGN.md
 #   git add docs/design/... && git commit
 git diff FETCH_HEAD...feat/frontend --stat | tail -3   # 基于新 main 重看差异
 cd $FE/web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
@@ -215,16 +218,38 @@ git -C $MAIN branch -f feat/frontend FETCH_HEAD
 
 ---
 
-## 6. 已知 flake（既有，**非本批引入**，合入时按 flake 重跑处理）
+## 6. 已修：队列 HTTP 用例的收尾竞态（原登记为 flake，实为确定性竞态）
 
-`tests/web/test_multiturn_queue_http.py::test_get_queue_and_flush_roundtrip` 约 1/5 概率失败，
-两种表现：flush 未返回 SSE 流 / 期望 `200` 得到 `409`。
+**原登记（本节初版，已证实不准）**：`test_get_queue_and_flush_roundtrip` 记为"约 1/5 的既有 flake"。
+集成 AI 复核时指出隔离复跑 **5 次失败 4 次**，与"1/5"不符——这个质疑是对的，本节已按实测重写。
 
-**归因证据**：本批改动了 flush 的 SSE 路径，为排除嫌疑，特在**修复前 commit `552a5e5`**
-建临时 worktree 复现（8 跑 1 败）后删除 → 证明是**既有 flake**，与本批无关。
+**独立复核结论**：不是随机概率问题，是**测试侧两处缺陷**（产品代码零问题），
+修复提交 `5fb016d`（feat/backend clone）：
 
-其余既有抖动：`test_multiturn_queue_http.py::test_edit_queued_item_cancel_old_then_queue_new`、
-e2e `r-project-groups.spec.ts:139`（单跑恒绿，全量偶发）。
+1. **起点竞态**：`test_get_queue_and_flush_roundtrip` 与 `test_edit_queued_item_cancel_old_then_queue_new`
+   用 `_completed_session` + `_wait_idle` 作起点，再手工 append 一条 `message/queued`。
+   但 `_wait_idle` **不是只读的**（它 POST `/queue/flush`），且它的 idle 回执只证明
+   "没有待投递输入"——`deliver_next_undelivered` 在 pending 为空时直接返回，**根本不看 `get_active`**。
+   于是"`run/completed` 已落盘"与"`_drive` finally 调 `run.finish()` 摘掉 active"之间的窗口里，
+   那个 run 的终态回调（§4.5.5 接力）会把刚 append 的项投递掉 → flush 正确返回
+   `{"status":"idle"}`，断言却期望 SSE 流。**修法**：新增 `_empty_session()`
+   （`POST /api/sessions?launch=false`）作确定性起点——空会话没有回调可竞争。
+
+2. **假通过**：`test_supersede_with_queue_id_still_validated` 与 `..._injected_message_409`
+   只断言 `status == 409`，而 `ActiveRunConflict` 与 `SupersedeTargetInvalid` **同为 409**——
+   竞态触发的在途冲突会让这两条"验证取代校验"的用例**假通过**。**修法**：补 detail 断言钉住具体原因。
+
+**验证**：两条目标用例隔离各跑 **25 次全绿**（修复前分别约 1/5、1/2 失败）；
+全量门禁 ruff clean + **2382 passed / 10 skipped / 0 failed**；
+变异测试（把 `deliver_next_undelivered` 改成永不投递）目标用例立刻变红，
+证明修复后仍能捕获真实投递回归，不是把断言放松换来的绿。
+
+**残留（未修，与本批无关）**：共享事件循环下偶发的整文件级联
+（`RemoteProtocolError: peer closed connection`，一次 20 跑里出现 1 次）。
+已确认它始于**本批未改动**的用例，且在改动前就出现过（`fz10.log`），
+属测试基础设施的资源竞争，不影响全量门禁结果（集成后 main 全量 0 failed）。
+
+其余既有抖动：e2e `r-project-groups.spec.ts:139`（单跑恒绿，全量偶发）。
 
 ---
 
