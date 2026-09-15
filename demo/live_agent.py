@@ -49,6 +49,12 @@ from rich.text import Text
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
+# 交互模式要 `from demo.live_agent_repl import ...`（绝对名，与 tests/ 一致）。
+# 以脚本方式运行时 Python 只把 `demo/` 放进 sys.path，仓库根不在——不补这行
+# 交互模式会在那条 import 上直接 ModuleNotFoundError（--task 单次模式不受影响，
+# 因为该 import 在交互分支内）。pytest 侧能看到是因为 pyproject 配了 pythonpath=["."]。
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.config import Settings
