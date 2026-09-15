@@ -1,8 +1,10 @@
 # AGENTS.md
 
-> 本文件定义 **Codex / ZCode 等非 Primary Coding Agent** 在 `intelligence-agent` 项目中的默认行为。
-> Claude Code 仍是 **Primary Developer**，负责主 Spec Kit 流程、主要实现与最终集成。
-> Codex / ZCode 默认承担 **Secondary / Task Agent**：Review、Debug、Security、验证，以及用户明确分配的小范围实现。
+> 本文件定义所有 Coding Agent（ZCode / Codex / WorkBuddy / Claude Code …）在 `intelligence-agent` 项目中的默认行为。
+> **Primary 不绑定工具名**：谁当前在干活，谁就是当下的 Primary Developer，负责主 Spec Kit 流程、
+> 主要实现与集成。用户随时可以换人，规则不因此失效。
+> 同一时刻有多个 Agent 并行时，非主开发的 Agent 承担 **独立审查 / Debug / Security / 验证**；
+> 该职责由角色（谁在审查）成立，不由工具名成立。
 > 纯工程模式：做项目，不做教学。
 
 ---
@@ -98,7 +100,10 @@
 
 ---
 
-# 4. Secondary / Task Agent 职责
+# 4. 独立审查 / Debug / Security 职责
+
+> 本节描述**角色**，不描述工具。任何 Agent 以「独立审查者」身份进场时（即不是当前主开发），
+> 都按本节执行。
 
 ## 4.1 Independent Review
 
@@ -155,9 +160,9 @@ Review 必须同时看：
 - 大文件/Artifact 访问控制；
 - 动态 SubAgent 权限扩大。
 
-## 4.4 Explicit Local Implementation
+## 4.4 施工授权
 
-只有用户、Primary Developer 或当前 ticket 明确分配的小范围 Task 才写代码。
+只有用户、当前主开发或 ticket 明确分配的 Task 才写代码。
 
 默认不承担整项目重新规划。
 
@@ -165,13 +170,13 @@ Review 必须同时看：
 
 # 5. 工程规划边界
 
-Claude Code / Primary Developer 维护 Matt SDD 主工程规划：
+当前主开发（谁在干活谁就是，见文件头）维护 Matt SDD 主工程规划：
 
 - `/grill-with-docs → /to-spec → /to-tickets → /implement` workflow
 - GitHub Issue、Ticket 依赖与验收标准
 - 主 Ticket 拆分与集成
 
-Codex / ZCode：
+非主开发的 Agent：
 
 - 不创建第二套完整主 SDD 规格；
 - 不重新解释整个产品方向；
@@ -373,10 +378,10 @@ Scope 外问题只报告，不顺手修。
 
 ---
 
-# 11. 与 Claude Code / 其他 Agent 协作
+# 11. 多 Agent 协作
 
-- Claude Code 是 Primary Developer；
-- Codex / ZCode 默认做独立 Review、Debug、Security 或明确 Task；
+- 主开发由「谁当前在干活」决定（见文件头），不绑定工具名；
+- 非主开发的 Agent 默认做独立 Review、Debug、Security 或用户明确分配的 Task；
 - 不重复生成同一模块；
 - 修改前先检查 Git diff，避免覆盖其他 Agent 未提交工作；
 - 遇到冲突先报告具体文件/范围；
@@ -387,13 +392,13 @@ Scope 外问题只报告，不顺手修。
   - 还剩什么；
   - 是否存在风险/未决项。
 
-如果用户明确将某一完整模块交给 Codex / ZCode 主导，则该 Agent 可以负责该模块，但仍必须遵守同一 Engineering Specification，且不得创建与项目宪法冲突的平行架构。
+如果用户明确将某一完整模块交给某个 Agent 主导，则该 Agent 可以负责该模块，但仍必须遵守同一 Engineering Specification，且不得创建与项目宪法冲突的平行架构。
 
 ---
 
 # 12. 最终原则
 
-> **Engineering Specification 决定“要做什么与不能做什么”；Primary Spec Kit / ticket 决定“当前怎么施工”；Secondary Agent 的价值是独立验证、找根因、守住边界，并在明确 Scope 内完成高质量实现。**
+> **Engineering Specification 决定“要做什么与不能做什么”；当前 ticket 决定“当前怎么施工”；主开发负责实现与集成，独立审查者的价值是找根因、守住边界、防止自证清白。**
 
 ---
 
