@@ -102,6 +102,15 @@ export interface ApiMock {
    *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
    *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
   onApprovePost?: (route: Route) => Promise<void> | void;
+  // ── ADR-0030 #195/#196 多轮投递通道 ──
+  /** GET /api/sessions/{id}/queue（待发送输入首屏补齐；缺省 200 → 空队列）。
+   *  #195 队列条 AC：注入此回调即可构造「重启后仍有未投递输入」的首屏。 */
+  onQueueGet?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/queue/{qid}/cancel（取消排队项；缺省 200 → cancelled）。 */
+  onQueueCancelPost?: (route: Route) => Promise<void> | void;
+  /** GET /api/sessions/{id}/context-usage（上下文容量看板；缺省 200 → ok 空桶）。
+   *  #200 看板 AC：注入此回调即可构造有数据/未采集/无数据三种状态。 */
+  onContextUsageGet?: (route: Route) => Promise<void> | void;
   // ── #172 / ADR-0029 会话硬删 ──
   /** 指定 id 的 DELETE /api/sessions/{id} 直接回这个错误——用来构造只在真机上才会
    *  自然出现的拒绝：409（有在途 run / 有挂起审批 / 是 fork 父会话；**状态码相同**，
@@ -175,6 +184,14 @@ export interface ApiMock {
    *  在浮层里，再设回 undefined 并重试——同一条路径因此能覆盖"可重试"。
    *  不设 = 按真后端语义成功（见 routeApi 的 POST /api/sessions 分支）。 */
   cwdSessionError?: { status: number; detail: string };
+  /** #204：launch=false（只建会话不启动 run）时伪造失败。不设 = 按真后端语义
+   *  成功：返回 `{session_id, permission_mode}` JSON（非 SSE），只写 session/started，
+   *  无 run 帧。 */
+  emptySessionError?: { status: number; detail: string };
+  /** #204 裁定 §3 考点：launch=false 响应里回传**与请求不同的** permission_mode
+   *  （模拟后端归一化/接管）——pill 必须显示**响应**的档位而不是前端本地选中值。
+   *  不设 = 回显请求的档位（缺省 workspace-write）。 */
+  emptySessionPermissionOverride?: string;
   // ── WS-7 / #170 宿主目录列举 ──
   /** 假目录树（`GET /api/host/dirs`）。**不设 = 空的根列举**（不是错误）：浏览器是
    *  新建项目对话框的一部分，不关心它的 spec 不该因此多出一条红色错误盒。
@@ -336,6 +353,51 @@ export function routeApi(page: Page, mock: ApiMock): void {
       const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
       const cwd = typeof body.cwd === 'string' ? body.cwd : '';
       if (!cwd) return route.abort('aborted');
+      // ── #204：launch=false（只建会话不启动 run）——按真后端语义（裁定 §2）：
+      //  返回 `{session_id, permission_mode}` JSON（非 SSE）、只写 session/started、
+      //  无 run 帧；给了 task 又 launch=false 是矛盾组合 → 422（照真后端）。
+      const launchFalse = new URL(req.url()).searchParams.get('launch') === 'false';
+      if (launchFalse) {
+        if (mock.emptySessionError) {
+          return json(route, { detail: mock.emptySessionError.detail }, mock.emptySessionError.status);
+        }
+        if ('task' in body) {
+          return json(
+            route,
+            { detail: 'task 与 launch=false 互斥：要么带 task 启动 run（launch=true），要么只建会话（省略 task）' },
+            422,
+          );
+        }
+        const sid = `empty-${sessionState.length + 1}`;
+        // #204 裁定 §3 考点：`emptySessionPermissionOverride` 模拟后端归一化/接管
+        // （响应档位 ≠ 请求档位）——pill 必须显示响应的档位，不是前端本地选中值。
+        const permissionMode =
+          mock.emptySessionPermissionOverride ??
+          (typeof body.permission_mode === 'string' ? body.permission_mode : 'workspace-write');
+        let project = projectState.find((p) => p.path === cwd);
+        if (!project) {
+          project = {
+            id: `p-${projectState.length + 1}`,
+            path: cwd,
+            title: cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || cwd,
+            session_ids: [],
+          };
+          projectState.unshift(project);
+        }
+        sessionState.unshift(
+          // 空会话：没有 user/message → first_user_message 为 null（真后端语义）。
+          sessionRow(sid, { id: project.id, title: project.title }, {
+            event_count: 1,
+            first_user_message: null,
+          }),
+        );
+        project.session_ids.unshift(sid); // 账本前插（与 attach 语义一致）
+        // durable log 只有一条 session/started（无 run 帧——launch=false 不启动 run）。
+        sessionEvents.set(sid, [
+          { type: 'session/started', data: { cwd, permission_mode: permissionMode }, seq: 1, session_id: sid, time: T },
+        ]);
+        return json(route, { session_id: sid, permission_mode: permissionMode });
+      }
       // ── WS-6 / #169：带 cwd 建会话 —— 按真后端语义（ADR-0027 D2/D3）真的改状态：
       //  会话诞生在该目录、自动入组（未注册的 cwd 自动注册为项目，title = 目录末段名），
       //  于是"新会话落在该项目分组下"这条断言考的是界面跟着后端语义走，
@@ -524,6 +586,38 @@ export function routeApi(page: Page, mock: ApiMock): void {
       return route.fulfill({
         status: 200,
         body: JSON.stringify({ session_id: `${SID}-fork-${body.from_seq ?? 0}`, from_seq: body.from_seq ?? 0 }),
+        contentType: 'application/json',
+      });
+    }
+    if (/^\/api\/sessions\/[^/]+\/queue$/.test(path) && req.method() === 'GET') {
+      if (mock.onQueueGet) return mock.onQueueGet(route);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ items: [], steers: [] }),
+        contentType: 'application/json',
+      });
+    }
+    if (/^\/api\/sessions\/[^/]+\/queue\/[^/]+\/cancel$/.test(path) && req.method() === 'POST') {
+      if (mock.onQueueCancelPost) return mock.onQueueCancelPost(route);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({ status: 'cancelled' }),
+        contentType: 'application/json',
+      });
+    }
+    if (/^\/api\/sessions\/[^/]+\/context-usage$/.test(path) && req.method() === 'GET') {
+      if (mock.onContextUsageGet) return mock.onContextUsageGet(route);
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({
+          estimated: true,
+          window_tokens: 200000,
+          used_tokens: 0,
+          thresholds: { auto_compact: 0.7, hard_guard: 0.85 },
+          breakdown: { messages: 0, system_prompt: 0, skills: 0, other: 0, tools: { system: 0, mcp: 0 } },
+          cache: { state: 'not_collected', reported_calls: 0, total_calls: 0, avg_hit_rate: null },
+          state: 'no_data',
+        }),
         contentType: 'application/json',
       });
     }
@@ -789,10 +883,9 @@ export const REASONING_EFFORTS = [
   { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。' },
 ];
 
-export const CONTEXT_PROVIDERS = [
-  { id: 'memory', display_name: 'Memory', description: 'Inject relevant recalled memories scoped to the user into the model context.' },
-  { id: 'skills', display_name: 'Skills', description: 'Inject the catalog of available skills (name + description) into the model context.' },
-];
+/* #201：多选 Context provider 控件已删除（前端不再取 `GET /api/context-providers`），
+   配套的 `CONTEXT_PROVIDERS` 目录 fixture 随之删除。`routeApi` 里的该端点 mock 保留：
+   它描述的是一条**仍然存在**的后端契约（`ApiMock.contextProviders`），#200/#203 会再用。 */
 
 /** 能力条目 fixture（形状 = 后端 `capability/manifest.py::manifest_entry`）。
  *
@@ -842,12 +935,13 @@ export const CORE_CAPABILITY: Record<string, unknown> = {
   actions: { permissions: true, stop: true, retry: false, resume: true },
 };
 
-// ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 >5 条）──
-// 阈值速查（源码）：ModelPicker 用 `models.length + 1 > 5`（默认链算 1 条）；
-// ControlPicker / ContextProviderPicker 用 `entries.length > 5`。
-// 三处 spec 曾各自内联长目录 → 阈值/条数一改就静默漂移，故统一在此构造。
+// ── 长目录 fixture（F-DEFER-1：搜索框显示阈值 > 5 条）──
+// 阈值速查（源码）：#199 之后**只有** `OptionPicker` 还有搜索框，阈值 `options.length > 5`
+// （三处档位下拉共用）。模型选择器已删搜索框，所以下面的长模型目录不再与"搜索框显示"挂钩——
+// 它现在服务的是别的事实：provider 分组条数（4 组）与「多到旧实现必然要搜索」这个对照。
+// 曾各自内联长目录 → 阈值/条数一改就静默漂移，故统一在此构造。
 
-/** 造一个 id/display_name 结构的长目录（映射 ControlPicker / ContextProviderPicker 端点形状）。
+/** 造一个 id/display_name 结构的长目录（形状 = 三个档位端点共用的 `CatalogEntry`）。
  *
  * `highlight` 指定某一项的 display_name（供"键入过滤"类用例断言），默认 `前缀 N`。 */
 export function longCatalog(prefix: string, n: number, highlight?: { index: number; label: string }) {
@@ -858,14 +952,16 @@ export function longCatalog(prefix: string, n: number, highlight?: { index: numb
   }));
 }
 
-/** 长模型目录：MODELS（3）+ 2 条 = 5 条，+1 默认链 = 6 > 5 → 搜索框显示。 */
+/** 长模型目录：MODELS（3）+ 2 条 = 5 条、4 个 provider——供「分组就是导航」用例
+ *  （旧实现在这个规模会显示搜索框，正好当对照）。 */
 export const SEARCHABLE_MODELS = [
   ...MODELS,
   { name: 'gpt-5-mini', provider: 'openai', model: 'gpt-5-mini', default: false },
   { name: 'gemini-3-pro', provider: 'google', model: 'gemini-3-pro', default: false },
 ];
 
-/** 长模型目录 PLUS：MODELS（3）+ 4 条 = 7 条，+1 = 8 > 5（更强的长目录信号，供可见性用例）。 */
+/** 长模型目录 PLUS：MODELS（3）+ 4 条 = 7 条、6 个 provider——比 SEARCHABLE_MODELS 更长的
+ *  目录，供「没有搜索框」用例（目录一长就更该有搜索框 ⇒ 更能证明它被删了）。 */
 export const LONG_MODELS = [
   ...SEARCHABLE_MODELS,
   { name: 'llama-5-70b', provider: 'meta', model: 'llama-5-70b', default: false },
@@ -911,18 +1007,85 @@ export async function pickControl(
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
 }
 
-/** 键盘在 ModelPicker 里选目录第一行（「默认链」之后第一项 = MODELS[0]），断言 trigger 文本。
+/** 选目录里的**第一个模型**（`MODELS[0]`，provider = `MODELS[0].provider`），
+ *  断言 trigger 文本变成该模型名（#199 两级飞出）。
  *
- * F-DEFER-1：同 pickControl——焦点显式落到 listbox，不碰 0×0 的搜索框。 */
+ * 与旧版的差别是**语义变了，不是断言变松**：一级只列 provider，模型在二级子菜单里，
+ * 所以"下压 N 次"不再能表达目标——必须按 provider 展开再选。鼠标路径（hover 展开）
+ * 与键盘路径（`→` 进二级）都由 Radix Sub 提供，这里走鼠标路径（更短、也给悬停迟滞
+ * 一条真实覆盖）。
+ *
+ * 关闭态的信号是 `[role="menu"]`（菜单语义），不再是 `[role="listbox"]`：两级飞出在
+ * 平台上就是「菜单 + 子菜单」，见 `ModelPicker.tsx` 顶部对语义变更的说明。 */
 export async function pickFirstModel(page: Page): Promise<void> {
-  const trigger = page.locator('.composer-model[aria-label="模型选择"]');
-  const listbox = page.locator('[role="listbox"]:visible').last();
+  await pickModel(page, MODELS[0].provider, MODELS[0].name);
+}
+
+/** 「这个面板里没有搜索入口」的**可失败**口径：任何输入控件 / 搜索语义都算。
+ *
+ * 为什么不能只数某个类名：`#199` 要证明的是「模型选择器没有搜索框」，而旧模型的搜索框类名是
+ * `.model-picker-search-wrap`、新共享组件（`OptionPicker`）才是 `.picker-search-wrap`——
+ * 在模型菜单里数后者永远得 0，那是**恒真命题**（两轴 review 的 Standards 轴把这个假绿挑出来了）。
+ * 按标签/role 数才对实现细节免疫：将来谁把搜索框塞回来，无论挂什么类名都会红。
+ *
+ * `[cmdk-input]` 一并算上：cmdk 的输入框正是 `role="combobox"`，但显式写上让口径不依赖库实现。 */
+export function noSearchInputIn(page: Page, scope: string) {
+  return page.locator(
+    `${scope} input, ${scope} textarea, ${scope} [role="combobox"], ${scope} [role="searchbox"], ${scope} [role="search"], ${scope} [cmdk-input]`,
+  );
+}
+
+/** 焦点描述，口径统一为 `role|aria-haspopup|文本前 12 字`——供菜单键盘断言/轮询共用。 */
+async function activeMenuItem(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const a = document.activeElement as HTMLElement | null;
+    return `${a?.getAttribute('role') ?? '-'}|${a?.getAttribute('aria-haspopup') ?? '-'}|${(a?.textContent ?? '').slice(0, 12)}`;
+  });
+}
+
+/** 按一个菜单键，并**等焦点真的移到位**才交还控制权。
+ *
+ * 为什么必须轮询而不是按键后直接读：Radix 的 roving focus 是在 `setTimeout` 里移焦的
+ * （`react-roving-focus` 的 Item.onKeyDown 末尾：`setTimeout(() => focusFirst(candidateNodes))`），
+ * 所以「按键 → 立刻读 `document.activeElement`」拿到的是**旧值**。探针实测：同一个键，
+ * 立刻读会显示焦点没动、隔一帧再读就是新位置；把 keydown 直接派发到聚焦元素上（绕过
+ * CDP 输入管线）并等 50ms 也总能移动。也就是说**按键没有丢，是读得太早**——早先那个
+ * 「第一次 ↓ 丢、第二次才好」的现象就是这个竞态的表象，而不是产品缺陷。
+ * 断言 `expected` 用 `toContain` 语义（形状见 `activeMenuItem`）。 */
+export async function pressMenuItemKey(page: Page, key: string, expected: string): Promise<void> {
+  await page.keyboard.press(key);
+  await expect.poll(() => activeMenuItem(page), { message: `${key} 之后焦点应移到 ${expected}` }).toContain(expected);
+}
+
+/** 打开模型菜单（键盘路径）并等初焦落到菜单项上（同 `pressMenuItemKey` 的延迟移焦成因）。 */
+export async function openModelMenu(page: Page): Promise<void> {
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]').first();
   await trigger.focus();
   await page.keyboard.press('Enter');
-  await expect(listbox).toBeVisible();
-  await listbox.focus();
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
-  await expect(trigger).toContainText(MODELS[0].name);
-  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="menu"]').first()).toBeVisible();
+  await expect.poll(() => activeMenuItem(page)).toContain('menuitem|');
+}
+
+/** 打开模型菜单 → 展开 `provider` 的二级 → 点中 `modelName`，断言 trigger 文本。
+ *
+ * 首尾各一次「菜单已彻底卸载」等待，成因与 `pickControl` 尾部那条完全相同（探针实测）：
+ * Radix 的退出动画期间 menu 节点仍在 DOM，且 modal 菜单层把 `body` 设成
+ * `pointer-events:none`——此时开下一个浮层会被它吞掉（键盘尤其明显：Enter 被正在
+ * 卸载的菜单吃掉，目标浮层根本不出现；鼠标路径因为 Playwright 的可操作性重试天然
+ * 吸收了这段窗口，所以只有键盘路径会炸）。 */
+async function pickModel(page: Page, provider: string, modelName: string): Promise<void> {
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]').first();
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+  await trigger.click();
+  // 一级的 provider 行 = 带 aria-haspopup 的 menuitem（SubTrigger）
+  const providerRow = page
+    .locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: provider })
+    .first();
+  await providerRow.hover();
+  // 二级的模型行 = menuitemradio（「从这一组里选一个」）
+  const modelRow = page.locator('[role="menuitemradio"]', { hasText: modelName }).first();
+  await modelRow.click();
+  await expect(trigger).toContainText(modelName);
+  // 退出动画走完再交还控制权——否则下一次交互会撞上正在关闭的菜单
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
 }

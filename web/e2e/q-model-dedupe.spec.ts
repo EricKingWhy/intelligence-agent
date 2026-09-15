@@ -57,10 +57,25 @@ function countModelPosts(page: import('@playwright/test').Page): string[] {
   return posts;
 }
 
-/** 打开模型浮层，返回目标任务项（`.model-picker-item`）。 */
+/** 打开模型菜单 → 展开目标模型所在 provider 的二级，返回该模型项。
+ *
+ * #199 后模型在二级子菜单里（一级只列 provider），所以定位要多一步"展开所属 provider"；
+ * 目标模型 → provider 的对应关系直接取自 fixture（`MODELS`），不靠猜。
+ *
+ * 开头等「上一次的菜单已彻底卸载」：本文件是**故意**用原始鼠标点击制造"弹层已关但节点
+ * 仍可命中"的场景，所以调用点常常紧跟在一次选中之后；若不先等干净，这次 open 会撞在
+ * 正在退场的菜单上（modal 层把 body 设成 pointer-events:none）而根本打不开。
+ * 这不影响被测语义：去重锁的是"节点仍可命中时的第二次点击会被丢弃"。 */
 async function openPicker(page: import('@playwright/test').Page, name: string) {
+  const entry = MODELS.find((m) => m.name === name);
+  if (!entry) throw new Error(`MODELS fixture 里没有 ${name}`);
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
   await page.locator('.composer-model[aria-label="模型选择"]').first().click();
-  const item = page.locator('.model-picker-item', { hasText: name }).first();
+  const providerRow = page
+    .locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: entry.provider })
+    .first();
+  await providerRow.hover();
+  const item = page.locator('[role="menuitemradio"]', { hasText: name }).first();
   await item.waitFor();
   return item;
 }

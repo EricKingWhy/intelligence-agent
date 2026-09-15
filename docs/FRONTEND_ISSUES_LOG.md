@@ -2303,3 +2303,306 @@ drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方�
 
 **归属：后端（测试稳定性）**。本轮**不修**（§8 Scope Lock）。下次复现时按上面三条假设取证，
 **不要**用"重跑一次过了"结案。
+
+---
+
+## 用户报障批次（2026-09-14）：composer 停止提示 + 用户消息动作行（**裁决已定，未修**）
+
+用户真机截图报的两点前端 UX 问题。按用户明确要求：**本轮只登记 + 开 issue，不动代码**
+（"你先记下来，不要着急修"）。已开 GitHub issue，编号写在每条的标题里。
+随后用户对形态/语义问题作了裁决，**裁决原文见下方各条 + 对应 issue 评论**；
+等用户发来第二个修复点后一并排期开工。
+
+### UX-01（issue #194）流式期间「Esc 停止」提示压在左下角档位控件上
+
+**现象**：发起 query（run 流式中）时，composer 左下角出现 `<kbd>Esc</kbd> 停止`，
+与最左档位控件（模型选择器）**画在同一位置、互相叠字**；而真正的停止按钮在右下。
+用户原话：「左边为什么会有个 ESC 停止？就算有也应该是在右边的按钮上啊」。
+
+**根因（定位到行）**：`web/src/components/Composer.tsx:173-175` 渲染该提示（仅 `streaming` 时），
+`web/src/styles/app.css:2998-3009` 给它 `position:absolute; left: var(--space-lg); bottom: var(--space-sm)`
+—— 与档位行（模型/权限/Agent/推理/Context）**同一锚点**；停止按钮在 `right/bottom`（`app.css:2959-2962`）。
+即同一动作的两个 affordance 被放在相反两侧，且文字提示那侧正好是档位控件。
+
+**裁决（用户 2026-09-14，issue #194 评论）**：**删掉文字提示，只留右侧圆形停止按钮**。
+用户原话：「干脆去掉文字，只留圆形停止按钮」。
+
+即重叠是**从根上消失**（元素删除），不是挪位置。实现面：删 `Composer.tsx:173-175` 的
+`<span className="composer-esc-hint">` + `app.css:2998-3018` 两条规则（含 `kbd` 子选择器）；
+`.composer-stop`（`Composer.tsx:176-178`）保持右下不动。
+
+**已核：删它不带走任何断言**——`grep -rn composer-esc-hint web/` 只有组件与 CSS 两处，
+`web/e2e/**` 与 `src/**/*.test.tsx` **零引用**。
+
+**验收要点**：流式中左下档位行（模型选择器起）与任何元素**不相交**；右下停止按钮点击仍中断在途 run；
+`Esc` 中断行为不变（全局键绑定在 App，本票不动）；非流式不渲染停止按钮与提示。
+
+**已知代价（记录在案）**：键盘用户失去"Esc 可中断"的可见提示（只剩按钮 `title`，需悬停）。
+若将来要补偿，落点是 `aria-keyshortcuts` / `title` 这类**非布局**信号，而不是再放一个绝对定位浮字。
+
+### UX-02（issue #195）用户消息动作行重设计：复制 / 编辑 / 分叉 三图标（对齐 Codex）
+
+**需求**：query 下方一行图标 —— **复制** / **编辑（铅笔）** / **分叉**；hover 出提示
+（分叉文案「在此次分叉新会话」）；点编辑后 query 变可编辑输入框 + 「取消」「发送」按钮（参考图四）；
+分叉不再用文字胶囊（参考图五）。
+
+**现状（定位到行）**：`Conversation.tsx:450-465` 用户消息 = 气泡 + **文字**按钮「分叉」
+（`.fork-btn`，`app.css:1790-1805`，`title` 为「从此处分叉新会话」/ 首轮空会话提示）；
+助手侧有 hover 复制（`CopyButton.tsx` 经 `Conversation.tsx:643`）；**没有编辑能力**
+（`lib/amend.ts` 与"编辑历史消息"无关，它是 Composer 档位→契约字段的映射）；
+用户消息**没有**时间戳。
+
+**裁决（用户 2026-09-14，issue #195 评论）**：
+
+1. **编辑范围 = 只有最后一条 query**。判据是"其上再没有后继轮次"，不是"第几轮"；中间历史 query 不提供编辑。
+2. **流式中也要能编辑 + 能发送**（用户原话：「即使大模型正在输出也要能编辑可以发送，和 codex、zcode 一样」）。
+   ⇒ `Conversation.tsx:452` 的 `turn.status !== 'streaming'` 守卫**必须放开**（至少对编辑/复制），
+   否则最后一条 query 在流式中根本看不到按钮。
+3. **「发送」语义 = 先停止在途 run，再把改后文本作为一条新的 user message 发出**（用户选 (c) 等价重发）。
+   复用既有正道：在途 run → 走 `Composer.tsx:22` 的 `onCancel`（就是右下圆形按钮的同一个回调）→
+   然后 append 新 user message。**零后端改动、零新契约、零新 ADR**，且 spec 03 要求的
+   SessionEvent 完整历史不被破坏（机器里没有"改掉第 N 条 user message"这种事件）。
+   与参考图四「你在 0 秒后停止了」的观感同形：被替代的那条留在日志里，UI 照现在的停止样式呈现。
+4. **时间戳加在图标行最左侧**（用户原话：「加，放在图标行最左侧」）。
+5. 图标行左→右：**时间戳 / 复制 / 编辑 / 分叉**；`分叉` 的文字 pill 改图标 + `title`（hover 出「在此次分叉新会话」）。
+
+**待用户拍板的一点**：被替代的那条 query 在界面上怎么显示。倾向**原样保留 + 已有停止标记，不隐藏**——
+隐藏它要么前端维持第二份真相（违反不变量 22），要么给 `/messages` 加"被 seq=N 取代"字段（后端契约变更）。
+若用户要求"编辑后旧 query 消失"，那是一个**独立的后端契约票**，不塞进本票。
+
+**待定（实现时按仓里既有先例办，不再回问）**：流式期间分叉按钮是否显示。后端对在途 run 的 fork 会拒
+（`ActiveRunConflict`）；按 #172 定下的纪律"不据前端猜测做禁用态，让后端拒绝并显示它的 detail"，
+倾向照常显示、点了看到后端 409 原文。
+
+**实现要点（裁决 4 引申，别踩坑）**：`Turn` **当前没有** user-message 时间字段——
+`lib/projection.ts:214-226` 的 `projectUserMessage` 只设 `user_message` / `user_message_seq`；
+`touchTurn`（`lib/projection.ts:1183-1187`）只给 `turn.started_at` 赋值。**不能拿 `started_at` 顶替**：
+它是该轮**第一个事件**（通常 `run/started`）的时刻，不是 query 自己的时刻，拿它显示就是伪造（不变量 21）。
+⇒ 需在投影层加 `user_message_time`（`newTurn` + `projectUserMessage`，取 user/message 事件自带的 `time`），
+并同步投影测试。
+
+**影响面（改动时会踩到的断言）**：`Conversation.test.tsx:292-336`（断言 `.fork-btn` 存在与 title 文案）、
+`web/e2e/b-fork.spec.ts:79,108,118-121`（按 `.fork-btn` 定位 + 逐字断言 title `从此处分叉新会话` / `/空会话/`）。
+改图标后 `title` 属性必须保留（hover 仍可读），否则这两处要**重写**而不是删。
+
+**验收草案**：① 最后一条 query 三图标在流式中即可见可用，非最后一条用户消息只有复制/分叉；
+② 编辑态 = 内联替换 + 「取消」「发送」，取消后原文还原；③ 编辑态发送时 e2e 断言
+**先出现停止请求、再出现新的消息发送请求**及结果收敛；④ 只增不改——编辑发送后 `/events` 里旧的
+`user/message` 事件**仍在**（用事件数/seq 断言，不只看界面）；⑤ 时间戳取自 user/message 事件自身 `time`；
+⑥ 图标有 `title`（含「在此次分叉新会话」）；⑦ 门禁五连绿。
+
+**本票不动**：助手侧输出动作（`CopyButton`，`Conversation.tsx:643`）；`lib/amend.ts` 是 Composer 档位
+→ 契约字段映射、**与消息编辑无关**，别被名字误导。
+
+**状态**：两条**均未修**（用户明确「你不要执行」）。等用户发来**第二个修复点**，一并收编排期后开工。
+
+---
+
+## 用户报障批次 2（2026-09-14）：Inspector 拖拽方向 + 「模型说没有写工具」（**仅登记，未修**）
+
+用户第二批真机报障。同样**只登记 + 开 issue，不动代码**。完整证据链在 issue 正文里。
+
+### UX-03（issue #197）Inspector 水平拖拽方向反了
+
+**现象**：向右拖把手，右侧面板反而**变大**（直觉应为变小）。
+**需求**：向右拖 = 面板缩小；向左拖 = 面板放大。仅改拖拽方向，保留原样式与 `↔` 控件，不碰面板业务代码。
+
+**根因（定位到行）**：面板右侧停靠、手柄在**面板左缘**，指针右移 `dx>0` 应减小宽度，代码却**加** `dx`——
+`web/src/components/StepDetail.tsx:279` `clampInspectorWidth(drag.startW + (e.clientX - drag.startX), …)`。
+**同源反转**：键盘通路 `:297` 的 `ArrowRight` 也是加宽（同一 `role="separator"` 上键鼠必须同语义）。
+**会红的既有断言**：`web/e2e/y-inspector-peek.spec.ts` 的 AC6（`:222-234` 向右拖到 480、向左拖到 320、
+向右 `>320`）与 AC7（`:248-251` `ArrowRight → 336`）**逐字锁住反向行为**，必须同步翻转（连用例名一起改，
+commit message 写明"方向翻转 + 断言同步"）。
+**⚠ 易误判点**：`INSPECTOR_MIN_W = 320` 且初始宽度就是 320（e2e `:198-200` 断言 `aria-valuenow/min` 均为 320）
+⇒ 修好后**在默认宽度下向右拖没有任何视觉变化**（已夹在下限），只有向左拖会变大。是否调整初始/下限关系属产品取舍，未定。
+**影响面**：`StepDetail.tsx` 1 行必要 + 1 行待定；`clampInspectorWidth`（`lib/inspectorPanel.ts:40-43`）与 CSS 不动。
+
+### OBS-04（issue #198）「模型说没有 write/edit/apply_patch」无法从日志回溯
+
+**现象**：用户问模型有哪些工具，模型答只有 `read`/`glob`/`grep`/`web_search`，并称没有 `write`/`edit`/`apply_patch`。
+**根因（已定案，非幻觉、非未安装）**：那次会话的 Agent 档位是 **「研究审查」(`research_review`)**，
+按 ADR-0020a 用 `registry.filtered(spec.tool_scope)` 收窄了 registry；`_RESEARCH_TOOLS`（`agent/profiles.py:68-71`）
+**不含任何写工具**；`research_review` 的 system prompt 末句就是「**你没有写权限。**」（`prompt/builtin.py:49`），
+模型是在转述它。内置工具本身在 `assembly.py:212-218` **无条件注册**（唯一收窄途径就是 `agent_profile`）。
+**决定性证据**：会话 `f522d4a9-55dc-42c7-b24d-e20320f5f77b`（`D:\intelligence-agent\.agent\workspace\sessions\`，2145 事件 / 13 轮 / 0 次 tool call）
+—— 模型报的 4 项**精确等于** `_RESEARCH_TOOLS` 减去两个未装配的知识库工具，全量注册表是十几个工具。
+**本票要修的是它暴露的三个缺口（不是上面那条设计）**：
+1. `agent_profile` **不落任何日志**（SessionEvent 0 命中；诊断日志字段里根本没有）；
+2. **每个 run 实际拿到的工具清单不落任何日志**（全仓无 `tools=`/`tool_names`，已 grep 确认）；
+3. UI **不提示档位收窄了工具集**，且前端不持久化档位（`App.tsx:145` 默认 null = 全量），刷新后现象不可复现。
+
+**与 #187 的关系**：BUG-013 当时**移除了 runtime context 里的工具清单**（防模型把写作任务误判为工具任务），
+本现象是同一处改动的另一面代价——模型只能靠 tools 参数自省，自述工具的能力变弱。这条权衡必须在 ADR 里写明。
+**与 #196 的边界**：本票只管"可观测/可解释"，`queue`/`steer` 消费侧死路见 #196，别合并成一个改动。
+
+---
+
+## 用户报障批次 3（2026-09-14）：UI 重设计三件 + 上下文容量看板（**仅登记，未修**）
+
+用户第三批报障，主体是 **UI 重设计**（明确要求：**用 `impeccable` skill 设计，品味要高**）+ 一个新看板。
+仍**只登记 + 开 issue，不动代码**。完整需求/证据/受影响断言在 issue 正文里，本节只留索引与关键结论。
+
+### UX-05（issue #199）模型选择器两级重设计
+
+**现象**：当前弹层难看（行距局促、`系统自动选`/`默认` 与勾选散落、层级不清）。
+**要求**：改成 ZCode 式两级——一级 provider（带 `>` 与当前生效 ✓、顶部显示当前选中项、底部 `管理模型`），
+二级悬停/点击侧向飞出该 provider 的模型列表。
+**关键发现（"难看"的第一根因）**：**分组其实早就实现了**（`ModelPicker.tsx:42-51` `groupByProvider` +
+`:147` 每 provider 一个 `CommandGroup`），但 `app.css:5697-5705` 的 `.model-picker-group-label`
+**全仓从未被任何 tsx 引用**（死 CSS），cmdk 实际渲染的 `[cmdk-group-heading]` **没有任何样式规则**
+⇒ 视觉上退化成"平铺一长条"。**数据面不需要后端改动**（`/api/models` 已含 `provider` 字段）。
+**必须保留**：`默认链`（系统自动选）伪选项、`commitSelection` 的双击去重守卫（`q-model-dedupe.spec.ts` 逐字锁）。
+**待定**：两级 + 搜索并存时的行为（建议搜索态扁平化并带 provider 前缀）。
+**会动到的断言**：`model-picker.spec.ts`（"6 个 option"语义会变）、`q-model-dedupe.spec.ts`（按 `.model-picker-item` 定位）、
+`picker-search-visibility.spec.ts`、`ModelPicker.test.tsx`、`fixtures.ts`（`MODELS`/`longCatalog`/`pickFirstModel`）。
+
+### UX-06（issue #200）新增「上下文容量」看板（**跨端，后端数据面基本缺失**）
+
+**要求**：对齐 ZCode 的图4——`上下文容量` + `18.3万/35万（52.2%）` + 分段条 + 六类占比
+（消息 / MCP 工具 / 系统工具 / 其他 / 系统提示词 / 技能）+ 脚注 `平均缓存命中率 99.6%`。
+**结论先行（必须让用户先知道）**：**这六个数字今天后端基本算不出来**，
+且 `平均缓存命中率` **完全不可用**——`_usage_from_response`（`runtime.py:118-135`）只映射三个键、
+**主动丢弃** `input_token_details`（含 `cache_read`），并且**有测试逐字锁住这个丢弃行为**
+（`tests/test_structured_logging.py:95-133`）。SDD 已声明 `cached_tokens?: number`
+（`03_RUNTIME_EVENT_CONTRACT.md:162`）但**未实现**；PRD 亦承认命中率未实测（`PRD_PROMPT_REGISTRY.md:280`）。
+按不变量 #21（不得伪造事实）**不能先填占位数字**。其余：窗口只有全局 `Settings.max_context_tokens=200_000`
+（`config.py:68`）且 builder **忽略**目录里的每模型 `context_window`（deepseek 宣称 64k、实际按 200k 算，既有不一致）；
+分类明细是 builder 的**私有** int（`_system_prompt_tokens` / `_token_estimate_total`，`builder.py:57,198-228`）未暴露；
+**工具 schema 的 token 全仓零计数**（系统工具 / MCP 工具两行无来源）；
+技能/记忆的 provider 代价在 `_with_providers`（`builder.py:244`）算完即丢。
+**无任何** `/usage`、`/stats`、`/context`、`/cost` 端点，WS 也无 stats 帧；前端今天只渲染 `usage_total.total_tokens`。
+**待拍板**：窗口真相（全局 vs 每模型 vs 新配置）、分类集合（照抄图4 还是落到本仓架构含"记忆"）、
+是否明示"这是估算"、触发入口（建议升级 TopBar 已有 tok 读数；
+⚠ **必须与 composer 现存的 `Context · N` 药丸区分**——那个是 context **providers** 选择器，同名即误解）。
+
+### UX-07（issue #201）权限 / Agent 档位 / 深度 三个下拉统一重设计
+
+**要求**：按图6 范式——每行 = **图标 + 标题 + 一句话描述**，选中态整行 accent + 行尾 ✓，
+面板带一句问句式头部（本仓无对应文档 ⇒ **链接先留空，不许造死链**）。
+**好消息**：图6 那种两行结构**数据早已具备**——三份目录的 `description` 全由后端下发
+（`tooling/contract.py:110-121` / `web/app.py:107-120, 123-136`），前端零硬编码；
+"难看"的根因是现在把 description 塞进 `.model-picker-item-meta` 灰字（`app.css:5727-5731`），
+且选项名用了 `--font-mono` + 11px（`app.css:5718-5726`）偏离 type scale。
+**顺带收债**：三个近乎重复的 picker 实现（`DEFAULT_VALUE` 与 cmdk `includes` 回调逐字复制）、
+触发按钮 CSS 双份（`.composer-model` 5519-5575 vs `.composer-control` 5587-5639，仅 max-width 不同）、
+默认项文案/选中指示/搜索阈值/`align`/可访问名（中英混用）五处不一致、多选无法表达"显式清空"。
+**待授权**：是否把三个 picker 合并为一个共享组件（**结构重构**，非纯视觉——但不合并则上述不一致会被抄成三份新样式）。
+**会动到的断言**：`control-row.spec.ts`、`context-providers.spec.ts`、`picker-search-visibility.spec.ts`、
+`u-project-task.spec.ts`（弹窗复用同一 `ControlPicker`）、`e2e-live/approval-live.spec.ts`、
+`g-visual-qa.spec.ts`（`.composer-control` 计数 = 3）、`fixtures.ts`（三份目录 + `pickControl`）。
+
+### UX-08（issue #198 评论）档位收窄工具集的提示 —— 裁决 = 从简披露
+
+用户要求「UI 可以提示一下，具体怎么设计一定要从简，不能突兀」。
+**主方案**：把"该档位不含什么"写进**选项自己的描述**（后端 `AGENT_PROFILE_DESCRIPTIONS` 补一句工具面摘要），
+零新增视觉元素，信息正好出现在做选择的那一刻；**文案必须后端下发**（写前端常量等于把 `tool_scope` 抄第二遍）。
+**次方案**：触发按钮 `title` 补一句（hover 可见、零占位）。**不做**横幅/toast/红点。
+**关于不持久化**：核对后建议**保持现状**——`agent_profile` 是 per-run amend，未选=后端默认=全量，
+刷新后显示"未选"**是如实的**；加 localStorage 反而会让用户被忘记选过的只读档位困住。
+本仓既有纪律也是"只有视图状态落 localStorage，**会改变运行行为的入参不落**"。
+若用户要"记住档位"属**独立决定**（会改变"未选"的语义），需单独拍板。
+
+---
+
+## 用户报障批次 3 的答复与落实（2026-09-14）：三项裁决 + 一项派生发现（**仍仅登记，未修**）
+
+用户对批次 3 的待定项给出裁决，并追加"能直接拿来用的就直接拿来用，不要手写"的复用要求。
+
+### 裁决已落到 issue
+
+| 出口 | 裁决 |
+| --- | --- |
+| **#199** 模型选择器 | **去掉搜索框**，只做两级（"才几个模型没有必要使用搜索框"）。删搜索相关 tsx/CSS/断言；`默认链` 伪选项与双击去重守卫保留。⚠ `picker-search-visibility.spec.ts` 是**局部删除**（另两个 picker 仍在用搜索）。 |
+| **#201** 三个控制下拉 | **授权合并成一个共享组件**；`aria-label` **不统一为中文**——已核实会碰到 e2e 定位器（`control-row.spec.ts:42-52`、`context-providers.spec.ts:40-94`、`fixtures.ts:889-912`、`e2e-live/approval-live.spec.ts:35`），按用户给的条件维持现状。⚠ 不统一意味着**共享组件不得内置 aria-label 默认值**（否则合并会顺手改名，等于偷偷做了被否掉的事）。图6 头部的「了解更多」本仓无落点 ⇒ 先不放，不造死链。 |
+| **#200** 上下文容量看板 | **必须做，图4 全部元素都要**（含缓存命中率）⇒ 缓存 token 捕获从"可选降级"变成**必做**。**入口替换 composer 的 `Context · N` 药丸**（`ContextProviderPicker` 移除）。 |
+
+### 派生发现（已开 issue #202）：用户对记忆的判断**只成立一半**
+
+用户前提：「记忆不需要点击选择就能注入…模型觉得需要就**可以按需检索**」。
+
+- **成立的一半**：`MemoryContextProvider.select()` 每 run 自动跑（`context/builder.py:230-251`），
+  查询词 = 会话累计用户消息（`memory/context_provider.py:32-34`），注入为 SystemMessage；
+  与 pill 无关。因此"移除 pill"是安全的（缺省即全量注入，`assembly.py:147-148`）。
+- **不成立的一半**：**没有任何模型可调用的记忆检索工具**。memory 只贡献 `forget_memory`（写侧，
+  `memory/tools.py:44-53`）；`search`/`recall` 只是 Protocol 原语（`memory/capability.py:85-86`），
+  `recall` 零调用方。对照：**技能**走的正是用户描述的形态——静态目录注入 + `load_skill` 按需加载
+  （`skills/context_provider.py:19-50` + `skills/tool.py:36-44`）。记忆缺的正是这一半。
+- **派生缺陷**：`forget_memory` 的描述写着"不确定要删哪条时先检索确认"（`memory/tools.py:61`），
+  让模型去用一个**不存在**的工具——与 #187 同类（模型对自身能力认知不可靠）。
+
+### 复用调研结论（Reuse First §6，许可证已核；详见 #200 评论）
+
+- **可直接移植的 MIT/Apache-2.0 代码四段**：dsh `context-occupancy.ts`（百分比 clamp 公式）+
+  `ContextMeter.module.css`（弹层几何与 4px 分段条，含 `min-width:2px`、0% 段不渲染）；
+  opencode `session-context-breakdown.ts`（分类拆解 + **"其他"兜底桶** + **估算超出真实 input 时按比例缩放**的诚实机制）+
+  `session-context-tab.tsx`（bar + swatch 图例版式）；pi 社区扩展（唯一带 Skills 桶的公开实现）；
+  Codex `TokenUsageBreakdown`（cache 感知的字段命名，建议直接对齐）。
+- **分段条不需要任何库**：npm 上"segmented progress bar"只有 RN/控件类，Tremor 只支持单值，
+  Recharts/visx 对一条 4px 的条属杀鸡用牛刀 ⇒ flex div 手写，不引库。
+- **缓存命中率没有现成组件**，只有两种公式口径（dsh 会话平均 vs pi 最近一轮）。
+- ⚠ **dsh 自己的归档笔记是本次最重要的警告**：它明确记录"更细的分类（rules/skills/MCP tools）
+  **Not separable here**，因为 harness 把那些贡献折进了 system text 与 tools list，三分类才是诚实的解"。
+  本仓同样把工具 `prompt_guidance` 折进系统提示词、且**工具 schema 全仓零 token 计数**
+  ⇒ 要拆成图4 的六类，**必须先在后端把桶分开**，否则那几行的数字就是编的（不变量 #21）。
+- 仓库早有记载：`docs/BENCHMARK_SYNTHESIS.md:109-116` 已写明"tokens 消耗量 ❌ 事件 payload 无…
+  要显示真值必须扩后端事件 payload"。
+
+### ⚠ 唯一仍未明确的一项（已在 #200 评论中标为待拍板）
+
+窗口真相。用户原话把三个选项并列抄回（「全局 200k / 接通每模型 context_window（我推荐…）/ 新配置」），
+**未单选**。这不是纯展示改动：接通每模型 `context_window` 后，deepseek 的有效预算从 200k 掉到 64k
+（`model/config.py:35`），**自动压缩会更早触发**（`auto_compact_threshold=0.70`，`config.py:69`），
+即单轮能装下的历史变少——属**运行行为变更**，必须用户口头确认。
+
+---
+
+## 用户答复落实（2026-09-14 第四轮）：记忆工具 / 队列语义 / 供应商管理 / 项目弹窗
+
+用户对上一轮全部问题作答，并追加两项 UI 需求。**仍只登记，未实现**。
+
+### 裁决落点（全部已写进对应 issue 评论）
+
+| 出口 | 裁决 |
+| --- | --- |
+| **#202** 记忆工具 | A1 选方案 (a)：**自动注入完全不动**，`search_memory` 只做精准补充、按 id 去重并标出"哪些已注入"，run 中由模型自行判断是否调用。A2 **做**显式"记住这条"写入工具。用户强调**工具描述与参数必须准确**。 |
+| **#195/#196** steer/编辑 | B1 默认**排队** + 另有「立即」按钮触发 steer。B2 队列**界面可见**（chip 列表，可编辑/可取消，接既有 `queue/{id}/cancel`）。B3 队列**要活过崩溃/重启** ⇒ 从 SessionEvent 日志重建（不做第二份持久化文件）。B4 两种场景分开：**S1 编辑**（A→B，界面只显示 B）；**S2 暂停后另发 B**（A、B 都在，链含两者，最新回答要覆盖两者）。 |
+| **#197** 拖拽 | C1 键盘方向键**一起翻**。C2 初始宽度**调成 340**。 |
+| **#199** 模型菜单 | D1「管理模型」入口**归 #203**（本票只做两级菜单 + 去搜索）。 |
+| **#201** 控制下拉 | D2 合并后**直接删掉** `ContextProviderPicker`。 |
+| **#200** 看板 | 窗口 = 全局 200k（已裁决）；**六类之外是否单列「记忆」行**待确认。 |
+
+### 新增两张 issue
+
+- **#203**（跨端·安全）**自定义模型供应商管理**（仿图1：左列表 + 右详情表单，含 Base URL /
+  API 格式 / API Key 掩码 / 模型列表增删改 / 启用禁用 / 测试连接 / 删除）。
+  核实结论：**这不是 UI 改动而是新功能**——目录只来自 env 的 `AGENT_MODELS` JSON，
+  provider 预设**硬编码**（新增 provider 必须改代码，三处校验/索引耦合：`model/config.py:153,303,317`
+  + `web/app.py:887,906`），无可写配置、无加密落盘、`is_available` 恒 True、
+  **只有一种线协议（OpenAI 兼容）**且图1 的「API 格式」下拉**后端无对应物**、无测试连接端点。
+  安全硬约束：管理端 GET 对密钥**只写不可读**；`/api/models` 的零密钥保证与
+  `tests/web/test_web_models.py:56-58` 的 `sk-` 回归锁必须继续成立。
+- **#204**（跨端）**项目弹窗去掉「任务内容」+ 权限选择器重设计**。
+  阻塞点已查清：`CreateSessionRequest.task` 必填（`web/app.py:204`，空串 422 由
+  `tests/test_web_api.py:297-304` 锁住）且 `POST /api/sessions` **总是** `create_and_launch`
+  ⇒ **HTTP 层不存在"只建会话不跑 run"的路**（domain 层 `Session.start` 支持，
+  `docs/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md:121-125` 早已把"空会话创建入口"点名为产品决策）。
+  连带要定的产品问题：空会话在列表里显示什么（标题取自首条 user/message，为空时只剩短 id）；
+  弹窗选的权限在去掉输入框后作用于谁。
+
+### 本轮查证到的、会影响设计的事实（避免后人重复挖）
+
+1. **队列消费与 steer 注入都缺**（#196）：`drain_steers` / `drain_queued_message` **零生产调用方**，
+   `steer/applied` **零写入者**，WS 上行 `{"type":"steer"}` 无分派分支，前端硬编码 `mode:'queue'`。
+   而 run 循环每轮都重建上下文（`runtime.py:592`）⇒ 只要有人 append 一条 `user/message` 就能生效
+   （工具失败熔断的纠正消息已证明这条通路可用）。
+2. **记忆检索每轮重跑**（#202）：`_with_providers` 在每次 `build()` 里执行、无缓存，
+   但查询词恒为"用户消息尾部 4000 字符"⇒ 同一 run 内 N 次调用查同一个 query。
+   "标出哪些已注入"需要一个 **run 级已注入 id 集合**（照 `run_context_var` 的 contextvar 方式），
+   否则该需求做不出来。
+3. **Inspector 初始宽度与下限共用同一常量**（#197）：`App.tsx:260` 写 `width: INSPECTOR_MIN_W`
+   ⇒ 要"初始 340、下限 320"必须新增 `INSPECTOR_DEFAULT_W`，`clampInspectorWidth` 与单测不动。
+4. **`/api/models` 仍在暴露 deepseek `context_window=64000`**（#200）：窗口已裁决用全局 200k
+   ⇒ 该字段不得被当成预算，UI 要么不用、要么标注"模型声明值（非本机预算）"。
+5. **仓库自研能力的边界**（多票共用）：`retrieve_knowledge` 属 **knowledge** capability，
+   与长期记忆（memory）是两回事；技能有 `load_skill` 按需加载，记忆**没有**对应的读侧工具——
+   这正是 #202 要补的差距。

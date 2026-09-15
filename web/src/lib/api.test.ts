@@ -33,6 +33,7 @@ import {
   reorderProjectSession,
   sendMessage,
   startSession,
+  createEmptySession,
 } from './api';
 import { onUnauthorized } from './auth';
 import type { MemorySummary, Project, SessionSummary } from '../types';
@@ -952,5 +953,83 @@ describe('会话归档（#171）—— 请求形状与错误文案', () => {
     );
     await expect(archiveSession('s1')).rejects.toThrow('运行中的会话不能归档');
     expect(describeSessionError(new Error('x'), '归档失败')).toBe('x');
+  });
+});
+
+/** 捕获带响应头的 fetch（launch=false 的回执断言用）。 */
+function captureFetchWithHeaders(
+  status = 200,
+  body: unknown = {},
+  headers: Record<string, string> = {},
+): { calls: { url: string; body: Record<string, unknown> }[] } {
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        body:
+          typeof init?.body === 'string'
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : {},
+      });
+      return new Response(JSON.stringify(body), { status, headers });
+    }),
+  );
+  return { calls };
+}
+
+describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3）', () => {
+  it('POST /api/sessions?launch=false：payload 无 task，返回 {session_id, permission_mode}', async () => {
+    const cap = captureFetchWithHeaders(200, {
+      session_id: 'sid-1',
+      permission_mode: 'workspace-write',
+    });
+    const created = await createEmptySession({
+      cwd: 'D:/repos/alpha',
+      max_steps: 10,
+      auto_approve: true,
+    });
+    expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
+    expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', max_steps: 10, auto_approve: true });
+    expect(cap.calls[0].body).not.toHaveProperty('task');
+    expect(created).toEqual({ sessionId: 'sid-1', permissionMode: 'workspace-write' });
+  });
+
+  it('显式 permission_mode → 带键（弹窗选的档 = 会话级权限，#204 裁定 §3）', async () => {
+    const cap = captureFetchWithHeaders(200, {
+      session_id: 'sid-2',
+      permission_mode: 'read-only',
+    });
+    await createEmptySession({
+      cwd: 'D:/repos/alpha',
+      max_steps: 10,
+      auto_approve: true,
+      permission_mode: 'read-only',
+    });
+    expect(cap.calls[0].body).toEqual({
+      cwd: 'D:/repos/alpha',
+      max_steps: 10,
+      auto_approve: true,
+      permission_mode: 'read-only',
+    });
+  });
+
+  it('响应缺 permission_mode → 抛错（零伪造：pill 初始化需要它，编默认值正是不一致的来源）', async () => {
+    captureFetchWithHeaders(200, { session_id: 'sid-3' });
+    await expect(createEmptySession({ cwd: 'D:/x', max_steps: 10, auto_approve: true }))
+      .rejects.toThrow(/permission_mode/);
+  });
+
+  it('422 → 抛 SessionError，message 是后端 detail 原文（浮层就地显示）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ detail: 'task 与 launch=false 互斥' }), { status: 422 }),
+      ),
+    );
+    await expect(createEmptySession({ cwd: 'D:/x', max_steps: 10, auto_approve: true }))
+      .rejects.toThrow('task 与 launch=false 互斥');
   });
 });

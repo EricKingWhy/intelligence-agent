@@ -23,6 +23,7 @@ import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
+import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
@@ -37,17 +38,17 @@ import {
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
-import { INSPECTOR_MIN_W } from './lib/inspectorPanel';
+import { INSPECTOR_DEFAULT_W } from './lib/inspectorPanel';
 import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
+  createEmptySession,
   describeSessionError,
   getAgentProfiles,
   getCapabilities,
-  getContextProviders,
   getModels,
   getPermissionModes,
   getReasoningEfforts,
@@ -57,7 +58,10 @@ import {
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
-import type { ToolCall, PresetTask, AgentEvent, Project } from './types';
+import type { ToolCall, PresetTask, AgentEvent, Project, UndeliveredInput } from './types';
+
+// 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
+const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
 import './styles/app.css';
 
 /** 分叉请求的兜底超时。`forkInFlightRef` 只在 `finally` 里复位——请求若既不
@@ -90,6 +94,9 @@ export default function App() {
     refreshSessions,
     changeModel,
     fork,
+    sendSteer,
+    flushQueue,
+    cancelItem,
   } = useSession();
 
   // ── 项目（WS-5 / #155）──
@@ -137,34 +144,32 @@ export default function App() {
   }, []);
 
   // ── Phase 2b Composer control row（Ticket F1）──
-  // 四个控制目录（均已运行时消费，非 staged）：permission-modes /
-  // agent-profiles / reasoning-efforts / context-providers。空 → 隐藏控件。
+  // 三个控制目录（均已运行时消费，非 staged）：permission-modes /
+  // agent-profiles / reasoning-efforts。空 → 隐藏控件。
+  // #201：context-providers 目录不再取——多选控件已删除（职责交给看板 #200 与供应商
+  // 管理 #203；记忆是自动注入的，不需要选）。后端 `context_providers` 请求契约**一字
+  // 未动**：不传键 = 全部已装配 provider，正是此前"未选"时的行为。
   const [permissionModes, setPermissionModes] = useState<CatalogEntry[]>([]);
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null);
   const [agentProfiles, setAgentProfiles] = useState<CatalogEntry[]>([]);
   const [selectedAgentProfile, setSelectedAgentProfile] = useState<string | null>(null);
   const [reasoningEfforts, setReasoningEfforts] = useState<CatalogEntry[]>([]);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
-  const [contextProviders, setContextProviders] = useState<CatalogEntry[]>([]);
-  const [selectedContextProviders, setSelectedContextProviders] = useState<string[]>([]);
   const fetchControlCatalogs = useCallback(async () => {
     try {
-      const [modes, profiles, efforts, providers] = await Promise.all([
+      const [modes, profiles, efforts] = await Promise.all([
         getPermissionModes(),
         getAgentProfiles(),
         getReasoningEfforts(),
-        getContextProviders(),
       ]);
       setPermissionModes(modes);
       setAgentProfiles(profiles);
       setReasoningEfforts(efforts);
-      setContextProviders(providers);
     } catch {
       // 降级隐藏——非关键能力
       setPermissionModes([]);
       setAgentProfiles([]);
       setReasoningEfforts([]);
-      setContextProviders([]);
     }
   }, []);
   // ── #182 能力声明显隐（PRD §3.2；数据源 GET /api/capabilities）──
@@ -214,21 +219,27 @@ export default function App() {
     applyDensity(next);
   };
 
+  // #200 上下文容量看板：open 的 sid（null = 关闭）。必须在 Esc 中断 effect 之前声明（effect 读它）。
+  const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
   // Esc 中断（Claude Code "esc to interrupt" 语言）：流式中 Esc = 停止当前 run，
   // 与 Composer 停止按钮同走 cancelStream。dialog 打开时（palette/auth 面板）
   // Esc 优先归它们——target 在 dialog 内则不抢。target 可能是 window/document
   //（合成事件/焦点缺失），closest 仅对 Element 存在——先做类型守卫。
+  // 终审 P1 修复：context-usage 看板是**非 Radix** 的 role="dialog"（无焦点陷阱，
+  // 焦点通常还留在 body/composer 上），closest 会不命中——不挡的话 Esc 关看板
+  // 会同时打断在途 run（两个 handler 都在 window 上，App 的先注册先跑）。
   useEffect(() => {
     if (!streaming) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
+      if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
       cancelStream();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [streaming, cancelStream]);
+  }, [streaming, cancelStream, contextUsageOpen]);
 
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
@@ -257,7 +268,7 @@ export default function App() {
   const [panel, setPanel] = useState({
     pinned: false,
     expanded: false,
-    width: INSPECTOR_MIN_W,
+    width: INSPECTOR_DEFAULT_W,
     peekOpen: false,
   });
   /* 选中即预览（AC3：鼠标点击即选中即预览）。reducer 里改 peekOpen 会让"选一个新
@@ -435,15 +446,8 @@ export default function App() {
       permissionMode: selectedPermissionMode,
       agentProfile: selectedAgentProfile,
       reasoningEffort: selectedReasoningEffort,
-      contextProviders: selectedContextProviders,
     }),
-    [
-      selectedModel,
-      selectedPermissionMode,
-      selectedAgentProfile,
-      selectedReasoningEffort,
-      selectedContextProviders,
-    ],
+    [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
 
   const handleSubmit = useCallback(
@@ -470,29 +474,48 @@ export default function App() {
     [submitTask, sendMessage, focusRun, selectedId, streaming, composerControls],
   );
 
-  /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 起一个会话，
-   *  复用 submitTask 的同一条 SSE 接线——新会话因此会被选中并跟随流，而不是另造
-   *  一条"提交后就撒手"的路径（不变量 #22：会话真相只有一条）。
+  /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 创建**空会话**
+   *  （#204 裁定 §1：launch=false，不启动 run）——会话出现，用户回主界面在 chat
+   *  输入框发第一条消息。不再走 submitTask 的 SSE 接线：launch=false 没有流可接，
+   *  submitTask 的"流已接上"语义对它不成立（也绝不进入 live 模式——空会话没有 run）。
    *
-   *  `ownError: true`：失败原因**返回给确认面**在浮层里就地显示（AC12），不打到
-   *  Workspace 区的全局横幅上；同时那条路径里的 422 不套用「未知模型」旧语义，
-   *  所以「目录不存在：…」这类后端 detail 会原样出现在用户眼前。
+   *  失败原因**返回给确认面**在浮层里就地显示（AC12），不打到 Workspace 区的全局
+   *  横幅上；422 不套用「未知模型」旧语义，后端 detail 原样出现。
    *
    *  `permissionMode === null`（默认档）→ 不进 payload → api 层不发键 → 后端
    *  默认 workspace-write + auto-approve（见 StartTaskInProjectDialog 文件头）。 */
   const handleStartTaskInProject = useCallback(
-    (project: Project, task: string, permissionMode: string | null) =>
-      submitTask(
-        {
-          task,
+    async (project: Project, permissionMode: string | null) => {
+      try {
+        const created = await createEmptySession({
           cwd: project.path,
           max_steps: 10,
           auto_approve: true,
           ...(permissionMode ? { permission_mode: permissionMode } : {}),
-        },
-        { ownError: true },
-      ),
-    [submitTask],
+        });
+        // #204 裁定 §3：用后端回传的会话级权限档初始化 composer 权限 pill——
+        // 不要各自取默认值，那正是不一致的来源（弹窗本地值只是请求意图，不参与）。
+        setSelectedPermissionMode(created.permissionMode);
+        // 空会话创建后**选中它**（终审 P1 修复：不选中的话用户在 idle 态输入的
+        // 第一条消息会走 submitTask 另造一个**没有 cwd** 的新会话——弹窗请他
+        // "在输入框发第一条消息"的那个会话反而成了孤儿）。选中走既有
+        // selectSession（回 viewing + 记住会话 id），composer 的第一条消息即
+        // 落进这个会话（sendMessage 路径）。
+        selectSession(created.sessionId);
+        // 空会话创建后刷新列表（会话出现在该项目分组下）。
+        await refreshSessions();
+        // #204 裁定 §1：焦点落到 chat 输入框——用户立刻可以打字（弹窗关闭后的
+        // 下一步就是在那里发第一条消息）。放在浮层关闭之后（调用方 onOpenChange
+        // 先把 Radix 焦点还回来，这里再指到输入框，否则会被浮层的关闭焦点打断）。
+        document.getElementById('composer-input')?.focus();
+        return null;
+      } catch (e) {
+        // 前缀保留 AC12 旧语义（「提交失败：目录不存在：…」→「创建会话失败：…」）：
+        // 后端 detail 原样跟在前缀后面，确认面 toHaveText 整串相等锁住它。
+        return `创建会话失败：${describeSessionError(e, '请求失败')}`;
+      }
+    },
+    [refreshSessions, selectSession],
   );
 
   /* 归档 / 取消归档（#171 AC9）：把**失败原因**交回给 SessionList 就地显示，
@@ -548,6 +571,80 @@ export default function App() {
     [selectedId, fork, selectSession, refreshSessions],
   );
 
+  // Ctrl/Cmd+Enter = steer（ADR-0030 D10 键位）：复用 steer 提交路径。
+  const handleSteer = useCallback(
+    (task: string) => {
+      if (!selectedId) return;
+      void sendSteer(selectedId, task);
+    },
+    [sendSteer, selectedId],
+  );
+
+  // ADR-0030 §4.6「立即发送全部」：POST /queue/flush，launched 流经
+  // flushQueue 接消费机器（queue/consumed 帧经增量通道摘除条目）。
+  const handleFlush = useCallback(
+    () => {
+      if (!selectedId) return;
+      void flushQueue(selectedId);
+    },
+    [flushQueue, selectedId],
+  );
+
+  /** ADR-0030 §5.3 编辑最新一条用户消息 → supersede（POST /messages 带
+   *  supersedes_seq）。只传 fromSeq（新内容由 Composer 的 textarea 已 trim）；
+   *  409（非最新/已取代）走 sendMessage 的既有错误通道。 */
+  const handleEditTurn = useCallback(
+    (fromSeq: number, newContent: string) => {
+      if (!selectedId) return;
+      void sendMessage(selectedId, newContent, {
+        maxSteps: 10,
+        amend: { supersedes_seq: fromSeq },
+      });
+    },
+    [sendMessage, selectedId],
+  );
+
+  // ── ADR-0030 §5.2 队列条动作（#195）──
+  // 四个 handler 都必须 useCallback：Composer 是 memo，内联箭头会让队列条
+  // 在每个流式 delta 上整片重渲染。
+  // 「立即」= steer item：POST /messages mode:steer **带 queue_id**（ADR-0030 §5.2
+  // 明确要求"先取消原排队项"）。不带 queue_id 时原排队项仍在队列里，终态驱动会把
+  // 同一条内容再当普通输入投递一次——用户看到同一句话被处理两遍。
+  const handleSteerItem = useCallback(
+    (item: UndeliveredInput) => {
+      if (!selectedId) return;
+      void sendMessage(selectedId, item.content, {
+        maxSteps: 10,
+        amend: { mode: 'steer', queue_id: item.id },
+      });
+    },
+    [sendMessage, selectedId],
+  );
+
+  // 「取消」= POST /queue/{id}/cancel；条目摘除由 queue/cancelled 事件驱动
+  // （事件流是唯一事实，不变量 #22——这里不本地摘）。
+  const handleCancelItem = useCallback(
+    (item: UndeliveredInput) => {
+      if (!selectedId) return;
+      void cancelItem(selectedId, item.id);
+    },
+    [cancelItem, selectedId],
+  );
+
+  // 「编辑」= 就地编辑排队项（ADR-0030 §5.2）：POST /messages 带 queue_id——
+  // 后端先取消旧项（queue/cancelled）再按 mode 重新投递新内容。**不是**"回填主
+  // 输入框 + 取消原项"：那种做法在取消失败时会留下一个已预填却仍排队的双重状态。
+  const handleEditItem = useCallback(
+    (item: UndeliveredInput, newContent: string) => {
+      if (!selectedId) return;
+      void sendMessage(selectedId, newContent, {
+        maxSteps: 10,
+        amend: { mode: 'queue', queue_id: item.id },
+      });
+    },
+    [sendMessage, selectedId],
+  );
+
   // 已不含所选 name（死选中值），校正回默认链，避免无效 422 循环。
   // 识别走 useSession 具名判定（submitTask 不抛出，error 是其唯一对外通道）。
   // 同步刷新控制目录并清除死选中值（permission_mode / agent_profile /
@@ -555,12 +652,11 @@ export default function App() {
   useEffect(() => {
     if (!error || !isUnknownModelError(error)) return;
     void (async () => {
-      const [modelList, modes, profiles, efforts, providers] = await Promise.all([
+      const [modelList, modes, profiles, efforts] = await Promise.all([
         getModels().catch(() => [] as ModelCatalogEntry[]),
         getPermissionModes().catch(() => [] as CatalogEntry[]),
         getAgentProfiles().catch(() => [] as CatalogEntry[]),
         getReasoningEfforts().catch(() => [] as CatalogEntry[]),
-        getContextProviders().catch(() => [] as CatalogEntry[]),
       ]);
       setModels(modelList);
       setSelectedModel((prev) => (prev && modelList.some((m) => m.name === prev) ? prev : null));
@@ -570,8 +666,6 @@ export default function App() {
       setSelectedAgentProfile((prev) => (prev && profiles.some((m) => m.id === prev) ? prev : null));
       setReasoningEfforts(efforts);
       setSelectedReasoningEffort((prev) => (prev && efforts.some((m) => m.id === prev) ? prev : null));
-      setContextProviders(providers);
-      setSelectedContextProviders((prev: string[]) => prev.filter((id) => providers.some((p) => p.id === id)));
     })();
   }, [error]);
 
@@ -598,6 +692,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
   const [memoriesOpen, setMemoriesOpen] = useState(false);
+  // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {
@@ -782,6 +877,8 @@ export default function App() {
         onToggleTheme={toggleTheme}
         authRequired={authRequired}
         onOpenMemories={() => setMemoriesOpen(true)}
+        sessionId={selectedId}
+        onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
       />
 
       <main
@@ -934,6 +1031,7 @@ export default function App() {
                     onOpenSession={handleSelect}
                     onInspectChild={focusChild}
                     onFork={handleFork}
+                    onEditTurn={handleEditTurn}
                     goneApprovalIds={goneApprovalIds}
                     onApprovalGone={onApprovalGone}
                   />
@@ -948,7 +1046,13 @@ export default function App() {
                       ),
                     )}
                     onSubmit={handleSubmit}
+                    onSteer={handleSteer}
                     onCancel={cancelStream}
+                    undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
+                    onSteerItem={handleSteerItem}
+                    onCancelItem={handleCancelItem}
+                    onEditItem={handleEditItem}
+                    onFlush={handleFlush}
                     presetTask={presetTask}
                     models={models}
                     selectedModel={selectedModel}
@@ -962,9 +1066,6 @@ export default function App() {
                     reasoningEfforts={reasoningEfforts}
                     selectedReasoningEffort={selectedReasoningEffort}
                     onReasoningEffortChange={setSelectedReasoningEffort}
-                    contextProviders={contextProviders}
-                    selectedContextProviders={selectedContextProviders}
-                    onContextProvidersChange={setSelectedContextProviders}
                   />
                 </>
               ) : null}
@@ -998,6 +1099,12 @@ export default function App() {
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} items={paletteItems} />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #200：上下文容量看板（TopBar Gauge 入口；Esc / 点击遮罩关闭）。 */}
+      <ContextUsagePanel
+        sessionId={contextUsageOpen ?? ''}
+        open={contextUsageOpen !== null}
+        onClose={() => setContextUsageOpen(null)}
+      />
     </div>
   );
 }

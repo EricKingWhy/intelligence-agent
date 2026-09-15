@@ -3,9 +3,13 @@
  *  锁定两条边界：
  *  1. 字段集：续聊 amend 面不含 permission_mode（不在 /messages 契约内）；
  *     创建路径包含它。
- *  2. 归一化归属：本模块**不做**空值丢弃——`[]` 原样透传，丢弃由 api 层
+ *  2. 归一化归属：本模块**不做**空值丢弃——空值映射成 undefined，丢弃由 api 层
  *     单一执行（见 amend.ts 顶部契约）。这条边界一旦模糊，就会回到
- *     「两层各判一次空、谁拥有契约说不清」的旧状态。 */
+ *     「两层各判一次空、谁拥有契约说不清」的旧状态。
+ *
+ *  #201：`context_providers` 已从本模块下线（多选控件删除）。下面第三条断言锁的是
+ *  **映射层不再产出这个键**——不传键 = 后端默认（全部已装配 provider），与删除前
+ *  "未选"时的行为一致。 */
 
 import { describe, expect, it } from 'vitest';
 import { toAmendFields, toCreateControls, type ComposerControls } from './amend';
@@ -15,7 +19,6 @@ const EMPTY: ComposerControls = {
   permissionMode: null,
   agentProfile: null,
   reasoningEffort: null,
-  contextProviders: [],
 };
 
 const FULL: ComposerControls = {
@@ -23,17 +26,15 @@ const FULL: ComposerControls = {
   permissionMode: 'auto',
   agentProfile: 'coding',
   reasoningEffort: 'deep',
-  contextProviders: ['memory', 'skills'],
 };
 
-describe('toAmendFields — 续聊 amend 面（四项，无 permission_mode）', () => {
+describe('toAmendFields — 续聊 amend 面（三项，无 permission_mode）', () => {
   it('全有值 → camelCase 映射为契约字段名，不含 permission_mode', () => {
     const fields = toAmendFields(FULL);
     expect(fields).toEqual({
       model: 'glm-4.5',
       agent_profile: 'coding',
       reasoning_effort: 'deep',
-      context_providers: ['memory', 'skills'],
     });
     expect(fields).not.toHaveProperty('permission_mode');
   });
@@ -45,25 +46,26 @@ describe('toAmendFields — 续聊 amend 面（四项，无 permission_mode）',
     expect(fields.reasoning_effort).toBeUndefined();
   });
 
-  it('context_providers 空数组原样透传（归一化归属 api 层，本模块不丢）', () => {
-    expect(toAmendFields(EMPTY).context_providers).toEqual([]);
+  it('不再产出 context_providers 键（#201 下线多选控件；不传键 = 后端默认）', () => {
+    expect(toAmendFields(FULL)).not.toHaveProperty('context_providers');
+    expect(toAmendFields(EMPTY)).not.toHaveProperty('context_providers');
   });
 });
 
-describe('toCreateControls — 创建路径控制面（amend 四项 + permission_mode）', () => {
-  it('全有值 → 含 permission_mode', () => {
-    expect(toCreateControls(FULL)).toEqual({
+describe('toCreateControls — 创建路径控制面（amend 三项 + permission_mode）', () => {
+  it('全有值 → 含 permission_mode，不含 context_providers', () => {
+    const controls = toCreateControls(FULL);
+    expect(controls).toEqual({
       model: 'glm-4.5',
       permission_mode: 'auto',
       agent_profile: 'coding',
       reasoning_effort: 'deep',
-      context_providers: ['memory', 'skills'],
     });
+    expect(controls).not.toHaveProperty('context_providers');
   });
 
-  it('空档位 → 各字段 undefined / 空数组（api 层丢弃后即「不传键」）', () => {
-    const controls = toCreateControls(EMPTY);
-    expect(controls.permission_mode).toBeUndefined();
-    expect(controls.context_providers).toEqual([]);
+  it('空档位 → 各字段 undefined（api 层丢弃后即「不传键」）', () => {
+    expect(toCreateControls(EMPTY).permission_mode).toBeUndefined();
+    expect(toCreateControls(EMPTY).model).toBeUndefined();
   });
 });

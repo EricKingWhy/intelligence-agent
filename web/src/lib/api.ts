@@ -164,6 +164,62 @@ export interface StartSessionPayload {
   context_providers?: string[];
 }
 
+/** createEmptySession 的载荷（#204 裁定 §2）：只建会话、不启动 run。
+ *  `task` **刻意不在这个形状里**——launch=false + task 是矛盾组合（给了任务却
+ *  静默不执行），后端 422；类型上没有它，编译期就挡住调用方传进来。
+ *  `permission_mode` 与 startSession 同词汇（弹窗选的档 = 会话级权限）；省略 =
+ *  后端默认 workspace-write + auto-approve。 */
+export interface CreateEmptySessionPayload {
+  cwd?: string;
+  max_steps?: number;
+  auto_approve?: boolean;
+  permission_mode?: string;
+  workspace?: string;
+}
+
+/** #204：launch=false 的创建回执。`permissionMode` 是**后端真实写入的会话级档位**
+ *  （省略时是默认 workspace-write）——前端用它初始化 composer 权限 pill（裁定 §3：
+ *  不要各自取默认值，那正是不一致的来源）。 */
+export interface CreatedEmptySession {
+  sessionId: string;
+  permissionMode: string;
+}
+
+/** POST /api/sessions?launch=false —— 只建会话，不启动 run、不返回 SSE（#204）。
+ *  返回会话 JSON（刻意小形状 `{session_id, permission_mode}`）。响应缺
+ *  permission_mode 时报错而不是编默认值：pill 初始化需要后端真值，编了默认值
+ *  正是裁定 §3 要消灭的不一致来源。 */
+export async function createEmptySession(
+  payload: CreateEmptySessionPayload,
+): Promise<CreatedEmptySession> {
+  const res = await apiFetch('/api/sessions?launch=false', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(
+      buildBody(payload, {
+        workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
+        cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
+        max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+        auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
+        permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
+      }),
+    ),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `create session ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (typeof r.session_id !== 'string' || !r.session_id) {
+    throw new SessionError(res.status, 'create 会话回执缺少 session_id');
+  }
+  if (typeof r.permission_mode !== 'string' || !r.permission_mode) {
+    throw new SessionError(res.status, 'create 会话回执缺少 permission_mode（权限 pill 初始化需要它）');
+  }
+  return { sessionId: r.session_id, permissionMode: r.permission_mode };
+}
+
 /** B1 契约通用清单条目——{id, display_name, description}。
  *  四个清单端点（permission-modes / agent-profiles / reasoning-efforts /
  *  context-providers）共用此结构，与 /api/models 富化模式对齐。 */
@@ -198,7 +254,11 @@ export async function getReasoningEfforts(): Promise<CatalogEntry[]> {
 }
 
 /** GET /api/context-providers —— Context Provider 清单。
- *  当前诚实返空数组（runtime 尚未装配任何 provider）。 */
+ *  当前诚实返空数组（runtime 尚未装配任何 provider）。
+ *
+ *  ⚠ 当前**没有调用方**：`#201` 删掉了多选控件，UI 不再有这个入口。函数保留是因为端点本身
+ *  仍在（`fixtures.ts` 的该端点 mock 也为此保留）——`#200` 看板与 `#203` 供应商管理会再评估
+ *  是否要选 provider；删掉它就得连契约一起忘掉。要清理请连同这个理由一起改。 */
 export async function getContextProviders(): Promise<CatalogEntry[]> {
   const res = await apiFetch('/api/context-providers');
   if (!res.ok) throw new Error(`context-providers ${res.status}`);
@@ -300,6 +360,13 @@ export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
   max_steps?: number;
+  /** 编辑语义（ADR-0030 §4.4，后端 #196 起接受；默认缺省不发键 = 现有行为不变）：
+   *  - supersedes_seq：取代 seq 为它的那条 user/message **及其整轮**（只影响
+   *    模型可见投影与界面，历史事件照旧保留）。目标必须是最新一条非注入用户
+   *    消息，否则 409 `SupersedeTargetInvalid`。与 mode 正交。
+   *  - queue_id：本条内容**替换**某条排队项（旧项被取消，新内容按 mode 投递）。 */
+  supersedes_seq?: number;
+  queue_id?: string;
   /** 续聊 amend 字段（后端 Q2 批次起 /messages 接受，与 create 路径同词汇）：
    *  - model: GET /api/models 的 name；
    *  - agent_profile: GET /api/agent-profiles 的 id；
@@ -325,6 +392,13 @@ const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
   max_steps: (p) => ['max_steps', p.max_steps ?? 10],
+  // 编辑语义（ADR-0030）：与 amend 四项同款「有值才带键」，缺省不发键 = 后端
+  // 默认 None = 现有行为逐字不变。
+  supersedes_seq: (p) =>
+    typeof p.supersedes_seq === 'number' && Number.isFinite(p.supersedes_seq)
+      ? ['supersedes_seq', p.supersedes_seq]
+      : null,
+  queue_id: (p) => (p.queue_id ? ['queue_id', p.queue_id] : null),
   model: (p) => (p.model ? ['model', p.model] : null),
   agent_profile: (p) => (p.agent_profile ? ['agent_profile', p.agent_profile] : null),
   reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
@@ -422,6 +496,154 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
   });
 }
 
+// ── 自定义模型供应商（#203 / ADR-0032）──
+
+/** GET /api/model-providers 条目。零密钥字段：`has_api_key` 是唯一状态通道
+ *  （不回显任何 key 值/片段）；`kind` = builtin|custom|override（override = 同 id
+ *  覆盖内置 preset）。`last_test` = 上次「测试连接」的结果（非密）。 */
+export interface ModelProviderEntry {
+  id: string;
+  label: string;
+  base_url: string;
+  models: { model_id: string; label?: string }[];
+  kind: 'custom' | 'override';
+  has_api_key: boolean;
+  is_available: boolean;
+  unavailable_reason: string | null;
+  last_test?: { ok: boolean; at: string | null; reason?: string; detail?: string } | null;
+}
+
+/** 后端 4xx/5xx → 可读错误（detail 就是后端那句话，不自己编文案）。 */
+export class ProviderError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function providerFetch(path: string, init?: RequestInit): Promise<unknown> {
+  const res = await apiFetch(path, init);
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body: unknown = await res.json();
+      if (typeof body === 'object' && body !== null) {
+        const d = (body as { detail?: unknown }).detail;
+        if (typeof d === 'string') detail = d;
+      }
+    } catch {
+      // 非 JSON 错误体：留空，用状态码兜底。
+    }
+    throw new ProviderError(res.status, detail || `model-providers ${res.status}`);
+  }
+  return res.json();
+}
+
+/** GET /api/model-providers。providers 数组缺失/形状不符 → 空数组（零伪造）。 */
+export async function getModelProviders(): Promise<ModelProviderEntry[]> {
+  const body = await providerFetch('/api/model-providers');
+  const raw =
+    typeof body === 'object' && body !== null && Array.isArray((body as { providers?: unknown }).providers)
+      ? (body as { providers: unknown[] }).providers
+      : [];
+  return raw.flatMap((p) => {
+    if (typeof p !== 'object' || p === null) return [];
+    const r = p as Record<string, unknown>;
+    if (typeof r.id !== 'string' || !r.id) return [];
+    if (typeof r.base_url !== 'string') return [];
+    const models = Array.isArray(r.models)
+      ? r.models.flatMap((m) => {
+          if (typeof m !== 'object' || m === null) return [];
+          const mr = m as Record<string, unknown>;
+          if (typeof mr.model_id !== 'string' || !mr.model_id) return [];
+          return [{
+            model_id: mr.model_id,
+            label: typeof mr.label === 'string' && mr.label ? mr.label : undefined,
+          }];
+        })
+      : [];
+    const lastTest =
+      typeof r.last_test === 'object' && r.last_test !== null
+        ? (r.last_test as { ok?: unknown; at?: unknown; reason?: unknown; detail?: unknown })
+        : null;
+    return [{
+      id: r.id,
+      label: typeof r.label === 'string' ? r.label : '',
+      base_url: r.base_url,
+      models,
+      kind: r.kind === 'override' ? 'override' as const : 'custom' as const,
+      has_api_key: r.has_api_key === true,
+      is_available: r.is_available === true,
+      unavailable_reason: typeof r.unavailable_reason === 'string' ? r.unavailable_reason : null,
+      last_test: lastTest
+        ? {
+            ok: lastTest.ok === true,
+            at: typeof lastTest.at === 'string' ? lastTest.at : null,
+            reason: typeof lastTest.reason === 'string' ? lastTest.reason : undefined,
+            detail: typeof lastTest.detail === 'string' ? lastTest.detail : undefined,
+          }
+        : null,
+    }];
+  });
+}
+
+/** 创建/更新 payload。`api_key` 省略 = 不改密钥；空串 = 显式清除（ADR-0032 §7.1）。 */
+export interface ProviderUpsert {
+  id: string;
+  label?: string;
+  base_url: string;
+  models: { model_id: string; label?: string }[];
+  api_key?: string;
+}
+
+/** POST /api/model-providers（id 冲突 = 覆盖更新；与内置同名 = 覆盖内置）。 */
+export async function createModelProvider(payload: ProviderUpsert): Promise<void> {
+  await providerFetch('/api/model-providers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+/** PUT /api/model-providers/{id}。api_key 省略 = 不改；空串 = 清除。 */
+export async function updateModelProvider(id: string, patch: Omit<ProviderUpsert, 'id'>): Promise<void> {
+  await providerFetch(`/api/model-providers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+/** DELETE /api/model-providers/{id}。404 = 不存在；500 = 凭据删除失败（配置保留）。 */
+export async function deleteModelProvider(id: string): Promise<void> {
+  await providerFetch(`/api/model-providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** 连接测试结果（失败归类 reason + 截断摘要 detail；零密钥）。 */
+export interface ProviderTestResult {
+  ok: boolean;
+  message: string;
+  reason?: string;
+  detail?: string;
+  duration_ms: number;
+}
+
+/** POST /api/model-providers/{id}/test — 走真实构造路径的最小 chat completion。 */
+export async function testModelProvider(id: string): Promise<ProviderTestResult> {
+  const body = await providerFetch(`/api/model-providers/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+  });
+  const r = body as Record<string, unknown>;
+  return {
+    ok: r.ok === true,
+    message: typeof r.message === 'string' ? r.message : (r.ok === true ? '连接正常' : '测试失败'),
+    reason: typeof r.reason === 'string' ? r.reason : undefined,
+    detail: typeof r.detail === 'string' ? r.detail : undefined,
+    duration_ms: typeof r.duration_ms === 'number' ? r.duration_ms : 0,
+  };
+}
+
 // ── 能力 manifest（#182 / PRD §3.2）──
 
 /** GET /api/capabilities（SDD 03 §17）。
@@ -454,6 +676,63 @@ export async function cancelSession(sessionId: string): Promise<{ status: string
   });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
   return res.json();
+}
+
+// ── 在途输入队列（ADR-0030 §4.6 / §5.2，后端 #196）──
+
+/** `GET /api/sessions/{id}/queue` 的条目形状。
+ *  数据源是**事件流**（不是内存队列）：只有它跨崩溃存活、也只有它同时看得见
+ *  queue 与 steer 的到达顺序。前端用它做首屏/重连补齐，实时增量仍由 SSE 事件
+ *  流驱动（不变量 #22：事件流是唯一事实，本端点只做补齐）。 */
+export interface QueueItem {
+  queue_id: string;
+  content: string;
+  created_at: string;
+}
+
+export interface SteerItem {
+  steer_id: string;
+  content: string;
+  created_at: string;
+}
+
+export interface SessionQueue {
+  items: QueueItem[];
+  steers: SteerItem[];
+}
+
+/** GET /api/sessions/{id}/queue —— 待发送输入（ADR-0030 D11）。
+ *  404 = 会话不存在。非 2xx 抛 Error（调用方静默降级：首屏补齐失败不影响
+ *  实时增量通道）。 */
+export async function listSessionQueue(sessionId: string): Promise<SessionQueue> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/queue`);
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`queue ${res.status}`);
+  return res.json();
+}
+
+/** POST /api/sessions/{id}/queue/flush —— 立刻投递队首的待发送输入（ADR-0030 §4.6）。
+ *  空队列 → `{"status":"idle"}`；有 → 与 `/messages` 的 launched 分支同形的 SSE 流
+ *  （返回原始 Response 供 consumeSSE 消费）。
+ *  409 = 在途 run（轮询重试是调用方的职责：flush 的 idle 回执与在途状态不是
+ *  幂等回执——投递会开新 run）。 */
+export async function flushSessionQueue(sessionId: string): Promise<Response> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/queue/flush`, {
+    method: 'POST',
+  });
+}
+
+/** POST /api/sessions/{id}/queue/{queue_id}/cancel —— 取消尚未消费的排队项。
+ *  200 `{"status":"cancelled"}`；404 = 已取消/已消费/不存在 → NotFoundError
+ *  （幂等失败语义，调用方静默）；其余非 2xx 抛 Error（网络/服务端失败必须
+ *  上浮——静默会让用户以为已取消、请求根本没到服务器）。 */
+export async function cancelQueueItem(sessionId: string, queueId: string): Promise<void> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}/cancel`,
+    { method: 'POST' },
+  );
+  if (res.status === 404) throw new NotFoundError('排队项已取消或已消费');
+  if (!res.ok) throw new Error(`queue cancel ${res.status}`);
 }
 
 // ── Artifact 内容读取（#185 路由 / #186 消费）──
@@ -1097,3 +1376,38 @@ function normalizeProjectStatus(raw: unknown): ProjectStatus {
   return raw === 'missing-dir' ? 'missing-dir' : 'ok';
 }
 
+
+// ── 上下文容量看板（#200）──
+
+/** 六桶分类 + 缓存命中率的端点形状（后端 GET /api/sessions/{id}/context-usage）。 */
+export interface ContextUsage {
+  estimated: boolean;
+  window_tokens: number;
+  used_tokens: number;
+  thresholds: { auto_compact: number; hard_guard: number };
+  breakdown: {
+    messages: number;
+    system_prompt: number;
+    skills: number;
+    other: number;
+    tools: { system: number; mcp: number };
+  };
+  cache: {
+    state: 'ok' | 'partial' | 'not_collected';
+    reported_calls: number;
+    total_calls: number;
+    avg_hit_rate: number | null;
+  };
+  state: 'ok' | 'no_data';
+}
+
+/** GET /api/sessions/{id}/context-usage —— 上下文容量（只读，无副作用）。
+ *  404 = 会话不存在；非 2xx 抛 Error（调用方降级为空态，不影响会话）。 */
+export async function getContextUsage(sessionId: string): Promise<ContextUsage> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/context-usage`,
+  );
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`context-usage ${res.status}`);
+  return res.json();
+}

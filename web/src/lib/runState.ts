@@ -225,6 +225,26 @@ export function deriveRunSummary(conversation: ConversationState): {
   return { label, startedAt: start, duration: formatDuration(start, end) };
 }
 
+// ── #198：生效档位（Inspector 头标） ──
+
+/**
+ * 最后一个 `run/started` 携带的 agent_profile——纯事件真值，无状态。
+ *
+ * 后端 #198 起 run/started.data **总是**带 `agent_profile`（未指定 = "main"）；
+ * 旧数据（字段缺失）返回 null，调用方显示「档位未知」——不伪造 "main"（那是
+ * 编造运行条件，正是本票要修的不可回溯根因）。多 run 会话取**最后一个**：
+ * 与"当前这轮的运行条件"同口径。
+ */
+export function deriveAgentProfile(events: AgentEvent[]): string | null {
+  let profile: string | null = null;
+  for (const e of events) {
+    if (e.type !== EventType.RUN_STARTED) continue;
+    const value = (e.data as Record<string, unknown> | undefined)?.agent_profile;
+    if (typeof value === 'string' && value.length > 0) profile = value;
+  }
+  return profile;
+}
+
 // ── 会话健康度：恢复入口可见性（da394a9 §二.2 建议语义） ──
 
 /**

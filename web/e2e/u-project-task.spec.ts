@@ -1,20 +1,20 @@
-/** 场景 U（WS-6 / #169 前端半）：项目内新建任务——入口 → 确认面 → cwd 提交 → 落组。
+/** 场景 U（WS-6 / #169 前端半；#204 裁定收窄）：项目内新建会话——入口 → 确认面 →
+ *  launch=false 创建 → 落组 + 权限 pill 一致。
  *
- *  契约来源：`docs/PRD_WS6_WS7_DIR_ROOTED_SESSION_AND_DIR_PICKER.md` §4.3（后端契约
- *  矩阵在 §4.1；ADR-0027 是决策与安全论证）。本 spec 锁 AC9–AC13 里可在无后端环境
- *  确定复现的部分：
+ *  契约来源：`docs/design/WEB_UI_BATCH_REDESIGN.md` §5（#204 裁定）+ 后端
+ *  `web/app.py` launch=false 分支。本 spec 锁可在无后端环境确定复现的部分：
  *  - AC9 项目行 kebab 第一项 =「在此项目中新建任务」；空项目占位区替换为该入口按钮；
- *  - AC10 确认面逐字出现「Agent 将直接读写该目录：<路径>」+ 权限档三选 + 空任务禁用；
- *  - AC11 提交体带 `cwd`，会话真的落进该项目分组；**默认档不发 `permission_mode`**
- *    （这是本票最容易踩的坑：后端"显式传非 danger 档 → 切交互式审批"，把默认档也
- *    塞进 payload 会让每次工具调用都弹审批卡）；
+ *  - AC10 确认面逐字出现「Agent 将直接读写该目录：<路径>」+ 权限档三选；
+ *    **没有「任务内容」输入框**（#204 裁定 §1：弹窗职责收窄为选目录 + 设默认
+ *    权限 + 创建会话）；
+ *  - AC11 创建体带 `cwd`、**不带 task**、不带 `launch`（query 参数在 URL 上）；
+ *    **默认档不发 `permission_mode`**（后端"显式传非 danger 档 → 切交互式审批"）；
+ *  - AC11b 权限一致性（#204 裁定 §3）：创建响应回传的 permission_mode 必须初始化
+ *    composer 权限 pill（断言两处文本一致）；
  *  - AC12 422 留在确认面：不关对话框、不打全局横幅、后端 detail 原样可见、可重试；
- *  - AC13 以上全部由本 spec 覆盖（mock 语义按真后端，见 fixtures 的 cwd 分支）。
+ *  - AC13 以上全部由本 spec 覆盖（mock 语义按真后端 launch=false，见 fixtures）。
  *
- *  权限档夹具用**真后端的三个 id/显示名**（`tooling/contract.py::PERMISSION_MODE_DESCRIPTIONS`）
- *  ——fixtures 里共享的 `PERMISSION_MODES`（auto/ask/deny）是另一批 spec 的历史夹具，
- *  与本票的真实契约不一致（已知漂移，另记，不在本票范围内顺手改）。
- *
+ *  权限档夹具用**真后端的三个 id/显示名**（`tooling/contract.py::PERMISSION_MODE_DESCRIPTIONS`）。
  *  车道：Playwright e2e + page.route（同 r-project-groups.spec.ts 约定），`--workers=2`。
  */
 
@@ -74,24 +74,22 @@ async function openStartDialog(page: Page, title: string) {
   await expect(dialog(page)).toBeVisible();
 }
 
-/** 捕获 POST /api/sessions 的请求体（AC13 的请求体断言）。
- *  用 page 级 request 事件而不是 fixture 回调：请求体是"前端发了什么"的事实，
- *  与被 mock 的响应语义无关，两者分开观察才不会互相掩盖。 */
-function captureSessionPosts(page: Page): Record<string, unknown>[] {
-  const bodies: Record<string, unknown>[] = [];
+/** 捕获 POST /api/sessions 的请求（URL + 请求体——launch 在 URL 上，AC13 断言用）。 */
+function captureSessionPosts(page: Page): { url: string; body: Record<string, unknown> }[] {
+  const posts: { url: string; body: Record<string, unknown> }[] = [];
   page.on('request', (req) => {
     if (req.method() !== 'POST') return;
     if (new URL(req.url()).pathname !== '/api/sessions') return;
     try {
-      bodies.push(req.postDataJSON() as Record<string, unknown>);
+      posts.push({ url: req.url(), body: req.postDataJSON() as Record<string, unknown> });
     } catch {
       /* 非 JSON 体（本 spec 不该出现）：忽略而不是让监听器抛错 */
     }
   });
-  return bodies;
+  return posts;
 }
 
-test('AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限档默认工作区写入、空任务禁用', async ({
+test('AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限档默认工作区写入、没有任务输入框', async ({
   page,
 }) => {
   routeApi(page, baseMock());
@@ -104,103 +102,109 @@ test('AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限�
 
   const box = dialog(page);
   await expect(box).toBeVisible();
-  // AC10①：路径明示行**逐字**出现——标签与路径必须连续（拆成两条断言的话，
-  // "把路径挪到别的元素里、两段之间插入别的话"也能通过，那就不叫逐字了）
+  // AC10①：路径明示行**逐字**出现——标签与路径必须连续。
   const callout = box.locator('.project-path-callout');
   await expect(callout).toContainText(`Agent 将直接读写该目录：${ALPHA}`);
-  // AC10②：权限档是**三选**（默认档之外两档也必须真的可选，否则"三选"只是文案）
-  // FE-R11-05 之后单选 picker 多了一个首项「默认（未选）」（提交 `null` = 用默认档），
-  // 所以这里是 1 + 3。三档**逐档**断言存在，不靠总数——总数只是"多了一项"的护栏。
-  await box.locator('.composer-control[aria-label="权限模式"]').click();
+  // #204 裁定 §1：「任务内容」输入框**不存在**（弹窗职责收窄）。
+  await expect(box.getByLabel('任务内容')).toHaveCount(0);
+  // AC10②：权限档是**三选**（FE-R11-05 之后单选 picker 多了一个首项「默认（未选）」，
+  // 所以这里是 1 + 3。三档**逐档**断言存在，不靠总数。）
+  await page.locator('.project-dialog .composer-control[aria-label="权限模式"]').click();
   const listbox = page.locator('[role="listbox"]:visible').last();
   await expect(listbox.getByRole('option')).toHaveCount(4);
   for (const mode of ['只读', '工作区写入', '完全访问']) {
     await expect(listbox.getByRole('option', { name: mode })).toBeVisible();
   }
   await page.keyboard.press('Escape');
-  await expect(box.locator('.composer-control[aria-label="权限模式"]')).toContainText('工作区写入');
-  // AC10③：空任务禁用 → 填了才可提交
-  const start = box.getByRole('button', { name: '开始任务' });
-  await expect(start).toBeDisabled();
-  await box.getByLabel('任务内容').fill('看看这个目录');
-  await expect(start).toBeEnabled();
+  await expect(page.locator('.project-dialog .composer-control[aria-label="权限模式"]')).toContainText('工作区写入');
+  // #204 裁定 §1：提交按钮可用（没有任务内容可判空，只看 pending），文案是「创建会话」。
+  await expect(box.getByRole('button', { name: '创建会话' })).toBeEnabled();
 });
 
-test('AC11 默认档提交：请求体带 cwd、不带 permission_mode，会话落进该项目分组', async ({
+test('AC11 launch=false 创建：请求带 cwd、不带 task、URL 带 launch=false，会话落组 + 权限 pill 一致', async ({
   page,
 }) => {
-  routeApi(page, baseMock());
-  const bodies = captureSessionPosts(page);
+  const mock = baseMock({
+    // #204 裁定 §3 考点：响应回传与请求**不同**的档位（模拟后端归一化/接管）——
+    // pill 必须显示**响应**的档位（read-only），不是前端本地选中的默认档。回显 mock
+    // 会让"本地值 vs 响应值"不可区分（本地值后到覆盖响应值也能过）。
+    emptySessionPermissionOverride: 'read-only',
+  });
+  routeApi(page, mock);
+  const posts = captureSessionPosts(page);
   await page.goto('/');
 
   await openStartDialog(page, '项目 alpha');
-  await dialog(page).getByLabel('任务内容').fill('读一下 README，总结项目结构');
-  await dialog(page).getByRole('button', { name: '开始任务' }).click();
+  await dialog(page).getByRole('button', { name: '创建会话' }).click();
 
-  await expect.poll(() => bodies.length).toBe(1);
-  expect(bodies[0].task).toBe('读一下 README，总结项目结构');
-  expect(bodies[0].cwd).toBe(ALPHA);
+  await expect.poll(() => posts.length).toBe(1);
+  // launch=false 在 URL query 上（后端 `launch: bool = True` 的默认值不碰既有契约）。
+  expect(new URL(posts[0].url).searchParams.get('launch')).toBe('false');
+  expect(posts[0].body.cwd).toBe(ALPHA);
+  // #204 裁定 §2：launch=false 的请求体**没有 task**（矛盾组合 = 422）。
+  expect('task' in posts[0].body).toBe(false);
   // 坑点锁（PRD §4.3）：默认档必须"不发键"——发了就是切交互式审批，
   // 每次工具调用都会弹审批卡。这条断言红了不要改 mock，要改的是那段提交逻辑。
-  expect('permission_mode' in bodies[0]).toBe(false);
+  expect('permission_mode' in posts[0].body).toBe(false);
 
-  // AC11 落组：新会话出现在「项目 alpha」下（mock 按真语义改了账本 + 行的 workspace）
+  // AC11 落组：新会话出现在「项目 alpha」下。
   await expect(project(page, '项目 alpha').locator('.session-item-id')).toHaveCount(1);
-  // AC11「选中该会话、跟随流」：这一行处于选中态，且流里的回答已渲染出来
-  // （只断言"落组"会漏掉"提交完还得用户自己点一下才看到"的实现）
-  await expect(project(page, '项目 alpha').locator('.session-item.selected')).toHaveCount(1);
-  await expect(page.getByText('好，我先看看这个目录。')).toBeVisible();
-  // 确认面关闭：用户接下来要看着那条流（不是停在浮层里）
+  // AC11b（#204 裁定 §3 权限一致性）：创建响应回传 read-only（非请求档位）→ composer
+  // 权限 pill 必须显示「只读」——前端用了**响应**的档位，没有用本地默认值。
+  await expect(page.locator('.composer-dock .composer-control[aria-label="权限模式"]')).toContainText('只读');
+  // 确认面关闭：用户接下来要在 chat 输入框发第一条消息（不自动发起 run）。
   await expect(dialog(page)).toHaveCount(0);
+  // #204 裁定 §1：焦点落到 chat 输入框——用户立刻可以打字（createEmptySession
+  // 成功路径的 focus()）。
+  await expect(page.locator('#composer-input')).toBeFocused();
 });
 
-test('AC11 主动改档才发 permission_mode（改档 = 要逐次审批）', async ({ page }) => {
+test('AC11 主动改档才发 permission_mode；创建后 pill 与弹窗选择一致', async ({ page }) => {
   routeApi(page, baseMock());
-  const bodies = captureSessionPosts(page);
+  const posts = captureSessionPosts(page);
   await page.goto('/');
 
   await openStartDialog(page, '项目 alpha');
   const box = dialog(page);
-  await box.locator('.composer-control[aria-label="权限模式"]').click();
+  await page.locator('.project-dialog .composer-control[aria-label="权限模式"]').click();
   // `:visible` 限定当前打开的浮层：关闭动画期间上一层 listbox 仍在 DOM 里。
   const listbox = page.locator('[role="listbox"]:visible').last();
   await expect(listbox).toBeVisible();
   await listbox.getByRole('option', { name: /只读/ }).click();
-  await expect(box.locator('.composer-control[aria-label="权限模式"]')).toContainText('只读');
+  await expect(page.locator('.project-dialog .composer-control[aria-label="权限模式"]')).toContainText('只读');
 
-  await box.getByLabel('任务内容').fill('只做只读检查');
-  await box.getByRole('button', { name: '开始任务' }).click();
+  await box.getByRole('button', { name: '创建会话' }).click();
 
-  await expect.poll(() => bodies.length).toBe(1);
-  expect(bodies[0].permission_mode).toBe('read-only'); // 改档 → 显式发键（切交互式审批）
-  expect(bodies[0].cwd).toBe(ALPHA);
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].body.permission_mode).toBe('read-only'); // 改档 → 显式发键（切交互式审批）
+  expect(posts[0].body.cwd).toBe(ALPHA);
+  // #204 裁定 §3：pill 初始化为创建响应回传的档位（read-only）。
+  await expect(page.locator('.composer-dock .composer-control[aria-label="权限模式"]')).toContainText('只读');
 });
 
 test('AC12 422 留在确认面：后端 detail 原样可见、不关对话框、无全局横幅、重试即成功', async ({
   page,
 }) => {
   const mock = baseMock({
-    cwdSessionError: { status: 422, detail: `目录不存在：${ALPHA}` },
+    emptySessionError: { status: 422, detail: `目录不存在：${ALPHA}` },
   });
   routeApi(page, mock);
   await page.goto('/');
 
   await openStartDialog(page, '项目 alpha');
   const box = dialog(page);
-  await box.getByLabel('任务内容').fill('做点什么');
-  await box.getByRole('button', { name: '开始任务' }).click();
+  await box.getByRole('button', { name: '创建会话' }).click();
 
-  // 后端 detail 原样出现在浮层里——而且**不是** Composer 那条 422 旧语义
-  // （「模型不可用（422）」），cwd 校验失败必须让后端那句话说话。
-  // 用 toHaveText（整串相等）而不是 toContainText：前缀是「提交失败：」+ 后端原文，
-  // 后半段一旦被改写（哪怕改成更"友好"的话）这条断言必须变红。
-  await expect(box.locator('.project-error')).toHaveText(`提交失败：目录不存在：${ALPHA}`);
+  // 后端 detail 原样出现在浮层里——**不是** Composer 那条 422 旧语义。
+  // 用 toHaveText（整串相等）：前缀是「创建会话失败：」+ 后端原文，后半段一旦被
+  // 改写（哪怕改成更"友好"的话）这条断言必须变红。
+  await expect(box.locator('.project-error')).toHaveText(`创建会话失败：目录不存在：${ALPHA}`);
   await expect(box).toBeVisible();
   await expect(page.locator('.app-error')).toHaveCount(0); // 不弹全局横幅
 
-  // 可重试：失败原因解除后同一条路径成功 → 落组 + 关闭
-  mock.cwdSessionError = undefined;
-  await box.getByRole('button', { name: '开始任务' }).click();
+  // 可重试：失败原因解除后同一条路径成功 → 落组 + 关闭。
+  mock.emptySessionError = undefined;
+  await box.getByRole('button', { name: '创建会话' }).click();
   await expect(project(page, '项目 alpha').locator('.session-item-id')).toHaveCount(1);
   await expect(box).toHaveCount(0);
 });

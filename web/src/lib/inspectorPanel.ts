@@ -14,6 +14,18 @@
 export const INSPECTOR_MIN_W = 320;
 export const INSPECTOR_MAX_W = 480;
 
+/**
+ * 初始宽度（#197）：比下限高 20px，**不是**随手挑的中间值。
+ *
+ * 面板右停靠、拖宽手柄挂在它的**左缘**（StepDetail 的 `onResizeMove`）⇒ 向左拖变宽、
+ * 向右拖变窄。默认值若等于下限，向右拖会被夹取**永远吃掉** ⇒ 用户第一次拖拽就得到
+ * "这个手柄坏了"的结论，而真相是下限在起作用。340 让两个方向都有可见余量
+ * （向右 20px 到下限、向左 140px 到上限）。
+ *
+ * 不持久化（不变量 #22）：刷新回到这个值。
+ */
+export const INSPECTOR_DEFAULT_W = 340;
+
 /** 中心列最小可用宽度：拖宽不得把它压垮（AC6）。 */
 export const CENTER_MIN_W = 360;
 

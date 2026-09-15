@@ -1,7 +1,10 @@
 /** Picker 浮层打开时的初始焦点（FE-R11-04）。
  *
- *  三个 picker（ModelPicker / ControlPicker / ContextProviderPicker）共用
- *  Radix Popover + cmdk Command。cmdk 把方向键 / Home / End / Enter 的处理挂在
+ *  #201 之后只有档位下拉在用：三处共用一个 `OptionPicker`（Radix Popover + cmdk Command）。
+ *  模型选择器已改两级飞出菜单（Radix DropdownMenu），不经过本文件——那条键盘路径由
+ *  Radix 的 roving focus 负责（e2e 见 `model-picker.spec.ts`）。
+ *
+ *  cmdk 把方向键 / Home / End / Enter 的处理挂在
  *  `[cmdk-root]` div 的 `onKeyDown` 上（`node_modules/cmdk/dist/index.mjs`），
  *  而这些**只能靠冒泡到达**——焦点必须落在 root 内部。
  *

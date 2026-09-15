@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CENTER_MIN_W,
+  INSPECTOR_DEFAULT_W,
   INSPECTOR_MAX_W,
   INSPECTOR_MIN_W,
   PEEK_TAP_MS,
@@ -21,6 +22,21 @@ import {
   spaceReleaseCloses,
   toolKey,
 } from './inspectorPanel';
+
+describe('INSPECTOR_DEFAULT_W — 初始宽度（#197）', () => {
+  it('是 340：比下限高 20px，两个拖拽方向都留可见余量', () => {
+    expect(INSPECTOR_DEFAULT_W).toBe(340);
+  });
+
+  it('严格落在 [下限, 上限] 之内，且**不等于**下限（等于下限时向右拖永远无变化）', () => {
+    expect(INSPECTOR_DEFAULT_W).toBeGreaterThan(INSPECTOR_MIN_W);
+    expect(INSPECTOR_DEFAULT_W).toBeLessThan(INSPECTOR_MAX_W);
+  });
+
+  it('它是夹取函数的不动点（初始值必须是合法宽度，否则首帧就被改写）', () => {
+    expect(clampInspectorWidth(INSPECTOR_DEFAULT_W, 1440)).toBe(INSPECTOR_DEFAULT_W);
+  });
+});
 
 describe('clampInspectorWidth — 拖宽范围与中心列保护（AC6）', () => {
   it('正常区间内原样（四舍五入到整像素）', () => {

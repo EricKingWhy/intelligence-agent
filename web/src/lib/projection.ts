@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
@@ -17,6 +17,137 @@ import { quarantineRecord, validateEvent } from './eventValidate';
 
 /** 输出 chunk 数上限：交替通道流的有界收缩触发线（spec 03 §9.4 bounded DOM）。 */
 const MAX_OUTPUT_CHUNKS = 512;
+
+// ── ADR-0030（#196）§4.2 / §5.4：supersede 区间（与后端 derive.py 同构）─────
+//
+// 被取代 seq 为 s。区间 = `[s, n)`，n = s 之后第一条**未被取代**的 user/message
+// 的 seq；没有就一直到底。判据只看 seq 与"该 seq 是否也被取代"，与事件到达顺序
+// 无关（纯函数性质）。前端与后端**同一区间定义、同一命名**——漂移由两端的
+// 测试各锁一条（后端单测 + 前端 e2e）。
+//
+// 被取代的整轮（问 + 答 + 工具）从**视图**移除；events 日志照旧保留（不变量
+// #3 append-only），只影响渲染。用户裁定（§4.5.1）：旧回答段直接删掉不显示，
+// 不加"已改写"标记。
+
+/** supersede 区间的端点：返回每个被取代 seq 的区间 `[start, end)`（end 独占）。
+ *  与后端 `derive.py` 的区间计算同构（同一判据、同一"到下一条未被取代的
+ *  user 消息"边界）。 */
+function supersedeRanges(events: readonly AgentEvent[]): Array<[number, number]> {
+  const supersededSeqs = new Set<number>();
+  for (const event of events) {
+    if (event.type !== EventType.MESSAGE_SUPERSEDED) continue;
+    const raw = event.data.superseded_seq;
+    // 一行坏数据只损失该行（与后端 derive 同款容错）：非有限数就忽略。
+    if (typeof raw === 'number' && Number.isFinite(raw)) supersededSeqs.add(raw);
+  }
+  if (supersededSeqs.size === 0) return [];
+  const userSeqs = events
+    .filter((e) => e.type === EventType.USER_MESSAGE && e.seq !== null)
+    .map((e) => e.seq as number);
+  // reduce 而非 Math.max(...spread)（审查 P2）：超长会话（数万事件）下
+  // spread 会把整个数组当函数参数展开 → RangeError，历史装载直接崩。
+  const lastSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+  const ranges: Array<[number, number]> = [];
+  for (const seq of [...supersededSeqs].sort((a, b) => a - b)) {
+    const following = userSeqs.find((u) => u > seq && !supersededSeqs.has(u));
+    const end = following !== undefined ? following : lastSeq + 1;
+    if (end > seq) ranges.push([seq, end]);
+  }
+  return ranges;
+}
+
+/** 把 supersede 区间应用到已渲染的 turns：区间内的轮整段置 `superseded`。
+ *  整体 reassign（与 pending_approvals 同款契约）；不删除 turns 数组元素——
+ *  渲染层按标记过滤，重放确定性更好（重复应用幂等）。 */
+function applySupersedeShadow(state: ConversationState): void {
+  const ranges = supersedeRanges(state.events);
+  if (ranges.length === 0) return;
+  const shadowed = (seq: number | null): boolean =>
+    seq !== null && ranges.some(([start, end]) => start <= seq && seq < end);
+  state.turns = state.turns.map((turn) =>
+    shadowed(turn.user_message_seq) && !turn.superseded
+      ? { ...turn, superseded: true }
+      : turn,
+  );
+}
+
+/** 未投递输入的逐事件折叠（ADR-0030 §5.2：事件流是唯一事实）。
+ *  `message/queued` / `queue/cancelled` / `steer/requested` 增量；`queue/consumed`
+ *  / `steer/applied` 摘除（消费事实）。与后端 `undelivered_inputs` 同一判据。 */
+function projectUndelivered(state: ConversationState, event: AgentEvent): void {
+  const { type } = event;
+  const data = event.data;
+  if (type === EventType.MESSAGE_QUEUED) {
+    const id = data.queue_id;
+    if (typeof id !== 'string' || !id) return;
+    state.undelivered = [
+      ...state.undelivered,
+      {
+        kind: 'queue',
+        id,
+        content: String(data.content ?? ''),
+        seq: event.seq ?? 0,
+        created_at: event.time ?? '',
+      },
+    ];
+    return;
+  }
+  if (type === EventType.STEER_REQUESTED) {
+    const id = data.steer_id;
+    if (typeof id !== 'string' || !id) return;
+    state.undelivered = [
+      ...state.undelivered,
+      {
+        kind: 'steer',
+        id,
+        content: String(data.content ?? ''),
+        seq: event.seq ?? 0,
+        created_at: event.time ?? '',
+      },
+    ];
+    return;
+  }
+  if (type === EventType.QUEUE_CANCELLED) {
+    const id = data.queue_id;
+    if (typeof id !== 'string') return;
+    state.undelivered = state.undelivered.filter((u) => u.id !== id);
+    return;
+  }
+  if (type === EventType.QUEUE_CONSUMED || type === EventType.STEER_APPLIED) {
+    const id =
+      type === EventType.QUEUE_CONSUMED
+        ? data.queue_id
+        : data.steer_id;
+    if (typeof id !== 'string') return;
+    state.undelivered = state.undelivered.filter((u) => u.id !== id);
+  }
+}
+
+/** 首屏/重连补齐：用 `GET /queue` 的响应**替换**未投递列表（§5.2 状态源优先级：
+ *  事件流是唯一事实，本端点只做补齐）。替换而非合并——重复执行幂等。
+ *  由 useSession 在历史装载 / 重连时调用。 */
+export function restoreUndeliveredFromQueue(
+  state: ConversationState,
+  queue: { items: Array<{ queue_id: string; content: string; created_at: string }>; steers: Array<{ steer_id: string; content: string; created_at: string }> },
+): void {
+  const items: UndeliveredInput[] = [
+    ...queue.items.map((i) => ({
+      kind: 'queue' as const,
+      id: i.queue_id,
+      content: i.content,
+      seq: Number.MAX_SAFE_INTEGER,
+      created_at: i.created_at,
+    })),
+    ...queue.steers.map((s) => ({
+      kind: 'steer' as const,
+      id: s.steer_id,
+      content: s.content,
+      seq: Number.MAX_SAFE_INTEGER,
+      created_at: s.created_at,
+    })),
+  ];
+  state.undelivered = items;
+}
 
 export function initConversation(session_id: string): ConversationState {
   return {
@@ -42,6 +173,7 @@ export function initConversation(session_id: string): ConversationState {
     run_interrupted: null,
     turn_index: null,
     seenSeqs: new Set(),
+    undelivered: [],
   };
 }
 
@@ -207,6 +339,31 @@ function summarizePermissionResolved(event: AgentEvent): string {
  *  reasoning/delta 同一惯例：Timeline 行仍 verbatim 在场，摘要只记增量）。 */
 function summarizeDeltaChars(event: AgentEvent): string {
   return `+${String(event.data.delta ?? '').length} 字符`;
+}
+
+// ── ADR-0030（#196）：在途输入通道的 Timeline 摘要 ──
+
+/** 术语表 §2：queue（排队）= 等当前 run 结束后接力成下一个 run。 */
+function summarizeMessageQueued(event: AgentEvent): string {
+  const content = String(event.data.content ?? '').trim();
+  return content ? `已排队 · ${truncateQueueSummary(content)}` : '已排队';
+}
+
+/** 术语表 §2：steer（引导）= 注入当前 run 的下一个模型调用前。 */
+function summarizeSteerRequested(event: AgentEvent): string {
+  const content = String(event.data.content ?? '').trim();
+  return content ? `引导中 · ${truncateQueueSummary(content)}` : '引导中';
+}
+
+/** §4.5.1：被取代的那一轮整段从界面消失——Timeline 摘要只描述事实。 */
+function summarizeSuperseded(event: AgentEvent): string {
+  const seq = event.data.superseded_seq;
+  return typeof seq === 'number' ? `第 ${seq} 条输入已被新内容取代` : '输入已被取代';
+}
+
+/** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
+function truncateQueueSummary(content: string, max = 40): string {
+  return content.length > max ? `${content.slice(0, max)}…` : content;
 }
 
 // ── applyEvent 的 per-type 投影 ──
@@ -924,10 +1081,16 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.TEXT_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
   [EventType.COMPACTION_START]: { apply: unhandledProjection, summarize: unknownSummary },
   [EventType.COMPACTION_END]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.MESSAGE_QUEUED]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.QUEUE_CANCELLED]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.STEER_REQUESTED]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.STEER_APPLIED]: { apply: unhandledProjection, summarize: unknownSummary },
+  // ADR-0030（#196）§5.2：未投递输入逐事件折叠进 state.undelivered（队列条数据源，
+  // 事件流是唯一事实）。摘要给 Timeline 一行语义（不再是「未接线」）。
+  [EventType.MESSAGE_QUEUED]: { apply: projectUndelivered, summarize: summarizeMessageQueued },
+  [EventType.QUEUE_CANCELLED]: { apply: projectUndelivered, summarize: emptySummary },
+  [EventType.STEER_REQUESTED]: { apply: projectUndelivered, summarize: summarizeSteerRequested },
+  [EventType.STEER_APPLIED]: { apply: projectUndelivered, summarize: emptySummary },
+  [EventType.QUEUE_CONSUMED]: { apply: projectUndelivered, summarize: emptySummary },
+  // 编辑语义（§5.4）：投影只读 events 日志（shadow 在 applyEvent 里统一应用），
+  // 不折叠进轮次——被取代轮的移除由 applySupersedeShadow 按 seq 区间驱动。
+  [EventType.MESSAGE_SUPERSEDED]: { apply: noopProjection, summarize: summarizeSuperseded },
 };
 
 /** Apply one event to state, returning new state. Copy-on-write:
@@ -981,6 +1144,13 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
     // UnknownSurfaceNode 兜底协议（冻结决策第 69 行）：未知事件类型不静默丢弃，
     // 记录到 unknown_events 供 Timeline / Inspector 显式渲染为 raw 行。
     next.unknown_events = [...next.unknown_events, event];
+  }
+
+  // ADR-0030 §5.4：`message/superseded` 到达后按同一区间规则把被取代的整轮从
+  // 视图移除。放在语义分派**之后**：区间计算读 events 日志（上面刚 push 过），
+  // 先分派再 shadow 保证新到的 user/message（B）已折叠进轮次。
+  if (type === EventType.MESSAGE_SUPERSEDED) {
+    applySupersedeShadow(next);
   }
 
   // T1（#94）幂等标记在投影成功之后（seen = applied，spec 02 §6.1）：投影分支
@@ -1257,6 +1427,26 @@ export function firstForkableTurnIndex(turns: Turn[]): number {
  *  提示），而不是直接返回那个「最早可分叉轮」。 */
 export function emptyChildTurnIndex(turns: Turn[]): number {
   return firstForkableTurnIndex(turns) === 0 ? 0 : -1;
+}
+
+/** 最新一条用户消息的 seq（ADR-0030 D8：只有它可被 supersede/编辑）。
+ *
+ *  只算**非取代**的轮：被 supersede 的轮里那条问句已被新内容取代，它不再是
+ *  "最新"——允许编辑它会让用户编辑一条已消失的消息（写侧 409）。注入轮
+ *  （`injected_by`）不是用户发言，同样不可编辑。 */
+export function latestEditableTurn(turns: Turn[]): Turn | null {
+  let latest: Turn | null = null;
+  let latestSeq = -1;
+  for (const turn of turns) {
+    if (turn.superseded) continue;
+    if (!turn.user_message || turn.injected_by) continue;
+    if (turn.user_message_seq === null) continue;
+    if (turn.user_message_seq > latestSeq) {
+      latest = turn;
+      latestSeq = turn.user_message_seq;
+    }
+  }
+  return latest;
 }
 
 /** Extract a session-title string from a single event if it's a user/message
