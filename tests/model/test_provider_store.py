@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_harness.config import Settings
 from agent_harness.model.provider_store import (
     CredentialError,
     MemoryCredentialStore,
@@ -206,3 +207,85 @@ def test_new_custom_provider_keeps_models_exactly(store: ProviderStore):
     store.create(_body(models=[{"model_id": "only-mine"}]))
     entry = store.get_entry("my-proxy")
     assert [m["model_id"] for m in entry["models"]] == ["only-mine"]
+
+
+class TestResolveSelectionChain:
+    """终审 P1 修复：统一解析点 `ModelConfig.resolve_selection`——
+    /api/models 广告的自定义条目（`<provider>:<model_id>`）在 create/resume/
+    model 三道校验闸此前被 from_catalog 422（UI 能选、一提交就拒，feature
+    promise 断裂）。三道闸与 build_runtime 引用本函数后，广告列表与可解析
+    集合同一。"""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        """MemoryCredentialStore 注入（与 provider_app fixture 同一口径：
+        不碰真实系统凭据管理器）。"""
+        from agent_harness.model.provider_store import (
+            MemoryCredentialStore,
+            ProviderStore,
+        )
+
+        return ProviderStore(
+            tmp_path / "model-providers.json",
+            MemoryCredentialStore(),
+            builtin_ids=frozenset({"deepseek"}),
+        )
+
+    def test_catalog_name_still_resolves_via_catalog(self, store):
+        """无冒号的名字仍按 catalog 解析（既有契约不变）。"""
+        from agent_harness.model.config import ModelConfig
+
+        catalog = '[{"name": "gpt-4o", "provider": "deepseek", "model_name": "gpt-4o-mini"}]'
+        settings = Settings(_env_file=None, model_api_key="sk-test",
+                            model_provider="deepseek", model_name="deepseek-chat",
+                            agent_models=catalog)
+        resolved = ModelConfig.resolve_selection(settings, "gpt-4o", store)
+        assert resolved.provider == "deepseek"  # catalog 条目的 provider
+
+    def test_composite_id_resolves_custom_provider(self, store):
+        """`<provider>:<model_id>` 命名空间 → from_custom_provider（凭据在场）。"""
+        from agent_harness.model.config import ModelConfig
+
+        store.create({"id": "my-proxy", "label": "My Proxy",
+                      "base_url": "https://my-proxy.internal/v1",
+                      "models": [{"model_id": "gpt-x"}],
+                      "api_key": "sk-custom-123"})
+        settings = Settings(_env_file=None, model_api_key="sk-test",
+                            model_provider="deepseek", model_name="deepseek-chat")
+        resolved = ModelConfig.resolve_selection(settings, "my-proxy:gpt-x", store)
+        assert resolved.provider == "my-proxy"
+        assert resolved.model_name == "gpt-x"
+
+    def test_composite_id_deleted_provider_is_loud(self, store):
+        """被删 provider 的 composite id **不静默 fallback**（D9）——响亮失败。"""
+        import pytest
+
+        from agent_harness.model.config import ConfigError, ModelConfig
+
+        settings = Settings(_env_file=None, model_api_key="sk-test",
+                            model_provider="deepseek", model_name="deepseek-chat")
+        with pytest.raises(ConfigError, match="my-proxy"):
+            ModelConfig.resolve_selection(settings, "my-proxy:gpt-x", store)
+
+    def test_no_colon_in_catalog_fails_loud(self, store):
+        """未知 catalog 名 → 未知模型错误（既有 422 语义不变）。"""
+        import pytest
+
+        from agent_harness.model.config import ConfigError, ModelConfig
+
+        settings = Settings(_env_file=None, model_api_key="sk-test",
+                            model_provider="deepseek", model_name="deepseek-chat")
+        with pytest.raises(ConfigError, match="未知模型"):
+            ModelConfig.resolve_selection(settings, "no-such-model", store)
+
+    def test_store_none_composite_id_fails_loud(self):
+        """store 不在场（CLI 等未接 provider_store 的调用方）+ composite id
+        → 确定性错误，不假装是 catalog 问题。"""
+        import pytest
+
+        from agent_harness.model.config import ConfigError, ModelConfig
+
+        settings = Settings(_env_file=None, model_api_key="sk-test",
+                            model_provider="deepseek", model_name="deepseek-chat")
+        with pytest.raises(ConfigError, match="供应商存储"):
+            ModelConfig.resolve_selection(settings, "my-proxy:gpt-x", None)

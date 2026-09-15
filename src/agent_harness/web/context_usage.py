@@ -136,3 +136,35 @@ def build_context_usage_payload(
         "cache": cache_summary(events),
         "state": "ok",
     }
+
+
+def skills_provider_tokens(builder: Any) -> int:
+    """skills provider 注入文本的 token 估算（#200 技能桶，设计稿 §3.2）。
+
+    skills provider 是独立 SystemMessage（`SkillCatalogContextProvider`），
+    目录文本终身不变——按 provider 类型识别（isinstance，不靠 name 猜），
+    对**与 provider.select 同一份文本**（`_DATA_FRAME` + 各条目行）估算。
+    非 skills provider（记忆等）归残差桶，不在这里算。
+
+    终审 P1 修复前这里只有 app.py 的私有副本 `_skills_provider_tokens`（live
+    端点在用），RunManager 的收口缓存调不到——技能桶在 run 终结后静默折进
+    "其他"残差，live 与缓存两个视图不一致。现在两个调用点共用这一份。
+    """
+    from langchain_core.messages import SystemMessage
+
+    from agent_harness.context.tokens import estimate_message_tokens
+    from agent_harness.skills.context_provider import SkillCatalogContextProvider
+
+    for provider in builder.context_providers:
+        if isinstance(provider, SkillCatalogContextProvider):
+            entries = provider._capability.catalog()
+            if not entries:
+                return 0
+            lines = [provider._DATA_FRAME]
+            for e in entries:
+                line = f"- {e.name}: {e.description}"
+                if e.when_to_use:
+                    line += f"（何时用：{e.when_to_use}）"
+                lines.append(line)
+            return estimate_message_tokens([SystemMessage(content="\n".join(lines))])
+    return 0

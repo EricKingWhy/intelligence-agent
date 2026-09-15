@@ -197,37 +197,28 @@ async def build_runtime(
     # DEFAULT_REGISTRY 不读环境（§4.4），所以这里显式按 settings 构建一次。
     persona = parse_persona_config(settings.agent_persona)
 
-    # #203 / ADR-0032 D8：模型解析收敛——catalog 名走 from_catalog；不在
-    # catalog 的名字尝试自定义供应商（provider_store）；两者都未命中才响亮
-    # 失败。被删 provider **不静默 fallback**（D9：明确错误含 provider id）。
+    # #203 / ADR-0032 D8：模型解析收敛——统一解析点 resolve_selection（catalog
+    # 名优先 + 自定义供应商 `<provider>:<model_id>` 命名空间 fallback）；两者都
+    # 未命中才响亮失败。被删 provider **不静默 fallback**（D9：明确错误含
+    # provider id）。终审 P2 修复：不再裸 model_id 跨 provider 匹配——两个自定义
+    # provider 注册同一 model_id 时此前的循环取文件序第一个（顺序依赖的静默选择）；
+    # 现在 catalog 名精确命中 + composite id（provider:model）精确解析，无歧义。
     if model_name is None:
         config = ModelConfig.from_settings(settings)
     else:
         try:
-            config = ModelConfig.from_catalog(settings, model_name)
-        except ConfigError as catalog_error:
             # 局部 import 只引 provider_store 三件套——**不**引 pathlib.Path：
             # 局部 Path 会遮蔽模块级 Path，`_render_runtime_context` 的
             # `Path.cwd()` 会炸成 NameError（全量回归实证：run 起跑即失败）。
             from agent_harness.model.provider_store import (
                 ProviderStore,
                 SystemCredentialStore,
-                resolve_provider_target,
             )
 
             store = ProviderStore(Path(settings.provider_store_path), SystemCredentialStore())
-            custom = None
-            for provider_entry in store.list_entries():
-                custom = resolve_provider_target(
-                    store, settings_provider=provider_entry["id"], model_id=model_name,
-                )
-                if custom is not None:
-                    config = ModelConfig.from_custom_provider(
-                        settings, provider_entry["id"], model_name, store,
-                    )
-                    break
-            if custom is None:
-                raise catalog_error from None
+            config = ModelConfig.resolve_selection(settings, model_name, store)
+        except ConfigError as error:
+            raise error from None
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
     # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime

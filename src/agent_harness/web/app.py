@@ -87,7 +87,10 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
 )
 from agent_harness.web import artifacts
-from agent_harness.web.context_usage import build_context_usage_payload
+from agent_harness.web.context_usage import (
+    build_context_usage_payload,
+    skills_provider_tokens,
+)
 from agent_harness.web.domain_errors import http_error
 from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
@@ -581,34 +584,6 @@ async def _validate_wired_context_providers(
         )
 
 
-def _skills_provider_tokens(builder: Any) -> int:
-    """skills provider 注入文本的 token 估算（#200 技能桶，设计稿 §3.2）。
-
-    skills provider 是独立 SystemMessage（`SkillCatalogContextProvider`），
-    目录文本终身不变——按 provider 类型识别（isinstance，不靠 name 猜），
-    对**与 provider.select 同一份文本**（`_DATA_FRAME` + 各条目行）估算。
-    非 skills provider（记忆等）归残差桶，不在这里算。
-    """
-    from langchain_core.messages import SystemMessage
-
-    from agent_harness.context.tokens import estimate_message_tokens
-    from agent_harness.skills.context_provider import SkillCatalogContextProvider
-
-    for provider in builder.context_providers:
-        if isinstance(provider, SkillCatalogContextProvider):
-            entries = provider._capability.catalog()
-            if not entries:
-                return 0
-            lines = [provider._DATA_FRAME]
-            for e in entries:
-                line = f"- {e.name}: {e.description}"
-                if e.when_to_use:
-                    line += f"（何时用：{e.when_to_use}）"
-                lines.append(line)
-            return estimate_message_tokens([SystemMessage(content="\n".join(lines))])
-    return 0
-
-
 async def _validate_amend_for_existing_session(
     state: AppState, amend: AmendOptions
 ) -> None:
@@ -622,8 +597,20 @@ async def _validate_amend_for_existing_session(
     """
     await _validate_wired_context_providers(state, amend.context_providers)
     if amend.model is not None:
+        from agent_harness.model.provider_store import (
+            ProviderStore,
+            SystemCredentialStore,
+        )
+
         try:
-            ModelConfig.from_catalog(state.settings, amend.model)
+            # 终审 P1 修复：统一解析点（catalog + 自定义供应商 fallback）——
+            # /api/models 广告的自定义条目此前在这里被 from_catalog 422。
+            store = ProviderStore(
+                Path(state.settings.provider_store_path),
+                SystemCredentialStore(),
+                builtin_ids=frozenset(),
+            )
+            ModelConfig.resolve_selection(state.settings, amend.model, store)
         except ConfigError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -1486,7 +1473,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         if active is not None and active.runtime is not None:
             builder = active.runtime._context_builder
             if builder is not None:
-                skills_tokens = _skills_provider_tokens(builder)
+                # 终审 P1 修复：共享 helper（RunManager 收口缓存用同一份）——
+                # 私有副本曾只在这里可见，收口快照的技能桶静默折进残差。
+                skills_tokens = skills_provider_tokens(builder)
                 builder_snapshot = builder.usage_snapshot(
                     active.session, skills_tokens=skills_tokens)
             tool_definitions = active.runtime.registry.export_model_definitions()

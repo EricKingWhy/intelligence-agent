@@ -343,6 +343,30 @@ class ModelConfig:
         return resolved
 
     @classmethod
+    def resolve_selection(
+        cls, settings: "Settings", name: str, store: Any | None = None,
+    ) -> "ModelConfig":
+        """会话级模型选择的**统一解析点**（catalog 优先 + 自定义供应商 fallback）。
+
+        `name` 带冒号（`<provider>:<model_id>`，/api/models 自定义条目的命名空间，
+        与 catalog 名不重叠）→ 走 from_custom_provider（store 必须在场，无凭据/被删
+        provider 是确定性配置错误）；否则按 catalog 名解析（from_catalog）。
+
+        统一这一个点的理由（终审 P1）：/api/models 广告自定义条目并承诺"选中后经
+        model 字段回传、解析走自定义分支"，而 create/resume/model 三道校验闸此前
+        只认 from_catalog——UI 能选、一提交就 422（feature promise 断裂）。三道闸
+        与 build_runtime 全部引用本函数后，广告的列表与真实可解析的集合同一。
+        """
+        if ":" in name:
+            if store is None:
+                raise ConfigError(
+                    f"自定义供应商模型 {name!r} 需要供应商存储，当前环境不可用"
+                )
+            provider_id, _, model_id = name.partition(":")
+            return cls.from_custom_provider(settings, provider_id, model_id, store)
+        return cls.from_catalog(settings, name)
+
+    @classmethod
     def _single_from(
         cls, *, provider: str, model_name: str, api_key: str,
         base_url: str, temperature: float, key_env: str,

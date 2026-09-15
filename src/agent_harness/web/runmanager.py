@@ -298,7 +298,16 @@ class RunManager:
         if builder is None:
             return
         try:
-            capture(run.session.session_id, builder.usage_snapshot(run.session),
+            # 终审 P1 修复：收口快照带 skills_tokens——live 端点（app.py）算它，
+            # 收口缓存不算的话技能桶静默折进"其他"残差，六个桶在 live 与缓存两个
+            # 视图里不一致（run 终结后再开看板是常见路径）。同一份 helper（web 层
+            # _skills_provider_tokens 的依赖倒置：RunManager 不认识 app.py，这里
+            # 通过 builder 协议取同一文本）。
+            from agent_harness.web.context_usage import skills_provider_tokens
+
+            capture(run.session.session_id,
+                    builder.usage_snapshot(
+                        run.session, skills_tokens=skills_provider_tokens(builder)),
                     runtime.registry.export_model_definitions())
         except Exception:
             logging.getLogger(__name__).debug(
