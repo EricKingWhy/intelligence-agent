@@ -106,6 +106,33 @@ git -C D:/intelligence-agent diff --check          # 无 whitespace / 冲突标�
 git -C D:/intelligence-agent status --short        # 干净
 ```
 
+### ⚠️ 2.1 跑 e2e 门禁前**必须**先查 5173（本次实测踩到，会得到假红）
+
+两个 clone 的 `web/playwright.config.ts` **逐字相同**，都写死 `baseURL: http://localhost:5173` 且
+`reuseExistingServer: !process.env.CI`（本地 = true）。**跨 clone 抢同一个端口 ⇒ A 仓的 spec 会打到
+B 仓的 dev server 上**，而且没有任何提示。
+
+本次真实踩到：在 `D:\intelligence-agent\web` 跑全量得 **18 failed**（`d-recover` 4 × 2 /
+`e-reconnect` 1 × 2 / `k-refresh-restore` 2 × 2 / `n-approval-card` 1 × 2 / `o-wait-hint` 1 × 2）。
+根因不是 main 坏了——5173 上那个常驻 vite 属于 **`D:\intelligence-agent-frontend\web`**（实测进程命令行），
+于是 **main 的 spec + WS 分支的代码**（spec 里没有 WS mock）⇒ 正好是 #206 描述的那批红。
+把 5173 让开（换 `--port 5273 --strictPort` 独立起服务）重跑这 5 个 spec：**58 passed / 0 failed**。
+
+**跑门禁前先执行**：
+
+```bash
+netstat -ano | grep 5173            # 有 LISTENING 就是有人占着
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"ProcessId=<PID>\" | Select-Object CommandLine"
+```
+
+- 端口空闲 → 直接跑，服务由 playwright 自己起（最干净）。
+- 端口被**另一个 clone** 占用 → 先把那个 dev server 停掉再跑，**不要**在占用状态下跑门禁
+  （结果不可信，且会给出如上 18 条的假红）。
+- 判据：你跑的那次，`webServer` 必须是 playwright 自己起的。想强制如此就设 `CI=1`
+  （此时 `reuseExistingServer=false`，端口被占会**直接报错**而不是静默复用——报错正是你要的信号）。
+
+> 这是门禁基建本身的缺陷（两个 clone 共用端口 + 静默复用），已单独开票 **#209**，**不在本批修**。
+
 ---
 
 ## 3. 合并后必须跑的门禁
@@ -144,6 +171,15 @@ cd D:/intelligence-agent && ruff check . && python -m pytest -q
 期望：与 main 集成前一致（本批不新增后端测试；后端 keepalive 改动是另一条线，见
 `feat/backend` 的 `7bd6c4a`）。
 
+### 3.3 main 侧的基线（供你比对，非门禁）
+
+- main（`e4da691`）的 e2e 声明数：`npx playwright test --list` → **346 tests / 39 files**；
+  合并本批后应变成 **364 / 41**（+2 个 spec 文件：`queue-flush` 7 + `stream-fallback` 2，各 ×2 viewport）。
+- main 的 vitest 基线：**848 passed / 49 files**（合并后应 882 / 50，`+34` 全部来自 `wsStream.test.ts`）。
+- main 的 oxlint 基线：**0 error / 43 warnings**（合并后 44 warnings）。
+- main 的真实 e2e 结果：本次**没能干净测到**（被 §2.1 的端口复用打断）；用独立端口只复跑了本批相关的
+  5 个 spec → **58 passed / 0 failed**。你合并后跑全量即可，**别把 §2.1 那 18 条当成 main 的既有红**。
+
 ---
 
 ## 4. 真机验证点（合 main 后、push 前建议扫一遍）
@@ -174,6 +210,9 @@ cd D:/intelligence-agent && ruff check . && python -m pytest -q
    控制帧；实时流一律用 `onWs`。别按旧文档拿它驱动 live 流。
 5. **`stream/truncated` 的 e2e 覆盖是经降级通道**取的（`stream-fallback.spec.ts`）：
    主通道（WS）本来就不发这个帧（见 1），所以这是**当下唯一忠实**的构造方式。
+6. **e2e 门禁会被跨 clone 的端口复用静默污染**（见 §2.1）：这是本批**之外**的门禁基建缺陷——
+   已开票 **#209**，未在本批修（改 `playwright.config.ts` 属改门禁契约，超出 #205/#206 的范围）。
+   合并前请按 §2.1 的预检跑一次；若你看到那 18 条红，先怀疑端口，不要先怀疑代码。
 
 ---
 
@@ -185,6 +224,8 @@ cd D:/intelligence-agent && ruff check . && python -m pytest -q
 | #206 | 已关（comment 记录 commit + 证据） | 同上；正文里关于 `routeWebSocket` 的结论已更正 |
 | #207 | **OPEN（留给 Integrator）** | 合 main + 门禁 + push（push 需用户批准）后关单 |
 | #208 | OPEN（新开的后端票） | WS 快照加 cap / 复用 `stream/truncated`，见 §5.1 |
+| #209 | OPEN（新开的前端测试基建票） | 两个 clone 共用 5173 → e2e 门禁静默污染，见 §2.1 / §5.6 |
+| #199 / #201 | OPEN（**故意不关**，别顺手关） | 票面各自有**冻结 AC 缺数据源**未落地（#199：不可用 provider 置灰 + reason / 能力徽标 / 「管理模型」入口；#201：档位收窄提示 N/M 工具数）；票面 comment 已写「不关单」的理由。本批只发现"它们已随 `334de4b` 合入 main"（其实现与 review 修复都在 main 上），**没有**去补那几条 AC |
 
 ---
 
