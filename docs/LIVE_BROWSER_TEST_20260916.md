@@ -348,3 +348,48 @@ F1 修完之后，复审提出一条我**当时没测**的怀疑：把面板拖�
   1. **Radix 模态打开期间，其余内容被 `aria-hidden`**，`getByRole` 会返回 0 ——
      必须用 `waitForFunction` 等模态真正退场，不能把「查不到」当成「按钮不存在」；
   2. **`innerText` 不含 placeholder**，用它探测「搜索框是否出现」必然假阴性。
+
+## 9. 与 DeepSeek Harness 的对照（用户点名："能拿来抄的直接抄"）
+
+**怎么查的**：DSH 仓库 README 不含这些设计（只有 `npx @deepseek-ai/dsh web` 的用法与
+"everything-is-a-plugin / Cordis" 的定位），所以按目录稀疏拉取只读对照
+（`git clone --depth 1 --filter=blob:none --sparse` 后 `sparse-checkout set docs`），
+读 `docs/subsystems/session.md`、`docs/architecture.md`、`docs/capability-seams.md`、
+`docs/event-producer-consumer.md`。**没有复制任何代码**（本项目对 DSH 的既定策略见
+`SPEC_ROOT/13_OPEN_SOURCE_REUSE_MATRIX.md` §3：事件溯源/Capability seam/工具管线等
+一律 **PORT DESIGN**，其 TS/Cordis runtime 为 **DEFER**），这里只做设计对照。
+
+### 9.1 已经在做同一件事的（对照后确认，无需改动）
+
+| DSH 的设计 | 我们这边的对应 | 证据 |
+| --- | --- | --- |
+| append-only typed SessionEvent 作为主事实源，前端消费 `session/event` 派生消息 | 本项目同一模型（不变量 #3/#5/#6）；刷新一致性就是它成立的实证 | 本文 §5：四场景逐字节哈希一致 + 零点击恢复 |
+| 事件→线路的 payload **单一构建点**（避免多通道各自手搓） | `web/serialization.py` 即"RuntimeEvent 信封的单一构建点"（Q4b 技术债修复的产物），SSE 与 WS 只留传输层包装 | `serialization.py` 头部注释；P0-001（`ev.to_dict()` 崩溃）正是一个**绕过它**的站点，已按同一模式对齐 |
+| 用户消息是一个"已识别、冻结"的值，**途中投递的路由状态属于 driver，不属于消息本身** | ADR-0030：`mode`（queue/steer）是请求级字段、由后端在 idle/在途两种状态下分流；消息内容不被改写 | 本文 F4：前端不该按 `streaming` 自行分流，修法就是把它交回后端 |
+
+### 9.2 DSH 有、我们还没有的两条（**只报告，本批不动**）
+
+1. **`replaceGeneration` / `contentGeneration` 单调计数器**
+   DSH 的 `SessionSurface` 暴露两个单调计数：`replaceGeneration` 统计"位置替换"提交次数、
+   `contentGeneration` 统计替换 + 插件消息变更次数，目的是让**增量消费方能区分
+   "只是尾部增长"还是"发生过重写"**。
+   我们的增量侧现在是靠 `seenSeqs` 幂等门 + 每会话 max-seq 游标 + `terminalSeenRef`
+   判断的（见 `web/src/hooks/useSession.ts` 与 `lib/wsStream.ts` 的实测注释）。功能上
+   已经够用（本次真机刷新/重连全部通过），但缺一个**显式的"重写发生过"信号**——
+   supersede/取代轮这类改写目前只能靠序号与内容推断。
+   **建议**：值得进 backlog（一条前端 + 后端契约的小增强），但**不是缺陷**，别当 bug 修；
+   要动就得连 spec/契约一起改，属 §9.1 的"先报告再动手"。已开单：
+   [#213](https://github.com/EricKingWhy/intelligence-agent/issues/213)。
+
+2. **折叠一个"从中间开始的窗口"时，越界的替换必须**失败**而不是静默算出一个错的 surface**
+   DSH 明写：`SurfaceManager(log, baseSeq)` 只能折叠**连续**窗口，且"a replacement that
+   crosses the window head fails because its declared range is absent"。
+   我们现在的重建是**整段 `GET /events` 全量重放**（`doTruncatedRebuild`），所以这条规则
+   暂时咬不到；但一旦将来为了省带宽改成"从游标起只拉增量窗口"，这条就是必须一起抄的
+   不变量——**宁可失败也不要静默错**，与本项目不变量 #22（前端不维护第二套不可对账真相）同向。
+
+### 9.3 本次修的六个缺陷里，没有一条能"直接抄 DSH"
+
+F1/F5 是 Inspector 头部的 flex/容器查询布局（本项目自己的设计系统与面板宽度语义），
+F2 是亮色主题 WCAG 对比（§15 纪律），F3 是看板文案归因，F4 是本项目 ADR-0030 的路由分派，
+F6 是本项目 404 文案分流。DSH 是 TS/Cordis 前端 + 自己的 surface 契约，这六处没有可移植的实现。
