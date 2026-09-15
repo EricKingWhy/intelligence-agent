@@ -34,8 +34,10 @@
   **调用方的写入契约就是这个方法**——`store` 是 provider 侧的原语（manager/工具用它落盘），
   它不带"不丢写"保证：决策/检索失败时会抛异常，候选会丢。只有 `consolidate` 保证
   "返回 ⟹ 已落盘"。
-- **只有一条路径**：检索发生在 provider 内部（LangMem 的 manager 自己按 provider 的方式检索），
-  Core 侧不再另做一次 `recall` 注入——两套检索并存迟早对不上账。
+- **检索实现唯一，调用点两个**（#202 / ADR-0031 D1 修订）：检索**实现**只有 provider 的
+  `search` 一个；**调用点**有两个——① `MemoryContextProvider` 在每次 `build()` 时自动注入；
+  ② `retrieve_memory` 工具按需精准补充。两者共用同一个 `search` 与同一份排序函数
+  （`rank_entries`），不新增第二条检索链。
 - **注入有界**（provider 的责任，实现见 `consolidation.py`）：既有记忆注进 prompt 的条数与
   每条字符数都有上界，与 `extractor._clip_events` 同一思路。
 - **不丢写**：决策或检索阶段任何失败都**降级为一条无条件写入**，并把脱敏原因放进

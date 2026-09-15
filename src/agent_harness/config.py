@@ -117,6 +117,14 @@ class Settings(BaseSettings):
     # SecretStr：JSON 里可带条目级 api_key（活密钥），dump()/repr() 一律脱敏。
     agent_models: SecretStr = SecretStr("")
 
+    # #203 / ADR-0032：自定义供应商存储。非密配置落**用户级全局** JSON
+    # （作用域 = 全局，用户裁定；**不得**放进 workspace——那是 per-session 的；
+    # 相对路径依赖 CWD 的教训与 .env 同源，默认锚用户主目录）；
+    # 密钥只进凭据管理器（keyring），该文件不含任何密钥字段。
+    provider_store_path: str = str(Path.home() / ".agent-harness" / "model-providers.json")
+    # 连接测试超时（秒，§6.2）：固定参数之一，默认 15s——测试不该等 300s。
+    model_test_timeout_seconds: float = 15.0
+
     # Langfuse 旁路观测（ADR-0018 D2/D6，首个 OPTIONAL_OBSERVABILITY 实现）：
     # key 空 = 旁路完全缺席（懒加载，零 import 开销）。key 同 SecretStr 脱敏待遇。
     langfuse_public_key: SecretStr = SecretStr("")

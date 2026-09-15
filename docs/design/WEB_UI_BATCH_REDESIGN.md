@@ -174,7 +174,7 @@ type Props = {
 **契约**：`CreateSessionRequest` 新增 `launch: bool = True`（默认 true ⇒ 既有行为逐字不变）。
 
 - `launch=True`（默认）：现有路径，SSE 直驱 run。
-- `launch=False`：只写 `session/started`（+ 既有 session 元数据），**不**启动 run、**不**返回 SSE，返回会话 JSON（同 `GET /api/sessions/{sid}` 的形状）。此时 `task` 可省略（若同时给了 task 而 `launch=False`，按 422 拒绝，避免"给了任务却静默不执行"）。
+- `launch=False`：只写 `session/started`（+ 既有 session 元数据），**不**启动 run、**不**返回 SSE，返回会话 JSON（刻意小形状：`{session_id, permission_mode}`——前端初始化 composer 状态只需这两项；仓库里不存在 `GET /api/sessions/{sid}` 单会话路由，且事件数/标题是列表页投影字段，这里没有数据来源，不伪造）。此时 `task` 可省略（若同时给了 task 而 `launch=False`，按 422 拒绝，避免"给了任务却静默不执行"）。
 
 ### 5.3 权限一致性（用户裁定 11）
 - 弹窗里的权限选择 = **首次**创建会话时写入的会话级权限。

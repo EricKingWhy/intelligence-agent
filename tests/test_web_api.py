@@ -295,11 +295,27 @@ def test_create_session_rejects_nested_workspace_name(app):
 
 
 def test_create_session_rejects_empty_task(tmp_path):
-    """task="" → 422，且不留任何 session JSONL / workspace 目录。"""
+    """task="" → 422，且不留任何 session JSONL / workspace 目录。
+
+    #204 注：task 字段本身从"必填"放宽为"可选"（空会话入口需要"只建会话
+    不启动 run"），但**空串/空白语义不变**——显式传了 task 就必须给出内容，
+    `min_length=1` 校验保留；launch=true（默认）时缺 task 也在 handler 层 422
+    （tests/session/test_launch_false.py 锁新契约）。"""
     settings = Settings(workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
     resp = client.post("/api/sessions", json={"task": ""})
+    assert resp.status_code == 422
+    _assert_rejection_left_no_trace(app)
+
+
+def test_create_session_rejects_missing_task_on_launch(tmp_path):
+    """#204：launch=true（默认）时缺 task → 422（既有"task 必填"契约不变，
+    只是校验点从 pydantic min_length 移到 handler 的互斥分支），不留落盘痕迹。"""
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    client = TestClient(app)
+    resp = client.post("/api/sessions", json={})
     assert resp.status_code == 422
     _assert_rejection_left_no_trace(app)
 

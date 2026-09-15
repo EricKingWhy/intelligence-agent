@@ -174,8 +174,11 @@ class TestWebWiringCoexistence:
         assert len(wiring.context_providers) == 2  # MemoryContextProvider + SkillCatalogContextProvider
         # #159 起 memory 经契约贡献遗忘工具（收集循环的第二来源）——这个共存网关必须看见它，
         # 否则"记忆工具真的接进了统一 ToolRegistry"就没有证据。断言**集合**而不是顺序：收集
-        # 顺序是实现细节，不是这个网关要守的行为。
-        assert {tool.name for tool in wiring.tools} == {"load_skill", "tick", "forget_memory"}
+        # 顺序是实现细节，不是这个网关要守的行为。#202 / ADR-0031：retrieve_memory /
+        # remember_this 随 capability 一起经同一条收集循环注册（D5）。
+        assert {tool.name for tool in wiring.tools} == {
+            "load_skill", "tick", "forget_memory", "retrieve_memory", "remember_this",
+        }
 
 
 class TestGate2SkillsProgressiveDisclosure:

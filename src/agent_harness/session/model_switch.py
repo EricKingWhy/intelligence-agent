@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
+from typing import Any
 
 from agent_harness.config import Settings
 from agent_harness.session.amend import AmendOptions
@@ -187,12 +188,17 @@ def inherit_parent_model(child: Session, parent_events: list[SessionEvent]) -> N
     )
 
 
-def assert_model_resolvable(settings: Settings, target: ModelTarget) -> None:
+def assert_model_resolvable(
+    settings: Settings, target: ModelTarget, store: Any | None = None,
+) -> None:
     """校验目标模型真能装配（provider 已知 + 有可用 key），否则 UnknownModel。
 
     AC「校验 provider 可用性」：catalog 成员资格之外，还确认 ``ModelConfig`` 能
-    构造出来——与创建路径（``create_and_launch`` 的 ``from_catalog``）同一判据，
-    避免 POST /model 接受一个 POST /sessions 会拒绝的目标。CLI 与 Web 共用。
+    构造出来——与创建路径（``create_and_launch``）同一判据，避免 POST /model 接受
+    一个 POST /sessions 会拒绝的目标。CLI 与 Web 共用。
+    终审 P1 修复：统一解析点 resolve_selection（catalog + 自定义供应商 fallback）——
+    /api/models 广告的自定义条目此前在这里被 from_catalog 拒绝，会话永远带不上
+    自定义模型。
     """
     from agent_harness.model.config import ConfigError, ModelConfig
     from agent_harness.session.errors import UnknownModel
@@ -201,6 +207,6 @@ def assert_model_resolvable(settings: Settings, target: ModelTarget) -> None:
         if target.model_id is None:
             ModelConfig.from_settings(settings)
         else:
-            ModelConfig.from_catalog(settings, target.model_id)
+            ModelConfig.resolve_selection(settings, target.model_id, store)
     except (ConfigError, KeyError) as error:
         raise UnknownModel(str(error)) from error

@@ -33,6 +33,7 @@ from agent_harness.capability.manifest import (
 )
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.context.tokens import estimate_tokens
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -47,6 +48,7 @@ from agent_harness.model.config import (
     _pick_capabilities,
     parse_model_catalog,
 )
+from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
@@ -68,6 +70,7 @@ from agent_harness.session.service import (
     SessionNotFound,
     SessionService,
     SteerTargetNotFound,
+    SupersedeTargetInvalid,
     UnknownModel,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
@@ -85,6 +88,7 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
 )
 from agent_harness.web import artifacts
+from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import http_error
 from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
@@ -121,17 +125,20 @@ REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
 
 #: agent_profile 三档（已运行时消费——system_prompt 经 ContextBuilder 注入 + tool_scope 经 registry.filtered 收窄，ADR-0020a）。
 AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    # #198 缺口③（档位收窄披露）：description 带一句工具面摘要——文案由后端下发、
+    # 前端零硬编码（同 api.ts CatalogEntry 的既有纪律）。约束：短（一行放得下），
+    # 且不写"你不必调用工具"类鼓励性文案（#187/BUG-013 刚删掉的东西）。
     "main": {
         "display_name": "通用",
-        "description": "通用编排 Agent（默认）。",
+        "description": "通用编排 Agent（默认）。含全部工具（读写、执行、检索、网络、委派）。",
     },
     "coding": {
         "display_name": "编程",
-        "description": "专精代码编辑、调试和构建任务。",
+        "description": "专精代码编辑、调试和构建任务。可读写与执行命令；不含网络检索。",
     },
     "research_review": {
         "display_name": "研究审查",
-        "description": "专精研究、检索和审查任务。",
+        "description": "专精研究、检索和审查任务。只读：不含 write / edit / apply_patch / bash。",
     },
 }
 
@@ -198,10 +205,15 @@ class _AmendValueValidators(BaseModel):
 class CreateSessionRequest(_AmendValueValidators):
     """POST /api/sessions 的请求体。"""
 
-    # 空 task 直接 422（FastAPI 自动校验）；纯空白 task 容忍（runtime 侧无意义但不危险）。
-    # max_length 封顶：task 会逐字持久化进 JSONL（user/message）并整体进模型上下文，
-    # 无上限时一个多 MB 请求体就能写爆日志 + 撑爆 context。
-    task: str = Field(min_length=1, max_length=100_000)
+    # #204：task 从"必填"变为"可选"——**刻意放宽，不是偷偷放宽**。空会话入口
+    # （"在项目中新建任务"弹窗）只需要"创建文件 + 设好默认权限"，然后在 chat
+    # 输入框里发第一条消息；此前的契约把 task 锁成必填，正是该弹窗做不出来的
+    # 原因（裁定 §2 原文）。语义：launch=true（默认）时 task 仍必填（由下方
+    # handler 校验，422 不变）；launch=false 时 task 可省略——给了 task 又
+    # launch=false 是矛盾组合（给了任务却静默不执行）⇒ 422。纯空白 task 容忍
+    # （runtime 侧无意义但不危险）；max_length 封顶原因不变：task 会逐字持久化
+    # 进 JSONL（user/message）并整体进模型上下文。
+    task: str | None = Field(default=None, min_length=1, max_length=100_000)
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
     # ADR-0027 / #169：任意**已存在**的绝对目录，会话直接以它为操作目录（不创建、
     # 不复制），并自动注册为项目 + 归组。与 `workspace` 互斥（同时非空 → 422）。
@@ -282,11 +294,21 @@ class SendMessageRequest(_AmendValueValidators):
         （不抢断不丢消息，下个 run 自然消费）。
       * ``steer``——仅在途 run 时合法：注入引导请求，被当前 step 边界
         的 run 读取（不重启 run、不改写历史事件）。
+
+    编辑语义（ADR-0030 §4.4，两个可选字段，默认 None = 现有行为逐字不变）：
+
+      * ``supersedes_seq``——取代 seq 为它的那条 user/message **及其整轮**（只
+        影响模型可见投影与界面，历史事件照旧保留）。目标必须是本会话最新一条
+        非注入用户消息，否则 409。与 ``mode`` 正交：取代之后新内容按 mode 投递。
+      * ``queue_id``——本条内容**替换**某条排队项：旧项被取消
+        （``queue/cancelled``），新内容按 ``mode`` 重新投递。
     """
 
     content: str = Field(min_length=1, max_length=100_000)
     mode: str = Field(default="queue", pattern="^(queue|steer)$")
     max_steps: int = Field(default=10, ge=1, le=200)
+    supersedes_seq: int | None = Field(default=None, ge=0)
+    queue_id: str | None = None
     # staged amend 字段（可选，None = 默认行为）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
@@ -388,18 +410,35 @@ class AppState:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
         self.store = JsonlSessionStore(root=self.sessions_root)
+        # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
+        # 必须在 RunManager **之前**建：下面的 on_run_terminal 回调要用它（闭包按
+        # 引用捕获 self，顺序其实无妨，但先建可读性更好）。
+        self.message_queues = MessageQueueManager()
         # detached-run 托管（ADR-0016 §2.1，D-A）：run 生命周期与 HTTP 请求
-        # 解耦——SSE 订阅者离开只 unsubscribe，取消只经 POST /cancel 或孤儿
-        # 回收（宽限期 Settings.run_disconnect_grace_seconds）。
+        # 解耦——SSE 订阅者离开只 unsubscribe，取消只经 POST /cancel 或
+        # 孤儿回收（宽限期 Settings.run_disconnect_grace_seconds）。
+        #
+        # on_run_terminal（ADR-0030 D4）：run 收口后接力投递下一条未投递输入。
+        # 回调**唯一**实现点是 SessionService.on_run_terminal（Web/CLI 不各写一份）；
+        # 这里用 lambda 延迟构造 service——AppState 构造期还没有 app，而 service
+        # 只需要一个带 store/run_manager/message_queues 的 state 对象（就是 self）。
         self.run_manager = RunManager(
             disconnect_grace_seconds=settings.run_disconnect_grace_seconds,
+            on_run_terminal=lambda session_id: SessionService(self).on_run_terminal(
+                session_id
+            ),
+            # #200：run 收口时缓存该会话的 builder 快照（context-usage 端点读
+            # 它——run 终结后 get_active=None，缓存是"最后 build"的当前事实）。
+            on_context_snapshot=self._cache_context_snapshot,
         )
+        # #200：会话 → (builder 快照, 工具定义)。工具定义与快照在**同一次收口**
+        # 时取（registry 与 builder 属于同一个 runtime，分开取会得到两个真相）。
+        # 只保留最近一次（同一会话再次收口时覆盖）。
+        self.context_snapshots: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
         # Phase 5：会话级待审批队列——当 permission_mode 非 danger-full-access
         # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
         # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
         self.approval_queues: dict[str, PendingApprovalQueue] = {}
-        # Phase Multiturn T2：续聊排队 + steer 请求注册表（PRD §5.3 / §6）。
-        self.message_queues = MessageQueueManager()
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -425,7 +464,22 @@ class AppState:
         self._wiring_lock = asyncio.Lock()
         self._registry: CapabilityRegistry | None = None
         self._wiring: CapabilityWiring | None = None
+        # #203 / ADR-0032：自定义供应商存储（全局配置实体，与 env catalog 并存）。
+        # 单一构造入口 ProviderStore.for_settings：真实凭据后端（keyring），
+        # 测试可经 patch 换 MemoryCredentialStore。
+        self.provider_store = ProviderStore.for_settings(settings)
         self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
+
+    def _cache_context_snapshot(
+        self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
+    ) -> None:
+        """run 收口时缓存 builder 快照 + 工具定义（#200 context-usage 数据面）。
+
+        两者取自**同一次收口的 runtime**（RunManager 的 `_capture_context_snapshot`
+        在 run 收尾时传入）——分开取会得到两个真相。只保留最近一次（同一会话
+        再次收口时覆盖）。
+        """
+        self.context_snapshots[session_id] = (snapshot, tool_definitions)
 
     async def ensure_stores(self) -> None:
         """惰性初始化恢复三 Store（幂等；并发首请求由锁守 once 语义）。"""
@@ -534,7 +588,10 @@ async def _validate_amend_for_existing_session(
     await _validate_wired_context_providers(state, amend.context_providers)
     if amend.model is not None:
         try:
-            ModelConfig.from_catalog(state.settings, amend.model)
+            # 统一解析点（catalog + 自定义供应商 fallback）：/api/models 广告的
+            # 自定义条目必须在这里就能解析，否则"UI 能选、一提交就 422"。
+            store = ProviderStore.for_settings(state.settings)
+            ModelConfig.resolve_selection(state.settings, amend.model, store)
         except ConfigError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -545,9 +602,37 @@ async def _validate_amend_for_existing_session(
 STREAM_REPLAY_MAX_EVENTS = 1000
 
 
+def _run_stream_response(
+    state: Any, run: Any, subscriber: Any, session_id: str,
+    *, headers: dict[str, str] | None = None,
+) -> EventSourceResponse:
+    """detached run 的 live SSE 响应（**唯一**实现）。
+
+    三个调用点共用：`POST /api/sessions`（创建即跑）、`POST /messages` 的
+    launched 分支、`POST /queue/flush`。语义必须一致（ADR-0030 §4.6 明确要求
+    flush 与 messages 同形），各写一遍就会在「谁 unsubscribe、谁处理 DONE、
+    断连怎么收尾」这些细节上漂移——而这正是上一版留下的三份逐字副本。
+
+    断连时 EventSourceResponse 取消本 generator → finally unsubscribe（run 不受
+    影响，ADR-0016 detached）；run 终结 → DONE 哨兵 → 流干净收尾。
+    """
+    async def event_generator():
+        try:
+            while True:
+                event = await subscriber.queue.get()
+                if event is state.run_manager.DONE:
+                    break
+                yield _event_to_sse_dict(event, session_id)
+        finally:
+            run.unsubscribe(subscriber)
+
+    return EventSourceResponse(event_generator(), headers=headers)
+
+
 def _render_model_option(
     *, id: str, provider: str, model_name: str, is_default: bool,
     capabilities: dict[str, Any], metadata_source: str,
+    is_available: bool = True, unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
     """渲染一条 ModelOption（SDD 03 §16）。
 
@@ -555,19 +640,26 @@ def _render_model_option(
     context_window? / speed_tier? / supports_*? / metadata_source。
     旧字段 alias（向后兼容）：name / model / default。
     未知能力位不在 capabilities dict 里即不出现在响应（契约：「not guessed」）。
+
+    #203 / ADR-0032 D5：is_available 改为真实判定的**入参**（默认 True 向后
+    兼容）；provider_store 侧的条目传真实值（有凭据 ⇒ true）。语义是**已配置**，
+    不是"网络可达"——可达性由「测试连接」给结论（列表接口不做网络探测）。
     """
     option: dict[str, Any] = {
         # 新契约字段
         "id": id,
         "provider": provider,
         "is_default": is_default,
-        "is_available": True,  # catalog 无 disabled 概念，恒可用
+        # ADR-0032 D5：真实判定（此前硬编码 True，"可用"没有任何依据）。
+        "is_available": is_available,
         "metadata_source": metadata_source,
         # 旧字段 alias（前端切换期间保留，避免破坏现有客户端）
         "name": id,
         "model": model_name,
         "default": is_default,
     }
+    if unavailable_reason is not None:
+        option["unavailable_reason"] = unavailable_reason
     # display_name 缺省回落到 model_name（更可读）。
     option["display_name"] = capabilities.get("display_name", model_name)
     # 已知能力位透传（未声明的键不在 capabilities 里 → 省略，不猜测）。
@@ -723,6 +815,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 logging.getLogger("agent_harness.web").exception(
                     "启动崩溃扫描失败（不阻塞启动）"
                 )
+            # Phase Multiturn（ADR-0030 §4.8 / D5）：按事件流重建"未投递输入"的
+            # 内存镜像。**不自动起 run**：刚启动没有订阅者，起了会被 orphan 回收，
+            # 用户回来时会话已被跑掉（用户不在场时自动消耗 token 更不可接受）。
+            # 用户在界面上看到「待发送 N」，点「立即发送」走 POST /queue/flush。
+            try:
+                from agent_harness.session.service import SessionService
+
+                rebuilt = await SessionService(state).rebuild_message_queues()
+                if rebuilt:
+                    logging.getLogger("agent_harness.web").info(
+                        "启动重建未投递输入：%d 个会话有待发送项", rebuilt,
+                    )
+            except Exception:
+                # 失败同样不阻塞启动：未投递输入的事实仍在事件流里，用户随时能让
+                # 它重新投递（flush 读的是事件流，不依赖这份镜像），所以降级安全。
+                logging.getLogger("agent_harness.web").exception(
+                    "启动重建未投递输入失败（不阻塞启动）"
+                )
             try:
                 yield
             finally:
@@ -768,6 +878,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     from agent_harness.web.workspace_files import register_workspace_file_routes
 
     register_workspace_file_routes(app, validate_session_id=validate_session_id)
+
+    # #203 / ADR-0032 自定义供应商管理（CRUD + 连接测试；独立 router）。
+    # 凭据读写是宿主侧敏感操作，来源闸用既有的 `require_trusted_origin`（同款）。
+    from agent_harness.web.model_providers import register_model_provider_routes
+
+    register_model_provider_routes(app)
 
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
@@ -880,11 +996,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
           metadata_source="agent_models"，否则（全靠 preset 回落）="provider_preset"。
         未知能力位省略（契约：「not guessed」）。旧字段 name/model/default 作为
         alias 保留（前端切换期间不破）。
+
+        #203 / ADR-0032 D5：is_available 是**真实判定**（有凭据 ⇒ true）；
+        自定义供应商的条目按 provider_store 的凭据状态过滤 unavailable_reason。
+        默认链/内置 preset 条目仍走 .env（本票**不迁移**既有 key，行为不变）。
         """
         state = app.state.agent
         default_config = ModelConfig.from_settings(state.settings)
         default_provider = state.settings.model_provider
         default_caps = _pick_capabilities(PROVIDER_PRESETS.get(default_provider, {}))
+        # 内置 preset 条目的 is_available 语义不变（.env 配置即已配置）；自定义
+        # provider 的条目按凭据状态真实判定（有凭据 ⇒ true，无 ⇒ false + 原因）。
         models: list[dict[str, Any]] = [_render_model_option(
             id=default_config.model_name,
             provider=default_provider,
@@ -916,6 +1038,26 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 capabilities=merged,
                 metadata_source=source,
             ))
+        # #203 / ADR-0032：自定义供应商的模型并入列表（provider = 自定义 id）。
+        # id = "<provider>:<model_id>"（与 catalog 名的命名空间不重叠）；能力位
+        # 诚实标注（无声明 ⇒ 不猜）；不可用（无凭据）⇒ is_available=false + 原因。
+        # 前端选中后经 POST /api/sessions 的 model 字段回传，解析走
+        # build_runtime 的自定义供应商分支（from_custom_provider）。
+        for provider_entry in state.provider_store.list_entries():
+            for model in provider_entry["models"]:
+                option_id = f"{provider_entry['id']}:{model['model_id']}"
+                models.append(_render_model_option(
+                    id=option_id,
+                    provider=provider_entry["id"],
+                    model_name=model["model_id"],
+                    is_default=False,
+                    capabilities=(
+                        {"display_name": model["label"]} if model.get("label") else {}
+                    ),
+                    metadata_source="custom_provider",
+                    is_available=provider_entry["is_available"],
+                    unavailable_reason=provider_entry["unavailable_reason"],
+                ))
         return {"models": models}
 
     @app.get("/api/permission-modes")
@@ -1039,13 +1181,36 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         return {"providers": providers}
 
     @app.post("/api/sessions")
-    async def create_session(req: CreateSessionRequest):
+    async def create_session(
+        req: CreateSessionRequest, launch: bool = True,
+    ):
         """起新 session + 跑任务，流式返回 AgentEvent（SSE）。
 
         ADR-0016 §2.1（D-A）：run 由 RunManager 以 detached task 驱动，与
         本次 HTTP 请求生命周期解耦——断连（本 generator 被取消）只做
         unsubscribe，run 继续跑到终态；显式取消走 POST /cancel。
+
+        `launch`（#204，query 参数，默认 true ⇒ 既有行为逐字不变）：
+        - true：现有路径（create_and_launch，SSE 直驱 run）；task 必填。
+        - false：**只建会话**——返回会话 JSON（非 SSE），不启动 run、不返回
+          SSE；task 可省略。给了 task 又 launch=false ⇒ 422（"给了任务却
+          静默不执行"的矛盾组合必须显式拒绝）。
+        会话级 `permission_mode` 通过 `X-Permission-Mode` 响应头回传（launch=true
+        的 SSE 响应没有 JSON 体可承载元数据；launch=false 的 JSON 体里也带
+        同名字段）——前端用它初始化 composer 权限 pill（#204 裁定 §3：不要
+        各自取默认值，那正是不一致的来源）。
         """
+        # launch/Task 互斥（#204 裁定 §2）：给了任务却静默不执行是最坏的一种
+        # "宽容"——矛盾组合必须显式拒绝，而不是挑一个语义执行。
+        if not launch and req.task is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="task 与 launch=false 互斥：要么带 task 启动 run（launch=true），"
+                       "要么只建会话（省略 task）",
+            )
+        if launch and req.task is None:
+            # launch=true 恢复既有契约：task 必填（422，行为与原 min_length 校验一致）。
+            raise HTTPException(status_code=422, detail="Field required (task)")
         service = SessionService(app.state.agent)
         state = app.state.agent
 
@@ -1070,28 +1235,31 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 auto_approve_explicit=auto_approve_explicit,
                 auto_approve=req.auto_approve,
                 amend=AmendOptions.from_request(req),
+                launch=launch,
             )
         except (WorkspaceNameInvalid, InvalidDecision) as e:
             raise http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
-        async def event_generator():
-            """SSE 事件源：消费订阅队列，转成 SSE 帧。
+        headers = {"X-Permission-Mode": permission_mode.value}
 
-            断连时 EventSourceResponse 取消本 generator → finally unsubscribe
-            （run 不受影响）；run 终结 → sentinel → 流干净收尾。
-            """
-            try:
-                while True:
-                    event = await subscriber.queue.get()
-                    if event is state.run_manager.DONE:
-                        break
-                    yield _event_to_sse_dict(event, session.session_id)
-            finally:
-                run.unsubscribe(subscriber)
+        # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
+        # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题
+        # （那些是列表页的投影字段，这里没有数据来源）。
+        if not launch:
+            return JSONResponse(
+                status_code=200,
+                headers=headers,
+                content={
+                    "session_id": session.session_id,
+                    "permission_mode": permission_mode.value,
+                },
+            )
 
-        return EventSourceResponse(event_generator())
+        return _run_stream_response(
+            state, run, subscriber, session.session_id, headers=headers,
+        )
 
     @app.get("/api/sessions/{session_id}/stream")
     async def stream_session(session_id: str, after_seq: int = -1):
@@ -1188,20 +1356,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
 
         session_id = result.session.session_id
-        run, subscriber = result.run, result.subscriber
-        state = app.state.agent
-
-        async def event_generator():
-            try:
-                while True:
-                    event = await subscriber.queue.get()
-                    if event is state.run_manager.DONE:
-                        break
-                    yield _event_to_sse_dict(event, session_id)
-            finally:
-                run.unsubscribe(subscriber)
-
-        return EventSourceResponse(event_generator())
+        return _run_stream_response(
+            app.state.agent, result.run, result.subscriber, session_id,
+        )
 
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:
@@ -1270,6 +1427,52 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
+
+    @app.get("/api/sessions/{session_id}/context-usage")
+    async def get_context_usage(session_id: str):
+        """上下文容量看板数据面（#200）：只读端点，六桶分类 + 缓存命中率。
+
+        分类明细**不进** SessionEvent（不变量 #4：Event ≠ Diagnostic Log），
+        只经本端点暴露。三份硬约束（设计稿 §3 诚实原则）：``estimated`` 恒为
+        true；cache 三态（not_collected 时**不显示 0%**）；六桶之和 = used_tokens
+        （差额进"其他"残差）。
+
+        数据来源：在途 run 的 builder 快照（``ContextBuilder.usage_snapshot``，
+        实时读——最近一次 build 是当前事实）+ 会话事件流 usage 汇总 + 该 run 的
+        ToolRegistry 工具 schema 估算；run 已终结 ⇒ 从收口时缓存的快照读（
+        `_cache_context_snapshot` 在 run 收尾时取，registry 与快照同一真相）；
+        都没有 ⇒ state="no_data"（诚实口径，不伪造）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            events = await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+
+        # builder 快照 + 工具定义：优先在途 run；run 已终结 ⇒ 收口缓存；都没有
+        # ⇒ no_data（不伪造，也不重建一个假 registry 来算工具桶）。两者必须同源
+        # 取（同一个 runtime 的 builder + registry），分开取会得到两个真相。
+        builder_snapshot = None
+        tool_definitions: list[dict[str, Any]] = []
+        active = app.state.agent.run_manager.get_active(session_id)
+        if active is not None and active.runtime is not None:
+            builder = active.runtime._context_builder
+            if builder is not None:
+                builder_snapshot = builder.usage_snapshot(active.session)
+            tool_definitions = active.runtime.registry.export_model_definitions()
+        else:
+            cached = app.state.agent.context_snapshots.get(session_id)
+            if cached is not None:
+                builder_snapshot, tool_definitions = cached
+
+        payload = build_context_usage_payload(
+            settings=app.state.agent.settings,
+            builder_snapshot=builder_snapshot,
+            tool_definitions=tool_definitions,
+            estimate_tokens=estimate_tokens,
+            events=events,
+        )
+        return payload
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(
@@ -1526,6 +1729,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 mode=req.mode,
                 max_steps=req.max_steps,
                 amend=amend,
+                supersedes_seq=req.supersedes_seq,
+                queue_id=req.queue_id,
             )
         except (
             InvalidSessionId,
@@ -1534,31 +1739,90 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             RecoveryConflict,
             QueueItemNotFound,
             SteerTargetNotFound,
+            SupersedeTargetInvalid,
             SeqConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
+            # SupersedeTargetInvalid → 409（ADR-0030 §4.6）：目标不对，不是会话不存在。
             raise http_error(e) from e
 
         if result.status == "launched":
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
-            run = result.run
-            subscriber = result.subscriber
-            state = app.state.agent
-
-            async def event_generator():
-                try:
-                    while True:
-                        event = await subscriber.queue.get()
-                        if event is state.run_manager.DONE:
-                            break
-                        yield _event_to_sse_dict(event, session_id)
-                finally:
-                    run.unsubscribe(subscriber)
-
-            return EventSourceResponse(event_generator())
+            return _launched_response(app, result, session_id)
         # queued / steered：JSON 确认（不打开流——前端订阅既有 SSE/WS）。
         return result.to_response()
+
+    def _launched_response(
+        app: FastAPI, result, session_id: str
+    ) -> EventSourceResponse:
+        """launched 分支的统一 SSE 响应（/messages 与 /queue/flush 共用）。
+
+        与创建端点同一段实现（`_run_stream_response`）：ADR-0030 §4.6 要求 flush
+        与 messages 的 launched 语义完全一致（打开同样的 detached-run 流）。
+        """
+        return _run_stream_response(
+            app.state.agent, result.run, result.subscriber, session_id,
+        )
+
+    @app.get("/api/sessions/{session_id}/queue")
+    async def get_session_queue(session_id: str) -> dict[str, list[dict[str, str]]]:
+        """待发送输入（ADR-0030 §4.6 / D11）。
+
+        数据源是**事件流**而非内存队列：只有事件流跨崩溃存活、也只有它同时
+        看得见 queue 与 steer 的到达顺序（§4.8 / §5.2 的"事件流是唯一事实"）。
+        前端用它做首屏 / 重连补齐，实时增量仍由 SSE 事件流驱动。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            pending = await service.list_undelivered_inputs(session_id)
+        except (InvalidSessionId, SessionNotFound, SeqConflict) as e:
+            raise http_error(e) from e
+        return {
+            "items": [
+                {
+                    "queue_id": item.input_id,
+                    "content": item.content,
+                    "created_at": item.created_at,
+                }
+                for item in pending
+                if item.kind == "queue"
+            ],
+            "steers": [
+                {
+                    "steer_id": item.input_id,
+                    "content": item.content,
+                    "created_at": item.created_at,
+                }
+                for item in pending
+                if item.kind != "queue"
+            ],
+        }
+
+    @app.post("/api/sessions/{session_id}/queue/flush")
+    async def flush_session_queue(session_id: str):
+        """立刻投递队首的待发送输入（ADR-0030 §4.6）。
+
+        空队列 → ``{"status": "idle"}``（幂等，不报错）；有 → 与 `/messages` 的
+        launched 分支**同一段代码**返回 SSE 流。用途：① 前端在会话恢复时主动投递；
+        ② 重启后手动投递（§4.8 说不自动起 run，就靠这个入口）。
+
+        只投递**一条**：后续输入在下一个 run 终态继续接力（§4.5.5）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            launched = await service.deliver_next_undelivered(session_id=session_id)
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            ActiveRunConflict,
+            RecoveryConflict,
+            SeqConflict,
+        ) as e:
+            raise http_error(e) from e
+        if launched is None:
+            return {"status": "idle"}
+        return _launched_response(app, launched, session_id)
 
     @app.post("/api/sessions/{session_id}/queue/{queue_id}/cancel")
     async def cancel_queue_item(session_id: str, queue_id: str) -> dict[str, str]:

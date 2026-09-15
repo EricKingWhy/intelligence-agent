@@ -123,6 +123,16 @@ class SteerTargetNotFound(SessionServiceError):
     """steer 目标 run 不存在（无在途 run）。"""
 
 
+class SupersedeTargetInvalid(SessionServiceError):
+    """supersede 目标不合法（ADR-0030 §4.4 第 1 步）。
+
+    五种情形共用一个 409：目标不存在 / 不是 user/message / 是注入消息
+    （``injected_by``，编辑它等于篡改 runtime 文案）/ 已被取代过 / 不是最新一条
+    用户消息。刻意都报 409 而不是把"目标不对"谎报成 404 会话不存在：
+    会话是存在的，是这次编辑按当前状态不允许（D8：只允许最新一条，防误删长历史）。
+    """
+
+
 class UnknownModel(SessionServiceError):
     """模型切换目标不在 catalog 中（provider + model_id 未命中）。"""
 

@@ -59,13 +59,15 @@
 | 桶 | 定义 | 来源 |
 | --- | --- | --- |
 | 系统提示词 | profile system prompt + 折进 system prompt 的工具指导文本 | `builder._system_prompt_tokens` |
-| 技能 | 技能目录框架 + 各技能描述文本 | skills context provider 的注入文本 |
+| 技能 | 技能目录框架 + 各技能描述文本 | skills provider **实际注入**的消息成本（builder 按 provider 自称的 `name` 分账） |
 | 消息 | 会话投影出的 messages（含压缩摘要投影成的 SystemMessage） | 逐条 `estimate_message_tokens` 求和 |
-| 其他（**残差桶**） | 上下文 provider 注入（记忆等）+ 任何未归类残差 | `used_tokens − 上述三类 − 工具两组` |
+| 其他 | 其余 context provider 注入（记忆等）+ 运行期快照 | builder 上报的**真实注入成本**（非 skills 的 provider 之和 + 运行期快照） |
 | 工具 · 系统 | core/内置工具 schema 的 token 估算 | §3.2.1 |
 | 工具 · MCP | 外部（MCP/插件）工具 schema 的 token 估算 | §3.2.1 |
 
-**不变量**：`Σ(消息 + 系统提示词 + 技能 + 其他) + Σ(工具两组) = 已用总量`。差额**一律进"其他"**，绝不静默丢弃（前端断言这条，见 §7 T4）。
+**不变量**：`Σ(消息 + 系统提示词 + 技能 + 其他) + Σ(工具两组) = 已用总量`（前端断言这条，见 §7 T4）。
+
+**实现口径（与早期草案的差别，勿回退）**：`used_tokens` 与各桶都由 builder 上报的**真实成本直接求和**，**不是**"总量减各项"的残差倒推。倒推写法在总量只含投影 messages 时会令"其他"恒为 0，把记忆注入整块漏报——首版即此 bug（回归测试 `test_t4_snapshot_counts_provider_injection` 钉住）。分账依据是 provider 自称的 `name`，不是调用方按 provider 文本重算一遍（重算会复制 `select()` 的拼装逻辑并漏掉预算截断，从而估高）。
 
 **3.2.1 工具来源分组（不靠名字前缀猜）**
 在实现里用一个**显式常量集合**声明 core 工具名（`assembly.py:212-218` 的 9 个 + 内置 capability 工具名），其余（MCP / 插件）归"工具 · MCP"。要求这个集合有单测钉住——新增 core 工具却忘了登记时，测试会失败，而不是静默把系统工具算成 MCP。
@@ -104,7 +106,7 @@
 | --- | --- |
 | `estimated` | **恒为 true**。除 provider 返回的 usage 外一切数字都是估算；前端必须在 UI 上标注口径（副标题"估算值"） |
 | `window_tokens` / `thresholds` | 直接来自 `Settings`（`config.py:68-70`）；**不得**改成每模型 `context_window`（用户裁定 3） |
-| `breakdown` | §3.2 的六个数；`other` 是残差 |
+| `breakdown` | §3.2 的六个数；`other` = 非 skills 的 provider 注入 + 运行期快照（真实记账，非残差倒推） |
 | `cache.state` | `"ok"` \| `"partial"`（部分调用带回）\| `"not_collected"`（一次都没有） |
 | `state` | `"ok"` \| `"no_data"`（会话还没有任何 build 快照） |
 
@@ -196,7 +198,8 @@
 
 | 风险 | 对策 |
 | --- | --- |
-| "技能"与"工具 schema"今天确实**不可精确分割**（技能目录与工具指导文本都折进 system prompt；dsh 归档的 "Not separable here" 是同一个病） | 明确以"目录框架 + 各技能描述文本"作为技能桶估算口径；UI 副标题标注"估算"；某桶恒为 0 时如实显示 0 而**不是**填假数 |
+| 技能桶与"其他"的分割 | 按 provider 自称的 `name` 分账（skills provider 的注入单列成"技能"，其余 provider 归"其他"），记的是**实际注入**成本；UI 副标题标注"估算"；某桶恒为 0 时如实显示 0 而**不是**填假数 |
+| "其他"桶恒为 0 的漏报（首版 bug） | `used_tokens` 与各桶都由 builder 真实成本求和，禁止残差倒推；回归测试钉住（`test_t4_snapshot_counts_provider_injection`） |
 | 不同 provider 的 cache 字段差异 | 只读 OpenAI 兼容的 `input_token_details`；不返回 ⇒ `not_collected`，不猜 |
 | 分类估算与真实 token 有偏差 | `estimated: true` + UI 副标题；端点契约里不承诺精确 |
 | 工具 schema 记账新增的估算开销 | 只在端点被调用时计算（不在每轮 build 里做），避免给热路径加成本 |
