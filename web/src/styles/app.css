@@ -3404,6 +3404,20 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: color-mix(in srgb, var(--danger) 32%, transparent);
 }
 .run-badge-idle { color: var(--text-tertiary); }
+
+/* #198：Inspector 头标的档位徽标（.detail-profile-badge）——与 .run-badge 同族
+ * 视觉参数，但走中性色（档位是事实标签，不是状态）。技术标识用等宽
+ * （这里显式写 font-family——本仓没有独立 .mono 规则，挂空类名是假样式）。 */
+.detail-profile-badge {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 3px var(--space-sm);
+  border-radius: var(--radius-full);
+  background: var(--color-hover);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
 /* 中断 = 中性第四态（OBS-007：取消 ≠ 失败，与顶栏 pulse 同语言）。 */
 .run-badge-interrupted {
   color: var(--text-secondary);

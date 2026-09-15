@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RUN_TERMINAL_TYPES, WAIT_HINT_IDLE_SEC, deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, shouldShowWaitHint, unpairedToolCallIds, waitingHintText } from './runState';
+import { RUN_TERMINAL_TYPES, WAIT_HINT_IDLE_SEC, deriveAgentProfile, deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun, recoverDoneMessage, shouldShowWaitHint, unpairedToolCallIds, waitingHintText } from './runState';
 import { initConversation, applyEvent } from './projection';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
@@ -454,5 +454,27 @@ describe('shouldShowWaitHint', () => {
 
   it('流已脱离不提示——我们没在听，那句「仍在等待」是断线条的地盘', () => {
     expect(shouldShowWaitHint('thinking', false)).toBe(false);
+  });
+});
+
+// ── #198：生效档位（Inspector 头标） ──
+
+describe('deriveAgentProfile', () => {
+  it('取最后一个 run/started 携带的 agent_profile', () => {
+    const events = [
+      ev(EventType.RUN_STARTED, { agent_profile: 'research_review' }),
+      ev(EventType.RUN_COMPLETED, {}),
+      ev(EventType.RUN_STARTED, { agent_profile: 'main' }),
+    ];
+    expect(deriveAgentProfile(events)).toBe('main');
+  });
+
+  it('旧数据无字段 → null（不伪造 "main"）', () => {
+    const events = [ev(EventType.RUN_STARTED, {}), ev(EventType.RUN_STARTED, {})];
+    expect(deriveAgentProfile(events)).toBe(null);
+  });
+
+  it('无 run 的裸会话 → null', () => {
+    expect(deriveAgentProfile([ev(EventType.USER_MESSAGE, { content: 'hi' })])).toBe(null);
   });
 });

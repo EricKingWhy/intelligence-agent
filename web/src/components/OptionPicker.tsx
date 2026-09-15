@@ -123,6 +123,10 @@ export function OptionPicker({
   );
   // 选中值不在目录里（目录换了）→ 归一化为「默认（未选）」：与 trigger 文案同一口径。
   const effectiveValue = selected?.value ?? null;
+  // #198 次方案：选中非默认档位时 trigger 的 hover title 附上**后端下发的**条目
+  // 描述（`研究审查\n只读：不含 write / edit…`）——零视觉占位，文案零前端硬编码
+  // （把 tool_scope 写成前端常量就是抄第二份知识，profiles.py 一改就漂移）。
+  const triggerTitle = selected ? `${selected.title}\n${selected.description ?? ''}`.trimEnd() : ariaLabel;
   const triggerLabel = selected?.title ?? placeholder;
   const searchHidden = options.length <= 5; // 阈值与 picker-search-visibility 契约一致
   const listRef = useRef<HTMLDivElement>(null);
@@ -145,7 +149,7 @@ export function OptionPicker({
           type="button"
           className="composer-control"
           aria-label={ariaLabel}
-          title={triggerLabel}
+          title={triggerTitle}
           // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
           aria-disabled={disabled || undefined}
           disabled={disabled}
