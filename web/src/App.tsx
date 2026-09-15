@@ -219,21 +219,27 @@ export default function App() {
     applyDensity(next);
   };
 
+  // #200 上下文容量看板：open 的 sid（null = 关闭）。必须在 Esc 中断 effect 之前声明（effect 读它）。
+  const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
   // Esc 中断（Claude Code "esc to interrupt" 语言）：流式中 Esc = 停止当前 run，
   // 与 Composer 停止按钮同走 cancelStream。dialog 打开时（palette/auth 面板）
   // Esc 优先归它们——target 在 dialog 内则不抢。target 可能是 window/document
   //（合成事件/焦点缺失），closest 仅对 Element 存在——先做类型守卫。
+  // 终审 P1 修复：context-usage 看板是**非 Radix** 的 role="dialog"（无焦点陷阱，
+  // 焦点通常还留在 body/composer 上），closest 会不命中——不挡的话 Esc 关看板
+  // 会同时打断在途 run（两个 handler 都在 window 上，App 的先注册先跑）。
   useEffect(() => {
     if (!streaming) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
+      if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
       cancelStream();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [streaming, cancelStream]);
+  }, [streaming, cancelStream, contextUsageOpen]);
 
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
@@ -490,6 +496,12 @@ export default function App() {
         // #204 裁定 §3：用后端回传的会话级权限档初始化 composer 权限 pill——
         // 不要各自取默认值，那正是不一致的来源（弹窗本地值只是请求意图，不参与）。
         setSelectedPermissionMode(created.permissionMode);
+        // 空会话创建后**选中它**（终审 P1 修复：不选中的话用户在 idle 态输入的
+        // 第一条消息会走 submitTask 另造一个**没有 cwd** 的新会话——弹窗请他
+        // "在输入框发第一条消息"的那个会话反而成了孤儿）。选中走既有
+        // selectSession（回 viewing + 记住会话 id），composer 的第一条消息即
+        // 落进这个会话（sendMessage 路径）。
+        selectSession(created.sessionId);
         // 空会话创建后刷新列表（会话出现在该项目分组下）。
         await refreshSessions();
         // #204 裁定 §1：焦点落到 chat 输入框——用户立刻可以打字（弹窗关闭后的
@@ -503,7 +515,7 @@ export default function App() {
         return `创建会话失败：${describeSessionError(e, '请求失败')}`;
       }
     },
-    [refreshSessions],
+    [refreshSessions, selectSession],
   );
 
   /* 归档 / 取消归档（#171 AC9）：把**失败原因**交回给 SessionList 就地显示，
@@ -674,7 +686,6 @@ export default function App() {
   // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
-  const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {

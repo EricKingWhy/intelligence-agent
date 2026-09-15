@@ -451,12 +451,6 @@ export function useSession() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
 
-/** Submit a new task. Creates a fresh session and streams the response.
-   *  The conversation is reset first — a live stream never folds into the
-   *  previously viewed session's turns.
-   *  T4（#97）：流消费升级为重连状态机——异常关闭 / seq gap / 停摆（含后台
-   *  杀流）触发 GET stream?after_seq=lastApplied 续传；stream/truncated 控制
-   *  帧走 GET /events 全量重建后续传；终态帧已达 → 正常收尾迁移。 */
   /** SSE 流消费机器——submitTask 和 sendMessage 共用。
    *  P1-3 合帧 + T7 后台降渲染 + T4 重连状态机全部内联于此。
    *  initialConv：新会话传 null（首帧惰性初始化）；续聊传当前 conversation（追加）。

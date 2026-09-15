@@ -444,24 +444,30 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
   const [editValue, setEditValue] = useState('');
   // D8：编辑只在**最新一条**用户消息上可用；其余置灰 + title 说明（禁用而不是
   // 隐藏：让用户知道能力存在）。被取代的轮不在 latestEditableTurn 里（自然禁用）。
+  // 终审 P2 修复：streaming 中的最新消息**不可编辑**——与两行下的 fork 按钮同一
+  // 守卫（ADR-0030 §5.3 的意图是编辑**已完成**的轮；流式中编辑发 queue-time
+  // supersede 会命中在途轮的 409 或静默排队，意图不成立）。
   const editable =
     onEditTurn != null &&
+    turn.status !== 'streaming' &&
     turn.user_message_seq !== null &&
     !turn.injected_by &&
     turn.user_message_seq === latestEditableSeq;
 
   return (
     <div className={`turn turn-${turn.status}`} data-step-key={`step:${turn.step_id}`}>
+      {/* ADR-0030 §4.5.1：被取代的轮**整段从视图移除**（用户裁定：旧回答段直接
+          删掉不显示，不加"已改写"标记）。由 `message/superseded` 驱动（投影层
+          applySupersedeShadow 置位），不靠前端猜；事件照旧在 events 日志。
+          终审 P2 修复：轮次标签**在门内**——标签在门外的话，被取代的整段只剩一个
+          孤儿「第 N 轮」标签（问与答都不渲染）。 */}
+      {isSupersededTurn ? null : (
+        <>
       {/* T9 #139：轮次标签——turn_index 为 per-turn 事实（run/started 携带）。
           仅正整数显示：null=旧版后端缺字段，≤0=防御性不渲染。 */}
       {turnIndex != null && turnIndex > 0 && (
         <div className="turn-index-label">第 {turnIndex} 轮</div>
       )}
-      {/* ADR-0030 §4.5.1：被取代的轮**整段从视图移除**（用户裁定：旧回答段直接
-          删掉不显示，不加"已改写"标记）。由 `message/superseded` 驱动（投影层
-          applySupersedeShadow 置位），不靠前端猜；事件照旧在 events 日志。 */}
-      {isSupersededTurn ? null : (
-        <>
       {/* User message — minimal, right-aligned；harness 注入的纠正消息
           （failure-guard soft）渲染为系统提示条而非用户气泡（不是真人说的话） */}
       {turn.user_message &&
