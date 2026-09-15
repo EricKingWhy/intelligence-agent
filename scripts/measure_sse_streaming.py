@@ -21,8 +21,9 @@
 
 - 帧**阶梯式**到达、且 keepalive 注释帧周期性出现 → 交付层放行字节，流式正常；
 - `t_headers` ≈ run 全长、数据帧全挤在最后 → 交付层攒包（keepalive 无效）；
-- 完全看不到注释帧 → 后端没开 keepalive（本仓应恒有，见
-  `web/app.py::SSE_PING_INTERVAL_SECONDS`）。
+- 完全看不到注释帧 → 该部署没开 keepalive / 间隔比 run 还长（库默认 15s）/
+  中间层吞了注释帧。**这一条不能单独用来判断"能不能流式"**：攒包的判据是
+  响应头到达时刻——响应头也被拖到流末就说明整包被攒，此时注释帧多密都没用。
 
 ## 用法
 
@@ -75,10 +76,12 @@ class Timeline:
             if not line:
                 continue
             text = line.decode("utf-8", "replace")
+            # 存**整行**（JSON 产物要能当取证材料用：截断过会把 session_id 这类
+            # 尾部字段切掉，回头想拿它清理探针会话都拿不到）；截断只发生在打印。
             self.frames.append({
                 "t": round(self.elapsed(), 3),
                 "kind": "comment" if text.startswith(":") else "data",
-                "line": text[:160],
+                "line": text,
             })
 
     # ── 汇总 ──
@@ -120,9 +123,11 @@ def compute_verdict(
         return (
             "⚠ 无 keepalive",
             (
-                "整条流里没有任何 `: ping` 注释帧。本仓应恒有"
-                "（SSE_PING_INTERVAL_SECONDS=2）——要么版本不对，"
-                "要么中间层把注释帧吞了。"
+                "整条流里没有任何 `: ping` 注释帧。三种可能：① 该部署没开 keepalive；"
+                "② keepalive 间隔比这次 run 还长（sse-starlette 库默认 15s，"
+                "短于 15s 的 run 一个 ping 都不会产生）；③ 中间层把注释帧吞了。"
+                "注意这一条**单独不足以**判断能不能流式——真正的判据是响应头何时到"
+                "（若响应头也被拖到流末，说明整包被攒，注释帧多密都没用）。"
             ),
         )
     headers = headers_at if headers_at is not None else 0.0
@@ -167,7 +172,7 @@ def _print_report(timeline: Timeline, headers: object, status: int, limit: int) 
     print(f"\n=== 帧到达时间线（前 {limit} 条）===")
     for frame in timeline.frames[:limit]:
         mark = "COMMENT" if frame["kind"] == "comment" else "data   "
-        print(f"  t={frame['t']:7.2f}s [{mark}] {frame['line'][:110]!r}")
+        print(f"  t={frame['t']:7.2f}s [{mark}] {frame['line'][:110]!r}")  # 打印截断
 
     comments, data = timeline.comments, timeline.data_frames
     print("\n=== 汇总 ===")
@@ -205,7 +210,13 @@ def main() -> int:
     timeline = Timeline()
     base = args.base_url.rstrip("/")
     try:
-        with httpx.Client(timeout=httpx.Timeout(args.timeout, connect=15.0)) as client:
+        # trust_env=False：**无视本机 HTTP_PROXY** 裸连。交付层量测必须直连——
+        # 走本地代理时拿到的是代理自己的行为（它可能自己攒包/改响应头），
+        # 那就把"谁的锅"量错了。项目既有探针（.workbuddy/public_sse_probe.py）
+        # 也是这个口径（http.client 裸连）。
+        with httpx.Client(
+            timeout=httpx.Timeout(args.timeout, connect=15.0), trust_env=False,
+        ) as client:
             if args.mode == "create":
                 context = client.stream("POST", f"{base}/api/sessions",
                                         json={"task": args.task, "max_steps": 1})
