@@ -124,17 +124,20 @@ REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
 
 #: agent_profile 三档（已运行时消费——system_prompt 经 ContextBuilder 注入 + tool_scope 经 registry.filtered 收窄，ADR-0020a）。
 AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    # #198 缺口③（档位收窄披露）：description 带一句工具面摘要——文案由后端下发、
+    # 前端零硬编码（同 api.ts CatalogEntry 的既有纪律）。约束：短（一行放得下），
+    # 且不写"你不必调用工具"类鼓励性文案（#187/BUG-013 刚删掉的东西）。
     "main": {
         "display_name": "通用",
-        "description": "通用编排 Agent（默认）。",
+        "description": "通用编排 Agent（默认）。含全部工具（读写、执行、检索、网络、委派）。",
     },
     "coding": {
         "display_name": "编程",
-        "description": "专精代码编辑、调试和构建任务。",
+        "description": "专精代码编辑、调试和构建任务。可读写与执行命令；不含网络检索。",
     },
     "research_review": {
         "display_name": "研究审查",
-        "description": "专精研究、检索和审查任务。",
+        "description": "专精研究、检索和审查任务。只读：不含 write / edit / apply_patch / bash。",
     },
 }
 
