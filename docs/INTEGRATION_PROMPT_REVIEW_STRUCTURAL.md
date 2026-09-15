@@ -77,7 +77,7 @@ git -C $FE   diff origin/main...feat/frontend --stat | tail -3
 git -C $MAIN fetch $BE feat/backend:feat/backend      # 若报非 FF，见 §2.1 备选
 git -C $MAIN fetch $FE feat/frontend:feat/frontend
 git -C $MAIN log --oneline -1 feat/backend            # 应等于 backend clone 的 HEAD
- git -C $MAIN log --oneline -1 feat/frontend           # 应等于 frontend clone 的 HEAD
+git -C $MAIN log --oneline -1 feat/frontend           # 应等于 frontend clone 的 HEAD
 
 # ---------- 2) 合 backend ----------
 git -C $MAIN checkout main
@@ -88,7 +88,10 @@ git -C $MAIN merge --no-ff feat/backend               # ← 需要用户批准
 cd $BE && .venv/Scripts/python.exe -m pytest tests/ -q
 
 # ---------- 3) backend 稳定后，重新分析再合 frontend（§14.9） ----------
-git -C $MAIN fetch origin                              # 之前的冲突判断全部过期
+# backend 已进 main，之前针对 frontend 的冲突判断全部作废：重新取、重新 diff
+git -C $MAIN fetch $FE feat/frontend:feat/frontend     # 再取一次 clone HEAD（可能又有新 commit）
+git -C $MAIN fetch origin
+git -C $MAIN diff main...feat/frontend --stat | tail -3 # 基于新 main 重新看差异
 git -C $MAIN merge --no-ff feat/frontend               # ← 需要用户批准
 cd $FE/web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
 
