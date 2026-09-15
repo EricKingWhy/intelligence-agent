@@ -33,6 +33,7 @@ from agent_harness.capability.manifest import (
 )
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.context.tokens import estimate_tokens
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -86,6 +87,7 @@ from agent_harness.tooling.contract import (
     PermissionPolicy,
 )
 from agent_harness.web import artifacts
+from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import http_error
 from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
@@ -416,7 +418,14 @@ class AppState:
             on_run_terminal=lambda session_id: SessionService(self).on_run_terminal(
                 session_id
             ),
+            # #200：run 收口时缓存该会话的 builder 快照（context-usage 端点读
+            # 它——run 终结后 get_active=None，缓存是"最后 build"的当前事实）。
+            on_context_snapshot=self._cache_context_snapshot,
         )
+        # #200：会话 → (builder 快照, 工具定义)。工具定义与快照在**同一次收口**
+        # 时取（registry 与 builder 属于同一个 runtime，分开取会得到两个真相）。
+        # 只保留最近一次（同一会话再次收口时覆盖）。
+        self.context_snapshots: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
         # Phase 5：会话级待审批队列——当 permission_mode 非 danger-full-access
         # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
         # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
@@ -447,6 +456,17 @@ class AppState:
         self._registry: CapabilityRegistry | None = None
         self._wiring: CapabilityWiring | None = None
         self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
+
+    def _cache_context_snapshot(
+        self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
+    ) -> None:
+        """run 收口时缓存 builder 快照 + 工具定义（#200 context-usage 数据面）。
+
+        两者取自**同一次收口的 runtime**（RunManager 的 `_capture_context_snapshot`
+        在 run 收尾时传入）——分开取会得到两个真相。只保留最近一次（同一会话
+        再次收口时覆盖）。
+        """
+        self.context_snapshots[session_id] = (snapshot, tool_definitions)
 
     async def ensure_stores(self) -> None:
         """惰性初始化恢复三 Store（幂等；并发首请求由锁守 once 语义）。"""
@@ -539,6 +559,34 @@ async def _validate_wired_context_providers(
                 f"available: {sorted(wired_ids)}"
             ),
         )
+
+
+def _skills_provider_tokens(builder: Any) -> int:
+    """skills provider 注入文本的 token 估算（#200 技能桶，设计稿 §3.2）。
+
+    skills provider 是独立 SystemMessage（`SkillCatalogContextProvider`），
+    目录文本终身不变——按 provider 类型识别（isinstance，不靠 name 猜），
+    对**与 provider.select 同一份文本**（`_DATA_FRAME` + 各条目行）估算。
+    非 skills provider（记忆等）归残差桶，不在这里算。
+    """
+    from langchain_core.messages import SystemMessage
+
+    from agent_harness.context.tokens import estimate_message_tokens
+    from agent_harness.skills.context_provider import SkillCatalogContextProvider
+
+    for provider in builder.context_providers:
+        if isinstance(provider, SkillCatalogContextProvider):
+            entries = provider._capability.catalog()
+            if not entries:
+                return 0
+            lines = [provider._DATA_FRAME]
+            for e in entries:
+                line = f"- {e.name}: {e.description}"
+                if e.when_to_use:
+                    line += f"（何时用：{e.when_to_use}）"
+                lines.append(line)
+            return estimate_message_tokens([SystemMessage(content="\n".join(lines))])
+    return 0
 
 
 async def _validate_amend_for_existing_session(
@@ -1309,6 +1357,53 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
+
+    @app.get("/api/sessions/{session_id}/context-usage")
+    async def get_context_usage(session_id: str):
+        """上下文容量看板数据面（#200）：只读端点，六桶分类 + 缓存命中率。
+
+        分类明细**不进** SessionEvent（不变量 #4：Event ≠ Diagnostic Log），
+        只经本端点暴露。三份硬约束（设计稿 §3 诚实原则）：``estimated`` 恒为
+        true；cache 三态（not_collected 时**不显示 0%**）；六桶之和 = used_tokens
+        （差额进"其他"残差）。
+
+        数据来源：在途 run 的 builder 快照（``ContextBuilder.usage_snapshot``，
+        实时读——最近一次 build 是当前事实）+ 会话事件流 usage 汇总 + 该 run 的
+        ToolRegistry 工具 schema 估算；run 已终结 ⇒ 从收口时缓存的快照读（
+        `_cache_context_snapshot` 在 run 收尾时取，registry 与快照同一真相）；
+        都没有 ⇒ state="no_data"（诚实口径，不伪造）。
+        """
+        service = SessionService(app.state.agent)
+        try:
+            events = await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+
+        # builder 快照 + 工具定义：优先在途 run；run 已终结 ⇒ 收口缓存；都没有
+        # ⇒ no_data（不伪造，也不重建一个假 registry 来算工具桶）。
+        builder_snapshot = None
+        tool_definitions: list[dict[str, Any]] = []
+        active = app.state.agent.run_manager.get_active(session_id)
+        if active is not None and active.runtime is not None:
+            builder = active.runtime._context_builder
+            if builder is not None:
+                skills_tokens = _skills_provider_tokens(builder)
+                builder_snapshot = builder.usage_snapshot(
+                    active.session, skills_tokens=skills_tokens)
+            tool_definitions = active.runtime.registry.export_model_definitions()
+        else:
+            cached = app.state.agent.context_snapshots.get(session_id)
+            if cached is not None:
+                builder_snapshot, tool_definitions = cached
+
+        payload = build_context_usage_payload(
+            settings=app.state.agent.settings,
+            builder_snapshot=builder_snapshot,
+            tool_definitions=tool_definitions,
+            estimate_tokens=estimate_tokens,
+            events=events,
+        )
+        return payload
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(

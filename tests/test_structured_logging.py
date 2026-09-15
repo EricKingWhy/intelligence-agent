@@ -126,6 +126,10 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     llm_entry = entries[1]
     assert llm_entry["llm_input(模型输入)"] == "只回复 ok"
     assert llm_entry["llm_output(模型输出)"] == "ok"
+    # #200 行为变更（见 PR）：本测试的 FakeModel（本地 astream，不转发
+    # input_token_details）不带回缓存明细 ⇒ 仍是 3 键（缺失即省略，不写 0）。
+    # 带回明细的路径（cached_tokens 第 4 键）由 tests/web/test_context_usage.py
+    # 的 T1/T5 用例锁住（ScriptedModel 流末尾转发 usage_metadata）。
     assert llm_entry["token_usage(Token用量)"] == {
         "prompt_tokens": 4,
         "completion_tokens": 1,

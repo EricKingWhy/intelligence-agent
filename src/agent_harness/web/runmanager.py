@@ -68,6 +68,9 @@ class ManagedRun:
         # "这条输入被哪个 run 收编了"，只有 runtime 自己 append 的 run/started 是
         # 权威来源（launch 时刻还没有 run_id：begin_run 在 run 任务里跑）。
         self.run_id: str | None = None
+        # #200：本 run 的 runtime（launch 时填）——context-usage 端点从它的
+        # builder 读最近一次 build 快照。launch 之后即有值（launch 同步填）。
+        self.runtime: AgentRuntime | None = None
 
     DONE = _DONE  # 订阅者侧哨兵引用
 
@@ -223,12 +226,16 @@ class RunManager:
         self,
         disconnect_grace_seconds: float = 300.0,
         on_run_terminal: Callable[[str], Awaitable[None]] | None = None,
+        on_context_snapshot: Callable[[str, dict, list[dict]], None] | None = None,
     ) -> None:
         self.disconnect_grace_seconds = disconnect_grace_seconds
         # run 终态后的唯一驱动回调（ADR-0030 D4）：接力投递下一条未投递输入。
         # 默认 None ⇒ 测试与既有调用零改动，且 RunManager 不认识 queue 语义
         # （回调由 session 层提供，Web 层只负责"在正确的时刻叫它"）。
         self._on_run_terminal = on_run_terminal
+        # #200：run 收口时的看板快照回调（builder 快照 + 工具定义）。默认 None
+        # = 不缓存（CLI 等调用方不消费看板）；Web 层在正确的时刻叫它。
+        self._on_context_snapshot = on_context_snapshot
         self._runs: dict[str, ManagedRun] = {}
         # 关停中：`aclose()` 取消在途 run 会走 `_drive` 的 finally，而那条路径默认
         # 会触发接力投递——关机时又拉起新 run 显然是错的（进程马上没了，新 run
@@ -245,6 +252,10 @@ class RunManager:
         被调度前就已挂上（同一事件循环内无插队窗口）。
         """
         run = ManagedRun(session, self)
+        # #200：runtime 引用存到 ManagedRun——context-usage 端点从在途 run 的
+        # builder 读最近一次 build 快照（launch 时刻 builder 还没 build 过，
+        # _token_estimate_total=0 是诚实的"未 build"信号）。
+        run.runtime = runtime
         self._runs[session.session_id] = run
         run.task = asyncio.create_task(
             self._drive(run, runtime, user_input),
@@ -271,7 +282,29 @@ class RunManager:
             run.session.remove_listener(run._on_session_event)
             memory_session_var.reset(token)
             run.finish()
+            # #200：run 收口时把 builder 快照缓存下来（最后 build 是当前事实，
+            # run 终结后 get_active=None，端点从缓存读——不重建假 registry）。
+            self._capture_context_snapshot(run, runtime)
             await self._notify_run_terminal(run.session.session_id)
+
+    def _capture_context_snapshot(self, run: ManagedRun, runtime: AgentRuntime) -> None:
+        """run 收口时缓存 context-usage 快照（#200）。快照在 run 收尾时计算
+        （builder 与 session 都还活着）；异常吞掉——缓存失败不得污染 run 终态
+        事实（快照只是看板数据，不是运行事实）。"""
+        capture = self._on_context_snapshot
+        if capture is None:
+            return
+        builder = runtime._context_builder
+        if builder is None:
+            return
+        try:
+            capture(run.session.session_id, builder.usage_snapshot(run.session),
+                    runtime.registry.export_model_definitions())
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "context-usage snapshot capture failed for %s",
+                run.session.session_id, exc_info=True,
+            )
 
     async def _notify_run_terminal(self, session_id: str) -> None:
         """通知 session 层"这个 run 收口了"（ADR-0030 §4.7 的唯一驱动点）。

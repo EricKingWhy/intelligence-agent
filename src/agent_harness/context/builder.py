@@ -249,3 +249,29 @@ class ContextBuilder:
         while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
             insertion += 1
         return messages[:insertion] + selected + messages[insertion:]
+
+    def usage_snapshot(
+        self, session: Session, skills_tokens: int = 0,
+    ) -> dict[str, Any]:
+        """builder 侧的分类用量快照（#200，只读——不改 build 行为）。
+
+        builder 能如实算出的桶（design §3.2）：消息（会话投影消息逐条求和）、
+        系统提示词（profile + 折进 system prompt 的工具指导）、技能（skills
+        provider 注入文本——``skills_tokens`` 由装配方按 provider 注入文本估算
+        传入）、其他（残差 = provider 注入 + 运行期快照，从上次 build 总量倒推，
+        不静默丢弃）。工具两组由端点层持有 registry 单独估算后合并（T4 求和
+        不变式在端点层闭合）。
+        """
+        messages_tokens = estimate_message_tokens(session.derive_messages())
+        system_prompt_tokens = self._system_prompt_tokens or 0
+        # 残差桶 = 上次 build 总量 − 消息 − 系统提示词 − 技能 − 工具（工具由
+        # 端点层传入前扣 0）；负值说明 memo 与当前投影有偏差（计数失配分支
+        # 重估后尚未 build）——如实归 0，不造负数假话。
+        residual = max(self._token_estimate_total - messages_tokens - system_prompt_tokens - skills_tokens, 0)
+        return {
+            "messages": messages_tokens,
+            "system_prompt": system_prompt_tokens,
+            "skills": skills_tokens,
+            "other": residual,
+            "used_tokens": self._token_estimate_total,
+        }
