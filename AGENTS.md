@@ -101,7 +101,7 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 | Context / Artifact / MinIO / Memory | `06_CONTEXT_ARTIFACT_MEMORY.md` |
 | Storage / Checkpoint / Recovery | `07_STORAGE_PERSISTENCE_RECOVERY.md` |
 | Capability / Plugin / Provider | `08_PLUGIN_CAPABILITY_SYSTEM.md` |
-| MCP / Skills / RAG / Web | `09_MCP_SKILLS_KNOWLEDGE_WEB.md` |
+| MCP / Skills / Knowledge / Web | `09_MCP_SKILLS_KNOWLEDGE_WEB.md` |
 | Multi-Agent / Dynamic SubAgent | `10_MULTI_AGENT_DELEGATION.md` |
 | CLI / SSE / Web UI | `11_STREAMING_API_WEB_UI.md` |
 | JSONL / Langfuse / Eval | `12_OBSERVABILITY_EVALUATION.md` |
@@ -364,25 +364,25 @@ Scope 外问题只报告，不顺手修。
 
 # 10. Skill 使用
 
-若当前 Agent 环境已安装对应 Skill，可优先使用：
+**不维护静态清单**：可用 Skill 以当前 Agent 环境**实际枚举**为准。
+（本文件旧版列举的 `/review`、`/investigate`、`/cso`、`/qa` 在当前环境中并不存在——
+这既让 Agent 找不到命令，也违反了本节自己「不存在的命令不要伪造」的规矩。）
 
-```text
-/review
-/investigate
-/cso
-/qa
-/understand
-/understand-chat
-/understand-diff
-/understand-explain
-/understand-domain
-```
+通用意图 → skill 对照（名称以实际枚举为准）：
 
-不存在的命令不要伪造。
+| 意图 | skill |
+| --- | --- |
+| 代码审查 | `code-review` |
+| 疑难 bug 根因定位 | `diagnosing-bugs` |
+| 流程 / 架构疑问求助 | `ask-matt` |
+| 代码库理解 | `understand` / `understand-chat` / `understand-diff` / `understand-domain` / `understand-explain` |
+| 实现 / TDD | `implement` / `tdd` |
 
-代码库图谱产物放 `.understand-anything/`，不提交。
+约定：
 
-若 Claude 已建立图谱，Secondary Agent 优先复用，不重复全仓扫描。
+- 不存在的命令不要伪造，也不要把 skill 名当 shell 命令直接调用；
+- 代码库图谱产物放 `.understand-anything/`，不提交；
+- 已有图谱产物时优先复用，不重复全仓扫描。
 
 ---
 
