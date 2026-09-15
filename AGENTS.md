@@ -410,53 +410,64 @@ Scope 外问题只报告，不顺手修。
 
 ---
 
-# 13. 并行开发
+# 13. 仓库模型与并行开发
 
-## 13.1 Git Worktree 并行开发规则
+## 13.1 三个独立仓库（不是 worktree）
 
-### 固定目录与分支
-
-| 用途 | 目录 | 分支 |
+| 目录 | 角色 | 常态位置 |
 | --- | --- | --- |
-| 最终集成、完整验证、Push GitHub | `D:\intelligence-agent` | `main` |
-| 后端开发 | `D:\intelligence-agent-backend` | `feat/backend` |
-| 前端开发 | `D:\intelligence-agent-frontend` | `feat/frontend` |
+| `D:\intelligence-agent` | 集成区 | `main` |
+| `D:\intelligence-agent-backend` | 后端施工区 | `main`（干活时开短分支） |
+| `D:\intelligence-agent-frontend` | 前端施工区 | `main`（干活时开短分支） |
 
-核心原则：
+### 拓扑事实（实测，勿凭目录名推断）
 
-```text
-backend / frontend = 施工区
-main = 最终整合版
-```
+三者是**三个独立 Git 仓库（clone）**，**不是**同一仓库的 linked worktree：
+各自有独立的 `.git`，对象库不共享，本地分支 ref 互不可见。
+
+后果（必须遵守）：
+
+- 跨仓库取对象必须先 `git fetch <path 或 url>`，不得假设对方的分支 ref 在本仓库存在；
+- 三个仓库根各有一份 `AGENTS.md` / `CLAUDE.md` / `docs/**` 的 checkout，但它们**是同一个
+  tracked 文件树**——内容由 git 保证一致，**不是**三份各自维护的副本，不会自动分叉；
+- 真正的 linked worktree 只存在于**单个仓库内部**（`git worktree list --porcelain` 可查）；
+  本仓库内可能另有 worktree，对它们只做只读检查，写操作需用户授权。
+
+> **测量陷阱（踩过一次，代价是两份错误审计结论）**：main / backend 的 `core.autocrlf=true`
+> （检出 CRLF），frontend 是 `input`（检出 LF）。**跨 clone 比较必须比 git 对象**
+> （`git rev-parse <rev>:<path>`、`git diff --stat <sha>..<sha>`），
+> **不要比工作树字节**（`diff`、`sha256sum`、直接拷文件）——否则每个文件都显示为全文件改写，
+> 会得出"三个仓库已经漂移""`web/` 有两份不同拷贝"之类的错误结论。
 
 ### 开发规则
 
-1. 后端任务默认在 `D:\intelligence-agent-backend` 开发。
-2. 前端任务默认在 `D:\intelligence-agent-frontend` 开发。
-3. 并行 AI 会话不能使用同一个 Worktree。
-4. `D:\intelligence-agent` 的 `main` 默认不作为并行开发目录，主要用于最终整合和验证。
-5. 公共项目资产应通过 Git commit 进入版本控制，使其他 Worktree 同步后能看到，例如：
-   - `docs`
-   - `goal`
-   - Spec
-   - `AGENTS.md`
-   - `CLAUDE.md`
-   - `CONTEXT.md`
-   - 已确认源码
-   - `tests`
-   - 正式配置
-6. 以下本地内容不要求在 Worktree 之间同步：
-   - `.env`
-   - `.venv`
-   - cache
-   - `logs`
-   - IDE 临时文件
-   - runtime 临时文件
-   - secrets
+1. 三个仓库都可以施工；用哪一个是**分工选择**，不是硬边界（用户可以授权任一条线做另一端的活）。
+2. 同一时刻，同一个文件只由一条线修改；并行会话不要共用同一个仓库目录。
+3. 跨仓库操作用 `git -C <repo-path> <command>`，不用 `cd` 切换。
+4. 公共项目资产通过 Git commit 进入版本控制，其他仓库 fetch/merge 后即可见：
+   `docs`、`goal`、Spec、`AGENTS.md`、`CLAUDE.md`、`CONTEXT.md`、已确认源码、`tests`、正式配置。
+5. 以下本地内容**不要求**跨仓库同步：`.env`、`.venv`、cache、`logs`、IDE 临时文件、
+   runtime 临时文件、secrets。
 
-### 13.2 Feature Worktree 完成后的默认行为
+## 13.2 核心模型：main 是稳态，干活开短分支
 
-在 `feat/backend` 或 `feat/frontend` 完成任务后，可以自行：
+```text
+平时：三个 clone 都停在 main —— "三方一致"是默认状态，一条命令可验
+干活：在任意一个 clone 开短分支 → 施工 → 门禁 → 合回 main → push
+```
+
+不变式（可一行验证）：
+
+```bash
+git merge-base --is-ancestor main <feature-branch>   # main 永远是 feature 分支的祖先
+```
+
+**不要**把某个仓库长期挂在一条 feature 分支上：那样"三方一致"只能靠人记得维持，
+每次集成之后另一条线会静默落后（历史上就是这么欠账的）。
+
+## 13.3 短分支完成后的默认行为
+
+在一条短分支上完成工作后，可以自行：
 
 ```bash
 git status
@@ -465,15 +476,8 @@ git add <本次任务相关文件>
 git commit -m "..."
 ```
 
-但默认**不要擅自**：
-
-- `merge main`
-- `push GitHub`
-- `push feature branch`
-- 创建 PR
-- 删除 branch
-- 删除 worktree
-- `reset --hard`
+哪些动作需要用户批准、哪些是常设授权，一律按 §14.4 的分类执行
+（`merge`、`push`、删分支等仍是受控动作）。
 
 完成后向用户报告：
 
@@ -483,32 +487,24 @@ git commit -m "..."
 - commit 信息
 - 是否建议合并
 
-等待用户决定下一步。
+## 13.4 最终合并规则
 
-### 13.3 最终合并规则
-
-最终集成统一在 `D:\intelligence-agent` 的 `main` 进行。
-
-默认流程：
+最终集成统一在 `D:\intelligence-agent` 的 `main` 进行：
 
 ```text
-feat/backend
-→ diff 检查
+feature branch
+→ diff 检查 + 门禁全绿（§14.10）
 → merge 到本地 main
-
-feat/frontend
-→ diff 检查
-→ merge 到本地 main
-
-→ 在 D:\intelligence-agent 启动完整项目
-→ 运行完整测试
+→ 在 D:\intelligence-agent 启动完整项目 / 跑全量门禁
 → 确认前后端集成正常
-→ 最后 git push origin main
+→ git push origin main（当前主开发执行，常设授权见 §14.4）
+→ 通知另一条线把 main 合回来（§14.9）
 ```
 
-**默认先合并到本地 `main` 并验证，再 Push GitHub。** GitHub 不是 backend / frontend 之间交换代码的必经步骤。除非用户明确要求，否则不要默认「先 push feature branch 再通过 GitHub PR merge」。
+**先合并到本地 `main` 并验证，再 push GitHub。** GitHub 不是仓库之间交换代码的必经步骤。
+除非用户明确要求，否则不要默认「先 push feature 分支再通过 GitHub PR merge」。
 
-### 13.4 `git diff` 的用途
+## 13.5 `git diff` 的用途
 
 合并前可以检查实际改动：
 
@@ -523,40 +519,44 @@ git diff main...feat/frontend
 
 # 14. Git Workflow / Merge Safety
 
-本节定义跨分支集成、合并冲突、危险 Git 操作与集成 Approval 的长期规则，适用于所有 Agent 与所有 Worktree。它与 §13 并行开发规则配套：§13 定义「在哪个 Worktree 开发」，本节定义「如何安全地把成果合进 `main`」。
+本节定义跨分支集成、合并冲突、危险 Git 操作与集成 Approval 的长期规则，适用于所有 Agent 与所有仓库。它与 §13 配套：§13 定义「代码在哪个仓库、哪条分支上长」，本节定义「如何安全地把成果合进 `main`」。
 
 ## 14.1 Branch Roles
 
-- `main` 是 **Integration Branch（集成主分支）**，必须始终可运行、可验证、稳定。
-- `feat/backend` 负责 Backend / Runtime 实现。
-- `feat/frontend` 负责 Frontend / Web UI 实现。
-- Backend / Frontend Agent **不自行决定**最终进入 `main`；跨分支集成统一由 **Git Integrator**（或用户明确授权的集成角色）负责。
+- `main` 是 **Integration Branch（集成主分支）**，必须始终可运行、可验证、稳定，
+  也是三个仓库的**共同稳态**（§13.2）。
+- 所有工作分支都是**短分支**：从 `main` 出发，合回 `main` 即结束使命。
+- 集成由当前**主开发**执行（谁在干活谁就是，见文件头）。用户可以把它交给另一个 Agent，
+  但同一时刻只能有一处执行，不允许并发集成。
 
-## 14.2 Worktree Rules
+## 14.2 Git 写操作前置检查
 
 任何 Git 写操作前，必须先确认当前：
 
-- repository
-- worktree path
+- repository（是三个仓库中的哪一个）
 - branch
 - working tree status
 
 禁止：
 
-- 凭目录名称猜 Branch；
-- 为了查看其他 Branch 在当前 Worktree 中随意 `checkout` / `switch`；
-- 在 dirty worktree 上执行 merge / rebase / reset。
+- 凭目录名称猜 branch、或凭目录名猜仓库角色；
+- 为了查看其他分支随意 `checkout` / `switch`；
+- 在 dirty working tree 上执行 merge / rebase / reset。
 
 真实映射来源：
 
 ```bash
-git worktree list --porcelain
+git worktree list --porcelain    # 只反映**单个仓库内部**的 worktree
+git branch --show-current
 ```
 
-跨 Worktree 操作优先使用：
+**注意**：main / backend / frontend **之间**不适用 worktree 概念（它们是独立 clone，见 §13.1）。
+上面的 `git worktree list` 只能看到当前仓库自己的 worktree，看不到另外两个仓库。
+
+跨仓库操作统一用：
 
 ```bash
-git -C <worktree-path> <command>
+git -C <repo-path> <command>
 ```
 
 ## 14.3 Read-only Git Operations（无需批准）
@@ -576,29 +576,52 @@ git diff --name-status
 git diff --check
 git merge-base
 git rev-list
-git fetch origin --prune
 ```
 
 以及：只读源码分析、Test、Lint、Type Check、Diff Review。
 
-## 14.4 Approval Required（必须用户明确批准）
-
-以下操作**未经用户明确批准不得执行**：
+**低风险同步操作（无需批准，但不是严格只读）**：
 
 ```text
-git merge
-Merge Conflict Resolution
-冲突后的 git add
-Merge / Integration Commit
-git push
+git fetch origin --prune
+git fetch <repo-path> <branch>:<ref>
+```
+
+它会写入对象库、更新 `FETCH_HEAD` 与 remote-tracking refs，并删除远端已不存在的
+remote-tracking ref；不触碰工作树与本地分支。允许无批准执行，但跨仓库审计时要注意
+它会改变「本地可见的 ref」。
+
+## 14.4 Git 授权分类
+
+### 常设授权（不必每次重新批准）
+
+用户 2026-09-16 明确：**集成完成后由当前主开发执行 `push origin main`**，不必每次单独确认。
+
+```text
+把 main 合回自己的短分支        # 同步动作，§14.9 要求
+集成：把验证过的短分支合进 main
+集成验证通过后：git push origin main
+```
+
+前置条件（缺一不可）：
+
+- 门禁全绿（§14.10）；
+- 已按 §14.9 完成「一次只集成一条线」的顺序要求；
+- 集成完成后通知另一条线把 main 合回来（§14.9）。
+
+### 需用户明确批准（每次单独确认）
+
+```text
+在 feature / 短分支上 git push      # 向外发布未集成的工作，不在常设授权内
 GitHub PR Merge
 git cherry-pick
 git revert
+冲突解决后的 git add               # 先按 §14.7 做逐文件语义分析并报告
 Branch 删除
 Worktree 删除
 ```
 
-以下操作**默认禁止**，除非用户针对具体操作明确批准：
+### 默认禁止（除非用户针对具体操作明确批准）
 
 ```text
 git reset --hard
@@ -664,21 +687,36 @@ git merge --abort
 
 然后回 Feature Worktree 解决。不在 `main` 上临时拼接复杂业务逻辑。
 
-## 14.9 One Branch at a Time
+## 14.9 一次只集成一条线 + 集成后回补
 
-禁止同时集成 Backend 和 Frontend。顺序：
+**禁止同时集成两条线。** 顺序固定：
 
 ```text
-feat/backend → main（完成并验证）
-→ 新的 main 重新分析 feat/frontend
-→ feat/frontend → main
+短分支 A → main（完成并验证）
+→ 用新的 main 重新分析短分支 B
+→ 短分支 B → main
 ```
 
-Backend 合入 `main` 后，之前针对 Frontend 做的 Conflict 判断**全部视为可能过期**，必须重新 `fetch` / `diff` / `merge-base` / conflict analysis。
+A 合入 `main` 后，之前针对 B 做的 Conflict 判断**全部视为可能过期**，必须重新
+`fetch` / `diff` / `merge-base` / conflict analysis。
+
+### 集成后回补（"三方一致"靠这条维持）
+
+`main` 每前进一次，**没被合入的那条线当场落后**。这不是比喻，是当场发生的事实：
+集成那一刻只有来源分支与 `main` 对齐。
+
+所以每次集成后必须：
+
+1. 集成者**通知**另一条线（或用户）；
+2. 另一条线在**下一次开工前**先自检：`git merge-base --is-ancestor main HEAD`——
+   返回非 0 就说明落后，**先把 `main` 合回来再动手**；
+3. 合并 `main` 属常设授权（§14.4）；若产生 Conflict，按 §14.7 停下做语义分析。
+
+自检是**开工前的强制第一步**，不靠人记得。
 
 ## 14.10 Validation Gate
 
-任何 Feature Branch 准备进入 `main` 前，至少检查：
+任何分支准备进入 `main` 前，至少检查：
 
 - Working Tree clean；
 - Diff 可解释；
@@ -714,7 +752,42 @@ gh issue close <n> --comment "<验证证据：commit / 测试结果 / 关键文�
 - 只完成部分交付（例如跨端 ticket 只做完一端）→ **不关单**，用 comment 记录已完成部分与剩余项。
 - 关单前先核实实际状态（代码/测试），不要凭进度文档或记忆关单。
 
-## 15. 前端 CSS 主题变量维护纪律（Ticket #35）
+## 14.13 跨仓库协作的两条硬规则
+
+### （a）文件级避让：同一个文件不要同时在两条线上改
+
+用户允许任意一条线做另一端的活（backend 线可以做前端，frontend 线可以做后端），
+所以**不做目录级所有权**——按目录说"这是前端的活"没有意义。真正会出事的是
+**同一个文件被两条线同时改**。
+
+开工前（尤其要改 `web/**`、`src/**`、`docs/**` 这类共享路径时）先看一眼对侧：
+
+```bash
+git -C <另一个仓库路径> fetch
+git -C <另一个仓库路径> log --oneline main..HEAD -- <你打算改的路径>
+```
+
+看到对侧有未合并的同文件改动 → 先协调（等它合入，或改由那一条线做），不要并行写同一个文件。
+
+### （b）跨 clone 比较用 git 对象，不要用工作树字节
+
+三个仓库的行尾配置不同（main / backend 是 `core.autocrlf=true`，frontend 是 `input`），
+同一份内容在两边的**工作树字节**不同。任何跨 clone 的 `diff` / `sha256sum` / 直接拷文件
+都会显示成"全文件改写"，据此会得出"仓库已漂移"的错误结论（§13.1 的测量陷阱）。
+
+正确做法：
+
+```bash
+git -C <repo> rev-parse <rev>:<path>       # 比对象
+git -C <repo> diff --stat <sha>..<sha>     # 比提交
+diff --strip-trailing-cr <a> <b>           # 万不得已比工作树时必须剥掉 CR
+```
+
+# 15. 前端 CSS 主题变量维护纪律（Ticket #35）
+
+> 本节是这条规则的**唯一权威**。`web/PRODUCT.md` 引用的是本节。
+> `web/` 在三个仓库里都存在（同一个 tracked 目录，§13.1）；无论你在哪一个仓库改
+> `web/**`，本节都适用。
 
 `web/src/index.css` 使用 `[data-theme]` 属性切换暗/亮主题。暗色 token 在 `:root` 中定义，亮色 token 在 `:root[data-theme='light']` 中覆盖。
 
