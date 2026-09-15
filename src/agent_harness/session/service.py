@@ -566,6 +566,11 @@ class SessionService:
             # #204：只建会话。session/started 与元数据已照常落盘（上面的路径
             # 完全共享）；不调 RunManager.launch——没有 run 就没有订阅句柄，
             # None 是诚实的"不存在"，调用方据此不组 SSE。
+            # review 修复：interactive 路径在 _build_approval_callback 里已把
+            # 队列登记进 approval_queues，而没有 run 就没有终结回调来 GC 它
+            # （登记点永远等不到 pop）——只建路径当场撤掉登记，队列不泄漏。
+            if interactive:
+                self._state.approval_queues.pop(session_id, None)
             return LaunchResult(session=session, run=None, subscriber=None)
 
         run, subscriber = self._state.run_manager.launch(session, runtime, task)

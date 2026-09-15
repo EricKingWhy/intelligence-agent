@@ -179,7 +179,9 @@ def test_web_create_response_carries_permission_mode(tmp_path):
 
 
 def test_web_create_launch_false_carries_explicit_permission_mode(tmp_path):
-    """launch=false + 显式 permission_mode：JSON 体回传同一档位。"""
+    """launch=false + 显式 permission_mode：JSON 体回传同一档位，且
+    X-Permission-Mode 头**恒在**（裁定 §3：创建响应必须回传 permission_mode，
+    不分路径）。"""
     _, client = _web_client(tmp_path)
     with patch("agent_harness.assembly.create_chat_model",
                return_value=ScriptedModel(responses=[AIMessage(content="ok")])):
@@ -187,6 +189,37 @@ def test_web_create_launch_false_carries_explicit_permission_mode(tmp_path):
                            params={"launch": "false"})
     assert resp.status_code == 200
     assert resp.json()["permission_mode"] == "read-only"
+    assert resp.headers["x-permission-mode"] == "read-only"
+
+
+def test_launch_false_interactive_permission_does_not_leak_approval_queue(tmp_path):
+    """review 修复：interactive 权限（显式非完全访问档）+ launch=False 时，
+    _build_approval_callback 登记进 approval_queues 的队列必须当场撤掉——
+    没有 run 就没有终结回调来 GC 它，留着就是到进程重启才清的泄漏。"""
+    state = _state(tmp_path)
+    state.approval_queues = {}
+    from unittest.mock import patch as _patch
+
+    with _patch("agent_harness.session.service.build_runtime", new_callable=AsyncMock):
+        service = SessionService(state)
+        # 对照组：launch=True 时 interactive 分支真实登记队列（证明确实会登记）。
+        launched = asyncio.run(
+            service.create_and_launch(
+                task="hi", permission_mode=PermissionPolicy.READ_ONLY,
+                permission_mode_explicit=True,
+            )
+        )
+        assert state.approval_queues.get(launched.session.session_id) is not None
+        state.approval_queues.pop(launched.session.session_id)
+
+        # 主张：launch=False 时队列当场撤掉，approval_queues 不留条目。
+        result = asyncio.run(
+            service.create_and_launch(
+                task="hi", permission_mode=PermissionPolicy.READ_ONLY,
+                permission_mode_explicit=True, launch=False,
+            )
+        )
+    assert state.approval_queues.get(result.session.session_id) is None
 
 
 def test_permission_policy_values_are_wire_format():
