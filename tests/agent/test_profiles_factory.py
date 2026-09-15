@@ -57,18 +57,23 @@ class TestBuiltinProfiles:
 
     def test_coding_scope_has_no_web(self):
         coding = BUILTIN_PROFILES["coding"]
+        # #202 / ADR-0031 D8：记忆工具（检索 + 显式写入 + 删除）对 coding 开放。
         assert {"read", "write", "edit", "apply_patch", "bash", "grep",
-                "glob", "git_status", "git_diff"} == coding.tool_scope
+                "glob", "git_status", "git_diff",
+                "retrieve_memory", "remember_this", "forget_memory"} == coding.tool_scope
         assert "web_search" not in coding.tool_scope
         assert "delegate" not in coding.tool_scope  # depth=1：child 无 delegate
         assert coding.max_steps == 10
 
     def test_research_review_is_read_only(self):
         research = BUILTIN_PROFILES["research_review"]
+        # #202：retrieve_memory 是只读检索，对 research 开放；写侧工具不进。
         assert {"read", "grep", "glob", "retrieve_knowledge",
-                "read_knowledge_source", "web_search"} == research.tool_scope
+                "read_knowledge_source", "web_search",
+                "retrieve_memory"} == research.tool_scope
         assert not (research.tool_scope & {"write", "edit", "bash",
-                                           "apply_patch"})
+                                           "apply_patch", "remember_this",
+                                           "forget_memory"})
         assert research.max_steps == 10
 
     def test_spec_rejects_invalid_shape(self):

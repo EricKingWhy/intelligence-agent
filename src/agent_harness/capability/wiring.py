@@ -22,7 +22,11 @@ from agent_harness.capability.base import (
 from agent_harness.capability.config import ProviderConfig
 from agent_harness.config import Settings
 from agent_harness.memory.capability import MemoryCapability
-from agent_harness.memory.tools import ForgetMemoryTool
+from agent_harness.memory.tools import (
+    ForgetMemoryTool,
+    RememberThisTool,
+    RetrieveMemoryTool,
+)
 from agent_harness.sandbox import WorkspaceRegistry
 
 logger = logging.getLogger(__name__)
@@ -125,7 +129,11 @@ async def _wire_memory(
     wiring.memory_writer = components.writeback
     wiring.memory = components
     # #159：遗忘工具经契约（MemoryCapability）贡献，收集走末尾的统一循环。
-    wiring.tool_contributors.append(_MemoryCapabilityProvider(components.capability))
+    # #202 / ADR-0031：retrieve_memory 的检索超时与 provider 同一配置口径
+    # （settings.memory_search_timeout_seconds）——两处口径漂移就是"两套检索"。
+    wiring.tool_contributors.append(_MemoryCapabilityProvider(
+        components.capability, timeout_seconds=settings.memory_search_timeout_seconds,
+    ))
 
 
 def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
@@ -337,11 +345,18 @@ class _MemoryCapabilityProvider:
     这条**同一个收集循环**的第二个来源（见 `wire_capabilities` 末尾），而不是偷塞进 `wiring.tools`。
     """
 
-    def __init__(self, capability: MemoryCapability) -> None:
+    def __init__(self, capability: MemoryCapability, timeout_seconds: float = 10.0) -> None:
         self._capability = capability
+        self._timeout_seconds = timeout_seconds
 
     def contributes_tools(self) -> list[Any]:
-        return [ForgetMemoryTool(self._capability)]
+        # #202 / ADR-0031：三个记忆工具（读 retrieve_memory / 写 remember_this /
+        # 删 forget_memory）都随 capability 存在而存在（D5）——不写 runtime 特判。
+        return [
+            RetrieveMemoryTool(self._capability, timeout_seconds=self._timeout_seconds),
+            RememberThisTool(self._capability),
+            ForgetMemoryTool(self._capability),
+        ]
 
 
 class _MultiagentCapabilityProvider:

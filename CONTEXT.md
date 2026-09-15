@@ -272,6 +272,14 @@ _Avoid_: memory engine, memory service
 Memory 双写一致性机制（transactional outbox pattern）。SQLite 单事务同时写记忆行 + outbox 行（要么都成功要么都回滚），进程内 asyncio 后台 relay 定期 poll outbox 表把未同步的行推到 Milvus 向量索引，成功后标记。relay 崩溃重启自动恢复（outbox 行持久化在 SQLite 里）。幂等性由 consumer 保证（按 memory_id 去重）。
 _Avoid_: memory sync queue, vector indexer
 
+**retrieve_memory**:
+模型可调用的记忆**只读检索**工具（#202 / ADR-0031）。与 provider 自动注入共用同一个 `MemoryCapability.search` 与同一份 `rank_entries` 排序（检索实现唯一、调用点两个）；结果按 id 去重、不带分数，`injected=true` 标出本 run 已自动注入进上下文的条目（读 run 级 `memory_injected_ids_var` 注册表）。只做"自动注入不够用时的精准补充"，不替代自动注入。
+_Avoid_: search_memory（用户裁定名固定为 retrieve_memory）, recall_memory, memory_search
+
+**remember_this**:
+模型可调用的记忆**显式写入**工具（#202 / ADR-0031 D3）。只接受 `content`（一句话一条事实，≤2000 字符），走 `capability.consolidate` 落库（与后台提取共用同一条写入路径，冲突交给 provider 消解）；scope/namespace/metadata 不来自参数。只进 main/coding 的 tool_scope；research 档位只读不开写。
+_Avoid_: save_memory, remember, store_memory
+
 ## Phase 7：Capability / Plugin + Skills
 
 **CapabilityRegistry**:

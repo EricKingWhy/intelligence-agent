@@ -67,6 +67,7 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
     SessionEvent,
+    memory_injected_ids_var,
     run_context_var,
 )
 from agent_harness.session.event import STEER_APPLIED
@@ -655,6 +656,9 @@ class AgentRuntime:
             # 事件降级时需要 run_id 对账，经 contextvar 传递。嵌套运行的恢复
             # 由外层 finally 兜底（token 捕获于下）。
             run_context_token = run_context_var.set(run_id)
+            # 本 run 的记忆注入注册表（#202 / ADR-0031 D4）：设空集合，由
+            # MemoryContextProvider.select() 在注入时写入；run 收尾 reset。
+            memory_injected_token = memory_injected_ids_var.set(frozenset())
             # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
             run_started = next(e for e in session.since(memory_event_start) if e.type == RUN_STARTED)
             yield to_agent_event(run_started)
@@ -1210,6 +1214,13 @@ class AgentRuntime:
                     # SSE 消费方可能在【另一上下文】aclose 本生成器（断连路径）
                     # ——token 无法跨上下文 reset。该上下文随任务消亡，无需恢复；
                     # 正常路径（同任务）的 reset 一定成功。
+                    pass
+            # 记忆注入注册表收口（#202 / ADR-0031 D4）：下一 run 里 injected 全
+            # false。与 run_context_token 同一收口窗口；ValueError 语义同上。
+            if memory_injected_token is not None:
+                try:
+                    memory_injected_ids_var.reset(memory_injected_token)
+                except ValueError:
                     pass
 
     def _new_coordinator(self) -> ModelFallbackCoordinator:
