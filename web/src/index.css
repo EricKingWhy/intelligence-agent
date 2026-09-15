@@ -206,12 +206,18 @@
    * 粉色选中染底上 4.46:1，均不达 AA——估算让位实测；0.63 → 白底 ≈5.4、染底 ≈5.0。 */
   --text-tertiary:  rgba(18, 18, 24, 0.63);
 
-  --accent:        #c96990;
-  --accent-strong: #b95680;
-  --accent-soft:   rgba(201, 105, 144, 0.10);
+  /* §15 实测纪律（与 --text-tertiary 同款）：原 #c96990 在白底只有 3.56:1、
+   * 卡片底 3.44:1、画布底 3.15:1——12px 的 .act-name（工具名）与
+   * .rail-empty-action 直接不达 AA。按同一色相压低明度到白底 ≈5.45:1，
+   * 亮色下三档背景（白 / 卡片 / 画布）全部 ≥4.8。 */
+  --accent:        #b2406e;
+  --accent-strong: #9c355e;
+  --accent-soft:   rgba(178, 64, 110, 0.10);
   --accent-muted:  var(--accent-soft);
 
-  --success: #2f9e63;
+  /* 同因：原 #2f9e63 在画布底只有 3.01:1——「已完成」徽标与顶栏 run-pulse
+   * 的 12px 文案不达 AA。压到白底 ≈5.5:1。 */
+  --success: #23774a;
   --warning: #b07a10;
   --danger: #cf4a46;
   --info: #4a6fd6;

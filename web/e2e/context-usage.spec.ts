@@ -19,7 +19,7 @@ async function openIdleSession(page: Page): Promise<void> {
   await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
 }
 
-test('T6a：空数据 → 「暂无用量数据」，不出现 0% 假话', async ({ page }) => {
+test('T6a：空数据 → 「后端未上报用量数据」，不出现 0% 假话', async ({ page }) => {
   await routeApi(page, {
     sessions: [],
     events: [],
@@ -34,7 +34,11 @@ test('T6a：空数据 → 「暂无用量数据」，不出现 0% 假话', async
   await page.getByRole('button', { name: '上下文容量' }).click();
   const dialog = page.getByRole('dialog', { name: '上下文容量' });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('暂无用量数据');
+  // 文案只陈述本面板能知道的事实（后端没给数据）。**不得**出现
+  // 「会话还没有任何运行」这类归因：no_data 与 run 数量无关——实测
+  // 2a2d03f1（16 个 run / 3865 事件）同样落到这一支。
+  await expect(dialog).toContainText('后端未上报用量数据');
+  await expect(dialog).not.toContainText('还没有任何运行');
   // 不出现 0% 假话（诚实约束）
   await expect(dialog).not.toContainText('0.0%');
   // 「估算值」副标题在场

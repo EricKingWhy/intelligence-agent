@@ -3396,6 +3396,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 1px solid var(--border-subtle);
   color: var(--color-muted-foreground);
   font-variant-numeric: tabular-nums;
+  /* Inspector 头部（默认 340px 面板 ≈308px 内容宽）是 flex 行，这一行有三个
+     兄弟：面板标题、状态徽标、档位徽标。徽标作为 flex item 会被压到 48px
+     （实测 rect [1184,69,48,66]；同组件在 .tl-run-header 里是 62×27 的正常值），
+     而 white-space 默认 normal → 「已完成」逐字折成三行，并把标题挤成两行。
+     徽标是**定长状态标签**，不该参与收缩：不收缩 + 不折行，由标题侧让位。 */
+  flex: none;
+  white-space: nowrap;
 }
 /* 与顶栏 run-pulse 同一状态语言：tinted 胶囊 */
 .run-badge-running,

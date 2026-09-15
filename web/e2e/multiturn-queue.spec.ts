@@ -4,11 +4,13 @@
  * supersedes_seq → message/superseded 事件 → 该轮整段从 DOM 移除、新问句可见。
  * T12（§5.2 队列条）：排队项显示 + 徽标；「取消」移除条目（queue/cancelled 帧）；
  * 空队列不渲染。
+ * T12e（§5.1 发送键语义）：在途 run 时提交必须打到 /messages（mode=queue），
+ * 不得另造会话——真机实测回归锁，见 docs/LIVE_BROWSER_TEST_20260916.md F4。
  *
  * 车道归属：Playwright e2e（同 continuation.spec.ts 约定）。 */
 
 import { expect, test, type Page } from '@playwright/test';
-import { fulfillSse, routeApi, submitTask } from './fixtures';
+import { fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
 
 const FIRST_FRAMES = [
   { type: 'session/started', seq: 1, session_id: 'mt-session-1', run_id: 'mt-run-1', time: '2026-09-15T00:00:00Z' },
@@ -270,4 +272,67 @@ test('T12d：「编辑」就地改内容 → POST /messages 带 queue_id + 新�
   expect(bodies[0]).toMatchObject({ queue_id: 'q-1', content: '改过的问题' });
   // 主输入框没有被回填（就地编辑的语义边界）。
   await expect(page.getByLabel('Agent 任务')).toHaveValue('');
+});
+
+/* ── T12e：在途 run 时提交必须**排队**，不得另造会话（ADR-0030 §5.1）── */
+
+/** 未终态的流：run 一直 running ⇒ `streaming` 恒真（与 composer-stream-actions
+ *  spec 同一手法：mock 只给有限帧，模式停在 live）。 */
+const LIVE_FRAMES: FrameSpec[] = [
+  { type: 'session/started', seq: 1, session_id: 'mt-live-1', run_id: 'mt-run-live', time: '2026-09-16T00:00:00Z' },
+  { type: 'run/started', seq: 2, session_id: 'mt-live-1', run_id: 'mt-run-live', time: '2026-09-16T00:00:00Z' },
+  { type: 'user/message', data: { content: '长任务' }, seq: 3, session_id: 'mt-live-1', run_id: 'mt-run-live', step_id: 1, time: '2026-09-16T00:00:00Z' },
+];
+
+test('T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第二个会话', async ({ page }) => {
+  // 回归锁（真机实测，见 docs/LIVE_BROWSER_TEST_20260916.md F4）：修复前
+  // `handleSubmit` 的 `selectedId && !streaming` 把「已有会话 + 在途 run」
+  // 分流给了 submitTask（= **创建新会话**）。界面后果：用户对进行中任务的追问
+  // 被拆成一个没有上下文的新会话，而发送按钮的 title 明写「Enter 排队」，
+  // ADR-0030 §5.1 也规定 Enter = queue；队列条与 /queue 系列接口因此永不产生条目。
+  // 本测试同时锁「打到哪个端点」与「mode 取值」两条，端点是关键——只锁模式的话，
+  // 一旦有人又把分流写回去，mode 依然会是 queue 却发去了错的地方。
+  let sessionPosts = 0;
+  const messageBodies: Array<Record<string, unknown>> = [];
+
+  await routeApi(page, {
+    sessions: [],
+    events: LIVE_FRAMES,
+    onSessionPost: (route) => {
+      sessionPosts += 1;
+      return fulfillSse(route, LIVE_FRAMES);
+    },
+    onMessagesPost: (route) => {
+      messageBodies.push((route.request().postDataJSON() ?? {}) as Record<string, unknown>);
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'queued', mode: 'queue' }),
+      });
+    },
+    // 服务端仍在跑：快照即全量、连接保持——这正是「流式中」的真相。
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+  });
+
+  await page.goto('/');
+  await submitTask(page, '长任务');
+
+  // 在途的界面真相：停止按钮在场（发送按钮同时在场，ADR-0030 D10）。
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+  // 基线而不是硬编码 1：建立这一步本身就允许出现一次 POST /api/sessions
+  // （**不**断言它必须等于 1——那会把"首条消息走哪条通道"也锁进来，
+  // 而那由 selectedId 决定，与本次回归无关）。要锁的是**增量**。
+  const sessionPostsBeforeFollowUp = sessionPosts;
+
+  // 流式中提交（Enter 无修饰键 = queue）
+  await expect(page.locator('.composer-stop')).toBeVisible();
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('追问一句');
+  await box.press('Enter');
+
+  await expect.poll(() => messageBodies.length).toBe(1);
+  expect(messageBodies[0]).toMatchObject({ content: '追问一句', mode: 'queue' });
+  // 关键回归：**没有**第二个会话被创建。
+  expect(sessionPosts).toBe(sessionPostsBeforeFollowUp);
+  await expect(page.locator('.app-error')).toHaveCount(0);
 });

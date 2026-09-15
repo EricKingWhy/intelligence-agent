@@ -455,9 +455,13 @@ export default function App() {
       focusRun();
       // Composer 档位 → 契约字段的映射统一走 lib/amend.ts（单一构造器）；
       // 空值丢弃由 api 层单一执行（见 amend.ts 顶部契约说明）。
-      // 续聊：已有会话且不在流式中 → 发消息到现有会话（PRD §5.3 续聊入口）。
+      // 续聊：已有会话 → 发消息到现有会话（PRD §5.3 续聊入口）。
+      // 空闲 / 在途由**后端**分流（ADR-0030 §5.1）：空闲 → launched 直驱新 run；
+      // 在途 run → queued 入队，下个 run 消费。前端不按 streaming 自行分流——
+      // 那会把「Enter = 排队」变成 submitTask（**另造一个会话**），追问与上下文
+      // 一起被拆散；队列条与 /queue 系列接口随之永不产生条目。
       // 新会话：无 selectedId → startSession 创建新会话。
-      if (selectedId && !streaming) {
+      if (selectedId) {
         void sendMessage(selectedId, task, {
           maxSteps: 10,
           amend: toAmendFields(composerControls),
@@ -471,7 +475,7 @@ export default function App() {
         ...toCreateControls(composerControls),
       });
     },
-    [submitTask, sendMessage, focusRun, selectedId, streaming, composerControls],
+    [submitTask, sendMessage, focusRun, selectedId, composerControls],
   );
 
   /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 创建**空会话**
