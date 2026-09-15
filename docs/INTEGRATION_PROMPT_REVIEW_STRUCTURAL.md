@@ -27,12 +27,49 @@ git -C D:/intelligence-agent-frontend rev-parse --short HEAD   # 前端真实 HE
 
 **已核验的关系（本次实测）**：
 
-- main 仓库本地 `feat/backend`(`80d49e1`) **是** backend clone HEAD 的祖先 → 可 fast-forward；
-- main 仓库本地 `feat/frontend`(`2b51914`) **是** frontend clone HEAD 的祖先 → 可 fast-forward；
+- main 仓库本地 `feat/backend`(`80d49e1`) / `feat/frontend`(`2b51914`) **都是** 各自 clone HEAD 的祖先
+  ⇒ 把 clone HEAD 拉进 main 仓库这两个分支指针是 fast-forward（仅仅是**指针更新**，不是"合进 main"）。
 - 同理当前 `origin/feat/backend`(`9727344`) / `origin/feat/frontend`(`3706e9b`) 也都是各自 clone HEAD 的祖先。
 
 ⇒ **不要复用 main worktree 里的旧 `feat/*` 分支去 merge**（会漏掉全部新成果）。
-推荐做法见 §2：直接从 clone 拉取，或先把 clone 的分支更新进 main 仓库再合并。
+
+### 0.1 ⚠ 合进 main 是**真 merge，不是 fast-forward**
+
+clone HEAD **不是** 当前 `origin/main`(`9ce0b47`) 的子孙：main 上有 backend clone **缺的 11 个 commit**
+（#171/#181/#191/#193 的集成记录等）、frontend clone 缺 2 个。所以无论怎么合，都是**三路 merge**。
+
+**已实测预演冲突**（用 `git merge-tree` + 临时仓库完整走了一遍，结论可直接采信）：
+
+| 合并 | 结果 |
+| --- | --- |
+| `feat/backend` → main | 1 处冲突：`docs/PHASE_STATUS.md` |
+| `feat/frontend` → main（**backend 已合入后**） | 2 处冲突：`docs/design/CONTEXT_CAPACITY_DASHBOARD.md`、`docs/design/WEB_UI_BATCH_REDESIGN.md` |
+
+> ⚠ 注意第二行：`feat/frontend` 单独对旧 main 是零冲突，**但 backend 一旦先进 main 就变成 2 处冲突**。
+> 这正是 §14.9「backend 合入后，之前对 frontend 的冲突判断全部过期」的实例——不要凭"先前预演过零冲突"就放心。
+
+**全部 3 处冲突都在 `docs/`，没有一处落在代码上**（实测：两侧源码文件全部自动合并成功）。三处解法如下：
+
+1. **`docs/PHASE_STATUS.md`（backend 合入时）**——纯追加日志的 EOF 冲突，也不是语义冲突：
+   main 追加了 #171 那条、本分支追加了 #194–#204 与本次复审各条，两侧都在文件尾部追加。
+   **解法 = 两段都保留**（main 的 #171 条目 + 本分支的 #194…#204/复审条目），不是二选一，
+   **不要**用 `ours`/`theirs` 一把梭。
+
+2. **`docs/design/CONTEXT_CAPACITY_DASHBOARD.md`（frontend 合入时，3 个冲突块）**——两侧都在改 §3.2 桶表与风险表。
+   **以 backend 侧为准**：backend 的副本 (a) 已按本批复审的真实成本口径改写，
+   (b) 时间在后（`d2aa803`），而 frontend 的副本是 `c00604e` 一次性镜像的**旧快照**。
+   已核对：frontend 侧唯一独有的一句"技能与工具 schema 不可精确分割"，backend 侧**已有等价表述**
+   （第 31 行"技能目录注入的文本折进 system prompt（与 dsh 归档 'Not separable here' 同一个病"），
+   所以取 backend 侧**不丢信息**。
+
+3. **`docs/design/WEB_UI_BATCH_REDESIGN.md`（frontend 合入时，1 个冲突块）**——`launch=False` 的响应形状描述。
+   **以 backend 侧为准**：backend 写的是"刻意小形状 `{session_id, permission_mode}`，仓库里不存在
+   `GET /api/sessions/{sid}` 单会话路由，不伪造"；frontend 旧快照写的是"同 `GET /api/sessions/{sid}` 的形状"。
+   已核验：backend 的路由表里**确实没有**单会话 GET 路由（只有 `/events`、`/stream`、`/context-usage`…），
+   所以 backend 侧才是事实，frontend 那句是镜像时对不上的描述。
+
+⇒ 这正是 §14.6「先回后正」的场景：**先在 feature 分支上把 main 合进来、把冲突解掉并复跑门禁**，
+再回到 main 做干净的 down-merge。§2 已按此改写；上面三处的裁决就是 §14.7 要求的"逐文件分析"结论。
 
 ---
 
@@ -57,9 +94,9 @@ clone HEAD 相对 `origin/main` 的**完整**增量：backend **22 个 commit**�
 
 ---
 
-## 2. 建议的集成流程（§14.9：一次一个分支；§13.3：先本地 main 验证再 push）
+## 2. 建议的集成流程（§14.6 先回后正；§14.9 一次一个分支；§13.3 先本地 main 验证再 push）
 
-> 下面命令里的 `<main>` = `D:\intelligence-agent`。每一步的 merge 都需要**用户明确批准**（§14.4）。
+> 每一步的 `merge` / `push` 都需要**用户明确批准**（§14.4）。冲突处理见 §14.7（逐文件分析，禁止机械 `ours`/`theirs`）。
 
 ```bash
 MAIN=D:/intelligence-agent
@@ -68,48 +105,61 @@ FE=D:/intelligence-agent-frontend
 
 # ---------- 0) 同步与核查 ----------
 git -C $MAIN fetch origin
-git -C $MAIN status                              # 必须 clean，不 clean 就停
-git -C $BE   diff origin/main...feat/backend --stat | tail -3
-git -C $FE   diff origin/main...feat/frontend --stat | tail -3
+git -C $MAIN status                                   # 必须 clean，不 clean 就停
+git -C $BE   status ; git -C $FE status               # 两个 clone 也必须 clean
+# 起始点：origin/main 与 $MAIN 的 main 内容一致（本次实测同为 9ce0b47）
 
-# ---------- 1) 把 clone 的真实成果弄进 main 仓库（不 push） ----------
-# 直接把 clone 的 HEAD 拉到 main 仓库的对应分支（FF，已核验可 FF）：
-git -C $MAIN fetch $BE feat/backend:feat/backend      # 若报非 FF，见 §2.1 备选
-git -C $MAIN fetch $FE feat/frontend:feat/frontend
-git -C $MAIN log --oneline -1 feat/backend            # 应等于 backend clone 的 HEAD
-git -C $MAIN log --oneline -1 feat/frontend           # 应等于 frontend clone 的 HEAD
+# ================= 后端（先做完，再碰前端；§14.9） =================
+# 1) 「先回」：在 backend clone 上把 main 合进来，就地解 §0.1 的 PHASE_STATUS 冲突
+cd $BE
+git fetch origin
+git merge origin/main                    # ← 需要批准；预期仅 docs/PHASE_STATUS.md 冲突
+# 解法：两段都留（main 的 #171 条目 + 本分支 #194–#204/复审条目），再：
+#   git add docs/PHASE_STATUS.md && git commit
+.venv/Scripts/python.exe -m pytest tests/ -q          # 「回」之后必须复跑全量
+ruff check .
 
-# ---------- 2) 合 backend ----------
-git -C $MAIN checkout main
-git -C $MAIN merge --no-ff feat/backend               # ← 需要用户批准
-# 若冲突：STOP，按 §14.7 逐文件分析后请示，禁止机械 ours/theirs
+# 2) 「后正」：把已解冲突的 backend 分支取进 main 仓库并合入
+git -C $MAIN fetch $BE feat/backend:feat/backend-new  # 取 clone 最新（含上面的合并提交）
+git -C $MAIN merge --no-ff feat/backend-new           # ← 需要批准（此时应无冲突）
+git -C $MAIN log --oneline -1 main                    # 确认 backend 成果已进 main
 
-# 后端全量回归（在 backend clone 跑，环境最全）：
-cd $BE && .venv/Scripts/python.exe -m pytest tests/ -q
-
-# ---------- 3) backend 稳定后，重新分析再合 frontend（§14.9） ----------
-# backend 已进 main，之前针对 frontend 的冲突判断全部作废：重新取、重新 diff
-git -C $MAIN fetch $FE feat/frontend:feat/frontend     # 再取一次 clone HEAD（可能又有新 commit）
-git -C $MAIN fetch origin
-git -C $MAIN diff main...feat/frontend --stat | tail -3 # 基于新 main 重新看差异
-git -C $MAIN merge --no-ff feat/frontend               # ← 需要用户批准
+# ================= 前端（backend 稳定后重新分析，§14.9） =================
+# 3) 「先回」：⚠ 这里必须合 $MAIN 的 main（**本地**，含刚合入的 backend），
+#    不是 origin/main —— 我们尚未 push，origin/main 还是旧的 9ce0b47。
+cd $FE
+git fetch $MAIN main                     # 把本地 main 取进 FETCH_HEAD
+git merge FETCH_HEAD                     # ← 需要批准；预演为零冲突
+git diff FETCH_HEAD...feat/frontend --stat | tail -3   # 基于新 main 重看差异
 cd $FE/web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
 
-# ---------- 4) 集成后总门禁（在 main 上） ----------
-cd $MAIN  # 按仓库现有方式启动并至少跑后端 pytest + 前端构建
+# 4) 「后正」：把前端合进 main
+git -C $MAIN fetch $FE feat/frontend:feat/frontend-new
+git -C $MAIN merge --no-ff feat/frontend-new          # ← 需要批准
 
-# ---------- 5) 通过后才 push ----------
-git -C $MAIN push origin main                          # ← 需要用户批准
+# ---------- 5) 集成后总门禁（在 main 上） ----------
+cd $MAIN    # 按仓库既有方式启动，至少跑后端 pytest + 前端构建
+
+# ---------- 6) 通过后才 push ----------
+git -C $MAIN push origin main                         # ← 需要批准
 ```
 
-### 2.1 备选（若 `fetch <path>:<branch>` 因非 FF 被拒）
+> 说明：上面用 `feat/backend-new` / `feat/frontend-new` 两个**临时分支名**接收 clone 的最新 HEAD，
+> 避免与 main 仓库里已存在、且内容不同的同名旧 `feat/*` 混淆。合并验证完成后可删除临时分支（删分支同样需批准）。
+
+### 2.1 备选（若 Integrator 希望只更新已有分支名）
 
 ```bash
-# 用 main 上的分支指向 clone 的 HEAD（同样不 push，逐条需批准）
-git -C $MAIN branch -f feat/backend  $(git -C D:/intelligence-agent-backend  rev-parse HEAD)
-git -C $MAIN branch -f feat/frontend $(git -C D:/intelligence-agent-frontend rev-parse HEAD)
+# 让 main 仓库的 feat/backend 指向 backend clone 的 HEAD（FF，已核验；逐条需批准）
+git -C $MAIN fetch D:/intelligence-agent-backend  feat/backend
+git -C $MAIN branch -f feat/backend FETCH_HEAD
+# frontend 同理：
+git -C $MAIN fetch D:/intelligence-agent-frontend feat/frontend
+git -C $MAIN branch -f feat/frontend FETCH_HEAD
 ```
-若 Integrator 更希望走 GitHub PR 流程，则先在两个 clone 里 `git push origin feat/backend` / `push origin feat/frontend`，再开 PR——**但 ADR/§13.3 的默认是不走这条路**，本地 main 先验证。
+
+若 Integrator 更希望走 GitHub PR 流程，则先在两个 clone 里 `push origin <branch>`，再开 PR——
+**但 §13.3 的默认是不走这条路**：先本地 `main` 验证，最后才 push。
 
 ---
 
@@ -125,6 +175,10 @@ git -C $MAIN branch -f feat/frontend $(git -C D:/intelligence-agent-frontend rev
 **前端**：
 - 供应商表单的 `models` 是 **`ProviderModelRow[]`（每行 `model_id` + `label`）**，提交前经 `normalizeProviderModels()` 规整（trim、丢空行、按首个去重）。若 main 上还是"整表替换为一行"的旧逻辑，以本分支为准（旧逻辑会**静默删掉用户其余模型和全部 label**）。
 - 队列条「立即发送」发 `amend:{mode:'steer', queue_id}`；「编辑」走**行内编辑态**提交 `{content, queue_id}`，**不回填主输入框**；三个操作按钮**仅对 `kind==='queue'` 渲染**（steer 项渲染出来是静默 404）。
+
+**文档合并（§0.1 第 2/3 处冲突专用裁决）**：
+- `docs/design/CONTEXT_CAPACITY_DASHBOARD.md` → **取 backend 侧**（backend 已按本批复审口径重写，frontend 是旧镜像快照；frontend 独有的一句在 backend 第 31 行有等价表述，不丢信息）。
+- `docs/design/WEB_UI_BATCH_REDESIGN.md` → **取 backend 侧**（frontend 旧快照引用了一个**不存在**的 `GET /api/sessions/{sid}` 路由，backend 侧的描述与真实路由表一致）。
 
 以上均对应 ADR-0030 §5.2 / ADR-0032 §8.1；设计稿 `docs/design/CONTEXT_CAPACITY_DASHBOARD.md` §3.2 的桶表已按新口径重写。
 
