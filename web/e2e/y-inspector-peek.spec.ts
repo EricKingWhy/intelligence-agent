@@ -335,7 +335,61 @@ test('AC8：头部必须容得下最长档位名（不溢出面板、控制按�
     if (runId && runId.height > 0) expect(runId.height, `${label}：范围被压成竖条`).toBeLessThanOrEqual(30);
   }
 
+  /* 范围文本的**去留边界**要显式锁住（复审 P2-1）：窄面板（≤360 容器宽，含默认
+   * 340）它整体退出头部、宽面板（480）必须完整可见。不锁的话，"默认宽度下它其实是
+   * 隐藏的"这件事没有任何测试会发现——`g-visual-qa.spec.ts` 对它用的是 `toHaveText`，
+   * 隐藏元素照样通过。这是本批对 UI-03「头标显示 N runs · M 事件」的**有意偏离**
+   * （340 + 长档位名下所有需宽项无法共存，见 CSS 注释里的取舍），所以更要锁死方向，
+   * 免得将来有人无声地改回去又改坏溢出。 */
+  // 上一步停在 480；两个方向都按"多按几次撞夹取边界"来走（步长 16，夹取 320/480）
+  for (let i = 0; i < 12; i++) await page.keyboard.press('ArrowRight');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '320');
+  await expect(page.locator('.detail-run-id')).toBeHidden();
+  for (let i = 0; i < 12; i++) await page.keyboard.press('ArrowLeft');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '480');
+  await expect(page.locator('.detail-run-id')).toBeVisible();
+  // 单 run / 6 事件的 fixture（EVENTS）→ 文案逐字（含中文单位，不是裸 run_id）
+  await expect(page.locator('.detail-run-id')).toHaveText('1 runs · 6 事件');
+
   // 最窄处仍然**真的能点**（Playwright 会做可操作性检查：视口外/被遮挡会超时）
+  for (let i = 0; i < 12; i++) await page.keyboard.press('ArrowRight');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '320');
   await page.locator('button[aria-label="关闭 Inspector"]').click();
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
+});
+
+test('AC9：窄面板下**子会话**头部仍显示 child id（窄宽退出只对 run 头部生效）', async ({ page }) => {
+  /* 复审 P3：`.detail-run-id` 是**两个**头部共用的类——run 头部（`N runs · M 事件`，
+   * AC8 里窄宽退出）与子会话头部（`childSessionId` 前 8 字符，钻取视图里**唯一**的
+   * 会话标识）。容器查询若写成无作用域的 `.detail-run-id { display:none }`，会把后者
+   * 一起删掉——而这条钻取路径此前**零 e2e 覆盖**，删了不会有人发现。
+   * 本用例同时是 `StepDetail` 子会话头部的第一条行为覆盖：点委派节点的
+   * 「Inspect 子会话」→ 头部原位换成子会话视图，child id 必须看得见。
+   *
+   * 注：child 视图里**没有** `.detail-resizer`（实测 count=0），所以这里的"窄面板"
+   * 就是默认 340（≤360 ⇒ 容器查询处于生效状态），不需要拖宽——这正是要锁的场景。 */
+  const CHILD = 'child-abc12345';
+  const frames: FrameSpec[] = [
+    EVENTS[0],
+    EVENTS[1],
+    EVENTS[2],
+    { type: 'agent/delegation-started', data: { child_session_id: CHILD, target: '研究', task: '查一下' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
+  ];
+  await routeApi(page, {
+    sessions: [{ session_id: SID, event_count: frames.length, first_event_time: T, last_event_time: T, first_user_message: '看看这个', trace_id: null, trace_url: null }],
+    events: frames,
+  });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+  await expect(page.locator('.timeline-row')).toHaveCount(frames.length);
+  await expect(page.locator('.detail-resizer')).toHaveAttribute('aria-valuenow', '340'); // 窄面板（≤360）
+
+  await page.locator('.deleg-open-btn').first().click();
+
+  const header = page.locator('.detail-header');
+  await expect(header.locator('.child-back-btn')).toBeVisible(); // 确实进了子会话视图
+  await expect(header.locator('.detail-header-actions')).toHaveCount(0); // 它不是 run 头部
+  await expect(header.locator('.detail-run-id')).toBeVisible();
+  await expect(header.locator('.detail-run-id')).toHaveText(CHILD.slice(0, 8));
 });

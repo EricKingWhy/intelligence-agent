@@ -3399,9 +3399,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  * 缺 `white-space:nowrap` 时会被压成 ~30px 宽、**7 行高**的竖条（实测 340 宽
  * + agent_profile=research_review 时头部 99px 高全是它撑的），并把
  * `.detail-header-actions` 顶到面板右缘之外 44px——关闭按钮因此点不到。
- * 完整值另有出处（元素的 title + Overview 页签），截断不损信息可达性。 */
+ * 截断后完整值仍在元素的 `title` 里（本行两条各有 title，不是"信息丢失"）。 */
 .detail-header .panel-label,
-.detail-run-id {
+.detail-header .detail-run-id {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3465,8 +3465,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   /* 档位名是**后端标识符**（`research_review` 15 字符 = 126px），长度不受前端
      控制。给它 `min-width:0`（可低于 min-content = 真的能截断）+ 省略号，让它在
      真正不够宽时才让位；不设硬上限——否则宽面板上本来放得下的档位名也会被砍。
-     实测 320/340 下 77+126+73 ≤ 可用宽，短档位与长档位名都能完整显示。
-     完整值另在 title 里。 */
+     实测（面板 340 + 该档位名）：`clientWidth 93 / scrollWidth 124`，即**这一档
+     下确实截断**（显示 `research_re…`），完整值在 title 里；同一输入在 480 下
+     仍截断到 ~101（该宽度上 5 个兄弟的 max-content 合计 483 > 内容宽 448，
+     缺口按各弹性项摊分）。所以"截断"是常态而非例外，别再写成"都能完整显示"。 */
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3617,10 +3619,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   .detail-ctrl-label {
     display: none;
   }
-  /* runs·事件范围在窄面板退出头部：同一份数据在 Overview 里完整可读，而它在这里
-     是最容易把头部撑爆的一项（长档位名下实测被压成 30px×90px 的竖条并顶飞控制按钮）。
-     让位顺序按信息价值排：状态 > 档位 > 控制 > 范围 > 标题。 */
-  .detail-run-id {
+  /* `N runs · M 事件` 范围在窄面板整体退出头部：
+   *  - **它是这条查询里唯一让位的一项**（标题只截断、其余不动）——不是按某种
+   *    "信息价值顺序"逐个让位，别在注释里编排序（复审 P2-3）。
+   *  - 代价是**默认宽度 340 也在 360 以内**，所以默认就看不到它；数据改到
+   *    **Timeline 页签**可读（分组头的条数 + `.detail-tab-count` 的事件数），
+   *    Overview 页签里**没有**这两个数（复审 P2-1 实测）。这偏离了
+   *    `docs/UI_POLISH_TICKETS.md` UI-03 的「头标显示 `2 runs · 19 事件`」，
+   *    偏离理由与该 AC 的现状见那里的批注。
+   *  - 为什么不让它留着一截：340 + 长档位名下它只能拿到 ~72px（自身需 94px），
+   *    留着也是一串省略号；而它在这里是最容易把头部撑爆的一项（实测被压成
+   *    30px×90px 的竖条并把控制按钮顶出面板 44px）。
+   *  - `:has(.detail-header-actions)` 把作用域限定在 **run 头部**：子会话头部
+   *    （`StepDetail.tsx` 里那个带 `.child-back-btn` 的）也挂 `.detail-run-id`，
+   *    但那里它是钻取视图里**唯一**的会话标识，窄面板下不能删。 */
+  .detail-header:has(.detail-header-actions) .detail-run-id {
     display: none;
   }
 }

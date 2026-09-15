@@ -229,6 +229,48 @@ test('T12c：「立即」→ POST /messages 带 mode=steer 且带 queue_id（不
   expect(bodies[0]).toMatchObject({ mode: 'steer', queue_id: 'q-1', content: '排队的问题' });
 });
 
+/* ── T12f：带 queue_id 的 404 说的是「排队项没了」，不是「会话没了」── */
+
+test('T12f：排队项 404 不得被说成「会话已不存在」（404 不唯一）', async ({ page }) => {
+  /* 独立复审 P1-1：`/messages` 的 404 有两个来源——会话不存在，以及带 queue_id
+   * 时目标排队项不存在（后端 `QueueItemNotFound`，ADR-0030 §5.2「queue_id 不存在
+   * → 404」，错误面见后端 `web/domain_errors.py` 的 audit 表）。
+   * 上一版修复把两者合成一句「会话已不存在（可能已被删除），请从左侧另选一个会话」，
+   * 于是「另一个标签页刚把这条排队项消费掉」这种**会话完全正常**的情形，用户会被告知
+   * 会话已被删除并被劝去离开它——事实错、下一步也错。本用例锁两者的区分。 */
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onQueueGet: (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [{ queue_id: 'q-1', content: '排队的问题', created_at: '2026-09-15T00:00:05Z' }],
+          steers: [],
+        }),
+      }),
+    // 后端实况：该项已被消费/取消 → 404 QueueItemNotFound。
+    onMessagesPost: (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: "queue item 'q-1' not found, already consumed, or cancelled" }),
+      }),
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+  await page.locator('.queue-item', { hasText: '排队的问题' }).getByRole('button', { name: '立即发送' }).click();
+
+  const err = page.locator('.app-error');
+  await expect(err).toContainText('排队项已不存在');
+  // 关键：不得把"排队项过期"谎报成"会话没了"（会话此时是好的）。
+  await expect(err).not.toContainText('会话已不存在');
+  await expect(err).not.toContainText('Send failed');
+});
+
 /* ── T12d：「编辑」是就地编辑，提交走 {content, queue_id}（ADR-0030 §5.2）── */
 
 test('T12d：「编辑」就地改内容 → POST /messages 带 queue_id + 新内容', async ({ page }) => {

@@ -181,8 +181,8 @@ const handleSubmit = useCallback((task: string) => {
 | F2 | 亮色块 `--accent` `#c96990 → #b2406e`、`--success` `#2f9e63 → #1f6b42`（并同步 `--accent-strong` / `--accent-soft` 保持层级与色调一致） | `web/src/index.css` | 自动对比度扫描：light **7 → 0** 处不达标；dark 仍 0；新增 `e2e/t-contrast.spec.ts` 语义色锁（双主题 20 用例全绿） |
 | F3 | 空态文案 `暂无用量数据（会话还没有任何运行）` → `后端未上报用量数据`；e2e 同步加断言「不得出现『还没有任何运行』」 | `web/src/components/ContextUsagePanel.tsx`、`web/e2e/context-usage.spec.ts` | `context-usage.spec.ts` T6a/T6b/T6c/T6d 全绿；后端取数口径另立 issue **#212**（不在此猜） |
 | F4 | `handleSubmit` 去掉 `!streaming` 条件（在途由后端分流：idle→launched、在途→queued） | `web/src/App.tsx` | 新增 `e2e/multiturn-queue.spec.ts` T12e；并在**真实后端**复验，见下 |
-| F5 | 头部定长/弹性分工：`.detail-header .panel-label` / `.detail-run-id` 加 `min-width:0 + nowrap + ellipsis`；`.detail-profile-badge` 同上（去掉硬上限，宽面板仍显示全名）；`.detail-header-actions` 加 `flex:none`；窄面板容器查询（<360px）隐藏 `.detail-run-id` | `web/src/styles/app.css` | 实测（面板 340 / 320 / 384 / 480 四档）：`scrollWidth == clientWidth`（368>308 → **308==308**），头部高 **99 → 36**，actions 右缘收回 384 → **324 = 内容右缘**，`run-id` 不再出现 90px 竖条；新增 `e2e/y-inspector-peek.spec.ts` **AC8** 几何锁（**已做红证**：还原 CSS 后 AC8 立刻以 `368 > 309` 失败） |
-| F6 | `/messages` 404 分支：`Send failed: 404` → `SESSION_GONE_ERROR_TEXT = 会话已不存在（可能已被删除），请从左侧另选一个会话` | `web/src/hooks/useSession.ts` | 新增 `e2e/continuation.spec.ts`「续聊 404」用例：断言出现「会话已不存在」且**不得出现** `Send failed` / `404` |
+| F5 | 头部定长/弹性分工：`.detail-header .panel-label` / `.detail-header .detail-run-id` 加 `min-width:0 + nowrap + ellipsis`；`.detail-profile-badge` 同上（去掉硬上限，宽面板仍显示全名）；`.detail-header-actions` 加 `flex:none`；窄面板容器查询（<360px）**按 run 头部作用域**（`:has(.detail-header-actions)`）隐藏 `.detail-run-id` | `web/src/styles/app.css` | 实测（面板 340 / 320 / 384 / 480 四档）：`scrollWidth == clientWidth`（368>308 → **308==308**），头部高 **99 → 36**，actions 右缘收回 384 → **324 = 内容右缘**，`run-id` 不再出现 90px 竖条；新增 `e2e/y-inspector-peek.spec.ts` **AC8** 几何锁（**已做红证**：还原 CSS 后 AC8 立刻以 `368 > 309` 失败）+ **AC9** 子会话头部锁（`:has` 作用域的红证：去掉作用域 → AC9 以 `Received: hidden` 失败） |
+| F6 | `/messages` 404 分支按 `queue_id` 分流：无 queue_id → `SESSION_GONE_ERROR_TEXT`（会话已不存在 + 另选会话）；有 `queue_id`（队列条「立即」/「编辑」）→ `QUEUE_ITEM_GONE_ERROR_TEXT`（排队项已消费/取消 + 刷新重试） | `web/src/hooks/useSession.ts` | `e2e/continuation.spec.ts`「续聊 404」（不得出现 `Send failed` / `404`）+ `e2e/multiturn-queue.spec.ts` **T12f**（不得把排队项 404 说成会话不存在；**已做红证**） |
 
 **F4 的真机复验**（不是 mock，打的是 127.0.0.1:8000 的真实 API）：
 
@@ -236,6 +236,17 @@ F1 修完之后，复审提出一条我**当时没测**的怀疑：把面板拖�
 `useSession` 落到通用分支，用户看到 `续聊失败：Send failed: 404`
 ——英文 + 裸状态码，既没说"会话没了"，也没说下一步做什么。
 422 / 409 早已各有中文分支，404 是同类路径上的漏网。
+
+**第二轮复审在这里抓到我自己引入的一个正确性退化（P1-1）**：`/messages` 的 404
+**不唯一**。同一个端点上，带 `queue_id` 的请求（队列条「立即」/「编辑」）在后端找不到
+该排队项时也回 404（`QueueItemNotFound`；错误面 audit 表见后端 `web/domain_errors.py`，
+语义见 ADR-0030 §5.2，那份 ADR 本身还专门写过"**目标不对**不能谎报成"会话不存在""）。
+我第一版把两者合成一句「会话已不存在（可能已被删除），请从左侧另选一个会话」→
+**另一个标签页刚把这条排队项消费掉**这种会话完全正常的情形，用户会被告知会话被删除、
+并被劝去离开它。事实错、下一步也错。修法：按请求是否携带 `queue_id` 分流成两条文案
+（`SESSION_GONE_ERROR_TEXT` / `QUEUE_ITEM_GONE_ERROR_TEXT`），并用 `multiturn-queue`
+新增 **T12f** 锁住区分（已做红证：改回"一律说会话不存在"后 T12f 立刻以
+`Received: 续聊失败：会话已不存在…` 失败）。
 
 ## 3. 已实测正常（逐条勾掉，避免重复测）
 

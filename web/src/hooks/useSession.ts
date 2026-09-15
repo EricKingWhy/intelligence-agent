@@ -231,8 +231,19 @@ export const CONTINUE_PARAMS_ERROR_TEXT = '续聊参数无效（422）：请刷�
 
 /** 续聊 404 的稳定文案：这个会话在后端已经不存在了（另一个标签页 / CLI / 硬删
  *  都会造成）。不是"网络故障、可以重试"——重发同一个 session_id 只会再 404，
- *  所以文案必须说明**会话本身没了**，而不是把英文的 HTTP 状态码原样抛给用户。 */
+ *  所以文案必须说明**会话本身没了**，而不是把英文的 HTTP 状态码原样抛给用户。
+ *
+ *  ⚠ 404 **不唯一**：同一个端点上，带 `queue_id` 的请求（队列条「立即」/「编辑」）
+ *  在后端找不到该排队项时也回 404 `QueueItemNotFound`（ADR-0030 §5.2
+ *  「queue_id 不存在 → 404」，audit 表见后端 `web/domain_errors.py`）。
+ *  那条路径下会话活得好好的，把它说成"会话已不存在"是**对事实的误报**，
+ *  还会把用户劝去离开一个正常的会话——所以两种 404 必须分开说，见下。 */
 export const SESSION_GONE_ERROR_TEXT = '会话已不存在（可能已被删除），请从左侧另选一个会话';
+
+/** 排队项 404 的文案（与上一条同因不同事）：目标排队项已被消费/取消/被别的
+ *  标签页处理掉了。**不是**会话问题，所以给的是"刷新后重试"这条真正可行的
+ *  下一步（终态事件与 `GET /queue` 快照都会把过期的排队条刷掉）。 */
+export const QUEUE_ITEM_GONE_ERROR_TEXT = '排队项已不存在（可能已被消费或取消），请刷新后重试';
 
 /** 「立即失败 vs 正常流式」的判别窗口（毫秒）。
  *
@@ -1017,7 +1028,11 @@ export function useSession() {
           try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
           throw new Error(detail || '存在需要人工裁决的高风险操作');
         }
-        if (res.status === 404) throw new Error(SESSION_GONE_ERROR_TEXT);
+        // 404 两个来源，分不清就会误报（见 QUEUE_ITEM_GONE_ERROR_TEXT 注释）：
+        // 带 queue_id（「立即」/「编辑」）→ 目标排队项没了；否则 → 会话没了。
+        if (res.status === 404) {
+          throw new Error(opts?.amend?.queue_id ? QUEUE_ITEM_GONE_ERROR_TEXT : SESSION_GONE_ERROR_TEXT);
+        }
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
         // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
         // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。
