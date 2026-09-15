@@ -225,9 +225,21 @@ class ProviderStore:
         """创建自定义供应商（id 冲突 = 覆盖更新，ADR-0032 §4）。
 
         带 `api_key` 的创建要么整体成功要么整体失败（凭据写失败 ⇒ 配置不落盘）。
+        覆盖内置 preset（同 id）时 **models 取并集**（按 model_id 去重，自定义
+        优先，§3.2）——"把 deepseek 指向自建代理"仍保留内置默认模型。
         """
         provider_id = self._require_id(body)
         entry = self._normalize(body, provider_id)
+        if provider_id in self._builtin_ids:
+            # 覆盖内置：models 并集（内置 preset 默认模型 + 自定义模型），去重
+            # 且自定义优先（§3.2 合并规则）。
+            from agent_harness.model.config import PROVIDER_PRESETS
+
+            builtin_model = PROVIDER_PRESETS.get(provider_id, {}).get("model_name", "")
+            builtin_rows = ([{"model_id": builtin_model}] if builtin_model else [])
+            custom_ids = {m["model_id"] for m in entry["models"]}
+            entry["models"] = [*entry["models"],
+                               *(m for m in builtin_rows if m["model_id"] not in custom_ids)]
         api_key = body.get("api_key")
         if isinstance(api_key, str) and api_key:
             self._require_credential_backend()

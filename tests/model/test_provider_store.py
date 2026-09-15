@@ -186,3 +186,23 @@ def test_store_persists_across_instances(tmp_path: Path):
     assert [e["id"] for e in second.list_entries()] == ["my-proxy"]
     # last_test 结构非密。
     assert "sk-" not in json.dumps(second.list_entries())
+
+
+# ── T4 补：models 并集（覆盖内置 §3.2） ──────────────────────────────
+
+
+def test_override_builtin_merges_models_union(store: ProviderStore):
+    """同 id 覆盖内置 ⇒ models 并集（自定义优先，内置默认模型保留）。"""
+    store.create(_body(id="deepseek", base_url="https://my-proxy.internal/v1",
+                       models=[{"model_id": "my-model"}]))
+    entry = store.get_entry("deepseek")
+    model_ids = [m["model_id"] for m in entry["models"]]
+    # 自定义优先在前列，内置默认模型 deepseek-chat 保留（并集）。
+    assert model_ids == ["my-model", "deepseek-chat"]
+
+
+def test_new_custom_provider_keeps_models_exactly(store: ProviderStore):
+    """新 id（不覆盖内置）⇒ models 原样（无内置并集）。"""
+    store.create(_body(models=[{"model_id": "only-mine"}]))
+    entry = store.get_entry("my-proxy")
+    assert [m["model_id"] for m in entry["models"]] == ["only-mine"]

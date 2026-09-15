@@ -309,6 +309,40 @@ class ModelConfig:
         return resolved
 
     @classmethod
+    def from_custom_provider(cls, settings: "Settings", provider_id: str,
+                             model_id: str, store: Any) -> "ModelConfig":
+        """按自定义供应商解析会话级模型（#203 / ADR-0032 D8）。
+
+        解析入口收敛（D8）：与 from_catalog 同层——`resolve_provider_target`
+        未命中抛 ConfigError（含 provider id，被删 provider **不静默 fallback**，
+        D9/T11）。凭据从凭据管理器取（store.credentials）；**无凭据**也是确定性
+        配置错误（快速失败，不推到首次 ainvoke）。fallback 链语义不动（ADR-0014）。
+        """
+        from agent_harness.model.provider_store import resolve_provider_target
+
+        target = resolve_provider_target(
+            store, settings_provider=provider_id, model_id=model_id,
+        )
+        if target is None:
+            raise ConfigError(
+                f"供应商 {provider_id!r} 已被删除或不包含模型 {model_id!r}，"
+                "请在模型选择器里改选模型"
+            )
+        api_key = store.credentials.get(provider_id)
+        if not api_key:
+            raise ConfigError(f"供应商 {provider_id!r} 未配置 API Key")
+        resolved = cls(
+            provider=provider_id,
+            model_name=model_id,
+            api_key=api_key,
+            base_url=target["base_url"],
+            temperature=settings.temperature,
+        )
+        # fallback 链语义不动（ADR-0014）：自定义供应商只替换 primary。
+        resolved.fallback = cls._fallback_from(settings)
+        return resolved
+
+    @classmethod
     def _single_from(
         cls, *, provider: str, model_name: str, api_key: str,
         base_url: str, temperature: float, key_env: str,

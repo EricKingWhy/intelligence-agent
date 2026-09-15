@@ -26,6 +26,7 @@ from agent_harness.model.provider_store import (
     ProviderStore,
     ProviderStoreError,
     validate_base_url,
+    validate_provider_id,
 )
 
 logger = logging.getLogger("agent_harness.model")
@@ -78,7 +79,9 @@ class ProviderPayload(BaseModel):
     @field_validator("id")
     @classmethod
     def _id_slug(cls, value: str | None) -> str | None:
-        if value is not None and not re.match(r"^[a-z0-9][a-z0-9-_]{0,63}$", value):
+        # 校验收敛到 provider_store.validate_provider_id（同一份 slug 规则，
+        # 抄第二份正则就是给漂移留门——#203 批内审查发现）。
+        if value is not None and not validate_provider_id(value):
             raise ValueError(f"provider id 必须是 slug（^[a-z0-9][a-z0-9-_]{{0,63}}$）: {value!r}")
         return value
 
@@ -99,6 +102,13 @@ class ProviderUpdatePayload(BaseModel):
         if value is not None and not validate_base_url(value):
             raise ValueError(f"base_url 必须是 http/https URL: {value!r}")
         return value
+
+
+def _now_iso() -> str:
+    """测试时刻（ISO）。last_test.at 是**测试发生时**，不是配置更新时刻。"""
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
 
 
 def _redact_detail(detail: str) -> str:
@@ -125,6 +135,11 @@ def _classify_failure(error: Exception) -> tuple[str, str]:
         return "model_or_route_not_found", _FAILURE_COPY["model_or_route_not_found"]
     if "authentication" in lower or "api key" in lower:
         return "auth_failed", _FAILURE_COPY["auth_failed"]
+    # 其他 4xx/5xx：HTTP 状态在文本里出现（openai SDK 异常文本带 status_code）。
+    if any(code in text for code in ("400", "402", "405", "406", "408", "409",
+                                     "410", "413", "415", "418", "422", "500",
+                                     "502", "503", "504")):
+        return "provider_error", f"供应商返回错误：{type(error).__name__}"
     return "network_error", f"网络不可达：{type(error).__name__}"
 
 
@@ -262,7 +277,7 @@ def register_model_provider_routes(app: FastAPI) -> None:
                       outcome="provider_test_failed", provider_id=provider_id,
                       reason=reason, duration_ms=elapsed)
             store.update(provider_id, {"last_test": {
-                "ok": False, "at": entry.get("updated_at"), "reason": reason, "detail": detail,
+                "ok": False, "at": _now_iso(), "reason": reason, "detail": detail,
             }})
             return {"ok": False, "reason": reason, "detail": detail,
                     "message": _FAILURE_COPY.get(reason, copy), "duration_ms": elapsed}
@@ -270,7 +285,7 @@ def register_model_provider_routes(app: FastAPI) -> None:
         log_event(logger, "system_log", "连接测试通过", component="model_provider",
                   outcome="provider_test_ok", provider_id=provider_id, duration_ms=elapsed)
         store.update(provider_id, {"last_test": {
-            "ok": True, "at": entry.get("updated_at"), "detail": f"200 · {elapsed}ms",
+            "ok": True, "at": _now_iso(), "detail": f"200 · {elapsed}ms",
         }})
         return {"ok": True, "message": f"连接正常 · {elapsed}ms", "duration_ms": elapsed}
 

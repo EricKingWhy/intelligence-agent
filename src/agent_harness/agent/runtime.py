@@ -634,6 +634,10 @@ class AgentRuntime:
         # 上下文——child 的 set 会覆盖父值且不会随 child 完成消失，必须显式
         # 恢复，否则父后续的 Ledger/事件归因错挂到 child 的 run_id（#87 实锤）。
         run_context_token = None
+        # 记忆注入注册表 token（#202 / ADR-0031 D4）：与 run_context_token 同一
+        # 初始化点——异常发生在两个 set 之间时 finally 引用未绑定变量会掩盖
+        # 原异常（全量回归实证：UnboundLocalError 掩盖 queue 竞态）。
+        memory_injected_token = None
         # Model Fallback + 卡流看门狗 + 并发闸：每 run 一个新 coordinator
         # （切换状态不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator
         # 退化为透传（异常原样上抛），但看门狗/并发闸对所有 run 生效。

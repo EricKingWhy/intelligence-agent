@@ -1038,6 +1038,26 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 capabilities=merged,
                 metadata_source=source,
             ))
+        # #203 / ADR-0032：自定义供应商的模型并入列表（provider = 自定义 id）。
+        # id = "<provider>:<model_id>"（与 catalog 名的命名空间不重叠）；能力位
+        # 诚实标注（无声明 ⇒ 不猜）；不可用（无凭据）⇒ is_available=false + 原因。
+        # 前端选中后经 POST /api/sessions 的 model 字段回传，解析走
+        # build_runtime 的自定义供应商分支（from_custom_provider）。
+        for provider_entry in state.provider_store.list_entries():
+            for model in provider_entry["models"]:
+                option_id = f"{provider_entry['id']}:{model['model_id']}"
+                models.append(_render_model_option(
+                    id=option_id,
+                    provider=provider_entry["id"],
+                    model_name=model["model_id"],
+                    is_default=False,
+                    capabilities=(
+                        {"display_name": model["label"]} if model.get("label") else {}
+                    ),
+                    metadata_source="custom_provider",
+                    is_available=provider_entry["is_available"],
+                    unavailable_reason=provider_entry["unavailable_reason"],
+                ))
         return {"models": models}
 
     @app.get("/api/permission-modes")

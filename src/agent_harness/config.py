@@ -118,9 +118,10 @@ class Settings(BaseSettings):
     agent_models: SecretStr = SecretStr("")
 
     # #203 / ADR-0032：自定义供应商存储。非密配置落**用户级全局** JSON
-    # （作用域 = 全局，用户裁定；**不得**放进 workspace——那是 per-session 的）；
+    # （作用域 = 全局，用户裁定；**不得**放进 workspace——那是 per-session 的；
+    # 相对路径依赖 CWD 的教训与 .env 同源，默认锚用户主目录）；
     # 密钥只进凭据管理器（keyring），该文件不含任何密钥字段。
-    provider_store_path: str = ".agent/model-providers.json"
+    provider_store_path: str = str(Path.home() / ".agent-harness" / "model-providers.json")
     # 连接测试超时（秒，§6.2）：固定参数之一，默认 15s——测试不该等 300s。
     model_test_timeout_seconds: float = 15.0
 
