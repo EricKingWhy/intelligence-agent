@@ -45,6 +45,7 @@ import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
+  createEmptySession,
   describeSessionError,
   getAgentProfiles,
   getCapabilities,
@@ -467,29 +468,42 @@ export default function App() {
     [submitTask, sendMessage, focusRun, selectedId, streaming, composerControls],
   );
 
-  /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 起一个会话，
-   *  复用 submitTask 的同一条 SSE 接线——新会话因此会被选中并跟随流，而不是另造
-   *  一条"提交后就撒手"的路径（不变量 #22：会话真相只有一条）。
+  /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 创建**空会话**
+   *  （#204 裁定 §1：launch=false，不启动 run）——会话出现，用户回主界面在 chat
+   *  输入框发第一条消息。不再走 submitTask 的 SSE 接线：launch=false 没有流可接，
+   *  submitTask 的"流已接上"语义对它不成立（也绝不进入 live 模式——空会话没有 run）。
    *
-   *  `ownError: true`：失败原因**返回给确认面**在浮层里就地显示（AC12），不打到
-   *  Workspace 区的全局横幅上；同时那条路径里的 422 不套用「未知模型」旧语义，
-   *  所以「目录不存在：…」这类后端 detail 会原样出现在用户眼前。
+   *  失败原因**返回给确认面**在浮层里就地显示（AC12），不打到 Workspace 区的全局
+   *  横幅上；422 不套用「未知模型」旧语义，后端 detail 原样出现。
    *
    *  `permissionMode === null`（默认档）→ 不进 payload → api 层不发键 → 后端
    *  默认 workspace-write + auto-approve（见 StartTaskInProjectDialog 文件头）。 */
   const handleStartTaskInProject = useCallback(
-    (project: Project, task: string, permissionMode: string | null) =>
-      submitTask(
-        {
-          task,
+    async (project: Project, permissionMode: string | null) => {
+      try {
+        const created = await createEmptySession({
           cwd: project.path,
           max_steps: 10,
           auto_approve: true,
           ...(permissionMode ? { permission_mode: permissionMode } : {}),
-        },
-        { ownError: true },
-      ),
-    [submitTask],
+        });
+        // #204 裁定 §3：用后端回传的会话级权限档初始化 composer 权限 pill——
+        // 不要各自取默认值，那正是不一致的来源（弹窗本地值只是请求意图，不参与）。
+        setSelectedPermissionMode(created.permissionMode);
+        // 空会话创建后刷新列表（会话出现在该项目分组下）。
+        await refreshSessions();
+        // #204 裁定 §1：焦点落到 chat 输入框——用户立刻可以打字（弹窗关闭后的
+        // 下一步就是在那里发第一条消息）。放在浮层关闭之后（调用方 onOpenChange
+        // 先把 Radix 焦点还回来，这里再指到输入框，否则会被浮层的关闭焦点打断）。
+        document.getElementById('composer-input')?.focus();
+        return null;
+      } catch (e) {
+        // 前缀保留 AC12 旧语义（「提交失败：目录不存在：…」→「创建会话失败：…」）：
+        // 后端 detail 原样跟在前缀后面，确认面 toHaveText 整串相等锁住它。
+        return `创建会话失败：${describeSessionError(e, '请求失败')}`;
+      }
+    },
+    [refreshSessions],
   );
 
   /* 归档 / 取消归档（#171 AC9）：把**失败原因**交回给 SessionList 就地显示，

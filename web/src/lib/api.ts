@@ -164,6 +164,62 @@ export interface StartSessionPayload {
   context_providers?: string[];
 }
 
+/** createEmptySession 的载荷（#204 裁定 §2）：只建会话、不启动 run。
+ *  `task` **刻意不在这个形状里**——launch=false + task 是矛盾组合（给了任务却
+ *  静默不执行），后端 422；类型上没有它，编译期就挡住调用方传进来。
+ *  `permission_mode` 与 startSession 同词汇（弹窗选的档 = 会话级权限）；省略 =
+ *  后端默认 workspace-write + auto-approve。 */
+export interface CreateEmptySessionPayload {
+  cwd?: string;
+  max_steps?: number;
+  auto_approve?: boolean;
+  permission_mode?: string;
+  workspace?: string;
+}
+
+/** #204：launch=false 的创建回执。`permissionMode` 是**后端真实写入的会话级档位**
+ *  （省略时是默认 workspace-write）——前端用它初始化 composer 权限 pill（裁定 §3：
+ *  不要各自取默认值，那正是不一致的来源）。 */
+export interface CreatedEmptySession {
+  sessionId: string;
+  permissionMode: string;
+}
+
+/** POST /api/sessions?launch=false —— 只建会话，不启动 run、不返回 SSE（#204）。
+ *  返回会话 JSON（刻意小形状 `{session_id, permission_mode}`）。响应缺
+ *  permission_mode 时报错而不是编默认值：pill 初始化需要后端真值，编了默认值
+ *  正是裁定 §3 要消灭的不一致来源。 */
+export async function createEmptySession(
+  payload: CreateEmptySessionPayload,
+): Promise<CreatedEmptySession> {
+  const res = await apiFetch('/api/sessions?launch=false', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(
+      buildBody(payload, {
+        workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
+        cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
+        max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+        auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
+        permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
+      }),
+    ),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `create session ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (typeof r.session_id !== 'string' || !r.session_id) {
+    throw new SessionError(res.status, 'create 会话回执缺少 session_id');
+  }
+  if (typeof r.permission_mode !== 'string' || !r.permission_mode) {
+    throw new SessionError(res.status, 'create 会话回执缺少 permission_mode（权限 pill 初始化需要它）');
+  }
+  return { sessionId: r.session_id, permissionMode: r.permission_mode };
+}
+
 /** B1 契约通用清单条目——{id, display_name, description}。
  *  四个清单端点（permission-modes / agent-profiles / reasoning-efforts /
  *  context-providers）共用此结构，与 /api/models 富化模式对齐。 */

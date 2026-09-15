@@ -184,6 +184,14 @@ export interface ApiMock {
    *  在浮层里，再设回 undefined 并重试——同一条路径因此能覆盖"可重试"。
    *  不设 = 按真后端语义成功（见 routeApi 的 POST /api/sessions 分支）。 */
   cwdSessionError?: { status: number; detail: string };
+  /** #204：launch=false（只建会话不启动 run）时伪造失败。不设 = 按真后端语义
+   *  成功：返回 `{session_id, permission_mode}` JSON（非 SSE），只写 session/started，
+   *  无 run 帧。 */
+  emptySessionError?: { status: number; detail: string };
+  /** #204 裁定 §3 考点：launch=false 响应里回传**与请求不同的** permission_mode
+   *  （模拟后端归一化/接管）——pill 必须显示**响应**的档位而不是前端本地选中值。
+   *  不设 = 回显请求的档位（缺省 workspace-write）。 */
+  emptySessionPermissionOverride?: string;
   // ── WS-7 / #170 宿主目录列举 ──
   /** 假目录树（`GET /api/host/dirs`）。**不设 = 空的根列举**（不是错误）：浏览器是
    *  新建项目对话框的一部分，不关心它的 spec 不该因此多出一条红色错误盒。
@@ -345,6 +353,51 @@ export function routeApi(page: Page, mock: ApiMock): void {
       const body = (req.postDataJSON() ?? {}) as Record<string, unknown>;
       const cwd = typeof body.cwd === 'string' ? body.cwd : '';
       if (!cwd) return route.abort('aborted');
+      // ── #204：launch=false（只建会话不启动 run）——按真后端语义（裁定 §2）：
+      //  返回 `{session_id, permission_mode}` JSON（非 SSE）、只写 session/started、
+      //  无 run 帧；给了 task 又 launch=false 是矛盾组合 → 422（照真后端）。
+      const launchFalse = new URL(req.url()).searchParams.get('launch') === 'false';
+      if (launchFalse) {
+        if (mock.emptySessionError) {
+          return json(route, { detail: mock.emptySessionError.detail }, mock.emptySessionError.status);
+        }
+        if ('task' in body) {
+          return json(
+            route,
+            { detail: 'task 与 launch=false 互斥：要么带 task 启动 run（launch=true），要么只建会话（省略 task）' },
+            422,
+          );
+        }
+        const sid = `empty-${sessionState.length + 1}`;
+        // #204 裁定 §3 考点：`emptySessionPermissionOverride` 模拟后端归一化/接管
+        // （响应档位 ≠ 请求档位）——pill 必须显示响应的档位，不是前端本地选中值。
+        const permissionMode =
+          mock.emptySessionPermissionOverride ??
+          (typeof body.permission_mode === 'string' ? body.permission_mode : 'workspace-write');
+        let project = projectState.find((p) => p.path === cwd);
+        if (!project) {
+          project = {
+            id: `p-${projectState.length + 1}`,
+            path: cwd,
+            title: cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || cwd,
+            session_ids: [],
+          };
+          projectState.unshift(project);
+        }
+        sessionState.unshift(
+          // 空会话：没有 user/message → first_user_message 为 null（真后端语义）。
+          sessionRow(sid, { id: project.id, title: project.title }, {
+            event_count: 1,
+            first_user_message: null,
+          }),
+        );
+        project.session_ids.unshift(sid); // 账本前插（与 attach 语义一致）
+        // durable log 只有一条 session/started（无 run 帧——launch=false 不启动 run）。
+        sessionEvents.set(sid, [
+          { type: 'session/started', data: { cwd, permission_mode: permissionMode }, seq: 1, session_id: sid, time: T },
+        ]);
+        return json(route, { session_id: sid, permission_mode: permissionMode });
+      }
       // ── WS-6 / #169：带 cwd 建会话 —— 按真后端语义（ADR-0027 D2/D3）真的改状态：
       //  会话诞生在该目录、自动入组（未注册的 cwd 自动注册为项目，title = 目录末段名），
       //  于是"新会话落在该项目分组下"这条断言考的是界面跟着后端语义走，
