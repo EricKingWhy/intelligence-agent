@@ -11,13 +11,19 @@
 
 # 1. 最高需求来源
 
-项目正式工程规格位于：
+项目正式 Engineering Specification 位于**当前仓库内**：
 
-`goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/`
+```text
+SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
+```
 
-绝对路径：
+下文所有 `SPEC_ROOT/xxx.md` 均指该目录。三个仓库各有一份，绝对路径各自不同，
+一律以**当前仓库根**为基准，不要抄另一个仓库的绝对路径。
 
-`D:\intelligence-agent\goal\Lightweight_Observable_Agent_Harness_Spec\docs\spec`
+**路径陷阱（勿踩）**：仓库根下另有一个 `docs/spec/`，内容是流式 UI PRD、
+`Observable_Agent_Workspace_SDD/`、`web-ui-redesign-implementation-spec.md`——
+**不是** Engineering Specification，其中不存在 `00_PROJECT_VISION.md` / `README.md`。
+凡本文件写作 `SPEC_ROOT/...` 的，一律不要简写为 `docs/spec/...`。
 
 旧的 Day / SourcePlan / Learning Plan 已失效，不再作为当前工程依据。
 
@@ -26,11 +32,11 @@
 发生冲突时按以下顺序处理：
 
 1. **用户当前明确指令**
-2. `docs/spec/00_PROJECT_VISION.md`
+2. `SPEC_ROOT/00_PROJECT_VISION.md`
 3. 当前模块对应 Engineering Specification
-4. `docs/spec/01_SYSTEM_ARCHITECTURE.md`
-5. `docs/spec/13_OPEN_SOURCE_REUSE_MATRIX.md`
-6. `docs/spec/14_IMPLEMENTATION_ROADMAP.md`
+4. `SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md`
+5. `SPEC_ROOT/13_OPEN_SOURCE_REUSE_MATRIX.md`
+6. `SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md`
 7. 当前已批准的 GitHub Issue、Matt `to-spec` 产物与 Ticket 拆分
 8. 实际代码与测试状态
 9. 历史文档
@@ -43,11 +49,11 @@
 
 首次接手本仓库时，先完整读取：
 
-1. `docs/spec/README.md`
-2. `docs/spec/00_PROJECT_VISION.md`
-3. `docs/spec/01_SYSTEM_ARCHITECTURE.md`
-4. `docs/spec/13_OPEN_SOURCE_REUSE_MATRIX.md`
-5. `docs/spec/14_IMPLEMENTATION_ROADMAP.md`
+1. `SPEC_ROOT/README.md`
+2. `SPEC_ROOT/00_PROJECT_VISION.md`
+3. `SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md`
+4. `SPEC_ROOT/13_OPEN_SOURCE_REUSE_MATRIX.md`
+5. `SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md`
 
 然后检查：
 
@@ -75,12 +81,14 @@
 
 开始一个 Task 前：
 
-1. 读取 `00_PROJECT_VISION.md` 中相关原则；
+1. 读取 `SPEC_ROOT/00_PROJECT_VISION.md` 中相关原则；
 2. 读取当前任务对应模块规格；
-3. 读取 `13_OPEN_SOURCE_REUSE_MATRIX.md` 中相关部分；
-4. 确认当前属于 `14_IMPLEMENTATION_ROADMAP.md` 哪个 Phase；
+3. 读取 `SPEC_ROOT/13_OPEN_SOURCE_REUSE_MATRIX.md` 中相关部分；
+4. 确认当前属于 `SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 哪个 Phase；
 5. 检查当前代码与测试；
 6. 再开始 Review / Debug / Implementation。
+
+下表规格文件均在 `SPEC_ROOT/` 下。
 
 模块映射：
 
@@ -195,7 +203,7 @@ Review 必须同时看：
 
 实现前必须检查：
 
-`docs/spec/13_OPEN_SOURCE_REUSE_MATRIX.md`
+`SPEC_ROOT/13_OPEN_SOURCE_REUSE_MATRIX.md`
 
 明确选择：
 
