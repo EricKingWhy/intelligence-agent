@@ -1,7 +1,7 @@
 # Phase Status — 实施进度追踪
 
 > **单一事实源**：任何 agent 进入项目前先读本文件，判断"当前做到哪里"。
-> 规格文件（`docs/spec/14_IMPLEMENTATION_ROADMAP.md` 等）保持冻结，不被进度修改。
+> 规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等，`SPEC_ROOT` 见 `AGENTS.md` §1）保持冻结，不被进度修改。
 > 每完成一个 Phase，更新本文件对应行的状态 + commit hash + Gate 证据。
 
 更新规则：

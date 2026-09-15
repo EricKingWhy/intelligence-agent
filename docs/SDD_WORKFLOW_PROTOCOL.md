@@ -55,7 +55,8 @@
 ### 1.1 单 ticket 执行
 
 1. `/implement` 完成当前 ticket。**跳过其收尾自带的 `/code-review`**（本流程改为批量审查，避免同票双审）。
-2. 每个 ticket 完成后自行 commit（**测试全绿才 commit**，commit message 描述工程事实），并在
+2. 每个 ticket 完成后自行 commit（**门禁全绿才 commit**——后端 `ruff check` + 全量 `pytest`；
+   前端五件套，命令见 §5 第 6 条。commit message 描述工程事实），并在
    `docs/SDD_TICKET_TRACKER.md` 追加记录。
 
 ### 1.2 批量审查（每 2–3 个 ticket 一次）

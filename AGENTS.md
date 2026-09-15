@@ -22,7 +22,8 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 
 **路径陷阱（勿踩）**：仓库根下另有一个 `docs/spec/`，内容是流式 UI PRD、
 `Observable_Agent_Workspace_SDD/`、`web-ui-redesign-implementation-spec.md`——
-**不是** Engineering Specification，其中不存在 `00_PROJECT_VISION.md` / `README.md`。
+**不是** Engineering Specification。那里的 `README.md` 只是本陷阱的说明文件，
+`00_PROJECT_VISION.md` / `01_SYSTEM_ARCHITECTURE.md` / `13_` / `14_` 一个都不存在。
 凡本文件写作 `SPEC_ROOT/...` 的，一律不要简写为 `docs/spec/...`。
 
 旧的 Day / SourcePlan / Learning Plan 已失效，不再作为当前工程依据。
@@ -429,7 +430,9 @@ Scope 外问题只报告，不顺手修。
 
 - 跨仓库取对象必须先 `git fetch <path 或 url>`，不得假设对方的分支 ref 在本仓库存在；
 - 三个仓库根各有一份 `AGENTS.md` / `CLAUDE.md` / `docs/**` 的 checkout，但它们**是同一个
-  tracked 文件树**——内容由 git 保证一致，**不是**三份各自维护的副本，不会自动分叉；
+  tracked 文件树**——**同一个 commit 上，三份逐字节相同**；不存在"三份各自维护的副本"。
+  （注意：不同 commit 上内容当然不同，落后未 fetch 的仓库看到的就是旧内容——那正是 §14.9
+  「集成后回补」要解决的问题，不是"副本分叉"。）
 - 真正的 linked worktree 只存在于**单个仓库内部**（`git worktree list --porcelain` 可查）；
   本仓库内可能另有 worktree，对它们只做只读检查，写操作需用户授权。
 
@@ -476,8 +479,10 @@ git add <本次任务相关文件>
 git commit -m "..."
 ```
 
-哪些动作需要用户批准、哪些是常设授权，一律按 §14.4 的分类执行
-（`merge`、`push`、删分支等仍是受控动作）。
+哪些动作需要用户批准、哪些是常设授权，一律按 §14.4 的分类执行。
+（注意 §14.4 里已有常设授权：**把 main 合回自己的分支、集成、集成后的 `push origin main`
+都不必每次重新批准**；仍需单独批准的是 feature 分支上的 push、PR merge、cherry-pick、
+revert、冲突后的 add、删分支。）
 
 完成后向用户报告：
 
@@ -648,10 +653,15 @@ Feature Branch 集成时采用「先回后正」方向：
 ```text
 origin/main
     ↓
-feature branch   ← 在这里解决 Conflict、Test、Review、Push
+feature branch   ← 在这里解决 Conflict、Test、Review（push 不在这里，见下）
     ↓
-main             ← feature branch 稳定后再合入
+main             ← feature branch 稳定后再合入 main
+    ↓
+push origin main ← 集成动作，由当前主开发执行（§14.4 常设授权）
 ```
+
+**Push 不在 feature 分支上做**：feature 分支上的 `git push` 属"向外发布未集成的工作"，
+需要用户单独批准（§14.4）。集成线只在合入 `main` 之后推。
 
 不要优先在 `main` 上解决复杂业务 Conflict。
 
@@ -685,7 +695,7 @@ main             ← feature branch 稳定后再合入
 git merge --abort
 ```
 
-然后回 Feature Worktree 解决。不在 `main` 上临时拼接复杂业务逻辑。
+然后回**该分支所属的仓库**解决。不在 `main` 上临时拼接复杂业务逻辑。
 
 ## 14.9 一次只集成一条线 + 集成后回补
 
@@ -804,15 +814,24 @@ CSS 原生没有变量组复用机制，手工双份同步是当前最小风险�
 
 # 16. SDD 长任务工作流协议（入口）
 
-> **触发条件**：用户明确要求「按顺序做剩余 tickets」「使用 SDD 方式」「每完成一个 ticket 必须 code-review」「出现 bug 用 diagnose-bug」「全部完成后用 improve-codebase-architecture」「不知道怎么做用 ask-matt」「完成后写提示词给集成 AI」。
+> **触发条件**：用户说这些话中的任意一句，就说明要按本节的 SDD 长任务协议走——
+> 「按顺序做剩余 tickets」「使用 SDD 方式」「每完成一个 ticket 必须 code-review」
+> 「出现 bug 用 diagnose-bug」「全部完成后用 improve-codebase-architecture」
+> 「不知道怎么做用 ask-matt」「完成后写提示词给集成 AI」。
+>
+> **触发词按用户原话保留，但它们描述的是"何时进入本协议"，不是"具体怎么做"**：
+> 例如「每完成一个 ticket 必须 code-review」这句里的流程细节早已被 v2 取代
+> （现在是每 2–3 票批量审，见下）；「diagnose-bug」在本环境的实际 skill 名是
+> `diagnosing-bugs`。**实际流程一律以下面的权威文件为准。**
 
 **本节不复制流程细节。触发后第一个动作是读权威文件：**
 
 1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前生效流程（**v2：批量审查循环**；v1 的
-   「每票一次 `/code-review`、修复后循环到零 finding」**已作废**）；
-2. `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、批次、fixed point、审查结论。
+   「每票一次 `/code-review`、修复后循环到零 finding」**已作废**）。**它是 SDD 流程的唯一权威**；
+2. `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、批次、fixed point、审查结论（**记录事实，不定义流程**）。
 
-两者若与本文件不一致，**以它们为准**（本节只是入口）。
+三份文件若有冲突：**流程以 `docs/SDD_WORKFLOW_PROTOCOL.md` 为准**，事实记录以 tracker 为准，
+本节只是入口，不参与裁决。注意「集成 AI」是历史叫法——现在集成与 push 由**当前主开发**执行（§14.4）。
 
 **自愈条款**：上下文被压缩 / 不记得批次边界 / 不确定当前在循环哪一步
 → 重读上面两份文件，**禁止凭记忆继续施工**。

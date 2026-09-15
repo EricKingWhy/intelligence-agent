@@ -17,7 +17,8 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 ```
 
 **路径陷阱**：仓库根下另有一个 `docs/spec/`，那是流式 UI 规格族，**不是** Engineering
-Specification（`00_PROJECT_VISION.md` / `README.md` 都不在它里面）。
+Specification。那里的 `README.md` 只是本陷阱的说明文件——`00_PROJECT_VISION.md`
+`01_SYSTEM_ARCHITECTURE.md` / `13_` / `14_` 一个都不在它里面。
 详见 `AGENTS.md` §1 与 `docs/spec/README.md`。
 
 首次进入的阅读协议、每个 task 的阅读协议、模块 → 规格映射表、需求冲突优先级：
@@ -156,7 +157,8 @@ GitHub Issues：`EricKingWhy/intelligence-agent`
 
 - 多 Agent 协作：`AGENTS.md` §11；
 - 仓库模型（三个独立 clone、main 是稳态、短分支）：`AGENTS.md` §13；
-- Git 授权分类（免批准 / 需批准 / 默认禁止）：`AGENTS.md` §14.4；
+- Git 授权分类：`AGENTS.md` §14.4（常设授权 / 需批准 / 默认禁止）；
+  只读且无需批准的 Git 命令清单在 §14.3；
 - 跨仓库两条硬规则（文件级避让、跨 clone 比较用 git 对象）：`AGENTS.md` §14.13；
 - SDD 长任务流程：`docs/SDD_WORKFLOW_PROTOCOL.md`（**唯一权威**，`AGENTS.md` §16 只是入口）。
 
