@@ -12,17 +12,24 @@
 三个目录是**独立 clone**，不是同一个 worktree。**`D:\intelligence-agent` 里本地的
 `feat/backend` / `feat/frontend` 是过期的**，真实成果在这两个 clone 的本地分支上：
 
-| 目录 | branch | 真实 HEAD | 说明 |
-| --- | --- | --- | --- |
-| `D:\intelligence-agent-backend` | `feat/backend` | `e62b5d8` | **真实后端成果**（本批 + #194–#204 全部） |
-| `D:\intelligence-agent-frontend` | `feat/frontend` | `a3afd18` | **真实前端成果**（本批 + #194–#204 全部） |
-| `D:\intelligence-agent` | `main` | `9ce0b47` | 集成目标；其本地 `feat/*`（`80d49e1` / `2b51914`）**陈旧，别用来合并** |
+| 目录 | branch | 说明 |
+| --- | --- | --- |
+| `D:\intelligence-agent-backend` | `feat/backend` | **真实后端成果**（本批 + #194–#204 全部） |
+| `D:\intelligence-agent-frontend` | `feat/frontend` | **真实前端成果**（本批 + #194–#204 全部） |
+| `D:\intelligence-agent` | `main` | 集成目标；其**本地** `feat/*` 陈旧，**别用来合并** |
+
+**HEAD 请现场解析，不要照抄本文件的数字**（本 Agent 每次补文档都会推进 HEAD）：
+
+```bash
+git -C D:/intelligence-agent-backend  rev-parse --short HEAD   # 后端真实 HEAD
+git -C D:/intelligence-agent-frontend rev-parse --short HEAD   # 前端真实 HEAD
+```
 
 **已核验的关系（本次实测）**：
 
-- `D:\intelligence-agent` 本地 `feat/backend`(`80d49e1`) **是** backend clone `e62b5d8` 的祖先 → 可 fast-forward；
-- `D:\intelligence-agent` 本地 `feat/frontend`(`2b51914`) **是** frontend clone `a3afd18` 的祖先 → 可 fast-forward；
-- 同理 `origin/feat/backend`(`9727344`) / `origin/feat/frontend`(`3706e9b`) 也都是各自 clone HEAD 的祖先。
+- main 仓库本地 `feat/backend`(`80d49e1`) **是** backend clone HEAD 的祖先 → 可 fast-forward；
+- main 仓库本地 `feat/frontend`(`2b51914`) **是** frontend clone HEAD 的祖先 → 可 fast-forward；
+- 同理当前 `origin/feat/backend`(`9727344`) / `origin/feat/frontend`(`3706e9b`) 也都是各自 clone HEAD 的祖先。
 
 ⇒ **不要复用 main worktree 里的旧 `feat/*` 分支去 merge**（会漏掉全部新成果）。
 推荐做法见 §2：直接从 clone 拉取，或先把 clone 的分支更新进 main 仓库再合并。
@@ -33,15 +40,14 @@
 
 ### 1.1 commit 清单
 
+**本批代码 commit（内容锚点，SHA 稳定不变）**：
+
 | 端 | commit | 说明 |
 | --- | --- | --- |
 | 后端 | `d2aa803` | `refactor(review)`：结构复审修复（used_tokens 漏报 + 去重 + 单一接缝） |
-| 后端 | `19809b5` | 进度记录 PHASE_STATUS |
-| 后端 | `22cc01d` | 集成提示词 + 引用修正 |
-| 后端 | `e62b5d8` | 合并前后端集成提示词为单篇 + 更新主分支引用 |
 | 前端 | `f766848` | `refactor(review)`：供应商多模型编辑 + 队列条动作带 queue_id |
-| 前端 | `df4c851` | 进度记录 SDD_TICKET_TRACKER + 集成提示词 |
-| 前端 | `a3afd18` | tracker 指向合并篇 + 删除前半分文档 |
+
+其后每端还有若干 **docs-only commit**（进度登记 + 本集成提示词），只改 `docs/`，不碰代码。
 
 clone HEAD 相对 `origin/main` 的**完整**增量：backend **22 个 commit**（#196/#195、#200、#202、#198、#203、#204、终审修复、本批复审修复），frontend **28 个 commit**（同批次前端半 + 本批）。即本批是压在这些之上的**增量**，前面各批此前已关单、证据在 `docs/PHASE_STATUS.md` / `docs/SDD_TICKET_TRACKER.md`。
 
@@ -70,8 +76,8 @@ git -C $FE   diff origin/main...feat/frontend --stat | tail -3
 # 直接把 clone 的 HEAD 拉到 main 仓库的对应分支（FF，已核验可 FF）：
 git -C $MAIN fetch $BE feat/backend:feat/backend      # 若报非 FF，见 §2.1 备选
 git -C $MAIN fetch $FE feat/frontend:feat/frontend
-git -C $MAIN log --oneline -1 feat/backend            # 期望 e62b5d8
-git -C $MAIN log --oneline -1 feat/frontend           # 期望 a3afd18
+git -C $MAIN log --oneline -1 feat/backend            # 应等于 backend clone 的 HEAD
+ git -C $MAIN log --oneline -1 feat/frontend           # 应等于 frontend clone 的 HEAD
 
 # ---------- 2) 合 backend ----------
 git -C $MAIN checkout main
@@ -97,8 +103,8 @@ git -C $MAIN push origin main                          # ← 需要用户批准
 
 ```bash
 # 用 main 上的分支指向 clone 的 HEAD（同样不 push，逐条需批准）
-git -C $MAIN branch -f feat/backend  e62b5d8
-git -C $MAIN branch -f feat/frontend a3afd18
+git -C $MAIN branch -f feat/backend  $(git -C D:/intelligence-agent-backend  rev-parse HEAD)
+git -C $MAIN branch -f feat/frontend $(git -C D:/intelligence-agent-frontend rev-parse HEAD)
 ```
 若 Integrator 更希望走 GitHub PR 流程，则先在两个 clone 里 `git push origin feat/backend` / `push origin feat/frontend`，再开 PR——**但 ADR/§13.3 的默认是不走这条路**，本地 main 先验证。
 
