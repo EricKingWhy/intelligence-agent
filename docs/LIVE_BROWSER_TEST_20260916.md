@@ -47,6 +47,8 @@ VectorStoreError('Memory vector store: unavailable')`（Milvus 不可用）。
 | F2 | P2 | 亮色主题文字对比度 | ≥ WCAG AA（正文 4.5 / 大字 3.0） | **7 处不达标**（暗色 0 处） | 前端 CSS | 见 §2.2 | **已修**（§2.5） |
 | F3 | P2 | 上下文容量看板（#200） | 「未采集」应如实说未采集 | 对 **16 个 run / 3865 事件**的会话显示「暂无用量数据**（会话还没有任何运行）**」——归因与事实相反 | 前端文案 + 后端聚合 | 见 §2.3 | 文案**已修**；后端聚合**未动**（§2.5 说明理由） |
 | F4 | **P1** | 流式中发消息（Enter / 发送按钮） | 排队到当前会话（按钮 title 明写「Enter 排队」） | **另造一个新会话**；队列条从未渲染，无任何 queue 请求 | 前端提交分派 | 见 §2.4 | **已修**（§2.5） |
+| F5 | P2 | Inspector 头部（长档位名） | 头部一行装得下：徽标单行、控制按钮在面板内可点 | 面板 **340 默认宽**下 `scrollWidth 368 > clientWidth 308`：`N runs · M 事件` 被压成 30px 宽 × **90px 高（7 行）竖条**，头部高 36 → 99，**关闭按钮被顶出面板右缘 44px（视口外，点不到）** | 前端 CSS | 见 §2.6 | **已修**（§2.5） |
+| F6 | P3 | 续聊时会话已在后端删除 | 说清「会话没了」并给出下一步 | 独立复审发现：`.app-error` 显示 `续聊失败：Send failed: 404`——英文 + 裸状态码 | 前端文案 | 见 §2.7 | **已修**（§2.5） |
 
 ### 2.1 F1 — Inspector 状态徽标逐字折行（P2，前端）
 
@@ -158,9 +160,14 @@ const handleSubmit = useCallback((task: string) => {
 `submitTask`——它的语义是**创建新会话**。于是：
 
 - 与 **ADR-0030 §5.1** 直接冲突（Enter = queue）；
-- `Composer` 的队列 UI（`.queue-bar` / 排队 / 引导 / 立即 / 取消）与后端
-  `GET /queue`、`POST /queue/flush`、`POST /queue/{id}/cancel` 全部成为**不可达代码**；
+- `Composer` 的队列 UI（`.queue-bar` / 排队 / 引导 / 立即 / 取消）在这条路径上
+  **永远渲染不出来**（前端入口不可达）；
 - 用户对进行中任务的追问被拆成一个无上下文的新会话。
+
+> 措辞校正（独立复审 P3-3）：上面说的是**前端入口**不可达，不是"后端端点成了死代码"。
+> `GET /queue`、`POST /queue/flush`、`POST /queue/{id}/cancel` 是正常的 API 面，
+> CLI / 其他客户端始终可调用，它们本就**不经过** `handleSubmit`；当时的实测结论是
+> 「浏览器里发不出队列请求」（`queue` 请求计数 0），不是「端点在服务端不存在」。
 
 `api.ts` 侧的通道是齐的：`sendMessage` 的 payload 支持 `mode: 'queue' | 'steer'`，
 注释还明写「在途会话 → queued 入队（JSON），消息在下个 run 自然消费」。
@@ -171,9 +178,11 @@ const handleSubmit = useCallback((task: string) => {
 | # | 改动 | 文件 | 回归证据 |
 | --- | --- | --- | --- |
 | F1 | `.run-badge` 加 `flex: none; white-space: nowrap` | `web/src/styles/app.css` | 实测几何 48×66 → **62×27**（与时间线头部同值），头部高度 75 → 55 |
-| F2 | 亮色块 `--accent` `#c96990 → #b2406e`、`--success` `#2f9e63 → #23774a`（并同步 `--accent-strong` / `--accent-soft` 保持层级与色调一致） | `web/src/index.css` | 自动对比度扫描：light **7 → 0** 处不达标；dark 仍 0 |
-| F3 | 空态文案 `暂无用量数据（会话还没有任何运行）` → `后端未上报用量数据`；e2e 同步加断言「不得出现『还没有任何运行』」 | `web/src/components/ContextUsagePanel.tsx`、`web/e2e/context-usage.spec.ts` | `context-usage.spec.ts` T6a/T6b/T6c/T6d 全绿 |
+| F2 | 亮色块 `--accent` `#c96990 → #b2406e`、`--success` `#2f9e63 → #1f6b42`（并同步 `--accent-strong` / `--accent-soft` 保持层级与色调一致） | `web/src/index.css` | 自动对比度扫描：light **7 → 0** 处不达标；dark 仍 0；新增 `e2e/t-contrast.spec.ts` 语义色锁（双主题 20 用例全绿） |
+| F3 | 空态文案 `暂无用量数据（会话还没有任何运行）` → `后端未上报用量数据`；e2e 同步加断言「不得出现『还没有任何运行』」 | `web/src/components/ContextUsagePanel.tsx`、`web/e2e/context-usage.spec.ts` | `context-usage.spec.ts` T6a/T6b/T6c/T6d 全绿；后端取数口径另立 issue **#212**（不在此猜） |
 | F4 | `handleSubmit` 去掉 `!streaming` 条件（在途由后端分流：idle→launched、在途→queued） | `web/src/App.tsx` | 新增 `e2e/multiturn-queue.spec.ts` T12e；并在**真实后端**复验，见下 |
+| F5 | 头部定长/弹性分工：`.detail-header .panel-label` / `.detail-run-id` 加 `min-width:0 + nowrap + ellipsis`；`.detail-profile-badge` 同上（去掉硬上限，宽面板仍显示全名）；`.detail-header-actions` 加 `flex:none`；窄面板容器查询（<360px）隐藏 `.detail-run-id` | `web/src/styles/app.css` | 实测（面板 340 / 320 / 384 / 480 四档）：`scrollWidth == clientWidth`（368>308 → **308==308**），头部高 **99 → 36**，actions 右缘收回 384 → **324 = 内容右缘**，`run-id` 不再出现 90px 竖条；新增 `e2e/y-inspector-peek.spec.ts` **AC8** 几何锁（**已做红证**：还原 CSS 后 AC8 立刻以 `368 > 309` 失败） |
+| F6 | `/messages` 404 分支：`Send failed: 404` → `SESSION_GONE_ERROR_TEXT = 会话已不存在（可能已被删除），请从左侧另选一个会话` | `web/src/hooks/useSession.ts` | 新增 `e2e/continuation.spec.ts`「续聊 404」用例：断言出现「会话已不存在」且**不得出现** `Send failed` / `404` |
 
 **F4 的真机复验**（不是 mock，打的是 127.0.0.1:8000 的真实 API）：
 
@@ -185,8 +194,8 @@ QUEUEFIX 队列 UI = queue-bar :: 排队 | 追加一句：只回答 ok
 事件流末段 = queue/consumed → text/delta → model/completed → run/completed
 ```
 
-即：流式中按 Enter 现在**入队**，排队条渲染出真实条目（此前是不可达代码），
-排队项由**同一会话**的下一个 run 消费。
+即：流式中按 Enter 现在**入队**，排队条渲染出真实条目（修复前它在浏览器里
+根本渲染不出来——见上面 F4 的措辞校正），排队项由**同一会话**的下一个 run 消费。
 
 **F3 为什么只改了文案、没动后端聚合**：`used_tokens` 的语义是**当前上下文窗口占用**，
 不是「本次会话累计花掉的 token」。后者（339,182）可以从 `model/completed.usage` 求和，
@@ -194,8 +203,43 @@ QUEUEFIX 队列 UI = queue-bar :: 排队 | 追加一句：只回答 ok
 正确的修法是后端定义清楚「窗口占用」的取数口径（例如以最后一个 run 的
 `prompt_tokens` 近似），而那属于契约决策，按 `AGENTS.md` §9.1 应当先报告再动手，
 不在这里替后端猜。**上一句是本次唯一一处"发现问题但故意不修"**，它是待决项而非遗留缺陷。
+待决项已开单：[#212](https://github.com/EricKingWhy/intelligence-agent/issues/212)（含四个候选口径与"顺带确认 #200 三态接线是否真的生效"）。
 
-## 3. 已实测正常（逐条勾掉，避免重复测）| 区域 | 控件 / 场景 | 实测结论 |
+### 2.6 F5 — Inspector 头部长档位名溢出（P2，前端，独立复审追加）
+
+F1 修完之后，复审提出一条我**当时没测**的怀疑：把面板拖到最小、换成长档位名，
+头部会不会溢出/被裁。实测（`web/e2e` 临时诊断规格 + 真实后端跑 `agent_profile=research_review`
+的 run，面板 340 宽、内容区 308）：
+
+| 头部子项 | 相对面板 x | 高 | 结论 |
+| --- | --- | --- | --- |
+| `.panel-label`（Run Inspector） | 16..93 | 38 | 折成两行 |
+| `.run-badge`（已完成） | 93..155 | 27 | 单行（F1 修复保持） |
+| `.detail-profile-badge`（research_review） | 155..281 | 27 | 126px，不可收缩 |
+| `.detail-run-id`（1 runs · 3 事件） | 281..**311** | **90** | **被压成 30px 宽 × 7 行竖条** |
+| `.detail-header-actions` | 311..**384** | 21 | **越出面板右缘 44px** |
+
+根因是两类宽度需求混在一条 flex 行里、且**两类都没被正确声明**：
+
+- 定长项（状态徽标 / 档位徽标 / 控制按钮）没有 `flex: none`，会被压缩；
+- 弹性文本（标题 / `runs·事件`）没有 `min-width: 0`，既截不了自己，又去挤压定长项。
+  `runs·事件` 更特殊：中文可**逐字断行**，它的 min-content 只有一个汉字宽，
+  于是被压成 7 行竖条，把头部从 36px 撑到 99px，并把 `.detail-header-actions`
+  顶出面板——**关闭按钮跑到视口外，物理上点不到**（Playwright 的可操作性检查会直接超时）。
+
+所以这不是"轻微溢出"，而是**默认宽度下就能触发的控件不可达**；
+默认档位名短（`main` / 旧数据「档位未知」）刚好把它掩盖住了。
+
+### 2.7 F6 — 续聊时会话已被删除的报错文案（P3，前端，独立复审追加）
+
+会话在别处被删（另一个标签页 / CLI / 硬删）后追问，`/messages` 返回 404，
+`useSession` 落到通用分支，用户看到 `续聊失败：Send failed: 404`
+——英文 + 裸状态码，既没说"会话没了"，也没说下一步做什么。
+422 / 409 早已各有中文分支，404 是同类路径上的漏网。
+
+## 3. 已实测正常（逐条勾掉，避免重复测）
+
+| 区域 | 控件 / 场景 | 实测结论 |
 | --- | --- | --- |
 | 外壳 | 首屏加载 | 标题正确；会话行 **88** 条；空态「暂无对话」可见 |
 | 外壳 | 能力门控 | `Split`/`Preview`/`Context Providers` 均 **0 个**（#182/#201 已删除，不报缺失） |
