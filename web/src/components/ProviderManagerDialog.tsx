@@ -29,7 +29,9 @@ import {
   updateModelProvider,
   type ModelProviderEntry,
   type ProviderTestResult,
+  type ProviderUpsert,
 } from '../lib/api';
+import { normalizeProviderModels, type ProviderModelRow } from '../lib/providerModels';
 
 interface Props {
   open: boolean;
@@ -182,7 +184,14 @@ function ProviderForm({
   const [id, setId] = useState(entry?.id ?? '');
   const [label, setLabel] = useState(entry?.label ?? '');
   const [baseUrl, setBaseUrl] = useState(entry?.base_url ?? '');
-  const [modelId, setModelId] = useState(entry?.models[0]?.model_id ?? '');
+  // 每行 = model_id + 可选 label（ADR-0032 §8.1 原文）。**保留 label**：整表替换式
+  // PUT 下漏掉它就是把用户已有的显示名静默删掉（与"只编辑 models[0] 丢掉其余模型"
+  // 是同一类数据丢失）。
+  const [models, setModels] = useState<ProviderModelRow[]>(
+    entry?.models.map((m) => ({ model_id: m.model_id, label: m.label ?? '' })) ?? [
+      { model_id: '', label: '' },
+    ],
+  );
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -200,12 +209,13 @@ function ProviderForm({
     setPending(true);
     setError(null);
     try {
-      const payload = {
+      // 模型列表：空行丢弃、按 model_id 去重、label 随行保留。规整逻辑在
+      // lib/providerModels（纯函数，单测钉住数据丢失类回归）。
+      const payload: Omit<ProviderUpsert, 'id'> = {
         base_url: baseUrl,
-        models: modelId.trim() ? [{ model_id: modelId.trim() }] : [],
-        // 留空 = 不改（不是清除）；仅填写了新值才发送（ADR-0032 §8.2）。
+        models: normalizeProviderModels(models),
+        // 留空 = 不改（不是清除）；仅填写了新值才发送键（ADR-0032 §8.2）。
         ...(apiKey ? { api_key: apiKey } : {}),
-        ...(isEdit ? {} : { api_key: apiKey }),
       };
       if (isEdit) {
         await updateModelProvider(entry!.id, payload);
@@ -303,14 +313,53 @@ function ProviderForm({
         />
       </div>
       <div className="provider-field">
-        <label className="project-field-label" htmlFor="provider-model">模型</label>
-        <input
-          id="provider-model"
-          className="project-input"
-          value={modelId}
-          onChange={(e) => setModelId(e.target.value)}
-          placeholder="模型名，如 deepseek-chat"
-        />
+        <span className="project-field-label" id="provider-models-label">模型列表</span>
+        <div className="provider-model-list" role="group" aria-labelledby="provider-models-label">
+          {models.map((row, index) => (
+            // key 用下标：行身份就是位置（行可增删、值可重复输入），用 value 做 key
+            // 会让"改一个字"整行重挂载、丢掉输入焦点。
+            <div className="provider-model-row" key={index}>
+              <input
+                className="project-input mono"
+                value={row.model_id}
+                onChange={(e) =>
+                  setModels((rows) =>
+                    rows.map((r, i) => (i === index ? { ...r, model_id: e.target.value } : r)))
+                }
+                placeholder="模型名，如 deepseek-chat"
+                aria-label={`模型 ${index + 1} 名称`}
+              />
+              <input
+                className="project-input provider-model-label"
+                value={row.label}
+                onChange={(e) =>
+                  setModels((rows) =>
+                    rows.map((r, i) => (i === index ? { ...r, label: e.target.value } : r)))
+                }
+                placeholder="显示名（可选）"
+                aria-label={`模型 ${index + 1} 显示名`}
+              />
+              <button
+                type="button"
+                className="provider-key-toggle"
+                onClick={() => setModels((rows) => rows.filter((_, i) => i !== index))}
+                // 至少留一行：删空后表单没有可编辑目标，用户会以为控件消失。
+                disabled={models.length === 1}
+                aria-label={`删除模型 ${index + 1}`}
+                title="删除这一行"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="provider-link-btn"
+          onClick={() => setModels((rows) => [...rows, { model_id: '', label: '' }])}
+        >
+          <Plus size={12} aria-hidden="true" /> 添加模型
+        </button>
       </div>
       <div className="provider-field">
         <label className="project-field-label" htmlFor="provider-key">API Key</label>

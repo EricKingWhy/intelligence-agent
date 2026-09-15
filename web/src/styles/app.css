@@ -3043,6 +3043,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 2px;
 }
+/* §5.2 就地编辑输入：占满条目正文的位置（与 .queue-item-content 同一 flex 位），
+   视觉上与队列条同高，不撑高整条。 */
+.queue-item-edit {
+  flex: 1;
+  min-width: 0;
+  padding: 2px var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--color-foreground);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.queue-item-edit:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .queue-item-btn {
   display: inline-flex;
   align-items: center;
@@ -6258,6 +6274,25 @@ button.json-row {
   align-items: center;
 }
 .provider-key-row .project-input { flex: 1; }
+/* 模型列表多行编辑（ADR-0032 §8.1：可增删行）。行与 key-row 同布局，复用
+   provider-key-toggle 的按钮外观——删除行与显示/隐藏密钥是同一级别的行内小按钮。 */
+.provider-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.provider-model-row {
+  display: flex;
+  gap: var(--space-xs);
+  align-items: center;
+}
+.provider-model-row .project-input { flex: 1; }
+/* 显示名比模型名窄一档（模型名是必填且更长）。 */
+.provider-model-row .provider-model-label { flex: 0 0 34%; }
+.provider-key-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .provider-key-toggle {
   display: inline-flex;
   padding: 7px;

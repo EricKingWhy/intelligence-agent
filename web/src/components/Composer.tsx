@@ -7,7 +7,7 @@
  */
 
 import { memo, useEffect, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Brain, Pencil, Play, Shield, Square, User, X, Zap } from 'lucide-react';
+import { ArrowUp, Brain, Check, Pencil, Play, Shield, Square, User, X, Zap } from 'lucide-react';
 import type { PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
@@ -51,8 +51,9 @@ interface Props {
   onSteerItem?: (item: UndeliveredInput) => void;
   /** 「取消」= POST /sessions/{sid}/queue/{queue_id}/cancel。 */
   onCancelItem?: (item: UndeliveredInput) => void;
-  /** 「编辑」= 就地编辑排队项（App 打开编辑态）。 */
-  onEditItem?: (item: UndeliveredInput) => void;
+  /** 「编辑」= 就地编辑该排队项（ADR-0030 §5.2）：提交后走
+   *  `POST /messages {content, queue_id}`（后端取消旧项 + 按 mode 重新投递）。 */
+  onEditItem?: (item: UndeliveredInput, newContent: string) => void;
   /** ADR-0030 §4.6「立即发送」：立刻投递队首待发送输入（POST /queue/flush）。
    *  缺席 = 不渲染按钮（重启后手动投递是 ADR 明确的前端职责）。 */
   onFlush?: () => void;
@@ -85,6 +86,10 @@ export const Composer = memo(function Composer({
   onFlush,
 }: Props) {
   const [value, setValue] = useState('');
+  // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
+  // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
 
   // ADR-0030 §5.1 D10：`locked` 拆开——approvalPending 仍禁用（等待审批时输入
   // 无意义且与审批 UI 竞争）；streaming **不再**禁用。issue #196 的根因正是
@@ -143,16 +148,75 @@ export const Composer = memo(function Composer({
         <div className="queue-bar" role="list" aria-label="待发送消息">
           {undelivered.map((item) => (
             <div key={item.id} className="queue-item" role="listitem" data-queue-id={item.id}>
+              {editingId === item.id && item.kind === 'queue' ? (
+                /* §5.2 就地编辑：该行原地换成输入框 + 保存/取消，不弹模态、
+                   不回填主输入框（回填 + 取消原项会让"取消"变成不可逆的丢条目）。 */
+                <>
+                  <input
+                    className="queue-item-edit"
+                    value={editDraft}
+                    autoFocus
+                    aria-label="编辑排队消息内容"
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.preventDefault();
+                        setEditingId(null);
+                        return;
+                      }
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        const trimmed = editDraft.trim();
+                        if (!trimmed) return;
+                        onEditItem?.(item, trimmed);
+                        setEditingId(null);
+                      }
+                    }}
+                  />
+                  <span className="queue-item-actions">
+                    <button
+                      className="queue-item-btn"
+                      onClick={() => {
+                        const trimmed = editDraft.trim();
+                        if (!trimmed) return;
+                        onEditItem?.(item, trimmed);
+                        setEditingId(null);
+                      }}
+                      aria-label="保存排队消息"
+                      title="保存这一条"
+                    >
+                      <Check size={13} />
+                    </button>
+                    <button
+                      className="queue-item-btn"
+                      onClick={() => setEditingId(null)}
+                      aria-label="取消编辑"
+                      title="取消编辑（不改动这条）"
+                    >
+                      <X size={13} />
+                    </button>
+                  </span>
+                </>
+              ) : (
+                <>
               <span className={`queue-item-badge queue-item-${item.kind}`}>
                 {item.kind === 'steer' ? '引导' : '排队'}
               </span>
               <span className="queue-item-content" title={item.content}>
                 {item.content.length > 40 ? `${item.content.slice(0, 40)}…` : item.content}
               </span>
+              {/* 三个动作只给**排队项**（ADR-0030 §5.2 的原文就是"每个排队项显示…
+                  编辑/立即/取消"）。steer 项没有对应后端通道：取消/编辑都以 queue_id
+                  定位（`cancel_queue` 只认 kind=queue），渲染出来点了就是静默 404。
+                  等 steer 撤回有后端语义时再补（本票不加半条通道）。 */}
+              {item.kind === 'queue' && (
               <span className="queue-item-actions">
                 <button
                   className="queue-item-btn"
-                  onClick={() => onEditItem?.(item)}
+                  onClick={() => {
+                    setEditingId(item.id);
+                    setEditDraft(item.content);
+                  }}
                   disabled={!onEditItem}
                   aria-label="编辑排队消息"
                   title="编辑这条排队消息"
@@ -178,6 +242,9 @@ export const Composer = memo(function Composer({
                   <X size={13} />
                 </button>
               </span>
+              )}
+                </>
+              )}
             </div>
           ))}
           {/* §4.6「立即发送全部」：重启后/空闲时手动投递（POST /queue/flush）。

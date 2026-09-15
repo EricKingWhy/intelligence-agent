@@ -186,3 +186,88 @@ test('T12b：首屏补齐（GET /queue）→ 队列条渲染排队/引导徽标�
   await expect(item.getByRole('button', { name: '立即发送' })).toBeVisible();
   await expect(item.getByRole('button', { name: '取消排队消息' })).toBeVisible();
 });
+
+/* ── T12c：「立即」必须带 queue_id（ADR-0030 §5.2 升级为 steer，先取消原项）── */
+
+test('T12c：「立即」→ POST /messages 带 mode=steer 且带 queue_id（不重复投递）', async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onQueueGet: (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [{ queue_id: 'q-1', content: '排队的问题', created_at: '2026-09-15T00:00:05Z' }],
+          steers: [],
+        }),
+      }),
+    onMessagesPost: (route) => {
+      bodies.push(JSON.parse(route.request().postData() ?? '{}'));
+      // steer 带 queue_id → 后端先取消原项、再注册 steer；steered JSON 确认。
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'steered', mode: 'steer' }),
+      });
+    },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const item = page.locator('.queue-item', { hasText: '排队的问题' });
+  await item.getByRole('button', { name: '立即发送' }).click();
+
+  await expect.poll(() => bodies.length).toBe(1);
+  // 关键回归：queue_id 必须随请求带上——不带的话原排队项仍在队列里，
+  // 终态驱动会把同一条内容再投递一次（同句被处理两遍）。
+  expect(bodies[0]).toMatchObject({ mode: 'steer', queue_id: 'q-1', content: '排队的问题' });
+});
+
+/* ── T12d：「编辑」是就地编辑，提交走 {content, queue_id}（ADR-0030 §5.2）── */
+
+test('T12d：「编辑」就地改内容 → POST /messages 带 queue_id + 新内容', async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onQueueGet: (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [{ queue_id: 'q-1', content: '排队的问题', created_at: '2026-09-15T00:00:05Z' }],
+          steers: [],
+        }),
+      }),
+    onMessagesPost: (route) => {
+      bodies.push(JSON.parse(route.request().postData() ?? '{}'));
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'queued', mode: 'queue' }),
+      });
+    },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const item = page.locator('.queue-item', { hasText: '排队的问题' });
+  await item.getByRole('button', { name: '编辑排队消息' }).click();
+  // 就地编辑：该行原地变成输入框（不回填主 composer）。
+  const editBox = page.getByLabel('编辑排队消息内容');
+  await expect(editBox).toBeVisible();
+  await expect(editBox).toHaveValue('排队的问题');
+  await editBox.fill('改过的问题');
+  await page.getByRole('button', { name: '保存排队消息' }).click();
+
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toMatchObject({ queue_id: 'q-1', content: '改过的问题' });
+  // 主输入框没有被回填（就地编辑的语义边界）。
+  await expect(page.getByLabel('Agent 任务')).toHaveValue('');
+});
