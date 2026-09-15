@@ -84,6 +84,22 @@ git -C $MAIN push origin main                    # ← 需要用户批准
 起连锁）。已确认两点：① 它始于**本次未改动**的用例；② 在本次改动前就出现过（旧日志 `fz10.log`）。
 ⇒ 属测试基础设施的资源竞争，与本修复无关，也不影响全量门禁（集成后 main 全量 0 failed）。
 
-## 5. 我未做、留给你的动作
+## 5. 落地后请在 `docs/PHASE_STATUS.md` 追加一条记录
+
+`docs/PHASE_STATUS.md` 的唯一事实源在 **main**（你上一轮的集成记录 `9b95e4f` 就在那里）；
+clone 上的副本是集成前版本，**不要**从 clone 带 PHASE_STATUS，以免与 main 的记录打架。
+请在 main 上追加（格式 §16.5）：
+
+```markdown
+- 2026-09-15：**队列 HTTP 用例收尾竞态修复（既有 flake，非产品 bug）**。commit `<cherry-pick sha>`。
+  `test_get_queue_and_flush_roundtrip` 原被登记为"约 1/5 既有 flake"，集成 AI 复测 5 跑 4 败
+  提出质疑——复核确认是**确定性竞态**（`_wait_idle` 非只读，其 idle 回执只证明"无待投递输入"，
+  不证明 run 已收口；测试手工 append 的 queued 被 run 终态回调接力投递）；另发现两条 supersede
+  用例只断言 `status==409`，与 ActiveRunConflict 不可区分（假通过）。修法：`_empty_session()`
+  作确定性起点 + 补 detail 断言。验证：目标用例隔离各 25 跑全绿；全量 2382 passed / 0 failed；
+  变异测试（永不投递）目标用例变红。手册 §2 `--ours` 错写与 §6 描述一并订正。
+```
+
+## 6. 我未做、留给你的动作
 
 `git cherry-pick` / `git merge` / `git push` —— **全部未执行**（AGENTS.md §13.2 / §14.4）。
