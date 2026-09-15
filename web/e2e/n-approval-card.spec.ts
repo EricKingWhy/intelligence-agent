@@ -52,7 +52,7 @@ const HEAD: FrameSpec[] = [
 ];
 
 async function openCard(page: import('@playwright/test').Page, frames: FrameSpec[], sent: unknown[]) {
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     onApprovePost: async (route) => {
       // 同时记 URL 路径：只断请求体会漏掉「打到别的会话」的回归（本 spec 的 route 正则
@@ -282,7 +282,7 @@ test('permission/resolved 把卡片从待决队列移除（不渲染）', async 
 test('POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错误提示', async ({ page }) => {
   const approveCalls: unknown[] = [];
   const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     onApprovePost: async (route) => {
       approveCalls.push(route.request().postDataJSON());
@@ -324,7 +324,7 @@ test('POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错�
 test('POST 409 → 幂等成功，卡片翻「已批准」', async ({ page }) => {
   const approveCalls: unknown[] = [];
   const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     onApprovePost: async (route) => {
       approveCalls.push(route.request().postDataJSON());
@@ -362,7 +362,7 @@ test('POST 409 → 幂等成功，卡片翻「已批准」', async ({ page }) =>
 test('POST 404 → 只读失效态（404 不是幂等已决，也不是可重试错误）', async ({ page }) => {
   const approveCalls: unknown[] = [];
   const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     onApprovePost: async (route) => {
       approveCalls.push(route.request().postDataJSON());

@@ -54,6 +54,9 @@ class FakeWebSocket {
   fireRaw(data: string): void {
     this.onmessage?.({ data });
   }
+  fireError(): void {
+    this.onerror?.();
+  }
   fireClose(): void {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.();
@@ -219,10 +222,115 @@ describe('wsStreamResponse — 游标与收尾', () => {
     await vi.waitFor(() => expect(sock.readyState).toBe(FakeWebSocket.CLOSED));
   });
 
-  it('socket 异常关闭 → 流收尾（由上层按 terminalSeen 决定收尾还是重连）', async () => {
+  it('socket 异常关闭（已收到服务帧）→ 流收尾，由上层按 terminalSeen 决定收尾还是重连', async () => {
     const reader = openStream();
+    // 先收到服务帧 = WS 这条链路是通的：此后断流是「流本身的事」，交给上层重连
+    //（换一条新 WS 更可能成功），不是传输不可用。
+    socket.fire({ type: 'server_ping' });
     socket.fireClose();
     expect(await readEvent(reader)).toBeNull();
+  });
+});
+
+/** 降级路径：WS 建连阶段一个服务帧都没收到 = 传输不可用（代理拒 Upgrade / CSP）。 */
+describe('wsStreamResponse — WS 不可用时降级到 HTTP SSE', () => {
+  /** 假 SSE 响应（真 Response + 真 ReadableStream：降级是**字节级搬运**，得用真流证）。 */
+  function sseResponse(text: string, status = 200): Response {
+    return new Response(text, {
+      status,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  }
+
+  it('零服务帧 + onerror → 改走 GET /stream（携带同一游标），响应体原样搬进流', async () => {
+    const sse = 'data: {"type":"text/delta","data":{"text":"hi"},"seq":3}\n\n';
+    const fetchMock = vi.fn(async () => sseResponse(sse));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const reader = openStream(7);
+    socket.fireError();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    // 游标必须一致：降级补的是同一截，不能从头发（会把历史重放一遍）
+    const url = String((fetchMock.mock.calls[0] as unknown[])[0]);
+    expect(url).toContain('/api/sessions/s-1/stream?after_seq=7');
+    expect((await readEvent(reader))?.seq).toBe(3);
+    expect(await readEvent(reader)).toBeNull(); // 搬完即收尾
+
+    // error/close 成对到来是常态：不能二次降级（第二次降级会把流搅乱）
+    socket.fireClose();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  });
+
+  it('零服务帧 + 直接 close（Upgrade 握手被拒）→ 同样降级', async () => {
+    const fetchMock = vi.fn(async () => sseResponse('data: {"type":"run/started","seq":1}\n\n'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const reader = openStream();
+    socket.fireClose(); // 没有 onerror，只有 close（握手被代理拒掉就是这个形状）
+
+    expect((await readEvent(reader))?.type).toBe('run/started');
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  });
+
+  it('连 WebSocket 都构造不出来（CSP / 非 WS 环境）→ 直接降级', async () => {
+    vi.stubGlobal('WebSocket', class {
+      constructor() {
+        throw new Error('blocked by CSP');
+      }
+    });
+    const fetchMock = vi.fn(async () => sseResponse('data: {"type":"run/started","seq":2}\n\n'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = wsStreamResponse(sid);
+    const reader = res.body!.getReader();
+    expect((await readEvent(reader))?.seq).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('降级本身也失败（网络故障）→ 流以错误收尾，不静默悬挂', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('network down');
+    }));
+    const reader = openStream();
+    socket.fireError();
+
+    await expect(reader.read()).rejects.toThrow(/SSE 降级请求也失败：network down/);
+  });
+
+  it('降级拿到非 2xx（如会话被删的 404）→ 流以错误收尾', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse('', 404)));
+    const reader = openStream();
+    socket.fireClose();
+
+    await expect(reader.read()).rejects.toThrow(/SSE 降级 404/);
+  });
+
+  it('已收到服务帧后断流 → **不**降级（WS 是通的，由上层重连换新连接）', async () => {
+    const fetchMock = vi.fn(async () => sseResponse('data: {"type":"a","seq":1}\n\n'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const reader = openStream();
+    socket.fire({ type: 'server_ping' }); // 服务帧 = 链路可用
+    socket.fireClose();
+
+    expect(await readEvent(reader)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('cancel() 之后 socket 关闭 → 不降级（切走会话不该再发一条 SSE 请求）', async () => {
+    const fetchMock = vi.fn(async () => sseResponse(''));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = wsStreamResponse(sid);
+    const handle = consumeSSE(res, () => {}, () => {});
+    const sock = FakeWebSocket.instances[0];
+    sock.fireOpen();
+
+    handle.cancel();
+    sock.fireClose();
+    sock.fireError();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

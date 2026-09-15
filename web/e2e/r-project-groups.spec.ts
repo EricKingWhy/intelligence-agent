@@ -68,7 +68,7 @@ async function openSessionMenu(page: Page, sessionId: string) {
 
 test('AC1/AC2：项目 → 会话层级按账本手工序渲染；未分组区可点开、可继续对话', async ({ page }) => {
   let sent: Record<string, unknown> | null = null;
-  routeApi(page, {
+  await routeApi(page, {
     sessions: baseSessions(),
     projects: [P1, P2],
     events: FREE_EVENTS,
@@ -108,7 +108,7 @@ test('AC1/AC2：项目 → 会话层级按账本手工序渲染；未分组区�
 });
 
 test('AC3：新建项目输入绝对路径；路径不存在 → 就地给出清晰错误', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: baseSessions(),
     projects: [P1],
     projectMissingPaths: ['D:/nope/missing'],
@@ -137,7 +137,7 @@ test('AC3：新建项目输入绝对路径；路径不存在 → 就地给出清
 });
 
 test('AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: baseSessions(),
     projects: [{ id: 'p1', path: 'D:/repos/alpha', title: '项目 alpha', session_ids: ['s1', 's2', 's3'] }],
   });
@@ -207,7 +207,7 @@ test('加入项目被后端拒绝时（409 会话 cwd 与项目路径不一致�
   // 这条是"归属由 cwd 决定"的证明：会话不能靠界面被塞进一个它不属于的项目。
   // 真机上 409 由后端给出（自由会话的 cwd 与项目路径不同），e2e 用拦截口伪造。
   const detail = "会话 'free-1' 的工作目录与项目「项目 alpha」不一致（账本按会话 cwd 判定成员资格）";
-  routeApi(page, {
+  await routeApi(page, {
     sessions: baseSessions(),
     projects: [P1],
     onAttachPost: async (route) => {
@@ -241,7 +241,7 @@ test('加入项目被后端拒绝时（409 会话 cwd 与项目路径不一致�
 });
 
 test('AC5：删除项目明示"只解除分组"，删除后会话仍在且落到未分组', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: baseSessions(),
     projects: [P1, P2],
   });
@@ -276,7 +276,7 @@ test('AC5：删除项目明示"只解除分组"，删除后会话仍在且落到
 test('项目列表端点失败时不隐藏会话：全部落到未分组 + 一条可重试的错误条', async ({ page }) => {
   // 后端不可用/契约失效时的降级：项目区消失但**一行都不丢**（比"项目也看不见、会话
   // 也看不见"好）；错误条给出重试入口。这条是 buildRailModel「绝不丢行」的 e2e 证据。
-  routeApi(page, { sessions: baseSessions(), events: FREE_EVENTS });
+  await routeApi(page, { sessions: baseSessions(), events: FREE_EVENTS });
   // 注意注册顺序：Playwright 后注册的路由优先，所以这条 502 必须**在 routeApi 之后**
   // 注册才能盖住 `**/api/**` 里的默认实现。
   await page.route('**/api/projects', (route) =>
@@ -304,7 +304,7 @@ test('项目列表端点失败时不隐藏会话：全部落到未分组 + 一�
 });
 
 test('会话行不因进入项目而看到假的"已分组"：行 tooltip 区分未分组', async ({ page }) => {
-  routeApi(page, { sessions: baseSessions(), projects: [P1, P2] });
+  await routeApi(page, { sessions: baseSessions(), projects: [P1, P2] });
   await page.goto('/');
   // 未分组行的 title 带「· 未分组」；项目内行不带——同一份列表里两种状态可区分。
   await expect(ungrouped(page).locator('.session-item')).toHaveAttribute('title', /未分组/);
@@ -316,7 +316,7 @@ test('会话行不因进入项目而看到假的"已分组"：行 tooltip 区分
 
 test('UI-05：真空态 → Rail 头部是文字按钮 + 空态文案带行动链接（不再指路到不存在的实体）', async ({ page }) => {
   // 真·空态：无会话、无项目（与空态文案自洽，不复现「请求失败也算空」的矛盾）
-  routeApi(page, { sessions: [], projects: [] });
+  await routeApi(page, { sessions: [], projects: [] });
   await page.goto('/');
   await page.setViewportSize({ width: 1440, height: 900 });
 
@@ -344,7 +344,7 @@ test('UI-05：真空态 → Rail 头部是文字按钮 + 空态文案带行动�
 });
 
 test('UI-05：有会话或项目时回退 icon-only 按钮（aria-label 定位）', async ({ page }) => {
-  routeApi(page, { sessions: baseSessions(), projects: [P1] });
+  await routeApi(page, { sessions: baseSessions(), projects: [P1] });
   await page.goto('/');
   await expect(page.locator('.rail-empty-btn-primary')).toHaveCount(0);
   await expect(page.locator('button[aria-label="新建项目"]')).toBeVisible();
@@ -365,7 +365,7 @@ test.describe('窄屏 ≤820px：项目级操作（#179）', () => {
   test.use({ viewport: { width: 800, height: 900 } });
 
   test('项目头不再整块收起：⋯ 菜单可达且菜单项与宽屏一致', async ({ page }) => {
-    routeApi(page, { sessions: baseSessions(), projects: [P1] });
+    await routeApi(page, { sessions: baseSessions(), projects: [P1] });
     await page.goto('/');
 
     const head = project(page, '项目 alpha').locator('.rail-project-head');
@@ -391,7 +391,7 @@ test.describe('窄屏 ≤820px：项目级操作（#179）', () => {
   });
 
   test('窄屏重命名真的落到后端（PATCH 后重取仍在，不是本地改名）', async ({ page }) => {
-    routeApi(page, { sessions: baseSessions(), projects: [P1] });
+    await routeApi(page, { sessions: baseSessions(), projects: [P1] });
     await page.goto('/');
 
     await openProjectMenu(page, '项目 alpha');

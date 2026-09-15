@@ -28,7 +28,7 @@ import {
 } from './fixtures';
 
 test('#199：两级结构 + 鼠标悬停展开 + 选中回写 trigger', async ({ page }) => {
-  routeApi(page, { sessions: [], events: [], models: MODELS });
+  await routeApi(page, { sessions: [], events: [], models: MODELS });
   await page.goto('/');
 
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');
@@ -62,7 +62,7 @@ test('#199：两级结构 + 鼠标悬停展开 + 选中回写 trigger', async ({
 });
 
 test('#199：键盘 `→` 进二级、Esc 逐级退出；选中项带 aria-checked', async ({ page }) => {
-  routeApi(page, { sessions: [], events: [], models: MODELS });
+  await routeApi(page, { sessions: [], events: [], models: MODELS });
   await page.goto('/');
 
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');
@@ -107,7 +107,7 @@ test('#199：键盘 `→` 进二级、Esc 逐级退出；选中项带 aria-check
 });
 
 test('#199：Esc 不写回未确认的选择（打开 → 移动 → Esc → trigger 不变）', async ({ page }) => {
-  routeApi(page, { sessions: [], events: [], models: MODELS });
+  await routeApi(page, { sessions: [], events: [], models: MODELS });
   await page.goto('/');
 
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');
@@ -130,7 +130,7 @@ test('#199：Esc 不写回未确认的选择（打开 → 移动 → Esc → tri
 
 test('#199：长目录不再需要搜索框——provider 分组就是导航', async ({ page }) => {
   // SEARCHABLE_MODELS：5 个模型 / 4 个 provider。
-  routeApi(page, { sessions: [], events: [], models: SEARCHABLE_MODELS });
+  await routeApi(page, { sessions: [], events: [], models: SEARCHABLE_MODELS });
   await page.goto('/');
 
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');

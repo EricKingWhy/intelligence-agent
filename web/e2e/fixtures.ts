@@ -31,6 +31,111 @@ export async function fulfillSse(route: Route, frames: FrameSpec[]): Promise<voi
   await route.fulfill({ status: 200, contentType: 'text/event-stream', body: frames.map(sseFrame).join('') });
 }
 
+/** ── WS 接流 mock（#206）──
+ *
+ *  live 流的**真实**通道是 `GET /api/ws`（交付层会把整个 HTTP 响应攒到流结束才下发，
+ *  详见 `web/src/lib/wsStream.ts` 的实测表：POST 44.2s / GET 41.6s 才到响应头）。
+ *  `page.route` 拦不到 WebSocket —— 不 mock 这条通道，界面在 e2e 里就没有可用的
+ *  实时通道：握手落到 vite dev server 上失败 → 前端降级回 SSE → 于是「接流/重连」
+ *  类断言考的是**降级路径**，不是用户真实走的路径。
+ *
+ *  这里按真后端的下行契约答话（`web/websocket.py`）：
+ *
+ *      subscribe(sid) → snapshot{events, has_active_run} → event* → done
+ *
+ *  缺省剧本 = 该会话没有在途 run：快照即全量（`has_active_run:false`，客户端按约定
+ *  立即收尾，不空转也不重连）。有 `frames` = 有在途 run（`has_active_run:true`，
+ *  客户端据此保持收流），送完帧再补 `done`——与旧 `fulfillSse` 的「帧 + 包体结束」
+ *  等价，因此原有 spec 的语义不用改。
+ *
+ *  快照事件与 `GET /events` **同源**（`sessionEvents` / `mock.events`）：真后端两者
+ *  读同一份 durable 日志，mock 若各说各话，就会出现"接流补的帧和历史对不上"这种
+ *  只在 mock 里存在的现象。
+ *
+ *  心跳不模拟：客户端只应答 `server_ping`（不依赖它维持连接），模拟它没有观测价值。 */
+export interface WsScript {
+  /** 快照事件。缺省 = 与 `GET /events` 同源（sessionEvents / mock.events）。 */
+  events?: FrameSpec[];
+  /** 快照之后逐帧下发（= 在途 run 的增量）。给了它 ⇒ `has_active_run: true`。 */
+  frames?: FrameSpec[];
+  /** 显式声明快照的 `has_active_run`。缺省 = 有 `frames` 就 true。
+   *  「有在途 run 但本地游标之后暂时没新事件」（模型在思考）要用它——此时连接
+   *  保持、不发 done，界面应维持在生成态。 */
+  hasActiveRun?: boolean;
+  /** 快照 + frames 之后怎么收场：
+   *  - `done`（缺省）= 送 done 收尾（等价旧 `fulfillSse` 的「帧 + 包体结束」）；
+   *  - `keep` = 连接保持（真后端在 run 未收口时就是这样；考「停摆」「等待提示」
+   *    需要它，`route.fulfill` 给不出长连接）；
+   *  - `drop` = 直接断开、**不送 done**（真实网络断线）——重连类用例的起点。 */
+  ending?: 'done' | 'keep' | 'drop';
+  /** 首次下行前延迟（毫秒）：考「断线条延迟显示」「接流补帧」的时序。 */
+  delayMs?: number;
+  /** 一个帧都不发就关闭（服务端/代理拒掉这条订阅）：考零服务帧路径。 */
+  closeNow?: boolean;
+}
+
+export type WsProvider = (ctx: {
+  sessionId: string;
+  /** 第几次接流（从 1 数）——区分「首次接流」与「重连/刷新后接流」。 */
+  call: number;
+}) => WsScript | undefined | Promise<WsScript | undefined>;
+
+/** 装 WS 接流 mock（在 `routeApi` 内调用——快照要与 /events 同源，只有那里拿得到
+ *  `sessionEvents`）。`page.routeWebSocket` 与 `page.route` 走同一条命令通道，
+ *  命令按发出顺序生效，所以 `void` 掉它再 `page.goto` 也不会漏接（spec 无需 await）。 */
+async function installWsRoute(
+  page: Page,
+  mock: ApiMock,
+  sessionEvents: Map<string, FrameSpec[]>,
+): Promise<void> {
+  let calls = 0;
+  await page.routeWebSocket(/\/api\/ws$/, (ws) => {
+    ws.onMessage((raw) => {
+      let msg: { type?: string; session_id?: string };
+      try {
+        msg = JSON.parse(String(raw)) as typeof msg;
+      } catch {
+        return;
+      }
+      if (msg.type !== 'subscribe' || !msg.session_id) return; // pong / 未知上行：忽略
+      const sessionId = msg.session_id;
+      calls += 1;
+      const call = calls;
+      void (async () => {
+        const script = await mock.onWs?.({ sessionId, call });
+        if (script?.closeNow) {
+          ws.close();
+          return;
+        }
+        if (script?.delayMs) await new Promise((r) => setTimeout(r, script.delayMs));
+        const events = script?.events ?? sessionEvents.get(sessionId) ?? mock.events ?? [];
+        const frames = script?.frames ?? [];
+        const active = script?.hasActiveRun ?? frames.length > 0;
+        ws.send(
+          JSON.stringify({
+            type: 'snapshot',
+            session_id: sessionId,
+            events,
+            has_active_run: active,
+          }),
+        );
+        for (const f of frames) {
+          ws.send(JSON.stringify({ type: 'event', session_id: sessionId, event: f }));
+        }
+        // run 收口 → 服务端 relay task 下行 done（真后端在带终态帧后就是这么收尾的）。
+        // `hasActiveRun: true` 而未声明 ending 也照样收尾：脚本没说要保持，就当成
+        // 「这些帧之后 run 结束了」——比留一条永远不说话的连接更不容易误导出假绿。
+        const ending = script?.ending ?? 'done';
+        if (ending === 'drop') {
+          ws.close(); // 异常收尾：没有 done（客户端只能靠 terminalSeen 判断）
+        } else if (active && ending === 'done') {
+          ws.send(JSON.stringify({ type: 'done', session_id: sessionId }));
+        }
+      })();
+    });
+  });
+}
+
 export interface ApiMock {
   /** GET /api/sessions（会话列表） */
   sessions?: unknown[];
@@ -45,8 +150,9 @@ export interface ApiMock {
   models?: unknown[];
   /** POST /api/sessions（live 流） */
   onSessionPost?: (route: Route) => Promise<void> | void;
-  /** GET /api/sessions/{id}/stream?after_seq=N（重连续传） */
-  onStreamGet?: (route: Route) => Promise<void> | void;
+  /** `GET /api/ws` 的接流剧本（每次 `subscribe` 调用一次；第 N 次 = 第 N 次接流）。
+   *  缺省 = 会话无在途 run：快照即全量、立即收尾（见 `WsScript`）。 */
+  onWs?: WsProvider;
   // ── Phase 2b Composer control row（Ticket F1/B1）──
   /** GET /api/permission-modes（权限模式清单） */
   permissionModes?: unknown[];
@@ -86,6 +192,9 @@ export interface ApiMock {
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/queue/flush（「立即发送全部」）。缺省 404——该端点
+   *  此前没有 mock（也无人调用）。 */
+  onFlushPost?: (route: Route) => Promise<void> | void;
   /** POST /api/sessions/{id}/model（T7 #137 模型切换；缺省 200 → 回传请求的
    *  provider/model_id，即真实端点的「规范 model_id」形状）。
    *  注入此回调即可**计数**或延迟响应（BUG-011 回归锁：双击只允许一个请求；
@@ -264,7 +373,13 @@ export const rowOf = (page: Page, sessionId: string) =>
     .locator('.session-row')
     .filter({ has: page.locator('.session-item-id', { hasText: sessionId }) });
 
-export function routeApi(page: Page, mock: ApiMock): void {
+/** 装 API mock（HTTP 路由 + WS 接流通道）。
+ *
+ *  ⚠ **必须 `await`**：WS 通道的注册（`page.routeWebSocket`）是异步的，且要早于
+ *  第一次导航——漏掉 await 时它不会报错，只会**不生效**：界面连不上 mock 的 WS，
+ *  悄悄走 SSE 降级路径（帧被攒到流结束），于是「接流/重连」类断言考的东西整个换了
+ *  一条路。表现是 spec 失败（onWs 剧本不触发），不会假绿。 */
+export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
   // ── WS-5 #155：可变状态（每测试一份，互不串味）──
   // 注意 sessions **持有调用方数组的引用**，不拷贝：既有 spec 的约定是"fork 成功后
   // 往自己的 sessions 数组里 push child，下一次 GET 就能看到"（b-fork.spec.ts 依赖
@@ -282,6 +397,10 @@ export function routeApi(page: Page, mock: ApiMock): void {
   const sessionEvents = new Map<string, FrameSpec[]>();
   /** `GET /api/sessions` 的次数（`sessionsListFailAfter` 用；见该分支注释）。 */
   let listCalls = 0;
+
+  // WS 接流通道（#206）：必须与 page.route 同时就位——界面一旦进 live 态就接 WS，
+  // 漏掉这条通道只会让它悄悄走 SSE 降级路径（见 installWsRoute 的注释）。
+  await installWsRoute(page, mock, sessionEvents);
 
   /** 后端 `web/projects.py::Project` 的响应形状（时间戳不是本车道断言的对象）。 */
   const projectView = (p: ProjectFixture) => ({
@@ -533,7 +652,8 @@ export function routeApi(page: Page, mock: ApiMock): void {
       });
     }
     if (/^\/api\/sessions\/[^/]+\/stream$/.test(path)) {
-      if (mock.onStreamGet) return mock.onStreamGet(route);
+      // 实时流的 HTTP 通道：界面已改走 WS（#205），这条路只剩降级兜底
+      //（WS 建连失败时前端自己会回来要）。spec 要驱动实时流请用 `onWs`。
       return route.abort('aborted');
     }
     if (path === '/api/models') {
@@ -596,6 +716,11 @@ export function routeApi(page: Page, mock: ApiMock): void {
         body: JSON.stringify({ items: [], steers: [] }),
         contentType: 'application/json',
       });
+    }
+    if (/^\/api\/sessions\/[^/]+\/queue\/flush$/.test(path) && req.method() === 'POST') {
+      if (mock.onFlushPost) return mock.onFlushPost(route);
+      // 真后端：无在途 run 且队列空 → idle JSON；本车道默认照 idle 答。
+      return json(route, { status: 'idle' });
     }
     if (/^\/api\/sessions\/[^/]+\/queue\/[^/]+\/cancel$/.test(path) && req.method() === 'POST') {
       if (mock.onQueueCancelPost) return mock.onQueueCancelPost(route);

@@ -30,10 +30,22 @@
  *   （契约「重放帧与 live 帧做同一 seq 幂等投影」）。`model/started` /
  *   `model/delta` 是 stream-only（seq=null、从不落库），不会出现在快照里，
  *   故 null-seq 帧无需去重也不会重复。
+ *
+ * ## WS 不可用时：自动降级到 HTTP SSE
+ *
+ * WS 不是所有部署都能用（前置代理可能拒掉 Upgrade 握手）。**建连阶段一个服务帧
+ * 都没收到**就失败 = 传输不可用 → 用同一个 `after_seq` 改走
+ * `GET /sessions/{id}/stream`，把 SSE 响应体逐字节搬进本流。降级后帧会被交付层
+ * 攒到 run 结束（慢，但**能用**：答案照样落进界面），比「连接中断」横幅诚实。
+ *
+ * 两种失败**不**降级，因为它们恰恰证明 WS 是通的：
+ * - 已经收到过服务帧（快照/事件/心跳）后断流 —— 那是流本身的问题，交给上层的
+ *   重连状态机（换一条新 WS 更可能成功）；
+ * - 服务端 `error` 帧（如会话不存在 / 快照失败）—— 同上。
  */
 
 import type { AgentEvent } from '../types';
-import { listSessions } from './api';
+import { listSessions, streamSession } from './api';
 // 终态集合**不另抄一份**：runState.ts 是「这个 run 收口了吗」的唯一判断点
 // （T8 加 run/interrupted 时三处各自枚举集体漂移，见那里的注释）。
 import { RUN_TERMINAL_TYPES } from './runState';
@@ -59,6 +71,10 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
   let closed = false;
   let maxSeq = afterSeq;
   let terminalTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 收到的**服务帧**数（快照/事件/心跳/错误都算）。0 = 建连就没成功过。 */
+  let serverFrames = 0;
+  /** 已切到 SSE 降级：旧 socket 的后续事件（error/close 会成对来）一律忽略。 */
+  let fallbackStarted = false;
 
   const teardown = () => {
     if (terminalTimer !== null) {
@@ -89,19 +105,63 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
           /* 上层已取消：controller 已失效，静默 */
         }
       };
-      const emit = (event: unknown) => {
+      const emitRaw = (chunk: Uint8Array) => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(chunk);
         } catch {
           /* controller 已关闭 */
         }
+      };
+      const emit = (event: unknown) => {
+        emitRaw(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
+
+      /** WS 建连阶段就失败（零服务帧）→ 降级到 HTTP SSE，字节原样搬运。
+       *  只降级一次：失败后 `serverFrames` 置非零，再失败就走 settle。 */
+      const fallbackToSse = async (cause: string) => {
+        let res: Response;
+        try {
+          res = await streamSession(sessionId, afterSeq);
+        } catch (e) {
+          settle(new Error(`${cause}；SSE 降级请求也失败：${(e as Error).message}`));
+          return;
+        }
+        if (!res.ok || !res.body) {
+          settle(new Error(`${cause}；SSE 降级 ${res.status}`));
+          return;
+        }
+        const reader = res.body.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done || closed) break;
+            if (value) emitRaw(value);
+          }
+          settle();
+        } catch (e) {
+          settle(e instanceof Error ? e : new Error(String(e)));
+        }
+      };
+
+      /** 失败收口：零服务帧 = WS 传输不可用 → 降级；否则按流失败上报。 */
+      const fail = (err: Error | null) => {
+        if (closed || fallbackStarted) return;
+        if (serverFrames > 0) {
+          settle(err ?? undefined);
+          return;
+        }
+        fallbackStarted = true;
+        teardown();
+        void fallbackToSse(err ? err.message : 'WebSocket 不可用');
       };
 
       try {
         sock = new WebSocket(wsEndpoint());
       } catch (e) {
-        settle(e as Error);
+        // 构造就抛（CSP / 非 WS 环境）：没有任何 socket 可关，直接降级
+        fallbackStarted = true;
+        void fallbackToSse((e as Error).message);
         return;
       }
       const s = sock;
@@ -118,6 +178,7 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
         } catch {
           return; // 非 JSON 帧（理论上不存在）：忽略，不污染流
         }
+        serverFrames += 1;
 
         switch (frame.type) {
           case 'server_ping':
@@ -166,9 +227,10 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
         }
       };
 
-      s.onerror = () => settle(new Error('ws error'));
-      // 异常关闭：不冒充自然终结——让 onStreamEnd 依 terminalSeen 决定收尾还是重连
-      s.onclose = () => settle();
+      s.onerror = () => fail(new Error('ws error'));
+      // 异常关闭：不冒充自然终结——让 onStreamEnd 依 terminalSeen 决定收尾还是重连。
+      // 建连阶段就关（握手被拒）走 fail → 降级；已在流的关闭按原语义收口。
+      s.onclose = () => fail(null);
     },
     cancel() {
       // 上层 cancel()（导航离开 / 显式断开 / 重连前静默断开）
@@ -232,5 +294,26 @@ export async function sessionIdBaseline(): Promise<Set<string> | null> {
     return new Set(rows.map((r) => r.session_id));
   } catch {
     return null;
+  }
+}
+
+/** 会话是否还在。重连接流失败时用来分辨两种失败：
+ *
+ *  - **会话已不存在** —— 重试多少次都是同样的结局（旧语义：HTTP 404 → 停止重连
+ *    + 「会话不存在」文案，不空转）；
+ *  - **瞬时故障** —— 退避重试有意义。
+ *
+ *  为什么需要它：WS 的错误帧只有一句 message（`snapshot failed` / id 非法），
+ *  不含状态码；HTTP SSE 的 404 又会被降级层抹平成流错误。**存在性**是唯一
+ *  在两套传输下口径一致的判据。
+ *
+ *  列表读不到时返回 `true`（当作还在）：把「读不到」误报成「已删」，会让一次
+ *  列表抖动直接掐断一条本来能自愈的重连链。 */
+export async function sessionExists(sessionId: string): Promise<boolean> {
+  try {
+    const rows = await listSessions({ includeArchived: true });
+    return rows.some((r) => r.session_id === sessionId);
+  } catch {
+    return true;
   }
 }

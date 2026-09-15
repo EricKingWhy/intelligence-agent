@@ -1,13 +1,13 @@
 /** 场景 E（spec 01 §22 + 契约 §3）：断连重连——流异常收尾（无终态）→
- *  断线状态条 → GET /stream?after_seq=lastApplied 重放续传 → 终态收尾；
+ *  断线状态条 → 重新订阅 WS 并补齐缺口（快照按本地游标去重）→ 终态收尾；
  *  重放帧经 seenSeqs 去重（无缝无重复），显式 cancel 不触发重连（T5）。 */
 
 import { expect, test } from '@playwright/test';
 import { RUN, SID, T, routeApi, fulfillSse, submitTask, type FrameSpec } from './fixtures';
 
-test('断连重连：断线条在场 → after_seq 续传 → 文本无重复 → 收尾清条', async ({ page }) => {
-  const streamUrls: string[] = [];
-  routeApi(page, {
+test('断连重连：断线条在场 → 重新订阅补齐缺口 → 文本无重复 → 收尾清条', async ({ page }) => {
+  const wsSessions: string[] = [];
+  await routeApi(page, {
     // 初始流：部分帧后异常收尾（不伪造终态——重连信号）
     onSessionPost: (route) => fulfillSse(route, [
           { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
@@ -24,14 +24,11 @@ test('断连重连：断线条在场 → after_seq 续传 → 文本无重复 �
       { type: 'text/delta', data: { delta: '有座山' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
       { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
     ],
-    // 重连：延迟 > 800ms 断线条显示阈值；重放 (after_seq, cursor] 零重叠 + 新帧
-    onStreamGet: async (route) => {
-      streamUrls.push(route.request().url());
-      await new Promise((r) => setTimeout(r, 1500));
-      await fulfillSse(route, [
-        { type: 'text/delta', data: { delta: '有座山' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
-        { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
-      ]);
+    // 重连：延迟 > 800ms 断线条显示阈值才考得到「条在场」；快照按缺省剧本给全量
+    // durable 事件（1..6），其中 ≤ 本地游标(4) 的由客户端自己滤掉 → 零重叠。
+    onWs: ({ sessionId }) => {
+      wsSessions.push(sessionId);
+      return { delayMs: 1500 };
     },
   });
 
@@ -46,7 +43,6 @@ test('断连重连：断线条在场 → after_seq 续传 → 文本无重复 �
   expect(text).toContain('从前');
   expect(text).toContain('有座山');
   expect(text.match(/从前/g)).toHaveLength(1);
-  // 重连契约：after_seq = 本地已应用最大 seq（4）——重放自 5 起，零重叠
-  expect(streamUrls).toHaveLength(1);
-  expect(new URL(streamUrls[0]).searchParams.get('after_seq')).toBe('4');
+  // 重连契约：重新订阅**同一个会话**，且只订阅一次（单飞守卫）
+  expect(wsSessions).toEqual([SID]);
 });

@@ -22,7 +22,7 @@ const WIDTHS = [1440, 1280, 1024, 820, 768];
 
 for (const width of WIDTHS) {
   test(`Composer control row 在 ${width}px 宽度下不溢出`, async ({ page }) => {
-    routeApi(page, {
+    await routeApi(page, {
       sessions: [],
       events: [],
       permissionModes: PERMISSION_MODES,
@@ -52,7 +52,7 @@ for (const width of WIDTHS) {
 }
 
 test('Composer control row 在浅色模式下可见', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES,
@@ -94,7 +94,7 @@ test('Inspector 时间线 run 分组头 + 头标对齐（UI-03）', async ({ pag
     { type: 'user/message', data: { content: '第二轮' }, seq: 6, session_id: 'e2e-two-run', run_id: 'r2', step_id: 2, time: T0 },
     { type: 'text/delta', data: { delta: '完成' }, seq: 7, session_id: 'e2e-two-run', run_id: 'r2', step_id: 2, time: T0 },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [ROW2],
     events: EVENTS2,
     permissionModes: PERMISSION_MODES,

@@ -39,7 +39,7 @@ test('工具输出尾窗：自动换行可切换；上滚出「↓ 最新」，�
     { type: 'tool/output_delta', data: { tool_call_id: 'tc-1', channel: 'stdout', delta: out.slice(0, 2000) }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
     { type: 'tool/output_delta', data: { tool_call_id: 'tc-1', channel: 'stdout', delta: out.slice(2000) }, seq: 6, session_id: SID, run_id: RUN, step_id: 1, time: T },
   ];
-  routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
+  await routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
 
   await page.goto('/');
   await submitTask(page, '跑个长命令');
@@ -101,7 +101,7 @@ test('推理块：上滚出「↓ 最新」，点击回底并消失', async ({ p
     // 只给思考增量、**不给 reasoning/completed** → block 恒为 streaming → 浮标可达
     { type: 'reasoning/delta', data: { delta: longText(80, 'THINK'), source: 'model' }, block_id: 'rsn-1-1', seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
   ];
-  routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
+  await routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
 
   await page.goto('/');
   await submitTask(page, '想个长问题');

@@ -95,7 +95,7 @@ async function rawClickItem(page: import('@playwright/test').Page, item: import(
 test.describe('模型切换去重（BUG-011）', () => {
   test('在途重复点击：延迟响应窗口内只发一个 POST /model', async ({ page }) => {
     const posts = countModelPosts(page);
-    routeApi(page, {
+    await routeApi(page, {
       sessions: [SESSION_ROW],
       events: EVENTS,
       models: MODELS,
@@ -118,7 +118,7 @@ test.describe('模型切换去重（BUG-011）', () => {
 
   test('关闭态下的第二次点击：仍是 1 个请求；换目标照常发', async ({ page }) => {
     const posts = countModelPosts(page);
-    routeApi(page, { sessions: [SESSION_ROW], events: EVENTS, models: MODELS });
+    await routeApi(page, { sessions: [SESSION_ROW], events: EVENTS, models: MODELS });
 
     await page.goto('/');
     await page.locator('.session-item').first().click();

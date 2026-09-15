@@ -48,7 +48,7 @@ const pickerSearchInputs = (page: import('@playwright/test').Page) => noSearchIn
 test('#199：模型选择器没有搜索框（一级与二级都没有）', async ({ page }) => {
   // 用**长**目录：旧实现在长目录下会显示搜索框，所以这条能真正证明搜索框被删掉，
   // 而不是"目录太短所以没显示"（后者是假绿——正是本 spec 要防的那种）。
-  routeApi(page, { sessions: [], events: [], models: LONG_MODELS, permissionModes: PERMISSION_MODES });
+  await routeApi(page, { sessions: [], events: [], models: LONG_MODELS, permissionModes: PERMISSION_MODES });
   await page.goto('/');
 
   const trigger = page.locator('.composer-model[aria-label="模型选择"]');
@@ -75,7 +75,7 @@ test('#199：模型选择器没有搜索框（一级与二级都没有）', asyn
 });
 
 test('短目录：OptionPicker（权限模式）搜索框不可见', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES, // 3 条 ≤ 5 → 隐藏
@@ -93,7 +93,7 @@ test('短目录：OptionPicker（权限模式）搜索框不可见', async ({ pa
 });
 
 test('长目录：OptionPicker（权限模式）搜索框可见且可过滤', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: LONG_MODES, // 6 > 5

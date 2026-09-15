@@ -47,7 +47,7 @@ test('AC1：列表按后端分页渲染 content / scope / 创建时间；"加载
   const many: MemoryFixture[] = Array.from({ length: 55 }, (_, i) =>
     mem(`p-${i}`, `第 ${i} 条记忆`, { scope: i % 10 === 3 ? 'session' : 'user' }),
   );
-  routeApi(page, {
+  await routeApi(page, {
     memories: many,
     onMemoriesGet: (route) => {
       requested.push(new URL(route.request().url()).search);
@@ -84,7 +84,7 @@ test('AC1：列表按后端分页渲染 content / scope / 创建时间；"加载
 });
 
 test('AC1：长正文可展开读全文（删除决定前必须读得到完整内容）', async ({ page }) => {
-  routeApi(page, { memories: [LONG, SHORT] });
+  await routeApi(page, { memories: [LONG, SHORT] });
   await page.goto('/');
   await openMemories(page);
 
@@ -97,7 +97,7 @@ test('AC1：长正文可展开读全文（删除决定前必须读得到完整�
 });
 
 test('AC2 + AC3：删除必须二次确认且写明"删除不可恢复"；确认后后端状态真的变了', async ({ page }) => {
-  routeApi(page, { memories: [SHORT, OTHER] });
+  await routeApi(page, { memories: [SHORT, OTHER] });
   await page.goto('/');
   await openMemories(page);
 
@@ -126,7 +126,7 @@ test('AC2 + AC3：删除必须二次确认且写明"删除不可恢复"；确认
 });
 
 test('AC3：删除失败 → UI 回滚（该行仍在）+ 显示后端拒绝原因', async ({ page }) => {
-  routeApi(page, { memories: [SHORT, OTHER], memoryDeniedIds: ['m-1'] });
+  await routeApi(page, { memories: [SHORT, OTHER], memoryDeniedIds: ['m-1'] });
   await page.goto('/');
   await openMemories(page);
 
@@ -153,7 +153,7 @@ test('AC3：删除失败 → UI 回滚（该行仍在）+ 显示后端拒绝原�
 test('AC3：这条在别处已被删（DELETE 404）→ 行随之消失，但失败必须报出来（不能被界面吞掉）', async ({
   page,
 }) => {
-  routeApi(page, { memories: [SHORT, OTHER], memoryVanishedIds: ['m-1'] });
+  await routeApi(page, { memories: [SHORT, OTHER], memoryVanishedIds: ['m-1'] });
   await page.goto('/');
   await openMemories(page);
 
@@ -175,7 +175,7 @@ test('AC3：这条在别处已被删（DELETE 404）→ 行随之消失，但失
 
 test('AC4：记忆未装配（503）→ 如实说"记忆未启用"，不伪造空列表、不给无意义的重试', async ({ page }) => {
   const detail = 'memory capability 未启用：请在 CAPABILITIES 中配置 memory。';
-  routeApi(page, { memories: [SHORT], memoryDisabled: detail });
+  await routeApi(page, { memories: [SHORT], memoryDisabled: detail });
   await page.goto('/');
   await openMemories(page);
 
@@ -191,7 +191,7 @@ test('AC4：记忆未装配（503）→ 如实说"记忆未启用"，不伪造�
 });
 
 test('AC4：真的没有记忆 → "还没有记忆"（与降级/读取失败都区分开）', async ({ page }) => {
-  routeApi(page, { memories: [] });
+  await routeApi(page, { memories: [] });
   await page.goto('/');
   await openMemories(page);
   await expect(panel(page).locator('.memory-empty')).toContainText('还没有记忆');
@@ -202,7 +202,7 @@ test('AC4：读取失败（500）→ 错误条 + 重试可恢复；不得显示�
   // 失败保持到本测试显式关掉（不是"只失败一次"）：dev 下 StrictMode 会把挂载
   // effect 跑两遍，"计数到 1"的写法会让第二个请求立刻把错误覆盖成成功列表。
   let fail = true;
-  routeApi(page, {
+  await routeApi(page, {
     memories: [SHORT],
     onMemoriesGet: (route) => {
       if (!fail) return false;
@@ -225,7 +225,7 @@ test('AC4：读取失败（500）→ 错误条 + 重试可恢复；不得显示�
 });
 
 test('入口：命令面板「管理记忆」也能打开（顶栏按钮之外的第二入口）', async ({ page }) => {
-  routeApi(page, { memories: [SHORT] });
+  await routeApi(page, { memories: [SHORT] });
   await page.goto('/');
 
   await page.keyboard.press('Control+k');

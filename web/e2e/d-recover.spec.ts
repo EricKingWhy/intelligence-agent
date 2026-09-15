@@ -62,7 +62,7 @@ function repairedEvents(): FrameSpec[] {
 }
 
 async function openCrashedSession(page: Page, mock: ApiMock): Promise<void> {
-  routeApi(page, mock);
+  await routeApi(page, mock);
   await page.goto('/');
   await page.locator('.session-item').first().click();
   await expect(page.locator('.recover-btn')).toBeVisible();
@@ -188,7 +188,7 @@ function interruptedBeforeFirstStep(): FrameSpec[] {
 }
 
 test('中断在首个步骤之前：横幅说「首个步骤开始前中断」而不是「第 ? 步」', async ({ page }) => {
-  routeApi(page, { sessions: [ROW], events: interruptedBeforeFirstStep() });
+  await routeApi(page, { sessions: [ROW], events: interruptedBeforeFirstStep() });
   await page.goto('/');
   await page.locator('.session-item').first().click();
 
@@ -199,7 +199,7 @@ test('中断在首个步骤之前：横幅说「首个步骤开始前中断」�
 });
 
 test('中断在某个步骤：横幅仍报具体步号', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [ROW],
     events: [
       ...crashedEvents(),

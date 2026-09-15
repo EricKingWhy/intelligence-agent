@@ -41,7 +41,7 @@ const outputTab = (page: import('@playwright/test').Page) =>
 test('AC1/AC2：面内明示只读；命令按工具调用分组，stdout/stderr 与 exit code 都在', async ({
   page,
 }) => {
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, FRAMES),
     events: FRAMES,
   });
@@ -80,7 +80,7 @@ test('AC1/AC2：面内明示只读；命令按工具调用分组，stdout/stderr
 test('AC5：面内不存在任何暗示可输入的元素（无输入框 / 无"运行"按钮 / 无光标）', async ({
   page,
 }) => {
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, FRAMES),
     events: FRAMES,
   });
@@ -102,7 +102,7 @@ test('AC5：面内不存在任何暗示可输入的元素（无输入框 / 无"�
 });
 
 test('AC4：能力声明为假 → 整面不渲染（连 tab 都不出现）', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     capabilities: DISABLED,
     onSessionPost: (route) => fulfillSse(route, FRAMES),
     events: FRAMES,
@@ -125,7 +125,7 @@ test('空态如实：能力为真但本会话没跑过命令 → 说明原因，
     { type: 'user/message', data: { content: '只聊两句' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
     { type: 'run/completed', data: {}, seq: 4, session_id: SID, run_id: RUN, time: T },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });
@@ -149,7 +149,7 @@ test('AC3：长输出就地折叠，点开即得全文（不新开导航面）',
     { type: 'tool/result', data: { tool_call_id: 'tc-1', content: JSON.stringify({ ok: true, message: 'ok', data: { exit_code: 0, stdout, stderr: '' } }) }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
     { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });
@@ -178,7 +178,7 @@ test('AC5：运行中的命令也不画光标——"还在跑"用文字说，不
     { type: 'tool/call', data: { tool_call_id: 'tc-1', tool_name: 'bash', args: { command: 'pytest -q' } }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
     { type: 'tool/output_delta', data: { tool_call_id: 'tc-1', channel: 'stdout', delta: 'collected 3 items' + NL }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });
@@ -200,7 +200,7 @@ test('运行中但还没有输出 → 说"等待输出…"，不说"没有输出
     { type: 'user/message', data: { content: '跑个慢命令' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
     { type: 'tool/call', data: { tool_call_id: 'tc-1', tool_name: 'bash', args: { command: 'sleep 30' } }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
   ];
-  routeApi(page, {
+  await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, frames),
     events: frames,
   });

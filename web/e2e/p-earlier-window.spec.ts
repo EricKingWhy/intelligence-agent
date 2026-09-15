@@ -30,7 +30,7 @@ const EVENTS: FrameSpec[] = [
 ];
 
 test('时间线「加载更早 N 条」：真实点击展开折叠的前段，折叠条随之消失', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [{
       session_id: SID, event_count: EVENTS.length, first_event_time: T, last_event_time: T,
       first_user_message: '长会话', trace_id: null, trace_url: null,

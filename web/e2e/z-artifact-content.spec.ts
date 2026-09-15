@@ -72,7 +72,7 @@ const SLICE = {
 };
 
 async function openSession(page: import('@playwright/test').Page, frames: FrameSpec[], extra = {}) {
-  routeApi(page, {
+  await routeApi(page, {
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: true, artifacts: true })],
     sessions: [{
       session_id: SID, event_count: frames.length, first_event_time: T, last_event_time: T,

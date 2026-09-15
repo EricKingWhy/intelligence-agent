@@ -47,7 +47,7 @@ const permissionSection = (page: import('@playwright/test').Page) =>
   page.locator('[data-section="permission"]');
 
 async function openInspectorOverview(page: import('@playwright/test').Page, frames: FrameSpec[]) {
-  routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
+  await routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
   await page.goto('/');
   await submitTask(page, '写个文件');
   await page
