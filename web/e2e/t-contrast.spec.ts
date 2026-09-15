@@ -236,4 +236,33 @@ for (const theme of ['dark', 'light'] as const) {
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
   });
+
+  /* 真机验收补锁（docs/LIVE_BROWSER_TEST_20260916.md F2）：上一批把亮色
+     `--accent` `#c96990→#b2406e`、`--success` `#2f9e63→#23774a` 压深，
+     因为这两个 token 的 12px 文字在亮色下只有 3.15–3.44 / 3.01:1。
+     本用例把它们的使用点纳入既有循环——否则改回旧值不会有任何测试变红。 */
+  test(`[${theme}] 语义色 ink（run-badge-completed / run-pulse / act-name）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      events: [
+        ...EVENTS,
+        // 带 tool_name 的 tool/call → ToolCard 渲染 .act-name（--accent 的使用点）
+        { type: 'tool/call', data: { tool_call_id: 'tc-c1', tool_name: 'bash', args: { command: 'echo hi' } }, seq: 6, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T },
+      ],
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await page.locator('.approval-card').waitFor();
+    for (const selector of ['.run-badge-completed', '.run-pulse', '.act-name']) {
+      const m = await measure(page, selector);
+      const ratio = contrast(m.color, m.bg);
+      expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
 }

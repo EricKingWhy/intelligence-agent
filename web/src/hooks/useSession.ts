@@ -229,6 +229,11 @@ export function isUnknownModelError(message: string | null | undefined): boolean
  *  所以不做子串区分，统一提示「刷新选项后重试」。 */
 export const CONTINUE_PARAMS_ERROR_TEXT = '续聊参数无效（422）：请刷新选项后重试';
 
+/** 续聊 404 的稳定文案：这个会话在后端已经不存在了（另一个标签页 / CLI / 硬删
+ *  都会造成）。不是"网络故障、可以重试"——重发同一个 session_id 只会再 404，
+ *  所以文案必须说明**会话本身没了**，而不是把英文的 HTTP 状态码原样抛给用户。 */
+export const SESSION_GONE_ERROR_TEXT = '会话已不存在（可能已被删除），请从左侧另选一个会话';
+
 /** 「立即失败 vs 正常流式」的判别窗口（毫秒）。
  *
  *  起因是交付层攒包：正常流式的响应头会被压到 run 结束才下发，而 4xx/422 是
@@ -1012,6 +1017,7 @@ export function useSession() {
           try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
           throw new Error(detail || '存在需要人工裁决的高风险操作');
         }
+        if (res.status === 404) throw new Error(SESSION_GONE_ERROR_TEXT);
         if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
         // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
         // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。

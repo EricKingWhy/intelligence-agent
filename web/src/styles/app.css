@@ -3348,6 +3348,9 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 2px;
   margin-left: auto;
+  /* 交互控件不参与收缩：这些按钮被挤出面板就等于不可达（实测长档位名下
+     关闭按钮会跑到面板右缘外 44px）。让位由文本侧负责。 */
+  flex: none;
 }
 .detail-ctrl {
   display: inline-flex;
@@ -3384,6 +3387,25 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   justify-content: space-between;
   border-bottom: 1px solid var(--border-subtle);
   padding-bottom: var(--space-sm);
+}
+/* Inspector 头部是一条 flex 行，装着**两类**宽度需求完全不同的东西：
+ *   定长标签：run 状态徽标、档位徽标、三个控制按钮（钉住/整页/关闭）
+ *   弹性文本：面板标题、`N runs · M 事件` 范围
+ * 定长类不许收缩（收缩会把状态徽标压成逐字折行、把控制按钮推出面板）；
+ * 弹性类必须**真的能截断**（`min-width:0` 才能低于 min-content），否则它们
+ * 既截不了自己，又会去挤压定长类。
+ *
+ * 不变量：`N runs · M 事件` 里的中文可逐字断行，min-content 只有一个汉字宽，
+ * 缺 `white-space:nowrap` 时会被压成 ~30px 宽、**7 行高**的竖条（实测 340 宽
+ * + agent_profile=research_review 时头部 99px 高全是它撑的），并把
+ * `.detail-header-actions` 顶到面板右缘之外 44px——关闭按钮因此点不到。
+ * 完整值另有出处（元素的 title + Overview 页签），截断不损信息可达性。 */
+.detail-header .panel-label,
+.detail-run-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .run-badge {
   /* UI-06 徽章收敛：与顶栏 .run-pulse 同族视觉参数（3px 内边距药丸，
@@ -3440,6 +3462,15 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+  /* 档位名是**后端标识符**（`research_review` 15 字符 = 126px），长度不受前端
+     控制。给它 `min-width:0`（可低于 min-content = 真的能截断）+ 省略号，让它在
+     真正不够宽时才让位；不设硬上限——否则宽面板上本来放得下的档位名也会被砍。
+     实测 320/340 下 77+126+73 ≤ 可用宽，短档位与长档位名都能完整显示。
+     完整值另在 title 里。 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 中断 = 中性第四态（OBS-007：取消 ≠ 失败，与顶栏 pulse 同语言）。 */
 .run-badge-interrupted {
@@ -3584,6 +3615,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   /* #183：面板窄到 360 以下时，头部三个控制（钉住/整页/关闭）降级为 icon-only
      ——同一条容器查询口径（拖窄不是"变了个窗口"，是这个面板自己的宽度行为）。 */
   .detail-ctrl-label {
+    display: none;
+  }
+  /* runs·事件范围在窄面板退出头部：同一份数据在 Overview 里完整可读，而它在这里
+     是最容易把头部撑爆的一项（长档位名下实测被压成 30px×90px 的竖条并顶飞控制按钮）。
+     让位顺序按信息价值排：状态 > 档位 > 控制 > 范围 > 标题。 */
+  .detail-run-id {
     display: none;
   }
 }

@@ -294,6 +294,7 @@ test('T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第�
   // 一旦有人又把分流写回去，mode 依然会是 queue 却发去了错的地方。
   let sessionPosts = 0;
   const messageBodies: Array<Record<string, unknown>> = [];
+  const messageUrls: string[] = [];
 
   await routeApi(page, {
     sessions: [],
@@ -303,6 +304,7 @@ test('T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第�
       return fulfillSse(route, LIVE_FRAMES);
     },
     onMessagesPost: (route) => {
+      messageUrls.push(route.request().url());
       messageBodies.push((route.request().postDataJSON() ?? {}) as Record<string, unknown>);
       return route.fulfill({
         status: 200,
@@ -331,8 +333,14 @@ test('T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第�
   await box.press('Enter');
 
   await expect.poll(() => messageBodies.length).toBe(1);
+  // 三层一起锁：**(a) 发去哪个会话**、(b) 模式、(c) 内容。(a) 走 URL 路径而不是
+  // body——`/messages` 的会话身份在 path 上，body 里根本没有 session_id 字段，
+  // 只断言 body 会漏掉"发给另一个会话"这类回归。
+  expect(messageUrls[0]).toMatch(/\/api\/sessions\/mt-live-1\/messages$/);
   expect(messageBodies[0]).toMatchObject({ content: '追问一句', mode: 'queue' });
-  // 关键回归：**没有**第二个会话被创建。
+  // 关键回归：**没有**第二个会话被创建（增量，不是绝对值）。
   expect(sessionPosts).toBe(sessionPostsBeforeFollowUp);
+  // 追问的确切条数：多出一条 = 按钮/键位被绑了两次（重复提交）。
+  expect(messageBodies).toHaveLength(1);
   await expect(page.locator('.app-error')).toHaveCount(0);
 });

@@ -170,3 +170,31 @@ test('续聊 422：提示「续聊参数无效」而非「未知模型」（hand
   await expect(err).toContainText('续聊参数无效');
   await expect(err).not.toContainText('模型不可用');
 });
+
+test('续聊 404：会话已被删除 → 中文说明并指向另选会话，不泄露 HTTP 状态码', async ({ page }) => {
+  /* 独立复审 P2-1：会话在别处被删（另一个标签页 / CLI / 硬删）时，追问会落到
+   * `/messages` 的 404 分支。修复前用户看到的是 `续聊失败：Send failed: 404`
+   * ——英文 + 裸状态码，既没说他能做什么，也不像产品文案。
+   * 这里锁的是**文案是给人看的**：说明会话没了、给出下一步，且不出现状态码。 */
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'session not found' }),
+      }),
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+  await submitTask(page, '第二条消息');
+
+  const err = page.locator('.app-error');
+  await expect(err).toContainText('续聊失败');
+  await expect(err).toContainText('会话已不存在');
+  await expect(err).not.toContainText('Send failed');
+  await expect(err).not.toContainText('404');
+});

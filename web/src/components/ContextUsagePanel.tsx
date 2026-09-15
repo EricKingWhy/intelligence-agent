@@ -117,7 +117,7 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
           /* 只陈述**本面板能知道的事实**：后端这一轮没有给出用量。
              原先的「（会话还没有任何运行）」把 no_data 归因成一个具体原因，
              而那个原因常常与事实相反——实测 2a2d03f1（16 个 run、3865 事件）
-             同样落到这一支。归因留给后端（见 issue），文案不猜。 */
+             同样落到这一支。归因留给后端（取数口径见 #212），文案不猜。 */
           <div className="ctx-usage-empty">后端未上报用量数据</div>
         )}
 

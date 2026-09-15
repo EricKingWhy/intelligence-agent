@@ -36,6 +36,12 @@ async function openSession(page: import('@playwright/test').Page, which = 0) {
   return rows;
 }
 
+/** 与 EVENTS 同形，只在 run/started 上带**最长档位名**（内置档位里最长的一个）。
+ *  档位名直接进头部徽标，长度就是头部宽度需求的来源。 */
+const LONG_PROFILE: FrameSpec[] = EVENTS.map((f) =>
+  f.type === 'run/started' ? { ...f, data: { agent_profile: 'research_review' } } : f,
+);
+
 test('AC1：点一行即预览；↑↓ 移动选中，详情实时跟随且清单不消失', async ({ page }) => {
   await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
@@ -266,4 +272,70 @@ test('AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调�
   await page.locator('button[aria-label="关闭 Inspector"]').click();
   await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
   await expect(page.getByRole('button', { name: '展开 Inspector' })).toBeVisible();
+});
+
+test('AC8：头部必须容得下最长档位名（不溢出面板、控制按钮不被顶出去）', async ({ page }) => {
+  /* 真机验收 P2-2（docs/LIVE_BROWSER_TEST_20260916.md F5）。修复前实测（面板 340、
+   * 档位 research_review）：`.detail-header` scrollWidth 368 > clientWidth 308，
+   * `N runs · M 事件` 被压成 30px×90px 的**7 行竖条**（头部因此从 36 高变 99 高），
+   * `.detail-header-actions` 被顶到面板右缘之外 44px —— 关闭按钮在视口外，点不到。
+   *
+   * 为什么档位名要专门测：它是**后端下发的标识符**，长度不受前端控制，而它直接进
+   * 头部这一条定长 flex 行。默认档位（`main` / 旧数据「档位未知」）短，掩盖了问题；
+   * 内置档位里 `research_review` 最长，就该用它当输入。
+   *
+   * 三个宽度都要过：340 是默认值，320/480 是 AC6 的上下夹取边界——只在默认宽度
+   * 上量，等于假设用户从不拖面板。 */
+  await routeApi(page, { sessions: [session(SID, '看看这个')], events: LONG_PROFILE });
+  await page.goto('/');
+  await openSession(page);
+  await expect(page.locator('.detail-profile-badge')).toHaveText('research_review');
+
+  const geometry = () =>
+    page.evaluate(() => {
+      const header = document.querySelector('.detail-header');
+      if (!header) throw new Error('没有 .detail-header');
+      const hb = header.getBoundingClientRect();
+      const kids = [...header.children].map((c) => {
+        const r = c.getBoundingClientRect();
+        return { cls: (c.className || '').split(' ')[0], right: r.right - hb.right, height: Math.round(r.height) };
+      });
+      return { sw: header.scrollWidth, cw: header.clientWidth, right: Math.round(hb.right), kids };
+    });
+
+  const resizer = page.locator('.detail-resizer');
+  const widths: Array<[string, () => Promise<void>]> = [
+    ['默认 340', async () => {}],
+    ['最小 320', async () => {
+      for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowRight');
+      await expect(resizer).toHaveAttribute('aria-valuenow', '320');
+    }],
+    ['最大 480', async () => {
+      for (let i = 0; i < 12; i++) await page.keyboard.press('ArrowLeft');
+      await expect(resizer).toHaveAttribute('aria-valuenow', '480');
+    }],
+  ];
+
+  await resizer.focus();
+  for (const [label, step] of widths) {
+    await step();
+    const g = await geometry();
+    // 行内不许有横向溢出：定长项不收缩、弹性项真能截断，两者都对才可能相等。
+    expect(g.sw, `${label}：头部横向溢出`).toBeLessThanOrEqual(g.cw + 1);
+    // 每个子项都待在头部右缘之内（含交互控件——越界 = 点不到）。
+    for (const kid of g.kids) {
+      if (kid.height === 0) continue; // 窄宽下退出头部的项
+      expect(kid.right, `${label}：${kid.cls} 越出头部右缘`).toBeLessThanOrEqual(1);
+    }
+    // 状态徽标锁单行（F1：它曾被压成 48px 宽、逐字折三行 → 高 66）
+    const badge = g.kids.find((k) => k.cls === 'run-badge');
+    expect(badge?.height, `${label}：状态徽标折行`).toBeLessThanOrEqual(30);
+    // 范围文本要么退出、要么单行；不得再被压成多行竖条（曾出现 90px 高）
+    const runId = g.kids.find((k) => k.cls === 'detail-run-id');
+    if (runId && runId.height > 0) expect(runId.height, `${label}：范围被压成竖条`).toBeLessThanOrEqual(30);
+  }
+
+  // 最窄处仍然**真的能点**（Playwright 会做可操作性检查：视口外/被遮挡会超时）
+  await page.locator('button[aria-label="关闭 Inspector"]').click();
+  await expect(page.locator('.app-regions')).toHaveClass(/inspector-closed/);
 });
