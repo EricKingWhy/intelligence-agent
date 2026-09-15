@@ -601,6 +601,39 @@ async def _validate_amend_for_existing_session(
 #: 重建后带 after_seq=latest_seq 重连（02 §10.4 简化版；snapshot 层 DEFER）。
 STREAM_REPLAY_MAX_EVENTS = 1000
 
+#: SSE keepalive 间隔（秒）——周期性下发注释帧（`: ping - <ts>`）。
+#:
+#: 为什么必须显式设：部署交付层（`Server: CloudStudio Gateway`，前置腾讯 EdgeOne）
+#: 会把**整个响应**攒到流结束才下发——实测 `POST /api/sessions` 的响应头要
+#: 44.158s 才到（≈ run 全长），而 326 帧数据全在其后 0.094s 内到齐。也就是说
+#: 前端拿不到任何字节直到 run 跑完，打字机效果不可能存在。
+#:
+#: 持续有字节流动是让中间层及时 flush 的前提，而 sse-starlette 的默认间隔是
+#: **15s**——比一个交互式 run 还长，等于没有 keepalive。2s 对齐 WS 通道既有的
+#: `WS_PING_INTERVAL`（websocket.py）：两条通道同一拍，观测/调优不必记两套数。
+#:
+#: 注意注释帧**不是**事件：客户端（`lib/sse.ts::parseFrame`）只取 `data:` 行，
+#: 停摆检测（`RECONNECT_STALL_MS`）看的是真实帧，不会被 keepalive 喂假进展。
+SSE_PING_INTERVAL_SECONDS = 2
+
+
+def _sse_response(
+    generator: Any, *, headers: dict[str, str] | None = None,
+) -> EventSourceResponse:
+    """SSE 响应的**唯一**构造点：keepalive 只在这里定义。
+
+    三个端点共用（live run / 重连续传 / truncated 控制帧）。各写一遍就会在
+    「哪条忘了开 keepalive」上漂移——而那正是「某些请求流式、某些不流式」
+    这类只在部署层才暴露的 bug 形态（本地直连看不出区别，因为没有中间层攒包）。
+
+    反缓冲头不在这里重复声明：`X-Accel-Buffering: no` / `Connection: keep-alive`
+    / `Cache-Control: no-store` 由 sse-starlette 在 `EventSourceResponse.__init__`
+    里默认带上；抄一份会在库改默认值时变成两处不一致，而真正生效的是库那一份。
+    """
+    return EventSourceResponse(
+        generator, headers=headers, ping=SSE_PING_INTERVAL_SECONDS,
+    )
+
 
 def _run_stream_response(
     state: Any, run: Any, subscriber: Any, session_id: str,
@@ -626,7 +659,7 @@ def _run_stream_response(
         finally:
             run.unsubscribe(subscriber)
 
-    return EventSourceResponse(event_generator(), headers=headers)
+    return _sse_response(event_generator(), headers=headers)
 
 
 def _render_model_option(
@@ -1305,7 +1338,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 }
                 yield {"data": json.dumps(control, ensure_ascii=False)}
 
-            return EventSourceResponse(truncated_generator())
+            return _sse_response(truncated_generator())
 
         async def event_generator():
             try:
@@ -1325,7 +1358,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 if subscriber is not None and run is not None:
                     run.unsubscribe(subscriber)
 
-        return EventSourceResponse(event_generator())
+        return _sse_response(event_generator())
 
     @app.post("/api/sessions/{session_id}/resume")
     async def resume_session(session_id: str, req: ResumeRequest):
