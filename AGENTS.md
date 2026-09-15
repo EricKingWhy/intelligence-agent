@@ -729,82 +729,38 @@ CSS 原生没有变量组复用机制，手工双份同步是当前最小风险�
 
 ---
 
-# 16. SDD 长任务工作流协议（防指令漂移）
+# 16. SDD 长任务工作流协议（入口）
 
-> **触发条件**：用户明确要求「按顺序做剩余 tickets」「使用 SDD 方式」「每完成一个 ticket 必须 code-review」「出现 bug 用 diagnose-bug」「修完再 code-review 直到没问题才进下一个 ticket」「全部完成后用 improve-codebase-architecture」「不知道怎么做用 ask-matt」「每完成一个 ticket 不许推送到远程 GitHub——这是集成 AI 做的事」「完成后写提示词给集成 AI」。
->
-> 本节是**自执行协议**：用户睡觉期间，Agent 按此循环自主推进，不需要逐 step 询问用户。只有遇到 §9.1 列出的需要用户决策的情况时才停下。
+> **触发条件**：用户明确要求「按顺序做剩余 tickets」「使用 SDD 方式」「每完成一个 ticket 必须 code-review」「出现 bug 用 diagnose-bug」「全部完成后用 improve-codebase-architecture」「不知道怎么做用 ask-matt」「完成后写提示词给集成 AI」。
 
-## 16.1 单 Ticket SDD 循环
+**本节不复制流程细节。触发后第一个动作是读权威文件：**
 
-每个 ticket 严格按以下顺序执行：
+1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前生效流程（**v2：批量审查循环**；v1 的
+   「每票一次 `/code-review`、修复后循环到零 finding」**已作废**）；
+2. `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、批次、fixed point、审查结论。
 
-```text
-1. 读 spec + 现状审计（§3 每个 Task 的阅读协议）
-2. /implement（TDD：先红后绿；Reuse First §6）
-3. /code-review（两轴：Standards + Spec）
-   - 发现问题 → 修复 → 再 /code-review
-   - 循环直到零 finding
-4. ruff check + 全量 pytest
-5. git add <相关文件> + git commit
-6. 关单判定（§14.12）：
-   - 纯后端 ticket 且 AC 全覆盖 → gh issue close
-   - 跨端 ticket 只做完后端 → comment 记录已完成部分 + 剩余前端项，不关单
-7. 更新 docs/PHASE_STATUS.md（进度单一事实源）
-8. 写集成提示词到 docs/INTEGRATION_PROMPT_*.md（告诉集成 AI 做了什么）
-```
+两者若与本文件不一致，**以它们为准**（本节只是入口）。
 
-## 16.2 Bug 处理协议
+**自愈条款**：上下文被压缩 / 不记得批次边界 / 不确定当前在循环哪一步
+→ 重读上面两份文件，**禁止凭记忆继续施工**。
 
-当 `/code-review` 或测试发现 bug 时：
+## 16.1 进度落点分工
 
-```text
-1. 使用 /diagnose-bug（或 diagnosing-bugs skill）定位根因
-2. 最小修复（Surgical Changes §9.3）
-3. 回归测试（确保修复不引入新问题）
-4. 再 /code-review（验证修复有效且无新问题）
-5. 循环直到零 finding
-```
+| 内容 | 落点 |
+| --- | --- |
+| 在途 ticket、批次、fixed point、审查结论 | `docs/SDD_TICKET_TRACKER.md` |
+| Phase 状态、关键 commit、Gate 证据、集成记录 | `docs/PHASE_STATUS.md` |
+| 一次性集成执行资料 | `docs/integration/`、`docs/INTEGRATION_PROMPT_*.md` |
 
-## 16.3 全部 Ticket 完成后
+规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等）保持冻结，进度变更不回写规格。
 
-```text
-1. /improve-codebase-architecture（扫描深化机会）
-2. 如果发现问题 → 修复 → /code-review
-3. 最终全量回归：ruff check + pytest
-4. 写最终集成提示词
-```
+## 16.2 不随协议版本变化的红线
 
-## 16.4 防漂移纪律
-
-- **每个 ticket 开始前**：重读本节（§16），确认当前在哪个步骤。
-- **每个 ticket 完成后**：更新 `docs/PHASE_STATUS.md`，记录 commit、测试结果、关单状态。
-- **不允许跳过 /code-review**：即使代码看起来没问题，也必须走完整 SDD 循环。
-- **不允许跳过测试**：`ruff check` + 全量 `pytest` 必须通过才能 commit。
-- **不推送远程**：`git push` 由集成 AI 执行，本 Agent 只做本地 commit。
-- **遇到不确定的问题**：使用 `/ask-matt` 寻求指导，不要盲目猜测。
-- **上下文被摘要后**：重新读 `docs/PHASE_STATUS.md` 确认进度，读本节确认工作流。
-
-## 16.5 进度追踪
-
-进度追踪使用 `docs/PHASE_STATUS.md` 作为单一事实源。每个 ticket 完成后，在该文件追加一条记录，格式：
-
-```markdown
-- YYYY-MM-DD：**ticket #N 标题**。commit `<sha>`。测试：N passed / M skipped。关单：是/否（理由）。集成提示词：`docs/INTEGRATION_PROMPT_*.md`。
-```
-
----
-
-## 16.6 前端 worktree 补充
-
-前端 SDD 循环（worktree `D:\intelligence-agent-frontend`）与后端同构，但门禁工具链与进度落点不同：
-
-- **前端门禁**（替换 16.1 步骤 4 的 `ruff check + 全量 pytest`）：
-  `cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build`
-  （e2e 必须 `--workers=2`：4 worker 全量并行存在资源竞争型抖动）。
-- **前端在途进度**记 `docs/SDD_TICKET_TRACKER.md`（frontend worktree 内）；
-  合入 main 后的整合进度仍记 `docs/PHASE_STATUS.md`（单一事实源不变）。
-- **前端细化协议**：`docs/SDD_WORKFLOW_PROTOCOL.md`（frontend worktree 内）。
-- **遇到不确定时**：使用 `/ask-matt` skill 提问。不要猜测、不要自行决定架构方向。
+- 每个 ticket 完成后：**门禁全绿才允许 commit**（命令见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5）；
+- 实现线默认只做**本地 commit**；集成与 `push origin main` 由当前主开发执行（§14.4）；
+- 不覆盖其他 Agent 未提交的工作；
+- 关单判定按 §14.12；跨端 ticket 只完成一端时**不关单**；
+- 前端 / 后端的门禁工具链、在途进度落点，一律以当前仓库的
+  `docs/SDD_WORKFLOW_PROTOCOL.md` 为准，本文件不再复制。
 
 ---

@@ -21,6 +21,11 @@
 >
 > **协议版本**：v2（新版批量审查循环，2026-09-12 切换；v1 的"每票一次 `/code-review`"已作废）。
 > 切换记录与 fixed point 见 `docs/SDD_TICKET_TRACKER.md` 的「流程切换 + 批次记录」章节。
+>
+> **与根规则文件的关系（2026-09-16 明确）**：本文件是 SDD 执行流程的**唯一权威**。
+> `AGENTS.md` §16 只是入口与触发表述，**不复制流程细节**。两者若出现不一致，**以本文件为准**。
+> （补写原因：v1→v2 切换时本文件只声明了"v1 已作废"，从未声明它取代 `AGENTS.md` §16，
+> 导致根文件里那份 v1 副本长期与新协议并存、且因为根文件是自动加载的而实际胜出。）
 
 ---
 
@@ -84,8 +89,10 @@
 
 ### 1.6 推送规则
 
-- **禁止推送到远程 GitHub**（AGENTS.md §13.2/§14.4）
-- 集成 AI 负责推送；完成后写提示词给集成 AI
+- 实现线默认只做**本地 commit**，不在 feature 分支上 `git push`；
+- **集成**与 **`push origin main`** 由**当前主开发**执行（用户 2026-09-16 常设授权，
+  不必每次重新批准）。前置条件：集成后门禁全绿（本文件 §1.3 + `AGENTS.md` §14.10）；
+- 集成完成后必须通知另一条线（见 `AGENTS.md` §14.9），否则"三方一致"会当场破功。
 
 ---
 
@@ -139,17 +146,14 @@
 
 ## 4. 剩余 Ticket 清单
 
-前端剩余 ticket（后端交接手册 `HANDOFF_FRONTEND_T7_T9.md`）：
+**不在此维护静态清单**——它会在每个 ticket 完成后立刻过期（本文件 2026-09-10 曾在此写下
+FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被当成"当前剩余工作"）。
 
-| Ticket | 描述 | 后端依赖 |
-| --- | --- | --- |
-| FE-T7 | 会话级模型切换 + Fork UI | T7 #137（POST /model, POST /forks, model/changed 事件） |
-| FE-T8 | 崩溃恢复 UI — run/interrupted + 409 守卫 | T8 #138（run/interrupted 事件, 409 UNKNOWN 守卫） |
-| FE-T9 | 轮次标签（turn_index 显示） | T9 #139（RUN_STARTED data.turn_index） |
+当前剩余工作唯一来源：
 
-### 处理顺序
-
-FE-T7 → FE-T8 → FE-T9 → 最终全量 review（fixed point = main）→ 写集成 AI 交接
+- `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、批次、fixed point、审查结论；
+- `docs/PHASE_STATUS.md` —— Phase 状态与集成证据；
+- GitHub Issues（`EricKingWhy/intelligence-agent`）—— 票面与验收标准。
 
 ---
 
@@ -158,8 +162,13 @@ FE-T7 → FE-T8 → FE-T9 → 最终全量 review（fixed point = main）→ 写
 1. **禁止跳过批量审查**：每 2–3 票必须对累计 diff 跑一次 `/code-review`；最终还必须跑一次全量
    （fixed point = main）。（单票内的收尾 review 按 v2 §1.1 跳过，不算"跳过审查"。）
 2. **禁止跳过 `/implement`**：即使 ticket 很小，也必须用 implement skill
-3. **禁止推送到远程**：本地 commit 可以，push 不行
+3. **禁止在 feature 分支上推送**：本地 commit 可以；`push origin main` 属集成动作，按 §1.6 执行。
 4. **禁止自行决定架构**：遇到架构决策，用 `/ask-matt`
-5. **禁止修改后端仓库**（前端 worktree 内）：后端归 `feat/backend` 会话；反之亦然
-6. **禁止跳过门禁**：前端每个 ticket 完成必须跑 tsc + vitest + oxlint + playwright(`--workers=2`) + build
+5. **禁止跨仓库无授权写入**：`D:\intelligence-agent`（main）、`D:\intelligence-agent-backend`、
+   `D:\intelligence-agent-frontend` 是**三个独立 clone**（不是 worktree），各有自己的工作树与分支。
+   用户可以授权任意一条线做另一端的活，但**动手前必须先读 `AGENTS.md` §13 的仓库模型**——
+   "三方一致"靠"谁集成谁通知、另一条线开工前先把 main 合回来"维持，不靠目录名分工。
+6. **禁止跳过门禁**：后端 `ruff check` + 全量 `pytest`；前端（在 `web/` 下）
+   `npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build`。
+   e2e 必须 `--workers=2`（4 worker 全量并行存在资源竞争型抖动）。
 7. **禁止凭记忆猜流程**：不确定就执行自愈条款（重读本文件 + Tracker）
