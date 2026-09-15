@@ -27,15 +27,16 @@
  *     而 `unavailable_reason` 确实不存在（那是 #203 要补的）——所以现在**没有任何** provider
  *     会是不可用态，置灰分支永远不触发；等后端真的能表达不可用时再接。
  *   - 「能力徽标」：目录里没有能力字段。
- * 另有「管理模型」入口未做：它是 #203 的交付物，现在放上去只能是个死入口
- * （#203 落地时应复用共享的 `.picker-foot` 面板底部槽位——本文件现在没有 footer，
- * .picker-foot 只由 OptionPicker 的 `footer` prop 渲染）。 */
+ * 另有「管理模型」入口：#203 交付物（后端 CRUD + 凭据管理器已落地）——经
+ * `.picker-foot` 同族槽位渲染，点击打开 ProviderManagerDialog（两栏弹层），
+ * 不再是死入口。 */
 
 import * as Menu from '@radix-ui/react-dropdown-menu';
 import { useCallback, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Cpu } from 'lucide-react';
+import { ChevronDown, ChevronRight, Cpu, Settings2 } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
 import { DEFAULT_VALUE, OptionRowContent } from './OptionPicker';
+import { ProviderManagerDialog } from './ProviderManagerDialog';
 
 interface Props {
   models: ModelCatalogEntry[];
@@ -67,6 +68,9 @@ function modelMeta(m: ModelCatalogEntry): string | undefined {
 export function ModelPicker({ models, selectedModel, onModelChange, disabled = false }: Props) {
   // 受控开关：一级列表与二级子菜单的展开/收起由 Radix 管，这里只管整棵菜单的开与关。
   const [open, setOpen] = useState(false);
+  // #203：管理模型弹层（在菜单里点击入口后打开；菜单先关闭——两层浮层叠放
+  // 会互相抢 Esc/焦点，先关菜单再开弹层）。
+  const [manageOpen, setManageOpen] = useState(false);
   const grouped = useMemo(() => groupByProvider(models), [models]);
   const selectedEntry = useMemo(
     () => (selectedModel ? models.find((m) => m.name === selectedModel) ?? null : null),
@@ -169,8 +173,26 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
               </Menu.Sub>
             );
           })}
+          <Menu.Separator className="picker-sep" />
+          {/* #203：「管理模型」入口（两栏弹层）。onSelect 里先关菜单再开弹层：
+              两层浮层叠放会互相抢 Esc 与焦点；先关菜单让弹层独占浮层栈。 */}
+          <Menu.Item
+            className="picker-item picker-manage-item"
+            onSelect={() => {
+              setOpen(false);
+              setManageOpen(true);
+            }}
+          >
+            <OptionRowContent
+              title="管理模型"
+              description="自定义供应商 · API Key · 测试连接"
+              selected={false}
+              trailing={<Settings2 size={13} className="picker-item-trailing" aria-hidden="true" />}
+            />
+          </Menu.Item>
         </Menu.Content>
       </Menu.Portal>
+      <ProviderManagerDialog open={manageOpen} onOpenChange={setManageOpen} />
     </Menu.Root>
   );
 }

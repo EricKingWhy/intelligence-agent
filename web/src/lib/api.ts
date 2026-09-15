@@ -440,6 +440,154 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
   });
 }
 
+// ── 自定义模型供应商（#203 / ADR-0032）──
+
+/** GET /api/model-providers 条目。零密钥字段：`has_api_key` 是唯一状态通道
+ *  （不回显任何 key 值/片段）；`kind` = builtin|custom|override（override = 同 id
+ *  覆盖内置 preset）。`last_test` = 上次「测试连接」的结果（非密）。 */
+export interface ModelProviderEntry {
+  id: string;
+  label: string;
+  base_url: string;
+  models: { model_id: string; label?: string }[];
+  kind: 'custom' | 'override';
+  has_api_key: boolean;
+  is_available: boolean;
+  unavailable_reason: string | null;
+  last_test?: { ok: boolean; at: string | null; reason?: string; detail?: string } | null;
+}
+
+/** 后端 4xx/5xx → 可读错误（detail 就是后端那句话，不自己编文案）。 */
+export class ProviderError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function providerFetch(path: string, init?: RequestInit): Promise<unknown> {
+  const res = await apiFetch(path, init);
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body: unknown = await res.json();
+      if (typeof body === 'object' && body !== null) {
+        const d = (body as { detail?: unknown }).detail;
+        if (typeof d === 'string') detail = d;
+      }
+    } catch {
+      // 非 JSON 错误体：留空，用状态码兜底。
+    }
+    throw new ProviderError(res.status, detail || `model-providers ${res.status}`);
+  }
+  return res.json();
+}
+
+/** GET /api/model-providers。providers 数组缺失/形状不符 → 空数组（零伪造）。 */
+export async function getModelProviders(): Promise<ModelProviderEntry[]> {
+  const body = await providerFetch('/api/model-providers');
+  const raw =
+    typeof body === 'object' && body !== null && Array.isArray((body as { providers?: unknown }).providers)
+      ? (body as { providers: unknown[] }).providers
+      : [];
+  return raw.flatMap((p) => {
+    if (typeof p !== 'object' || p === null) return [];
+    const r = p as Record<string, unknown>;
+    if (typeof r.id !== 'string' || !r.id) return [];
+    if (typeof r.base_url !== 'string') return [];
+    const models = Array.isArray(r.models)
+      ? r.models.flatMap((m) => {
+          if (typeof m !== 'object' || m === null) return [];
+          const mr = m as Record<string, unknown>;
+          if (typeof mr.model_id !== 'string' || !mr.model_id) return [];
+          return [{
+            model_id: mr.model_id,
+            label: typeof mr.label === 'string' && mr.label ? mr.label : undefined,
+          }];
+        })
+      : [];
+    const lastTest =
+      typeof r.last_test === 'object' && r.last_test !== null
+        ? (r.last_test as { ok?: unknown; at?: unknown; reason?: unknown; detail?: unknown })
+        : null;
+    return [{
+      id: r.id,
+      label: typeof r.label === 'string' ? r.label : '',
+      base_url: r.base_url,
+      models,
+      kind: r.kind === 'override' ? 'override' as const : 'custom' as const,
+      has_api_key: r.has_api_key === true,
+      is_available: r.is_available === true,
+      unavailable_reason: typeof r.unavailable_reason === 'string' ? r.unavailable_reason : null,
+      last_test: lastTest
+        ? {
+            ok: lastTest.ok === true,
+            at: typeof lastTest.at === 'string' ? lastTest.at : null,
+            reason: typeof lastTest.reason === 'string' ? lastTest.reason : undefined,
+            detail: typeof lastTest.detail === 'string' ? lastTest.detail : undefined,
+          }
+        : null,
+    }];
+  });
+}
+
+/** 创建/更新 payload。`api_key` 省略 = 不改密钥；空串 = 显式清除（ADR-0032 §7.1）。 */
+export interface ProviderUpsert {
+  id: string;
+  label?: string;
+  base_url: string;
+  models: { model_id: string; label?: string }[];
+  api_key?: string;
+}
+
+/** POST /api/model-providers（id 冲突 = 覆盖更新；与内置同名 = 覆盖内置）。 */
+export async function createModelProvider(payload: ProviderUpsert): Promise<void> {
+  await providerFetch('/api/model-providers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+/** PUT /api/model-providers/{id}。api_key 省略 = 不改；空串 = 清除。 */
+export async function updateModelProvider(id: string, patch: Omit<ProviderUpsert, 'id'>): Promise<void> {
+  await providerFetch(`/api/model-providers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+/** DELETE /api/model-providers/{id}。404 = 不存在；500 = 凭据删除失败（配置保留）。 */
+export async function deleteModelProvider(id: string): Promise<void> {
+  await providerFetch(`/api/model-providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** 连接测试结果（失败归类 reason + 截断摘要 detail；零密钥）。 */
+export interface ProviderTestResult {
+  ok: boolean;
+  message: string;
+  reason?: string;
+  detail?: string;
+  duration_ms: number;
+}
+
+/** POST /api/model-providers/{id}/test — 走真实构造路径的最小 chat completion。 */
+export async function testModelProvider(id: string): Promise<ProviderTestResult> {
+  const body = await providerFetch(`/api/model-providers/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+  });
+  const r = body as Record<string, unknown>;
+  return {
+    ok: r.ok === true,
+    message: typeof r.message === 'string' ? r.message : (r.ok === true ? '连接正常' : '测试失败'),
+    reason: typeof r.reason === 'string' ? r.reason : undefined,
+    detail: typeof r.detail === 'string' ? r.detail : undefined,
+    duration_ms: typeof r.duration_ms === 'number' ? r.duration_ms : 0,
+  };
+}
+
 // ── 能力 manifest（#182 / PRD §3.2）──
 
 /** GET /api/capabilities（SDD 03 §17）。
