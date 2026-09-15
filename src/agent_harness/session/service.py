@@ -180,11 +180,14 @@ class LaunchResult:
 
     Web 层用 run + subscriber 组装 SSE；CLI 层可直接 await run.task
     或忽略 run（自有驱动路径）。
+
+    #204：`launch=False` 的只建路径返回 `run=None`/`subscriber=None`——
+    没有 run 就没有订阅句柄，None 是诚实的"不存在"，调用方据此不组 SSE。
     """
 
     session: Session
-    run: ManagedRun
-    subscriber: Subscriber
+    run: ManagedRun | None
+    subscriber: Subscriber | None
 
 
 @dataclass(frozen=True)
@@ -434,12 +437,20 @@ class SessionService:
         auto_approve_explicit: bool = False,
         auto_approve: bool = True,
         amend: AmendOptions | None = None,
+        launch: bool = True,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
         返回 LaunchResult(session, run, subscriber)。调用方：
         - Web：消费 subscriber.queue 组装 SSE 流。
         - CLI：可 await run.task 或忽略（自有驱动路径）。
+
+        `launch`（#204，默认 True ⇒ 既有行为逐字不变）：
+        - True：创建 + 启动 run（现有路径）；
+        - False：**只建会话**——session/started 与全部会话元数据照常落盘，
+          但不调 RunManager.launch（无在途 run、无订阅者），返回束的
+          run/subscriber 为 None。空会话入口（前端"在项目中新建任务"弹窗）
+          与未来的空会话创建共用这一条路径，不再各自造。
 
         组装顺序（R6-6）：先建 workspace + runtime，最后才 Session.start 落盘，
         避免 runtime 组装失败时留下只含 session/started 的孤儿 session。
@@ -550,6 +561,12 @@ class SessionService:
         # 交互式审批：把真实 session 注入 callback 闭包
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
+
+        if not launch:
+            # #204：只建会话。session/started 与元数据已照常落盘（上面的路径
+            # 完全共享）；不调 RunManager.launch——没有 run 就没有订阅句柄，
+            # None 是诚实的"不存在"，调用方据此不组 SSE。
+            return LaunchResult(session=session, run=None, subscriber=None)
 
         run, subscriber = self._state.run_manager.launch(session, runtime, task)
 

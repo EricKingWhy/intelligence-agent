@@ -204,10 +204,15 @@ class _AmendValueValidators(BaseModel):
 class CreateSessionRequest(_AmendValueValidators):
     """POST /api/sessions 的请求体。"""
 
-    # 空 task 直接 422（FastAPI 自动校验）；纯空白 task 容忍（runtime 侧无意义但不危险）。
-    # max_length 封顶：task 会逐字持久化进 JSONL（user/message）并整体进模型上下文，
-    # 无上限时一个多 MB 请求体就能写爆日志 + 撑爆 context。
-    task: str = Field(min_length=1, max_length=100_000)
+    # #204：task 从"必填"变为"可选"——**刻意放宽，不是偷偷放宽**。空会话入口
+    # （"在项目中新建任务"弹窗）只需要"创建文件 + 设好默认权限"，然后在 chat
+    # 输入框里发第一条消息；此前的契约把 task 锁成必填，正是该弹窗做不出来的
+    # 原因（裁定 §2 原文）。语义：launch=true（默认）时 task 仍必填（由下方
+    # handler 校验，422 不变）；launch=false 时 task 可省略——给了 task 又
+    # launch=false 是矛盾组合（给了任务却静默不执行）⇒ 422。纯空白 task 容忍
+    # （runtime 侧无意义但不危险）；max_length 封顶原因不变：task 会逐字持久化
+    # 进 JSONL（user/message）并整体进模型上下文。
+    task: str | None = Field(default=None, min_length=1, max_length=100_000)
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
     # ADR-0027 / #169：任意**已存在**的绝对目录，会话直接以它为操作目录（不创建、
     # 不复制），并自动注册为项目 + 归组。与 `workspace` 互斥（同时非空 → 422）。
@@ -1181,13 +1186,36 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         return {"providers": providers}
 
     @app.post("/api/sessions")
-    async def create_session(req: CreateSessionRequest):
+    async def create_session(
+        req: CreateSessionRequest, launch: bool = True,
+    ):
         """起新 session + 跑任务，流式返回 AgentEvent（SSE）。
 
         ADR-0016 §2.1（D-A）：run 由 RunManager 以 detached task 驱动，与
         本次 HTTP 请求生命周期解耦——断连（本 generator 被取消）只做
         unsubscribe，run 继续跑到终态；显式取消走 POST /cancel。
+
+        `launch`（#204，query 参数，默认 true ⇒ 既有行为逐字不变）：
+        - true：现有路径（create_and_launch，SSE 直驱 run）；task 必填。
+        - false：**只建会话**——返回会话 JSON（非 SSE），不启动 run、不返回
+          SSE；task 可省略。给了 task 又 launch=false ⇒ 422（"给了任务却
+          静默不执行"的矛盾组合必须显式拒绝）。
+        会话级 `permission_mode` 通过 `X-Permission-Mode` 响应头回传（launch=true
+        的 SSE 响应没有 JSON 体可承载元数据；launch=false 的 JSON 体里也带
+        同名字段）——前端用它初始化 composer 权限 pill（#204 裁定 §3：不要
+        各自取默认值，那正是不一致的来源）。
         """
+        # launch/Task 互斥（#204 裁定 §2）：给了任务却静默不执行是最坏的一种
+        # "宽容"——矛盾组合必须显式拒绝，而不是挑一个语义执行。
+        if not launch and req.task is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="task 与 launch=false 互斥：要么带 task 启动 run（launch=true），"
+                       "要么只建会话（省略 task）",
+            )
+        if launch and req.task is None:
+            # launch=true 恢复既有契约：task 必填（422，行为与原 min_length 校验一致）。
+            raise HTTPException(status_code=422, detail="Field required (task)")
         service = SessionService(app.state.agent)
         state = app.state.agent
 
@@ -1212,11 +1240,27 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 auto_approve_explicit=auto_approve_explicit,
                 auto_approve=req.auto_approve,
                 amend=AmendOptions.from_request(req),
+                launch=launch,
             )
         except (WorkspaceNameInvalid, InvalidDecision) as e:
             raise http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
+
+        headers = {"X-Permission-Mode": permission_mode.value}
+
+        # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
+        # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题
+        # （那些是列表页的投影字段，这里没有数据来源）。
+        if not launch:
+            return JSONResponse(
+                status_code=200,
+                headers=headers,
+                content={
+                    "session_id": session.session_id,
+                    "permission_mode": permission_mode.value,
+                },
+            )
 
         async def event_generator():
             """SSE 事件源：消费订阅队列，转成 SSE 帧。
@@ -1233,7 +1277,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             finally:
                 run.unsubscribe(subscriber)
 
-        return EventSourceResponse(event_generator())
+        return EventSourceResponse(event_generator(), headers=headers)
 
     @app.get("/api/sessions/{session_id}/stream")
     async def stream_session(session_id: str, after_seq: int = -1):
