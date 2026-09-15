@@ -458,6 +458,18 @@ class AppState:
         self._wiring_lock = asyncio.Lock()
         self._registry: CapabilityRegistry | None = None
         self._wiring: CapabilityWiring | None = None
+        # #203 / ADR-0032：自定义供应商存储（全局配置实体，与 env catalog 并存）。
+        # 真实凭据后端（keyring）；测试可经 patch 换 MemoryCredentialStore。
+        from agent_harness.model.config import PROVIDER_PRESETS
+        from agent_harness.model.provider_store import (
+            ProviderStore,
+            SystemCredentialStore,
+        )
+
+        self.provider_store = ProviderStore(
+            Path(settings.provider_store_path), SystemCredentialStore(),
+            builtin_ids=frozenset(PROVIDER_PRESETS),
+        )
         self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
 
     def _cache_context_snapshot(
@@ -620,6 +632,7 @@ STREAM_REPLAY_MAX_EVENTS = 1000
 def _render_model_option(
     *, id: str, provider: str, model_name: str, is_default: bool,
     capabilities: dict[str, Any], metadata_source: str,
+    is_available: bool = True, unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
     """渲染一条 ModelOption（SDD 03 §16）。
 
@@ -627,19 +640,26 @@ def _render_model_option(
     context_window? / speed_tier? / supports_*? / metadata_source。
     旧字段 alias（向后兼容）：name / model / default。
     未知能力位不在 capabilities dict 里即不出现在响应（契约：「not guessed」）。
+
+    #203 / ADR-0032 D5：is_available 改为真实判定的**入参**（默认 True 向后
+    兼容）；provider_store 侧的条目传真实值（有凭据 ⇒ true）。语义是**已配置**，
+    不是"网络可达"——可达性由「测试连接」给结论（列表接口不做网络探测）。
     """
     option: dict[str, Any] = {
         # 新契约字段
         "id": id,
         "provider": provider,
         "is_default": is_default,
-        "is_available": True,  # catalog 无 disabled 概念，恒可用
+        # ADR-0032 D5：真实判定（此前硬编码 True，"可用"没有任何依据）。
+        "is_available": is_available,
         "metadata_source": metadata_source,
         # 旧字段 alias（前端切换期间保留，避免破坏现有客户端）
         "name": id,
         "model": model_name,
         "default": is_default,
     }
+    if unavailable_reason is not None:
+        option["unavailable_reason"] = unavailable_reason
     # display_name 缺省回落到 model_name（更可读）。
     option["display_name"] = capabilities.get("display_name", model_name)
     # 已知能力位透传（未声明的键不在 capabilities 里 → 省略，不猜测）。
@@ -859,6 +879,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_workspace_file_routes(app, validate_session_id=validate_session_id)
 
+    # #203 / ADR-0032 自定义供应商管理（CRUD + 连接测试；独立 router）。
+    # 凭据读写是宿主侧敏感操作，来源闸用既有的 `require_trusted_origin`（同款）。
+    from agent_harness.web.model_providers import register_model_provider_routes
+
+    register_model_provider_routes(app)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
@@ -970,11 +996,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
           metadata_source="agent_models"，否则（全靠 preset 回落）="provider_preset"。
         未知能力位省略（契约：「not guessed」）。旧字段 name/model/default 作为
         alias 保留（前端切换期间不破）。
+
+        #203 / ADR-0032 D5：is_available 是**真实判定**（有凭据 ⇒ true）；
+        自定义供应商的条目按 provider_store 的凭据状态过滤 unavailable_reason。
+        默认链/内置 preset 条目仍走 .env（本票**不迁移**既有 key，行为不变）。
         """
         state = app.state.agent
         default_config = ModelConfig.from_settings(state.settings)
         default_provider = state.settings.model_provider
         default_caps = _pick_capabilities(PROVIDER_PRESETS.get(default_provider, {}))
+        # 内置 preset 条目的 is_available 语义不变（.env 配置即已配置）；自定义
+        # provider 的条目按凭据状态真实判定（有凭据 ⇒ true，无 ⇒ false + 原因）。
         models: list[dict[str, Any]] = [_render_model_option(
             id=default_config.model_name,
             provider=default_provider,
