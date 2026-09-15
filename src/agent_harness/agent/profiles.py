@@ -57,21 +57,27 @@ class AgentSpec:
 
 #: coding 角色的工具集（spec §8：read/write/edit/apply_patch/bash/grep/glob，
 #: 加 git_status/git_diff；默认不开放 web）。
+#: #202 / ADR-0031 D8：记忆检索与显式写入工具对 coding 开放（写入源是模型自己）。
 _CODING_TOOLS = frozenset({
     "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
-    "git_status", "git_diff",
+    "git_status", "git_diff", "retrieve_memory", "remember_this", "forget_memory",
 })
 
 #: research/review 角色的只读工具集（spec §8：Knowledge/Web/MCP 只读，无
 #: write/bash；本地 read/grep/glob 是 review 看共享 workspace 真实文件的最小需要）。
-#: MCP 工具名运行时动态发现，V1 静态集合不含——capability 接线时按需扩展。
+#: #202：retrieve_memory 是只读检索，对 research 开放；remember_this（写）不进。
 _RESEARCH_TOOLS = frozenset({
     "read", "grep", "glob",
     "retrieve_knowledge", "read_knowledge_source", "web_search",
+    "retrieve_memory",
 })
 
 #: supervisor（main）：亲自查证用全量 + delegate。max_steps 对齐单代理现状。
-_MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | {"delegate", "inspect_artifact"}
+#: #202：`forget_memory`（DANGER + 审批）补进 scope——修它此前不在任何 tool_scope、
+#: 被非 main 档位 `registry.filtered()` 静默剔除的既有缺陷。
+_MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | frozenset({
+    "delegate", "inspect_artifact", "forget_memory",
+})
 
 #: 三内置 profile（出厂设定，非用户自定义面——文件发现机制 DEFER）。
 #: `system_prompt` 的正文在 `agent_harness.prompt.builtin`（改文案开那一个文件）。

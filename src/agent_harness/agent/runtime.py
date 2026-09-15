@@ -67,8 +67,11 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
     SessionEvent,
+    memory_injected_ids_var,
     run_context_var,
 )
+from agent_harness.session.event import STEER_APPLIED
+from agent_harness.session.queue import SteerRequest, SteerSource
 from agent_harness.storage import (
     CheckpointBoundary,
     CheckpointPolicy,
@@ -121,6 +124,11 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     负值条目直接丢弃：负 token 数对账无效，入账会污染 usage_total 聚合。
     丢弃遵循"缺失/无效时省略"语义，不是伪造；非数值形状已被 AIMessage 自身
     校验挡在构造期（归因 model 失败，语义正确），到不了这里。
+
+    缓存读取（#200，SDD 03 §162 已声明的 ``cached_tokens`` 兑现）：只读
+    OpenAI 兼容线的 ``input_token_details.cached_tokens``；字段缺失/非数值/
+    负值 ⇒ 键省略（**不写 0**——0 会被命中率算成 0% 假话，not_collected
+    语义才是诚实口径）。
     """
     meta = getattr(ai, "usage_metadata", None)
     if not isinstance(meta, dict):
@@ -132,6 +140,11 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
         value = meta.get(source_key)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             usage[target_key] = value
+    details = meta.get("input_token_details")
+    if isinstance(details, dict):
+        cached = details.get("cached_tokens")
+        if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+            usage["cached_tokens"] = cached
     return usage or None
 
 
@@ -378,9 +391,15 @@ class AgentRuntime:
         model_call_gate: ModelCallGate | None = None,
         agent_id: str = "default",
         observability_sink: Any | None = None,
+        steer_source: SteerSource | None = None,
+        agent_profile: str = "main",
+        dropped_tools: tuple[str, ...] = (),
     ) -> None:
         self.registry = registry
         self.executor = executor
+        # steer 注入源（ADR-0030 D2 / §4.3）：None = 不注入，行为逐字不变
+        # （CLI 与绝大多数单测走这条路径）。
+        self._steer_source = steer_source
         # 同错熔断护栏（ADR-0014 #69）：可选注入；默认每 run 一个新实例
         # （计数不跨 run 累积——每个 run 的循环各自干净起步）。
         self._failure_guard = failure_guard
@@ -403,6 +422,12 @@ class AgentRuntime:
         # Langfuse 旁路观测（ADR-0018 D2）：可选注入；None/缺席 = 零开销。
         # 埋点是添加性的：tracer 故障被 sink 边界吞掉，绝不影响 Loop 语义。
         self._observability_sink = observability_sink
+        # #198：生效档位与被 tool_scope 剔除的工具名（装配层在 registry 收窄后
+        # 计算）。run_config 结构化日志与 run/started 事件的数据源——"模型为什么
+        # 说没有 write"必须可从日志回溯，不能靠工具集形状反推。默认 "main"/空
+        # = 添加性（既有调用方与测试零改动）。
+        self._agent_profile = agent_profile
+        self._dropped_tools = dropped_tools
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
@@ -448,6 +473,73 @@ class AgentRuntime:
                 self._fallback_model = fallback_model.bind_tools(definitions)
             else:
                 self._fallback_model = fallback_model
+
+    @property
+    def agent_profile(self) -> str:
+        """生效档位（#198）：测试断言装配层接线用。"""
+        return self._agent_profile
+
+    @property
+    def dropped_tools(self) -> tuple[str, ...]:
+        """被 tool_scope 剔除的工具名（#198）：测试断言装配层接线用。"""
+        return self._dropped_tools
+
+    async def _inject_steers(
+        self, session: Session, run_id: str, step_id: int,
+    ) -> list[SessionEvent]:
+        """把待注入的 steer 追加成本 run 的 user/message（ADR-0030 §4.3）。
+
+        返回**已持久化**的事件列表（调用方逐个 yield 镜像 AgentEvent）——本方法
+        只做 append，不负责广播，避免生成器嵌套里再嵌一层 yield。
+
+        三条硬性要求（都有具体故障模式，不是风格问题）：
+
+        1. 用**本 run 自己的** ``session`` 实例 append：两个 Session 各自推算 seq
+           会撞号，写出重复 seq 让会话不可 resume。
+        2. steer 消息带 ``steer_id``、**绝不**带 ``injected_by``：后者是"runtime
+           注入的文案"，标记它会让用户自己的话被记忆抽取排除
+           （`memory/extractor.py`）并从 `user_turn_count` 里漏计。
+        3. 陈旧请求（run_id 不匹配 / run_id 未知）**丢弃并记日志**，不注入——给
+           错误的 run 注入等于让用户的话出现在无关的上下文里；丢弃是安全的，
+           因为该 `steer/requested` 仍未被 `steer/applied` 收口，终态驱动会把它
+           当普通输入投递（不变量 #7：事件还在，投递晚一点而已）。
+        """
+        if self._steer_source is None:  # pragma: no cover - 调用方已判
+            return []
+        drained = await self._steer_source.drain_steers(session.session_id)
+        if not drained:
+            return []
+        appended: list[SessionEvent] = []
+        for steer in self._applicable_steers(drained, run_id):
+            user_event = session.append(
+                USER_MESSAGE,
+                {"content": steer.content, "steer_id": steer.steer_id},
+                run_id=run_id, step_id=step_id,
+            )
+            applied = session.append(
+                STEER_APPLIED,
+                {"steer_id": steer.steer_id, "applied_seq": user_event.seq, "run_id": run_id},
+                run_id=run_id, step_id=step_id,
+            )
+            appended.extend((user_event, applied))
+        return appended
+
+    @staticmethod
+    def _applicable_steers(
+        drained: list[SteerRequest], run_id: str,
+    ) -> list[SteerRequest]:
+        """筛掉陈旧 steer（顺序保持队列内 FIFO）。"""
+        applicable: list[SteerRequest] = []
+        for steer in drained:
+            if steer.run_id == run_id:
+                applicable.append(steer)
+            else:
+                logger.warning(
+                    "丢弃陈旧 steer（steer_id=%s，目标 run=%s，当前 run=%s）"
+                    "——它仍未被 steer/applied 收口，由终态驱动当普通输入投递",
+                    steer.steer_id, steer.run_id, run_id,
+                )
+        return applicable
 
     async def run(self, session: Session, user_input: str) -> AgentRunResult:
         """跑完整条 Agent Loop，返回 AgentRunResult。
@@ -542,6 +634,10 @@ class AgentRuntime:
         # 上下文——child 的 set 会覆盖父值且不会随 child 完成消失，必须显式
         # 恢复，否则父后续的 Ledger/事件归因错挂到 child 的 run_id（#87 实锤）。
         run_context_token = None
+        # 记忆注入注册表 token（#202 / ADR-0031 D4）：与 run_context_token 同一
+        # 初始化点——异常发生在两个 set 之间时 finally 引用未绑定变量会掩盖
+        # 原异常（全量回归实证：UnboundLocalError 掩盖 queue 竞态）。
+        memory_injected_token = None
         # Model Fallback + 卡流看门狗 + 并发闸：每 run 一个新 coordinator
         # （切换状态不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator
         # 退化为透传（异常原样上抛），但看门狗/并发闸对所有 run 生效。
@@ -561,7 +657,9 @@ class AgentRuntime:
             # USER_ACCEPTED 稳定边界：user/message 已持久化。
             await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
-            run_id, turn_index = session.begin_run(agent_id=self._agent_id)
+            run_id, turn_index = session.begin_run(
+                agent_id=self._agent_id, agent_profile=self._agent_profile,
+            )
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
             if self._observability_sink is not None and self._observability_sink.enabled:
@@ -582,14 +680,40 @@ class AgentRuntime:
             # 事件降级时需要 run_id 对账，经 contextvar 传递。嵌套运行的恢复
             # 由外层 finally 兜底（token 捕获于下）。
             run_context_token = run_context_var.set(run_id)
+            # 本 run 的记忆注入注册表（#202 / ADR-0031 D4）：设空集合，由
+            # MemoryContextProvider.select() 在注入时写入；run 收尾 reset。
+            memory_injected_token = memory_injected_ids_var.set(frozenset())
             # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
             run_started = next(e for e in session.since(memory_event_start) if e.type == RUN_STARTED)
             yield to_agent_event(run_started)
+
+            # run_config（#198）：每个 run 的运行条件——档位 / 主模型 / 生效工具
+            # 清单 / 被剔除工具——落一条结构化日志。此前这些事实不落任何日志，
+            # "模型为什么说没有 write"只能靠工具集形状 + system prompt 自述反推
+            # （真机会话 f522d4a9 实证）。工具名单只进诊断日志不进事件流（事件
+            # 膨胀边界，docs/TICKET_BATCH_PLAN.md §4）；位置在 run_context_var.set
+            # 之后：日志行带 session_id（此前 llm_call 只能靠正文指纹检索）。
+            self._log("run_config", "Run 运行条件", span_id=run_span, step=0,
+                      agent_profile=self._agent_profile,
+                      model_id=self._primary_model_name,
+                      tool_names=tuple(t.name for t in self.registry.list()),
+                      dropped_tools=tuple(self._dropped_tools),
+                      session_id=session.session_id)
 
             self._log("agent_start", "Agent Loop 开始", span_id=run_span, step=0,
                       outcome="started", agent_name="agent_runtime")
 
             while True:
+                # 第 0 步（ADR-0030 D2）：steer 注入。位置固定在 ContextBuilder
+                # 之前——那是模型可见投影的唯一入口，注入必须发生在投影之前才
+                # 会被本轮模型调用看到；轮次边界（而不是"边答边改"）是物理约束：
+                # 已发出的请求无法改写，已流出的 token 收不回来（ADR §1.3）。
+                if self._steer_source is not None:
+                    for steer_event in await self._inject_steers(
+                        session, run_id, step_base + steps,
+                    ):
+                        yield to_agent_event(steer_event)
+
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
                 ctx_span = (
@@ -1127,6 +1251,13 @@ class AgentRuntime:
                     # SSE 消费方可能在【另一上下文】aclose 本生成器（断连路径）
                     # ——token 无法跨上下文 reset。该上下文随任务消亡，无需恢复；
                     # 正常路径（同任务）的 reset 一定成功。
+                    pass
+            # 记忆注入注册表收口（#202 / ADR-0031 D4）：下一 run 里 injected 全
+            # false。与 run_context_token 同一收口窗口；ValueError 语义同上。
+            if memory_injected_token is not None:
+                try:
+                    memory_injected_ids_var.reset(memory_injected_token)
+                except ValueError:
                     pass
 
     def _new_coordinator(self) -> ModelFallbackCoordinator:

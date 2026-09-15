@@ -16,6 +16,10 @@ run 与 HTTP 请求生命周期解耦：`POST /api/sessions` 经 launch() 把
 孤儿回收：最后一个订阅者离开后启动宽限计时（Settings.run_disconnect_grace_seconds），
 到期仍零订阅者 → 取消 run task（取消臂收尾 run/failed(reason=orphaned)）；
 新订阅者接入即撤销计时。显式 POST /cancel 与孤儿回收是仅有的两个外部终止路径。
+
+run 终态驱动（ADR-0030 D4）：`_drive` 收口后调注入的 `on_run_terminal(session_id)`
+——那是 queue/steer 接力投递的**唯一**触发点（Web / CLI 不各自实现）。回调由
+session 层提供（默认 None = 不接力），RunManager 自身不认识 queue 语义。
 """
 
 from __future__ import annotations
@@ -23,11 +27,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.memory.types import memory_session_var
-from agent_harness.session import Session
+from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_STARTED, Session
 
 logger = logging.getLogger("agent_harness.web.runmanager")
 
@@ -57,6 +63,14 @@ class ManagedRun:
         self.terminal = False
         self.reap_requested = False
         self._orphan_handle: asyncio.TimerHandle | None = None
+        # run/started 落盘后填上（ADR-0030 §4.7）：服务层要用它写
+        # `steer/requested.run_id` 与 `queue/consumed.run_id`——那两个字段的语义是
+        # "这条输入被哪个 run 收编了"，只有 runtime 自己 append 的 run/started 是
+        # 权威来源（launch 时刻还没有 run_id：begin_run 在 run 任务里跑）。
+        self.run_id: str | None = None
+        # #200：本 run 的 runtime（launch 时填）——context-usage 端点从它的
+        # builder 读最近一次 build 快照。launch 之后即有值（launch 同步填）。
+        self.runtime: AgentRuntime | None = None
 
     DONE = _DONE  # 订阅者侧哨兵引用
 
@@ -122,6 +136,31 @@ class ManagedRun:
         与 live 流无缝拼合、零重复。"""
         return self._last_enqueued_seq
 
+    async def wait_run_id(self, timeout: float = 5.0) -> str | None:
+        """等 run/started 落盘后取 run_id；超时返回 None（`RUN_ID_WAIT_TIMEOUT`）。
+
+        存在这个等待窗口是因为 `RunManager.launch` 只负责 `create_task`——
+        `session.begin_run()` 在 run 任务里跑，run/started 之前用户/系统都拿不到
+        run_id。窗口极短（begin_run 紧跟 user 落盘与一次 checkpoint 写），但
+        **不能假设它已经结束**：`send_message(mode="steer")` 与终态驱动的
+        `queue/consumed` 都发生在 launch 返回后的同一事件循环刻度上。
+
+        轮询而不是 `asyncio.Event`：listener（`_on_session_event`）按契约可在任意
+        线程上下文被调用，跨线程 set 事件不安全；读一个属性并 sleep 是安全的。
+        超时**不抛错**：拿不到 run_id 只让消费事件少一个字段（判据是 id），
+        不该让投递本身失败。
+        """
+        deadline = time.monotonic() + timeout
+        while self.run_id is None:
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "run/started 在 %.1fs 内未落盘（session=%s）——run_id 未知",
+                    timeout, self.session.session_id,
+                )
+                return None
+            await asyncio.sleep(0.01)
+        return self.run_id
+
     # ── 内部 ──
 
     def _fanout(self, event: AgentEvent) -> None:
@@ -166,10 +205,14 @@ class ManagedRun:
     def _on_session_event(self, event) -> None:
         """session listener：任何线程上下文都安全（put_nowait）。"""
         self.enqueue_session_event(event)
+        # run/started 是本 run 的归因身份（ADR-0030 §4.7）：只认第一条，后续步事件
+        # 的 run_id 是同一个值，重复覆盖没有意义。
+        if self.run_id is None and event.type == RUN_STARTED and event.run_id:
+            self.run_id = event.run_id
         # 终态事实落盘即视为非在途（02 §17）：checkpoint/memory 回写等收尾
         # await 还会跑一会儿——只等 task.done() 会让 cancel/重连在此窗口
         # 误判"仍在途"（store 已见 run/completed 而 cancel 返回 cancelling）。
-        if event.type in ("run/completed", "run/failed") and not self.terminal:
+        if event.type in (RUN_COMPLETED, RUN_FAILED) and not self.terminal:
             self.terminal = True
             self._cancel_orphan_timer()
 
@@ -179,9 +222,25 @@ class RunManager:
 
     DONE = _DONE
 
-    def __init__(self, disconnect_grace_seconds: float = 300.0) -> None:
+    def __init__(
+        self,
+        disconnect_grace_seconds: float = 300.0,
+        on_run_terminal: Callable[[str], Awaitable[None]] | None = None,
+        on_context_snapshot: Callable[[str, dict, list[dict]], None] | None = None,
+    ) -> None:
         self.disconnect_grace_seconds = disconnect_grace_seconds
+        # run 终态后的唯一驱动回调（ADR-0030 D4）：接力投递下一条未投递输入。
+        # 默认 None ⇒ 测试与既有调用零改动，且 RunManager 不认识 queue 语义
+        # （回调由 session 层提供，Web 层只负责"在正确的时刻叫它"）。
+        self._on_run_terminal = on_run_terminal
+        # #200：run 收口时的看板快照回调（builder 快照 + 工具定义）。默认 None
+        # = 不缓存（CLI 等调用方不消费看板）；Web 层在正确的时刻叫它。
+        self._on_context_snapshot = on_context_snapshot
         self._runs: dict[str, ManagedRun] = {}
+        # 关停中：`aclose()` 取消在途 run 会走 `_drive` 的 finally，而那条路径默认
+        # 会触发接力投递——关机时又拉起新 run 显然是错的（进程马上没了，新 run
+        # 只会被半个生命周期地拖死）。置位后终态回调直接跳过。
+        self._closing = False
 
     def launch(
         self, session: Session, runtime: AgentRuntime, user_input: str,
@@ -193,6 +252,10 @@ class RunManager:
         被调度前就已挂上（同一事件循环内无插队窗口）。
         """
         run = ManagedRun(session, self)
+        # #200：runtime 引用存到 ManagedRun——context-usage 端点从在途 run 的
+        # builder 读最近一次 build 快照（launch 时刻 builder 还没 build 过，
+        # _token_estimate_total=0 是诚实的"未 build"信号）。
+        run.runtime = runtime
         self._runs[session.session_id] = run
         run.task = asyncio.create_task(
             self._drive(run, runtime, user_input),
@@ -219,6 +282,54 @@ class RunManager:
             run.session.remove_listener(run._on_session_event)
             memory_session_var.reset(token)
             run.finish()
+            # #200：run 收口时把 builder 快照缓存下来（最后 build 是当前事实，
+            # run 终结后 get_active=None，端点从缓存读——不重建假 registry）。
+            self._capture_context_snapshot(run, runtime)
+            # 快照取完即释放 runtime 引用：`_runs` 每会话保留一条 ManagedRun 终身，
+            # 留着 runtime 就等于把模型客户端 / registry / sandbox 句柄一起钉住
+            # （终端 run 的 runtime 再无读者——端点只读在途 run 的）。
+            run.runtime = None
+            await self._notify_run_terminal(run.session.session_id)
+
+    def _capture_context_snapshot(self, run: ManagedRun, runtime: AgentRuntime) -> None:
+        """run 收口时缓存 context-usage 快照（#200）。快照在 run 收尾时计算
+        （builder 与 session 都还活着）；异常吞掉——缓存失败不得污染 run 终态
+        事实（快照只是看板数据，不是运行事实）。"""
+        capture = self._on_context_snapshot
+        if capture is None:
+            return
+        builder = runtime._context_builder
+        if builder is None:
+            return
+        try:
+            capture(run.session.session_id,
+                    builder.usage_snapshot(run.session),
+                    runtime.registry.export_model_definitions())
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "context-usage snapshot capture failed for %s",
+                run.session.session_id, exc_info=True,
+            )
+
+    async def _notify_run_terminal(self, session_id: str) -> None:
+        """通知 session 层"这个 run 收口了"（ADR-0030 §4.7 的唯一驱动点）。
+
+        顺序硬约束：**必须在 `run.finish()` 之后**——回调会检查
+        `get_active()` 来决定要不要接力，而 finish() 之前本 run 仍被算作在途，
+        接力会被自己的守卫挡住（静默不投递）。
+
+        异常一律吞掉并记日志：收尾失败不得污染 run 的终态事实（run/completed
+        已经落盘，那是事实；接力失败只是"下一条输入晚一点被投递"，事件流
+        仍然记着它）。CancelledError 例外上抛——那是关机 / 取消臂在收口本任务。
+        """
+        if self._on_run_terminal is None or self._closing:
+            return
+        try:
+            await self._on_run_terminal(session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("run 终态驱动失败（session=%s）——未投递输入留待下次", session_id)
 
     def get_active(self, session_id: str) -> ManagedRun | None:
         """在途 run（未终态）；重连续传接 live 流用。
@@ -263,6 +374,7 @@ class RunManager:
 
     async def aclose(self) -> None:
         """应用关停：取消全部在途 run 并等待收尾（幂等）。"""
+        self._closing = True  # 先置位：取消引发的终态回调不得再接力开新 run
         for run in list(self._runs.values()):
             if run.task is not None and not run.task.done():
                 run.task.cancel()

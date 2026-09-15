@@ -384,15 +384,21 @@ class Session:
 
     # ── Run 生命周期 ──
 
-    def begin_run(self, *, agent_id: str = "default") -> tuple[str, int]:
+    def begin_run(self, *, agent_id: str = "default",
+                  agent_profile: str = "main") -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
         ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
         trace metadata 标记「这是第 N 轮」（T9 #139）。
+
+        ``agent_profile``（#198）：生效档位**总是**写进 run/started.data——
+        未指定时为 "main"。"缺字段"正是此前不可回溯的根因（真机会话里 13 个
+        run 全部查不到档位，只能靠工具集形状反推）；旧数据无该字段时前端按
+        「档位未知」降级，不报错。
         """
         run_id = str(uuid4())
         turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
-        self.append(RUN_STARTED, {"turn_index": turn_index},
+        self.append(RUN_STARTED, {"turn_index": turn_index, "agent_profile": agent_profile},
                     run_id=run_id, agent_id=agent_id)
         return run_id, turn_index
 

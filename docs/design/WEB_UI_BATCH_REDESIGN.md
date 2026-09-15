@@ -1,0 +1,224 @@
+# 设计稿 — Web UI 批次重设计（#194 / #197 / #199 / #201 / #204）
+
+- **Status**: 设计冻结，待实现
+- **Date**: 2026-09-13
+- **读者**：接下来实现这批的前端 agent（**很可能不是写这份文档的人**）
+- **Related**：Issue #194 / #197 / #199 / #201 / #204；`docs/FRONTEND_ISSUES_LOG.md`（前端 worktree 的四轮裁决记录）；AGENTS §15（主题变量双份）、§16.6（前端门禁）
+
+---
+
+## 0 硬性要求（先读这一节）
+
+1. **UI 必须用 `impeccable` skill 做**（用户明确要求："UI 设计要是用 impeccable 这个 skills 来设计，品味要高"）。
+   实现时在前端 worktree（`D:\intelligence-agent-frontend`）里按其 Setup 步骤执行：运行 `<skill-base-dir>/scripts/impeccable context --target <改动文件/路由>` → 加载 `reference/operate.md`（本批全部是 **Operate** 模式：用户是来完成任务的，不是来被说服的）→ **动手改任何 UI 之前**读 `reference/craft-floor.md`。
+   若 launcher 不可用：先告知用户"context 未加载"，再按 SKILL.md 的降级路径推进，并在 PR 里说明。
+2. **本批的模式 = Operate**：可扫描性、一致性、原生预期、真实使用场景优先于表达欲；品牌感落在精确的细节里，不靠大动效。
+3. **不引入新依赖**：不装 UI 库、不装图标库（沿用现有内联 SVG 与现有 CSS 类）；分段条/菜单全部用手写 flex + 现有 token。
+4. **主题纪律（AGENTS §15）**：任何新增颜色/尺寸 token 必须在 `:root` **与** `:root[data-theme='light']` 双份定义。
+5. **e2e 定位器优先保持**：优先保持 DOM 契约（`role` / `aria-label` / 既有类名），把 e2e 改动量压到最小；确需改类名时，同一 PR 内同步更新对应 spec（§6 给了清单）。
+6. **只动本票范围内的东西**：不顺手重构、不改无关样式（AGENTS §8/§9.3）。
+
+---
+
+## 1 #194 — 流式期间「Esc 停止」提示压在左下角档位控件上
+
+### 现状
+`.composer-esc-hint`（`Composer.tsx:173-175`）用绝对定位贴在输入区左下角，与档位控件（模型/权限/档位/深度）在同一区域重叠。
+
+### 设计（从简，不突兀）
+- **去掉绝对定位**，把提示放进 Composer 的 **footer 行内**：与发送/停止按钮同一行、靠右对齐（`Esc 停止`），仅在 `streaming` 为真时渲染。
+- 视觉：`12px` 次级文字色 + 现有 mono 字重；`Esc` 用一个 `<kbd>` 样式的小胶囊（复用现有 token，不新造颜色）。
+- 与 #195/#196 的队列条位置规则：**队列条在输入框上方**、Esc 提示在按钮行 → 两者不再有可能重叠。
+
+### 验收
+| 检查 | 方式 |
+| --- | --- |
+| 与档位控件、模型选择器均不重叠（≥1200px 与 ≤1200px 折叠两种布局） | e2e：取 `.composer-esc-hint` 与各控件 `boundingBox()` 断言矩形不相交 |
+| 只在 streaming 时出现 | e2e：非流式下 `toHaveCount(0)` |
+| 键盘路径不变（Esc 仍能停止） | 既有停止用例保持绿 |
+
+---
+
+## 2 #197 — Inspector 水平拖拽方向反了（+ 默认宽度 340）
+
+### 现状（已定位到行）
+| 位置 | 现状 | 问题 |
+| --- | --- | --- |
+| `StepDetail.tsx:279` | `clampInspectorWidth(drag.startW + (e.clientX - drag.startX), drag.available)` | 面板在**右侧**：把手右移对应面板**变窄**，所以这里符号反了 |
+| `StepDetail.tsx:297` | `panel.width + (e.key === 'ArrowRight' ? step : -step)` | 键盘同源反转 |
+| `App.tsx:260` | `width: INSPECTOR_MIN_W`（=320） | 初始宽度等于下限；用户裁定**默认 340** |
+
+### 改动（用户原话："仅修改拖拽逻辑，保留原有 UI 样式、把手↔箭头，不要改动面板里面的业务代码"）
+1. 指针路径：`drag.startW + Δ` → **`drag.startW − Δ`**。
+2. 键盘路径：`ArrowRight` 应让面板**变窄** → `step` 取负；即 `panel.width + (e.key === 'ArrowRight' ? -step : step)`。
+3. `web/src/lib/inspectorPanel.ts` 新增并导出 **`INSPECTOR_DEFAULT_W = 340`**（`MIN=320` / `MAX=480` 保持不变）；`App.tsx:260` 改用 `INSPECTOR_DEFAULT_W`；`:40` 的 import 同步。
+4. **不动**：`clampInspectorWidth` 的夹取公式（中心列保护语义不变）、把手 DOM/`role="separator"`/`aria-valuetext`、面板内部业务代码。
+
+### 语义确认（写进代码注释，避免下一个人又"修回去"）
+> 面板位于三栏布局的最右列。把手向右移动 ⇒ 中心列变宽 ⇒ 面板变窄。因此宽度 = `startW − (clientX − startX)`。
+
+### 必须同步的断言（逐条对照，勿漏）
+| 文件:行 | 现值 | 改为 |
+| --- | --- | --- |
+| `e2e/y-inspector-peek.spec.ts:198-200` | `aria-valuenow=320`、min 320、max 480 | `aria-valuenow=340`（min/max 不变） |
+| `:222-223` | 向右拖 600 ⇒ 480（变大） | 向右拖 600 ⇒ **320**（到下限）；向左拖 600 ⇒ **480** |
+| `:229-230` | 向左拖 ⇒ 320 | 向左拖 ⇒ 480 |
+| `:233-234` | 拖 80 后 > 320 | 拖 80（向右）后 **< 340 且 ≥ 320** |
+| `:237` | reload 后回到 320 | reload 后回到 **340** |
+| `:249-251` | `ArrowRight` ⇒ 336（320+16） | `ArrowRight` ⇒ **324**（340−16）；`ArrowLeft` ⇒ 回到 **340**（再按到 356 也可，按实现语义断言） |
+| `lib/inspectorPanel.test.ts` | `clampInspectorWidth(480, 700) === 340` | 该夹取用例**不变**（它与方向无关）；新增 `INSPECTOR_DEFAULT_W === 340` 的常量断言 |
+
+> 注：`:249` 的期望值取决于"步长 16 且从 340 出发"，实现后按真实值对齐；**不要**为了让旧断言通过而保留反转方向。
+
+---
+
+## 3 #199 — 模型选择器改两级飞出（对齐 ZCode 图 2/图 3）
+
+### 用户裁定
+- **不要搜索框**（"才几个模型没有必要使用搜索框"），**只要两级**。
+- 形态：参考 ZCode 的两级飞出菜单——第一级 provider，悬停/右移展开第二级 model。
+
+### 结构
+```
+[模型选择器触发]  →  ┌ 第一级：provider / 默认链 ─┐
+                     │ ● 默认链                  │
+                     │ ● DeepSeek        18 个 ▸ │──┐
+                     │ ● 自建代理        3 个  ▸ │  │
+                     │ ─────────────────────────  │  │
+                     │ ⚙ 管理模型（#203 入口）     │  │
+                     └───────────────────────────┘  │
+                        ┌ 第二级：该 provider 的模型 ─┘
+                        │ ✓ deepseek-chat            │
+                        │   deepseek-reasoner        │
+                        └────────────────────────────┘
+```
+
+### 要求
+| 项 | 要求 |
+| --- | --- |
+| 两级导航 | 键盘：`→`/`Enter` 进第二级，`←`/`Esc` 回第一级/关闭；鼠标：hover 展开（带 ~80ms 迟滞，防抖动）；都要能 Tab 到达 |
+| 搜索框 | **删除**（含 `ModelPicker.tsx:67` 的搜索阈值逻辑与相关样式） |
+| 保留 | `groupByProvider()`（`:42-51`）产出的 provider 分组语义、`默认链`伪选项（`:135-145`）、`commitSelection` 的守卫（`:79-86`） |
+| 选中态 | 当前模型：勾选图标 + 加重字重 + 左侧 2px 高亮条；当前 provider 在第一级同样高亮 |
+| 不可用 provider | 置灰但仍可展开（不要隐藏）；行尾显示原因（复用 #203 的 `unavailable_reason` 文案映射），无 reason 时显示「未配置」 |
+| 信息密度 | 第二级行 = 模型名（主）+ provider 名（次级小字）；不显示价格/上下文窗口（看板负责上下文，不在选择器里堆数据） |
+| 管理入口 | 第一级底部「管理模型」→ 打开 #203 的供应商管理弹层 |
+| CSS | 复用 `.model-picker-content` / `.model-picker-item` 等（`app.css:5644-5731`）；`.model-picker-group-label`（`:5697-5705`）**当前是死 CSS**：本次结构替换后若不再需要就删除（属本票 scope 内的清理），若作为第一级组标题启用则在两个主题下都校验对比度 |
+
+---
+
+## 4 #201 — 权限 / Agent 档位 / 深度 三个下拉统一重设计（+ 合并共享组件）
+
+### 用户裁定
+- 三个下拉**合并成一个共享组件**（授权），范式对齐图 6：**图标 + 标题 + 描述 + 明确选中态**。
+- 合并后 **`ContextProviderPicker` 直接删除**（其职责被 #200 看板与 #203 供应商管理取代；记忆是自动注入的不需要选）。
+- `aria-label` 可统一成中文，**除非**会破坏 e2e 定位器（若破坏则保留原值，并在 PR 里注明原因）。
+
+### 组件契约（新）
+`web/src/components/OptionPicker.tsx`（共享）：
+
+```ts
+type Option = { value: string; title: string; description?: string; icon?: ReactNode };
+type Props = {
+  label: string;            // 触发按钮上的短标签
+  icon: ReactNode;          // 触发按钮上的图标
+  value: string;            // '__default__' = 未选（沿用 ControlPicker 现状）
+  options: Option[];
+  onChange: (v: string) => void;
+  ariaLabel?: string;       // 显式传入；组件不内置 aria-label 默认值
+  footer?: ReactNode;       // 例如档位收窄提示（见下）
+};
+```
+
+要求：
+- 每行 = 图标槽（20px 固定宽，保证多行对齐）+ 标题（主）+ 描述（次级 2 行内截断）+ 右侧选中标记。
+- 选中态 = 勾选 + 加重 + 左侧 2px 高亮条（与 #199 第二级同一视觉语言）。
+- `__default__` 行文案沿用「默认（未选）」；不得把"未选"渲染成空白。
+- **组件不内置 `aria-label`**：由调用方传（避免三处默认值打架，也避免统一中文时误伤 e2e）。
+
+### 三处替换
+| 原组件 | 处置 |
+| --- | --- |
+| `ControlPicker.tsx`（权限/档位/深度共用） | 改为 `OptionPicker` 的薄包装或直接用；`DEFAULT_VALUE='__default__'`（`:42`）与「默认（未选）」行（`:108-120`）语义保持不变 |
+| `ContextProviderPicker.tsx` | **删除组件文件与其专属测试**；后端 `context_providers` 契约**一字不动**（请求字段仍被接受；只是没有 UI 去选它）。若要显式关闭全部 provider，仍可用 API（见 #200 的范围界定） |
+| `ModelPicker.tsx` | 保留两级结构，但**行样式与选中态复用** `OptionPicker` 的行实现（抽出行组件，不复制视觉） |
+
+### 档位收窄提示（用户裁定："要提示，但从简，不能突兀"）
+- 位置：档位 picker 弹层的 `footer`（选中行下方），一行 12px 次级文字：
+  「该档位只开放 N 个工具（共 M 个）」
+- hover/聚焦该行时用 `title`/tooltip 列出被收窄掉的工具名（最多 6 个 + 「…」）。
+- **不用** toast、不用 banner、不用一次性弹窗。
+- 这条同时缓解 #198 的现象（用户选档位后看不到工具集被收窄），但在 UI 上只说事实，不解释原因。
+
+---
+
+## 5 #204 — 项目弹窗：去掉「任务内容」+ 权限选择重设计
+
+### 用户裁定
+1. 弹窗**不应有**「任务内容」输入框：用户只需"创建文件 + 设好默认权限"，然后在 chat 输入框里发消息。
+2. 图 3 的权限设置**不美观** → 用 §4 的 `OptionPicker` 重做。
+3. 「完全访问」这类选择要与 composer 的权限 pill **保持一致**（弹窗里的选择**只影响第一次**）。
+
+### 5.1 前端改动
+- 删除 `StartTaskInProjectDialog.tsx:154-166` 的任务内容 textarea。
+- 提交守卫（`:87-101` 的 `if (!text || pending) return;` 与 `:178-184` 的 `disabled={!text || pending}`）改为**只看 `pending`**。
+- 创建成功后：弹出层关闭，焦点落到 chat 输入框（用户立刻可以打字）。**不再**自动发起 run。
+
+### 5.2 后端前置（**必须先做，否则前端无从调用**）
+| 现状 | 证据 | 需要 |
+| --- | --- | --- |
+| `CreateSessionRequest.task` 必填 `min_length=1` | `web/app.py:198-238`（`:204`） | 允许"只建会话、不启动 run" |
+| `POST /api/sessions` 总是 `create_and_launch` | `web/app.py:1041-1094` | 同上 |
+| 已有"空会话"能力 | `tests/test_web_api.py:96-108`（`Session.start` 空会话，`first_user_message is None`） | 复用，不新增会话模型 |
+
+**契约**：`CreateSessionRequest` 新增 `launch: bool = True`（默认 true ⇒ 既有行为逐字不变）。
+
+- `launch=True`（默认）：现有路径，SSE 直驱 run。
+- `launch=False`：只写 `session/started`（+ 既有 session 元数据），**不**启动 run、**不**返回 SSE，返回会话 JSON（刻意小形状：`{session_id, permission_mode}`——前端初始化 composer 状态只需这两项；仓库里不存在 `GET /api/sessions/{sid}` 单会话路由，且事件数/标题是列表页投影字段，这里没有数据来源，不伪造）。此时 `task` 可省略（若同时给了 task 而 `launch=False`，按 422 拒绝，避免"给了任务却静默不执行"）。
+
+### 5.3 权限一致性（用户裁定 11）
+- 弹窗里的权限选择 = **首次**创建会话时写入的会话级权限。
+- 创建响应必须回传 `permission_mode`；前端用它**初始化** composer 权限 pill 的状态（不要各自取默认值——那就是不一致的来源）。
+- 之后在 composer 改权限 ⇒ 走既有会话级更新路径，弹窗不再参与。
+- **验收**：弹窗选「完全访问」⇒ 创建后 composer 的权限 pill 必须显示「完全访问」（e2e 断言两处文本一致）。
+
+---
+
+## 6 测试影响清单（实现时逐条核对，勿漏）
+
+| 文件 | 影响 | 处理 |
+| --- | --- | --- |
+| `web/e2e/y-inspector-peek.spec.ts` | #197 拖拽方向 + 默认宽度 | 按 §2 表格逐条翻转 |
+| `web/src/lib/inspectorPanel.test.ts` | 新增 `INSPECTOR_DEFAULT_W` | 加常量断言；夹取用例不变 |
+| `web/e2e/u-project-task.spec.ts` | #204 去掉任务内容 + `launch=false` + 权限一致性 | 改造创建流程用例（`:7/:94/:122` 的三个 title 也要改文案） |
+| `web/e2e/fixtures.ts` | `:359,371` mock 从 `body.task` 派生 `first_user_message`；`:768-795`/`:853-859` catalog；`:889-927` `pickControl`/`pickFirstModel` | mock 需支持 `launch=false`（无 run、空会话）；picker 定位器若因合并组件改名，**同步更新这两个 helper**（改一处即可覆盖多处用例） |
+| `web/src/hooks/useSession.ts` | `:842` `mode:'queue'` 调用、`:869-872` queued ack → `setMode('viewing')` | #204 的 `launch=false` 不走 SSE；确保空会话创建后不进入 `live` 模式 |
+| 既有 `ContextProviderPicker` 相关测试 | 组件删除 | 一并删除；后端 `context_providers` 契约测试**保留**（不受影响） |
+
+**前端门禁（AGENTS §16.6，缺一不可）**：
+```
+cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
+```
+（e2e 必须 `--workers=2`：4 worker 全量并行有资源竞争型抖动。）
+
+---
+
+## 7 视觉方向（给 `impeccable` 的起点，不是终点）
+
+- **模式**：Operate。信息密度与一致性优先；动效只用于状态转换（展开/选中/hover），时长与缓动沿用现有 motion token。
+- **层级**：一级用 1px 边框 + 背景色差区分弹层；二级飞出用同色系更浅一档，**不用阴影堆叠**（三层阴影会脏）。
+- **选中**：勾选图标 + 2px 高亮条 + 字重变化，三者同时给出（只靠颜色不足以表达选中）。
+- **留白**：沿用现有 spacing token（不引入半像素值）；菜单行统一 32px 高（图标行 40px）。
+- **禁止**：纯装饰渐变、发光边框、圆角不一致、emoji 当图标、把工具名/模型名截断到不可辨识（截断要保留可辨识前缀 + `title` 全文）。
+- **空态**（#203/#204 共用）：一行说明 + 一个主行动按钮，不放大插画。
+
+---
+
+## 8 Out of scope
+
+- 不做搜索框（用户明确否掉）。
+- 不改后端 `context_providers` 契约（只删前端选择器）。
+- 不改 Inspector 面板内部业务代码与既有样式（#197 只改方向与默认宽度）。
+- 不引入 UI 库/图标库/图表库。
+- 不做移动端专属布局（沿用现有 <1200px 折叠行为）。
+- 不改权限的后端语义（只改默认值与 UI 一致性）。

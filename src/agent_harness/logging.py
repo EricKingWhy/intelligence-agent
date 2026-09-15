@@ -27,6 +27,9 @@ EVENT_TYPES = frozenset(
         "session_start",
         "task_start",
         "agent_start",
+        # 每个 run 的运行条件（#198）：档位 / 主模型 / 生效工具清单 / 被剔除工具
+        # ——"模型为什么说没有 write"必须可从日志回溯。诊断词汇而非会话事件。
+        "run_config",
         "agent_decision",
         "llm_call",
         "tool_operation",

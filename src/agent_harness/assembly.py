@@ -30,7 +30,7 @@ from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.model.concurrency import ModelCallGate
-from agent_harness.model.config import ModelConfig
+from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
@@ -167,6 +167,7 @@ async def build_runtime(
     reasoning_effort: str | None = None,
     agent_profile: str | None = None,
     context_providers: list[str] | None = None,
+    steer_source: Any | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -179,6 +180,8 @@ async def build_runtime(
     硬墙——policy 决定哪些工具 needs_approval，审批结果仍由 callback 决定）。
     approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
     式审批 callback（见 web 层 PendingApprovalQueue）。
+    steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
+    MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
@@ -194,8 +197,22 @@ async def build_runtime(
     # DEFAULT_REGISTRY 不读环境（§4.4），所以这里显式按 settings 构建一次。
     persona = parse_persona_config(settings.agent_persona)
 
-    config = (ModelConfig.from_settings(settings) if model_name is None
-              else ModelConfig.from_catalog(settings, model_name))
+    # #203 / ADR-0032 D8：模型解析收敛——统一解析点 resolve_selection（catalog
+    # 名优先 + 自定义供应商 `<provider>:<model_id>` 命名空间 fallback）；两者都
+    # 未命中才响亮失败。被删 provider **不静默 fallback**（D9：明确错误含
+    # provider id）。终审 P2 修复：不再裸 model_id 跨 provider 匹配——两个自定义
+    # provider 注册同一 model_id 时此前的循环取文件序第一个（顺序依赖的静默选择）；
+    # 现在 catalog 名精确命中 + composite id（provider:model）精确解析，无歧义。
+    if model_name is None:
+        config = ModelConfig.from_settings(settings)
+    else:
+        try:
+            from agent_harness.model.provider_store import ProviderStore
+
+            store = ProviderStore.for_settings(settings)
+            config = ModelConfig.resolve_selection(settings, model_name, store)
+        except ConfigError as error:
+            raise error from None
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
     # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
@@ -262,8 +279,13 @@ async def build_runtime(
     # tool_scope 未声明的工具，filter 会隐性收窄它。所以 main/None 走原路径不 filter，
     # 只有 coding/research_review 才收窄。收窄后 registry 流向所有下游：
     # ToolExecutor / AgentRuntime / multiagent activate 的 source_registry。
+    # #198：被剔除的工具名必须在收窄**前**记录（收窄后已无从对比）——这正是
+    # "模型说没有 write/edit/apply_patch"的答案本身，经 run_config 日志可回溯。
+    dropped_tools: tuple[str, ...] = ()
     if profile_spec is not None and agent_profile != "main":
+        pre_filter_names = {tool.name for tool in registry.list()}
         registry = registry.filtered(profile_spec.tool_scope)
+        dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
 
     # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
     # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。
@@ -373,4 +395,9 @@ async def build_runtime(
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
         observability_sink=get_observability_sink(settings),
+        steer_source=steer_source,
+        # #198：生效档位（未指定 = "main"）与被 tool_scope 剔除的工具名——
+        # run_config 结构化日志与 run/started 事件的数据源。
+        agent_profile=(agent_profile if agent_profile is not None else "main"),
+        dropped_tools=dropped_tools,
     )

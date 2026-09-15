@@ -5,6 +5,11 @@
     2. model/completed → AIMessage（含 tool_calls）
     3. tool/result → ToolMessage（按 tool_call_id 配对到 AIMessage）
     4. dangling tool_call 检测 → 注入合成 ToolMessage
+    5. ADR-0030（#196）：`message/superseded` 区间剔除（投影级"编辑替换问句"）
+
+本模块同时是**事件流派生**的集散地：`collect_dangling` / `detect_dangling` /
+`undelivered_inputs` 都是同一种东西——只读事件、产出领域事实的纯函数，供
+runtime / recovery / service 复用，避免各调用点各写一遍扫描逻辑。
 
 配对算法：以 AIMessage 为单位。一条 model/completed 带多个 tool_calls 时，
 投影成一条 AIMessage(tool_calls=[...])，后续 tool/result 按 tool_call_id
@@ -14,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from langchain_core.messages import (
     AIMessage,
@@ -27,7 +33,13 @@ from agent_harness.session.event import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    MESSAGE_QUEUED,
+    MESSAGE_SUPERSEDED,
     MODEL_COMPLETED,
+    QUEUE_CANCELLED,
+    QUEUE_CONSUMED,
+    STEER_APPLIED,
+    STEER_REQUESTED,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -94,6 +106,11 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
     T4 (#134)：识别 4-event compaction bracket。bracket 标记的 source_seq 区间
     内的原始投影事件被 shadowed（跳过），CONTEXT_COMPACTED 的 summary 投影成
     SystemMessage 替代被压缩段。
+
+    ADR-0030 (#196)：识别 `message/superseded`——被取代的 user/message 及其整轮
+    （答 + tool_call/result）走同一条 shadowed 跳过路径，所以"编辑了问句"在模型可见
+    上下文里表现为"旧问句那一轮整段消失、只剩新问句"。dangling 合成发生在 shadow
+    之后，被取代轮里的 tool_call 不会被补一条合成 ToolMessage。
     """
     # 第一遍：收集所有 bracket 的 shadowed seq 区间 + 对应 summary。
     # 每个 bracket 由 COMPACTION_START(source_seq_start..source_seq_end) 标记，
@@ -108,8 +125,48 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
         elif event.type == CONTEXT_COMPACTED:
             bracket_summaries.append(event.data.get("summary", ""))
 
+    # ADR-0030 §4.2（#196）：supersede 区间——被取代的那个问句**连同它的整轮**
+    # （答、tool_call、tool_result、delta）都不进模型可见投影。
+    #
+    # 区间 = `[s, n)`，s = 被取代的 user/message seq，n = s 之后第一条**未被取代**的
+    # user/message seq；没有这样一条就一直 shadow 到末尾（该轮之后不再有用户输入）。
+    # 判据只看 seq 与"该 seq 是否也被取代"，与事件到达顺序无关 ⇒ 纯函数性质不破。
+    #
+    # ⚠ 刻意与 compaction 的 `shadowed_ranges` **分成两个列表**：下面吐 summary 的循环用
+    # `enumerate(shadowed_ranges)` 的下标去索引 `bracket_summaries`（一个 bracket 一条
+    # summary）；把 supersede 区间并进去会让下标错位，summary 落到错误的位置甚至不吐。
+    # 跳过逻辑仍然只有一处（`is_shadowed`），没有第二套跳过实现。
+    superseded_ranges: list[tuple[int, int]] = []
+    superseded_seqs: set[int] = set()
+    for event in events:
+        if event.type != MESSAGE_SUPERSEDED:
+            continue
+        raw = event.data.get("superseded_seq")
+        # 一行坏数据只损失该行（存储模块契约）：非 int 就跳过并警告，不 brick 恢复。
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            superseded_seqs.add(raw)
+        elif raw is not None:
+            logger.warning(
+                "MESSAGE_SUPERSEDED.superseded_seq 形状非法（%s），忽略该条",
+                type(raw).__name__,
+            )
+    if superseded_seqs:
+        user_seqs = [e.seq for e in events if e.type == USER_MESSAGE]
+        last_seq = max((e.seq for e in events), default=0)
+        for seq in sorted(superseded_seqs):
+            following = next(
+                (u for u in user_seqs if u > seq and u not in superseded_seqs),
+                None,
+            )
+            # n = 下一条未被取代的 user 消息 ⇒ 区间末尾（含）是 n - 1；没有则到末尾。
+            end = (following - 1) if following is not None else last_seq
+            if end >= seq:
+                superseded_ranges.append((seq, end))
+
     def is_shadowed(seq: int) -> bool:
-        return any(start <= seq <= end for start, end in shadowed_ranges)
+        if any(start <= seq <= end for start, end in shadowed_ranges):
+            return True
+        return any(start <= seq <= end for start, end in superseded_ranges)
 
     # 第二遍：从事件按顺序投影 messages（不含 dangling 合成）。
     #
@@ -249,3 +306,89 @@ def detect_dangling(events: list[SessionEvent]) -> list[str]:
     """
     dangling, _ = collect_dangling(events)
     return sorted(dangling)
+
+
+#: 未投递输入的两种载体（ADR-0030 §2 术语表）。
+KIND_QUEUE = "queue"
+KIND_STEER = "steer"
+
+
+@dataclass(frozen=True)
+class UndeliveredInput:
+    """一条尚未变成 run 的用户输入（queue 项或未生效的 steer 请求）。
+
+    `seq` 是**到达顺序**（ADR-0030 D7）：queue 与 steer 混排时按它排序，而不是
+    "先队列后 steer"——两种载体的差别只在投递边界，不在优先级。
+    """
+
+    kind: str  # KIND_QUEUE / KIND_STEER
+    input_id: str  # queue_id（queue）或 steer_id（steer）
+    content: str
+    seq: int
+    created_at: str
+    #: steer 的注入目标 run（重建内存注册表时还原）。queue 恒 None。
+    run_id: str | None = None
+
+
+def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
+    """未投递输入，按到达顺序（seq）升序——D4 驱动点与 `GET /queue` 的唯一判据。
+
+    纯函数（与 derive_messages 同族：只读事件、不碰内存态）。判据：
+
+    - `message/queued` 中未被 `queue/cancelled` 取消、未被 `queue/consumed` 消费的；
+    - `steer/requested` 中未被 `steer/applied` 收口的。
+
+    这是"队列跨崩溃存活"（D5）的落点：未投递 = **事件流上的事实**，与进程内那
+    份缓存无关，所以重启后按它重建即可（ADR-0030 §4.8）。一行坏数据（缺 id /
+    id 非法形状）只损失该行，不让整个派生抛错——与 collect_dangling 的容错口径一致。
+    """
+    cancelled: set[str] = set()
+    consumed: set[str] = set()
+    applied: set[str] = set()
+    for event in events:
+        if event.type == QUEUE_CANCELLED or event.type == QUEUE_CONSUMED:
+            target = cancelled if event.type == QUEUE_CANCELLED else consumed
+        elif event.type == STEER_APPLIED:
+            target = applied
+        else:
+            continue
+        value = event.data.get("steer_id" if event.type == STEER_APPLIED else "queue_id")
+        if isinstance(value, str) and value:
+            target.add(value)
+
+    items: list[UndeliveredInput] = []
+    for event in events:
+        if event.type == MESSAGE_QUEUED:
+            input_id = event.data.get("queue_id")
+            if not isinstance(input_id, str) or not input_id:
+                continue
+            if input_id in cancelled or input_id in consumed:
+                continue
+            items.append(
+                UndeliveredInput(
+                    kind=KIND_QUEUE,
+                    input_id=input_id,
+                    content=str(event.data.get("content", "")),
+                    seq=event.seq,
+                    created_at=event.time,
+                )
+            )
+        elif event.type == STEER_REQUESTED:
+            input_id = event.data.get("steer_id")
+            if not isinstance(input_id, str) or not input_id:
+                continue
+            if input_id in applied:
+                continue
+            run_id = event.data.get("run_id")
+            items.append(
+                UndeliveredInput(
+                    kind=KIND_STEER,
+                    input_id=input_id,
+                    content=str(event.data.get("content", "")),
+                    seq=event.seq,
+                    created_at=event.time,
+                    run_id=run_id if isinstance(run_id, str) else None,
+                )
+            )
+    items.sort(key=lambda item: item.seq)
+    return items
