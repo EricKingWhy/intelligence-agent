@@ -265,8 +265,13 @@ async def build_runtime(
     # tool_scope 未声明的工具，filter 会隐性收窄它。所以 main/None 走原路径不 filter，
     # 只有 coding/research_review 才收窄。收窄后 registry 流向所有下游：
     # ToolExecutor / AgentRuntime / multiagent activate 的 source_registry。
+    # #198：被剔除的工具名必须在收窄**前**记录（收窄后已无从对比）——这正是
+    # "模型说没有 write/edit/apply_patch"的答案本身，经 run_config 日志可回溯。
+    dropped_tools: tuple[str, ...] = ()
     if profile_spec is not None and agent_profile != "main":
+        pre_filter_names = {tool.name for tool in registry.list()}
         registry = registry.filtered(profile_spec.tool_scope)
+        dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
 
     # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
     # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。
@@ -377,4 +382,8 @@ async def build_runtime(
                              else "fallback"),
         observability_sink=get_observability_sink(settings),
         steer_source=steer_source,
+        # #198：生效档位（未指定 = "main"）与被 tool_scope 剔除的工具名——
+        # run_config 结构化日志与 run/started 事件的数据源。
+        agent_profile=(agent_profile if agent_profile is not None else "main"),
+        dropped_tools=dropped_tools,
     )

@@ -392,6 +392,8 @@ class AgentRuntime:
         agent_id: str = "default",
         observability_sink: Any | None = None,
         steer_source: SteerSource | None = None,
+        agent_profile: str = "main",
+        dropped_tools: tuple[str, ...] = (),
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -420,6 +422,12 @@ class AgentRuntime:
         # Langfuse 旁路观测（ADR-0018 D2）：可选注入；None/缺席 = 零开销。
         # 埋点是添加性的：tracer 故障被 sink 边界吞掉，绝不影响 Loop 语义。
         self._observability_sink = observability_sink
+        # #198：生效档位与被 tool_scope 剔除的工具名（装配层在 registry 收窄后
+        # 计算）。run_config 结构化日志与 run/started 事件的数据源——"模型为什么
+        # 说没有 write"必须可从日志回溯，不能靠工具集形状反推。默认 "main"/空
+        # = 添加性（既有调用方与测试零改动）。
+        self._agent_profile = agent_profile
+        self._dropped_tools = dropped_tools
         # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
         # 正常停止由"模型不再返回 tool_calls"决定。
         self.max_steps = max_steps
@@ -465,6 +473,16 @@ class AgentRuntime:
                 self._fallback_model = fallback_model.bind_tools(definitions)
             else:
                 self._fallback_model = fallback_model
+
+    @property
+    def agent_profile(self) -> str:
+        """生效档位（#198）：测试断言装配层接线用。"""
+        return self._agent_profile
+
+    @property
+    def dropped_tools(self) -> tuple[str, ...]:
+        """被 tool_scope 剔除的工具名（#198）：测试断言装配层接线用。"""
+        return self._dropped_tools
 
     async def _inject_steers(
         self, session: Session, run_id: str, step_id: int,
@@ -635,7 +653,9 @@ class AgentRuntime:
             # USER_ACCEPTED 稳定边界：user/message 已持久化。
             await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
 
-            run_id, turn_index = session.begin_run(agent_id=self._agent_id)
+            run_id, turn_index = session.begin_run(
+                agent_id=self._agent_id, agent_profile=self._agent_profile,
+            )
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
             if self._observability_sink is not None and self._observability_sink.enabled:
@@ -662,6 +682,19 @@ class AgentRuntime:
             # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
             run_started = next(e for e in session.since(memory_event_start) if e.type == RUN_STARTED)
             yield to_agent_event(run_started)
+
+            # run_config（#198）：每个 run 的运行条件——档位 / 主模型 / 生效工具
+            # 清单 / 被剔除工具——落一条结构化日志。此前这些事实不落任何日志，
+            # "模型为什么说没有 write"只能靠工具集形状 + system prompt 自述反推
+            # （真机会话 f522d4a9 实证）。工具名单只进诊断日志不进事件流（事件
+            # 膨胀边界，docs/TICKET_BATCH_PLAN.md §4）；位置在 run_context_var.set
+            # 之后：日志行带 session_id（此前 llm_call 只能靠正文指纹检索）。
+            self._log("run_config", "Run 运行条件", span_id=run_span, step=0,
+                      agent_profile=self._agent_profile,
+                      model_id=self._primary_model_name,
+                      tool_names=tuple(t.name for t in self.registry.list()),
+                      dropped_tools=tuple(self._dropped_tools),
+                      session_id=session.session_id)
 
             self._log("agent_start", "Agent Loop 开始", span_id=run_span, step=0,
                       outcome="started", agent_name="agent_runtime")

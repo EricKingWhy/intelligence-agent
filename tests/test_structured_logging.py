@@ -115,6 +115,7 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     assert result == "ok"
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [
+        "run_config",
         "agent_start",
         "llm_call",
         "agent_decision",
@@ -123,7 +124,8 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     assert len({entry["trace_id(追踪ID)"] for entry in entries}) == 1
     assert len({entry["task_id(任务ID)"] for entry in entries}) == 1
 
-    llm_entry = entries[1]
+    # #198：run_config 是每个 run 的第一条日志行——llm_call 顺移到 index 2。
+    llm_entry = entries[2]
     assert llm_entry["llm_input(模型输入)"] == "只回复 ok"
     assert llm_entry["llm_output(模型输出)"] == "ok"
     # #200 行为变更（见 PR）：本测试的 FakeModel（本地 astream，不转发
@@ -137,7 +139,8 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     }
     assert llm_entry["outcome(结果)"] == "success"
     assert "duration_ms(耗时毫秒)" in llm_entry
-    assert entries[2]["decision(决策)"] == "finish"
+    # agent_decision 顺移到 index 3（run_config 占了第一条）。
+    assert entries[3]["decision(决策)"] == "finish"
     assert entries[-1]["outcome(结果)"] == "success"
 
 
@@ -175,6 +178,7 @@ async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
 
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [
+        "run_config",
         "agent_start",
         "task_failed",
     ]
