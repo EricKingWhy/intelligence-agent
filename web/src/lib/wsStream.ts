@@ -48,11 +48,11 @@
  * 不是永远转圈。（要让它「慢但能用」，得让停摆检查认识「已降级的传输」——那是
  * 传输策略问题，见 #208，不在本模块单方面改。）
  *
- * 反向的一个已知落差（#208 一并记）：服务端 WS 快照**没有** backlog 上限、也不发
- * `stream/truncated` 控制帧（那条保护只在 SSE `GET /stream` 里）——所以切到 WS 之后
- * 「backlog > 1000 → 全量重建」在 WS 主通道上不可达，该分支只剩降级流还会走到。
- * 功能不丢（`seenSeqs` 幂等门吸收重复），但超大会话的一次重连会把整段 durable
- * 日志塞进一个 WS 帧。
+ * 反向的落差（#208，**已修**）：WS 快照曾**没有** backlog 上限、也不发
+ * `stream/truncated`（那条保护只在 SSE `GET /stream` 里）——超大会话的一次重连
+ * 会把整段 durable 日志塞进一个 WS 帧。后端现在按与 SSE **同一判据**处理，
+ * 前提是本模块把游标上行（见 `onopen` 的 `after_seq`）；不带游标的客户端退回
+ * 「全发 + 客户端过滤」的旧行为，不会因协议变更而坏。
  *
  * 握手成功但服务端**永不吐帧也不断开**（半死连接）不在本模块加 deadline：那会给
  * 慢链路引入假降级，而它已经被上层的停摆检查覆盖（10s → 重连 3 次 → 明确报错）。
@@ -193,7 +193,11 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
       const s = sock;
 
       s.onopen = () => {
-        s.send(JSON.stringify({ type: 'subscribe', session_id: sessionId }));
+        // 游标必须上行（#208）：服务端据此只补 (after_seq, replay_upto] 那一截，
+        // 并在 backlog 超阈值时改发 stream/truncated（与 SSE 同一判据）。
+        // 不带游标时服务端只能按"总事件数"判定 —— 那会把"我已有全部历史、只差
+        // 尾部"也判成超限，客户端重建后重新订阅仍然超限 ⇒ 重建-订阅死循环。
+        s.send(JSON.stringify({ type: 'subscribe', session_id: sessionId, after_seq: afterSeq }));
       };
 
       s.onmessage = (msg: MessageEvent) => {

@@ -81,7 +81,7 @@
 
 上行（JSON）：
 ```json
-{"type":"subscribe","session_id":"..."}   // 订阅该会话的 live 流
+{"type":"subscribe","session_id":"...","after_seq":N}  // 订阅（游标可选，见下）
 {"type":"pong"}                            // 应答 server_ping（任意上行都算活性）
 {"type":"send_message","session_id":"...","content":"...","mode":"queue"}
 {"type":"steer","session_id":"...","content":"..."}
@@ -99,17 +99,42 @@
 ```
 
 与 SSE 的**语义差异**（前端必须知道的三条）：
-1. **订阅不带 `after_seq`**：快照总是重发**全部** durable 事件，游标过滤由客户端做
-   （`seq ≤ 本地游标` 的直接丢弃）。所以「接流不重复投影」靠客户端游标，不靠后端。
+1. **订阅的游标可选但强烈建议带**（`after_seq`，#208）：带上 → 服务端只发
+   `after_seq < seq ≤ replay_upto` 的那一截，backlog 超阈值时改发
+   `stream/truncated`（判据与常量与 SSE `GET /stream` **同一份**）；不带 / 非法
+   → 当 `-1`（从头发），保护照常生效（超大会话会直接被导向全量重建，而不是塞
+   一整段日志进一个帧）。
+   **不带游标的兼容性边界（如实说明）**：会话总事件数 ≤ 阈值时，不带游标拿到的
+   就是全量快照，与 #208 之前**完全一致**；一旦超过阈值，服务端不再送 backlog，
+   只送那一帧 `stream/truncated` —— 此时"从不带游标"的客户端只能每次都被导向
+   全量重建（拿不到增量），若它重建后**仍**不带游标重订阅，就会在
+   重建 → 截断 → 重建之间打转。本仓唯一的 WS 客户端（`web/src/lib/wsStream.ts`）
+   必定带游标，且这条被 `wsStream.test.ts` 与 `stream-fallback.spec.ts` 双侧锁住；
+   外部自建客户端必须实现"订阅带游标 + 重建后带新游标回来"这两步。
+   客户端**仍**按 seq 幂等去重（服务端窗口与客户端游标可能因一次丢帧而错开）。
 2. **`has_active_run: false` ⇒ 快照即全量**：后端此时不起 relay task，**永远不会发
    `done`**；客户端要自己收流（前端 `wsStream` 读到该字段即 `settle()`）。
+   发 `stream/truncated` 时同样是 `false`（那一帧之后客户端会主动断开重连）。
 3. **`error` 帧没有状态码**：只有一句 message（`snapshot failed` / id 非法），
    与 HTTP 的 404/422 不同形。要分辨「会话已不存在」，客户端只能另做存在性判据
    （前端用 `GET /api/sessions?include_archived=true` 的成员判定）。
 
-已知落差（#208 后端票）：WS 快照**没有** backlog 上限、也不发 `stream/truncated`
-——「backlog > 1000 → 全量重建」这条保护只在 SSE `GET /stream` 上成立。功能不丢
-（客户端按 seq 幂等吸收重复），但超大会话的一次握手会把整段日志塞进一个帧。
+backlog 保护（#208，已落地）：两条通道用**同一条**判据
+`当前最大 seq - after_seq > STREAM_REPLAY_MAX_EVENTS (1000)`，超限时发同一形状的
+控制帧（`serialization.build_truncated_control`，SSE 与 WS 的唯一构建点）。
+"当前最大 seq"在两条通道上的**字段名不同、值同源**：SSE 载荷里叫 `latest_seq`，
+WS 快照载荷里叫 `replay_upto`（都是服务端在订阅/取游标那一刻读到的 `session.seq`，
+`after_seq` 就是控制帧里回显的那个客户端游标）：
+
+```json
+{"type":"stream/truncated","data":{"after_seq":N,"latest_seq":M},
+ "seq":null,"run_id":null,"step_id":null,"durability":"transient"}
+```
+
+它不是运行事实（无 seq、transient）⇒ 客户端不投影它，只走
+`GET /events` 全量重建 + 以重建后的真实 max seq 重新订阅（前端
+`useSession.doTruncatedRebuild`，`web/e2e/stream-fallback.spec.ts` 锁着）。
+重建后游标已在最新处 ⇒ 不会二次触发。
 
 ### POST /api/sessions/{id}/cancel（新增，C3）
 - 在途 → `200 {"status":"cancelling"}`；随后 `run/failed` `data.reason="cancelled"` 落盘并经流广播；

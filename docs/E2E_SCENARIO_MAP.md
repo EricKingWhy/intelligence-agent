@@ -27,7 +27,7 @@
 | C 工具输出 | `e2e/c-tool-output.spec.ts` | tool/call 先于执行落盘、终态由 tool/result 校准、折叠行渲染 | 流式分块中间态见下 |
 | E 断连重连 | `e2e/e-reconnect.spec.ts` | 流异常收尾→断线条（800ms 阈值）→**重新订阅 WS**（快照重放由客户端游标滤掉，零重复）→终态清条 | T4 #97 契约 §3；游标丢失的可观测后果（旧终态被重放 ⇒ 误判已收口 ⇒ 断流不再重连）由 `queue-flush.spec.ts` 的「游标」用例锁 |
 | 队列投递（#195/#205） | `e2e/queue-flush.spec.ts` | flush 的 launched（响应攒包 6s 时回答仍经 WS 提前到达）/ 游标 / idle 静默 / 409 重试三次 / 窗外迟到回执不吞掉 / 404 | ADR-0030 §5.2 D10；ADR-0030 §4.6 |
-| WS 降级 + 重建（#205） | `e2e/stream-fallback.spec.ts` | WS 被拒（零服务帧）→ 降级 `GET /stream` 接流照样建立；降级流收 `stream/truncated` → `GET /events` 全量重建 → 以真实 max seq 续传 | 契约 §3（truncated 只在 SSE 通道发，见该文件头注） |
+| WS 降级 + 重建（#205） | `e2e/stream-fallback.spec.ts` | WS 被拒（零服务帧）→ 降级 `GET /stream` 接流照样建立；降级流收 `stream/truncated` → `GET /events` 全量重建 → 以真实 max seq 续传；WS 侧 backlog 超限同样只发该控制帧，且重新订阅必须带新游标（#208，见该文件头注） | 契约 §3（`stream/truncated` 两条通道都发，同一常数与判据） |
 | F 历史重放 | `e2e/f-history.spec.ts` | 会话行首条 user/message 标题 → projectHistory 重建 | 不变量 #22 同一管线 |
 | H 密度四档 | `e2e/h-density.spec.ts` | data-density 即时生效 + localStorage（ahi.traceDensity）刷新持久 | 冻结决策 |
 | I 键盘可达 | `e2e/i-keyboard.spec.ts` | Ctrl+K palette 唤起/焦点/Esc 关闭；Composer Ctrl+Enter 提交 | |

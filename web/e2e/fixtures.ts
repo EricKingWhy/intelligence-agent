@@ -103,13 +103,17 @@ async function installWsRoute(
   let calls = 0;
   await page.routeWebSocket(/\/api\/ws$/, (ws) => {
     ws.onMessage((raw) => {
-      let msg: { type?: string; session_id?: string };
+      let msg: { type?: string; session_id?: string; after_seq?: unknown };
       try {
         msg = JSON.parse(String(raw)) as typeof msg;
       } catch {
         return;
       }
       if (msg.type !== 'subscribe' || !msg.session_id) return; // pong / 未知上行：忽略
+      // 记录每次订阅的**上行原文**（#208 游标契约的观测点）：断言"客户端带了游标"
+      // 只能看这里——客户端把游标丢掉时服务端行为依旧正确（当 -1 从头发），
+      // 于是"没带"这件事在界面上完全看不出来。
+      mock.wsSubscribes?.push({ session_id: msg.session_id, after_seq: msg.after_seq });
       const sessionId = msg.session_id;
       calls += 1;
       const call = calls;
@@ -154,6 +158,9 @@ export interface ApiMock {
   sessions?: unknown[];
   /** GET /api/sessions/{id}/events（历史重放） */
   events?: FrameSpec[];
+  /** 调用方传入的空数组：fixture 把每次 WS `subscribe` 上行的 `{session_id, after_seq}`
+   *  推进去（#208）。用来锁"客户端把本地游标带上了"——见 `installWsRoute` 的注释。 */
+  wsSubscribes?: Array<{ session_id: string; after_seq?: unknown }>;
   /** 第 N 次之后的 `GET /api/sessions` 直接回 500（N 从 1 数）。
    *  用途：构造"归档写成功了、但随后的列表重拉失败"这个只在真机上偶发的窗口——
    *  界面此刻的行还是旧状态，必须**说出来**而不是沉默（#171 AC9 的就地报错）。
@@ -168,7 +175,8 @@ export interface ApiMock {
   onWs?: WsProvider;
   /** `GET /api/sessions/{id}/stream?after_seq=N` —— **只剩两条非主路径**用它：
    *  ① WS 不可用时的降级兜底（配合 `onWs: () => ({ closeNow: true })`）；
-   *  ② 驱动 `stream/truncated` 控制帧（该帧只在 SSE 通道上发，见 #208）。
+   *  ② 驱动 `stream/truncated` 控制帧（#208 起两条通道都发：SSE 走这里，
+   *     WS 走 `onWs` 的快照分支——本参数只覆盖 SSE 那条）。
    *  实时流请用 `onWs`。不设 = `route.abort()`（没人 mock 时必然失败，不静默通过）。 */
   onStreamGet?: (route: Route) => Promise<void> | void;
   // ── Phase 2b Composer control row（Ticket F1/B1）──
@@ -235,8 +243,10 @@ export interface ApiMock {
   onQueueGet?: (route: Route) => Promise<void> | void;
   /** POST /api/sessions/{id}/queue/{qid}/cancel（取消排队项；缺省 200 → cancelled）。 */
   onQueueCancelPost?: (route: Route) => Promise<void> | void;
-  /** GET /api/sessions/{id}/context-usage（上下文容量看板；缺省 200 → ok 空桶）。
-   *  #200 看板 AC：注入此回调即可构造有数据/未采集/无数据三种状态。 */
+  /** GET /api/sessions/{id}/context-usage（上下文容量看板；缺省 200 → **no_data 空桶**，
+   *  与真后端"这个会话没有任何用量事实"同形）。
+   *  #200 看板 AC：注入此回调即可构造有数据/未采集/无数据三种状态；
+   *  #212 起多了第四态 `usage_only`（有总量、缺分类——快照丢了但事件流有用量）。 */
   onContextUsageGet?: (route: Route) => Promise<void> | void;
   // ── #172 / ADR-0029 会话硬删 ──
   /** 指定 id 的 DELETE /api/sessions/{id} 直接回这个错误——用来构造只在真机上才会

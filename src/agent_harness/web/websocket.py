@@ -43,7 +43,9 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     """WebSocket 主入口：接受连接 → 多路复用 session 事件流。
 
     上行消息格式（JSON）：
-      {"type": "subscribe", "session_id": "..."}
+      {"type": "subscribe", "session_id": "...", "after_seq": N}
+           after_seq 可选（#208）：本地游标，只补 (after_seq, replay_upto]；
+           缺失/非法 = -1（从头发）。超阈值改发一帧 stream/truncated。
       {"type": "send_message", "session_id": "...", "content": "...", "mode": "queue"}
       {"type": "steer", "session_id": "...", "content": "..."}
       {"type": "cancel", "session_id": "..."}
@@ -78,12 +80,26 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         except Exception:
             logger.debug("WS send 失败（客户端可能已断开）", exc_info=True)
 
-    async def _push_snapshot(session_id: str) -> None:
+    async def _push_snapshot(session_id: str, after_seq: int = -1) -> None:
         """服务端权威快照：session 当前事件投影 + 在途 run baseline。
 
         客户端重连时先收到完整快照，之后增量事件无缝接上。
+
+        ``after_seq``（#208，可选）：客户端的本地游标，语义与 SSE `GET /stream`
+        的 `after_seq` **逐字相同**——只发 ``after_seq < seq <= replay_upto``
+        的那一截，且 backlog 超阈值时改发 `stream/truncated` 控制帧。
+
+        为什么必须收这个游标（而不是继续"全发 + 客户端过滤"）：backlog 保护
+        一旦只按"总事件数"判定，就无法区分「客户端已经有 10k 事件、只差尾部」
+        与「客户端什么都没有」——前者会被反复要求全量重建，而重建后重新订阅
+        仍然超阈值 ⇒ **重建-订阅死循环**。游标是唯一能让两条通道语义一致的
+        输入。不带（旧客户端 / 首次订阅）= -1 = 从头发：会话**未超阈值**时拿到的
+        就是全量快照，与 #208 之前一致；一旦超阈值，服务端只回那一帧控制帧
+        ——从不带游标的客户端拿不到增量，只能每次都被导向全量重建。本仓客户端
+        （`web/src/lib/wsStream.ts`）恒带游标，被契约文档与两侧测试锁住。
         """
         from agent_harness.session.service import InvalidSessionId, SessionService
+        from agent_harness.web.serialization import build_truncated_control
 
         service = SessionService(state)
         try:
@@ -96,16 +112,40 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             return
 
         active_run = run_manager.get_active(session_id)
-        subscriber = active_run.subscribe() if active_run is not None else None
+        # 游标口径与 SSE 一致：在途 run 用 last_enqueued_seq（订阅本身只建队列，
+        # 读这个数不需要订阅先建立）。
         replay_upto = (
             active_run.last_enqueued_seq if active_run is not None else events[-1].seq
         )
 
-        # 推快照：全部 durable 事件（客户端据 seq 去重）
+        # backlog 保护（#208）：与 SSE 通道**同一判据、同一常量**（惰性导入读
+        # 模块属性，测试要把它调小才可能构造超限——与 test_web_stream 同法）。
+        # 超限只发控制帧：客户端走既有 `GET /events` 全量重建路径，再带真实
+        # max seq 回来订阅（那时 backlog 已是 0，不会二次触发）。
+        # **不订阅、不起 relay**：这一帧之后客户端会 cancel 本流，先订阅就等于
+        # 把队列挂到一个没人消费的 subscriber 上（泄漏，且会随重建次数累积）。
+        from agent_harness.web.app import STREAM_REPLAY_MAX_EVENTS
+
+        if replay_upto - after_seq > STREAM_REPLAY_MAX_EVENTS:
+            await _send_json({
+                "type": "snapshot",
+                "session_id": session_id,
+                "events": [build_truncated_control(
+                    session_id, after_seq=after_seq, latest_seq=replay_upto,
+                )],
+                "replay_upto": replay_upto,
+                "has_active_run": False,
+            })
+            return
+
+        subscriber = active_run.subscribe() if active_run is not None else None
+        # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与
+        # 客户端游标可能因一次丢帧而错开，双保险比互相信任便宜）。
+        window = [e for e in events if after_seq < e.seq <= replay_upto]
         await _send_json({
             "type": "snapshot",
             "session_id": session_id,
-            "events": [e.to_dict() for e in events],
+            "events": [e.to_dict() for e in window],
             "replay_upto": replay_upto,
             "has_active_run": active_run is not None,
         })
@@ -163,7 +203,17 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                 if msg_type == "subscribe":
                     sid = msg.get("session_id", "")
                     if sid:
-                        await _push_snapshot(sid)
+                        # 游标可选（#208）：非 int / 布尔 / 缺失一律当 -1（从头发）。
+                        # 不校验就等于把 `replay_upto - after_seq` 交给任意 JSON
+                        # 类型去抛 TypeError——那是**连接级**异常，会让整条 WS 挂掉，
+                        # 代价远大于"按最保守的从头发"。
+                        raw_after = msg.get("after_seq", -1)
+                        after = (
+                            raw_after
+                            if isinstance(raw_after, int) and not isinstance(raw_after, bool)
+                            else -1
+                        )
+                        await _push_snapshot(sid, after)
                 elif msg_type == "ping":
                     await _send_json({"type": "pong"})
                 elif msg_type == "pong":

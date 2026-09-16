@@ -101,10 +101,22 @@ function openStream(afterSeq?: number) {
 }
 
 describe('wsStreamResponse — WS 帧重编码为 SSE 文本', () => {
-  it('连上后按 session_id 订阅（WS 是多路复用通道，订阅是必需的握手）', () => {
+  it('连上后按 session_id 订阅 + 带上本地游标（WS 是多路复用通道，订阅是必需的握手）', () => {
     openStream();
     expect(socket.url).toBe(endpoint);
-    expect(socket.sent).toEqual([JSON.stringify({ type: 'subscribe', session_id: sid })]);
+    // 游标必须是**默认值 -1**而不是省略：服务端按 `after_seq` 只补
+    // `(after_seq, replay_upto]` 那一截，并据此判 backlog 超限（#208）。缺了这个
+    // 字段，服务端只能拿"总事件数"当 backlog ⇒ 长会话每次订阅都被判超限。
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'subscribe', session_id: sid, after_seq: -1 }),
+    ]);
+  });
+
+  it('订阅带上调用方给的游标（重建后重新订阅不能退回从头补）', () => {
+    openStream(4);
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'subscribe', session_id: sid, after_seq: 4 }),
+    ]);
   });
 
   it('event 帧原样重编码成 SSE data 帧——既有 consumeSSE 直接可消费', async () => {

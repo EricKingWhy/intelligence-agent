@@ -2,10 +2,11 @@
  *
  * ## 为什么走降级通道才能考这两件事
  *
- * 实时流的主通道已经是 WS。`stream/truncated` 控制帧只由 SSE
+ * 实时流的主通道已经是 WS。`stream/truncated` 控制帧过去只由 SSE
  * `GET /stream` 发（`web/app.py`：`latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS`
- * 时单帧下发）——WS 快照没有上限、也不发控制帧（#208 记的后端落差）。所以这条路径
- * 在 e2e 里只能经**降级**触发：`onWs → closeNow`（WS 被拒）+ `onStreamGet` 喂控制帧。
+ * 时单帧下发）——#208 **已修**：WS 快照现在按同一判据发同一形状的帧（见本文件
+ * 末尾两条用例）。但**降级**这条路仍然只能这么构造：`onWs → closeNow`（WS 被拒）
+ * + `onStreamGet` 喂控制帧。
  *
  * 顺带就把降级本身考了：整条链路（WS 零服务帧 → 同一 after_seq 改走 GET /stream）
  * 在真机上完全可能出现（前置代理拒 Upgrade），此前只有 `wsStream.test.ts` 的单测覆盖。
@@ -103,4 +104,59 @@ test('降级流收到 stream/truncated → 先 GET /events 全量重建，再以
   // 重建不是叠加：历史照旧只一份（重复投影会把这一段变成两段）
   const text = (await page.locator('.model-output').allInnerTexts()).join('\n');
   expect(text.match(/刷新前已有的内容。/g)).toHaveLength(1);
+});
+
+// ── #208：WS 快照的 backlog 保护（与 SSE 同一判据、同一帧形状）──
+
+test('WS 订阅必须带本地游标：不带则服务端只能按总数判定（#208）', async ({ page }) => {
+  const subscribes: Array<{ session_id: string; after_seq?: unknown }> = [];
+  await routeApi(page, {
+    sessions: [ROW],
+    events: IN_FLIGHT,
+    wsSubscribes: subscribes,
+    // 进站接流的游标 = 已装载历史的真实 max seq（IN_FLIGHT 到 4）
+    onWs: () => ({ hasActiveRun: false }),
+  });
+
+  await openStoredSession(page);
+  await expect.poll(() => subscribes.length).toBeGreaterThan(0);
+  expect(subscribes[0]).toEqual({ session_id: SID, after_seq: 4 });
+});
+
+test('WS 收到 stream/truncated → 全量重建后带**新**游标回来，且不再触发（无重建死循环）', async ({ page }) => {
+  const subscribes: Array<{ session_id: string; after_seq?: unknown }> = [];
+  let wsCalls = 0;
+  // 可变 durable log：重建时那条 GET /events 会读到 push 进来的这条（seq 5），
+  // 于是"重建真的发生了"与"新游标 = 5"两件事都可观测。
+  const log: FrameSpec[] = [...IN_FLIGHT];
+  await routeApi(page, {
+    sessions: [ROW],
+    events: log,
+    wsSubscribes: subscribes,
+    onWs: () => {
+      wsCalls += 1;
+      if (wsCalls === 1) {
+        // 服务端按 backlog 判据回控制帧（真后端由 serialization.build_truncated_control
+        // 构造；这里照抄它的形状）。hasActiveRun=false ⇒ 客户端 settle 后主动重建。
+        log.push({ type: 'text/delta', data: { delta: 'WS 重建补回的。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T });
+        return {
+          events: [{ type: 'stream/truncated', data: { after_seq: 4, latest_seq: 5 }, seq: null, session_id: SID, time: T }],
+          hasActiveRun: false,
+        };
+      }
+      // 第二次订阅：游标已是重建后的真实 max seq ⇒ 服务端不再截断（真后端此时
+      // 算出的 backlog 是 0）。这里照实回一个空窗口。
+      return { events: [], hasActiveRun: false };
+    },
+  });
+
+  await openStoredSession(page);
+
+  // 重建真的发生了：这条只可能来自重建时的那次 GET /events
+  await expect(page.locator('.model-output').last()).toContainText('WS 重建补回的。');
+  // 且只订阅了两次——若客户端不带游标，服务端会一直判超限 ⇒ 无限重建
+  await expect.poll(() => subscribes.length).toBeGreaterThanOrEqual(2);
+  expect(wsCalls).toBe(2);
+  expect(subscribes[0].after_seq).toBe(4);
+  expect(subscribes[1].after_seq).toBe(5);
 });

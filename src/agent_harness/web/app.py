@@ -52,7 +52,6 @@ from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
-from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
@@ -94,6 +93,7 @@ from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
+    build_truncated_control,
 )
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 
@@ -1327,15 +1327,21 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         state = app.state.agent
 
         if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
+            # 截断分支必须**先退订**（与 WS 的 `_push_snapshot` 同一条纪律）：
+            # `stream_reconnect` 按协议先订阅后取游标（重放与 live 无缝无重复），
+            # 所以走到这里时 subscriber 已经在 `run.subscribers` 里了。这一支直接
+            # return，那个队列**永远没人消费**——subscriber 留在字典里 ⇒ 孤儿计时
+            # 也不会被激活（它只在 subscribers 为空时武装），run 之后每次 fanout
+            # 都会往里写。客户端收到控制帧就去重建了，不会有人来读它。
+            if subscriber is not None and run is not None:
+                run.unsubscribe(subscriber)
+
             async def truncated_generator():
-                control = {
-                    "type": "stream/truncated",
-                    "data": {"after_seq": after_seq, "latest_seq": latest_seq},
-                    "seq": None, "run_id": None, "step_id": None,
-                    "session_id": session_id,
-                    "schema_version": RUNTIME_EVENT_SCHEMA_VERSION,
-                    "durability": "transient",
-                }
+                # 帧形状来自 serialization 的**单一构建点**（#208）：WS 快照
+                # 超限时发的是同一个函数产出的帧，两条通道一字不差。
+                control = build_truncated_control(
+                    session_id, after_seq=after_seq, latest_seq=latest_seq,
+                )
                 yield {"data": json.dumps(control, ensure_ascii=False)}
 
             return _sse_response(truncated_generator())
@@ -1468,13 +1474,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         分类明细**不进** SessionEvent（不变量 #4：Event ≠ Diagnostic Log），
         只经本端点暴露。三份硬约束（设计稿 §3 诚实原则）：``estimated`` 恒为
         true；cache 三态（not_collected 时**不显示 0%**）；六桶之和 = used_tokens
-        （差额进"其他"残差）。
+        （差额进"其他"残差，**仅 state="ok" 时成立**）。
 
         数据来源：在途 run 的 builder 快照（``ContextBuilder.usage_snapshot``，
         实时读——最近一次 build 是当前事实）+ 会话事件流 usage 汇总 + 该 run 的
         ToolRegistry 工具 schema 估算；run 已终结 ⇒ 从收口时缓存的快照读（
         `_cache_context_snapshot` 在 run 收尾时取，registry 与快照同一真相）；
-        都没有 ⇒ state="no_data"（诚实口径，不伪造）。
+        快照缺席但事件流有 usage ⇒ state="usage_only"（#212：报窗口占用下界 +
+        usage_source，分类如实为 0）；两者都没有 ⇒ state="no_data"（不伪造）。
+
+        注意快照是**进程内**缓存：后端重启后历史会话必然走到 usage_only/no_data
+        ——这不是异常分支，是常态分支（#212 实测踩到）。
         """
         service = SessionService(app.state.agent)
         try:
@@ -1483,8 +1493,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
 
         # builder 快照 + 工具定义：优先在途 run；run 已终结 ⇒ 收口缓存；都没有
-        # ⇒ no_data（不伪造，也不重建一个假 registry 来算工具桶）。两者必须同源
-        # 取（同一个 runtime 的 builder + registry），分开取会得到两个真相。
+        # ⇒ 交给 build_context_usage_payload 按事件流落 usage_only/no_data
+        # （不伪造，也不重建一个假 registry 来算工具桶）。两者必须同源取
+        # （同一个 runtime 的 builder + registry），分开取会得到两个真相。
         builder_snapshot = None
         tool_definitions: list[dict[str, Any]] = []
         active = app.state.agent.run_manager.get_active(session_id)

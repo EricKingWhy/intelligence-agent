@@ -389,3 +389,212 @@ async def test_ws_disconnect_cleans_subscriber(tmp_path, monkeypatch):
                 "WS 断开后 ManagedRun.subscribers 应归零"
     finally:
         await _shutdown(server, serve_task)
+
+
+# ── #208：WS 快照的 backlog 保护（与 SSE 同一判据）─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ws_snapshot_backlog_over_threshold_emits_control_frame(
+    tmp_path, monkeypatch,
+):
+    """backlog 超阈值 → 快照里只有一帧 stream/truncated，**不塞整段日志**。
+
+    与 `test_web_stream.test_replay_backlog_threshold_emits_control_frame`
+    同一手法（把阈值调小才可能构造超限），但走 WS 通道：断言两条通道的**判据
+    与帧形状一致**——形状来自 `serialization.build_truncated_control` 这个唯一
+    构建点，所以这里同时锁住了 SSE 侧不会与 WS 漂开。
+    """
+    from agent_harness import web as web_module
+
+    monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 2)
+
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        session_id = await _create_session(port, "一轮")
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client:
+            events = (await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
+            )).json()
+        latest = max(e["seq"] for e in events if e.get("seq") is not None)
+        assert latest > 2, "夹具前提：event 数必须超过（调小后的）阈值"
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            # 从头发（after_seq=-1）⇒ 4 个事件 > 阈值 2 ⇒ 必须截断
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": -1}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            assert len(snap["events"]) == 1, \
+                f"超限快照只应带控制帧，实际 {len(snap['events'])} 条"
+            control = snap["events"][0]
+            assert control["type"] == "stream/truncated"
+            assert control["data"] == {"after_seq": -1, "latest_seq": latest}
+            assert control["seq"] is None, "控制帧不是运行事实，无 seq"
+            assert control["durability"] == "transient"
+            # has_active_run=false ⇒ 客户端据此 settle 后走重建（不会等 done）
+            assert snap["has_active_run"] is False
+
+        # 客户端按重建路径回来：游标在最新处 ⇒ 不再触发，且只补窗口内那一截
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": latest}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            assert all(e["type"] != "stream/truncated" for e in snap["events"])
+            assert snap["events"] == [], "游标已在最新处 ⇒ 没有可补的事件"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_truncation_on_active_run_leaves_no_subscriber(tmp_path, monkeypatch):
+    """超限分支**不订阅、不起 relay**：被导向重建时不得留下孤儿订阅者。
+
+    为什么这条必须单独锁：被截断的订阅者不会有人消费（客户端收到控制帧就断开去
+    重建），若超限分支先 `subscribe()` 再返回，每个重建周期都会在 RunManager 的
+    `subscribers` 里留一个永不清理的队列——重建次数越多泄漏越多，且这个 session
+    的下一轮 fanout 会往这些死队列里写。这里用**真在途 run**（3s 慢流）才能非空洞
+    地验证：跑完再订阅能收到增量，证明断言时 run 确实在途。
+    """
+    from agent_harness import web as web_module
+
+    monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 2)
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=30, interval=0.1),
+    )
+    try:
+        session_id = await _start_run_get_session_id(port, "慢任务")
+
+        # 前置：等这个在途 run 产出**超过**（调小后的）阈值的事件。seq 从 0 起，
+        # 所以"≥阈值+1"才保证 `replay_upto - (-1) > 2` 成立——订阅早于它就会
+        # 走正常分支，本用例变成空洞的绿。
+        run = None
+        for _ in range(200):
+            run = app.state.agent.run_manager.get_active(session_id)
+            if run is not None and run.last_enqueued_seq > 2:
+                break
+            await asyncio.sleep(0.05)
+        assert run is not None and run.last_enqueued_seq > 2, \
+            f"前提：在途 run 必须已产出 >2 个事件（实际 {run and run.last_enqueued_seq}）"
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=15) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            # 从头发 ⇒ 在途 run 的事件数早已超过阈值 2 ⇒ 必须走截断分支
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": -1}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            assert [e["type"] for e in snap["events"]] == ["stream/truncated"]
+
+            run = app.state.agent.run_manager.get_active(session_id)
+            assert run is not None, "前提：此时 run 仍在途（否则本用例空洞）"
+            assert run.subscribers == {}, \
+                "超限分支不得留下订阅者——客户端会断开去重建，没人消费这些队列"
+
+            # 旁证（用户可见后果）：这条连接上不该再有 event 帧——relay 没起。
+            after = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "event" for f in fs),
+                timeout=0.5,
+            )
+            assert not [f for f in after if f.get("type") == "event"], \
+                "截断后不得继续推增量事件（客户端已去重建）"
+
+        # 非空洞对照：带真实游标回来仍能收到增量 ⇒ run 确实是活的
+        async with httpx2.AsyncClient(timeout=15) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            run = app.state.agent.run_manager.get_active(session_id)
+            cursor = run.last_enqueued_seq if run is not None else -1
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": cursor}))
+            frames = await _recv_until(
+                ws,
+                lambda fs: len([f for f in fs if f.get("type") == "event"]) >= 1,
+            )
+            assert [f for f in frames if f.get("type") == "event"], \
+                "带正确游标回来必须能接上 live 增量"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_snapshot_window_filters_by_cursor(tmp_path, monkeypatch):
+    """带游标 ⇒ 快照只发 `after_seq < seq ≤ replay_upto` 那一截（#208）。
+
+    阈值保持默认（1000）⇒ 走在窗口这条正常路径上：这是"老客户端拿全量、
+    新客户端只补差额"的分界，也是重建后不重复投影的**服务端**那一半
+    （另一半是客户端的 seq 幂等门）。
+    """
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        session_id = await _create_session(port, "一轮")
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client:
+            events = (await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
+            )).json()
+        seqs = [e["seq"] for e in events if e.get("seq") is not None]
+        assert len(seqs) >= 3, "夹具前提：至少 3 个 durable 事件"
+        mid = sorted(seqs)[1]
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": mid}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            got = [e["seq"] for e in snap["events"] if e.get("seq") is not None]
+            assert got == [s for s in sorted(seqs) if s > mid], \
+                f"窗口应为 ({mid}, {max(seqs)}]，实际 {got}"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_snapshot_illegal_cursor_falls_back_to_head(tmp_path, monkeypatch):
+    """非法 `after_seq`（字符串 / 布尔 / 缺失）⇒ 当 -1 从头发，**不报错不断连**。
+
+    这是纯粹的输入校验：把任意 JSON 类型交给 `replay_upto - after_seq` 会抛
+    TypeError，那是**连接级**异常（整条 WS 挂掉），代价远大于"按最保守的
+    从头发"。三条非法输入都必须照常拿到快照。
+    """
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        session_id = await _create_session(port, "一轮")
+        import httpx2
+
+        for bad in ("9", True, None):
+            payload = {"type": "subscribe", "session_id": session_id}
+            if bad is not None:
+                payload["after_seq"] = bad
+            async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+                f"ws://127.0.0.1:{port}/api/ws"
+            ) as ws:
+                await ws.send_text(json.dumps(payload))
+                frames = await _recv_until(
+                    ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+                snap = next(
+                    (f for f in frames if f.get("type") == "snapshot"), None)
+                assert snap is not None, f"after_seq={bad!r} 未拿到快照"
+                assert snap["events"], "回退到 -1 ⇒ 应重放全部 durable 事件"
+                assert not any(f.get("type") == "error" for f in frames)
+    finally:
+        await _shutdown(server, serve_task)

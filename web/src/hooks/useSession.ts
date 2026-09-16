@@ -555,9 +555,10 @@ export function useSession() {
           if (awaitingEvidence) endReconnecting();
           lastFrameAtRef.current = Date.now();
           // T4 控制帧先于投影（seq=null 不入轮次）：backlog>1000 → 全量重建。
-          // 'stream/truncated' 是 web 层控制帧（app.py 内联构造，不在 event.py
-          // 词汇表）——generated/event-types.ts 由 event.py 生成，此字面量是
-          // 唯一正确落点（勿收进生成产物）。
+          // 'stream/truncated' 是 web 层控制帧（`serialization.build_truncated_control`
+          // 构造——SSE 与 WS 两条通道的**唯一**构建点，不在 event.py 词汇表）
+          // ——generated/event-types.ts 由 event.py 生成，此字面量是唯一正确落点
+          // （勿收进生成产物）。
           if (event.type === 'stream/truncated') {
             const plan = parseTruncated(event.data);
             sseRef.current?.cancel(); // 静默断开，不走 onStreamEnd
