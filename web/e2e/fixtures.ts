@@ -1032,7 +1032,12 @@ export const MODELS = [
  *                  不许把码原样打给用户、也不许冒称「未配置」（那是具体诊断，
  *                  `modelAvailability.reasonLabel` 的回落）；
  *   - `mixed`   —— 组内**部分**不可用 ⇒ **不许**置灰（把一个可用项说成不可用
- *                  比不置灰更糟）。 */
+ *                  比不置灰更糟）。
+ *  ⚠ 这组载荷是**为覆盖纯函数分支手工构造的**，不是任何真实部署的快照：真后端只在
+ *  provider preset / `AGENT_MODELS` 条目声明过能力位时才发 `supports_*`（且 preset 里
+ *  只有 `supports_tools`），而"整组不可用"只发生在**自定义供应商**上——那个条目又不
+ *  带能力位。也就是说"zhipu 三徽标齐全 + custom 置灰"这**同一画面**真机做不出来
+ *  （详见设计稿 §3 的"可达性前置"）。夹具的职责是把两边的分支都喂到，不是证伪后端。 */
 export const MODELS_WITH_AVAILABILITY = [
   {
     name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: true,

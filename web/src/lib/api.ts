@@ -1480,7 +1480,14 @@ export interface ContextUsage {
   state: 'ok' | 'usage_only' | 'no_data';
   /** 仅 `usage_only` 下发：`used_tokens` 的取数事实（后端算，前端不推算，#22）。 */
   usage_source?: {
-    kind: 'last_call_prompt_tokens';
+    /** 取数口径的机器码。已知值 `'last_call_prompt_tokens'` = 最近一次
+     *  `model/completed` 的 `prompt_tokens`（窗口占用下界）。
+     *
+     *  **故意不写成字面量联合**：`getContextUsage` 没做字段窄化（`res.json()` 直出），
+     *  写成 `'last_call_prompt_tokens'` 只会在"后端换口径"时让编译期继续点头——
+     *  而设计稿 §3.4 明说翻案只改一行取值、不动契约形状。所以类型如实写成 string，
+     *  由 `ContextUsagePanel` 按值选措辞、未知码退中性说法（有单测）。 */
+    kind: string;
     calls_with_usage: number;
     last_prompt_tokens: number;
     last_total_tokens: number | null;

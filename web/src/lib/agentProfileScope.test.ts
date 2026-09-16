@@ -40,9 +40,10 @@ describe('toolScopeNote', () => {
   it('一句话用**声明**口径（数字取自后端 tool_scope，措辞不得断言部署事实）', () => {
     const note = toolScopeNote(PROFILES, 'coding');
     // 措辞锁："声明开放"这几个字是批 2 Spec 轴 P1 的修复点——原稿写「只开放 12 个
-    // 工具」，而本部署实际注册的是另一个集合（默认部署只注册 9 个内置工具，
-    // 且本地 artifact 下 read_artifact 会被收窄却不在这份 excluded 里）。
-    // 改成"某某声明了 N 个"后逐字为真。**不要**把它改回"开放 N 个"。
+    // 工具」，而本部署实际注册的是另一个集合（最小 wiring 实测 main 10 / coding 9 /
+    // research_review 3，声明是 17/12/7；且本地 artifact 下 read_artifact 会被收窄
+    // 却不在这份 excluded 里）。改成"某某声明了 N 个"后逐字为真。
+    // **不要**把它改回"开放 N 个"。
     expect(note?.text).toBe('该档位声明开放 12 个工具（全部档位声明 17 个）');
   });
 

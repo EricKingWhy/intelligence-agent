@@ -126,15 +126,17 @@ def tool_scope_summary(profile: str) -> dict[str, Any]:
 
     ## 口径：这是**声明面**，不是本部署的工具清单
 
-    两个方向都会差（最小 wiring 实测：`CAPABILITIES=""`、无 session_store，
-    `build_runtime` 后数 registry）：
+    两个方向都会差（最小 harness 实测：`CAPABILITIES=""`、无 session_store、
+    无 Tavily key，`build_runtime` 后数 registry）：
 
-    - **声明 ⊃ 注册**：`scope` 里有名字，本部署可能没注册它。同一最小 wiring 实测
+    - **声明 ⊃ 注册**：`scope` 里有名字，本部署可能没注册它。同一 harness 实测
       注册数 = main/None **10**、coding **9**、research_review **3**（声明分别是
-      17/12/7）：knowledge/websearch/memory 等 capability 未启用时
-      `retrieve_knowledge` / `web_search` / `retrieve_memory` 一类根本不注册，
-      此时"开放 7 个"是**高报**。而这些工具在别的部署里**是**注册的——所以注册数
-      不是常量，它随 `CAPABILITIES` 与会话装配变化。
+      17/12/7）：knowledge/websearch/memory 等 capability 未启用（或缺运行期前置，
+      如 `TAVILY_API_KEY` / session_store）时不注册，`retrieve_knowledge` /
+      `web_search` / `retrieve_memory` / `delegate` 一类就不在 registry 里，此时
+      "开放 7 个"是**高报**。这个数**不是常量**：它随 wiring 与运行期前置变化
+      （缺 key / 缺 session_store 都会按 optional 降级缺席）——所以"本部署 = N 个
+      工具"这种说法本身就不稳，不该写进对用户的话里。
     - **注册 ⊄ 声明**：`assembly.py` 在收窄**前**注册的工具若不在任何 scope 里，
       它会被 filter 静默剔除，却**不在** `excluded` 里。同一实测：coding 丢掉的
       唯一工具是 `read_artifact`（本地 artifact 存储注册的），而声明面只声明了

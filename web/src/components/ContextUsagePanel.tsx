@@ -14,6 +14,7 @@
 import { memo, useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { getContextUsage, type ContextUsage } from '../lib/api';
+import { usageOnlyNote } from '../lib/contextUsageNote';
 
 /** 桶的展示元数据：key → 颜色 token + 中文名。顺序即图例顺序（与后端六桶一致）。 */
 const BUCKETS: Array<{
@@ -206,13 +207,8 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
             {usage.state === 'usage_only' && (
               /* 分类缺席时把**为什么**写出来（诚实约束）：否则「未分类 100%」
                  看起来像我们分类失败，而不是"分类这一次拿不到"。
-                 数字全部来自后端（calls_with_usage），前端不推算。 */
-              <div className="ctx-usage-note">
-                分类未采集：总数取自最近一次调用的输入规模（窗口占用下界）
-                {usage.usage_source
-                  ? `，本会话 ${usage.usage_source.calls_with_usage} 次调用有用量上报`
-                  : ''}
-              </div>
+                 措辞按 `usage_source.kind` 选（见 usageOnlyNote 的注释）。 */
+              <div className="ctx-usage-note">{usageOnlyNote(usage)}</div>
             )}
 
             <div className="ctx-usage-cache">

@@ -112,23 +112,37 @@
    必定带游标，且这条被 `wsStream.test.ts` 与 `stream-fallback.spec.ts` 双侧锁住；
    外部自建客户端必须实现"订阅带游标 + 重建后带新游标回来"这两步。
    客户端**仍**按 seq 幂等去重（服务端窗口与客户端游标可能因一次丢帧而错开）。
-2. **`has_active_run: false` ⇒ 快照即全量**：后端此时不起 relay task，**永远不会发
-   `done`**；客户端要自己收流（前端 `wsStream` 读到该字段即 `settle()`）。
+2. **`has_active_run: false` ⇒ 这条连接不会再有帧**：后端此时不起 relay task，**永远
+   不会发 `done`**；客户端要自己收流（前端 `wsStream` 读到该字段即 `settle()`）。
    发 `stream/truncated` 时同样是 `false`（那一帧之后客户端会主动断开重连）。
+   ⚠ 该字段**不**表示"快照是全量"——超限时快照恰恰不是全量（只有一个控制帧）。
+   两个含义在 `false` 上重载是有意的：客户端据此收流，再按控制帧去重建。
 3. **`error` 帧没有状态码**：只有一句 message（`snapshot failed` / id 非法），
    与 HTTP 的 404/422 不同形。要分辨「会话已不存在」，客户端只能另做存在性判据
    （前端用 `GET /api/sessions?include_archived=true` 的成员判定）。
 
 backlog 保护（#208，已落地）：两条通道用**同一条**判据
-`当前最大 seq - after_seq > STREAM_REPLAY_MAX_EVENTS (1000)`，超限时发同一形状的
+`latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS (1000)`，超限时发同一形状的
 控制帧（`serialization.build_truncated_control`，SSE 与 WS 的唯一构建点）。
-"当前最大 seq"在两条通道上的**字段名不同、值同源**：SSE 载荷里叫 `latest_seq`，
-WS 快照载荷里叫 `replay_upto`（都是服务端在订阅/取游标那一刻读到的 `session.seq`，
-`after_seq` 就是控制帧里回显的那个客户端游标）：
+`latest_seq` = **持久化**最大 seq（SSE 的 `handle.latest_seq`、WS 的 `events[-1].seq`
+——两条通道同一个量，因此控制帧逐字相同）：
 
 ```json
 {"type":"stream/truncated","data":{"after_seq":N,"latest_seq":M},
  "seq":null,"run_id":null,"step_id":null,"durability":"transient"}
+```
+
+**别把它与 `replay_upto` 当同一个数**：`replay_upto` 是重放窗口的上界 = 在途 run 的
+`last_enqueued_seq`（含已入队未落盘的几条，先补上才不丢）；run 不在途时两条通道都回落
+成 `latest_seq`。即**判据用持久面的 `latest_seq`，窗口用入队面的 `replay_upto`**——
+两者稳态相等，listener 落后时 `replay_upto` 领先（曾因此让两条通道对同一会话给出
+相反裁决，2026-09-17 审查修正）。
+
+WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的单帧形状写会漏收）：
+
+```json
+{"type":"snapshot","session_id":"...","events":[<上面的控制帧>],
+ "replay_upto":N,"has_active_run":false}
 ```
 
 它不是运行事实（无 seq、transient）⇒ 客户端不投影它，只走

@@ -139,7 +139,12 @@ const USAGE_ONLY_BODY = {
   cache: { state: 'partial', reported_calls: 1, total_calls: 2, avg_hit_rate: 0.9118 },
   state: 'usage_only',
   usage_source: {
-    kind: 'last_call_prompt_tokens', calls_with_usage: 16,
+    // ⚠ `calls_with_usage` 必须与 `cache.total_calls` **同值**：后端两者同源同判据
+    // （`context_usage.py::_usable_usage`——`cache_summary` 与 `last_call_usage` 都过它），
+    // `usage_only` 下恒相等（`tests/web/test_context_usage.py::test_t6_usage_only_*`
+    // 就是这么钉的）。夹具里放 16 与 2 两个数会喂出一个后端产不出的载荷，把"调用数虚高"
+    // 这类漂移（本批刚修过一种）在 e2e 里屏蔽掉。
+    kind: 'last_call_prompt_tokens', calls_with_usage: 2,
     last_prompt_tokens: 54841, last_total_tokens: 61342,
   },
 };
@@ -178,7 +183,7 @@ test('T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不�
   // 4) 说明行给出**为什么**（分类拿不到 + 取自哪一次调用）
   await expect(dialog).toContainText('分类未采集');
   await expect(dialog).toContainText('最近一次调用的输入规模');
-  await expect(dialog).toContainText('16 次调用有用量上报');
+  await expect(dialog).toContainText('2 次调用有用量上报');
   // 5) 缓存事实来自同一条事件流（partial：1/2）
   await expect(dialog).toContainText('91.2%');
   await expect(dialog).toContainText('1/2 次调用带回明细');

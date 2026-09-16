@@ -101,7 +101,7 @@
 | 保留 | `groupByProvider()`（`:42-51`）产出的 provider 分组语义、`默认链`伪选项（`:135-145`）、`commitSelection` 的守卫（`:79-86`） |
 | 选中态 | 当前模型：勾选图标 + 加重字重 + 左侧 2px 高亮条；当前 provider 在第一级同样高亮 |
 | 不可用 provider | 置灰但仍可展开（不要隐藏）；行尾显示原因（`unavailable_reason` 的文案映射在 `web/src/lib/modelAvailability.ts`，属 #199 本次新增；#203 只交付了后端机器码本身），无 reason 时显示「未配置」。**已落地（#199，2026-09-17）**，判定口径写在这里：①「不可用」= 后端明确说 `is_available: false`（缺字段是"没说"不是"不可用"；`getModels` 对 `is_available` 做**三态**解析，不用 `!== false` 归一，否则"没说"被伪造成"可用"）；② 只有**整组都不可用**才把 provider 行置灰（组里还有一个可用模型 ⇒ 不置灰，把一个可用项说成不可用比不置灰更糟）；③ 原因取组内第一条非空；④ 已知码 `missing_api_key`/`credential_unavailable` 翻成人话，**未知码回落「不可用」**（「未配置」是具体诊断，只留给"后端没给原因"那一态；机器码绝不原样打给用户）；⑤ 一级与**二级**行都写出原因文本（只靠颜色区分，色觉障碍/截图里就退化成"和别的一样"），逐条判定与文案都在 `web/src/lib/modelAvailability.ts`（纯函数，单测直测），DOM 接线由 `e2e/model-picker.spec.ts` 锁。**⚠ 本部署可达性前置**：`is_available` 只有在**自定义供应商**条目上才是真实判定（内置 preset/catalog 条目恒 `true`，见 `app.py:1044-1093`），所以"置灰 + 行尾原因"在**默认部署（未配任何自定义供应商）里看不到**——要复现得先加一个**没有 API Key 的自定义供应商**（这也是 e2e 用夹具而非真后端的原因） |
-| 信息密度 | 第二级行 = 模型名（主）+ provider 名（次级小字）；不显示价格/上下文窗口（看板负责上下文，不在选择器里堆数据） |
+| 信息密度 | 第二级行 = 模型名（主）+ provider 名（次级小字）；不显示价格/上下文窗口（看板负责上下文，不在选择器里堆数据）。**#199 能力徽标**（工具/视觉/思考，只在后端声明为 `true` 时出）走同一行的行尾槽位，与不可用原因共处（两者可以同时在）。**⚠ 徽标也有可达性前置**：后端只在 provider preset 或 `AGENT_MODELS` 目录条目**声明过**能力位时才下发（`app.py:1048-1092` 的 `_pick_capabilities` 只透传已声明键；`PROVIDER_PRESETS` 里只有 `supports_tools`），**自定义供应商条目恒无徽标**（只传 `display_name`）。于是"视觉 / 思考"两个徽标要有人手写 `AGENT_MODELS` 才看得到，而"置灰 + 行尾原因"只在自定义供应商上成立——**两个特性的可达域互斥**，`e2e/fixtures.ts` 里那组"zhipu 三徽标齐全 + custom 置灰"的同一画面，真后端一个部署都做不出来（夹具是为覆盖纯函数分支手工构造的） |
 | 管理入口 | 第一级底部「管理模型」→ 打开 #203 的供应商管理弹层 |
 | CSS | 复用 `.model-picker-content` / `.model-picker-item` 等（`app.css:5644-5731`）；`.model-picker-group-label`（`:5697-5705`）**当前是死 CSS**：本次结构替换后若不再需要就删除（属本票 scope 内的清理），若作为第一级组标题启用则在两个主题下都校验对比度 |
 
@@ -148,11 +148,16 @@ type Props = {
   「该档位声明开放 N 个工具（全部档位声明 M 个）」
   - **措辞是「声明」口径，不是「你现在有 N 个工具」**（批 2 Spec 轴 P1）：N/M 数的是
     **声明的工具面**，本部署**实际注册**的工具是另一个集合，两个方向都会差——
-    默认部署（`CAPABILITIES=""`）只注册 9 个内置工具，`research_review` 声明的
-    `retrieve_knowledge` / `web_search` 不在其中（声明 7、实注册 5，属**高报**）；反过来
-    本地 artifact 存储下 `read_artifact` 会被收窄掉却不在 `excluded` 里（属**漏报**）。
-    把数说成部署事实就是 UI 断言后端做不到的事，故取声明口径（逐字为真），仍完成用户
-    要的那件事：让人看见"选了这个档位，工具面被收窄了"。
+    最小 harness（`CAPABILITIES=""`、无 session_store、无 Tavily key）实测注册数
+    main **10** / coding **9** / research_review **3**，声明是 17/12/7
+    （`retrieve_knowledge` / `web_search` / `retrieve_memory` 一类根本不在 registry
+    里）⇒ 属**高报**；反过来本地 artifact 存储下 `read_artifact` 会被收窄掉却不在
+    `excluded` 里（属**漏报**）。
+    注册数甚至**不是同一个 CAPABILITIES 下的常量**：同一个 harness 里 websearch 缺
+    `TAVILY_API_KEY`、multiagent 缺 session_store 时都按 optional 降级缺席（装配日志
+    里各有一句 warning），补上它们数字就变。所以任何"本部署 = N 个工具"的说法都不
+    稳；把数说成部署事实就是 UI 断言后端做不到的事，故取声明口径（逐字为真），仍完成
+    用户要的那件事：让人看见"选了这个档位，工具面被收窄了"。
 - hover/聚焦该行时用 `title` 列出被收窄掉的工具名（**带档位名归属**，最多 6 个 + 「、…」）。
   - 带档位名是因为 footer 描述的是**当前生效档位**，而列表里高亮的那一行可能是别的档位
     （鼠标移动即高亮）；只说「未开放：…」会被读成"这是高亮那一行的信息"。
@@ -174,11 +179,24 @@ type Props = {
 3. **披露对象**：**当前生效档位**（未选 = 后端默认档位）。跟着"当前选中的那一个"走，
    不是"刚刚 hover 的那一个"——`footer` 是调用方传入的静态内容，与 cmdk 的高亮值
    无关（要跟着 hover 走得改组件契约，收益不足）；名字归属靠 `title` 里的档位名补上。
-4. **残留缺口（已知，未修）**：句子里的 N/M 是**声明面**数字，真机部署注册数与它不等
-   （本部署实测 main 15/15、coding 12/15、research_review 5/15，见后端用例里手工镜像
-   的数字与 tracker 记录）。文案已改为不宣称部署事实，故不构成"UI 骗人"；但用户若想
-   知道"我现在到底有几个工具"，这一步还得去别处看。修它需要在会话上下文里数收窄前后
-   的 registry（`assembly.py:277-287` 已有 `dropped_tools`），另开一张票。
+4. **残留缺口（已知，未修）**：句子里的 N/M 是**声明面**数字，真机部署注册数与它不等。
+   实测（本仓最小 harness：`Settings(capabilities="")` + `assemble_wiring` +
+   `build_runtime`，之后数 `registry.list()`）：
+
+   | 档位 | 声明（本文件口径） | 实测注册 |
+   | --- | --- | --- |
+   | main / None | 17 | 10 |
+   | coding | 12 | 9 |
+   | research_review | 7 | 3 |
+
+   ⚠ 这张表**只说明"两个面不相等"这件事**，不要当成"另一套 N/M"：
+   注册数随 wiring 与运行期前置变化（同一 harness 里 websearch 缺 key、multiagent 缺
+   session_store 都会按 optional 降级缺席，补上就变），所以它**没有**一个可写进文档的
+   固定值；声明口径只有一套（17/17、12/17、7/17，见 `docs/SDD_TICKET_TRACKER.md` 与
+   `tests/web/test_web_phase5_staged_endpoints.py` 的镜像）。文案已改为不宣称部署事实，
+   故不构成"UI 骗人"；但用户若想知道"我现在到底有几个工具"，这一步还得去别处看。
+   修它需要在会话上下文里数收窄前后的 registry（`assembly.py:277-287` 已有
+   `dropped_tools`），另开一张票。
 
 ---
 

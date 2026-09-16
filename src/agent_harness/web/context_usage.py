@@ -164,9 +164,14 @@ def build_context_usage_payload(
     empty_breakdown = {"messages": 0, "system_prompt": 0, "skills": 0,
                        "other": 0, "tools": {"system": 0, "mcp": 0}}
     if builder_snapshot is None:
-        # cache 与 usage 都从**同一条**事件流汇总——旧版在这里硬编码
-        # not_collected/0，把"事件流里有 16 次带缓存的调用"一并丢掉（#212
-        # 同批修：no_data 不等于"这个会话什么都不知道"）。
+        # cache 与 usage 都从**同一条**事件流汇总（同一 `_usable_usage` 闸门）。
+        # ⚠ 本分支的两种态**不对称**，别把功劳记错（2026-09-17 审查澄清）：
+        #   - `usage_only`（事件流里有 usage）：`cache` 是**真汇总**——旧版在这里
+        #     硬编码 not_collected/0，把"有 12 次调用、其中 5 次带缓存"一并丢掉；
+        #   - `no_data`（`usage is None`）：`cache_summary` **结构上恒等于**
+        #     not_collected/reported 0/total 0（两个函数共用同一闸门 ⇒ 没有任何
+        #     事件过闸），与旧版硬编码逐字段相同。此处仍走同一个函数只为两态**同源**，
+        #     它在这个分支拿不出新事实。
         cached = cache_summary(events)
         usage = last_call_usage(events)
         if usage is None:

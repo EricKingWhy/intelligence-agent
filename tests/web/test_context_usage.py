@@ -574,6 +574,10 @@ def test_t6_no_usable_usage_still_no_data():
     assert payload["state"] == "no_data"
     assert payload["used_tokens"] == 0
     assert "usage_source" not in payload
+    # ⚠ 这一条是**同义反复**（恒真），不是"#212 修了 cache 硬编码"的锁：两个汇总共用
+    # 同一 `_usable_usage` 闸门，`usage is None` ⇒ `cache_summary` 必然 0/0。
+    # 留着只为 no_data 形状完整；cache 真被汇总的那半边在 `usage_only` 用例里
+    # （`test_t6_usage_only_*` 断言 partial 且有 1/2 的调用数）。
     assert payload["cache"]["total_calls"] == 0
 
 

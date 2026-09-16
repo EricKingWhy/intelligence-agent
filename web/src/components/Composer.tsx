@@ -322,10 +322,16 @@ export const Composer = memo(function Composer({
                 (() => {
                   const note = toolScopeNote(agentProfiles, selectedAgentProfile);
                   if (!note) return undefined;
-                  // `tabIndex=0` + `aria-label`：tooltip 靠 `title` 暴露，而 `title`
-                  // 只有可聚焦元素才触得到——否则这条提示只对鼠标用户存在。
+                  // `tabIndex=0` 让它可聚焦（键盘用户也能拿到提示）；`aria-label`
+                  // **以可见文字开头**再接 tooltip 内容——直接用 tooltip 当可访问名
+                  // 会违反 WCAG 2.5.3（Label in Name：可访问名须包含可见文字，
+                  // 否则语音控制/switch 用户照可见文字说不中）。
                   return (
-                    <span tabIndex={0} title={note.title} aria-label={note.title}>
+                    <span
+                      tabIndex={0}
+                      title={note.title}
+                      aria-label={`${note.text}；${note.title}`}
+                    >
                       {note.text}
                     </span>
                   );

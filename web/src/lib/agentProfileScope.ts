@@ -12,10 +12,14 @@
  *
  * 设计稿里那句话原本写作「该档位只开放 N 个工具（共 M 个）」。**这个说法在真机上是
  * 假的**：`tool_scope` 数的是**声明的工具面**，而本部署实际注册的工具是另一个集合，
- * 两个方向都会差——
- *   - 声明里有、本部署没注册：默认部署（`CAPABILITIES=""`）只注册 9 个内置工具，
- *     `research_review` 声明的 `retrieve_knowledge` / `web_search` 不在其中 ⇒
- *     "只开放 7 个"是高报（实测真值 5）；
+ * 两个方向都会差（最小 harness 实测：`Settings(capabilities="")` + `assemble_wiring` +
+ * `build_runtime`，之后数 `registry.list()`）——
+ *   - 声明里有、本部署没注册：实测注册数 main **10** / coding **9** /
+ *     research_review **3**，而声明是 17/12/7（`research_review` 声明的
+ *     `retrieve_knowledge` / `web_search` / `retrieve_memory` 根本不在 registry 里）
+ *     ⇒ "只开放 7 个"是高报。这个数还**不是常量**：同一个 harness 里 websearch 缺
+ *     `TAVILY_API_KEY`、multiagent 缺 session_store 时都按 optional 降级缺席，补上就变
+ *     ——所以"本部署 = N 个工具"这种说法本身就不稳；
  *   - 注册了、但不在任何声明里：本地 artifact 存储下 `read_artifact` 会被收窄掉，
  *     却不在 `excluded` 里（声明面只声明了 `inspect_artifact`）。
  * 两个数都不是"你现在有多少工具"。所以文案改成**声明口径**（「声明开放 N 个工具

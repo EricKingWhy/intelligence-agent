@@ -112,10 +112,15 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             return
 
         active_run = run_manager.get_active(session_id)
-        # 游标口径与 SSE 一致：在途 run 用 last_enqueued_seq（订阅本身只建队列，
-        # 读这个数不需要订阅先建立）。
+        # 阈值判据取**持久化最大 seq**——与 SSE 同一个量（`app.py:1336` 的
+        # `handle.latest_seq`）。不能用 run 的入队游标：两者稳态相等（落盘先于
+        # listener 入队），但 listener 落后时入队游标领先，同一会话 + 同一游标
+        # 会在两条通道上得到**相反裁决**（SSE 重放、WS 截断），而契约写的是
+        # "同一条判据"。控制帧里的 `latest_seq` 也取它 ⇒ 两条通道逐字一致。
+        latest_seq = events[-1].seq if events else -1
+        # 重放窗口上界仍是入队游标：那一截含已入队未落盘的几条，先补上才不丢。
         replay_upto = (
-            active_run.last_enqueued_seq if active_run is not None else events[-1].seq
+            active_run.last_enqueued_seq if active_run is not None else latest_seq
         )
 
         # backlog 保护（#208）：与 SSE 通道**同一判据、同一常量**（惰性导入读
@@ -126,14 +131,17 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         # 把队列挂到一个没人消费的 subscriber 上（泄漏，且会随重建次数累积）。
         from agent_harness.web.app import STREAM_REPLAY_MAX_EVENTS
 
-        if replay_upto - after_seq > STREAM_REPLAY_MAX_EVENTS:
+        if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
             await _send_json({
                 "type": "snapshot",
                 "session_id": session_id,
                 "events": [build_truncated_control(
-                    session_id, after_seq=after_seq, latest_seq=replay_upto,
+                    session_id, after_seq=after_seq, latest_seq=latest_seq,
                 )],
                 "replay_upto": replay_upto,
+                # `false` 描述的是**这条连接**（不起 relay、永远不发 done），
+                # 不是"快照是全量"——超限时快照恰恰不是全量。客户端据此 settle
+                # 收流，再按控制帧去重建（契约 §3 第 2 条同义）。
                 "has_active_run": False,
             })
             return

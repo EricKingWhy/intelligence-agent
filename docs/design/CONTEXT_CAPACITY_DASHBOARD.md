@@ -129,7 +129,7 @@
 | `used_tokens` | **最近一次可用调用的 `prompt_tokens`** | 它就是那次调用真正发出去的输入规模，是"当前窗口占用"能给出的**最小真值**（下一轮的输入只会 ≥ 它）。**不高报**是这块看板的诚实红线 |
 | `breakdown` 六桶 | 全 0 | 分类只能由 builder 的真实记账给出（§3.2「勿回退」那条禁止残差倒推）。把它整块塞进"其他"会让"其他"从"残差桶"变成"未知桶"，等于用一个说谎的分类掩盖一次缺席 |
 | `usage_source` | `{kind, calls_with_usage, last_prompt_tokens, last_total_tokens}` | 只给**结构化事实**，文案由前端写（与 `cache.state` 的分工一致）。`last_total_tokens` 一并返回 ⇒ 将来若翻案改用 total，只改一行取值、不动契约形状 |
-| `cache` | 照旧从事件流汇总（**不再硬编码**） | `cache.state` 与 `used_tokens` 的取数必须同源，否则同一会话两个字段讲两个故事 |
+| `cache` | 照旧从事件流汇总（**不再硬编码**） | `cache.state` 与 `used_tokens` 的取数必须同源，否则同一会话两个字段讲两个故事。⚠ 精确地说：这半边改动**只在 `usage_only` 态兑现**——`no_data` 态下两个汇总共用同一 `_usable_usage` 闸门，`usage is None` ⇒ `cache` 结构上必然是 `not_collected/0`，与旧版硬编码逐字段相同（2026-09-17 审查澄清） |
 
 **不取 `total_tokens` 的理由**：把本轮回答算进"占用"，量纲就变成"上一轮消耗"——而那正是
 Inspector 里 `tokens 61,342` 的含义。两个数同值不同义，比一个数不对更难解释。

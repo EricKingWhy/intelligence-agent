@@ -533,6 +533,81 @@ async def test_ws_truncation_on_active_run_leaves_no_subscriber(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_ws_truncation_criterion_is_persisted_max_not_enqueue_cursor(
+    tmp_path, monkeypatch,
+):
+    """阈值判据取**持久面** `latest_seq`，不取 run 的入队游标（2026-09-17 审查修正）。
+
+    为什么必须单锁：两个量在稳态相等（`runmanager.py:131-137`：落盘先于 listener
+    入队），**只有 listener 落后时**才分叉——而那一刻两条通道会给出相反裁决
+    （SSE 用 `events[-1].seq`、WS 若用 `last_enqueued_seq` 就会截断），契约却写着
+    "同一条判据"。分叉窗口靠真实时序等不到，所以这里**直接构造**：把在途 run 的
+    入队游标推到持久 max 之外（`_last_enqueued_seq` 是 `runmanager.py:62` 的私有
+    计数，测试直接写它），游标取到"持久面刚好不超限"的位置（差值 == 阈值）。
+    旧实现（用入队游标）⇒ 502 > 2 ⇒ 截断（红）；现实现（用持久 max）⇒ 正常快照，
+    窗口恰好两条（绿）。
+    """
+    from agent_harness import web as web_module
+
+    monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 2)
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=30, interval=0.1),
+    )
+    try:
+        session_id = await _start_run_get_session_id(port, "慢任务")
+
+        # 前置：持久化事件必须已超过（调小后的）阈值——否则"没截断"是因为事件本来就
+        # 少，本用例变成空洞的绿。
+        run = None
+        for _ in range(200):
+            run = app.state.agent.run_manager.get_active(session_id)
+            if run is not None and run.last_enqueued_seq > 2:
+                break
+            await asyncio.sleep(0.05)
+        assert run is not None and run.last_enqueued_seq > 2, \
+            f"前提：在途 run 必须已产出 >2 个事件（实际 {run and run.last_enqueued_seq}）"
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=15) as client:
+            events = (await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
+            )).json()
+        persisted_max = max(e["seq"] for e in events if e.get("seq") is not None)
+
+        # 构造分叉：入队游标 >> 持久 max。真实的"落盘先于入队"不变量被打破，但判据
+        # 若取持久面，就**不该**受影响。
+        run._last_enqueued_seq = persisted_max + 500
+
+        # 游标取到"持久面刚好不超限"的位置：`latest_seq - after_seq == 阈值`（不是 >）。
+        # 于是两个判据给出相反裁决——持久面 ⇒ 正常快照（2 条）；入队游标 ⇒ 502 > 2
+        # ⇒ 截断。这正是分叉时两条通道会打架的那一刻。
+        after_seq = persisted_max - 2
+
+        async with httpx2.AsyncClient(timeout=15) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": after_seq}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            types = [e["type"] for e in snap["events"]]
+            assert "stream/truncated" not in types, (
+                "判据取的是 run 的入队游标（被推高即误判超限）——应取持久 max "
+                f"`events[-1].seq`（persisted_max={persisted_max}, after_seq={after_seq}）"
+            )
+            # 非空洞：窗口恰好是 (after_seq, replay_upto] 那一截（持久面 2 条）
+            seqs = [e["seq"] for e in snap["events"] if e.get("seq") is not None]
+            assert seqs == [persisted_max - 1, persisted_max], \
+                f"窗口应只补持久面那两条，实际 {seqs}"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
 async def test_ws_snapshot_window_filters_by_cursor(tmp_path, monkeypatch):
     """带游标 ⇒ 快照只发 `after_seq < seq ≤ replay_upto` 那一截（#208）。
 
