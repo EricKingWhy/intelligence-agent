@@ -528,8 +528,9 @@ origin/main
 （若走 §13.2(b) 即直接在施工 clone 的 main 上提交，则没有这一步，直接对账）
 → diff 检查 + 门禁全绿（§14.10）
 → **审查覆盖闸门**：`scripts/check_review_coverage.sh`
-   （范围 `<最早台账 base>..HEAD` 的每条 commit 必须落在某次审查范围内，或为 docs-only 白名单；
-    台账 `docs/review_ledger.tsv`，规则见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5）
+   （范围 `<最早台账 base>..HEAD` 的每条 commit 必须有台账归属：审查行、docs-only 白名单，
+    或"恰好只改台账文件"的记账提交——**代码提交只有"补一次审查"一条路**；
+    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5 第 8 条）
 → merge 到本地 main（快进优先）
 → **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
    与施工 clone 的 `HEAD^{tree}` 比——**相等即证明"我跑过门禁的那棵树"就是"被集成的这棵树"**，
@@ -768,6 +769,8 @@ A 合入 `main` 后，之前针对 B 做的 Conflict 判断**全部视为可能�
 - Lint 通过；
 - Type Check（如项目存在）通过；
 - `git diff --check` 无 whitespace / conflict-marker 问题；
+- **审查覆盖闸门通过**：`scripts/check_review_coverage.sh` 退出 0（§13.4 那一步；漏了它
+  = 允许未审查的 commit 进 main，2026-09-17 立的机械门）；
 - 没有误删文件；
 - 没有覆盖其他 Agent 成果；
 - 没有 Scope 外修改。
