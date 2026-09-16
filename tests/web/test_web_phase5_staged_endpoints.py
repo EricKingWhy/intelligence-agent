@@ -9,7 +9,8 @@
   ② 空目录降级（context-providers 当前可能返 []）；
   ③ 字段 schema 锁定（契约形态稳定，前端可放心消费）。
 
-契约形态对齐既有 /api/permission-modes（封闭枚举：{id, display_name, description}）
+契约形态对齐既有 /api/permission-modes（封闭枚举：{id, display_name, description, icon}；
+`icon` 是 #214 起的语义名、**恒在**（未声明为 null），取值域见 TestCatalogIcons）
 与 /api/capabilities（动态列表，未装配就是空，不伪造）。Reuse First（§6）。
 Scope Lock（§8）：本测试只锁清单端点契约，不验运行时消费（那是独立批次）。
 """

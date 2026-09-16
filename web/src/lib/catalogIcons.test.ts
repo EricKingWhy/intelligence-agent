@@ -27,14 +27,12 @@ describe('catalogIcon（#214：后端声明的语义名 → 字形）', () => {
   it('已知名集合是后端 CATALOG_ICON_NAMES 的镜像，且每个名都有字形', () => {
     // 逐值：这一串与后端 `web/app.py::CATALOG_ICON_NAMES` 同集（跨语言手工镜像，
     // 增删名必须两端一起改；后端侧由 tests/web/test_web_phase5_staged_endpoints.py
-    // 的 TestCatalogIcons 锁同一串）
+    // 的 TestCatalogIcons 锁同一串）。
+    // 这条同时钉住"每个名都有字形"：右边是**字面量**、左边是 `Object.keys(ICONS)`，
+    // 两者相等即蕴含字面量里每个名都是 `ICONS` 的键。曾经另写一个"遍历**集合**逐个
+    // 断言 defined"的循环——集合本就来自 `ICONS`，恒真、发现不了任何东西，已删。
     expect([...CATALOG_ICON_NAMES].sort()).toEqual([
       'bolt', 'code', 'gauge', 'layers', 'lock', 'pencil', 'search', 'telescope', 'unlock',
     ]);
-    // 上面那串字面量里的每个名都必须真的映射出字形。**遍历字面量而不是遍历集合**：
-    // 集合就是 `Object.keys(ICONS)`，遍历它恒真、发现不了任何东西（写错过一版）。
-    for (const name of ['bolt', 'code', 'gauge', 'layers', 'lock', 'pencil', 'search', 'telescope', 'unlock']) {
-      expect(catalogIcon(name)).toBeDefined();
-    }
   });
 });

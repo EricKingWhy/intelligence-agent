@@ -24,18 +24,22 @@ import { routeApi, sessionRow, type ApiMock } from './fixtures';
 const ALPHA = 'D:/repos/alpha';
 const BETA = 'D:/repos/beta';
 
-/** 真后端 GET /api/permission-modes 的三档（id 是封闭枚举，未知值 → 422）。 */
+/** 真后端 GET /api/permission-modes 的三档（id 是封闭枚举，未知值 → 422）。
+ *  `icon` 是 #214 起的契约字段（语义名，恒在；未声明时 null）——这里照抄真值，
+ *  否则弹窗那条 picker 的图标槽永远空着，AC4 在第四个调用点上就没法断言。 */
 const REAL_PERMISSION_MODES = [
-  { id: 'read-only', display_name: '只读', description: '可读文件和运行只读工具，不可写入。' },
+  { id: 'read-only', display_name: '只读', description: '可读文件和运行只读工具，不可写入。', icon: 'lock' },
   {
     id: 'workspace-write',
     display_name: '工作区写入',
     description: '可读写工作区内文件；高危工具仍需审批。',
+    icon: 'pencil',
   },
   {
     id: 'danger-full-access',
     display_name: '完全访问',
     description: '所有工具无需审批，含网络/系统副作用。仅在可信环境使用。',
+    icon: 'unlock',
   },
 ];
 
@@ -115,6 +119,17 @@ test('AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限�
   for (const mode of ['只读', '工作区写入', '完全访问']) {
     await expect(listbox.getByRole('option', { name: mode })).toBeVisible();
   }
+  // #214 AC4：这一处调用点（`StartTaskInProjectDialog.tsx` 的 `toCatalogOptions`）也必须
+  // 传 `catalogIcon`——漏传就是静默空槽（本批 REVIEW 时正是这处漏了）。三档都声明了
+  // `icon` ⇒ 每个选项行的图标槽里必须有 svg；判据只看"槽里有字形"，不认具体字形
+  // （换一个 lucide 图标不算回归）。槽仍恒渲染：首行「默认（未选）」不是目录条目，
+  // 它一直是空槽。
+  for (const mode of ['只读', '工作区写入', '完全访问']) {
+    await expect(
+      listbox.getByRole('option', { name: mode }).locator('.picker-item-icon svg'),
+    ).toHaveCount(1);
+  }
+  await expect(listbox.getByRole('option', { name: '默认（未选）' }).locator('.picker-item-icon svg')).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(page.locator('.project-dialog .composer-control[aria-label="权限模式"]')).toContainText('工作区写入');
   // #204 裁定 §1：提交按钮可用（没有任务内容可判空，只看 pending），文案是「创建会话」。

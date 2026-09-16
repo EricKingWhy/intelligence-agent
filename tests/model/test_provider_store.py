@@ -168,6 +168,14 @@ def test_delete_aborts_when_credential_delete_fails(store: ProviderStore):
 #     真实凭据管理器"的回归都会当场红，而不是留下一条 sk-test 残留）；
 #   - 用例里不出现带 key 的 `create`：那会真写系统级存储（`tests/web/test_model_providers.py`
 #     顶部已登记过这个坑：'实测 my-proxy 残留'）——本批 REVIEW 时真的踩到过一次。
+#   - `available()` 也要 monkeypatch：带 key 的创建要先过 `_require_credential_backend()`
+#     （D10 的 503 门），它读的是**真** `keyring.get_keyring()`；不 mock 的话这条用例在
+#     没有可持久化后端的机器（CI / Linux / 服务账户）上会在 setup 阶段就抛
+#     `CredentialError: 当前平台没有可用的凭据存储`——判据（读回确认）本身与机器无关，
+#     setup 却与机器有关，那是假红。
+# REVIEW 还纠了一处**修法**：确认代码不能走 `self.get()`。读侧把后端故障降级成 None
+# （诚实降级），拿它当"凭据已不在"就 fail-open——后端删不掉也读不到时，配置被删而
+# 密钥还在。第三条用例锁的就是这个（读不出来 ⇒ 中止）。
 
 
 def test_delete_keyless_provider_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -204,6 +212,8 @@ def test_delete_aborts_when_credential_survives(tmp_path: Path, monkeypatch: pyt
     def _delete_fails(service: str, provider_id: str) -> None:
         raise PasswordDeleteError("backend refused")
 
+    monkeypatch.setattr(SystemCredentialStore, "available", lambda self: True)
+
     monkeypatch.setattr(keyring, "set_password", lambda s, p, pw: None)
     monkeypatch.setattr(keyring, "delete_password", _delete_fails)
     # 读回拿得到值（仍是 `sk-test` 前缀的假 key，不打印）⇒ 凭据还在
@@ -211,6 +221,32 @@ def test_delete_aborts_when_credential_survives(tmp_path: Path, monkeypatch: pyt
 
     store = ProviderStore(tmp_path / "p.json", SystemCredentialStore())
     store.create(_body())  # 带 key 的创建走的是被 monkeypatch 的空写入，不落真实后端
+    with pytest.raises(CredentialError):
+        store.delete("my-proxy")
+    assert [e["id"] for e in store.list_entries()] == ["my-proxy"]
+
+
+def test_delete_aborts_when_backend_cannot_confirm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """后端**删不掉也读不到**（kwallet 取消解锁 / macOS 钥匙串锁定）⇒ 无法确认 = 中止。
+
+    这条是"确认走 `self.get()`"那个修法的证伪点：`get` 把后端故障降级成 None
+    （诚实降级，读侧本该如此），拿它当"凭据已不在"的判据就成了 fail-open——配置被删、
+    密钥还留在系统里且仍可用，正是 D6 要消灭的孤立可用密钥。修法是确认时**直面后端**：
+    读也抛 ⇒ 无法确认 ⇒ 按失败处置（中止是安全方向，与 D6 同向）。
+    """
+    import keyring
+    from keyring.errors import KeyringError
+
+    def _backend_down(service: str, provider_id: str) -> None:
+        raise KeyringError("backend down")
+
+    monkeypatch.setattr(SystemCredentialStore, "available", lambda self: True)
+    monkeypatch.setattr(keyring, "set_password", lambda s, p, pw: None)
+    monkeypatch.setattr(keyring, "delete_password", _backend_down)
+    monkeypatch.setattr(keyring, "get_password", _backend_down)  # 读**也**失败
+
+    store = ProviderStore(tmp_path / "p.json", SystemCredentialStore())
+    store.create(_body())
     with pytest.raises(CredentialError):
         store.delete("my-proxy")
     assert [e["id"] for e in store.list_entries()] == ["my-proxy"]

@@ -159,10 +159,17 @@ class SystemCredentialStore(Credentials):
             #
             # 所以改为**读回确认**：凭据确实不在了才算"删除的语义已满足"（#215：新建
             # 供应商默认不带 key，那时必须能删掉）；还在 ⇒ 仍按 D6 中止。
-            # 残留（如实记）：读也失败的后端上 `get` 按既有的诚实降级返回 None
-            # （见上面 `get` 的注释），此时无法区分"没有"与"读不到"——那种状态下这条
-            # 凭据也读不出来，不构成"可用"的孤立密钥，与读侧同一口径。
-            if self.get(provider_id) is not None:
+            #
+            # ⚠ 确认**不能走 `self.get()`**：读侧把后端故障降级成 None（诚实降级，见
+            # 上面的 `get`），拿它当"凭据已不在"的判据就成了 fail-open——后端同时删不掉
+            # 也读不到时（kwallet 取消解锁 / macOS 钥匙串锁定 ⇒ 两次调用都抛），配置被
+            # 删而密钥还在，正是 D6 要消灭的"孤立可用密钥"。**读不出来 = 无法确认 =
+            # 按失败处置**（中止是安全方向，与 D6 同向）。
+            try:
+                remaining = keyring.get_password(CREDENTIAL_SERVICE, provider_id)
+            except KeyringError as read_error:
+                raise CredentialError(f"凭据删除失败（无法确认）: {type(error).__name__}") from read_error
+            if remaining is not None:
                 raise CredentialError(f"凭据删除失败: {type(error).__name__}") from error
 
 
