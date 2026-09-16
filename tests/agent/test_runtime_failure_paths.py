@@ -18,6 +18,10 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.runtime import (
+    _PROVIDER_FAILURE_MARKERS,
+    PROVIDER_FAILURE_MESSAGES,
+)
 from agent_harness.agent.types import STATUS_FAILED
 from agent_harness.session import (
     MODEL_COMPLETED,
@@ -374,6 +378,148 @@ class TestProviderContentModerationClassification:
         assert "message" not in run_failed.data
         # 模型已完整返回（归因窗口已关）：不补 model/failed
         assert not [e for e in session.events if e.type == MODEL_FAILED]
+
+
+# ---- #218：供应商账户 / 鉴权 / 模型不存在 → 固定可读文案 ----
+
+
+class ProviderErrorBodyModel:
+    """ainvoke / astream 抛带给定 provider 错误体的错误（形状同 openai SDK）。"""
+
+    def __init__(self, payload: str) -> None:
+        self._payload = payload
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        raise RuntimeError(self._payload)
+
+    async def astream(self, messages, **kwargs):
+        raise RuntimeError(self._payload)
+        yield AIMessageChunk(content="")  # 不可达：仅为把函数声明成 async generator
+
+
+#: 各分类的载荷 + 期望结果。``payload`` 取自真实错误体形状（account 一条是
+#: 2026-09-17 真机实测原文，见 docs/LIVE_BROWSER_TEST_20260917.md §2.1），
+#: 不是编造的措辞：分类表按错误码匹配，编造的载荷证明不了真实载荷能命中。
+#:
+#: ``expected`` 是 **(分类 reason, 固定可读文案) 字面量**，不用模块常量断言——
+#: 文案本身就是对外契约，拿常量断言会在有人误改常量时一起变绿（同现有内容审查
+#: 用例的纪律）。``None`` = 不该被分类（保持"只带类型名"原行为）。
+#: ``absent`` 是**必须不出现在任何持久化事件里**的载荷特征串（脱敏不变量）。
+PROVIDER_FAILURE_CASES: dict[str, dict[str, Any]] = {
+    "account_billing_frozen": {
+        "payload": (
+            "Error code: 400 - {'code': 'billing', 'message': '计费账户已被冻结', "
+            "'ref_code': 400901, 'ref_scope': 'common'}"
+        ),
+        "expected": (
+            "provider_account_unavailable",
+            (
+                "模型供应商账户不可用（欠费 / 配额耗尽 / 账户被冻结），"
+                "请到供应商控制台检查计费与配额"
+            ),
+        ),
+        "absent": ["计费账户已被冻结", "400901"],
+    },
+    "account_quota_exhausted": {
+        "payload": (
+            "Error code: 429 - {'code': 'insufficient_quota', 'message': "
+            "'You exceeded your current quota, please check your plan and billing "
+            "details.'}"
+        ),
+        "expected": (
+            "provider_account_unavailable",
+            (
+                "模型供应商账户不可用（欠费 / 配额耗尽 / 账户被冻结），"
+                "请到供应商控制台检查计费与配额"
+            ),
+        ),
+        # 这条载荷本身含 "billing" 字样：命中 account 是**故意**的——配额耗尽
+        # 是账户级硬阻塞，不是可重试的限流。
+        "absent": ["exceeded your current quota"],
+    },
+    "auth_invalid_key": {
+        "payload": (
+            "Error code: 401 - {'code': 'invalid_api_key', 'message': "
+            "'Incorrect API key provided: sk-abc***'}"
+        ),
+        "expected": (
+            "provider_auth_failed",
+            "模型供应商鉴权失败（API Key 无效或无权限），请检查供应商凭证配置",
+        ),
+        "absent": ["invalid_api_key", "sk-abc"],
+    },
+    "model_not_found": {
+        "payload": (
+            "Error code: 404 - {'code': 'model_not_found', 'message': "
+            "\"The model 'gpt-nope' does not exist\"}"
+        ),
+        "expected": (
+            "provider_model_not_found",
+            "模型不存在，或当前账户无权访问该模型，请检查模型名与开通状态",
+        ),
+        # 只放**载荷独有**的特征串：错误码 `model_not_found` 不能当反面 token——
+        # 我们自己的分类 reason 就叫 `provider_model_not_found`，断言它等于断言
+        # 分类名本身（实测撞到过，红在了合法词汇上，不是泄露）。
+        "absent": ["does not exist", "gpt-nope"],
+    },
+    "rate_limit_transient": {
+        # #218 范围外：限流是临时态、属模型 fallback 责任域，不做可读文案分类
+        # （错误码 rate_limit_exceeded 不在分类表里）。
+        "payload": (
+            "Error code: 429 - {'code': 'rate_limit_exceeded', 'message': "
+            "'Rate limit reached for gpt-4o in organization org-x on tokens per min.'}"
+        ),
+        "expected": None,
+        "absent": [],
+    },
+}
+
+
+class TestProviderFailureClassification:
+    """#218：账户/配额/鉴权/模型不存在不再只回显 ``BadRequestError``。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", list(PROVIDER_FAILURE_CASES))
+    async def test_payload_upgrades_to_fixed_message(self, tmp_path, case):
+        """命中分类表的载荷：model/failed 与 run/failed 都带固定可读文案，
+        且**任何**持久化事件都不含载荷原文；未命中的载荷保持类型名原行为。"""
+        spec = PROVIDER_FAILURE_CASES[case]
+        session = make_session(tmp_path)
+        runtime = _runtime(ProviderErrorBodyModel(spec["payload"]))
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        if spec["expected"] is None:
+            assert model_failed.data["message"] == "model call failed: RuntimeError"
+            assert "reason" not in run_failed.data
+            assert "message" not in run_failed.data
+        else:
+            reason, message = spec["expected"]
+            assert run_failed.data["reason"] == reason
+            assert model_failed.data["message"] == message
+            assert run_failed.data["message"] == message
+            # 仪器自检：下面的反面扫描必须真的在看事件数据（扫空集合永远绿）。
+            # 固定文案本身**应当**扫得到——扫不到说明扫描的样本是空的。
+            assert any(message in str(e.data) for e in session.events)
+        for event in session.events:
+            for token in spec["absent"]:
+                assert token not in str(event.data), (
+                    f"provider 回显原文不得进任何持久化事件（{case}: {token}）"
+                )
+
+    def test_every_marker_reason_has_a_message(self):
+        """分类表命中却缺文案 ⇒ 运行期取文案 KeyError，会被失败路径的兜底 except
+        吞掉、连 run/failed 一起丢。两个集合必须**相等**：缺键是崩溃，多出的键
+        是漂移（说明有分类被删而文案留下）。"""
+        assert {reason for _, reason in _PROVIDER_FAILURE_MARKERS} == set(
+            PROVIDER_FAILURE_MESSAGES
+        )
 
 
 @pytest.mark.asyncio

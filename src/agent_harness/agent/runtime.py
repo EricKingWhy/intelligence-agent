@@ -98,23 +98,80 @@ _MEMORY_EXCLUDED_EVENT_TYPES = frozenset({
 
 _DSML_MARKUP_MARKER = "<｜DSML｜"
 
-# provider 内容审查拒绝分类（阿里云 data_inspection_failed，2026-09-11 真实
-# 案例：百炼端点对含检索网页文本的二次调用 400）。识别后失败事件升级为固定
-# 可读文案，消费者（UI 事件检查器）无需翻服务端日志。只做分类——provider
-# 回显原文绝不进事件（脱敏不变量，见 append_model_failed）。
+# provider 侧失败的分类：识别后失败事件升级为固定可读文案，消费者（UI 事件检查器）
+# 无需翻服务端日志。只做分类——provider 回显原文绝不进事件（脱敏不变量，见
+# append_model_failed）。
+#
+# 两类历史来源：
+# - 内容审查拒绝：阿里云 data_inspection_failed（2026-09-11 真实案例：百炼端点对含
+#   检索网页文本的二次调用 400）。
+# - 账户 / 鉴权 / 模型不存在（#218，2026-09-17 真机案例：计费账户被冻结时界面只说
+#   ``BadRequestError``——该类型名横跨「欠费 / 鉴权 / 模型名错」三种完全不同的
+#   处置路径，不构成有效信息）。实测日志原文见
+#   docs/LIVE_BROWSER_TEST_20260917.md §2.1。
 CONTENT_MODERATION_REASON = "provider_content_moderation"
 CONTENT_MODERATION_MESSAGE = "provider 内容审查拒绝输入（可能因检索到的网页文本）"
-_CONTENT_MODERATION_MARKER = "data_inspection_failed"
+PROVIDER_ACCOUNT_UNAVAILABLE_REASON = "provider_account_unavailable"
+PROVIDER_ACCOUNT_UNAVAILABLE_MESSAGE = (
+    "模型供应商账户不可用（欠费 / 配额耗尽 / 账户被冻结），"
+    "请到供应商控制台检查计费与配额"
+)
+PROVIDER_AUTH_REASON = "provider_auth_failed"
+PROVIDER_AUTH_MESSAGE = (
+    "模型供应商鉴权失败（API Key 无效或无权限），请检查供应商凭证配置"
+)
+PROVIDER_MODEL_NOT_FOUND_REASON = "provider_model_not_found"
+PROVIDER_MODEL_NOT_FOUND_MESSAGE = (
+    "模型不存在，或当前账户无权访问该模型，请检查模型名与开通状态"
+)
+
+#: 分类表：``str(error)`` 里的小写标记子串 → 分类 reason。顺序即优先级。
+#:
+#: ⚠ 匹配面是整个 ``str(error)``（含 provider 错误体里的 ``code`` **与** ``message``
+#: 自然语言），不是在解析错误码——所以标记是"**从错误码里挑的词**"，不是"只可能出现在
+#: 错误码里"。实测例子：``insufficient_quota`` 那条载荷同时含 ``billing details``，
+#: 而 ``billing`` 在表里更靠前，于是走 ``billing`` 命中同一分类（结果一致，故不修顺序；
+#: 但别以为顺序不影响）。
+#: 命中不了本表的错误码保持"只带类型名"的原行为——典型是限流的
+#: ``rate_limit_exceeded``：临时态、属模型 fallback 责任域，不做可读文案；
+#: 而 ``billing`` 是**账户级硬阻塞**，两者处置不同（实测那条：计费账户被冻结）。
+_PROVIDER_FAILURE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("data_inspection_failed", CONTENT_MODERATION_REASON),
+    ("billing", PROVIDER_ACCOUNT_UNAVAILABLE_REASON),
+    ("insufficient_quota", PROVIDER_ACCOUNT_UNAVAILABLE_REASON),
+    ("quota_exceeded", PROVIDER_ACCOUNT_UNAVAILABLE_REASON),
+    ("account_deactivated", PROVIDER_ACCOUNT_UNAVAILABLE_REASON),
+    ("account_suspended", PROVIDER_ACCOUNT_UNAVAILABLE_REASON),
+    ("invalid_api_key", PROVIDER_AUTH_REASON),
+    ("incorrect_api_key", PROVIDER_AUTH_REASON),
+    ("invalid_organization", PROVIDER_AUTH_REASON),
+    ("model_not_found", PROVIDER_MODEL_NOT_FOUND_REASON),
+)
+
+#: 分类 reason → 固定可读文案（``append_model_failed`` 的 ``readable_message``）。
+#: 与上表**必须键集一致**（有无文案的对账用例）：分类命中而文案缺键 ⇒ 取文案时
+#: KeyError，会被失败路径的兜底 except 吞掉，连 run/failed 一起丢——把这件事堵在
+#: 提交前，而不是运行期静默。
+PROVIDER_FAILURE_MESSAGES: dict[str, str] = {
+    CONTENT_MODERATION_REASON: CONTENT_MODERATION_MESSAGE,
+    PROVIDER_ACCOUNT_UNAVAILABLE_REASON: PROVIDER_ACCOUNT_UNAVAILABLE_MESSAGE,
+    PROVIDER_AUTH_REASON: PROVIDER_AUTH_MESSAGE,
+    PROVIDER_MODEL_NOT_FOUND_REASON: PROVIDER_MODEL_NOT_FOUND_MESSAGE,
+}
 
 
 def _classify_provider_failure(error: BaseException) -> str | None:
-    """错误文本含内容审查错误码 → 返回分类 reason，否则 None（保持原行为）。
+    """错误文本命中分类表 → 返回分类 reason，否则 None（保持原行为）。
 
     按文本匹配而不是 SDK 异常属性：openai SDK 对 SSE 形状的错误响应
-    （``data: {...}``）解析不出结构化 body，错误码只存在于 str(error) 里。
+    （``data: {...}``）解析不出结构化 body，错误码只存在于 str(error) 里；且按文本
+    匹配不绑具体 SDK 版本与厂商（各家 OpenAI 兼容端点形状不一）。小写化后再比：
+    ``str(error)`` 的大小写由供应商决定，不是契约。
     """
-    if _CONTENT_MODERATION_MARKER in str(error):
-        return CONTENT_MODERATION_REASON
+    text = str(error).lower()
+    for marker, reason in _PROVIDER_FAILURE_MARKERS:
+        if marker in text:
+            return reason
     return None
 
 
@@ -1197,35 +1254,37 @@ class AgentRuntime:
                 )
                 # 本臂允许 yield——收尾事件（部分内容 + interrupted + 切换事实 +
                 # model/failed）逐条镜像给流消费者（与取消臂的唯一差异）。
-                # provider 内容审查拒绝（data_inspection_failed）→ 已分类 reason
-                # + 固定可读文案（run/failed 与 model/failed 成对升级，形状同
-                # 上下文超限路径）；其余异常保持类型名原行为。
+                # provider 侧可归因失败（内容审查 / 账户计费 / 鉴权 / 模型不存在）
+                # → 已分类 reason + 固定可读文案（run/failed 与 model/failed 成对
+                # 升级，形状同上下文超限路径）；其余异常保持类型名原行为。
                 # 分类只在**模型调用在途**时进行（model_call_open 正是 model/failed
                 # 的归因窗口）：本臂同时兜底工具/执行器异常，其错误文本可能恰好
-                # 引用该错误码（如抓取阿里云文档），不得误标为内容审查。
-                moderation_reason = (
+                # 引用这些标记（如抓取到阿里云文档或供应商计费文档），不得误标。
+                provider_reason = (
                     _classify_provider_failure(error)
                     if terminal.model_call_open
                     else None
                 )
-                moderation_message = (
-                    CONTENT_MODERATION_MESSAGE if moderation_reason else None
+                provider_message = (
+                    PROVIDER_FAILURE_MESSAGES[provider_reason]
+                    if provider_reason
+                    else None
                 )
                 for streamed in ctx.interrupt_streams():
                     yield to_agent_event(streamed)
                 for streamed in ctx.close_observability(
                     error_type=type(error).__name__,
-                    reason=moderation_reason or type(error).__name__,
+                    reason=provider_reason or type(error).__name__,
                     cancelled=False,
-                    readable_message=moderation_message,
+                    readable_message=provider_message,
                 ):
                     yield to_agent_event(streamed)
                 # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
                 # 已写入的事件保持原样，失败只能由日志承载。
                 end_event = terminal.failure_terminal(
                     steps=step_base + steps,
-                    reason=moderation_reason,
-                    message=moderation_message,
+                    reason=provider_reason,
+                    message=provider_message,
                     trace_id=(tracer.trace_id if tracer else None),
                     trace_url=(tracer.trace_url if tracer else None),
                 )
