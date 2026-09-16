@@ -11,6 +11,7 @@ import asyncio
 import pytest
 from langchain_core.messages import AIMessage
 
+from agent_harness.session import MODEL_COMPLETED, MODEL_FALLBACK
 from agent_harness.web.context_usage import (
     build_context_usage_payload,
     cache_summary,
@@ -146,8 +147,17 @@ async def _wait_context_snapshot(port: int, session_id: str, *, timeout: float =
 
 
 class _FakeEvent:
-    def __init__(self, data: dict) -> None:
+    """事件流的最小替身。
+
+    ``type`` 默认 ``model/completed``：真实事件流里**只有**它代表"一次模型调用"
+    并带 usage（``model/fallback`` 带的是同一份 usage 的副本，见
+    ``_usable_usage`` 的类型闸门）。替身不带类型会让这类用例悄悄退化成
+    "任何事件只要有 usage 就算一次调用"，那正是要防的重复计数。
+    """
+
+    def __init__(self, data: dict, type: str = MODEL_COMPLETED) -> None:
         self.data = data
+        self.type = type
 
 
 def test_t1_cache_capture_present():
@@ -474,5 +484,158 @@ async def test_t5_endpoint_cache_ok_with_cached_usage(tmp_path, monkeypatch):
         assert payload["cache"]["total_calls"] >= 1
         assert payload["cache"]["reported_calls"] == payload["cache"]["total_calls"]
         assert payload["cache"]["avg_hit_rate"] == pytest.approx(0.9)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+# ── T6：usage_only（#212 快照缺席但事件流有用量）──────────────────────
+
+
+def _settings_stub():
+    return type("S", (), {"max_context_tokens": 200_000,
+                          "auto_compact_threshold": 0.70,
+                          "hard_guard_threshold": 0.85})()
+
+
+def _usage_event(prompt: int, completion: int, *, cached: int | None = None) -> _FakeEvent:
+    usage: dict = {"prompt_tokens": prompt, "completion_tokens": completion,
+                   "total_tokens": prompt + completion}
+    if cached is not None:
+        usage["cached_tokens"] = cached
+    return _FakeEvent({"usage": usage})
+
+
+def test_t6_usage_only_takes_last_call_prompt_tokens():
+    """#212 取数口径：used_tokens = **最近一次**调用的 prompt_tokens（不是累计，
+    也不是 total）——16 次调用的会话里，这两个数分别是 339,182 与 61,342。
+
+    本票决议的理由（设计稿 §3.4）：prompt_tokens 是那次调用真正发出去的输入
+    规模 = 窗口占用的**下界**，不高报；total_tokens 会把本轮回答算进"占用"，
+    量纲变成"上一轮消耗"（Inspector 的 run tokens 就是那个数）。
+    """
+    events = [
+        _usage_event(1000, 100),
+        _usage_event(54841, 6501, cached=50000),
+    ]
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate, events=events,
+    )
+    assert payload["state"] == "usage_only"
+    assert payload["used_tokens"] == 54841
+    assert payload["breakdown"] == {"messages": 0, "system_prompt": 0, "skills": 0,
+                                    "other": 0, "tools": {"system": 0, "mcp": 0}}
+    assert payload["usage_source"] == {
+        "kind": "last_call_prompt_tokens",
+        "calls_with_usage": 2,
+        "last_prompt_tokens": 54841,
+        "last_total_tokens": 61342,
+    }
+    # cache 与 used_tokens 走**同一条**事件流（旧版在这里硬编码 not_collected/0，
+    # 把"有 2 次调用、其中 1 次带缓存"一并丢掉）。两态如实传递：partial。
+    assert payload["cache"]["state"] == "partial"
+    assert payload["cache"]["reported_calls"] == 1
+    assert payload["cache"]["total_calls"] == 2
+
+
+def test_t6_usage_only_tool_definitions_are_ignored():
+    """没有 builder 快照就没有"这次装配了哪些工具"的事实 ⇒ 不拿 registry 现算。
+
+    否则端点会报一个与本 run 无关的工具桶（端点拿到的 definitions 来自缓存
+    快照，两者同源；快照没了就一起没有）。
+    """
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[{"name": "read", "description": "x", "parameters": {}}],
+        estimate_tokens=_estimate, events=[_usage_event(10, 1)],
+    )
+    assert payload["state"] == "usage_only"
+    assert payload["breakdown"]["tools"] == {"system": 0, "mcp": 0}
+    assert payload["used_tokens"] == 10
+
+
+def test_t6_no_usable_usage_still_no_data():
+    """无可分解的 usage（缺字段 / 非正数 / 非数值）⇒ 仍是 no_data。
+
+    `_usable_usage` 的判据与 cache 汇总**同一份**——分开各写一遍正是同一事件流
+    给出两个调用数的来源。
+    """
+    events = [
+        _FakeEvent({}),                                        # 无 usage
+        _FakeEvent({"usage": {"completion_tokens": 5}}),       # 缺 prompt
+        _FakeEvent({"usage": {"prompt_tokens": 0}}),           # 0 不是规模
+        _FakeEvent({"usage": {"prompt_tokens": "100"}}),       # 字符串不猜
+        _FakeEvent({"usage": {"prompt_tokens": True}}),        # bool 是 int 的子类
+    ]
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate, events=events,
+    )
+    assert payload["state"] == "no_data"
+    assert payload["used_tokens"] == 0
+    assert "usage_source" not in payload
+    assert payload["cache"]["total_calls"] == 0
+
+
+def test_t6_fallback_usage_copy_is_not_a_second_call():
+    """发生过 fallback 的步骤只算**一次**调用（`model/fallback` 带的是副本）。
+
+    真实事件流形状（`runtime.py`）：本步 model/fallback 与紧随其后的
+    model/completed 携带**同一个** usage 对象——切换事件要自洽，不是又花了一次
+    token。旧口径"任何带 usage 的事件都算一次调用"会把每一步 fallback 记成 2 次，
+    `usage_source.calls_with_usage` 与 `cache.total_calls` 一起虚高。
+    """
+    usage = {"prompt_tokens": 54841, "completion_tokens": 6501,
+             "total_tokens": 61342, "cached_tokens": 50000}
+    events = [
+        _FakeEvent({"from_model": "a", "to_model": "b", "reason": "x", "usage": usage},
+                   MODEL_FALLBACK),
+        _FakeEvent({"usage": usage}),  # model/completed，同一份
+    ]
+    payload = build_context_usage_payload(
+        settings=_settings_stub(), builder_snapshot=None,
+        tool_definitions=[], estimate_tokens=_estimate, events=events,
+    )
+    assert payload["state"] == "usage_only"
+    assert payload["usage_source"]["calls_with_usage"] == 1
+    assert payload["cache"]["total_calls"] == 1
+    # 取数不受影响（副本与本体同值，最后一版一定是 model/completed）。
+    assert payload["used_tokens"] == 54841
+
+
+@pytest.mark.asyncio
+async def test_t6_endpoint_survives_snapshot_loss(tmp_path, monkeypatch):
+    """#212 真机复现（HTTP）：快照丢了（= 后端重启）也必须报出真实用量。
+
+    进程内快照 `AppState.context_snapshots` 在重启后必然为空 ⇒ 历史会话全部
+    落到这条路径。旧实现在这里回 `used_tokens=0, state=no_data`，对 16 个 run
+    的会话谎报"后端未上报"（`LIVE_BROWSER_TEST_20260916.md` F3）。
+    """
+    server, serve_task, port = await _start_server(
+        tmp_path, monkeypatch,
+        model_kwargs={"usage_metadata": {
+            "input_tokens": 54841, "output_tokens": 6501, "total_tokens": 61342,
+            "input_token_details": {"cached_tokens": 50000},
+        }},
+    )
+    try:
+        sid = await _completed_session(port)
+        # 前提：先拿到 ok（证明这个会话本来有快照），再把它抹掉。
+        ok_payload = await _wait_context_snapshot(port, sid)
+        assert ok_payload["state"] == "ok"
+        app = server.config.app
+        assert app.state.agent.context_snapshots.pop(sid, None) is not None
+
+        status, payload = await _get(port, f"/api/sessions/{sid}/context-usage")
+        assert status == 200
+        assert payload["state"] == "usage_only"
+        assert payload["used_tokens"] == 54841
+        assert payload["breakdown"]["messages"] == 0
+        assert payload["usage_source"]["last_prompt_tokens"] == 54841
+        assert payload["usage_source"]["last_total_tokens"] == 61342
+        assert payload["usage_source"]["calls_with_usage"] >= 1
+        # 缓存事实来自事件流，与 used_tokens 同源
+        assert payload["cache"]["state"] == "ok"
+        assert payload["cache"]["avg_hit_rate"] == pytest.approx(50000 / 54841)
     finally:
         await _shutdown(server, serve_task)

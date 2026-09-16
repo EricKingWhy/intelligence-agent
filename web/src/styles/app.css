@@ -6213,6 +6213,13 @@ button.json-row {
   font-size: var(--text-sm);
   color: var(--text-tertiary);
 }
+/* #212 usage_only：分类缺席时的说明行（比图例更弱一档——它是"这条数从哪来"，
+   不是数据本身）。只用既有 token，无新 token ⇒ §15 双份定义不涉及。 */
+.ctx-usage-note {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: 1.5;
+}
 
 /* ── #203：自定义供应商管理弹层（provider-dialog / 列表 / 表单）──
  *  全部语义 token（AGENTS §15：新增 token 必须双份——本块只复用既有 token，

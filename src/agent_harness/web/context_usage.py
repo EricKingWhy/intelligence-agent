@@ -6,7 +6,22 @@ Event ≠ Diagnostic Log），只经本端点暴露。三份硬约束（设计�
 1. ``estimated`` 恒为 true——除 provider usage 外一切数字都是估算；
 2. ``cache.state`` 三态：ok / partial / not_collected；**一次都没带回缓存
    明细时不得显示 0%**（not_collected 语义才是诚实口径）；
-3. 求和不变式：六桶之和 = used_tokens，差额一律进"其他"残差桶。
+3. 求和不变式：六桶之和 = used_tokens（**仅当** ``state="ok"``——分类可
+   分解时；``usage_only`` 下六桶如实为 0 而总数非 0，理由见下）。
+
+``state`` 三态（#212）：
+
+- ``ok`` —— 有 builder 快照 ⇒ 六桶分类与 used_tokens 同源、可求和；
+- ``usage_only`` —— **没有** builder 快照，但事件流里有可用 usage ⇒ 报窗口占用的
+  **下界**（最近一次调用的输入规模）+ ``usage_source`` 说明来源，六桶如实为 0
+  （分类**不可**分解——不用"其他"桶假装知道）；
+- ``no_data`` —— 两者都没有 ⇒ 各数为 0（诚实口径，不伪造）。
+
+为什么需要 ``usage_only``：builder 快照是**进程内**缓存（``AppState.context_snapshots``），
+后端一重启就全没了 ⇒ 历史会话的**分类**必然缺席，而事实
+（``model/completed.usage``）就在 durable 事件流里。实测（#212）：16 次调用全带
+usage 的会话，端点回的是 ``used_tokens=0, state="no_data"`` ⇒ 看板对真实用量
+谎报"后端未上报"。
 
 数据来源：在途 run 的 builder 最近一次 build 快照（``ContextBuilder.usage_snapshot``，
 launch 后未 build 时 used=0 是诚实的"未 build"信号）+ 该会话事件流里的
@@ -17,6 +32,8 @@ from __future__ import annotations
 
 import json
 from typing import Any
+
+from agent_harness.session import MODEL_COMPLETED
 
 # 工具 schema 估算的 core 名单（设计稿 §3.2.1：不靠名字前缀猜，显式常量集合）。
 # assembly.py 的 9 个内置 coding 工具；新增 core 工具必须来这里登记，否则会被
@@ -42,6 +59,32 @@ def tool_schema_breakdown(definitions: list[dict[str, Any]], estimate_tokens: An
     return {"system": system, "mcp": mcp}
 
 
+def _usable_usage(event: Any) -> dict[str, Any] | None:
+    """事件的 provider usage 能否作为事实（**唯一**判据，两处汇总共用）。
+
+    两条闸门，缺一条就会数错调用：
+
+    1. **类型必须是 ``model/completed``**——"一次模型调用"在事件流里的载体只有它。
+       ``model/fallback`` 也带 ``usage``，但那是**同一个** usage 的副本
+       （``runtime.py`` 让切换事件自洽，值 = 切换后实际产出本步回答的那次调用），
+       按事件数求和会把发生过 fallback 的每一步算成两次调用；
+    2. ``prompt_tokens`` 缺失 / 非正整数 ⇒ 不是事实，返回 None（**不猜、不补 0**）。
+       ``isinstance(x, bool)`` 排除是必要的：``True`` 也是 ``int``。
+
+    两处口径必须逐字相同——分开各写一遍正是 ``cache`` 与 ``usage_source``
+    对同一事件流给出不同调用数的来源。
+    """
+    if getattr(event, "type", None) != MODEL_COMPLETED:
+        return None
+    usage = event.data.get("usage") if isinstance(event.data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("prompt_tokens")
+    if not isinstance(prompt, int) or isinstance(prompt, bool) or prompt <= 0:
+        return None
+    return usage
+
+
 def cache_summary(events: list[Any]) -> dict[str, Any]:
     """会话事件流的缓存命中汇总（设计稿 §3.1 口径：Σcached ÷ Σinput，求和
     而非逐调用算术平均——调用大小差异会让算术平均失真）。
@@ -54,14 +97,11 @@ def cache_summary(events: list[Any]) -> dict[str, Any]:
     cached_sum = 0
     input_sum = 0
     for event in events:
-        usage = event.data.get("usage") if isinstance(event.data, dict) else None
-        if not isinstance(usage, dict):
-            continue
-        prompt = usage.get("prompt_tokens")
-        if not isinstance(prompt, int) or isinstance(prompt, bool) or prompt <= 0:
+        usage = _usable_usage(event)
+        if usage is None:
             continue
         total_calls += 1
-        input_sum += prompt
+        input_sum += usage["prompt_tokens"]
         cached = usage.get("cached_tokens")
         if isinstance(cached, int) and not isinstance(cached, bool):
             reported_calls += 1
@@ -75,6 +115,37 @@ def cache_summary(events: list[Any]) -> dict[str, Any]:
             "total_calls": total_calls, "avg_hit_rate": avg}
 
 
+def last_call_usage(events: list[Any]) -> dict[str, Any] | None:
+    """最近一次可用 usage 的取数（#212 ``usage_only`` 的数据面）。
+
+    口径（本票决议，已写进设计稿 §3.3）：``used_tokens`` 用**最近一次调用的
+    ``prompt_tokens``**——它就是那次调用真正发出去的输入规模，是"当前窗口占用"
+    能给出的**最小真值**（下一轮的输入只会 ≥ 它：还要加本轮回答与新输入）。
+    取 ``total_tokens`` 会把本轮回答算进"占用"，量纲变成"上一轮消耗"（Inspector
+    的 run tokens 就是那个数，两者同值不同义 = 更难解释的假一致）。两个数都
+    返回，将来翻案只改一行 ``used_tokens`` 的取值，不动契约形状。
+
+    没有任何可用 usage ⇒ None（调用方据此落 ``no_data``，不伪造）。
+    """
+    last: dict[str, Any] | None = None
+    calls = 0
+    for event in events:
+        usage = _usable_usage(event)
+        if usage is None:
+            continue
+        calls += 1
+        total = usage.get("total_tokens")
+        last = {
+            "last_prompt_tokens": usage["prompt_tokens"],
+            "last_total_tokens": (
+                total if isinstance(total, int) and not isinstance(total, bool) else None
+            ),
+        }
+    if last is None:
+        return None
+    return {"kind": "last_call_prompt_tokens", "calls_with_usage": calls, **last}
+
+
 def build_context_usage_payload(
     *,
     settings: Any,
@@ -84,22 +155,39 @@ def build_context_usage_payload(
     events: list[Any],
 ) -> dict[str, Any]:
     """组装端点响应（设计稿 §3.3 形状）。``builder_snapshot is None`` ⇒
-    ``state="no_data"``（会话还没有任何 build 快照，各数为 0）。"""
+    ``usage_only``（事件流里有 usage）或 ``no_data``（两者都没有）。"""
     window_tokens = settings.max_context_tokens
+    thresholds = {
+        "auto_compact": settings.auto_compact_threshold,
+        "hard_guard": settings.hard_guard_threshold,
+    }
+    empty_breakdown = {"messages": 0, "system_prompt": 0, "skills": 0,
+                       "other": 0, "tools": {"system": 0, "mcp": 0}}
     if builder_snapshot is None:
+        # cache 与 usage 都从**同一条**事件流汇总——旧版在这里硬编码
+        # not_collected/0，把"事件流里有 16 次带缓存的调用"一并丢掉（#212
+        # 同批修：no_data 不等于"这个会话什么都不知道"）。
+        cached = cache_summary(events)
+        usage = last_call_usage(events)
+        if usage is None:
+            return {
+                "estimated": True,
+                "window_tokens": window_tokens,
+                "used_tokens": 0,
+                "thresholds": thresholds,
+                "breakdown": empty_breakdown,
+                "cache": cached,
+                "state": "no_data",
+            }
         return {
             "estimated": True,
             "window_tokens": window_tokens,
-            "used_tokens": 0,
-            "thresholds": {
-                "auto_compact": settings.auto_compact_threshold,
-                "hard_guard": settings.hard_guard_threshold,
-            },
-            "breakdown": {"messages": 0, "system_prompt": 0, "skills": 0,
-                          "other": 0, "tools": {"system": 0, "mcp": 0}},
-            "cache": {"state": "not_collected", "reported_calls": 0,
-                      "total_calls": 0, "avg_hit_rate": None},
-            "state": "no_data",
+            "used_tokens": usage["last_prompt_tokens"],
+            "thresholds": thresholds,
+            "breakdown": empty_breakdown,
+            "cache": cached,
+            "state": "usage_only",
+            "usage_source": usage,
         }
 
     tools = tool_schema_breakdown(tool_definitions, estimate_tokens)
@@ -120,10 +208,7 @@ def build_context_usage_payload(
         "estimated": True,
         "window_tokens": window_tokens,
         "used_tokens": used_tokens,
-        "thresholds": {
-            "auto_compact": settings.auto_compact_threshold,
-            "hard_guard": settings.hard_guard_threshold,
-        },
+        "thresholds": thresholds,
         "breakdown": {
             "messages": messages,
             "system_prompt": system_prompt,

@@ -128,6 +128,65 @@ test('T6c：未采集 → 「未采集（提供商未返回缓存明细）」，
   await expect(dialog).not.toContainText('平均缓存命中率 0.0%');
 });
 
+/** #212：`usage_only` = 快照缺席（后端重启后必然如此）但事件流有用量。
+ *  面板必须报出真实总量并**如实说明分类缺席**，不得落进"后端未上报"那一支。 */
+const USAGE_ONLY_BODY = {
+  estimated: true,
+  window_tokens: 200000,
+  used_tokens: 54841,
+  thresholds: { auto_compact: 0.7, hard_guard: 0.85 },
+  breakdown: { messages: 0, system_prompt: 0, skills: 0, other: 0, tools: { system: 0, mcp: 0 } },
+  cache: { state: 'partial', reported_calls: 1, total_calls: 2, avg_hit_rate: 0.9118 },
+  state: 'usage_only',
+  usage_source: {
+    kind: 'last_call_prompt_tokens', calls_with_usage: 16,
+    last_prompt_tokens: 54841, last_total_tokens: 61342,
+  },
+};
+
+test('T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不说"未上报"）', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onContextUsageGet: (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(USAGE_ONLY_BODY),
+      }),
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  await page.getByRole('button', { name: '上下文容量' }).click();
+  const dialog = page.getByRole('dialog', { name: '上下文容量' });
+  await expect(dialog).toBeVisible();
+
+  // 1) 总量是**真值**（窗口占用下界），不是 0
+  await expect(dialog).toContainText('54,841 / 200,000');
+  await expect(dialog).toContainText('27.4%');
+  // 2) **不得**把 usage_only 说成 no_data——这两句对用户是不同的意思
+  await expect(dialog).not.toContainText('后端未上报用量数据');
+  // 3) 分类如实缺席：只有一段「未分类」，不得冒出六桶中任何一桶
+  await expect(dialog).toContainText('未分类');
+  for (const label of ['消息', '系统提示词', '技能', '系统工具', 'MCP 工具']) {
+    await expect(dialog).not.toContainText(label);
+  }
+  await expect(dialog.locator('.ctx-usage-bar .ctx-usage-seg')).toHaveCount(1);
+  // 4) 说明行给出**为什么**（分类拿不到 + 取自哪一次调用）
+  await expect(dialog).toContainText('分类未采集');
+  await expect(dialog).toContainText('最近一次调用的输入规模');
+  await expect(dialog).toContainText('16 次调用有用量上报');
+  // 5) 缓存事实来自同一条事件流（partial：1/2）
+  await expect(dialog).toContainText('91.2%');
+  await expect(dialog).toContainText('1/2 次调用带回明细');
+  // 6) 阈值标记仍在（占用条的主要用途：看得见自己在哪）
+  await expect(dialog.locator('.ctx-usage-mark-compact')).toHaveCount(1);
+  await expect(dialog.locator('.ctx-usage-mark-hard')).toHaveCount(1);
+});
+
 test('T6d：Esc 关闭看板（与既有 picker 一致）', async ({ page }) => {
   await routeApi(page, {
     sessions: [],

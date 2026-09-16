@@ -65,7 +65,7 @@
 | 工具 · 系统 | core/内置工具 schema 的 token 估算 | §3.2.1 |
 | 工具 · MCP | 外部（MCP/插件）工具 schema 的 token 估算 | §3.2.1 |
 
-**不变量**：`Σ(消息 + 系统提示词 + 技能 + 其他) + Σ(工具两组) = 已用总量`（前端断言这条，见 §7 T4）。
+**不变量**：`Σ(消息 + 系统提示词 + 技能 + 其他) + Σ(工具两组) = 已用总量`（**仅 `state="ok"`**：分类可分解时才有这条等式，`Σ六桶=used` 由后端单测钉死，见 §7 T4）。`usage_only` 下分类不可分解——**后端六桶如实为 0 而总数非 0**，那正是它"不假装知道"的形态，见 §3.4（#212 补充）；前端此时只渲染一段「未分类」，所以**页面上**看到的求和仍然自洽，但那是渲染约定，不是分类事实。`no_data` 两者皆 0。
 
 **实现口径（与早期草案的差别，勿回退）**：`used_tokens` 与各桶都由 builder 上报的**真实成本直接求和**，**不是**"总量减各项"的残差倒推。倒推写法在总量只含投影 messages 时会令"其他"恒为 0，把记忆注入整块漏报——首版即此 bug（回归测试 `test_t4_snapshot_counts_provider_injection` 钉住）。分账依据是 provider 自称的 `name`，不是调用方按 provider 文本重算一遍（重算会复制 `select()` 的拼装逻辑并漏掉预算截断，从而估高）。
 
@@ -108,10 +108,39 @@
 | `window_tokens` / `thresholds` | 直接来自 `Settings`（`config.py:68-70`）；**不得**改成每模型 `context_window`（用户裁定 3） |
 | `breakdown` | §3.2 的六个数；`other` = 非 skills 的 provider 注入 + 运行期快照（真实记账，非残差倒推） |
 | `cache.state` | `"ok"` \| `"partial"`（部分调用带回）\| `"not_collected"`（一次都没有） |
-| `state` | `"ok"` \| `"no_data"`（会话还没有任何 build 快照） |
+| `state` | `"ok"`（有 builder 快照，分类可分解）\| `"usage_only"`（无快照但事件流有 usage，见 §3.4）\| `"no_data"`（两者都没有） |
 
 - 数据来源：`ContextBuilder` 最近一次 build 的快照（需暴露一个只读快照方法，**不改** build 行为）+ 该会话事件流里的 `usage`/`usage_total` 汇总。
-- 无 run / 无快照 ⇒ `state="no_data"`、各数为 0、`cache.state="not_collected"`。
+- 无 run / 无快照且无 usage 事实 ⇒ `state="no_data"`、各数为 0、`cache.state="not_collected"`。
+
+### 3.4 `usage_only`：快照缺席但用量事实在事件流里（#212 补充，2026-09-17）
+
+**背景**：builder 快照是**进程内**缓存（`AppState.context_snapshots`，`app.py:437`），
+后端一重启就全没了；而 `app.py` 的旧实现在 `builder_snapshot is None` 时直接返回
+`used_tokens=0, state="no_data"`，**连带把事件流里的 cache 汇总也硬编码成
+`not_collected/0`**。实测（`LIVE_BROWSER_TEST_20260916.md` F3）：16 个 run / 3865 事件、
+16 次调用全带 usage 的会话，端点回的是 `used_tokens=0, state="no_data"`,
+`cache.total_calls=0` ⇒ 看板对该会话谎报"后端未上报用量数据"。
+
+**取数口径（本票决议，四个候选里选定的那一个）**：
+
+| 项 | 取值 | 理由 |
+| --- | --- | --- |
+| `used_tokens` | **最近一次可用调用的 `prompt_tokens`** | 它就是那次调用真正发出去的输入规模，是"当前窗口占用"能给出的**最小真值**（下一轮的输入只会 ≥ 它）。**不高报**是这块看板的诚实红线 |
+| `breakdown` 六桶 | 全 0 | 分类只能由 builder 的真实记账给出（§3.2「勿回退」那条禁止残差倒推）。把它整块塞进"其他"会让"其他"从"残差桶"变成"未知桶"，等于用一个说谎的分类掩盖一次缺席 |
+| `usage_source` | `{kind, calls_with_usage, last_prompt_tokens, last_total_tokens}` | 只给**结构化事实**，文案由前端写（与 `cache.state` 的分工一致）。`last_total_tokens` 一并返回 ⇒ 将来若翻案改用 total，只改一行取值、不动契约形状 |
+| `cache` | 照旧从事件流汇总（**不再硬编码**） | `cache.state` 与 `used_tokens` 的取数必须同源，否则同一会话两个字段讲两个故事 |
+
+**不取 `total_tokens` 的理由**：把本轮回答算进"占用"，量纲就变成"上一轮消耗"——而那正是
+Inspector 里 `tokens 61,342` 的含义。两个数同值不同义，比一个数不对更难解释。
+
+**与 `no_data` 的分界**：`usage_only` = 有 usage 事实、缺分类；`no_data` = 两样都没有。
+前端据此分两句文案（"分类未采集" vs "没有用量数据"），**不得**把 `usage_only` 也说成
+"没有数据"。
+
+**已知未做（登记，不在本票内）**：快照不落盘 ⇒ 重启后分类永远缺席。要真修得给
+builder 快照一个持久化落点（新 Store），属基础设施扩面（`AGENTS.md` §8 Scope Lock），
+故本票只做"事实不丢"的兜底。
 
 ---
 
@@ -139,7 +168,7 @@
 | 阈值可视化 | 70%（auto compact）与 85%（hard guard）在条上以标记线显示——这两个阈值对应真实的运行时行为（`config.py:69-70`），用户应能看见自己在哪 |
 | 图例数值 | 每类显示 token 数 + 百分比（百分比按 `window_tokens` 算，与"已用总量"同一分母口径） |
 | 溢出处理 | 小桶（< 2%）合并进"其他"的显示并按比例重标定（取自 opencode 的做法），但**图例仍列出全部桶**，不隐藏数据 |
-| 空态 | `no_data` → 「暂无用量数据」；`cache.state="not_collected"` → 「未采集（提供商未返回缓存明细）」。**禁止**显示 0% 或示例值 |
+| 空态 | 三态各有自己的话（**实现文案**，见 `ContextUsagePanel.tsx`）：`no_data` → 「后端未上报用量数据」；`usage_only` → 单段「未分类」+ 「分类未采集：总数取自最近一次调用的输入规模（窗口占用下界），本会话 N 次调用有用量上报」；`cache.state="not_collected"` → 「缓存命中率未采集（提供商未返回缓存明细）」。**禁止**显示 0% 或示例值；也**禁止**把 `usage_only` 说成"没有数据"（它有用量事实，只缺分类） |
 | 主题 | 新增颜色/尺寸 token 必须在 `:root` **与** `:root[data-theme='light']` 双份定义（AGENTS §15） |
 | 无障碍 | 分段条 `role="img"` + `aria-label` 概述各类占比；弹层与既有 picker 一致：`Esc` 关闭、焦点陷阱、键盘可达 |
 | 刷新 | 打开时拉一次 + 会话有新 run 时刷新；不做实时轮询（避免无谓请求） |
@@ -166,9 +195,9 @@
 | T1 | 采集 cache | mock 响应带 `input_token_details.cached_tokens` ⇒ `model/completed.usage.cached_tokens` 存在且相等；缺失 ⇒ 字段为 `None`/省略，**绝不写 0** |
 | T2 | 命中率算法 | 两次调用（1000/800 命中）⇒ 平均 = 0.8（求和口径，不是逐次平均）；全缺 ⇒ `cache.state="not_collected"`；部分缺 ⇒ `"partial"` |
 | T3 | 既有断言更新 | `test_structured_logging.py` 更新后仍断言 3 个既有字段，并允许可选第 4 个；PR 说明这是本票的行为变更 |
-| T4 | 求和不变式 | `Σ(四类) + Σ(工具两组) == used_tokens`；构造有 MCP 工具的场景 ⇒ `tools.mcp > 0` |
+| T4 | 求和不变式 | **`state="ok"` 时** `Σ(四类) + Σ(工具两组) == used_tokens`；构造有 MCP 工具的场景 ⇒ `tools.mcp > 0`。`usage_only` / `no_data` 不受这条约束（前者六桶如实为 0，见 §3.4） |
 | T5 | 端点形状 | 无数据 ⇒ `state="no_data"`；有 run ⇒ 各数与 builder 快照一致；`window_tokens == 200000`（回归：用户裁定不要每模型窗口） |
-| T6 | 前端渲染 | 六个桶都渲染；空态/未采集文案正确（不出现 0%）；亮色主题下新 token 生效（双份定义）；`Esc` 可关闭 |
+| T6 | 前端渲染 | `ok`：六个桶都渲染；`usage_only`：**恰好一段**「未分类」= `used_tokens`（**不得**把总数摊进"其他"）+ 说明行；空态/未采集文案正确（不出现 0%）；亮色主题下新 token 生效（双份定义）；`Esc` 可关闭 |
 | T7 | 阈值标记 | 70% / 85% 标记位置按百分比换算正确（纯函数单测） |
 
 ---

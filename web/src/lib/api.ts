@@ -1398,7 +1398,18 @@ export interface ContextUsage {
     total_calls: number;
     avg_hit_rate: number | null;
   };
-  state: 'ok' | 'no_data';
+  /** `ok` = 有 builder 快照（六桶可分解）；`usage_only` = 快照缺席但事件流有用量
+   *  （#212：`used_tokens` 是**窗口占用下界**，六桶如实为 0，来源见 `usage_source`）；
+   *  `no_data` = 两者都没有。**不得**把 `usage_only` 也说成"没有数据"，
+   *  两者对用户是两句不同的话（"分类缺了" vs "什么都没上报"）。 */
+  state: 'ok' | 'usage_only' | 'no_data';
+  /** 仅 `usage_only` 下发：`used_tokens` 的取数事实（后端算，前端不推算，#22）。 */
+  usage_source?: {
+    kind: 'last_call_prompt_tokens';
+    calls_with_usage: number;
+    last_prompt_tokens: number;
+    last_total_tokens: number | null;
+  };
 }
 
 /** GET /api/sessions/{id}/context-usage —— 上下文容量（只读，无副作用）。

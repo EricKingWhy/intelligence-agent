@@ -87,6 +87,20 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
 
   if (!open) return null;
 
+  // 分段条与图例的唯一数据源（#212）：
+  //   ok          → 六桶（分段只画值 >0 的，图例列出全部六桶——不隐藏数据）；
+  //   usage_only  → 单段「未分类」= 总数（分类这一次拿不到，不编一个假的分解）；
+  //   其余（no_data / 未加载）→ 空数组（那些分支不渲染分段条）。
+  // 两态都满足 Σ分段 = used_tokens，与后端的不变量同一口径。
+  const segments: Array<{ key: string; label: string; colorVar: string; value: number }> =
+    usage === null || usage.state === 'no_data'
+      ? []
+      : usage.state === 'ok'
+        ? BUCKETS.map((b) => ({
+            key: b.key, label: b.label, colorVar: b.colorVar, value: b.value(usage),
+          }))
+        : [{ key: 'unclassified', label: '未分类', colorVar: 'var(--text-tertiary)', value: usage.used_tokens }];
+
   return (
     <div className="ctx-usage-overlay" onClick={onClose}>
       <div
@@ -117,11 +131,13 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
           /* 只陈述**本面板能知道的事实**：后端这一轮没有给出用量。
              原先的「（会话还没有任何运行）」把 no_data 归因成一个具体原因，
              而那个原因常常与事实相反——实测 2a2d03f1（16 个 run、3865 事件）
-             同样落到这一支。归因留给后端（取数口径见 #212），文案不猜。 */
+             同样落到这一支。**#212 之后**该会话走的是 usage_only（有总量、
+             缺分类），真正落到这里的只剩"两样都没有"。
+             归因留给后端（取数口径见设计稿 §3.4），文案不猜。 */
           <div className="ctx-usage-empty">后端未上报用量数据</div>
         )}
 
-        {!error && usage && usage.state === 'ok' && (
+        {!error && usage && (usage.state === 'ok' || usage.state === 'usage_only') && (
           <>
             <div className="ctx-usage-total">
               {usage.used_tokens.toLocaleString()} / {usage.window_tokens.toLocaleString()}
@@ -129,32 +145,35 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
             </div>
 
             {/* 分段条：role=img + aria-label 概述占比（无障碍，设计稿 §5）。
-                小桶重标定显示宽度，图例仍列全部（不隐藏数据）。 */}
+                小桶重标定显示宽度，图例仍列全部（不隐藏数据）。
+                分类缺席时（usage_only）只有一段「未分类」——**不**把总数摊进
+                「其他」桶：那会让"其余 provider 注入"的残差桶变成一个说谎的未知桶，
+                而图例上"其他 54,841"读起来像"我们查过了，其余部分是这么多"。 */}
             <div
               className="ctx-usage-bar"
               role="img"
-              aria-label={BUCKETS.map((b) => {
-                const v = b.value(usage);
-                return `${b.label} ${pctOf(v, usage.used_tokens).toFixed(1)}%`;
-              }).join('、')}
+              aria-label={segments
+                .map((s) => `${s.label} ${pctOf(s.value, usage.used_tokens).toFixed(1)}%`)
+                .join('、')}
             >
-              {BUCKETS.map((b) => {
-                const p = pctOf(b.value(usage), usage.used_tokens);
+              {segments.map((s) => {
+                const p = pctOf(s.value, usage.used_tokens);
                 if (p <= 0) return null;
                 const width = Math.max(p, MIN_SEGMENT_PCT);
                 return (
                   <div
-                    key={b.key}
+                    key={s.key}
                     className="ctx-usage-seg"
-                    style={{ width: `${width}%`, background: b.colorVar }}
-                    title={`${b.label}：${b.value(usage).toLocaleString()} tok（${p.toFixed(1)}%）`}
+                    style={{ width: `${width}%`, background: s.colorVar }}
+                    title={`${s.label}：${s.value.toLocaleString()} tok（${p.toFixed(1)}%）`}
                   />
                 );
               })}
             </div>
 
             {/* 阈值标记：70% / 85% 在条上（真实运行时行为，config.py:69-70）。
-                标记按「已用占窗口」的同一分母定位——用户应能看见自己在哪。 */}
+                标记按「已用占窗口」的同一分母定位——用户应能看见自己在哪。
+                usage_only 下 used_tokens 是**下界** ⇒ 标记只会偏保守（不高报占用）。 */}
             <div className="ctx-usage-thresholds">
               {([usage.thresholds.auto_compact, usage.thresholds.hard_guard] as const).map(
                 (t, i) => (
@@ -173,17 +192,28 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
             </div>
 
             <div className="ctx-usage-legend">
-              {BUCKETS.map((b) => {
-                const v = b.value(usage);
-                const p = pctOf(v, usage.used_tokens);
+              {segments.map((s) => {
+                const p = pctOf(s.value, usage.used_tokens);
                 return (
-                  <span key={b.key} className="ctx-usage-legend-item">
-                    <span className="ctx-usage-dot" style={{ background: b.colorVar }} />
-                    {b.label} {v.toLocaleString()}（{p.toFixed(1)}%）
+                  <span key={s.key} className="ctx-usage-legend-item">
+                    <span className="ctx-usage-dot" style={{ background: s.colorVar }} />
+                    {s.label} {s.value.toLocaleString()}（{p.toFixed(1)}%）
                   </span>
                 );
               })}
             </div>
+
+            {usage.state === 'usage_only' && (
+              /* 分类缺席时把**为什么**写出来（诚实约束）：否则「未分类 100%」
+                 看起来像我们分类失败，而不是"分类这一次拿不到"。
+                 数字全部来自后端（calls_with_usage），前端不推算。 */
+              <div className="ctx-usage-note">
+                分类未采集：总数取自最近一次调用的输入规模（窗口占用下界）
+                {usage.usage_source
+                  ? `，本会话 ${usage.usage_source.calls_with_usage} 次调用有用量上报`
+                  : ''}
+              </div>
+            )}
 
             <div className="ctx-usage-cache">
               {usage.cache.state === 'not_collected' ? (
