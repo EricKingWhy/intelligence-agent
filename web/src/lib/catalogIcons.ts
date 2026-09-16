@@ -38,8 +38,10 @@ const ICONS = {
 } satisfies Record<string, LucideIcon>;
 
 /** 已知名全集。与后端 `web/app.py::CATALOG_ICON_NAMES` **同集**——跨语言、跨目录的
- *  手工镜像（同 `lib/capabilities.ts::SURFACE_KEYS` 的既有口径），两端各有测试锁，
- *  增名必须一起改。 */
+ *  手工镜像（同 `lib/capabilities.ts::SURFACE_KEYS` 的既有口径）。
+ *  ⚠ 两侧各有一把锁把**自己那份**钉住（后端逐值 + 本文件这条字面量断言），
+ *  **没有**跨端自动校验：单边加一个名，两边测试都还是绿的，只是那一行静默变空槽。
+ *  所以增删名必须手工同步两端（后端集合 + 本映射 + 两边测试）。 */
 export const CATALOG_ICON_NAMES: ReadonlySet<string> = new Set(Object.keys(ICONS));
 
 /** 条目的行首图标；未知名 / 缺键 ⇒ `undefined`（渲染层留空槽，绝不编字形）。 */

@@ -157,8 +157,9 @@ AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
 #: 三个目录端点（/api/permission-modes、/api/reasoning-efforts、/api/agent-profiles）
 #: 的每条内置条目都从本集合里取一个名；前端 `web/src/lib/catalogIcons.ts` 是这些名
 #: → 字形的**唯一**映射处（未知名/缺键 ⇒ 留空槽，不编字形）。
-#: 增删名必须两端一起改（本集合 + 前端映射 + `tests/web/test_web_phase5_staged_endpoints.py`
-#: 的逐值断言）；跨语言、跨目录，改这里不会自动同步过去。
+#: ⚠ 两侧各有一把锁把**自己那份**钉住（本集合 + 前端的字面量断言），**没有**跨端自动
+#: 校验——单边加一个名，两边测试都还是绿的，只是前端那一行静默变空槽。增删名必须手工
+#: 同步两端（本集合 + `web/src/lib/catalogIcons.ts` + 两边测试）。
 CATALOG_ICON_NAMES: frozenset[str] = frozenset({
     "lock", "pencil", "unlock",      # 权限模式：只读 / 工作区写入 / 完全访问
     "layers", "code", "search",      # agent 档位：通用 / 编程 / 研究审查

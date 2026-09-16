@@ -348,27 +348,21 @@ test('#201 冻结行：每行 20px 图标槽恒在，未知名/缺键留空槽�
 });
 
 test('#214：行首字形由条目声明的 icon 名决定（未知名 / 缺键留空槽，不拿 id 猜）', async ({ page }) => {
-  /* #214 的判据全在这条里——它要能区分三种条目，而不是"看起来有图标"：
+  /* 三种条目在**同一个 picker** 里并排，差异只可能来自声明的名：
        ① `icon: 'layers'`（后端内置名）→ 槽里有 svg；
-       ② `icon: 'sparkles'`（前端还不认识的名）→ 空槽（后端可以先行加名，前端不报错、
-          也不编字形）；
-       ③ **同一个 id**（`read-only`，真实 PermissionPolicy 值）但载荷**缺 `icon` 键**
-          （老载荷 / 部署自定义条目）→ 空槽。
-     ③ 是"前端不再按 id 猜"的判定性证据：id 一样，字形有无只看键在不在。 */
+       ② `id: 'read-only'`（**曾经**在"按 id 映射"那张表里的 id）但**缺 `icon` 键**
+          （老载荷 / 部署自定义条目）→ 空槽；
+       ③ `icon: 'sparkles'`（前端还不认识的名）→ 空槽。
+     ② 是判定性证据：同一目录里 `main` 与 `read-only` 两个 id 在旧实现里**都会**命中
+     映射表，现在一个有字形、一个没有 ⇒ 只看键在不在，"不再按 id 猜"这件事才算被锁住。 */
   const PROFILES = [
-    ...AGENT_PROFILES,
-    { id: 'deploy-custom', display_name: '部署档位', description: '带前端不认识的名', icon: 'sparkles' },
+    ...AGENT_PROFILES, // main / coding / research_review，带真实 icon 名
+    { id: 'read-only', display_name: '只读', description: '缺 icon 键（老载荷 / 部署自定义）' },
+    { id: 'deploy-custom', display_name: '部署档位', description: '声明了前端还不认识的名', icon: 'sparkles' },
   ];
-  await routeApi(page, {
-    sessions: [],
-    events: [],
-    // 同一个 id 只换个载荷：真实后端会带 icon（见本文件上一条用例用的是同一份 id 的真载荷）
-    permissionModes: [{ id: 'read-only', display_name: '只读（缺 icon）', description: '老载荷 / 部署自定义' }],
-    agentProfiles: PROFILES,
-  });
+  await routeApi(page, { sessions: [], events: [], agentProfiles: PROFILES });
   await page.goto('/');
 
-  // ①②：同一个 picker 里两种条目并排，槽的差异只来自声明的名
   await pickControl(page, 'Agent Profile', 1, 'Main');
   const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
   await trigger.focus();
@@ -376,20 +370,42 @@ test('#214：行首字形由条目声明的 icon 名决定（未知名 / 缺键�
   await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
   const row = (title: string) => page.locator('.picker-item', { hasText: title }).first();
   await expect(row('Main').locator('.picker-item-icon svg')).toHaveCount(1); // ① layers
-  await expect(row('部署档位').locator('.picker-item-icon svg')).toHaveCount(0); // ② sparkles
+  await expect(row('只读').locator('.picker-item-icon svg')).toHaveCount(0); // ② 缺键
+  await expect(row('部署档位').locator('.picker-item-icon svg')).toHaveCount(0); // ③ sparkles
+  // 空白槽仍占 20px ⇒ 有没有图标都不影响这一行的左对齐
+  const noKeyBox = await row('只读').locator('.picker-item-icon').boundingBox();
+  expect(Math.round(noKeyBox!.width)).toBe(20);
   await page.keyboard.press('Escape');
   await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+});
 
-  // ③ 同一 id（read-only）缺 `icon` 键 → 空槽
-  await pickControl(page, '权限模式', 1, '只读（缺 icon）');
-  const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
-  await permTrigger.focus();
-  await page.keyboard.press('Enter');
-  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
-  const noKeyRow = page.locator('.picker-item', { hasText: '只读（缺 icon）' }).first();
-  await expect(noKeyRow.locator('.picker-item-icon')).toBeAttached();
-  await expect(noKeyRow.locator('.picker-item-icon svg')).toHaveCount(0);
-  // 槽宽不变 ⇒ 有没有图标都不影响这一行的左对齐
-  const noKeyBox = await noKeyRow.locator('.picker-item-icon').boundingBox();
-  expect(Math.round(noKeyBox!.width)).toBe(20);
+test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形', async ({ page }) => {
+  /* 纯函数对 ≠ 界面上有图标：三个调用点（`Composer.tsx` 的权限/档位/推理深度）各自
+     传一次 `catalogIcon`，任何一处漏传都会静默退化成空槽——这条按 picker 逐个断言，
+     顺带覆盖"后端内置名在前端都有对应字形"（名集镜像错位会在这里露出来）。 */
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES, // read-only → lock
+    agentProfiles: AGENT_PROFILES, // main → layers
+    reasoningEfforts: REASONING_EFFORTS, // minimal → bolt
+  });
+  await page.goto('/');
+
+  const cases = [
+    { label: '权限模式', title: '只读' },
+    { label: 'Agent Profile', title: 'Main' },
+    { label: 'Reasoning Effort', title: 'Minimal' },
+  ];
+  for (const { label, title } of cases) {
+    const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+    await expect(
+      page.locator('.picker-item', { hasText: title }).first().locator('.picker-item-icon svg'),
+    ).toHaveCount(1);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+  }
 });

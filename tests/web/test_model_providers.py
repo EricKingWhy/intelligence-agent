@@ -79,6 +79,48 @@ class TestCrudEndpoints:
     def test_delete_missing_is_404(self, client):
         assert client.delete("/api/model-providers/ghost").status_code == 404
 
+    def test_delete_keyless_provider_succeeds(self, tmp_path, monkeypatch):
+        """#215 回归锁（**在端点这一层**，因为它就是在端点上被报出来的）。
+
+        ⚠ 必须用**真实适配器** `SystemCredentialStore`：把 `PasswordDeleteError`
+        转成"删除已满足"（读回确认）的逻辑只住在它里面。夹具默认注入的内存凭据后端
+        的 `delete` 对不存在的条目是宽容的——这正是这条 bug 从既有夹具里溜过去的原因
+        （自造一个 Memory 子类也不行：那等于绕过被改的那一层）。
+
+        只 monkeypatch keyring 的三个函数，**不碰真实凭据管理器**：`set_password`
+        直接抛错 ⇒ 任何"偷偷写系统级存储"的回归当场红（本批 REVIEW 时真的踩到过
+        一次 sk-test 残留）。
+        """
+        import keyring
+        from keyring.errors import PasswordDeleteError
+
+        def _no_write(service, provider_id, password):
+            raise AssertionError("用例不得向真实凭据后端写入任何东西")
+
+        def _delete_raises(service, provider_id):
+            # WinVault 的形态：删一条不存在的凭据抛 PasswordDeleteError
+            raise PasswordDeleteError("no such password")
+
+        monkeypatch.setattr(keyring, "set_password", _no_write)
+        monkeypatch.setattr(keyring, "delete_password", _delete_raises)
+        monkeypatch.setattr(keyring, "get_password", lambda service, provider_id: None)
+
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            model_provider="deepseek", model_name="deepseek-chat",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+        )
+        app = create_app(settings, enable_cors=False)
+        assert type(app.state.agent.provider_store.credentials).__name__ == "SystemCredentialStore"
+        client = TestClient(app)
+
+        assert client.post("/api/model-providers", json=_body(api_key=None)).status_code in (200, 201)
+        resp = client.delete("/api/model-providers/my-proxy")
+        assert resp.status_code == 200, resp.text
+        assert client.get("/api/model-providers").json()["providers"] == []
+        # 残留会污染目录（#215 的实测现象：3 条内置目录断言变红）——这里顺带锁上
+        assert not any("my-proxy" in m["name"] for m in client.get("/api/models").json()["models"])
+
 
 # ── T2：无密钥回显 ───────────────────────────────────────────────────
 

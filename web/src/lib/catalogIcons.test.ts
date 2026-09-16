@@ -31,7 +31,10 @@ describe('catalogIcon（#214：后端声明的语义名 → 字形）', () => {
     expect([...CATALOG_ICON_NAMES].sort()).toEqual([
       'bolt', 'code', 'gauge', 'layers', 'lock', 'pencil', 'search', 'telescope', 'unlock',
     ]);
-    // 集合里的每个名都必须真的映射出字形——否则"后端声明了名、前端给空槽"会静默发生
-    for (const name of CATALOG_ICON_NAMES) expect(catalogIcon(name)).toBeDefined();
+    // 上面那串字面量里的每个名都必须真的映射出字形。**遍历字面量而不是遍历集合**：
+    // 集合就是 `Object.keys(ICONS)`，遍历它恒真、发现不了任何东西（写错过一版）。
+    for (const name of ['bolt', 'code', 'gauge', 'layers', 'lock', 'pencil', 'search', 'telescope', 'unlock']) {
+      expect(catalogIcon(name)).toBeDefined();
+    }
   });
 });

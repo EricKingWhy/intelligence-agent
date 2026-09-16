@@ -27,6 +27,7 @@ import { Shield, TriangleAlert, X } from 'lucide-react';
 import type { CatalogEntry } from '../lib/api';
 import type { Project } from '../types';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
+import { catalogIcon } from '../lib/catalogIcons';
 
 /** 默认权限档——与后端 `web/app.py::CreateSessionRequest.permission_mode` 的默认值
  *  同名同义（workspace-write + auto-approve）。它只作为**本地选中态**，不发进请求体：
@@ -146,7 +147,7 @@ function StartTaskForm({
           <OptionPicker
             ariaLabel="权限模式"
             title="工具调用如何批准？"
-            options={toCatalogOptions(permissionModes)}
+            options={toCatalogOptions(permissionModes, catalogIcon)}
             value={mode}
             onChange={(id) => setMode(id ?? DEFAULT_PERMISSION_MODE)}
             icon={Shield}

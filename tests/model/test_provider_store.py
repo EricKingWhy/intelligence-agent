@@ -159,41 +159,58 @@ def test_delete_aborts_when_credential_delete_fails(store: ProviderStore):
     assert [e["id"] for e in store.list_entries()] == ["my-proxy"]
 
 
-# ── #215：无 key 的供应商必须能删掉；keyring **真故障**仍必须中止 ─────
+# ── #215：无 key 的供应商必须能删掉；凭据**还在**时仍必须中止 ─────────
 #
-# 这两条锁的是同一行代码的两侧（`SystemCredentialStore.delete` 的异常分流）：
-# keyring 用 `PasswordDeleteError` 表达"这条凭据不存在"，把它并进 KeyringError
-# 会让 `ProviderStore.delete`（D6：先删凭据、异常即中止）在**无 key 的供应商**
-# 上永远中止——而"无 key"正是新建供应商的默认状态（#215 的实测现象）。
-# 只用 monkeypatch 换掉 keyring 那一次调用，不碰 store 的其余真实对象，
-# 因此判据与"本机 keyring 后端是否可用"无关。
+# 判定用"读回确认"而不是"异常类"：`PasswordDeleteError` 的库定义是"删不掉"，不是
+# "不存在"（keyring/errors.py + backend.py::delete_password 的"后端不支持删除"）。
+# 这两条把两侧都钉住，且**不碰真实凭据管理器**：
+#   - keyring 的三个函数全部 monkeypatch（含 `set_password` 直接抛错 ⇒ 任何"偷偷写
+#     真实凭据管理器"的回归都会当场红，而不是留下一条 sk-test 残留）；
+#   - 用例里不出现带 key 的 `create`：那会真写系统级存储（`tests/web/test_model_providers.py`
+#     顶部已登记过这个坑：'实测 my-proxy 残留'）——本批 REVIEW 时真的踩到过一次。
 
 
 def test_delete_keyless_provider_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """#215 现象：新建（不填 key）后删除必须成功，且一个字节都不许写进凭据后端。"""
     import keyring
     from keyring.errors import PasswordDeleteError
 
-    def _missing(service: str, provider_id: str) -> None:
+    def _no_write(service: str, provider_id: str, password: str) -> None:
+        raise AssertionError("用例不得向真实凭据后端写入任何东西")
+
+    def _delete_fails_but_absent(service: str, provider_id: str) -> None:
+        # WinVault 的形态：删一条不存在的凭据时抛 PasswordDeleteError
         raise PasswordDeleteError("no such password")
 
-    monkeypatch.setattr(keyring, "delete_password", _missing)
+    monkeypatch.setattr(keyring, "set_password", _no_write)
+    monkeypatch.setattr(keyring, "delete_password", _delete_fails_but_absent)
+    monkeypatch.setattr(keyring, "get_password", lambda service, provider_id: None)
+
     store = ProviderStore(tmp_path / "p.json", SystemCredentialStore())
     store.create(_body(api_key=None))  # 不填 key（= 新建供应商的默认状态）
     store.delete("my-proxy")
     assert store.list_entries() == []
 
 
-def test_delete_aborts_when_keyring_backend_fails(tmp_path: Path,
-                                                  monkeypatch: pytest.MonkeyPatch):
+def test_delete_aborts_when_credential_survives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """反向：删除报错**且读回还在** ⇒ 必须中止、配置保持原样（D6 的孤立密钥窗口为零）。
+
+    这条是"按异常类放行"那个错误修法的证伪点：那时删不掉也会被当成功，配置先删、
+    密钥留在钥匙串里。
+    """
     import keyring
-    from keyring.errors import KeyringError
+    from keyring.errors import PasswordDeleteError
 
-    def _broken(service: str, provider_id: str) -> None:
-        raise KeyringError("backend down")
+    def _delete_fails(service: str, provider_id: str) -> None:
+        raise PasswordDeleteError("backend refused")
 
-    monkeypatch.setattr(keyring, "delete_password", _broken)
+    monkeypatch.setattr(keyring, "set_password", lambda s, p, pw: None)
+    monkeypatch.setattr(keyring, "delete_password", _delete_fails)
+    # 读回拿得到值（仍是 `sk-test` 前缀的假 key，不打印）⇒ 凭据还在
+    monkeypatch.setattr(keyring, "get_password", lambda s, p: "sk-test-still-there")
+
     store = ProviderStore(tmp_path / "p.json", SystemCredentialStore())
-    store.create(_body())  # 带 key：凭据确实存在，删不掉就不能删配置
+    store.create(_body())  # 带 key 的创建走的是被 monkeypatch 的空写入，不落真实后端
     with pytest.raises(CredentialError):
         store.delete("my-proxy")
     assert [e["id"] for e in store.list_entries()] == ["my-proxy"]

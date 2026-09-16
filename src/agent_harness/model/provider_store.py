@@ -145,19 +145,25 @@ class SystemCredentialStore(Credentials):
 
     def delete(self, provider_id: str) -> None:
         import keyring
-        from keyring.errors import KeyringError, PasswordDeleteError
+        from keyring.errors import KeyringError
 
         try:
             keyring.delete_password(CREDENTIAL_SERVICE, provider_id)
-        except PasswordDeleteError:
-            # **本来就没有这条凭据**（新建供应商默认不填 key、或已被手工清过）——
-            # 删除的语义已经满足，不是失败。keyring 用这个异常类表达"该条目不存在"，
-            # 所以必须单独接住：混进下面的 `KeyringError` 会让 `ProviderStore.delete`
-            # （D6：先删凭据、异常即中止）在**无 key 的供应商**上永远中止 ⇒ 条目留在
-            # 盘上删不掉（#215），而"无 key"恰是新建供应商的默认状态。
-            return
         except KeyringError as error:
-            raise CredentialError(f"凭据删除失败: {type(error).__name__}") from error
+            # ⚠ **不能按异常类放行**：`PasswordDeleteError` 的库定义是"**删不掉**"
+            # （`keyring/errors.py`：`Raised when the password can't be deleted`，
+            # 基类 `backend.py::delete_password` 的"后端不支持删除"也走它）——后端拒绝、
+            # 钥匙串删失败、kwallet 用户取消解锁都会落在这里；WinVault 只是**恰好**把
+            # "本来就没有这条"也算进同一个异常。按类放行 = 在这些后端上把真失败当成功、
+            # 接着删掉配置 ⇒ 正是 D6 要消灭的"孤立可用密钥"。
+            #
+            # 所以改为**读回确认**：凭据确实不在了才算"删除的语义已满足"（#215：新建
+            # 供应商默认不带 key，那时必须能删掉）；还在 ⇒ 仍按 D6 中止。
+            # 残留（如实记）：读也失败的后端上 `get` 按既有的诚实降级返回 None
+            # （见上面 `get` 的注释），此时无法区分"没有"与"读不到"——那种状态下这条
+            # 凭据也读不出来，不构成"可用"的孤立密钥，与读侧同一口径。
+            if self.get(provider_id) is not None:
+                raise CredentialError(f"凭据删除失败: {type(error).__name__}") from error
 
 
 class ProviderStore:
