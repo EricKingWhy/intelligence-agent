@@ -255,4 +255,126 @@ DELETE cb7326c7 → 200
 - **抓请求必须匹配 `/api/`**（走 vite 代理），匹配上游 host 会静默零命中（§0）。
 - **"零点击恢复"要真的不点**：reload 后直接读 DOM；先点一下再读会把
   "恢复"验成"点击能选中"，两者不是一回事。
-- 想看**真实失败原因**：读后端 stdout 的结构化日志；界面上按设计只有错误类型名（F1）。
+- 想看**真实失败原因**：先看界面（#220 之后分类失败会在 Overview 的「失败原因」行 +
+  Timeline 摘要里出现），再读后端 stdout 的结构化日志；**未分类失败**目前两边都可能没有，见 §6.3 F5。
+
+---
+
+## 6. Round 2 巡检（同一夜续做：控件遍历 + 真失败复核）
+
+**方法**：真浏览器（Playwright 驱动真 Chrome）对着**真后端**逐个点控件；每一步取
+「点击前/后快照」（`data-density` / `data-theme` / `localStorage` / 会话条目数 / 正文长度 /
+页签选中态 / 对话框数 / 当前焦点），所以「点了没反应」是**测出来的**，不是看着像。
+用户数据只读：只在**新建的探针会话**里写入，结束时按 id **精确**删除并核对基线（32 → 33 → 32）。
+
+### 6.1 实测正常（本轮新增）
+
+| # | 验的什么 | 结果 |
+| --- | --- | --- |
+| 6.1.1 | 密度四档（紧凑/均衡/详细/Raw） | 四档都生效：`data-density` 与 `localStorage.ahi.traceDensity` 同步变 |
+| 6.1.2 | 主题切换 | `data-theme` dark↔light 往复，持久化到 `ahi.theme` |
+| 6.1.3 | 收起 / 展开 Inspector | 正文长度 1947↔1927，按钮 aria-label 同步切换 |
+| 6.1.4 | 记忆管理 / API 令牌设置 / 新建项目 | 三个面板都能开、都能关（Esc 或「关闭」）；打开时的请求符合预期 |
+| 6.1.5 | 项目 ⋯ 菜单 | 能开、Esc 能关 |
+| 6.1.6 | 显示 / 隐藏已归档会话 | `localStorage.ahi.showArchived` 1↔0 |
+| 6.1.7 | 工作区三页签 + Inspector 四页签 | 全部切换正确；`Timeline280` / `Changes1` / `Terminal1` / `Artifacts2` 的数字与实际内容对得上（Overview 19 行 detail-row、Artifacts 6 行） |
+| 6.1.8 | composer 四个选择器（模型 / 权限 / Agent Profile / Reasoning） | 都能开、都能 Esc 关；关闭后配置**未被改动**（storage 快照无差异）；权限模式四项文案逐字可读 |
+| 6.1.9 | **刷新一致性（用户点名）** | 打开 280 事件会话 → 取正文 + DOM 结构哈希 → `reload()` → **正文逐字相同、结构哈希相同、0 次点击**，`ahi.selectedSession` 自动回到同一会话 |
+| 6.1.10 | 会话 ⋯ 菜单条目 | 加入项目… / 新建项目… / 归档 / 删除会话…（四项齐全） |
+| 6.1.11 | 删除会话流程 | 确认框把后果说清（硬删除 / 不可恢复 / 项目只解除不删目录）；删完转结果态（「已永久删除 4 条事件记录」+「完成」），Esc 也能关；删完视图正确回到空状态、`ahi.selectedSession` 置 null |
+| 6.1.12 | 控制台 | 全程零 JS 错误（唯一 404 是浏览器默认探的 `/favicon.ico`，见 F7） |
+
+### 6.2 被证伪的怀疑（如实记录，避免下次重复怀疑）
+
+- **「删完会话界面就点不动了」——错。** 删除确认后去点页签被 `.palette-overlay` 拦住，
+  看上去像"死界面"。逐帧取几何后看清：确认框**自己转成了结果态**（`z=51`、可见、
+  带「完成」按钮），模态遮罩照常拦背后的点击——这是**模态的正确行为**，不是卡死；
+  Esc /「完成」之后一切正常。误判源于我的选择器只认 `/确认|删除/`，没把「完成」算进去。
+- **「记忆面板 503 会谎报为空」——错。** 面板如实显示「记忆未启用」并把后端 `detail` 原样带出；
+  503 本身是**设计内降级**（`capability 'memory' 初始化失败，按 OPTIONAL_RUNTIME 降级跳过`，
+  不变量 #21）。但它的**措辞**会误导，见 F8。
+
+### 6.3 本轮发现
+
+#### F5 — 真实 run 失败时，**界面与会话事件流都没有原因**（P1；后端为主）
+
+**现象**（真机实跑）：发一条消息，44s 内 run 变「失败」，而：
+
+- 运行徽标 `失败`；无 `.app-error` 条（run 失败不是投递失败，符合设计）；
+- Inspector `Timeline` 末几行只有 `只回复：收到` 与空行，**没有失败摘要**；
+- 切到 `Overview`：`状态 失败 / 轮次 1 / 耗时 4.1s / tokens — …`，**没有「失败原因」行**，
+  `.run-failure-val` 元素数为 **0**；
+- 对话区只有 `第 1 轮 只回复：收到 编辑 分叉`；
+- 页面全文**不含** `ProxyError`，也不含 `model call failed`。
+
+**会话自己的事件流**（`GET /api/sessions/{id}/events`，同源 fetch）：
+
+```
+0 session/started {...}
+1 user/message    {"content":"只回复：收到"}
+2 run/started     {"turn_index":1,"agent_profile":"main"}
+3 run/failed      {"trace_id":"11ebf194…","trace_url":null}   ← 没有 reason，也没有 message
+```
+
+**没有 `model/failed`**——原因在**持久历史里也不存在**，只活在后端进程日志。
+
+**归因（代码级）**：`src/agent_harness/agent/runtime.py`
+
+- 失败臂只在**模型调用在途**（`terminal.model_call_open`）时才做归因分类；本轮失败发生在
+  **更早的阶段**——tiktoken 取 `cl100k_base` 词表要走网络
+  （`openaipublic.blob.core.windows.net`），而本机代理不可达 ⇒ `ProxyError` ⇒ run 死在
+  「准备上下文 / 数 token」这一步，此时 `model_call_open` 仍为 `False`；
+- 于是 `failure_terminal(reason=None, message=None)` ⇒ `run/failed` 两个键都不写；
+  `close_observability` 因同一条件**不写 `model/failed`**；
+- 即便是在途失败，**未分类**异常（网络/超时等）同样 `reason=None` ⇒ 界面依旧只有「失败」。
+
+**影响**：#218 + #220 的成果对"最常见的失败模式"（模型侧网络/依赖不可达）**失效**——用户看到的
+还是两个字，且这次连事件流里都没有线索。既是**可归因性**缺口，也是**可观测/历史保真**缺口
+（失败的 run 在 durable 历史里记不出为什么）。
+
+#### F6 — 在「文件/改动」或「输出」页签上点「新建会话」，用户被留在无法输入的状态（P3；前端）
+
+工作区停在「输出」页签时点「新建会话」：页签仍是「输出」，`#composer-input` 在 DOM 里但
+**不可见**（composer 属于 Chat 面板），会话数不变（设计如此：空状态在发送时才建会话）⇒
+整屏**没有任何"新建会话"的反馈**、也没有输入框——正是"点了没反应"。切回 Chat 才有输入框。
+**归因**：前端（新建会话没有把工作区切回 Chat）。修法有产品取舍：切页签，或让 composer 不绑页签。
+
+#### F7 — 每次加载一条 `/favicon.ico` 404（P3；前端，装饰性）
+
+`web/index.html` 未声明任何 icon、`web/public/` 只有 `icons.svg` ⇒ 浏览器默认探
+`/favicon.ico` 得 404（本轮抓到 URL 与来源，不再是"某处 404"）。零功能影响，但每次开控制台都是噪声。
+
+#### F8 — 记忆面板的 503 把「配置缺失」与「初始化失败」混为一谈（P3；后端措辞，前端忠实渲染）
+
+`GET /api/memories` → 503，`detail = "memory capability 未启用：请在 CAPABILITIES 中配置 memory。"`；
+面板据此显示「记忆未启用」+「**这是配置状态而非故障**」。而真实原因是
+`capability 'memory' 初始化失败，按 OPTIONAL_RUNTIME 降级跳过：VectorStoreError('Memory vector store: unavailable')`
+——**是故障**（向量库连不上），不是"没配置"。**归因**：`web/memory.py::_capability()` 只在
+`wiring.memory is None` 上判一次，而 `wire_capabilities` 把"没配"与"配了但初始化失败"都塌成
+`wiring.memory is None`，**降级原因没有结构化留存**（只进日志）。前端是忠实渲染后端那句话的，
+所以修点在后端给原因，必要时前端再按原因分文案。
+
+### 6.4 由本轮巡检开出的工单
+
+| 票 | 级别 | 一句话 | 归因 |
+| --- | --- | --- | --- |
+| [#222](https://github.com/EricKingWhy/intelligence-agent/issues/222) | **P1** | run 失败时事件流里没有任何原因（`run/failed` 无 reason/message；不在模型调用窗口内的失败连 `model/failed` 都不写） | 后端 |
+| [#223](https://github.com/EricKingWhy/intelligence-agent/issues/223) | P3 | 在「文件/改动」/「输出」页签上点「新建会话」零反馈，composer 不可见 | 前端 |
+| [#224](https://github.com/EricKingWhy/intelligence-agent/issues/224) | P3 | 每次加载一条 `/favicon.ico` 404（`index.html` 未声明 icon） | 前端 |
+| [#225](https://github.com/EricKingWhy/intelligence-agent/issues/225) | P3 | `/api/memories` 的 503 把「没配置」与「初始化失败」混为一谈 | 后端措辞（前端忠实渲染） |
+
+**为什么 #222 这一夜没有当场修**（如实写，避免下一位以为"忘了"）：
+
+1. **它要动一条被两条测试显式钉住的合同**——`tests/agent/test_runtime_failure_paths.py` 的
+   `test_unclassified_failure_keeps_type_only_terminal` 与 `test_tool_phase_error_with_marker_not_misclassified`
+   都断言 `run/failed` **不落** `reason`/`message` 键，合同写作"缺省 = 模型/执行器异常"，
+   并把"用户怎么知道原因"交给 `model/failed.message`（类型名）。改它属于**合同变更**，
+   该走 ADR/票面决策，不该在半夜顺手改掉（§9.1）。
+2. **本机此刻跑不到那条路径做验证**：代理不可达 ⇒ tiktoken 取词表先炸 ⇒ run 死在
+   上下文准备阶段，**根本进不了模型调用窗口**。此时改前端"投影 `model/failed.message`"
+   也无法真机证明（那需要一次窗口内的失败）。**没有验证手段的改动不上**。
+
+两条**已确证**的边界事实（留给修 #222 的人，省一次摸索）：窗口内未分类失败 → `model/failed.message
+= "model call failed: <TypeName>"`（本机实测 `RuntimeError` 路径单测已覆盖）；窗口**外**失败 →
+`model/failed` **一条都没有**，类型名只在进程日志里。
+
