@@ -6054,9 +6054,13 @@ button.json-row {
   cursor: default;
 }
 /* #199：整组不可用的 provider（一级行）。**不用 opacity**：半透明会把正文与背景
-   一起压暗，对比度变得不可预测（亮色主题首当其冲，t-contrast.spec 会抓）。
+   一起压暗，对比度变得不可预测（亮色主题首当其冲）。
    改用既有的 `--text-tertiary`——描述行本来就用它，说明它在两套主题下都是
    "可读但退后一档"的语义色，§15 无需新增 token。
+   ⚠ 本组合（tertiary on 弹层底）**不**被 `e2e/t-contrast.spec.ts` 覆盖：那里锁的是
+   会话元数据 / 时间线序号 / placeholder / 三处 ink 元素的对比度，选择器里没有
+   `.picker-item*`。这里敢用它的理由是"与既有的 `.picker-item-desc` 同色同底"，
+   不是"对比度已被测得"——要立新锁得把这两行加进那份清单（另一张票）。
    ⚠ 置灰 ≠ 禁用：这一行仍可展开、可键盘到达（用户看得到里面有什么模型；
    能不能用由"选了之后后端怎么回"决定，前端不替后端下判断）。 */
 .picker-item[data-unavailable="true"] .picker-item-title {
@@ -6066,7 +6070,7 @@ button.json-row {
 .picker-item[data-unavailable="true"] .picker-item-desc {
   color: var(--text-tertiary);
 }
-/* 行尾原因（「未配置 API Key」/「未配置」）：一行小字，不抢标题。 */
+/* 行尾原因（「未配置 API Key」/「不可用」）：一行小字，不抢标题。 */
 .picker-item-note {
   flex-shrink: 0;
   font-size: var(--text-xs);

@@ -172,10 +172,12 @@ test('#199：不可用 provider 置灰但仍可展开 + 行尾原因 + 能力徽
   // 置灰不改变"还能展开"这件事：行尾的 `▸` 被原因挤掉了，但 aria-haspopup 仍在
   await expect(customRow).toHaveAttribute('aria-haspopup', 'menu');
 
-  // ② 未知原因码 ⇒ 回落「未配置」，**不**把机器码打给用户
+  // ② 未知原因码 ⇒ 回落「不可用」（**不是**「未配置」：那是具体诊断，我不知道是不是
+  //    没配置），也**不**把机器码打给用户
   const weirdRow = providerRow('weird');
   await expect(weirdRow).toHaveAttribute('data-unavailable', 'true');
-  await expect(weirdRow).toContainText('未配置');
+  await expect(weirdRow).toContainText('不可用');
+  await expect(weirdRow).not.toContainText('未配置');
   await expect(weirdRow).not.toContainText('some_future_code');
 
   // ③ 部分不可用（mixed：一个可用一个没有 key）⇒ **不许**整组置灰
@@ -190,6 +192,9 @@ test('#199：不可用 provider 置灰但仍可展开 + 行尾原因 + 能力徽
   await expect(subRows.first()).toContainText('custom:gpt-x');
   // 二级行自己也带不可用标记（组内可能只有部分不可用，所以它必须独立判定）
   await expect(subRows.first()).toHaveAttribute('data-unavailable', 'true');
+  // **且行尾也要写出原因**——只靠颜色区分的话，色觉障碍/截图里这一行就退化成
+  // "和别的一样"，而"为什么不能用"正是这一行要回答的（批 2 Standards 轴 P2）
+  await expect(subRows.first()).toContainText('未配置 API Key');
 
   // ⑤ 能力徽标：只在后端声明为 true 时出现，且**按条**而不是按 provider
   await providerRow('zhipu').hover();

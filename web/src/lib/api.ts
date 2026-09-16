@@ -498,9 +498,13 @@ export async function postApproval(
  *  思考能力不进元数据（显示侧由 reasoning 事件族驱动，有则显示无则不显示）。
  *
  *  #199 加法：`isAvailable` / `unavailableReason` / 三个能力位。#203 已把
- *  `is_available` 做成**真实判定**（有凭据 ⇒ true）并给出 `unavailable_reason`
- *  机器码（`provider_store.py:237-244`：`credential_unavailable` / `missing_api_key`）；
+ *  `is_available` 做成**真实判定**并给出 `unavailable_reason` 机器码
+ *  （`provider_store.py:237-244`：`credential_unavailable` / `missing_api_key`）；
  *  能力位只在后端**声明过**时才出现（未声明的键后端不返回，前端记 null = 不猜）。
+ *
+ *  ⚠ `is_available` 的真实性**有边界**：只有**自定义供应商**条目是按凭据真判
+ *  （`app.py:1044-1093`）；内置 preset / catalog 条目恒 `true`。所以"不可用"这一态在
+ *  默认部署（没配任何自定义供应商）里根本不会出现——UI 实现了它，不等于默认部署能看到。
  */
 export interface ModelCatalogEntry {
   name: string;
@@ -509,9 +513,10 @@ export interface ModelCatalogEntry {
   default: boolean;
   /** 已配置语义（有凭据 ⇒ true），不是网络可达（ADR-0032 D5）。
    *
-   *  ⚠ 类型上**可选**，判定必须用 `modelAvailability.ts::isUnavailable`
-   *  （= `=== false`）：缺字段是"后端没说"（旧载荷 / 测试夹具），把没说当成
-   *  "不可用"会把整份目录渲染成灰色。真载荷经 `getModels` 解析后恒有值。 */
+   *  ⚠ 类型上**可选**且是**三态**（true / false / 缺失=后端没说），判定必须用
+   *  `modelAvailability.ts::isUnavailable`（= `=== false`）：把"没说"当成"不可用"
+   *  会把整份目录渲染成灰色。`getModels` 解析后**键恒存在**、值可能是 `undefined`
+   *  （后端没给）——这正是三态要区分的那一态，别用 `!== false` 把它压成 `true`。 */
   isAvailable?: boolean;
   /** 机器码（`credential_unavailable` / `missing_api_key`）；无 ⇒ null。
    *  前端只在行尾给一句短文案（映射见 `lib/modelAvailability.ts`）。 */
@@ -543,8 +548,11 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
         provider: typeof r.provider === 'string' ? r.provider : null,
         model: typeof r.model === 'string' ? r.model : null,
         default: r.default === true,
-        // 只在后端明确说 false 时才不可用；缺字段（旧载荷）记 true（见类型注释）。
-        isAvailable: r.is_available !== false,
+        // 三态，与 `supports_*` 同一条纪律：true / false / **缺失=undefined**。
+        // `!== false` 会把"后端没说"和"后端说 true"压成同一个值——那是伪造。
+        // 判定侧唯一入口是 `modelAvailability.ts::isUnavailable`（= `=== false`），
+        // 所以 undefined 落进"可用"那一支的行为不变，但类型不再说谎。
+        isAvailable: typeof r.is_available === 'boolean' ? r.is_available : undefined,
         unavailableReason:
           typeof r.unavailable_reason === 'string' && r.unavailable_reason
             ? r.unavailable_reason

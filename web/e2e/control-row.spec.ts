@@ -279,16 +279,16 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   await expect(foot).toHaveCount(0);
   await closePicker();
 
-  // ② 被收窄的档位（编程 = coding，12/17）⇒ 逐字给出那句话
+  // ② 被收窄的档位（编程 = coding，12/17）⇒ 逐字给出那句话（**声明**口径）
   await pickControl(page, 'Agent Profile', 2, 'Coding');
   await openPicker();
   await expect(foot).toBeVisible();
-  await expect(foot).toHaveText('该档位只开放 12 个工具（共 17 个）');
+  await expect(foot).toHaveText('该档位声明开放 12 个工具（全部档位声明 17 个）');
   // hover 提示只列名字、不解释原因（设计稿：「只说事实，不解释原因」）。
   // `title` 挂在文案 span 上（`.picker-foot` 是容器槽位——调用方可能放别的东西，
   // 那个槽位本身不该被强行赋予一个 title 语义）。
   const note = foot.locator('span[title]');
-  await expect(note).toHaveAttribute('title', /^未开放：/);
+  await expect(note).toHaveAttribute('title', /^Coding未声明开放：/);
   await expect(note).toHaveAttribute('title', /delegate/);
   await expect(note).toHaveAttribute('title', /web_search/);
   await closePicker();

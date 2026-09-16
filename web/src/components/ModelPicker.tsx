@@ -174,12 +174,17 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
                       {items.map((m) => {
                         const isSelected = effectiveSelectedModel === m.name;
                         const badges = capabilityBadges(m);
+                        // 行尾的不可用原因**必须写出来**，不能只靠置灰：颜色是唯一
+                        // 区别的话，色觉障碍 / 打印 / 截图里这一行就退化成"和别的
+                        // 一样"，而用户要的是"为什么不能用"。一级行同理（见上）。
+                        const unavailable = isUnavailable(m);
+                        const reason = unavailable ? reasonLabel(m.unavailableReason) : null;
                         return (
                           <Menu.RadioItem
                             key={m.name}
                             value={m.name}
                             className="picker-item"
-                            data-unavailable={isUnavailable(m) ? 'true' : undefined}
+                            data-unavailable={unavailable ? 'true' : undefined}
                             // 不可用的模型仍然可点：后端会给出明确失败（provider_store
                             // 的凭据错误），前端在这里**不替后端 decide**。点击后的失败
                             // 由既有的错误通路呈现，语义比"点了没反应"清楚。
@@ -189,8 +194,11 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
                               description={modelMeta(m)}
                               selected={isSelected}
                               trailing={
-                                badges.length > 0 ? (
+                                reason || badges.length > 0 ? (
+                                  // 复用同族的行尾簇容器（flex + gap）装"原因 + 徽标"，
+                                  // 两者可以同时在：不可用与能力各自是事实。
                                   <span className="picker-badges">
+                                    {reason ? <span className="picker-item-note">{reason}</span> : null}
                                     {badges.map((b) => (
                                       <span key={b.key} className="picker-badge">
                                         {b.label}

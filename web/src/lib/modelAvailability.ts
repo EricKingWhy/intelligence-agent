@@ -19,18 +19,24 @@ export interface CapabilityBadge {
 
 /** 某些 `unavailable_reason` 机器码的短文案。
  *
- * ⚠ 这是**已知码的翻译表**，不是"可用性判定"：判定只有后端做。未知码一律回落
- * 「未配置」（设计稿 §3 的原话："无 reason 显示「未配置」"）——**绝不把机器码
- * 原样打给用户**（`missing_api_key` 不是给用户看的），也**绝不根据码去猜一个
- * 原因**（后端将来加一个码，这里显示的是一句保守的实话，而不是一句编造的解释）。
- * 新增码时同步这张表；对不上的表现是"文案变保守"，不是"文案变错"。 */
+ * ⚠ 这是**已知码的翻译表**，不是"可用性判定"：判定只有后端做。**绝不把机器码原样
+ * 打给用户**（`missing_api_key` 不是给用户看的），也**绝不根据码去猜一个原因**
+ * （后端将来加一个码，这里显示的是一句保守的实话，而不是一句编造的解释）。
+ * 新增码时同步这张表。 */
 const REASON_LABELS: Record<string, string> = {
   missing_api_key: '未配置 API Key',
   credential_unavailable: '凭据不可用',
 };
 
-/** 未配置 / 说不清原因时的统一短文案（设计稿 §3 的回落值）。 */
+/** 说不出原因时的兜底短文案。
+ *
+ * 为什么不是「未配置」（批 2 Spec 轴 P2）：**未知机器码**与**没有原因**是两件事，
+ * 都渲染成「未配置」等于向后端的**未知**故障贴一个具体诊断——恰恰是这张表自己
+ * 立下的规矩（不猜原因）的反面。所以：
+ *   - 没有 reason（`null`/空）= 后端没说 ⇒ 「未配置」（那一档确实是"没配好"）；
+ *   - 有 reason 但不认识 ⇒ 「不可用」（只说"用不了"这件确定的事，不解释为什么）。 */
 export const UNCONFIGURED_LABEL = '未配置';
+const UNKNOWN_REASON_LABEL = '不可用';
 
 /** 单条模型是否不可用——**唯一判据**：只有后端明确说 `false` 才算。
  *
@@ -44,7 +50,7 @@ export function isUnavailable(m: ModelCatalogEntry): boolean {
 /** `unavailable_reason` → 行尾短文案。 */
 export function reasonLabel(reason: string | null | undefined): string {
   if (!reason) return UNCONFIGURED_LABEL;
-  return REASON_LABELS[reason] ?? UNCONFIGURED_LABEL;
+  return REASON_LABELS[reason] ?? UNKNOWN_REASON_LABEL;
 }
 
 /** 一个 provider 组的可用性。

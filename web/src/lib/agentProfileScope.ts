@@ -8,12 +8,27 @@
  * vitest 能直测（本仓 vitest 是 SSR、弹层内容断言不了，交互只能靠 playwright；
  * 但"该说什么话"这件事不该既依赖后端又依赖浏览器）。弹层里只做渲染。
  *
+ * ## 措辞为什么是「声明开放」而不是「开放」（批 2 Spec 轴 P1 结论）
+ *
+ * 设计稿里那句话原本写作「该档位只开放 N 个工具（共 M 个）」。**这个说法在真机上是
+ * 假的**：`tool_scope` 数的是**声明的工具面**，而本部署实际注册的工具是另一个集合，
+ * 两个方向都会差——
+ *   - 声明里有、本部署没注册：默认部署（`CAPABILITIES=""`）只注册 9 个内置工具，
+ *     `research_review` 声明的 `retrieve_knowledge` / `web_search` 不在其中 ⇒
+ *     "只开放 7 个"是高报（实测真值 5）；
+ *   - 注册了、但不在任何声明里：本地 artifact 存储下 `read_artifact` 会被收窄掉，
+ *     却不在 `excluded` 里（声明面只声明了 `inspect_artifact`）。
+ * 两个数都不是"你现在有多少工具"。所以文案改成**声明口径**（「声明开放 N 个工具
+ * （全部档位声明 M 个）」）——它逐字为真，且仍然完成用户要的那件事：让用户看见
+ * "选了这个档位，工具面被收窄了"。算真值需要在会话上下文里数收窄前后的 registry
+ * （`assembly.py:277-287` 的 `dropped_tools`），属另一张票。
+ *
  * 口径（三条都与后端对齐，抄在这里方便复核）：
  *   - 数字来自 `GET /api/agent-profiles` 的 `tool_scope`（后端 `tool_scope_summary`）；
  *   - 后端**没给** `tool_scope`（老部署 / 夹具没带）⇒ 返回 null，不显示——宁可不提示，
  *     也不编一个数；
  *   - `excluded` 为空（该档位没被收窄，例如「通用」）⇒ 也返回 null：
- *     「共 17 个中开放 17 个」只是噪音，用户没被收窄就没有事实要披露。
+ *     「声明 17 个中开放 17 个」只是噪音，用户没被收窄就没有事实要披露。
  */
 
 import type { CatalogEntry } from './api';
@@ -29,9 +44,11 @@ export const MAX_LISTED_TOOLS = 6;
 export const DEFAULT_PROFILE_ID = 'main';
 
 export interface ToolScopeNote {
-  /** footer 那一行文字（逐字对应设计稿 §4）。 */
+  /** footer 那一行文字（声明口径，见文件头）。 */
   text: string;
-  /** hover/聚焦时的 `title`：被收窄掉的工具名（最多 6 个 + 「…」）。 */
+  /** hover/聚焦时的 `title`：**哪个档位** + 被收窄掉的工具名（最多 6 个 + 「…」）。
+   *  带档位名是为了让归属无歧义：footer 描述的是**当前生效档位**，而列表里高亮的那
+   *  一行可能是别的档位（鼠标移动即高亮），只说「未开放：…」会让人以为是高亮那一行。 */
   title: string;
 }
 
@@ -54,9 +71,11 @@ export function toolScopeNote(
   const listed = scope.excluded.slice(0, MAX_LISTED_TOOLS);
   const more = scope.excluded.length > listed.length;
   return {
-    text: `该档位只开放 ${scope.open} 个工具（共 ${scope.total} 个）`,
+    // 声明口径：这批数**不是**"你现在有 N 个工具"（见文件头）。
+    text: `该档位声明开放 ${scope.open} 个工具（全部档位声明 ${scope.total} 个）`,
     // 只列名字、不加解释——设计稿明说"只说事实，不解释原因"（原因属于产品文档，
-    // 而这个 tooltip 的位置只够一行）。
-    title: `未开放：${listed.join('、')}${more ? '…' : ''}`,
+    // 而这个 tooltip 的位置只够一行）。档位名在前，杜绝"这是高亮那一行的信息"的误读。
+    // 「…」前留一个「、」，否则最后一个名字和省略号黏在一起（"forget_memory…"）。
+    title: `${entry.display_name}未声明开放：${listed.join('、')}${more ? '、…' : ''}`,
   };
 }

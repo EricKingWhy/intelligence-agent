@@ -37,9 +37,13 @@ const PROFILES: CatalogEntry[] = [
 ];
 
 describe('toolScopeNote', () => {
-  it('逐字给出设计稿 §4 的那句话（数字取自后端 tool_scope）', () => {
+  it('一句话用**声明**口径（数字取自后端 tool_scope，措辞不得断言部署事实）', () => {
     const note = toolScopeNote(PROFILES, 'coding');
-    expect(note?.text).toBe('该档位只开放 12 个工具（共 17 个）');
+    // 措辞锁："声明开放"这几个字是批 2 Spec 轴 P1 的修复点——原稿写「只开放 12 个
+    // 工具」，而本部署实际注册的是另一个集合（默认部署只注册 9 个内置工具，
+    // 且本地 artifact 下 read_artifact 会被收窄却不在这份 excluded 里）。
+    // 改成"某某声明了 N 个"后逐字为真。**不要**把它改回"开放 N 个"。
+    expect(note?.text).toBe('该档位声明开放 12 个工具（全部档位声明 17 个）');
   });
 
   it('未被收窄的档位（excluded 为空）不提示——「17 中开放 17」只是噪音', () => {
@@ -64,20 +68,26 @@ describe('toolScopeNote', () => {
     expect(toolScopeNote(PROFILES, 'ghost-profile')).toBeNull();
   });
 
-  it('tooltip 列出被收窄掉的工具名，超过 6 个截断并加「…」', () => {
+  it('tooltip 带档位名归属（footer 说的是当前档位，不是高亮那一行）', () => {
+    // 列表里鼠标移动即高亮，footer 却描述**当前生效**档位；不带名字会被读成
+    // "这是高亮那一行的信息"。夹具里 display_name === id，故这里等于 id。
+    expect(toolScopeNote(PROFILES, 'coding')?.title).toContain('coding未声明开放：');
+  });
+
+  it('tooltip 列出被收窄掉的工具名，超过 6 个截断并加「、…」', () => {
     const coding = toolScopeNote(PROFILES, 'coding');
-    expect(coding?.title).toBe('未开放：delegate、inspect_artifact、read_knowledge_source、retrieve_knowledge、web_search');
+    expect(coding?.title).toBe('coding未声明开放：delegate、inspect_artifact、read_knowledge_source、retrieve_knowledge、web_search');
 
     const research = toolScopeNote(PROFILES, 'research_review');
-    const listed = research!.title.replace('未开放：', '').split('、');
-    expect(listed).toHaveLength(MAX_LISTED_TOOLS); // 恰好 6 个名字
-    expect(listed[listed.length - 1].endsWith('…')).toBe(true); // 还有没说出来的
+    const listed = research!.title.replace('research_review未声明开放：', '').split('、');
+    expect(listed[listed.length - 1]).toBe('…'); // 还有没说出来的
+    expect(listed.slice(0, -1)).toHaveLength(MAX_LISTED_TOOLS); // 恰好 6 个名字
     expect(research?.title).toContain('apply_patch、bash');
   });
 
   it('恰好 6 个被收窄时不加「…」（多了这个符号会暗示还有没说出来的）', () => {
     const exact = [entry('p', { open: 11, total: 17, excluded: ['a', 'b', 'c', 'd', 'e', 'f'] })];
     const note = toolScopeNote(exact, 'p');
-    expect(note?.title).toBe('未开放：a、b、c、d、e、f');
+    expect(note?.title).toBe('p未声明开放：a、b、c、d、e、f');
   });
 });

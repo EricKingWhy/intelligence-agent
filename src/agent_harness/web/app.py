@@ -129,6 +129,10 @@ AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
     # #198 缺口③（档位收窄披露）：description 带一句工具面摘要——文案由后端下发、
     # 前端零硬编码（同 api.ts CatalogEntry 的既有纪律）。约束：短（一行放得下），
     # 且不写"你不必调用工具"类鼓励性文案（#187/BUG-013 刚删掉的东西）。
+    # ⚠ 这里的键集与 `agent/profiles.py::BUILTIN_PROFILES` **必须同键集**（本表管文案、
+    # 那张表管工具面）：本表多一个键 = 前端出现一个选了就 422 的档位；少一个键 =
+    # `/api/agent-profiles` 取 `tool_scope_summary(profile_id)` 时 KeyError 500。
+    # 数量口径（#201 的 N/M）在 `tool_scope_summary` 的 docstring 里，不在本表。
     "main": {
         "display_name": "通用",
         "description": "通用编排 Agent（默认）。含全部工具（读写、执行、检索、网络、委派）。",

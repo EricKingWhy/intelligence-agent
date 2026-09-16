@@ -110,8 +110,15 @@ class TestAgentProfiles:
         """#201 AC：N/M 与 `BUILTIN_PROFILES[*].tool_scope` **逐值相等**，且互相对账。
 
         钉在这里的意图：这三个数一旦漂移（有人改了 scope 却没改口径、或有人把
-        ``total`` 换成另一个来源），UI 上那句「该档位只开放 N 个工具（共 M 个）」
-        立刻变成假话，而**看是看不出来的**（数字只会变成另一个数字）。
+        ``total`` 换成另一个来源），UI 上那句提示立刻变成假话，而**看是看不出来的**
+        （数字只会变成另一个数字）。
+
+        ⚠ 下面**显式写死 17 / 12 / 7**（而不是只跟 `BUILTIN_PROFILES` 自比）：前端
+        `e2e/fixtures.ts::AGENT_PROFILES` 与 `lib/agentProfileScope.test.ts` 是这三
+        个数的**手工镜像**，跨语言没有共享来源。只自比的话，某人往 `_CODING_TOOLS`
+        加一个工具 → 后端测试照样绿、前端照样绿，而 fixture 里还是 12/17（真机是
+        13/18）——"三处都绿、UI 说错话"正是这类漂移的形态。写死数字让后端先红，
+        见到红请同时改前端那两处（这是有意的双份维护，与 §15 的 CSS 双份同理）。
         """
         from agent_harness.agent.profiles import (
             BUILTIN_PROFILES,
@@ -134,6 +141,12 @@ class TestAgentProfiles:
             # （那两个数在将来某个 scope 不在 main 里时会分叉）。
             assert scope["excluded"] == sorted(universe - spec_scope)
             assert (scope["open"] + len(scope["excluded"])) == scope["total"]
+
+        # 手工镜像的数字（前端 fixture / 纯函数单测里各有一份），改动必须三处同步
+        assert by_id["main"] == {"open": 17, "total": 17, "excluded": []}
+        assert by_id["coding"]["open"] == 12
+        assert by_id["coding"]["total"] == 17
+        assert by_id["research_review"]["open"] == 7
 
     def test_main_profile_reports_nothing_narrowed(self, bare_client):
         """main（通用）**没有**被收窄的工具 ⇒ excluded 为空、open == total。

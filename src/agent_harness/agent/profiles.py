@@ -110,27 +110,44 @@ BUILTIN_PROFILES: dict[str, AgentSpec] = {
 
 
 def declared_tool_universe() -> frozenset[str]:
-    """全部内置档位声明工具面的**并集**——「共 M 个」里的 M。
+    """全部内置档位声明工具面的**并集**——`tool_scope_summary` 的 `total`。
 
     取并集而不是取 main 的 scope：并集对"将来新增一个档位、其 scope 不在 main 里"
-    这个改动是自洽的（那时“共 M 个”仍然成立），取 main 会静默漏掉它。
+    这个改动是自洽的（那时 total 仍然成立），取 main 会静默漏掉它。
     """
     return frozenset().union(*(spec.tool_scope for spec in BUILTIN_PROFILES.values()))
 
 
 def tool_scope_summary(profile: str) -> dict[str, Any]:
-    """某个内置档位的工具面披露（#201 冻结 AC：档位收窄提示的数据面）。
+    """某个内置档位的工具面披露（#201：档位收窄提示的数据面）。
 
     ``open`` = 该档位 ``tool_scope`` 的条目数；``total`` = 所有内置档位声明工具面的
     并集大小；``excluded`` = 并集里**不在**该 scope 的名字（升序）。
 
-    **这是"声明面"，不是"运行时注册集"**——如实写在这里，因为两者会差：
-    实际注册还取决于本部署启用了哪些 capability（例如未启用 websearch 时
-    ``web_search`` 根本不注册），而 catalog 端点没有 session 上下文，也不会为了
-    数数去 ``build_runtime``（那要 sandbox 与 workspace）。同一取舍在
-    `capability/manifest.py` 的 core 条目里已经写过一次：**声明级/部署级的实话
-    > 按会话猜**。将来若要把 N 做成"运行时实际开放数"，得在会话上下文里算
-    （另一张票的范围）。
+    ## 口径：这是**声明面**，不是本部署的工具清单
+
+    两个方向都会差（最小 wiring 实测：`CAPABILITIES=""`、无 session_store，
+    `build_runtime` 后数 registry）：
+
+    - **声明 ⊃ 注册**：`scope` 里有名字，本部署可能没注册它。同一最小 wiring 实测
+      注册数 = main/None **10**、coding **9**、research_review **3**（声明分别是
+      17/12/7）：knowledge/websearch/memory 等 capability 未启用时
+      `retrieve_knowledge` / `web_search` / `retrieve_memory` 一类根本不注册，
+      此时"开放 7 个"是**高报**。而这些工具在别的部署里**是**注册的——所以注册数
+      不是常量，它随 `CAPABILITIES` 与会话装配变化。
+    - **注册 ⊄ 声明**：`assembly.py` 在收窄**前**注册的工具若不在任何 scope 里，
+      它会被 filter 静默剔除，却**不在** `excluded` 里。同一实测：coding 丢掉的
+      唯一工具是 `read_artifact`（本地 artifact 存储注册的），而声明面只声明了
+      `inspect_artifact`——前端 tooltip 因此**列不出**这个名字。
+
+    所以这两个数**只能读作"声明的工具面"**，读作"你现在有 N 个工具"就是假的。
+    要算真值得在会话上下文里数**收窄前后**的 registry（`assembly.py:277-287` 已经
+    算过一次：`pre_filter_names - filtered` = 运行时 `dropped_tools`，随
+    `run/started` 落盘）——catalog 端点没有 session，也不会为了数数去
+    `build_runtime`（要 sandbox/workspace，MCP 还会建连接）。同一取舍在
+    `capability/manifest.py` 的 core 条目里写过一次：**部署级/声明级的实话
+    > 按会话猜**。前端文案据此写成"声明开放"（见
+    `web/src/lib/agentProfileScope.ts`），不写成"你开放了多少个"。
     """
     spec = BUILTIN_PROFILES[profile]
     universe = declared_tool_universe()

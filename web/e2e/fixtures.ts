@@ -1028,8 +1028,9 @@ export const MODELS = [
  *                  证明徽标是 per-model 而不是 per-provider；
  *   - `custom`  —— **整组不可用**（`missing_api_key`，真实后端在无凭据时就是这个码）
  *                  ⇒ 该置灰 + 行尾原因 + 仍可展开；
- *   - `weird`   —— 整组不可用但原因是**未知码** ⇒ 行尾必须回落「未配置」，
- *                  不许把码原样打给用户（`modelAvailability.reasonLabel` 的回落）；
+ *   - `weird`   —— 整组不可用但原因是**未知码** ⇒ 行尾必须回落「不可用」，
+ *                  不许把码原样打给用户、也不许冒称「未配置」（那是具体诊断，
+ *                  `modelAvailability.reasonLabel` 的回落）；
  *   - `mixed`   —— 组内**部分**不可用 ⇒ **不许**置灰（把一个可用项说成不可用
  *                  比不置灰更糟）。 */
 export const MODELS_WITH_AVAILABILITY = [

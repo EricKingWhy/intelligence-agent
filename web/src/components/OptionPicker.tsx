@@ -102,7 +102,8 @@ interface Props {
   value: string | null;
   /** 选中回调；`null` 表示选了「默认（未选）」。 */
   onChange: (value: string | null) => void;
-  /** 面板底部插槽（说明性内容，例如未来的档位收窄提示）。 */
+  /** 面板底部插槽（说明性内容）。当前唯一使用者：档位 picker 的收窄提示
+   *  （#201，文案组装在 `lib/agentProfileScope.ts`）。 */
   footer?: ReactNode;
   disabled?: boolean;
 }

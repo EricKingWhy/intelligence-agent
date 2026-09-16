@@ -321,7 +321,14 @@ export const Composer = memo(function Composer({
               footer={
                 (() => {
                   const note = toolScopeNote(agentProfiles, selectedAgentProfile);
-                  return note ? <span title={note.title}>{note.text}</span> : undefined;
+                  if (!note) return undefined;
+                  // `tabIndex=0` + `aria-label`：tooltip 靠 `title` 暴露，而 `title`
+                  // 只有可聚焦元素才触得到——否则这条提示只对鼠标用户存在。
+                  return (
+                    <span tabIndex={0} title={note.title} aria-label={note.title}>
+                      {note.text}
+                    </span>
+                  );
                 })()
               }
             />

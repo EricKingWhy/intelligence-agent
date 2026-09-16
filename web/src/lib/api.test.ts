@@ -14,6 +14,7 @@ import {
   detachSessionFromProject,
   getHostDirs,
   getModels,
+  getAgentProfiles,
   getSessionEvents,
   isMemoryDisabled,
   listMemories,
@@ -67,10 +68,14 @@ afterEach(() => {
 });
 
 describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
-  /** #199 之后 `getModels` 恒产出这 5 个字段（可用性 + 三个能力位）。留成 helper 是
-   *  为了让断言继续**逐字段精确**（`toEqual` 不允许多余字段）而不被五个默认值淹掉。 */
+  /** #199 之后 `getModels` 恒产出这 5 个字段的**键**。留成 helper 是为了让断言继续
+   *  **逐字段精确**（`toEqual` 不允许多余字段）而不被五个默认值淹掉。
+   *
+   *  `isAvailable: undefined` 就是"后端没说"这一态：它不再是 `true`（`!= false`
+   *  那种写法会把"没说"伪造成"可用"）。注意 `toEqual` 会忽略值为 `undefined` 的键，
+   *  所以对这条的精确断言由下面那条独立用例显式做（`toBeUndefined`）。 */
   const withAvailabilityDefaults = (base: Record<string, unknown>) => ({
-    isAvailable: true,
+    isAvailable: undefined,
     unavailableReason: null,
     supportsTools: null,
     supportsVision: null,
@@ -116,9 +121,25 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
     // `is_available: 'yes'` 不是布尔 ⇒ 按"没说"处理（**不**把非布尔当真值）
     expect(models[1]).toEqual({
       name: 'weird', provider: null, model: null, default: false,
-      isAvailable: true, unavailableReason: null,
+      isAvailable: undefined, unavailableReason: null,
       supportsTools: null, supportsVision: null, supportsReasoningSummary: null,
     });
+  });
+
+  it('#199：is_available 是**三态**——没说 ≠ 可用（`!== false` 是伪造）', async () => {
+    captureFetch(200, {
+      models: [
+        { name: 'a', is_available: true },
+        { name: 'b', is_available: false },
+        { name: 'c' }, // 后端没说（旧载荷）
+      ],
+    });
+    const [a, b, c] = await getModels();
+    expect(a.isAvailable).toBe(true);
+    expect(b.isAvailable).toBe(false);
+    // 这条必须显式 `toBeUndefined`：`toEqual` 会忽略 undefined 值，放在对象字面量里
+    // 断言等于没断言——而"没说"恰恰是这次要钉住的那一态。
+    expect(c.isAvailable).toBeUndefined();
   });
 
   it('畸形条目剔除（name 缺失/非对象），零伪造；可选字段缺失记 null', async () => {
@@ -146,6 +167,47 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
   it('非 2xx → 抛错（调用方降级隐藏入口）', async () => {
     captureFetch(500, {});
     await expect(getModels()).rejects.toThrow('models 500');
+  });
+});
+
+describe('getAgentProfiles — tool_scope 窄化解析（#201：形状不完整就整块丢掉）', () => {
+  /** 半个 `tool_scope`（有 open 没 total、excluded 混进非字符串）会被渲染成一句
+   *  **半真的话**，比不显示更差；所以解析取"三个字段全合法才要，否则整块丢"，
+   *  丢掉的后果是前端不显示那句提示（缺省 = 后端没说）。 */
+  const profile = (scope: unknown) => ({
+    profiles: [{ id: 'p', display_name: 'P', description: 'd', tool_scope: scope }],
+  });
+
+  it('三个字段全合法 → 原样保留（excluded 为空数组也算合法：那是"没被收窄"这个事实）', async () => {
+    captureFetch(200, profile({ open: 3, total: 5, excluded: ['a', 'b'] }));
+    const [p] = await getAgentProfiles();
+    expect(p.tool_scope).toEqual({ open: 3, total: 5, excluded: ['a', 'b'] });
+
+    captureFetch(200, profile({ open: 5, total: 5, excluded: [] }));
+    expect((await getAgentProfiles())[0].tool_scope).toEqual({ open: 5, total: 5, excluded: [] });
+  });
+
+  it('缺字段 / 类型不对 / 负数 → 整块丢弃（键都不出现，不是置 null）', async () => {
+    const bad = [
+      { open: 3, total: 5 },                      // 缺 excluded
+      { open: 3, excluded: [] },                  // 缺 total
+      { open: 3, total: 5, excluded: [1, 'a'] },  // 混进非字符串
+      { open: -1, total: 5, excluded: [] },       // 负数（任何一边越界都要丢，否则 N+len(excluded) != M 也没人管）
+      { open: '3', total: 5, excluded: [] },      // 字符串数字不采信
+      'nope',                                     // 非对象
+    ];
+    for (const scope of bad) {
+      captureFetch(200, profile(scope));
+      const [p] = await getAgentProfiles();
+      expect(p.tool_scope).toBeUndefined();
+      expect(p).not.toHaveProperty('tool_scope');
+    }
+  });
+
+  it('后端没给这个字段（老部署）→ 无键，前端据此不显示提示', async () => {
+    captureFetch(200, { profiles: [{ id: 'p', display_name: 'P', description: 'd' }] });
+    const [p] = await getAgentProfiles();
+    expect(p).not.toHaveProperty('tool_scope');
   });
 });
 

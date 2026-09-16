@@ -38,14 +38,17 @@ describe('reasonLabel', () => {
     expect(reasonLabel('credential_unavailable')).toBe('凭据不可用');
   });
 
-  it('无原因 → 「未配置」（设计稿 §3 的回落值）', () => {
+  it('无原因 → 「未配置」（后端没说原因，那一档就是"没配好"）', () => {
     expect(reasonLabel(null)).toBe(UNCONFIGURED_LABEL);
     expect(reasonLabel('')).toBe(UNCONFIGURED_LABEL);
     expect(reasonLabel(undefined)).toBe(UNCONFIGURED_LABEL);
   });
 
-  it('未知机器码 → 保守回落，**不**把码原样打给用户、也不猜一个原因', () => {
-    expect(reasonLabel('some_future_code')).toBe(UNCONFIGURED_LABEL);
+  it('未知机器码 → 「不可用」，**不**把码原样打给用户、也不冒称「未配置」', () => {
+    // 「未配置」是一个**具体诊断**；后端给了一个我不认识的码时，我只知道"用不了"，
+    // 不知道是不是没配置（批 2 Spec 轴 P2：两件事不能压成一句话）。
+    expect(reasonLabel('some_future_code')).toBe('不可用');
+    expect(reasonLabel('some_future_code')).not.toBe(UNCONFIGURED_LABEL);
   });
 });
 
