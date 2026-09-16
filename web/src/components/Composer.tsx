@@ -110,6 +110,11 @@ export const Composer = memo(function Composer({
   const submit = (mode: 'queue' | 'steer') => {
     const trimmed = value.trim();
     if (!trimmed || locked) return;
+    // steer 通道的**失败兜底不在这一层**（#219）：没有可打断的在途 run 时后端回 409
+    // （session/service.py::SteerTargetNotFound），由交付层改投 queue 把消息送到
+    // （见 useSession.sendFollowUp 的 steer 回退）。这里不能拿 `streaming` 当
+    // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
+    // **本页有活流**，跨客户端时判反）。
     if (mode === 'steer' && onSteer) {
       onSteer(trimmed);
     } else {

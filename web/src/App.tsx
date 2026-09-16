@@ -576,12 +576,24 @@ export default function App() {
   );
 
   // Ctrl/Cmd+Enter = steer（ADR-0030 D10 键位）：复用 steer 提交路径。
+  //
+  // 空状态（没有选中会话）没有"可打断的在途 run"可言 ⇒ 退回 handleSubmit（新建会话，#219）。
+  // 这一步是**防丢输入**的，不是便利：Composer 在 submit 末尾无条件 `setValue('')`，
+  // 所以这里静默 return = 用户刚打的字凭空消失（真机实测：裸 Enter 建了会话，
+  // Ctrl+Enter 零请求零会话，输入框照样清空）。
+  // 判据用 `selectedId`（事实）而**不是** `streaming`（只表示本页有活流）——
+  // 后者正是 issue #196「跨客户端判反」的病灶。
+  // "有会话但 run 已终结"那一支由后端 409 + 交付层回退 queue 兜住
+  // （useSession.sendFollowUp），这里不重复判断。
   const handleSteer = useCallback(
     (task: string) => {
-      if (!selectedId) return;
+      if (!selectedId) {
+        handleSubmit(task);
+        return;
+      }
       void sendSteer(selectedId, task);
     },
-    [sendSteer, selectedId],
+    [sendSteer, selectedId, handleSubmit],
   );
 
   // ADR-0030 §4.6「立即发送全部」：POST /queue/flush，launched 流经

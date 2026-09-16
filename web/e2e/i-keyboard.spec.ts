@@ -26,9 +26,21 @@ test('palette 键盘唤起与关闭；Composer 键盘提交', async ({ page }) =
   await expect(page.locator('.palette-input')).toBeHidden();
 
   // Composer ⌘/Ctrl+Enter 发送（键盘路径不依赖鼠标）
-  await page.getByLabel('Agent 任务').fill('键盘提交');
+  //
+  // ⚠ 断言**发出去的请求及其载荷**，不断言"会话行里出现这段文字"：夹具会话的
+  // `first_user_message` 就渲染在轨道行上、且复用 `e2e-session-0002` 这个 id，
+  // 新建会话不会长出新行 ⇒ 任何 UI 文字断言在本环境都**无从区分**发没发。
+  // 见 docs/LIVE_BROWSER_TEST_20260917.md §2.2。
+  const TYPED = '键盘提交（空状态 Ctrl+Enter）';
+  const created = page.waitForRequest(
+    (r) => r.method() === 'POST' && new URL(r.url()).pathname === '/api/sessions',
+  );
+  await page.getByLabel('Agent 任务').fill(TYPED);
   await page.getByLabel('Agent 任务').press('Control+Enter');
-  await expect(page.locator('.session-item')).toContainText('键盘提交');
+  // 没发出这条请求 ⇒ 这个 await 超时失败（本用例锁的就是这个行为）
+  const req = await created;
+  // 且载荷必须是**用户刚打的那句**：任意别的 create 请求不算数
+  expect(req.postDataJSON().task).toBe(TYPED);
 });
 
 test('palette 的 Copy Run ID 复制 run id，而不是 session id', async ({ page, context }) => {  await context.grantPermissions(['clipboard-read', 'clipboard-write']);

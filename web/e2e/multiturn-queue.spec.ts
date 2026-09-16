@@ -6,6 +6,10 @@
  * 空队列不渲染。
  * T12e（§5.1 发送键语义）：在途 run 时提交必须打到 /messages（mode=queue），
  * 不得另造会话——真机实测回归锁，见 docs/LIVE_BROWSER_TEST_20260916.md F4。
+ * T12g/T12h/T12i（#219 的 Ctrl+Enter 丢消息修复）：成对锁「steer 只在后端说没有
+ * 在途 run（409）时才回退成 queue」——T12g 锁不该回退，T12h 锁该回退，
+ * T12i 锁带 queue_id 那一支的回退必须丢掉 queue_id。
+ * 见 docs/LIVE_BROWSER_TEST_20260917.md §2.2。
  *
  * 车道归属：Playwright e2e（同 continuation.spec.ts 约定）。 */
 
@@ -385,4 +389,178 @@ test('T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第�
   // 追问的确切条数：多出一条 = 按钮/键位被绑了两次（重复提交）。
   expect(messageBodies).toHaveLength(1);
   await expect(page.locator('.app-error')).toHaveCount(0);
+});
+
+/* ── T12g：在途 steer 不得被回退逻辑误伤（与 T12h 成对）── */
+
+test('T12g：在途 run + Ctrl+Enter → POST /messages(mode=steer)（未被降级成 queue）', async ({ page }) => {
+  /* #219 引入的回退只在**后端回 409** 时触发（T12h），本用例锁它的反面：
+     真有在途 run 时，steer 必须原样发出去。回退条件写宽了（例如拿本页的
+     `streaming` 当服务端在途判据）就会把真正该打断的 steer 静默降级为排队——
+     语义不同且不报错，只有这条断言能发现。见
+     docs/LIVE_BROWSER_TEST_20260917.md §2.2。 */
+  const messageBodies: Array<Record<string, unknown>> = [];
+  const messageUrls: string[] = [];
+
+  await routeApi(page, {
+    sessions: [],
+    events: LIVE_FRAMES,
+    onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
+    onMessagesPost: (route) => {
+      const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+      messageUrls.push(route.request().url());
+      messageBodies.push(body);
+      // 回执按请求的 mode 原样回应：mock 自己编一个 mode 会把"前端发了什么"
+      // 与"它拿到什么"搅在一起。
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'steered', mode: body.mode }),
+      });
+    },
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+  });
+
+  await page.goto('/');
+  await submitTask(page, '长任务');
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('打断一下');
+  await box.press('Control+Enter');
+
+  await expect.poll(() => messageBodies.length).toBe(1);
+  expect(messageUrls[0]).toMatch(/\/api\/sessions\/mt-live-1\/messages$/);
+  expect(messageBodies[0]).toMatchObject({ content: '打断一下', mode: 'steer' });
+  await expect(page.locator('.app-error')).toHaveCount(0);
+});
+
+/* ── T12h：idle 会话上 Ctrl+Enter（steer）→ 后端 409 → 改投 queue，消息不丢 ── */
+
+test('T12h：idle 会话 Ctrl+Enter 被后端 409 拒 → 自动改投 queue（不报「人工裁决」错，不丢消息）', async ({ page }) => {
+  /* `/messages` 的 409 **同码不同因**：「此刻没有可打断的 run」（后端要求改用 queue）
+     与 T8 #138 的「存在需人工裁决的 UNKNOWN 操作」。只认后者时，idle 上按 Ctrl+Enter
+     会消息被拒 + 输入框已清空 + 弹一句"人工裁决"的错话（真机实测，见
+     docs/LIVE_BROWSER_TEST_20260917.md §2.2）。本用例锁回退：**两次请求、模式依次
+     steer→queue**，且不出现错误条（错误条 = 又把它说成人工裁决）。 */
+  const bodies: Record<string, unknown>[] = [];
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: (route) => {
+      const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>;
+      bodies.push(body);
+      // 第一次（steer）→ 后端 detail 逐字取自 service.py::SteerTargetNotFound
+      if (body.mode === 'steer') {
+        return route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: "steer requires an active run; use mode='queue' to enqueue" }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'launched', mode: 'queue' }),
+      });
+    },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page); // 会话已选中且 run 已终结 = 没有可打断的在途 run
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('空闲态打断一下');
+  await box.press('Control+Enter');
+
+  await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies[0]).toMatchObject({ content: '空闲态打断一下', mode: 'steer' });
+  // 回退必须改的是**模式**，内容一字不差（这是"消息没丢"的机械证据）
+  expect(bodies[1]).toMatchObject({ content: '空闲态打断一下', mode: 'queue' });
+  await expect(page.locator('.app-error')).toHaveCount(0);
+});
+
+/* ── T12i：带 queue_id 的 steer 撞 409 → 重投必须**丢掉 queue_id** ── */
+
+test('T12i：队列条「立即」在 idle 上被 409 拒 → 重投去掉 queue_id（否则撞 404，消息真丢）', async ({ page }) => {
+  /* service.py 的顺序是**先 cancel_queue 再判在途 run**（:779-788）：所以带 queue_id 的
+     steer 走到 `SteerTargetNotFound` 时，那条排队项**已经被取消了**。重投要是照抄
+     queue_id，后端找不到该项 → 404 QueueItemNotFound → 前端报"排队项已不存在，请刷新
+     重试"——而用户的消息其实从没投出去过，且输入框早被清空。去掉 queue_id 重投，
+     语义正好是"这条排队项立即作为新消息投递"。 */
+  const bodies: Record<string, unknown>[] = [];
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onQueueGet: (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [{ queue_id: 'q-9', content: '立即发这条', created_at: '2026-09-15T00:00:05Z' }],
+          steers: [],
+        }),
+      }),
+    onMessagesPost: (route) => {
+      const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>;
+      bodies.push(body);
+      if (body.mode === 'steer') {
+        return route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: "steer requires an active run; use mode='queue' to enqueue" }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'launched', mode: 'queue' }),
+      });
+    },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+  await page.locator('.queue-item', { hasText: '立即发这条' })
+    .getByRole('button', { name: '立即发送' }).click();
+
+  await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies[0]).toMatchObject({ content: '立即发这条', mode: 'steer', queue_id: 'q-9' });
+  expect(bodies[1]).toMatchObject({ content: '立即发这条', mode: 'queue' });
+  expect(bodies[1]).not.toHaveProperty('queue_id'); // ← 本用例的关键断言
+  await expect(page.locator('.app-error')).toHaveCount(0);
+});
+
+/* ── T12j：与 steer 无关的 409 → 必须仍然原样显示后端 detail ── */
+
+test('T12j：steer 撞上**无关**的 409（人工裁决）→ 原样显示后端 detail，不被"是否 steer 409"的判断吃掉 body', async ({ page }) => {
+  /* 认 steer 那一支要先读一次 409 的 body（读的是 clone）。若直接读原响应，
+     下面这一支（T8 #138 的人工裁决）就只能 catch 到 "Body is unusable"，
+     后端给的**可行动** detail（工具名 / call id）被换成一句泛化文案——
+     诊断力静默降级，而这条正是"需人工裁决"路径唯一的线索来源。 */
+  const DECIDABLE_DETAIL = '存在需人工裁决的高峰操作：tool=bash call_id=call_abc123';
+  await routeApi(page, {
+    sessions: [],
+    events: LIVE_FRAMES,
+    onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
+    onMessagesPost: (route) =>
+      route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: DECIDABLE_DETAIL }),
+      }),
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+  });
+
+  await page.goto('/');
+  await submitTask(page, '长任务');
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('打断一下');
+  await box.press('Control+Enter');
+
+  await expect(page.locator('.app-error')).toContainText('call_id=call_abc123');
 });

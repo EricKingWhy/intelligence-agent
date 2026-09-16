@@ -245,6 +245,33 @@ export const SESSION_GONE_ERROR_TEXT = '会话已不存在（可能已被删除�
  *  下一步（终态事件与 `GET /queue` 快照都会把过期的排队条刷掉）。 */
 export const QUEUE_ITEM_GONE_ERROR_TEXT = '排队项已不存在（可能已被消费或取消），请刷新后重试';
 
+/** 后端「这条 steer 没有可打断的在途 run」的判别串——**契约串**，来源是
+ *  `src/agent_harness/session/service.py::SteerTargetNotFound` 的 detail
+ *  （"steer requires an active run; use mode='queue' to enqueue"）。取稳定前缀而不是
+ *  整句：后半句是给调用方的操作建议，改措辞不该让判别失效。
+ *
+ *  为什么要在客户端认这个 409：`/messages` 的 409 **同码不同因**——
+ *  这一支是"此刻没有可打断的 run"（后端已明说改用 queue），
+ *  另一支是 T8 #138 的"存在需人工裁决的 UNKNOWN 操作"。混为一谈的后果见
+ *  `sendFollowUp` 里的回退分支：用户的消息会被判成"需人工裁决"而丢掉。 */
+const STEER_TARGET_MISSING_MARKER = 'steer requires an active run';
+
+/** 409 + 该 detail ⇒ 应改投 queue 重发。
+ *
+ *  ⚠ 读的是 `res.clone()`：调用方在**不是**这一支时还要再读一次 body 拿 detail
+ *  （T8 #138 的人工裁决支）。直接读原响应会把它消耗掉，那一支就只能 catch 到
+ *  "Body is unusable"，把后端给的具体原因（工具名 / call id / seq 冲突）换成
+ *  一句泛化的"存在需要人工裁决的高风险操作"。`clone()` 必须在任何读取**之前**调用。 */
+async function isSteerTargetMissing(res: Response): Promise<boolean> {
+  try {
+    const detail = (await res.clone().json()) as { detail?: unknown } | null;
+    return typeof detail?.detail === 'string'
+      && detail.detail.includes(STEER_TARGET_MISSING_MARKER);
+  } catch {
+    return false; // 读不出 body 就当不是这一支：宁可报错，也不误判成因
+  }
+}
+
 /** 「立即失败 vs 正常流式」的判别窗口（毫秒）。
  *
  *  起因是交付层攒包：正常流式的响应头会被压到 run 结束才下发，而 4xx/422 是
@@ -988,13 +1015,44 @@ export function useSession() {
         // 同 submitTask：launched 分支的 SSE 响应体会被交付层攥到 run 结束，不能干等。
         // queued/steered 是 JSON 确认（极短）→ 短窗内必返回；窗外 = launched，
         // 此时 sid 已知，直接用 WS 接流。
-        const pending = apiSendMessage(sessionId, {
+        // `sendMode` 可被下面的 steer 回退改写（steer 与 queue 打同一个端点，
+        // 唯一差别就是这个字段），所以它是变量而不是内联字面量。
+        let sendMode: 'queue' | 'steer' = opts?.amend?.mode === 'steer' ? 'steer' : 'queue';
+        let pending = apiSendMessage(sessionId, {
           content,
-          mode: 'queue',
           max_steps: opts?.maxSteps ?? 10,
           ...(opts?.amend ?? {}),
+          mode: sendMode,
         });
-        const res = await raceEarlyResponse(pending);
+        let res = await raceEarlyResponse(pending);
+        if (res !== null && res.status === 409 && sendMode === 'steer') {
+          /* steer 的 409 与 T8 #138 的 409 **同码不同因**，混为一谈就会丢消息：
+             - 这一支（service.py::SteerTargetNotFound，"steer requires an active run"）
+               是"此刻没有可打断的 run"——后端在 detail 里明确要求改投 queue；
+             - 后面那一支才是"存在需人工裁决的 UNKNOWN 操作"（它的 detail 必须留着，
+               见 isSteerTargetMissing 的 clone 说明）。
+             用户此时的处境是**消息已被拒**，而 Composer 早已清空输入框（它的
+             submit 末尾无条件 setValue('')）⇒ 不在这里回退，用户就得凭记忆重打
+             一遍，界面上还只会出现一句关于"人工裁决"的错话（真机实测）。
+             重投**必须去掉 queue_id**：带 queue_id 的 steer（队列条「立即」）在
+             service.py 里是**先 cancel_queue 再判在途 run**（:779-788 的顺序），
+             所以走到这个 409 时那条排队项**已经被取消**了——带同一个 queue_id
+             重投只会撞 404 QueueItemNotFound，消息反而真的丢。去掉它、内容原样、
+             模式改 queue，语义正好是"这条排队项立即作为新消息投递"。
+             无 queue_id 时该 409 在 register_steer **之前**抛出、什么也没登记，
+             重投同样不会重复投递。 */
+          if (await isSteerTargetMissing(res)) {
+            const { queue_id: _alreadyCancelled, ...restAmend } = opts?.amend ?? {};
+            sendMode = 'queue';
+            pending = apiSendMessage(sessionId, {
+              content,
+              max_steps: opts?.maxSteps ?? 10,
+              ...restAmend,
+              mode: sendMode,
+            });
+            res = await raceEarlyResponse(pending);
+          }
+        }
         if (res === null) {
           // launched → 直驱新 run，用 WS 消费（同 POST /api/sessions 形状）。
           //
