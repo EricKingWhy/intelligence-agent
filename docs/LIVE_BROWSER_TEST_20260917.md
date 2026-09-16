@@ -332,6 +332,16 @@ DELETE cb7326c7 → 200
 还是两个字，且这次连事件流里都没有线索。既是**可归因性**缺口，也是**可观测/历史保真**缺口
 （失败的 run 在 durable 历史里记不出为什么）。
 
+**已修（#222，同夜）**：`run/failed` 在**每条运行期失败路径**上都带 `reason`（未分类退到异常
+类型名）+ 项目自拼的可读 `message`；`max_steps` 那条此前完全没落键的路径一并补上并改走
+`failure_terminal`（终态字段的唯一 owner）。**修的时候又抓到一个前端 bug**：`Overview` 的
+「失败原因」行在"只有码、没有文案"时渲染成**空值**（码原本只在 `message` 同时存在时才缀出来），
+而 Timeline 摘要一直有兜底——同一事实两个口径；`toContain(码)` 那条旧断言之所以是绿的，是因为
+码还出现在**同一元素**的 `title` 属性里。两者都已修，口径与逐路径清单收进
+`docs/adr/0033-run-failure-attribution-surface.md` §2.4。真机复核（代理恢复后把 `MODEL_BASE_URL`
+指向死端口制造真实失败）：事件流 `run/failed {"reason":"RateLimitError","message":"运行失败
+（RateLimitError），未分类异常；完整原始信息见后端日志"}`，Overview 行与 Timeline 摘要都显示了它。
+
 #### F6 — 在「文件/改动」或「输出」页签上点「新建会话」，用户被留在无法输入的状态（P3；前端）
 
 工作区停在「输出」页签时点「新建会话」：页签仍是「输出」，`#composer-input` 在 DOM 里但
@@ -377,4 +387,8 @@ DELETE cb7326c7 → 200
 两条**已确证**的边界事实（留给修 #222 的人，省一次摸索）：窗口内未分类失败 → `model/failed.message
 = "model call failed: <TypeName>"`（本机实测 `RuntimeError` 路径单测已覆盖）；窗口**外**失败 →
 `model/failed` **一条都没有**，类型名只在进程日志里。
+
+**后续（同夜晚些时候）**：上面两条阻塞都已解除——代理恢复 ⇒ 真机能跑到失败路径；合同变更按
+§9.1 走成了显式决策（收进 ADR-0033 §2.4）。#222 已实现、两轴审查、门禁、真机复核、集成关单；
+逐条记录见 `docs/phase_status/2026-09.md` 同日两条。
 
