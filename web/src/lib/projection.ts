@@ -171,6 +171,7 @@ export function initConversation(session_id: string): ConversationState {
     run_id: null,
     model_fallback: null,
     run_interrupted: null,
+    run_failure: null,
     turn_index: null,
     seenSeqs: new Set(),
     undelivered: [],
@@ -393,6 +394,8 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   // 「已完成」）同屏打架。清空后 `run_interrupted` 的语义收窄为「**最近一个** run
   // 以中断收口」，deriveRunPulse 也就据此给出中性的「已中断」而不是「已完成」。
   state.run_interrupted = null;
+  // #220：失败归因同属「**最近一个** run」的事实，新 run 开始即过期（同 run_interrupted）。
+  state.run_failure = null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -600,6 +603,8 @@ function projectToolOutputDelta(state: ConversationState, event: AgentEvent): vo
 function projectRunCompleted(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
   state.run_cancelled = false;
+  // #220：失败归因是「最近一个 run 的结局」，更晚的终态一到它就过期（同 run_cancelled 复位）。
+  state.run_failure = null;
   state.usage_total = parseUsage(data.usage_total) ?? state.usage_total;
   state.cost_usd =
     typeof data.cost_usd === 'number' && Number.isFinite(data.cost_usd) ? data.cost_usd : null;
@@ -618,6 +623,13 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
 function projectRunFailed(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
   state.run_cancelled = data.reason === 'cancelled';
+  // #220：折叠失败归因。要点三条（载荷形状与呈现口径见 ADR-0033 §2.2/2.3）：
+  // 取消那支不记（取消 ≠ 错误，da394a9）；两个键互相独立、都可缺；都没给就整体 null
+  // ——不是 `{reason:null,message:null}`，那会让 `if (run_failure)` 为真却无内容。
+  const reason = typeof data.reason === 'string' && data.reason ? data.reason : null;
+  const message = typeof data.message === 'string' && data.message ? data.message : null;
+  state.run_failure =
+    state.run_cancelled || (reason === null && message === null) ? null : { reason, message };
   state.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
   state.trace_url = typeof data.trace_url === 'string' && data.trace_url ? data.trace_url : null;
   finalizeRun(state, 'failed', event.time);
@@ -633,6 +645,7 @@ function projectRunInterrupted(state: ConversationState, event: AgentEvent): voi
     interrupted_seq: typeof data.interrupted_seq === 'number' ? data.interrupted_seq : null,
     reason: typeof data.reason === 'string' ? data.reason : 'process_restart',
   };
+  state.run_failure = null; // #220：中断是这轮 run 的**结局**终态，过期归因同 run/completed 清掉
   finalizeRun(state, 'completed', event.time);
 }
 
@@ -1003,6 +1016,19 @@ function summarizeRunInterrupted(event: AgentEvent): string {
   return step !== null && step !== undefined ? `第 ${step} 步中断` : '运行中断';
 }
 
+/** #220：`run/failed` 行摘要 = 随事件的失败归因文案，缺 message 时退到 reason 码
+ *  （「identical_tool_failure_loop」比空白更能说明这行为什么红）。
+ *  两处与相邻 summary 不同，都是刻意的：取消那支返回空串（它是 run/failed 但语义是取消，
+ *  机器码 `cancelled` 不该上时间线，状态行另有「已取消」）；不做 slice(0,40)——文案是
+ *  完整句子，截断正好切掉可操作尾巴，两个消费面都已有 CSS 省略（ADR-0033 §2.3）。 */
+function summarizeRunFailed(event: AgentEvent): string {
+  const message = event.data.message;
+  if (typeof message === 'string' && message) return message;
+  const reason = event.data.reason;
+  if (typeof reason !== 'string' || reason === 'cancelled') return '';
+  return reason;
+}
+
 function summarizeModelChanged(event: AgentEvent): string {
   const to = event.data.to_model_id;
   return typeof to === 'string' && to ? `模型 → ${to}` : '模型已切换';
@@ -1017,7 +1043,7 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.SESSION_FORKED]: { apply: noopProjection, summarize: summarizeForked },
   [EventType.RUN_STARTED]: { apply: projectRunStarted, summarize: emptySummary },
   [EventType.RUN_COMPLETED]: { apply: projectRunCompleted, summarize: summarizeRunCompleted },
-  [EventType.RUN_FAILED]: { apply: projectRunFailed, summarize: emptySummary },
+  [EventType.RUN_FAILED]: { apply: projectRunFailed, summarize: summarizeRunFailed },
   [EventType.RUN_INTERRUPTED]: { apply: projectRunInterrupted, summarize: summarizeRunInterrupted },
   [EventType.USER_MESSAGE]: { apply: projectUserMessage, summarize: summarizeUserMessage },
   [EventType.MODEL_STARTED]: { apply: projectModelStarted, summarize: emptySummary },

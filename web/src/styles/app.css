@@ -4096,6 +4096,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .model-fallback-val {
   color: var(--info);
 }
+/* #220 失败原因值：后端文案是完整句子，「请到供应商控制台检查计费与配额」这类可操作尾巴
+ * 正好被 `.detail-val` 的 nowrap+ellipsis 切掉——这一行允许换行，并按左对齐读整段
+ * （多行右对齐会出现参差左边缘）。overflow-wrap:anywhere 兼作 min-content 保护：
+ * 长分类码（identical_tool_failure_loop）不断行的话 Flex 行会被撑破。 */
+.run-failure-val {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  text-align: left;
+}
 /* 预期降级灰字（如 Trace「未追踪」）——非故障，弱化呈现 */
 .detail-val-muted {
   color: var(--text-tertiary);

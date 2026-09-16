@@ -18,7 +18,7 @@ describe('initConversation', () => {
       permission_policy: null, events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
-      run_interrupted: null, turn_index: null,
+      run_interrupted: null, run_failure: null, turn_index: null,
       seenSeqs: new Set(),
       undelivered: [],
     });
@@ -2163,5 +2163,97 @@ describe('projectUndelivered — 摘除与补齐（#195）', () => {
     // 最新轮被取代 → 退回上一条非取代非注入轮（注入轮不算）
     const superseded = turns.map((t, i) => (i === 2 ? { ...t, superseded: true } : t));
     expect(latestEditableTurn(superseded)?.user_message_seq).toBe(3);
+  });
+});
+
+// ── #220：失败归因（run/failed 的 reason + message）投影与呈现口径 ──
+// 机制全文见 ADR-0033 §2.2/2.3。这里锁三件事：三态载荷各自落什么值、
+// 「更晚的终态赢」的失效规则、以及 Timeline 摘要的兜底与两种刻意偏离。
+
+describe('#220 run_failure — 失败归因投影（ADR-0033）', () => {
+  const failWith = (data: Record<string, unknown>) =>
+    applyEvent(
+      applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } })),
+      ev({ type: EventType.RUN_FAILED, data }),
+    );
+
+  it('reason + message（已分类供应商故障）→ 两者都进状态', () => {
+    const s = failWith({ reason: 'provider_account_unavailable', message: '模型供应商账户不可用（…）' });
+    expect(s.run_status).toBe('failed');
+    expect(s.run_failure).toEqual({
+      reason: 'provider_account_unavailable',
+      message: '模型供应商账户不可用（…）',
+    });
+  });
+
+  it('只有 reason（工具失败保险丝：后端只给码不给文案）→ 保留码，message 为 null', () => {
+    const s = failWith({ reason: 'identical_tool_failure_loop' });
+    expect(s.run_failure).toEqual({ reason: 'identical_tool_failure_loop', message: null });
+  });
+
+  it('两键都不落（未分类异常）→ 整个字段 null，**不是** {reason:null,message:null}', () => {
+    const s = failWith({});
+    expect(s.run_status).toBe('failed');
+    expect(s.run_failure).toBeNull();
+  });
+
+  it('取消（reason=cancelled）不算失败归因（取消 ≠ 错误，da394a9）', () => {
+    const s = failWith({ reason: 'cancelled' });
+    expect(s.run_cancelled).toBe(true);
+    expect(s.run_failure).toBeNull();
+  });
+
+  it('新 run 开始 → 上一轮归因过期（不挂在正在跑的 run 上）', () => {
+    let s = failWith({ reason: 'provider_auth_failed', message: '…鉴权失败…' });
+    expect(s.run_failure).not.toBeNull();
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    expect(s.run_failure).toBeNull();
+    expect(s.run_status).toBe('running');
+  });
+
+  /* 「更晚的终态赢」：completed / interrupted 都是这轮 run 的结局，过期归因必须一起清掉
+     ——否则状态行说「已完成」而「失败原因」还挂在旁边（同屏打架）。
+     正常日志里这两者前面必有 run/started（所以是纵深防御），但 runState.ts 对
+     run_interrupted 已按同一规则退化处理，这里对齐。 */
+  it('run/completed 与 run/interrupted 也清掉归因（更晚的终态赢）', () => {
+    const completed = applyEvent(
+      failWith({ reason: 'provider_auth_failed', message: '…鉴权失败…' }),
+      ev({ type: EventType.RUN_COMPLETED, data: {} }),
+    );
+    expect(completed.run_failure).toBeNull();
+
+    const interrupted = applyEvent(
+      failWith({ reason: 'provider_auth_failed', message: '…鉴权失败…' }),
+      ev({ type: EventType.RUN_INTERRUPTED, data: { interrupted_seq: 9 } }),
+    );
+    expect(interrupted.run_failure).toBeNull();
+  });
+
+  it('清掉后再次失败 → 重新落值（不是只清一次就哑了）', () => {
+    let s = failWith({ reason: 'provider_auth_failed', message: '第一次' });
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'provider_model_not_found', message: '第二次' } }));
+    expect(s.run_failure).toEqual({ reason: 'provider_model_not_found', message: '第二次' });
+  });
+
+  describe('Timeline 行摘要', () => {
+    it('有文案 → 用文案（Inspector 默认页签就能看见失败原因）', () => {
+      expect(summarizeEvent(ev({
+        type: EventType.RUN_FAILED,
+        data: { reason: 'provider_account_unavailable', message: '模型供应商账户不可用（…）' },
+      }))).toBe('模型供应商账户不可用（…）');
+    });
+
+    it('只有码 → 退到码（「identical_tool_failure_loop」比空白更能说明这行为什么红）', () => {
+      expect(summarizeEvent(ev({
+        type: EventType.RUN_FAILED,
+        data: { reason: 'identical_tool_failure_loop' },
+      }))).toBe('identical_tool_failure_loop');
+    });
+
+    it('取消那支与两者皆无 → 空摘要（机器码 cancelled 不上时间线；不编文案）', () => {
+      expect(summarizeEvent(ev({ type: EventType.RUN_FAILED, data: { reason: 'cancelled' } }))).toBe('');
+      expect(summarizeEvent(ev({ type: EventType.RUN_FAILED, data: {} }))).toBe('');
+    });
   });
 });

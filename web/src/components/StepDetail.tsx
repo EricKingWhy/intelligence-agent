@@ -540,6 +540,30 @@ export function ChatTab({
           <span className="detail-key">状态</span>
           <span className="detail-val">{runStatusLabel}</span>
         </div>
+        {/* #220：失败归因紧跟在「状态」下面——只渲染后端**给了**的部分，绝不编文案。
+            三态（文案+码 / 只有码 / 都没有）与失效规则见 ADR-0033 §2.2-2.3。 */}
+        {conversation.run_failure &&
+          (conversation.run_failure.message || conversation.run_failure.reason) && (
+            <div className="detail-row detail-row-warn">
+              <span className="detail-key">失败原因</span>
+              {/* 文案是完整句子（30-45 字），而 `.detail-val` 是 nowrap+ellipsis——这行必须
+                  换行（run-failure-val）才能让「请到供应商控制台检查计费与配额」这类可操作
+                  尾巴真的可见；title 再兜一层鼠标可达的全文。 */}
+              <span
+                className="detail-val run-failure-val"
+                title={conversation.run_failure.message ?? conversation.run_failure.reason ?? ''}
+              >
+                {conversation.run_failure.message}
+                {/* 有文案时把分类码缀在后面（等宽、次级）；没有文案时它就是唯一信息，不再重复 */}
+                {conversation.run_failure.message && conversation.run_failure.reason && (
+                  <>
+                    {' '}
+                    <code className="detail-val-mono">{conversation.run_failure.reason}</code>
+                  </>
+                )}
+              </span>
+            </div>
+          )}
         <div className="detail-row">
           <span className="detail-key">轮次</span>
           <span className="detail-val">{conversation.turns.length}</span>
