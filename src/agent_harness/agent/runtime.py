@@ -125,6 +125,14 @@ PROVIDER_MODEL_NOT_FOUND_MESSAGE = (
     "模型不存在，或当前账户无权访问该模型，请检查模型名与开通状态"
 )
 
+#: 未分类失败的固定可读兜底（#222）。**只代入异常类型名**——类名不是 provider
+#: 回显正文，不越 OBS-008 的脱敏边界（与 ``model/failed`` 的
+#: "model call failed: {error_type}" 同源）。不写"请重试"：未分类里重试有效无效
+#: 都有，承诺不了。口径见 docs/adr/0033-run-failure-attribution-surface.md §2.4。
+UNCLASSIFIED_FAILURE_MESSAGE = (
+    "运行失败（{error_type}），未分类异常；完整原始信息见后端日志"
+)
+
 #: 分类表：``str(error)`` 里的小写标记子串 → 分类 reason。顺序即优先级。
 #:
 #: ⚠ 匹配面是整个 ``str(error)``（含 provider 错误体里的 ``code`` **与** ``message``
@@ -326,9 +334,11 @@ class _RunFinalizer:
         """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。
 
         reason 落事件 data（如 identical_tool_failure_loop）——消费者区分失败
-        原因，与取消臂的 reason=cancelled 同一语义层。message 是已分类故障的
-        固定可读文案（reason+message 成对，与上下文超限路径的 RUN_FAILED
-        形状一致）；缺省两者都不落键（合同：缺省 = 模型/执行器异常）。
+        原因，与取消臂的 reason=cancelled 同一语义层。message 是固定可读文案
+        （reason+message 成对，与上下文超限路径的 RUN_FAILED 形状一致）。
+        本方法不替调用方编原因（两个入参缺省即不落键）；运行期每条失败路径都
+        必须带 reason 这件事由**逐路径用例**守，清单见
+        docs/adr/0033-run-failure-attribution-surface.md §2.4。
         """
         if self.run_id is None or self._terminal_written:
             return None
@@ -1025,13 +1035,19 @@ class AgentRuntime:
                               reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
                     if tracer is not None:
                         tracer.run_failed("max_steps_exceeded")
-                    end_event = session.end_run(run_id, status="failed",
-                                                usage_total=dict(usage_total) or None,
-                                                trace_id=(tracer.trace_id if tracer else None),
-                                                trace_url=(tracer.trace_url if tracer else None))
-                    terminal.mark_terminal_written()
+                    # 走 failure_terminal（终态字段的唯一 owner）：本路径原先自己拼
+                    # end_run，于是 #222 之前它**一个归因键都没有**（字段集中供给
+                    # 被绕过 = 下一次加字段还会漏它）。文案复用上面那行日志的同一句。
+                    end_event = terminal.failure_terminal(
+                        steps=step_base + steps,
+                        reason=STATUS_MAX_STEPS_EXCEEDED,
+                        message=f"连续 {steps} 轮仍在请求工具，触发保险丝",
+                        trace_id=(tracer.trace_id if tracer else None),
+                        trace_url=(tracer.trace_url if tracer else None),
+                    )
                     self._write_memories(session, memory_event_start)
-                    yield to_agent_event(end_event)
+                    if end_event is not None:
+                        yield to_agent_event(end_event)
                     result_holder.append(
                         AgentRunResult(status=STATUS_MAX_STEPS_EXCEEDED, final_text="", steps=steps),
                     )
@@ -1254,9 +1270,9 @@ class AgentRuntime:
                 )
                 # 本臂允许 yield——收尾事件（部分内容 + interrupted + 切换事实 +
                 # model/failed）逐条镜像给流消费者（与取消臂的唯一差异）。
-                # provider 侧可归因失败（内容审查 / 账户计费 / 鉴权 / 模型不存在）
-                # → 已分类 reason + 固定可读文案（run/failed 与 model/failed 成对
-                # 升级，形状同上下文超限路径）；其余异常保持类型名原行为。
+                # 归因口径（已分类 / 未分类两条支路，以及"每条失败路径都要有值"
+                # 为什么必须做到）见 docs/adr/0033-run-failure-attribution-surface.md
+                # §2.1/§2.4。
                 # 分类只在**模型调用在途**时进行（model_call_open 正是 model/failed
                 # 的归因窗口）：本臂同时兜底工具/执行器异常，其错误文本可能恰好
                 # 引用这些标记（如抓取到阿里云文档或供应商计费文档），不得误标。
@@ -1269,6 +1285,15 @@ class AgentRuntime:
                     PROVIDER_FAILURE_MESSAGES[provider_reason]
                     if provider_reason
                     else None
+                )
+                # 终态文案：未分类也必须有可读兜底（#222）。**只喂 run/failed**——
+                # model/failed 那侧保持原样（未分类时它是 "model call failed: {type}"，
+                # 前端不投影它，见 ADR-0033 §3），两个面各有各的读者。
+                terminal_message = (
+                    provider_message
+                    or UNCLASSIFIED_FAILURE_MESSAGE.format(
+                        error_type=type(error).__name__,
+                    )
                 )
                 for streamed in ctx.interrupt_streams():
                     yield to_agent_event(streamed)
@@ -1283,8 +1308,8 @@ class AgentRuntime:
                 # 已写入的事件保持原样，失败只能由日志承载。
                 end_event = terminal.failure_terminal(
                     steps=step_base + steps,
-                    reason=provider_reason,
-                    message=provider_message,
+                    reason=provider_reason or type(error).__name__,
+                    message=terminal_message,
                     trace_id=(tracer.trace_id if tracer else None),
                     trace_url=(tracer.trace_url if tracer else None),
                 )

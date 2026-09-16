@@ -184,7 +184,9 @@ class TestReasoningInterruption:
         assert REASONING_INTERRUPTED in types
         assert "model/failed" in types
         failed = [e for e in session.events if e.type == RUN_FAILED]
-        assert failed and failed[-1].data.get("reason") is None
+        # #222：未分类失败（ConnectionError 不在分类表里）的终态 reason 退到类型名
+        # ——旧断言锁的是「reason is None」，那是「缺省 = 模型/执行器异常」的老合同。
+        assert failed and failed[-1].data.get("reason") == "ConnectionError"
         # 部分内容保留（S18/16.4）：中断前思考已在 durable 流里
         persisted = [e for e in session.events if e.type == REASONING_DELTA]
         assert persisted and persisted[0].data["delta"] == "想到一半"

@@ -182,7 +182,13 @@ WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的�
 - `"orphaned"`：孤儿回收（零订阅者连续 300s，`RUN_DISCONNECT_GRACE_SECONDS` 可调）；
 - `"identical_tool_failure_loop"`：同错熔断硬保险丝（ADR-0014）；
 - `"provider_content_moderation"`：provider 内容审查拒绝输入（如阿里云 `data_inspection_failed`，仅模型调用在途时分类）；与 `data.message` 成对出现（固定可读文案），provider 回显原文只进服务端日志；
-- 缺省：模型/执行器异常。
+- `"max_steps_exceeded"`：模型连续请求工具不收敛，撞 `max_steps` 保险丝（`data.message` 说明轮数）；
+- **其余未分类失败**：`reason` = **异常类型名**（`RateLimitError` / `ProxyError` / `ConnectionError` …），`data.message` = 固定兜底句（`运行失败（<类型名>），未分类异常；完整原始信息见后端日志`）。
+
+⚠ **`reason` 是开集，不是枚举**（#222 起）：运行期路径上它**总有值**，只对上面
+`"cancelled"` / `"orphaned"` 两个字面量做等值判断，其余一律当不透明字符串渲染/透传，
+不要写白名单、正则或长度假设。`data.message` 不保证是中文（上下文超限路径给的是项目
+内部英文串）。取值域与三态呈现的完整口径见 `docs/adr/0033-run-failure-attribution-surface.md`。
 `run/completed` 语义不变。**断连永远不会出现在终态原因里**。
 （上下文超限另有独立终态 `reason=context_window_exceeded` + `data.message`，见 02 §17。）
 

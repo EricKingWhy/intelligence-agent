@@ -425,9 +425,11 @@ class Session:
         对称终态：completed 与 failed 都下发 trace_id / trace_url——失败 run 在
         Langfuse 也有可见 trace，跳转有排查价值。reason 仅 failed 语义使用
         （如 identical_tool_failure_loop），落事件 data——消费者可区分失败原因
-        （取消路径的 reason=cancelled 同款先例）。message 同仅 failed：已分类
-        故障的固定可读文案（如内容审查拒绝），与上下文超限路径直接 append 的
-        reason+message 形状一致；只接受调用方常量，绝不透传 provider 回显原文。
+        （取消路径的 reason=cancelled 同款先例）。message 同仅 failed：固定可读文案
+        （已分类故障如内容审查拒绝；未分类异常由运行时侧拼一句带类型名的兜底），
+        与上下文超限路径直接 append 的 reason+message 形状一致；只接受调用方
+        **自己拼**的常量/模板，绝不透传 provider 回显原文
+        （口径见 docs/adr/0033-run-failure-attribution-surface.md §2.1）。
         """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}

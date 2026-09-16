@@ -553,7 +553,13 @@ export function ChatTab({
                 className="detail-val run-failure-val"
                 title={conversation.run_failure.message ?? conversation.run_failure.reason ?? ''}
               >
-                {conversation.run_failure.message}
+                {/* #222 真机实测：后端只给码（无文案）时这一行渲染成**空值**——码原本只在
+                    `message` 同时存在时才缀出来，而 Timeline 摘要（summarizeRunFailed）早
+                    就用码兜底了：同一事实两个口径。这里对齐它的规则：没有文案时，码就是这
+                    一行的唯一信息。 */}
+                {conversation.run_failure.message ?? (
+                  <code className="detail-val-mono">{conversation.run_failure.reason}</code>
+                )}
                 {/* 有文案时把分类码缀在后面（等宽、次级）；没有文案时它就是唯一信息，不再重复 */}
                 {conversation.run_failure.message && conversation.run_failure.reason && (
                   <>

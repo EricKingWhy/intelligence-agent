@@ -613,10 +613,13 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
   finalizeRun(state, 'completed', event.time);
 }
 
-/** 终态 reason 三值（契约回执 §4，detached-run）：'cancelled' = 显式
+/** 终态 reason（契约回执 §4，detached-run）：'cancelled' = 显式
  *  POST /cancel（用户意图中断，≠ 错误）→ Run Pulse「已取消」；
  *  'orphaned' = 孤儿回收（零订阅 300s，非用户意图，按失败展示）；
- *  缺省 = 模型/执行器异常。断连永远不出现在终态原因里（订阅者离开只
+ *  其余（#222 起）**总有值**：已分类故障给 `provider_*`，未分类给异常类型名
+ *  （如 `RateLimitError`）——reason 是开集，只对上面两个字面量做等值判断，
+ *  别把它当枚举/白名单用（取值域与呈现见 ADR-0033 §2.1/§2.3）。缺省只会出现在
+ *  #222 之前写下的历史会话里。断连永远不出现在终态原因里（订阅者离开只
  *  unsubscribe）。turn/tool 仍按失败终态 settle。
  *  trace_id / trace_url 对称抽取（契约 2d7f87a——失败 run 在 Langfuse 也有
  *  可见 trace，跳转有排查价值；此前 failed 分支漏抽 trace_id 是 pre-existing bug）。 */

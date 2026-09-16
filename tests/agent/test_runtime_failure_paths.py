@@ -21,6 +21,7 @@ from agent_harness.agent import AgentRuntime
 from agent_harness.agent.runtime import (
     _PROVIDER_FAILURE_MARKERS,
     PROVIDER_FAILURE_MESSAGES,
+    UNCLASSIFIED_FAILURE_MESSAGE,
 )
 from agent_harness.agent.types import STATUS_FAILED
 from agent_harness.session import (
@@ -81,6 +82,17 @@ class ListContentModel:
     async def astream(self, messages: list, **kwargs):
         yield AIMessageChunk(content=[{"type": "text", "text": "你好"}])
         yield AIMessageChunk(content=[{"type": "text", "text": "世界"}])
+
+
+class _ExplodingContextBuilder:
+    """ContextBuilder 替身：投影阶段抛错（模型调用之前）。
+
+    真实形状（#222 现场）：tiktoken 取词表时网络不可达 → `ContextBuilder.build`
+    先炸，`model_call_open` 从未置位。此时既没有 model/failed，也没有任何模型
+    事件——run/failed 是界面上唯一的信息来源。"""
+
+    async def build(self, session: Any) -> list:
+        raise RuntimeError("context build failed: <urlopen error 代理不可达>")
 
 
 def _runtime(model: Any, registry: ToolRegistry | None = None) -> AgentRuntime:
@@ -330,9 +342,12 @@ class TestProviderContentModerationClassification:
             assert "chatcmpl-88bc0696" not in str(event.data)
 
     @pytest.mark.asyncio
-    async def test_unclassified_failure_keeps_type_only_terminal(self, tmp_path):
-        """未分类错误保持原行为：model/failed 只带类型名，run/failed 不落
-        reason / message 键（合同：缺省 = 模型/执行器异常）。"""
+    async def test_unclassified_failure_terminal_carries_error_type(self, tmp_path):
+        """未分类错误的终态归因（#222）：reason 退到**错误类型名**、message 退到
+        固定可读兜底——界面据此能说出失败原因，而不是一个字都没有。
+
+        兜底文案里只代入类型名（项目自己拼的），不代入 ``str(error)``：下一段
+        断言的就是这条脱敏边界。"""
         session = make_session(tmp_path)
         runtime = _runtime(ExplodingModel())
 
@@ -342,15 +357,23 @@ class TestProviderContentModerationClassification:
         model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
         assert model_failed.data["message"] == "model call failed: RuntimeError"
         run_failed = next(e for e in session.events if e.type == RUN_FAILED)
-        assert "reason" not in run_failed.data
-        assert "message" not in run_failed.data
+        assert run_failed.data["reason"] == "RuntimeError"
+        assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+            error_type="RuntimeError",
+        )
+        # 脱敏不变量（OBS-008）：异常**正文**不进任何持久化事件，只进结构化日志。
+        # ExplodingModel 抛的是 "模拟 API 中断"；它不得出现在事件流里。
+        for event in session.events:
+            assert "模拟 API 中断" not in str(event.data), (
+                f"异常正文不得进持久化事件（{event.type}）"
+            )
 
     @pytest.mark.asyncio
     async def test_tool_phase_error_with_marker_not_misclassified(self, tmp_path):
         """分类只在模型调用在途时进行：工具/执行器阶段异常的错误文本即使恰好
         含 data_inspection_failed（如抓取到引用该错误码的文档），也不得误标——
         model_call_open 在模型完整返回后已复位（runtime.py「调用完整返回，
-        后续异常不再归因 model」）。"""
+        后续异常不再归因 model」）。未分类 ≠ 无归因：reason 落类型名。"""
         session = make_session(tmp_path)
         model = ToolCallThenExplodeModel({
             "name": "multiply",
@@ -374,10 +397,45 @@ class TestProviderContentModerationClassification:
 
         assert result.status == STATUS_FAILED
         run_failed = next(e for e in session.events if e.type == RUN_FAILED)
-        assert "reason" not in run_failed.data, "工具阶段异常不得误标内容审查"
-        assert "message" not in run_failed.data
+        assert run_failed.data["reason"] == "RuntimeError", (
+            "工具阶段异常不得误标内容审查；无分类可归时落类型名"
+        )
+        assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+            error_type="RuntimeError",
+        ), "未命中分类表 ⇒ 走未分类兜底文案，而不是内容审查那句"
         # 模型已完整返回（归因窗口已关）：不补 model/failed
         assert not [e for e in session.events if e.type == MODEL_FAILED]
+
+    @pytest.mark.asyncio
+    async def test_failure_before_model_window_names_cause_in_terminal(self, tmp_path):
+        """#222 形状（与真机那条**等价**，非同一异常类型：真机是 tiktoken 取词表
+        时 `ProxyError`，这里用替身抛 `RuntimeError`）：投影阶段就失败 ⇒ 归因窗口
+        从未打开 ⇒ 没有 model/failed。界面上唯一的信息来源是 run/failed，而它此前
+        连 reason 都没有键——用户看到的失败原因是空的。"""
+        session = make_session(tmp_path)
+        reg = ToolRegistry()
+        runtime = AgentRuntime(
+            model=ListContentModel(), registry=reg, executor=ToolExecutor(reg),
+            context_builder=_ExplodingContextBuilder(),
+        )
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert run_failed.data["reason"] == "RuntimeError"
+        assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+            error_type="RuntimeError",
+        )
+        # 归因窗口没开：不得凭空补一条 model/failed 把锅甩给模型
+        assert not [e for e in session.events if e.type == MODEL_FAILED]
+        # 模型替身本会成功：仍在 failed 说明错误确实来自投影阶段
+        assert not [e for e in session.events if e.type == RUN_COMPLETED]
+        # 脱敏：替身抛的正文（含"代理不可达"字样）不得落进任何事件
+        for event in session.events:
+            assert "代理不可达" not in str(event.data), (
+                f"异常正文不得进持久化事件（{event.type}）"
+            )
 
 
 # ---- #218：供应商账户 / 鉴权 / 模型不存在 → 固定可读文案 ----
@@ -485,7 +543,8 @@ class TestProviderFailureClassification:
     @pytest.mark.parametrize("case", list(PROVIDER_FAILURE_CASES))
     async def test_payload_upgrades_to_fixed_message(self, tmp_path, case):
         """命中分类表的载荷：model/failed 与 run/failed 都带固定可读文案，
-        且**任何**持久化事件都不含载荷原文；未命中的载荷保持类型名原行为。"""
+        且**任何**持久化事件都不含载荷原文；未命中的载荷退到类型名归因（#222：
+        reason 总有值，message 仍只落固定文案）。"""
         spec = PROVIDER_FAILURE_CASES[case]
         session = make_session(tmp_path)
         runtime = _runtime(ProviderErrorBodyModel(spec["payload"]))
@@ -497,8 +556,12 @@ class TestProviderFailureClassification:
         run_failed = next(e for e in session.events if e.type == RUN_FAILED)
         if spec["expected"] is None:
             assert model_failed.data["message"] == "model call failed: RuntimeError"
-            assert "reason" not in run_failed.data
-            assert "message" not in run_failed.data
+            assert run_failed.data["reason"] == "RuntimeError", (
+                "未命中分类表：终态归因退到错误类型名，不是留空"
+            )
+            assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+                error_type="RuntimeError",
+            )
         else:
             reason, message = spec["expected"]
             assert run_failed.data["reason"] == reason

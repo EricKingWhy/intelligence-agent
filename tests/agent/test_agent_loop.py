@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED
+from agent_harness.session import RUN_FAILED
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -261,7 +262,11 @@ TOOL_CALL_ID_LOOP = "call_loop"
 class TestAgentLoopMaxSteps:
     @pytest.mark.asyncio
     async def test_max_steps_exceeded_with_exact_step_count(self, tmp_path):
-        """模型不收敛 + max_steps=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。"""
+        """模型不收敛 + max_steps=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。
+
+        #222 追加：这条终态此前 run/failed 里**没有任何键**，"步数用尽"只活在后端
+        进程日志里；现在 reason 落常量，durable 历史自己说得清为什么失败。
+        """
         rounds = [
             AIMessage(
                 content="",
@@ -278,13 +283,19 @@ class TestAgentLoopMaxSteps:
         ]
         scripted = ScriptedModel(rounds)
         runtime = _runtime(scripted, max_steps=3)
+        session = make_session(tmp_path)
 
-        result = await runtime.run(make_session(tmp_path), "永远算不完")
+        result = await runtime.run(session, "永远算不完")
 
         assert result.status == STATUS_MAX_STEPS_EXCEEDED
         assert result.final_text == ""
         assert result.steps == 3
         assert len(scripted.snapshots) == 3
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert run_failed.data["reason"] == "max_steps_exceeded"
+        # 文案复用 agent_decision 日志里的同一句：模型不收敛是**可读**的结局，
+        # 不是又一个机器码（reason 已有码，message 给人看）
+        assert run_failed.data["message"] == "连续 3 轮仍在请求工具，触发保险丝"
 
     @pytest.mark.asyncio
     async def test_convergence_on_last_step_is_completed_not_exceeded(self, tmp_path):

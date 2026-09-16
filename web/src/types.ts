@@ -550,9 +550,10 @@ export interface ConversationState {
    *  ——UI 应说「首个步骤开始前中断」，不要渲染成「第 ? 步」。 */
   run_interrupted: { step_id: number | null; interrupted_seq: number | null; reason: string } | null;
   /** #220：`run/failed.data` 的失败归因折叠。两个键**互相独立**（`session.end_run` 各自
-   *  判空）：`reason` 是机器可读分类码（如 `provider_account_unavailable`），`message`
-   *  是随附文案——已分类的供应商故障给固定中文句，但上下文超限路径给的是内部英文串，
-   *  **不可假定它必然是可读中文**；缺 message 而有 reason 也是合法载荷（工具失败保险丝）。
+   *  判空）：`reason` 是机器可读码——已分类故障给 `provider_*`，未分类给异常类型名
+   *  （#222 起 reason 在运行期路径上**总有值**），`message` 是随附文案——已分类的供应商
+   *  故障与未分类异常都给固定中文句，但上下文超限路径给的是内部英文串，
+   *  **不可假定它必然是可读中文**。
    *
    *  缺失即 null，**绝不伪造文案**；取消不算失败归因（取消 ≠ 错误，da394a9）。
    *  失效规则与三态的呈现口径见 `docs/adr/0033-run-failure-attribution-surface.md`。 */

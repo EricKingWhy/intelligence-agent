@@ -1450,8 +1450,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         （另一个是孤儿回收）。语义：在途 → 200 cancelling；无在途 run →
         200 no_active_run（幂等成功：用户按 Esc 与 run 恰好刚终结的竞态是
         常态不是错误）；session 不存在 → 404。取消与失败不混淆（02 §17）：
-        run/failed data.reason=cancelled，与异常臂（无 reason）、孤儿回收
-        （reason=orphaned）区分。
+        run/failed data.reason=cancelled，与异常臂（reason=分类码或异常类型名）、
+        孤儿回收（reason=orphaned）区分。
         """
         service = SessionService(app.state.agent)
         try:
