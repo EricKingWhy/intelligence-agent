@@ -74,6 +74,15 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 
 **Phase 进度**：读 `docs/PHASE_STATUS.md`——它是实施进度的单一事实源（每个 Phase 的状态 + commit + Gate 证据）。规格文件保持冻结，进度变更只更新 PHASE_STATUS.md。
 
+> **该文件的结构（2026-09-17 起）**：`PHASE_STATUS.md` 只留**当前态**（Phase 进度表 + 当前焦点）与**索引**；
+> 逐条批次 / 集成 / 审查记录在 `docs/phase_status/<年-月>.md`（当月归档）。查历史时按索引里的
+> 「按日定位」用 `Read` + `offset/limit` **只读那一段**，或先 `grep -n "关键词" docs/phase_status/*.md` 定位。
+> **不要整文件读**（拆分前它是 565 KB，一次吃掉整个上下文）；**单条 bullet 上限 2000 字符**，超出就只留索引一行 + 正文进归档。
+>
+> ⚠ **读这些中文大文件的工具纪律**：用 `Read`（含 `offset`/`limit`）或 `Grep`；**不要用 `tail` / `sed` / `cat` / `head`**
+> 读——Windows Git Bash 的 GBK 控制台会把 UTF-8 显示成乱码（实测踩过两次，其中一次差点拿乱码当编辑锚点）。
+> 需要看大文件末尾时用 `Read` 的 `offset`，或用 `grep -c ""` 先取行数。
+
 ---
 
 # 3. 每个 Task 的阅读协议
@@ -156,9 +165,16 @@ Review 必须同时看：
 
 ## 4.3 Security Check
 
+**第 0 条（用户 2026-09-16 定下的红线，本节最高优先）——凭证零泄漏**：
+`.env` 的值绝不打印、不提交、不复制进任何文档或命令输出；可以列 key **名**，不可列 key **值**。
+（原先只写在 `CLAUDE.md` §3，2026-09-17 搬到此处：本文件是所有 Agent 的默认行为来源，只读
+`CLAUDE.md` 的 Claude 之外的 Agent 拿不到它；`CLAUDE.md` 相应改为指针，避免两处漂移。）
+
 至少关注：
 
-- Secret 泄露；
+- Secret 泄露（含**测试/探针**：实测教训——用例拿真 `SystemCredentialStore` + 带 key 的 `create`
+  会往系统凭据管理器写进一条假 key，且 monkeypatch 让删除必失败时**删不掉**，残留只能手工清；
+  探针供应商写进全局 `model-providers.json` 会让 3 条内置目录断言变红）；
 - Prompt 不能替代 Runtime 权限；
 - 命令执行；
 - Path Traversal；
@@ -452,18 +468,27 @@ Scope 外问题只报告，不顺手修。
 5. 以下本地内容**不要求**跨仓库同步：`.env`、`.venv`、cache、`logs`、IDE 临时文件、
    runtime 临时文件、secrets。
 
-## 13.2 核心模型：main 是稳态，干活开短分支
+## 13.2 核心模型：main 是稳态，干活开短分支（或直接在施工 clone 的 main 上提交）
 
 ```text
 平时：三个 clone 都停在 main —— "三方一致"是默认状态，一条命令可验
-干活：在任意一个 clone 开短分支 → 施工 → 门禁 → 合回 main → push
+干活（两种都被授权，按并行度选）：
+ (a) 短分支：施工 clone 开短分支 → 施工 → 门禁 → 合回 main → 集成 → push
+ (b) 直接在**施工 clone** 的 main 上提交（单线作业时的常态）
 ```
 
-不变式（可一行验证）：
+不变式（仅在走 (a) 时成立，可一行验证）：
 
 ```bash
 git merge-base --is-ancestor main <feature-branch>   # main 永远是 feature 分支的祖先
 ```
+
+**两种走法的实际差别（2026-09-17 实测）**：走 (b) 时集成是 `git merge --ff-only`、不产生
+merge commit，§13.4 与 §14.6 的「先回后正」那一步自动消失；走 (a) 时它才真正发生。
+**什么时候必须走 (a)**：同一个 clone 上有第二个会话 / agent 在写（并行分歧会污染"三方一致"），
+或者需要在合入前让别人能指名称地 review 一条分支。
+⚠ 走 (b) 时**上面那条不变式无从验证**（没有 feature branch）——此时"三方一致"退化为
+「三个 clone 的 `main` 指向同一个 commit」+ §14.9 的集成后回补自检。
 
 **不要**把某个仓库长期挂在一条 feature 分支上：那样"三方一致"只能靠人记得维持，
 每次集成之后另一条线会静默落后（历史上就是这么欠账的）。
@@ -500,10 +525,16 @@ revert、冲突后的 add、删分支。）
 origin/main
 → 先把 main 合回你的短分支（§14.6「先回后正」）：冲突与测试都在短分支上解决，
   不把过期分支直接合进 main
-feature branch
+（若走 §13.2(b) 即直接在施工 clone 的 main 上提交，则没有这一步，直接对账）
 → diff 检查 + 门禁全绿（§14.10）
-→ merge 到本地 main
-→ 在 D:\intelligence-agent 启动完整项目 / 跑全量门禁
+→ **审查覆盖闸门**：`scripts/check_review_coverage.sh`
+   （范围 `<最早台账 base>..HEAD` 的每条 commit 必须落在某次审查范围内，或为 docs-only 白名单；
+    台账 `docs/review_ledger.tsv`，规则见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5）
+→ merge 到本地 main（快进优先）
+→ **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
+   与施工 clone 的 `HEAD^{tree}` 比——**相等即证明"我跑过门禁的那棵树"就是"被集成的这棵树"**，
+   不必再跑一遍（2026-09-17 实测：两 clone tree 同为 `e63c202…`，省掉一次 ~20 分钟的前后端全量）。
+   不等（例如集成 clone 的检出行尾/CRLF 造成差异、或合入时产生新内容）⇒ 在集成 clone 里跑全量门禁
 → 确认前后端集成正常
 → git push origin main（当前主开发执行，常设授权见 §14.4）
 → 通知另一条线把 main 合回来（§14.9）
@@ -843,8 +874,16 @@ CSS 原生没有变量组复用机制，手工双份同步是当前最小风险�
 | 内容 | 落点 |
 | --- | --- |
 | 在途 ticket、批次、fixed point、审查结论 | `docs/SDD_TICKET_TRACKER.md` |
-| Phase 状态、关键 commit、Gate 证据、集成记录 | `docs/PHASE_STATUS.md` |
+| Phase 状态、当前焦点、历史索引 | `docs/PHASE_STATUS.md`（**只放索引一行 + 行号指针**） |
+| 批次 / 集成 / 审查的**逐条明细** | `docs/phase_status/<年-月>.md`（当月归档，按需读） |
+| 机读的审查范围台账（覆盖闸门的输入） | `docs/review_ledger.tsv` |
 | 一次性集成执行资料 | `docs/integration/`、`docs/INTEGRATION_PROMPT_*.md` |
+
+**同一事实只在一处写全，其余处只留指针**（2026-09-17 立的规矩，起因：一条机制描述同时住在
+ADR、用例头注释、设计稿、tracker 四处，其中一处被后来的实测**推翻**，改一处要改四处才自洽）。
+落点约定：**机制 / 决议的完整叙述 → ADR**（或设计稿）；**代码注释只写"这段代码自己看不出来的
+操作约束 + 指向 ADR 的一句指针"**；tracker / PHASE_STATUS 只写操作性事实（批次、commit、
+门禁数字、结论一行）+ 指针。跨文件重复叙述属于要被清理的债务，不是"写详细一点"。
 
 规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等）保持冻结，进度变更不回写规格。
 

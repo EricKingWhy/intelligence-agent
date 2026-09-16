@@ -1,0 +1,24 @@
+# 审查台账（review ledger）—— `scripts/check_review_coverage.sh` 的机械输入
+#
+# 为什么有这个东西：v2 协议的「fixed point = 上一批审查结束时的 commit」一直是**手抄进
+# tracker 的一个数字**，抄错一格就静默豁免一票（#213 就这样从未被任何 review 读过）；
+# 而「修复 commit = 下一批的 fixed point」意味着**交付周期里最后一次审查的修复提交没有
+# 下一批**（实测 `9f2a8f8` 免疫进了 main，复验才发现它带着一个真 bug）。所以把"哪些
+# commit 被审查过"变成机器可读的一行行，交付前由脚本对账。
+#
+# 审查行：  <日期>\t<范围描述>\t<base>..<tip>
+#   base = fixed point（累计 diff 的起点，**不含**该 commit）；tip = 本次审查实际读到的末条 commit。
+#   多次/多段审查各写一行，并集即"已审查范围"。
+#
+# [whitelist] 段：  <sha>\t<原因>
+#   只收 **docs-only** commit——脚本自己校验改动文件是否全部命中文档模式，代码提交
+#   不能靠白名单放行，只能去补一次审查（这正是闸门要挡住的那一类）。
+#
+# 新增审查后请同时更新 `docs/SDD_TICKET_TRACKER.md` 的批次行（人读）与这里（机读）。
+#
+2026-09-17	批① 两轴批量审查（Standards + Spec，独立子代理；#214/#215/#216）	6f81c6e..fdb9ce3
+2026-09-17	复验 A：#213 的两轴独立审查（该票此前从未被 review 覆盖）	089524a~1..6f81c6e
+2026-09-17	复验 B：批① + 修复 9f2a8f8（修复提交此前结构性免疫）的两轴独立审查	6f81c6e..44f48c7
+#
+[whitelist]
+e125e27	tracker + PHASE_STATUS 记录（docs-only）
