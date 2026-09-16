@@ -32,10 +32,19 @@ if [ "${1:-}" = "--list" ]; then LIST_ONLY=1; fi
 [ -f "$LEDGER" ] || { echo "找不到台账 $LEDGER"; exit 1; }
 
 # 临时文件：早退分支（台账 base 不存在等）也要收干净——否则"闸门报错"顺手在 /tmp 留垃圾
-TMP_FILES=""
-cleanup() { [ -n "$TMP_FILES" ] && rm -f $TMP_FILES; }
+TMP_FILES=()
+cleanup() {
+  if [ "${#TMP_FILES[@]}" -gt 0 ]; then
+    rm -f -- "${TMP_FILES[@]}"
+  fi
+}
 trap cleanup EXIT
-mktmp() { local f; f="$(mktemp)"; TMP_FILES="$TMP_FILES $f"; printf '%s' "$f"; }
+mktmp() {
+  local f
+  f="$(mktemp)"
+  TMP_FILES+=("$f")
+  printf '%s' "$f"
+}
 
 # 文档模式：白名单里的 commit 必须**全部**改动都命中这些（代码永远进不了白名单）
 DOC_PATTERN='^(docs/|web/PRODUCT\.md|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md$)'
@@ -90,8 +99,11 @@ while read -r sha; do
   subject=$(git log -1 --pretty=%s "$sha")
   reason=""
   for w in ${wl[@]+"${wl[@]}"}; do
-    IFS=$'\t' read -r wsha wreason <<< "$w"
-    if [ "$(git rev-parse --short "$(git rev-parse "$wsha^{commit}")")" = "$short" ]; then reason="$wreason"; fi
+    # 整行匹配（不经 word-splitting 的字段拆分）：原因文本含空格时 `read -r wsha wreason`
+    # 仍把剩余部分当**一个** reason；逐行比对而非拆词，避免含空格的原因被拆散后误匹配
+    case "$w" in
+      "$short"$'\t'*) reason="${w#*$'\t'}" ;;
+    esac
   done
   if [ -z "$reason" ]; then
     echo "❌ 未审查且未声明: $short  $subject"
