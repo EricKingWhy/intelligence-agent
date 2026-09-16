@@ -9,10 +9,17 @@
 | 角色 | 值 |
 | --- | --- |
 | 前端 | `D:\intelligence-agent-frontend`（branch `feat/frontend`），dev server `:5173` |
-| 后端 | `:8000`——**由启动者决定是哪个 worktree**（见 §3） |
+| 后端 | `:8000`——**由启动者决定是哪个 clone**（见 §3） |
 | 代理关系 | `web/vite.config.*` 把 `/api` **硬编码**代理到 `http://127.0.0.1:8000`，不读环境变量 |
 
 推论：**`:8000` 上是谁，这条车道就在验谁。** 前端只是如实渲染后端给的事件与能力。
+
+> **与 e2e 门禁的端口冲突（#209）**：本车道的 `:5173` 正是 `web/playwright.config.ts`
+> 写死的那个端口。若验收用的 frontend clone 常驻 dev server 还开着，任何一仓跑
+> `npx playwright test` 都会**拒绝启动**并打印占用者是谁（`reuseExistingServer: false`
+> + `vite --strictPort` + `scripts/preflight-port.mjs` 预检），这是**有意的**：复用别人
+> 的 server 会让门禁的绿/红指向另一个 clone 的代码（#209 实测 18 failed 假红）。
+> 两件事要错开做：验收时占着 5173，跑门禁前先结束它（`taskkill /PID <pid> /F`）。
 
 ## 2. 期望能力集（`/api/capabilities` 是唯一判据）
 

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:e2e": "node scripts/preflight-port.mjs && vite --strictPort",
     "build": "tsc -b && vite build",
     "gen:event-types": "uv run python ../scripts/gen_event_types.py",
     "lint": "oxlint",

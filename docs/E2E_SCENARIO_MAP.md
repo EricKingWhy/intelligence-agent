@@ -59,3 +59,35 @@
 - 本仓 node_modules 为 **pnpm 布局**：装依赖用 `pnpm add`，npm 会报
   `edgesOut` 错误；跑 playwright 用 `pnpm exec playwright test`（npx 会命中
   全局缓存里的旧版）。
+
+- **dev server 端口（5173）必须由本次门禁自己独占**（#209）。三个 clone 的
+  `playwright.config.ts` 都写死 `baseURL: http://localhost:5173`，过去本地是
+  `reuseExistingServer: !CI` + vite 默认「端口被占就换一个」，于是：
+
+  | 场景 | 后果 |
+  | --- | --- |
+  | 5173 上是**另一个 clone** 的 vite | Playwright 复用它 ⇒ 用本仓的 spec 测别人的代码。实测 **18 failed 假红**（`d-recover`/`e-reconnect`/`k-refresh-restore`/`n-approval-card`/`o-wait-hint`），排查约 20 分钟 |
+  | 同上但两边的代码恰好等价 | **假绿**——数字指向的不是本次改动 |
+
+  现在的机制（`web/playwright.config.ts` + `web/scripts/preflight-port.mjs`）：
+
+  1. 端口被占 → **配置加载期就失败**（`assertPortFree`），报错里直接打出占用者的
+     **PID / 仓库根 / 命令行**，例如
+     `仓库根: D:\intelligence-agent-frontend`；
+  2. `reuseExistingServer: false`（本地也是）⇒ 永不静默复用；
+  3. `vite --strictPort` ⇒ 被占时拒绝启动，而不是换端口（换端口会让 Playwright
+     等一个没人监听的 URL）。
+
+  手工预检（排查时用，门禁链路不需要人工步骤）：
+
+  ```bash
+  cd web && node scripts/preflight-port.mjs        # 默认 5173
+  cd web && node scripts/preflight-port.mjs 5174   # 查别的端口
+  ```
+
+  ⚠ 报出占用者后要**结束那个进程**再重跑（`taskkill /PID <pid> /F`）。
+  另注：`--list`（只列用例）会跳过端口检查——本机有 dev server 时也能数用例。
+
+  ⚠ 实现陷阱（已踩）：Windows 上 `netstat -p TCP` **只列 IPv4**，而 vite 绑的是
+  `[::1]` —— 用 `-p TCP` 过滤会对着真实的 vite 监听报「端口空闲」。
+  必须全量 `netstat -ano` 并在协议列上认 `TCP` 与 `TCPv6`。
