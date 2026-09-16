@@ -15,7 +15,7 @@
 
 ## 工程依据
 
-- 规格：`docs/spec/11_STREAMING_API_WEB_UI.md`（SSE / REST）、`docs/spec/12_OBSERVABILITY_EVALUATION.md`（usage / trace_id / Langfuse 关联）
+- 规格：`goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/11_STREAMING_API_WEB_UI.md`（SSE / REST）、`goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/12_OBSERVABILITY_EVALUATION.md`（usage / trace_id / Langfuse 关联）
 - 不变量：#4（Event ≠ Diagnostic Log——usage 等进 SessionEvent.data，不进日志）、#22（前端单一真相源）
 - 前端消费者：`web/src/components/StepDetail.tsx`（MODEL 空槽 §250 / CHECKPOINT 空槽 §256）、`web/src/hooks/useSession.ts`（titlesById 缓存来自首条 user/message event）
 
@@ -45,7 +45,7 @@
      "trace_id": "lf-xxxxxx"               // 新增（与 Gap 2 复用）
    }
    ```
-3. 后端从阿里云百炼 API 响应直接抽取（已有 `model` 字段，usage 在响应 `usage` key）；cost 按 `docs/spec/12_OBSERVABILITY_EVALUATION.md` 定义的费率表计算（若无费率表，先记 `cost_usd: null` + 加 TODO，不伪造）
+3. 后端从阿里云百炼 API 响应直接抽取（已有 `model` 字段，usage 在响应 `usage` key）；cost 按 `goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/12_OBSERVABILITY_EVALUATION.md` 定义的费率表计算（若无费率表，先记 `cost_usd: null` + 加 TODO，不伪造）
 4. 前端 `types.ts` `EventType.MODEL_COMPLETED` / `RUN_COMPLETED` 的 `data` 类型同步扩展为可选字段；`projection.ts` summarizeEvent 增加这些字段的摘要逻辑
 5. **绝不伪造**：字段缺失时返回 `null` / 省略，不要默认值填零（不变量 #22 + 零伪造指标冻结决策）
 
