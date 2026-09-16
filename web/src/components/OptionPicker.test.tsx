@@ -92,20 +92,29 @@ describe('toCatalogOptions — 目录 → 选项的唯一映射点', () => {
     ]);
   });
 
-  it('iconOf 给了映射表 → 已知 id 带 icon，未知 id **不带**（槽由渲染层补，不编字形）', () => {
-    // 真实 id（后端 PermissionPolicy 的三个值）都在 catalogIcons 表里
+  it('iconOf：带已知 icon 名的条目出图标；未知名 / 缺键**不带**（槽由渲染层补，不编字形）', () => {
+    // #214：名由后端声明（`web/app.py::CATALOG_ICON_NAMES`），这里用内置条目的真名
     const real: CatalogEntry[] = [
-      { id: 'read-only', display_name: '只读', description: '' },
-      { id: 'workspace-write', display_name: '工作区写入', description: '' },
+      { id: 'read-only', display_name: '只读', description: '', icon: 'lock' },
+      { id: 'workspace-write', display_name: '工作区写入', description: '', icon: 'pencil' },
     ];
     const withIcons = toCatalogOptions(real, catalogIcon);
     expect(withIcons[0].icon).toBeDefined();
     expect(withIcons[1].icon).toBeDefined();
-    // 后端扩展出来的档位（夹具里的 mode-0…mode-5）：**不给字形**——给未知 id 编一个
-    // 字形正是产品禁止的「编占位」；行仍然对齐，因为槽是渲染层恒渲染的。
-    const unknown = toCatalogOptions([{ id: 'mode-7', display_name: 'M7', description: '' }], catalogIcon);
+    // 后端扩展出来的档位声明了一个前端还不认识的名：**不给字形**——给未知名编一个字形
+    // 正是产品禁止的「编占位」；行仍然对齐，因为槽是渲染层恒渲染的。
+    const unknown = toCatalogOptions(
+      [{ id: 'mode-7', display_name: 'M7', description: '', icon: 'sparkles' }],
+      catalogIcon,
+    );
     expect(unknown[0].icon).toBeUndefined();
     expect('icon' in unknown[0]).toBe(false);
+    // 缺键（老载荷 / 部署自定义档位）：留空槽，**不拿 id 去猜**
+    const noKey = toCatalogOptions(
+      [{ id: 'read-only', display_name: '只读', description: '' }],
+      catalogIcon,
+    );
+    expect(noKey[0].icon).toBeUndefined();
   });
 
   it('不传 iconOf → 一个 icon 都不产出（老调用点零改动）', () => {

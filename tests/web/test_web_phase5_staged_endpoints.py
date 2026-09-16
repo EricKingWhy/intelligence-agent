@@ -20,7 +20,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
-from agent_harness.web.app import create_app
+from agent_harness.web import app as web_app
+from agent_harness.web.app import CATALOG_ICON_NAMES, create_app
 
 
 @pytest.fixture
@@ -53,11 +54,11 @@ class TestReasoningEfforts:
             assert e["description"], "每个 effort 必须有 description"
 
     def test_schema_locked(self, bare_client):
-        """字段 schema 锁定：每条 entry 必须含 id / display_name / description。"""
+        """字段 schema 锁定：每条 entry 必须含 id / display_name / description / icon。"""
         resp = bare_client.get("/api/reasoning-efforts")
         body = resp.json()
         for e in body["efforts"]:
-            assert set(e.keys()) == {"id", "display_name", "description"}
+            assert set(e.keys()) == {"id", "display_name", "description", "icon"}
             assert isinstance(e["id"], str)
             assert isinstance(e["display_name"], str)
             assert isinstance(e["description"], str)
@@ -89,12 +90,12 @@ class TestAgentProfiles:
             assert p["description"], "每个 profile 必须有 description"
 
     def test_schema_locked(self, bare_client):
-        """字段 schema 锁定：每条 entry 必须含 id / display_name / description / tool_scope。"""
+        """字段 schema 锁定：每条 entry 必须含 id / display_name / description / icon / tool_scope。"""
         resp = bare_client.get("/api/agent-profiles")
         body = resp.json()
         for p in body["profiles"]:
             assert set(p.keys()) == {
-                "id", "display_name", "description", "tool_scope",
+                "id", "display_name", "description", "icon", "tool_scope",
             }
             assert isinstance(p["id"], str)
             assert isinstance(p["display_name"], str)
@@ -208,3 +209,58 @@ class TestContextProviders:
         resp = bare_client.get("/api/context-providers")
         body = resp.json()
         assert set(body.keys()) == {"providers"}
+
+
+# ── #214：三个目录端点的 icon 语义名 ──
+
+
+class TestCatalogIcons:
+    """#214：三个目录端点在内置条目上下发**稳定**的 `icon` 名。
+
+    锁三件事：
+    ① 逐值稳定——把 `read-only` 的图标名从 `lock` 改成别的，前端那一行的字形会
+       **静默变空**（未知名留空槽，不报错），所以必须逐条钉住，不能只断言"有值"；
+    ② 下发名全部 ∈ `CATALOG_ICON_NAMES`（稳定取值集，不是自由字符串）；
+    ③ 该集合与三个目录**实际下发的并集相等**——多一个名 = 文档里有但没人用，
+       少一个 = 有人下发了一个没登记的名。
+    """
+
+    def test_icon_names_are_declared_and_exact(self, bare_client):
+        modes = bare_client.get("/api/permission-modes").json()["modes"]
+        efforts = bare_client.get("/api/reasoning-efforts").json()["efforts"]
+        profiles = bare_client.get("/api/agent-profiles").json()["profiles"]
+
+        emitted = ({m["icon"] for m in modes}
+                   | {e["icon"] for e in efforts}
+                   | {p["icon"] for p in profiles})
+        assert emitted == CATALOG_ICON_NAMES
+
+        assert {m["id"]: m["icon"] for m in modes} == {
+            "read-only": "lock",
+            "workspace-write": "pencil",
+            "danger-full-access": "unlock",
+        }
+        assert {e["id"]: e["icon"] for e in efforts} == {
+            "minimal": "bolt",
+            "standard": "gauge",
+            "deep": "telescope",
+        }
+        assert {p["id"]: p["icon"] for p in profiles} == {
+            "main": "layers",
+            "coding": "code",
+            "research_review": "search",
+        }
+
+    def test_entry_without_icon_yields_null(self, bare_client, monkeypatch):
+        """没有 icon 的条目 → `null`（前端留空槽），**不得**回落成 id、也不得编一个名。
+
+        这是"部署/后端扩展目录"的未来路径（#214 要解决的正是它）：加一条不带 icon 的
+        档位时载荷必须是 null，而不是让前端拿 id 去猜。
+        """
+        monkeypatch.setitem(
+            web_app.REASONING_EFFORT_DESCRIPTIONS, "custom",
+            {"display_name": "自定义档", "description": "部署自带档位"},
+        )
+        efforts = bare_client.get("/api/reasoning-efforts").json()["efforts"]
+        [custom] = [e for e in efforts if e["id"] == "custom"]
+        assert custom["icon"] is None

@@ -113,14 +113,17 @@ REASONING_EFFORT_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "minimal": {
         "display_name": "轻量",
         "description": "最少推理开销，最快但不够深入。",
+        "icon": "bolt",
     },
     "standard": {
         "display_name": "标准",
         "description": "平衡的推理深度，适用于常规任务（默认）。",
+        "icon": "gauge",
     },
     "deep": {
         "display_name": "深度",
         "description": "较高推理开销，较慢但更深入。",
+        "icon": "telescope",
     },
 }
 
@@ -136,16 +139,31 @@ AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "main": {
         "display_name": "通用",
         "description": "通用编排 Agent（默认）。含全部工具（读写、执行、检索、网络、委派）。",
+        "icon": "layers",
     },
     "coding": {
         "display_name": "编程",
         "description": "专精代码编辑、调试和构建任务。可读写与执行命令；不含网络检索。",
+        "icon": "code",
     },
     "research_review": {
         "display_name": "研究审查",
         "description": "专精研究、检索和审查任务。只读：不含 write / edit / apply_patch / bash。",
+        "icon": "search",
     },
 }
+
+#: 目录条目允许的 `icon` 语义名（#214）——**稳定取值集**，不是自由字符串。
+#: 三个目录端点（/api/permission-modes、/api/reasoning-efforts、/api/agent-profiles）
+#: 的每条内置条目都从本集合里取一个名；前端 `web/src/lib/catalogIcons.ts` 是这些名
+#: → 字形的**唯一**映射处（未知名/缺键 ⇒ 留空槽，不编字形）。
+#: 增删名必须两端一起改（本集合 + 前端映射 + `tests/web/test_web_phase5_staged_endpoints.py`
+#: 的逐值断言）；跨语言、跨目录，改这里不会自动同步过去。
+CATALOG_ICON_NAMES: frozenset[str] = frozenset({
+    "lock", "pencil", "unlock",      # 权限模式：只读 / 工作区写入 / 完全访问
+    "layers", "code", "search",      # agent 档位：通用 / 编程 / 研究审查
+    "bolt", "gauge", "telescope",    # 推理深度：轻量 / 标准 / 深度
+})
 
 #: context_providers 已装配清单投影（ADR-0020b，已运行时消费——按 name 筛选
 #: wiring 自动装配的 ContextProvider 子集注入 ContextBuilder）。id 必须与
@@ -1105,12 +1123,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         返回 PermissionPolicy 全集 + 人类可读描述。诚实标注：当前 Web 层
         auto_approve 默认开（同步 callback），交互式审批是 Phase 5 的工作——
         这里只暴露「后端认识哪些 mode」，不假装审批已就绪。
+
+        #214 加法：每条带 ``icon``（**语义名**，取值集 CATALOG_ICON_NAMES）——
+        前端把它映射成行首字形；未知名/缺键 ⇒ 留空槽，两端都不编字形。
         """
         modes = [
             {
                 "id": policy.value,
                 "display_name": desc["display_name"],
                 "description": desc["description"],
+                # #214：`icon` 键**恒在**（未声明时为 null）——它是语义名、不是字形，
+                # 前端映射已知名，未知名/缺键一律留空槽（取值集见 CATALOG_ICON_NAMES）。
+                "icon": desc.get("icon"),
             }
             for policy, desc in PERMISSION_MODE_DESCRIPTIONS.items()
         ]
@@ -1155,7 +1179,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         reasoning_effort 已被运行时真实消费：harness 语义档位经
         create_chat_model 翻译为 provider 线格式枚举后注入（翻译表在
         model/provider.py）；本端点暴露「后端认识哪些档位」。
-        字段与 /api/permission-modes 同模式（{id, display_name, description}），
+        字段与 /api/permission-modes 同模式（{id, display_name, description, icon}），
         单一事实源是模块级 REASONING_EFFORT_DESCRIPTIONS（validator 与清单
         引用同一份 → 永不漂移）。
         """
@@ -1164,6 +1188,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 "id": effort_id,
                 "display_name": desc["display_name"],
                 "description": desc["description"],
+                "icon": desc.get("icon"),  # #214，与 /api/permission-modes 同形状
             }
             for effort_id, desc in REASONING_EFFORT_DESCRIPTIONS.items()
         ]
@@ -1174,7 +1199,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """列出 agent_profile 可选档位（Ticket B1，SDD 03 §16 对齐 Phase 5）。
 
         同 reasoning-efforts：Phase 5 staged 契约的清单投影，运行时 no-op 不变。
-        字段与 /api/permission-modes 同模式，单一事实源是 AGENT_PROFILE_DESCRIPTIONS。
+        字段与 /api/permission-modes 同模式（含 #214 的 `icon`），单一事实源是
+        AGENT_PROFILE_DESCRIPTIONS。
 
         #201 加法：每条带 ``tool_scope``（档位收窄披露的数据面）——
         ``{open, total, excluded}``，值来自 `agent/profiles.py` 的
@@ -1188,6 +1214,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 "id": profile_id,
                 "display_name": desc["display_name"],
                 "description": desc["description"],
+                "icon": desc.get("icon"),  # #214，与 /api/permission-modes 同形状
                 "tool_scope": tool_scope_summary(profile_id),
             }
             for profile_id, desc in AGENT_PROFILE_DESCRIPTIONS.items()

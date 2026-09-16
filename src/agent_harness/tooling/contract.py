@@ -107,18 +107,23 @@ class PermissionPolicy(str, Enum):
 #: 各权限模式的可读描述（SDD 03 §10，Phase 2 加法）：用于 GET /api/permission-modes
 #: 端点向前端暴露「后端能真实执行的 mode 列表」+ 人类可读说明。如实描述，
 #: 不假装交互式审批已就绪（那是 Phase 5）。display_name 给 UI 标签，description 给 tooltip。
+#: `icon`（#214）是**语义名**不是字形——前端把已知名映射成字形、未知名留空槽；
+#: 允许的取值集在 `web/app.py::CATALOG_ICON_NAMES`（三个目录端点共用，有测试锁）。
 PERMISSION_MODE_DESCRIPTIONS: dict[PermissionPolicy, dict[str, str]] = {
     PermissionPolicy.READ_ONLY: {
         "display_name": "只读",
         "description": "可读文件和运行只读工具，不可写入。",
+        "icon": "lock",
     },
     PermissionPolicy.WORKSPACE_WRITE: {
         "display_name": "工作区写入",
         "description": "可读写工作区内文件；高危工具仍需审批。",
+        "icon": "pencil",
     },
     PermissionPolicy.DANGER_FULL_ACCESS: {
         "display_name": "完全访问",
         "description": "所有工具无需审批，含网络/系统副作用。仅在可信环境使用。",
+        "icon": "unlock",
     },
 }
 

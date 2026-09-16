@@ -1,49 +1,50 @@
-/** 目录条目 id → 行首图标（#201 冻结行「每行 20px 图标槽」的呈现数据）。
+/** 目录条目 `icon` 语义名 → 行首图标（#201 冻结行「每行 20px 图标槽」的呈现数据）。
  *
- * ## 为什么是**按已知 id 的映射**，而不是从后端来的字段
+ * ## 数据来源：后端声明的**语义名**，不是前端按 id 猜
  *
- * 三份目录的条目契约是 `CatalogEntry {id, display_name, description}`，**没有** per-option
- * 图标数据。这里给的是**内置 id → 字形**的映射，它不是"编占位"，而是与"选中态用哪种
- * 颜色"同一类**呈现选择**：`read-only` 是只读、`workspace-write` 是写入、`main` 是通用
- * 编排——每个字形都对应这个档位**真实存在的语义**，不宣称任何数据。
+ * #214 之前这里是**按条目 id** 映射（`read-only` → 锁、`main` → 分层…）。那样只有内置
+ * id 有图标：目录一旦被扩展（新档位、新权限模式、部署自带条目），那一行永远没有图标——
+ * 前端没有渠道知道该画什么。现在三个目录端点（`/api/permission-modes`、
+ * `/api/reasoning-efforts`、`/api/agent-profiles`）在内置条目上下发 `icon` 名
+ * （后端 `web/app.py::CATALOG_ICON_NAMES` 是取值集的单一归属），本模块把**已知名**
+ * 映射成字形。
  *
- * ## 未知 id：留空槽，不编字形
+ * ## 未知名 / 缺键：留空槽，不编字形
  *
- * 目录是可扩展的（后端加一个档位、夹具里就有 `mode-0…mode-5`），未知 id 一律返回
- * `undefined` ⇒ 那一行的图标槽**渲染成空的 20px**（对齐不破，见 `OptionPicker`：
- * 槽恒在，内容可空）。给未知 id 编一个字形才是本产品明令禁止的「编占位」
- * （PRODUCT.md 原则 3「真实优先于好看」）。
- *
- * 这条残留缺口（部署自定义的档位/模式拿不到图标）已开 issue 登记：
- * 需要后端在目录条目上给一个可选 `icon` 键，前端再把已知 icon 名映射成字形。
+ * 名不认识、条目压根没带 `icon`（老载荷、部署自定义档位）→ 一律 `undefined` ⇒ 那一行的
+ * 图标槽**渲染成空的 20px**（对齐不破，见 `OptionPicker`：槽恒在、内容可空）。给未知名
+ * 编一个字形、或回头拿 id 去猜，都是本产品明令禁止的「编占位」（PRODUCT.md 原则 3
+ * 「真实优先于好看」）——id 空间是可扩展的，猜出来的字形只是在宣称一个后端没说的语义。
  *
  * 纯函数、无 JSX（返回组件类型，尺寸由渲染层决定）——vitest 直测。 */
 
 import { Brain, Code2, FileSearch, Layers, Lock, Pencil, Telescope, Unlock, Zap, type LucideIcon } from 'lucide-react';
 
-/** 内置档位/模式 id → 图标。
- *
- * 三份目录的 id 空间**互不重叠**，所以一张表就够（不必按目录分三份，那只会多两个
- * 参数与三处同步点）：
- *   - 权限模式（`PermissionPolicy`，`tooling/contract.py:102-104`）
- *   - Agent 档位（`agent/profiles.py::BUILTIN_PROFILES`）
- *   - 推理深度（`web/app.py::REASONING_EFFORT_DESCRIPTIONS`） */
-const ICONS: Record<string, LucideIcon> = {
-  // 权限模式：锁 / 笔 / 开锁——与"能不能写、要不要审批"这个真实差异对应
-  'read-only': Lock,
-  'workspace-write': Pencil,
-  'danger-full-access': Unlock,
-  // Agent 档位：全工具 / 写代码 / 查与读
-  main: Layers,
-  coding: Code2,
-  research_review: FileSearch,
+/** 已知图标名 → 字形。名是**语义**（锁 / 笔 / 开锁），不是字形描述——换字形不改名，
+ *  这样后端声明的名不会因为前端换了个更顺眼的图标而失效。 */
+const ICONS = {
+  // 权限模式：能不能写、要不要审批
+  lock: Lock,
+  pencil: Pencil,
+  unlock: Unlock,
+  // agent 档位：全工具 / 写代码 / 查与读
+  layers: Layers,
+  code: Code2,
+  search: FileSearch,
   // 推理深度：最快 / 平衡 / 最深
-  minimal: Zap,
-  standard: Brain,
-  deep: Telescope,
-};
+  bolt: Zap,
+  gauge: Brain,
+  telescope: Telescope,
+} satisfies Record<string, LucideIcon>;
 
-/** 条目的行首图标；未知 id ⇒ `undefined`（渲染层留空槽，绝不编字形）。 */
-export function catalogIcon(id: string): LucideIcon | undefined {
-  return ICONS[id];
+/** 已知名全集。与后端 `web/app.py::CATALOG_ICON_NAMES` **同集**——跨语言、跨目录的
+ *  手工镜像（同 `lib/capabilities.ts::SURFACE_KEYS` 的既有口径），两端各有测试锁，
+ *  增名必须一起改。 */
+export const CATALOG_ICON_NAMES: ReadonlySet<string> = new Set(Object.keys(ICONS));
+
+/** 条目的行首图标；未知名 / 缺键 ⇒ `undefined`（渲染层留空槽，绝不编字形）。 */
+export function catalogIcon(iconName?: string | null): LucideIcon | undefined {
+  return iconName && CATALOG_ICON_NAMES.has(iconName)
+    ? ICONS[iconName as keyof typeof ICONS]
+    : undefined;
 }

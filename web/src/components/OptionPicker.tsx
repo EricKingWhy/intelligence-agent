@@ -21,12 +21,11 @@
  * 默认该拒绝的形态）。
  *
  * ⚠ 设计稿 §4 的「每行 20px 图标槽」已落地（`OptionRowContent` 的 `.picker-item-icon`，
- * 槽**恒在**、内容可空 ⇒ 没有图标的行也保持同样的左对齐）。图标来源是
- * `lib/catalogIcons.ts` 的内置 id → 字形映射：三份目录的条目契约里**没有** per-option
- * 图标数据，所以只给**已知 id** 出字形，未知 id（后端扩展出来的档位/模式、夹具里的
- * `mode-0…mode-5`）**留空槽**——给未知 id 编一个字形正是产品明令禁止的「编占位」
- * （PRODUCT.md 原则 3）。要让部署自定义的条目也能带图标，得后端在条目上给一个可选
- * `icon` 键（已开 issue 登记）。trigger 上的图标是另一回事（每个控件一个，调用方传入）。
+ * 槽**恒在**、内容可空 ⇒ 没有图标的行也保持同样的左对齐）。图标来源是**条目自己声明的
+ * `icon` 语义名**（#214：三个目录端点在内置条目上下发该键）经
+ * `lib/catalogIcons.ts` 的已知名映射：名不认识、或条目压根没带 `icon`（老载荷、部署
+ * 自定义档位）**留空槽**——给未知名编一个字形、或回头拿 `id` 去猜，都是产品明令禁止的
+ * 「编占位」（PRODUCT.md 原则 3）。trigger 上的图标是另一回事（每个控件一个，调用方传入）。
  *
  * 设计稿 §4 的「档位收窄提示」也已落地（#201）：`GET /api/agent-profiles` 自 #201 起回
  * `tool_scope {open, total, excluded}`，调用方（`Composer.tsx` 的档位 picker）把
@@ -57,14 +56,15 @@ export interface Option {
 
 /** `CatalogEntry[]` → `Option[]`（三份档位目录共用的唯一映射点，前端零硬编码文案）。
  *
- *  `iconOf` 可选：条目 id → 行首图标。缺省不传 = 全都不给图标（槽仍占 20px 保持对齐）。
- *  映射表在 `lib/catalogIcons.ts`（只认已知 id，未知 id 返回 undefined）。 */
+ *  `iconOf` 可选：条目声明的 `icon` **名** → 行首图标。缺省不传 = 全都不给图标
+ *  （槽仍占 20px 保持对齐）。映射表在 `lib/catalogIcons.ts`（只认已知名，
+ *  未知名 / 缺键返回 undefined ⇒ 该行留空槽）。 */
 export function toCatalogOptions(
   entries: CatalogEntry[],
-  iconOf?: (id: string) => LucideIcon | undefined,
+  iconOf?: (iconName: string | null | undefined) => LucideIcon | undefined,
 ): Option[] {
   return entries.map((e) => {
-    const Icon = iconOf?.(e.id);
+    const Icon = iconOf?.(e.icon);
     return {
       value: e.id,
       title: e.display_name,

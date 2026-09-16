@@ -227,6 +227,11 @@ export interface CatalogEntry {
   id: string;
   display_name: string;
   description: string;
+  /** #214：行首图标的**语义名**（后端在后端条目上声明；取值集见
+   *  `lib/catalogIcons.ts::CATALOG_ICON_NAMES`）。
+   *  缺键 / `null` / 不认识的名 ⇒ 那一行留空槽——前端不编字形，也**不拿 `id` 去猜**
+   *  （部署自定义档位时 id 千变万化，猜出来的字形是编的）。 */
+  icon?: string | null;
   /** #201：只有 `/api/agent-profiles` 会带；其余三个清单端点没有这个字段
    *  （缺省 = 后端没说这个档位的工具面 → 前端不渲染提示，不编）。 */
   tool_scope?: ToolScope;
@@ -284,7 +289,10 @@ export async function getContextProviders(): Promise<CatalogEntry[]> {
  *  顶层 key 用复数短名（modes/profiles/efforts/providers），调用方传入对应 key。
  *  `tool_scope`（#201）是**可选**字段：形状不完整就整块丢掉（缺省 = 后端没说，
  *  前端据此不渲染提示）——半个 tool_scope（有 open 没 total，或 excluded 混进
- *  非字符串）会被渲染成一句半真的话，比不显示更差。 */
+ *  非字符串）会被渲染成一句半真的话，比不显示更差。
+ *  `icon`（#214）同样是可选字段，非空字符串才认（缺失 / `null` / 非字符串一律当"没说"）。
+ *  ⚠ **本函数是白名单投影**：契约新增字段必须在这里登记，否则会被静默丢掉——后端照发、
+ *  前端拿不到，是最难查的一类失效（#214 落地时实测撞到过一次：图标配好了却不显示）。 */
 function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
   const raw =
     typeof body === 'object' && body !== null && Array.isArray((body as Record<string, unknown>)[key])
@@ -296,15 +304,23 @@ function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
     if (typeof r.id !== 'string' || !r.id) return [];
     if (typeof r.display_name !== 'string' || !r.display_name) return [];
     const scope = parseToolScope(r.tool_scope);
+    const icon = parseIconName(r.icon);
     return [
       {
         id: r.id,
         display_name: r.display_name,
         description: typeof r.description === 'string' ? r.description : '',
+        ...(icon ? { icon } : {}),
         ...(scope ? { tool_scope: scope } : {}),
       },
     ];
   });
+}
+
+/** `icon`（#214）的窄化：非空字符串才认；缺失 / `null` / 非字符串 ⇒ undefined
+ *  （= 后端没说这个条目该画什么 ⇒ 渲染层留空槽，不编字形）。 */
+function parseIconName(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
 }
 
 /** `tool_scope` 的窄化：三个字段全部合法才返回，否则 undefined（整块丢弃）。 */

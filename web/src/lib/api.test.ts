@@ -211,6 +211,32 @@ describe('getAgentProfiles — tool_scope 窄化解析（#201：形状不完整�
   });
 });
 
+describe('清单端点 — icon 窄化解析（#214：白名单投影，新字段必须在这里登记）', () => {
+  /** `parseCatalogEntries` 是**白名单投影**：契约新增字段忘了登记就会被**静默丢掉**
+   *  （后端照发、前端拿不到）。#214 落地时实测撞到过一次——图标配好、夹具也带了，
+   *  界面上就是不显示，因为投影没带上 `icon`。这条锁住登记这件事。 */
+  const withIcon = (icon: unknown) => ({
+    profiles: [{ id: 'p', display_name: 'P', description: 'd', icon }],
+  });
+
+  it('非空字符串的名 → 保留（长短都认：名只是键，不在这里校验已知与否）', async () => {
+    captureFetch(200, withIcon('layers'));
+    expect((await getAgentProfiles())[0].icon).toBe('layers');
+    // 前端**不认识**的名也要原样带进来：渲染层据"已知名集合"决定画不画，
+    // 这里丢掉的话就没人知道后端声明了什么（也就没机会在别处提示）
+    captureFetch(200, withIcon('sparkles'));
+    expect((await getAgentProfiles())[0].icon).toBe('sparkles');
+  });
+
+  it('缺失 / null / 空串 / 非字符串 → 无键（当"后端没说"，渲染层留空槽）', async () => {
+    for (const icon of [undefined, null, '', 42, { name: 'layers' }]) {
+      captureFetch(200, withIcon(icon));
+      const [p] = await getAgentProfiles();
+      expect(p).not.toHaveProperty('icon');
+    }
+  });
+});
+
 describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => {
   it('四项 amend 全有值 → payload 带全部键（端点路径不变）', async () => {
     const cap = captureFetch();

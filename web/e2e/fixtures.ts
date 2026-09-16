@@ -1075,9 +1075,9 @@ export const MODELS_WITH_AVAILABILITY = [
  *  （`web/app.py:247-253`）。于是"提交 payload 字段名对齐后端契约"那条用例实际在断言一个
  *  后端必然拒绝的取值——文案对了、契约是假的。2026-09-17 改为真实载荷。 */
 export const PERMISSION_MODES = [
-  { id: 'read-only', display_name: '只读', description: '可读文件和运行只读工具，不可写入。' },
-  { id: 'workspace-write', display_name: '工作区写入', description: '可读写工作区内文件；高危工具仍需审批。' },
-  { id: 'danger-full-access', display_name: '完全访问', description: '所有工具无需审批，含网络/系统副作用。仅在可信环境使用。' },
+  { id: 'read-only', display_name: '只读', description: '可读文件和运行只读工具，不可写入。', icon: 'lock' },
+  { id: 'workspace-write', display_name: '工作区写入', description: '可读写工作区内文件；高危工具仍需审批。', icon: 'pencil' },
+  { id: 'danger-full-access', display_name: '完全访问', description: '所有工具无需审批，含网络/系统副作用。仅在可信环境使用。', icon: 'unlock' },
 ];
 
 /** `GET /api/agent-profiles` 的默认载荷（形状 = 后端 `AGENT_PROFILE_DESCRIPTIONS`
@@ -1093,12 +1093,14 @@ export const AGENT_PROFILES = [
     id: 'main',
     display_name: 'Main',
     description: '通用编排代理（默认）',
+    icon: 'layers',
     tool_scope: { open: 17, total: 17, excluded: [] },
   },
   {
     id: 'coding',
     display_name: 'Coding',
     description: '代码编辑、调试和构建任务专用',
+    icon: 'code',
     tool_scope: {
       open: 12,
       total: 17,
@@ -1112,6 +1114,7 @@ export const AGENT_PROFILES = [
     id: 'research_review',
     display_name: 'Research & Review',
     description: '研究、检索和审查任务专用',
+    icon: 'search',
     tool_scope: {
       open: 7,
       total: 17,
@@ -1124,9 +1127,9 @@ export const AGENT_PROFILES = [
 ];
 
 export const REASONING_EFFORTS = [
-  { id: 'minimal', display_name: 'Minimal', description: '最少推理开销；最快但最不彻底。' },
-  { id: 'standard', display_name: 'Standard', description: '典型任务的平衡推理深度（默认）。' },
-  { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。' },
+  { id: 'minimal', display_name: 'Minimal', description: '最少推理开销；最快但最不彻底。', icon: 'bolt' },
+  { id: 'standard', display_name: 'Standard', description: '典型任务的平衡推理深度（默认）。', icon: 'gauge' },
+  { id: 'deep', display_name: 'Deep', description: '最多推理开销；较慢但最彻底。', icon: 'telescope' },
 ];
 
 /* #201：多选 Context provider 控件已删除（前端不再取 `GET /api/context-providers`），
