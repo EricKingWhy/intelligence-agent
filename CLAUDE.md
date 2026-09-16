@@ -76,8 +76,9 @@ Matt SDD 负责：
 > 这几条要么不可逆，要么会污染整条事实链。**完整的 22 条架构不变量在 `AGENTS.md` §7——
 > 改动 Core / Runtime / Session / Tool / Recovery 相关代码前必须去读。**
 
-1. **凭证零泄漏**：`.env` 的值绝不打印、不提交、不复制进任何文档或命令输出。
-   可以列 key 名，不可列 key 值。
+1. **凭证零泄漏**：见 `AGENTS.md` §4.3 第 0 条（`.env` 的值绝不打印、不提交、不复制进任何
+   文档或命令输出；可列 key 名，不可列 key 值）。2026-09-17 搬到 `AGENTS.md`——它是所有 Agent
+   的默认行为来源，只放在本文件里的话，非 Claude 的 Agent 拿不到这条红线。
 2. **Tool 只有一条统一执行路径**：任何 Tool（Coding / Knowledge / Web / MCP / Memory /
    SubAgent / future）都走
    `Contract → Registry → Validation → Permission → Scheduler → ToolExecutor → Ledger → ToolResult → SessionEvent`。

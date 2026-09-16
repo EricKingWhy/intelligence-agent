@@ -150,7 +150,8 @@ class WorkspaceRegistry:
         本地后端是 `shutil.rmtree(self._workspace_root)`；而 ADR-0027 之后
         `workspace_root` 可能是**用户的真实目录**（cwd 会话），映射里就写着
         `D:\\some\\repo`。任何用它做硬删的路径都会删掉用户的仓库——所以那条路径
-        今天不能有生产调用方（`docs/PHASE_STATUS.md` 已登记），本方法就是它的安全替代。
+        今天不能有生产调用方（登记在 `docs/phase_status/2026-09.md:293`，即 2026-09-13
+        的 #172 会话硬删除条目：`WorkspaceRegistry.delete()` 被硬性否决），本方法就是它的安全替代。
 
         映射指向别处时，只删映射文件本身，**不碰 `workspace_root`**（这是刻意的：
         用户目录不归 harness 处置）。
