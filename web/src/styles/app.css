@@ -6053,6 +6053,44 @@ button.json-row {
   opacity: 0.5;
   cursor: default;
 }
+/* #199：整组不可用的 provider（一级行）。**不用 opacity**：半透明会把正文与背景
+   一起压暗，对比度变得不可预测（亮色主题首当其冲，t-contrast.spec 会抓）。
+   改用既有的 `--text-tertiary`——描述行本来就用它，说明它在两套主题下都是
+   "可读但退后一档"的语义色，§15 无需新增 token。
+   ⚠ 置灰 ≠ 禁用：这一行仍可展开、可键盘到达（用户看得到里面有什么模型；
+   能不能用由"选了之后后端怎么回"决定，前端不替后端下判断）。 */
+.picker-item[data-unavailable="true"] .picker-item-title {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+.picker-item[data-unavailable="true"] .picker-item-desc {
+  color: var(--text-tertiary);
+}
+/* 行尾原因（「未配置 API Key」/「未配置」）：一行小字，不抢标题。 */
+.picker-item-note {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+/* #199：能力徽标（二级行）。只在后端声明为 true 时才出现——样式是中性事实标签，
+   不填色、不加权重：把元数据位渲染成"卖点"会让"有这一位"读成"推荐这个模型"。 */
+.picker-badges {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+.picker-badge {
+  flex-shrink: 0;
+  padding: 0 var(--space-xs);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
 
 /* ═══ #200：上下文容量看板（设计稿 §5） ═══
  * 与项目/记忆浮层同一套材质（glass 仅浮层可用，冻结视觉原则）；分段条用

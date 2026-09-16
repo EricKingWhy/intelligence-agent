@@ -67,6 +67,17 @@ afterEach(() => {
 });
 
 describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
+  /** #199 之后 `getModels` 恒产出这 5 个字段（可用性 + 三个能力位）。留成 helper 是
+   *  为了让断言继续**逐字段精确**（`toEqual` 不允许多余字段）而不被五个默认值淹掉。 */
+  const withAvailabilityDefaults = (base: Record<string, unknown>) => ({
+    isAvailable: true,
+    unavailableReason: null,
+    supportsTools: null,
+    supportsVision: null,
+    supportsReasoningSummary: null,
+    ...base,
+  });
+
   it('200 合法 body：提取条目，name 为选择键', async () => {
     captureFetch(200, {
       models: [
@@ -76,8 +87,38 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
     });
     const models = await getModels();
     expect(models).toHaveLength(2);
-    expect(models[0]).toEqual({ name: 'deepseek-v4-flash-0731', provider: 'senseaudio', model: 'deepseek-v4-flash-0731', default: true });
+    expect(models[0]).toEqual(withAvailabilityDefaults({ name: 'deepseek-v4-flash-0731', provider: 'senseaudio', model: 'deepseek-v4-flash-0731', default: true }));
     expect(models[1].model).toBe('qwen3.8-max-0902');
+  });
+
+  it('#199：is_available / unavailable_reason / supports_* 逐字段收窄（不猜）', async () => {
+    captureFetch(200, {
+      models: [
+        {
+          name: 'no-key', provider: 'custom', model: 'gpt-x', default: false,
+          is_available: false, unavailable_reason: 'missing_api_key',
+          supports_tools: false, supports_vision: true,
+        },
+        // 类型不对的字段一律不采信：reason 是数字、能力位是字符串
+        {
+          name: 'weird', is_available: 'yes', unavailable_reason: 42,
+          supports_tools: 'true', supports_reasoning_summary: null,
+        },
+      ],
+    });
+    const models = await getModels();
+    expect(models[0]).toEqual({
+      name: 'no-key', provider: 'custom', model: 'gpt-x', default: false,
+      isAvailable: false, unavailableReason: 'missing_api_key',
+      // false 与 true 都如实保留（三态：true / false / null=没说）
+      supportsTools: false, supportsVision: true, supportsReasoningSummary: null,
+    });
+    // `is_available: 'yes'` 不是布尔 ⇒ 按"没说"处理（**不**把非布尔当真值）
+    expect(models[1]).toEqual({
+      name: 'weird', provider: null, model: null, default: false,
+      isAvailable: true, unavailableReason: null,
+      supportsTools: null, supportsVision: null, supportsReasoningSummary: null,
+    });
   });
 
   it('畸形条目剔除（name 缺失/非对象），零伪造；可选字段缺失记 null', async () => {
@@ -90,7 +131,9 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
       ],
     });
     const models = await getModels();
-    expect(models).toEqual([{ name: 'ok-model', provider: null, model: null, default: false }]);
+    expect(models).toEqual([
+      withAvailabilityDefaults({ name: 'ok-model', provider: null, model: null, default: false }),
+    ]);
   });
 
   it('models 数组缺失/形状不符 → 空数组（入口降级隐藏，不伪造列表）', async () => {

@@ -21,12 +21,13 @@
  * 数据真相仍是 /api/models（`lib/api.ts` 的 `ModelCatalogEntry`）。这里只提交偏好，
  * 不是会话内模型真相——后者仍以模型卡 `data.model` 为准（不变量 #22）。
  *
- * ⚠ 两处设计稿写了但**没有可用数据**、故未实现（不编占位）：
- *   - 「不可用 provider 置灰 + 行尾原因」：`/api/models` **有** `is_available`，但后端把它
- *     写死成 `True`（`web/app.py::_render_model_option`：「catalog 无 disabled 概念」），
- *     而 `unavailable_reason` 确实不存在（那是 #203 要补的）——所以现在**没有任何** provider
- *     会是不可用态，置灰分支永远不触发；等后端真的能表达不可用时再接。
- *   - 「能力徽标」：目录里没有能力字段。
+ * ⚠ 曾经"没有可用数据、故未实现"的两处，**#199 已落地**（数据面由 #203 补齐）：
+ *   - 「不可用 provider 置灰 + 行尾原因」：`/api/models` 的 `is_available` 在 #203 之后
+ *     是真实判定（有凭据 ⇒ true），`unavailable_reason` 也在。置灰的是**整组都不可用**
+ *     的 provider，且**仍可展开**（用户看得到里面有什么，只是选了会用不了），行尾给一句
+ *     原因短文案。口径是纯函数（`lib/modelAvailability.ts`，单测直测）。
+ *   - 「能力徽标」：同样落地——**只在后端声明为 true 时**出徽标（`false` 与"未声明"都不出，
+ *     灰徽标会被读成"不支持"，而未声明时我们并不知道）。
  * 另有「管理模型」入口：#203 交付物（后端 CRUD + 凭据管理器已落地）——经
  * `.picker-foot` 同族槽位渲染，点击打开 ProviderManagerDialog（两栏弹层），
  * 不再是死入口。 */
@@ -35,6 +36,7 @@ import * as Menu from '@radix-ui/react-dropdown-menu';
 import { useCallback, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Cpu, Settings2 } from 'lucide-react';
 import type { ModelCatalogEntry } from '../lib/api';
+import { capabilityBadges, isUnavailable, providerAvailability, reasonLabel } from '../lib/modelAvailability';
 import { DEFAULT_VALUE, OptionRowContent } from './OptionPicker';
 import { ProviderManagerDialog } from './ProviderManagerDialog';
 
@@ -133,6 +135,7 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
           <Menu.Separator className="picker-sep" />
           {grouped.map(({ provider, items }) => {
             const isCurrentProvider = items.some((m) => m.name === effectiveSelectedModel);
+            const availability = providerAvailability(items);
             return (
               <Menu.Sub key={provider}>
                 <Menu.SubTrigger
@@ -141,12 +144,25 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
                   // 不用「已选」那套（勾选 + 左侧条）——那是二级行的语言，复用会让
                   // "provider 被选中了"与"这个 provider 里有选中项"读成同一件事。
                   data-current={isCurrentProvider ? 'true' : undefined}
+                  // #199：整组不可用 → 置灰但**仍可展开**（拿掉 hover/键盘可达性会让
+                  // 用户看不到里面有什么，而"组里有什么模型"仍然是事实）。
+                  data-unavailable={availability.unavailable ? 'true' : undefined}
                 >
                   <OptionRowContent
                     title={provider}
                     description={`${items.length} 个模型`}
                     selected={false}
-                    trailing={<ChevronRight size={13} className="picker-item-trailing" aria-hidden="true" />}
+                    trailing={
+                      // 行尾优先给原因：不可用时"为什么不能用"比"有几个模型"更要紧，
+                      // 两个都放会把这一行挤成一团（设计稿：行尾只挂一个信息）。
+                      availability.unavailable ? (
+                        <span className="picker-item-note">
+                          {reasonLabel(availability.reason)}
+                        </span>
+                      ) : (
+                        <ChevronRight size={13} className="picker-item-trailing" aria-hidden="true" />
+                      )
+                    }
                   />
                 </Menu.SubTrigger>
                 <Menu.Portal>
@@ -157,12 +173,32 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
                     <Menu.RadioGroup value={effectiveSelectedModel ?? ''} onValueChange={commitSelection}>
                       {items.map((m) => {
                         const isSelected = effectiveSelectedModel === m.name;
+                        const badges = capabilityBadges(m);
                         return (
-                          <Menu.RadioItem key={m.name} value={m.name} className="picker-item">
+                          <Menu.RadioItem
+                            key={m.name}
+                            value={m.name}
+                            className="picker-item"
+                            data-unavailable={isUnavailable(m) ? 'true' : undefined}
+                            // 不可用的模型仍然可点：后端会给出明确失败（provider_store
+                            // 的凭据错误），前端在这里**不替后端 decide**。点击后的失败
+                            // 由既有的错误通路呈现，语义比"点了没反应"清楚。
+                          >
                             <OptionRowContent
                               title={m.name}
                               description={modelMeta(m)}
                               selected={isSelected}
+                              trailing={
+                                badges.length > 0 ? (
+                                  <span className="picker-badges">
+                                    {badges.map((b) => (
+                                      <span key={b.key} className="picker-badge">
+                                        {b.label}
+                                      </span>
+                                    ))}
+                                  </span>
+                                ) : undefined
+                              }
                             />
                           </Menu.RadioItem>
                         );

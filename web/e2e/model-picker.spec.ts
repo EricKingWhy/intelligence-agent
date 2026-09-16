@@ -20,6 +20,7 @@
 import { expect, test } from '@playwright/test';
 import {
   MODELS,
+  MODELS_WITH_AVAILABILITY,
   SEARCHABLE_MODELS,
   noSearchInputIn,
   openModelMenu,
@@ -147,4 +148,58 @@ test('#199：长目录不再需要搜索框——provider 分组就是导航', a
     els.map((el) => Number(el.textContent?.match(/(\d+) 个模型/)?.[1] ?? 0)),
   );
   expect(counts.reduce((a, b) => a + b, 0)).toBe(SEARCHABLE_MODELS.length);
+});
+
+test('#199：不可用 provider 置灰但仍可展开 + 行尾原因 + 能力徽标', async ({ page }) => {
+  /* 数据面：`/api/models` 的 `is_available` / `unavailable_reason`（#203 落地）与
+     `supports_*`。口径在纯函数 `lib/modelAvailability.ts`（单测 14 条），这条锁
+     **真实 DOM 接线**——纯函数对了但没挂上去，用户在弹层里什么也看不到。 */
+  await routeApi(page, { sessions: [], events: [], models: MODELS_WITH_AVAILABILITY });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-model[aria-label="模型选择"]');
+  await trigger.click();
+  const rootMenu = page.locator('[role="menu"]').first();
+  await expect(rootMenu).toBeVisible();
+
+  const providerRow = (p: string) =>
+    page.locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: p }).first();
+
+  // ① 整组不可用（custom，missing_api_key）⇒ 置灰标记 + 行尾给出**人话**原因
+  const customRow = providerRow('custom');
+  await expect(customRow).toHaveAttribute('data-unavailable', 'true');
+  await expect(customRow).toContainText('未配置 API Key');
+  // 置灰不改变"还能展开"这件事：行尾的 `▸` 被原因挤掉了，但 aria-haspopup 仍在
+  await expect(customRow).toHaveAttribute('aria-haspopup', 'menu');
+
+  // ② 未知原因码 ⇒ 回落「未配置」，**不**把机器码打给用户
+  const weirdRow = providerRow('weird');
+  await expect(weirdRow).toHaveAttribute('data-unavailable', 'true');
+  await expect(weirdRow).toContainText('未配置');
+  await expect(weirdRow).not.toContainText('some_future_code');
+
+  // ③ 部分不可用（mixed：一个可用一个没有 key）⇒ **不许**整组置灰
+  const mixedRow = providerRow('mixed');
+  await expect(mixedRow).not.toHaveAttribute('data-unavailable', 'true');
+  await expect(mixedRow).toContainText('2 个模型');
+
+  // ④ 仍然可展开：悬停置灰行 → 二级照常出现（"看得到里面有什么"不能被置灰拿走）
+  await customRow.hover();
+  const subRows = page.locator('[role="menuitemradio"]');
+  await expect(subRows).toHaveCount(1);
+  await expect(subRows.first()).toContainText('custom:gpt-x');
+  // 二级行自己也带不可用标记（组内可能只有部分不可用，所以它必须独立判定）
+  await expect(subRows.first()).toHaveAttribute('data-unavailable', 'true');
+
+  // ⑤ 能力徽标：只在后端声明为 true 时出现，且**按条**而不是按 provider
+  await providerRow('zhipu').hover();
+  await expect(subRows).toHaveCount(2);
+  const glm = subRows.filter({ hasText: 'glm-4.6' }).first();
+  await expect(glm).toContainText('工具');
+  await expect(glm).toContainText('视觉');
+  await expect(glm).toContainText('思考');
+  // 同组第二个模型只声明了 vision ⇒ 只有「视觉」，没有「工具」
+  const air = subRows.filter({ hasText: 'glm-4.6-air' }).first();
+  await expect(air).toContainText('视觉');
+  await expect(air).not.toContainText('工具');
 });

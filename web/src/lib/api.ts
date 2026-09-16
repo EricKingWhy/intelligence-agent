@@ -496,12 +496,30 @@ export async function postApproval(
 
 /** GET /api/models 目录条目。零密钥字段；name 是 POST /api/sessions 的选择键；
  *  思考能力不进元数据（显示侧由 reasoning 事件族驱动，有则显示无则不显示）。
+ *
+ *  #199 加法：`isAvailable` / `unavailableReason` / 三个能力位。#203 已把
+ *  `is_available` 做成**真实判定**（有凭据 ⇒ true）并给出 `unavailable_reason`
+ *  机器码（`provider_store.py:237-244`：`credential_unavailable` / `missing_api_key`）；
+ *  能力位只在后端**声明过**时才出现（未声明的键后端不返回，前端记 null = 不猜）。
  */
 export interface ModelCatalogEntry {
   name: string;
   provider: string | null;
   model: string | null;
   default: boolean;
+  /** 已配置语义（有凭据 ⇒ true），不是网络可达（ADR-0032 D5）。
+   *
+   *  ⚠ 类型上**可选**，判定必须用 `modelAvailability.ts::isUnavailable`
+   *  （= `=== false`）：缺字段是"后端没说"（旧载荷 / 测试夹具），把没说当成
+   *  "不可用"会把整份目录渲染成灰色。真载荷经 `getModels` 解析后恒有值。 */
+  isAvailable?: boolean;
+  /** 机器码（`credential_unavailable` / `missing_api_key`）；无 ⇒ null。
+   *  前端只在行尾给一句短文案（映射见 `lib/modelAvailability.ts`）。 */
+  unavailableReason?: string | null;
+  /** 能力位：true / false / 缺失（= 后端没声明，**不猜**）。 */
+  supportsTools?: boolean | null;
+  supportsVision?: boolean | null;
+  supportsReasoningSummary?: boolean | null;
 }
 
 /** GET /api/models。窄化解析（零伪造）：仅 name 非空字符串的条目入选，
@@ -525,6 +543,21 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
         provider: typeof r.provider === 'string' ? r.provider : null,
         model: typeof r.model === 'string' ? r.model : null,
         default: r.default === true,
+        // 只在后端明确说 false 时才不可用；缺字段（旧载荷）记 true（见类型注释）。
+        isAvailable: r.is_available !== false,
+        unavailableReason:
+          typeof r.unavailable_reason === 'string' && r.unavailable_reason
+            ? r.unavailable_reason
+            : null,
+        // 能力位三态：true / false / null（未声明）。**不**用 `=== true` 归一成
+        // 布尔——那会把"后端说 false"与"后端没说"压成同一个值，徽标就无从判断
+        // 该不该渲染（这正是 `supports_*` 与 `is_available` 语义不同的地方）。
+        supportsTools: typeof r.supports_tools === 'boolean' ? r.supports_tools : null,
+        supportsVision: typeof r.supports_vision === 'boolean' ? r.supports_vision : null,
+        supportsReasoningSummary:
+          typeof r.supports_reasoning_summary === 'boolean'
+            ? r.supports_reasoning_summary
+            : null,
       },
     ];
   });
