@@ -25,3 +25,4 @@
 [whitelist]
 e125e27	tracker + PHASE_STATUS 记录（docs-only）
 ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
+0b427f3	台账白名单声明 ba5dff1（docs-only）
