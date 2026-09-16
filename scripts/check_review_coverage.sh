@@ -31,6 +31,12 @@ if [ "${1:-}" = "--list" ]; then LIST_ONLY=1; fi
 
 [ -f "$LEDGER" ] || { echo "找不到台账 $LEDGER"; exit 1; }
 
+# 临时文件：早退分支（台账 base 不存在等）也要收干净——否则"闸门报错"顺手在 /tmp 留垃圾
+TMP_FILES=""
+cleanup() { [ -n "$TMP_FILES" ] && rm -f $TMP_FILES; }
+trap cleanup EXIT
+mktmp() { local f; f="$(mktemp)"; TMP_FILES="$TMP_FILES $f"; printf '%s' "$f"; }
+
 # 文档模式：白名单里的 commit 必须**全部**改动都命中这些（代码永远进不了白名单）
 DOC_PATTERN='^(docs/|web/PRODUCT\.md|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md$)'
 
@@ -49,7 +55,7 @@ done < "$LEDGER"
 [ "${#rows[@]}" -gt 0 ] || { echo "台账里没有审查行"; exit 1; }
 
 base=""
-covered="$(mktemp)"; : > "$covered"
+covered="$(mktmp)"; : > "$covered"
 printf '审查范围（台账，%d 行）:\n' "${#rows[@]}"
 for r in "${rows[@]}"; do
   IFS=$'\t' read -r date desc range <<< "$r"
@@ -66,16 +72,16 @@ done
 sort -u -o "$covered" "$covered"
 
 git rev-parse --verify --quiet "$base^{commit}" >/dev/null || { echo "❌ 计算出的 base 不存在: $base"; exit 1; }
-all="$(mktemp)"; git rev-list HEAD --not "$base" | sort -u > "$all"
+all="$(mktmp)"; git rev-list HEAD --not "$base" | sort -u > "$all"
 total=$(wc -l < "$all" | tr -d ' ')
 cov=$(comm -12 "$all" "$covered" | wc -l | tr -d ' ')
-missing="$(mktemp)"; comm -23 "$all" "$covered" > "$missing"
+missing="$(mktmp)"; comm -23 "$all" "$covered" > "$missing"
 miss_n=$(wc -l < "$missing" | tr -d ' ')
 
 printf '\n覆盖区间: %s..HEAD\n' "$(git rev-parse --short "$base")"
 printf '提交总数 %s / 已审查 %s / 待判定 %s\n' "$total" "$cov" "$miss_n"
 
-if [ "$LIST_ONLY" = "1" ]; then rm -f "$covered" "$all" "$missing"; exit 0; fi
+if [ "$LIST_ONLY" = "1" ]; then exit 0; fi   # 临时文件由 EXIT trap 收
 
 fail=0
 while read -r sha; do
@@ -93,6 +99,12 @@ while read -r sha; do
     continue
   fi
   files=$(git show --pretty=format: --name-only "$sha" | awk 'NF')
+  if [ -z "$files" ]; then
+    # 合并提交的 --name-only 默认无输出：**核对不了就不放行**，但别把"核对不了"说成"改了非文档文件"
+    echo "❌ 白名单只收 docs-only，但 $short 的改动文件**核对不了**（合并提交？）（$reason）"
+    fail=1
+    continue
+  fi
   bad=$(printf '%s\n' "$files" | grep -Evc "$DOC_PATTERN" || true)
   if [ "$bad" != "0" ]; then
     echo "❌ 白名单只收 docs-only，但 $short 改了非文档文件（$reason）:"
@@ -103,7 +115,6 @@ while read -r sha; do
   fi
 done < "$missing"
 
-rm -f "$covered" "$all" "$missing"
 if [ "$fail" != "0" ]; then
   cat <<'EOT'
 
