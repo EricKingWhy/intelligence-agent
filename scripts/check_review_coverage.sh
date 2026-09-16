@@ -31,7 +31,10 @@ if [ "${1:-}" = "--list" ]; then LIST_ONLY=1; fi
 
 [ -f "$LEDGER" ] || { echo "找不到台账 $LEDGER"; exit 1; }
 
-# 临时文件：早退分支（台账 base 不存在等）也要收干净——否则"闸门报错"顺手在 /tmp 留垃圾
+# 临时文件：早退分支（台账 base 不存在等）也要收干净——否则"闸门报错"顺手在 /tmp 留垃圾。
+# ⚠ 登记必须在**父进程**做：`covered="$(mktmp)"` 是命令替换子 shell，子 shell 里的
+# `TMP_FILES+=` 对父进程不可见（97aa5ac 第一版就这么写的，实测每次跑漏 3 个文件）。
+# 所以 mktmp 只返回路径，登记由调用方在父进程里显式做。
 TMP_FILES=()
 cleanup() {
   if [ "${#TMP_FILES[@]}" -gt 0 ]; then
@@ -40,20 +43,22 @@ cleanup() {
 }
 trap cleanup EXIT
 mktmp() {
-  local f
-  f="$(mktemp)"
-  TMP_FILES+=("$f")
-  printf '%s' "$f"
+  mktemp
 }
+reg() { TMP_FILES+=("$1"); }   # 父进程登记（调用方紧随 `$(mktmp)` 之后调用）
 
-# 文档模式：白名单里的 commit 必须**全部**改动都命中这些（代码永远进不了白名单）
-DOC_PATTERN='^(docs/|web/PRODUCT\.md|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md$)'
+# 文档模式：白名单里的 commit 必须**全部**改动都命中这些（代码永远进不了白名单）。
+# ⚠ 根级名分支必须带 `$` 锚：不带的话 `AGENTS.md.bak` / `CLAUDE.md.orig` 这类备份文件也算
+# docs-only（实测 grep 0 命中=放行）——备份文件可能是**旧版规则**，用它的提交不该进白名单。
+# `web/PRODUCT.md` 分支其实是冗余的（`[^/]*\.md$` 已覆盖），保留是为了把"这个例外文件"写显眼。
+DOC_PATTERN='^(docs/|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md$)'
 
 rows=()
 wl=()
 section="review"
 while IFS= read -r line; do
   line="${line%$'\r'}"
+  line="${line#\$'\xef\xbb\xbf'}"   # BOM（fail-closed，但剥掉才能让白名单 SHA 匹配上）
   case "$line" in
     ''|'#'*) continue ;;
     '[whitelist]') section="wl"; continue ;;
@@ -64,7 +69,7 @@ done < "$LEDGER"
 [ "${#rows[@]}" -gt 0 ] || { echo "台账里没有审查行"; exit 1; }
 
 base=""
-covered="$(mktmp)"; : > "$covered"
+covered="$(mktmp)"; reg "$covered"; : > "$covered"
 printf '审查范围（台账，%d 行）:\n' "${#rows[@]}"
 for r in "${rows[@]}"; do
   IFS=$'\t' read -r date desc range <<< "$r"
@@ -81,10 +86,19 @@ done
 sort -u -o "$covered" "$covered"
 
 git rev-parse --verify --quiet "$base^{commit}" >/dev/null || { echo "❌ 计算出的 base 不存在: $base"; exit 1; }
-all="$(mktmp)"; git rev-list HEAD --not "$base" | sort -u > "$all"
+# ⚠ base 也必须是 HEAD 的祖先：台账手抄错一格（base 抄到 HEAD 或更后）⇒ `rev-list HEAD --not base`
+# 为空 ⇒ "提交总数 0 / 待判定 0" ⇒ **exit 0 假绿**，白名单校验也整个被跳过——那正是 #213 的
+# 失效形态（fixed point 手抄错误静默豁免一票），闸门必须在这里显式失败而不是通过。
+if ! git merge-base --is-ancestor "$base" HEAD; then
+  echo "❌ 台账的最早 base 不是 HEAD 的祖先: $base（台账手抄错了？）"; exit 1
+fi
+all="$(mktmp)"; reg "$all"; git rev-list HEAD --not "$base" | sort -u > "$all"
 total=$(wc -l < "$all" | tr -d ' ')
+if [ "$total" = "0" ]; then
+  echo "❌ 覆盖区间为空（base..HEAD 没有提交）——台账 base 抄错或没有新提交可审"; exit 1
+fi
 cov=$(comm -12 "$all" "$covered" | wc -l | tr -d ' ')
-missing="$(mktmp)"; comm -23 "$all" "$covered" > "$missing"
+missing="$(mktmp)"; reg "$missing"; comm -23 "$all" "$covered" > "$missing"
 miss_n=$(wc -l < "$missing" | tr -d ' ')
 
 printf '\n覆盖区间: %s..HEAD\n' "$(git rev-parse --short "$base")"
