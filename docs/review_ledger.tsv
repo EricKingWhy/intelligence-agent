@@ -26,3 +26,4 @@
 #
 [whitelist]
 ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
+16f61b9	本流程批落点记录（tracker + PHASE_STATUS + 归档，docs-only）
