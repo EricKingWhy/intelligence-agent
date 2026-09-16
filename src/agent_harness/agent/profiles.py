@@ -15,6 +15,7 @@ systemPrompt/tools 必备形状 + per-agent 工具收窄与深度上限），裁
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from agent_harness.prompt import DEFAULT_REGISTRY
 
@@ -106,3 +107,35 @@ BUILTIN_PROFILES: dict[str, AgentSpec] = {
         max_steps=10,
     ),
 }
+
+
+def declared_tool_universe() -> frozenset[str]:
+    """全部内置档位声明工具面的**并集**——「共 M 个」里的 M。
+
+    取并集而不是取 main 的 scope：并集对"将来新增一个档位、其 scope 不在 main 里"
+    这个改动是自洽的（那时“共 M 个”仍然成立），取 main 会静默漏掉它。
+    """
+    return frozenset().union(*(spec.tool_scope for spec in BUILTIN_PROFILES.values()))
+
+
+def tool_scope_summary(profile: str) -> dict[str, Any]:
+    """某个内置档位的工具面披露（#201 冻结 AC：档位收窄提示的数据面）。
+
+    ``open`` = 该档位 ``tool_scope`` 的条目数；``total`` = 所有内置档位声明工具面的
+    并集大小；``excluded`` = 并集里**不在**该 scope 的名字（升序）。
+
+    **这是"声明面"，不是"运行时注册集"**——如实写在这里，因为两者会差：
+    实际注册还取决于本部署启用了哪些 capability（例如未启用 websearch 时
+    ``web_search`` 根本不注册），而 catalog 端点没有 session 上下文，也不会为了
+    数数去 ``build_runtime``（那要 sandbox 与 workspace）。同一取舍在
+    `capability/manifest.py` 的 core 条目里已经写过一次：**声明级/部署级的实话
+    > 按会话猜**。将来若要把 N 做成"运行时实际开放数"，得在会话上下文里算
+    （另一张票的范围）。
+    """
+    spec = BUILTIN_PROFILES[profile]
+    universe = declared_tool_universe()
+    return {
+        "open": len(spec.tool_scope),
+        "total": len(universe),
+        "excluded": sorted(universe - spec.tool_scope),
+    }

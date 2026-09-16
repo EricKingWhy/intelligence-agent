@@ -100,7 +100,7 @@
 | 搜索框 | **删除**（含 `ModelPicker.tsx:67` 的搜索阈值逻辑与相关样式） |
 | 保留 | `groupByProvider()`（`:42-51`）产出的 provider 分组语义、`默认链`伪选项（`:135-145`）、`commitSelection` 的守卫（`:79-86`） |
 | 选中态 | 当前模型：勾选图标 + 加重字重 + 左侧 2px 高亮条；当前 provider 在第一级同样高亮 |
-| 不可用 provider | 置灰但仍可展开（不要隐藏）；行尾显示原因（复用 #203 的 `unavailable_reason` 文案映射），无 reason 时显示「未配置」 |
+| 不可用 provider | 置灰但仍可展开（不要隐藏）；行尾显示原因（复用 #203 的 `unavailable_reason` 文案映射），无 reason 时显示「未配置」。**已落地（#199，2026-09-17）**，判定口径写在这里：①「不可用」= 后端明确说 `is_available: false`（缺字段是"没说"，不是"不可用"）；② 只有**整组都不可用**才把 provider 行置灰（组里还有一个可用模型 ⇒ 不置灰，把一个可用项说成不可用比不置灰更糟）；③ 原因取组内第一条非空；④ 已知码 `missing_api_key`/`credential_unavailable` 翻成人话，**未知码回落「未配置」**（不把机器码打给用户、也不替后端猜原因）；⑤ 未知码与逐条判定都在 `web/src/lib/modelAvailability.ts`（纯函数，14 条单测），DOM 接线由 `e2e/model-picker.spec.ts` 锁 |
 | 信息密度 | 第二级行 = 模型名（主）+ provider 名（次级小字）；不显示价格/上下文窗口（看板负责上下文，不在选择器里堆数据） |
 | 管理入口 | 第一级底部「管理模型」→ 打开 #203 的供应商管理弹层 |
 | CSS | 复用 `.model-picker-content` / `.model-picker-item` 等（`app.css:5644-5731`）；`.model-picker-group-label`（`:5697-5705`）**当前是死 CSS**：本次结构替换后若不再需要就删除（属本票 scope 内的清理），若作为第一级组标题启用则在两个主题下都校验对比度 |
@@ -149,6 +149,20 @@ type Props = {
 - hover/聚焦该行时用 `title`/tooltip 列出被收窄掉的工具名（最多 6 个 + 「…」）。
 - **不用** toast、不用 banner、不用一次性弹窗。
 - 这条同时缓解 #198 的现象（用户选档位后看不到工具集被收窄），但在 UI 上只说事实，不解释原因。
+
+**已落地（#201，2026-09-17）**，三处口径在此写明（实现里另有注释，这里是与设计稿对齐的那一份）：
+1. **数据源**：`GET /api/agent-profiles` 每条带 `tool_scope {open, total, excluded}`，
+   值来自 `agent/profiles.py::tool_scope_summary`。口径 = **档位声明的工具面**
+   （`BUILTIN_PROFILES[*].tool_scope`），`total` = 所有内置档位声明面的**并集**；
+   **不是**运行时实际注册集（那取决于本部署启用了哪些 capability，且 catalog 端点
+   没有 session 上下文、不会为了数数去 build_runtime）。将来若要把 N 做成"实际开放数"，
+   得在会话上下文里算（另一张票）。
+2. **什么时候说**：只在 `excluded` 非空时显示。未被收窄的档位（`main`/通用）与
+   未选档位（后端默认落 `main`）都**不显示**——没被收窄就没有事实要披露，
+   「共 17 个中开放 17 个」只是噪音。
+3. **披露对象**：**当前生效档位**（未选 = 后端默认档位）。跟着"当前选中的那一个"走，
+   不是"刚刚 hover 的那一个"——`footer` 是调用方传入的静态内容，与 cmdk 的高亮值
+   无关（要跟着 hover 走得改组件契约，收益不足）。
 
 ---
 

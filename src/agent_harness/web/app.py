@@ -24,6 +24,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
+from agent_harness.agent.profiles import tool_scope_summary
 from agent_harness.assembly import RecoveryStores, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
@@ -1170,12 +1171,20 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         同 reasoning-efforts：Phase 5 staged 契约的清单投影，运行时 no-op 不变。
         字段与 /api/permission-modes 同模式，单一事实源是 AGENT_PROFILE_DESCRIPTIONS。
+
+        #201 加法：每条带 ``tool_scope``（档位收窄披露的数据面）——
+        ``{open, total, excluded}``，值来自 `agent/profiles.py` 的
+        ``tool_scope_summary``（口径写在那里的 docstring：**声明面**，不是运行时
+        注册集）。前端据此在档位 picker 底部说一句「该档位只开放 N 个工具（共 M 个）」，
+        被收窄掉的名字放 hover 提示——用户只看得到"选完档位后工具变少了"，看不到
+        变少了什么，这条是那个缺口的唯一补法（#198 现象的缓解）。
         """
         profiles = [
             {
                 "id": profile_id,
                 "display_name": desc["display_name"],
                 "description": desc["description"],
+                "tool_scope": tool_scope_summary(profile_id),
             }
             for profile_id, desc in AGENT_PROFILE_DESCRIPTIONS.items()
         ]

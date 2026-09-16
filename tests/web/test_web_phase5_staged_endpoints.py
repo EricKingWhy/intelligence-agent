@@ -89,11 +89,13 @@ class TestAgentProfiles:
             assert p["description"], "每个 profile 必须有 description"
 
     def test_schema_locked(self, bare_client):
-        """字段 schema 锁定：每条 entry 必须含 id / display_name / description。"""
+        """字段 schema 锁定：每条 entry 必须含 id / display_name / description / tool_scope。"""
         resp = bare_client.get("/api/agent-profiles")
         body = resp.json()
         for p in body["profiles"]:
-            assert set(p.keys()) == {"id", "display_name", "description"}
+            assert set(p.keys()) == {
+                "id", "display_name", "description", "tool_scope",
+            }
             assert isinstance(p["id"], str)
             assert isinstance(p["display_name"], str)
             assert isinstance(p["description"], str)
@@ -103,6 +105,61 @@ class TestAgentProfiles:
         resp = bare_client.get("/api/agent-profiles")
         ids = {p["id"] for p in resp.json()["profiles"]}
         assert ids == {"main", "coding", "research_review"}
+
+    def test_tool_scope_counts_match_declared_scopes(self, bare_client):
+        """#201 AC：N/M 与 `BUILTIN_PROFILES[*].tool_scope` **逐值相等**，且互相对账。
+
+        钉在这里的意图：这三个数一旦漂移（有人改了 scope 却没改口径、或有人把
+        ``total`` 换成另一个来源），UI 上那句「该档位只开放 N 个工具（共 M 个）」
+        立刻变成假话，而**看是看不出来的**（数字只会变成另一个数字）。
+        """
+        from agent_harness.agent.profiles import (
+            BUILTIN_PROFILES,
+            declared_tool_universe,
+        )
+
+        universe = declared_tool_universe()
+        resp = bare_client.get("/api/agent-profiles")
+        by_id = {p["id"]: p["tool_scope"] for p in resp.json()["profiles"]}
+
+        # 两处事实源必须同键集：`AGENT_PROFILE_DESCRIPTIONS`（文案，web 层）与
+        # `BUILTIN_PROFILES`（工具面，agent 层）。少一个键 = 端点 KeyError 500，
+        # 多一个键 = 前端出现一个选了就 422 的档位。
+        assert set(by_id) == set(BUILTIN_PROFILES)
+        for profile, scope in by_id.items():
+            spec_scope = BUILTIN_PROFILES[profile].tool_scope
+            assert scope["open"] == len(spec_scope)
+            assert scope["total"] == len(universe)
+            # excluded 就是并集减去本档位——**不是**另一个数，也不是"总减已开"
+            # （那两个数在将来某个 scope 不在 main 里时会分叉）。
+            assert scope["excluded"] == sorted(universe - spec_scope)
+            assert (scope["open"] + len(scope["excluded"])) == scope["total"]
+
+    def test_main_profile_reports_nothing_narrowed(self, bare_client):
+        """main（通用）**没有**被收窄的工具 ⇒ excluded 为空、open == total。
+
+        前端据此不渲染那句提示（"从简、不能突兀"）：没被收窄就没有事实可说，
+        「共 17 个中开放 17 个」只增噪音。
+        """
+        resp = bare_client.get("/api/agent-profiles")
+        main = next(p for p in resp.json()["profiles"] if p["id"] == "main")
+        assert main["tool_scope"]["excluded"] == []
+        assert main["tool_scope"]["open"] == main["tool_scope"]["total"]
+
+    def test_narrowed_profile_names_the_dropped_tools(self, bare_client):
+        """收窄的档位必须**点名**掉了哪些工具（hover 提示的唯一数据源）。
+
+        research_review 是只读档：write / edit / apply_patch / bash 必须在
+        excluded 里——#198 的真实现象就是"选了档位后模型说没有 write/edit"。
+        """
+        resp = bare_client.get("/api/agent-profiles")
+        research = next(
+            p for p in resp.json()["profiles"] if p["id"] == "research_review"
+        )
+        excluded = set(research["tool_scope"]["excluded"])
+        assert {"write", "edit", "apply_patch", "bash"} <= excluded
+        # 有序（前端只取前 6 个 + 「…」，顺序必须稳定，否则每次打开提示都在变）
+        assert research["tool_scope"]["excluded"] == sorted(excluded)
 
 
 # ── GET /api/context-providers ──

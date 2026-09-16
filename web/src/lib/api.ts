@@ -227,6 +227,21 @@ export interface CatalogEntry {
   id: string;
   display_name: string;
   description: string;
+  /** #201：只有 `/api/agent-profiles` 会带；其余三个清单端点没有这个字段
+   *  （缺省 = 后端没说这个档位的工具面 → 前端不渲染提示，不编）。 */
+  tool_scope?: ToolScope;
+}
+
+/** #201：档位的工具面披露（**只有 `/api/agent-profiles` 会带**）。
+ *  `open` = 该档位开放的工具数，`total` = 全部内置档位声明工具面的并集大小，
+ *  `excluded` = 并集里不在该档位的工具名（升序）。
+ *  ⚠ 这是**声明面**不是运行时注册集（后端 `agent/profiles.py::tool_scope_summary`
+ *  写明口径）：本部署少启用一个 capability 时，只有声明里提到、实际没注册的工具
+ *  会计进 `open`——所以文案只说"该档位开放 N 个（共 M 个）"，不说"你现在能用 N 个"。 */
+export interface ToolScope {
+  open: number;
+  total: number;
+  excluded: string[];
 }
 
 /** GET /api/permission-modes —— 权限模式清单。
@@ -266,7 +281,10 @@ export async function getContextProviders(): Promise<CatalogEntry[]> {
 }
 
 /** 窄化解析清单端点响应——仅 id/display_name/description 非空字符串的条目入选。
- *  顶层 key 用复数短名（modes/profiles/efforts/providers），调用方传入对应 key。 */
+ *  顶层 key 用复数短名（modes/profiles/efforts/providers），调用方传入对应 key。
+ *  `tool_scope`（#201）是**可选**字段：形状不完整就整块丢掉（缺省 = 后端没说，
+ *  前端据此不渲染提示）——半个 tool_scope（有 open 没 total，或 excluded 混进
+ *  非字符串）会被渲染成一句半真的话，比不显示更差。 */
 function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
   const raw =
     typeof body === 'object' && body !== null && Array.isArray((body as Record<string, unknown>)[key])
@@ -277,14 +295,29 @@ function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
     const r = m as Record<string, unknown>;
     if (typeof r.id !== 'string' || !r.id) return [];
     if (typeof r.display_name !== 'string' || !r.display_name) return [];
+    const scope = parseToolScope(r.tool_scope);
     return [
       {
         id: r.id,
         display_name: r.display_name,
         description: typeof r.description === 'string' ? r.description : '',
+        ...(scope ? { tool_scope: scope } : {}),
       },
     ];
   });
+}
+
+/** `tool_scope` 的窄化：三个字段全部合法才返回，否则 undefined（整块丢弃）。 */
+function parseToolScope(raw: unknown): ToolScope | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const open = r.open;
+  const total = r.total;
+  if (!Number.isInteger(open) || !Number.isInteger(total)) return undefined;
+  if ((open as number) < 0 || (total as number) < 0) return undefined;
+  if (!Array.isArray(r.excluded)) return undefined;
+  if (!r.excluded.every((n) => typeof n === 'string')) return undefined;
+  return { open: open as number, total: total as number, excluded: r.excluded as string[] };
 }
 
 /** 请求体字段表：字段 → [契约键, 值]，返回 null = **不发键**（= 后端默认）。
@@ -462,7 +495,8 @@ export async function postApproval(
 // ── Models（后端契约回执 §3，T10 #103：多模型不写死，grill Q2 拍板）──
 
 /** GET /api/models 目录条目。零密钥字段；name 是 POST /api/sessions 的选择键；
- *  思考能力不进元数据（显示侧由 reasoning 事件族驱动，有则显示无则不显示）。 */
+ *  思考能力不进元数据（显示侧由 reasoning 事件族驱动，有则显示无则不显示）。
+ */
 export interface ModelCatalogEntry {
   name: string;
   provider: string | null;

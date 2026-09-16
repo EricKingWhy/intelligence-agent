@@ -1020,16 +1020,94 @@ export const MODELS = [
   { name: 'claude-sonnet-4', provider: 'anthropic', model: 'claude-sonnet-4-20250514', default: false },
 ];
 
+/** #199：可用性 + 能力位的**载荷形状**夹具（键名与真后端一致：`is_available` /
+ *  `unavailable_reason` / `supports_*`，`getModels` 逐字段窄化）。
+ *
+ * 四组覆盖四个必须分辨的情形（每组都要能在真实浏览器里被断言到）：
+ *   - `zhipu`   —— 可用 + 能力位（工具/视觉/思考）；组内两个模型徽标**不同**，
+ *                  证明徽标是 per-model 而不是 per-provider；
+ *   - `custom`  —— **整组不可用**（`missing_api_key`，真实后端在无凭据时就是这个码）
+ *                  ⇒ 该置灰 + 行尾原因 + 仍可展开；
+ *   - `weird`   —— 整组不可用但原因是**未知码** ⇒ 行尾必须回落「未配置」，
+ *                  不许把码原样打给用户（`modelAvailability.reasonLabel` 的回落）；
+ *   - `mixed`   —— 组内**部分**不可用 ⇒ **不许**置灰（把一个可用项说成不可用
+ *                  比不置灰更糟）。 */
+export const MODELS_WITH_AVAILABILITY = [
+  {
+    name: 'glm-4.6', provider: 'zhipu', model: 'glm-4.6', default: true,
+    is_available: true, unavailable_reason: null,
+    supports_tools: true, supports_vision: true, supports_reasoning_summary: true,
+  },
+  {
+    name: 'glm-4.6-air', provider: 'zhipu', model: 'glm-4.6-air', default: false,
+    is_available: true, unavailable_reason: null,
+    supports_vision: true,
+  },
+  {
+    name: 'custom:gpt-x', provider: 'custom', model: 'gpt-x', default: false,
+    is_available: false, unavailable_reason: 'missing_api_key',
+  },
+  {
+    name: 'weird:model-a', provider: 'weird', model: 'model-a', default: false,
+    is_available: false, unavailable_reason: 'some_future_code',
+  },
+  {
+    name: 'mixed:ok', provider: 'mixed', model: 'ok', default: false,
+    is_available: true, unavailable_reason: null,
+  },
+  {
+    name: 'mixed:no-key', provider: 'mixed', model: 'no-key', default: false,
+    is_available: false, unavailable_reason: 'missing_api_key',
+  },
+];
+
 export const PERMISSION_MODES = [
   { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
   { id: 'ask', display_name: 'Ask Each Time', description: '每次工具调用都询问' },
   { id: 'deny', display_name: 'Deny All', description: '拒绝所有工具调用' },
 ];
 
+/** `GET /api/agent-profiles` 的默认载荷（形状 = 后端 `AGENT_PROFILE_DESCRIPTIONS`
+ *  + `agent/profiles.py::tool_scope_summary` 的 `tool_scope`）。
+ *
+ *  `tool_scope` 三个数**逐值镜像后端实测值**（main 17/17、coding 12/17、
+ *  research_review 7/17）——后端那两个函数会随 scope 改动漂移，两侧各有一把锁
+ *  （后端 `test_web_phase5_staged_endpoints.py::test_tool_scope_counts_match_declared_scopes`，
+ *  前端 `lib/agentProfileScope.test.ts`）；改 scope 请同时看这两处。
+ *  只写要断言的事实：`display_name`/`description` 的文案不参与断言。 */
 export const AGENT_PROFILES = [
-  { id: 'main', display_name: 'Main', description: '通用编排代理（默认）' },
-  { id: 'coding', display_name: 'Coding', description: '代码编辑、调试和构建任务专用' },
-  { id: 'research_review', display_name: 'Research & Review', description: '研究、检索和审查任务专用' },
+  {
+    id: 'main',
+    display_name: 'Main',
+    description: '通用编排代理（默认）',
+    tool_scope: { open: 17, total: 17, excluded: [] },
+  },
+  {
+    id: 'coding',
+    display_name: 'Coding',
+    description: '代码编辑、调试和构建任务专用',
+    tool_scope: {
+      open: 12,
+      total: 17,
+      excluded: [
+        'delegate', 'inspect_artifact', 'read_knowledge_source',
+        'retrieve_knowledge', 'web_search',
+      ],
+    },
+  },
+  {
+    id: 'research_review',
+    display_name: 'Research & Review',
+    description: '研究、检索和审查任务专用',
+    tool_scope: {
+      open: 7,
+      total: 17,
+      excluded: [
+        'apply_patch', 'bash', 'delegate', 'edit', 'forget_memory',
+        'git_diff', 'git_status', 'inspect_artifact', 'remember_this', 'write',
+      ],
+    },
+  },
 ];
 
 export const REASONING_EFFORTS = [

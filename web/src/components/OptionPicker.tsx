@@ -24,9 +24,11 @@
  * `CatalogEntry = {id, display_name, description}`，**没有任何 per-option 图标数据**；
  * 而为后端可扩展的枚举（fixture 里就有 `mode-0…mode-5`）编一套字形，正是本产品明令
  * 禁止的「编占位」行为（PRODUCT.md 原则 3「真实优先于好看」/ PRD §4 No fake values）。
- * 图标留在 trigger 上——那是每个控件一个（调用方传入），不是每行一个。同理，
- * 设计稿 §4 的「档位收窄提示」也**没有落地**：`GET /api/agent-profiles` 不回工具数，
- * N/M 无来源；footer 插槽留着，等后端暴露该字段再接（见 `docs/PHASE_STATUS.md` 的残余）。
+ * 图标留在 trigger 上——那是每个控件一个（调用方传入），不是每行一个。设计稿 §4 的
+ * 「档位收窄提示」已落地（#201）：`GET /api/agent-profiles` 自 #201 起回
+ * `tool_scope {open, total, excluded}`，调用方（`Composer.tsx` 的档位 picker）把
+ * `lib/agentProfileScope.ts` 组装的文案塞进 `footer` 插槽——本组件不认识那段话的语义，
+ * 只负责位置与样式（没被收窄时不传 footer，就没有这一行）。
  *
  * 契约（向后兼容）：
  *   - trigger 仍是 `button.composer-control`，`aria-label` 由调用方传入——组件**不内置**

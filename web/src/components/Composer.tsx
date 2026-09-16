@@ -10,6 +10,7 @@ import { memo, useEffect, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Check, Pencil, Play, Shield, Square, User, X, Zap } from 'lucide-react';
 import type { PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
+import { toolScopeNote } from '../lib/agentProfileScope';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
@@ -312,6 +313,17 @@ export const Composer = memo(function Composer({
               icon={User}
               placeholder="Agent"
               disabled={locked}
+              // #201 冻结 AC：档位收窄提示（用户裁定"要提示，但从简，不能突兀"）。
+              // 文案组装在纯函数里（`lib/agentProfileScope.ts`，vitest 直测）；
+              // 没被收窄 / 后端没给 tool_scope → 该函数返回 null → 不渲染 footer。
+              // 按**当前生效档位**披露：未选时按后端默认档位（main），因为那才是
+              // 这次会话真正会用的工具面。
+              footer={
+                (() => {
+                  const note = toolScopeNote(agentProfiles, selectedAgentProfile);
+                  return note ? <span title={note.title}>{note.text}</span> : undefined;
+                })()
+              }
             />
             <OptionPicker
               ariaLabel="Reasoning Effort"

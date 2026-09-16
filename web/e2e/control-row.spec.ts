@@ -244,3 +244,58 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   // 断言它不出现在 payload（后端仍接受程序化显式传值，见 web/src/lib/amend.ts）。
   expect(body.context_providers).toBeUndefined();
 });
+
+test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出 N/M', async ({ page }) => {
+  /* 用户裁定（设计稿 §4）：「要提示，但从简，不能突兀」——位置固定在档位弹层的
+     footer（`.picker-foot`），一行次级文字，被收窄掉的名字放 `title`。
+     数字来自后端 `/api/agent-profiles` 的 `tool_scope`（纯函数
+     `lib/agentProfileScope.ts` 组装，单测在 `agentProfileScope.test.ts`）；
+     这条 e2e 锁的是**真实 DOM 接线**——纯函数对但没挂上去，用户一样看不到。 */
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  const foot = page.locator('.picker-foot');
+  const openPicker = async () => {
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  };
+  const closePicker = async () => {
+    await page.keyboard.press('Escape');
+    // 退出动画期间 listbox 仍在 DOM（与 pickControl 的注释同一成因）
+    await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+  };
+
+  // ① 未选档位 = 用后端默认值，运行时落到 main（assembly.py:401）——main 没被收窄
+  //    ⇒ **不许**出现那一行：「共 17 个中开放 17 个」只是噪音。
+  await openPicker();
+  await expect(foot).toHaveCount(0);
+  await closePicker();
+
+  // ② 被收窄的档位（编程 = coding，12/17）⇒ 逐字给出那句话
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await openPicker();
+  await expect(foot).toBeVisible();
+  await expect(foot).toHaveText('该档位只开放 12 个工具（共 17 个）');
+  // hover 提示只列名字、不解释原因（设计稿：「只说事实，不解释原因」）。
+  // `title` 挂在文案 span 上（`.picker-foot` 是容器槽位——调用方可能放别的东西，
+  // 那个槽位本身不该被强行赋予一个 title 语义）。
+  const note = foot.locator('span[title]');
+  await expect(note).toHaveAttribute('title', /^未开放：/);
+  await expect(note).toHaveAttribute('title', /delegate/);
+  await expect(note).toHaveAttribute('title', /web_search/);
+  await closePicker();
+
+  // ③ 换回未被收窄的档位（通用 = main）⇒ 提示消失（跟着当前生效档位走，不是一次性的）
+  await pickControl(page, 'Agent Profile', 1, 'Main');
+  await openPicker();
+  await expect(foot).toHaveCount(0);
+  await closePicker();
+});
