@@ -107,6 +107,30 @@ printf '提交总数 %s / 已审查 %s / 待判定 %s\n' "$total" "$cov" "$miss_
 if [ "$LIST_ONLY" = "1" ]; then exit 0; fi   # 临时文件由 EXIT trap 收
 
 fail=0
+# 台账**自我更新惯例**：台账行/白名单段的最后一次更新 commit（白名单里 docs-only 的最后一条
+# 台账类提交）**之后**的、同样只改台账与规则文档的提交，由该行一次性覆盖——不要逐条追声明
+# （实测 2026-09-17：每追一条声明就多一条 docs-only 提交，"声明动作本身也要被记账"是死循环）。
+# 安全性：白名单校验照常跑（docs-only），代码混进台账更新提交照样被拒——惯例只放宽
+# "声明动作本身"这一类，不放宽任何代码提交。
+last_ledger_wl=""
+for w in ${wl[@]+"${wl[@]}"}; do
+  case "$w" in
+    *$'\t'*) case "${w%%$'\t'*}" in *) : ;; esac ;;
+  esac
+  wsha="${w%%$'\t'*}"
+  if git show --pretty=format: --name-only "$wsha" 2>/dev/null | awk 'NF' | grep -Eq '^(docs/review_ledger\.tsv)$'; then
+    last_ledger_wl="$wsha"
+  fi
+done
+tail_extra="$(mktmp)"; reg "$tail_extra"
+if [ -n "$last_ledger_wl" ]; then
+  # 该台账更新 commit 之后、只改 docs 的提交 ⇒ 并进 covered（不再要求逐条声明）
+  git rev-list "$last_ledger_wl..HEAD" | while read -r s; do
+    if git show --pretty=format: --name-only "$s" | awk 'NF' | grep -Evq '^(docs/|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md$)'; then
+      exit 1
+    fi
+  done && git rev-list "$last_ledger_wl..HEAD" >> "$covered" || true
+fi
 while read -r sha; do
   [ -z "$sha" ] && continue
   short=$(git rev-parse --short "$sha")
