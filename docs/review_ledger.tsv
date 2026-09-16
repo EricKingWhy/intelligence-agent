@@ -33,6 +33,7 @@ d748546	本批门禁数字落点（tracker + 归档，docs-only）
 07faef5	#220 落点记录（tracker 批次行 + PHASE_STATUS 索引 + 归档明细，docs-only）
 59c62a8	#221 落点记录（tracker 批次行 B-7 + PHASE_STATUS 索引 + 归档明细 + 审查行 dfb3d74..fb85790，docs-only）
 3674079	#221 集成/关单状态如实化（tracker + 归档，docs-only）
+017c981	真机巡检 round 2 记录（LIVE_BROWSER_TEST §6 + 工单 #222-#225，docs-only）
 41ea4b8	真机巡检记录 2026-09-17 + tracker/PHASE_STATUS/归档落点（docs-only）
 ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
 16f61b9	本流程批落点记录（tracker + PHASE_STATUS + 归档，docs-only）
