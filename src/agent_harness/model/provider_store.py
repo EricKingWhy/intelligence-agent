@@ -145,10 +145,17 @@ class SystemCredentialStore(Credentials):
 
     def delete(self, provider_id: str) -> None:
         import keyring
-        from keyring.errors import KeyringError
+        from keyring.errors import KeyringError, PasswordDeleteError
 
         try:
             keyring.delete_password(CREDENTIAL_SERVICE, provider_id)
+        except PasswordDeleteError:
+            # **本来就没有这条凭据**（新建供应商默认不填 key、或已被手工清过）——
+            # 删除的语义已经满足，不是失败。keyring 用这个异常类表达"该条目不存在"，
+            # 所以必须单独接住：混进下面的 `KeyringError` 会让 `ProviderStore.delete`
+            # （D6：先删凭据、异常即中止）在**无 key 的供应商**上永远中止 ⇒ 条目留在
+            # 盘上删不掉（#215），而"无 key"恰是新建供应商的默认状态。
+            return
         except KeyringError as error:
             raise CredentialError(f"凭据删除失败: {type(error).__name__}") from error
 

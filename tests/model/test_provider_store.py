@@ -17,6 +17,7 @@ from agent_harness.model.provider_store import (
     CredentialError,
     MemoryCredentialStore,
     ProviderStore,
+    SystemCredentialStore,
     validate_base_url,
     validate_provider_id,
 )
@@ -155,6 +156,46 @@ def test_delete_aborts_when_credential_delete_fails(store: ProviderStore):
     with pytest.raises(CredentialError):
         store.delete("my-proxy")
     # 配置保持原样——不出现"配置没了凭据还在"。
+    assert [e["id"] for e in store.list_entries()] == ["my-proxy"]
+
+
+# ── #215：无 key 的供应商必须能删掉；keyring **真故障**仍必须中止 ─────
+#
+# 这两条锁的是同一行代码的两侧（`SystemCredentialStore.delete` 的异常分流）：
+# keyring 用 `PasswordDeleteError` 表达"这条凭据不存在"，把它并进 KeyringError
+# 会让 `ProviderStore.delete`（D6：先删凭据、异常即中止）在**无 key 的供应商**
+# 上永远中止——而"无 key"正是新建供应商的默认状态（#215 的实测现象）。
+# 只用 monkeypatch 换掉 keyring 那一次调用，不碰 store 的其余真实对象，
+# 因此判据与"本机 keyring 后端是否可用"无关。
+
+
+def test_delete_keyless_provider_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import keyring
+    from keyring.errors import PasswordDeleteError
+
+    def _missing(service: str, provider_id: str) -> None:
+        raise PasswordDeleteError("no such password")
+
+    monkeypatch.setattr(keyring, "delete_password", _missing)
+    store = ProviderStore(tmp_path / "p.json", SystemCredentialStore())
+    store.create(_body(api_key=None))  # 不填 key（= 新建供应商的默认状态）
+    store.delete("my-proxy")
+    assert store.list_entries() == []
+
+
+def test_delete_aborts_when_keyring_backend_fails(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch):
+    import keyring
+    from keyring.errors import KeyringError
+
+    def _broken(service: str, provider_id: str) -> None:
+        raise KeyringError("backend down")
+
+    monkeypatch.setattr(keyring, "delete_password", _broken)
+    store = ProviderStore(tmp_path / "p.json", SystemCredentialStore())
+    store.create(_body())  # 带 key：凭据确实存在，删不掉就不能删配置
+    with pytest.raises(CredentialError):
+        store.delete("my-proxy")
     assert [e["id"] for e in store.list_entries()] == ["my-proxy"]
 
 
