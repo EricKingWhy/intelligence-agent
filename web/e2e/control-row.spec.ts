@@ -381,8 +381,11 @@ test('#214：行首字形由条目声明的 icon 名决定（未知名 / 缺键�
 
 test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形', async ({ page }) => {
   /* 纯函数对 ≠ 界面上有图标：三个调用点（`Composer.tsx` 的权限/档位/推理深度）各自
-     传一次 `catalogIcon`，任何一处漏传都会静默退化成空槽——这条按 picker 逐个断言，
-     顺带覆盖"后端内置名在前端都有对应字形"（名集镜像错位会在这里露出来）。 */
+     传一次 `catalogIcon`，任何一处漏传都会静默退化成空槽——这条按 picker 逐个断言。
+     ⚠ 它覆盖的**不是**完整名集：三个 picker 的代表名是 `lock` / `layers` / `bolt`，
+     `u-project-task` 的 AC10 再加 `pencil` / `unlock`；其余四个（`code` / `search` /
+     `gauge` / `telescope`）没有 e2e 覆盖。名集两侧的一致性由跨端对账用例负责
+     （`tests/web/test_web_phase5_staged_endpoints.py::TestCatalogIcons`），不靠这里。 */
   await routeApi(page, {
     sessions: [],
     events: [],

@@ -157,9 +157,11 @@ AGENT_PROFILE_DESCRIPTIONS: dict[str, dict[str, str]] = {
 #: 三个目录端点（/api/permission-modes、/api/reasoning-efforts、/api/agent-profiles）
 #: 的每条内置条目都从本集合里取一个名；前端 `web/src/lib/catalogIcons.ts` 是这些名
 #: → 字形的**唯一**映射处（未知名/缺键 ⇒ 留空槽，不编字形）。
-#: ⚠ 两侧各有一把锁把**自己那份**钉住（本集合 + 前端的字面量断言），**没有**跨端自动
-#: 校验——单边加一个名，两边测试都还是绿的，只是前端那一行静默变空槽。增删名必须手工
-#: 同步两端（本集合 + `web/src/lib/catalogIcons.ts` + 两边测试）。
+#: ⚠ 增删名必须**同一个提交里改两端**：本集合 + `web/src/lib/catalogIcons.ts` 的
+#: `CATALOG_ICON_NAMES` 字面量（前端还要在 `ICONS` 里配字形——缺了过不了 `tsc`）。
+#: 跨端一致性有**机械闸门**（#217）：`tests/web/test_web_phase5_staged_endpoints.py::
+#: TestCatalogIcons::test_frontend_mirror_is_in_sync_with_backend_set` 读前端那份字面量
+#: 与本集合逐值对账 ⇒ 单边增删名必红（漏改前端 = 那一行静默空槽，正是它要挡的）。
 CATALOG_ICON_NAMES: frozenset[str] = frozenset({
     "lock", "pencil", "unlock",      # 权限模式：只读 / 工作区写入 / 完全访问
     "layers", "code", "search",      # agent 档位：通用 / 编程 / 研究审查

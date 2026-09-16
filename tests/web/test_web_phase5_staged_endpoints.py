@@ -17,12 +17,28 @@ Scope Lock（§8）：本测试只锁清单端点契约，不验运行时消费�
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
 from agent_harness.web import app as web_app
 from agent_harness.web.app import CATALOG_ICON_NAMES, create_app
+
+#: 前端那份名单的**声明点**（跨端对账要读的源文件；#217）。
+_WEB_CATALOG_ICONS = Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "catalogIcons.ts"
+#: 抓 `export const CATALOG_ICON_NAMES = [ … ] as const` 的块（`re.DOTALL` 跨行）。
+_FRONTEND_ICON_NAMES_RE = re.compile(
+    r"export const CATALOG_ICON_NAMES = \[(.*?)\]\s*as const", re.DOTALL
+)
+#: 块内两种注释（行注释 + 块注释）：先剥掉，注释里的引号才不会变成幽灵名。
+_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
+#: 块内引号里的名。**不限制字符集**（`[^'\"]+`）：名域是复合词的常态（lucide 自己就叫
+#: `file-search`），用 `[A-Za-z0-9_]` 会把带连字符的名**整名丢掉** ⇒ 两侧集合仍相等 ⇒
+#: **静默放行**——那正是本用例要消灭的形态。抓宽一点，让任何漂移都进比对。
+_QUOTED_NAME_RE = re.compile(r"['\"]([^'\"]+)['\"]")
 
 
 @pytest.fixture
@@ -265,3 +281,34 @@ class TestCatalogIcons:
         efforts = bare_client.get("/api/reasoning-efforts").json()["efforts"]
         [custom] = [e for e in efforts if e["id"] == "custom"]
         assert custom["icon"] is None
+
+    def test_frontend_mirror_is_in_sync_with_backend_set(self):
+        """#217：前端那份名单（`web/src/lib/catalogIcons.ts` 的 `CATALOG_ICON_NAMES` 字面量）
+        必须与后端本集合**同集**——跨端逐值对账，读的是前端源文件本身。
+
+        为什么需要（实测口径，不是 issue 原文的口径）：改动前**后端侧**其实已经被本类的
+        `test_icon_names_are_declared_and_exact` 锁住了——那条断言"集合 == 三个目录实际下发的
+        并集"外加逐 id 的图标名映射，所以往集合里加名会撞前一断言（没有条目下发它），
+        加名并让某条条目下发它则撞后一断言（多了一条不在固定映射里的条目）。实测两态皆红。
+        **真正开着的是前端侧**：前端那把锁比的是前端自己的镜像字面量，于是"前端删掉一个
+        后端仍在下发的字形、并同步改掉自己那份镜像"⇒ 前后端测试全绿，而界面上那一行
+        **静默变空槽**（正是 #214 要消灭的那类静默，且它恰是用户可见的退化）。
+        本用例是那个方向的唯一机械闸门：**单边增删名必红**，失败信息直接指出该改哪两侧。
+        """
+        source = _WEB_CATALOG_ICONS.read_text(encoding="utf-8")
+        match = _FRONTEND_ICON_NAMES_RE.search(source)
+        assert match is not None, (
+            f"未能在 {_WEB_CATALOG_ICONS} 找到 `export const CATALOG_ICON_NAMES = [ … ] as const` "
+            "字面量（格式改过？）——本用例是跨端名集的唯一闸门，找不到就必须红，不能跳过"
+        )
+        frontend_names = set(_QUOTED_NAME_RE.findall(_COMMENT_RE.sub("", match.group(1))))
+
+        backend_names = set(CATALOG_ICON_NAMES)
+        assert frontend_names == backend_names, (
+            "图标名集跨端不同步："
+            f"仅后端有 {sorted(backend_names - frontend_names)}（前端缺字形 ⇒ 该行空槽），"
+            f"仅前端有 {sorted(frontend_names - backend_names)}（没有条目会下发它）。"
+            "增删名要同一个提交里改两端："
+            "`src/agent_harness/web/app.py::CATALOG_ICON_NAMES` 与 "
+            "`web/src/lib/catalogIcons.ts::CATALOG_ICON_NAMES`（前端还要在 `ICONS` 里配字形）"
+        )
