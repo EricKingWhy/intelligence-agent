@@ -172,4 +172,8 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
 6. **禁止跳过门禁**：后端 `ruff check` + 全量 `pytest`；前端（在 `web/` 下）
    `npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build`。
    e2e 必须 `--workers=2`（4 worker 全量并行存在资源竞争型抖动）。
+   后端门禁用 `uv run`，而 `uv run` 会在锁过期时**静默重写 `uv.lock`**。所以跑完先看
+   `git status`：若出现 `uv.lock` 改动，说明提交的锁与 `pyproject.toml` 不同步（#216），
+   它是**独立的 chore commit**——不要用 `git add -A` 把它混进功能票，也不要为了"工作树干净"
+   顺手 `git checkout -- uv.lock`（那只是把不同步藏起来，下一次 `uv run` 还会再改一次）。
 7. **禁止凭记忆猜流程**：不确定就执行自愈条款（重读本文件 + Tracker）
