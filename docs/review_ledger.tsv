@@ -40,3 +40,4 @@ d748546	本批门禁数字落点（tracker + 归档，docs-only）
 ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
 16f61b9	本流程批落点记录（tracker + PHASE_STATUS + 归档，docs-only）
 55321bc	#222 落点记录（tracker 批次行 B-8 + PHASE_STATUS 索引 + 归档明细 + 审查行 1a4c2fb..864fb15 + 巡检 F5 状态，docs-only）
+51d0c8e	#222 集成/关单状态如实化（tracker + PHASE_STATUS + 归档，docs-only）
