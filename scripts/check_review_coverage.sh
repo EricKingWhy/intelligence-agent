@@ -107,35 +107,20 @@ printf '提交总数 %s / 已审查 %s / 待判定 %s\n' "$total" "$cov" "$miss_
 if [ "$LIST_ONLY" = "1" ]; then exit 0; fi   # 临时文件由 EXIT trap 收
 
 fail=0
-# 台账**自我更新惯例**：台账行/白名单段的最后一次更新 commit（白名单里 docs-only 的最后一条
-# 台账类提交）**之后**的、同样只改台账与规则文档的提交，由该行一次性覆盖——不要逐条追声明
-# （实测 2026-09-17：每追一条声明就多一条 docs-only 提交，"声明动作本身也要被记账"是死循环）。
-# 安全性：白名单校验照常跑（docs-only），代码混进台账更新提交照样被拒——惯例只放宽
-# "声明动作本身"这一类，不放宽任何代码提交。
-last_ledger_wl=""
-for w in ${wl[@]+"${wl[@]}"}; do
-  case "$w" in
-    *$'\t'*) case "${w%%$'\t'*}" in *) : ;; esac ;;
-  esac
-  wsha="${w%%$'\t'*}"
-  if git show --pretty=format: --name-only "$wsha" 2>/dev/null | awk 'NF' | grep -Eq '^(docs/review_ledger\.tsv)$'; then
-    last_ledger_wl="$wsha"
-  fi
-done
-tail_extra="$(mktmp)"; reg "$tail_extra"
-if [ -n "$last_ledger_wl" ]; then
-  # 该台账更新 commit 之后、只改 docs 的提交 ⇒ 并进 covered（不再要求逐条声明）
-  git rev-list "$last_ledger_wl..HEAD" | while read -r s; do
-    if git show --pretty=format: --name-only "$s" | awk 'NF' | grep -Evq '^(docs/|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md$)'; then
-      exit 1
-    fi
-  done && git rev-list "$last_ledger_wl..HEAD" >> "$covered" || true
-fi
 while read -r sha; do
   [ -z "$sha" ] && continue
   short=$(git rev-parse --short "$sha")
   subject=$(git log -1 --pretty=%s "$sha")
   reason=""
+  # 台账自身的记账动作**自动放行**：恰好只改 docs/review_ledger.tsv 的提交机械可验、藏不了代码；
+  # 而"把这件事记进台账"本身又要被记账是**死循环**（实测 2026-09-17 绕了三轮：白名单声明 → 台账
+  # 补记 → 惯例块，每轮都产出新的待记账提交）。收窄条件：夹带任何其他文件（含 scripts/）即回落
+  # 到正常判定——85310b4 含 scripts/ 改动，实测仍被拦下要求审查。
+  lfiles=$(git show --pretty=format: --name-only "$sha" | awk 'NF')
+  if [ -n "$lfiles" ] && ! printf '%s\n' "$lfiles" | grep -Evq '^docs/review_ledger\.tsv$'; then
+    printf '✅ 台账自身更新（自动放行）: %s  %s\n' "$short" "$subject"
+    continue
+  fi
   for w in ${wl[@]+"${wl[@]}"}; do
     # 整行匹配（不经 word-splitting 的字段拆分）：原因文本含空格时 `read -r wsha wreason`
     # 仍把剩余部分当**一个** reason；逐行比对而非拆词，避免含空格的原因被拆散后误匹配
