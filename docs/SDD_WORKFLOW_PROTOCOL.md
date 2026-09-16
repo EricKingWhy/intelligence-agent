@@ -143,6 +143,11 @@
 | 审查结论 | 轮次 + findings 分级 + 是否零 finding |
 | 修复 commit | findings 修完后的 commit（下一批的 fixed point） |
 
+⚠ **表格里的范围数字只是人读的索引；交付前"哪些 commit 真的被审过"以机读台账
+`docs/review_ledger.tsv` 为准**（覆盖对账见 §5 第 8 条——手抄的 fixed point 错一格就是
+#213 那次静默豁免）。审查行的 tip 必须 = **审查实际读到的末条 commit**：审查之后才创建的
+修复提交**不在**那个范围内，它由下一行（或补审行）覆盖。
+
 ---
 
 ## 4. 剩余 Ticket 清单
