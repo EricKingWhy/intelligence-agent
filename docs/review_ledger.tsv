@@ -22,6 +22,7 @@
 2026-09-17	复验 B 补审：修复 9f2a8f8 + 复验修复 44f48c7（两轴，findings 见 e626d2d）	fdb9ce3..e125e27
 2026-09-17	本批（流程优化 2447c0a/4f053b3 + 自审 97aa5ac/513b7e7 + 两轴修复 e626d2d）两轴审查	fdb9ce3..e626d2d
 2026-09-17	闸门脚本两轴审查（Standards + Spec 独立子代理，读 c2b3b23 状态）——findings：docs/ 下脚本可被白名单放行(P1)、根级名缺 $ 锚、SIGPIPE fail-open、BOM 剥离 no-op、缺 base-ancestor 校验、台账行 25/26 事实错误	132ba35..c2b3b23
+2026-09-17	闸门脚本两轴 findings 的全数修复（dda2b64，含自审时自己撞出的一处 unbound variable）——**作者自审，未过两轴，下一批必读**	132ba35..dda2b64
 #
 [whitelist]
 ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
