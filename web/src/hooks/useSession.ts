@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, startSession, startSessionErrorDetail, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -256,20 +256,47 @@ export const QUEUE_ITEM_GONE_ERROR_TEXT = '排队项已不存在（可能已被�
  *  `sendFollowUp` 里的回退分支：用户的消息会被判成"需人工裁决"而丢掉。 */
 const STEER_TARGET_MISSING_MARKER = 'steer requires an active run';
 
-/** 409 + 该 detail ⇒ 应改投 queue 重发。
- *
- *  ⚠ 读的是 `res.clone()`：调用方在**不是**这一支时还要再读一次 body 拿 detail
- *  （T8 #138 的人工裁决支）。直接读原响应会把它消耗掉，那一支就只能 catch 到
- *  "Body is unusable"，把后端给的具体原因（工具名 / call id / seq 冲突）换成
- *  一句泛化的"存在需要人工裁决的高风险操作"。`clone()` 必须在任何读取**之前**调用。 */
-async function isSteerTargetMissing(res: Response): Promise<boolean> {
-  try {
-    const detail = (await res.clone().json()) as { detail?: unknown } | null;
-    return typeof detail?.detail === 'string'
-      && detail.detail.includes(STEER_TARGET_MISSING_MARKER);
-  } catch {
-    return false; // 读不出 body 就当不是这一支：宁可报错，也不误判成因
+/** 一次 `/messages` 投递的结局分派结果。 */
+export type FollowUpOutcome =
+  | { kind: 'stream' }
+  | { kind: 'ack' }
+  | { kind: 'retry-queue' }
+  | { kind: 'fail'; text: string };
+
+/** 把一条已落定的 `/messages` 响应映射成「接下来做什么」。**纯函数**，窗内窗外共用
+ *  （单一分派表，理由见 `docs/adr/0030-…md` §13）。 */
+export function decideFollowUpOutcome(input: {
+  status: number;
+  /** 响应带 body——没 body 的 2xx 不是可消费的回执。 */
+  hasBody: boolean;
+  contentType: string;
+  /** 本次投递用的 mode（steer 与 queue 打同一端点，只有这个字段不同）。 */
+  mode: SendMessagePayload['mode'];
+  /** 已读出的后端 detail——只有 409 会用到（它是同码不同因的唯一依据）。 */
+  detail: string;
+  /** 请求是否带 queue_id——决定 404 说的是哪一件事（见 QUEUE_ITEM_GONE_ERROR_TEXT）。 */
+  hasQueueId: boolean;
+}): FollowUpOutcome {
+  const { status, hasBody, contentType, mode, detail, hasQueueId } = input;
+  const ok = status >= 200 && status < 300; // `Response.ok` 的定义，不必让调用方再传一遍
+  if (ok && hasBody) {
+    // 事件流 = launched（新 run 直驱，接流消费）；JSON = queued/steered 收据
+    return contentType.includes('text/event-stream') ? { kind: 'stream' } : { kind: 'ack' };
   }
+  if (status === 409) {
+    // 409 同码不同因（detail 是唯一能分开它们的东西）：
+    //  - steer 打空（此刻没有可打断的 run）⇒ 后端自己要求改投 queue；
+    //  - T8 #138「存在需人工裁决的 UNKNOWN 操作」⇒ 如实转述后端 detail，不代它编话。
+    if (mode === 'steer' && detail.includes(STEER_TARGET_MISSING_MARKER)) {
+      return { kind: 'retry-queue' };
+    }
+    return { kind: 'fail', text: detail || '存在需要人工裁决的高风险操作' };
+  }
+  if (status === 422) return { kind: 'fail', text: CONTINUE_PARAMS_ERROR_TEXT };
+  if (status === 404) {
+    return { kind: 'fail', text: hasQueueId ? QUEUE_ITEM_GONE_ERROR_TEXT : SESSION_GONE_ERROR_TEXT };
+  }
+  return { kind: 'fail', text: `Send failed: ${status}` };
 }
 
 /** 「立即失败 vs 正常流式」的判别窗口（毫秒）。
@@ -1011,98 +1038,111 @@ export function useSession() {
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
       setMode({ kind: 'live', sessionId });
-      try {
-        // 同 submitTask：launched 分支的 SSE 响应体会被交付层攥到 run 结束，不能干等。
-        // queued/steered 是 JSON 确认（极短）→ 短窗内必返回；窗外 = launched，
-        // 此时 sid 已知，直接用 WS 接流。
-        // `sendMode` 可被下面的 steer 回退改写（steer 与 queue 打同一个端点，
-        // 唯一差别就是这个字段），所以它是变量而不是内联字面量。
-        let sendMode: 'queue' | 'steer' = opts?.amend?.mode === 'steer' ? 'steer' : 'queue';
-        let pending = apiSendMessage(sessionId, {
-          content,
-          max_steps: opts?.maxSteps ?? 10,
-          ...(opts?.amend ?? {}),
-          mode: sendMode,
-        });
-        let res = await raceEarlyResponse(pending);
-        if (res !== null && res.status === 409 && sendMode === 'steer') {
-          /* steer 的 409 与 T8 #138 的 409 **同码不同因**，混为一谈就会丢消息：
-             - 这一支（service.py::SteerTargetNotFound，"steer requires an active run"）
-               是"此刻没有可打断的 run"——后端在 detail 里明确要求改投 queue；
-             - 后面那一支才是"存在需人工裁决的 UNKNOWN 操作"（它的 detail 必须留着，
-               见 isSteerTargetMissing 的 clone 说明）。
-             用户此时的处境是**消息已被拒**，而 Composer 早已清空输入框（它的
-             submit 末尾无条件 setValue('')）⇒ 不在这里回退，用户就得凭记忆重打
-             一遍，界面上还只会出现一句关于"人工裁决"的错话（真机实测）。
-             重投**必须去掉 queue_id**：带 queue_id 的 steer（队列条「立即」）在
-             service.py 里是**先 cancel_queue 再判在途 run**（:779-788 的顺序），
-             所以走到这个 409 时那条排队项**已经被取消**了——带同一个 queue_id
-             重投只会撞 404 QueueItemNotFound，消息反而真的丢。去掉它、内容原样、
-             模式改 queue，语义正好是"这条排队项立即作为新消息投递"。
-             无 queue_id 时该 409 在 register_steer **之前**抛出、什么也没登记，
-             重投同样不会重复投递。 */
-          if (await isSteerTargetMissing(res)) {
-            const { queue_id: _alreadyCancelled, ...restAmend } = opts?.amend ?? {};
-            sendMode = 'queue';
-            pending = apiSendMessage(sessionId, {
-              content,
-              max_steps: opts?.maxSteps ?? 10,
-              ...restAmend,
-              mode: sendMode,
-            });
-            res = await raceEarlyResponse(pending);
+
+      /** 投递一次：发请求 → 按结局分派。窗内与窗外**必须同一张表、同一套错误呈现**
+       *  （都抛 Error，由「续聊失败：」收口）——原因见 `docs/adr/0030-…md` §13。 */
+      const deliver = async (payload: SendMessagePayload): Promise<void> => {
+        /* 本次**投递尝试**的代际：纠正「接错流」时会推进它（见下面 outOfWindow 支），
+           于是回退重投在新代际下继续，而被纠正那条流彻底失效。按投递计而不是按一次
+           sendFollowUp 计，是因为重投必须活着——`settle` 与迟到链的守卫都读它。 */
+        let myGen = streamGenRef.current;
+
+        /** 分派一条**已落定**的响应。@param outOfWindow 响应是在判定「正常流式」
+         *  之后才落定的（此时已按 launched 接过一条流）。 */
+        const settle = async (res: Response, outOfWindow: boolean): Promise<void> => {
+          // 只有 409 需要 detail：它是「同码不同因」的唯一区分依据，也是人工裁决支要
+          // 转述的那句话；404/422/其余状态各有固定文案，不必为不读的 body 等一次 I/O。
+          const detail = res.status === 409 ? await readErrorDetail(res) : '';
+          if (streamGenRef.current !== myGen) return; // 读 detail 期间已换代际
+          const outcome = decideFollowUpOutcome({
+            status: res.status,
+            hasBody: res.body !== null,
+            contentType: res.headers.get('content-type') ?? '',
+            mode: payload.mode,
+            detail,
+            hasQueueId: Boolean(payload.queue_id),
+          });
+          if (outcome.kind === 'stream') {
+            // 窗外的「事件流」= 当初判 launched 是对的，WS 已在收，不重复接。
+            if (!outOfWindow) attachLiveStream(res, myGen, conversationRef.current);
+            return;
           }
+          if (outOfWindow) {
+            /* 迟到的落定不是事件流 ⇒ 当初判 launched 判错了，那条 WS 流与本次投递的
+               结局无关。**推进代际**是这里的要点：光 cancel 只停掉读，已经排定的重连
+               定时器仍会按 500/1000/2000ms 跑完三次退避、最后弹一条假的「连接中断」
+               ——把真正该显示的原因（这条响应）盖掉。 */
+            myGen = ++streamGenRef.current;
+            sseRef.current?.cancel(); // 收掉那条接错的流（含服务端订阅）
+          }
+          if (outcome.kind === 'ack') {
+            // queued/steered JSON 收据：消息已受理、当前 run 仍在跑，本次不接流。
+            setMode({ kind: 'viewing', sessionId });
+            return;
+          }
+          if (outcome.kind === 'retry-queue') {
+            /* 用户此时的处境是**消息已被拒**，而 Composer 早已清空输入框（它的
+               submit 末尾无条件 setValue('')）⇒ 不在这里回退，用户就得凭记忆重打
+               一遍，界面上还只会出现一句关于"人工裁决"的错话（真机实测）。
+               重投**必须去掉 queue_id**：带 queue_id 的 steer（队列条「立即」）在
+               service.py 里是**先 cancel_queue 再判在途 run**（:779-788 的顺序），
+               所以走到这个 409 时那条排队项**已经被取消**了——带同一个 queue_id
+               重投只会撞 404 QueueItemNotFound，消息反而真的丢。去掉它、内容原样、
+               模式改 queue，语义正好是"这条排队项立即作为新消息投递"。
+               无 queue_id 时该 409 在 register_steer **之前**抛出、什么也没登记，
+               重投同样不会重复投递。重投不会再回退：改投后 mode=queue，而这张表只在
+               mode=steer 时给出 retry-queue ⇒ 递归深度恒为 1。 */
+            const { queue_id: _alreadyCancelled, ...rest } = payload;
+            await deliver({ ...rest, mode: 'queue' });
+            return;
+          }
+          throw new Error(outcome.text);
+        };
+
+        const pending = apiSendMessage(sessionId, payload);
+        const res = await raceEarlyResponse(pending);
+        if (res !== null) {
+          await settle(res, false);
+          return;
         }
-        if (res === null) {
-          // launched → 直驱新 run，用 WS 消费（同 POST /api/sessions 形状）。
-          //
-          // 游标必须带（不能从头发）：WS 快照会重放**整段历史**，而其中上一轮的
-          // 终态事件会让 onEvent 把 terminalSeenRef 置真（那一步在 seenSeqs 去重门
-          // **之前**，重放的旧终态照样算数）。于是新 run 还没跑完，本地就认为
-          // 「已收口」——中途断流不再重连、停摆检查也失效，用户被静默丢在半路。
-          //
-          // 游标取自**本会话**的对话状态（seq 每会话单调，契约 C5）：不能读
-          // lastAppliedSeqRef——它是跨会话的单个槽位、历史装载不刷新它，读到别的
-          // 会话的游标会把本会话的事件整段跳掉。会话不匹配时退回 -1（从头发，
-          // 由 seenSeqs 幂等门吸收重复）。
-          const conv = conversationRef.current;
-          const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
-          lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
-          attachLiveStream(wsStreamResponse(sessionId, cursor), gen, conversationRef.current);
-          // 这条 promise 仍会悬挂到 run 结束；中途 reject（401 / 网络故障）时
-          // 消息其实没被受理，必须说出来——顺带接住 rejection 免得变成 unhandled。
-          void pending.catch((e) => {
-            if (streamGenRef.current !== gen) return;
-            streamGenRef.current += 1;
+        // 窗外 = 判为 launched → 直驱新 run，用 WS 消费（同 POST /api/sessions 形状）。
+        // 悬挂的 promise 有两条通道都要消费：rejection，以及**迟到的落定**（#221）。
+        // 两条都先挂上——后面的代际守卫可能提前 return，先挂才不会有 unhandled rejection。
+        void pending
+          .then((settled) => (streamGenRef.current === myGen ? settle(settled, true) : undefined))
+          .catch((e) => {
+            if (streamGenRef.current !== myGen) return;
+            myGen = ++streamGenRef.current;
             setMode({ kind: 'viewing', sessionId });
             setError(`续聊失败：${(e as Error).message}`);
           });
-          return;
-        }
-        if (res.status === 422) throw new Error(CONTINUE_PARAMS_ERROR_TEXT);
-        if (res.status === 409) {
-          // T8 #138：409 = 存在需人工裁决的 UNKNOWN Operation。
-          // detail 含 tool_name 和 tool_call_id；不伪造「结果未知」继续。
-          let detail = '';
-          try { detail = (await res.json())?.detail ?? ''; } catch { /* keep '' */ }
-          throw new Error(detail || '存在需要人工裁决的高风险操作');
-        }
-        // 404 两个来源，分不清就会误报（见 QUEUE_ITEM_GONE_ERROR_TEXT 注释）：
-        // 带 queue_id（「立即」/「编辑」）→ 目标排队项没了；否则 → 会话没了。
-        if (res.status === 404) {
-          throw new Error(opts?.amend?.queue_id ? QUEUE_ITEM_GONE_ERROR_TEXT : SESSION_GONE_ERROR_TEXT);
-        }
-        if (!res.ok || !res.body) throw new Error(`Send failed: ${res.status}`);
-        // launched → SSE 流（同 POST /api/sessions 形状），续接消费机器。
-        // queued/steered → JSON 确认——当前 run 仍在跑，消息入队待消费。
-        // 后者不 attach 新流；回到 viewing 让用户看到当前 run 继续推进。
-        const ct = res.headers.get('content-type') ?? '';
-        if (ct.includes('text/event-stream')) {
-          attachLiveStream(res, gen, conversationRef.current);
-        } else {
-          // queued/steered JSON：当前流仍在跑，回 viewing 等终态帧迁移。
-          setMode({ kind: 'viewing', sessionId });
-        }
+        // await 期间已被取代（切会话 / 取消 / 又发了一条）⇒ 到此为止：下面两行会
+        // **无条件覆写**会话级游标与流引用，把一条失效的流挂到新会话身上（submitTask
+        // 与 resumeLiveStream 在同一位置都有这道闸，本函数此前漏了）。
+        if (streamGenRef.current !== myGen) return;
+        // 游标必须带（不能从头发）：WS 快照会重放**整段历史**，而其中上一轮的
+        // 终态事件会让 onEvent 把 terminalSeenRef 置真（那一步在 seenSeqs 去重门
+        // **之前**，重放的旧终态照样算数）。于是新 run 还没跑完，本地就认为
+        // 「已收口」——中途断流不再重连、停摆检查也失效，用户被静默丢在半路。
+        //
+        // 游标取自**本会话**的对话状态（seq 每会话单调，契约 C5）：不能读
+        // lastAppliedSeqRef——它是跨会话的单个槽位、历史装载不刷新它，读到别的
+        // 会话的游标会把本会话的事件整段跳掉。会话不匹配时退回 -1（从头发，
+        // 由 seenSeqs 幂等门吸收重复）。
+        const conv = conversationRef.current;
+        const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+        lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
+        attachLiveStream(wsStreamResponse(sessionId, cursor), myGen, conversationRef.current);
+      };
+
+      try {
+        const amend = opts?.amend ?? {};
+        await deliver({
+          content,
+          max_steps: opts?.maxSteps ?? 10,
+          ...amend,
+          mode: amend.mode === 'steer' ? 'steer' : 'queue',
+        });
       } catch (e) {
         if (streamGenRef.current !== gen) return; // 过期请求迟到失败：丢弃，不污染新会话
         streamGenRef.current += 1;
@@ -1365,13 +1405,6 @@ export function useSession() {
         // （等 run 收口即可）与 RecoveryConflict（崩溃遗留的 UNKNOWN 高风险操作，
         // 要人工裁决——重试其实无意义，但重试是既有行为，本票不改）。两者都说得通的
         // 那句话只有后端的 detail，所以如实转述它，不替后端编一句。
-        const conflictDetail = async (res: Response): Promise<string> => {
-          try {
-            return ((await res.json()) as { detail?: string })?.detail ?? '';
-          } catch {
-            return '';
-          }
-        };
         for (let i = 0; i < 3; i++) {
           const pending = flushSessionQueue(sessionId);
           const res = await raceEarlyResponse(pending);
@@ -1395,7 +1428,7 @@ export function useSession() {
               if (streamGenRef.current !== gen) return;
               const ct = late.headers.get('content-type') ?? '';
               if (late.ok && ct.includes('text/event-stream')) return; // 真是 launched：流照旧
-              const detail = late.status === 409 ? await conflictDetail(late) : '';
+              const detail = late.status === 409 ? await readErrorDetail(late) : '';
               if (streamGenRef.current !== gen) return; // 读 detail 期间又换了代际
               streamGenRef.current += 1;
               sseRef.current?.cancel(); // 收掉那条接错的流（含服务端订阅）
@@ -1417,7 +1450,7 @@ export function useSession() {
           if (res.status === 409) {
             // 在途 run 未到终态：等它收口再投（第三次仍是 409 就如实报出来）。
             if (i === 2) {
-              const detail = await conflictDetail(res);
+              const detail = await readErrorDetail(res);
               throw new Error(
                 detail || '投递被拒绝（409）：在途 run 未收口，或存在需人工裁决的遗留操作',
               );

@@ -9,11 +9,17 @@
  * T12g/T12h/T12i（#219 的 Ctrl+Enter 丢消息修复）：成对锁「steer 只在后端说没有
  * 在途 run（409）时才回退成 queue」——T12g 锁不该回退，T12h 锁该回退，
  * T12i 锁带 queue_id 那一支的回退必须丢掉 queue_id。
- * 见 docs/LIVE_BROWSER_TEST_20260917.md §2.2。
+ * 见 docs/LIVE_BROWSER_TEST_20260917.md §2.2（该缺陷的真机记录）。
+ *
+ * T12k-T12q（#221，机制全文见 ADR-0030 §13）：窗外落定的响应必须与窗内同等处置——
+ * 四类非 2xx 各一条 + 迟到 2xx 收据（判错要纠正，且不得留下假「连接中断」）+
+ * 迟到事件流（判对则不许动）+ **纠正之后的回退重投**（T12q：它失败时必须照样报错；
+ * 纠正会推进「本次投递的代际」，报错守卫若沿用入口代际，就会把这条重投的失败当成
+ * 「过期请求」静默丢弃，回到"消息没了、界面不说"的原症状）。
  *
  * 车道归属：Playwright e2e（同 continuation.spec.ts 约定）。 */
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
 
 const FIRST_FRAMES = [
@@ -536,10 +542,9 @@ test('T12i：队列条「立即」在 idle 上被 409 拒 → 重投去掉 queue
 /* ── T12j：与 steer 无关的 409 → 必须仍然原样显示后端 detail ── */
 
 test('T12j：steer 撞上**无关**的 409（人工裁决）→ 原样显示后端 detail，不被"是否 steer 409"的判断吃掉 body', async ({ page }) => {
-  /* 认 steer 那一支要先读一次 409 的 body（读的是 clone）。若直接读原响应，
-     下面这一支（T8 #138 的人工裁决）就只能 catch 到 "Body is unusable"，
-     后端给的**可行动** detail（工具名 / call id）被换成一句泛化文案——
-     诊断力静默降级，而这条正是"需人工裁决"路径唯一的线索来源。 */
+  /* 409 的 detail 现在只读一次、由判别与呈现共用（`readErrorDetail` → `settle`）。
+     若把它当成"只给判别用"，人工裁决这一支就会退化成一句泛化文案——
+     而 detail（工具名 / call id）是这条路径唯一的线索来源。 */
   const DECIDABLE_DETAIL = '存在需人工裁决的高峰操作：tool=bash call_id=call_abc123';
   await routeApi(page, {
     sessions: [],
@@ -563,4 +568,242 @@ test('T12j：steer 撞上**无关**的 409（人工裁决）→ 原样显示后�
   await box.press('Control+Enter');
 
   await expect(page.locator('.app-error')).toContainText('call_id=call_abc123');
+});
+
+/* ── #221：窗外落定的响应必须与窗内同等处置（机制见 ADR-0030 §13）──
+ *
+ * 五个用例：四类非 2xx 各一条（409 steer 打空 / 409 人工裁决 / 404 / 422），
+ * 外加迟到 2xx JSON 收据一条（锁「纠正接错流要推进代际」，否则会弹假「连接中断」）。
+ * 一律用**延迟响应**构造窗外，而不是改窗口常量——窗口值是产品决策（1200ms 由
+ * `src/hooks/useSession.test.ts` 钉住），测试不该改它，只要保证 `LATE_MS` 大于它。 */
+
+/** 延迟到窗外才落定（> EARLY_RESPONSE_WINDOW_MS）。 */
+const LATE_MS = 1600;
+const answerLate = async (route: Route, status: number, body: unknown) => {
+  await new Promise((r) => setTimeout(r, LATE_MS));
+  await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+};
+
+test('T12k：迟到的 409（steer 打空）→ 与窗内一致改投 queue，消息不丢', async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: async (route) => {
+      const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>;
+      bodies.push(body);
+      if (body.mode === 'steer') {
+        // 窗外：响应先落进"判为 launched"，再由迟到分支纠正
+        return answerLate(route, 409, { detail: "steer requires an active run; use mode='queue' to enqueue" });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'launched', mode: 'queue' }),
+      });
+    },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('慢链路下打断一下');
+  await box.press('Control+Enter');
+
+  await expect.poll(() => bodies.length, { timeout: 8000 }).toBe(2);
+  expect(bodies[0]).toMatchObject({ content: '慢链路下打断一下', mode: 'steer' });
+  // 迟到的回退同样只改模式、内容一字不差（"消息没丢"的机械证据）
+  expect(bodies[1]).toMatchObject({ content: '慢链路下打断一下', mode: 'queue' });
+  await expect(page.locator('.app-error')).toHaveCount(0);
+});
+
+test('T12l：迟到的 409（人工裁决）→ 原样显示后端 detail（不被吞成无反馈）', async ({ page }) => {
+  const DECIDABLE = '存在需人工裁决的高风险操作：tool=bash call_id=call_late_9';
+  await routeApi(page, {
+    sessions: [],
+    events: LIVE_FRAMES,
+    onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
+    onMessagesPost: (route) => answerLate(route, 409, { detail: DECIDABLE }),
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+  });
+
+  await page.goto('/');
+  await submitTask(page, '长任务');
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('打断一下');
+  await box.press('Control+Enter');
+
+  await expect(page.locator('.app-error')).toContainText('call_id=call_late_9');
+});
+
+test('T12m：迟到的 404 → 说出「会话已不存在」（不静默丢消息）', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: (route) => answerLate(route, 404, { detail: 'session not found' }),
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('发往已删会话的一句');
+  await box.press('Enter');
+
+  await expect(page.locator('.app-error')).toContainText('会话已不存在');
+});
+
+test('T12n：迟到的 422 → 说出「续聊参数无效」（与窗内同一条文案）', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: (route) => answerLate(route, 422, { detail: 'bad params' }),
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('参数不对的一句');
+  await box.press('Enter');
+
+  await expect(page.locator('.app-error')).toContainText('续聊参数无效');
+});
+
+
+/* ── T12o：迟到的 2xx JSON 收据 → 必须没有假「连接中断」 ──
+ *
+ * 窗外已按「launched」接管了一条流，迟到落定却证明判错了（这是 queued 收据，不是事件流）。
+ * 只 `cancel()` 那条流是不够的：它已经排定的重连定时器仍会跑完 500/1000/2000ms 三次退避，
+ * 最后弹一条「连接中断（stream ended unexpectedly）：重试 3 次未成功」，把"消息其实已
+ * 受理"这件事盖成一次假故障。所以纠正时**必须推进代际**让那条链整体失效（ADR-0030 §13
+ * 第 4 条）。断言要活过那三轮退避（5s+）才看得见差别——这正是本条存在的理由。 */
+
+test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无错误条', async ({ page }) => {
+  const calls: Record<string, unknown>[] = [];
+  const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    wsSubscribes: subs,
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: (route) => {
+      calls.push(JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>);
+      // 窗外落定的**收据**（极短 JSON 被延迟到窗外，慢链路上的真实形态）
+      return answerLate(route, 200, { status: 'queued', mode: 'queue' });
+    },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('慢链路上排个队');
+  await box.press('Enter');
+
+  await expect.poll(() => calls.length, { timeout: 8000 }).toBe(1);
+  // 活过三轮退避（500 + 1000 + 2000）＋余量：假「连接中断」正是在那之后才弹出来
+  await page.waitForTimeout(6000);
+  await expect(page.locator('.app-error')).toHaveCount(0);
+  await expect(page.locator('.reconnect-banner')).toBeHidden();
+  // 更硬的证据：那条接错的流被纠正后**没有**被重连复活（代际推进 = 整条链失效）
+  expect(subs).toHaveLength(1);
+});
+
+/* ── T12p：迟到的**事件流**响应 → 当初判 launched 是对的，WS 继续收（不必也不许再接一条）──
+ *
+ * 窗外那条支路并非只在判错时才走到：交付层攒包时，正常流式的**响应头本身**就会
+ * 晚于窗口到达，于是"迟到 + 事件流"是主路径而非例外。它必须保持原样——把迟到的
+ * 事件流也当成"判错了"去 cancel，会直接把正在看的 run 掐掉（用户看到流停在半路，
+ * 且没有任何错误提示）。本用例同时是 T12o 的反面：一个说"判错了要纠正"，一个说
+ * "判对了别动它"。 */
+
+test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐流、不重订阅）', async ({ page }) => {
+  const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  const DELTA: FrameSpec = {
+    type: 'model/delta', data: { delta: '延迟启动的回答' }, seq: 4,
+    session_id: 'mt-live-1', run_id: 'mt-run-live', step_id: 1, time: '2026-09-16T00:00:01Z',
+  };
+  await routeApi(page, {
+    sessions: [],
+    events: LIVE_FRAMES,
+    wsSubscribes: subs,
+    onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
+    // 响应头晚于窗口才到（交付层攒包的真实形态）：这是事件流，不是失败
+    onMessagesPost: async (route) => {
+      await new Promise((r) => setTimeout(r, LATE_MS));
+      await fulfillSse(route, [DELTA]);
+    },
+    // 帧**必须晚于迟到的响应头**才到：否则"文本已上屏"这件事在 cancel 之前就发生了，
+    // 断言对「掐流」这个变异毫无判别力（实测踩过——第一版 delayMs 没设，变异照样绿）。
+    onWs: () => ({
+      events: LIVE_FRAMES, frames: [DELTA], hasActiveRun: true, ending: 'keep',
+      delayMs: LATE_MS + 1000,
+    }),
+  });
+
+  await page.goto('/');
+  await submitTask(page, '长任务');
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('慢链路下追问');
+  await box.press('Enter');
+
+  await expect(page.locator('.model-output').last()).toContainText('延迟启动的回答', { timeout: 12_000 });
+  await expect(page.locator('.app-error')).toHaveCount(0);
+  expect(subs).toHaveLength(1); // 接流一次；迟到的响应头不该触发第二次订阅
+});
+
+/* ── T12q：纠正之后的**回退重投**失败时照样要报错 ──
+ *
+ * 纠正（ADR-0030 §13 第 4 条）会推进「本次投递的代际」，好让那条接错的流整体失效。
+ * 而报错守卫若读的是 `sendFollowUp` 入口那个代际，就等于把自己刚推进的代际当成
+ * 「用户换了会话」——回退重投的失败会被静默丢弃：消息已被后端拒掉、输入框早已清空、
+ * 界面上一个字都没有。那正是本票要消灭的形状，所以这一条必须单独锁住
+ * （T12k 只覆盖"回退成功"那一半）。 */
+test('T12q：纠正后回退重投仍失败（409 人工裁决）→ 必须把原因说出来，不许静默', async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  const DECIDABLE = '存在需人工裁决的高风险操作：tool=bash call_id=call_after_fallback';
+  await routeApi(page, {
+    sessions: [],
+    events: LIVE_FRAMES,
+    onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
+    onMessagesPost: (route) => {
+      const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>;
+      bodies.push(body);
+      if (body.mode === 'steer') {
+        // 窗外：先判 launched，再由迟到分支纠正成 queue 重投（同 T12k）
+        return answerLate(route, 409, { detail: "steer requires an active run; use mode='queue' to enqueue" });
+      }
+      // 回退重投**窗内**就落定，且这次是另一支 409（人工裁决）——它必须报出来
+      return route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: DECIDABLE }),
+      });
+    },
+    onWs: () => ({ frames: [], hasActiveRun: true, ending: 'keep' }),
+  });
+
+  await page.goto('/');
+  await submitTask(page, '长任务');
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('打断一下（回退也会被拒）');
+  await box.press('Control+Enter');
+
+  // 前置证据：确实走了「steer → 迟到 409 → 改投 queue」这条路（否则下面的断言无对象）
+  await expect.poll(() => bodies.length, { timeout: 8000 }).toBe(2);
+  expect(bodies[0]).toMatchObject({ content: '打断一下（回退也会被拒）', mode: 'steer' });
+  expect(bodies[1]).toMatchObject({ content: '打断一下（回退也会被拒）', mode: 'queue' });
+
+  await expect(page.locator('.app-error')).toContainText('call_id=call_after_fallback');
 });

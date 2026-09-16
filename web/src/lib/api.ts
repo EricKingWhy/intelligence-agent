@@ -59,7 +59,7 @@ export class ApprovalGoneError extends Error {}
  *    就会把"path 必须是绝对路径"降级成"注册项目失败（422）"，把最该看懂的一条
  *    提示扔在门外。只取 `msg` 并剥掉 Pydantic 自己的 `Value error, ` 前缀——
  *    用户要看的是规则的结论，不是校验器的转述层。 */
-async function readErrorDetail(res: Response): Promise<string> {
+export async function readErrorDetail(res: Response): Promise<string> {
   try {
     const j = (await res.json()) as { detail?: unknown } | null;
     const detail = j?.detail;
