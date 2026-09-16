@@ -27,6 +27,7 @@
 2026-09-17	#218 + #219 两轴独立审查（Standards + Spec 独立子代理，审的是未提交工作树；findings 全部就地修复 ⇒ 该工作树即本 range 的两个 commit）——findings：#219 修法第一版拿 `streaming` 当「服务端有在途 run」被 Standards 轴推翻（与 ADR-0030 §5.1 及 #196 的结论冲突，核对源码后整条重做）；Spec 轴两条 P2 均为本批引入的回归——`isSteerTargetMissing` 读原响应吃掉 body（T8 #138 那一支的 detail 退化成泛化文案）、带 queue_id 的 steer 重投照抄 queue_id（service.py 先 cancel 再判在途 run ⇒ 必撞 404）；另有分类表注释与匹配面不符（称只取错误码、实为整体子串含 provider message）、常量名与取值不一致、测试类名覆盖不符、函数内导入、e2e 注释复述而非指针。全部已修 + 各自红证（T12g/T12h/T12i/T12j + i-keyboard 恒真断言改判据）	4cfe40c..4f017c0
 #
 [whitelist]
+d748546	本批门禁数字落点（tracker + 归档，docs-only）
 41ea4b8	真机巡检记录 2026-09-17 + tracker/PHASE_STATUS/归档落点（docs-only）
 ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
 16f61b9	本流程批落点记录（tracker + PHASE_STATUS + 归档，docs-only）
