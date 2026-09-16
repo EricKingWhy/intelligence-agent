@@ -18,6 +18,7 @@ import { renderToString } from 'react-dom/server';
 import { Shield } from 'lucide-react';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 import type { CatalogEntry } from '../lib/api';
+import { catalogIcon } from '../lib/catalogIcons';
 
 const ENTRIES: CatalogEntry[] = [
   { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
@@ -89,6 +90,26 @@ describe('toCatalogOptions — 目录 → 选项的唯一映射点', () => {
       // 空 description → undefined（不渲染描述行，也不填占位文案）
       { value: 'deny', title: 'Deny All', description: undefined },
     ]);
+  });
+
+  it('iconOf 给了映射表 → 已知 id 带 icon，未知 id **不带**（槽由渲染层补，不编字形）', () => {
+    // 真实 id（后端 PermissionPolicy 的三个值）都在 catalogIcons 表里
+    const real: CatalogEntry[] = [
+      { id: 'read-only', display_name: '只读', description: '' },
+      { id: 'workspace-write', display_name: '工作区写入', description: '' },
+    ];
+    const withIcons = toCatalogOptions(real, catalogIcon);
+    expect(withIcons[0].icon).toBeDefined();
+    expect(withIcons[1].icon).toBeDefined();
+    // 后端扩展出来的档位（夹具里的 mode-0…mode-5）：**不给字形**——给未知 id 编一个
+    // 字形正是产品禁止的「编占位」；行仍然对齐，因为槽是渲染层恒渲染的。
+    const unknown = toCatalogOptions([{ id: 'mode-7', display_name: 'M7', description: '' }], catalogIcon);
+    expect(unknown[0].icon).toBeUndefined();
+    expect('icon' in unknown[0]).toBe(false);
+  });
+
+  it('不传 iconOf → 一个 icon 都不产出（老调用点零改动）', () => {
+    expect(toCatalogOptions(ENTRIES).every((o) => o.icon === undefined)).toBe(true);
   });
 
   it('空目录 → 空数组（调用方据此隐藏入口）', () => {

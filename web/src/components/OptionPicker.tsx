@@ -20,12 +20,15 @@
  * 实现，用伪元素而不是 `border-left`——craft-floor 把 >1px 的彩色 border-left 列为
  * 默认该拒绝的形态）。
  *
- * ⚠ **没有**设计稿 §4 写的「每行 20px 图标槽」：三份目录的条目契约是
- * `CatalogEntry = {id, display_name, description}`，**没有任何 per-option 图标数据**；
- * 而为后端可扩展的枚举（fixture 里就有 `mode-0…mode-5`）编一套字形，正是本产品明令
- * 禁止的「编占位」行为（PRODUCT.md 原则 3「真实优先于好看」/ PRD §4 No fake values）。
- * 图标留在 trigger 上——那是每个控件一个（调用方传入），不是每行一个。设计稿 §4 的
- * 「档位收窄提示」已落地（#201）：`GET /api/agent-profiles` 自 #201 起回
+ * ⚠ 设计稿 §4 的「每行 20px 图标槽」已落地（`OptionRowContent` 的 `.picker-item-icon`，
+ * 槽**恒在**、内容可空 ⇒ 没有图标的行也保持同样的左对齐）。图标来源是
+ * `lib/catalogIcons.ts` 的内置 id → 字形映射：三份目录的条目契约里**没有** per-option
+ * 图标数据，所以只给**已知 id** 出字形，未知 id（后端扩展出来的档位/模式、夹具里的
+ * `mode-0…mode-5`）**留空槽**——给未知 id 编一个字形正是产品明令禁止的「编占位」
+ * （PRODUCT.md 原则 3）。要让部署自定义的条目也能带图标，得后端在条目上给一个可选
+ * `icon` 键（已开 issue 登记）。trigger 上的图标是另一回事（每个控件一个，调用方传入）。
+ *
+ * 设计稿 §4 的「档位收窄提示」也已落地（#201）：`GET /api/agent-profiles` 自 #201 起回
  * `tool_scope {open, total, excluded}`，调用方（`Composer.tsx` 的档位 picker）把
  * `lib/agentProfileScope.ts` 组装的文案塞进 `footer` 插槽——本组件不认识那段话的语义，
  * 只负责位置与样式（没被收窄时不传 footer，就没有这一行）。
@@ -43,41 +46,64 @@ import { Check, ChevronDown, type LucideIcon } from 'lucide-react';
 import type { CatalogEntry } from '../lib/api';
 import { focusPickerListOnOpen } from '../lib/pickerFocus';
 
-/** 一行选项的数据。`description` 为空 → 不渲染描述行（不填占位文案）。 */
+/** 一行选项的数据。`description` 为空 → 不渲染描述行（不填占位文案）。
+ *  `icon` 缺省 → 图标槽留空（槽本身恒在，见 `OptionRowContent`）。 */
 export interface Option {
   value: string;
   title: string;
   description?: string;
+  icon?: ReactNode;
 }
 
-/** `CatalogEntry[]` → `Option[]`（三份档位目录共用的唯一映射点，前端零硬编码文案）。 */
-export function toCatalogOptions(entries: CatalogEntry[]): Option[] {
-  return entries.map((e) => ({
-    value: e.id,
-    title: e.display_name,
-    description: e.description.length > 0 ? e.description : undefined,
-  }));
+/** `CatalogEntry[]` → `Option[]`（三份档位目录共用的唯一映射点，前端零硬编码文案）。
+ *
+ *  `iconOf` 可选：条目 id → 行首图标。缺省不传 = 全都不给图标（槽仍占 20px 保持对齐）。
+ *  映射表在 `lib/catalogIcons.ts`（只认已知 id，未知 id 返回 undefined）。 */
+export function toCatalogOptions(
+  entries: CatalogEntry[],
+  iconOf?: (id: string) => LucideIcon | undefined,
+): Option[] {
+  return entries.map((e) => {
+    const Icon = iconOf?.(e.id);
+    return {
+      value: e.id,
+      title: e.display_name,
+      description: e.description.length > 0 ? e.description : undefined,
+      ...(Icon ? { icon: <Icon size={13} aria-hidden="true" /> } : {}),
+    };
+  });
 }
 
 /** cmdk Item value 必须唯一、稳定（不依赖 textContent）。null 选中态用 sentinel。 */
 export const DEFAULT_VALUE = '__default__';
 
 /** 选项行内容（不含交互元素本身）——**ModelPicker 的第二级复用同一份实现**，
- *  避免"抽出行组件"变成"复制一份视觉"（#201 的明确要求）。 */
+ *  避免"抽出行组件"变成"复制一份视觉"（#201 的明确要求）。
+ *
+ *  行结构（设计稿 §4）：**图标槽（20px 固定宽）** + 标题（主）+ 描述（次级，2 行内
+ *  截断）+ 行尾 + 选中标记。图标槽**恒渲染**——它是"保证多行对齐"的手段，所以
+ *  没有图标的行（未知 id、二级模型行）也占同样的 20px，否则标题会随图标有无而左右
+ *  跳动。 */
 export function OptionRowContent({
   title,
   description,
   selected,
+  icon,
   trailing,
 }: {
   title: string;
   description?: string;
   selected: boolean;
+  /** 行首图标；缺省 → 空槽（不编字形）。 */
+  icon?: ReactNode;
   /** 行尾附加内容（例如二级菜单的 `▸`）。放在选中标记之前。 */
   trailing?: ReactNode;
 }) {
   return (
     <>
+      <span className="picker-item-icon" aria-hidden="true">
+        {icon}
+      </span>
       <span className="picker-item-text">
         <span className="picker-item-title">{title}</span>
         {description ? <span className="picker-item-desc">{description}</span> : null}
@@ -218,7 +244,7 @@ export function OptionPicker({
                       data-state={isSelected ? 'checked' : 'unchecked'}
                       onSelect={commit}
                     >
-                      <OptionRowContent title={o.title} description={o.description} selected={isSelected} />
+                      <OptionRowContent title={o.title} description={o.description} icon={o.icon} selected={isSelected} />
                     </CommandItem>
                   );
                 })}

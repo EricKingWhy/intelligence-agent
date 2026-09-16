@@ -5984,6 +5984,20 @@ button.json-row {
 .picker-item[data-state="checked"] {
   color: var(--text-primary);
 }
+/* #201 冻结行「每行 20px 图标槽」：槽**恒在**（没有图标的行也占同样宽度），
+   这样标题不会随图标有无而左右跳动。图标来源是 `lib/catalogIcons.ts` 的
+   内置 id → 字形映射，未知 id 留空槽（不编字形，见该文件头）。
+   颜色用既有 --text-tertiary（与描述行同色：图标是辅助识别，不抢标题；
+   选中态由 .picker-item[data-state="checked"] 的整行主色统一处理）。 */
+.picker-item-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
 .picker-item-text {
   flex: 1 1 auto;
   min-width: 0;

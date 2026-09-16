@@ -70,13 +70,13 @@ test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭',
   await expect(page.locator('[role="listbox"]')).toBeHidden();
 
   // 再次打开 + Enter 选第一个真实档位（ArrowDown 1 次越过「默认（未选）」）
-  await pickControl(page, '权限模式', 1, 'Auto Approve');
+  await pickControl(page, '权限模式', 1, '只读');
 });
 
 test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', async ({ page }) => {
   // 权限模式 3 条 ≤ 5 → 搜索框隐藏；要测搜索需换长目录（F-DEFER-1）。
   // 长目录来自 fixtures 公共构造，避免内联后与其它 spec 漂移。
-  const LONG_MODES = longCatalog('mode', 6, { index: 2, label: 'Ask Each Time' });
+  const LONG_MODES = longCatalog('mode', 6, { index: 2, label: '工作区写入' });
 
   await routeApi(page, {
     sessions: [],
@@ -97,10 +97,12 @@ test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', 
   // 6 条目录 + 「默认（未选）」= 7
   await expect(page.locator('[role="option"]')).toHaveCount(7);
 
-  // 搜索过滤：键入「ask」只剩匹配项（「默认（未选）」的 keywords 不含 ask）
-  await page.keyboard.type('ask');
+  // 搜索过滤：键入「工作区」只剩匹配项（「默认（未选）」的 keywords 不含它；
+  // 其余 mode N 行也不含）。夹具与断言同步改成真实文案后，原来那句 `ask`
+  // 已无匹配项——这正是"断言跟着数据走"该有的样子，不是把断言放宽。
+  await page.keyboard.type('工作区');
   await expect(page.locator('[role="option"]')).toHaveCount(1);
-  await expect(page.locator('[role="option"]')).toContainText('Ask Each Time');
+  await expect(page.locator('[role="option"]')).toContainText('工作区写入');
 });
 
 /** FE-R11-05 回归锁：单选控件选了之后必须能回到「未选」。
@@ -119,12 +121,12 @@ test('Composer control row：单选档位可以选回「默认（未选）」', 
   await expect(trigger).toContainText('权限'); // 未选 → placeholder（文案是「权限」）
 
   // 先选一个真实档位
-  await pickControl(page, '权限模式', 1, 'Auto Approve');
-  await expect(trigger).toContainText('Auto Approve');
+  await pickControl(page, '权限模式', 1, '只读');
+  await expect(trigger).toContainText('只读');
 
   // 再选回「默认（未选）」——首项，Enter 零次下压即命中
   await pickControl(page, '权限模式', 0, '权限');
-  await expect(trigger).not.toContainText('Auto Approve');
+  await expect(trigger).not.toContainText('只读');
 });
 
 /** #201 验收「选中态 = 勾选 + 加重 + 左侧 2px 高亮条」的**可失败**锁。
@@ -139,19 +141,19 @@ test('Composer control row：选中行的三通道选中态（勾选 + 加重 + 
 
   const trigger = page.locator('.composer-control[aria-label="权限模式"]');
   await trigger.click();
-  // 下压一次到第一个真实档位（Auto Approve），Enter 选中
+  // 下压一次到第一个真实档位（只读），Enter 选中
   const listbox = page.locator('[role="listbox"]:visible').last();
   await expect(listbox).toBeVisible();
   await listbox.focus();
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
-  await expect(trigger).toContainText('Auto Approve');
+  await expect(trigger).toContainText('只读');
 
   // 重新打开：选中行的三通道同时在场，且只有它一行是 checked
   await trigger.click();
   const checked = page.locator('.picker-item[data-state="checked"]');
   await expect(checked).toHaveCount(1);
-  await expect(checked).toContainText('Auto Approve');
+  await expect(checked).toContainText('只读');
   await expect(checked.locator('.picker-item-check')).toHaveCount(1);
   const barWidth = await checked.evaluate(
     (el) => getComputedStyle(el, '::before').width,
@@ -194,7 +196,7 @@ test('Composer control row：短目录键盘导航（不手动聚焦 listbox）'
   // 零下压 = 首项「默认（未选）」；下压一次 → 第一个真实档位
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
-  await expect(trigger).toContainText('Auto Approve');
+  await expect(trigger).toContainText('只读');
 });
 
 test('Composer control row：提交 payload 字段名对齐后端契约', async ({ page }) => {
@@ -224,7 +226,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   // 选 权限模式 → auto / Agent 档位 → coding / 推理深度 → deep
   // （每个控件首项都是「默认（未选）」，故下压次数 = 条目下标 + 1）
-  await pickControl(page, '权限模式', 1, 'Auto Approve');
+  await pickControl(page, '权限模式', 1, '只读');
   await pickControl(page, 'Agent Profile', 2, 'Coding');
   await pickControl(page, 'Reasoning Effort', 3, 'Deep');
 
@@ -237,7 +239,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   const body = JSON.parse(capturedBody!);
   // 字段名对齐后端 B1 契约
-  expect(body.permission_mode).toBe('auto');
+  expect(body.permission_mode).toBe('read-only');
   expect(body.agent_profile).toBe('coding');
   expect(body.reasoning_effort).toBe('deep');
   // #201：多选 context provider 控件已删除，UI 上没有任何入口能设这个键 →
@@ -298,4 +300,51 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   await openPicker();
   await expect(foot).toHaveCount(0);
   await closePicker();
+});
+
+test('#201 冻结行：每行 20px 图标槽恒在，未知 id 留空槽（不编字形）', async ({ page }) => {
+  /* 行结构 = 图标槽（20px 固定宽）+ 标题 + 描述 + 选中标记（设计稿 §4）。
+     两件必须同时成立，缺一条这个"槽"就没意义：
+       ① 已知 id（后端 `PermissionPolicy` 的真实值）→ 槽里有字形；
+       ② 未知 id（后端扩展出来的档位，夹具用 `mode-0…mode-5`）→ 槽**留空但仍在**，
+          宽度不变 ⇒ 标题左边界不随图标有无跳动。给未知 id 编一个字形才是被禁的
+          「编占位」。 */
+  const LONG = longCatalog('mode', 6); // 未知 id 目录（真要能被选到，故走真实载荷）
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: LONG,
+    agentProfiles: AGENT_PROFILES, // 真实 id：main / coding / research_review
+  });
+  await page.goto('/');
+
+  // ① 已知 id：档位 picker 的每一行（除首行「默认（未选）」）槽里都有 svg
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+
+  const slot = page.locator('.picker-item .picker-item-icon');
+  await expect(slot.first()).toBeVisible();
+  const box = await slot.first().boundingBox();
+  expect(Math.round(box!.width)).toBe(20); // 固定宽 = 多行对齐的前提
+  // 「默认（未选）」那一行没有图标（它不是目录条目）⇒ 空槽；真实档位行有 svg
+  await expect(slot.first().locator('svg')).toHaveCount(0);
+  await expect(slot.nth(1).locator('svg')).toHaveCount(1);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+
+  // ② 未知 id：槽仍在（宽度一样）、里面是空的
+  await pickControl(page, '权限模式', 1, 'mode 0');
+  const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await permTrigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  const unknownRow = page.locator('.picker-item', { hasText: 'mode 1' }).first();
+  const unknownSlot = unknownRow.locator('.picker-item-icon');
+  await expect(unknownSlot).toBeAttached();
+  await expect(unknownSlot.locator('svg')).toHaveCount(0); // 空槽，不是编出来的字形
+  const unknownBox = await unknownSlot.boundingBox();
+  expect(Math.round(unknownBox!.width)).toBe(20);
 });

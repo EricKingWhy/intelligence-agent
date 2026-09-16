@@ -1067,10 +1067,17 @@ export const MODELS_WITH_AVAILABILITY = [
   },
 ];
 
+/** `GET /api/permission-modes` 的载荷。**逐字对齐后端**：id = `PermissionPolicy`
+ *  的三个值（`tooling/contract.py:102-104`），文案 = `PERMISSION_MODE_DESCRIPTIONS`。
+ *
+ *  ⚠ 原先这里是 `auto`/`ask`/`deny` + 英文名——**后端产不出这组值**：`POST /api/sessions`
+ *  的 `permission_mode` 校验只认这三个枚举值，`auto` 会直接 422
+ *  （`web/app.py:247-253`）。于是"提交 payload 字段名对齐后端契约"那条用例实际在断言一个
+ *  后端必然拒绝的取值——文案对了、契约是假的。2026-09-17 改为真实载荷。 */
 export const PERMISSION_MODES = [
-  { id: 'auto', display_name: 'Auto Approve', description: '自动批准工具调用' },
-  { id: 'ask', display_name: 'Ask Each Time', description: '每次工具调用都询问' },
-  { id: 'deny', display_name: 'Deny All', description: '拒绝所有工具调用' },
+  { id: 'read-only', display_name: '只读', description: '可读文件和运行只读工具，不可写入。' },
+  { id: 'workspace-write', display_name: '工作区写入', description: '可读写工作区内文件；高危工具仍需审批。' },
+  { id: 'danger-full-access', display_name: '完全访问', description: '所有工具无需审批，含网络/系统副作用。仅在可信环境使用。' },
 ];
 
 /** `GET /api/agent-profiles` 的默认载荷（形状 = 后端 `AGENT_PROFILE_DESCRIPTIONS`

@@ -11,6 +11,7 @@ import { ArrowUp, Brain, Check, Pencil, Play, Shield, Square, User, X, Zap } fro
 import type { PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
+import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
@@ -297,7 +298,7 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="权限模式"
               title="工具调用如何批准？"
-              options={toCatalogOptions(permissionModes)}
+              options={toCatalogOptions(permissionModes, catalogIcon)}
               value={selectedPermissionMode}
               onChange={onPermissionModeChange ?? (() => {})}
               icon={Shield}
@@ -307,7 +308,7 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="Agent Profile"
               title="这次会话用哪个档位？"
-              options={toCatalogOptions(agentProfiles)}
+              options={toCatalogOptions(agentProfiles, catalogIcon)}
               value={selectedAgentProfile}
               onChange={onAgentProfileChange ?? (() => {})}
               icon={User}
@@ -341,7 +342,7 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="Reasoning Effort"
               title="推理深度选哪一档？"
-              options={toCatalogOptions(reasoningEfforts)}
+              options={toCatalogOptions(reasoningEfforts, catalogIcon)}
               value={selectedReasoningEffort}
               onChange={onReasoningEffortChange ?? (() => {})}
               icon={Brain}
