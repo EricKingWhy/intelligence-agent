@@ -9,6 +9,10 @@ seq **分配**仍是 Session 聚合根的职责（``_next_seq``）；本层负�
 「读已落盘最大 seq → 判定 → 写」串成临界区，并拒写违反单调性的 seq
 （写者跨线程：事件循环的 ``Session.append`` 与恢复扫描的工作线程都会进来）。
 保证范围是**同一进程内**——跨进程没有文件锁，见 ``__init__`` 的边界说明。
+
+另有一条护栏（ADR-0036）：本进程硬删过的会话 id 不再接受追加——``delete_session``
+与 ``append_event`` 共用一把会话写锁，迟到的旁路写者（run 收尾后的记忆写回任务）
+无法把已删会话的日志重建出来。
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from agent_harness.session.errors import SeqConflict
+from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     RUN_TERMINAL_TYPES,
     SESSION_STARTED,
@@ -110,6 +114,11 @@ class JsonlSessionStore:
         # 外部追加。同一进程内（真实缺陷 BUG-011 的现场：一个 server 的两个并发请求）
         # 由 _lock_for + 本检查共同保证严格单调。
         self._last_seq: dict[str, tuple[int, int, int]] = {}
+        # 本进程硬删过的会话 id（ADR-0036）：`append_event` 据此拒写。不清除是有意的——
+        # 生产 id 由 uuid4 生成（没有客户端可控入口），同一 id 再次出现只可能是迟到写者；
+        # 进程重启即归零。它**不落盘、不可恢复**，因此不是 ADR-0029 D1 反对的"墓碑"
+        # （那条反对的是"已删但还在"的半状态）。
+        self._deleted_ids: set[str] = set()
         self._state_guard = threading.Lock()
 
     def _session_dir(self, session_id: str) -> Path:
@@ -163,11 +172,21 @@ class JsonlSessionStore:
         seq 守卫（BUG-011）：seq ≤ 已落盘最大 seq 是**拒写**而不是写入。
         否则并发取号会留下重复 seq，使该会话此后任何构造聚合的路径
         （``Session.load`` / ``resume``）永久失败。
+
+        **硬删之后不得重建**（ADR-0036）：本进程删过的 id 一律拒写（``SessionNotFound``）。
+        否则迟到的旁路写者会在这里把日志凭空重建，静默撤销用户那次不可逆的删除。
+        抛异常而不是静默丢：拒写是事实，写者（如 ``MemoryWriteback``）自带降级兜底。
         """
-        path = self._events_path(session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        path = self._events_path(session_id)
         with self._lock_for(session_id):
+            # 已删集合与建目录都在临界区内（ADR-0036）：迟到的 append 只可能看到
+            # 「还没删」或「已登记」两种状态之一，不会写进一个正在被删的目录里。
+            if session_id in self._deleted_ids:
+                raise SessionNotFound(
+                    f"Session '{session_id}' 已被硬删，拒绝重建事件日志"
+                )
+            path.parent.mkdir(parents=True, exist_ok=True)
             last = self._last_seq_on_disk(session_id)
             if event.seq <= last:
                 raise SeqConflict(
@@ -400,15 +419,22 @@ class JsonlSessionStore:
         `rmtree` 到用户的真实目录（ADR-0029 D2）。
 
         幂等：目录不存在 → `False`，不抛错（重跑即自愈，ADR-0029 D3）。
+
+        **删除与追加互斥**（ADR-0036）：整个删除与"登记已删 id"都在会话写锁内完成。
+        否则迟到的写者能在 `rmtree` 与登记之间挤进来重建目录，而"谁赢"取决于线程调度。
         """
         session_dir = self._session_dir(session_id)
         if not session_dir.exists():
             return False
-        shutil.rmtree(session_dir, ignore_errors=True)
-        # 进程内 seq 缓存与锁表要一起清——否则同 id 再次出现时会带着旧的 last_seq。
-        with self._state_guard:
-            self._last_seq.pop(session_id, None)
-            self._seq_locks.pop(session_id, None)
+        with self._lock_for(session_id):
+            shutil.rmtree(session_dir, ignore_errors=True)
+            # 进程内 seq 缓存与锁表要一起清——否则同 id 再次出现时会带着旧的 last_seq。
+            # 先登记已删 id 再摘锁：摘锁后若又有写者取到**新**锁，它在临界区里读到的
+            # 也已经是"已删"（ADR-0036）。
+            with self._state_guard:
+                self._deleted_ids.add(session_id)
+                self._last_seq.pop(session_id, None)
+                self._seq_locks.pop(session_id, None)
         return True
 
     def read_started_header(self, session_id: str) -> StartedHeader | None:

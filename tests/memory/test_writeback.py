@@ -5,11 +5,16 @@
 「回退必留痕、成功零噪音、降级不丢候选」三条。
 """
 
+import asyncio
+
 import pytest
 
 from agent_harness.memory.extractor import ExtractionOutcome
 from agent_harness.memory.types import MemoryScope
 from agent_harness.memory.writeback import MemoryWriteback
+from agent_harness.session import Session, SessionEvent
+from agent_harness.session.errors import SessionNotFound
+from agent_harness.session.store import JsonlSessionStore
 from tests.conftest import make_session
 
 
@@ -245,3 +250,67 @@ async def test_real_langmem_delete_failure_degrades_but_never_drops_the_candidat
     assert degraded[0].data["reason"].startswith("consolidation_failed: ")
     assert "storage unavailable" not in degraded[0].data["reason"]
     assert "alice 现在用 Rust" in written
+
+
+# ── 迟到的写回不得把**已硬删**的会话重建出来（#232 / ADR-0036）──────────────
+#
+# 真机证据：docs/LIVE_BROWSER_TEST_20260917.md §9.4 F13（三轮独立复现）——DELETE 回执
+# `events: N` 已承诺删净，20–30s 后会话带着 1 条 `memory/degraded` 自己回到列表。
+# 机制、边界与取舍单点在 ADR-0036；下面两条只钉住可执行断言。
+
+@pytest.mark.asyncio
+async def test_late_writeback_append_cannot_resurrect_a_deleted_session(tmp_path):
+    """写回在删除**之后**落笔时，会话必须仍然不存在。
+
+    形状与真机一致：抽取慢到超过写回预算（真机是 `TimeoutError`），于是降级写入
+    发生在删除之后——正是这一笔把会话拉回列表的。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session = Session.start(store)
+    session_id = session.session_id
+
+    class NeverFinishesExtractor:
+        async def extract(self, events):
+            await asyncio.sleep(30)
+            raise AssertionError("写回预算应当先到")  # pragma: no cover
+
+    writer = MemoryWriteback(
+        RecordingCapability(), NeverFinishesExtractor(), timeout_seconds=0.05,
+    )
+    writer.submit(session, session.events)
+    assert store.delete_session(session_id) is True
+
+    await writer.drain()  # 降级写入在这里发生（删除之后）
+
+    assert store.read_events(session_id) == []
+    assert not (tmp_path / session_id).exists(), (
+        "迟到的写回把已硬删的会话重建了出来（真机 F13 的形状）"
+    )
+
+
+def test_append_after_delete_is_refused_and_creates_nothing(tmp_path):
+    """store 层直锁：删除之后任何 append 都拒写，且不在磁盘上留任何痕迹。
+
+    会话 id 复用是**迟到写者**的特征（生产 id 是 uuid4），所以已删 id 集合不清除；
+    这条同时钉住"拒写而不是静默丢"——静默丢会让写者以为事实已落盘。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session = Session.start(store)
+    session_id = session.session_id
+    assert store.delete_session(session_id) is True
+
+    with pytest.raises(SessionNotFound):
+        store.append_event(
+            session_id,
+            SessionEvent(
+                type="memory/degraded",
+                data={"operation": "writeback", "reason": "unavailable: TimeoutError"},
+                seq=session.next_seq,
+                session_id=session_id,
+            ),
+        )
+
+    assert not (tmp_path / session_id).exists()  # 连空目录都没有
+    assert store.list_session_ids() == []
+    # 幂等仍成立：再删一次是 False（目录本就不在），不是异常
+    assert store.delete_session(session_id) is False
