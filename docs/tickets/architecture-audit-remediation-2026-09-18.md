@@ -4,6 +4,7 @@
 > 来源审计：`docs/research/2026-09-18-full-codebase-architecture-quality-audit.md`
 > 用途：12 张可由独立 Coding Agent 领取的本地执行票；对应 GitHub Issues #237–#248。本文是执行索引，不替代 Engineering Specification、ADR 或 GitHub issue。
 > 共同约束：Reuse First；Scope Lock；不改变外部 Contract，除非票面明确披露；门禁全绿后才可提交；每票完成后按仓库 SDD 审查协议进入批量 review。
+> **裁决规则**：GitHub issue 正文是每票 Scope/AC 的权威；本文只补充证据、依赖和测试。若本文与对应 issue 冲突，以 issue 为准，额外建议不构成关单条件。
 
 ## 0. 统一执行协议
 
@@ -356,10 +357,8 @@ Recovery 为保证幂等和一致性，将人工交互放入同一数据库级�
 
 ### 范围
 
-第一交付可二选一，优先 A：
-
-- A：锁内完成 scan + 状态推进 + reconcile-required，释放锁等待 callback，重抢锁后按 operation identity/version 提交 verdict。
-- B：若 A 超出单票，至少为 callback 加 deadline、锁持有时长诊断、并发恢复红证，并输出 A 的最小设计决议。
+- 锁内完成 scan + 状态推进 + reconcile-required，释放锁等待 callback，重抢锁后按 operation identity/version 提交 verdict。
+- callback deadline、锁持有时长诊断可作为前置测量，但不能替代上述交付，也不能据此关闭 #242。
 
 ### 不做
 
@@ -469,13 +468,17 @@ OpenAPI before/after snapshot；端点错误矩阵；router fake dependency；We
 ### 证据
 
 - `src/agent_harness/tools/bash.py:86-132`：BashTool 使用 `to_thread`、`cancel_event`、output sink；CancelledError 通知 Sandbox 杀进程树。
-- `_BashArgs` 在 `bash.py:23-25` 只有 command，不表达 timeout。
-- `src/agent_harness/sandbox/local.py:290+` 与 Docker backend 各自拥有执行超时/进程终止细节。
+- `src/agent_harness/tooling/contract.py:192-196`：Tool 默认 timeout 是 `10.0s`；`src/agent_harness/tooling/executor.py:801` 在 ToolExecutor 外层强制使用该预算。
+- `src/agent_harness/sandbox/local.py:31-32`：Local Sandbox 另有 `DEFAULT_EXEC_TIMEOUT=60.0s`；BashTool 未覆写前者，故当前有效预算是 10 秒而非 60 秒。
 - Bash 契约要求非零 exit_code 仍 `ok=True`（`bash.py:5-7,121-132`）。
 
 ### 根因
 
 Tool 层、Sandbox 层、Executor 取消/超时有三个时间域；没有一个跨后端的 typed timeout result contract，容易出现只取消 await、子进程继续写 workspace，或把 timeout 错映为工具 transient retry。
+
+### 前置决策 Gate
+
+GitHub #244 列出的默认预算、配置入口、Local/Docker 一致性、唯一 deadline owner、取消传播、MUTATING 超时后 UNKNOWN/不可自动重试六项，必须先由用户/产品批准并记录。未批准前只能补红证和测量，不得修改默认值。
 
 ### 范围
 
@@ -506,6 +509,7 @@ Tool 层、Sandbox 层、Executor 取消/超时有三个时间域；没有一个
 
 ### 二值 AC
 
+- [ ] 默认 BashTool 的**实际有效预算**等于已批准值，测试能区分旧的 10s 外层预算与 60s Sandbox 默认，不再存在双真相。
 - [ ] timeout/cancel 后子进程树终止，延迟 marker 文件不会出现。
 - [ ] Local/Docker 返回同形结果字段。
 - [ ] exit_code!=0 仍 `ToolResult.ok=True`。
@@ -554,7 +558,7 @@ Tool 层、Sandbox 层、Executor 取消/超时有三个时间域；没有一个
 
 ### 依赖
 
-建议 T06 writer 票前后均可；如都改 store.py，串行。
+建议 T05 writer 票前后均可；如都改 store.py，串行。
 
 ### 候选文件
 
@@ -599,6 +603,10 @@ Tool 层、Sandbox 层、Executor 取消/超时有三个时间域；没有一个
 
 核心命令已统一，但 Web adapter 仍组合 `_boundary_checked`、`_scope_for`、command helper 和 result mapping；增加第三个 git 查询或修改规则时仍可能在 Tool/Web 两条路径漂移。
 
+### 硬 Gate
+
+必须满足 GitHub #246 的统一路径：Permission → ToolExecutor → timeout/telemetry → Operation Ledger → 可对账审计。HTTP 请求没有自然 session 时的 ledger/session/run 关联键未冻结前，不得实施；共用 command helper 不能替代统一执行路径。
+
 ### 范围
 
 - 将“checked scope + command + execute + normalized result”收成 tooling 层窄 service/helper。
@@ -625,6 +633,8 @@ Tool 层、Sandbox 层、Executor 取消/超时有三个时间域；没有一个
 
 ### 二值 AC
 
+- [ ] Web git 请求经过统一 Permission、ToolExecutor、timeout、telemetry 与 Operation Ledger 路径。
+- [ ] ledger/session/run 关联键已由 ADR 或 issue 决策冻结，审计事实可对账。
 - [ ] Tool/Web 使用同一 command+execute 路径。
 - [ ] path traversal、shell meta、git pathspec magic 均拒绝。
 - [ ] 无 path 时 scope=`.`，有 path 时单一 pathspec 不被 `.` 并集扩宽。
@@ -663,7 +673,7 @@ Phase 叠加以“在主循环加一臂”演进，正确性被丰富测试守�
 本票只做第一刀：
 
 - 建立 `_drive` 事件序列 golden。
-- 选一个高内聚阶段提取（推荐 model turn 或 terminal failure），方法参数使用 typed context，不传十几个散参。
+- 第一切片固定提取 terminal arms；第二切片再收敛 telemetry scope。方法参数使用 typed context，不传十几个散参。
 - `_drive` 保留唯一 loop 和状态推进；提取函数不自行创建第二 loop。
 - 行为零变化；无新事件类型/API。
 
@@ -676,7 +686,7 @@ Phase 叠加以“在主循环加一臂”演进，正确性被丰富测试守�
 
 ### 依赖
 
-建议 T04 failure、T05 tracer、T09 timeout 先完成，减少移动中的条件分支；与任何 runtime.py 任务串行。
+建议 T03 provider failure、T04 tracer、T08 timeout 先完成，减少移动中的条件分支；与任何 runtime.py 任务串行。
 
 ### 候选文件
 
@@ -723,8 +733,9 @@ before/after event golden、提取边界说明、零行为变化证明、Phase 1
 
 ### 范围
 
-- 在 session/application 边界定义最小 Protocol（按实际访问属性列出）。
-- `SessionService.__init__` 接受该 Protocol。
+- 先盘点真实 consumer 和 SessionService 实际访问的最小字段集。
+- 只有确认至少两个真实 consumer/implementation 并能形成真实 seam 时，才在 session/application 边界定义最小 Protocol；否则使用显式 collaborators，不能把 AppState 换成同样宽的 Protocol。
+- `SessionService.__init__` 接受该窄 interface 或显式 collaborators。
 - AppState 结构化满足 Protocol，不需要继承。
 - CLI/测试可用最小 fake state 构造。
 - 保留 `TYPE_CHECKING`，session 模块运行时不能 import web。

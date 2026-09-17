@@ -669,7 +669,12 @@ class SessionService:
             if persisted_cwd is not None
             else self._state.workspaces_root / session_id
         )
-        workspace.mkdir(parents=True, exist_ok=True)
+        if persisted_cwd is None:
+            workspace.mkdir(parents=True, exist_ok=True)
+        elif not workspace.is_dir():
+            raise WorkspaceNotFound(
+                f"session '{session_id}' 的 cwd 不存在或不是目录: {workspace}"
+            )
         _, wiring = await self._state.get_wiring()
         await self._state.ensure_stores()
 

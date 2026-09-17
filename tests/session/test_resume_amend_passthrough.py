@@ -14,8 +14,11 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from agent_harness.config import Settings
 from agent_harness.session.cwd import session_cwd
+from agent_harness.session.errors import WorkspaceNotFound
 from agent_harness.session.service import AmendOptions, SessionService
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
@@ -81,6 +84,28 @@ class TestResumeWorkspace:
             event for event in state.store.read_events("test-sid")
             if event.type == "session/started"
         ]) == 1
+
+    def test_missing_persisted_cwd_fails_without_recreating_it(self, tmp_path):
+        state = self._real_state(tmp_path)
+        external = tmp_path / "removed-project"
+        external.mkdir()
+        Session.start(state.store, session_id="test-sid", cwd=external)
+        external.rmdir()
+
+        with (
+            patch(
+                "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
+            ) as mock_build,
+            pytest.raises(WorkspaceNotFound, match="cwd 不存在或不是目录"),
+        ):
+            asyncio.run(
+                SessionService(state).resume_and_launch(
+                    session_id="test-sid", task="hello",
+                )
+            )
+
+        assert not external.exists()
+        mock_build.assert_not_awaited()
 
     def test_legacy_session_without_cwd_keeps_default_workspace(self, tmp_path):
         state = self._real_state(tmp_path)
