@@ -32,6 +32,7 @@
 2026-09-17	#226 + #227 两轴独立审查（Standards + Correctness 各一 subagent，fixed point ba26e81，审的是未提交工作树；findings 全部就地修复 ⇒ 该工作树即本 range 的 commit）——**两轴共识两条 P2**：①新「请求模型」行会**跨 run 并排**：`model`（会话级、不随新 run 失效，写者有回显/fallback/changed/重放四个）与 `requested_model`（每 run 重置）直接比较，run1 回显 A + run2 请求 B 且本轮尚无回显时，界面显示「模型 A / 请求模型 B」，被读成「请求了 B 却回显 A（provider 无视请求）」——而 A 只是上一轮的值；②ADR-0035 §2.2 与 e2e 注释声称「码与后端 message 一起显示」，但 `ArtifactViewer` 把 `err.code` 丢在状态机边界（`ArtifactContentState` 没有 code 字段），文档-实现不符。**Standards 轴**另有 1×P2（`web/artifacts.py` 的常量注释成段复述 ADR-0035 §1.1 的动机叙述，违反 §16.1）与 7×P3：四处新注释缺 ADR 指针、后端用例 docstring 自称「改码名两侧一起变红」（实际两侧各自自证，已改口径并**新增真正的跨端闸门**）、projection 用例标题覆盖大于断言（非字符串分支没人喂）、`模型` 行 title 指向可能不存在的行、ADR-0034 行号偏 3 行、ADR-0035 把 #225 的四个码写成两个、ADR-0034 §1.1 漏记 `run_config` 诊断日志同值并存。**Correctness 轴**独立复现了 6 个变异（全部按预期变红、无假绿，并用 git blob 索引逐字校验恢复）另提 4 条 P3：码字面量两侧各自自证（同上，已建闸门）、`code === null` 兜底比「旧版后端」宽（`detail: {}` / 无码对象也被判成 no-storage ⇒ 已按 `objectDetail` 精确化）、「实际发往 provider 的 model 值」对「本轮一次调用都没发生」的 run 不成立（措辞收窄为配置侧事实）、新渲染用例里有整页 `toContain` 弱断言（已改成按 `detail-key` 取值域的结构化断言）。**修复后新增红证 4 条**（非本轮标注、畸形体分支、跨端码闸门单边改名、模型行值域）+ 两轴各自复现的 6 条。	ba26e81..252e0db
 #
 [whitelist]
+133ef5a	B-10 落点记录（tracker + 归档 + PHASE_STATUS + 本台账审查行，docs-only）
 a7ce879	DSH 审计集成/推送状态（docs-only）
 75253d7	DSH 审计收尾：现场抽查 + 开票 #226/#227（docs-only）
 d291a0f	DSH 审计明细入归档（docs-only）
