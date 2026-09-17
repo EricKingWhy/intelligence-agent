@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ConversationState } from '../types';
-import { decisionLabel, permissionView, verdictTone } from './permission';
+import { decisionLabel, permissionView, verdictTone, composerPermissionMode } from './permission';
 import { applyEvent, initConversation } from './projection';
 
 const T = '2026-01-01T00:00:00Z';
@@ -109,5 +109,42 @@ describe('permissionView — 段内措辞（AC2/AC4：说了没有，也不填 0
     expect(view.decisions[0].toolName).toBe('—');
     expect(view.decisions[0].verdict).toBe('拒绝');
     expect(view.decisions[0].tone).toBe('deny');
+  });
+});
+
+// ── #236：composer 权限 pill 的取值（含跨会话身份闸）──
+// pill 是这个 UI 唯一的**权限承诺**：显示错一格就是"说只读、后端自动放行写操作"。
+
+describe('composerPermissionMode — 权限 pill 该显示哪一档（#236）', () => {
+  /** 一个只有 `session/started` 的会话投影（`mode=null` = 后端未显式声明档位）。 */
+  const convOf = (sid: string, mode: string | null) =>
+    applyEvent(initConversation(sid), {
+      type: 'session/started',
+      seq: 1,
+      session_id: sid,
+      time: T,
+      data: mode === null ? {} : { permission_mode: mode },
+    } as unknown as Parameters<typeof applyEvent>[1]);
+
+  it('无选中会话（新会话）→ 显示本地创建意图；null = 未选（后端默认）', () => {
+    expect(composerPermissionMode(null, null, 'read-only')).toBe('read-only');
+    expect(composerPermissionMode(null, null, null)).toBeNull();
+  });
+
+  it('选中会话且 conversation 属于它 → 显示会话真值（session/started 投影）', () => {
+    expect(composerPermissionMode('s1', convOf('s1', 'read-only'), null)).toBe('read-only');
+  });
+
+  it('会话未声明档位（老日志 / 用后端默认创建）→ null：不拿本地选择冒充会话事实', () => {
+    // 本地选择是"下一次创建"的意图，与这个已存在会话的档位无关
+    expect(composerPermissionMode('s1', convOf('s1', null), 'danger-full-access')).toBeNull();
+  });
+
+  it('切会话加载中（conversation 仍属**旧**会话）→ null，绝不用旧档冒充新会话', () => {
+    expect(composerPermissionMode('s-new', convOf('s-old', 'read-only'), 'read-only')).toBeNull();
+  });
+
+  it('选中会话但 conversation 尚未加载（null）→ null', () => {
+    expect(composerPermissionMode('s1', null, 'read-only')).toBeNull();
   });
 });

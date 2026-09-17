@@ -58,6 +58,7 @@ import {
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
+import { composerPermissionMode } from './lib/permission';
 import type { ToolCall, PresetTask, AgentEvent, Project, UndeliveredInput } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
@@ -456,14 +457,15 @@ export default function App() {
     [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
 
-  // #236：权限 pill 按"有没有会话"换源——会话里显示**会话真值**（`session/started`
-  // 投影；#234 起档位是会话属性、创建后不可变），新会话才用本地创建意图。
-  // 会话内一律只读：续聊 amend 面不含 `permission_mode`（`lib/amend.ts`），可编辑
-  // 就是骗人——用户拨到「只读」以为写操作会弹审批，后端仍按创建档执行。
+  // #236：权限 pill 按"有没有会话"换源，且会话内一律只读（续聊 amend 面不含
+  // `permission_mode`，可编辑就是骗人）。取值 + 跨会话身份闸都在纯函数
+  // `composerPermissionMode` 里（App 没有 SSR 测试车道，逻辑放 lib 直测）。
   const permissionModeLocked = selectedId !== null;
-  const displayedPermissionMode = permissionModeLocked
-    ? conversation?.session_permission_mode ?? null
-    : selectedPermissionMode;
+  const displayedPermissionMode = composerPermissionMode(
+    selectedId,
+    conversation,
+    selectedPermissionMode,
+  );
 
   const handleSubmit = useCallback(
     (task: string) => {
