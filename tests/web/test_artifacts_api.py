@@ -263,12 +263,23 @@ def test_blank_artifact_dir_returns_503(tmp_path: Path) -> None:
 
     这是"这个部署确实没有可读存储"的剩余场景：接口若报 404，用户会以为是
     "产物不存在"，而事实是"这里根本存不下也读不到产物"。
+
+    #227：503 的 `detail` 改成 `{code, message}` 机读形状——前端只认码，不按状态码
+    猜原因（与 #225 的 `/api/memories` 同一形状）。本用例钉的是**后端这一侧**的字面量
+    与"码来自唯一常量"；**跨端同值**由 `tests/web/test_error_code_contract.py` 直接读
+    前端源文件对账（单边改名在那里红）——两侧各自自证是有洞的（#225 的实测教训）。
     """
     client = _client(tmp_path, artifact_dir="")
     session_id = _create_session(client)
     resp = client.get(f"/api/sessions/{session_id}/artifacts/0123456789abcdef")
     assert resp.status_code == 503, resp.text
-    assert "存储" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert detail["code"] == "artifact_storage_unavailable"
+    assert "存储" in detail["message"]
+    # 与 `web/artifacts.py` 的常量同源（不是路由里手写的第二份字面量）。
+    from agent_harness.web import artifacts as artifacts_module
+
+    assert detail["code"] == artifacts_module.ARTIFACT_STORAGE_UNAVAILABLE
 
 
 def test_reads_a_locally_written_artifact_over_http(tmp_path: Path) -> None:

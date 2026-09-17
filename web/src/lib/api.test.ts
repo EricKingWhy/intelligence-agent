@@ -29,6 +29,7 @@ import {
   UnauthorizedError,
   AlreadyResolvedError,
   ApprovalGoneError,
+  ArtifactContentError,
   getArtifactContent,
   postApproval,
   renameProject,
@@ -1040,6 +1041,56 @@ describe('getArtifactContent — artifact 切片解析（#185/#186，缺字段�
     await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
     captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', total_lines: 0, returned_lines: 0 });
     await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+  });
+
+  /* #227：非 2xx 的 kind **只按机读码判**，不按状态码猜原因。
+     判别力在第三条：后端哪天加了第二个 503 原因（带自己的码），界面必须落到通用失败态，
+     而不是把它说成"部署没配存储"——那正是 #225 在记忆面板上踩过的坑。 */
+  it('503 + code=artifact_storage_unavailable → kind=no-storage，码原样带上', async () => {
+    captureFetch(503, {
+      detail: { code: 'artifact_storage_unavailable', message: '本部署没有可读取的 artifact 存储' },
+    });
+    const err = (await getArtifactContent('s-1', 'a1b2c3d4e5f60718').catch((e: unknown) => e)) as ArtifactContentError;
+    expect(err).toBeInstanceOf(ArtifactContentError);
+    expect(err.kind).toBe('no-storage');
+    expect(err.code).toBe('artifact_storage_unavailable');
+    expect(err.status).toBe(503);
+    expect(err.detail).toBe('本部署没有可读取的 artifact 存储');
+  });
+
+  it('503 **未知码** → kind=error（不猜成 no-storage：猜错会把故障说成"没配存储"）', async () => {
+    captureFetch(503, {
+      detail: { code: 'artifact_store_auth_failed', message: '对象存储鉴权失败' },
+    });
+    const err = (await getArtifactContent('s-1', 'a1b2c3d4e5f60718').catch((e: unknown) => e)) as ArtifactContentError;
+    expect(err.kind).toBe('error');
+    expect(err.code).toBe('artifact_store_auth_failed');
+    expect(err.detail).toBe('对象存储鉴权失败');
+  });
+
+  it('503 无码（旧版后端）→ kind=no-storage（那时这个端点只有一个 503 原因）', async () => {
+    captureFetch(503, { detail: '本部署没有可读取的 artifact 存储' });
+    const err = (await getArtifactContent('s-1', 'a1b2c3d4e5f60718').catch((e: unknown) => e)) as ArtifactContentError;
+    expect(err.kind).toBe('no-storage');
+    expect(err.code).toBeNull();
+  });
+
+  it('503 对象形状但**没有合法码** → kind=error（"码缺席"不等于"旧版后端"）', async () => {
+    /* 两种"没码"必须分开：纯字符串 detail = 旧版后端（那时这个端点只有一个 503 原因）；
+       对象形状却没给码 = 新版返回了畸形体 ⇒ 是后端 bug，**不能**读成"部署没配存储"。
+       少了这个区分，"按缺席猜原因"就从"状态码"挪到了"码解析失败"这一侧，纪律没变。 */
+    captureFetch(503, { detail: { message: '存储层出问题了' } });
+    const err = (await getArtifactContent('s-1', 'a1b2c3d4e5f60718').catch((e: unknown) => e)) as ArtifactContentError;
+    expect(err.kind).toBe('error');
+    expect(err.code).toBeNull();
+    expect(err.detail).toBe('存储层出问题了');
+  });
+
+  it('404 → kind=gone（归属不可探测的既有语义不动）', async () => {
+    captureFetch(404, { detail: 'artifact 不在会话 s-1 里' });
+    const err = (await getArtifactContent('s-1', 'a1b2c3d4e5f60718').catch((e: unknown) => e)) as ArtifactContentError;
+    expect(err.kind).toBe('gone');
+    expect(err.status).toBe(404);
   });
 });
 

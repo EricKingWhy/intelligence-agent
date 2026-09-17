@@ -564,6 +564,21 @@ export interface ConversationState {
   /** T9 #139：当前 run 的轮次索引（1-based）。来自 RUN_STARTED.data.turn_index。
    *  null = 尚未收到 RUN_STARTED 或字段缺失。UI 可据此显示「第 N 轮」。 */
   turn_index: number | null;
+  /** #226：本轮**请求侧**模型标识（来自 RUN_STARTED.data.model；run/started 是
+   *  持久事件 ⇒ 刷新/重放后仍在）。与 `model` 的分工：`model` 是 provider 在
+   *  响应里**回显**的名字（`model/completed.data.model`，对方不回显就没有），
+   *  本字段是我们**发出去**的那个 `model` 值。仅当"不回显"或"回显 ≠ 请求"时
+   *  本字段才提供额外信息——口径见 `docs/adr/0034-request-side-model-identity.md`。
+   *  null = 尚未收到 RUN_STARTED，或该 run 未携带（旧版后端）。 */
+  requested_model: string | null;
+  /** #226 review（两轴共识 P2）：`model` 这个值的**来源 run**——它的写者有四个
+   *  （`model/completed` 回显、`model/fallback` 切换、`model/changed` 会话级切换、
+   *  重放重建），三者**都不随新 run 失效**，而 `requested_model` 是**每 run 重置**的。
+   *  没有这个归属就无法判断两个值能否并排比较：run 1 的回显与 run 2 的请求并排会被
+   *  读成"请求了 B 却回显 A（provider 无视请求）"，而 A 其实只是上一轮的值。
+   *  null = 该值来自不带 `run_id` 的事件（会话级 `model/changed`）或旧数据。
+   *  取值口径见 `docs/adr/0034-request-side-model-identity.md` §2.3。 */
+  model_run_id: string | null;
   /** T1（#94）幂等簿记：本会话已应用的持久事件 seq 集合（spec 02 §6.1 at-least-once
    *  去重键）。append-only 共享日志纪律（同 events）：只增不改、跨快照共享引用、
    *  绝不整体替换。null-seq 帧不入册——ephemeral 流式信号（model/delta 等）

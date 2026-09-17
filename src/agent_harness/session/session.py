@@ -16,7 +16,7 @@ import logging
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from langchain_core.messages import AnyMessage
@@ -385,7 +385,8 @@ class Session:
     # ── Run 生命周期 ──
 
     def begin_run(self, *, agent_id: str = "default",
-                  agent_profile: str = "main") -> tuple[str, int]:
+                  agent_profile: str = "main",
+                  model: str | None = None) -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
         ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
@@ -395,11 +396,20 @@ class Session:
         未指定时为 "main"。"缺字段"正是此前不可回溯的根因（真机会话里 13 个
         run 全部查不到档位，只能靠工具集形状反推）；旧数据无该字段时前端按
         「档位未知」降级，不报错。
+
+        ``model``（#226）：本轮**请求侧**的模型标识（= 真正发往 provider 的
+        ``model`` 字段，装配层给的就是 `ModelConfig.model_name`）。`None` 时
+        **不落该键**（本方法只写调用方给的事实，不替它编默认值；Runtime 路径
+        总传真值）。取值口径、与 ``model/completed`` 回显侧的对照、以及为什么
+        不能放在 ``model/started``（流式专属、永不持久化），见
+        ``docs/adr/0034-request-side-model-identity.md``。
         """
         run_id = str(uuid4())
         turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
-        self.append(RUN_STARTED, {"turn_index": turn_index, "agent_profile": agent_profile},
-                    run_id=run_id, agent_id=agent_id)
+        data: dict[str, Any] = {"turn_index": turn_index, "agent_profile": agent_profile}
+        if model is not None:
+            data["model"] = model
+        self.append(RUN_STARTED, data, run_id=run_id, agent_id=agent_id)
         return run_id, turn_index
 
     def end_run(

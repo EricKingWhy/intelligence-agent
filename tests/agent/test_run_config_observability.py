@@ -21,7 +21,7 @@ from agent_harness.assembly import build_runtime, initialize_stores, recovery_st
 from agent_harness.capability.wiring import CapabilityWiring
 from agent_harness.config import Settings
 from agent_harness.sandbox import WorkspaceRegistry
-from agent_harness.session import RUN_STARTED
+from agent_harness.session import RUN_STARTED, JsonlSessionStore, Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tools import ReadTool
 from tests.conftest import make_session
@@ -134,8 +134,10 @@ class ScriptedModelFactory:
         yield AIMessageChunk(content="ok")
 
 
-async def _build(tmp_path, agent_profile: str | None) -> AgentRuntime:
-    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
+async def _build(tmp_path, agent_profile: str | None,
+                 model_name: str | None = None) -> AgentRuntime:
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+                        **({"model_name": model_name} if model_name is not None else {}))
     stores = recovery_stores(tmp_path / "harness.db")
     await initialize_stores(stores)
     workspace_registry = WorkspaceRegistry(root=tmp_path, backend="local")
@@ -148,6 +150,38 @@ async def _build(tmp_path, agent_profile: str | None) -> AgentRuntime:
             max_steps=10,
             agent_profile=agent_profile,
         )
+
+
+# ── #226：run/started.data.model（请求侧模型标识） ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_started_carries_model_from_runtime_name(tmp_path):
+    """#226：跑一个 run ⇒ run/started 落请求侧模型标识（此处是调用方给的运行时名）。"""
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([AIMessage(content="done")]), registry, ToolExecutor(registry),
+        primary_model_name="deepseek-chat",
+    )
+    session = make_session(tmp_path)
+    await runtime.run(session, "hello")
+    started = next(e for e in session.events if e.type == RUN_STARTED)
+    assert started.data["model"] == "deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_run_started_model_is_the_wire_model_id_not_placeholder(tmp_path):
+    """#226：装配路径下落的是**发往 provider 的 model 值**（`ModelConfig.model_name`），
+    不是 AgentRuntime 的占位默认名 "primary"——后者只是直接构造路径的缺省。"""
+    runtime = await _build(tmp_path, "main", model_name="qwen-plus")
+    session = make_session(tmp_path)
+    await runtime.run(session, "hello")
+    started = next(e for e in session.events if e.type == RUN_STARTED)
+    assert started.data["model"] == "qwen-plus"
+    # 同一事实落盘可重读（durable，不是内存对象的偶然形状）——刷新/回放后仍在。
+    reloaded = Session.resume(JsonlSessionStore(root=tmp_path), session.session_id)
+    replayed = next(e for e in reloaded.events if e.type == RUN_STARTED)
+    assert replayed.data["model"] == "qwen-plus"
 
 
 @pytest.mark.asyncio

@@ -726,6 +726,11 @@ class AgentRuntime:
 
             run_id, turn_index = session.begin_run(
                 agent_id=self._agent_id, agent_profile=self._agent_profile,
+                # #226：请求侧模型标识落 durable 事件（同一 run 内只在 fallback 时换
+                # 模型，那次切换另由 model/fallback 记录）。装配层给的
+                # primary_model_name = ModelConfig.model_name = 发给 provider 的
+                # `model` 值（model/provider.py:107）。取值口径见 ADR-0034。
+                model=self._primary_model_name,
             )
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。

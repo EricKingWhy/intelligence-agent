@@ -27,8 +27,16 @@ from agent_harness.storage.artifact_select import select_artifact_store
 MAX_LINES_CAP = 1000
 MAX_CHARS_PER_LINE_CAP = 2000
 
+#: 读路径 503 的**机读码**（#227）：前端只认这个码判因，不按状态码猜。
+#:
+#: 值是**开集**——加新码可以，改名必须两侧一起动（`tests/web/test_error_code_contract.py`
+#: 直接读前端源文件对账）；未知码在前端走通用失败态。机制与逐处判定见
+#: `docs/adr/0035-machine-readable-error-codes-for-503-families.md`。
+ARTIFACT_STORAGE_UNAVAILABLE = "artifact_storage_unavailable"
+
 __all__ = [
     "ARTIFACT_ID_PATTERN",
+    "ARTIFACT_STORAGE_UNAVAILABLE",
     "MAX_CHARS_PER_LINE_CAP",
     "MAX_LINES_CAP",
     "build_read_artifact_store",

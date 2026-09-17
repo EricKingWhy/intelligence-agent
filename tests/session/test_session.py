@@ -199,6 +199,25 @@ class TestRunLifecycle:
         session.begin_run()
         assert session.events[-1].data["turn_index"] == 3
 
+    def test_begin_run_records_requested_model_when_given(self, store: JsonlSessionStore):
+        """#226：调用方给了请求侧模型标识 ⇒ 落进 run/started（持久事实）。"""
+        session = Session.start(store)
+        session.begin_run(model="deepseek-chat")
+        assert session.events[-1].data["model"] == "deepseek-chat"
+
+    def test_begin_run_omits_model_key_when_not_given(self, store: JsonlSessionStore):
+        """#226 添加性：不传 = **不落该键**（本方法不替调用方编默认值）。
+
+        「键在场但为空」与「键缺席」是两种不同的历史事实，后端只在确知时才断言，
+        前端按缺字段降级。既有直接调 begin_run 的调用方与旧事件载荷逐字不变。
+        """
+        session = Session.start(store)
+        session.begin_run()
+        assert "model" not in session.events[-1].data
+        # 同一事实经 JSONL 落盘/重读后仍然成立（不是内存对象的偶然形状）。
+        reloaded = Session.resume(store, session.session_id)
+        assert "model" not in reloaded.events[-1].data
+
     def test_end_run_completed(self, store: JsonlSessionStore):
         session = Session.start(store)
         run_id, _ = session.begin_run()

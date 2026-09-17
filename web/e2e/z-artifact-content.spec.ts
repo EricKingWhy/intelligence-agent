@@ -225,9 +225,15 @@ tail of log`,
 
 test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在本会话"不是同一句话', async ({ page }) => {
   const frames = framesWithArtifact();
-  // 503：本部署没有可读存储
+  // 503：#227 起的真实机读形状（`detail = {code, message}`）——前端只认这个码
   await openSession(page, frames, {
-    artifactContentError: { status: 503, detail: '本部署没有可读取的 artifact 存储：artifact_dir 为空' },
+    artifactContentError: {
+      status: 503,
+      detail: {
+        code: 'artifact_storage_unavailable',
+        message: '本部署没有可读取的 artifact 存储：artifact_dir 为空',
+      },
+    },
   });
   await openArtifactsTab(page);
   await page.getByRole('button', { name: '查看内容' }).click();
@@ -251,4 +257,26 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
   const gone = page.locator('.artifact-content-error');
   await expect(gone).toContainText('不在本会话里');
   await expect(gone).not.toContainText('本部署没有可读取的 artifact 存储');
+});
+
+test('#227：同一个 503 的**第二个原因**（自带码）不说成"部署没配存储"', async ({ page }) => {
+  /* 判别力所在：这是"后端加了第二个 503 原因"的近似实验。修复前前端按 `status === 503`
+     一律渲染「本部署没有可读取的 artifact 存储」——把一次存储鉴权故障说成部署没配存储，
+     用户会去改一个本来就配好的配置。现在只按码判：未知码走通用失败态，码与后端文案一起显示。 */
+  const frames = framesWithArtifact();
+  await openSession(page, frames, {
+    artifactContentError: {
+      status: 503,
+      detail: { code: 'artifact_store_auth_failed', message: '对象存储鉴权失败：AK/SK 无效' },
+    },
+  });
+  await openArtifactsTab(page);
+  await page.getByRole('button', { name: '查看内容' }).click();
+  const err = page.locator('.artifact-content-error');
+  await expect(err).toBeVisible();
+  // 后端文案照显（含码本体的诊断信息由它承担）
+  await expect(err).toContainText('对象存储鉴权失败');
+  // **不能**把它说成"没配存储"——那是修复前的错法
+  await expect(err).not.toContainText('本部署没有可读取的 artifact 存储');
+  await expect(err).not.toContainText('部署配置问题');
 });

@@ -173,6 +173,8 @@ export function initConversation(session_id: string): ConversationState {
     run_interrupted: null,
     run_failure: null,
     turn_index: null,
+    requested_model: null,
+    model_run_id: null,
     seenSeqs: new Set(),
     undelivered: [],
   };
@@ -396,6 +398,14 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   state.run_interrupted = null;
   // #220：失败归因同属「**最近一个** run」的事实，新 run 开始即过期（同 run_interrupted）。
   state.run_failure = null;
+  // #226：本轮请求侧模型标识（run/started 持久携带）——每 run 各自一个值，故是
+  // 「**最近一个** run」的镜像（与 run_failure / run_interrupted 同一失效规则）：
+  // 新 run 开始即重置，本 run 没带该键就归 null（**不**保留上一轮的值）。必须放在
+  // 下面 turn_index 的提前 return 之前：那个 return 只跳过 turn 回填。
+  // 失效规则与「与 model 的归属对照」口径见 ADR-0034 §2.3。
+  const requested = event.data.model;
+  state.requested_model =
+    typeof requested === 'string' && requested ? requested : null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -463,7 +473,12 @@ function projectModelCompleted(state: ConversationState, event: AgentEvent): voi
     ensureModelActivity(turn);
   });
   // Run-level observability（后端 Gap 1）：可选字段，缺失/畸形不伪造。
-  if (typeof data.model === 'string' && data.model) state.model = data.model;
+  // 同时记下这个回显属于哪个 run：`model` 不随新 run 失效，而 `requested_model` 是每
+  // run 重置的——没有归属就无法判断两个值能否并排比较（ADR-0034 §2.3）。
+  if (typeof data.model === 'string' && data.model) {
+    state.model = data.model;
+    state.model_run_id = event.run_id ?? null;
+  }
   const usage = parseUsage(data.usage);
   if (usage) {
     // run/completed 权威聚合到达前，累计各次推理 usage 作为运行中视图。
@@ -826,6 +841,7 @@ function projectModelFallback(state: ConversationState, event: AgentEvent): void
   if (from && to) {
     state.model_fallback = { from_model: from, to_model: to, reason };
     state.model = to;
+    state.model_run_id = event.run_id ?? null; // 同 echo：记归属（切换是 run 内的事实）
   }
 }
 
@@ -833,7 +849,11 @@ function projectModelFallback(state: ConversationState, event: AgentEvent): void
  *  切换不打断在途 run，下一轮 run 从事件流派生当前模型生效。 */
 function projectModelChanged(state: ConversationState, event: AgentEvent): void {
   const toModel = typeof event.data.to_model_id === 'string' ? event.data.to_model_id : null;
-  if (toModel) state.model = toModel;
+  if (toModel) {
+    state.model = toModel;
+    // 会话级切换不带 run_id ⇒ 归属归 null（读作"不是任何本轮的事实"）
+    state.model_run_id = event.run_id ?? null;
+  }
 }
 
 /** Phase 13 Multi-Agent（ADR-0015）：父流白盒委派事件。child 完整历史在

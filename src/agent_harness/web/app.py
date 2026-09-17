@@ -1659,9 +1659,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         if store is None:
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "本部署没有可读取的 artifact 存储：artifact_dir 为空，或对象存储只配了一半"
-                ),
+                # #227：带机读码（前端只认码，不按 503 猜原因）。文案与码的分工见
+                # docs/adr/0035-*.md：`message` 给人看，`code` 给程序判。
+                detail={
+                    "code": artifacts.ARTIFACT_STORAGE_UNAVAILABLE,
+                    "message": (
+                        "本部署没有可读取的 artifact 存储：artifact_dir 为空，"
+                        "或对象存储只配了一半"
+                    ),
+                },
             )
         try:
             slice_ = await store.inspect(

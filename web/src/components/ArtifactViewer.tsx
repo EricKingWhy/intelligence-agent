@@ -25,7 +25,15 @@ import type { ArtifactSlice } from '../types';
 /** 一次取数的三种状态（判别联合，避免"加载中也可以有错误"这种不存在的组合）。 */
 export type ArtifactContentState =
   | { status: 'loading' }
-  | { status: 'error'; kind: 'gone' | 'no-storage' | 'error'; detail: string }
+  | {
+      status: 'error';
+      kind: 'gone' | 'no-storage' | 'error';
+      detail: string;
+      /** 后端机读码（#227）；无码 = 旧版后端。**通用失败态下它必须显示出来**：
+       *  "后端加了第二个 503 原因"时，用户能拿到的唯一诊断就是这样一条码
+       *  （口径见 `docs/adr/0035-machine-readable-error-codes-for-503-families.md`）。 */
+      code: string | null;
+    }
   | { status: 'ready'; slice: ArtifactSlice };
 
 /** 拿不到内容时该怎么跟用户说——**因**分开，不合并成一句万能的"加载失败"。 */
@@ -76,6 +84,8 @@ export function ArtifactContentView({
         {hint && <div className="artifact-content-error-hint">{hint}</div>}
         {/* 后端 detail 原文（读不到时为空串，不补一句自造的） */}
         {state.detail && <div className="artifact-content-detail">{state.detail}</div>}
+        {/* 机读码（#227）：后端给码就照显——通用失败态下它是唯一能指向真因的东西 */}
+        {state.code && <div className="artifact-content-code mono">{state.code}</div>}
         <div className="artifact-content-id mono">{artifactId.slice(0, 16)}…</div>
       </div>
     );
@@ -164,12 +174,13 @@ export function ArtifactViewer({
       .catch((err: unknown) => {
         if (!aliveRef.current) return;
         if (err instanceof ArtifactContentError) {
-          setState({ status: 'error', kind: err.kind, detail: err.detail });
+          setState({ status: 'error', kind: err.kind, detail: err.detail, code: err.code });
         } else {
           setState({
             status: 'error',
             kind: 'error',
             detail: err instanceof Error ? err.message : '',
+            code: null,
           });
         }
       });

@@ -206,8 +206,10 @@ export interface ApiMock {
   // ── #185 路由 / #186 消费：GET /api/sessions/{id}/artifacts/{aid} ──
   /** 内容切片（形状 = 后端 `ArtifactSlice.model_dump()`）。 */
   artifactContent?: unknown;
-  /** 直接回错误（404 不在本会话 / 503 没配存储 / 422 形态非法）。 */
-  artifactContentError?: { status: number; detail: string };
+  /** 直接回错误（404 不在本会话 / 503 没配存储 / 422 形态非法）。
+   *  `detail` 可以是字符串（旧版后端形状）或 `{code, message}`（#227 起的机读形状）——
+   *  两种都要能 mock，否则"前端只按码判别"这条只能靠单测证明。 */
+  artifactContentError?: { status: number; detail: unknown };
   /** 拦截口（计数 / 按 artifact_id 给不同内容）；返回 true = 已处理。 */
   onArtifactGet?: (route: Route, artifactId: string) => Promise<boolean> | boolean;
   /** GET /api/capabilities 的拦截口（计数 / 断言"端点真的被消费了"）；返回 true = 已处理。

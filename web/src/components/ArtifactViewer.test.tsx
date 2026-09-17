@@ -59,26 +59,40 @@ describe('#186 AC1：三态如实', () => {
   /* 404 与 503 对用户是两句不同的话：前者"这个产物不在这里"，后者"这个部署没有可读
      存储"。合并成一句"加载失败"会让用户去追一个不存在的丢失事故。 */
   it('拿不到（404 不在本会话）：说明不在本会话，并给出 id', () => {
-    const html = render({ status: 'error', kind: 'gone', detail: '' });
+    const html = render({ status: 'error', kind: 'gone', detail: '', code: null });
     expect(html).toContain('不在本会话里');
     expect(html).toContain('0123456789abcdef');
     expect(html).toContain('role="alert"');
   });
 
   it('拿不到（503 没配存储）：说清是部署配置问题，不是产物丢了', () => {
-    const html = render({ status: 'error', kind: 'no-storage', detail: '本部署没有可读取的 artifact 存储' });
+    const html = render({ status: 'error', kind: 'no-storage', detail: '本部署没有可读取的 artifact 存储', code: null });
     expect(html).toContain('本部署没有可读取的 artifact 存储');
     expect(html).toContain('部署配置问题');
   });
 
   it('后端 detail **原文**照显（不替它翻译成更短的话）', () => {
     const detail = "artifact '0123456789abcdef' 不在会话 's1' 的命名空间里（不存在，或属于别的会话）";
-    const html = render({ status: 'error', kind: 'gone', detail });
+    const html = render({ status: 'error', kind: 'gone', detail, code: null });
     expect(html).toContain('不在会话');
   });
 
+  it('#227：后端给了机读码就照显（通用失败态下它是唯一指向真因的东西）', () => {
+    const html = render({
+      status: 'error', kind: 'error', detail: '对象存储鉴权失败：AK/SK 无效', code: 'artifact_store_auth_failed',
+    });
+    expect(html).toContain('artifact-content-code');
+    expect(html).toContain('artifact_store_auth_failed');
+    expect(html).toContain('对象存储鉴权失败');
+  });
+
+  it('#227：无码（旧版后端）→ 不渲染码那一行（不铺空槽）', () => {
+    const html = render({ status: 'error', kind: 'no-storage', detail: '本部署没有可读取的 artifact 存储', code: null });
+    expect(html).not.toContain('artifact-content-code');
+  });
+
   it('detail 为空时不补一句自造的错误文案', () => {
-    const html = render({ status: 'error', kind: 'error', detail: '' });
+    const html = render({ status: 'error', kind: 'error', detail: '', code: null });
     expect(html).toContain('读取 artifact 内容失败');
     expect(html).not.toContain('artifact-content-detail');
   });

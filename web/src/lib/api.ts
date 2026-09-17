@@ -68,12 +68,23 @@ export async function readErrorDetail(res: Response): Promise<string> {
   return (await readErrorBody(res)).message;
 }
 
-/** 一次读取拿到 `{message, code}`（响应体只能读一次，两个消费者必须共用这次读取）。 */
-async function readErrorBody(res: Response): Promise<{ message: string; code: string | null }> {
+/**
+ * 一次读取拿到 `{message, code, objectDetail}`（响应体只能读一次，所有消费者必须共用
+ * 这次读取）。
+ *
+ * `objectDetail` = "后端用了 `detail` 是对象的**机读形状**回答"（#227）：用它区分三种
+ * 截然不同的情况——纯字符串 detail（旧版后端）、对象 detail 带码、对象 detail **没有**
+ * 合法码（新版形状却没给码 ⇒ 是后端 bug，不是旧版）。少了这个信号，调用方只能看
+ * "码是不是 null"，于是会把"新版形状却没给码"误读成旧版行为——那正是本批要消灭的
+ * "按缺席猜原因"（错误码只按码判：`docs/adr/0035-machine-readable-error-codes-for-503-families.md`）。
+ */
+async function readErrorBody(
+  res: Response,
+): Promise<{ message: string; code: string | null; objectDetail: boolean }> {
   try {
     const j = (await res.json()) as { detail?: unknown } | null;
     const detail = j?.detail;
-    if (typeof detail === 'string') return { message: detail, code: null };
+    if (typeof detail === 'string') return { message: detail, code: null, objectDetail: false };
     if (Array.isArray(detail)) {
       const message = detail
         .flatMap((item) => {
@@ -81,18 +92,19 @@ async function readErrorBody(res: Response): Promise<{ message: string; code: st
           return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
         })
         .join('；');
-      return { message, code: null };
+      return { message, code: null, objectDetail: false };
     }
     if (typeof detail === 'object' && detail !== null) {
       const { message, code } = detail as { message?: unknown; code?: unknown };
       return {
         message: typeof message === 'string' ? message : '',
         code: typeof code === 'string' && code ? code : null,
+        objectDetail: true,
       };
     }
-    return { message: '', code: null };
+    return { message: '', code: null, objectDetail: false };
   } catch {
-    return { message: '', code: null };
+    return { message: '', code: null, objectDetail: false };
   }
 }
 
@@ -851,23 +863,37 @@ export async function cancelQueueItem(sessionId: string, queueId: string): Promi
  *  - `gone`（404）：这个 id 不在本会话的命名空间里（不存在，或属于别的会话）。
  *    后端刻意不区分这两者——`artifact_id` 是内容哈希、跨会话可重复，区分"不存在"与
  *    "存在但不可读"会把归属变成可探测的信息（`web/app.py` 的 404 注释）。
- *  - `no-storage`（503）：本部署**确实没有可读的存储**。不能降级成"不存在"——
- *    那会让用户以为产物丢了，而其实是这个部署没配存储。
+ *  - `no-storage`（503 + `code=artifact_storage_unavailable`）：本部署**确实没有可读的
+ *    存储**。不能降级成"不存在"——那会让用户以为产物丢了，而其实是这个部署没配存储。
  *  - `error`：其它失败（5xx / 网络 / 形状不符）。`detail` 是后端原文。
  *
  *  `detail` 一律是后端 `{detail}` 原文（读不到时为空串）——界面照原样显示，
  *  这比前端替它翻译一句更短的错误更有用（同 `describeSessionError` 的既有口径）。 */
 export type ArtifactContentFailure = 'gone' | 'no-storage' | 'error';
 
+/** 后端"本部署没有可读 artifact 存储"的机读码（#227，与
+ *  `src/agent_harness/web/artifacts.py` 的 `ARTIFACT_STORAGE_UNAVAILABLE` 同值）。
+ *  **两侧同值的唯一事实源是跨仓契约**（`docs/BACKEND_CONTRACT_STREAMING_UI.md` §3）；
+ *  改名会让全门禁仍然全绿而界面把故障渲染错类——#225 的教训，故此处与 e2e 一并钉住。 */
+const ARTIFACT_STORAGE_UNAVAILABLE = 'artifact_storage_unavailable';
+
 export class ArtifactContentError extends Error {
   readonly kind: ArtifactContentFailure;
   readonly detail: string;
   readonly status: number;
-  constructor(kind: ArtifactContentFailure, detail: string, status: number) {
+  /** 后端给的机读码（无码 = null，旧版后端 / 非码化响应）。判别只读它（#227）。 */
+  readonly code: string | null;
+  constructor(
+    kind: ArtifactContentFailure,
+    detail: string,
+    status: number,
+    code: string | null = null,
+  ) {
     super(detail || `artifact content ${status}`);
     this.kind = kind;
     this.detail = detail;
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -942,11 +968,24 @@ export async function getArtifactContent(
       (qs ? `?${qs}` : ''),
   );
   if (!res.ok) {
-    const detail = await readErrorDetail(res);
-    if (res.status === 404) throw new ArtifactContentError('gone', detail, 404);
-    if (res.status === 503) throw new ArtifactContentError('no-storage', detail, 503);
+    const { message: detail, code, objectDetail } = await readErrorBody(res);
+    if (res.status === 404) throw new ArtifactContentError('gone', detail, 404, code);
+    if (res.status === 503) {
+      // #227：**只按码判**。三种情形分开，别让"这一版的 503 只有一个原因"变成隐藏前提：
+      //  - 码 = 无读存储 ⇒ no-storage（今天的唯一原因）；
+      //  - **纯字符串 detail**（旧版后端，那时这个端点的 503 也只有这一个原因）
+      //    ⇒ 同样的 no-storage；
+      //  - 其余（**别的码**，或对象形状却没给合法码）⇒ 通用失败态。猜成 no-storage 会
+      //    重演 #225：后端加了第二个 503 原因，界面却说是"部署没配存储"，用户照着
+      //    重启/改配置。第二种尤其要小心——"码缺席"不等于"旧版后端"。
+      const kind: ArtifactContentFailure =
+        code === ARTIFACT_STORAGE_UNAVAILABLE || (code === null && !objectDetail)
+          ? 'no-storage'
+          : 'error';
+      throw new ArtifactContentError(kind, detail, 503, code);
+    }
     if (res.status === 422) throw new ArtifactQueryError(detail, 422);
-    throw new ArtifactContentError('error', detail, res.status);
+    throw new ArtifactContentError('error', detail, res.status, code);
   }
   return parseArtifactSlice(await res.json());
 }

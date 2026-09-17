@@ -730,8 +730,12 @@ export function ChatTab({
 
       {/* MODEL：后端 Gap 1 已落地（model/completed + run/completed 观测字段）。
           全部缺失时保留空槽语义（提示而非留白），有任一真值则逐行渲染，
-          缺失行显示「—」——绝不伪造 0（零伪造指标冻结决策）。 */}
-      {conversation.model === null && conversation.usage_total === null && conversation.cost_usd === null ? (
+          缺失行显示「—」——绝不伪造 0（零伪造指标冻结决策）。
+          `requested_model`（#226）也算「有真值」：provider 不回显时它是这一节
+          唯一的模型事实，此时若还显示空槽提示，用户会以为连请求都没发出去。
+          两个模型值的分工与「非本轮」标记的口径见 ADR-0034 §2.3。 */}
+      {conversation.model === null && conversation.requested_model === null
+        && conversation.usage_total === null && conversation.cost_usd === null ? (
         <div className="detail-section detail-reserved">
           <div className="detail-section-title">
             <Database size={14} /> MODEL
@@ -745,8 +749,33 @@ export function ChatTab({
           </div>
           <div className="detail-row">
             <span className="detail-key">模型</span>
-            <span className="detail-val detail-val-mono">{conversation.model ?? '—'}</span>
+            <span
+              className="detail-val detail-val-mono"
+              title="会话内最近一次记录的模型名——写者有四个（provider 在响应里回显 / 模型 fallback 切换 / 会话级模型切换 / 重放重建），因此它**可能是上一轮的值**；不是本轮写入时其后缀标注「非本轮」。口径见 docs/adr/0034-request-side-model-identity.md §2.3"
+            >
+              {conversation.model ?? '—'}
+              {/* #226 review（两轴共识）：`model` 是**会话最新**、不随新 run 失效，而
+                  `请求模型` 是**本轮**的。不标出来的话，"模型 A / 请求模型 B" 会被读成
+                  "请求了 B 却回显 A（provider 无视请求）"，而 A 只是上一轮的值。 */}
+              {conversation.model !== null && conversation.model_run_id !== conversation.run_id && (
+                <span className="detail-val-muted">（非本轮）</span>
+              )}
+            </span>
           </div>
+          {/* 只在**提供信息**时出现：请求与回显不同，或回显缺失。两者一致时
+              重复一行是无信息量的噪音。 */}
+          {conversation.requested_model !== null
+            && conversation.requested_model !== conversation.model && (
+            <div className="detail-row">
+              <span className="detail-key">请求模型</span>
+              <span
+                className="detail-val detail-val-mono"
+                title="本轮请求侧的模型标识：run/started 携带的 model（持久事件）= 装配给 provider 的 model 值。本轮若一次模型调用都没发生，它仍是配置意图、不代表已发出去"
+              >
+                {conversation.requested_model}
+              </span>
+            </div>
+          )}
           {conversation.model_fallback && (
             <div className="detail-row">
               <span className="detail-key">已切换</span>

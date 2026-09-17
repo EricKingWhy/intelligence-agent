@@ -19,6 +19,8 @@ describe('initConversation', () => {
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       run_interrupted: null, run_failure: null, turn_index: null,
+      requested_model: null,
+      model_run_id: null,
       seenSeqs: new Set(),
       undelivered: [],
     });
@@ -2255,5 +2257,74 @@ describe('#220 run_failure — 失败归因投影（ADR-0033）', () => {
       expect(summarizeEvent(ev({ type: EventType.RUN_FAILED, data: { reason: 'cancelled' } }))).toBe('');
       expect(summarizeEvent(ev({ type: EventType.RUN_FAILED, data: {} }))).toBe('');
     });
+  });
+});
+
+describe('#226 requested_model — 请求侧模型标识（run/started，ADR-0034）', () => {
+  it('RUN_STARTED 带 model ⇒ 落到 requested_model（与回显的 model 各管一边）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { turn_index: 1, model: 'deepseek-chat' },
+    }));
+    expect(s.requested_model).toBe('deepseek-chat');
+    // 请求侧不冒充回显侧：provider 还没回显时 model 仍是 null。
+    expect(s.model).toBeNull();
+  });
+
+  it('provider 不回显时：请求侧的模型名仍在（刷新/重放后依然在，因为 run/started 是持久事件）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { turn_index: 1, model: 'custom:my-model' },
+    }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: 'hi' } }));
+    expect(s.model).toBeNull(); // 响应里没有 model 字段
+    expect(s.requested_model).toBe('custom:my-model');
+  });
+
+  it('新 run 没带该键 ⇒ 归 null，**不**沿用上一轮（字段缺席读作"未知"）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { turn_index: 1, model: 'deepseek-chat' },
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    expect(s.requested_model).toBeNull();
+  });
+
+  it('turn_index 缺失时该字段照落（不被 turn_index 的提前 return 顺带丢掉）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { model: 'qwen-plus' },
+    }));
+    expect(s.requested_model).toBe('qwen-plus');
+    expect(s.turn_index).toBeNull();
+  });
+
+  it('空串与**非字符串** ⇒ null（不把脏载荷渲染成模型名）', () => {
+    for (const bad of ['', 123, null, { name: 'x' }]) {
+      const s = applyEvent(initConversation('s'), ev({
+        type: EventType.RUN_STARTED,
+        data: { turn_index: 1, model: bad },
+      }));
+      expect(s.requested_model, `model=${JSON.stringify(bad)}`).toBeNull();
+    }
+  });
+
+  it('回显带回它自己的 run 归属（model_run_id）——两轴共识：不记归属就无法判断能否并排比较', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED, data: { turn_index: 1, model: 'A' }, run_id: 'r1',
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_COMPLETED, data: { content: 'hi', model: 'A' }, run_id: 'r1', step_id: 1,
+    }));
+    expect(s.model).toBe('A');
+    expect(s.model_run_id).toBe('r1');
+    // 新一轮开始：请求侧换 B，而回显仍是**上一轮的** A 且归属没变——
+    // 渲染层据此把「模型 A」标成「非本轮」，避免被读成"请求 B 却回显 A"。
+    s = applyEvent(s, ev({
+      type: EventType.RUN_STARTED, data: { turn_index: 2, model: 'B' }, run_id: 'r2',
+    }));
+    expect(s.requested_model).toBe('B');
+    expect(s.model_run_id).toBe('r1');
+    expect(s.run_id).toBe('r2');
   });
 });

@@ -48,8 +48,9 @@
 | `reasoning/interrupted` | ✅ | `{}` | 块异常收（显式取消 / 孤儿回收 / 模型失败）；已落盘 delta 保留部分内容（16.4）。 |
 | `tool/output_delta` | ✅ | `{tool_call_id, channel:"stdout"\|"stderr", delta}` | 工具输出增量（合帧、channel 保真）。每 channel 每 tool_call 上限 64KB，超出静默停发——`tool/result` 仍是完整真相（截断/artifact 语义不变），前端对已流式渲染的 tool 可用 result 的元数据（exit_code 等）而不重复铺 stdout/stderr 文本。 |
 | `tool/call` | ✅（时序变更） | 不变 | **现在在执行前落盘**；其后才可能跟 output_delta；执行后 `tool/result` 终态。 |
-| `model/started` | ❌（stream-only） | `{step}` | 活跃信号，seq=null，重放不出现（首个 delta 隐含开始）。 |
+| `model/started` | ❌（stream-only） | `{step}` | 活跃信号，seq=null，重放不出现（首个 delta 隐含开始）。**请求侧模型名不在这里**（stream-only = 刷新后什么都不剩），见下一条 `run/started`。 |
 | `model/delta` | ❌（legacy 不发射） | — | 词汇保留，运行时不再产生。 |
+| `run/started` | ✅ | `{turn_index, agent_profile, model?}` | `model` 是 **#226 的加法**：本轮**请求侧**模型标识（装配自 `ModelConfig.model_name`，即进请求体的那个 `model` 值）。**它是配置侧事实**——本轮若一次模型调用都没发生，它表示"打算用谁"、不代表已发出去（"实际用过谁"只有 `model/completed` 的回显能证明）。**缺键 = 旧版后端或调用方未给**（读作"未知"，不得拿上一轮的值顶替）。它与 `model/completed.data.model`（provider **回显**）是**两个独立事实**，任何一侧缺失都不许用另一侧冒充——口径见 `docs/adr/0034-request-side-model-identity.md`。 |
 
 `source` 语义（02 §7.3/§15）：本轮生产者只有 `source:"model"`（provider 思考）；`"agent"` 词汇预留（agent 进度叙述）。emitted 即 user-visible，`visibility=internal` 的内容在本协议不产生事件（隐私硬边界在发射侧成立）。
 
@@ -174,6 +175,24 @@ WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的�
 | qwen-plus | dashscope 专属端点 | 无（enable_thinking 未暴露，事件驱动下正确无事件） |
 
 注意：前端 prompt 所述 `qwen3.8-max-0902` 在 senseaudio 账户上**不存在**（网关 400「模型未找到」），真实可用清单以上表与 `AGENT_MODELS` 为准。
+
+### GET /api/sessions/{id}/artifacts/{aid}（#185；**#227 起 503 带机读码**）
+
+| 状态 | 含义 |
+|---|---|
+| 422 | `session_id` / `artifact_id` 形态非法，或 `start_line < 1`——客户端 bug，不是冲突 |
+| 404 | 会话不存在，**或**该 artifact 不在这个会话的命名空间里。两者**刻意不区分**（`artifact_id` 是内容哈希、跨会话可重复，区分会让归属变成可探测信息） |
+| 503 | `{"detail": {"code": "artifact_storage_unavailable", "message": "…"}}`——本部署**没有可读的 artifact 存储**（`artifact_dir` 置空 / 对象存储半配置 / 可选依赖缺失 / 路径不可用，四种原因**如实收敛成一句**，不细分） |
+| 200 | 切片（`ArtifactSlice`，见 #185） |
+
+**前端判别规则（#227，与 `/api/memories` 的 #225 同一套）**：**不按 503 猜原因**，只认 `code`——
+
+- `code == "artifact_storage_unavailable"` ⇒「本部署没有可读取的 artifact 存储」（部署配置问题，不是产物丢了）；
+- **无码**（旧版后端）⇒ 同上（那时此端点的 503 只有这一个原因）；
+- **别的码**（后端新增了第二个 503 原因）⇒ **通用失败态**，把码与后端 `message` 一起显示（码渲染在 `.artifact-content-code`）。**猜成"没配存储"是错法**：用户会照着重启/改配置，而真因（例如存储鉴权失败）一点没变；
+- **对象形状却没给合法码**（畸形体）⇒ 同样走通用失败态：**"码缺席"不等于"旧版后端"**。
+
+码的字面量纪律同 #225：**值集合可增，改名必须两侧一起动**——本码有**机械闸门**：`tests/web/test_error_code_contract.py` 直接读 `web/src/lib/api.ts` 的字面量与后端常量 `web/artifacts.py::ARTIFACT_STORAGE_UNAVAILABLE` 对账，单边改名必红（#225 的四个码还没有这道闸门，见 ADR-0035 §4）。机制全文与"哪些状态码推断按据不改"的逐处判定见 `docs/adr/0035-machine-readable-error-codes-for-503-families.md`。
 
 ## 4. run 终态语义（02 §17，不并入 failed）
 
