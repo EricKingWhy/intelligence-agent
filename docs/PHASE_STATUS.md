@@ -56,6 +56,7 @@
 
 ### 最近条目（最新在上）
 
+- 2026-09-18（#236）：**F17 权限档已落 session/started，前端「唯一来源」注释与权限 pill 成第二套真相（P2，前端）交付**（fixed point `5efe2b7`；6 个 commit `0e42162`/`3a1e9e1`/`e559525`/`4139b00`/`997cff6`/`c661160`）——票面选项①+③（不改后端）：投影同源（`projectSessionStarted` 只认第一条**带值的** `session/started`，坏值保持 null 不编默认档；与 `permission_policy` 明确是两件事）+ pill 会话内改读投影真值并转只读（`disabled` + 提示「权限档在会话创建时确定，会话内不可修改」）；**删掉** `setSelectedPermissionMode(created.permissionMode)`——回执驱动的本地状态会让下一次新建会话凭空继承该档，把「后端默认（自动批准）」悄悄变成「交互式审批」；自查补漏 `composerPermissionMode` 身份闸（切会话加载中 `conversation` 仍属旧会话 ⇒ 不符/未加载 → null 显示占位不猜）。**独立复审两轮**（各一 Explore 子代理，只读、明确声明只审指定区间）：第一轮 `5efe2b7..997cff6` NEEDS-FIX 6 条（2×P2：api.ts 无人消费的 `permissionMode` 字段 + 硬校验；e2e 夹具同值双写 ⇒ 判别力被掏空；4×P3）；第二轮审修复批又逮 3 条（P2 `StartTaskInProjectDialog` 文件头 + Props 旧断言并引用不存在的 `onPermissionInitialized`——**并更正 `0e42162` 的 commit message：自称改两处实际只改一处**），全处置。**红证**：App 接线退回旧行为 ⇒ 新增 e2e 立刻红（Expected "只读" / Received "权限"）。**门禁**：`tsc -b` 0 / vitest **980 · 57 files** / oxlint 0 error / playwright **1280 全量 219/219 ok**、**1920 全量 105/107 ok**（2 例超时 ⇒ 定向复跑受影响两 spec 8/8 绿，归因宿主满载抖动：另一 clone 的挂死 playwright 僵尸进程，已清理）/ `vite build` ✓（首跑失败系宿主 safe-delete 闸门挡 `emptyOutDir`，与代码无关）。**未做**：mid-session 改档（票面②）是产品决策，未开票；e2e 夹具恒写 `permission_mode` 键 ⇒「默认档创建→pill 显示未选」无 e2e 覆盖（登记）。详见 `2026-09.md` 末尾
 - 2026-09-17（B-13）：**巡检 6 工具类控件段的两条 F 同批交付**（实现 `40ae1a4` F16 `#235` / `a508e67` F15 `#234`，fixed point `1761ff7`；巡检记录 §9.10 `d425edc`）——**F16（#235）沙箱输出「假流式」**：真机红证 `.tool-out-body` 112/112/112 + 仅 1 条 `tool/output_delta`；根因是读侧**两层**缓冲（`_drain_stream` 的 `BufferedReader.read(n)` 阻塞到凑满 n/EOF；`StreamDecoder.feed()` 判定前把合法 UTF-8 全扣在 `_pending` 到 64 KiB/flush）；修 = `read1()` + 放行前导 ASCII 段（五种兜底编码对 0x00–0x7F 逐字节等同 ASCII）+ 已放行字节计入判定预算；绿证 14→…→112（8 段）。**F15（#234）审批队列续聊后消失**：`session/started` 不落 `permission_mode`/`auto_approve` 且 `resume_and_launch` 固定 `WORKSPACE_WRITE` + 无回调 ⇒ `interactive` 恒假；修 = 显式声明才落盘 + 续聊读回声明重建回调 + fork 继承；真机 repro6 红 → repro8 绿。**两轴审查**：Correctness 轴 1×P1（`auto_approve=false` 的 deny 路由同样不落盘 ⇒ 续聊降级成「全自动批准」）+ 1×P2（fork 不继承权限档）+ P3 若干；跨仓 1×P2（前端权限 pill 第二套真相）按 §8 单独开 **#236**。**门禁**：ruff clean；pytest **2461 / 2442 passed / 10 skipped / 9 failed**（9 红全环境：6 symlink 同族 + 3 条 `tests/evaluation/*` 撞**宿主 safe-delete 单轮累计删除闸门**，traceback 落 `sitecustomize.py:851`，`count=383 threshold=50 scope=turn`）；**A/B**：同树摘掉闸门两变量复跑 = **2445 passed / 6 failed**。前端零改动未重跑。详见 `2026-09.md` 末尾
 - 2026-09-17（B-12）：**Round 3 真机巡检的五条 F10–F14 同批交付**（实现 `6cb229c`..`aa81a57`，fixed point `a63dc46`；另含门禁修复 `1103d77` 与巡检记录 §9 `da7d4b5`）——F10「管理模型」浮层缺 `position` ⇒ 被 portal 追加到 body 末尾、落在视口下方而 overlay 盖在其上（整页变暗、点什么都没反应）；F11 供应商 422 的 Pydantic `detail` 数组被 `providerFetch` 的手写解析整段丢掉；F12 命令的 focus 被 Radix 关闭焦点恢复打断（键盘打开的浮层恢复目标就是 body）；F13 `MemoryWriteback` 这条 fire-and-forget 旁路写者把**已硬删**的会话从零重建（复活日志只剩那条 `memory/degraded`）；F14 `sendFollowUp` 入口推进代际后 ack 分支不接流 ⇒ 整场直播被一条排队项换掉，叠加 dev proxy 缺 `ws: true`。**机制单点新建 ADR-0036**（对已硬删 id 拒写 `SessionNotFound` + delete/append 共用写锁 + 进程内已删集合；含与 ADR-0029 D1 反对的「墓碑」的对比表）。两轴审查：Standards 1×P1（`store.py` 误称 tombstone 且与 ADR-0029 D1 冲突）、Correctness 抓到 F12 的 a11y 回归（无条件 `preventDefault` 把焦点丢给 body）。门禁：后端 ruff clean / pytest 2422 passed（6 条 symlink 环境红经反证证明与 diff 无关）；前端 tsc 0 / vitest 968 / oxlint 0 error / playwright 436 用例（1280 全绿；1920 全量证据本机不可得，定向复跑受影响两 spec 23/23 绿）/ build ✓。顺带补两笔门禁修复（`tsc -b` 既有红 + B-11 落点记录漏声明）。详见 `2026-09.md` 末尾
 - 2026-09-17（B-11）：**#228（F9 假空态）完成**（实现 `24dc0c2`）——会话列表**加载失败**不再被说成「暂无会话」：`refreshSessions` 失败改走新增的区域级 `sessionsError`（与 `projectsError` 同形），空态守卫 `!sessionsUnavailable`，错误条 `opError` 优先、项目/会话两条彼此独立。红证 5 组 + e2e 锁（组件测试证明不了 prop 真被填上）。门禁：pytest 2426 / vitest 968 / playwright 434 全绿。票由崩溃恢复真杀进程对照实验开出：DSH 审计第 11 条验证通过（`run/interrupted` 同形具备），孤儿回收 `run/failed{reason=orphaned}` 如实登记。详见 `2026-09.md` 末尾 + `LIVE_BROWSER_TEST_20260917.md` §8
@@ -81,24 +82,25 @@
 
 | 文件 | 覆盖日期 | 条目数 | 说明 |
 | --- | --- | --- | --- |
-| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-17 | 223 | 原「更新日志」整段（条目正文逐字未改，按日期重排） |
+| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-18 | 244 | 原「更新日志」整段（条目正文逐字未改，按日期重排） |
 
 ### 按日定位（归档内行号，日期降序）
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
-| 2026-09-17 | 24 | `2026-09.md` L412-435 |
-| 2026-09-16 | 4 | `2026-09.md` L408-411 |
-| 2026-09-15 | 11 | `2026-09.md` L387-407 |
-| 2026-09-14 | 11 | `2026-09.md` L317-386 |
-| 2026-09-13 | 14 | `2026-09.md` L289-316 |
-| 2026-09-12 | 23 | `2026-09.md` L255-288 |
-| 2026-09-11 | 25 | `2026-09.md` L220-254 |
-| 2026-09-10 | 6 | `2026-09.md` L209-219 |
-| 2026-09-09 | 9 | `2026-09.md` L193-208 |
-| 2026-09-08 | 14 | `2026-09.md` L165-192 |
-| 2026-09-07 | 18 | `2026-09.md` L136-164 |
-| 2026-09-06 | 33 | `2026-09.md` L78-135 |
-| 2026-09-05 | 20 | `2026-09.md` L45-77 |
-| 2026-09-04 | 15 | `2026-09.md` L17-44 |
 | 2026-09-03 | 4 | `2026-09.md` L13-16 |
+| 2026-09-04 | 15 | `2026-09.md` L17-44 |
+| 2026-09-05 | 20 | `2026-09.md` L45-77 |
+| 2026-09-06 | 33 | `2026-09.md` L78-135 |
+| 2026-09-07 | 18 | `2026-09.md` L136-164 |
+| 2026-09-08 | 14 | `2026-09.md` L165-192 |
+| 2026-09-09 | 9 | `2026-09.md` L193-208 |
+| 2026-09-10 | 6 | `2026-09.md` L209-219 |
+| 2026-09-11 | 25 | `2026-09.md` L220-254 |
+| 2026-09-12 | 23 | `2026-09.md` L255-288 |
+| 2026-09-13 | 14 | `2026-09.md` L289-316 |
+| 2026-09-14 | 11 | `2026-09.md` L317-386 |
+| 2026-09-15 | 11 | `2026-09.md` L387-407 |
+| 2026-09-16 | 4 | `2026-09.md` L408-411 |
+| 2026-09-17 | 35 | `2026-09.md` L412-447 |
+| 2026-09-18 | 2 | `2026-09.md` L448-449 |
