@@ -1052,13 +1052,147 @@ e2e 亦有覆盖 ⇒ 按交接手册 §4 的判断**不开票**，在此如实�
 | 删除确认 `DeleteSessionDialog.tsx`（1） | 确认 / 取消 | 1 | §9.5、`web/e2e/w-session-delete.spec.ts` |
 | 复制按钮 `CopyButton.tsx`（1） | — | 1 | §9.5（复制消息后回读剪贴板，与消息逐字相同） |
 | 崩溃恢复 | 甲·后端层 / 甲·真机层 / 乙·孤儿回收 | 1 | §8.1–§8.3 |
-| **工具卡（展开 / 输出流）** | — | **3** | **巡检 6 未做（本轮 5/6 段）** |
-| **审批卡（批准 / 拒绝）** | — | **2** | `web/e2e/n-approval-card.spec.ts`（真机未点） |
+| **工具卡（展开 / 输出流）** | 展开 L0→L1→L2→L0 三段循环 / 输出流 | 1 | §9.10.1（展开循环）、§9.10.2（输出流，F16 已修） |
+| **审批卡（批准 / 拒绝）** | 批准 `approve_once` / 拒绝 `deny` | 1 | §9.10.3（两键都真机点过，含 POST body） |
 
 **本轮的空档（如实登记，不假装点过）**：
 
-- 巡检 6（工具类控件：工具卡展开 / 输出流 / 审批卡批准-拒绝 / 崩溃恢复入口）**未执行**
-  ⇒ 「工具卡」档 3、「审批卡」真机档 3（e2e 档 2）。它需要先给 stub 加 `tool_call` delta
-  才能造出工具卡与审批卡，属**独立工作量**，已与用户确认后置单排。
+- ~~巡检 6（工具类控件）未执行~~ → **已执行**（§9.10，2026-09-17 夜），台账里「工具卡」
+  「审批卡」两行由档 3 / 真机未证 升为 **档 1**；该轮开出 F15（#234）/ F16（#235）两条。
 - `web/src/lib/markdown.tsx`（1 处 `aria-label`）等**非控件**（渲染产物上的标注）不计入档次判定。
+- 采样法的一个固有盲区：真机时序探针每 300ms 采一次，只能证明「长度在增长」，不能证明
+  每一段都已落盘到事件流——后者由 `tool/output_delta` 事件数单独核对（§9.10.2）。
+
+---
+
+### 9.10 巡检 6：工具类控件（工具卡展开 / 输出流 / 审批卡两键）
+
+这一节补上 §9.9 台账里最后两个「档 3」。方法沿用 §9.0：**真 Chromium（无头）+ 真 vite
+dev(5174) + 真 uvicorn(8000) + 本地 OpenAI 兼容 stub(8100)**。stub 按提示词分支返回
+`write` / `bash` 的 `tool_call`；`TOOLBASH` 造 8 行 × 约 1s 的慢速输出（`ping -n 2` 间隔）。
+探针会话自建自删，收尾基线：会话数 = **32**（与 §9.9 同一条基线）。
+
+#### 9.10.1 工具卡展开循环：L0 → L1 → L2 → L0
+
+真机「初始 + 3 次点击」、每次回读 `aria-level` / `aria-expanded` 与三处 DOM 计数
+（`p6a-toolcard.json`；`inlineDetail` / `body` / `raw` 分别是行内详情、`.tool-out-body`、
+原始参数块的数量）：
+
+| 步骤 | aria-level | aria-expanded | inlineDetail | body | raw |
+| --- | --- | --- | --- | --- | --- |
+| 初始 | 0 | false | 0 | 0 | 0 |
+| 点 1 | 1 | true | 1 | 0 | 0 |
+| 点 2 | 2 | true | 1 | 1 | 1 |
+| 点 3 | 0 | false | 0 | 0 | 0 |
+
+结论：展开是 **三段循环**，第 3 次点击收回 L0；只有在 **L2** 才渲染 `.tool-out-body` 与原始
+参数。终态 `act-status-success`，行尾带耗时（`… 10.9s`）。**正常，未开票。**
+
+#### 9.10.2 输出流：修复前是"假流式"（F16 / #235）
+
+**红证（修复前，两处独立证实）**
+
+1. **真机时序**（`p6a3-streamscope`，展开到 L2、每 300ms 采样）：三次采样长度恒为
+   **112 / 112 / 112**（`grew12 = grew23 = false`）；`samples[0] = {t: 9530, len: 112}` ——
+   第一次 `innerText` 阻塞约 9.5s 才拿到内容，而拿到时已经是全部 8 行。
+2. **durable 事件流**（会话 `aced744c…`）：整场只落 **1 条** `tool/output_delta`，
+   其 `delta` 一次性包含全部 8 行：
+
+```
+seq 4  tool/call         {"tool_call_id":"call_probe_6","tool_name":"bash",…}
+seq 5  tool/output_delta {"tool_call_id":"call_probe_6","channel":"stdout",
+                          "delta":"probe-line-1 \n…probe-line-8 \n"}   ← 8 行一次性
+seq 6  model/completed
+```
+
+**根因：两层，`read` 只是外层**
+
+- **外层** `sandbox/local.py`：`_DRAIN_CHUNK_BYTES = 65536` 而 `Popen` 未传 `bufsize`
+  ⇒ `process.stdout` 是 `BufferedReader` ⇒ `stream.read(65536)` **阻塞到凑满 64 KiB 或 EOF**。
+- **主因** `sandbox/decoding.py`：`StreamDecoder.feed()` 在编码判定前把合法 UTF-8 字节全部
+  扣在 `_pending`，一路返回空串，只有累积到 `PROBE_LIMIT`（64 KiB）或 `flush()`（= 进程结束）
+  才吐字。工具输出几乎永远 < 64 KiB ⇒ 逐段回调只可能发生在 EOF。
+  该缓冲是**有意**的（OBS-011：乱码固化进 append-only JSONL 不可逆），不能简单删掉。
+
+只改外层不够——这正是修复后 `f16_probe.py` 仍报 `callbacks: 1` 的原因，也是本票根因被修正的地方。
+
+**修法与绿证**（两层都要动，详见 #235 的补评）：`read` → `read1`；未判定期间**放行前导 ASCII
+段**（0x00–0x7F 在全部候选编码下逐字节等同 ASCII，放行与判定后重解等价），非 ASCII 段落仍
+扣住、且一旦扣住不许后续 ASCII 抢跑（防乱序），并把已放行字节计入判定预算（防「纯 ASCII
+长流 + 坏字节」被误判成兜底编码而让后续合法 UTF-8 变乱码）。
+
+- **单元**：`tests/sandbox/test_output_encoding.py` 27 passed（新增 `TestStreamingEmission`
+  4 例）；`tests/sandbox` + `tests/tooling` 合计 **217 passed / 0 failed**；`ruff` 通过。
+- **沙箱级**（`f16_probe.py`）：`callbacks: 3`，`t = 0.13 / 1.28 / 2.44`，`elapsed = 3.65`。
+- **真机**（`p6a3-streamscope` 重跑）：运行期 `.tool-out-body` 长度以 14 为步长递增
+  **14→28→42→56→70→84→98→112**（8 段 = 8 行），全程 `running = true`，终态长度 = 112。
+
+```
+samples: t=68…1025 len=14 | t=1351…2289 len=28 | … | t=8611…10831 len=112 (running=false)
+```
+
+#### 9.10.3 审批卡：批准 / 拒绝两键都真机点过（F15 / #234）
+
+审批卡的可达前提（这是 F15 的关键发现）：`interactive = permission_mode_explicit and
+permission_mode != danger-full-access`（`SessionService.create_and_launch` 里的 `interactive`
+判据；此处刻意不写行号——本票改动会让行号漂移）。因此真机探针以**显式
+`permission_mode=read-only`** 建会话，让 `write`（`WORKSPACE_WRITE`）落进「需要审批」。
+
+两键都点过，回读了发出去的 POST body 与卡片消失（`p6b-approval-approve.json` /
+`p6b-approval-deny.json`）：
+
+| 用例 | 卡片文案（节选） | POST body | 点后 |
+| --- | --- | --- | --- |
+| 批准 | 「需要审批 工具授权级别为 workspace-write，但当前策略为只读（read-only）… 批准 Ctrl+⏎ 拒绝 Ctrl+⌫」 | `{"approval_id":"…","approved":true,"decision":"approve_once"}` | 卡片消失（`titleAfter="(card gone)"`） |
+| 拒绝 | 同上 | `{"approval_id":"…","approved":false,"decision":"deny"}` | 卡片消失 |
+
+**F15（#234）**：上述形态在**首条消息**下成立；但**续聊**（resume）时审批卡不出现——
+只读会话里的 `write` 未经审批直接执行。根因是 `resume_and_launch` 硬编码
+`PermissionPolicy.WORKSPACE_WRITE` + `approval_callback=None`（`None` 在 `build_runtime` 里
+= 全自动批准），且权限档**从未落进事件流**。修法：把档位写进 `session/started`，续聊时从事件流
+派生并重建交互回调。红证 → 绿证对照：
+
+```
+repro6（修复前）types = …,tool/call,model/completed,tool/result,…   has_tool_approval_requested=False
+repro8（修复后）types = …,tool/call,tool/approval-requested
+                 tool_name=write permission=workspace-write policy=read-only
+                 allowed_decisions=deny|approve_once
+                 → approve_once → permission/resolved → tool/result → run/completed
+```
+
+**两轴审查补出同一根因的另外两扇门，已在本票一并关掉**（都属于"创建期权限决策不落
+事件流"，不修就是同一条 P1 换个入口）：
+
+- `auto_approve` 的显式声明同样没落盘：`auto_approve=false` 且未选档位时创建走 **deny
+  路由**（回调一律拒绝），但续聊读不到它 → 退化成全自动批准。
+- **fork 子会话不继承权限档**：`fork.py` 只继承 `cwd`，child 的 `session/started` 没有
+  `permission_mode` → 只读父会话分叉出的 child 复制了父的 workspace 文件，却对写操作免审批。
+
+修法与主干同构：`auto_approve` 也在显式声明时落键、续聊复原 deny 回调（档位声明优先，
+与创建路径同一优先级）；fork 像继承 `cwd` 一样继承 `permission_mode` + `auto_approve`。
+回归锁：`tests/session/test_permission_mode_persistence.py`（16 例）+ `tests/session/test_fork.py`
+（2 例），并对 deny 路由做了**变异红证**（把派生函数打回恒 `None` ⇒ 回调变 `None` ⇒ 用例必红）。
+
+#### 9.10.4 本轮开出的工单
+
+| 编号 | 标题 | 级别 | 状态 |
+| --- | --- | --- | --- |
+| #234 | F15 会话级权限档不落事件流，续聊硬编码 workspace-write + 全自动批准 | P1（安全边界） | 本节已修 + 真机绿证 |
+| #235 | F16 本地沙箱输出流是假的（`read` 阻塞 + `StreamDecoder` 探测缓冲） | P2 | 本节已修 + 真机绿证 |
+
+#### 9.10.5 探针卫生（本节）
+
+- 本节所有会话自建自删，收尾 `GET /api/sessions?include_archived=true` = **32**（= §9.9 基线），
+  与 `baseline6.json` 逐 id 比对无残留。
+- 收尾时清掉一个**上轮遗留**的泄漏会话 `aced744c-6614-4c5d-9bca-7b22ffaa88ef`
+  （12 事件、已终态）。
+- **环境噪声登记（非产品缺陷）**：`DELETE /api/sessions/{id}` 在「由工具启动的后端」里会返 500。
+  真因是 WorkBuddy 的 `sitecustomize.py` 安全删除 shim——单轮批量删除超过阈值 50 个文件时抛
+  `SystemExit(1)`，而 `SystemExit` 不是 `Exception`，穿透了应用只捕获业务异常的 `except`。
+  该会话目录有 134 个文件故触发。让服务端在**不带** `CODEBUDDY_TOOL_CALL_ID` /
+  `CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR` 的干净环境下启动（≈生产）即返回 200：
+  `{"deleted":true,"events":12,"detached_from_projects":0}`。
+- 另一条同源噪声：Python 侧探针默认走宿主 `http_proxy`（本机 127.0.0.1:58918），会把
+  localhost 请求转给代理，由此返回 500 / 502 假信号。本节全部 Python 探针显式
+  `ProxyHandler({})` 直连；PowerShell 的 `Invoke-RestMethod` 默认绕过 localhost，故未见此坑。
 
