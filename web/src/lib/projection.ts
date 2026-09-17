@@ -161,6 +161,7 @@ export function initConversation(session_id: string): ConversationState {
     pending_approvals: [],
     approval_decisions: [],
     permission_policy: null,
+    session_permission_mode: null,
     events: [],
     unknown_events: [],
     model: null,
@@ -747,6 +748,21 @@ function projectOperationReconcileRequired(state: ConversationState, event: Agen
   ];
 }
 
+/** `session/started`（会话第一条事件）：`started_data` 是会话级初始配置的**加法槽**
+ *  （T7 #137）。今天这里只取 F15 #234 落进来的权限档（`permission_mode`）。
+ *
+ *  **只认第一条**：档位是会话属性、创建后不可变，所以重放 / 迟到重复投递都不得让后来的
+ *  值改写先到的（与后端 `approval.py::declared_permission_mode` 同一规矩）。值不是
+ *  非空字符串（老日志没有这个键、或日志被手改）→ 保持 null = "未声明"，不编默认档。
+ *
+ *  注意它**不是** `permission_policy`：后者是审批请求到达时 ToolExecutor 实际用的阈值，
+ *  两者可以合法地不同（#236）。 */
+function projectSessionStarted(state: ConversationState, event: AgentEvent): void {
+  if (state.session_permission_mode !== null) return;
+  const mode = event.data.permission_mode;
+  if (typeof mode === 'string' && mode) state.session_permission_mode = mode;
+}
+
 /** #37 交互式审批（PRD §2.2）：ToolExecutor._check_approval 暂停 run，
  *  发 tool/approval-requested 事件；前端 ApprovalCard 内联渲染。 */
 function projectToolApprovalRequested(state: ConversationState, event: AgentEvent): void {
@@ -1060,7 +1076,7 @@ function summarizeModelChanged(event: AgentEvent): string {
 // ── 注册表（穷尽 EventTypeValue：生成物新增类型时 tsc 失败直到登记）──
 
 const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
-  [EventType.SESSION_STARTED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.SESSION_STARTED]: { apply: projectSessionStarted, summarize: emptySummary },
   [EventType.SESSION_RESUMED]: { apply: noopProjection, summarize: emptySummary },
   // session/forked：单行语义 = 已分叉（UI-04 定案；child 指针进详情，不做截断 id）。
   [EventType.SESSION_FORKED]: { apply: noopProjection, summarize: summarizeForked },
