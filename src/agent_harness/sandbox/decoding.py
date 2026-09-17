@@ -54,7 +54,16 @@ class StreamDecoder:
     1. 先按 UTF-8 **严格**试探（增量，能跨 chunk 缓冲不完整序列）；
     2. 探测到确凿的非法序列 → 判定整条流为 `fallback_encoding`，并**用该编码
        重解已缓冲的全部原始字节**（不丢前缀）；
-    3. 判定是粘性的：同一条流不再反复横跳。
+    3. 判定是粘性的：同一条流不再反复横跳；
+    4. 未判定期间，**前导 ASCII 段立即放行**（0x00–0x7F 在所有候选编码下逐字节
+       等同 ASCII，放行与重解结果一致）——流式回调因此能在进程结束前拿到输出，
+       而不必等到 `flush()`。非 ASCII 段落则一律扣住直到判定（见 `feed`）。
+       该前提由**兜底编码的来源**保证：生产路径只可能是
+       `platform_fallback_encoding()`（Windows OEM 代码页，或探测失败时的 utf-8），
+       它们对 0x00–0x7F 都是 ASCII 透明的（实测 cp936 / cp1252 / cp437 / cp850）。
+       构造函数只校验编码名、不校验 ASCII 兼容性——因为非 ASCII 兼容的编码
+       （EBCDIC 系，如 cp037）没有任何生产调用方；真出现时是调用方违约，不是本类
+       要静默兜住的场景。
 
     `encoding` 属性暴露最终判定，供调用方记录（「这次解码是否可信」可审计）。
 
@@ -73,6 +82,10 @@ class StreamDecoder:
         self._probe_text: list[str] = []
         self._pending = bytearray()
         self._decoder = None
+        #: 已放行的**判定无关**字节数（前导 ASCII，见 feed）。它与 `_pending` 之和
+        #: 达到 PROBE_LIMIT 时即判定 UTF-8：等价于旧的「缓冲满 PROBE_LIMIT 才判定」，
+        #: 使纯 ASCII 长流后面跟坏字节时不会被误判成兜底编码。
+        self._invariant_emitted = 0
         #: 归一换行时暂存的结尾 `\r`（可能是下一段 `\n` 的前半，不能提前翻译）
         self._carry = ""
 
@@ -111,17 +124,38 @@ class StreamDecoder:
             # （errors="replace"），与旧编码路径的容错等价。
             return self._normalize_newlines(self._decoder.decode(data))
 
-        # 单次喂入不得超过剩余探测预算（调用方靠 `_DRAIN_CHUNK_BYTES <= PROBE_LIMIT`
-        # 保证）：否则「已满上限的合法 UTF-8 + 同一段里的坏字节」会因探测先抛而被
-        # 误判成兜底编码，与「坏字节落在下一段」的判定结果不一致。
-        self._pending += data
-        try:
-            self._probe_text.append(self._probe.decode(data))
-        except UnicodeDecodeError:
-            return self._switch_to_fallback()
-        if len(self._pending) >= PROBE_LIMIT:
-            return self._commit_utf8()
-        return ""
+        # 未判定期间**前导 ASCII 段立即放行**：0x00–0x7F 在全部候选编码（utf-8 /
+        # Windows OEM 代码页）下逐字节等同 ASCII，现在吐出去与判定后重解的结果
+        # 完全一致——它本就不需要等判定。这是工具卡「输出 · 流式」能实时出字的前提
+        # （F16 #235）：否则 feed 对合法 UTF-8 一路返回空串，回调只能到 flush（=进程
+        # 结束）才拿到全量，「流式」名不副实。
+        # 一旦 `_pending` 已扣住非 ASCII 字节，后续字节必须按原序等待判定，不能再放行。
+        emitted = ""
+        if not self._pending:
+            split = len(data)
+            for index, byte in enumerate(data):
+                if byte >= 0x80:
+                    split = index
+                    break
+            if split:
+                emitted = self._normalize_newlines(data[:split].decode("ascii"))
+                self._invariant_emitted += split
+                data = data[split:]
+
+        if data:
+            # 单次喂入不得超过剩余探测预算（调用方靠 `_DRAIN_CHUNK_BYTES <= PROBE_LIMIT`
+            # 保证）：否则「已满上限的合法 UTF-8 + 同一段里的坏字节」会因探测先抛而被
+            # 误判成兜底编码，与「坏字节落在下一段」的判定结果不一致。
+            self._pending += data
+            try:
+                self._probe_text.append(self._probe.decode(data))
+            except UnicodeDecodeError:
+                return emitted + self._switch_to_fallback()
+        # 判定预算按「流过探测窗口的字节」计：放行的 ASCII 与仍在缓冲的字节一样，
+        # 都已经失去了「回退重解」的机会，必须一并计入，否则纯 ASCII 长流永不判定。
+        if self._invariant_emitted + len(self._pending) >= PROBE_LIMIT:
+            return emitted + self._commit_utf8()
+        return emitted
 
     def flush(self) -> str:
         """流结束：吐出剩余文本（含被缓冲的不完整序列与扣住的 `\\r`）。"""

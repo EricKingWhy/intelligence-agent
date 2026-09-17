@@ -323,7 +323,12 @@ class LocalSubprocessSandbox(Sandbox):
         if decoder is None:  # 防御：无解码器时按 UTF-8 宽松解（等价旧行为）
             decoder = StreamDecoder("utf-8")
         try:
-            while raw := stream.read(_DRAIN_CHUNK_BYTES):
+            # read1（不是 read）：`process.stdout` 是 BufferedReader（Popen 未传 bufsize），
+            # 而 `BufferedReader.read(n)` 会**阻塞到凑满 n 字节或 EOF**——输出小于一个块
+            # （_DRAIN_CHUNK_BYTES = 64 KiB）的命令，on_output 在进程结束前一次都不会被
+            # 调用，工具卡「输出 · 流式」因此拿到的是终态一次性全量（F16 #235）。
+            # read1 = 至多一次底层读、有多少给多少；循环仍读到 EOF，捕获完整性不变。
+            while raw := stream.read1(_DRAIN_CHUNK_BYTES):
                 chunk = decoder.feed(raw)
                 if not chunk:
                     continue
