@@ -19,6 +19,7 @@ import {
   AGENT_PROFILES,
   PERMISSION_MODES,
   REASONING_EFFORTS,
+  T,
   fulfillSse,
   longCatalog,
   pickControl,
@@ -411,4 +412,46 @@ test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形'
     await page.keyboard.press('Escape');
     await expect(page.locator('[role="listbox"]')).toHaveCount(0);
   }
+});
+
+/** #236：会话已定档 → 权限 pill 显示**会话真值**并转为只读。
+ *
+ *  为什么必须在 e2e：可编辑性由 App 的 `selectedId` 决定（单测断不到"选中会话"这个
+ *  状态），真值又只从 `session/started` 投影来——必须走真实的「列表 → 点行 → 投影」
+ *  链路，才能同时锁住"源换对了"和"确实锁死了"。
+ *
+ *  旧行为（本票要消灭的）：pill 由创建回执的本地状态供值，会话内仍可编辑——拨到
+ *  「只读」以为写操作会弹审批，后端其实仍按创建档执行。 */
+test('#236：会话内权限 pill 只读显示 session/started 的档位', async ({ page }) => {
+  const SID = 'e2e-session-perm';
+  const EVENTS = [
+    // 会话真值在这里——后端「显式改档才写键」（F15 #234）
+    { type: 'session/started', data: { permission_mode: 'read-only' }, seq: 1, session_id: SID, time: T },
+    { type: 'user/message', data: { content: '历史问题' }, seq: 2, session_id: SID, time: T },
+    { type: 'run/started', data: { turn_index: 1 }, seq: 3, session_id: SID, run_id: 'r-1', time: T },
+    { type: 'text/delta', data: { delta: '历史回答。' }, seq: 4, session_id: SID, step_id: 1, run_id: 'r-1', time: T },
+    { type: 'model/completed', data: { content: '历史回答。' }, seq: 5, session_id: SID, step_id: 1, run_id: 'r-1', time: T },
+    { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: 'r-1', time: T },
+  ];
+
+  await routeApi(page, {
+    sessions: [{
+      session_id: SID, event_count: 6, first_event_time: T, last_event_time: T,
+      first_user_message: '历史问题', trace_id: null, trace_url: null,
+    }],
+    events: EVENTS,
+    permissionModes: PERMISSION_MODES,
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  // 新会话态：还没定档，pill 可编辑（未选 = 后端默认）
+  await expect(trigger).toBeEnabled();
+  await expect(trigger).toContainText('权限');
+
+  // 打开历史会话 → pill 换成会话真值，且转为只读 + 说明为什么
+  await page.locator('.session-item').first().click();
+  await expect(trigger).toContainText('只读');
+  await expect(trigger).toBeDisabled();
+  await expect(trigger).toHaveAttribute('title', '权限档在会话创建时确定，会话内不可修改');
 });

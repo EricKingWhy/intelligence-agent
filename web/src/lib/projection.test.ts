@@ -15,7 +15,7 @@ describe('initConversation', () => {
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
-      permission_policy: null, events: [], unknown_events: [],
+      permission_policy: null, session_permission_mode: null, events: [], unknown_events: [],
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       run_interrupted: null, run_failure: null, turn_index: null,
@@ -2113,6 +2113,53 @@ describe('审批投影 — 权限档（permission_policy）/ 待审批 / 裁决�
       data: { decision: 'deny', reason: '缺 id' },
     }));
     expect(s.approval_decisions).toEqual([]);
+  });
+});
+
+// ── #236：会话级权限档从 `session/started` 投影（F15 #234 的读侧）──
+// 此前前端断言"`permission_mode` 不在任何事件里"，pill 只能靠创建回执的本地状态供值——
+// 那既是第二套真相，也让用户以为会话内改档生效（后端只认创建档）。
+
+describe('session/started → session_permission_mode（#236）', () => {
+  const T = '2026-09-18T00:00:00Z';
+  const started = (data: Record<string, unknown>, seq = 1) =>
+    ev({ type: EventType.SESSION_STARTED, seq, session_id: 's', run_id: 'r', time: T, data });
+
+  it('事件带 permission_mode → 投影出该档（后端显式改档才写键）', () => {
+    const s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
+  it('未声明（老日志 / 用后端默认档创建）→ null，不编字面值冒充', () => {
+    const s = applyEvent(initConversation('s'), started({ model_id: 'x' }));
+    expect(s.session_permission_mode).toBeNull();
+  });
+
+  it('坏值（非字符串 / 空串）→ null（日志被手改时不制造假档位）', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 7 }));
+    expect(s.session_permission_mode).toBeNull();
+    s = applyEvent(s, started({ permission_mode: '' }, 2));
+    expect(s.session_permission_mode).toBeNull();
+  });
+
+  it('只认第一条：档位是会话属性、创建后不可变，迟到/重放的 started 不改写它', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, started({ permission_mode: 'danger-full-access' }, 2));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
+  it('与 permission_policy 是两件事：声明档与审批观测阈值各存各的（可合法不同）', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_APPROVAL_REQUESTED, seq: 2, session_id: 's', run_id: 'r', step_id: 1, time: T,
+      data: {
+        approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'workspace-write',
+        title: 't', description: 'd', arguments_preview: {}, permission: 'workspace-write',
+        policy: 'workspace-write', reason: 'r', allowed_decisions: ['deny'],
+      },
+    }));
+    expect(s.session_permission_mode).toBe('read-only');
+    expect(s.permission_policy).toBe('workspace-write');
   });
 });
 
