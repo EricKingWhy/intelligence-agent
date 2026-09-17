@@ -40,10 +40,20 @@ from agent_harness.logging import log_event
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
 from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
+    SESSION_AUTO_APPROVE_KEY,
+    SESSION_PERMISSION_MODE_KEY,
+)
+from agent_harness.session.approval import (
     InteractiveCallbackHolder as _InteractiveCallbackHolder,
 )
 from agent_harness.session.approval import (
     build_approval_callback as _build_approval_callback_impl,
+)
+from agent_harness.session.approval import (
+    declared_auto_approve as _declared_auto_approve,
+)
+from agent_harness.session.approval import (
+    declared_permission_mode as _declared_permission_mode,
 )
 from agent_harness.session.derive import (
     KIND_QUEUE,
@@ -506,6 +516,18 @@ class SessionService:
                 "model_id": amend.model,
             }
 
+        # F15 #234：会话级**权限决策**（档位 + 是否自动批准）也是会话的属性，必须随
+        # session/started 落进事件流。续聊路径（resume_and_launch）读不到创建请求，
+        # 只能从这里派生——不落盘就等于用户在创建时做的选择从第二轮起静默失效。
+        # 不显式声明 → 不写键 → 与历史会话逐字不可区分（与模型初始值同一条规矩：
+        # 有才写）。auto_approve 只在「未声明档位」时才成为唯一决策依据（deny 路由），
+        # 但同样必须落盘，否则那条路由的"不自动批准"承诺在续聊时消失。
+        session_start_data: dict[str, Any] = dict(initial_model_data)
+        if permission_mode_explicit:
+            session_start_data[SESSION_PERMISSION_MODE_KEY] = permission_mode.value
+        if auto_approve_explicit:
+            session_start_data[SESSION_AUTO_APPROVE_KEY] = auto_approve
+
         _, wiring = await self._state.get_wiring()
         await self._state.ensure_stores()
 
@@ -539,7 +561,7 @@ class SessionService:
         )
         session = Session.start(
             self._state.store, session_id=session_id,
-            started_data=initial_model_data or None,
+            started_data=session_start_data or None,
             # WS-1 #151：会话侧 cwd 锚由**创建者**赋予（这里），与 build_runtime
             # 写进映射表的 workspace_root 是同一路径、同一套规范化（AC5）。
             #
@@ -644,6 +666,48 @@ class SessionService:
         workspace.mkdir(parents=True, exist_ok=True)
         _, wiring = await self._state.get_wiring()
         await self._state.ensure_stores()
+
+        # F15 #234：权限决策（档位 + 是否自动批准）从事件流派生（创建时显式声明过才
+        # 作数）。续聊路径没有创建请求可读，硬编码默认值就等于"用户的选择只管第一条
+        # 消息"——所以在续聊入口把会话级决策与审批回调一起重建，和 create_and_launch
+        # 同一套装配。
+        #
+        # 未声明（历史会话 / 用户没选）→ 行为逐字不变：workspace-write + None
+        # （build_runtime 对 None 的语义 = 安全默认 auto-approve）。
+        declared_mode = _declared_permission_mode(existing)
+        declared_auto = _declared_auto_approve(existing)
+        interactive = False
+        approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder
+        if declared_mode is None:
+            permission_mode = PermissionPolicy.WORKSPACE_WRITE
+            if declared_auto is False:
+                # deny 路由（创建时声明了"不自动批准"且未选档位）也只能从事件流复原：
+                # 它同样不落盘的话，第二条消息起会变成全自动批准——与该路由的承诺相反。
+                approval_callback = await self._build_approval_callback(
+                    interactive=False,
+                    auto_approve_explicit=True,
+                    permission_mode_explicit=False,
+                    auto_approve=False,
+                    session_id=session_id,
+                )
+            else:
+                approval_callback = None
+        else:
+            permission_mode = declared_mode
+            # danger-full-access 是"无需审批"档，与创建路径同判据（那边的 interactive
+            # 同样排除它），不要在这里发明第二套判定。
+            interactive = declared_mode is not PermissionPolicy.DANGER_FULL_ACCESS
+            approval_callback = await self._build_approval_callback(
+                interactive=interactive,
+                # 续聊请求体不承载这两个创建期标志；interactive 分支在前，二者不参与
+                # 判定（非 interactive 时 permission_mode_explicit=True 会让 deny 分支
+                # 也不成立 → None，即 danger 档的正确结果）。
+                auto_approve_explicit=False,
+                permission_mode_explicit=True,
+                auto_approve=False,
+                session_id=session_id,
+            )
+
         runtime = await build_runtime(
             settings=self._state.settings,
             wiring=wiring,
@@ -652,13 +716,20 @@ class SessionService:
             session_id=session_id,
             workspace=workspace,
             max_steps=max_steps,
-            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
-            approval_callback=None,
+            permission_mode=permission_mode,
+            approval_callback=approval_callback,
             session_store=self._state.store,
             steer_source=self._state.message_queues,
             **amend_kwargs(amend),
         )
+        # 交互式审批：session 已存在，直接绑定（创建路径是"先 holder 后 Session.start"，
+        # 这里顺序反过来，但注入点相同）。
+        if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
+            approval_callback.bind_session(session)
         run, subscriber = self._state.run_manager.launch(session, runtime, task)
+        # run 终结时 GC approval_queue（与创建路径同一条防泄漏路径）。
+        if interactive:
+            self._attach_approval_queue_gc(run, session_id)
         return LaunchResult(session=session, run=run, subscriber=subscriber)
 
     # ── 重连续传 ─────────────────────────────────────────────────────

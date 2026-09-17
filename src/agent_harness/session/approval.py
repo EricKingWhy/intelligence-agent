@@ -11,9 +11,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-from agent_harness.session.event import TOOL_APPROVAL_REQUESTED
+from agent_harness.session.event import (
+    SESSION_STARTED,
+    TOOL_APPROVAL_REQUESTED,
+    SessionEvent,
+)
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalRequest,
@@ -21,9 +26,18 @@ from agent_harness.tooling.approval import (
     PermissionDecision,
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
     from agent_harness.session.session import Session
+
+logger = logging.getLogger("agent_harness.session.approval")
+
+#: ``session/started`` 里承载会话级权限档的键（F15 #234）。
+SESSION_PERMISSION_MODE_KEY = "permission_mode"
+#: ``session/started`` 里承载会话级「是否自动批准」声明的键（F15 #234）。
+#: 与档位同一个病：创建期决策不落盘，续聊就只能猜（那里 ``None`` = 全自动批准）。
+SESSION_AUTO_APPROVE_KEY = "auto_approve"
 
 
 class InteractiveCallbackHolder:
@@ -100,6 +114,60 @@ class InteractiveCallbackHolder:
         return response
 
 
+def declared_permission_mode(events: list[SessionEvent]) -> PermissionPolicy | None:
+    """派生会话创建时**显式声明的**权限档；未声明 → None（F15 #234）。
+
+    权限档是会话的属性：创建时定、之后不可变（与 ``cwd`` 同级），所以只认第一条
+    ``session/started`` 里的 ``permission_mode`` 键。返回 None 表示"这份日志来自
+    未声明档位的会话"（历史会话 / 用户没选），调用方据此保持既有语义
+    （``workspace-write`` + 安全默认回调），而不是替用户猜一个更严或更松的档。
+
+    值不可解析（日志被手改）时记 warning 并按未声明处理——不静默改写成某个具体档位。
+    """
+    for event in events:
+        if event.type != SESSION_STARTED:
+            continue
+        raw = event.data.get(SESSION_PERMISSION_MODE_KEY)
+        if raw is None:
+            return None
+        try:
+            return PermissionPolicy(raw)
+        except ValueError:
+            logger.warning(
+                "session/started 的 %s=%r 不是合法权限档，按未声明处理",
+                SESSION_PERMISSION_MODE_KEY, raw,
+            )
+            return None
+    return None
+
+
+def declared_auto_approve(events: list[SessionEvent]) -> bool | None:
+    """派生会话创建时**显式声明的** ``auto_approve``；未声明 → None（F15 #234）。
+
+    与 :func:`declared_permission_mode` 同一个病、同一把锁：创建期
+    ``auto_approve_explicit=True, auto_approve=False`` 走 deny 路由
+    （``build_approval_callback`` 的第二支），但这条决策此前不落盘 ⇒ 续聊落到
+    "未声明"分支（``None`` = 全自动批准），用户勾的"不自动批准"从第二条消息起失效。
+
+    只认第一条 ``session/started`` 里的 ``auto_approve`` 键。值不是 bool（日志被手改）
+    时记 warning 并按未声明处理——**不猜**一个更松的值。
+    """
+    for event in events:
+        if event.type != SESSION_STARTED:
+            continue
+        raw = event.data.get(SESSION_AUTO_APPROVE_KEY)
+        if raw is None:
+            return None
+        if isinstance(raw, bool):
+            return raw
+        logger.warning(
+            "session/started 的 %s=%r 不是 bool，按未声明处理",
+            SESSION_AUTO_APPROVE_KEY, raw,
+        )
+        return None
+    return None
+
+
 def build_approval_callback(
     *,
     interactive: bool,
@@ -139,6 +207,10 @@ def build_approval_callback(
 
 
 __all__ = [
+    "SESSION_AUTO_APPROVE_KEY",
+    "SESSION_PERMISSION_MODE_KEY",
     "InteractiveCallbackHolder",
     "build_approval_callback",
+    "declared_auto_approve",
+    "declared_permission_mode",
 ]

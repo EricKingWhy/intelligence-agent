@@ -432,3 +432,57 @@ async def test_tail_summarizer_uses_scripted_model(tmp_path) -> None:
     # 提示词带进了 tail 文本与摘要指令
     prompt = model.snapshots[0].messages[0].content
     assert "方案A" in prompt
+
+
+# ── F15 #234：权限决策是会话属性，fork 必须显式继承 ─────────────────
+
+
+async def test_fork_inherits_parent_permission_decisions(tmp_path) -> None:
+    """父会话显式声明的权限决策（档位 + auto_approve）必须进 child 的 session/started。
+
+    不继承的后果不是"少个字段"：child 续聊会落到"未声明"分支 = workspace-write +
+    全自动批准——它复制了父的 workspace 文件，却对写操作免审批（安全边界反向放宽）。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="parent",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    parent.append(USER_MESSAGE, {"content": "第一条"})
+    parent.append(RUN_STARTED, {})
+    parent.append(MODEL_COMPLETED, {"content": "好的"})
+    parent.append(RUN_COMPLETED, {})
+    anchor = parent.append(USER_MESSAGE, {"content": "第二条"}).seq
+
+    child = await fork_session(
+        store, meta, "parent", boundary_user_message_seq=anchor,
+        child_session_id="child",
+    )
+
+    started = child.events[0]
+    assert started.type == SESSION_STARTED
+    assert started.data["permission_mode"] == "read-only"
+    assert started.data["auto_approve"] is False
+    # 父的 started 不进 seed（原语义不变）
+    assert all(e.type != SESSION_STARTED for e in child.events[1:])
+
+
+async def test_fork_of_undeclared_parent_writes_no_permission_keys(tmp_path) -> None:
+    """父未声明权限决策 → child 也不写键（历史会话 fork 出的子树语义一致）。"""
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _build_parent(store)
+
+    child = await fork_session(
+        store, meta, "parent",
+        boundary_user_message_seq=parent.events[-1].seq,
+        child_session_id="child",
+    )
+
+    started = child.events[0]
+    assert "permission_mode" not in started.data
+    assert "auto_approve" not in started.data
