@@ -68,6 +68,10 @@ interface Props {
   /** `GET /api/projects` 失败原因（有值时项目区**不隐藏**，只是多一条可重试的错误条：
    *  隐藏项目会把所有会话误显示成未分组，比显示一条错误糟）。 */
   projectsError: string | null;
+  /** `GET /api/sessions` 失败原因（F9）。与 `projectsError` **同形同因**——两者都是
+   *  "区域级加载失败"，都不该走主区那条**单槽** error 横幅（会被后续错误覆盖掉，
+   *  真机实测过：见 `docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。 */
+  sessionsError: string | null;
   onRetryProjects: () => void;
   /** 「在此项目中新建任务」（WS-6 / #169；#204 起 launch=false 只建会话不启动 run）：
    *  以项目目录为 cwd 创建空会话。resolve `null` = 已创建（权限 pill 已用响应回传的
@@ -101,6 +105,7 @@ export const SessionList = memo(function SessionList({
   projectActions,
   onSessionsChanged,
   projectsError,
+  sessionsError,
   onRetryProjects,
   onStartTask,
   permissionModes,
@@ -216,6 +221,18 @@ export const SessionList = memo(function SessionList({
   };
 
   const showEmpty = sessions.length === 0 && projects.length === 0;
+  /** 会话列表**没拿到**（不是"确实没有"）——F9：`sessions === []` 同时是"真没有会话"
+   *  与"这次请求失败了"的形状，两者**必须分开说**。
+   *
+   *  真机症状（`docs/LIVE_BROWSER_TEST_20260917.md` §8.5）：后端不可达时，项目区挂着
+   *  「项目列表加载失败：… 重试」，同一屏的会话区却写着「暂无会话，提交任务即可开始。」
+   *  ——把一次加载失败渲染成一个看起来完全正常的空状态；用户此刻最想知道的恰恰是
+   *  "我的会话还在不在"。空态判据只有 `length === 0`，所以它无法自己分辨这件事；
+   *  分辨所需的唯一信息在本栏之外（请求结果），故以 prop 传入。
+   *
+   *  注意它**不等于** `sessionsError !== null` 之外还要看别的：只要这次没拿到，
+   *  无论之前有没有成功过都不说"暂无会话"（有旧数据时列表照旧渲染，空态本来就不成立）。 */
+  const sessionsUnavailable = sessionsError !== null;
 
   return (
     <aside className="session-rail">
@@ -261,6 +278,15 @@ export const SessionList = memo(function SessionList({
         )}
       </div>
 
+      {/* `opError` 优先（动作级、更具体），它出现时**不再并列**列表加载错误：归档走
+          「写成功 → 紧接着重拉列表失败」那个窗口时，动作级那句（「归档已生效，但会话
+          列表刷新失败…」，见 `useSession.setArchived`）说的就是同一件事的更好版本，
+          并列两条只是噪音。这条优先级与改动前一致（原先那条 else-if 链里 opError 也
+          在最前），不是新语义。
+          两条**列表**错误条彼此独立（不是 else-if 链）：它们说的是两件不同的事实，
+          一次挂两条不是重复而是"确实坏了两处"。真机 F9 现场就是这样——后端不可达时
+          项目与会话**两个**列表同时 502，用链式结构只会显示第一条，第二条那个
+          「暂无会话」的假空态就仍然没人挡（`docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。 */}
       {opError ? (
         <div className="rail-error" role="alert">
           <span className="rail-error-text" title={opError}>
@@ -274,7 +300,8 @@ export const SessionList = memo(function SessionList({
             ×
           </button>
         </div>
-      ) : projectsError ? (
+      ) : null}
+      {!opError && projectsError ? (
         <div className="rail-error" role="alert">
           <span className="rail-error-text" title={projectsError}>
             项目列表加载失败：{projectsError}
@@ -284,9 +311,23 @@ export const SessionList = memo(function SessionList({
           </button>
         </div>
       ) : null}
+      {!opError && sessionsError ? (
+        <div className="rail-error" role="alert">
+          <span className="rail-error-text" title={sessionsError}>
+            {sessionsError}
+          </span>
+          {/* 复用项目的重试回调：`handleRetryProjects` 本来就同时重拉项目与会话两个列表
+              （`App.tsx`），再包一层只是为了改回调而改回调。 */}
+          <button className="rail-error-retry" onClick={onRetryProjects}>
+            重试
+          </button>
+        </div>
+      ) : null}
 
       <div className="session-items">
-        {showEmpty && <div className="empty-hint">暂无会话，提交任务即可开始。</div>}
+        {showEmpty && !sessionsUnavailable && (
+          <div className="empty-hint">暂无会话，提交任务即可开始。</div>
+        )}
         {/* 不是真空态，但开关把**每一行**都收起来了——必须说清楚，否则侧栏看起来像坏了
             （且给出去处：顶部那个开关）。
             两个守卫都不能省：

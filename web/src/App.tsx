@@ -82,6 +82,7 @@ export default function App() {
     streaming,
     reconnecting,
     error,
+    sessionsError,
     titlesById,
     recoverState,
     selectSession,
@@ -927,6 +928,7 @@ export default function App() {
           projectActions={projectActions}
           onSessionsChanged={refreshSessions}
           projectsError={projectsError}
+          sessionsError={sessionsError}
           onRetryProjects={handleRetryProjects}
           onStartTask={handleStartTaskInProject}
           permissionModes={permissionModes}

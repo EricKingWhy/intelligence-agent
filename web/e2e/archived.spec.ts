@@ -156,6 +156,12 @@ test('归档写入成功但列表重拉失败：就地说明「已生效但没�
   const error = page.locator('.rail-error');
   await expect(error).toBeVisible();
   await expect(error).toContainText('归档已生效，但会话列表刷新失败');
+  // **恰好一条**：这条动作级说明出现的同一刻，「加载会话列表失败」那条通用错误也在
+  // 台上（`refreshSessions` 刚失败过）。两条并列说同一件事只是噪音，所以侧栏的规则是
+  // opError 优先、列表错误条让位（F9 修复时定的优先级，见 `SessionList` 的渲染注释）。
+  // 不加这条 `toHaveCount(1)` 也能红，但红的形式是 strict-mode 冲突——下一位看不出
+  // 这是"多了一条"还是"选择器写错了"。
+  await expect(error).toHaveCount(1);
   // 行仍在（列表确实是旧的）——界面不自作主张地把它藏掉（不变量 #22）。
   await expect(rowOf(page, 's-keep')).toBeVisible();
 });

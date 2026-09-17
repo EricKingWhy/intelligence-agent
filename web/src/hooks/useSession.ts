@@ -343,6 +343,15 @@ export function useSession() {
   const [conversation, setConversation] = useState<ConversationState | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 会话**列表**加载失败原因（F9 / 真机证据见 `docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。
+   *
+   *  为什么是独立一条通道、而不是复用上面的 `error`：`error` 是**单槽**主区横幅，
+   *  后一条错误会把前一条**覆盖掉**。真机实测的正是这件事——`refreshSessions` 报了
+   *  「加载会话列表失败」，紧接着取事件失败的 `setError` 把它顶掉，于是那句话在屏上
+   *  消失，而侧栏照旧渲染「暂无会话，提交任务即可开始。」（失败被说成空）。
+   *  区域级通道不会被后续错误顶掉，与既有的 `projectsError`（同文件旁边的项目列表）
+   *  完全同形——两者是同一类事实，不该一个有一个没有。 */
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
   // Session Rail 行标题缓存（Session Model E 轮）：查看某会话时从首条 user/message
   // 投影出标题，本地缓存供 SessionList 行渲染。无缓存时回退到短 ID——不伪造。
   const [titlesById, setTitlesById] = useState<Record<string, string>>({});
@@ -403,7 +412,7 @@ export function useSession() {
   /** 重新拉取会话列表。返回**是否成功**——`sessions` 的唯一写入者，所以调用方
    *  （`setArchived`）需要知道"界面现在是不是已经反映了新状态"。
    *  返回值对既有调用方（`void refreshSessions()` / `onSessionsChanged`）无影响：
-   *  它们忽略它，失败处理仍走 `error` 那条既有通道（`<T> void` 语义不变）。 */
+   *  它们忽略它，失败处理仍走 `sessionsError` 那条既有通道（`<T> void` 语义不变）。 */
   const refreshSessions = useCallback(async (): Promise<boolean> => {
     try {
       // #171：**总是**要全量（含已归档）。可见性由 UI 的开关决定，不由请求决定——
@@ -412,6 +421,7 @@ export function useSession() {
       // 显式说明「这份 UI 要自己过滤」，也让投影层能对归档行给出真实徽标与计数。
       const list = await listSessions({ includeArchived: true });
       setSessions(list);
+      setSessionsError(null); // 成功即清：错误条不留到下一次成功之后（F9）
       // 后端 Gap 3：列表 payload 携带首条用户消息（截断 128）——零额外请求预填
       // 标题缓存。events 扫描（viewing 路径）保留为后端未返回时的 fallback；
       // 已有标题不覆盖（事件派生值优先，保持单一更新路径语义）。
@@ -428,7 +438,7 @@ export function useSession() {
       });
       return true;
     } catch (e) {
-      setError(`加载会话列表失败：${(e as Error).message}`);
+      setSessionsError(`加载会话列表失败：${(e as Error).message}`);
       return false;
     }
   }, []);
@@ -1508,6 +1518,7 @@ export function useSession() {
     streaming,
     reconnecting,
     error,
+    sessionsError,
     titlesById,
     recoverState,
     selectSession,
