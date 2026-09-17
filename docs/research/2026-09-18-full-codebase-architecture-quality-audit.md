@@ -4,7 +4,8 @@
 > 仓库：`D:\intelligence-agent-backend`
 > 性质：只读架构/质量审计；本文不代表已执行任何修复。
 > 审计对象：`src/agent_harness/`、`tests/`、`web/`、装配/配置/观测/恢复边界，以及现行 Engineering Specification。
-> 基线：工作树进入审计时为 `main`，`HEAD=5efe2b7e35297d626cc1da1abaf4b932812cf8d`，目标文档创建前无未提交业务源码变更。
+> 基线：审计开始时工作树为 `main`，`HEAD=5efe2b7e35297d626cc1da1abaf4b932812cf8d`；这是审计快照，不是本次交付后的 HEAD。
+> 本次交付验证：`4dbe7db`（cwd 缺失目录保护 + ticket 口径修正）；专项 42 passed；全量 `2453 passed / 10 skipped / 42 deselected / 0 failed`；`ruff` clean。
 
 ## 1. 执行摘要
 
@@ -194,11 +195,11 @@
 - **证据**：`src/agent_harness/session/cwd.py:1-17,29-57` 已将 cwd 写入首个 `session/started`，只读第一条，旧日志返回 `None`；`session/session.py:150-184` 只接受显式 `cwd` 参数并规范化；`session/service.py:128-132` 仅 TYPE_CHECKING 导入 AppState；工作区 Index 的 SessionHeaders Protocol 位于 `workspace/index.py:38-47`。
 - **耦合**：创建入口 Web/CLI/Fork、Session header、WorkspaceIndex、WorkspaceRegistry、续聊 `resume_and_launch`。
 - **后果**：若续聊只按 sandbox mapping 恢复而不把 cwd 作为 session 事实校验，会出现“会话能跑但归属不可信”；旧会话必须保留未分组语义，不能猜测回填。
-- **修法**：主代理负责实施；独立票应验证所有创建/续聊/fork 路径均保持首条 cwd 不变、冲突显式失败、旧日志可读。
+- **修法**：`356c531` 已完成 durable cwd 续聊基础修复；`4dbe7db` 增加外部 cwd 缺失时 fail-closed（不重建空目录）。仍待后续票验证真实 Registry mapping/cache 冲突与跨入口矩阵。
 - **文件**：`session/cwd.py:29-57`、`session/session.py:150-184,221-274`、`session/service.py:600+`、`workspace/index.py:38-97`、`tests/session/test_session_cwd.py`、权限/续聊测试。
 - **Blast radius**：高；会话、项目、sandbox、Web/CLI。
 - **风险**：中；错误修法会把 cwd 变成可变配置或误删历史归属。
-- **现在是否值得改**：是，但以对账/红证为主；当前由主代理实施，本文 ticket 可独立理解和验收。
+- **现在是否值得改**：基础 bug 已修复；mapping/cache 对账与跨入口矩阵仍由 #237 后续范围跟进，不能宣称全部闭合。
 - **测试**：create→resume→follow-up cwd 不变；fork 子会话按明确 policy；历史无 cwd 返回 None；相对/不存在/空 cwd 拒绝或保持既有语义；Web/CLI 同源。
 
 ### 5.7 `tool_scope` 声明面与注册面不一致
