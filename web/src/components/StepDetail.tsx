@@ -813,9 +813,11 @@ export function ChatTab({
 /** PERMISSION 段（#184，PRD §12）。
  *
  *  数据全部来自事件流投影（`tool/approval-requested` → 队列；`permission/resolved`
- *  → 裁决留痕），**没有新 API**。权限档是唯一需要解释的字段：`permission_mode` 不在
- *  任何事件里、也没有 GET 接口，能证明的只有审批请求携带的 `policy`（ToolExecutor
- *  当时实际用的阈值）——所以整段措辞都在 `lib/permission.ts` 里定，这里只接线。
+ *  → 裁决留痕），**没有新 API**。段里两个"档"是两件事：`session_permission_mode`
+ *  （会话创建时声明、不可变）与 `permission_policy`（审批真发生那一刻实际用的阈值）。
+ *  本段显示的是**后者**——它是运行时证据，会话无审批事件就无从得知，如实显示 `—` +
+ *  说明原因（不拿前者冒充；#236 更正了此处"`permission_mode` 不在任何事件里"的旧前提）。
+ *  整段措辞都在 `lib/permission.ts` 里定，这里只接线。
  *
  *  两处刻意的"不消失"：零待审批 → 显示「无待审批」；零裁决 → 「尚无裁决」。段本身
  *  永远渲染（除非 conversation 为空）——段消失会被读成"这个会话没有权限概念"。 */

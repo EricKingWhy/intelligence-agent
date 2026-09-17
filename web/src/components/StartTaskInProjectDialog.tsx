@@ -101,11 +101,10 @@ function StartTaskForm({
       return;
     }
     onOpenChange(false); // 成功即关闭：用户接下来要在 chat 输入框发第一条消息
-    // #204 裁定 §3：pill 初始化由 App 用**创建响应回传的**会话级档位完成
-    // （handleStartTaskInProject 里 setSelectedPermissionMode(created.permissionMode)）。
-    // 本组件**不**再传本地选中态——弹窗本地值只是请求意图，后端真实写入的档位才是
-    // pill 的事实源（本地值 + 后端值并存双写，本地后到会覆盖响应值，正是 §3 要消灭
-    // 的"各自取默认值"不一致）。
+    // #236：pill 的真值来自会话自己的 `session/started` 投影（App 的
+    // `displayedPermissionMode`），创建回执不再参与。本组件**不**传本地选中态——
+    // 弹窗本地值只是请求意图，后端真实写入的档位才是会话事实（本地值 + 后端值并存
+    // 双写，本地后到会覆盖响应值，正是 #204 裁定 §3 要消灭的"各自取默认值"不一致）。
   };
 
   return (

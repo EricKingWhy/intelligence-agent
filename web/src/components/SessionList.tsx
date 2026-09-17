@@ -74,8 +74,8 @@ interface Props {
   sessionsError: string | null;
   onRetryProjects: () => void;
   /** 「在此项目中新建任务」（WS-6 / #169；#204 起 launch=false 只建会话不启动 run）：
-   *  以项目目录为 cwd 创建空会话。resolve `null` = 已创建（权限 pill 已用响应回传的
-   *  档位初始化）；否则为**给用户看的原因**（留在确认面里）。 */
+   *  以项目目录为 cwd 创建空会话。resolve `null` = 已创建（#236 起权限 pill 由会话自己的
+   *  `session/started` 投影供值，不再依赖创建回执）；否则为**给用户看的原因**（留在确认面里）。 */
   onStartTask: (
     project: Project,
     permissionMode: string | null,
