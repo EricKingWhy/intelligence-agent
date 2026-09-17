@@ -717,6 +717,9 @@ export default function App() {
 
   // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /** 面板**关闭后**要执行的一次性动作（见命令 `focus-composer` 与 CommandPalette 的
+   *  `onAfterClose` 注释：命令执行时浮层还开着，直接 focus 会被关闭时的焦点恢复打断）。 */
+  const paletteAfterClose = useRef<(() => void) | null>(null);
   // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
@@ -828,7 +831,13 @@ export default function App() {
         keywords: 'focus composer',
         hint: '输入框',
         group: 'actions',
-        run: () => document.getElementById('composer-input')?.focus(),
+        // 不在命令里直接 focus()：命令跑的时候面板还开着，Radix 关闭时的焦点恢复会紧接着
+        // 把焦点抢回 body（键盘打开的浮层没有触发器，恢复目标就是 body）——真机实测
+        // "点了命令后打字进不去输入框"。登记到浮层关闭之后执行（同一个坑在
+        // `createEmptySession` 已记过，见 CommandPalette 的 `onAfterClose`）。
+        run: () => {
+          paletteAfterClose.current = () => document.getElementById('composer-input')?.focus();
+        },
       },
       {
         id: 'manage-memories',
@@ -1125,7 +1134,19 @@ export default function App() {
         />
       </main>
 
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} items={paletteItems} />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        items={paletteItems}
+        onAfterClose={() => {
+          const run = paletteAfterClose.current;
+          paletteAfterClose.current = null;
+          // 无落点 ⇒ 返回 false，让 Radix 做默认焦点恢复（通常还给 composer）。
+          if (!run) return false;
+          run();
+          return true;
+        }}
+      />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
       {/* #200：上下文容量看板（TopBar Gauge 入口；Esc / 点击遮罩关闭）。 */}
       <ContextUsagePanel
