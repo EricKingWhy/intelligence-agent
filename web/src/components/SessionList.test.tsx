@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import { SessionList } from './SessionList';
-import type { SessionSummary } from '../types';
+import type { Project, SessionSummary } from '../types';
 
 function session(id: string, archived = false): SessionSummary {
   return {
@@ -36,7 +36,13 @@ function session(id: string, archived = false): SessionSummary {
 }
 
 const noop = () => {};
-const noopAsync = async () => null;
+/** 异步 handler 的统一替身。返回类型写 `Promise<never>`：本文件只做 SSR 渲染、
+ *  从不触发这些回调，而各 handler 的返回类型互不相同（`onDeleteSession`
+ *  → `Promise<SessionDeleted>`、`onSetArchived` → `Promise<string | null>`）——
+ *  任何具体返回类型都会与其中之一冲突（`tsc -b` 就是这么红的）。`never` 对全部成立。 */
+const noopAsync = async (): Promise<never> => {
+  throw new Error('SSR 渲染不应触发回调');
+};
 
 function render(props: {
   sessions?: SessionSummary[];
