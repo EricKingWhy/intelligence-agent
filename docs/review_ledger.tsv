@@ -60,3 +60,4 @@ a63dc46	B-11 落点记录（tracker 批次行 B-11 + 归档明细 + PHASE_STATUS
 a893d80	B-12 集成/关单状态如实化（tracker + 归档，docs-only）
 fc01d28	B-12 集成 push 补记（tracker + 归档，docs-only）
 8930701	B-13 落点记录（tracker + 归档明细 + PHASE_STATUS 索引 + 本台账审查行，docs-only）
+9444f65	B-13 集成/关单状态如实化（tracker + 归档，docs-only）
