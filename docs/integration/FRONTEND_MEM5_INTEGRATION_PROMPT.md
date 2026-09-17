@@ -46,6 +46,11 @@
 2. **503 是配置状态，不是故障**：`isMemoryDisabled` 把它分流到独立降级态（「记忆未启用」+ 后端原文 +
    `CAPABILITIES` 指引 + **不给重试按钮**），与「读取失败（错误条 + 重试）」「真的没有（空态）」三分。
    不变量 #21 的落地。
+   > ⚠ **此条已被 #225（2026-09-17）部分取代**：503 内部现在有一个**真故障**子类
+   > （`detail.code = "init_failed"`：CAPABILITIES 里配了但装配时出错），它走
+   > 「读取失败 + 重试」那一支而不是降级态；`isMemoryDisabled` 只认**配置状态**的那几个码。
+   > 逐原因文案与判别口径见 `docs/adr/0010-capability-registry-and-plugin-config.md`
+   > 「补充（#225）」。本文件其余描述（分页 / 乐观删除 / 零解析等）仍然有效。
 3. **`created_at` 零解析**：`types.ts` 保持后端 ISO 原值（`<time datetime>` 原样透传），
    只在展示层 `formatMemoryTime` 本地化；解析失败**原样返回字符串**（显示 `Invalid Date` 或补当前时间
    都是在"记忆是何时记的"上撒谎）。

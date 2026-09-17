@@ -20,6 +20,20 @@ class Degradation(str, Enum):
     OPTIONAL_OBSERVABILITY = "OPTIONAL_OBSERVABILITY"  # 缺失不得影响业务执行
 
 
+class DegradeReason(str, Enum):
+    """capability **缺席**的原因分类（`CapabilityWiring.degradations` 的值词汇表）。
+
+    前三码是"配置状态"（改配置能解决），最后一码是"装配时出错"（改配置解决不了）。
+    **不能塌成一个"未启用"**：那会让界面把故障说成配置状态，用户去改一个本来就配好的
+    CAPABILITIES 而永远修不好（#225 的真机症状）。
+    """
+
+    NOT_CONFIGURED = "not_configured"  # CAPABILITIES 里没有这一项
+    DISABLED = "disabled"  # 配了但 enabled=false
+    MISSING_SETTINGS = "missing_settings"  # capability 自己的前置配置（settings）不齐
+    INIT_FAILED = "init_failed"  # factory 抛异常（外部依赖故障等），已按档降级
+
+
 class CapabilityError(RuntimeError):
     """Capability 域显式错误词汇表（08 §2）。降级只能走 optional() 的 None 路径。"""
 

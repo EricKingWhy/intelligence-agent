@@ -304,7 +304,12 @@ export interface ApiMock {
    *  分页也按真实端点走（`limit`/`offset` 切片），"加载更多"因此可被真的驱动。 */
   memories?: MemoryFixture[];
   /** 记忆能力未装配 → GET/DELETE 都回 503 + 该 detail（AC4 降级态）。
-   *  刻意用真实后端那句话（`web/memory.py`）：前端把"未启用"与"没有记忆"分开显示。 */
+   *  刻意用真实后端那句话（`web/memory.py`）：前端把"未启用"与"没有记忆"分开显示。
+   *  503 的 body 形状是 `{detail: {code, message}}`（#225）——`code` 是前端分流的
+   *  依据（`init_failed` = 故障，其余 = 配置状态），不是装饰。
+   *  **装配失败**（`code=init_failed`）那个形状刻意**不在这里**开开关：它要连同
+   *  "点重试仍失败、失败不被吞"一起断言，用 `onMemoriesGet` 就地写更诚实
+   *  （见 `s-memories.spec.ts` 的 #225 用例）。 */
   memoryDisabled?: string;
   /** 这些 id 的 DELETE 回 403（`web/memory.py` 的"不属于当前入口"）——AC3 的
    *  失败回滚路径（真机上要构造一条 SESSION 记忆才自然出现）。 */
@@ -797,7 +802,9 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
     // ── MEM-5 / #160 记忆端点（有状态 mock：语义对齐后端 `web/memory.py`）──
     if (path === '/api/memories' && req.method() === 'GET') {
       if (mock.onMemoriesGet && (await mock.onMemoriesGet(route))) return;
-      if (mock.memoryDisabled) return json(route, { detail: mock.memoryDisabled }, 503);
+      if (mock.memoryDisabled) {
+        return json(route, { detail: { code: 'not_configured', message: mock.memoryDisabled } }, 503);
+      }
       const params = new URL(req.url()).searchParams;
       const limit = Number(params.get('limit') ?? '50');
       const offset = Number(params.get('offset') ?? '0');
@@ -814,7 +821,9 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
     }
     const memoryMatch = /^\/api\/memories\/([^/]+)$/.exec(path);
     if (memoryMatch && req.method() === 'DELETE') {
-      if (mock.memoryDisabled) return json(route, { detail: mock.memoryDisabled }, 503);
+      if (mock.memoryDisabled) {
+        return json(route, { detail: { code: 'not_configured', message: mock.memoryDisabled } }, 503);
+      }
       const memoryId = decodeURIComponent(memoryMatch[1]);
       // 403 = 领域层的归属校验（`MemoryRecordStore.delete` 的 namespace 匹配）：
       // 与 404「这条不在了」分开——AC3 的失败回滚就靠这条。

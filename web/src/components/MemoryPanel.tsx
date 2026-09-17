@@ -95,24 +95,24 @@ function MemoryPanelBody() {
 
       <div className="memory-body">
         {disabled !== null ? (
-          // 降级态（AC4）：能力未装配是**配置状态**，不是故障——不给"重试"，
+          // 降级态（AC4）：能力**未装配**是配置状态，不是故障——不给"重试"，
           // 因为重试修不了一个没配置的能力（不变量 #21）。
+          // #225：这里只铺后端那句原文，**不再自己加一句"这是配置状态而非故障"**——
+          // 那是前端对后端状态的断言，而后端当时正因为装配失败（向量库不可达）才缺席，
+          // 用户照这句去改 CAPABILITIES 永远修不好。缺席原因（没配 / 被禁用 / 缺前置配置）
+          // 由后端逐原因写清，前端不复述、不猜。
           <div className="memory-degraded" role="status">
             <span className="memory-degraded-title">记忆未启用</span>
             <span className="memory-degraded-detail">{disabled}</span>
-            <span className="memory-degraded-hint">
-              这是配置状态而非故障：后端 <code>CAPABILITIES</code> 里没有 <code>memory</code>
-              时，记忆不会被写入，这里的列表也无从列出。配置后重新打开本面板即可看到。
-            </span>
           </div>
         ) : loading ? (
           <div className="memory-loading" role="status">
             正在加载记忆…
           </div>
         ) : visible.length === 0 && loadError === null ? (
-          // 空态只在"确实读到了空列表"时出现（零伪造）：HTTP 503 走上面的降级态，
-          // 读取失败走下面的错误条——**一条行都没有 + 读取失败**时这里必须是空
-          // （只留错误条），否则"读不到"就被伪装成了"没有"。
+          // 空态只在"确实读到了空列表"时出现（零伪造）：配置降级走上面的块、读取失败
+          // （含 503 + `init_failed`）走下面的错误条——**一条行都没有 + 读取失败**时
+          // 这里必须是空（只留错误条），否则"读不到"就被伪装成了"没有"。
           <div className="memory-empty" role="status">
             <span className="memory-empty-title">还没有记忆</span>
             <span className="memory-empty-hint">
@@ -145,8 +145,9 @@ function MemoryPanelBody() {
           </ul>
         )}
 
-        {/* 加载失败（非 503）：保留已加载的行，只补一条错误条 + 重试——一次网络
-            抖动不该把用户已经看到的内容抹掉（同 useProjects 的 loadError 纪律）。 */}
+        {/* 加载失败（**含 503 + init_failed** 那个故障子类；配置降级态不走这里）：
+            保留已加载的行，只补一条错误条 + 重试——一次网络抖动不该把用户已经看到的
+            内容抹掉（同 useProjects 的 loadError 纪律）。 */}
         {loadError !== null && (
           <div className="memory-error" role="alert">
             <span>{loadError}</span>

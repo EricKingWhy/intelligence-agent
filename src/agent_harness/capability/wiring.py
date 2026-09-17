@@ -18,6 +18,7 @@ from agent_harness.capability.base import (
     CapabilityError,
     CapabilityRegistry,
     Degradation,
+    DegradeReason,
 )
 from agent_harness.capability.config import ProviderConfig
 from agent_harness.config import Settings
@@ -64,6 +65,16 @@ class CapabilityWiring:
     # （模型链/registry/session store）要等 build_runtime 装配完才能注入——
     # 这里只携带 provider 引用，激活在 build_runtime 完成（激活前调用明确失败）。
     multiagent_provider: Any | None = None
+    #: capability 名 → 降级原因（`DegradeReason` 的**值**；写点一律取 `.value`——
+    #: 存枚举成员的话，将来任何 `f"{reason}"` 会写出 `DegradeReason.X` 而不是码）。
+    #: **只登记"非缺省"的原因**：
+    #: "CAPABILITIES 里没有它"（= NOT_CONFIGURED）是缺省状态，不进本表——查表者据此
+    #: 把 `None`（或键不存在）读作 NOT_CONFIGURED。一个 capability 因**自身内容为空**
+    #: 而缺席（如 mcp 连上了但没有任何工具）也不进本表：那是该能力自己的领域判据，
+    #: 它自己的 errors 才是落点。
+    #: 存在的意义：装配期只把原因写进 logger.warning，路由层无从区分"没配"与"配了
+    #: 但坏了"，只能给一句话（#225）。
+    degradations: dict[str, str] = field(default_factory=dict)
 
     async def aclose(self) -> None:
         """关闭本次装配持有的全部生命周期资源；逐项故障隔离——进程退出路径，
@@ -96,6 +107,9 @@ async def _wire_memory(
     components = factories.build_memory_components(settings, provider=cfg.provider)
     if components is None:
         # 配置不齐 → OPTIONAL_RUNTIME 降级：不注册、不注入（与 Phase 6 行为一致）。
+        # 原因记进 wiring（#225）：路由层要能对用户说清"缺的是哪些配置"，而不是
+        # 一律"请在 CAPABILITIES 中配置 memory"——后者指向的开关本来就是开的。
+        wiring.degradations["memory"] = DegradeReason.MISSING_SETTINGS.value
         return
     try:
         # 只调 provider 自己的生命周期入口（ADR-0024 D6）：包内有几个组件、什么顺序，
@@ -266,6 +280,7 @@ async def _wire_knowledge(
             "capability 'knowledge' 未配置 KNOWLEDGE_COLLECTION，按 %s 降级缺席",
             Degradation.OPTIONAL_RUNTIME.value,
         )
+        wiring.degradations["knowledge"] = DegradeReason.MISSING_SETTINGS.value
         return
 
     try:
@@ -285,6 +300,7 @@ async def _wire_knowledge(
             "capability 'knowledge' 初始化失败（%s: %s），按 %s 降级缺席",
             type(error).__name__, error, Degradation.OPTIONAL_RUNTIME.value,
         )
+        wiring.degradations["knowledge"] = DegradeReason.INIT_FAILED.value
         return
 
     service = KnowledgeService(
@@ -418,6 +434,7 @@ async def _wire_websearch(
             "capability 'websearch' 未配置 TAVILY_API_KEY，按 %s 降级缺席",
             Degradation.OPTIONAL_RUNTIME.value,
         )
+        wiring.degradations["websearch"] = DegradeReason.MISSING_SETTINGS.value
         return
 
     provider = TavilyWebSearchProvider(api_key)
@@ -527,6 +544,7 @@ async def wire_capabilities(
             )
         factory, degradation = entry
         if not cfg.enabled:
+            wiring.degradations[name] = DegradeReason.DISABLED.value
             continue
         try:
             await factory(registry, cfg, settings, wiring)
@@ -541,6 +559,7 @@ async def wire_capabilities(
                 "capability '%s' 初始化失败，按 %s 降级跳过：%r",
                 name, degradation.value, error,
             )
+            wiring.degradations[name] = DegradeReason.INIT_FAILED.value
             continue
 
     # 收集工具贡献：已启用的 provider（demo capability 走这条）**加上**第二来源

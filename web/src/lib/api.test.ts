@@ -17,6 +17,7 @@ import {
   getAgentProfiles,
   getSessionEvents,
   isMemoryDisabled,
+  isMemoryFault,
   listMemories,
   listProjects,
   listSessions,
@@ -856,6 +857,27 @@ describe('memories — 列表/硬删端点契约（#160；ARCH-4b 类型注解 +
     expect((err as MemoryError).message).toBe(detail);
     // 降级通道判定：面板据此显示"记忆未启用"而非"加载失败 + 重试"。
     expect(isMemoryDisabled(err)).toBe(true);
+  });
+
+  it('listMemories：503 + code=not_configured（#225 的机读形状）→ 仍是降级态', async () => {
+    const detail = 'memory capability 已在 CAPABILITIES 中登记但被禁用（enabled=false）：…';
+    captureProjectFetch(503, { detail: { code: 'not_configured', message: detail } });
+    const err = await listMemories().catch((e: unknown) => e);
+    expect((err as MemoryError).message).toBe(detail);
+    expect((err as MemoryError).code).toBe('not_configured');
+    expect(isMemoryDisabled(err)).toBe(true);
+    expect(isMemoryFault(err)).toBe(false);
+  });
+
+  it('listMemories：503 + code=init_failed → **故障**（可重试），不是"未启用"', async () => {
+    // 真机症状（#225）：这个形状曾被当成配置状态渲染成"记忆未启用 + 这不是故障"，
+    // 用户于是去改一个本来就配好的 CAPABILITIES。判别只认码，不认文案。
+    const detail = 'memory capability 初始化失败：配置齐全，但装配时出错…';
+    captureProjectFetch(503, { detail: { code: 'init_failed', message: detail } });
+    const err = await listMemories().catch((e: unknown) => e);
+    expect((err as MemoryError).message).toBe(detail);
+    expect(isMemoryFault(err)).toBe(true);
+    expect(isMemoryDisabled(err)).toBe(false);
   });
 
   it('listMemories：500 → MemoryError(500)，但**不是**降级态（真故障要可重试）', async () => {

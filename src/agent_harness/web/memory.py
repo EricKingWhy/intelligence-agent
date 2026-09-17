@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from agent_harness.capability.base import DegradeReason
 from agent_harness.memory.audit import (
     ENTRY_API,
     OUTCOME_ABSENT,
@@ -40,6 +41,30 @@ if TYPE_CHECKING:
 
 #: 单页上限：记忆正文可能很长，列表必须有闸（客户端可传更小值）。
 _MAX_LIMIT = 200
+
+#: 装配期没能启用记忆时的**逐原因**说法（#225）。为什么要分开写：真机上
+#: `CAPABILITIES` 里配着 memory、向量库连不上，装配期降级但路由层只能重复
+#: "请在 CAPABILITIES 中配置 memory"——用户于是去改一个本来就配好的开关。
+#: 前三码是**配置状态**（重试无用：`CAPABILITIES` 里少写/写错/缺前置项）；
+#: `INIT_FAILED` 是**装配时出错**（改 CAPABILITIES 没用，要看日志、修它指向的东西）。
+#: 机制与边界见 ADR-0010「补充（#225）」。
+_DEGRADED_MESSAGE: dict[DegradeReason, str] = {
+    DegradeReason.NOT_CONFIGURED: "memory capability 未启用：请在 CAPABILITIES 中配置 memory。",
+    DegradeReason.DISABLED: (
+        "memory capability 已在 CAPABILITIES 中登记但被禁用（enabled=false）："
+        "请改为 enabled=true（或删掉这条登记）。"
+    ),
+    DegradeReason.MISSING_SETTINGS: (
+        "memory capability 缺前置配置：向量检索（MILVUS_URI / MILVUS_TOKEN / "
+        "MILVUS_COLLECTION）与嵌入模型（EMBEDDING_MODEL / EMBEDDING_BASE_URL / "
+        "EMBEDDING_API_KEY）两组都齐才装配记忆。补齐后重启后端。"
+    ),
+    DegradeReason.INIT_FAILED: (
+        "memory capability 初始化失败：CAPABILITIES 里已登记且启用，但装配时出错"
+        "（记忆向量库不可达是常见原因）。这不是「没配置」——改 CAPABILITIES 没用；"
+        "完整原因在后端日志的「capability 'memory' 初始化失败」那条里，排除后重启后端即可恢复。"
+    ),
+}
 
 
 class MemorySummary(BaseModel):
@@ -71,11 +96,16 @@ def register_memory_routes(app: FastAPI) -> None:
         _, wiring = await app.state.agent.get_wiring()
         components = wiring.memory
         if components is None:
-            # 配置状态，不是领域错误：CAPABILITIES 里没有 memory 时这些端点无从服务。
-            # 503 比 404 诚实——"能力没启用"不是"这个资源不存在"。
+            # 能力缺席 → 503（比 404 诚实："能力没启用"不是"这个资源不存在"）。
+            # 但"为什么缺席"必须分得开（#225）：`wiring.degradations` 里记着装配期
+            # 的分类原因，**缺省 = 不在 CAPABILITIES 里**（见该字段的说明）。
+            # `detail` 是 `{code, message}`：code 给机器（前端据它决定"未启用"还是
+            # "故障 + 重试"），message 给人。判别走码，不走中文。
+            recorded = wiring.degradations.get("memory")
+            reason = DegradeReason.NOT_CONFIGURED if recorded is None else DegradeReason(recorded)
             raise HTTPException(
                 status_code=503,
-                detail="memory capability 未启用：请在 CAPABILITIES 中配置 memory。",
+                detail={"code": reason.value, "message": _DEGRADED_MESSAGE[reason]},
             )
         return components.capability
 

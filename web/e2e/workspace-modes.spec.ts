@@ -191,3 +191,31 @@ test('AC7：三区几何不变，Chat 的对话与输入框照常渲染', async 
   await expect(page.getByLabel('Agent 任务')).toBeVisible();
   await expect(page.locator('.conversation')).toBeVisible();
 });
+
+test('#223：在「输出」页签上点「新建会话」→ 必须切回 Chat 且 composer 可见可输入', async ({
+  page,
+}) => {
+  /* 真机现象（巡检 round 2）：页签停在「输出」时点「新建会话」⇒ 页签**还是**「输出」、
+     `#composer-input` 在 DOM 里存在却不可见（composer 只属于 Chat 面）、没有会话被建
+     （设计如此：空态在**发送**时才建会话）⇒ 整屏零反馈，用户读作"点了没反应"。
+     修法取票面选项 1（最小、且就是「新建会话」这句话的意图）：点它即把工作区切回 Chat。
+     这里锁**真实 DOM 接线**（呈现层的 resolveActiveTab 兜底另有纯函数单测）。 */
+  await routeApi(page, {});
+  await page.goto('/');
+
+  const composer = page.getByLabel('Agent 任务');
+  await page.getByRole('tab', { name: '输出' }).click();
+  await expect(page.getByRole('tab', { name: '输出' })).toHaveAttribute('aria-selected', 'true');
+  // 现象面先锁住：这一步 composer 确实不可见（否则下面的断言可能被初始状态蒙对）。
+  await expect(composer).toBeHidden();
+
+  // 空列表态渲染的是**带文字**的「新会话」（UI-05：真空态把 icon-only 换成文字按钮），
+  // 有会话时才是 aria-label「新建会话」的 icon 按钮——两个入口同一个 `onNew`。
+  await page.getByRole('button', { name: /^新(建)?会话$/ }).click();
+
+  await expect(page.getByRole('tab', { name: 'Chat' })).toHaveAttribute('aria-selected', 'true');
+  await expect(composer).toBeVisible();
+  // 「可输入」而不是「看得见」：值真的进得去（可见但只读/被遮挡会在这里露出来）。
+  await composer.fill('切回 Chat 之后能打字');
+  await expect(composer).toHaveValue('切回 Chat 之后能打字');
+});

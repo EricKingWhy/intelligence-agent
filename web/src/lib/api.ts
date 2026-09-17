@@ -53,28 +53,46 @@ export class ApprovalGoneError extends Error {}
 /** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
  *
- *  `detail` 有**两种合法形状**，两者都要认：
+ *  `detail` 有**三种合法形状**，都要认：
  *  - `string`：端点自己 `raise HTTPException(detail=…)` —— 后端的可行动中文原因；
  *  - `Array<{loc, msg, type}>`：Pydantic 请求体校验失败的固定形状（422）。不认它
  *    就会把"path 必须是绝对路径"降级成"注册项目失败（422）"，把最该看懂的一条
  *    提示扔在门外。只取 `msg` 并剥掉 Pydantic 自己的 `Value error, ` 前缀——
- *    用户要看的是规则的结论，不是校验器的转述层。 */
+ *    用户要看的是规则的结论，不是校验器的转述层。
+ *  - `{code, message}`：**带机读判别字段**的错误（#225 `/api/memories` 的 503：
+ *    "没配"与"配了但装配失败"必须分流，判别走 `code` 而不是匹配中文——文案会改，
+ *    码不会）。`code` 由同一次读取里的 `readErrorBody` 取出（响应体只能读一次），
+ *    这里只认 `message` 那个给人看的串。
+ */
 export async function readErrorDetail(res: Response): Promise<string> {
+  return (await readErrorBody(res)).message;
+}
+
+/** 一次读取拿到 `{message, code}`（响应体只能读一次，两个消费者必须共用这次读取）。 */
+async function readErrorBody(res: Response): Promise<{ message: string; code: string | null }> {
   try {
     const j = (await res.json()) as { detail?: unknown } | null;
     const detail = j?.detail;
-    if (typeof detail === 'string') return detail;
+    if (typeof detail === 'string') return { message: detail, code: null };
     if (Array.isArray(detail)) {
-      return detail
+      const message = detail
         .flatMap((item) => {
           const msg = (item as { msg?: unknown } | null)?.msg;
           return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
         })
         .join('；');
+      return { message, code: null };
     }
-    return '';
+    if (typeof detail === 'object' && detail !== null) {
+      const { message, code } = detail as { message?: unknown; code?: unknown };
+      return {
+        message: typeof message === 'string' ? message : '',
+        code: typeof code === 'string' && code ? code : null,
+      };
+    }
+    return { message: '', code: null };
   } catch {
-    return '';
+    return { message: '', code: null };
   }
 }
 
@@ -1335,12 +1353,15 @@ export async function getHostDirs(path?: string | null): Promise<HostDirsListing
   };
 }
 
-/** 记忆请求失败：状态码 + 后端 detail 原文（detail 优先，是 AC 要展示的那句话）。 */
+/** 记忆请求失败：状态码 + 后端 detail 原文（detail 优先，是 AC 要展示的那句话）
+ *  + 机读判别码（`detail.code`，老后端没有则为 null）。 */
 export class MemoryError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly code: string | null;
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -1385,14 +1406,29 @@ export async function deleteMemory(memoryId: string): Promise<MemoryDeleted> {
 
 /** 非 2xx → MemoryError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
 async function memoryError(res: Response, fallback: string): Promise<MemoryError> {
-  const detail = await readErrorDetail(res);
-  return new MemoryError(res.status, detail || `${fallback}（${res.status}）`);
+  const { message, code } = await readErrorBody(res);
+  return new MemoryError(res.status, message || `${fallback}（${res.status}）`, code);
 }
 
-/** 记忆能力未装配（503）——**配置状态，不是故障**：UI 要显示「记忆未启用」而不是
- *  "加载失败/重试"，否则用户会一直点重试去修一个不存在的故障（不变量 #21）。 */
+/** 装配期就失败（`DegradeReason.INIT_FAILED`）的机读码。与"没配"共用一个 503 状态码，
+ *  但**是故障不是配置状态**：要报错、要给重试（#225）。 */
+const MEMORY_INIT_FAILED = 'init_failed';
+
+/** 记忆能力**装配失败**（外部依赖故障，503 + `code=init_failed`）：**这是故障**——
+ *  用户改配置没用，要给错误条 + 重试，而不是"记忆未启用"那句配置态文案。
+ *  真机症状（#225）：后端明明返回了"初始化失败"的降级原因，前端却一律按配置状态渲染，
+ *  还自己加了一句"这不是故障"，把用户推去改一个本来就配好的开关。 */
+export function isMemoryFault(error: unknown): boolean {
+  return (
+    error instanceof MemoryError && error.status === 503 && error.code === MEMORY_INIT_FAILED
+  );
+}
+
+/** 记忆能力**未装配**（配置状态，503 且不是装配失败）：UI 要显示「记忆未启用」而不是
+ *  "加载失败/重试"，否则用户会一直点重试去修一个不存在的故障（不变量 #21）。
+ *  **老后端没有 `code`**（detail 是纯字符串）时按配置状态处理——那是这以前的唯一语义。 */
 export function isMemoryDisabled(error: unknown): boolean {
-  return error instanceof MemoryError && error.status === 503;
+  return error instanceof MemoryError && error.status === 503 && !isMemoryFault(error);
 }
 
 /** 记忆错误 → 展示文案：MemoryError 的 message 就是后端 detail（或兜底前缀），

@@ -348,11 +348,22 @@ DELETE cb7326c7 → 200
 **不可见**（composer 属于 Chat 面板），会话数不变（设计如此：空状态在发送时才建会话）⇒
 整屏**没有任何"新建会话"的反馈**、也没有输入框——正是"点了没反应"。切回 Chat 才有输入框。
 **归因**：前端（新建会话没有把工作区切回 Chat）。修法有产品取舍：切页签，或让 composer 不绑页签。
+**已修（#223，同夜）**：取票面选项 1——`App.tsx::handleNew`（以及同缺陷的
+`handleStartTaskInProject`：它把焦点交给一个隐藏的 `#composer-input`）先 `setSelectedSurface('chat')`
+再聚焦。红线：e2e 在「输出」页签 → 点「新会话」→ 断言 Chat 被选中、composer 可见且**真的能打字**
+（`fill` + `toHaveValue`）；把那一行还原 ⇒ 两条 viewport 全红（`aria-selected` 为 false）。
+另外记一笔：空列表态那个按钮的可见文字是「新会话」（UI-05 换成了带文字的按钮），
+`aria-label="新建会话"` 是有会话时的 icon 按钮——两个入口同一个 handler。
 
 #### F7 — 每次加载一条 `/favicon.ico` 404（P3；前端，装饰性）
 
 `web/index.html` 未声明任何 icon、`web/public/` 只有 `icons.svg` ⇒ 浏览器默认探
 `/favicon.ico` 得 404（本轮抓到 URL 与来源，不再是"某处 404"）。零功能影响，但每次开控制台都是噪声。
+**已修（#224，同夜）**：新增 `web/public/favicon.svg`（字形 = 顶栏那个 lucide `Activity` mark，
+不引入第二套品牌资产）+ `index.html` 的 `<link rel="icon">`。**没用** `public/icons.svg`：
+它只含 `<symbol>`、没有可渲染的根图形，当 icon 渲染出来是空白（那条判据写成了断言）。
+红线锁**声明→可获取→真在画东西**这条链（从活 DOM 取 `link[rel~=icon]` 的 href 再取回来看），
+不是"index.html 里有一行 link"：把 href 指向 `icons.svg` ⇒ 红；删掉声明 ⇒ 红。
 
 #### F8 — 记忆面板的 503 把「配置缺失」与「初始化失败」混为一谈（P3；后端措辞，前端忠实渲染）
 
@@ -363,6 +374,13 @@ DELETE cb7326c7 → 200
 `wiring.memory is None` 上判一次，而 `wire_capabilities` 把"没配"与"配了但初始化失败"都塌成
 `wiring.memory is None`，**降级原因没有结构化留存**（只进日志）。前端是忠实渲染后端那句话的，
 所以修点在后端给原因，必要时前端再按原因分文案。
+**已修（#225，同夜）**：装配期把缺席原因**分类留码**（`CapabilityWiring.degradations` +
+`DegradeReason`：`not_configured` / `disabled` / `missing_settings` / `init_failed`），
+`/api/memories` 的 503 改成 `detail: {code, message}` 并逐原因给话；前端的「记忆未启用」块
+**不再自己加**那句"这是配置状态而非故障"（改由后端逐原因说清），`init_failed` 改走错误条 + 重试
+（**这是故障**，改配置没用）。判别只认 `code`，老后端（无 code）仍按配置状态。机制落点
+`docs/adr/0010-capability-registry-and-plugin-config.md`「补充（#225）」。**顺带修掉同一处塌缩**：
+`missing_settings`（CAPABILITIES 里配了但向量库/嵌入模型的前置配置不齐）以前也被告知"去配 CAPABILITIES"。
 
 ### 6.4 由本轮巡检开出的工单
 

@@ -15,6 +15,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
+from agent_harness.capability.base import DegradeReason
 from agent_harness.config import Settings
 from agent_harness.identity import (
     IdentityContext,
@@ -23,8 +24,10 @@ from agent_harness.identity import (
 )
 from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.types import MemoryScope, memory_session_var
+from agent_harness.memory.vector_store import VectorStoreError
 from agent_harness.session.event import EVENT_TYPES as SESSION_EVENT_TYPES
 from agent_harness.web.app import create_app
+from agent_harness.web.memory import _DEGRADED_MESSAGE
 
 _SECRET = "memory-api-test-signing-secret-at-least-32"
 _ALICE = IdentityContext("acme", "alice", ["user"])
@@ -253,8 +256,56 @@ async def test_memory_capability_disabled_is_503(tmp_path: Path):
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test", jwt_secret=_SECRET,
     )
     with TestClient(create_app(settings, enable_cors=False)) as client:
-        assert client.get("/api/memories", headers=_auth(_ALICE)).status_code == 503
+        list_resp = client.get("/api/memories", headers=_auth(_ALICE))
+        assert list_resp.status_code == 503
         assert client.delete("/api/memories/x", headers=_auth(_ALICE)).status_code == 503
+
+    # #225：503 的 detail 是 `{code, message}`——code 是给前端的机读判别字段
+    # （不靠匹配中文），message 是给人看的那句话。
+    detail = list_resp.json()["detail"]
+    assert detail["code"] == DegradeReason.NOT_CONFIGURED.value
+    assert "CAPABILITIES" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_memory_init_failure_503_says_fault_not_config_state(tmp_path: Path, monkeypatch):
+    """配了 memory 但装配期抛异常（向量库不可达）→ 503 必须说"故障"，且不给"去配 CAPABILITIES"的错线索。
+
+    真机症状（#225）：`CAPABILITIES` 里配着 memory，工厂里向量库连不上，装配期按
+    OPTIONAL_RUNTIME 降级；路由层把"没配"与"配了但坏了"塌成同一句话，用户于是去改一个
+    本来就配好的开关，怎么改都没用。这条与上一条配对，锁"两条 503 的码与文案都不同"。
+    """
+
+    def _unreachable(settings, *, provider="builtin"):
+        raise VectorStoreError("Memory vector store: unavailable")
+
+    monkeypatch.setattr(
+        "agent_harness.capability.factories.build_memory_components", _unreachable,
+    )
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+        jwt_secret=_SECRET,
+        capabilities='{"memory": {"provider": "langmem"}}',
+    )
+    with TestClient(create_app(settings, enable_cors=False)) as client:
+        resp = client.get("/api/memories", headers=_auth(_ALICE))
+
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert detail["code"] == DegradeReason.INIT_FAILED.value
+    assert "初始化失败" in detail["message"]
+    # 判别性断言：那条把人指向本来就是开的开关的线索，在这个原因下**一个字都不许有**。
+    assert "请在 CAPABILITIES 中配置 memory" not in detail["message"]
+
+
+def test_every_degrade_reason_has_a_message():
+    """逐原因的文案表必须**覆盖整个枚举**（`_DEGRADED_MESSAGE[reason]` 是直接索引）。
+
+    给 `DegradeReason` 添第 5 个码而不加文案 ⇒ 那条路径 500（而不是 503）。
+    枚举与表分居两个模块，没有这条钉子就只能靠人记得两边一起改。"""
+    assert set(_DEGRADED_MESSAGE) == set(DegradeReason)
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,7 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_COMPLETED
-from agent_harness.capability.base import CapabilityRegistry, Degradation
+from agent_harness.capability.base import CapabilityRegistry, Degradation, DegradeReason
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
@@ -233,6 +233,15 @@ class TestGate2SkillsProgressiveDisclosure:
         assert "不是运行时指令" in second_request  # 数据非指令前缀在场（防注入框架）
 
 
+def _degrade_codes(wiring) -> dict[str, str]:
+    """码表快照 + 「存的是码、不是枚举成员」这条一并钉住。
+
+    `f"{reason}"` 对 `str`-Enum 成员写出的是 `DegradeReason.X` 而不是 `missing_settings`，
+    而 API 里给前端的是后者——存成员会让日志/序列化与跨端契约悄悄不一致。"""
+    assert all(not isinstance(value, DegradeReason) for value in wiring.degradations.values())
+    return dict(wiring.degradations)
+
+
 class TestDegradation:
     @pytest.mark.asyncio
     async def test_factory_failure_degrades_and_base_agent_still_runs(self, tmp_path, monkeypatch):
@@ -252,6 +261,9 @@ class TestDegradation:
         assert registry.optional("memory") is None
         assert wiring.memory_writer is None and wiring.memory is None
         assert wiring.context_providers == []
+        # #225：降级**原因**要结构化留在 wiring 上——否则路由层只能对用户说
+        # "未启用"，把"配了但装配失败"说成"没配"（真机症状）。
+        assert wiring.degradations == {"memory": DegradeReason.INIT_FAILED.value}
 
         # 降级后基础 Agent 照常运行（08 §7：OPTIONAL_RUNTIME 缺失不影响 Agent 可运行）。
         model = ScriptedModel([AIMessage(content="纯 Runtime 回答")])
@@ -261,3 +273,61 @@ class TestDegradation:
         result = await runtime.run(make_session(tmp_path), "在吗")
         assert result.status == STATUS_COMPLETED
         assert result.final_text == "纯 Runtime 回答"
+
+    @pytest.mark.asyncio
+    async def test_absent_reasons_are_not_collapsed(self, tmp_path):
+        """#225：缺席的**四种**原因各自留码，不塌成一个"未启用"。
+
+        「没配」（缺省，不进表）与「配了但没启用」「配了但前置配置不齐」必须分得开——
+        三种处境给用户的下一步动作完全不同（改 CAPABILITIES / 改 enabled / 改 .env）。
+        """
+        registry = CapabilityRegistry()
+        # ① 没配：不是"降级"，是缺省（CAPABILITIES 是空的 = 一切按零行为变化）。
+        wiring = await wire_capabilities(registry, {}, settings=_settings(tmp_path))
+        assert _degrade_codes(wiring) == {}
+
+        # ② 配了但 enabled=false。
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"memory": {"enabled": false}}'),
+            settings=_settings(tmp_path),
+        )
+        assert _degrade_codes(wiring) == {"memory": DegradeReason.DISABLED.value}
+        assert wiring.memory is None
+
+        # ③ 配了、启用了，但 provider 自己的前置配置不齐（真 factory：milvus/embedding
+        # 都没配 → 返回 None）。这条走的是**真** `build_builtin_memory_components`，
+        # 不是替身——"分不出来的原因"正是它里面的那个 `return None`。
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"memory": {}}'),
+            settings=_settings(tmp_path),
+        )
+        assert _degrade_codes(wiring) == {"memory": DegradeReason.MISSING_SETTINGS.value}
+        assert wiring.memory is None
+
+        # ④ 另外两个"缺前置配置"的登记点（knowledge 的 collection、websearch 的 key）：
+        # 删掉它们不会让别的用例变红，所以在这里点名——"某些 capability 的缺席原因
+        # 从表里静默消失"正是这张表最容易退化回去的方式。
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"knowledge": {}, "websearch": {}}'),
+            settings=_settings(tmp_path),
+        )
+        assert _degrade_codes(wiring) == {
+            "knowledge": DegradeReason.MISSING_SETTINGS.value,
+            "websearch": DegradeReason.MISSING_SETTINGS.value,
+        }
+
+    def test_reason_codes_are_a_closed_set(self):
+        """码是**跨端契约**（前端 `isMemoryFault` 比的就是字符串 `init_failed`）。
+
+        改名不会让任何门禁变红——前后端各自用自己那份字面量自证（`DegradeReason`
+        在后端测试里是符号，前端/e2e 是字面量）。这条把"值集合"钉死：改名先红，
+        逼迫有人去看前端那份字面量要不要跟着改。"""
+        assert {reason.value for reason in DegradeReason} == {
+            "not_configured",
+            "disabled",
+            "missing_settings",
+            "init_failed",
+        }

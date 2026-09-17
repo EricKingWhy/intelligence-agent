@@ -385,6 +385,11 @@ export default function App() {
     selectedIdRef.current = null;
     selectSession(null);
     focusRun();
+    // #223：把工作区切回 Chat。composer 只属于 Chat 面，停在「文件/改动」/「输出」
+    // 时点「新建会话」= 整屏没有任何可输入的地方（用户读作"点了没反应"）。
+    // 「新建会话」的意图就是"我要说点什么"，所以这一跳是意图本身，不是补偿动画；
+    // 能力收窄时 resolveActiveTab 兜底，不会切到一个不存在的面。
+    setSelectedSurface('chat');
     // #183 AC4：未钉住时**离开一个正在看的会话** = 收起面板（钉住的用途正是
     // "切换会话时它还开着"）。首次进入（原本没有会话）不算离开——那会把"点开第一个
     // 会话"也变成"面板自己关掉"。
@@ -508,6 +513,11 @@ export default function App() {
         selectSession(created.sessionId);
         // 空会话创建后刷新列表（会话出现在该项目分组下）。
         await refreshSessions();
+        // #223（同一缺陷的另一入口）：先切回 Chat 再聚焦——本函数下面是"焦点落到
+        // chat 输入框、用户立刻可以打字"，但 composer 只属于 Chat 面；停在
+        // 「文件/改动」/「输出」时 `#composer-input` 在 DOM 里存在却**不可见**，
+        // 那句 focus() 落在一个看不见的输入框上，用户看到的仍是"没反应"。
+        setSelectedSurface('chat');
         // #204 裁定 §1：焦点落到 chat 输入框——用户立刻可以打字（弹窗关闭后的
         // 下一步就是在那里发第一条消息）。放在浮层关闭之后（调用方 onOpenChange
         // 先把 Radix 焦点还回来，这里再指到输入框，否则会被浮层的关闭焦点打断）。

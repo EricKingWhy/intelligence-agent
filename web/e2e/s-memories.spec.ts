@@ -188,6 +188,47 @@ test('AC4：记忆未装配（503）→ 如实说"记忆未启用"，不伪造�
   await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
   await expect(panel(page).getByRole('button', { name: '重试' })).toHaveCount(0);
   await expect(panel(page).locator('.memory-loading')).toHaveCount(0);
+  // #225：前端不再自己附会一句"这是配置状态而非故障"——那是它对后端状态的断言。
+  await expect(degraded).not.toContainText('非故障');
+});
+
+test('#225：记忆装配失败（503 + init_failed）→ 说"故障" + 可重试，不得说成"未启用"', async ({
+  page,
+}) => {
+  /* 真机症状：CAPABILITIES 里配着 memory、向量库连不上 → 装配期降级；界面却把它渲染成
+     "记忆未启用 + 这是配置状态而非故障"，用户于是去改一个本来就配好的开关。
+     与上一条的**唯一**区别是 503 的 `code`（init_failed vs not_configured）——
+     分流依据就是这个码，不是文案。 */
+  const detail = 'memory capability 初始化失败：CAPABILITIES 里已登记且启用，但装配时出错。';
+  let calls = 0;
+  await routeApi(page, {
+    memories: [SHORT],
+    onMemoriesGet: (route) => {
+      calls += 1;
+      return route
+        .fulfill({
+          status: 503,
+          body: JSON.stringify({ detail: { code: 'init_failed', message: detail } }),
+          contentType: 'application/json',
+        })
+        .then(() => true);
+    },
+  });
+  await page.goto('/');
+  await openMemories(page);
+
+  // 故障走错误条（能重试），不走降级态。
+  await expect(panel(page).locator('.memory-error')).toContainText(detail);
+  await expect(panel(page).locator('.memory-degraded')).toHaveCount(0);
+  await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
+
+  // **真的点一次**（而不是只断言按钮在）：依赖没修好时重试必然还是 503——这才是要锁的
+  // 语义，失败**不许被界面吞掉**（请求真的发出去了、错误条还在、空态不出来）。
+  const before = calls;
+  await panel(page).getByRole('button', { name: '重试' }).click();
+  await expect(panel(page).locator('.memory-error')).toContainText(detail);
+  expect(calls).toBeGreaterThan(before);
+  await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
 });
 
 test('AC4：真的没有记忆 → "还没有记忆"（与降级/读取失败都区分开）', async ({ page }) => {

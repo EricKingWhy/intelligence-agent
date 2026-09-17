@@ -1549,19 +1549,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-weight: 600;
   color: var(--warning);
 }
-.memory-degraded-detail,
-.memory-degraded-hint {
+.memory-degraded-detail {
   font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--text-tertiary);
-}
-.memory-degraded-hint code {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  padding: 0 3px;
-  background: var(--surface-2);
-  border-radius: var(--radius-xs);
-  color: var(--text-secondary);
 }
 .memory-loading {
   padding: var(--space-xl) 0;

@@ -128,7 +128,10 @@ export interface MemorySummary {
  *
  *  **硬删不可恢复**（不是软删/回收站）：后端 `forget` 真的移除记录行与索引。
  *  失败语义在后端是**显式**的：id 不存在 → 404、不属于当前入口 → 403、
- *  记忆能力未装配 → 503（前端据此区分"没了"/"不给删"/"未启用"）。 */
+ *  记忆能力没启用 → 503（前端据此区分"没了"/"不给删"/"未启用"）。
+ *  503 自身还分两种（#225）：`detail.code = not_configured/disabled/missing_settings`
+ *  = 配置状态（面板说"记忆未启用"），`init_failed` = 装配失败（错误条 + 重试）。
+ *  判别走 `code`，不走文案（见 `lib/api.ts` 的 `isMemoryFault`）。 */
 export interface MemoryDeleted {
   id: string;
   deleted: boolean;

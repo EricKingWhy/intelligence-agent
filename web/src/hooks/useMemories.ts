@@ -5,12 +5,19 @@
  *  重拉权威列表把它清掉（成功 → 该行由后端的缺席消失；失败 → 该行回来）。所以列表
  *  静止态永远等于最近一次后端响应——这正是 AC3「不得只做本地隐藏」的落地方式。
  *
- *  能力未装配（503）**不是加载失败**：`disabled` 与 `loadError` 是两条通道，
- *  面板据此显示"记忆未启用"而不是"加载失败 + 重试"（不变量 #21：可选能力故障
- *  不能拖垮核心，也不该让用户去重试一个配置状态）。 */
+ *  503 分两种（#225，判别走后端的机读 `code`，不匹配中文）：
+ *  - **未装配**（配置状态）→ `disabled` 通道，面板显示"记忆未启用"、不给重试
+ *    （不变量 #21：不该让用户去重试一个配置状态）；
+ *  - **装配失败**（`init_failed`，向量库不可达之类）→ 走 `loadError` 通道：这是
+ *    **故障**，要给错误条 + 重试，说成"未启用"会把用户推去改一个本来就配好的开关。 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MemoryError, deleteMemory, isMemoryDisabled, listMemories } from '../lib/api';
+import {
+  MemoryError,
+  deleteMemory,
+  isMemoryDisabled,
+  listMemories,
+} from '../lib/api';
 import { MEMORY_PAGE_SIZE, hasMoreAfter, refetchLimit, withoutIds } from '../lib/memory';
 import { withTimeout } from '../lib/timeout';
 import type { MemorySummary } from '../types';
@@ -24,9 +31,11 @@ export interface MemoriesState {
   loading: boolean;
   /** "加载更多"在途（与 `loading` 分开：首屏骨架不该在翻页时回来）。 */
   loadingMore: boolean;
-  /** 非 503 的加载失败原因（**不清空**已加载的行——一次抖动不该把列表抹掉）。 */
+  /** 加载失败原因（**含 503 + `init_failed` 那个故障子类**，不含配置降级态）；
+   *  **不清空**已加载的行——一次抖动不该把列表抹掉。 */
   loadError: string | null;
-  /** 记忆能力未装配（503）的后端原文；非空 = 降级态。 */
+  /** 记忆能力**未装配**（配置状态）的后端原文；非空 = 降级态。
+   *  **不含装配失败**：那是故障，走 `loadError`（可重试）。 */
   disabled: string | null;
   hasMore: boolean;
   /** 删除在途的行 id（按钮渲染"删除中…"并禁用，防连点重复 DELETE）。 */
@@ -61,13 +70,16 @@ export function useMemories(): MemoriesState {
   // 而回调闭包里的 state 是发起时的快照。
   const rowsRef = useRef<MemorySummary[]>([]);
 
-  /** 统一的错误落点：503 走降级通道，其余走错误通道。 */
+  /** 统一的错误落点：未装配 → 降级通道，其余（含装配失败）→ 错误通道。 */
   const recordError = useCallback((error: unknown) => {
     if (isMemoryDisabled(error)) {
       setDisabled(error instanceof Error ? error.message : '记忆未启用');
       setLoadError(null);
       return;
     }
+    // 装配失败（503 + init_failed）刻意落在这里：它有后端的可行动原文（"向量库不可达"），
+    // 而错误条正是"能重试 + 显示原因"的那个面。**不设 disabled**：那会渲染成"未启用"。
+    setDisabled(null);
     setLoadError((error as Error).message || '加载记忆失败');
   }, []);
 
