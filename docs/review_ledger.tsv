@@ -55,3 +55,4 @@ ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
 55321bc	#222 落点记录（tracker 批次行 B-8 + PHASE_STATUS 索引 + 归档明细 + 审查行 1a4c2fb..864fb15 + 巡检 F5 状态，docs-only）
 51d0c8e	#222 集成/关单状态如实化（tracker + PHASE_STATUS + 归档，docs-only）
 a63dc46	B-11 落点记录（tracker 批次行 B-11 + 归档明细 + PHASE_STATUS 索引 + 本台账审查行，docs-only；上一批漏声明，本批补）
+757ccea	B-12 落点记录（tracker 批次行 B-12 + 归档明细 + PHASE_STATUS 索引 + 本台账审查行 + a63dc46 白名单，docs-only）
