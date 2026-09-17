@@ -34,6 +34,7 @@
 2026-09-17	B-11 双轴审查（#228 F9 假空态；subagent 余额不足→主会话内联双轴：11 处 refreshSessions 调用方全量审计 + 红证 5 组独立复核）	9843545..ed02c53
 2026-09-17	B-12 双轴审查（#229 F10 浮层渲染在视口外 / #230 F11 供应商 422 detail 被整段丢弃 / #231 F12 命令面板焦点被关闭恢复抢走 / #232 F13 硬删会话被后台记忆写回复活 / #233 F14 排队冻死直播 + dev proxy 缺 ws；Standards + Correctness 各一 subagent，fixed point a63dc46，审的是未提交工作树；findings 全部就地修复 ⇒ 该工作树即本 range 的 7 个 commit）——**Standards 轴 1×P1**：`store.py` 六处注释把进程内已删 id 集合说成「tombstone」并引 ADR-0029 D1，而 ADR-0029 D1 反对的正是墓碑（机制叙述与既有决议冲突、且无 ADR 落点）⇒ 新建 **ADR-0036** 收机制单点（D1 拒写 `SessionNotFound` / D2 delete·append 共用会话写锁 / D3 进程内集合与墓碑的对比表），六处压成「约束 + 指针」；1×P3：`multiturn-queue.spec.ts` 的 T12r 注释误引 ADR-0030 §5.1（该条不存在）⇒ 改指 §2 术语表。**Correctness 轴 P3**：`CommandPalette` 的 `onCloseAutoFocus` 无条件 `preventDefault` 会让普通 Esc/Ctrl+K 关闭时焦点掉到 body（a11y 回归）⇒ `onAfterClose` 改返回布尔、仅真登记落点时接管；另两条经代码核实：「cli.py:207 传客户端 id」系**误报**（`cli.py:198` 是 `str(uuid4())`，src 中 `Session.start(` 三处均非客户端可控）、术语「tombstone」随 ADR-0036 整改消除。**红证**：F13 kill test 回退 `store.py` ⇒ 2 条精确失败（`read_events` 返回 1 条 `memory/degraded` 复活形状 / `DID NOT RAISE SessionNotFound`），还原后 2 passed。	a63dc46..da7d4b5
 2026-09-17	B-13 双轴审查（#234 F15 审批队列续聊后消失 / #235 F16 沙箱输出假流式；Standards + Correctness 各一 subagent，fixed point 1761ff7，审的是未提交工作树；findings 全部就地修复 ⇒ 该工作树即本 range 的 3 个 commit）——**Correctness 轴 1×P1**：`auto_approve=False` 的 **deny 路由**同样不落盘 ⇒ 续聊静默降级成「全自动批准」（反向门，比原症状更危险）⇒ 落 `SESSION_AUTO_APPROVE_KEY` + 续聊复原 deny 回调 + **变异红证**（把 `_declared_auto_approve` patch 成恒 `None` ⇒ 新用例必红、真实路径 `callback_is_none=False`）；**1×P2**：`fork` 子会话不继承权限档 ⇒ 子会话静默回默认档（已修 + 2 例回归）；**P3**：`docs` 行号引用 `session/service.py:513` 已漂移 ⇒ 改符号引用；ASCII 透明性是隐含前提 ⇒ docstring 写明「由兜底编码来源保证、cp037 之类非生产路径不为其加机制」；`TestStreamingEmission` 4 例只有 1 例是真红证 ⇒ docstring 注明；坏值静默降级方向与旧行为一致（可辩护、不改）；**非 ASCII（中文）流仍全缓冲至 64 KiB/EOF（`_carry` 等正确性风险）风险登记**。跨仓 1×P2（前端 `types.ts` 的权限 pill 只由创建回执初始化、amend 不含 `permission_mode` ⇒ 第二套真相）按 §8 Scope Lock 不在本票内 ⇒ 单独开 #236。	1761ff7..d425edc
+2026-09-18	架构审计 + #237 cwd 续聊修复两轴审查（Standards + Spec；findings 经 4dbe7db 处置）	5efe2b7..4dbe7db
 [whitelist]
 b53465e	B-10 集成/关单状态（tracker + PHASE_STATUS + 归档，docs-only）
 133ef5a	B-10 落点记录（tracker + 归档 + PHASE_STATUS + 本台账审查行，docs-only）
@@ -62,5 +63,3 @@ fc01d28	B-12 集成 push 补记（tracker + 归档，docs-only）
 8930701	B-13 落点记录（tracker + 归档明细 + PHASE_STATUS 索引 + 本台账审查行，docs-only）
 9444f65	B-13 集成/关单状态如实化（tracker + 归档，docs-only）
 3dff24f	B-13 落点记录推送补记（tracker + 归档，docs-only）
-
-2026-09-18	架构审计 + #237 cwd 续聊修复两轴审查（Standards + Spec；findings 经 4dbe7db 处置）	5efe2b7..4dbe7db
