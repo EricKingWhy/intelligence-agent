@@ -930,10 +930,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 /* ═══ WS-5 / #155：项目浮层（新建 / 删除确认 / 加入项目） ═══
  * 与命令面板同一套浮层材质（glass 仅浮层可用，冻结视觉原则）；
- * 居中而非顶部对齐：这三个动作都是"停下来做一件事"，不是快速搜索。 */
+ * 居中而非顶部对齐：这三个动作都是"停下来做一件事"，不是快速搜索。
+ *
+ * **定位必须在这一组里给**：Radix `Dialog.Content` 不带样式，内容类只给了皮
+ * （背景/圆角/宽高），没给 `position` 就会留在常规流里 —— 被 portal 追加到 body
+ * 末尾 ⇒ 落在视口**下方**，而 `.palette-overlay`（fixed、z-index 50）盖在其上，
+ * 用户看到的是"整页变暗、弹层没出来、页面还点不动"。#203 的 `provider-dialog`
+ * 正是漏了这一条（真机证据与复现见 `docs/LIVE_BROWSER_TEST_20260917.md` §9.1）。
+ * ⇒ 新增浮层内容类时，**必须**加进这个选择器组（或自带等价定位规则）。 */
 
 .project-dialog,
-.memory-panel {
+.memory-panel,
+.provider-dialog {
   position: fixed;
   left: 50%;
   top: 50%;
