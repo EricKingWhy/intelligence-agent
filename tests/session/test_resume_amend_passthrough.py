@@ -15,7 +15,10 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent_harness.config import Settings
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.service import AmendOptions, SessionService
+from agent_harness.session.session import Session
+from agent_harness.session.store import JsonlSessionStore
 
 
 def _make_state(tmp_path):
@@ -40,6 +43,61 @@ def _make_state(tmp_path):
     state.ensure_stores = AsyncMock()
     state.stores = MagicMock()
     return state
+
+
+class TestResumeWorkspace:
+    """续聊 runtime 必须沿用会话创建时不可变的 cwd 锚。"""
+
+    def _real_state(self, tmp_path):
+        state = _make_state(tmp_path)
+        state.store = JsonlSessionStore(root=tmp_path / "sessions")
+        state.message_queues = MagicMock()
+        state.approval_queues = {}
+        state.run_manager.get_active = MagicMock(return_value=None)
+        state.workspace_registry = MagicMock()
+        state.workspace_registry.get = MagicMock(return_value=MagicMock())
+        return state
+
+    def test_resume_uses_persisted_external_cwd(self, tmp_path):
+        state = self._real_state(tmp_path)
+        external = tmp_path / "external-project"
+        external.mkdir()
+        Session.start(state.store, session_id="test-sid", cwd=external)
+
+        with patch(
+            "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
+        ) as mock_build:
+            asyncio.run(
+                SessionService(state).resume_and_launch(
+                    session_id="test-sid", task="hello",
+                )
+            )
+
+        persisted = session_cwd(state.store.read_events("test-sid"))
+        assert persisted is not None
+        assert mock_build.call_args.kwargs["workspace"] == external.resolve()
+        assert session_cwd(state.store.read_events("test-sid")) == persisted
+        assert len([
+            event for event in state.store.read_events("test-sid")
+            if event.type == "session/started"
+        ]) == 1
+
+    def test_legacy_session_without_cwd_keeps_default_workspace(self, tmp_path):
+        state = self._real_state(tmp_path)
+        Session.start(state.store, session_id="test-sid")
+
+        with patch(
+            "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
+        ) as mock_build:
+            asyncio.run(
+                SessionService(state).resume_and_launch(
+                    session_id="test-sid", task="hello",
+                )
+            )
+
+        expected = state.workspaces_root / "test-sid"
+        assert mock_build.call_args.kwargs["workspace"] == expected
+        assert expected.is_dir()
 
 
 class TestResumeAndLaunchPassthrough:

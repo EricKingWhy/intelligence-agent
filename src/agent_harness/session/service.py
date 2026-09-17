@@ -55,6 +55,7 @@ from agent_harness.session.approval import (
 from agent_harness.session.approval import (
     declared_permission_mode as _declared_permission_mode,
 )
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
     UndeliveredInput,
@@ -662,7 +663,12 @@ class SessionService:
                 workspace_registry=self._state.workspace_registry,
             )
 
-        workspace = self._state.workspaces_root / session_id
+        persisted_cwd = session_cwd(existing)
+        workspace = (
+            Path(persisted_cwd)
+            if persisted_cwd is not None
+            else self._state.workspaces_root / session_id
+        )
         workspace.mkdir(parents=True, exist_ok=True)
         _, wiring = await self._state.get_wiring()
         await self._state.ensure_stores()
