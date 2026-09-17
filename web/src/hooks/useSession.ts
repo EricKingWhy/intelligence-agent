@@ -1086,8 +1086,20 @@ export function useSession() {
             sseRef.current?.cancel(); // 收掉那条接错的流（含服务端订阅）
           }
           if (outcome.kind === 'ack') {
-            // queued/steered JSON 收据：消息已受理、当前 run 仍在跑，本次不接流。
-            setMode({ kind: 'viewing', sessionId });
+            /* queued/steered JSON 收据：消息已受理、**当前 run 仍在跑**。
+               这里必须把流接回来，不能只置 viewing：本函数入口已经推进了代际
+               （`streamGenRef.current += 1`），`onEvent` 的 gen 守卫会把原来那条
+               live 流的后续帧**全部丢弃**——于是"一条排队项"换掉了整场直播。
+               真机实测（`docs/LIVE_BROWSER_TEST_20260917.md` §9.4 F14）：排队前
+               正文长度逐帧增长，按 Enter 排队后**停住不动**（8s 采样无一次变化）。
+               接流写法与下面 launched 分支逐字一致（带游标，避免快照重放旧终态把
+               terminalSeen 提前置真）。 */
+            sseRef.current?.cancel(); // 旧流已被入口代际作废，先收掉它的订阅
+            sseRef.current = null;
+            const conv = conversationRef.current;
+            const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+            lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
+            attachLiveStream(wsStreamResponse(sessionId, cursor), myGen, conversationRef.current);
             return;
           }
           if (outcome.kind === 'retry-queue') {

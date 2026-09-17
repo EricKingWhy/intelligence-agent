@@ -11,6 +11,14 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
+        // `ws: true` 不是可选调优：**live 流的真实通道是 `WebSocket /api/ws`**
+        // （`lib/wsStream.ts` 有实测表——交付层会把整个 HTTP 响应攒到流结束才下发，
+        // 所以 POST/GET 的 SSE 在部署链路上要 41~44s 才到响应头）。Vite 的 proxy
+        // 默认**不处理 Upgrade 请求**，少了这一行，dev 下 `/api/ws` 的握手永远
+        // 完不成：客户端 `onopen` 不触发 → 不发 subscribe → 浏览器 ~11s 后才放弃。
+        // 现象是"直播卡住 11 秒以上"（真机取证：排队一条消息后正文长度停在 39
+        // 整整 8s 不动，见 `docs/LIVE_BROWSER_TEST_20260917.md` §9.4 F14）。
+        ws: true,
       },
     },
   },

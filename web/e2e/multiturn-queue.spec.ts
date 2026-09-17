@@ -683,7 +683,12 @@ test('T12n：迟到的 422 → 说出「续聊参数无效」（与窗内同一�
  * 只 `cancel()` 那条流是不够的：它已经排定的重连定时器仍会跑完 500/1000/2000ms 三次退避，
  * 最后弹一条「连接中断（stream ended unexpectedly）：重试 3 次未成功」，把"消息其实已
  * 受理"这件事盖成一次假故障。所以纠正时**必须推进代际**让那条链整体失效（ADR-0030 §13
- * 第 4 条）。断言要活过那三轮退避（5s+）才看得见差别——这正是本条存在的理由。 */
+ * 第 4 条）。断言要活过那三轮退避（5s+）才看得见差别——这正是本条存在的理由。
+ *
+ * 纠正之后的落点（T12r 的修复）：收据说"消息已受理"，而 queued 只在一个 run 正在跑时
+ * 才可能出现（ADR-0030 §2 术语表：queue 的投递边界 = 当前 run 的**终态之后**）⇒ 判错要
+ * 纠正的是"接错了哪条流"，不是"接流这件事本身"。
+ * 因此纠正会**换一条**流（游标接上本地实况），而不是把用户留在一个死画面上。 */
 
 test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无错误条', async ({ page }) => {
   const calls: Record<string, unknown>[] = [];
@@ -712,8 +717,11 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
   await page.waitForTimeout(6000);
   await expect(page.locator('.app-error')).toHaveCount(0);
   await expect(page.locator('.reconnect-banner')).toBeHidden();
-  // 更硬的证据：那条接错的流被纠正后**没有**被重连复活（代际推进 = 整条链失效）
-  expect(subs).toHaveLength(1);
+  /* 订阅恰好两次：① 窗外按 launched 接的那条（已被纠正，代际推进后它的整条重连链
+     失效）；② 纠正后由 ack 分支**换**上的那条（本地游标续接）。要锁的是"接错的流
+     没有被重连复活"——那种复活会在上面留下假「连接中断」，也会把这里推成 3 次以上
+     （每轮退避各一条）。 */
+  expect(subs).toHaveLength(2);
 });
 
 /* ── T12p：迟到的**事件流**响应 → 当初判 launched 是对的，WS 继续收（不必也不许再接一条）──
@@ -806,4 +814,69 @@ test('T12q：纠正后回退重投仍失败（409 人工裁决）→ 必须把�
   expect(bodies[1]).toMatchObject({ content: '打断一下（回退也会被拒）', mode: 'queue' });
 
   await expect(page.locator('.app-error')).toContainText('call_id=call_after_fallback');
+});
+
+/* ── T12r：排队（ack）之后必须把 live 流接回来 ──
+ *
+ * 真机实测（`docs/LIVE_BROWSER_TEST_20260917.md` §9.4 F14）：在途 run 里按 Enter
+ * 排队一条消息后，正在生成的回答**停止更新**——同一次运行内对照，排队前正文长度
+ * 18→67 逐帧增长，排队后**停在 73 整整 11s 不动**；同一原因使队列项的摘除事件
+ * （`queue/cancelled`）不再应用，「取消排队消息」点了界面毫无变化（服务端已取消）。
+ *
+ * 机制：`sendFollowUp` 入口就推进了代际（`streamGenRef.current += 1`），`onEvent`
+ * 的 gen 守卫会把原流的后续帧全部丢弃；而 queued 的 ack 分支当时只
+ * `setMode({kind:'viewing'})`（注释写「本次不接流」）——原流已作废、又不接新流，
+ * 于是整场直播被一条排队项换掉。修复 = ack 分支按 launched 分支同一套写法重接流。
+ *
+ * 判别力从「本场只剩一次订阅机会」来：历史端点空日志（viewing 兜底失效）+ POST
+ * 走窗内 SSE（不产生 WS），于是**唯一那次 WS 订阅只可能由 ack 分支发出**——修复前
+ * 它一次都不发，那段文本永远不上屏（红证明：超时失败）。 */
+test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应用后续帧', async ({ page }) => {
+  const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  // 序号接在 LIVE_FRAMES 的 max seq（3）之后：游标对齐后不构成 seq gap
+  const AFTER_QUEUE: FrameSpec = {
+    type: 'model/delta', data: { delta: '排队之后仍在写' }, seq: 4,
+    session_id: 'mt-live-1', run_id: 'mt-run-live', step_id: 1, time: '2026-09-16T00:00:02Z',
+  };
+  await routeApi(page, {
+    sessions: [],
+    /* 历史端点返回**空日志**：让「viewing 迁移 → 历史装载 → 自动接流」这条
+       兜底路径失效。否则本用例对修复毫无判别力——修复前 ack 分支置 viewing，
+       那次迁移会顺带自动重接一次流，帧照样上屏（实测：第一版本用例在修复前
+       也绿，属于假绿）。空日志 = 没有未收口的 run = 兜底不启动，于是
+       本场**唯一的 WS 订阅只可能来自 ack 分支自己接流**（模拟交付层直连的
+       快链路：POST /messages 的 200 JSON 在窗内落定，SSE 那条没有 WS）。 */
+    events: [],
+    wsSubscribes: subs,
+    onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
+    onMessagesPost: (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'queued', mode: 'queue' }),
+      }),
+    // 帧挂在**唯一那次**订阅上：接流本身就是要考的事，不另设第二次订阅
+    // （设 `call >= 2` 会把脚本挂在一次不存在的调用上——那正是本用例第一版
+    // 的错，基线 WS 其实来自 ack 分支，于是"永远等不到帧"）。
+    onWs: () => ({
+      events: LIVE_FRAMES, frames: [AFTER_QUEUE], hasActiveRun: true, ending: 'keep',
+    }),
+  });
+
+  await page.goto('/');
+  await submitTask(page, '长任务');
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('排队的一句');
+  await box.press('Enter');
+
+  // 关键断言：排队之后 run 的输出仍然上屏
+  await expect(page.locator('.model-output').last()).toContainText('排队之后仍在写', { timeout: 8000 });
+  await expect(page.locator('.app-error')).toHaveCount(0);
+  // 恰好一次订阅——就是 ack 分支接的那条（也不该出现重连风暴）。
+  expect(subs).toHaveLength(1);
+  // 且必须带**本地游标**：不带就会从 -1 重发整段快照，旧终态会被重新投影，
+  // 足以把「流还在跑」判成「已收尾」（#208 游标契约）。
+  expect(subs[0]).toMatchObject({ session_id: 'mt-live-1', after_seq: 3 });
 });
