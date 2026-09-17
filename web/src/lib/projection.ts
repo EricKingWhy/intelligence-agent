@@ -751,9 +751,14 @@ function projectOperationReconcileRequired(state: ConversationState, event: Agen
 /** `session/started`（会话第一条事件）：`started_data` 是会话级初始配置的**加法槽**
  *  （T7 #137）。今天这里只取 F15 #234 落进来的权限档（`permission_mode`）。
  *
- *  **只认第一条**：档位是会话属性、创建后不可变，所以重放 / 迟到重复投递都不得让后来的
- *  值改写先到的（与后端 `approval.py::declared_permission_mode` 同一规矩）。值不是
- *  非空字符串（老日志没有这个键、或日志被手改）→ 保持 null = "未声明"，不编默认档。
+ *  **只认第一个带值的 `session/started`**：档位是会话属性、创建后不可变，所以重放 /
+ *  迟到重复投递都不得让后来的值改写先到的（与后端 `approval.py::declared_permission_mode`
+ *  同一规矩——那边也是在第一条 started 上取键，缺键即 None）。实现按"已非 null 即早退"
+ *  达成这一点（"没带键"读作"没声明"，所以脏日志里**后**一条仍可声明：比后端"只在第一条
+ *  上取键"宽一格，为这个不可达分支不再多存一个 seen 标志——判据由下方单测钉住）；
+ *  今天每会话恰好一条 started（`session.py` 的 `Session.start` 只 append 一次），
+ *  分叉 child 也是自带继承值而非复用父的 started。值不是非空字符串（老日志没有这个
+ *  键、或日志被手改）→ 保持 null = "未声明"，不编默认档。
  *
  *  注意它**不是** `permission_policy`：后者是审批请求到达时 ToolExecutor 实际用的阈值，
  *  两者可以合法地不同（#236）。 */

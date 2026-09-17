@@ -2148,6 +2148,15 @@ describe('session/started → session_permission_mode（#236）', () => {
     expect(s.session_permission_mode).toBe('read-only');
   });
 
+  it('第一条没带键、后一条带了 → 取后者（"没带键"= 没声明，不是"声明为 null"）', () => {
+    // 钉住实现判据：按"已非 null 即早退"，而不是"只看下标 0"。真机上每会话恰好一条
+    // started，所以这是脏日志分支——但它必须按上面那句话行事，不能靠巧合。
+    let s = applyEvent(initConversation('s'), started({ model_id: 'x' }));
+    expect(s.session_permission_mode).toBeNull();
+    s = applyEvent(s, started({ permission_mode: 'read-only' }, 2));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
   it('与 permission_policy 是两件事：声明档与审批观测阈值各存各的（可合法不同）', () => {
     let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
     s = applyEvent(s, ev({

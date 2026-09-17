@@ -13,9 +13,9 @@
  *  `service.create_and_launch` 的语义是「显式传了非 danger-full-access 的档 →
  *  切交互式审批」（`permission_mode_explicit`）。所以"默认 = workspace-write +
  *  自动执行"只能靠**不发这个键**来表达；一旦把默认档也塞进 payload，每次工具调用
- *  都会弹审批卡。只有用户主动改档才发 `permission_mode`。创建响应回传后端真实
- *  写入的会话档位（`onPermissionInitialized`），前端用它初始化 composer 权限 pill
- *  ——不要各自取默认值，那正是不一致的来源（#204 裁定 §3）。
+ *  都会弹审批卡。只有用户主动改档才发 `permission_mode`。回执里的档位**不再**参与
+ *  composer 权限 pill（#236）：pill 的真值来自会话自己的 `session/started` 投影，弹窗
+ *  本地选中态只是**请求意图**（接线见 `App.tsx::handleStartTaskInProject`）。
  *
  *  失败留在本浮层（AC12）：项目目录被移走 → 后端 422「目录不存在：…」，这句话
  *  必须出现在用户目光所在的位置（浮层里）。表单状态放只在打开时挂载的内层组件
@@ -41,9 +41,8 @@ interface Props {
    *  用默认档（与 Composer 的降级立场一致：不伪造列表）。 */
   permissionModes: CatalogEntry[];
   onOpenChange: (open: boolean) => void;
-  /** 创建空会话（launch=false，不启动 run）。resolve `null` = 已创建（调用方关闭
-   *  浮层、用响应回传的档位初始化权限 pill）；否则 resolve 一句**给用户看的原因**
-   *  （浮层就地显示）。 */
+  /** 创建空会话（launch=false，不启动 run）。resolve `null` = 已创建（调用方关闭浮层
+   *  并选中这个新会话）；否则 resolve 一句**给用户看的原因**（浮层就地显示）。 */
   onCreateSession: (
     project: Project,
     permissionMode: string | null,

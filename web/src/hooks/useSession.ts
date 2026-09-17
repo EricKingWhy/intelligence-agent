@@ -1023,7 +1023,9 @@ export function useSession() {
    *  空闲会话 → 后端 launched 直驱新 run（同形 SSE）→ attachLiveStream 续接。
    *  在途 run → 后端 queued 入队（JSON 确认）→ 当前流继续，下个 run 消费消息。
    *
-   *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 档位。仅在
+   *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 的三项档位
+   *  （model / agent_profile / reasoning_effort；**不含 `permission_mode`**——
+   *  它不在 /messages 请求契约内，是会话属性，创建后由后端从事件流派生，见 #236）。仅在
    *  「空闲 → launched 新 run」时被后端应用；在途 run 的 queued 消息忽略。
    *  空值不发键（api.sendMessage 兜底归一化；App.tsx 侧另有与 create 分支
    *  同款的「有值才带」展开），与 create 分支同一语义。 */

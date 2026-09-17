@@ -320,7 +320,11 @@ export const Composer = memo(function Composer({
               icon={Shield}
               placeholder="权限"
               disabled={locked || permissionModeLocked}
-              disabledHint={permissionModeLocked ? PERMISSION_MODE_LOCKED_HINT : undefined}
+              // 审批等待时 `locked` 才是**操作性的**禁用原因（旁边另有可见提示），
+              // 别用"会话内不可改"顶掉 trigger 原有的「当前档位 + 后端描述」title。
+              disabledHint={
+                permissionModeLocked && !locked ? PERMISSION_MODE_LOCKED_HINT : undefined
+              }
             />
             <OptionPicker
               ariaLabel="Agent Profile"

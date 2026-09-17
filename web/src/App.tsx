@@ -460,7 +460,11 @@ export default function App() {
   // #236：权限 pill 按"有没有会话"换源，且会话内一律只读（续聊 amend 面不含
   // `permission_mode`，可编辑就是骗人）。取值 + 跨会话身份闸都在纯函数
   // `composerPermissionMode` 里（App 没有 SSR 测试车道，逻辑放 lib 直测）。
-  const permissionModeLocked = selectedId !== null;
+  // 锁定条件取 `selectedId !== null || streaming`：两半合起来 = `mode.kind !== 'idle'`
+  // （见 `useSession.ts:408-409`），也就是"这次 composer 不是新会话"。只写前者会漏掉
+  // 「提交新任务 → 首帧到达」这段 `live(sessionId: null)` 窗口（降级路径下可长到 run 结束），
+  // 那时改档同样不生效。
+  const permissionModeLocked = selectedId !== null || streaming;
   const displayedPermissionMode = composerPermissionMode(
     selectedId,
     conversation,

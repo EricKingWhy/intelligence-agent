@@ -9,8 +9,10 @@
  *    权限 + 创建会话）；
  *  - AC11 创建体带 `cwd`、**不带 task**、不带 `launch`（query 参数在 URL 上）；
  *    **默认档不发 `permission_mode`**（后端"显式传非 danger 档 → 切交互式审批"）；
- *  - AC11b 权限一致性（#204 裁定 §3）：创建响应回传的 permission_mode 必须初始化
- *    composer 权限 pill（断言两处文本一致）；
+ *  - AC11b 权限一致性（#204 裁定 §3，**#236 起换源**）：创建后 composer 权限 pill
+ *    必须显示该会话的档位（会话真值 = `session/started` 投影）。夹具把同一个值同时
+ *    注入回执与事件（真后端同源），所以这里锁的是**用户可见结果**；「pill 到底读哪条
+ *    通道」的判别性锁在 `control-row.spec.ts`（那条路径没有创建回执）；
  *  - AC12 422 留在确认面：不关对话框、不打全局横幅、后端 detail 原样可见、可重试；
  *  - AC13 以上全部由本 spec 覆盖（mock 语义按真后端 launch=false，见 fixtures）。
  *
@@ -140,9 +142,9 @@ test('AC11 launch=false 创建：请求带 cwd、不带 task、URL 带 launch=fa
   page,
 }) => {
   const mock = baseMock({
-    // #204 裁定 §3 考点：响应回传与请求**不同**的档位（模拟后端归一化/接管）——
-    // pill 必须显示**响应**的档位（read-only），不是前端本地选中的默认档。回显 mock
-    // 会让"本地值 vs 响应值"不可区分（本地值后到覆盖响应值也能过）。
+    // 生效档位与请求不同（模拟后端归一化/接管）。夹具把 read-only 同时写进回执与
+    // `session/started`（真后端同源），所以本条只锁**用户可见结果**：pill 显示 read-only。
+    // "pill 读事件还是读回执"的判别性锁在 control-row.spec.ts（那条路径没有创建回执）。
     emptySessionPermissionOverride: 'read-only',
   });
   await routeApi(page, mock);
@@ -164,8 +166,9 @@ test('AC11 launch=false 创建：请求带 cwd、不带 task、URL 带 launch=fa
 
   // AC11 落组：新会话出现在「项目 alpha」下。
   await expect(project(page, '项目 alpha').locator('.session-item-id')).toHaveCount(1);
-  // AC11b（#204 裁定 §3 权限一致性）：创建响应回传 read-only（非请求档位）→ composer
-  // 权限 pill 必须显示「只读」——前端用了**响应**的档位，没有用本地默认值。
+  // AC11b（#204 裁定 §3，**#236 起换源**）：pill 必须显示该会话的档位（read-only）。
+  // 夹具把 read-only 同时写进回执与 `session/started`（真后端同源），所以这条锁的是
+  // 用户可见结果；"pill 读事件还是读回执"的判别性锁在 control-row.spec.ts（无回执路径）。
   await expect(page.locator('.composer-dock .composer-control[aria-label="权限模式"]')).toContainText('只读');
   // 确认面关闭：用户接下来要在 chat 输入框发第一条消息（不自动发起 run）。
   await expect(dialog(page)).toHaveCount(0);
@@ -193,7 +196,7 @@ test('AC11 主动改档才发 permission_mode；创建后 pill 与弹窗选择�
   await expect.poll(() => posts.length).toBe(1);
   expect(posts[0].body.permission_mode).toBe('read-only'); // 改档 → 显式发键（切交互式审批）
   expect(posts[0].body.cwd).toBe(ALPHA);
-  // #204 裁定 §3：pill 初始化为创建响应回传的档位（read-only）。
+  // #236：pill 显示该会话的档位（read-only）——真值来自 `session/started` 投影。
   await expect(page.locator('.composer-dock .composer-control[aria-label="权限模式"]')).toContainText('只读');
 });
 
