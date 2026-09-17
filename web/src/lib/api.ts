@@ -646,16 +646,12 @@ export class ProviderError extends Error {
 async function providerFetch(path: string, init?: RequestInit): Promise<unknown> {
   const res = await apiFetch(path, init);
   if (!res.ok) {
-    let detail = '';
-    try {
-      const body: unknown = await res.json();
-      if (typeof body === 'object' && body !== null) {
-        const d = (body as { detail?: unknown }).detail;
-        if (typeof d === 'string') detail = d;
-      }
-    } catch {
-      // 非 JSON 错误体：留空，用状态码兜底。
-    }
+    // 复用 `readErrorDetail`（同文件上面的单一实现），**不再自己读一遍 body**：
+    // 原先这里手写的版本只认 `detail` 是**字符串**，于是把 Pydantic 422 的
+    // `Array<{loc,msg}>` 形状整个丢掉 ——「ID 必须是 slug」被降级成
+    // `model-providers 422`（真机证据见 `docs/LIVE_BROWSER_TEST_20260917.md` §9.2）。
+    // 本文件第 53 行的注释早就把三种形状写全了，provider 这条路当时没接上去。
+    const detail = await readErrorDetail(res);
     throw new ProviderError(res.status, detail || `model-providers ${res.status}`);
   }
   return res.json();
