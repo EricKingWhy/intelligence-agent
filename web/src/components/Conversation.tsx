@@ -95,6 +95,9 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   // 又上去了…必须要输出完才能看见」）。现在只有 followRef 决定要不要跟随。
   const followRef = useRef<FollowState>(FOLLOW_BOTTOM);
   const [suspended, setSuspended] = useState(false);
+  /** F3（#276）挂起的「贴底」帧句柄：`null` = 本帧没有待执行的贴底。
+   *  读 `scrollHeight` + 写 `scrollTop` 收进同一个 rAF 回调（见下方流式贴底 effect）。 */
+  const snapFrameRef = useRef<number | null>(null);
 
   // PRD §20.2 / ADR-0014 D7：turns 列表窗口化（@tanstack/react-virtual）。
   // turn 是虚拟单元（user 消息 + 执行链，高度差异大）→ measureElement 动态测高；
@@ -205,6 +208,13 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   // 流式期间的自动贴底——**只在 follow 为真时**，且用瞬时 `scrollTop = scrollHeight`
   // （不做 smooth 动画：动画中间态会被下一次 delta 重启，把用户的手动滚动一起吃掉）。
   //
+  // F3（#276）：读 `scrollHeight` + 写 `scrollTop` **收进同一个 rAF 帧**，同一帧内多次
+  // 登记只执行一次。本 effect 的依赖含整个 `conversation` ⇒ 每个 delta 提交都重跑一次，
+  // 改造前是「每提交一次强制布局」（实测 1 提交 = 1 读 + 1 写）；收进单帧后每个 rAF 帧
+  // 至多一次。⚠ 读写必须留在**同一个回调**里：分开会引入「读到的目标位置在写入前过期」
+  // 的新竞态。鼠标释放/键盘等**用户发起**的贴底（run 结束补底、点「↓ 最新」）不在此列，
+  // 仍走同步瞬时贴底——那些一拍对延迟敏感，不需要也不该等一帧。
+  //
   // 依赖是有意保留整个 `conversation` 的（HANDOFF C.4.3 要求收窄，此处偏离并记录
   // 理由）：内容增长才是必须贴底的信号，而它既来自模型 delta、也来自工具输出，任何
   // 单一窄信号都接不住——`turns.length` 在纯文本 delta 时**根本不变**（漏触发、
@@ -221,9 +231,26 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   useEffect(() => {
     if (!runActive) return;
     if (!followRef.current.following) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    // 同帧去重：已有待执行的贴底帧就不再排（一帧至多一次强制布局）。
+    if (snapFrameRef.current !== null) return;
+    snapFrameRef.current = requestAnimationFrame(() => {
+      snapFrameRef.current = null;
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
   }, [conversation, runActive]);
+
+  // F3（#276）：卸载时取消挂起的贴底帧——不给已经卸载的节点写属性。
+  // （`scrollRef` 在卸载时会被回调 ref 置 null，这里多一道取消是为了连回调都不再执行。）
+  useEffect(
+    () => () => {
+      if (snapFrameRef.current !== null) {
+        cancelAnimationFrame(snapFrameRef.current);
+        snapFrameRef.current = null;
+      }
+    },
+    [],
+  );
 
   // Follow-mode：用户滚动即转移跟随态（贴底恢复跟随；上滚脱离并浮现「↓ 最新」）。
   // 流式增长本身不触发 scroll 事件，而我们写入 scrollTop 会触发——nearBottom
