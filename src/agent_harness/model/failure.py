@@ -1,9 +1,8 @@
-"""Provider failure 语义的 model 层 owner（T03/#239）。
+"""Provider failure 语义的 model 层 owner（T03/#239）：分类表与 DSML 判定。
 
-审计 finding：Agent Core 曾直接持有 vendor/protocol failure 字符串（`agent/runtime.py`
-里的 `_PROVIDER_FAILURE_MARKERS` 与 DSML wire marker），于是"新增/调整一个供应商的错误
-语义"要改 Agent Loop。本模块把这两样收进 model 层，Runtime 只消费这里给出的
-reason / 固定文案 / 布尔判定。
+本模块是这两个判据的唯一 owner——Agent Core（``agent/runtime.py``）只消费这里给出的
+reason / 固定文案 / 布尔判定，不持有 vendor / protocol 字面量（分层由
+``tests/model/test_provider_failure_classification.py`` 的源码闸门钉住）。
 
 两个面，互不重叠：
 
@@ -66,10 +65,7 @@ UNCLASSIFIED_FAILURE_MESSAGE = (
 #: 分类表：``str(error)`` 里的小写标记子串 → 分类 reason。顺序即优先级。
 #:
 #: ⚠ 匹配面是整个 ``str(error)``（含 provider 错误体里的 ``code`` **与** ``message``
-#: 自然语言），不是在解析错误码——所以标记是"**从错误码里挑的词**"，不是"只可能出现在
-#: 错误码里"。实测例子：``insufficient_quota`` 那条载荷同时含 ``billing details``，
-#: 而 ``billing`` 在表里更靠前，于是走 ``billing`` 命中同一分类（结果一致，故不修顺序；
-#: 但别以为顺序不影响）。
+#: 自然语言）——顺序有实际后果（实测载荷见 ADR-0033 §2.1），改顺序前先看那里。
 #: 命中不了本表的错误码保持"只带类型名"的原行为——典型是限流的
 #: ``rate_limit_exceeded``：临时态、属模型 fallback 责任域，不做可读文案；
 #: 而 ``billing`` 是**账户级硬阻塞**，两者处置不同（实测那条：计费账户被冻结）。

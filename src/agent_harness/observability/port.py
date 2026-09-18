@@ -1,4 +1,4 @@
-"""Tracer 端口（#249 / 审计 Top 3）：Core 与观测实现之间的最小契约。
+"""Tracer 端口（#249）：Core 与观测实现之间的最小契约。
 
 为什么有它：观测是旁路，但"观测是否启用"曾以 ``tracer is None`` 的形状渗进
 Runtime 控制流——每加一条运行路径都要记得判空与对称收尾，替换非 Langfuse
@@ -8,8 +8,10 @@ Runtime 控制流——每加一条运行路径都要记得判空与对称收尾
 边界（ADR-0018 D3 / 不变量 #21 不变）：
 - 本模块只依赖标准库——不 import Langfuse，Core 侧只认协议；
 - ``RunTracer`` 是 Langfuse adapter，结构上满足 ``Tracer``（不做继承耦合）；
-- 句柄允许是 ``None``：adapter 在根观测缺席/降级时如实返回 ``None``（既有
-  行为，不伪造），调用方只需把句柄原样传回，不做判空分支。
+- 句柄可能是 ``None``（adapter 在根观测缺席/降级时如实返回，不伪造）：两个实现
+  都对 ``None`` 句柄安全 no-op，调用方把它原样传回即可，不必为句柄分叉；
+- 实现**必须不抛**：观测故障绝不传染主流程。该保证由 Core 单点强制
+  （``agent.runtime._GuardedTracer`` 包住选定实现），实现违约也不会改写 run 语义。
 """
 
 from __future__ import annotations
@@ -28,7 +30,10 @@ class Span(Protocol):
 
 @runtime_checkable
 class Tracer(Protocol):
-    """一次 run 的观测端口；方法集 = Runtime 与 ToolExecutor 当前调用的全部方法。"""
+    """一次 run 的观测端口；方法集 = Runtime 与 ToolExecutor 当前调用的全部方法。
+
+    实现必须不抛（见模块 docstring）。
+    """
 
     #: 真实 trace 标识；观测缺席/降级时如实 None（绝不伪造）。
     trace_id: str | None

@@ -44,6 +44,8 @@
 
 命中标记表的顺序有意义（先匹配先赢），且**标记必须取自供应商错误体**：不能把项目自己的 reason 常量当标记，否则常量名会自我命中（#218 实现期踩过，见 `tests/agent/test_runtime_failure_paths.py` 里 `absent` 用例的注释）。
 
+匹配面是整个 `str(error)`（供应商错误体的 `code` **与** `message` 自然语言都算），不是在解析错误码——标记是"从错误码里挑的词"，不是"只可能出现在错误码里"。顺序因此有实际后果：实测 `insufficient_quota` 那条载荷同时含 `billing details`，而 `billing` 在表里更靠前，于是按 `billing` 命中**同一** reason（结果一致，故不调整顺序；但改表顺序前先看这条）。
+
 真机证据：冻结账户的真实失败产生 `run/failed` 且 `reason=provider_account_unavailable` + 固定中文文案——证明标记匹配的是**真实的** `str(error)`，不只是合成载荷。
 
 ### 2.2 前端：`run_failure` 投影 + 两处呈现（#220）

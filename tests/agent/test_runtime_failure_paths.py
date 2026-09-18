@@ -491,7 +491,7 @@ PROVIDER_FAILURE_CASES: dict[str, dict[str, Any]] = {
             ),
         ),
         # 这条载荷本身含 "billing" 字样：命中 account 是**故意**的——配额耗尽
-        # 是账户级硬阻塞，不是可重试的限流。
+        # 是账户级硬阻塞，不是可重试的限流（顺序后果见 ADR-0033 §2.1）。
         "absent": ["exceeded your current quota"],
     },
     "auth_invalid_key": {

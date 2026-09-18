@@ -53,6 +53,12 @@ _MARKER_GOLDEN: tuple[tuple[str, str], ...] = (
     ("model_not_found", PROVIDER_MODEL_NOT_FOUND_REASON),
 )
 
+#: wire 字面量：agent 包内一律不得出现（vendor 标记 + DSML 协议标记）。
+_WIRE_LITERALS: tuple[str, ...] = (
+    *(marker for marker, _ in _MARKER_GOLDEN),
+    failure_module._DSML_MARKUP_MARKER,
+)
+
 
 def test_marker_table_matches_golden() -> None:
     """表逐项（含顺序）等于 golden。"""
@@ -152,16 +158,22 @@ def test_vendor_marker_table_lives_in_model_layer() -> None:
     断言"runtime 命名空间里取不到"而不是"没赋值"——`from ... import` 形式的再导出
     同样会让 Runtime 继续持有 vendor 词汇，那正是本票要消除的耦合。
     """
-    assert _PROVIDER_FAILURE_MARKERS is failure_module._PROVIDER_FAILURE_MARKERS
     assert not hasattr(runtime_module, "_PROVIDER_FAILURE_MARKERS")
     assert not hasattr(runtime_module, "_DSML_MARKUP_MARKER")
 
 
 def test_runtime_source_carries_no_vendor_literals() -> None:
-    """Runtime 源码里不出现任何 vendor 标记字面量（含注释）——防止"挪走又抄回来"。
+    """``agent/`` 包内不出现任何 wire 字面量（含注释）——防止"挪走又抄回来"。
 
-    判据取自 golden 表而不是另抄一份清单：表变了这里跟着变。
+    判据取自 golden 表（vendor 标记）与 model 层的 DSML 判据本身，不另抄清单：
+    表变了这里跟着变。DSML 是协议标记而非 vendor 词，但同属"挪走又抄回来"
+    这一族退化——只扫 vendor 表时，把 DSML 字面量塞回 agent 包仍全绿。
+    扫整个包（不只 runtime.py）：分层是包级主张，字面量抄进同包任何文件都算复发。
     """
-    source = Path(runtime_module.__file__).read_text(encoding="utf-8")
-    leaked = [marker for marker, _ in _MARKER_GOLDEN if marker in source]
-    assert not leaked, f"vendor 标记不得留在 Runtime：{leaked}"
+    leaked = [
+        f"{path.name}:{literal}"
+        for path in sorted(Path(runtime_module.__file__).parent.glob("*.py"))
+        for literal in _WIRE_LITERALS
+        if literal in path.read_text(encoding="utf-8")
+    ]
+    assert not leaked, f"wire 字面量不得留在 agent 包：{leaked}"

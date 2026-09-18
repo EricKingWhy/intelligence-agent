@@ -20,6 +20,7 @@ Diagnostic Log（_log）保留不动——执行链路观察与 SessionEvent 分
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
@@ -329,7 +330,8 @@ class _TerminalContext:
                 step=self.steps, cancelled=cancelled, error_type=error_type,
                 readable_message=readable_message,
             ))
-        # 观测端口（#249）恒为对象：缺席实现是 NullTracer，这里不再判空。
+        # 观测端口（#249）恒为对象且已包保护层（见 _GuardedTracer）：这里既不判空
+        # 也不兜异常，端口实现的故障不会让调用方紧随其后的终态事件写不出去。
         if self.ctx_span is not None:
             self.tracer.context_build_completed(self.ctx_span)
             self.ctx_span = None
@@ -341,6 +343,38 @@ class _TerminalContext:
             self.generation = None
         self.tracer.run_failed(reason)
         return events
+
+
+class _GuardedTracer:
+    """端口实现的外层保护（#249）：实现违约抛异常时，观测故障绝不改写 run 语义。
+
+    包在 ``_new_tracer`` 选定的实现外面——调用点既不判空也不各自兜异常，将来
+    新增的调用点自动受保护（不变量 #21：旁路故障不拖垮 Core）。逐次调用独立兜底：
+    前一次调用抛错不会让后续收口调用被跳过（run 在观测面上仍有终态）。
+    句柄方法不在此列：Core 从不调用句柄方法，句柄只作为不透明凭据原样传回端口。
+    """
+
+    def __init__(self, inner: Tracer) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._inner, name)
+        if not callable(attribute):
+            return attribute
+
+        @functools.wraps(attribute)
+        def _guarded(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return attribute(*args, **kwargs)
+            except Exception as error:  # noqa: BLE001 - 观测故障边界
+                log_event(
+                    logger, "system_log", "观测端口调用失败（旁路故障，已吞）",
+                    level="warn", component="tracer", outcome="swallowed",
+                    error_type=type(error).__name__, error_message=str(error),
+                )
+                return None
+
+        return _guarded
 
 
 class AgentRuntime:
@@ -597,8 +631,8 @@ class AgentRuntime:
         # 注意 steps 仍是 run 内轮次计数（max_steps 保险丝与 AgentRunResult.steps
         # 依赖它逐 run 从 0 起算），全局编号一律走 step_base + steps。
         step_base = 0
-        # 观测端口（#249）：本 run 的 tracer 恒为对象——未配置/未启用 sink 时是
-        # NullTracer（零副作用）；实现在 begin_run 后单点选定（见 _new_tracer）。
+        # 观测端口（#249）：本 run 的 tracer 恒为对象——缺席实现是 NullTracer，
+        # 选定与保护见 _new_tracer。
         tracer: Tracer = NullTracer()
         generation: Span | None = None
         ctx_span: Span | None = None
@@ -650,8 +684,6 @@ class AgentRuntime:
             )
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
-            # 实现选择是"观测是否存在"的唯一判据点（#249）——此后全 run 的调用
-            # 点都不判空：缺席时 NullTracer 收下同样的生命周期调用。
             tracer = self._new_tracer(session, run_id, user_input, turn_index)
             tracer.run_started()
             # 流式块记账绑定本 run（ADR-0016 §3.3）：此后思考/文本 chunk 经
@@ -801,7 +833,7 @@ class AgentRuntime:
                 # DSML 协议泄漏守卫（冒烟实测）：无结构化 tool_calls 且 content
                 # 含协议保留标记 = 网关没把工具调用解析成结构化字段，绝不能把
                 # 这段标记文本当最终回答持久化——与空响应同一失败语义。标记本身
-                # 的定义在 model/failure.py（本文件不再持有 vendor 词汇，T03/#239）。
+                # 的定义在 model/failure.py。
                 if not ai.tool_calls and has_malformed_tool_call_markup(extracted_content):
                     raise RuntimeError(
                         "model response contains malformed tool-call markup"
@@ -1266,19 +1298,20 @@ class AgentRuntime:
         """观测实现选择（#249）：全 run 唯一一处"观测是否存在"的判据。
 
         未注入 / 未启用 sink → NullTracer（零外部副作用）；启用 → RunTracer
-        （Langfuse adapter，ADR-0018 D5/D7）。调用点一律拿到对象，不判空。
+        （Langfuse adapter，ADR-0018 D5/D7）。返回的实现外面一律包
+        ``_GuardedTracer``——调用点既不判空、也不各自兜异常。
         """
         sink = self._observability_sink
         if sink is None or not sink.enabled:
-            return NullTracer()
-        return RunTracer(
+            return _GuardedTracer(NullTracer())
+        return _GuardedTracer(RunTracer(
             sink,
             session_id=session.session_id,
             run_id=run_id,
             agent_id=self._agent_id,
             user_input=user_input,
             turn_index=turn_index,
-        )
+        ))
 
     def _write_memories(self, session: Session, start: int) -> None:
         if self._memory_writer is not None:
