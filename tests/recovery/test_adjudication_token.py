@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -56,6 +56,13 @@ def test_same_snapshot_produces_equal_deterministic_token() -> None:
     assert RecoveryAdjudicationToken.from_operation(
         operation
     ) == RecoveryAdjudicationToken.from_operation(operation)
+
+
+def test_tampered_state_fingerprint_invalidates_token() -> None:
+    operation = _operation()
+    token = RecoveryAdjudicationToken.from_operation(operation)
+
+    assert not replace(token, state_fingerprint="0" * 64).matches(operation)
 
 
 def test_identity_change_invalidates_old_token() -> None:

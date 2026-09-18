@@ -14,13 +14,17 @@ _SESSION_SOURCE = (
 )
 
 
-def _session_methods() -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+def _session_class() -> ast.ClassDef:
     tree = ast.parse(_SESSION_SOURCE.read_text(encoding="utf-8"))
-    session = next(
+    return next(
         node
         for node in tree.body
         if isinstance(node, ast.ClassDef) and node.name == "Session"
     )
+
+
+def _session_methods() -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    session = _session_class()
     return {
         node.name: node
         for node in session.body
@@ -66,7 +70,9 @@ def _self_funnel_calls(node: ast.AST) -> list[ast.Call]:
 def test_session_has_one_durable_store_writer() -> None:
     """Only the private funnel may perform Session-owned physical appends."""
     methods = _session_methods()
+    session = _session_class()
 
+    assert len(_self_store_append_calls(session)) == 1
     assert len(_self_store_append_calls(methods["_persist_event"])) == 1
     assert _self_store_append_calls(methods["append"]) == []
     assert _self_store_append_calls(methods["adopt_history"]) == []
