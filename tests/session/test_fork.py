@@ -486,3 +486,66 @@ async def test_fork_of_undeclared_parent_writes_no_permission_keys(tmp_path) -> 
     started = child.events[0]
     assert "permission_mode" not in started.data
     assert "auto_approve" not in started.data
+
+
+async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None:
+    """seed 写盘中途失败：父日志逐字节不变，child 只留下已落盘的前缀。
+
+    这是**当前语义**（`#251` 冻结，父票 #241 的冻结决策②）：不在本阶段实现
+    "临时文件 + 原子替换"，失败清理的责任在 fork 主流程。本用例把两侧的事实都
+    钉住——将来若改成原子替换，这条必须红着改。
+    """
+    root = tmp_path / "sessions"
+    base = JsonlSessionStore(root=root)
+    parent = _build_parent(base)
+    parent_path = base._events_path("parent")
+    parent_bytes_before = parent_path.read_bytes()
+
+    class _FailingFrom(JsonlSessionStore):
+        def __init__(self, root, *, fail_from: int) -> None:
+            super().__init__(root=root)
+            self._calls = 0
+            self._fail_from = fail_from
+
+        def append_event(self, session_id, event):
+            self._calls += 1
+            if self._calls >= self._fail_from:
+                raise RuntimeError(f"磁盘故障（注入，第 {self._calls} 次写）")
+            super().append_event(session_id, event)
+
+    # 第 3 次写 = child 的 seed 第二项（1=session/started, 2=seed[0]）
+    failing = _FailingFrom(root, fail_from=3)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+
+    with pytest.raises(RuntimeError, match="磁盘故障"):
+        await fork_session(
+            failing, meta, "parent",
+            boundary_user_message_seq=parent.events[-1].seq,
+            child_session_id="partial_child",
+        )
+
+    # ① 父日志逐字节不变（§7 父不可改）
+    assert parent_path.read_bytes() == parent_bytes_before
+    # ② child 只留下已落盘的前缀（无 session/forked、无 meta 行）
+    durable = base.read_events("partial_child")
+    assert [e.type for e in durable] == [SESSION_STARTED, USER_MESSAGE]
+    assert await meta.get("partial_child") is None
+
+
+async def test_fork_does_not_touch_parent_log_bytes(tmp_path) -> None:
+    """成功 fork 同样是只读父：父日志逐字节不变（不含 seq / mtime 之外的任何痕迹）。"""
+    store = _store(tmp_path)
+    parent = _build_parent(store)
+    parent_path = store._events_path("parent")
+    before = parent_path.read_bytes()
+
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    await fork_session(
+        store, meta, "parent",
+        boundary_user_message_seq=parent.events[1].seq,
+        child_session_id="child_ok",
+    )
+
+    assert parent_path.read_bytes() == before
