@@ -37,6 +37,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import anyio
+
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
@@ -81,6 +83,26 @@ class LocalArtifactStore(ArtifactStore):
     ) -> Artifact:
         if session_id != self._session_id:
             raise ValueError("save session_id must match the store namespace")
+        # #275：整段同步工作（encode + sha256 + 两次原子落盘）**一次**下放线程。
+        # 实测（`docs/PERF_BASELINE.md` B7 节）：2M 字符内容下这一段占 37ms 中位；而
+        # `_write_atomic` 的单次固定成本就有 1.5–2.5ms **且与内容大小基本无关**，
+        # 而 `save` 要调它两次（内容 + 元数据）⇒ 只搬 `_write_atomic` 会把
+        # `encode` / `sha256`（6MB 下合计约 22ms）留在循环上，站点不算搬走。
+        # 契约逐字不变：原子纪律、内容先 / 元数据后、返回形状、异常语义。
+        return await anyio.to_thread.run_sync(
+            self._save_blocking, session_id, content, mime_type, source_tool,
+            tool_call_id,
+        )
+
+    def _save_blocking(
+        self,
+        session_id: str,
+        content: str,
+        mime_type: str,
+        source_tool: str,
+        tool_call_id: str,
+    ) -> Artifact:
+        """`save` 的同步体（原样搬运，只把 `self` 显式化；#275 未改任何一行语义）。"""
         body = content.encode("utf-8")
         artifact = Artifact(
             artifact_id=compute_artifact_id(content),
@@ -109,6 +131,14 @@ class LocalArtifactStore(ArtifactStore):
         # 形态校验先做（与 S3/MinIO 一致，#185 AC3）：畸形 id 不得进入路径拼接。
         if not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
             raise KeyError(f"Artifact '{artifact_id}' does not exist")
+        # #275：读 + decode + hash 自证 + 旁挂元数据**一次**下放线程。实测 2M 字符下
+        # 整个 `load` 占 37ms 中位，而其中 `read_bytes` 只占 4.7ms——`decode`(17.3ms)
+        # 与 `sha256`(12.4ms) 才是大头。只搬 `read_bytes` 等于把站点留在循环上。
+        # 形态校验留在循环（它不碰 IO，且畸形 id 不该进线程）。
+        return await anyio.to_thread.run_sync(self._load_blocking, artifact_id)
+
+    def _load_blocking(self, artifact_id: str) -> Artifact:
+        """`load` 的同步体（原样搬运；异常映射逐字未改，#275 Scope lock）。"""
         path = self._content_path(artifact_id)
         try:
             body = path.read_bytes()
