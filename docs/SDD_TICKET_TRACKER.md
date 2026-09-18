@@ -1999,6 +1999,7 @@ main 由集成 AI 执行）。
 | 批次号 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | **P1-B1** | **#268**、**#269**（均 docs-only） | `45744d3`（**它自身的归属见下方「fixed point 归属」**） | **已审**（两轴独立只读子代理：Standards + Correctness）——fixed point `45744d3`，范围 `45744d3..70d88f2`；轴内合计 **1×P1 + 6×P2 + 6×P3**（其中 2 条 P3 两轴共同指出 ⇒ 去重后 **11** 条），**findings 全数处置**（逐条见下方处置表） | findings 处置 = `2048764`；台账审查行 + 白名单 = 随后的 `chore(review-ledger)` 提交 |
+| **P1-B2** | **#270**（F1，**代码票**）、#271（N2）、#272（F2） | 待定（本批尚未起审） | **未审查**——按 `docs/SDD_WORKFLOW_PROTOCOL.md` §1.2「每 2–3 票对累计 diff 跑一次两轴审查」，`#270` 单票落地时**不单独起审查**；起审点应在 #271（或 #272）落地后，范围从上一审查行 tip `2048764` 起算 | 见下方「P1-B2 票」 |
 
 ### 票
 
@@ -2006,6 +2007,7 @@ main 由集成 AI 执行）。
 | --- | --- | --- | --- | --- | --- |
 | **#268** | 勘误 `docs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done（**未合并**：`1529aa7` 在本批分支上，集成由主开发执行，见索引 §0.5 G5） | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` 机械证明（见下；**blob 哈希是 #269 的 AC7 证据，不是本票的**——两轴 Standards P3 纠正） |
 | **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（**未合并**：`9886a9c` 在本批分支上；`Status: Proposed` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
+| **#270** | **F1**：稳定 `disclosure` / `reasoningDisclosure` 引用，接回被折断的 memo 链 | done（**未落到任何 ref**：`bcdf4e4` 已用 plumbing 造出；本沙箱不能写 ref，待用户在自己的终端执行一条 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | `lib/disclosure.ts` 两个 hook 的返回值改 `useMemo`（票面必做 1 的 **B 方案**，**不取**标注「推荐」的 A 方案——理由与红证见下方证据节）；链路渲染器的 per-render `cycle` 闭包上移为 `useCallback`；已完成段 markdown 收进按**内容**记忆的 `memo(MarkdownBody)`；`ToolCard` 的 `onCycleLevel` 签名带 `(key, density)` | `bcdf4e4` | **全绿**：oxlint **44 → 42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` **59 文件 / 982 用例全绿**（含 `projection.test.ts` 193 条引用稳定契约，**未改写**）；`vite build` 通过；红证 6/14 → 绿 14/14（见下） |
 
 > **「SHA 待回填」已回填 —— 顺带记下这次实测到的确切机制（比我原先的说明更准）**：
 > 本 worktree 的沙箱**专门回收 `refs/heads/workbuddy/` 这个目录**：
@@ -2225,3 +2227,92 @@ D1-D4:          ['D1', 'D2', 'D3', 'D4']
    ⚠ 附带教训：`commit-tree` **不写 reflog**，一旦命令在管道里断掉（见第 2 条），
    刚造出的提交对象就**只剩一个拿不到 SHA 的孤儿**——所以 `commit-tree` 的输出
    **必须直接回显**，不要先接管道。
+
+---
+
+#### F1（#270）验收证据
+
+**票面**：GitHub #270（`## What to build` 必做 1/2/3 + AC1–AC8）。
+**实现 commit**：`bcdf4e4`（9 文件，**+985 / −28**）。
+**性能数字**：`docs/PERF_BASELINE.md` 的 F1 节（G3 硬前置：基线先落，改造后数字再落）。
+
+**红证（改造前 → 改造后，同一条命令、同一批用例）**
+
+做法：三个源文件临时换回 `HEAD` 版本（`git show HEAD:<path>` 写回，**全程未用 `git stash`**——
+本机实测一次 `git stash -u` 会清掉 `.git/refs`），跑完用 sha256 逐字节校验还原。
+
+```
+cd web && node node_modules/vitest/vitest.mjs run src/lib/disclosure.test.tsx src/components/Conversation.render.test.tsx
+```
+
+> ⚠ **本环境两条通道坑（本次实测，写下来省下一轮）**：① `npx` 与 `pnpm` **都不可用**
+> （`npx vitest --version` 只回 UTF-16 的「拒绝访问。」；`pnpm exec` 报
+> `Cannot find module 'C:\Node_modules\pnpm\bin\pnpm.cjs'`）；可用通道是
+> **`node node_modules/vitest/vitest.mjs …`**。② `--reporter=basic` 在 vitest 5 **已不存在**
+> （报 `Failed to load custom Reporter from basic`）——用它会得到一个**看起来像测试失败**的
+> `exit=1`（本次差点据此误判）。
+
+| 阶段 | 结果 | 关键失败断言 |
+| --- | --- | --- |
+| 改造前（`HEAD`） | **6 failed / 8 passed（14）** | R1×2 `expected 3 to be 2`；AC3 `expected 2 to be 1`；AC4 `expected 2 to be 1`；AC5 `expected "vi.fn()" to be called 1 times, but got 2 times`（×2） |
+| 改造后 | **14 passed** | — |
+
+还原校验（三条全部 `sha_match=True`）：`disclosure.ts` / `Conversation.tsx` / `ToolCard.tsx`。
+
+> **注意别把这条读成红证**：AC8 代理用例（点击工具行）在**改造前后都是绿的**——它锁的不是原缺陷，
+> 而是「修法本身不得把交互做坏」（即下面「A 方案否决」里的那条回归）。它的红证在 A 方案实现下取得。
+
+**AC 逐条**
+
+| AC | 结论 | 证据 |
+| --- | --- | --- |
+| AC1 | ✅ | `disclosure.test.tsx` 两个 hook 各一条 R1 用例（依赖未变的连续渲染 `new Set(seen).size === 1`） |
+| AC2 | ✅ | 同文件三条 R2 用例（`setLevel` 连发两次都生效 / `isOpen` 读最新 `density` / `toggle` 压过自动规则） |
+| AC3 | ✅ | `Conversation.render.test.tsx`：挂载 `baseTurns === 1`，4 次无关提交后不增 |
+| AC4 | ✅ | 同文件：只改 `model` 时 `toolRenders` 不增（`onCycleLevel` 稳定） |
+| AC5 | ✅ | 同一内容 5 次提交 `renderMarkdown` 恒 **1** 次；内容变则 **+1** |
+| AC6 | ✅ | `oxlint` 44 → **42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` 59 文件 / 982 用例全绿；`vite build` 通过 |
+| AC7 | ⚠ **有披露** | `git diff --stat` 除 Scope lock 允许的 4 个文件外，另有 `web/package.json` + `web/pnpm-lock.yaml`（新增 devDependency **jsdom**）——见下方「披露与偏离」第 1 条 |
+| AC8 | ⚠ **部分** | **可自动化代理已覆盖**（点击工具行 `aria-level` 0 → 1，且在 A 方案下实测为红）；**手工冒烟截图/录屏未取得**（本环境无 GUI 浏览器 + 无真后端），解除条件见 `PERF_BASELINE` F1 节「未闭合」段 |
+
+**披露与偏离（逐条）**
+
+1. **`web/package.json` + `web/pnpm-lock.yaml`（在 AC7 的 Scope lock 允许清单之外）**：新增
+   devDependency `jsdom ^30.1.0`。理由：AC1–AC5 判的全是「**同一实例**在父级提交时有没有重渲染」，
+   而单次 SSR 渲染里 `memo` 的浅比较**根本不执行**（本仓既有 10+ 处注释写明「本仓没有 jsdom」，
+   默认车道是 `renderToStaticMarkup`）。两个新测试文件用**文件级** `// @vitest-environment jsdom`
+   覆盖，全局 `vitest.config.ts` **不动**，其余 57 个测试文件继续跑 node。
+   **该依赖变更已先经用户选择确认**（选项「加 jsdom（推荐）」）。
+2. **新增 `web/src/lib/f1-cost-probe.perf.test.ts`**：`PERF_BASELINE` §3 要求每条数字可复核
+   （命令 + 脚本路径），它是 F1 **单次成本**数字的复现脚本。与仓内既有的
+   `projection.perf.test.ts` / `streaming.perf.test.ts` 同属 perf 车道
+   （`vitest.config.ts` 已排除 `*.perf.test.ts`，**不进** `npm test`）。
+3. **票面「推荐 A 方案」被否决（实质偏离）**：见下。
+
+**A 方案否决（票面必做 1 把 A 标为「推荐」，本票取 B）**
+
+- **A 方案** = `useRef` 稳定容器，返回对象**身份永不改变**；**B 方案** = 整体 `useMemo` + 依赖补全。
+- **否决理由（功能性缺陷，不是风格）**：`levelFor` 是在 `TurnView` **自己的渲染体**里被调用、
+  用来算每个工具卡的 `level` 的（`Conversation.tsx:711`）。点了档位 → `setLevel` → `overrides` 变，
+  此时**必须**让 `memo(TurnView)` 重新比较出「不等」，`TurnView` 才会重渲染、新的 `level` 才流得到
+  `ToolCard`。身份永不改变 ⇒ memo 恒 bail out ⇒ **点击工具行的档位循环静默无效**——正是票面
+  `## Risks` 点名的那类「点了没反应」的静默 bug，只是换了个触发形态。
+- **实测红证**：先在 A 方案实现下跑新增的 AC8 代理用例，得
+  `AssertionError: expected 1 to be greater than 1`（**TurnView 一次都没重渲染**）；
+  换 B 方案后同一条转绿，14/14 全绿。
+- **B 方案的代价已逐项核对**（票面 Risks 称它「比 A 危险」）：两个 hook 的捕获面实测为
+  `useDisclosure` `[overrides, setLevel]`、`useReasoningDisclosure` `[overrides, density, toggle]`
+  （`levelFor` 的 `density` 是**调用方参数**、不进闭包）。每种漏依赖的失败形态都有用例钉住（AC1/AC2 表）。
+- **附带**：为满足 R1 的字面口径（「同一实例连续两次渲染 `===` 相等」），清空 override 的
+  `useEffect` 加了「**挂载期跳过**」守卫——挂载那一次清空是**可证明无内容变化**的状态写入
+  （`useState` 初值本就是一张空 Map），它白渲染一次并破坏 R1。顺带把 `lib/disclosure.ts` 的
+  `react(set-state-in-effect)` 告警 **2 → 0**，故全仓告警数 44 → 42（净减 2，零新增）。
+
+**未闭合项（每条写明解除条件）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 在真机 Chrome Performance 面板按固定场景录一次（同窗口尺寸 + 同一段长回答 + 同一操作序列：打开 → 流式 → 折叠/展开工具卡 → 切 density），trace 存档并把两列数字补进 `PERF_BASELINE` F1 节 |
+| 交互语义的手工冒烟（AC8 的原始口径：截图 / 录屏） | **未取得** | 同上真机环境；已用 AC8 的可自动化代理先行覆盖 |
+| perf 车道覆盖不到「已完成段重复渲染」这类回归 | **本票不做** | 票面已指定归属：N2/#271 落 `eventsVersion` 后，在 perf 车道加一条「已完成后追加 delta ⇒ 已完成段 render 次数不增长」的比例型探测器 |
+| `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269，不在本票范围） |
