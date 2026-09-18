@@ -67,3 +67,4 @@ fc01d28	B-12 集成 push 补记（tracker + 归档，docs-only）
 3dff24f	B-13 落点记录推送补记（tracker + 归档，docs-only）
 d9c2f51	B-14 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引，docs-only）
 1545f6d	#239 落点记录（tracker 明细 + 归档 + PHASE_STATUS 索引，docs-only）
+8ab109e	#249 落点记录（tracker 明细 + 归档 + PHASE_STATUS 索引，docs-only）
