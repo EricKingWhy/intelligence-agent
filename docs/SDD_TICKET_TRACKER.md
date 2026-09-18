@@ -2696,3 +2696,11 @@ D5 引用的行号/数字经实跑核对；`web/` 三文件的 diff **逐 hunk �
 2. 供应商账户冻结 ⇒ 一切依赖真模型往返的用例（审批卡 / 流式长回答）不可绿；解除条件 = 用户解冻/充值。
 3. `PERF_BASELINE` §2.1 的「流式」录制仍缺（与第 2 条同源）；F1 节那行保持「未取得」。
 
+<!-- P1-B2-LIVE-PROJECTGROUPS-DECISION-A-2026-09-18 -->
+**决策已拍板（2026-09-18 深夜，用户选 A）**：project-groups-live 的既存冲突按 **A = 改规格承认 AC5** 处置，**未动产品代码**。规格 ③ 步更正为：
+
+- 注册 ws-delete-me → 断言 POST /api/projects 响应 sessions_attached === 1（注册即归入）、项目行可见、目标会话渲染在项目下、**未分组区不再有它**（原断言「注册后仍在未分组」与 projects.py:249 + AC5/#169 正面冲突，属**过期规格**，不是「放宽校验」）；
+- 幂等重放同一路径 → 200 + sessions_attached === 0 + session_ids === [SESSION_ID]（账本不重复入序）；
+- ④ detach / ⑤ 再 attach + 软删除两段**保持原样**：UI 的「加入项目…」选择器路径因此仍被 ⑤ 覆盖，③ 改成 API 重放**没有**丢覆盖面。
+
+**证据（生产口径真机；不经 test runner、不起 vite）**：%TEMP%\wbi-probe-groupflow.cjs（裸 chromium 直连 127.0.0.1:8000，失败自保 = 先软删除残留项目再比对基线）→ **16 条断言全 PASS**、退出码 0、**基线逐字段还原 true**（项目含账本序 + 会话归属）；输出存档 %TEMP%\wbi-probe-groupflow.out，截图 web/gui-test-screenshots/ws5-probe/。其中 sessions_attached 实测 **1**、幂等重放实测 **0** ⇒ AC5 语义在真机成立。
