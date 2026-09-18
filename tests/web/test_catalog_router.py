@@ -44,6 +44,6 @@ def test_catalog_router_registers_stable_read_only_operations():
     }
     assert set(app.openapi()["paths"]) >= expected_paths
     assert all(
-        set(app.openapi()["paths"][path]) >= {"get"}
+        set(app.openapi()["paths"][path]) == {"get"}
         for path in expected_paths
     )

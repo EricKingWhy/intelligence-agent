@@ -9,7 +9,7 @@
        - 终态 3 种 → Ledger result_json 精确合成（#29）
        - PENDING → PendingPolicy 决策（默认 skip，#29）
        - RUNNING/UNKNOWN/NEED_RECONCILE → 状态推进至 NEED_RECONCILE 后
-         交独立 ReconcileCallback 人工裁决（#30）；无 callback 安全拒绝
+         交独立 ReconcileCallback 人工裁决；无 callback 安全拒绝
     6. restore tool result / message consistency → append 合成事件
     7. rebuild Runtime Context（derive_messages 从恢复后事件重新投影）
     8. return Session，交给 AgentRuntime 继续
@@ -18,10 +18,8 @@
 - Ledger-first 顺序保证 Ledger 永远比 SessionEvent 更完整：崩溃时 Ledger 有终态但
   SessionEvent 缺配对 → 本协调器用原 tool_call_id 合成 Recovery ToolResult。
 - 先决策后写结果：确定性 reconcile 决策（读 Ledger + 投影）全部完成后再 append 事件；
-  人工裁决（ReconcileCallback）本质是交互式决策，无法预先完成——只在锁内推进到
-  NEED_RECONCILE 并记录关卡，随后锁外等待；重锁后以 adjudication token 复核，
-  裁决失败时已写的 reconcile-required 事件只是"需要人工"这一事实的诚实记录，
-  重试恢复会重新裁决（幂等收敛，不产生伪造结果）。
+  人工裁决的锁边界、token 复核与 stale verdict 处理遵循已冻结的 T06/#242 决策，
+  详见 `docs/tickets/architecture-audit-remediation-2026-09-18.md` §0.1。
 - 并发恢复串行化：SQLite 无行级锁——用 BEGIN EXCLUSIVE 事务在【数据库级】悲观串行化，
   第二个恢复方阻塞直到第一个完成或 busy_timeout 超时。WAL 模式下读者不被阻塞，
   恢复期间经 OperationLedger 的只读查询正常进行。
