@@ -185,6 +185,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* 呼吸辉光：运行相位（thinking/tool）的胶囊体随相位呼吸——icon 自旋之外的
  * 第二层"活着"信号。currentColor 让一套 keyframes 适配两种状态色；
  * 胶囊面积小，box-shadow 动画 repaint 可忽略；reduced-motion 由全局块关闭。 */
+/* F6(#277) 复核（2026-09-19）：上句「repaint 可忽略」**实测成立**（真机 Chromium + 生产 dist CSS，A/B=动画开 vs prefers-reduced-motion:reduce，3 轮中位）：long task 数 0/0；最长帧间隔 16.8/16.8ms（掉帧 0/0）；可归因成本 style 20.7 + paint 0.4 + raster 0.6 ms / 3s ≈ 0.7% 单核；实现不改。采集器 web/scripts/perf-pulse-cost.mjs，数字与仪器自证见 docs/PERF_BASELINE.md「F6」节。 */
 @keyframes pulse-glow {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
   50% { box-shadow: 0 0 12px 1px color-mix(in srgb, currentColor 26%, transparent); }
