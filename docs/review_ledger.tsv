@@ -79,3 +79,4 @@ f1984e8	docs-only（PERF_BASELINE F2 节表头如实化：脚本 report 行数 3
 40c0795	F4/#273 落点记录（tracker F4 验收证据节 + PERF_BASELINE F4 节 + phase_status 归档索引，docs-only）
 e22bdc1	B7/#275 落点记录（phase_status 归档索引行，docs-only）
 169204f	P1-B3 审查记录 + 台账按 findings 校正（tracker B7 节审查表 + phase_status 归档索引，docs-only）
+5029821	F3/#276 落点记录（tracker F3 验收证据节 + PERF_BASELINE F3 节 + phase_status 归档索引，docs-only）
