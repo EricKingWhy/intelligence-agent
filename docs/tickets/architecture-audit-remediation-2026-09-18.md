@@ -6,6 +6,60 @@
 > 共同约束：Reuse First；Scope Lock；不改变外部 Contract，除非票面明确披露；门禁全绿后才可提交；每票完成后按仓库 SDD 审查协议进入批量 review。
 > **裁决规则**：GitHub issue 正文是每票 Scope/AC 的权威；本文只补充证据、依赖和测试。若本文与对应 issue 冲突，以 issue 为准，额外建议不构成关单条件。
 
+
+## 0.1 已冻结的跨票决策（2026-09-18 grilling）
+
+以下决策已由用户确认，后续 Agent 不得重新猜测；若实现发现与 Engineering Specification 冲突，必须停止并报告：
+
+- **T01/#237 cwd**：`session/started.cwd` 是事实源；与 Registry mapping/cache 冲突时类型化失败；外部目录丢失时 fail-closed；legacy 无 cwd 才回退默认目录。
+- **T02/#238 tool_scope**：main 不强制过滤；其他 profile 显式收窄；未归属工具必须进入带理由白名单，否则测试失败；optional capability 缺席不算漏配。
+- **T03/#239 provider failure**：只把 Runtime marker/DSML 判定原样下沉到 model；Web connection-test 另票。
+- **T04/#240 tracing**：最小 Tracer/Span Protocol + NullTracer；先 Runtime 后 Executor；不做万能 observability facade。
+- **T05/#241 session funnel**：`adopt_history` 离线、不通知 listener；逐条 durable append；中途失败由 fork 清理 child；保留 seed provenance。
+- **T06/#242 recovery**：锁内生成 `operation_id + version/state fingerprint` token；锁外等待；重锁后 token 匹配才提交，stale verdict 拒绝。
+- **T07/#243 router**：首批只迁移只读 Catalog/Profile，使用原生 `APIRouter + Depends`，契约逐字兼容。
+- **T08/#244 Bash**：ToolExecutor 唯一 deadline owner；默认有效预算 60 秒；Local/Docker 同预算；MUTATING timeout 不自动重试。必须拆契约、Local、Docker 子票。
+- **T09/#245 JSONL**：坏行、日志、limit=200、header、缺文件和 UTF-8 行为逐字冻结；只抽内部 iterator，不改公开 API。
+- **T10/#246 Web git**：统一 ToolExecutor + transport-scoped Ledger；不伪造 SessionEvent；完整 stdout/stderr 写入受控 ArtifactStore，Ledger 保存不可变 ref。
+- **T11/#247 `_drive`**：先 golden，再 terminal arms，再 telemetry；保持唯一 loop；每切片独立 review。
+- **T12/#248 AppState**：等 router 后有真实 consumer/implementation 证据再决定窄 Protocol，否则显式 collaborators。
+
+## 0.3 已发布子票（严格 blockers-first）
+
+原始父票是 umbrella；以下子票各自只覆盖一个可验证 seam，父票不得在子票未完成前关闭。
+
+| 父票 | 子票 | 内容 | Blocked by |
+|---:|---:|---|---|
+| #240 | #249 | Runtime Tracer seam + NullTracer | 无 |
+| #240 | #250 | Executor Tracer seam | #249 |
+| #241 | #251 | Session write behavior golden | 无 |
+| #241 | #252 | Session single durable write funnel | #251 |
+| #242 | #253 | Recovery adjudication token contract | 无 |
+| #242 | #254 | Recovery lock-outside adjudication | #253 |
+| #243 | #255 | Read-only Catalog router seam | 无 |
+| #244 | #256 | Bash timeout contract and red evidence | 无 |
+| #244 | #257 | Local Bash 60-second enforcement | #256 |
+| #244 | #258 | Docker Bash timeout parity | #257 |
+| #245 | #259 | JSONL reader behavior golden | 无 |
+| #245 | #260 | Internal JSONL iterator extraction | #259 |
+| #246 | #261 | Transport Ledger and Artifact contract | 无 |
+| #246 | #262 | Web git through ToolExecutor | #261 |
+| #247 | #263 | AgentRuntime event-sequence golden | 无 |
+| #247 | #264 | Extract terminal arms | #263 |
+| #247 | #265 | Extract telemetry scope | #264 + #250 |
+
+#248 暂不创建子票：先等待 #255 产生真实 router consumer/implementation 证据，再决定窄 Protocol 或显式 collaborators。
+
+## 0.2 小步拆票规则
+
+原始 12 张票是主题索引，不要求一票完成全部工作。后续新增子票必须：
+
+1. 只覆盖一个可验证 seam 或一个事实契约；
+2. 有独立红证、测试和回滚边界；
+3. 标明 Parent、Blocked by、Blocks；
+4. 不把设计决策、实现、跨平台适配和集成验证塞进同一提交；
+5. 子票完成后，父票只有在全部子票和最终跨模块 Gate 通过后才能关闭。
+
 ## 0. 统一执行协议
 
 每张票按以下顺序执行：
