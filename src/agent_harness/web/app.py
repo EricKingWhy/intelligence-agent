@@ -72,6 +72,7 @@ from agent_harness.session.service import (
     SteerTargetNotFound,
     SupersedeTargetInvalid,
     UnknownModel,
+    WorkspaceBindingConflict,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
     resolve_model_target,
@@ -1432,9 +1433,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             ActiveRunConflict,
             RecoveryConflict,
             SeqConflict,
+            WorkspaceBindingConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留需人工裁决的 UNKNOWN
             # tool_call，不伪造结果（不变量 #14）。
+            # WorkspaceBindingConflict → 409（#266）：cwd 锚与沙箱映射互相矛盾，
+            # 拒绝静默选边（判定见 `service._reconcile_workspace_binding`）。
             raise http_error(e) from e
 
         session_id = result.session.session_id
@@ -1834,10 +1838,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SteerTargetNotFound,
             SupersedeTargetInvalid,
             SeqConflict,
+            WorkspaceBindingConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
             # SupersedeTargetInvalid → 409（ADR-0030 §4.6）：目标不对，不是会话不存在。
+            # WorkspaceBindingConflict → 409（#266）：idle 分支会走 resume_and_launch，
+            # 工作目录归属冲突同样拒绝静默选边。
             raise http_error(e) from e
 
         if result.status == "launched":
@@ -1911,6 +1918,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             ActiveRunConflict,
             RecoveryConflict,
             SeqConflict,
+            WorkspaceBindingConflict,
         ) as e:
             raise http_error(e) from e
         if launched is None:

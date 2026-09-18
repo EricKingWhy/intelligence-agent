@@ -99,6 +99,19 @@ class WorkspaceNotFound(SessionServiceError):
     """
 
 
+class WorkspaceBindingConflict(SessionServiceError):
+    """会话的 durable cwd 与 WorkspaceRegistry 登记的目录不一致（#266）。
+
+    两个事实源（`session/started.cwd` 与沙箱映射 / 进程内 cache）对同一会话给出不同
+    目录时**类型化失败**：不自动覆盖映射、不静默选任一侧——ADR-0027 之后
+    `workspace_root` 可能就是用户的真实仓库，选错一侧等于让工具在用户没选过的目录里
+    执行。续聊入口在**任何** Sandbox 实例化之前对账，所以失败时不会 mkdir、不会起 run。
+
+    fork 子会话不在对账范围内（它的 cwd 锚记的是项目归属、映射是 copy-on-fork 的副本
+    目录，按设计就不同，ADR-0017 决策 5）——那是续聊入口的判定，不是本异常的形状。
+    """
+
+
 class WorkspaceMoveInvalid(SessionServiceError):
     """请求的会话↔项目移动在当前状态下不成立（WS-4 / #154，AC7 的对应物）。
 

@@ -96,6 +96,35 @@ class WorkspaceRegistry:
         """检查 session 是否有映射记录。"""
         return self._mapping_path(session_id).exists()
 
+    def recorded_workspace_roots(self, session_id: str) -> list[str]:
+        """本注册表为该 session 登记的**全部**工作目录（持久映射 + 进程内 cache）。
+
+        只读对账入口（#266）：会话侧拿 `session/started.cwd`，注册表拿这些值，任一项
+        不一致时由调用方类型化失败。两个记录都可能成为 runtime 实际使用的目录
+        （`create()` 的 cache 分支按定义返回既有实例、**不重写映射**），所以两个都要
+        对账——只看其中一个，都会漏掉另一种"静默跑在别的目录"的形态。
+
+        **不实例化 Sandbox**：`get()` / `create()` 都会在构造 Sandbox 时 mkdir 工作
+        目录，对一个已被用户删掉的外部目录，那等于先把它凭空建回来、再宣布"目录在，
+        一切正常"（"目录没了"就永远看不见了）。
+
+        无任何记录 → 空列表："没登记"与"登记在别处"必须可区分。cache 项只对本地后端取
+        `workspace_root`：DockerSandbox 的同名属性是**容器内**路径，与会话侧 cwd 不是
+        一个坐标系（AppState 固定 backend='local'）。
+        """
+        roots: list[str] = []
+        mapping = self._read_mapping(session_id)
+        if mapping is not None:
+            recorded = mapping.get("workspace_root")
+            if isinstance(recorded, str) and recorded:
+                roots.append(recorded)
+        sandbox = self._cache.get(session_id)
+        if isinstance(sandbox, LocalSubprocessSandbox):
+            cached = canonical_workspace_path(sandbox.workspace_root)
+            if cached not in roots:
+                roots.append(cached)
+        return roots
+
     def stop(self, session_id: str) -> None:
         """停止 session 的 Sandbox（保留 Volume/workspace 以便 resume）。幂等。
 

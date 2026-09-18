@@ -89,6 +89,10 @@ def test_status_map_is_the_audited_contract():
         # 不允许这次编辑」，所以是 409。刻意不翻 404：把「目标不对」谎报成「会话
         # 不存在」会让前端显示错误的失败原因。
         "SupersedeTargetInvalid": 409,
+        # #266：durable `session/started.cwd` 与沙箱映射/进程内 cache 指向不同目录——
+        # 两侧目录可能都在，是**归属事实**矛盾（不是 404 的"目录没了"，也不是 422 的
+        # "请求写错"）。续聊拒绝静默选边。
+        "WorkspaceBindingConflict": 409,
     }
 
 

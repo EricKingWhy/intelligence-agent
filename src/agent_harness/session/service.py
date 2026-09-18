@@ -79,6 +79,7 @@ from agent_harness.session.errors import (
     SteerTargetNotFound,
     SupersedeTargetInvalid,
     UnknownModel,
+    WorkspaceBindingConflict,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
     WorkspacePathInvalid,
@@ -88,6 +89,7 @@ from agent_harness.session.event import (
     MESSAGE_SUPERSEDED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
+    SESSION_FORKED,
     STEER_APPLIED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
@@ -638,6 +640,23 @@ class SessionService:
         if self._state.run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
 
+        # 工作目录归属对账（#266）：必须在 `Session.resume/load` **之前**——那两处会
+        # `registry.get()`，而实例化 Sandbox 时会 mkdir 工作目录：外部 cwd 被用户删掉
+        # 之后会被凭空建回来，"目录没了"从此看不见（旧用例用 MagicMock registry，
+        # 正好绕开了这个 mkdir）。对账只读注册表的登记事实，不实例化任何 Sandbox。
+        persisted_cwd = session_cwd(existing)
+        if persisted_cwd is None:
+            # 历史遗留（无 cwd 锚）：兼容语义逐字不变——默认目录 + 确保它存在。
+            workspace = self._state.workspaces_root / session_id
+            workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            workspace = Path(persisted_cwd)
+            self._reconcile_workspace_binding(session_id, persisted_cwd, existing)
+            if not workspace.is_dir():
+                raise WorkspaceNotFound(
+                    f"session '{session_id}' 的 cwd 不存在或不是目录: {workspace}"
+                )
+
         # T8 #138：崩溃遗留（悬空 tool_call / 无终态 run）必须走 Ledger
         # reconcile——Session.resume 的 dangling 兜底对 RUNNING/UNKNOWN 的
         # tool_call 一律伪造「结果未知」，等于替高风险副作用猜结论
@@ -663,18 +682,6 @@ class SessionService:
                 workspace_registry=self._state.workspace_registry,
             )
 
-        persisted_cwd = session_cwd(existing)
-        workspace = (
-            Path(persisted_cwd)
-            if persisted_cwd is not None
-            else self._state.workspaces_root / session_id
-        )
-        if persisted_cwd is None:
-            workspace.mkdir(parents=True, exist_ok=True)
-        elif not workspace.is_dir():
-            raise WorkspaceNotFound(
-                f"session '{session_id}' 的 cwd 不存在或不是目录: {workspace}"
-            )
         _, wiring = await self._state.get_wiring()
         await self._state.ensure_stores()
 
@@ -775,6 +782,44 @@ class SessionService:
         )
 
     # ── 续聊（Phase Multiturn T2 / PRD §5.3）──────────────────────
+
+    def _reconcile_workspace_binding(
+        self, session_id: str, persisted_cwd: str, events: list,
+    ) -> None:
+        """durable cwd 与沙箱映射 / 进程内 cache 的机械对账（#266）。
+
+        两侧不一致 → 类型化冲突：**不覆盖映射、不静默选边**（ADR-0027 之后
+        `workspace_root` 可能就是用户的真实仓库，选错一侧等于让工具在用户没选过的
+        目录里执行）。注册表侧有两条记录（持久映射 + 进程内 cache），**两条都要对账**
+        ——只看一条会漏掉另一种形态：cache 与 cwd 一致、映射却指向别处时，进程一重启
+        就会换到另一个目录。只读对账，不实例化 Sandbox（那会 mkdir）。
+
+        两类**按设计就不同**的会话不在对账范围：
+
+        - 无 cwd 锚的历史遗留会话（调用方在进入本方法前已分流）；
+        - fork 子会话：cwd 锚记的是**项目归属**（父的目录），映射是 copy-on-fork 的
+          副本目录（ADR-0017 决策 5 / `test_session_cwd.py::TestForkInheritance`）。
+          真机上 3 条 fork 子会话正是这个形状——判成冲突等于让它们再也无法续聊。
+        """
+        registry = self._state.workspace_registry
+        if registry is None:
+            return
+        disagreeing = [
+            root
+            for root in registry.recorded_workspace_roots(session_id)
+            if root != persisted_cwd
+        ]
+        if not disagreeing:
+            return
+        if any(event.type == SESSION_FORKED for event in events):
+            return
+        raise WorkspaceBindingConflict(
+            f"session '{session_id}' 的工作目录绑定冲突："
+            f"session/started.cwd={persisted_cwd}，"
+            f"沙箱登记={', '.join(disagreeing)}。"
+            "两侧不一致时拒绝续聊（不静默选边、不覆盖映射）——"
+            "请核对并修正映射文件或会话日志后重试。"
+        )
 
     def _live_session(self, session_id: str) -> Session | None:
         """在途 run 持有的 Session 聚合（seq 计数器与 listener 都是活的）；无则 None。

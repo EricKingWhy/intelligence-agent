@@ -244,6 +244,46 @@ def test_default_session_behavior_unchanged(tmp_path: Path) -> None:
     assert _row_of(client, session_id)["workspace"] is None
 
 
+# ── 续聊对账（#266）：cwd 锚与沙箱映射互相矛盾 → 409，不静默选边 ──
+
+
+def test_resume_rejects_drifted_sandbox_mapping(tmp_path: Path) -> None:
+    """durable cwd 与 mapping 指向不同目录 → resume 409（类型化冲突），不起 run。
+
+    旧行为：`Session.resume` 先 `registry.get()` 读 mapping（并装进进程内 cache），
+    随后 `build_runtime` → `create(workspace_root=<cwd>)` 命中 cache 直接返回 mapping
+    的 Sandbox——run 静默落在**另一个目录**，用户从响应上看不出任何异常。
+    """
+    client = _client(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = _create_session(client, cwd=str(project))
+    assert _started_cwd(client, session_id) == os.path.realpath(project)
+
+    other = tmp_path / "other"
+    other.mkdir()
+    mapping_path = tmp_path / "workspaces" / f"{session_id}.json"
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    mapping["workspace_root"] = str(other)
+    mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+
+    with patch(
+        "agent_harness.assembly.create_chat_model",
+        return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
+    ):
+        resp = client.post(
+            f"/api/sessions/{session_id}/resume", json={"task": "再来一轮"},
+        )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert "工作目录绑定冲突" in detail
+    assert os.path.realpath(project) in detail and str(other) in detail
+    # 拒绝发生在任何副作用之前：日志里仍只有一条 started
+    events = client.get(f"/api/sessions/{session_id}/events").json()
+    assert len([e for e in events if e["type"] == "session/started"]) == 1
+
+
 # ── AC5：create_project 自动归入 + sessions_attached ──
 
 

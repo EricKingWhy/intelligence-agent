@@ -97,6 +97,7 @@ from agent_harness.session.errors import (
     SteerTargetNotFound,
     SupersedeTargetInvalid,
     UnknownModel,
+    WorkspaceBindingConflict,
     WorkspaceMoveInvalid,
     WorkspaceNameInvalid,
     WorkspaceNotFound,
@@ -137,6 +138,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # WS-4 / #154：会话↔项目的移动在当前状态下不成立（无 cwd 锚 / cwd 不属于该项目 /
     # 重排目标不在该项目账本里）。是"请求合法但状态不允许"，与 422 的名字形态非法分开。
     WorkspaceMoveInvalid: 409,
+    # #266：durable `session/started.cwd` 与沙箱映射/进程内 cache 指向不同目录——
+    # 续聊拒绝静默选边（也不覆盖映射）。与 404 的 `WorkspaceNotFound` 刻意分开：
+    # 那条是"目录没了"，这条是两侧目录可能都在、**归属事实**互相矛盾。
+    WorkspaceBindingConflict: 409,
     # BUG-011：seq 冲突是「资源当前状态与请求冲突」，**不是**「资源不存在」——
     # 旧行为把它翻成 404（`send_message` 的 `Send failed: 404`），掩盖了日志损坏。
     SeqConflict: 409,

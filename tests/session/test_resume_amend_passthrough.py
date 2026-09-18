@@ -12,13 +12,17 @@ tests/web/test_web_amend_passthrough.py。
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_harness.config import Settings
+from agent_harness.sandbox.paths import canonical_workspace_path
+from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session.cwd import session_cwd
-from agent_harness.session.errors import WorkspaceNotFound
+from agent_harness.session.errors import WorkspaceBindingConflict, WorkspaceNotFound
+from agent_harness.session.event import SESSION_FORKED, USER_MESSAGE
 from agent_harness.session.service import AmendOptions, SessionService
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
@@ -49,32 +53,68 @@ def _make_state(tmp_path):
 
 
 class TestResumeWorkspace:
-    """续聊 runtime 必须沿用会话创建时不可变的 cwd 锚。"""
+    """续聊 runtime 必须沿用会话创建时不可变的 cwd 锚，并与沙箱映射机械对账（#266）。
+
+    本类用**真实** ``WorkspaceRegistry`` + 真实 ``JsonlSessionStore``：映射/缓存与
+    durable cwd 的对账正是本票要证明的东西，而 MagicMock 的 ``get()`` 不 mkdir、
+    ``create()`` 也不命中缓存——两侧的失真恰好都落在被测点上（#266 Red/green
+    evidence：禁止只 mock ``build_runtime(workspace=...)`` 参数）。
+    """
 
     def _real_state(self, tmp_path):
         state = _make_state(tmp_path)
         state.store = JsonlSessionStore(root=tmp_path / "sessions")
+        # 与 AppState 同构：workspaces_root == <workspace_dir>/workspaces，注册表根
+        # 也是 <workspace_dir>（映射文件就写在 workspaces_root 下）。
+        state.workspaces_root = tmp_path / "workspaces"
+        state.workspaces_root.mkdir(parents=True, exist_ok=True)
+        state.workspace_registry = WorkspaceRegistry(root=tmp_path)
         state.message_queues = MagicMock()
         state.approval_queues = {}
         state.run_manager.get_active = MagicMock(return_value=None)
-        state.workspace_registry = MagicMock()
-        state.workspace_registry.get = MagicMock(return_value=MagicMock())
         return state
 
-    def test_resume_uses_persisted_external_cwd(self, tmp_path):
-        state = self._real_state(tmp_path)
-        external = tmp_path / "external-project"
-        external.mkdir()
-        Session.start(state.store, session_id="test-sid", cwd=external)
+    @staticmethod
+    def _start_with_cwd(state, session_id, cwd):
+        """按**创建路径的真实顺序**落一条带 cwd 的会话。
 
+        `create_and_launch` 里 `build_runtime`（→ `create(workspace_root=...)`）先于
+        `Session.start`，所以映射与 cwd 锚同值；顺序反过来（先 start 再 create）会
+        得到"映射=默认目录 + cwd=外部目录"的 fork 形状，那是另一回事。
+        """
+        state.workspace_registry.create(session_id, workspace_root=cwd)
+        return Session.start(
+            state.store, session_id=session_id, cwd=cwd,
+            workspace_registry=state.workspace_registry,
+        )
+
+    @staticmethod
+    def _rewrite_mapping(state, session_id, root):
+        """把映射文件改指别处——模拟漂移/损坏（对账的另一侧事实）。"""
+        path = state.workspaces_root / f"{session_id}.json"
+        mapping = json.loads(path.read_text(encoding="utf-8"))
+        mapping["workspace_root"] = str(root)
+        path.write_text(json.dumps(mapping), encoding="utf-8")
+
+    @staticmethod
+    def _resume(state, session_id):
         with patch(
             "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
         ) as mock_build:
             asyncio.run(
                 SessionService(state).resume_and_launch(
-                    session_id="test-sid", task="hello",
+                    session_id=session_id, task="hello",
                 )
             )
+        return mock_build
+
+    def test_resume_uses_persisted_external_cwd(self, tmp_path):
+        state = self._real_state(tmp_path)
+        external = tmp_path / "external-project"
+        external.mkdir()
+        self._start_with_cwd(state, "test-sid", external)
+
+        mock_build = self._resume(state, "test-sid")
 
         persisted = session_cwd(state.store.read_events("test-sid"))
         assert persisted is not None
@@ -86,43 +126,147 @@ class TestResumeWorkspace:
         ]) == 1
 
     def test_missing_persisted_cwd_fails_without_recreating_it(self, tmp_path):
+        """durable 外部 cwd 被删 → 类型化失败，且**不得**把它凭空建回来。
+
+        真 registry 下这条曾经是绿的假象：`Session.resume` → `registry.get()` →
+        `LocalSubprocessSandbox.__init__` 无条件 mkdir，目录被复活后服务层的
+        `is_dir()` 检查自然通过（旧用例用 MagicMock registry，正好绕开了 mkdir）。
+        """
         state = self._real_state(tmp_path)
         external = tmp_path / "removed-project"
         external.mkdir()
-        Session.start(state.store, session_id="test-sid", cwd=external)
+        self._start_with_cwd(state, "test-sid", external)
         external.rmdir()
+        # 进程重启后的形态（cache 空、只剩映射文件）才是这条路径的真实场景：
+        # 目录是在服务没跑的时候被删掉的。cache 命中时不会重建目录，测不到缺口。
+        state.workspace_registry = WorkspaceRegistry(root=tmp_path)
 
-        with (
-            patch(
-                "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
-            ) as mock_build,
-            pytest.raises(WorkspaceNotFound, match="cwd 不存在或不是目录"),
-        ):
-            asyncio.run(
-                SessionService(state).resume_and_launch(
-                    session_id="test-sid", task="hello",
-                )
-            )
+        with pytest.raises(WorkspaceNotFound, match="cwd 不存在或不是目录"):
+            self._resume(state, "test-sid")
 
         assert not external.exists()
-        mock_build.assert_not_awaited()
 
     def test_legacy_session_without_cwd_keeps_default_workspace(self, tmp_path):
+        """历史遗留（无 cwd 锚）：兼容语义逐字不变——用默认目录，且可续聊。"""
         state = self._real_state(tmp_path)
+        state.workspace_registry.create("test-sid")
         Session.start(state.store, session_id="test-sid")
 
-        with patch(
-            "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
-        ) as mock_build:
-            asyncio.run(
-                SessionService(state).resume_and_launch(
-                    session_id="test-sid", task="hello",
-                )
-            )
+        mock_build = self._resume(state, "test-sid")
 
         expected = state.workspaces_root / "test-sid"
         assert mock_build.call_args.kwargs["workspace"] == expected
         assert expected.is_dir()
+
+    def test_mapping_conflict_fails_typed(self, tmp_path):
+        """mapping=B、durable cwd=A（**新 Registry 实例**：cache 空）→ 类型化冲突。
+
+        旧行为：`Session.resume` → `get()` 读 mapping B 并缓存 → `build_runtime` →
+        `create(workspace_root=A)` 命中 cache 直接返回 B —— run 静默落在 B。
+        """
+        state = self._real_state(tmp_path)
+        cwd = tmp_path / "project-a"
+        cwd.mkdir()
+        other = tmp_path / "project-b"
+        other.mkdir()
+        self._start_with_cwd(state, "test-sid", cwd)
+        self._rewrite_mapping(state, "test-sid", other)
+        state.workspace_registry = WorkspaceRegistry(root=tmp_path)  # 新实例，cache 空
+
+        with pytest.raises(WorkspaceBindingConflict, match="工作目录绑定冲突"):
+            self._resume(state, "test-sid")
+
+        assert self._started_count(state, "test-sid") == 1
+        assert not (state.workspaces_root / "test-sid").exists()
+
+    def test_cached_sandbox_conflict_fails_typed(self, tmp_path):
+        """**进程内 cache 命中**路径：cache=B（mapping 后来改回 A、cwd=A）→ 冲突。
+
+        与上一条的区别是事实来源：这里对账必须看 cache（`get()` 读过的映射被
+        改回后，cache 里仍是 B），只读映射文件会得出"两侧一致"的错误结论。
+        """
+        state = self._real_state(tmp_path)
+        cwd = tmp_path / "project-a"
+        cwd.mkdir()
+        other = tmp_path / "project-b"
+        other.mkdir()
+        self._start_with_cwd(state, "test-sid", cwd)
+        self._rewrite_mapping(state, "test-sid", other)
+        # 进程重启后的形态：新实例从映射读到 B 并把它装进 cache（此后 cache=B）。
+        restarted = WorkspaceRegistry(root=tmp_path)
+        restarted.get("test-sid")
+        state.workspace_registry = restarted
+        self._rewrite_mapping(state, "test-sid", cwd)  # 映射改回 A：cache 成为唯一异见
+
+        with pytest.raises(WorkspaceBindingConflict, match="工作目录绑定冲突"):
+            self._resume(state, "test-sid")
+
+        assert self._started_count(state, "test-sid") == 1
+
+    def test_drifted_mapping_fails_even_when_cache_agrees_with_cwd(self, tmp_path):
+        """映射指向别处、cache 与 durable cwd 一致 → 仍然冲突（两条记录都要对账）。
+
+        cache 一致只说明**本次**运行会落在正确目录；映射是持久事实，进程重启后它是
+        唯一记录——那时才拒绝等于把问题推迟到下一次启动，而用户已经以为它好了。
+        """
+        state = self._real_state(tmp_path)
+        cwd = tmp_path / "project-a"
+        cwd.mkdir()
+        other = tmp_path / "project-b"
+        other.mkdir()
+        self._start_with_cwd(state, "test-sid", cwd)
+        self._rewrite_mapping(state, "test-sid", other)  # cache 仍是 cwd
+
+        with pytest.raises(WorkspaceBindingConflict, match="工作目录绑定冲突"):
+            self._resume(state, "test-sid")
+
+        assert self._started_count(state, "test-sid") == 1
+
+    def test_fork_child_copy_on_fork_mapping_is_not_a_conflict(self, tmp_path):
+        """fork 子会话的 copy-on-fork 目录 ≠ cwd 锚（父的项目目录）是**设计如此**。
+
+        cwd 锚记的是项目归属、mapping 记的是子会话自己那份副本（ADR-0017 决策 5 /
+        `test_session_cwd.py::TestForkInheritance` 的语义边界）；把它判成冲突会让
+        每个 fork 子会话再也无法续聊——真机上 3 条 fork 子会话正是这个形状。
+        """
+        from agent_harness.session.fork import fork_session
+        from agent_harness.storage.sqlite import SqliteSessionMetaStore
+
+        state = self._real_state(tmp_path)
+        project = tmp_path / "project-a"
+        project.mkdir()
+        parent = self._start_with_cwd(state, "parent", project)
+        parent.append(USER_MESSAGE, {"content": "分叉点"})
+
+        async def _fork():
+            meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+            await meta.initialize()
+            return await fork_session(
+                state.store, meta, "parent",
+                boundary_user_message_seq=parent.events[-1].seq,
+                workspace_registry=state.workspace_registry,
+                with_tail_summary=False,
+            )
+
+        child = asyncio.run(_fork())
+
+        assert session_cwd(state.store.read_events(child.session_id)) == (
+            canonical_workspace_path(project)
+        )
+        recorded = state.workspace_registry.recorded_workspace_roots(child.session_id)
+        assert recorded == [str(state.workspaces_root / child.session_id)]
+        assert SESSION_FORKED in [e.type for e in child.events]
+
+        mock_build = self._resume(state, child.session_id)
+
+        assert mock_build.call_args.kwargs["workspace"] == project.resolve()
+
+    @staticmethod
+    def _started_count(state, session_id):
+        return len([
+            event for event in state.store.read_events(session_id)
+            if event.type == "session/started"
+        ])
 
 
 class TestResumeAndLaunchPassthrough:
