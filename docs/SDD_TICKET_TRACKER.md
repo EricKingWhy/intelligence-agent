@@ -1999,7 +1999,7 @@ main 由集成 AI 执行）。
 | 批次号 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | **P1-B1** | **#268**、**#269**（均 docs-only） | `45744d3`（**它自身的归属见下方「fixed point 归属」**） | **已审**（两轴独立只读子代理：Standards + Correctness）——fixed point `45744d3`，范围 `45744d3..70d88f2`；轴内合计 **1×P1 + 6×P2 + 6×P3**（其中 2 条 P3 两轴共同指出 ⇒ 去重后 **11** 条），**findings 全数处置**（逐条见下方处置表） | findings 处置 = `2048764`；台账审查行 + 白名单 = 随后的 `chore(review-ledger)` 提交 |
-| **P1-B2** | **#270**（F1，**代码票**）、#271（N2）、#272（F2） | 待定（本批尚未起审） | **未审查**——按 `docs/SDD_WORKFLOW_PROTOCOL.md` §1.2「每 2–3 票对累计 diff 跑一次两轴审查」，`#270` 单票落地时**不单独起审查**；起审点应在 #271（或 #272）落地后，范围从上一审查行 tip `2048764` 起算 | 见下方「P1-B2 票」 |
+| **P1-B2** | **#270**（F1，**代码票**）、#271（N2）、#272（F2） | 待定（本批尚未起审；`#270` / `#271` 均已落地，**起审点 = `#272` 落地后**） | **未审查**——按 `docs/SDD_WORKFLOW_PROTOCOL.md` §1.2「每 2–3 票对累计 diff 跑一次两轴审查」，单票落地时**不单独起审查**（`#270`、`#271` 均照此，**未给自己开审查、未加白名单掩盖**）；三票齐了以后一次性起审，范围从上一审查行 tip `2048764` 起算 | 见下方「P1-B2 票」 |
 
 ### 票
 
@@ -2008,6 +2008,7 @@ main 由集成 AI 执行）。
 | **#268** | 勘误 `docs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done（**未合并**：`1529aa7` 在本批分支上，集成由主开发执行，见索引 §0.5 G5） | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` 机械证明（见下；**blob 哈希是 #269 的 AC7 证据，不是本票的**——两轴 Standards P3 纠正） |
 | **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（**未合并**：`9886a9c` 在本批分支上；`Status: Proposed` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
 | **#270** | **F1**：稳定 `disclosure` / `reasoningDisclosure` 引用，接回被折断的 memo 链 | done（**未落到任何 ref**：`bcdf4e4` 已用 plumbing 造出；本沙箱不能写 ref，待用户在自己的终端执行一条 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | `lib/disclosure.ts` 两个 hook 的返回值改 `useMemo`（票面必做 1 的 **B 方案**，**不取**标注「推荐」的 A 方案——理由与红证见下方证据节）；链路渲染器的 per-render `cycle` 闭包上移为 `useCallback`；已完成段 markdown 收进按**内容**记忆的 `memo(MarkdownBody)`；`ToolCard` 的 `onCycleLevel` 签名带 `(key, density)` | `bcdf4e4` | **全绿**：oxlint **44 → 42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` **59 文件 / 982 用例全绿**（含 `projection.test.ts` 193 条引用稳定契约，**未改写**）；`vite build` 通过；红证 6/14 → 绿 14/14（见下） |
+| **#271** | **N2**：引入 `eventsVersion`，修 `StepDetail` 三处陈旧 memo（**正确性缺陷**——`events` 引用被刻意固定 ⇒ 派生值停在首帧） | done（**未落到任何 ref**：`40851f8`（红证）/ `4e85938`（实现）已用 plumbing 造出；待用户终端 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | 投影层新增 `ConversationState.eventsVersion`（**只在 `events.push` 真执行时 +1**：正常 push 增、去重短路不增、quarantine 分支增）+ `StepDetail` 三处 `useMemo` 依赖 `events` → `eventsVersion`（三处各带**行内** `eslint-disable-line react-hooks/exhaustive-deps`）+ 改写 COW docstring 里那句已被证伪的「无消费者把 events 放进 memo 依赖」 | `40851f8`（红证）+ `4e85938`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、**零顺带消失**）；`vitest` **60 文件 / 990 用例全绿**（F1 时 59 / 982）；perf 车道 `n2-cost-probe.perf.test.ts` 2 例通过；红证 **8 failed / 193 passed** → 改造后 **201/201 全绿**（见下方「N2（#271）验收证据」） |
 
 > **「SHA 待回填」已回填 —— 顺带记下这次实测到的确切机制（比我原先的说明更准）**：
 > 本 worktree 的沙箱**专门回收 `refs/heads/workbuddy/` 这个目录**：
@@ -2316,3 +2317,115 @@ cd web && node node_modules/vitest/vitest.mjs run src/lib/disclosure.test.tsx sr
 | 交互语义的手工冒烟（AC8 的原始口径：截图 / 录屏） | **未取得** | 同上真机环境；已用 AC8 的可自动化代理先行覆盖 |
 | perf 车道覆盖不到「已完成段重复渲染」这类回归 | **本票不做** | 票面已指定归属：N2/#271 落 `eventsVersion` 后，在 perf 车道加一条「已完成后追加 delta ⇒ 已完成段 render 次数不增长」的比例型探测器 |
 | `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269，不在本票范围） |
+
+---
+
+#### N2（#271）验收证据
+
+**票面**：GitHub #271（`## What to build` 必做 1–4 + AC1–AC10）。
+**实现 commit**：`4e85938`（实现，6 文件）＋ `40851f8`（红证 + 前置基线，3 文件）；
+两者合起来对 `e4a4b4f` 的净 diff = **8 文件 / +355 −14**。逐文件（`git diff --numstat`，实测）：
+
+| commit | 文件 | +/− | 归属 |
+| --- | --- | --- | --- |
+| `40851f8` | `web/src/components/StepDetail.render.test.tsx`（**新增**，jsdom 车道） | +114 | 票面必做 4（组件红证） |
+| `40851f8` | `web/src/lib/projection.test.ts` | +70 | 票面必做 4（投影红证） |
+| `40851f8` | `docs/PERF_BASELINE.md`（N2 改造前基线节，G3 硬前置） | +31 −1 | 本批 G3 |
+| `4e85938` | `web/src/lib/n2-cost-probe.perf.test.ts`（**新增**，perf 车道） | +80 | `PERF_BASELINE` §3 可复核要求 |
+| `4e85938` | `web/src/components/StepDetail.tsx` | +26 −8 | 票面必做 2 |
+| `4e85938` | `web/src/lib/projection.ts` | +16 −5 | 票面必做 1 + 3 |
+| `4e85938` | `web/src/types.ts` | +14 | 票面 Scope lock「类型所在处」 |
+| `4e85938` | `web/src/lib/projection.test.ts` | +2 | 编译器强制的形状断言补键 |
+| `4e85938` | `web/src/hooks/useSession.test.ts` | +2 | 编译器强制的构造点 |
+
+**根因（本票是**正确性缺陷**，不是性能票）**：`applyEvent` 返回**新 state 对象 + 同一个 `events` 引用**
+（P0-1 / `3344e34` 刻意固定的 append-only 共享数组）。`useMemo` / `React.memo` 比的是**引用** ⇒
+`StepDetail.tsx` 三处以 `events` 为键的派生值**首次计算后再不重算**：Timeline 的 run 分组停在首帧
+（第 2 个 run 的组头永不出现、老组的「N 事件」永不涨）、Inspector 头部 run 数、选中行 `findIndex` 定位。
+`projection.ts` 的 COW docstring 当时把「**无消费者把 events 放进 memo 依赖**」写成契约——该句已被事实证伪，
+本票必做 3 改写它。
+
+**红证（先红后绿，同一条命令、同一批用例）**
+
+做法：四个文件临时换回 `40851f8` 版本（`git show <sha>:<path>` 写回，**全程未用 `git stash`**——
+本机实测一次 `git stash -u` 会清掉 `.git/refs`），跑完用 `git hash-object` 与 `4e85938:<path>` 逐字节对账还原。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts src/components/StepDetail.render.test.tsx
+```
+
+| 阶段 | 配置 | 结果 | 关键失败断言 |
+| --- | --- | --- | --- |
+| 改造前（`40851f8` 精确复现，本轮实测） | 三个源文件 + `projection.test.ts` 全部换回 `40851f8` | **8 failed / 193 passed（201）** | `src/lib/projection.test.ts` **199 tests / 6 failed**（全部落在 `❯ eventsVersion — events 追加的精确信号（ADR-0037 D2）`）+ `src/components/StepDetail.render.test.tsx` **2 tests / 2 failed**（`× AC7 追加 run 2 后：组头从 1 个变 2 个、行数从 4 变 6（改造前均为陈旧值）`、`× AC7 已存在组的计数与状态也刷新（不是只追加新组头就完事）`）；断言文本见 `PERF_BASELINE` N2 节（同一次红态的失败输出）：`expected undefined to be +0`（AC1）/ `to be 1`（AC2–AC4）/ `to be 5`（AC5）、`expected [ 'Run 1已完成4 事件' ] to have a length of 2 but got 1`、`expected 'Run 1已完成4 事件' to contain '5 事件'` |
+| 改造后（`4e85938` 工作树，本轮实测） | — | **201 passed（201）** | — |
+
+> **两条数字的关系（防止被读成互相矛盾）**：上表第一行的 **8/193** 是 `40851f8` **自身**的红态，
+> 与 `PERF_BASELINE` N2 节记录的数字**逐字一致**（本轮独立复现，非转抄）。
+> 另做了一组更严的 A/B——**只**换回三个源文件、保留实现后的测试文件 ⇒ **9 failed / 192 passed**：
+> 多出的那一条正是 `initConversation` 的形状断言（实现 commit 给既有断言补了 `eventsVersion: 0`，
+> 源码回退后该键不存在）。两个数各自成立、差值 1 可逐条解释；**台账只引用与配置相符的那一个**。
+> 还原对账：4 个文件 `git hash-object` == `4e85938:<path>` **全部 SAME=True**；还原后复跑同一命令 **201/201 绿**。
+
+**AC 逐条**
+
+| AC | 结论 | 证据 |
+| --- | --- | --- |
+| AC1 | ✅ | `web/src/types.ts` 新增 `eventsVersion: number`（含「只在 `events.push` 真执行时 +1」的语义注释）；`initConversation` / `projectHistory` 产物为 `0`，`projection.test.ts` 两条断言 |
+| AC2 | ✅ | 正常 push 路径 `next.eventsVersion = state.eventsVersion + 1`（`projection.ts`），对应用例 +1 |
+| AC3 | ✅ | 去重短路 `return state` 分支**不**递增；用例同时钉住「返回的还是**同一个** state 对象」 |
+| AC4 | ✅ | quarantine 分支同样 +1（该分支也真的 `push` 了 `events`） |
+| AC5 | ✅ | 同一串事件下 `projectHistory(...)` 与逐帧 `applyEvent` 得到相同 `eventsVersion`；另加**引用稳定守卫**用例（新增字段**不得**改变 `events` 引用，P0-1 非回归） |
+| AC6 | ⚠ **命令口径需订正，实质达成** | 三处依赖均已改为 `eventsVersion`，`events` **不再**作依赖。但票面给的字面命令 `grep -n "\[conversation\.events\|\[conversation?\.events"` **会命中 3 行**——命中的正是新依赖 `[conversation?.eventsVersion]` / `[conversation.eventsVersion]` 的**前缀**（正则第二个备选未加词尾边界）。带边界的正确判据 `grep -nE "\[conversation\??\.events\]"` = **空**（本轮实测）。**未改票面正则去掩盖**，按实情登记 |
+| AC7 | ✅ | `StepDetail.render.test.tsx`（`@vitest-environment jsdom`）两条：同一实例追加事件后组头数 **1 → 2**、行数 **4 → 6**；已存在组的计数 **4 → 5**。**改造前失败输出见上表**（同一文件在 `40851f8` 下 2/2 红） |
+| AC8 | ✅ | COW docstring 改写为新契约（依赖 `eventsVersion`、不依赖 `events`、并写明 `events.length` **不是**替代品）；`projection.ts` 中 `eventsVersion` 出现 **4** 次（≥2） |
+| AC9 | ✅ | `tsc -b` **0 错误**（输出 0 字节）；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` **60 文件 / 990 用例全绿**；perf 车道 `n2-cost-probe` **2 例通过**；`vite build` **rc=0** |
+| AC10 | ⚠ **有披露** | 见下方「披露与偏离」第 1–3 条（4 个票面清单外的文件，逐个有理由） |
+
+**门禁（同一 commit 树，本轮重跑，全绿）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint --format json` | rc=0，**42 条**（全 warning / 0 error），与 F1 基线 **42** 持平 |
+| 单测全量 | `node node_modules/vitest/vitest.mjs run` | rc=0，**60 文件 / 990 用例全绿**（F1 时 59 / 982） |
+| perf 车道 | `… -c vitest.perf.config.ts src/lib/n2-cost-probe.perf.test.ts` | rc=0，**1 文件 / 2 用例** |
+| 生产构建 | `node node_modules/vite/bin/vite.js build` | rc=0（仅既有的 chunk-size 提示） |
+
+> **`oxlint` 零新增的机械依据（不只看总数）**：本票触碰的 7 个文件里只有 `StepDetail.tsx` 有告警，
+> 共 **3 条**且全部是本票之前既有的、且都不在改动行上——2×`react(only-export-components)`（`:907` / `:927`）
+> + 1×`react(refs)`（`:1004`，F1 已登记为「原样保留」）。另外 6 个文件 **0 条**。
+> 三处新依赖本应新增的 6 条 `exhaustive-deps` 被**行内** `// eslint-disable-line` 精确吞掉；
+> 本版 oxlint 剩余的 3 条 `exhaustive-deps` 全落在本票**未触碰**的文件（`lib/followLatest.ts` / `hooks/useSession.ts`）。
+> ⇒ 总数持平既不是「新增被抵消」，也不是「既有被顺带吞掉」。机制与最小复现见 `PERF_BASELINE` N2 节。
+
+**披露与偏离（逐条）**
+
+1. **`web/src/components/StepDetail.render.test.tsx`（新文件，票面写的是 `StepDetail.test.tsx`）**：
+   AC7 判的是「**同一实例**在父级提交后有没有重算派生值」，而 `useMemo` 的 bail-out 只在**客户端渲染器**
+   的 reconciliation 里发生——既有 `StepDetail.test.tsx` 是 SSR（`renderToString`）契约测试，每次调用都是全新
+   一次渲染、`useMemo` 必然重算，**陈旧 memo 在 node 车道里不可观测**。而 `@vitest-environment` 是**文件级**
+   指令，加在既有文件上会把它**全部**既有用例一起换车道 ⇒ 另开同构文件（沿用 F1 `Conversation.render.test.tsx`
+   的同一做法），全局 `vitest.config.ts` **不动**。依赖 `jsdom` 已在 F1 落地（经用户确认），本票**未**再增依赖。
+2. **`web/src/hooks/useSession.test.ts`（+2）**：`conv()` 夹具是 `ConversationState` 的**构造点**，
+   新增必填字段后 `tsc -b` 立刻红——这正是票面 `## Risks` 预告的「编译器会指出全部构造点」。
+   只补 `eventsVersion: 0`，**不改**该文件任何行为或断言。
+3. **`web/src/lib/n2-cost-probe.perf.test.ts`（新文件，+80）**：`PERF_BASELINE` §3 要求每条数字可复核
+   （命令 + 脚本路径）。与仓内既有的 `projection.perf.test.ts` / `f1-cost-probe.perf.test.ts` 同属 perf 车道
+   （`vitest.config.ts` 已排除 `*.perf.test.ts`，**不进** `npm test`）。
+4. **`docs/PERF_BASELINE.md`**：不在票面 Scope lock 的允许清单里，但它是本批 **G3 硬前置 + 性能数字唯一落点**
+   （索引 §0.3 与 tracker 批次表头都写明），F1 已按同一口径处理。
+
+**未闭合项（每条写明解除条件）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| **F1 的未闭合项「perf 车道补一条『已完成后追加 delta ⇒ 已完成段 render 次数不增长』的比例型探测器」票面把它归给了 N2——本票`未做`** | **未做（如实登记）** | 本票 perf 车道新增的是**成本**探针（`eventsVersion` 增量的 A/B + `groupEventsByRun` 调用频率折算），**不是** render 次数探测器。解除条件：随 **F2（#272，memo 与 props 收敛）**一并补——F2 正要把 `allTools` / `deriveAgentProfile` 这些宽对象派生收敛，render 次数在那之后才有稳定口径；若 F2 也不做，则另开票 |
+| `StepDetail.tsx` 其余以宽对象为依赖的派生（`allTools(conversation)`、`deriveRunPulse`、`deriveAgentProfile`、三处 `tools.filter`、`events.map` 建闭包） | **本票不处理** | 票面 `## 未闭合项` 已指定归属：**F2**（memo 与 props 收敛）与 **F5**（长列表离屏）合并 |
+| `projection.perf.test.ts` 的 `applyEvent @N` 基准走**去重短路**路径（`seq` 恒 `999999`）⇒ 它对 push 路径的回退是瞎的 | **仅登记，未改他人行** | 把基准里的 delta 换成每次新 `seq`（一行改动）后重测；或由本票的 `n2-cost-probe` 承担 push 路径预算断言（后者已带 `<50µs` 断言，**已覆盖**，故本条不阻塞） |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 同 F1：在真机 Chrome Performance 面板按固定场景录一次并归档（本环境无 GUI 浏览器、无真后端可驱动一场真实流式） |
+| 交互语义的手工冒烟（截图 / 录屏） | **未取得** | 同上真机环境；AC7 已用可自动化用例先覆盖（且带改造前失败输出） |
+| `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269） |
+
+**审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
+`40851f8` / `4e85938` 交由 **P1-B2** 的两轴审查窗口（起审点 = #272 落地后，范围自 `2048764` 起算）覆盖。
+

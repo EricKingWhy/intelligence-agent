@@ -139,11 +139,11 @@ cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/l
 
 | 场景 | 规模 | 指标 | 改造前 | 改造后 | 口径 / 命令 | 日期 | commit |
 |---|---|---|---|---|---|---|---|
-| Timeline run 分组是否跟随 `events` 追加更新 | 1→2 个 run（4→6 事件） | 组头数 / 行数（**同一实例**再渲染后） | **1 / 4**（陈旧——派生值停在首帧，第 2 个 run 不出现） | 2 / 6 | `node node_modules/vitest/vitest.mjs run src/components/StepDetail.render.test.tsx` | 2026-09-18 | `<sha>` |
-| 同上：已存在组的计数也陈旧 | 同 run 追加 1 事件（4→5） | 组头文案 | **「Run 1 已完成 4 事件」**（不涨） | 「5 事件」 | 同上 | 2026-09-18 | `<sha>` |
-| `eventsVersion` 语义（AC1–AC5 + 引用稳定守卫） | 6 帧（含 1 重复 seq + 1 quarantine） | 断言通过数 | **0 / 6 通过**（字段不存在，6 条全红） | 6 / 6 | `node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts` | 2026-09-18 | `<sha>` |
-| `applyEvent` 单事件成本（**不得**回退 P0-1） | @1k / @5k / @20k | µs/事件 | **0.5 / 0.2 / 0.2** | 见下 | `node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/lib/projection.perf.test.ts` | 2026-09-18 | `<sha>` |
-| `projectHistory` 历史重建（**不得**回退 P0-1） | 4650 / 20000 事件 | ms | **4.3 / 10.7** | 见下 | 同上 | 2026-09-18 | `<sha>` |
+| Timeline run 分组是否跟随 `events` 追加更新 | 1→2 个 run（4→6 事件） | 组头数 / 行数（**同一实例**再渲染后） | **1 / 4**（陈旧——派生值停在首帧，第 2 个 run 不出现） | 2 / 6 | `node node_modules/vitest/vitest.mjs run src/components/StepDetail.render.test.tsx` | 2026-09-18 | `40851f8` |
+| 同上：已存在组的计数也陈旧 | 同 run 追加 1 事件（4→5） | 组头文案 | **「Run 1 已完成 4 事件」**（不涨） | 「5 事件」 | 同上 | 2026-09-18 | `40851f8` |
+| `eventsVersion` 语义（AC1–AC5 + 引用稳定守卫） | 6 帧（含 1 重复 seq + 1 quarantine） | 断言通过数 | **0 / 6 通过**（字段不存在，6 条全红） | 6 / 6 | `node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts` | 2026-09-18 | `40851f8` |
+| `applyEvent` 单事件成本（**不得**回退 P0-1） | @1k / @5k / @20k | µs/事件 | **0.5 / 0.2 / 0.2** | 见下 | `node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/lib/projection.perf.test.ts` | 2026-09-18 | `40851f8` |
+| `projectHistory` 历史重建（**不得**回退 P0-1） | 4650 / 20000 事件 | ms | **4.3 / 10.7** | 见下 | 同上 | 2026-09-18 | `40851f8` |
 
 **红证（改造前，同一条命令的失败输出）**：`Tests 8 failed | 193 passed (201)`
 ——失败的正是本票新增的 8 条（投影 6 + 组件 2），**既有 193 条全部通过**（含
@@ -170,6 +170,53 @@ TypeError: actual value must be number or bigint, received "undefined"  // 引�
 - 投影层：`projectHistory` 4650 事件、`applyEvent` @20k 事件的耗时
   （**必须保持** `3344e34` 的水平：`<10µs/事件` / `2.8ms`——本票**不得**回退这两个数）；
 - 新增字段后 `applyEvent` 的耗时增量（应可忽略）。
+
+---
+
+**改造后（2026-09-18，同口径，追加记录——上表原值一字未改）**：
+
+| 场景 | 规模 | 指标 | 改造前 → 改造后 | 口径 / 命令 |
+|---|---|---|---|---|
+| Timeline run 分组跟随追加更新 | 1→2 个 run（4→6 事件） | 组头数 / 行数 | **1 / 4 → 2 / 6** ✔ | `node node_modules/vitest/vitest.mjs run src/components/StepDetail.render.test.tsx` |
+| 同 run 追加 1 事件（组内计数） | 4→5 事件 | 组头文案 | **「4 事件」→「5 事件」**、行 4→5 ✔ | 同上 |
+| `eventsVersion` 语义（AC1–AC5 + 引用稳定守卫） | 6 帧（含 1 重复 seq + 1 quarantine） | 断言通过数 | **0 / 6 → 6 / 6** ✔ | `node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts` |
+| `applyEvent` 单事件成本（不得回退 P0-1） | @100 / @1k / @5k / @20k | µs/事件 | 0.4/0.5/0.2/0.2 → **0.7/0.3/0.1/0.2**（同车道；未回退） | `node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/lib/projection.perf.test.ts` |
+| `projectHistory` 历史重建（不得回退 P0-1） | 4650 / 20000 事件 | ms | 4.3/10.7 → **3.4/12.5**（同量级，机器抖动内） | 同上 |
+| **新增字段的耗时增量**（A/B，各 3 轮取中位） | @20k **真实 push 路径**（`seq: null`，不去重） | µs/事件 | 改造前 **0.696** → 改造后 **0.678** ⇒ **增量落在抖动内** | 见下「N2 成本探针」 |
+| **本票唯一被改变的运行时行为**：`groupEventsByRun` 调用频率 | 从「永不重算」变成「每次 `events.push`」 | 单次成本 / 折算 | @20k 单次 **0.145 → 0.147 ms**（单次成本不变）⇒ 合帧 40 次/秒 ≈ **5.9 ms/s（≈0.6% 单核）** | 同上 |
+
+**N2 成本探针（基线复现脚本，随本票入库）**：`web/src/lib/n2-cost-probe.perf.test.ts`
+（与 `f1-cost-probe.perf.test.ts` 同属 perf 车道，不进默认 `npm test`）：
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/lib/n2-cost-probe.perf.test.ts
+```
+
+> ⚠ **顺带查明的一个度量陷阱（不改动他人行，仅追加说明）**：`projection.perf.test.ts` 的
+> `applyEvent @N` 基准把**同一个 `seq: 999999` 反复投递**——`seenSeqs` 是跨 state 共享的
+> Set（append-only 簿记，ADR-0016 §2），第二轮起该 seq 已在集合里，于是每次都走
+> **去重短路 `return state`**，测到的是短路路径（≈0.2µs），**不是真实事件要走的 push
+> 路径**。实测对照：真实 push 路径 @20k ≈ **0.68µs**（本票探针，A/B 各 3 轮）。
+> 影响面（**不在本票范围，仅登记**）：
+> 1. `3344e34` 引用的「0.2µs/事件」实际是短路路径读数——P0-1 的收益方向不变（它消灭的是
+>    `[...state.events, event]` 的整体克隆，那条路径在两个口径下都变快了），但**倍数**若要
+>    对外引用，应以 push 路径重测为准；
+> 2. 该文件的「O(N²) 回潮探测器」用的也是同一口径 ⇒ 它对 **push 路径**的回退是**瞎的**。
+>    **解除条件**：把基准里的 delta 换成每次新 seq（一行改动）后重测，或由本票的
+>    `n2-cost-probe` 承担 push 路径的预算断言（后者已带 `<50µs` 断言，**已覆盖**）。
+
+**门禁（同一 commit 树，全绿）**：`tsc -b` 0 错误；`oxlint` **42 → 42**
+（零新增，且**零顺带消失**——见下方说明）；`vitest` **60 文件 / 990 用例全绿**
+（F1 时 59 / 982）；`vite build` 通过。
+
+> **oxlint 零新增的实现方式（重要，供后续票复用）**：三处 `useMemo` 用 `eventsVersion`
+> 作键会被 `exhaustive-deps` 判为「缺依赖 `conversation.events`」+「多余依赖 `eventsVersion`」
+> （共 6 条）。豁免**只能用行内 `// eslint-disable-line react-hooks/exhaustive-deps`**：
+> 本版 oxlint（1.79.0）下 `disable-next-line` 与块级 `disable`/`enable` 会让该函数**全部
+> compiler 类规则一起跳过**——最小复现：同一份代码无豁免时 4 条告警（2×`react(refs)` +
+> 2×`exhaustive-deps`），加 `disable-next-line` 后变成「无告警」，连无关真告警一起吞掉。
+> 行内形式实测只吞目标告警：`oxlint` 总数 42 → 42，`StepDetail.tsx` 里那条既有的
+> `react(refs)`（`visibleRef.current = visible`）**原样保留**。
 
 ### F2 — memo 与 props 收敛（#272）
 _待落基线。_
