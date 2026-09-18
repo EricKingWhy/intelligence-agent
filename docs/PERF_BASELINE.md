@@ -131,6 +131,21 @@ cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/l
 切 density），把 trace 存档并把两列数字补进上表。在此之前，本票的收益证据只覆盖
 「可自动化口径」（调用次数 / 次数 × 单价）。
 
+<!-- PERF-LIVE-G4-CORRECTION-2026-09-18 -->
+> **2026-09-18 追加更正（当日晚些时候，采集手段已补）**：上面解除条件的 ① **已完成** ——
+> `web/scripts/perf-longtask-live.mjs` 用浏览器原生 `PerformanceObserver('longtask')`
+> （阈值 50ms，与 Chrome Performance 面板同源判定）做采集，**可自动化、不需要 GUI 录制**。
+> 但它**没能**补上本行的「长回答流式」场景：2026-09-18 真机联调时模型供应商账户被冻结，
+> `api.senseaudio.cn` 对 `deepseek-v4-flash-0731` 返回
+> `HTTP 400 {"code":"billing","message":"计费账户已被冻结","ref_code":400901}`，
+> 任何依赖真模型往返的场景当前都跑不出流式（harness 侧表现为 `run/failed
+> reason=provider_account_unavailable`）。该脚本覆盖的场景是**打开长会话 → 12 次 Inspector
+> peek 切换 → 工作区面板往返**，即 F2（#272）的交互路径，数字见 F2 节
+> 「真机 live 车道（2026-09-18）」。
+> ⇒ **本行仍标记为「未取得」**；解除条件更新为：账户解冻后，用同一脚本指向一个流式会话采集，
+> 或按 §2.1 人工在 Performance 面板按固定场景录一次并归档 trace。
+
+
 要求指标：
 - 「流式提交一次」时 `renderMarkdown` 的实际调用次数（改造前应按可见已完成段数增长）；
 - `memo(TurnView)` / `memo(ToolCard)` 的 render 次数（render 计数 spy）；
@@ -329,6 +344,84 @@ cd web && node node_modules/@playwright/test/cli.js test --workers=2 --output=<�
 | 主车道 e2e（AC8 的相关 e2e） | **已闭合**（2026-09-18，436 绿） | 无 |
 | `playwright.live.config.ts` 联调车道（真模型 + 真后端 `127.0.0.1:8000`） | **未运行** | 按设计**不入标准门禁**；后端起在 8000 后跑 `--config playwright.live.config.ts --workers=1` |
 | long task 数 + 最长单帧（上表最后一行） | **未取得** | 写 CDP `PerformanceObserver('longtask')` 采集脚本（可自动化，本批未做），或人工在 Performance 面板按固定场景录一次并归档。⚠ 理由更正：真机 Chromium 一直可用，**不是**「无 GUI 浏览器」 |
+
+<!-- PERF-LIVE-F2-RAIL-2026-09-18 -->
+#### 真机 live 车道（2026-09-18 追加）
+
+**验收范围**：`web/playwright.live.config.ts`（**真后端** `127.0.0.1:8000` + **真模型**）。
+上文 436 绿属**主车道 mock 车道**（`e2e/fixtures.ts` 用 `page.route` mock SSE，
+帧形状照 `docs/BACKEND_CONTRACT_STREAMING_UI.md`）——两者不是一回事，别互相顶替。
+
+| spec | 用例数 | 结果 | 归因 |
+| --- | --- | --- | --- |
+| `e2e-live/approval-live.spec.ts` | 2 | 修好选择器后**仍红** | 前端链路是对的：`session/started` 里 `permission_mode: 'read-only'` 证明档位选中；发出任务即 `run/failed reason=provider_account_unavailable` |
+| `e2e-live/project-groups-live.spec.ts` | 1 | 红（**既存规格与代码冲突**） | `src/agent_harness/web/projects.py:249`「注册即归入 cwd 匹配的既有会话」（AC5 / #169，响应带 `sessions_attached`）与规格第 143 行「注册后应仍在未分组」正面冲突 |
+| `web/scripts/perf-longtask-live.mjs`（采集器，非 e2e） | — | 绿 | 只读 + 只互动本地 UI，不依赖模型 |
+
+- **`approval-live` 两层失败**：第一层已修（`pickControl(page,'权限模式', 0, '只读')` → **1**）。
+  根因：`OptionPicker` 自 #201（`4ddec6b`，同时是 main HEAD 与本批 tip 的祖先 ⇒ **与 P1-B2 无关的
+  既存漂移**）在目录首部恒插「默认（未选）」行，下压次数 = 条目下标 + 1；主车道
+  `e2e/control-row.spec.ts` 里选「只读」的 4 处调用全是 1，只有本文件写 0，而 live 车道不入标准
+  门禁 ⇒ 静默腐烂。**判别证据（真机 A/B，零副作用）**：`%TEMP%\wbi-probe-permpick.cjs`
+  （只做「打开 → ↓N 次 → Enter」，**不点发送** ⇒ 不新增会话、不污染工作区）实测
+  `目录前 5 行 = ["默认（未选）","只读","工作区写入","完全访问"]`；下压 **0** 次 ⇒ trigger 文案
+  **`"权限"`**（= placeholder，证明 0 选中的是「默认（未选）」）、下压 **1** 次 ⇒ **`"只读"`**。
+  另核：`4ddec6b`（#201）确为 main HEAD 与本批 tip 的共同祖先（`git merge-base --is-ancestor`
+  两条均成立）⇒ 这是**既存漂移**，不是 P1-B2 引入的。
+  第二层是**外部阻塞、本机不可解**：供应商账户冻结（证据同上），
+  ⇒ **任何依赖真模型往返的用例（审批卡、流式长回答）当前不可能绿**。
+- **`project-groups-live` 是决策票，不擅自修**：候选 A = 改规格承认 AC5 语义（有 `projects.py:249`
+  的 docstring + AC5 背书，属纠正过期断言而非放宽校验）；候选 B = 台账登记「规格过期，待 WS-5/#155
+  票主修」，live 车道保持红。已在台账登记，**未改规格**。
+- ⚠ 该 spec 跑到一半失败会**污染真实数据**（把 `ws-delete-me` 注册进用户真实分组）。上次已用
+  `DELETE /api/projects/<id>` 软删除还原（`sessions_detached=1`）。**重跑前先想清楚还原方式。**
+
+**long task 数字（`perf-longtask-live.mjs`，生产口径 = 后端同源托管 `web/dist`）**
+
+```bash
+cd web
+node scripts/perf-longtask-live.mjs                         # 生产口径（默认 http://127.0.0.1:8000）
+node scripts/perf-longtask-live.mjs --base http://localhost:5173   # dev 口径（vite，未压缩）
+```
+
+场景：打开 **事件数最多** 的真实会话（本次 `40ee6420-…`，**1834 事件**，`timeline-row=200`）→
+**12 次 Inspector peek 切换** → 工作区面板（输出 / 改动）往返。会话由脚本按 `event_count`
+自动挑选，**不硬编码 id**；viewport 固定 1440×900。同轮顺带巡检不变量：
+`detail-peek-kind` 12 次全部有值、`timeline-row[aria-current="true"]` 恒为 **1**
+（F1 / N2 / F2 要保的在真机成立）。
+
+北京时间 2026-09-18 同一台机器、同一后端、同一份 `web/dist` 上连跑四轮（`--base` 默认生产口径）：
+
+| 阶段（脚本的 3 个 report 行**均为累计**口径） | 轮次 1 | 轮次 2 | 轮次 3 | 轮次 4 | 该行**新增那一段**内最坏单帧 |
+| --- | --- | --- | --- | --- | --- |
+| 加载 + 初始渲染 | 3 条 / 297ms | 4 条 / 333ms | 4 条 / 308ms | **0 条 / 0ms** | 156 / 102 / 83 / — ms |
+| 打开长会话（1834 事件） | 6 条 / 1040ms | 5 条 / 669ms | 5 条 / 803ms | **1 条 / 272ms** | 513 / 336 / 495 / 272 ms |
+| 再 +12 次 peek 切换与面板往返 | 10 条 / 1481ms | 7 条 / 909ms | 9 条 / 1331ms | **3 条 / 506ms** | 189 / 122 / 186 / 126 ms |
+| 第 4 行（= 打开 + 交互，扣掉加载段） | 7 条 / 1184ms | 3 条 / 576ms | 5 条 / 1023ms | **3 条 / 506ms** | 513 / 336 / 495 / 272 ms |
+
+> 读表须知：条数 / 总时长两列**累计**；最后一列是该行**新增那一段**里的最坏单帧
+> （从 `run*.log` 的 `worst=[…]` 列表逐段切出来），**不是**累计最坏——轮次 1–3 的累计最坏
+> 在第 2 行就已出现（513 / 336 / 495 ms），后面几段都没超过它。
+
+证据（可直接复核）：日志 `%TEMP%\wbi-perf-longtask-run1.log` … `run4.log`；
+截图 `web/gui-test-screenshots/perf-longtask/01-shell.png` … `04-panels.png`（gitignored）；
+后端启动日志 `%TEMP%\wbi-perf-backend-20260918.log` 首行可证「用的是本 worktree 的 src」，且
+`/` 返回的 `assets/index-DWcQjnCB.js` 与 disk 同文件（确为生产口径而非 dev）。
+
+⚠ **轮次 4 推翻了本轮早先的「跨会话差异」定性（自我更正）**：轮次 1–3（23:26）加载段恒有
+3–4 条 / ~300ms，而 23:50 的轮次 4 是 **0 条 / 0ms**，与上一会话（22:14）两次跑的
+「加载 0 条 / 0ms、打开 1 条 / 257ms、全段 3 条 / 463ms」**同型**。⇒ 这不是「跨会话」差异，
+而是**同一机器、同一会话、同一份 `web/dist` 上的双峰波动**（mode A：加载段有 3–4 条长任务、
+全段 7–10 条；mode B：加载段 0 条、全段 1–3 条）。触发条件**未定位**（轮次 4 之前刚跑过一次
+同页面的探针，怀疑与 OS 文件缓存 / 字体与主包解析冷热相关，**未证实**）。⇒ 结论不变但更强：
+这批数字只能当**数量级基线**、**不得用作阈值断言**（与 `f1-cost-probe` 同规矩），且**单次
+采样不足以支撑任何前后对照**——要用它做 A/B，必须同机、同口径、多轮取中位数并在文档里留下
+全部轮次。dev 口径（vite 未压缩 + React DEV）系统性更高，两种口径**不可混用同一条基线**。
+
+⚠ **口径边界（别把这当成替换）**：§2.1 禁的是 **Playwright 帧率（FPS）自动采集**；本脚本是
+原生 long task 计数，**不与该禁令冲突**。但它给的是 **F2 交互路径**的数字，不是 F1 的
+「长回答流式」——后者仍因账户冻结 **未取得**，F1 节那一行继续保留。
+
 
 ### F4 — 命令面板门控（#273）
 _待落基线。_

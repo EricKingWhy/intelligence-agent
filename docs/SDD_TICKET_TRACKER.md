@@ -2657,3 +2657,42 @@ D5 引用的行号/数字经实跑核对；`web/` 三文件的 diff **逐 hunk �
 > 这正是「9 条 `exhaustive-deps` 行内豁免的位置与依赖内容一字未动」的可执行证明。
 
 
+<!-- P1-B2-LIVE-VERIFY-2026-09-18 -->
+#### P1-B2 live 车道验收 + G4 采集手段（2026-09-18 深夜）
+
+**环境**：worktree `main-f049fadd` @ `33bd447`；后端 = `create_prod_app` 起在 `127.0.0.1:8000`
+并**同源托管本 worktree 的 `web/dist`**（`/` 返回的 `assets/index-DWcQjnCB.js` 与磁盘同文件；
+启动器首行打印的 `agent_harness.__file__` 指向本 worktree 的 `src`）。主车道 mock e2e 的
+**436 绿**（`fe96009`）本轮**未重跑**——本次改动不落主车道（`web/playwright.config.ts`
+`testDir: './e2e'` 不含 `e2e-live/`，`playwright.live.config.ts` 才是 `./e2e-live`），重跑无增量信息。
+
+| live 车道 | 结果 | 归因 / 处置 |
+| --- | --- | --- |
+| `e2e-live/approval-live.spec.ts`（2 例） | **第一层已修**；整体仍红 | 选择器下压次数 `0 → 1`（`OptionPicker` 自 #201 / `4ddec6b` 起目录首行恒为「默认（未选）」）；余下是 `run/failed reason=provider_account_unavailable` = 供应商账户冻结，**非本仓可解** |
+| `e2e-live/project-groups-live.spec.ts`（1 例） | 红（**决策票，未擅改**） | `src/agent_harness/web/projects.py:249`「注册即归入 cwd 匹配的既有会话」（AC5 / #169）与规格第 143 行「注册后应仍在未分组」冲突 ⇒ 候选 A（改规格承认 AC5 语义，越 WS-5 票）/ 候选 B（登记「规格过期，待 WS-5/#155 票主修」、live 保持红），**等用户拍板** |
+| `web/scripts/perf-longtask-live.mjs` | 绿（连跑 4 轮） | 只读 + 本地互动，不依赖模型；**不新增会话** |
+
+**G4 观感口径（long task）——采集手段已补，场景仍部分未取**
+
+- 新脚本 `web/scripts/perf-longtask-live.mjs`：浏览器原生 `PerformanceObserver('longtask')`
+  （阈值 50ms），场景 = 打开事件数最多的真实会话（本次 1834 事件）→ 12 次 Inspector peek 切换 →
+  工作区面板（输出 / 改动）往返。数字、dev / 生产两口径对照、**轮次双峰波动（mode A/B）声明**
+  全部落在 `docs/PERF_BASELINE.md` F2 节（方式为**只追加**，未改他人历史行）。
+- **F1 的「长回答流式」场景仍「未取得」**（账户冻结 ⇒ 跑不出真流式）⇒ F1 节那一行的未闭合状态
+  **保留**，解除条件写在其追加段里。`PERF_BASELINE` §2.1 禁的是 **Playwright 帧率（FPS）自动采集**；
+  本脚本是 long task 计数，**不与该禁令冲突**，但它是**补充口径、不是替换**。
+
+**门禁（本轮实跑，`33bd447` + 本次未提交改动的同一工作树）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint` | **42 warnings / 0 errors**（与基线 42 同数：零新增、零顺带消失） |
+| 主车道 e2e | — | **未重跑**（理由见上：本次改动不在该车道） |
+
+**仍未闭合（交用户）**
+
+1. `project-groups-live` 的 A/B 决策（上表）——**未自动执行**，台账只登记、不改规格。
+2. 供应商账户冻结 ⇒ 一切依赖真模型往返的用例（审批卡 / 流式长回答）不可绿；解除条件 = 用户解冻/充值。
+3. `PERF_BASELINE` §2.1 的「流式」录制仍缺（与第 2 条同源）；F1 节那行保持「未取得」。
+
