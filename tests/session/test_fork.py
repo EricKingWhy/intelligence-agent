@@ -29,6 +29,7 @@ from agent_harness.session.fork import (
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from tests.scripted_model import ScriptedModel
+from tests.session.store_fixtures import FailingFromStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -501,20 +502,8 @@ async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None
     parent_path = base._events_path("parent")
     parent_bytes_before = parent_path.read_bytes()
 
-    class _FailingFrom(JsonlSessionStore):
-        def __init__(self, root, *, fail_from: int) -> None:
-            super().__init__(root=root)
-            self._calls = 0
-            self._fail_from = fail_from
-
-        def append_event(self, session_id, event):
-            self._calls += 1
-            if self._calls >= self._fail_from:
-                raise RuntimeError(f"磁盘故障（注入，第 {self._calls} 次写）")
-            super().append_event(session_id, event)
-
     # 第 3 次写 = child 的 seed 第二项（1=session/started, 2=seed[0]）
-    failing = _FailingFrom(root, fail_from=3)
+    failing = FailingFromStore(root, fail_from=3)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
     await meta.initialize()
 

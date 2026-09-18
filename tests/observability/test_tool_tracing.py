@@ -249,15 +249,77 @@ def test_executor_tracer_defaults_to_the_null_implementation():
         assert isinstance(default, Tracer)
 
 
+def _tracer_truthiness_guards(source: str) -> list[int]:
+    """找出以 `tracer` 作判空 / 判真值的表达式行号（扫 AST，不是匹配字符串）。
+
+    字符串匹配只挡得住一种写法（`tracer is not None`），挡不住 `if tracer:` /
+    `tracer is None` / 多空格等等价形状；扫 AST 才真钉住"映射路径不靠 None
+    分支表达 optional tracing"这条验收标准。
+
+    两类形状都要抓：
+      (a) 与 None 的比较——出现在 Compare / BoolOp（`x and tracer is not None`）
+          里都要算；
+      (b) 裸真值上下文——`if tracer:` / `while tracer:` / `tracer and ...`。
+    注意 `tracer.trace_id` 这类**属性**访问不算：属性取值判空是业务判断，
+    判的是 trace 是否可关联，不是 tracing 是否缺席。
+    """
+    import ast
+
+    tree = ast.parse(source)
+    hits: list[int] = []
+
+    def _is_tracer_name(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == "tracer"
+
+    for node in ast.walk(tree):
+        # (a) 与 None 比较（Compare 及其在 BoolOp 中的组合都被 walk 分别命中）。
+        if isinstance(node, ast.Compare) and any(
+            _is_tracer_name(n) for n in [node.left, *node.comparators]
+        ):
+            if any(
+                isinstance(op, (ast.Is, ast.IsNot))
+                and any(
+                    isinstance(c, ast.Constant) and c.value is None
+                    for c in node.comparators
+                )
+                for op in node.ops
+            ):
+                hits.append(node.lineno)
+        # (b) 裸真值上下文：If / While 的 test，以及 BoolOp 的操作数。
+        elif isinstance(node, (ast.If, ast.While)) and _is_tracer_name(node.test) or isinstance(node, ast.BoolOp) and any(
+            _is_tracer_name(v) for v in node.values
+        ):
+            hits.append(node.lineno)
+    return sorted(hits)
+
+
 def test_executor_source_has_no_none_guard_on_tracer():
-    """AC1（机械闸）：Executor 源码里不再出现 `if tracer is not None` 形状的分支。"""
-    source = _executor_module_source()
-    assert "tracer is not None" not in source
+    """AC1（机械闸）：Executor 源码里不再有任何以 `tracer` 判空 / 判真值形状的分支。"""
+    hits = _tracer_truthiness_guards(_executor_module_source())
+    assert hits == [], f"executor 里仍有 tracer 判空分支，行号：{hits}"
+    # 闸门自检：喂各种等价形状必须报得出来，否则这闸门是空转的。
+    sample = (
+        "async def f(tracer=None):\n"
+        "    if tracer is not None:\n"       # 2: 与 None 比较
+        "        pass\n"
+        "    if tracer:\n"                   # 4: 裸真值
+        "        pass\n"
+        "    if tracer is None:\n"           # 6: 反向比较
+        "        pass\n"
+        "    x = tracer and tracer.trace_id\n"  # 8: BoolOp 操作数
+        "    return x\n"
+    )
+    assert _tracer_truthiness_guards(sample) == [2, 4, 6, 8]
 
 
 @pytest.mark.asyncio
-async def test_executor_without_tracer_drives_the_null_tracer_port():
-    """缺席观测时 Executor 仍驱动端口：NullTracer 收到 span 的完整生命周期。"""
+async def test_explicitly_injected_null_tracer_is_driven_through_the_lifecycle():
+    """显式注入缺席实现时端口被完整驱动（start → completed 各一次）。
+
+    默认值本身（`_NULL_TRACER` 是 NullTracer 实例而非 None，且无 None 判空分支）
+    由 `test_executor_tracer_defaults_to_the_null_implementation` 与上面那条
+    AST 闸门钉住——默认值在 def 期就已绑定，无法在此处替身观测，故不在此重复宣称。
+    """
     calls: list[str] = []
     recording = RecordingNullTracer(calls)
 
@@ -343,3 +405,30 @@ async def test_ledger_failure_closes_the_span_once(tmp_path):
     assert closes[0]["metadata"]["outcome"] == "exception"
     # 异常文本不进观测（脱敏）：metadata 里只有 outcome / attempts / session_id。
     assert set(closes[0]["metadata"]) == {"outcome", "attempts", "session_id"}
+
+
+@pytest.mark.asyncio
+async def test_raising_tracer_cannot_replace_the_original_exception(tmp_path):
+    """异常隔离（#250 findings）：观测实现违约抛错时，原发异常必须原样传播。
+
+    Executor 是公开可构造组件（assembly / factory 都直接构造它），调用方
+    未必经过 Runtime 的保护层；收口点自兜一层，否则观测异常会顶掉
+    Ledger 存储失败这类真正要诊断的原发异常。
+    """
+
+    class _RaisingCloseTracer(NullTracer):
+        def tool_span_completed(self, span, **_kwargs):  # type: ignore[override]
+            raise RuntimeError("观测实现在收口时违约")
+
+    ledger = _FailingTerminalLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    registry = ToolRegistry()
+    registry.register(_FlakyTool())
+    executor = ToolExecutor(registry, operation_ledger=ledger)
+
+    with pytest.raises(RuntimeError, match="ledger 挂了"):
+        await executor.execute(
+            {"id": "call_ledger", "name": "flaky", "args": {"value": 1}},
+            tracer=_RaisingCloseTracer(),
+            operation_context=OperationContext(session_id="sess-1"),
+        )

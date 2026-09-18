@@ -37,6 +37,7 @@ from agent_harness.session import (
 )
 from agent_harness.session.event import MODEL_DELTA, SessionEvent
 from agent_harness.session.store import SeqConflict
+from tests.session.store_fixtures import FailingFromStore, RejectingStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -44,32 +45,6 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture
 def store(tmp_path) -> JsonlSessionStore:
     return JsonlSessionStore(root=tmp_path / "sessions")
-
-
-class _RejectingStore(JsonlSessionStore):
-    """append_event 一律拒写：模拟 seq 冲突 / 存储故障这一类失败。"""
-
-    def __init__(self, root, error_type: type[Exception] = SeqConflict) -> None:
-        super().__init__(root=root)
-        self._error_type = error_type
-
-    def append_event(self, session_id: str, event: SessionEvent) -> None:
-        raise self._error_type("拒写（注入）")
-
-
-class _FailingFrom(JsonlSessionStore):
-    """第 n 次 append_event 起拒写：注入"写盘中途失败"。"""
-
-    def __init__(self, root, *, fail_from: int) -> None:
-        super().__init__(root=root)
-        self._calls = 0
-        self._fail_from = fail_from
-
-    def append_event(self, session_id: str, event: SessionEvent) -> None:
-        self._calls += 1
-        if self._calls >= self._fail_from:
-            raise RuntimeError(f"磁盘故障（注入，第 {self._calls} 次写）")
-        super().append_event(session_id, event)
 
 
 # ---- 1. append 失败：内存与 next_seq 不越过失控事件 ----
@@ -87,7 +62,7 @@ async def test_append_failure_leaves_memory_and_next_seq_untouched(tmp_path) -> 
     before_events = len(session.events)
     before_seq = session.next_seq
 
-    rejecting = _RejectingStore(tmp_path / "sessions")
+    rejecting = RejectingStore(tmp_path / "sessions")
     session._store = rejecting  # 只换物理写口，聚合状态不变
     with pytest.raises(SeqConflict):
         session.append(USER_MESSAGE, {"content": "写不进去"})
@@ -129,15 +104,29 @@ async def test_append_rejects_before_touching_disk(store, event_type, message) -
 
 
 async def test_append_notifies_listener_after_persist(store) -> None:
-    """listener 在持久化之后被同步调用，且拿到的是已落盘的那条事件。"""
+    """listener 在持久化**之后**被同步调用：回调发生时事件已经在磁盘上。
+
+    鉴别力来自"在回调内部当场读盘"：只断言 `store.read_events(...)[-1] == event`
+    分辨不出先写盘还是后写盘——两种顺序下，回调返回后的终态完全相同。
+    """
     session = Session.start(store, session_id="s1")
+    seq_after_start = [e.seq for e in store.read_events("s1")]
     seen: list[SessionEvent] = []
-    session.add_listener(seen.append)
+    seq_on_disk_at_callback: list[list[int]] = []
+
+    def _listener(event: SessionEvent) -> None:
+        seen.append(event)
+        seq_on_disk_at_callback.append([e.seq for e in store.read_events("s1")])
+
+    session.add_listener(_listener)
 
     event = session.append(USER_MESSAGE, {"content": "hi"})
 
     assert seen == [event]
-    assert store.read_events("s1")[-1] == event, "通知时事件已在磁盘上"
+    assert seq_on_disk_at_callback == [[*seq_after_start, event.seq]], (
+        "回调被调用时该事件必须已在磁盘上——否则通知早于持久化"
+    )
+    assert store.read_events("s1")[-1] == event
 
 
 async def test_listener_exception_does_not_break_append(store) -> None:
@@ -161,7 +150,7 @@ async def test_append_failure_does_not_notify_listener(tmp_path) -> None:
     seen: list[SessionEvent] = []
     session.add_listener(seen.append)
 
-    session._store = _RejectingStore(tmp_path / "sessions")
+    session._store = RejectingStore(tmp_path / "sessions")
     with pytest.raises(SeqConflict):
         session.append(USER_MESSAGE, {"content": "写不进去"})
 
@@ -268,7 +257,7 @@ async def test_adopt_history_mid_write_failure_keeps_prefix(tmp_path) -> None:
     root = tmp_path / "sessions"
     base = JsonlSessionStore(root=root)
     session = Session.start(base, session_id="child")
-    failing = _FailingFrom(root, fail_from=2)  # 第 2 次写 = seed 第二项
+    failing = FailingFromStore(root, fail_from=2)  # 第 2 次写 = seed 第二项
 
     session._store = failing
     seed = [

@@ -341,11 +341,17 @@ class ToolExecutor:
         span_session_id = operation_context.session_id if operation_context else None
 
         def _close_span(outcome: str, **fields: Any) -> None:
-            """收口本次工具观测（attempt 链与 ledger 关联键逐次带上）。"""
-            tracer.tool_span_completed(
-                obs_span, outcome=outcome, attempts=attempts or None,
-                session_id=span_session_id, **fields,
-            )
+            """收口本次工具观测（attempt 链与 ledger 关联键逐次带上）。
+
+            收口在异常臂里也会被调用：观测实现违约抛错时绝不顶掉原发异常
+            （端口契约的"实现必须不抛"由 Runtime 的保护层单点强制，但 Executor
+            是公开可构造组件、可被 Runtime 之外的调用方直接使用，此处自兜一层）。
+            """
+            with suppress(BaseException):
+                tracer.tool_span_completed(
+                    obs_span, outcome=outcome, attempts=attempts or None,
+                    session_id=span_session_id, **fields,
+                )
 
         # -- 阶段 2.7：输出流 sink（ADR-0016 §4.2）--
         # 执行期 stdout/stderr 增量：工具（经 contextvar）从 sandbox reader
