@@ -70,3 +70,4 @@ d9c2f51	B-14 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS �
 1545f6d	#239 落点记录（tracker 明细 + 归档 + PHASE_STATUS 索引，docs-only）
 45744d3	P1-B1 批次基线（#267：新建 docs/PERF_BASELINE.md + 本批执行索引 §0–§0.6，docs-only）——两轴审查行的 fixed point，自身落在审查范围外，故按台账惯例走白名单
 943e1ac	P1-B1 落点记录（tracker 批次台账 + 两轴审查 findings 处置表 + fixed point 归属段 + 覆盖闸门 A/B 证据 + 跨批缺口登记 + 票表状态列限定，docs-only）
+55892ed	F1（#270）落点记录（tracker「F1（#270）验收证据」节 + P1-B2 批次行 + 票表 #270 行 + 归档索引行 + PERF_BASELINE 回填 commit 列，docs-only）
