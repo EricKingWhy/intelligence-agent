@@ -1979,3 +1979,117 @@ main 由集成 AI 执行）。
 - 2026-09-18：**T02 / #238（父票 #237）profile tool_scope 与内置工具面机械对账——实现 + 红证 + 门禁**（实现 commit `c7384ff`，5 文件 +127/−21；票面 `docs/tickets/architecture-audit-remediation-2026-09-18.md` §T02；**父票 #237 保持 OPEN**）。**做了什么**：把 profile 的**声明面**（`profiles.py` 三个手写 `tool_scope`）、**注册面**（capability wiring 动态装配）与**收窄面**（`registry.filtered()` 对未注册名静默跳过、对"注册了但未声明"的工具静默剔除）之间此前只靠注释与记忆维持的关系落成机械对账（#238 AC1/AC2/AC3）：① `assembly.py` 把无条件注册的本地工具元组提成模块常量 `BUILTIN_LOCAL_TOOLS`（同顺序同内容，纯提取——对账需要机械输入，不在函数体里抄第二份）；② `profiles.py` 三个 scope 上方加"加工具的约束"指针 + 写明这三个集合是**声明面**不是本部署工具清单；③ 新测试模块 `tests/agent/test_tool_scope_reconciliation.py`：AST 枚举 `src/` 下全部 `Tool` 子类（22 个，除动态命名的 `MCPTool`）+ `BUILTIN_LOCAL_TOOLS` + capability 工具清单，凡未归属任何非-main 档位、也不在带理由白名单里的内置工具即红；白名单 6 条（`delegate` / `inspect_artifact` / `read_artifact` / `ingest_document` / `load_skill` / `tick`，各带理由）反向查死条目 / 空理由 / 不存在的名字；判据收成纯函数 `unscoped()` ⇒ "新增工具会红"由测试自证（喂假名字），不是声称；④ `test_profiles_factory.py` 新增手写镜像表 `_DECLARED_SCOPES`（main 17 / coding 12 / research_review 7 的 **exact set**，参数化 + 同键集校验）；⑤ `test_assembly_agent_profile.py` 新增 AC2（`artifact_dir=""` 关掉本地 store ⇒ effective = declared ∩ registered，**缺席不进 `dropped_tools`**，声明数 17/12/7 ≠ 实际数 9/9/3 由测试钉住）+ AC3（`read_artifact` 是 coding 收窄后**唯一**被剔除的工具 ⇒ `dropped_tools == ("read_artifact",)`；main 不过滤故在册、dropped 为空）。**声明面一字未改**（票面 Scope：先建立机械对账；收窄面变更会牵动跨端手工镜像的 17/12/7，两个未归属工具按"只登记不改 scope"进白名单）；AC4（child effective ⊆ source、越权拒绝）由既有 `TestAgentFactoryFiltering` 三例覆盖，本票只为其补变异红证。**红证（四处变异，恢复后 sha256 逐字节相同）**：白名单清空 ⇒ `test_every_builtin_tool_is_declared_or_whitelisted` 红且**恰好点名 6 个**未归属名；新增一个 `Tool` 子类（临时探针文件，跑完即删）⇒ AST 闸红并点名 `MutationProbeTool`；把 `read_artifact` 写进 coding scope ⇒ 白名单死条目 + `dropped_tools` + exact set **三处红**；关掉 factory 越权闸（`if False and escalated`）⇒ `test_escalation_rejected_when_grantable_narrower` 红（`DID NOT RAISE ValueError`）。**门禁**：`ruff check .` All checks passed；`pytest -q` **2479 passed / 10 skipped / 42 deselected / 0 failed（6:08）**（= T01 基线 2463 + 本票 16 例）；`git diff --check` 干净；票面专项五文件 64 passed。**覆盖闸门（如实登记）**：`c7384ff` 未审查且未声明 ⇒ exit 1——单票流程**不给自己开审查**（协议 v2 §1.1），按 §1.2 由后续批量审查补台账行；**未加白名单、未改台账掩盖**。
 - 2026-09-18：**B-14 收批——T01 / #266 + T02 / #238（fixed point `4dbe7db`）两轴独立审查 + findings 全数修复 + 独立复验**（审查行 `4dbe7db..0f5aefd`、修复行 `0f5aefd..182d77a`，修复 commit `182d77a`）。**范围**：本批两个实现 commit（`aa47d25` T01 + `c7384ff` T02）及其落点/台账提交；两轴 = Standards + Correctness，各一独立只读子代理，审的是未提交工作树。**结论：零 P0/P1，2×P2 + 8×P3，全部就地修复。****两轴共识 P2①（真缺陷）**：`web/websocket.py` 的 `send_message` 是 HTTP 三个端点之外的**第四个**续聊入口，`WorkspaceBindingConflict` 不在它的 except 元组里 ⇒ 逃到外层 `except Exception`（只 `logger.debug`）并让连接静默死掉——T01 的修复在 WS 面**复辟**（用户可见形态：点了续聊、界面毫无反应、连接消失）。**②（§16.1）**：`_reconcile_workspace_binding` 里「为什么不静默选边」的整段理由与 `WorkspaceBindingConflict` 的 docstring 逐字重复 ⇒ 收敛为指针（机制叙述单点在异常 docstring）。**Standards 轴**：`test_tool_scope_reconciliation.py` 的「子代理 ⊆ main」是**结构恒真**断言（main 的 scope 由 `_CODING_TOOLS | _RESEARCH_TOOLS | {...}` 定义，子集关系由构造保证）⇒ 删断言改注释（`test_profiles_factory.py` 同一条，main 具体是哪 17 个已由 exact set 表钉住）；AST 扫描只记单一模块路径 ⇒ **同名类可静默逃过全部判据**（改收「名字 → 模块列表」并对同名判红）；`_declared_sub_agent_scope()` 抽公共并集去两处重复；`_LOCAL_TOOL_NAMES` 是手抄的第三份、不随 `BUILTIN_LOCAL_TOOLS` 漂移 ⇒ 改为从常量派生；三处「把映射改指别处」的夹具重复（tests/session ×2 + tests/web ×1）⇒ 收敛为新 `tests/workspace_fixtures.py::rewrite_workspace_mapping`；边界叙述补「基类判定是名字启发式」「扫描根不含 `evaluation/` 的 AddTool」。**Correctness 轴**：既有 4 条冲突用例的漂移目标**都已存在**（`registry.get()` 的 mkdir 是 no-op）⇒ 对账点后移照样全绿，「冲突必须在任何 Sandbox 实例化之前被拦下」这条性质无人钉住。**修复（`182d77a`）**：WS except 收编 + 叙述收敛 + 上述测试面整改，另加两条用例——`test_conflict_is_detected_before_any_sandbox_instantiation`（漂移目标**故意不存在**，对账点若挪到 `Session.resume/load` 之后 ⇒ 幽灵目录被 mkdir）与 `test_ws_send_message_reports_workspace_binding_conflict`（WS 续聊撞冲突必须回 error 帧）。**红证两条变异（恢复后 sha256 逐字节相同）**：对账点后移 ⇒ 幽灵目录被 mkdir ⇒ 新用例红而**其余 4 条冲突用例仍绿**（正是它们钉不住这条性质的证据）；WS except 元组去掉 `WorkspaceBindingConflict` ⇒ 连接以 `WebSocketNetworkError` 静默死掉、无 error 帧 ⇒ 新用例红。**独立复验（另一只读子代理逐 finding 对账）**：10/10 addressed、无新增阻断。**门禁**：`ruff check .` All checks passed；专项 83 passed；`pytest -q` **2481 passed / 10 skipped / 42 deselected / 0 failed（5:42）**；`git diff --check` 干净。**残余登记（未修）**：① WS 其余 7 个 domain error 仍逃到 `except Exception` 静默（同一族、超出本批范围，建议另开票）；② `recovery/coordinator.py:227-230` 恢复入口绕过对账可 mkdir（相邻路径，§8 Scope Lock）；③ 用例钉中文文案字面量（与既有实践一致，可辩护）；④ `_LOCAL_TOOL_NAMES` 改派生后成员钉子的强度下降（C1/C3/C4 仍把九个名字钉在 runtime registry 上，独立复验判非阻断）。**票**：#266 + #238 保持 OPEN（父票 #237 亦 OPEN）。
 - 2026-09-18：**T03 / #239 provider failure 分类表与 DSML 判定下沉 model 层——实现 + 红证 + 门禁**（实现 commit `877d92e`，5 文件 +302/−109；票面 `docs/tickets/architecture-audit-remediation-2026-09-18.md` §T03）。**范围按 issue 冻结决策收窄（记录一处票面/issue 差异）**：整改文档 §T03「范围」写的是「统一 runtime/fallback/test-provider 对状态码和错误类型的判定」，而 issue #239 的已冻结决策是**只**把 Runtime 内 `_PROVIDER_FAILURE_MARKERS` 与 DSML malformed-response 判定**原样迁入** `model` 模块、行为逐字一致，**Web provider connection-test 的字符串分类不在本票内**（如需统一另立子票）。按整改文档自己的裁决规则（issue 正文是 Scope/AC 权威），本票按 issue 执行，**Web 那半未动**。**做了什么**：① 新增 `src/agent_harness/model/failure.py`——标记表（10 条，顺序即优先级）、四个 reason 常量、固定可读文案、`UNCLASSIFIED_FAILURE_MESSAGE`、`classify_provider_failure()`（原 `_classify_provider_failure`）、`has_malformed_tool_call_markup()`（原 `_DSML_MARKUP_MARKER` 的判定），注释与文档逐字随迁；② `agent/runtime.py` 删掉两表（−94 行）与 DSML 常量，两处调用点改指新接口，**DSML 守卫保留「无结构化 tool_calls」那一半**（响应形状是 Runtime 的知识，标记定义在 model 层）；③ `docs/adr/0033` §2.1 与 Related 的 owner 改为 `model/failure.py`（机制叙述单点，§16.1）；④ 新增 `tests/model/test_provider_failure_classification.py`（24 例参数化 golden：矩阵逐项 + 顺序即优先级 + 大小写不敏感 + 未命中 None + 文案键集相等 + DSML 正/负样本 + 两条分层闸门），`test_every_marker_reason_has_a_message` 随表迁入，`test_runtime_failure_paths.py` 导入改指新模块。**AC2/AC3/AC4 由既有 + 新增用例共同钉住**：marker 集 / reason 取值 / 文案 / DSML 正负行为 / fallback 序列均未动（fallback 与失败路径用例全绿；DSML 正负样本既有 `TestMalformedToolCallMarkupGuard` 锁 run 级行为，新模块锁判定本身）。**红证（先红后绿）**：基线缺口两条——`model.failure` 不存在（ImportError）、Runtime 当前 `hasattr(_PROVIDER_FAILURE_MARKERS)` / `hasattr(_DSML_MARKUP_MARKER)` 均为 True；四条变异（恢复后 sha256 逐字节相同）：runtime 注释里抄回 vendor 标记 ⇒ 源码扫描闸红（分层闸仍绿，两闸独立）、runtime 再导出 `_PROVIDER_FAILURE_MARKERS` ⇒ 分层闸红、分类表顺序变更（表首标记挪到表尾）⇒ 表 golden + `test_first_marker_wins` 红、DSML 判据改 `startswith` ⇒ 两条带前缀的正样本红。**门禁**：`ruff check .` All checks passed；全量 `pytest -q` **2504 passed / 10 skipped / 42 deselected / 0 failed（6:35）**（= 上一批 2481 + 新模块 24 − 迁走的 1，逐值对得上）；`git diff --check` 干净。**登记（未做，与规格相关）**：`SPEC_ROOT/02_AGENT_RUNTIME.md` §8「不要用自由文本字符串推断异常类型」——本票只搬位置、不改判据（issue 冻结「逐字一致」）；**仍按文本匹配**的分类现在只住在 model 层，Web connection-test 那处字符串分类（`web/model_providers.py`）留在原地，属另一张子票。**覆盖闸门（如实登记）**：`877d92e` 未审查且未声明 ⇒ exit 1——单票流程 §1.1 不自审，按 §1.2 由后续批量审查补台账行；**未加白名单、未改台账**。票：#239 保持 OPEN。
+
+---
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— 本批台账起点（2026-09-18） ===== -->
+
+## 批 P1：响应速度与交互流畅度硬化（父票 #267）
+
+- **本批索引**：`docs/tickets/perf-interaction-smoothness-2026-09-18.md`
+- **子票**：GitHub **#268–#281**（14 张）；父票 [#267](https://github.com/EricKingWhy/intelligence-agent/issues/267)
+- **性能数字唯一落点**：`docs/PERF_BASELINE.md`（**不进** `docs/PHASE_STATUS.md`——那里是 Phase 进度表）
+- **并行批次避让**：本批与 `T01–T12 / #237–#248`（+ 18 张子票 #249–#266）**并行飞行**；
+  避让硬规则、对方文件地盘、「已撤回项」表与文件所有权矩阵见索引 §0.1 / §0.3。
+  **9 张前端票（F1–F8 + N2）只改 `web/src/**`，与对方（全 Python）零文件交集**；
+  仅 B6（`storage/sqlite.py`，blocked by #242）与 B8（`agent/runtime.py`，blocked by #247）有受控重叠。
+
+### 批次台账
+
+| 批次号 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
+| --- | --- | --- | --- | --- |
+| **P1-B1** | **#268**、**#269**（均 docs-only） | `45744d3` | 待审（票数达 2–3 后对累计 diff 跑一次两轴 review） | — |
+
+### 票
+
+| Ticket | 描述 | 状态 | 实现方式 | Commit SHA | 门禁结果 |
+| --- | --- | --- | --- | --- | --- |
+| **#268** | 勘误 `docs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` + blob 哈希机械证明（见下） |
+| **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（`Status` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
+
+> **「SHA 待回填」已回填 —— 顺带记下这次实测到的确切机制（比我原先的说明更准）**：
+> 本 worktree 的沙箱**专门回收 `refs/heads/workbuddy/` 这个目录**：
+> 对它里面的 ref 做任何写入（`git update-ref`、`git commit`）都会让**整个目录被删掉**，
+> 连用户已恢复好的那条 ref 也一并消失；而写到 `refs/tags/**` 的 ref **跨进程存活**
+> （同一次会话内做的对照实验，已分别跨进程复验）。由此三条规律写死：
+>
+> 1. **`git commit` 在本沙箱内不可用**——它会把刚写出的 ref 一起被回收，于是提交对象立刻变孤儿，
+>    下一条命令就报 `does not have any commits yet`（本批实测：`git commit` 打印 `1529aa7` 后同进程即复现）；
+> 2. **提交对象不会丢**，且分支 reflog（共享仓库 `logs/refs/heads/workbuddy/main-f049fadd`）
+>    会逐条记下 `旧sha → 新sha` + `commit: <标题>`——这次就靠它取回 `45744d3 → 1529aa7`，**零数据丢失**；
+> 3. ⇒ 正确姿势 = **用 plumbing 造提交，把 ref 写入留给用户终端**：
+>    `git add`（index 不受影响）→ `git write-tree` → `git commit-tree <tree> -p <parent> -F <msg文件>`，
+>    最后由用户在**他自己的终端**执行一条
+>    `git update-ref refs/heads/workbuddy/main-f049fadd <final-tip>`。
+>
+> 本批的三个提交（`1529aa7` #268 / `9886a9c` #269 / 落点记录）就是这么造出来的。
+> 与 `docs/HANDOFF_PERF_FRONTEND.md` §10 备案第 2 条**同源**，但那条只说到「`update-ref` 退出 0
+> 而 ref 文件不存在」；这里补上「**目录级回收**」这个更精确的机制，以及 `refs/tags` 的对照证据。
+
+### #268 证据（docs-only 的「红证」按票面定义 = **diff 证据**）
+
+```bash
+# 改造前基线：45744d3 版本文档
+git show 45744d3:docs/HANDOFF_PERF_FRONTEND.md > "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md"
+# 改造后对照（numstat 第 2 列 = 删除行数）
+git diff --no-index --numstat \
+  "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md" \
+  docs/HANDOFF_PERF_FRONTEND.md
+# 实际输出：
+# 96	0	"…/base-HANDOFF.md" => docs/HANDOFF_PERF_FRONTEND.md
+```
+
+- **AC4**（只改一个文件、删改行数 0）：新增 **96** 行 / 删除 **0** 行 ✅
+- **AC5**（§9 / §10 逐字未变）：由「删除行数 = 0」机械蕴含 ✅
+- 三条勘误的归属：勘误 1 → **F1 / #270**；勘误 2 → **无需新票**（能力已存在，只是文档没跟上事实）；
+  勘误 3 → **N2 / #271**
+- 结构自检：`## 11.` 出现 **1** 次；`### 勘误 ` 出现 **3** 次（恰好三条）✅
+
+### #269 证据
+
+结构自检（`Status` / 四行头 / 章节顺序 / D1–D4 / 字面约束）：
+
+```
+Status:        **Status**: Proposed（待用户批准）
+章节顺序:      ## Context(13) → ## Decision(66) → ## Consequences(128) → ## Non-Goals(148) → ## Alternatives considered(164)
+ADR-0016 count: 7
+D1-D4:          ['D1', 'D2', 'D3', 'D4']
+'eventsVersion` 只度量 events 数组的 append 次数' -> True
+'不是通用脏标记' -> True
+'不进 SessionEvent' -> True
+'补充，不覆盖' -> True
+'projection.ts:1174' -> True
+'projection.ts:1161' -> True
+'3344e34' -> True
+'f97f322' -> True
+```
+
+- **AC7**（`docs/adr/0016-*.md` 零改动）——两份文件 `git hash-object` 与 `45744d3:<path>` **逐字节相同**：
+
+| 文件 | 基线 blob @ `45744d3` | 工作树 blob | 结论 |
+| --- | --- | --- | --- |
+| `docs/adr/0016-streaming-ui-runtime-and-library-strategy.md` | `d9cfca0295e12dea…` | `d9cfca0295e12dea…` | **SAME** |
+| `docs/adr/0016-streaming-ui-detached-run.md` | `5ea5ad5f2d46b95f…` | `5ea5ad5f2d46b95f…` | **SAME** |
+
+### 票面修正记录（本轮同时改了 **#268 / #269 自己的** issue 正文）
+
+两处**我在建票时写下的**不严谨表述已就地修正。**只改本批 #267 系的票**，
+未触碰 #237–#266 的任何 issue / 子票 / 索引文档（并行批次避让硬规则第 2 条）。
+
+| 票 | 原表述的问题 | 修正后 |
+| --- | --- | --- |
+| **#268** | 「`git merge-base --is-ancestor f97f322 a78c322` 为非零 ⇒ `f97f322` **晚于** `a78c322`」——**非因果**：非零只能证明「f97f322 不是 a78c322 的祖先」，不能证明先后 | 改为两条一起给：`--is-ancestor a78c322 f97f322` 返回 **0**（`a78c322` 是 `f97f322` 的祖先）⇒ 晚于；并显式标注反方向那条的**读法警告**。同一修正已落进 §11 勘误 1 |
+| **#269** | 「去重短路（`:1174`）与 quarantine 分支（`:1161`）**都要正确递增**」——**自相矛盾**：`:1174` 是 `return state`，根本没有 push，递增它就等于谎报 append | 改为按「**是否真的 push**」判定：`:1174` **不递增**；`:1161-1163` **递增**。同一修正已落进 ADR-0037 D2 |
+
+修正后均经**线上回读**逐字节核对（`gh issue view --json body` 与本地正文比对，
+唯一差异是 GitHub 侧补的一个尾换行）。
+
+### 本批环境备案
+
+1. **本地 refs 写入静默吞没**（本轮复现）：见上方「SHA 待回填已回填」。
+   处置与 `docs/HANDOFF_PERF_FRONTEND.md` §10 第 2 条一致——**不得**在沙箱内依赖本地 ref 写入。
+2. **bash shim 缺 coreutils**：`ls` / `cat` / `head` / `tail` / `dirname` / `tr` / `grep` 不可用。
+   列目录用 Glob、读文件用 Read、聚合与统计用托管 `python -c`（`git` 本身正常）。
+   ⚠ 实测教训：shell 管道里出现 `grep`/`head` 会让整条管道**静默产出空输出**
+   （`git diff --no-index … | grep -v warning` 曾因此给出**假的「无差异」**）——
+   **校验一律不要经过过滤管道**，改用 python 直接取原始输出。
