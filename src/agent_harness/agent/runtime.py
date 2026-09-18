@@ -59,6 +59,7 @@ from agent_harness.model.fallback import (
     ModelFallbackCoordinator,
     TwoLevelFallbackPolicy,
 )
+from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.observability.tracer import RunTracer
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import (
@@ -287,9 +288,9 @@ class _TerminalContext:
     terminal: _RunFinalizer
     streamer: BlockStreamer | None
     model_coord: ModelFallbackCoordinator
-    tracer: Any
-    ctx_span: Any
-    generation: Any
+    tracer: Tracer
+    ctx_span: Span | None
+    generation: Span | None
 
     def interrupt_streams(self) -> list[SessionEvent]:
         """流式块收口 + 切换事实落盘（取消臂与异常臂同一不变量）。
@@ -328,17 +329,17 @@ class _TerminalContext:
                 step=self.steps, cancelled=cancelled, error_type=error_type,
                 readable_message=readable_message,
             ))
-        if self.tracer is not None:
-            if self.ctx_span is not None:
-                self.tracer.context_build_completed(self.ctx_span)
-                self.ctx_span = None
-            if self.generation is not None:
-                self.tracer.model_call_failed(
-                    self.generation,
-                    error_type=("cancelled" if cancelled else error_type),
-                )
-                self.generation = None
-            self.tracer.run_failed(reason)
+        # 观测端口（#249）恒为对象：缺席实现是 NullTracer，这里不再判空。
+        if self.ctx_span is not None:
+            self.tracer.context_build_completed(self.ctx_span)
+            self.ctx_span = None
+        if self.generation is not None:
+            self.tracer.model_call_failed(
+                self.generation,
+                error_type=("cancelled" if cancelled else error_type),
+            )
+            self.generation = None
+        self.tracer.run_failed(reason)
         return events
 
 
@@ -596,11 +597,11 @@ class AgentRuntime:
         # 注意 steps 仍是 run 内轮次计数（max_steps 保险丝与 AgentRunResult.steps
         # 依赖它逐 run 从 0 起算），全局编号一律走 step_base + steps。
         step_base = 0
-        # Langfuse 旁路（ADR-0018 D5/D7）：begin_run 后创建；六条终态臂统一
-        # 经它收口 trace 并回填 trace_id。begin_run 之前异常 = 无 run 可观测。
-        tracer: Any = None
-        generation: Any = None
-        ctx_span: Any = None
+        # 观测端口（#249）：本 run 的 tracer 恒为对象——未配置/未启用 sink 时是
+        # NullTracer（零副作用）；实现在 begin_run 后单点选定（见 _new_tracer）。
+        tracer: Tracer = NullTracer()
+        generation: Span | None = None
+        ctx_span: Span | None = None
         # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
         # begin_run 之前异常 = 没有可记账的 run，保持 None。
         streamer: BlockStreamer | None = None
@@ -649,16 +650,10 @@ class AgentRuntime:
             )
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
-            if self._observability_sink is not None and self._observability_sink.enabled:
-                tracer = RunTracer(
-                    self._observability_sink,
-                    session_id=session.session_id,
-                    run_id=run_id,
-                    agent_id=self._agent_id,
-                    user_input=user_input,
-                    turn_index=turn_index,
-                )
-                tracer.run_started()
+            # 实现选择是"观测是否存在"的唯一判据点（#249）——此后全 run 的调用
+            # 点都不判空：缺席时 NullTracer 收下同样的生命周期调用。
+            tracer = self._new_tracer(session, run_id, user_input, turn_index)
+            tracer.run_started()
             # 流式块记账绑定本 run（ADR-0016 §3.3）：此后思考/文本 chunk 经
             # streamer 合帧成 durable delta；取消/失败臂负责 interrupt 收口。
             streamer = BlockStreamer(session)
@@ -703,20 +698,16 @@ class AgentRuntime:
 
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
-                ctx_span = (
-                    tracer.context_build_started(step=steps)
-                    if tracer is not None else None
-                )
+                ctx_span = tracer.context_build_started(step=steps)
                 try:
                     messages = await self._context_builder.build(session)
                 except ContextWindowExceededError as error:
-                    if tracer is not None:
-                        tracer.context_build_completed(ctx_span)
-                        tracer.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
+                    tracer.context_build_completed(ctx_span)
+                    tracer.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
                     failed = session.append(
                         RUN_FAILED, {"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": str(error),
-                                     "trace_id": tracer.trace_id if tracer else None,
-                                     "trace_url": tracer.trace_url if tracer else None},
+                                     "trace_id": tracer.trace_id,
+                                     "trace_url": tracer.trace_url},
                         run_id=run_id, step_id=step_base + steps,
                     )
                     terminal.mark_terminal_written()
@@ -727,18 +718,17 @@ class AgentRuntime:
                     # 模型在本轮从未被调用：没有可抽取的对话内容，跳过 writeback。
                     return
                 new_events = list(session.since(context_event_start))
-                if tracer is not None:
-                    compaction = next(
-                        (e for e in new_events if e.type == CONTEXT_COMPACTED), None,
-                    )
-                    tracer.context_build_completed(
-                        ctx_span,
-                        compacted_turn_count=(
-                            compaction.data.get("compacted_turn_count")
-                            if compaction is not None else None
-                        ),
-                    )
-                    ctx_span = None
+                compaction = next(
+                    (e for e in new_events if e.type == CONTEXT_COMPACTED), None,
+                )
+                tracer.context_build_completed(
+                    ctx_span,
+                    compacted_turn_count=(
+                        compaction.data.get("compacted_turn_count")
+                        if compaction is not None else None
+                    ),
+                )
+                ctx_span = None
                 for event in new_events:
                     yield to_agent_event(event)
 
@@ -748,12 +738,9 @@ class AgentRuntime:
                 llm_started = time.perf_counter()
                 # generation 句柄（ADR-0018 D7）：与 llm_call 诊断行同源同时点，
                 # 完成/失败时回填；异常臂/取消臂负责收口在途 generation。
-                generation = (
-                    tracer.model_call_started(
-                        step=steps + 1, messages=messages,
-                        model=self._primary_model_name,
-                    )
-                    if tracer is not None else None
+                generation = tracer.model_call_started(
+                    step=steps + 1, messages=messages,
+                    model=self._primary_model_name,
                 )
 
                 # 在途标记：从发起调用到聚合完成，此间抛错按 model/failed 归因。
@@ -885,20 +872,19 @@ class AgentRuntime:
                           **llm_log_fields)
                 # generation 回填（ADR-0018 D7）：与 llm_call 诊断行同源数据——
                 # usage/时延/finish_reason/fallback 履历；无数据键省略零伪造。
-                if tracer is not None:
-                    response_meta = getattr(ai, "response_metadata", None) or {}
-                    tracer.model_call_completed(
-                        generation,
-                        output_text=extracted_content,
-                        usage=usage,
-                        duration_ms=llm_duration_ms,
-                        finish_reason=response_meta.get("finish_reason"),
-                        provider_request_id=response_meta.get("id"),
-                        response_model=model_name,
-                        fallback_transitions=fallback_transitions,
-                        tool_call_names=[c.name for c in calls] if calls else None,
-                    )
-                    generation = None
+                response_meta = getattr(ai, "response_metadata", None) or {}
+                tracer.model_call_completed(
+                    generation,
+                    output_text=extracted_content,
+                    usage=usage,
+                    duration_ms=llm_duration_ms,
+                    finish_reason=response_meta.get("finish_reason"),
+                    provider_request_id=response_meta.get("id"),
+                    response_model=model_name,
+                    fallback_transitions=fallback_transitions,
+                    tool_call_names=[c.name for c in calls] if calls else None,
+                )
+                generation = None
                 if tool_calls:
                     model_data["tool_calls"] = [
                         {"id": c.id, "name": c.name, "args": c.args} for c in calls
@@ -931,13 +917,12 @@ class AgentRuntime:
                               reason="本轮无 tool_calls，模型选择直接答复", outcome="success")
                     self._log("task_completed", "Agent Loop 正常结束", span_id=run_span,
                               step=steps, outcome="success")
-                    if tracer is not None:
-                        tracer.run_completed(final, usage_total=dict(usage_total) or None)
+                    tracer.run_completed(final, usage_total=dict(usage_total) or None)
                     end_event = session.end_run(run_id, status="completed", final_text=final,
                                                 usage_total=dict(usage_total) or None,
                                                 cost_usd=None,   # TODO(spec 12): 费率表未定义，不伪造
-                                                trace_id=(tracer.trace_id if tracer else None),
-                                                trace_url=(tracer.trace_url if tracer else None))
+                                                trace_id=tracer.trace_id,
+                                                trace_url=tracer.trace_url)
                     terminal.mark_terminal_written()
                     self._write_memories(session, memory_event_start)
                     yield to_agent_event(end_event)
@@ -954,8 +939,7 @@ class AgentRuntime:
                               span_id=new_span_id(), parent_span_id=run_span, step=steps,
                               decision="max_steps_exceeded", remaining_steps=0,
                               reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
-                    if tracer is not None:
-                        tracer.run_failed("max_steps_exceeded")
+                    tracer.run_failed("max_steps_exceeded")
                     # 走 failure_terminal（终态字段的唯一 owner）：本路径原先自己拼
                     # end_run，于是 #222 之前它**一个归因键都没有**（字段集中供给
                     # 被绕过 = 下一次加字段还会漏它）。文案复用上面那行日志的同一句。
@@ -963,8 +947,8 @@ class AgentRuntime:
                         steps=step_base + steps,
                         reason=STATUS_MAX_STEPS_EXCEEDED,
                         message=f"连续 {steps} 轮仍在请求工具，触发保险丝",
-                        trace_id=(tracer.trace_id if tracer else None),
-                        trace_url=(tracer.trace_url if tracer else None),
+                        trace_id=tracer.trace_id,
+                        trace_url=tracer.trace_url,
                     )
                     self._write_memories(session, memory_event_start)
                     if end_event is not None:
@@ -1119,13 +1103,12 @@ class AgentRuntime:
                                   outcome="failed")
                         # 与异常臂同一收尾语义（_RunFinalizer 单终态 owner），
                         # reason 落 run/failed data 供消费者区分失败原因。
-                        if tracer is not None:
-                            tracer.run_failed(STATUS_IDENTICAL_TOOL_FAILURE_LOOP)
+                        tracer.run_failed(STATUS_IDENTICAL_TOOL_FAILURE_LOOP)
                         end_event = terminal.failure_terminal(
                             steps=step_base + steps,
                             reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-                            trace_id=(tracer.trace_id if tracer else None),
-                            trace_url=(tracer.trace_url if tracer else None),
+                            trace_id=tracer.trace_id,
+                            trace_url=tracer.trace_url,
                         )
                         self._write_memories(session, memory_event_start)
                         yield to_agent_event(end_event)
@@ -1160,8 +1143,8 @@ class AgentRuntime:
                 terminal.cancelled_terminal(
                     steps=step_base + steps,
                     reason=cancel_reason,
-                    trace_id=(tracer.trace_id if tracer else None),
-                    trace_url=(tracer.trace_url if tracer else None),
+                    trace_id=tracer.trace_id,
+                    trace_url=tracer.trace_url,
                 )
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
@@ -1231,8 +1214,8 @@ class AgentRuntime:
                     steps=step_base + steps,
                     reason=provider_reason or type(error).__name__,
                     message=terminal_message,
-                    trace_id=(tracer.trace_id if tracer else None),
-                    trace_url=(tracer.trace_url if tracer else None),
+                    trace_id=tracer.trace_id,
+                    trace_url=tracer.trace_url,
                 )
                 if end_event is not None:
                     yield to_agent_event(end_event)
@@ -1275,6 +1258,26 @@ class AgentRuntime:
             idle_timeout=self._stream_idle_timeout,
             total_timeout=self._stream_total_timeout,
             gate=self._model_call_gate,
+        )
+
+    def _new_tracer(
+        self, session: Session, run_id: str, user_input: str, turn_index: int,
+    ) -> Tracer:
+        """观测实现选择（#249）：全 run 唯一一处"观测是否存在"的判据。
+
+        未注入 / 未启用 sink → NullTracer（零外部副作用）；启用 → RunTracer
+        （Langfuse adapter，ADR-0018 D5/D7）。调用点一律拿到对象，不判空。
+        """
+        sink = self._observability_sink
+        if sink is None or not sink.enabled:
+            return NullTracer()
+        return RunTracer(
+            sink,
+            session_id=session.session_id,
+            run_id=run_id,
+            agent_id=self._agent_id,
+            user_input=user_input,
+            turn_index=turn_index,
         )
 
     def _write_memories(self, session: Session, start: int) -> None:
