@@ -73,6 +73,11 @@ const TIP_PADDING = 12;
 const TIP_GAP = 4;
 const TIP_TOP_MARGIN = 16;
 
+/** 「稳定的空值」——沿用 `Conversation.tsx` 的 `EMPTY_TURNS` 同款惯例：`memo` /
+ *  `useMemo` 的依赖比较是**引用比较**，每次渲染新建的 `[]` 会让记忆化永久失效。 */
+const EMPTY_TOOLS: ToolCall[] = [];
+const EMPTY_TARGETS: { key: string; focus: () => void }[] = [];
+
 interface Props {
   conversation: ConversationState | null;
   streaming: boolean;
@@ -113,7 +118,23 @@ export type InspectorPanelAction =
   | { type: 'close-peek' }
   | { type: 'resize'; width: number };
 
-export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, onPanelAction }: Props) {
+/**
+ * F2（#272）：`memo` 包裹——App 的与对话无关的提交（打字 / hover / 面板拖宽 / 换焦点）
+ * 此前都会让本组件重渲染，并把整棵 Inspector 子树一起重跑。而 Inspector **关闭时仍保持
+ * 挂载**（`hidden` 属性而非卸载，DSH 语义 / 冻结决策），所以这份成本一直在付。
+ *
+ * 装 memo 的前提是 props 引用稳定——逐项核对过（App.tsx），全部天然稳定：
+ *   - `streaming`：`useSession` 的布尔
+ *   - `focus`（App.tsx:265）/ `panel`（App.tsx:269）：`useState` 持有的对象
+ *   - `onFocusRun` / `onFocusTool` / `onFocusEvent` / `onJumpToStream` /
+ *     `onJumpToApproval` / `onPanelAction`：全是 `useCallback`（App.tsx:277-351）
+ * ⇒ **不需要**自定义 `areEqual`（票面 Risks 第 1 条：漏比 `jumpRequest.nonce` 会让
+ * Timeline 跳转失效、漏比 `goneApprovalIds` 会让审批卡不失效——不写比较函数就没有
+ * 这两个坑；"props 变了必须重渲染"由 `StepDetail.memo.test.tsx` 的反例守卫钉住）。
+ *
+ * `conversation` 每次投影提交换引用（顶层浅克隆）——那是**应该**重渲染的信号。
+ */
+export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, onPanelAction }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
   /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——useMemo 不许
    * 出现在下方任何 early-return 之后（Rules of Hooks：focus/tool 分支返回的渲染
@@ -137,6 +158,94 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
   const spaceDownAt = useRef<number | null>(null);
   const dragRef = useRef<{ startX: number; startW: number; available: number } | null>(null);
   const [resizing, setResizing] = useState(false);
+
+  /* ── F2（#272）：派生收敛 ────────────────────────────────────────────────
+   *
+   * **为什么这些 useMemo 必须在两处 early-return 之前**：Rules of Hooks。`!conversation`
+   * 与 `focus.kind === 'child'` 两条路径不渲染下面那几个面，hook 数若随之变化，React 会
+   * 在两次渲染之间直接崩——与本文件既有 `runIdList` 同一条约束（它的注释写了同样理由）。
+   *
+   * **依赖一律细到字段，绝不写整个 `conversation`**：`applyEvent` 每次事件都返回新的顶层
+   * 对象（浅克隆，`projection.ts:1190`），写整个对象不是"省一次重算"，而是"一次也不省"。
+   * 各键逐个**从被调函数的实现里读出来**，不是猜：
+   *  - `allTools` 只读 `state.turns`（`projection.ts:1424` 的 `state.turns.flatMap`）
+   *    ⇒ 键 = `turns` 引用。`turns` 走 COW（`replaceTurnAt`，`projection.ts:251-254`），
+   *    只有真的动到某一轮才换引用。
+   *  - `deriveRunPulse` 只读 `run_interrupted` / `run_status` / `run_cancelled` /
+   *    `active_step_id` / `turns` 与入参 `streaming`（`runState.ts:73-141`）
+   *    ⇒ 键 = 这五项 + `streaming`。
+   *  - `deriveAgentProfile` 读的是 events 日志 ⇒ 键 = `eventsVersion`（N2 #271 /
+   *    ADR-0037 D3 给出的"events 又追加了"唯一精确信号；`events` 引用刻意稳定，拿它
+   *    当键是**永不重算**——那正是 N2 修掉的陈旧缺陷）。
+   *
+   * **代价如实说明**（本票消不掉的那部分）：`eventsVersion` 每次 `events.push` 都 +1，
+   * 含 `model/delta` 这类每帧都有的流式帧 ⇒ `agentProfile` / `tabCounts.timeline` /
+   * 键盘导航表的 timeline 分支**每次追加都重算**。本票消掉的是另外两类：
+   *   (a) 与对话无关的提交 —— `memo` 挡住整棵树；
+   *   (b) 不改轮次的追加   —— `tools` / `pulse` / 三张过滤表 / 导航表命中。
+   * 这两类的可执行证据在 `StepDetail.memo.test.tsx`（含"变化时必须重算"的反例守卫）。 */
+
+  // 单一走法（#190）：与中心列「输出」面共用 projection.allTools——不在本文件内再造一份。
+  const tools = useMemo(() => (conversation ? allTools(conversation) : EMPTY_TOOLS),
+    [conversation?.turns]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pulse = useMemo(() => deriveRunPulse(conversation, streaming),
+    [ // eslint-disable-line react-hooks/exhaustive-deps
+      conversation?.run_interrupted, conversation?.run_status, conversation?.run_cancelled,
+      conversation?.active_step_id, conversation?.turns, streaming,
+    ]);
+  // #198：生效档位（最后一个 run/started 携带；旧数据 → null →「档位未知」）。
+  const agentProfile = useMemo(() => (conversation ? deriveAgentProfile(conversation.events) : null),
+    [conversation?.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
+   * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应 Tab 组件内的
+   * filter 逐字一致——收敛成三张表后 tab 计数与列表内容同源，也顺手消掉了每次提交三次
+   * O(tools) 扫描。 */
+  const diffTools = useMemo(() => tools.filter((t) => t.diff), [tools]);
+  const commandTools = useMemo(() => tools.filter(isCommand), [tools]);
+  const artifactTools = useMemo(() => tools.filter((t) => t.artifact), [tools]);
+  const tabCounts: Partial<Record<Tab, number>> = {
+    timeline: conversation?.events.length ?? 0,
+    changes: diffTools.length,
+    terminal: commandTools.length,
+    artifacts: artifactTools.length,
+  };
+
+  /* #183 清单条目：↑/↓ 的移动域 = **当前 tab 里可点击选中的行**。
+   *
+   * 只登记"行本身可点"的三个面（Timeline 事件 / Overview 工具行 / Terminal 命令行）：
+   * Changes / Artifacts 的行目前是只读卡片（不是按钮），为它们造一个只能用键盘到达的
+   * 选中态，等于做出一个鼠标无法复现的选择——违反 AC3「鼠标默认可用，不做键盘唯一」。
+   * 那两面的行要不要变成可选中，是它们各自票里的事。
+   *
+   * F2（#272）：这张表建的是 N 个新闭包（`focus: () => onFocusEvent(e)`），此前每次提交
+   * 都重建（事件多时 = O(N) 个闭包 + 一次 events 线性扫描）。键含 `eventsVersion` 与
+   * `tools`；`onFocusEvent` / `onFocusTool` 进依赖是**反陈旧**保险——它们是 App 的
+   * `useCallback`，但万一哪天不再稳定，这里必须跟着重建，否则闭包会永远指向第一个回调
+   * （票面 Risks 第 3 条）。 */
+  const listTargets: { key: string; focus: () => void }[] = useMemo(() => {
+    switch (tab) {
+      case 'timeline': {
+        /* ⚠ 本 memo 里 `conversation` 只在这一行被引用，但豁免**不能**写在这一行——
+         * 本版 oxlint 的"判定位置"与它报出来的标签行不是同一个：实测把指令挂在这一行
+         * ⇒ 告警照旧；挂在下面依赖数组那一行 ⇒ 整条 `useMemo` 的告警（含本行这条
+         * `missing dependency: conversation`）一起被压掉。上面 tools / pulse /
+         * agentProfile 三个单行 memo 同一条规律（只留回调行 ⇒ 泄漏 3 条；只留依赖行
+         * ⇒ 42 条全压）。故指令统一落在依赖数组行——见本票 DoD 的豁免 A/B 表。 */
+        const events = conversation?.events;
+        return events
+          ? events.map((e) => ({ key: eventKey(e), focus: () => onFocusEvent(e) }))
+          : EMPTY_TARGETS;
+      }
+      case 'chat':
+        return tools.map((t) => ({ key: toolKey(t), focus: () => onFocusTool(t) }));
+      case 'terminal':
+        return commandTools.map((t) => ({ key: toolKey(t), focus: () => onFocusTool(t) }));
+      default:
+        return EMPTY_TARGETS;
+    }
+  }, [ // eslint-disable-line react-hooks/exhaustive-deps
+    tab, conversation?.eventsVersion, tools, commandTools, onFocusEvent, onFocusTool,
+  ]);
 
   if (!conversation) {
     return (
@@ -170,44 +279,9 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
     );
   }
 
-  // 单一走法（#190）：与中心列「输出」面共用 projection.allTools。
-  const tools = allTools(conversation);
   // #186：归档 diff 的「就地展开」要按会话读 artifact 内容——归属只能由 session 决定
   // （artifact_id 是内容哈希，跨会话可重名），所以从投影的会话 id 取，不另存一份。
   const sessionId = conversation.session_id;
-  const pulse = deriveRunPulse(conversation, streaming);
-  // #198：生效档位（最后一个 run/started 携带；旧数据 → null →「档位未知」）。
-  const agentProfile = deriveAgentProfile(conversation.events);
-  /* UI-03：tab 条目计数（与各 tab 的数据源同一判据，不建第二真相）。
-   * Overview 是摘要页不计数；Changes/Terminal/Artifacts 的过滤条件与对应
-   * Tab 组件内的 filter 逐字一致。 */
-  const tabCounts: Partial<Record<Tab, number>> = {
-    timeline: conversation.events.length,
-    changes: tools.filter((t) => t.diff).length,
-    terminal: tools.filter(isCommand).length,
-    artifacts: tools.filter((t) => t.artifact).length,
-  };
-
-  /* #183 清单条目：↑/↓ 的移动域 = **当前 tab 里可点击选中的行**。
-   *
-   * 只登记"行本身可点"的三个面（Timeline 事件 / Overview 工具行 / Terminal 命令行）：
-   * Changes / Artifacts 的行目前是只读卡片（不是按钮），为它们造一个只能用键盘到达的
-   * 选中态，等于做出一个鼠标无法复现的选择——违反 AC3「鼠标默认可用，不做键盘唯一」。
-   * 那两面的行要不要变成可选中，是它们各自票里的事。 */
-  const listTargets: { key: string; focus: () => void }[] = (() => {
-    switch (tab) {
-      case 'timeline':
-        return conversation.events.map((e) => ({ key: eventKey(e), focus: () => onFocusEvent(e) }));
-      case 'chat':
-        return tools.map((t) => ({ key: toolKey(t), focus: () => onFocusTool(t) }));
-      case 'terminal':
-        return tools
-          .filter(isCommand)
-          .map((t) => ({ key: toolKey(t), focus: () => onFocusTool(t) }));
-      default:
-        return [];
-    }
-  })();
   const selectedKey =
     focus.kind === 'event' ? eventKey(focus.event) : focus.kind === 'tool' ? toolKey(focus.tool) : null;
   const selectedIndex = selectedKey === null ? -1 : listTargets.findIndex((t) => t.key === selectedKey);
@@ -499,7 +573,7 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
       </div>
     </aside>
   );
-}
+});
 
 /** UI-03：run 分组头状态徽章文案（与 run-badge-<state> 色域一一对应）。 */
 const RUN_GROUP_STATUS_LABEL: Record<RunGroupStatus, string> = {
@@ -530,6 +604,10 @@ export function ChatTab({
   // 共用同一份判据（此处原先自己再分支一次 run_cancelled/run_status，规则一变
   // Inspector 就会与顶栏说法不一致——T8 加 run/interrupted 时正是三处集体漂移）。
   const { label: runStatusLabel, startedAt: runStart, duration: runDuration } = deriveRunSummary(conversation);
+  /* F2（#272）：TOOLS 段两个计数此前每次渲染各扫一遍工具表；键 = `tools`（调用方已
+   * memo）。本 tab 只在 `tab === 'chat'` 时挂载，这一层省的是驻留期间的重渲染。 */
+  const runningToolCount = useMemo(() => tools.filter((t) => t.status === 'running').length, [tools]);
+  const failedToolCount = useMemo(() => tools.filter((t) => t.status === 'failed').length, [tools]);
 
   return (
     <>
@@ -636,11 +714,11 @@ export function ChatTab({
         </div>
         <div className="detail-row">
           <span className="detail-key">活跃</span>
-          <span className="detail-val">{tools.filter((t) => t.status === 'running').length}</span>
+          <span className="detail-val">{runningToolCount}</span>
         </div>
         <div className="detail-row">
           <span className="detail-key">失败</span>
-          <span className="detail-val">{tools.filter((t) => t.status === 'failed').length}</span>
+          <span className="detail-val">{failedToolCount}</span>
         </div>
         {tools.map((t) => {
           const selected = selectedKey != null && toolKey(t) === selectedKey;
@@ -1137,7 +1215,9 @@ const TimelineRow = memo(function TimelineRow({
 /** 导出供 SSR 测试直接渲染（同 `TimelineTab` / `ToolEventSections`：`tab` 是内部
  *  状态，从 `StepDetail` 外面进不到这个面）。 */
 export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?: string }) {
-  const diffs = tools.filter((t) => t.diff);
+  // F2（#272）：`tools` 由调用方 memo 提供，过滤跟着它的引用走——面板关闭期间本组件
+  // 仍挂载（`hidden` 不卸载），此前每次提交都要重扫一遍工具表。
+  const diffs = useMemo(() => tools.filter((t) => t.diff), [tools]);
   if (diffs.length === 0) {
     return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
   }
@@ -1165,7 +1245,8 @@ export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?
 function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; onFocusTool: (t: ToolCall) => void; selectedKey?: string | null }) {
   // 判定与读取都来自 lib/commandOutput（票面 AC2）：
   // "什么算一次命令"只允许有一处答案——两边各写一份会各自演化。
-  const bashes = tools.filter(isCommand);
+  // F2（#272）：同上（过滤谓词仍是 lib/commandOutput 的唯一那份 `isCommand`）。
+  const bashes = useMemo(() => tools.filter(isCommand), [tools]);
   if (bashes.length === 0) {
     return <TabEmpty hint="本次会话未执行命令。" icon={TerminalSquare} />;
   }
@@ -1205,7 +1286,8 @@ function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionId: stri
   // artifact/created event's tool isn't found by the projection, that's a
   // projection concern — not something to paper over here with a second truth
   // path (invariant #22).
-  const artifacts = tools.filter((t) => t.artifact);
+  // F2（#272）：同上。
+  const artifacts = useMemo(() => tools.filter((t) => t.artifact), [tools]);
   if (artifacts.length === 0) {
     return <TabEmpty hint="本次会话未产生 Artifact。" icon={Package} />;
   }
