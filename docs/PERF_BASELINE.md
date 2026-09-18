@@ -595,7 +595,130 @@ PYTHONPATH=$PWD/src "D:/intelligence-agent-backend/.venv/Scripts/python.exe" \
 所以它**控不住** S1 的漂移。判定因此一律取**保守侧**，并把全部轮次留在上表里。
 
 ### F3 — 贴底读写收进单帧（#276）
-_待落基线。_
+
+**基线（改造前，2026-09-19）**——全部为实测，非估算。计数用 `Object.defineProperty`
+替换 `Element.prototype` 上的 `scrollHeight` / `scrollTop` accessor（jsdom 无布局，
+节点上观察不到读数），夹具是**真投影** `applyEvent` 折叠真事件得到的流式中会话：
+
+| 场景 | 规模 | 指标 | 改造前 | 改造后 | 口径 / 命令 | 日期 | commit |
+|---|---|---|---|---|---|---|---|
+| 同一同步块内 **3** 次提交（= 一帧内 3 次登记） | 1 轮流式中会话 | `scrollHeight` 读 / `scrollTop` 写 | **3 / 3** | **1 / 1** | `node node_modules/vitest/vitest.mjs run src/components/Conversation.snapframe.test.tsx`（cwd=`web/`） | 2026-09-19 | 改造前源码 = `f2ec9f2`；改造后源码 = `ec047bf` |
+| 同一帧内 **5** 次提交 | 同上 | 同上 | **5 / 5** | **1 / 1** | 同上 | 2026-09-19 | 同上 |
+| 跨两帧、每帧 **2** 次提交 | 同上 | 同上 | **2 / 2（每帧）** | **1 / 1（每帧）** | 同上 | 2026-09-19 | 同上 |
+| 单帧 **1** 次提交（稳态） | 同上 | 同上 | **1 / 1** | **1 / 1** | 同上 | 2026-09-19 | 同上 |
+| 一次提交后 `requestAnimationFrame` 被调用次数 | 同上 | 次 | **0**（不登记帧，直接同步读+写） | **1**（每次提交登记一帧；同帧内后续提交不再登记） | 同上 | 2026-09-19 | 同上 |
+| long task 数 + 最长单帧（长会话 + 长回答） | — | Chrome Performance | **未取得** | **未取得** | 见下「未取得的原因与解除条件」 | 2026-09-19 | — |
+
+**改造前的红证（同一条命令、同一批用例）**：`5 failed / 7 passed (12)`。失败的五条与关键输出：
+
+```
+× 一帧内 3 次提交 ⇒ 读 1 次、写 1 次（改造前 3 / 3）
+  AssertionError: expected 3 to be 1
+× 一帧内 5 次提交 ⇒ 仍然是读 1 次
+  AssertionError: expected 5 to be 1
+× 跨两帧各 2 次提交 ⇒ 每帧各读 1 次
+  AssertionError: expected 2 to be 1
+× 前提自检：挂载那一拍确实贴了一次底（容器在、follow 为真）
+  AssertionError: expected +0 to be 1
+× 卸载后已登记的 rAF 被 cancelAnimationFrame 掉
+  AssertionError: expected "bound " to be called 1 times, but got 0 times
+```
+
+另外 7 条改造前就通过——它们是**不变式守卫**（闸门为假时零写入、瞬时贴底语义、
+run 结束同步补底、浮标点击同步、wheel 脱离），不是本票的新行为，按 F2 的同一规矩**不计入红证**。
+
+> **口径更正（2026-09-19）**：本节先前记的是 `4 failed / 7 passed (11)`。那是 11 条用例的
+> 中间版本——第 5 条「前提自检」是修绿阶段为把「挂载那一拍」与「被测区间」钉开而补的，
+> 补完之后**没有重跑红证**。上表是**当前 12 条用例**在改造前源码（`f2ec9f2`）上的重跑结果，
+> 旧数字作废。第 5 条红在**时序前提**上（改造前挂载贴底是同步的，归零后自然读到 0），
+> 不属于任何一条 AC，价值在判别力：它证明「贴底被推迟一帧」这件事真的被观测到了。
+
+**改造后的绿证（同一命令）**：**12 passed / 0 failed**。全量前端门禁见下「门禁」。
+
+**AC5 的相关 e2e（A/B，同一批 10 条；两档视口各 5）**
+
+票面的定位命令 `grep -rl "scroll\|latest\|follow" web/e2e/*.spec.ts` 命中 6 个 spec；
+本轮跑了**与人相关度最高的两个**（`j-scroll.spec.ts` 38 处命中、`m-stream-affordances.spec.ts`
+23 处命中），另四个是 2–4 处的偶发命中（`multiturn-queue` / `stream-fallback` /
+`y-inspector-peek` / `z-artifact-content`），见未闭合项。
+
+| 侧 | 结果 | 退出码 / 耗时 |
+|---|---|---|
+| 改造后（`ec047bf`） | **10 passed / 0 failed** | **0** / 22.0s（无收尾挂死） |
+| 改造前（`f2ec9f2` 的 `Conversation.tsx`） | **10 passed / 0 failed** | **0** / 19.7s（无收尾挂死） |
+
+命令（`npx` 在本环境不可用，等价直调；`npm run dev:e2e` 由 Playwright 经 cmd.exe 起，
+所以进程 PATH 需前置一个 `npm.cmd` 转发 shim）：
+
+```
+cd web && node node_modules/@playwright/test/cli.js test \
+  e2e/j-scroll.spec.ts e2e/m-stream-affordances.spec.ts --workers=2 --output=<新目录>
+```
+
+覆盖到的行为：滚动容器关闭浏览器滚动锚定；非流式态不残留「↓ 最新」浮标；**流式中真实滚轮
+上滚 → 浮标出现 → 点浮标回底并恢复跟随**；工具输出尾窗与推理块各自的浮标往返。
+A/B 逐条同名同结果 ⇒ 改造前后行为一致（AC5 不回归）。
+
+> **A/B 手法**：不用 `git stash` / `git checkout`（本机红线）。把工作树版本复制到仓库外 →
+> 用 `git show f2ec9f2:web/src/components/Conversation.tsx` 直接写回工作树 → 跑 → 从备份
+> 逐字节恢复并校验 sha256（`2aedf0c0…` 一致，`git diff --stat` 随即恢复出该文件的 31 行变更）。
+> 两遍的测试文件完全相同，只有被测源码不同。
+
+#### 门禁（本轮实跑；`npm` 在本环境不可用，一律走包入口点直调，cwd = `web/`）
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| lint | `node node_modules/oxlint/bin/oxlint` | **rc=0**，`Found 42 warnings and 0 errors`（200 文件 / 116 规则；与 F2 基线 **42** 持平，**新增 0**） |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | **rc=0**，零错误 |
+| 单测（全量） | `node node_modules/vitest/vitest.mjs run` | **rc=0**，**1026 passed / 0 failed**（含本票新增 12 条） |
+| 构建 | `node node_modules/vite/bin/vite.js build` | **rc=0**（vite build 通过） |
+| 相关 e2e（AC5） | 见上 A/B 表 | **10 passed / 0 failed**，两侧同值 |
+
+#### 未闭合项（每项写明解除条件）
+
+| 项 | 状态 | 解除条件 |
+|---|---|---|
+| long task 数 + 最长单帧（上表最后一行） | **未取得** | 见下「未取得的原因与解除条件」 |
+| AC6 手工冒烟（长回答流式中上滚 → 浮标 → 点回最新，附录屏） | **未执行** | 需要真模型往返，而供应商账户冻结（`api.senseaudio.cn` 返回 `HTTP 400 {"code":"billing",…}`，证据见 F1 节）⇒ 账户解冻后按票面 §2.1 固定场景录一次。**行为等价性不因此悬空**：AC5 的 e2e 里那条正是「真实滚轮上滚 → 浮标出现 → 点浮标回底并恢复跟随」，已 A/B 同值 |
+| 其余 4 个「偶发命中」spec 未跑 | **未跑**（票面只要求跑命中的） | 若要全覆盖：`multiturn-queue` / `stream-fallback` / `y-inspector-peek` / `z-artifact-content` 各跑一次 A/B |
+| 超长会话下 `scrollTop = scrollHeight` 本身的 O(1) 布局成本 | **未消除**（票面已列） | 基线显示该成本可测；届时另开票评估 `overflow-anchor` 组合（**本票不做**） |
+
+**读数含义（本票的全部前置结论）**：`scrollHeight` 读次数 **= 提交次数**，
+1:1，与内容体量无关——即「**每提交一次强制布局**」这一条在基线上成立。
+
+#### 收益的诚实量化（**稳态 ≈ 0，收益只在单帧内提交数 > 1 时出现**）
+
+这一段是本票 DoD 里「可见增益为 X」的依据，必须写在此处而不是只写在结论里：
+
+- **稳态**：`useSession.ts:178` 的合帧窗口 `windowMs = 24` ⇒ 提交率 ≤ **41.7 次/秒**；
+  60Hz 显示器每帧 16.7ms ⇒ 平均 **0.70 次提交/帧**。⇒ 单帧内通常只有 **1** 次登记，
+  改造前后都是 1 读 1 写，**稳态收益为零**。
+- **收益出现在单帧内提交数 > 1 时**：一帧被长任务拖慢 T ms，就会挤进 ⌊T/24⌋ 次提交
+  ⇒ 改造前是那么多次强制布局，改造后恒为 **1**。本仓**已实测**的最坏单帧为
+  **83 – 513 ms**（F2 节真机 live 车道，同机同 `web/dist` 四轮）⇒ 对应单帧内
+  **3 – 21** 次提交，即该帧的强制布局次数从 **3 – 21 降到 1**。⇒ 收益随帧时长线性放大，
+  但**只在帧被拖慢时兑现**。
+- **一条被实测推翻的猜想（保留在此，避免后人重犯）**：曾以为「后台标签页 rAF 不触发
+  ⇒ 改造后隐藏期零布局」是真收益。**不成立**——`useSession.ts:196` 的后台降渲染
+  (`if (!isVisible()) return;`) 使隐藏期**根本不提交**，改造前同样不产生布局。
+  ⇒ 隐藏期不是本票的收益来源。
+- **因此本票是「最坏情况上界」收紧，不是稳态吞吐优化**。按票面 §必做 2 的判据
+  （「基线显示每提交一次布局、长帧主要由 markdown 解析贡献」⇒ **仍然做**），
+  本基线命中该判据：布局确实每提交一次，而长帧的主要贡献者是 markdown 解析
+  （F1 已把**冗余重解析**消掉，单价 0.692 ms/次见 F1 节），每次提交的贴底布局
+  在虚拟化窗口下 DOM 规模有界、单价远小于它。
+
+**未取得的原因与解除条件（long task 数 + 最长单帧）**：
+
+- 该列**未取得**。原因不是「无 GUI 浏览器」（真机 Chromium 一直可用，F2 节已更正过
+  同一句话），而是：① 依赖真模型往返的长回答流式场景**当前被外部阻塞**——模型供应商
+  账户冻结（`api.senseaudio.cn` 返回 `HTTP 400 {"code":"billing",...}`，证据见 F1 节）；
+  ② 票面 §Validation 明令「**不要新增采集器**」，而现有 `web/scripts/perf-longtask-live.mjs`
+  覆盖的是 F2 的交互路径（打开长会话 → 12 次 peek 切换 → 面板往返），**不含流式**。
+- **解除条件**（二选一）：① 账户解冻后，把 `perf-longtask-live.mjs` 指向一段**流式**
+  会话采集（同脚本、同口径，不算新增采集器）；② 人工在 Performance 面板按 §2.1 固定场景
+  （同窗口尺寸 + 同一段长回答 + 同一操作序列）录一次并归档 trace，把两列数字补进上表。
+
 要求指标：
 - 一个 rAF 帧内 `scrollHeight` 的读取次数（改造前为「每提交一次」）；
 - long task 数 + 最长单帧（长会话 + 长回答，录制存档）。

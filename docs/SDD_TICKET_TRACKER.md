@@ -2990,3 +2990,108 @@ os.listdir(root)  = ['target']          # 只有真目录，链接没出现
 Scope lock 只动 2 个源码文件 + 2 个新增测试文件。
 **审查明确未复现的**：全量套件「64 vs 78、新增 0」的归因（8min×2，审查者判为**台账断言**）——本票**不**把它
 升格为已复核事实；解除条件见上表「全量套件非确定性」一行。
+
+---
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B4（#276）台账起点（2026-09-19） ===== -->
+
+#### F3（#276）验收证据
+
+**票面**：GitHub #276（`## What to build` 必做 1/2/3 + AC1–AC9、`## Scope lock`、`## Blocked by` = F2）。
+**实现 commit**：`78eb3bf`（红证用例，新增 `web/src/components/Conversation.snapframe.test.tsx` **321 行 / 12 条**）＋ `ec047bf`（实现，`web/src/components/Conversation.tsx` **+29 −2**）。
+对 `f2ec9f2`（本票 HEAD 基线 = B7/P1-B3 收口后的 tip）的源码净 diff = **1 文件 +29 −2**；另有新增测试 1 文件 + `docs/PERF_BASELINE.md`（AC1 强制落点）。
+**性能数字**：`docs/PERF_BASELINE.md` 的 F3 节（G3 硬前置：基线先落、改造后数字再落）。
+
+**第 1 步（强制，先量再定）——判定取「每提交一次强制布局」**
+
+观测手法：`Object.defineProperty` 替换 `Element.prototype` 的 `scrollHeight` / `scrollTop` accessor 计数（jsdom 无布局，节点上观察不到读数）；夹具是**真投影** `applyEvent` 折叠真事件得到的流式中会话。
+
+| 读数 | 改造前 | 改造后 |
+| --- | --- | --- |
+| 一帧 3 次提交 | **读 3 / 写 3** | **1 / 1** |
+| 一帧 5 次提交 | **5 / 5** | **1 / 1** |
+| 跨两帧、每帧 2 次提交 | **2 / 2（每帧）** | **1 / 1（每帧）** |
+| 单帧 1 次提交（稳态） | **1 / 1** | **1 / 1** |
+| 一次提交后 `requestAnimationFrame` 调用次数 | **0** | **1** |
+| long task 数 + 最长单帧 | **未取得** | **未取得** |
+
+**判定：做**（票面必做 2 的第二档）。`scrollHeight` 读次数 **= 提交次数**、1:1、与内容体量无关 ⇒ 命中「每提交一次布局」这一判据。
+**同时如实写明可见增益**：稳态 `windowMs = 24`（`useSession.ts:178`）⇒ 提交率 ≤ 41.7 次/秒 ⇒ 平均 **0.70 次提交/帧** ⇒ **稳态收益为零**；收益只在单帧内提交数 > 1（长帧）时出现——本仓实测最坏单帧 **83–513ms**（F2 节 live 车道）⇒ 对应 3–21 次布局降到 1。**本票是「最坏情况上界」收紧，不是稳态吞吐优化。**
+另有一条**被实测推翻的猜想**已写入基线：`useSession.ts:196` 的后台降渲染使隐藏期**根本不提交**，故「隐藏期省布局」不是收益来源。
+
+**第 2 步 —— 改法（`Conversation.tsx` 恰好 3 处）**
+
+| # | 位置 | 改动 |
+| --- | --- | --- |
+| 1 | `:96` | 新增 `snapFrameRef = useRef<number \| null>(null)`（`null` = 本帧无待执行贴底） |
+| 2 | `:231` 流式贴底 effect | 闸门两条（`!runActive` / `!following`）原样保留在前；`snapFrameRef.current !== null` 直接返回；回调内**同一个**帧里做「读 `scrollHeight` → 写 `scrollTop`」，并先把 ref 置回 `null` |
+| 3 | `:243` 新增卸载 effect | cleanup 里 `cancelAnimationFrame` + 置 `null` |
+
+**未动**（Scope lock）：effect 依赖列表仍是整个 `conversation`（票面明文禁止收窄）；贴底仍是瞬时 `scrollTop = scrollHeight`（无 `smooth` / `scrollIntoView`）；`followLatest.ts` 状态机与 `setScrollNode` 的 wheel 监听未碰；**run 结束补底与「↓ 最新」点击仍是同步瞬时贴底**（那两拍对延迟敏感，不该等一帧）——三者都有反例守卫用例钉住。
+
+**红证 / 绿证 / 变异检验**（同一命令：`node node_modules/vitest/vitest.mjs run src/components/Conversation.snapframe.test.tsx`，cwd=`web/`）
+
+| 阶段 | 结果 |
+| --- | --- |
+| 改造前（源码 `f2ec9f2`） | **5 failed / 7 passed (12)** |
+| 改造后（`ec047bf`） | **12 passed / 0 failed** |
+| **变异 1**：摘去同帧去重闸门（`if (snapFrameRef.current !== null) return;`） | **3 failed / 9 passed**——恰好是三条合并断言，全部 `expected N to be 1`（3 / 5 / 2） |
+| **变异 2**：摘去卸载取消帧 effect | **1 failed / 11 passed**——恰好 AC4 那条（`expected "bound " to be called with arguments: [ 27 ]`） |
+
+变异是**逐字注入 + sha256 还原校验**：注入前把工作树文件备份到仓库外，测完从备份恢复并逐字节校验，两遍都确认变异标记无残留。
+改造前失败的 5 条里，4 条是 AC2/AC4 的新行为；第 5 条「前提自检」红在**时序前提**上（改造前挂载贴底是同步的，计数器归零后自然读到 0），不属于任何 AC，价值在判别力。
+另 7 条改造前就通过 = **不变式守卫**（闸门为假零写入 ×2、瞬时贴底语义、卸载后零写、run 结束同步补底、浮标点击同步、wheel 脱离），按 F2/N2 的同一规矩**不计入红证**。
+
+> ⚠ **口径更正**：`docs/PERF_BASELINE.md` 先前记的红证是 `4 failed / 7 passed (11)`——那是 11 条用例的中间版本；第 5 条「前提自检」补进去之后**没有重跑红证**。已在基线里改为当前 12 条口径并注明旧数字作废（本票自查发现，非审查 findings）。
+
+**AC5 —— 相关 e2e 的 A/B**（先 `grep -rl "scroll\|latest\|follow" web/e2e/*.spec.ts` 定位）
+
+命令：`node node_modules/@playwright/test/cli.js test e2e/j-scroll.spec.ts e2e/m-stream-affordances.spec.ts --workers=2 --output=<新目录>`（cwd=`web/`；`npx` 本环境不可用，等价直调；`npm run dev:e2e` 由 Playwright 经 cmd.exe 起，故进程 PATH 需前置一个 `npm.cmd` 转发 shim）。
+
+| 侧 | 结果 | 退出码 / 耗时 |
+| --- | --- | --- |
+| 改造后（`ec047bf`） | **10 passed / 0 failed** | **0** / 22.0s |
+| 改造前（`f2ec9f2` 的 `Conversation.tsx`） | **10 passed / 0 failed** | **0** / 19.7s |
+
+覆盖：滚动容器关闭浏览器滚动锚定 / 非流式态不残留浮标 / **流式中真实滚轮上滚 → 浮标出现 → 点浮标回底并恢复跟随** / 工具输出尾窗与推理块各自的浮标往返（两档视口各 5 条）。A/B 逐条同名同结果 ⇒ 不回归。
+A/B 手法：`git show f2ec9f2:web/src/components/Conversation.tsx` 直接写回工作树，跑完从仓库外备份逐字节恢复并校验 sha256——**全程未用 `git stash` / `git checkout`**（本机红线）。
+
+**AC 逐条**
+
+| AC | 内容 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| AC1 | `PERF_BASELINE.md` 有前置基线（long task 数与最长单帧） | ⚠ 部分 | 基线节已落，但 long task/最长单帧**未取得**（见未闭合项与基线的解除条件）；替代观测（每帧 `scrollHeight` 读数）已落 |
+| AC2 | 单测：一个 rAF 帧内 `scrollHeight` 读取次数为 1；附改造前失败输出 | ✅ | 3 条（一帧 3 次 / 一帧 5 次 / 跨两帧各 2 次），红证输出见上 |
+| AC3 | 单测：`runActive === false` 或 `following === false` 时零次 `scrollTop` 写入 | ✅ | 2 条（`run_status !== running` ⇒ 0 写；上滚脱离 ⇒ 0 写且浮标出现） |
+| AC4 | 单测：卸载后已登记的 rAF 被 cancel | ✅ | 1 条（`toHaveBeenCalledWith(handle)`）＋ 1 条行为守卫（卸载后过一帧零读写）；变异 2 证明其判别力 |
+| AC5 | 相关 e2e 不回归，附改造前 A/B | ✅ | 上表 10 / 10 vs 10 / 10 |
+| AC6 | 手工冒烟（上滚 → 浮标 → 点回最新，附录屏） | ❌ **未执行** | 需真模型往返，供应商账户冻结（`HTTP 400 {"code":"billing"}`，证据见 F1 节）。行为等价性由 AC5 的同名 e2e + 12 条单测覆盖；解除条件见未闭合项 |
+| AC7 | `build` / `lint` / `test` 全绿 | ✅ | 见下门禁表（四件套 rc 全 0） |
+| AC8 | `git diff --stat` 只出现 `Conversation.tsx` 与其测试 | ⚠ 见下 | 源码只有 `Conversation.tsx`（+29 −2）+ 新增 1 个测试文件；另 `docs/PERF_BASELINE.md`（**AC1 强制落点**）与台账，均非源码 |
+| AC9 | 若关单为 wontfix 需附基线 + 否决记录 | ✅ 不适用 | 判定为「做」，未走 wontfix |
+
+**AC8 的精确表述**：`git diff --stat f2ec9f2 <本票 tip> -- web/` 只列出 `web/src/components/Conversation.tsx` 与新增的 `Conversation.snapframe.test.tsx`；`web/` 之外只有 `docs/`（`PERF_BASELINE.md` + 本台账 + 归档索引），与 B7 的 AC9 同一处置（AC1 强制落点）。
+
+**门禁（本轮实跑；`npm` 不可用，走包入口点直调，cwd = `web/`；权威取 vitest 的 JSON report 解析）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| lint | `node node_modules/oxlint/bin/oxlint` | **rc=0**，`Found 42 warnings and 0 errors`（200 文件 / 116 规则；与 F2 基线 42 持平，**新增 0**） |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | **rc=0** |
+| 单测（全量） | `node node_modules/vitest/vitest.mjs run` | **rc=0**，**1026 passed / 0 failed** |
+| 构建 | `node node_modules/vite/bin/vite.js build` | **rc=0** |
+| 相关 e2e | 见上 A/B | **10 passed / 0 failed** |
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| long task 数 + 最长单帧（AC1 的浏览器侧数字） | **未取得**（**非本票引入**，F1/F4/F2 同一外部阻塞） | ① 账户解冻后把 `perf-longtask-live.mjs` 指向**流式**会话（同脚本同口径，不算新增采集器）；② 人工按 §2.1 固定场景录一次并归档 trace。票面明令「不得新增采集器」 |
+| AC6 手工冒烟未执行 | **未执行** | 同上账户解冻；行为等价性已由 AC5 e2e + 单测覆盖 |
+| 其余 4 个「偶发命中」spec 未跑 | **未跑**（票面只要求跑命中的） | 若要全覆盖：`multiturn-queue` / `stream-fallback` / `y-inspector-peek` / `z-artifact-content` 各跑一次 A/B |
+| 超长会话下 `scrollTop = scrollHeight` 自身 O(1) 布局成本 | **未消除**（票面已列） | 基线显示该成本可测；届时另开票评估 `overflow-anchor`（**本票不做**） |
+| 稳态收益为零（只有长帧受益） | **记录在案**（实测结论，非缺陷） | 若后续实测长帧不再是瓶颈，本票收益归零；数字已在基线，不需要行动 |
+
+**审查**：本票**不**给自己开审查；`78eb3bf` / `ec047bf`（含源码）**均不进 `[whitelist]`**，交由 **P1-B4** 的两轴审查窗口覆盖（fixed point = `f2ec9f2`）。docs 落点 commit 与 ledger 白名单行按台账惯例处理。
+
+<!-- ===== F3(#276) 台账节结束 ===== -->
