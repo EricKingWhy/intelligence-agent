@@ -470,7 +470,154 @@ node scripts/perf-longtask-live.mjs --base http://localhost:5173   # dev 口径�
    只是从「每秒 40 次」减到「每次打开 1 次」。
 
 ### F6 — 呼吸辉光（#277）
-_待落基线。_
+_（2026-09-19 基线已落：结论与全部数字见下方。本节的唯一「删除行」原为占位符 `_待落基线。_`，不含任何既有数字 ⇒ 未违反 §1.2 的「不得改写他人已落的数字」。）_
+
+**结论（2026-09-19）：测得可忽略 ⇒ 走票面「第 2 步 A」，`app.css` 的视觉实现不改**
+（只在 `:187` 注释下方追加一行复核结论；`git diff --numstat web/src/styles/app.css` = `1 0`，删除行数为 0）。
+
+**采集器（随本票入库，可复跑）**：`web/scripts/perf-pulse-cost.mjs`
+
+```bash
+cd web
+npm run build                                     # 脚本读 dist/ 里那份**生产 CSS**
+node scripts/perf-pulse-cost.mjs                  # 8 臂 × 3 轮（约 3 分钟）
+node scripts/perf-pulse-cost.mjs --only A1,B1,C,C2 --reps 5   # 只复跑 A/B 与正对照
+node scripts/perf-pulse-cost.mjs --headed         # 同一脚本的另一条车道（真窗口）
+```
+
+**车道与场景**：真机 Chromium（Playwright 的 chromium，headless 默认）+ `web/dist` 里那份
+**生产 CSS** + 与 `TopBar.tsx:122-132` 同形的胶囊 DOM（`.pulse-thinking` 实测 110.1×27.2px、
+`.pulse-tool` 122.1×27.2px，padding `3px 12px`，`font-size` 12px，图标 14px）。
+每臂 warmup 1.2s + 测量两趟各 3s（第 1 趟**不挂 tracer** 取 long task / rAF 帧间隔；
+第 2 趟挂 CDP `Tracing` 取渲染列）。viewport 1440×900。**多轮取中位数**
+（本文件 F2 节已写明「单次采样不足以支撑任何前后对照」）。
+
+**为什么不用「真 run」**：模型供应商账户冻结（`HTTP 400 {"code":"billing"}`，证据见本文件 F1 节），
+「真实 run 的 thinking/tool 相位」当前不可得。而本票测的是 **`box-shadow` 动画的渲染成本**——
+CSS 的固有属性，与「数据从哪来」无关 ⇒ 用受控臂把变量（动画开/关、面积、个数）单独掀开。
+B 臂走的是**真机制**：CDP `Emulation.setEmulatedMedia` 打开 `prefers-reduced-motion: reduce`，
+由 `index.css:368-376` 的全局块（`animation-duration: 0.01ms !important` /
+`animation-iteration-count: 1 !important`）关掉动画，**不是**在脚本里另写 `animation: none` 假装关掉。
+
+**A/B 两列（headless，3 轮中位）**
+
+| 臂 | 构成 | long task 数 | 最长 long task | rAF 最长帧间隔 | 掉帧(>20ms) | trace 最长 RunTask | trace >16.7ms 帧 | RunTask 数 | style / paint / raster（ms / 3s） |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Z0** | 空舞台（零动画）＝噪声地板 | **0** | 0ms | 16.8ms | 0 | 1.4ms | 0 | 1361 | 0 / 0 / 0 |
+| **A1** | `pulse-thinking` ×1 · 动画**开** | **0** | 0ms | **16.8ms** | **0** | **1.6ms** | **0** | 3021 | **20.7 / 0.4 / 0.6** |
+| **B1** | `pulse-thinking` ×1 ＋ reduced-motion | **0** | 0ms | **16.8ms** | **0** | **1.5ms** | **0** | 1399 | 0 / 0 / 0 |
+| **A2** | `pulse-tool` ×1 · 动画**开** | **0** | 0ms | **16.8ms** | **0** | **1.4ms** | **0** | 3024 | **20.8 / 0.7 / 1.2** |
+| **B2** | `pulse-tool` ×1 ＋ reduced-motion | **0** | 0ms | **16.8ms** | **0** | 0.9ms | 0 | 1396 | 0 / 0 / 0 |
+| **A40** | `pulse-thinking` ×40（放大臂） | **0** | 0ms | 16.8ms | 0 | 5.2ms | 0 | 3843 | 162.8 / 1.4 / 11.7 |
+| **C** | 正对照①：**同一套** keyframes 铺满 1440×900 | **0** | 0ms | 16.8ms | 0 | 3.2ms | 0 | 1463 | 15.5 / 0.3 / 4.2 |
+| **C2** | 正对照②：`filter: blur()` 铺满 1440×900 | **0** | 0ms | **33.5ms** | **54** | **36.9ms** | **100** | 2324 | 7.7 / 0 / 0 |
+
+**A/B 差值（B 侧把 `pulse-glow`、`spin`、`transition` 一起关了 ⇒ A−B 是这三者的成本上界）**
+
+| 指标 | A1 − B1 | A2 − B2 |
+| --- | --- | --- |
+| long task 数 | **0**（0 vs 0） | **0**（0 vs 0） |
+| 最长帧间隔 | **0ms**（16.8 vs 16.8） | **0ms**（16.8 vs 16.8） |
+| 掉帧(>20ms) | **0**（0 vs 0） | **0**（0 vs 0） |
+| trace 最长 RunTask | **+0.1ms**（1.6 vs 1.5） | **+0.5ms**（1.4 vs 0.9） |
+| trace >16.7ms 帧数 | **0**（0 vs 0） | **0**（0 vs 0） |
+| style / paint / raster | **+20.7 / +0.4 / +0.6 ms / 3s** | **+20.8 / +0.7 / +1.2 ms / 3s** |
+| RunTask 数 | +1622（3021 vs 1399） | +1628（3024 vs 1396） |
+
+**稳定性交叉检验（`--only A1,B1,A2,B2 --reps 5`，2026-09-19，同一脚本同一车道）**
+
+| 指标（中位） | A1 | B1 | A2 | B2 |
+| --- | --- | --- | --- | --- |
+| long task 数 | 0 | 0 | 0 | 0 |
+| 掉帧(>20ms) / rAF 最长帧间隔 | 0 / 16.8ms | 0 / 16.8ms | 0 / 16.8ms | 0 / 16.8ms |
+| trace 最长 RunTask | 1.6ms | 1.9ms | 1.4ms | 1.5ms |
+| trace >16.7ms 帧数 | 0 | 0 | 0 | 0 |
+| style / paint / raster（ms / 3s） | 22.8 / 0.4 / 0.7 | 0 / 0 / 0 | 19.6 / 0.5 / 1.0 | 0 / 0 / 0 |
+| RunTask 数 | 3021 | 1405 | 3028 | 1398 |
+
+- 3 轮与 5 轮**结论完全一致**：long task 0/0、掉帧 0/0、`>16.7ms` 帧 0/0；
+  style 差值从 `+20.7 / +20.8`（3 轮）到 `+22.8 / +19.6`（5 轮）
+  ⇒ 成本区间约 **20–23 ms/3s（≈ 0.65–0.76% 单核）**，正文采用的 `21.7ms / 0.72%` 落在区间中间。
+- 5 轮下 **A 的最长 RunTask 反而略低于 B**（A1 1.6 vs B1 1.9、A2 1.4 vs B2 1.5，差值为**负**）
+  ⇒「最长单帧」这一列在 A/B 之间**不可区分**，这是「不引起掉帧」的更直接证据。
+- 逐轮原始值（可复核）：A1 最长 RunTask `[1.8, 1.3, 1.5, 4, 1.6]`、paint `[0.5, 0.5, 0.3, 0.4, 0.4]`；
+  A2 最长 `[1.7, 1.3, 1.9, 1.3, 1.4]`。单轮确有抖动（A1 第 4 轮 4ms）——
+  **这正是必须多轮取中位、且不得拿单轮做前后对照的原因**（本文件 F2 节同规矩）。
+
+**读数怎么解释（诚实量化）**
+
+- **票面 AC1 要的两列**：**long task 数 A/B 都是 0**；「**最长单帧**」这一列有两个口径，**必须分开读**：
+  - **掉帧数（>20ms）**：A/B **都是 0**，且这一列**能响应**（正对照② 掉 **54** 帧）⇒ 动画**不引起掉帧**；
+  - **rAF 最长帧间隔**：A/B 都是 **16.8ms** —— ⚠ 这一列被 vsync 钳在刷新周期上，非卡顿臂**恒为 16.8ms**，
+    所以 **A−B = 0 是「平凡真」**，只能当参考、**不得单独当作成本证据**；
+  - 真正支撑结论的是 **long task 数 = 0**（硬阈值 50ms，与 DevTools 同源）与 **style 差值**
+    （后者已由仪器自证 ②③ 证明随变量响应）。
+- 唯一测得出来的差别是 **style recalc（`UpdateLayoutTree`）**：`+20.7ms / 3s`（`pulse-tool` +20.8ms 同量级）。
+  加上 paint +0.4ms、raster +0.6ms ⇒ **A−B 上界 ≈ 21.7ms / 3s ≈ 0.72% 的单核占用**
+  （折算每帧 ≈ 0.12ms，占 16.7ms 帧预算的 **0.72%**）。
+  **注意这个上界里含 `spin` 与 `transition`**（B 臂把三者一起关了，见下面「已知混杂」）——
+  也就是说：**连上界都可忽略**，结论比「pulse-glow 本身可忽略」更强。
+  来源可解释：`color-mix(in srgb, currentColor 26%, transparent)` 让 `box-shadow` 的**值**每帧都要重算一次
+  —— 所以成本落在 style 而不是 paint。`RunTask` 数 +1622（≈9 个/帧的微任务碎片）是同一件事的形态，
+  但单个最长才 1.6ms，**不构成卡顿**。
+- **面积不是这台机器上 `box-shadow` 动画的瓶颈**：正对照 C 把**同一套** keyframes 铺到
+  1440×900（元素盒 1,296,000 px²，是胶囊 110.1×27.2 = 2,994.7 px² 的 **≈ 433 倍**；
+  若按含 12px 光晕的实际绘制面积算是 ≈ 188 倍）后，style 成本 **15.5ms/3s 与 A1 的 20.7ms/3s 同级
+  （甚至更低）**、最长 RunTask 3.2ms、掉帧 0。这既印证了原注释「胶囊面积小」判断的**方向**，
+  也说明**决定性因素是元素个数、不是面积**——与实测一致的解释是：成本落在 `color-mix()` 的
+  **每帧求值次数**上，而求值次数 =「在动的元素数 × 帧数」，与元素多大无关：
+  A40 与 A1 **同尺寸、只多个数** ⇒ style 涨到 **7.9 倍**（162.8 vs 20.7）；
+  C 与 A1 **同个数、面积涨 433 倍** ⇒ style 没涨（15.5 vs 20.7）。
+- **决定成本的是元素个数**：A40（40 个）把 style 抬到 162.8ms/3s（≈ A1 的 7.9 倍），
+  但即使 40 个同时呼吸，仍 **0 掉帧、最长 RunTask 5.2ms**。真实 run 里同时可见的胶囊**最多 1 个**
+  （`runState.ts:58-66` 是单一相位），所以 `A1`/`A2`（1 个）才是本票的真实场景。
+
+**仪器自证（三条都通过；不通过则本报告作废 —— 防「测不出 ⇒ 误判可忽略」的假绿）**
+
+1. **B 臂动画确实被关掉**：`document.getAnimations()` 里 `playState === 'running'` 的计数
+   `A1 = 2`（`pulse-glow` + `spin`）、`B1 = 0`，且 B 臂计算值 `animation-duration = 1e-05s`、
+   `iteration-count = 1` ⇒ 走的是 `index.css:368-376` 的全局块。✅
+   （顺带复验原注释的承诺：**`prefers-reduced-motion: reduce` 确实把它关掉了**。）
+2. **指标随被测变量响应**：`A1 → A40` 时 style `20.7 → 162.8ms`、RunTask 数 `3021 → 3843`、
+   paint `0.4 → 1.4ms` ⇒ 指标不是「测不出」，A1 的近零读数是真近零。✅
+3. **仪器看得见真卡顿**（正对照②）：`filter: blur()` 铺满视口时掉帧 **54**、最长帧间隔 **33.5ms**、
+   trace 最长 RunTask **36.9ms**、**100** 帧 >16.7ms ⇒「**掉帧数**」与「**trace 最长 RunTask**」两列
+   明确与地板拉开、可响应；「rAF 最长帧间隔」只在**极端卡顿**时才挣脱 vsync 钳制（16.8 → 33.5ms），
+   故只能作**旁证**（见上「必须分开读」）。✅
+
+**未取得：paint 时间占比**（票面写的是「若可取得」）
+
+- 该列**在本车道不可用**，因此**不当证据**：正对照②已经卡到掉帧 54、最长帧 36.9ms，
+  而 trace 的 `Paint` / `RasterTask` 两个聚合**仍然读到 0ms**（`--headed` 车道同结果）。
+  ⇒ 本车道的 CDP `Tracing` 不做真光栅化，渲染列只能当**相对**参考。
+  表中出现的 `paint 0.4ms` 是**同一份 trace 内部的相对比较**，不是绝对 paint 时间。
+- **解除条件**（二选一）：① 人工在 Chrome DevTools Performance 面板按 §2.1 固定场景录一次，
+  在面板里读 Paint 汇总并归档 trace；② 换到会真光栅化的车道（真实 GPU 合成、`RasterTask` 可见）
+  重跑同一脚本。两者都必须记「同机、同口径、多轮」。
+- 与本票结论无关：判定依据是 **long task 数 / 掉帧 / 最长单帧**，这三条都有数字且仪器自证通过。
+
+**未闭合项（每项写明解除条件）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 「真实 run 的 thinking/tool 相位」实景录制 | **未取得**（账户冻结） | 账户解冻后用 `web/scripts/perf-longtask-live.mjs` 或本脚本 `--headed` 在**真 run** 上复采一次；本票的受控臂结论不依赖它 |
+| paint 时间占比 | **未取得**（本车道不可用） | 见上「解除条件」 |
+| A/B 差值里含 `spin` 与 `transition` | **已知混杂** | 无需解除：B 臂走的是 `index.css:368-376` 那个全局块，它把 `pulse-glow` + `spin`（`animation-duration` / `animation-iteration-count`）**和 `transition-duration`**（`.run-pulse` 的 color/background/border-color 过渡，`app.css:179`）**一起**置成 0.01ms ⇒ A−B 是「三样一起」的**上界**。本次是静止舞台、transition 不被触发，故近似无差；上界都可忽略 ⇒ 结论只会更强 |
+| 40 个以上胶囊同时呼吸 | **未测**（真实 run 最多 1 个） | 若将来 UI 改成同时多胶囊，按 A40 的口径重跑一次 |
+
+**本票的非目标（票面 AC8 要求记录）**：**不做**「全库补合成层提示（`will-change` / `transform: translateZ(0)`）」这类广谱改造。
+`app.css` 里 40+ 处 `box-shadow` 绝大多数是静态样式，本票一个字没动；也没有新增
+`content-visibility` / `contain`（那是 F5 的候选手段）、没有改全局 `reduced-motion` 块。
+
+**AC7 的披露（越界判断，写在明面上而不是默默放过）**：本票的 `git diff --numstat web/src/styles/app.css` = `1 0`
+（只新增、0 删除），符合 AC2；但交付面**多了一个新增文件** `web/scripts/perf-pulse-cost.mjs`——
+它不在 AC7 的字面清单里。判定为**不越界**，理由三条：① 票面硬规则 **G3**「基线必须能在别人机器上按同样的命令复现」；
+② 本文件 **§1.3**「每条数字必须可复核：附怎么测的——命令、脚本路径；只有数字没有口径 = 无效」；
+③ 本批既有先例（F2 的 `web/scripts/perf-longtask-live.mjs`、B7 的 `scripts/measure_loop_blocking.py`）
+都是随票入库的采集器。该脚本**不进生产构建**（`vite.config.ts` 无 `scripts/**` glob、`index.html` 只引
+`/src/main.tsx`，且 `npm run build` 后 `dist/assets/index-*.css` 的哈希与内容不变），
+也不是测试（`vitest` 不 glob `scripts/`）。
+
 要求指标：
 - `pulse-thinking` / `pulse-tool` **可见**时 vs `prefers-reduced-motion: reduce` 的
   **A/B 两列** long task 数 + 最长单帧；A/B 差值即动画的真实成本；
