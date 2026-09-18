@@ -72,23 +72,15 @@ const EXAMPLE_TASKS = [
 ];
 
 /**
- * F2（#272）：`memo` 包裹——App 的**任何**一次提交（输入框打字 / hover / 面板拖宽 /
- * 换焦点）此前都会让本组件重渲染，进而把它下面所有子树重渲染：`TurnView` 上的 memo
- * 只能挡住"props 相等的那些子树"，挡不住"子树整体重跑"，而流式期间每一拍都提交。
+ * F2（#272）：`memo` 包裹——挡住"与对话无关的父级提交"（打字 / hover / 拖宽 / 换焦点）。
  *
- * 装 memo 的前提是 props 引用稳定——逐项核对过（App.tsx），全部天然稳定：
- *   - `loadingHistory`：`useState(false)` 布尔（`useSession.ts:344`）
- *   - `density` / `jumpRequest` / `goneApprovalIds`：都是 `useState`
- *     （App.tsx:217 / :303 / :321——`goneApprovalIds` 是 `ReadonlySet`，但由 useState
- *     持有 ⇒ 引用稳定，不需要"按内容比较"）
- *   - 一组回调：`useCallback`（App.tsx:263-264 的注释就是为这件事写的）
- *   - `disclosure` / `reasoningDisclosure`：F1（#270）已给出"只在自身依赖变化时换引用"
- *     的契约（`lib/disclosure.ts:123-126` / `:177-181`），有 F1 的用例钉住
- * ⇒ **不需要**自定义 `areEqual`，因此没有"比较函数漏比字段 ⇒ 静默吞更新"这一类风险
- * （票面 Risks 第 1 条点名的 `jumpRequest.nonce` / `goneApprovalIds` 两个坑，靠"不写
- *  areEqual"直接排除；"props 变了必须重渲染"由 `Conversation.memo.test.tsx` 钉住）。
+ * ⚠ **操作约束（改本组件 props 前必读）**：`memo` 的有效性完全取决于上游给的 prop 身份是否
+ * 稳定。新增 prop 前必须在 `App.tsx` 侧确认它由 `useState` / `useCallback` / 原语持有；否则
+ * `memo` 恒 miss。**不要**补自定义 `areEqual`：那是第二套（且更容易写错的）版本机制，
+ * 一处分不清该比哪些字段就是静默吞更新。
  *
- * `conversation` 每次投影提交换引用（顶层浅克隆）——那是**应该**重渲染的信号，不是噪声。
+ * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
+ * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
 export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);

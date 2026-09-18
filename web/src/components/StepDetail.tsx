@@ -119,35 +119,24 @@ export type InspectorPanelAction =
   | { type: 'resize'; width: number };
 
 /**
- * F2（#272）：`memo` 包裹——App 的与对话无关的提交（打字 / hover / 面板拖宽 / 换焦点）
- * 此前都会让本组件重渲染，并把整棵 Inspector 子树一起重跑。而 Inspector **关闭时仍保持
- * 挂载**（`hidden` 属性而非卸载，DSH 语义 / 冻结决策），所以这份成本一直在付。
+ * F2（#272）：`memo` 包裹——本组件**关闭时仍保持挂载**（`hidden` 而非卸载），所以"父级
+ * 与对话无关的提交"（打字 / hover / 拖宽 / 换焦点）此前一直在付整棵 Inspector 子树的重跑成本。
  *
- * 装 memo 的前提是 props 引用稳定——逐项核对过（App.tsx），全部天然稳定：
- *   - `streaming`：`useSession` 的布尔
- *   - `focus`（App.tsx:265）/ `panel`（App.tsx:269）：`useState` 持有的对象
- *   - `onFocusRun` / `onFocusTool` / `onFocusEvent` / `onJumpToStream` /
- *     `onJumpToApproval` / `onPanelAction`：全是 `useCallback`（App.tsx:277-351）
- * ⇒ **不需要**自定义 `areEqual`（票面 Risks 第 1 条：漏比 `jumpRequest.nonce` 会让
- * Timeline 跳转失效、漏比 `goneApprovalIds` 会让审批卡不失效——不写比较函数就没有
- * 这两个坑；"props 变了必须重渲染"由 `StepDetail.memo.test.tsx` 的反例守卫钉住）。
+ * ⚠ **操作约束（改本组件 props 前必读）**：`memo` 的有效性完全取决于上游给的 prop 身份是否
+ * 稳定。新增 prop 前必须在 `App.tsx` 侧确认它由 `useState` / `useCallback` / 原语持有；否则
+ * `memo` 恒 miss。**不要**补自定义 `areEqual`（同 `Conversation.tsx`：第二套版本机制 +
+ * 更易写错的静默吞更新）。
  *
- * `conversation` 每次投影提交换引用（顶层浅克隆）——那是**应该**重渲染的信号。
+ * 逐项稳定性核对表、否决 `areEqual` 的理由，见
+ * `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
 export const StepDetail = memo(function StepDetail({ conversation, streaming, focus, onFocusRun, onFocusTool, onFocusEvent, onJumpToStream, onJumpToApproval, panel, onPanelAction }: Props) {
   const [tab, setTab] = useState<Tab>('timeline');
-  /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——useMemo 不许
-   * 出现在下方任何 early-return 之后（Rules of Hooks：focus/tool 分支返回的渲染
-   * 不跑这些 hook，先后两次渲染的 hook 数就会不一致 → React 崩溃）。
+  /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——`useMemo` 不许出现在
+   * 下方任何 early-return 之后（Rules of Hooks：两次渲染的 hook 数必须一致）。
    *
-   * N2（#271）：依赖键是 `eventsVersion`，**不是** `events`——后者引用刻意稳定
-   * （P0-1 append-only 共享数组），拿它当依赖 ⇒ 首次提交后永不重算 ⇒ 头部的 run
-   * 数停在首帧。`exhaustive-deps` 看不到这层契约（它假设「用到的值就该进依赖」），
-   * 故两处定向豁免（同仓先例：ApprovalCard / ProviderManagerDialog）。
-   *
-   * ⚠ 豁免只能用**行内** `eslint-disable-line`：本版 oxlint 下 `disable-next-line`
-   * 与块级豁免会让该函数**全部 compiler 类规则**一起跳过——实测（最小复现）会把同
-   * 函数里无关的真告警（如 `react(refs)`）一并吞掉，那才是「放宽校验」。 */
+   * 依赖键是 `eventsVersion`，**不是** `events`——契约见 ADR-0037 D3，`exhaustive-deps`
+   * 看不到这层，故定向豁免；豁免写法见本文件 `listTargets` 内的那条说明。 */
   const runIdList = useMemo(
     () => [...new Set((conversation?.events ?? []).flatMap((e) => (e.run_id ? [e.run_id] : [])))], // eslint-disable-line react-hooks/exhaustive-deps
     [conversation?.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
@@ -161,29 +150,11 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
 
   /* ── F2（#272）：派生收敛 ────────────────────────────────────────────────
    *
-   * **为什么这些 useMemo 必须在两处 early-return 之前**：Rules of Hooks。`!conversation`
-   * 与 `focus.kind === 'child'` 两条路径不渲染下面那几个面，hook 数若随之变化，React 会
-   * 在两次渲染之间直接崩——与本文件既有 `runIdList` 同一条约束（它的注释写了同样理由）。
-   *
-   * **依赖一律细到字段，绝不写整个 `conversation`**：`applyEvent` 每次事件都返回新的顶层
-   * 对象（浅克隆，`projection.ts:1190`），写整个对象不是"省一次重算"，而是"一次也不省"。
-   * 各键逐个**从被调函数的实现里读出来**，不是猜：
-   *  - `allTools` 只读 `state.turns`（`projection.ts:1424` 的 `state.turns.flatMap`）
-   *    ⇒ 键 = `turns` 引用。`turns` 走 COW（`replaceTurnAt`，`projection.ts:251-254`），
-   *    只有真的动到某一轮才换引用。
-   *  - `deriveRunPulse` 只读 `run_interrupted` / `run_status` / `run_cancelled` /
-   *    `active_step_id` / `turns` 与入参 `streaming`（`runState.ts:73-141`）
-   *    ⇒ 键 = 这五项 + `streaming`。
-   *  - `deriveAgentProfile` 读的是 events 日志 ⇒ 键 = `eventsVersion`（N2 #271 /
-   *    ADR-0037 D3 给出的"events 又追加了"唯一精确信号；`events` 引用刻意稳定，拿它
-   *    当键是**永不重算**——那正是 N2 修掉的陈旧缺陷）。
-   *
-   * **代价如实说明**（本票消不掉的那部分）：`eventsVersion` 每次 `events.push` 都 +1，
-   * 含 `model/delta` 这类每帧都有的流式帧 ⇒ `agentProfile` / `tabCounts.timeline` /
-   * 键盘导航表的 timeline 分支**每次追加都重算**。本票消掉的是另外两类：
-   *   (a) 与对话无关的提交 —— `memo` 挡住整棵树；
-   *   (b) 不改轮次的追加   —— `tools` / `pulse` / 三张过滤表 / 导航表命中。
-   * 这两类的可执行证据在 `StepDetail.memo.test.tsx`（含"变化时必须重算"的反例守卫）。 */
+   * ⚠ **操作约束（改下列任一 useMemo 前必读）**：
+   *  1. 它们必须在两处 early-return **之前**（Rules of Hooks，同上面的 `runIdList`）。
+   *  2. 依赖**细到字段，绝不写整个 `conversation`**——`applyEvent` 每次事件都返回新的顶层
+   *     对象（顶层浅克隆），写整个对象是"**一次也不省**"。每个键怎么来的、为什么是它、
+   *     以及本票消不掉的那部分代价，见 ADR-0037 D5.3 / D5.4。 */
 
   // 单一走法（#190）：与中心列「输出」面共用 projection.allTools——不在本文件内再造一份。
   const tools = useMemo(() => (conversation ? allTools(conversation) : EMPTY_TOOLS),
@@ -217,20 +188,21 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
    * 选中态，等于做出一个鼠标无法复现的选择——违反 AC3「鼠标默认可用，不做键盘唯一」。
    * 那两面的行要不要变成可选中，是它们各自票里的事。
    *
-   * F2（#272）：这张表建的是 N 个新闭包（`focus: () => onFocusEvent(e)`），此前每次提交
-   * 都重建（事件多时 = O(N) 个闭包 + 一次 events 线性扫描）。键含 `eventsVersion` 与
-   * `tools`；`onFocusEvent` / `onFocusTool` 进依赖是**反陈旧**保险——它们是 App 的
-   * `useCallback`，但万一哪天不再稳定，这里必须跟着重建，否则闭包会永远指向第一个回调
-   * （票面 Risks 第 3 条）。 */
+   * F2（#272）：这张表每次提交都重建成 N 个新闭包（事件多时 = O(N) 个闭包 + 一次 events
+   * 线性扫描），故收进 `memo`。键含 `eventsVersion` 与两个回调——依赖逐项理由见 ADR-0037
+   * D5.3 的 `listTargets` 行（两个回调进依赖是**反陈旧**保险，不是"用到了就写"）。 */
   const listTargets: { key: string; focus: () => void }[] = useMemo(() => {
     switch (tab) {
       case 'timeline': {
-        /* ⚠ 本 memo 里 `conversation` 只在这一行被引用，但豁免**不能**写在这一行——
-         * 本版 oxlint 的"判定位置"与它报出来的标签行不是同一个：实测把指令挂在这一行
-         * ⇒ 告警照旧；挂在下面依赖数组那一行 ⇒ 整条 `useMemo` 的告警（含本行这条
-         * `missing dependency: conversation`）一起被压掉。上面 tools / pulse /
-         * agentProfile 三个单行 memo 同一条规律（只留回调行 ⇒ 泄漏 3 条；只留依赖行
-         * ⇒ 42 条全压）。故指令统一落在依赖数组行——见本票 DoD 的豁免 A/B 表。 */
+        /* ⚠ 本 memo 里 `conversation` 只在这一行被引用，但豁免指令**不能**写在这一行——
+         * oxlint 的"判定位置"与它报出来的标签行不是同一个：挂在这一行 ⇒ 告警照旧；
+         * 挂在下面依赖数组那一行 ⇒ 整条 `useMemo` 的告警（含本行这条 `missing
+         * dependency: conversation`）一起被压掉。本文件所有同类豁免统一落在依赖数组行。
+         *
+         * 两条通用纪律（本仓一致，机制与 A/B 数字见 ADR-0037 D5.5）：
+         *  1. 只能用行内 `eslint-disable-line`——`disable-next-line` / 块级会让该函数
+         *     **全部** compiler 类规则一起跳过（连无关的真告警一起吞），那是放宽校验；
+         *  2. 指令必须落在**依赖数组那一行**，写在回调行上是**装饰**（不生效）。 */
         const events = conversation?.events;
         return events
           ? events.map((e) => ({ key: eventKey(e), focus: () => onFocusEvent(e) }))
@@ -1027,13 +999,9 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
   const visibleRef = useRef<AgentEvent[]>([]);
   const lastRowRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  /* run 分组派生（N2 #271）：键用 `eventsVersion`——`events` 引用刻意稳定（P0-1），
-   * 拿它当依赖不是"省一次重算"，而是**永不重算**：新 run 的组头永远不出现、老组的
-   * 「N 事件」永远不涨（Inspector 显示陈旧内容，是正确性缺陷）。
-   * 代价如实说明：每次 `events.push` 都 +1（含 model/delta 这类每帧都有的流式帧），
-   * 所以分组会随每次提交重算——单次成本见 `docs/PERF_BASELINE.md` §N2（一次线性扫描）。
-   * `exhaustive-deps` 看不到这层契约，故行内定向豁免（ADR-0037 D3；为什么必须用行内
-   * 形式见上方 runIdList 处——块级/NEXT-LINE 会连带吞掉同函数的无关真告警）。 */
+  /* run 分组派生（N2 #271）：键用 `eventsVersion`——写 `events` 不是"省一次重算"，而是
+   * **永不重算**（组头不出现、计数不涨，是正确性缺陷）。契约与代价见 ADR-0037 D3 / D5.4；
+   * 豁免形式见上方 `runIdList` / `listTargets`。 */
   const runGroups = useMemo(() => groupEventsByRun(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* #183：键盘选中项必须在**渲染窗口**里，否则"选中了却看不见"（↑/↓ 到窗口外
@@ -1043,8 +1011,8 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
    * "加载更早"的意图，两者取大——精确到 `total - selectedIndex`，不是一把拉到全量
    * （全量渲染正是 200 行窗口要避免的成本，见文件头的实测）。
    *
-   * N2（#271）：依赖键是 `eventsVersion`——依赖 `events` 引用等于把查找结果冻结在
-   * 首帧（`exhaustive-deps` 于此定向豁免，理由见 ADR-0037 D3）。 */
+   * N2（#271）：依赖键是 `eventsVersion`——依赖 `events` 引用等于把查找结果冻结在首帧
+   * （契约见 ADR-0037 D3）。 */
   const selectedIndex = useMemo(() => {
     if (!selectedKey) return -1;
     return conversation.events.findIndex((e) => eventKey(e) === selectedKey); // eslint-disable-line react-hooks/exhaustive-deps
