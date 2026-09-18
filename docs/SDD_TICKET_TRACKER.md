@@ -2704,3 +2704,112 @@ D5 引用的行号/数字经实跑核对；`web/` 三文件的 diff **逐 hunk �
 - ④ detach / ⑤ 再 attach + 软删除两段**保持原样**：UI 的「加入项目…」选择器路径因此仍被 ⑤ 覆盖，③ 改成 API 重放**没有**丢覆盖面。
 
 **证据（生产口径真机；不经 test runner、不起 vite）**：%TEMP%\wbi-probe-groupflow.cjs（裸 chromium 直连 127.0.0.1:8000，失败自保 = 先软删除残留项目再比对基线）→ **16 条断言全 PASS**、退出码 0、**基线逐字段还原 true**（项目含账本序 + 会话归属）；输出存档 %TEMP%\wbi-probe-groupflow.out，截图 web/gui-test-screenshots/ws5-probe/。其中 sessions_attached 实测 **1**、幂等重放实测 **0** ⇒ AC5 语义在真机成立。
+
+---
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B3（#273 + #275）台账起点（2026-09-19） ===== -->
+
+#### F4（#273）验收证据
+
+**票面**：GitHub #273（`## What to build` 必做 1/2/3 + AC1–AC8）。
+**实现 commit**：`5a7f40e`（红证用例，新增 `web/src/App.test.tsx` 332 行 / 6 条）＋ `6d17bef`（实现，`web/src/App.tsx` **+16 −1**）。
+对 `28a1a34` 的净 diff = **2 文件 / +348 −1**。
+**性能数字**：`docs/PERF_BASELINE.md` 的 F4 节（G3 硬前置：基线先落、改造后数字再落）。
+
+**做法（`web/src/App.tsx` 恰好 3 处，别的什么都没动）**
+
+| # | 改动（改造后行号） | 说明 |
+| --- | --- | --- |
+| 1 | `:79` 新增模块级常量 `CLOSED_PALETTE_ITEMS: CommandItem[] = []` | 关闭态的返回值必须是**同一个引用**。用 `[]` 字面量每次渲染都是新数组，会让 `CommandPalette` 的 memo 恒 miss，把 F1/F2 的收敛成果反向抵消——仓库里 `EMPTY_UNDELIVERED`（`:64`）就是同一道理的既有先例 |
+| 2 | `:758` memo 体首行 `if (!paletteOpen) return CLOSED_PALETTE_ITEMS;` | 关闭态**不构建**。该表随事件窗口线性放大（`:897` 的 `conversation.events.slice(-100)` 逐条 `summarizeEvent`），而流式期间每秒约 40 次投影提交 |
+| 3 | `:916` 依赖数组**前置** `paletteOpen`，`conversation` **原样保留** | 打开那一拍依赖变化 ⇒ 立刻用最新 `conversation` 重建。PRD §15 只要求「打开那一刻最新」，不要求关闭期间逐帧维护；`conversation` 是 R2 行为不变的前提，**不得**收窄 |
+
+**红证（改造前 → 改造后，同一条命令、同一批用例、**同一份测试文件**）**
+
+做法：`web/src/App.tsx` 临时换回 `28a1a34`（`git show <sha>:<path>` 写回，**全程未用 `git stash`**），
+跑完按字节还原（`git diff --numstat -- web/src/App.tsx` 复原为 `16	1`）。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run src/App.test.tsx
+```
+
+| 阶段 | 文件级 | 关键失败断言 |
+| --- | --- | --- |
+| 改造前（`App.tsx` = `28a1a34`，新用例保留） | **2 failed \| 4 passed (6)** | `expected [ 100, 100, 100, 100, 100 ] to deeply equal [ +0, +0, +0, +0, +0 ]`（AC1）、`expected [ …(110) ] to be [ …(110) ]`（AC3） |
+| 改造后（`6d17bef` 工作树，本轮实测） | **6 passed (6)** | — |
+
+> **改造前就通过的那 4 条不计入红证**：AC2 ×2、AC4 golden、AC5 键盘——它们是**不变式守卫**
+> （面板开不开都该成立），改造前天然成立。AC4 的价值在**反方向**：锁死「门控**没有**改动候选表内容」，
+> 是 AC1 之外防「为了省事把候选表改小」的那道闸。
+
+**⚠ 归因陷阱（本票最费时的一处，务必保留）**
+
+`summarizeEvent` 在 `web/src` 有**两处**调用点（grep 实证）：`App.tsx:898`（本票对象，改造前 `:883`）
+与 `StepDetail.tsx:1647`（时间线每帧对**全部**事件各调一次）；而 `App.tsx:1138`（改造前 `:1123`）
+**无条件**渲染 `StepDetail`。不隔离时计数 = 「100 + 事件总数」——实测拿到
+`[223,224,225,226,227]`／累计 **1125**，每次 +1 恰是事件数在涨。
+这个数字**看着完全合理**（有量级、有趋势、可复现），却与 `paletteItems` 毫无关系。
+⇒ 用例把 `StepDetail` 换成空壳（它是 App 的唯一引用方），观测面收敛为单点，
+AC1 期望值同时从「≈123」**收紧为严格 0**。
+**教训**：取数前先证明「观测点是单源」，否则量到的是噪声之和。
+
+**墙钟口径：实测三轮后判定不可用（不落任何数字当证据）**
+
+| 轮次 | 代码 | 探针 | 关闭态中位数 | 打开态中位数 |
+| --- | --- | --- | --- | --- |
+| 1 | `28a1a34` | 5 样本 | 14.23ms | 42.40ms |
+| 2 | `28a1a34`（**同一份代码**） | 预热 3 + 15 样本 | 27.41ms | 33.78ms |
+| 3 | `6d17bef` | 同第 2 轮 | 12.06ms | 20.97ms |
+
+第 1、2 轮是**同一份代码**，关闭态中位数却差近 2 倍；第 3 轮里**打开态那段代码一个字都没改**，
+中位数却从 33.78 掉到 20.97（−38%）。⇒ jsdom 墙钟被 JIT / GC / 后台负载漂移主导，
+**不足以支撑「<5ms 级」的判定**。AC8 的「(若可测) 主线程占用」据此判为**本环境不可测**，
+**不编造数字**（AC8 原文即带「若可测」，不构成验收缺口）。
+本票的决定性证据是**确定性计数 100 → 0**——任意次运行同值，无噪声。
+
+**AC 逐条**
+
+| AC | 内容 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| AC1 | 关闭态构建体不执行，`summarizeEvent` 调用 = 0（连续 N 次提交） | ✅ | `[100,100,100,100,100]` → `[0,0,0,0,0]`（逐次断言，非求和） |
+| AC2 | 打开那一拍候选表是最新的 | ✅ | 两条用例：①「关闭 → 追加 → 打开」新事件 id 在列；②已打开时每拍重建，且**当场**搜得到刚追加的事件 |
+| AC3 | 关闭态返回值是**同一引用** | ✅ | `[ …(110) ] to be [ …(110) ]` 由红转绿；返回的是模块级常量 |
+| AC4 | 打开态候选表与改造前逐项一致（id + 顺序 + 分组 golden） | ✅ | **110 项** = 6 `actions` + 4 `density` + 100 `events`（`event-121` → `event-22`） |
+| AC5 | 选中/回车/键盘导航行为不变 | ✅ | 组件用例（真 `App` + 真 Radix 浮层，`↓` → `Enter` 执行并关闭）+ **e2e `i-keyboard.spec.ts` 6/6** |
+| AC6 | lint / build / test 全绿 | ✅ | 见下表 |
+| AC7 | `git diff --stat` 只出现 `App.tsx` 与其测试 | ⚠ 口径见下 | 源码文件**只有 `App.tsx`**；另有 `docs/PERF_BASELINE.md`（AC8 硬要求） |
+| AC8 | `PERF_BASELINE.md` 记录改造前后 | ✅ | F4 节，含墙钟不可用的判定与三轮依据 |
+
+> **AC7 的口径说明**：`git diff --name-only` = `docs/PERF_BASELINE.md` + `web/src/App.tsx`
+> （`web/src/App.test.tsx` 为新增）。**源码文件只有 `App.tsx`**，符合 AC7 的意图；
+> `docs/PERF_BASELINE.md` 是 **AC8** 强制要求的落点，两条 AC 合读不冲突
+> （F1/F2 的落点同样含该文件，属既有惯例）。**未**用任何白名单掩盖源码提交。
+
+**门禁（本轮实跑，`28a1a34` + 本次未提交改动的同一工作树）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| lint | `node node_modules/oxlint/bin/oxlint` | **42 warnings / 0 errors**；并与 `28a1a34` 版本做 A/B：总数与 `App.tsx` 12 条**逐项同数**，新增文件 `App.test.tsx` **0 条** ⇒ 零新增、零顺带消失 |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| build | `node node_modules/vite/bin/vite.js build` | rc=0，`✓ built in 5.51s` |
+| 全量单测 | `node node_modules/vitest/vitest.mjs run` | **Test Files 63 passed (63) / Tests 1014 passed (1014)** |
+| 相关 e2e | `e2e/i-keyboard.spec.ts`（2 project × 3 例；JSON reporter 落盘取数） | **expected 6 / unexpected 0 / flaky 0** |
+
+> **e2e 环境备注（可复现）**：本机 `npm` 不可用（`npm --version` → RC=1），而基配置的
+> `webServer.command` 是 `npm run dev:e2e`。本轮用**临时** config 把该命令换成等价的
+> `node node_modules/vite/bin/vite.js --strictPort` 后跑通，**跑完即删、未进提交**
+> （`testDir` / `workers` / `projects` / 端口守卫全部沿用，仍走仓库既定车道）。
+> 结果**以 JSON reporter 落盘为准**，不依赖退出码——实测收尾时 runner 自身不退出
+> （`netstat` 判据：5173 已释放、无孤儿 server，与仓库既有记录一致）。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 打开态仍是全量构建 100 条候选（`events.slice(-100)`） | **未闭合**（票面已列） | 基线证明该构建造成**可测长帧** ⇒ 才做票面「必做 3」的记忆化。本轮墙钟不可用 ⇒ 需先有可靠的帧级采集手段（与 F1 同一未闭合项：真机 Chromium 可用，缺的是 G4 观感口径的采集脚本） |
+| 关闭期间候选表不再维护 | **设计如此**（门控的代价） | 无。AC2 / AC4 是它的守卫；`paletteOpen` 进依赖保证「打开即最新」 |
+| `docs/PERF_BASELINE.md` 行尾为 LF，仓库多数 docs 为 CRLF | 既有状态，**非本票引入** | 只在有人统一行尾时处理；本票避开了顺带改动 |
+
+**审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
+`5a7f40e` / `6d17bef` 交由 **P1-B3** 的两轴审查窗口覆盖（fixed point = `28a1a34`）；
+本轮落点与白名单这两个 docs-only 提交按台账惯例另行声明。
