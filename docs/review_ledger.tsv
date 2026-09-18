@@ -46,6 +46,7 @@
 2026-09-19	B-18 两轴批量审查（Standards + Correctness；T09/#254 + T10/#255；fixed point 1ba46a2；Correctness zero findings；Standards 1xP2 + 1xP3）	1ba46a2..a47d855
 2026-09-19	B-18 findings 修复（Tracker/归档/Recovery 注释收敛为决策指针；Catalog 注册测试收紧为精确 GET-only）	a47d855..ae14ee4
 [whitelist]
+c5cd404	B-18 收批落点记录（tracker + PHASE_STATUS + 归档 + 审查台账，docs-only）
 def3bec	#254 实现落点记录（tracker + PHASE_STATUS + 2026-09 归档，docs-only）
 5e03579	SDD 续批开工提示词（B-17 起的开工指令，docs-only）
 c52aab6	#252 实现落点记录（tracker + PHASE_STATUS + 2026-09 归档，docs-only）
