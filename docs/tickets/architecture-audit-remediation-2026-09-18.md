@@ -30,6 +30,7 @@
 
 | 父票 | 子票 | 内容 | Blocked by |
 |---:|---:|---|---|
+| #237 | #266 | Resume cwd 与 WorkspaceRegistry 冲突 fail-closed | 无 |
 | #240 | #249 | Runtime Tracer seam + NullTracer | 无 |
 | #240 | #250 | Executor Tracer seam | #249 |
 | #241 | #251 | Session write behavior golden | 无 |
