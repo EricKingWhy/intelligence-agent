@@ -194,9 +194,9 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与
         # 客户端游标可能因一次丢帧而错开，双保险比互相信任便宜）。
         window = [e for e in events if after_seq < e.seq <= replay_upto]
-        # 整段渲染（`to_dict()` × N + `json.dumps`）下放线程：实测这一块在 1000 事件
-        # 真实窗口下的 P90 ≥5.6ms、最长 7–32ms（`docs/PERF_BASELINE.md` B7 节），
-        # 超过票面的 5ms 阈值 ⇒ 必须搬（#275 站点 1 方案 A）。帧结构逐字不变。
+        # 整段渲染（`to_dict()` × N + `json.dumps`）下放线程：票面的 5ms 阈值判定为
+        # 「必须搬」（#275 站点 1 方案 A，实测数字见 `docs/PERF_BASELINE.md` B7 节）。
+        # 帧结构逐字不变。
         await _send_json_offloaded(
             websocket, _render_snapshot, session_id, window, replay_upto,
             active_run is not None,
