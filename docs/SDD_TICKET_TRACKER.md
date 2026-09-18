@@ -1999,7 +1999,7 @@ main 由集成 AI 执行）。
 | 批次号 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | **P1-B1** | **#268**、**#269**（均 docs-only） | `45744d3`（**它自身的归属见下方「fixed point 归属」**） | **已审**（两轴独立只读子代理：Standards + Correctness）——fixed point `45744d3`，范围 `45744d3..70d88f2`；轴内合计 **1×P1 + 6×P2 + 6×P3**（其中 2 条 P3 两轴共同指出 ⇒ 去重后 **11** 条），**findings 全数处置**（逐条见下方处置表） | findings 处置 = `2048764`；台账审查行 + 白名单 = 随后的 `chore(review-ledger)` 提交 |
-| **P1-B2** | **#270**（F1，**代码票**）、**#271**（N2，代码票）、**#272**（F2，代码票） | **待定**（三票**均已落地**：`#270` / `#271` / `#272` 的提交都已用 plumbing 造出，**只差用户终端的一条 `update-ref`** ⇒ 本批**已可起审**） | **未审查**——按 `docs/SDD_WORKFLOW_PROTOCOL.md` §1.2「每 2–3 票对累计 diff 跑一次两轴审查」，单票落地时**不单独起审查**（`#270`、`#271`、`#272` 均照此，**未给自己开审查、未加白名单掩盖**）；三票齐了以后一次性起审，范围从上一审查行 tip `2048764` 起算，**覆盖三票的累计 diff** | 见下方「P1-B2 票」 |
+| **P1-B2** | **#270**（F1，**代码票**）、**#271**（N2，代码票）、**#272**（F2，代码票） | `2048764`（上一批次审查行的 tip） | **已审**（两轴独立只读子代理：Standards + Correctness）——fixed point `2048764`，范围 `2048764..dd66913`（**13 个提交**，覆盖三票累计 diff）；**Standards 轴 1×P1 + 2×P3**、**Correctness 轴 0×P0/P1/P2 + 1×P3**，详见下方「**P1-B2 两轴审查记录（2026-09-18）**」 | findings 处置 = `5ce86f7`（ADR-0037 新增 D5，docs）+ `fe96009`（三文件注释压成「操作约束 + 指针」，**纯注释**）；台账审查行 + 白名单 = 随后的 `chore(review-ledger)` 提交 |
 
 ### 票
 
@@ -2293,7 +2293,7 @@ cd web && node node_modules/vitest/vitest.mjs run src/lib/disclosure.test.tsx sr
 | AC5 | ✅ | 同一内容 5 次提交 `renderMarkdown` 恒 **1** 次；内容变则 **+1** |
 | AC6 | ✅ | `oxlint` 44 → **42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` 59 文件 / 982 用例全绿；`vite build` 通过 |
 | AC7 | ⚠ **有披露** | `git diff --stat` 除 Scope lock 允许的 4 个文件外，另有 `web/package.json` + `web/pnpm-lock.yaml`（新增 devDependency **jsdom**）——见下方「披露与偏离」第 1 条 |
-| AC8 | ⚠ **部分** | **可自动化代理已覆盖**（点击工具行 `aria-level` 0 → 1，且在 A 方案下实测为红）；**手工冒烟截图/录屏未取得**（本环境无 GUI 浏览器 + 无真后端），解除条件见 `PERF_BASELINE` F1 节「未闭合」段 |
+| AC8 | ⚠ **部分** | **可自动化代理已覆盖**（点击工具行 `aria-level` 0 → 1，且在 A 方案下实测为红）；**手工冒烟截图/录屏未取得**——⚠ 2026-09-18 更正理由：真机浏览器**一直可用**（`web/e2e` 主车道用真机 Chromium，本轮实测 436 绿），缺的是**该口径的产物本身**（人工录制的截图/录屏需人执行并归档）。解除条件见 `PERF_BASELINE` F1 节「未闭合」段 |
 
 **披露与偏离（逐条）**
 
@@ -2441,7 +2441,7 @@ cd web && node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts src
 | **F1 的未闭合项「perf 车道补一条『已完成后追加 delta ⇒ 已完成段 render 次数不增长』的比例型探测器」票面把它归给了 N2——本票`未做`** | **未做（如实登记）** | 本票 perf 车道新增的是**成本**探针（`eventsVersion` 增量的 A/B + `groupEventsByRun` 调用频率折算），**不是** render 次数探测器。解除条件：随 **F2（#272，memo 与 props 收敛）**一并补——F2 正要把 `allTools` / `deriveAgentProfile` 这些宽对象派生收敛，render 次数在那之后才有稳定口径；若 F2 也不做，则另开票 |
 | `StepDetail.tsx` 其余以宽对象为依赖的派生（`allTools(conversation)`、`deriveRunPulse`、`deriveAgentProfile`、三处 `tools.filter`、`events.map` 建闭包） | **本票不处理** | 票面 `## 未闭合项` 已指定归属：**F2**（memo 与 props 收敛）与 **F5**（长列表离屏）合并 |
 | `projection.perf.test.ts` 的 `applyEvent @N` 基准走**去重短路**路径（`seq` 恒 `999999`）⇒ 它对 push 路径的回退是瞎的 | **仅登记，未改他人行** | 把基准里的 delta 换成每次新 `seq`（一行改动）后重测；或由本票的 `n2-cost-probe` 承担 push 路径预算断言（后者已带 `<50µs` 断言，**已覆盖**，故本条不阻塞） |
-| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 同 F1：在真机 Chrome Performance 面板按固定场景录一次并归档（本环境无 GUI 浏览器、无真后端可驱动一场真实流式） |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 同 F1：要么写 CDP `PerformanceObserver('longtask')` 采集脚本（可自动化、本批未做），要么人工在 Performance 面板按固定场景录一次并归档。⚠ 2026-09-18 更正理由：真机 Chromium **一直可用**（e2e 主车道本轮 436 绿），不是「无 GUI 浏览器」 |
 | 交互语义的手工冒烟（截图 / 录屏） | **未取得** | 同上真机环境；AC7 已用可自动化用例先覆盖（且带改造前失败输出） |
 | `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269） |
 
@@ -2518,7 +2518,7 @@ Tests  1 failed | 10 passed (11)
 | AC5 | ✅ | 8 处 filter 逐条对照（下表），谓词**逐字照抄**、`isCommand` 仍取 `../lib/commandOutput`（`StepDetail.tsx:27`，未改）；tab 计数另有用例钉住（Timeline 5 / Terminal 1 / Changes 0 / Artifacts 0） |
 | AC6 | ✅ | 新增 2 条：① 无选中时 `↑` 选最后一条 ⇒ peek 显示的是**当前**列表最新事件（`session/resumed`）；② 追加事件后从原选中项按 `↓` 能走到新增的那一条（陈旧导航表会原地不动）——②的**判别力由变异检验证明**（上节），另配「run 收口后 `pulse` 必须重算」与「同内容新对象必须重渲染」等 4 条反例守卫 |
 | AC7 | ✅ | `tsc -b` rc=0、输出 **0 字节**；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` rc=0 **62 文件 / 1008 用例全绿**；`vite build` rc=0。⚠ 票面写的是 `npm run lint/build/test`：本环境 `npx` / `pnpm` 均不可用（F1 已登记），等价命令用 `node node_modules/...` 直调——**同一份配置、同一个 bin**，非替换口径 |
-| AC8 | ⚠ **未跑（登记）** | 本票**未改**任何交互逻辑（只改 `memo` 包裹与 `useMemo` 依赖），交互语义已由 jsdom 车道的 AC6 两条 + 既有 SSR 契约文件覆盖；真机 e2e 需要浏览器 + 真后端驱动一场真实流式。**解除条件**：真机跑 `npm run test:e2e -- web/e2e/inspector-*.spec.ts`（并注意本仓 e2e 有收尾挂死历史，见 `HANDOFF §10`） |
+| AC8 | ✅（**2026-09-18 已跑，缺口闭合**） | **真机 Chromium（用户本机）e2e 全量**：`web/e2e/` **436 passed / 0 failed**，退出码 0，耗时 10.2 分钟，**无收尾挂死**（主车道两个 project：chromium-1280 / chromium-1920 `--workers=2`）。与本票直接相关的 9 个 spec 逐条绿（**条数为每个 project**；两个 project 各跑一遍 ⇒ 合计 2×）：`y-inspector-peek` **9**（AC1–AC9，含 AC6 拖宽 / AC8 头部不溢出 / AC9 子会话头）＋ `i-keyboard` 3 ＋ `j-scroll` 3 ＋ `z-artifact-content` 6 ＋ `x-output-panel` 7 ＋ `z-changes-panel` 3 ＋ `a-reasoning` / `c-tool-output` / `h-density` 各 1。**更正登记口径**：此前写的「需真后端」**不准确**——主车道 `playwright.config.ts` 用 `page.route` mock SSE（`e2e/fixtures.ts`），**核心矩阵不依赖真后端**，本环境一直可跑（命令 `node node_modules/@playwright/test/cli.js test`，`npx` 不可用）。**仍未闭合**：`playwright.live.config.ts` 联调车道（真模型 + 真后端 127.0.0.1:8000）**未跑**——它按设计不入标准门禁，见 `PERF_BASELINE` F2 节 |
 | AC9 | ✅（代码提交）/ ⚠ **有披露**（docs 提交） | `git diff --stat 79f7f26 1f88116` = **恰好 4 个文件**，全部落在 Scope lock 允许清单内（`Conversation.tsx` / `StepDetail.tsx` / 及其 `web/src/components/*.test.tsx`）⇒ 代码提交 AC9 成立；落点记录提交另含 3 个 docs（见「披露与偏离」第 1 条） |
 
 **AC5 逐条对照（前后等价）**
@@ -2588,12 +2588,72 @@ Tests  1 failed | 10 passed (11)
 | `ChildSessionView`（`StepDetail.tsx:1645`）内 `<ChatTab tools={allTools(conversation)} />`（`:1655`）仍是**未记忆化**的第二次 `allTools` 调用 | **本票不处理** | 它不在票面必做 2 的清单里（票面只列 `:175-180 / :630 / :634 / :1122 / :1150 / :1190`），且属**另一个组件**（child 会话视图）。解除条件：随 **F5**（Inspector 长列表离屏）或另开票 |
 | Inspector 三面列表仍是**全量渲染**（`:636` / `:1220` / `:1290`） | 票面 `## 未闭合项` 已指定归属 | **F5** |
 | Inspector 关闭时**仍保持挂载**（刻意设计，本票只降其成本） | 设计如此，非缺口 | 无（除非基线证明成本不可忽略，另开票讨论「延迟卸载」） |
-| AC8 的相关 e2e | **未跑** | 真机浏览器 + 真后端；见 AC8 行 |
-| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 同 F1/N2：在真机 Chrome Performance 面板按固定场景录一次并归档（本环境无 GUI 浏览器） |
+| AC8 的相关 e2e（主车道 / mock 车道） | **已闭合**（2026-09-18） | 无（证据见 AC8 行：436 passed / 0 failed） |
+| `playwright.live.config.ts` **联调车道**（真模型 + 真后端 `127.0.0.1:8000`） | **未运行** | 该车道按设计**不入标准门禁**（需后端已启动 + 模型可用 + 结果非确定）。解除条件：后端起在 8000 后跑 `node node_modules/@playwright/test/cli.js test --config playwright.live.config.ts --workers=1` |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 真机 Chromium 已可用（e2e 主车道本轮实测 436 绿），缺的是 **G4 观感口径的采集手段**：要么写 CDP `PerformanceObserver('longtask')` 采集脚本（可自动化、本批未做），要么人工在 Performance 面板按固定场景录一次并归档。同 F1/N2 的同一未闭合项 |
 | `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269） |
 
 **审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
 `4752236` / `1f88116` 交由 **P1-B2** 的两轴审查窗口（范围自 `2048764` 起算，**覆盖 #270 + #271 + #272
-的累计 diff**）覆盖。
+的累计 diff**）覆盖；**该审查已完成**，结论与 findings 处置见下方
+「**P1-B2 两轴审查记录（2026-09-18）**」。
+
+#### P1-B2 两轴审查记录（2026-09-18）
+
+**范围**：fixed point `2048764`（上一批次审查行 `45744d3..2048764` 的 tip），
+`2048764..dd66913` = **13 个提交**（三票累计 diff）。两个**独立只读子代理**并行跑
+（Standards 轴 / Correctness 轴），两轴各出报告后再汇总——**不排序、不互相引用**。
+
+**轴内合计**：Standards **1×P1 + 2×P3**；Correctness **0×P0 / 0×P1 / 0×P2 + 1×P3**。
+
+| 轴 | 级别 | finding | 处置 |
+| --- | --- | --- | --- |
+| Standards | **P1（S1）** | 三个文件（`Conversation.tsx` / `disclosure.ts` / `StepDetail.tsx`）把**设计动机、风险分析、oxlint 行为实测、A/B 对照**整段写在代码注释里，违反 `AGENTS.md` §16.1「机制的完整叙述 → ADR；代码注释只写『这段代码自己看不出来的操作约束 + 指向 ADR 的一句指针』」 | 新增 **ADR-0037 D5**（唯一落点，含 D5.1–D5.6 六个子节）＋ 三个文件的注释逐处压成「操作约束 + 指针」（`5ce86f7` / `fe96009`）——**本批唯一一条 P1，处置见下** |
+| Standards | P3 | `StepDetail` 里 8 处 `useMemo(() => xs.filter(...))` 是重复模式 | **按据不改**：8 处的谓词**本就不同**（`t.diff` / `isCommand` / `t.artifact` / `t.status === 'running'` / `t.status === 'failed'`），收敛成一张表要引入 `key → predicate` 映射，是把「无抽象」换成「多一层间接」——`AGENTS.md` §9.2 明确反对。已登记在 D5.3 的依赖表里 |
+| Standards | P3 | `eventsVersion` 命名不自明 | **按据不改**：它是**投影层的派生计数**，不是通用脏标记（ADR-0037 D2/Non-Goals 写死语义、D5.1 给出消费端判据）；改名成 `eventsAppendCount` 之类反而更容易被当成通用版本号用。ADR-0037 已是它的单一叙述落点 |
+| Correctness | P3 | 票面 AC2/AC3 的**字面承诺**与**收窄后的用例覆盖**之间存在差距 | **已登记**（非缺陷）：票面两条要求彼此互斥，收窄口径与理由已在 F2 验收证据的 AC2/AC3 行 + `PERF_BASELINE` F2 节如实写明，**未改票面文字、未隐去 `agentProfile` 的 +1**。审查者本人也在报告里标注「transparently noted, not a defect」 |
+
+**Correctness 轴（零 P0/P1/P2）另行确认**：所有 `useMemo` 依赖均按**被调函数真实读取面**
+逐个推导（非猜测）；`memo` 正确性核验通过；边界安全；**架构不变量 #22**（Web UI 不维护第二套
+不可对账的 Session 真相）保持；**无 scope creep**；相关 **233** 条用例通过。
+
+**独立复验（findings 处置之后，另一只读子代理逐条实测对账）**：S1 在三文件**均无残留**；
+被删掉的信息**全部在 D5 里找到落点**（无信息丢失）；D5.3 依赖表与实际代码**逐项吻合**；
+D5 引用的行号/数字经实跑核对；`web/` 三文件的 diff **逐 hunk 核对为纯注释**；`tsc -b` rc=0。
+复验另提 **1×P2 + 3×P3**，**全数就地修复**：
+
+| 复验 finding | 事实 | 处置 |
+| --- | --- | --- |
+| P2 | ADR-0037 **D3 表**的「现状」列写 `[conversation?.events]`，而代码此刻已是 `eventsVersion`；同段「本 ADR 不改代码」与已落地的 `4e85938` **冲突** | 表格改标「**决策时**的行号 / 现状快照」，并写明 N2（`40851f8` / `4e85938`）**已落地**、落地后三处一律写 `eventsVersion` |
+| P3 | D5.2 里的 `Conversation.tsx:711` 是**预存**错误行号（原代码注释就写错了，本次照抄） | 实测改为 `:726`（工具链路渲染器 `CHAIN_RENDERERS.tool`）并补 `:445`（档位循环）——两处均实跑核对 |
+| P3 | D5.5 少了「同仓先例」引用 | **不能照原样补**：实测那两处（`ApprovalCard.tsx:64`/`:113`、`ProviderManagerDialog.tsx:86`）用的**正是** `eslint-disable-next-line`——即本批判定为「会连带吞掉同函数无关 compiler 类告警」的那种形式。已按实情改写为「**不沿用**它」 |
+| P3 | D5.3 依赖表缺 `allTools` / `deriveRunPulse` 的行号 | 补 `projection.ts:1424`（`state.turns.flatMap`）与 `runState.ts:73-141`，两处实跑核对 |
+
+复验同时**明确标注两条「无法验证」**（只读条件下不可复现，故**保留作者的「已实测」标注、
+不升级为已验证**）：① oxlint 的 **51**（只留回调行那态的告警总数）需改文件才能复现；
+② oxlint 内部行为两条断言（`disable-next-line` / 块级会跳过该函数全部 compiler 类规则、
+判定位置与标签行不同）。**这是本批审查的已知证据强度边界。**
+
+**本批的提交（`fe96009` 是审查覆盖到的代码提交，`5ce86f7` 是它的 docs 前置）**
+
+| commit | 内容 | 性质 |
+| --- | --- | --- |
+| `5ce86f7` | ADR-0037 新增 D5（机制叙述唯一落点）＋ 两处事实修正（D3 表 / `Conversation.tsx:711`） | docs-only（`+131/−2`，仅 1 文件） |
+| `fe96009` | 三个文件注释压成「操作约束 + 指针」 | 代码（**纯注释**：机械校验 `+/-` 行里 **0 条**非注释，见下） |
+| `chore(review-ledger)` 提交 | 本台账两行审查记录 + 白名单 | 台账记账（脚本自动放行） |
+
+**门禁（`fe96009` 同一工作树，本轮重跑，全绿）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint --format json` | **42 → 42**（零新增、**零顺带消失**） |
+| 单测全量 | `node node_modules/vitest/vitest.mjs run` | rc=0，**62 文件 / 1008 用例全绿**（与 F2 落地时同数） |
+| 生产构建 | `node node_modules/vite/bin/vite.js build` | rc=0（仅既有 chunk-size 提示） |
+| 真机 e2e（主车道） | `node node_modules/@playwright/test/cli.js test --workers=2` | **436 passed / 0 failed**，退出码 0，10.2 分钟，无收尾挂死 |
+
+> **「纯注释」的机械依据**（不只看 diff 摘要）：把 `git diff 5ce86f7 fe96009` 的每一行
+> `+`/`-` 逐行判定，只允许空行与以 `*` / `/*` / `*/` / `//` 开头者 ⇒ **非注释行 0 条**。
+> 这正是「9 条 `exhaustive-deps` 行内豁免的位置与依赖内容一字未动」的可执行证明。
 
 

@@ -121,10 +121,13 @@ cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/l
 > **注意别把功劳记错**：`deriveChain` 只有 0.002 ms，**本票真正的浪费全在 markdown 重解析**
 > （0.692 ms/次）。`deriveChain` 那一行是「顺手测了一下、结论是可忽略」，不是收益来源。
 
-**未闭合（G4 的观感口径）**：Chrome Performance 的 long task 数 / 最长单帧**本次未取得**——
-本执行环境无 GUI 浏览器、且无真后端可驱动一场真实流式，产不出可信 trace（`PERF_BASELINE §2.1`
-本身也明令**不引入** Playwright 帧率自动采集）。**解除条件**：在真机 Chrome Performance 面板按
-固定场景录一次（同窗口尺寸 + 同一段长回答 + 同一操作序列：打开 → 流式 → 折叠/展开工具卡 →
+**未闭合（G4 的观感口径）**：Chrome Performance 的 long task 数 / 最长单帧**本次未取得**。
+⚠ **2026-09-18 更正理由**：原文写「本执行环境无 GUI 浏览器、且无真后端可驱动一场真实流式」——
+**不属实**，真机 Chromium 一直可用（`web/e2e` 主车道用真机 Chromium，2026-09-18 实测 436 绿）。
+真正缺的是**该口径的采集手段**：`PERF_BASELINE §2.1` 明令**不引入** Playwright 帧率自动采集，
+而人工录制需要一个可判读的 trace 与固定场景。**解除条件**（二选一）：① 写一个 CDP
+`PerformanceObserver('longtask')` 采集脚本（这是**可自动化**的，本批未做）；② 人工在 Performance
+面板按固定场景录一次（同窗口尺寸 + 同一段长回答 + 同一操作序列：打开 → 流式 → 折叠/展开工具卡 →
 切 density），把 trace 存档并把两列数字补进上表。在此之前，本票的收益证据只覆盖
 「可自动化口径」（调用次数 / 次数 × 单价）。
 
@@ -297,6 +300,35 @@ Tests  1 failed | 10 passed (11)
 ⇒ **真正生效的是「挂在依赖数组那一行」的指令**；挂在回调行（`useMemo(() => …,` 那一行）的
 指令是**装饰**。这与直觉相反（告警的标签行指向回调体里的 `conversation`），故写在此处供后续票复用。
 `:1037` 是单行 `useMemo`（回调与依赖同处一行），两个变体都保留、不参与判定。
+
+**真机 e2e（2026-09-18，AC8 缺口闭合；`fe96009` 同一工作树）**
+
+主车道 `web/playwright.config.ts` 用**真机 Chromium**，但**不连真后端**——`e2e/fixtures.ts` 用
+`page.route` mock SSE（帧形状 = `docs/BACKEND_CONTRACT_STREAMING_UI.md`）。命令（`npx` 在本环境
+不可用，等价直调）：
+
+```
+cd web && node node_modules/@playwright/test/cli.js test --workers=2 --output=<新目录>
+```
+
+| 结果 | 数字 |
+| --- | --- |
+| 用例 | **436 passed / 0 failed** |
+| 退出码 / 耗时 | **0** / 10.2 分钟（**无收尾挂死**） |
+| project | `chromium-1280` + `chromium-1920`（各 218） |
+
+与本票直接相关的 spec（**条数为每 project**）：`y-inspector-peek` **9**（AC1–AC9：点行预览 / ↑↓
+移动 / Esc / Space 快按与按住 / 钉住跨会话 / 整页往返 / 拖宽夹取 / 头部不溢出 / 子会话头）、
+`x-output-panel` 7、`z-artifact-content` 6、`i-keyboard` 3、`j-scroll` 3、`z-changes-panel` 3、
+`a-reasoning` / `c-tool-output` / `h-density` 各 1。
+
+**未闭合（本票）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 主车道 e2e（AC8 的相关 e2e） | **已闭合**（2026-09-18，436 绿） | 无 |
+| `playwright.live.config.ts` 联调车道（真模型 + 真后端 `127.0.0.1:8000`） | **未运行** | 按设计**不入标准门禁**；后端起在 8000 后跑 `--config playwright.live.config.ts --workers=1` |
+| long task 数 + 最长单帧（上表最后一行） | **未取得** | 写 CDP `PerformanceObserver('longtask')` 采集脚本（可自动化，本批未做），或人工在 Performance 面板按固定场景录一次并归档。⚠ 理由更正：真机 Chromium 一直可用，**不是**「无 GUI 浏览器」 |
 
 ### F4 — 命令面板门控（#273）
 _待落基线。_
