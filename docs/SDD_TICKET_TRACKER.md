@@ -1999,7 +1999,7 @@ main 由集成 AI 执行）。
 | 批次号 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
 | --- | --- | --- | --- | --- |
 | **P1-B1** | **#268**、**#269**（均 docs-only） | `45744d3`（**它自身的归属见下方「fixed point 归属」**） | **已审**（两轴独立只读子代理：Standards + Correctness）——fixed point `45744d3`，范围 `45744d3..70d88f2`；轴内合计 **1×P1 + 6×P2 + 6×P3**（其中 2 条 P3 两轴共同指出 ⇒ 去重后 **11** 条），**findings 全数处置**（逐条见下方处置表） | findings 处置 = `2048764`；台账审查行 + 白名单 = 随后的 `chore(review-ledger)` 提交 |
-| **P1-B2** | **#270**（F1，**代码票**）、#271（N2）、#272（F2） | 待定（本批尚未起审；`#270` / `#271` 均已落地，**起审点 = `#272` 落地后**） | **未审查**——按 `docs/SDD_WORKFLOW_PROTOCOL.md` §1.2「每 2–3 票对累计 diff 跑一次两轴审查」，单票落地时**不单独起审查**（`#270`、`#271` 均照此，**未给自己开审查、未加白名单掩盖**）；三票齐了以后一次性起审，范围从上一审查行 tip `2048764` 起算 | 见下方「P1-B2 票」 |
+| **P1-B2** | **#270**（F1，**代码票**）、**#271**（N2，代码票）、**#272**（F2，代码票） | **待定**（三票**均已落地**：`#270` / `#271` / `#272` 的提交都已用 plumbing 造出，**只差用户终端的一条 `update-ref`** ⇒ 本批**已可起审**） | **未审查**——按 `docs/SDD_WORKFLOW_PROTOCOL.md` §1.2「每 2–3 票对累计 diff 跑一次两轴审查」，单票落地时**不单独起审查**（`#270`、`#271`、`#272` 均照此，**未给自己开审查、未加白名单掩盖**）；三票齐了以后一次性起审，范围从上一审查行 tip `2048764` 起算，**覆盖三票的累计 diff** | 见下方「P1-B2 票」 |
 
 ### 票
 
@@ -2009,6 +2009,7 @@ main 由集成 AI 执行）。
 | **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（**未合并**：`9886a9c` 在本批分支上；`Status: Proposed` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
 | **#270** | **F1**：稳定 `disclosure` / `reasoningDisclosure` 引用，接回被折断的 memo 链 | done（**未落到任何 ref**：`bcdf4e4` 已用 plumbing 造出；本沙箱不能写 ref，待用户在自己的终端执行一条 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | `lib/disclosure.ts` 两个 hook 的返回值改 `useMemo`（票面必做 1 的 **B 方案**，**不取**标注「推荐」的 A 方案——理由与红证见下方证据节）；链路渲染器的 per-render `cycle` 闭包上移为 `useCallback`；已完成段 markdown 收进按**内容**记忆的 `memo(MarkdownBody)`；`ToolCard` 的 `onCycleLevel` 签名带 `(key, density)` | `bcdf4e4` | **全绿**：oxlint **44 → 42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` **59 文件 / 982 用例全绿**（含 `projection.test.ts` 193 条引用稳定契约，**未改写**）；`vite build` 通过；红证 6/14 → 绿 14/14（见下） |
 | **#271** | **N2**：引入 `eventsVersion`，修 `StepDetail` 三处陈旧 memo（**正确性缺陷**——`events` 引用被刻意固定 ⇒ 派生值停在首帧） | done（**未落到任何 ref**：`40851f8`（红证）/ `4e85938`（实现）已用 plumbing 造出；待用户终端 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | 投影层新增 `ConversationState.eventsVersion`（**只在 `events.push` 真执行时 +1**：正常 push 增、去重短路不增、quarantine 分支增）+ `StepDetail` 三处 `useMemo` 依赖 `events` → `eventsVersion`（三处各带**行内** `eslint-disable-line react-hooks/exhaustive-deps`）+ 改写 COW docstring 里那句已被证伪的「无消费者把 events 放进 memo 依赖」 | `40851f8`（红证）+ `4e85938`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、**零顺带消失**）；`vitest` **60 文件 / 990 用例全绿**（F1 时 59 / 982）；perf 车道 `n2-cost-probe.perf.test.ts` 2 例通过；红证 **8 failed / 193 passed** → 改造后 **201/201 全绿**（见下方「N2（#271）验收证据」） |
+| **#272** | **F2**：`Conversation` / `StepDetail` 补齐 `memo` 与 props 收敛 | done（**未落到任何 ref**：`4752236`（红证测试）/ `1f88116`（实现）已用 plumbing 造出；待用户终端 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | 两个组件各装 `memo(...)`（**不写** `areEqual`——票面 Risks 第 1 条那个「比较函数写错就静默吞更新」的失败模式，因 App 侧 props 逐个核对后确认全部天然稳定而**不存在**）；`StepDetail` 6 处宽对象派生收敛为 `useMemo` 且依赖**逐个从被调函数实现读出**后细化到字段（`allTools`→`turns`、`deriveRunPulse`→5 个 run 字段 + `streaming`、`deriveAgentProfile`→`eventsVersion`）；3 处列表 filter + ChatTab 两个计数各自 memo；键盘导航表（原每次提交重建 O(N) 个闭包）包 `useMemo`；`hidden` 挂载语义保留（**未改** `App.tsx` / `projection.ts` / `disclosure.ts` / `app.css`） | `4752236`（红证）+ `1f88116`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` **62 文件 / 1008 用例全绿**（N2 时 62 / 1006，+2 = AC6）；`vite build` rc=0；红证 **7 failed / 11 passed (18)** → 改造后 **18/18 全绿**（见下方「F2（#272）验收证据」） |
 
 > **「SHA 待回填」已回填 —— 顺带记下这次实测到的确切机制（比我原先的说明更准）**：
 > 本 worktree 的沙箱**专门回收 `refs/heads/workbuddy/` 这个目录**：
@@ -2028,6 +2029,24 @@ main 由集成 AI 执行）。
 > 本批的三个提交（`1529aa7` #268 / `9886a9c` #269 / 落点记录）就是这么造出来的。
 > 与 `docs/HANDOFF_PERF_FRONTEND.md` §10 备案第 2 条**同源**，但那条只说到「`update-ref` 退出 0
 > 而 ref 文件不存在」；这里补上「**目录级回收**」这个更精确的机制，以及 `refs/tags` 的对照证据。
+>
+> **当前待落地的完整链条（自 P1-B1 的 findings 处置提交起算，共 **13** 个提交；一次性 `update-ref` 即可全落）**：
+> `2048764`（P1-B1 findings 处置，**P1-B1 审查行 `45744d3..2048764` 的右端**）
+> → `943e1ac`（P1-B1 落点记录）→ `8813dbf`（P1-B1 审查行 + 白名单）
+> → `bcdf4e4`（F1 #270 实现）→ `55892ed`（F1 落点）→ `e4a4b4f`（F1 白名单）
+> → `40851f8`（N2 #271 红证）→ `4e85938`（N2 实现）→ `622f3f5`（N2 落点）→ `79f7f26`（N2 白名单）
+> → `4752236`（F2 #272 红证测试）→ `1f88116`（F2 实现）→ 本次 F2 落点记录 → 本次 F2 白名单
+> （**最后那个白名单提交即待写入的 tip**；这两个提交的 SHA 见交付消息——落点记录写不出自己后继的 SHA）。
+>
+> ⚠ **别把 `2048764` 当成链条的上一个提交**——它**不是** `bcdf4e4` 的父提交：中间还夹着 P1-B1 自己的
+> 两个台账提交（`943e1ac` / `8813dbf`），它们与 P1-B2 的三票一样**尚未落到任何 ref**。
+> 本轮实测的机械校验（`<tip>` = 白名单提交，写在此处供下一次直接复用；**行号是实测值，别凭直觉推**）：
+> `git merge-base --is-ancestor 2048764 <tip>` ⇒ **rc=0**；
+> `git log --oneline -14 <tip>` ⇒ **第 14 条 = `2048764`**、第 15 条 = `70d88f2`；
+> `git log --oneline -12 <tip>` ⇒ 第 12 条 = `8813dbf`（**不是** `2048764`）；
+> ⇒ `2048764..<tip>` 共 **13** 个提交（第 14 条**不计入**，它是范围的左端本身）。
+
+
 
 
 ### 两轴审查（P1-B1）与 findings 处置
@@ -2428,4 +2447,153 @@ cd web && node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts src
 
 **审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
 `40851f8` / `4e85938` 交由 **P1-B2** 的两轴审查窗口（起审点 = #272 落地后，范围自 `2048764` 起算）覆盖。
+
+---
+
+#### F2（#272）验收证据
+
+**票面**：GitHub #272（`## What to build` 必做 1/2/3 + AC1–AC9）。
+**实现 commit**：`1f88116`（实现，2 文件 +145 −44）＋ `4752236`（红证测试，2 文件 +545）；
+两者合起来对 `79f7f26`（N2 tip）的净 diff = **4 文件 / +690 −44**。逐文件（`git diff --numstat`，实测）：
+
+| commit | 文件 | +/− | 归属 |
+| --- | --- | --- | --- |
+| `4752236` | `web/src/components/Conversation.memo.test.tsx`（**新增**，jsdom 车道，7 条） | +195 | AC1 / AC3(a) 红证 |
+| `4752236` | `web/src/components/StepDetail.memo.test.tsx`（**新增**，jsdom 车道，11 条） | +350 | AC1 / AC2 / AC3(a) / AC6 红证 + 反例守卫 |
+| `1f88116` | `web/src/components/StepDetail.tsx` | +124 −42 | 票面必做 1 + 2 + 3 |
+| `1f88116` | `web/src/components/Conversation.tsx` | +21 −2 | 票面必做 1 |
+
+**做法（为什么**不写** `areEqual`）**：票面 Risks 第 1 条把「`areEqual` 写错 ⇒ 静默吞更新」列为
+**高**风险，并点出两条具体失败模式（漏比 `jumpRequest.nonce` ⇒ 点 Timeline 跳转失效；
+漏比 `goneApprovalIds` ⇒ 审批卡不失效）。逐项核对 `App.tsx` 后确认两个组件的 props
+**全部天然稳定**——`focus`(:265) / `panel`(:269) / `jumpRequest`(:303) / `goneApprovalIds`(:321)
+是 `useState` 持有的对象，`onPresetTask`…`onApprovalGone`(:277-351) 是 `useCallback`，
+`disclosure` / `reasoningDisclosure` 由 F1（`lib/disclosure.ts:123-126` / `:177-181`）稳定，
+`conversation` 每次投影提交换引用（**应该**重渲染的信号），`streaming` / `density` 是布尔/枚举。
+⇒ 两个 `memo` 都**不传** `areEqual`，那个失败模式连同它一起不存在；依据写在两个组件头上的注释里。
+
+**红证（先红后绿，同一条命令、同一批用例）**
+
+做法：两个源文件临时换回 `79f7f26`（`git show <sha>:<path>` 写回，**全程未用 `git stash`**），
+跑完按字节还原并 sha256 对账（两文件 `same=True`，`Conversation.tsx` `8b5679df…`、
+`StepDetail.tsx` `da9972e4…`）。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run src/components/Conversation.memo.test.tsx src/components/StepDetail.memo.test.tsx
+```
+
+| 阶段 | 文件级 | 合计 | 关键失败断言 |
+| --- | --- | --- | --- |
+| 改造前（两源文件 = `79f7f26`，新用例保留） | `Conversation.memo.test.tsx` **7 tests / 2 failed**；`StepDetail.memo.test.tsx` **11 tests / 5 failed** | **7 failed / 11 passed (18)** | `expected undefined to be Symbol(react.memo)`（AC1 ×2）、`expected 6 to be 1`（Conversation 6 次无关提交）、`expected { all: 2, pulse: 2, profile: 2 } to deeply equal { all: 1, pulse: 1, profile: 1 }`（AC3(a) / AC2 / 反例守卫 ×2） |
+| 改造后（`1f88116` 工作树，本轮实测） | 同两文件 | **18 passed (18)** | — |
+
+> **改造前就通过的那 11 条不计入红证**：含 AC6 两条与「输入变了必须重算」三条——它们是
+> **不变式守卫**而不是新行为，改造前天然成立（改造前导航表本来就每次提交重建；没有 memo
+> 当然也不会漏重算）。红证只认「改造前必红」的 7 条。
+
+**变异检验（钉住导航表的 `eventsVersion` 依赖确实是可载荷的）**
+
+导航表 `listTargets` 若漏掉事件变化或用陈旧长度，`↓` 会在原位置**静默不动**
+（`moveSelection` 里 `next === selectedIndex` 直接 return，连回调都不发）⇒ 这正是 F2 最容易
+做错、且**没有用例就发现不了**的地方。把依赖数组里的 `conversation?.eventsVersion` 摘掉
+（只此一处、只此一项），AC6 第二条立刻转红：
+
+```
+× 追加事件后 ↓ 能走到新增的那一条（陈旧导航表会原地不动、连回调都不发）
+AssertionError: expected 'run/completed' to be 'session/resumed'
+Tests  1 failed | 10 passed (11)
+```
+
+`StepDetail.tsx` sha256：变异前 `da9972e4d83c4b21…` → 变异后 `084ce979e4f12744…` → 还原后
+**逐字节相同**；还原后复跑同一文件 **11/11 绿**。
+
+**AC 逐条**
+
+| AC | 结论 | 证据 |
+| --- | --- | --- |
+| AC1 | ✅ | 两个组件均以 `export const X = memo(function X(...) {...})` 形式导出（具名导出 ⇒ `App.tsx` 的 import 与调用点一字未改）；用例直接断言 `$$typeof === Symbol.for('react.memo')`（改造前该断言红，见上表） |
+| AC2 | ⚠ **口径收窄，实质达成** | 票面字面「内容未变的部分不重渲染」在 N2 契约下不可达（理由见 AC3）。收窄后：追加一个**不改轮次**的事件 ⇒ `tools` / `pulse` 零重算（前提钉住：`second.events === first.events`、`eventsVersion` +1、`turns` 引用不变）；另配 `text delta 换 turns 引用 ⇒ allTools 必须重算` |
+| AC3 | ⚠ **口径收窄（经用户 2026-09-18 裁定）** | **票面原文与 N2 契约正面冲突**：`deriveAgentProfile` 的键按必做 2 必须=`eventsVersion`，而任何**真正追加成功**的事件都让 `eventsVersion` +1（`projection.ts:1171/1190`；唯一不增的是去重短路 `return state`，它返回**同一个 state 对象**）⇒ 必然重算；`model/delta` 还经 `withTurnAt → replaceTurnAt`（`projection.ts:251-254`）换掉 `turns` 引用 ⇒ 连 `allTools` 也必然重算。收窄为 (a) 与对话无关的 5 次提交 ⇒ **全部派生 0 次重算**（改造前各 +5）+ (b) 追加不改轮次的事件 ⇒ `tools`/`pulse` 稳定、`agentProfile` **如实断言 +1**（不假装它没涨）。代码级理由写在 `StepDetail.memo.test.tsx:21-34` 文件头 |
+| AC4 | ✅（**票面命令有一处前缀误命中**） | 票面原命令 `grep -n "conversation\.events" src/components/StepDetail.tsx` 命中 **15 行**，逐行归属：渲染/`.length`（`:432 :437 :802 :810 :1023 :1081 :1154 :1157 :1656`）、注释（`:976 :1020`）、被调函数实参（`:197 :1037 :1050`）、**前缀误命中**（`:1037 :1051` —— 这两行的依赖位文本是 `conversation.eventsVersion`，正则 `.` 吃掉了它）。**依赖位反向判据** `grep -nE "[\[,]\s*conversation\??\.events\s*[,\]]"` = **空**、带边界判据 `grep -nE "\[conversation\??\.events\]"` = **空**（本轮实测）。⇒ 无一行把 `events` 放在依赖位；**不改票面正则去掩盖**，按实情登记 |
+| AC5 | ✅ | 8 处 filter 逐条对照（下表），谓词**逐字照抄**、`isCommand` 仍取 `../lib/commandOutput`（`StepDetail.tsx:27`，未改）；tab 计数另有用例钉住（Timeline 5 / Terminal 1 / Changes 0 / Artifacts 0） |
+| AC6 | ✅ | 新增 2 条：① 无选中时 `↑` 选最后一条 ⇒ peek 显示的是**当前**列表最新事件（`session/resumed`）；② 追加事件后从原选中项按 `↓` 能走到新增的那一条（陈旧导航表会原地不动）——②的**判别力由变异检验证明**（上节），另配「run 收口后 `pulse` 必须重算」与「同内容新对象必须重渲染」等 4 条反例守卫 |
+| AC7 | ✅ | `tsc -b` rc=0、输出 **0 字节**；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` rc=0 **62 文件 / 1008 用例全绿**；`vite build` rc=0。⚠ 票面写的是 `npm run lint/build/test`：本环境 `npx` / `pnpm` 均不可用（F1 已登记），等价命令用 `node node_modules/...` 直调——**同一份配置、同一个 bin**，非替换口径 |
+| AC8 | ⚠ **未跑（登记）** | 本票**未改**任何交互逻辑（只改 `memo` 包裹与 `useMemo` 依赖），交互语义已由 jsdom 车道的 AC6 两条 + 既有 SSR 契约文件覆盖；真机 e2e 需要浏览器 + 真后端驱动一场真实流式。**解除条件**：真机跑 `npm run test:e2e -- web/e2e/inspector-*.spec.ts`（并注意本仓 e2e 有收尾挂死历史，见 `HANDOFF §10`） |
+| AC9 | ✅（代码提交）/ ⚠ **有披露**（docs 提交） | `git diff --stat 79f7f26 1f88116` = **恰好 4 个文件**，全部落在 Scope lock 允许清单内（`Conversation.tsx` / `StepDetail.tsx` / 及其 `web/src/components/*.test.tsx`）⇒ 代码提交 AC9 成立；落点记录提交另含 3 个 docs（见「披露与偏离」第 1 条） |
+
+**AC5 逐条对照（前后等价）**
+
+| 位 | 改造前（`79f7f26`） | 改造后（`1f88116`） | 等价 |
+| --- | --- | --- | --- |
+| `tabCounts` changes | `:186` `tools.filter((t) => t.diff).length` | `:203` `diffTools.length` ← `useMemo(() => tools.filter((t) => t.diff), [tools])` | ✅ 同谓词、同 `tools` 源 |
+| `tabCounts` terminal | `:187` `tools.filter(isCommand).length` | `:204` `commandTools.length` ← 同上 | ✅ 复用同一 `isCommand` |
+| `tabCounts` artifacts | `:188` `tools.filter((t) => t.artifact).length` | `:205` `artifactTools.length` ← 同上 | ✅ |
+| ChatTab running | `:639` `tools.filter((t) => t.status === 'running').length` | `:609` `runningToolCount` ← `useMemo(…, [tools])`，渲染于 `:717` | ✅ |
+| ChatTab failed | `:643` `tools.filter((t) => t.status === 'failed').length` | `:610` `failedToolCount`（同上），渲染于 `:721` | ✅ |
+| ChangesTab diffs | `:1140` `tools.filter((t) => t.diff)` | `:1220` 同谓词，包 `useMemo` | ✅ |
+| TerminalTab bashes | `:1168` `tools.filter(isCommand)` | `:1249` 同谓词，包 `useMemo` | ✅ |
+| ArtifactsTab artifacts | `:1208` `tools.filter((t) => t.artifact)` | `:1290` 同谓词，包 `useMemo` | ✅ |
+
+> 另：`tools` 基底由 `:174` 的**每渲染调用一次** `allTools(conversation)` 改为
+> `:189` `useMemo(() => (conversation ? allTools(conversation) : EMPTY_TOOLS), [conversation?.turns])`；
+> `EMPTY_TOOLS` / `EMPTY_TARGETS` 是**模块级常量**——`useMemo` 的依赖比较是**引用比较**，
+> 在渲染里新建 `[]` 会让记忆化永久失效（`!conversation` 分支下也会）。
+
+**门禁（同一 commit 树，本轮重跑，全绿）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint --format json` | rc=0，**42 条**（全 warning / 0 error），与 F1、N2 基线 **42** 持平 |
+| 单测全量 | `node node_modules/vitest/vitest.mjs run` | rc=0，**62 文件 / 1008 用例全绿**（N2 时 62 / 1006） |
+| 生产构建 | `node node_modules/vite/bin/vite.js build` | rc=0（仅既有的 chunk-size 提示） |
+
+> **`oxlint` 零新增的机械依据（不只看总数）+ 一条与直觉相反、值得后续票复用的规律**：
+> 本票触碰的 4 个文件里只有 `StepDetail.tsx` 有告警，共 **3 条**且全部是本票之前既有的、
+> 且都不在改动行上——2×`react(only-export-components)`（`:985` / `:1005`）+ 1×`react(refs)`
+> （`:1082`，F1 已登记为「原样保留」）。另 3 个文件 **0 条**。
+> 新依赖本应新增的多条 `exhaustive-deps` 被**行内** `// eslint-disable-line` 精确吞掉
+> （本文件共 **9** 条）。**指令挂在哪一行才生效**——本轮 A/B（按指令所在行分两类，择一保留）：
+
+| 变体 | 保留 | oxlint 总数 | `StepDetail.tsx` 本文件告警 |
+| --- | --- | --- | --- |
+| 基准 | 9 条全留 | **42** | 3（与 F1/N2 基线同数） |
+| A | **只留依赖数组行**（`:153 :190 :192 :198 :246 :1051`），删掉回调行的（`:152 :1050`） | **42** | 3 ⇒ **毫无变化** ⇒ 回调行那两条是**装饰** |
+| B | **只留回调行**，删掉依赖数组行的 | **51** | 12 ⇒ 漏出 9 条（`:152` `:153` `:189` `:191` `:197` `:234` `:246` …） |
+
+> ⇒ **生效的是「挂在依赖数组那一行」的指令**；挂在 `useMemo(() => …` 回调行的指令不生效。
+> 这与直觉相反（告警的标签行指向回调体里的 `conversation`），故写在此处供后续票复用。
+> 另：本版 oxlint（1.79.0）下 `disable-next-line` 与块级 `disable`/`enable` 会让该函数
+> **全部 compiler 类规则一起跳过**（最小复现见 `PERF_BASELINE` N2 节）⇒ 只能用行内形式。
+
+**披露与偏离（逐条）**
+
+1. **落点记录提交含 3 个 docs 文件**（`docs/SDD_TICKET_TRACKER.md` / `docs/PERF_BASELINE.md` /
+   `docs/phase_status/2026-09.md`），不在票面 Scope lock 的允许清单里。理由与 F1、N2 一致：
+   `PERF_BASELINE` 是本批 **G3 硬前置 + 性能数字唯一落点**，tracker / 归档是台账义务；
+   且它们**单独成一个 docs 提交**（`4752236` / `1f88116` 两个代码提交的 `--stat` 恰好只有 4 个允许文件）。
+2. **两个新测试文件走 jsdom 车道**（票面 AC2/AC3 只说「新增用例」，未指定车道）：`memo` 与
+   `useMemo` 的 bail-out 只在**客户端渲染器**的 reconciliation 里发生，既有 `StepDetail.test.tsx`
+   是 SSR（`renderToString`）契约测试、每次调用都是全新渲染 ⇒ 陈旧 memo 在 node 车道里**不可观测**。
+   而 `@vitest-environment` 是**文件级**指令，加在既有文件上会把它**全部**既有用例一起换车道
+   ⇒ 另开同构文件（沿用 F1 `Conversation.render.test.tsx`、N2 `StepDetail.render.test.tsx` 的同一做法），
+   全局 `vitest.config.ts` **不动**。依赖 `jsdom` 已在 F1 落地，本票**未**再增依赖。
+3. **AC3 的口径收窄**（见上表）：不是「做不到就放宽」，而是票面两条要求**互斥**时的显式裁定，
+   偏离与理由都记在此处与 `PERF_BASELINE` F2 节；**未**改票面文字、**未**隐去 `agentProfile` 的 +1。
+
+**未闭合项（每条写明解除条件）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| `ChildSessionView`（`StepDetail.tsx:1645`）内 `<ChatTab tools={allTools(conversation)} />`（`:1655`）仍是**未记忆化**的第二次 `allTools` 调用 | **本票不处理** | 它不在票面必做 2 的清单里（票面只列 `:175-180 / :630 / :634 / :1122 / :1150 / :1190`），且属**另一个组件**（child 会话视图）。解除条件：随 **F5**（Inspector 长列表离屏）或另开票 |
+| Inspector 三面列表仍是**全量渲染**（`:636` / `:1220` / `:1290`） | 票面 `## 未闭合项` 已指定归属 | **F5** |
+| Inspector 关闭时**仍保持挂载**（刻意设计，本票只降其成本） | 设计如此，非缺口 | 无（除非基线证明成本不可忽略，另开票讨论「延迟卸载」） |
+| AC8 的相关 e2e | **未跑** | 真机浏览器 + 真后端；见 AC8 行 |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 同 F1/N2：在真机 Chrome Performance 面板按固定场景录一次并归档（本环境无 GUI 浏览器） |
+| `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269） |
+
+**审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
+`4752236` / `1f88116` 交由 **P1-B2** 的两轴审查窗口（范围自 `2048764` 起算，**覆盖 #270 + #271 + #272
+的累计 diff**）覆盖。
+
 

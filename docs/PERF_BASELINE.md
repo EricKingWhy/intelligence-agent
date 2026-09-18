@@ -219,11 +219,84 @@ cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/l
 > `react(refs)`（`visibleRef.current = visible`）**原样保留**。
 
 ### F2 — memo 与 props 收敛（#272）
-_待落基线。_
-要求指标：
-- Inspector **关闭**状态下追加 delta 时 `allTools` / `deriveAgentProfile` 的调用次数；
-- `Conversation` / `StepDetail` 的 render 次数（父级无关状态变化时）；
-- long task 数 + 最长单帧（Inspector 打开且长 run，录制存档）。
+
+**一句话**：本票的收益是「**提交频次 × 组件规模**」的一次性下降（与对话无关的提交、以及
+「只动事件日志」的提交不再触发任何派生），**不是**单帧成本的下降。唯一需要真机录制的
+门槛数字本机不可得，已如实登记（见文末）。
+
+| 指标（票面要求） | 场景 | 口径 | 改造前 → 改造后 | 复核命令 |
+| --- | --- | --- | --- | --- |
+| Inspector **关闭**状态下追加 delta 时的派生调用次数 | 面板关闭后 5 次**与对话无关**的父级提交 | `allTools` / `deriveRunPulse` / `deriveAgentProfile` 各自 spy 调用数 | **5 / 5 / 5 → 0 / 0 / 0** | `node node_modules/vitest/vitest.mjs run src/components/StepDetail.memo.test.tsx` |
+| `Conversation` 的 render 次数（父级无关状态变化） | 同上（6 次无关提交） | 函数组件体执行次数（虚拟化 hook 计数） | **6 → 0** | `node node_modules/vitest/vitest.mjs run src/components/Conversation.memo.test.tsx` |
+| 追加**不改轮次**的事件（`SESSION_RESUMED`） | 追加 1 条 | spy 计数增量 | `allTools` **+1 → 0**、`deriveRunPulse` **+1 → 0**、`deriveAgentProfile` **+1 → +1（契约要求，非回归）** | 见下方「第三行为什么 +1」 |
+| 键盘导航表随事件变化重建 | 事件 5 条 → 6 条后按 `↓` | 能否走到新增条目（peek 显示的 `event.type`） | **不能（原地不动，停在 `run/completed`）→ 能（`session/resumed`）** | 同上；变异检验见下 |
+| long task 数 + 最长单帧（Inspector 打开且长 run，录制存档） | — | Chrome Performance | **未取得** | 见文末「未闭合项」 |
+
+> **第三行为什么 `deriveAgentProfile` 仍然 +1**：票面 AC3 原文要求「Inspector 关闭态追加
+> delta 时 `allTools` / `deriveAgentProfile` 调用次数**都不增长**」，这与 N2 的 `eventsVersion`
+> 契约正面冲突——任何**真正追加成功**的事件都让 `eventsVersion` +1（`projection.ts:1171/1190`；
+> 唯一不增的路径是去重短路 `return state`，它返回**同一个 state 对象**），而本票必做 2 又
+> **指定** `deriveAgentProfile` 的键必须是 `eventsVersion`。两条不可能同时成立。
+> 已交用户 2026-09-18 裁定，按「**收窄 AC3 + 补无关提交用例**」执行：断言**如实写 +1**，
+> 不假装它没涨；收窄后成立的两条 = 上表第 1、2 行（无关提交零重算）与第 3 行的前两项
+> （不改轮次的事件下 `tools` / `pulse` 零重算）。
+
+**红证（改造前 → 改造后，同一条命令、同一批用例）**
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run src/components/Conversation.memo.test.tsx src/components/StepDetail.memo.test.tsx
+```
+
+做法：两个源文件临时换回 N2 tip `79f7f26`（`git show <sha>:<path>` 写回，**全程未用 `git stash`**），
+跑完按字节还原并 sha256 对账（两文件 `same=True`）。
+
+| 阶段 | 文件级 | 合计 |
+| --- | --- | --- |
+| 改造前（两个源文件 = `79f7f26`，新用例保留） | `Conversation.memo.test.tsx` **7 tests / 2 failed**；`StepDetail.memo.test.tsx` **11 tests / 5 failed** | **7 failed / 11 passed (18)** |
+| 改造后（本票工作树） | 同两文件 | **18 passed (18)** |
+
+关键失败断言（改造前）：`expected undefined to be Symbol(react.memo)`（AC1，两个组件各一条）、
+`expected 6 to be 1`（Conversation 在 6 次无关提交下的 render 次数）、
+`expected { all: 2, pulse: 2, profile: 2 } to deeply equal { all: 1, pulse: 1, profile: 1 }`
+（AC3(a) / AC2 / 两条反例守卫）。
+
+> **改造前就通过的那 11 条不计入红证**：含 AC6 两条与「输入变了必须重算」三条——它们是
+> **不变式守卫**而不是新行为，改造前天然成立（改造前导航表本来就每次提交重建；没有 memo
+> 当然也不会漏重算）。红证只认「改造前必红」的那 7 条。
+
+**变异检验（钉住导航表的 `eventsVersion` 依赖确实是可载荷的）**：把 `listTargets` 依赖数组里的
+`conversation?.eventsVersion` 摘掉（只此一处、只此一项），AC6 第二条立刻转红：
+
+```
+× 追加事件后 ↓ 能走到新增的那一条（陈旧导航表会原地不动、连回调都不发）
+AssertionError: expected 'run/completed' to be 'session/resumed'
+Tests  1 failed | 10 passed (11)
+```
+
+`StepDetail.tsx` sha256：变异前 `da9972e4d83c4b21…` → 变异后 `084ce979e4f12744…` → 还原后
+**逐字节相同**；还原后复跑同一文件 **11/11 绿**。
+
+**门禁（同一 commit 树，全绿）**：`tsc -b` rc=0（输出 0 字节）；`oxlint` **42 → 42**
+（零新增、零顺带消失）；`vitest` **62 文件 / 1008 用例全绿**（N2 时 62 / 1006，+2 = 本票 AC6 两条）；
+`vite build` rc=0。
+
+**oxlint 零新增的实现方式 + 「指令挂在哪一行才生效」的 A/B（本轮实测，可复跑）**
+
+本票新增的 6 处 `useMemo` 依赖被**刻意**写成字段级（`conversation?.turns` /
+`conversation?.eventsVersion` / …）⇒ 会被 `exhaustive-deps` 判成「缺 `conversation`」+
+「多余字段」；豁免**只能用行内 `// eslint-disable-line react-hooks/exhaustive-deps`**
+（`disable-next-line` 与块级会把该函数全部 compiler 类规则一起吞掉——最小复现见 N2 节）。
+`StepDetail.tsx` 最终保留 **9** 条行内指令，按**指令所在行**分两类：
+
+| 变体 | 保留 | oxlint 总数 | `StepDetail.tsx` 本文件告警 |
+| --- | --- | --- | --- |
+| 基准 | 9 条全留 | **42** | 3（与 F1/N2 基线同数） |
+| A | **只留依赖数组行**（`:153 :190 :192 :198 :246 :1051`），删掉回调行的（`:152 :1050`） | **42** | 3 ⇒ 少了回调行那两条**毫无变化** |
+| B | **只留回调行**，删掉依赖数组行的 | **51** | 12 ⇒ 漏出 9 条（`:152` `:153` `:189` `:191` `:197` `:234` `:246` 等） |
+
+⇒ **真正生效的是「挂在依赖数组那一行」的指令**；挂在回调行（`useMemo(() => …,` 那一行）的
+指令是**装饰**。这与直觉相反（告警的标签行指向回调体里的 `conversation`），故写在此处供后续票复用。
+`:1037` 是单行 `useMemo`（回调与依赖同处一行），两个变体都保留、不参与判定。
 
 ### F4 — 命令面板门控（#273）
 _待落基线。_
