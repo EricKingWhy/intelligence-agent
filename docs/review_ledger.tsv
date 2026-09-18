@@ -43,6 +43,7 @@
 2026-09-18	B-16 findings 全数修复（P2 收口自兜 + AST 闸门带自检样本 + 用例改名/改断言 + store_fixtures 收敛 + PHASE_STATUS 压行）+ 另一条轴 P3 如实登记不修	c700655..cff9ae6
 [whitelist]
 5e03579	SDD 续批开工提示词（B-17 起的开工指令，docs-only）
+c52aab6	#252 实现落点记录（tracker + PHASE_STATUS + 2026-09 归档，docs-only）
 db81e5e	B-16 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引 + 本台账审查行/修复行 + 删 2 条死白名单，docs-only）
 b53465e	B-10 集成/关单状态（tracker + PHASE_STATUS + 归档，docs-only）
 133ef5a	B-10 落点记录（tracker + 归档 + PHASE_STATUS + 本台账审查行，docs-only）
