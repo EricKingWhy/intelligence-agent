@@ -80,6 +80,12 @@ _MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | frozenset({
     "delegate", "inspect_artifact", "forget_memory",
 })
 
+#: **加工具的约束**（#238）：新增的内置工具必须至少归属一个非-main 档位，否则要登记进
+#: `tests/agent/test_tool_scope_reconciliation.py` 的带理由白名单——那边的对账机械枚举
+#: `src/` 下全部 `Tool` 子类与 `assembly.BUILTIN_LOCAL_TOOLS`，漏登记就是红灯（不靠人记得）。
+#: 三个 scope 是**声明面**：本部署实际注册了什么由 capability wiring 决定，两者会双向不一致
+#: （`tool_scope_summary` 的 docstring 有实测数字），所以不要把这里的集合读成"能用的工具"。
+
 #: 三内置 profile（出厂设定，非用户自定义面——文件发现机制 DEFER）。
 #: `system_prompt` 的正文在 `agent_harness.prompt.builtin`（改文案开那一个文件）。
 BUILTIN_PROFILES: dict[str, AgentSpec] = {

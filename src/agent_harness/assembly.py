@@ -51,7 +51,7 @@ from agent_harness.storage import (
     SqliteSessionMetaStore,
 )
 from agent_harness.storage.artifact_select import select_artifact_store
-from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
@@ -68,6 +68,15 @@ from agent_harness.tools import (
 )
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 from agent_harness.workspace.index import SessionHeaders
+
+#: `build_runtime` **无条件**注册的本地工具类（顺序 = 注册顺序）。
+#: 提成模块常量是为了让 profile 对账有一个**机械输入**：未归属任何档位、也不在带理由
+#: 白名单里的工具会让 `tests/agent/test_tool_scope_reconciliation.py` 变红——加工具
+#: 时改这里，别在函数里再写一份。
+BUILTIN_LOCAL_TOOLS: tuple[type[Tool], ...] = (
+    ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
+    GlobTool, GrepTool, GitStatusTool, GitDiffTool,
+)
 
 
 @dataclass
@@ -228,10 +237,7 @@ async def build_runtime(
 
     sandbox = workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
-    for tool_cls in (
-        ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
-        GlobTool, GrepTool, GitStatusTool, GitDiffTool,
-    ):
+    for tool_cls in BUILTIN_LOCAL_TOOLS:
         registry.register(tool_cls(sandbox))
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
