@@ -56,6 +56,7 @@
 
 ### 最近条目（最新在上）
 
+- 2026-09-18（B-14，批审查与修复）：**T01(#266) + T02(#238) 收批**（fixed point `4dbe7db`；两轴独立只读子代理，零 P0/P1、2×P2 + 8×P3，findings 全数就地修复 ⇒ 该工作树即 `182d77a`）——**两轴共识 P2**：`web/websocket.py` 的 `send_message` 是 HTTP 三端点之外的**第四个**续聊入口，`WorkspaceBindingConflict` 不在其 except 元组 ⇒ 逃到外层 `except Exception`（只 `logger.debug`）静默死连接（#266 的修复在 WS 面复辟）；`_reconcile_workspace_binding` 与 `WorkspaceBindingConflict` docstring 逐字重复「为什么不静默选边」（§16.1 ⇒ 收敛为指针）。**Standards 轴**：删两条**结构恒真**断言（子代理 ⊆ main 由构造保证）；AST 扫描只记单一模块路径 ⇒ **同名类可静默逃过全部判据**（改收「名字 → 模块列表」并对同名判红）；`_LOCAL_TOOL_NAMES` 手抄第三份 ⇒ 改从 `BUILTIN_LOCAL_TOOLS` 派生；三处「把映射改指别处」夹具收敛为 `tests/workspace_fixtures.py`。**Correctness 轴**：既有 4 条冲突用例的漂移目标**都已存在**（`registry.get()` 的 mkdir 是 no-op）⇒ 对账点后移照样全绿，须另钉「冲突在任何 Sandbox 实例化之前被拦下」。**修复 + 两条新用例**（幽灵目录 / WS error 帧）；**红证两条变异（恢复逐字节相同）**：对账点后移 ⇒ 幽灵目录被 mkdir、新用例红而其余 4 条冲突用例仍绿；WS except 去掉该异常 ⇒ 连接静默死掉、无 error 帧、新用例红。**独立复验 10/10 addressed，无新增阻断**。**门禁**：ruff clean；pytest **2481 passed / 10 skipped / 0 failed（5:42）**；`git diff --check` 干净；台账审查行 `4dbe7db..0f5aefd` + 修复行 `0f5aefd..182d77a`。**残余登记（未修）**：WS 其余 7 个 domain error 仍逃到 `except Exception` 静默（同族，建议另开票）；`recovery/coordinator.py:227-230` 恢复入口绕过对账可 mkdir。票 #266 / #238 / 父票 #237 均保持 OPEN。详见 `2026-09.md` 末尾
 - 2026-09-18（T02/#238）：**#238（父票 #237）profile tool_scope 与内置工具面机械对账——实现 + 红证 + 门禁**（实现 `c7384ff`，5 文件 +127/−21）——声明面（`profiles.py` 手写 scope）、注册面（capability wiring）、收窄面（`registry.filtered()` 静默跳过未注册名 / 静默剔除未声明工具）三者此前只靠注释与记忆维持，现落成机械对账：AST 枚举 `src/` 下全部 `Tool` 子类（22 个）+ `assembly.BUILTIN_LOCAL_TOOLS`（本票新提取的模块常量）+ capability 清单，未归属任何非-main 档位且不在带理由白名单（6 条）者即红；`_DECLARED_SCOPES` 手写镜像表钉 17/12/7 的 **exact set**；装配层新增 AC2（optional 缺席 ⇒ effective = 交集，**缺席不算 dropped**）+ AC3（注册了但未声明的 `read_artifact` 进 `dropped_tools`）。**三个 scope 一字未改**（收窄面变更牵动跨端手工镜像的 17/12/7）。**红证（四处变异，恢复逐字节相同）**：白名单清空 ⇒ 恰好 6 个未归属名；加 `Tool` 子类 ⇒ AST 闸点名；`read_artifact` 进 coding scope ⇒ 三处红；关越权闸 ⇒ DID NOT RAISE。**门禁**：ruff clean；pytest **2479 passed / 10 skipped / 0 failed（6:08）**；`git diff --check` 干净。**覆盖闸门如实登记 exit 1**（`c7384ff` 未审查且未声明，单票不自审、等批量审查补台账行；未加白名单、未改台账）；父票 #237 保持 OPEN。详见 `2026-09.md` 末尾
 - 2026-09-18（T01/#266）：**#266（父票 #237）cwd 续聊归属对账——实现 + 红证 + 门禁**（实现 `aa47d25`，9 文件 +415/−43）——续聊入口在任何 Sandbox 实例化**之前**对账 `session/started.cwd` 与 WorkspaceRegistry 的两条登记（持久映射 + 进程内 cache），不一致即 `WorkspaceBindingConflict`（新类型化异常 → 409 + 三个端点收编），不静默选边、不覆盖映射；`recorded_workspace_roots()` 只读（不实例化 Sandbox——那会 mkdir，把用户删掉的外部 cwd 凭空建回来）；fork 子会话按 ADR-0017 决策 5 的 copy-on-fork 语义排除（真机 3 条不一致会话全是该形状）。**红证**：反向变异 ⇒ 恰好 4 红（3 单元 + 1 e2e 409）、正向变异 ⇒ 3 红，恢复逐字节相同。**门禁**：ruff clean；pytest **2463 passed / 10 skipped / 0 failed（13:41）**；`git diff --check` 干净。**覆盖闸门如实登记 exit 1**（`aa47d25` 未审查且未声明，单票不自审、等批量审查补台账行；未加白名单、未改台账）；父票 #237 保持 OPEN。详见 `2026-09.md` 末尾
 - 2026-09-17（B-13）：**巡检 6 工具类控件段的两条 F 同批交付**（实现 `40ae1a4` F16 `#235` / `a508e67` F15 `#234`，fixed point `1761ff7`；巡检记录 §9.10 `d425edc`）——**F16（#235）沙箱输出「假流式」**：真机红证 `.tool-out-body` 112/112/112 + 仅 1 条 `tool/output_delta`；根因是读侧**两层**缓冲（`_drain_stream` 的 `BufferedReader.read(n)` 阻塞到凑满 n/EOF；`StreamDecoder.feed()` 判定前把合法 UTF-8 全扣在 `_pending` 到 64 KiB/flush）；修 = `read1()` + 放行前导 ASCII 段（五种兜底编码对 0x00–0x7F 逐字节等同 ASCII）+ 已放行字节计入判定预算；绿证 14→…→112（8 段）。**F15（#234）审批队列续聊后消失**：`session/started` 不落 `permission_mode`/`auto_approve` 且 `resume_and_launch` 固定 `WORKSPACE_WRITE` + 无回调 ⇒ `interactive` 恒假；修 = 显式声明才落盘 + 续聊读回声明重建回调 + fork 继承；真机 repro6 红 → repro8 绿。**两轴审查**：Correctness 轴 1×P1（`auto_approve=false` 的 deny 路由同样不落盘 ⇒ 续聊降级成「全自动批准」）+ 1×P2（fork 不继承权限档）+ P3 若干；跨仓 1×P2（前端权限 pill 第二套真相）按 §8 单独开 **#236**。**门禁**：ruff clean；pytest **2461 / 2442 passed / 10 skipped / 9 failed**（9 红全环境：6 symlink 同族 + 3 条 `tests/evaluation/*` 撞**宿主 safe-delete 单轮累计删除闸门**，traceback 落 `sitecustomize.py:851`，`count=383 threshold=50 scope=turn`）；**A/B**：同树摘掉闸门两变量复跑 = **2445 passed / 6 failed**。前端零改动未重跑。详见 `2026-09.md` 末尾
@@ -83,13 +84,13 @@
 
 | 文件 | 覆盖日期 | 条目数 | 说明 |
 | --- | --- | --- | --- |
-| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-18 | 244 | 原「更新日志」整段（条目正文逐字未改，按日期重排） |
+| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-18 | 245 | 原「更新日志」整段（条目正文逐字未改，按日期重排） |
 
 ### 按日定位（归档内行号，日期降序）
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
-| 2026-09-18 | 2 | `2026-09.md` L448-449 |
+| 2026-09-18 | 3 | `2026-09.md` L448-450 |
 | 2026-09-17 | 35 | `2026-09.md` L412-447 |
 | 2026-09-16 | 4 | `2026-09.md` L408-411 |
 | 2026-09-15 | 11 | `2026-09.md` L387-407 |
