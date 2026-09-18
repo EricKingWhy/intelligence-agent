@@ -3,7 +3,7 @@
 - **Status**: Accepted
 - **Date**: 2026-09-17（§2.4 与 §3 的三条判定随 #222 同日追加）
 - **Deciders**: 本 Agent（机制设计）+ 真机实测证据（见 §2.1）
-- **Related**：Issue #218（后端分类）、#220（前端呈现）、#221（迟到响应丢消息，未覆盖）、**#222（任何失败路径都要有归因）**；`src/agent_harness/agent/runtime.py`（分类表 / `failure_terminal` / `UNCLASSIFIED_FAILURE_MESSAGE`）；`src/agent_harness/session/session.py:end_run`；`web/src/lib/projection.ts`（`projectRunFailed` / `summarizeRunFailed`）；`web/src/components/StepDetail.tsx`（ChatTab「失败原因」行）；`docs/BACKEND_CONTRACT_STREAMING_UI.md` §4（跨仓取值登记）；ADR-0016 §2（投影纪律）；`docs/LIVE_BROWSER_TEST_20260917.md`（实测记录）；AGENTS §7 不变量 2/4、§16.1（机制叙述的唯一落点）
+- **Related**：Issue #218（后端分类）、#220（前端呈现）、#221（迟到响应丢消息，未覆盖）、**#222（任何失败路径都要有归因）**、**#239（分类表下沉 model 层）**；`src/agent_harness/model/failure.py`（分类表 / reason / 固定文案 / DSML 判定——本表唯一 owner）；`src/agent_harness/agent/runtime.py`（`failure_terminal` / 消费分类结果 / `UNCLASSIFIED_FAILURE_MESSAGE` 的使用点）；`src/agent_harness/session/session.py:end_run`；`web/src/lib/projection.ts`（`projectRunFailed` / `summarizeRunFailed`）；`web/src/components/StepDetail.tsx`（ChatTab「失败原因」行）；`docs/BACKEND_CONTRACT_STREAMING_UI.md` §4（跨仓取值登记）；ADR-0016 §2（投影纪律）；`docs/LIVE_BROWSER_TEST_20260917.md`（实测记录）；AGENTS §7 不变量 2/4、§16.1（机制叙述的唯一落点）
 
 > 本文档是「失败归因」这条机制的**唯一完整叙述**。代码注释只写各自那一段代码自己看不出来的操作约束 + 指向本文件的一句指针。
 
@@ -26,7 +26,7 @@
 
 ### 2.1 后端：标记表分类 → 固定 reason + 固定文案（#218）
 
-`runtime.py` 维护一张有序标记表 `_PROVIDER_FAILURE_MARKERS`，把 `str(error).lower()` 里出现的供应商错误标记映射到**项目自有的 reason 常量**，并配一句固定的中文可读文案：
+`model/failure.py` 维护一张有序标记表 `_PROVIDER_FAILURE_MARKERS`，把 `str(error).lower()` 里出现的供应商错误标记映射到**项目自有的 reason 常量**，并配一句固定的中文可读文案（T03/#239 起本表与 DSML wire marker 都在 model 层；`runtime.py` 只消费 reason / 文案 / 判定，不再持有 vendor 词汇）：
 
 | reason | 文案语义 | 命中标记（示例） |
 | --- | --- | --- |
