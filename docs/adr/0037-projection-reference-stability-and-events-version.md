@@ -91,9 +91,11 @@ P0-1（`3344e34`）把原来「每事件整体克隆」的写法改成 append-on
 **`conversation?.eventsVersion`**，**不要**写 `conversation?.events`——
 后者引用刻意稳定（D1），写了等于**永不重算**。
 
-本批将修正的三处（归属 N2 / GitHub #271，**本 ADR 不改代码**）：
+本 ADR 自身不改代码。下表是**决策时**的现状快照（三处依赖键均为 `events`），其修正归属
+N2 / GitHub #271，**已落地**（`40851f8` 红证 + `4e85938` 实现；落地后三处一律写
+`conversation?.eventsVersion`）：
 
-| 位置 | 现状 | 问题 |
+| 位置（决策时的行号） | 决策时现状 | 问题 |
 | --- | --- | --- |
 | `web/src/components/StepDetail.tsx:123` | `[conversation?.events]` | 追加后不重算（陈旧） |
 | `web/src/components/StepDetail.tsx:944` | `[conversation.events]` | 同上 |
@@ -114,6 +116,133 @@ P0-1（`3344e34`）把原来「每事件整体克隆」的写法改成 append-on
 
 一句话：**ADR-0016 §2 说的是「events 为什么可以是共享的」；ADR-0037 说的是「既然它是共享的，
 消费端该怎么正确重算」。** 前者因后者更完整，后者**依赖**前者成立。
+
+### D5：消费端 memo / prop 引用稳定纪律（F1 #270 / F2 #272 施工细则）
+
+> **追溯记录，不引入新决策**：F1 / F2 的实现已经生效，本节只是把原先写在代码注释里的
+> 机制叙述收敛到唯一落点（`AGENTS.md` §16.1：机制的完整叙述 → ADR；代码注释只留
+> 「这段代码自己看不出来的操作约束 + 指向 ADR 的一句指针」）。代码侧只保留 D5.6 那条
+> 属于"操作约束"的内容。
+
+#### D5.1 一对**对称**的纪律
+
+D1 让 `events` 引用刻意稳定 ⇒ 消费端需要一把「追加发生了没有」的精确钥匙（D3 的
+`eventsVersion`）——这是**时效性**问题。反方向还有另一个坑：上游 hook **每次渲染返回新
+对象** ⇒ 下游 `memo` 浅比较恒不等、**恒 miss** ⇒ `memo` 退化成普通函数组件——这是
+**有效性**问题。两者合起来只有一句判据：
+
+| 要保证什么 | 判据 |
+| --- | --- |
+| 「events 追加后必须重算」 | 依赖键写 `conversation?.eventsVersion`，**不写** `events`（D3） |
+| 「与对话无关的提交不得重算」 | 进 `memo` 的 prop 必须有稳定身份（`useState` / `useCallback` / 原语） |
+
+#### D5.2 F1（#270）：`useDisclosure` / `useReasoningDisclosure` 返回对象必须稳定
+
+两个 hook 的返回对象被 `Conversation.tsx` 当 prop 一路透传（→ `TurnView` → 链路渲染器），
+`reasoningDisclosure` 还直接进 `ReasoningBlockView`。不稳定 ⇒ `memo(TurnView)` /
+`memo(ToolCard)` / `memo(ReasoningBlockView)` 三处**恒 miss**：流式期间约 40 次/秒的合帧
+提交里，屏幕上每个已完成的可见 model 段都被重跑一次全量 markdown 解析——即用户报告的
+「长回答越写越卡」。前后数字见 `docs/PERF_BASELINE.md` F1 节。
+
+**取票面「必做 1」的 B 方案（整体 `useMemo` + 依赖补全），否决 A 方案（`useRef` 稳定容器、
+返回对象身份永不改变）。** A 不是风格差异，是可复现的**功能缺陷**：`levelFor` 是在
+`TurnView` **自己的渲染体**里被调用、用来算每张工具卡的 `level` 的
+（`Conversation.tsx:726` 的工具链路渲染器；同一 hook 的另一处消费在 `:445` 的档位循环）；
+点档位 ⇒ `setLevel` ⇒ `overrides` 变 ⇒ **必须**让 `memo(TurnView)` 比较出「不等」，
+`TurnView` 才会重渲染、新 level 才流得到 `ToolCard`。身份永不改变 ⇒ memo 恒 bail out ⇒
+**点击工具行的档位循环静默无效**。红证：先在 A 方案实现下跑 AC8 代理用例得
+`expected 1 to be greater than 1`，换 B 后同一条转绿。
+
+B 的代价是「依赖集合必须补全」，漏一个就是陈旧读取（票面 Risks 点名的陷阱）。两个 hook 的
+捕获面逐个核对如下——`levelFor` / `isOpen` 的 `density` 分别是**调用方传入的参数**与**prop**，
+都不落在「捕获了却漏进依赖」的坑里：
+
+| hook | 捕获面 | 依赖集合 |
+| --- | --- | --- |
+| `useDisclosure` | `levelFor` 只捕获 `overrides`（`density` 是调用方参数，不进闭包）；`setLevel` 是空依赖 `useCallback` | `[overrides, setLevel]` |
+| `useReasoningDisclosure` | `isOpen` 捕获 `overrides` + `density`（**prop，必须进依赖**：切档后自动开合规则要按新档重新求值且结果会变，memo 必须重算）；`toggle` 是空依赖 `useCallback` | `[overrides, density, toggle]` |
+
+另有一条容易被误读成"放宽断言"的**空写**：`sessionKey` 变化时的清空 effect 必须跳过挂载
+那一次——state 初值本就是一张空 Map，`setOverrides(new Map())` 只把引用换成内容相同的新表
+（白渲染一次，并按 `useMemo` 依赖捅出一个「无内容变化的新引用」，破掉「同一实例连续两次渲染
+`===` 相等」的字面口径）。**这是消掉一次可证明无内容变化的状态写入，不是放宽断言。**
+
+#### D5.3 F2（#272）：`Conversation` / `StepDetail` 装 `memo`
+
+`conversation` 顶层每次投影提交都换引用（`projection.ts` 顶层浅克隆），而这两个组件此前都是
+普通函数组件 ⇒ 父级**任何**一次提交（打字 / hover / 面板拖宽 / 换焦点）都会把整棵 Inspector
+子树重渲染一遍，并连带重算 5 个宽对象派生。Inspector **关闭时仍保持挂载**（`hidden` 而非
+卸载，DSH 语义 / 冻结决策），所以这份成本**一直在付**。
+
+**props 引用稳定性逐项核对（App.tsx）⇒ 结论：不写自定义 `areEqual`。**
+
+| 组件 | 逐项 |
+| --- | --- |
+| `Conversation` | `loadingHistory` 布尔；`density` / `jumpRequest` / `goneApprovalIds` 由 `useState` 持有（`goneApprovalIds` 是 `ReadonlySet`，但由 `useState` 持有 ⇒ 引用稳定，**不需要**按内容比较）；一组回调为 `useCallback`；`disclosure` / `reasoningDisclosure` 由 D5.2 给出契约 |
+| `StepDetail` | `streaming` 布尔；`focus` / `panel` 由 `useState` 持有；`onFocusRun` / `onFocusTool` / `onFocusEvent` / `onJumpToStream` / `onJumpToApproval` / `onPanelAction` 全为 `useCallback` |
+
+**为什么"不写 `areEqual`"本身就是决策而不是偷懒**：自定义比较器是**第二套版本机制**，且更容易
+写错——一处判断错「该比 / 不该比哪些字段」就是**静默吞更新**。票面 Risks 点名的两个坑
+（漏比 `jumpRequest.nonce` ⇒ Timeline 跳转失效；漏比 `goneApprovalIds` ⇒ 审批卡不失效）
+靠"不写比较函数"直接**不存在**（与 `Alternatives considered` 的方案 ④ 同一条理由）。
+反向风险（该重渲染时被 memo 挡掉）由 `Conversation.memo.test.tsx` / `StepDetail.memo.test.tsx`
+的反例守卫钉住。
+
+`conversation` 每次投影提交换引用——**那是"应该"重渲染的信号，不是噪声**。
+
+**依赖一律细到字段，绝不写整个 `conversation`**：`applyEvent` 每次事件都返回新的顶层对象
+（顶层浅克隆）⇒ 写整个对象不是「省一次重算」，而是「**一次也不省**」。各键逐个**从被调函数
+的实现里读出来**，不是猜：
+
+| 派生 | 实际读取面 | 依赖键 |
+| --- | --- | --- |
+| `tools`（`allTools`） | 只读 `state.turns`（`projection.ts:1424` 的 `state.turns.flatMap`） | `conversation?.turns`（走 COW `replaceTurnAt`，`projection.ts:251-254`：只有真动到某一轮才换引用） |
+| `pulse`（`deriveRunPulse`） | `run_interrupted` / `run_status` / `run_cancelled` / `active_step_id` / `turns` + 入参 `streaming`（`runState.ts:73-141`） | 这五项 + `streaming` |
+| `agentProfile`（`deriveAgentProfile`） | events 日志 | `conversation?.eventsVersion`（D3） |
+| 三张过滤表（diff / command / artifact） | `tools` | `[tools]` |
+| `runIdList` | events 日志 | `conversation?.eventsVersion` |
+| `listTargets`（↑↓ 的移动域） | `tab` / events 日志 / `tools` / `commandTools` / 两个回调 | `[tab, eventsVersion, tools, commandTools, onFocusEvent, onFocusTool]` |
+
+`listTargets` 的依赖里放两个**回调**是**反陈旧**保险：它们现在是 `useCallback`（稳定），但万一
+哪天不再稳定，这里必须跟着重建——否则表里那 N 个新闭包会永远指向第一个回调（票面 Risks 第 3 条）。
+
+#### D5.4 本批**消不掉**的那部分代价（如实记录）
+
+`eventsVersion` 每次 `events.push` 都 +1，**含 `model/delta` 这类每帧都有的流式帧**
+⇒ `agentProfile` / `tabCounts.timeline` / 导航表的 timeline 分支**每次追加都重算**。
+F2 消掉的是另外两类：
+
+- (a) 与对话无关的提交 —— `memo` 挡住整棵树；
+- (b) 不改轮次的追加 —— `tools` / `pulse` / 三张过滤表 / 导航表命中。
+
+两类都有可执行证据：`StepDetail.memo.test.tsx` 的「变化时必须重算」反例守卫；以及
+`eventsVersion` 依赖的**变异检验**——摘掉 `listTargets` 上的该依赖 ⇒ 断言
+`expected 'run/completed' to be 'session/resumed'` 转红（证明依赖是**承重**的，不是装饰）。
+
+#### D5.5 `exhaustive-deps` 豁免纪律（本仓通用，已实测）
+
+D3 的键纪律（写 `eventsVersion` 而不写 `events`）**是 `exhaustive-deps` 看不到的一层契约**
+——该规则假设「用到的值就该进依赖」。因此本批的豁免指令必须遵守两条：
+
+1. **只能用行内 `eslint-disable-line`。** 本版 oxlint 下 `disable-next-line` 与块级豁免会让
+   该函数**全部 compiler 类规则**一起跳过——实测（最小复现）会把同函数里无关的真告警
+   （如 `react(refs)`）一并吞掉。那不是「定向豁免」，是**放宽校验**。
+   （同仓既有两处同类豁免——`ApprovalCard.tsx:64`/`:113`、`ProviderManagerDialog.tsx:86`——
+   用的**正是** `eslint-disable-next-line`：本批实测证明那种形式会连带吞掉同函数的无关
+   compiler 类告警，所以本批**不沿用**它，改用行内形式。）
+2. **指令必须挂在依赖数组那一行，不是回调那一行。** 本版 oxlint 的判定位置与它报出来的标签
+   行**不是同一个**：实测 A 态（只留依赖数组行的指令、删掉回调行的）⇒ 告警总数 **42**，与
+   两处都留**完全等价**；B 态（只留回调行）⇒ **51**，漏出 9 条。⇒ **回调行的指令是装饰**
+   （写着不生效，反而让人以为已豁免）。A/B 表见 ticket #272 证据节与 `docs/PERF_BASELINE.md` F2 节。
+
+#### D5.6 一条**属于代码注释**的操作约束（不需要搬进本节）
+
+`StepDetail` 的这几个 `useMemo` **必须挂在两处 early-return 之前**（Rules of Hooks）：
+`!conversation` 与 `focus.kind === 'child'` 两条路径不渲染下面那几个面，hook 数若随之变化，
+React 会在两次渲染之间直接崩。这条与引用稳定无关，但它正是 §16.1 所说"这段代码自己看不出来
+的操作约束"，**留在代码里**。
+
+---
 
 ### 候选方案对照（结论表，理由见 `Alternatives considered`）
 
