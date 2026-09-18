@@ -3095,3 +3095,109 @@ A/B 手法：`git show f2ec9f2:web/src/components/Conversation.tsx` 直接写回
 **审查**：本票**不**给自己开审查；`78eb3bf` / `ec047bf`（含源码）**均不进 `[whitelist]`**，交由 **P1-B4** 的两轴审查窗口覆盖（fixed point = `f2ec9f2`）。docs 落点 commit 与 ledger 白名单行按台账惯例处理。
 
 <!-- ===== F3(#276) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B5（#277）台账起点（2026-09-19） ===== -->
+
+#### F6（#277）验收证据
+
+**票面**：GitHub #277（`## What to build` 第 1 步「强制测量」＋第 2 步 A/B 二选一、AC1–AC8、`## Scope lock`、`## Blocked by` = 无；`## 文件所有权` = `web/src/styles/app.css` 的第一顺位）。
+
+**本票结论：走第 2 步 A —— 测得「可忽略」，`app.css` 的视觉实现不改**（只在 `:187` 注释下方**追加一行**复核结论）。
+⇒ **源码改动 = 0 行**；`git diff --numstat web/src/styles/app.css` = **`1 0`**（第 2 列 = 0，满足 AC2「只新增」）。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | F6 面：` M web/src/styles/app.css`、`MM docs/PERF_BASELINE.md`、`?? web/scripts/perf-pulse-cost.mjs`（其余 5 项 `M `/`A ` 属**上一票 F3/#276**，其提交已在索引里、ref 未落地） |
+| `git log --oneline -8 -- web/src/styles/app.css` | `6cb229c` `80b41b9` `d048587` `a19eae0` `4c5539c` `78f5019` `c74a9c7` `0f50134`（最近 8 条，**无本批在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 同文件**无在飞冲突**；本票与 `docs/tickets/architecture-audit-remediation-2026-09-18.md` 的 #237–#266 候选文件（全 `src/agent_harness/**`）**零交集**。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F6 节**（票面 AC1 的落点）。采集器随票入库：**`web/scripts/perf-pulse-cost.mjs`**。
+
+```bash
+cd web
+npm run build                                  # 脚本读 dist/ 里那份**生产 CSS**
+node scripts/perf-pulse-cost.mjs               # 8 臂 × 3 轮（约 3 分钟）
+node scripts/perf-pulse-cost.mjs --only A1,B1,A2,B2 --reps 5   # 稳定性交叉检验
+```
+
+**第 1 步（强制，先量再定）—— 读数（headless，3 轮中位；另有 5 轮交叉检验）**
+
+| 臂 | 构成 | long task 数 | 掉帧(>20ms) | trace 最长 RunTask | trace >16.7ms 帧 | RunTask 数 | style / paint / raster（ms / 3s） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **Z0** | 空舞台（零动画）＝噪声地板 | **0** | 0 | 1.4ms | 0 | 1361 | 0 / 0 / 0 |
+| **A1** | `pulse-thinking` ×1 · 动画**开** | **0** | **0** | **1.6ms** | **0** | 3021 | **20.7 / 0.4 / 0.6** |
+| **B1** | `pulse-thinking` ×1 ＋ reduced-motion | **0** | **0** | **1.5ms** | **0** | 1399 | 0 / 0 / 0 |
+| **A2** | `pulse-tool` ×1 · 动画**开** | **0** | **0** | **1.4ms** | **0** | 3024 | **20.8 / 0.7 / 1.2** |
+| **B2** | `pulse-tool` ×1 ＋ reduced-motion | **0** | **0** | 0.9ms | 0 | 1396 | 0 / 0 / 0 |
+| **A40** | ×40（放大臂） | **0** | 0 | 5.2ms | 0 | 3843 | 162.8 / 1.4 / 11.7 |
+| **C** | 正对照①：**同一套** keyframes 铺满 1440×900 | **0** | 0 | 3.2ms | 0 | 1463 | 15.5 / 0.3 / 4.2 |
+| **C2** | 正对照②：`filter: blur()` 铺满 1440×900 | **0** | **54** | **36.9ms** | **100** | 2324 | 7.7 / 0 / 0 |
+
+**判定：可忽略（走 2A）**。三条依据（都落盘在基线里）：
+1. **票面 AC1 的两列**：**long task 数 A/B 都是 0**；掉帧 A/B 都是 **0**。
+   ⚠ 「最长单帧」的口径要在基线里分开读：**rAF 最长帧间隔（16.8/16.8ms）被 vsync 钳住、A−B=0 是「平凡真」，只作参考**；
+   掉帧数（能响应：C2 掉 54 帧）与 **trace 最长 RunTask**（5 轮下 A 反而略低于 B）才是证据。
+2. **A−B 上界 ≈ 21.7 ms / 3s ≈ 0.72% 单核**（style +20.7 ＋ paint +0.4 ＋ raster +0.6；5 轮区间 20–23 ms/3s）。
+   而且该上界**含 `spin` 与 `transition`**（B 臂走 `index.css:368-376` 的全局块，把三者一起关了）⇒ **连上界都可忽略**，结论比「pulse-glow 本身可忽略」更强。
+3. **面积不是瓶颈**：正对照 C 把同一套 keyframes 铺到 1440×900（元素盒 **≈ 433 倍**面积）后 style **没涨**（15.5 vs 20.7）；
+   而 A40（同尺寸、40 个）style 涨到 **7.9 倍** ⇒ 决定性因素是**元素个数**，真实 run 里同时可见的胶囊**最多 1 个**（`runState.ts:58-66` 单一相位）。
+
+**仪器自证（三条都过；这是「防假绿」的关键：把「测不出」与「零成本」分开）**
+
+| # | 自证 | 结果 |
+| --- | --- | --- |
+| ① | B 臂动画**确实被关掉**：`document.getAnimations()` 中 `playState==='running'` 计数 | A1 = **2**（`pulse-glow`+`spin`）/ B1 = **0**；B 臂 `animation-duration = 1e-05s`、`iteration-count = 1` ✅（顺带复验原注释承诺「reduced-motion 由全局块关闭」**为真**） |
+| ② | 指标**随被测变量响应** | `A1 → A40`：style `20.7 → 162.8ms`、RunTask `3021 → 3843`、paint `0.4 → 1.4ms` ✅ |
+| ③ | 仪器**看得见真卡顿** | 正对照②（`filter: blur()` 铺满视口）掉帧 **54**、最长帧间隔 33.5ms、trace 最长 RunTask **36.9ms**、**100** 帧 >16.7ms ✅ |
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | `docs/PERF_BASELINE.md` F6 节：A/B 两列（long task 数、最长单帧的两个口径）＋ 3 轮/5 轮两套数字 ＋ 采集器与命令 |
+| AC2（2A 分支） | **通过** | `app.css:188` 有追加行，含**日期**（2026-09-19）＋**数字**（long task 0/0、最长帧间隔 16.8/16.8ms、掉帧 0/0、≈0.7% 单核）＋指向 `docs/PERF_BASELINE.md`「F6」节；`git diff --numstat web/src/styles/app.css` = **`1 0`**；`git diff` 中 `:185-187` 原注释**无任何 `-` 行** |
+| AC3 / AC4 / AC5 | **N/A** | 票面写明「若走 2B」才适用；本票走 2A |
+| AC6 | **通过** | `oxlint` rc=0；`tsc -b && vite build` rc=0（`built in ~9s`，CSS 产物哈希与改造前一致 ⇒ 改动确为纯注释）；`vitest run` **300 suites / 1026 tests / 0 failed**（`success=true`） |
+| AC7 | **需披露**（见下） | 字面 `git diff --stat` 对 F6 面只有 `web/src/styles/app.css`（+1）与 `docs/PERF_BASELINE.md`；**另有一个新增文件** `web/scripts/perf-pulse-cost.mjs` |
+| AC8 | **通过（已记录）** | 基线 F6 节有「本票的非目标」一段：不做全库合成层提示、未新增 `content-visibility`/`contain`、未改全局 `reduced-motion` 块、未动其余 40+ 处静态 `box-shadow` |
+
+**AC7 披露（写在明面上，不默默放过）**：新增 `web/scripts/perf-pulse-cost.mjs` 不在 AC7 的字面清单里。
+判定为**不越界**：① 票面硬规则 **G3**「基线必须能在别人机器上按同样的命令复现」；
+② `docs/PERF_BASELINE.md` **§1.3**「每条数字必须可复核：附怎么测的——命令、脚本路径；只有数字没有口径 = 无效」；
+③ 本批既有先例：F2 的 `web/scripts/perf-longtask-live.mjs`、B7 的 `scripts/measure_loop_blocking.py` 都是随票入库的采集器。
+该脚本**不进生产构建**（`vite.config.ts` 无 `scripts/**` glob、`index.html` 只引 `/src/main.tsx`；`npm run build` 后
+`dist/assets/index-BmiM9eNd.css` 哈希与内容不变），也**不进测试**（`vitest` 不 glob `scripts/`）。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P1**：基线里「≈270 倍面积」算错（正确 ≈433 倍） | 已改为 **433 倍**（并补「含 12px 光晕的实际绘制面积≈188 倍」的口径说明） |
+| 正确性轴 | P2：「0.72% 单核」与「0.7% 帧预算」同源却不同值 | 统一为 **0.72%** |
+| 正确性轴 | P2：rAF 最长帧间隔被 vsync 钳住，A−B=0 是「平凡真」，不应作头条 | 已把该列**降为参考**，头条改为 long task=0 ＋ style 差值；并在「读数怎么解释」「仪器自证 ③」两处同步改写 |
+| 正确性轴 | P2：B 臂还关了 `transition`（`index.css:374` 的 `transition-duration`），文档未声明 | 已把「未闭合项」的「已知混杂」行扩为 **`spin` + `transition`**，并把「A−B 是上界」的措辞贯穿到表头 |
+| 正确性轴 | P2：`median()` 偶数取上中位有偏；`startsWith(DIST)` 缺分隔符；`reps=3` 偏薄 | 脚本已修前两条；第三条用 **`--reps 5` 交叉检验**闭合（结论一致，style 区间 20–23 ms/3s） |
+| 规范轴 | P2：新脚本对字面 Scope lock 是扩展 | 判定**不越界**，并按建议在台账与基线**明面披露**（见上 AC7 段） |
+| 规范轴 | P2：AC8 缺显式「非目标」记录 | 已在基线 F6 节补「本票的非目标」一段 |
+| 规范轴 | 结论：AC2 / 并行批次避让 **通过**；构建污染 **无**；脚本风格与本仓 peer 一致（`oxlint` 0/0） | — |
+
+> 两轴审查**未发现 P0**（即没有任何一条会推翻「可忽略」的结论）。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 「真实 run 的 thinking/tool 相位」实景录制 | **未取得** | 账户解冻后用 `perf-longtask-live.mjs` 或本脚本 `--headed` 在**真 run** 上复采一次；本票的受控臂结论不依赖它（测的是 CSS 固有属性） |
+| paint 时间占比（票面「若可取得」） | **未取得** | ① 人工在 DevTools Performance 面板按 §2.1 录一次读 Paint 汇总；② 换到会真光栅化的车道重跑同一脚本。原因：正对照②卡到掉帧 54 时 trace 的 `Paint`/`RasterTask` 仍读 0 ⇒ 本车道渲染列不可用、**不当证据** |
+| A−B 上界里含 `spin` / `transition` | **已知混杂** | 无需解除：B 臂三者一起关 ⇒ A−B 是上界；上界都可忽略 ⇒ 结论更强 |
+| 40 个以上胶囊同时呼吸 | **未测** | 真实 run 最多 1 个；若将来 UI 改成同时多胶囊，按 A40 口径重跑 |
+
+**审查与台账处理**：本票**含源码改动为 0**，唯一新增的可执行物是测量采集器 `web/scripts/perf-pulse-cost.mjs`（非生产、非测试）。
+按 batch 惯例，`docs/PERF_BASELINE.md`（AC1 强制落点）与采集器**均进本票的提交**；两轴审查已在**本票内**完成（上表），
+其 fixed point = `f2ec9f2`。是否把该 commit 放进 **P1-B4** 的 `[whitelist]`：**不放**（它含可执行物，按 F3 同规矩交由 P1-B4 的两轴审查窗口覆盖）。
+
+<!-- ===== F6(#277) 台账节结束 ===== -->
