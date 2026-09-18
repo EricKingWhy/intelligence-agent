@@ -162,6 +162,8 @@ export function initConversation(session_id: string): ConversationState {
     approval_decisions: [],
     permission_policy: null,
     events: [],
+    // ADR-0037 D2：append 计数初值 0（与 projectHistory 的空历史产物一致）。
+    eventsVersion: 0,
     unknown_events: [],
     model: null,
     usage_total: null,
@@ -1149,9 +1151,15 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
  * events 日志例外（P0-1，HANDOFF_PERF_FRONTEND §4.3/§6 方案 b）：append-only
  * 共享数组，push O(1)、引用跨 state 稳定——消灭 `[...state.events, event]`
  * 每事件整体克隆的 O(N²)（20k 事件 240.9µs/事件 → <10µs）。契约：
- * 既有条目永不改写、顺序不变；旧 state 的 events 视图会随后续追加继续增长，
- * 消费端只持有最新 state（useSession 管线：局部 conv 折叠 + setConversation
- * 提交，无消费者把 events 放进 memo/useEffect 依赖），不受影响。 */
+ * 既有条目永不改写、顺序不变；旧 state 的 events 视图会随后续追加继续增长。
+ *
+ * ⚠ 消费端契约（N2 #271，ADR-0037 D3）——**引用稳定是刻意的，所以键不能用它**：
+ * 需要「events 追加后重算」的 `useMemo` / `useEffect` 依赖 `eventsVersion`
+ * （下面两处 push 各 +1），**不要**依赖 `events`——引用相等 ⇒ 永不重算 ⇒ 陈旧渲染。
+ * 现有消费点见 `components/StepDetail.tsx` 三处（run 列表 / run 分组 / 选中项定位）。
+ * `events.length` 不是替代品：去重短路那帧不 push、quarantine 分支 push，
+ * 长度区分不了「长度不变而内容变」——那等于用巧合代替契约。
+ * （P0-1 当时写的「无消费者把 events 放进依赖」已不属实，由本票改正。） */
 export function applyEvent(state: ConversationState, raw: AgentEvent): ConversationState {
   // T1（#94）第一道闸——帧级形状校验（spec 02 §14）：完全不可辨的帧隔离进
   // unknown_events（UnknownSurface 兜底协议，永不静默丢弃），不投影、不进轮次。
@@ -1159,7 +1167,8 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
   if (!checked.ok) {
     const quarantined = quarantineRecord(raw);
     state.events.push(quarantined);
-    const next: ConversationState = { ...state };
+    // ADR-0037 D2 的边界之一：这一路**也 push 了 events**（且确实改变渲染面）⇒ 同样 +1。
+    const next: ConversationState = { ...state, eventsVersion: state.eventsVersion + 1 };
     next.unknown_events = [...next.unknown_events, quarantined];
     return next;
   }
@@ -1176,7 +1185,9 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
   // Inspector Timeline 真相源：流经的每个事件原样追加（不含 model/delta 折叠）。
   // 先落地日志再做投影——即使投影分支抛出，事件也不从日志丢失。
   state.events.push(event);
-  const next: ConversationState = { ...state };
+  // ADR-0037 D2：push 成功 ⇒ 版本 +1（与上面那行 push 成对，判定依据是「是否真的 push」，
+  // 不是「是否进入 applyEvent」——所以上面那条去重短路 `return state` 时不递增）。
+  const next: ConversationState = { ...state, eventsVersion: state.eventsVersion + 1 };
 
   const { type } = event;
 

@@ -16,6 +16,8 @@ describe('initConversation', () => {
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
       permission_policy: null, events: [], unknown_events: [],
+      // N2（#271）：events 的 append 计数初值（ADR-0037 D2）——形状断言要跟着长。
+      eventsVersion: 0,
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       run_interrupted: null, run_failure: null, turn_index: null,

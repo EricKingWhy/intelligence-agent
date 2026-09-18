@@ -117,10 +117,19 @@ export function StepDetail({ conversation, streaming, focus, onFocusRun, onFocus
   const [tab, setTab] = useState<Tab>('timeline');
   /* 头标 run-id 列表（title + 「N runs」计数同源）。必须挂在此处——useMemo 不许
    * 出现在下方任何 early-return 之后（Rules of Hooks：focus/tool 分支返回的渲染
-   * 不跑这些 hook，先后两次渲染的 hook 数就会不一致 → React 崩溃）。 */
+   * 不跑这些 hook，先后两次渲染的 hook 数就会不一致 → React 崩溃）。
+   *
+   * N2（#271）：依赖键是 `eventsVersion`，**不是** `events`——后者引用刻意稳定
+   * （P0-1 append-only 共享数组），拿它当依赖 ⇒ 首次提交后永不重算 ⇒ 头部的 run
+   * 数停在首帧。`exhaustive-deps` 看不到这层契约（它假设「用到的值就该进依赖」），
+   * 故两处定向豁免（同仓先例：ApprovalCard / ProviderManagerDialog）。
+   *
+   * ⚠ 豁免只能用**行内** `eslint-disable-line`：本版 oxlint 下 `disable-next-line`
+   * 与块级豁免会让该函数**全部 compiler 类规则**一起跳过——实测（最小复现）会把同
+   * 函数里无关的真告警（如 `react(refs)`）一并吞掉，那才是「放宽校验」。 */
   const runIdList = useMemo(
-    () => [...new Set((conversation?.events ?? []).flatMap((e) => (e.run_id ? [e.run_id] : [])))],
-    [conversation?.events],
+    () => [...new Set((conversation?.events ?? []).flatMap((e) => (e.run_id ? [e.run_id] : [])))], // eslint-disable-line react-hooks/exhaustive-deps
+    [conversation?.eventsVersion], // eslint-disable-line react-hooks/exhaustive-deps
   );
   /* #183：面板根节点（拖宽要量出"中心列 + 面板"的实际可用宽度）与键盘计时/拖拽状态。
    * 同样是 hook——必须在 early-return 之前。 */
@@ -940,19 +949,28 @@ export function TimelineTab({ conversation, onFocusEvent, onJumpToStream, select
   const visibleRef = useRef<AgentEvent[]>([]);
   const lastRowRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  /* run 分组派生：events 引用不变则不重算（流式每帧 delta 不触发全量重分组）。 */
-  const runGroups = useMemo(() => groupEventsByRun(conversation.events), [conversation.events]);
+  /* run 分组派生（N2 #271）：键用 `eventsVersion`——`events` 引用刻意稳定（P0-1），
+   * 拿它当依赖不是"省一次重算"，而是**永不重算**：新 run 的组头永远不出现、老组的
+   * 「N 事件」永远不涨（Inspector 显示陈旧内容，是正确性缺陷）。
+   * 代价如实说明：每次 `events.push` 都 +1（含 model/delta 这类每帧都有的流式帧），
+   * 所以分组会随每次提交重算——单次成本见 `docs/PERF_BASELINE.md` §N2（一次线性扫描）。
+   * `exhaustive-deps` 看不到这层契约，故行内定向豁免（ADR-0037 D3；为什么必须用行内
+   * 形式见上方 runIdList 处——块级/NEXT-LINE 会连带吞掉同函数的无关真告警）。 */
+  const runGroups = useMemo(() => groupEventsByRun(conversation.events), [conversation.eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* #183：键盘选中项必须在**渲染窗口**里，否则"选中了却看不见"（↑/↓ 到窗口外
    * 就停在原地）。窗口下界由选中项**派生**（`effectiveWindow`），不在 effect 里
    * setState：那是纯函数关系，用 effect 追会多一轮渲染（oxlint
    * `react(set-state-in-effect)` 说的就是这条）。`windowSize` 只保存用户手动
    * "加载更早"的意图，两者取大——精确到 `total - selectedIndex`，不是一把拉到全量
-   * （全量渲染正是 200 行窗口要避免的成本，见文件头的实测）。 */
+   * （全量渲染正是 200 行窗口要避免的成本，见文件头的实测）。
+   *
+   * N2（#271）：依赖键是 `eventsVersion`——依赖 `events` 引用等于把查找结果冻结在
+   * 首帧（`exhaustive-deps` 于此定向豁免，理由见 ADR-0037 D3）。 */
   const selectedIndex = useMemo(() => {
     if (!selectedKey) return -1;
-    return conversation.events.findIndex((e) => eventKey(e) === selectedKey);
-  }, [conversation.events, selectedKey]);
+    return conversation.events.findIndex((e) => eventKey(e) === selectedKey); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [conversation.eventsVersion, selectedKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const effectiveWindow =
     selectedIndex >= 0 ? Math.max(windowSize, total - selectedIndex) : windowSize;
   const hidden = Math.max(0, total - effectiveWindow);

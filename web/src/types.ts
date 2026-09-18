@@ -524,6 +524,20 @@ export interface ConversationState {
    *  Never key a `useMemo`/`useEffect` on `events` identity, and never stash it as
    *  a frozen "before": copy it, or derive what you need, before the next append. */
   events: AgentEvent[];
+  /** `events` 数组**被 push 过的次数**——「又追加了」的精确信号（ADR-0037 D2 / N2 #271）。
+   *
+   *  为什么需要它：`events` 的引用被**刻意**固定（见上），而 `React.memo` / `useMemo`
+   *  比较的是**引用相等** ⇒ 依赖 `events` 的派生**永不重算**（陈旧渲染，不是性能问题）。
+   *  需要「events 追加后重算」的 `useMemo` / `useEffect` 依赖**本字段**。
+   *  `events.length` **不是**替代品：去重短路那帧不 push、quarantine 分支 push，
+   *  长度区分不了「长度不变而内容变」——用长度当版本号是「用巧合代替契约」。
+   *
+   *  语义边界（不得扩大解释）：初值 `0`；**每当 `events.push(...)` 真的执行一次就 +1**
+   *  （重复 seq 的去重短路不递增，quarantine 分支递增）。它**只**度量 events 数组的
+   *  append 次数——**不是**通用脏标记，不度量 turns/tools，不替代 `seq` / `run_id` /
+   *  `seenSeqs`。纯渲染层投影实现细节：**不进** SessionEvent、**不进** JSONL、
+   *  不参与 resume / replay / fork 的任何对账。 */
+  eventsVersion: number;
   /** Events whose type didn't match any known case (UnknownSurfaceNode 协议,
    *  冻结决策第 69 行 "unknown 事件渲染为 raw 行兜底，永不静默丢弃")。
    *  Kept separately so Timeline / Inspector can surface them explicitly
