@@ -2813,3 +2813,158 @@ AC1 期望值同时从「≈123」**收紧为严格 0**。
 **审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
 `5a7f40e` / `6d17bef` 交由 **P1-B3** 的两轴审查窗口覆盖（fixed point = `28a1a34`）；
 本轮落点与白名单这两个 docs-only 提交按台账惯例另行声明。
+
+<!-- ===== F4(#273) 台账节结束 ===== -->
+
+---
+
+<!-- ===== B7(#275) 台账起点（2026-09-19） ===== -->
+
+#### B7（#275）验收证据
+
+**票面**：GitHub #275（`## What to build` 必做 1/2/3、AC1–AC10、`## Scope lock`）。
+**实现 commit**：`c3558a9`（量测脚本 + G3 基线）→ `7c4cbb6`（站点 1）→ `d6da1f9`（站点 2）→ 本提交（红证用例 + 本节）。
+对 `8d7cdc5` 的**源码净 diff = 2 文件 / +81 −7**（`websocket.py` +51 −7、`local_artifact.py` +30 −0）；
+另有 `docs/PERF_BASELINE.md` +103 −1、新脚本 `scripts/measure_loop_blocking.py` 615 行、新测试 2 文件（176 + 159 行）。
+
+**第 1 步（强制）——先量再定：判定取「最长单次同步占用」，不取平均**
+
+| 站点 | 真实上界（**读实现取**，非估值） | 最长单次 | 判定 |
+| --- | --- | --- | --- |
+| **S1** WS 快照（`to_dict()` × N + `json.dumps`，中间无 `await` ⇒ 一整块） | **1000 事件**（`STREAM_REPLAY_MAX_EVENTS`，`web/app.py:629`） | p90 **5.6–11.9ms**、最长 **7–32ms** | **必须搬（方案 A）** |
+| **S1′** 单条事件帧（relay `websocket.py:303` 的 `_send_json`） | 1 条事件 | 0.008–0.145ms | **不搬**（与 S1 差 3 个数量级） |
+| **S2** `LocalArtifactStore.save` 整个函数体 | **2,000,000 字符**（沙箱单通道捕获上限 `max_capture_chars`，经 `tooling/overflow.py` 原样进 store） | **73.9ms**（2M CJK = 6MB 落盘） | **必须搬** |
+| **S3** `LocalArtifactStore.load` 整个函数体 | 同上 | **61.5ms** | **必须搬** |
+
+数字与 7 次运行的全部读数在 `docs/PERF_BASELINE.md` B7 节；量测脚本随票入库、可复跑。
+两个函数体**零 `await`**（`GET_AWAITABLE` 操作码探测；`inspect.CO_AWAIT` 在现代 CPython 里不存在）
+⇒ 对 S2/S3 而言「最长单次同步占用」**就是**整个函数的墙钟。
+
+> **S1 判定为什么取 n≥200 那一侧**：n=50 那次量到「最长 2.2–3.7ms」，在 n≥200 **未复现**；
+> n=200/300 的 9 次窗口测量 p90 **全部** ≥5.6ms。本机墙钟对 <5ms 级判定不可靠（F4 节同一结论），
+> 故判定取**保守侧**，并把全部轮次留在基线表里（含未复现的那次）。
+
+**第 2 步 —— 搬进线程（两个站点，共 3 个新增 `to_thread` 调用点）**
+
+| # | 文件 / 站点 | 做法 | 为什么整段搬、而不是只搬那一行 IO |
+| --- | --- | --- | --- |
+| 1 | `web/websocket.py` 站点 1 | 新增模块级**纯函数** `_render_snapshot(...)`；新增 `_send_json_offloaded(...)`：**先在线程里产出字符串**，回循环再 `send_text` | 列表推导与 `json.dumps` 之间没有 `await`，分开搬没有意义 |
+| 2 | `storage/local_artifact.py::save` | 异步壳 + `_save_blocking`（同步体原样搬运），**一次** `to_thread` | 只搬 `_write_atomic` 会把 `encode`(19.5ms) + `sha256`(27.8ms) 留在循环上 |
+| 3 | `storage/local_artifact.py::load` | 异步壳 + `_load_blocking`，**一次** `to_thread` | `read_bytes` 只占 4.7ms，`decode`(17.3ms) + `sha256`(12.4ms) 才是大头 |
+
+**`send_text` 未搬线程**（票面 Risks：并发写同一 socket 会破坏 WebSocket 发送语义）——下放的只是产出字符串那一段。
+`_send_json_offloaded` 的 `try` 覆盖面与 `_send_json` **逐字相同**（渲染 + 发送都在里面）⇒
+「渲染失败」与「连接已断」仍是同一条静默忽略路径，不新增异常层级。
+`ARTIFACT_ID_PATTERN` 形态校验**留在循环**（不碰 IO，畸形 id 不该进线程）；超阈值那条**控制帧**路径原样不动（单帧，判定不搬）。
+
+**红证（改造前 → 改造后，同一批用例、同一份测试文件）**
+
+做法：`git archive HEAD src` 导出**未改动的 HEAD 源码**到临时目录，用 `PYTHONPATH` 指向它跑同一批用例
+（**全程未用 `git stash`**，也**没有**改工作树文件）。
+
+```bash
+PYTHONPATH=<HEAD源码临时目录>/src python -m pytest \
+  tests/web/test_web_ws_snapshot_offload.py tests/storage/test_local_artifact_thread_offload.py -q   # 改造前
+PYTHONPATH=<worktree>/src python -m pytest \
+  tests/web/test_web_ws_snapshot_offload.py tests/storage/test_local_artifact_thread_offload.py -q   # 改造后
+```
+
+| 阶段 | 结果 | 说明 |
+| --- | --- | --- |
+| 改造前（HEAD 源码） | **12 failed / 3 passed** | 站点 2 两条红在**断言**上（`落盘仍发生在事件循环线程 …` / `读取仍发生在事件循环线程上`），不是 ImportError——它们只观测**改造前就存在**的内部名字 |
+| 改造后（工作树） | **15 passed** | — |
+
+> **改造前就通过的那 3 条不计入红证**：`not_found → KeyError`、`PermissionError 不得被吞成 KeyError`、
+> 「内容先于元数据」——它们是**不变式守卫**（改造前后都必须成立），价值在**反方向**：
+> 锁死「搬线程没有顺手改掉异常映射 / 原子纪律 / 落盘顺序」。
+
+**归因（本轮最花时间的一处，务必保留）——全量套件在本机是「非确定性」的**
+
+`pytest tests/ -q` 出现了大量红（改造后 64 / 改造前 78），但它们**不是**本票引入的：
+
+| 运行 | 用例数 | failures | 备注 |
+| --- | --- | --- | --- |
+| `tests/`，**改造后**（工作树） | 2529 | **64** | — |
+| `tests/`，**改造前**（HEAD 源码，同一 runner） | 2529 | **78** | — |
+| 差集 | — | **改造后新增 = 0** | 两侧失败集合求差：`{改造后} − {改造前}` 为空集 |
+
+那 14 条「仅改造前失败」= 本票的 **12 条红证用例**（本来就该在改造前红）+ 2 条 **A/B 手法副产物**
+（`test_env_file_anchored_to_repo_root` / `test_regression_metadata_fields_are_honest`：它们按**模块文件位置**
+推仓库根 / 读 evaluation 产物，而 A/B 把模块放到了临时目录）。
+
+**同一命令两次不同的结果**（代码一个字没改）：
+
+| 命令 | 第 1 次 | 第 2 次 |
+| --- | --- | --- |
+| `pytest tests/session/ tests/web/test_workspace_files_api.py -q` | **4 failed** | **0 failed** |
+
+⇒ 本机（沙箱）存在**随负载抖动**的失败：`tests/session/` 之后再跑 `tests/web/` 的「真建会话」用例，
+SSE 流会**偶发为空**（`AssertionError: SSE 流里没有 session_id：[]`；伴 `RemoteProtocolError: peer closed
+connection without sending complete message body`）。这不是稳定复现的缺陷，也不属于本票范围。
+
+**另一类环境致红（可根因复述）**：`os.symlink` 在本环境**返回成功但什么都不建**——
+
+```text
+os.symlink 返回值 = None （None = 无异常）
+link.is_symlink() = False
+os.readlink 抛错  = FileNotFoundError
+os.listdir(root)  = ['target']          # 只有真目录，链接没出现
+```
+
+（`mkdir` 与 `cmd /c mklink /J` 均正常，故不是权限问题；`WORKBUDDY_FS_PROTECTION_ROLE=daemon` 在场。）
+后果：`tests/**` 里所有 `_make_directory_link` 风格的辅助函数**先试 symlink、不抛就当成功**，
+于是「建了链接」的判据为真而链接并不存在 ⇒ 断言红。**A/B 已在 HEAD 源码上复现同一条红** ⇒ 与 B7 无关。
+
+**AC 逐条**
+
+| AC | 内容 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| AC1 | `PERF_BASELINE.md` 有第 1 步基线（含真实上界） | ✅ | B7 节：S1 7 次运行 / S1′ / S2 / S3 四组数字 |
+| AC2 | 每站点给出判定（搬 / 不搬）及依据数字 | ✅ | 上表四条判定；S1′ 写明「测量后判定无需处理」 |
+| AC3 | 「搬」的站点有测试证明重活不在循环线程上 | ✅ | 3 条：渲染线程 ≠ 循环线程；`_write_atomic` / `Path.read_bytes` 所在线程 ≠ 循环线程 |
+| AC4 | artifact 原子性未变（既有测试文件**删除行数为 0**） | ✅ | `git diff --numstat -- tests/` **为空**；半写/损坏相关用例全绿 |
+| AC5 | `load` 异常映射未变（not-found → `KeyError`；`PermissionError` 不得被吞） | ✅ | `TestExceptionContract` 三条（含「内容先于元数据」崩溃窗口） |
+| AC6 | WS 快照**帧结构未变**（方案 A） | ✅ | `TestFrameBytesUnchanged` 四条：与改造前内联表达式**逐字**相等、键序钉死、`ensure_ascii=True` 钉死、空窗口形状 |
+| AC7 | DoD 列出全部新增 `to_thread` 调用点 + 线程池总量评估 | ✅ | 见下「线程池清单」 |
+| AC8 | `context/builder.py` 的 `git diff` 为空 | ✅ | 命令输出为空 |
+| AC9 | `git diff --stat` 只出现 Scope lock 允许的文件 | ✅ | 源码 2 文件 + `PERF_BASELINE.md`（AC1 强制落点）+ 本批测试/脚本/台账 |
+| AC10 | 门禁全绿（`ruff` + `pytest` 全量，`--junitxml` 取权威结果） | ⚠ 见下 | `ruff` 0；票面相关两个目录稳定绿；**全量套件本机非确定性**（改造前后都有，新增 0） |
+
+**AC7 — 线程池清单（必做 3）**
+
+| 新增调用点 | 触发频率 | 量级 |
+| --- | --- | --- |
+| `websocket.py::_send_json_offloaded`（→ `_render_snapshot`） | **每订阅一次**（唯一调用点：客户端 `subscribe` 消息，`websocket.py:268`） | 1000 事件 ≈ 0.43MB 文本，5–32ms |
+| `local_artifact.py::save`（→ `_save_blocking`） | 每次 artifact 落盘一次（唯一写入者 `tooling/overflow.py`） | ≤2M 字符，≤74ms |
+| `local_artifact.py::load`（→ `_load_blocking`） | 每次 artifact 读取一次 | ≤2M 字符，≤62ms |
+
+三个都是**每请求 / 每产物一次**的短任务，**不是每帧一次**：流式增量走 relay 的 `_send_json`（未搬）。
+它们与既有 `session/service.py`、`workspace/index.py`、`recovery/scan.py`、`web/workspace_files.py` 等
+**共用同一个 anyio 默认线程池**；按票面必做 3，**未**调整池上限（「为提并发改上限」是另一件事，需独立评估）。
+
+**门禁（本轮实跑，`py` = 主仓库 venv + `PYTHONPATH=<worktree>/src`；权威取 `--junitxml` 解析，不靠 stdout）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| lint | `python -m ruff check .` | **rc=0，`All checks passed!`** |
+| 专项（新用例） | `pytest tests/web/test_web_ws_snapshot_offload.py tests/storage/test_local_artifact_thread_offload.py -q` | **15 passed**（改造前 12 failed / 3 passed） |
+| 相关目录 | `pytest tests/web/ -q` | **381 用例 / 1 failed**（`test_host_dirs_api::test_symlinked_directory_is_listed_once_without_expansion`，环境致红，见上） |
+| 相关目录 | `pytest tests/storage/ -q` | **92 用例 / 0 failed** |
+| 相关目录（复跑） | `pytest tests/web/ tests/storage/ -q` | **473 用例 / 同样仅那 1 条** ⇒ 该粒度下结果稳定 |
+| 全量 | `pytest tests/ -q` | **2529 用例 / 64 failed**（改造后）vs **78 failed**（HEAD）⇒ **新增 0**，差异解释见上 |
+| AC8 | `git diff src/agent_harness/context/builder.py` | **空** |
+| AC4 | `git diff --numstat -- tests/` | **空**（既有测试文件零增删） |
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 全量套件在本机**非确定性**（64 / 78 两跑不同；最小复现命令两次为 4 / 0） | **未闭合**（**非本票引入**，A/B 已证新增 0） | 需要一个能区分「负载抖动」与真实回归的稳定 runner（或把易抖用例显式标注）。在拿到它之前，本票的归因证据是**失败集合求差 = 空** |
+| `test_host_dirs_api::test_symlinked_directory_is_listed_once_without_expansion` 在本机恒红 | **未闭合**（环境；A/B 在 HEAD 上同样红） | 二选一：① 在无 FS 保护的真实 shell / CI 跑；② 把该文件的 `_make_dir_link` symlink 分支改成**建完再验存在**（`if link.is_dir(): return True`），静默失效时才落到 `mklink /J` 回退。**属 WS-7/#170 的测试文件，本票不改**（Scope lock） |
+| relay 单帧 `json.dumps` 仍在循环上 | **未闭合**（票面已列） | 基线显示单帧 `dumps` 成为长帧主因。本轮**未**成为主因（0.008–0.145ms，差 3 个数量级）⇒ 按票面留在原地 |
+| `context/builder.py:236` 的 `estimate_tokens` 留在循环内 | **按票面保持**（已核证为误报） | 出现**实测**长帧（必须附测量）；本票 `git diff` 为空 |
+| 线程池上限**未调整** | **设计如此**（票面必做 3 明确禁止借此提并发） | 出现「因 `to_thread` 排队导致延迟」的实测证据；届时按「线程池容量策略」独立开票 |
+| `_write_atomic` 的固定成本 1.5–2.5ms/次（本机 NTFS + AV），`save` 一次调它**两次** | **记录在案**（非本票引入，且已搬离循环） | 若将来到 Linux/CI 上复核，该成本会低一个量级；6MB 那一级的数字与平台无关 |
+
+**审查**：本票**不**给自己开审查；`c3558a9`（含非文档的脚本）、`7c4cbb6`、`d6da1f9` 与本提交**均不进 `[whitelist]`**，
+统一交由 **P1-B3** 的两轴审查窗口覆盖（fixed point = `8d7cdc5`，与本批 F4 的 `5a7f40e` / `6d17bef` 同一窗口）。
