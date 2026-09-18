@@ -67,3 +67,6 @@ fc01d28	B-12 集成 push 补记（tracker + 归档，docs-only）
 3dff24f	B-13 落点记录推送补记（tracker + 归档，docs-only）
 d9c2f51	B-14 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引，docs-only）
 1545f6d	#239 落点记录（tracker 明细 + 归档 + PHASE_STATUS 索引，docs-only）
+1529aa7	#268 勘误落点：HANDOFF_PERF_FRONTEND 追加 §11（docs-only）
+9886a9c	#269 ADR-0037 投影层引用稳定与 eventsVersion（新增 ADR 文件，docs-only）
+4c4b2cb	P1-B1 落点记录（tracker 批次明细 + 本批索引 §0.3 共享追加目标，docs-only）
