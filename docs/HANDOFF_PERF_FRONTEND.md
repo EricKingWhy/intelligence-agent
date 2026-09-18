@@ -262,3 +262,99 @@ TTFT 模型侧主导，Run Pulse「思考中·Ns」已是最优解——**不要
 **⚠️ 本批环境备案（新增两条，接手必读）**：
 1. **Edit 工具写入丢失**：同一会话内对同一文件的多个 Edit 出现部分落盘（StepDetail.tsx 的 EventInspector 段、ToolCard.tsx 的 GenericBlock 段、TimelineRow 签名各丢一次，工具返回成功但文件未变）。**对策：每次 Edit 后立即 grep 关键锚点验证**——tsc/vitest 全绿不代表编辑落盘（旧代码同样合法）。
 2. **本地 refs 写入静默吞没依旧**（`update-ref` 退出 0 但 ref 文件物理不存在；与 git 二进制无关，文件系统层）。**可靠路径：`git push origin <full-sha>:refs/heads/feat/frontend`**（sha 直推绕开本地 ref）；本地 ref 恢复由用户/集成 AI 终端执行 `git fetch origin && git update-ref refs/heads/feat/frontend origin/feat/frontend`。
+
+---
+
+## 11. 勘误（2026-09-18）
+
+> **§11 只做一件事：标出已经过期的断言。**
+> 本文档第一句自称「唯一事实源」——**一个错的唯一事实源比没有更危险**：后续 Agent 会照着它下判断。
+>
+> **本节不修改任何既有回执。** §9 / §10 是历史记录，不是待修正的错误——**它们写在当时是对的**。
+> 过期是**后续改动造成的**，所以勘误以「新节 + 指向原文位置」的方式存在。
+> 本节也**不写「怎么修」**：修复各自归属子票。
+>
+> 本节共 **3** 条：勘误 1、勘误 2 指向本文档内的句子；勘误 3 指向本文档**之外**的一处错误注释。
+> 行号以**本节落盘后的当前文件**为准（本节追加在文末，不会移动任何既有行）。
+
+### 勘误 1 —「TurnView memo 已挡住完成段重复 markdown 解析（无需再动）」已失效
+
+| | |
+| --- | --- |
+| **原句位置** | §9 末段「候选额外优化点」第 3 条（本文件 `:243`） |
+| **原句** | 「TurnView memo 已挡住完成段重复 markdown 解析（**无需再动**）」 |
+| **归属子票** | **F1 = GitHub #270** |
+
+**为什么过期**：该结论成立于 `a78c322`（2026-09-05，P0-2a 流式 markdown 增量化）。
+但**晚一天**的 `f97f322`（2026-09-06，Web UI Redesign Phase 1-9）给 `TurnView` 新增了
+`disclosure` / `reasoningDisclosure` 两个 prop（`web/src/components/Conversation.tsx:420` 签名、
+`:355-356` 与 `:615-616` 传参），而这两个对象的**生产方每次渲染都返回新的对象字面量**：
+
+- `web/src/lib/disclosure.ts:94` → `return { levelFor, setLevel };`
+- `web/src/lib/disclosure.ts:143` → `return { isOpen, toggle };`
+
+`TurnView` 是 `memo(...)`（`Conversation.tsx:420`）且**未给自定义比较器** ⇒ 浅比较这两项
+**恒不相等** ⇒ **memo 恒 miss**。于是 `Conversation.tsx:418-419` 的注释
+「流式期间每个 delta 只重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析」
+目前**不再成立**。
+
+**可复现证据（commit sha + 那条 `--is-ancestor` 结论）**：
+
+```bash
+git merge-base --is-ancestor a78c322 f97f322 ; echo "rc=$?"   # rc=0 → a78c322 是 f97f322 的祖先
+git merge-base --is-ancestor f97f322 a78c322 ; echo "rc=$?"   # rc=1 → f97f322 不是 a78c322 的祖先
+git log -1 --format='%h %ad %s' --date=short a78c322          # a78c322 2026-09-05 perf(web): 流式 markdown 增量化（P0-2a）+ SSE delta 合帧提交（P1-3）
+git log -1 --format='%h %ad %s' --date=short f97f322          # f97f322 2026-09-06 feat(web): Web UI Redesign Phase 1-9 — …
+```
+
+⇒ `f97f322`（2026-09-06）**晚于** `a78c322`（2026-09-05）。
+⚠ **读法警告**：只看 `--is-ancestor f97f322 a78c322` 返回非零，**只能说明「f97f322 不是 a78c322 的祖先」，
+不足以证明先后**；要断言「晚于」必须用**反方向**那条 `rc=0`。两条一起看才是完整证明。
+
+**后果（同一份证据链的下一环）**：`web/src/components/Conversation.tsx:751` 在 render 体内直调
+`renderMarkdown(display)`（**无 memo**）；而 `Conversation.tsx:733-743` 的**纯文本路径只覆盖
+`status === 'streaming'` 的段**——那是 P0-2a 的成果，**仍然有效、不得回退**。
+⇒ 于是**每个已完成的可见段**会在每次 24ms 事件提交时重新全量解析 markdown。
+原句说的「完成段」，正是落在这里。
+
+### 勘误 2 —「Conversation 虚拟化未做 / YAGNI」已失效（它**已经做了**）
+
+| | |
+| --- | --- |
+| **原句位置 ①** | §6 P1-4 标题行（本文件 `:168`）：「Conversation 部分按 YAGNI 暂缓（turn 级 memo + 增量 markdown 已挡热路径，待真实大会话证据）」 |
+| **原句位置 ②** | §9「剩余」→ ZCode 回执第 2 条（本文件 `:237`）：「**Conversation 虚拟化未做**——…待真实大会话出现性能证据再议（YAGNI）」 |
+| **归属子票** | **无**（这一条**不需要新票**：能力已存在，只是文档没跟上事实） |
+
+**为什么过期**：`web/src/components/Conversation.tsx:14` 已 import `@tanstack/react-virtual`；
+`:88-99` 已用 `useVirtualizer` 对 `turns` 做窗口化——`estimateSize: () => 240`、`overscan: 6`、
+`getItemKey: (i) => turns[i].step_id`，且 `:88` 的注释逐字写着
+「PRD §20.2 / ADR-0014 D7：turns 列表窗口化（@tanstack/react-virtual）」。
+`docs/adr/0014-web-ui-redesign-architecture.md` 的 **D7 是一条决定**（Conversation + Timeline 都窗口化），
+不是「暂缓」。⇒ 这不是「待证据再议」，是**已实施**。
+
+**⚠ 同一区域必须分开读的三件事**（原句附近把三个话题混在一起，新读者极易再次混淆）：
+
+| 话题 | 真实状态 | 证据 | 归属 |
+| --- | --- | --- | --- |
+| Timeline 尾窗（200 行 + 「加载更早」，500 步长） | **已落地** | `da01efd`（§9 ZCode 回执第 2 条） | 无（已完成） |
+| Conversation 虚拟化 | **已落地** | `Conversation.tsx:14`、`:88-99` + ADR-0014 D7 | 无（已完成；本条勘误只是把文档对齐事实） |
+| `StepDetail` 的 tools / diffs / artifacts **全量渲染** | **仍未做** | `web/src/components/StepDetail.tsx:636`、`:1122`、`:1190` | **F5 = GitHub #279** |
+
+即：**「Conversation 未虚拟化」是错的**；但**「StepDetail 三个长列表仍是全量渲染」是对的**——
+**后者才是 F5 的范围**，不要因为本条勘误就把 F5 一并撤掉。
+
+### 勘误 3 — 本文档**之外**还有一处错误断言（此处仅登记存在性与归属，本票不改）
+
+- **位置**：`web/src/lib/projection.ts:1149-1154`（`applyEvent` 的 COW docstring 末句）。
+- **原句**：「…消费端只持有最新 state（useSession 管线：局部 conv 折叠 + setConversation 提交，
+  **无消费者把 `events` 放进 memo/useEffect 依赖**），不受影响。」
+- **为什么不属实**：至少三处把它当依赖——`web/src/components/StepDetail.tsx:123`、`:944`
+  （`[conversation?.events]`）与 `:955`（`[conversation.events]`）。
+- **它和 §9 是同一个判断、同时失效**：§9 主回执（本文件 `:230`）写着「全量核对无消费者把
+  `conversation.events` 放进 memo/useEffect 依赖（App/Conversation/StepDetail/Run Pulse），
+  故未引入 eventsVersion（Simplicity First）」——与该注释同源，**同被 `f97f322` 推翻**
+  （`f97f322` 晚于该回执的 `a78c322`，证明见勘误 1）。
+- **归属子票**：**N2 = GitHub #271**（同一处代码的行为与注释必须一起改，避免两个 commit 撞同一段；
+  新语义见 `docs/adr/0037-projection-reference-stability-and-events-version.md`）。
+- **本文档对此不做任何改动**：此处只登记，避免下一个读者把「HANDOFF 说没有消费者」
+  当成「确实没有」，从而再次得出「不需要 eventsVersion」的结论。
