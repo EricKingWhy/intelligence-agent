@@ -39,6 +39,8 @@
 2026-09-18	批审查 findings 的全数修复（182d77a）+ 独立复验（另一只读子代理逐 finding 对账：10/10 addressed，无新增阻断）——两条新用例钉住审查实测钉不住的性质：`test_conflict_is_detected_before_any_sandbox_instantiation`（漂移目标故意不存在 ⇒ 对账点若挪到 resume/load 之后，`registry.get()` 会 mkdir 出幽灵目录）与 `test_ws_send_message_reports_workspace_binding_conflict`（WS 续聊撞冲突必须回 error 帧）。**红证两条变异（恢复后 sha256 逐字节相同）**：对账点后移 ⇒ 幽灵目录被 mkdir ⇒ 新用例红、其余 4 条冲突用例仍绿（正是它们钉不住这条性质的证据）；WS except 元组去掉 `WorkspaceBindingConflict` ⇒ 连接以 `WebSocketNetworkError` 静默死掉、无 error 帧 ⇒ 新用例红。门禁：ruff clean；专项 83 passed；全量 2481 passed / 10 skipped / 42 deselected / 0 failed（5:42）；`git diff --check` 干净。复验残余（不阻断，已登记）：`_LOCAL_TOOL_NAMES` 改派生后成员钉子的强度下降（C1/C3/C4 仍把九个名字钉在 runtime registry 上）；用例钉中文文案字面量与既有实践一致。	0f5aefd..182d77a
 2026-09-18	B-15 两轴批量审查（Standards + Correctness 各一独立只读子代理；#239 + #249；审后工作树带修复 ⇒ 两轴重跑取回完整 findings）——1×P2 共识（观测故障边界只覆盖两臂）+ 7×P3	182d77a..5cc9f2a
 2026-09-18	B-15 findings 全数修复（`_GuardedTracer` 单点保护 + 终态臂用例补齐 + §16.1 收敛 + 源码闸门改扫包 + ADR-0033 §2.1 补排序后果）	5cc9f2a..d84222a
+2026-09-18	B-16 两轴批量审查（Standards + Correctness 各一独立只读子代理；#250 Executor Tracer seam + #251 Session 写行为 golden；fixed point 0f121ac，审后工作树带修复 ⇒ Correctness 轴首轮未产出文本、经 SendMessage 重发取回）——**两轴共识 P2①**：`_close_span` 收口点自身无异常保护，观测实现违约抛错会顶掉原发异常（实测 CancelledError 被换成 RuntimeError、Ledger 存储失败被换成观测异常）；端口契约的"实现必须不抛"只由 Runtime 的 `_GuardedTracer` 单点强制，Executor 可被 Runtime 之外直接构造 ⇒ 收口自兜一层。**Standards 轴另有 4×P3**：`tracer is not None` 字符串闸门鉴别力不足（`if tracer:` / `tracer is None` / 双空格均溜过，实测）⇒ 改扫 AST；`test_executor_without_tracer_drives_the_null_tracer_port` 名实不符（实际显式传 tracer，默认值从未被驱动）；listener 顺序用例两条断言分辨不出先后（变异实测：通知提前仍绿）⇒ 改回调内当场读盘；`_FailingFrom` 在两文件重复。**Correctness 轴 F2（P3，已回报决定不改）**：span 开始到收口 try 之间夹 sink 建立，该段抛出会挂单；实测改序会把洞换成 drain task 泄漏，两个顺序各有洞，维持现状如实记录。两轴均确认：Scope Lock 属实（#251 生产代码零改动）、#250"行为逐字不变"属实、默认值反射用例有鉴别力、port 成员反射非空转、#251 六组语义与实现一致（含 `fail_from` 计数无 off-by-one 实测、fork 边界确能触发抛错）。	0f121ac..c700655
+2026-09-18	B-16 findings 全数修复（P2 收口自兜 + AST 闸门带自检样本 + 用例改名/改断言 + store_fixtures 收敛 + PHASE_STATUS 压行）+ 另一条轴 P3 如实登记不修	c700655..cff9ae6
 [whitelist]
 b53465e	B-10 集成/关单状态（tracker + PHASE_STATUS + 归档，docs-only）
 133ef5a	B-10 落点记录（tracker + 归档 + PHASE_STATUS + 本台账审查行，docs-only）
@@ -68,5 +70,3 @@ fc01d28	B-12 集成 push 补记（tracker + 归档，docs-only）
 9444f65	B-13 集成/关单状态如实化（tracker + 归档，docs-only）
 3dff24f	B-13 落点记录推送补记（tracker + 归档，docs-only）
 c497d6f	B-15 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引 + 本台账审查行/修复行，docs-only）
-c888c09	#250 落点记录（tracker 明细 + 归档 + PHASE_STATUS 索引，docs-only）
-c700655	#251 落点记录（tracker 明细 + 归档 + PHASE_STATUS 索引，docs-only）
