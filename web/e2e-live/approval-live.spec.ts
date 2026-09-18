@@ -30,9 +30,11 @@ async function runUntilCard(page: import('@playwright/test').Page, task: string)
     }
   });
   await page.goto('/');
-  // 显式选权限档位：read-only（真目录第一项）——这一步是「交互式审批」的开关。
+  // 显式选权限档位：read-only——这一步是「交互式审批」的开关。
+  // 下压 **1** 次（不是 0）：`OptionPicker` 首项恒是「默认（未选）」（#201 / FE-R11-05），
+  // 故下压次数 = 条目下标 + 1（主车道 `e2e/control-row.spec.ts:73` 同用法）。
   // 目录若重排，这里会因文案断言不符而**明确变红**（不会静默选错档位）。
-  await pickControl(page, '权限模式', 0, '只读');
+  await pickControl(page, '权限模式', 1, '只读');
   await page.getByLabel('Agent 任务').fill(task);
   await page.getByLabel('发送').click();
   const card = page.locator('.approval-card');
