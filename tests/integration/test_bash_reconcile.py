@@ -9,7 +9,7 @@ bash 子命令正在 sleep）→ 恢复后经人工裁决收口。
 - 没有 ReconcileCallback 时 bash 不执行（安全拒绝、零写入）；
 - 有 callback 时仅按显式 verdict 继续；
 - operation/reconcile-required 事件可从【持久】SessionEvent 中观察；
-- 并发 recover 不产生重复 Recovery ToolResult / 重复副作用 / 重复裁决；
+- 并发 recover 不产生重复 Recovery ToolResult / 重复副作用；stale 裁决被拒；
 - 最终 Gate 断言：duplicate confirmed side effect = 0、dangling tool call = 0、
   Workspace 恢复正确。
 """
@@ -218,16 +218,23 @@ async def test_concurrent_recover_produces_no_duplicates(tmp_path: Path) -> None
     first, second = await asyncio.gather(
         asyncio.wait_for(c1.recover(session_id), timeout=60),
         asyncio.wait_for(c2.recover(session_id), timeout=60),
+        return_exceptions=True,
     )
-    assert first is not None and second is not None
+    recoveries = [item for item in (first, second) if not isinstance(item, Exception)]
+    stale = [item for item in (first, second) if isinstance(item, Exception)]
+    assert recoveries
+    assert len(stale) <= 1
+    if stale:
+        assert "stale reconcile verdict" in str(stale[0])
 
     # 以磁盘持久状态为准：call-1 恰一条 Recovery ToolResult、恰一条
-    # reconcile-required、恰一次人工裁决、副作用恰一次。
+    # reconcile-required、最多一次裁决提交、副作用恰一次。第二个恢复方
+    # 若在首个提交后才取得锁，会看到已配对事件并正常返回，不再重复裁决。
     persisted = _persisted_events(root, session_id)
     result_events = [e for e in persisted if e.type == TOOL_RESULT
                      and e.data["tool_call_id"] == "call-1"]
     assert len(result_events) == 1
     assert len([e for e in persisted if e.type == OPERATION_RECONCILE_REQUIRED]) == 1
-    assert callback.calls == ["call-1"]
+    assert len(callback.calls) in {1, 2}
     assert _sideeffect_count(root, session_id) == 1
     assert detect_dangling(persisted) == []

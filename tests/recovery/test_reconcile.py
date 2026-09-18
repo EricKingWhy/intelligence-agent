@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -131,6 +132,32 @@ class _ScriptedCallback(ReconcileCallback):
         return self.verdict
 
 
+class _BlockingCallback(ReconcileCallback):
+    """阻塞到外部放行，用于证明恢复锁不跨越人工等待。"""
+
+    def __init__(self, verdict: ReconcileVerdict) -> None:
+        self.verdict = verdict
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def resolve(
+        self, operation: Operation, hint: ReconcileHint
+    ) -> ReconcileVerdict:
+        self.started.set()
+        await self.release.wait()
+        return self.verdict
+
+
+class _FailingCallback(ReconcileCallback):
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    async def resolve(
+        self, operation: Operation, hint: ReconcileHint
+    ) -> ReconcileVerdict:
+        raise self.error
+
+
 def _make_coordinator(
     store: JsonlSessionStore,
     ledger: SqliteOperationLedger,
@@ -188,6 +215,152 @@ async def test_ledger_enforces_two_step_unknown_transition(tmp_path: Path) -> No
     await _seed_operation(ledger, session_id, "call-b", OperationState.RUNNING)
     with pytest.raises(ValueError, match="RUNNING -> NEED_RECONCILE"):
         await ledger.update_state(session_id, "call-b", OperationState.NEED_RECONCILE)
+
+
+# ── #254 锁外人工裁决 ──
+
+
+@pytest.mark.asyncio
+async def test_callback_wait_does_not_hold_recovery_lock(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session_a = _make_crashed_session(store, call_id="call-a")
+    session_b = _make_crashed_session(store, call_id="call-b")
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, session_a.session_id, "call-a", OperationState.RUNNING)
+    await _seed_operation(ledger, session_b.session_id, "call-b", OperationState.SUCCEEDED)
+
+    callback = _BlockingCallback(ReconcileVerdict.CONFIRM_SUCCESS)
+    coordinator_a = _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback
+    )
+    coordinator_b = _make_coordinator(store, ledger, tmp_path / "state.db")
+
+    pending_a = asyncio.create_task(coordinator_a.recover(session_a.session_id))
+    await callback.started.wait()
+    recovered_b = await asyncio.wait_for(
+        coordinator_b.recover(session_b.session_id), timeout=1.0
+    )
+    assert "call-b" in _result_events(recovered_b)
+
+    callback.release.set()
+    recovered_a = await pending_a
+    assert "call-a" in _result_events(recovered_a)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), ValueError("broken")])
+async def test_callback_failure_does_not_write_fake_completion(
+    failure: BaseException, tmp_path: Path
+) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, crashed.session_id, "call-1", OperationState.RUNNING)
+
+    coordinator = _make_coordinator(
+        store, ledger, tmp_path / "state.db",
+        reconcile_callback=_FailingCallback(failure),
+    )
+    with pytest.raises(type(failure), match=str(failure)):
+        await coordinator.recover(crashed.session_id)
+
+    operation = await ledger.get(crashed.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.NEED_RECONCILE
+    events = store.read_events(crashed.session_id)
+    assert not [event for event in events if event.type == TOOL_RESULT]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_callback_does_not_write_fake_completion(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, crashed.session_id, "call-1", OperationState.RUNNING)
+
+    coordinator = _make_coordinator(
+        store, ledger, tmp_path / "state.db",
+        reconcile_callback=_FailingCallback(asyncio.CancelledError()),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await coordinator.recover(crashed.session_id)
+
+    operation = await ledger.get(crashed.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.NEED_RECONCILE
+    assert not [
+        event for event in store.read_events(crashed.session_id)
+        if event.type == TOOL_RESULT
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_adjudication_has_one_reconciled_outcome(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, crashed.session_id, "call-1", OperationState.RUNNING)
+
+    callback_a = _BlockingCallback(ReconcileVerdict.CONFIRM_SUCCESS)
+    callback_b = _BlockingCallback(ReconcileVerdict.CONFIRM_FAILURE)
+    coordinator_a = _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback_a
+    )
+    coordinator_b = _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback_b
+    )
+
+    first = asyncio.create_task(coordinator_a.recover(crashed.session_id))
+    await callback_a.started.wait()
+    second = asyncio.create_task(coordinator_b.recover(crashed.session_id))
+    await callback_b.started.wait()
+
+    callback_a.release.set()
+    first_result = await first
+    callback_b.release.set()
+    with pytest.raises(RecoveryError, match="stale reconcile verdict"):
+        await second
+
+    outcomes = [
+        event
+        for event in store.read_events(crashed.session_id)
+        if event.type == TOOL_RESULT and event.data["tool_call_id"] == "call-1"
+    ]
+    assert len(outcomes) == 1
+    operation = await ledger.get(crashed.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.SUCCEEDED
+    assert first_result is not None
+
+
+@pytest.mark.asyncio
+async def test_stale_verdict_is_rejected_without_result_event(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, crashed.session_id, "call-1", OperationState.RUNNING)
+
+    callback = _BlockingCallback(ReconcileVerdict.CONFIRM_SUCCESS)
+    coordinator = _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback
+    )
+    pending = asyncio.create_task(coordinator.recover(crashed.session_id))
+    await callback.started.wait()
+    await ledger.update_state(
+        crashed.session_id, "call-1", OperationState.CANCELLED,
+    )
+    callback.release.set()
+
+    with pytest.raises(RecoveryError, match="stale reconcile verdict"):
+        await pending
+    operation = await ledger.get(crashed.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.CANCELLED
+    assert not [
+        event for event in store.read_events(crashed.session_id)
+        if event.type == TOOL_RESULT
+    ]
 
 
 # ── 四种裁决 ──
