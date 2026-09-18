@@ -70,6 +70,14 @@ import './styles/app.css';
  *  两个用途的语义提醒都写在那里）；api 层没有统一超时（其余请求同病）。 */
 const FORK_TIMEOUT_MS = 30_000;
 
+/** 命令面板**关闭**时 `paletteItems` 的返回值（F4 / #273）。
+ *
+ *  必须是模块级常量、**不能**写 `[]` 字面量：字面量每次渲染都是新数组，面板虽关着，
+ *  但 `CommandPalette` 仍被渲染（只是 `open=false`），新引用会让它的 memo 恒 miss，
+ *  把 F1/F2 的收敛成果抵消回去（与 `EMPTY_UNDELIVERED` 同一道理）。
+ *  引用恒定还有一个用处：关闭态的返回值可被下游安全地当作「内容未变」的信号。 */
+const CLOSED_PALETTE_ITEMS: CommandItem[] = [];
+
 export default function App() {
   // BUG-001 fix：fork 失败的本地错误状态（useSession 的 error 是流级通道）。
   const [forkError, setForkError] = useState<{ sessionId: string; message: string } | null>(null);
@@ -741,6 +749,13 @@ export default function App() {
   }, []);
 
   const paletteItems = useMemo<CommandItem[]>(() => {
+    /* F4 / #273：面板关着就不构建。这份候选表随事件窗口线性放大（`slice(-100)` 逐条
+       summarizeEvent），而流式期间每秒约 40 次投影提交——关闭态下这些构建全部是白做的，
+       CommandPalette 拿到 items 也只是渲染个空/不渲染（`open=false`）。
+       门控的代价是**关闭期间的候选表不再维护**：`paletteOpen` 进依赖数组后，打开那一拍
+       依赖变化 ⇒ 立刻用最新 `conversation` 重建，故「打开即最新」不变（PRD §15 只要求
+       打开那一刻最新，不要求关闭期间逐帧维护）。 */
+    if (!paletteOpen) return CLOSED_PALETTE_ITEMS;
     // label 用中文（与工具栏/空态/提示文案一致——此前只有 label 是英文、hint 已是
     // 中文，属本地化做了一半），英文说法放进 keywords 继续可搜（BUG-007）。
     const items: CommandItem[] = [
@@ -898,7 +913,7 @@ export default function App() {
       });
     }
     return items;
-  }, [conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction]);
+  }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction]);
 
   return (
     <div className="app-frame">
