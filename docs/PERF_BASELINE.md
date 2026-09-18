@@ -134,7 +134,37 @@ cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/l
 - Chrome Performance：long task 数 + 最长单帧（长回答场景，录制存档）。
 
 ### N2 — `eventsVersion`（#271）
-_待落基线。_
+
+**基线（改造前，2026-09-18）**——全部为实测，非估算：
+
+| 场景 | 规模 | 指标 | 改造前 | 改造后 | 口径 / 命令 | 日期 | commit |
+|---|---|---|---|---|---|---|---|
+| Timeline run 分组是否跟随 `events` 追加更新 | 1→2 个 run（4→6 事件） | 组头数 / 行数（**同一实例**再渲染后） | **1 / 4**（陈旧——派生值停在首帧，第 2 个 run 不出现） | 2 / 6 | `node node_modules/vitest/vitest.mjs run src/components/StepDetail.render.test.tsx` | 2026-09-18 | `<sha>` |
+| 同上：已存在组的计数也陈旧 | 同 run 追加 1 事件（4→5） | 组头文案 | **「Run 1 已完成 4 事件」**（不涨） | 「5 事件」 | 同上 | 2026-09-18 | `<sha>` |
+| `eventsVersion` 语义（AC1–AC5 + 引用稳定守卫） | 6 帧（含 1 重复 seq + 1 quarantine） | 断言通过数 | **0 / 6 通过**（字段不存在，6 条全红） | 6 / 6 | `node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts` | 2026-09-18 | `<sha>` |
+| `applyEvent` 单事件成本（**不得**回退 P0-1） | @1k / @5k / @20k | µs/事件 | **0.5 / 0.2 / 0.2** | 见下 | `node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/lib/projection.perf.test.ts` | 2026-09-18 | `<sha>` |
+| `projectHistory` 历史重建（**不得**回退 P0-1） | 4650 / 20000 事件 | ms | **4.3 / 10.7** | 见下 | 同上 | 2026-09-18 | `<sha>` |
+
+**红证（改造前，同一条命令的失败输出）**：`Tests 8 failed | 193 passed (201)`
+——失败的正是本票新增的 8 条（投影 6 + 组件 2），**既有 193 条全部通过**（含
+`applyEvent — 引用稳定性（流式渲染 memo 契约）` 的 7 条）。关键失败行：
+
+```
+AssertionError: expected [ 'Run 1已完成4 事件' ] to have a length of 2 but got 1
+AssertionError: expected 'Run 1已完成4 事件' to contain '5 事件'
+AssertionError: expected undefined to be +0      // AC1
+AssertionError: expected undefined to be 1       // AC2 / AC3 / AC4
+AssertionError: expected undefined to be 5       // AC5
+TypeError: actual value must be number or bigint, received "undefined"  // 引用稳定守卫
+```
+
+> 「组头数 1、行数 4」这一条是**红证的主体**：`useMemo(..., [conversation.events])` 的
+> 依赖是 P0-1 刻意固定的共享数组引用，父级提交后比较恒等 ⇒ 派生值停在首帧。
+> 用例里用 `expect(second.events).toBe(first.events)` 同时钉住「新 state 对象 + 同一数组引用」
+> 这一对条件，否则用例会退化成「测了一个不存在的场景」。
+
+**改造前后对照（同上口径）**：见本小节末尾「改造后」。
+
 要求指标：
 - **正确性数字**：`StepDetail` 的 run 分组在「追加事件后」是否更新（二值）；
 - 投影层：`projectHistory` 4650 事件、`applyEvent` @20k 事件的耗时
