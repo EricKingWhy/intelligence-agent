@@ -41,6 +41,8 @@
 2026-09-18	B-15 findings 全数修复（`_GuardedTracer` 单点保护 + 终态臂用例补齐 + §16.1 收敛 + 源码闸门改扫包 + ADR-0033 §2.1 补排序后果）	5cc9f2a..d84222a
 2026-09-18	B-16 两轴批量审查（Standards + Correctness 各一独立只读子代理；#250 Executor Tracer seam + #251 Session 写行为 golden；fixed point 0f121ac，审后工作树带修复 ⇒ Correctness 轴首轮未产出文本、经 SendMessage 重发取回）——**两轴共识 P2①**：`_close_span` 收口点自身无异常保护，观测实现违约抛错会顶掉原发异常（实测 CancelledError 被换成 RuntimeError、Ledger 存储失败被换成观测异常）；端口契约的"实现必须不抛"只由 Runtime 的 `_GuardedTracer` 单点强制，Executor 可被 Runtime 之外直接构造 ⇒ 收口自兜一层。**Standards 轴另有 4×P3**：`tracer is not None` 字符串闸门鉴别力不足（`if tracer:` / `tracer is None` / 双空格均溜过，实测）⇒ 改扫 AST；`test_executor_without_tracer_drives_the_null_tracer_port` 名实不符（实际显式传 tracer，默认值从未被驱动）；listener 顺序用例两条断言分辨不出先后（变异实测：通知提前仍绿）⇒ 改回调内当场读盘；`_FailingFrom` 在两文件重复。**Correctness 轴 F2（P3，已回报决定不改）**：span 开始到收口 try 之间夹 sink 建立，该段抛出会挂单；实测改序会把洞换成 drain task 泄漏，两个顺序各有洞，维持现状如实记录。两轴均确认：Scope Lock 属实（#251 生产代码零改动）、#250"行为逐字不变"属实、默认值反射用例有鉴别力、port 成员反射非空转、#251 六组语义与实现一致（含 `fail_from` 计数无 off-by-one 实测、fork 边界确能触发抛错）。	0f121ac..c700655
 2026-09-18	B-16 findings 全数修复（P2 收口自兜 + AST 闸门带自检样本 + 用例改名/改断言 + store_fixtures 收敛 + PHASE_STATUS 压行）+ 另一条轴 P3 如实登记不修	c700655..cff9ae6
+2026-09-19	B-17 两轴批量审查（Standards + Correctness；T07/#252 + T08/#253；fixed point ca60905；Correctness zero findings；Standards 2xP2 + 1xP3）	ca60905..3f0f959
+2026-09-19	B-17 findings 修复与落点（Session 类级 Store writer 护栏、token fingerprint 篡改红证、Tracker 机制叙述压行）	3f0f959..1ba46a2
 [whitelist]
 5e03579	SDD 续批开工提示词（B-17 起的开工指令，docs-only）
 c52aab6	#252 实现落点记录（tracker + PHASE_STATUS + 2026-09 归档，docs-only）
