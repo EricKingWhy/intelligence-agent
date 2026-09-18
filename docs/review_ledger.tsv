@@ -75,3 +75,4 @@ d9c2f51	B-14 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS �
 45744d3	P1-B1 批次基线（#267：新建 docs/PERF_BASELINE.md + 本批执行索引 §0–§0.6，docs-only）——两轴审查行的 fixed point，自身落在审查范围外，故按台账惯例走白名单
 4fc7e21	P1-B2 落点记录（tracker P1-B2 审查记录节 + F2 AC8 缺口闭合 + F1/N2 未闭合理由更正 + PERF_BASELINE F2 e2e 节与 F1 G4 理由更正 + 归档索引，docs-only）
 f1984e8	docs-only（PERF_BASELINE F2 节表头如实化：脚本 report 行数 3→4，前 3 行累计 + 第 4 行为扣加载段的派生行）
+40c0795	F4/#273 落点记录（tracker F4 验收证据节 + PERF_BASELINE F4 节 + phase_status 归档索引，docs-only）
