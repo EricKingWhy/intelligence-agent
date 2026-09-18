@@ -417,7 +417,25 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
+// 引用稳定性由 F1（#270）保证：disclosure / reasoningDisclosure 的返回值现在只在
+// **自身依赖变化**时换引用（override 改动 / density 换档），流式提交期间恒等——memo 的
+// 浅比较才真的会命中原注释所声明的效果。注意它**不能**做成「身份永不改变」：那样
+// override 变化时 memo 也会 bail out，点击工具行的档位循环会静默无效（见
+// lib/disclosure.ts 顶部注释与 Conversation.render.test.tsx 的 AC8 代理用例）。
 export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string) => void; isSupersededTurn?: boolean }) {
+  // F1（#270）必做 2：`cycle` 回调此前在链路渲染器里**每次渲染现建一个新闭包**，
+  // 作为 prop 传给 memo(ToolCard) ⇒ 浅比较恒不等，memo 恒 miss。移到组件里用
+  // useCallback 建立一次（依赖 disclosure——它只在 override / density 变化时换引用，
+  // 流式提交期间恒等），引用就稳定了；注册表本身不取 hook，仍按 ChainRenderCtx 的
+  // 既有约定只接收透传值。
+  const cycleLevel = useCallback(
+    (key: string, density: TraceDensity) => {
+      if (!disclosure) return;
+      disclosure.setLevel(key, nextLevel(disclosure.levelFor(key, density)));
+    },
+    [disclosure],
+  );
+
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -615,6 +633,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                     disclosure={disclosure}
                     reasoningDisclosure={reasoningDisclosure}
                     isFinalModel={i === lastModelIndex}
+                    onCycleLevel={cycleLevel}
                     onFocusTool={onFocusTool}
                     onOpenSession={onOpenSession}
                     onInspectChild={onInspectChild}
@@ -662,6 +681,10 @@ interface ChainRenderCtx {
    *  （与旧 ChainNodeView 默认一致——直接调用方多省略此 prop）。 */
   isFinalModel?: boolean;
   onFocusTool?: (tool: ToolCall) => void;
+  /** L 级循环回调（F1/#270）：由 TurnView 用 useCallback 建立一次，跨渲染引用稳定，
+   *  memo(ToolCard) 才会命中。带 (key, density) 参数而不是无参闭包——注册表不能取
+   *  hook，按节点现场建的闭包必然破坏下游 memo 的浅比较。 */
+  onCycleLevel?: (key: string, density: TraceDensity) => void;
   onOpenSession?: (sessionId: string) => void;
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
   /** #186：这条链属于哪个会话——工具卡的归档 diff 要按会话读 artifact 内容。 */
@@ -673,18 +696,24 @@ type RendererFor<K extends ChainNode['kind']> = (
   ctx: Omit<ChainRenderCtx, 'node'> & { node: Extract<ChainNode, { kind: K }> },
 ) => ReactNode;
 
+/** 已完成/历史 model 段的 markdown 正文（F1/#270 必做 3）。
+ *  记忆化的键**必须是内容**：`segment` 对象在每次投影提交时都可能换引用，按引用记忆
+ *  等于没记忆化（票面 Risks 点名的陷阱）。这里靠 memo 的 props 浅比较，键就是字符串
+ *  `text`——内容未变的重复提交直接 bail out，`renderMarkdown` 一次都不再跑。
+ *  注：注册表是普通函数不能取 hook，所以记忆化只能落在组件上。 */
+const MarkdownBody = memo(function MarkdownBody({ text }: { text: string }) {
+  return <>{renderMarkdown(text)}</>;
+});
+
 const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
-  tool: ({ node, density, disclosure, onFocusTool, sessionId }) => {
+  tool: ({ node, density, disclosure, onFocusTool, sessionId, onCycleLevel }) => {
     const key = toolEventKey(node.tool.tool_call_id);
-    const cycle = disclosure
-      ? () => disclosure.setLevel(key, nextLevel(disclosure.levelFor(key, density)))
-      : undefined;
     return (
       <ToolCard
         tool={node.tool}
         density={density}
         level={disclosure ? disclosure.levelFor(key, density) : undefined}
-        onCycleLevel={cycle}
+        onCycleLevel={onCycleLevel}
         onFocus={onFocusTool}
         sessionId={sessionId}
       />
@@ -709,7 +738,7 @@ const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
       const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
       if (!first) return null;
       return (
-        <div className="model-output done model-output-compact">{renderMarkdown(truncateForDisplay(first))}</div>
+        <div className="model-output done model-output-compact"><MarkdownBody text={truncateForDisplay(first)} /></div>
       );
     }
     if (!segment.text && segment.status !== 'streaming') return null;
@@ -748,7 +777,7 @@ const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
       <div className="model-output-wrap">
         {kindRow}
         <div className={`model-output ${segment.status}${kind === 'model' ? ' model-output-intermediate' : ''}`}>
-          {renderMarkdown(display)}
+          <MarkdownBody text={display} />
         </div>
         {segment.text && <CopyButton text={segment.text} label={kind === 'final-answer' ? '复制回答' : '复制输出'} />}
       </div>

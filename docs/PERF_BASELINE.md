@@ -74,7 +74,60 @@
 > 无性能数字要求（docs-only）。**不在此文件记账。**
 
 ### F1 — 稳定 `disclosure` 引用（#270）
-_待落基线。_
+
+**基线（改造前，2026-09-18）**——全部为实测，非估算：
+
+| 场景 | 规模 | 指标 | 改造前 | 改造后 | 口径 / 命令 | 日期 | commit |
+|---|---|---|---|---|---|---|---|
+| 流式提交一次（已完成段已渲染） | 1 个可见已完成段 | `renderMarkdown` 调用次数 / 每次父级提交 | **1**（= 可见已完成段数，与提交同频） | **0**（内容未变即命中，零解析） | `node node_modules/vitest/vitest.mjs run src/components/Conversation.render.test.tsx` | 2026-09-18 | <sha> |
+| 同上，挂载即计数 | 1 个已完成轮 | `renderMarkdown` 调用次数 / 挂载（含 sessionKey effect 那一拍） | **2** | **1** | 同上 | 2026-09-18 | <sha> |
+| 父级无关状态变化 | 1 个已完成轮 | `memo(TurnView)` render 次数 / 挂载 | **2**（memo 恒 miss） | **1** | 同上（以轮次时间戳计 `formatDuration` 调用） | 2026-09-18 | <sha> |
+| 只改与工具卡无关的 prop | 1 个工具轮 | `memo(ToolCard)` render 次数 / 挂载 | **2**（`cycle` 闭包每次新建） | **1** | 同上（以工具时间戳计 `formatDuration` 调用） | 2026-09-18 | <sha> |
+| 单次解析成本 | 2k 字长回答 | `renderMarkdown` 单次耗时中位数（n=200） | **0.692 ms**（p95 3.591 ms） | 同（单价不变，变的是调用次数） | 见下方「成本探针」命令 | 2026-09-18 | <sha> |
+| 一次提交的被浪费工作 | 3 个可见已完成段 | 一轮全量重解析耗时中位数（n=200） | **1.320 ms**（p95 2.614 ms） | **0**（内容未变即命中，零解析） | 同下 | 2026-09-18 | <sha> |
+| 折算每秒 | 合帧窗口 24ms ⇒ 40 次提交/秒 | 单核占用（40 × 1.320 ms） | **≈53 ms/s（≈5.3%）**，且随段数/长度线性增长 | ≈0 | 同上 | 2026-09-18 | <sha> |
+| `deriveChain` 单次成本 | 3 model 段 + 2 工具 | 单次耗时中位数（n=200） | **0.002 ms** | 同 | 同下 | 2026-09-18 | <sha> |
+| Chrome Performance（观感口径，G4） | 长回答流式 | long task 数 + 最长单帧 | **未取得** | **未取得** | 见「未闭合」 | 2026-09-18 | — |
+
+**改造后数字的取证方式（可复核）**：上表前 4 行的「改造后」不是估算，是
+`web/src/lib/disclosure.test.tsx` + `web/src/components/Conversation.render.test.tsx` 里
+**直接断言掉的计数**（计数用的是 `formatDuration` / `renderMarkdown` 的 spy，见该文件头部注释）；
+命令与上表「口径 / 命令」列一致，全绿即等于这几个数字成立。
+
+**改造前的红证（同一条命令、同一批用例）**：把三个源文件临时换回 `HEAD` 版本
+（`git show HEAD:<path>`，**禁用 `git stash`**）后重跑，14 条里 **6 条失败**：
+`disclosure.test.tsx` R1 ×2（`expected 3 to be 2`）、AC3（`expected 2 to be 1`）、
+AC4（`expected 2 to be 1`）、AC5 ×2（`expected "vi.fn()" to be called 1 times, but got 2 times`）。
+改造后 14/14 全绿 —— 因果闭合。
+
+**顺带记录（同一文件、非本票收益来源）**：`web/src/lib/disclosure.ts` 的
+`react(set-state-in-effect)` 告警由 **2 → 0**（清空 override 的 effect 加了「挂载期跳过」守卫
+后不再是无条件同步 setState）；全仓 oxlint 告警总数 **44 → 42**，**无新增**。
+
+
+**成本探针（基线复现脚本，已随本票入库）**：`web/src/lib/f1-cost-probe.perf.test.ts`
+（与仓内既有的 `projection.perf.test.ts` / `streaming.perf.test.ts` 同属 perf 车道；
+`vitest.config.ts` 已排除 `*.perf.test.ts`，不进默认 `npm test`）：
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts src/lib/f1-cost-probe.perf.test.ts
+```
+
+> **复跑波动（2026-09-18 当日第二次运行，追加记录，不改上表原值）**：`renderMarkdown(2k)`
+> 中位 **0.752 ms**（p95 3.958）、三段合计 **1.484 ms**（p95 3.264）。与上表 0.692 / 1.320
+> 同量级、差异属机器抖动——**结论不受影响**：本票的收益是「调用次数从 N 降到 0」，
+> 单价量级只用于说明「浪费确实有成本」，不作为阈值。
+
+> **注意别把功劳记错**：`deriveChain` 只有 0.002 ms，**本票真正的浪费全在 markdown 重解析**
+> （0.692 ms/次）。`deriveChain` 那一行是「顺手测了一下、结论是可忽略」，不是收益来源。
+
+**未闭合（G4 的观感口径）**：Chrome Performance 的 long task 数 / 最长单帧**本次未取得**——
+本执行环境无 GUI 浏览器、且无真后端可驱动一场真实流式，产不出可信 trace（`PERF_BASELINE §2.1`
+本身也明令**不引入** Playwright 帧率自动采集）。**解除条件**：在真机 Chrome Performance 面板按
+固定场景录一次（同窗口尺寸 + 同一段长回答 + 同一操作序列：打开 → 流式 → 折叠/展开工具卡 →
+切 density），把 trace 存档并把两列数字补进上表。在此之前，本票的收益证据只覆盖
+「可自动化口径」（调用次数 / 次数 × 单价）。
+
 要求指标：
 - 「流式提交一次」时 `renderMarkdown` 的实际调用次数（改造前应按可见已完成段数增长）；
 - `memo(TurnView)` / `memo(ToolCard)` 的 render 次数（render 计数 spy）；

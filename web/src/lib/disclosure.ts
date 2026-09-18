@@ -8,7 +8,7 @@
  * override 随 session 切换清空（hook 壳 effect），不跨会话记忆。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TraceDensity } from './density';
 import type { ReasoningStatus } from './reasoningCursor';
 
@@ -74,11 +74,42 @@ export interface Disclosure {
   setLevel: (key: string, level: DisclosureLevel) => void;
 }
 
+/* ── F1（#270）：返回值跨渲染引用稳定 ─────────────────────────────────────────────
+ *
+ * 为什么必须稳定：返回对象会被 `Conversation.tsx` 一路当 prop 透传（`:355` → `:629`
+ * → 链路渲染器 `:711`），同时 `reasoningDisclosure` 进 `ReasoningBlock`。不稳定 ⇒
+ * `memo(TurnView)` / `memo(ToolCard)` / `memo(ReasoningBlockView)` 三处浅比较恒不等，
+ * memo **恒 miss**。后果是流式期间约 40 次/秒的合帧提交里，屏幕上每个已完成的可见
+ * model 段都被重跑一次全量 markdown 解析（机制与前后数字见 docs/PERF_BASELINE.md
+ * 的 F1 节）——正是「长回答越写越卡」。
+ *
+ * 为什么选票面必做 1 的 **B 方案**（整体 useMemo）而不是标注「推荐」的 A 方案
+ * （useRef 稳定容器，身份**永不改变**）：A 会引入一条可复现的**功能缺陷**，不是风格问题。
+ * `levelFor` 是在 `TurnView` **自己的渲染体**里被调用、用来算每个工具卡的 `level` 的
+ * （Conversation.tsx:711）。点了档位 → `setLevel` → overrides 变 → **必须**让
+ * `memo(TurnView)` 重新比较出「不等」，TurnView 才会重渲染、新的 level 才流得到
+ * ToolCard。身份永不改变的 A 方案下 memo 恒 bail out ⇒ 点击工具行的档位循环静默无效
+ * （实测红证：Conversation.render.test.tsx 的「稳定化不得变成『点了没反应』」用例
+ * 在 A 方案下断言 `expected 1 to be greater than 1`）。
+ *
+ * B 的代价是「依赖集合必须补全」，漏一个就是陈旧读取（票面 Risks 点名的陷阱）。两个
+ * hook 的捕获面都在下面逐项注明；`levelFor`/`isOpen` 的 `density` 是**调用方传入的
+ * 参数**（`levelFor`）或显式依赖（`isOpen`），都不落在「捕获了却漏进依赖」的坑里。
+ */
+
 /** 逐会话的手动展开状态（hook 壳：sessionKey 变化即清空）。 */
 export function useDisclosure(sessionKey: string | null): Disclosure {
   const [overrides, setOverrides] = useState<ReadonlyMap<string, DisclosureLevel>>(() => new Map());
 
+  /* 清空 override 只应发生在 **sessionKey 真的变了** 的时候。挂载那一次必须跳过：
+   * state 初值本就是一张空 Map，`setOverrides(new Map())` 只是把引用换成内容相同的新表
+   * ——白渲染一次，并按下面 useMemo 的依赖捅出一个「无内容变化的新引用」，R1 的
+   * 字面口径（同一实例连续两次渲染 `===` 相等）会因此破。这不是放宽断言，是消掉一次
+   * 可证明无内容变化的状态写入。 */
+  const lastSessionKey = useRef(sessionKey);
   useEffect(() => {
+    if (lastSessionKey.current === sessionKey) return;
+    lastSessionKey.current = sessionKey;
     setOverrides(new Map());
   }, [sessionKey]);
 
@@ -86,12 +117,13 @@ export function useDisclosure(sessionKey: string | null): Disclosure {
     setOverrides((prev) => applyOverride(prev, key, level));
   }, []);
 
-  const levelFor = useCallback(
-    (key: string, density: TraceDensity): DisclosureLevel => resolveLevel(overrides, key, density),
-    [overrides],
-  );
-
-  return { levelFor, setLevel };
+  /* 捕获面核对：`levelFor` 只捕获 `overrides`（density 是调用方的参数，不进闭包）；
+   * `setLevel` 只捕获 useCallback 出来的 `setLevel`（空依赖，本身稳定）
+   * ⇒ 依赖集合 `[overrides, setLevel]` 完整。 */
+  return useMemo<Disclosure>(() => ({
+    levelFor: (key, density) => resolveLevel(overrides, key, density),
+    setLevel,
+  }), [overrides, setLevel]);
 }
 
 // ── T2（#95）reasoning 自动开合（S6/S7，规格 03 §7.5 DisclosureState）──
@@ -126,19 +158,25 @@ export function setReasoningOpen(
 export function useReasoningDisclosure(sessionKey: string | null, density: TraceDensity) {
   const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(() => new Map());
 
+  // sessionKey 变化清空；挂载期跳过（理由同 useDisclosure）。
+  const lastSessionKey = useRef(sessionKey);
   useEffect(() => {
+    if (lastSessionKey.current === sessionKey) return;
+    lastSessionKey.current = sessionKey;
     setOverrides(new Map());
   }, [sessionKey]);
-
-  const isOpen = useCallback(
-    (blockId: string, status: ReasoningStatus) =>
-      reasoningIsOpen(overrides, blockId, status, density),
-    [overrides, density],
-  );
 
   const toggle = useCallback((blockId: string, currentOpen: boolean) => {
     setOverrides((prev) => setReasoningOpen(prev, blockId, !currentOpen));
   }, []);
 
-  return { isOpen, toggle };
+  /* F1（#270）：与 useDisclosure 同一条引用稳定契约（`memo(ReasoningBlockView)` 直接吃
+   * 这个对象）。捕获面核对：`isOpen` 捕获 `overrides` + `density`（**prop**，必须进依赖：
+   * 切 density 后自动开合规则要按新档重新求值，且结果会变，memo 必须重算）；
+   * `toggle` 捕获 useCallback 的 `toggle`（空依赖）⇒ `[overrides, density, toggle]` 完整。 */
+  return useMemo(() => ({
+    isOpen: (blockId: string, status: ReasoningStatus) =>
+      reasoningIsOpen(overrides, blockId, status, density),
+    toggle: (blockId: string, currentOpen: boolean) => toggle(blockId, currentOpen),
+  }), [overrides, density, toggle]);
 }
