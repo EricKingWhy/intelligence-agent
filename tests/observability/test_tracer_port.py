@@ -38,6 +38,7 @@ from tests.agent.test_runtime_failure_paths import ExplodingModel
 from tests.conftest import make_session
 from tests.observability.test_tool_tracing import _FlakyTool
 from tests.observability.test_tracer import FakeRecorder, _tracer
+from tests.observability.tracer_fixtures import RecordingNullTracer
 from tests.scripted_model import ScriptedModel
 
 
@@ -122,24 +123,6 @@ def _timing_normalized(value: Any) -> Any:
     return value
 
 
-class _RecordingNullTracer:
-    """记录端口调用名，行为委托 NullTracer（测试 seam：证明"谁被调用"，零副作用）。"""
-
-    trace_id: str | None = None
-    trace_url: str | None = None
-
-    def __init__(self, calls: list[str]) -> None:
-        self._calls = calls
-        self._inner = NullTracer()
-
-    def __getattr__(self, name: str):
-        def _record(*args: Any, **kwargs: Any) -> Any:
-            self._calls.append(name)
-            return getattr(self._inner, name)(*args, **kwargs)
-
-        return _record
-
-
 def test_null_tracer_lifecycle_is_inert_and_returns_usable_handles():
     """NullTracer：零参数可构造，全生命周期零抛错，句柄是对象而非 None。"""
     tracer = NullTracer()
@@ -177,7 +160,7 @@ def test_run_tracer_drives_the_same_lifecycle_script():
 async def test_runtime_without_sink_drives_the_null_tracer_port(tmp_path, monkeypatch):
     """未配置观测 = NullTracer 收到完整生命周期（而不是"没有 tracer"）。"""
     calls: list[str] = []
-    monkeypatch.setattr(runtime_module, "NullTracer", lambda: _RecordingNullTracer(calls))
+    monkeypatch.setattr(runtime_module, "NullTracer", lambda: RecordingNullTracer(calls))
     scripted = ScriptedModel([AIMessage(content="你好")])
     session = make_session(tmp_path)
 
@@ -267,7 +250,7 @@ async def test_sink_failing_only_in_trace_url_keeps_run_intact(tmp_path):
 def _record_null_tracer_calls(monkeypatch) -> list[str]:
     """把 Runtime 的缺席实现换成记录器：返回被调用的端口方法名列表。"""
     calls: list[str] = []
-    monkeypatch.setattr(runtime_module, "NullTracer", lambda: _RecordingNullTracer(calls))
+    monkeypatch.setattr(runtime_module, "NullTracer", lambda: RecordingNullTracer(calls))
     return calls
 
 
