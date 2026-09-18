@@ -23,7 +23,12 @@ import pytest
 from langchain_core.messages import AIMessageChunk
 
 from agent_harness.agent.profiles import BUILTIN_PROFILES, declared_tool_universe
-from agent_harness.assembly import build_runtime, initialize_stores, recovery_stores
+from agent_harness.assembly import (
+    BUILTIN_LOCAL_TOOLS,
+    build_runtime,
+    initialize_stores,
+    recovery_stores,
+)
 from agent_harness.capability.wiring import CapabilityWiring
 from agent_harness.config import Settings
 from agent_harness.sandbox import WorkspaceRegistry
@@ -141,12 +146,10 @@ async def test_build_runtime_main_profile_injects_system_prompt(tmp_path):
 
 # ── #238：声明面 / 注册面对账（AC2 交集、AC3 dropped） ──────────────────
 
-#: `assembly.BUILTIN_LOCAL_TOOLS` 无条件注册的 9 个本地工具名——关掉 artifact store
-#: 且无 capability wiring 时的**注册面**全貌。
-_LOCAL_TOOL_NAMES = frozenset({
-    "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
-    "git_status", "git_diff",
-})
+#: `assembly.BUILTIN_LOCAL_TOOLS` 无条件注册的本地工具名——从常量**取**（`cls(None)`
+#: 只读 `.name`，构造器不碰沙箱），不再手抄第三份：手抄的那份不会随常量漂移，
+#: 而常量本身由 `tests/agent/test_tool_scope_reconciliation.py` 的 AST 闸看住。
+_LOCAL_TOOL_NAMES = frozenset(cls(None).name for cls in BUILTIN_LOCAL_TOOLS)
 
 
 @pytest.mark.asyncio

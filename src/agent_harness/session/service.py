@@ -784,15 +784,13 @@ class SessionService:
     # ── 续聊（Phase Multiturn T2 / PRD §5.3）──────────────────────
 
     def _reconcile_workspace_binding(
-        self, session_id: str, persisted_cwd: str, events: list,
+        self, session_id: str, persisted_cwd: str, events: list,  # list[SessionEvent]
     ) -> None:
         """durable cwd 与沙箱映射 / 进程内 cache 的机械对账（#266）。
 
-        两侧不一致 → 类型化冲突：**不覆盖映射、不静默选边**（ADR-0027 之后
-        `workspace_root` 可能就是用户的真实仓库，选错一侧等于让工具在用户没选过的
-        目录里执行）。注册表侧有两条记录（持久映射 + 进程内 cache），**两条都要对账**
-        ——只看一条会漏掉另一种形态：cache 与 cwd 一致、映射却指向别处时，进程一重启
-        就会换到另一个目录。只读对账，不实例化 Sandbox（那会 mkdir）。
+        注册表侧有两条记录（持久映射 + 进程内 cache），**两条都要对账**——只看一条会
+        漏掉另一种形态：cache 与 cwd 一致、映射却指向别处时，进程一重启就会换到另一个
+        目录。只读对账，不实例化 Sandbox（那会 mkdir）。
 
         两类**按设计就不同**的会话不在对账范围：
 
@@ -800,6 +798,9 @@ class SessionService:
         - fork 子会话：cwd 锚记的是**项目归属**（父的目录），映射是 copy-on-fork 的
           副本目录（ADR-0017 决策 5 / `test_session_cwd.py::TestForkInheritance`）。
           真机上 3 条 fork 子会话正是这个形状——判成冲突等于让它们再也无法续聊。
+
+        冲突为什么必须类型化失败（不静默选边）单点在 `WorkspaceBindingConflict` 的
+        docstring，这里不重复（§16.1）。
         """
         registry = self._state.workspace_registry
         if registry is None:

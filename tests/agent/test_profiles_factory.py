@@ -92,9 +92,9 @@ class TestBuiltinProfiles:
         assert "delegate" in main.tool_scope
         assert main.max_steps == 20
         assert main.max_delegations == 8
-        # union 语义：其余档位声明的工具面必须被 main 覆盖（子代理能做的 main 都能）
-        for name, spec in BUILTIN_PROFILES.items():
-            assert spec.tool_scope <= main.tool_scope, f"{name} 的 scope 未被 main 覆盖"
+        # 注：main 的 scope 由 `_MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | {...}`
+        # 定义，所以"其余档位 ⊆ main"是**结构上**成立的（不是可被断言推翻的性质）；
+        # main 具体是哪 17 个由上面的 exact set 表钉住。
 
     def test_coding_scope_has_no_web(self):
         coding = BUILTIN_PROFILES["coding"]

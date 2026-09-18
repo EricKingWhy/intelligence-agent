@@ -12,7 +12,6 @@ tests/web/test_web_amend_passthrough.py。
 from __future__ import annotations
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,6 +25,7 @@ from agent_harness.session.event import SESSION_FORKED, USER_MESSAGE
 from agent_harness.session.service import AmendOptions, SessionService
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
+from tests.workspace_fixtures import rewrite_workspace_mapping
 
 
 def _make_state(tmp_path):
@@ -87,14 +87,6 @@ class TestResumeWorkspace:
             state.store, session_id=session_id, cwd=cwd,
             workspace_registry=state.workspace_registry,
         )
-
-    @staticmethod
-    def _rewrite_mapping(state, session_id, root):
-        """把映射文件改指别处——模拟漂移/损坏（对账的另一侧事实）。"""
-        path = state.workspaces_root / f"{session_id}.json"
-        mapping = json.loads(path.read_text(encoding="utf-8"))
-        mapping["workspace_root"] = str(root)
-        path.write_text(json.dumps(mapping), encoding="utf-8")
 
     @staticmethod
     def _resume(state, session_id):
@@ -170,7 +162,7 @@ class TestResumeWorkspace:
         other = tmp_path / "project-b"
         other.mkdir()
         self._start_with_cwd(state, "test-sid", cwd)
-        self._rewrite_mapping(state, "test-sid", other)
+        rewrite_workspace_mapping(state.workspaces_root, "test-sid", other)
         state.workspace_registry = WorkspaceRegistry(root=tmp_path)  # 新实例，cache 空
 
         with pytest.raises(WorkspaceBindingConflict, match="工作目录绑定冲突"):
@@ -178,6 +170,30 @@ class TestResumeWorkspace:
 
         assert self._started_count(state, "test-sid") == 1
         assert not (state.workspaces_root / "test-sid").exists()
+
+    def test_conflict_is_detected_before_any_sandbox_instantiation(self, tmp_path):
+        """对账必须在**任何 Sandbox 实例化之前**（#266 的核心性质，不只是"会拒绝"）。
+
+        漂移目标是**不存在**的目录：`get()` / `create()` 构造 Sandbox 时会 mkdir，
+        所以对账一旦被挪到 `Session.resume`（那一步会 `registry.get()`）之后，这个
+        目录就会被凭空建出来——正是票面要杜绝的"先建回来、再宣布一切正常"。
+
+        上面几条冲突用例的漂移目标都是**已存在**的目录，mkdir 是 no-op：把对账点挪到
+        后面它们照样全绿（审查实测），钉不住这条性质，所以这条用幽灵目录单独钉。
+        """
+        state = self._real_state(tmp_path)
+        cwd = tmp_path / "project-a"
+        cwd.mkdir()
+        ghost = tmp_path / "project-b"  # 故意不创建：任何 mkdir 都会留下痕迹
+        self._start_with_cwd(state, "test-sid", cwd)
+        rewrite_workspace_mapping(state.workspaces_root, "test-sid", ghost)
+        state.workspace_registry = WorkspaceRegistry(root=tmp_path)  # 新实例，cache 空
+
+        with pytest.raises(WorkspaceBindingConflict, match="工作目录绑定冲突"):
+            self._resume(state, "test-sid")
+
+        assert not ghost.exists(), "对账之前不得实例化 Sandbox（会 mkdir 漂移目标）"
+        assert self._started_count(state, "test-sid") == 1
 
     def test_cached_sandbox_conflict_fails_typed(self, tmp_path):
         """**进程内 cache 命中**路径：cache=B（mapping 后来改回 A、cwd=A）→ 冲突。
@@ -191,12 +207,12 @@ class TestResumeWorkspace:
         other = tmp_path / "project-b"
         other.mkdir()
         self._start_with_cwd(state, "test-sid", cwd)
-        self._rewrite_mapping(state, "test-sid", other)
+        rewrite_workspace_mapping(state.workspaces_root, "test-sid", other)
         # 进程重启后的形态：新实例从映射读到 B 并把它装进 cache（此后 cache=B）。
         restarted = WorkspaceRegistry(root=tmp_path)
         restarted.get("test-sid")
         state.workspace_registry = restarted
-        self._rewrite_mapping(state, "test-sid", cwd)  # 映射改回 A：cache 成为唯一异见
+        rewrite_workspace_mapping(state.workspaces_root, "test-sid", cwd)  # 映射改回 A：cache 成为唯一异见
 
         with pytest.raises(WorkspaceBindingConflict, match="工作目录绑定冲突"):
             self._resume(state, "test-sid")
@@ -215,7 +231,7 @@ class TestResumeWorkspace:
         other = tmp_path / "project-b"
         other.mkdir()
         self._start_with_cwd(state, "test-sid", cwd)
-        self._rewrite_mapping(state, "test-sid", other)  # cache 仍是 cwd
+        rewrite_workspace_mapping(state.workspaces_root, "test-sid", other)  # cache 仍是 cwd
 
         with pytest.raises(WorkspaceBindingConflict, match="工作目录绑定冲突"):
             self._resume(state, "test-sid")

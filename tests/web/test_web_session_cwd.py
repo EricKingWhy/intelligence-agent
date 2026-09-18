@@ -28,6 +28,7 @@ from langchain_core.messages import AIMessage
 from agent_harness.config import Settings
 from agent_harness.web.app import create_app
 from tests.scripted_model import ScriptedModel
+from tests.workspace_fixtures import rewrite_workspace_mapping
 
 _DATA_PREFIX = "data:"
 
@@ -262,10 +263,7 @@ def test_resume_rejects_drifted_sandbox_mapping(tmp_path: Path) -> None:
 
     other = tmp_path / "other"
     other.mkdir()
-    mapping_path = tmp_path / "workspaces" / f"{session_id}.json"
-    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
-    mapping["workspace_root"] = str(other)
-    mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+    rewrite_workspace_mapping(tmp_path / "workspaces", session_id, other)
 
     with patch(
         "agent_harness.assembly.create_chat_model",

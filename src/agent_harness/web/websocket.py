@@ -234,6 +234,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         InvalidSessionId,
                         SessionNotFound,
                         SessionService,
+                        WorkspaceBindingConflict,
                     )
 
                     sid = msg.get("session_id", "")
@@ -247,7 +248,10 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         result = await service.send_message(
                             session_id=sid, content=content, mode=mode,
                         )
-                    except (InvalidSessionId, SessionNotFound) as e:
+                    # WorkspaceBindingConflict（#266）：WS 是 HTTP 三个端点之外的第四个
+                    # 续聊入口——不在这里收编，它会逃到外层的 `except Exception`（只
+                    # `logger.debug`）并让连接静默死掉，用户看不到任何原因。
+                    except (InvalidSessionId, SessionNotFound, WorkspaceBindingConflict) as e:
                         await _send_json({"type": "error", "message": str(e)})
                         continue
                     if result.status == "launched":

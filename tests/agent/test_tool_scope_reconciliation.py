@@ -29,6 +29,13 @@
 - **本部署实际注册了什么**：那是 wiring 与运行期前置（API key / session_store）决定的，
   会与声明面双向不一致。本文件只对账**声明**与**源码里的工具类**；"声明 ⊃ 注册"由
   `tests/test_assembly_agent_profile.py` 的降级用例覆盖。
+- **扫描根是 `src/agent_harness`**：`evaluation/support.py` 的 `AddTool`（由
+  `evaluation/runner.py` 注册进真实 registry）在扫描根之外——它是评测支撑工具，不属
+  内置工具面。生产侧新增注册机制时，这里要跟着扩，否则新工具对判据不可见。
+- **基类判定是"名字以 `Tool` 结尾"**（`source_tool_classes`）：不是 MRO/import 判定。
+  两个方向都不是静默的——基类名不以 `Tool` 结尾的真子类会**漏掉**（判据看不见它），
+  继承自某个 `*Tool` 命名的非工具基类会被**多收**（进清单，红，需登记）。实测当前
+  `src/` 下无两类误判；真出现时按 `_NOT_STATICALLY_ENUMERABLE` 的先例写明理由。
 """
 
 from __future__ import annotations
@@ -107,16 +114,20 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
 }
 
 
+def _declared_sub_agent_scope() -> frozenset[str]:
+    """非-main 档位声明面的**并集**（对账里的"声明面"）。"""
+    return frozenset().union(
+        *(BUILTIN_PROFILES[name].tool_scope for name in _SUB_AGENT_PROFILES)
+    )
+
+
 def unscoped(names: Iterable[str]) -> list[str]:
     """返回"既不在任何非-main 档位、也不在带理由白名单"的工具名（升序）。空 = 通过。
 
     刻意收成纯函数：判据要能被喂**假名字**（`test_new_unscoped_tool_is_reported`），
     否则"新增工具会红"只是声称，不是证据。
     """
-    declared = frozenset().union(
-        *(BUILTIN_PROFILES[name].tool_scope for name in _SUB_AGENT_PROFILES)
-    )
-    return sorted(set(names) - declared - set(_UNSCOPED_TOOL_REASONS))
+    return sorted(set(names) - _declared_sub_agent_scope() - set(_UNSCOPED_TOOL_REASONS))
 
 
 def _name_of(class_name: str, module_name: str) -> str:
@@ -138,9 +149,14 @@ def builtin_tool_names() -> set[str]:
     return local | capability
 
 
-def source_tool_classes() -> dict[str, str]:
-    """`src/agent_harness` 下全部 `Tool` 子类：类名 → 相对 `src/` 的模块路径。"""
-    found: dict[str, str] = {}
+def source_tool_classes() -> dict[str, list[str]]:
+    """`src/agent_harness` 下全部 `Tool` 子类：类名 → 定义它的模块路径（可多个）。
+
+    名字是**唯一**的对账键（清单登记的是名字），所以同名类不能互相覆盖：两个模块各
+    定义一个 `FooTool` 时只留一条，另一个就逃过全部判据。返回列表、由调用方对"同名"
+    直接判红（`test_source_tool_classes_are_all_inventoried`）。
+    """
+    found: dict[str, list[str]] = {}
     for path in sorted(_SRC_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -151,8 +167,9 @@ def source_tool_classes() -> dict[str, str]:
                 for base in node.bases
             ]
             if any(base.endswith("Tool") for base in bases):
-                found[node.name] = str(path.relative_to(_SRC_ROOT.parent.parent)).replace("\\", "/")
-    return found
+                rel = str(path.relative_to(_SRC_ROOT.parent.parent)).replace("\\", "/")
+                found.setdefault(node.name, []).append(rel)
+    return {name: sorted(set(paths)) for name, paths in found.items()}
 
 
 def _inventoried_classes() -> set[str]:
@@ -170,14 +187,21 @@ def test_source_tool_classes_are_all_inventoried():
     这是"新增 builtin tool 而未更新对账表时测试变红"（#238 AC2）的机械部分：
     加类 → 这里红 → 加进清单 → 第 1 条判据接着问它归谁。
     """
-    discovered = set(source_tool_classes()) - set(_NOT_STATICALLY_ENUMERABLE)
+    discovered_all = source_tool_classes()
+    # 同名类：按名字对账会让其中一个静默逃过**全部**判据（清单/白名单都只认名字）。
+    duplicates = sorted(name for name, paths in discovered_all.items() if len(paths) > 1)
+    assert not duplicates, (
+        f"同名 Tool 子类出现在多个模块，按名字对账会漏掉其中一个："
+        f"{ {name: discovered_all[name] for name in duplicates} }"
+    )
+    discovered = set(discovered_all) - set(_NOT_STATICALLY_ENUMERABLE)
     missing = sorted(discovered - _inventoried_classes())
     assert not missing, (
         f"这些 Tool 子类不在内置工具清单里，工具面因此无人对账：{missing}"
         "（加进 _CAPABILITY_TOOL_CLASSES，或按 MCPTool 的先例写进 _NOT_STATICALLY_ENUMERABLE）"
     )
     # 反向：清单里写了但源码里没有的类（改名/删除后的残骸）——同样红。
-    stale = sorted(_inventoried_classes() - set(source_tool_classes()))
+    stale = sorted(_inventoried_classes() - set(discovered_all))
     assert not stale, f"清单里有源码中不存在的工具类（已改名或删除？）：{stale}"
 
 
@@ -207,10 +231,7 @@ def test_whitelist_entries_carry_a_reason():
 
 def test_whitelist_has_no_dead_entries():
     """已被非-main 档位声明的名字不该再躺在白名单里（理由过期 = 误导后来人）。"""
-    declared = frozenset().union(
-        *(BUILTIN_PROFILES[name].tool_scope for name in _SUB_AGENT_PROFILES)
-    )
-    dead = sorted(set(_UNSCOPED_TOOL_REASONS) & declared)
+    dead = sorted(set(_UNSCOPED_TOOL_REASONS) & _declared_sub_agent_scope())
     assert not dead, (
         f"这些名字已被非-main 档位声明，白名单条目应删除：{dead}"
     )
@@ -222,17 +243,17 @@ def test_whitelist_only_covers_real_tools():
     assert not unknown, f"白名单里有不存在的工具名：{unknown}"
 
 
-# ── 声明面本身：三个档位的 exact 集合（参数化，见 test_profiles_factory）──
+# ── 声明面本身：子代理档位非空（exact 集合见 test_profiles_factory）──
 
 
 @pytest.mark.parametrize("profile", _SUB_AGENT_PROFILES)
-def test_sub_agent_scopes_are_non_empty_and_subset_of_main(profile: str):
-    """子代理档位的 scope 非空、且 ⊆ main 的声明面（main 是超集是**声明**上的性质）。
+def test_sub_agent_scopes_are_non_empty(profile: str):
+    """子代理档位的 scope 非空——空集等于"这个档位一个工具都没有"。
 
-    这条不是重复 `test_profiles_factory` 的 exact 集合：它钉的是方向性——子代理
-    不可能声明一个 main 都没有的工具（那会让"main 亲自查证"这一档突然少一个工具，
-    而 profile 的选择不该改变 main 的能力）。
+    "子代理 ⊆ main"**不在这里断言**：main 的 scope 定义为
+    `_MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | frozenset({...})`，子代理档位又
+    复用这两个常量，所以那是**结构上**成立的性质，写出来只会是一条永远绿的断言
+    （审查实测：只有把 main 改成不派生的字面量才可能红，而那种改动由
+    `test_profiles_factory.py::test_declared_scope_is_exact` 的 exact set 表先抓住）。
     """
-    scope = BUILTIN_PROFILES[profile].tool_scope
-    assert scope, f"{profile} 的 tool_scope 为空：子代理将没有任何工具"
-    assert scope <= BUILTIN_PROFILES["main"].tool_scope
+    assert BUILTIN_PROFILES[profile].tool_scope, f"{profile} 的 tool_scope 为空"

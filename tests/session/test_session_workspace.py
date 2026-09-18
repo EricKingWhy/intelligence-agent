@@ -16,6 +16,7 @@ from agent_harness.sandbox.paths import canonical_workspace_path
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
+from tests.workspace_fixtures import rewrite_workspace_mapping
 
 
 @pytest.fixture
@@ -159,10 +160,7 @@ class TestRecordedWorkspaceRoots:
             canonical_workspace_path(external)
         ]
 
-        mapping_path = tmp_path / "workspaces" / "sid.json"
-        mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
-        mapping["workspace_root"] = str(other)
-        mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+        rewrite_workspace_mapping(tmp_path / "workspaces", "sid", other)
 
         assert registry.recorded_workspace_roots("sid") == [
             str(other),
