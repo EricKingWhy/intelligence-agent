@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import shlex
 import subprocess
@@ -306,21 +307,43 @@ async def test_bash_tool_offloads_exec_to_worker_thread(tmp_path):
     assert seen["timeout"] == 60.0
 
 
+class _SlowDockerExec:
+    def __init__(self, delay: float):
+        self.delay = delay
+        self.killed = threading.Event()
+        self.started = threading.Event()
+
+    def exec_create(self, container_id, command, **kwargs):
+        return {"Id": "exec-slow"}
+
+    def exec_start(self, exec_id, **kwargs):
+        self.started.set()
+        yield (None, b"\x1eAH_PID:1234\x1f\n")
+        if self.delay:
+            self.killed.wait(self.delay)
+        if not self.killed.is_set():
+            yield (b"done", b"")
+
+    def exec_inspect(self, exec_id):
+        return {"Pid": 1234, "Running": not self.killed.is_set(), "ExitCode": 0}
+
+
 def _docker_sandbox_with_slow_exec(delay: float) -> object:
-    """构造跳过 __init__ 的 DockerSandbox：不需要 Docker daemon 即可测 exec 契约。"""
+    """构造统一 low-level Docker exec fake，不需要 Docker daemon。"""
     from agent_harness.sandbox.docker import DockerSandbox
 
     sandbox = object.__new__(DockerSandbox)
-    container = Mock()
-    container.reload = Mock()
-    container.status = "running"
+    api = _SlowDockerExec(delay)
+    container = Mock(id="container-1", status="running")
 
-    def slow_exec_run(*args, **kwargs):
-        time.sleep(delay)
-        return Mock(exit_code=0, output=(b"done", b""))
+    def kill_exec(command, **kwargs):
+        api.killed.set()
+        return Mock(exit_code=0)
 
-    container.exec_run = slow_exec_run
+    container.exec_run = kill_exec
     sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
     return sandbox
 
 
@@ -335,9 +358,361 @@ def test_docker_exec_honors_timeout():
     assert elapsed < 5, "exec 必须在 timeout 附近返回，而不是等容器命令结束"
 
 
+def test_docker_exec_create_exception_is_not_timeout_result():
+    """Docker API failure must remain an exception, not a successful Bash result."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = object.__new__(DockerSandbox)
+    container = Mock(id="container-1", status="running")
+    container.kill = Mock()
+    api = Mock()
+    api.exec_create.side_effect = RuntimeError("daemon unavailable")
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+
+    with pytest.raises(RuntimeError, match="daemon unavailable"):
+        sandbox.exec("echo never", timeout=1)
+    container.kill.assert_not_called()
+
+
+class _BlockingDockerExecCreate:
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.started = False
+
+    def exec_create(self, container_id, command, **kwargs):
+        self.entered.set()
+        self.release.wait()
+        return {"Id": "exec-blocked-create"}
+
+    def exec_start(self, exec_id, **kwargs):
+        self.started = True
+        yield (b"should not start", None)
+
+
+def test_docker_exec_create_observes_cancel_while_call_is_blocked():
+    """Cancel during exec_create returns promptly without starting or killing the container."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = object.__new__(DockerSandbox)
+    api = _BlockingDockerExecCreate()
+    container = Mock(id="container-1", status="running")
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+    cancel_event = threading.Event()
+    results: list[ExecResult] = []
+    thread = threading.Thread(
+        target=lambda: results.append(
+            sandbox.exec("touch /workspace/late", timeout=5, cancel_event=cancel_event)
+        )
+    )
+    thread.start()
+    assert api.entered.wait(1)
+    cancel_event.set()
+    try:
+        thread.join(0.2)
+        assert not thread.is_alive(), "exec_create cancellation must not wait for the Docker API call"
+        assert len(results) == 1
+        assert results[0].cancelled is True
+        assert not api.started
+        container.kill.assert_not_called()
+    finally:
+        api.release.set()
+        thread.join(2)
+
+
+def test_docker_exec_start_exception_kills_container():
+    """A stream-start failure must stop a possibly running exec/container."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = object.__new__(DockerSandbox)
+    container = Mock(id="container-1", status="running")
+    api = Mock()
+    api.exec_create.return_value = {"Id": "exec-error"}
+    api.exec_start.side_effect = RuntimeError("stream unavailable")
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+
+    with pytest.raises(RuntimeError, match="stream unavailable"):
+        sandbox.exec("touch /workspace/should-not-run", timeout=1)
+    container.kill.assert_called_once_with()
+
+
 def test_docker_exec_passes_through_normal_result():
     """正常路径契约不变：exit_code / stdout 解码 / demux。"""
     sandbox = _docker_sandbox_with_slow_exec(delay=0)
     result = sandbox.exec("echo done", timeout=5)
     assert result.exit_code == 0
     assert result.stdout == "done"
+
+
+class _StreamingDockerExec:
+    def __init__(self):
+        self.killed = threading.Event()
+        self.started = threading.Event()
+        self.kill_commands: list[list[str]] = []
+
+    def exec_create(self, container_id, command, **kwargs):
+        self.command = command
+        self.create_kwargs = kwargs
+        return {"Id": "exec-1"}
+
+    def exec_start(self, exec_id, **kwargs):
+        assert kwargs == {"stream": True, "demux": True}
+        self.started.set()
+        yield (b"stdout-before\n", b"\x1eAH_PID:1234\x1f\nstderr-before\n")
+        while not self.killed.wait(0.01):
+            yield (b"late\n", None)
+
+    def exec_inspect(self, exec_id):
+        return {
+            "Pid": 1234,
+            "Running": not self.killed.is_set(),
+            "ExitCode": -9 if self.killed.is_set() else 0,
+        }
+
+
+def _docker_sandbox_with_streaming_exec(*, ignore_term: bool = False):
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = object.__new__(DockerSandbox)
+    api = _StreamingDockerExec()
+    container = Mock(id="container-1", status="running")
+
+    def kill_exec(command, **kwargs):
+        api.kill_commands.append(command)
+        shell_command = command[2]
+        if "test -s" in shell_command:
+            return Mock(exit_code=0, output=(b"", b""))
+        if "signal=$2" in shell_command and (
+            command[-1] == "KILL" or not ignore_term
+        ):
+            api.killed.set()
+        return Mock(exit_code=0, output=(b"", b""))
+
+    container.exec_run = kill_exec
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+    return sandbox, api
+
+
+class _ConcurrentDockerExec:
+    def __init__(self):
+        self.started_ids: list[str] = []
+        self.first_stopped = threading.Event()
+        self.next_id = 0
+
+    def exec_create(self, container_id, command, **kwargs):
+        self.next_id += 1
+        return {"Id": f"exec-{self.next_id}"}
+
+    def exec_start(self, exec_id, **kwargs):
+        self.started_ids.append(exec_id)
+        yield (None, b"\x1eAH_PID:1234\x1f\n")
+        if exec_id == "exec-1":
+            while not self.first_stopped.wait(0.01):
+                yield (None, b"")
+        else:
+            yield (b"second done", None)
+
+    def exec_inspect(self, exec_id):
+        return {"ExitCode": 0}
+
+
+def _docker_sandbox_with_concurrent_exec():
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = object.__new__(DockerSandbox)
+    api = _ConcurrentDockerExec()
+    container = Mock(id="container-1", status="running")
+    sandbox._container_name = "container-exec-lock-test"
+    sandbox._exec_state = DockerSandbox._state_for_container(sandbox._container_name)
+
+    def kill_exec(command, **kwargs):
+        api.first_stopped.set()
+        return Mock(exit_code=0)
+
+    container.exec_run = kill_exec
+    container.kill = Mock(side_effect=api.first_stopped.set)
+    container.wait = Mock(return_value={"StatusCode": 137})
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = sandbox._exec_state.lock
+    return sandbox, api
+
+
+def test_docker_timeout_does_not_kill_a_concurrent_exec():
+    """A timed-out command cannot kill another exec using the same container."""
+    sandbox, api = _docker_sandbox_with_concurrent_exec()
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    other_sandbox = object.__new__(DockerSandbox)
+    other_sandbox._container_name = sandbox._container_name
+    other_sandbox._exec_state = DockerSandbox._state_for_container(other_sandbox._container_name)
+    other_sandbox._exec_lock = other_sandbox._exec_state.lock
+    other_sandbox._container = sandbox._container
+    other_sandbox._client = sandbox._client
+    results: dict[str, ExecResult] = {}
+    second_attempted = threading.Event()
+    first_thread = threading.Thread(
+        target=lambda: results.setdefault("first", sandbox.exec("first", timeout=0.6))
+    )
+    first_thread.start()
+    deadline = time.monotonic() + 1
+    while not api.started_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert api.started_ids == ["exec-1"]
+
+    def run_second():
+        second_attempted.set()
+        results["second"] = other_sandbox.exec("second", timeout=3)
+
+    second_thread = threading.Thread(target=run_second)
+    second_thread.start()
+    try:
+        assert second_attempted.wait(1)
+        deadline = time.monotonic() + 0.2
+        while len(api.started_ids) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert api.started_ids == ["exec-1"]
+    finally:
+        first_thread.join(3)
+        second_thread.join(3)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert api.started_ids == ["exec-1", "exec-2"]
+    assert results["first"].exit_code == -1
+    assert results["second"].exit_code == 0
+    assert results["second"].stdout == "second done"
+
+
+class _LargeDockerExec:
+    def exec_create(self, container_id, command, **kwargs):
+        return {"Id": "exec-large"}
+
+    def exec_start(self, exec_id, **kwargs):
+        yield (b"x" * 2_000_100, b"y" * 2_000_100)
+
+    def exec_inspect(self, exec_id):
+        return {"Running": False, "ExitCode": 0}
+
+
+def _docker_sandbox_with_large_output():
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Mock(id="container-1", status="running")
+    sandbox._container.exec_run = Mock(return_value=Mock(exit_code=0, output=b""))
+    sandbox._client = Mock(api=_LargeDockerExec())
+    sandbox._exec_lock = threading.Lock()
+    return sandbox
+
+
+def test_docker_output_is_capped_per_channel():
+    """Docker output follows Local's 2M-per-channel cap and truncation marker."""
+    result = _docker_sandbox_with_large_output().exec("large", timeout=5)
+
+    assert len(result.stdout) <= 2_000_100
+    assert len(result.stderr) <= 2_000_100
+    assert "stdout 超过捕获上限" in result.stdout
+    assert "stderr 超过捕获上限" in result.stderr
+
+
+def test_docker_timeout_kills_exec_and_keeps_partial_output():
+    """Timeout terminates the container exec and retains output emitted before it."""
+    sandbox, api = _docker_sandbox_with_streaming_exec()
+    result = sandbox.exec("sleep forever", timeout=0.1)
+
+    assert api.started.is_set()
+    assert api.command[:4] == ["setsid", "-w", "/bin/sh", "-lc"]
+    assert api.create_kwargs["workdir"] == "/workspace"
+    assert api.kill_commands
+    assert result.exit_code == -1
+    assert "stdout-before" in result.stdout
+    assert "stderr-before" in result.stderr
+    assert "超时" in result.stderr
+    assert result.cancelled is False
+
+
+def test_docker_timeout_fails_if_container_stop_cannot_be_confirmed():
+    """Do not report timeout cleanup as complete when Docker cannot confirm container exit."""
+    sandbox, _ = _docker_sandbox_with_streaming_exec()
+    sandbox._container.kill = Mock(side_effect=RuntimeError("kill unavailable"))
+    sandbox._container.wait = Mock(side_effect=RuntimeError("wait unavailable"))
+
+    with pytest.raises(RuntimeError, match="cleanup.*confirmed"):
+        sandbox.exec("sleep forever", timeout=0.1)
+
+    sandbox._container.kill.assert_called_once_with()
+    sandbox._container.wait.assert_called_once_with()
+    with pytest.raises(RuntimeError, match="previous cleanup was unconfirmed"):
+        sandbox.exec("must not run", timeout=1)
+    sandbox._container.reload.assert_called_once_with()
+
+
+def test_docker_cleanup_failure_guard_survives_sandbox_collection():
+    """A failed cleanup remains fail-closed if its original sandbox is collected."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    container_name = f"cleanup-failed-{time.monotonic_ns()}"
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container_name = container_name
+    sandbox._exec_state = DockerSandbox._state_for_container(container_name)
+    sandbox._mark_exec_cleanup_failed()
+
+    del sandbox
+    gc.collect()
+
+    recovered = object.__new__(DockerSandbox)
+    recovered._container_name = container_name
+    recovered._exec_state = DockerSandbox._state_for_container(container_name)
+    recovered._exec_lock = recovered._exec_state.lock
+
+    with pytest.raises(RuntimeError, match="previous cleanup was unconfirmed"):
+        recovered._assert_exec_cleanup_healthy()
+
+
+def test_docker_cancel_kills_exec_and_marks_cancelled():
+    """cancel_event terminates the same exec path and marks the result cancelled."""
+    sandbox, api = _docker_sandbox_with_streaming_exec()
+    cancel_event = threading.Event()
+    result_holder: list[ExecResult] = []
+    thread = threading.Thread(
+        target=lambda: result_holder.append(
+            sandbox.exec("sleep forever", timeout=5, cancel_event=cancel_event)
+        )
+    )
+    thread.start()
+    assert api.started.wait(2)
+    cancel_event.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert len(result_holder) == 1
+    assert api.kill_commands
+    assert result_holder[0].exit_code == -1
+    assert result_holder[0].cancelled is True
+    assert "stdout-before" in result_holder[0].stdout
+    assert "stderr-before" in result_holder[0].stderr
+    assert "取消" in result_holder[0].stderr
+
+
+def test_docker_timeout_escalates_when_term_is_ignored():
+    """TERM delivery alone is insufficient; cleanup must escalate to KILL."""
+    sandbox, api = _docker_sandbox_with_streaming_exec(ignore_term=True)
+    result = sandbox.exec("sleep forever", timeout=0.1)
+
+    assert result.exit_code == -1
+    signal_commands = [
+        command for command in api.kill_commands
+        if "signal=$2" in command[2]
+    ]
+    assert len(signal_commands) >= 2
+    assert signal_commands[0][-1] == "TERM"
+    assert signal_commands[-1][-1] == "KILL"

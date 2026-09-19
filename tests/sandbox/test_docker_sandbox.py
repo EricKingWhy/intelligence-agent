@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import threading
+import time
 from collections.abc import Iterator
 from uuid import uuid4
 
@@ -73,6 +75,76 @@ def test_exec_runs_in_workspace_and_stop_is_idempotent(docker_sandbox: object) -
 
     docker_sandbox.stop()
     docker_sandbox.stop()
+
+
+@docker_required
+def test_timeout_stops_late_workspace_mutation(docker_sandbox: object) -> None:
+    marker = "/workspace/late-timeout-marker"
+    result = docker_sandbox.exec(
+        f"rm -f {marker}; "
+        f"(sleep 1; touch {marker}) & child=$!; "
+        f"printf before; wait $child",
+        timeout=0.2,
+    )
+
+    assert result.exit_code == -1
+    assert "before" in result.stdout
+    assert "超时" in result.stderr
+    time.sleep(1.2)
+    assert docker_sandbox.exec(f"test ! -e {marker}").exit_code == 0
+
+
+@docker_required
+def test_timeout_stops_detached_workspace_mutation(docker_sandbox: object) -> None:
+    marker = "/workspace/detached-timeout-marker"
+    result = docker_sandbox.exec(
+        f"rm -f {marker}; "
+        f"setsid /bin/sh -lc 'sleep 1; touch {marker}' "
+        ">/dev/null 2>&1 & sleep 2",
+        timeout=0.2,
+    )
+
+    assert result.exit_code == -1
+    time.sleep(1.2)
+    assert docker_sandbox.exec(f"test ! -e {marker}").exit_code == 0
+
+
+@docker_required
+def test_cancel_stops_late_workspace_mutation(docker_sandbox: object) -> None:
+    marker = "/workspace/late-cancel-marker"
+    cancel_event = threading.Event()
+    result_holder: list[ExecResult] = []
+    ready = threading.Event()
+
+    def on_output(channel: str, text: str) -> None:
+        if channel == "stdout" and "before" in text:
+            ready.set()
+
+    worker = threading.Thread(
+        target=lambda: result_holder.append(
+            docker_sandbox.exec(
+                f"rm -f {marker}; "
+                f"(sleep 1; touch {marker}) & child=$!; "
+                f"printf before; wait $child",
+                timeout=5,
+                cancel_event=cancel_event,
+                on_output=on_output,
+            )
+        )
+    )
+    worker.start()
+    assert ready.wait(3)
+    cancel_event.set()
+    worker.join(8)
+
+    assert not worker.is_alive()
+    assert len(result_holder) == 1
+    assert result_holder[0].exit_code == -1
+    assert result_holder[0].cancelled is True
+    assert "before" in result_holder[0].stdout
+    assert "取消" in result_holder[0].stderr
+    time.sleep(1.2)
+    assert docker_sandbox.exec(f"test ! -e {marker}").exit_code == 0
 
 
 @docker_required
