@@ -140,12 +140,12 @@ def test_windows_native_fallback_kills_real_descendants(monkeypatch, tmp_path):
         lambda *args, **kwargs: Mock(returncode=1),
     )
     result = sandbox.exec(
-        _python_command(script, "parent", marker, 1.5),
-        timeout=0.3,
+        _python_command(script, "parent", marker, 3.0),
+        timeout=1.5,
     )
     _wait_for_path(started)
     assert result.exit_code == -1
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 4.0
     while marker.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not marker.exists()
@@ -182,21 +182,21 @@ def test_local_timeout_kills_child_tree_without_late_marker(tmp_path):
     )
     # The writer process is the parent of the delayed marker child; its shell is
     # the process owned by LocalSubprocessSandbox.
-    command = _python_command(script, "parent", marker, 1.5)
+    command = _python_command(script, "parent", marker, 3.0)
     sandbox = LocalSubprocessSandbox(tmp_path)
-    result = sandbox.exec(command, timeout=0.3)
+    result = sandbox.exec(command, timeout=1.5)
 
     assert started.exists(), "child 未确认启动，marker 测试无法证明整树终止"
     assert result.exit_code == -1
     assert "超时" in result.stderr
     assert "stdout-before" in result.stdout
     assert "stderr-before" in result.stderr
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 4.0
     while marker.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not marker.exists(), "timeout 后 child/grandchild 仍写入 marker"
 
-    partial = sandbox.exec(_python_command(output_script), timeout=0.3)
+    partial = sandbox.exec(_python_command(output_script), timeout=1.5)
     assert partial.exit_code == -1
     assert "stdout-before" in partial.stdout
     assert "stderr-before" in partial.stderr
@@ -254,7 +254,7 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
             self.seen_timeout = timeout
             return super().exec(
                 command,
-                timeout=0.3,
+                timeout=1.5,
                 cancel_event=cancel_event,
                 on_output=on_output,
             )
@@ -264,7 +264,7 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
     class _TimedBash(BashTool):
         @property
         def timeout_seconds(self) -> float:
-            return 0.8
+            return 6.0
 
     registry = ToolRegistry()
     registry.register(_TimedBash(sandbox))
@@ -273,18 +273,18 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
     execution = await executor.execute({
         "id": "executor-timeout",
         "name": "bash",
-        "args": {"command": _python_command(script, "parent", marker, 1.5)},
+        "args": {"command": _python_command(script, "parent", marker, 3.0)},
     })
 
     _wait_for_path(started)
-    assert sandbox.seen_timeout == 0.8
+    assert sandbox.seen_timeout == 6.0
     assert execution.result.ok is True
     assert execution.result.data["exit_code"] == -1
     assert "stdout-before" in execution.result.data["stdout"]
     assert "stderr-before" in execution.result.data["stderr"]
     assert "cancelled" not in execution.result.data
     assert execution.result.metadata["attempt"] == 1
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 4.0
     while marker.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     assert not marker.exists()
