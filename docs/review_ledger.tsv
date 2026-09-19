@@ -85,3 +85,4 @@ e22bdc1	B7/#275 落点记录（phase_status 归档索引行，docs-only）
 f9ba501c9c403d22dcd03bfe63b291b2c5a6a969	F7/#278 落点记录（tracker F7 验收证据节 + PERF_BASELINE F7 节 + phase_status 归档索引，docs-only）
 87aa3ebb430fc2eeaa73caa0e6b191d3486b32c8	F5/#279 落点记录（tracker F5 验收证据节 + PERF_BASELINE F5 节 + phase_status 归档索引，docs-only）
 1a626d7357ea751732609ceed9c6e082bbdcac30	F8/#280 落点记录（tracker F8 验收证据节 + PERF_BASELINE F8 节 + phase_status 归档索引，docs-only）
+be7db83	P1-B4 审查记录（tracker P1-B4 节 + phase_status 归档索引 + 本台账审查行，docs-only）
