@@ -557,6 +557,12 @@ const RUN_GROUP_STATUS_LABEL: Record<RunGroupStatus, string> = {
 
 // ── Chat tab：Run 级摘要（真数据区块 + 空槽标注） ──
 
+/** TOOLS 列表尾窗（F5 #279）。50 行 ≈3.4ms——探针 `stepdetail-list-cost.perf.test.ts`
+ *  实测 @50 3.4ms / @200 17.5ms（≈0.07ms/行），与 Timeline 尾窗的 ~16% 单核量级对齐；
+ *  步长 200 ≈4 屏。**不复用 `TIMELINE_WINDOW_DEFAULT`**：那是事件行，高度特征与工具行不同。 */
+export const TOOLS_WINDOW_DEFAULT = 50;
+export const TOOLS_WINDOW_STEP = 200;
+
 export function ChatTab({
   conversation, tools, onFocusTool, onJumpToApproval, selectedKey,
 }: {
@@ -580,6 +586,19 @@ export function ChatTab({
    * memo）。本 tab 只在 `tab === 'chat'` 时挂载，这一层省的是驻留期间的重渲染。 */
   const runningToolCount = useMemo(() => tools.filter((t) => t.status === 'running').length, [tools]);
   const failedToolCount = useMemo(() => tools.filter((t) => t.status === 'failed').length, [tools]);
+
+  /* F5（#279）TOOLS 尾窗：此前全量渲染（N=500 单次 38.7ms，40fps 合帧下就是满载）。
+   * 选中项必须留在窗口里——同 `TimelineTab` 的 `effectiveWindow`（#183）：键盘 ↑/↓ 的移动域
+   * 是**全部**工具（见 `listTargets`），列表却只画尾窗，不派生就会「选中了却看不见」。 */
+  const [toolWindow, setToolWindow] = useState(TOOLS_WINDOW_DEFAULT);
+  const selectedToolIndex = useMemo(() => {
+    if (!selectedKey) return -1;
+    return tools.findIndex((t) => toolKey(t) === selectedKey);
+  }, [tools, selectedKey]);
+  const effectiveToolWindow =
+    selectedToolIndex >= 0 ? Math.max(toolWindow, tools.length - selectedToolIndex) : toolWindow;
+  const hiddenTools = Math.max(0, tools.length - effectiveToolWindow);
+  const visibleTools = hiddenTools > 0 ? tools.slice(hiddenTools) : tools;
 
   return (
     <>
@@ -692,7 +711,22 @@ export function ChatTab({
           <span className="detail-key">失败</span>
           <span className="detail-val">{failedToolCount}</span>
         </div>
-        {tools.map((t) => {
+        {hiddenTools > 0 && (
+          /* 窗口条直接复用 Timeline 的类：`app.css` 里 `.timeline-window-bar/-earlier/-hint`
+             都是无前缀的全局选择器，F5 因此**不需要动样式**（票面禁止改 app.css）。 */
+          <div className="timeline-window-bar">
+            <button
+              className="timeline-earlier"
+              onClick={() => setToolWindow(effectiveToolWindow + TOOLS_WINDOW_STEP)}
+            >
+              加载更早 {Math.min(TOOLS_WINDOW_STEP, hiddenTools)} 条
+            </button>
+            <span className="timeline-window-hint">
+              显示最近 {visibleTools.length} / 共 {tools.length} 条（前段已折叠，真相完整保留）
+            </span>
+          </div>
+        )}
+        {visibleTools.map((t) => {
           const selected = selectedKey != null && toolKey(t) === selectedKey;
           const rowClass = `detail-tool-row${selected ? ' sel' : ''}`;
           return onFocusTool ? (
@@ -1180,18 +1214,43 @@ const TimelineRow = memo(function TimelineRow({
 
 // ── Changes tab：文件 diff 聚合（渲染复用 `DiffBlock`——diff 只有一份渲染器） ──
 
+/** DIFFS 列表尾窗（F5 #279）。50 项 ≈4.4ms——探针 `stepdetail-list-cost.perf.test.ts`
+ *  实测 @50 4.4ms / @200 31.4ms（每项含一个 `DiffBlock`，比工具行重），故取 50 而非更大；
+ *  步长 200 ≈4 屏。 */
+export const CHANGES_WINDOW_DEFAULT = 50;
+export const CHANGES_WINDOW_STEP = 200;
+
 /** 导出供 SSR 测试直接渲染（同 `TimelineTab` / `ToolEventSections`：`tab` 是内部
  *  状态，从 `StepDetail` 外面进不到这个面）。 */
 export function ChangesTab({ tools, sessionId }: { tools: ToolCall[]; sessionId?: string }) {
   // F2（#272）：`tools` 由调用方 memo 提供，过滤跟着它的引用走——面板关闭期间本组件
   // 仍挂载（`hidden` 不卸载），此前每次提交都要重扫一遍工具表。
   const diffs = useMemo(() => tools.filter((t) => t.diff), [tools]);
+  /* F5（#279）尾窗：本面**没有选中态**（行是只读卡片，理由见 `listTargets` 的注释），
+     所以不需要 Timeline 那套「选中项派生扩窗」，只留用户的「加载更早」意图。
+     `useState` 必须在下面那条 early-return **之前**（Rules of Hooks）。 */
+  const [diffWindow, setDiffWindow] = useState(CHANGES_WINDOW_DEFAULT);
+  const hiddenDiffs = Math.max(0, diffs.length - diffWindow);
+  const visibleDiffs = hiddenDiffs > 0 ? diffs.slice(hiddenDiffs) : diffs;
   if (diffs.length === 0) {
     return <TabEmpty hint="本次会话未产生文件变更。" icon={FileDiff} />;
   }
   return (
     <>
-      {diffs.map((t) => (
+      {hiddenDiffs > 0 && (
+        <div className="timeline-window-bar">
+          <button
+            className="timeline-earlier"
+            onClick={() => setDiffWindow(diffWindow + CHANGES_WINDOW_STEP)}
+          >
+            加载更早 {Math.min(CHANGES_WINDOW_STEP, hiddenDiffs)} 条
+          </button>
+          <span className="timeline-window-hint">
+            显示最近 {visibleDiffs.length} / 共 {diffs.length} 条（前段已折叠，真相完整保留）
+          </span>
+        </div>
+      )}
+      {visibleDiffs.map((t) => (
         <div key={t.tool_call_id} className="detail-section">
           <div className="detail-section-title">
             <FileDiff size={14} /> {t.name}: {String(t.args.path ?? '')}
@@ -1248,7 +1307,14 @@ function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCall[]; o
 
 // ── Artifacts tab：artifact 聚合页（工具挂载 ref，单一投影源——不变量 #22） ──
 
-function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionId: string }) {
+/** ARTIFACTS 列表尾窗（F5 #279）。20 项 ≈5ms——探针 `stepdetail-list-cost.perf.test.ts`
+ *  实测 @50 12.6ms / @200 45.4ms（≈0.25ms/项；每项一个 `ArtifactViewer`，是三个列表里
+ *  最重的），故窗口取 20；步长 100 ≈5 屏。 */
+export const ARTIFACTS_WINDOW_DEFAULT = 20;
+export const ARTIFACTS_WINDOW_STEP = 100;
+
+/** 导出理由同 `ChangesTab`：`tab` 是内部状态，SSR 测试与 F5 成本探针进不到这个面。 */
+export function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionId: string }) {
   // Artifacts only reach this tab through the projection attaching an ArtifactRef
   // to the producing ToolCall (lib/projection.ts ARTIFACT_CREATED case). If an
   // artifact/created event's tool isn't found by the projection, that's a
@@ -1256,12 +1322,29 @@ function ArtifactsTab({ tools, sessionId }: { tools: ToolCall[]; sessionId: stri
   // path (invariant #22).
   // F2（#272）：同上。
   const artifacts = useMemo(() => tools.filter((t) => t.artifact), [tools]);
+  // F5（#279）尾窗：同 `ChangesTab`（本面也无选中态）；`useState` 必须在这条 early-return 之前。
+  const [artifactWindow, setArtifactWindow] = useState(ARTIFACTS_WINDOW_DEFAULT);
+  const hiddenArtifacts = Math.max(0, artifacts.length - artifactWindow);
+  const visibleArtifacts = hiddenArtifacts > 0 ? artifacts.slice(hiddenArtifacts) : artifacts;
   if (artifacts.length === 0) {
     return <TabEmpty hint="本次会话未产生 Artifact。" icon={Package} />;
   }
   return (
     <>
-      {artifacts.map((t) => (
+      {hiddenArtifacts > 0 && (
+        <div className="timeline-window-bar">
+          <button
+            className="timeline-earlier"
+            onClick={() => setArtifactWindow(artifactWindow + ARTIFACTS_WINDOW_STEP)}
+          >
+            加载更早 {Math.min(ARTIFACTS_WINDOW_STEP, hiddenArtifacts)} 条
+          </button>
+          <span className="timeline-window-hint">
+            显示最近 {visibleArtifacts.length} / 共 {artifacts.length} 条（前段已折叠，真相完整保留）
+          </span>
+        </div>
+      )}
+      {visibleArtifacts.map((t) => (
         <div key={t.tool_call_id} className="detail-section">
           <div className="detail-section-title">
             <FileCheck2 size={14} /> {t.name}
