@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import subprocess
@@ -21,6 +22,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import agent_harness.sandbox.local as local_module
 from agent_harness.sandbox import ExecResult, LocalSubprocessSandbox
 from agent_harness.tools import BashTool
 from agent_harness.tools.bash import _BashArgs
@@ -67,6 +69,8 @@ def _write_delayed_tree_writer(tmp_path):
             if role == "parent":
                 started = marker.with_name(marker.stem + "-started" + marker.suffix)
                 child = subprocess.Popen([sys.executable, __file__, "child", marker_name, str(delay)])
+                print("stdout-before", flush=True)
+                print("stderr-before", file=sys.stderr, flush=True)
                 started.write_text(str(child.pid), encoding="utf-8")
                 time.sleep(delay + 5)
             else:
@@ -84,6 +88,66 @@ def _python_command(script, *args):
     if os.name == "nt":
         return subprocess.list2cmdline(parts)
     return " ".join(shlex.quote(part) for part in parts)
+
+
+def _wait_for_path(path, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.02)
+    assert path.exists(), f"marker 未在 {timeout}s 内出现: {path}"
+
+
+def test_local_timeout_fallback_uses_job_when_taskkill_fails(monkeypatch):
+    """taskkill failure must use the native Job seam, not shell-only kill."""
+    calls = []
+
+    class _Process:
+        pid = 42
+
+        def kill(self):
+            calls.append("process.kill")
+
+    monkeypatch.setattr(local_module.os, "name", "nt")
+    monkeypatch.setattr(
+        local_module.subprocess,
+        "run",
+        lambda *args, **kwargs: Mock(returncode=1),
+    )
+    monkeypatch.setattr(
+        local_module.LocalSubprocessSandbox,
+        "_terminate_windows_job",
+        staticmethod(lambda process: calls.append("job") or True),
+    )
+
+    local_module.LocalSubprocessSandbox._kill_process_tree(_Process())
+
+    assert calls == ["job"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object fallback")
+def test_windows_native_fallback_kills_real_descendants(monkeypatch, tmp_path):
+    """The real Job Object fallback prevents a late descendant marker."""
+    script = _write_delayed_tree_writer(tmp_path)
+    marker = tmp_path / "native-fallback-marker.txt"
+    started = marker.with_name(marker.stem + "-started" + marker.suffix)
+    sandbox = LocalSubprocessSandbox(tmp_path)
+    monkeypatch.setattr(
+        local_module.subprocess,
+        "run",
+        lambda *args, **kwargs: Mock(returncode=1),
+    )
+    result = sandbox.exec(
+        _python_command(script, "parent", marker, 1.5),
+        timeout=0.3,
+    )
+    _wait_for_path(started)
+    assert result.exit_code == -1
+    deadline = time.monotonic() + 2.0
+    while marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not marker.exists()
 
 
 def test_local_default_timeout_allows_commands_past_ten_seconds(tmp_path):
@@ -124,7 +188,11 @@ def test_local_timeout_kills_child_tree_without_late_marker(tmp_path):
     assert started.exists(), "child 未确认启动，marker 测试无法证明整树终止"
     assert result.exit_code == -1
     assert "超时" in result.stderr
-    time.sleep(2.0)
+    assert "stdout-before" in result.stdout
+    assert "stderr-before" in result.stderr
+    deadline = time.monotonic() + 2.0
+    while marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert not marker.exists(), "timeout 后 child/grandchild 仍写入 marker"
 
     partial = sandbox.exec(_python_command(output_script), timeout=0.3)
@@ -151,7 +219,7 @@ def test_local_cancel_kills_child_tree_without_late_marker(tmp_path):
         )
     )
     thread.start()
-    time.sleep(0.3)
+    _wait_for_path(started)
     cancel_event.set()
     thread.join(timeout=5)
 
@@ -159,8 +227,66 @@ def test_local_cancel_kills_child_tree_without_late_marker(tmp_path):
     assert started.exists(), "child 未确认启动，marker 测试无法证明整树终止"
     assert len(result_holder) == 1
     assert result_holder[0].cancelled is True
-    time.sleep(2.0)
+    assert "stdout-before" in result_holder[0].stdout
+    assert "stderr-before" in result_holder[0].stderr
+    deadline = time.monotonic() + 2.0
+    while marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert not marker.exists(), "cancel 后 child/grandchild 仍写入 marker"
+
+
+@pytest.mark.asyncio
+async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
+    """The real executor/tool/sandbox chain stops a timed-out Local command."""
+    from agent_harness.tooling import PermissionPolicy, ToolExecutor, ToolRegistry
+
+    script = _write_delayed_tree_writer(tmp_path)
+    marker = tmp_path / "executor-timeout-marker.txt"
+    started = marker.with_name(marker.stem + "-started" + marker.suffix)
+
+    class _ShortDeadlineSandbox(LocalSubprocessSandbox):
+        def __init__(self, workspace_root):
+            super().__init__(workspace_root)
+            self.seen_timeout = None
+
+        def exec(self, command, *, timeout=None, cancel_event=None, on_output=None):
+            self.seen_timeout = timeout
+            return super().exec(
+                command,
+                timeout=0.3,
+                cancel_event=cancel_event,
+                on_output=on_output,
+            )
+
+    sandbox = _ShortDeadlineSandbox(tmp_path)
+
+    class _TimedBash(BashTool):
+        @property
+        def timeout_seconds(self) -> float:
+            return 0.8
+
+    registry = ToolRegistry()
+    registry.register(_TimedBash(sandbox))
+    executor = ToolExecutor(registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
+
+    execution = await executor.execute({
+        "id": "executor-timeout",
+        "name": "bash",
+        "args": {"command": _python_command(script, "parent", marker, 1.5)},
+    })
+
+    _wait_for_path(started)
+    assert sandbox.seen_timeout == 0.8
+    assert execution.result.ok is True
+    assert execution.result.data["exit_code"] == -1
+    assert "stdout-before" in execution.result.data["stdout"]
+    assert "stderr-before" in execution.result.data["stderr"]
+    assert "cancelled" not in execution.result.data
+    assert execution.result.metadata["attempt"] == 1
+    deadline = time.monotonic() + 2.0
+    while marker.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert not marker.exists()
 
 
 @pytest.mark.asyncio
