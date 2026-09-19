@@ -47,6 +47,7 @@
 2026-09-19	B-18 findings 修复（Tracker/归档/Recovery 注释收敛为决策指针；Catalog 注册测试收紧为精确 GET-only）	a47d855..ae14ee4
 2026-09-19	B-19 两轴批量审查与修复复验（Standards + Correctness；fixed point ae14ee4；覆盖 #256/#257 实现、测试、交付记录；首轮 findings 经 d7e7a14 修复）	ae14ee4..d7e7a14
 [whitelist]
+dd92253	B-19 收批落点记录（tracker + PHASE_STATUS + 归档 + 审查台账，docs-only）
 db81e5e	B-16 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引 + 本台账审查行/修复行 + 删 2 条死白名单，docs-only）
 b53465e	B-10 集成/关单状态（tracker + PHASE_STATUS + 归档，docs-only）
 133ef5a	B-10 落点记录（tracker + 归档 + PHASE_STATUS + 本台账审查行，docs-only）
