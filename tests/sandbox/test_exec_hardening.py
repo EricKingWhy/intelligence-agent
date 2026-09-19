@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
 import sys
+import textwrap
 import threading
 import time
 from unittest.mock import Mock
@@ -48,36 +51,116 @@ def test_local_exec_under_cap_is_untouched(tmp_path):
 # ============================================================================
 
 
-@pytest.mark.skipif(os.name != "nt", reason="泄漏场景依赖 Windows shell=True(cmd.exe) 与 start 语义")
-def test_local_exec_timeout_kills_grandchild_tree(tmp_path):
-    """超时后整棵进程树必须死透：孙进程不得在 exec 返回后继续写 workspace。
+def _write_delayed_tree_writer(tmp_path):
+    """Create a portable child/grandchild marker probe for Local process groups."""
+    script = tmp_path / "tree_writer.py"
+    script.write_text(
+        textwrap.dedent(
+            '''\
+            import pathlib
+            import subprocess
+            import sys
+            import time
 
-    shell=True 时 Popen 拿到的只是 cmd.exe 壳；壳里 start 出的孙进程若只被
-    process.kill() 漏掉，会在 exec 返回后继续写 marker 文件、占住捕获管道
-    （reader join 超时），其 cwd 锁还会让 delete() 的 rmtree 静默失败。
-    """
-    sandbox = LocalSubprocessSandbox(tmp_path)
-    # start /b 拉起脱管的孙进程（ping 约 3 秒后才写 marker），外层 ping 让壳活到超时
-    command = (
-        'start /b cmd /c "ping -n 4 127.0.0.1 > nul & echo x > leak_marker.txt"'
-        " & ping -n 10 127.0.0.1 > nul"
+            role, marker_name, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
+            marker = pathlib.Path(marker_name)
+            if role == "parent":
+                started = marker.with_name(marker.stem + "-started" + marker.suffix)
+                child = subprocess.Popen([sys.executable, __file__, "child", marker_name, str(delay)])
+                started.write_text(str(child.pid), encoding="utf-8")
+                time.sleep(delay + 5)
+            else:
+                time.sleep(delay)
+                marker.write_text("late", encoding="utf-8")
+            '''
+        ),
+        encoding="utf-8",
     )
-    result = sandbox.exec(command, timeout=1)
+    return script
 
-    # 超时契约不变：不抛异常，返回 exit_code=-1 + stderr 超时提示
+
+def _python_command(script, *args):
+    parts = [sys.executable, str(script), *map(str, args)]
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def test_local_default_timeout_allows_commands_past_ten_seconds(tmp_path):
+    """The Local default remains 60s: a 10s+ command must finish, not be killed early."""
+    script = tmp_path / "finish_writer.py"
+    marker = tmp_path / "finished.txt"
+    script.write_text(
+        "import pathlib, sys, time; time.sleep(10.2); "
+        "pathlib.Path(sys.argv[1]).write_text('finished', encoding='utf-8')",
+        encoding="utf-8",
+    )
+
+    result = LocalSubprocessSandbox(tmp_path).exec(
+        _python_command(script, marker),
+    )
+
+    assert result.exit_code == 0
+    assert marker.read_text(encoding="utf-8") == "finished"
+
+
+def test_local_timeout_kills_child_tree_without_late_marker(tmp_path):
+    """Timeout kills the child/grandchild tree and preserves output emitted before it."""
+    script = _write_delayed_tree_writer(tmp_path)
+    marker = tmp_path / "timeout-marker.txt"
+    started = tmp_path / "timeout-marker-started.txt"
+    output_script = tmp_path / "partial_output.py"
+    output_script.write_text(
+        "import sys, time; print('stdout-before', flush=True); "
+        "print('stderr-before', file=sys.stderr, flush=True); time.sleep(5)",
+        encoding="utf-8",
+    )
+    # The writer process is the parent of the delayed marker child; its shell is
+    # the process owned by LocalSubprocessSandbox.
+    command = _python_command(script, "parent", marker, 1.5)
+    sandbox = LocalSubprocessSandbox(tmp_path)
+    result = sandbox.exec(command, timeout=0.3)
+
+    assert started.exists(), "child 未确认启动，marker 测试无法证明整树终止"
     assert result.exit_code == -1
     assert "超时" in result.stderr
+    time.sleep(2.0)
+    assert not marker.exists(), "timeout 后 child/grandchild 仍写入 marker"
 
-    # 泄漏的孙进程会在 ~3 秒后写出 marker；轮询窗口内绝不允许出现
-    marker = sandbox.workspace_root / "leak_marker.txt"
-    deadline = time.perf_counter() + 3.0
-    while time.perf_counter() < deadline:
-        assert not marker.exists(), "超时后孙进程仍存活并写出文件——超时击杀泄漏了进程树"
-        time.sleep(0.1)
+    partial = sandbox.exec(_python_command(output_script), timeout=0.3)
+    assert partial.exit_code == -1
+    assert "stdout-before" in partial.stdout
+    assert "stderr-before" in partial.stderr
 
-    # 整树已死：workspace 不再被孙进程 cwd 锁占住，delete() 能真正删干净
-    sandbox.delete()
-    assert not sandbox.workspace_root.exists()
+
+def test_local_cancel_kills_child_tree_without_late_marker(tmp_path):
+    """Cooperative cancellation kills the same process tree as timeout."""
+    script = _write_delayed_tree_writer(tmp_path)
+    marker = tmp_path / "cancel-marker.txt"
+    started = tmp_path / "cancel-marker-started.txt"
+    cancel_event = threading.Event()
+    sandbox = LocalSubprocessSandbox(tmp_path)
+    result_holder = []
+    thread = threading.Thread(
+        target=lambda: result_holder.append(
+            sandbox.exec(
+                _python_command(script, "parent", marker, 1.5),
+                timeout=5,
+                cancel_event=cancel_event,
+            )
+        )
+    )
+    thread.start()
+    time.sleep(0.3)
+    cancel_event.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive(), "取消后 Local exec 未在 5s 内返回"
+    assert started.exists(), "child 未确认启动，marker 测试无法证明整树终止"
+    assert len(result_holder) == 1
+    assert result_holder[0].cancelled is True
+    time.sleep(2.0)
+    assert not marker.exists(), "cancel 后 child/grandchild 仍写入 marker"
 
 
 @pytest.mark.asyncio
