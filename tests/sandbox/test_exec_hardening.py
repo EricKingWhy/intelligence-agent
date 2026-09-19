@@ -88,11 +88,13 @@ async def test_bash_tool_offloads_exec_to_worker_thread(tmp_path):
     class ProbeSandbox(LocalSubprocessSandbox):
         def exec(self, command, *, timeout=None, cancel_event=None, on_output=None):
             seen["thread"] = threading.current_thread()
+            seen["timeout"] = timeout
             return ExecResult(exit_code=0, stdout="", stderr="", duration_ms=0.0)
 
     tool = BashTool(ProbeSandbox(tmp_path))
     await tool.execute(_BashArgs(command="anything"))
     assert seen["thread"] is not threading.main_thread()
+    assert seen["timeout"] == 60.0
 
 
 def _docker_sandbox_with_slow_exec(delay: float) -> object:
