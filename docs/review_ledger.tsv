@@ -48,6 +48,7 @@
 2026-09-20	#256 + 四个既存集成文件两轴独立只读审查（Standards + Spec；fixed point 6a5c2c2，实际审查 tip cbe3b09；历史提示计数错误在纳入前更正；Spec AC2/AC3/AC4 缺口登记，不关单）	6a5c2c2..cbe3b09
 [whitelist]
 e60011e	#256 实现落点记录（tracker + PHASE_STATUS + 2026-09 归档，docs-only）
+c1b4a0e	#256 中间集成落点记录（Tracker + PHASE_STATUS + 月度归档 + review ledger，docs-only）
 c5cd404	B-18 收批落点记录（tracker + PHASE_STATUS + 归档 + 审查台账，docs-only）
 def3bec	#254 实现落点记录（tracker + PHASE_STATUS + 2026-09 归档，docs-only）
 5e03579	SDD 续批开工提示词（B-17 起的开工指令，docs-only）
