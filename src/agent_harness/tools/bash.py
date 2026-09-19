@@ -20,6 +20,8 @@ from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.result import ErrorCode
 
+DEFAULT_BASH_TIMEOUT_SECONDS = 60.0
+
 
 class _BashArgs(BaseModel):
     command: str = Field(..., description="要在 workspace 内执行的 shell 命令")
@@ -77,6 +79,11 @@ class BashTool(Tool):
         return _BashArgs
 
     @property
+    def timeout_seconds(self) -> float:
+        """统一 Bash contract：ToolExecutor 的有效预算为 60 秒。"""
+        return DEFAULT_BASH_TIMEOUT_SECONDS
+
+    @property
     def side_effect(self) -> ToolSideEffect:
         return ToolSideEffect.MUTATING
 
@@ -102,7 +109,8 @@ class BashTool(Tool):
         sink = tool_output_sink_var.get()
         try:
             result = await asyncio.to_thread(
-                self._sandbox.exec, args.command, cancel_event=cancel_event,
+                self._sandbox.exec, args.command, timeout=self.timeout_seconds,
+                cancel_event=cancel_event,
                 on_output=(sink.push if sink is not None else None),
             )
         except asyncio.CancelledError:
