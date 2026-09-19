@@ -3201,3 +3201,97 @@ node scripts/perf-pulse-cost.mjs --only A1,B1,A2,B2 --reps 5   # 稳定性交叉
 其 fixed point = `f2ec9f2`。是否把该 commit 放进 **P1-B4** 的 `[whitelist]`：**不放**（它含可执行物，按 F3 同规矩交由 P1-B4 的两轴审查窗口覆盖）。
 
 <!-- ===== F6(#277) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B5（#278）台账起点（2026-09-19） ===== -->
+
+#### F7（#278）验收证据
+
+**票面**：GitHub #278（`## What to build` 第 1 步过渡编排 ＋ 第 2 步「逐轨道的可插值性**必须实测**；不可插值就只过渡能插值的轨道，并在 DoD 写明哪条轨道降级为瞬时」；AC1–AC10；`## Scope lock`；`## 文件所有权` = `app.css` 的 `.app-regions/.inspector-closed/.inspector-fullpage/.app-workspace` 片段 ＋ `App.tsx` 类名切换片段 ＋ `e2e/y-inspector-peek.spec.ts` **只增不改**）。
+
+**本票结论（三句分开读，不要合成一句）**
+1. **连续过渡：达成两条轨道，第三轨按票面「必做 2」降级并在 DoD 写明。** open/close 两段 workspace 与 inspector 都插值；整页两段 rail 与 workspace 插值、**inspector 一帧离散翻转**（`--inspector-w ↔ 1fr` 是 length ↔ fr，不可插值；救它只能改 grid 布局模型 ⇒ 票面明文禁止，不改）。
+2. **long task：五组读数、288/288 段次全 0** ⇒ 过渡**没有引入新的 long task**（G4 头条口径）。
+3. **最长单帧：本轮比改造前多掉 1 帧，上一轮同参数测不出差异 ⇒ 不下「不变差」的断言。** 本轮（负载较高）过渡开 vs 过渡关 = 33.4ms vs 16.8ms（63/64 vs 10/64 段次）；上一轮（同日 04:47–04:51，机器空闲）= 2/64 vs 0/64，中位都 16.8ms。**A/A 仪器对照**（同 CSS、只差注入与否）两臂读数完全一致 ⇒ 变的是机器状态而非臂构造。⇒ 按 AC8 的收窄手段（减少同时过渡的轨道数 / 缩短时长）**本票不采纳**，理由与复测条件写进基线与下方「残余风险」。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | F7 面：`MM web/src/styles/app.css`、`MM docs/PERF_BASELINE.md`、`?? web/scripts/perf-inspector-transition.mjs`（另 6 项 `M `/`A ` 属**上一票 F3/#276 ＋ F6/#277**，其提交对象已在隔离索引里、ref 未落地） |
+| `git log --oneline -8 -- web/src/styles/app.css` | `6cb229c` `80b41b9` `d048587` `a19eae0` `4c5539c` `78f5019` `c74a9c7` `0f50134`（最近 8 条，**无本批在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 同文件**无在飞冲突**；本票与 `docs/tickets/architecture-audit-remediation-2026-09-18.md` 的 #237–#266 候选文件（全 `src/agent_harness/**`）**零交集**。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F7 节**（票面 AC8 的落点，含逐轨道判定表、A/B 五组读数、仪器自证 ①–⑥、未闭合项）。采集器随票入库：**`web/scripts/perf-inspector-transition.mjs`**。
+
+```bash
+cd web
+npm run build                                    # 脚本读 dist/ 里那份生产 CSS
+node scripts/perf-inspector-transition.mjs --mode probe --json %TEMP%/f7-probe-v3.json   # V0–V5 六臂（V5 = 不注入、直接量交付物）
+node scripts/perf-inspector-transition.mjs --mode segments --before  --reps 8 --json %TEMP%/f7-abv3-b1.json
+node scripts/perf-inspector-transition.mjs --mode segments --shipped --reps 8 --json %TEMP%/f7-abv3-a1.json
+node scripts/perf-inspector-transition.mjs --mode segments --before  --reps 8 --json %TEMP%/f7-abv3-b2.json
+node scripts/perf-inspector-transition.mjs --mode segments --shipped --reps 8 --json %TEMP%/f7-abv3-a2.json
+```
+
+**逐轨道判定（本票最关键的口径修正）**：原判据「数整串 `grid-template-columns` 的取值个数」**被 rail 主导**——只要一列在插值整串就好看，另两列的一帧跳变被掩盖（本票真撞上）。改为**逐帧拆三列、看该列最大跳幅 / 全幅**后，交付物（`V5`，不注入）实测：
+
+| 段 | rail | workspace | inspector |
+| --- | --- | --- | --- |
+| open / close | 不变 | **插值**（13 / 10 个取值，最大跳 95.1 / 148.2px） | **插值**（13 / 10 个取值） |
+| fullpage | **插值**（7 值 / 105.1px） | **插值**（7 值 / **309.5px**） | **离散翻转**（6 值 / 一帧 **722.0px** @+52ms） |
+| exit-fullpage | **插值**（12 值 / 67.3px） | **插值**（12 值 / **296.8px**） | **离散翻转**（3 值 / 一帧 **717.9px** @+37ms） |
+
+红证 `V0`（同一次运行内注入改造前语义）：四段**全轨道一帧到位**、关闭段 `.step-detail` **第 0 帧**就 hidden ⇒ AC1/AC2 的「前」半边有对照数字。
+
+**V3 修正（P2 审查 finding → 已进交付物）**：`.app-regions.inspector-fullpage` 中间轨道 `0px` → `minmax(0, 0fr)`。静态解完全相同（`0fr` ⇒ `0px`，探针终态 `to: 0` 逐值一致），但 `1fr ↔ 0fr` **可插值**。整页 workspace 由「一帧 946.6px」变成插值（V3 308.3px=37% / 交付物 V5 309.5px）；退出整页 955.4px → 296.8px。**inspector 轨道救不了**（除非改布局模型），故 DoD 写明该轨道降级为瞬时。
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | 逐帧轨道序列（不是截图目测）：open 13–16 个取值 / close 10 / 整页 7–12，全部 ≥3 个中间态；`V0` 红证只有 1 个取值（一帧跳变）。采样密度自证见基线④ |
+| AC2 | **通过** | 关闭方向 `.step-detail` 到 **第 10 帧（+177ms）** 才 hidden（V0 是第 0 帧）；打开方向**第 0 帧（+0ms）** 即重新可见 ⇒ 两半都有对照 |
+| AC3 | **通过** | e2e `y-inspector-peek.spec.ts:139-140` 的 `toBeHidden()` 用例（本文件 AC2 用例）在子集复跑中通过；spec **一字未改** |
+| AC4 | **部分通过 ＋ 已按票面披露** | rail / workspace 两条轨道连续（逐轨道表）；`inspector` 降级为一帧离散翻转，DoD 与 `app.css` 注释均写明。**不为此改布局模型**（票面禁止） |
+| AC5 | **通过** | reduce 下 `RM1`（含 `transition-delay` 复位）第 **3** 帧（42ms）就 hidden，`RM0`（不复位）第 **10** 帧（160ms）⇒ 复位必要；全局块只压 duration 不碰 delay 的坑有实测；`allow-discrete` 声明经 V2 臂证伪后**未进生产** |
+| AC6 | **通过** | `git diff --numstat HEAD -- web/e2e/y-inspector-peek.spec.ts` **为空**（删除行 0、新增行 0）⇒ 既有断言一字未改，本票也未新增用例 |
+| AC7 | **通过** | `git diff --numstat HEAD` 显示 `App.tsx`、`StepDetail.tsx` **零改动** ⇒ 挂载方式与卸载语义未动；e2e「Esc 关预览但面板与清单都还在（关闭不卸载）」用例通过 |
+| AC8 | **通过（已记录）** | 基线 F7 节有改造前/后四段的 long task 数 + 最长单帧（本轮 ＋ 上一轮 ＋ A/A 对照三组），并**明确写出**「本轮比改造前多掉 1 帧、上一轮测不出」以及「收窄手段未采纳」的理由 |
+| AC9 | **通过** | `oxlint` **42 warnings / 0 errors**（rc=0）；`tsc -b && vite build` rc=0（`built in 16.78s`）；`vitest run` **1026 tests / 0 failed / 0 errors**（junit 权威解析）；e2e 子集见 AC3 |
+| AC10 | **需披露**（见下） | 源码面只有 `web/src/styles/app.css`；**另有一个新增文件** `web/scripts/perf-inspector-transition.mjs` 不在 Scope lock 字面清单里 |
+
+**AC10 披露（写在明面上，不默默放过）**：新增采集器 `web/scripts/perf-inspector-transition.mjs` 不在票面字面清单内。
+判定为**不越界**：① 票面硬规则 **G3**「基线必须能在别人机器上按同样的命令复现」；② `docs/PERF_BASELINE.md` **§1.3**「每条数字必须可复核：附怎么测的——命令、脚本路径」；③ 本批既有先例（F2 的 `perf-longtask-live.mjs`、F6 的 `perf-pulse-cost.mjs`、B7 的 `measure_loop_blocking.py`）。该脚本**不进生产构建**（`index.html` 只引 `/src/main.tsx`，本轮 `npm run build` 的产物哈希随本票 CSS 变更而变、脚本零影响），也**不进测试**（`vitest` 不 glob `scripts/`）。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P1**：基线原判据「整串取值个数」把整页两段说成「三列同时插值」，与逐轨道实测不符（rail 主导掩盖另两列） | 判据改为**逐轨道最大跳幅**；基线写入判定表，注明旧口径已废弃；`app.css` 注释同步改写 |
+| 正确性轴 | **P2**：workspace 轨道可救——`0px` → `minmax(0, 0fr)` | **采纳**（V3 臂实测后进交付物），并用新增 **V5 臂**（不注入）在交付物本身上复证 |
+| 正确性轴 | **P2**：`app.css` 注释引用的 reduce 帧号来自另一次运行，与基线引用互不一致（183ms vs 167ms） | 统一为**三次真跑的范围**表述（`RM0` 第 10–11 帧 / `RM1` 第 2–3 帧），并写明「±1 帧抖动，比帧序不比毫秒」 |
+| 正确性轴 | **P2**：未闭合项只披露了关闭方向的 `padding` 瞬变，**打开方向同源问题漏了** | 合并为一条：打开首帧「面板盒 32px vs 轨道 0px」＋关闭首帧「padding 16px→0」，同一解除条件 |
+| 正确性轴 | **P1（本轮新发现）**：基线原打算沿用上一轮的 A/B 结论「过渡没有让最长单帧变差」，但**本轮回测在 B/A/B/A 交替下给出相反读数**（A 63/64、B 10/64） | **不下该断言**；补做 **A/A 仪器对照**（同 CSS、只差注入）判明是机器状态差异；基线并列三组读数，并把「掉 1 帧」列为未闭合项、写明复测条件 |
+| 规范轴 | **P2**：`exit-fullpage` 走 `--dur-in`（240ms）未在台账写明，读者会以为整页方向一律 150ms | 基线写明：**进入整页 150ms、退出整页 240ms**（`anims` 读数 `grid-template-columns:150` / `:240` 实证），`app.css` 注释同步 |
+| 规范轴 | **P3**：同批 F6 节引用的 `app.css:188` 在最终树已移位 | 基线仅加括注：最终树为 **`:261`**（F7 前部净插 73 行）；**不改** F6 记录 |
+| 规范轴 | 结论：Scope lock（`app.css` 指定片段 / `App.tsx` 零改动 / e2e 只增不改）、架构不变量、并行批次避让 **通过**；`npm run build` 产物与 `tsc` 类型检查干净 | — |
+
+> 两轴审查**未发现 P0**。P1 的处置是**改写结论**而不是「补一句免责」——原来的头条「过渡没有让最长单帧变差」在本轮读数下不成立。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 「过渡开」比「过渡关」多掉 1 帧（33.4ms，非 long task） | **已知，环境依赖** | 在**空闲机器**上重跑 `--mode segments` 四块（`--reps 8`，B/A/B/A）：A 臂回到 0–2/64 ⇒ 判为机器负载效应、闭合；若稳定复现 ⇒ 按 AC8 收窄并复验 AC1/AC4 |
+| `.step-detail` 的 `padding` 不参与过渡（两方向同一根因，1 帧） | **已知** | 若观感复核判定可见，用同一套 `0s + delay` 手法延后 `padding`；本票不落未测量的声明 |
+| 键盘调宽不置 `data-resizing` ⇒ 守卫不生效 | **已知** | `StepDetail.tsx` 在 `keydown` 时置该属性——属 N2 / F2 / F5 所有权 |
+| 窗口跨 1200px / 820px 断点 | **已知** | 媒体查询改写的正是 `grid-template-columns` ⇒ 列宽变化也会插值。本票不加 `@media` 包裹（会让窄屏失去过渡） |
+| 过渡期间 `.step-detail` 内部节点仍参与逐帧重排 | **未处理**（本票不引入 `contain`） | **F5** 若引入 `content-visibility` / `contain`，本票的过渡需在 **F5 之后复验一次**（这也是上表「掉 1 帧」最可能的解除路径） |
+
+**审查与台账处理**：本票含源码改动（`app.css` 的过渡编排 ＋ 一处 `0fr` 修正）与一个随票入库的采集器（非生产、非测试）。
+`docs/PERF_BASELINE.md`（AC8 落点）与采集器**均进本票的提交**；两轴审查已在**本票内**完成（上表），其 fixed point = `f2ec9f2`。
+**白名单归属**：docs-only 的台账刀（tracker F7 验收证据节 + `PERF_BASELINE` F7 节 + phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀（`app.css` 过渡编排）与含可执行采集器的刀**不进**，按 F3 / F6 同规矩交 P1-B4 的两轴审查窗口覆盖。
+
+<!-- ===== F7(#278) 台账节结束 ===== -->
