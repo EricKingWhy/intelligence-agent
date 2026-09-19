@@ -1001,7 +1001,88 @@ node scripts/perf-inspector-transition.mjs --mode segments --shipped --reps 4 --
 - **必须明确写出**「过渡没有让最长单帧变差」；若变差，写明按实测收窄了哪些轨道。
 
 ### F5 — 长列表离屏跳过（#279）
-_待落基线。_
+
+**口径**：与 `da01efd` 的 Timeline 实测同源（`HANDOFF_PERF_FRONTEND.md` P1-4：「renderToString
+探针：20k 全量 359ms / 2k 40ms」）——`renderToString` 全量渲染 = React 建元素树 + 序列化 HTML，
+n=50 取中位数、预热 10 次。复现脚本 `web/src/components/stepdetail-list-cost.perf.test.ts`：
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts \
+  src/components/stepdetail-list-cost.perf.test.ts
+```
+
+**基线（改造前，2026-09-19 11:18——脚本跑在实现提交之前的树上）**
+
+| 列表 | N=50 | N=200 | N=500 | 行节点数 @N=500 |
+|---|---|---|---|---|
+| TOOLS（`ChatTab`） | 3.41 / 6.62 | **17.53 / 19.25** | 38.67 / 44.70 | 500 |
+| DIFFS（`ChangesTab`） | 4.35 / 6.94 | **31.36 / 34.88** | 134.94 / 94.30 | 500 |
+| ARTIFACTS（`ArtifactsTab`） | 12.63 / 13.53 | **45.36 / 50.54** | 138.07 / 124.05 | 500 |
+
+（每格两轮独立运行，格式 `第一轮 / 第二轮`。**跨运行只比量级**——这台机同期抖动可达 ±40%，
+与 F7 的 A/B 非平稳是同一现象。）
+
+**判定（票面二值规则：N ≥ 200 时 ≥ 4ms ⇒ 该列表必须做尾窗）**
+
+| 列表 | @200（两轮） | 判定 | 依据 |
+|---|---|---|---|
+| TOOLS | 17.5 / 19.3 ms | **做** | 4.4–4.8× 阈值；40fps 合帧 ⇒ 0.70–0.77 单核 |
+| DIFFS | 31.4 / 34.9 ms | **做** | 7.8–8.7× |
+| ARTIFACTS | 45.4 / 50.5 ms | **做** | 11.3–12.6×；每项一个 `ArtifactViewer`，三个里最重 |
+
+⇒ **三个列表全部判定为「做」**（票面 Risks 允许的「只有 TOOLS 适用尾窗」不是本票的实测结论）。
+
+**改造后（尾窗）**
+
+| 列表 | 窗口 / 步长 | 常量 | 默认行节点数 @N=500 |
+|---|---|---|---|
+| TOOLS | 50 / 200 | `TOOLS_WINDOW_DEFAULT` / `⋯_STEP` | **50** |
+| DIFFS | 50 / 200 | `CHANGES_WINDOW_DEFAULT` / `⋯_STEP` | **50** |
+| ARTIFACTS | 20 / 100 | `ARTIFACTS_WINDOW_DEFAULT` / `⋯_STEP` | **20** |
+
+改造前后 @N=500 的节点数：**500→50 / 500→50 / 500→20**。
+
+> **判据为什么用节点数而不是耗时**：改造后同一脚本两轮里，耗时跨格跳到 29–76 ms（同一构造、
+> 同一进程、格子随机），而节点数**恒定等于窗口大小、与 N 无关**——那是结构量，不受 CPU 抖动
+> 影响。所以本票**不下**「渲染耗时降到 X ms」的断言（列进未闭合项）。
+>
+> 窗口取值的依据：实测线性系数 TOOLS ≈0.07 ms/行、DIFFS ≈0.09 ms/行、ARTIFACTS ≈0.25 ms/项
+> ⇒ 取到与 Timeline 窗口同量级的单次成本（≈3.4 / 4.4 / 5 ms），即 40fps 合帧下 14–20% 单核。
+
+**默认端 = 最新（尾部）**——三个列表同一理由：工具、变更、产物都是**追加**语义，流式期间用户
+关心的是刚发生的那一条；前段经「加载更早」可达（AC4 用例点到全量）。
+
+**红证**（`StepDetail.window.test.tsx`：改造前 **5 红 / 1 绿**）
+
+| # | 断言 | 改造前实测 |
+|---|---|---|
+| 1 | TOOLS @N=500 默认行数 ≤ 100 | `expected 500 to be less than or equal to 100` |
+| 2 | DIFFS 同上 | 同上（500） |
+| 3 | ARTIFACTS 同上 | 同上（500） |
+| 4 | TOOLS 有「加载更早」出口 | `expected null not to be null` |
+| 5 | DIFFS / ARTIFACTS 默认先裁（`before < N`） | `expected 500 to be less than 500` |
+| 6 | （绿）窗口只裁首段、保留尾部连续段 | 不变式守卫，改造前后都成立 |
+
+第 5 条特意写成 `before < N` 而非「最终 = N」——后者在改造前**也成立**（全量渲染本来就是 N），
+是空过，不能当 AC4 的证据。
+
+**「改造前」怎么构造（可复现）**：`git show HEAD:web/src/components/StepDetail.tsx` 取回改造前源码，
+**只**在 `ArtifactsTab` 声明前补一个 `export`（不导出则用例与探针都到不了第三个面，见 AC10 披露）、
+其余一字未动；断言记完后还原，`sha256` 与实现版逐字节相同（实现版 `f4d23ffc…`／改造前 `a22137ef…`）。
+
+**门禁（2026-09-19）**：oxlint 42w/0e（与 F7 持平，无新增）；`tsc -b && vite build` 通过——
+`dist` 里「加载更早」出现 4 次（Timeline 1 + 本票 3），且 **CSS 产物文件名与 F7 时逐字相同**
+（`index-CT5J37S6.css`）⇒ 本票零样式改动；vitest **1032/1032**（F7 时 1026，+6 即本票用例）；
+e2e `y-inspector-peek` **18/18**、`z-changes-panel` + `z-artifact-content` **18/18**。
+
+**未闭合项**
+
+| 项 | 解除条件 |
+|---|---|
+| **未引入** `content-visibility` / `contain`（票面第 4 步）：离屏内容仍参与布局/绘制，尾窗只减节点数、不减布局成本 | 必须有一份实测，证明某个**具体容器**（不是全库）加 `content-visibility: auto` 后 long task / 最长单帧显著改善，且**不破坏** `find-in-page`、滚动锚定（`app.css` 已有 `overflow-anchor: none` 一处）与 a11y 树。未满足前不开票 |
+| `TerminalTab` 的 `commandTools` 列表**仍是全量渲染**（与三处同源的问题；票面 Scope lock 只列了 `:636 / :1122 / :1190` 三处） | 该列表单次渲染 ≥4 ms（同口径）时按同一模式补。本票**不顺手改**（AGENTS.md §8） |
+| 改造后耗时读数跨格抖动（29–76 ms）⇒ 本票不下「耗时降到 X ms」的断言 | 空闲机器上重跑 `stepdetail-list-cost.perf.test.ts` 两遍取一致读数 |
+
 要求指标：
 - TOOLS / DIFFS / ARTIFACTS 三个列表在 **N = 50 / 200 / 500** 下的单次渲染耗时 + 节点数；
 - **判定阈值**：某列表在 N ≥ 200 时单次渲染 **≥ 4ms**（与 `StepDetail.tsx:891-893` 注释里

@@ -3295,3 +3295,98 @@ node scripts/perf-inspector-transition.mjs --mode segments --shipped --reps 8 --
 **白名单归属**：docs-only 的台账刀（tracker F7 验收证据节 + `PERF_BASELINE` F7 节 + phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀（`app.css` 过渡编排）与含可执行采集器的刀**不进**，按 F3 / F6 同规矩交 P1-B4 的两轴审查窗口覆盖。
 
 <!-- ===== F7(#278) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— F5（#279）台账起点（2026-09-19） ===== -->
+
+#### F5（#279）验收证据
+
+**票面**：GitHub #279（`## What to build` 四步：①先量再改 ②对判定为「必须做」的列表**复用 Timeline 尾窗模式** ③关闭态成本（可选、有前提） ④明确不做的事；AC1–AC11；`## Scope lock` = 仅 `StepDetail.tsx` 的三个列表片段与其新常量及其测试）。
+
+**本票结论（三句分开读）**
+1. **三个列表全部判定为「做」**（票面二值规则：N ≥ 200 时 ≥ 4 ms ⇒ 必须做）：TOOLS 17.5 / 19.3 ms、DIFFS 31.4 / 34.9 ms、ARTIFACTS 45.4 / 50.5 ms（两轮读数）——无一例外，全部远超 4 ms。票面 Risks 里允许的「只有 TOOLS 适用尾窗」**不是**本票的实测结论。
+2. **改造是否有效，判据用「默认挂载节点数」而不是耗时。** 改造后同一脚本两轮里耗时跨格跳到 29–76 ms（同一构造、同一进程、格子随机），而节点数**恒定等于窗口大小、与 N 无关**。改造前后 @N=500：**500→50 / 500→50 / 500→20**。
+3. **未引入 `content-visibility` / `contain`**（票面第 4 步硬约束）。因此 **F7 那条「F5 若引入 contain，F7 的过渡需复验一次」的触发条件未成立**——F7 的未闭合项保持原状，本票无需复验。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | **空**（F7 已落地 `2c8ddeb`，工作树与索引均干净） |
+| `git log --oneline -8 -- web/src/components/StepDetail.tsx` | `fe96009` `1f88116` `4e85938` `252e0db` `864fb15` `d048587` `332d933` `5cfb6ff`（**无在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 同文件**无在飞冲突**；`StepDetail.tsx` 的所有权按票面矩阵是 `N2 → F2 → F5`，前两张均已落地。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F5 节**（AC1 落点）。复现脚本随票入库：**`web/src/components/stepdetail-list-cost.perf.test.ts`**（perf 车道，`vitest.config.ts` 已排除 `*.perf.test.ts`）。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts \
+  src/components/stepdetail-list-cost.perf.test.ts
+```
+
+**红证（`StepDetail.window.test.tsx`；改造前 5 红 / 1 绿）**
+
+| # | 断言 | 改造前的实际失败输出 |
+| --- | --- | --- |
+| 1 | TOOLS @N=500 默认行数 ≤ 100 | `expected 500 to be less than or equal to 100` |
+| 2 | DIFFS 同上 | 同上（500） |
+| 3 | ARTIFACTS 同上 | 同上（500） |
+| 4 | TOOLS 有「加载更早」出口 | `expected null not to be null` |
+| 5 | DIFFS / ARTIFACTS 默认先裁（`before < N`） | `expected 500 to be less than 500` |
+| 6 | （绿）窗口只裁首段、保留尾部连续段 | 不变式守卫，改造前后都成立 |
+
+> **红证的「改造前」怎么构造**：`HEAD` 的 `StepDetail.tsx` **仅**在 `ArtifactsTab` 声明前补一个
+> `export`（不导出则用例与探针都到不了第三个面，见 AC10 披露）、其余一字未动；记完断言即还原，
+> `sha256` 与实现版逐字节相同（实现版 `f4d23ffc…`／改造前 `a22137ef…`）。复现命令：
+> `node node_modules/vitest/vitest.mjs run src/components/StepDetail.window.test.tsx`
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | 基线 F5 节：三列表 × N=50/200/500 × 两轮的耗时 + 节点数，附可复现命令与脚本路径 |
+| AC2 | **通过** | 基线「判定」表逐列表给结论与倍数（4.4–4.8× / 7.8–8.7× / 11.3–12.6×） |
+| AC3 | **通过** | 用例断言默认行数 ≤ 100（三个窗口 50/50/20 均在界内）；改造前为 500 ⇒ 红证成立 |
+| AC4 | **通过** | 用例点「加载更早」到窗口到底，行数 = N；且**先断言 `before < N`** 以排除空过（见右侧处置表） |
+| AC5 | **通过** | 基线与本表均声明默认端 = **最新（尾部）**，理由：工具 / 变更 / 产物都是**追加**语义，流式期间关心的是刚发生的那条 |
+| AC6 | **通过** | `git diff` 的**删除行只有 4 行**（三个 `map` 的列表源 + `ArtifactsTab` 声明行加 `export`）⇒ 行渲染 JSX 一行未动；两个 tab 的 e2e spec 全绿 |
+| AC7 | **通过** | `git diff` 的 **9 个 hunk 全部落在 TOOLS / DIFFS / ARTIFACTS 段**，Timeline 段（`:948-1010`）零改动；`TIMELINE_WINDOW_DEFAULT = 200` / `STEP = 500` 未变 |
+| AC8 | **通过** | oxlint **42 warnings / 0 errors**（与 F7 持平）；`tsc -b && vite build` 通过（`dist` 内「加载更早」4 处 = Timeline 1 + 本票 3）；vitest **1032/1032**（F7 时 1026，+6） |
+| AC9 | **通过** | e2e `y-inspector-peek.spec.ts` **18/18**；`z-changes-panel.spec.ts` + `z-artifact-content.spec.ts` **18/18**（收尾挂死用外部超时 + ok 行判定，两轮都干净退出） |
+| AC10 | **需披露**（见下） | 改动面 = `web/src/components/StepDetail.tsx`（+87 / −4）+ 两个新增测试文件 |
+| AC11 | **通过** | 基线未闭合项第 1 条；`web/src` 全目录检索 `content-visibility` / `contain:` **零匹配** |
+
+**AC10 披露（写在明面上）**：除票面字面清单外有两点，均**不进生产构建**：
+① `ArtifactsTab` 的**声明行加了 `export`**（4 行删除里的 1 行）—— 不导出则成本探针与用例都进不到这个面，而票面 AC1 要求 ARTIFACTS 也要有基线。本文件既有惯例即「为 SSR 测试导出 tab 组件」（`ChangesTab` 的注释就写着这条理由），此举是**补齐**而非引入新机制。
+② 新增 perf 车道脚本 `web/src/components/stepdetail-list-cost.perf.test.ts`：`vitest.config.ts` 已排除 `*.perf.test.ts` ⇒ 不进 `npm test`（先例：`f1-cost-probe.perf.test.ts`、`n2-cost-probe.perf.test.ts`）。
+两项都不改变生产行为——AC6 的「删除行只有 4 行」就是可复核的证据。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P2**：AC4 若只断言「最终行数 = N」，改造前**也成立**（全量渲染本来就是 N）= 空过，不构成红证 | 改写为三段：`before < N` ⇒ 点一次必须增长 ⇒ 到底 = N；红证重跑确认 5 红 1 绿 |
+| 正确性轴 | **P2**：`ArtifactsTab` 未导出 ⇒ 探针与用例都测不到 ARTIFACTS，票面 AC1 要求的第三处基线无法成立 | 加 `export`（见 AC10 披露），并在文件内注明与 `ChangesTab` 同理由 |
+| 正确性轴 | **P1（本轮新发现）**：改造后耗时读数跨格抖动（29 / 37 / 76 ms，同构造同进程）⇒ 拿它当「改造有效」的证据会得出错误结论（改后 37 ms 反而高于改前 19 ms） | **换判据**：改用**节点数**（结构量，恒定 = 窗口大小）；基线明确「不下耗时降到 X ms 的断言」并记未闭合项 |
+| 正确性轴 | 窗口化后**选中项可能落在窗口外**：`listTargets` 的 ↑/↓ 移动域是**全部**工具，而列表只画尾窗 ⇒ 会「选中了却看不见」 | 照 `TimelineTab` 的 `effectiveWindow` 做选中项派生扩窗（`ChatTab` 的 `selectedToolIndex`）；DIFFS / ARTIFACTS 的行是只读卡片、无选中态，故不需要 |
+| 规范轴 | 窗口条复用了 `timeline-*` 类名（语义错位） | 复核 `app.css:3759-3794`：这三个类**无 `.detail-timeline` 前缀限定** ⇒ 复用即零样式改动（`dist` 的 CSS 文件名与 F7 时逐字相同可证）；票面禁止改 `app.css`，不复用反而会逼出越界改动 |
+| 规范轴 | 新常量命名易与 `TIMELINE_WINDOW_DEFAULT` 混 | 用 `TOOLS_` / `CHANGES_` / `ARTIFACTS_WINDOW_*` 前缀，各自独立取值（**不复用** Timeline 语义——那是事件行，高度特征不同） |
+| 规范轴 | 结论：Scope lock（未碰 Timeline 尾窗实现 / `App.tsx` / `app.css` / 其余 tab）、`useState` 均在 early-return 之前（Rules of Hooks）、无新依赖、无虚拟化库 **通过** | — |
+
+> 两轴审查**未发现 P0**。P1 的处置是**换判据**（耗时 → 节点数），不是补一句免责。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| **未引入** `content-visibility` / `contain`（票面第 4 步） | **未处理** | 同基线：需某个**具体容器**的实测，证明 long task / 最长单帧显著改善且不破坏 `find-in-page`、滚动锚定、a11y 树 |
+| `TerminalTab` 的 `commandTools` 列表**仍是全量渲染** | **已知**（票面 Scope lock 未列它，按 AGENTS.md §8 不顺手改） | 该列表单次渲染 ≥4 ms（同口径）时按同一尾窗模式补 |
+| **F7 的过渡复验**（F7 台账节：F5 若引入 `contain` 则过渡需复验一次） | **触发条件未成立** | 本票未引入 `contain` ⇒ F7 那条未闭合项保持原状，无需复验；若后续有票引入则按 F7 记录执行 |
+| 改造后耗时读数跨格抖动 | **已知** | 空闲机器上重跑 `stepdetail-list-cost.perf.test.ts` 两遍取一致读数 |
+| 超长会话下的**操作成本**（用户可能要连点多次「加载更早」） | **未测量**（本票只测渲染成本） | 真实会话出现 >1000 个工具时再评估窗口/步长取值（YAGNI） |
+
+**审查与台账处理**：本票含源码改动（`StepDetail.tsx` +87 / −4）与两个测试文件（一个 jsdom 用例、一个 perf 探针）。
+`docs/PERF_BASELINE.md`（AC1 落点）进本票提交；两轴审查已在**本票内**完成（上表）。
+**白名单归属**：docs-only 的台账刀（tracker F5 验收证据节 + `PERF_BASELINE` F5 节 + phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀与含可执行探针的刀**不进**，按 F3 / F6 / F7 同规矩交审查窗口覆盖。
+
+<!-- ===== F5(#279) 台账节结束 ===== -->
