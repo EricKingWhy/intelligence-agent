@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -204,6 +205,24 @@ class JsonlSessionStore:
                 )
 
     @staticmethod
+    def _iter_event_lines(
+        path: Path, limit: int | None = None
+    ) -> Iterator[tuple[int, str]]:
+        """Yield physical lines lazily; ``limit`` caps physical lines, not events.
+
+        All Store readers share this one file-open/line-enumeration path. Parsing stays
+        in ``_parse_event_line`` so summary can count the whole file while parsing only
+        its bounded head and final non-empty line.
+        """
+        if limit is not None and limit <= 0:
+            return
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for lineno, raw_line in enumerate(handle, start=1):
+                yield lineno, raw_line
+                if limit is not None and lineno >= limit:
+                    break
+
+    @staticmethod
     def _parse_event_line(raw_line: str, path_name: str, lineno: int) -> SessionEvent | None:
         """单行解析（容错语义的单一 owner，read_events / summary 共用）。
 
@@ -244,12 +263,10 @@ class JsonlSessionStore:
             return []
 
         events: list[SessionEvent] = []
-        # errors="replace"：非法 UTF-8 字节替换为 U+FFFD，让坏行走统一的跳过路径
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for lineno, raw_line in enumerate(fh, start=1):
-                event = self._parse_event_line(raw_line, path.name, lineno)
-                if event is not None:
-                    events.append(event)
+        for lineno, raw_line in self._iter_event_lines(path):
+            event = self._parse_event_line(raw_line, path.name, lineno)
+            if event is not None:
+                events.append(event)
         return events
 
     def read_session_summary(self, session_id: str) -> SessionSummaryStats | None:
@@ -280,30 +297,29 @@ class JsonlSessionStore:
         # （见下方守卫），所以不存在「改用前一行」的分支。
         last_line: tuple[int, str] | None = None
 
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for lineno, raw_line in enumerate(fh, start=1):
-                stripped = raw_line.strip()
-                if not stripped:
-                    continue
-                event_count += 1
-                last_line = (lineno, stripped)
+        for lineno, raw_line in self._iter_event_lines(path):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            event_count += 1
+            last_line = (lineno, stripped)
 
-                if not head_done:
-                    event = self._parse_event_line(raw_line, path.name, lineno)
-                    if event is None:
-                        # 头部存在损坏行：中段完整性不可信 → 全量回退
-                        return self._summary_fallback(session_id)
-                    if first_time is None:
-                        first_time = event.time
-                    if (event.type == USER_MESSAGE
-                            and isinstance(event.data.get("content"), str)
-                            and event.data["content"].strip()):
-                        first_user_message = event.data["content"].strip()[:128]
+            if not head_done:
+                event = self._parse_event_line(raw_line, path.name, lineno)
+                if event is None:
+                    # 头部存在损坏行：中段完整性不可信 → 全量回退
+                    return self._summary_fallback(session_id)
+                if first_time is None:
+                    first_time = event.time
+                if (event.type == USER_MESSAGE
+                        and isinstance(event.data.get("content"), str)
+                        and event.data["content"].strip()):
+                    first_user_message = event.data["content"].strip()[:128]
+                    head_done = True
+                else:
+                    head_parsed += 1
+                    if head_parsed >= _SUMMARY_HEAD_PARSE_LIMIT:
                         head_done = True
-                    else:
-                        head_parsed += 1
-                        if head_parsed >= _SUMMARY_HEAD_PARSE_LIMIT:
-                            head_done = True
 
         # 末行损坏（崩溃半写的常态位置）→ 全量回退，保证精确。
         # 只解析这一次：last_event_time 与 trace_id 同源于本事件，快路径与
@@ -450,23 +466,22 @@ class JsonlSessionStore:
         path = self._events_path(session_id)
         if not path.exists():
             return None
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for lineno, raw_line in enumerate(handle, start=1):
-                if not raw_line.strip():
-                    continue
-                event = self._parse_event_line(raw_line, path.name, lineno)
-                if event is None:
-                    continue
-                if event.type != SESSION_STARTED:
-                    # header 正常就是第一条；遇到别的说明日志形状异常，不再往下翻
-                    # （继续翻就等于读正文了）。
-                    return None
-                data = event.data or {}
-                cwd = data.get("cwd")
-                return StartedHeader(
-                    session_id=session_id,
-                    cwd=cwd if isinstance(cwd, str) and cwd else None,
-                    created_at=event.time,
-                    agent_id=event.agent_id,
-                )
+        for lineno, raw_line in self._iter_event_lines(path):
+            if not raw_line.strip():
+                continue
+            event = self._parse_event_line(raw_line, path.name, lineno)
+            if event is None:
+                continue
+            if event.type != SESSION_STARTED:
+                # header 正常就是第一条；遇到别的说明日志形状异常，不再往下翻
+                # （继续翻就等于读正文了）。
+                return None
+            data = event.data or {}
+            cwd = data.get("cwd")
+            return StartedHeader(
+                session_id=session_id,
+                cwd=cwd if isinstance(cwd, str) and cwd else None,
+                created_at=event.time,
+                agent_id=event.agent_id,
+            )
         return None
