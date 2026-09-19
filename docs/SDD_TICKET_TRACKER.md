@@ -3390,3 +3390,106 @@ cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts \
 **白名单归属**：docs-only 的台账刀（tracker F5 验收证据节 + `PERF_BASELINE` F5 节 + phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀与含可执行探针的刀**不进**，按 F3 / F6 / F7 同规矩交审查窗口覆盖。
 
 <!-- ===== F5(#279) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— F8（#280）台账起点（2026-09-19） ===== -->
+
+#### F8（#280）验收证据
+
+**票面**：GitHub #280（`## Problem` = `web/src/lib/sse.ts:43-62` 两处超线性：`:54` 每 chunk 对**整个 buffer** 跑两遍 CRLF 正则、`:58-60` 每切一帧 `slice` 一次剩余 buffer；`## What to build` 必做 1 游标式归一化 / 必做 2 去 `slice` 的 O(n²) / 必做 3 **行为等价的证据**；硬约束 **C1**（`consumeSSE` 仍是唯一解码器）/ **C2**（`wsStream.test.ts` 的同形字节契约不得改）/ **C3**（`attachLiveStream` / 合帧器 / `seenSeqs` / 重连调度零改动）；AC1–AC9）。
+
+**本票结论（三句分开读，不要合成一句）**
+1. **分帧处理量从二次变线性**：4× 输入的处理量比 **15.18× → 4.00×**（一帧超大）、**14.14× → 4.04×**（N 帧切 M chunk）。
+2. **顺带修掉一个真丢事件的缺陷**：`\r\n` 跨 chunk 边界（`\r` 结尾 + 下一 chunk `\n` 开头）旧实现把孤立 `\r` 立即转成 `\n`，与下一块的 `\n` 拼成「空行」⇒ **提前切帧，半截 JSON 被丢**（改造前 `events = []`，改造后 1 条）。这正是票面 Risks 点名的高危陷阱，AC2 的红证落在它身上。
+3. **耗时**：一帧超大 4 MB / 128 chunk 档 **297.3 ms → 133.4 ms**；1 MB / 32 chunk 档 15.1 → 14.2 ms（该档已由 `JSON.parse` 主导，看不出差别是预期的）⇒ **不下「耗时降到 X ms」的断言**（单次采样）。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | **F8 面：干净**（`web/src/lib/sse.ts`、`web/src/lib/sse.test.ts` 开工时均无改动）。其余 ` M web/src/components/StepDetail.tsx`、`?? web/src/components/StepDetail.window.test.tsx`、`?? web/src/components/stepdetail-list-cost.perf.test.ts` 属**上一票 F5/#279**（其提交对象已在隔离索引里、ref 未落地）；` M docs/*` 属 F5 台账 + 台账修订刀 |
+| `git log --oneline -8 -- web/src/lib/sse.ts` | `3555542`（最近一条即文件当前形态，**无在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 文件所有权矩阵里 `web/src/lib/sse.ts` **只此一张**（F8，唯一占用者）；本票与 `docs/tickets/architecture-audit-remediation-2026-09-18.md` 的 #237–#266 候选文件（全 `src/agent_harness/**`）**零交集**。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F8 节**（AC9 落点，含两场景逐项处理量、buffer 上限、耗时构成、未闭合项）。
+**复现命令 = 本票测试文件本身**（形态用例是确定性计数，进默认车道；**没有**另建采集器脚本——票面 AC8 把 diff 限死在 `sse.ts` + 其测试两个文件）：
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run --reporter=verbose src/lib/sse.test.ts
+```
+
+**改造前/后逐条对照（票面「必做 3」的 8 条；同一命令跑两遍，只换 `sse.ts`）**
+
+| # | 用例（`web/src/lib/sse.test.ts`） | 改造前 | 改造后 |
+| --- | --- | --- | --- |
+| ① | LF 帧逐条解析 → 既有 `consumeSSE > LF 帧逐条解析为事件` | ✓ 绿 | ✓ 绿 |
+| ② | `\n` 分隔符恰好切在两个 chunk 之间 | ✓ 绿 | ✓ 绿 |
+| ③ | `\r\n\r\n` 落在同一 chunk 内（**逐字段等价**，不只看「解析成功」） | ✓ 绿 | ✓ 绿 |
+| ④ | **`\r\n` 跨 chunk 边界** | ✗ **红**（`expected [] to deeply equal [{type:'text/delta',…}]`） | ✓ 绿 |
+| ⑤ | 仅 `\r` 作行结束符（单 chunk ＋ 跨 chunk 两形态） | ✓ 绿 | ✓ 绿 |
+| ⑥ | 一帧超大（`stream/truncated` 重放形态，200 KB 单帧 16 段投喂） | ✓ 绿 | ✓ 绿 |
+| ⑦ | 空帧 / 仅 `:` 注释行 / 多行 `data:` 拼接 | ✓ 绿 | ✓ 绿 |
+| ⑧ | 末尾 flush 的尾部 `\r` | ✓ 绿 | ✓ 绿 |
+| + | 形态用例：4× 输入 ⇒ 处理量 < 6× | ✗ **红**（15.18 / 14.14×） | ✓ 绿（4.00 / 4.04×） |
+
+改造前整跑结论行：`Test Files 1 failed (1) | Tests 2 failed | 13 passed (15)`（红 = ④ + 形态用例）。
+**AC2 只要求 ④/⑧ 至少一条红**：④ 红；⑧ 改造前即绿——它是「**没被破坏**」的 golden（票面 AC1 允许，并在此说明）。
+
+**红证（改造前，2026-09-19 12:30——用例已写、`sse.ts` 仍是 `2c8ddeb` 那版）**
+
+```
+× src/lib/sse.test.ts > F8 分帧边界矩阵（#280） > ④ `\r\n` 跨 chunk 边界 … 11ms
+  → expected [] to deeply equal [ { type: 'text/delta', …(1) } ]
+× src/lib/sse.test.ts > F8 分帧扫描的处理量形态（#280） > 4× 输入 ⇒ 处理量 < 6× … 365ms
+  → expected 15.183997618789197 to be less than 6
+```
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | 上表 8 条全绿 ＋ 逐条改造前/后对照（④ 红→绿；其余 7 条改造前后都绿 = 没被破坏；③⑤ 断言的是**逐字段等价**） |
+| AC2 | **通过** | ④ **改造前红**（见红证）；⑧ 改造前绿，按票面「至少一条」成立 |
+| AC3 | **通过** | 形态用例通过，且附改造前的二次形态对照数字：**15.18× → 4.00×**、**14.14× → 4.04×**（线性 ≈4） |
+| AC4 | **通过** | `git diff --numstat HEAD -- web/src/lib/wsStream.ts web/src/lib/wsStream.test.ts` **为空**（C1/C2 未被碰） |
+| AC5 | **通过** | `git diff --numstat HEAD -- web/src/hooks/useSession.ts` **为空**（C3 未被碰） |
+| AC6 | **通过** | `grep -rl "wsStream\|api/ws\|WebSocket" web/e2e/*.spec.ts` 命中 **2 个 spec**（`queue-flush.spec.ts` / `stream-fallback.spec.ts`，`fixtures.ts` 非 spec）；子集两臂同批结果：**改造前 22/22 ok、0 失败；改造后 22/22 ok、0 失败** |
+| AC7 | **通过** | `oxlint` **42 warnings / 0 errors**（rc=0）；`tsc -b && vite build` rc=0（`built in 11.32s`）；`vitest run` **65 files / 1040 tests / 0 failed**；子集 `vitest run src/lib/sse.test.ts src/lib/wsStream.test.ts` = **46 passed** |
+| AC8 | **通过（脚本口径为准，见下）** | 本票**只有两个文件**：`web/src/lib/sse.ts`（+48/−13）、`web/src/lib/sse.test.ts`（+234/−0）——路径域 diff 与提交级 `--stat` 一致。工作树里另有 F5 的在飞改动（台账已记，非本票） |
+| AC9 | **通过** | 基线 F8 节写明一帧超大两档的改造前/后耗时（**15.1 → 14.2 ms** / **297.3 → 133.4 ms**）＋ 处理量分解 ＋「耗时构成」说明 |
+
+**AC8 的口径说明（写在明面上）**：本 worktree 是**隔离提交链**形态——F5（#279）的改动仍在工作树里未落地（其提交对象挂在 `git` 对象库里，`ref` 未动），所以裸 `git diff --stat HEAD` 会同时列出 F5 的 `StepDetail.tsx` 与两个新增测试文件。判定本票范围用**路径域**：`git diff --numstat HEAD -- web/src/lib/`（只出本票两个文件），落地后用 `git show --stat <本票 commit>` 复核（同样只有两个文件）。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P1**：形态用例的观测量本身是错的——`indexOf` 记的是「接收者全长 − from」，把**成功命中**也当成扫完整个尾巴 ⇒ 新实现在场景 B 上被误判二次（14.14×） | 改口径：命中记 `out - from`、未命中才记扫完；两臂数字在最终口径下**重测** |
+| 正确性轴 | **P1**：计数累加写成 `chars += (bySlice += n)` ⇒ 累加的是**运行中总数**，头条数字被放大（曾出现 59.55× 而非 15.18×） | 拆成两句独立累加；重测并复核三项之和 = 总数（51,503,210 = 33.0+16.5+2.0 M） |
+| 正确性轴 | **P1（本轮新发现）**：只做「归一化只处理新区间 ＋ 游标推进」**还不够**——`indexOf` 每 chunk 仍从 0 重扫整个 buffer，一帧超大时处理量仍是 `输入 × chunk 数`（新实现 4× 臂实测 256 M） | 加 `scanFrom`：未命中后下次从「**尾部最后一个字符**」起扫（它可能是跨界 `\n\n` 的前半个）；实测 4× 臂 256 M → 4 M。这是票面「必做 2」之外的必要一步，逻辑写进 `sse.ts` 的 `drain` 注释 |
+| 正确性轴 | **P2**：场景 B 的 4× 放大原设计是「帧数 ×4、chunk 数 ×4」⇒ **每 chunk 帧数不变**，二次项根本不放大（改造前只有 4.02×，用例失去鉴别力） | 改成「帧数 ×4、chunk 数不变」；改造前 14.14×、改造后 4.04× |
+| 正确性轴 | **P2**：起草时 ④⑤⑦ 的多行 `data:` 续行写成 `{"data":…}`（**非法 JSON**）⇒ ④ 的「红」里混进了假红成分（即使切帧正确也解析不出） | 续行统一为 `"data":{"delta":"hi"}}`；修后 ④ 在改造前**仍红**（真红：提前切帧丢事件）、改造后转绿 |
+| 正确性轴 | 结论：`carry` 只可能是单个 `\r`（`text.endsWith('\r')`）；`buffer` 内不可能以 `\r` 结尾 ⇒ `scanFrom = buffer.length - 1` 的「回看 1 字符」不变量成立；压缩后 `scanFrom -= readPos` 恒 ≥ 0；flush 后先 `drain()` 再取 `slice(readPos)` 才能与旧实现的 `buffer.trim()` 语义对齐 | — |
+| 规范轴 | **P2**：测试里 `split`（矩阵 describe）与 `even`（形态 describe）是同一个切块工具的两份拷贝 | 提为模块级 `evenChunks`，两处共用 |
+| 规范轴 | **P2**：计数窗口内若 `collect` 抛错，`restore()` 不会执行 ⇒ 打过补丁的 `String.prototype` 会留给同 worker 的其它测试文件 | `costOf` 改 `try/finally` 还原 |
+| 规范轴 | **P2**：形态用例进**默认车道**（与 F5/F6/F7 的 `*.perf.test.ts` 手动车道相反）需要理由 | 理由写进实现上方注释：该用例断言的是**算法形态的确定性计数**（与机器速度无关），不是耗时预算；且票面 AC8 把可改文件限死为 `sse.ts` + 其测试 |
+| 规范轴 | **P3**：断言 buffer 上限用字面量 `256 * 1024`，而实现常量是 `COMPACT_THRESHOLD = 64 KiB` | **故意**：断言的是「有界」这一性质，不锁实现常量（阈值调大调小都不该让用例红） |
+| 规范轴 | 结论：Scope lock（只碰 `sse.ts` + 其测试；C1/C2/C3 三个文件零 diff）、`sse.ts:50-53` 的 CRLF 归一化注释**原文保留**（在其下追加游标说明）、`parseFrame` 语义未动、无新依赖、无第二个解析器 | — |
+
+> 两轴审查**未发现 P0**。两个 P1 的处置都是**改观测量/补算法**，不是补免责说明——第一个 P1 若放过，本票会以「场景 B 仍二次」的假象收场。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| `parseFrame` 对超大单帧仍是 O(n)（`split` + `JSON.parse`）⇒ 一帧超大场景的**耗时**由它主导（4× 臂 133.4 ms 里，分帧处理量已 39× 降） | **票面明示不动** | 后续基线显示单帧解析本身成为长帧主因 ⇒ 另开票（基线 F8 节的「耗时构成」已给出指向） |
+| 耗时读数单次采样、无重复 | **已知** | 空闲机器上重跑基线 F8 节命令三次取中位数 |
+| 跨 chunk `\r\n` 的行为**有意改变**（旧：丢事件；新：保留） | **已确认无下游依赖** | `wsStream.ts:134` 只发 `\n\n`（不受影响）；HTTP SSE 降级路径走 uvicorn 的 `\r\n\r\n`，整帧到达（⑤/⑧ 覆盖）。若将来出现依赖「提前切帧」的调用方，需新 ADR 说明 |
+| 形态用例进默认车道 ⇒ 每次 `npm test` 多跑 ~0.5 s（改造前那一版要 ~0.4 s 的二次做功） | **可接受** | 若默认车道时间预算收紧，把该用例挪进 `*.perf.test.ts` 车道（计数口径可原样搬） |
+
+**审查与台账处理**：本票含源码改动（`sse.ts` +48/−13）与一个测试文件（`sse.test.ts` +234）。
+`docs/PERF_BASELINE.md`（AC9 落点）进本票提交；两轴审查已在**本票内**完成（上表），其 **fixed point = `6cbebbc`**（= 本票提交链的父：补回 P1-B3 审查行缺失区间字段的那一刀）。
+**白名单归属**：docs-only 的台账刀（tracker F8 验收证据节 ＋ `PERF_BASELINE` F8 节 ＋ phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀与含测试的刀**不进**，按 F3 / F5 / F6 / F7 同规矩交审查窗口覆盖。
+
+<!-- ===== F8(#280) 台账节结束 ===== -->
