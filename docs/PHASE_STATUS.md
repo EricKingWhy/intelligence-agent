@@ -40,6 +40,8 @@
 
 ## 当前工作焦点
 
+**2026-09-20 集成状态**：#256 Bash timeout contract 已合入集成候选（merge commit `cbe3b09`）；全量门禁与 review coverage 记录见 `docs/phase_status/2026-09.md`。Spec 复核发现 #256 的 AC2/AC3/AC4 仍有缺口，因此 #256 与父票 #244 继续 OPEN，本次仅记为中间集成。四个既存集成文件已纳入版本控制；详见月度归档。
+
 **Phase 14 已完成（Resume / Replay / Fork 完整化，ADR-0017 + tickets #107-#115）**：file-per-lineage fork（session 线性 JSONL 宪法不动）+ seed 逐字复制 + `session/forked` provenance + lineage 双层索引（fork|delegation 同树）+ copy-on-fork + tail summary（失败降级）+ CLI `fork`/`replay`/`sessions --tree` + Web 只读 lineage API（独立 router）。真实 Gate 5/5 单轮全过（docs/PHASE14_GATE.md）。离线全量 1089 passed、9 skipped、25 deselected，ruff clean。**本 Phase 在独立 worktree `D:\intelligence-agent-phase14`（feat/phase14）交付**——与并行流式改造（ADR-0016，feat/backend）零文件冲突；集成顺序：流式改造先、Phase 14 后（§14.9）。
 
 **Streaming UI 生产级改造已完成（S-UI，ADR-0016）**：detached-run + 显式取消端点 + reasoning 事件族 + 工具输出真流式 + after_seq 重连续传 + 多模型 catalog 全部落地；断连不再取消 run（Phase 9 取消臂语义经 ADR-0016 有意修订），前端契约回执见 docs/BACKEND_CONTRACT_STREAMING_UI.md（关键迁移点：live 文本流 model/delta → text/delta、Esc 走 POST /cancel、seq gap 触发 after_seq 重连）。
