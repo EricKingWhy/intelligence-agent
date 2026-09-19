@@ -40,11 +40,7 @@
 
 ## 当前工作焦点
 
-**Phase 14 已完成（Resume / Replay / Fork 完整化，ADR-0017 + tickets #107-#115）**：file-per-lineage fork（session 线性 JSONL 宪法不动）+ seed 逐字复制 + `session/forked` provenance + lineage 双层索引（fork|delegation 同树）+ copy-on-fork + tail summary（失败降级）+ CLI `fork`/`replay`/`sessions --tree` + Web 只读 lineage API（独立 router）。真实 Gate 5/5 单轮全过（docs/PHASE14_GATE.md）。离线全量 1089 passed、9 skipped、25 deselected，ruff clean。**本 Phase 在独立 worktree `D:\intelligence-agent-phase14`（feat/phase14）交付**——与并行流式改造（ADR-0016，feat/backend）零文件冲突；集成顺序：流式改造先、Phase 14 后（§14.9）。
-
-**Streaming UI 生产级改造已完成（S-UI，ADR-0016）**：detached-run + 显式取消端点 + reasoning 事件族 + 工具输出真流式 + after_seq 重连续传 + 多模型 catalog 全部落地；断连不再取消 run（Phase 9 取消臂语义经 ADR-0016 有意修订），前端契约回执见 docs/BACKEND_CONTRACT_STREAMING_UI.md（关键迁移点：live 文本流 model/delta → text/delta、Esc 走 POST /cancel、seq gap 触发 after_seq 重连）。
-
-前序：Phase 13 完成（Multi-Agent，ADR-0015）；Phase 12 完成（Web Search / Reliability，ADR-0014）；Phase 8 完成（MCP，ADR-0012）；Phase 11 完成（Knowledge，ADR-0013）。fallback 链已异构化（senseaudio primary + zhipu fallback，gate2 实测真实切换）。
+**当前主线：架构整改 #237–#248 与子票 #249–#266**（排除 #236、#267–#281）。当前后端序列：#256/#257 已完成并于 B-19 收批；T13/#258 已实现并提交 `90842cc`，专项与全量门禁通过；下一张为 T14/#259 JSONL reader golden。#258 / 父票 #244 仍 OPEN；#258/#259 的 B-20 两轴审查、coverage gate 与最终集成 Gate 尚未完成。跨进程共享同名 Docker container 的互斥不属于 #258 冻结验收，作为审查风险记录。
 
 ## 更新日志（索引）
 
@@ -61,6 +57,7 @@
 - 2026-09-19（B-18，T09/#254 + T10/#255）：**两轴批量审查收口**——fixed point `1ba46a2`，审查 tip `a47d855`，Correctness zero findings，Standards 1×P2 + 1×P3，修复 `ae14ee4`；Catalog/Recovery 回归与 Ruff 全绿。详见 `docs/phase_status/2026-09.md` 2026-09-19 条目；#254/#255 及父票 #242/#243 OPEN。
 - 2026-09-19（T11/#256）：**Bash timeout/cancel contract**——实现 `2776c4e`，60 秒预算由 `BashTool` 统一传入 Sandbox；专项 103 passed / 1 skipped，全量 2561 passed / 10 skipped / 42 deselected，Ruff clean，`uv.lock` 未变；coverage 留待下一批两轴审查。详见 `docs/phase_status/2026-09.md` 2026-09-19 T11 条目；#256 / 父票 #244 OPEN。
 - 2026-09-19（B-19，T11/#256 + T12/#257）：**两轴批量审查与修复收口**——fixed point `ae14ee4`，审查/复验实际 tip `d7e7a14`；Windows Local 改为 CREATE_SUSPENDED + Job Object 进程树终止，补 taskkill 失败 fallback、端到端 Executor→Bash→Local golden、readiness/partial-output 证据；两轴 findings 全数修复。专项 86 passed / 1 skipped；全量 2566 passed / 10 skipped / 42 deselected / 15 warnings；Ruff clean，diff clean，`uv.lock` 未变；#256/#257 / 父票 #244 OPEN。详见 `docs/phase_status/2026-09.md` 2026-09-19 B-19 条目。
+- 2026-09-19（T13/#258）：**Docker Bash timeout/cancel parity**——实现 `90842cc`；专项 148 passed；全量 `PYTHONUTF8=1 uv run pytest -q` 为 2587 passed / 2 skipped / 42 deselected / 13 warnings；Ruff 与 diff clean。覆盖待 B-20 两轴审查；#258 / 父票 #244 OPEN。详见 `docs/phase_status/2026-09.md`。
 - 2026-09-19（T08/#253）：**Recovery adjudication token contract**（实现 `42b7faf`；3 文件 +149/−2）——frozen/slots token 固定复合身份与 SHA-256 state fingerprint；不扩 schema、不触碰 coordinator 锁流程，#254 负责锁外 stale 拒绝。专项/回归/全量门禁通过；明细见 `2026-09.md` 2026-09-19 段。票 #253 / 父票 #242 OPEN。
 - 2026-09-19（T07/#252）：**Session single durable write funnel**（实现 `0851c43`；2 文件 +100/−4）——`Session.append` 与 `adopt_history` 统一走私有 `_persist_event`，保留 normal listener 与 fork seed 离线语义；专项/回归/全量门禁通过。明细见 `2026-09.md` 2026-09-19 段。票 #252 / 父票 #241 OPEN。
 - 2026-09-18（B-16）：**T05(#250) + T06(#251) 收批**（fixed point `0f121ac`；两轴独立只读子代理；**零 P0/P1、1×P2 共识 + 5×P3**，修复 `cff9ae6`，覆盖闸门 exit 0）——P2 = `ToolExecutor._close_span` 自身无异常保护（观测实现违约会顶掉原发异常）⇒ 自兜一层；P3×5 全修 + 1 条如实登记不修。明细见 `2026-09.md` 2026-09-18 段（B-16 条目）。票 #250 / #251 / #240 / #241 OPEN。
@@ -96,12 +93,13 @@
 
 | 文件 | 覆盖日期 | 条目数 | 说明 |
 | --- | --- | --- | --- |
-| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-18 | 247 | 原「更新日志」整段（条目正文逐字未改，按日期重排） |
+| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-19 | 256 | 原「更新日志」整段（条目正文逐字未改，按日期重排） |
 
 ### 按日定位（归档内行号，日期降序）
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
+| 2026-09-19 | 9 | `2026-09.md` L458-467 |
 | 2026-09-18 | 5 | `2026-09.md` L448-452 |
 | 2026-09-17 | 35 | `2026-09.md` L412-447 |
 | 2026-09-16 | 4 | `2026-09.md` L408-411 |
