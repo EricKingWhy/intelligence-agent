@@ -85,15 +85,16 @@ def callee_name(func: ast.expr) -> str:
     return ""
 
 
-def imported_modules(node: ast.Import | ast.ImportFrom, package: str = "") -> list[str]:
+def imported_modules(node: ast.Import | ast.ImportFrom, package: str) -> list[str]:
     """import 语句**涉及的全部**模块名（用于精确判断是否属 `agent_harness.web`）。
 
     只取第一个别名、或只看 `node.module` 都会漏两种等价写法（审查 findings）：
     `from agent_harness import web`（web 在 names 里、不在 module 里）与
     `import a, b` 里 web 排在第二个。
-    `package` = 被扫文件所在包的模块名（如 `agent_harness.session`），相对导入
-    （`from .. import web`）按它解成绝对模块名——否则 `level` 被忽略、整类逃过扫描
-    （审查 findings）。
+    `package`（必填，无默认值）= 被扫文件所在包的模块名（如 `agent_harness.session`），
+    相对导入（`from .. import web`）按它解成绝对模块名——否则 `level` 被忽略、整类逃过
+    扫描（审查 findings）。**刻意不给默认值**：将来新增调用点忘传时应当 `TypeError`
+    报出来，而不是静默退回修复前的弱判据（审查 findings 的 P3）。
     """
     if isinstance(node, ast.ImportFrom):
         if node.level:

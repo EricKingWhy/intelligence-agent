@@ -166,8 +166,10 @@ Lock：不顺手重构）。
   含函数体内的惰性 import（实测：在 `service.py` 函数体里插 `from agent_harness.web.app import …`
   也会红）。相对导入按被扫文件的包解成绝对模块名（`from .. import web` 会被判出，见 §5 红证 13）。
   它**不覆盖**的是**动态导入**（`__import__("agent_harness.web.app")`、
-  `importlib.import_module(...)`，表达式根本不是 `Import` 节点）——这一类属**声明范围外**，
-  不视为缺口（审查第三轮提出前两类漏判，本批已收全；相对导入同一轮收全）。
+  `importlib.import_module(...)`，表达式根本不是 `Import` 节点）与 **star import 的"内容"**
+  （`from .. import *` 这条**语句**会被扫到，但星号展开出哪些名字无法静态解析；今天
+  `src/agent_harness/__init__.py` 只有一条 docstring、没有任何 re-export，故无实际暴露面）。
+  这两类属**声明范围外**，不视为缺口（审查第三轮提出前两类漏判，本批已收全；相对导入同一轮收全）。
 
 另外实测：今天任何模块级 `agent_harness.web.*` 运行时 import 都会**立刻成环**
 （`web/__init__.py` eager import `app`，`app` 又 import `session.projects` → `session.service`）
