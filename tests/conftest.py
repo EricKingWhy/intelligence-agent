@@ -48,3 +48,26 @@ def _clean_settings_env(request: pytest.FixtureRequest) -> Iterator[None]:
         yield
     finally:
         os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _reset_sse_shutdown_latch() -> Iterator[None]:
+    """用例前后各复位一次 sse_starlette 的进程级关机闩锁 `AppStatus.should_exit`。
+
+    操作约束：该全局量一旦被翻成 `True` 就**没有复位路径**，会让此后同进程内每个 SSE 响应
+    变成「200 + 零 `data:` 帧」；本仓库有 11 个用例会写 `server.should_exit = True` 去停真实
+    uvicorn 服务。**不要删这两行 `_reset()`**——删掉后失败是**浮动的**、且「单模块全绿」，
+    极难重新定位（这正是它此前被当成环境噪声放过的原因）。
+
+    判据与机制：`docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md`。
+    """
+    def _reset() -> None:
+        try:
+            from sse_starlette.sse import AppStatus
+        except ImportError:  # sse_starlette 不在时（极少数纯离线子集）无闩锁可复位
+            return
+        AppStatus.should_exit = False
+
+    _reset()
+    yield
+    _reset()
