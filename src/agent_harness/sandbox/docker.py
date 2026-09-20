@@ -233,6 +233,7 @@ class DockerSandbox(Sandbox):
             ),
             max(0.0, deadline - perf_counter()),
             cancel_event=cancel_event,
+            on_late_result=lambda late: self._cleanup_late_exec_create(api, late),
         )
         if not complete:
             return self._interrupted_result(
@@ -411,6 +412,10 @@ class DockerSandbox(Sandbox):
                     ) from holder["error"]
                 raise holder["error"]
 
+        if control_pending:
+            stderr_capture.append(stderr_decoder.feed(bytes(control_pending)))
+            control_pending.clear()
+
         for decoder, capture, channel in (
             (stdout_decoder, stdout_capture, "stdout"),
             (stderr_decoder, stderr_capture, "stderr"),
@@ -449,6 +454,18 @@ class DockerSandbox(Sandbox):
             duration_ms=round((perf_counter() - started) * 1000, 1),
         )
 
+    def _cleanup_late_exec_create(self, api, created: object) -> None:
+        """Reap an exec created after its caller already timed out/cancelled."""
+        if not isinstance(created, dict) or not created.get("Id"):
+            return
+        try:
+            # A late exec has no PID marker yet; fail closed by stopping the
+            # owning container rather than leaving an untracked process behind.
+            self._stop_container()
+        except Exception:
+            self._mark_exec_cleanup_failed()
+            logger.exception("迟到的 Docker exec 创建结果无法回收")
+
     @staticmethod
     def _best_effort_bounded_call(call, timeout: float) -> tuple[bool, object | None]:
         try:
@@ -486,12 +503,17 @@ class DockerSandbox(Sandbox):
         timeout: float,
         *,
         cancel_event=None,
+        on_late_result=None,
     ) -> tuple[bool, object | None]:
         holder: dict[str, object] = {}
+        expired = threading.Event()
 
         def run() -> None:
             try:
-                holder["result"] = call()
+                result = call()
+                holder["result"] = result
+                if expired.is_set() and on_late_result is not None:
+                    on_late_result(result)
             except Exception as error:  # noqa: BLE001
                 holder["error"] = error
 
@@ -500,9 +522,11 @@ class DockerSandbox(Sandbox):
         deadline = perf_counter() + timeout
         while worker.is_alive():
             if cancel_event is not None and cancel_event.is_set():
+                expired.set()
                 return False, None
             remaining = deadline - perf_counter()
             if remaining <= 0:
+                expired.set()
                 return False, None
             worker.join(min(0.05, remaining))
         if "error" in holder:
@@ -522,7 +546,7 @@ class DockerSandbox(Sandbox):
                 "for child in $(cat /proc/$1/task/$1/children 2>/dev/null); do "
                 "kill_tree $child; "
                 "done; "
-                "kill -$signal -$1 2>/dev/null; "
+                "kill -$signal -- -$1 2>/dev/null; "
                 "}; "
                 "kill_tree $1"
             )

@@ -392,13 +392,15 @@ class _BlockingDockerExecCreate:
         yield (b"should not start", None)
 
 
-def test_docker_exec_create_observes_cancel_while_call_is_blocked():
-    """Cancel during exec_create returns promptly without starting or killing the container."""
+def test_docker_exec_create_late_result_is_reaped_after_cancel():
+    """A late exec_create result must trigger container cleanup after cancel."""
     from agent_harness.sandbox.docker import DockerSandbox
 
     sandbox = object.__new__(DockerSandbox)
     api = _BlockingDockerExecCreate()
     container = Mock(id="container-1", status="running")
+    container.kill = Mock()
+    container.wait = Mock()
     sandbox._container = container
     sandbox._client = Mock(api=api)
     sandbox._exec_lock = threading.Lock()
@@ -418,10 +420,16 @@ def test_docker_exec_create_observes_cancel_while_call_is_blocked():
         assert len(results) == 1
         assert results[0].cancelled is True
         assert not api.started
-        container.kill.assert_not_called()
     finally:
         api.release.set()
         thread.join(2)
+
+    for _ in range(50):
+        if container.kill.called:
+            break
+        time.sleep(0.02)
+    container.kill.assert_called_once_with()
+    container.wait.assert_called_once_with()
 
 
 def test_docker_exec_start_exception_kills_container():
@@ -624,6 +632,32 @@ def test_docker_output_is_capped_per_channel():
     assert "stderr 超过捕获上限" in result.stderr
 
 
+def test_docker_incomplete_pid_marker_keeps_stderr():
+    """Stderr before an incomplete PID marker remains visible at stream EOF."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    class _MissingMarkerExec:
+        def exec_create(self, container_id, command, **kwargs):
+            return {"Id": "exec-missing-marker"}
+
+        def exec_start(self, exec_id, **kwargs):
+            yield (None, b"stderr-before\x1eAH_PID:1234")
+
+        def exec_inspect(self, exec_id):
+            return {"ExitCode": 0}
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Mock(id="container-1", status="running")
+    sandbox._client = Mock(api=_MissingMarkerExec())
+    sandbox._exec_lock = threading.Lock()
+
+    result = sandbox.exec("printf done", timeout=1)
+
+    assert result.exit_code == 0
+    assert "stderr-before" in result.stderr
+    assert "AH_PID:1234" in result.stderr
+
+
 def test_docker_timeout_kills_exec_and_keeps_partial_output():
     """Timeout terminates the container exec and retains output emitted before it."""
     sandbox, api = _docker_sandbox_with_streaming_exec()
@@ -633,6 +667,7 @@ def test_docker_timeout_kills_exec_and_keeps_partial_output():
     assert api.command[:4] == ["setsid", "-w", "/bin/sh", "-lc"]
     assert api.create_kwargs["workdir"] == "/workspace"
     assert api.kill_commands
+    assert any("kill -$signal -- -$1" in command[2] for command in api.kill_commands)
     assert result.exit_code == -1
     assert "stdout-before" in result.stdout
     assert "stderr-before" in result.stderr
