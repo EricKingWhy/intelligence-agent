@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from agent_harness.sandbox import Sandbox, ShellFamily
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
+from agent_harness.tooling.deadline import tool_execution_deadline_var
 from agent_harness.tooling.result import ErrorCode
 
 DEFAULT_BASH_TIMEOUT_SECONDS = 60.0
@@ -107,14 +108,27 @@ class BashTool(Tool):
         # "超时/取消返回"之后命令不再继续改 workspace（R7-1 的执行层闭环）。
         cancel_event = threading.Event()
         sink = tool_output_sink_var.get()
+        deadline = tool_execution_deadline_var.get()
+        worker = asyncio.create_task(asyncio.to_thread(
+            self._sandbox.exec, args.command, timeout=self.timeout_seconds,
+            deadline=deadline,
+            cancel_event=cancel_event,
+            on_output=(sink.push if sink is not None else None),
+        ))
         try:
-            result = await asyncio.to_thread(
-                self._sandbox.exec, args.command, timeout=self.timeout_seconds,
-                cancel_event=cancel_event,
-                on_output=(sink.push if sink is not None else None),
-            )
+            # Shield keeps the worker available for the mandatory cleanup join
+            # when the Executor's deadline cancels this coroutine.
+            result = await asyncio.shield(worker)
         except asyncio.CancelledError:
             cancel_event.set()
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    cancel_event.set()
+            # Cleanup failure outranks the timeout result: claiming a clean
+            # timeout while a process may still be alive would be unsafe.
+            worker.result()
             raise
         except PermissionError as e:
             return ToolResult.failure(
@@ -127,6 +141,11 @@ class BashTool(Tool):
                 message=f"bash 执行环境异常: {type(e).__name__}: {e}",
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
+        if deadline is not None and result.timed_out:
+            # The Sandbox observed the Executor-owned absolute boundary just
+            # before asyncio delivered cancellation.  Preserve one timeout
+            # classification path instead of returning a Bash business result.
+            raise TimeoutError
         # 关键映射（ADR-0002）：命令业务失败（exit_code!=0）→ ok=True，
         # exit_code/stdout/stderr 在 data 里供模型读取。
         return ToolResult.success(

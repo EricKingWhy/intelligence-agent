@@ -167,6 +167,7 @@ class LocalSubprocessSandbox(Sandbox):
         """no-op：本机进程总在，无需启动。幂等。"""
 
     def exec(self, command: str, *, timeout: float | None = None,
+             deadline: float | None = None,
              cancel_event=None,
              on_output=None) -> ExecResult:
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
@@ -189,6 +190,9 @@ class LocalSubprocessSandbox(Sandbox):
         # 故走 StreamDecoder：优先 UTF-8，遇到确凿非法序列整体回退宿主编码。
         # 注意：这里必须 text=False 自己解，不能让 Popen 的 TextIOWrapper 定死编码。
         t0 = perf_counter()
+        effective_deadline = (
+            deadline if deadline is not None else t0 + effective_timeout
+        )
         # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀。
         # Windows：CREATE_SUSPENDED + Job Object 让后代自动继承同一终止域。
         windows_job = self._create_windows_job() if os.name == "nt" else None
@@ -258,7 +262,9 @@ class LocalSubprocessSandbox(Sandbox):
         cancelled = False
         if cancel_event is None:
             try:
-                exit_code = process.wait(timeout=effective_timeout)
+                exit_code = process.wait(
+                    timeout=max(0.0, effective_deadline - perf_counter())
+                )
             except subprocess.TimeoutExpired:
                 timed_out = True
                 self._kill_process_tree(process)
@@ -270,11 +276,18 @@ class LocalSubprocessSandbox(Sandbox):
             # 协作取消（C1）：小步轮询等退出；置位即击杀整树。
             # pi-mono 同款"取消信号驱动到静默"模式；无 cancel_event 时保持
             # 原单次 wait 路径（git 等只读命令零轮询开销）。
-            deadline = perf_counter() + effective_timeout
             while True:
-                remaining = deadline - perf_counter()
+                remaining = effective_deadline - perf_counter()
+                if remaining <= 0:
+                    timed_out = True
+                    self._kill_process_tree(process)
+                    try:
+                        exit_code = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:  # pragma: no cover
+                        exit_code = -1
+                    break
                 try:
-                    exit_code = process.wait(timeout=max(0.05, min(0.1, remaining)))
+                    exit_code = process.wait(timeout=min(0.1, remaining))
                     break
                 except subprocess.TimeoutExpired:
                     if cancel_event.is_set():
@@ -285,7 +298,7 @@ class LocalSubprocessSandbox(Sandbox):
                         except subprocess.TimeoutExpired:  # pragma: no cover
                             exit_code = -1
                         break
-                    if perf_counter() >= deadline:
+                    if perf_counter() >= effective_deadline:
                         timed_out = True
                         self._kill_process_tree(process)
                         try:
@@ -315,6 +328,7 @@ class LocalSubprocessSandbox(Sandbox):
             stderr=stderr,
             duration_ms=round((perf_counter() - t0) * 1000, 1),
             cancelled=cancelled,
+            timed_out=timed_out,
         )
 
     @staticmethod

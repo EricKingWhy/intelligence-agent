@@ -238,6 +238,95 @@ def test_local_cancel_kills_child_tree_without_late_marker(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_executor_owns_the_absolute_bash_deadline(tmp_path):
+    """Executor creates the one absolute deadline consumed by Bash/Sandbox."""
+    from time import perf_counter
+
+    from agent_harness.tooling import PermissionPolicy, ToolExecutor, ToolRegistry
+
+    seen: dict[str, float | None] = {}
+
+    class _DeadlineProbeSandbox(LocalSubprocessSandbox):
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
+            seen["timeout"] = timeout
+            seen["deadline"] = deadline
+            return ExecResult(exit_code=0, stdout="done", stderr="", duration_ms=0.0)
+
+    class _TimedBash(BashTool):
+        @property
+        def timeout_seconds(self) -> float:
+            return 0.2
+
+    registry = ToolRegistry()
+    registry.register(_TimedBash(_DeadlineProbeSandbox(tmp_path)))
+    executor = ToolExecutor(registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
+
+    started = perf_counter()
+    execution = await executor.execute({
+        "id": "executor-deadline-owner",
+        "name": "bash",
+        "args": {"command": "anything"},
+    })
+
+    assert execution.result.ok is True
+    assert seen["timeout"] == 0.2
+    assert seen["deadline"] is not None
+    assert started < seen["deadline"] <= perf_counter() + 0.2
+
+
+@pytest.mark.asyncio
+async def test_executor_timeout_waits_for_bash_cleanup(tmp_path):
+    """Timeout is not observable until the Sandbox has finished cancellation cleanup."""
+    from agent_harness.tooling import (
+        PermissionPolicy,
+        ToolExecutor,
+        ToolRegistry,
+    )
+    from agent_harness.tooling.result import ErrorCode
+
+    cleaned = threading.Event()
+
+    class _CleanupProbeSandbox(LocalSubprocessSandbox):
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
+            assert deadline is not None
+            assert cancel_event is not None
+            assert cancel_event.wait(1.0), "Executor timeout did not reach the Sandbox"
+            time.sleep(0.05)
+            cleaned.set()
+            return ExecResult(
+                exit_code=-1, stdout="partial", stderr="cancelled",
+                duration_ms=50.0, cancelled=True,
+            )
+
+    class _TimedBash(BashTool):
+        @property
+        def timeout_seconds(self) -> float:
+            return 0.05
+
+    registry = ToolRegistry()
+    registry.register(_TimedBash(_CleanupProbeSandbox(tmp_path)))
+    executor = ToolExecutor(registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
+
+    execution = await executor.execute({
+        "id": "executor-cleanup-boundary",
+        "name": "bash",
+        "args": {"command": "anything"},
+    })
+
+    assert cleaned.is_set(), "ToolExecutor returned before process cleanup completed"
+    assert execution.result.ok is False
+    assert execution.result.error_code == ErrorCode.TIMEOUT
+    assert execution.result.retryable is False
+    assert execution.result.metadata["attempt"] == 1
+
+
+@pytest.mark.asyncio
 async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
     """The real executor/tool/sandbox chain stops a timed-out Local command."""
     from agent_harness.tooling import PermissionPolicy, ToolExecutor, ToolRegistry
@@ -250,12 +339,18 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
         def __init__(self, workspace_root):
             super().__init__(workspace_root)
             self.seen_timeout = None
+            self.seen_deadline = None
 
-        def exec(self, command, *, timeout=None, cancel_event=None, on_output=None):
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
             self.seen_timeout = timeout
+            self.seen_deadline = deadline
             return super().exec(
                 command,
-                timeout=1.5,
+                timeout=timeout,
+                deadline=deadline,
                 cancel_event=cancel_event,
                 on_output=on_output,
             )
@@ -265,7 +360,7 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
     class _TimedBash(BashTool):
         @property
         def timeout_seconds(self) -> float:
-            return 6.0
+            return 2.5
 
     registry = ToolRegistry()
     registry.register(_TimedBash(sandbox))
@@ -274,18 +369,17 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
     execution = await executor.execute({
         "id": "executor-timeout",
         "name": "bash",
-        "args": {"command": _python_command(script, "parent", marker, 3.0)},
+        "args": {"command": _python_command(script, "parent", marker, 4.0)},
     })
 
     _wait_for_path(started)
-    assert sandbox.seen_timeout == 6.0
-    assert execution.result.ok is True
-    assert execution.result.data["exit_code"] == -1
-    assert "stdout-before" in execution.result.data["stdout"]
-    assert "stderr-before" in execution.result.data["stderr"]
-    assert "cancelled" not in execution.result.data
+    assert sandbox.seen_timeout == 2.5
+    assert sandbox.seen_deadline is not None
+    assert execution.result.ok is False
+    assert execution.result.error_code == "TIMEOUT"
+    assert execution.result.retryable is False
     assert execution.result.metadata["attempt"] == 1
-    deadline = time.monotonic() + 4.0
+    deadline = time.monotonic() + 5.0
     while marker.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     assert not marker.exists()
@@ -297,7 +391,10 @@ async def test_bash_tool_offloads_exec_to_worker_thread(tmp_path):
     seen: dict = {}
 
     class ProbeSandbox(LocalSubprocessSandbox):
-        def exec(self, command, *, timeout=None, cancel_event=None, on_output=None):
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
             seen["thread"] = threading.current_thread()
             seen["timeout"] = timeout
             return ExecResult(exit_code=0, stdout="", stderr="", duration_ms=0.0)

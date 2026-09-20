@@ -82,15 +82,15 @@ def test_timeout_stops_late_workspace_mutation(docker_sandbox: object) -> None:
     marker = "/workspace/late-timeout-marker"
     result = docker_sandbox.exec(
         f"rm -f {marker}; "
-        f"(sleep 1; touch {marker}) & child=$!; "
+        f"(sleep 2.5; touch {marker}) & child=$!; "
         f"printf before; wait $child",
-        timeout=0.2,
+        timeout=1.0,
     )
 
     assert result.exit_code == -1
     assert "before" in result.stdout
     assert "超时" in result.stderr
-    time.sleep(1.2)
+    time.sleep(2.7)
     assert docker_sandbox.exec(f"test ! -e {marker}").exit_code == 0
 
 
@@ -99,13 +99,13 @@ def test_timeout_stops_detached_workspace_mutation(docker_sandbox: object) -> No
     marker = "/workspace/detached-timeout-marker"
     result = docker_sandbox.exec(
         f"rm -f {marker}; "
-        f"setsid /bin/sh -lc 'sleep 1; touch {marker}' "
-        ">/dev/null 2>&1 & sleep 2",
-        timeout=0.2,
+        f"setsid /bin/sh -lc 'sleep 2.5; touch {marker}' "
+        ">/dev/null 2>&1 & sleep 3.5",
+        timeout=1.0,
     )
 
     assert result.exit_code == -1
-    time.sleep(1.2)
+    time.sleep(2.7)
     assert docker_sandbox.exec(f"test ! -e {marker}").exit_code == 0
 
 

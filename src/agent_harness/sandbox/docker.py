@@ -140,15 +140,18 @@ class DockerSandbox(Sandbox):
         )
 
     def exec(self, command: str, *, timeout: float | None = None,
+             deadline: float | None = None,
              cancel_event=None, on_output=None) -> ExecResult:
         """在容器内执行命令，超时/取消终止对应 exec 的进程组。"""
         started = perf_counter()
         effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
-        deadline = started + effective_timeout
+        effective_deadline = (
+            deadline if deadline is not None else started + effective_timeout
+        )
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 return self._interrupted_result(started, effective_timeout, cancelled=True)
-            remaining = deadline - perf_counter()
+            remaining = effective_deadline - perf_counter()
             if remaining <= 0:
                 return self._interrupted_result(started, effective_timeout, cancelled=False)
             if self._exec_lock.acquire(timeout=min(0.05, remaining)):
@@ -156,7 +159,7 @@ class DockerSandbox(Sandbox):
         try:
             self._drain_pending_cleanup()
             self._assert_exec_cleanup_healthy()
-            remaining = deadline - perf_counter()
+            remaining = effective_deadline - perf_counter()
             if remaining <= 0:
                 return self._interrupted_result(started, effective_timeout, cancelled=False)
             self.ensure_started()
@@ -164,7 +167,7 @@ class DockerSandbox(Sandbox):
                 command,
                 effective_timeout=effective_timeout,
                 started=started,
-                deadline=perf_counter() + remaining,
+                deadline=effective_deadline,
                 cancel_event=cancel_event,
                 on_output=on_output,
             )
@@ -189,6 +192,7 @@ class DockerSandbox(Sandbox):
             stderr=f"{stderr}{detail}",
             duration_ms=round((perf_counter() - started) * 1000, 1),
             cancelled=cancelled,
+            timed_out=not cancelled,
         )
 
     def _drain_pending_cleanup(self) -> None:
@@ -474,6 +478,7 @@ class DockerSandbox(Sandbox):
                 exit_code=-1, stdout=stdout, stderr=stderr,
                 duration_ms=round((perf_counter() - started) * 1000, 1),
                 cancelled=cancelled,
+                timed_out=timed_out,
             )
 
         inspected = api.exec_inspect(exec_id)

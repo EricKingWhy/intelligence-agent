@@ -69,6 +69,7 @@ from agent_harness.tooling.contract import (
     ToolCall,
     ToolSideEffect,
 )
+from agent_harness.tooling.deadline import tool_execution_deadline_var
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.registry import ToolRegistry
@@ -839,9 +840,13 @@ class ToolExecutor:
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             t0 = perf_counter()
+            deadline = t0 + tool.timeout_seconds
+            deadline_token = tool_execution_deadline_var.set(deadline)
             try:
-                # Timeout 边界：只包 execute 这一行；到点未返回即被取消并抛 TimeoutError。
-                async with asyncio.timeout(tool.timeout_seconds):
+                # Executor creates the only absolute deadline for this attempt.
+                # Tools may forward it to blocking adapters, but must not start a
+                # second relative budget at a later layer.
+                async with asyncio.timeout(max(0.0, deadline - perf_counter())):
                     result = await tool.execute(validated)
             except TimeoutError:
                 # asyncio.timeout 到点把 execute 掐断——映射细节（含 retryable 为何
@@ -851,6 +856,8 @@ class ToolExecutor:
                 # 宽捕获理由同 Task 2：工具是开放世界，无法预知会抛什么。
                 # 分类表查找（isinstance 连子类一起认）在 _ToolFailure.from_exception。
                 result = _ToolFailure.from_exception(e, name).to_result()
+            finally:
+                tool_execution_deadline_var.reset(deadline_token)
 
             duration_ms = round((perf_counter() - t0) * 1000, 1)
             total_ms += duration_ms
