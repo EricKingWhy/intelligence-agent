@@ -3,6 +3,8 @@
 > **持久化活文档** — 跨 context window 追踪 SDD 循环进度。
 > 每次进入新 context window 时，先读本文件恢复状态。
 
+> **当前执行流程：V3-lite**（2026-09-20 起），唯一权威为 `docs/SDD_WORKFLOW_PROTOCOL.md`。本文件中的 V1/V2 切换说明、固定批次节奏和旧版 Skill 指令均为历史事实，不构成当前要求；新工作按 V3-lite 风险 review 与集成覆盖闸门执行。
+
 > **⚠️ 2026-09-16 模型切换**：仓库模型已改为「三个独立 clone + 平时都在 `main`、干活开短分支」
 > （`AGENTS.md` §13）。本文件**历史条目**里的 "worktree"、"`feat/backend`"、"`feat/frontend`"
 > 等措辞是切换前的记录，属于 append-only 历史、不改写；但**当前施工**一律按 `AGENTS.md` §13 /
@@ -10,7 +12,7 @@
 
 ---
 
-## 流程切换 + 批次记录（v2 批量审查循环）
+## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过
 > → **第一动作**：重读 `docs/SDD_WORKFLOW_PROTOCOL.md` + 本文件，禁止凭记忆猜流程继续施工。
@@ -31,7 +33,7 @@
 | B-2 | **#169 WS-6 后端半 + #170 WS-7 后端半**（同一张 PRD/ADR 的两个端点，依赖链自然收批） | **`80d49e1`**（merge main → feat/backend，本批第一行代码之前） | **已审**：Spec 轴 `NEEDS-FIX`（1×P1 + 5×P3）+ Standards 轴 `NEEDS-FIX`（3×P2 + 3×P3）→ 全部处置（修 / 文档化 / 有据不改） | **`9c158c9`**（下一批 fixed point） |
 | B-3 | **#194 + #197 + #199 + #201**（用户报障的纯前端 UI 批；4 票全部已交付并收批） | **`c00604e`**（本批第一行代码之前——文档镜像 commit） | **已审**：Spec 轴 `NEEDS-FIX`（1×P1 + 2×P2 + 3×P3）+ Standards 轴 `NEEDS-FIX`（2×P2 + 8×P3）→ 全部处置（修 / 文档化 / 有据保留） | **`cd3a2b4`**（下一批 fixed point） |
 
-**批次边界规则（v2 §1.2）**：每攒满 2–3 个 ticket（或遇到依赖链断点）即收批；收批时对
+**当时的批次边界规则（V2 历史）**：每攒满 2–3 个 ticket（或遇到依赖链断点）即收批；当时对
 `git diff <fixed point>..HEAD` 跑一次两轴 `/code-review`（Standards + Spec，两个独立只读子代理）。
 
 #### B-2 交付与审查记录（2026-09-12，后端 worktree）
@@ -101,13 +103,13 @@ Standards 轴 2×P2 + 8×P3 → 全部处置完毕**（修复 commit 见台账�
 **B-3 设计依据**：`docs/design/WEB_UI_BATCH_REDESIGN.md`（本 worktree 已镜像一份，来源
 `feat/backend fd16de3`）+ 票面 `## 最终实现契约（已冻结）`。本批**不推远程**（AGENTS §13.2/§14.4）。
 
-## 当前状态
+## 历史状态（2026-09-13 前端 worktree；当时协议为 V2，现已被 V3-lite 取代）
 
 | 项 | 值 |
 | --- | --- |
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
-| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（批量审查循环；v1 的「每票一次 /code-review」已作废） |
+| 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（批量审查循环；v1 的「每票一次 /code-review」已作废）——**历史值：现行协议是 V3-lite** |
 | 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
 | 集成交接提示词 | 本轮：`docs/integration/FRONTEND_SESSION_HARD_DELETE_INTEGRATION_PROMPT.md`（#172 前端半，**集成 AI 的唯一入口**，§0 是可执行摘要）；上一批（**已入 main `593dcda`**）：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md` |
 | 本批交接手册 | `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（做了什么 + 8 个坑点 + 未决项 + 复核命令） |
@@ -207,7 +209,7 @@ cwd 会话映射的坑（ADR-0029 D2 记录未修）；`refreshSessions` 无代�
 
 ---
 
-## ⚠️ 流程切换 + 批次记录（v2 批量审查循环，2026-09-12）
+## 历史记录：V2 流程切换 + 批次记录（2026-09-12）
 
 **自愈条款（先读这段）**：任何时候你发现自己（a）不确定当前在循环哪一步，（b）不记得批量审查的
 fixed point 或批次边界，（c）上下文刚被压缩 / 摘要过 —— **第一动作 = 立即重读

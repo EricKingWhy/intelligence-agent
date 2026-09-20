@@ -1,4 +1,6 @@
-# 开工提示词：SDD v2 续批（B-17 起）— intelligence-agent-backend
+# 历史开工提示词：SDD V2 续批（B-17 起）— intelligence-agent-backend
+
+> **历史任务快照，禁止作为当前开工授权。** 下方每 2–3 票 review、旧 Skill 命令与队列仅描述 B-17 时的流程。当前工作以用户最新指令、`AGENTS.md` 和 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 为准。
 
 > **你是下一个 Primary Developer**。本文件是你的开工指令：读完它 + 两份权威文件即可开工，
 > 不要凭本文件的记忆副本施工——**事实以 tracker 为准，流程以协议为准，本文件只是起点快照**。

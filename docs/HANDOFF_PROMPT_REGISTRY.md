@@ -1,5 +1,7 @@
 # 交接文档：Prompt Registry Phase（GitHub #161–#168）
 
+> **历史交接快照**：#161–#168 对应的实施队列和本文件中的旧 Skill / review / 门禁流程不构成当前任务或授权。若相关工作被重新打开，按当前 Issue、`AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行。
+
 > **写给接手的实现 AI**（在 `feat/backend` 分支、`D:\intelligence-agent-backend` worktree 工作）。
 > 本 Phase 的设计与票面由前一会话（ZCode）完成、经用户逐问批准后定稿，**实现尚未开始**，现整体移交给你。
 > 本文档是地图：东西在哪、按什么顺序做、哪些设计决定不许动。

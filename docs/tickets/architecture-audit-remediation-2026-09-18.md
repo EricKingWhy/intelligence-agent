@@ -3,7 +3,7 @@
 > 日期：2026-09-18
 > 来源审计：`docs/research/2026-09-18-full-codebase-architecture-quality-audit.md`
 > 用途：12 张可由独立 Coding Agent 领取的本地执行票；对应 GitHub Issues #237–#248。本文是执行索引，不替代 Engineering Specification、ADR 或 GitHub issue。
-> 共同约束：Reuse First；Scope Lock；不改变外部 Contract，除非票面明确披露；门禁全绿后才可提交；每票完成后按仓库 SDD 审查协议进入批量 review。
+> 共同约束：Reuse First；Scope Lock；不改变外部 Contract，除非票面明确披露；逐票运行与改动相称的 focused checks；review 按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 的风险边界安排；集成前通过完整门禁和 review coverage。
 > **裁决规则**：GitHub issue 正文是每票 Scope/AC 的权威；本文只补充证据、依赖和测试。若本文与对应 issue 冲突，以 issue 为准，额外建议不构成关单条件。
 
 
@@ -21,7 +21,7 @@
 - **T08/#244 Bash**：ToolExecutor 唯一 deadline owner；默认有效预算 60 秒；Local/Docker 同预算；MUTATING timeout 不自动重试。必须拆契约、Local、Docker 子票。
 - **T09/#245 JSONL**：坏行、日志、limit=200、header、缺文件和 UTF-8 行为逐字冻结；只抽内部 iterator，不改公开 API。
 - **T10/#246 Web git**：统一 ToolExecutor + transport-scoped Ledger；不伪造 SessionEvent；完整 stdout/stderr 写入受控 ArtifactStore，Ledger 保存不可变 ref。
-- **T11/#247 `_drive`**：先 golden，再 terminal arms，再 telemetry；保持唯一 loop；每切片独立 review。
+- **T11/#247 `_drive`**：先 golden，再 terminal arms，再 telemetry；保持唯一 loop；review 时点按 V3-lite 风险安排，集成前确保每个代码 commit 都有真实 review coverage。
 - **T12/#248 AppState**：等 router 后有真实 consumer/implementation 证据再决定窄 Protocol，否则显式 collaborators。
 
 ## 0.3 已发布子票（严格 blockers-first）

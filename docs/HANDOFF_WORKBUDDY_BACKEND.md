@@ -1,5 +1,7 @@
 # WorkBuddy 后端交接手册
 
+> **历史交接快照**：本文中的旧分支、HEAD、剩余工作和逐票流程均为记录，不代表当前仓库状态或授权。新工作按当前 Issue、`AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行。
+
 > **仓库**：`intelligence-agent`
 > **后端 worktree**：`D:\intelligence-agent-backend`
 > **后端分支**：`feat/backend`

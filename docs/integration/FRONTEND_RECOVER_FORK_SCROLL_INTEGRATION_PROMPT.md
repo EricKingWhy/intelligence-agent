@@ -1,5 +1,7 @@
 # 集成 AI 提示词 — `feat/frontend` 增量：恢复/分叉/滚动 三项缺陷修复 + 按钮巡检
 
+> **历史集成提示词**：下方授权、工作分支与逐票 `/implement` / review 要求是当时的任务记录，不是当前授权或流程。新工作按 `AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行。
+
 > **给集成 AI（Git Integrator）的执行提示词。**
 > 按 `AGENTS.md` §14 集成规则执行；**merge / push 必须用户明确批准**。
 > 本文件由前端 Agent 在 `feat/frontend` worktree 完成本轮任务后起草。

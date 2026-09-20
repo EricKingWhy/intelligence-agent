@@ -1,129 +1,95 @@
-# SDD 工作流协议（防指令漂移）
+# SDD 工作流协议（V3-lite：按风险审查）
 
 > ## ⚠️ 自愈条款（最高优先级，先读这段）
 >
 > **任何时候你发现自己**：
-> （a）不确定当前在循环哪一步；
-> （b）不记得批量审查的 fixed point 或批次边界；
+> （a）不确定当前 Ticket / 验收条件 / 工作状态；
+> （b）不记得当前 review 覆盖到哪个 commit；
 > （c）上下文刚被压缩 / 摘要过；
 >
-> **第一动作 = 立即重读 `docs/SDD_WORKFLOW_PROTOCOL.md` + `docs/SDD_TICKET_TRACKER.md` 恢复状态。
-> 禁止凭记忆猜测流程继续施工。**
+> **第一动作 = 重读 `docs/SDD_WORKFLOW_PROTOCOL.md` + `docs/SDD_TICKET_TRACKER.md`，并核对 Git 状态。
+> 按记录恢复，不凭记忆猜流程或 Ticket 状态。**
 
-> 本文件是**跨上下文窗口的持久化指令**。任何 Agent 进入新 context window 时，
-> 必须先读本文件 + `docs/SDD_TICKET_TRACKER.md`，恢复完整 SDD 上下文。
+> 本文件是当前 SDD 执行流程的**唯一权威**；`AGENTS.md` §16 与 `CLAUDE.md` 只提供入口，
+> `docs/SDD_TICKET_TRACKER.md` 记录事实，不定义流程。进入新 context window 或摘要后，
+> 先读本文件和 Tracker，再按本文件恢复当前工作。
 >
-> 创建原因：长任务（多 ticket × SDD 循环）会跨越多个 context window。
-> 没有持久化协议，每个新窗口会丢失前序工作状态，导致：
-> - 指令漂移：忘记用 `/implement`、忘记批量审查
-> - 误差累积：跳过修复步骤、ticket 状态混乱
-> - 重复工作：不知道哪些 ticket 已完成
->
-> **协议版本**：v2（新版批量审查循环，2026-09-12 切换；v1 的"每票一次 `/code-review`"已作废）。
-> 切换记录与 fixed point 见 `docs/SDD_TICKET_TRACKER.md` 的「流程切换 + 批次记录」章节。
->
-> **与根规则文件的关系（2026-09-16 明确）**：本文件是 SDD 执行流程的**唯一权威**。
-> `AGENTS.md` §16 只是入口与触发表述，**不复制流程细节**。两者若出现不一致，**以本文件为准**。
-> （补写原因：v1→v2 切换时本文件只声明了"v1 已作废"，从未声明它取代 `AGENTS.md` §16，
-> 导致根文件里那份 v1 副本长期与新协议并存、且因为根文件是自动加载的而实际胜出。）
+> **协议版本：V3-lite（2026-09-20）**。V3-lite 在 V2 的基础上保留 Ticket / Spec 对齐、focused 验证、风险审查、独立 review 证据、review ledger 和最终集成闸门；
+> 移除固定的“每 2–3 个 Ticket 审一次”节奏和不可用 Skill 的强制要求。V1/V2 流程记录仅作历史，不再是执行要求。
 
 ---
 
-## 1. 核心规则（v2：批量审查循环）
+## 1. Ticket 与实施
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  新版批量审查循环（每个 ticket）                              │
-├──────────────────────────────────────────────────────────────┤
-│  A. 单 ticket：/implement → 门禁全绿 → commit → 记 Tracker    │
-│      （**跳过**该票自带的 /code-review，改为批量审）           │
-│       ↓                                                       │
-│  B. 每 2–3 个 ticket：对本批累计 diff 跑一次 /code-review     │
-│      fixed point = 上一批审查结束时的 commit                  │
-│       ↓                                                       │
-│  C. findings：能定位的直接最小修复 + 跑测试；疑难才 diagnose   │
-│      修复后**不重跑全量 review**（跑测试 + 自查 diff 即可）    │
-│      仅当改动触及架构/契约 → 只对上一轮 findings 做增量复查    │
-│       ↓                                                       │
-│  下一批                                                        │
-│       ↓                                                       │
-│  D. 全部 ticket 完成：对整条分支跑最终全量 /code-review        │
-│      fixed point = main → findings 按 C 的方式修完 = 任务结束  │
-└──────────────────────────────────────────────────────────────┘
-```
+### 1.1 开始一个 Ticket
 
-### 1.1 单 ticket 执行
+1. 读取当前 Issue / Ticket 的验收条件、相关 Engineering Specification 和 Reuse Matrix；核对代码、测试、分支与工作树。
+2. 把目标写成可验证结果并锁定范围。发现验收条件实质冲突、新证据证明目标不可实现或需要改变架构时，先报告证据与最小替代方案，再请求用户决定；未经批准不改 Issue、Ticket 或冻结规格。
+3. 选择当前环境实际可用的工具和 Skills。`/implement`、`/ask-matt` 等未枚举的命令不是强制步骤，也不得假设存在。
 
-1. `/implement` 完成当前 ticket。**跳过其收尾自带的 `/code-review`**（本流程改为批量审查，避免同票双审）。
-2. 每个 ticket 完成后自行 commit（**门禁全绿才 commit**——后端 `ruff check` + 全量 `pytest`；
-   前端五件套，命令见 §5 第 6 条。commit message 描述工程事实），并在
-   `docs/SDD_TICKET_TRACKER.md` 追加记录。
+### 1.2 实施与验证
 
-### 1.2 批量审查（每 2–3 个 ticket 一次）
+1. 按最小垂直切片实现；修 Bug 或新增行为时先建立能命中真实症状的测试，再修复并复跑。
+2. 每个 Ticket 跑与改动相称的 focused tests、lint / type check 和必要的集成测试；**不要求每张票都重跑全量测试**。高风险跨模块改动可在自然边界提前跑更广门禁。
+3. 相关验证通过后再提交，commit message 描述实际工程事实；更新 `docs/SDD_TICKET_TRACKER.md` 的状态、提交、门禁证据和残余问题。`uv run` 后检查 `uv.lock`，处理规则见 §7 第 6 条。
 
-3. 每完成 2–3 个 ticket（批大小按 ticket 体量自定；遇到依赖链断点等自然分界可提前收批），对这批
-   tickets 的**累计 diff** 跑一次 `/code-review`；**fixed point = 上一批审查结束时的 commit**。
-4. findings 分级处理：
-   - **一眼能定位的** → 直接最小修复 + 跑测试，不停顿；
-   - **真正疑难的**（无法稳定复现 / 间歇性 / 回归）→ 才用 `/diagnosing-bugs` 定位根因后修复。
-5. 修复后**不重跑全量 review**：跑测试 + 自查 diff 确认 finding 消除即可；**仅当修复触及架构或契约时**，
-   才做**增量复查**（只复查上一轮 findings）。确认无误后 commit 修复，并把 Tracker 中本批审查状态推进到
-   修复 commit，进入下一批。
-   ⚠ 「修复 commit = 下一批的 fixed point」只说明**它为什么会漏**，不构成豁免：这条规则自己就是
-   失效案例 (b) 的来源（交付周期里最后一批评审的修复提交没有下一批）。**修复 commit 必须另有
-   一条台账行覆盖它**（§5 第 8 条），交付前由 `scripts/check_review_coverage.sh` 机械把住。
+## 2. 按风险安排 Code Review
 
-### 1.3 总门禁（全部 ticket 完成后）
+V3-lite **不设固定 Ticket 数量或日历节奏**。在变更风险高、边界清楚且 review 能显著降低风险时审查；具体时点由实现证据决定。
 
-6. 对整条分支跑一次**最终全量** `/code-review`；**fixed point = `main`**。
-7. findings 全部按 §1.2 第 4、5 条的方式修复并验证后，任务才算结束。
+以下改动默认值得独立 review：
 
-### 1.4 过渡条款（切换时正在施工的票）
+- 凭证、权限、Sandbox / Host 边界或外部副作用；
+- 删除、迁移、持久化、SessionEvent、Checkpoint、Recovery 或 Operation Ledger；
+- 并发、取消、流式生命周期、共享进程状态；
+- 公共 API / Contract、Provider 边界、跨模块或大范围改动；
+- 测试结果与票面 / 规格不一致，或新证据改变原假设。
 
-- 旧版循环下**已完成并 commit** 的 tickets 一律承认有效：不再补审、不重跑。
-- 切换时正处于中间步骤的票（做到一半 / 旧循环遗留未修 findings）：**按旧规则把当前这一步收尾**
-  （修复、测试全绿、commit），落盘后立即切到 v2；**不要**为已收尾的工作开新的 review。
-- 每个 ticket 的**第一个动作** = 重读本文件 + Tracker（把重读变成强制步骤，不靠自觉）。
+低风险文档、纯测试和局部机械改动可合并到最近的自然 review 边界。review 按项目需要覆盖 Standards 与 Correctness / Spec；审查范围必须准确记录实际读过的 base..tip。发现的问题按影响修复：疑难、间歇或并发 Bug 使用 `diagnosing-bugs` 建立可复现反馈环；其余做最小修复并跑对应测试。
 
-### 1.5 遇到不确定时
+**集成前覆盖要求保持不变**：每个代码提交都必须落在真实 review ledger 审查范围内；此前未审的低风险代码在集成前补一次最小范围 review。已审范围没有后续代码变化时，不重复跑相同的全量 review。Review 修复提交也必须被后续 review 范围覆盖；代码提交不得用 whitelist 放行。
 
-- 使用 `/ask-matt` skill 提问
-- 不要猜测、不要自行决定架构方向
-- 仅当出现**规格实质冲突**或**架构分叉**时才停下来问用户
+## 3. 完成与集成
 
-### 1.6 推送规则
+1. 更新 Tracker、`PHASE_STATUS.md` 当前焦点 / 索引和当月归档；每条事实只写全一次，其余位置给指针。
+2. 集成前按 `AGENTS.md` §14.10 通过全量测试、lint、type check（如有）、`git diff --check`、审查覆盖闸门及工作树检查；比较 tree，确认集成内容与已验证内容一致。
+3. Branch merge、push、issue close 和跨仓库同步遵守 `AGENTS.md` §13–14。前一阶段的授权不自动扩大到下一种 Git 写操作；冲突按 §14.7 分析并取得批准。
 
-- 实现线默认只做**本地 commit**，不在 feature 分支上 `git push`；
-- **集成**与 **`push origin main`** 由**当前主开发**执行（用户 2026-09-16 常设授权，
-  不必每次重新批准）。前置条件：集成后门禁全绿（本文件 §1.3 + `AGENTS.md` §14.10）；
-- 集成完成后必须通知另一条线（见 `AGENTS.md` §14.9），否则"三方一致"会当场破功。
+### 3.1 不确定与票面变化
+
+不要用猜测代替规格或用户决定。若验收条件不可实现、证据推翻原假设，或存在会改变架构 / 范围 / 数据迁移的选择，先停止相关实现，提交可复现证据、影响和最小替代方案，请用户批准后再改票面或计划。普通实现细节自行判断，不频繁打断用户。
+
+### 3.2 Git 与推送
+
+- 实现线默认只做本地 commit，不在 feature branch 上 push。
+- 集成与 `push origin main` 的授权分类、前置条件和通知要求统一见 `AGENTS.md` §14.4、§14.9、§14.10；本文件不重复定义。
 
 ---
 
-## 2. Context Window 恢复协议
+## 4. Context Window 恢复协议
 
 任何新 context window 启动时，按以下顺序恢复：
 
 0. **先执行上面的自愈条款**（不确定就重读，不猜）
 1. 读 `docs/SDD_WORKFLOW_PROTOCOL.md`（本文件）
-2. 读 `docs/SDD_TICKET_TRACKER.md`（当前进度 + 批次 fixed point）
-3. 读 `AGENTS.md` §16（SDD 工作流引用）
-4. 根据 Tracker 中「下一个待处理 ticket」继续工作
+2. 读 `docs/SDD_TICKET_TRACKER.md`（当前在途 Ticket、验证证据与 review 覆盖状态）
+3. 核对 `git status`、分支与 HEAD；确认无用户改动被覆盖
+4. 根据 Tracker 与当前用户授权继续工作
 
-### 2.1 恢复时的自检清单
+### 4.1 恢复时的自检清单
 
 - [ ] 当前在哪个 worktree？（`git worktree list`）
 - [ ] 当前在哪个分支？（`git branch --show-current`）
 - [ ] HEAD 是哪个 commit？（`git log --oneline -1`）
 - [ ] 工作树是否干净？（`git status --short`）
-- [ ] 上一个完成的 ticket 是哪个？（查 Tracker）
-- [ ] 下一个要做的 ticket 是哪个？（查 Tracker）
-- [ ] **本批**已攒了几个 ticket？**上一批审查结束时的 commit（fixed point）**是哪个？（查 Tracker）
-- [ ] 是否有**未修完的批次 findings**？（查 Tracker）
+- [ ] 当前在途 / 上一个完成的 Ticket 是哪个？（查 Tracker）
+- [ ] 当前 HEAD 与工作树是否符合 Tracker 记录？
+- [ ] 哪些代码 commit 已有 review 覆盖，哪些尚待 review？（查 Tracker + `review_ledger.tsv`）
+- [ ] 是否有未修完的 review finding 或待用户决定事项？
 
 ---
 
-## 3. Ticket Tracker 格式
+## 5. Ticket Tracker 与进度记录
 
 `docs/SDD_TICKET_TRACKER.md` 记录每个 ticket 的状态：
 
@@ -131,12 +97,12 @@
 | --- | --- |
 | Ticket ID | 如 FE-T7 |
 | 描述 | 一句话说明 |
-| 状态 | `pending` / `in_progress` / `done` / `batched`（已进批待审）/ `reviewed` |
+| 状态 | 记录项目当前使用的 Ticket 状态；`batched` 等旧批次状态只保留为历史 |
 | 实现方式 | 用了什么 skill、改了哪些文件 |
 | Commit SHA | 完成时的 commit hash |
 | 门禁结果 | 前端：tsc/vitest/oxlint/playwright/build；后端：ruff/pytest（+ 真机 gate/变异，若有） |
 
-**批次记录**（v2 新增，防漂移的关键）：
+历史批次记录（V1/V2）：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -144,40 +110,39 @@
 | 本批 tickets | 这批包含哪几个 ticket |
 | fixed point | 本批累计 diff 的起点 commit（= 上一批审查结束时的 commit） |
 | 审查结论 | 轮次 + findings 分级 + 是否零 finding |
-| 修复 commit | findings 修完后的 commit（**默认**成为下一批的 fixed point；但它自己必须有台账行覆盖——见 §1.2 第 5 条的 ⚠） |
+| 修复 commit | 当时 findings 修完后的 commit；该字段保留历史事实，不定义 V3-lite 审查节奏 |
 
 ⚠ **表格里的范围数字只是人读的索引；交付前"哪些 commit 真的被审过"以机读台账
-`docs/review_ledger.tsv` 为准**（覆盖对账见 §5 第 8 条——手抄的 fixed point 错一格就是
+`docs/review_ledger.tsv` 为准**（覆盖对账见 §7 第 8 条——手抄的 review 范围错一格就是
 #213 那次静默豁免）。审查行的 tip 必须 = **审查实际读到的末条 commit**：审查之后才创建的
-修复提交**不在**那个范围内，它由下一行（或补审行）覆盖。
+修复提交**不在**那个范围内，必须由另一条真实 review 行覆盖。
 
 ---
 
-## 4. 剩余 Ticket 清单
+## 6. Ticket 来源
 
 **不在此维护静态清单**——它会在每个 ticket 完成后立刻过期（本文件 2026-09-10 曾在此写下
 FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被当成"当前剩余工作"）。
 
 当前剩余工作唯一来源：
 
-- `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、批次、fixed point、审查结论；
+- `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、验证证据、review 状态与残余问题；
 - `docs/PHASE_STATUS.md` —— Phase 状态与集成证据；
 - GitHub Issues（`EricKingWhy/intelligence-agent`）—— 票面与验收标准。
 
 ---
 
-## 5. 禁止事项
+## 7. 执行边界与集成闸门
 
-1. **禁止跳过批量审查**：每 2–3 票必须对累计 diff 跑一次 `/code-review`；最终还必须跑一次全量
-   （fixed point = main）。（单票内的收尾 review 按 v2 §1.1 跳过，不算"跳过审查"。）
-2. **禁止跳过 `/implement`**：即使 ticket 很小，也必须用 implement skill
-3. **禁止在 feature 分支上推送**：本地 commit 可以；`push origin main` 属集成动作，按 §1.6 执行。
-4. **禁止自行决定架构**：遇到架构决策，用 `/ask-matt`
+1. **按风险安排 review**：不设固定 Ticket 数量节奏。集成前每个代码 commit 都必须有真实 review ledger 覆盖；审查范围缺口在集成前补齐。
+2. **使用实际可用的 Skills / 命令**：按任务需要选择；不要求不存在的 `/implement`、`/ask-matt` 或其他工具。
+3. **feature branch 不 push**：本地 commit 可以；push 与集成授权按 `AGENTS.md` §14.4 执行。
+4. **规格外架构决策先问用户**：按 `AGENTS.md` §9.1 / §9.1.1 处理新证据、验收条件和范围变化。
 5. **禁止跨仓库无授权写入**：`D:\intelligence-agent`（main）、`D:\intelligence-agent-backend`、
    `D:\intelligence-agent-frontend` 是**三个独立 clone**（不是 worktree），各有自己的工作树与分支。
    用户可以授权任意一条线做另一端的活，但**动手前必须先读 `AGENTS.md` §13 的仓库模型**——
    "三方一致"靠"谁集成谁通知、另一条线开工前先把 main 合回来"维持，不靠目录名分工。
-6. **禁止跳过门禁**：后端 `ruff check` + 全量 `pytest`；前端（在 `web/` 下）
+6. **按改动选择逐票验证，集成前通过完整门禁**：逐票跑相关 focused tests、lint / type check 和必要的集成测试；不要求每张票都重跑全量。集成前完整门禁见 `AGENTS.md` §14.10：后端 `ruff check` + 全量 `pytest`；前端（在 `web/` 下）
    `npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build`。
    e2e 必须 `--workers=2`（4 worker 全量并行存在资源竞争型抖动）。
    后端门禁用 `uv run`，而 `uv run` 会在锁过期时**静默重写 `uv.lock`**。所以跑完先看
@@ -187,7 +152,7 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
    （那只是把不同步藏起来，下一次 `uv run` 还会再改一次）。§14.10 要求的"工作树 clean"
    指的是**进入集成之前**：这份改动同样要有归属的 commit，不能带着未提交的锁进集成。
 7. **禁止凭记忆猜流程**：不确定就执行自愈条款（重读本文件 + Tracker）
-8. **禁止未审查的 commit 进集成**：交付前跑 `scripts/check_review_coverage.sh`（台账
+8. **禁止未审查的代码 commit 进集成**：交付前跑 `scripts/check_review_coverage.sh`（台账
    `docs/review_ledger.tsv`）。它机械地对账「`<最早台账 base>..HEAD` 的每条 commit 是否有
    台账归属」，**例外两类**：
    - `[whitelist]` 段的 **docs-only** commit（脚本自己校验：改动文件全部命中文档扩展名；
@@ -196,12 +161,12 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
    - **恰好只改台账文件本身**的记账提交（机械可验、藏不了代码，自动放行——"把记账这件事
      记进台账"再要求记账是**死循环**，实测绕了三轮）。
 
-   **代码提交永远不能靠白名单放行，只能去补一次审查**。为什么需要这条（2026-09-17 实测
+   **代码提交永远不能靠白名单放行，必须落在真实 review 行中**。为什么需要这条（2026-09-17 实测
    两个案例，都是复验才发现）：
-   - **#213 从未被任何 review 读过**：本协议说「fixed point = 上一批审查结束时的 commit」，
+   - **#213 从未被任何 review 读过**：旧 V2 把 fixed point 作为批次边界，
      但那个数字是**手抄进 tracker 的**，抄过一格（把 fixed point 设在该票自己的末条提交上）
      就静默豁免一票，没有任何东西会报错；
-   - **修复提交结构性免疫**：本文件表格写着「修复 commit = 下一批的 fixed point」，于是交付
+   - **修复提交结构性免疫**：旧 V2 表格写着「修复 commit = 下一批的 fixed point」，于是交付
      周期里**最后一次审查的修复提交没有下一批**。实测 `9f2a8f8` 就是这样进的 main，而补审它
      时发现它带着一个真 bug（凭据删除 fail-open）。
 
@@ -210,7 +175,7 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
    ① 审计窗口的**左端由台账自己决定**（删掉最早那行即可整体缩短窗口，脚本无外部锚点）；
    ② 台账从**工作树**读，不读 HEAD 版 ⇒ 必须在**干净检出**上跑；
    ③ 闸门**目前只手动跑**（无 CI、无 hook），靠流程纪律而不是机器强制。
-   补审查后：把范围写进台账新行 + 更新 tracker 的批次行。**不要改台账蒙过去**。
+   新增 review 后：把准确范围写进台账新行，并更新 Tracker 的 review 状态与证据指针。**不要改台账蒙过去**。
 
    顺带（同一批实测得出）：**集成后不必重复跑全量门禁——先比 `HEAD^{tree}`**。两个 clone 的
    tree 相同即证明"跑过门禁的那棵树 = 被集成的这棵树"（2026-09-17 实测同为 `e63c202…`，

@@ -1,5 +1,7 @@
 # 前端交接手册：feat/frontend — T7/T8/T9 + 架构深化
 
+> **历史交接快照**：本文中的旧分支、HEAD、剩余工作和逐票 review 指令均为记录，不代表当前仓库状态或授权。新工作按当前 Issue、`AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行。
+
 > **给 workbuddy 的交接手册。**
 > 你也是前端，使用 `feat/frontend` 分支。后端已写完交接手册发给你的 workbuddy 了。
 > 本文件告诉你：当前状态是什么、哪些已完成、**唯一剩余的工作是什么**。

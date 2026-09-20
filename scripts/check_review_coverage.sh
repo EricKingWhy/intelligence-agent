@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check_review_coverage.sh —— 交付前闸门：**`<最早台账 base>..HEAD` 的每条 commit 都必须在台账里有归属**
 #
-# 完整机制叙述（为什么存在、两类例外、**信任边界**）见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5 第 8 条。
+# 完整机制叙述（为什么存在、两类例外、**信任边界**）见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条。
 # 本文件只写**这段代码自己看不出来的操作约束**：
 #   · 台账 = `docs/review_ledger.tsv`：审查行取并集；白名单段**逐条**自校验 docs-only；
 #   · 例外两类：① [whitelist] 的 docs-only commit；② **恰好只改台账文件本身**的记账提交
@@ -170,7 +170,7 @@ if [ "$fail" != "0" ]; then
 闸门失败。处置（二选一，不要改台账蒙过去）：
   · 对这些 commit **补一次审查**（两轴 /code-review，范围写进台账的新行）；
   · 或者：若它们确实只是文档改动 ⇒ 在台账 [whitelist] 段声明（脚本会校验 docs-only）。
-  协议原文：docs/SDD_WORKFLOW_PROTOCOL.md §5。
+  协议原文：docs/SDD_WORKFLOW_PROTOCOL.md §7。
 EOT
   exit 1
 fi
@@ -182,5 +182,5 @@ for w in ${wl[@]+"${wl[@]}"}; do
 done
 
 # 口径门：断言的是"每条 commit 都有台账归属"，**不是**"审查确实发生过"——台账是声明式输入，
-# 审查行的真实性由人对账（详见 docs/SDD_WORKFLOW_PROTOCOL.md §5 第 8 条的信任边界）。
+# 审查行的真实性由人对账（详见 docs/SDD_WORKFLOW_PROTOCOL.md §7 第 8 条的信任边界）。
 echo "✅ 台账覆盖闸门通过：$base..HEAD 每条 commit 均有归属（审查行 / 白名单 / 台账记账）。"

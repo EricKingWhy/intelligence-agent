@@ -197,7 +197,7 @@ Review 必须同时看：
 
 当前主开发（谁在干活谁就是，见文件头）维护 Matt SDD 主工程规划：
 
-- `/grill-with-docs → /to-spec → /to-tickets → /implement` workflow
+- 需求澄清 → Engineering Specification → GitHub Issue / Ticket 拆分 → 实施；当前施工与 review 节奏见 `docs/SDD_WORKFLOW_PROTOCOL.md`（V3）
 - GitHub Issue、Ticket 依赖与验收标准
 - 主 Ticket 拆分与集成
 
@@ -407,9 +407,9 @@ Scope 外问题只报告，不顺手修。
 | --- | --- |
 | 代码审查 | `code-review` |
 | 疑难 bug 根因定位 | `diagnosing-bugs` |
-| 流程 / 架构疑问求助 | `ask-matt` |
+| 流程 / 架构疑问 | 先读当前 Specification / ADR；存在实质决策时询问用户 |
 | 代码库理解 | `understand` / `understand-chat` / `understand-diff` / `understand-domain` / `understand-explain` |
-| 实现 / TDD | `implement` / `tdd` |
+| 实现 / TDD | `tdd`（在适用时）；其他实现按当前环境可用能力执行 |
 
 约定：
 
@@ -546,7 +546,7 @@ origin/main
 → **审查覆盖闸门**：`scripts/check_review_coverage.sh`
    （范围 `<最早台账 base>..HEAD` 的每条 commit 必须有台账归属：审查行、docs-only 白名单，
     或"恰好只改台账文件"的记账提交——**代码提交只有"补一次审查"一条路**；
-    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5 第 8 条）
+    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）
 → merge 到本地 main（快进优先）
 → **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
    与施工 clone 的 `HEAD^{tree}` 比——**相等即证明"我跑过门禁的那棵树"就是"被集成的这棵树"**，
@@ -866,33 +866,22 @@ CSS 原生没有变量组复用机制，手工双份同步是当前最小风险�
 
 # 16. SDD 长任务工作流协议（入口）
 
-> **触发条件**：用户说这些话中的任意一句，就说明要按本节的 SDD 长任务协议走——
-> 「按顺序做剩余 tickets」「使用 SDD 方式」「每完成一个 ticket 必须 code-review」
-> 「出现 bug 用 diagnose-bug」「全部完成后用 improve-codebase-architecture」
-> 「不知道怎么做用 ask-matt」「完成后写提示词给集成 AI」。
->
-> **触发词按用户原话保留，但它们描述的是"何时进入本协议"，不是"具体怎么做"**：
-> 例如「每完成一个 ticket 必须 code-review」这句里的流程细节早已被 v2 取代
-> （现在是每 2–3 票批量审，见下）；「diagnose-bug」在本环境的实际 skill 名是
-> `diagnosing-bugs`。**实际流程一律以下面的权威文件为准。**
+> **触发条件**：用户要求按顺序处理多个 Ticket、执行 SDD、追查疑难 Bug，或跨 context 延续工程任务。
 
-**本节不复制流程细节。触发后第一个动作是读权威文件：**
+触发后读取：
 
-1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前生效流程（**v2：批量审查循环**；v1 的
-   「每票一次 `/code-review`、修复后循环到零 finding」**已作废**）。**它是 SDD 流程的唯一权威**；
-2. `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、批次、fixed point、审查结论（**记录事实，不定义流程**）。
+1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前唯一流程权威（**V3-lite：按风险安排 review，不设固定票数节奏**）；
+2. `docs/SDD_TICKET_TRACKER.md` —— 当前 Ticket、验证、review 覆盖与残余问题（记录事实，不定义流程）。
 
-三份文件若有冲突：**流程以 `docs/SDD_WORKFLOW_PROTOCOL.md` 为准**，事实记录以 tracker 为准，
-本节只是入口，不参与裁决。注意「集成 AI」是历史叫法——现在集成与 push 由**当前主开发**执行（§14.4）。
+本节只作入口。流程冲突以 `docs/SDD_WORKFLOW_PROTOCOL.md` 为准，进度事实以 Tracker 为准。Tracker 中 V1/V2 的批次、fixed point 与旧 Skill 指令是历史记录，不是当前要求。集成与 push 由当前主开发按 §14 执行。
 
-**自愈条款**：上下文被压缩 / 不记得批次边界 / 不确定当前在循环哪一步
-→ 重读上面两份文件，**禁止凭记忆继续施工**。
+**自愈条款**：上下文被压缩、摘要或不确定当前状态时，先重读上述两份文件并核对 Git 状态，再继续施工。
 
 ## 16.1 进度落点分工
 
 | 内容 | 落点 |
 | --- | --- |
-| 在途 ticket、批次、fixed point、审查结论 | `docs/SDD_TICKET_TRACKER.md` |
+| 在途 ticket、门禁证据、review 覆盖状态与残余问题 | `docs/SDD_TICKET_TRACKER.md` |
 | Phase 状态、当前焦点、历史索引 | `docs/PHASE_STATUS.md`（**只放索引一行 + 行号指针**） |
 | 批次 / 集成 / 审查的**逐条明细** | `docs/phase_status/<年-月>.md`（当月归档，按需读） |
 | 机读的审查范围台账（覆盖闸门的输入） | `docs/review_ledger.tsv` |
@@ -904,15 +893,15 @@ ADR、用例头注释、设计稿、tracker 四处，其中一处被后来的实
 操作约束 + 指向 ADR 的一句指针"**；tracker / PHASE_STATUS 只写操作性事实（批次、commit、
 门禁数字、结论一行）+ 指针。跨文件重复叙述属于要被清理的债务，不是"写详细一点"。
 
-规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等）保持冻结，进度变更不回写规格。
+V1/V2 的批次 / fixed point 留作历史事实；V3 不要求固定批次。规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等）保持冻结，进度变更不回写规格。
 
 ## 16.2 不随协议版本变化的红线
 
-- 每个 ticket 完成后：**门禁全绿才允许 commit**（命令见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5）；
+- 每个 ticket 完成后：对应的 focused tests / lint / type check 通过后再 commit；**集成前仍须通过完整门禁与 review coverage**（`docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite、§14.10）；
 - 实现线默认只做**本地 commit**；集成与 `push origin main` 由当前主开发执行（§14.4）；
 - 不覆盖其他 Agent 未提交的工作；
 - 关单判定按 §14.12；跨端 ticket 只完成一端时**不关单**；
-- 前端 / 后端的门禁工具链、在途进度落点，一律以当前仓库的
-  `docs/SDD_WORKFLOW_PROTOCOL.md` 为准，本文件不再复制。
+- 前端 / 后端的门禁工具链、review 时点与在途进度落点，一律按当前仓库的
+  `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite；本文件不复制流程细节。
 
 ---

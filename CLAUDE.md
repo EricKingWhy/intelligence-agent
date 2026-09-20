@@ -36,28 +36,27 @@ Matt SDD 负责：
 
 `当前模块如何澄清、规格化、拆分和施工`
 
-推荐流程：
+推荐流程（**阶段固定，Skill 名不固定**——按当前环境实际可用的能力选，不要伪造不存在的命令；
+口径见 `AGENTS.md` §5 与 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 2 条）：
 
 ```text
 需求仍有重大歧义或需要补足领域术语
-→ /grill-with-docs
+→ 先澄清（用当前环境提供的能力，例如领域建模 / 规格整理类 Skill）
 
 需要把当前对话整理为功能规格
-→ /to-spec
+→ Engineering Specification
 
 需要拆分为可独立交付、带依赖关系的 Ticket
-→ /to-tickets
-
-需要规划跨多个会话的大型工作
-→ /wayfinder
+→ GitHub Issue / Ticket 拆分
 
 用户授权当前 Ticket
-→ /implement（在预先约定的 seam 使用 /tdd）
+→ 按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 实施；使用当前环境可用的 Skill，适用时测试先行
 
 完成
-→ Test
-→ /code-review（批大小与 fixed point 见 docs/SDD_WORKFLOW_PROTOCOL.md）
-→ Acceptance Criteria
+→ focused Test / lint / type check
+→ 按风险选择 review 时点；集成前每个代码 commit 必须有真实 review coverage
+→ Acceptance Criteria + 完整集成门禁
+→ 更新 Tracker / phase status
 → Git（授权分类见 AGENTS.md §14.4）
 ```
 
@@ -144,7 +143,7 @@ GitHub Issues：`EricKingWhy/intelligence-agent`
 
 1. 当前 GitHub Issue、Matt 规格产物或 Ticket 要求完成；
 2. 当前模块 Acceptance Criteria 相关项通过；
-3. 测试通过（门禁命令见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5）；
+3. 测试通过（门禁命令见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7）；
 4. Failure Case 已覆盖；
 5. 如果涉及 Recovery，真实 Kill/Resume 已验证；
 6. JSONL / SessionEvent 能观察真实行为；

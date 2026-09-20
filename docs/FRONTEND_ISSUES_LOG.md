@@ -1,5 +1,7 @@
 # 前端问题登记簿（实时更新）
 
+> **历史条目中的指令须按日期理解**：旧 Skill 命令、批次 review 和当时授权只作为事件记录；新增或重开的工作按用户当前指令、`AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行。
+
 > **2026-09-13 集成归并说明**：本文档曾在 backend / frontend 两个 worktree 之间分叉（SID-04）。
 > 本次 feat/backend → main 集成已完成两侧轮次归并：各轮按时间顺序全部保留，重复的
 > 「第十一轮」编号已消歧为「第十一轮（前端侧）」（#155 两轴 code-review，2026-09-12）与

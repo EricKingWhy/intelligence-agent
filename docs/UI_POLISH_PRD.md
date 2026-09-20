@@ -66,21 +66,22 @@
 
 ---
 
-## 4. 全批次通用的工程要求（每个 ticket 的完成定义都包含）
+## 4. 工程要求（具体票面优先；执行流程按 V3-lite）
 
-1. **SDD 循环**（AGENTS.md §16.6）：/implement（TDD 先红后绿）→ /code-review（Standards + Spec 双轴，Spec 轴含 DESIGN.md 对照）→ 修复到零 finding → 全量门禁 → 本地 commit → 更新 `docs/SDD_TICKET_TRACKER.md`。
-2. **门禁命令**（任一失败不得 commit）：
+1. **SDD 流程**：按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 实施；适用时测试先行，review 按风险安排。需要 review 时按项目需求覆盖 Standards 与 Spec（含本 PRD / `DESIGN.md`）；集成前每个代码 commit 必须有真实 review coverage。
+2. **逐票验证**：每张票运行与改动相称的 focused tests、lint / type check 和必要的集成测试；对应验证失败时不得提交。
+3. **集成前完整前端门禁**（不是每张票都要重跑）：
    ```bash
    cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build
    ```
+   完整门禁失败时不得集成。
    - oxlint 基线 **38 warnings / 0 errors**（B-1 批起为 38；本批新增文件 0 warning，基线不增加）。
    - Playwright **必须 `--workers=2`**（4 worker 有资源竞争抖动）。
-3. **变异验证**：每个新增断言必须证明有效——故意改坏实现 → 该断言变红 → 还原 → 变绿。记录进 ticket 完成笔记。
-4. **§15 亮色同步**：凡动 `:root` token，必须检查 `:root[data-theme='light']` 是否需要同步覆盖；DESIGN.md 的 Colors 节若受影响也要同步。
-5. **e2e selector 稳定性**：重构组件时**尽量保留既有 class 名**（`.approval-title/.approval-actions/.approval-error` 等 e2e 依赖项）；必须改名时，同一 ticket 内同步更新全部引用，并在 tracker 里列出 selector 变更清单。
-6. **不推送远程**：只本地 commit；merge/push 由集成 AI 负责（AGENTS.md §13/§14）。
-7. **临时产物**：`web/audit-screenshots.mjs`、`web/audit-dom-evidence.mjs` 是审查工具脚本（未入库）；UI-02 需要把其中对比度/字号测量固化成正式 e2e spec，之后这两个脚本删除，不入库。
-8. **进度落点**：在途进度记 `docs/SDD_TICKET_TRACKER.md`；全部合入 main 后由集成侧更新 `docs/PHASE_STATUS.md`。
+4. **变异验证**：每个新增断言必须证明有效——故意改坏实现 → 该断言变红 → 还原 → 变绿。记录进 ticket 完成笔记。
+5. **§15 亮色同步**：凡动 `:root` token，必须检查 `:root[data-theme='light']` 是否需要同步覆盖；DESIGN.md 的 Colors 节若受影响也要同步。
+6. **e2e selector 稳定性**：重构组件时**尽量保留既有 class 名**（`.approval-title/.approval-actions/.approval-error` 等 e2e 依赖项）；必须改名时，同一 ticket 内同步更新全部引用，并在 tracker 里列出 selector 变更清单。
+7. **Git / 进度**：本地提交、merge、push 和跨仓同步按 `AGENTS.md` §13–14 授权执行；当前主开发负责集成。更新 `docs/SDD_TICKET_TRACKER.md`，集成后更新 `docs/PHASE_STATUS.md`。
+8. **临时产物**：`web/audit-screenshots.mjs`、`web/audit-dom-evidence.mjs` 是审查工具脚本（未入库）；UI-02 需要把其中对比度/字号测量固化成正式 e2e spec，之后这两个脚本删除，不入库。
 
 ---
 
