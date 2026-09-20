@@ -30,27 +30,41 @@ from agent_harness.session.service import validate_session_id
 from agent_harness.workspace import Workspace
 
 if TYPE_CHECKING:
-    from agent_harness.web.app import AppState
+    from collections.abc import Awaitable, Callable
+
+    from agent_harness.session.store import JsonlSessionStore
     from agent_harness.workspace import WorkspaceIndex
 
 logger = logging.getLogger(__name__)
 
 
 class ProjectService:
-    """项目 CRUD（供 Web handler 调用；`state` 与 `SessionService` 同款）。"""
+    """项目 CRUD（供 Web handler 调用；构造契约与 `SessionService` 同款，见 #248）。
 
-    def __init__(self, state: AppState) -> None:
-        self._state = state
+    只声明实际用到的三个 collaborators：会话存储、workspace 索引，
+    以及装配它们所需的 `ensure_stores()`。
+    """
+
+    def __init__(
+        self,
+        *,
+        store: JsonlSessionStore,
+        workspace_index: WorkspaceIndex | None,
+        ensure_stores: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._store = store
+        self._workspace_index = workspace_index
+        self._ensure_stores = ensure_stores
 
     # —— 装配 ——
 
     async def _index(self) -> WorkspaceIndex:
         """`ensure_stores()` 之后的索引（Web 装配恒存在）。"""
-        await self._state.ensure_stores()
-        index = self._state.workspace_index
+        await self._ensure_stores()
+        index = self._workspace_index
         if index is None:
-            # 装配错误，不是用户错误：Web 装配恒带索引（`assembly.py`），走到这里说明
-            # 有人用 CLI 形状的 AppState 调了项目 API。500 比伪造"项目不存在"诚实。
+            # 装配错误，不是用户错误：Web 装配恒带索引（`assembly.py`），走到这里
+            # 说明有人用不带索引的装配调了项目 API。500 比伪造"项目不存在"诚实。
             raise RuntimeError("当前装配没有 workspace 索引，无法提供项目 API")
         return index
 
@@ -158,7 +172,7 @@ class ProjectService:
         """
         try:
             return await anyio.to_thread.run_sync(
-                self._state.store.read_started_header, session_id
+                self._store.read_started_header, session_id
             )
         except OSError:
             logger.warning("读取会话 %s 的 header 失败，按不可 attach 处理", session_id,

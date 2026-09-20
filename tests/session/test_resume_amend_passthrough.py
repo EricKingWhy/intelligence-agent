@@ -25,6 +25,7 @@ from agent_harness.session.event import SESSION_FORKED, USER_MESSAGE
 from agent_harness.session.service import AmendOptions, SessionService
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
+from agent_harness.web.app import session_service
 from tests.workspace_fixtures import rewrite_workspace_mapping
 
 
@@ -94,7 +95,7 @@ class TestResumeWorkspace:
             "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
         ) as mock_build:
             asyncio.run(
-                SessionService(state).resume_and_launch(
+                session_service(state).resume_and_launch(
                     session_id=session_id, task="hello",
                 )
             )
@@ -322,7 +323,7 @@ class TestResumeAndLaunchPassthrough:
             mock_session.session_id = "test-sid"
             mock_session_cls.resume = MagicMock(return_value=mock_session)
 
-            service = SessionService(state)
+            service = session_service(state)
             asyncio.run(
                 service.resume_and_launch(
                     session_id="test-sid",
@@ -375,7 +376,7 @@ class TestResumeAndLaunchPassthrough:
             mock_session.session_id = "test-sid"
             mock_session_cls.resume = MagicMock(return_value=mock_session)
 
-            service = SessionService(state)
+            service = session_service(state)
             asyncio.run(
                 service.resume_and_launch(
                     session_id="test-sid",
@@ -410,7 +411,7 @@ class TestSendMessageIdlePassthrough:
         launched.run = MagicMock()
         launched.subscriber = MagicMock()
 
-        service = SessionService(state)
+        service = session_service(state)
         with (
             patch.object(
                 SessionService, "has_session", new_callable=AsyncMock

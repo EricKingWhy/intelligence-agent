@@ -105,7 +105,6 @@ from agent_harness.observability import get_observability_sink
 from agent_harness.observability.tracer import RunTracer
 from agent_harness.session import Session
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
-from agent_harness.session.service import SessionService
 from agent_harness.storage.artifact import slice_lines
 from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.storage.operation import OperationContext
@@ -126,6 +125,7 @@ from agent_harness.transport import (
     TransportStatus,
     new_transport_entry,
 )
+from agent_harness.web.app import session_service
 from agent_harness.web.artifacts import MAX_CHARS_PER_LINE_CAP, MAX_LINES_CAP
 from agent_harness.web.domain_errors import http_error, workspace_http_error
 from agent_harness.web.projects import require_trusted_origin
@@ -204,7 +204,7 @@ async def _session_sandbox(
         validate_session_id(session_id)
     except InvalidSessionId as error:
         raise http_error(error) from error
-    if not await SessionService(state).has_session(session_id):
+    if not await session_service(state).has_session(session_id):
         raise http_error(SessionNotFound(f"session '{session_id}' not found"))
     try:
         return await anyio.to_thread.run_sync(state.workspace_registry.get, session_id)

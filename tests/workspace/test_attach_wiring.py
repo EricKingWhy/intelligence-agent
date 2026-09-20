@@ -18,9 +18,8 @@ from agent_harness.assembly import initialize_stores, recovery_stores
 from agent_harness.config import Settings
 from agent_harness.session import USER_MESSAGE, Session
 from agent_harness.session.event import RUN_COMPLETED, RUN_STARTED
-from agent_harness.session.service import SessionService
 from agent_harness.session.store import JsonlSessionStore
-from agent_harness.web.app import AppState
+from agent_harness.web.app import AppState, session_service
 
 
 def _state(tmp_path: Path, *, model: MagicMock | None = None) -> AppState:
@@ -41,7 +40,7 @@ def _launch(state: AppState, **kwargs) -> object:
         "agent_harness.session.service.build_runtime", new_callable=AsyncMock
     ) as build:
         build.return_value = MagicMock()
-        return asyncio.run(SessionService(state).create_and_launch(
+        return asyncio.run(session_service(state).create_and_launch(
             task="hello", max_steps=1, **kwargs
         ))
 
@@ -102,7 +101,7 @@ class TestForkWiring:
             e.seq for e in state.store.read_events(parent_id) if e.type == USER_MESSAGE
         )
         child_id = asyncio.run(
-            SessionService(state).fork(session_id=parent_id, from_seq=boundary)
+            session_service(state).fork(session_id=parent_id, from_seq=boundary)
         )
 
         workspaces = state.workspace_index.list()
@@ -121,7 +120,7 @@ class TestForkWiring:
         boundary = next(
             e.seq for e in state.store.read_events(parent_id) if e.type == USER_MESSAGE
         )
-        asyncio.run(SessionService(state).fork(session_id=parent_id, from_seq=boundary))
+        asyncio.run(session_service(state).fork(session_id=parent_id, from_seq=boundary))
 
         assert state.workspace_index.list() == []
 

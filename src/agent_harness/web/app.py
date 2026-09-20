@@ -42,6 +42,7 @@ from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
+from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
@@ -357,11 +358,11 @@ class AppState:
         #
         # on_run_terminal（ADR-0030 D4）：run 收口后接力投递下一条未投递输入。
         # 回调**唯一**实现点是 SessionService.on_run_terminal（Web/CLI 不各写一份）；
-        # 这里用 lambda 延迟构造 service——AppState 构造期还没有 app，而 service
-        # 只需要一个带 store/run_manager/message_queues 的 state 对象（就是 self）。
+        # 这里用 lambda 延迟构造 service——AppState 构造期还没有 app，而
+        # `session_service(self)` 只需要按属性取几个 collaborator。
         self.run_manager = RunManager(
             disconnect_grace_seconds=settings.run_disconnect_grace_seconds,
-            on_run_terminal=lambda session_id: SessionService(self).on_run_terminal(
+            on_run_terminal=lambda session_id: session_service(self).on_run_terminal(
                 session_id
             ),
             # #200：run 收口时缓存该会话的 builder 快照（context-usage 端点读
@@ -486,6 +487,52 @@ class AppState:
         # lifecycle 通道逐项隔离关闭，web 层不再懂每种 capability 的关闭姿势。
         if wiring is not None:
             await wiring.aclose()
+
+
+# ── 领域服务的组合根适配（#248）──────────────────────────────────────
+#
+# 领域层（`session/service.py` / `session/projects.py`）的构造契约是**它自己拥有的
+# 显式 collaborators**；「容器长什么样」翻译成「领域要什么」只在这两个函数里发生。
+# **新增 AppState 成员不会自动流进领域层**，必须在这里显式搬一次——那正是要的边界。
+#
+# 为什么是模块级函数而不是 AppState 方法：测试里有大量 duck-typed 的局部假 state
+# （只提供 store / run_manager / settings 等**被真正访问**的成员）。方法形态要求假对象
+# 自己也提供 `session_service()`，等于把组合根重新塞回容器类型；函数形态只按属性取
+# 所需成员——真容器与假对象一视同仁，缺谁就是 AttributeError，不静默兜底。
+#
+# 每次调用现取属性（不缓存）：与原先 `SessionService(state)` 的行为逐字一致，
+# 构造后替换 `state.run_manager` 等打桩仍然生效。
+
+
+def session_service(state: AppState) -> SessionService:
+    """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
+    return SessionService(
+        store=state.store,
+        run_manager=state.run_manager,
+        settings=state.settings,
+        workspace_registry=state.workspace_registry,
+        session_meta_store=state.session_meta_store,
+        message_queues=state.message_queues,
+        approval_queues=state.approval_queues,
+        workspaces_root=state.workspaces_root,
+        workspace_index=state.workspace_index,
+        operation_ledger=state.operation_ledger,
+        transport_ledger=state.transport_ledger,
+        checkpoint_store=state.checkpoint_store,
+        harness_db=state.harness_db,
+        stores=state.stores,
+        ensure_stores=state.ensure_stores,
+        get_wiring=state.get_wiring,
+    )
+
+
+def project_service(state: AppState) -> ProjectService:
+    """用容器的成员构造 `ProjectService`（传输侧唯一适配点）。"""
+    return ProjectService(
+        store=state.store,
+        workspace_index=state.workspace_index,
+        ensure_stores=state.ensure_stores,
+    )
 
 
 async def _validate_wired_context_providers(
@@ -734,9 +781,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
             # 不该让服务起不来），但必须响亮落日志。
             try:
-                from agent_harness.session.service import SessionService
 
-                scan_results = await SessionService(state).scan_interrupted()
+                scan_results = await session_service(state).scan_interrupted()
                 for result in scan_results:
                     logging.getLogger("agent_harness.web").warning(
                         "启动崩溃扫描：session=%s recovery=%s detail=%s",
@@ -751,9 +797,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # 用户回来时会话已被跑掉（用户不在场时自动消耗 token 更不可接受）。
             # 用户在界面上看到「待发送 N」，点「立即发送」走 POST /queue/flush。
             try:
-                from agent_harness.session.service import SessionService
 
-                rebuilt = await SessionService(state).rebuild_message_queues()
+                rebuilt = await session_service(state).rebuild_message_queues()
                 if rebuilt:
                     logging.getLogger("agent_harness.web").info(
                         "启动重建未投递输入：%d 个会话有待发送项", rebuilt,
@@ -872,7 +917,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         曾需秒级串行解析，现约几十 ms）。损坏行走 store 内全量回退，摘要
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             summaries = await service.list_sessions(
                 workspace_id=workspace_id, include_archived=include_archived
@@ -907,7 +952,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         session_id 先过安全校验（名字段，不是路径）；store 读是同步磁盘 I/O，
         走 to_thread 卸载（同 list_sessions）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             events = await service.get_events(session_id)
         except (InvalidSessionId, SessionNotFound) as e:
@@ -949,7 +994,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         if launch and req.task is None:
             # launch=true 恢复既有契约：task 必填（422，行为与原 min_length 校验一致）。
             raise HTTPException(status_code=422, detail="Field required (task)")
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         state = app.state.agent
 
         # context_providers handler-level 422（ADR-0021 模式，适配 ADR-0020b 的
@@ -1014,7 +1059,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
            （崩溃遗留的悬空 run 不伪造终态，修复走 POST /recover）。
         客户端对重放帧与 live 帧做同一 seq 幂等投影（C5）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             handle = await service.stream_reconnect(
                 session_id=session_id,
@@ -1079,7 +1124,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         历史与 dangling 修复，RunManager.launch 驱动一轮新的 Agent Loop。
         在途 session 拒绝 409，避免同一 session 并发两轮。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         amend = AmendOptions.from_request(req)
         await _validate_amend_for_existing_session(app.state.agent, amend)
         try:
@@ -1118,7 +1163,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         run/failed data.reason=cancelled，与异常臂（reason=分类码或异常类型名）、
         孤儿回收（reason=orphaned）区分。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             cancelled = await service.cancel(session_id)
         except (InvalidSessionId, SessionNotFound) as e:
@@ -1147,7 +1192,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         来源闸（ADR-0025 D1）：归档改的是宿主侧列表可见性，只接受本机来源
         （与项目 / 目录 / 记忆 / 工作区端点同一份实现）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             archived = await service.set_archived(
                 session_id, archived=True, entry_point=ARCHIVE_ENTRY_API
@@ -1166,7 +1211,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         形态非法。**没有 409**：把行放回列表不破坏任何人的前提，在途 run 也无所谓
         （见 `SessionService.set_archived` 里那条非对称的理由）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             archived = await service.set_archived(
                 session_id, archived=False, entry_point=ARCHIVE_ENTRY_API
@@ -1194,7 +1239,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         注意快照是**进程内**缓存：后端重启后历史会话必然走到 usage_only/no_data
         ——这不是异常分支，是常态分支（#212 实测踩到）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             events = await service.get_events(session_id)
         except (InvalidSessionId, SessionNotFound) as e:
@@ -1242,7 +1287,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         来源闸（ADR-0025 D1）：删除是宿主侧不可逆操作，只接受本机来源。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             stats = await service.delete_session(session_id)
         except (
@@ -1318,7 +1363,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     status_code=422,
                     detail=f"{name} 必须 >= 1（行号从 1 开始计数）：{value}",
                 )
-        if not await SessionService(state).has_session(session_id):
+        if not await session_service(state).has_session(session_id):
             raise http_error(SessionNotFound(f"session '{session_id}' not found"))
         store = artifacts.build_read_artifact_store(state.settings, session_id)
         if store is None:
@@ -1376,7 +1421,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 "status": "received",
                 "note": "auto-approve is default; interactive approval via approval_id",
             }
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             result = await service.resolve_approval(
                 session_id=session_id,
@@ -1411,7 +1456,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         PENDING 默认 skip；RUNNING/UNKNOWN 需要人工裁决时返回 409（不伪造、
         不盲跑，不变量 #14）。幂等：重复调用靠事件配对自然跳过已修复项。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             events = await service.recover(session_id)
         except (InvalidSessionId, SessionNotFound, RecoveryConflict, SeqConflict) as e:
@@ -1433,7 +1478,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         404 = session 不存在；422 = provider/model_id 不在 catalog
         （``GET /api/models`` 的默认条目也是合法目标 = 切回默认链）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             change = await service.change_model(
                 session_id=session_id,
@@ -1464,7 +1509,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         ``mode=steer``：仅在途 run 时合法——注册 SteerRequest 并返回
         JSON 确认；无在途 run → 409（steer 必须有目标）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         amend = AmendOptions.from_request(req)
         # 契约（handoff §3.1 / P3）：只有 idle → launched 才消费 amend；在途 run
         # 的 queued 消息与 steer 一律忽略这些字段。因此引用类字段（model /
@@ -1534,7 +1579,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         看得见 queue 与 steer 的到达顺序（§4.8 / §5.2 的"事件流是唯一事实"）。
         前端用它做首屏 / 重连补齐，实时增量仍由 SSE 事件流驱动。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             pending = await service.list_undelivered_inputs(session_id)
         except (InvalidSessionId, SessionNotFound, SeqConflict) as e:
@@ -1570,7 +1615,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         只投递**一条**：后续输入在下一个 run 终态继续接力（§4.5.5）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             launched = await service.deliver_next_undelivered(session_id=session_id)
         except (
@@ -1593,7 +1638,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         语义：取消成功 → 200 cancelled；queue_id 已取消 / 已消费 /
         不存在 → 404；session 不存在 → 404。幂等失败（防覆盖式重置语义）。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             cancelled = await service.cancel_queue(
                 session_id=session_id, queue_id=queue_id

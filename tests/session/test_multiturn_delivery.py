@@ -36,8 +36,7 @@ from agent_harness.session.event import (
     STEER_REQUESTED,
 )
 from agent_harness.session.queue import QueuedMessage
-from agent_harness.session.service import SessionService
-from agent_harness.web.app import AppState
+from agent_harness.web.app import AppState, session_service
 
 
 class GateScriptedModel(ScriptedModel):
@@ -70,7 +69,7 @@ class _Harness:
 
     def __init__(self, state: AppState, snapshots: list[RequestSnapshot]) -> None:
         self.state = state
-        self.service = SessionService(state)
+        self.service = session_service(state)
         self.snapshots = snapshots
 
     def events(self, session_id: str):

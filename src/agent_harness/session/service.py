@@ -128,8 +128,24 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from agent_harness.assembly import RecoveryStores
+    from agent_harness.capability.base import CapabilityRegistry
+    from agent_harness.capability.wiring import CapabilityWiring
+    from agent_harness.config import Settings
     from agent_harness.recovery.scan import InterruptionScanResult
-    from agent_harness.web.app import AppState
+    from agent_harness.sandbox.registry import WorkspaceRegistry
+    from agent_harness.session.queue import MessageQueueManager
+    from agent_harness.storage.sqlite import (
+        SqliteCheckpointStore,
+        SqliteOperationLedger,
+        SqliteSessionMetaStore,
+    )
+    from agent_harness.transport.contract import SqliteTransportLedger
+
+    # `RunManager` 的家目前仍在 `web/`（运行管理器 + SSE 订阅者）。本层只在类型
+    # 标注里命名它、**运行时不 import** —— 这是 #248 留下的残余（见 tracker B-26）。
     from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
     from agent_harness.workspace.index import WorkspaceIndex
 
@@ -271,45 +287,84 @@ class SessionDeletionStats:
 
 
 class SessionService:
-    """会话领域服务：统一 CLI / Web 的 session 生命周期操作。
+    """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
-    包装 AppState（store / run_manager / approval_queues / capability 装配），
-    对外暴露纯领域方法，不感知 HTTP / SSE / CLI 终端。
+    构造契约是**本层拥有的显式 collaborators**（#248）：只包含实际被访问的成员，
+    不再命名传输层的容器类型（`web.app` 里的那个 state 容器）——领域类型不指向
+    传输层。适配（把容器成员搬进这些参数）由传输侧组合根
+    `web/app.py::session_service()` 唯一一处负责。
+
+    每个参数都是**真的在用**：字段清单与用途见
+    `docs/adr/0040-session-service-explicit-collaborators.md`。
     """
 
-    def __init__(self, state: AppState) -> None:
-        self._state = state
+    def __init__(
+        self,
+        *,
+        store: JsonlSessionStore,
+        run_manager: RunManager,
+        settings: Settings,
+        workspace_registry: WorkspaceRegistry,
+        session_meta_store: SqliteSessionMetaStore,
+        message_queues: MessageQueueManager,
+        approval_queues: dict[str, PendingApprovalQueue],
+        workspaces_root: Path,
+        workspace_index: WorkspaceIndex | None,
+        operation_ledger: SqliteOperationLedger,
+        transport_ledger: SqliteTransportLedger,
+        checkpoint_store: SqliteCheckpointStore,
+        harness_db: Path,
+        stores: RecoveryStores,
+        ensure_stores: Callable[[], Awaitable[None]],
+        get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+    ) -> None:
+        self._store = store
+        self._run_manager = run_manager
+        self._settings = settings
+        self._workspace_registry = workspace_registry
+        self._session_meta_store = session_meta_store
+        self._message_queues = message_queues
+        self._approval_queues = approval_queues
+        self._workspaces_root = workspaces_root
+        self._workspace_index = workspace_index
+        self._operation_ledger = operation_ledger
+        self._transport_ledger = transport_ledger
+        self._checkpoint_store = checkpoint_store
+        self._harness_db = harness_db
+        self._stores = stores
+        self._ensure_stores = ensure_stores
+        self._get_wiring = get_wiring
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
     @property
     def store(self) -> JsonlSessionStore:
-        return self._state.store
+        return self._store
 
     @property
     def run_manager(self) -> RunManager:
-        return self._state.run_manager
+        return self._run_manager
 
     @property
     def approval_queues(self) -> dict[str, PendingApprovalQueue]:
-        return self._state.approval_queues
+        return self._approval_queues
 
     @property
     def workspaces_root(self) -> Path:
-        return self._state.workspaces_root
+        return self._workspaces_root
 
     @property
     def settings(self):
-        return self._state.settings
+        return self._settings
 
     @property
     def workspace_registry(self):
-        return self._state.workspace_registry
+        return self._workspace_registry
 
     @property
     def session_meta_store(self):
         """Session 元信息存储（fork 需要写 child 的 provenance）。"""
-        return self._state.session_meta_store
+        return self._session_meta_store
 
     # ── 只读操作 ─────────────────────────────────────────────────────
 
@@ -339,9 +394,9 @@ class SessionService:
         只做形状复述、没有校验与行为的 dict 中转——列表行的字段因此在领域层就有带类型的
         唯一定义点。由调用方（`web/app.py`）映射为 API response model。
         """
-        await self._state.ensure_stores()
-        store = self._state.store
-        index = self._state.workspace_index
+        await self._ensure_stores()
+        store = self._store
+        index = self._workspace_index
 
         if workspace_id is not None:
             # `index.get()` 经 `_view → _visible_ids → _filter_visible → _read_header`
@@ -397,7 +452,7 @@ class SessionService:
         无 meta 行的会话**不在**集合里 ⇒ 视为未归档（AC3 的口径要点——`session_meta`
         行由 lineage/fork 懒补，不能假设"每个会话恒有一行"）。
         """
-        metas = await self._state.session_meta_store.list_all()
+        metas = await self._session_meta_store.list_all()
         return {meta.session_id for meta in metas if meta.archived}
 
     @staticmethod
@@ -422,7 +477,7 @@ class SessionService:
         """
         self._validate_session_id(session_id)
         events = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         if not events:
             raise SessionNotFound(f"session '{session_id}' not found")
@@ -432,7 +487,7 @@ class SessionService:
         """检查 session 是否存在（用于 cancel/approve 等 404 前置校验）。"""
         self._validate_session_id(session_id)
         events = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         return bool(events)
 
@@ -492,10 +547,10 @@ class SessionService:
         if cwd is not None:
             workspace = self._resolve_cwd(cwd)
         elif workspace_name is not None:
-            workspace = self._state.workspaces_root / workspace_name
+            workspace = self._workspaces_root / workspace_name
             workspace.mkdir(parents=True, exist_ok=True)
         else:
-            workspace = self._state.workspaces_root / session_id
+            workspace = self._workspaces_root / session_id
             workspace.mkdir(parents=True, exist_ok=True)
 
         # 模型 catalog 校验（在落盘前，避免孤儿）；合法则记为会话初始模型，
@@ -508,9 +563,9 @@ class SessionService:
             from agent_harness.model.provider_store import ProviderStore
 
             try:
-                store = ProviderStore.for_settings(self._state.settings)
+                store = ProviderStore.for_settings(self._settings)
                 initial_model = ModelConfig.resolve_selection(
-                    self._state.settings, amend.model, store,
+                    self._settings, amend.model, store,
                 )
             except ConfigError as error:
                 raise InvalidDecision(str(error)) from error
@@ -531,8 +586,8 @@ class SessionService:
         if auto_approve_explicit:
             session_start_data[SESSION_AUTO_APPROVE_KEY] = auto_approve
 
-        _, wiring = await self._state.get_wiring()
-        await self._state.ensure_stores()
+        _, wiring = await self._get_wiring()
+        await self._ensure_stores()
 
         # 审批路由（三种，保留向后兼容）
         interactive = (
@@ -549,21 +604,21 @@ class SessionService:
         )
 
         runtime = await build_runtime(
-            settings=self._state.settings,
+            settings=self._settings,
             wiring=wiring,
-            stores=self._state.stores,
-            workspace_registry=self._state.workspace_registry,
+            stores=self._stores,
+            workspace_registry=self._workspace_registry,
             session_id=session_id,
             workspace=workspace,
             max_steps=max_steps,
             permission_mode=permission_mode,
             approval_callback=approval_callback,
-            session_store=self._state.store,
-            steer_source=self._state.message_queues,
+            session_store=self._store,
+            steer_source=self._message_queues,
             **amend_kwargs(amend),
         )
         session = Session.start(
-            self._state.store, session_id=session_id,
+            self._store, session_id=session_id,
             started_data=session_start_data or None,
             # WS-1 #151：会话侧 cwd 锚由**创建者**赋予（这里），与 build_runtime
             # 写进映射表的 workspace_root 是同一路径、同一套规范化（AC5）。
@@ -585,9 +640,9 @@ class SessionService:
         # 项目实体由 create 幂等建立（同路径的多会话共享同一项目）。
         # #169：`cwd` 走同一条路（title=None → `Workspace.default_title` 取目录末段名）。
         explicit_dir = workspace_name is not None or cwd is not None
-        if explicit_dir and self._state.workspace_index is not None:
-            await self._state.workspace_index.create(workspace, title=workspace_name)
-            await self._state.workspace_index.attach_session(session_id)
+        if explicit_dir and self._workspace_index is not None:
+            await self._workspace_index.create(workspace, title=workspace_name)
+            await self._workspace_index.attach_session(session_id)
 
         # 交互式审批：把真实 session 注入 callback 闭包
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
@@ -601,10 +656,10 @@ class SessionService:
             # 队列登记进 approval_queues，而没有 run 就没有终结回调来 GC 它
             # （登记点永远等不到 pop）——只建路径当场撤掉登记，队列不泄漏。
             if interactive:
-                self._state.approval_queues.pop(session_id, None)
+                self._approval_queues.pop(session_id, None)
             return LaunchResult(session=session, run=None, subscriber=None)
 
-        run, subscriber = self._state.run_manager.launch(session, runtime, task)
+        run, subscriber = self._run_manager.launch(session, runtime, task)
 
         # run 终结时 GC approval_queue（防泄漏）
         if interactive:
@@ -631,13 +686,13 @@ class SessionService:
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
         # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
-        amend = _amend_with_session_model(amend, existing, self._state.settings)
-        if self._state.run_manager.get_active(session_id) is not None:
+        amend = _amend_with_session_model(amend, existing, self._settings)
+        if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
 
         # 工作目录归属对账（#266）：必须在 `Session.resume/load` **之前**——那两处会
@@ -647,7 +702,7 @@ class SessionService:
         persisted_cwd = session_cwd(existing)
         if persisted_cwd is None:
             # 历史遗留（无 cwd 锚）：兼容语义逐字不变——默认目录 + 确保它存在。
-            workspace = self._state.workspaces_root / session_id
+            workspace = self._workspaces_root / session_id
             workspace.mkdir(parents=True, exist_ok=True)
         else:
             workspace = Path(persisted_cwd)
@@ -671,19 +726,19 @@ class SessionService:
         if detect_dangling(existing) or detect_unterminated_runs(existing):
             await self.recover(session_id)
             session = Session.load(
-                self._state.store,
+                self._store,
                 session_id,
-                workspace_registry=self._state.workspace_registry,
+                workspace_registry=self._workspace_registry,
             )
         else:
             session = Session.resume(
-                self._state.store,
+                self._store,
                 session_id,
-                workspace_registry=self._state.workspace_registry,
+                workspace_registry=self._workspace_registry,
             )
 
-        _, wiring = await self._state.get_wiring()
-        await self._state.ensure_stores()
+        _, wiring = await self._get_wiring()
+        await self._ensure_stores()
 
         # F15 #234：权限决策（档位 + 是否自动批准）从事件流派生（创建时显式声明过才
         # 作数）。续聊路径没有创建请求可读，硬编码默认值就等于"用户的选择只管第一条
@@ -727,24 +782,24 @@ class SessionService:
             )
 
         runtime = await build_runtime(
-            settings=self._state.settings,
+            settings=self._settings,
             wiring=wiring,
-            stores=self._state.stores,
-            workspace_registry=self._state.workspace_registry,
+            stores=self._stores,
+            workspace_registry=self._workspace_registry,
             session_id=session_id,
             workspace=workspace,
             max_steps=max_steps,
             permission_mode=permission_mode,
             approval_callback=approval_callback,
-            session_store=self._state.store,
-            steer_source=self._state.message_queues,
+            session_store=self._store,
+            steer_source=self._message_queues,
             **amend_kwargs(amend),
         )
         # 交互式审批：session 已存在，直接绑定（创建路径是"先 holder 后 Session.start"，
         # 这里顺序反过来，但注入点相同）。
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
-        run, subscriber = self._state.run_manager.launch(session, runtime, task)
+        run, subscriber = self._run_manager.launch(session, runtime, task)
         # run 终结时 GC approval_queue（与创建路径同一条防泄漏路径）。
         if interactive:
             self._attach_approval_queue_gc(run, session_id)
@@ -762,14 +817,14 @@ class SessionService:
         """
         self._validate_session_id(session_id)
         events = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         if not events:
             raise SessionNotFound(f"session '{session_id}' not found")
         latest_seq = events[-1].seq
 
         # 先订阅后取游标（无缝无重复）
-        run = self._state.run_manager.get_active(session_id)
+        run = self._run_manager.get_active(session_id)
         subscriber = run.subscribe() if run is not None else None
         replay_upto = run.last_enqueued_seq if run is not None else latest_seq
 
@@ -802,7 +857,7 @@ class SessionService:
         冲突为什么必须类型化失败（不静默选边）单点在 `WorkspaceBindingConflict` 的
         docstring，这里不重复（§16.1）。
         """
-        registry = self._state.workspace_registry
+        registry = self._workspace_registry
         if registry is None:
             return
         disagreeing = [
@@ -829,7 +884,7 @@ class SessionService:
         （run 的内存计数器看不到旁路追加，写出重复 seq 让会话不可 resume），且
         run 的 listener 在册才能把旁路事件实时广播给 SSE/WS 订阅者。
         """
-        active = self._state.run_manager.get_active(session_id)
+        active = self._run_manager.get_active(session_id)
         return active.session if active is not None else None
 
     def _append_session_event(
@@ -844,7 +899,7 @@ class SessionService:
         if live is not None:
             live.append(event_type, dict(data))
             return
-        Session.append_event(self._state.store, session_id, event_type, dict(data))
+        Session.append_event(self._store, session_id, event_type, dict(data))
 
     async def send_message(
         self,
@@ -907,7 +962,7 @@ class SessionService:
         if queue_id is not None:
             await self.cancel_queue(session_id=session_id, queue_id=queue_id)
 
-        active_run = self._state.run_manager.get_active(session_id)
+        active_run = self._run_manager.get_active(session_id)
 
         if mode == "steer":
             if active_run is None:
@@ -917,7 +972,7 @@ class SessionService:
             # run_id 可能尚未落盘（launch 与 run/started 之间）——等一小会儿，
             # 拿不到就登记 None：runtime 侧对"run_id 未知"的 steer 一律丢弃
             # （不会注入错误的 run），该请求仍会被终态驱动当普通输入投递。
-            steer_req = await self._state.message_queues.register_steer(
+            steer_req = await self._message_queues.register_steer(
                 session_id=session_id,
                 content=content,
                 run_id=await active_run.wait_run_id(),
@@ -944,7 +999,7 @@ class SessionService:
             )
         else:
             # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
-            queued = await self._state.message_queues.enqueue(
+            queued = await self._message_queues.enqueue(
                 session_id=session_id, content=content, created_at=_utc_now_iso()
             )
             self._append_session_event(
@@ -966,7 +1021,7 @@ class SessionService:
     async def _assert_supersedable(self, session_id: str, superseded_seq: int) -> None:
         """校验 supersede 目标（ADR-0030 §4.4 第 1 步 / D8）。不合法 → 409。"""
         events = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         target = next((e for e in events if e.seq == superseded_seq), None)
         if target is None or target.type != USER_MESSAGE:
@@ -1018,7 +1073,7 @@ class SessionService:
         self._validate_session_id(session_id)
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
-        cancelled = await self._state.message_queues.cancel(
+        cancelled = await self._message_queues.cancel(
             session_id=session_id, queue_id=queue_id
         )
         if not cancelled:
@@ -1045,7 +1100,7 @@ class SessionService:
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
         events = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         return undelivered_inputs(events)
 
@@ -1079,14 +1134,14 @@ class SessionService:
         # run_id 拿不到（超时）不阻塞投递：消费判据是 input_id，run_id 只是归因。
         run_id = await launched.run.wait_run_id()
         if nxt.kind == KIND_QUEUE:
-            await self._state.message_queues.take_queue_item(
+            await self._message_queues.take_queue_item(
                 session_id=session_id, queue_id=nxt.input_id,
             )
             self._append_session_event(
                 session_id, QUEUE_CONSUMED, queue_id=nxt.input_id, run_id=run_id,
             )
         else:
-            await self._state.message_queues.take_steer(
+            await self._message_queues.take_steer(
                 session_id=session_id, steer_id=nxt.input_id,
             )
             self._append_session_event(
@@ -1105,7 +1160,7 @@ class SessionService:
         由 `RunManager` 在 run 收口后调用（Web 层接线）；CLI 未接线时本方法
         不被调用，行为与接线前一致。
         """
-        if self._state.run_manager.get_active(session_id) is not None:
+        if self._run_manager.get_active(session_id) is not None:
             return  # 已有在途 run（用户手动开了）：不要双驱
         try:
             await self.deliver_next_undelivered(session_id=session_id)
@@ -1129,7 +1184,7 @@ class SessionService:
         """
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
-        return self._state.run_manager.cancel(session_id)
+        return self._run_manager.cancel(session_id)
 
     # ── 归档（#171）──────────────────────────────────────────────────
 
@@ -1179,15 +1234,15 @@ class SessionService:
         """
         # ①②③ 存在性与在途 run（存在性那三步与删除共用，见 `_require_existing_session`）
         await self._require_existing_session(session_id)
-        if archived and self._state.run_manager.get_active(session_id) is not None:
+        if archived and self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict(
                 f"session '{session_id}' has a run in flight; archive it after it finishes"
             )
 
         # ④ 懒补行 → 写标记
-        meta = await self._state.session_meta_store.get(session_id)
+        meta = await self._session_meta_store.get(session_id)
         if meta is None:
-            await self._state.session_meta_store.upsert(
+            await self._session_meta_store.upsert(
                 SessionMeta(
                     session_id=session_id,
                     created_at=_utc_now_iso(),
@@ -1195,7 +1250,7 @@ class SessionService:
                 )
             )
         else:
-            await self._state.session_meta_store.set_archived(session_id, archived)
+            await self._session_meta_store.set_archived(session_id, archived)
 
         # ⑤ 审计：归档不是会话真相（不变量 #16/#22），痕迹只落结构化日志。只带 id 与
         #    动作——会话正文（标题 / 任务文本）是用户数据，进日志只是多余的泄露面
@@ -1262,16 +1317,16 @@ class SessionService:
         # ①② 形态 + 存在性（要删多少，在删之前就必须知道——删完就只能编了；
         #     这两步与归档共用 `_require_existing_session`）
         summary = await self._require_existing_session(session_id)
-        store = self._state.store
+        store = self._store
 
         # ③ 在途 run
-        if self._state.run_manager.is_busy(session_id):
+        if self._run_manager.is_busy(session_id):
             raise ActiveRunConflict(
                 f"session '{session_id}' has a run in flight; cancel it first"
             )
 
         # ④ 挂起审批
-        queue = self._state.approval_queues.get(session_id)
+        queue = self._approval_queues.get(session_id)
         if queue is not None and queue.pending_ids():
             raise ActiveRunConflict(
                 f"session '{session_id}' has a pending approval; resolve it first"
@@ -1279,7 +1334,7 @@ class SessionService:
 
         # ⑤ fork 子会话（`origin != "delegation"`：NULL 也当 fork 处理——保守拒绝，
         #    宁可让用户先去处理子会话，也不留一个悬空父链接）
-        metas = await self._state.session_meta_store.list_all()
+        metas = await self._session_meta_store.list_all()
         children = [
             m.session_id
             for m in metas
@@ -1295,33 +1350,33 @@ class SessionService:
         #    编排，不让任一 Store 隐式拥有别人的写语义（`SessionMetaStore.cleanup` 的原话）。
         #    解除计数用 `detach_session` 的返回值：它修剪的是原始账本，是**实际发生**的
         #    动作；自己再扫一遍 `list()` 只会得到一个近似值，还多一次同步磁盘 I/O。
-        detached = await self._state.workspace_index.detach_session(session_id)
+        detached = await self._workspace_index.detach_session(session_id)
         # 委派子行的父链接要一起清：委派子会话放行（D5），但不许留下指着死父的悬空链接
         # （`build_lineage_tree` 会渲染成 `(parent missing)`，而那条边永远无法自愈）。
-        repaired_links = await self._state.session_meta_store.clear_delegation_parent(
+        repaired_links = await self._session_meta_store.clear_delegation_parent(
             session_id
         )
-        await self._state.session_meta_store.cleanup(session_id)
-        await self._state.checkpoint_store.delete_for_session(session_id)
-        await self._state.operation_ledger.delete_for_session(session_id)
-        await self._state.transport_ledger.delete_for_session(session_id)
+        await self._session_meta_store.cleanup(session_id)
+        await self._checkpoint_store.delete_for_session(session_id)
+        await self._operation_ledger.delete_for_session(session_id)
+        await self._transport_ledger.delete_for_session(session_id)
 
         # ⑦ 文件（后）——白名单三条路径；同步磁盘 I/O 一律离开事件循环。
         await anyio.to_thread.run_sync(store.delete_session, session_id)
         await anyio.to_thread.run_sync(
-            self._state.workspace_registry.discard_session_artifacts, session_id
+            self._workspace_registry.discard_session_artifacts, session_id
         )
         # 本地 artifact 目录（#192）：与 sandbox 工件同一条纪律——只删 harness 用
         # setting + session_id 自己拼出来的路径，**不读映射**（ADR-0029 D2）。配了对象
         # 存储时远端对象不在此列（那些 Provider 没有 delete，记录为已知边界）。
         await anyio.to_thread.run_sync(
-            discard_local_artifacts, self._state.settings, session_id
+            discard_local_artifacts, self._settings, session_id
         )
 
         # ⑧ 进程内残留——排队消息与审批队列都按 session_id 索引，会话没了它们永远等不到
         #    消费者，且会让同 id 重建的会话继承上一世的队列。
-        await self._state.message_queues.cleanup(session_id)
-        self._state.approval_queues.pop(session_id, None)
+        await self._message_queues.cleanup(session_id)
+        self._approval_queues.pop(session_id, None)
 
         # ⑨ 审计：领域数据里不留墓碑（D1/D7），"它存在过"只在结构化日志里可查。
         #    只带 id 与计数——删除不可撤销，审计要能回答"谁在何时删了哪个会话"，
@@ -1361,12 +1416,12 @@ class SessionService:
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
 
-        queue = self._state.approval_queues.get(session_id)
+        queue = self._approval_queues.get(session_id)
         if queue is None:
             raise ApprovalQueueMissing(
                 f"session '{session_id}' has no interactive approval queue "
@@ -1436,18 +1491,18 @@ class SessionService:
         )
 
         self._validate_session_id(session_id)
-        await self._state.ensure_stores()
+        await self._ensure_stores()
         existing = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
 
         coordinator = RecoveryCoordinator(
-            session_store=self._state.store,
-            workspace_registry=self._state.workspace_registry,
-            operation_ledger=self._state.operation_ledger,
-            database_path=self._state.harness_db,
+            session_store=self._store,
+            workspace_registry=self._workspace_registry,
+            operation_ledger=self._operation_ledger,
+            database_path=self._harness_db,
         )
         try:
             recovered = await coordinator.recover(session_id)
@@ -1463,12 +1518,12 @@ class SessionService:
         """
         from agent_harness.recovery.scan import scan_interrupted_sessions
 
-        await self._state.ensure_stores()
+        await self._ensure_stores()
         results = await scan_interrupted_sessions(
-            session_store=self._state.store,
-            operation_ledger=self._state.operation_ledger,
-            workspace_registry=self._state.workspace_registry,
-            database_path=self._state.harness_db,
+            session_store=self._store,
+            operation_ledger=self._operation_ledger,
+            workspace_registry=self._workspace_registry,
+            database_path=self._harness_db,
         )
         return results
 
@@ -1485,13 +1540,13 @@ class SessionService:
         代价与边界：这里对每个会话做一次全量事件读取（`list_session_ids` 的顺序即
         最近修改倒序）。重建只在启动时跑一次，耗时随会话总量线性增长。
         """
-        await self._state.ensure_stores()
-        session_ids = await anyio.to_thread.run_sync(self._state.store.list_session_ids)
+        await self._ensure_stores()
+        session_ids = await anyio.to_thread.run_sync(self._store.list_session_ids)
         started = time.monotonic()
         rebuilt = 0
         for session_id in session_ids:
             events = await anyio.to_thread.run_sync(
-                self._state.store.read_events, session_id
+                self._store.read_events, session_id
             )
             if not events:
                 continue
@@ -1519,7 +1574,7 @@ class SessionService:
                 for item in pending
                 if item.kind != KIND_QUEUE
             ]
-            await self._state.message_queues.restore(
+            await self._message_queues.restore(
                 session_id=session_id, queue_items=queue_items, steers=steers,
             )
             rebuilt += 1
@@ -1551,22 +1606,22 @@ class SessionService:
 
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
 
-        target = resolve_model_target(self._state.settings, provider, model_id)
+        target = resolve_model_target(self._settings, provider, model_id)
         if target is None:
             raise UnknownModel(
                 f"未知模型: provider={provider!r} model_id={model_id!r}，可选: "
-                f"{[(e.provider, e.name) for e in parse_model_catalog(self._state.settings)]}"
+                f"{[(e.provider, e.name) for e in parse_model_catalog(self._settings)]}"
             )
         from agent_harness.model.provider_store import ProviderStore
 
         assert_model_resolvable(
-            self._state.settings, target,
-            ProviderStore.for_settings(self._state.settings),
+            self._settings, target,
+            ProviderStore.for_settings(self._settings),
         )
         # 在途 run 存在时用它的 Session 聚合追加（seq 不撞号 + listener 实时广播）；
         # 否则只读加载一个聚合。两条路径都只 append，不走 resume。
@@ -1590,13 +1645,13 @@ class SessionService:
             validate_event_seq(session_id, existing)  # 判据 owner：session 模块
             try:
                 return append_model_change(
-                    Session(session_id, self._state.store, existing), target
+                    Session(session_id, self._store, existing), target
                 )
             except SeqConflict:
                 if attempts_left <= 0:
                     raise
                 existing = await anyio.to_thread.run_sync(
-                    self._state.store.read_events, session_id
+                    self._store.read_events, session_id
                 )
 
     async def fork(
@@ -1616,20 +1671,20 @@ class SessionService:
 
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
-            self._state.store.read_events, session_id
+            self._store.read_events, session_id
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
-        if self._state.run_manager.get_active(session_id) is not None:
+        if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run; fork needs settled history")
-        await self._state.ensure_stores()
+        await self._ensure_stores()
         try:
             child = await fork_session(
-                self._state.store,
-                self._state.session_meta_store,
+                self._store,
+                self._session_meta_store,
                 session_id,
                 boundary_user_message_seq=from_seq,
-                workspace_registry=self._state.workspace_registry,
+                workspace_registry=self._workspace_registry,
                 with_tail_summary=with_tail_summary,
             )
         except ForkBoundaryError as error:
@@ -1639,8 +1694,8 @@ class SessionService:
         # 父所属的项目里。attach 只加入**已注册**的项目：父是未命名会话（其目录未注册）
         # → child 也保持 Ungrouped，与父一致。SubAgent 子会话不走这里（内部子代理
         # 不进项目列表，见 ADR-0025 D6 说明）。
-        if self._state.workspace_index is not None:
-            await self._state.workspace_index.attach_session(child.session_id)
+        if self._workspace_index is not None:
+            await self._workspace_index.attach_session(child.session_id)
         return child.session_id
 
     # ── 内部方法 ─────────────────────────────────────────────────────
@@ -1663,9 +1718,9 @@ class SessionService:
         （删除要事件数）。一处改了另一处不会漂。
         """
         self._validate_session_id(session_id)
-        await self._state.ensure_stores()
+        await self._ensure_stores()
         summary = await anyio.to_thread.run_sync(
-            self._state.store.read_session_summary, session_id
+            self._store.read_session_summary, session_id
         )
         if summary is None or summary.event_count == 0:
             raise SessionNotFound(f"session '{session_id}' not found")
@@ -1724,7 +1779,7 @@ class SessionService:
             raise WorkspaceNameInvalid(
                 f"workspace 只接受单个目录名（不接受路径）：{workspace!r}"
             )
-        resolved_root = self._state.workspaces_root.resolve()
+        resolved_root = self._workspaces_root.resolve()
         if not (resolved_root / workspace).resolve().is_relative_to(resolved_root):
             raise WorkspaceNameInvalid(
                 f"workspace 越出 workspaces_root：{workspace!r}"
@@ -1742,17 +1797,17 @@ class SessionService:
     ) -> ApprovalCallback | None | _InteractiveCallbackHolder:
         """构建审批 callback（三种路由，与原 handler 行为完全一致）。
 
-        委托 ``session/approval.py`` 的模块级函数（候选 2）；把 ``self._state``
-        的两处依赖显式传入，本方法签名与调用点保持不变。
+        委托 ``session/approval.py`` 的模块级函数（候选 2）；把本层持有的
+        settings / approval_queues 两处依赖显式传入，签名与调用点保持不变。
         """
         return _build_approval_callback_impl(
             interactive=interactive,
             auto_approve_explicit=auto_approve_explicit,
             permission_mode_explicit=permission_mode_explicit,
             auto_approve=auto_approve,
-            approval_queues=self._state.approval_queues,
+            approval_queues=self._approval_queues,
             session_id=session_id,
-            approval_timeout_seconds=self._state.settings.approval_timeout_seconds,
+            approval_timeout_seconds=self._settings.approval_timeout_seconds,
         )
 
     def _attach_approval_queue_gc(self, run: ManagedRun, session_id: str) -> None:
@@ -1760,7 +1815,7 @@ class SessionService:
         _task = run.task
 
         def _gc_approval_queue(_t):
-            self._state.approval_queues.pop(session_id, None)
+            self._approval_queues.pop(session_id, None)
 
         if _task is not None:
             _task.add_done_callback(_gc_approval_queue)

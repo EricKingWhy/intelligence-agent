@@ -142,10 +142,11 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         ——从不带游标的客户端拿不到增量，只能每次都被导向全量重建。本仓客户端
         （`web/src/lib/wsStream.ts`）恒带游标，被契约文档与两侧测试锁住。
         """
-        from agent_harness.session.service import InvalidSessionId, SessionService
+        from agent_harness.session.service import InvalidSessionId
+        from agent_harness.web.app import session_service
         from agent_harness.web.serialization import build_truncated_control
 
-        service = SessionService(state)
+        service = session_service(state)
         try:
             events = await service.get_events(session_id)
         except InvalidSessionId as e:
@@ -277,9 +278,9 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     from agent_harness.session.service import (
                         InvalidSessionId,
                         SessionNotFound,
-                        SessionService,
                         WorkspaceBindingConflict,
                     )
+                    from agent_harness.web.app import session_service
 
                     sid = msg.get("session_id", "")
                     content = msg.get("content", "")
@@ -287,7 +288,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     if not sid or not content:
                         await _send_json({"type": "error", "message": "missing session_id or content"})
                         continue
-                    service = SessionService(state)
+                    service = session_service(state)
                     try:
                         result = await service.send_message(
                             session_id=sid, content=content, mode=mode,
@@ -325,9 +326,9 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                 elif msg_type == "cancel":
                     sid = msg.get("session_id", "")
                     if sid:
-                        from agent_harness.session.service import SessionService
+                        from agent_harness.web.app import session_service
 
-                        service = SessionService(state)
+                        service = session_service(state)
                         try:
                             await service.cancel(sid)
                             await _send_json({"type": "cancelled", "session_id": sid})
