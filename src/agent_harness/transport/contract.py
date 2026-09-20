@@ -31,6 +31,7 @@ _GIT_CONFIG_SECRET = re.compile(
     r"(?i)(-c\s+(?:credential\.[^=\s]+|http\.[^=\s]+|url\.[^=\s]+))="
     r"(?:\"[^\"]*\"|'[^']*'|[^\s]+)"
 )
+_GIT_URL_USERINFO = re.compile(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@")
 _LEGACY_SESSION_ID = "legacy-transport"
 _PATH_ASSIGNMENT = re.compile(r"(?i)(--?(?:path|file|cwd|workdir)|(?:path|file|cwd|workdir))\s*(?:=|:)\s*([^\s]+)")
 _QUOTED_PATH = re.compile(r"(?:\"[^\"]+\"|'[^']+')")
@@ -177,8 +178,11 @@ class SqliteTransportLedger:
                     """
                     UPDATE transport_ledger
                     SET session_id = json_extract(artifact_ref_json, '$.session_id')
-                    WHERE artifact_ref_json IS NOT NULL
-                      AND json_extract(artifact_ref_json, '$.session_id') IS NOT NULL
+                    WHERE json_valid(artifact_ref_json)
+                      AND json_type(artifact_ref_json, '$.session_id') = 'text'
+                      AND json_extract(artifact_ref_json, '$.session_id') GLOB '[A-Za-z0-9_-]*'
+                      AND json_extract(artifact_ref_json, '$.session_id') NOT GLOB '*[^A-Za-z0-9_-]*'
+                      AND length(json_extract(artifact_ref_json, '$.session_id')) > 0
                     """
                 )
             await connection.execute(
@@ -255,8 +259,18 @@ class SqliteTransportLedger:
                 (request_id,),
             )
             rows = await cursor.fetchall()
-        return [
-            TransportLedgerEntry(
+        entries: list[TransportLedgerEntry] = []
+        for row in rows:
+            artifact_ref = None
+            raw_artifact_ref = row["artifact_ref_json"]
+            if raw_artifact_ref is not None:
+                try:
+                    artifact_ref = TransportArtifactRef.model_validate_json(raw_artifact_ref)
+                except (TypeError, ValueError):
+                    # Legacy audit rows may contain malformed or retired artifact refs;
+                    # keep the audit identity readable without reviving unsafe data.
+                    artifact_ref = None
+            entries.append(TransportLedgerEntry(
                 request_id=row["request_id"],
                 session_id=row["session_id"],
                 operation_id=row["operation_id"],
@@ -264,14 +278,10 @@ class SqliteTransportLedger:
                 scope=row["scope"],
                 status=row["status"],
                 duration_ms=row["duration_ms"],
-                artifact_ref=(
-                    TransportArtifactRef.model_validate_json(row["artifact_ref_json"])
-                    if row["artifact_ref_json"] is not None else None
-                ),
+                artifact_ref=artifact_ref,
                 created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+            ))
+        return entries
 
 
 class InMemoryTransportLedger:
@@ -319,6 +329,7 @@ def redact_command_summary(command: str, *, scope: str) -> str:
     redacted = _SECRET_ASSIGNMENT.sub(r"\1=<redacted>", command)
     redacted = _GIT_HEADER_SECRET.sub(r"\1<redacted>", redacted)
     redacted = _GIT_CONFIG_SECRET.sub(r"\1=<redacted>", redacted)
+    redacted = _GIT_URL_USERINFO.sub(r"\1<redacted>@", redacted)
     redacted = _PATH_ASSIGNMENT.sub(r"\1=<scoped>", redacted)
     redacted = _QUOTED_PATH.sub("<scoped>", redacted)
     redacted = _ABSOLUTE_PATH.sub("<scoped>", redacted)
