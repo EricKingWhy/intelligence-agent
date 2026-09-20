@@ -1,6 +1,6 @@
 # 审查台账（review ledger）—— `scripts/check_review_coverage.sh` 的机械输入
 #
-# 机制叙述（两个实测失效案例、两类例外、**信任边界**）单点在 `docs/SDD_WORKFLOW_PROTOCOL.md` §5 第 8 条。
+# 机制叙述（两个实测失效案例、两类例外、**信任边界**）单点在 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条。
 # 本文件只保留**改这个文件必须知道的格式契约**：
 #
 # 审查行：  <日期>\t<范围描述>\t<base>..<tip>
@@ -14,7 +14,8 @@
 #   已被审查行覆盖的条目是死条目，脚本会告警，应删除。
 #
 # **恰好只改本文件**的提交由脚本自动放行，无需声明（机械可验、藏不了代码）。
-# 新增审查后请同时更新 `docs/SDD_TICKET_TRACKER.md` 的批次行（人读）。
+# 新增审查后按落点分工更新人读台账；V3-lite 不设固定批次，不再要求往
+# `docs/SDD_TICKET_TRACKER.md` 的「批次台账」追加（那一节已是历史记录）。
 #
 2026-09-17	批① 两轴批量审查（Standards + Spec，独立子代理；#214/#215/#216）	6f81c6e..fdb9ce3
 2026-09-17	复验 A：#213 的两轴独立审查（该票此前从未被 review 覆盖）	089524a~1..6f81c6e
@@ -51,6 +52,7 @@
 2026-09-20	B-20 / 最终双轴审查（#257 尾部 + #258-#262；#258 late cleanup P2 保留，#262 async load P2 经后续 724e62e 修复）	d7e7a14..2efbeaa
 2026-09-20	#262 async Session.load P2 修复增量复核（两轴 addressed，无新 finding）	2efbeaa..724e62e
 2026-09-20	#256 + 四个既存集成文件两轴独立只读审查（Standards + Spec；fixed point 6a5c2c2，实际审查 tip cbe3b09；历史提示计数错误在纳入前更正；Spec AC2/AC3/AC4 缺口登记，不关单）	6a5c2c2..cbe3b09
+2026-09-20	B-21 两轴审查（Standards + Correctness 各一独立只读子代理；fixed point 7da0290；覆盖 1d7f3a0 merge 冲突解决 + V3-lite 协议升级 + 两个 smoke 脚本）——findings 2×P1 + 2×P2，就地修复 3 条：①V3-lite 重排章节致 scripts/check_review_coverage.sh 三处「§5」指针失效（已改 §7；AGENTS.md:549 / CLAUDE.md:148 同批已对）；②docs/SDD_TICKET_TRACKER.md:106「## 当前状态」实为 2026-09-13 前端 worktree 历史快照且协议版本仍写 v2（已改「历史状态」并标注历史值）；③CLAUDE.md §2 推荐流程仍把 /grill-with-docs、/to-spec、/to-tickets、/wayfinder 当固定命令链，与 AGENTS.md §5 及协议 §7 第 2 条矛盾（已改为固定阶段名 + 指针）。登记不修 1 条：执行摘要（逐票 focused checks / 按风险 review / 集成前完整门禁）跨 6 份文档重复，属 §16.1 单点债务，按 Scope Lock 留给专门清理。正确性轴零 P0/P1：merge 经两侧 diff + tree 扩张核对为真合并，4 个冲突文件双方新增内容均保留，台账机读格式（BOM/CRLF/tab/重复）校验通过；smoke 脚本负向路径实测均 exit 1，成功路径仍从未在真实 Web 服务上执行过（已知缺口，见 637e3b2 的 commit message）	7da0290..637e3b2
 [whitelist]
 e26f785	B-20 coverage result + tracker/phase current-state update（docs-only）
 428b8f1	#260-#262 tracker + phase archive + current focus + review ledger closure（docs-only）
