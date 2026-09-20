@@ -20,6 +20,7 @@ import textwrap
 import threading
 import time
 from unittest.mock import Mock
+from uuid import uuid4
 
 import pytest
 
@@ -430,6 +431,97 @@ def test_docker_exec_create_late_result_is_reaped_after_cancel():
         time.sleep(0.02)
     container.kill.assert_called_once_with()
     container.wait.assert_called_once_with()
+
+
+class _LateAbandonedDockerExecCreate:
+    """`exec_create` 在调用方已经放弃之后才返回结果。"""
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.started = False
+
+    def exec_create(self, container_id, command, **kwargs):
+        self.entered.set()
+        self.release.wait()
+        return {"Id": "exec-late-abandoned"}
+
+    def exec_start(self, exec_id, **kwargs):
+        self.started = True
+        yield (b"should not start", None)
+
+
+def _sandbox_with_production_exec_state(api, container):
+    """构造与 `__init__` 同形的 sandbox（含 `_exec_state` / `_exec_lock`）。
+
+    上一个「late result」用例用 bare `object.__new__` 只设了 `_container` /
+    `_client` / `_exec_lock`，**漏了 `_exec_state`** ⇒ 它命中 `state is None` 的
+    内联捷径，从未覆盖生产一定会走的「排队」路径。这正是 #258 P2 长期未被测到的原因。
+    """
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    # 唯一名字：避免命中类级 WeakValueDictionary / poisoned 状态
+    sandbox._container_name = f"container-late-{uuid4().hex[:8]}"
+    sandbox._exec_state = DockerSandbox._state_for_container(sandbox._container_name)
+    sandbox._exec_lock = sandbox._exec_state.lock
+    return sandbox
+
+
+def test_abandoned_sandbox_reaps_late_exec_without_a_second_exec():
+    """#258 P2：迟到的 exec_create 必须在**没有任何后续 exec()** 时也被回收。
+
+    红证（修复前）：清理只排进 `cleanup_pending`，而唯一的出队点是下一次
+    `exec()` 的开头；sandbox 被遗弃（会话结束、用户不再下命令）时，容器里那个
+    迟到的进程永远不会被停 ⇒ 容器泄漏。本用例全程不发起第二次 exec()。
+    """
+    api = _LateAbandonedDockerExecCreate()
+    container = Mock(id="container-1", status="running")
+    container.kill = Mock()
+    container.wait = Mock()
+    sandbox = _sandbox_with_production_exec_state(api, container)
+    state = sandbox._exec_state
+
+    cancel_event = threading.Event()
+    results: list[ExecResult] = []
+    thread = threading.Thread(
+        target=lambda: results.append(
+            sandbox.exec("sleep 999", timeout=5, cancel_event=cancel_event)
+        )
+    )
+    thread.start()
+    assert api.entered.wait(2)
+    cancel_event.set()
+    thread.join(2)
+    assert not thread.is_alive(), "取消不得等待 Docker API 调用返回"
+    assert len(results) == 1 and results[0].cancelled is True
+    assert not api.started, "迟到的 exec 不得被 start"
+    # 结果还没到达 ⇒ 此刻什么都还没排队（排队发生在 on_late_result 里）
+    assert state.cleanup_pending is False
+    assert not container.kill.called, "结果到达前不得有任何清理"
+
+    api.release.set()  # 迟到结果现在才到达
+    try:
+        # 关键：从这里到用例结束**不发起第二次 exec()**。
+        # 修复前：清理只排进 `cleanup_pending`，而唯一的出队点是下一次 exec()
+        # 的开头 ⇒ 下面这个循环会空转到超时，kill 永不被调用。
+        for _ in range(150):
+            if container.kill.called:
+                break
+            time.sleep(0.02)
+        container.kill.assert_called_once_with()
+        container.wait.assert_called_once_with()
+        for _ in range(100):
+            if not state.cleanup_pending:
+                break
+            time.sleep(0.02)
+        assert state.cleanup_pending is False, "排队的清理没有被消费（永久 pending）"
+        assert state.late_cleanup is None
+    finally:
+        api.release.set()
+        thread.join(2)
 
 
 def test_docker_exec_start_exception_kills_container():
