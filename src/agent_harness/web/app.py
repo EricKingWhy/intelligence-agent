@@ -73,6 +73,7 @@ from agent_harness.storage import (
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.transport import InMemoryTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.context_usage import build_context_usage_payload
@@ -381,6 +382,7 @@ class AppState:
         # 的测试路径。
         self.harness_db = Path(settings.workspace_dir) / "harness.db"
         self.operation_ledger = SqliteOperationLedger(self.harness_db)
+        self.transport_ledger = InMemoryTransportLedger()
         self.checkpoint_store = SqliteCheckpointStore(self.harness_db)
         self.session_meta_store = SqliteSessionMetaStore(self.harness_db)
         self.workspace_registry = WorkspaceRegistry(

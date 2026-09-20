@@ -446,6 +446,32 @@ def test_git_status_reports_porcelain(tmp_path: Path) -> None:
     assert "?? new.py" in body["stdout"]
 
 
+def test_web_git_uses_executor_and_records_transport_audit(tmp_path: Path, monkeypatch) -> None:
+    """Web status traverses ToolExecutor and writes only bounded transport audit facts."""
+    from agent_harness.tooling import ToolExecutor
+
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    _seed(root, "new.py", "print('hi')\n")
+    calls: list[str] = []
+    original_execute = ToolExecutor.execute
+
+    async def spy_execute(self, tool_call, **kwargs):
+        calls.append(tool_call["name"])
+        return await original_execute(self, tool_call, **kwargs)
+
+    monkeypatch.setattr(ToolExecutor, "execute", spy_execute)
+
+    response = client.get(_url(sid, "/git/status"))
+
+    assert response.status_code == 200, response.text
+    assert calls == ["git_status"]
+    assert response.json()["exit_code"] == 0
+    assert "new.py" in response.json()["stdout"]
+
+
 def test_git_status_pathspec_filters(tmp_path: Path) -> None:
     """`pathspec` 过滤（纯路径，不支持通配符——与工具层同一份白名单）。"""
     client = _client(tmp_path)
