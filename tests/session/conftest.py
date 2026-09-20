@@ -36,10 +36,17 @@ def make_session_service(tmp_path: Path):
     需要 AppState / FastAPI 的地方用 `session_service(state)`；这条路径专门服务
     「本用例只关心其中两三个 collaborator」的场景——不碰容器，也就不再依赖它的
     魔法属性。默认值全是替身，用例按需覆盖。
+
+    两个**形状**上的默认值按真实契约给（不是裸 MagicMock）：
+    `get_wiring` 必须是"返回二元组"的 awaitable（调用点解包 `_, wiring = ...`），
+    `run_manager` 的 `get_active` 默认答"没有在途 run"。
+    其余 MagicMock 仍是"什么答什么"——**真值语义要当心**：`MagicMock().read_events(...)`
+    为真会让 `has_session` 恒真、`is_busy` 恒真会把删除判成 409。要断言这些路径的用例
+    必须显式覆盖对应 collaborator。
     """
     defaults = {
         "store": MagicMock(),
-        "run_manager": MagicMock(),
+        "run_manager": MagicMock(get_active=MagicMock(return_value=None)),
         "settings": Settings(_env_file=None, workspace_dir=str(tmp_path)),
         "workspace_registry": MagicMock(),
         "session_meta_store": MagicMock(),
@@ -53,7 +60,7 @@ def make_session_service(tmp_path: Path):
         "harness_db": tmp_path / "harness.db",
         "stores": MagicMock(),
         "ensure_stores": AsyncMock(),
-        "get_wiring": AsyncMock(),
+        "get_wiring": AsyncMock(return_value=(MagicMock(), MagicMock())),
     }
 
     def build(**overrides) -> SessionService:

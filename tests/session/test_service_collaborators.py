@@ -2,14 +2,14 @@
 
 四条证据分别对应：
 
-- **AC1**：构造参数的**名字集合**与 ADR-0040 §2 的字段清单逐字一致——清单在文档里
+- **AC1**：构造参数的**名字集合**与 ADR-0040 §3 的字段清单逐字一致——清单在文档里
   是表格，在这里是 frozenset，两边任一漂移这条就红。
 - **AC2/AC4**：构造不经过容器——普通 duck-typed 对象（不是 `AppState`、不是
   `MagicMock`）即可；少一个 collaborator 属性就是 `AttributeError`，没有魔法兜底；
   domain 源码（`session/service.py` / `session/projects.py`）不再在代码或注解里
   命名 `AppState`。
-- **AC3**：`src` 全树只有**两个**领域服务构造点被允许——各自的定义模块与
-  `web/app.py`（传输侧组合根）。
+- **AC3**：两个领域服务的**构造点都只允许 `web/app.py`**（传输侧组合根）；
+  各自的定义模块只定义类，不构造实例。
 - **AC5**：删掉组合根就会重新造成跨层耦合，所以这里锁住"import domain 不 import
   `agent_harness.web.app`"（子进程实测，不受本进程已导入的模块影响）。
 """
@@ -31,7 +31,7 @@ from agent_harness.web.app import project_service, session_service
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 REPO_ROOT = SRC_ROOT.parent
 
-#: AC1 的字段清单（与 ADR-0040 §2 表格同源；改这里必须同时改文档）。
+#: AC1 的字段清单（与 ADR-0040 §3 表格同源；改这里必须同时改文档）。
 SESSION_SERVICE_COLLABORATORS = frozenset({
     "store",
     "run_manager",
@@ -75,17 +75,26 @@ def _state_for(names: frozenset[str]) -> tuple[_DuckState, dict[str, object]]:
     return _DuckState(**sentinels), sentinels
 
 
+def callee_name(func: ast.expr) -> str:
+    """被调用者的**最后一段名字**：`SessionService(...)` 与 `svc.SessionService(...)` 同判。"""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
 class TestConstructionContract:
     def test_session_service_takes_exactly_the_documented_collaborators(self):
         params = set(inspect.signature(SessionService.__init__).parameters) - {"self"}
         assert params == SESSION_SERVICE_COLLABORATORS, (
-            "构造契约变了：ADR-0040 §2 的字段清单必须同步"
+            "构造契约变了：ADR-0040 §3 的字段清单必须同步"
         )
 
     def test_project_service_takes_exactly_the_documented_collaborators(self):
         params = set(inspect.signature(ProjectService.__init__).parameters) - {"self"}
         assert params == PROJECT_SERVICE_COLLABORATORS, (
-            "构造契约变了：ADR-0040 §2 的字段清单必须同步"
+            "构造契约变了：ADR-0040 §3 的字段清单必须同步"
         )
 
     @pytest.mark.parametrize("cls", [SessionService, ProjectService])
@@ -144,6 +153,8 @@ class TestCompositionRoot:
         守卫的是"适配只有一处"：任何在 router / handler / 领域代码里就地 new 服务的
         写法都会在这里变红，而不是等到某天两份构造悄悄漂移。
         （定义模块自己不构造——只定义类；因此判据是"构造点 ⊆ {组合根}" + 组合根必须在。）
+        属性形式（`svc.SessionService(...)`）与裸名字形式**都**算构造点：本仓两种写法
+        并存（`artifacts.build_read_artifact_store(...)` 是属性形式）。
         """
         composition_root = "agent_harness/web/app.py"
         targets = {"SessionService", "ProjectService"}
@@ -153,12 +164,11 @@ class TestCompositionRoot:
             tree = ast.parse(py.read_text(encoding="utf-8"))
             rel = str(py.relative_to(SRC_ROOT)).replace("\\", "/")
             for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id in targets
-                ):
-                    found[node.func.id].add(rel)
+                if not isinstance(node, ast.Call):
+                    continue
+                called = callee_name(node.func)
+                if called in targets:
+                    found[called].add(rel)
 
         for name, files in found.items():
             assert files == {composition_root}, (
@@ -254,4 +264,11 @@ class TestRuntimeImportBoundary:
         assert runtime_web_imports == [], "领域层出现运行时 web import"
 
         residual = "from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber"
-        assert residual in type_checking_imports, "残余的 RunManager 类型引用不见了（先看 ADR-0040 §4 R1）"
+        type_only_web = {
+            imp for imp in type_checking_imports if "agent_harness.web" in imp
+        }
+        assert type_only_web == {residual}, (
+            "TYPE_CHECKING 下的 web 引用集合变了："
+            f"{sorted(type_only_web)}（ADR-0040 §4 R1 只登记了 RunManager 这一条；"
+            "集合的**增减**都要先更新 ADR/裁决，不能顺手改守卫）"
+        )

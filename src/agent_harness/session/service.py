@@ -1,11 +1,12 @@
-"""SessionService — CLI/Web 共享的会话领域服务（T1 / #131）。
+"""SessionService — 会话领域服务（T1 / #131；消费方见 #248）。
 
-从 Web FastAPI handlers 抽出的 session 生命周期逻辑，统一供 CLI 与 Web 调用。
-HTTP 是传输层，不进本模块；领域异常由调用方翻译为 HTTP/CLI 响应。
+从 Web FastAPI handlers 抽出的 session 生命周期逻辑，**Web 传输层是它唯一的构造方**
+（`web/app.py::session_service()`）；CLI 不构造本类，只从本模块取纯领域函数
+（`inherit_parent_model` 等）。HTTP 是传输层，不进本模块；领域异常由调用方翻译为
+HTTP/CLI 响应。
 
 设计原则（PRD §4）：
 - Web FastAPI handler 只做参数校验 + 调用 SessionService + 响应封装。
-- CLI 直接调用 SessionService（T3 重构后）。
 - 所有真相来自 append-only JSONL + Session 单一事实源（不变量 #22）。
 - Tool 只有一条执行路径（不变量 #7）：审批回传统一汇聚到 ToolExecutor callback。
 
@@ -145,7 +146,8 @@ if TYPE_CHECKING:
     from agent_harness.transport.contract import SqliteTransportLedger
 
     # `RunManager` 的家目前仍在 `web/`（运行管理器 + SSE 订阅者）。本层只在类型
-    # 标注里命名它、**运行时不 import** —— 这是 #248 留下的残余（见 tracker B-26）。
+    # 标注里命名它、**运行时不 import** —— 这是 #248 留下的残余（ADR-0040 §4 R1：
+    # 该模块无任何 web 依赖，本层只用到 4 个方法；守卫锁住"残余不得扩大"）。
     from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
     from agent_harness.workspace.index import WorkspaceIndex
 
