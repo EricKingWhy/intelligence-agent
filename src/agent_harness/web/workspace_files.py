@@ -335,7 +335,7 @@ async def _execute_git_request(
             operation_ledger=state.operation_ledger,
             overflow_handler=overflow_handler,
         )
-        session = Session.load(state.store, session_id)
+        session = await anyio.to_thread.run_sync(Session.load, state.store, session_id)
         tracer = RunTracer(
             get_observability_sink(state.settings),
             session_id=session_id,
