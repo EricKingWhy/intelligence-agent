@@ -3749,3 +3749,18 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 **状态**：子票 `#257`、`#259`–`#262` 与父票 `#237`、`#240`–`#243`、`#245`–`#246` 已逐票核验并关闭；#256/#244 曾在本批初审时关闭，但两轴 review 发现唯一 deadline owner 的 P1 后已撤销关单并恢复 OPEN。每张 GitHub 状态变更均附实现/证据或审查 finding。`#267/#274/#281` 保持 OPEN，本批未领取任何新票。
 
 **证据指针**：B-24 的 #256 缺口、当前 tip 门禁、历史 review ranges、两轴 findings、warnings 与 blocker 边界统一写在 `docs/phase_status/2026-09.md:509`；本节只保留 ticket 状态，不复制机制。
+
+---
+
+### B-25（2026-09-21）：接管在途 #256/#244 deadline ownership 修复（五轮独立审查 → `5db3d43`）
+
+**状态**：`#256`、`#244` **均保持 OPEN**。AC 侧：`#256` 的 AC1–AC4 已在本批有实跑证据（见月档），AC5 属 `#244`；`#244` 的 AC5（预算配置非法值启动期响亮失败）**实测未实现且无豁免**（`src/agent_harness/config.py` 无 sandbox/bash 预算键）。
+
+**待用户裁决（票面未改写，AGENTS.md §9.1.1）**：本批实现「消费 deadline」必然改 `sandbox/local.py` / `sandbox/docker.py`，超出 `#256` 票面 Scope lock「本票只做契约和红证，不修改 Local/Docker 实现」，且 `#244` 冻结决策要求「不要一个提交跨完三层」⇒ `5db3d43` 一个提交跨了三层。这是有意的工程取舍（三者是同一不变量的同一实现面，拆开会出现「谁都不拥有 deadline」的中间态），但**没有用户批准留痕**，故只登记、不擅自改写票面，等用户裁决：追认该偏离并重定 Scope，或要求拆分重做。
+
+**残余（登记，不阻断，需各自单独票）**：
+- `tools/git.py:100-102` 不转发 deadline/`cancel_event`/timeout，且 `GitStatusTool`/`GitDiffTool` 从不读 `timed_out` ⇒ 预算到期仍报 `ok=True`，残余进程无人终止（ADR-0039 L2；实测标记在返回后 5.20 s、带 3 次自动重试时 19.80 s 写出）。
+- `metadata` 不在 `ArtifactOverflowHandler` 扫描面内（一般规则，ADR-0039 L7）；现存同类实例 `multiagent/tools.py:181-188` 的 delegate payload（先于本 ADR、未修）。
+- 全量套件里 `tests/web/test_web_batch51_spec_contract.py::test_approval_queue_gc_after_run_completes` 的顺序 flake（单项重跑 8.49 s 绿，pre-existing，与本批无关）。
+
+**证据指针**：机制正本 `docs/adr/0039-tool-executor-owns-absolute-deadline.md`（D1–D7 + L1–L7）；本批门禁读数、五轮审查的 findings 与处置、红证产物路径、残余与待裁决边界统一写在 `docs/phase_status/2026-09.md` 的 B-25 段；本文件只保留 ticket 状态与待裁决事项，不复制机制。

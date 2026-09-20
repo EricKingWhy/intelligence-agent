@@ -12,8 +12,8 @@
 **⚠ 边界（未获用户批准，如实登记）**：实现"消费 deadline"必然要动 `sandbox/local.py` /
 `sandbox/docker.py`，而 `#256` 票面的 Scope lock 写的是「本票只做契约和红证，不修改
 Local/Docker 实现」，#244 冻结决策另要求「不要一个提交跨完三层」。这个偏离**没有用户批准留痕**：
-按 AGENTS.md §9.1.1 属需要用户裁决的票面变更，本批次把它登记为待决项（tracker 的待裁决
-条目与 #256 的 issue 评论，登记动作在紧随本 ADR 的 docs 提交内），票面**未擅自改写**。
+按 AGENTS.md §9.1.1 属需要用户裁决的票面变更，本批次把它登记为待决项——tracker 的待裁决
+条目随紧随本 ADR 的 docs 提交落地，#256 的 issue 评论已同步发出；票面**未擅自改写**。
 **真实证据**: §4 列了可复算的读数与产物路径（树 = 本文档所在提交）。
 
 ---
@@ -180,7 +180,8 @@ MUTATING ⇒ False），并把沙箱已捕获的 `exit_code / stdout / stderr / 
   **3 次全绿**（4.24 / 4.76 / 4.76 s）；两条替身用例（payload 上限 / 文案同源）同一负载下
   0.33–0.60 s。改用 1.0 秒固定余量的旧写法在同一负载下测得 **3 次红 2 次**。
 - 红证（截断 helper 的退化入参）：删掉早退的副本 `.workbuddy/r5-nolimit/`（`PYTHONPATH` 前置，
-  已确认 `_clip_for_model.__module__` 指向副本、副本内无 `if limit <= 0`）实测
+  已确认 `sys.modules['agent_harness.tools.bash'].__file__` 指向副本、副本内无
+  `if limit <= 0`）实测
   `limit=0` → 47 字符（文案写"保留首 0 + 末 0"，却把 6 字符整串原样返回）、
   `limit=-5` → 50 字符（"首 -3 + 末 -2"，比入参还长）——"截断"变成放大；
   加早退后两条断言进 `test_clip_for_model_degenerate_limit_returns_empty`（红臂读数见上）。
