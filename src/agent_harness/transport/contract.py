@@ -23,9 +23,15 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(--?(?:token|password|passwd|secret|api[-_]?key|authorization)|"
     r"(?:token|password|passwd|secret|api[-_]?key|authorization))\s*(?:=|:)\s*([^\s]+)"
 )
-_GIT_CONFIG_SECRET = re.compile(
-    r"(?i)(-c\s+(?:credential\.[^=\s]+|http\.[^=\s]+|url\.[^=\s]+))=([^\s]+)"
+_GIT_HEADER_SECRET = re.compile(
+    r"(?i)(-c\s+http\.[^=\s]*extraheader\s*=\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s]+(?:\s+[^\s]+)*)"
 )
+_GIT_CONFIG_SECRET = re.compile(
+    r"(?i)(-c\s+(?:credential\.[^=\s]+|http\.[^=\s]+|url\.[^=\s]+))="
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s]+)"
+)
+_LEGACY_SESSION_ID = "legacy-transport"
 _PATH_ASSIGNMENT = re.compile(r"(?i)(--?(?:path|file|cwd|workdir)|(?:path|file|cwd|workdir))\s*(?:=|:)\s*([^\s]+)")
 _QUOTED_PATH = re.compile(r"(?:\"[^\"]+\"|'[^']+')")
 _ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:[\\/]|/)[^\s]+")
@@ -102,6 +108,13 @@ class TransportLedgerEntry(BaseModel):
             raise ValueError("transport ids contain unsafe characters")
         return value
 
+    @field_validator("session_id")
+    @classmethod
+    def _valid_session_id(cls, value: str) -> str:
+        if not SESSION_KEY_PATTERN.fullmatch(value):
+            raise ValueError("session_id must be one safe path segment")
+        return value
+
     @field_validator("created_at")
     @classmethod
     def _valid_timestamp(cls, value: str) -> str:
@@ -157,7 +170,16 @@ class SqliteTransportLedger:
             columns = {row[1] for row in await cursor.fetchall()}
             if "session_id" not in columns:
                 await connection.execute(
-                    "ALTER TABLE transport_ledger ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"
+                    "ALTER TABLE transport_ledger ADD COLUMN session_id TEXT NOT NULL "
+                    f"DEFAULT '{_LEGACY_SESSION_ID}'"
+                )
+                await connection.execute(
+                    """
+                    UPDATE transport_ledger
+                    SET session_id = json_extract(artifact_ref_json, '$.session_id')
+                    WHERE artifact_ref_json IS NOT NULL
+                      AND json_extract(artifact_ref_json, '$.session_id') IS NOT NULL
+                    """
                 )
             await connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_transport_ledger_request "
@@ -295,6 +317,7 @@ def redact_command_summary(command: str, *, scope: str) -> str:
     if not isinstance(scope, str) or not scope.strip():
         raise ValueError("scope must be non-empty")
     redacted = _SECRET_ASSIGNMENT.sub(r"\1=<redacted>", command)
+    redacted = _GIT_HEADER_SECRET.sub(r"\1<redacted>", redacted)
     redacted = _GIT_CONFIG_SECRET.sub(r"\1=<redacted>", redacted)
     redacted = _PATH_ASSIGNMENT.sub(r"\1=<scoped>", redacted)
     redacted = _QUOTED_PATH.sub("<scoped>", redacted)

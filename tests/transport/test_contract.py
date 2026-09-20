@@ -75,6 +75,14 @@ def test_command_summary_redacts_secret_and_raw_paths():
     assert "secret-do-not-log" not in redact_command_summary(
         "git -c credential.helper=secret-do-not-log diff", scope="workspace"
     )
+    assert "Bearer super-secret" not in redact_command_summary(
+        'git -c http.extraheader="Authorization: Bearer super-secret" diff',
+        scope="workspace",
+    )
+    assert "super-secret" not in redact_command_summary(
+        "git -c http.extraheader=Authorization: Bearer super-secret diff",
+        scope="workspace",
+    )
 
 
 def test_generated_git_summary_never_contains_position_pathspec():
@@ -146,6 +154,40 @@ async def test_sqlite_transport_ledger_migrates_existing_table_and_scopes_deleti
     assert await ledger.delete_for_session("session-target") == 1
     assert await ledger.list_for_request("req-target") == []
     assert len(await ledger.list_for_request("req-other")) == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_transport_ledger_migration_uses_artifact_session_owner(tmp_path):
+    database = tmp_path / "harness.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE transport_ledger (
+                request_id TEXT NOT NULL,
+                operation_id TEXT NOT NULL,
+                command_summary TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_ms INTEGER,
+                artifact_ref_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO transport_ledger VALUES
+            ('legacy-request', 'legacy-operation', 'git_status', '.', 'succeeded',
+             NULL, '{"artifact_id":"0123456789abcdef","session_id":"session-owned"}',
+             '2026-09-20T00:00:00+00:00')
+            """
+        )
+        connection.commit()
+
+    ledger = SqliteTransportLedger(database)
+    await ledger.initialize()
+    assert await ledger.delete_for_session("session-owned") == 1
+    assert await ledger.list_for_request("legacy-request") == []
 
 
 @pytest.mark.asyncio
