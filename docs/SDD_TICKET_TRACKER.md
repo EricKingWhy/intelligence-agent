@@ -3746,12 +3746,6 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 
 ### B-24（2026-09-21）：已落地票据逐票核验与状态收口
 
-**范围**：只核验、关单和同步状态；没有启动新实现票。以 GitHub issue AC 为权威，逐票对照实现 commit、历史两轴 review ledger、当前 `main` tip `59f8827` 的聚焦/全量回归。
+**状态**：子票 `#257`、`#259`–`#262` 与父票 `#237`、`#240`–`#243`、`#245`–`#246` 已逐票核验并关闭；#256/#244 曾在本批初审时关闭，但两轴 review 发现唯一 deadline owner 的 P1 后已撤销关单并恢复 OPEN。每张 GitHub 状态变更均附实现/证据或审查 finding。`#267/#274/#281` 保持 OPEN，本批未领取任何新票。
 
-**关闭结果**：先关闭仍 OPEN 的已完成子票 `#256`、`#257`、`#259`、`#260`、`#261`、`#262`，再关闭父票 `#237`、`#240`、`#241`、`#242`、`#243`、`#244`、`#245`、`#246`。每张 GitHub 关单 comment 均附准确实现 commit、AC 映射、测试、review coverage 与残余；历史条目中的「保持 OPEN」是当时事实，不回写改造。
-
-**#256 旧缺口闭合**：`2776c4e` 冻结 Bash 60 秒有效预算；#257 的 `f434713` / `d7e7a14` / `f735a1c` 补 Local 10–60 秒、Executor→Bash→Sandbox 转发、timeout/cancel 进程树和 partial output；#258 的 `90842cc` / `740c53c` / `50297f6` 补 Docker 同形语义、late `exec_create` 自驱动回收与 fail-closed cleanup；MUTATING timeout 不自动 retry 和非零 exit contract 由既有 Executor/Bash 判别测试锁定。ToolExecutor 拥有预算值与 retry 决策，Sandbox 使用收到的同一预算负责后端清理，不存在 Bash 路径上的第二个独立预算值。覆盖来自 B-19 `ae14ee4..d7e7a14`、B-20 `d7e7a14..2efbeaa`、B-23 `37ca5815..d48d924d`。
-
-**本次验证**：closure focused matrix **350 passed / 10 skipped / 1 warning**；全量 **2622 passed / 13 skipped / 42 deselected / 0 failed / 17 warnings**；`ruff check .` clean；修改前 `git diff --check` clean。Warnings 为既有 pytest marker、未 await coroutine 与 gRPC destructor/unraisable 警告，本批不改产品代码，按 Scope Lock 如实登记、不顺手修。
-
-**边界**：`#242` 关闭只解除 `#274` blocker，`#243` 关闭只解除 `#248` blocker；本批未领取 #248、#263–#265、#274 或 #281。父票 `#267` 保持 OPEN，`#274/#281` 保持 OPEN/未开工。
+**证据指针**：B-24 的 #256 缺口、当前 tip 门禁、历史 review ranges、两轴 findings、warnings 与 blocker 边界统一写在 `docs/phase_status/2026-09.md:509`；本节只保留 ticket 状态，不复制机制。

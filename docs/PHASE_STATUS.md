@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前主线：架构整改剩余 #247、#248 与子票 #263–#265**（排除前端 #236、性能线 #267/#274/#281）。2026-09-21 B-24 已逐票核验并关闭已落地的父票 `#237`、`#240`–`#246` 及此前仍 OPEN 的已完成子票 `#256`、`#257`、`#259`–`#262`；#256 的旧证据缺口已用 #257/#258 的 Local/Docker deadline 转发、timeout/cancel、partial output、进程树与 retry 证据逐项闭合。当前 tip `59f8827` 的关单聚焦矩阵 **350 passed / 10 skipped**，全量 **2622 passed / 13 skipped / 42 deselected / 0 failed**，Ruff 与 diff clean。`#242` 关闭仅解除 `#274` blocker，`#243` 关闭仅解除 `#248` blocker；本批**未启动任何新票**，`#267` 继续保持 OPEN，`#274/#281` 保持 OPEN/未开工。
+**当前主线：架构整改剩余 #244/#256、#247、#248 与子票 #263–#265**（排除前端 #236、性能线 #267/#274/#281）。B-24 已完成其余已落地票据的状态收口；#244/#256 因 review 发现 deadline ownership P1 而恢复 OPEN。本批未启动任何新票，详情见下方最新索引。
 
 ## 更新日志（索引）
 
@@ -52,7 +52,7 @@
 
 ### 最近条目（最新在上）
 
-- 2026-09-21（B-24，已落地票据收口）：逐票对照 GitHub AC、实现 commit、历史两轴 review ledger 与当前 tip 回归，关闭父票 **#237、#240–#246** 及仍 OPEN 的已完成子票 **#256、#257、#259–#262**。#256 的 AC2/AC3/AC4 由 B-19/B-20/B-23 后续证据补齐；每张关单 comment 均附实现、测试、review coverage 与残余。当前 `59f8827` 聚焦 **350 passed / 10 skipped**，全量 **2622 passed / 13 skipped / 42 deselected / 0 failed**，Ruff/diff clean。未启动 #248/#247；#267、#274、#281 保持 OPEN。
+- 2026-09-21（B-24，已落地票据收口 + 两轴 review）：关闭父票 **#237、#240–#243、#245–#246** 及子票 **#257、#259–#262**；Spec review 判定 #256/#244 的唯一 deadline owner 未满足，已撤销关单并恢复 OPEN。未启动新票；详情见 `docs/phase_status/2026-09.md:509`。
 - 2026-09-20（B-23）：**`#258` P2 修复 + 软链夹具根因化 + smoke 成功路径首次跑通 +「Web/SSE 大规模失败」根因结案**。① `#258` late-cleanup P2：被遗弃的 sandbox 不再依赖「下一次 `exec()`」才回收迟到 `exec_create` 进程（改为排队即起 daemon 线程 drain；红证由作者与审查者各独立复现 `Called 0 times` @3.85 s / 4.08 s → 0.29 s 绿）。② 软链夹具：夹具 `symlink_to` 后**无条件 `return True`** + 沙箱 `os.symlink` 静默 no-op ⇒ 5–6 条假红；改为**核验存在**、不成立走 `mklink /J` 回退（**不 skip**）。③ smoke 成功路径：两个 `.mjs` 在**活服务**上 **RC=0**，数据足迹硬删回收（35 → 36 → 35）。④ **root cause 结案**：`sse_starlette` 的**进程级单向闩锁** `AppStatus.should_exit` ⇒ 每次 SSE 响应 200 + 零 `data:` 帧；修复只落测试隔离层，**不改产品代码**；**闩锁复位后全量 2635 / 0 failed**（修前 67 / 68；探针 131 + 唯一一次 `FLIP`）；终局树 2635 / 3，3 条全为 `tests/evaluation/*` 的 FS 守卫 `SystemExit(1)`（与本批无关）。机制正本：`docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md`；明细见 `2026-09.md` B-23 段。**集成/关单**：链 tip `c6144d4` 覆盖闸门 exit 0、`main` `37ca581..c6144d4` 已 push、`#258` 已关单。
 - 2026-09-20（集成：性能与交互流畅度硬化线并入 main）：**merge commit `080cc1464af837d3bb1547bc7900e7c8d4580cca`**——`workbuddy/main-f049fadd`（67 提交，tip `8bb947e`）并入 `2ea205a`；仅 3 个 docs 台账文件冲突、**零代码冲突**（两线改动面交集实测恰为这 3 个文件）。两轴独立只读复核 7/7 PASS，findings 就地修复 3 条（2×P2 docs + 1×P3 EOF 空行）。**同环境四组对照**：main 工作树 69 failed / main 全新检出 117 failed / **合并树全新检出 7 failed / 2625 passed**；另把本线在 `src/` 下仅改的 2 个文件单独贴回 main 即 117 → 7（修复 110 条、零新增，失败集与合并树逐条相同）⇒ 归因闭合到 B7/#275。~~该批 Web/SSE 失败的性质 = 全量串跑的用例间状态泄漏（单模块跑全绿）~~。**【⚠ 2026-09-20 晚 B-23 更正：本条「117 基线 / 修复 110 条 / 归因闭合到 B7/#275 /『用例间状态泄漏』定性」四项已撤销或更正，明细见 `2026-09.md` 同期 ⚠ 更正与 B-23 段。】** 明细见 `2026-09.md` 2026-09-20 段。
 - 2026-09-20（B-20 / #258–#262）：**最终双轴审查与 #262 两项最小修复**——审查 `d7e7a14..2efbeaa`；#258 late cleanup P2 保留 OPEN；#262 legacy ref owner P1 → `2efbeaa`，async Session.load P2 → `724e62e`，增量复核无新 finding。focused 85 / JSONL 10 / transport 13 passed，Ruff/diff clean，coverage exit 0；全量仍沿用最近一次红证，集成/关单未完成。详见月度归档 2026-09-20 段。
