@@ -21,6 +21,7 @@ import inspect
 import subprocess
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -82,6 +83,22 @@ def callee_name(func: ast.expr) -> str:
     if isinstance(func, ast.Attribute):
         return func.attr
     return ""
+
+
+def imported_module(node: ast.Import | ast.ImportFrom) -> str:
+    """import 语句指向的模块名（`ast.Import` 可能一次导多个，取第一个）。"""
+    if isinstance(node, ast.ImportFrom):
+        return node.module or ""
+    return node.names[0].name if node.names else ""
+
+
+def is_web_module(module: str) -> bool:
+    """是否属 `agent_harness.web` 包**本身**。
+
+    按完整模块路径判，不用子串：`agent_harness.websearch` 是另一个模块（能力层），
+    `"agent_harness.web" in module` 会把它误当传输层。
+    """
+    return module == "agent_harness.web" or module.startswith("agent_harness.web.")
 
 
 class TestConstructionContract:
@@ -234,41 +251,64 @@ class TestRuntimeImportBoundary:
             f"导入领域层时被拖入了 web 模块：\n{proc.stdout}\n{proc.stderr}"
         )
 
+    #: 领域文件的 web 类型引用**登记表**（ADR-0040 §4 R1）：集合必须恰等于这里。
+    #: 多一条 = 残余悄悄扩大；少一条 = 残余已消除（那时要同时更新 ADR 与这条判据，
+    #: 不能顺手改守卫）。两个领域服务都扫：`projects.py` 今天是空集。
+    EXPECTED_TYPE_ONLY_WEB_IMPORTS: ClassVar[dict[str, set[str]]] = {
+        "agent_harness/session/service.py": {
+            "from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber"
+        },
+        "agent_harness/session/projects.py": set(),
+    }
+
     def test_types_only_reference_to_web_is_the_documented_residual(self):
         """残余的**唯一**一条 `web` 引用必须仍是 TYPE_CHECKING 下的 `RunManager`。
 
         ADR-0040 §4 R1 记着它：`RunManager` 的模块家在 `web/`（无 HTTP 依赖，
-        仅 4 个方法被用到）。哪天它多了新的 web 类型引用，或运行时真的被 import，
-        这条守卫就红——那时应当先做决策，而不是让残余悄悄扩大。
+        仅 4 个方法被用到）。它是**待裁决**项，所以判据是"集合恰等于登记值"而不是
+        "包含登记值"——残余的增减都要先改决策。
+        `import agent_harness.web.app` 与 `from agent_harness.web import app` 语义等价，
+        两种写法一起收（`ast.Import` / `ast.ImportFrom`），否则强度就取决于写法；
+        模块名按完整路径判（`is_web_module`），兄弟模块 `agent_harness.websearch` 不算。
         """
-        text = (SRC_ROOT / "agent_harness/session/service.py").read_text(encoding="utf-8")
-        tree = ast.parse(text)
+        for rel, residual in self.EXPECTED_TYPE_ONLY_WEB_IMPORTS.items():
+            tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"))
 
-        # 先收 TYPE_CHECKING 块内的 import 节点（含嵌套），运行时 import 是剩下的那些。
-        type_checking_nodes: set[int] = set()
-        type_checking_imports: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
-                for inner in ast.walk(node):
-                    type_checking_nodes.add(id(inner))
-                    if isinstance(inner, ast.ImportFrom):
-                        type_checking_imports.add(ast.unparse(inner))
+            # 先收 TYPE_CHECKING 块内的 import 节点（含嵌套），运行时 import 是剩下的那些。
+            type_checking_nodes: set[int] = set()
+            type_checking_imports: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+                    for inner in ast.walk(node):
+                        type_checking_nodes.add(id(inner))
+                        if isinstance(inner, (ast.Import, ast.ImportFrom)) and is_web_module(
+                            imported_module(inner)
+                        ):
+                            type_checking_imports.add(ast.unparse(inner))
 
-        runtime_web_imports = [
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-            and (node.module or "").startswith("agent_harness.web")
-            and id(node) not in type_checking_nodes
-        ]
-        assert runtime_web_imports == [], "领域层出现运行时 web import"
+            runtime_web_imports = [
+                node.lineno
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+                and is_web_module(imported_module(node))
+                and id(node) not in type_checking_nodes
+            ]
+            assert runtime_web_imports == [], f"{rel} 出现运行时 web import"
 
-        residual = "from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber"
-        type_only_web = {
-            imp for imp in type_checking_imports if "agent_harness.web" in imp
-        }
-        assert type_only_web == {residual}, (
-            "TYPE_CHECKING 下的 web 引用集合变了："
-            f"{sorted(type_only_web)}（ADR-0040 §4 R1 只登记了 RunManager 这一条；"
-            "集合的**增减**都要先更新 ADR/裁决，不能顺手改守卫）"
-        )
+            assert type_checking_imports == residual, (
+                f"{rel} 的 TYPE_CHECKING web 引用集合变了：{sorted(type_checking_imports)}"
+                f"（登记值 {sorted(residual)}；增减都要先更新 ADR-0040 §4 R1 / 裁决，"
+                "不能顺手改守卫）"
+            )
+
+    def test_web_module_match_is_not_a_substring_test(self):
+        """钉住判据的**精度**：`agent_harness.websearch` 是兄弟模块，不是传输层。
+
+        子串判据（`"agent_harness.web" in module`）会给它误报——那时守卫的"绿"
+        就不再等于"领域没碰传输层"，而是"领域没碰名字里带 web 的东西"。
+        """
+        assert is_web_module("agent_harness.web")
+        assert is_web_module("agent_harness.web.app")
+        assert not is_web_module("agent_harness.websearch")
+        assert not is_web_module("agent_harness.websearch.tool")
+        assert not is_web_module("my_agent_harness.web")
