@@ -46,6 +46,10 @@
 2026-09-19	B-18 两轴批量审查（Standards + Correctness；T09/#254 + T10/#255；fixed point 1ba46a2；Correctness zero findings；Standards 1xP2 + 1xP3）	1ba46a2..a47d855
 2026-09-19	B-18 findings 修复（Tracker/归档/Recovery 注释收敛为决策指针；Catalog 注册测试收紧为精确 GET-only）	a47d855..ae14ee4
 2026-09-19	B-19 两轴批量审查与修复复验（Standards + Correctness；fixed point ae14ee4；覆盖 #256/#257 实现、测试、交付记录；首轮 findings 经 d7e7a14 修复）	ae14ee4..d7e7a14
+2026-09-20	#262 最后增量双轴审查（Standards + Correctness/Spec；legacy artifact owner P1 经 2efbeaa 修复）	63f508f..eabbd6f
+2026-09-20	#262 legacy owner P1 修复增量复核（两轴 addressed，无新 finding）	eabbd6f..2efbeaa
+2026-09-20	B-20 / 最终双轴审查（#257 尾部 + #258-#262；#258 late cleanup P2 保留，#262 async load P2 经后续 724e62e 修复）	d7e7a14..2efbeaa
+2026-09-20	#262 async Session.load P2 修复增量复核（两轴 addressed，无新 finding）	2efbeaa..724e62e
 [whitelist]
 dd92253	B-19 收批落点记录（tracker + PHASE_STATUS + 归档 + 审查台账，docs-only）
 db81e5e	B-16 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引 + 本台账审查行/修复行 + 删 2 条死白名单，docs-only）
