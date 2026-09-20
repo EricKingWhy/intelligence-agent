@@ -217,15 +217,20 @@ async def test_sqlite_transport_ledger_migration_ignores_malformed_or_invalid_ow
             [
                 ("bad-json", "op-bad", "git_status", ".", "started", None, "{", "2026-09-20T00:00:00+00:00"),
                 ("bad-owner", "op-owner", "git_status", ".", "started", None, '{"session_id":"../escape"}', "2026-09-20T00:00:00+00:00"),
+                ("bad-artifact", "op-artifact", "git_status", ".", "started", None, '{"artifact_id":"../../bad","session_id":"session-owned"}', "2026-09-20T00:00:00+00:00"),
+                ("retired-policy", "op-policy", "git_status", ".", "started", None, '{"artifact_id":"0123456789abcdef","session_id":"session-owned","retention":"forever"}', "2026-09-20T00:00:00+00:00"),
             ],
         )
         connection.commit()
 
     ledger = SqliteTransportLedger(database)
     await ledger.initialize()
-    assert await ledger.list_for_request("bad-json")
-    assert await ledger.list_for_request("bad-owner")
-    assert await ledger.delete_for_session("legacy-transport") == 2
+    for request_id in ("bad-json", "bad-owner", "bad-artifact", "retired-policy"):
+        [entry] = await ledger.list_for_request(request_id)
+        assert entry.session_id == "legacy-transport"
+        assert entry.artifact_ref is None
+    assert await ledger.delete_for_session("session-owned") == 0
+    assert await ledger.delete_for_session("legacy-transport") == 4
 
 
 @pytest.mark.asyncio

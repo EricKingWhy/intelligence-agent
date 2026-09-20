@@ -174,17 +174,19 @@ class SqliteTransportLedger:
                     "ALTER TABLE transport_ledger ADD COLUMN session_id TEXT NOT NULL "
                     f"DEFAULT '{_LEGACY_SESSION_ID}'"
                 )
-                await connection.execute(
-                    """
-                    UPDATE transport_ledger
-                    SET session_id = json_extract(artifact_ref_json, '$.session_id')
-                    WHERE json_valid(artifact_ref_json)
-                      AND json_type(artifact_ref_json, '$.session_id') = 'text'
-                      AND json_extract(artifact_ref_json, '$.session_id') GLOB '[A-Za-z0-9_-]*'
-                      AND json_extract(artifact_ref_json, '$.session_id') NOT GLOB '*[^A-Za-z0-9_-]*'
-                      AND length(json_extract(artifact_ref_json, '$.session_id')) > 0
-                    """
+                cursor = await connection.execute(
+                    "SELECT rowid, artifact_ref_json FROM transport_ledger "
+                    "WHERE artifact_ref_json IS NOT NULL"
                 )
+                for rowid, raw_artifact_ref in await cursor.fetchall():
+                    try:
+                        artifact_ref = TransportArtifactRef.model_validate_json(raw_artifact_ref)
+                    except (TypeError, ValueError):
+                        continue
+                    await connection.execute(
+                        "UPDATE transport_ledger SET session_id = ? WHERE rowid = ?",
+                        (artifact_ref.session_id, rowid),
+                    )
             await connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_transport_ledger_request "
                 "ON transport_ledger(request_id, created_at)"
