@@ -91,6 +91,7 @@ local 的 `newline=""` 字节透传（CRLF 不被折叠）与 docker 的容器�
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -100,6 +101,8 @@ import anyio
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from agent_harness.observability import get_observability_sink
+from agent_harness.observability.tracer import RunTracer
 from agent_harness.session import Session
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.service import SessionService
@@ -179,7 +182,6 @@ class GitCommandResult(BaseModel):
     exit_code: int
     stdout: str
     stderr: str
-    artifact_ref: str | None = None
 
 
 async def _session_sandbox(
@@ -289,11 +291,11 @@ async def _execute_git_request(
     request_id = f"http-{uuid4().hex}"
     operation_id = f"transport-{uuid4().hex}"
     started = perf_counter()
-    audit_command = f"{tool_name} path=<scoped>"
+    await state.ensure_stores()
     started_entry = new_transport_entry(
         request_id=request_id,
         operation_id=operation_id,
-        command=audit_command,
+        command=command,
         scope=scope or ".",
         status=TransportStatus.STARTED,
     )
@@ -307,13 +309,16 @@ async def _execute_git_request(
     )
     registry.register(tool)
     selection = select_artifact_store(state.settings, session_id)
-    overflow_handler = None
-    if selection is not None:
-        overflow_handler = ArtifactOverflowHandler(
-            selection.store,
-            state.settings.artifact_overflow_chars,
-            read_tool_name=selection.read_tool(selection.store).name,
-        )
+    overflow_handler = ArtifactOverflowHandler(
+        selection.store if selection is not None else None,
+        state.settings.artifact_overflow_chars,
+        read_tool_name=(
+            selection.read_tool(selection.store).name
+            if selection is not None
+            else "read_artifact"
+        ),
+        fail_open=False,
+    )
     executor = ToolExecutor(
         registry,
         policy=PermissionPolicy.READ_ONLY,
@@ -321,11 +326,20 @@ async def _execute_git_request(
         overflow_handler=overflow_handler,
     )
     session = Session.load(state.store, session_id)
+    tracer = RunTracer(
+        get_observability_sink(state.settings),
+        session_id=session_id,
+        run_id=operation_id,
+        agent_id="web",
+        user_input=command,
+    )
+    tracer.run_started()
     try:
         execution = await executor.execute(
             {"id": operation_id, "name": tool_name, "args": args},
             operation_context=OperationContext(session_id=session_id),
             session=session,
+            tracer=tracer,
         )
         result = execution.result
         data = result.data or {}
@@ -340,23 +354,38 @@ async def _execute_git_request(
         await state.transport_ledger.append(new_transport_entry(
             request_id=request_id,
             operation_id=operation_id,
-            command=audit_command,
+            command=command,
             scope=scope or ".",
             status=status,
             duration_ms=round((perf_counter() - started) * 1000),
             artifact_ref=terminal_ref,
         ))
+        if result.ok:
+            tracer.run_completed(result.message)
+        else:
+            tracer.run_failed(result.message)
         return GitCommandResult(
             exit_code=int(data.get("exit_code", -1)),
             stdout=str(data.get("stdout", "")),
             stderr=str(data.get("stderr", "")),
-            artifact_ref=artifact_id,
         )
-    except BaseException:
+    except asyncio.CancelledError:
         await state.transport_ledger.append(new_transport_entry(
             request_id=request_id,
             operation_id=operation_id,
-            command=audit_command,
+            command=command,
+            scope=scope or ".",
+            status=TransportStatus.CANCELLED,
+            duration_ms=round((perf_counter() - started) * 1000),
+        ))
+        tracer.run_failed("cancelled")
+        raise
+    except BaseException:
+        tracer.run_failed("failed")
+        await state.transport_ledger.append(new_transport_entry(
+            request_id=request_id,
+            operation_id=operation_id,
+            command=command,
             scope=scope or ".",
             status=TransportStatus.FAILED,
             duration_ms=round((perf_counter() - started) * 1000),

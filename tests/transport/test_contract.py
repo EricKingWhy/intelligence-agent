@@ -7,6 +7,7 @@ from agent_harness.transport import (
     ArtifactAccessPolicy,
     ArtifactRetention,
     InMemoryTransportLedger,
+    SqliteTransportLedger,
     TransportArtifactRef,
     TransportLedgerEntry,
     TransportStatus,
@@ -74,6 +75,20 @@ def test_entry_redacts_direct_construction_and_caps_summary():
 
     assert "secret" not in entry.command_summary
     assert len(entry.command_summary) <= 500
+
+
+@pytest.mark.asyncio
+async def test_sqlite_transport_ledger_survives_reopen(tmp_path):
+    first = SqliteTransportLedger(tmp_path / "harness.db")
+    await first.initialize()
+    entry = _entry(artifact_ref=TransportArtifactRef(
+        artifact_id="0123456789abcdef", session_id="session-1"
+    ))
+    await first.append(entry)
+
+    reopened = SqliteTransportLedger(tmp_path / "harness.db")
+    await reopened.initialize()
+    assert await reopened.list_for_request("req-1") == [entry]
 
 
 @pytest.mark.asyncio

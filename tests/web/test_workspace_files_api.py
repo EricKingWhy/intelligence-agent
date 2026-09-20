@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -446,30 +447,52 @@ def test_git_status_reports_porcelain(tmp_path: Path) -> None:
     assert "?? new.py" in body["stdout"]
 
 
-def test_web_git_uses_executor_and_records_transport_audit(tmp_path: Path, monkeypatch) -> None:
-    """Web status traverses ToolExecutor and writes only bounded transport audit facts."""
-    from agent_harness.tooling import ToolExecutor
-
+def test_web_git_records_durable_transport_audit(tmp_path: Path) -> None:
+    """Web status records a bounded, durable audit without copying command output."""
     client = _client(tmp_path)
     sid = _create_session(client)
     root = _root(client, sid)
     _init_git_repo(client, sid)
     _seed(root, "new.py", "print('hi')\n")
-    calls: list[str] = []
-    original_execute = ToolExecutor.execute
-
-    async def spy_execute(self, tool_call, **kwargs):
-        calls.append(tool_call["name"])
-        return await original_execute(self, tool_call, **kwargs)
-
-    monkeypatch.setattr(ToolExecutor, "execute", spy_execute)
 
     response = client.get(_url(sid, "/git/status"))
 
     assert response.status_code == 200, response.text
-    assert calls == ["git_status"]
     assert response.json()["exit_code"] == 0
-    assert "new.py" in response.json()["stdout"]
+    with sqlite3.connect(Path(client.app.state.agent.harness_db)) as connection:
+        rows = connection.execute(
+            "SELECT command_summary, status FROM transport_ledger ORDER BY rowid"
+        ).fetchall()
+    assert rows[0][1] == "started"
+    assert rows[1][1] == "succeeded"
+    assert "git status" in rows[0][0]
+    assert "new.py" not in rows[0][0]
+
+
+def test_web_git_pathspec_uses_one_scope_and_not_dot_union(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A checked path is the only Git scope; adding dot would widen pathspec union."""
+    from agent_harness.tools.git import GitStatusTool
+
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    _seed(root, "a.py", "a\n")
+    seen_scopes: list[str] = []
+    original_init = GitStatusTool.__init__
+
+    def spy_init(self, sandbox, *, scope=""):
+        seen_scopes.append(scope)
+        original_init(self, sandbox, scope=scope)
+
+    monkeypatch.setattr(GitStatusTool, "__init__", spy_init)
+
+    response = client.get(_url(sid, "/git/status"), params={"pathspec": "a.py"})
+
+    assert response.status_code == 200, response.text
+    assert seen_scopes == [""]
 
 
 def test_git_status_pathspec_filters(tmp_path: Path) -> None:

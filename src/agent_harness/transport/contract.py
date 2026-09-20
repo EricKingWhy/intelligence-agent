@@ -7,10 +7,13 @@ ToolExecutor. It deliberately does not emit SessionEvents or execute commands.
 from __future__ import annotations
 
 import re
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Protocol
 
+import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
@@ -105,8 +108,102 @@ class TransportLedger(Protocol):
     async def list_for_request(self, request_id: str) -> list[TransportLedgerEntry]: ...
 
 
+_TRANSPORT_LEDGER_DDL = """
+CREATE TABLE IF NOT EXISTS transport_ledger (
+    request_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    command_summary TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('started', 'succeeded', 'failed', 'cancelled')),
+    duration_ms INTEGER,
+    artifact_ref_json TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+
+
+@asynccontextmanager
+async def _connect(database_path: Path):
+    connection = await aiosqlite.connect(database_path)
+    try:
+        await connection.execute("PRAGMA busy_timeout=10000")
+        yield connection
+    finally:
+        await connection.close()
+
+
+class SqliteTransportLedger:
+    """Durable append-only transport audit in the application SQLite database."""
+
+    def __init__(self, database_path: str | Path) -> None:
+        self.database_path = Path(database_path)
+
+    async def initialize(self) -> None:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        async with _connect(self.database_path) as connection:
+            await connection.execute("PRAGMA journal_mode=WAL")
+            await connection.execute(_TRANSPORT_LEDGER_DDL)
+            await connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transport_ledger_request "
+                "ON transport_ledger(request_id, created_at)"
+            )
+            await connection.commit()
+
+    async def append(self, entry: TransportLedgerEntry) -> None:
+        async with _connect(self.database_path) as connection:
+            await connection.execute(
+                """
+                INSERT INTO transport_ledger (
+                    request_id, operation_id, command_summary, scope, status,
+                    duration_ms, artifact_ref_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.request_id,
+                    entry.operation_id,
+                    entry.command_summary,
+                    entry.scope,
+                    entry.status.value,
+                    entry.duration_ms,
+                    entry.artifact_ref.model_dump_json()
+                    if entry.artifact_ref is not None else None,
+                    entry.created_at,
+                ),
+            )
+            await connection.commit()
+
+    async def list_for_request(self, request_id: str) -> list[TransportLedgerEntry]:
+        async with _connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                """
+                SELECT request_id, operation_id, command_summary, scope, status,
+                       duration_ms, artifact_ref_json, created_at
+                FROM transport_ledger WHERE request_id = ? ORDER BY rowid
+                """,
+                (request_id,),
+            )
+            rows = await cursor.fetchall()
+        return [
+            TransportLedgerEntry(
+                request_id=row["request_id"],
+                operation_id=row["operation_id"],
+                command_summary=row["command_summary"],
+                scope=row["scope"],
+                status=row["status"],
+                duration_ms=row["duration_ms"],
+                artifact_ref=(
+                    TransportArtifactRef.model_validate_json(row["artifact_ref_json"])
+                    if row["artifact_ref_json"] is not None else None
+                ),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+
 class InMemoryTransportLedger:
-    """Small fake for contract tests; production wiring chooses its adapter later."""
+    """Small fake for contract tests; production wiring uses a durable adapter."""
 
     def __init__(self) -> None:
         self._entries: list[TransportLedgerEntry] = []

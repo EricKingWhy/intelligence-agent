@@ -33,25 +33,26 @@ class ArtifactOverflowHandler(OverflowHandler):
     """当 tool result 超过 ``overflow_chars`` 阈值时，将原始内容外置到
     ``ArtifactStore``，并在 session 中保留截断摘要 + ``artifact_ref``。
 
-    T5 (#135): 如果存储不可用（网络故障、MinIO 宕机等），handler 会优雅降级
-    (fail-open)：保留原始未截断的 tool result 在 session 中，不外置产物，
-    不发出 ``ARTIFACT_EXTERNALIZED`` 事件。这确保了工具执行不会因为对象存储
-    故障而失败——模型仍然能看到完整的输出。
+    默认保持 T5 (#135) 的 fail-open 降级；调用方可用 ``fail_open=False``
+    要求输出必须进入受控 ArtifactStore，适用于 transport audit 等不能把大输出
+    写入 Operation Ledger 的边界。
     """
 
     def __init__(
         self,
-        store: ArtifactStore,
+        store: ArtifactStore | None,
         overflow_chars: int = 2000,
         *,
         read_tool_name: str = "read_artifact",
         externalize_event_type: str = ARTIFACT_EXTERNALIZED,
+        fail_open: bool = True,
     ) -> None:
         if overflow_chars <= 0:
             raise ValueError("overflow_chars must be positive")
         self._store = store
         self._overflow_chars = overflow_chars
         self._externalize_event_type = externalize_event_type
+        self._fail_open = fail_open
         # 摘要里的读回提示必须点名**与本 store 配对的那个工具**（#186 AC4）：
         # 配对关系由 `storage/artifact_select.py` 决定——S3 配 `inspect_artifact`，
         # MinIO / Local 配 `read_artifact`。此前这里写死 `read_artifact`，于是
@@ -95,12 +96,18 @@ class ArtifactOverflowHandler(OverflowHandler):
 
         # T5 (#135): graceful degradation — if the store is unavailable,
         # keep the original (untruncated) tool result in-session.
+        if self._store is None:
+            if self._fail_open:
+                return result, []
+            raise RuntimeError("Artifact store is required for oversized tool output")
         try:
             artifact = await self._store.save(
                 session.session_id, content, mime_type=mime_type,
                 source_tool=tool_name, tool_call_id=tool_call_id,
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
+            if not self._fail_open:
+                raise RuntimeError("Artifact store failed for oversized tool output") from error
             logger.warning(
                 "Artifact store unavailable, keeping raw tool result "
                 "in-session (fail-open): %s",
