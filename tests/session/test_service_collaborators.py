@@ -85,11 +85,17 @@ def callee_name(func: ast.expr) -> str:
     return ""
 
 
-def imported_module(node: ast.Import | ast.ImportFrom) -> str:
-    """import 语句指向的模块名（`ast.Import` 可能一次导多个，取第一个）。"""
+def imported_modules(node: ast.Import | ast.ImportFrom) -> list[str]:
+    """import 语句**涉及的全部**模块名（用于精确判断是否属 `agent_harness.web`）。
+
+    只取第一个别名、或只看 `node.module` 都会漏两种等价写法（审查 findings）：
+    `from agent_harness import web`（web 在 names 里、不在 module 里）与
+    `import a, b` 里 web 排在第二个。
+    """
     if isinstance(node, ast.ImportFrom):
-        return node.module or ""
-    return node.names[0].name if node.names else ""
+        base = node.module or ""
+        return [base, *(f"{base}.{alias.name}" for alias in node.names)]
+    return [alias.name for alias in node.names]
 
 
 def is_web_module(module: str) -> bool:
@@ -99,6 +105,20 @@ def is_web_module(module: str) -> bool:
     `"agent_harness.web" in module` 会把它误当传输层。
     """
     return module == "agent_harness.web" or module.startswith("agent_harness.web.")
+
+
+def is_type_checking_test(test: ast.expr) -> bool:
+    """`if TYPE_CHECKING:` 的**正向**形态。
+
+    子串判据（`"TYPE_CHECKING" in ast.unparse(test)`）会把 `if not TYPE_CHECKING:`
+    也算进去，那等于把一条**真运行时** import 当成类型引用豁免掉（审查 findings）。
+    只认裸名字与属性两种正向写法，其余（`not …`、`… and …`）一律不算。
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
 
 
 class TestConstructionContract:
@@ -268,9 +288,16 @@ class TestRuntimeImportBoundary:
         仅 4 个方法被用到）。它是**待裁决**项，所以判据是"集合恰等于登记值"而不是
         "包含登记值"——残余的增减都要先改决策。
         `import agent_harness.web.app` 与 `from agent_harness.web import app` 语义等价，
-        两种写法一起收（`ast.Import` / `ast.ImportFrom`），否则强度就取决于写法；
-        模块名按完整路径判（`is_web_module`），兄弟模块 `agent_harness.websearch` 不算。
+        两种写法一起收（`ast.Import` / `ast.ImportFrom` + 全部别名），否则强度就取决于
+        写法；模块名按完整路径判（`is_web_module`），兄弟模块 `agent_harness.websearch`
+        不算；`if TYPE_CHECKING:` 只认正向形态（`is_type_checking_test`），
+        `if not TYPE_CHECKING:` 里的 import 仍是运行时 import。
         """
+        assert set(self.EXPECTED_TYPE_ONLY_WEB_IMPORTS) == {
+            "agent_harness/session/service.py",
+            "agent_harness/session/projects.py",
+        }, "登记表被清空或改名 ⇒ 这条守卫会静默变成空转（审查 findings）"
+
         for rel, residual in self.EXPECTED_TYPE_ONLY_WEB_IMPORTS.items():
             tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"))
 
@@ -278,11 +305,11 @@ class TestRuntimeImportBoundary:
             type_checking_nodes: set[int] = set()
             type_checking_imports: set[str] = set()
             for node in ast.walk(tree):
-                if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+                if isinstance(node, ast.If) and is_type_checking_test(node.test):
                     for inner in ast.walk(node):
                         type_checking_nodes.add(id(inner))
-                        if isinstance(inner, (ast.Import, ast.ImportFrom)) and is_web_module(
-                            imported_module(inner)
+                        if isinstance(inner, (ast.Import, ast.ImportFrom)) and any(
+                            is_web_module(m) for m in imported_modules(inner)
                         ):
                             type_checking_imports.add(ast.unparse(inner))
 
@@ -290,7 +317,7 @@ class TestRuntimeImportBoundary:
                 node.lineno
                 for node in ast.walk(tree)
                 if isinstance(node, (ast.Import, ast.ImportFrom))
-                and is_web_module(imported_module(node))
+                and any(is_web_module(m) for m in imported_modules(node))
                 and id(node) not in type_checking_nodes
             ]
             assert runtime_web_imports == [], f"{rel} 出现运行时 web import"
@@ -312,3 +339,35 @@ class TestRuntimeImportBoundary:
         assert not is_web_module("agent_harness.websearch")
         assert not is_web_module("agent_harness.websearch.tool")
         assert not is_web_module("my_agent_harness.web")
+
+    def test_import_statement_forms_are_all_considered(self):
+        """两种等价写法都要算 web 引用：`from agent_harness import web` 与多别名 `import`。
+
+        只取 `names[0]`（`import a, b` 里 web 排第二）或只看 `node.module`
+        （`from agent_harness import web`）都会漏（审查 findings 的 P3）。
+        """
+        cases = {
+            "import agent_harness.web.app": True,
+            "import agent_harness.websearch, agent_harness.web.app": True,
+            "import agent_harness.web.app, agent_harness.websearch": True,
+            "from agent_harness import web": True,
+            "from agent_harness.web import app": True,
+            "import agent_harness.websearch": False,
+            "from agent_harness import websearch": False,
+            "from agent_harness.websearch import protocol": False,
+        }
+        for source, expected in cases.items():
+            node = ast.parse(source).body[0]
+            assert isinstance(node, (ast.Import, ast.ImportFrom))
+            got = any(is_web_module(m) for m in imported_modules(node))
+            assert got is expected, f"{source!r} 判成 {got}，应为 {expected}"
+
+    def test_type_checking_test_must_be_positive(self):
+        """`if TYPE_CHECKING:` 才豁免；`if not TYPE_CHECKING:` 是**反**语义。
+
+        子串判据把它一并豁免 ⇒ 那条 import 是真运行时 import 却逃过扫描（审查 findings）。
+        """
+        assert is_type_checking_test(ast.parse("TYPE_CHECKING").body[0].value)
+        assert is_type_checking_test(ast.parse("typing.TYPE_CHECKING").body[0].value)
+        assert not is_type_checking_test(ast.parse("not TYPE_CHECKING").body[0].value)
+        assert not is_type_checking_test(ast.parse("True").body[0].value)

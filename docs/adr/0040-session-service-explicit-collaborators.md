@@ -37,7 +37,7 @@ class SessionService:
 
 ```bash
 git show 77b80eb:src/agent_harness/session/service.py | grep -c "self\._state\."   # 117
-git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\."   # 同款
+git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\."   # 3（同款写法，不同数量）
 ```
 
 两个后果：
@@ -118,7 +118,7 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 保证索引就绪。
 
 **"比 AppState 明显更窄"的判据（可复核）**：`AppState` 公开成员 21 个
-（16 个实例属性 + 5 个公开方法/属性）。AST 统计口径：`AppState.__init__`（`web/app.py:343-411`）
+（16 个实例属性 + 5 个公开方法/属性）。AST 统计口径：`AppState.__init__`（`web/app.py:343-410`）
 里 `self.X =` 共 **22** 项（16 公开 + 6 私有）——全文件是 27 项，别按全文件数；`class AppState`
 的 7 个方法里 2 个私有。本层用到的正是上表 16 个，**每一个都有调用点**；
 余下 5 个（`provider_store` / `context_snapshots` / `sessions_root` / `shutdown` / `wiring`）
@@ -157,11 +157,23 @@ Lock：不顺手重构）。
 且 R4 已记"合并参数"被否的取舍），或改为由领域层自己从三个 ledger 组束、把该类型从构造契约里
 去掉（少 1 个参数，代价是领域自建上层 bundle）。
 
-**R3 — 守卫的作用域要说清。** `test_importing_the_domain_does_not_load_the_web_app` 只覆盖
-**模块级运行时** web import；函数体内的惰性 import 不在其内（今天 `web/websocket.py` 就是从
-`web.app` 惰性 import 组合根的，方向相反、不受影响）。另外实测：今天任何模块级
-`agent_harness.web.*` 运行时 import 都会**立刻成环**（`web/__init__.py` eager import `app`，
-`app` 又 import `session.projects` → `session.service`）——该性质因此是结构性约束（§5 红证 4）。
+**R3 — 两条守卫各自的作用域要说清**（窄验证第二轮实测后订正——此前把两条的作用域写混了）：
+
+- `test_importing_the_domain_does_not_load_the_web_app`（子进程）：只看**真正被加载**的模块，
+  即模块级 web import；函数体内的惰性 import 不执行、因此不在其内（今天 `web/websocket.py`
+  就是从 `web.app` 惰性 import 组合根的，方向相反、不受影响）。
+- `test_types_only_reference_to_web_is_the_documented_residual`（AST）：扫**全部 import 语句**，
+  含函数体内的惰性 import（实测：在 `service.py` 函数体里插 `from agent_harness.web.app import …`
+  也会红）——**比 R3 此前写的"只覆盖模块级"更严**。它不覆盖的是**动态导入**
+  （`__import__("agent_harness.web.app")`、`importlib.import_module(...)`，表达式不是 `Import`
+  节点）与 `if TYPE_CHECKING:` 之外的条件 import；这两类属**声明范围外**，不视为缺口。
+
+另外实测：今天任何模块级 `agent_harness.web.*` 运行时 import 都会**立刻成环**
+（`web/__init__.py` eager import `app`，`app` 又 import `session.projects` → `session.service`）
+——该性质因此是结构性约束（§5 红证 4）。窄验证第二轮另实测：两条**漏判**写法
+（`from agent_harness import web`、多别名 `import` 里 web 排第二）在修复前虽能骗过 AST 守卫，
+却当场撞上这个循环（`ImportError: cannot import name 'validate_session_id' from partially
+initialized module …`）⇒ 它们在今天**不可利用**；但守卫已按 findings 收全（§5 红证 9/10）。
 
 **R4 — 未采纳的收窄方案（逐条留痕）**：
 
@@ -177,8 +189,13 @@ Lock：不顺手重构）。
 
 **门禁（本文档所在批次，`PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest`）**：
 
-- focused：`tests/session` = 366 passed（新增证据文件后 **379** passed）；`tests/web` + `tests/workspace`
-  + 顶层 web 测试 = 495 passed；两段 0 failed（详见 tracker B-26 的当次数字与月档逐条记录）。
+- `tests/session`：改造前 **366** → 新增证据文件后 **379**（`ed1c5fa`）→ 审查补强两条用例后
+  **382**（本轮 tip，实测 52.20 s）。每条数字都能对着它的树复算，别把某一轮的数字安到另一棵树上
+  （上一轮 review 就是这么踩的）。
+- `tests/web` + `tests/workspace` + 5 个顶层 web 文件（`test_web_api` / `test_web_lineage` /
+  `test_web_phase5` / `test_sse_disconnect` / `test_measure_sse_streaming`）**493 passed**
+  （220.33 s）——**命令即上面那串**：只写"495"而不给文件清单是不可复算的（上一轮 review 的读数
+  451 / 493 / 502 三种口径都能自圆其说，所以这里把口径写死）。
 - 全量：见 tracker B-26 / 月档（同一提交上的全量读数列在那里，本文档不复制数字以免两处漂移）。
 - `ruff check` 改动文件：All checks passed；`git diff --check` 无输出。
 
@@ -206,22 +223,32 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -o "self\._state\
 代码只有 `self._state = state`（第 281 行），另一处是 docstring 散文（第 1745 行，讲候选方案的
 文字，不是调用）。即没有第二条第代码路径把容器递出去。
 
-**红证（逐条变异真实源文件 → 跑真实守卫 → 观察预期失败 → 还原并比对 `git hash-object`；
-脚本 `.workbuddy/red_248_guards.py`——**在仓库工作树内**、仅被 `.gitignore` 忽略（不提交、不入
-tracked 树；脚本自己断言锚点唯一、还原后哈希一致，任何一条没变红就 `sys.exit`）**）：
+**红证（逐条变异真实源文件 → 跑真实守卫 → 观察预期失败 → 还原并比对 `git hash-object`）**：
+脚本 `.workbuddy/red_248_guards.py` —— 在**仓库工作树内**、仅被 `.gitignore` 忽略（不提交、不入
+tracked 树）。脚本自己断言锚点唯一、还原后哈希一致，任何一条没变红就 `sys.exit`。下表即其
+完整变异清单（脚本是动过真实文件的，所以这里逐条留痕；跑法见脚本头部注释）：
 
 | # | 变异 | 观察到的失败 |
 | --- | --- | --- |
 | 1 | 在 `web/workspace_files.py` 加 `__RED_PROBE = SessionService(**{})` | `Extra items in the left set: 'agent_harness/web/workspace_files.py'`（构造点守卫） |
-| 2 | 把 `session/service.py` 的 `has_session` 注解改成 `state: AppState` | `领域层又命名了传输容器：['agent_harness\\session\\service.py:486', '…:486']`（同一行报两次 = 注解与函数节点各命中一次；行号随文档串增删滑动） |
+| 2 | 把 `session/service.py` 的 `has_session` 注解改成 `state: AppState` | `领域层又命名了传输容器：['agent_harness\\session\\service.py:486', '…:486']`（同一行报两次 = `ast.arg` 的注解节点与注解里的 `ast.Name` 各命中一次；**行号随文档串增删滑动，按用例名定位**） |
 | 3 | 把组合根的 `approval_queues=state.approval_queues` 改成 `approval_queues={}` | `AssertionError: approval_queues 没有被搬进服务`（字段搬家可证伪） |
 | 4 | 模块级加 `from agent_harness.web.runmanager import …` 到 `session/service.py` | 循环 `ImportError`（exit=4）——即该性质是结构性约束；同一探测片段换成导入 `web.app` 时输出 `LOADED: ['agent_harness.web', 'agent_harness.web.app', …]`、exit=1（探测器对照，证明"绿"不是片段失效） |
 | 5 | 在 `web/workspace_files.py` 加**属性形式**构造 `__RED_PROBE = _svc.SessionService(**{})` | `Extra items in the left set: 'agent_harness/web/workspace_files.py'`。补强前该形式会漏（独立审查者用同一判据复现：只认裸名字时集合为空），因此这条同时是 finding 的修复证据 |
-| 6 | 在 `session/service.py` 的 `TYPE_CHECKING` 块内加第二条 web 引用 `from agent_harness.web.app import AppState as …` | `Extra items in the left set: 'from agent_harness.web.app import AppState as _RedProbeAppState'`（集合相等断言，`tests/…:270`）。补强前只断言"残余存在"，这条会静默通过（审查者 findings） |
+| 6 | 在 `session/service.py` 的 `TYPE_CHECKING` 块内加第二条 web 引用 `from agent_harness.web.app import AppState as …` | `Extra items in the left set: 'from agent_harness.web.app import AppState as _RedProbeAppState'`（`test_types_only_reference_to_web_is_the_documented_residual` 的集合相等断言；**该用例内的行号随文档串增删滑动，一律按用例名定位**）。补强前只断言"残余存在"，这条会静默通过（审查者 findings） |
 | 7 | 同上位置改加**plain import** 等价写法 `import agent_harness.web.app`（旧判据只收 `ImportFrom`，这条曾整条绕过） | `Extra items in the left set: 'import agent_harness.web.app'`（同一条集合相等断言）。补强前该形式既不进 `runtime_web_imports` 也不进 `ImportFrom` 记录，守卫仍是绿的（窄验证 findings） |
+| 8 | 把 `is_web_module` 退回子串实现 `"agent_harness.web" in module` | `test_web_module_match_is_not_a_substring_test` 红（`assert not True`）——证明该精度用例不是空转（窄验证 findings） |
+| 9 | `imported_modules` 的 `ImportFrom` 分支只回 `[base]`（即漏 `from agent_harness import web`） | `test_import_statement_forms_are_all_considered` 红：`AssertionError: 'from agent_harness import web' 判成 False，应为 True` |
+| 10 | `imported_modules` 的 `Import` 分支只取 `names[0]`（漏 `import x, agent_harness.web.app`） | 同上用例红：`AssertionError: 'import agent_harness.websearch, agent_harness.web.app' 判成 False，应为 True` |
+| 11 | `is_type_checking_test` 换回子串判据 `"TYPE_CHECKING" in ast.unparse(test)` | `test_type_checking_test_must_be_positive` 红：`assert not True where True = is_type_checking_test(<ast.UnaryOp …>)`（即 `if not TYPE_CHECKING:` 被误当豁免块） |
+| 12 | 把登记表 `EXPECTED_TYPE_ONLY_WEB_IMPORTS` 清空 | 同一条残余用例的键集合断言红：`Extra items in the right set: 'agent_harness/session/service.py' / 'agent_harness/session/projects.py'`（否则守卫会静默空转成空循环） |
 
-七条变异全部按预期变红，且还原后 `git hash-object` 与变异前一致（脚本内断言）。守卫侧的两处
-补强（第 5/6/7 条）来自独立审查与窄验证的 findings，均已在 `ed1c5fa` + 本轮修复提交里落地。
+十二条变异全部按预期变红，且还原后 `git hash-object` 与变异前一致（脚本内断言）。第 5–12 条是
+审查 findings 的修复证据：独立审查（第 5/6 条）、窄验证第一轮（第 7/8 条）、窄验证第二轮（第 9–12 条）。
+**方法学留痕**：第 11 条第一版探针只改 `Name` 分支、漏了 `Attribute` 分支与末尾 `return False`，
+于是 `not TYPE_CHECKING`（`ast.UnaryOp`）照样走到 `return False`、守卫**没红**——脚本当场
+`sys.exit("红证失败")` 把这次"探针不判别"暴露出来，改成整段替换后才成立。这也说明：**探针本身
+必须先被证明能判别**（同步于 §5 第 4 条的探测器对照）。
 
 ---
 

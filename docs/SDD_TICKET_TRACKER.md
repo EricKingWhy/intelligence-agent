@@ -3779,7 +3779,7 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 
 **残余（登记，不阻断，各需单独票）**：
 - `RunManager` 的家在 `web/runmanager.py`（R1，同上，待裁决）。
-- 守卫的作用域：`test_importing_the_domain_does_not_load_the_web_app` 只覆盖模块级运行时 web import，函数体内惰性 import 不在其内（今天 `web/websocket.py` 从 `web.app` 惰性 import 组合根，方向相反）。实测任何模块级 `agent_harness.web.*` 运行时 import 都会立刻成环（`web/__init__.py` eager import `app`），故该性质是结构性约束。
+- 守卫作用域（两条并列，见 ADR-0040 §4 R3）：子进程那条只看**真正被加载**的模块级 web import；AST 那条扫全部 import 语句（含函数体内的惰性 import，比原描述更严），**不覆盖** `__import__` / `importlib.import_module` 这类动态导入。实测任何模块级 `agent_harness.web.*` 运行时 import 都会立刻成环（`web/__init__.py` eager import `app`），故该性质是结构性约束。
 - 未采纳的收窄方案（窄 Protocol、合并 `stores` 与三 ledger、搬 `RunManager`）逐条留痕在 ADR-0040 §4 R4，附否掉的理由。
 
 **覆盖**：审查行 `<base>..978e960`（两轴）+ `978e960..ed1c5fa`（窄验证）+ `ed1c5fa..61aaa20`（窄验证 findings 复验）见 `docs/review_ledger.tsv`；docs 落点提交走白名单。
