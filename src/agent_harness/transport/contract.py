@@ -155,13 +155,6 @@ class SqliteTransportLedger:
     async def append(self, entry: TransportLedgerEntry) -> None:
         async with _connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                "SELECT created_at FROM transport_ledger ORDER BY rowid DESC LIMIT 1"
-            )
-            latest = await cursor.fetchone()
-            if latest is not None and entry.created_at < latest[0]:
-                await connection.rollback()
-                raise ValueError("transport ledger entries must be append-only")
             if entry.status in {
                 TransportStatus.SUCCEEDED,
                 TransportStatus.FAILED,
@@ -169,14 +162,18 @@ class SqliteTransportLedger:
             }:
                 cursor = await connection.execute(
                     """
-                    SELECT 1 FROM transport_ledger
+                    SELECT status FROM transport_ledger
                     WHERE operation_id = ?
                       AND status IN ('succeeded', 'failed', 'cancelled')
                     LIMIT 1
                     """,
                     (entry.operation_id,),
                 )
-                if await cursor.fetchone() is not None:
+                existing = await cursor.fetchone()
+                if existing is not None:
+                    if existing[0] != entry.status.value:
+                        await connection.rollback()
+                        raise ValueError("transport ledger terminal state conflicts")
                     await connection.commit()
                     return
             await connection.execute(
@@ -237,8 +234,23 @@ class InMemoryTransportLedger:
         self._entries: list[TransportLedgerEntry] = []
 
     async def append(self, entry: TransportLedgerEntry) -> None:
-        if self._entries and entry.created_at < self._entries[-1].created_at:
-            raise ValueError("transport ledger entries must be append-only")
+        terminal = {
+            TransportStatus.SUCCEEDED,
+            TransportStatus.FAILED,
+            TransportStatus.CANCELLED,
+        }
+        if entry.status in terminal:
+            existing = next(
+                (
+                    item for item in self._entries
+                    if item.operation_id == entry.operation_id and item.status in terminal
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing.status is not entry.status:
+                    raise ValueError("transport ledger terminal state conflicts")
+                return
         self._entries.append(entry)
 
     async def list_for_request(self, request_id: str) -> list[TransportLedgerEntry]:

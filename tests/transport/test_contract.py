@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from pydantic import ValidationError
 
@@ -102,18 +104,6 @@ async def test_sqlite_transport_ledger_survives_reopen(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_sqlite_transport_ledger_rejects_backdated_append(tmp_path):
-    ledger = SqliteTransportLedger(tmp_path / "harness.db")
-    await ledger.initialize()
-    await ledger.append(_entry())
-    with pytest.raises(ValueError, match="append-only"):
-        await ledger.append(_entry(
-            operation_id="op-2",
-            created_at="2026-09-19T23:59:59+00:00",
-        ))
-
-
-@pytest.mark.asyncio
 async def test_sqlite_transport_ledger_deduplicates_terminal_append(tmp_path):
     ledger = SqliteTransportLedger(tmp_path / "harness.db")
     await ledger.initialize()
@@ -129,6 +119,37 @@ async def test_sqlite_transport_ledger_deduplicates_terminal_append(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sqlite_transport_ledger_rejects_conflicting_terminal(tmp_path):
+    ledger = SqliteTransportLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    await ledger.append(_entry(status=TransportStatus.STARTED))
+    await ledger.append(_entry(
+        status=TransportStatus.SUCCEEDED,
+        created_at="2026-09-20T00:00:01+00:00",
+    ))
+    with pytest.raises(ValueError, match="terminal state conflicts"):
+        await ledger.append(_entry(
+            status=TransportStatus.FAILED,
+            created_at="2026-09-20T00:00:02+00:00",
+        ))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_transport_ledger_concurrent_appends_keep_both_entries(tmp_path):
+    database = tmp_path / "harness.db"
+    first = SqliteTransportLedger(database)
+    second = SqliteTransportLedger(database)
+    await first.initialize()
+    earlier = _entry(operation_id="op-1", created_at="2026-09-20T00:00:00+00:00")
+    later = _entry(operation_id="op-2", created_at="2026-09-20T00:00:01+00:00")
+
+    await asyncio.gather(first.append(later), second.append(earlier))
+
+    entries = await first.list_for_request("req-1")
+    assert {entry.operation_id for entry in entries} == {"op-1", "op-2"}
+
+
+@pytest.mark.asyncio
 async def test_transport_ledger_is_append_only_and_queryable():
     ledger = InMemoryTransportLedger()
     first = _entry()
@@ -137,13 +158,13 @@ async def test_transport_ledger_is_append_only_and_queryable():
         status=TransportStatus.FAILED,
         created_at="2026-09-20T00:00:01+00:00",
     )
+    backdated = _entry(
+        operation_id="op-3",
+        created_at="2026-09-19T23:59:59+00:00",
+    )
 
     await ledger.append(first)
     await ledger.append(second)
+    await ledger.append(backdated)
 
-    assert await ledger.list_for_request("req-1") == [first, second]
-    with pytest.raises(ValueError, match="append-only"):
-        await ledger.append(_entry(
-            operation_id="op-3",
-            created_at="2026-09-19T23:59:59+00:00",
-        ))
+    assert await ledger.list_for_request("req-1") == [first, second, backdated]
