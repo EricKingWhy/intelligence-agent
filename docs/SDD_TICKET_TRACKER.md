@@ -3764,3 +3764,5 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 - 全量套件里 `tests/web/test_web_batch51_spec_contract.py::test_approval_queue_gc_after_run_completes` 的顺序 flake（单项重跑 8.49 s 绿，pre-existing，与本批无关）。
 
 **证据指针**：机制正本 `docs/adr/0039-tool-executor-owns-absolute-deadline.md`（D1–D7 + L1–L7）；本批门禁读数、五轮审查的 findings 与处置、红证产物路径、残余与待裁决边界统一写在 `docs/phase_status/2026-09.md` 的 B-25 段；本文件只保留 ticket 状态与待裁决事项，不复制机制。
+
+**集成与关单（2026-09-21）**：本批在后端 clone 的 `main` 上完成（工作区干净，仅 `.zcodeignore` 未跟踪）——本地 `main` 已含 `origin/main`（`e0e31fa` 是 HEAD 的祖先，无需先回后正），覆盖面 **`e0e31fa..d52f97f` = 5 笔**（`80f73ef`/`c99fc9d` 作者在途修复 + `5db3d43` 修复包 + `3205238` 登记 + `d52f97f` 台账）；覆盖闸门 **exit 0**；代码树与门禁树一致（`git diff 5db3d43..HEAD -- src tests` 为空）。已 `push origin main`（`e0e31fa..d52f97f`，快进），写前存 refs 快照、写后逐条比对：`feat/backend`、`feat/FixBUG`、`feat/FIX-test-BUG`、`workbuddy/main-f049fadd` 与 `origin/feat/*` **全部未变**。**两票未关单**（#256/#244 保持 OPEN，待用户裁决见上）。**§14.9 通知**：另一条线（`D:\intelligence-agent`，分支 `codex/256-timeout-cleanup`，工作树有未提交改动、其本地 `main` 落后于新的 `origin/main`）开工前必须先 `git merge-base --is-ancestor origin/main HEAD` 自检并合回 `main`；本批未触碰该 clone。
