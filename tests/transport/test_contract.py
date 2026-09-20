@@ -71,12 +71,13 @@ def test_command_summary_redacts_secret_and_raw_paths():
 
 
 def test_generated_git_summary_never_contains_position_pathspec():
-    summary = redact_command_summary(
+    for command in (
         'git_status -- "secret.py" C:/private/repo/secret.py',
-        scope="workspace",
-    )
-    assert "secret.py" not in summary
-    assert "private/repo" not in summary
+        "git diff -- secret.py",
+    ):
+        summary = redact_command_summary(command, scope="workspace")
+        assert "secret.py" not in summary
+        assert "private/repo" not in summary
 
 
 def test_entry_redacts_direct_construction_and_caps_summary():
@@ -110,6 +111,21 @@ async def test_sqlite_transport_ledger_rejects_backdated_append(tmp_path):
             operation_id="op-2",
             created_at="2026-09-19T23:59:59+00:00",
         ))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_transport_ledger_deduplicates_terminal_append(tmp_path):
+    ledger = SqliteTransportLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    started = _entry(status=TransportStatus.STARTED)
+    await ledger.append(started)
+    terminal = _entry(
+        status=TransportStatus.SUCCEEDED,
+        created_at="2026-09-20T00:00:01+00:00",
+    )
+    await ledger.append(terminal)
+    await ledger.append(terminal)
+    assert await ledger.list_for_request("req-1") == [started, terminal]
 
 
 @pytest.mark.asyncio
