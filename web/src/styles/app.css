@@ -37,6 +37,10 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
      内联了这个变量，但若两者不等，任何"变量没写上"的降级路径都会先画成 320 再跳
      20px。取值范围与初始值是两个数，别把回退值当成"安全的那个下限"。 */
   grid-template-columns: 240px minmax(0, 1fr) var(--inspector-w, 340px);
+  /* F7(#278)：**打开方向**的过渡。关闭 / 整页方向的时长不同，写在各自的态上
+     （见下面的 `.inspector-closed` / `.app-regions.inspector-fullpage`）——
+     靠级联区分方向，不需要 JS 状态。完整说明见「F7 过渡编排」。 */
+  transition: grid-template-columns var(--dur-in) var(--ease-apple);
   min-height: 0;
   /* SDD §9: chrome quieter than workspace. The container is the quietest
    * tone (canvas) so the rail/inspector (chrome) and workspace sit on top
@@ -57,32 +61,101 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .app-workspace {
   grid-column: 2;
 }
+/* ═══ F7(#278)：Inspector / 整页切换的过渡编排 ═══
+ * 目标：`grid-template-columns` 的三条轨道各自尽量连续插值，而不是一帧跳变；同时不卸载
+ * 任何区域（N1/N4）、不去掉 `visibility: hidden`（N2/N3）。纯 CSS，无 JS 状态。
+ *
+ * ⚠ **不是「三列同时插值」**——逐轨道探针（`--mode probe` 的 `trackStats()` 逐帧拆三列）实测：
+ *   · 打开 / 关闭：rail 不变；workspace 与 inspector **都**插值。
+ *   · 整页 / 退出整页：rail 插值；workspace 经 `minmax(0, 0fr)` 修正后插值；
+ *     inspector（`--inspector-w ↔ 1fr`）是 length ↔ fr，**不可插值** ⇒ 该轨道降级为
+ *     一帧离散翻转。旧判据「数整串 `grid-template-columns` 的取值个数」被 rail 主导、
+ *     会掩盖另两列，已废弃——逐轨道判定表见 PERF_BASELINE「F7」节。
+ *
+ * **方向差异（本票技术核心）**——用「把关闭方向的 transition 写在关闭态自己身上」实现：
+ *   · 打开：after-change 样式是基态（`.app-regions` / `.step-detail` 都没有给
+ *     `visibility` 声明过渡）⇒ duration 取初值 `0s` ⇒ 内容**立刻**可见（AC2 前半）。
+ *   · 关闭：after-change 样式是 `.inspector-closed*`（下面几条）⇒
+ *     `visibility 0s linear var(--dur-out)`（时长 0 + 延迟 = 过渡时长）
+ *     ⇒ 内容留到过渡**结束后**才隐藏（AC2 后半）。
+ *   `visibility` 本身是可插值的离散属性，**不需要** `transition-behavior: allow-discrete`
+ *   ——探针 V1/V2 两臂读数完全一致，实测证伪了票面「推荐 A」里的这一半（见 DoD）。
+ *
+ * **时长与缓动复用既有变量**，无新常量：打开 `--dur-in` 240ms（PRD 220-280）、关闭
+ * `--dur-out` 150ms。⚠ 方向时长取 **after-change 态**上的 transition ⇒ 进入整页 150ms
+ * （`.inspector-fullpage` 自带），**退出整页 240ms**（落到基态的 `--dur-in`）；
+ * 探针 `anims` 读数 `grid-template-columns:150` / `:240` 实证。静态尺寸（240px / 340px）一字未动。
+ *
+ * 数字与仪器自证见 `docs/PERF_BASELINE.md`「F7」节；采集器
+ * `web/scripts/perf-inspector-transition.mjs`（`--shipped` 直接量交付物本身）。 */
 .inspector-closed {
   grid-template-columns: 240px minmax(0, 1fr) 0px;
+  transition: grid-template-columns var(--dur-out) var(--ease-apple);
 }
 /* Collapse hides the region visually but keeps it mounted (DSH semantics).
- * The inspector element stays in the DOM; zero width + hidden overflow. */
+ * The inspector element stays in the DOM; zero width + hidden overflow.
+ * 过渡编排见 F7。 */
 .inspector-closed .step-detail {
-  width: 0;
+  /* ★ `auto` 而不是 `0`：面板盒必须**跟着轨道走**。原来写 `width: 0`，于是栅格列
+     还在平滑插值、面板盒却在一帧内收成 0——正是 AC2 禁止的「内容先没了、列再收」。
+     探针实测：关闭段 `.step-detail` 宽度取值由 1 种变成 10 种（连续）。 */
+  width: auto;
   min-width: 0;
   padding-left: 0;
   padding-right: 0;
   border: none;
   overflow: hidden;
   visibility: hidden;
+  /* 时长 0 + 延迟 = 过渡时长 ⇒ 可见性在过渡结束后才切（AC2）。 */
+  transition: visibility 0s linear var(--dur-out);
 }
 
 /* #183 AC5：整页——面板占满工作区宽度，长 trace / 大 diff 宽读。
    与 `inspector-closed` 同一取舍：rail 与 workspace 收成 0 宽 + 可见性隐藏，
    **仍在 DOM 里**（不卸载，滚动位置与内部状态留着），所以退回是瞬时的。 */
 .app-regions.inspector-fullpage {
-  grid-template-columns: 0px 0px minmax(0, 1fr);
+  /* ★ 中间轨道写 `minmax(0, 0fr)` 而不是 `0px`：静态解完全相同（0fr ⇒ 0px，探针实测终态
+     `to: 0` 与 `0px` 版逐值一致，布局模型与静态尺寸都没动），但 `1fr ↔ 0fr` **可插值**，
+     `1fr ↔ 0px` 不可。V3 臂实测：只改这一处，整页 / 退出整页的 workspace 轨道由
+     「一帧跳完」变成插值（最大跳幅 308.3px/37%、296.3px/35%），rail 与 inspector 读数不变。
+     第三列的 `--inspector-w ↔ 1fr` 仍是 length ↔ fr，**不可插值** ⇒ 该轨道降级为
+     一帧离散翻转（见下条注释与 PERF_BASELINE「F7」节的逐轨道判定表）。 */
+  grid-template-columns: 0px minmax(0, 0fr) minmax(0, 1fr);
+  transition: grid-template-columns var(--dur-out) var(--ease-apple);
 }
 .app-regions.inspector-fullpage .session-rail,
 .app-regions.inspector-fullpage .app-workspace {
   overflow: hidden;
   visibility: hidden;
   border: none;
+  /* ⚠ 不是「三列同时插值」——逐轨道实测：rail 240px→0 插值、workspace 842px→0 插值
+     （靠上面那条 `0fr`），inspector 340px→1422px 一帧翻转。N3 要求的可见性同样是
+     「过渡结束后才隐藏」；退出整页时基态无过渡 ⇒ 立刻可见（瞬时）。 */
+  transition: visibility 0s linear var(--dur-out);
+}
+
+/* F7 拖宽守卫（#197）：手柄每帧改 `--inspector-w`，而它正是第三列的轨道宽度 ⇒
+ * 不加这条，拖拽会带上 240ms 滞后（手柄"黏手"）。实测：有守卫 1 帧落到目标，
+ * 无守卫 10 帧滞后。`:has()` 的优先级取其最内层选择器，足以压过上面所有规则。 */
+.app-regions:has(.step-detail[data-resizing='true']) {
+  transition: none;
+}
+
+/* F7：`prefers-reduced-motion: reduce` 下新过渡必须彻底关闭（AC5）。
+ * ⚠ 全局块（`index.css` 的 Motion safety）**只**压 `transition-duration`、不碰
+ * `transition-delay` ⇒ 不复位延迟的话，关闭态的 `visibility` 仍会被推迟 150ms。
+ * 实测（三次真跑：`f7-probe-track.json` / `f7-probe-final2.json` / `f7-probe-v3.json`）：
+ * 不复位（RM0）第 10–11 帧（+160 … +182ms）才隐藏，复位后（RM1）第 2–3 帧（+32 … +42ms）。
+ * ⚠ **比帧序、不比毫秒**——同一断言的跨运行抖动是 ±1 帧。 */
+@media (prefers-reduced-motion: reduce) {
+  .app-regions,
+  .inspector-closed,
+  .inspector-closed .step-detail,
+  .app-regions.inspector-fullpage,
+  .app-regions.inspector-fullpage .session-rail,
+  .app-regions.inspector-fullpage .app-workspace {
+    transition-delay: 0s;
+  }
 }
 
 /* ── Workspace（中：Agent Workspace） ── */
@@ -185,6 +258,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* 呼吸辉光：运行相位（thinking/tool）的胶囊体随相位呼吸——icon 自旋之外的
  * 第二层"活着"信号。currentColor 让一套 keyframes 适配两种状态色；
  * 胶囊面积小，box-shadow 动画 repaint 可忽略；reduced-motion 由全局块关闭。 */
+/* F6(#277) 复核（2026-09-19）：上句「repaint 可忽略」**实测成立**（真机 Chromium + 生产 dist CSS，A/B=动画开 vs prefers-reduced-motion:reduce，3 轮中位）：long task 数 0/0；最长帧间隔 16.8/16.8ms（掉帧 0/0）；可归因成本 style 20.7 + paint 0.4 + raster 0.6 ms / 3s ≈ 0.7% 单核；实现不改。采集器 web/scripts/perf-pulse-cost.mjs，数字与仪器自证见 docs/PERF_BASELINE.md「F6」节。 */
 @keyframes pulse-glow {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
   50% { box-shadow: 0 0 12px 1px color-mix(in srgb, currentColor 26%, transparent); }

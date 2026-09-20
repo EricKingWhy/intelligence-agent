@@ -1952,7 +1952,7 @@ main 由集成 AI 执行）。
 - 2026-09-17：**ticket #213 增量「重写发生过」信号（设计票，决议 = 不改契约，不新增计数器）**。**票面要求先决定再改**：①改契约要连 `SPEC_ROOT/03_SESSION_EVENT_MODEL.md` + ADR 一起改；②计数器必须服务端单一 owner，不得引入第二套序号语义；③无用户可见缺陷支撑。**调查（决定性事实：票面前提在本项目不成立）**：本项目的重写**已经是一条显式事件**——`message/superseded {superseded_seq, carrier}`（`session/event.py:98`，`session/service.py:832` 服务端单一 owner 写入，`session/derive.py:110-169` 派生，前端 `projection.ts:35-72` 消费），不是 DSH 那种"内容面被原地改写、需要靠计数器推断"的形态。**三条否决理由**：①计数器会成为同一事实的第二套序号语义（该事件自带单调 `seq`，已持久、已重放）；②取代事实**不可能被静默跳过**——续传游标是客户端自身水位线（run 启动时取本地对话 `max seq`，`useSession.ts:1010-1012`），故它缺的任何事件 `seq` 必 > 游标 ⇒ 必落在 `seq > after_seq` 重放窗口内；同时跳号帧按契约 T4 **不投影**、直接丢弃重连（`useSession.ts:571-575`），不会"跳过丢帧继续往前"；③项目内不存在以序列号为键的增量缓存消费方（`derive.py` 每次现算、前端投影是纯折叠）⇒ 没有"重写后要失效的缓存"。**锁定（本票唯一代码产物）**：新增 `web/e2e/supersede-gap-recovery.spec.ts`——造出最坏形态（**取代帧本身在 live 通道被丢掉**，客户端只看到 14→16 的跳号尾帧，与"尾部增长"同形），断言：①任何一次续传游标都不得越过丢帧处（= 重放窗口必含该帧）；②旧轮问 + 答整段消失、carrier 与其回答各恰好一次；③该帧确实进了本地事件日志（Inspector 可见）。**红证（实测过一次并已还原）**：把该帧同时从 live 流与 durable log 剔除 = 客户端任何通道都收不到取代事实 → 旧轮留在视图（`原始问题` 计数 1）⇒ 上述断言有判别力、非空转。**过程更正（实测推翻我自己的假设）**：第一版断言写的是"重连订阅带 `after_seq=14`"，实测是 **7**（launch 分支取 `conv.events` 的 max seq，重试复用该值）——游标偏小只是多补几帧、由幂等门吸收，永远安全；危险的只有"越过丢帧处"，故判据改成**不变量**（≤ 14）而不是某个具体数值。**附带发现（Scope Lock：只报告）**：同一条 run 内的多次重连复用 launch 时的游标（`wsStream.ts:200` 是构造期捕获值），故每次重连都多补一段重复帧——当前由 `seenSeqs` 幂等吸收，无用户可见影响，未动。**决定记录**：`docs/adr/0030-…md` 新增 §12（含"本决议失效并应升级为契约提案"的三个条件：出现不产生事件的原地改写、出现序列号键增量缓存、客户端改为从服务端声明游标续传）。**收尾时撞到两件 Scope 外的事，均已开票 + 已清理/未改动**：①**#215**——我此前 #199 可达性验证用 `POST /api/model-providers` 建的**无 key 探针 `myprov` 删不掉**（`DELETE` 在无密钥条目上抛 `CredentialError: 凭据删除失败: PasswordDeleteError`，`ProviderStore.delete` 先删凭据即中止 ⇒ JSON 条目原地不动），而该残留是**全局**可见的：本次后端门禁因此出现 3 条失败（`test_lists_default_and_catalog_without_secrets` 等，`Left contains one more item: 'myprov:some-model'`）。**探针残留已清理**（`providers: []`，`keyring.get_password` 对该 id 为 `None`），3 条断言随之恢复；设计稿 §3 的可见性配方已补"做完要能回收，而当前回收不了"的警告。②**#216**——`uv run` 会把**已提交的 `uv.lock` 静默重写**（+126 行，补 `pyproject.toml` 声明却缺失的 `keyring` 依赖树；`uv lock --check` 对已提交的锁报 `needs to be updated`），后果是每次后端门禁跑完工作树必脏（§14.10 的 clean 前提）。本批**未提交任何锁改动**（已还原到 HEAD），留待单独 chore commit。**门禁（实测）**：后端 `ruff check src/ tests/` All checks passed + `pytest -q` **2403 passed / 10 skipped / 42 deselected / 0 failed（8:53）**（与上一批记录逐值一致）；前端 `tsc -b` 0 错 / vitest **916 passed**（无新增，`a19eae0` 后的既定数）/ oxlint **0 error · 44 warning**（未新增）/ playwright **392 passed · 0 failed（9.5m，--workers=2；其中本票新增 2 条 = 1 用例 × 2 viewport，既有基线 390）** / `vite build` ✓（2116 modules）。⚠ **本条关于 #213 的实测细节已被当日复验订正（见下条）**：该 e2e 首轮编到 seq 7、第二轮却从 seq 9 起（**在 7 与 9 之间凭空留了个洞**），客户端在第二轮**第一帧**就判跳号、一条都没投影、游标恒为 7 ⇒ 三次重试耗尽 → give-up → 全量回读把视图兜对。于是"客户端只看到 14→16 的跳号尾帧"与"任何一次续传游标都不得越过丢帧处"这两条描述**都不成立**，那条 `after_seq ≤ 14` 因游标恒为 7 而**恒真**（等于只断言了"重连发生过"）；"实测是 7（launch 分支取 `conv.events`）"这段机制归因也不对——游标是 `lastAppliedSeqRef`（本地已应用事件最大 seq），与 run 以哪条分支启动无关。用例已重造（第二轮连续 + 夹具按游标真裁 + 判定性断言），ADR §12 同步改写。
 - 2026-09-17：**ticket #214 + #215 + #216 收批（`6f81c6e` → `9f2a8f8`，3 票各一 commit + 1 个两轴审查修复 commit）**。**#215（P2 bug，`6d261d5`）**：无 API Key 的自定义供应商删不掉。根因 = `SystemCredentialStore.delete` 把 keyring 的 `PasswordDeleteError` 并进 `KeyringError` ⇒ `CredentialError`，而 `ProviderStore.delete`（D6：先删凭据、异常即中止）因此在**无 key 的供应商**上永远中止（"无 key"恰是新建默认态，也是 #199 设计稿公布的可见性配方）。**修法定稿在审查后改了**：初版按异常类放行，被 Standards 轴证明是错的——`PasswordDeleteError` 的库定义是"**删不掉**"（`keyring/errors.py`；基类 `backend.py::delete_password` 的"后端不支持删除"、kwallet 取消解锁、macOS 钥匙串失败都走它），只有 WinVault 恰好把"本来就没有"也算进去；按类放行会把这些后端上的真失败当成功、接着删配置 = D6 明令消灭的"孤立可用密钥"。**终版 = 读回确认**（`self.get(id) is not None` 才中止）。锁：模型层两条（无 key 可删 / 凭据还在必中止，**红证**：换回异常类版本 ⇒ `DID NOT RAISE CredentialError`）+ **端点层**一条（bug 就是在端点上报出来的，必须用真实适配器：自造 Memory 子类是打错层——转换逻辑只住在 `SystemCredentialStore` 里）。**#216（P3 基建，`c5f13ab`）**：`uv lock` 补齐 keyring 依赖树（11 包，`uv lock --check` 由此从失败转通过）+ 门禁协议加一行处置（跑完见 `uv.lock` 改动 ⇒ **先独立 chore commit 落地再进集成**，别 `git add -A` 混进功能票、也别 `git checkout --` 藏起来）。**#214（`fdb9ce3`）**：三个目录端点下发稳定 `icon` 语义名（`CATALOG_ICON_NAMES` 九名：lock/pencil/unlock/layers/code/search/bolt/gauge/telescope，键恒在、未声明为 `null`），前端 `catalogIcons.ts` 改成「已知名 → 字形」并**删掉按 id 的映射表**（id 空间可扩展，拿 id 猜 = 宣称一个后端没说的语义）；未知名/缺键留空槽。**落地时实测撞到一处静默失效**：`api.ts::parseCatalogEntries` 是白名单投影，新字段不登记就被丢掉（后端配好、夹具也带，界面就是不显示）——已登记并补锁。**两轴批量审查（fixed point `6f81c6e`，独立 subagent）**：两个 P1 都成立，见 `9f2a8f8`；**其中 P1-a 是我引入的真实副作用**——新用例用真 `SystemCredentialStore` + 带 key 的 `create` 往 Windows 凭据管理器写了 `sk-test` 假 key，且 monkeypatch 让删除必失败 ⇒ 残留（实测读回非空）；**已手工删除残留**（删后读回 None），用例改成 keyring 三函数全 mock（`set_password` 抛错 ⇒ 任何偷写真实后端的回归当场红）。其余修复：删掉 `catalogIcons.test.ts` 的**恒真**循环（遍历集合 = `Object.keys(ICONS)`，写错过一版）、e2e 把三种条目放进**同一 picker**（`main` 与 `read-only` 都在被删的旧映射表里 ⇒ 差异只可能来自键在不在）、按 AC4 补"三条 picker 的内置条目都画出字形"（逮住 `StartTaskInProjectDialog.tsx` 漏传 `catalogIcon`）、跨端名集措辞改为"手工镜像、**无跨端自动校验**"、设计稿"每一行"限定为"目录条目行"。**门禁（`9f2a8f8`，独机独占）**：后端 `ruff` All checks passed + `pytest -q` **2408 passed / 10 skipped / 42 deselected / 0 failed（5:56；+5 = 本批新增用例）**；前端 `tsc -b` 0 / vitest **922 passed · 54 files（+6 用例 +1 文件）** / oxlint **0 error · 44 warning**（未新增）/ playwright **396 passed · 0 failed（8.0m，--workers=2）** / `vite build` ✓。**工作树无 `uv.lock` 抖动**（#216 生效的旁证）。**集成**：`origin/main` `6f81c6e` → `9f2a8f8`（FF，本批 4 个 commit）；三票按 §14.12 关单。**回补**：三 clone 同步到 `9f2a8f8`。
 - 2026-09-17：**集成交付后的两轴复验（审查对象 = `089524a~1..6f81c6e` 的 #213 + `6f81c6e..HEAD` 的 #214/#215/#216/`9f2a8f8`），findings 全部处置，修复 commit `44f48c7`**。**动因（两处流程缺口，不是"再跑一遍"）**：①上一批的两轴审查跑在**修复提交之前**，`9f2a8f8` 本身从未被独立看过；②#213 的 e2e 恰好落在批次边界上——上一批的 fixed point `6f81c6e` 正是它自己的末条提交，于是它从没被任何 review 读过（协议 §1.2"每 2–3 票批量审查 + 最终全量"在这里漏了一票）。**P1（Standards）——#213 的"决定性证据"被伪证**（订正说明见上条）：该用例一直为错误的理由变绿，subagent 用 trace（give-up 条 + `/events` 回读顺序）证明后我复核、重造并实测红证两态。**重造**：第二轮改 **seq 8..14 连续**（改前 9..16 与首轮 7 之间有个洞 ⇒ 第一帧即跳号、零投影），被丢的取代帧落 seq 13、终态 14 ⇒ 客户端真应用 8..12、在 12→14 撞跳号、带**游标 12** 重连；夹具的 WS 快照改成**真按 `seq > after_seq` 裁**（改前只记录游标、照发全量 ⇒ 游标越过丢帧处也照样收得到，"窗口必含该帧"这条不变量不受检）；断言改为「撞跳号那次重连的游标 = 丢帧前最后一条已应用事件 + 视图 + Inspector + **只发生一次重连、无 give-up 条**」。**红证实测**：窗口置空 ⇒ `subscribes=[12,12,12]`、give-up 条出现、视图由两次 `/events` 回读兜对、判定性断言红（`Received +2`）；正常形态 `[12]`、give-up 0。**竞态实证**：第一版把"无 give-up 条"写在视图断言之前时，窗口置空**照样绿**（该断言取的是瞬时态）⇒ 判定性断言必须排在视图断言之后（兜底要先耗尽重试才修对视图），这条已写进 ADR §12 与用例注释。**保真度订正（Spec 轴 P2）**：取代帧在真后端是**登记 carrier 后立刻**写入（`service.py` §4.4 第 3 步，落在流前段），夹具为让它成为被丢那一帧才挪到流尾；后端真会丢的位置是 `runmanager.py` 队列**丢最旧**（ADR-0016），方向相反——ADR §12 与用例头部"与真后端同序 / 最坏位置"改为"合成的客户端最坏形态"，并记明服务端那半由 `tests/web/test_web_ws_relay.py` 锁。**P2（两轴）——#215 的读回确认 fail-open**：上一版确认走 `self.get()`，而读侧把后端故障**降级成 None**，于是"删不掉也读不到"的后端（kwallet 取消解锁 / 钥匙串锁定）被判成"凭据已不在" ⇒ 配置删了密钥还在（正是 D6 要消灭的孤立可用密钥，上一版却把它当"残留"写在注释里）。改为确认时**直面 `keyring.get_password`**，读也抛 ⇒ 无法确认 ⇒ 中止。新增 `test_delete_aborts_when_backend_cannot_confirm`，红证：换回 `self.get()` ⇒ `DID NOT RAISE`。**P2（Standards）——#215 用例仍依赖本机凭据后端**：带 key 的 `create` 要先过 `_require_credential_backend()`（D10 的门），它读**真** `keyring.get_keyring()` ⇒ 无持久化后端的机器（CI/Linux/服务账户）在 setup 就抛，判据与机器无关而 setup 与机器有关 = 假红；补 `available` monkeypatch。**P2（两轴）——#214 AC4 只覆盖 3 个调用点、文档却称覆盖 4 个**：AC4 遍历的是 Composer 三个 picker，而**漏传 `catalogIcon` 的偏偏是第四个**（`StartTaskInProjectDialog.tsx`，上一批刚修）⇒ 再删一次没人拦得住；`u-project-task.spec.ts` 的权限档夹具补真值 `icon`（原三条都缺键、槽必空）+ AC10 逐档断言 `.picker-item-icon svg` = 1、首行「默认（未选）」= 0；红证：删掉该处 `catalogIcon` ⇒ `Expected 1 / Received 0`。**文档漂移（P2/P3）**：设计稿 §3 的可见性配方仍写 #215 缺陷与"先确认你接受手改 JSON 文件收尾"（照旧文操作的人会把能用的删除当坏的）⇒ 改为已修 + 保留"残留是全局可见的"这条教训；§4"缺键"理由与"键恒在"自相矛盾 ⇒ 改为"未升级的后端才缺键"；`test_web_phase5_staged_endpoints.py` 模块 docstring 的封闭枚举仍写三键 ⇒ 补 `icon`；`catalogIcons.test.ts` 里"遍历集合逐个断言 defined"的循环恒真（集合就来自 `ICONS`）⇒ 删。**残余缺口另开 #217**（图标名集跨语言手工镜像、**无跨端自动校验** ⇒ 单边加名静默空槽），本批不修（需新增跨语言校验机制，超范围）。**门禁（`44f48c7`，独机独占）**：后端 `ruff` All checks passed + `pytest -q` **2409 passed / 10 skipped / 42 deselected / 0 failed（11:36；+1 = 新增 fail-open 用例）**；前端 `tsc -b` 0 / vitest **922 passed · 54 files**（删的循环不计数）/ oxlint **0 error · 44 warning**（未新增，`catalogIcons`/两个 e2e 文件 0 告警）/ playwright **396 passed · 0 failed（8.7m，--workers=2）** / `vite build` ✓。**未改动**：`multiturn-queue.spec.ts` T11 与本批无关；`#217` 留待排期。
-- 2026-09-17：**流程批：审查覆盖机械闸门 + 规则落点整理（两轴专门审闸门脚本，findings 全修）**。**无 ticket**（用户直接指令的流程优化，7 项授权，其中"测试卫生清单"一项用户明确不同意，未做）。**新增机制**：`scripts/check_review_coverage.sh` + `docs/review_ledger.tsv`——针对两个实测失效：**#213 从未被任何 review 读过**（fixed point 手抄成该票自己的末条提交、静默豁免）与**修复提交结构性免疫**（"修复 commit = 下一批 fixed point" ⇒ 交付周期最后一次审查的修复没有下一批，`9f2a8f8` 如此入 main 且真带 bug）。闸门对 `<最早台账 base>..HEAD` 每条 commit 要求台账归属，例外两类：**docs-only 白名单** 与 **恰好只改台账文件的记账提交**（后者机械可验、藏不了代码；早期用 25 行"自我更新惯例块"兜它，本身是死循环的补丁——每追一条声明又产出新的待记账提交——已整块删除，`fa5ea62`）。**规则落点**：凭证零泄漏红线搬进 `AGENTS.md` §4.3 第 0 条（`CLAUDE.md` 改指针）；§16.1「同一事实只在一处写全」；`PHASE_STATUS.md` 565 KB → 22.9 KB + 归档 `docs/phase_status/2026-09.md`（多重集守恒已验）；§13.4 改「先比 `HEAD^{tree}`，不等才跑全量」；§13.2 与"直接在施工 clone 的 main 提交"实践对齐；§14.10 清单补上覆盖闸门（§14.4→§14.10 指针链原本漏掉它）。**两轴审查（Standards + Spec 独立子代理，读 `c2b3b23`）→ 修复 `dda2b64`**：**P1** 文档模式只看 `docs/` 前缀 ⇒ `docs/integration/verify-before-merge.sh`（可执行脚本）+ `docs/tickets/tickets.json` 加一行白名单即放行（端到端复现）⇒ docs/ 下只认文档扩展名 + `--no-renames`；**P2** 根级名缺 `$` 锚（`AGENTS.md.bak` 等被判 docs-only）、自动放行在 `pipefail` 下 SIGPIPE 141 致 `!` 反相 ⇒ 跳过全部校验（改精确判等）、台账两行描述与自身 range 矛盾（"不含 `9f2a8f8`"而含 / 声称覆盖而含不到）；**P3** BOM 剥离 no-op、缺 base-is-ancestor-of-tip 校验、白名单只认 7 位缩写、`--list` 缺口仍退 0（改退 2）、成功文案降级为「每条 commit 均有归属」（台账是声明式输入，不证明审查真实）。**信任边界（写进协议 §5）**：窗口左端由台账自己决定、从工作树读（须干净检出）、**当前只手动跑（无 CI / 无 hook）**。**自审撞出的自身缺陷**：死条目告警变量初始化写错位置 ⇒ `unbound variable`（红证时炸出，已修）。**门禁**：自 `e125e27`（全量门禁树 `e63c202…`）以来只有文档/脚本/注释改动（实测 `registry.py` 仅 docstring、e2e spec 非注释改动 **0 行**）⇒ 后端 `ruff check .` clean + 闸门自带滥用双态 7 项实测（绿/红/滥用；含"删掉审查行后含 `scripts/` 的提交被正确拦下"与"`docs/` 下 `.sh` 被白名单拒"），**未重跑 pytest / playwright**（无可执行行改动）。**未做（用户明确不同意）**：测试卫生清单（探针凭证/全局配置残留）**不**补进协议。**另记**：`D:/intelligence-agent-fixbug`（worktree，`feat/FIX-test-BUG`）是并发会话，只读未触碰。
+- 2026-09-17：**流程批：审查覆盖机械闸门 + 规则落点整理（两轴专门审闸门脚本，findings 全修）**。**无 ticket**（用户直接指令的流程优化，7 项授权，其中"测试卫生清单"一项用户明确不同意，未做）。**新增机制**：`scripts/check_review_coverage.sh` + `docs/review_ledger.tsv`——针对两个实测失效：**#213 从未被任何 review 读过**（fixed point 手抄成该票自己的末条提交、静默豁免）与**修复提交结构性免疫**（"修复 commit = 下一批 fixed point" ⇒ 交付周期最后一次审查的修复没有下一批，`9f2a8f8` 如此入 main 且真带 bug）。闸门对 `<最早台账 base>..HEAD` 每条 commit 要求台账归属，例外两类：**docs-only 白名单** 与 **恰好只改台账文件的记账提交**（后者机械可验、藏不了代码；早期用 25 行"自我更新惯例块"兜它，本身是死循环的补丁——每追一条声明又产出新的待记账提交——已整块删除，`fa5ea62`）。**规则落点**：凭证零泄漏红线搬进 `AGENTS.md` §4.3 第 0 条（`CLAUDE.md` 改指针）；§16.1「同一事实只在一处写全」；`PHASE_STATUS.md` 565 KB → 22.9 KB + 归档 `docs/phase_status/2026-09.md`（多重集守恒已验）；§13.4 改「先比 `HEAD^{tree}`，不等才跑全量」；§13.2 与"直接在施工 clone 的 main 提交"实践对齐；§14.10 清单补上覆盖闸门（§14.4→§14.10 指针链原本漏掉它）。**两轴审查（Standards + Spec 独立子代理，读 `c2b3b23`）→ 修复 `dda2b64`**：**P1** 文档模式只看 `docs/` 前缀 ⇒ `docs/integration/verify-before-merge.sh`（可执行脚本）+ `docs/tickets/tickets.json` 加一行白名单即放行（端到端复现）⇒ docs/ 下只认文档扩展名 + `--no-renames`；**P2** 根级名缺 `$` 锚（`AGENTS.md.bak` 等被判 docs-only）、自动放行在 `pipefail` 下 SIGPIPE 141 致 `!` 反相 ⇒ 跳过全部校验（改精确判等）、台账两行描述与自身 range 矛盾（"不含 `9f2a8f8`"而含 / 声称覆盖而含不到）；**P3** BOM 剥离 no-op、缺 base-is-ancestor-of-tip 校验、白名单只认 7 位缩写、`--list` 缺口仍退 0（改退 2）、成功文案降级为「每条 commit 均有归属」（台账是声明式输入，不证明审查真实）。**信任边界（写进协议 §7 第 8 条）**：窗口左端由台账自己决定、从工作树读（须干净检出）、**当前只手动跑（无 CI / 无 hook）**。**自审撞出的自身缺陷**：死条目告警变量初始化写错位置 ⇒ `unbound variable`（红证时炸出，已修）。**门禁**：自 `e125e27`（全量门禁树 `e63c202…`）以来只有文档/脚本/注释改动（实测 `registry.py` 仅 docstring、e2e spec 非注释改动 **0 行**）⇒ 后端 `ruff check .` clean + 闸门自带滥用双态 7 项实测（绿/红/滥用；含"删掉审查行后含 `scripts/` 的提交被正确拦下"与"`docs/` 下 `.sh` 被白名单拒"），**未重跑 pytest / playwright**（无可执行行改动）。**未做（用户明确不同意）**：测试卫生清单（探针凭证/全局配置残留）**不**补进协议。**另记**：`D:/intelligence-agent-fixbug`（worktree，`feat/FIX-test-BUG`）是并发会话，只读未触碰。
 - 2026-09-17：**ticket #217 图标名集跨端对账（`4cfe40c`；两轴 code-review 后定稿）**。**issue 前提经实测订正**：原文"后端加名 ⇒ 两边测试全绿"**只对一半**——后端侧早已被 `TestCatalogIcons` 锁住（加名进集合 ⇒"集合 == 实际下发的并集"红；加名并由条目下发 ⇒ 逐 id 固定映射红，实测 `Left contains 1 more item: {'custom': 'sparkles'}`）；**真正开着的是前端侧**（前端那把锁比的是自己那份镜像字面量 ⇒"前端删掉一个后端仍在下发的字形"两套测试全绿、那一行**静默空槽**，用户可见退化）。**实现**（issue 建议的选项 B：对账测试，不做 codegen）：①前端名单收敛成**单一声明**的 `as const` 字面量 + `ICONS: Record<CatalogIconName, LucideIcon>`（"名单有名却没字形"`tsc` 阶段红；联合类型不外传；`catalogIcons.test.ts` 的镜像字面量随之删除，否则是第三份副本）；②新增 `TestCatalogIcons::test_frontend_mirror_is_in_sync_with_backend_set`：读 `web/src/lib/catalogIcons.ts` 那份字面量与后端 frozenset **逐值对账**，找不到字面量即失败（不跳过）。**红证实测四态**：后端新增条目+名进集合（旧锁红 + 新用例红）／前端删 `gauge`（vitest 绿、旧锁绿、**新用例红**）／前端加 `rocket` 且配字形（tsc 绿、vitest 绿、旧锁绿、**新用例红**）／前端加连字符名 `file-search`（旧正则 `[A-Za-z0-9_]+` **整名丢掉** ⇒ 静默放行；新正则 `[^'\"]+` 抽 10 名 ⇒ 红）。**两轴 review findings 全部处置**：**P2** 提取正则丢连字符名（审查自己抓出，我原版就是那个正则；名字域里复合词是常态）；**P2** `web/app.py` 定义处仍写"**没有**跨端自动校验"（issue 说缺口登记在**两侧**注释，上一批只改了前端侧）⇒ 改指向新用例；**P3** 三处叙述重复 issue 的错误前提 ⇒ 改实测口径；**P3** 新增的前端运行时循环**近似恒真**（`KNOWN` 由同一数组构造 + `tsc` 保证字形完备）⇒ 删除；**P3** "不做 codegen"的理由漏了仓内先例（`scripts/gen_event_types.py`）⇒ 改写为"生成整份模块 vs 这里字形必须手写"；**P3** `control-row.spec.ts` 注释夸大 e2e 覆盖（9 名里 4 名无覆盖）⇒ 按实际改写。**门禁（`4cfe40c`，独机独占）**：后端 `ruff` All checks passed + `pytest -q` **2410 passed / 10 skipped / 42 deselected / 0 failed（6:03；+1 = 新增对账用例）**；前端 `tsc -b` 0 / vitest **921 passed · 54 files（−1 = 删掉近似恒真那条）** / oxlint **0 error · 44 warning**（未新增）/ playwright **396 passed · 0 failed（8.3m，--workers=2）** / `vite build` ✓。**关单**：是（comment 附实现 + 四态红证 + 门禁数字 + **issue 前提订正**）。明细见 `docs/phase_status/2026-09.md` 同日条。
 - 2026-09-17：**真机巡检批：ticket #218（后端可归因性）+ #219（前端 Ctrl+Enter 丢输入）**（巡检记录 `docs/LIVE_BROWSER_TEST_20260917.md`，边测边写）。**#218**：真机跑 run **全部失败**，事件里只有 `model call failed: BadRequestError`，可操作原因只活在后端日志（实测 `openai.BadRequestError: 400 {'code':'billing','message':'计费账户已被冻结'}`）——`BadRequestError` 横跨「欠费/鉴权/模型名错」三种完全不同的处置路径，不构成信息。修法：把 2026-09-11 就有的内容审查分类机制扩成**分类表**（标记→reason）+ **reason→固定中文文案**，账户/配额/鉴权/模型不存在四类入表；脱敏不变量保持（不回显原文，全文只进 OBS-008 结构化日志）。**真机复核**：同一条被冻结的真 key 复跑，`run/failed.reason=provider_account_unavailable` + 固定文案落盘——证明标记命中的是**真实错误的 `str()`**，不只是自造载荷。**#219**：真机发现 `Ctrl+Enter` **静默丢用户输入**——空状态零请求零会话（`handleSteer` 的 `if (!selectedId) return;` 静默返回，而 `Composer.submit` 末尾无条件 `setValue('')`）；空闲会话则后端 409（`steer requires an active run`）而输入框早已清空。**修法定稿经两轴审查改过一次**：第一版把守卫写成「只在 `streaming` 时才 steer」，Standards 轴指出这与 ADR-0030 §5.1 及 **#196 的结论**冲突（`streaming = mode.kind === 'live'` 只表示**本页**有活流），核对源码后确认审查正确、整条重做——改用两个**事实判据**：空状态按 `selectedId` 退回 `handleSubmit`；有空话但在途 run 已终结则照发 steer，由**后端的 409** 触发交付层改投 queue 重发。**真机复核**：`POST /messages [409] mode=steer` → 自动重投 `[200] mode=queue`，两条消息落库、零错误条（两条请求 `content` 逐字相同 = 只是换了模式）。**顺带修掉一条恒真 e2e 断言**：`i-keyboard.spec.ts` 声称覆盖 Ctrl+Enter 提交，却断言轨道行出现 `键盘提交`，而夹具 `first_user_message` 恰是同名 ⇒ 在**未修复**的代码上照样 2 passed（这个 bug 活到现在的原因），改为断言请求路径 + 载荷。**两轴 finding 全修**：Spec 轴两条 P2 都是我引入的回归——①`isSteerTargetMissing` 读原响应**吃掉 body**，让 T8 #138 那一支的 detail 退化成泛化文案（改读 `res.clone()`，补 T12j 锁住）；②带 `queue_id` 的 steer（队列条「立即」）重投**照抄 queue_id**，而 service.py 是**先 cancel 再判在途 run** ⇒ 重投必撞 404、消息真丢（改成丢掉 queue_id，补 T12i）。**另开两张单（本批不修，见各自正文）**：#220 `run/failed.message` 未投影进 `ConversationState` ⇒ 界面仍只说「失败」（上下文超限路径同样受影响，非本批引入）；#221 迟到的非 2xx（>1200ms 窗）只处理 rejection、不处理 409/404 响应 ⇒ 该窗口内消息仍会丢（#219 的回退只覆盖窗内响应；这是更早的既有缺口，修它要覆盖全部迟到非 2xx，属独立范围）。**门禁（独机独占）**：后端 `ruff check .` All checks passed + `pytest -q` **2416 passed / 10 skipped / 42 deselected / 0 failed（9:15）**；前端 `tsc -b` 0 错 / vitest **921 passed · 54 files** / oxlint **0 error · 44 warning**（未新增）/ playwright **404 passed · 0 failed（12.5m，--workers=2）**（+8 = 本批新增 e2e 用例）。**flake 归属（有据）**：默认并行度下全量曾红 2 例（`j-scroll.spec.ts:41`、`stream-fallback.spec.ts:48`，分别在 1920 / 1280），两个 spec **都不碰本批改动的路径**（不用 Composer、不发 `/messages`——grep 实测零命中），且各自单独跑均全绿、失败视口在两次运行间还会互换 ⇒ 属既有的负载诱发抖动；`--workers=2` 重跑 404/404 全绿。**覆盖闸门**：`scripts/check_review_coverage.sh` exit 0（顺带删掉一条已被本批审查窗口覆盖的死白名单条目 `4bb6fb2`）。
 - 2026-09-17：**ticket #220 失败归因投影进 UI（`d048587`）——上批 #218 的下半：后端算出的原因要到达用户眼前**。**缺口**（#218 只做了后端那半）：`run/failed.data.reason/message` 在 `ConversationState` 里**一条都没投影**，Inspector 只说「失败」两字、Timeline 那一行摘要为空。**实现**：新增 `run_failure {reason,message} | null` 字段 + `projectRunFailed` 折叠 + 两处呈现——Overview 的「失败原因」行（文案 + 等宽分类码）与 Timeline 行摘要（`summarizeRunFailed`；Timeline 是 Inspector **默认页签**，同一句话不该要求先切页签）。**口径**（测试逐条锁定，机制全文收进新 **ADR-0033**）：取消那支不记（取消 ≠ 错误，da394a9）；`reason`/`message` **互相独立、都可缺**（`session.end_run` 各自判空）⇒ 只有 reason（工具失败保险丝 `identical_tool_failure_loop`）时**用码兜底**显示，都比「失败」两字有信息；两键都缺 ⇒ 字段整体 `null`（而非 `{reason:null,message:null}`——那会让 `if (run_failure)` 为真却无内容），绝不伪造文案；`run/started` / `run/completed` / `run/interrupted` 都清空（更晚的终态赢），避免状态行说「已完成」而「失败原因」还挂在旁边。**真机复核（冻结账户 = 真实失败）**：默认 Timeline 摘要即显示该文案；切到 Overview 后「失败原因」行 248px 宽 / **59px 高**（换行为 4 行、`scrollWidth == clientWidth` **未被裁切**）、分类码同屏，且整段在 `page.reload()` 后**逐字一致**（历史重放与实时流同一投影——用户关心的「刷新后内容一致」在这条路径上成立）。**两轴审查（Standards + Correctness）零 P0/P1、6×P2 全修 + 红证 8 条**：①**只有 reason 的载荷在渲染侧什么都不显示** ⇒ 保险丝那一类仍只有「失败」两字（改 `message || reason` 门）；②**默认 340px 下 `.detail-val` 的 nowrap+ellipsis 把 30-45 字文案连同分类码截断**——正好切掉「请到供应商控制台检查计费与配额」这种可操作尾巴，正是本票要修的东西（新增 `run-failure-val` 允许换行 + `title` 兜底；真机实测换行生效）；③机制叙述在 4 处代码里重复且**无 ADR 落点**（§16.1）⇒ 建 ADR-0033，各处收成「操作约束 + 指针」；④漏掉本文件用测试锁过的**「更晚终态复位」惯例**（`run_cancelled` 的同款）⇒ completed/interrupted 也清；⑤类型注释把两键说成必然成对、`message` 必然是「固定可读文案」——后端两条可达路径不符（保险丝只给 reason；上下文超限路径 `message = str(error)` 是内部英文串）⇒ 按实情改写并写进 ADR §2.3；⑥新增组件测试插在**无关 banner 与它的 describe 之间**且复制既有 ChatTab harness ⇒ 移入独立 `StepDetail.runFailure.test.tsx`（与 `StepDetail.trace/peek.test.tsx` 同构）。P3 亦处置：未分类时不再落 truthy 空对象（AC 字面要求 null）、摘要不做 `slice(0,40)` 并写明理由、`detail-val-mono` 补基类、用例组提到顶层、**fork 子会话继承父 run 归因**（判定可接受，写入 ADR §3）。**红证**：把取消守卫 / 终态清理 / 空对象语义 / 摘要兜底 / 渲染门 / 换行类逐一回退 ⇒ **8 条用例按预期变红**，恢复后全绿。
@@ -2025,3 +2025,1567 @@ main 由集成 AI 执行）。
   **门禁**：`ruff check .` All checks passed；全量 `pytest -q` **2517 passed / 10 skipped / 42 deselected / 0 failed（6:49）**（= T04 后 2509 + 本批新增 8 例，逐值对得上）；`git diff --check` 干净；本轮**零环境红**。**残余登记（未修，建议另开票）**：executor 的 `tracer: Any = None` 与 4 处判空属 #250（本票只改 Runtime）；端口机制叙述的落点是 `port.py` 模块 docstring（未新建 ADR）。**票**：#239 / #249 保持 OPEN（父票 #237 / #240 亦 OPEN）。
 - 2026-09-18：**T03 / #239 provider failure 分类表与 DSML 判定下沉 model 层——实现 + 红证 + 门禁**（实现 commit `877d92e`，5 文件 +302/−109；票面 `docs/tickets/architecture-audit-remediation-2026-09-18.md` §T03）。**范围按 issue 冻结决策收窄（记录一处票面/issue 差异）**：整改文档 §T03「范围」写的是「统一 runtime/fallback/test-provider 对状态码和错误类型的判定」，而 issue #239 的已冻结决策是**只**把 Runtime 内 `_PROVIDER_FAILURE_MARKERS` 与 DSML malformed-response 判定**原样迁入** `model` 模块、行为逐字一致，**Web provider connection-test 的字符串分类不在本票内**（如需统一另立子票）。按整改文档自己的裁决规则（issue 正文是 Scope/AC 权威），本票按 issue 执行，**Web 那半未动**。**做了什么**：① 新增 `src/agent_harness/model/failure.py`——标记表（10 条，顺序即优先级）、四个 reason 常量、固定可读文案、`UNCLASSIFIED_FAILURE_MESSAGE`、`classify_provider_failure()`（原 `_classify_provider_failure`）、`has_malformed_tool_call_markup()`（原 `_DSML_MARKUP_MARKER` 的判定），注释与文档逐字随迁；② `agent/runtime.py` 删掉两表（−94 行）与 DSML 常量，两处调用点改指新接口，**DSML 守卫保留「无结构化 tool_calls」那一半**（响应形状是 Runtime 的知识，标记定义在 model 层）；③ `docs/adr/0033` §2.1 与 Related 的 owner 改为 `model/failure.py`（机制叙述单点，§16.1）；④ 新增 `tests/model/test_provider_failure_classification.py`（24 例参数化 golden：矩阵逐项 + 顺序即优先级 + 大小写不敏感 + 未命中 None + 文案键集相等 + DSML 正/负样本 + 两条分层闸门），`test_every_marker_reason_has_a_message` 随表迁入，`test_runtime_failure_paths.py` 导入改指新模块。**AC2/AC3/AC4 由既有 + 新增用例共同钉住**：marker 集 / reason 取值 / 文案 / DSML 正负行为 / fallback 序列均未动（fallback 与失败路径用例全绿；DSML 正负样本既有 `TestMalformedToolCallMarkupGuard` 锁 run 级行为，新模块锁判定本身）。**红证（先红后绿）**：基线缺口两条——`model.failure` 不存在（ImportError）、Runtime 当前 `hasattr(_PROVIDER_FAILURE_MARKERS)` / `hasattr(_DSML_MARKUP_MARKER)` 均为 True；四条变异（恢复后 sha256 逐字节相同）：runtime 注释里抄回 vendor 标记 ⇒ 源码扫描闸红（分层闸仍绿，两闸独立）、runtime 再导出 `_PROVIDER_FAILURE_MARKERS` ⇒ 分层闸红、分类表顺序变更（表首标记挪到表尾）⇒ 表 golden + `test_first_marker_wins` 红、DSML 判据改 `startswith` ⇒ 两条带前缀的正样本红。**门禁**：`ruff check .` All checks passed；全量 `pytest -q` **2504 passed / 10 skipped / 42 deselected / 0 failed（6:35）**（= 上一批 2481 + 新模块 24 − 迁走的 1，逐值对得上）；`git diff --check` 干净。**登记（未做，与规格相关）**：`SPEC_ROOT/02_AGENT_RUNTIME.md` §8「不要用自由文本字符串推断异常类型」——本票只搬位置、不改判据（issue 冻结「逐字一致」）；**仍按文本匹配**的分类现在只住在 model 层，Web connection-test 那处字符串分类（`web/model_providers.py`）留在原地，属另一张子票。**覆盖闸门（如实登记）**：`877d92e` 未审查且未声明 ⇒ exit 1——单票流程 §1.1 不自审，按 §1.2 由后续批量审查补台账行；**未加白名单、未改台账**。票：#239 保持 OPEN。
 - 2026-09-18：**T04 / #249 Tracer/Span 端口 + NullTracer——实现 + 红证 + 门禁**（实现 commit `534bf4c`，3 文件 +443/−86；票面 `docs/tickets/architecture-audit-remediation-2026-09-18.md` §T04 + 父票 #240 的冻结决策）。**票面结构**：父票 #240 是 umbrella，两个子票严格 blockers-first——#249 无 blocker（本票），#250（Executor Tracer seam）blocked by #249 ⇒ 本票**只改 Runtime**、executor 一字未动。**审计 finding（Top 3）**：`RunTracer` 早已让缺席 sink 安全 no-op，但 Runtime 仍以 `tracer=None` 起步并在 model/context/终态路径反复判空（开工实测 8 处 `if tracer is not None` + 12 处 `tracer.trace_id if tracer else None`）——"观测是否存在"渗进 Core 控制流，每加一条运行路径都要记得判空与对称收尾，替换非 Langfuse 实现也只能伪装成 LangfuseSink。**实现**：① 新增 `src/agent_harness/observability/port.py`——`Span`/`Tracer` 两个最小 Protocol（方法集 = Runtime 与 ToolExecutor 当前调用的全部方法，含 `trace_id`/`trace_url` 数据成员）+ `NullSpan`/`NullTracer`（零副作用 no-op、句柄返回对象而非 None）；端口只依赖标准库（不 import Langfuse），`RunTracer` 结构上满足协议、不引入继承耦合；② Runtime：`tracer: Tracer = NullTracer()` 起步，实现选择单点收进新方法 `_new_tracer()`（未注入/未启用 sink → NullTracer，启用 → RunTracer），`tracer.run_started()` 改为无条件调用；③ 删掉全部 8 处 `if tracer is not None` 与 12 处 `else None` 兜底，`_TerminalContext`/`_RunFinalizer` 的 `tracer`/`ctx_span`/`generation` 字段由 `Any` 收敛为 `Tracer`/`Span | None`。**行为逐字不变**：span 名称/metadata/终态字段、Langfuse 熔断与故障隔离（不变量 #21）、`trace_id`/`trace_url` 缺席时仍为 None（不伪造）全部保留。**红证（先红后绿）**：基线缺口两条——`observability.port` 不存在（ModuleNotFoundError）、runtime 零 `NullTracer` 引用。**四条变异（恢复后 sha256 逐字节相同）**：A `_new_tracer` 在 sink 缺席时返回 `None` ⇒ **5 红**（2 新 + 3 既有 golden：disabled-sink 事件流 / no-sink trace_id / disabled-sink trace_url）；B 配了 sink 仍返回 `NullTracer` ⇒ **3 红**（既有 trace_id/trace_url golden——adapter 路径仍被钉住）；C `NullTracer` 空句柄退回 `None` ⇒ **1 红**（新用例"句柄必须是对象"）；D 去掉 `sink.start_observation` 的异常边界 ⇒ **1 红**（新用例"事件流逐字段一致"当场抓到旁路故障泄进 run）。**新增测试** `tests/observability/test_tracer_port.py`（5 例）：NullTracer 全生命周期 + 句柄形状、端口方法集对两个实现闭合（`typing.get_protocol_members` 取成员、不手抄名字）、同一段生命周期脚本对 RunTracer 成立、Runtime 无 sink 时驱动端口（monkeypatch 记录调用序列）、sink 每个方法都抛时事件流与"没有 sink"逐字段一致（含工具重试链的 ToolResult 序列化；唯一豁免是计时字段，正则归零后比较）。**门禁**：`ruff check .` All checks passed；全量 `pytest -q` **2509 passed / 10 skipped / 42 deselected / 0 failed（7:39）**（= 上一批 2504 + 本票 5；测试文件重排后在同一棵最终树上复跑一次，数字一致）；`git diff --check` 干净；本轮**零环境红**（前几批登记的 6 条 symlink + 3 条 eval 宿主闸门红本次未出现）。**登记（未做）**：① `RunTracer` 在根观测缺席/降级时仍返回 `None` 句柄（既有行为、不伪造）⇒ 协议声明 `Span | None` 而非 `Span`；② executor 的 `tracer: Any = None` 与 4 处判空属 #250；③ Runtime 的 sink 注入 seam 保持原样（未改成注入 tracer factory），按父票冻结决策"只定义最小协议与 Null 实现"。**覆盖闸门（如实登记）**：`534bf4c` 未审查且未声明 ⇒ exit 1——单票流程 §1.1 不自审，按 §1.2 由后续批量审查补台账行；**未加白名单、未改台账**。票：#249 保持 OPEN。
+
+---
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— 本批台账起点（2026-09-18） ===== -->
+
+## 批 P1：响应速度与交互流畅度硬化（父票 #267）
+
+- **本批索引**：`docs/tickets/perf-interaction-smoothness-2026-09-18.md`
+- **子票**：GitHub **#268–#281**（14 张）；父票 [#267](https://github.com/EricKingWhy/intelligence-agent/issues/267)
+- **性能数字唯一落点**：`docs/PERF_BASELINE.md`（**不进** `docs/PHASE_STATUS.md`——那里是 Phase 进度表）
+- **并行批次避让**：本批与 `T01–T12 / #237–#248`（+ 18 张子票 #249–#266）**并行飞行**；
+  避让硬规则、对方文件地盘、「已撤回项」表与文件所有权矩阵见索引 §0.1 / §0.3。
+  **9 张前端票（F1–F8 + N2）只改 `web/src/**`，与对方（全 Python）零文件交集**；
+  仅 B6（`storage/sqlite.py`，blocked by #242）与 B8（`agent/runtime.py`，blocked by #247）有受控重叠。
+
+### 批次台账
+
+| 批次号 | 本批 tickets | fixed point | 审查结论 | 修复 commit |
+| --- | --- | --- | --- | --- |
+| **P1-B1** | **#268**、**#269**（均 docs-only） | `45744d3`（**它自身的归属见下方「fixed point 归属」**） | **已审**（两轴独立只读子代理：Standards + Correctness）——fixed point `45744d3`，范围 `45744d3..70d88f2`；轴内合计 **1×P1 + 6×P2 + 6×P3**（其中 2 条 P3 两轴共同指出 ⇒ 去重后 **11** 条），**findings 全数处置**（逐条见下方处置表） | findings 处置 = `2048764`；台账审查行 + 白名单 = 随后的 `chore(review-ledger)` 提交 |
+| **P1-B2** | **#270**（F1，**代码票**）、**#271**（N2，代码票）、**#272**（F2，代码票） | `2048764`（上一批次审查行的 tip） | **已审**（两轴独立只读子代理：Standards + Correctness）——fixed point `2048764`，范围 `2048764..dd66913`（**13 个提交**，覆盖三票累计 diff）；**Standards 轴 1×P1 + 2×P3**、**Correctness 轴 0×P0/P1/P2 + 1×P3**，详见下方「**P1-B2 两轴审查记录（2026-09-18）**」 | findings 处置 = `5ce86f7`（ADR-0037 新增 D5，docs）+ `fe96009`（三文件注释压成「操作约束 + 指针」，**纯注释**）；台账审查行 + 白名单 = 随后的 `chore(review-ledger)` 提交 |
+
+### 票
+
+| Ticket | 描述 | 状态 | 实现方式 | Commit SHA | 门禁结果 |
+| --- | --- | --- | --- | --- | --- |
+| **#268** | 勘误 `docs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done（**未合并**：`1529aa7` 在本批分支上，集成由主开发执行，见索引 §0.5 G5） | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` 机械证明（见下；**blob 哈希是 #269 的 AC7 证据，不是本票的**——两轴 Standards P3 纠正） |
+| **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（**未合并**：`9886a9c` 在本批分支上；`Status: Proposed` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
+| **#270** | **F1**：稳定 `disclosure` / `reasoningDisclosure` 引用，接回被折断的 memo 链 | done（**未落到任何 ref**：`bcdf4e4` 已用 plumbing 造出；本沙箱不能写 ref，待用户在自己的终端执行一条 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | `lib/disclosure.ts` 两个 hook 的返回值改 `useMemo`（票面必做 1 的 **B 方案**，**不取**标注「推荐」的 A 方案——理由与红证见下方证据节）；链路渲染器的 per-render `cycle` 闭包上移为 `useCallback`；已完成段 markdown 收进按**内容**记忆的 `memo(MarkdownBody)`；`ToolCard` 的 `onCycleLevel` 签名带 `(key, density)` | `bcdf4e4` | **全绿**：oxlint **44 → 42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` **59 文件 / 982 用例全绿**（含 `projection.test.ts` 193 条引用稳定契约，**未改写**）；`vite build` 通过；红证 6/14 → 绿 14/14（见下） |
+| **#271** | **N2**：引入 `eventsVersion`，修 `StepDetail` 三处陈旧 memo（**正确性缺陷**——`events` 引用被刻意固定 ⇒ 派生值停在首帧） | done（**未落到任何 ref**：`40851f8`（红证）/ `4e85938`（实现）已用 plumbing 造出；待用户终端 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | 投影层新增 `ConversationState.eventsVersion`（**只在 `events.push` 真执行时 +1**：正常 push 增、去重短路不增、quarantine 分支增）+ `StepDetail` 三处 `useMemo` 依赖 `events` → `eventsVersion`（三处各带**行内** `eslint-disable-line react-hooks/exhaustive-deps`）+ 改写 COW docstring 里那句已被证伪的「无消费者把 events 放进 memo 依赖」 | `40851f8`（红证）+ `4e85938`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、**零顺带消失**）；`vitest` **60 文件 / 990 用例全绿**（F1 时 59 / 982）；perf 车道 `n2-cost-probe.perf.test.ts` 2 例通过；红证 **8 failed / 193 passed** → 改造后 **201/201 全绿**（见下方「N2（#271）验收证据」） |
+| **#272** | **F2**：`Conversation` / `StepDetail` 补齐 `memo` 与 props 收敛 | done（**未落到任何 ref**：`4752236`（红证测试）/ `1f88116`（实现）已用 plumbing 造出；待用户终端 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | 两个组件各装 `memo(...)`（**不写** `areEqual`——票面 Risks 第 1 条那个「比较函数写错就静默吞更新」的失败模式，因 App 侧 props 逐个核对后确认全部天然稳定而**不存在**）；`StepDetail` 6 处宽对象派生收敛为 `useMemo` 且依赖**逐个从被调函数实现读出**后细化到字段（`allTools`→`turns`、`deriveRunPulse`→5 个 run 字段 + `streaming`、`deriveAgentProfile`→`eventsVersion`）；3 处列表 filter + ChatTab 两个计数各自 memo；键盘导航表（原每次提交重建 O(N) 个闭包）包 `useMemo`；`hidden` 挂载语义保留（**未改** `App.tsx` / `projection.ts` / `disclosure.ts` / `app.css`） | `4752236`（红证）+ `1f88116`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` **62 文件 / 1008 用例全绿**（N2 时 62 / 1006，+2 = AC6）；`vite build` rc=0；红证 **7 failed / 11 passed (18)** → 改造后 **18/18 全绿**（见下方「F2（#272）验收证据」） |
+
+> **「SHA 待回填」已回填 —— 顺带记下这次实测到的确切机制（比我原先的说明更准）**：
+> 本 worktree 的沙箱**专门回收 `refs/heads/workbuddy/` 这个目录**：
+> 对它里面的 ref 做任何写入（`git update-ref`、`git commit`）都会让**整个目录被删掉**，
+> 连用户已恢复好的那条 ref 也一并消失；而写到 `refs/tags/**` 的 ref **跨进程存活**
+> （同一次会话内做的对照实验，已分别跨进程复验）。由此三条规律写死：
+>
+> 1. **`git commit` 在本沙箱内不可用**——它会把刚写出的 ref 一起被回收，于是提交对象立刻变孤儿，
+>    下一条命令就报 `does not have any commits yet`（本批实测：`git commit` 打印 `1529aa7` 后同进程即复现）；
+> 2. **提交对象不会丢**，且分支 reflog（共享仓库 `logs/refs/heads/workbuddy/main-f049fadd`）
+>    会逐条记下 `旧sha → 新sha` + `commit: <标题>`——这次就靠它取回 `45744d3 → 1529aa7`，**零数据丢失**；
+> 3. ⇒ 正确姿势 = **用 plumbing 造提交，把 ref 写入留给用户终端**：
+>    `git add`（index 不受影响）→ `git write-tree` → `git commit-tree <tree> -p <parent> -F <msg文件>`，
+>    最后由用户在**他自己的终端**执行一条
+>    `git update-ref refs/heads/workbuddy/main-f049fadd <final-tip>`。
+>
+> 本批的三个提交（`1529aa7` #268 / `9886a9c` #269 / 落点记录）就是这么造出来的。
+> 与 `docs/HANDOFF_PERF_FRONTEND.md` §10 备案第 2 条**同源**，但那条只说到「`update-ref` 退出 0
+> 而 ref 文件不存在」；这里补上「**目录级回收**」这个更精确的机制，以及 `refs/tags` 的对照证据。
+>
+> **当前待落地的完整链条（自 P1-B1 的 findings 处置提交起算，共 **13** 个提交；一次性 `update-ref` 即可全落）**：
+> `2048764`（P1-B1 findings 处置，**P1-B1 审查行 `45744d3..2048764` 的右端**）
+> → `943e1ac`（P1-B1 落点记录）→ `8813dbf`（P1-B1 审查行 + 白名单）
+> → `bcdf4e4`（F1 #270 实现）→ `55892ed`（F1 落点）→ `e4a4b4f`（F1 白名单）
+> → `40851f8`（N2 #271 红证）→ `4e85938`（N2 实现）→ `622f3f5`（N2 落点）→ `79f7f26`（N2 白名单）
+> → `4752236`（F2 #272 红证测试）→ `1f88116`（F2 实现）→ 本次 F2 落点记录 → 本次 F2 白名单
+> （**最后那个白名单提交即待写入的 tip**；这两个提交的 SHA 见交付消息——落点记录写不出自己后继的 SHA）。
+>
+> ⚠ **别把 `2048764` 当成链条的上一个提交**——它**不是** `bcdf4e4` 的父提交：中间还夹着 P1-B1 自己的
+> 两个台账提交（`943e1ac` / `8813dbf`），它们与 P1-B2 的三票一样**尚未落到任何 ref**。
+> 本轮实测的机械校验（`<tip>` = 白名单提交，写在此处供下一次直接复用；**行号是实测值，别凭直觉推**）：
+> `git merge-base --is-ancestor 2048764 <tip>` ⇒ **rc=0**；
+> `git log --oneline -14 <tip>` ⇒ **第 14 条 = `2048764`**、第 15 条 = `70d88f2`；
+> `git log --oneline -12 <tip>` ⇒ 第 12 条 = `8813dbf`（**不是** `2048764`）；
+> ⇒ `2048764..<tip>` 共 **13** 个提交（第 14 条**不计入**，它是范围的左端本身）。
+
+
+
+
+### 两轴审查（P1-B1）与 findings 处置
+
+- **做法**：按 `docs/SDD_WORKFLOW_PROTOCOL.md` §1.2，票数达 2 后对**累计 diff** 跑一次**两轴独立审查**
+  （Standards + Correctness 各一个**独立只读子代理**，互不可见、均不改代码）。fixed point = `45744d3`，
+  范围 `45744d3..70d88f2`；findings 已在工作树全数处置 ⇒ **处置后的树即 `2048764`**。
+- **轴内合计**：Correctness **0×P0 / 0×P1**、**4×P2 + 3×P3**；Standards **1×P1 + 2×P2 + 3×P3**。
+  其中 **2 条 P3 为两轴共同指出**（同一处表述被两轴各记一次）⇒ **去重后 11 条不同问题**。
+- **记账**：`docs/review_ledger.tsv` 新增审查行 `45744d3..2048764`；`45744d3` 自身走 `[whitelist]`（理由见下）。
+- **审查者的独立读数**（登记，不在本批处置）：两轴均确认本批**无代码改动**，故不变量 #22、
+  引用稳定契约与 5 处刻意设计（索引 §0.2 G1）在本批范围内**无从被破坏**；真正的验证责任在 F1/N2 之后。
+
+#### fixed point 归属（Standards **P1** 的处置）
+
+审查行写 `45744d3..` 时，**`45744d3` 自己落在该范围之外**，而它并不在任何既有审查行里。
+`scripts/check_review_coverage.sh` 的判据是「**台账最早 base..HEAD** 每条 commit 都有归属」；
+本仓台账最早 base 是 `089524a~1`（实测 `git rev-list --count` = 1030），故 `45744d3` **确实在待判定集内**——
+这不是「闸门会自动放过」，而是**它会被判成「未审查且未声明」**（闸门红）。
+
+> **这不是新缺陷，是同族缺陷的第三例**：本 tracker 上方 2026-09-17 那条已记过完全相同的形态——
+> 「#213 的 e2e 恰好落在批次边界上，上一批的 fixed point `6f81c6e` 正是它自己的末条提交，
+> 于是它**从没被任何 review 读过**」。本次是 `45744d3`（本批**首**条提交）踩同一处：
+> **批次边界上的那条提交，无论落在首还是尾，都会被 fixed point 漏掉**。
+> ⇒ 这才是真正值得记住的一般化规律；`[whitelist]` 只是这一票的收口，**不是**通用解。
+
+**处置：给 `45744d3` 补一行 `[whitelist]`，不动 fixed point。** 两条理由：
+
+1. 它**确系 docs-only**——只改 `docs/PERF_BASELINE.md` 与
+   `docs/tickets/perf-interaction-smoothness-2026-09-18.md`，脚本的 `DOC_PATTERN` 机械校验能过；
+2. **不能**把 fixed point 往前挪到 `e1266f8` 来「顺手覆盖」它：审查子代理看的是 `45744d3..70d88f2`
+   这段 diff，往前挪等于**谎称审过 `45744d3` 自己的改动**⇒ 正是「**用关闭规则让绿灯变绿**」，
+   与 `docs/HANDOFF_PERF_FRONTEND.md` §10 备案第 1 条点名的错误同类。
+
+#### findings 处置表（11 条，逐条）
+
+| # | 轴 | 级别 | finding | 处置 |
+| --- | --- | --- | --- | --- |
+| 1 | Standards | **P1** | 审查行的 fixed point `45744d3` 是本批**自己的开篇提交**，不在任何审查行范围内 ⇒ 闸门判「未审查且未声明」（与协议 §7 第 8 条点名的 #213 同族失效形态：**fixed point 错位即静默豁免一票**） | 台账 `[whitelist]` 补 `45744d3`（docs-only，机械可验）；**不改** fixed point——往前挪等于谎称审过它的 diff |
+| 2 | Correctness | P2 | ADR-0037 §1 性能表把**实测值**标成 `<10 µs/事件`、把**验收预算**塞进括号 ⇒ 主次颠倒 | 改为 `**0.2 µs/事件**（≈1200×；当次验收预算为 <10 µs/事件）`；Alternatives ① 同步改 `240.9µs → 0.2µs（验收预算 <10µs）` |
+| 3 | Correctness | P2 | ADR-0037 §2(b)「去重短路时长度作键**恰好是错的**」与它自己的 D2 结论**相反** | 改为「**凑巧**与正确结果一致…但那是**巧合而不是契约**：长度**无法区分「长度不变但内容改变」**」 |
+| 4 | Correctness | P2 | ADR-0037 §3(3) 称候选「**有且只有三个**」，而 `Alternatives considered` 实际列了 6 条 ⇒ 自相矛盾 | 改为「在 `Decision` 的结论表里**收敛为三个**（另有三个更细的变体列在 `Alternatives considered`）」 |
+| 5 | Correctness | P2 | 勘误 3 只登记**一处**文外错误断言，同源副本实为**三处**；漏掉的第一处恰恰在**守这条契约的测试内部**（`projection.test.ts:542-544` 的注释在替假前提背书） | 补登 `projection.test.ts:542-544` 与 `3344e34` 提交信息；标题改「同一断言还有**三处副本**」；写明 N2/#271 的修正范围含前者、且**只改注释、不得动那 7 个契约测试的断言** |
+| 6 | Standards | P2 | 票表 `#268` / `#269` 状态写 `done`，但两个 commit 仍在**本批分支上未合并** ⇒ 过度声明 | 两行状态列均补 `（**未合并**…）` 限定语（沿用本 tracker 既有的 `done（…）` 写法） |
+| 7 | Standards | P2 | 勘误 2 没有「可复现证据」而 issue AC3 要求**逐条**写明；勘误 1 的 `--is-ancestor` 结论易被误读成顺带证明了勘误 2 | 补 AC3 口径段：勘误 2 是**状态描述过期**、不涉时间线 ⇒ **不适用** `--is-ancestor`；证据是**当前代码 + ADR 决定**本身 |
+| 8 | 两轴共同 | P3 | 勘误 3 的主回执 `:230` 就在**本文档内**，与顶部索引「指向本文档**之外**」的概述不符 | 顶部索引改为「勘误 3 **兼指**文外一处错误注释与本文档内 `:230` 的同源句——**同一个判断、同一次失效**」 |
+| 9 | 两轴共同 | P3 | 勘误 1 的原句位置写成「§9 末段…**第 3 条**」，实际该行列表标号是 `4.`，TurnView 那句是它括号内的**第 3 个子句** | 改为「**第 4 项「候选额外优化点」内的第 3 个子句**」 |
+| 10 | Correctness | P3 | ADR-0037 把 `events` 写成 `ADR-0016 §2` 的「**第二**处文档化例外」，而 `ADR-0016:33` 原文次序是**第一处 = `events`、第二处 = `seenSeqs`** ⇒ 引用与原文相反 | `Related` 行、§2(2)、D4 对照表**三处**同步更正并引 `ADR-0016:33` 原文 |
+| 11 | Standards | P3 | `#268` 行门禁列写「AC4/AC5 以 `numstat` **+ blob 哈希**机械证明」，但 blob 哈希是 `#269` AC7 用的，`#268` 的 AC 里没有它 | 删去 `#268` 行的「+ blob 哈希」，只留 `numstat` |
+
+> **残余（登记，不阻断关批）**：审查者另指出两轴**共有的**口径问题——本批两条 issue 的 AC3 都要求
+> 「可复现证据含 `文件:行号`」，而 `#268` 的勘误 1 用的是 **`git merge-base --is-ancestor` 结论 + 行号**、
+> 勘误 2/3 用的是**现状引用**，口径**不统一**。已按各条性质分别写明（不强行统一成同一种证据），
+> 未新增机制；若 F1/N2 之后的批次认为需要统一模板，另开票。
+
+> **对账点**：处置仅改 2 个文档（`2048764`），**零代码改动**；`docs/adr/0016-*.md` 两份 blob 与本批基线
+> **逐字节相同**（见下 #269 证据表，该表在本提交后**仍然成立**——本次没有碰 ADR-0016）。
+
+#### 覆盖闸门的 A/B 实测（本批 P1 的红→绿证据）
+
+`scripts/check_review_coverage.sh` 在本沙箱跑不了（需 `wsl.exe`，被安全策略拦下——不重试、不绕过）。
+因此在 Python 里**逐语句复刻了它的算法**（`[whitelist]` 段解析、`tip`/`base` 祖先校验、
+最靠前 base 归约、`rev-list tip --not base` 取覆盖集、台账自身更新自动放行、白名单 docs-only 机械校验），
+对同一份台账与提交图求判定。**它只用于产出证据，不替代你在本机的实跑。**
+
+| 状态 | HEAD | 台账 | 待判定缺口 |
+| --- | --- | --- | --- |
+| 改动**前** | `70d88f2` | `70d88f2:docs/review_ledger.tsv` | ❌ `45744d3` **+** ❌ `877d92e`（**2 条**） |
+| 改动**后** | 本批末条提交（在 `70d88f2` 之上新增的 3 条：findings 修复 → 落点 → 台账） | 工作树（含本批审查行） | ❌ **仅** `877d92e`（**1 条**） |
+
+**权威验收（在你本机执行，可判定）**：
+
+```bash
+scripts/check_review_coverage.sh
+# 预期：仅一行 ❌ 未审查且未声明: 877d92e  refactor(model): ... （#239）
+#      其余本批 commit 全部落在 ✅ 白名单(docs-only) 或 ✅ 台账自身更新（自动放行）
+# 退出码 1 —— 那一条红的归属见下节；本批自身的 5 条（45744d3 / 1529aa7 / 9886a9c /
+#       4c4b2cb / 70d88f2）与本批新增的 3 条均为 ✅。
+```
+
+> 说明口径：上表的「改动后」一行为什么**不写死末条 SHA**——末条是台账提交，写进 tracker 会构成
+> 「提交引用自己的后继」；而 `2048764` 之后的提交**只改台账本身**（走自动放行）或为 docs-only 落点
+> （走白名单），**不改变判定结果**。若你要按 SHA 复现，取 `git rev-parse HEAD` 即可。
+
+⇒ 两件事同时被证明：① 本批的 Standards P1（`45744d3` 无归属）**已真实转绿**，
+且走的是 `[whitelist]` 的 docs-only **机械校验**，**没有放宽任何规则**；
+② `877d92e` **在改动前就是红的**——它与本批无因果关系（见下）。
+
+#### 跨批覆盖缺口（**登记，不属本批**）
+
+- **`877d92e`** `refactor(model): provider failure 分类表与 DSML 判定下沉 model 层（#239）`
+  —— **实现提交**（5 个文件：`src/agent_harness/agent/runtime.py`、
+  `src/agent_harness/model/failure.py`、`docs/adr/0033-run-failure-attribution-surface.md`、
+  `tests/agent/test_runtime_failure_paths.py`、`tests/model/test_provider_failure_classification.py`），
+  归属**并行批次** `T01–T12 / #237–#248` 的 **#239**；时间戳 2026-09-18 15:00:35，作者 `EricKingWhy`。
+- **它为什么没被覆盖**：`git merge-base --is-ancestor 877d92e 182d77a` = **非零**
+  ⇒ 它落在**最后一条既有审查行 `0f5aefd..182d77a` 之后**。`182d77a` 之后的序列是
+  `5836603`（台账自身）→ `d9c2f51`（B-14 落点，白名单）→ `39b2f63`/`dcfb5a1`（台账自身）
+  → **`877d92e`（代码，无归属）** → `1545f6d`（#239 落点，白名单）→ `e1266f8`（台账自身）。
+  即 #239 那批**只落了落点与白名单，尚未补自己的审查行**。
+- **为什么本批不代它收口**：
+  1. `877d92e` 是 `#239` 的**实现提交**，按 `AGENTS.md §4.4`「只有用户、当前主开发或 ticket
+     明确分配的 Task 才写代码」与 §8 Scope Lock，它**不在本批授权内**；
+  2. `#239` 那批**正在并行飞行**（刚落完 `1545f6d` / `e1266f8`）——按索引 §0.1 硬规则第 5 条
+     「同文件有在飞改动 ⇒ 停止并报告」，本批**不抢写**它那条 ledger 行，否则与其审查行重复或冲突；
+  3. **补法只有一条正确路径**：由 #239 那批（或用户指定的人）对 `877d92e` 跑一次两轴 review 后，
+     在 `docs/review_ledger.tsv` **审查段**补一行。**不得**把它塞进 `[whitelist]`——
+     它是代码提交，脚本的 `DOC_PATTERN` 必然拦下（这正是该判据存在的意义）。
+
+#### 顺带：删除 3 条已死的白名单行（沿用仓库既有先例）
+
+本批新增审查行 `45744d3..2048764` 后，`1529aa7` / `9886a9c` / `4c4b2cb` 三条白名单行
+**落入审查范围** ⇒ 不再是「待判定」，闸门会报「白名单条目本次未被用到」（冗余）。
+按仓库既有先例 `dcfb5a1`（`chore(review-ledger): 删掉 5 条已被本批审查窗口覆盖的死白名单条目`）
+一并删除；`45744d3` 的白名单行**保留**（它**不在**审查范围内，正是 P1 要收口的那条）。
+⇒ `[whitelist]` 段的净变动（**实测**，非推算）：**原有 32 条 → 本次新增 2 条
+（`45744d3` 与落点提交）→ 删去上列 3 条 ⇒ 31 条**；审查段 **20 条 → 21 条**。
+两个数字都按「`[whitelist]` 标记之后的非空行数」与「标记之前的非空非注释行数」直接数出。
+
+### #268 证据（docs-only 的「红证」按票面定义 = **diff 证据**）
+
+```bash
+# 改造前基线：45744d3 版本文档
+git show 45744d3:docs/HANDOFF_PERF_FRONTEND.md > "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md"
+# 改造后对照（numstat 第 2 列 = 删除行数）
+git diff --no-index --numstat \
+  "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md" \
+  docs/HANDOFF_PERF_FRONTEND.md
+# 实际输出：
+# 96	0	"…/base-HANDOFF.md" => docs/HANDOFF_PERF_FRONTEND.md
+```
+
+- **AC4**（只改一个文件、删改行数 0）：新增 **96** 行 / 删除 **0** 行 ✅
+- **AC5**（§9 / §10 逐字未变）：由「删除行数 = 0」机械蕴含 ✅
+- 三条勘误的归属：勘误 1 → **F1 / #270**；勘误 2 → **无需新票**（能力已存在，只是文档没跟上事实）；
+  勘误 3 → **N2 / #271**
+- 结构自检：`## 11.` 出现 **1** 次；`### 勘误 ` 出现 **3** 次（恰好三条）✅
+
+### #269 证据
+
+结构自检（`Status` / 四行头 / 章节顺序 / D1–D4 / 字面约束）：
+
+```
+Status:        **Status**: Proposed（待用户批准）
+章节顺序:      ## Context(13) → ## Decision(66) → ## Consequences(128) → ## Non-Goals(148) → ## Alternatives considered(164)
+ADR-0016 count: 7
+D1-D4:          ['D1', 'D2', 'D3', 'D4']
+'eventsVersion` 只度量 events 数组的 append 次数' -> True
+'不是通用脏标记' -> True
+'不进 SessionEvent' -> True
+'补充，不覆盖' -> True
+'projection.ts:1174' -> True
+'projection.ts:1161' -> True
+'3344e34' -> True
+'f97f322' -> True
+```
+
+- **AC7**（`docs/adr/0016-*.md` 零改动）——两份文件 `git hash-object` 与 `45744d3:<path>` **逐字节相同**：
+
+| 文件 | 基线 blob @ `45744d3` | 工作树 blob | 结论 |
+| --- | --- | --- | --- |
+| `docs/adr/0016-streaming-ui-runtime-and-library-strategy.md` | `d9cfca0295e12dea…` | `d9cfca0295e12dea…` | **SAME** |
+| `docs/adr/0016-streaming-ui-detached-run.md` | `5ea5ad5f2d46b95f…` | `5ea5ad5f2d46b95f…` | **SAME** |
+
+### 票面修正记录（本轮同时改了 **#268 / #269 自己的** issue 正文）
+
+两处**我在建票时写下的**不严谨表述已就地修正。**只改本批 #267 系的票**，
+未触碰 #237–#266 的任何 issue / 子票 / 索引文档（并行批次避让硬规则第 2 条）。
+
+| 票 | 原表述的问题 | 修正后 |
+| --- | --- | --- |
+| **#268** | 「`git merge-base --is-ancestor f97f322 a78c322` 为非零 ⇒ `f97f322` **晚于** `a78c322`」——**非因果**：非零只能证明「f97f322 不是 a78c322 的祖先」，不能证明先后 | 改为两条一起给：`--is-ancestor a78c322 f97f322` 返回 **0**（`a78c322` 是 `f97f322` 的祖先）⇒ 晚于；并显式标注反方向那条的**读法警告**。同一修正已落进 §11 勘误 1 |
+| **#269** | 「去重短路（`:1174`）与 quarantine 分支（`:1161`）**都要正确递增**」——**自相矛盾**：`:1174` 是 `return state`，根本没有 push，递增它就等于谎报 append | 改为按「**是否真的 push**」判定：`:1174` **不递增**；`:1161-1163` **递增**。同一修正已落进 ADR-0037 D2 |
+
+修正后均经**线上回读**逐字节核对（`gh issue view --json body` 与本地正文比对，
+唯一差异是 GitHub 侧补的一个尾换行）。
+
+### 本批环境备案
+
+1. **本地 refs 写入静默吞没**（本轮复现）：见上方「SHA 待回填已回填」。
+   处置与 `docs/HANDOFF_PERF_FRONTEND.md` §10 第 2 条一致——**不得**在沙箱内依赖本地 ref 写入。
+2. **bash shim 缺 coreutils**：`ls` / `cat` / `head` / `tail` / `dirname` / `tr` / `grep` 不可用。
+   列目录用 Glob、读文件用 Read、聚合与统计用托管 `python -c`（`git` 本身正常）。
+   ⚠ 实测教训：shell 管道里出现 `grep`/`head` 会让整条管道**静默产出空输出**
+   （`git diff --no-index … | grep -v warning` 曾因此给出**假的「无差异」**）——
+   **校验一律不要经过过滤管道**，改用 python 直接取原始输出。
+   另：`tee` / `sort` / `rm` 也不可用（`rm` 被替换成 safe-delete shim 且自身缺 `dirname`）；
+   所以「`cmd | tee f`」这种写法会**在 `tee` 处断链**——命令已执行、输出已丢。
+3. **plumbing 造提交的 index 陷阱（本轮实测，**踩了**）**：`git add` 是**增量**的，
+   上一轮为造前一个提交而暂存的内容**会留在 index 里**。于是
+   `git add <A>; T=$(git write-tree); git commit-tree …` 造出的树里
+   **同时含上一轮暂存的 `<B>`** ⇒ 提交粒度被污染（实测：落点提交里夹带了台账改动，
+   而那版台账里还写着一个**已被换掉的、变孤儿的 SHA**）。
+   正确姿势二选一：① 造每个提交前先 `git read-tree <parent>` 把 index 重置到父提交的树；
+   ② 更稳：用 `GIT_INDEX_FILE=<临时路径>` 把整个流程隔离在独立 index 上，
+   **完全不碰真实 index**（本轮重造即用此法）。造完再把真实 index
+   `git read-tree <final-tip>` 归位，`git status` 才会干净。
+   ⚠ 附带教训：`commit-tree` **不写 reflog**，一旦命令在管道里断掉（见第 2 条），
+   刚造出的提交对象就**只剩一个拿不到 SHA 的孤儿**——所以 `commit-tree` 的输出
+   **必须直接回显**，不要先接管道。
+
+---
+
+#### F1（#270）验收证据
+
+**票面**：GitHub #270（`## What to build` 必做 1/2/3 + AC1–AC8）。
+**实现 commit**：`bcdf4e4`（9 文件，**+985 / −28**）。
+**性能数字**：`docs/PERF_BASELINE.md` 的 F1 节（G3 硬前置：基线先落，改造后数字再落）。
+
+**红证（改造前 → 改造后，同一条命令、同一批用例）**
+
+做法：三个源文件临时换回 `HEAD` 版本（`git show HEAD:<path>` 写回，**全程未用 `git stash`**——
+本机实测一次 `git stash -u` 会清掉 `.git/refs`），跑完用 sha256 逐字节校验还原。
+
+```
+cd web && node node_modules/vitest/vitest.mjs run src/lib/disclosure.test.tsx src/components/Conversation.render.test.tsx
+```
+
+> ⚠ **本环境两条通道坑（本次实测，写下来省下一轮）**：① `npx` 与 `pnpm` **都不可用**
+> （`npx vitest --version` 只回 UTF-16 的「拒绝访问。」；`pnpm exec` 报
+> `Cannot find module 'C:\Node_modules\pnpm\bin\pnpm.cjs'`）；可用通道是
+> **`node node_modules/vitest/vitest.mjs …`**。② `--reporter=basic` 在 vitest 5 **已不存在**
+> （报 `Failed to load custom Reporter from basic`）——用它会得到一个**看起来像测试失败**的
+> `exit=1`（本次差点据此误判）。
+
+| 阶段 | 结果 | 关键失败断言 |
+| --- | --- | --- |
+| 改造前（`HEAD`） | **6 failed / 8 passed（14）** | R1×2 `expected 3 to be 2`；AC3 `expected 2 to be 1`；AC4 `expected 2 to be 1`；AC5 `expected "vi.fn()" to be called 1 times, but got 2 times`（×2） |
+| 改造后 | **14 passed** | — |
+
+还原校验（三条全部 `sha_match=True`）：`disclosure.ts` / `Conversation.tsx` / `ToolCard.tsx`。
+
+> **注意别把这条读成红证**：AC8 代理用例（点击工具行）在**改造前后都是绿的**——它锁的不是原缺陷，
+> 而是「修法本身不得把交互做坏」（即下面「A 方案否决」里的那条回归）。它的红证在 A 方案实现下取得。
+
+**AC 逐条**
+
+| AC | 结论 | 证据 |
+| --- | --- | --- |
+| AC1 | ✅ | `disclosure.test.tsx` 两个 hook 各一条 R1 用例（依赖未变的连续渲染 `new Set(seen).size === 1`） |
+| AC2 | ✅ | 同文件三条 R2 用例（`setLevel` 连发两次都生效 / `isOpen` 读最新 `density` / `toggle` 压过自动规则） |
+| AC3 | ✅ | `Conversation.render.test.tsx`：挂载 `baseTurns === 1`，4 次无关提交后不增 |
+| AC4 | ✅ | 同文件：只改 `model` 时 `toolRenders` 不增（`onCycleLevel` 稳定） |
+| AC5 | ✅ | 同一内容 5 次提交 `renderMarkdown` 恒 **1** 次；内容变则 **+1** |
+| AC6 | ✅ | `oxlint` 44 → **42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` 59 文件 / 982 用例全绿；`vite build` 通过 |
+| AC7 | ⚠ **有披露** | `git diff --stat` 除 Scope lock 允许的 4 个文件外，另有 `web/package.json` + `web/pnpm-lock.yaml`（新增 devDependency **jsdom**）——见下方「披露与偏离」第 1 条 |
+| AC8 | ⚠ **部分** | **可自动化代理已覆盖**（点击工具行 `aria-level` 0 → 1，且在 A 方案下实测为红）；**手工冒烟截图/录屏未取得**——⚠ 2026-09-18 更正理由：真机浏览器**一直可用**（`web/e2e` 主车道用真机 Chromium，本轮实测 436 绿），缺的是**该口径的产物本身**（人工录制的截图/录屏需人执行并归档）。解除条件见 `PERF_BASELINE` F1 节「未闭合」段 |
+
+**披露与偏离（逐条）**
+
+1. **`web/package.json` + `web/pnpm-lock.yaml`（在 AC7 的 Scope lock 允许清单之外）**：新增
+   devDependency `jsdom ^30.1.0`。理由：AC1–AC5 判的全是「**同一实例**在父级提交时有没有重渲染」，
+   而单次 SSR 渲染里 `memo` 的浅比较**根本不执行**（本仓既有 10+ 处注释写明「本仓没有 jsdom」，
+   默认车道是 `renderToStaticMarkup`）。两个新测试文件用**文件级** `// @vitest-environment jsdom`
+   覆盖，全局 `vitest.config.ts` **不动**，其余 57 个测试文件继续跑 node。
+   **该依赖变更已先经用户选择确认**（选项「加 jsdom（推荐）」）。
+2. **新增 `web/src/lib/f1-cost-probe.perf.test.ts`**：`PERF_BASELINE` §3 要求每条数字可复核
+   （命令 + 脚本路径），它是 F1 **单次成本**数字的复现脚本。与仓内既有的
+   `projection.perf.test.ts` / `streaming.perf.test.ts` 同属 perf 车道
+   （`vitest.config.ts` 已排除 `*.perf.test.ts`，**不进** `npm test`）。
+3. **票面「推荐 A 方案」被否决（实质偏离）**：见下。
+
+**A 方案否决（票面必做 1 把 A 标为「推荐」，本票取 B）**
+
+- **A 方案** = `useRef` 稳定容器，返回对象**身份永不改变**；**B 方案** = 整体 `useMemo` + 依赖补全。
+- **否决理由（功能性缺陷，不是风格）**：`levelFor` 是在 `TurnView` **自己的渲染体**里被调用、
+  用来算每个工具卡的 `level` 的（`Conversation.tsx:711`）。点了档位 → `setLevel` → `overrides` 变，
+  此时**必须**让 `memo(TurnView)` 重新比较出「不等」，`TurnView` 才会重渲染、新的 `level` 才流得到
+  `ToolCard`。身份永不改变 ⇒ memo 恒 bail out ⇒ **点击工具行的档位循环静默无效**——正是票面
+  `## Risks` 点名的那类「点了没反应」的静默 bug，只是换了个触发形态。
+- **实测红证**：先在 A 方案实现下跑新增的 AC8 代理用例，得
+  `AssertionError: expected 1 to be greater than 1`（**TurnView 一次都没重渲染**）；
+  换 B 方案后同一条转绿，14/14 全绿。
+- **B 方案的代价已逐项核对**（票面 Risks 称它「比 A 危险」）：两个 hook 的捕获面实测为
+  `useDisclosure` `[overrides, setLevel]`、`useReasoningDisclosure` `[overrides, density, toggle]`
+  （`levelFor` 的 `density` 是**调用方参数**、不进闭包）。每种漏依赖的失败形态都有用例钉住（AC1/AC2 表）。
+- **附带**：为满足 R1 的字面口径（「同一实例连续两次渲染 `===` 相等」），清空 override 的
+  `useEffect` 加了「**挂载期跳过**」守卫——挂载那一次清空是**可证明无内容变化**的状态写入
+  （`useState` 初值本就是一张空 Map），它白渲染一次并破坏 R1。顺带把 `lib/disclosure.ts` 的
+  `react(set-state-in-effect)` 告警 **2 → 0**，故全仓告警数 44 → 42（净减 2，零新增）。
+
+**未闭合项（每条写明解除条件）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 在真机 Chrome Performance 面板按固定场景录一次（同窗口尺寸 + 同一段长回答 + 同一操作序列：打开 → 流式 → 折叠/展开工具卡 → 切 density），trace 存档并把两列数字补进 `PERF_BASELINE` F1 节 |
+| 交互语义的手工冒烟（AC8 的原始口径：截图 / 录屏） | **未取得** | 同上真机环境；已用 AC8 的可自动化代理先行覆盖 |
+| perf 车道覆盖不到「已完成段重复渲染」这类回归 | **本票不做** | 票面已指定归属：N2/#271 落 `eventsVersion` 后，在 perf 车道加一条「已完成后追加 delta ⇒ 已完成段 render 次数不增长」的比例型探测器 |
+| `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269，不在本票范围） |
+
+---
+
+#### N2（#271）验收证据
+
+**票面**：GitHub #271（`## What to build` 必做 1–4 + AC1–AC10）。
+**实现 commit**：`4e85938`（实现，6 文件）＋ `40851f8`（红证 + 前置基线，3 文件）；
+两者合起来对 `e4a4b4f` 的净 diff = **8 文件 / +355 −14**。逐文件（`git diff --numstat`，实测）：
+
+| commit | 文件 | +/− | 归属 |
+| --- | --- | --- | --- |
+| `40851f8` | `web/src/components/StepDetail.render.test.tsx`（**新增**，jsdom 车道） | +114 | 票面必做 4（组件红证） |
+| `40851f8` | `web/src/lib/projection.test.ts` | +70 | 票面必做 4（投影红证） |
+| `40851f8` | `docs/PERF_BASELINE.md`（N2 改造前基线节，G3 硬前置） | +31 −1 | 本批 G3 |
+| `4e85938` | `web/src/lib/n2-cost-probe.perf.test.ts`（**新增**，perf 车道） | +80 | `PERF_BASELINE` §3 可复核要求 |
+| `4e85938` | `web/src/components/StepDetail.tsx` | +26 −8 | 票面必做 2 |
+| `4e85938` | `web/src/lib/projection.ts` | +16 −5 | 票面必做 1 + 3 |
+| `4e85938` | `web/src/types.ts` | +14 | 票面 Scope lock「类型所在处」 |
+| `4e85938` | `web/src/lib/projection.test.ts` | +2 | 编译器强制的形状断言补键 |
+| `4e85938` | `web/src/hooks/useSession.test.ts` | +2 | 编译器强制的构造点 |
+
+**根因（本票是**正确性缺陷**，不是性能票）**：`applyEvent` 返回**新 state 对象 + 同一个 `events` 引用**
+（P0-1 / `3344e34` 刻意固定的 append-only 共享数组）。`useMemo` / `React.memo` 比的是**引用** ⇒
+`StepDetail.tsx` 三处以 `events` 为键的派生值**首次计算后再不重算**：Timeline 的 run 分组停在首帧
+（第 2 个 run 的组头永不出现、老组的「N 事件」永不涨）、Inspector 头部 run 数、选中行 `findIndex` 定位。
+`projection.ts` 的 COW docstring 当时把「**无消费者把 events 放进 memo 依赖**」写成契约——该句已被事实证伪，
+本票必做 3 改写它。
+
+**红证（先红后绿，同一条命令、同一批用例）**
+
+做法：四个文件临时换回 `40851f8` 版本（`git show <sha>:<path>` 写回，**全程未用 `git stash`**——
+本机实测一次 `git stash -u` 会清掉 `.git/refs`），跑完用 `git hash-object` 与 `4e85938:<path>` 逐字节对账还原。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run src/lib/projection.test.ts src/components/StepDetail.render.test.tsx
+```
+
+| 阶段 | 配置 | 结果 | 关键失败断言 |
+| --- | --- | --- | --- |
+| 改造前（`40851f8` 精确复现，本轮实测） | 三个源文件 + `projection.test.ts` 全部换回 `40851f8` | **8 failed / 193 passed（201）** | `src/lib/projection.test.ts` **199 tests / 6 failed**（全部落在 `❯ eventsVersion — events 追加的精确信号（ADR-0037 D2）`）+ `src/components/StepDetail.render.test.tsx` **2 tests / 2 failed**（`× AC7 追加 run 2 后：组头从 1 个变 2 个、行数从 4 变 6（改造前均为陈旧值）`、`× AC7 已存在组的计数与状态也刷新（不是只追加新组头就完事）`）；断言文本见 `PERF_BASELINE` N2 节（同一次红态的失败输出）：`expected undefined to be +0`（AC1）/ `to be 1`（AC2–AC4）/ `to be 5`（AC5）、`expected [ 'Run 1已完成4 事件' ] to have a length of 2 but got 1`、`expected 'Run 1已完成4 事件' to contain '5 事件'` |
+| 改造后（`4e85938` 工作树，本轮实测） | — | **201 passed（201）** | — |
+
+> **两条数字的关系（防止被读成互相矛盾）**：上表第一行的 **8/193** 是 `40851f8` **自身**的红态，
+> 与 `PERF_BASELINE` N2 节记录的数字**逐字一致**（本轮独立复现，非转抄）。
+> 另做了一组更严的 A/B——**只**换回三个源文件、保留实现后的测试文件 ⇒ **9 failed / 192 passed**：
+> 多出的那一条正是 `initConversation` 的形状断言（实现 commit 给既有断言补了 `eventsVersion: 0`，
+> 源码回退后该键不存在）。两个数各自成立、差值 1 可逐条解释；**台账只引用与配置相符的那一个**。
+> 还原对账：4 个文件 `git hash-object` == `4e85938:<path>` **全部 SAME=True**；还原后复跑同一命令 **201/201 绿**。
+
+**AC 逐条**
+
+| AC | 结论 | 证据 |
+| --- | --- | --- |
+| AC1 | ✅ | `web/src/types.ts` 新增 `eventsVersion: number`（含「只在 `events.push` 真执行时 +1」的语义注释）；`initConversation` / `projectHistory` 产物为 `0`，`projection.test.ts` 两条断言 |
+| AC2 | ✅ | 正常 push 路径 `next.eventsVersion = state.eventsVersion + 1`（`projection.ts`），对应用例 +1 |
+| AC3 | ✅ | 去重短路 `return state` 分支**不**递增；用例同时钉住「返回的还是**同一个** state 对象」 |
+| AC4 | ✅ | quarantine 分支同样 +1（该分支也真的 `push` 了 `events`） |
+| AC5 | ✅ | 同一串事件下 `projectHistory(...)` 与逐帧 `applyEvent` 得到相同 `eventsVersion`；另加**引用稳定守卫**用例（新增字段**不得**改变 `events` 引用，P0-1 非回归） |
+| AC6 | ⚠ **命令口径需订正，实质达成** | 三处依赖均已改为 `eventsVersion`，`events` **不再**作依赖。但票面给的字面命令 `grep -n "\[conversation\.events\|\[conversation?\.events"` **会命中 3 行**——命中的正是新依赖 `[conversation?.eventsVersion]` / `[conversation.eventsVersion]` 的**前缀**（正则第二个备选未加词尾边界）。带边界的正确判据 `grep -nE "\[conversation\??\.events\]"` = **空**（本轮实测）。**未改票面正则去掩盖**，按实情登记 |
+| AC7 | ✅ | `StepDetail.render.test.tsx`（`@vitest-environment jsdom`）两条：同一实例追加事件后组头数 **1 → 2**、行数 **4 → 6**；已存在组的计数 **4 → 5**。**改造前失败输出见上表**（同一文件在 `40851f8` 下 2/2 红） |
+| AC8 | ✅ | COW docstring 改写为新契约（依赖 `eventsVersion`、不依赖 `events`、并写明 `events.length` **不是**替代品）；`projection.ts` 中 `eventsVersion` 出现 **4** 次（≥2） |
+| AC9 | ✅ | `tsc -b` **0 错误**（输出 0 字节）；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` **60 文件 / 990 用例全绿**；perf 车道 `n2-cost-probe` **2 例通过**；`vite build` **rc=0** |
+| AC10 | ⚠ **有披露** | 见下方「披露与偏离」第 1–3 条（4 个票面清单外的文件，逐个有理由） |
+
+**门禁（同一 commit 树，本轮重跑，全绿）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint --format json` | rc=0，**42 条**（全 warning / 0 error），与 F1 基线 **42** 持平 |
+| 单测全量 | `node node_modules/vitest/vitest.mjs run` | rc=0，**60 文件 / 990 用例全绿**（F1 时 59 / 982） |
+| perf 车道 | `… -c vitest.perf.config.ts src/lib/n2-cost-probe.perf.test.ts` | rc=0，**1 文件 / 2 用例** |
+| 生产构建 | `node node_modules/vite/bin/vite.js build` | rc=0（仅既有的 chunk-size 提示） |
+
+> **`oxlint` 零新增的机械依据（不只看总数）**：本票触碰的 7 个文件里只有 `StepDetail.tsx` 有告警，
+> 共 **3 条**且全部是本票之前既有的、且都不在改动行上——2×`react(only-export-components)`（`:907` / `:927`）
+> + 1×`react(refs)`（`:1004`，F1 已登记为「原样保留」）。另外 6 个文件 **0 条**。
+> 三处新依赖本应新增的 6 条 `exhaustive-deps` 被**行内** `// eslint-disable-line` 精确吞掉；
+> 本版 oxlint 剩余的 3 条 `exhaustive-deps` 全落在本票**未触碰**的文件（`lib/followLatest.ts` / `hooks/useSession.ts`）。
+> ⇒ 总数持平既不是「新增被抵消」，也不是「既有被顺带吞掉」。机制与最小复现见 `PERF_BASELINE` N2 节。
+
+**披露与偏离（逐条）**
+
+1. **`web/src/components/StepDetail.render.test.tsx`（新文件，票面写的是 `StepDetail.test.tsx`）**：
+   AC7 判的是「**同一实例**在父级提交后有没有重算派生值」，而 `useMemo` 的 bail-out 只在**客户端渲染器**
+   的 reconciliation 里发生——既有 `StepDetail.test.tsx` 是 SSR（`renderToString`）契约测试，每次调用都是全新
+   一次渲染、`useMemo` 必然重算，**陈旧 memo 在 node 车道里不可观测**。而 `@vitest-environment` 是**文件级**
+   指令，加在既有文件上会把它**全部**既有用例一起换车道 ⇒ 另开同构文件（沿用 F1 `Conversation.render.test.tsx`
+   的同一做法），全局 `vitest.config.ts` **不动**。依赖 `jsdom` 已在 F1 落地（经用户确认），本票**未**再增依赖。
+2. **`web/src/hooks/useSession.test.ts`（+2）**：`conv()` 夹具是 `ConversationState` 的**构造点**，
+   新增必填字段后 `tsc -b` 立刻红——这正是票面 `## Risks` 预告的「编译器会指出全部构造点」。
+   只补 `eventsVersion: 0`，**不改**该文件任何行为或断言。
+3. **`web/src/lib/n2-cost-probe.perf.test.ts`（新文件，+80）**：`PERF_BASELINE` §3 要求每条数字可复核
+   （命令 + 脚本路径）。与仓内既有的 `projection.perf.test.ts` / `f1-cost-probe.perf.test.ts` 同属 perf 车道
+   （`vitest.config.ts` 已排除 `*.perf.test.ts`，**不进** `npm test`）。
+4. **`docs/PERF_BASELINE.md`**：不在票面 Scope lock 的允许清单里，但它是本批 **G3 硬前置 + 性能数字唯一落点**
+   （索引 §0.3 与 tracker 批次表头都写明），F1 已按同一口径处理。
+
+**未闭合项（每条写明解除条件）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| **F1 的未闭合项「perf 车道补一条『已完成后追加 delta ⇒ 已完成段 render 次数不增长』的比例型探测器」票面把它归给了 N2——本票`未做`** | **未做（如实登记）** | 本票 perf 车道新增的是**成本**探针（`eventsVersion` 增量的 A/B + `groupEventsByRun` 调用频率折算），**不是** render 次数探测器。解除条件：随 **F2（#272，memo 与 props 收敛）**一并补——F2 正要把 `allTools` / `deriveAgentProfile` 这些宽对象派生收敛，render 次数在那之后才有稳定口径；若 F2 也不做，则另开票 |
+| `StepDetail.tsx` 其余以宽对象为依赖的派生（`allTools(conversation)`、`deriveRunPulse`、`deriveAgentProfile`、三处 `tools.filter`、`events.map` 建闭包） | **本票不处理** | 票面 `## 未闭合项` 已指定归属：**F2**（memo 与 props 收敛）与 **F5**（长列表离屏）合并 |
+| `projection.perf.test.ts` 的 `applyEvent @N` 基准走**去重短路**路径（`seq` 恒 `999999`）⇒ 它对 push 路径的回退是瞎的 | **仅登记，未改他人行** | 把基准里的 delta 换成每次新 `seq`（一行改动）后重测；或由本票的 `n2-cost-probe` 承担 push 路径预算断言（后者已带 `<50µs` 断言，**已覆盖**，故本条不阻塞） |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 同 F1：要么写 CDP `PerformanceObserver('longtask')` 采集脚本（可自动化、本批未做），要么人工在 Performance 面板按固定场景录一次并归档。⚠ 2026-09-18 更正理由：真机 Chromium **一直可用**（e2e 主车道本轮 436 绿），不是「无 GUI 浏览器」 |
+| 交互语义的手工冒烟（截图 / 录屏） | **未取得** | 同上真机环境；AC7 已用可自动化用例先覆盖（且带改造前失败输出） |
+| `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269） |
+
+**审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
+`40851f8` / `4e85938` 交由 **P1-B2** 的两轴审查窗口（起审点 = #272 落地后，范围自 `2048764` 起算）覆盖。
+
+---
+
+#### F2（#272）验收证据
+
+**票面**：GitHub #272（`## What to build` 必做 1/2/3 + AC1–AC9）。
+**实现 commit**：`1f88116`（实现，2 文件 +145 −44）＋ `4752236`（红证测试，2 文件 +545）；
+两者合起来对 `79f7f26`（N2 tip）的净 diff = **4 文件 / +690 −44**。逐文件（`git diff --numstat`，实测）：
+
+| commit | 文件 | +/− | 归属 |
+| --- | --- | --- | --- |
+| `4752236` | `web/src/components/Conversation.memo.test.tsx`（**新增**，jsdom 车道，7 条） | +195 | AC1 / AC3(a) 红证 |
+| `4752236` | `web/src/components/StepDetail.memo.test.tsx`（**新增**，jsdom 车道，11 条） | +350 | AC1 / AC2 / AC3(a) / AC6 红证 + 反例守卫 |
+| `1f88116` | `web/src/components/StepDetail.tsx` | +124 −42 | 票面必做 1 + 2 + 3 |
+| `1f88116` | `web/src/components/Conversation.tsx` | +21 −2 | 票面必做 1 |
+
+**做法（为什么**不写** `areEqual`）**：票面 Risks 第 1 条把「`areEqual` 写错 ⇒ 静默吞更新」列为
+**高**风险，并点出两条具体失败模式（漏比 `jumpRequest.nonce` ⇒ 点 Timeline 跳转失效；
+漏比 `goneApprovalIds` ⇒ 审批卡不失效）。逐项核对 `App.tsx` 后确认两个组件的 props
+**全部天然稳定**——`focus`(:265) / `panel`(:269) / `jumpRequest`(:303) / `goneApprovalIds`(:321)
+是 `useState` 持有的对象，`onPresetTask`…`onApprovalGone`(:277-351) 是 `useCallback`，
+`disclosure` / `reasoningDisclosure` 由 F1（`lib/disclosure.ts:123-126` / `:177-181`）稳定，
+`conversation` 每次投影提交换引用（**应该**重渲染的信号），`streaming` / `density` 是布尔/枚举。
+⇒ 两个 `memo` 都**不传** `areEqual`，那个失败模式连同它一起不存在；依据写在两个组件头上的注释里。
+
+**红证（先红后绿，同一条命令、同一批用例）**
+
+做法：两个源文件临时换回 `79f7f26`（`git show <sha>:<path>` 写回，**全程未用 `git stash`**），
+跑完按字节还原并 sha256 对账（两文件 `same=True`，`Conversation.tsx` `8b5679df…`、
+`StepDetail.tsx` `da9972e4…`）。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run src/components/Conversation.memo.test.tsx src/components/StepDetail.memo.test.tsx
+```
+
+| 阶段 | 文件级 | 合计 | 关键失败断言 |
+| --- | --- | --- | --- |
+| 改造前（两源文件 = `79f7f26`，新用例保留） | `Conversation.memo.test.tsx` **7 tests / 2 failed**；`StepDetail.memo.test.tsx` **11 tests / 5 failed** | **7 failed / 11 passed (18)** | `expected undefined to be Symbol(react.memo)`（AC1 ×2）、`expected 6 to be 1`（Conversation 6 次无关提交）、`expected { all: 2, pulse: 2, profile: 2 } to deeply equal { all: 1, pulse: 1, profile: 1 }`（AC3(a) / AC2 / 反例守卫 ×2） |
+| 改造后（`1f88116` 工作树，本轮实测） | 同两文件 | **18 passed (18)** | — |
+
+> **改造前就通过的那 11 条不计入红证**：含 AC6 两条与「输入变了必须重算」三条——它们是
+> **不变式守卫**而不是新行为，改造前天然成立（改造前导航表本来就每次提交重建；没有 memo
+> 当然也不会漏重算）。红证只认「改造前必红」的 7 条。
+
+**变异检验（钉住导航表的 `eventsVersion` 依赖确实是可载荷的）**
+
+导航表 `listTargets` 若漏掉事件变化或用陈旧长度，`↓` 会在原位置**静默不动**
+（`moveSelection` 里 `next === selectedIndex` 直接 return，连回调都不发）⇒ 这正是 F2 最容易
+做错、且**没有用例就发现不了**的地方。把依赖数组里的 `conversation?.eventsVersion` 摘掉
+（只此一处、只此一项），AC6 第二条立刻转红：
+
+```
+× 追加事件后 ↓ 能走到新增的那一条（陈旧导航表会原地不动、连回调都不发）
+AssertionError: expected 'run/completed' to be 'session/resumed'
+Tests  1 failed | 10 passed (11)
+```
+
+`StepDetail.tsx` sha256：变异前 `da9972e4d83c4b21…` → 变异后 `084ce979e4f12744…` → 还原后
+**逐字节相同**；还原后复跑同一文件 **11/11 绿**。
+
+**AC 逐条**
+
+| AC | 结论 | 证据 |
+| --- | --- | --- |
+| AC1 | ✅ | 两个组件均以 `export const X = memo(function X(...) {...})` 形式导出（具名导出 ⇒ `App.tsx` 的 import 与调用点一字未改）；用例直接断言 `$$typeof === Symbol.for('react.memo')`（改造前该断言红，见上表） |
+| AC2 | ⚠ **口径收窄，实质达成** | 票面字面「内容未变的部分不重渲染」在 N2 契约下不可达（理由见 AC3）。收窄后：追加一个**不改轮次**的事件 ⇒ `tools` / `pulse` 零重算（前提钉住：`second.events === first.events`、`eventsVersion` +1、`turns` 引用不变）；另配 `text delta 换 turns 引用 ⇒ allTools 必须重算` |
+| AC3 | ⚠ **口径收窄（经用户 2026-09-18 裁定）** | **票面原文与 N2 契约正面冲突**：`deriveAgentProfile` 的键按必做 2 必须=`eventsVersion`，而任何**真正追加成功**的事件都让 `eventsVersion` +1（`projection.ts:1171/1190`；唯一不增的是去重短路 `return state`，它返回**同一个 state 对象**）⇒ 必然重算；`model/delta` 还经 `withTurnAt → replaceTurnAt`（`projection.ts:251-254`）换掉 `turns` 引用 ⇒ 连 `allTools` 也必然重算。收窄为 (a) 与对话无关的 5 次提交 ⇒ **全部派生 0 次重算**（改造前各 +5）+ (b) 追加不改轮次的事件 ⇒ `tools`/`pulse` 稳定、`agentProfile` **如实断言 +1**（不假装它没涨）。代码级理由写在 `StepDetail.memo.test.tsx:21-34` 文件头 |
+| AC4 | ✅（**票面命令有一处前缀误命中**） | 票面原命令 `grep -n "conversation\.events" src/components/StepDetail.tsx` 命中 **15 行**，逐行归属：渲染/`.length`（`:432 :437 :802 :810 :1023 :1081 :1154 :1157 :1656`）、注释（`:976 :1020`）、被调函数实参（`:197 :1037 :1050`）、**前缀误命中**（`:1037 :1051` —— 这两行的依赖位文本是 `conversation.eventsVersion`，正则 `.` 吃掉了它）。**依赖位反向判据** `grep -nE "[\[,]\s*conversation\??\.events\s*[,\]]"` = **空**、带边界判据 `grep -nE "\[conversation\??\.events\]"` = **空**（本轮实测）。⇒ 无一行把 `events` 放在依赖位；**不改票面正则去掩盖**，按实情登记 |
+| AC5 | ✅ | 8 处 filter 逐条对照（下表），谓词**逐字照抄**、`isCommand` 仍取 `../lib/commandOutput`（`StepDetail.tsx:27`，未改）；tab 计数另有用例钉住（Timeline 5 / Terminal 1 / Changes 0 / Artifacts 0） |
+| AC6 | ✅ | 新增 2 条：① 无选中时 `↑` 选最后一条 ⇒ peek 显示的是**当前**列表最新事件（`session/resumed`）；② 追加事件后从原选中项按 `↓` 能走到新增的那一条（陈旧导航表会原地不动）——②的**判别力由变异检验证明**（上节），另配「run 收口后 `pulse` 必须重算」与「同内容新对象必须重渲染」等 4 条反例守卫 |
+| AC7 | ✅ | `tsc -b` rc=0、输出 **0 字节**；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` rc=0 **62 文件 / 1008 用例全绿**；`vite build` rc=0。⚠ 票面写的是 `npm run lint/build/test`：本环境 `npx` / `pnpm` 均不可用（F1 已登记），等价命令用 `node node_modules/...` 直调——**同一份配置、同一个 bin**，非替换口径 |
+| AC8 | ✅（**2026-09-18 已跑，缺口闭合**） | **真机 Chromium（用户本机）e2e 全量**：`web/e2e/` **436 passed / 0 failed**，退出码 0，耗时 10.2 分钟，**无收尾挂死**（主车道两个 project：chromium-1280 / chromium-1920 `--workers=2`）。与本票直接相关的 9 个 spec 逐条绿（**条数为每个 project**；两个 project 各跑一遍 ⇒ 合计 2×）：`y-inspector-peek` **9**（AC1–AC9，含 AC6 拖宽 / AC8 头部不溢出 / AC9 子会话头）＋ `i-keyboard` 3 ＋ `j-scroll` 3 ＋ `z-artifact-content` 6 ＋ `x-output-panel` 7 ＋ `z-changes-panel` 3 ＋ `a-reasoning` / `c-tool-output` / `h-density` 各 1。**更正登记口径**：此前写的「需真后端」**不准确**——主车道 `playwright.config.ts` 用 `page.route` mock SSE（`e2e/fixtures.ts`），**核心矩阵不依赖真后端**，本环境一直可跑（命令 `node node_modules/@playwright/test/cli.js test`，`npx` 不可用）。**仍未闭合**：`playwright.live.config.ts` 联调车道（真模型 + 真后端 127.0.0.1:8000）**未跑**——它按设计不入标准门禁，见 `PERF_BASELINE` F2 节 |
+| AC9 | ✅（代码提交）/ ⚠ **有披露**（docs 提交） | `git diff --stat 79f7f26 1f88116` = **恰好 4 个文件**，全部落在 Scope lock 允许清单内（`Conversation.tsx` / `StepDetail.tsx` / 及其 `web/src/components/*.test.tsx`）⇒ 代码提交 AC9 成立；落点记录提交另含 3 个 docs（见「披露与偏离」第 1 条） |
+
+**AC5 逐条对照（前后等价）**
+
+| 位 | 改造前（`79f7f26`） | 改造后（`1f88116`） | 等价 |
+| --- | --- | --- | --- |
+| `tabCounts` changes | `:186` `tools.filter((t) => t.diff).length` | `:203` `diffTools.length` ← `useMemo(() => tools.filter((t) => t.diff), [tools])` | ✅ 同谓词、同 `tools` 源 |
+| `tabCounts` terminal | `:187` `tools.filter(isCommand).length` | `:204` `commandTools.length` ← 同上 | ✅ 复用同一 `isCommand` |
+| `tabCounts` artifacts | `:188` `tools.filter((t) => t.artifact).length` | `:205` `artifactTools.length` ← 同上 | ✅ |
+| ChatTab running | `:639` `tools.filter((t) => t.status === 'running').length` | `:609` `runningToolCount` ← `useMemo(…, [tools])`，渲染于 `:717` | ✅ |
+| ChatTab failed | `:643` `tools.filter((t) => t.status === 'failed').length` | `:610` `failedToolCount`（同上），渲染于 `:721` | ✅ |
+| ChangesTab diffs | `:1140` `tools.filter((t) => t.diff)` | `:1220` 同谓词，包 `useMemo` | ✅ |
+| TerminalTab bashes | `:1168` `tools.filter(isCommand)` | `:1249` 同谓词，包 `useMemo` | ✅ |
+| ArtifactsTab artifacts | `:1208` `tools.filter((t) => t.artifact)` | `:1290` 同谓词，包 `useMemo` | ✅ |
+
+> 另：`tools` 基底由 `:174` 的**每渲染调用一次** `allTools(conversation)` 改为
+> `:189` `useMemo(() => (conversation ? allTools(conversation) : EMPTY_TOOLS), [conversation?.turns])`；
+> `EMPTY_TOOLS` / `EMPTY_TARGETS` 是**模块级常量**——`useMemo` 的依赖比较是**引用比较**，
+> 在渲染里新建 `[]` 会让记忆化永久失效（`!conversation` 分支下也会）。
+
+**门禁（同一 commit 树，本轮重跑，全绿）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint --format json` | rc=0，**42 条**（全 warning / 0 error），与 F1、N2 基线 **42** 持平 |
+| 单测全量 | `node node_modules/vitest/vitest.mjs run` | rc=0，**62 文件 / 1008 用例全绿**（N2 时 62 / 1006） |
+| 生产构建 | `node node_modules/vite/bin/vite.js build` | rc=0（仅既有的 chunk-size 提示） |
+
+> **`oxlint` 零新增的机械依据（不只看总数）+ 一条与直觉相反、值得后续票复用的规律**：
+> 本票触碰的 4 个文件里只有 `StepDetail.tsx` 有告警，共 **3 条**且全部是本票之前既有的、
+> 且都不在改动行上——2×`react(only-export-components)`（`:985` / `:1005`）+ 1×`react(refs)`
+> （`:1082`，F1 已登记为「原样保留」）。另 3 个文件 **0 条**。
+> 新依赖本应新增的多条 `exhaustive-deps` 被**行内** `// eslint-disable-line` 精确吞掉
+> （本文件共 **9** 条）。**指令挂在哪一行才生效**——本轮 A/B（按指令所在行分两类，择一保留）：
+
+| 变体 | 保留 | oxlint 总数 | `StepDetail.tsx` 本文件告警 |
+| --- | --- | --- | --- |
+| 基准 | 9 条全留 | **42** | 3（与 F1/N2 基线同数） |
+| A | **只留依赖数组行**（`:153 :190 :192 :198 :246 :1051`），删掉回调行的（`:152 :1050`） | **42** | 3 ⇒ **毫无变化** ⇒ 回调行那两条是**装饰** |
+| B | **只留回调行**，删掉依赖数组行的 | **51** | 12 ⇒ 漏出 9 条（`:152` `:153` `:189` `:191` `:197` `:234` `:246` …） |
+
+> ⇒ **生效的是「挂在依赖数组那一行」的指令**；挂在 `useMemo(() => …` 回调行的指令不生效。
+> 这与直觉相反（告警的标签行指向回调体里的 `conversation`），故写在此处供后续票复用。
+> 另：本版 oxlint（1.79.0）下 `disable-next-line` 与块级 `disable`/`enable` 会让该函数
+> **全部 compiler 类规则一起跳过**（最小复现见 `PERF_BASELINE` N2 节）⇒ 只能用行内形式。
+
+**披露与偏离（逐条）**
+
+1. **落点记录提交含 3 个 docs 文件**（`docs/SDD_TICKET_TRACKER.md` / `docs/PERF_BASELINE.md` /
+   `docs/phase_status/2026-09.md`），不在票面 Scope lock 的允许清单里。理由与 F1、N2 一致：
+   `PERF_BASELINE` 是本批 **G3 硬前置 + 性能数字唯一落点**，tracker / 归档是台账义务；
+   且它们**单独成一个 docs 提交**（`4752236` / `1f88116` 两个代码提交的 `--stat` 恰好只有 4 个允许文件）。
+2. **两个新测试文件走 jsdom 车道**（票面 AC2/AC3 只说「新增用例」，未指定车道）：`memo` 与
+   `useMemo` 的 bail-out 只在**客户端渲染器**的 reconciliation 里发生，既有 `StepDetail.test.tsx`
+   是 SSR（`renderToString`）契约测试、每次调用都是全新渲染 ⇒ 陈旧 memo 在 node 车道里**不可观测**。
+   而 `@vitest-environment` 是**文件级**指令，加在既有文件上会把它**全部**既有用例一起换车道
+   ⇒ 另开同构文件（沿用 F1 `Conversation.render.test.tsx`、N2 `StepDetail.render.test.tsx` 的同一做法），
+   全局 `vitest.config.ts` **不动**。依赖 `jsdom` 已在 F1 落地，本票**未**再增依赖。
+3. **AC3 的口径收窄**（见上表）：不是「做不到就放宽」，而是票面两条要求**互斥**时的显式裁定，
+   偏离与理由都记在此处与 `PERF_BASELINE` F2 节；**未**改票面文字、**未**隐去 `agentProfile` 的 +1。
+
+**未闭合项（每条写明解除条件）**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| `ChildSessionView`（`StepDetail.tsx:1645`）内 `<ChatTab tools={allTools(conversation)} />`（`:1655`）仍是**未记忆化**的第二次 `allTools` 调用 | **本票不处理** | 它不在票面必做 2 的清单里（票面只列 `:175-180 / :630 / :634 / :1122 / :1150 / :1190`），且属**另一个组件**（child 会话视图）。解除条件：随 **F5**（Inspector 长列表离屏）或另开票 |
+| Inspector 三面列表仍是**全量渲染**（`:636` / `:1220` / `:1290`） | 票面 `## 未闭合项` 已指定归属 | **F5** |
+| Inspector 关闭时**仍保持挂载**（刻意设计，本票只降其成本） | 设计如此，非缺口 | 无（除非基线证明成本不可忽略，另开票讨论「延迟卸载」） |
+| AC8 的相关 e2e（主车道 / mock 车道） | **已闭合**（2026-09-18） | 无（证据见 AC8 行：436 passed / 0 failed） |
+| `playwright.live.config.ts` **联调车道**（真模型 + 真后端 `127.0.0.1:8000`） | **未运行** | 该车道按设计**不入标准门禁**（需后端已启动 + 模型可用 + 结果非确定）。解除条件：后端起在 8000 后跑 `node node_modules/@playwright/test/cli.js test --config playwright.live.config.ts --workers=1` |
+| Chrome Performance 的 long task 数 / 最长单帧（G4 观感口径） | **未取得** | 真机 Chromium 已可用（e2e 主车道本轮实测 436 绿），缺的是 **G4 观感口径的采集手段**：要么写 CDP `PerformanceObserver('longtask')` 采集脚本（可自动化、本批未做），要么人工在 Performance 面板按固定场景录一次并归档。同 F1/N2 的同一未闭合项 |
+| `docs/adr/0037` 的 `Status` 仍为 `Proposed` | **待用户批准** | 用户批准后另提交改 `Accepted`（该 ADR 属 #269） |
+
+**审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
+`4752236` / `1f88116` 交由 **P1-B2** 的两轴审查窗口（范围自 `2048764` 起算，**覆盖 #270 + #271 + #272
+的累计 diff**）覆盖；**该审查已完成**，结论与 findings 处置见下方
+「**P1-B2 两轴审查记录（2026-09-18）**」。
+
+#### P1-B2 两轴审查记录（2026-09-18）
+
+**范围**：fixed point `2048764`（上一批次审查行 `45744d3..2048764` 的 tip），
+`2048764..dd66913` = **13 个提交**（三票累计 diff）。两个**独立只读子代理**并行跑
+（Standards 轴 / Correctness 轴），两轴各出报告后再汇总——**不排序、不互相引用**。
+
+**轴内合计**：Standards **1×P1 + 2×P3**；Correctness **0×P0 / 0×P1 / 0×P2 + 1×P3**。
+
+| 轴 | 级别 | finding | 处置 |
+| --- | --- | --- | --- |
+| Standards | **P1（S1）** | 三个文件（`Conversation.tsx` / `disclosure.ts` / `StepDetail.tsx`）把**设计动机、风险分析、oxlint 行为实测、A/B 对照**整段写在代码注释里，违反 `AGENTS.md` §16.1「机制的完整叙述 → ADR；代码注释只写『这段代码自己看不出来的操作约束 + 指向 ADR 的一句指针』」 | 新增 **ADR-0037 D5**（唯一落点，含 D5.1–D5.6 六个子节）＋ 三个文件的注释逐处压成「操作约束 + 指针」（`5ce86f7` / `fe96009`）——**本批唯一一条 P1，处置见下** |
+| Standards | P3 | `StepDetail` 里 8 处 `useMemo(() => xs.filter(...))` 是重复模式 | **按据不改**：8 处的谓词**本就不同**（`t.diff` / `isCommand` / `t.artifact` / `t.status === 'running'` / `t.status === 'failed'`），收敛成一张表要引入 `key → predicate` 映射，是把「无抽象」换成「多一层间接」——`AGENTS.md` §9.2 明确反对。已登记在 D5.3 的依赖表里 |
+| Standards | P3 | `eventsVersion` 命名不自明 | **按据不改**：它是**投影层的派生计数**，不是通用脏标记（ADR-0037 D2/Non-Goals 写死语义、D5.1 给出消费端判据）；改名成 `eventsAppendCount` 之类反而更容易被当成通用版本号用。ADR-0037 已是它的单一叙述落点 |
+| Correctness | P3 | 票面 AC2/AC3 的**字面承诺**与**收窄后的用例覆盖**之间存在差距 | **已登记**（非缺陷）：票面两条要求彼此互斥，收窄口径与理由已在 F2 验收证据的 AC2/AC3 行 + `PERF_BASELINE` F2 节如实写明，**未改票面文字、未隐去 `agentProfile` 的 +1**。审查者本人也在报告里标注「transparently noted, not a defect」 |
+
+**Correctness 轴（零 P0/P1/P2）另行确认**：所有 `useMemo` 依赖均按**被调函数真实读取面**
+逐个推导（非猜测）；`memo` 正确性核验通过；边界安全；**架构不变量 #22**（Web UI 不维护第二套
+不可对账的 Session 真相）保持；**无 scope creep**；相关 **233** 条用例通过。
+
+**独立复验（findings 处置之后，另一只读子代理逐条实测对账）**：S1 在三文件**均无残留**；
+被删掉的信息**全部在 D5 里找到落点**（无信息丢失）；D5.3 依赖表与实际代码**逐项吻合**；
+D5 引用的行号/数字经实跑核对；`web/` 三文件的 diff **逐 hunk 核对为纯注释**；`tsc -b` rc=0。
+复验另提 **1×P2 + 3×P3**，**全数就地修复**：
+
+| 复验 finding | 事实 | 处置 |
+| --- | --- | --- |
+| P2 | ADR-0037 **D3 表**的「现状」列写 `[conversation?.events]`，而代码此刻已是 `eventsVersion`；同段「本 ADR 不改代码」与已落地的 `4e85938` **冲突** | 表格改标「**决策时**的行号 / 现状快照」，并写明 N2（`40851f8` / `4e85938`）**已落地**、落地后三处一律写 `eventsVersion` |
+| P3 | D5.2 里的 `Conversation.tsx:711` 是**预存**错误行号（原代码注释就写错了，本次照抄） | 实测改为 `:726`（工具链路渲染器 `CHAIN_RENDERERS.tool`）并补 `:445`（档位循环）——两处均实跑核对 |
+| P3 | D5.5 少了「同仓先例」引用 | **不能照原样补**：实测那两处（`ApprovalCard.tsx:64`/`:113`、`ProviderManagerDialog.tsx:86`）用的**正是** `eslint-disable-next-line`——即本批判定为「会连带吞掉同函数无关 compiler 类告警」的那种形式。已按实情改写为「**不沿用**它」 |
+| P3 | D5.3 依赖表缺 `allTools` / `deriveRunPulse` 的行号 | 补 `projection.ts:1424`（`state.turns.flatMap`）与 `runState.ts:73-141`，两处实跑核对 |
+
+复验同时**明确标注两条「无法验证」**（只读条件下不可复现，故**保留作者的「已实测」标注、
+不升级为已验证**）：① oxlint 的 **51**（只留回调行那态的告警总数）需改文件才能复现；
+② oxlint 内部行为两条断言（`disable-next-line` / 块级会跳过该函数全部 compiler 类规则、
+判定位置与标签行不同）。**这是本批审查的已知证据强度边界。**
+
+**本批的提交（`fe96009` 是审查覆盖到的代码提交，`5ce86f7` 是它的 docs 前置）**
+
+| commit | 内容 | 性质 |
+| --- | --- | --- |
+| `5ce86f7` | ADR-0037 新增 D5（机制叙述唯一落点）＋ 两处事实修正（D3 表 / `Conversation.tsx:711`） | docs-only（`+131/−2`，仅 1 文件） |
+| `fe96009` | 三个文件注释压成「操作约束 + 指针」 | 代码（**纯注释**：机械校验 `+/-` 行里 **0 条**非注释，见下） |
+| `chore(review-ledger)` 提交 | 本台账两行审查记录 + 白名单 | 台账记账（脚本自动放行） |
+
+**门禁（`fe96009` 同一工作树，本轮重跑，全绿）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint --format json` | **42 → 42**（零新增、**零顺带消失**） |
+| 单测全量 | `node node_modules/vitest/vitest.mjs run` | rc=0，**62 文件 / 1008 用例全绿**（与 F2 落地时同数） |
+| 生产构建 | `node node_modules/vite/bin/vite.js build` | rc=0（仅既有 chunk-size 提示） |
+| 真机 e2e（主车道） | `node node_modules/@playwright/test/cli.js test --workers=2` | **436 passed / 0 failed**，退出码 0，10.2 分钟，无收尾挂死 |
+
+> **「纯注释」的机械依据**（不只看 diff 摘要）：把 `git diff 5ce86f7 fe96009` 的每一行
+> `+`/`-` 逐行判定，只允许空行与以 `*` / `/*` / `*/` / `//` 开头者 ⇒ **非注释行 0 条**。
+> 这正是「9 条 `exhaustive-deps` 行内豁免的位置与依赖内容一字未动」的可执行证明。
+
+
+<!-- P1-B2-LIVE-VERIFY-2026-09-18 -->
+#### P1-B2 live 车道验收 + G4 采集手段（2026-09-18 深夜）
+
+**环境**：worktree `main-f049fadd` @ `33bd447`；后端 = `create_prod_app` 起在 `127.0.0.1:8000`
+并**同源托管本 worktree 的 `web/dist`**（`/` 返回的 `assets/index-DWcQjnCB.js` 与磁盘同文件；
+启动器首行打印的 `agent_harness.__file__` 指向本 worktree 的 `src`）。主车道 mock e2e 的
+**436 绿**（`fe96009`）本轮**未重跑**——本次改动不落主车道（`web/playwright.config.ts`
+`testDir: './e2e'` 不含 `e2e-live/`，`playwright.live.config.ts` 才是 `./e2e-live`），重跑无增量信息。
+
+| live 车道 | 结果 | 归因 / 处置 |
+| --- | --- | --- |
+| `e2e-live/approval-live.spec.ts`（2 例） | **第一层已修**；整体仍红 | 选择器下压次数 `0 → 1`（`OptionPicker` 自 #201 / `4ddec6b` 起目录首行恒为「默认（未选）」）；余下是 `run/failed reason=provider_account_unavailable` = 供应商账户冻结，**非本仓可解** |
+| `e2e-live/project-groups-live.spec.ts`（1 例） | 红（**决策票，未擅改**） | `src/agent_harness/web/projects.py:249`「注册即归入 cwd 匹配的既有会话」（AC5 / #169）与规格第 143 行「注册后应仍在未分组」冲突 ⇒ 候选 A（改规格承认 AC5 语义，越 WS-5 票）/ 候选 B（登记「规格过期，待 WS-5/#155 票主修」、live 保持红），**等用户拍板** |
+| `web/scripts/perf-longtask-live.mjs` | 绿（连跑 4 轮） | 只读 + 本地互动，不依赖模型；**不新增会话** |
+
+**G4 观感口径（long task）——采集手段已补，场景仍部分未取**
+
+- 新脚本 `web/scripts/perf-longtask-live.mjs`：浏览器原生 `PerformanceObserver('longtask')`
+  （阈值 50ms），场景 = 打开事件数最多的真实会话（本次 1834 事件）→ 12 次 Inspector peek 切换 →
+  工作区面板（输出 / 改动）往返。数字、dev / 生产两口径对照、**轮次双峰波动（mode A/B）声明**
+  全部落在 `docs/PERF_BASELINE.md` F2 节（方式为**只追加**，未改他人历史行）。
+- **F1 的「长回答流式」场景仍「未取得」**（账户冻结 ⇒ 跑不出真流式）⇒ F1 节那一行的未闭合状态
+  **保留**，解除条件写在其追加段里。`PERF_BASELINE` §2.1 禁的是 **Playwright 帧率（FPS）自动采集**；
+  本脚本是 long task 计数，**不与该禁令冲突**，但它是**补充口径、不是替换**。
+
+**门禁（本轮实跑，`33bd447` + 本次未提交改动的同一工作树）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| lint | `node node_modules/oxlint/bin/oxlint` | **42 warnings / 0 errors**（与基线 42 同数：零新增、零顺带消失） |
+| 主车道 e2e | — | **未重跑**（理由见上：本次改动不在该车道） |
+
+**仍未闭合（交用户）**
+
+1. `project-groups-live` 的 A/B 决策（上表）——**未自动执行**，台账只登记、不改规格。
+2. 供应商账户冻结 ⇒ 一切依赖真模型往返的用例（审批卡 / 流式长回答）不可绿；解除条件 = 用户解冻/充值。
+3. `PERF_BASELINE` §2.1 的「流式」录制仍缺（与第 2 条同源）；F1 节那行保持「未取得」。
+
+<!-- P1-B2-LIVE-PROJECTGROUPS-DECISION-A-2026-09-18 -->
+**决策已拍板（2026-09-18 深夜，用户选 A）**：project-groups-live 的既存冲突按 **A = 改规格承认 AC5** 处置，**未动产品代码**。规格 ③ 步更正为：
+
+- 注册 ws-delete-me → 断言 POST /api/projects 响应 sessions_attached === 1（注册即归入）、项目行可见、目标会话渲染在项目下、**未分组区不再有它**（原断言「注册后仍在未分组」与 projects.py:249 + AC5/#169 正面冲突，属**过期规格**，不是「放宽校验」）；
+- 幂等重放同一路径 → 200 + sessions_attached === 0 + session_ids === [SESSION_ID]（账本不重复入序）；
+- ④ detach / ⑤ 再 attach + 软删除两段**保持原样**：UI 的「加入项目…」选择器路径因此仍被 ⑤ 覆盖，③ 改成 API 重放**没有**丢覆盖面。
+
+**证据（生产口径真机；不经 test runner、不起 vite）**：%TEMP%\wbi-probe-groupflow.cjs（裸 chromium 直连 127.0.0.1:8000，失败自保 = 先软删除残留项目再比对基线）→ **16 条断言全 PASS**、退出码 0、**基线逐字段还原 true**（项目含账本序 + 会话归属）；输出存档 %TEMP%\wbi-probe-groupflow.out，截图 web/gui-test-screenshots/ws5-probe/。其中 sessions_attached 实测 **1**、幂等重放实测 **0** ⇒ AC5 语义在真机成立。
+
+---
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B3（#273 + #275）台账起点（2026-09-19） ===== -->
+
+#### F4（#273）验收证据
+
+**票面**：GitHub #273（`## What to build` 必做 1/2/3 + AC1–AC8）。
+**实现 commit**：`5a7f40e`（红证用例，新增 `web/src/App.test.tsx` 332 行 / 6 条）＋ `6d17bef`（实现，`web/src/App.tsx` **+16 −1**）。
+对 `28a1a34` 的净 diff = **2 文件 / +348 −1**。
+**性能数字**：`docs/PERF_BASELINE.md` 的 F4 节（G3 硬前置：基线先落、改造后数字再落）。
+
+**做法（`web/src/App.tsx` 恰好 3 处，别的什么都没动）**
+
+| # | 改动（改造后行号） | 说明 |
+| --- | --- | --- |
+| 1 | `:79` 新增模块级常量 `CLOSED_PALETTE_ITEMS: CommandItem[] = []` | 关闭态的返回值必须是**同一个引用**。用 `[]` 字面量每次渲染都是新数组，会让 `CommandPalette` 的 memo 恒 miss，把 F1/F2 的收敛成果反向抵消——仓库里 `EMPTY_UNDELIVERED`（`:64`）就是同一道理的既有先例 |
+| 2 | `:758` memo 体首行 `if (!paletteOpen) return CLOSED_PALETTE_ITEMS;` | 关闭态**不构建**。该表随事件窗口线性放大（`:897` 的 `conversation.events.slice(-100)` 逐条 `summarizeEvent`），而流式期间每秒约 40 次投影提交 |
+| 3 | `:916` 依赖数组**前置** `paletteOpen`，`conversation` **原样保留** | 打开那一拍依赖变化 ⇒ 立刻用最新 `conversation` 重建。PRD §15 只要求「打开那一刻最新」，不要求关闭期间逐帧维护；`conversation` 是 R2 行为不变的前提，**不得**收窄 |
+
+**红证（改造前 → 改造后，同一条命令、同一批用例、**同一份测试文件**）**
+
+做法：`web/src/App.tsx` 临时换回 `28a1a34`（`git show <sha>:<path>` 写回，**全程未用 `git stash`**），
+跑完按字节还原（`git diff --numstat -- web/src/App.tsx` 复原为 `16	1`）。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run src/App.test.tsx
+```
+
+| 阶段 | 文件级 | 关键失败断言 |
+| --- | --- | --- |
+| 改造前（`App.tsx` = `28a1a34`，新用例保留） | **2 failed \| 4 passed (6)** | `expected [ 100, 100, 100, 100, 100 ] to deeply equal [ +0, +0, +0, +0, +0 ]`（AC1）、`expected [ …(110) ] to be [ …(110) ]`（AC3） |
+| 改造后（`6d17bef` 工作树，本轮实测） | **6 passed (6)** | — |
+
+> **改造前就通过的那 4 条不计入红证**：AC2 ×2、AC4 golden、AC5 键盘——它们是**不变式守卫**
+> （面板开不开都该成立），改造前天然成立。AC4 的价值在**反方向**：锁死「门控**没有**改动候选表内容」，
+> 是 AC1 之外防「为了省事把候选表改小」的那道闸。
+
+**⚠ 归因陷阱（本票最费时的一处，务必保留）**
+
+`summarizeEvent` 在 `web/src` 有**两处**调用点（grep 实证）：`App.tsx:898`（本票对象，改造前 `:883`）
+与 `StepDetail.tsx:1647`（时间线每帧对**全部**事件各调一次）；而 `App.tsx:1138`（改造前 `:1123`）
+**无条件**渲染 `StepDetail`。不隔离时计数 = 「100 + 事件总数」——实测拿到
+`[223,224,225,226,227]`／累计 **1125**，每次 +1 恰是事件数在涨。
+这个数字**看着完全合理**（有量级、有趋势、可复现），却与 `paletteItems` 毫无关系。
+⇒ 用例把 `StepDetail` 换成空壳（它是 App 的唯一引用方），观测面收敛为单点，
+AC1 期望值同时从「≈123」**收紧为严格 0**。
+**教训**：取数前先证明「观测点是单源」，否则量到的是噪声之和。
+
+**墙钟口径：实测三轮后判定不可用（不落任何数字当证据）**
+
+| 轮次 | 代码 | 探针 | 关闭态中位数 | 打开态中位数 |
+| --- | --- | --- | --- | --- |
+| 1 | `28a1a34` | 5 样本 | 14.23ms | 42.40ms |
+| 2 | `28a1a34`（**同一份代码**） | 预热 3 + 15 样本 | 27.41ms | 33.78ms |
+| 3 | `6d17bef` | 同第 2 轮 | 12.06ms | 20.97ms |
+
+第 1、2 轮是**同一份代码**，关闭态中位数却差近 2 倍；第 3 轮里**打开态那段代码一个字都没改**，
+中位数却从 33.78 掉到 20.97（−38%）。⇒ jsdom 墙钟被 JIT / GC / 后台负载漂移主导，
+**不足以支撑「<5ms 级」的判定**。AC8 的「(若可测) 主线程占用」据此判为**本环境不可测**，
+**不编造数字**（AC8 原文即带「若可测」，不构成验收缺口）。
+本票的决定性证据是**确定性计数 100 → 0**——任意次运行同值，无噪声。
+
+**AC 逐条**
+
+| AC | 内容 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| AC1 | 关闭态构建体不执行，`summarizeEvent` 调用 = 0（连续 N 次提交） | ✅ | `[100,100,100,100,100]` → `[0,0,0,0,0]`（逐次断言，非求和） |
+| AC2 | 打开那一拍候选表是最新的 | ✅ | 两条用例：①「关闭 → 追加 → 打开」新事件 id 在列；②已打开时每拍重建，且**当场**搜得到刚追加的事件 |
+| AC3 | 关闭态返回值是**同一引用** | ✅ | `[ …(110) ] to be [ …(110) ]` 由红转绿；返回的是模块级常量 |
+| AC4 | 打开态候选表与改造前逐项一致（id + 顺序 + 分组 golden） | ✅ | **110 项** = 6 `actions` + 4 `density` + 100 `events`（`event-121` → `event-22`） |
+| AC5 | 选中/回车/键盘导航行为不变 | ✅ | 组件用例（真 `App` + 真 Radix 浮层，`↓` → `Enter` 执行并关闭）+ **e2e `i-keyboard.spec.ts` 6/6** |
+| AC6 | lint / build / test 全绿 | ✅ | 见下表 |
+| AC7 | `git diff --stat` 只出现 `App.tsx` 与其测试 | ⚠ 口径见下 | 源码文件**只有 `App.tsx`**；另有 `docs/PERF_BASELINE.md`（AC8 硬要求） |
+| AC8 | `PERF_BASELINE.md` 记录改造前后 | ✅ | F4 节，含墙钟不可用的判定与三轮依据 |
+
+> **AC7 的口径说明**：`git diff --name-only` = `docs/PERF_BASELINE.md` + `web/src/App.tsx`
+> （`web/src/App.test.tsx` 为新增）。**源码文件只有 `App.tsx`**，符合 AC7 的意图；
+> `docs/PERF_BASELINE.md` 是 **AC8** 强制要求的落点，两条 AC 合读不冲突
+> （F1/F2 的落点同样含该文件，属既有惯例）。**未**用任何白名单掩盖源码提交。
+
+**门禁（本轮实跑，`28a1a34` + 本次未提交改动的同一工作树）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| lint | `node node_modules/oxlint/bin/oxlint` | **42 warnings / 0 errors**；并与 `28a1a34` 版本做 A/B：总数与 `App.tsx` 12 条**逐项同数**，新增文件 `App.test.tsx` **0 条** ⇒ 零新增、零顺带消失 |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | rc=0，**输出 0 字节** |
+| build | `node node_modules/vite/bin/vite.js build` | rc=0，`✓ built in 5.51s` |
+| 全量单测 | `node node_modules/vitest/vitest.mjs run` | **Test Files 63 passed (63) / Tests 1014 passed (1014)** |
+| 相关 e2e | `e2e/i-keyboard.spec.ts`（2 project × 3 例；JSON reporter 落盘取数） | **expected 6 / unexpected 0 / flaky 0** |
+
+> **e2e 环境备注（可复现）**：本机 `npm` 不可用（`npm --version` → RC=1），而基配置的
+> `webServer.command` 是 `npm run dev:e2e`。本轮用**临时** config 把该命令换成等价的
+> `node node_modules/vite/bin/vite.js --strictPort` 后跑通，**跑完即删、未进提交**
+> （`testDir` / `workers` / `projects` / 端口守卫全部沿用，仍走仓库既定车道）。
+> 结果**以 JSON reporter 落盘为准**，不依赖退出码——实测收尾时 runner 自身不退出
+> （`netstat` 判据：5173 已释放、无孤儿 server，与仓库既有记录一致）。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 打开态仍是全量构建 100 条候选（`events.slice(-100)`） | **未闭合**（票面已列） | 基线证明该构建造成**可测长帧** ⇒ 才做票面「必做 3」的记忆化。本轮墙钟不可用 ⇒ 需先有可靠的帧级采集手段（与 F1 同一未闭合项：真机 Chromium 可用，缺的是 G4 观感口径的采集脚本） |
+| 关闭期间候选表不再维护 | **设计如此**（门控的代价） | 无。AC2 / AC4 是它的守卫；`paletteOpen` 进依赖保证「打开即最新」 |
+| `docs/PERF_BASELINE.md` 行尾为 LF，仓库多数 docs 为 CRLF | 既有状态，**非本票引入** | 只在有人统一行尾时处理；本票避开了顺带改动 |
+
+**审查**：单票落地**不**给自己开审查、**未加** `[whitelist]` 掩盖代码提交（协议 §1.1 / §1.2）——
+`5a7f40e` / `6d17bef` 交由 **P1-B3** 的两轴审查窗口覆盖（fixed point = `28a1a34`）；
+本轮落点与白名单这两个 docs-only 提交按台账惯例另行声明。
+
+<!-- ===== F4(#273) 台账节结束 ===== -->
+
+---
+
+<!-- ===== B7(#275) 台账起点（2026-09-19） ===== -->
+
+#### B7（#275）验收证据
+
+**票面**：GitHub #275（`## What to build` 必做 1/2/3、AC1–AC10、`## Scope lock`）。
+**实现 commit**：`c3558a9`（量测脚本 + G3 基线）→ `7c4cbb6`（站点 1）→ `d6da1f9`（站点 2）→ `31c2dff`（红证用例 + 本节）→ `7f6c0fd`（审查 finding：注释只留约束与指针）。
+对 `8d7cdc5`（本票 HEAD 基线）的**源码净 diff = 2 文件 / +79 −7**（`websocket.py` +51 −7、`local_artifact.py` +28 −0）；
+另有 `docs/PERF_BASELINE.md` +103 −1、新脚本 `scripts/measure_loop_blocking.py` **614 行**、新测试 2 文件（**175 + 158 行**）。
+
+> ⚠ **数字基准（P1-B3 审查 P3 之一）**：上面的数字**对 `8d7cdc5`** 计。P1-B3 审查行的 range base 是更早的
+> `28a1a34`，两者之间夹着并行批次（#237–#266）对 `websocket.py` 的改动 ⇒ 用 range base 量出来的数字会更大。
+> 两条都对，**基准不同**；本票的有效基准是 `8d7cdc5`。
+
+**第 1 步（强制）——先量再定：判定取「最长单次同步占用」，不取平均**
+
+| 站点 | 真实上界（**读实现取**，非估值） | 最长单次 | 判定 |
+| --- | --- | --- | --- |
+| **S1** WS 快照（`to_dict()` × N + `json.dumps`，中间无 `await` ⇒ 一整块） | **1000 事件**（`STREAM_REPLAY_MAX_EVENTS`，`web/app.py:629`） | p90 **5.6–11.9ms**、最长 **7–32ms** | **必须搬（方案 A）** |
+| **S1′** 单条事件帧（relay `websocket.py:303` 的 `_send_json`） | 1 条事件 | 0.008–0.145ms | **不搬**（与 S1 差 3 个数量级） |
+| **S2** `LocalArtifactStore.save` 整个函数体 | **2,000,000 字符**（沙箱单通道捕获上限 `max_capture_chars`，经 `tooling/overflow.py` 原样进 store） | **73.9ms**（2M CJK = 6MB 落盘） | **必须搬** |
+| **S3** `LocalArtifactStore.load` 整个函数体 | 同上 | **61.5ms** | **必须搬** |
+
+数字与 7 次运行的全部读数在 `docs/PERF_BASELINE.md` B7 节；量测脚本随票入库、可复跑。
+两个函数体**零 `await`**（`GET_AWAITABLE` 操作码探测；`inspect.CO_AWAIT` 在现代 CPython 里不存在）
+⇒ 对 S2/S3 而言「最长单次同步占用」**就是**整个函数的墙钟。
+
+> **S1 判定为什么取 n≥200 那一侧**：n=50 那次量到「最长 2.2–3.7ms」，在 n≥200 **未复现**；
+> n=200/300 的 9 次窗口测量 p90 **全部** ≥5.6ms。本机墙钟对 <5ms 级判定不可靠（F4 节同一结论），
+> 故判定取**保守侧**，并把全部轮次留在基线表里（含未复现的那次）。
+
+**第 2 步 —— 搬进线程（两个站点，共 3 个新增 `to_thread` 调用点）**
+
+| # | 文件 / 站点 | 做法 | 为什么整段搬、而不是只搬那一行 IO |
+| --- | --- | --- | --- |
+| 1 | `web/websocket.py` 站点 1 | 新增模块级**纯函数** `_render_snapshot(...)`；新增 `_send_json_offloaded(...)`：**先在线程里产出字符串**，回循环再 `send_text` | 列表推导与 `json.dumps` 之间没有 `await`，分开搬没有意义 |
+| 2 | `storage/local_artifact.py::save` | 异步壳 + `_save_blocking`（同步体原样搬运），**一次** `to_thread` | 只搬 `_write_atomic` 会把 `encode`(19.5ms) + `sha256`(27.8ms) 留在循环上 |
+| 3 | `storage/local_artifact.py::load` | 异步壳 + `_load_blocking`，**一次** `to_thread` | `read_bytes` 只占 4.7ms，`decode`(17.3ms) + `sha256`(12.4ms) 才是大头 |
+
+**`send_text` 未搬线程**（票面 Risks：并发写同一 socket 会破坏 WebSocket 发送语义）——下放的只是产出字符串那一段。
+`_send_json_offloaded` 的 `try` 覆盖面与 `_send_json` **逐字相同**（渲染 + 发送都在里面）⇒
+「渲染失败」与「连接已断」仍是同一条静默忽略路径，不新增异常层级。
+`ARTIFACT_ID_PATTERN` 形态校验**留在循环**（不碰 IO，畸形 id 不该进线程）；超阈值那条**控制帧**路径原样不动（单帧，判定不搬）。
+
+**红证（改造前 → 改造后，同一批用例、同一份测试文件）**
+
+做法：`git archive 8d7cdc5 src`（本票 HEAD 基线）导出**未改动的改造前源码**到临时目录，用 `PYTHONPATH` 指向它跑同一批用例
+（**全程未用 `git stash`**，也**没有**改工作树文件）。Correctness 轴审查**独立复跑**了这条红证：改用更早的
+range base `28a1a34` 导出源码、同样得到 **12 failed / 3 passed**，且通过的 3 条与下表列出的不变式守卫**完全一致**。
+
+```bash
+PYTHONPATH=<HEAD源码临时目录>/src python -m pytest \
+  tests/web/test_web_ws_snapshot_offload.py tests/storage/test_local_artifact_thread_offload.py -q   # 改造前
+PYTHONPATH=<worktree>/src python -m pytest \
+  tests/web/test_web_ws_snapshot_offload.py tests/storage/test_local_artifact_thread_offload.py -q   # 改造后
+```
+
+| 阶段 | 结果 | 说明 |
+| --- | --- | --- |
+| 改造前（HEAD 源码） | **12 failed / 3 passed** | 站点 2 两条红在**断言**上（`落盘仍发生在事件循环线程 …` / `读取仍发生在事件循环线程上`），不是 ImportError——它们只观测**改造前就存在**的内部名字 |
+| 改造后（工作树） | **15 passed** | — |
+
+> **改造前就通过的那 3 条不计入红证**：`not_found → KeyError`、`PermissionError 不得被吞成 KeyError`、
+> 「内容先于元数据」——它们是**不变式守卫**（改造前后都必须成立），价值在**反方向**：
+> 锁死「搬线程没有顺手改掉异常映射 / 原子纪律 / 落盘顺序」。
+
+**归因（本轮最花时间的一处，务必保留）——全量套件在本机是「非确定性」的**
+
+`pytest tests/ -q` 出现了大量红（改造后 64 / 改造前 78），但它们**不是**本票引入的：
+
+| 运行 | 用例数 | failures | 备注 |
+| --- | --- | --- | --- |
+| `tests/`，**改造后**（工作树） | 2529 | **64** | — |
+| `tests/`，**改造前**（HEAD 源码，同一 runner） | 2529 | **78** | — |
+| 差集 | — | **改造后新增 = 0** | 两侧失败集合求差：`{改造后} − {改造前}` 为空集 |
+
+那 14 条「仅改造前失败」= 本票的 **12 条红证用例**（本来就该在改造前红）+ 2 条 **A/B 手法副产物**
+（`test_env_file_anchored_to_repo_root` / `test_regression_metadata_fields_are_honest`：它们按**模块文件位置**
+推仓库根 / 读 evaluation 产物，而 A/B 把模块放到了临时目录）。
+
+**同一命令两次不同的结果**（代码一个字没改）：
+
+| 命令 | 第 1 次 | 第 2 次 |
+| --- | --- | --- |
+| `pytest tests/session/ tests/web/test_workspace_files_api.py -q` | **4 failed** | **0 failed** |
+
+⇒ 本机（沙箱）存在**随负载抖动**的失败：`tests/session/` 之后再跑 `tests/web/` 的「真建会话」用例，
+SSE 流会**偶发为空**（`AssertionError: SSE 流里没有 session_id：[]`；伴 `RemoteProtocolError: peer closed
+connection without sending complete message body`）。这不是稳定复现的缺陷，也不属于本票范围。
+
+**另一类环境致红（可根因复述）**：`os.symlink` 在本环境**返回成功但什么都不建**——
+
+```text
+os.symlink 返回值 = None （None = 无异常）
+link.is_symlink() = False
+os.readlink 抛错  = FileNotFoundError
+os.listdir(root)  = ['target']          # 只有真目录，链接没出现
+```
+
+（`mkdir` 与 `cmd /c mklink /J` 均正常，故不是权限问题；`WORKBUDDY_FS_PROTECTION_ROLE=daemon` 在场。）
+后果：`tests/**` 里所有 `_make_directory_link` 风格的辅助函数**先试 symlink、不抛就当成功**，
+于是「建了链接」的判据为真而链接并不存在 ⇒ 断言红。**A/B 已在 HEAD 源码上复现同一条红** ⇒ 与 B7 无关。
+
+**AC 逐条**
+
+| AC | 内容 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| AC1 | `PERF_BASELINE.md` 有第 1 步基线（含真实上界） | ✅ | B7 节：S1 7 次运行 / S1′ / S2 / S3 四组数字 |
+| AC2 | 每站点给出判定（搬 / 不搬）及依据数字 | ✅ | 上表四条判定；S1′ 写明「测量后判定无需处理」 |
+| AC3 | 「搬」的站点有测试证明重活不在循环线程上 | ✅ | 3 条：渲染线程 ≠ 循环线程；`_write_atomic` / `Path.read_bytes` 所在线程 ≠ 循环线程 |
+| AC4 | artifact 原子性未变（既有测试文件**删除行数为 0**） | ✅ | 既有测试文件**零增删**——`git diff --numstat 28a1a34 7f6c0fd -- tests/` 只列出**两个新增**文件（`+158` / `+175`，**无删除行**）；半写/损坏相关用例全绿 |
+| AC5 | `load` 异常映射未变（not-found → `KeyError`；`PermissionError` 不得被吞） | ✅ | `TestExceptionContract` 三条（含「内容先于元数据」崩溃窗口） |
+| AC6 | WS 快照**帧结构未变**（方案 A） | ✅ | `TestFrameBytesUnchanged` 四条：与改造前内联表达式**逐字**相等、键序钉死、`ensure_ascii=True` 钉死、空窗口形状 |
+| AC7 | DoD 列出全部新增 `to_thread` 调用点 + 线程池总量评估 | ✅ | 见下「线程池清单」 |
+| AC8 | `context/builder.py` 的 `git diff` 为空 | ✅ | 命令输出为空 |
+| AC9 | `git diff --stat` 只出现 Scope lock 允许的文件 | ✅ | 源码 2 文件 + `PERF_BASELINE.md`（AC1 强制落点）+ 本批测试/脚本/台账 |
+| AC10 | 门禁全绿（`ruff` + `pytest` 全量，`--junitxml` 取权威结果） | ⚠ 见下 | `ruff` 0；票面相关两个目录稳定绿；**全量套件本机非确定性**（改造前后都有，新增 0） |
+
+**AC7 — 线程池清单（必做 3）**
+
+| 新增调用点 | 触发频率 | 量级 |
+| --- | --- | --- |
+| `websocket.py::_send_json_offloaded`（→ `_render_snapshot`） | **每订阅一次**（唯一调用点：客户端 `subscribe` 消息，`websocket.py:268`） | 1000 事件 ≈ 0.43MB 文本，5–32ms |
+| `local_artifact.py::save`（→ `_save_blocking`） | 每次 artifact 落盘一次（唯一写入者 `tooling/overflow.py`） | ≤2M 字符，≤74ms |
+| `local_artifact.py::load`（→ `_load_blocking`） | 每次 artifact 读取一次 | ≤2M 字符，≤62ms |
+
+三个都是**每请求 / 每产物一次**的短任务，**不是每帧一次**：流式增量走 relay 的 `_send_json`（未搬）。
+它们与既有 `session/service.py`、`workspace/index.py`、`recovery/scan.py`、`web/workspace_files.py` 等
+**共用同一个 anyio 默认线程池**；按票面必做 3，**未**调整池上限（「为提并发改上限」是另一件事，需独立评估）。
+
+**门禁（本轮实跑，`py` = 主仓库 venv + `PYTHONPATH=<worktree>/src`；权威取 `--junitxml` 解析，不靠 stdout）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| lint | `python -m ruff check .` | **rc=0，`All checks passed!`** |
+| 专项（新用例） | `pytest tests/web/test_web_ws_snapshot_offload.py tests/storage/test_local_artifact_thread_offload.py -q` | **15 passed**（改造前 12 failed / 3 passed） |
+| 相关目录 | `pytest tests/web/ -q` | **381 用例 / 1 failed**（`test_host_dirs_api::test_symlinked_directory_is_listed_once_without_expansion`，环境致红，见上） |
+| 相关目录 | `pytest tests/storage/ -q` | **92 用例 / 0 failed** |
+| 相关目录（复跑） | `pytest tests/web/ tests/storage/ -q` | **473 用例 / 同样仅那 1 条** ⇒ 该粒度下结果稳定 |
+| 全量 | `pytest tests/ -q` | **2529 用例 / 64 failed**（改造后）vs **78 failed**（HEAD）⇒ **新增 0**，差异解释见上 |
+| AC8 | `git diff src/agent_harness/context/builder.py` | **空** |
+| AC4 | `git diff --numstat -- tests/` | **空**（既有测试文件零增删） |
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 全量套件在本机**非确定性**（64 / 78 两跑不同；最小复现命令两次为 4 / 0） | **未闭合**（**非本票引入**，A/B 已证新增 0） | 需要一个能区分「负载抖动」与真实回归的稳定 runner（或把易抖用例显式标注）。在拿到它之前，本票的归因证据是**失败集合求差 = 空** |
+| `test_host_dirs_api::test_symlinked_directory_is_listed_once_without_expansion` 在本机恒红 | **未闭合**（环境；A/B 在 HEAD 上同样红） | 二选一：① 在无 FS 保护的真实 shell / CI 跑；② 把该文件的 `_make_dir_link` symlink 分支改成**建完再验存在**（`if link.is_dir(): return True`），静默失效时才落到 `mklink /J` 回退。**属 WS-7/#170 的测试文件，本票不改**（Scope lock） |
+| relay 单帧 `json.dumps` 仍在循环上 | **未闭合**（票面已列） | 基线显示单帧 `dumps` 成为长帧主因。本轮**未**成为主因（0.008–0.145ms，差 3 个数量级）⇒ 按票面留在原地 |
+| `context/builder.py:236` 的 `estimate_tokens` 留在循环内 | **按票面保持**（已核证为误报） | 出现**实测**长帧（必须附测量）；本票 `git diff` 为空 |
+| 线程池上限**未调整** | **设计如此**（票面必做 3 明确禁止借此提并发） | 出现「因 `to_thread` 排队导致延迟」的实测证据；届时按「线程池容量策略」独立开票 |
+| `_write_atomic` 的固定成本 1.5–2.5ms/次（本机 NTFS + AV），`save` 一次调它**两次** | **记录在案**（非本票引入，且已搬离循环） | 若将来到 Linux/CI 上复核，该成本会低一个量级；6MB 那一级的数字与平台无关 |
+
+**审查**：本票**不**给自己开审查；`c3558a9`（含非文档的脚本）、`7c4cbb6`、`d6da1f9`、`31c2dff`、`7f6c0fd`
+**均不进 `[whitelist]`**，统一交由 **P1-B3** 的两轴审查窗口覆盖（fixed point = `28a1a34`，与本批 F4 的
+`5a7f40e` / `6d17bef` 同一窗口；本票自己的 HEAD 基线是 `8d7cdc5`）。
+
+**P1-B3 两轴审查与 findings 处置（2026-09-19）**
+
+两个**独立只读**子代理分跑 Standards 轴与 Correctness 轴。因为本轮提交是用 git plumbing 建的、
+**refs 尚未移动**（HEAD 仍是 `8d7cdc5`），审查者直接按 SHA 读对象（`git diff 28a1a34 <sha>`）。
+
+| 轴 | 结果 | 处置 |
+| --- | --- | --- |
+| **Correctness** | **无 P0 / P1 / P2**；2×P3 仅供参考 | P3① 改造后「渲染失败」不再终止整条 WS 连接（改造前会冒泡到 `_read_loop` 的兜底而断连）——**票面有意设计**，已在用例里钉死；P3② F4 的共享空数组常量若被下游**就地**改会污染（实测 `CommandPalette` 无就地排序 ⇒ 非缺陷） |
+| **Standards** | **2×P1 + 2×P3** | P1① 源码注释内联实测数字（违反本仓库「数字只进台账、注释只留约束与指针」的判例）⇒ `7f6c0fd` 只删数字、留指针；P1② 台账把 `git diff --numstat -- tests/` 说成「为空」（该命令在 range 上会列出两个**新增**文件）⇒ AC4 行改为精确表述；P3① `c3558a9` 主题用批次位号 `perf(b7)` 而非票号（仓库既有 `perf(web)` / `docs(#273)` 两式）⇒ **保留**并在此记录；P3② 台账行数用 `count('\n')+1` 口径多算 1 行 ⇒ 已改为 git 口径 |
+
+**审查独立复现的事实**（不是转述台账）：红证 `12 failed / 3 passed`（并在 range base `28a1a34` 上复跑得到同值）；
+改造后 `15 passed`；WS 帧与改造前那段内联表达式**逐字节等同**（不依赖测试独立比对得出）；
+Scope lock 只动 2 个源码文件 + 2 个新增测试文件。
+**审查明确未复现的**：全量套件「64 vs 78、新增 0」的归因（8min×2，审查者判为**台账断言**）——本票**不**把它
+升格为已复核事实；解除条件见上表「全量套件非确定性」一行。
+
+---
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B4（#276）台账起点（2026-09-19） ===== -->
+
+#### F3（#276）验收证据
+
+**票面**：GitHub #276（`## What to build` 必做 1/2/3 + AC1–AC9、`## Scope lock`、`## Blocked by` = F2）。
+**实现 commit**：`78eb3bf`（红证用例，新增 `web/src/components/Conversation.snapframe.test.tsx` **321 行 / 12 条**）＋ `ec047bf`（实现，`web/src/components/Conversation.tsx` **+29 −2**）。
+对 `f2ec9f2`（本票 HEAD 基线 = B7/P1-B3 收口后的 tip）的源码净 diff = **1 文件 +29 −2**；另有新增测试 1 文件 + `docs/PERF_BASELINE.md`（AC1 强制落点）。
+**性能数字**：`docs/PERF_BASELINE.md` 的 F3 节（G3 硬前置：基线先落、改造后数字再落）。
+
+**第 1 步（强制，先量再定）——判定取「每提交一次强制布局」**
+
+观测手法：`Object.defineProperty` 替换 `Element.prototype` 的 `scrollHeight` / `scrollTop` accessor 计数（jsdom 无布局，节点上观察不到读数）；夹具是**真投影** `applyEvent` 折叠真事件得到的流式中会话。
+
+| 读数 | 改造前 | 改造后 |
+| --- | --- | --- |
+| 一帧 3 次提交 | **读 3 / 写 3** | **1 / 1** |
+| 一帧 5 次提交 | **5 / 5** | **1 / 1** |
+| 跨两帧、每帧 2 次提交 | **2 / 2（每帧）** | **1 / 1（每帧）** |
+| 单帧 1 次提交（稳态） | **1 / 1** | **1 / 1** |
+| 一次提交后 `requestAnimationFrame` 调用次数 | **0** | **1** |
+| long task 数 + 最长单帧 | **未取得** | **未取得** |
+
+**判定：做**（票面必做 2 的第二档）。`scrollHeight` 读次数 **= 提交次数**、1:1、与内容体量无关 ⇒ 命中「每提交一次布局」这一判据。
+**同时如实写明可见增益**：稳态 `windowMs = 24`（`useSession.ts:178`）⇒ 提交率 ≤ 41.7 次/秒 ⇒ 平均 **0.70 次提交/帧** ⇒ **稳态收益为零**；收益只在单帧内提交数 > 1（长帧）时出现——本仓实测最坏单帧 **83–513ms**（F2 节 live 车道）⇒ 对应 3–21 次布局降到 1。**本票是「最坏情况上界」收紧，不是稳态吞吐优化。**
+另有一条**被实测推翻的猜想**已写入基线：`useSession.ts:196` 的后台降渲染使隐藏期**根本不提交**，故「隐藏期省布局」不是收益来源。
+
+**第 2 步 —— 改法（`Conversation.tsx` 恰好 3 处）**
+
+| # | 位置 | 改动 |
+| --- | --- | --- |
+| 1 | `:96` | 新增 `snapFrameRef = useRef<number \| null>(null)`（`null` = 本帧无待执行贴底） |
+| 2 | `:231` 流式贴底 effect | 闸门两条（`!runActive` / `!following`）原样保留在前；`snapFrameRef.current !== null` 直接返回；回调内**同一个**帧里做「读 `scrollHeight` → 写 `scrollTop`」，并先把 ref 置回 `null` |
+| 3 | `:243` 新增卸载 effect | cleanup 里 `cancelAnimationFrame` + 置 `null` |
+
+**未动**（Scope lock）：effect 依赖列表仍是整个 `conversation`（票面明文禁止收窄）；贴底仍是瞬时 `scrollTop = scrollHeight`（无 `smooth` / `scrollIntoView`）；`followLatest.ts` 状态机与 `setScrollNode` 的 wheel 监听未碰；**run 结束补底与「↓ 最新」点击仍是同步瞬时贴底**（那两拍对延迟敏感，不该等一帧）——三者都有反例守卫用例钉住。
+
+**红证 / 绿证 / 变异检验**（同一命令：`node node_modules/vitest/vitest.mjs run src/components/Conversation.snapframe.test.tsx`，cwd=`web/`）
+
+| 阶段 | 结果 |
+| --- | --- |
+| 改造前（源码 `f2ec9f2`） | **5 failed / 7 passed (12)** |
+| 改造后（`ec047bf`） | **12 passed / 0 failed** |
+| **变异 1**：摘去同帧去重闸门（`if (snapFrameRef.current !== null) return;`） | **3 failed / 9 passed**——恰好是三条合并断言，全部 `expected N to be 1`（3 / 5 / 2） |
+| **变异 2**：摘去卸载取消帧 effect | **1 failed / 11 passed**——恰好 AC4 那条（`expected "bound " to be called with arguments: [ 27 ]`） |
+
+变异是**逐字注入 + sha256 还原校验**：注入前把工作树文件备份到仓库外，测完从备份恢复并逐字节校验，两遍都确认变异标记无残留。
+改造前失败的 5 条里，4 条是 AC2/AC4 的新行为；第 5 条「前提自检」红在**时序前提**上（改造前挂载贴底是同步的，计数器归零后自然读到 0），不属于任何 AC，价值在判别力。
+另 7 条改造前就通过 = **不变式守卫**（闸门为假零写入 ×2、瞬时贴底语义、卸载后零写、run 结束同步补底、浮标点击同步、wheel 脱离），按 F2/N2 的同一规矩**不计入红证**。
+
+> ⚠ **口径更正**：`docs/PERF_BASELINE.md` 先前记的红证是 `4 failed / 7 passed (11)`——那是 11 条用例的中间版本；第 5 条「前提自检」补进去之后**没有重跑红证**。已在基线里改为当前 12 条口径并注明旧数字作废（本票自查发现，非审查 findings）。
+
+**AC5 —— 相关 e2e 的 A/B**（先 `grep -rl "scroll\|latest\|follow" web/e2e/*.spec.ts` 定位）
+
+命令：`node node_modules/@playwright/test/cli.js test e2e/j-scroll.spec.ts e2e/m-stream-affordances.spec.ts --workers=2 --output=<新目录>`（cwd=`web/`；`npx` 本环境不可用，等价直调；`npm run dev:e2e` 由 Playwright 经 cmd.exe 起，故进程 PATH 需前置一个 `npm.cmd` 转发 shim）。
+
+| 侧 | 结果 | 退出码 / 耗时 |
+| --- | --- | --- |
+| 改造后（`ec047bf`） | **10 passed / 0 failed** | **0** / 22.0s |
+| 改造前（`f2ec9f2` 的 `Conversation.tsx`） | **10 passed / 0 failed** | **0** / 19.7s |
+
+覆盖：滚动容器关闭浏览器滚动锚定 / 非流式态不残留浮标 / **流式中真实滚轮上滚 → 浮标出现 → 点浮标回底并恢复跟随** / 工具输出尾窗与推理块各自的浮标往返（两档视口各 5 条）。A/B 逐条同名同结果 ⇒ 不回归。
+A/B 手法：`git show f2ec9f2:web/src/components/Conversation.tsx` 直接写回工作树，跑完从仓库外备份逐字节恢复并校验 sha256——**全程未用 `git stash` / `git checkout`**（本机红线）。
+
+**AC 逐条**
+
+| AC | 内容 | 状态 | 证据 |
+| --- | --- | --- | --- |
+| AC1 | `PERF_BASELINE.md` 有前置基线（long task 数与最长单帧） | ⚠ 部分 | 基线节已落，但 long task/最长单帧**未取得**（见未闭合项与基线的解除条件）；替代观测（每帧 `scrollHeight` 读数）已落 |
+| AC2 | 单测：一个 rAF 帧内 `scrollHeight` 读取次数为 1；附改造前失败输出 | ✅ | 3 条（一帧 3 次 / 一帧 5 次 / 跨两帧各 2 次），红证输出见上 |
+| AC3 | 单测：`runActive === false` 或 `following === false` 时零次 `scrollTop` 写入 | ✅ | 2 条（`run_status !== running` ⇒ 0 写；上滚脱离 ⇒ 0 写且浮标出现） |
+| AC4 | 单测：卸载后已登记的 rAF 被 cancel | ✅ | 1 条（`toHaveBeenCalledWith(handle)`）＋ 1 条行为守卫（卸载后过一帧零读写）；变异 2 证明其判别力 |
+| AC5 | 相关 e2e 不回归，附改造前 A/B | ✅ | 上表 10 / 10 vs 10 / 10 |
+| AC6 | 手工冒烟（上滚 → 浮标 → 点回最新，附录屏） | ❌ **未执行** | 需真模型往返，供应商账户冻结（`HTTP 400 {"code":"billing"}`，证据见 F1 节）。行为等价性由 AC5 的同名 e2e + 12 条单测覆盖；解除条件见未闭合项 |
+| AC7 | `build` / `lint` / `test` 全绿 | ✅ | 见下门禁表（四件套 rc 全 0） |
+| AC8 | `git diff --stat` 只出现 `Conversation.tsx` 与其测试 | ⚠ 见下 | 源码只有 `Conversation.tsx`（+29 −2）+ 新增 1 个测试文件；另 `docs/PERF_BASELINE.md`（**AC1 强制落点**）与台账，均非源码 |
+| AC9 | 若关单为 wontfix 需附基线 + 否决记录 | ✅ 不适用 | 判定为「做」，未走 wontfix |
+
+**AC8 的精确表述**：`git diff --stat f2ec9f2 <本票 tip> -- web/` 只列出 `web/src/components/Conversation.tsx` 与新增的 `Conversation.snapframe.test.tsx`；`web/` 之外只有 `docs/`（`PERF_BASELINE.md` + 本台账 + 归档索引），与 B7 的 AC9 同一处置（AC1 强制落点）。
+
+**门禁（本轮实跑；`npm` 不可用，走包入口点直调，cwd = `web/`；权威取 vitest 的 JSON report 解析）**
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| lint | `node node_modules/oxlint/bin/oxlint` | **rc=0**，`Found 42 warnings and 0 errors`（200 文件 / 116 规则；与 F2 基线 42 持平，**新增 0**） |
+| typecheck | `node node_modules/typescript/bin/tsc -b` | **rc=0** |
+| 单测（全量） | `node node_modules/vitest/vitest.mjs run` | **rc=0**，**1026 passed / 0 failed** |
+| 构建 | `node node_modules/vite/bin/vite.js build` | **rc=0** |
+| 相关 e2e | 见上 A/B | **10 passed / 0 failed** |
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| long task 数 + 最长单帧（AC1 的浏览器侧数字） | **未取得**（**非本票引入**，F1/F4/F2 同一外部阻塞） | ① 账户解冻后把 `perf-longtask-live.mjs` 指向**流式**会话（同脚本同口径，不算新增采集器）；② 人工按 §2.1 固定场景录一次并归档 trace。票面明令「不得新增采集器」 |
+| AC6 手工冒烟未执行 | **未执行** | 同上账户解冻；行为等价性已由 AC5 e2e + 单测覆盖 |
+| 其余 4 个「偶发命中」spec 未跑 | **未跑**（票面只要求跑命中的） | 若要全覆盖：`multiturn-queue` / `stream-fallback` / `y-inspector-peek` / `z-artifact-content` 各跑一次 A/B |
+| 超长会话下 `scrollTop = scrollHeight` 自身 O(1) 布局成本 | **未消除**（票面已列） | 基线显示该成本可测；届时另开票评估 `overflow-anchor`（**本票不做**） |
+| 稳态收益为零（只有长帧受益） | **记录在案**（实测结论，非缺陷） | 若后续实测长帧不再是瓶颈，本票收益归零；数字已在基线，不需要行动 |
+
+**审查**：本票**不**给自己开审查；`78eb3bf` / `ec047bf`（含源码）**均不进 `[whitelist]`**，交由 **P1-B4** 的两轴审查窗口覆盖（fixed point = `f2ec9f2`）。docs 落点 commit 与 ledger 白名单行按台账惯例处理。
+
+<!-- ===== F3(#276) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B5（#277）台账起点（2026-09-19） ===== -->
+
+#### F6（#277）验收证据
+
+**票面**：GitHub #277（`## What to build` 第 1 步「强制测量」＋第 2 步 A/B 二选一、AC1–AC8、`## Scope lock`、`## Blocked by` = 无；`## 文件所有权` = `web/src/styles/app.css` 的第一顺位）。
+
+**本票结论：走第 2 步 A —— 测得「可忽略」，`app.css` 的视觉实现不改**（只在 `:187` 注释下方**追加一行**复核结论）。
+⇒ **源码改动 = 0 行**；`git diff --numstat web/src/styles/app.css` = **`1 0`**（第 2 列 = 0，满足 AC2「只新增」）。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | F6 面：` M web/src/styles/app.css`、`MM docs/PERF_BASELINE.md`、`?? web/scripts/perf-pulse-cost.mjs`（其余 5 项 `M `/`A ` 属**上一票 F3/#276**，其提交已在索引里、ref 未落地） |
+| `git log --oneline -8 -- web/src/styles/app.css` | `6cb229c` `80b41b9` `d048587` `a19eae0` `4c5539c` `78f5019` `c74a9c7` `0f50134`（最近 8 条，**无本批在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 同文件**无在飞冲突**；本票与 `docs/tickets/architecture-audit-remediation-2026-09-18.md` 的 #237–#266 候选文件（全 `src/agent_harness/**`）**零交集**。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F6 节**（票面 AC1 的落点）。采集器随票入库：**`web/scripts/perf-pulse-cost.mjs`**。
+
+```bash
+cd web
+npm run build                                  # 脚本读 dist/ 里那份**生产 CSS**
+node scripts/perf-pulse-cost.mjs               # 8 臂 × 3 轮（约 3 分钟）
+node scripts/perf-pulse-cost.mjs --only A1,B1,A2,B2 --reps 5   # 稳定性交叉检验
+```
+
+**第 1 步（强制，先量再定）—— 读数（headless，3 轮中位；另有 5 轮交叉检验）**
+
+| 臂 | 构成 | long task 数 | 掉帧(>20ms) | trace 最长 RunTask | trace >16.7ms 帧 | RunTask 数 | style / paint / raster（ms / 3s） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **Z0** | 空舞台（零动画）＝噪声地板 | **0** | 0 | 1.4ms | 0 | 1361 | 0 / 0 / 0 |
+| **A1** | `pulse-thinking` ×1 · 动画**开** | **0** | **0** | **1.6ms** | **0** | 3021 | **20.7 / 0.4 / 0.6** |
+| **B1** | `pulse-thinking` ×1 ＋ reduced-motion | **0** | **0** | **1.5ms** | **0** | 1399 | 0 / 0 / 0 |
+| **A2** | `pulse-tool` ×1 · 动画**开** | **0** | **0** | **1.4ms** | **0** | 3024 | **20.8 / 0.7 / 1.2** |
+| **B2** | `pulse-tool` ×1 ＋ reduced-motion | **0** | **0** | 0.9ms | 0 | 1396 | 0 / 0 / 0 |
+| **A40** | ×40（放大臂） | **0** | 0 | 5.2ms | 0 | 3843 | 162.8 / 1.4 / 11.7 |
+| **C** | 正对照①：**同一套** keyframes 铺满 1440×900 | **0** | 0 | 3.2ms | 0 | 1463 | 15.5 / 0.3 / 4.2 |
+| **C2** | 正对照②：`filter: blur()` 铺满 1440×900 | **0** | **54** | **36.9ms** | **100** | 2324 | 7.7 / 0 / 0 |
+
+**判定：可忽略（走 2A）**。三条依据（都落盘在基线里）：
+1. **票面 AC1 的两列**：**long task 数 A/B 都是 0**；掉帧 A/B 都是 **0**。
+   ⚠ 「最长单帧」的口径要在基线里分开读：**rAF 最长帧间隔（16.8/16.8ms）被 vsync 钳住、A−B=0 是「平凡真」，只作参考**；
+   掉帧数（能响应：C2 掉 54 帧）与 **trace 最长 RunTask**（5 轮下 A 反而略低于 B）才是证据。
+2. **A−B 上界 ≈ 21.7 ms / 3s ≈ 0.72% 单核**（style +20.7 ＋ paint +0.4 ＋ raster +0.6；5 轮区间 20–23 ms/3s）。
+   而且该上界**含 `spin` 与 `transition`**（B 臂走 `index.css:368-376` 的全局块，把三者一起关了）⇒ **连上界都可忽略**，结论比「pulse-glow 本身可忽略」更强。
+3. **面积不是瓶颈**：正对照 C 把同一套 keyframes 铺到 1440×900（元素盒 **≈ 433 倍**面积）后 style **没涨**（15.5 vs 20.7）；
+   而 A40（同尺寸、40 个）style 涨到 **7.9 倍** ⇒ 决定性因素是**元素个数**，真实 run 里同时可见的胶囊**最多 1 个**（`runState.ts:58-66` 单一相位）。
+
+**仪器自证（三条都过；这是「防假绿」的关键：把「测不出」与「零成本」分开）**
+
+| # | 自证 | 结果 |
+| --- | --- | --- |
+| ① | B 臂动画**确实被关掉**：`document.getAnimations()` 中 `playState==='running'` 计数 | A1 = **2**（`pulse-glow`+`spin`）/ B1 = **0**；B 臂 `animation-duration = 1e-05s`、`iteration-count = 1` ✅（顺带复验原注释承诺「reduced-motion 由全局块关闭」**为真**） |
+| ② | 指标**随被测变量响应** | `A1 → A40`：style `20.7 → 162.8ms`、RunTask `3021 → 3843`、paint `0.4 → 1.4ms` ✅ |
+| ③ | 仪器**看得见真卡顿** | 正对照②（`filter: blur()` 铺满视口）掉帧 **54**、最长帧间隔 33.5ms、trace 最长 RunTask **36.9ms**、**100** 帧 >16.7ms ✅ |
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | `docs/PERF_BASELINE.md` F6 节：A/B 两列（long task 数、最长单帧的两个口径）＋ 3 轮/5 轮两套数字 ＋ 采集器与命令 |
+| AC2（2A 分支） | **通过** | `app.css:188` 有追加行，含**日期**（2026-09-19）＋**数字**（long task 0/0、最长帧间隔 16.8/16.8ms、掉帧 0/0、≈0.7% 单核）＋指向 `docs/PERF_BASELINE.md`「F6」节；`git diff --numstat web/src/styles/app.css` = **`1 0`**；`git diff` 中 `:185-187` 原注释**无任何 `-` 行** |
+| AC3 / AC4 / AC5 | **N/A** | 票面写明「若走 2B」才适用；本票走 2A |
+| AC6 | **通过** | `oxlint` rc=0；`tsc -b && vite build` rc=0（`built in ~9s`，CSS 产物哈希与改造前一致 ⇒ 改动确为纯注释）；`vitest run` **300 suites / 1026 tests / 0 failed**（`success=true`） |
+| AC7 | **需披露**（见下） | 字面 `git diff --stat` 对 F6 面只有 `web/src/styles/app.css`（+1）与 `docs/PERF_BASELINE.md`；**另有一个新增文件** `web/scripts/perf-pulse-cost.mjs` |
+| AC8 | **通过（已记录）** | 基线 F6 节有「本票的非目标」一段：不做全库合成层提示、未新增 `content-visibility`/`contain`、未改全局 `reduced-motion` 块、未动其余 40+ 处静态 `box-shadow` |
+
+**AC7 披露（写在明面上，不默默放过）**：新增 `web/scripts/perf-pulse-cost.mjs` 不在 AC7 的字面清单里。
+判定为**不越界**：① 票面硬规则 **G3**「基线必须能在别人机器上按同样的命令复现」；
+② `docs/PERF_BASELINE.md` **§1.3**「每条数字必须可复核：附怎么测的——命令、脚本路径；只有数字没有口径 = 无效」；
+③ 本批既有先例：F2 的 `web/scripts/perf-longtask-live.mjs`、B7 的 `scripts/measure_loop_blocking.py` 都是随票入库的采集器。
+该脚本**不进生产构建**（`vite.config.ts` 无 `scripts/**` glob、`index.html` 只引 `/src/main.tsx`；`npm run build` 后
+`dist/assets/index-BmiM9eNd.css` 哈希与内容不变），也**不进测试**（`vitest` 不 glob `scripts/`）。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P1**：基线里「≈270 倍面积」算错（正确 ≈433 倍） | 已改为 **433 倍**（并补「含 12px 光晕的实际绘制面积≈188 倍」的口径说明） |
+| 正确性轴 | P2：「0.72% 单核」与「0.7% 帧预算」同源却不同值 | 统一为 **0.72%** |
+| 正确性轴 | P2：rAF 最长帧间隔被 vsync 钳住，A−B=0 是「平凡真」，不应作头条 | 已把该列**降为参考**，头条改为 long task=0 ＋ style 差值；并在「读数怎么解释」「仪器自证 ③」两处同步改写 |
+| 正确性轴 | P2：B 臂还关了 `transition`（`index.css:374` 的 `transition-duration`），文档未声明 | 已把「未闭合项」的「已知混杂」行扩为 **`spin` + `transition`**，并把「A−B 是上界」的措辞贯穿到表头 |
+| 正确性轴 | P2：`median()` 偶数取上中位有偏；`startsWith(DIST)` 缺分隔符；`reps=3` 偏薄 | 脚本已修前两条；第三条用 **`--reps 5` 交叉检验**闭合（结论一致，style 区间 20–23 ms/3s） |
+| 规范轴 | P2：新脚本对字面 Scope lock 是扩展 | 判定**不越界**，并按建议在台账与基线**明面披露**（见上 AC7 段） |
+| 规范轴 | P2：AC8 缺显式「非目标」记录 | 已在基线 F6 节补「本票的非目标」一段 |
+| 规范轴 | 结论：AC2 / 并行批次避让 **通过**；构建污染 **无**；脚本风格与本仓 peer 一致（`oxlint` 0/0） | — |
+
+> 两轴审查**未发现 P0**（即没有任何一条会推翻「可忽略」的结论）。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 「真实 run 的 thinking/tool 相位」实景录制 | **未取得** | 账户解冻后用 `perf-longtask-live.mjs` 或本脚本 `--headed` 在**真 run** 上复采一次；本票的受控臂结论不依赖它（测的是 CSS 固有属性） |
+| paint 时间占比（票面「若可取得」） | **未取得** | ① 人工在 DevTools Performance 面板按 §2.1 录一次读 Paint 汇总；② 换到会真光栅化的车道重跑同一脚本。原因：正对照②卡到掉帧 54 时 trace 的 `Paint`/`RasterTask` 仍读 0 ⇒ 本车道渲染列不可用、**不当证据** |
+| A−B 上界里含 `spin` / `transition` | **已知混杂** | 无需解除：B 臂三者一起关 ⇒ A−B 是上界；上界都可忽略 ⇒ 结论更强 |
+| 40 个以上胶囊同时呼吸 | **未测** | 真实 run 最多 1 个；若将来 UI 改成同时多胶囊，按 A40 口径重跑 |
+
+**审查与台账处理**：本票**含源码改动为 0**，唯一新增的可执行物是测量采集器 `web/scripts/perf-pulse-cost.mjs`（非生产、非测试）。
+按 batch 惯例，`docs/PERF_BASELINE.md`（AC1 强制落点）与采集器**均进本票的提交**；两轴审查已在**本票内**完成（上表），
+其 fixed point = `f2ec9f2`。是否把该 commit 放进 **P1-B4** 的 `[whitelist]`：**不放**（它含可执行物，按 F3 同规矩交由 P1-B4 的两轴审查窗口覆盖）。
+
+<!-- ===== F6(#277) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B5（#278）台账起点（2026-09-19） ===== -->
+
+#### F7（#278）验收证据
+
+**票面**：GitHub #278（`## What to build` 第 1 步过渡编排 ＋ 第 2 步「逐轨道的可插值性**必须实测**；不可插值就只过渡能插值的轨道，并在 DoD 写明哪条轨道降级为瞬时」；AC1–AC10；`## Scope lock`；`## 文件所有权` = `app.css` 的 `.app-regions/.inspector-closed/.inspector-fullpage/.app-workspace` 片段 ＋ `App.tsx` 类名切换片段 ＋ `e2e/y-inspector-peek.spec.ts` **只增不改**）。
+
+**本票结论（三句分开读，不要合成一句）**
+1. **连续过渡：达成两条轨道，第三轨按票面「必做 2」降级并在 DoD 写明。** open/close 两段 workspace 与 inspector 都插值；整页两段 rail 与 workspace 插值、**inspector 一帧离散翻转**（`--inspector-w ↔ 1fr` 是 length ↔ fr，不可插值；救它只能改 grid 布局模型 ⇒ 票面明文禁止，不改）。
+2. **long task：五组读数、288/288 段次全 0** ⇒ 过渡**没有引入新的 long task**（G4 头条口径）。
+3. **最长单帧：本轮比改造前多掉 1 帧，上一轮同参数测不出差异 ⇒ 不下「不变差」的断言。** 本轮（负载较高）过渡开 vs 过渡关 = 33.4ms vs 16.8ms（63/64 vs 10/64 段次）；上一轮（同日 04:47–04:51，机器空闲）= 2/64 vs 0/64，中位都 16.8ms。**A/A 仪器对照**（同 CSS、只差注入与否）两臂读数完全一致 ⇒ 变的是机器状态而非臂构造。⇒ 按 AC8 的收窄手段（减少同时过渡的轨道数 / 缩短时长）**本票不采纳**，理由与复测条件写进基线与下方「残余风险」。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | F7 面：`MM web/src/styles/app.css`、`MM docs/PERF_BASELINE.md`、`?? web/scripts/perf-inspector-transition.mjs`（另 6 项 `M `/`A ` 属**上一票 F3/#276 ＋ F6/#277**，其提交对象已在隔离索引里、ref 未落地） |
+| `git log --oneline -8 -- web/src/styles/app.css` | `6cb229c` `80b41b9` `d048587` `a19eae0` `4c5539c` `78f5019` `c74a9c7` `0f50134`（最近 8 条，**无本批在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 同文件**无在飞冲突**；本票与 `docs/tickets/architecture-audit-remediation-2026-09-18.md` 的 #237–#266 候选文件（全 `src/agent_harness/**`）**零交集**。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F7 节**（票面 AC8 的落点，含逐轨道判定表、A/B 五组读数、仪器自证 ①–⑥、未闭合项）。采集器随票入库：**`web/scripts/perf-inspector-transition.mjs`**。
+
+```bash
+cd web
+npm run build                                    # 脚本读 dist/ 里那份生产 CSS
+node scripts/perf-inspector-transition.mjs --mode probe --json %TEMP%/f7-probe-v3.json   # V0–V5 六臂（V5 = 不注入、直接量交付物）
+node scripts/perf-inspector-transition.mjs --mode segments --before  --reps 8 --json %TEMP%/f7-abv3-b1.json
+node scripts/perf-inspector-transition.mjs --mode segments --shipped --reps 8 --json %TEMP%/f7-abv3-a1.json
+node scripts/perf-inspector-transition.mjs --mode segments --before  --reps 8 --json %TEMP%/f7-abv3-b2.json
+node scripts/perf-inspector-transition.mjs --mode segments --shipped --reps 8 --json %TEMP%/f7-abv3-a2.json
+```
+
+**逐轨道判定（本票最关键的口径修正）**：原判据「数整串 `grid-template-columns` 的取值个数」**被 rail 主导**——只要一列在插值整串就好看，另两列的一帧跳变被掩盖（本票真撞上）。改为**逐帧拆三列、看该列最大跳幅 / 全幅**后，交付物（`V5`，不注入）实测：
+
+| 段 | rail | workspace | inspector |
+| --- | --- | --- | --- |
+| open / close | 不变 | **插值**（13 / 10 个取值，最大跳 95.1 / 148.2px） | **插值**（13 / 10 个取值） |
+| fullpage | **插值**（7 值 / 105.1px） | **插值**（7 值 / **309.5px**） | **离散翻转**（6 值 / 一帧 **722.0px** @+52ms） |
+| exit-fullpage | **插值**（12 值 / 67.3px） | **插值**（12 值 / **296.8px**） | **离散翻转**（3 值 / 一帧 **717.9px** @+37ms） |
+
+红证 `V0`（同一次运行内注入改造前语义）：四段**全轨道一帧到位**、关闭段 `.step-detail` **第 0 帧**就 hidden ⇒ AC1/AC2 的「前」半边有对照数字。
+
+**V3 修正（P2 审查 finding → 已进交付物）**：`.app-regions.inspector-fullpage` 中间轨道 `0px` → `minmax(0, 0fr)`。静态解完全相同（`0fr` ⇒ `0px`，探针终态 `to: 0` 逐值一致），但 `1fr ↔ 0fr` **可插值**。整页 workspace 由「一帧 946.6px」变成插值（V3 308.3px=37% / 交付物 V5 309.5px）；退出整页 955.4px → 296.8px。**inspector 轨道救不了**（除非改布局模型），故 DoD 写明该轨道降级为瞬时。
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | 逐帧轨道序列（不是截图目测）：open 13–16 个取值 / close 10 / 整页 7–12，全部 ≥3 个中间态；`V0` 红证只有 1 个取值（一帧跳变）。采样密度自证见基线④ |
+| AC2 | **通过** | 关闭方向 `.step-detail` 到 **第 10 帧（+177ms）** 才 hidden（V0 是第 0 帧）；打开方向**第 0 帧（+0ms）** 即重新可见 ⇒ 两半都有对照 |
+| AC3 | **通过** | e2e `y-inspector-peek.spec.ts:139-140` 的 `toBeHidden()` 用例（本文件 AC2 用例）在子集复跑中通过；spec **一字未改** |
+| AC4 | **部分通过 ＋ 已按票面披露** | rail / workspace 两条轨道连续（逐轨道表）；`inspector` 降级为一帧离散翻转，DoD 与 `app.css` 注释均写明。**不为此改布局模型**（票面禁止） |
+| AC5 | **通过** | reduce 下 `RM1`（含 `transition-delay` 复位）第 **3** 帧（42ms）就 hidden，`RM0`（不复位）第 **10** 帧（160ms）⇒ 复位必要；全局块只压 duration 不碰 delay 的坑有实测；`allow-discrete` 声明经 V2 臂证伪后**未进生产** |
+| AC6 | **通过** | `git diff --numstat HEAD -- web/e2e/y-inspector-peek.spec.ts` **为空**（删除行 0、新增行 0）⇒ 既有断言一字未改，本票也未新增用例 |
+| AC7 | **通过** | `git diff --numstat HEAD` 显示 `App.tsx`、`StepDetail.tsx` **零改动** ⇒ 挂载方式与卸载语义未动；e2e「Esc 关预览但面板与清单都还在（关闭不卸载）」用例通过 |
+| AC8 | **通过（已记录）** | 基线 F7 节有改造前/后四段的 long task 数 + 最长单帧（本轮 ＋ 上一轮 ＋ A/A 对照三组），并**明确写出**「本轮比改造前多掉 1 帧、上一轮测不出」以及「收窄手段未采纳」的理由 |
+| AC9 | **通过** | `oxlint` **42 warnings / 0 errors**（rc=0）；`tsc -b && vite build` rc=0（`built in 16.78s`）；`vitest run` **1026 tests / 0 failed / 0 errors**（junit 权威解析）；e2e 子集见 AC3 |
+| AC10 | **需披露**（见下） | 源码面只有 `web/src/styles/app.css`；**另有一个新增文件** `web/scripts/perf-inspector-transition.mjs` 不在 Scope lock 字面清单里 |
+
+**AC10 披露（写在明面上，不默默放过）**：新增采集器 `web/scripts/perf-inspector-transition.mjs` 不在票面字面清单内。
+判定为**不越界**：① 票面硬规则 **G3**「基线必须能在别人机器上按同样的命令复现」；② `docs/PERF_BASELINE.md` **§1.3**「每条数字必须可复核：附怎么测的——命令、脚本路径」；③ 本批既有先例（F2 的 `perf-longtask-live.mjs`、F6 的 `perf-pulse-cost.mjs`、B7 的 `measure_loop_blocking.py`）。该脚本**不进生产构建**（`index.html` 只引 `/src/main.tsx`，本轮 `npm run build` 的产物哈希随本票 CSS 变更而变、脚本零影响），也**不进测试**（`vitest` 不 glob `scripts/`）。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P1**：基线原判据「整串取值个数」把整页两段说成「三列同时插值」，与逐轨道实测不符（rail 主导掩盖另两列） | 判据改为**逐轨道最大跳幅**；基线写入判定表，注明旧口径已废弃；`app.css` 注释同步改写 |
+| 正确性轴 | **P2**：workspace 轨道可救——`0px` → `minmax(0, 0fr)` | **采纳**（V3 臂实测后进交付物），并用新增 **V5 臂**（不注入）在交付物本身上复证 |
+| 正确性轴 | **P2**：`app.css` 注释引用的 reduce 帧号来自另一次运行，与基线引用互不一致（183ms vs 167ms） | 统一为**三次真跑的范围**表述（`RM0` 第 10–11 帧 / `RM1` 第 2–3 帧），并写明「±1 帧抖动，比帧序不比毫秒」 |
+| 正确性轴 | **P2**：未闭合项只披露了关闭方向的 `padding` 瞬变，**打开方向同源问题漏了** | 合并为一条：打开首帧「面板盒 32px vs 轨道 0px」＋关闭首帧「padding 16px→0」，同一解除条件 |
+| 正确性轴 | **P1（本轮新发现）**：基线原打算沿用上一轮的 A/B 结论「过渡没有让最长单帧变差」，但**本轮回测在 B/A/B/A 交替下给出相反读数**（A 63/64、B 10/64） | **不下该断言**；补做 **A/A 仪器对照**（同 CSS、只差注入）判明是机器状态差异；基线并列三组读数，并把「掉 1 帧」列为未闭合项、写明复测条件 |
+| 规范轴 | **P2**：`exit-fullpage` 走 `--dur-in`（240ms）未在台账写明，读者会以为整页方向一律 150ms | 基线写明：**进入整页 150ms、退出整页 240ms**（`anims` 读数 `grid-template-columns:150` / `:240` 实证），`app.css` 注释同步 |
+| 规范轴 | **P3**：同批 F6 节引用的 `app.css:188` 在最终树已移位 | 基线仅加括注：最终树为 **`:261`**（F7 前部净插 73 行）；**不改** F6 记录 |
+| 规范轴 | 结论：Scope lock（`app.css` 指定片段 / `App.tsx` 零改动 / e2e 只增不改）、架构不变量、并行批次避让 **通过**；`npm run build` 产物与 `tsc` 类型检查干净 | — |
+
+> 两轴审查**未发现 P0**。P1 的处置是**改写结论**而不是「补一句免责」——原来的头条「过渡没有让最长单帧变差」在本轮读数下不成立。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| 「过渡开」比「过渡关」多掉 1 帧（33.4ms，非 long task） | **已知，环境依赖** | 在**空闲机器**上重跑 `--mode segments` 四块（`--reps 8`，B/A/B/A）：A 臂回到 0–2/64 ⇒ 判为机器负载效应、闭合；若稳定复现 ⇒ 按 AC8 收窄并复验 AC1/AC4 |
+| `.step-detail` 的 `padding` 不参与过渡（两方向同一根因，1 帧） | **已知** | 若观感复核判定可见，用同一套 `0s + delay` 手法延后 `padding`；本票不落未测量的声明 |
+| 键盘调宽不置 `data-resizing` ⇒ 守卫不生效 | **已知** | `StepDetail.tsx` 在 `keydown` 时置该属性——属 N2 / F2 / F5 所有权 |
+| 窗口跨 1200px / 820px 断点 | **已知** | 媒体查询改写的正是 `grid-template-columns` ⇒ 列宽变化也会插值。本票不加 `@media` 包裹（会让窄屏失去过渡） |
+| 过渡期间 `.step-detail` 内部节点仍参与逐帧重排 | **未处理**（本票不引入 `contain`） | **F5** 若引入 `content-visibility` / `contain`，本票的过渡需在 **F5 之后复验一次**（这也是上表「掉 1 帧」最可能的解除路径） |
+
+**审查与台账处理**：本票含源码改动（`app.css` 的过渡编排 ＋ 一处 `0fr` 修正）与一个随票入库的采集器（非生产、非测试）。
+`docs/PERF_BASELINE.md`（AC8 落点）与采集器**均进本票的提交**；两轴审查已在**本票内**完成（上表），其 fixed point = `f2ec9f2`。
+**白名单归属**：docs-only 的台账刀（tracker F7 验收证据节 + `PERF_BASELINE` F7 节 + phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀（`app.css` 过渡编排）与含可执行采集器的刀**不进**，按 F3 / F6 同规矩交 P1-B4 的两轴审查窗口覆盖。
+
+<!-- ===== F7(#278) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— F5（#279）台账起点（2026-09-19） ===== -->
+
+#### F5（#279）验收证据
+
+**票面**：GitHub #279（`## What to build` 四步：①先量再改 ②对判定为「必须做」的列表**复用 Timeline 尾窗模式** ③关闭态成本（可选、有前提） ④明确不做的事；AC1–AC11；`## Scope lock` = 仅 `StepDetail.tsx` 的三个列表片段与其新常量及其测试）。
+
+**本票结论（三句分开读）**
+1. **三个列表全部判定为「做」**（票面二值规则：N ≥ 200 时 ≥ 4 ms ⇒ 必须做）：TOOLS 17.5 / 19.3 ms、DIFFS 31.4 / 34.9 ms、ARTIFACTS 45.4 / 50.5 ms（两轮读数）——无一例外，全部远超 4 ms。票面 Risks 里允许的「只有 TOOLS 适用尾窗」**不是**本票的实测结论。
+2. **改造是否有效，判据用「默认挂载节点数」而不是耗时。** 改造后同一脚本两轮里耗时跨格跳到 29–76 ms（同一构造、同一进程、格子随机），而节点数**恒定等于窗口大小、与 N 无关**。改造前后 @N=500：**500→50 / 500→50 / 500→20**。
+3. **未引入 `content-visibility` / `contain`**（票面第 4 步硬约束）。因此 **F7 那条「F5 若引入 contain，F7 的过渡需复验一次」的触发条件未成立**——F7 的未闭合项保持原状，本票无需复验。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | **空**（F7 已落地 `2c8ddeb`，工作树与索引均干净） |
+| `git log --oneline -8 -- web/src/components/StepDetail.tsx` | `fe96009` `1f88116` `4e85938` `252e0db` `864fb15` `d048587` `332d933` `5cfb6ff`（**无在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 同文件**无在飞冲突**；`StepDetail.tsx` 的所有权按票面矩阵是 `N2 → F2 → F5`，前两张均已落地。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F5 节**（AC1 落点）。复现脚本随票入库：**`web/src/components/stepdetail-list-cost.perf.test.ts`**（perf 车道，`vitest.config.ts` 已排除 `*.perf.test.ts`）。
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts \
+  src/components/stepdetail-list-cost.perf.test.ts
+```
+
+**红证（`StepDetail.window.test.tsx`；改造前 5 红 / 1 绿）**
+
+| # | 断言 | 改造前的实际失败输出 |
+| --- | --- | --- |
+| 1 | TOOLS @N=500 默认行数 ≤ 100 | `expected 500 to be less than or equal to 100` |
+| 2 | DIFFS 同上 | 同上（500） |
+| 3 | ARTIFACTS 同上 | 同上（500） |
+| 4 | TOOLS 有「加载更早」出口 | `expected null not to be null` |
+| 5 | DIFFS / ARTIFACTS 默认先裁（`before < N`） | `expected 500 to be less than 500` |
+| 6 | （绿）窗口只裁首段、保留尾部连续段 | 不变式守卫，改造前后都成立 |
+
+> **红证的「改造前」怎么构造**：`HEAD` 的 `StepDetail.tsx` **仅**在 `ArtifactsTab` 声明前补一个
+> `export`（不导出则用例与探针都到不了第三个面，见 AC10 披露）、其余一字未动；记完断言即还原，
+> `sha256` 与实现版逐字节相同（实现版 `f4d23ffc…`／改造前 `a22137ef…`）。复现命令：
+> `node node_modules/vitest/vitest.mjs run src/components/StepDetail.window.test.tsx`
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | 基线 F5 节：三列表 × N=50/200/500 × 两轮的耗时 + 节点数，附可复现命令与脚本路径 |
+| AC2 | **通过** | 基线「判定」表逐列表给结论与倍数（4.4–4.8× / 7.8–8.7× / 11.3–12.6×） |
+| AC3 | **通过** | 用例断言默认行数 ≤ 100（三个窗口 50/50/20 均在界内）；改造前为 500 ⇒ 红证成立 |
+| AC4 | **通过** | 用例点「加载更早」到窗口到底，行数 = N；且**先断言 `before < N`** 以排除空过（见右侧处置表） |
+| AC5 | **通过** | 基线与本表均声明默认端 = **最新（尾部）**，理由：工具 / 变更 / 产物都是**追加**语义，流式期间关心的是刚发生的那条 |
+| AC6 | **通过** | `git diff` 的**删除行只有 4 行**（三个 `map` 的列表源 + `ArtifactsTab` 声明行加 `export`）⇒ 行渲染 JSX 一行未动；两个 tab 的 e2e spec 全绿 |
+| AC7 | **通过** | `git diff` 的 **9 个 hunk 全部落在 TOOLS / DIFFS / ARTIFACTS 段**，Timeline 段（`:948-1010`）零改动；`TIMELINE_WINDOW_DEFAULT = 200` / `STEP = 500` 未变 |
+| AC8 | **通过** | oxlint **42 warnings / 0 errors**（与 F7 持平）；`tsc -b && vite build` 通过（`dist` 内「加载更早」4 处 = Timeline 1 + 本票 3）；vitest **1032/1032**（F7 时 1026，+6） |
+| AC9 | **通过** | e2e `y-inspector-peek.spec.ts` **18/18**；`z-changes-panel.spec.ts` + `z-artifact-content.spec.ts` **18/18**（收尾挂死用外部超时 + ok 行判定，两轮都干净退出） |
+| AC10 | **需披露**（见下） | 改动面 = `web/src/components/StepDetail.tsx`（+87 / −4）+ 两个新增测试文件 |
+| AC11 | **通过** | 基线未闭合项第 1 条；`web/src` 全目录检索 `content-visibility` / `contain:` **零匹配** |
+
+**AC10 披露（写在明面上）**：除票面字面清单外有两点，均**不进生产构建**：
+① `ArtifactsTab` 的**声明行加了 `export`**（4 行删除里的 1 行）—— 不导出则成本探针与用例都进不到这个面，而票面 AC1 要求 ARTIFACTS 也要有基线。本文件既有惯例即「为 SSR 测试导出 tab 组件」（`ChangesTab` 的注释就写着这条理由），此举是**补齐**而非引入新机制。
+② 新增 perf 车道脚本 `web/src/components/stepdetail-list-cost.perf.test.ts`：`vitest.config.ts` 已排除 `*.perf.test.ts` ⇒ 不进 `npm test`（先例：`f1-cost-probe.perf.test.ts`、`n2-cost-probe.perf.test.ts`）。
+两项都不改变生产行为——AC6 的「删除行只有 4 行」就是可复核的证据。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P2**：AC4 若只断言「最终行数 = N」，改造前**也成立**（全量渲染本来就是 N）= 空过，不构成红证 | 改写为三段：`before < N` ⇒ 点一次必须增长 ⇒ 到底 = N；红证重跑确认 5 红 1 绿 |
+| 正确性轴 | **P2**：`ArtifactsTab` 未导出 ⇒ 探针与用例都测不到 ARTIFACTS，票面 AC1 要求的第三处基线无法成立 | 加 `export`（见 AC10 披露），并在文件内注明与 `ChangesTab` 同理由 |
+| 正确性轴 | **P1（本轮新发现）**：改造后耗时读数跨格抖动（29 / 37 / 76 ms，同构造同进程）⇒ 拿它当「改造有效」的证据会得出错误结论（改后 37 ms 反而高于改前 19 ms） | **换判据**：改用**节点数**（结构量，恒定 = 窗口大小）；基线明确「不下耗时降到 X ms 的断言」并记未闭合项 |
+| 正确性轴 | 窗口化后**选中项可能落在窗口外**：`listTargets` 的 ↑/↓ 移动域是**全部**工具，而列表只画尾窗 ⇒ 会「选中了却看不见」 | 照 `TimelineTab` 的 `effectiveWindow` 做选中项派生扩窗（`ChatTab` 的 `selectedToolIndex`）；DIFFS / ARTIFACTS 的行是只读卡片、无选中态，故不需要 |
+| 规范轴 | 窗口条复用了 `timeline-*` 类名（语义错位） | 复核 `app.css:3759-3794`：这三个类**无 `.detail-timeline` 前缀限定** ⇒ 复用即零样式改动（`dist` 的 CSS 文件名与 F7 时逐字相同可证）；票面禁止改 `app.css`，不复用反而会逼出越界改动 |
+| 规范轴 | 新常量命名易与 `TIMELINE_WINDOW_DEFAULT` 混 | 用 `TOOLS_` / `CHANGES_` / `ARTIFACTS_WINDOW_*` 前缀，各自独立取值（**不复用** Timeline 语义——那是事件行，高度特征不同） |
+| 规范轴 | 结论：Scope lock（未碰 Timeline 尾窗实现 / `App.tsx` / `app.css` / 其余 tab）、`useState` 均在 early-return 之前（Rules of Hooks）、无新依赖、无虚拟化库 **通过** | — |
+
+> 两轴审查**未发现 P0**。P1 的处置是**换判据**（耗时 → 节点数），不是补一句免责。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| **未引入** `content-visibility` / `contain`（票面第 4 步） | **未处理** | 同基线：需某个**具体容器**的实测，证明 long task / 最长单帧显著改善且不破坏 `find-in-page`、滚动锚定、a11y 树 |
+| `TerminalTab` 的 `commandTools` 列表**仍是全量渲染** | **已知**（票面 Scope lock 未列它，按 AGENTS.md §8 不顺手改） | 该列表单次渲染 ≥4 ms（同口径）时按同一尾窗模式补 |
+| **F7 的过渡复验**（F7 台账节：F5 若引入 `contain` 则过渡需复验一次） | **触发条件未成立** | 本票未引入 `contain` ⇒ F7 那条未闭合项保持原状，无需复验；若后续有票引入则按 F7 记录执行 |
+| 改造后耗时读数跨格抖动 | **已知** | 空闲机器上重跑 `stepdetail-list-cost.perf.test.ts` 两遍取一致读数 |
+| 超长会话下的**操作成本**（用户可能要连点多次「加载更早」） | **未测量**（本票只测渲染成本） | 真实会话出现 >1000 个工具时再评估窗口/步长取值（YAGNI） |
+
+**审查与台账处理**：本票含源码改动（`StepDetail.tsx` +87 / −4）与两个测试文件（一个 jsdom 用例、一个 perf 探针）。
+`docs/PERF_BASELINE.md`（AC1 落点）进本票提交；两轴审查已在**本票内**完成（上表）。
+**白名单归属**：docs-only 的台账刀（tracker F5 验收证据节 + `PERF_BASELINE` F5 节 + phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀与含可执行探针的刀**不进**，按 F3 / F6 / F7 同规矩交审查窗口覆盖。
+
+<!-- ===== F5(#279) 台账节结束 ===== -->
+
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— F8（#280）台账起点（2026-09-19） ===== -->
+
+#### F8（#280）验收证据
+
+**票面**：GitHub #280（`## Problem` = `web/src/lib/sse.ts:43-62` 两处超线性：`:54` 每 chunk 对**整个 buffer** 跑两遍 CRLF 正则、`:58-60` 每切一帧 `slice` 一次剩余 buffer；`## What to build` 必做 1 游标式归一化 / 必做 2 去 `slice` 的 O(n²) / 必做 3 **行为等价的证据**；硬约束 **C1**（`consumeSSE` 仍是唯一解码器）/ **C2**（`wsStream.test.ts` 的同形字节契约不得改）/ **C3**（`attachLiveStream` / 合帧器 / `seenSeqs` / 重连调度零改动）；AC1–AC9）。
+
+**本票结论（三句分开读，不要合成一句）**
+1. **分帧处理量从二次变线性**：4× 输入的处理量比 **15.18× → 4.00×**（一帧超大）、**14.14× → 4.04×**（N 帧切 M chunk）。
+2. **顺带修掉一个真丢事件的缺陷**：`\r\n` 跨 chunk 边界（`\r` 结尾 + 下一 chunk `\n` 开头）旧实现把孤立 `\r` 立即转成 `\n`，与下一块的 `\n` 拼成「空行」⇒ **提前切帧，半截 JSON 被丢**（改造前 `events = []`，改造后 1 条）。这正是票面 Risks 点名的高危陷阱，AC2 的红证落在它身上。
+3. **耗时**：一帧超大 4 MB / 128 chunk 档 **297.3 ms → 133.4 ms**；1 MB / 32 chunk 档 15.1 → 14.2 ms（该档已由 `JSON.parse` 主导，看不出差别是预期的）⇒ **不下「耗时降到 X ms」的断言**（单次采样）。
+
+**开工前自检（票面 §开工前自检 三条命令的实际输出）**
+
+| 命令 | 输出 |
+| --- | --- |
+| `git status --short` | **F8 面：干净**（`web/src/lib/sse.ts`、`web/src/lib/sse.test.ts` 开工时均无改动）。其余 ` M web/src/components/StepDetail.tsx`、`?? web/src/components/StepDetail.window.test.tsx`、`?? web/src/components/stepdetail-list-cost.perf.test.ts` 属**上一票 F5/#279**（其提交对象已在隔离索引里、ref 未落地）；` M docs/*` 属 F5 台账 + 台账修订刀 |
+| `git log --oneline -8 -- web/src/lib/sse.ts` | `3555542`（最近一条即文件当前形态，**无在飞改动**） |
+| `git branch -a --contains HEAD` | `* workbuddy/main-f049fadd`（只有本 worktree 分支） |
+
+⇒ 文件所有权矩阵里 `web/src/lib/sse.ts` **只此一张**（F8，唯一占用者）；本票与 `docs/tickets/architecture-audit-remediation-2026-09-18.md` 的 #237–#266 候选文件（全 `src/agent_harness/**`）**零交集**。
+
+**G3 前置基线**：`docs/PERF_BASELINE.md` 的 **F8 节**（AC9 落点，含两场景逐项处理量、buffer 上限、耗时构成、未闭合项）。
+**复现命令 = 本票测试文件本身**（形态用例是确定性计数，进默认车道；**没有**另建采集器脚本——票面 AC8 把 diff 限死在 `sse.ts` + 其测试两个文件）：
+
+```bash
+cd web && node node_modules/vitest/vitest.mjs run --reporter=verbose src/lib/sse.test.ts
+```
+
+**改造前/后逐条对照（票面「必做 3」的 8 条；同一命令跑两遍，只换 `sse.ts`）**
+
+| # | 用例（`web/src/lib/sse.test.ts`） | 改造前 | 改造后 |
+| --- | --- | --- | --- |
+| ① | LF 帧逐条解析 → 既有 `consumeSSE > LF 帧逐条解析为事件` | ✓ 绿 | ✓ 绿 |
+| ② | `\n` 分隔符恰好切在两个 chunk 之间 | ✓ 绿 | ✓ 绿 |
+| ③ | `\r\n\r\n` 落在同一 chunk 内（**逐字段等价**，不只看「解析成功」） | ✓ 绿 | ✓ 绿 |
+| ④ | **`\r\n` 跨 chunk 边界** | ✗ **红**（`expected [] to deeply equal [{type:'text/delta',…}]`） | ✓ 绿 |
+| ⑤ | 仅 `\r` 作行结束符（单 chunk ＋ 跨 chunk 两形态） | ✓ 绿 | ✓ 绿 |
+| ⑥ | 一帧超大（`stream/truncated` 重放形态，200 KB 单帧 16 段投喂） | ✓ 绿 | ✓ 绿 |
+| ⑦ | 空帧 / 仅 `:` 注释行 / 多行 `data:` 拼接 | ✓ 绿 | ✓ 绿 |
+| ⑧ | 末尾 flush 的尾部 `\r` | ✓ 绿 | ✓ 绿 |
+| + | 形态用例：4× 输入 ⇒ 处理量 < 6× | ✗ **红**（15.18 / 14.14×） | ✓ 绿（4.00 / 4.04×） |
+
+改造前整跑结论行：`Test Files 1 failed (1) | Tests 2 failed | 13 passed (15)`（红 = ④ + 形态用例）。
+**AC2 只要求 ④/⑧ 至少一条红**：④ 红；⑧ 改造前即绿——它是「**没被破坏**」的 golden（票面 AC1 允许，并在此说明）。
+
+**红证（改造前，2026-09-19 12:30——用例已写、`sse.ts` 仍是 `2c8ddeb` 那版）**
+
+```
+× src/lib/sse.test.ts > F8 分帧边界矩阵（#280） > ④ `\r\n` 跨 chunk 边界 … 11ms
+  → expected [] to deeply equal [ { type: 'text/delta', …(1) } ]
+× src/lib/sse.test.ts > F8 分帧扫描的处理量形态（#280） > 4× 输入 ⇒ 处理量 < 6× … 365ms
+  → expected 15.183997618789197 to be less than 6
+```
+
+**AC 逐条**
+
+| AC | 判定 | 依据 |
+| --- | --- | --- |
+| AC1 | **通过** | 上表 8 条全绿 ＋ 逐条改造前/后对照（④ 红→绿；其余 7 条改造前后都绿 = 没被破坏；③⑤ 断言的是**逐字段等价**） |
+| AC2 | **通过** | ④ **改造前红**（见红证）；⑧ 改造前绿，按票面「至少一条」成立 |
+| AC3 | **通过** | 形态用例通过，且附改造前的二次形态对照数字：**15.18× → 4.00×**、**14.14× → 4.04×**（线性 ≈4） |
+| AC4 | **通过** | `git diff --numstat HEAD -- web/src/lib/wsStream.ts web/src/lib/wsStream.test.ts` **为空**（C1/C2 未被碰） |
+| AC5 | **通过** | `git diff --numstat HEAD -- web/src/hooks/useSession.ts` **为空**（C3 未被碰） |
+| AC6 | **通过** | `grep -rl "wsStream\|api/ws\|WebSocket" web/e2e/*.spec.ts` 命中 **2 个 spec**（`queue-flush.spec.ts` / `stream-fallback.spec.ts`，`fixtures.ts` 非 spec）；子集两臂同批结果：**改造前 22/22 ok、0 失败；改造后 22/22 ok、0 失败** |
+| AC7 | **通过** | `oxlint` **42 warnings / 0 errors**（rc=0）；`tsc -b && vite build` rc=0（`built in 11.32s`）；`vitest run` **65 files / 1040 tests / 0 failed**；子集 `vitest run src/lib/sse.test.ts src/lib/wsStream.test.ts` = **46 passed** |
+| AC8 | **通过（脚本口径为准，见下）** | 本票**只有两个文件**：`web/src/lib/sse.ts`（+48/−13）、`web/src/lib/sse.test.ts`（+234/−0）——路径域 diff 与提交级 `--stat` 一致。工作树里另有 F5 的在飞改动（台账已记，非本票） |
+| AC9 | **通过** | 基线 F8 节写明一帧超大两档的改造前/后耗时（**15.1 → 14.2 ms** / **297.3 → 133.4 ms**）＋ 处理量分解 ＋「耗时构成」说明 |
+
+**AC8 的口径说明（写在明面上）**：本 worktree 是**隔离提交链**形态——F5（#279）的改动仍在工作树里未落地（其提交对象挂在 `git` 对象库里，`ref` 未动），所以裸 `git diff --stat HEAD` 会同时列出 F5 的 `StepDetail.tsx` 与两个新增测试文件。判定本票范围用**路径域**：`git diff --numstat HEAD -- web/src/lib/`（只出本票两个文件），落地后用 `git show --stat <本票 commit>` 复核（同样只有两个文件）。
+
+**两轴独立 code review（本票自审；findings 已就地修）**
+
+| 轴 | 主要发现 | 处置 |
+| --- | --- | --- |
+| 正确性轴 | **P1**：形态用例的观测量本身是错的——`indexOf` 记的是「接收者全长 − from」，把**成功命中**也当成扫完整个尾巴 ⇒ 新实现在场景 B 上被误判二次（14.14×） | 改口径：命中记 `out - from`、未命中才记扫完；两臂数字在最终口径下**重测** |
+| 正确性轴 | **P1**：计数累加写成 `chars += (bySlice += n)` ⇒ 累加的是**运行中总数**，头条数字被放大（曾出现 59.55× 而非 15.18×） | 拆成两句独立累加；重测并复核三项之和 = 总数（51,503,210 = 33.0+16.5+2.0 M） |
+| 正确性轴 | **P1（本轮新发现）**：只做「归一化只处理新区间 ＋ 游标推进」**还不够**——`indexOf` 每 chunk 仍从 0 重扫整个 buffer，一帧超大时处理量仍是 `输入 × chunk 数`（新实现 4× 臂实测 256 M） | 加 `scanFrom`：未命中后下次从「**尾部最后一个字符**」起扫（它可能是跨界 `\n\n` 的前半个）；实测 4× 臂 256 M → 4 M。这是票面「必做 2」之外的必要一步，逻辑写进 `sse.ts` 的 `drain` 注释 |
+| 正确性轴 | **P2**：场景 B 的 4× 放大原设计是「帧数 ×4、chunk 数 ×4」⇒ **每 chunk 帧数不变**，二次项根本不放大（改造前只有 4.02×，用例失去鉴别力） | 改成「帧数 ×4、chunk 数不变」；改造前 14.14×、改造后 4.04× |
+| 正确性轴 | **P2**：起草时 ④⑤⑦ 的多行 `data:` 续行写成 `{"data":…}`（**非法 JSON**）⇒ ④ 的「红」里混进了假红成分（即使切帧正确也解析不出） | 续行统一为 `"data":{"delta":"hi"}}`；修后 ④ 在改造前**仍红**（真红：提前切帧丢事件）、改造后转绿 |
+| 正确性轴 | 结论：`carry` 只可能是单个 `\r`（`text.endsWith('\r')`）；`buffer` 内不可能以 `\r` 结尾 ⇒ `scanFrom = buffer.length - 1` 的「回看 1 字符」不变量成立；压缩后 `scanFrom -= readPos` 恒 ≥ 0；flush 后先 `drain()` 再取 `slice(readPos)` 才能与旧实现的 `buffer.trim()` 语义对齐 | — |
+| 规范轴 | **P2**：测试里 `split`（矩阵 describe）与 `even`（形态 describe）是同一个切块工具的两份拷贝 | 提为模块级 `evenChunks`，两处共用 |
+| 规范轴 | **P2**：计数窗口内若 `collect` 抛错，`restore()` 不会执行 ⇒ 打过补丁的 `String.prototype` 会留给同 worker 的其它测试文件 | `costOf` 改 `try/finally` 还原 |
+| 规范轴 | **P2**：形态用例进**默认车道**（与 F5/F6/F7 的 `*.perf.test.ts` 手动车道相反）需要理由 | 理由写进实现上方注释：该用例断言的是**算法形态的确定性计数**（与机器速度无关），不是耗时预算；且票面 AC8 把可改文件限死为 `sse.ts` + 其测试 |
+| 规范轴 | **P3**：断言 buffer 上限用字面量 `256 * 1024`，而实现常量是 `COMPACT_THRESHOLD = 64 KiB` | **故意**：断言的是「有界」这一性质，不锁实现常量（阈值调大调小都不该让用例红） |
+| 规范轴 | 结论：Scope lock（只碰 `sse.ts` + 其测试；C1/C2/C3 三个文件零 diff）、`sse.ts:50-53` 的 CRLF 归一化注释**原文保留**（在其下追加游标说明）、`parseFrame` 语义未动、无新依赖、无第二个解析器 | — |
+
+> 两轴审查**未发现 P0**。两个 P1 的处置都是**改观测量/补算法**，不是补免责说明——第一个 P1 若放过，本票会以「场景 B 仍二次」的假象收场。
+
+**残余风险与未闭合项**
+
+| 项 | 状态 | 解除条件 |
+| --- | --- | --- |
+| `parseFrame` 对超大单帧仍是 O(n)（`split` + `JSON.parse`）⇒ 一帧超大场景的**耗时**由它主导（4× 臂 133.4 ms 里，分帧处理量已 39× 降） | **票面明示不动** | 后续基线显示单帧解析本身成为长帧主因 ⇒ 另开票（基线 F8 节的「耗时构成」已给出指向） |
+| 耗时读数单次采样、无重复 | **已知** | 空闲机器上重跑基线 F8 节命令三次取中位数 |
+| 跨 chunk `\r\n` 的行为**有意改变**（旧：丢事件；新：保留） | **已确认无下游依赖** | `wsStream.ts:134` 只发 `\n\n`（不受影响）；HTTP SSE 降级路径走 uvicorn 的 `\r\n\r\n`，整帧到达（⑤/⑧ 覆盖）。若将来出现依赖「提前切帧」的调用方，需新 ADR 说明 |
+| 形态用例进默认车道 ⇒ 每次 `npm test` 多跑 ~0.5 s（改造前那一版要 ~0.4 s 的二次做功） | **可接受** | 若默认车道时间预算收紧，把该用例挪进 `*.perf.test.ts` 车道（计数口径可原样搬） |
+
+**审查与台账处理**：本票含源码改动（`sse.ts` +48/−13）与一个测试文件（`sse.test.ts` +234）。
+`docs/PERF_BASELINE.md`（AC9 落点）进本票提交；两轴审查已在**本票内**完成（上表），其 **fixed point = `6cbebbc`**（= 本票提交链的父：补回 P1-B3 审查行缺失区间字段的那一刀）。
+**白名单归属**：docs-only 的台账刀（tracker F8 验收证据节 ＋ `PERF_BASELINE` F8 节 ＋ phase_status 归档索引）**进** `[whitelist]`；含源码改动的刀与含测试的刀**不进**，按 F3 / F5 / F6 / F7 同规矩交审查窗口覆盖。
+
+<!-- ===== F8(#280) 台账节结束 ===== -->
+<!-- ===== 批 P1（#267）性能与交互流畅度硬化 —— P1-B4 批次两轴审查记录（2026-09-19） ===== -->
+
+#### P1-B4 两轴审查与 findings 处置（2026-09-19）
+
+**范围**：fixed point `7f6c0fd`（上一批次审查行 `28a1a34..7f6c0fd` 的 tip），tip `9ab85ea`，
+共 **23 个提交 / 14 文件 +3690 −35**，覆盖**五票**：F3（#276）/ F6（#277）/ F7（#278）/ F5（#279）/ F8（#280）。
+
+**范围构成**：`web/` 10 个文件（3 个源码 + 3 个新增测试 + 2 个新增采集器 + 2 个 `.perf.test.ts`）= 需审查的**源/测试刀**；
+`docs/` 4 个文件（`PERF_BASELINE.md` / 本文件 / `phase_status/2026-09.md` / `review_ledger.tsv`）= 落点与台账刀，走 `[whitelist]`。
+（票面自陈同一规矩：F8 台账节写「含源码改动的刀与含测试的刀**不进** `[whitelist]`，按 F3 / F5 / F6 / F7 同规矩交审查窗口覆盖」。）
+
+两个**独立只读**子代理分跑 Standards 轴与 Spec 轴；**主会话逐条复核**了行号级结论（见下「主会话复核」）。
+
+| 轴 | 结果 | 处置 |
+| --- | --- | --- |
+| **Standards** | **1×Hard + 2×Judgement** | Hard：源码注释内联实测数字，**在 P1-B3 判例之后下一批即复发** —— `StepDetail.tsx` L560-561 / L590 / L984 / L1027-1028 / L1217-1218 / L1310-1311、`app.css` L120 / L131-133 / L147-148 / L261（数字均已在 `PERF_BASELINE` F5/F6/F7 节，属同事实的第二落点）。**其中 `app.css` L261 与 F6 票面 AC2-2A 直接冲突 ⇒ 未自动修复，见下「决策点」**。Judgement① `StepDetail.tsx` 三处新尾窗的状态 + 窗口条 JSX 近逐字重复（L717 / L1113 / L1241 / L1335，含 Timeline 既有那处共 4 处）；Judgement② `Conversation.tsx` L208 注释复述机制（非数字） | Hard 待拍板（见决策点）；两条 Judgement **按据不改**并在此登记（三个列表的谓词与列本身不同，抽公共组件会引入 key→render 映射；与 P1-B2 判「8 处 useMemo(filter) 重复按据不改」同一口径） |
+| **Spec** | **1×实现可疑 + 1×证据口径 + 1×作用域外 + 1×过度工程** | (c) **#276 F3 AC3**：字面「`runActive === false` 或 `following === false` 时**不发生任何** `scrollTop` 写入」，而 `Conversation.tsx` L231-241 的早退只阻止**新**帧登记、**不取消已登记的帧**（取消只在卸载路径 L245-253，对应 AC4）⇒ 同一帧内状态翻转时已登记帧仍在下一帧写 `scrollTop`。(a) **#277 F6 AC2-2A** 的「可忽略」结论建立在作者自建的 `web/scripts/perf-pulse-cost.mjs` 上（AC 的机械要求已满足：只新增、`--numstat` 第二列为 0）。(b) **#278 F7** 新增 `.app-regions:has(.step-detail[data-resizing='true']) { transition: none }`（`app.css` L137-142，由 `fd59be8` 引入、注释记 #197）**不在 F7 任何 AC 内** ⇒ 作用域外改动（文件在 Scope lock 内，规则不在）。(b) 采集器体量 `perf-inspector-transition.mjs` +1111 / `perf-pulse-cost.mjs` +417 | 三条挂决策点（见下）；(b) 体量登记不改（G3 要求量测可复跑，脚本入库是票面硬要求） |
+| **F8 源/测试刀** | **忠实** | `web/src/lib/sse.ts` 无内联数字；8 个分帧边界用例与票面一致；`wsStream.ts` / `useSession.ts` 在本 range 内零 diff | — |
+
+**主会话复核（对子代理结论的独立验证，含推翻）**
+
+复核手法：不转述子代理结论，按 SHA 直接读源码 / 基线 / issue 正文逐条对账（`gh issue view` 取 AC 原文 + 行号级 `Read`）。结果：
+
+- **修正 1 处引用错误**：子代理所报「`app.css:159-163` 的 `:has()` 规则」实际在 **L137-142**（159-163 是 reduced-motion 块的收尾）；
+  该规则的引入提交经 `git log -S` 实证为 `fd59be8`（F7 本票），而 `data-resizing` 属性来自既有的 `6426a55`（#183）。
+- **推翻 1 条不成立的 finding**：子代理所报「#279 F5 AC4『显示全部』只做了一半，只有增量『加载更早』」——
+  AC4 原文为「每个窗口化列表都有**『加载更早 / 显示全部』**出口」（斜杠 = 二选一），且 `StepDetail.window.test.tsx:120-129` 实测把「加载更早」
+  点到全量（`expect(rows('.detail-tool-row')).toBe(N)`）⇒ **该 finding 撤销**。
+- **确认 1 条口径**：Hard finding 里「数字已在 `PERF_BASELINE`」**成立**——F5 节的 `17.53` / `19.25` / `38.67` / `31.36` / `45.36` / `12.63` / `0.07 ms/行`
+  与源码注释内联的 `17.5ms` / `38.7ms` / `31.4ms` / `45.4ms` / `12.6ms` / `≈0.07ms/行` 是同一批数字的两种写法。
+  （主会话第一遍检索把 `ms` 后缀带进了检索词，据此误判「不在基线」；复核后更正——记在此处以免后人重踩。）
+- **§16.1 的条款位置已核**：注释纪律确实写在 `AGENTS.md §16.1`（标题是「进度落点分工」，条款在正文「同一事实只在一处写全……代码注释只写操作约束 + 指向 ADR 的一句指针」），
+  故子代理的 §16.1 引用**正确**（主会话曾一度怀疑其引错，读原文后撤回怀疑）。
+
+**决策点（需用户拍板；按 AGENTS.md §9.1「规格实质冲突 ⇒ 先停止并报告」，本批未自动修复）**
+
+1. **§16.1 注释纪律 vs F6 票面 AC2-2A 直接冲突**：§16.1 要求「代码注释只写操作约束 + 指向 ADR 的一句指针」（P1-B3 已按此把 `7f6c0fd` 的数字删光），
+   而 F6 的 AC2-2A 在走 2A 时**强制**要求「`app.css:187` 下方有复核追加行（**含日期 + 数字** + 指向 `PERF_BASELINE.md`）」⇒ 两者不可能同时满足。
+   候选：(A) 保留 F6 现状（AC 优先，§16.1 在 AC 明确要求处让位），只在 tracker 记一条豁免；
+   (B) 改 F6 的 `app.css` 追加行——只留日期 + 指针、数字移入 `PERF_BASELINE`，并在 F6 AC 行标注「按 §16.1 收窄」；
+   (C) 只清理 F5/F7 的注释数字（无 AC 冲突），`app.css` 单独留待 ADR 裁定。
+   **推荐 (B)**：判例（§16.1）是通用的、AC 是单票的，把 AC 收窄一次比在判例上开口子代价小；代价是 F6 的 AC2-2A 文本要改（属规格修订，需留痕）。
+2. **F5/F7 的注释数字（无 AC 冲突）**：可直接按 `7f6c0fd` 的同一手法处置（只删数字、留约束与指针），与决策点 1 分开进行。
+3. **F7 的 `:has()` 拖宽守卫（#197）**：`fd59be8` 把一条记在 #197 名下的行为改动混进了 F7 提交。候选：
+   (A) 保留并在 #197 回填「已由 `fd59be8` 落地」；(B) 认定属 F7 过渡编排的必要组成（无它会「手柄黏手」）⇒ 在 F7 台账补记理由并把注释的 #197 改为双指。
+   **推荐 (A)**：该改动可独立验证（有守卫 1 帧 vs 无守卫 10 帧），归属回填比改注释省事，也不改已冻结的提交历史。
+4. **#276 F3 AC3 字面 vs 实现**：AC3 写「**不发生任何** `scrollTop` 写入」，而实现里「run 结束补底」那条路径（票面 Risks 明示为**有意保留**）本身就会写。
+   裁定二选一：AC3 字面过强（应读作「本 rAF 机制不写」），还是实现补一道「状态翻假时取消已登记帧」。
+   **推荐前者**：补取消会让「run 结束补底」那一拍（票面 Risks 标注为**敏感**）在部分帧里被吞掉，风险大于收益；
+   但需把 AC3 的读法写进台账，并补一条「翻转帧不新增登记」的用例。

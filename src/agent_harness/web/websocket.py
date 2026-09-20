@@ -21,8 +21,10 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from fastapi import WebSocket, WebSocketDisconnect
 
 from agent_harness.web.serialization import build_event_payload
@@ -37,6 +39,48 @@ logger = logging.getLogger("agent_harness.web.websocket")
 WS_PING_INTERVAL: float = 2.0
 #: 客户端静默超时（秒）——超过该时长未收到任何上行消息则关闭连接。
 WS_PING_TIMEOUT: float = 30.0
+
+
+def _render_snapshot(
+    session_id: str, window: list[Any], replay_upto: int, has_active_run: bool,
+) -> str:
+    """把快照渲染成 WS 文本帧（**纯函数**，供下放线程用；#275 站点 1）。
+
+    为什么整段（`to_dict()` × N + `json.dumps`）一起搬：两者之间**没有** `await`——
+    列表推导在 dict 字面量求值时跑完，`json.dumps` 的实参求值又发生在
+    `await websocket.send_text(...)` 之前，所以它们是**一整块**循环占用，分开搬没有意义。
+
+    帧结构**逐字不变**（判定级的键序与 `default=str` 都是改造前的原样）：
+    键序变化会改变线上字节，虽然语义等价，但那属于契约变化（票面 AC6）。
+    """
+    return json.dumps({
+        "type": "snapshot",
+        "session_id": session_id,
+        "events": [e.to_dict() for e in window],
+        "replay_upto": replay_upto,
+        "has_active_run": has_active_run,
+    }, default=str)
+
+
+async def _send_json_offloaded(
+    websocket: WebSocket, render: Callable[..., str], *args: Any,
+) -> None:
+    """在**线程里**渲染文本、回到循环再发送（#275 站点 1，方案 A）。
+
+    `try` 的覆盖面与 `_send_json` 逐字相同（渲染 + 发送都在里面），所以
+    「渲染失败」与「连接已断」仍是同一条静默忽略路径，不新增异常层级。
+
+    ⚠ **`send_text` 不得搬线程**：并发写同一 socket 会破坏 WebSocket 的发送语义
+    （票面 Risks）。这里下放的只是**产出字符串**那一段，发送仍在循环上。
+
+    参数按位置转发给 `render`（`anyio.to_thread.run_sync` 的 `*args` 语义），
+    所以 `render` 必须是**纯函数**——它会在另一个线程里被调用。
+    """
+    try:
+        text = await anyio.to_thread.run_sync(render, *args)
+        await websocket.send_text(text)
+    except Exception:
+        logger.debug("WS send 失败（客户端可能已断开）", exc_info=True)
 
 
 async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
@@ -150,13 +194,13 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与
         # 客户端游标可能因一次丢帧而错开，双保险比互相信任便宜）。
         window = [e for e in events if after_seq < e.seq <= replay_upto]
-        await _send_json({
-            "type": "snapshot",
-            "session_id": session_id,
-            "events": [e.to_dict() for e in window],
-            "replay_upto": replay_upto,
-            "has_active_run": active_run is not None,
-        })
+        # 整段渲染（`to_dict()` × N + `json.dumps`）下放线程：票面的 5ms 阈值判定为
+        # 「必须搬」（#275 站点 1 方案 A，实测数字见 `docs/PERF_BASELINE.md` B7 节）。
+        # 帧结构逐字不变。
+        await _send_json_offloaded(
+            websocket, _render_snapshot, session_id, window, replay_upto,
+            active_run is not None,
+        )
 
         if subscriber is not None:
             subscriptions[session_id] = (active_run, subscriber)

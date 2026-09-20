@@ -20,7 +20,7 @@ import { memo } from 'react';
 import { Check, Scissors, Square, X } from 'lucide-react';
 import type { ToolCall } from '../types';
 import type { TraceDensity } from '../lib/density';
-import { defaultLevelFor, type DisclosureLevel } from '../lib/disclosure';
+import { defaultLevelFor, toolEventKey, type DisclosureLevel } from '../lib/disclosure';
 import { formatDuration, stringifyForDisplay, truncateForDisplay } from '../lib/format';
 import { KIND_ICON, toolKind } from '../lib/eventKind';
 import {
@@ -43,8 +43,10 @@ interface Props {
   density: TraceDensity;
   /** 生效展开级（override ?? density 默认）。缺省 = density 推导（未接 disclosure 的旧用法）。 */
   level?: DisclosureLevel;
-  /** 点击行 → 循环 L 级（App 层 setLevel(nextLevel)）。缺省回退旧行为。 */
-  onCycleLevel?: () => void;
+  /** 点击行 → 循环 L 级（F1/#270：TurnView 用 useCallback 建立的**引用稳定**回调，
+   *  否则本组件的 memo 恒 miss）。带 (key, density) 参数：key 由本组件从自己的
+   *  tool_call_id 现算，上层就不必按节点现场建闭包。缺省回退旧行为。 */
+  onCycleLevel?: (key: string, density: TraceDensity) => void;
   /** hover Inspect chip 点击 → 进 Inspector。缺省时点击行为回退（旧：onFocus / 本地展开）。 */
   onFocus?: (tool: ToolCall) => void;
   /** #186：归档 diff 的「就地展开」要按会话读 artifact 内容。缺省 = 不提供展开入口。 */
@@ -71,7 +73,7 @@ export const ToolCard = memo(function ToolCard({ tool, density, level, onCycleLe
 
   const handleRowClick = () => {
     if (onCycleLevel) {
-      onCycleLevel();
+      onCycleLevel(toolEventKey(tool.tool_call_id), density);
       return;
     }
     // 旧回退（未接 disclosure 的用法）：点击 = 进 Inspector。
