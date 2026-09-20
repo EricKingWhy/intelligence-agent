@@ -2051,11 +2051,11 @@ main 由集成 AI 执行）。
 
 | Ticket | 描述 | 状态 | 实现方式 | Commit SHA | 门禁结果 |
 | --- | --- | --- | --- | --- | --- |
-| **#268** | 勘误 `docs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done（**未合并**：`1529aa7` 在本批分支上，集成由主开发执行，见索引 §0.5 G5） | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` 机械证明（见下；**blob 哈希是 #269 的 AC7 证据，不是本票的**——两轴 Standards P3 纠正） |
-| **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（**未合并**：`9886a9c` 在本批分支上；`Status: Proposed` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
-| **#270** | **F1**：稳定 `disclosure` / `reasoningDisclosure` 引用，接回被折断的 memo 链 | done（**未落到任何 ref**：`bcdf4e4` 已用 plumbing 造出；本沙箱不能写 ref，待用户在自己的终端执行一条 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | `lib/disclosure.ts` 两个 hook 的返回值改 `useMemo`（票面必做 1 的 **B 方案**，**不取**标注「推荐」的 A 方案——理由与红证见下方证据节）；链路渲染器的 per-render `cycle` 闭包上移为 `useCallback`；已完成段 markdown 收进按**内容**记忆的 `memo(MarkdownBody)`；`ToolCard` 的 `onCycleLevel` 签名带 `(key, density)` | `bcdf4e4` | **全绿**：oxlint **44 → 42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` **59 文件 / 982 用例全绿**（含 `projection.test.ts` 193 条引用稳定契约，**未改写**）；`vite build` 通过；红证 6/14 → 绿 14/14（见下） |
-| **#271** | **N2**：引入 `eventsVersion`，修 `StepDetail` 三处陈旧 memo（**正确性缺陷**——`events` 引用被刻意固定 ⇒ 派生值停在首帧） | done（**未落到任何 ref**：`40851f8`（红证）/ `4e85938`（实现）已用 plumbing 造出；待用户终端 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | 投影层新增 `ConversationState.eventsVersion`（**只在 `events.push` 真执行时 +1**：正常 push 增、去重短路不增、quarantine 分支增）+ `StepDetail` 三处 `useMemo` 依赖 `events` → `eventsVersion`（三处各带**行内** `eslint-disable-line react-hooks/exhaustive-deps`）+ 改写 COW docstring 里那句已被证伪的「无消费者把 events 放进 memo 依赖」 | `40851f8`（红证）+ `4e85938`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、**零顺带消失**）；`vitest` **60 文件 / 990 用例全绿**（F1 时 59 / 982）；perf 车道 `n2-cost-probe.perf.test.ts` 2 例通过；红证 **8 failed / 193 passed** → 改造后 **201/201 全绿**（见下方「N2（#271）验收证据」） |
-| **#272** | **F2**：`Conversation` / `StepDetail` 补齐 `memo` 与 props 收敛 | done（**未落到任何 ref**：`4752236`（红证测试）/ `1f88116`（实现）已用 plumbing 造出；待用户终端 `update-ref`，见上方「SHA 待回填」段第 3 条与索引 §0.5 G5） | 两个组件各装 `memo(...)`（**不写** `areEqual`——票面 Risks 第 1 条那个「比较函数写错就静默吞更新」的失败模式，因 App 侧 props 逐个核对后确认全部天然稳定而**不存在**）；`StepDetail` 6 处宽对象派生收敛为 `useMemo` 且依赖**逐个从被调函数实现读出**后细化到字段（`allTools`→`turns`、`deriveRunPulse`→5 个 run 字段 + `streaming`、`deriveAgentProfile`→`eventsVersion`）；3 处列表 filter + ChatTab 两个计数各自 memo；键盘导航表（原每次提交重建 O(N) 个闭包）包 `useMemo`；`hidden` 挂载语义保留（**未改** `App.tsx` / `projection.ts` / `disclosure.ts` / `app.css`） | `4752236`（红证）+ `1f88116`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` **62 文件 / 1008 用例全绿**（N2 时 62 / 1006，+2 = AC6）；`vite build` rc=0；红证 **7 failed / 11 passed (18)** → 改造后 **18/18 全绿**（见下方「F2（#272）验收证据」） |
+| **#268** | 勘误 `docs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done（**已合并并推送**：`1529aa7`；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` 机械证明（见下；**blob 哈希是 #269 的 AC7 证据，不是本票的**——两轴 Standards P3 纠正） |
+| **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（**已合并并推送**：`9886a9c`；merge `080cc146`，tip `ad6ccd8c`。**遗留**：ADR-0037 `Status: Proposed` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
+| **#270** | **F1**：稳定 `disclosure` / `reasoningDisclosure` 引用，接回被折断的 memo 链 | done（**已合并并推送**：`bcdf4e4`；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | `lib/disclosure.ts` 两个 hook 的返回值改 `useMemo`（票面必做 1 的 **B 方案**，**不取**标注「推荐」的 A 方案——理由与红证见下方证据节）；链路渲染器的 per-render `cycle` 闭包上移为 `useCallback`；已完成段 markdown 收进按**内容**记忆的 `memo(MarkdownBody)`；`ToolCard` 的 `onCycleLevel` 签名带 `(key, density)` | `bcdf4e4` | **全绿**：oxlint **44 → 42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` **59 文件 / 982 用例全绿**（含 `projection.test.ts` 193 条引用稳定契约，**未改写**）；`vite build` 通过；红证 6/14 → 绿 14/14（见下） |
+| **#271** | **N2**：引入 `eventsVersion`，修 `StepDetail` 三处陈旧 memo（**正确性缺陷**——`events` 引用被刻意固定 ⇒ 派生值停在首帧） | done（**已合并并推送**：`40851f8`（红证）/ `4e85938`（实现）；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | 投影层新增 `ConversationState.eventsVersion`（**只在 `events.push` 真执行时 +1**：正常 push 增、去重短路不增、quarantine 分支增）+ `StepDetail` 三处 `useMemo` 依赖 `events` → `eventsVersion`（三处各带**行内** `eslint-disable-line react-hooks/exhaustive-deps`）+ 改写 COW docstring 里那句已被证伪的「无消费者把 events 放进 memo 依赖」 | `40851f8`（红证）+ `4e85938`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、**零顺带消失**）；`vitest` **60 文件 / 990 用例全绿**（F1 时 59 / 982）；perf 车道 `n2-cost-probe.perf.test.ts` 2 例通过；红证 **8 failed / 193 passed** → 改造后 **201/201 全绿**（见下方「N2（#271）验收证据」） |
+| **#272** | **F2**：`Conversation` / `StepDetail` 补齐 `memo` 与 props 收敛 | done（**已合并并推送**：`4752236`（红证测试）/ `1f88116`（实现）；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | 两个组件各装 `memo(...)`（**不写** `areEqual`——票面 Risks 第 1 条那个「比较函数写错就静默吞更新」的失败模式，因 App 侧 props 逐个核对后确认全部天然稳定而**不存在**）；`StepDetail` 6 处宽对象派生收敛为 `useMemo` 且依赖**逐个从被调函数实现读出**后细化到字段（`allTools`→`turns`、`deriveRunPulse`→5 个 run 字段 + `streaming`、`deriveAgentProfile`→`eventsVersion`）；3 处列表 filter + ChatTab 两个计数各自 memo；键盘导航表（原每次提交重建 O(N) 个闭包）包 `useMemo`；`hidden` 挂载语义保留（**未改** `App.tsx` / `projection.ts` / `disclosure.ts` / `app.css`） | `4752236`（红证）+ `1f88116`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、零顺带消失）；`vitest` **62 文件 / 1008 用例全绿**（N2 时 62 / 1006，+2 = AC6）；`vite build` rc=0；红证 **7 failed / 11 passed (18)** → 改造后 **18/18 全绿**（见下方「F2（#272）验收证据」） |
 
 > **「SHA 待回填」已回填 —— 顺带记下这次实测到的确切机制（比我原先的说明更准）**：
 > 本 worktree 的沙箱**专门回收 `refs/heads/workbuddy/` 这个目录**：
@@ -3589,3 +3589,77 @@ cd web && node node_modules/vitest/vitest.mjs run --reporter=verbose src/lib/sse
    裁定二选一：AC3 字面过强（应读作「本 rAF 机制不写」），还是实现补一道「状态翻假时取消已登记帧」。
    **推荐前者**：补取消会让「run 结束补底」那一拍（票面 Risks 标注为**敏感**）在部分帧里被吞掉，风险大于收益；
    但需把 AC3 的读法写进台账，并补一条「翻转帧不新增登记」的用例。
+
+### 集成与关单（P1 批次收口，2026-09-20）
+
+**落地**：本批 `workbuddy/main-f049fadd` 线（tip `8bb947e`）以 merge commit `080cc14`（父 `2ea205a` = 原 `main`）
+并入 `main`；工作树经 `git read-tree --reset -u` 同步（索引树与 `HEAD^{tree}` 相等、`git status` 仅剩未跟踪的 `.zcodeignore`）；
+随即 `push origin main`，`origin/main` = `ad6ccd8c33739face48abfab9c7aa94093dbfee2`（`1c6ccb97..ad6ccd8c`，**103 提交，fast-forward**）。
+
+**冲突面**：3 个文件，**全部是 docs 台账**（本文件 / `phase_status/2026-09.md` / `review_ledger.tsv`），**零代码冲突**；
+两线改动文件交集恰为这 3 个（并集 114 文件，其中 111 个只被单侧改过）。
+
+**合并前验收（同环境、洁净检出、同一 venv，**只差代码**）**
+
+| 跑的代码 | 失败 | 通过 |
+| --- | --- | --- |
+| `main` 工作树（脏，**不作基线**） | 69 | 2548 |
+| `main` 全新检出（基线） | 117 | 2500 |
+| **合并树全新检出** | **7** | **2625** |
+| `main` 全新检出 + 本线改动的 2 个 `src/` 文件 | 7 | 2610 |
+
+- `合并树 − main 全新检出` 的**失败集合差集 = ∅** ⇒ 合并零新增失败，且修复其中 110 条 Web/SSE 失败。
+- 归因闭合（3 臂定位，非「看起来没事」）：本线只改了 2 个 `src/` 文件（`storage/local_artifact.py`、`web/websocket.py`，B7/#275），
+  把它们补进 `main` 全新检出即复现**同样的 7 条剩余集合** ⇒ 那 110 条由 B7 修复。
+- 7 条残差全部是环境噪声：`os.symlink` 沙箱空操作 ×6 + 临时检出无 `.git` ×1（`tests/evaluation/test_smoke.py`）。
+- ⚠ 方法论：**工作树的失败数不能当基线**（69 vs 117，差在工作树脏这第三变量）；**子集跑也不是判别器**
+  （`tests/web/test_workspace_files_api.py` 单独跑 36/36 全绿，只在全量串跑下现形）。
+
+**静态与门禁**：`git diff --check` 在 `2ea205a..tip` 与 `e1266f8..tip` 两范围均干净（并据此修掉本线引入的
+`web/src/App.test.tsx` EOF 空行）；合并树 `ruff` = `All checks passed`；台账机器可读（无 BOM、全 LF、审查行 43 / 白名单 48、
+无重复 sha）；**覆盖闸门 exit 0**（264 提交全部有归属）。
+
+**关单**：#268 #269 #270 #271 #272 #273 #275 #276 #277 #278 #279 #280 共 **12 张**已在 GitHub 关闭并附落地证据
+（每条含 merge/tip SHA、本票提交清单、验收证据节指针、门禁数字）。
+**#274**（B6，blocked by #242）与 **#281**（B8，blocked by #247）**未开工** ⇒ 父票 **#267 保持 OPEN**。
+
+> 另：本次推送同时把 `main` 线上原本未推的 33 个提交（含 `#257`–`#262` 与 B-19/B-20/B-21 审查记录）推到 `origin/main`。
+> 这批票的关单属**另一条线的验收范围**——`docs/PHASE_STATUS.md` 当前焦点写明「全量与最终验收通过前不 push/关单」，
+> 且 `#258` late `exec_create` cleanup P2 按用户既有决定保持 OPEN ⇒ **本记录不代为关单**，如实披露该边界。
+
+### 集成与关单（P1 批次收口，2026-09-20）
+
+**落地**：本批 `workbuddy/main-f049fadd` 线（tip `8bb947e`）以 merge commit `080cc14`（父 `2ea205a` = 原 `main`）
+并入 `main`；工作树经 `git read-tree --reset -u` 同步（索引树与 `HEAD^{tree}` 相等、`git status` 仅剩未跟踪的 `.zcodeignore`）；
+随即 `push origin main`，`origin/main` = `ad6ccd8c33739face48abfab9c7aa94093dbfee2`（`1c6ccb97..ad6ccd8c`，**103 提交，fast-forward**）。
+
+**冲突面**：3 个文件，**全部是 docs 台账**（本文件 / `phase_status/2026-09.md` / `review_ledger.tsv`），**零代码冲突**；
+两线改动文件交集恰为这 3 个（并集 114 文件，其中 111 个只被单侧改过）。
+
+**合并前验收（同环境、洁净检出、同一 venv，**只差代码**）**
+
+| 跑的代码 | 失败 | 通过 |
+| --- | --- | --- |
+| `main` 工作树（脏，**不作基线**） | 69 | 2548 |
+| `main` 全新检出（基线） | 117 | 2500 |
+| **合并树全新检出** | **7** | **2625** |
+| `main` 全新检出 + 本线改动的 2 个 `src/` 文件 | 7 | 2610 |
+
+- `合并树 − main 全新检出` 的**失败集合差集 = ∅** ⇒ 合并零新增失败，且修复其中 110 条 Web/SSE 失败。
+- 归因闭合（3 臂定位，非「看起来没事」）：本线只改了 2 个 `src/` 文件（`storage/local_artifact.py`、`web/websocket.py`，B7/#275），
+  把它们补进 `main` 全新检出即复现**同样的 7 条剩余集合** ⇒ 那 110 条由 B7 修复。
+- 7 条残差全部是环境噪声：`os.symlink` 沙箱空操作 ×6 + 临时检出无 `.git` ×1（`tests/evaluation/test_smoke.py`）。
+- ⚠ 方法论：**工作树的失败数不能当基线**（69 vs 117，差在工作树脏这第三变量）；**子集跑也不是判别器**
+  （`tests/web/test_workspace_files_api.py` 单独跑 36/36 全绿，只在全量串跑下现形）。
+
+**静态与门禁**：`git diff --check` 在 `2ea205a..tip` 与 `e1266f8..tip` 两范围均干净（并据此修掉本线引入的
+`web/src/App.test.tsx` EOF 空行）；合并树 `ruff` = `All checks passed`；台账机器可读（无 BOM、全 LF、审查行 43 / 白名单 48、
+无重复 sha）；**覆盖闸门 exit 0**（264 提交全部有归属）。
+
+**关单**：#268 #269 #270 #271 #272 #273 #275 #276 #277 #278 #279 #280 共 **12 张**已在 GitHub 关闭并附落地证据
+（每条含 merge/tip SHA、本票提交清单、验收证据节指针、门禁数字）。
+**#274**（B6，blocked by #242）与 **#281**（B8，blocked by #247）**未开工** ⇒ 父票 **#267 保持 OPEN**。
+
+> 另：本次推送同时把 `main` 线上原本未推的 33 个提交（含 `#257`–`#262` 与 B-19/B-20/B-21 审查记录）推到 `origin/main`。
+> 这批票的关单属**另一条线的验收范围**——`docs/PHASE_STATUS.md` 当前焦点写明「全量与最终验收通过前不 push/关单」，
+> 且 `#258` late `exec_create` cleanup P2 按用户既有决定保持 OPEN ⇒ **本记录不代为关单**，如实披露该边界。
