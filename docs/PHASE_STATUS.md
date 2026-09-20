@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前主线：架构整改 #237–#248 与子票 #249–#266**（排除 #236、#267–#281）。T15/#260 `5650696`、T16/#261 `2618e8b`、T17/#262 `99bb942` 及 review 修复链已实现；#262 当前 tip `724e62e`。最终双轴覆盖 `d7e7a14..2efbeaa`，#260/#261 无 finding，#262 的 legacy owner P1 与 async session-load P2 已分别由 `2efbeaa` / `724e62e` 修复并增量复核。#258 late `exec_create` cleanup P2 仍未解决，按用户既有决定保持 OPEN。当前 focused 85 passed、JSONL 10 passed、transport 13 passed、Ruff/diff clean，coverage gate exit 0；最近一次全量仍为 130 failed / 2484 passed（Web/SSE suite-level 污染链）。本地 `main` 与 `origin/main` 分叉，同步分析、最终集成与关单均未完成；不得声称可 merge/push/关单。
+**当前主线：架构整改 #237–#248 与子票 #249–#266**（排除 #236、#267–#281）。T15/#260 `5650696`、T16/#261 `2618e8b`、T17/#262 `99bb942` 及 review 修复链已实现；#262 当前 tip `724e62e`。最终双轴覆盖 `d7e7a14..2efbeaa`，#260/#261 无 finding，#262 的 legacy owner P1 与 async session-load P2 已分别由 `2efbeaa` / `724e62e` 修复并增量复核。#258 late `exec_create` cleanup P2 仍未解决，按用户既有决定保持 OPEN。当前 focused 85 passed、JSONL 10 passed、transport 13 passed、Ruff/diff clean，coverage gate exit 0；最近一次全量仍为 130 failed / 2484 passed（Web/SSE suite-level 污染链）。本地 `main` 正在合入 `origin/main` 的 6 个提交；完成后重跑全量门禁。全量与最终验收通过前不 push/关单。
 
 ## 更新日志（索引）
 
@@ -53,6 +53,7 @@
 ### 最近条目（最新在上）
 
 - 2026-09-20（B-20 / #258–#262）：**最终双轴审查与 #262 两项最小修复**——审查 `d7e7a14..2efbeaa`；#258 late cleanup P2 保留 OPEN；#262 legacy ref owner P1 → `2efbeaa`，async Session.load P2 → `724e62e`，增量复核无新 finding。focused 85 / JSONL 10 / transport 13 passed，Ruff/diff clean，coverage exit 0；全量仍沿用最近一次红证，集成/关单未完成。详见月度归档 2026-09-20 段。
+- 2026-09-20（#256 中间集成）：merge commit `cbe3b09` 与既存集成文件 `0d3b7b5` 已由远端主线纳入；专项 76 passed / 1 skipped，全量 2569 passed / 2 skipped / 42 deselected，coverage gate exit 0。Spec 仍列出 AC2/AC3/AC4 证据缺口，#256/#244 保持 OPEN。详见月度归档。
 - 2026-09-20（T15–T17 / #260–#262）：实现 commits `5650696`、`2618e8b`、`99bb942` 与 #262 修复链；合同与残余见月度归档 2026-09-20 段。
 - 2026-09-18（T04/#249）：**Tracer/Span 端口 + NullTracer——Runtime 不再以 None 表达观测可选**（实现 `534bf4c`，3 文件 +443/−86）——审计 finding（Top 3）：`RunTracer` 早已让缺席 sink 安全 no-op，但 Runtime 仍以 `tracer=None` 起步并反复判空（开工实测 **8 处 `if tracer is not None` + 12 处 `tracer.trace_id if tracer else None`**），"观测是否存在"渗进 Core 控制流、替换非 Langfuse 实现只能伪装成 LangfuseSink。新增 `observability/port.py`（最小 `Span`/`Tracer` Protocol + `NullSpan`/`NullTracer`，只依赖标准库、不 import Langfuse；`RunTracer` 结构上满足协议、不继承）；Runtime 改为 `tracer: Tracer = NullTracer()` 起步、实现选择单点收进 `_new_tracer()`，8 + 12 处判空全删，`_TerminalContext`/`_RunFinalizer` 字段 `Any` → `Tracer`/`Span | None`。**行为逐字不变**（span 名称/metadata/终态字段/熔断与故障隔离；executor 侧判空属 #250）。**红证**：基线两条（`observability.port` ModuleNotFoundError + runtime 零 NullTracer 引用）+ **四条变异（恢复逐字节相同）**：A 缺席时返回 None ⇒ 5 红（含 3 条既有 golden）、B 配了 sink 仍返回 NullTracer ⇒ 3 红、C 空句柄退回 None ⇒ 1 红、D 去掉 sink 异常边界 ⇒ 1 红。**门禁**：ruff clean；pytest **2509 passed / 10 skipped / 0 failed（7:39）**（= 上批 2504 + 5；最终树上复跑一致）；`git diff --check` 干净；本轮零环境红。**覆盖闸门如实登记 exit 1**（`534bf4c` 未审查且未声明，等 §1.2 批量审查 B-15 补台账行；未加白名单、未改台账）。票 #249 保持 OPEN（父票 #240 亦 OPEN，#250 待做）。详见 `2026-09.md` 末尾
 - 2026-09-19（B-17）：**T07/#252 + T08/#253 收批**（fixed point `ca60905`；两轴审查 P0/P1=0、P2=2、P3=1；修复 `2eee2df`；覆盖闸门与明细见 `2026-09.md` 2026-09-19 段）。票 #252/#253 及父票 #241/#242 OPEN。

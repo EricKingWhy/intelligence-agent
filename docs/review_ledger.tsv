@@ -50,9 +50,12 @@
 2026-09-20	#262 legacy owner P1 修复增量复核（两轴 addressed，无新 finding）	eabbd6f..2efbeaa
 2026-09-20	B-20 / 最终双轴审查（#257 尾部 + #258-#262；#258 late cleanup P2 保留，#262 async load P2 经后续 724e62e 修复）	d7e7a14..2efbeaa
 2026-09-20	#262 async Session.load P2 修复增量复核（两轴 addressed，无新 finding）	2efbeaa..724e62e
+2026-09-20	#256 + 四个既存集成文件两轴独立只读审查（Standards + Spec；fixed point 6a5c2c2，实际审查 tip cbe3b09；历史提示计数错误在纳入前更正；Spec AC2/AC3/AC4 缺口登记，不关单）	6a5c2c2..cbe3b09
 [whitelist]
 e26f785	B-20 coverage result + tracker/phase current-state update（docs-only）
 428b8f1	#260-#262 tracker + phase archive + current focus + review ledger closure（docs-only）
+c1b4a0e	#256 中间集成落点记录（Tracker + PHASE_STATUS + 月度归档 + review ledger，docs-only）
+a0567eb	#256 review coverage gate 结果落点（Tracker + 月度归档，docs-only）
 db81e5e	B-16 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引 + 本台账审查行/修复行 + 删 2 条死白名单，docs-only）
 b53465e	B-10 集成/关单状态（tracker + PHASE_STATUS + 归档，docs-only）
 133ef5a	B-10 落点记录（tracker + 归档 + PHASE_STATUS + 本台账审查行，docs-only）
