@@ -23,6 +23,9 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(--?(?:token|password|passwd|secret|api[-_]?key|authorization)|"
     r"(?:token|password|passwd|secret|api[-_]?key|authorization))\s*(?:=|:)\s*([^\s]+)"
 )
+_GIT_CONFIG_SECRET = re.compile(
+    r"(?i)(-c\s+(?:credential\.[^=\s]+|http\.[^=\s]+|url\.[^=\s]+))=([^\s]+)"
+)
 _PATH_ASSIGNMENT = re.compile(r"(?i)(--?(?:path|file|cwd|workdir)|(?:path|file|cwd|workdir))\s*(?:=|:)\s*([^\s]+)")
 _QUOTED_PATH = re.compile(r"(?:\"[^\"]+\"|'[^']+')")
 _ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:[\\/]|/)[^\s]+")
@@ -76,6 +79,7 @@ class TransportLedgerEntry(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     request_id: str
+    session_id: str
     operation_id: str
     command_summary: str = Field(min_length=1, max_length=500)
     scope: str = Field(min_length=1, max_length=500)
@@ -110,10 +114,13 @@ class TransportLedger(Protocol):
 
     async def list_for_request(self, request_id: str) -> list[TransportLedgerEntry]: ...
 
+    async def delete_for_session(self, session_id: str) -> int: ...
+
 
 _TRANSPORT_LEDGER_DDL = """
 CREATE TABLE IF NOT EXISTS transport_ledger (
     request_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     operation_id TEXT NOT NULL,
     command_summary TEXT NOT NULL,
     scope TEXT NOT NULL,
@@ -146,6 +153,12 @@ class SqliteTransportLedger:
         async with _connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_TRANSPORT_LEDGER_DDL)
+            cursor = await connection.execute("PRAGMA table_info(transport_ledger)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if "session_id" not in columns:
+                await connection.execute(
+                    "ALTER TABLE transport_ledger ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"
+                )
             await connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_transport_ledger_request "
                 "ON transport_ledger(request_id, created_at)"
@@ -179,12 +192,13 @@ class SqliteTransportLedger:
             await connection.execute(
                 """
                 INSERT INTO transport_ledger (
-                    request_id, operation_id, command_summary, scope, status,
+                    request_id, session_id, operation_id, command_summary, scope, status,
                     duration_ms, artifact_ref_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.request_id,
+                    entry.session_id,
                     entry.operation_id,
                     entry.command_summary,
                     entry.scope,
@@ -197,12 +211,22 @@ class SqliteTransportLedger:
             )
             await connection.commit()
 
+    async def delete_for_session(self, session_id: str) -> int:
+        async with _connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "DELETE FROM transport_ledger WHERE session_id = ?",
+                (session_id,),
+            )
+            removed = cursor.rowcount or 0
+            await connection.commit()
+        return removed
+
     async def list_for_request(self, request_id: str) -> list[TransportLedgerEntry]:
         async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
-                SELECT request_id, operation_id, command_summary, scope, status,
+                SELECT request_id, session_id, operation_id, command_summary, scope, status,
                        duration_ms, artifact_ref_json, created_at
                 FROM transport_ledger WHERE request_id = ? ORDER BY rowid
                 """,
@@ -212,6 +236,7 @@ class SqliteTransportLedger:
         return [
             TransportLedgerEntry(
                 request_id=row["request_id"],
+                session_id=row["session_id"],
                 operation_id=row["operation_id"],
                 command_summary=row["command_summary"],
                 scope=row["scope"],
@@ -256,6 +281,12 @@ class InMemoryTransportLedger:
     async def list_for_request(self, request_id: str) -> list[TransportLedgerEntry]:
         return [entry for entry in self._entries if entry.request_id == request_id]
 
+    async def delete_for_session(self, session_id: str) -> int:
+        retained = [entry for entry in self._entries if entry.session_id != session_id]
+        removed = len(self._entries) - len(retained)
+        self._entries = retained
+        return removed
+
 
 def redact_command_summary(command: str, *, scope: str) -> str:
     """Return bounded audit text without secrets or raw path arguments."""
@@ -264,6 +295,7 @@ def redact_command_summary(command: str, *, scope: str) -> str:
     if not isinstance(scope, str) or not scope.strip():
         raise ValueError("scope must be non-empty")
     redacted = _SECRET_ASSIGNMENT.sub(r"\1=<redacted>", command)
+    redacted = _GIT_CONFIG_SECRET.sub(r"\1=<redacted>", redacted)
     redacted = _PATH_ASSIGNMENT.sub(r"\1=<scoped>", redacted)
     redacted = _QUOTED_PATH.sub("<scoped>", redacted)
     redacted = _ABSOLUTE_PATH.sub("<scoped>", redacted)
@@ -275,6 +307,7 @@ def redact_command_summary(command: str, *, scope: str) -> str:
 def new_transport_entry(
     *,
     request_id: str,
+    session_id: str,
     operation_id: str,
     command: str,
     scope: str,
@@ -284,6 +317,7 @@ def new_transport_entry(
 ) -> TransportLedgerEntry:
     return TransportLedgerEntry(
         request_id=request_id,
+        session_id=session_id,
         operation_id=operation_id,
         command_summary=redact_command_summary(command, scope=scope),
         scope=scope,

@@ -469,6 +469,30 @@ def test_web_git_records_durable_transport_audit(tmp_path: Path) -> None:
     assert "new.py" not in rows[0][0]
 
 
+def test_web_git_oversized_output_without_artifact_store_returns_structured_503(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, artifact_dir="", artifact_overflow_chars=100)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    for index in range(20):
+        _seed(root, f"untracked-{index:02d}.py", "print('oversized output')\n")
+
+    response = client.get(_url(sid, "/git/status"))
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == {
+        "code": "artifact_store_unavailable",
+        "message": "大输出暂时无法安全外置，请稍后重试。",
+    }
+    with sqlite3.connect(Path(client.app.state.agent.harness_db)) as connection:
+        rows = connection.execute(
+            "SELECT status, artifact_ref_json FROM transport_ledger ORDER BY rowid"
+        ).fetchall()
+    assert rows == [("started", None), ("failed", None)]
+
+
 def test_web_git_audit_redacts_relative_and_absolute_pathspec(
     tmp_path: Path,
 ) -> None:

@@ -6,7 +6,10 @@ import pytest
 
 from agent_harness.storage.artifact import FakeArtifactStore
 from agent_harness.tooling import ToolResult
-from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.overflow import (
+    ArtifactOverflowHandler,
+    ArtifactOverflowUnavailable,
+)
 from tests.conftest import make_session
 
 
@@ -77,7 +80,7 @@ async def test_upload_failure_can_fail_closed_for_audit_paths(tmp_path):
 
     session = make_session(tmp_path)
     result = ToolResult.success("x" * 5000)
-    with pytest.raises(RuntimeError, match="Artifact store failed"):
+    with pytest.raises(ArtifactOverflowUnavailable, match="Artifact store failed"):
         await ArtifactOverflowHandler(
             UnavailableStore(), fail_open=False
         ).maybe_overflow(session, "call", "git_status", result)
@@ -87,7 +90,7 @@ async def test_upload_failure_can_fail_closed_for_audit_paths(tmp_path):
 async def test_missing_store_can_fail_closed_for_audit_paths(tmp_path):
     session = make_session(tmp_path)
     result = ToolResult.success("x" * 5000)
-    with pytest.raises(RuntimeError, match="Artifact store is required"):
+    with pytest.raises(ArtifactOverflowUnavailable, match="Artifact store is required"):
         await ArtifactOverflowHandler(
             None, fail_open=False
         ).maybe_overflow(session, "call", "git_status", result)

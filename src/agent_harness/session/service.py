@@ -1304,6 +1304,7 @@ class SessionService:
         await self._state.session_meta_store.cleanup(session_id)
         await self._state.checkpoint_store.delete_for_session(session_id)
         await self._state.operation_ledger.delete_for_session(session_id)
+        await self._state.transport_ledger.delete_for_session(session_id)
 
         # ⑦ 文件（后）——白名单三条路径；同步磁盘 I/O 一律离开事件循环。
         await anyio.to_thread.run_sync(store.delete_session, session_id)

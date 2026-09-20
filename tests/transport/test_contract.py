@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from agent_harness.transport import (
 def _entry(**overrides):
     values = {
         "request_id": "req-1",
+        "session_id": "session-1",
         "operation_id": "op-1",
         "command_summary": "git diff -- path=<scoped>",
         "scope": "workspace/subdir",
@@ -70,6 +72,9 @@ def test_command_summary_redacts_secret_and_raw_paths():
     assert "/private/repo" not in summary
     assert "<redacted>" in summary
     assert "<scoped>" in summary
+    assert "secret-do-not-log" not in redact_command_summary(
+        "git -c credential.helper=secret-do-not-log diff", scope="workspace"
+    )
 
 
 def test_generated_git_summary_never_contains_position_pathspec():
@@ -101,6 +106,46 @@ async def test_sqlite_transport_ledger_survives_reopen(tmp_path):
     reopened = SqliteTransportLedger(tmp_path / "harness.db")
     await reopened.initialize()
     assert await reopened.list_for_request("req-1") == [entry]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_transport_ledger_migrates_existing_table_and_scopes_deletion(tmp_path):
+    database = tmp_path / "harness.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE transport_ledger (
+                request_id TEXT NOT NULL,
+                operation_id TEXT NOT NULL,
+                command_summary TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_ms INTEGER,
+                artifact_ref_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+    ledger = SqliteTransportLedger(database)
+    await ledger.initialize()
+    await ledger.append(_entry(
+        request_id="req-target",
+        session_id="session-target",
+        operation_id="op-target",
+        status=TransportStatus.STARTED,
+    ))
+    await ledger.append(_entry(
+        request_id="req-other",
+        session_id="session-other",
+        operation_id="op-other",
+        status=TransportStatus.STARTED,
+    ))
+
+    assert await ledger.delete_for_session("session-target") == 1
+    assert await ledger.list_for_request("req-target") == []
+    assert len(await ledger.list_for_request("req-other")) == 1
 
 
 @pytest.mark.asyncio

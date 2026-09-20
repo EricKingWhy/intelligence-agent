@@ -111,7 +111,10 @@ from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.storage.operation import OperationContext
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tooling.contract import PermissionPolicy
-from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.overflow import (
+    ArtifactOverflowHandler,
+    ArtifactOverflowUnavailable,
+)
 from agent_harness.tools.git import (
     GitDiffTool,
     GitStatusTool,
@@ -298,6 +301,7 @@ async def _execute_git_request(
     )
     started_entry = new_transport_entry(
         request_id=request_id,
+        session_id=session_id,
         operation_id=operation_id,
         command=audit_command,
         scope=scope or ".",
@@ -358,6 +362,7 @@ async def _execute_git_request(
         status = TransportStatus.SUCCEEDED if result.ok else TransportStatus.FAILED
         await state.transport_ledger.append(new_transport_entry(
             request_id=request_id,
+            session_id=session_id,
             operation_id=operation_id,
             command=audit_command,
             scope=scope or ".",
@@ -376,10 +381,28 @@ async def _execute_git_request(
             stderr=str(data.get("stderr", "")),
             artifact_ref=artifact_id,
         )
+    except ArtifactOverflowUnavailable as error:
+        await state.transport_ledger.append(new_transport_entry(
+            request_id=request_id,
+            session_id=session_id,
+            operation_id=operation_id,
+            command=audit_command,
+            scope=scope or ".",
+            status=TransportStatus.FAILED,
+            duration_ms=round((perf_counter() - started) * 1000),
+        ))
+        terminal_written = True
+        if tracer is not None:
+            tracer.run_failed("artifact_store_unavailable")
+        raise HTTPException(status_code=503, detail={
+            "code": "artifact_store_unavailable",
+            "message": "大输出暂时无法安全外置，请稍后重试。",
+        }) from error
     except asyncio.CancelledError:
         if not terminal_written:
             await state.transport_ledger.append(new_transport_entry(
                 request_id=request_id,
+                session_id=session_id,
                 operation_id=operation_id,
                 command=audit_command,
                 scope=scope or ".",
@@ -395,6 +418,7 @@ async def _execute_git_request(
         if not terminal_written:
             await state.transport_ledger.append(new_transport_entry(
                 request_id=request_id,
+                session_id=session_id,
                 operation_id=operation_id,
                 command=audit_command,
                 scope=scope or ".",

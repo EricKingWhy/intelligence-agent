@@ -15,6 +15,10 @@ from agent_harness.tooling.result import ToolResult
 logger = logging.getLogger("agent_harness.tooling.overflow")
 
 
+class ArtifactOverflowUnavailable(RuntimeError):
+    """Raised when oversized output cannot be externalized safely."""
+
+
 class OverflowHandler(ABC):
     @abstractmethod
     async def maybe_overflow(
@@ -99,7 +103,9 @@ class ArtifactOverflowHandler(OverflowHandler):
         if self._store is None:
             if self._fail_open:
                 return result, []
-            raise RuntimeError("Artifact store is required for oversized tool output")
+            raise ArtifactOverflowUnavailable(
+                "Artifact store is required for oversized tool output"
+            )
         try:
             artifact = await self._store.save(
                 session.session_id, content, mime_type=mime_type,
@@ -107,7 +113,9 @@ class ArtifactOverflowHandler(OverflowHandler):
             )
         except Exception as error:
             if not self._fail_open:
-                raise RuntimeError("Artifact store failed for oversized tool output") from error
+                raise ArtifactOverflowUnavailable(
+                    "Artifact store failed for oversized tool output"
+                ) from error
             logger.warning(
                 "Artifact store unavailable, keeping raw tool result "
                 "in-session (fail-open): %s",
