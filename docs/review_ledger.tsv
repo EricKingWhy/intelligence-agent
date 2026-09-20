@@ -110,3 +110,4 @@ f9ba501c9c403d22dcd03bfe63b291b2c5a6a969	F7/#278 落点记录（tracker F7 验�
 1a626d7357ea751732609ceed9c6e082bbdcac30	F8/#280 落点记录（tracker F8 验收证据节 + PERF_BASELINE F8 节 + phase_status 归档索引，docs-only）
 be7db83	P1-B4 审查记录（tracker P1-B4 节 + phase_status 归档索引 + 本台账审查行，docs-only）
 3976e02	性能线并入 main 的落点记录（PHASE_STATUS 索引 + 月度归档明细，docs-only）
+83dcfb73932f10d95afd21a7734fbc92dd45d610	集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
