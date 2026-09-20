@@ -33,6 +33,9 @@ class _ContainerExecState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.cleanup_failed = False
+        self.cleanup_pending = False
+        self.late_cleanup: tuple[object, object] | None = None
+        self.late_cleanup_event = threading.Event()
 
 
 def _glob_match_posix(rel_path: str, pattern: str) -> bool:
@@ -148,6 +151,7 @@ class DockerSandbox(Sandbox):
             if self._exec_lock.acquire(timeout=min(0.05, remaining)):
                 break
         try:
+            self._drain_pending_cleanup()
             self._assert_exec_cleanup_healthy()
             remaining = deadline - perf_counter()
             if remaining <= 0:
@@ -183,6 +187,18 @@ class DockerSandbox(Sandbox):
             duration_ms=round((perf_counter() - started) * 1000, 1),
             cancelled=cancelled,
         )
+
+    def _drain_pending_cleanup(self) -> None:
+        state = getattr(self, "_exec_state", None)
+        if state is None or not state.cleanup_pending:
+            return
+        pending = state.late_cleanup
+        if pending is None:
+            raise RuntimeError("DockerSandbox is awaiting late exec cleanup")
+        state.late_cleanup = None
+        self._cleanup_late_exec_create(*pending)
+        state.cleanup_pending = False
+        self._assert_exec_cleanup_healthy()
 
     def _assert_exec_cleanup_healthy(self) -> None:
         state = getattr(self, "_exec_state", None)
@@ -233,7 +249,7 @@ class DockerSandbox(Sandbox):
             ),
             max(0.0, deadline - perf_counter()),
             cancel_event=cancel_event,
-            on_late_result=lambda late: self._cleanup_late_exec_create(api, late),
+            on_late_result=lambda late: self._queue_late_cleanup(api, late),
         )
         if not complete:
             return self._interrupted_result(
@@ -244,8 +260,10 @@ class DockerSandbox(Sandbox):
         if not isinstance(created, dict) or not created.get("Id"):
             raise RuntimeError("Docker exec_create 返回了无效的 exec ID")
         if cancel_event is not None and cancel_event.is_set():
+            self._queue_late_cleanup(api, created)
             return self._interrupted_result(started, effective_timeout, cancelled=True)
         if perf_counter() >= deadline:
+            self._queue_late_cleanup(api, created)
             return self._interrupted_result(started, effective_timeout, cancelled=False)
         exec_id = created["Id"]
         output_queue: queue.Queue[tuple[bytes | None, bytes | None] | None] = queue.Queue(
@@ -413,7 +431,13 @@ class DockerSandbox(Sandbox):
                 raise holder["error"]
 
         if control_pending:
-            stderr_capture.append(stderr_decoder.feed(bytes(control_pending)))
+            text = stderr_decoder.feed(bytes(control_pending))
+            stderr_capture.append(text)
+            if on_output is not None and text:
+                try:
+                    on_output("stderr", text)
+                except Exception:
+                    logger.debug("Docker output callback failed", exc_info=True)
             control_pending.clear()
 
         for decoder, capture, channel in (
@@ -453,6 +477,15 @@ class DockerSandbox(Sandbox):
             exit_code=inspected.get("ExitCode", 0), stdout=stdout, stderr=stderr,
             duration_ms=round((perf_counter() - started) * 1000, 1),
         )
+
+    def _queue_late_cleanup(self, api, created: object) -> None:
+        state = getattr(self, "_exec_state", None)
+        if state is None:
+            self._cleanup_late_exec_create(api, created)
+            return
+        state.late_cleanup = (api, created)
+        state.cleanup_pending = True
+        state.late_cleanup_event.set()
 
     def _cleanup_late_exec_create(self, api, created: object) -> None:
         """Reap an exec created after its caller already timed out/cancelled."""
