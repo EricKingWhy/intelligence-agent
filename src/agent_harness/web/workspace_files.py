@@ -182,6 +182,7 @@ class GitCommandResult(BaseModel):
     exit_code: int
     stdout: str
     stderr: str
+    artifact_ref: str | None = None
 
 
 async def _session_sandbox(
@@ -292,49 +293,53 @@ async def _execute_git_request(
     operation_id = f"transport-{uuid4().hex}"
     started = perf_counter()
     await state.ensure_stores()
+    audit_command = (
+        f"{tool_name} staged={args.get('staged', False)} path=<scoped>"
+    )
     started_entry = new_transport_entry(
         request_id=request_id,
         operation_id=operation_id,
-        command=command,
+        command=audit_command,
         scope=scope or ".",
         status=TransportStatus.STARTED,
     )
     await state.transport_ledger.append(started_entry)
-
-    registry = ToolRegistry()
-    tool = (
-        GitStatusTool(sandbox, scope=scope)
-        if tool_name == "git_status"
-        else GitDiffTool(sandbox, scope=scope)
-    )
-    registry.register(tool)
-    selection = select_artifact_store(state.settings, session_id)
-    overflow_handler = ArtifactOverflowHandler(
-        selection.store if selection is not None else None,
-        state.settings.artifact_overflow_chars,
-        read_tool_name=(
-            selection.read_tool(selection.store).name
-            if selection is not None
-            else "read_artifact"
-        ),
-        fail_open=False,
-    )
-    executor = ToolExecutor(
-        registry,
-        policy=PermissionPolicy.READ_ONLY,
-        operation_ledger=state.operation_ledger,
-        overflow_handler=overflow_handler,
-    )
-    session = Session.load(state.store, session_id)
-    tracer = RunTracer(
-        get_observability_sink(state.settings),
-        session_id=session_id,
-        run_id=operation_id,
-        agent_id="web",
-        user_input=command,
-    )
-    tracer.run_started()
+    terminal_written = False
+    tracer: RunTracer | None = None
     try:
+        registry = ToolRegistry()
+        tool = (
+            GitStatusTool(sandbox, scope=scope)
+            if tool_name == "git_status"
+            else GitDiffTool(sandbox, scope=scope)
+        )
+        registry.register(tool)
+        selection = select_artifact_store(state.settings, session_id)
+        overflow_handler = ArtifactOverflowHandler(
+            selection.store if selection is not None else None,
+            state.settings.artifact_overflow_chars,
+            read_tool_name=(
+                selection.read_tool(selection.store).name
+                if selection is not None
+                else "read_artifact"
+            ),
+            fail_open=False,
+        )
+        executor = ToolExecutor(
+            registry,
+            policy=PermissionPolicy.READ_ONLY,
+            operation_ledger=state.operation_ledger,
+            overflow_handler=overflow_handler,
+        )
+        session = Session.load(state.store, session_id)
+        tracer = RunTracer(
+            get_observability_sink(state.settings),
+            session_id=session_id,
+            run_id=operation_id,
+            agent_id="web",
+            user_input=command,
+        )
+        tracer.run_started()
         execution = await executor.execute(
             {"id": operation_id, "name": tool_name, "args": args},
             operation_context=OperationContext(session_id=session_id),
@@ -354,12 +359,13 @@ async def _execute_git_request(
         await state.transport_ledger.append(new_transport_entry(
             request_id=request_id,
             operation_id=operation_id,
-            command=command,
+            command=audit_command,
             scope=scope or ".",
             status=status,
             duration_ms=round((perf_counter() - started) * 1000),
             artifact_ref=terminal_ref,
         ))
+        terminal_written = True
         if result.ok:
             tracer.run_completed(result.message)
         else:
@@ -368,28 +374,33 @@ async def _execute_git_request(
             exit_code=int(data.get("exit_code", -1)),
             stdout=str(data.get("stdout", "")),
             stderr=str(data.get("stderr", "")),
+            artifact_ref=artifact_id,
         )
     except asyncio.CancelledError:
-        await state.transport_ledger.append(new_transport_entry(
-            request_id=request_id,
-            operation_id=operation_id,
-            command=command,
-            scope=scope or ".",
-            status=TransportStatus.CANCELLED,
-            duration_ms=round((perf_counter() - started) * 1000),
-        ))
-        tracer.run_failed("cancelled")
+        if not terminal_written:
+            await state.transport_ledger.append(new_transport_entry(
+                request_id=request_id,
+                operation_id=operation_id,
+                command=audit_command,
+                scope=scope or ".",
+                status=TransportStatus.CANCELLED,
+                duration_ms=round((perf_counter() - started) * 1000),
+            ))
+        if tracer is not None:
+            tracer.run_failed("cancelled")
         raise
     except BaseException:
-        tracer.run_failed("failed")
-        await state.transport_ledger.append(new_transport_entry(
-            request_id=request_id,
-            operation_id=operation_id,
-            command=command,
-            scope=scope or ".",
-            status=TransportStatus.FAILED,
-            duration_ms=round((perf_counter() - started) * 1000),
-        ))
+        if tracer is not None:
+            tracer.run_failed("failed")
+        if not terminal_written:
+            await state.transport_ledger.append(new_transport_entry(
+                request_id=request_id,
+                operation_id=operation_id,
+                command=audit_command,
+                scope=scope or ".",
+                status=TransportStatus.FAILED,
+                duration_ms=round((perf_counter() - started) * 1000),
+            ))
         raise
 
 

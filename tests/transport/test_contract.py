@@ -70,6 +70,15 @@ def test_command_summary_redacts_secret_and_raw_paths():
     assert "<scoped>" in summary
 
 
+def test_generated_git_summary_never_contains_position_pathspec():
+    summary = redact_command_summary(
+        'git_status -- "secret.py" C:/private/repo/secret.py',
+        scope="workspace",
+    )
+    assert "secret.py" not in summary
+    assert "private/repo" not in summary
+
+
 def test_entry_redacts_direct_construction_and_caps_summary():
     entry = _entry(command_summary="token=secret " + "x" * 1000)
 
@@ -89,6 +98,18 @@ async def test_sqlite_transport_ledger_survives_reopen(tmp_path):
     reopened = SqliteTransportLedger(tmp_path / "harness.db")
     await reopened.initialize()
     assert await reopened.list_for_request("req-1") == [entry]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_transport_ledger_rejects_backdated_append(tmp_path):
+    ledger = SqliteTransportLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    await ledger.append(_entry())
+    with pytest.raises(ValueError, match="append-only"):
+        await ledger.append(_entry(
+            operation_id="op-2",
+            created_at="2026-09-19T23:59:59+00:00",
+        ))
 
 
 @pytest.mark.asyncio

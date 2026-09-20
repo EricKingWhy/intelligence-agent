@@ -465,8 +465,35 @@ def test_web_git_records_durable_transport_audit(tmp_path: Path) -> None:
         ).fetchall()
     assert rows[0][1] == "started"
     assert rows[1][1] == "succeeded"
-    assert "git status" in rows[0][0]
+    assert "git_status" in rows[0][0]
     assert "new.py" not in rows[0][0]
+
+
+def test_web_git_audit_redacts_relative_and_absolute_pathspec(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    secret = _seed(root, "secret.py", "secret\n")
+
+    response = client.get(
+        _url(sid, "/git/status"), params={"pathspec": "secret.py"}
+    )
+    assert response.status_code == 200, response.text
+    rejected = client.get(_url(sid, "/git/status"), params={"pathspec": str(secret)})
+    assert rejected.status_code == 422, rejected.text
+
+    with sqlite3.connect(Path(client.app.state.agent.harness_db)) as connection:
+        summaries = [
+            row[0]
+            for row in connection.execute(
+                "SELECT command_summary FROM transport_ledger"
+            ).fetchall()
+        ]
+    assert all("secret.py" not in summary for summary in summaries)
+    assert all(str(root) not in summary for summary in summaries)
 
 
 def test_web_git_pathspec_uses_one_scope_and_not_dot_union(

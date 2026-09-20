@@ -24,6 +24,8 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?:token|password|passwd|secret|api[-_]?key|authorization))\s*(?:=|:)\s*([^\s]+)"
 )
 _PATH_ASSIGNMENT = re.compile(r"(?i)(--?(?:path|file|cwd|workdir)|(?:path|file|cwd|workdir))\s*(?:=|:)\s*([^\s]+)")
+_QUOTED_PATH = re.compile(r"(?:\"[^\"]+\"|'[^']+')")
+_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:[\\/]|/)[^\s]+")
 
 
 class TransportStatus(str, Enum):
@@ -151,6 +153,12 @@ class SqliteTransportLedger:
 
     async def append(self, entry: TransportLedgerEntry) -> None:
         async with _connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "SELECT created_at FROM transport_ledger ORDER BY rowid DESC LIMIT 1"
+            )
+            latest = await cursor.fetchone()
+            if latest is not None and entry.created_at < latest[0]:
+                raise ValueError("transport ledger entries must be append-only")
             await connection.execute(
                 """
                 INSERT INTO transport_ledger (
@@ -225,6 +233,8 @@ def redact_command_summary(command: str, *, scope: str) -> str:
         raise ValueError("scope must be non-empty")
     redacted = _SECRET_ASSIGNMENT.sub(r"\1=<redacted>", command)
     redacted = _PATH_ASSIGNMENT.sub(r"\1=<scoped>", redacted)
+    redacted = _QUOTED_PATH.sub("<scoped>", redacted)
+    redacted = _ABSOLUTE_PATH.sub("<scoped>", redacted)
     redacted = re.sub(r"(?i)(Bearer\s+)[^\s]+", r"\1<redacted>", redacted)
     return redacted[:500]
 

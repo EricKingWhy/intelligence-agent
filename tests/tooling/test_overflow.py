@@ -70,6 +70,30 @@ async def test_both_streams_and_duplicate_message_are_preserved_and_bounded(tmp_
 
 
 @pytest.mark.asyncio
+async def test_upload_failure_can_fail_closed_for_audit_paths(tmp_path):
+    class UnavailableStore(FakeArtifactStore):
+        async def save(self, *args, **kwargs):
+            raise ConnectionError("unavailable")
+
+    session = make_session(tmp_path)
+    result = ToolResult.success("x" * 5000)
+    with pytest.raises(RuntimeError, match="Artifact store failed"):
+        await ArtifactOverflowHandler(
+            UnavailableStore(), fail_open=False
+        ).maybe_overflow(session, "call", "git_status", result)
+
+
+@pytest.mark.asyncio
+async def test_missing_store_can_fail_closed_for_audit_paths(tmp_path):
+    session = make_session(tmp_path)
+    result = ToolResult.success("x" * 5000)
+    with pytest.raises(RuntimeError, match="Artifact store is required"):
+        await ArtifactOverflowHandler(
+            None, fail_open=False
+        ).maybe_overflow(session, "call", "git_status", result)
+
+
+@pytest.mark.asyncio
 async def test_upload_failure_fails_open_with_raw_result(tmp_path):
     """T5 (#135): store unavailable → fail-open: keep raw tool result in-session."""
 
