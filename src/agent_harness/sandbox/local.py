@@ -193,6 +193,22 @@ class LocalSubprocessSandbox(Sandbox):
         effective_deadline = (
             deadline if deadline is not None else t0 + effective_timeout
         )
+        if cancel_event is not None and cancel_event.is_set():
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr="\n命令被取消，进程树已终止",
+                duration_ms=round((perf_counter() - t0) * 1000, 1),
+                cancelled=True,
+            )
+        if perf_counter() >= effective_deadline:
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr=f"\n命令超时（上限 {effective_timeout} 秒）",
+                duration_ms=round((perf_counter() - t0) * 1000, 1),
+                timed_out=True,
+            )
         # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀。
         # Windows：CREATE_SUSPENDED + Job Object 让后代自动继承同一终止域。
         windows_job = self._create_windows_job() if os.name == "nt" else None

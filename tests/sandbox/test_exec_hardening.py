@@ -128,6 +128,23 @@ def test_local_timeout_fallback_uses_job_when_taskkill_fails(monkeypatch):
     assert calls == ["job"]
 
 
+def test_local_expired_absolute_deadline_does_not_start_process(monkeypatch, tmp_path):
+    """An Executor-owned deadline that is already expired forbids a late start."""
+    popen = Mock(side_effect=AssertionError("expired command must not start"))
+    monkeypatch.setattr(local_module.subprocess, "Popen", popen)
+
+    result = LocalSubprocessSandbox(tmp_path).exec(
+        "touch should-not-run",
+        timeout=60.0,
+        deadline=time.perf_counter() - 0.001,
+        cancel_event=threading.Event(),
+    )
+
+    assert result.timed_out is True
+    assert result.cancelled is False
+    popen.assert_not_called()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object fallback")
 def test_windows_native_fallback_kills_real_descendants(monkeypatch, tmp_path):
     """The real Job Object fallback prevents a late descendant marker."""
@@ -454,6 +471,24 @@ def test_docker_exec_honors_timeout():
     assert result.exit_code == -1
     assert "超时" in result.stderr
     assert elapsed < 5, "exec 必须在 timeout 附近返回，而不是等容器命令结束"
+
+
+def test_docker_deadline_expiring_during_startup_does_not_create_exec():
+    """Container startup may consume the budget; no exec may start afterwards."""
+    sandbox = _docker_sandbox_with_slow_exec(delay=0)
+    api = sandbox._client.api
+    api.exec_create = Mock(wraps=api.exec_create)
+    sandbox.ensure_started = lambda: time.sleep(0.05)
+
+    result = sandbox.exec(
+        "touch /workspace/should-not-run",
+        timeout=60.0,
+        deadline=time.perf_counter() + 0.01,
+        cancel_event=threading.Event(),
+    )
+
+    assert result.timed_out is True
+    api.exec_create.assert_not_called()
 
 
 def test_docker_exec_create_exception_is_not_timeout_result():

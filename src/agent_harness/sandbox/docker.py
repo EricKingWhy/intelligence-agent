@@ -163,6 +163,14 @@ class DockerSandbox(Sandbox):
             if remaining <= 0:
                 return self._interrupted_result(started, effective_timeout, cancelled=False)
             self.ensure_started()
+            if cancel_event is not None and cancel_event.is_set():
+                return self._interrupted_result(
+                    started, effective_timeout, cancelled=True,
+                )
+            if perf_counter() >= effective_deadline:
+                return self._interrupted_result(
+                    started, effective_timeout, cancelled=False,
+                )
             return self._exec_locked(
                 command,
                 effective_timeout=effective_timeout,
