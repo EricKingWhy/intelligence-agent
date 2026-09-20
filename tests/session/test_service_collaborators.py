@@ -20,7 +20,7 @@ import ast
 import inspect
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
 import pytest
@@ -85,15 +85,23 @@ def callee_name(func: ast.expr) -> str:
     return ""
 
 
-def imported_modules(node: ast.Import | ast.ImportFrom) -> list[str]:
+def imported_modules(node: ast.Import | ast.ImportFrom, package: str = "") -> list[str]:
     """import 语句**涉及的全部**模块名（用于精确判断是否属 `agent_harness.web`）。
 
     只取第一个别名、或只看 `node.module` 都会漏两种等价写法（审查 findings）：
     `from agent_harness import web`（web 在 names 里、不在 module 里）与
     `import a, b` 里 web 排在第二个。
+    `package` = 被扫文件所在包的模块名（如 `agent_harness.session`），相对导入
+    （`from .. import web`）按它解成绝对模块名——否则 `level` 被忽略、整类逃过扫描
+    （审查 findings）。
     """
     if isinstance(node, ast.ImportFrom):
-        base = node.module or ""
+        if node.level:
+            parts = package.split(".") if package else []
+            prefix = ".".join(parts[: max(len(parts) - (node.level - 1), 0)])
+            base = f"{prefix}.{node.module}" if node.module else prefix
+        else:
+            base = node.module or ""
         return [base, *(f"{base}.{alias.name}" for alias in node.names)]
     return [alias.name for alias in node.names]
 
@@ -112,12 +120,18 @@ def is_type_checking_test(test: ast.expr) -> bool:
 
     子串判据（`"TYPE_CHECKING" in ast.unparse(test)`）会把 `if not TYPE_CHECKING:`
     也算进去，那等于把一条**真运行时** import 当成类型引用豁免掉（审查 findings）。
-    只认裸名字与属性两种正向写法，其余（`not …`、`… and …`）一律不算。
+    只认裸名字 `TYPE_CHECKING` 与 `typing.TYPE_CHECKING` 两种正向写法：任意
+    `X.TYPE_CHECKING` 属性（如 `settings.TYPE_CHECKING`）一律不算——那同样会让
+    一条真运行时 import 落进豁免块（审查 findings 的 P3）。
     """
     if isinstance(test, ast.Name):
         return test.id == "TYPE_CHECKING"
     if isinstance(test, ast.Attribute):
-        return test.attr == "TYPE_CHECKING"
+        return (
+            test.attr == "TYPE_CHECKING"
+            and isinstance(test.value, ast.Name)
+            and test.value.id == "typing"
+        )
     return False
 
 
@@ -289,7 +303,8 @@ class TestRuntimeImportBoundary:
         "包含登记值"——残余的增减都要先改决策。
         `import agent_harness.web.app` 与 `from agent_harness.web import app` 语义等价，
         两种写法一起收（`ast.Import` / `ast.ImportFrom` + 全部别名），否则强度就取决于
-        写法；模块名按完整路径判（`is_web_module`），兄弟模块 `agent_harness.websearch`
+        写法；相对导入（`from .. import web`）按被扫文件所在包解成绝对模块名；
+        模块名按完整路径判（`is_web_module`），兄弟模块 `agent_harness.websearch`
         不算；`if TYPE_CHECKING:` 只认正向形态（`is_type_checking_test`），
         `if not TYPE_CHECKING:` 里的 import 仍是运行时 import。
         """
@@ -300,6 +315,7 @@ class TestRuntimeImportBoundary:
 
         for rel, residual in self.EXPECTED_TYPE_ONLY_WEB_IMPORTS.items():
             tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"))
+            package = str(PurePosixPath(rel).parent).replace("/", ".")
 
             # 先收 TYPE_CHECKING 块内的 import 节点（含嵌套），运行时 import 是剩下的那些。
             type_checking_nodes: set[int] = set()
@@ -309,7 +325,7 @@ class TestRuntimeImportBoundary:
                     for inner in ast.walk(node):
                         type_checking_nodes.add(id(inner))
                         if isinstance(inner, (ast.Import, ast.ImportFrom)) and any(
-                            is_web_module(m) for m in imported_modules(inner)
+                            is_web_module(m) for m in imported_modules(inner, package)
                         ):
                             type_checking_imports.add(ast.unparse(inner))
 
@@ -317,7 +333,7 @@ class TestRuntimeImportBoundary:
                 node.lineno
                 for node in ast.walk(tree)
                 if isinstance(node, (ast.Import, ast.ImportFrom))
-                and any(is_web_module(m) for m in imported_modules(node))
+                and any(is_web_module(m) for m in imported_modules(node, package))
                 and id(node) not in type_checking_nodes
             ]
             assert runtime_web_imports == [], f"{rel} 出现运行时 web import"
@@ -345,6 +361,7 @@ class TestRuntimeImportBoundary:
 
         只取 `names[0]`（`import a, b` 里 web 排第二）或只看 `node.module`
         （`from agent_harness import web`）都会漏（审查 findings 的 P3）。
+        相对导入段（`package=` 那几行）同理：`level` 被忽略时整类逃过扫描。
         """
         cases = {
             "import agent_harness.web.app": True,
@@ -352,22 +369,29 @@ class TestRuntimeImportBoundary:
             "import agent_harness.web.app, agent_harness.websearch": True,
             "from agent_harness import web": True,
             "from agent_harness.web import app": True,
+            "from .. import web": True,
+            "from ..web.app import AppState": True,
             "import agent_harness.websearch": False,
             "from agent_harness import websearch": False,
             "from agent_harness.websearch import protocol": False,
+            "from . import web": False,
+            "from .web import app": False,
         }
+        package = "agent_harness.session"  # 被扫的两个领域文件都在这个包下
         for source, expected in cases.items():
             node = ast.parse(source).body[0]
             assert isinstance(node, (ast.Import, ast.ImportFrom))
-            got = any(is_web_module(m) for m in imported_modules(node))
+            got = any(is_web_module(m) for m in imported_modules(node, package))
             assert got is expected, f"{source!r} 判成 {got}，应为 {expected}"
 
     def test_type_checking_test_must_be_positive(self):
-        """`if TYPE_CHECKING:` 才豁免；`if not TYPE_CHECKING:` 是**反**语义。
+        """`if TYPE_CHECKING:` 才豁免；`if not TYPE_CHECKING:` 与任意 `X.TYPE_CHECKING` 都不是。
 
-        子串判据把它一并豁免 ⇒ 那条 import 是真运行时 import 却逃过扫描（审查 findings）。
+        子串判据把前者一并豁免 ⇒ 那条 import 是真运行时 import 却逃过扫描；
+        只看 `attr` 的宽判据同样会被 `settings.TYPE_CHECKING` 那类写法钻（审查 findings）。
         """
         assert is_type_checking_test(ast.parse("TYPE_CHECKING").body[0].value)
         assert is_type_checking_test(ast.parse("typing.TYPE_CHECKING").body[0].value)
         assert not is_type_checking_test(ast.parse("not TYPE_CHECKING").body[0].value)
+        assert not is_type_checking_test(ast.parse("settings.TYPE_CHECKING").body[0].value)
         assert not is_type_checking_test(ast.parse("True").body[0].value)

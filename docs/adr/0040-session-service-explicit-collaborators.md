@@ -164,9 +164,10 @@ Lock：不顺手重构）。
   就是从 `web.app` 惰性 import 组合根的，方向相反、不受影响）。
 - `test_types_only_reference_to_web_is_the_documented_residual`（AST）：扫**全部 import 语句**，
   含函数体内的惰性 import（实测：在 `service.py` 函数体里插 `from agent_harness.web.app import …`
-  也会红）——**比 R3 此前写的"只覆盖模块级"更严**。它不覆盖的是**动态导入**
-  （`__import__("agent_harness.web.app")`、`importlib.import_module(...)`，表达式不是 `Import`
-  节点）与 `if TYPE_CHECKING:` 之外的条件 import；这两类属**声明范围外**，不视为缺口。
+  也会红）。相对导入按被扫文件的包解成绝对模块名（`from .. import web` 会被判出，见 §5 红证 13）。
+  它**不覆盖**的是**动态导入**（`__import__("agent_harness.web.app")`、
+  `importlib.import_module(...)`，表达式根本不是 `Import` 节点）——这一类属**声明范围外**，
+  不视为缺口（审查第三轮提出前两类漏判，本批已收全；相对导入同一轮收全）。
 
 另外实测：今天任何模块级 `agent_harness.web.*` 运行时 import 都会**立刻成环**
 （`web/__init__.py` eager import `app`，`app` 又 import `session.projects` → `session.service`）
@@ -189,14 +190,18 @@ initialized module …`）⇒ 它们在今天**不可利用**；但守卫已按 
 
 **门禁（本文档所在批次，`PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest`）**：
 
-- `tests/session`：改造前 **366** → 新增证据文件后 **379**（`ed1c5fa`）→ 审查补强两条用例后
-  **382**（本轮 tip，实测 52.20 s）。每条数字都能对着它的树复算，别把某一轮的数字安到另一棵树上
+- `tests/session`：改造前 **366**（`77b80eb`）→ 新增证据文件后 **379**（`ed1c5fa`）→
+  审查补强两条用例后 **382**（`61aaa20` 及其后的测试侧提交，本轮 tip 实测 52.20 s，独立审查者
+  在导出树上逐棵复算 366/379/380/382）。每条数字都能对着它的树复算，别把某一轮的数字安到另一棵树上
   （上一轮 review 就是这么踩的）。
 - `tests/web` + `tests/workspace` + 5 个顶层 web 文件（`test_web_api` / `test_web_lineage` /
   `test_web_phase5` / `test_sse_disconnect` / `test_measure_sse_streaming`）**493 passed**
-  （220.33 s）——**命令即上面那串**：只写"495"而不给文件清单是不可复算的（上一轮 review 的读数
-  451 / 493 / 502 三种口径都能自圆其说，所以这里把口径写死）。
-- 全量：见 tracker B-26 / 月档（同一提交上的全量读数列在那里，本文档不复制数字以免两处漂移）。
+  （220.33 s；独立审查者同命令复算 188.26 s）——**命令即上面那串**：只写"495"而不给文件清单
+  是不可复算的（上一轮 review 的读数 451 / 493 / 502 三种口径都能自圆其说，所以这里把口径写死）。
+- 全量：**跑过全量的是 `978e960` 与 `ed1c5fa` 两棵树**（数字记在 tracker B-26 / 月档，本文档不复制
+  以免两处漂移）；其后的提交只动测试与文档（`61aaa20` / `d96e148` / 本轮 tip 均为测试或 docs-only），
+  终点树的全量读数在同一批次的登记/集成条目里给。**别写"本文档所在提交"**——上一轮 review
+  就是照这句话去复算、发现该提交上并没有全量读数（finding N4）。
 - `ruff check` 改动文件：All checks passed；`git diff --check` 无输出。
 
 **调用点计数（AC5 用；`grep -c` 会把 `def session_service(` 与注释里的引用一并计入，所以按调用点口径数）**：
@@ -242,13 +247,17 @@ tracked 树）。脚本自己断言锚点唯一、还原后哈希一致，任何
 | 10 | `imported_modules` 的 `Import` 分支只取 `names[0]`（漏 `import x, agent_harness.web.app`） | 同上用例红：`AssertionError: 'import agent_harness.websearch, agent_harness.web.app' 判成 False，应为 True` |
 | 11 | `is_type_checking_test` 换回子串判据 `"TYPE_CHECKING" in ast.unparse(test)` | `test_type_checking_test_must_be_positive` 红：`assert not True where True = is_type_checking_test(<ast.UnaryOp …>)`（即 `if not TYPE_CHECKING:` 被误当豁免块） |
 | 12 | 把登记表 `EXPECTED_TYPE_ONLY_WEB_IMPORTS` 清空 | 同一条残余用例的键集合断言红：`Extra items in the right set: 'agent_harness/session/service.py' / 'agent_harness/session/projects.py'`（否则守卫会静默空转成空循环） |
+| 13 | 相对导入忽略 `level`（`prefix` 不按被扫文件的包回退） | `test_import_statement_forms_are_all_considered` 红：`from .. import web` 判成 False |
+| 14 | `is_type_checking_test` 的属性分支放宽成只看 `attr`（不看 `value`） | `test_type_checking_test_must_be_positive` 红：`settings.TYPE_CHECKING` 被判成豁免块 |
 
-十二条变异全部按预期变红，且还原后 `git hash-object` 与变异前一致（脚本内断言）。第 5–12 条是
-审查 findings 的修复证据：独立审查（第 5/6 条）、窄验证第一轮（第 7/8 条）、窄验证第二轮（第 9–12 条）。
-**方法学留痕**：第 11 条第一版探针只改 `Name` 分支、漏了 `Attribute` 分支与末尾 `return False`，
-于是 `not TYPE_CHECKING`（`ast.UnaryOp`）照样走到 `return False`、守卫**没红**——脚本当场
-`sys.exit("红证失败")` 把这次"探针不判别"暴露出来，改成整段替换后才成立。这也说明：**探针本身
-必须先被证明能判别**（同步于 §5 第 4 条的探测器对照）。
+十四条变异全部按预期变红，且还原后 `git hash-object` 与变异前一致（脚本内断言）。第 5–14 条是
+审查 findings 的修复证据：独立审查（第 5/6 条）、窄验证第一轮（第 7/8 条）、窄验证第二轮
+（第 9–12 条）、窄验证第三轮（第 13/14 条）。
+**方法学留痕（两条）**：① 第 11 条探针第一版只改 `Name` 分支、漏了 `Attribute` 分支与末尾
+`return False`，于是 `not TYPE_CHECKING`（`ast.UnaryOp`）照样走到 `return False`、守卫**没红**——
+脚本当场 `sys.exit("红证失败")` 把这次"探针不判别"暴露出来，改成整段替换后才成立；② 本轮改动
+`is_type_checking_test` 之后，第 11 条探针的锚点**当场失效**（锚点唯一性断言报"出现 0 次"）——
+即"改完实现要同步改探针"这件事由脚本机械保证，不靠人记得。**探针本身必须先被证明能判别。**
 
 ---
 
