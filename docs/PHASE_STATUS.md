@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前主线：架构整改 #237–#248 与子票 #249–#266**（排除 #236、#267–#281）。T15/#260 `5650696`、T16/#261 `2618e8b`、T17/#262 `99bb942` 及 review 修复链已实现；#262 当前 tip `724e62e`。最终双轴覆盖 `d7e7a14..2efbeaa`，#260/#261 无 finding，#262 的 legacy owner P1 与 async session-load P2 已分别由 `2efbeaa` / `724e62e` 修复并增量复核。#258 late `exec_create` cleanup P2 仍未解决，按用户既有决定保持 OPEN。当前 focused 85 passed、JSONL 10 passed、transport 13 passed、Ruff/diff clean，coverage gate exit 0；最近一次全量仍为 130 failed / 2484 passed（Web/SSE suite-level 污染链）。本地 `main` 正在合入 `origin/main` 的 6 个提交；完成后重跑全量门禁。全量与最终验收通过前不 push/关单。
+**当前主线：架构整改 #237–#248 与子票 #249–#266**（排除 #236、#267–#281）。T15/#260 `5650696`、T16/#261 `2618e8b`、T17/#262 `99bb942` 及 review 修复链已实现；#262 当前 tip `724e62e`。最终双轴覆盖 `d7e7a14..2efbeaa`，#260/#261 无 finding，#262 的 legacy owner P1 与 async session-load P2 已分别由 `2efbeaa` / `724e62e` 修复并增量复核。#258 late `exec_create` cleanup P2 仍未解决，按用户既有决定保持 OPEN。当前 focused 85 passed、JSONL 10 passed、transport 13 passed、Ruff/diff clean，coverage gate exit 0；最近一次全量仍为 130 failed / 2484 passed（Web/SSE suite-level 污染链）。本地 `main` 正在合入 `origin/main` 的 6 个提交；完成后重跑全量门禁。全量与最终验收通过前不 push/关单。（2026-09-20 补记：性能与交互流畅度硬化线 `workbuddy/main-f049fadd` 67 提交已以 merge commit `080cc1464af837d3bb1547bc7900e7c8d4580cca` 并入 `2ea205a`；仅 3 个 docs 台账冲突、零代码冲突；同环境对照合并树 7 failed / 2625 passed，相对 main 全新检出 117 failed 零新增失败并修复 110 条 Web/SSE 失败；归因闭合到 B7/#275。)
 
 ## 更新日志（索引）
 
@@ -52,6 +52,7 @@
 
 ### 最近条目（最新在上）
 
+- 2026-09-20（集成：性能与交互流畅度硬化线并入 main）：**merge commit `080cc1464af837d3bb1547bc7900e7c8d4580cca`**——`workbuddy/main-f049fadd`（67 提交，tip `8bb947e`）并入 `2ea205a`；仅 3 个 docs 台账文件冲突、**零代码冲突**（两线改动面交集实测恰为这 3 个文件）。两轴独立只读复核 7/7 PASS，findings 就地修复 3 条（2×P2 docs + 1×P3 EOF 空行）。**同环境四组对照**：main 工作树 69 failed / main 全新检出 117 failed / **合并树全新检出 7 failed / 2625 passed**；另把本线在 `src/` 下仅改的 2 个文件单独贴回 main 即 117 → 7（修复 110 条、零新增，失败集与合并树逐条相同）⇒ 归因闭合到 B7/#275。该批 Web/SSE 失败的性质 = 全量串跑的用例间状态泄漏（单模块跑全绿）。明细见 `2026-09.md` 2026-09-20 段。
 - 2026-09-20（B-20 / #258–#262）：**最终双轴审查与 #262 两项最小修复**——审查 `d7e7a14..2efbeaa`；#258 late cleanup P2 保留 OPEN；#262 legacy ref owner P1 → `2efbeaa`，async Session.load P2 → `724e62e`，增量复核无新 finding。focused 85 / JSONL 10 / transport 13 passed，Ruff/diff clean，coverage exit 0；全量仍沿用最近一次红证，集成/关单未完成。详见月度归档 2026-09-20 段。
 - 2026-09-20（#256 中间集成）：merge commit `cbe3b09` 与既存集成文件 `0d3b7b5` 已由远端主线纳入；专项 76 passed / 1 skipped，全量 2569 passed / 2 skipped / 42 deselected，coverage gate exit 0。Spec 仍列出 AC2/AC3/AC4 证据缺口，#256/#244 保持 OPEN。详见月度归档。
 - 2026-09-20（T15–T17 / #260–#262）：实现 commits `5650696`、`2618e8b`、`99bb942` 与 #262 修复链；合同与残余见月度归档 2026-09-20 段。
