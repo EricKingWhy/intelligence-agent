@@ -36,6 +36,9 @@ class _ContainerExecState:
         self.cleanup_pending = False
         self.late_cleanup: tuple[object, object] | None = None
         self.late_cleanup_event = threading.Event()
+        # 只保护 `late_cleanup` / `cleanup_pending` 这一对的**交接**（读-清原子化）。
+        # 与 `lock` 分开：`lock` 要跨越 drain 里 0.5s+5s 的外部调用，不能用来做交接。
+        self.late_cleanup_lock = threading.Lock()
 
 
 def _glob_match_posix(rel_path: str, pattern: str) -> bool:
@@ -190,14 +193,20 @@ class DockerSandbox(Sandbox):
 
     def _drain_pending_cleanup(self) -> None:
         state = getattr(self, "_exec_state", None)
-        if state is None or not state.cleanup_pending:
+        if state is None:
             return
-        pending = state.late_cleanup
-        if pending is None:
-            raise RuntimeError("DockerSandbox is awaiting late exec cleanup")
-        state.late_cleanup = None
+        # 「取走待清理项」必须与 `_queue_late_cleanup` 的写入在 `late_cleanup_lock` 下互斥，
+        # **并且要在那个可能耗时 0.5s+5s 的外部清理之前完成**：否则期间并入的新项会被
+        # 旧写法的 `cleanup_pending = False` 一起清掉，那个 exec 就再没有驱动去回收它。
+        with state.late_cleanup_lock:
+            if not state.cleanup_pending:
+                return
+            pending = state.late_cleanup
+            if pending is None:
+                raise RuntimeError("DockerSandbox is awaiting late exec cleanup")
+            state.late_cleanup = None
+            state.cleanup_pending = False
         self._cleanup_late_exec_create(*pending)
-        state.cleanup_pending = False
         self._assert_exec_cleanup_healthy()
 
     def _assert_exec_cleanup_healthy(self) -> None:
@@ -483,13 +492,41 @@ class DockerSandbox(Sandbox):
         if state is None:
             self._cleanup_late_exec_create(api, created)
             return
-        state.late_cleanup = (api, created)
-        state.cleanup_pending = True
+        with state.late_cleanup_lock:
+            state.late_cleanup = (api, created)
+            state.cleanup_pending = True
         state.late_cleanup_event.set()
+        # 立刻在后台驱动一次清理，**不等下一次 `exec()`**：会话结束 / sandbox 被遗弃时
+        # 不会再有 `exec()`，只排队就等于让容器里的迟到进程永远跑下去（#258 P2）。
+        threading.Thread(target=self._drive_late_cleanup, daemon=True).start()
+
+    def _drive_late_cleanup(self) -> None:
+        """从一个游离线程里把排队的迟到清理跑掉。
+
+        清理失败只记日志、**绝不外逃**：这个线程是 detached 的，抛出去只会变成
+        `threading` 的未捕获异常输出，既没人接也掩盖了真正的失败点。
+        """
+        lock = getattr(self, "_exec_lock", None)
+        try:
+            if lock is None:
+                self._drain_pending_cleanup()
+            else:
+                # 必须与 `exec()` 共用 `_exec_lock`：它才是「同一时刻只有一个 exec 在跑」的
+                # 那把锁；调用方若正持锁（create 之后才被 cancel/deadline 命中的那条路径），
+                # 本线程会等它 release 后再跑。
+                with lock:
+                    self._drain_pending_cleanup()
+        except Exception:
+            logger.exception("DockerSandbox 后台驱动迟到的 exec 清理失败")
 
     def _cleanup_late_exec_create(self, api, created: object) -> None:
         """Reap an exec created after its caller already timed out/cancelled."""
         if not isinstance(created, dict) or not created.get("Id"):
+            return
+        if self._container is None:
+            # 容器已被 `stop()` / `delete()` 拆掉：没有可回收的宿主进程，也**不能**因此把
+            # `_container_name` 记进进程级 `_poisoned_container_exec_states`——那是永久性的，
+            # 会让此后所有同名容器都 exec 不了。
             return
         try:
             # A late exec has no PID marker yet; fail closed by stopping the
