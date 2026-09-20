@@ -403,6 +403,186 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_executor_timeout_carries_partial_output(tmp_path):
+    """预算到期时工具边界仍保留沙箱捕获的部分输出与 exit_code（ADR-0039 D5）。
+
+    这条用例**故意**把"沙箱先返回 timed_out"那条支路钉死：沙箱把绝对上限压到 1 秒、
+    Executor 的名义预算留 30 秒（余量 ~29 秒，远大于清理噪声——实测负载下杀树可达 3.3 秒），
+    否则余量一旦落在噪声带里，Executor 的 `asyncio.timeout` 就会先响、走到不带 payload 的
+    通用 TIMEOUT 上（ADR-0039 L1 的竞态不对称），用例随即假红。
+    超时前打印的内容是模型判断"打到哪一步"的依据，必须出现在 ToolResult.metadata 里，
+    不能被压成一条纯文案。
+    """
+    from agent_harness.tooling import PermissionPolicy, ToolExecutor, ToolRegistry
+
+    script = tmp_path / "partial_output.py"
+    script.write_text(
+        "import sys, time\n"
+        "sys.stdout.write('stdout-before-timeout\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('stderr-before-timeout\\n')\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    class _EarlyDeadlineSandbox(LocalSubprocessSandbox):
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
+            assert deadline is not None
+            return super().exec(
+                command,
+                timeout=timeout,
+                deadline=min(deadline, time.perf_counter() + 1.0),
+                cancel_event=cancel_event,
+                on_output=on_output,
+            )
+
+    class _TimedBash(BashTool):
+        @property
+        def timeout_seconds(self) -> float:
+            return 30.0
+
+    registry = ToolRegistry()
+    registry.register(_TimedBash(_EarlyDeadlineSandbox(tmp_path)))
+    executor = ToolExecutor(registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
+
+    execution = await executor.execute({
+        "id": "executor-timeout-payload",
+        "name": "bash",
+        "args": {"command": _python_command(script)},
+    })
+
+    result = execution.result
+    assert result.ok is False
+    assert result.error_code == "TIMEOUT"
+    assert result.retryable is False
+    # 工具臂独有的文案：Executor 掐断那条路给的是另一句话（"命令执行超时"）。
+    # 钉住它，用例红了能一眼看出走错臂还是 payload 丢了。
+    assert "预算 30.0 秒到期" in result.message
+    assert result.metadata["exit_code"] == -1
+    assert "stdout-before-timeout" in result.metadata["stdout"]
+    assert "stderr-before-timeout" in result.metadata["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_payload_is_bounded_for_the_model(tmp_path):
+    """超时 payload 必须自带上限：metadata 不在 Artifact/Overflow 预算内（ADR-0039 D5）。
+
+    替身沙箱直接返回超长 timed_out 结果：payload 若原样进 metadata，就会绕过
+    `ArtifactOverflowHandler`（它只扫 data 与 message）把捕获上限的全部输出
+    （默认 2 MB）灌进模型上下文。断言：首尾保留、中间有截断标记、总长受控。
+    """
+    from agent_harness.tooling import PermissionPolicy, ToolExecutor, ToolRegistry
+
+    flood = "A" * 50_000 + "TAIL-MARKER"
+
+    class _FloodSandbox(LocalSubprocessSandbox):
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
+            return ExecResult(
+                exit_code=-1, stdout=flood, stderr=flood,
+                duration_ms=1.0, timed_out=True,
+            )
+
+    class _TimedBash(BashTool):
+        @property
+        def timeout_seconds(self) -> float:
+            return 30.0
+
+    registry = ToolRegistry()
+    registry.register(_TimedBash(_FloodSandbox(tmp_path)))
+    executor = ToolExecutor(registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
+
+    execution = await executor.execute(
+        {"id": "timeout-payload-bound", "name": "bash", "args": {"command": "noisy"}}
+    )
+
+    result = execution.result
+    assert result.ok is False and result.error_code == "TIMEOUT"
+    stdout = result.metadata["stdout"]
+    assert len(stdout) < 2_200, f"payload 未被截断（{len(stdout)} 字符）"
+    assert "已截断" in stdout and "50011" in stdout
+    assert stdout.startswith("A" * 50) and stdout.endswith("TAIL-MARKER")
+    # 沙箱自报耗时必须走独立 key：与 Executor 自己的 duration_ms 同名会被它覆盖，
+    # 换成 `duration_ms` 这条就 KeyError。
+    assert result.metadata["sandbox_duration_ms"] == 1.0
+    assert len(result.metadata["stderr"]) < 2_200
+
+
+def test_clip_for_model_degenerate_limit_returns_empty():
+    """`limit <= 0` 必须返回空串：`text[-0:]` 是整串、负 tail 会切出乱序片段。
+
+    这条不是"截断太狠"，是把上限变成假的——留着比返回空更危险。
+    """
+    from agent_harness.tools.bash import _clip_for_model
+
+    assert _clip_for_model("abcdef", limit=0) == ""
+    assert _clip_for_model("abcdef", limit=-5) == ""
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_hint_follows_side_effect(tmp_path):
+    """超时文案与 retryable 位必须同源（不变量 #8：重试决策只有 Executor 一个责任域）。
+
+    只读子类走真实 Executor：器位必须可重试、文案不得再写"MUTATING…不要直接重跑"，
+    否则模型会被自己的工具文案误导（实则 Executor 已自动重试 3 次）。
+    """
+    from agent_harness.tooling import (
+        PermissionPolicy,
+        ToolExecutor,
+        ToolRegistry,
+        ToolSideEffect,
+    )
+    from agent_harness.tooling.executor import MAX_ATTEMPTS
+
+    class _TimedOutSandbox(LocalSubprocessSandbox):
+        def __init__(self, root):
+            super().__init__(root)
+            self.calls = 0
+
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
+            self.calls += 1
+            return ExecResult(
+                exit_code=-1, stdout="partial", stderr="",
+                duration_ms=1.0, timed_out=True,
+            )
+
+    class _ReadOnlyBash(BashTool):
+        @property
+        def timeout_seconds(self) -> float:
+            return 30.0
+
+        @property
+        def side_effect(self) -> ToolSideEffect:
+            return ToolSideEffect.READ_ONLY
+
+    sandbox = _TimedOutSandbox(tmp_path)
+    registry = ToolRegistry()
+    registry.register(_ReadOnlyBash(sandbox))
+    executor = ToolExecutor(registry, policy=PermissionPolicy.DANGER_FULL_ACCESS)
+
+    execution = await executor.execute(
+        {"id": "timeout-hint-readonly", "name": "bash", "args": {"command": "read-only"}}
+    )
+
+    result = execution.result
+    assert result.error_code == "TIMEOUT"
+    assert result.retryable is True
+    assert "READ_ONLY" in result.message and "MUTATING" not in result.message
+    assert sandbox.calls == MAX_ATTEMPTS, (
+        f"只读工具的超时应按 retryable 重试到上限（实际 {sandbox.calls} 次）"
+    )
+
+
+@pytest.mark.asyncio
 async def test_bash_tool_offloads_exec_to_worker_thread(tmp_path):
     """tool 边界把同步 sandbox.exec 卸载到工作线程——event loop 不被长命令冻结。"""
     seen: dict = {}

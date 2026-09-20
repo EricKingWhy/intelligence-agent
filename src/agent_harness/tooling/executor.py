@@ -827,7 +827,9 @@ class ToolExecutor:
 
         一轮 attempt 的数据流：
           t0 = perf_counter()
-          asyncio.timeout(tool.timeout_seconds) 包住 await tool.execute(validated)
+          deadline = t0 + tool.timeout_seconds（放进 tool_execution_deadline_var，
+                    Tool 把它原样转发给执行后端——唯一 owner，见 ADR-0039）
+          asyncio.timeout(deadline - perf_counter()) 包住 await tool.execute(validated)
             -> 正常返回 ToolResult  -> 透传（尊重工具自己的 ok/retryable 语义）
             -> 抛 TimeoutError      -> 映射 TIMEOUT（READ_ONLY 可重试；MUTATING 不可——
                                       副作用状态未知不盲重跑，见 except TimeoutError 注释）
@@ -843,9 +845,8 @@ class ToolExecutor:
             deadline = t0 + tool.timeout_seconds
             deadline_token = tool_execution_deadline_var.set(deadline)
             try:
-                # Executor creates the only absolute deadline for this attempt.
-                # Tools may forward it to blocking adapters, but must not start a
-                # second relative budget at a later layer.
+                # 本次 attempt 的**唯一**绝对 deadline：本行建立、放进 contextvar
+                # 供 Tool 转发给执行后端，后端不得重新起算。机制见 ADR-0039。
                 async with asyncio.timeout(max(0.0, deadline - perf_counter())):
                     result = await tool.execute(validated)
             except TimeoutError:

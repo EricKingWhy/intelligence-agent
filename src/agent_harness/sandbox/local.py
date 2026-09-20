@@ -173,7 +173,9 @@ class LocalSubprocessSandbox(Sandbox):
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
 
         timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉整个进程树并返回
-        ExecResult(exit_code=-1, stderr="命令超时…")，不抛异常。
+        ExecResult(exit_code=-1, stderr="命令超时…", timed_out=True)，不抛异常。
+        deadline（ADR-0039）为 ToolExecutor 给的绝对边界：给了就用它，收不到
+        deadline 才退回 timeout 相对预算；已过期时直接返回 timed_out，不起进程。
         stdout/stderr 捕获到 max_capture_chars 上限，超限丢弃并附截断标记
         （D4：无上限捕获会被大输出 OOM）。管道由 reader 线程持续排空，
         子进程可自然结束，不会因为缓冲塞满而死锁。

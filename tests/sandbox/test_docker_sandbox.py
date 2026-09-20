@@ -80,6 +80,8 @@ def test_exec_runs_in_workspace_and_stop_is_idempotent(docker_sandbox: object) -
 @docker_required
 def test_timeout_stops_late_workspace_mutation(docker_sandbox: object) -> None:
     marker = "/workspace/late-timeout-marker"
+    # 预算 1.0s / 写入点 2.5s：预算必须够命令启动（printf before 有输出，断言才非平凡），
+    # 又必须早于写入点——0.2s 会让容器冷启动吃掉全部预算，命令根本没跑起来。
     result = docker_sandbox.exec(
         f"rm -f {marker}; "
         f"(sleep 2.5; touch {marker}) & child=$!; "
@@ -97,6 +99,7 @@ def test_timeout_stops_late_workspace_mutation(docker_sandbox: object) -> None:
 @docker_required
 def test_timeout_stops_detached_workspace_mutation(docker_sandbox: object) -> None:
     marker = "/workspace/detached-timeout-marker"
+    # 预算/延迟同 test_timeout_stops_late_workspace_mutation：保证命令真的启动并跑满预算。
     result = docker_sandbox.exec(
         f"rm -f {marker}; "
         f"setsid /bin/sh -lc 'sleep 2.5; touch {marker}' "

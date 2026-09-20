@@ -142,7 +142,12 @@ class DockerSandbox(Sandbox):
     def exec(self, command: str, *, timeout: float | None = None,
              deadline: float | None = None,
              cancel_event=None, on_output=None) -> ExecResult:
-        """在容器内执行命令，超时/取消终止对应 exec 的进程组。"""
+        """在容器内执行命令，超时/取消终止对应 exec 的进程组。
+
+        deadline（ADR-0039）为 ToolExecutor 给的绝对边界：给了就用它，收不到
+        deadline 才退回 timeout 相对预算；容器启动（ensure_started）吃掉预算
+        后不得再 exec_create——过期后产生新副作用就是 bug。
+        """
         started = perf_counter()
         effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
         effective_deadline = (
