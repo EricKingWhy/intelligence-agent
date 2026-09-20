@@ -167,7 +167,10 @@ Lock：不顺手重构）。
   也会红）。相对导入按被扫文件的包解成绝对模块名（`from .. import web` 会被判出，见 §5 红证 13）。
   它**不覆盖**的是**动态导入**（`__import__("agent_harness.web.app")`、
   `importlib.import_module(...)`，表达式根本不是 `Import` 节点）与 **star import 的"内容"**
-  （`from .. import *` 这条**语句**会被扫到，但星号展开出哪些名字无法静态解析；今天
+  （星号展开出哪些名字无法静态解析。实测 `from .. import *` 在 `package="agent_harness.session"`
+  下解成 `["agent_harness", "agent_harness.*"]`，`is_web_module` 全 False ⇒ 这条语句会被**遍历**
+  但**不会**被判出；会判出的是 import 路径里写明 `web` 的形式：`from ..web import *` /
+  `from agent_harness.web import *` / `from ..web.app import *`。今天
   `src/agent_harness/__init__.py` 只有一条 docstring、没有任何 re-export，故无实际暴露面）。
   这两类属**声明范围外**，不视为缺口（审查第三轮提出前两类漏判，本批已收全；相对导入同一轮收全）。
 
@@ -200,10 +203,11 @@ initialized module …`）⇒ 它们在今天**不可利用**；但守卫已按 
   `test_web_phase5` / `test_sse_disconnect` / `test_measure_sse_streaming`）**493 passed**
   （220.33 s；独立审查者同命令复算 188.26 s）——**命令即上面那串**：只写"495"而不给文件清单
   是不可复算的（上一轮 review 的读数 451 / 493 / 502 三种口径都能自圆其说，所以这里把口径写死）。
-- 全量：**跑过全量的是 `978e960` 与 `ed1c5fa` 两棵树**（数字记在 tracker B-26 / 月档，本文档不复制
-  以免两处漂移）；其后的提交只动测试与文档（`61aaa20` / `d96e148` / 本轮 tip 均为测试或 docs-only），
-  终点树的全量读数在同一批次的登记/集成条目里给。**别写"本文档所在提交"**——上一轮 review
-  就是照这句话去复算、发现该提交上并没有全量读数（finding N4）。
+- 全量：**跑过全量的是三棵**——`978e960` / `ed1c5fa`（各 2654）与终点树 `af6f369`（2657；数值记在
+  tracker B-26 / 月档，本文档不复制以免两处漂移）；其后的提交只动测试与文档（`61aaa20` / `d96e148` /
+  `8fcf483` 均为测试或 docs-only），故未单独跑全量。**别写"本文档所在提交"**——上一轮 review
+  就是照这句话去复算、发现该提交上并没有全量读数（finding N4）；**也别把树的枚举写死**——终点树读数
+  落盘后「两棵树」即不成立（finding N5）。
 - `ruff check` 改动文件：All checks passed；`git diff --check` 无输出。
 
 **调用点计数（AC5 用；`grep -c` 会把 `def session_service(` 与注释里的引用一并计入，所以按调用点口径数）**：

@@ -3769,11 +3769,11 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 
 ---
 
-### B-26（2026-09-21）：#248 领域服务改显式 collaborators（两轴审查 + 三轮窄验证 → `978e960` / `ed1c5fa` / `61aaa20` / `a6dbb9f` / `d96e148`）
+### B-26（2026-09-21）：#248 领域服务改显式 collaborators（截至 `8fcf483` 共 **6 轮**独立审查 = 两轴各一 + 五轮窄验证 → `978e960` / `ed1c5fa` / `61aaa20` / `a6dbb9f` / `d96e148` / `af6f369` / `8fcf483`）
 
 **状态**：`#248` 的实现与证据已完成、**保持 OPEN**——AC1/AC3/AC4/AC5 满足，**AC2 部分满足**（残余 R1），另有两处**待用户裁决**（见下）。blocker `#243` 已关。
 
-**落点**：实现 `978e960`（18 文件，+661/−255）→ 两轴 findings 修复 `ed1c5fa`（3 文件）→ 窄验证第一轮 findings 修复 `61aaa20`（1 文件）→ docs 落点 `a6dbb9f`（4 文件，docs-only）→ 窄验证第二轮 findings 修复 `d96e148`（测试 + docs）→ 窄验证第三轮 findings 修复（测试 + docs）。机制正本 `docs/adr/0040-session-service-explicit-collaborators.md`（D1–D5 决策、§3 字段清单、R1–R4 残余与未采纳方案、§6 AC 矩阵）；本批门禁读数、四轮独立审查（两轴各一 + 三轮窄验证）findings 与处置、红证产物、残余与待裁决边界统一写在 `docs/phase_status/2026-09.md` 的 B-26 段；本节只保留 ticket 状态、待裁决与残余，不复制机制。
+**落点**：实现 `978e960`（18 文件，+661/−255）→ 两轴 findings 修复 `ed1c5fa`（3 文件）→ 窄验证第一轮 findings 修复 `61aaa20`（1 文件）→ docs 落点 `a6dbb9f`（4 文件，docs-only）→ 窄验证第二轮 findings 修复 `d96e148`（测试 + docs）→ 窄验证第三轮 findings 修复 `af6f369`（测试 + docs）→ 窄验证第四轮 P3 收口 `8fcf483`（测试 + docs）。机制正本 `docs/adr/0040-session-service-explicit-collaborators.md`（D1–D5 决策、§3 字段清单、R1–R4 残余与未采纳方案、§6 AC 矩阵）；本批门禁读数、逐轮审查 findings 与处置、红证产物、残余与待裁决边界统一写在 `docs/phase_status/2026-09.md` 的 B-26 段；本节只保留 ticket 状态、待裁决与残余，不复制机制。
 
 **待用户裁决（票面未改写，AGENTS.md §9.1.1）**：① **R1**——`RunManager`（+ `ManagedRun` / `Subscriber`）的模块家仍在 `web/`，是 AC2「新 interface 不引用 `web`」唯一未闭合处（该模块自身不 import 任何 web 依赖，本层只在 `TYPE_CHECKING` 下命名它、运行时零成本；纯移位即闭合，但跨 ~13 个测试文件的 patch 路径，属跨模块重构）。② **R2**——本票新增了一条通向组合层 `assembly` 的**类型级**引用 `stores: RecoveryStores`（改造前该符号根本不出现于 `service.py`）；不碰 `web`、AC2 字面不受影响，但同属本票引入的接口耦合，可选"接受登记"或"领域自建三 store 束、去掉该参数"。拿到裁决前不自行搬迁、不自行改写构造契约。
 
@@ -3782,4 +3782,4 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 - 守卫作用域（两条并列，见 ADR-0040 §4 R3）：子进程那条只看**真正被加载**的模块级 web import；AST 那条扫全部 import 语句（含函数体内的惰性 import，比原描述更严），**不覆盖** `__import__` / `importlib.import_module` 这类动态导入。实测任何模块级 `agent_harness.web.*` 运行时 import 都会立刻成环（`web/__init__.py` eager import `app`），故该性质是结构性约束。
 - 未采纳的收窄方案（窄 Protocol、合并 `stores` 与三 ledger、搬 `RunManager`）逐条留痕在 ADR-0040 §4 R4，附否掉的理由。
 
-**覆盖**：本批各提交（实现 / 三轮窄验证的 findings 修复 / docs 落点）的审查范围行与 docs-only 白名单**唯一住在 `docs/review_ledger.tsv`**（闸门 `scripts/check_review_coverage.sh` 的输入；机制见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）。本节**不复述**范围清单——上一轮审查按这里写死的清单去台账核对，发现台账当时还没有对应行（finding N1：文档先于台账声明覆盖），故按 §16.1 收敛为指针。
+**覆盖**：本批各提交（实现 / 各轮窄验证的 findings 修复 / docs 落点）的审查范围行与 docs-only 白名单**唯一住在 `docs/review_ledger.tsv`**（闸门 `scripts/check_review_coverage.sh` 的输入；机制见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）。本节**不复述**范围清单——上一轮审查按这里写死的清单去台账核对，发现台账当时还没有对应行（finding N1：文档先于台账声明覆盖），故按 §16.1 收敛为指针。
