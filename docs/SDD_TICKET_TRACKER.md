@@ -3766,3 +3766,20 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 **证据指针**：机制正本 `docs/adr/0039-tool-executor-owns-absolute-deadline.md`（D1–D7 + L1–L7）；本批门禁读数、五轮审查的 findings 与处置、红证产物路径、残余与待裁决边界统一写在 `docs/phase_status/2026-09.md` 的 B-25 段；本文件只保留 ticket 状态与待裁决事项，不复制机制。
 
 **集成与关单（2026-09-21）**：本批在后端 clone 的 `main` 上完成（工作区干净，仅 `.zcodeignore` 未跟踪）——本地 `main` 已含 `origin/main`（`e0e31fa` 是 HEAD 的祖先，无需先回后正），覆盖面 **`e0e31fa..d52f97f` = 5 笔**（`80f73ef`/`c99fc9d` 作者在途修复 + `5db3d43` 修复包 + `3205238` 登记 + `d52f97f` 台账）；覆盖闸门 **exit 0**；代码树与门禁树一致（`git diff 5db3d43..HEAD -- src tests` 为空）。已 `push origin main`（`e0e31fa..d52f97f`，快进），写前存 refs 快照、写后逐条比对：`feat/backend`、`feat/FixBUG`、`feat/FIX-test-BUG`、`workbuddy/main-f049fadd` 与 `origin/feat/*` **全部未变**。**两票未关单**（#256/#244 保持 OPEN，待用户裁决见上）。**§14.9 通知**：另一条线（`D:\intelligence-agent`，分支 `codex/256-timeout-cleanup`，工作树有未提交改动、其本地 `main` 落后于新的 `origin/main`）开工前必须先 `git merge-base --is-ancestor origin/main HEAD` 自检并合回 `main`；本批未触碰该 clone。
+
+---
+
+### B-26（2026-09-21）：#248 领域服务改显式 collaborators（两轴审查 → `ed1c5fa` → 窄验证 → `61aaa20`）
+
+**状态**：`#248` 的实现与证据已完成、**保持 OPEN**——AC1/AC3/AC4/AC5 满足，**AC2 部分满足**（残余 R1），另有两处**待用户裁决**（见下）。blocker `#243` 已关。
+
+**落点**：实现 `978e960`（18 文件，+661/−255）→ 两轴 findings 修复 `ed1c5fa`（3 文件）→ 窄验证 findings 修复 `61aaa20`（1 文件）。机制正本 `docs/adr/0040-session-service-explicit-collaborators.md`（D1–D5 决策、§3 字段清单、R1–R4 残余与未采纳方案、§6 AC 矩阵）；本批门禁读数、五轮审查 findings 与处置、红证产物、残余与待裁决边界统一写在 `docs/phase_status/2026-09.md` 的 B-26 段；本节只保留 ticket 状态、待裁决与残余，不复制机制。
+
+**待用户裁决（票面未改写，AGENTS.md §9.1.1）**：① **R1**——`RunManager`（+ `ManagedRun` / `Subscriber`）的模块家仍在 `web/`，是 AC2「新 interface 不引用 `web`」唯一未闭合处（该模块自身不 import 任何 web 依赖，本层只在 `TYPE_CHECKING` 下命名它、运行时零成本；纯移位即闭合，但跨 ~13 个测试文件的 patch 路径，属跨模块重构）。② **R2**——本票新增了一条通向组合层 `assembly` 的**类型级**引用 `stores: RecoveryStores`（改造前该符号根本不出现于 `service.py`）；不碰 `web`、AC2 字面不受影响，但同属本票引入的接口耦合，可选"接受登记"或"领域自建三 store 束、去掉该参数"。拿到裁决前不自行搬迁、不自行改写构造契约。
+
+**残余（登记，不阻断，各需单独票）**：
+- `RunManager` 的家在 `web/runmanager.py`（R1，同上，待裁决）。
+- 守卫的作用域：`test_importing_the_domain_does_not_load_the_web_app` 只覆盖模块级运行时 web import，函数体内惰性 import 不在其内（今天 `web/websocket.py` 从 `web.app` 惰性 import 组合根，方向相反）。实测任何模块级 `agent_harness.web.*` 运行时 import 都会立刻成环（`web/__init__.py` eager import `app`），故该性质是结构性约束。
+- 未采纳的收窄方案（窄 Protocol、合并 `stores` 与三 ledger、搬 `RunManager`）逐条留痕在 ADR-0040 §4 R4，附否掉的理由。
+
+**覆盖**：审查行 `<base>..978e960`（两轴）+ `978e960..ed1c5fa`（窄验证）+ `ed1c5fa..61aaa20`（窄验证 findings 复验）见 `docs/review_ledger.tsv`；docs 落点提交走白名单。
