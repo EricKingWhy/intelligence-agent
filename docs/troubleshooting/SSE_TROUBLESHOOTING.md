@@ -11,7 +11,7 @@
 
 | 现象 | 第一检查 | 不要直接归因 |
 | --- | --- | --- |
-| 单独测试通过，套件中首帧没有 `session_id` | 测试顺序、server/lifespan 收尾、残留 task | Docker、JSONL 或当前业务 diff |
+| 单独测试通过，套件中首帧没有 `session_id` | **先查 `sse_starlette` 的 `AppStatus.should_exit` 是否已被翻成 `True`**（§1 / ADR-0038）；再看测试顺序、server/lifespan 收尾、残留 task | Docker、JSONL 或当前业务 diff |
 | 没有逐字输出、数据集中到达 | `curl -N`、响应头、网关 buffering | 模型没有流式输出 |
 | 断连后 run 没有取消 | 当前 detached-run 契约与 `/cancel` 调用 | SSE producer 一定泄漏 |
 | `seq` 重复或缺口 | `after_seq`、持久化 events、重连游标 | 只按 `event_id` 猜测 |
@@ -21,16 +21,22 @@
 
 ## 1. 已确认的套件级失败形态
 
-曾观察到：Web/SSE 大集合或并行运行时，多条用例报首帧没有 `session_id`；相同或相近用例单独运行可以通过。这个事实证明了“套件/生命周期差异”，但**不单独证明根因**。
+曾观察到：Web/SSE 大集合或并行运行时，多条用例报首帧没有 `session_id`；相同或相近用例单独运行可以通过。
 
-当前 Uvicorn 版本静态检查没有发现跨实例共享的 `AppStatus.should_exit`。实际可见的是：
+**根因已定位（2026-09-20；本节上一版结论被推翻）**：`sse_starlette.sse.AppStatus.should_exit` **就是**一个跨实例共享的**进程级**模块全局量（`sse.py:184`，初值 `False`）。库只在两处把它置 `True`——`_shutdown_watcher` 轮询到某个 uvicorn `Server.should_exit` 已置位（`sse.py:134`）、或 `AppStatus.handle_exit` 被调用（`sse.py:214`）——**且不提供任何复位路径**（它的语义是「这个进程要退出了」）。本仓库有 **11 个**用例为了让真实 uvicorn 服务停下而写 `server.should_exit = True`（`tests/test_sse_disconnect.py:133`、`tests/web/test_web_cancel.py:55`、`tests/web/test_web_stream.py:54`、`tests/mcp_client/test_client_lifecycle.py:210` 等）⇒ 一旦那个 0.5 s 轮询窗口与这次置位重叠，闩锁被翻 `True` 并**在进程内永久生效**，此后**每个** `EventSourceResponse` 都在吐出首帧之前被取消 ⇒ **HTTP 200 + 零 `data:` 帧**（即 §0 表里那一行「首帧没有 `session_id`」），或连接被提前关闭（`incomplete chunked read`）。
+
+> ⚠ 本节上一版的结论（「当前版本没有跨实例共享的 `AppStatus.should_exit`，优先怀疑生命周期残留」）**是错的**，已删除：它只静态检查了 `uvicorn.Server` 与 `LifespanOn`，**漏了 `sse_starlette.AppStatus`**。
+
+判据、必要性/充分性实验、三条被排除的假说（外部 `.instance.lock` / CPU 负载 / 根级测试顺序）与全量读数见 `docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md`。测试侧修复 = `tests/conftest.py` 的 autouse 夹具 `_reset_sse_shutdown_latch`（用例前后各复位一次）；**产品代码不动**（真实部署里「服务器关机 ⇒ 排空流」是正确行为）。
+
+下面这些**仍然是事实**，只是不构成本现象的主因：
 
 - 每个 `uvicorn.Server` 有自己的 `should_exit`、`force_exit` 和 `server_state`；
 - `uvicorn.lifespan.on.LifespanOn` 另有自己的 `should_exit`、startup/shutdown 状态；
 - `AppState` 每个 app 实例独立，`shutdown()` 会关闭 RunManager 和 capability wiring；
 - 多个测试文件各自复制 server 启动/关闭 helper。
 
-因此优先怀疑“未完成的生命周期收尾、连接、后台 run 或 task 残留”，而不是寻找一个当前版本不存在的全局字段。
+因此「未完成的生命周期收尾、连接、后台 run 或 task 残留」仍值得查，但**不是**本现象的主因——主因是上面那个进程级闩锁。
 
 ## 2. 推荐判别顺序
 

@@ -2011,12 +2011,12 @@ main 由集成 AI 执行）。
 - 2026-09-19：**B-18 收批——T09/#254 + T10/#255**（fixed point `1ba46a2`；Standards + Correctness 两轴独立只读审查；Correctness zero findings；Standards 1×P2 + 1×P3；修复 `ae14ee4`；审查行 `1ba46a2..a47d855`、修复行 `a47d855..ae14ee4`）。受影响回归与两条后端门禁已绿；覆盖闸门登记见 `docs/review_ledger.tsv`；票 #254/#255 及父票 #242/#243 保持 OPEN。详细 findings 见 `docs/phase_status/2026-09.md` 2026-09-19 条目。
 - 2026-09-19：**T11/#256 Bash timeout/cancel contract**（实现 `2776c4e`；`BashTool` 的有效预算冻结为 60 秒并显式转发至 Sandbox；仅 3 文件，未提前改 #257/#258）。专项 103 passed / 1 skipped；Ruff clean；后端全量 2561 passed / 10 skipped / 42 deselected / 13 warnings；`uv.lock` 未变；coverage 留待下一批两轴审查。#256 / 父票 #244 保持 OPEN。详见 `docs/phase_status/2026-09.md` 2026-09-19 T11 条目。
 - 2026-09-19：**B-19 收批——T11/#256 + T12/#257**（fixed point `ae14ee4`；Standards + Correctness 两轴独立复核；审查实际 tip `d7e7a14`；findings 全数修复）。#257 生产实现为 Windows CREATE_SUSPENDED + Job Object 进程树终止，含 attach/resume/cleanup bounded fallback；补端到端 Executor→Bash→Local golden、readiness/partial-output 断言。专项 86 passed / 1 skipped；全量 2566 passed / 10 skipped / 42 deselected / 15 warnings；Ruff clean、diff clean、`uv.lock` 未变。覆盖行见 `docs/review_ledger.tsv`；#256/#257 / 父票 #244 OPEN。详见 `docs/phase_status/2026-09.md` B-19 条目。
-- 2026-09-19：**T13 / #258 Docker Bash timeout/cancel parity**（实现 `90842cc`，3 文件 +879/−46）。Docker exec 采用 low-level streaming API 与 deadline；超时/取消保留 partial stdout/stderr，TERM/KILL exec 进程树后 kill+wait container；cleanup 无法确认则 fail-closed，正常非零 exit 保留业务结果。专项 148 passed；全量 `PYTHONUTF8=1 uv run pytest -q` **2587 passed / 2 skipped / 42 deselected / 13 warnings**；Ruff 与 `git diff --check` clean。B-20（#258/#259）两轴审查及 coverage gate pending；#258 / 父票 #244 OPEN。详见月度归档。
+- 2026-09-19：**T13 / #258 Docker Bash timeout/cancel parity**（实现 `90842cc`，3 文件 +879/−46）。Docker exec 采用 low-level streaming API 与 deadline；超时/取消保留 partial stdout/stderr，TERM/KILL exec 进程树后 kill+wait container；cleanup 无法确认则 fail-closed，正常非零 exit 保留业务结果。专项 148 passed；全量 `PYTHONUTF8=1 uv run pytest -q` **2587 passed / 2 skipped / 42 deselected / 13 warnings**；Ruff 与 `git diff --check` clean。B-20（#258/#259）两轴审查及 coverage gate pending；#258 / 父票 #244 OPEN。**【⚠ 2026-09-20 晚：`#258` 已由 B-23 修复并关单，见「B-23」段。】** 详见月度归档。
 - 2026-09-19：**T14 / #259 JSONL reader behavior golden**（测试提交 `d66d590`，test-only）。新增 7 个 golden 用例冻结损坏/非事件行、非法 seq、非法 UTF-8、半行诊断日志、缺失/空文件返回 shape、StartedHeader shape、summary 200 行边界与损坏尾部 fallback；未改 parser、reader、consumer 或公共 API。Session/Workspace 相关回归 **426 passed**；全量 `PYTHONUTF8=1 uv run pytest -q` **2594 passed / 2 skipped / 42 deselected / 13 warnings**；Ruff 与 `git diff --check` clean。B-20 两轴审查及 coverage gate pending；#259 / 父票 #245 OPEN。详见月度归档。
 - 2026-09-20：**T15 / #260 Internal JSONL iterator extraction**（实现 `5650696`）。Store 内四条扫描路径复用内部 line iterator/parser，公开 API 与既有容错不变；本次接管复跑 reader golden + iterator **10 passed**。最终双轴审查范围 `d7e7a14..2efbeaa` 对 #260 无 finding；#260 / 父票 #245 保持 OPEN，尚未集成/关单。
 - 2026-09-20：**T16 / #261 Transport Ledger and Artifact contract**（实现 `2618e8b`）。冻结精简 append-only transport entry、不可变 session-retained/read-only artifact ref、secret/path redaction；本次接管复跑 contract **13 passed**。最终双轴审查对 #261 无 finding；#261 / 父票 #246 保持 OPEN，尚未集成/关单。
 - 2026-09-20：**T17 / #262 Web git through ToolExecutor**（实现 `99bb942`；修复链 `902bd68`、`f900d96`、`2dff3ea`、`ef3bf8e`、`83420f7`、`63f508f`、`eabbd6f`、`2efbeaa`、`724e62e`）。Web status/diff 经 READ_ONLY Permission → ToolExecutor → timeout/telemetry → Operation/transport Ledger；保持 HTTP/非零 exit/pathspec 语义；大输出无法安全外置时结构化 503；session hard delete 清理 transport rows。固定点 `63f508f` 的增量双轴审查发现 legacy ref 只校验 owner 的 P1，`2efbeaa` 改为完整 `TransportArtifactRef` 校验后再迁移；最终审查另发现 async handler 同步 `Session.load` 的 P2，`724e62e` 卸载到 worker。两次修复均经增量双轴复核无新 finding；当前 focused **85 passed**、Ruff clean、diff clean。
-- 2026-09-20：**B-20 / 最终覆盖审查**（fixed point `d7e7a14`，审查 tip `2efbeaa`；Standards + Correctness/Spec 独立只读审查）。#259–#262 除上述已修 #262 findings 外无新增 correctness finding；#258 仍有已证实 P2：late `exec_create` 只排入 `cleanup_pending`，若无后续 `exec()` 且 sandbox 被遗弃，cleanup 可能永久 pending。按用户既有决定不继续在该 Docker race 上循环，#258 保持 OPEN/未完成。最近一次全量仍为 **130 failed / 2484 passed / 2 skipped / 42 deselected / 9 warnings**，失败集中 Web/SSE 套件级状态污染；本次未无证据重跑全量。Git Bash 运行 `scripts/check_review_coverage.sh` **exit 0**；因全量红、#258 P2 及本地 `main` 与 `origin/main` 分叉，仍不得 merge/push/关单。
+- 2026-09-20：**B-20 / 最终覆盖审查**（fixed point `d7e7a14`，审查 tip `2efbeaa`；Standards + Correctness/Spec 独立只读审查）。#259–#262 除上述已修 #262 findings 外无新增 correctness finding；#258 仍有已证实 P2：late `exec_create` 只排入 `cleanup_pending`，若无后续 `exec()` 且 sandbox 被遗弃，cleanup 可能永久 pending。按用户既有决定不继续在该 Docker race 上循环，#258 保持 OPEN/未完成。最近一次全量仍为 **130 failed / 2484 passed / 2 skipped / 42 deselected / 9 warnings**，失败集中 Web/SSE 套件级状态污染；本次未无证据重跑全量。Git Bash 运行 `scripts/check_review_coverage.sh` **exit 0**；因全量红、#258 P2 及本地 `main` 与 `origin/main` 分叉，仍不得 merge/push/关单。**【⚠ 2026-09-20 晚 已全部解除，见本文件「B-23」段：`#258` P2 已修并关单；「全量红」的根因 = `sse_starlette` 进程级闩锁（已修，全量 2635 / 0）；`main` 的合并与推送均已完成（`1c6ccb97..ad6ccd8c`）。】**
 - 2026-09-20：**#256 中间集成**（集成 merge commit `cbe3b09`；另以 `0d3b7b5` 保留四个既存集成文件）。Ruff clean；专项 76 passed / 1 skipped；全量 pytest 2569 passed / 2 skipped / 42 deselected / 14 warnings；两个浏览器脚本仅做 `node --check`，未执行；`git diff --check` clean。两轴 review fixed point `6a5c2c2`、实际审查 tip `cbe3b09`；`scripts/check_review_coverage.sh` 在 `be6317d` 返回 exit 0。Spec：AC1 pass；AC2/AC3/AC4 仍有 deadline ownership、timeout/cancel partial output 与 Local/Docker 同形 parity 证据缺口；#256 与父票 #244 保持 OPEN，不据此关单。详见月度归档。
 - 2026-09-18：**B-15 收批——T03 / #239 + T04 / #249（fixed point `182d77a`）两轴独立审查 + findings 全数修复**（审查行 `182d77a..5cc9f2a`、修复行 `5cc9f2a..d84222a`，修复 commit `d84222a`）。**范围**：两个实现 commit（`877d92e` T03 + `534bf4c` T04）及其落点/台账提交；两轴 = Standards + Correctness，各一独立只读子代理，审的是未提交工作树（**审后工作树有未提交修复，故重跑两轴取回完整 findings**）。**结论：零 P0/P1，1×P2（两轴共识）+ 7×P3，全部就地修复。**
   **两轴共识 P2（真缺陷，两轴各自写探针实测复现）**：观测故障边界只落在 `_TerminalContext.close_observability`（取消/异常两臂），**四条臂内端口调用没有保护**——`context_build_completed`（超限臂）/ `run_completed`（正常完成臂）/ `run_failed`（max_steps 臂、硬熔断臂）任一抛异常都被顶层 `except Exception` 兜成 run/failed：探针 A（`run_completed` 抛）⇒ 一次**成功**的 run 变 `status='failed'`、`final_text=''`，`session.end_run` / `mark_terminal_written` / 记忆写回 / FINAL_COMPLETED checkpoint 全被跳过；探针 B（`context_build_completed` 抛）⇒ 超限臂 status 从 `context_window_exceeded` 变 `failed`、reason 变 `RuntimeError`，同一 ctx span 收到**两次** completed。触发需端口实现违约（`RunTracer`/`NullTracer` 都不抛，故不是现存实现上的活 bug），但端口存在的理由正是替换非 Langfuse 实现 ⇒ 本批自己写在 port.py 的"实现必须不抛、Core 兜住"当时只对两条臂成立。**修法（单点，不靠调用点自觉）**：新增 `_GuardedTracer`——`_new_tracer` 选定的实现一律包一层，`__getattr__` 逐方法 try/except + `system_log` 记录；`close_observability` 的局部 try/except 随之删除（同一事实只在一处写全）。逐次调用独立兜底 ⇒ 前一次抛错不再让后续收口被跳过（P3②）。
@@ -3599,21 +3599,38 @@ cd web && node node_modules/vitest/vitest.mjs run --reporter=verbose src/lib/sse
 **冲突面**：3 个文件，**全部是 docs 台账**（本文件 / `phase_status/2026-09.md` / `review_ledger.tsv`），**零代码冲突**；
 两线改动文件交集恰为这 3 个（并集 114 文件，其中 111 个只被单侧改过）。
 
-**合并前验收（同环境、洁净检出、同一 venv，**只差代码**）**
+**合并前验收（同环境、洁净检出、同一 venv，只差代码）——⚠ 下表是集成当时的原始读数，其中两行已被 2026-09-20 晚的复测推翻，见紧随其后的「更正」段**
 
 | 跑的代码 | 失败 | 通过 |
 | --- | --- | --- |
 | `main` 工作树（脏，**不作基线**） | 69 | 2548 |
-| `main` 全新检出（基线） | 117 | 2500 |
+| `main` 全新检出（基线） | ~~117~~ | ~~2500~~ |
 | **合并树全新检出** | **7** | **2625** |
 | `main` 全新检出 + 本线改动的 2 个 `src/` 文件 | 7 | 2610 |
 
-- `合并树 − main 全新检出` 的**失败集合差集 = ∅** ⇒ 合并零新增失败，且修复其中 110 条 Web/SSE 失败。
-- 归因闭合（3 臂定位，非「看起来没事」）：本线只改了 2 个 `src/` 文件（`storage/local_artifact.py`、`web/websocket.py`，B7/#275），
-  把它们补进 `main` 全新检出即复现**同样的 7 条剩余集合** ⇒ 那 110 条由 B7 修复。
-- 7 条残差全部是环境噪声：`os.symlink` 沙箱空操作 ×6 + 临时检出无 `.git` ×1（`tests/evaluation/test_smoke.py`）。
-- ⚠ 方法论：**工作树的失败数不能当基线**（69 vs 117，差在工作树脏这第三变量）；**子集跑也不是判别器**
-  （`tests/web/test_workspace_files_api.py` 单独跑 36/36 全绿，只在全量串跑下现形）。
+**更正（2026-09-20 晚，B-23）**
+
+- **不可复现**：同一棵 `2ea205a` 完整树（`git archive 2ea205a` 导出、同 venv、`PYTHONPATH=<树>/src`、`cwd=<树>`）复测为
+  **2619 例 / 7 failed / 0 error**，与「117」相差 110 例，且其失败集合**与合并树的 7 条同集**。
+  ⇒ 本机**无法复现**「main 117 → 合并 7」这个对照；下表的 117 / 2500 两格不成立。
+- **撤销**「本线修复 110 条 Web/SSE 失败」：该差值建立在一个不可复现的基线上。B7/#275 的两个文件是否修复过真实缺陷，
+  **缺少可复现判别**（解除条件：补一条能稳定复现该失败的用例，再对该用例做 A/B）。
+- **撤销**「3 臂归因闭合」：`main 全新检出 + 2 个 src 文件 = 7` 这一臂同样是拿不可复现的基线做减法，不构成归因。
+- **保留**「合并零新增失败」：该结论只依赖两臂失败集合相同，与 117 能否复现无关，仍然成立。
+- **7 条残差已全部给出归属**：6 条属 `os.symlink` 家族——**已根因化并修复**（见下方「B-23」段）；
+  另 1 条是 `git archive` / 临时检出**无 `.git`** 致 `tests/evaluation/test_smoke.py` 取不到 `git_commit`，属检出产物、非产品缺陷。
+- **「全量串跑用例间状态泄漏」的精确机制已定位（B-23）**：根因是第三方库 `sse_starlette` 的**进程级单向闩锁**
+  `AppStatus.should_exit`——被真实 uvicorn 的关机路径翻成 `True` 后，**库内不存在任何复位路径**，此后同进程内
+  每个 `EventSourceResponse` 都 **200 + 零 `data:` 帧** ⇒ 该族失败**不是**本仓库自己的状态泄漏。
+  三条候选假说（**外部 `.instance.lock` 被占** / **机器 CPU 负载** / **根级测试顺序污染**）各有受控实验反例；
+  「117」那条读数的归因（「B7/#275 修好 110 条」）**已撤销**——它只建立在一个不可复现的基线上。机制全文 + 证据表：
+  `docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md`；修复与前后读数见本文件「B-23」段。
+- **本节此前被重复插入两次**（`git merge-file --union` 在双方都新增同一段时会留下两边，逐字节相同的 36 行），
+  B-22 审查打出的「零真实重复行」判据**漏掉了它** ⇒ 该判据不成立，重复块已就地删除。
+  教训（已写进本段以免后人重踩）：并集解析后的机械校验必须专门查**跨段落重复**——按行多重集比较**查不出**这种重复，
+  因为并集里两边各自都是合法内容。
+- ⚠ 方法论（保留）：**工作树的失败数不能当基线**；但当时那条「子集跑也不是判别器」的观察同样**不可复现**
+  （`tests/web/test_workspace_files_api.py` 现在在全量串跑里也全绿），故它不能再作为「串跑才红」的证据。
 
 **静态与门禁**：`git diff --check` 在 `2ea205a..tip` 与 `e1266f8..tip` 两范围均干净（并据此修掉本线引入的
 `web/src/App.test.tsx` EOF 空行）；合并树 `ruff` = `All checks passed`；台账机器可读（无 BOM、全 LF、审查行 43 / 白名单 48、
@@ -3627,39 +3644,100 @@ cd web && node node_modules/vitest/vitest.mjs run --reporter=verbose src/lib/sse
 > 这批票的关单属**另一条线的验收范围**——`docs/PHASE_STATUS.md` 当前焦点写明「全量与最终验收通过前不 push/关单」，
 > 且 `#258` late `exec_create` cleanup P2 按用户既有决定保持 OPEN ⇒ **本记录不代为关单**，如实披露该边界。
 
-### 集成与关单（P1 批次收口，2026-09-20）
+> **⚠ 2026-09-20 晚 更新（B-23）**：上条那条边界已被用户解除——用户 2026-09-20 明确授权本线承担集成工作
+> （合并 / 推送 / 关单），并同时批准修 `#258` 的 late-cleanup P2 ⇒ **`#258` 已修复并关单**，见下方「B-23」段。
+> `#274` / `#281` 仍**未开工**且不在本线施工面 ⇒ 父票 `#267` 保持 OPEN。
 
-**落地**：本批 `workbuddy/main-f049fadd` 线（tip `8bb947e`）以 merge commit `080cc14`（父 `2ea205a` = 原 `main`）
-并入 `main`；工作树经 `git read-tree --reset -u` 同步（索引树与 `HEAD^{tree}` 相等、`git status` 仅剩未跟踪的 `.zcodeignore`）；
-随即 `push origin main`，`origin/main` = `ad6ccd8c33739face48abfab9c7aa94093dbfee2`（`1c6ccb97..ad6ccd8c`，**103 提交，fast-forward**）。
+---
 
-**冲突面**：3 个文件，**全部是 docs 台账**（本文件 / `phase_status/2026-09.md` / `review_ledger.tsv`），**零代码冲突**；
-两线改动文件交集恰为这 3 个（并集 114 文件，其中 111 个只被单侧改过）。
+### B-23（2026-09-20 晚）：#258 late-cleanup P2 + 软链夹具根因化 + smoke 成功路径 + 「Web/SSE 大规模失败」根因定位
 
-**合并前验收（同环境、洁净检出、同一 venv，**只差代码**）**
+**动因**：用户批准三件此前挂起的事——① smoke 脚本的**成功路径**（需活的本地 Web 服务）；
+② 定位「Web/SSE 跨用例状态泄漏」的精确根因（此前只登记为遗留、未关）；③ 授权动 `#258` 的 late-cleanup P2。
 
-| 跑的代码 | 失败 | 通过 |
-| --- | --- | --- |
-| `main` 工作树（脏，**不作基线**） | 69 | 2548 |
-| `main` 全新检出（基线） | 117 | 2500 |
-| **合并树全新检出** | **7** | **2625** |
-| `main` 全新检出 + 本线改动的 2 个 `src/` 文件 | 7 | 2610 |
+#### ① #258 P2（AC2「容器内进程终止后无延迟副作用」）
 
-- `合并树 − main 全新检出` 的**失败集合差集 = ∅** ⇒ 合并零新增失败，且修复其中 110 条 Web/SSE 失败。
-- 归因闭合（3 臂定位，非「看起来没事」）：本线只改了 2 个 `src/` 文件（`storage/local_artifact.py`、`web/websocket.py`，B7/#275），
-  把它们补进 `main` 全新检出即复现**同样的 7 条剩余集合** ⇒ 那 110 条由 B7 修复。
-- 7 条残差全部是环境噪声：`os.symlink` 沙箱空操作 ×6 + 临时检出无 `.git` ×1（`tests/evaluation/test_smoke.py`）。
-- ⚠ 方法论：**工作树的失败数不能当基线**（69 vs 117，差在工作树脏这第三变量）；**子集跑也不是判别器**
-  （`tests/web/test_workspace_files_api.py` 单独跑 36/36 全绿，只在全量串跑下现形）。
+**缺陷**：`DockerSandbox._queue_late_cleanup` 只**排队**（`state.late_cleanup = (api, created)`、
+`cleanup_pending = True`、`late_cleanup_event.set()`），唯一出队路径是**下一次 `exec()` 开头**的
+`_drain_pending_cleanup()`；`late_cleanup_event` 被 `set()` 却从没有 `wait()` ⇒ 会话结束 / sandbox 被遗弃时
+不会再有 `exec()`，容器里的迟到 `exec_create` 进程**永远不被回收**。
 
-**静态与门禁**：`git diff --check` 在 `2ea205a..tip` 与 `e1266f8..tip` 两范围均干净（并据此修掉本线引入的
-`web/src/App.test.tsx` EOF 空行）；合并树 `ruff` = `All checks passed`；台账机器可读（无 BOM、全 LF、审查行 43 / 白名单 48、
-无重复 sha）；**覆盖闸门 exit 0**（264 提交全部有归属）。
+**长期无测试的机制性原因**：旧用例用裸 `object.__new__` 造 sandbox 且**没有 `_exec_state`**，撞上
+`state is None` 的**内联短路分支**（直调 `_cleanup_late_exec_create`），从未走过生产队列路径。
 
-**关单**：#268 #269 #270 #271 #272 #273 #275 #276 #277 #278 #279 #280 共 **12 张**已在 GitHub 关闭并附落地证据
-（每条含 merge/tip SHA、本票提交清单、验收证据节指针、门禁数字）。
-**#274**（B6，blocked by #242）与 **#281**（B8，blocked by #247）**未开工** ⇒ 父票 **#267 保持 OPEN**。
+**修法**：排队后立刻起 daemon 线程跑新增的 `_drive_late_cleanup()`（在 `self._exec_lock` 内 drain，
+异常只记日志、绝不外逃）；与 `exec()` 共用同一把锁 ⇒ 不会有两个驱动同时消费同一份 `late_cleanup`。
 
-> 另：本次推送同时把 `main` 线上原本未推的 33 个提交（含 `#257`–`#262` 与 B-19/B-20/B-21 审查记录）推到 `origin/main`。
-> 这批票的关单属**另一条线的验收范围**——`docs/PHASE_STATUS.md` 当前焦点写明「全量与最终验收通过前不 push/关单」，
-> 且 `#258` late `exec_create` cleanup P2 按用户既有决定保持 OPEN ⇒ **本记录不代为关单**，如实披露该边界。
+**红→绿证据（作者与审查者各一次，独立复现）**：把新线程那一行换成 `pass` ⇒ 新用例
+`test_abandoned_sandbox_reaps_late_exec_without_a_second_exec` 红在 `container.kill.assert_called_once_with()`
+（`Called 0 times`），耗时 3.85 s（作者）/ 4.08 s（审查者）；恢复后转绿 0.29 s。
+
+**两轴审查（第二轮，收口）**：
+
+- *Standards* 2×P1 + 3×P2 + 3×P3，**已就地修**：① `docs/troubleshooting/SSE_TROUBLESHOOTING.md` §1 留着与本批**相反的过期结论**（它写「当前版本没有跨实例共享的 `AppStatus.should_exit`」）——已重写为真根因 + 指针；② 本段表格的模板占位符已填实；③ 跨文件重复叙述收敛到 `docs/adr/0038-*.md`（§16.1 单点：ADR 是机制正本，本段只留运营事实与读数）。
+- *Correctness* 发现并**就地修好 2×P2**：① **丢清理的竞态**——`_queue_late_cleanup` 在锁外写队列、`_drain_pending_cleanup` 在锁内「读→清」，且旧写法把 `cleanup_pending = False` 放在**耗时的外部清理之后** ⇒ 期间并入的新项会被一起清掉，而它的驱动看到 `cleanup_pending=False` 直接返回 ⇒ **该项永不回收**（正是本票要修的那类泄漏）。修法：新增 per-state `late_cleanup_lock`，只保护这一对字段的**交接**，并把「读→清」整体前移到外部清理之前；锁序恒为 `_exec_lock` → `late_cleanup_lock`，不与既有路径成环。② `stop()` / `delete()` 会把 `self._container` 置 None，drive 线程撞上后 `AttributeError` → `_mark_exec_cleanup_failed()` 把 `_container_name` 写进**进程级** `_poisoned_container_exec_states`（永久，之后所有同名容器都 exec 不了）⇒ `_cleanup_late_exec_create` 在 `self._container is None` 时直接返回。两条都在票面内：本批新增的并发驱动**放大了**既有窗口。
+- **红证（在最终代码上复算）**：进程内摘掉自驱动（`.workbuddy/smoke_20260920/mutate258_red.py`）⇒ `1 failed in 4.19 s`，红在 `container.kill.assert_called_once_with()`（`Called 0 times`）；恢复后 `tests/sandbox/test_exec_hardening.py` **23 passed / 22.38 s**，ruff `All checks passed`。
+
+#### ② 软链夹具：假红根因化并修复
+
+**现象**：全量串跑有 5–6 条 `os.symlink` 家族失败（`tests/session/test_session_cwd.py` ×4、
+`tests/web/test_host_dirs_api.py`、`tests/workspace/test_workspace_index.py`），此前一律按「环境噪声」结案。
+
+**根因（两条实测，缺一不可）**：① **沙箱内 `os.symlink` 是静默 no-op**——不抛异常、返回 `None`、
+链接**根本没建出来**（`os.path.lexists` 为 False；`WORKBUDDY_FS_PROTECTION_ROLE=daemon`）；同一段代码在
+**沙箱被绕过的进程**里则抛 `OSError [WinError 1314]` ⇒ 两种世界里同一段夹具表现不同。
+② 三个夹具的 `_make_directory_link` 在 `symlink_to` 之后**无条件 `return True`**，不核验链接是否真存在
+⇒ sandbox 世界里「返回 True 但没有夹具」，下游断言拿着不存在的路径去比，红成一条**看起来像产品缺陷的假失败**。
+
+**修法**：三处夹具在 `symlink_to` 之后**核验存在**，不成立就继续走 `cmd /c mklink /J` 目录联接回退；
+junction 分支返回值收紧为 `completed.returncode == 0 and link.is_dir()`。**不改成 skip**——skip 等于没覆盖。
+
+**⚠ 方法论坑（写给后人）**：夹具 A/B 实验若走**沙箱被绕过**的通道，`os.symlink` 会抛 1314 而不是静默 no-op，
+老夹具随即落到 junction 回退**也能绿** ⇒ **A/B 两边都绿、看起来「修了没用」**。夹具行为类 A/B 必须在
+**同一沙箱状态**下跑，否则测的是两种世界。
+
+**环境缺陷登记（可解除）**：`os.symlink` 在沙箱内静默 no-op 这件事本身还没有独立记录。
+解除条件：在真支持符号链接的机器（或关掉 FS 保护层的环境）复跑这 6 条用例，确认夹具走**符号链接**分支时
+同样全绿；在此之前，这 6 条用例覆盖的是**目录联接**形态而不是符号链接形态。
+
+#### ③ smoke 脚本的成功路径首次在活服务上跑通
+
+B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行过」——本轮补上。
+
+**起服务（绕开坏掉的 `pnpm` wrapper）**：
+`PYTHONPATH=src .venv/Scripts/python.exe -m uvicorn agent_harness.web.app:create_prod_app --factory --host 127.0.0.1 --port 8000`
+搭配 `node web/node_modules/vite/bin/vite.js --port 5173 --strictPort`（vite 的 `/api` 反代含 `ws: true`）。
+
+- **`web/stream_check_local.mjs` → RC=0 ✅**：真 Chromium 提交一条「写 600 字短文、不调用任何工具」的任务，
+  共 42 个采样点；首次增长 t=11.1 s，**有增长的采样点 5 次、增长跨度 21.5 s**（判定线 ≥3 次且跨度 ≥4 s），
+  WS 实测 `ws://localhost:5173/api/ws`，console 错误 0。
+- **`web/ui_check3.mjs` → 先失败、修后 RC=0 ✅**：原版两条断言在当前 UI 下**结构性不可达**
+  （id 用 `body.innerText` 全文正则匹配**完整** UUID 前缀，而列表渲染的是 `session_id` 的**截断**形式
+  ⇒ 计数恒 0，即使渲染完全正常也必然判红；打开会话的定位又写死依赖某个实例才有的语料）。
+  修法：id 改读 DOM 节点 `.session-item-id`、点第一条会话、语料字符串降级为**信息性输出**。
+  修后 **36 条会话条目、打开首条会话可见文本 14364 字符、工具痕迹 True、console 错误 0**。
+  原文件备份在 `.workbuddy/smoke_20260920/ui_check3.mjs.orig`。
+- **数据足迹**：smoke 新建 1 条会话（`7e5c8650-1127-4a6a-b59d-2f7e03139839`），跑完**硬删回收**，
+  会话数 35 → 36 → **35**（`DELETE /api/sessions/<id>` 返回 `deleted:true, events:6`）。
+
+#### ④ 「Web/SSE 大规模失败」根因（结论与读数；机制全文见 `docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md`）
+
+**结论一行**：根因 = `sse_starlette` 的**进程级单向闩锁** `AppStatus.should_exit`；**不是**本仓状态泄漏，也非外部锁 / CPU 负载 / 测试顺序。修复只落**测试隔离层**（`tests/conftest.py` 的夹具，**不改产品代码**——真实部署里「关机 ⇒ 排空流」是正确行为）。机制正本、必要性/充分性实验、被排除假说、备选方案对照：`docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md`（**唯一落点**）。本段只留读数：
+
+| 跑的树 / 条件 | 例数 | 失败 | 归因 |
+| --- | --- | --- | --- |
+| `2ea205a` 完整树（`git archive`，无 `.git`） | 2619 | 7 | 6 条软链假红 + 1 条无 `.git` 致 `tests/evaluation/test_smoke.py` 取不到 `git_commit`（检出产物） |
+| 本批改前（`37ca581`，夹具未修） | 2635 | 5 | 5 条全为软链假红 |
+| 本批改后（夹具已修，**未**修闩锁；无探针） | 2635 | 67 | 闩锁族（另一次独立复现 68；带探针 v3 为 131，探针按用例采样放大了可观测面） |
+| 本批改后（夹具已修 + **闩锁复位**，带探针） | 2635 | **0** | 翻转次数 **0**；闩锁族与软链族全部消除 |
+| 本批终局（终局树、无探针） | 2635 | **3** | 3 条**全部**是 `tests/evaluation/*` 的 `SystemExit(1)`（FS 批量删除守卫 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`，`count 8620 > threshold 50`，作用域 = pytest 临时目录），**与本批无关**、已登记残余；闩锁族与软链族均为 **0** |
+
+**判据产物**：`.workbuddy/smoke_20260920/probe_latch.py` + `probe_latch.out`（`VERDICT: NECESSARY_AND_SUFFICIENT`；三臂读数在 ADR D4）。
+
+**撤销**：B-22 记的「main 117 → 合并 7，B7/#275 修好 110 条」——同一棵 `2ea205a` 树复测 2619 / 7，
+117 不可复现（详见上一节「更正」；那 110 条与本轮闩锁族同数量级）。
+
+#### ⑤ 关单
+
+`#258` 两轴审查通过、AC2 有红→绿证据、专项与全量门禁达标 ⇒ 已关单（comment 附实现 commit、红→绿证据、
+门禁数字、`git diff --check`、覆盖闸门结果与残余）。父票 `#244` 的其余子票状态不在本批范围。
