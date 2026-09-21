@@ -182,13 +182,17 @@ def _runtime_for_session(
 
 
 def _make_approval_callback(auto: bool):
-    """Demo 用审批回调：auto=True 全部批准（默认），auto=False 每次问你 y/n。"""
+    """Demo 用审批回调：auto=True 全部批准（默认），auto=False 每次问你 y/n。
+
+    两个回调都必须 async——ApprovalCallback 契约是 Awaitable，executor 在审批关卡直接
+    await（tooling/approval.py）；同步实现会在首次 DANGER 工具审批时抛 TypeError 终止整轮 run。
+    """
     if auto:
-        def _auto(_req: ApprovalRequest) -> ApprovalResponse:
+        async def _auto(_req: ApprovalRequest) -> ApprovalResponse:
             return ApprovalResponse(approved=True, reason="demo auto-approve")
         return _auto
 
-    def _ask(req: ApprovalRequest) -> ApprovalResponse:
+    async def _ask(req: ApprovalRequest) -> ApprovalResponse:
         console.print(Panel(
             f"[yellow]{req.tool_name}[/yellow] 需要审批\n"
             f"权限级别: {req.permission.value}  策略: {req.policy.value}\n"
