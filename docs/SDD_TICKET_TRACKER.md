@@ -4015,3 +4015,59 @@ E       assert 3 == 1
    既有刻意设计冲突（票面「不得触碰的既有刻意设计」第 1 条），故不做。
 
 **残余风险**：读-校验-写之间的窗口**变短但未消失**（票面 Risks 已明示）；CAS 仍是唯一防线。
+
+### 集成与关单（2026-09-21）
+
+**落地**：本票 tip `240a79da`，`workbuddy/main-f049fadd` → `main` **快进** push（`09bae517..240a79da`，6 笔）；
+写后 `origin/main` = `240a79daac235533dd808d96032a21fbf8db95bd`（fetch 后复验；本地分支与远端 ahead/behind = 0/0）。
+
+| commit | 内容 | 改动面 |
+| --- | --- | --- |
+| `6c4790d` | `test(storage)`：连接计数红证 + 异常/CAS 守卫用例 | 测试 +118 −0 |
+| `a2651d6` | `perf(storage)`：`update_state` 三次连接收敛为一次 | 源码 +33 −20 |
+| `0af6f21` | `docs(#274)`：PERF_BASELINE B6 节 + 本文件 B6 节 | docs-only |
+| `4987a0c` | `chore(review-ledger)`：两轴审查行 + 白名单行 | 台账 |
+| `36a36fb` | `style(tests)`：去掉文件尾多余空行（交付后 review 的 findings 处置） | 测试（纯空白 −1） |
+| `240a79d` | `chore(review-ledger)`：上述 fix 提交的归属行 | 台账 |
+
+**关单**：#274 = **CLOSED**（`closedAt 2026-09-21T12:02:22Z`）。关单 comment 已附完整证据（commit 链 / 红证 /
+AC4 逐字节 / 门禁读数 / 两轴结论 / 修复的 P2 / 未闭合项 / 残余风险）。依据 `AGENTS.md` §14.12：
+已合入 `main` 且门禁通过 ⇒ 直接关单。
+
+**交付后独立 review（与本文件上方「Review」节是两轮，勿混）**：本轮由**另一批独立只读子代理**
+（Standards + Spec）在**交付后**重跑，fixed point 仍为 `09bae51`。
+
+- **Standards 轴 0 条**规范违规。内联 `SELECT` 的重复被判为**被票面 R1/R2 强制**——`get()` 自带
+  `_connect`，复用会把连接数加回去 ⇒ 属「不复用即违规」的强制重复，**不是** §9.5 违规；
+  函数内 import 与文件既有 spy 用例（`:146-162`）同形 ⇒ 合规。
+- **Spec 轴**：必做 1 七步 / R1 / R2 / R3 / 必做 2 / 必做 3 / Scope lock / **AC1–AC9 逐项 PASS**；
+  测试文件名按票面授权沿用既有文件（票面原文：「开工时按实际文件名定位，不要新建重复的测试文件」）。
+- **发现并修复 1 条 P2**：`tests/storage/test_sqlite_operation_ledger.py` **文件尾多余空行** ⇒
+  `git diff --check 09bae51..HEAD` 报 `323: new blank line at EOF.`（**exit 2**），
+  违反 `AGENTS.md` §14.10 Validation Gate。**归属已取证为本次引入**：本仓近 15 笔
+  （`09bae51~15..09bae51`）与本轮 `origin/main` 近 25 笔该检查**均 exit 0**；全仓 463 个 `.py`
+  仅 **5** 个带尾空行 ⇒ 由 `36a36fb` 修复（删 2 字节纯空白）、`240a79d` 记账。
+  同类先例：`web/src/App.test.tsx` 的 EOF 空行（见本文件「集成与关单（P1 批次收口，2026-09-20）」段）。
+
+**门禁复跑（修复后、tip `240a79da` 上实测）**：全量 **2916 passed / 2 skipped / 0 failed / 0 errors**；
+`tests/storage/` **95 passed**；`ruff check .` → `All checks passed!`；
+`git diff --check 09bae51..HEAD` → **exit 0**；`scripts/check_review_coverage.sh` → **exit 0**。
+（修复前的 review 轮同样是 `2916 passed / 0 failed` —— 纯空白改动不动测试语义，两轮读数一致可互证。）
+
+**⚠ 运行链路陷阱（本票实踩，写在此以免后人重踩）**：`R="$PWD"` 时 Git Bash 给的是 **POSIX 形态**
+`/c/Users/...`，原生 Windows `python.exe` **不认** ⇒ `PYTHONPATH` **等于没设**；解释器于是退到主仓 venv 的
+`intelligence_agent.pth`（内容仅一行 `D:\intelligence-agent-backend\src`）⇒ `import agent_harness`
+**落到主仓旧码**，表现为「疑似回归」（`update_state 打开了 3 个连接`）。**判据**：跑测试前先执行
+`python -c "import agent_harness.storage.sqlite as m; print(m.__file__)"`，**必须落在 worktree 下**；
+`PYTHONPATH` 一律用 Windows 形态 `C:/...`。
+
+**批次态势**：父票 #267（14 子票）现 **13 CLOSED / 1 OPEN** ⇒ 只剩 **#281（B8，`agent/runtime.py`）**；
+父票 #267 待 #281 关闭后方可关。
+
+**§14.9 通知（集成后回补，2026-09-21 当场 `fetch` 实测，只读；本票无推送动作，只登记）**：
+`D:\intelligence-agent` —— 分支 `codex/256-timeout-cleanup`、HEAD `8bd105d`、**8 笔未推送**、工作树 1 个脏文件；
+fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本地 `main` = `1b7857b`、
+**8 笔 #236 未推送**、工作树 clean；fetch 后 **8 ahead / 250 behind**。**两者开工前必须先自检
+`git merge-base --is-ancestor origin/main HEAD`**，落后就先把 `main` 合回来再动手（§14.9 第 2 步，常设授权）；
+冲突按 §14.7 停下做逐文件语义分析。另：`D:\intelligence-agent` 停在 feature 分支上 —— §13.2 明确提醒
+**不要把某个仓库长期挂在一条 feature 分支上**。
