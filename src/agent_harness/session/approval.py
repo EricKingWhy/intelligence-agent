@@ -7,14 +7,24 @@
 
 ``service.py`` 以 ``_InteractiveCallbackHolder = InteractiveCallbackHolder`` 别名
 重新导出，既有的私有名引用与测试导入路径不变。
+
+F18-A（#282）追加：
+
+- ``declared_permission_mode`` / ``declared_auto_approve`` —— 会话**创建时**显式声明
+  的档位与 auto_approve（F15 #234）。
+- ``effective_permission_mode`` / ``effective_auto_approve`` —— 会话**当下生效**的值：
+  最后一次 ``permission/changed`` 胜，否则回落到创建时的声明。
+- ``append_permission_change`` —— ``permission/changed`` 的唯一写入口。
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from agent_harness.session.event import (
+    PERMISSION_CHANGED,
     SESSION_STARTED,
     TOOL_APPROVAL_REQUESTED,
     SessionEvent,
@@ -206,11 +216,87 @@ def build_approval_callback(
         return None
 
 
+# ── F18-A（#282）：会话内改权限档 ──────────────────────────────────────────
+# 「创建时声明」与「会话内改档」写同一对键，故 ``effective_*`` = ``declared_*`` 之上
+# 叠一层「最后一次 changed 胜」。决策与优先级：ADR-0041 §2 D3。
+
+
+@dataclass(frozen=True)
+class PermissionChange:
+    """一次权限档切换的结果（F18-A #282）。
+
+    ``permission_mode`` / ``auto_approve`` 是**改后当下生效**的值——HTTP 响应回传它，
+    前端按回执对齐（不引入乐观本地状态，见 ``web/src/lib/api.ts``）。
+    """
+
+    permission_mode: PermissionPolicy
+    auto_approve: bool
+
+
+def effective_permission_mode(events: list[SessionEvent]) -> PermissionPolicy | None:
+    """派生会话**当下生效**的权限档（F18-A #282；优先级见 ADR-0041 §2 D3）。
+
+    约束：命中一条 ``permission/changed`` 就**不再往下找**——值不可解析时记 warning 并按
+    未声明返回 None（不回落 declared、不猜更严或更松的档，与 :func:`declared_permission_mode`
+    同一条规矩）。无 ``permission/changed`` 时逐字回落 F15 #234 的既有行为。
+    """
+    for event in reversed(events):
+        if event.type != PERMISSION_CHANGED:
+            continue
+        raw = event.data.get(SESSION_PERMISSION_MODE_KEY)
+        try:
+            return PermissionPolicy(raw)
+        except ValueError:
+            logger.warning(
+                "permission/changed 的 %s=%r 不是合法权限档，按未声明处理",
+                SESSION_PERMISSION_MODE_KEY, raw,
+            )
+            return None
+    return declared_permission_mode(events)
+
+
+def effective_auto_approve(events: list[SessionEvent]) -> bool | None:
+    """派生会话**当下生效**的 ``auto_approve``（F18-A #282）。规则同
+    :func:`effective_permission_mode`；只认 bool，其余按未声明处理。"""
+    for event in reversed(events):
+        if event.type != PERMISSION_CHANGED:
+            continue
+        raw = event.data.get(SESSION_AUTO_APPROVE_KEY)
+        if isinstance(raw, bool):
+            return raw
+        logger.warning(
+            "permission/changed 的 %s=%r 不是 bool，按未声明处理",
+            SESSION_AUTO_APPROVE_KEY, raw,
+        )
+        return None
+    return declared_auto_approve(events)
+
+
+def append_permission_change(session: Session, change: PermissionChange) -> PermissionChange:
+    """追加 ``permission/changed``——PERMISSION_CHANGED 的**唯一**写入口（F18-A #282）。
+
+    data 形状（只写改后当前值、无 from/to）见 ADR-0041 §2 D2。走 ``Session.append``
+    ——不产生 resume 副作用（不变量 #7）。
+    """
+    session.append(
+        PERMISSION_CHANGED,
+        {
+            SESSION_PERMISSION_MODE_KEY: change.permission_mode.value,
+            SESSION_AUTO_APPROVE_KEY: change.auto_approve,
+        },
+    )
+    return change
+
+
 __all__ = [
     "SESSION_AUTO_APPROVE_KEY",
     "SESSION_PERMISSION_MODE_KEY",
     "InteractiveCallbackHolder",
+    "PermissionChange",
+    "append_permission_change",
     "build_approval_callback",
     "declared_auto_approve",
     "declared_permission_mode",
+    "effective_auto_approve",
+    "effective_permission_mode",
 ]
