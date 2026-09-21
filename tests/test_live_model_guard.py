@@ -301,15 +301,67 @@ async def test_probe_endpoint_releases_when_the_call_succeeds(_fake_provider) ->
 async def test_probe_endpoint_classifies_a_real_payload_and_redacts_the_detail(
     _fake_provider,
 ) -> None:
-    """失败路径：真实回显 → 三态里的「已分类的不可用」，详情经过脱敏 helper。"""
+    """失败路径：真实回显 → 三态里的「已分类的不可用」，详情一律经脱敏 helper 产出。"""
     _fake_provider["error"] = _HttpError(_PRIMARY_BODY, status_code=400)
 
     probe = await probe_endpoint(_config(), label="primary", timeout=15.0)
 
     assert probe.unavailable and probe.reason == PROVIDER_ACCOUNT_UNAVAILABLE_REASON
     assert probe.error_type == "_HttpError"
-    assert probe.detail and "sk-fake" not in probe.detail
+    assert probe.detail and "计费账户已被冻结" in probe.detail
     assert skip_reason([probe]) is not None
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_masks_a_key_shaped_token_in_the_detail(_fake_provider) -> None:
+    """脱敏**有牙**：正文里塞一个密钥形 token，它必须变成 `***`。
+
+    这条单独成立的理由：`_PRIMARY_BODY`（实测回显）里根本没有密钥形子串，拿它断言
+    "key 不在 detail 里"是空转——换成"忘了调 `_redact_detail`"的实现照样绿。要测出
+    脱敏这一层，载荷里就必须**真的**有一个会被它命中的 token。
+    """
+    _fake_provider["error"] = _HttpError(
+        "Error code: 401 - {'error': {'message': 'invalid api_key=sk-live-ZZZZ9999'}}",
+        status_code=401,
+    )
+
+    probe = await probe_endpoint(_config(), label="primary", timeout=15.0)
+
+    assert probe.unavailable and probe.reason == PROVIDER_AUTH_REASON
+    assert "sk-live-ZZZZ9999" not in probe.detail
+    assert "api_key=sk-live-ZZZZ9999" not in probe.detail
+    assert "***" in probe.detail
+    # 归因行（最终进 skip 理由的那段文字）同样不许带明文。
+    assert skip_reason([probe]) is not None
+    assert "sk-live-ZZZZ9999" not in skip_reason([probe])
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_arms_the_outer_budget_above_the_inner_timeout(
+    _fake_provider, monkeypatch,
+) -> None:
+    """外层硬上限 = 内层请求超时 + 余量（**方向与数值都钉住**）。
+
+    为什么要断言：`asyncio.wait_for` 的 timeout 只决定"谁先抛"。若它与内层相等或更小，
+    正常超时路径会先被外层砍掉，归因就从"端点超时"退化成无信息的 `TimeoutError`
+    （还会连带改变 TLS/连接类失败的归类面）。这个耦合跨了两个模块（`Settings` 超时 →
+    探测预算），只靠真跑是看不出来的。
+    """
+    seen: list[float] = []
+    real_wait_for = guard.asyncio.wait_for
+
+    async def _spy(awaitable: Any, timeout: float) -> Any:  # 原样转发，形状与 wait_for 一致
+        seen.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(guard.asyncio, "wait_for", _spy)
+
+    probe = await probe_endpoint(_config(), label="primary", timeout=15.0)
+
+    assert probe.ok
+    assert len(seen) == 1
+    assert seen[0] > 15.0
+    assert seen[0] == 15.0 + guard._PROBE_BUDGET_MARGIN_SECONDS
 
 
 @pytest.mark.asyncio

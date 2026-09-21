@@ -436,6 +436,9 @@ def test_context_build_completed_keeps_the_pre_264_keyword_arity() -> None:
     `test_context_exceeded_arm_closes_and_clears_the_handle`（臂层裸调）与
     `test_context_window_exceeded_then_disconnect_collects_the_span_once`
     （端到端 kwargs 面）分别承载。
+
+    末项（第 4 个 `()`）顺带钉住 `close_pending` 的形状：它**直呼端口**、从不经上面那个
+    参数，所以它给出的关键字集合也是空——这正是它与前两项分属两条路径的证据。
     """
     seen: list[tuple[str, ...]] = []
 

@@ -130,6 +130,9 @@ _TRANSPORT_ERROR_TYPES: tuple[type[BaseException], ...] = (OSError,)
 #: 只有这几个是「端点 / 网络路径状态」语义，其余（400/422…）是「这个请求不对」）。
 #: 407 由代理产生（网络路径上我们过不去），402 由供应商产生（余额耗尽）——两者都不是
 #: 本侧载荷问题，故整类归入环境。
+#: 408（Request Timeout）**故意不映射**（已知取舍）：它同属"端点此刻状态"语义，映射成
+#: `provider_timeout` 也说得通；但 408 也可能是"我们发得太慢/载荷太大"这类本侧症状，
+#: 判成环境就等于把一种可能的代码回归吞成 skip。两害相权取**留在红里**（fail-closed 那一侧）。
 _STATUS_REASONS: dict[int, str] = {
     401: PROVIDER_AUTH_REASON,
     403: PROVIDER_AUTH_REASON,
@@ -294,7 +297,8 @@ def _configured_chain(settings: Any) -> list[tuple[str, ModelConfig]] | None:
 async def probe_chain(settings: Any) -> list[EndpointProbe]:
     """探测整条配置链（超时取 `settings.model_test_timeout_seconds`，与连接测试同源）。
 
-    配置不全 ⇒ 空链（`skip_reason` 的「链为空」规则随之放行）。
+    配置不全 ⇒ 空链（不是异常；`skip_reason` 的「链为空」规则随之放行——守卫自身
+    那一步更早，见其 docstring）。
     """
     timeout = float(getattr(settings, "model_test_timeout_seconds", 15.0))
     return [await probe_endpoint(config, label=label, timeout=timeout)
@@ -306,8 +310,12 @@ def skip_reason(probes: list[EndpointProbe]) -> str | None:
 
     四条规则，缺一不可：
 
-    - 链为空（未配置任何端点 / 配置不全）⇒ 放行：那是**缺配置**，用例里的既有 skipif
-      有自己的话要说（`probe_chain` 把 `ConfigError` 折成空链，这条规则即那条路径）；
+    - 链为空 ⇒ 放行：那是**缺配置**，用例里的既有 skipif 有自己的话要说。
+      注意这条规则的**可达面**：经由 `chain_verdict` 的守卫路径**走不到它**——配置不全时
+      `chain_verdict` 在探测前就返回 None（`_configured_chain` 把 `ConfigError` 折成 `None`，
+      见其 docstring）。这里收的是**直呼组合**的调用方（本模块的用例，
+      以及将来别的工具）：`probe_chain` 对不全配置返回空链（不是异常），空链没有
+      "可用 / 不可用"可判，唯一正确的语义就是放行；
     - 任一端点可用 ⇒ 放行：环境能跑真实模型，后来的红必然是别的；
     - 任一未分类失败 ⇒ 放行（**fail-closed**）：判不出环境的失败可能是代码回归；
     - 全部端点都是「已分类的不可用」⇒ skip。
