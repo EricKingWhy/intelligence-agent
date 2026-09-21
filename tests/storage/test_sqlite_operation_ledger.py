@@ -320,4 +320,3 @@ async def test_update_state_concurrent_writer_raises_runtimeerror(
 
     assert excinfo.value.args[0] == "Operation 'call-race' changed concurrently"
     assert fired, "竞态未注入（_utc_now_iso 未被调用）"
-
