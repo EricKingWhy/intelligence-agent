@@ -485,22 +485,27 @@ git commit -m "..."
 最终集成统一在 `D:\intelligence-agent` 的 `main` 进行：
 
 ```text
-按 §14.6 先回后正（若直接在施工 clone 的 `main` 上提交，则没有这一步）
+origin/main
+→ 先把 main 合回你的短分支（§14.6「先回后正」）：冲突与测试都在短分支上解决，
+  不把过期分支直接合进 main
+（若走 §13.2(b) 即直接在施工 clone 的 main 上提交，则没有这一步，直接对账）
 → diff 检查 + 门禁全绿（§14.10）
-→ 审查覆盖闸门：`scripts/check_review_coverage.sh` 退出 0
-   （对账范围 `<最早台账 base>..HEAD`，每条 commit 必须有台账归属：审查行、docs-only 白名单，
-    或"恰好只改台账文件"的记账提交——代码提交只有"补一次审查"一条路；机制与信任边界见
-    `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）
+→ **审查覆盖闸门**：`scripts/check_review_coverage.sh`
+   （范围 `<最早台账 base>..HEAD` 的每条 commit 必须有台账归属：审查行、docs-only 白名单，
+    或"恰好只改台账文件"的记账提交——**代码提交只有"补一次审查"一条路**；
+    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）
 → merge 到本地 main（快进优先）
-→ 先比 tree 再决定要不要重跑门禁：`git -C <集成 clone> rev-parse main^{tree}` 与施工 clone 的
-   `HEAD^{tree}` 相等 ⇒ 证明"跑过门禁的那棵树 = 被集成的这棵树"，不必重跑（2026-09-17 实测
-   省掉一次 ~20 分钟的前后端全量）；不等（行尾 / CRLF 或合入产生新内容）⇒ 在集成 clone 跑全量门禁
+→ **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
+   与施工 clone 的 `HEAD^{tree}` 比——**相等即证明"我跑过门禁的那棵树"就是"被集成的这棵树"**，
+   不必再跑一遍（2026-09-17 实测：两 clone tree 同为 `e63c202…`，省掉一次 ~20 分钟的前后端全量）。
+   不等（例如集成 clone 的检出行尾/CRLF 造成差异、或合入时产生新内容）⇒ 在集成 clone 里跑全量门禁
 → 确认前后端集成正常
-→ `git push origin main`（§14.4 常设授权）
+→ git push origin main（当前主开发执行，常设授权见 §14.4）
 → 通知另一条线把 main 合回来（§14.9）
 ```
 
-先合并到本地 `main` 并验证，再 push GitHub；除非用户明确要求，不默认走 feature push + PR merge。
+**先合并到本地 `main` 并验证，再 push GitHub。** GitHub 不是仓库之间交换代码的必经步骤。
+除非用户明确要求，否则不要默认「先 push feature 分支再通过 GitHub PR merge」。
 
 ## 13.5 `git diff` 的用途
 

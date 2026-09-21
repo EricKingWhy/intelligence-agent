@@ -229,7 +229,11 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
    即会对过期读数放行）。**出现任何非 docs / 台账路径 ⇒ 必须在新树上重跑全量**，不允许"看起来只是小改"。
    **不许把本条读成 §13.4 的 tree 比较**（那条比的是整棵 `HEAD^{tree}`；本条是"文档面之外无改动"的等价条件，
    判据形式不同）。
-4. **判据必须先自证可执行**：跑判据前先 `git rev-parse --verify` 冻结 sha 与 HEAD 两个对象；
+4. **判据必须先自证可执行**：跑判据前**逐个**验证两个对象——
+   `git rev-parse --verify <冻结sha>^{commit} && git rev-parse --verify HEAD^{commit}`。
+   **必须分次调用且带 `^{commit}`**：`git rev-parse --verify <a> <b>` 一次传两个参数**恒 exit 128**
+   （`fatal: Needed a single revision`），与该命令"对象不存在"的报错**同形**（2026-09-21 实测）⇒
+   自证本身会变成假绿；`scripts/check_review_coverage.sh:74-75` 用的是同一 fail-closed 形状（`--verify --quiet || exit 1`）。
    **stdout 为空 + exit≠0 不算通过**（`git diff <抄错的sha> HEAD` 恰好 stdout 空、exit 128 ⇒ 抄错一位就假绿，
    与 §7 第 8 条记的 #213 手抄事故同形状）。两条判据的**输出原文**写进 Tracker 门禁证据；
    **证据缺失等同于没跑**。
