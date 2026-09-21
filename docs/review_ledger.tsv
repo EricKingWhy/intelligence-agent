@@ -181,3 +181,4 @@ f1b65e4	B-33/B-34 落点（tracker 两段 + 月度归档 2 条 + PHASE_STATUS �
 f838a92	B-33/B-34 集成与关单落点（tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
 4cd66ef	docs(B-33) `-m integration` 读数环境归因更正（tracker 读数段 + 归档门禁子项 + PHASE_STATUS 焦点/最近条目；docs-only）
 fd55e70	B-33/B-34 落点行补最终 tip（bafbd12 → a080912 的 4 笔 docs-only；tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
+f08f630	B-33/B-34 tip 锚点自维护口径（tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
