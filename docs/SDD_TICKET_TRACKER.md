@@ -4071,3 +4071,18 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 `git merge-base --is-ancestor origin/main HEAD`**，落后就先把 `main` 合回来再动手（§14.9 第 2 步，常设授权）；
 冲突按 §14.7 停下做逐文件语义分析。另：`D:\intelligence-agent` 停在 feature 分支上 —— §13.2 明确提醒
 **不要把某个仓库长期挂在一条 feature 分支上**。
+
+**push 结构补记（本批共两轮快进 push，2026-09-21）**：第①轮 = **代码 + 审查面 6 笔**（`6c4790d` 红证 /
+`a2651d6` 实现 / `0af6f21` docs / `4987a0c` 台账 / `36a36fb` 去尾空行 / `240a79d` 归属行，`09bae517..240a79da`）；
+第②轮 = **docs / 台账收尾 2 笔**（`62f5d73` 集成与关单落点 + `41df925` 白名单行，`240a79da..41df925`）。
+第②轮写后实测 `git ls-remote origin refs/heads/main` = `41df9252cdadc8f59308b784e97a6be3ff55c617` = 本地 `HEAD`
+（**只信 `ls-remote`，不信 `refs/remotes/origin/*`**）。**本批两次 push 全部为快进。**
+
+⚠ **第②轮落地踩坑（如实记，供后人避险）**：`git update-ref refs/heads/workbuddy/main-f049fadd <tip>`
+**返回 RC=0 却把该 ref 删掉了**（`refs/heads/workbuddy/` 整个目录被回收）——不建目录、不建文件，
+`rev-parse --verify` 随即报 `fatal: Needed a single revision`、`status` 显示 `## No commits yet` + 几百个幻影 `A`。
+**同一次会话内两度实测复现**（一次 ref 父目录**在场**、一次**缺席**，结果**相同**）⇒ **并非「目录是否存在」决定的**：
+本沙箱对 `workbuddy/` 斜杠命名空间的**任何 ref 写尝试都不可信，退出码不是判据**。
+恢复 = python **直写松散 ref 文件**（`os.makedirs(<commondir>/refs/heads/workbuddy)` + 写 `40位SHA\n`），
+绕开 git 的 ref 写入路径；`for-each-ref` 快照 **14 → 15 条，只多目标 ref、零丢失**，且随后跨 8+ 次独立进程
+（含一次 4m52s 长跑脚本）复验均能解析。
