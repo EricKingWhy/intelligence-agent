@@ -154,3 +154,4 @@ cedb30c	B-31 集成段落盘（tracker B-31 集成与关单段 + 归档 B-31 集
 e3fa930	B-31 集成 push 结构补记（两次快进 push 分开记：代码面 6 笔 + docs/台账收尾 4 笔；docs-only）
 92242ae57e1a79414b6ee387b1c190bf86188b54	B-31 收尾记账如实化（push 三次 / ② 收尾 6 笔 / tracker 指针「两条」→「三条」子项；docs-only）
 0af6f21	B6/#274 落点记录（PERF_BASELINE B6 节：G3 前置基线 + 改造后对照 + 复现性三轮；tracker 文末追加「批 P1-B6」节；docs-only）
+62f5d73314170a847287aa7951144c9253e57ce7	B6/#274 集成与关单落点（tracker 集成段 + 归档条目 + PHASE_STATUS 索引与条目数真值修正；docs-only）
