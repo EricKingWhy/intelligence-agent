@@ -4125,7 +4125,7 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 **覆盖面声明（不夸大）**：挂守卫的集合 = **依赖 `.env` 主模型链**的真实调用；别处的真实依赖（Phase 6/11 的真实 embedding / 存储端点、Docker 门控用例）**不在**本守卫声称的范围内，它们的可用性由各自的门控表达。
 
-**读数（实测）**：修复前 `-m integration` **17 failed / 17 passed / 6 skipped** → 修复后 **0 failed / 16 passed / 24 skipped**（18 条守卫 skip + 6 条 Phase 6 既有 skip）。**18 = 17 红 + 1 条假绿**：`tests/integration/test_phase14_gate.py::TestGate4SessionsTreeReal::test_real_fork_edge_renders_in_tree` **也**打真实模型（走真实 runtime），只是断言面只读 `sessions --tree` 的输出——模型调用失败它照样绿。两轴各自独立确认这 18 条的结构对应（其中 15 条**没有**自己的 `skipif` ⇒ 修复前只能以红收场）。
+**读数（实测）**：修复前 `-m integration` **17 failed / 17 passed / 6 skipped** → 修复后 **0 failed / 16 passed / 24 skipped**（18 条守卫 skip + 6 条 Phase 6 既有 skip）。**18 = 17 红 + 1 条假绿**：`tests/integration/test_phase14_gate.py::TestGate4SessionsTreeReal::test_real_fork_edge_renders_in_tree` **也**打真实模型（走真实 runtime），只是断言面只读 `sessions --tree` 的输出——模型调用失败它照样绿。两轴各自独立确认这 18 条的结构对应（其中 15 条**没有**自己的 `skipif` ⇒ 修复前只能以红收场）。**另两种环境的读数（同一冻结树，用于把判据面与"有没有凭据"分开）**：`%TEMP%` 副本**无 `.env`** ⇒ 守卫按设计**放行**（`ConfigError`）、28 条 skip 全部来自用例自己的 `skipif`（`-rs` 实测理由：「需要 .env 里配置 MODEL_API_KEY …」等）；副本 + **合成假 key 的 `.env`**（`MODEL_BASE_URL=https://127.0.0.1:9/v1`，零真实凭据）⇒ 守卫路径实测 **12 passed / 28 skipped / 0 failed**，skip 理由带 `[live-model guard]` 前缀 + 逐端点归因 + 诚实尾句 ⇒ **守卫的 skip 路径可在无凭据环境里被任何人复现**（16 vs 12 的 passed 差来自 `.env` 有无可选键 `FALLBACK_MODEL_*` / `TAVILY_API_KEY` / Milvus；三轮 `failed` 恒 0）。
 
 **环境事实（本批实测，供复现）**：primary `senseaudio/deepseek-v4-flash-0731` → HTTP 400 `{'code':'billing','message':'计费账户已被冻结','ref_code':400901}`；fallback `zhipu/glm-4.5-air` → HTTP 429 余额不足。**密钥字段全程 `SecretStr('**********')`，无泄漏**（诊断与审查均未打印任何 key 值）。
 
