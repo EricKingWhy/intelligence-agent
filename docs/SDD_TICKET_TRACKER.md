@@ -2216,7 +2216,7 @@ scripts/check_review_coverage.sh
 
 ```bash
 # 改造前基线：45744d3 版本文档
-git show 45744d3:docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md > "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md"
+git show 45744d3:docs/HANDOFF_PERF_FRONTEND.md > "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md"
 # 改造后对照（numstat 第 2 列 = 删除行数）
 git diff --no-index --numstat \
   "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md" \
