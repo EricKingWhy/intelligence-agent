@@ -150,3 +150,4 @@ b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 
 0571b01	B-31 闭合复验 findings 处置（flake 行「无残留」被证伪后的改写 + 行号/路径口径 + 残余⑥⑦；docs-only）
 cedb30c	B-31 集成段落盘（tracker B-31 集成与关单段 + 归档 B-31 集成/§14.9 通知两条子项 + PHASE_STATUS 索引与按日表；docs-only）
 e3fa930	B-31 集成 push 结构补记（两次快进 push 分开记：代码面 6 笔 + docs/台账收尾 4 笔；docs-only）
+92242ae57e1a79414b6ee387b1c190bf86188b54	B-31 收尾记账如实化（push 三次 / ② 收尾 6 笔 / tracker 指针「两条」→「三条」子项；docs-only）
