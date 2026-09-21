@@ -26,7 +26,12 @@ from agent_harness.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolRegistry
 
-pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+# requires_live_model：本模块 8 个 gate 里 Gate 1..7 都以真实模型的多 Agent 委派为被测
+# 对象，整模块挂守卫因此是精确的——环境没有可用端点时它们一条也证明不了。Gate 8
+# （CAPABILITIES 未配 multiagent）自身不测委派，但同样真跑一次 run，一并挂（见
+# tests/live_model_guard.py）。
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio,
+              pytest.mark.usefixtures("requires_live_model")]
 
 
 def _gate_settings(tmp_path) -> Settings:

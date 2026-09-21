@@ -95,6 +95,7 @@ def _real_summarizer(settings: Settings) -> TailSummarizer:
 
 
 class TestGate1ForkFullChain:
+    @pytest.mark.usefixtures("requires_live_model")
     @pytest.mark.asyncio
     async def test_real_fork_then_child_resume(self, gate_env):
         """真实两轮会话 fork → child 独立 runtime 续跑，seed 快照（文件）可见。"""
@@ -141,6 +142,7 @@ class TestGate1ForkFullChain:
 
 
 class TestGate2TailSummaryReal:
+    @pytest.mark.usefixtures("requires_live_model")
     @pytest.mark.asyncio
     async def test_real_tail_summary_attached(self, gate_env):
         """真实 LLM 对被放弃路线生成摘要 → session/forked.tail_summary 在场。"""
@@ -173,6 +175,7 @@ class TestGate2TailSummaryReal:
 
 
 class TestGate3CopyOnForkIsolation:
+    @pytest.mark.usefixtures("requires_live_model")
     @pytest.mark.asyncio
     async def test_child_workspace_snapshot_isolated(self, gate_env):
         """child 拿到 fork 点快照；双向隔离（child 改不伤父，父后写不进 child）。"""
@@ -211,6 +214,10 @@ class TestGate3CopyOnForkIsolation:
 
 
 class TestGate4SessionsTreeReal:
+    # 本用例**也**打真实模型（`_run_and_collect` 走真实 runtime），只是断言面只看
+    # fork 边有没有进 tree 渲染 —— 模型调用失败它照样绿。挂守卫是诚实的：环境没有
+    # 可用端点时，它证明的东西比它声称的少（真实模型调用并未被校验）。
+    @pytest.mark.usefixtures("requires_live_model")
     @pytest.mark.asyncio
     async def test_real_fork_edge_renders_in_tree(self, gate_env):
         """真实 fork 边经 sessions --tree 渲染（[fork @seq] 标注在场）。"""
@@ -236,6 +243,7 @@ class TestGate4SessionsTreeReal:
 
 
 class TestGate5ReplayFrozen:
+    @pytest.mark.usefixtures("requires_live_model")
     @pytest.mark.asyncio
     async def test_replay_real_history_zero_side_effects(self, gate_env):
         """真实历史回放：tool result 冻结可见 + 事件/文件零副作用。"""

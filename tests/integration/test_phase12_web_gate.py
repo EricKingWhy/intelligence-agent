@@ -83,6 +83,7 @@ async def test_gate1_tavily_real_web_search(settings):
 # ── Gate 2：Model Fallback 真实切换 ──
 
 
+@pytest.mark.usefixtures("requires_live_model")
 @pytest.mark.asyncio
 async def test_gate2_model_fallback_real_switch(settings, tmp_path):
     """primary = 死端点（连接失败=瞬时）→ 切真实 fallback 完成回答。"""
@@ -152,6 +153,7 @@ class _AlwaysFailTool(Tool):
         )
 
 
+@pytest.mark.usefixtures("requires_live_model")
 @pytest.mark.asyncio
 async def test_gate3_repeated_tool_failure_guard_real_trigger(settings, tmp_path):
     """真实模型反复同参调用失败工具 → 熔断触发 → run/failed。
