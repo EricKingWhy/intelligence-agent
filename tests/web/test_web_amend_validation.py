@@ -1,6 +1,6 @@
 """P1 回归：``/resume`` 与 ``/messages`` 的 amend 校验对齐 create 路径（未知值 → 422）。
 
-背景（docs/HANDOFF_FRONTEND_TECH_DEBT.md §5 P1）：Q2 让这两个端点开始透传
+背景（docs/archive/handoffs/HANDOFF_FRONTEND_TECH_DEBT.md §5 P1）：Q2 让这两个端点开始透传
 amend 字段，但没有 create 路径的三道校验——未知 ``model`` / ``agent_profile``
 会在 ``build_runtime`` 抛未捕获异常 → **500**，未知 ``context_providers``
 被静默跳过。本文件锁定 422 语义（与 ``POST /api/sessions`` 一致），

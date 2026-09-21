@@ -24,11 +24,11 @@ from agent_harness.session.service import (
     InvalidSessionId,
     RecoveryConflict,
     SessionNotFound,
-    SessionService,
     SessionServiceError,
     WorkspaceNameInvalid,
 )
 from agent_harness.session.store import SessionSummaryStats
+from agent_harness.web.app import session_service
 
 # ── 异常层级 ──────────────────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ class TestExceptionHierarchy:
 class TestServiceConstruction:
     def test_exposes_store_and_run_manager(self, app_state):
         """SessionService 正确透传 AppState 的核心属性。"""
-        service = SessionService(app_state)
+        service = session_service(app_state)
         assert service.store is app_state.store
         assert service.run_manager is app_state.run_manager
         assert service.approval_queues is app_state.approval_queues
@@ -81,19 +81,19 @@ class TestSessionIdValidation:
     ])
     @pytest.mark.asyncio
     async def test_get_events_rejects_unsafe_id(self, app_state, bad_id):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(InvalidSessionId):
             await service.get_events(bad_id)
 
     @pytest.mark.asyncio
     async def test_has_session_rejects_unsafe_id(self, app_state):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(InvalidSessionId):
             await service.has_session("../etc/passwd")
 
     @pytest.mark.asyncio
     async def test_cancel_rejects_unsafe_id(self, app_state):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(InvalidSessionId):
             await service.cancel("../etc/passwd")
 
@@ -104,19 +104,19 @@ class TestSessionIdValidation:
 class TestReadOperations:
     @pytest.mark.asyncio
     async def test_get_events_raises_not_found_for_missing(self, app_state):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(SessionNotFound):
             await service.get_events("nonexistent-uuid-here")
 
     @pytest.mark.asyncio
     async def test_has_session_false_for_missing(self, app_state):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.has_session("nonexistent-uuid-here")
         assert result is False
 
     @pytest.mark.asyncio
     async def test_has_session_true_for_existing(self, app_state, existing_session):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.has_session(existing_session)
         assert result is True
 
@@ -124,7 +124,7 @@ class TestReadOperations:
     async def test_get_events_returns_events_for_existing(
         self, app_state, existing_session
     ):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         events = await service.get_events(existing_session)
         assert len(events) >= 1
         assert events[0].type == "session/started"
@@ -136,13 +136,13 @@ class TestReadOperations:
 class TestListSessions:
     @pytest.mark.asyncio
     async def test_empty_when_no_sessions(self, app_state):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.list_sessions()
         assert result == []
 
     @pytest.mark.asyncio
     async def test_lists_existing_session(self, app_state, existing_session):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.list_sessions()
         assert len(result) == 1
         assert result[0].session_id == existing_session
@@ -151,7 +151,7 @@ class TestListSessions:
     @pytest.mark.asyncio
     async def test_returns_domain_dataclass_not_dict(self, app_state, existing_session):
         """ARCH-4：列表行是领域 dataclass（不再是 dict 中转）——类型系统能抓住字段漂移。"""
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.list_sessions()
         assert isinstance(result[0], SessionSummaryStats)
 
@@ -165,7 +165,7 @@ class TestListSessions:
                         trace_id="tr-list",
                         trace_url="https://lf.example/trace/tr-list")
 
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.list_sessions()
         row = next(r for r in result if r.session_id == existing_session)
         assert (row.trace_id, row.trace_url) == (
@@ -174,7 +174,7 @@ class TestListSessions:
     @pytest.mark.asyncio
     async def test_trace_id_none_without_terminal_event(self, app_state, existing_session):
         """只有 session/started（无 run 终态）→ trace_id / trace_url 都为 None，不伪造。"""
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.list_sessions()
         row = next(r for r in result if r.session_id == existing_session)
         assert (row.trace_id, row.trace_url) == (None, None)
@@ -186,7 +186,7 @@ class TestListSessions:
 class TestCancel:
     @pytest.mark.asyncio
     async def test_cancel_raises_not_found_for_missing(self, app_state):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(SessionNotFound):
             await service.cancel("nonexistent-uuid-here")
 
@@ -195,7 +195,7 @@ class TestCancel:
         self, app_state, existing_session
     ):
         """没有在途 run 时幂等返回 False。"""
-        service = SessionService(app_state)
+        service = session_service(app_state)
         result = await service.cancel(existing_session)
         assert result is False
 
@@ -206,7 +206,7 @@ class TestCancel:
 class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_raises_not_found_for_missing_session(self, app_state):
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(SessionNotFound):
             await service.resolve_approval(
                 session_id="nonexistent-uuid-here",
@@ -216,7 +216,7 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_raises_when_no_queue(self, app_state, existing_session):
         """session 存在但没有交互式审批队列 → ApprovalQueueMissing。"""
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(ApprovalQueueMissing):
             await service.resolve_approval(
                 session_id=existing_session,
@@ -238,11 +238,11 @@ class TestWorkspaceNameValidation:
     ])
     def test_workspace_validation_rejects_paths(self, app_state, bad_name):
         """workspace 含路径 → WorkspaceNameInvalid。"""
-        service = SessionService(app_state)
+        service = session_service(app_state)
         with pytest.raises(WorkspaceNameInvalid):
             service._validate_workspace_name(bad_name)
 
     def test_workspace_none_returns_none(self, app_state):
         """workspace=None → 返回 None（向后兼容）。"""
-        service = SessionService(app_state)
+        service = session_service(app_state)
         assert service._validate_workspace_name(None) is None

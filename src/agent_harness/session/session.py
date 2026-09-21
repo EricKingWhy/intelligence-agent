@@ -314,10 +314,22 @@ class Session:
             data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
         )
+        self._persist_event(event, notify=True)
+        return event
+
+    def _persist_event(self, event: SessionEvent, *, notify: bool) -> None:
+        """提交一条已构造事件，并在需要时通知实时观察者。
+
+        Store 是 durable 写入 owner，Session 仍拥有内存投影与 seq 计数器。
+        顺序不可交换：store 成功后才更新内存/seq，避免失败留下空洞；history
+        adoption 通过 ``notify=False`` 保持离线 seed 语义。
+        """
         self._store.append_event(self.session_id, event)
         self._events.append(event)
         # 写盘成功后才推进计数器——失败不消耗 seq
         self._next_seq += 1
+        if not notify:
+            return
         # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
         for listener in self._listeners:
             try:
@@ -327,7 +339,6 @@ class Session:
                     "session listener 回调失败（session=%s, event=%s）",
                     self.session_id, event.type,
                 )
-        return event
 
     def adopt_history(self, events: list[SessionEvent]) -> list[SessionEvent]:
         """移植既有事件（fork seed 的唯一 owner，ADR-0017 决策 3）。
@@ -345,9 +356,7 @@ class Session:
             if event.type not in EVENT_TYPES:
                 raise ValueError(f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中")
             moved = replace(event, seq=self._next_seq, session_id=self.session_id)
-            self._store.append_event(self.session_id, moved)
-            self._events.append(moved)
-            self._next_seq += 1
+            self._persist_event(moved, notify=False)
             adopted.append(moved)
         return adopted
 

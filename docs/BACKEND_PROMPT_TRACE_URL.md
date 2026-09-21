@@ -144,7 +144,7 @@ if status == "completed":
 
 ## 四、前端将做的事（契约就绪后）
 
-后端这张票落地（或集成 AI 把它排进队列）后，前端 B 在 feat/frontend-B 上独立开票，走完整 `/implement`（红测先行）→ 四门禁 → 双轴 `/code-review` 流程。范围严格限定为：
+后端这张票落地（或排入队列）后，前端按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 独立开票实施：先跑与改动相称的 focused checks，按风险安排 review，并在集成前通过完整门禁与 review coverage。范围严格限定为：
 
 1. **`types.ts`**：`ConversationState` 新增 `trace_url: string | null`；`AgentEvent.data` 类型扩展 `trace_url?: string | null`。
 2. **`projection.ts`**：`RUN_COMPLETED` 和 `RUN_FAILED` 抽取 `data.trace_url`（同 `trace_id` 模式），缺省 `null`。

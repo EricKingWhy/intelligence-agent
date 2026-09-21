@@ -31,6 +31,11 @@ from agent_harness.sandbox.decoding import StreamDecoder, platform_fallback_enco
 #: LocalSubprocess 的默认命令超时（秒）。None 表示不超时。
 DEFAULT_EXEC_TIMEOUT: float = 60.0
 
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
+_WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_WINDOWS_TERMINATE_EXIT_CODE = 1
+
 logger = logging.getLogger("agent_harness.sandbox.local")
 
 #: 捕获流读取块大小（字节——流以 text=False 打开，解码见 sandbox/decoding.py）。
@@ -162,12 +167,15 @@ class LocalSubprocessSandbox(Sandbox):
         """no-op：本机进程总在，无需启动。幂等。"""
 
     def exec(self, command: str, *, timeout: float | None = None,
+             deadline: float | None = None,
              cancel_event=None,
              on_output=None) -> ExecResult:
         """在本机 subprocess 执行命令，cwd 锁定在 workspace_root。
 
         timeout 默认 DEFAULT_EXEC_TIMEOUT 秒；到点杀掉整个进程树并返回
-        ExecResult(exit_code=-1, stderr="命令超时…")，不抛异常。
+        ExecResult(exit_code=-1, stderr="命令超时…", timed_out=True)，不抛异常。
+        deadline（ADR-0039）为 ToolExecutor 给的绝对边界：给了就用它，收不到
+        deadline 才退回 timeout 相对预算；已过期时直接返回 timed_out，不起进程。
         stdout/stderr 捕获到 max_capture_chars 上限，超限丢弃并附截断标记
         （D4：无上限捕获会被大输出 OOM）。管道由 reader 线程持续排空，
         子进程可自然结束，不会因为缓冲塞满而死锁。
@@ -184,21 +192,75 @@ class LocalSubprocessSandbox(Sandbox):
         # 故走 StreamDecoder：优先 UTF-8，遇到确凿非法序列整体回退宿主编码。
         # 注意：这里必须 text=False 自己解，不能让 Popen 的 TextIOWrapper 定死编码。
         t0 = perf_counter()
-        # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀；
-        # Windows 不支持该参数（走 taskkill /T，见 _kill_process_tree）。
+        effective_deadline = (
+            deadline if deadline is not None else t0 + effective_timeout
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr="\n命令被取消，进程树已终止",
+                duration_ms=round((perf_counter() - t0) * 1000, 1),
+                cancelled=True,
+            )
+        if perf_counter() >= effective_deadline:
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr=f"\n命令超时（上限 {effective_timeout} 秒）",
+                duration_ms=round((perf_counter() - t0) * 1000, 1),
+                timed_out=True,
+            )
+        # POSIX：start_new_session 让子进程自成进程组，超时可 killpg 整树击杀。
+        # Windows：CREATE_SUSPENDED + Job Object 让后代自动继承同一终止域。
+        windows_job = self._create_windows_job() if os.name == "nt" else None
         popen_kwargs: dict[str, object] = (
             {"start_new_session": True} if os.name == "posix" else {}
         )
-        process = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=self._workspace_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,  # 字节流：解码由 StreamDecoder 负责（见上）
-            env=self._env,
-            **popen_kwargs,
-        )
+        if windows_job is not None:
+            popen_kwargs["creationflags"] = _WINDOWS_CREATE_SUSPENDED
+        try:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                cwd=self._workspace_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,  # 字节流：解码由 StreamDecoder 负责（见上）
+                env=self._env,
+                **popen_kwargs,
+            )
+        except BaseException:
+            if windows_job is not None:
+                self._close_windows_handle(windows_job)
+            raise
+        if windows_job is not None:
+            if not self._attach_windows_job(process, windows_job):
+                # 进程仍处于挂起态：关闭不可用的 Job 后恢复，回到既有 taskkill /T 路径。
+                self._close_windows_handle(windows_job)
+                windows_job = None
+                if not self._resume_windows_process(process):
+                    process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.debug("无法清理未接入 Job 的挂起进程")
+                    raise RuntimeError("无法恢复未接入 Windows Job 的 Local 子进程")
+            else:
+                process._agent_windows_job = windows_job
+                if not self._resume_windows_process(process):
+                    self._terminate_windows_job(process)
+                    self._close_windows_handle(windows_job)
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.debug("无法清理无法恢复的 Windows Job 子进程")
+                    raise RuntimeError("无法恢复 Windows Job Object 中的 Local 子进程")
+
         stdout_cap = _CappedCapture(self._max_capture_chars)
         stderr_cap = _CappedCapture(self._max_capture_chars)
         readers = [
@@ -218,7 +280,9 @@ class LocalSubprocessSandbox(Sandbox):
         cancelled = False
         if cancel_event is None:
             try:
-                exit_code = process.wait(timeout=effective_timeout)
+                exit_code = process.wait(
+                    timeout=max(0.0, effective_deadline - perf_counter())
+                )
             except subprocess.TimeoutExpired:
                 timed_out = True
                 self._kill_process_tree(process)
@@ -230,11 +294,18 @@ class LocalSubprocessSandbox(Sandbox):
             # 协作取消（C1）：小步轮询等退出；置位即击杀整树。
             # pi-mono 同款"取消信号驱动到静默"模式；无 cancel_event 时保持
             # 原单次 wait 路径（git 等只读命令零轮询开销）。
-            deadline = perf_counter() + effective_timeout
             while True:
-                remaining = deadline - perf_counter()
+                remaining = effective_deadline - perf_counter()
+                if remaining <= 0:
+                    timed_out = True
+                    self._kill_process_tree(process)
+                    try:
+                        exit_code = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:  # pragma: no cover
+                        exit_code = -1
+                    break
                 try:
-                    exit_code = process.wait(timeout=max(0.05, min(0.1, remaining)))
+                    exit_code = process.wait(timeout=min(0.1, remaining))
                     break
                 except subprocess.TimeoutExpired:
                     if cancel_event.is_set():
@@ -245,7 +316,7 @@ class LocalSubprocessSandbox(Sandbox):
                         except subprocess.TimeoutExpired:  # pragma: no cover
                             exit_code = -1
                         break
-                    if perf_counter() >= deadline:
+                    if perf_counter() >= effective_deadline:
                         timed_out = True
                         self._kill_process_tree(process)
                         try:
@@ -255,6 +326,8 @@ class LocalSubprocessSandbox(Sandbox):
                         break
         for reader in readers:
             reader.join(5)
+        if windows_job is not None:
+            self._close_windows_handle(windows_job)
 
         stdout, stderr = stdout_cap.value(), stderr_cap.value()
         if stdout_cap.truncated:
@@ -273,7 +346,118 @@ class LocalSubprocessSandbox(Sandbox):
             stderr=stderr,
             duration_ms=round((perf_counter() - t0) * 1000, 1),
             cancelled=cancelled,
+            timed_out=timed_out,
         )
+
+    @staticmethod
+    def _create_windows_job() -> int | None:
+        """Create a kill-on-close Job Object before a Windows child starts."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.SetInformationJobObject.argtypes = [
+                wintypes.HANDLE, wintypes.INT, wintypes.LPVOID, wintypes.DWORD,
+            ]
+            kernel32.SetInformationJobObject.restype = wintypes.BOOL
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return None
+            # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000, class = ExtendedLimitInformation (9).
+            class _BasicLimitInfo(ctypes.Structure):
+                _fields_ = [
+                    ("per_process_user_time_limit", wintypes.LARGE_INTEGER),
+                    ("per_job_user_time_limit", wintypes.LARGE_INTEGER),
+                    ("limit_flags", wintypes.DWORD),
+                    ("minimum_working_set_size", ctypes.c_size_t),
+                    ("maximum_working_set_size", ctypes.c_size_t),
+                    ("active_process_limit", wintypes.DWORD),
+                    ("affinity", ctypes.c_size_t),
+                    ("priority_class", wintypes.DWORD),
+                    ("scheduling_class", wintypes.DWORD),
+                ]
+
+            class _IoCounters(ctypes.Structure):
+                _fields_ = [("values", ctypes.c_ulonglong * 6)]
+
+            class _LimitInfo(ctypes.Structure):
+                _fields_ = [
+                    ("basic", _BasicLimitInfo),
+                    ("io", _IoCounters),
+                    ("process_memory", ctypes.c_size_t),
+                    ("job_memory", ctypes.c_size_t),
+                    ("peak_process_memory", ctypes.c_size_t),
+                    ("peak_job_memory", ctypes.c_size_t),
+                ]
+
+            info = _LimitInfo()
+            info.basic.limit_flags = _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(
+                job, _WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                kernel32.CloseHandle(job)
+                return None
+            return int(job)
+        except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+            return None
+
+    @staticmethod
+    def _attach_windows_job(process: subprocess.Popen, job: int) -> bool:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+            return bool(kernel32.AssignProcessToJobObject(job, process._handle))
+        except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+            return False
+
+    @staticmethod
+    def _resume_windows_process(process: subprocess.Popen) -> bool:
+        try:
+            import ctypes
+
+            ntdll = ctypes.WinDLL("ntdll")
+            ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+            ntdll.NtResumeProcess.restype = ctypes.c_long
+            return ntdll.NtResumeProcess(process._handle) == 0
+        except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+            return False
+
+    @staticmethod
+    def _close_windows_handle(handle: int) -> None:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+            logger.debug("Windows handle close failed")
+
+    @staticmethod
+    def _terminate_windows_job(process: subprocess.Popen) -> bool:
+        job = getattr(process, "_agent_windows_job", None)
+        if job is None:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            kernel32.TerminateJobObject.restype = wintypes.BOOL
+            return bool(kernel32.TerminateJobObject(job, _WINDOWS_TERMINATE_EXIT_CODE))
+        except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+            return False
 
     @staticmethod
     def _kill_process_tree(process: subprocess.Popen) -> None:
@@ -296,7 +480,7 @@ class LocalSubprocessSandbox(Sandbox):
                 killed = result.returncode == 0
             except (OSError, subprocess.TimeoutExpired) as error:  # pragma: no cover
                 logger.debug("taskkill 调用失败，回退 process.kill()：%s", type(error).__name__)
-            if not killed:
+            if not killed and not LocalSubprocessSandbox._terminate_windows_job(process):
                 process.kill()
         else:
             # POSIX：子进程已在独立进程组（见 Popen start_new_session），整组 SIGKILL。

@@ -157,7 +157,6 @@ class ModelFallbackCoordinator:
         if self._gate is not None:
             stream = self._gate.wrap(stream)
         return stream
-        return stream
 
     def _slot(self) -> AbstractAsyncContextManager[None]:
         """取一个**新**的并发槽位——每次尝试都必须新取一个。

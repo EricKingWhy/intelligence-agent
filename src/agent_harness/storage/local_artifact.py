@@ -37,6 +37,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import anyio
+
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
@@ -81,6 +83,24 @@ class LocalArtifactStore(ArtifactStore):
     ) -> Artifact:
         if session_id != self._session_id:
             raise ValueError("save session_id must match the store namespace")
+        # #275：整段同步工作（encode + sha256 + 两次原子落盘）**一次**下放线程——只搬
+        # `_write_atomic` 不够（encode/sha256 会留在循环上）。阈值判定见
+        # `docs/PERF_BASELINE.md` B7 节。
+        # 契约逐字不变：原子纪律、内容先 / 元数据后、返回形状、异常语义。
+        return await anyio.to_thread.run_sync(
+            self._save_blocking, session_id, content, mime_type, source_tool,
+            tool_call_id,
+        )
+
+    def _save_blocking(
+        self,
+        session_id: str,
+        content: str,
+        mime_type: str,
+        source_tool: str,
+        tool_call_id: str,
+    ) -> Artifact:
+        """`save` 的同步体（原样搬运，只把 `self` 显式化；#275 未改任何一行语义）。"""
         body = content.encode("utf-8")
         artifact = Artifact(
             artifact_id=compute_artifact_id(content),
@@ -109,6 +129,14 @@ class LocalArtifactStore(ArtifactStore):
         # 形态校验先做（与 S3/MinIO 一致，#185 AC3）：畸形 id 不得进入路径拼接。
         if not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
             raise KeyError(f"Artifact '{artifact_id}' does not exist")
+        # #275：读 + decode + hash 自证 + 旁挂元数据**一次**下放线程——只搬
+        # `read_bytes` 不够（decode/sha256 才是大头）。阈值判定见
+        # `docs/PERF_BASELINE.md` B7 节。
+        # 形态校验留在循环（它不碰 IO，且畸形 id 不该进线程）。
+        return await anyio.to_thread.run_sync(self._load_blocking, artifact_id)
+
+    def _load_blocking(self, artifact_id: str) -> Artifact:
+        """`load` 的同步体（原样搬运；异常映射逐字未改，#275 Scope lock）。"""
         path = self._content_path(artifact_id)
         try:
             body = path.read_bytes()

@@ -16,6 +16,8 @@ describe('initConversation', () => {
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
       compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
       permission_policy: null, session_permission_mode: null, events: [], unknown_events: [],
+      // N2（#271）：events 的 append 计数初值（ADR-0037 D2）——形状断言要跟着长。
+      eventsVersion: 0,
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
       run_interrupted: null, run_failure: null, turn_index: null,
@@ -566,6 +568,76 @@ describe('applyEvent — Inspector Timeline 事件日志（Phase 5）', () => {
       ev({ type: EventType.MODEL_DELTA, data: { delta: 'b', step: 1 } }),
     ].reduce(applyEvent, initConversation('s1'));
     expect(state.events).toHaveLength(2);
+  });
+});
+
+/* ── N2（#271）：`eventsVersion` —— 「events 又追加了」的唯一精确信号（ADR-0037 D2）──
+ *
+ * 为什么需要它：`events` 的引用被 P0-1 **刻意**固定（append-only 共享数组，`3344e34`），
+ * 而 `React.memo` / `useMemo` 的比较语义是**引用相等** ⇒ 任何依赖 `events` 的派生
+ * 永不重算（陈旧渲染，不是性能问题）。`events.length` 当键语义不封闭——去重短路那帧
+ * 不 push（长度不变但确实没新信息 ✔），quarantine 分支 push 了（长度也变 ✔），
+ * 但长度**无法区分「长度不变而内容变」**，是「用巧合代替契约」。故单设一个只由
+ * 「是否真的 push」唯一决定的计数器。
+ *
+ * 边界写死（不得扩大解释）：去重短路**不**递增；quarantine 分支**递增**；
+ * 只度量 events 数组的 append 次数，**不是**通用脏标记、不度量 turns/tools。
+ * 本文件既有的 COW / 引用稳定用例在本票**零改动**（只新增下面这一节）。 */
+describe('eventsVersion — events 追加的精确信号（ADR-0037 D2）', () => {
+  it('AC1 初值：initConversation() 与 projectHistory(空历史) 的产物都是 0', () => {
+    expect(initConversation('v').eventsVersion).toBe(0);
+    expect(projectHistory('v', []).eventsVersion).toBe(0);
+  });
+
+  it('AC2 正常 push 路径：每落一个事件 +1（与 events 实际增长同步）', () => {
+    let s = initConversation('v');
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }));
+    expect(s.eventsVersion).toBe(1);
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, seq: 2, run_id: 'r' }));
+    expect(s.eventsVersion).toBe(2);
+    expect(s.eventsVersion).toBe(s.events.length);
+  });
+
+  it('AC3 去重短路（重复 seq）：不 push ⇒ 不递增，且原 state 对象原样返回', () => {
+    const e1 = ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' });
+    const s1 = applyEvent(initConversation('v'), e1);
+    const s2 = applyEvent(s1, e1);
+    expect(s2).toBe(s1); // 短路连新 state 都不建
+    expect(s2.eventsVersion).toBe(1); // 没 push ⇒ 不递增
+    expect(s2.events).toHaveLength(1);
+  });
+
+  it('AC4 quarantine 分支（形状不可辨的帧）：它也 push 了 events ⇒ 递增', () => {
+    const junk = { totally: 'unrecognized' } as unknown as AgentEvent;
+    const s = applyEvent(initConversation('v'), junk);
+    expect(s.events).toHaveLength(1); // 兜底协议：永不静默丢弃
+    expect(s.unknown_events).toHaveLength(1);
+    expect(s.eventsVersion).toBe(1);
+  });
+
+  it('AC5 两条路径同构：projectHistory 与逐帧 applyEvent 得到相同的 eventsVersion', () => {
+    const events: AgentEvent[] = [
+      ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi', step: 1 }, seq: 2, run_id: 'r', step_id: 1 }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: 'ok', step: 1 }, seq: 3, run_id: 'r', step_id: 1 }),
+      ev({ type: EventType.RUN_COMPLETED, seq: 4, run_id: 'r' }),
+      ev({ type: EventType.RUN_COMPLETED, seq: 4, run_id: 'r' }), // 重复投递：两条路径同样不计入
+      { totally: 'unrecognized' } as unknown as AgentEvent, // quarantine：两条路径同样计入
+    ];
+    const replayed = events.reduce(applyEvent, initConversation('v'));
+    const history = projectHistory('v', events);
+    expect(history.eventsVersion).toBe(replayed.eventsVersion);
+    expect(history.eventsVersion).toBe(5); // 6 帧中 1 帧被去重短路
+    expect(history.eventsVersion).toBe(history.events.length);
+  });
+
+  it('追加不是「改引用」的替代品：eventsVersion 变化时 events 引用仍必须稳定', () => {
+    // 反例守卫——若有人把 eventsVersion 的实现写成「顺便换 events 引用」，
+    // 等于回退 P0-1（O(N²) 复活）。本断言与上面 AC2 配对。
+    const s1 = applyEvent(initConversation('v'), ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }));
+    const s2 = applyEvent(s1, ev({ type: EventType.RUN_COMPLETED, seq: 2, run_id: 'r' }));
+    expect(s2.events).toBe(s1.events);
+    expect(s2.eventsVersion).toBeGreaterThan(s1.eventsVersion);
   });
 });
 

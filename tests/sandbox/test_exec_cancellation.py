@@ -104,10 +104,16 @@ async def test_bash_tool_signals_cancel_event_on_timeout(tmp_path):
             super().__init__(*args, **kwargs)
             self.seen_cancel = None
 
-        def exec(self, command, *, timeout=None, cancel_event=None, on_output=None):
+        def exec(
+            self, command, *, timeout=None, deadline=None,
+            cancel_event=None, on_output=None,
+        ):
             self.seen_cancel = cancel_event
             time.sleep(0.5)  # 超过工具 timeout，触发 asyncio 超时取消
-            return super().exec("echo hi", timeout=timeout, cancel_event=cancel_event)
+            return super().exec(
+                "echo hi", timeout=timeout, deadline=deadline,
+                cancel_event=cancel_event,
+            )
 
     sandbox = SlowSandbox(workspace_root=tmp_path)
     class _TimedBash(BashTool):

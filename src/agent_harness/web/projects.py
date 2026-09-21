@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field, field_validator
 from agent_harness.sandbox.paths import is_absolute_path
 from agent_harness.session.errors import SessionServiceError
 from agent_harness.session.projects import ProjectService
+from agent_harness.web.app import project_service
 from agent_harness.web.domain_errors import http_error, workspace_http_error
 from agent_harness.workspace import Workspace, WorkspaceError
 
@@ -240,7 +241,7 @@ def register_project_routes(app: FastAPI) -> None:
     """把项目路由挂到既有 app（`create_app` 里一行调用的接入面）。"""
 
     def _service() -> ProjectService:
-        return ProjectService(app.state.agent)
+        return project_service(app.state.agent)
 
     @app.post("/api/projects")
     async def create_project(

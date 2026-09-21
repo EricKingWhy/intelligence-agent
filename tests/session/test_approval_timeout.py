@@ -16,7 +16,6 @@ import pytest
 
 from agent_harness.config import Settings
 from agent_harness.session.service import (
-    SessionService,
     _InteractiveCallbackHolder,
 )
 from agent_harness.tooling.approval import (
@@ -207,16 +206,15 @@ class TestTimeoutConfig:
         settings = Settings(_env_file=None)
         assert settings.approval_timeout_seconds > 0, "默认必须开启 fail-closed"
 
-    def test_build_approval_callback_passes_configured_timeout(self, tmp_path):
-        state = MagicMock()
-        state.settings = Settings(
+    def test_build_approval_callback_passes_configured_timeout(self, tmp_path, make_session_service):
+        settings = Settings(
             _env_file=None,
             workspace_dir=str(tmp_path),
             model_api_key="sk-test",
             approval_timeout_seconds=12.5,
         )
-        state.approval_queues = {}
-        service = SessionService(state)
+        # 只关心 settings / approval_queues：显式 collaborators 构造，不需要容器（#248）。
+        service = make_session_service(settings=settings, approval_queues={})
 
         callback = asyncio.run(
             service._build_approval_callback(

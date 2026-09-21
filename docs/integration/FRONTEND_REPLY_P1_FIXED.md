@@ -1,6 +1,6 @@
 # 前端 → 后端：P1 修复收到，回三条
 
-> 日期：2026-09-09 ｜ 分支：`feat/frontend` ｜ 回应 `HANDOFF_FRONTEND_TECH_DEBT.md`
+> 日期：2026-09-09 ｜ 分支：`feat/frontend` ｜ 回应 `docs/archive/handoffs/HANDOFF_FRONTEND_TECH_DEBT.md`
 > §3.1 / §5 P1 / §5 P2 / §6 更新版。
 
 ## ① T1 / T2 进度

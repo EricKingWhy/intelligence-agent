@@ -40,11 +40,9 @@
 
 ## 当前工作焦点
 
-**Phase 14 已完成（Resume / Replay / Fork 完整化，ADR-0017 + tickets #107-#115）**：file-per-lineage fork（session 线性 JSONL 宪法不动）+ seed 逐字复制 + `session/forked` provenance + lineage 双层索引（fork|delegation 同树）+ copy-on-fork + tail summary（失败降级）+ CLI `fork`/`replay`/`sessions --tree` + Web 只读 lineage API（独立 router）。真实 Gate 5/5 单轮全过（docs/PHASE14_GATE.md）。离线全量 1089 passed、9 skipped、25 deselected，ruff clean。**本 Phase 在独立 worktree `D:\intelligence-agent-phase14`（feat/phase14）交付**——与并行流式改造（ADR-0016，feat/backend）零文件冲突；集成顺序：流式改造先、Phase 14 后（§14.9）。
+**当前主线：架构整改剩余 #244/#256、#247、#248 与子票 #263–#265**（排除前端 #236、性能线 #267/#274/#281）。B-27 把 `#247` 的子票 **`#263`**（事件序列 golden 基线）做完（单文件纯测试 226 → **243**，产品代码零改动）；B-28 紧接着把同父票的 **`#264`**（终结臂提取）做到「交付 + 两轴独立审查（Standards 判"必须修后重审" / Falsification 判"可以合入"）+ findings 修复 + 修后重审（"可以合入"，P0/P1/P2 = 0）+ P3 收口」：六个 run 终结点从 `_drive` 提取成 `_TerminalArms` + 五个 `_terminal_*` 方法（`_drive` 仍是唯一 loop owner），**行为零变化**由 #263 的 golden 判据锁定（本批逐字未改、blob `d0c868e120f8` 两侧相等，全量 2913 passed / 0 failed = B-27 终点 2900 + 本票 13）。**设计意图之外的两点收获**：① 新专项文件顺手补上 #263 残余① 的未覆盖面（`interrupt_streams` 的两处 `self.steps + 1`）；② 两轴各自实证出**两条基线盲点**（全仓对终态 `run_id` 无断言、记忆↔checkpoint 顺序无断言），已就地补断言并给出红证（修复前那两条变异全绿、修复后转红）。逐轮范围唯一住 `docs/review_ledger.tsv`；`#265`（telemetry 切片）接手前必读 tracker B-28 段的五条关键约定（字段纪律 / 信封单一入口 / 命名分工 / 不可达登记差异 / 死参数保持原状）与四条残余。`#248` **保持 OPEN**（AC2 部分满足 + R1/R2 待裁决），`#244/#256` 维持 B-25 的待裁决状态。**`#264` 已集成关单**（2026-09-21：`7edb345..20b0dd6` 5 笔快进 push，`origin/main` = `HEAD` = `20b0dd6`、tree `f0ef80e5…`，覆盖闸门 exit 0；AC4 的「Phase 16」一半**不成立**——既有缺陷、§8 只报不修，关单 comment 未写"Phase 16 全绿"；**该既有缺陷已于同日经用户批准由 B-31 修复（`e036681`），Phase 16 gate 现 12 passed ⇒ AC4 的「Phase 16」一半当前成立；是否补记 `#264` 关单 comment 属另一笔，不重开关单**）。**下一步：`#265`（telemetry 切片，依赖 `#264` 与 `#250`）本批未开工——用户指示 #264 收尾后停下、交由其他 Agent 接手。**
 
-**Streaming UI 生产级改造已完成（S-UI，ADR-0016）**：detached-run + 显式取消端点 + reasoning 事件族 + 工具输出真流式 + after_seq 重连续传 + 多模型 catalog 全部落地；断连不再取消 run（Phase 9 取消臂语义经 ADR-0016 有意修订），前端契约回执见 docs/BACKEND_CONTRACT_STREAMING_UI.md（关键迁移点：live 文本流 model/delta → text/delta、Esc 走 POST /cancel、seq gap 触发 after_seq 重连）。
-
-前序：Phase 13 完成（Multi-Agent，ADR-0015）；Phase 12 完成（Web Search / Reliability，ADR-0014）；Phase 8 完成（MCP，ADR-0012）；Phase 11 完成（Knowledge，ADR-0013）。fallback 链已异构化（senseaudio primary + zhipu fallback，gate2 实测真实切换）。
+**文档导航（2026-09-21，B-30）**：`docs/` 的入口收敛为 `docs/README.md`（当前必读 / 按任务查阅 / 历史归档）；一次性集成提示词与交接资料已移入 `docs/archive/`（旧路径映射见各目录 `README.md`）。
 
 ## 更新日志（索引）
 
@@ -56,51 +54,37 @@
 
 ### 最近条目（最新在上）
 
-- 2026-09-18（#236）：**F17 权限档已落 session/started，前端「唯一来源」注释与权限 pill 成第二套真相（P2，前端）交付**（fixed point `5efe2b7`；6 个 commit `0e42162`/`3a1e9e1`/`e559525`/`4139b00`/`997cff6`/`c661160`）——票面选项①+③（不改后端）：投影同源（`projectSessionStarted` 只认第一条**带值的** `session/started`，坏值保持 null 不编默认档；与 `permission_policy` 明确是两件事）+ pill 会话内改读投影真值并转只读（`disabled` + 提示「权限档在会话创建时确定，会话内不可修改」）；**删掉** `setSelectedPermissionMode(created.permissionMode)`——回执驱动的本地状态会让下一次新建会话凭空继承该档，把「后端默认（自动批准）」悄悄变成「交互式审批」；自查补漏 `composerPermissionMode` 身份闸（切会话加载中 `conversation` 仍属旧会话 ⇒ 不符/未加载 → null 显示占位不猜）。**独立复审两轮**（各一 Explore 子代理，只读、明确声明只审指定区间）：第一轮 `5efe2b7..997cff6` NEEDS-FIX 6 条（2×P2：api.ts 无人消费的 `permissionMode` 字段 + 硬校验；e2e 夹具同值双写 ⇒ 判别力被掏空；4×P3）；第二轮审修复批又逮 3 条（P2 `StartTaskInProjectDialog` 文件头 + Props 旧断言并引用不存在的 `onPermissionInitialized`——**并更正 `0e42162` 的 commit message：自称改两处实际只改一处**），全处置。**红证**：App 接线退回旧行为 ⇒ 新增 e2e 立刻红（Expected "只读" / Received "权限"）。**门禁**：`tsc -b` 0 / vitest **980 · 57 files** / oxlint 0 error / playwright **1280 全量 219/219 ok**、**1920 全量 105/107 ok**（2 例超时 ⇒ 定向复跑受影响两 spec 8/8 绿，归因宿主满载抖动：另一 clone 的挂死 playwright 僵尸进程，已清理）/ `vite build` ✓（首跑失败系宿主 safe-delete 闸门挡 `emptyOutDir`，与代码无关）。**未做**：mid-session 改档（票面②）是产品决策，未开票；e2e 夹具恒写 `permission_mode` 键 ⇒「默认档创建→pill 显示未选」无 e2e 覆盖（登记）。详见 `2026-09.md` 末尾
-- 2026-09-17（B-13）：**巡检 6 工具类控件段的两条 F 同批交付**（实现 `40ae1a4` F16 `#235` / `a508e67` F15 `#234`，fixed point `1761ff7`；巡检记录 §9.10 `d425edc`）——**F16（#235）沙箱输出「假流式」**：真机红证 `.tool-out-body` 112/112/112 + 仅 1 条 `tool/output_delta`；根因是读侧**两层**缓冲（`_drain_stream` 的 `BufferedReader.read(n)` 阻塞到凑满 n/EOF；`StreamDecoder.feed()` 判定前把合法 UTF-8 全扣在 `_pending` 到 64 KiB/flush）；修 = `read1()` + 放行前导 ASCII 段（五种兜底编码对 0x00–0x7F 逐字节等同 ASCII）+ 已放行字节计入判定预算；绿证 14→…→112（8 段）。**F15（#234）审批队列续聊后消失**：`session/started` 不落 `permission_mode`/`auto_approve` 且 `resume_and_launch` 固定 `WORKSPACE_WRITE` + 无回调 ⇒ `interactive` 恒假；修 = 显式声明才落盘 + 续聊读回声明重建回调 + fork 继承；真机 repro6 红 → repro8 绿。**两轴审查**：Correctness 轴 1×P1（`auto_approve=false` 的 deny 路由同样不落盘 ⇒ 续聊降级成「全自动批准」）+ 1×P2（fork 不继承权限档）+ P3 若干；跨仓 1×P2（前端权限 pill 第二套真相）按 §8 单独开 **#236**。**门禁**：ruff clean；pytest **2461 / 2442 passed / 10 skipped / 9 failed**（9 红全环境：6 symlink 同族 + 3 条 `tests/evaluation/*` 撞**宿主 safe-delete 单轮累计删除闸门**，traceback 落 `sitecustomize.py:851`，`count=383 threshold=50 scope=turn`）；**A/B**：同树摘掉闸门两变量复跑 = **2445 passed / 6 failed**。前端零改动未重跑。详见 `2026-09.md` 末尾
-- 2026-09-17（B-12）：**Round 3 真机巡检的五条 F10–F14 同批交付**（实现 `6cb229c`..`aa81a57`，fixed point `a63dc46`；另含门禁修复 `1103d77` 与巡检记录 §9 `da7d4b5`）——F10「管理模型」浮层缺 `position` ⇒ 被 portal 追加到 body 末尾、落在视口下方而 overlay 盖在其上（整页变暗、点什么都没反应）；F11 供应商 422 的 Pydantic `detail` 数组被 `providerFetch` 的手写解析整段丢掉；F12 命令的 focus 被 Radix 关闭焦点恢复打断（键盘打开的浮层恢复目标就是 body）；F13 `MemoryWriteback` 这条 fire-and-forget 旁路写者把**已硬删**的会话从零重建（复活日志只剩那条 `memory/degraded`）；F14 `sendFollowUp` 入口推进代际后 ack 分支不接流 ⇒ 整场直播被一条排队项换掉，叠加 dev proxy 缺 `ws: true`。**机制单点新建 ADR-0036**（对已硬删 id 拒写 `SessionNotFound` + delete/append 共用写锁 + 进程内已删集合；含与 ADR-0029 D1 反对的「墓碑」的对比表）。两轴审查：Standards 1×P1（`store.py` 误称 tombstone 且与 ADR-0029 D1 冲突）、Correctness 抓到 F12 的 a11y 回归（无条件 `preventDefault` 把焦点丢给 body）。门禁：后端 ruff clean / pytest 2422 passed（6 条 symlink 环境红经反证证明与 diff 无关）；前端 tsc 0 / vitest 968 / oxlint 0 error / playwright 436 用例（1280 全绿；1920 全量证据本机不可得，定向复跑受影响两 spec 23/23 绿）/ build ✓。顺带补两笔门禁修复（`tsc -b` 既有红 + B-11 落点记录漏声明）。详见 `2026-09.md` 末尾
-- 2026-09-17（B-11）：**#228（F9 假空态）完成**（实现 `24dc0c2`）——会话列表**加载失败**不再被说成「暂无会话」：`refreshSessions` 失败改走新增的区域级 `sessionsError`（与 `projectsError` 同形），空态守卫 `!sessionsUnavailable`，错误条 `opError` 优先、项目/会话两条彼此独立。红证 5 组 + e2e 锁（组件测试证明不了 prop 真被填上）。门禁：pytest 2426 / vitest 968 / playwright 434 全绿。票由崩溃恢复真杀进程对照实验开出：DSH 审计第 11 条验证通过（`run/interrupted` 同形具备），孤儿回收 `run/failed{reason=orphaned}` 如实登记。详见 `2026-09.md` 末尾 + `LIVE_BROWSER_TEST_20260917.md` §8
-- 2026-09-17（B-10）：**DSH 对照两票 #226 + #227 完成**（实现 `252e0db`，fixed point `ba26e81`）——#226 请求侧模型标识落 `run/started`（票面初稿的 `model/started` 修法经实测推翻：那是 stream-only、永不落盘），前端区分「请求 / 回显 / （非本轮）」；#227 artifact 503 给机读码、前端只按码判，并新增跨端码闸门（`tests/web/test_error_code_contract.py`，单边改名必红）。两轴 findings 全修（2×P2 共识 + 10×P3）。门禁：pytest 2426 / vitest 964 / playwright 426 全绿；已集成 + 推送（`4bb2017`，tree 同为 `b15f0674…`）并关单 #226/#227。明细三行见 `2026-09.md` 末尾
-- 2026-09-17（对照）：**DSH 设计对照审计**——12 条可借模式逐条对我们实测（多已具备，2 条刻意偏离，2 条真实差异：请求侧模型名不落事件、其余错误家族无机读码）；初稿两条「缺口」被实测推翻后改写。产出 `docs/RESEARCH_DSH_PATTERN_GAP_AUDIT.md`，两条差异**已开票 #226 / #227**（网络恢复后当场开的）；DSH 一侧已从转引升级为**现场抽查**（clone 到 `%TEMP%`，4 条引用逐字成立，现场多挖出 2 条并入 #227）；已 ff-only 集成 + 推送（`679f749`，三方对齐）
-- 2026-09-17（本批，集成与关单）：**#223 / #224 / #225 三票已集成并关闭**——两 clone `HEAD^{tree}` 同为 `d7f87943…`（门禁跑过的树就是被集成的树），`push origin main`（`7e174e7..e060c5d`，首次经代理失败、清空代理环境变量后成功），三方 clone 的 `main` 都在 `e060c5d`；**round 2 巡检开出的 #222-#225 至此全部清零**
-- 2026-09-17（本批）：**巡检 round 2 的三张 P3 同批**（#223 非 Chat 页签上点「新建会话」零反馈 / #224 未声明 icon ⇒ 每次加载一条 `/favicon.ico` 404 / #225 记忆 503 把"没配"与"装配失败"塌成一句话）——#225 把装配期缺席原因分类留码（`CapabilityWiring.degradations` + `DegradeReason`），503 改成 `detail={code,message}` 逐原因给话，前端按码分流并删掉自己附会的那句「这是配置状态而非故障」；机制收进 **ADR-0010「补充（#225）」**。两轴 1×P2 + 12×P3，处置 8 条（含"跨端码字面量无单一事实源 ⇒ 改错码名全门禁仍绿会复辟 #225"的钉子、favicon 正则过拟合、码表存枚举成员、`init_failed` 的 e2e 只断言按钮可见 ⇒ 改成真的点一次）
-- 2026-09-17（本批）：**#222 失败归因补齐**——`run/failed` 在每条失败路径上都落 `reason`（未分类退到异常类型名，`max_steps` 那条此前一个键都没有）+ 可读 `message` 兜底；真机修的过程中又抓到 Overview「失败原因」行"只有码没有文案 ⇒ 渲染空值"的前端 bug；两轴共识两条（ADR/契约未随合同更新、票面 AC 的可读兜底未做）全处置，机制收进 ADR-0033 §2.4
-- 2026-09-17（本批）：**#221 慢链路上迟到的非 2xx 被静默吞掉**——`/messages` 结局改为单一分派表（窗内窗外同表同呈现）+ 迟到落定必须消费；两轴抓到我自己漏的 P1（纠正接错流不推进代际 ⇒ 假「连接中断」盖掉真原因），机制收进 ADR-0030 §13；收尾自检又补 T12q（纠正后回退重投的失败必须报出），并对本批早先写下的 playwright「410 passed」做了**自我勘误**（那是推算值，实测 412+4 → 归因满载抖动，终版 418 全绿）
-- 2026-09-17（本批）：**#220 失败归因投影进 UI**——「失败原因」行 + Timeline 摘要（reason-only 兜底、长文案换行、取消不算失败）；两轴 findings 全修（6×P2）+ 红证 8 条 + 机制收进新 ADR-0033
-- 2026-09-17（本批）：**真机巡检批 #218（后端可归因性）+ #219（Ctrl+Enter 静默丢输入）**——两轴 findings 全修（含我引入的两条 P2 回归）；另开 #220（失败文案未投影进界面）/ #221（迟到非 2xx 丢消息）
-- 2026-09-17（本批）：#217 图标名集跨端对账（issue 前提经实测订正：真正开着的是前端侧）
-- 2026-09-17（流程）：**审查覆盖机械闸门 + 规则落点整理**（`dda2b64`，两轴 findings 全修：P1 白名单可放行 `docs/` 下脚本等）
-- 2026-09-17（复验）：集成交付后的两轴复验修复（`44f48c7`）
-- 2026-09-17（本批）：#214 / #215 / #216 三票收批（`6f81c6e` → `9f2a8f8`）
-- 2026-09-17（本批）：#213「增量重写发生过信号」收尾 = 决议不改契约（`089524a`）
-- 2026-09-17（集成）：批 ③ + 批 ④ 共 5 票（#212 / #208 / #209 / #201 / #199）已集成并 push
-- 2026-09-17（补记）：批 ④ 的最终全量审查（两轴独立，fixed point = `origin/main`）
-- 2026-09-17：批 ④（#201 剩余 AC + #199 剩余 AC）——档位收窄披露的数据面与呈现，两轴审查各一轮
-- 2026-09-16：复审第二轮（对本批自审，独立 subagent 两轴）
+- 2026-09-21（B-31，既有红修复 + demo 同缺陷类残留 + 已知 flake 转生效）：`tests/integration/_phase16_helpers.py:245` 的 `_auto_approve` 同步 → `async def`（`e036681`，amend 前 `fd9882c`、**树未变**）、`demo/live_agent.py` 两处审批回调同缺陷类补 async（`1383e52`）、B-29 遗留的已知 flake 表翻**生效**。**用户批准**：① 修既有红（「Phase 16 Gate 1/12 红，根因即该行」）；② Docker 已启动，把 `test_timeout_stops_late_workspace_mutation` 补跑 3 次以转生效；demo 一项**不在点名范围**，按「我允许你执行新 tickets，但是要按照 v3 的方式开发」作为新票执行并走同一套审查与门禁。**红证（副本复算）**：把 `:245` 改回同步 ⇒ gate `1 failed, 11 passed`（断在 `:379`），修后 `12 passed`。**两轴审查（锚 `fd9882c`）**：A 轴 `P0/P2 = 0`、P1×2、P3×3（P1① = 台账缺行 ⇒ 覆盖闸门 exit 1，由本批台账行兑现；P1② = demo 残留）；B 轴 `P0/P1 = 0`、P2×1、P3×3，机制溯源（TypeError → 收口为**持久** `run/failed(reason=TypeError)` + INFO 诊断）**证伪**原提交信息「静默夭折」措辞 ⇒ 未 push 前 `git commit --amend` **只改信息**；**变异 R3（保持 async 但 `approved=False`）红在 `:390`** ⇒ 判据面对"审批放行"敏感、非空转。**门禁**：冻结树 `1383e52` 全量 **2913 passed / 2 skipped / 42 deselected / 546.21s / exit 0**（Docker 在场 ⇒ 上一批 11 条 docker 门控由 skip 转真跑；冻结前一手复跑 `fd9882c` 树采集数同、墙钟 606.00s）、`ruff` clean、`git diff --check` 无输出。**flake**：独立子代理 3 次（实为 5 次）全部 `1 passed`、并发探针实捕容器 `Up → Exited(137)` ⇒ 翻**生效**（保留项：历史失败未复现，属**潜伏**）。**集成**：三次快进 `push origin main`（① 代码面 `5003377..bb594e6` = 6 笔：判据① 4 行全 `M` docs-only ⇒ 全量读数传递、`ruff` clean；② 收尾 6 笔纯 docs/台账），覆盖闸门首跑 334/238/96、② 段复跑 336/238/98、收尾修订后再复跑均 **exit 0**，`origin/main` = `HEAD`、ahead/behind 0/0、无关单；**§14.9 通知**：两 clone 分别 **8/173** / **8/238** behind（前端 8 笔重叠同 4 个 docs 文件 ⇒ 预期冲突），开工前先自检。明细见 `docs/phase_status/2026-09.md` L576。
+- 2026-09-21（B-30，文档治理清理）：`AGENTS.md` **907 → 822 行**（`523efc1` → `35268a3`；章节号与标题逐字未变；其后记录追加与 §13.4 逐字还原使行数回到 836（`93de00e`）/ 841（`20ee173`））、`docs/PHASE_STATUS.md` **132 行 / 63.5 KB → 85 行 / 23.1 KB**（同两节点，按 `git cat-file -s` 对象字节；"瘦身"读数即取这两节点，其后每次追加记录都会再变）、75 份一次性资料 `git mv` 进 `docs/archive/`（顶层 .md 147 → 73，不留 stub、映射在两目录 README）、新建 **`docs/README.md` 作为 `docs/` 唯一导航入口**；两轴独立审查首轮各 1 个阻断 findings（按日索引失真 / 历史 `git show <rev>:<path>` 被误改）修复后 P0/P1/P2/P3 = 0；**接手 delta（`93de00e`）第二轮两轴审查 P0 = 0 / P1×1（台账未覆盖该 tip ⇒ 覆盖闸门 exit 1 而记录写 exit 0）/ P2×3 / P3×6（去重后），修后重审 P0/P1 = 0、余 4 条一并处置**；闭合复验（两轴，锚 `d5e1a68`）上轮 findings 逐条闭合、另出 3 条（2 条已在 `b7108c7`；"`^{commit}` 是重定向符"的过度声明 1 条按实测改写）**；门禁：后端全量 2902 passed / 13 skipped（其中 11 条为 Docker daemon 不在场，reason 清单实测）、前端 tsc 0 错 / vitest 1040 通过 / oxlint 0 error / build 成功 / e2e 436 passed；集成：按 §13.2(b) 在施工 clone 的 `main` 上快进 `push origin main`（`523efc1..8602676` = 13 笔；覆盖闸门 exit 0、后端全量一手复跑 **2902 passed, 13 skipped, 42 deselected, 13 warnings in 398.97s (0:06:38)**、`ruff` clean、`git diff --check` 无输出、`origin/main` = `HEAD`、ahead/behind = 0/0）。。明细见 `docs/phase_status/2026-09.md` L566。
+- 2026-09-21（B-29，V3.1-lite 提速增补）：协议 §8、两轮独立审查、已知 flake 与待裁决明细见 `docs/phase_status/2026-09.md` L565；当前流程权威仍为 `docs/SDD_WORKFLOW_PROTOCOL.md`。
+- 2026-09-18（#236，前端 F17 权限档「第二套真相」）：**投影同源 + 权限 pill 会话内改读投影真值并转只读**（fixed point `5efe2b7`；6 commit `0e42162`/`3a1e9e1`/`e559525`/`4139b00`/`997cff6`/`c661160`）——删掉 `setSelectedPermissionMode(created.permissionMode)`（回执驱动的本地态会让**下一次新建会话**凭空继承该档）；自查补漏 `composerPermissionMode` 跨会话身份闸。**独立复审两轮**（各一只读子代理）findings 全数处置。门禁：`tsc -b` 0 错 / vitest **980 · 57 files** / oxlint 0 error / playwright chromium-1280 全量 **219/219 ok**。**未做**：mid-session 改档（票面②，产品决策，未开票）。明细见 `2026-09.md` L449-464。
 
 ### 归档文件
 
 | 文件 | 覆盖日期 | 条目数 | 说明 |
 | --- | --- | --- | --- |
-| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-18 | 244 | 原「更新日志」整段（条目正文逐字未改，按日期重排） |
+| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-21 | 294 | 历史明细；2026-09-17 初次迁移的正文逐字保留，后续批次按日期追加 |
 
 ### 按日定位（归档内行号，日期降序）
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
-| 2026-09-03 | 4 | `2026-09.md` L13-16 |
-| 2026-09-04 | 15 | `2026-09.md` L17-44 |
-| 2026-09-05 | 20 | `2026-09.md` L45-77 |
-| 2026-09-06 | 33 | `2026-09.md` L78-135 |
-| 2026-09-07 | 18 | `2026-09.md` L136-164 |
-| 2026-09-08 | 14 | `2026-09.md` L165-192 |
-| 2026-09-09 | 9 | `2026-09.md` L193-208 |
-| 2026-09-10 | 6 | `2026-09.md` L209-219 |
-| 2026-09-11 | 25 | `2026-09.md` L220-254 |
-| 2026-09-12 | 23 | `2026-09.md` L255-288 |
-| 2026-09-13 | 14 | `2026-09.md` L289-316 |
-| 2026-09-14 | 11 | `2026-09.md` L317-386 |
-| 2026-09-15 | 11 | `2026-09.md` L387-407 |
-| 2026-09-16 | 4 | `2026-09.md` L408-411 |
-| 2026-09-17 | 35 | `2026-09.md` L412-447 |
-| 2026-09-18 | 2 | `2026-09.md` L448-449 |
+| 2026-09-21 | 9（B-24 / B-25 / B-26 / B-27 / B-28 / B-29 / B-30 / B-31 / #274 B6 集成/关单） | `2026-09.md` L512-607（B-29 = L565，B-30 = L566 起含 8 条子项，B-31 = L576 起含 13 条子项，**#274 B6 集成/关单 = L591 起含 8 条子项**） |
+| 2026-09-20 | 8 | `2026-09.md` L485-511 |
+| 2026-09-19 | 20 | `2026-09.md` L465-484 |
+| 2026-09-18 | 15 | `2026-09.md` L449-464 |
+| 2026-09-17 | 35 | `2026-09.md` L413-448 |
+| 2026-09-16 | 4 | `2026-09.md` L409-412 |
+| 2026-09-15 | 11 | `2026-09.md` L388-408 |
+| 2026-09-14 | 11 | `2026-09.md` L318-387 |
+| 2026-09-13 | 14 | `2026-09.md` L290-317 |
+| 2026-09-12 | 23 | `2026-09.md` L256-289 |
+| 2026-09-11 | 25 | `2026-09.md` L221-255 |
+| 2026-09-10 | 6 | `2026-09.md` L210-220 |
+| 2026-09-09 | 9 | `2026-09.md` L194-209 |
+| 2026-09-08 | 14 | `2026-09.md` L166-193 |
+| 2026-09-07 | 18 | `2026-09.md` L137-165 |
+| 2026-09-06 | 33 | `2026-09.md` L79-136 |
+| 2026-09-05 | 20 | `2026-09.md` L46-78 |
+| 2026-09-04 | 15 | `2026-09.md` L18-45 |
+| 2026-09-03 | 4 | `2026-09.md` L14-17 |

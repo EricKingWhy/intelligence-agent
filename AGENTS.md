@@ -125,43 +125,14 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 
 ## 4.1 Independent Review
 
-重点检查：
-
-- 逻辑 Bug；
-- 边界条件；
-- Async / 并发；
-- Race Condition；
-- 状态一致性；
-- SessionEvent 不变量；
-- Tool Call / ToolResult 配对；
-- Operation Ledger / Recovery；
-- Context 污染；
-- Capability 边界；
-- 测试缺口；
-- 不必要复杂度。
-
-Review 必须同时看：
-
-`代码正确性 + 当前规格一致性`
-
-不能只说代码“能跑”。
+Review 必须同时检查**代码正确性 + 当前规格一致性**，不能只确认“能跑”。以独立审查者身份
+工作时，完整检查项与完成判据见 `docs/agents/review-debug-playbook.md` 的 Independent Review 分支。
 
 ## 4.2 Difficult Bug Investigation
 
-按：
-
-`复现 → Trace / JSONL / SessionEvent → 假设 → 验证 → Root Cause → 最小修复 → 回归`
-
-优先使用项目自己的可观察链路定位问题。
-
-涉及 Crash / Tool 副作用时，必须同时检查：
-
-- SessionEvent；
-- Checkpoint；
-- Operation Ledger；
-- Sandbox 状态；
-- Artifact；
-- `tool_call_id` consistency。
+按 `复现 → Trace / JSONL / SessionEvent → 假设 → 验证 → Root Cause → 最小修复 → 回归`
+闭环，优先使用项目自己的可观察链路。涉及 Crash / Tool 副作用时，必须检查完整恢复链；
+检查对象与完成判据见 `docs/agents/review-debug-playbook.md` 的 Difficult Bug Investigation 分支。
 
 ## 4.3 Security Check
 
@@ -197,7 +168,7 @@ Review 必须同时看：
 
 当前主开发（谁在干活谁就是，见文件头）维护 Matt SDD 主工程规划：
 
-- `/grill-with-docs → /to-spec → /to-tickets → /implement` workflow
+- 需求澄清 → Engineering Specification → GitHub Issue / Ticket 拆分 → 实施；当前施工与 review 节奏见 `docs/SDD_WORKFLOW_PROTOCOL.md`（V3）
 - GitHub Issue、Ticket 依赖与验收标准
 - 主 Ticket 拆分与集成
 
@@ -318,6 +289,22 @@ Scope 外问题只报告，不顺手修。
 - 需要决定“迁移还是推倒”；
 - 要新增规格外的重要基础设施。
 
+### 9.1.1 新证据导致的票面变更控制
+
+施工过程中如果出现新线索，足以推翻原有假设、证明票面不可实现、持续暴露未解决 Bug，
+或证明当前证据与既定计划冲突，Agent 不得为了“守住旧票面”继续硬顶，也不得伪造完成。
+必须先停在分析/报告阶段，明确列出：
+
+- 新证据及其可复现方式；
+- 被推翻的假设或无法满足的验收条件；
+- 对架构、范围、测试、依赖与风险的影响；
+- 可行的最小替代方案及其取舍。
+
+这类情况需要向用户请求决策。只有用户明确批准后，才可以修改 ticket / issue 票面、
+重制定实施计划、调整验收标准或扩大/缩小范围，并在 tracker 与相关文档中记录该决策。
+用户的批准只覆盖明确批准的变更，不自动授权后续 merge、push、关单或其他高风险动作；
+变更后的票面必须重新走对应的实现、测试、审查与 coverage 闸门。
+
 ## 9.2 Simplicity First
 
 - 最少代码解决当前 Ticket；
@@ -359,23 +346,12 @@ Scope 外问题只报告，不顺手修。
 
 **不许偷懒的红线**：信任边界的输入校验、防数据丢失的错误处理、安全措施、
 用户明确要求的一切——永不简化掉（与 §9.2 Lightweight 红线同源）。
-阶梯缩短的是解法，不是阅读：先完整理解问题再爬梯，没读全代码就动手写出的
-“最小修改”是第二个 bug。
+阶梯缩短的是解法，不是理解与验证；展开说明见 `docs/agents/implementation-discipline.md`。
 
 ## 9.6 工程八荣八耻
 
-以瞎猜接口为耻，以认真查询为荣；
-以模糊执行为耻，以寻求确认为荣；
-以臆想业务为耻，以人类确认为荣；
-以创造接口为耻，以复用现有为荣；
-以跳过验证为耻，以主动测试为荣；
-以破坏架构为耻，以遵循规范为荣；
-以假装理解为耻，以诚实无知为荣；
-以盲目修改为耻，以谨慎重构为荣。
-
-> 保留价值：与 §6 Reuse First / §7 不变量 / §9.4 一一对应，且“诚实无知”
-> 显式授权 AI 承认不知道（不装懂）——这是瞎猜接口的根治条目。每句都能落到
-> 已有条款，不是新增约束，是已有约束的口诀化。
+查询接口、澄清业务、复用现有、主动验证、遵循规格、诚实说明未知、谨慎修改。
+完整口诀及其与 §6 / §7 / §9.4 的对应关系见 `docs/agents/implementation-discipline.md`。
 
 ---
 
@@ -391,9 +367,9 @@ Scope 外问题只报告，不顺手修。
 | --- | --- |
 | 代码审查 | `code-review` |
 | 疑难 bug 根因定位 | `diagnosing-bugs` |
-| 流程 / 架构疑问求助 | `ask-matt` |
+| 流程 / 架构疑问 | 先读当前 Specification / ADR；存在实质决策时询问用户 |
 | 代码库理解 | `understand` / `understand-chat` / `understand-diff` / `understand-domain` / `understand-explain` |
-| 实现 / TDD | `implement` / `tdd` |
+| 实现 / TDD | `tdd`（在适用时）；其他实现按当前环境可用能力执行 |
 
 约定：
 
@@ -452,11 +428,8 @@ Scope 外问题只报告，不顺手修。
 - 真正的 linked worktree 只存在于**单个仓库内部**（`git worktree list --porcelain` 可查）；
   本仓库内可能另有 worktree，对它们只做只读检查，写操作需用户授权。
 
-> **测量陷阱（踩过一次，代价是两份错误审计结论）**：main / backend 的 `core.autocrlf=true`
-> （检出 CRLF），frontend 是 `input`（检出 LF）。**跨 clone 比较必须比 git 对象**
-> （`git rev-parse <rev>:<path>`、`git diff --stat <sha>..<sha>`），
-> **不要比工作树字节**（`diff`、`sha256sum`、直接拷文件）——否则每个文件都显示为全文件改写，
-> 会得出"三个仓库已经漂移""`web/` 有两份不同拷贝"之类的错误结论。
+> **测量陷阱**：三个 clone 的行尾配置不同；跨 clone 比较必须比 Git 对象，不能据工作树字节
+> 判断漂移。命令与原因见 §14.13(b)。
 
 ### 开发规则
 
@@ -505,17 +478,7 @@ git commit -m "..."
 ```
 
 哪些动作需要用户批准、哪些是常设授权，一律按 §14.4 的分类执行。
-（注意 §14.4 里已有常设授权：**把 main 合回自己的分支、集成、集成后的 `push origin main`
-都不必每次重新批准**；仍需单独批准的是 feature 分支上的 push、PR merge、cherry-pick、
-revert、冲突后的 add、删分支。）
-
-完成后向用户报告：
-
-- 完成了什么
-- 改了哪些文件
-- 测试结果
-- commit 信息
-- 是否建议合并
+完成后的交付报告按 §11，不在本节重复授权表与报告清单。
 
 ## 13.4 最终合并规则
 
@@ -530,7 +493,7 @@ origin/main
 → **审查覆盖闸门**：`scripts/check_review_coverage.sh`
    （范围 `<最早台账 base>..HEAD` 的每条 commit 必须有台账归属：审查行、docs-only 白名单，
     或"恰好只改台账文件"的记账提交——**代码提交只有"补一次审查"一条路**；
-    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5 第 8 条）
+    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）
 → merge 到本地 main（快进优先）
 → **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
    与施工 clone 的 `HEAD^{tree}` 比——**相等即证明"我跑过门禁的那棵树"就是"被集成的这棵树"**，
@@ -831,56 +794,35 @@ diff --strip-trailing-cr <a> <b>           # 万不得已比工作树时必须�
 
 # 15. 前端 CSS 主题变量维护纪律（Ticket #35）
 
-> 本节是这条规则的**唯一权威**。`web/PRODUCT.md` 引用的是本节。
-> `web/` 在三个仓库里都存在（同一个 tracked 目录，§13.1）；无论你在哪一个仓库改
-> `web/**`，本节都适用。
-
-`web/src/index.css` 使用 `[data-theme]` 属性切换暗/亮主题。暗色 token 在 `:root` 中定义，亮色 token 在 `:root[data-theme='light']` 中覆盖。
-
-**维护规则：**
-
-1. 修改 `:root` 中的某个 token 时，必须检查 `:root[data-theme='light']` 是否也需要同步覆盖。
-2. 新增 token 时在两个块都加定义，或确认亮色可安全继承暗色值。
-3. 遗漏亮色覆盖 → 该 token 在亮色模式下仍用暗色值（对比度/可见性问题）。
-
-CSS 原生没有变量组复用机制，手工双份同步是当前最小风险方案。
+修改或新增主题 token 时，必须同步检查暗色 `:root` 与亮色
+`:root[data-theme='light']` 两个定义块。完整实现规则与视觉权威见 `web/PRODUCT.md`；
+`web/` 是三个 clone 共享的 tracked 文件树，因此无论在哪个 clone 修改都适用。
 
 
 ---
 
 # 16. SDD 长任务工作流协议（入口）
 
-> **触发条件**：用户说这些话中的任意一句，就说明要按本节的 SDD 长任务协议走——
-> 「按顺序做剩余 tickets」「使用 SDD 方式」「每完成一个 ticket 必须 code-review」
-> 「出现 bug 用 diagnose-bug」「全部完成后用 improve-codebase-architecture」
-> 「不知道怎么做用 ask-matt」「完成后写提示词给集成 AI」。
->
-> **触发词按用户原话保留，但它们描述的是"何时进入本协议"，不是"具体怎么做"**：
-> 例如「每完成一个 ticket 必须 code-review」这句里的流程细节早已被 v2 取代
-> （现在是每 2–3 票批量审，见下）；「diagnose-bug」在本环境的实际 skill 名是
-> `diagnosing-bugs`。**实际流程一律以下面的权威文件为准。**
+> **触发条件**：用户要求按顺序处理多个 Ticket、执行 SDD、追查疑难 Bug，或跨 context 延续工程任务。
 
-**本节不复制流程细节。触发后第一个动作是读权威文件：**
+触发后读取：
 
-1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前生效流程（**v2：批量审查循环**；v1 的
-   「每票一次 `/code-review`、修复后循环到零 finding」**已作废**）。**它是 SDD 流程的唯一权威**；
-2. `docs/SDD_TICKET_TRACKER.md` —— 在途 ticket、批次、fixed point、审查结论（**记录事实，不定义流程**）。
+1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前唯一流程权威（**V3.1-lite：按风险安排 review；提速增补见协议 §8「冻结树单次全量 / 三路并行 / 审查预算 / 批次合并 / 记账压缩 / 既有红与 flake」，**质量门一条未减**）；
+2. `docs/SDD_TICKET_TRACKER.md` —— 当前 Ticket、验证、review 覆盖与残余问题（记录事实，不定义流程）。
 
-三份文件若有冲突：**流程以 `docs/SDD_WORKFLOW_PROTOCOL.md` 为准**，事实记录以 tracker 为准，
-本节只是入口，不参与裁决。注意「集成 AI」是历史叫法——现在集成与 push 由**当前主开发**执行（§14.4）。
+本节只作入口。流程冲突以 `docs/SDD_WORKFLOW_PROTOCOL.md` 为准，进度事实以 Tracker 为准。Tracker 中 V1/V2 的批次、fixed point 与旧 Skill 指令是历史记录，不是当前要求。集成与 push 由当前主开发按 §14 执行。
 
-**自愈条款**：上下文被压缩 / 不记得批次边界 / 不确定当前在循环哪一步
-→ 重读上面两份文件，**禁止凭记忆继续施工**。
+**自愈条款**：上下文被压缩、摘要或不确定当前状态时，先重读上述两份文件并核对 Git 状态，再继续施工。
 
 ## 16.1 进度落点分工
 
 | 内容 | 落点 |
 | --- | --- |
-| 在途 ticket、批次、fixed point、审查结论 | `docs/SDD_TICKET_TRACKER.md` |
+| 在途 ticket、门禁证据、review 覆盖状态与残余问题 | `docs/SDD_TICKET_TRACKER.md` |
 | Phase 状态、当前焦点、历史索引 | `docs/PHASE_STATUS.md`（**只放索引一行 + 行号指针**） |
 | 批次 / 集成 / 审查的**逐条明细** | `docs/phase_status/<年-月>.md`（当月归档，按需读） |
 | 机读的审查范围台账（覆盖闸门的输入） | `docs/review_ledger.tsv` |
-| 一次性集成执行资料 | `docs/integration/`、`docs/INTEGRATION_PROMPT_*.md` |
+| 一次性集成执行资料 | `docs/archive/integration-prompts/`、`docs/archive/handoffs/`；旧路径映射见各目录 README |
 
 **同一事实只在一处写全，其余处只留指针**（2026-09-17 立的规矩，起因：一条机制描述同时住在
 ADR、用例头注释、设计稿、tracker 四处，其中一处被后来的实测**推翻**，改一处要改四处才自洽）。
@@ -888,15 +830,12 @@ ADR、用例头注释、设计稿、tracker 四处，其中一处被后来的实
 操作约束 + 指向 ADR 的一句指针"**；tracker / PHASE_STATUS 只写操作性事实（批次、commit、
 门禁数字、结论一行）+ 指针。跨文件重复叙述属于要被清理的债务，不是"写详细一点"。
 
-规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等）保持冻结，进度变更不回写规格。
+V1/V2 的批次 / fixed point 留作历史事实；V3 不要求固定批次。规格文件（`SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` 等）保持冻结，进度变更不回写规格。
 
 ## 16.2 不随协议版本变化的红线
 
-- 每个 ticket 完成后：**门禁全绿才允许 commit**（命令见 `docs/SDD_WORKFLOW_PROTOCOL.md` §5）；
-- 实现线默认只做**本地 commit**；集成与 `push origin main` 由当前主开发执行（§14.4）；
-- 不覆盖其他 Agent 未提交的工作；
-- 关单判定按 §14.12；跨端 ticket 只完成一端时**不关单**；
-- 前端 / 后端的门禁工具链、在途进度落点，一律以当前仓库的
-  `docs/SDD_WORKFLOW_PROTOCOL.md` 为准，本文件不再复制。
+门禁与 review coverage 按当前协议及 §14.10，Git 授权按 §14.4，协作避让按 §11，关单按
+§14.12；本入口不复制这些规则。前后端的工具链、review 时点与在途进度落点统一以当前
+`docs/SDD_WORKFLOW_PROTOCOL.md` V3.1-lite 为准。
 
 ---

@@ -32,8 +32,8 @@ from agent_harness.session.service import (
     InvalidForkBoundary,
     InvalidSessionId,
     SessionNotFound,
-    SessionService,
 )
+from agent_harness.web.app import session_service
 from agent_harness.web.domain_errors import http_error
 
 if TYPE_CHECKING:
@@ -117,7 +117,7 @@ def register_lineage_routes(
         404 = session 不存在；409 = 在途 run（历史未 settled）；
         422 = from_seq 不是合法 fork 锚点。
         """
-        service = SessionService(app.state.agent)
+        service = session_service(app.state.agent)
         try:
             child_id = await service.fork(
                 session_id=session_id, from_seq=req.from_seq

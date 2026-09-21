@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -444,6 +445,105 @@ def test_git_status_reports_porcelain(tmp_path: Path) -> None:
     body = resp.json()
     assert body["exit_code"] == 0
     assert "?? new.py" in body["stdout"]
+
+
+def test_web_git_records_durable_transport_audit(tmp_path: Path) -> None:
+    """Web status records a bounded, durable audit without copying command output."""
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    _seed(root, "new.py", "print('hi')\n")
+
+    response = client.get(_url(sid, "/git/status"))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["exit_code"] == 0
+    with sqlite3.connect(Path(client.app.state.agent.harness_db)) as connection:
+        rows = connection.execute(
+            "SELECT command_summary, status FROM transport_ledger ORDER BY rowid"
+        ).fetchall()
+    assert rows[0][1] == "started"
+    assert rows[1][1] == "succeeded"
+    assert "git_status" in rows[0][0]
+    assert "new.py" not in rows[0][0]
+
+
+def test_web_git_oversized_output_without_artifact_store_returns_structured_503(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, artifact_dir="", artifact_overflow_chars=100)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    for index in range(20):
+        _seed(root, f"untracked-{index:02d}.py", "print('oversized output')\n")
+
+    response = client.get(_url(sid, "/git/status"))
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == {
+        "code": "artifact_store_unavailable",
+        "message": "大输出暂时无法安全外置，请稍后重试。",
+    }
+    with sqlite3.connect(Path(client.app.state.agent.harness_db)) as connection:
+        rows = connection.execute(
+            "SELECT status, artifact_ref_json FROM transport_ledger ORDER BY rowid"
+        ).fetchall()
+    assert rows == [("started", None), ("failed", None)]
+
+
+def test_web_git_audit_redacts_relative_and_absolute_pathspec(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    secret = _seed(root, "secret.py", "secret\n")
+
+    response = client.get(
+        _url(sid, "/git/status"), params={"pathspec": "secret.py"}
+    )
+    assert response.status_code == 200, response.text
+    rejected = client.get(_url(sid, "/git/status"), params={"pathspec": str(secret)})
+    assert rejected.status_code == 422, rejected.text
+
+    with sqlite3.connect(Path(client.app.state.agent.harness_db)) as connection:
+        summaries = [
+            row[0]
+            for row in connection.execute(
+                "SELECT command_summary FROM transport_ledger"
+            ).fetchall()
+        ]
+    assert all("secret.py" not in summary for summary in summaries)
+    assert all(str(root) not in summary for summary in summaries)
+
+
+def test_web_git_pathspec_uses_one_scope_and_not_dot_union(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A checked path is the only Git scope; adding dot would widen pathspec union."""
+    from agent_harness.tools.git import GitStatusTool
+
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _init_git_repo(client, sid)
+    _seed(root, "a.py", "a\n")
+    seen_scopes: list[str] = []
+    original_init = GitStatusTool.__init__
+
+    def spy_init(self, sandbox, *, scope=""):
+        seen_scopes.append(scope)
+        original_init(self, sandbox, scope=scope)
+
+    monkeypatch.setattr(GitStatusTool, "__init__", spy_init)
+
+    response = client.get(_url(sid, "/git/status"), params={"pathspec": "a.py"})
+
+    assert response.status_code == 200, response.text
+    assert seen_scopes == [""]
 
 
 def test_git_status_pathspec_filters(tmp_path: Path) -> None:

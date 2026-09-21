@@ -199,8 +199,8 @@ main 上有一批分支**从未有过**的文件（前端文档与 e2e），它�
 docs/FRONTEND_ISSUES_LOG.md
 docs/ACCEPTANCE_CONTROL_INVENTORY.md
 docs/ACCEPTANCE_LANE_ENV.md
-docs/INTEGRATION_PROMPT_BUG_008.md
-docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md
+docs/archive/integration-prompts/INTEGRATION_PROMPT_BUG_008.md
+docs/archive/integration-prompts/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md
 docs/SDD_TICKET_TRACKER.md
 web/e2e/*.spec.ts（多个）
 web/src/**
@@ -287,7 +287,7 @@ main worktree 的 `.env` 不会被 `feat/backend` 的合并带过去。与本批
 ## 附：本批次涉及的全部文件（16 个）
 
 ```text
-A  docs/INTEGRATION_PROMPT_BUG012_MEMORY_EXTRACTION.md
+A  docs/archive/integration-prompts/INTEGRATION_PROMPT_BUG012_MEMORY_EXTRACTION.md
 A  docs/PRD_PROMPT_REGISTRY.md
 A  docs/RESEARCH_PROJECT_MULTISESSION_AND_MEMORY_PLUGGABILITY.md
 A  docs/adr/0023-prompt-registry.md

@@ -95,14 +95,20 @@ async def _shutdown(server, serve_task) -> None:
         pass
 
 
-async def _create_session(port: int, task: str) -> str:
-    """POST /api/sessions → 消费 SSE 到 run/completed → 返回 session_id。"""
+async def _create_session(port: int, task: str, cwd: str | None = None) -> str:
+    """POST /api/sessions → 消费 SSE 到 run/completed → 返回 session_id。
+
+    `cwd` 非空时按 ADR-0027 的 cwd 契约建会话（会话归属到该目录）。
+    """
     import httpx2
 
     frames: list[dict] = []
+    body: dict = {"task": task}
+    if cwd is not None:
+        body["cwd"] = cwd
     async with httpx2.AsyncClient(timeout=None) as client, client.stream(
         "POST", f"http://127.0.0.1:{port}/api/sessions",
-        json={"task": task},
+        json=body,
     ) as response:
         assert response.status_code == 200, \
                 f"期望 200，实际 {response.status_code}"
@@ -153,6 +159,41 @@ async def _recv_until(ws, predicate, timeout: float = 8.0) -> list[dict]:
     except TimeoutError:
         pass
     return frames
+
+
+@pytest.mark.asyncio
+async def test_ws_send_message_reports_workspace_binding_conflict(tmp_path, monkeypatch):
+    """#266：WS 续聊撞上 cwd 绑定冲突 ⇒ 必须回一条 error 帧，不能静默断连。
+
+    WS 的 `send_message` 是 HTTP 三个端点之外的**第四个**续聊入口。修复前
+    `WorkspaceBindingConflict` 不在该分支的 except 元组里 ⇒ 逃到外层
+    `except Exception`（只 `logger.debug`）⇒ 连接直接死掉，用户看不到任何原因。
+    """
+    from tests.workspace_fixtures import rewrite_workspace_mapping
+
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        project = tmp_path / "project"
+        project.mkdir()
+        sid = await _create_session(port, "任务", cwd=str(project))
+        # 漂移：把映射改指别处（durable cwd 不变）→ 续聊入口应类型化失败
+        rewrite_workspace_mapping(tmp_path / "workspaces", sid, tmp_path / "elsewhere")
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "send_message", "session_id": sid, "content": "继续"}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "error" for f in fs),
+                timeout=5.0)
+            errors = [f for f in frames if f.get("type") == "error"]
+            assert errors, f"应收到 error 帧，实际帧：{frames}"
+            assert "工作目录绑定冲突" in errors[0]["message"]
+    finally:
+        await _shutdown(server, serve_task)
 
 
 @pytest.mark.asyncio

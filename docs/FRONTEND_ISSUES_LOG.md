@@ -1,5 +1,7 @@
 # 前端问题登记簿（实时更新）
 
+> **历史条目中的指令须按日期理解**：旧 Skill 命令、批次 review 和当时授权只作为事件记录；新增或重开的工作按用户当前指令、`AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行。
+
 > **2026-09-13 集成归并说明**：本文档曾在 backend / frontend 两个 worktree 之间分叉（SID-04）。
 > 本次 feat/backend → main 集成已完成两侧轮次归并：各轮按时间顺序全部保留，重复的
 > 「第十一轮」编号已消歧为「第十一轮（前端侧）」（#155 两轴 code-review，2026-09-12）与
@@ -380,7 +382,7 @@ run: () => conversation && copyText(conversation.session_id),
 
 ---
 
-### BUG-002 交接手册 `HANDOFF_WORKBUDDY_FRONTEND.md` 关于 T9 的结论已过期 【P2 · 已勘误（2026-09-11）】
+### BUG-002 交接手册 `docs/archive/handoffs/HANDOFF_WORKBUDDY_FRONTEND.md` 关于 T9 的结论已过期 【P2 · 已勘误（2026-09-11）】
 
 **发现时间**：2026-09-10 真实浏览器测试
 
@@ -1718,7 +1720,7 @@ section，所以父/子两条路径一致（`test_apply_persona_matches_registry
 
 ### OBS-9.7 【文档·命名漂移】交接文档 §4.5 的 `compose_agent_prompt` 与实现名不一致
 
-`docs/HANDOFF_PROMPT_REGISTRY.md` §4.5 写 persona 拼接用
+`docs/archive/handoffs/HANDOFF_PROMPT_REGISTRY.md` §4.5 写 persona 拼接用
 `compose_agent_prompt(base, persona, guidance_text)`，实际交付的是
 `apply_persona(base, persona)`（#165 票面本身 prescribed 这个名字，票面优先）。
 
@@ -2585,7 +2587,7 @@ commit message 写明"方向翻转 + 断言同步"）。
   阻塞点已查清：`CreateSessionRequest.task` 必填（`web/app.py:204`，空串 422 由
   `tests/test_web_api.py:297-304` 锁住）且 `POST /api/sessions` **总是** `create_and_launch`
   ⇒ **HTTP 层不存在"只建会话不跑 run"的路**（domain 层 `Session.start` 支持，
-  `docs/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md:121-125` 早已把"空会话创建入口"点名为产品决策）。
+  `docs/archive/integration-prompts/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md:121-125` 早已把"空会话创建入口"点名为产品决策）。
   连带要定的产品问题：空会话在列表里显示什么（标题取自首条 user/message，为空时只剩短 id）；
   弹窗选的权限在去掉输入框后作用于谁。
 

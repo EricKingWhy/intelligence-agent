@@ -18,12 +18,8 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent import AgentRuntime
-from agent_harness.agent.runtime import (
-    _PROVIDER_FAILURE_MARKERS,
-    PROVIDER_FAILURE_MESSAGES,
-    UNCLASSIFIED_FAILURE_MESSAGE,
-)
 from agent_harness.agent.types import STATUS_FAILED
+from agent_harness.model.failure import UNCLASSIFIED_FAILURE_MESSAGE
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_FAILED,
@@ -495,7 +491,7 @@ PROVIDER_FAILURE_CASES: dict[str, dict[str, Any]] = {
             ),
         ),
         # 这条载荷本身含 "billing" 字样：命中 account 是**故意**的——配额耗尽
-        # 是账户级硬阻塞，不是可重试的限流。
+        # 是账户级硬阻塞，不是可重试的限流（顺序后果见 ADR-0033 §2.1）。
         "absent": ["exceeded your current quota"],
     },
     "auth_invalid_key": {
@@ -575,14 +571,6 @@ class TestProviderFailureClassification:
                 assert token not in str(event.data), (
                     f"provider 回显原文不得进任何持久化事件（{case}: {token}）"
                 )
-
-    def test_every_marker_reason_has_a_message(self):
-        """分类表命中却缺文案 ⇒ 运行期取文案 KeyError，会被失败路径的兜底 except
-        吞掉、连 run/failed 一起丢。两个集合必须**相等**：缺键是崩溃，多出的键
-        是漂移（说明有分类被删而文案留下）。"""
-        assert {reason for _, reason in _PROVIDER_FAILURE_MARKERS} == set(
-            PROVIDER_FAILURE_MESSAGES
-        )
 
 
 @pytest.mark.asyncio

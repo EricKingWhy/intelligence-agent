@@ -13,7 +13,7 @@
 
 上一批把「45 个按钮逐个点击」收口到 45/45，并证伪了两个「不可达」误判。过程中发现一个前端缺陷 **OBS-015**，登记但未修（当时按 Scope Lock 只报告）。本批处理它。
 
-`docs/FRONTEND_ISSUES_LOG.md` 的 **OBS-015** 条 + `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md` §6/§7 是本批的必读材料。
+`docs/FRONTEND_ISSUES_LOG.md` 的 **OBS-015** 条 + `docs/archive/handoffs/HANDOFF_APPROVAL_CARD_COVERAGE.md` §6/§7 是本批的必读材料。
 
 ### 任务 1：修 OBS-015 —— 审批卡把「任何错误」都当成已决（P2）
 
@@ -60,7 +60,7 @@
 
 ### 任务 3（可选，先问再动）：`已中断` 脉冲态的真实语料覆盖
 
-`docs/HANDOFF_APPROVAL_CARD_COVERAGE.md` §7 登记：`已中断` 脉冲态（`runState.ts` 第四态）**只有单测覆盖**，没有真实语料；且 `pulse-interrupted` 类名与 CSS 选择器之间**没有测试绑定**（改 CSS 类名不会被任何测试发现）。
+`docs/archive/handoffs/HANDOFF_APPROVAL_CARD_COVERAGE.md` §7 登记：`已中断` 脉冲态（`runState.ts` 第四态）**只有单测覆盖**，没有真实语料；且 `pulse-interrupted` 类名与 CSS 选择器之间**没有测试绑定**（改 CSS 类名不会被任何测试发现）。
 
 若时间允许且不改产品行为，可考虑：
 - 补一条「类名 ↔ CSS 选择器」的绑定测试（例如断言样式表里存在该选择器），防未来重命名静默失配。

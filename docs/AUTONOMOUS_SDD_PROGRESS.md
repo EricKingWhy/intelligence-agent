@@ -1,7 +1,6 @@
-# 自主 SDD 执行：常驻指令与进度（防指令漂移）
+# 历史归档：自主 SDD 执行指令与进度（2026-09-12）
 
-> **本文件是 Agent 的锚点。每完成一张票、每次上下文被摘要后，先读本文件 §1 与 §3。**
-> 用户 2026-09-12 授权：全自动执行，不询问、不确认、不做完一张就停，直至全部票完成。
+> **历史快照，不是当前授权或任务入口。** 下文的“不询问、不确认”、逐票 `/implement` / review、旧批次和旧队列只记录 2026-09-12 的任务指令；该次授权不延续到新任务。当前工作必须服从用户当前指令、`AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite（风险 review、无固定批次节奏）。
 
 ## 1. 常驻指令（原文约束，不许忘）
 
@@ -20,7 +19,7 @@
 
 硬链：**#161 → #162 → #163**，之后 **#164 → #165 → #166 → #167 → #168**，**T8 必须最后**。
 可执行规格 = GitHub 票面；契约终稿 = `docs/PRD_PROMPT_REGISTRY.md` §10；决策 = `docs/adr/0023-prompt-registry.md`。
-红线见 `docs/HANDOFF_PROMPT_REGISTRY.md` §4（`*` 只匹配 `profile:*`、Target 三值、T3 单点接线 `agent/profiles.py`、DEFAULT_REGISTRY 不读环境、FRAGMENT 不得并入 META_USER、冻结测试断言不许改、T3/T4/T8 逐字节等价）。
+红线见 `docs/archive/handoffs/HANDOFF_PROMPT_REGISTRY.md` §4（`*` 只匹配 `profile:*`、Target 三值、T3 单点接线 `agent/profiles.py`、DEFAULT_REGISTRY 不读环境、FRAGMENT 不得并入 META_USER、冻结测试断言不许改、T3/T4/T8 逐字节等价）。
 
 ### B. Memory / Workspace 组（#149–#160）
 
@@ -52,7 +51,7 @@
 
 ## 3. 执行队列（工作草稿）
 
-> **权威进度账本是 `docs/PHASE_STATUS.md`**（AGENTS.md §16.5）。本表只是 Agent
+> **权威进度账本是 `docs/PHASE_STATUS.md`**（`AGENTS.md` §2 / §16.1）。本表只是 Agent
 > 自己的执行队列草稿，便于上下文被摘要后立刻找回位置；两者冲突时**以
 > `PHASE_STATUS.md` 为准**，本表不承担事实源职责。
 

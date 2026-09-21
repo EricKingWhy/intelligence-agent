@@ -71,7 +71,11 @@ def _make_directory_link(link: Path, target: Path) -> bool:
     """
     try:
         link.symlink_to(target, target_is_directory=True)
-        return True
+        # `symlink_to` 可能**静默成功却没建出链接**（no-op 环境）⇒ 必须核验存在再返回 True，
+        # 否则下游会拿不存在的夹具去断言、红成假失败；核验不过走下面的目录联接回退，不退化 skip。
+        # 机制与实测证据：`docs/SDD_TICKET_TRACKER.md` 「B-23」段。
+        if link.is_symlink() or link.is_dir():
+            return True
     except (OSError, NotImplementedError):
         pass
     if os.name != "nt":
@@ -82,7 +86,7 @@ def _make_directory_link(link: Path, target: Path) -> bool:
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
     )
-    return completed.returncode == 0
+    return completed.returncode == 0 and link.is_dir()
 
 
 class TestWriteSide:

@@ -109,8 +109,9 @@ class _GitStatusArgs(BaseModel):
 class GitStatusTool(Tool):
     """git_status 工具：只读查询 workspace git 状态（porcelain 格式）。"""
 
-    def __init__(self, sandbox: Sandbox) -> None:
+    def __init__(self, sandbox: Sandbox, *, scope: str = "") -> None:
         self._sandbox = sandbox
+        self._scope = scope
 
     @property
     def name(self) -> str:
@@ -145,7 +146,7 @@ class GitStatusTool(Tool):
     async def execute(self, args: _GitStatusArgs) -> ToolResult:
         """exec 硬编码 git status；ADR-0002：exit_code 非零仍 ok=True。"""
         try:
-            command = git_status_command(args.pathspec)
+            command = git_status_command(args.pathspec, scope=self._scope)
         except ValueError as error:
             return ToolResult.failure(
                 message=str(error),
@@ -170,8 +171,9 @@ class _GitDiffArgs(BaseModel):
 class GitDiffTool(Tool):
     """git_diff 工具：只读查询 workspace git 差异内容。"""
 
-    def __init__(self, sandbox: Sandbox) -> None:
+    def __init__(self, sandbox: Sandbox, *, scope: str = "") -> None:
         self._sandbox = sandbox
+        self._scope = scope
 
     @property
     def name(self) -> str:
@@ -207,7 +209,9 @@ class GitDiffTool(Tool):
     async def execute(self, args: _GitDiffArgs) -> ToolResult:
         """exec 硬编码 git diff；ADR-0002：exit_code 非零仍 ok=True。"""
         try:
-            command = git_diff_command(staged=args.staged, path=args.path)
+            command = git_diff_command(
+                staged=args.staged, path=args.path, scope=self._scope,
+            )
         except ValueError as error:
             return ToolResult.failure(
                 message=str(error),

@@ -17,8 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent_harness.assembly import initialize_stores
 from agent_harness.config import Settings
-from agent_harness.session.service import SessionService
-from agent_harness.web.app import AppState
+from agent_harness.web.app import AppState, session_service
 
 
 def _state(tmp_path: Path) -> AppState:
@@ -40,7 +39,7 @@ def _launch(state: AppState, **kwargs) -> str:
     ) as build:
         build.return_value = MagicMock()
         result = asyncio.run(
-            SessionService(state).create_and_launch(task="hello", max_steps=1, **kwargs)
+            session_service(state).create_and_launch(task="hello", max_steps=1, **kwargs)
         )
     return result.session.session_id  # type: ignore[attr-defined]
 

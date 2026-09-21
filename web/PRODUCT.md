@@ -47,7 +47,7 @@ web
 ## Brand Commitments
 
 - 产品名 `intelligence-agent`，界面语言以中文为主（既有 UI 文案全中文）。
-- 既有视觉系统是**代码即权威**：`src/index.css` 用 `[data-theme]` 属性切换暗/亮，暗色 token 在 `:root`、亮色在 `:root[data-theme='light']` 覆盖（AGENTS.md §15 要求新增 token 两处同步）。
+- 既有视觉系统以本文件与代码为权威：`src/index.css` 用 `[data-theme]` 属性切换暗/亮，暗色 token 在 `:root`、亮色在 `:root[data-theme='light']` 覆盖。修改或新增 token 时必须检查两个定义块；只有确认亮色可安全继承时才可不写覆盖。`AGENTS.md` §15 保留这条规则的常驻入口。
 - 明确非目标：**不复制 Linear / ZCode / Raycast 的品牌**（PRD 非目标 2）——学交互范式可以，抄外观不行。
 
 ## Evidence on Hand

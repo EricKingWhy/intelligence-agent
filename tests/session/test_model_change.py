@@ -32,12 +32,12 @@ from agent_harness.session.service import (
     InvalidForkBoundary,
     SeqConflict,
     SessionNotFound,
-    SessionService,
     UnknownModel,
 )
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
+from agent_harness.web.app import session_service
 
 #: 两个 catalog 条目，provider 必须命中预设（deepseek / zhipu）。
 _CATALOG = (
@@ -95,7 +95,7 @@ def _resume_capture(state, amend=None) -> dict:
         mock_session = MagicMock()
         mock_session.session_id = "sid"
         mock_session_cls.resume = MagicMock(return_value=mock_session)
-        service = SessionService(state)
+        service = session_service(state)
         asyncio.run(
             service.resume_and_launch(session_id="sid", task="hi", amend=amend)
         )
@@ -106,7 +106,7 @@ class TestChangeModel:
     def test_appends_model_changed_with_from_and_to(self, tmp_path):
         state = _state(tmp_path)
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
-        service = SessionService(state)
+        service = session_service(state)
 
         change = asyncio.run(
             service.change_model(
@@ -131,7 +131,7 @@ class TestChangeModel:
     def test_second_change_derives_from_previous_change(self, tmp_path):
         state = _state(tmp_path)
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
-        service = SessionService(state)
+        service = session_service(state)
 
         asyncio.run(
             service.change_model(session_id="sid", provider="zhipu", model_id="glm-4.5")
@@ -148,7 +148,7 @@ class TestChangeModel:
     def test_unknown_model_raises(self, tmp_path):
         state = _state(tmp_path)
         _seed_session(state)
-        service = SessionService(state)
+        service = session_service(state)
 
         with pytest.raises(UnknownModel):
             asyncio.run(
@@ -161,7 +161,7 @@ class TestChangeModel:
         """catalog 名存在但 provider 不匹配 → 拒绝（防止跨 provider 误选）。"""
         state = _state(tmp_path)
         _seed_session(state)
-        service = SessionService(state)
+        service = session_service(state)
 
         with pytest.raises(UnknownModel):
             asyncio.run(
@@ -172,7 +172,7 @@ class TestChangeModel:
 
     def test_missing_session_raises(self, tmp_path):
         state = _state(tmp_path)
-        service = SessionService(state)
+        service = session_service(state)
 
         with pytest.raises(SessionNotFound):
             asyncio.run(
@@ -199,7 +199,7 @@ class TestChangeModel:
 
         with pytest.raises(UnknownModel):
             asyncio.run(
-                SessionService(state).change_model(
+                session_service(state).change_model(
                     session_id="sid", provider="zhipu", model_id="glm-4.5"
                 )
             )
@@ -289,7 +289,7 @@ class TestRuntimeReadsSessionModel:
             patch("agent_harness.session.service.Session") as mock_session_cls,
         ):
             mock_session_cls.start = MagicMock(return_value=MagicMock())
-            service = SessionService(state)
+            service = session_service(state)
             asyncio.run(
                 service.create_and_launch(
                     task="hello", amend=AmendOptions(model="gpt-4o")
@@ -327,7 +327,7 @@ class TestDefaultModelSelection:
     def test_change_to_default_writes_none_model_id(self, tmp_path):
         state = _state(tmp_path)
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
-        service = SessionService(state)
+        service = session_service(state)
 
         change = asyncio.run(
             service.change_model(
@@ -343,7 +343,7 @@ class TestDefaultModelSelection:
         """切回默认后再续聊 → 不传 model（走默认链），而不是回到旧 catalog 条目。"""
         state = _state(tmp_path)
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
-        service = SessionService(state)
+        service = session_service(state)
         asyncio.run(
             service.change_model(
                 session_id="sid", provider="deepseek", model_id="deepseek-chat"
@@ -357,7 +357,7 @@ class TestDefaultModelSelection:
     def test_default_alias_literal_also_accepted(self, tmp_path):
         state = _state(tmp_path)
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
-        service = SessionService(state)
+        service = session_service(state)
 
         change = asyncio.run(
             service.change_model(
@@ -384,7 +384,7 @@ class TestDefaultModelSelection:
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
 
         change = asyncio.run(
-            SessionService(state).change_model(
+            session_service(state).change_model(
                 session_id="sid", provider="deepseek", model_id="deepseek-chat"
             )
         )
@@ -405,7 +405,7 @@ class TestChangeModelDoesNotResume:
         before = [e.type for e in state.store.read_events("sid")]
 
         asyncio.run(
-            SessionService(state).change_model(
+            session_service(state).change_model(
                 session_id="sid", provider="zhipu", model_id="glm-4.5"
             )
         )
@@ -432,7 +432,7 @@ class TestChangeModelDoesNotResume:
         )
 
         result = asyncio.run(
-            SessionService(state).send_message(
+            session_service(state).send_message(
                 session_id="sid", content="next", mode="queue"
             )
         )
@@ -457,7 +457,7 @@ class TestChangeModelDoesNotResume:
         )
 
         asyncio.run(
-            SessionService(state).change_model(
+            session_service(state).change_model(
                 session_id="sid", provider="zhipu", model_id="glm-4.5"
             )
         )
@@ -481,7 +481,7 @@ class TestChangeModelDoesNotResume:
         )
 
         asyncio.run(
-            SessionService(state).change_model(
+            session_service(state).change_model(
                 session_id="sid", provider="zhipu", model_id="glm-4.5"
             )
         )
@@ -521,10 +521,10 @@ class TestConcurrentModelChange:
 
         async def run_both():
             return await asyncio.gather(
-                SessionService(state).change_model(
+                session_service(state).change_model(
                     session_id="sid", provider="zhipu", model_id="glm-4.5"
                 ),
-                SessionService(state).change_model(
+                session_service(state).change_model(
                     session_id="sid", provider="deepseek", model_id="gpt-4o"
                 ),
             )
@@ -564,7 +564,7 @@ class TestConcurrentModelChange:
 
         with pytest.raises(SeqConflict):
             asyncio.run(
-                SessionService(state).change_model(
+                session_service(state).change_model(
                     session_id="sid", provider="zhipu", model_id="glm-4.5"
                 )
             )
@@ -586,7 +586,7 @@ class TestFork:
         parent.append(RUN_STARTED, {})
         parent.append(RUN_COMPLETED, {})
         parent.append(USER_MESSAGE, {"content": "second"})
-        service = SessionService(state)
+        service = session_service(state)
 
         child_id = asyncio.run(service.fork(session_id="parent", from_seq=1))
 
@@ -598,7 +598,7 @@ class TestFork:
 
     def test_fork_missing_session_raises(self, tmp_path):
         state = self._fork_state(tmp_path)
-        service = SessionService(state)
+        service = session_service(state)
 
         with pytest.raises(SessionNotFound):
             asyncio.run(service.fork(session_id="nope", from_seq=0))
@@ -606,7 +606,7 @@ class TestFork:
     def test_fork_invalid_boundary_raises(self, tmp_path):
         state = self._fork_state(tmp_path)
         _seed_session(state, "parent")
-        service = SessionService(state)
+        service = session_service(state)
 
         with pytest.raises(InvalidForkBoundary):
             asyncio.run(service.fork(session_id="parent", from_seq=999))
@@ -615,7 +615,7 @@ class TestFork:
         state = self._fork_state(tmp_path)
         _seed_session(state, "parent")
         state.run_manager.get_active = MagicMock(return_value=MagicMock())
-        service = SessionService(state)
+        service = session_service(state)
 
         with pytest.raises(ActiveRunConflict):
             asyncio.run(service.fork(session_id="parent", from_seq=0))
@@ -631,7 +631,7 @@ class TestFork:
         parent.append(RUN_COMPLETED, {})
 
         child_id = asyncio.run(
-            SessionService(state).fork(session_id="parent", from_seq=1)
+            session_service(state).fork(session_id="parent", from_seq=1)
         )
 
         assert current_model_selection(
@@ -648,7 +648,7 @@ class TestFork:
         parent.append(RUN_COMPLETED, {})
 
         child_id = asyncio.run(
-            SessionService(state).fork(session_id="parent", from_seq=1)
+            session_service(state).fork(session_id="parent", from_seq=1)
         )
 
         assert current_model_selection(

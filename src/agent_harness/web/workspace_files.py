@@ -91,21 +91,41 @@ local 的 `newline=""` 字节透传（CRLF 不被折叠）与 docker 的容器�
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from time import perf_counter
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import anyio
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from agent_harness.observability import get_observability_sink
+from agent_harness.observability.tracer import RunTracer
+from agent_harness.session import Session
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
-from agent_harness.session.service import SessionService
 from agent_harness.storage.artifact import slice_lines
+from agent_harness.storage.artifact_select import select_artifact_store
+from agent_harness.storage.operation import OperationContext
+from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tooling.overflow import (
+    ArtifactOverflowHandler,
+    ArtifactOverflowUnavailable,
+)
 from agent_harness.tools.git import (
+    GitDiffTool,
+    GitStatusTool,
     git_diff_command,
     git_status_command,
-    run_git_command,
 )
+from agent_harness.transport import (
+    TransportArtifactRef,
+    TransportStatus,
+    new_transport_entry,
+)
+from agent_harness.web.app import session_service
 from agent_harness.web.artifacts import MAX_CHARS_PER_LINE_CAP, MAX_LINES_CAP
 from agent_harness.web.domain_errors import http_error, workspace_http_error
 from agent_harness.web.projects import require_trusted_origin
@@ -160,11 +180,12 @@ class WorkspaceFileSlice(BaseModel):
 
 
 class GitCommandResult(BaseModel):
-    """一条只读 git 命令的原样结果（ADR-0002：exit_code 非零**不是** HTTP 错误）。"""
+    """一条只读 git 命令的结果（ADR-0002：exit_code 非零**不是** HTTP 错误）。"""
 
     exit_code: int
     stdout: str
     stderr: str
+    artifact_ref: str | None = None
 
 
 async def _session_sandbox(
@@ -183,7 +204,7 @@ async def _session_sandbox(
         validate_session_id(session_id)
     except InvalidSessionId as error:
         raise http_error(error) from error
-    if not await SessionService(state).has_session(session_id):
+    if not await session_service(state).has_session(session_id):
         raise http_error(SessionNotFound(f"session '{session_id}' not found"))
     try:
         return await anyio.to_thread.run_sync(state.workspace_registry.get, session_id)
@@ -258,6 +279,153 @@ def _scope_for(checked_pathspec: str) -> str:
     pathspec 承担——给的 pathspec 已经过边界校验、必在 workspace 内，它自己就是围栏。
     """
     return "" if checked_pathspec else "."
+
+
+async def _execute_git_request(
+    *,
+    state: AppState,
+    session_id: str,
+    sandbox: Sandbox,
+    tool_name: str,
+    args: dict[str, object],
+    command: str,
+    scope: str,
+) -> GitCommandResult:
+    """Run one Web git query through the shared ToolExecutor contract."""
+    request_id = f"http-{uuid4().hex}"
+    operation_id = f"transport-{uuid4().hex}"
+    started = perf_counter()
+    await state.ensure_stores()
+    audit_command = (
+        f"{tool_name} staged={args.get('staged', False)} path=<scoped>"
+    )
+    started_entry = new_transport_entry(
+        request_id=request_id,
+        session_id=session_id,
+        operation_id=operation_id,
+        command=audit_command,
+        scope=scope or ".",
+        status=TransportStatus.STARTED,
+    )
+    await state.transport_ledger.append(started_entry)
+    terminal_written = False
+    tracer: RunTracer | None = None
+    try:
+        registry = ToolRegistry()
+        tool = (
+            GitStatusTool(sandbox, scope=scope)
+            if tool_name == "git_status"
+            else GitDiffTool(sandbox, scope=scope)
+        )
+        registry.register(tool)
+        selection = select_artifact_store(state.settings, session_id)
+        overflow_handler = ArtifactOverflowHandler(
+            selection.store if selection is not None else None,
+            state.settings.artifact_overflow_chars,
+            read_tool_name=(
+                selection.read_tool(selection.store).name
+                if selection is not None
+                else "read_artifact"
+            ),
+            fail_open=False,
+        )
+        executor = ToolExecutor(
+            registry,
+            policy=PermissionPolicy.READ_ONLY,
+            operation_ledger=state.operation_ledger,
+            overflow_handler=overflow_handler,
+        )
+        session = await anyio.to_thread.run_sync(Session.load, state.store, session_id)
+        tracer = RunTracer(
+            get_observability_sink(state.settings),
+            session_id=session_id,
+            run_id=operation_id,
+            agent_id="web",
+            user_input=command,
+        )
+        tracer.run_started()
+        execution = await executor.execute(
+            {"id": operation_id, "name": tool_name, "args": args},
+            operation_context=OperationContext(session_id=session_id),
+            session=session,
+            tracer=tracer,
+        )
+        result = execution.result
+        data = result.data or {}
+        artifact_id = result.artifact_ref
+        terminal_ref = None
+        if artifact_id is not None:
+            terminal_ref = TransportArtifactRef(
+                artifact_id=artifact_id,
+                session_id=session_id,
+            )
+        status = TransportStatus.SUCCEEDED if result.ok else TransportStatus.FAILED
+        await state.transport_ledger.append(new_transport_entry(
+            request_id=request_id,
+            session_id=session_id,
+            operation_id=operation_id,
+            command=audit_command,
+            scope=scope or ".",
+            status=status,
+            duration_ms=round((perf_counter() - started) * 1000),
+            artifact_ref=terminal_ref,
+        ))
+        terminal_written = True
+        if result.ok:
+            tracer.run_completed(result.message)
+        else:
+            tracer.run_failed(result.message)
+        return GitCommandResult(
+            exit_code=int(data.get("exit_code", -1)),
+            stdout=str(data.get("stdout", "")),
+            stderr=str(data.get("stderr", "")),
+            artifact_ref=artifact_id,
+        )
+    except ArtifactOverflowUnavailable as error:
+        await state.transport_ledger.append(new_transport_entry(
+            request_id=request_id,
+            session_id=session_id,
+            operation_id=operation_id,
+            command=audit_command,
+            scope=scope or ".",
+            status=TransportStatus.FAILED,
+            duration_ms=round((perf_counter() - started) * 1000),
+        ))
+        terminal_written = True
+        if tracer is not None:
+            tracer.run_failed("artifact_store_unavailable")
+        raise HTTPException(status_code=503, detail={
+            "code": "artifact_store_unavailable",
+            "message": "大输出暂时无法安全外置，请稍后重试。",
+        }) from error
+    except asyncio.CancelledError:
+        if not terminal_written:
+            await state.transport_ledger.append(new_transport_entry(
+                request_id=request_id,
+                session_id=session_id,
+                operation_id=operation_id,
+                command=audit_command,
+                scope=scope or ".",
+                status=TransportStatus.CANCELLED,
+                duration_ms=round((perf_counter() - started) * 1000),
+            ))
+        if tracer is not None:
+            tracer.run_failed("cancelled")
+        raise
+    except BaseException:
+        if tracer is not None:
+            tracer.run_failed("failed")
+        if not terminal_written:
+            await state.transport_ledger.append(new_transport_entry(
+                request_id=request_id,
+                session_id=session_id,
+                operation_id=operation_id,
+                command=audit_command,
+                scope=scope or ".",
+                status=TransportStatus.FAILED,
+                duration_ms=round((perf_counter() - started) * 1000),
+            ))
+        raise
 
 
 def _boundary_checked(sandbox: Sandbox, value: str) -> str:
@@ -371,9 +539,14 @@ def register_workspace_file_routes(
         except ValueError as error:
             # 白名单拒绝（shell 元字符等）：策略与文案都来自工具层那一份。
             raise HTTPException(status_code=422, detail=str(error)) from error
-        result = await run_git_command(sandbox, command)
-        return GitCommandResult(
-            exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr
+        return await _execute_git_request(
+            state=app.state.agent,
+            session_id=session_id,
+            sandbox=sandbox,
+            tool_name="git_status",
+            args={"pathspec": checked},
+            command=command,
+            scope=_scope_for(checked),
         )
 
     @app.get("/api/sessions/{session_id}/workspace/git/diff")
@@ -397,9 +570,14 @@ def register_workspace_file_routes(
             raise workspace_http_error(error, path=path) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        result = await run_git_command(sandbox, command)
-        return GitCommandResult(
-            exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr
+        return await _execute_git_request(
+            state=app.state.agent,
+            session_id=session_id,
+            sandbox=sandbox,
+            tool_name="git_diff",
+            args={"path": checked, "staged": staged},
+            command=command,
+            scope=_scope_for(checked),
         )
 
 

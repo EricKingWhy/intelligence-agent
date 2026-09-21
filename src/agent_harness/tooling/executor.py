@@ -47,6 +47,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
+from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.observability.tracer import TraceBinding, current_trace_binding
 from agent_harness.session import TOOL_CALL, TOOL_RESULT, Session, SessionEvent
 from agent_harness.storage import (
@@ -68,6 +69,7 @@ from agent_harness.tooling.contract import (
     ToolCall,
     ToolSideEffect,
 )
+from agent_harness.tooling.deadline import tool_execution_deadline_var
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.registry import ToolRegistry
@@ -79,6 +81,10 @@ logger = logging.getLogger("agent_harness.tooling.executor")
 #: 为什么是模块级常量而不是可配置项：重试上限必须收敛在【唯一 Retry Layer】
 #: 一处可见可调；一旦可配置，"到底重试几次"会重新散落回各层，铁律二就被架空。
 MAX_ATTEMPTS = 3
+
+#: 观测端口（#250）的缺席实现：`execute*` 的 tracer 参数恒为对象，调用点不判空。
+#: 无状态、可共享；有观测时调用方传入自己的实现（Runtime 传的是带保护层的那一个）。
+_NULL_TRACER = NullTracer()
 
 #: 阶段3 异常分类表：异常类型 -> (error_code, retryable)。
 #: 分类是确定性的【类型判断】，绝不解析错误字符串（字符串会变，类型不会）。
@@ -229,7 +235,7 @@ class ToolExecutor:
         operation_context: OperationContext | None = None,
         session: Session | None = None,
         step_id: int | None = None,
-        tracer: Any = None,
+        tracer: Tracer = _NULL_TRACER,
     ) -> ToolExecution:
         """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
 
@@ -321,19 +327,32 @@ class ToolExecutor:
         # -- Langfuse 工具观测（ADR-0018 D7）：与 JSONL tool_operation 同点平行。
         # delegate 工具按官方多 Agent 规则用 agent 型 + 目标命名，并在其存活
         # 期间设置嵌套绑定——child runtime 的 RunTracer 认领该观测为根。
-        obs_span = None
+        # 端口（#250）恒为对象：缺席实现是 NullTracer，这里不判空。
         attempts: list[dict[str, Any]] = []
         is_delegate = getattr(tool, "is_subagent_dispatch", False)
-        if tracer is not None:
-            obs_span = tracer.tool_span_started(
-                tool_name=name, tool_call_id=tool_call_id, args=raw_args,
-                is_delegate=is_delegate,
-            )
+        obs_span: Span | None = tracer.tool_span_started(
+            tool_name=name, tool_call_id=tool_call_id, args=raw_args,
+            is_delegate=is_delegate,
+        )
         binding_token = None
-        if tracer is not None and obs_span is not None and is_delegate and tracer.trace_id:
+        if obs_span is not None and is_delegate and tracer.trace_id:
             binding_token = current_trace_binding.set(
                 TraceBinding(trace_id=tracer.trace_id, observation=obs_span),
             )
+        span_session_id = operation_context.session_id if operation_context else None
+
+        def _close_span(outcome: str, **fields: Any) -> None:
+            """收口本次工具观测（attempt 链与 ledger 关联键逐次带上）。
+
+            收口在异常臂里也会被调用：观测实现违约抛错时绝不顶掉原发异常
+            （端口契约的"实现必须不抛"由 Runtime 的保护层单点强制，但 Executor
+            是公开可构造组件、可被 Runtime 之外的调用方直接使用，此处自兜一层）。
+            """
+            with suppress(BaseException):
+                tracer.tool_span_completed(
+                    obs_span, outcome=outcome, attempts=attempts or None,
+                    session_id=span_session_id, **fields,
+                )
 
         # -- 阶段 2.7：输出流 sink（ADR-0016 §4.2）--
         # 执行期 stdout/stderr 增量：工具（经 contextvar）从 sandbox reader
@@ -355,11 +374,14 @@ class ToolExecutor:
 
         # -- 阶段 3：execute + Timeout 边界 + 唯一 Retry Layer（Task 3）--
         # 三阶段顺序不变；Timeout/Retry 只包住 tool.execute 这一步。
+        # 外层 try 只为观测收口：观测一旦开始，任何逃逸路径（取消 / Ledger
+        # 存储失败 / overflow 处理失败）都必须把它结束掉——否则 Langfuse 上
+        # 永远挂着一个未收口的工具观测。收口只读 attempts 与异常类型，不改
+        # ToolResult / Ledger / 事件语义（异常原样传播）。
         try:
             try:
                 result = await self._execute_with_retry(
-                    tool_call_id, name, tool, validated,
-                    tracer=tracer, attempts=attempts,
+                    tool_call_id, name, tool, validated, attempts=attempts,
                 )
             except asyncio.CancelledError:
                 if self._operation_ledger is not None:
@@ -367,51 +389,58 @@ class ToolExecutor:
                         session_id, tool_call_id, OperationState.CANCELLED
                     )
                 raise
-        finally:
-            if binding_token is not None:
-                current_trace_binding.reset(binding_token)
-            if sink_token is not None:
-                tool_output_sink_var.reset(sink_token)
-            if sink is not None and drain_task is not None:
-                sink.close()
-                try:
-                    await drain_task
-                except asyncio.CancelledError:
-                    # 二次取消到达：放弃最终 flush（增量已周期性落盘），停泵收口。
-                    drain_task.cancel()
-                    with suppress(BaseException):
+            finally:
+                if binding_token is not None:
+                    current_trace_binding.reset(binding_token)
+                if sink_token is not None:
+                    tool_output_sink_var.reset(sink_token)
+                if sink is not None and drain_task is not None:
+                    sink.close()
+                    try:
                         await drain_task
-                    raise
+                    except asyncio.CancelledError:
+                        # 二次取消到达：放弃最终 flush（增量已周期性落盘），停泵收口。
+                        drain_task.cancel()
+                        with suppress(BaseException):
+                            await drain_task
+                        raise
 
-        # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
-        # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
-        deferred_events: list[tuple[str, dict[str, Any]]] = []
-        if self._overflow_handler is not None:
-            assert session is not None
-            result, deferred_events = await self._overflow_handler.maybe_overflow(
-                session, tool_call_id, name, result,
-            )
+            # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
+            # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
+            deferred_events: list[tuple[str, dict[str, Any]]] = []
+            if self._overflow_handler is not None:
+                assert session is not None
+                result, deferred_events = await self._overflow_handler.maybe_overflow(
+                    session, tool_call_id, name, result,
+                )
 
-        if self._operation_ledger is not None:
-            terminal_state = (
-                OperationState.SUCCEEDED if result.ok else OperationState.FAILED
-            )
-            await self._operation_ledger.update_state(
-                session_id, tool_call_id,
-                terminal_state,
-                result_json=result.model_dump_json(),
-                artifact_ref=result.artifact_ref,
-            )
-            self._maybe_kill("terminal", tool_call_id)
+            if self._operation_ledger is not None:
+                terminal_state = (
+                    OperationState.SUCCEEDED if result.ok else OperationState.FAILED
+                )
+                await self._operation_ledger.update_state(
+                    session_id, tool_call_id,
+                    terminal_state,
+                    result_json=result.model_dump_json(),
+                    artifact_ref=result.artifact_ref,
+                )
+                self._maybe_kill("terminal", tool_call_id)
+        except asyncio.CancelledError:
+            _close_span("cancelled")
+            raise
+        except BaseException:
+            # BaseException 而不是 Exception：GeneratorExit / KeyboardInterrupt 之类的
+            # 逃逸路径同样收口（收口是同步调用，且异常原样再抛）。
+            # 异常文本不进观测（脱敏不变量 OBS-008 同族）：归因由上层异常臂负责。
+            _close_span("exception")
+            raise
         # 工具自产的延迟事件（如 delegation）在前，overflow 在后。
         pending = [*result.pending_events, *deferred_events]
-        if tracer is not None:
-            tracer.tool_span_completed(
-                obs_span, outcome="success" if result.ok else "failure",
-                message=result.message, attempts=attempts or None,
-                session_id=(operation_context.session_id if operation_context else None),
-                extra={"artifact_ref": result.artifact_ref} if result.artifact_ref else None,
-            )
+        _close_span(
+            "success" if result.ok else "failure",
+            message=result.message,
+            extra={"artifact_ref": result.artifact_ref} if result.artifact_ref else None,
+        )
         return ToolExecution(tool_call_id=tool_call_id, result=result,
                              pending_events=pending)
 
@@ -432,7 +461,7 @@ class ToolExecutor:
         operation_context: OperationContext | None = None,
         session: Session | None = None,
         step_id: int | None = None,
-        tracer: Any = None,
+        tracer: Tracer = _NULL_TRACER,
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
@@ -792,13 +821,15 @@ class ToolExecutor:
 
     async def _execute_with_retry(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
-        *, tracer: Any = None, attempts: list[dict[str, Any]] | None = None,
+        *, attempts: list[dict[str, Any]] | None = None,
     ) -> ToolResult:
         """阶段3 主体：每次尝试被 timeout 包住，retryable 位驱动是否再来一轮。
 
         一轮 attempt 的数据流：
           t0 = perf_counter()
-          asyncio.timeout(tool.timeout_seconds) 包住 await tool.execute(validated)
+          deadline = t0 + tool.timeout_seconds（放进 tool_execution_deadline_var，
+                    Tool 把它原样转发给执行后端——唯一 owner，见 ADR-0039）
+          asyncio.timeout(deadline - perf_counter()) 包住 await tool.execute(validated)
             -> 正常返回 ToolResult  -> 透传（尊重工具自己的 ok/retryable 语义）
             -> 抛 TimeoutError      -> 映射 TIMEOUT（READ_ONLY 可重试；MUTATING 不可——
                                       副作用状态未知不盲重跑，见 except TimeoutError 注释）
@@ -811,9 +842,12 @@ class ToolExecutor:
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             t0 = perf_counter()
+            deadline = t0 + tool.timeout_seconds
+            deadline_token = tool_execution_deadline_var.set(deadline)
             try:
-                # Timeout 边界：只包 execute 这一行；到点未返回即被取消并抛 TimeoutError。
-                async with asyncio.timeout(tool.timeout_seconds):
+                # 本次 attempt 的**唯一**绝对 deadline：本行建立、放进 contextvar
+                # 供 Tool 转发给执行后端，后端不得重新起算。机制见 ADR-0039。
+                async with asyncio.timeout(max(0.0, deadline - perf_counter())):
                     result = await tool.execute(validated)
             except TimeoutError:
                 # asyncio.timeout 到点把 execute 掐断——映射细节（含 retryable 为何
@@ -823,6 +857,8 @@ class ToolExecutor:
                 # 宽捕获理由同 Task 2：工具是开放世界，无法预知会抛什么。
                 # 分类表查找（isinstance 连子类一起认）在 _ToolFailure.from_exception。
                 result = _ToolFailure.from_exception(e, name).to_result()
+            finally:
+                tool_execution_deadline_var.reset(deadline_token)
 
             duration_ms = round((perf_counter() - t0) * 1000, 1)
             total_ms += duration_ms

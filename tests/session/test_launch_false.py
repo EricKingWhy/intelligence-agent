@@ -21,9 +21,8 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
 from agent_harness.session import SESSION_STARTED, Session
-from agent_harness.session.service import SessionService
 from agent_harness.tooling.contract import PermissionPolicy
-from agent_harness.web.app import create_app
+from agent_harness.web.app import create_app, session_service
 from tests.scripted_model import ScriptedModel
 
 
@@ -62,7 +61,7 @@ def test_launch_false_does_not_start_run(tmp_path):
     返回束 run/subscriber 为 None。"""
     state = _state(tmp_path)
     with patch("agent_harness.session.service.build_runtime", new_callable=AsyncMock):
-        service = SessionService(state)
+        service = session_service(state)
         result = asyncio.run(
             service.create_and_launch(task="hello", launch=False)
         )
@@ -82,7 +81,7 @@ def test_launch_false_with_explicit_workspace(tmp_path):
     显式 workspace 名仍建目录、仍归组（本测试无索引 → 不归组，但目录必须建）。"""
     state = _state(tmp_path)
     with patch("agent_harness.session.service.build_runtime", new_callable=AsyncMock):
-        service = SessionService(state)
+        service = session_service(state)
         result = asyncio.run(
             service.create_and_launch(
                 task="hello", workspace_name="proj-a", launch=False
@@ -99,7 +98,7 @@ def test_launch_false_session_metadata_matches_launch_true(tmp_path):
     """两种意图共用同一路径：session/started 的元数据（cwd 锚）逐字段一致。"""
     state = _state(tmp_path)
     with patch("agent_harness.session.service.build_runtime", new_callable=AsyncMock):
-        service = SessionService(state)
+        service = session_service(state)
         launched = asyncio.run(
             service.create_and_launch(task="hi", workspace_name="w1")
         )
@@ -201,7 +200,7 @@ def test_launch_false_interactive_permission_does_not_leak_approval_queue(tmp_pa
     from unittest.mock import patch as _patch
 
     with _patch("agent_harness.session.service.build_runtime", new_callable=AsyncMock):
-        service = SessionService(state)
+        service = session_service(state)
         # 对照组：launch=True 时 interactive 分支真实登记队列（证明确实会登记）。
         launched = asyncio.run(
             service.create_and_launch(

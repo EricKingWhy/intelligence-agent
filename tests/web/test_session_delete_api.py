@@ -112,6 +112,32 @@ def _seed_aux_rows(client: TestClient, session_id: str) -> None:
             " VALUES (?, 'USER_ACCEPTED', 1, ?)",
             (session_id, "2026-09-13T00:00:00+00:00"),
         )
+        con.execute(
+            "INSERT INTO transport_ledger"
+            " (request_id, session_id, operation_id, command_summary, scope, status, created_at)"
+            " VALUES (?, ?, ?, ?, ?, 'started', ?)",
+            (
+                "request-target",
+                session_id,
+                "operation-target",
+                "git_status path=<scoped>",
+                ".",
+                "2026-09-13T00:00:00+00:00",
+            ),
+        )
+        con.execute(
+            "INSERT INTO transport_ledger"
+            " (request_id, session_id, operation_id, command_summary, scope, status, created_at)"
+            " VALUES (?, ?, ?, ?, ?, 'started', ?)",
+            (
+                "request-other",
+                "other-session",
+                "operation-other",
+                "git_status path=<scoped>",
+                ".",
+                "2026-09-13T00:00:00+00:00",
+            ),
+        )
         con.commit()
         counts = {
             table: con.execute(
@@ -160,6 +186,8 @@ def test_delete_removes_log_aux_rows_and_sandbox_artifacts(tmp_path: Path) -> No
     assert _query(client, "SELECT 1 FROM operations WHERE session_id=?", (session_id,)) == []
     assert _query(client, "SELECT 1 FROM checkpoints WHERE session_id=?", (session_id,)) == []
     assert _query(client, "SELECT 1 FROM workspace_sessions WHERE session_id=?", (session_id,)) == []
+    assert _query(client, "SELECT 1 FROM transport_ledger WHERE session_id=?", (session_id,)) == []
+    assert _query(client, "SELECT 1 FROM transport_ledger WHERE session_id=?", ("other-session",)) != []
     # 列表面（文件系统驱动）
     rows = client.get("/api/sessions").json()
     assert all(r["session_id"] != session_id for r in rows)

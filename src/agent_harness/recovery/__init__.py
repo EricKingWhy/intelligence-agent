@@ -7,7 +7,11 @@ from agent_harness.recovery.coordinator import (
     RecoveryError,
     SkipPendingPolicy,
 )
-from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
+from agent_harness.recovery.reconcile import (
+    ReconcileCallback,
+    ReconcileVerdict,
+    RecoveryAdjudicationToken,
+)
 from agent_harness.recovery.scan import (
     InterruptionScanResult,
     ScanRecovery,
@@ -20,6 +24,7 @@ __all__ = [
     "ReconcileCallback",
     "ReconcileRequired",
     "ReconcileVerdict",
+    "RecoveryAdjudicationToken",
     "RecoveryCoordinator",
     "RecoveryError",
     "ScanRecovery",

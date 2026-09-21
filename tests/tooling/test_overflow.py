@@ -6,7 +6,10 @@ import pytest
 
 from agent_harness.storage.artifact import FakeArtifactStore
 from agent_harness.tooling import ToolResult
-from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.overflow import (
+    ArtifactOverflowHandler,
+    ArtifactOverflowUnavailable,
+)
 from tests.conftest import make_session
 
 
@@ -67,6 +70,30 @@ async def test_both_streams_and_duplicate_message_are_preserved_and_bounded(tmp_
     assert artifact.mime_type == "application/json"
     assert len(compact.message) <= 2000
     assert all(len(value) <= 2000 for value in compact.data.values())
+
+
+@pytest.mark.asyncio
+async def test_upload_failure_can_fail_closed_for_audit_paths(tmp_path):
+    class UnavailableStore(FakeArtifactStore):
+        async def save(self, *args, **kwargs):
+            raise ConnectionError("unavailable")
+
+    session = make_session(tmp_path)
+    result = ToolResult.success("x" * 5000)
+    with pytest.raises(ArtifactOverflowUnavailable, match="Artifact store failed"):
+        await ArtifactOverflowHandler(
+            UnavailableStore(), fail_open=False
+        ).maybe_overflow(session, "call", "git_status", result)
+
+
+@pytest.mark.asyncio
+async def test_missing_store_can_fail_closed_for_audit_paths(tmp_path):
+    session = make_session(tmp_path)
+    result = ToolResult.success("x" * 5000)
+    with pytest.raises(ArtifactOverflowUnavailable, match="Artifact store is required"):
+        await ArtifactOverflowHandler(
+            None, fail_open=False
+        ).maybe_overflow(session, "call", "git_status", result)
 
 
 @pytest.mark.asyncio

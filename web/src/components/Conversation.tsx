@@ -71,7 +71,18 @@ const EXAMPLE_TASKS = [
   '列出当前目录的文件结构并总结',
 ];
 
-export function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone }: Props) {
+/**
+ * F2（#272）：`memo` 包裹——挡住"与对话无关的父级提交"（打字 / hover / 拖宽 / 换焦点）。
+ *
+ * ⚠ **操作约束（改本组件 props 前必读）**：`memo` 的有效性完全取决于上游给的 prop 身份是否
+ * 稳定。新增 prop 前必须在 `App.tsx` 侧确认它由 `useState` / `useCallback` / 原语持有；否则
+ * `memo` 恒 miss。**不要**补自定义 `areEqual`：那是第二套（且更容易写错的）版本机制，
+ * 一处分不清该比哪些字段就是静默吞更新。
+ *
+ * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
+ * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
+ */
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -84,6 +95,9 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
   // 又上去了…必须要输出完才能看见」）。现在只有 followRef 决定要不要跟随。
   const followRef = useRef<FollowState>(FOLLOW_BOTTOM);
   const [suspended, setSuspended] = useState(false);
+  /** F3（#276）挂起的「贴底」帧句柄：`null` = 本帧没有待执行的贴底。
+   *  读 `scrollHeight` + 写 `scrollTop` 收进同一个 rAF 回调（见下方流式贴底 effect）。 */
+  const snapFrameRef = useRef<number | null>(null);
 
   // PRD §20.2 / ADR-0014 D7：turns 列表窗口化（@tanstack/react-virtual）。
   // turn 是虚拟单元（user 消息 + 执行链，高度差异大）→ measureElement 动态测高；
@@ -194,6 +208,13 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
   // 流式期间的自动贴底——**只在 follow 为真时**，且用瞬时 `scrollTop = scrollHeight`
   // （不做 smooth 动画：动画中间态会被下一次 delta 重启，把用户的手动滚动一起吃掉）。
   //
+  // F3（#276）：读 `scrollHeight` + 写 `scrollTop` **收进同一个 rAF 帧**，同一帧内多次
+  // 登记只执行一次。本 effect 的依赖含整个 `conversation` ⇒ 每个 delta 提交都重跑一次，
+  // 改造前是「每提交一次强制布局」（实测 1 提交 = 1 读 + 1 写）；收进单帧后每个 rAF 帧
+  // 至多一次。⚠ 读写必须留在**同一个回调**里：分开会引入「读到的目标位置在写入前过期」
+  // 的新竞态。鼠标释放/键盘等**用户发起**的贴底（run 结束补底、点「↓ 最新」）不在此列，
+  // 仍走同步瞬时贴底——那些一拍对延迟敏感，不需要也不该等一帧。
+  //
   // 依赖是有意保留整个 `conversation` 的（HANDOFF C.4.3 要求收窄，此处偏离并记录
   // 理由）：内容增长才是必须贴底的信号，而它既来自模型 delta、也来自工具输出，任何
   // 单一窄信号都接不住——`turns.length` 在纯文本 delta 时**根本不变**（漏触发、
@@ -210,9 +231,26 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
   useEffect(() => {
     if (!runActive) return;
     if (!followRef.current.following) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    // 同帧去重：已有待执行的贴底帧就不再排（一帧至多一次强制布局）。
+    if (snapFrameRef.current !== null) return;
+    snapFrameRef.current = requestAnimationFrame(() => {
+      snapFrameRef.current = null;
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
   }, [conversation, runActive]);
+
+  // F3（#276）：卸载时取消挂起的贴底帧——不给已经卸载的节点写属性。
+  // （`scrollRef` 在卸载时会被回调 ref 置 null，这里多一道取消是为了连回调都不再执行。）
+  useEffect(
+    () => () => {
+      if (snapFrameRef.current !== null) {
+        cancelAnimationFrame(snapFrameRef.current);
+        snapFrameRef.current = null;
+      }
+    },
+    [],
+  );
 
   // Follow-mode：用户滚动即转移跟随态（贴底恢复跟随；上滚脱离并浮现「↓ 最新」）。
   // 流式增长本身不触发 scroll 事件，而我们写入 scrollTop 会触发——nearBottom
@@ -413,11 +451,29 @@ export function Conversation({ conversation, loadingHistory, density, disclosure
       )}
     </div>
   );
-}
+});
 
 // memo + 投影层 copy-on-write（未触及 turn 引用稳定）：流式期间每个 delta 只
 // 重渲染活跃轮次——已完成轮次不再重跑 deriveChain 与全量 markdown 重解析。
+// 引用稳定性由 F1（#270）保证：disclosure / reasoningDisclosure 的返回值现在只在
+// **自身依赖变化**时换引用（override 改动 / density 换档），流式提交期间恒等——memo 的
+// 浅比较才真的会命中原注释所声明的效果。注意它**不能**做成「身份永不改变」：那样
+// override 变化时 memo 也会 bail out，点击工具行的档位循环会静默无效（见
+// lib/disclosure.ts 顶部注释与 Conversation.render.test.tsx 的 AC8 代理用例）。
 export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string) => void; isSupersededTurn?: boolean }) {
+  // F1（#270）必做 2：`cycle` 回调此前在链路渲染器里**每次渲染现建一个新闭包**，
+  // 作为 prop 传给 memo(ToolCard) ⇒ 浅比较恒不等，memo 恒 miss。移到组件里用
+  // useCallback 建立一次（依赖 disclosure——它只在 override / density 变化时换引用，
+  // 流式提交期间恒等），引用就稳定了；注册表本身不取 hook，仍按 ChainRenderCtx 的
+  // 既有约定只接收透传值。
+  const cycleLevel = useCallback(
+    (key: string, density: TraceDensity) => {
+      if (!disclosure) return;
+      disclosure.setLevel(key, nextLevel(disclosure.levelFor(key, density)));
+    },
+    [disclosure],
+  );
+
   // 折叠是纯手动选项（用户指令 2026-09-05，覆盖冻结决策 L48 的"默认折叠"）：
   // 完成轮一律默认展开——先让用户看到模型回答，想收起再手动点。live 与
   // 历史重挂载行为一致；流式中/无模型文本的轮次不出现折叠按钮。
@@ -615,6 +671,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                     disclosure={disclosure}
                     reasoningDisclosure={reasoningDisclosure}
                     isFinalModel={i === lastModelIndex}
+                    onCycleLevel={cycleLevel}
                     onFocusTool={onFocusTool}
                     onOpenSession={onOpenSession}
                     onInspectChild={onInspectChild}
@@ -662,6 +719,10 @@ interface ChainRenderCtx {
    *  （与旧 ChainNodeView 默认一致——直接调用方多省略此 prop）。 */
   isFinalModel?: boolean;
   onFocusTool?: (tool: ToolCall) => void;
+  /** L 级循环回调（F1/#270）：由 TurnView 用 useCallback 建立一次，跨渲染引用稳定，
+   *  memo(ToolCard) 才会命中。带 (key, density) 参数而不是无参闭包——注册表不能取
+   *  hook，按节点现场建的闭包必然破坏下游 memo 的浅比较。 */
+  onCycleLevel?: (key: string, density: TraceDensity) => void;
   onOpenSession?: (sessionId: string) => void;
   onInspectChild?: (child: { childSessionId: string; target: string }) => void;
   /** #186：这条链属于哪个会话——工具卡的归档 diff 要按会话读 artifact 内容。 */
@@ -673,18 +734,24 @@ type RendererFor<K extends ChainNode['kind']> = (
   ctx: Omit<ChainRenderCtx, 'node'> & { node: Extract<ChainNode, { kind: K }> },
 ) => ReactNode;
 
+/** 已完成/历史 model 段的 markdown 正文（F1/#270 必做 3）。
+ *  记忆化的键**必须是内容**：`segment` 对象在每次投影提交时都可能换引用，按引用记忆
+ *  等于没记忆化（票面 Risks 点名的陷阱）。这里靠 memo 的 props 浅比较，键就是字符串
+ *  `text`——内容未变的重复提交直接 bail out，`renderMarkdown` 一次都不再跑。
+ *  注：注册表是普通函数不能取 hook，所以记忆化只能落在组件上。 */
+const MarkdownBody = memo(function MarkdownBody({ text }: { text: string }) {
+  return <>{renderMarkdown(text)}</>;
+});
+
 const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
-  tool: ({ node, density, disclosure, onFocusTool, sessionId }) => {
+  tool: ({ node, density, disclosure, onFocusTool, sessionId, onCycleLevel }) => {
     const key = toolEventKey(node.tool.tool_call_id);
-    const cycle = disclosure
-      ? () => disclosure.setLevel(key, nextLevel(disclosure.levelFor(key, density)))
-      : undefined;
     return (
       <ToolCard
         tool={node.tool}
         density={density}
         level={disclosure ? disclosure.levelFor(key, density) : undefined}
-        onCycleLevel={cycle}
+        onCycleLevel={onCycleLevel}
         onFocus={onFocusTool}
         sessionId={sessionId}
       />
@@ -709,7 +776,7 @@ const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
       const first = segment.text.split('\n').find((l) => l.trim()) ?? '';
       if (!first) return null;
       return (
-        <div className="model-output done model-output-compact">{renderMarkdown(truncateForDisplay(first))}</div>
+        <div className="model-output done model-output-compact"><MarkdownBody text={truncateForDisplay(first)} /></div>
       );
     }
     if (!segment.text && segment.status !== 'streaming') return null;
@@ -748,7 +815,7 @@ const CHAIN_RENDERERS: { [K in ChainNode['kind']]: RendererFor<K> } = {
       <div className="model-output-wrap">
         {kindRow}
         <div className={`model-output ${segment.status}${kind === 'model' ? ' model-output-intermediate' : ''}`}>
-          {renderMarkdown(display)}
+          <MarkdownBody text={display} />
         </div>
         {segment.text && <CopyButton text={segment.text} label={kind === 'final-answer' ? '复制回答' : '复制输出'} />}
       </div>

@@ -2,7 +2,7 @@
 
 > 生成时间：2026-09-13 · 分支 `feat/frontend` · commit `57dd028`
 > 关联：#172（跨端票，**不要关单**）、ADR-0029、后端半的对侧提示词
-> `D:\intelligence-agent-backend\docs\INTEGRATION_PROMPT_SESSION_HARD_DELETE.md`
+> `D:\intelligence-agent-backend\docs\archive\integration-prompts\INTEGRATION_PROMPT_SESSION_HARD_DELETE.md`
 
 ---
 

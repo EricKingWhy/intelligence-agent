@@ -200,7 +200,7 @@ export const LONG_MODELS         // SEARCHABLE_MODELS + 2 = 7，+1 = 8 > 5
 ## 六、剩余事项
 
 1. **推送 `eb999bc`**（你在终端执行，命令见上）——`4b45bc5` 已推送成功 ✅
-2. `docs/HANDOFF_WORKBUDDY_FRONTEND.md` 等 4 个未跟踪文档：判定是留是删（本次未动）
+2. `docs/archive/handoffs/HANDOFF_WORKBUDDY_FRONTEND.md` 等 4 个未跟踪文档：判定是留是删（本次未动）
 3. `test-results/` 建议加入 `.gitignore`
 4. **主仓库 `D:\intelligence-agent` 的对象库可能同样损坏**——合并前请先验证
 5. **合并前重跑 `merge-tree`**：`main` 已前进过一次，集成时请重新实测，勿沿用 `e0998e9`

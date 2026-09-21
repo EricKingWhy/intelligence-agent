@@ -5,10 +5,16 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import io
+import logging
 import posixpath
+import queue
+import shlex
 import tarfile
+import threading
+import weakref
 from pathlib import Path, PurePosixPath
-from time import perf_counter
+from time import perf_counter, sleep
+from typing import ClassVar
 from uuid import uuid4
 
 from agent_harness.sandbox.base import (
@@ -17,7 +23,22 @@ from agent_harness.sandbox.base import (
     ShellEnvironment,
     ShellFamily,
 )
-from agent_harness.sandbox.local import DEFAULT_EXEC_TIMEOUT
+from agent_harness.sandbox.decoding import StreamDecoder
+from agent_harness.sandbox.local import DEFAULT_EXEC_TIMEOUT, _CappedCapture
+
+logger = logging.getLogger("agent_harness.sandbox.docker")
+
+
+class _ContainerExecState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.cleanup_failed = False
+        self.cleanup_pending = False
+        self.late_cleanup: tuple[object, object] | None = None
+        self.late_cleanup_event = threading.Event()
+        # 只保护 `late_cleanup` / `cleanup_pending` 这一对的**交接**（读-清原子化）。
+        # 与 `lock` 分开：`lock` 要跨越 drain 里 0.5s+5s 的外部调用，不能用来做交接。
+        self.late_cleanup_lock = threading.Lock()
 
 
 def _glob_match_posix(rel_path: str, pattern: str) -> bool:
@@ -37,6 +58,10 @@ def _glob_match_posix(rel_path: str, pattern: str) -> bool:
 class DockerSandbox(Sandbox):
     """Run Coding Tools inside an isolated Docker container."""
 
+    _container_exec_states = weakref.WeakValueDictionary()
+    _container_exec_states_lock = threading.Lock()
+    _poisoned_container_exec_states: ClassVar[dict[str, _ContainerExecState]] = {}
+
     def __init__(
         self,
         *,
@@ -54,6 +79,20 @@ class DockerSandbox(Sandbox):
         self._container_name = container_name or f"agent-harness-{suffix}"
         self._volume_name = volume_name or f"agent-harness-{suffix}"
         self._container = None
+        self._exec_state = self._state_for_container(self._container_name)
+        self._exec_lock = self._exec_state.lock
+
+    @classmethod
+    def _state_for_container(cls, container_name: str) -> _ContainerExecState:
+        with cls._container_exec_states_lock:
+            state = cls._poisoned_container_exec_states.get(container_name)
+            if state is not None:
+                return state
+            state = cls._container_exec_states.get(container_name)
+            if state is None:
+                state = _ContainerExecState()
+                cls._container_exec_states[container_name] = state
+            return state
 
     @property
     def workspace_root(self) -> PurePosixPath:
@@ -101,59 +140,512 @@ class DockerSandbox(Sandbox):
         )
 
     def exec(self, command: str, *, timeout: float | None = None,
+             deadline: float | None = None,
              cancel_event=None, on_output=None) -> ExecResult:
-        """在容器内执行命令；timeout 到点返回 exit_code=-1 的超时结果（D10 契约）。
+        """在容器内执行命令，超时/取消终止对应 exec 的进程组。
 
-        docker SDK 的 exec_run 没有超时参数且是阻塞读——实现上把调用放进
-        daemon 线程等待，到点放弃等待返回超时结果（容器内进程随容器生命周期
-        收敛）。调用方（tool 边界）已把本方法卸载到工作线程，event loop 不阻塞。
-
-        V1 限制（诚实声明）：cancel_event 被接受但忽略——容器内进程的协作取消
-        需要 docker exec kill 链路，V1 不实现；容器内命令会跑完自身生命周期。
-        on_output（ADR-0016 §4.2）同样接受但忽略：exec_run 一次性返回 demux
-        结果，无逐段读取窗口；容器后端的输出流式留待 demux 迭代器改造。
+        deadline（ADR-0039）为 ToolExecutor 给的绝对边界：给了就用它，收不到
+        deadline 才退回 timeout 相对预算；容器启动（ensure_started）吃掉预算
+        后不得再 exec_create——过期后产生新副作用就是 bug。
         """
-        import threading
-
-        self.ensure_started()
-        effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
         started = perf_counter()
-        container = self._container
-        holder: dict = {}
+        effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
+        effective_deadline = (
+            deadline if deadline is not None else started + effective_timeout
+        )
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                return self._interrupted_result(started, effective_timeout, cancelled=True)
+            remaining = effective_deadline - perf_counter()
+            if remaining <= 0:
+                return self._interrupted_result(started, effective_timeout, cancelled=False)
+            if self._exec_lock.acquire(timeout=min(0.05, remaining)):
+                break
+        try:
+            self._drain_pending_cleanup()
+            self._assert_exec_cleanup_healthy()
+            remaining = effective_deadline - perf_counter()
+            if remaining <= 0:
+                return self._interrupted_result(started, effective_timeout, cancelled=False)
+            self.ensure_started()
+            if cancel_event is not None and cancel_event.is_set():
+                return self._interrupted_result(
+                    started, effective_timeout, cancelled=True,
+                )
+            if perf_counter() >= effective_deadline:
+                return self._interrupted_result(
+                    started, effective_timeout, cancelled=False,
+                )
+            return self._exec_locked(
+                command,
+                effective_timeout=effective_timeout,
+                started=started,
+                deadline=effective_deadline,
+                cancel_event=cancel_event,
+                on_output=on_output,
+            )
+        finally:
+            self._exec_lock.release()
+
+    @staticmethod
+    def _interrupted_result(
+        started: float,
+        effective_timeout: float,
+        *,
+        cancelled: bool,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> ExecResult:
+        detail = "\n命令被取消，进程树已终止" if cancelled else (
+            f"\n命令超时（上限 {effective_timeout} 秒）"
+        )
+        return ExecResult(
+            exit_code=-1,
+            stdout=stdout,
+            stderr=f"{stderr}{detail}",
+            duration_ms=round((perf_counter() - started) * 1000, 1),
+            cancelled=cancelled,
+            timed_out=not cancelled,
+        )
+
+    def _drain_pending_cleanup(self) -> None:
+        state = getattr(self, "_exec_state", None)
+        if state is None:
+            return
+        # 「取走待清理项」必须与 `_queue_late_cleanup` 的写入在 `late_cleanup_lock` 下互斥，
+        # **并且要在那个可能耗时 0.5s+5s 的外部清理之前完成**：否则期间并入的新项会被
+        # 旧写法的 `cleanup_pending = False` 一起清掉，那个 exec 就再没有驱动去回收它。
+        with state.late_cleanup_lock:
+            if not state.cleanup_pending:
+                return
+            pending = state.late_cleanup
+            if pending is None:
+                raise RuntimeError("DockerSandbox is awaiting late exec cleanup")
+            state.late_cleanup = None
+            state.cleanup_pending = False
+        self._cleanup_late_exec_create(*pending)
+        self._assert_exec_cleanup_healthy()
+
+    def _assert_exec_cleanup_healthy(self) -> None:
+        state = getattr(self, "_exec_state", None)
+        if getattr(self, "_exec_cleanup_failed", False) or (
+            state is not None and state.cleanup_failed
+        ):
+            raise RuntimeError(
+                "DockerSandbox cannot execute after a previous cleanup was unconfirmed"
+            )
+
+    def _mark_exec_cleanup_failed(self) -> None:
+        self._exec_cleanup_failed = True
+        state = getattr(self, "_exec_state", None)
+        if state is not None:
+            state.cleanup_failed = True
+            container_name = getattr(self, "_container_name", None)
+            if container_name is not None:
+                cls = type(self)
+                with cls._container_exec_states_lock:
+                    cls._poisoned_container_exec_states[container_name] = state
+
+    def _exec_locked(
+        self,
+        command: str,
+        *,
+        effective_timeout: float,
+        started: float,
+        deadline: float,
+        cancel_event,
+        on_output,
+    ) -> ExecResult:
+        api = self._client.api
+        if not hasattr(api, "exec_create"):
+            raise RuntimeError("DockerSandbox 需要支持 low-level exec API 的 Docker SDK")
+
+        wrapped_command = (
+            "printf '\\036AH_PID:%s\\037\\n' \"$$\" >&2; "
+            "trap 'exit 143' TERM INT HUP; "
+            f"/bin/sh -lc {shlex.quote(command)}; status=$?; exit $status"
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            return self._interrupted_result(started, effective_timeout, cancelled=True)
+        complete, created = self._bounded_call(
+            lambda: api.exec_create(
+                self._container.id,
+                ["setsid", "-w", "/bin/sh", "-lc", wrapped_command],
+                workdir=str(self.workspace_root),
+            ),
+            max(0.0, deadline - perf_counter()),
+            cancel_event=cancel_event,
+            on_late_result=lambda late: self._queue_late_cleanup(api, late),
+        )
+        if not complete:
+            return self._interrupted_result(
+                started,
+                effective_timeout,
+                cancelled=bool(cancel_event is not None and cancel_event.is_set()),
+            )
+        if not isinstance(created, dict) or not created.get("Id"):
+            raise RuntimeError("Docker exec_create 返回了无效的 exec ID")
+        if cancel_event is not None and cancel_event.is_set():
+            self._queue_late_cleanup(api, created)
+            return self._interrupted_result(started, effective_timeout, cancelled=True)
+        if perf_counter() >= deadline:
+            self._queue_late_cleanup(api, created)
+            return self._interrupted_result(started, effective_timeout, cancelled=False)
+        exec_id = created["Id"]
+        output_queue: queue.Queue[tuple[bytes | None, bytes | None] | None] = queue.Queue(
+            maxsize=128,
+        )
+        stop_stream = threading.Event()
+        holder: dict[str, object] = {}
+        control_pid: int | None = None
+        control_pending = bytearray()
+        control_prefix = b"\x1eAH_PID:"
+        control_suffix = b"\x1f\n"
+
+        def _put(chunk: tuple[bytes | None, bytes | None] | None) -> None:
+            while not stop_stream.is_set():
+                try:
+                    output_queue.put(chunk, timeout=0.05)
+                    return
+                except queue.Full:
+                    continue
 
         def _run() -> None:
             try:
-                holder["result"] = container.exec_run(
-                    ["/bin/sh", "-lc", command],
-                    demux=True,
-                    workdir=str(self.workspace_root),
-                )
-            except Exception as error:  # noqa: BLE001 — 交给调用方统一处理
+                stream = api.exec_start(exec_id, stream=True, demux=True)
+                holder["stream"] = stream
+                for chunk in stream:
+                    _put(chunk)
+            except Exception as error:  # noqa: BLE001
                 holder["error"] = error
+            finally:
+                _put(None)
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
-        worker.join(effective_timeout)
-        if worker.is_alive():
-            return ExecResult(
-                exit_code=-1,
-                stdout="",
-                stderr=f"命令超时（上限 {effective_timeout} 秒）",
-                duration_ms=round((perf_counter() - started) * 1000, 1),
+        stdout_capture = _CappedCapture(2_000_000)
+        stderr_capture = _CappedCapture(2_000_000)
+        stdout_decoder = StreamDecoder("utf-8")
+        stderr_decoder = StreamDecoder("utf-8")
+
+        def consume(chunk: tuple[bytes | None, bytes | None]) -> None:
+            nonlocal control_pid
+            stdout_payload, stderr_payload = chunk
+            if stderr_payload and control_pid is None:
+                control_pending.extend(stderr_payload)
+                start = control_pending.find(control_prefix)
+                if start < 0:
+                    keep = 0
+                    for size in range(1, len(control_prefix)):
+                        if control_pending.endswith(control_prefix[:size]):
+                            keep = size
+                    if keep:
+                        stderr_payload = bytes(control_pending[:-keep])
+                        del control_pending[:-keep]
+                    else:
+                        stderr_payload = bytes(control_pending)
+                        control_pending.clear()
+                else:
+                    end = control_pending.find(
+                        control_suffix, start + len(control_prefix),
+                    )
+                    if end < 0:
+                        stderr_payload = bytes(control_pending[:start])
+                        del control_pending[:start]
+                    else:
+                        candidate = bytes(control_pending[start + len(control_prefix):end])
+                        try:
+                            decoded_pid = candidate.decode("ascii")
+                        except UnicodeDecodeError:
+                            decoded_pid = ""
+                        if decoded_pid.isdecimal():
+                            control_pid = int(decoded_pid)
+                            stderr_payload = bytes(
+                                control_pending[:start]
+                                + control_pending[end + len(control_suffix):]
+                            )
+                            control_pending.clear()
+                        else:
+                            stderr_payload = bytes(control_pending)
+                            control_pending.clear()
+                chunk = (stdout_payload, stderr_payload)
+            for channel, payload, decoder, capture in (
+                ("stdout", chunk[0], stdout_decoder, stdout_capture),
+                ("stderr", chunk[1], stderr_decoder, stderr_capture),
+            ):
+                if not payload:
+                    continue
+                text = decoder.feed(payload)
+                capture.append(text)
+                if on_output is not None and text:
+                    try:
+                        on_output(channel, text)
+                    except Exception:
+                        logger.debug("Docker output callback failed", exc_info=True)
+
+        cancelled = False
+        timed_out = False
+        finished = False
+        while not finished:
+            remaining = max(0.0, deadline - perf_counter())
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                break
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                chunk = output_queue.get(timeout=min(0.05, remaining))
+            except queue.Empty:
+                continue
+            if chunk is None:
+                finished = True
+            else:
+                consume(chunk)
+
+        if cancelled or timed_out:
+            startup_deadline = perf_counter() + 0.25
+            while control_pid is None and perf_counter() < startup_deadline:
+                try:
+                    chunk = output_queue.get(timeout=0.02)
+                except queue.Empty:
+                    continue
+                if chunk is not None:
+                    consume(chunk)
+            while True:
+                try:
+                    chunk = output_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if chunk is not None:
+                    consume(chunk)
+            stop_stream.set()
+            self._terminate_exec(api, exec_id, control_pid)
+            stream = holder.get("stream")
+            if stream is not None and hasattr(stream, "close"):
+                self._best_effort_bounded_call(stream.close, 0.2)
+            self._stop_container()
+            worker.join(1.0)
+            if worker.is_alive():
+                self._mark_exec_cleanup_failed()
+                raise RuntimeError(
+                    "Docker exec cleanup could not be confirmed: output stream worker did not stop"
+                )
+            while True:
+                try:
+                    chunk = output_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if chunk is not None:
+                    consume(chunk)
+        else:
+            if "error" in holder:
+                self._terminate_exec(api, exec_id, control_pid)
+                stream = holder.get("stream")
+                if stream is not None and hasattr(stream, "close"):
+                    self._best_effort_bounded_call(stream.close, 0.2)
+                try:
+                    self._stop_container()
+                except RuntimeError as cleanup_error:
+                    raise cleanup_error from holder["error"]
+                worker.join(1.0)
+                if worker.is_alive():
+                    self._mark_exec_cleanup_failed()
+                    raise RuntimeError(
+                        "Docker exec cleanup could not be confirmed: output stream worker did not stop"
+                    ) from holder["error"]
+                raise holder["error"]
+
+        if control_pending:
+            text = stderr_decoder.feed(bytes(control_pending))
+            stderr_capture.append(text)
+            if on_output is not None and text:
+                try:
+                    on_output("stderr", text)
+                except Exception:
+                    logger.debug("Docker output callback failed", exc_info=True)
+            control_pending.clear()
+
+        for decoder, capture, channel in (
+            (stdout_decoder, stdout_capture, "stdout"),
+            (stderr_decoder, stderr_capture, "stderr"),
+        ):
+            text = decoder.flush()
+            capture.append(text)
+            if on_output is not None and text:
+                try:
+                    on_output(channel, text)
+                except Exception:
+                    logger.debug("Docker output callback failed", exc_info=True)
+
+        if cancelled or timed_out:
+            stdout, stderr = stdout_capture.value(), stderr_capture.value()
+            if stdout_capture.truncated:
+                stdout += "\n[stdout 超过捕获上限 2000000 字符，已截断]"
+            if stderr_capture.truncated:
+                stderr += "\n[stderr 超过捕获上限 2000000 字符，已截断]"
+            stderr += "\n命令被取消，进程树已终止" if cancelled else (
+                f"\n命令超时（上限 {effective_timeout} 秒）"
             )
-        if "error" in holder:
-            raise holder["error"]
-        result = holder["result"]
-        stdout_bytes, stderr_bytes = result.output
-        # 这里**刻意**保持固定 UTF-8（与 LocalSubprocessSandbox 的 StreamDecoder 不同）：
-        # 产出方是 Linux 容器内的进程，不是宿主控制台——宿主代码页（中文 Windows=GBK）
-        # 与容器输出编码无关，套用只会引入错误。OBS-011 的宿主乱码不适用于本后端。
+            return ExecResult(
+                exit_code=-1, stdout=stdout, stderr=stderr,
+                duration_ms=round((perf_counter() - started) * 1000, 1),
+                cancelled=cancelled,
+                timed_out=timed_out,
+            )
+
+        inspected = api.exec_inspect(exec_id)
+        stdout, stderr = stdout_capture.value(), stderr_capture.value()
+        if stdout_capture.truncated:
+            stdout += "\n[stdout 超过捕获上限 2000000 字符，已截断]"
+        if stderr_capture.truncated:
+            stderr += "\n[stderr 超过捕获上限 2000000 字符，已截断]"
         return ExecResult(
-            exit_code=result.exit_code,
-            stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
-            stderr=(stderr_bytes or b"").decode("utf-8", errors="replace"),
+            exit_code=inspected.get("ExitCode", 0), stdout=stdout, stderr=stderr,
             duration_ms=round((perf_counter() - started) * 1000, 1),
         )
+
+    def _queue_late_cleanup(self, api, created: object) -> None:
+        state = getattr(self, "_exec_state", None)
+        if state is None:
+            self._cleanup_late_exec_create(api, created)
+            return
+        with state.late_cleanup_lock:
+            state.late_cleanup = (api, created)
+            state.cleanup_pending = True
+        state.late_cleanup_event.set()
+        # 立刻在后台驱动一次清理，**不等下一次 `exec()`**：会话结束 / sandbox 被遗弃时
+        # 不会再有 `exec()`，只排队就等于让容器里的迟到进程永远跑下去（#258 P2）。
+        threading.Thread(target=self._drive_late_cleanup, daemon=True).start()
+
+    def _drive_late_cleanup(self) -> None:
+        """从一个游离线程里把排队的迟到清理跑掉。
+
+        清理失败只记日志、**绝不外逃**：这个线程是 detached 的，抛出去只会变成
+        `threading` 的未捕获异常输出，既没人接也掩盖了真正的失败点。
+        """
+        lock = getattr(self, "_exec_lock", None)
+        try:
+            if lock is None:
+                self._drain_pending_cleanup()
+            else:
+                # 必须与 `exec()` 共用 `_exec_lock`：它才是「同一时刻只有一个 exec 在跑」的
+                # 那把锁；调用方若正持锁（create 之后才被 cancel/deadline 命中的那条路径），
+                # 本线程会等它 release 后再跑。
+                with lock:
+                    self._drain_pending_cleanup()
+        except Exception:
+            logger.exception("DockerSandbox 后台驱动迟到的 exec 清理失败")
+
+    def _cleanup_late_exec_create(self, api, created: object) -> None:
+        """Reap an exec created after its caller already timed out/cancelled."""
+        if not isinstance(created, dict) or not created.get("Id"):
+            return
+        if self._container is None:
+            # 容器已被 `stop()` / `delete()` 拆掉：没有可回收的宿主进程，也**不能**因此把
+            # `_container_name` 记进进程级 `_poisoned_container_exec_states`——那是永久性的，
+            # 会让此后所有同名容器都 exec 不了。
+            return
+        try:
+            # A late exec has no PID marker yet; fail closed by stopping the
+            # owning container rather than leaving an untracked process behind.
+            self._stop_container()
+        except Exception:
+            self._mark_exec_cleanup_failed()
+            logger.exception("迟到的 Docker exec 创建结果无法回收")
+
+    @staticmethod
+    def _best_effort_bounded_call(call, timeout: float) -> tuple[bool, object | None]:
+        try:
+            return DockerSandbox._bounded_call(call, timeout)
+        except Exception as error:  # noqa: BLE001
+            logger.debug("Docker cleanup call failed: %s", type(error).__name__)
+            return False, None
+
+    def _stop_container(self) -> None:
+        kill_error: Exception | None = None
+        try:
+            complete, _ = self._bounded_call(self._container.kill, 0.5)
+            if not complete:
+                raise TimeoutError("Docker container kill timed out")
+        except Exception as error:  # noqa: BLE001
+            kill_error = error
+
+        try:
+            complete, _ = self._bounded_call(self._container.wait, 5.0)
+            if not complete:
+                raise TimeoutError("Docker container stop wait timed out")
+        except Exception as error:
+            self._mark_exec_cleanup_failed()
+            logger.debug(
+                "Docker container stop could not be confirmed (kill error: %s)",
+                type(kill_error).__name__ if kill_error is not None else "none",
+            )
+            raise RuntimeError(
+                "Docker exec cleanup could not be confirmed: container did not stop"
+            ) from error
+
+    @staticmethod
+    def _bounded_call(
+        call,
+        timeout: float,
+        *,
+        cancel_event=None,
+        on_late_result=None,
+    ) -> tuple[bool, object | None]:
+        holder: dict[str, object] = {}
+        expired = threading.Event()
+
+        def run() -> None:
+            try:
+                result = call()
+                holder["result"] = result
+                if expired.is_set() and on_late_result is not None:
+                    on_late_result(result)
+            except Exception as error:  # noqa: BLE001
+                holder["error"] = error
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        deadline = perf_counter() + timeout
+        while worker.is_alive():
+            if cancel_event is not None and cancel_event.is_set():
+                expired.set()
+                return False, None
+            remaining = deadline - perf_counter()
+            if remaining <= 0:
+                expired.set()
+                return False, None
+            worker.join(min(0.05, remaining))
+        if "error" in holder:
+            raise holder["error"]
+        return True, holder.get("result")
+
+    def _terminate_exec(self, api, exec_id: str, pid: int | None) -> None:
+        if pid is None or pid <= 1:
+            logger.warning("Docker exec %s did not publish a kill PID", exec_id)
+            return
+        workdir = str(self.workspace_root)
+
+        def kill(signal_name: str):
+            command = (
+                "signal=$2; "
+                "kill_tree() { "
+                "for child in $(cat /proc/$1/task/$1/children 2>/dev/null); do "
+                "kill_tree $child; "
+                "done; "
+                "kill -$signal -- -$1 2>/dev/null; "
+                "}; "
+                "kill_tree $1"
+            )
+            return self._container.exec_run(
+                ["/bin/sh", "-lc", command, "--", str(pid), signal_name],
+                workdir=workdir,
+            )
+
+        self._best_effort_bounded_call(lambda: kill("TERM"), 0.2)
+        sleep(0.2)
+        self._best_effort_bounded_call(lambda: kill("KILL"), 0.2)
 
     def list_files(self, pattern: str) -> list[str]:
         """枚举容器 workspace 内匹配 glob 模式的文件，返回相对 /workspace 路径（排序）。
@@ -275,3 +767,9 @@ class DockerSandbox(Sandbox):
             self._client.volumes.get(self._volume_name).remove(force=True)
         except docker.errors.NotFound:
             pass
+        state = getattr(self, "_exec_state", None)
+        if state is not None:
+            cls = type(self)
+            with cls._container_exec_states_lock:
+                if cls._poisoned_container_exec_states.get(self._container_name) is state:
+                    cls._poisoned_container_exec_states.pop(self._container_name, None)

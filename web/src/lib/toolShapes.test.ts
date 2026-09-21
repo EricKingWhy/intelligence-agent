@@ -1,5 +1,5 @@
 /** toolShapes 纯函数契约——后端 df4f7d8 工具结果标记的解析真值。
- * 标记格式以后端 HANDOFF_FRONTEND_SYNC.md §1.3 为准，零伪造：不匹配即 null。 */
+ * 标记格式以后端 docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md §1.3 为准，零伪造：不匹配即 null。 */
 
 import { describe, expect, it } from 'vitest';
 import {

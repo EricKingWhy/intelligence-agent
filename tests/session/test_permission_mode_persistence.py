@@ -32,6 +32,7 @@ from agent_harness.session.approval import (
 )
 from agent_harness.session.service import SessionService
 from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.web.app import session_service
 
 
 def _state(tmp_path) -> MagicMock:
@@ -90,7 +91,7 @@ def test_explicit_permission_mode_is_persisted_in_session_started(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             permission_mode=PermissionPolicy.READ_ONLY,
             permission_mode_explicit=True,
         )
@@ -106,7 +107,7 @@ def test_undeclared_permission_mode_writes_no_key(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             permission_mode_explicit=False,
         )
@@ -121,7 +122,7 @@ def test_undeclared_permission_mode_writes_no_key(tmp_path):
 def _resume(model_state: MagicMock, session_id: str) -> list[dict]:
     captured, patcher = _capture_build()
     with patcher:
-        service = SessionService(model_state)
+        service = session_service(model_state)
         asyncio.run(
             service.resume_and_launch(
                 session_id=session_id, task="再来一轮", amend=None
@@ -136,7 +137,7 @@ def test_resume_restores_declared_mode_and_interactive_callback(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             permission_mode=PermissionPolicy.READ_ONLY,
             permission_mode_explicit=True,
         )
@@ -158,7 +159,7 @@ def test_resume_danger_full_access_stays_non_interactive(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             permission_mode=PermissionPolicy.DANGER_FULL_ACCESS,
             permission_mode_explicit=True,
         )
@@ -176,7 +177,7 @@ def test_resume_without_declared_mode_keeps_legacy_behavior(tmp_path):
     state = _state(tmp_path)
     _, patcher = _capture_build()
     with patcher:
-        session_id = _create(SessionService(state))
+        session_id = _create(session_service(state))
 
     captured = _resume(state, session_id)
 
@@ -193,7 +194,7 @@ def test_explicit_auto_approve_false_is_persisted(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             auto_approve_explicit=True,
             auto_approve=False,
         )
@@ -207,7 +208,7 @@ def test_undeclared_auto_approve_writes_no_key(tmp_path):
     state = _state(tmp_path)
     _, patcher = _capture_build()
     with patcher:
-        session_id = _create(SessionService(state))
+        session_id = _create(session_service(state))
 
     assert "auto_approve" not in state.store.read_events(session_id)[0].data
 
@@ -219,7 +220,7 @@ def test_resume_restores_deny_route_instead_of_auto_approving(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             auto_approve_explicit=True,
             auto_approve=False,
         )
@@ -238,7 +239,7 @@ def test_resume_declared_auto_approve_true_keeps_auto_approve(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             auto_approve_explicit=True,
             auto_approve=True,
         )
@@ -254,7 +255,7 @@ def test_declared_permission_mode_takes_priority_over_auto_approve(tmp_path):
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(
-            SessionService(state),
+            session_service(state),
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             permission_mode_explicit=True,
             auto_approve_explicit=True,

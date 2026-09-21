@@ -9,8 +9,9 @@
  *  用到的真实目录（都是**已存在**的目录，测试不创建也不删除任何目录）：
  *   - `.scratch/ws5-live-project`：空的临时目录 → 注册/改名/删除（0 会话的软删除路径）；
  *   - `.agent/workspace/workspaces/ws-delete-me`：盘上真实存在、内含 1 个真实会话的目录
- *     → 注册 → attach（cwd 相等，后端放行）→ detach → 再 attach → **软删除**
- *     （sessions_detached=1，会话与目录都还在）→ 回到测试前状态。
+ *     → **注册即归入**（AC5 / #169，`projects.py:249` 把 cwd 匹配的既有会话一并挂上）
+ *     → detach → 再 attach → **软删除**（sessions_detached=1，会话与目录都还在）
+ *     → 回到测试前状态。
  *
  *  结束时把项目/会话两份 JSON 快照与开始时**逐字段比对**：真机验收必须证明"测完
  *  状态回到基线"，否则一次验收就污染了用户的真实分组。 */
@@ -136,17 +137,26 @@ test('真机：项目分组 / 新建 / 重命名 / attach / detach / 重排 / �
   await delDialog.getByRole('button', { name: '完成' }).click();
   await expect(page.locator('.rail-project-title')).toHaveCount(2);
 
-  // ③ 注册盘上真实存在、内含 1 个真实会话的目录 → attach（cwd 相等，后端放行）
+  // ③ 注册盘上真实存在、内含 1 个真实会话的目录 → **注册即归入**（AC5 / #169：
+  //    `projects.py:249` 把 cwd 匹配的既有会话一并挂上，响应带 sessions_attached=1）。
+  //    旧断言「注册后仍在未分组」与 AC5 正面冲突（2026-09-18 更正为过期规格，非放宽校验）。
+  const registered = page.waitForResponse(
+    (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/projects',
+  );
   await registerProject(page, WS_DELETE_ME);
+  expect((await (await registered).json()).sessions_attached).toBe(1);
   await expect(project(page, 'ws-delete-me')).toBeVisible();
-  await expect(ungrouped(page).locator('.session-item-id', { hasText: SESSION_ID.slice(0, 12) }))
-    .toHaveCount(1);
-  await row(page, SESSION_ID.slice(0, 12)).locator('.rail-menu-btn').click();
-  await page.getByRole('menuitem', { name: '加入项目…' }).click();
-  await page.locator('.project-pick-item').filter({ hasText: 'ws-delete-me' }).click();
   await expect
     .poll(() => project(page, 'ws-delete-me').locator('.session-item-id').count())
     .toBe(1);
+  await expect(ungrouped(page).locator('.session-item-id', { hasText: SESSION_ID.slice(0, 12) }))
+    .toHaveCount(0);
+  // 幂等重放（同一规范路径）→ 既有实体 + sessions_attached=0 + 账本不重复入序（AC5）
+  const replay = await page.request.post('/api/projects', { data: { path: WS_DELETE_ME } });
+  expect(replay.status()).toBe(200);
+  const replayed: ProjectRow & { sessions_attached: number } = await replay.json();
+  expect(replayed.sessions_attached).toBe(0);
+  expect(replayed.session_ids).toEqual([SESSION_ID]);
   await page.screenshot({ path: `${SHOT_DIR}/04-attached-under-project.png` });
 
   // ④ detach → 回到未分组（会话与日志都不动）

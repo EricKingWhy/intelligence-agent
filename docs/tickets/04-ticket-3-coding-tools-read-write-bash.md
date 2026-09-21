@@ -28,6 +28,8 @@
 - **WriteTool**（`side_effect = MUTATING`）：args_schema 含 `path: str, content: str`；调 `sandbox.write_text(path, content)`；成功返回 `ToolResult.success(data={"path": ..., "bytes_written": ...})`。
 - **BashTool**（`side_effect = MUTATING`）：args_schema 含 `command: str`；调 `sandbox.exec(command)`；**无论 exit_code 几**都返回 `ToolResult.ok=True`，`data = {exit_code, stdout, stderr, duration_ms}`（ADR-0002 不变量）。只有 Sandbox 本身抛异常（如 PermissionError / 容器崩）才返回 `ToolResult.failure`，PermissionError 映射成 `ErrorCode.PERMISSION_DENIED`。
 
+> ⚠ **2026-09-21 更正**：上面「无论 exit_code 几都 ok=True」还有**第二种**例外——执行预算到期（`ExecResult.timed_out`）返回 `ok=False / TIMEOUT`。见 `docs/adr/0002-bash-nonzero-exit-is-tool-success.md` 的「修订」节与 `docs/adr/0039-tool-executor-owns-absolute-deadline.md`。
+
 新增模块：`src/agent_harness/tools/`（`read.py` / `write.py` / `bash.py` + `__init__.py` 导出）。
 
 ## Acceptance criteria
