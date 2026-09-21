@@ -332,8 +332,11 @@ export interface ApiMock {
    *  成功：返回 `{session_id, permission_mode}` JSON（非 SSE），只写 session/started，
    *  无 run 帧。 */
   emptySessionError?: { status: number; detail: string };
-  /** #204 裁定 §3 考点：launch=false 响应里回传**与请求不同的** permission_mode
-   *  （模拟后端归一化/接管）——pill 必须显示**响应**的档位而不是前端本地选中值。
+  /** launch=false 的**生效**档位与请求不同时用它（模拟后端归一化/接管）。
+   *  回执与 `session/started` 事件注入的是**同一个值**——两条通道在真后端同源
+   *  （`service.py` 同一个 `permission_mode`），所以它不区分"pill 读的是哪条"。
+   *  #236 起 pill 的真值只来自事件投影；「读事件还是读回执」的**判别性**锁在
+   *  `control-row.spec.ts`（那条路径压根没有创建回执）。
    *  不设 = 回显请求的档位（缺省 workspace-write）。 */
   emptySessionPermissionOverride?: string;
   // ── WS-7 / #170 宿主目录列举 ──
@@ -523,8 +526,8 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
           );
         }
         const sid = `empty-${sessionState.length + 1}`;
-        // #204 裁定 §3 考点：`emptySessionPermissionOverride` 模拟后端归一化/接管
-        // （响应档位 ≠ 请求档位）——pill 必须显示响应的档位，不是前端本地选中值。
+        // `emptySessionPermissionOverride` 模拟后端归一化/接管（生效档位 ≠ 请求档位）。
+        // 回执与 started 事件注入同一个值（真后端同源），见该字段的注释。
         const permissionMode =
           mock.emptySessionPermissionOverride ??
           (typeof body.permission_mode === 'string' ? body.permission_mode : 'workspace-write');
@@ -547,6 +550,9 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
         );
         project.session_ids.unshift(sid); // 账本前插（与 attach 语义一致）
         // durable log 只有一条 session/started（无 run 帧——launch=false 不启动 run）。
+        // ⚠ 本夹具**恒写** permission_mode 键，而真后端只在用户**显式声明**档位时才写
+        // （`service.py:526-529`）⇒「默认档创建 → 事件无键 → pill 显示未选「权限」」
+        // 这条真机路径目前没有 e2e 覆盖（#236 记为已知残留，未修）。
         sessionEvents.set(sid, [
           { type: 'session/started', data: { cwd, permission_mode: permissionMode }, seq: 1, session_id: sid, time: T },
         ]);

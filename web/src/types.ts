@@ -506,15 +506,26 @@ export interface ConversationState {
    *  两者合计 = 本会话出现过的全部审批。Inspector PERMISSION 段据此显示"裁决结果"
    *  （#184）。决议事件**不改写**任何 `pending_approvals` 之外的状态。 */
   approval_decisions: ApprovalDecision[];
-  /** 本会话生效的审批阈值（`tool/approval-requested.data.policy`，逐事件折叠）。
+  /** 本会话**观测到的**审批阈值（`tool/approval-requested.data.policy`，逐事件折叠）。
    *
    *  为什么折叠而不是渲染时扫事件：扫描要 O(events)（"整个会话没有审批"是**最坏**情况，
    *  必须扫完），而这段在 Inspector 打开时每次渲染都会跑。折叠成字段后每事件 O(1)——
    *  与 `model` / `usage_total` 同一路数（投影的职责就是增量折叠）。
    *
-   *  为什么这是唯一来源：`permission_mode` 不在任何 SessionEvent 里、也没有 GET 接口，
-   *  审批请求携带的 `policy` 才是 ToolExecutor 当时实际用的阈值。无审批事件 → null。 */
+   *  与 `session_permission_mode` 是**两件事**（#236 更正）：那个是"会话被定为哪一档"
+   *  （创建时声明、此后不可变），这个是"审批真的发生那一刻，ToolExecutor 用的是哪一档"。
+   *  观测不到就 null——不拿声明值冒充观测值（反过来也不行，两者可以合法地不同）。 */
   permission_policy: string | null;
+  /** 本会话**声明的**权限档（`session/started.data.permission_mode`，与 `cwd` 同级）。
+   *
+   *  F15 #234 起这条事实有了家：创建会话时用户**显式改档才写键**，此后不可变——续聊
+   *  `POST /messages` 的契约压根不收该键。**只认第一条** `session/started`（与后端
+   *  `declared_permission_mode` 同一规矩：不可变属性，重放不得被后来的值改写）。
+   *  创建时未声明、或事件窗口从中间开始 → null = "后端默认档"，不编字面值冒充。
+   *
+   *  消费者是 composer 的权限 pill（#236）：会话内它显示这里的真值并转为只读，新会话
+   *  时才把本地选择当创建意图发出去。 */
+  session_permission_mode: string | null;
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22).
    *

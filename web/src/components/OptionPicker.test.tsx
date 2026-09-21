@@ -6,6 +6,7 @@
  *  - 目录在场：trigger 渲染 + `aria-label` 逐字在场（由调用方传入，组件不内置默认值）；
  *  - value 有值 → trigger 显示该条目标题；value 不在目录里 → 归一化为 placeholder；
  *  - disabled=true → trigger 标记 aria-disabled；
+ *  - disabled + disabledHint → trigger 的 title 换成"为什么不可点"（#236）；
  *  - `toCatalogOptions` 是真目录 → 选项的唯一映射点（空 description 不产出占位文案）。
  *
  *  合并前这四类断言分散在 ControlPicker.test.tsx 与 ContextProviderPicker.test.tsx
@@ -73,6 +74,21 @@ describe('OptionPicker（Radix Popover 契约，#201）', () => {
     // 而 aria-disabled 正是它在守的东西（两轴 review 的 Standards 轴指出）。
     const html = render({ options: toCatalogOptions(ENTRIES), disabled: true });
     expect(html).toContain('aria-disabled="true"');
+  });
+
+  it('disabled + disabledHint → title 换成"为什么不可点"；未 disabled 时 hint 不生效（#236）', () => {
+    const locked = render({
+      options: toCatalogOptions(ENTRIES), value: 'ask', disabled: true,
+      disabledHint: '权限档在会话创建时确定，会话内不可修改',
+    });
+    expect(locked).toContain('title="权限档在会话创建时确定，会话内不可修改"');
+
+    // 未锁定时 hint 只是被传进来，不参与 title（title 仍由选中条目决定）
+    const editable = render({
+      options: toCatalogOptions(ENTRIES), value: 'ask', disabledHint: '不该出现',
+    });
+    expect(editable).not.toContain('不该出现');
+    expect(editable).toContain('Ask Each Time');
   });
 
   it('弹层内容不在 SSR HTML 中（Radix portal 是客户端渲染）', () => {

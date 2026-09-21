@@ -58,6 +58,7 @@ import {
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
+import { composerPermissionMode } from './lib/permission';
 import type { ToolCall, PresetTask, AgentEvent, Project, UndeliveredInput } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
@@ -464,6 +465,20 @@ export default function App() {
     [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
 
+  // #236：权限 pill 按"有没有会话"换源，且会话内一律只读（续聊 amend 面不含
+  // `permission_mode`，可编辑就是骗人）。取值 + 跨会话身份闸都在纯函数
+  // `composerPermissionMode` 里（App 没有 SSR 测试车道，逻辑放 lib 直测）。
+  // 锁定条件取 `selectedId !== null || streaming`：两半合起来 = `mode.kind !== 'idle'`
+  // （见 `useSession.ts:408-409`），也就是"这次 composer 不是新会话"。只写前者会漏掉
+  // 「提交新任务 → 首帧到达」这段 `live(sessionId: null)` 窗口（降级路径下可长到 run 结束），
+  // 那时改档同样不生效。
+  const permissionModeLocked = selectedId !== null || streaming;
+  const displayedPermissionMode = composerPermissionMode(
+    selectedId,
+    conversation,
+    selectedPermissionMode,
+  );
+
   const handleSubmit = useCallback(
     (task: string) => {
       focusRun();
@@ -511,9 +526,11 @@ export default function App() {
           auto_approve: true,
           ...(permissionMode ? { permission_mode: permissionMode } : {}),
         });
-        // #204 裁定 §3：用后端回传的会话级权限档初始化 composer 权限 pill——
-        // 不要各自取默认值，那正是不一致的来源（弹窗本地值只是请求意图，不参与）。
-        setSelectedPermissionMode(created.permissionMode);
+        // #236：这里**不再**用回执初始化 composer 权限 pill（#204 裁定 §3 的旧做法）。
+        // pill 现在读会话自己的投影（`session/started`，见 `displayedPermissionMode`）——
+        // 回执驱动的本地状态是第二套真相，而且有实际后果：它会让**下一次新建会话**凭空
+        // 继承这一档，而显式发 `permission_mode` 会把那个会话从"后端默认（自动批准）"
+        // 悄悄变成"交互式审批"（后端 `permission_mode_explicit` 只认"键在不在"）。
         // 空会话创建后**选中它**（终审 P1 修复：不选中的话用户在 idle 态输入的
         // 第一条消息会走 submitTask 另造一个**没有 cwd** 的新会话——弹窗请他
         // "在输入框发第一条消息"的那个会话反而成了孤儿）。选中走既有
@@ -1110,8 +1127,9 @@ export default function App() {
                     selectedModel={selectedModel}
                     onModelChange={handleModelChange}
                     permissionModes={permissionModes}
-                    selectedPermissionMode={selectedPermissionMode}
+                    selectedPermissionMode={displayedPermissionMode}
                     onPermissionModeChange={setSelectedPermissionMode}
+                    permissionModeLocked={permissionModeLocked}
                     agentProfiles={agentProfiles}
                     selectedAgentProfile={selectedAgentProfile}
                     onAgentProfileChange={setSelectedAgentProfile}

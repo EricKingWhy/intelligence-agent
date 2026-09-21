@@ -1184,7 +1184,9 @@ function captureFetchWithHeaders(
 }
 
 describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3）', () => {
-  it('POST /api/sessions?launch=false：payload 无 task，返回 {session_id, permission_mode}', async () => {
+  it('POST /api/sessions?launch=false：payload 无 task，只消费回执的 session_id（#236）', async () => {
+    // 回执里后端仍会带 permission_mode——前端**不消费**它（pill 真值来自
+    // `session/started` 投影），所以这里刻意带上，断言它不参与解析结果。
     const cap = captureFetchWithHeaders(200, {
       session_id: 'sid-1',
       permission_mode: 'workspace-write',
@@ -1197,7 +1199,7 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
     expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', max_steps: 10, auto_approve: true });
     expect(cap.calls[0].body).not.toHaveProperty('task');
-    expect(created).toEqual({ sessionId: 'sid-1', permissionMode: 'workspace-write' });
+    expect(created).toEqual({ sessionId: 'sid-1' });
   });
 
   it('显式 permission_mode → 带键（弹窗选的档 = 会话级权限，#204 裁定 §3）', async () => {
@@ -1219,10 +1221,10 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     });
   });
 
-  it('响应缺 permission_mode → 抛错（零伪造：pill 初始化需要它，编默认值正是不一致的来源）', async () => {
+  it('响应缺 permission_mode → 照常成功（#236：该键已无消费者，缺席不该是错误）', async () => {
     captureFetchWithHeaders(200, { session_id: 'sid-3' });
     await expect(createEmptySession({ cwd: 'D:/x', max_steps: 10, auto_approve: true }))
-      .rejects.toThrow(/permission_mode/);
+      .resolves.toEqual({ sessionId: 'sid-3' });
   });
 
   it('422 → 抛 SessionError，message 是后端 detail 原文（浮层就地显示）', async () => {

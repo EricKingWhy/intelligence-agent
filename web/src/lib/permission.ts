@@ -1,8 +1,9 @@
-/** Inspector PERMISSION 段（#184）的派生视图与措辞。
+/** PERMISSION 域的派生视图与措辞：Inspector PERMISSION 段（#184）+ composer 权限
+ *  pill 的取值（#236）。
  *
  *  为什么单独一个模块：本仓没有 jsdom，组件测试是 SSR 渲染，交互与**措辞规则**只能靠
- *  "纯函数 + 单测"覆盖。把"无待审批怎么说""拿不到权限档叫什么"这类判断放在这里，
- *  组件就只剩接线（与 `lib/commandOutput`、`lib/capabilities` 同一路数）。
+ *  "纯函数 + 单测"覆盖。把"无待审批怎么说""拿不到权限档叫什么""pill 该显示哪一档"
+ *  这类判断放在这里，组件就只剩接线（与 `lib/commandOutput`、`lib/capabilities` 同一路数）。
  *
  *  **两条不许违反的规则**（PRD §4 No fake values）：
  *  1. 拿不到的数据渲染 `—`（或如实说明为什么拿不到），**不填 0、不编占位数字**；
@@ -78,4 +79,26 @@ export function permissionView(state: ConversationState): PermissionView {
     })),
     decisionsLabel: decisions.length === 0 ? '尚无裁决' : `${decisions.length} 条`,
   };
+}
+
+/** composer 权限 pill 该显示哪一档（#236）——按"有没有选中会话"换源。
+ *
+ *  - **新会话**（`selectedSessionId === null`）：显示本地创建意图（它会随 create 请求
+ *    发出，是这个会话档位的成因）。
+ *  - **会话内**：显示会话真值（`session_permission_mode`，投影自 `session/started`；
+ *    F15 #234 起档位是会话属性、创建后不可变）。
+ *
+ *  会话内取真值必须过一道**身份闸**（`conversation.session_id === selectedSessionId`）：
+ *  切会话时 `conversation` 仍是**旧会话**的（history 正在加载，见 `useSession.ts` 的
+ *  `shouldShowHistoryLoading`）——不加闸就会拿旧档冒充新会话，而"档位"是这个 UI 唯一的
+ *  权限承诺，错一格就是"UI 说只读、后端自动放行写操作"（正是本票的 P2）。身份不符 /
+ *  还没加载 → null ⇒ 渲染占位「权限」＝未选/后端默认，**不猜**（No fake values）。 */
+export function composerPermissionMode(
+  selectedSessionId: string | null,
+  conversation: ConversationState | null,
+  localChoice: string | null,
+): string | null {
+  if (selectedSessionId === null) return localChoice;
+  if (!conversation || conversation.session_id !== selectedSessionId) return null;
+  return conversation.session_permission_mode;
 }

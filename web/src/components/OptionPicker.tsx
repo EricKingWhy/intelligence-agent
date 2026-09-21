@@ -132,6 +132,9 @@ interface Props {
    *  （#201，文案组装在 `lib/agentProfileScope.ts`）。 */
   footer?: ReactNode;
   disabled?: boolean;
+  /** `disabled` 时 trigger 的 `title`（说清**为什么**不可点）。缺省 → 沿用原 title 规则。
+   *  #236：权限 pill 在会话内转为只读，需要一句能解释原因的悬停文案。 */
+  disabledHint?: string;
 }
 
 export function OptionPicker({
@@ -144,6 +147,7 @@ export function OptionPicker({
   onChange,
   footer,
   disabled = false,
+  disabledHint,
 }: Props) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(
@@ -178,7 +182,7 @@ export function OptionPicker({
           type="button"
           className="composer-control"
           aria-label={ariaLabel}
-          title={triggerTitle}
+          title={disabled && disabledHint ? disabledHint : triggerTitle}
           // Radix Popover 注入 aria-haspopup/aria-expanded；aria-disabled 让 SSR 可见
           aria-disabled={disabled || undefined}
           disabled={disabled}

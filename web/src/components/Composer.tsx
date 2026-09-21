@@ -16,6 +16,10 @@ import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 
+/** #236：会话内权限 pill 只读时的悬停说明——说清**为什么**不可点（档位是会话属性，
+ *  创建后不可变；续聊 amend 面不含该键，改了也不生效）。 */
+const PERMISSION_MODE_LOCKED_HINT = '权限档在会话创建时确定，会话内不可修改';
+
 interface Props {
   streaming: boolean;
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
@@ -38,6 +42,10 @@ interface Props {
   permissionModes?: CatalogEntry[];
   selectedPermissionMode?: string | null;
   onPermissionModeChange?: (id: string | null) => void;
+  /** #236：会话已定档 → 权限 pill **只读**。续聊 amend 面不含 `permission_mode`
+   *  （见 `lib/amend.ts`），所以会话内改档从来就不生效——留着可编辑就是骗人：用户把
+   *  pill 拨到「只读」，以为此后写操作会弹审批，后端仍按**创建时**的档执行。 */
+  permissionModeLocked?: boolean;
   /** GET /api/agent-profiles 清单。空 → 隐藏控件。 */
   agentProfiles?: CatalogEntry[];
   selectedAgentProfile?: string | null;
@@ -75,6 +83,7 @@ export const Composer = memo(function Composer({
   permissionModes = [],
   selectedPermissionMode = null,
   onPermissionModeChange,
+  permissionModeLocked = false,
   agentProfiles = [],
   selectedAgentProfile = null,
   onAgentProfileChange,
@@ -300,6 +309,8 @@ export const Composer = memo(function Composer({
                 并点名「不得内置默认值，否则合并本身就会顺手把英文名改掉，等于偷偷做了 B 项」。
                 所以这里传的是各调用点原来的名字——顺手统一会连同 locator 一起改，
                 正是那条冻结结论要防的事。要统一请先改票面结论。 */}
+            {/* #236：会话已定档 → 只读展示（真值来自 `session/started` 投影，由 App 传入）；
+                新会话 → 仍是创建期选择（随 create 请求发出）。 */}
             <OptionPicker
               ariaLabel="权限模式"
               title="工具调用如何批准？"
@@ -308,7 +319,12 @@ export const Composer = memo(function Composer({
               onChange={onPermissionModeChange ?? (() => {})}
               icon={Shield}
               placeholder="权限"
-              disabled={locked}
+              disabled={locked || permissionModeLocked}
+              // 审批等待时 `locked` 才是**操作性的**禁用原因（旁边另有可见提示），
+              // 别用"会话内不可改"顶掉 trigger 原有的「当前档位 + 后端描述」title。
+              disabledHint={
+                permissionModeLocked && !locked ? PERMISSION_MODE_LOCKED_HINT : undefined
+              }
             />
             <OptionPicker
               ariaLabel="Agent Profile"

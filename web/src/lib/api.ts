@@ -207,18 +207,20 @@ export interface CreateEmptySessionPayload {
   workspace?: string;
 }
 
-/** #204：launch=false 的创建回执。`permissionMode` 是**后端真实写入的会话级档位**
- *  （省略时是默认 workspace-write）——前端用它初始化 composer 权限 pill（裁定 §3：
- *  不要各自取默认值，那正是不一致的来源）。 */
+/** #204：launch=false 的创建回执。只留前端**真正消费**的 `sessionId`。
+ *
+ *  #236：这里曾经带 `permissionMode`（#204 裁定 §3 用它初始化 composer 权限 pill）。
+ *  那个消费者已随本票下线——pill 现在读会话自己的投影（`session/started` →
+ *  `ConversationState.session_permission_mode`），回执驱动的本地状态正是要消灭的
+ *  第二套真相。**没有消费者的字段与它的硬校验一起删掉**：留着只会让"后端哪天不返回
+ *  这个键"变成一条无人受益的假报错（响应里的该键仍被忽略，不影响解析）。 */
 export interface CreatedEmptySession {
   sessionId: string;
-  permissionMode: string;
 }
 
 /** POST /api/sessions?launch=false —— 只建会话，不启动 run、不返回 SSE（#204）。
- *  返回会话 JSON（刻意小形状 `{session_id, permission_mode}`）。响应缺
- *  permission_mode 时报错而不是编默认值：pill 初始化需要后端真值，编了默认值
- *  正是裁定 §3 要消灭的不一致来源。 */
+ *  响应形状 `{session_id, permission_mode}`；前端只用 `session_id`（见
+ *  `CreatedEmptySession`），`permission_mode` 缺席也不再报错。 */
 export async function createEmptySession(
   payload: CreateEmptySessionPayload,
 ): Promise<CreatedEmptySession> {
@@ -244,10 +246,7 @@ export async function createEmptySession(
   if (typeof r.session_id !== 'string' || !r.session_id) {
     throw new SessionError(res.status, 'create 会话回执缺少 session_id');
   }
-  if (typeof r.permission_mode !== 'string' || !r.permission_mode) {
-    throw new SessionError(res.status, 'create 会话回执缺少 permission_mode（权限 pill 初始化需要它）');
-  }
-  return { sessionId: r.session_id, permissionMode: r.permission_mode };
+  return { sessionId: r.session_id };
 }
 
 /** B1 契约通用清单条目——{id, display_name, description}。
