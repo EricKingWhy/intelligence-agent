@@ -93,6 +93,10 @@ def test_status_map_is_the_audited_contract():
         # 两侧目录可能都在，是**归属事实**矛盾（不是 404 的"目录没了"，也不是 422 的
         # "请求写错"）。续聊拒绝静默选边。
         "WorkspaceBindingConflict": 409,
+        # F18-A / #282：会话有**未裁决**的审批时拒绝改权限档——409（状态冲突）。
+        # 刻意与 `ActiveRunConflict`（同为 409）分开：那条是「有在途 run 就不许并发」，
+        # 本条只针对「有待裁决会议」，与在途 run 本身无关。
+        "PendingApprovalConflict": 409,
     }
 
 

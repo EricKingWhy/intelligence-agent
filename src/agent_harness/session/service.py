@@ -43,6 +43,8 @@ from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
     SESSION_AUTO_APPROVE_KEY,
     SESSION_PERMISSION_MODE_KEY,
+    PermissionChange,
+    append_permission_change,
 )
 from agent_harness.session.approval import (
     InteractiveCallbackHolder as _InteractiveCallbackHolder,
@@ -51,10 +53,10 @@ from agent_harness.session.approval import (
     build_approval_callback as _build_approval_callback_impl,
 )
 from agent_harness.session.approval import (
-    declared_auto_approve as _declared_auto_approve,
+    effective_auto_approve as _effective_auto_approve,
 )
 from agent_harness.session.approval import (
-    declared_permission_mode as _declared_permission_mode,
+    effective_permission_mode as _effective_permission_mode,
 )
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
@@ -71,6 +73,7 @@ from agent_harness.session.errors import (
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
+    PendingApprovalConflict,
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
@@ -742,20 +745,20 @@ class SessionService:
         _, wiring = await self._get_wiring()
         await self._ensure_stores()
 
-        # F15 #234：权限决策（档位 + 是否自动批准）从事件流派生（创建时显式声明过才
-        # 作数）。续聊路径没有创建请求可读，硬编码默认值就等于"用户的选择只管第一条
-        # 消息"——所以在续聊入口把会话级决策与审批回调一起重建，和 create_and_launch
-        # 同一套装配。
+        # F15 #234 + F18-A #282：权限决策（档位 + 是否自动批准）从事件流派生——创建时
+        # 显式声明**或**会话内改过档（permission/changed，最后一次胜）都作数。续聊路径
+        # 没有创建请求可读，硬编码默认值就等于"用户的选择只管第一条消息"——所以在续聊
+        # 入口把会话级决策与审批回调一起重建，和 create_and_launch 同一套装配。
         #
         # 未声明（历史会话 / 用户没选）→ 行为逐字不变：workspace-write + None
         # （build_runtime 对 None 的语义 = 安全默认 auto-approve）。
-        declared_mode = _declared_permission_mode(existing)
-        declared_auto = _declared_auto_approve(existing)
+        effective_mode = _effective_permission_mode(existing)
+        effective_auto = _effective_auto_approve(existing)
         interactive = False
         approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder
-        if declared_mode is None:
+        if effective_mode is None:
             permission_mode = PermissionPolicy.WORKSPACE_WRITE
-            if declared_auto is False:
+            if effective_auto is False:
                 # deny 路由（创建时声明了"不自动批准"且未选档位）也只能从事件流复原：
                 # 它同样不落盘的话，第二条消息起会变成全自动批准——与该路由的承诺相反。
                 approval_callback = await self._build_approval_callback(
@@ -768,10 +771,10 @@ class SessionService:
             else:
                 approval_callback = None
         else:
-            permission_mode = declared_mode
+            permission_mode = effective_mode
             # danger-full-access 是"无需审批"档，与创建路径同判据（那边的 interactive
             # 同样排除它），不要在这里发明第二套判定。
-            interactive = declared_mode is not PermissionPolicy.DANGER_FULL_ACCESS
+            interactive = effective_mode is not PermissionPolicy.DANGER_FULL_ACCESS
             approval_callback = await self._build_approval_callback(
                 interactive=interactive,
                 # 续聊请求体不承载这两个创建期标志；interactive 分支在前，二者不参与
@@ -1656,6 +1659,64 @@ class SessionService:
                     self._store.read_events, session_id
                 )
 
+    async def change_permission_mode(
+        self, *, session_id: str, permission_mode: str, auto_approve: bool
+    ) -> PermissionChange:
+        """会话内改权限档 + ``auto_approve`` 并写 ``permission/changed``（F18-A #282）。
+
+        形态对齐 ``change_model``。两类约束是这段代码自己看不出来的：
+
+        - **只 append、不打断在途 run**——生效时机 = 下一轮 run（机制见 ADR-0041 §1.2）；
+        - **有未裁决审批时拒绝**（``PendingApprovalConflict`` → 409）：判据与语义见
+          ADR-0041 §4.1，改档前先裁决（或取消）那条审批。
+
+        非法档位 → ``InvalidDecision``（422，与创建路径同一判据）；会话不存在 → 404。
+        """
+        self._validate_session_id(session_id)
+        try:
+            mode = PermissionPolicy(permission_mode)
+        except ValueError as exc:
+            raise InvalidDecision(
+                f"未知权限档: {permission_mode!r}，可选: "
+                f"{[p.value for p in PermissionPolicy]}"
+            ) from exc
+
+        existing = await anyio.to_thread.run_sync(
+            self._store.read_events, session_id
+        )
+        if not existing:
+            raise SessionNotFound(f"session '{session_id}' not found")
+
+        # 挂起审批闸门（ADR-0041 §4.1）：判据同 delete_session 的「④ 挂起审批」，但抛
+        # PendingApprovalConflict 而非 ActiveRunConflict（语义可区分，见该异常 docstring）。
+        queue = self._approval_queues.get(session_id)
+        if queue is not None and queue.pending_ids():
+            raise PendingApprovalConflict(
+                f"session '{session_id}' has a pending approval; resolve it first"
+            )
+
+        change = PermissionChange(permission_mode=mode, auto_approve=auto_approve)
+        # 与 change_model 同款 seq 重试循环（BUG-011 的语义单点在该方法注释）。
+        attempts_left = _WRITE_CONFLICT_ATTEMPTS
+        while True:
+            attempts_left -= 1
+            live = self._live_session(session_id)
+            if live is not None:
+                return append_permission_change(live, change)
+            if not existing:
+                raise SessionNotFound(f"session '{session_id}' not found")
+            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
+            try:
+                return append_permission_change(
+                    Session(session_id, self._store, existing), change
+                )
+            except SeqConflict:
+                if attempts_left <= 0:
+                    raise
+                existing = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id
+                )
+
     async def fork(
         self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
     ) -> str:
@@ -1840,6 +1901,8 @@ __all__ = [
     "LaunchResult",
     "ModelChange",
     "ModelTarget",
+    "PendingApprovalConflict",
+    "PermissionChange",
     "QueueItemNotFound",
     "RecoveryConflict",
     "SendMessageResult",

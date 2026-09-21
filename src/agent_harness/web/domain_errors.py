@@ -24,6 +24,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `DELETE /api/sessions/{id}`（会话硬删 / #172 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict, SessionHasChildren |
 | `POST /api/sessions/{id}/archive`（会话归档 / #171 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict |
 | `DELETE /api/sessions/{id}/archive`（取消归档 / #171 追加） | InvalidSessionId, SessionNotFound |
+| `POST /api/sessions/{id}/permission`（F18-A / #282 追加） | InvalidSessionId, SessionNotFound, InvalidDecision, PendingApprovalConflict, SeqConflict |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
 两个特例写进契约、不得「顺手统一」：
@@ -64,6 +65,10 @@ fork 父时不删（不级联、不静默 orphan），detail 带子会话数量�
 错）也不是 404（父明明存在），所以只有 409 诚实。上表已补该端点行；该端点的 `404`
 与 `409 ActiveRunConflict` 都是既有条目，复用不新增。
 
+**F18-A 追加（#282）**：新增 `PendingApprovalConflict: 409`——会话有未裁决审批时拒绝改档
+（`POST /api/sessions/{id}/permission`）。机制 / 不复用 `ActiveRunConflict` 的理由见 ADR-0041
+§4.1。上表已补该端点行。
+
 ## 设计取舍（为什么不再往前一步）
 
 - **不用 FastAPI 全局 `exception_handler`**：那会把整张表应用到每个端点，使一个本来
@@ -88,6 +93,7 @@ from agent_harness.session.errors import (
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
+    PendingApprovalConflict,
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
@@ -132,6 +138,8 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 消息 / 已被取代 / 不是最新一条）。会话是存在的，是这次编辑按当前状态不允许
     # ——所以不谎报 404（那会让前端以为会话没了），用 409。
     SupersedeTargetInvalid: 409,
+    # F18-A / #282：会话有未裁决的审批时拒绝改权限档（理由见 ADR-0041 §4.1）。
+    PendingApprovalConflict: 409,
     # #172 / ADR-0029：会话是 fork 父——删它会连带处置用户没选中的子会话（级联），
     # 或留一个悬空来源链接（orphan），两者都不接受，所以是"状态不允许"而非入参非法。
     SessionHasChildren: 409,

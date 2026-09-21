@@ -50,6 +50,15 @@ class ApprovalAlreadyResolved(SessionServiceError):
     """approval_id 已被决策（防重复）。"""
 
 
+class PendingApprovalConflict(SessionServiceError):
+    """会话有**未裁决**的审批，当前动作按此状态不允许（F18-A #282；ADR-0041 §4.1）。
+
+    判据与 ``delete_session`` 的「④ 挂起审批」相同（会话级待审批队列非空）。**刻意不
+    复用 ``ActiveRunConflict``**：那条是「有在途 run 就不许并发操作」；本条只针对「有
+    **待裁决会议**」——在途但无待审批时改档是允许的（下一轮生效，不打断本轮）。
+    """
+
+
 class InvalidDecision(SessionServiceError):
     """决策值不合法或不在 allowed_decisions 内。"""
 

@@ -26,13 +26,14 @@ from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.approval import (
     SESSION_AUTO_APPROVE_KEY,
     SESSION_PERMISSION_MODE_KEY,
-    declared_auto_approve,
-    declared_permission_mode,
+    effective_auto_approve,
+    effective_permission_mode,
 )
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
+    PERMISSION_CHANGED,
     RUN_FAILED,
     RUN_STARTED,
     RUN_TERMINAL_TYPES,
@@ -172,10 +173,14 @@ async def fork_session(
             f"（可用边界: {available}）"
         )
 
+    # F18-A #282：`permission/changed` 与 `session/started` 同属**会话级状态**，不是
+    # 对话历史——从 seed 里剔除（child 用 `started_data` 重新声明自己的档）。若不剔除，
+    # child 的「最后一次 changed 胜」会取到 seed 里**更早**的那条（锚点之前），覆盖掉
+    # 下面从父派生的**当下** effective 档，造成「父 fork 后又改过档、child 却继承旧档」。
     seed = [
         e
         for e in parent_events
-        if e.seq < anchor.seq and e.type != SESSION_STARTED
+        if e.seq < anchor.seq and e.type not in (SESSION_STARTED, PERMISSION_CHANGED)
     ]
     _validate_run_complete(seed, parent_session_id)
 
@@ -183,14 +188,14 @@ async def fork_session(
     # seed 与 provenance/索引（copy 失败属基础设施故障，原样上抛）。
     # WS-1 #151 AC4：child 的 cwd **显式继承自 parent**（不靠"反正目录是复制来的"
     # 隐式成立）。父无 cwd（历史遗留）→ child 也不写该字段，父子的未分组状态一致。
-    # F15 #234：会话级**权限决策**与 cwd 同级（创建时定、此后不可变），同样显式继承
-    # ——父是只读而 child"未声明"的话，续聊会落到 workspace-write + 全自动批准（复制了
-    # 父的 workspace 文件，却对写操作免审批）。父未声明 → child 也不写键，语义一致。
+    # F15 #234 + F18-A #282：会话级权限决策与 cwd 同级，显式继承——父是只读而 child
+    # "未声明"的话，续聊会落到 workspace-write + 全自动批准（复制了父的 workspace 文件，
+    # 却对写操作免审批）。继承的是父**当下生效**档（ADR-0041 §2 D7），父未声明 → 不写键。
     inherited: dict[str, object] = {}
-    parent_mode = declared_permission_mode(parent_events)
+    parent_mode = effective_permission_mode(parent_events)
     if parent_mode is not None:
         inherited[SESSION_PERMISSION_MODE_KEY] = parent_mode.value
-    parent_auto = declared_auto_approve(parent_events)
+    parent_auto = effective_auto_approve(parent_events)
     if parent_auto is not None:
         inherited[SESSION_AUTO_APPROVE_KEY] = parent_auto
 

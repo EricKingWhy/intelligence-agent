@@ -53,6 +53,7 @@ from agent_harness.session.service import (
     ApprovalRequestMissing,
     InvalidDecision,
     InvalidSessionId,
+    PendingApprovalConflict,
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
@@ -196,6 +197,17 @@ class ModelChangeRequest(BaseModel):
 
     provider: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
+
+
+class PermissionChangeRequest(BaseModel):
+    """POST /api/sessions/{id}/permission 的请求体（F18-A #282，ADR-0041 §2 D1/D2）。
+
+    两者**都无默认值**：漏传即 422——否则缺省值会悄悄把批准策略翻掉。合法档位由领域层
+    校验（``InvalidDecision`` 422），故此处不加 ``field_validator``（规则单一来源）。
+    """
+
+    permission_mode: str = Field(min_length=1)
+    auto_approve: bool
 
 
 class ApproveRequest(BaseModel):
@@ -1494,6 +1506,38 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             "status": "changed",
             "provider": change.to_provider,
             "model_id": change.effective_model_id,
+        }
+
+    @app.post("/api/sessions/{session_id}/permission")
+    async def change_session_permission(
+        session_id: str, req: PermissionChangeRequest
+    ) -> dict[str, str | bool]:
+        """会话内改权限档 + ``auto_approve`` 并写 ``permission/changed``（F18-A #282）。
+
+        对齐 ``POST /api/sessions/{id}/model``：只写事件、不打断在途 run（下一轮生效）。
+        422 = 非法档位；404 = session 不存在；**409 = 有未裁决审批或 seq 冲突**。
+        """
+        service = session_service(app.state.agent)
+        try:
+            change = await service.change_permission_mode(
+                session_id=session_id,
+                permission_mode=req.permission_mode,
+                auto_approve=req.auto_approve,
+            )
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            InvalidDecision,
+            PendingApprovalConflict,
+            SeqConflict,
+        ) as e:
+            raise http_error(e) from e
+        # 回传**改后**的当下生效值（service 解析出的档位），前端按回执对齐即可，不必
+        # 本地推导（不引入乐观状态；见 F18-B）。
+        return {
+            "status": "changed",
+            "permission_mode": change.permission_mode.value,
+            "auto_approve": change.auto_approve,
         }
 
     # ── 续聊入口（PRD §5.3）───────────────────────────────────────────
