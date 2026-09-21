@@ -106,6 +106,12 @@ MESSAGE_SUPERSEDED = "message/superseded"
 # 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id。
 MODEL_CHANGED = "model/changed"
 
+# ── F18-A（#282）：同 session 内改权限档 ──────────────────────────────────
+# 权限档与 auto_approve 从「创建时定、之后不可变」改为**会话内可变**：改档同样是
+# 会话事实（durable），下一轮 run 从事件流派生"当下生效的档"，不依赖创建时的值。
+# data: permission_mode / auto_approve（与 session/started 的同名键同义）。
+PERMISSION_CHANGED = "permission/changed"
+
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
 # below is an ephemeral streaming signal (Phase 9 AgentEvent) and MUST NOT be
@@ -157,6 +163,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         COMPACTION_END,
         # Phase Multiturn T7 (#137)：同 session 内模型切换
         MODEL_CHANGED,
+        # F18-A (#282)：同 session 内改权限档（permission_mode + auto_approve）
+        PERMISSION_CHANGED,
     }
 )
 

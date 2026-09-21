@@ -1123,6 +1123,10 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   },
   [EventType.MODEL_FALLBACK]: { apply: projectModelFallback, summarize: summarizeModelFallback },
   [EventType.MODEL_CHANGED]: { apply: projectModelChanged, summarize: summarizeModelChanged },
+  // F18-A（#282）：会话内改权限档已进词汇表（durable）。本票是**后端**票——投影
+  // 「最后一次 permission/changed 胜」与 pill 的可编辑化属 #283（F18-B）。这里先登记
+  // 为 no-op：保持 Record 穷尽性（否则 tsc 红），且不让 applyEvent 把它当未知帧丢弃。
+  [EventType.PERMISSION_CHANGED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.AGENT_DELEGATION_STARTED]: {
     apply: projectAgentDelegationStarted,
     summarize: summarizeDelegationStarted,

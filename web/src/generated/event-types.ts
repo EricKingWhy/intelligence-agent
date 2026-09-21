@@ -44,6 +44,7 @@ export const EventType = {
   QUEUE_CONSUMED: 'queue/consumed',
   MESSAGE_SUPERSEDED: 'message/superseded',
   MODEL_CHANGED: 'model/changed',
+  PERMISSION_CHANGED: 'permission/changed',
 } as const;
 
 export type EventTypeValue = (typeof EventType)[keyof typeof EventType];

@@ -84,6 +84,8 @@ class TestSessionEventDTO:
             # ADR-0030 (#196)：在途输入通道的消费侧——已消费 / 已被取代
             "queue/consumed",
             "message/superseded",
+            # F18-A (#282)：同 session 内改权限档
+            "permission/changed",
         }
         assert EVENT_TYPES == expected
 
