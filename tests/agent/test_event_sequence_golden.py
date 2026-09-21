@@ -20,8 +20,8 @@ max_steps / 同错熔断硬触发 / 取消 / 顶层异常），每一处只被�
   `runtime.py:632-671` 的实现是 `step_base = max(session.max_step_id,
   session.user_turn_count)`，即**跨轮全局连续**。单轮会话里 `step_base == 0`，
   于是 `step_base + steps` 与 `steps` 同值、换掉一个看不出来；多轮才分得开，
-  故信封由单轮的 `terminal_step_id` + 多轮的
-  `test_terminal_step_id_is_session_global_across_turns` 两处合起来钉。
+  故信封由单轮的 `terminal_step_id` + 多轮的两条用例（终态一条、**全事件**一条）
+  合起来钉（末条见"信封也钉"段——只钉终态曾是不够的）。
 - 03 §3：仅广播类型（`model/started`、`model/delta`）MUST NOT 落盘。
 - 03 §4 / 01 §8：`tool/call` ↔ `tool/result` 必须按 `tool_call_id` 一一配对，
   不得留下 dangling call。**本文件能证明的范围**只到"本文件这些场景里配对完整、
@@ -45,9 +45,22 @@ max_steps / 同错熔断硬触发 / 取消 / 顶层异常），每一处只被�
 类型精确计数比对。理由是 #264 的验收标准逐字要求"次数与顺序不变"，而提取终结臂最
 典型的落地事故正是"把 append 搬进被提取的方法，调用点又留一次"。
 
-**信封也钉**：`Scenario.terminal_step_id` 逐场景冻结终态事件的 `step_id`。各臂形状
-本就**不一致**（`end_run` 派不带 step_id ⇒ None；context 臂与取消臂显式带
-`step_base + steps` ⇒ 0）——#264 若"顺手统一"它们，基线必须变红。
+**信封也钉**（原始口径只钉终态，被修后重审的 P2-2 指出"信封"实际窄于这里的话）：
+`Scenario.terminal_step_id` 冻结单轮会话里终态事件的 `step_id`（各臂形状本就**不一致**：
+`end_run` 派不带 step_id ⇒ None；context 臂与取消臂显式带 `step_base + steps` ⇒ 0）；
+`Scenario.turn2` 冻结**在已跑完一轮的 session 上再跑一次**时第二轮新增段的 `(type, step_id)`
+全序列——单轮下 `step_base = max(max_step_id, user_turn_count) = 0`，`step_base + steps(0)`
+与 `steps(0)` 同值，那个表达式被换掉看不出来；第二轮 `step_base = 1` 才分岔。第二轮里被钉住的
+关键对：`model/completed(2)`/`(3)`（`step_base + steps + 1`，延迟与非延迟两分支）、
+`model/failed(2)`（异常臂与取消臂的 `_TerminalContext`）、`tool/call(2)`、`run/failed(1)`/`(None)`。
+#264 若"顺手统一"这些形状或搬表达式时漏掉 `step_base`，基线必须变红。
+
+**死参数（#264 必须先懂这条）**：`max_steps` / `hard_guard` / `provider_error` 三个臂的
+`failure_terminal(steps=step_base + steps)` 是**死参数**——`_RunFinalizer.failure_terminal`
+（`runtime.py:246-271`）不转发 `steps`，`Session.end_run`（`session.py:424-436`）也没有
+`step_id` 形参 ⇒ 这三臂的终态 `step_id` **恒为 None**，改或删那个实参**不可观测**（本文件的
+`(run/failed, None)` 对只钉"它就是 None"）。反之若让 `steps` 真的生效（终态带上 step_id），
+那是行为变更，这条基线会红。
 
 **接线是冻结的**：默认场景用 `ToolExecutor(registry)`，即**无 Ledger** ⇒
 `tracks_operations=False` ⇒ `model/completed` 在工具批次之前立即落盘。生产接线
@@ -101,6 +114,10 @@ from agent_harness.session import (
     MODEL_FAILED,
     MODEL_FALLBACK,
     MODEL_STARTED,
+    REASONING_COMPLETED,
+    REASONING_DELTA,
+    REASONING_INTERRUPTED,
+    REASONING_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
@@ -130,8 +147,8 @@ PROMPT = "hi"
 # 只在流式路径上存在的事实：run() 走 ainvoke 不会产生它们（ADR-0016 边界）。
 # 与 tests/agent/test_run_stream.py 同一口径。
 STREAM_FACT_TYPES = frozenset({
-    TEXT_DELTA, "reasoning/started", "reasoning/delta",
-    "reasoning/completed", "reasoning/interrupted",
+    TEXT_DELTA, REASONING_STARTED, REASONING_DELTA,
+    REASONING_COMPLETED, REASONING_INTERRUPTED,
 })
 
 # 终态 data 里"给人读的文案"：**键必须在、值必须是非空 str**，但措辞不逐字钉——
@@ -373,6 +390,8 @@ class Scenario:
     terminal = 期望的唯一终态类型；None = run 从未开始（不许补终结）
     terminal_payload   = 终态 data 的**整个键集**与逐键取值（各终结臂的**身份**）
     terminal_step_id   = 终态事件的信封 step_id（各臂形状不一致，见文件头）
+    turn2              = 在"已跑完一轮"的 session 上再跑一次时，**第二轮新增段**的
+                         `(type, step_id)` 全序列；None = 该臂不进信封用例（见下）
     memory_submits     = memory_writer 收到的每次提交的**事件类型序列**（空 = 从未提交）
     """
 
@@ -385,6 +404,7 @@ class Scenario:
     terminal: str | None
     terminal_payload: dict[str, Any]
     terminal_step_id: int | None = None
+    turn2: tuple[tuple[str, int | None], ...] | None = None
     discarded: tuple[str, ...] = ()
     memory_submits: tuple[tuple[str, ...], ...] = ()
     run_twin: bool = True  # 该场景能否用 run()（ainvoke）跑出同一套 durable 事实
@@ -429,6 +449,8 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "answer", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
+                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED,
                              RUN_COMPLETED),),
         ),
@@ -444,6 +466,9 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
+                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
+                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
                              TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
         ),
@@ -461,6 +486,9 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
+                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
+                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
                              TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
         ),
@@ -476,6 +504,9 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TOOL_CALL, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
+                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, TOOL_CALL, MODEL_COMPLETED,
                              TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
         ),
@@ -500,6 +531,8 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "fallback 的回答", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
+                   (MODEL_FALLBACK, 2), (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_FALLBACK,
                              MODEL_COMPLETED, RUN_COMPLETED),),
         ),
@@ -518,6 +551,9 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_FAILED,
             terminal_payload={"reason": STATUS_MAX_STEPS_EXCEEDED, "message": PROSE,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
+                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (MODEL_COMPLETED, 3),
+                   (RUN_FAILED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
                              TOOL_RESULT, MODEL_COMPLETED, RUN_FAILED),),
         ),
@@ -535,6 +571,7 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal_payload={"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": PROSE,
                               "trace_id": None, "trace_url": None},
             terminal_step_id=0,  # 该臂显式写 step_base + steps（其余臂走 end_run ⇒ None）
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (RUN_FAILED, 1)),
         ),
         Scenario(
             name="provider_error",
@@ -547,6 +584,8 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_FAILED,
             terminal_payload={"reason": "RuntimeError", "message": PROSE,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_FAILED, 2),
+                   (RUN_FAILED, None)),
         ),
         Scenario(
             name="hard_guard",
@@ -568,6 +607,10 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_FAILED,
             terminal_payload={"reason": STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
+                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TOOL_FAILURE_GUARD, 2),
+                   (USER_MESSAGE, 2), (MODEL_COMPLETED, 3), (TOOL_CALL, 3),
+                   (TOOL_RESULT, 3), (TOOL_FAILURE_GUARD, 3), (RUN_FAILED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
                              TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE, MODEL_COMPLETED,
                              TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),),
@@ -585,6 +628,8 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "answer", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
+                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED,
                              RUN_COMPLETED),),
         ),
@@ -597,6 +642,7 @@ def _scenarios() -> tuple[Scenario, ...]:
             emitted=(USER_MESSAGE,),
             terminal=None,
             terminal_payload={},
+            turn2=((USER_MESSAGE, None),),
             run_twin=False,
         ),
         Scenario(
@@ -609,6 +655,7 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_FAILED,
             terminal_payload={"reason": CANCEL_REASON, "trace_id": None, "trace_url": None},
             terminal_step_id=0,
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (RUN_FAILED, 1)),
             discarded=(RUN_FAILED,),
             run_twin=False,
         ),
@@ -622,12 +669,16 @@ def _scenarios() -> tuple[Scenario, ...]:
             terminal=RUN_FAILED,
             terminal_payload={"reason": CANCEL_REASON, "trace_id": None, "trace_url": None},
             terminal_step_id=0,
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_FAILED, 2),
+                   (RUN_FAILED, 1)),
             discarded=(MODEL_FAILED, RUN_FAILED),
             run_twin=False,
         ),
         Scenario(
             name="close_unstarted",
-            note="从未 __anext__ 就关闭：生成器体一次没跑，零事件",
+            note="从未 __anext__ 就关闭：生成器体一次没跑，零事件。"
+                 "**唯一不进信封用例的臂**（`turn2` 留空）：生成器体没跑就没有任何 "
+                 "append ⇒ 第二轮的 `(type, step_id)` 段必然是空的，空集比空集零区分力",
             build=lambda w: _runtime(_simple_model(), memory_writer=w.memory),
             drive=_close_unstarted,
             durable=(),
@@ -1054,32 +1105,77 @@ async def test_memory_writeback_submits_the_declared_events(name: str, tmp_path:
 # 信封：step_id 必须**跨轮全局连续**（单轮会话里 step_base == 0，看不出差别）
 # ---------------------------------------------------------------------------
 
+# 只在"已跑完一轮"的 session 上才分岔的臂。
+# 前三条显式写 `step_base + steps` ⇒ 第二轮必须是 1（不是 0）；
+# 后三条走 `end_run`，其 `steps=` 是死参数（见文件头"死参数"段）⇒ 恒 None，
+# 这一半钉的是"它**仍然**是 None"：哪天那参数真的生效（= 行为变更），基线必红。
+_TURN2_TERMINAL_ARMS = (
+    ("context_exceeded", 1),
+    ("generator_exit_post_run", 1),
+    ("cancel_while_blocked", 1),
+    ("max_steps", None),
+    ("hard_guard", None),
+    ("provider_error", None),
+)
+
+# 信封用例覆盖的臂：`turn2` 有值的全部（`close_unstarted` 空段除外，理由见其 note）。
+_TURN2_ENVELOPE_ARMS = tuple(n for n, s in GOLDENS.items() if s.turn2 is not None)
+
+
+async def _turn2_segment(
+    scenario: Scenario, tmp_path: Any,
+) -> tuple[list[AgentEvent], list[tuple[str, int | None]]]:
+    """跑完一轮后再跑一轮，返回（第二轮 emitted, 第二轮新增段的 `(type, step_id)`）。"""
+    session = make_session(tmp_path)
+    await _runtime(_simple_model()).run(session, PROMPT)  # 第一轮：max_step_id = 1
+    assert session.max_step_id == 1 and session.user_turn_count == 1, \
+        "第一轮必须留下 step 1，否则本用例失去区分力"
+    before = len(session.events)
+    emitted = await scenario.drive(
+        await _build(scenario, _wiring(tmp_path / "turn2")), session,
+    )
+    segment = [(e.type, e.step_id) for e in session.events[before:]]
+    return emitted, segment
+
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arm", ["context_exceeded", "generator_exit_post_run"])
+@pytest.mark.parametrize(
+    "arm,expected", _TURN2_TERMINAL_ARMS, ids=[arm for arm, _ in _TURN2_TERMINAL_ARMS],
+)
 async def test_terminal_step_id_is_session_global_across_turns(
-    arm: str, tmp_path: Any,
+    arm: str, expected: int | None, tmp_path: Any,
 ) -> None:
-    """第二轮的终结臂必须拿到 `step_base + steps`，不是每轮从 0 重数的 `steps`。
+    """第二轮的终态必须拿到 `step_base + steps`，不是每轮从 0 重数的 `steps`。
 
     单轮会话里 `step_base = max(max_step_id, user_turn_count) = 0`，两个表达式同值
     （`runtime.py:632-671`）；只有先在同一个 session 上跑完一轮，才会分岔——这正是
     TICKET_STEP_ID_COLLISION_MULTI_TURN 那类事故的形态。
     """
     scenario = GOLDENS[arm]
-    session = make_session(tmp_path)
-    await _runtime(_simple_model()).run(session, PROMPT)  # 第一轮：max_step_id = 1
-    assert session.max_step_id == 1 and session.user_turn_count == 1, \
-        "第一轮必须留下 step 1，否则本用例失去区分力"
-
-    emitted = await scenario.drive(
-        await _build(scenario, _wiring(tmp_path / "turn2")), session,
-    )
-    last = session.events[-1]  # 终态必须是最后一条事实（第一轮的 run/completed 在前）
-    assert last.type == RUN_FAILED, f"第二轮应当以 run/failed 收尾，实际 {last.type}"
-    assert last.step_id == 1, (
-        f"第二轮 {arm} 的终态 step_id 必须是 step_base(1) + steps(0) = 1，"
-        f"实际 {last.step_id}"
+    emitted, segment = await _turn2_segment(scenario, tmp_path)
+    last_type, last_step_id = segment[-1]
+    assert last_type == RUN_FAILED, f"第二轮应当以 run/failed 收尾，实际 {last_type}"
+    assert last_step_id == expected, (
+        f"第二轮 {arm} 的终态 step_id 应为 {expected}（第二轮 step_base = 1），"
+        f"实际 {last_step_id}"
     )
     assert _collapse([e.type for e in emitted]) == scenario.emitted, \
         "第二轮驱动的 emitted 序列应与单轮基线一致"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arm", _TURN2_ENVELOPE_ARMS)
+async def test_envelope_is_session_global_for_every_event(arm: str, tmp_path: Any) -> None:
+    """第二轮新增段的**全事件** `(type, step_id)` 必须与基线逐对相等。
+
+    只钉终态是不够的（修后重审的 P2-2）：`model/completed` 的 `step_base + steps + 1`、
+    取消臂 `_TerminalContext.steps` 派生的 `model/failed`、异常臂的 `model/failed` 都在
+    终态之**外**，而它们正是 #264 要搬进方法的表达式。单轮会话里 `step_base = 0` 使
+    这些变异全部不可观测；这里跑第二轮（`step_base = 1`）才第一次分得开。
+    """
+    scenario = GOLDENS[arm]
+    _, segment = await _turn2_segment(scenario, tmp_path)
+    assert segment == list(scenario.turn2), (
+        f"{arm}：第二轮新增段的信封序列偏离基线\n"
+        f"  期望 {tuple(scenario.turn2)}\n  实际 {tuple(segment)}"
+    )
