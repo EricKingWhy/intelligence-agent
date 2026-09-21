@@ -4095,7 +4095,7 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 ## B-32（#265 telemetry 切片——T11 第二切片）
 
-**状态**：实现 + 两轮两轴独立审查完成。两轴**第 1 轮均判"必须修后重审"**（findings 全数处置于 `7aef01b`）；**第 2 轮 B 轴判"通过"（P0/P1/P2 = 0）、A 轴判"不通过"**——A 轴三条全部落在 docstring / 记账面（**代码面无须返工**：B 轴 16 例端口调用差分实测 `7aef01b` 与 `09bae51` 结构签名逐项相同），已由 `cef3bcd` 落地。父票 `#247` **保持 OPEN**（本票只关自己）。
+**状态**：实现 + 两轮两轴独立审查完成。**第 1 轮**两轴 findings：A 轴 **P0/P1/P2 = 0、P3×2**（docstring 过度声明两条）；B 轴 **P0/P1 = 0、P2×2 + P3×2**（其中 F1 是阻断级——重构破坏了"行为逐字兼容"）⇒ findings 全数处置于 `7aef01b`；**第 2 轮 B 轴判"通过"（P0/P1/P2 = 0）、A 轴判"不通过"**——A 轴三条全部落在 docstring / 记账面（**代码面无须返工**：B 轴 16 例端口调用差分实测 `7aef01b` 与 `09bae51` 结构签名逐项相同），已由 `cef3bcd` 落地。父票 `#247` **保持 OPEN**（本票只关自己）。
 
 **交付面**：`src/agent_harness/agent/runtime.py`（`_Telemetry`：`tracer` + 在途 `ctx_span` / `generation` 的单点 owner，方法全是端口转发；`句柄不出对象`；`_TerminalContext` 只持 `snapshot()`，`_TerminalArms.telemetry` 一处持有）+ `tests/agent/test_terminal_arms.py`（属性路径适配 + 2 条新用例）+ `tests/observability/test_tracer_port.py`（2 条新用例）。**行为零变化**的两条判据：① #263 的 golden（`test_event_sequence_golden.py`）逐字未改且全绿；② 端口调用差分（16 例，两轴各自独立复现）在 `09bae51` ↔ `7aef01b` 之间**结构签名逐项相同**。`run_span` **仍留 `_drive` 局部**（不可变、不进端口、无"起/清两处写"⇒ #264 同一条判据）；端口实现选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外（不变量 #21 不变）。
 
