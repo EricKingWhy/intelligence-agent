@@ -178,3 +178,4 @@ b2bc1de	B-32（#265）记账笔多出的文件末尾空行——消除 git diff 
 f356384	#236 落点记录（tracker 批次行 + 归档明细 + PHASE_STATUS 索引 + 本台账审查行，docs-only）
 e8e8ce0	B-32（#265）集成落点记账——归档追加 5 条子项（闭合复核 / 集成 / 合并的独立审查 / 门禁读数 / push 与关单）+ tracker 状态与落点行 + PHASE_STATUS 焦点与最近条目，按日定位 2026-09-21 依合并后归档**实测重算**（docs-only）
 f1b65e4	B-33/B-34 落点（tracker 两段 + 月度归档 2 条 + PHASE_STATUS 焦点/最近条目/索引重算；docs-only）
+f838a92	B-33/B-34 集成与关单落点（tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
