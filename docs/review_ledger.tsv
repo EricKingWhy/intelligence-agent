@@ -84,6 +84,8 @@
 2026-09-21	B-30 文档治理清理——接手 delta 两轴独立审查（Standards + Spec 只读子代理；fixed point `ca2a3d0`，范围 `ca2a3d0..93de00e`）：去重后 10 条 = P1×1 + P2×3 + P3×6（P0 = 0）；P1 = 台账未覆盖该 tip ⇒ 覆盖闸门实测 exit 1 而记录写 exit 0（§8.3 第 5 条口径错误）。findings 全数处置于 `20ee173`，修后重审 P0/P1 = 0；明细见 `docs/phase_status/2026-09.md` B-30 段	ca2a3d0..93de00e
 2026-09-21	B-30 接手 delta 修后重审 + 闭合复验（两轴两步；fixed point `93de00e`，范围 `93de00e..d5e1a68`）：修后重审 P0 = 0 / P1 = 0、P2×2 + P3×2（去重后 4 条：节点读数归属 / 残余③ 总量不可复现 / 计划当事实 / 占位符照抄）⇒ 处置于 `d5e1a68`；闭合复验 4/4 闭合、另出 2 条（已撤回总量仍被别处引用 / 台账范围未覆盖修复提交）⇒ 处置于 `b7108c7`（该笔按 docs-only 走白名单）	93de00e..d5e1a68
 2026-09-21	B-30 接手 delta 闭合复验——A 轴（Standards，只读子代理；锚 `d5e1a68`，范围 `20ee173..d5e1a68`）：上轮 4 条 findings 逐条闭合成立；另出 3 条 = P2×1 + P3×2（P0/P1 = 0）：① 归档仍以事实口吻引用已撤回的"13 处"、② 状态行"523efc1 之后 6 笔"实为 7 笔 ⇒ 均处置于 `b7108c7`；③ 协议 §8.1 第 4 条把裸写 `^{commit}` 与 `<冻结sha>` 并列写成"重定向符"（过度声明：实测两者不引号亦 exit 0，只有 < 会走样）⇒ 处置于本批末笔（逐笔 sha 见「集成」段）	20ee173..d5e1a68
+2026-09-21	B-31 发现轮双轴独立审查（锚 `fd9882c` = `e036681` 的 amend 前身，同树 `7a3ee705…`；范围 `5003377..e036681`）：A 轴 P0/P2=0、P1×2、P3×3；B 轴 P0/P1=0、P2×1、P3×3。A 轴 P1① = 该 tree 无台账行 ⇒ 覆盖闸门实测 exit 1（由本批台账行兑现，非代码问题）；A 轴 P1② 与 B 轴 P2 同源 = `demo/live_agent.py` 两处同步审批回调（既有、无测试覆盖）⇒ 按用户「可执行新 ticket」授权修（`1383e52`）。B 轴：机制溯源证伪提交信息原措辞「静默夭折」（实为持久 `run/failed(reason=TypeError)` + INFO 级诊断）⇒ 未 push 前 amend 只改信息、树未变；4 轮变异中 R3（保持 async 但 `approved=False`）红在 `:390` ⇒ 判据面对审批放行敏感、非空转。A 轴全仓清点：`src/`+`tests/` 内 sync 残留 0。明细见 `docs/phase_status/2026-09.md` B-31 段	5003377..e036681
+2026-09-21	B-31 闭合复验双轴（覆盖 `1383e52` demo 修复 + 文档/台账 delta；锚 `1a77f9b`，范围 `e036681..1a77f9b`）：A 轴 P0/P1=0、P2×2、P3×5；B 轴 P0/P1=0、P2×1、P3×4，两轴均判「可以合入」。A 轴第一手复现 Phase 16 gate `-m integration` ⇒ 12 passed；sha/blob/tree 与两处门禁读数（`full_b31_final.log` 546.21s、`full_b31.log` 606.00s，归属已更正）逐项对账一致；无「未取得写成取得」（覆盖闸门当时尚未 exit 0，文档只写由本批台账行兑现）。B 轴第一手复现 demo 变异（同步 ⇒ `executor.py:808` 抛 TypeError 且无副作用；async ⇒ 真执行；拒绝 ⇒ PERMISSION_DENIED 未执行）、机制链逐段证实、amend 树同由 `fd9882c` 对象仍在而直接比对确证、独立 AST 扫描再确认 sync 残留 0；证伪 1 条 P2：flake 行「补跑后无残留」与 daemon 实测（20 个 `Exited (137)` 容器 + 卷）矛盾 ⇒ 按实测改写并登记残余⑦。findings 处置于本批末笔（docs-only）	e036681..1a77f9b
 [whitelist]
 45a367f	B-29 初稿（协议 §8 六条 + tracker B-29 + AGENTS.md §16 + PHASE_STATUS 索引，4 文件纯文档）——批次边界提交落在审查行 base 左侧，按 45744d3 先例走白名单
 1b01d17	B-28（#264）集成/关单状态如实化（tracker B-28 集成与关单节 + 月度归档集成与关单/F 轴故障登记 + PHASE_STATUS 焦点/索引/按日定位；docs-only）
@@ -145,3 +147,4 @@ be7db83	P1-B4 审查记录（tracker P1-B4 节 + phase_status 归档索引 + 本
 b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 月度归档修后复扫条、新增闭合复验条；docs-only）
 5658d86	B-30 A 轴闭合复验 1 条 P3 处置（协议 §8.1 第 4 条过度声明按实测改写 + 归档闭合复验按轴归属；docs-only）
 1c1bf42	B-30 集成/关单状态如实化（tracker 集成与关单节 + §14.9 通知 + 残余⑥ + 月度归档集成条 + PHASE_STATUS 索引；docs-only）
+0571b01	B-31 闭合复验 findings 处置（flake 行「无残留」被证伪后的改写 + 行号/路径口径 + 残余⑥⑦；docs-only）
