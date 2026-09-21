@@ -126,7 +126,7 @@ B′ 在旧 base（`522602d`，不含 U-2 审查修复）上测出的 3 个既�
 
 ## 8. 本次集成的完整证据链
 
-- 集成手册（唯一入口）：`docs/INTEGRATION_PROMPT_UI_POLISH_AND_WS6_WS7_JOINT.md`（backend clone）
+- 集成手册（唯一入口）：`docs/archive/integration-prompts/INTEGRATION_PROMPT_UI_POLISH_AND_WS6_WS7_JOINT.md`（backend clone）
 - 集成记录两条：`docs/PHASE_STATUS.md` 更新日志顶部 2026-09-13 两条
 - 冲突解决规则与真机清单：手册 §2.1 / §4
 - 门禁数字与 B′ 转绿预测：手册 §3.2（合并后实测逐条兑现）

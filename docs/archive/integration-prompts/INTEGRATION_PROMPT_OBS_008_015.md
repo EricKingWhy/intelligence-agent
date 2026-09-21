@@ -1,6 +1,6 @@
 # 集成提示词：OBS-008 … OBS-015 批次（feat/backend）
 
-> 来源：集成 AI 的 `docs/HANDOFF_BACKEND_OBS_008_015.md`（该文件只在 `main`，本 worktree 未同步）。
+> 来源：集成 AI 的 `docs/archive/handoffs/HANDOFF_BACKEND_OBS_008_015.md`（该文件只在 `main`，本 worktree 未同步）。
 > 本文件是**批次单一入口**：每完成一项就更新下表 + 对应小节，集成 AI 只看这一个文件即可。
 > 约束：**本分支不 push**（§16.4）。集成由集成 AI 执行。
 
@@ -292,13 +292,13 @@ Use bash with 'sed -n '{start}p' <file> | head -c {_READ_MAX_BYTES}' plus 'tail 
 解释器环境），目标场景同样会复现。
 
 **为什么本轮未顺手修**：① 属另一个工具（ReadTool），不在 OBS-012（bash 工具描述）scope 内
-（AGENTS.md §8 Scope Lock）；② 该字符串被前端 handoff 文档 `docs/HANDOFF_FRONTEND_SYNC.md:46`
+（AGENTS.md §8 Scope Lock）；② 该字符串被前端 handoff 文档 `docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md:46`
 当作契约引用，改它需要跨端同步。**独立复核也建议只报告不修**。
 
 **建议的最小修法**（交给集成 AI 排期）：把该提示改成后端无关的表述（如「用 shell 工具按
 字节/行切片读取后续内容」），或按 `sandbox.shell_environment`（`name` 显示 / `family`
 决定语法）给对应平台的示例；若采用后者，
-需同步 `docs/HANDOFF_FRONTEND_SYNC.md:46`。
+需同步 `docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md:46`。
 
 ---
 

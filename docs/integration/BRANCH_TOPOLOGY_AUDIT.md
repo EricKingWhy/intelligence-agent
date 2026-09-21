@@ -202,7 +202,7 @@
 
 **Untracked files**：
 
-1. `docs/INTEGRATION_PROMPT_PY312_READTEXT.md` — PY312 兼容性修复的集成提示词
+1. `docs/archive/integration-prompts/INTEGRATION_PROMPT_PY312_READTEXT.md` — PY312 兼容性修复的集成提示词
 2. `docs/PRD_ENTERPRISE_MULTI_TURN_SESSION.md` — 企业多轮会话 PRD
 3. `docs/RESEARCH_DEEPSEEK_HARNESS_WEB.md` — DeepSeek Harness Web 研究
 4. `docs/RESEARCH_OHMY_PI_DSH_COMPACTION.md` — oh-my-pi DSH Compaction 研究

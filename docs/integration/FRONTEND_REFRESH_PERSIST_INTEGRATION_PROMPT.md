@@ -1,7 +1,7 @@
 # 前端集成交接提示词 —— 刷新一致性 + 控制面清点 + 审批卡覆盖（本批）
 
 > 本文件是**集成 AI 的唯一入口**：§0 是要执行的动作，§8.x 是证据与移交细节。
-> 上一批的分支级细节见 `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（交接手册）与 `docs/FRONTEND_ISSUES_LOG.md`（问题台账）。
+> 上一批的分支级细节见 `docs/archive/handoffs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（交接手册）与 `docs/FRONTEND_ISSUES_LOG.md`（问题台账）。
 
 ---
 
@@ -44,7 +44,7 @@ git merge-tree --write-tree feat/frontend origin/main
 | 检查 | 结果 |
 | --- | --- |
 | `web/e2e/n-approval-card.spec.ts` / `web/e2e-live/approval-live.spec.ts` / `web/playwright.live.config.ts` | 均在合并结果中（OK） |
-| `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md` / `docs/PROMPT_FRONTEND_NEXT_BATCH.md` | 均在合并结果中（OK） |
+| `docs/archive/handoffs/HANDOFF_APPROVAL_CARD_COVERAGE.md` / `docs/PROMPT_FRONTEND_NEXT_BATCH.md` | 均在合并结果中（OK） |
 | `web/e2e/fixtures.ts` 的 `onApprovePost` | 2 处命中（接口字段 + 路由分支），**存活** |
 | `web/vitest.config.ts` 的 `e2e-live/**` 排除 | 2 处命中，**存活** |
 | `web/src/lib/projection.ts` 的 `projectPermissionResolved` | 2 处命中，**存活** |

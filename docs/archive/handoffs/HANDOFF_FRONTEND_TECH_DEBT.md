@@ -21,7 +21,7 @@
 ```text
 你在 intelligence-agent-frontend（D:\intelligence-agent-frontend，分支 feat/frontend）做前端任务。
 后端 feat/backend 刚完成一个技术债批次（后端分支 169d9a4–fa508ce，尚未合入 main）。
-完整交接手册在 D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_TECH_DEBT.md，先读它。
+完整交接手册在 D:\intelligence-agent-backend\docs\archive\handoffs\HANDOFF_FRONTEND_TECH_DEBT.md，先读它。
 
 本批唯一必做的前端动作（SSE 通道，不受后端未合并影响）：
 

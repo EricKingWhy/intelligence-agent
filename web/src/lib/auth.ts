@@ -1,6 +1,6 @@
 /** lib/auth — Bearer token 接缝（后端 auth_seam fail-closed 语义的前端对侧）。
  *
- * 后端契约（feat/backend df4f7d8 HANDOFF_FRONTEND_SYNC.md §1.2）：
+ * 后端契约（feat/backend df4f7d8 docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md §1.2）：
  *   - 配置了 JWT_SECRET 的部署：所有 /api/* 必须带 `Authorization: Bearer <HS256>`，
  *     匿名 → 401 {"detail": "Missing identity token"}；
  *   - 未配置（本地开发）：无 token 照常可用。

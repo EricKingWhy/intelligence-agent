@@ -2,7 +2,7 @@
 
 > **收件人**：Git Integrator（AGENTS.md §14 授权的集成角色）
 > **写于**：2026-09-13（后端 Agent，工作区 `D:\intelligence-agent-backend`）
-> **本文件的作用**：把**前端 AI 的交接手册**（`HANDOFF_UI_POLISH_BATCH.md`，UI Polish 六票）与本后端 Agent 的 **WS-6/WS-7 两端提示词**（`INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md`）路由成**一条可执行的合并序列**，并把冲突面、门禁、真机清单、以及**前端 AI 提给后端的两个问题**的答案一次讲清。
+> **本文件的作用**：把**前端 AI 的交接手册**（`docs/archive/handoffs/HANDOFF_UI_POLISH_BATCH.md`，UI Polish 六票）与本后端 Agent 的 **WS-6/WS-7 两端提示词**（`docs/archive/integration-prompts/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md`）路由成**一条可执行的合并序列**，并把冲突面、门禁、真机清单、以及**前端 AI 提给后端的两个问题**的答案一次讲清。
 > **用户授权范围（本次明确）**：解决冲突、`merge`、`push origin main`。
 > **仍未授权 / 默认禁止**：`git push --force` / `--force-with-lease`、`git rebase`、`git reset --hard`、`git branch -D`、删除分支、删除 worktree、`git pull`（§14.4/§14.5）。
 > **`.env` 的红线**：`D:\intelligence-agent-backend\.env` 的**值**不得出现在任何输出、文档或提交里；只提示"main worktree 需要配置哪些键"（§13.1.6）。
@@ -36,9 +36,9 @@
 
 | 批次 | 单一入口文档 | 位置 |
 | --- | --- | --- |
-| A：WS-6/WS-7 后端半 + 审查收口 | `docs/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md`（10 节：契约矩阵 / 门禁 / 两轴审查处置 / 坑点 / 合入后清单） | backend clone |
+| A：WS-6/WS-7 后端半 + 审查收口 | `docs/archive/integration-prompts/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md`（10 节：契约矩阵 / 门禁 / 两轴审查处置 / 坑点 / 合入后清单） | backend clone |
 | A：契约事实源 | `docs/PRD_WS6_WS7_DIR_ROOTED_SESSION_AND_DIR_PICKER.md` + `docs/adr/0027-*.md` + `docs/adr/0028-*.md` | backend clone |
-| B：UI Polish 六票 | `docs/HANDOFF_UI_POLISH_BATCH.md`（交接手册）+ `docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md` §0/§10（前端声明的"集成 AI 唯一入口"）+ `docs/UI_POLISH_PRD.md` / `docs/UI_POLISH_TICKETS.md`（逐票规格） | frontend clone |
+| B：UI Polish 六票 | `docs/archive/handoffs/HANDOFF_UI_POLISH_BATCH.md`（交接手册）+ `docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md` §0/§10（前端声明的"集成 AI 唯一入口"）+ `docs/UI_POLISH_PRD.md` / `docs/UI_POLISH_TICKETS.md`（逐票规格） | frontend clone |
 | B′：WS-6/WS-7 前端半 | 本文件 §1–§2 + frontend clone `docs/SDD_TICKET_TRACKER.md` 的 `### B-2` 节 | frontend clone |
 | 历史（已合入 main，仅备查） | `docs/integration/INTEGRATION_PROMPT_FEAT_BACKEND_PENDING_BATCH.md`（那 12 个 commit 已在 `cc5eee4` 入 main，**不要重复合**） | 两 clone 均有 |
 | 合并前自检脚本 | `docs/integration/verify-before-merge.sh`（frontend clone，§14.10 清单） | frontend clone |

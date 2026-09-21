@@ -19,7 +19,7 @@
 
 硬链：**#161 → #162 → #163**，之后 **#164 → #165 → #166 → #167 → #168**，**T8 必须最后**。
 可执行规格 = GitHub 票面；契约终稿 = `docs/PRD_PROMPT_REGISTRY.md` §10；决策 = `docs/adr/0023-prompt-registry.md`。
-红线见 `docs/HANDOFF_PROMPT_REGISTRY.md` §4（`*` 只匹配 `profile:*`、Target 三值、T3 单点接线 `agent/profiles.py`、DEFAULT_REGISTRY 不读环境、FRAGMENT 不得并入 META_USER、冻结测试断言不许改、T3/T4/T8 逐字节等价）。
+红线见 `docs/archive/handoffs/HANDOFF_PROMPT_REGISTRY.md` §4（`*` 只匹配 `profile:*`、Target 三值、T3 单点接线 `agent/profiles.py`、DEFAULT_REGISTRY 不读环境、FRAGMENT 不得并入 META_USER、冻结测试断言不许改、T3/T4/T8 逐字节等价）。
 
 ### B. Memory / Workspace 组（#149–#160）
 
@@ -51,7 +51,7 @@
 
 ## 3. 执行队列（工作草稿）
 
-> **权威进度账本是 `docs/PHASE_STATUS.md`**（AGENTS.md §16.5）。本表只是 Agent
+> **权威进度账本是 `docs/PHASE_STATUS.md`**（`AGENTS.md` §2 / §16.1）。本表只是 Agent
 > 自己的执行队列草稿，便于上下文被摘要后立刻找回位置；两者冲突时**以
 > `PHASE_STATUS.md` 为准**，本表不承担事实源职责。
 

@@ -26,8 +26,8 @@ src/agent_harness/web/app.py                     | 目录注释 + GET 端点 doc
 tests/model/test_reasoning_effort.py             | 重写为 6 条契约（G1/G1b/G2/G3/G4/G4b/G5）
 docs/goal/GOAL_RUNTIME_REASONING_EFFORT.md       | 勘误块（作废的透传假设）
 docs/PHASE_STATUS.md                             | 2026-09-11 条目
-docs/INTEGRATION_PROMPT_REASONING_EFFORT_FIX.md  | 本文件
-docs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md     | 前端交接单
+docs/archive/integration-prompts/INTEGRATION_PROMPT_REASONING_EFFORT_FIX.md  | 本文件
+docs/archive/handoffs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md     | 前端交接单
 ```
 
 base：`5c7d85b`（merge：origin/main 架构深化 code-review 集成 + 前端 T9 集成记录）。
@@ -152,7 +152,7 @@ cd D:/intelligence-agent && git diff --name-only origin/main..main
 #   → PHASE_STATUS.md + step_id 的 runtime/session/tests/docs（与本分支零交集）
 # 本分支触及：model/provider.py / web/app.py / tests/model/test_reasoning_effort.py
 #            / docs/PHASE_STATUS.md / docs/goal/GOAL_RUNTIME_REASONING_EFFORT.md
-#            / 本文件 / HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md
+#            / 本文件 / docs/archive/handoffs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md
 ```
 
 两边都是在「## 更新日志」**同一位置追加**（最新在上），因此会冲突。按 **§14.7 逐条保留、两边语义都成立**：本分支的 2026-09-11 条目 + main 的 step_id 集成条目**全部保留**（不是 ours/theirs 二选一）。上一轮 `5c7d85b` 处理过完全同型的冲突（「PHASE_STATUS 同位追加冲突按 §14.7 三条全保留」），可照抄那个判定口径。
@@ -196,7 +196,7 @@ cd D:/intelligence-agent && git diff --name-only origin/main..main
 
 ## 8. 与本次一并诊断、但属于**前端**的缺陷（不在本 commit）
 
-用户同一次提问里的另外两个症状是前端缺陷，已写成独立交接单：`docs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`。
+用户同一次提问里的另外两个症状是前端缺陷，已写成独立交接单：`docs/archive/handoffs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`。
 
 - 「恢复会话」点了没反应 —— `web/src/lib/runState.ts:116` 的 `isRecoverableRun` 不认识 T8 新增的终态 `run/interrupted`，按钮永不消失。
 - 「分叉」点了没反应 —— `web/src/components/Conversation.tsx:292` 把 `turn.step_id`（turn 键）当成用户消息 `seq` 传给 `from_seq`；错误又被 `web/src/App.tsx:318-323` 的 `catch {}` 静默吞掉。

@@ -9,7 +9,7 @@
 
 ## 0. 先读这条：上一轮集成 AI 越权 push 了
 
-上一轮我写的集成提示词（`docs/INTEGRATION_PROMPT_FEAT_BACKEND_TO_MAIN.md`）明确写了
+上一轮我写的集成提示词（`docs/archive/integration-prompts/INTEGRATION_PROMPT_FEAT_BACKEND_TO_MAIN.md`）明确写了
 "`git push` **不在本次范围**"，但 merge 之后 `origin/main` 变成了 `d6c5fff`——**集成 AI 把 merge 结果 push 了**。
 merge 本身经我复核**完全正确**（见 §1），但 push 越权这件事必须记下来：**本轮请不要 push**，
 等到本地 `main` 验证完毕、且用户明确批准后再 push。

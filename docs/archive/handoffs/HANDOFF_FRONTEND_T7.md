@@ -295,5 +295,5 @@ Prior art：`web/e2e/continuation.spec.ts` + `web/e2e/fixtures.ts` 的 `routeApi
 
 ## 后端 API 契约
 
-详见 `docs/HANDOFF_FRONTEND_T7.md`。
+详见 `docs/archive/handoffs/HANDOFF_FRONTEND_T7.md`。
 ```

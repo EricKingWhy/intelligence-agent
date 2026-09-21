@@ -122,7 +122,7 @@ git -C D:/intelligence-agent push origin main
 | 3 | `.hidden` 缺 CSS 规则（模型数 ≤5 时搜索框不隐藏） | 存量 bug，**已存在于 main**（`275d76b`）；已记 `docs/FRONTEND_DEFER.md` F-DEFER-1 | 用户决定是否单独立票 |
 | 4 | e2e 4-worker 抖动 | 资源竞争，非确定性；判据用 `--workers=2` | 无需修 |
 | 5 | 冻结规格 `reasoning_effort` 误引 `(ADR-0018 D7)`（实际 `79e2860`） | 事实勘误，非需求变更；规格冻结需用户批准 | 后端勘误（`03_RUNTIME_EVENT_CONTRACT.md:617`、`08_DECISION_LOG.md:136`） |
-| 6 | WS `snapshot` 帧与 live/SSE 帧形状不一致 | 后端 WS 采用前置项（前端未迁 WS，不影响） | 后端（见 `docs/HANDOFF_FRONTEND_TECH_DEBT.md` §6） |
+| 6 | WS `snapshot` 帧与 live/SSE 帧形状不一致 | 后端 WS 采用前置项（前端未迁 WS，不影响） | 后端（见 `docs/archive/handoffs/HANDOFF_FRONTEND_TECH_DEBT.md` §6） |
 | 7 | `BACKEND_CONTRACT_STREAMING_UI.md` 缺 WS 章节 | 文档缺口 | 后端（同上） |
 | 8 | `tests/web` 三文件重复 fake provider + wiring 注入 | 测试脚手架去重 | 后端（同上，低优先） |
 

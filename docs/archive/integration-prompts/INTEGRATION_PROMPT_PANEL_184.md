@@ -92,7 +92,7 @@
 
 1. `git -C D:\intelligence-agent fetch origin --prune`；`git diff main...feat/frontend` 应只剩
    #182 / #190 / #184 三票的 commit（前两票已关单，提示词见
-   `INTEGRATION_PROMPT_PANEL_182.md` / `_190.md`）。
+   `docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_182.md` / `_190.md`）。
 2. **先回后正**：把 `origin/main` 合进 `feat/frontend`，在 feature 分支上解决冲突、跑门禁
    （§5），**再**合 `feat/frontend` → 本地 `main`。
 3. 冲突处理遵循 §14.7：逐文件分析，**禁止**机械 `ours`/`theirs`。本票与后端

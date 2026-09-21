@@ -81,6 +81,6 @@ frontend 检出 LF）造成的**工作树字节差异**。`web/` 同理不是两
 
 ## 5. 本轮如实划界的未做项
 
-`docs/INTEGRATION_PROMPT_WS_COMPLETE.md` §4 列的**真机验证点**（交付层不攒 WS 帧、队列立即出字、
+`docs/archive/integration-prompts/INTEGRATION_PROMPT_WS_COMPLETE.md` §4 列的**真机验证点**（交付层不攒 WS 帧、队列立即出字、
 断线重连横幅、代理拒 WS 时降级）**本轮没做**：它们依赖真实部署环境（腾讯 EdgeOne 交付层），
 本地造不出来。自动化门禁全绿，但这四项建议在能起完整环境时补扫。

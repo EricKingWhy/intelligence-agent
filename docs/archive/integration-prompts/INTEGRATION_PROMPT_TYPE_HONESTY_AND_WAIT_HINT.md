@@ -106,7 +106,7 @@ npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 &&
   测试：前端门禁 tsc 0 · vitest 519 passed（29 文件）· oxlint 0 errors · playwright 126 passed
   · vite build ✓；后端本轮零改动。
   关单：#147、#148 已关闭（证据见 issue comment）。集成提示词：
-  `docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。
+  `docs/archive/integration-prompts/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。
   残留：`step_id` 模板字符串写法仍可通过 tsc（见提示词第 5 节，唯一未闭合项）；停顿提示与
   重连 give-up 的窗口重叠、同屏两个计时数字语义不同**均已由用户确认按现状保留**。
 ```

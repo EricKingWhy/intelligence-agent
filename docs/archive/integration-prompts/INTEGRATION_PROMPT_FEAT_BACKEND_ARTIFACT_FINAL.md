@@ -31,7 +31,7 @@ feat/frontend → main  （后）
 | `a38767d` | #185 读接口 + 存储层校验对齐（AC3/AC4） |
 | `2c658a2` | #185 AC4：MinIO `load` 不再伪造元数据（缺啥返回 `None`） |
 | `b31b9f3` | #192 `LocalArtifactStore` + 写入接线 S3→MinIO→Local |
-| `0296956` | #192 进度登记 + `INTEGRATION_PROMPT_ARTIFACT_192.md` |
+| `0296956` | #192 进度登记 + `docs/archive/integration-prompts/INTEGRATION_PROMPT_ARTIFACT_192.md` |
 | `9086642` | 批 1 审查修复：选择器收敛为一份 + 补两条端到端证据 |
 | `21e6f55` | 批 1 审查记录 + ADR-0029 D6/Non-Goals 与落地对齐 |
 | `d925899` | #186 AC4：外置摘要点名与本 store 配对的读回工具 |

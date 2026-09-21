@@ -1002,7 +1002,7 @@ node scripts/perf-inspector-transition.mjs --mode segments --shipped --reps 4 --
 
 ### F5 — 长列表离屏跳过（#279）
 
-**口径**：与 `da01efd` 的 Timeline 实测同源（`HANDOFF_PERF_FRONTEND.md` P1-4：「renderToString
+**口径**：与 `da01efd` 的 Timeline 实测同源（`docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` P1-4：「renderToString
 探针：20k 全量 359ms / 2k 40ms」）——`renderToString` 全量渲染 = React 建元素树 + 序列化 HTML，
 n=50 取中位数、预热 10 次。复现脚本 `web/src/components/stepdetail-list-cost.perf.test.ts`：
 

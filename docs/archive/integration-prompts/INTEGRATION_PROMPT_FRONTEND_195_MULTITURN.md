@@ -1,6 +1,6 @@
 # 集成提示词：#195 前端半（多轮投递：队列条 + 消息动作行 + supersede 编辑）
 
-> 后端半契约冻结见 `docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`（feat/backend）。
+> 后端半契约冻结见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`（feat/backend）。
 > 本单是前端半（feat/frontend，独立 clone `D:\intelligence-agent-frontend`）。
 
 ## 状态

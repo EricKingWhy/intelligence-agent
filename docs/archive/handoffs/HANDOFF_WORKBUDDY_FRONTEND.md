@@ -15,7 +15,7 @@
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
 | HEAD | `c00f742`（merge main 第一步） |
-| 后端交接手册 | `D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_T7_T9.md` |
+| 后端交接手册 | `D:\intelligence-agent-backend\docs\archive\handoffs\HANDOFF_FRONTEND_T7_T9.md` |
 | SDD Tracker | `docs/SDD_TICKET_TRACKER.md` |
 | 集成提示词 | `docs/integration/FRONTEND_INTEGRATION_PROMPT.md` |
 

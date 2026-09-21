@@ -72,7 +72,7 @@ bad588a test(phase16): T2 #127 research/KB/web/citation + permission 分段独�
 | 修改 | `CONTEXT.md` | 「Phase 16 / Final Full E2E」术语段 |
 | 修改 | `docs/PHASE_STATUS.md` | Phase 15 行修正 + Phase 16 行立项→完成 |
 | 新增 | `docs/PHASE16_GATE.md` | Gate 证据总表（本手册同批 commit） |
-| 新增 | `docs/INTEGRATION_PROMPT_PHASE16.md` | 本手册 |
+| 新增 | `docs/archive/integration-prompts/INTEGRATION_PROMPT_PHASE16.md` | 本手册 |
 
 **scope 边界（§8）**：改动严格限定在 `docs/` + `tests/integration/`——**零 src/ 改动**（除 `_kill_child.py` 这一处向后兼容扩展，是测试基础设施而非产品代码）。Phase 16 是验证型 Phase，不引入新模块。
 
@@ -132,7 +132,7 @@ uv run ruff check src/ tests/
 
 ### 4.2 其它文件：预期零冲突
 
-- `docs/adr/0019-*.md`、`tests/integration/_phase16_helpers.py`、`tests/integration/test_phase16_gate.py`、`docs/PHASE16_GATE.md`、`docs/INTEGRATION_PROMPT_PHASE16.md`：纯新增，`main` 侧无对应文件 → 零冲突。
+- `docs/adr/0019-*.md`、`tests/integration/_phase16_helpers.py`、`tests/integration/test_phase16_gate.py`、`docs/PHASE16_GATE.md`、`docs/archive/integration-prompts/INTEGRATION_PROMPT_PHASE16.md`：纯新增，`main` 侧无对应文件 → 零冲突。
 - `tests/integration/_kill_child.py`：`feat/phase16` 只加了一行 `backend = config.get("backend", "local")`（向后兼容）。若 `main` 在此期间也改了同一处，需逐行分析；概率低（Phase 4 已稳定）。
 - `CONTEXT.md`：`feat/phase16` 在尾部新增「Phase 16」术语段；若 `main` 也改了 CONTEXT.md 的其它段，多半是不同段落，冲突可逐段手工合并。
 

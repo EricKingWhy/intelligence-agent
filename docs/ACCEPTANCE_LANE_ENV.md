@@ -61,7 +61,7 @@ curl -s http://127.0.0.1:8000/api/capabilities
 
 ## 3. 两个 worktree 的 `.env` 差异（本文件存在的原因）
 
-`.env` 按 AGENTS.md §13.1.6 属**不在 worktree 之间同步**的本地文件，所以能力集天然可能不同。
+`.env` 按 `AGENTS.md` §13.1「开发规则」第 5 条属**不在 clone 之间同步**的本地文件，所以能力集天然可能不同。
 2026-09-11 实测：
 
 | worktree | `CAPABILITIES` |

@@ -93,7 +93,7 @@
 
 | 本地票 | GitHub | 内容 | Blocked by |
 |---|---:|---|---|
-| 勘误 | **#268** | `HANDOFF_PERF_FRONTEND.md` 补 §11 勘误小节（docs-only） | 无 |
+| 勘误 | **#268** | `docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` 补 §11 勘误小节（docs-only） | 无 |
 | ADR-0037 | **#269** | 投影层引用稳定与 `eventsVersion`（docs-only） | 无 |
 | F1 | **#270** | 稳定 `disclosure` 引用，接回被折断的 memo 链 | 无 |
 | N2 | **#271** | 引入 `eventsVersion`，修 StepDetail 三处陈旧 memo（**正确性缺陷**） | 无 |
@@ -125,7 +125,7 @@
 | `src/agent_harness/web/websocket.py` | B7 | 只此一张 |
 | `src/agent_harness/storage/local_artifact.py` | B7 | 只此一张 |
 | `src/agent_harness/agent/runtime.py` | **#247** → B8 | 撞 #247 同函数体 |
-| `docs/HANDOFF_PERF_FRONTEND.md` | 勘误 | 只加 §11，既有回执一字不改 |
+| `docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` | 勘误 | 只加 §11，既有回执一字不改 |
 | `docs/adr/0037-*.md` | ADR-0037 | 新文件；开工前先确认 0037 未被占用 |
 | `docs/PERF_BASELINE.md` | **所有性能票追加** | 只允许**追加**，不得改写他人已落的行 |
 | `docs/SDD_TICKET_TRACKER.md` | **所有票追加**（**且与并行批次共享尾部**） | ⚠ 见下方「跨批共享的追加目标」 |

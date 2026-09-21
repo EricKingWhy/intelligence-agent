@@ -47,7 +47,7 @@
 | Spec 轴 findings | **P1** 三处形态闸用 `PureWindowsPath(...).is_absolute()` → POSIX 上拒掉一切合法绝对路径（#170 AC1 明文要求 POSIX）→ 抽 `is_absolute_path` 平台分支并共用。**P3** 空白 `cwd` 语义自相矛盾 / 矩阵外分支未登记 → PRD 补记 + 测试钉住；403 文案静默变更 → PRD 记明；`max_length` 造出矩阵外 list 形状 detail → 去掉；ADR-0028 D1 与 PRD 对条目 `path` 措辞冲突 → 改 ADR；`started.cwd` 的 realpath 断言与 symlink 条目 `path` 断言属**假绿** → 补强 |
 | Standards 轴 findings | **P2** `attach_matching_sessions` 用过滤视图重写账本会**永久**删掉 header 暂时读不到的成员（会话静默变 Ungrouped）→ 改为"读到且不匹配才剪，读不到保留"+ 回归锁 + 变异验证（改回旧行为 → 1 failed，sha256 还原）。**P2** host_dirs 只抓 `PermissionError` → 其余 OSError（TOCTOU/断连盘）冒 500 → `os.stat` + errno 分派。**P2** 根模式在事件循环上跑同步 I/O（3.11 fallback 26 次 `exists`）→ 同样卸载 worker。**P3** NUL 未拒（POSIX 上 `realpath` 抛 `ValueError` → 500）→ 两处补闸；`exists`/`isdir` 吞权限错误 → 改 `os.stat`；测试缺口（N>1 归入、边界截断、NUL）→ 补 |
 | 有据不改（已记录理由） | ① `MAX_ENTRIES` 全量物化后才截断：截断契约本身要求"排序后的前缀"，改 `scandir` 早停会破坏确定性；要限内存只能改契约（分页），收益不抵代价。② `PureWindowsPath` 判 `C:\x`：Windows 侧与既有口径一致，单方收紧会造两套形态语义。③ `ROOTS_PROVIDER` 模块级可替换 seam：可接受的测试 seam，不引入 DI 容器 |
-| 残留 / 交接 | 前端半（#169 AC9–AC14、#170 AC8–AC13）未做 → 两票**保持 OPEN**；下一批 fixed point = `9c158c9`；集成提示词 `docs/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md` |
+| 残留 / 交接 | 前端半（#169 AC9–AC14、#170 AC8–AC13）未做 → 两票**保持 OPEN**；下一批 fixed point = `9c158c9`；集成提示词 `docs/archive/integration-prompts/INTEGRATION_PROMPT_WS6_WS7_DIR_ROOTED_SESSION.md` |
 
 #### B-3 交付记录（2026-09-13，前端 worktree）
 
@@ -96,7 +96,7 @@ Standards 轴 2×P2 + 8×P3 → 全部处置完毕**（修复 commit 见台账�
 不回工具数）、一级底部「管理模型」
 入口（#203 交付物，位已由 `.picker-foot` 预留）。
 
-**B-3 集成交接提示词**：`docs/INTEGRATION_PROMPT_FRONTEND_B3_WEB_UI.md`（集成 AI 的唯一入口；§0 是可执行
+**B-3 集成交接提示词**：`docs/archive/integration-prompts/INTEGRATION_PROMPT_FRONTEND_B3_WEB_UI.md`（集成 AI 的唯一入口；§0 是可执行
 摘要，§2 列出「本次没碰」的契约，§3 是本批残余，§4 是踩过的坑）。ticket 关单状态：#194/#197 **已关**
 （代码完成未合入 main，按 §14.12）；#199/#201 **保持 OPEN**（各有冻结 AC 因缺后端数据未落地，comment 已记）。
 
@@ -110,9 +110,9 @@ Standards 轴 2×P2 + 8×P3 → 全部处置完毕**（修复 commit 见台账�
 | Worktree | `D:\intelligence-agent-frontend` |
 | Branch | `feat/frontend` |
 | 协议版本 | `docs/SDD_WORKFLOW_PROTOCOL.md` **v2**（批量审查循环；v1 的「每票一次 /code-review」已作废）——**历史值：现行协议是 V3-lite** |
-| 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
+| 后端交接手册 | 本轮：`D:\intelligence-agent-backend\docs\archive\handoffs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（A/B/C/D） |
 | 集成交接提示词 | 本轮：`docs/integration/FRONTEND_SESSION_HARD_DELETE_INTEGRATION_PROMPT.md`（#172 前端半，**集成 AI 的唯一入口**，§0 是可执行摘要）；上一批（**已入 main `593dcda`**）：`docs/integration/FRONTEND_REFRESH_PERSIST_INTEGRATION_PROMPT.md` |
-| 本批交接手册 | `docs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（做了什么 + 8 个坑点 + 未决项 + 复核命令） |
+| 本批交接手册 | `docs/archive/handoffs/HANDOFF_APPROVAL_CARD_COVERAGE.md`（做了什么 + 8 个坑点 + 未决项 + 复核命令） |
 | 下一批提示词 | `docs/PROMPT_FRONTEND_NEXT_BATCH.md`（可直接复制给前端 Agent：OBS-015 修复为主） |
 
 **禁止推送远程**（AGENTS.md §13.2/§14.4）：本地 commit 已完成，push 归集成 AI。
@@ -470,9 +470,9 @@ v2 §1.3 要求「全部 ticket 完成后对整条分支跑一次最终全量 /c
 | --- | --- |
 | 本批 commit | `1fac807` |
 | 门禁 | tsc ✓ / vitest **502 passed**（28 文件）/ oxlint **35w 0e**（基线持平）/ playwright **118 passed**（`--workers=2`）/ vite build ✓ |
-| 交付 | 纯跨端同步，**解析逻辑零改动**（`LINE_TRUNCATED_RE` 的 `[^\]]*` 本就吞尾部）。① `web/src/lib/toolShapes.test.ts`：新增「新文案（OBS-016）」用例；原用例改标「旧文案（历史会话已落盘）」并**保留**——历史 JSONL 事件仍是旧文案，两种都要能解。② `docs/HANDOFF_FRONTEND_SYNC.md` §1.3：订正为「形状契约 + 措辞可变 + 历史文案兼容」。 |
+| 交付 | 纯跨端同步，**解析逻辑零改动**（`LINE_TRUNCATED_RE` 的 `[^\]]*` 本就吞尾部）。① `web/src/lib/toolShapes.test.ts`：新增「新文案（OBS-016）」用例；原用例改标「旧文案（历史会话已落盘）」并**保留**——历史 JSONL 事件仍是旧文案，两种都要能解。② `docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md` §1.3：订正为「形状契约 + 措辞可变 + 历史文案兼容」。 |
 | 变异验证 | 把 `LINE_TRUNCATED_RE` 改成仅匹配旧文案（追加 `\. Use bash`）→「新文案」用例变红、「旧文案」用例仍绿（已还原）。证明新增用例非空转，且旧用例仍锁住向后兼容。 |
-| 跨端配对 | 后端半在 `D:\intelligence-agent-backend` `feat/backend`：`aa29562`（`read.py` 正文改点名真实工具标识符 bash/grep）。本 clone 是独立 clone，`web/` 与 `docs/HANDOFF_FRONTEND_SYNC.md` 相对 `origin/main` **零漂移**，故本批**未做 merge**（`feat/frontend` @`274afcf` 是 `origin/main` @`63db650` 的严格祖先，如需同步可 ff）。 |
+| 跨端配对 | 后端半在 `D:\intelligence-agent-backend` `feat/backend`：`aa29562`（`read.py` 正文改点名真实工具标识符 bash/grep）。本 clone 是独立 clone，`web/` 与 `docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md` 相对 `origin/main` **零漂移**，故本批**未做 merge**（`feat/frontend` @`274afcf` 是 `origin/main` @`63db650` 的严格祖先，如需同步可 ff）。 |
 | code-review | 本批为测试/文档同步，无解析逻辑改动；后端半的两轴 review 已发现并修复初版「the shell tool」指向不存在工具的问题。 |
 
 ### 上一批：OBS-015 修复——审批卡区分幂等已决(409)与真失败(5xx)（2026-09-11）
@@ -820,7 +820,7 @@ glm-4.5-air · 6907 tok` → `run/completed 13873 tok`）。停顿期间 UI 全�
 （其中 3 例是无关用例）。清掉并发、`rm -rf test-results` 后重跑全绿。**同一 worktree 里
 不要并行跑两个 playwright。**
 
-**集成提示词**：`docs/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。
+**集成提示词**：`docs/archive/integration-prompts/INTEGRATION_PROMPT_TYPE_HONESTY_AND_WAIT_HINT.md`。
 
 ## 第八轮（2026-09-12）：WS-5 #155 项目分组 UI（跨端票的前端半）
 
@@ -1010,7 +1010,7 @@ dev server 已停、真记忆库已清空（不留假事实）。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit，不 push）；
 成功后回填 `docs/PHASE_STATUS.md`。合并顺序：先 `feat/backend`（含 spec #173 T1–T4 的 4 个 commit），
-再 `feat/frontend`（本表 4 个 commit）——详见 `docs/INTEGRATION_PROMPT_SPEC_173_T1_T5.md`（backend worktree）。
+再 `feat/frontend`（本表 4 个 commit）——详见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_SPEC_173_T1_T5.md`（backend worktree）。
 
 ---
 
@@ -1094,7 +1094,7 @@ BENCHMARK_SYNTHESIS 的取舍删除。
 **发现的既有测试现象（未修，非本票引入）**：无。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
-集成提示词见 `docs/INTEGRATION_PROMPT_PANEL_182.md`。
+集成提示词见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_182.md`。
 
 ## 第十六轮：#190（2026-09-14，前端侧 · 在途记录）
 
@@ -1149,7 +1149,7 @@ AC5 ✅e2e 断言无输入类元素、无"运行"键、无光标 / AC6 ✅7 条�
 是否对齐）。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
-集成提示词见 `docs/INTEGRATION_PROMPT_PANEL_190.md`。
+集成提示词见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_190.md`。
 
 ## 第十七轮：#184（2026-09-14，前端侧 · 在途记录）
 
@@ -1204,7 +1204,7 @@ ARTIFACTS run 级段，CHECKPOINT 保持诚实占位）／4 ✅（`—` + 原因
 不是新需求。**已报告用户等待决策，未擅自实现**（§8/§9.1）。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
-`docs/INTEGRATION_PROMPT_PANEL_184.md`。
+`docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_184.md`。
 
 ---
 
@@ -1265,7 +1265,7 @@ peek 结构 13）；`oxlint` 0 error（**44** warnings = 基线，新文件零 w
 所见一致），交后续票据或用户决定。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
-`docs/INTEGRATION_PROMPT_PANEL_183.md`。
+`docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_183.md`。
 
 ---
 
@@ -1327,7 +1327,7 @@ ChangesPanel 10）；`oxlint` 0 error（**44** warnings = 基线，新文件零 
 复制第二份。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push。集成提示词见
-`docs/INTEGRATION_PROMPT_PANEL_189.md`。
+`docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_189.md`。
 
 ---
 
@@ -1527,7 +1527,7 @@ feat/frontend → main   （#186 的消费侧）
   以 `web/app.py:1229-1330` 的 `ArtifactSlice.model_dump()` 为准。
 
 **交给集成 AI**：按上面的顺序合并与 push。集成提示词见
-`docs/INTEGRATION_PROMPT_PANEL_186.md`。
+`docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_186.md`。
 
 ---
 
@@ -1545,7 +1545,7 @@ read-only subagent **独立**审全量 diff（不是只看我改过的地方）�
 
 | # | 轴 | 严重度 | finding | 处置 |
 | --- | --- | --- | --- | --- |
-| 1 | Spec（两轴交叉验证） | **P0** | **中心列两个新面在真实部署里不可达**：`centerTabs` 要求"声明为 true **且**已实现"，实现侧两半都在（`implemented:true` + `App.tsx` 面板），但**声明侧永远不为 true**——`web/app.py:918-927` 对未声明 `surfaces` 的 descriptor 一律给 `changes/terminal/artifacts = false`，而 `capability/wiring.py` 里 7 个 descriptor（memory/skills/mcp/knowledge/multiagent/websearch/ticker）**没有一个填 `surfaces`**，`ProviderConfig` 是 strict 无该字段 ⇒ 配置也填不进。`workspace-modes` / `x-output-panel` / `z-changes-panel` 能看到是因为 e2e **注入了 `changes/terminal: true`**——后端发不出这种载荷 | **不按代码缺陷修**（见下"为什么不改代码"），改为：订正 `INTEGRATION_PROMPT_PANEL_189.md` 的错述 + 开票 **#193** 跟踪声明侧 |
+| 1 | Spec（两轴交叉验证） | **P0** | **中心列两个新面在真实部署里不可达**：`centerTabs` 要求"声明为 true **且**已实现"，实现侧两半都在（`implemented:true` + `App.tsx` 面板），但**声明侧永远不为 true**——`web/app.py:918-927` 对未声明 `surfaces` 的 descriptor 一律给 `changes/terminal/artifacts = false`，而 `capability/wiring.py` 里 7 个 descriptor（memory/skills/mcp/knowledge/multiagent/websearch/ticker）**没有一个填 `surfaces`**，`ProviderConfig` 是 strict 无该字段 ⇒ 配置也填不进。`workspace-modes` / `x-output-panel` / `z-changes-panel` 能看到是因为 e2e **注入了 `changes/terminal: true`**——后端发不出这种载荷 | **不按代码缺陷修**（见下"为什么不改代码"），改为：订正 `docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_189.md` 的错述 + 开票 **#193** 跟踪声明侧 |
 | 2 | Standards | P1 | **Inspector「Output」段取数反转**：只要留过流式块就用 `tool.output`，无视已到达的 `result`（>512 块还可能被投影合并/重排）⇒ 同一个 bash 调用在 Inspector 与中心列/「输出」面显示**不同文本**。`#190 AC7`（"不得改变 Inspector 侧既有行为"）与 `#183 AC9`（同一数据一个渲染器）都在这条上 | **修**（`09afbe5`）：命令走 `lib/commandOutput.ts` 的终态优先级；**只在有流式块时纠正**（无块时保留原"结果树"，那里还有 `exit_code`/`cancelled`）。变异验证：还原 → 用例红 |
 | 3 | Standards | P2 | `parseArtifactSlice` 注释说"缺字段抛错"，实现给 `total_lines/returned_lines` 填 **0** ⇒ 形状不符时渲染"共 0 行"的**假空产物** | **修**：两者改为必须在场；+3 单测（含变异验证） |
 | 4 | Standards | P2 | `ArtifactViewer.retry()` 丢弃 `load()` 的清理函数 ⇒ 存活标记恒 true，重试在飞时卸载仍 setState | **修**：改 ref，且臂化/释放在同一 effect（**单独一个"仅卸载置 false"的 effect 会被 `StrictMode` 的模拟卸载永久关掉**——`main.tsx:13` 确是 StrictMode，故按此形状写） |
@@ -1575,7 +1575,7 @@ read-only subagent **独立**审全量 diff（不是只看我改过的地方）�
 **票面 AC 与"用户可见"的区分**：#182 AC6 / #189 AC8 / #190 AC6 要求的是
 "声明为真 → 出现"（已逐条满足，e2e 用显式声明钉住），本批**没有** AC 要求
 "默认配置下用户可见"。所以这是**声明侧的缺口**，不是本批实现缺陷——但它决定了
-交付物是否被真实用户看到，必须显式记账（先前 `INTEGRATION_PROMPT_PANEL_189.md` 写
+交付物是否被真实用户看到，必须显式记账（先前 `docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_189.md` 写
 "此前能力接口声明为 true 但被登记表压住"，**与事实相反**，已订正）。
 
 ### AC9 残余（如实登记，不改）
@@ -1612,7 +1612,7 @@ bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门�
 - **#193 保持 OPEN**（后端声明侧，本批不做）。
 - 移交集成 AI：先 `feat/backend` → `main`（#185 的路由只在那条分支，否则前端"查看完整
   内容"404），再 `feat/frontend` → `main`，然后按集成提示词冒烟。
-  提示词：`docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md`。
+  提示词：`docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md`。
 
 ## 第二十二轮：#193（2026-09-14，跨端：后端 `21f5427` + 前端在途记录）
 
@@ -1685,9 +1685,9 @@ bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门�
 - **#193 前后端都完成** ⇒ 按 §14.12 关单：comment 写明两端分支（`feat/backend` /
   `feat/frontend`）与 commit（`21f5427` / `127ecc3`），注明合并由集成 AI 执行。
 - **本批（#193）的集成提示词是后端那份**：
-  `D:\intelligence-agent-backend\docs\INTEGRATION_PROMPT_193_CAPABILITY_SURFACES.md`
+  `D:\intelligence-agent-backend\docs\archive\integration-prompts\INTEGRATION_PROMPT_193_CAPABILITY_SURFACES.md`
   （跨端，含合并顺序、真端点验收、两条必须传下去的口径、风险 1 的同类隐患提示）。
-- 上一轮（#183 / #186 / #189）的提示词 `docs/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md` 仍然有效，
+- 上一轮（#183 / #186 / #189）的提示词 `docs/archive/integration-prompts/INTEGRATION_PROMPT_PANEL_FINAL_GATE.md` 仍然有效，
   但它里面"#193 未完成 ⇒ 两个面用户看不到"的告警**在本票合并后作废**。
 
 ## 第二十三轮：#181（2026-09-14，前端侧 · 在途记录）
@@ -1764,7 +1764,7 @@ bash 的 `exit_code` 不再渲染（那棵结果树才有）。这正是总门�
    入口，没有引入这个重叠。要真修得改槽位模型（行不再收缩成内容宽），建议与 ① 一起定案。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
-集成提示词见 `docs/INTEGRATION_PROMPT_181_TOUCH_RAIL.md`。
+集成提示词见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_181_TOUCH_RAIL.md`。
 
 ---
 
@@ -1852,7 +1852,7 @@ e2e 里"归档行不算缺失"必须带反向对照（账本里放一个**真**�
    resume / fork / lineage 照旧），而 stream 不读 `session_meta`；属联调车道可补项。
 
 **交给集成 AI**：`feat/frontend` → `main` 的合并与 push（本 worktree 只做本地 commit）。
-集成提示词见 `docs/INTEGRATION_PROMPT_171_SESSION_ARCHIVE.md`（在 `feat/backend`，与后端半
+集成提示词见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_171_SESSION_ARCHIVE.md`（在 `feat/backend`，与后端半
 同一份——跨端票合成一个入口，含合并顺序、契约要点与残余）。
 
 ---
@@ -1860,7 +1860,7 @@ e2e 里"归档行不算缺失"必须带反向对照（账本里放一个**真**�
 ## 第二十五轮：#195（2026-09-15，跨端：后端 `3d9dc28` + 前端 `3d3e591`）
 
 **票**：用户消息动作行 + 编辑（含流式输入解锁）。后端半已在 `feat/backend`
-`3d9dc28`（契约冻结见 `docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`），
+`3d9dc28`（契约冻结见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`），
 本 worktree 完成前端半。
 
 ### 做了什么
@@ -1927,14 +1927,14 @@ main 由集成 AI 执行）。
 
 **关单**：#196（纯后端）/ #195（跨端两半齐）均已关闭（comment 带两端 commit + 门禁数字）。
 **交给集成 AI**：feat/backend → feat/frontend → main 合并顺序（§14.9）；
-集成提示词 `docs/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`（feat/backend，契约冻结）+
-`docs/INTEGRATION_PROMPT_FRONTEND_195_MULTITURN.md`（feat/backend，前端半交付清单）。
+集成提示词 `docs/archive/integration-prompts/INTEGRATION_PROMPT_BACKEND_196_MULTITURN.md`（feat/backend，契约冻结）+
+`docs/archive/integration-prompts/INTEGRATION_PROMPT_FRONTEND_195_MULTITURN.md`（feat/backend，前端半交付清单）。
 - 2026-09-15：**ticket #200 上下文容量看板（前端半，feat/frontend d20cc3c 后续 commit）**。`ContextUsagePanel`（六桶分段条 + 图例 + 70%/85% 阈值标记 + 缓存命中率大字）；空态/未采集**不显示 0%**（用户裁定的诚实口径）；TopBar Gauge 入口（无会话不渲染）；Esc/遮罩关闭；打开拉一次不轮询。小桶 <1.5% 重标定（宽度仍显示，图例不隐藏数据）。e2e context-usage.spec 8 条（fixtures 增 onContextUsageGet）。门禁：tsc ✓ / vitest 832 ✓ / oxlint 0 err / e2e 342 ✓ / build ✓。关单：是（两端完成，#200 已关闭）。后端半与关单证据见 backend PHASE_STATUS。
 - 2026-09-15：**ticket #198 档位披露（前端半，feat/frontend 332d933）**。Inspector 头标档位徽标（deriveAgentProfile 纯函数；旧数据 → 「档位未知」，不伪造 main）；档位下拉 trigger hover title 附后端下发的条目描述（收窄披露，零前端硬编码）；detail-profile-badge CSS（中性色事实标签）。e2e g-visual-qa 回归（mock 无字段旧数据）——曾复用 detail-run-id 定位器撞 strict mode，改独立 class。门禁：tsc ✓ / vitest 835 ✓ / oxlint 0 / e2e 342 ✓ / build ✓。关单：是（#198 两端完成，已关闭）。后端半见 backend PHASE_STATUS。
 - 2026-09-15：**ticket #203 供应商管理（前端半，feat/frontend 597b501）**。ProviderManagerDialog 两栏弹层（列表状态点 + kind 标记 + 表单 + API Key type=password 零回显 + 测试连接内联 + 删除二次确认 + 清除密钥独立动作）；模型选择器底部「管理模型」入口（先关菜单再开弹层）。api.ts 增 provider CRUD/test 函数 + ProviderError。门禁：tsc ✓ / vitest 835 ✓ / oxlint 0 / e2e 342 ✓ / build ✓。关单：是（#203 两端完成，已关闭）。后端半与关单证据见 backend PHASE_STATUS。
 - 2026-09-15：**ticket #204 项目弹窗收窄（前端半，feat/frontend 5e0a396）**。弹窗去掉「任务内容」输入框（裁定 §1）；职责 = 选目录 + 设默认权限 + 创建空会话（createEmptySession 走 POST /api/sessions?launch=false，payload 类型上无 task）；提交守卫只看 pending；按钮「创建会话」；成功后焦点落到 chat 输入框、不自动发起 run。权限 pill 用**创建响应回传的** permission_mode 初始化（review 修复：删弹窗本地值双写——响应值才是事实源，本地值后到会覆盖它）。e2e u-project-task 全面改造（URL launch=false / 请求体无 task / emptySessionPermissionOverride 响应≠请求档位考真值 / focus 断言 / `.composer-dock` 与 `.project-dialog` 前缀分开 pill 与弹窗选择器定位符）。门禁：tsc ✓ / vitest 839 ✓ / oxlint 0 错误 / e2e 342 ✓ (--workers=2) / vite build ✓ / impeccable detect 空。关单：是（#204 两端完成，已关闭，comment 附两端 commit + 门禁数字）。后端半与关单证据见 backend PHASE_STATUS。
-- 2026-09-15：**全分支结构轴复审（前端半，feat/frontend f766848）**。复审轴 = 代码整洁度（重复/死代码/抽象泄漏/注释噪音/真 bug），刻意不重复"票面是否满足"（前一轮终审已覆盖），故**不新增票、不关单**。**真 bug（用户可见）**：①供应商表单把 models **整表替换**为只含 `models[0]` 的一行 → 保存即静默删掉其余模型、`label` 一并丢失（override 内置条目因后端做并集尤其明显；ADR-0032 §8.1 要"可增删行，每行 model_id + 可选 label"）；②create 分支 `api_key` 被两个 spread 重复写入，后者恒覆盖前者；③队列条「立即」未带 `queue_id` → 原排队项仍在队列，终态驱动会把同一句**再投递一次**；④队列条为 **steer 项**也渲染 编辑/立即/取消，但后端只按 `queue_id` 定位（`cancel_queue` 只认 kind=queue）→ 点击即静默 404；⑤「编辑」原为"回填主输入框 + 取消原项"（与 §5.2 就地编辑不符，且取消失败留下"已预填却仍排队"双重状态）。**修法**：多行模型编辑（每行 model_id + label）；`api_key` 收敛为单个条件 spread；「立即」发 `amend:{mode:'steer', queue_id}`；三个操作仅对 `kind==='queue'` 渲染；改为行内编辑态提交 `{content, queue_id}`、不回填主输入框。**去重**：model 规整抽成纯函数 `web/src/lib/providerModels.ts`（vitest 仅 SSR、无 jsdom，纯函数才可直测）+ `providerModels.test.ts` 6 例。**新增测试**：Composer 队列条 3 例（空队列不渲染 / queue 项渲染三个操作 / **steer 项不渲染**）；e2e T12c（立即发送请求体带 queue_id）/T12d（就地编辑不回填主输入框）。**门禁**：tsc ✓ / vitest **848** ✓ (+9) / oxlint **0 error / 43 warnings（均既有，无一来自本批文件）** / e2e **346** ✓ (--workers=2) / vite build ✓。**债务（Scope Lock 未动）**：`useSession.ts` 流前置 4 处（≈715/786/845/1123）实质不同故不重构；`getContextProviders` 导出未使用（端点仍在，保留决定）；本批未新增 CSS token，§15 不涉及。集成提示词：**前后端合并为一篇** → backend clone `docs/INTEGRATION_PROMPT_REVIEW_STRUCTURAL.md`（含仓库拓扑、冲突锚点、集成流程；原来分前后端的两篇已删除）。
-- 2026-09-15：**ticket #205 + #206（分支 `integrate/ws-stream`，`2dfc5f9` + `60da04c`）**。**B-4 收批**（fixed point `e4da691` = 本批第一行代码之前的 `origin/main`）。背景：交付层（CloudStudio EdgeOne）对 HTTP 响应整体攒包，实测 SSE 响应头 44.2s / `GET /stream` 41.6s 才到 ≈ run 全长；WS 帧不攒（实测 `text/delta` 1.65s→30.35s 逐帧到达）。**#205**：`flushQueue` / `scheduleReconnect` / `doTruncatedRebuild` 三条剩余 live 路径切 WS——「立即发送全部」不再 `await` 攒包的 SSE 响应体，改为「攒包判别（`raceEarlyResponse` 1200ms 窗）+ WS 接流」，游标取**本会话对话的真实 max seq**（快照重放的旧终态会在 `seenSeqs` 去重门之前把 `terminalSeenRef` 置真，缺游标 = 新 run 被误判"已收口"、断流不再重连）；`wsStream.ts` 新增**零服务帧建连失败 → 自动降级 HTTP SSE**（收到过服务帧或 `error` 帧则不降级，避免吞掉真实错误）；404 语义（会话已删）改由 `sessionExists` 存在性探测承担（WS 错误帧不带状态码）。**#206**：`#206` 正文「Playwright `routeWebSocket` 在本环境拦不到 `/api/ws`」的结论**被推翻**——真因是注册没 `await`（`void page.routeWebSocket(...)` 静默失效），对照实验已坐实，因此**不需要页内 shim**；`routeApi` 改 `async` 并 39 个 spec 全量 `await`。**新增覆盖**：`queue-flush.spec.ts`（7 例：launched 必须 3.5s 内出字 / 游标 / idle 静默 / 409×3 后透出后端 detail / 迟到 409 / 迟到 idle / 404 显式报错）+ `stream-fallback.spec.ts`（2 例：WS 被拒 → 自动降级接通；降级流收 `stream/truncated` → `/events` 全量重建后按真实 max seq 续流）。**两轴 review 处置**：降级流的 HTTP reader 未随 `cancel()` 断（P1，加 `sseReader` 并取消）/ flush 窗外落定的非 SSE 回执被吞（P2，加 `lateOutcome`）/ `installWsRoute` 文档与"必须 await"自相矛盾（P2）/ `hasActiveRun` 文档与实现不符 + `done` 时机不忠实（P2/P3）/ `closeNow`、降级、`sessionExists` 零覆盖（P1/P3）/ **#205 P1**`doTruncatedRebuild` 零覆盖。**有据不改并登记新票 #208**：WS 快照无 backlog 上限、`stream/truncated` 在 WS 主通道不可达（只剩降级流会走到）——功能不丢（seq 幂等吸收重复），但超大会话一次握手塞整段日志；前端**不**单方面限流（会是第二套语义）。**门禁**：tsc `-b` 0 错 / vitest **882 passed** / oxlint **0 error**（44 既有 warning）/ playwright **364 passed**（`--workers=2`，41 spec）/ `vite build` ✓。**关单**：**是**（#205 / #206 均为纯前端票，comment 附分支 + 两个 commit + 门禁数字，并注明合并与 push 由集成环节执行）。**集成提示词**：`docs/INTEGRATION_PROMPT_WS_COMPLETE.md`（含跨 clone 拓扑、`merge-tree` 实测**零冲突**、46 文件 footprint、合并后五项门禁期望值、真机验证点、风险与未尽事项）。**未做（按 §13.2/§14.4）**：未 merge、未 push、未建 PR；集成票 **#207** 留给集成 AI。
+- 2026-09-15：**全分支结构轴复审（前端半，feat/frontend f766848）**。复审轴 = 代码整洁度（重复/死代码/抽象泄漏/注释噪音/真 bug），刻意不重复"票面是否满足"（前一轮终审已覆盖），故**不新增票、不关单**。**真 bug（用户可见）**：①供应商表单把 models **整表替换**为只含 `models[0]` 的一行 → 保存即静默删掉其余模型、`label` 一并丢失（override 内置条目因后端做并集尤其明显；ADR-0032 §8.1 要"可增删行，每行 model_id + 可选 label"）；②create 分支 `api_key` 被两个 spread 重复写入，后者恒覆盖前者；③队列条「立即」未带 `queue_id` → 原排队项仍在队列，终态驱动会把同一句**再投递一次**；④队列条为 **steer 项**也渲染 编辑/立即/取消，但后端只按 `queue_id` 定位（`cancel_queue` 只认 kind=queue）→ 点击即静默 404；⑤「编辑」原为"回填主输入框 + 取消原项"（与 §5.2 就地编辑不符，且取消失败留下"已预填却仍排队"双重状态）。**修法**：多行模型编辑（每行 model_id + label）；`api_key` 收敛为单个条件 spread；「立即」发 `amend:{mode:'steer', queue_id}`；三个操作仅对 `kind==='queue'` 渲染；改为行内编辑态提交 `{content, queue_id}`、不回填主输入框。**去重**：model 规整抽成纯函数 `web/src/lib/providerModels.ts`（vitest 仅 SSR、无 jsdom，纯函数才可直测）+ `providerModels.test.ts` 6 例。**新增测试**：Composer 队列条 3 例（空队列不渲染 / queue 项渲染三个操作 / **steer 项不渲染**）；e2e T12c（立即发送请求体带 queue_id）/T12d（就地编辑不回填主输入框）。**门禁**：tsc ✓ / vitest **848** ✓ (+9) / oxlint **0 error / 43 warnings（均既有，无一来自本批文件）** / e2e **346** ✓ (--workers=2) / vite build ✓。**债务（Scope Lock 未动）**：`useSession.ts` 流前置 4 处（≈715/786/845/1123）实质不同故不重构；`getContextProviders` 导出未使用（端点仍在，保留决定）；本批未新增 CSS token，§15 不涉及。集成提示词：**前后端合并为一篇** → backend clone `docs/archive/integration-prompts/INTEGRATION_PROMPT_REVIEW_STRUCTURAL.md`（含仓库拓扑、冲突锚点、集成流程；原来分前后端的两篇已删除）。
+- 2026-09-15：**ticket #205 + #206（分支 `integrate/ws-stream`，`2dfc5f9` + `60da04c`）**。**B-4 收批**（fixed point `e4da691` = 本批第一行代码之前的 `origin/main`）。背景：交付层（CloudStudio EdgeOne）对 HTTP 响应整体攒包，实测 SSE 响应头 44.2s / `GET /stream` 41.6s 才到 ≈ run 全长；WS 帧不攒（实测 `text/delta` 1.65s→30.35s 逐帧到达）。**#205**：`flushQueue` / `scheduleReconnect` / `doTruncatedRebuild` 三条剩余 live 路径切 WS——「立即发送全部」不再 `await` 攒包的 SSE 响应体，改为「攒包判别（`raceEarlyResponse` 1200ms 窗）+ WS 接流」，游标取**本会话对话的真实 max seq**（快照重放的旧终态会在 `seenSeqs` 去重门之前把 `terminalSeenRef` 置真，缺游标 = 新 run 被误判"已收口"、断流不再重连）；`wsStream.ts` 新增**零服务帧建连失败 → 自动降级 HTTP SSE**（收到过服务帧或 `error` 帧则不降级，避免吞掉真实错误）；404 语义（会话已删）改由 `sessionExists` 存在性探测承担（WS 错误帧不带状态码）。**#206**：`#206` 正文「Playwright `routeWebSocket` 在本环境拦不到 `/api/ws`」的结论**被推翻**——真因是注册没 `await`（`void page.routeWebSocket(...)` 静默失效），对照实验已坐实，因此**不需要页内 shim**；`routeApi` 改 `async` 并 39 个 spec 全量 `await`。**新增覆盖**：`queue-flush.spec.ts`（7 例：launched 必须 3.5s 内出字 / 游标 / idle 静默 / 409×3 后透出后端 detail / 迟到 409 / 迟到 idle / 404 显式报错）+ `stream-fallback.spec.ts`（2 例：WS 被拒 → 自动降级接通；降级流收 `stream/truncated` → `/events` 全量重建后按真实 max seq 续流）。**两轴 review 处置**：降级流的 HTTP reader 未随 `cancel()` 断（P1，加 `sseReader` 并取消）/ flush 窗外落定的非 SSE 回执被吞（P2，加 `lateOutcome`）/ `installWsRoute` 文档与"必须 await"自相矛盾（P2）/ `hasActiveRun` 文档与实现不符 + `done` 时机不忠实（P2/P3）/ `closeNow`、降级、`sessionExists` 零覆盖（P1/P3）/ **#205 P1**`doTruncatedRebuild` 零覆盖。**有据不改并登记新票 #208**：WS 快照无 backlog 上限、`stream/truncated` 在 WS 主通道不可达（只剩降级流会走到）——功能不丢（seq 幂等吸收重复），但超大会话一次握手塞整段日志；前端**不**单方面限流（会是第二套语义）。**门禁**：tsc `-b` 0 错 / vitest **882 passed** / oxlint **0 error**（44 既有 warning）/ playwright **364 passed**（`--workers=2`，41 spec）/ `vite build` ✓。**关单**：**是**（#205 / #206 均为纯前端票，comment 附分支 + 两个 commit + 门禁数字，并注明合并与 push 由集成环节执行）。**集成提示词**：`docs/archive/integration-prompts/INTEGRATION_PROMPT_WS_COMPLETE.md`（含跨 clone 拓扑、`merge-tree` 实测**零冲突**、46 文件 footprint、合并后五项门禁期望值、真机验证点、风险与未尽事项）。**未做（按 §13.2/§14.4）**：未 merge、未 push、未建 PR；集成票 **#207** 留给集成 AI。
 - 2026-09-15：**收批后的门禁复核发现「跨 clone 端口复用」假红（登记为 #209，未修）**。为在关单前核实数字，于 `D:\intelligence-agent\web`（main，`e4da691`）跑全量 e2e，得 **18 failed**（`d-recover` 4×2 / `e-reconnect` 1×2 / `k-refresh-restore` 2×2 / `n-approval-card` 1×2 / `o-wait-hint` 1×2）。**不是 main 坏了**：两个 clone 的 `playwright.config.ts` 逐字相同（`baseURL: localhost:5173` + `reuseExistingServer: !CI`），而 5173 上那个常驻 vite 的进程命令行指向 **`D:\intelligence-agent-frontend\web`**（实测 PID 11460）⇒ Playwright **复用了它**，于是「main 的 spec（同步 `routeApi`、无 WS mock）+ WS 分支的代码」，正好复现 #206 描述的那批红。把端口让开（临时 `--port 5273 --strictPort` + `reuseExistingServer: false`，临时配置用完已删）重跑这 5 个 spec：**58 passed / 0 failed**。同时确认 main 基线：`playwright --list` **346 tests / 39 files**、vitest **848 passed / 49 files**、oxlint **0 error / 43 warnings**——与本批 `+18 e2e / +34 vitest / +1 file` 一一对得上。**假红比假绿同样昂贵**（本次约 20 分钟才查到端口），已按 Scope Lock 只报告不顺手改：开票 **#209**（三个候选修法 A/B/C + 预检命令），并把预检写进集成提示词 §2.1/§5.6，防止集成 AI 误判 main 有回归。**另核实（不改动）**：#199 / #201 虽已随 `334de4b` 合入 main（实现与两轴 review 修复都在 main 上），但两票票面 comment 明确写了「**不关单**」——各自有冻结 AC 缺数据源未落地（#199 不可用 provider 置灰 + reason / 能力徽标 / 「管理模型」入口；#201 档位收窄提示 N/M 工具数）。故**保持 OPEN**，符合 §14.12「不要凭进度文档或记忆关单」。
 - 2026-09-16：**真机浏览器逐控件验收（无票面，用户直接指令：前端每个功能都要点一遍）**。**测试方式**：`control-browser` 不可用（webview 未附着；成功加载的那页 `visibilityState=hidden`）→ 改真 Chromium + 真 vite(:5174) + 真 uvicorn(:8000) 逐控件点击，边测边写 `docs/LIVE_BROWSER_TEST_20260916.md`（那是本批唯一交付文档，含环境/能力集/逐条实测/刷新专项/数据足迹/复现方式与两条硬纪律：Radix 模态期 `aria-hidden` 会让 `getByRole` 归零、`innerText` 不含 placeholder）。**发现 6 项**：**F4 = P1**：流式中提交走 `submitTask` = **另造新会话**，追问与上下文被拆散、队列条永不渲染、`/messages` 零请求（与 ADR-0030 §5.1 直接冲突）；F1 徽标被 flex 压到 48px 并**逐字折三行**；F2 亮色主题 7 处不达 AA；F3 上下文看板对 16 run / 3865 事件的会话谎报「会话还没有任何运行」；**F5（复审追加）** Inspector 头部在 `agent_profile=research_review` 下 `scrollWidth 368 > clientWidth 308`——`N runs · M 事件` 被压成 30px×**90px 的 7 行竖条**、头部 36→99 高、`.detail-header-actions` 被顶出面板右缘 **44px（关闭按钮在视口外，点不到）**，默认 340 宽即触发；F6（复审追加）续聊 404 显示 `续聊失败：Send failed: 404`。**处置**：六项全修 + 六把永久锁，AC8 做**红证**（还原 CSS 立即 `368 > 309` 失败），F2 由新锁暴露「元素自身染底才是 WCAG 比较基准」并二次压深 `--success`。**唯一有据不修**：`used_tokens` 口径（窗口占用 vs 累计）→ 开票 **#212**（本批唯一待决项）。**刷新一致性专项（用户点名）**：四场景逐字节哈希一致 + 零点击恢复会话，**结论：刷新后与刷新前完全一致**。**门禁**：tsc 0 / vitest **882** / oxlint **0 error · 44 warning** / playwright **374 passed · 0 failed（7.6m，--workers=2）** / vite build ✓。**数据足迹**：新建 8 条测试会话全部硬删回收，**88 / 0** 与测试前一致。**关单**：无票面，不涉及。**未做**：未清理更早期的未跟踪探针（`web/stream_check_local.mjs`、`web/ui_check3.mjs`）与 `docs/INTEGRATION_*` 草稿——非本批产物，§11 不覆盖他人未提交工作，留待用户裁定。
 - 2026-09-16：**复审第二轮（本批自审，独立 subagent 两轴）**。**P1（我引入的退化）**：`/messages` 404 不唯一——带 `queue_id` 时后端回的是 `QueueItemNotFound`（ADR-0030 §5.2；audit 表 `web/domain_errors.py`），第一版把两种 404 合成「会话已不存在…请另选会话」，把"排队项过期"谎报成"会话被删"。修：按 `queue_id` 分流两条文案 + T12f 锁（红证）。**P2×3**：CSS 注释与实测不符（数据出处写错成 Overview、数字错、让位顺序是我编的）→ 按实测重写。**P3**：`.detail-run-id` 无作用域 → 容器查询连带隐藏**子会话头部**的 child id（该路径零覆盖）→ 改 `:has(.detail-header-actions)` 限定 run 头部 + 新增 **AC9**（红证）。**有意偏离**：`.detail-run-id` 在窄面板（≤360，含默认 340）整体退出，边界由 AC8 锁死，并已在 `docs/UI_POLISH_TICKETS.md` UI-03 AC 下批注「应读作宽面板下」。**门禁**：tsc 0 / vitest 882 / oxlint 0 error · 44 warning / playwright **378 passed · 0 failed（7.4m）** / build ✓。
@@ -2051,7 +2051,7 @@ main 由集成 AI 执行）。
 
 | Ticket | 描述 | 状态 | 实现方式 | Commit SHA | 门禁结果 |
 | --- | --- | --- | --- | --- | --- |
-| **#268** | 勘误 `docs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done（**已合并并推送**：`1529aa7`；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` 机械证明（见下；**blob 哈希是 #269 的 AC7 证据，不是本票的**——两轴 Standards P3 纠正） |
+| **#268** | 勘误 `docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` 的两处过期断言（+1 处文外指向） | done（**已合并并推送**：`1529aa7`；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | **仅追加** `§11 勘误（2026-09-18）`；`git diff --numstat` = `96	0`（**删除行数 0**） | `1529aa7` | docs-only，无代码门禁；AC4/AC5 以 `numstat` 机械证明（见下；**blob 哈希是 #269 的 AC7 证据，不是本票的**——两轴 Standards P3 纠正） |
 | **#269** | ADR-0037：投影层引用稳定与 `eventsVersion` | done（**已合并并推送**：`9886a9c`；merge `080cc146`，tip `ad6ccd8c`。**遗留**：ADR-0037 `Status: Proposed` 待用户批准后另提交改 `Accepted`） | 新增 `docs/adr/0037-projection-reference-stability-and-events-version.md` | `9886a9c` | docs-only；`docs/adr/0016-*.md` 两份 blob 哈希与基线一致 |
 | **#270** | **F1**：稳定 `disclosure` / `reasoningDisclosure` 引用，接回被折断的 memo 链 | done（**已合并并推送**：`bcdf4e4`；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | `lib/disclosure.ts` 两个 hook 的返回值改 `useMemo`（票面必做 1 的 **B 方案**，**不取**标注「推荐」的 A 方案——理由与红证见下方证据节）；链路渲染器的 per-render `cycle` 闭包上移为 `useCallback`；已完成段 markdown 收进按**内容**记忆的 `memo(MarkdownBody)`；`ToolCard` 的 `onCycleLevel` 签名带 `(key, density)` | `bcdf4e4` | **全绿**：oxlint **44 → 42**（净减 2、**零新增**）；`tsc -b` 零错误；`vitest` **59 文件 / 982 用例全绿**（含 `projection.test.ts` 193 条引用稳定契约，**未改写**）；`vite build` 通过；红证 6/14 → 绿 14/14（见下） |
 | **#271** | **N2**：引入 `eventsVersion`，修 `StepDetail` 三处陈旧 memo（**正确性缺陷**——`events` 引用被刻意固定 ⇒ 派生值停在首帧） | done（**已合并并推送**：`40851f8`（红证）/ `4e85938`（实现）；merge `080cc146`，`origin/main` tip `ad6ccd8c`） | 投影层新增 `ConversationState.eventsVersion`（**只在 `events.push` 真执行时 +1**：正常 push 增、去重短路不增、quarantine 分支增）+ `StepDetail` 三处 `useMemo` 依赖 `events` → `eventsVersion`（三处各带**行内** `eslint-disable-line react-hooks/exhaustive-deps`）+ 改写 COW docstring 里那句已被证伪的「无消费者把 events 放进 memo 依赖」 | `40851f8`（红证）+ `4e85938`（实现） | **全绿**：`tsc -b` 0 错误；`oxlint` **42 → 42**（零新增、**零顺带消失**）；`vitest` **60 文件 / 990 用例全绿**（F1 时 59 / 982）；perf 车道 `n2-cost-probe.perf.test.ts` 2 例通过；红证 **8 failed / 193 passed** → 改造后 **201/201 全绿**（见下方「N2（#271）验收证据」） |
@@ -2073,7 +2073,7 @@ main 由集成 AI 执行）。
 >    `git update-ref refs/heads/workbuddy/main-f049fadd <final-tip>`。
 >
 > 本批的三个提交（`1529aa7` #268 / `9886a9c` #269 / 落点记录）就是这么造出来的。
-> 与 `docs/HANDOFF_PERF_FRONTEND.md` §10 备案第 2 条**同源**，但那条只说到「`update-ref` 退出 0
+> 与 `docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` §10 备案第 2 条**同源**，但那条只说到「`update-ref` 退出 0
 > 而 ref 文件不存在」；这里补上「**目录级回收**」这个更精确的机制，以及 `refs/tags` 的对照证据。
 >
 > **当前待落地的完整链条（自 P1-B1 的 findings 处置提交起算，共 **13** 个提交；一次性 `update-ref` 即可全落）**：
@@ -2125,7 +2125,7 @@ main 由集成 AI 执行）。
    `docs/tickets/perf-interaction-smoothness-2026-09-18.md`，脚本的 `DOC_PATTERN` 机械校验能过；
 2. **不能**把 fixed point 往前挪到 `e1266f8` 来「顺手覆盖」它：审查子代理看的是 `45744d3..70d88f2`
    这段 diff，往前挪等于**谎称审过 `45744d3` 自己的改动**⇒ 正是「**用关闭规则让绿灯变绿**」，
-   与 `docs/HANDOFF_PERF_FRONTEND.md` §10 备案第 1 条点名的错误同类。
+   与 `docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` §10 备案第 1 条点名的错误同类。
 
 #### findings 处置表（11 条，逐条）
 
@@ -2216,13 +2216,13 @@ scripts/check_review_coverage.sh
 
 ```bash
 # 改造前基线：45744d3 版本文档
-git show 45744d3:docs/HANDOFF_PERF_FRONTEND.md > "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md"
+git show 45744d3:docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md > "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md"
 # 改造后对照（numstat 第 2 列 = 删除行数）
 git diff --no-index --numstat \
   "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md" \
-  docs/HANDOFF_PERF_FRONTEND.md
+  docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md
 # 实际输出：
-# 96	0	"…/base-HANDOFF.md" => docs/HANDOFF_PERF_FRONTEND.md
+# 96	0	"…/base-HANDOFF.md" => docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md
 ```
 
 - **AC4**（只改一个文件、删改行数 0）：新增 **96** 行 / 删除 **0** 行 ✅
@@ -2273,7 +2273,7 @@ D1-D4:          ['D1', 'D2', 'D3', 'D4']
 ### 本批环境备案
 
 1. **本地 refs 写入静默吞没**（本轮复现）：见上方「SHA 待回填已回填」。
-   处置与 `docs/HANDOFF_PERF_FRONTEND.md` §10 第 2 条一致——**不得**在沙箱内依赖本地 ref 写入。
+   处置与 `docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` §10 第 2 条一致——**不得**在沙箱内依赖本地 ref 写入。
 2. **bash shim 缺 coreutils**：`ls` / `cat` / `head` / `tail` / `dirname` / `tr` / `grep` 不可用。
    列目录用 Glob、读文件用 Read、聚合与统计用托管 `python -c`（`git` 本身正常）。
    ⚠ 实测教训：shell 管道里出现 `grep`/`head` 会让整条管道**静默产出空输出**

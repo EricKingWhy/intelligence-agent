@@ -1,7 +1,7 @@
 /** F5（#279）三个列表的单次渲染成本探针——`docs/PERF_BASELINE.md` §F5 那几行数字的
  *  **复现脚本**（该节规则要求每条数字可复核：命令 + 脚本路径 + 规模口径）。
  *
- *  口径与 `da01efd` 的 Timeline 实测**同源**（`docs/HANDOFF_PERF_FRONTEND.md` P1-4：
+ *  口径与 `da01efd` 的 Timeline 实测**同源**（`docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` P1-4：
  *  「renderToString 探针：20k 全量 359ms / 2k 40ms」）——`renderToString` 全量渲染，量的
  *  是 React 建元素树 + 序列化 HTML 的成本，即「这一屏真要吐多少 HTML」。取中位数
  *  （n=50，预热 10 次排除 JIT）。节点数 = 输出 HTML 里该列表行节点的出现次数。

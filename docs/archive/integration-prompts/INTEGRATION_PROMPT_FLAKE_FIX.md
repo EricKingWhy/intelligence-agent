@@ -1,6 +1,6 @@
 # 集成提示词（后续）：复用手册两个 commit 到 main —— 竞态修复 + 手册订正
 
-> **交付对象：Git Integrator**。承接 `docs/INTEGRATION_PROMPT_REVIEW_STRUCTURAL.md`。
+> **交付对象：Git Integrator**。承接 `docs/archive/integration-prompts/INTEGRATION_PROMPT_REVIEW_STRUCTURAL.md`。
 > 上一轮集成你已完成并 push（`9b95e4f`）——本文件是**之后的两个新 commit**。
 > 日期：2026-09-15 ｜ 分支：`feat/backend` clone ｜ **未 push、未 merge**。
 
@@ -25,7 +25,7 @@
 | commit | 文件 | 说明 |
 | --- | --- | --- |
 | `5fb016d` | `tests/web/test_multiturn_queue_http.py` | 修掉队列 HTTP 用例的收尾竞态（**只动测试，产品代码零改动**） |
-| `12fa471` | `docs/INTEGRATION_PROMPT_REVIEW_STRUCTURAL.md` | 手册 §2 `--ours` 订正 + §6 改写为真实根因 |
+| `12fa471` | `docs/archive/integration-prompts/INTEGRATION_PROMPT_REVIEW_STRUCTURAL.md` | 手册 §2 `--ours` 订正 + §6 改写为真实根因 |
 
 ### 修复内容（点成）
 

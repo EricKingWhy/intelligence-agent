@@ -71,7 +71,7 @@ git -C D:/intelligence-agent          rev-parse --short main                  # 
         web/e2e/stream-fallback.spec.ts
         web/src/lib/wsStream.ts
         web/src/lib/wsStream.test.ts
-   1 A  docs/INTEGRATION_PROMPT_WS_COMPLETE.md（本文件）
+   1 A  docs/archive/integration-prompts/INTEGRATION_PROMPT_WS_COMPLETE.md（本文件）
 ```
 
 > 只看代码影响请用 `git diff --stat origin/main...60da04c`（46 文件，+1841/−255）；

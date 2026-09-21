@@ -8,7 +8,7 @@
 
 ## 1. 要做什么（一句话）
 
-把 `feat/backend` 合进**本地 `main`**。**只合这一条**；`feat/frontend` 现在别动——我正在 frontend worktree 修 3 条 P1（清单见 `docs/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md`），改完会通知你。
+把 `feat/backend` 合进**本地 `main`**。**只合这一条**；`feat/frontend` 现在别动——我正在 frontend worktree 修 3 条 P1（清单见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md`），改完会通知你。
 
 `git push` **不在本次范围**（§14.4：push 要用户明确批准）。
 
@@ -130,7 +130,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE \
 
 ## 8. 后续（等我通知）
 
-我修完前端那批（`docs/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md`：3×P1 = Artifacts 页签恒空 / 「默认链」不发请求 / 重启后审批卡残留，8×P2）并跑过前端门禁后通知你。那时按 §14.9 **一次只合一条**，对**新的 main** 重新 `fetch` / `diff` / `merge-base` 分析 `feat/frontend`，跑满前端门禁再合：
+我修完前端那批（`docs/archive/integration-prompts/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md`：3×P1 = Artifacts 页签恒空 / 「默认链」不发请求 / 重启后审批卡残留，8×P2）并跑过前端门禁后通知你。那时按 §14.9 **一次只合一条**，对**新的 main** 重新 `fetch` / `diff` / `merge-base` 分析 `feat/frontend`，跑满前端门禁再合：
 
 ```bash
 cd web && npx tsc -b && npx vitest run && npx oxlint && npx playwright test --workers=2 && npx vite build

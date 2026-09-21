@@ -34,7 +34,7 @@ git worktree list --porcelain                          # 核对映射
    ```bash
    git -C D:\intelligence-agent-backend merge origin/main
    ```
-   预期冲突极小（backend 自 main 较早分叉，main 移动主要来自 frontend/docs）——若有冲突，按 §14.7 逐文件分析：预计只有 `docs/PHASE_STATUS.md` 追加行，语义并集。完成后在该 worktree 跑该支自己的验证门（基线见其自带手册 `docs/INTEGRATION_PROMPT_STREAMING_UI.md`，在 feat/backend 上）。
+   预期冲突极小（backend 自 main 较早分叉，main 移动主要来自 frontend/docs）——若有冲突，按 §14.7 逐文件分析：预计只有 `docs/PHASE_STATUS.md` 追加行，语义并集。完成后在该 worktree 跑该支自己的验证门（基线见其自带手册 `docs/archive/integration-prompts/INTEGRATION_PROMPT_STREAMING_UI.md`，在 feat/backend 上）。
 2. **合入 main**：
    ```bash
    git -C D:\intelligence-agent merge --no-ff feat/backend -m "Merge feat/backend: ADR-0016 streaming UI batch (T1-T8) — detached-run RunManager + cancel endpoint + after_seq reconnect + reasoning family + tool output stream + multi-model catalog"

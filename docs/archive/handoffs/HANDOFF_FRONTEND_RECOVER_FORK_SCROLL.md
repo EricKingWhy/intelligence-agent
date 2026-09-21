@@ -2,7 +2,7 @@
 
 > 面向 `D:\intelligence-agent-frontend`（`feat/frontend`）的前端 Agent。
 > 来源：用户实测报告 + `[$diagnosing-bugs]` 诊断（后端会话执行）。
-> 后端侧同期修了一个 P0（见 `docs/INTEGRATION_PROMPT_REASONING_EFFORT_FIX.md`），**本单三条全是前端**，后端无需改动。
+> 后端侧同期修了一个 P0（见 `docs/archive/integration-prompts/INTEGRATION_PROMPT_REASONING_EFFORT_FIX.md`），**本单三条全是前端**，后端无需改动。
 
 ---
 

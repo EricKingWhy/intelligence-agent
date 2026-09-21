@@ -125,43 +125,14 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 
 ## 4.1 Independent Review
 
-重点检查：
-
-- 逻辑 Bug；
-- 边界条件；
-- Async / 并发；
-- Race Condition；
-- 状态一致性；
-- SessionEvent 不变量；
-- Tool Call / ToolResult 配对；
-- Operation Ledger / Recovery；
-- Context 污染；
-- Capability 边界；
-- 测试缺口；
-- 不必要复杂度。
-
-Review 必须同时看：
-
-`代码正确性 + 当前规格一致性`
-
-不能只说代码“能跑”。
+Review 必须同时检查**代码正确性 + 当前规格一致性**，不能只确认“能跑”。以独立审查者身份
+工作时，完整检查项与完成判据见 `docs/agents/review-debug-playbook.md` 的 Independent Review 分支。
 
 ## 4.2 Difficult Bug Investigation
 
-按：
-
-`复现 → Trace / JSONL / SessionEvent → 假设 → 验证 → Root Cause → 最小修复 → 回归`
-
-优先使用项目自己的可观察链路定位问题。
-
-涉及 Crash / Tool 副作用时，必须同时检查：
-
-- SessionEvent；
-- Checkpoint；
-- Operation Ledger；
-- Sandbox 状态；
-- Artifact；
-- `tool_call_id` consistency。
+按 `复现 → Trace / JSONL / SessionEvent → 假设 → 验证 → Root Cause → 最小修复 → 回归`
+闭环，优先使用项目自己的可观察链路。涉及 Crash / Tool 副作用时，必须检查完整恢复链；
+检查对象与完成判据见 `docs/agents/review-debug-playbook.md` 的 Difficult Bug Investigation 分支。
 
 ## 4.3 Security Check
 
@@ -375,23 +346,12 @@ Scope 外问题只报告，不顺手修。
 
 **不许偷懒的红线**：信任边界的输入校验、防数据丢失的错误处理、安全措施、
 用户明确要求的一切——永不简化掉（与 §9.2 Lightweight 红线同源）。
-阶梯缩短的是解法，不是阅读：先完整理解问题再爬梯，没读全代码就动手写出的
-“最小修改”是第二个 bug。
+阶梯缩短的是解法，不是理解与验证；展开说明见 `docs/agents/implementation-discipline.md`。
 
 ## 9.6 工程八荣八耻
 
-以瞎猜接口为耻，以认真查询为荣；
-以模糊执行为耻，以寻求确认为荣；
-以臆想业务为耻，以人类确认为荣；
-以创造接口为耻，以复用现有为荣；
-以跳过验证为耻，以主动测试为荣；
-以破坏架构为耻，以遵循规范为荣；
-以假装理解为耻，以诚实无知为荣；
-以盲目修改为耻，以谨慎重构为荣。
-
-> 保留价值：与 §6 Reuse First / §7 不变量 / §9.4 一一对应，且“诚实无知”
-> 显式授权 AI 承认不知道（不装懂）——这是瞎猜接口的根治条目。每句都能落到
-> 已有条款，不是新增约束，是已有约束的口诀化。
+查询接口、澄清业务、复用现有、主动验证、遵循规格、诚实说明未知、谨慎修改。
+完整口诀及其与 §6 / §7 / §9.4 的对应关系见 `docs/agents/implementation-discipline.md`。
 
 ---
 
@@ -468,11 +428,8 @@ Scope 外问题只报告，不顺手修。
 - 真正的 linked worktree 只存在于**单个仓库内部**（`git worktree list --porcelain` 可查）；
   本仓库内可能另有 worktree，对它们只做只读检查，写操作需用户授权。
 
-> **测量陷阱（踩过一次，代价是两份错误审计结论）**：main / backend 的 `core.autocrlf=true`
-> （检出 CRLF），frontend 是 `input`（检出 LF）。**跨 clone 比较必须比 git 对象**
-> （`git rev-parse <rev>:<path>`、`git diff --stat <sha>..<sha>`），
-> **不要比工作树字节**（`diff`、`sha256sum`、直接拷文件）——否则每个文件都显示为全文件改写，
-> 会得出"三个仓库已经漂移""`web/` 有两份不同拷贝"之类的错误结论。
+> **测量陷阱**：三个 clone 的行尾配置不同；跨 clone 比较必须比 Git 对象，不能据工作树字节
+> 判断漂移。命令与原因见 §14.13(b)。
 
 ### 开发规则
 
@@ -521,44 +478,15 @@ git commit -m "..."
 ```
 
 哪些动作需要用户批准、哪些是常设授权，一律按 §14.4 的分类执行。
-（注意 §14.4 里已有常设授权：**把 main 合回自己的分支、集成、集成后的 `push origin main`
-都不必每次重新批准**；仍需单独批准的是 feature 分支上的 push、PR merge、cherry-pick、
-revert、冲突后的 add、删分支。）
-
-完成后向用户报告：
-
-- 完成了什么
-- 改了哪些文件
-- 测试结果
-- commit 信息
-- 是否建议合并
+完成后的交付报告按 §11，不在本节重复授权表与报告清单。
 
 ## 13.4 最终合并规则
 
-最终集成统一在 `D:\intelligence-agent` 的 `main` 进行：
+最终集成统一在 `D:\intelligence-agent` 的 `main` 进行：按 §14.6 先回后正，按 §14.10
+完成门禁与 review coverage，合入后比较已验证树与集成树，按 §14.4 push，并按 §14.9
+通知另一条线回补。若直接在施工 clone 的 `main` 上提交，则没有 feature 回合步骤。
 
-```text
-origin/main
-→ 先把 main 合回你的短分支（§14.6「先回后正」）：冲突与测试都在短分支上解决，
-  不把过期分支直接合进 main
-（若走 §13.2(b) 即直接在施工 clone 的 main 上提交，则没有这一步，直接对账）
-→ diff 检查 + 门禁全绿（§14.10）
-→ **审查覆盖闸门**：`scripts/check_review_coverage.sh`
-   （范围 `<最早台账 base>..HEAD` 的每条 commit 必须有台账归属：审查行、docs-only 白名单，
-    或"恰好只改台账文件"的记账提交——**代码提交只有"补一次审查"一条路**；
-    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）
-→ merge 到本地 main（快进优先）
-→ **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
-   与施工 clone 的 `HEAD^{tree}` 比——**相等即证明"我跑过门禁的那棵树"就是"被集成的这棵树"**，
-   不必再跑一遍（2026-09-17 实测：两 clone tree 同为 `e63c202…`，省掉一次 ~20 分钟的前后端全量）。
-   不等（例如集成 clone 的检出行尾/CRLF 造成差异、或合入时产生新内容）⇒ 在集成 clone 里跑全量门禁
-→ 确认前后端集成正常
-→ git push origin main（当前主开发执行，常设授权见 §14.4）
-→ 通知另一条线把 main 合回来（§14.9）
-```
-
-**先合并到本地 `main` 并验证，再 push GitHub。** GitHub 不是仓库之间交换代码的必经步骤。
-除非用户明确要求，否则不要默认「先 push feature 分支再通过 GitHub PR merge」。
+先合并到本地 `main` 并验证，再 push GitHub；除非用户明确要求，不默认走 feature push + PR merge。
 
 ## 13.5 `git diff` 的用途
 
@@ -847,19 +775,9 @@ diff --strip-trailing-cr <a> <b>           # 万不得已比工作树时必须�
 
 # 15. 前端 CSS 主题变量维护纪律（Ticket #35）
 
-> 本节是这条规则的**唯一权威**。`web/PRODUCT.md` 引用的是本节。
-> `web/` 在三个仓库里都存在（同一个 tracked 目录，§13.1）；无论你在哪一个仓库改
-> `web/**`，本节都适用。
-
-`web/src/index.css` 使用 `[data-theme]` 属性切换暗/亮主题。暗色 token 在 `:root` 中定义，亮色 token 在 `:root[data-theme='light']` 中覆盖。
-
-**维护规则：**
-
-1. 修改 `:root` 中的某个 token 时，必须检查 `:root[data-theme='light']` 是否也需要同步覆盖。
-2. 新增 token 时在两个块都加定义，或确认亮色可安全继承暗色值。
-3. 遗漏亮色覆盖 → 该 token 在亮色模式下仍用暗色值（对比度/可见性问题）。
-
-CSS 原生没有变量组复用机制，手工双份同步是当前最小风险方案。
+修改或新增主题 token 时，必须同步检查暗色 `:root` 与亮色
+`:root[data-theme='light']` 两个定义块。完整实现规则与视觉权威见 `web/PRODUCT.md`；
+`web/` 是三个 clone 共享的 tracked 文件树，因此无论在哪个 clone 修改都适用。
 
 
 ---
@@ -885,7 +803,7 @@ CSS 原生没有变量组复用机制，手工双份同步是当前最小风险�
 | Phase 状态、当前焦点、历史索引 | `docs/PHASE_STATUS.md`（**只放索引一行 + 行号指针**） |
 | 批次 / 集成 / 审查的**逐条明细** | `docs/phase_status/<年-月>.md`（当月归档，按需读） |
 | 机读的审查范围台账（覆盖闸门的输入） | `docs/review_ledger.tsv` |
-| 一次性集成执行资料 | `docs/integration/`、`docs/INTEGRATION_PROMPT_*.md` |
+| 一次性集成执行资料 | `docs/archive/integration-prompts/`、`docs/archive/handoffs/`；旧路径映射见各目录 README |
 
 **同一事实只在一处写全，其余处只留指针**（2026-09-17 立的规矩，起因：一条机制描述同时住在
 ADR、用例头注释、设计稿、tracker 四处，其中一处被后来的实测**推翻**，改一处要改四处才自洽）。
@@ -897,11 +815,8 @@ V1/V2 的批次 / fixed point 留作历史事实；V3 不要求固定批次。�
 
 ## 16.2 不随协议版本变化的红线
 
-- 每个 ticket 完成后：对应的 focused tests / lint / type check 通过后再 commit；**集成前仍须通过完整门禁与 review coverage**（`docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite、§14.10）；
-- 实现线默认只做**本地 commit**；集成与 `push origin main` 由当前主开发执行（§14.4）；
-- 不覆盖其他 Agent 未提交的工作；
-- 关单判定按 §14.12；跨端 ticket 只完成一端时**不关单**；
-- 前端 / 后端的门禁工具链、review 时点与在途进度落点，一律按当前仓库的
-  `docs/SDD_WORKFLOW_PROTOCOL.md` V3.1-lite（含 §8 的提速增补与 §8.7 不做清单）；本文件不复制流程细节。
+门禁与 review coverage 按当前协议及 §14.10，Git 授权按 §14.4，协作避让按 §11，关单按
+§14.12；本入口不复制这些规则。前后端的工具链、review 时点与在途进度落点统一以当前
+`docs/SDD_WORKFLOW_PROTOCOL.md` V3.1-lite 为准。
 
 ---

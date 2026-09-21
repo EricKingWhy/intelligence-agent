@@ -151,4 +151,4 @@ uv run pytest -q   # 默认排除 integration/qiniu；离线全量基线见 PHAS
 - 术语：`CONTEXT.md`「Phase 16 / Final Full E2E」段
 - 测试：`tests/integration/test_phase16_gate.py`、`tests/integration/_phase16_helpers.py`、`tests/integration/_kill_child.py`（向后兼容扩展：`backend` 字段）
 - Tickets：#126（T1）、#127（T2）、#128（T3）、#129（T4）、#130（T5）
-- 集成手册：`docs/INTEGRATION_PROMPT_PHASE16.md`
+- 集成手册：`docs/archive/integration-prompts/INTEGRATION_PROMPT_PHASE16.md`

@@ -2,7 +2,7 @@
 
 > 日期：2026-09-09 ｜ Worktree：`D:\intelligence-agent-frontend` ｜ 分支：`feat/frontend`
 > （批次主体至 `4b588af`；本交接文档为其后一个 docs commit，分支尖端以 `git log --oneline -1` 为准）
-> 对应后端手册：`docs/HANDOFF_FRONTEND_TECH_DEBT.md`（最新版）
+> 对应后端手册：`docs/archive/handoffs/HANDOFF_FRONTEND_TECH_DEBT.md`（最新版）
 > 集成规则：`AGENTS.md` §13 / §14
 
 ---

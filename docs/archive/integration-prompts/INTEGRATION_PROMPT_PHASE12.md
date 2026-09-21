@@ -59,7 +59,7 @@ git status --short                                 # 记录起点
 git diff origin/main -- web/src/lib/format.ts      # 抽查方向：应为 main 侧多内容
 
 git checkout -- AGENTS.md CLAUDE.md docs/INTEGRATION_NOTES.md docs/PHASE_STATUS.md web/
-git clean -f docs/HANDOFF_PERF_FRONTEND.md \
+git clean -f docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md \
   web/src/components/Conversation.test.tsx web/src/components/CopyButton.tsx \
   web/src/components/StepDetail.test.tsx web/src/hooks/useSession.test.ts \
   web/src/lib/auth.ts web/src/lib/projection.perf.test.ts \

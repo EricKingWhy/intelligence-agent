@@ -12,7 +12,7 @@
 ## 0. 一句话
 
 本分支新增 **1 个 commit**（见 §2 tip），交付内容 = 交接手册
-`docs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md` 的 **A/B/C/D 四项**（用户实名报告的三条前端缺陷）
+`docs/archive/handoffs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md` 的 **A/B/C/D 四项**（用户实名报告的三条前端缺陷）
 \+ 用户要求的**真实浏览器逐按钮巡检**中发现的 2 处缺陷。**未推送远程**（按用户指令，push 归集成 AI）。
 
 ---
@@ -22,7 +22,7 @@
 | 环节 | 依据 |
 | --- | --- |
 | 用户实名报告 | 「点击了『恢复会话』为什么什么反应也没有？」「点击了『分叉』也啥也没有」「我滑轮往下滚他就自动又上去了」 |
-| 交接手册 | `D:\intelligence-agent-backend\docs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（item A/B/C/D） |
+| 交接手册 | `D:\intelligence-agent-backend\docs\archive\handoffs\HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md`（item A/B/C/D） |
 | 用户授权接管 | `[$ask-matt]`「前端 ai 现在有事情，我授权你帮我修前端吧…修完要跑 code-review」→ 用户选择「停掉前端 AI，我接管做完」 |
 | 用户追加要求 | 真实浏览器**每个功能按钮都点一遍**、问题实时写入文档、`/implement` → `/code-review` → 修 → `diagnosing-bug` → 再 `/code-review` 循环到零问题；**不许 push 远程**，完成后写提示词给集成 AI |
 
@@ -164,7 +164,7 @@ git -C D:/intelligence-agent-frontend merge-tree --write-tree --name-only origin
 
 ```markdown
 - 2026-09-11：**前端缺陷修复批次（恢复/分叉/滚动 + 真实浏览器逐按钮巡检）**。commit `32356f4` + `0d6b82d`
-  （feat/frontend → main）。依据 `docs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md` A/B/C/D；
+  （feat/frontend → main）。依据 `docs/archive/handoffs/HANDOFF_FRONTEND_RECOVER_FORK_SCROLL.md` A/B/C/D；
   额外修复 BUG-004（Copy Run ID 复制 session id）+ 分叉超时反馈。
   测试：vitest 472 passed / playwright 86 passed / oxlint 35w0e / tsc + vite build 通过。
   已在真实浏览器 + 真实后端验证 A/B/D 三项（真机回执见 FRONTEND_ISSUES_LOG OBS-003/OBS-004）。

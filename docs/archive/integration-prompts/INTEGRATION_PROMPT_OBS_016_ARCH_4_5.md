@@ -99,7 +99,7 @@ const LINE_TRUNCATED_RE = /\[Line (\d+) truncated at (\d+) bytes[^\]]*\]\s*$/;
 | 文件 | 改动 |
 | --- | --- |
 | `web/src/lib/toolShapes.test.ts` | 新增「新文案（OBS-016）」用例；原用例改标「旧文案（历史会话已落盘）」并**保留**——历史 JSONL 事件里仍是旧文案，两种都必须能解，注释明写「别删旧用例」。 |
-| `docs/HANDOFF_FRONTEND_SYNC.md` §1.3 | 订正为「形状契约 + 明示措辞可变 + 历史文案兼容要求」。 |
+| `docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md` §1.3 | 订正为「形状契约 + 明示措辞可变 + 历史文案兼容要求」。 |
 | `docs/SDD_TICKET_TRACKER.md` | 登记本批门禁、变异验证、跨端配对与「未做 merge」的理由。 |
 
 - **解析逻辑零改动**（`LINE_TRUNCATED_RE` 本就吞尾部）。
@@ -114,7 +114,7 @@ const LINE_TRUNCATED_RE = /\[Line (\d+) truncated at (\d+) bytes[^\]]*\]\s*$/;
 | --- | --- | --- |
 | 1 | 后端提示不再出现 `sed` / `head -c` / `tail -c` | ✅ 词边界断言锁定 |
 | 2 | 前缀/结尾形状不变；`parseReadShape` 对旧、新两种文案都能解出 `{line, bytes}` | ✅ 新增新文案用例 + 保留旧文案用例 |
-| 3 | `docs/HANDOFF_FRONTEND_SYNC.md:46` 同步订正 | ✅ |
+| 3 | `docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md:46` 同步订正 | ✅ |
 | 4 | 后端 ruff + 全量 pytest 绿；前端五项门禁绿 | ✅ |
 
 ### 1.6 合并与验证要点

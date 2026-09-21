@@ -3,7 +3,7 @@
 **Status**: Proposed（待用户批准）
 **Date**: 2026-09-18
 **Related**: ADR-0016 §2（COW 纪律的**两处文档化例外**：**第一处** = `events` append-only 日志，**第二处** = `seenSeqs`）——**本 ADR 是它的补充，不覆盖它**；
-ADR-0014-web-ui-redesign-architecture D7；`docs/HANDOFF_PERF_FRONTEND.md` §4.3 / §6 / §9 / §11；
+ADR-0014-web-ui-redesign-architecture D7；`docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md` §4.3 / §6 / §9 / §11；
 本批 N2 子票（GitHub #271）
 **真实证据**: `3344e34`（P0-1 实测数字）、`a78c322`（P0-2a + 合帧，本决策得以成立的前提）、
 `f97f322`（Web UI Redesign Phase 1-9，消费端依赖格局在此改变）；`web/src/lib/projection.ts:1149-1180`
@@ -104,7 +104,7 @@ N2 / GitHub #271，**已落地**（`40851f8` 红证 + `4e85938` 实现；落地�
 同一处 `web/src/lib/projection.ts:1149-1154` 的 COW docstring 末句
 （「…**无消费者把 `events` 放进 memo/useEffect 依赖**，不受影响」）**已不属实**，
 由 N2 在同一处一起修正（行为与注释必须同改，避免两个 commit 撞同一段）。
-该断言与 `docs/HANDOFF_PERF_FRONTEND.md:230`（"全量核对无消费者…故未引入 eventsVersion"）
+该断言与 `docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md:230`（"全量核对无消费者…故未引入 eventsVersion"）
 同源，两者**同时失效**（`f97f322` 晚于该回执所依据的 `a78c322`）。
 
 ### D4：与 `ADR-0016 §2` 的关系——**补充，不覆盖**

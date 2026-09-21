@@ -49,7 +49,7 @@ feat/backend (c438a1e) ← 已被 main 完全包含，0 commits ahead
 | `/api/sessions/{id}/forks` | POST | 从历史用户消息 seq 派生 child session |
 | `/api/sessions/{id}/lineage` | GET | 会话谱系树（祖先 + 后代 + 边） |
 
-详细 API 契约见 [docs/HANDOFF_FRONTEND_T7.md](/D:/intelligence-agent-backend/docs/HANDOFF_FRONTEND_T7.md)。
+详细 API 契约见 [docs/archive/handoffs/HANDOFF_FRONTEND_T7.md](/D:/intelligence-agent-backend/docs/archive/handoffs/HANDOFF_FRONTEND_T7.md)。
 
 ---
 
@@ -161,8 +161,8 @@ feat/backend (c438a1e) ← 已被 main 完全包含，0 commits ahead
 
 | 文档 | 说明 |
 |---|---|
-| [docs/HANDOFF_FRONTEND_T7.md](/D:/intelligence-agent-backend/docs/HANDOFF_FRONTEND_T7.md) | 前端交接手册（#137 前端 UI 部分） |
-| [docs/HANDOFF_FRONTEND_T7_T9.md](/D:/intelligence-agent-backend/docs/HANDOFF_FRONTEND_T7_T9.md) | 前端交接手册（T7-T9 完整版） |
-| [docs/INTEGRATION_PROMPT_FEAT_BACKEND_T7_T9.md](/D:/intelligence-agent-backend/docs/INTEGRATION_PROMPT_FEAT_BACKEND_T7_T9.md) | 后端集成提示词（T7-T9） |
+| [docs/archive/handoffs/HANDOFF_FRONTEND_T7.md](/D:/intelligence-agent-backend/docs/archive/handoffs/HANDOFF_FRONTEND_T7.md) | 前端交接手册（#137 前端 UI 部分） |
+| [docs/archive/handoffs/HANDOFF_FRONTEND_T7_T9.md](/D:/intelligence-agent-backend/docs/archive/handoffs/HANDOFF_FRONTEND_T7_T9.md) | 前端交接手册（T7-T9 完整版） |
+| [docs/archive/integration-prompts/INTEGRATION_PROMPT_FEAT_BACKEND_T7_T9.md](/D:/intelligence-agent-backend/docs/archive/integration-prompts/INTEGRATION_PROMPT_FEAT_BACKEND_T7_T9.md) | 后端集成提示词（T7-T9） |
 | [docs/PHASE_STATUS.md](/D:/intelligence-agent-backend/docs/PHASE_STATUS.md) | 进度单一事实源 |
 | [AGENTS.md](/D:/intelligence-agent-backend/AGENTS.md) | 工程规范（§16 SDD 长任务工作流协议） |
