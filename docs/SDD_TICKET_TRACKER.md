@@ -4072,13 +4072,17 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 冲突按 §14.7 停下做逐文件语义分析。另：`D:\intelligence-agent` 停在 feature 分支上 —— §13.2 明确提醒
 **不要把某个仓库长期挂在一条 feature 分支上**。
 
-**push 结构补记（本批共两轮快进 push，2026-09-21）**：第①轮 = **代码 + 审查面 6 笔**（`6c4790d` 红证 /
-`a2651d6` 实现 / `0af6f21` docs / `4987a0c` 台账 / `36a36fb` 去尾空行 / `240a79d` 归属行，`09bae517..240a79da`）；
-第②轮 = **docs / 台账收尾 2 笔**（`62f5d73` 集成与关单落点 + `41df925` 白名单行，`240a79da..41df925`）。
-第②轮写后实测 `git ls-remote origin refs/heads/main` = `41df9252cdadc8f59308b784e97a6be3ff55c617` = 本地 `HEAD`
-（**只信 `ls-remote`，不信 `refs/remotes/origin/*`**）。**本批两次 push 全部为快进。**
+**push 结构补记（本批共三次快进 push，2026-09-21）**：① **`09bae517..240a79da` = 6 笔**——本批
+**全部代码改动在这 6 笔里**（`6c4790d` 红证 + 守卫 / `a2651d6` 实现 / `0af6f21` docs / `4987a0c` 台账 /
+`36a36fb` 去尾空行 / `240a79d` 归属行）。② **`240a79da..<本批末笔>` = 收尾 6 笔**（`62f5d73` 集成与关单落点 →
+`41df925` 其白名单行 → `ecbf00b` push 结构补记 → `da7dee9` 其白名单行 → **本条修订** → 其白名单行）
+**——纯 docs / 台账，无代码面**；收尾面分两次 push 落地（`240a79da..41df925`、`41df925..da7dee97`），
+本条修订随第三次。每次 push 后均当场实测 `git ls-remote origin refs/heads/main` = 本地 `HEAD`
+（**只信 `ls-remote`，不信 `refs/remotes/origin/*`**）；**三次 push 全部为快进**。
+**如实说明**：本条子项与其修订本身都算 ② 的笔（故 ② 按「含本笔与其白名单行」记）⇒ **记账递归在此收敛，
+不再另立轮次**（与 B-31 同一写法，见 `docs/phase_status/2026-09.md` 同日 B-31 条）。
 
-⚠ **第②轮落地踩坑（如实记，供后人避险）**：`git update-ref refs/heads/workbuddy/main-f049fadd <tip>`
+⚠ **本轮落地踩坑（如实记，供后人避险）**：`git update-ref refs/heads/workbuddy/main-f049fadd <tip>`
 **返回 RC=0 却把该 ref 删掉了**（`refs/heads/workbuddy/` 整个目录被回收）——不建目录、不建文件，
 `rev-parse --verify` 随即报 `fatal: Needed a single revision`、`status` 显示 `## No commits yet` + 几百个幻影 `A`。
 **同一次会话内两度实测复现**（一次 ref 父目录**在场**、一次**缺席**，结果**相同**）⇒ **并非「目录是否存在」决定的**：
