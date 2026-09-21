@@ -144,3 +144,4 @@ be7db83	P1-B4 审查记录（tracker P1-B4 节 + phase_status 归档索引 + 本
 4f41ba7	B-23 集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
 b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 月度归档修后复扫条、新增闭合复验条；docs-only）
 5658d86	B-30 A 轴闭合复验 1 条 P3 处置（协议 §8.1 第 4 条过度声明按实测改写 + 归档闭合复验按轴归属；docs-only）
+1c1bf42	B-30 集成/关单状态如实化（tracker 集成与关单节 + §14.9 通知 + 残余⑥ + 月度归档集成条 + PHASE_STATUS 索引；docs-only）
