@@ -356,9 +356,11 @@ class _TerminalArms:
 
     字段纪律（决定了 _drive 里哪些同名局部变量保留、哪些删除）：
 
-    · **建一次**：session / terminal / usage_total / model_coord / run_span / result_holder /
+    · **建一次**：session / terminal / usage_total / model_coord / result_holder /
       cancel_reason_supplier —— 构造时传入，此后只读。其中 usage_total 与 terminal 是**同一对象
       引用**（_drive 就地累加 usage、写 `model_call_open` 标志），臂读到的自然是当时值。
+      **只收臂真正读的**：`run_span`（日志用的 span id）留在 _drive 的局部变量里——臂一个读者
+      都没有，收进来就是死字段。
     · **同点写回**：step_base / memory_event_start / tracer / streamer —— _drive 里各自
       **只有一处赋值**，臂在那条语句里同步写回；局部变量保留给模型轮/工具批次继续读（本票 Scope
       lock 不搬那段）。唯一写点 ⇒ 不存在两个真相。`run_id` **不在此列**：owner 是
@@ -371,7 +373,6 @@ class _TerminalArms:
     terminal: _RunFinalizer
     usage_total: dict[str, int]
     model_coord: ModelFallbackCoordinator
-    run_span: str
     result_holder: list[AgentRunResult]
     cancel_reason_supplier: Callable[[], str] | None
     step_base: int = 0
@@ -734,7 +735,7 @@ class AgentRuntime:
         # ctx_span / generation 只住这里（_drive 不再留同名局部变量）。
         arms = _TerminalArms(
             session=session, terminal=terminal, usage_total=usage_total,
-            model_coord=model_coord, run_span=run_span,
+            model_coord=model_coord,
             result_holder=result_holder, cancel_reason_supplier=cancel_reason_supplier,
         )
         try:
@@ -1191,7 +1192,6 @@ class AgentRuntime:
                         ):
                             yield streamed
                         return
-                        return
         except (asyncio.CancelledError, GeneratorExit):
             # 取消臂：客户端断连（SSE 生成器被取消/关闭）走这里——GeneratorExit /
             # CancelledError 是 BaseException，顶层 except Exception 兜不到，
@@ -1226,7 +1226,7 @@ class AgentRuntime:
             try:
                 # 本臂允许 yield——收尾事件（部分内容 + interrupted + 切换事实 +
                 # model/failed + 终态）逐条镜像给流消费者（与取消臂的唯一差异）。
-                async for streamed in self._terminal_failed(arms, steps=steps, error=error):
+                async for streamed in self._terminal_exception(arms, steps=steps, error=error):
                     yield streamed
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "失败兜底事件写入失败（存储故障？）",
@@ -1357,7 +1357,7 @@ class AgentRuntime:
             trace_url=arms.tracer.trace_url,
         )
 
-    async def _terminal_failed(
+    async def _terminal_exception(
         self, arms: _TerminalArms, *, steps: int, error: BaseException,
     ) -> AsyncIterator[AgentEvent]:
         """顶层异常臂：归因 → 流收口 → model/failed → run/failed（逐条镜像）。

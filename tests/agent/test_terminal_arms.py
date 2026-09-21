@@ -104,32 +104,49 @@ class _PendingCoordinator:
 
     def __init__(self, *transitions: FallbackTransition) -> None:
         self._pending = list(transitions)
+        # 调用计数：断言"臂只取一次"要断这个，不能断"第二次返回空"——后者断的是
+        # 本替身自己的幂等实现，产品代码怎么改都会绿（自证式断言）。
+        self.drains = 0
 
     def drain_transitions(self) -> list[FallbackTransition]:
+        self.drains += 1
         out, self._pending = self._pending, []
         return out
 
 
 class _CheckpointSpy:
-    """记录边界 + **保存那一刻**最后一条已持久化事件（顺序证据）。"""
+    """记录边界 + **保存那一刻**最后一条已持久化事件（顺序证据）。
 
-    def __init__(self) -> None:
+    `order` 是与 `_MemorySpy` **共享**的同一根时间线：两个替身各写各的 list 时，
+    "记的都是当时最后一条事件类型"会恒等（`_write_memories` 不落事件），
+    于是两条断言都锁不住彼此的先后（实测：把记忆抽取挪到 checkpoint 之后，
+    各写各的版本全绿）。共享一根线才能钉住"终态 → 记忆 → checkpoint"这个三元序。
+    """
+
+    def __init__(self, order: list[str] | None = None) -> None:
         self.saves: list[tuple[str, str | None]] = []
+        self.order = order if order is not None else []
 
     async def maybe_save(self, session: Session, boundary_type: Any) -> None:
         last = session.events[-1].type if session.events else None
         self.saves.append((boundary_type.value, last))
+        self.order.append(f"checkpoint:{boundary_type.value}")
 
 
 class _MemorySpy:
-    """`memory_writer` 替身：只记"提交了几次、提交了哪些类型"（不落任何存储）。"""
+    """`memory_writer` 替身：只记"提交了几次、提交了哪些类型"（不落任何存储）。
 
-    def __init__(self) -> None:
+    顺序证据同 `_CheckpointSpy`：往共享时间线里追加 `memory`。
+    """
+
+    def __init__(self, order: list[str] | None = None) -> None:
         self.submits: list[tuple[tuple[str, ...], str | None]] = []
+        self.order = order if order is not None else []
 
     def submit(self, session: Session, events: list[Any]) -> None:
         last = session.events[-1].type if session.events else None
         self.submits.append((tuple(e.type for e in events), last))
+        self.order.append("memory")
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +202,6 @@ class _ArmsKit:
             terminal=terminal,
             usage_total=self.usage_total,
             model_coord=self.coord,
-            run_span="span-run",
             result_holder=self.result_holder,
             cancel_reason_supplier=cancel_reason_supplier,
             step_base=step_base,
@@ -229,7 +245,7 @@ def test_envelope_step_keeps_the_session_base() -> None:
     """
     arms = _TerminalArms(
         session=SimpleNamespace(), terminal=SimpleNamespace(run_id=None), usage_total={},
-        model_coord=SimpleNamespace(), run_span="s", result_holder=[],
+        model_coord=SimpleNamespace(), result_holder=[],
         cancel_reason_supplier=None, step_base=7,
     )
     assert arms.envelope_step(0) == 7
@@ -280,11 +296,13 @@ async def test_completed_arm_order_terminal_then_memory_then_checkpoint(
 ) -> None:
     """终态 → 记忆抽取 → 镜像 → FINAL_COMPLETED 边界 → 结果。
 
-    两个顺序断言各有读者：记忆抽取必须**看得见终态事件**（抽取器的窗口），
-    checkpoint 必须在终态事件**之后**（#28：checkpoint 只是恢复辅助的锚点）。
+    三元序用**共享时间线**钉死：两个替身各写各的 list 时，"提交/保存那一刻的最后一条
+    事件"恒为 `run/completed`（`_write_memories` 不落事件）⇒ 断言看不出记忆与 checkpoint
+    谁先谁后（实测：把记忆抽取挪到 checkpoint 之后仍全绿）。共享一根 `order` 才有区分力。
     """
-    memory = _MemorySpy()
-    checkpoints = _CheckpointSpy()
+    order: list[str] = []
+    memory = _MemorySpy(order)
+    checkpoints = _CheckpointSpy(order)
     kit = _kit(session, memory_writer=memory, checkpoint_policy=checkpoints)
     kit.usage_total["total_tokens"] = 42
     mark = len(session.events)
@@ -298,6 +316,7 @@ async def test_completed_arm_order_terminal_then_memory_then_checkpoint(
     assert terminal.type == RUN_COMPLETED
     assert terminal.data["final_text"] == "最终回答"
     assert terminal.data["usage_total"] == {"total_tokens": 42}
+    assert terminal.run_id == RUN_ID, "终态事件必须挂在本次 run 上（run_id 无第二来源）"
     # 记忆抽取：提交一次，且提交那一刻终态已落盘
     assert len(memory.submits) == 1
     submitted_types, last_at_submit = memory.submits[0]
@@ -305,6 +324,8 @@ async def test_completed_arm_order_terminal_then_memory_then_checkpoint(
     assert last_at_submit == RUN_COMPLETED
     # checkpoint：FINAL_COMPLETED，且保存时终态已落盘
     assert checkpoints.saves == [("FINAL_COMPLETED", RUN_COMPLETED)]
+    # 三元序：记忆抽取在 checkpoint 之前（抖动这一序必须让本行变红）
+    assert order == ["memory", "checkpoint:FINAL_COMPLETED"]
     # 结果：run() 的返回值载体（status 用状态常量，不是自由文本）
     assert len(kit.result_holder) == 1
     assert kit.result_holder[0].status == STATUS_COMPLETED
@@ -339,6 +360,7 @@ async def test_failed_run_arm_writes_reason_and_stops_at_one_terminal(
     terminal = kit.since(mark)[-1]
     assert terminal.data["reason"] == STATUS_MAX_STEPS_EXCEEDED
     assert terminal.data["message"] == "连续 2 轮仍在请求工具"
+    assert terminal.run_id == RUN_ID, "终态事件必须挂在本次 run 上"
     assert kit.result_holder[0].status == STATUS_MAX_STEPS_EXCEEDED
     assert kit.tracer.calls == [("run_failed", {"reason": STATUS_MAX_STEPS_EXCEEDED})]
     assert memory.submits[0][1] == RUN_FAILED, "记忆抽取要在终态落盘之后"
@@ -387,6 +409,7 @@ async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> 
     assert terminal.data["reason"] == STATUS_CONTEXT_WINDOW_EXCEEDED
     assert terminal.data["message"] == "上下文超限"
     assert terminal.step_id == kit.arms.envelope_step(0)
+    assert terminal.run_id == RUN_ID, "终态事件必须挂在本次 run 上"
     assert kit.result_holder[0].status == STATUS_CONTEXT_WINDOW_EXCEEDED
     assert memory.submits == []
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
@@ -432,8 +455,11 @@ async def test_cancelled_arm_discards_events_but_persists_them(session: Session)
     assert by_type[MODEL_FAILED].data["message"] == "model call cancelled"
     assert [e.type for e in written][-1] == RUN_FAILED
     assert by_type[RUN_FAILED].step_id == envelope
+    assert by_type[RUN_FAILED].run_id == RUN_ID
+    assert by_type[MODEL_FAILED].run_id == RUN_ID
     assert by_type[RUN_FAILED].data["reason"] == "cancelled"
-    # 切换事实只取走一次（drain 幂等）
+    # 切换事实只**取走一次**（断的是产品行为，不是替身的幂等实现）
+    assert coord.drains == 1
     assert coord.drain_transitions() == []
     # 观测：取消臂也要收口 generation（error_type="cancelled" 而非异常类型）
     assert ("model_call_failed", {"error_type": "cancelled"}) in kit.tracer.calls
@@ -503,7 +529,7 @@ async def test_failed_arm_classifies_only_while_the_model_call_is_open(
     kit.arms.terminal.model_call_open = True
     mark = len(session.events)
     emitted = await _drain(
-        kit.runtime._terminal_failed(
+        kit.runtime._terminal_exception(
             kit.arms, steps=1, error=RuntimeError("upstream: billing account frozen"),
         ),
     )
@@ -512,12 +538,18 @@ async def test_failed_arm_classifies_only_while_the_model_call_is_open(
     assert run_failed.data["reason"] == PROVIDER_ACCOUNT_UNAVAILABLE_REASON
     assert run_failed.data["message"] == PROVIDER_ACCOUNT_UNAVAILABLE_MESSAGE
     assert kit.since(mark)[-2].data["message"] == PROVIDER_ACCOUNT_UNAVAILABLE_MESSAGE
+    assert run_failed.run_id == RUN_ID
+    assert run_failed.step_id is None, (
+        "死参数实测：#263 段记录的 failure_terminal(steps=…) 不被转发（Session.end_run "
+        "无 step_id 形参）⇒ 异常臂终态 step_id 恒 None。让参数生效是行为变更，不在本票。"
+    )
+    assert kit.since(mark)[-2].run_id == RUN_ID, "model/failed 与终态挂同一个 run"
 
     # 同类文本但不在途：退回类型名，不误标 provider 归因
     other = _kit(session)
     mark = len(session.events)
     await _drain(
-        other.runtime._terminal_failed(
+        other.runtime._terminal_exception(
             other.arms, steps=1, error=RuntimeError("tool output mentioned billing account"),
         ),
     )
@@ -537,7 +569,7 @@ async def test_failed_arm_yields_nothing_when_no_run_was_started(session: Sessio
     mark = len(session.events)
 
     assert await _drain(
-        kit.runtime._terminal_failed(kit.arms, steps=0, error=ValueError("用户消息写入失败")),
+        kit.runtime._terminal_exception(kit.arms, steps=0, error=ValueError("用户消息写入失败")),
     ) == []
     assert session.events[mark:] == []
 
@@ -549,7 +581,7 @@ async def test_failed_arm_uses_the_unclassified_message_for_unknown_errors(
     """在途但分类表未命中：终态仍有可读兜底（#222），且只代入类型名（脱敏边界）。"""
     kit = _kit(session)
     kit.arms.terminal.model_call_open = True
-    await _drain(kit.runtime._terminal_failed(kit.arms, steps=0, error=ValueError("boom")))
+    await _drain(kit.runtime._terminal_exception(kit.arms, steps=0, error=ValueError("boom")))
 
     assert session.events[-1].data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
         error_type="ValueError",
