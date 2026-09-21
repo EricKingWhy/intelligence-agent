@@ -250,6 +250,69 @@ def test_skip_reason_masks_credentials_in_the_base_url() -> None:
     assert "api.example.com" in line and "/v1" in line
 
 
+def test_skip_reason_masks_the_credential_shaped_writes_the_first_rule_missed() -> None:
+    """两轴审查实测出的三种漏法各钉一条：不带冒号的 userinfo、无 scheme 的 userinfo、
+    非白名单参数名的 query 值（`client_secret` / `X-Amz-Signature` 这类派生命名）。
+
+    出处：B-35 两轴审查的 B 轴 findings（P2-3 / P2-4）——首版规则只认 `user:pass@` 与
+    六个固定参数名，实测这几种写法**原样回显**。每条都断言"值不在理由里"，否则这条用例
+    只剩"输出是字符串"这一层。
+    """
+    lines = [
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://tok1234@a.invalid/v1", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="user:secret@a.invalid/v1", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1?client_secret=cs-9999", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1?X-Amz-Signature=sig-8888", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1;token=semi-7777", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="").line(),
+    ]
+
+    for line in lines:
+        assert "***" in line
+    assert "tok1234" not in lines[0] and "secret" not in lines[1]
+    assert "cs-9999" not in lines[2] and "sig-8888" not in lines[3]
+    assert "semi-7777" not in lines[4]
+
+
+def test_skip_reason_keeps_a_non_credential_query_readable() -> None:
+    """反向：普通参数名**不许**被误伤（`?model=` 是排查时的关键信息）。"""
+    probe = EndpointProbe(
+        label="primary", provider="p", model_name="m",
+        base_url="https://api.example.com/v1?model=deepseek-chat", ok=False,
+        reason=REASON_RATE_LIMITED, error_type="RateLimitError", detail="",
+    )
+
+    assert "?model=deepseek-chat" in probe.line()
+
+
+def test_skip_reason_masks_key_shaped_provider_and_model_names() -> None:
+    """provider / model 名也过同一道脱敏：**有人会把 key 贴错字段**。
+
+    这两个字段没有"形状"判据（任意字符串都合法），所以回显前的兜底只剩"密钥形 token"
+    这一层。没有这条用例，`_KEY_SHAPED_TOKEN` 在 `line()` 上的两处调用是无人看守的。
+    """
+    probe = EndpointProbe(
+        label="primary", provider="sk-live-ABCD1234", model_name="AKIAIOSFODNN7EXAMPLE",
+        base_url="https://a.invalid/v1", ok=False,
+        reason=PROVIDER_AUTH_REASON, error_type="AuthenticationError",
+        detail="",
+    )
+
+    line = probe.line()
+
+    assert "ABCD1234" not in line and "AKIAIOSFODNN7EXAMPLE" not in line
+    assert "***" in line
+
+
 def test_skip_reason_keeps_a_plain_base_url_readable() -> None:
     """没有凭据的 URL 原样保留（脱敏不许误伤：否则排查时看不出打的是哪个地址）。"""
     probe = EndpointProbe(
@@ -398,6 +461,27 @@ async def test_probe_endpoint_masks_a_key_shaped_token_in_the_detail(_fake_provi
 
 
 @pytest.mark.asyncio
+async def test_probe_endpoint_masks_credentials_inside_a_url_in_the_detail(_fake_provider) -> None:
+    """错误正文里**带凭据的 URL** 也过脱敏——`detail` 走 `_redact_base_url` 的唯一守卫。
+
+    SDK 的报错经常把请求 URL 原样回显（`... connection to https://<userinfo>@host/v1 ...`），
+    这里的 userinfo 没有冒号（token 直接当用户名），首版"只认 `user:pass@` 与六个参数名"
+    的规则实测漏它。顺带钉住反向：host / path 必须留着，否则排查时看不出打的是哪个地址。
+    """
+    _fake_provider["error"] = _HttpError(
+        "Error code: 401 - connection to https://tok-1234@api.example.com/v1 timed out",
+        status_code=401,
+    )
+
+    probe = await probe_endpoint(_config(), label="primary", timeout=15.0)
+
+    assert probe.unavailable
+    assert "tok-1234" not in probe.detail
+    assert "***" in probe.detail
+    assert "api.example.com" in probe.detail and "/v1" in probe.detail
+
+
+@pytest.mark.asyncio
 async def test_probe_endpoint_arms_the_outer_budget_above_the_inner_timeout(
     _fake_provider, monkeypatch,
 ) -> None:
@@ -443,21 +527,72 @@ async def test_probe_chain_releases_when_the_config_is_incomplete(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_chain_verdict_and_ensure_release_on_incomplete_config(monkeypatch) -> None:
-    """**没声明**主模型（无 key / 未知 provider 且无 key）在两层都只是放行。
+    """**没声明**主模型（key 为空）在两层都只是放行——覆盖三条形态。
 
-    这是守卫与用例既有 `skipif` 的分界：没声明 ⇒ 由 `skipif` 说话。**声明了却建不起来**
-    是另一条出口（响亮 skip），见下一条。
+    这是守卫与用例既有 `skipif` 的分界：**key 为空** ⇒ 由 `skipif` 说话。判据与用例侧
+    逐字等价（`bool(settings.model_api_key.get_secret_value())`，不 strip、不看 provider），
+    所以放行面恰好是"用例自己会 skip"的那一片；其余形态一律走响亮 skip——放行它们
+    只会以夹具层 ERROR 收场（B-33 残余②的形状）。
 
-    两个空值是显式钉的：`Settings(...)` 会读**机器上真实的** `.env`（pydantic-settings 的
+    三个空值全是显式钉的：`Settings(...)` 会读**机器上真实的** `.env`（pydantic-settings 的
     env_file 来源），不钉就等于让本机的 key 决定这条用例往哪条出口走——实测踩过。
     """
     monkeypatch.setattr(guard, "_VERDICTS", {})
-    undeclared = Settings(
-        model_provider="no_such_provider", model_api_key="", fallback_model_provider="",
-    )
+    undeclared = [
+        Settings(model_api_key="", fallback_model_provider=""),           # 什么都没配
+        Settings(model_provider="", model_api_key=""),                    # provider 也空
+        Settings(model_provider="no_such_provider", model_api_key=""),    # provider 名错，但没 key
+    ]
 
-    assert await chain_verdict(undeclared) is None
-    await ensure_live_model(undeclared)  # 不抛 = 放行
+    for settings in undeclared:
+        assert await chain_verdict(settings) is None
+        await ensure_live_model(settings)  # 不抛 = 放行
+
+
+def test_primary_key_present_matrix_matches_the_case_side_skipif() -> None:
+    """`_primary_key_present` 的判据面 = 用例 `skipif` 的判据面（**逐行对照**）。
+
+    用例侧的表达式就是这个矩阵的期望列：`bool(settings.model_api_key.get_secret_value())`
+    （`tests/integration/test_phase13_gate.py` / `test_phase14_gate.py` 的 `_gate_settings`）。
+    守卫若在这里加了 `.strip()` 或"provider 也要非空"，**这批本该放行的形态会变成响亮
+    skip**——方向是安全的（不静默代码回归），但口径与用例分叉，同一台机器上会出现
+    "用例 skipif 说没配、守卫却报配置缺陷"的矛盾读数。所以两处判据必须一起改。
+    """
+    rows = [
+        (Settings(model_api_key="", fallback_model_provider=""), False),
+        (Settings(model_provider="", model_api_key=""), False),
+        (Settings(model_provider="", model_api_key="sk-fake"), True),   # 有 key，provider 空
+        (Settings(model_provider="no_such_provider", model_api_key="sk-fake"), True),
+        (Settings(model_api_key="   "), True),                          # 空白 key：两层都算"在场"
+    ]
+
+    for settings, expected in rows:
+        key = settings.model_api_key.get_secret_value()
+        assert bool(key) is expected, "夹具值与期望列不一致（先修表）"
+        assert guard._primary_key_present(settings) is expected
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_key_becomes_a_named_skip_not_a_fixture_error(monkeypatch) -> None:
+    """空白 key（`"   "`）：用例 `skipif` 也算"在场" ⇒ 守卫必须开口，不许放行。
+
+    放行它 = 把用例交给夹具层 ERROR：构造器拒**strip 后为空**的 key
+    （`ModelConfig` ⟶ "缺少 API key：空白 key 只会把失败推到首次 ainvoke"），于是
+    `from_settings` 在建 runtime 时抛 `ConfigError`——"环境噪声冒充代码回归"的形状。
+    守卫在探测前就把它转成**点名这条缺陷的 skip**（不花网络往返，故这里禁止发探测）。
+
+    注意实现面：这条出口与"provider 名写错"共用同一条响亮 skip，**不是**探测结果的
+    那条（空白 key 的链根本建不起来）。
+    """
+    monkeypatch.setattr("agent_harness.model.provider.create_chat_model",
+                        lambda *a, **k: pytest.fail("链建不起来，不该发起探测"))
+    monkeypatch.setattr(guard, "_VERDICTS", {})
+
+    reason = await chain_verdict(Settings(model_api_key="   "))
+
+    assert reason is not None
+    assert "未被验证" in reason, "skip 不能被读成门禁通过"
+    assert "空白 key" in reason, "理由要带原始报错（这里正是空白 key 的判据）"
 
 
 @pytest.mark.asyncio
@@ -470,8 +605,10 @@ async def test_chain_verdict_skips_loudly_when_the_declared_chain_is_incomplete(
     （`ModelConfig.from_settings` 在建 runtime 时抛 `ConfigError`）。守卫把整条链纳入
     配置谓词后，这条出口变成"指名缺哪个 env 的 skip"。
 
-    顺带钉住：理由里**没有**主模型 key 的明文（段内只兜底 key 形 token——理由里的 env 名
-    必须留全，喂 `_redact_detail` 会把 `FALLBACK_MODEL_API_KEY` 打成 `***`）。
+    顺带钉住：段内的脱敏**不许误伤 env 名**——理由必须留全 `FALLBACK_MODEL_API_KEY`
+    （喂 `_redact_detail` 会把它打成 `FALLBACK_MODEL_***`，用户就不知道该补哪个键了）。
+    反方向（真有密钥形 token 时必须打码）由下一条覆盖：本条的报错正文里根本没有
+    主模型 key，在这里断言"key 不在理由里"是**空转**——两轴审查实测指出后改掉了。
     """
     monkeypatch.setattr("agent_harness.model.provider.create_chat_model",
                         lambda *a, **k: pytest.fail("半配置在建链期就失败，不该发起探测"))
@@ -482,11 +619,28 @@ async def test_chain_verdict_skips_loudly_when_the_declared_chain_is_incomplete(
     assert reason is not None
     assert "FALLBACK_MODEL_API_KEY" in reason, "理由要指名缺的是哪一个 env"
     assert "未被验证" in reason, "skip 不能被读成门禁通过"
-    assert "sk-fake" not in reason
 
     monkeypatch.setattr(guard, "_WARNED", [True])  # warning 已发过，用例不重复发
     with pytest.raises(pytest.skip.Exception):
         await ensure_live_model(_half_config_settings())
+
+
+@pytest.mark.asyncio
+async def test_the_defect_reason_masks_a_key_shaped_provider_name() -> None:
+    """反向的牙：provider 名写成密钥形（**贴错字段**）时，理由里只剩 `***`。
+
+    这条也是 `_KEY_SHAPED_TOKEN` 在理由生成处唯一的守卫——没有它，把那行 `.sub(...)`
+    删掉照样全绿。载荷走的是真路径：`_fallback_from` 先查 provider 是否在预设里，
+    未知名直接进 `ConfigError` 正文，于是密钥形的名字会原样出现在理由中。
+    """
+    reason = await chain_verdict(Settings(
+        model_provider="deepseek", model_api_key="sk-fake",
+        fallback_model_provider="sk-live-ABCD1234", fallback_model_api_key="",
+    ))
+
+    assert reason is not None
+    assert "ABCD1234" not in reason
+    assert "***" in reason
 
 
 @pytest.mark.asyncio

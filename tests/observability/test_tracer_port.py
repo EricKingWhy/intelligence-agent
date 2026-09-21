@@ -365,7 +365,8 @@ class _IdentifiedNullSpan(NullSpan):
 
     `NullSpan` 是普通类（无 `__eq__`）⇒ 身份比较就是列表相等比较的语义，两个实例
     永远不相等。这正是"同一 span 收两次"与"两个 span 各收一次"的分辨力来源，同时
-    类型与生产 / 共享替身一致（B-35：此前本替身返回 `str` 句柄，是登记过的分叉）。
+    类型与生产 / 共享替身一致（此前本替身返回 `str` 句柄，该分叉已收口——登记与结论见
+    `docs/SDD_TICKET_TRACKER.md` 的 B-35 段）。
     """
 
     __slots__ = ("step",)
@@ -389,8 +390,8 @@ class _ContextSpanRecordingNullTracer(RecordingNullTracer):
     （做成测试内的专用替身、不改进共享的 `RecordingNullTracer`：新身份面只服务这一条
     用例，而共享替身在本批之外另有 6 个读者（`test_tracer_port.py` 五条 +
     `test_tool_tracing.py` 一条），为一条用例扩一个共用替身的接口不划算。句柄类型
-    与共享替身 / 生产**一致**（都是 `NullSpan` 家族）——B-35 收掉了此前"本替身返回
-    `str`"的分叉。）
+    与共享替身 / 生产**一致**（都是 `NullSpan` 家族）——此前"本替身返回 `str`"的分叉
+    已收口，登记与结论见 `docs/SDD_TICKET_TRACKER.md` 的 B-35 段。）
     """
 
     def __init__(self, calls: list[str] | None = None) -> None:
@@ -452,7 +453,7 @@ async def test_context_window_exceeded_then_disconnect_collects_the_span_once(
         "run_failed",
     ], "取消臂不得对已收口的 span 再收一次——第二次 run_failed 是取消臂自己的归因"
     assert isinstance(tracer.started[0], NullSpan), \
-        "句柄与生产 / 共享替身同型（B-35：此前这里是 `str` 分叉）"
+        "句柄与生产 / 共享替身同型（此前这里是 `str` 分叉，见 tracker B-35 段）"
     assert [span.step for span in tracer.started] == [0]
     assert tracer.collected == tracer.started, "收口收到的句柄必须是起出去的那一个"
     assert tracer.collected_kwargs == [()], "超限臂的收口是裸调（残余 R1：不传 compacted_turn_count）"

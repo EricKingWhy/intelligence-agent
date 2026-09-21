@@ -82,6 +82,11 @@ class _RecordingTracer:
     流经调用方，只有一个消费者（`_Telemetry`）能测到"收到的是哪一个"。
     （真实实现：`agent_harness/observability/port.py`，不抛的保证由 `_GuardedTracer`
     在 Core 单点强制——本替身不模拟那一层。）
+
+    ⚠ 句柄形状与生产**不同型**：这里返回 `str`，生产返回 `Span`（或降级后的 `None`）。
+    本替身只服务这两条臂——臂对句柄只做"存 / 取 / 转交"，从不调它的方法，所以形状差异
+    在**本文件的断言面**上没有影响；同型替身在 `tests/observability/test_tracer_port.py`
+    （`_IdentifiedNullSpan`），那里才测"句柄是怎么被收口的"。
     """
 
     trace_id = "trace-1"
@@ -208,12 +213,17 @@ def _runtime(
 
 
 class _ArmsKit:
-    """一次装配的全部零件（臂 + 便于断言的句柄）。"""
+    """一次装配的全部零件（臂 + 便于断言的句柄）。
+
+    `streamer` 声明成 `Any` 而不是 `BlockStreamer`：这里的故障注入用的是**鸭子类型**替身
+    （`_FailingStreamer` 只实现 `interrupt`，刻意不继承生产类——继承会把"臂只调这一面"
+    这条事实藏起来）。注成生产类型等于对类型检查器说谎。
+    """
 
     def __init__(
         self, runtime: AgentRuntime, session: Session, *, step_base: int = 0,
         run_id: str | None = RUN_ID, memory_event_start: int = 0,
-        streamer: BlockStreamer | None = None, coord: Any = None,
+        streamer: Any = None, coord: Any = None,
         tracer: _RecordingTracer | None = None,
         cancel_reason_supplier: Any = None,
         usage_total: dict[str, int] | None = None,
@@ -990,3 +1000,31 @@ async def test_cancelled_arm_still_writes_the_terminal_event_when_the_port_raise
     assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
         "终态事件不得因收口段故障而消失（R4）"
     assert written[-1].data["reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_both_stages_failing_re_raises_the_first_one_after_running_both(
+    session: Session,
+) -> None:
+    """两段都炸：`raise_first()` 还原**第一处**，且第二段照样跑到（不是短路退出）。
+
+    "先到先得"是 `_TerminalStages` 的契约之一（只存第一处）。不钉住的话，把它改成
+    "每次都覆盖"不会有任何用例变红——而调用方看到的失败会从"流收口的错"翻成"观测收口的
+    错"，归因随之翻转（排障时先看到的是完全不相干的那一段）。
+    """
+    streamer = _FailingStreamer(RuntimeError("streamer 收口炸了"))
+    kit = _kit(session, streamer=streamer, step_base=2, tracer=_ExplodingPortTracer())
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="streamer 收口炸了"):
+        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+
+    assert streamer.calls == [kit.arms.envelope_step(3) + 1], "第一段（流收口）跑过"
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
+        "第二段也跑到了（否则不会有第二处异常）；它内部抛错，故只到这一步"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
+        "两段皆炸也不影响终态事件落盘"

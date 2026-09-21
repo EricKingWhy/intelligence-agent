@@ -315,8 +315,14 @@ class _Telemetry:
     收口责任边界（按可证伪的方式写）：**收口只经本对象的成对方法**，已收口的句柄在本
     对象里唯一存放。各终结点**何时**调用、取消/异常臂经 `snapshot()` 拿的是哪份副本，
     由 `_drive` 与两个终态臂决定——本对象不保证"每个出口都被调用到"。注意"没被走到"
-    与"段内抛错"是两回事：后者由 `_TerminalStages` 逐段兜底收口（残留 R4），前者
+    与"段内抛错"是两回事：后者由 `_TerminalStages` 逐段兜底收口（残余 R4），前者
     本对象无从保证（那段代码压根没执行）。
+
+    逐段兜底**也不覆盖收尾的全部内容**，两条边界如实记在这里，免得被读成"收尾已免疫
+    一切故障"：一是两段之间的取值（`arms.cancel_reason()`）与终态事件本身的写入仍裸奔
+    ——前者是内存读（`return "orphaned" if run.reap_requested else "cancelled"`），
+    没有失败面，后者抛错的传播形状与修前一致（见 `_terminal_exception` 的 docstring）；
+    二是兜底**不吞**异常——第一处原样在全部段跑完后重抛，只是不再让后面的段陪葬。
 
     边界：`run_span`（诊断日志的根 span id）**不收**——它只在创建时写一次、不进端口，
     没有"起/清两处写"的漂移面，留在 `_drive` 局部（#264 已定的同一条判据）。
@@ -362,7 +368,7 @@ class _Telemetry:
         交代完了"的标记，保留它等于允许第二次收口（残余 R2 / R3 的根因，由 #285 收口）。
         清口只保证"不会收两次"，**不**保证"每个出口都收过一次"——未清不等于已交代：
         收口段可能根本没被走到（run 在进终态臂之前就没了下文）。**段内**抛错与此不同：
-        逐段兜底已收口那一路（`_TerminalStages` / 残留 R4），段抛错不再跳过后续段。
+        逐段兜底已收口那一路（`_TerminalStages` / 残余 R4），段抛错不再跳过后续段。
 
         关键字集合逐字回到 #264 之前的形状（残余 R1）：调用方**传了**就带关键字转发
         （`None` 也带——那是"本轮没有压缩发生"的实参，与"没传"不同），**没传**就裸调。
@@ -446,6 +452,13 @@ class _TerminalStages:
 
     被保护的是"收口段"（`interrupt_streams` / `close_observability`）；终态事件本身的
     写入不在其列：它抛错时的传播形状与修前一致（见两条臂的 docstring）。
+
+    两条臂都接了这个执行器，但**不是同一段代码**：取消臂逐段直呼，异常臂在段之间把
+    收口产生的事件逐条 yield 给流消费者。所以"某条出口修好了"不能由另一条臂的用例
+    代替——两边各有用例钉住（`tests/agent/test_terminal_arms.py`）。
+
+    契约：`step` 必须返回**当场物化**的 list（两段都是普通方法、返回 list）。若将来
+    某段改成生成器 / 惰性迭代，抛错就发生在调用方的 `for` 里，本兜底接不住。
     """
 
     def __init__(self) -> None:
@@ -459,7 +472,7 @@ class _TerminalStages:
             if self.first is None:
                 self.first = error
             log_event(
-                logger, "system_log", "终态收尾段失败（已继续执行后续段）",
+                logger, "system_log", f"终态收尾段 {stage} 失败（已继续执行后续段）",
                 level="warn", component="agent_runtime", outcome="stage_failed",
                 stage=stage, error_type=type(error).__name__, error_message=str(error),
             )
