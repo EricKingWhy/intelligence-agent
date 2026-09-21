@@ -482,9 +482,23 @@ git commit -m "..."
 
 ## 13.4 最终合并规则
 
-最终集成统一在 `D:\intelligence-agent` 的 `main` 进行：按 §14.6 先回后正，按 §14.10
-完成门禁与 review coverage，合入后比较已验证树与集成树，按 §14.4 push，并按 §14.9
-通知另一条线回补。若直接在施工 clone 的 `main` 上提交，则没有 feature 回合步骤。
+最终集成统一在 `D:\intelligence-agent` 的 `main` 进行：
+
+```text
+按 §14.6 先回后正（若直接在施工 clone 的 `main` 上提交，则没有这一步）
+→ diff 检查 + 门禁全绿（§14.10）
+→ 审查覆盖闸门：`scripts/check_review_coverage.sh` 退出 0
+   （对账范围 `<最早台账 base>..HEAD`，每条 commit 必须有台账归属：审查行、docs-only 白名单，
+    或"恰好只改台账文件"的记账提交——代码提交只有"补一次审查"一条路；机制与信任边界见
+    `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）
+→ merge 到本地 main（快进优先）
+→ 先比 tree 再决定要不要重跑门禁：`git -C <集成 clone> rev-parse main^{tree}` 与施工 clone 的
+   `HEAD^{tree}` 相等 ⇒ 证明"跑过门禁的那棵树 = 被集成的这棵树"，不必重跑（2026-09-17 实测
+   省掉一次 ~20 分钟的前后端全量）；不等（行尾 / CRLF 或合入产生新内容）⇒ 在集成 clone 跑全量门禁
+→ 确认前后端集成正常
+→ `git push origin main`（§14.4 常设授权）
+→ 通知另一条线把 main 合回来（§14.9）
+```
 
 先合并到本地 `main` 并验证，再 push GitHub；除非用户明确要求，不默认走 feature push + PR merge。
 

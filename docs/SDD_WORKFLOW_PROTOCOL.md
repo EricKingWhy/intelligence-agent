@@ -63,7 +63,7 @@ V3-lite **不设固定 Ticket 数量或日历节奏**。在变更风险高、边
 ## 3. 完成与集成
 
 1. 更新 Tracker、`PHASE_STATUS.md` 当前焦点 / 索引和当月归档；每条事实只写全一次，其余位置给指针。
-2. 集成前按 `AGENTS.md` §14.10 通过全量测试、lint、type check（如有）、`git diff --check`、审查覆盖闸门及工作树检查；比较 tree，确认集成内容与已验证内容一致。**全量只跑一次的老家规矩见 §8.1**：跑在冻结树，读数按 §8.1 第 3 条的**两条判据**（`git diff --name-only --no-renames <冻结sha> HEAD` 全部命中 docs-only 模式 **且** `git status --short` 除 docs/台账外为空）传递到被集成的代码面。
+2. 集成前按 `AGENTS.md` §14.10 通过全量测试、lint、type check（如有）、`git diff --check`、审查覆盖闸门及工作树检查；比较 tree，确认集成内容与已验证内容一致。**全量只跑一次的老家规矩见 §8.1**：跑在冻结树，读数按 §8.1 第 3 条的**两条判据**传递到被集成的代码面（判据原文、`--name-status` 要求与自证步骤见该条，此处不复述以免两处漂移）。
 3. Branch merge、push、issue close 和跨仓库同步遵守 `AGENTS.md` §13–14。前一阶段的授权不自动扩大到下一种 Git 写操作；冲突按 §14.7 分析并取得批准。
 
 ### 3.1 不确定与票面变化
