@@ -156,3 +156,4 @@ e3fa930	B-31 集成 push 结构补记（两次快进 push 分开记：代码面 
 0af6f21	B6/#274 落点记录（PERF_BASELINE B6 节：G3 前置基线 + 改造后对照 + 复现性三轮；tracker 文末追加「批 P1-B6」节；docs-only）
 62f5d73314170a847287aa7951144c9253e57ce7	B6/#274 集成与关单落点（tracker 集成段 + 归档条目 + PHASE_STATUS 索引与条目数真值修正；docs-only）
 ecbf00b289ffd3045ec66730193556bf09fc159d	B6/#274 集成 push 结构补记（两轮快进范围 + 落地踩坑；tracker + 归档 + PHASE_STATUS；docs-only）
+a861379e7a8d364d7d66f77844e188a2886aab8d	B6/#274 push 结构补记如实化（轮次口径 ①/② + 记账递归收敛；tracker + 归档 + PHASE_STATUS；docs-only）
