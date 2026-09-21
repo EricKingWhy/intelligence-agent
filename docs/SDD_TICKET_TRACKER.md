@@ -2215,14 +2215,12 @@ scripts/check_review_coverage.sh
 ### #268 证据（docs-only 的「红证」按票面定义 = **diff 证据**）
 
 ```bash
-# 改造前基线：45744d3 版本文档
-git show 45744d3:docs/HANDOFF_PERF_FRONTEND.md > "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md"
-# 改造后对照（numstat 第 2 列 = 删除行数）
-git diff --no-index --numstat \
-  "C:/Users/王浩宇/AppData/Local/Temp/perf-issues/base-HANDOFF.md" \
-  docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md
+# 改造前后分别固定为 45744d3 / 1529aa7，避免当前工作树演进改变历史读数
+git diff --numstat \
+  45744d3:docs/HANDOFF_PERF_FRONTEND.md \
+  1529aa7:docs/HANDOFF_PERF_FRONTEND.md
 # 实际输出：
-# 96	0	"…/base-HANDOFF.md" => docs/archive/handoffs/HANDOFF_PERF_FRONTEND.md
+# 96	0	docs/HANDOFF_PERF_FRONTEND.md
 ```
 
 - **AC4**（只改一个文件、删改行数 0）：新增 **96** 行 / 删除 **0** 行 ✅
