@@ -361,6 +361,38 @@ async def test_context_window_exceeded_drives_terminal_port_lifecycle(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_context_window_exceeded_then_disconnect_collects_the_span_twice(
+    tmp_path, monkeypatch,
+):
+    """超限臂 + 终态帧上断连：同一 context span 会被**第二条收集臂**再收一次。
+
+    这条路径**生产可达**（消费方在终态帧上断连 ⇒ GeneratorExit 落进 `_drive` 的取消
+    臂），6 次端口调用是 #264 之前的既有形状：本票（等价重构）逐字保留，两条出口与其
+    余细节登记为残余 R2 / R3（tracker #265 段）。用途同 `tests/agent/test_terminal_arms.py`
+    的同名用例——修 R2 / R3 的那张票会让它转红；在这里它钉的是**既有事实**。
+    """
+    calls = _record_null_tracer_calls(monkeypatch)
+    session = make_session(tmp_path)
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([AIMessage(content="不会走到这里")]),
+        registry, ToolExecutor(registry),
+        context_builder=_OverflowingContextBuilder(),
+    )
+
+    agen = runtime.run_stream(session, "hi")
+    async for event in agen:
+        if event.type == RUN_FAILED:
+            break  # 悬空点：终态帧已出，消费方在此断开
+    await agen.aclose()
+
+    assert calls == [
+        "run_started", "context_build_started", "context_build_completed", "run_failed",
+        "context_build_completed", "run_failed",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_hard_guard_run_drives_terminal_port_lifecycle(tmp_path, monkeypatch):
     """硬熔断臂：run_failed 必须到达端口（该臂的端口调用在 failure_terminal 之前）。
 

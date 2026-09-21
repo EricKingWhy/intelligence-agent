@@ -279,16 +279,18 @@ class _Telemetry:
     同点写回对齐），`ctx_span` / `generation` 是"起/清各两处写"的裸句柄，收口序列在每个
     收尾路径上直呼端口方法。本对象把这些收成**一份**（构造一次、按引用交给使用方，与
     `_RunFinalizer` 同一形状），并守住一条纪律：**句柄不出对象**——调用方只报"哪个阶段
-    开始了 / 结束了 / 在途的东西按失败收口"，既不持有也不回传句柄。这样"在途观测
-    有没有被收口"只由本对象的成对方法决定，`_drive` 的每个出口都不可能漏掉一处
-    收口（#247 AC4）。
+    开始了 / 结束了 / 在途的东西按失败收口"，既不持有也不回传句柄。这样"句柄写在哪里、
+    清在哪里"只由本对象的成对方法决定（#247 AC4）——**但这不等于"每个出口都被调用
+    到"**，后者见下「收口责任边界」。
 
     恒定式（#265 AC 的"逐字兼容"）：本对象的每个方法都是**转发**——调用的端口方法、
-    调用条件与顺序与原调用点相同，不加行为、不判空。两处**已登记的差异**（都在"键集 /
-    清口"层面，取值等价；登记见 docs/SDD_TICKET_TRACKER.md 的 #265 残余）：
-    ① `compacted_turn_count` 一律以关键字转发（端口两个实现的默认值即 None，值等价）；
+    调用条件与顺序与原调用点相同，不加行为、不判空。两处**已登记的差异**（编号对应
+    docs/SDD_TICKET_TRACKER.md 的 #265 残余 R1 / R2+R3）：
+    ① `compacted_turn_count` 一律以关键字转发：**端口输出无差异**（两个实现都按
+    `is not None` 决定是否写 metadata 键），差异只在"调用关键字集合"这一层；
     ② context 超限臂收口后**保留**在途句柄（`keep_handle`）——复刻它 #264 之前的既有
-    形状（"超限 + 消费方在终态帧上断连"时取消臂会对同一 span 再收一次）。
+    形状：该句柄会被**第二条收集臂**再收一次，取消臂（"超限 + 消费方在终态帧上断连"）
+    与异常臂（"超限臂落终态的 append 失败"）两条出口皆然。
     端口实现的选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外，
     故可选/故障 sink 不拖垮 Core 的性质不变。工具批次的 span 归 ToolExecutor：
     `tracer` 原样转交。
@@ -341,8 +343,10 @@ class _Telemetry:
         紧跟一句 `= None`"一致）。
 
         ``keep_handle`` 只服务 context 超限臂：那条臂在 #264 之前就**不清**句柄
-        （#264 只是原样搬过来），于是"超限 + 消费方在终态帧上断连"时取消臂会拿同一
-        句柄**再收一次**。本票是等价重构 ⇒ 逐字保留该形状，缺陷与可达路径登记为残余，
+        （#264 只是原样搬过来），于是同一句柄会被**第二条收集臂**再收一次——取消臂
+        （"超限 + 消费方在终态帧上断连"）与异常臂（"超限臂落终态的 append 失败"，
+        实测同样可达）两条出口皆然。本票是等价重构 ⇒ 逐字保留该形状，两条出口与
+        可达路径登记为残余 R2 / R3（见 docs/SDD_TICKET_TRACKER.md 的 #265 段），
         要不要修由单独一张票决定。
         """
         self.tracer.context_build_completed(
@@ -1403,9 +1407,10 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
     ) -> AsyncIterator[AgentEvent]:
         """context 超限臂：模型在本轮从未被调用，直接落终态（不经 failure_terminal）。"""
-        # keep_handle=True 复刻本臂 #264 之前的既有形状（收口不清口 ⇒ "超限 + 消费方在
-        # 终态帧上断连"时取消臂对同一 span 再收一次）。行为零变化是本票 AC，缺陷登记为
-        # 残余（见 _Telemetry.context_build_completed 的 docstring）。
+        # keep_handle=True 复刻本臂 #264 之前的既有形状（收口不清口 ⇒ 同一 span 被第二条
+        # 收集臂再收一次：取消臂的"终态帧上断连"与异常臂的"落终态 append 失败"两条出口）。
+        # 行为零变化是本票 AC，缺陷登记为残余 R2 / R3（见 _Telemetry 的 docstring 与
+        # docs/SDD_TICKET_TRACKER.md 的 #265 段）。
         arms.telemetry.context_build_completed(keep_handle=True)
         arms.telemetry.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
         failed = arms.session.append(
