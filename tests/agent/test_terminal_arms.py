@@ -873,3 +873,120 @@ async def test_failed_arm_uses_the_unclassified_message_for_unknown_errors(
         error_type="ValueError",
     )
     assert session.events[-2].data["message"] == "model call failed: ValueError"
+
+
+# ---------------------------------------------------------------------------
+# R4：收口段抛错不得让后续段消失（2026-09-22）
+# ---------------------------------------------------------------------------
+
+
+class _FailingStreamer:
+    """`interrupt(step=…)` 抛错的 streamer 替身（R4 的故障注入点，鸭子类型）。
+
+    生产里这里坐的是 `BlockStreamer`；本替身只实现终结臂真正调用的那一面，用来把
+    "流收口段抛错"做成可复现的故障（修前它让两臂后面的每一行都不执行）。
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls: list[int] = []
+
+    def interrupt(self, *, step: int) -> list[Any]:
+        self.calls.append(step)
+        raise self.error
+
+
+class _ExplodingPortTracer(_RecordingTracer):
+    """在 `model_call_failed` 上抛错的端口替身（R4 的第二段故障注入点）。"""
+
+    def model_call_failed(self, generation: Any, *, error_type: str) -> None:
+        raise RuntimeError("观测端口炸了")
+
+
+@pytest.mark.asyncio
+async def test_failed_arm_keeps_everything_after_the_failing_stream_stage(
+    session: Session,
+) -> None:
+    """R4（异常臂出口）：流收口段抛错时，观测收口与终态事件仍然执行。
+
+    修前实测形状：`interrupt_streams()` 一抛错，本臂后面的每一行都不执行 ⇒ 在途的
+    ctx_span / generation **0 次收口**、session 里也**没有** `run/failed`（消费方只看到
+    一个异常）。本用例钉三件事：① 端口收到三条收口调用（context_build_completed /
+    model_call_failed / run_failed）；② 终态 `run/failed` 落盘；③ 第一处异常在**全部
+    收尾跑完后**原样再抛（类型与文本都不替换）。
+    """
+    streamer = _FailingStreamer(RuntimeError("streamer 收口炸了"))
+    kit = _kit(session, streamer=streamer, step_base=2)
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="streamer 收口炸了"):
+        await _drain(
+            kit.runtime._terminal_exception(kit.arms, steps=3, error=ValueError("模型调用炸了")),
+        )
+
+    assert streamer.calls == [kit.arms.envelope_step(3) + 1], \
+        "流收口段（interrupt）确实被走到过——故障注入点有效"
+    assert [name for name, _ in kit.tracer.calls] == [
+        "context_build_completed", "model_call_failed", "run_failed",
+    ], "观测收口不得被前一段的故障跳过（R4）"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED]
+    assert written[-1].data["reason"] == "ValueError", \
+        "归因仍来自 run 的原始错误，不因收尾段故障而变"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_arm_keeps_everything_after_the_failing_stream_stage(
+    session: Session,
+) -> None:
+    """R4（取消臂出口）：同一故障在取消臂上同样不得让收口与终态事件消失。
+
+    取消臂是**另一条出口**（生成器关闭中调用、事件被丢弃），与异常臂各写一遍才是这族
+    缺口的完整判据面（与 R2/R3 的处置口径一致）。
+    """
+    streamer = _FailingStreamer(RuntimeError("streamer 收口炸了"))
+    kit = _kit(session, streamer=streamer, step_base=2)
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="streamer 收口炸了"):
+        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+
+    assert streamer.calls == [kit.arms.envelope_step(3) + 1]
+    assert [name for name, _ in kit.tracer.calls] == [
+        "context_build_completed", "model_call_failed", "run_failed",
+    ]
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED]
+    assert written[-1].data["reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_arm_still_writes_the_terminal_event_when_the_port_raises(
+    session: Session,
+) -> None:
+    """R4（第二段故障）：观测收口自己抛错时，终态事件仍然落盘。
+
+    与上一条的差别是故障段不同（`close_observability` 里的端口调用）：它证明"逐段兜底"
+    覆盖的是整条收尾序列，而不是只护住 `interrupt_streams` 这一段。
+    """
+    kit = _kit(session, step_base=2, tracer=_ExplodingPortTracer())
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="观测端口炸了"):
+        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
+        "抛错那一步之前仍执行过；它之后的 run_failed 没到（故障确实发生在段中间）"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
+        "终态事件不得因收口段故障而消失（R4）"
+    assert written[-1].data["reason"] == "cancelled"

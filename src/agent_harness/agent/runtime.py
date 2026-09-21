@@ -314,7 +314,9 @@ class _Telemetry:
 
     收口责任边界（按可证伪的方式写）：**收口只经本对象的成对方法**，已收口的句柄在本
     对象里唯一存放。各终结点**何时**调用、取消/异常臂经 `snapshot()` 拿的是哪份副本，
-    由 `_drive` 与两个终态臂决定——本对象不保证"每个出口都被调用到"。
+    由 `_drive` 与两个终态臂决定——本对象不保证"每个出口都被调用到"。注意"没被走到"
+    与"段内抛错"是两回事：后者由 `_TerminalStages` 逐段兜底收口（残留 R4），前者
+    本对象无从保证（那段代码压根没执行）。
 
     边界：`run_span`（诊断日志的根 span id）**不收**——它只在创建时写一次、不进端口，
     没有"起/清两处写"的漂移面，留在 `_drive` 局部（#264 已定的同一条判据）。
@@ -358,8 +360,9 @@ class _Telemetry:
         端口调用**无条件**——句柄可能是降级实现的 None，端口自己早退（port.py
         模块 docstring 的句柄契约）。收口后一律置空：清口是"这次观测**经过本对象**
         交代完了"的标记，保留它等于允许第二次收口（残余 R2 / R3 的根因，由 #285 收口）。
-        清口只保证"不会收两次"，**不**保证"每个出口都收过一次"——未清不等于已交代
-        （`interrupt_streams` 抛错时收口段整个不执行，见类 docstring 的责任边界）。
+        清口只保证"不会收两次"，**不**保证"每个出口都收过一次"——未清不等于已交代：
+        收口段可能根本没被走到（run 在进终态臂之前就没了下文）。**段内**抛错与此不同：
+        逐段兜底已收口那一路（`_TerminalStages` / 残留 R4），段抛错不再跳过后续段。
 
         关键字集合逐字回到 #264 之前的形状（残余 R1）：调用方**传了**就带关键字转发
         （`None` 也带——那是"本轮没有压缩发生"的实参，与"没传"不同），**没传**就裸调。
@@ -427,6 +430,45 @@ class _Telemetry:
         return _Telemetry(
             tracer=self.tracer, ctx_span=self.ctx_span, generation=self.generation,
         )
+
+
+class _TerminalStages:
+    """终态收尾的**逐段兜底**执行器（残余 R4，2026-09-22）。
+
+    收尾此前是直排的：任何一段抛错，它**后面**的段整个不执行。最刺眼的一条是
+    `interrupt_streams()` 抛错（streamer 收口失败 / 切换事实落盘失败）时观测收口
+    （context span、generation、`run_failed`）**一次都没发生**，run 也拿不到终态事件
+    ——与 R2/R3 同族：出口覆盖不齐（B-34 段登记的 R4）。
+
+    本对象把"每段独立兜底"收成一个点：段抛错 ⇒ 记一条结构化日志（类型 + 文本；
+    不静默）并继续跑后续段；**第一处异常**在全部段跑完后由 `raise_first()` 原样再抛
+    ——不吞、不改类型、不换异常，调用方看到的失败与修前同源，只是收尾不再半途而废。
+
+    被保护的是"收口段"（`interrupt_streams` / `close_observability`）；终态事件本身的
+    写入不在其列：它抛错时的传播形状与修前一致（见两条臂的 docstring）。
+    """
+
+    def __init__(self) -> None:
+        self.first: Exception | None = None
+
+    def run(self, stage: str, step: Callable[[], list[SessionEvent]]) -> list[SessionEvent]:
+        """跑一段收尾；抛错 ⇒ 记日志、返回空、**不**中断后续段。"""
+        try:
+            return step()
+        except Exception as error:  # noqa: BLE001 — 收尾段故障边界（见类 docstring）
+            if self.first is None:
+                self.first = error
+            log_event(
+                logger, "system_log", "终态收尾段失败（已继续执行后续段）",
+                level="warn", component="agent_runtime", outcome="stage_failed",
+                stage=stage, error_type=type(error).__name__, error_message=str(error),
+            )
+            return []
+
+    def raise_first(self) -> None:
+        """全部段跑完后原样再抛第一处异常（没有失败则什么都不做）。"""
+        if self.first is not None:
+            raise self.first
 
 
 @dataclass
@@ -1506,17 +1548,26 @@ class AgentRuntime:
         与异常臂的唯一差异是"收尾事件丢弃"：两臂共用 `_TerminalContext` 的收尾
         序列，本臂把返回值直接丢掉。reason 的解析点（supplier 调用）保持在
         `interrupt_streams()` **之后**——与原臂同序。
+
+        逐段兜底（R4）：两段收口任一抛错都不跳过后续——观测收口照跑、终态事件照写，
+        第一处异常在最后原样再抛（修前它会让整条收尾链断在这里：有 span 0 次收口、
+        也没有 `run/failed`）。
         """
         ctx = arms.context(steps)
-        ctx.interrupt_streams()
+        stages = _TerminalStages()
+        stages.run("interrupt_streams", ctx.interrupt_streams)
         reason = arms.cancel_reason()
-        ctx.close_observability(error_type=None, reason=reason, cancelled=True)
+        stages.run(
+            "close_observability",
+            lambda: ctx.close_observability(error_type=None, reason=reason, cancelled=True),
+        )
         arms.terminal.cancelled_terminal(
             steps=arms.envelope_step(steps),
             reason=reason,
             trace_id=arms.telemetry.trace_id,
             trace_url=arms.telemetry.trace_url,
         )
+        stages.raise_first()
 
     async def _terminal_exception(
         self, arms: _TerminalArms, *, steps: int, error: BaseException,
@@ -1525,6 +1576,10 @@ class AgentRuntime:
 
         归因口径（已分类 / 未分类两条支路，以及"每条失败路径都要有值"为什么必须
         做到）见 docs/adr/0033-run-failure-attribution-surface.md §2.1/§2.4。
+
+        逐段兜底（R4）：两段收口任一抛错都不跳过后续——观测收口照跑、终态事件照写，
+        第一处异常在全部收尾跑完后原样再抛（修前 streamer 收口一抛错，本臂后面的
+        每一行都不执行）。
         """
         ctx = arms.context(steps)
         # 分类只在**模型调用在途**时进行（model_call_open 正是 model/failed 的
@@ -1543,13 +1598,17 @@ class AgentRuntime:
             provider_message
             or UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=type(error).__name__)
         )
-        for streamed in ctx.interrupt_streams():
+        stages = _TerminalStages()
+        for streamed in stages.run("interrupt_streams", ctx.interrupt_streams):
             yield to_agent_event(streamed)
-        for streamed in ctx.close_observability(
-            error_type=type(error).__name__,
-            reason=provider_reason or type(error).__name__,
-            cancelled=False,
-            readable_message=provider_message,
+        for streamed in stages.run(
+            "close_observability",
+            lambda: ctx.close_observability(
+                error_type=type(error).__name__,
+                reason=provider_reason or type(error).__name__,
+                cancelled=False,
+                readable_message=provider_message,
+            ),
         ):
             yield to_agent_event(streamed)
         # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
@@ -1563,6 +1622,7 @@ class AgentRuntime:
         )
         if end_event is not None:
             yield to_agent_event(end_event)
+        stages.raise_first()
 
     def _new_coordinator(self) -> ModelFallbackCoordinator:
         """per-run coordinator 工厂（_drive 每调一次；测试可直取验证接线）。"""

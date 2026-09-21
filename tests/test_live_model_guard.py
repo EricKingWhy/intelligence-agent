@@ -229,6 +229,53 @@ def test_skip_reason_renders_every_endpoint_line() -> None:
     assert "provider_account_unavailable" in reason and REASON_TIMEOUT in reason
 
 
+def test_skip_reason_masks_credentials_in_the_base_url() -> None:
+    """base_url 里的凭据不进 skip 理由（B-33 残余①）：userinfo 与 query 两处都打码。
+
+    理由会被 pytest 原样打印、还会以 warning 再念一遍——用户自有配置的 URL 完全可能
+    写成 `https://user:pass@host/v1?api_key=…`，回显前必须先过 `_redact_base_url`。
+    """
+    probe = EndpointProbe(
+        label="primary", provider="p", model_name="m",
+        base_url="https://user:pass@api.example.com/v1?api_key=sk-live-ZZZZ9999",
+        ok=False, reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="",
+    )
+
+    line = probe.line()
+
+    assert "pass" not in line and "sk-live-ZZZZ9999" not in line
+    assert "user:pass@" not in line
+    assert "***" in line
+    # host / path 留着：那正是排查时要看的东西（脱敏不该把整行变成星号）。
+    assert "api.example.com" in line and "/v1" in line
+
+
+def test_skip_reason_keeps_a_plain_base_url_readable() -> None:
+    """没有凭据的 URL 原样保留（脱敏不许误伤：否则排查时看不出打的是哪个地址）。"""
+    probe = EndpointProbe(
+        label="primary", provider="p", model_name="m",
+        base_url="https://api.deepseek.com/v1", ok=False,
+        reason=REASON_RATE_LIMITED, error_type="RateLimitError", detail="",
+    )
+
+    assert "https://api.deepseek.com/v1" in probe.line()
+
+
+def test_skip_reason_leaves_a_credential_shaped_reason_line_clean() -> None:
+    """整条理由（多端点拼接）同样不带明文——单行脱敏漏了前缀拼接也过不了这条。"""
+    reason = skip_reason([
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://user:pw@a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail=""),
+        EndpointProbe(label="fallback", provider="q", model_name="n",
+                      base_url="https://b.invalid/v1?token=tok-1234", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError", detail=""),
+    ])
+
+    assert reason is not None
+    assert "pw@" not in reason and "tok-1234" not in reason
+
+
 # ── 探测器本体（离线替身；零网络）──────────────────────────────────────────
 
 
@@ -276,6 +323,20 @@ def _settings() -> Settings:
     return Settings(
         model_provider="deepseek", model_name="m", model_api_key="sk-fake",
         model_base_url="https://x.invalid/v1", fallback_model_provider="",
+    )
+
+
+def _half_config_settings() -> Settings:
+    """半配置：主模型给全了，fallback 侧**声明了**却没给键（B-33 残余②的注入形状）。
+
+    必须显式传 `fallback_model_api_key=""`：init kwargs 才压得住机器上真 `.env` 里的
+    同名键——否则这条用例在配了 fallback 的机器上会退化成"全配置"而失去判据。
+    """
+    return Settings(
+        model_provider="deepseek", model_name="m", model_api_key="sk-fake",
+        model_base_url="https://x.invalid/v1",
+        fallback_model_provider="deepseek", fallback_model_name="m",
+        fallback_model_api_key="",
     )
 
 
@@ -366,26 +427,79 @@ async def test_probe_endpoint_arms_the_outer_budget_above_the_inner_timeout(
 
 @pytest.mark.asyncio
 async def test_probe_chain_releases_when_the_config_is_incomplete(monkeypatch) -> None:
-    """配置不全（`ConfigError`）⇒ 空链 ⇒ 放行，**不**变成夹具层 ERROR。
+    """**直呼** `probe_chain`：配置不全（`ConfigError`）⇒ 空链 ⇒ 放行。
 
-    这是守卫与用例既有 `skipif` 的分界：缺配置时由 `skipif` 说话。
+    直呼组合的语义就是"空链 = 探测不了"，两条不全形态一视同仁：没给主模型键、
+    以及"主模型给全了但链上另一级建不起来"（半配置）。
     """
     monkeypatch.setattr("agent_harness.model.provider.create_chat_model",
                         lambda *a, **k: pytest.fail("配置不全时不该发起探测"))
 
-    probes = await probe_chain(Settings(model_api_key=""))
-
-    assert probes == []
-    assert skip_reason(probes) is None
+    for settings in (Settings(model_api_key=""), _half_config_settings()):
+        probes = await probe_chain(settings)
+        assert probes == []
+        assert skip_reason(probes) is None
 
 
 @pytest.mark.asyncio
 async def test_chain_verdict_and_ensure_release_on_incomplete_config(monkeypatch) -> None:
-    """同一个缺配置在 `chain_verdict` / `ensure_live_model` 两层都只是放行。"""
+    """**没声明**主模型（无 key / 未知 provider 且无 key）在两层都只是放行。
+
+    这是守卫与用例既有 `skipif` 的分界：没声明 ⇒ 由 `skipif` 说话。**声明了却建不起来**
+    是另一条出口（响亮 skip），见下一条。
+
+    两个空值是显式钉的：`Settings(...)` 会读**机器上真实的** `.env`（pydantic-settings 的
+    env_file 来源），不钉就等于让本机的 key 决定这条用例往哪条出口走——实测踩过。
+    """
+    monkeypatch.setattr(guard, "_VERDICTS", {})
+    undeclared = Settings(
+        model_provider="no_such_provider", model_api_key="", fallback_model_provider="",
+    )
+
+    assert await chain_verdict(undeclared) is None
+    await ensure_live_model(undeclared)  # 不抛 = 放行
+
+
+@pytest.mark.asyncio
+async def test_chain_verdict_skips_loudly_when_the_declared_chain_is_incomplete(
+    monkeypatch,
+) -> None:
+    """半配置（主模型给全、fallback 声明了缺键）⇒ 响亮 skip，**不**放行到夹具层 ERROR。
+
+    B-33 残余②的形状：用例的 `skipif` 只看主模型键 ⇒ 放行只会以夹具层 ERROR 收场
+    （`ModelConfig.from_settings` 在建 runtime 时抛 `ConfigError`）。守卫把整条链纳入
+    配置谓词后，这条出口变成"指名缺哪个 env 的 skip"。
+
+    顺带钉住：理由里**没有**主模型 key 的明文（段内只兜底 key 形 token——理由里的 env 名
+    必须留全，喂 `_redact_detail` 会把 `FALLBACK_MODEL_API_KEY` 打成 `***`）。
+    """
+    monkeypatch.setattr("agent_harness.model.provider.create_chat_model",
+                        lambda *a, **k: pytest.fail("半配置在建链期就失败，不该发起探测"))
     monkeypatch.setattr(guard, "_VERDICTS", {})
 
-    assert await chain_verdict(Settings(model_provider="no_such_provider")) is None
-    await ensure_live_model(Settings(model_provider="no_such_provider"))  # 不抛 = 放行
+    reason = await chain_verdict(_half_config_settings())
+
+    assert reason is not None
+    assert "FALLBACK_MODEL_API_KEY" in reason, "理由要指名缺的是哪一个 env"
+    assert "未被验证" in reason, "skip 不能被读成门禁通过"
+    assert "sk-fake" not in reason
+
+    monkeypatch.setattr(guard, "_WARNED", [True])  # warning 已发过，用例不重复发
+    with pytest.raises(pytest.skip.Exception):
+        await ensure_live_model(_half_config_settings())
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_with_a_key_is_a_config_defect_not_a_release() -> None:
+    """provider 名写错**且 key 给全了** ⇒ 也算"声明了却建不起来"（响亮 skip）。
+
+    与上一条同源：这种链在建 runtime 时同样抛 `ConfigError`，放行只能变成夹具层 ERROR。
+    """
+    reason = await chain_verdict(
+        Settings(model_provider="no_such_provider", model_api_key="sk-fake"),
+    )
+
+    assert reason is not None and "no_such_provider" in reason
 
 
 @pytest.mark.asyncio

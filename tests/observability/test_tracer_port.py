@@ -26,7 +26,7 @@ from agent_harness.agent.types import (
 )
 from agent_harness.context.builder import ContextWindowExceededError
 from agent_harness.observability import LangfuseSink
-from agent_harness.observability.port import NullTracer, Span, Tracer
+from agent_harness.observability.port import NullSpan, NullTracer, Span, Tracer
 from agent_harness.session import (
     CONTEXT_COMPACTED,
     MODEL_STARTED,
@@ -360,6 +360,23 @@ async def test_context_window_exceeded_drives_terminal_port_lifecycle(tmp_path, 
     ]
 
 
+class _IdentifiedNullSpan(NullSpan):
+    """带 step 身份的 `NullSpan`（与生产同型 + 身份可辨）。
+
+    `NullSpan` 是普通类（无 `__eq__`）⇒ 身份比较就是列表相等比较的语义，两个实例
+    永远不相等。这正是"同一 span 收两次"与"两个 span 各收一次"的分辨力来源，同时
+    类型与生产 / 共享替身一致（B-35：此前本替身返回 `str` 句柄，是登记过的分叉）。
+    """
+
+    __slots__ = ("step",)
+
+    def __init__(self, step: int) -> None:
+        self.step = step
+
+    def __repr__(self) -> str:
+        return f"_IdentifiedNullSpan(step={self.step})"
+
+
 class _ContextSpanRecordingNullTracer(RecordingNullTracer):
     """`RecordingNullTracer` + context span 的**身份与调用形状**（#285 的断言面）。
 
@@ -371,12 +388,9 @@ class _ContextSpanRecordingNullTracer(RecordingNullTracer):
 
     （做成测试内的专用替身、不改进共享的 `RecordingNullTracer`：新身份面只服务这一条
     用例，而共享替身在本批之外另有 6 个读者（`test_tracer_port.py` 五条 +
-    `test_tool_tracing.py` 一条），为一条用例扩一个共用替身的接口不划算——理由**不是**
-    "那边依赖句柄为 None"：共享替身委托的 `NullTracer` 本来就返回 `NullSpan()`，
-    句柄并非 None。与共享替身的一处已知分叉：本替身返回 `str` 句柄（要能分辨
-    "同一 span 收两次"与"两个 span 各收一次"），而生产与其共享替身返回 `NullSpan`
-    ——当前无害（Core 从不调用句柄方法），Core 若开始触碰句柄方法时这条用例会先以
-    `AttributeError` 暴露，届时改成携带 step 的 `NullSpan` 子类即可。）
+    `test_tool_tracing.py` 一条），为一条用例扩一个共用替身的接口不划算。句柄类型
+    与共享替身 / 生产**一致**（都是 `NullSpan` 家族）——B-35 收掉了此前"本替身返回
+    `str`"的分叉。）
     """
 
     def __init__(self, calls: list[str] | None = None) -> None:
@@ -387,7 +401,7 @@ class _ContextSpanRecordingNullTracer(RecordingNullTracer):
 
     def context_build_started(self, *, step: int) -> Any:
         super().__getattr__("context_build_started")(step=step)  # 记名 + 委托（返回值丢弃）
-        span = f"ctx-span-{step}"
+        span = _IdentifiedNullSpan(step)
         self.started.append(span)
         return span
 
@@ -437,7 +451,9 @@ async def test_context_window_exceeded_then_disconnect_collects_the_span_once(
         "run_started", "context_build_started", "context_build_completed", "run_failed",
         "run_failed",
     ], "取消臂不得对已收口的 span 再收一次——第二次 run_failed 是取消臂自己的归因"
-    assert tracer.started == ["ctx-span-0"]
+    assert isinstance(tracer.started[0], NullSpan), \
+        "句柄与生产 / 共享替身同型（B-35：此前这里是 `str` 分叉）"
+    assert [span.step for span in tracer.started] == [0]
     assert tracer.collected == tracer.started, "收口收到的句柄必须是起出去的那一个"
     assert tracer.collected_kwargs == [()], "超限臂的收口是裸调（残余 R1：不传 compacted_turn_count）"
 

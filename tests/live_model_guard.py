@@ -11,8 +11,11 @@
 - 有 ⇒ 放行，用例照常跑（代码回归仍然会红，门禁强度一条不减）；
 - 没有 ⇒ `pytest.skip`，理由逐端点列出分类结果（响亮，不静默）；
 - 判不出（未分类失败）⇒ 放行（**fail-closed**：可能是代码回归的失败绝不被吞成 skip）；
-- 配置不全（`ConfigError`）⇒ 放行，由用例里既有的 `skipif` 说话（缺配置有自己的话要说，
-  守卫不该把它变成夹具层 ERROR）。
+- 完全没配（没有 `MODEL_PROVIDER` / `MODEL_API_KEY`）⇒ 放行，由用例里既有的 `skipif`
+  说话（缺配置有自己的话要说，守卫不该把它变成夹具层 ERROR）；
+- 链**声明了却建不起来**（fallback 侧缺键 / provider 名写错）⇒ `pytest.skip`（响亮）：
+  这一路既跑不了真实模型、用例的 `skipif` 又不会说话（它只看主模型键），放行只能以
+  夹具层 ERROR 收场——B-33 登记的第 2 条残余（"半配置"），2026-09-22 收口。
 
 覆盖面：挂守卫的用例集合 = **依赖 `.env` 主模型链**的那些真实调用。别处的真实依赖不在此列
 （例如 Phase 6/11 的真实 embedding / 存储端点、Docker 门控用例），它们的可用性由各自的门控
@@ -32,6 +35,7 @@ HTTP 状态归类（用户点了「测试」按钮看结果），词表与消费
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -142,6 +146,37 @@ _STATUS_REASONS: dict[int, str] = {
     429: REASON_RATE_LIMITED,
 }
 
+#: ConfigError 文本里的密钥形 token。**不能**直接把整段文本喂 `_redact_detail`（实测）：
+#: 它的 `api[-_]?key` 规则会把 `FALLBACK_MODEL_API_KEY` 这类 **env 名**一并打码成
+#: `FALLBACK_MODEL_***`，把"缺哪一个 env"这条唯一可操作的信息毁掉。可触达的
+#: `ConfigError` 全是我们自己的固定模板（provider id + env 名 + 预设表），不含配置值；
+#: 唯一从 `.env` 抄来的自由文本是 provider id，故这里只兜底 key 形 token
+#: （有人把 key 贴错到 provider 字段里的情形）。
+_CONFIG_ERROR_KEY = re.compile(r"(?i)\b(?:sk|pk)-[A-Za-z0-9_-]{4,}")
+
+# ── base_url 回显前的脱敏（B-33 残余①，2026-09-22）──────────────────────────
+#: userinfo 形凭据（`https://user:pass@`）：与 `transport/contract.py` 的
+#: `_GIT_URL_USERINFO` 同一口径——仓库里既有的"审计文本不带凭据"判据，不另立一套。
+_URL_USERINFO = re.compile(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@")
+#: query 形凭据（`?api_key=…` / `?token=…`）：URL 里另一处常见的塞 key 位置。
+_URL_CREDENTIAL_QUERY = re.compile(
+    r"(?i)([?&](?:api[-_]?key|key|token|access[-_]?token|auth|password|secret)=)[^&\s]*"
+)
+
+
+def _redact_base_url(url: str) -> str:
+    """URL 回显前的脱敏（skip 理由会被 pytest 原样打印，还带一条 warning）。
+
+    用户自有配置的 base_url 可能把凭据塞在 userinfo 或 query 里；最后再过一遍
+    `_redact_detail`（密钥形 token 的兜底，ADR-0032 §6.3 的同一条判据）。副作用是
+    含 `sk` / `pk` 的主机名也可能被打码——**可接受的 fail-closed** 取舍：provider /
+    model 名仍在本行里，读者定位得到端点；公开面（issue / CI 日志）少一段 URL 比
+    多一段凭据划算。
+    """
+    masked = _URL_USERINFO.sub(r"\1***@", url)
+    masked = _URL_CREDENTIAL_QUERY.sub(r"\1***", masked)
+    return _redact_detail(masked)
+
 
 def classify_environment_failure(error: BaseException) -> str | None:
     """异常 → 「端点不可用」reason；判不出返回 None（fail-closed 的输入）。
@@ -219,8 +254,13 @@ class EndpointProbe:
         return f"{self.reason}{suffix}（{self.error_type}）"
 
     def line(self) -> str:
-        """skip 理由里的一行：`· primary provider/model @ base_url → 归因（脱敏详情）`。"""
-        text = f"  · {self.label} {self.provider}/{self.model_name} @ {self.base_url} → {self.message()}"
+        """skip 理由里的一行：`· primary provider/model @ base_url → 归因（脱敏详情）`。
+
+        base_url 也**必须**脱敏后再回显（`_redact_base_url`）：它来自用户配置，凭据可能
+        塞在 userinfo / query 里，而本行会被 pytest 原样打印并进 warning。
+        """
+        text = (f"  · {self.label} {self.provider}/{self.model_name} @ "
+                f"{_redact_base_url(self.base_url)} → {self.message()}")
         if self.detail:
             text += f"\n    {self.detail}"
         return text
@@ -282,11 +322,11 @@ async def probe_endpoint(
 
 
 def _configured_chain(settings: Any) -> list[tuple[str, ModelConfig]] | None:
-    """`chain_from_settings` 的守卫版：配置不全（`ConfigError`）⇒ None。
+    """`chain_from_settings` 的**直呼**版：配置不全（`ConfigError`）⇒ None。
 
-    「缺配置」不是「端点不可用」：`.env` 没配 key / 配了未知 provider 时，用例里的既有
-    `skipif`（`MODEL_API_KEY` 一类）有自己的话要说，守卫越俎代庖只会把一条清晰的 skip
-    变成夹具层的 ERROR。`ConfigError` 是配置期的确定性信号，只放行、不判定。
+    「缺配置」不是「端点不可用」⇒ 这里一律放行（空链 = 探测不了），供 `probe_chain`
+    这类直呼组合的调用方使用。守卫路径（`chain_verdict`）对**声明了却建不起来**的链有
+    更细的裁决（响亮 skip），见 `_incomplete_chain_reason`。
     """
     try:
         return chain_from_settings(settings)
@@ -294,11 +334,43 @@ def _configured_chain(settings: Any) -> list[tuple[str, ModelConfig]] | None:
         return None
 
 
+def _primary_declared(settings: Any) -> bool:
+    """主模型是否**真的被声明了**（`MODEL_PROVIDER` + `MODEL_API_KEY` 都非空）。
+
+    这是"缺配置"与"配置有缺陷"的分界：没声明 ⇒ 用例既有 `skipif` 有自己的话说
+    （放行）；声明了却建不起整条链 ⇒ 那条链的缺陷必须由守卫说出口（响亮 skip）。
+    """
+    provider = str(getattr(settings, "model_provider", "") or "")
+    key = getattr(settings, "model_api_key", None)
+    secret = key.get_secret_value() if key is not None else ""
+    return bool(provider.strip()) and bool(secret.strip())
+
+
+def _incomplete_chain_reason(settings: Any, error: ConfigError) -> str | None:
+    """链建不起来时的裁决：`None` = 放行（没声明）；字符串 = 响亮 skip 理由。
+
+    覆盖的是**整条链**，不只看主模型那一级：`MODEL_API_KEY` 给全了、fallback 侧声明了
+    却发现缺键（或 provider 名写错）时，用例的 `skipif` **不会**说话（它只看主模型键），
+    放行只能以夹具层 ERROR 收场——B-33 登记的第 2 条残余就是这个形状。
+    """
+    if not _primary_declared(settings):
+        return None
+    detail = _CONFIG_ERROR_KEY.sub("***", str(error))
+    return (
+        "[live-model guard] 配置链**声明了却建不起来** ⇒ skip 依赖真实模型的用例"
+        "（环境问题，不是代码回归）：\n"
+        f"  · {detail}\n"
+        "  处置：按上面的 .env 指引补全配置后原命令重跑；本 skip 不构成门禁通过——"
+        "真实模型路径在本轮**未被验证**。"
+    )
+
+
 async def probe_chain(settings: Any) -> list[EndpointProbe]:
     """探测整条配置链（超时取 `settings.model_test_timeout_seconds`，与连接测试同源）。
 
-    配置不全 ⇒ 空链（不是异常；`skip_reason` 的「链为空」规则随之放行——守卫自身
-    那一步更早，见其 docstring）。
+    配置不全 ⇒ 空链（不是异常；`skip_reason` 的「链为空」规则随之放行）。**直呼组合**
+    的语义就到这里；守卫路径（`chain_verdict`）对"声明了却建不起来"的链另有裁决
+    （响亮 skip），见 `_incomplete_chain_reason`。
     """
     timeout = float(getattr(settings, "model_test_timeout_seconds", 15.0))
     return [await probe_endpoint(config, label=label, timeout=timeout)
@@ -348,11 +420,14 @@ _VERDICTS: dict[str, str | None] = {}
 async def chain_verdict(settings: Any) -> str | None:
     """链签名 → skip 理由（None = 放行）；同签名只真探一次。
 
-    配置不全 ⇒ None（放行，见 `_configured_chain`；不缓存——它不花网络往返）。
+    配置面两条出口（覆盖整条链，见 `_incomplete_chain_reason`）：完全没配 ⇒ None
+    （放行，交给用例既有 `skipif`）；声明了却建不起来 ⇒ 响亮 skip 理由。两者都不花
+    网络往返，故不进缓存。
     """
-    chain = _configured_chain(settings)
-    if chain is None:
-        return None
+    try:
+        chain = chain_from_settings(settings)
+    except ConfigError as error:
+        return _incomplete_chain_reason(settings, error)
     signature = "|".join(
         f"{config.provider}/{config.model_name}@{config.base_url}" for _, config in chain
     )
