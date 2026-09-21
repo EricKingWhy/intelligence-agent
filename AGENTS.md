@@ -870,7 +870,7 @@ CSS 原生没有变量组复用机制，手工双份同步是当前最小风险�
 
 触发后读取：
 
-1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前唯一流程权威（**V3-lite：按风险安排 review，不设固定票数节奏**）；
+1. `docs/SDD_WORKFLOW_PROTOCOL.md` —— 当前唯一流程权威（**V3.1-lite：按风险安排 review；提速增补见协议 §8「冻结树单次全量 / 三路并行 / 审查预算 / 批次合并 / 记账压缩 / 既有红与 flake」，**质量门一条未减**）；
 2. `docs/SDD_TICKET_TRACKER.md` —— 当前 Ticket、验证、review 覆盖与残余问题（记录事实，不定义流程）。
 
 本节只作入口。流程冲突以 `docs/SDD_WORKFLOW_PROTOCOL.md` 为准，进度事实以 Tracker 为准。Tracker 中 V1/V2 的批次、fixed point 与旧 Skill 指令是历史记录，不是当前要求。集成与 push 由当前主开发按 §14 执行。
@@ -902,6 +902,6 @@ V1/V2 的批次 / fixed point 留作历史事实；V3 不要求固定批次。�
 - 不覆盖其他 Agent 未提交的工作；
 - 关单判定按 §14.12；跨端 ticket 只完成一端时**不关单**；
 - 前端 / 后端的门禁工具链、review 时点与在途进度落点，一律按当前仓库的
-  `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite；本文件不复制流程细节。
+  `docs/SDD_WORKFLOW_PROTOCOL.md` V3.1-lite（含 §8 的提速增补与 §8.7 不做清单）；本文件不复制流程细节。
 
 ---

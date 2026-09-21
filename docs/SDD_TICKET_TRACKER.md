@@ -3821,3 +3821,25 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 **残余（登记，不阻断）**：① **Phase 16 Gate 1/12 红（既有，与本票无关）**——`test_coding_edit_test_failure_retry`（`tests/integration/test_phase16_gate.py:379`）在**换回 HEAD 版 `runtime.py` 后同样失败**（两轴各自独立复现）；根因 = `tests/integration/_phase16_helpers.py:245` 的 `_auto_approve` 是**同步**函数而 `src/agent_harness/tooling/executor.py:808` 是 `await self._approval_callback(request)` ⇒ `TypeError: object ApprovalResponse can't be used in 'await' expression` ⇒ bash 调用夭折、run 只 1 条 `tool/call`。一行修法：`async def _auto_approve(...)`。**§8 Scope Lock ⇒ 只报不修**，故票面 AC"Phase 16 通过"在本树不成立（关单 comment 不写"Phase 16 全绿"）。② **四条臂的终态 `run_id` 无端到端锁**（只有异常臂在 `tests/agent/test_runtime_failure_paths.py:121` 有；臂层断言不能替代——`_ArmsKit` 自己接 `begin_run`）。③ `aclose()` 打在"臂正 `await _save_checkpoint` 中途"这一悬挂点**未实测**（已验证的是"终态已写、在 `yield` 处被 close"，六条臂都覆盖）。④ **#263 残余⑥ 措辞下调**（实测推翻，同日更正）：`close_unstarted` 那类"空集比空集"断言**有**区分力——删掉 `_RunFinalizer` 的两条 `run_id is None` 守卫会红（7 failed / 2 failed），原文"零区分力"应读作"只对守卫生效这类变异敏感"。
 
 **集成与关单（2026-09-21）**：按 §13.2(b) 直接在施工 clone 的 `main` 上提交（无「先回后正」一步）；集成范围 **`7edb345..20b0dd6` = 5 笔**，**只有前 3 笔动代码**。集成前：覆盖闸门 `scripts/check_review_coverage.sh` **exit 0**（`09ca47a..HEAD`：307 提交 / 225 审查行 + 82 白名单·记账）；**代码面等价性** `git diff 911d8d0 HEAD --stat -- src tests` **无输出** ⇒ 跑过全量的那棵树就是被集成的代码面（全量 `2913 passed / 2 skipped / 42 deselected / 0 failed`、516.19 s、`PYTEST_EXIT=0`）；`ruff check src tests` clean；`git diff --check` 无输出。已 `push origin main`（快进），写后 `origin/main` = `HEAD` = `20b0dd6`、tree `f0ef80e5e79db2052e8472751a415eb0646308a4`、ahead/behind 0/0，只有 `main` 一条 ref 移动。**§14.9 通知**：`D:\intelligence-agent-frontend`（`main` = `1b7857b`，8 笔 #236 未推送）与 `D:\intelligence-agent`（`codex/256-timeout-cleanup`，工作树有未提交 `tests/web/test_web_ws_relay.py`，8 笔未推送）开工前先自检并合回 `main`；两者与本次改动重叠 4 个追加式 docs 文件（`PHASE_STATUS` / 本文件 / `2026-09.md` / `review_ledger.tsv`）⇒ 预期冲突、按 §14.7 逐文件语义分析。**F 轴修后重审如实登记**：三次派出独立子代理，前两次上游流中断、第三次集成前未返回 ⇒ 该轮结论由 A 轴 + 作者红证 M12/M13 承担（明细见 `docs/phase_status/2026-09.md` B-28 段）。`#265` **未开工**（用户指示停下）。
+
+---
+
+## B-29（2026-09-21）：V3.1 提速增补 + 已知环境 flake 登记
+
+**变更**：`docs/SDD_WORKFLOW_PROTOCOL.md` 升到 **V3.1-lite**（文件头版本行 + **§8 六条增补** + §8.7「明确不做的事」）；`AGENTS.md` §16 的版本括注同步；`docs/PHASE_STATUS.md` 索引一行。**机制叙述唯一住在协议 §8**，本节只记动机、证据与例外登记。
+
+**动机（B-28 实测代价，不是感觉）**：一票（`#264`，3 小时 20 分）里——全量 suite 跑了 **3 次**（630.81 s + 623.91 s + 516.19 s ≈ **29.5 分钟**纯 pytest，只因每次修复都重跑）；F 轴修后重审**重派两次、各约 30 分钟上游流中断**（`Upstream stream ended before terminal chunk`）**零产出**；13 条变异红证 3 遍 ≈ 13–15 分钟；**7 笔提交里 4 笔是非代码记账**（docs 落点 / 台账行 / 集成状态 / 台账白名单）。**结论：慢在验证与记账的重复，不在实现**（代码面仅 `runtime.py` + 一个测试文件）。
+
+**四条增补（各带质量守卫，细节见协议 §8）**：① **§8.1 冻结树单次全量**——只在冻结树跑一次，用 `git diff <冻结sha> HEAD -- src tests` 为空把读数机械传递；期间禁止任何改工作树的动作（防"变异树上的假读数"）。② **§8.2 冻结即三路并行**——两轴审查 ∥ 作者红证 ∥ 全量同时起（红证不再是审查前置）。③ **§8.3 审查预算与有界收口**——派单给墙钟/变异条数/结论行硬要求；**发现阶段两轴不可替代**，只有"修后重审"在**基础设施故障**连续 2 次失败时才允许用"另一轴结论 + 作者红证 + 明文登记"收口。④ **§8.4–8.5 批次合并（2–3 张相邻子票）与记账压缩**——省的是仪式（记账/集成/通知各一次）不是验证；台账行 ≤ 约 600 字符、PHASE_STATUS 索引 ≤ 1500 字符，**归档仍是唯一写全明细处**。
+
+**质量守卫（对用户 2026-09-21 指令「提速不得降质」的机械落地）**：协议 §8 总则给三问判据（会不会让本该跑的验证不跑 / 读数来源不明 / 结论没有责任人），任何一问答"会"即**该条不适用**；§8.7 明列不做的事（不设跳过某轴的通道、不跨批沿用读数、代码提交永不走白名单、不缩小审查 base..tip、不跳覆盖闸门）。**V3.1 未改动任何一条既有硬门禁**：两轴发现审查、真实审查行、`check_review_coverage.sh` exit 0、等价性票的 golden 逐字未改判据、§14.10 门禁清单全部原样。
+
+### 已知环境 flake
+
+> 协议 §8.6 第 3 条：只有当**唯一**失败命中下表签名、且冻结树未变时，才允许用「同树单跑 3 次、≥2 次通过」作 flake 证据而**不必重跑全量**；签名不符或不在表内 ⇒ 一律阻断。**新增条目必须附证据 + 一次独立确认**。
+
+| 测试 | 失败签名 | 证据（作者侧） | 独立确认 | 状态 |
+| --- | --- | --- | --- | --- |
+| `tests/sandbox/test_docker_sandbox.py::test_timeout_stops_late_workspace_mutation` | 预算 1.0 s 而容器冷启动吃满（实测 `duration_ms=2092.9`、stdout 空）；**容器/daemon 在场时的冷启动敏感** | `.workbuddy/full_264_fix.log`（`1 failed, 2912 passed`、623.91 s）+ 同树单跑 3 次 **2 通过 / 1 失败**（pass / fail / pass）+ 最终树 `.workbuddy/full_264_final.log` **0 failed**（516.19 s） | **尚无**（B-27/B-28 均未留下独立复现记录） | ⚠ **暂不生效**：未取得独立确认前仍按「阻断、需完整重跑」处理 |
+
+**待用户裁决（一条，跨票）**：`tests/integration/_phase16_helpers.py:245` 的 `_auto_approve` 是同步函数而被 `src/agent_harness/tooling/executor.py:808` await（契约 `ApprovalCallback` 本就是 `Awaitable`；该 await 由 `c960be2` 2026-09-07 引入）⇒ **Phase 16 Gate 长期 1/12 红**，直接压着 `#264` 与 `#265` 的 AC「Phase 16 通过」。仓库内其余审批回调实现全是 `async def`，一行 `async def _auto_approve(...)` 即可复绿。按 §8 / §9.1.1 本线只报不修——**需要用户授权**（授权后建议单独开一张"门禁修复"票，与 `#265` 同批或先做）。
