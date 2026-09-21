@@ -203,3 +203,120 @@ async def test_same_tool_call_id_across_sessions_do_not_collide(tmp_path):
     b = await ledger.get("session-b", "call_1")
     assert a is not None and a.state is OperationState.RUNNING
     assert b is not None and b.state is OperationState.PENDING, "跨会话状态互相污染"
+
+
+# ── B6（#274）：单动作连接收敛 ──
+
+
+@pytest.mark.asyncio
+async def test_update_state_opens_single_connection(tmp_path, monkeypatch):
+    """一次 update_state 只允许打开 1 个连接（改造前 3：get / UPDATE / get）。
+
+    每次 _connect 都是 aiosqlite.connect + PRAGMA busy_timeout 的真实 IO；
+    一次工具调用要经历 2 次迁移（executor.py:322 PENDING->RUNNING、:421 ->终态），
+    连接次数直接乘在工具调用的关键路径上。
+    """
+    from contextlib import asynccontextmanager
+
+    from agent_harness.storage import sqlite as sqlite_mod
+
+    opened: list[Path] = []
+    real_connect = sqlite_mod._connect
+
+    @asynccontextmanager
+    async def spy_connect(path):
+        opened.append(Path(path))
+        async with real_connect(path) as connection:
+            yield connection
+
+    monkeypatch.setattr(sqlite_mod, "_connect", spy_connect)
+
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await ledger.create(
+        Operation(
+            tool_call_id="call-conn",
+            session_id="session-conn",
+            tool_name="read",
+            args_identity="{}",
+            state=OperationState.PENDING,
+            started_at="2026-09-21T00:00:00+00:00",
+        )
+    )
+
+    opened.clear()
+    updated = await ledger.update_state(
+        "session-conn", "call-conn", OperationState.RUNNING
+    )
+
+    assert updated.state is OperationState.RUNNING
+    assert len(opened) == 1, f"update_state 打开了 {len(opened)} 个连接，期望 1"
+
+
+@pytest.mark.asyncio
+async def test_update_state_missing_operation_raises_keyerror(tmp_path):
+    """不存在的 operation：触发条件与文案逐字不变。"""
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+
+    with pytest.raises(KeyError) as excinfo:
+        await ledger.update_state("session-x", "missing", OperationState.RUNNING)
+
+    assert excinfo.value.args[0] == "Operation 'missing' does not exist"
+
+
+@pytest.mark.asyncio
+async def test_update_state_concurrent_writer_raises_runtimeerror(
+    tmp_path, monkeypatch
+) -> None:
+    """CAS 语义未变：读与写之间被另一个 writer 改了行 ⇒ UPDATE 命中 0 行 ⇒ RuntimeError。
+
+    「另一个 writer」注入在 `_utc_now_iso` 这个缝上——它恰好落在**读之后、UPDATE 之前**
+    （改造前 :186 -> :204 之间；改造后同一连接内 SELECT -> UPDATE 之间），
+    对两版实现都成立，且不 mock 被测代码本身。
+
+    **本用例改造前后都通过**（已实测）——它守的是 CAS 不被动掉，**不是**连接数；
+    连接数的回归守卫是 `test_update_state_opens_single_connection`。
+    """
+    import sqlite3
+
+    from agent_harness.storage import sqlite as sqlite_mod
+
+    db = tmp_path / "state.db"
+    ledger = SqliteOperationLedger(db)
+    await ledger.initialize()
+    await ledger.create(
+        Operation(
+            tool_call_id="call-race",
+            session_id="session-race",
+            tool_name="read",
+            args_identity="{}",
+            state=OperationState.PENDING,
+            started_at="2026-09-21T00:00:00+00:00",
+        )
+    )
+    await ledger.update_state("session-race", "call-race", OperationState.RUNNING)
+
+    real_now = sqlite_mod._utc_now_iso
+    fired: list[bool] = []
+
+    def competing_now() -> str:
+        if not fired:
+            fired.append(True)
+            with sqlite3.connect(db) as competitor:
+                competitor.execute(
+                    "UPDATE operations SET state = ? "
+                    "WHERE session_id = ? AND tool_call_id = ?",
+                    ("CANCELLED", "session-race", "call-race"),
+                )
+        return real_now()
+
+    monkeypatch.setattr(sqlite_mod, "_utc_now_iso", competing_now)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await ledger.update_state(
+            "session-race", "call-race", OperationState.SUCCEEDED
+        )
+
+    assert excinfo.value.args[0] == "Operation 'call-race' changed concurrently"
+    assert fired, "竞态未注入（_utc_now_iso 未被调用）"

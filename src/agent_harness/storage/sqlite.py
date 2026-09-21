@@ -183,25 +183,34 @@ class SqliteOperationLedger(OperationLedger):
         artifact_ref: str | None = None,
         reconcile_meta: str | None = None,
     ) -> Operation:
-        current = await self.get(session_id, tool_call_id)
-        if current is None:
-            raise KeyError(f"Operation '{tool_call_id}' does not exist")
-        if state not in _ALLOWED_TRANSITIONS.get(current.state, frozenset()):
-            raise ValueError(
-                f"Invalid Operation transition: {current.state.value} -> {state.value}"
-            )
-
-        finished_at = (
-            _utc_now_iso()
-            if state
-            in {
-                OperationState.SUCCEEDED,
-                OperationState.FAILED,
-                OperationState.CANCELLED,
-            }
-            else None
-        )
+        # 单连接内完成「读 → 校验 → CAS 写 → 读回」：对外语义不变，只把 3 次
+        # _connect 收成 1 次。CAS 仍由 UPDATE 的 `WHERE ... AND state = ?` 加
+        # rowcount 检查保证——不引入显式事务，不加行锁（票面 R3）。
         async with _connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                "SELECT * FROM operations WHERE session_id = ? AND tool_call_id = ?",
+                (session_id, tool_call_id),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise KeyError(f"Operation '{tool_call_id}' does not exist")
+            current = self._to_operation(row)
+            if state not in _ALLOWED_TRANSITIONS.get(current.state, frozenset()):
+                raise ValueError(
+                    f"Invalid Operation transition: {current.state.value} -> {state.value}"
+                )
+
+            finished_at = (
+                _utc_now_iso()
+                if state
+                in {
+                    OperationState.SUCCEEDED,
+                    OperationState.FAILED,
+                    OperationState.CANCELLED,
+                }
+                else None
+            )
             cursor = await connection.execute(
                 """
                 UPDATE operations
@@ -227,9 +236,13 @@ class SqliteOperationLedger(OperationLedger):
                 raise RuntimeError(
                     f"Operation '{tool_call_id}' changed concurrently"
                 )
-        updated = await self.get(session_id, tool_call_id)
-        assert updated is not None
-        return updated
+            cursor = await connection.execute(
+                "SELECT * FROM operations WHERE session_id = ? AND tool_call_id = ?",
+                (session_id, tool_call_id),
+            )
+            updated_row = await cursor.fetchone()
+        assert updated_row is not None
+        return self._to_operation(updated_row)
 
     async def list_for_session(self, session_id: str) -> list[Operation]:
         async with _connect(self.database_path) as connection:
