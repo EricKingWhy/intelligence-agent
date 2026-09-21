@@ -234,8 +234,12 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
    **必须分次调用且带 `^{commit}`**：`git rev-parse --verify <a> <b>` 一次传两个参数**恒 exit 128**
    （`fatal: Needed a single revision`），与该命令"对象不存在"的报错**同形**（2026-09-21 实测）⇒
    自证本身会变成假绿；`scripts/check_review_coverage.sh:74-75` 用的是同一 fail-closed 形状（`--verify --quiet || exit 1`）。
-   **照抄时先替换占位符并加引号**——`git rev-parse --verify "$FROZEN^{commit}"`：模板里的 `<冻结sha>` 与裸写的 `^{commit}`
-   在 shell 里会被当成重定向符，整条命令走样（2026-09-21 复验实测）。
+   **照抄时先替换占位符**：模板里的 `<冻结sha>` 带 `<`，shell 会当**输入重定向**——实测
+   `git rev-parse --verify <冻结sha>^{commit}` 报 `冻结sha: No such file or directory`、exit 1，整条命令
+   根本没跑（也不留下杂散文件）；换成变量并整体加引号即成立：`git rev-parse --verify "$FROZEN^{commit}"`
+   （实测 exit 0）。**裸写的 `^{commit}` 在 bash 下不是特殊字符**（`git rev-parse --verify 20ee173^{commit}`
+   实测 exit 0）——加引号是为跨 shell 稳妥，不是 bash 的硬要求。2026-09-21 更正：本条首版把 `^{commit}`
+   与占位符**并列**写成"重定向符"，属过度声明，已按实测改写。
    **stdout 为空 + exit≠0 不算通过**（`git diff <抄错的sha> HEAD` 恰好 stdout 空、exit 128 ⇒ 抄错一位就假绿，
    与 §7 第 8 条记的 #213 手抄事故同形状）。两条判据的**输出原文**写进 Tracker 门禁证据；
    **证据缺失等同于没跑**。
