@@ -4103,6 +4103,7 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 **落点**：`7d6e30d` 实现 → `7aef01b` 两轴 findings 修复 → `2fb974f` 集成合并（并入 #274 的 12 笔，**独立审查行见台账**）→ `cef3bcd` 修后重审的两条 P3 措辞 + 超限断连端到端用例 → `918fe2f` docs 残余登记（⑦⑧）→ `90fc169` 闭合复核的 tracker 更正（本段按轴重写 + 残余⑦ 成本句）→ `37e8c4d` 台账（4 条审查行 + 4 条白名单，覆盖闸门 exit 0）→ **`d165740` 集成合并**（「先回后正」并入 `origin/main` 的前端线 `3b4e93c`）→ docs / 台账记账笔（本批末期）。**集成细节（`d165740`）**：`origin/main` 当时已被前端线推到 `3b4e93c`（#236，merge-base `eac23cc2`，6 web + 3 docs/台账）⇒ 本批不再能快进；**冲突恰好 2 个、全在记账面** —— ① `docs/PHASE_STATUS.md`：两侧改同一张索引（各自按自己的归档重算行号）⇒ 取**并集 + 实测重算**（合并后归档 **295 条 / 621 行**），两侧新增 bullet 全留；② `docs/review_ledger.tsv`：两侧各在自端追行、新增行集合**不相交** ⇒ 纯并集（159 + 10 + 3 = **172 行**，0 行改写 / 丢弃）。合并 message 里「622 行」的读数实测为 **621 行**（`split` 尾部空元素所致；sha 已被独立审查锚定 ⇒ 按「不改写已锚定历史」在文档登记更正）。**合并的独立审查 6 项全 OK**：两侧内容零丢失、数字逐项与实测相符、台账并集无改写、**`git diff HEAD^1 HEAD -- src tests pyproject.toml scripts goal` = 0 字节**（代码语义零改动）、`3b4e93c` 不含任何后端文件（其 web 面 19 文件 = #236 两条审查 range 的并集）、卫生（0 冲突标记 / `diff --check` rc 0 / 仅 `?? .zcodeignore`）。**门禁（冻结树 `d165740`）**：全量 **2915 passed / 13 skipped / 42 deselected / 13 warnings in 393.16s / exit 0**（11 条 skip 系 Docker daemon 不在场，与 B-30 同形态）、Phase 16 gate **11 passed / 1 skipped**（Docker 在场时 12 passed）、`ruff` clean、`git diff --check 09bae51..HEAD` exit 0、覆盖闸门（含 `d165740` / `3b4e93c` 两条审查行——**在本批收尾的台账笔里兑现**，写入前闸门仍为 exit 1）**exit 0**。**审查范围行与 docs-only 白名单唯一住 `docs/review_ledger.tsv`**；**逐轮 findings、红证、变异与门禁读数明细统一写在 `docs/phase_status/2026-09.md` 的 B-32 段（L609 起）**，本节只留状态、约定与残余。
 
 **残余（登记，不阻断；R1 为已知差异、R2/R3 是同一根因的两条出口，修不修由单独一张票决定）**：
+> **2026-09-22 更新（B-34 / `#285`）**：本清单 R1 / R2 / R3 / ④ / ⑤ / ⑦ / ⑧ **已全部收口**（R4 = 新发现的一条既有缺口，见 B-34 段）；逐条对照与红证见下文 **B-34** 段与 `docs/phase_status/2026-09.md` 的 B-34 条。本清单本身**逐字保留**（它记录的是 B-32 收官时的真实状态）。
 1. **R1**：`compacted_turn_count` 一律以关键字转发（成功路径 / 超限臂 / `close_pending` 三处口径统一）。**端口输出无差异**（`RunTracer` 按 `is not None` 决定是否写 metadata 键 ⇒ 显式 `None` 与不传同效；`NullTracer` 本就不产出观测、两条路皆零输出），差异只在"调用关键字集合"这一层——按端口 Protocol 显式关键字签名的实现都不可见。
 2. **R2**：context 超限臂收口后**保留**在途句柄（`keep_handle=True`）⇒"超限 + 消费方在终态帧上断连"时**取消臂**对同一 span 再收一次（端口调用 6 次而非 5 次）。这是 #264 之前的既有形状，本票 AC = 行为逐字兼容 ⇒ 逐字保留；新增两条用例（臂层 `test_context_exceeded_arm_keeps_the_handle_it_closed` + 端到端 `test_context_window_exceeded_then_disconnect_collects_the_span_twice`）钉住它，并在 docstring 注明"**既有事实、非期望语义**"——修 R2/R3 的票会让这两条转红。读数与逐项差分明细见 `docs/phase_status/2026-09.md` 的 B-32 段；**可复现的载体就是上面这两条仓库内用例**（作者侧探针 `.workbuddy/probe_f1.py` 只留本地证据目录、**未纳入版本控制**，不当仓库内指针用）。
 3. **R3**：同一保留句柄的**第二条收集出口是异常臂**——超限臂落终态的 `append` 失败（存储故障）会让异常臂同样再收一次（B 轴运行级实测，与 `09bae51` 逐项相同）。**修 R2 的票必须同时覆盖两条出口**，只按取消臂写会漏一半。
@@ -4111,3 +4112,44 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 6. **沿袭未动（指针，非本票残余）**：#264 段的残余②③（四条臂终态 `run_id` 无端到端锁；`aclose()` 打在"臂正 `await _save_checkpoint` 中途"未实测）与死参数 `failure_terminal(steps=)` 保持原状——本票未触碰其代码路径。
 7. **R3 在仓库内没有用例**（窄复验 B 轴 P3）：异常臂那条二次收口只有 docstring 散文登记，`grep` 两个用例文件零命中（构造方式 = 让超限臂落终态那次 `append` 抛 `OSError`，两轴各自在副本探针里独立复现过）。⇒ **修 R2/R3 的票必须同时补这条用例**；本票不补的理由是它属**新增测试面**、不在本票 AC。**成本更正（窄复验第二轮）**：不需要新建 session 替身——仓库已有可复用的故障注入夹具 `tests/session/store_fixtures.py`（#251 立的共享模块：`RejectingStore` 恒拒写 / `FailingFromStore(fail_from=N)` 第 N 次起拒写），注入是一行既有手法 `session._store = RejectingStore(...)`（见 `tests/session/test_write_behavior_golden.py:153`）；缺的只是用例本身（需捕获终态 `append` 失败再走 `_terminal_exception` 的脚手架）。
 8. **端到端用例的断言面只有方法名序列**（窄复验 B 轴 P3，M2 盲区实测：把二次收集的句柄换成 `NullSpan()`——同方法名、同次数、同顺序——该用例仍绿）：句柄**身份**由臂层用例 `assert kit.tracer.calls[2][1]["span"] == "span-ctx"` 承担。两条合起来才钉住"同一 span 被再收一次"；单看端到端那条会漏"句柄被换掉"。
+
+---
+
+## B-33（#284 `-m integration` 真实模型环境守卫）
+
+**状态**：实现 + 两轴独立审查（各一轮）+ 修后窄复验（两轴各一独立只读子代理，均判"通过"）完成，P3 处置于 `8213164`。**已集成并关单**（见「落点」行）。
+
+**问题**：整仓 `-m integration`（33 项选择）在本机 **17 项红**，全部是真实模型 / 真实云 Gate（失败形态 = 真实 run 落 `failed`），需要 live 端点与 Docker daemon。这类红**不可修**——任何代码改动都改不动供应商的账户状态；一直挂在红里，真正的代码回归就淹在 17 条噪声里。判据只有一条：**配置链里有没有任何一个端点能真的完成一次最小调用**（`ping` / `max_tokens=1`，与连接测试同形状）。
+
+**交付面**（`2f1d22f`，7 文件 +819/−9）：`tests/live_model_guard.py`（新：三态探测 `ok` / 已分类不可用 / 未分类 + 分类器 + 链级裁决 + 进程内结论缓存 + 警告闩）、`tests/test_live_model_guard.py`（新：离线用例，零网络，40 条）、`tests/conftest.py`（`settings_env_sealed()` 上下文 + 会话级 `requires_live_model` 夹具）、4 处 opt-in（`tests/agent/test_integration_coding.py`、`tests/integration/test_phase12_web_gate.py`、`test_phase13_gate.py`、`test_phase14_gate.py`）。**四态语义**：任一端点可用 ⇒ 放行；全部已分类不可用 ⇒ `pytest.skip`（理由逐端点列出，响亮）；**任一未分类失败 ⇒ 放行（fail-closed**——判不出的失败可能是代码回归）；配置不全（`ConfigError`）⇒ 放行，由用例既有 `skipif` 说话。
+
+**覆盖面声明（不夸大）**：挂守卫的集合 = **依赖 `.env` 主模型链**的真实调用；别处的真实依赖（Phase 6/11 的真实 embedding / 存储端点、Docker 门控用例）**不在**本守卫声称的范围内，它们的可用性由各自的门控表达。
+
+**读数（实测）**：修复前 `-m integration` **17 failed / 17 passed / 6 skipped** → 修复后 **0 failed / 16 passed / 24 skipped**（18 条守卫 skip + 6 条 Phase 6 既有 skip）。**18 = 17 红 + 1 条假绿**：`tests/integration/test_phase14_gate.py::TestGate4SessionsTreeReal::test_real_fork_edge_renders_in_tree` **也**打真实模型（走真实 runtime），只是断言面只读 `sessions --tree` 的输出——模型调用失败它照样绿。两轴各自独立确认这 18 条的结构对应（其中 15 条**没有**自己的 `skipif` ⇒ 修复前只能以红收场）。
+
+**环境事实（本批实测，供复现）**：primary `senseaudio/deepseek-v4-flash-0731` → HTTP 400 `{'code':'billing','message':'计费账户已被冻结','ref_code':400901}`；fallback `zhipu/glm-4.5-air` → HTTP 429 余额不足。**密钥字段全程 `SecretStr('**********')`，无泄漏**（诊断与审查均未打印任何 key 值）。
+
+**审查**：两轴共出 **P1×2 + P2×3 + P3 若干** ⇒ 全部处置于 `2f1d22f`。两条 P1 是判据面的真缺陷：① 第 3 层文本匹配未与「本侧异常族」划清界限 ⇒ 一个重构漏改的 `TypeError: create_chat_model() got unexpected keyword argument` 会被判成环境而 skip（把代码回归吞掉）；② `MODEL_API_KEY=""` 只遮蔽了守卫、没遮蔽用例 ⇒ 两条路径读的是不同的配置（实测：修前 13 条 Gate 真跑并变红）。处置含：`SSLCertVerificationError`（CPython 里同时继承 `SSLError` 与 `ValueError`）**必须先于**本侧 `ValueError` 家族判定，否则真实证书失败被判成"本侧代码问题"；以及把守卫与用例的配置边界收进**同一个** `settings_env_sealed()`。**变异验证**：无作用域的文本层变异实测"恰好把那 2 条该 fail-closed 的用例转红"；`ConfigError` 放行路径在**无 `.env` 副本**里验证（19 skipped / 0 error；反向变异 ⇒ 15 error）。**修后窄复验**两轴均判"通过"；A 轴另出 **3×P3 + 1×取舍**（`if not probes` 分支的可达面声明失实、外层预算无断言、脱敏断言空转、408 故意不映射）⇒ 全部处置于 `8213164`（每条新用例各由定向变异实测"恰好一条转红"）。
+
+**落点**：`2f1d22f` 实现（含两轴 findings 处置）→ `8213164` 窄复验 P3 处置（与 B-34 同笔）→ 集成 / 关单（末期记账笔）。**逐轮 findings、变异读数、`-m integration` 前后对照与门禁读数统一写在 `docs/phase_status/2026-09.md` 的 B-33 条**；本节只留判据、约定与结论。
+
+**残余（登记，不阻断）**：无 P0/P1/P2 级；两条被窄复验点出、**登记不修**的已知项：① 探测行的 `line()` 会回显 `base_url`（与连接测试 UI 同一口径；用户自有配置里的 URL 可能带凭据 ⇒ 若要收紧应在产品层统一做，不在本守卫单方面改）；② **半配置**（给了 `MODEL_API_KEY` 但 fallback 侧缺键）在守卫路径放行、到用例夹具层变 ERROR——该形状**先于本批存在**（用例既有 `skipif` 只看主模型键），本批未扩大也未缩小它。
+
+---
+
+## B-34（#285 `#265` 残余收口）
+
+**状态**：实现 + 两轴独立审查（各一轮）+ 修后窄复验完成，P3 处置于 `8213164`。**已集成并关单**（见「落点」行）。
+
+**票面 = B-32 段登记的那批残余**（R1 / R2 / R3 / ④ / ⑤ / ⑦ / ⑧），本批逐条收口：**R1** 调用关键字集合回到 #264 之前的形状（成功路径带 `compacted_turn_count`，`close_pending` 与 context 超限臂**裸调**；哨兵 `_Unset` / `_UNSET` 同时表达"值域外的缺省"与"没传"）；**R2/R3** 取消臂与异常臂两条出口**同时**收口（超限臂**收口即清口**，`keep_handle` 随之删除 = ④；一条 span 只收一次）；**⑤** 的失实句已在 B-32 的 `cef3bcd` 真正改掉（本批复核：`grep -rn "每个出口都不可能漏掉" src/ tests/` **零命中**，现行口径是 `runtime.py` 的「本对象**不保证**"每个出口都被调用到"」）；**⑦** 补仓库内异常臂用例（`RejectingStore` 让超限臂落终态那次 `append` 失败，走 `_terminal_exception`）；**⑧** 端到端用例的断言面从"方法名序列"补到"句柄身份 + 关键字集合"。
+
+**交付面**（`62beb55`，3 文件 +210/−57）：`src/agent_harness/agent/runtime.py`（`_Telemetry` 三处收口语义 + `_Unset` 哨兵 + 删公开参数 `keep_handle`）、`tests/agent/test_terminal_arms.py`（取消臂用例翻转 + 新增异常臂用例 + arity 用例）、`tests/observability/test_tracer_port.py`（端到端 kwargs 面 + 替身句柄身份）。`8213164`（4 文件 +75/−8）为本批与 B-33 的窄复验 P3 处置笔。
+
+**红证（先钉旧、再证新被承载）**：两条钉住旧形状的用例**先翻转**（钉"旧行为"的断言转红 ⇒ 证明它们测的正是要改的行为），实现改完后**定向变异**：取消臂变异 ⇒ 红 **2** 条（含臂层 `assert kit.tracer.calls[2][1]["span"] == "span-ctx"`）；**红集实测 3 条**（不是 1 条——两轴同判的"臂层调用点 R1 盲区"由此被覆盖：变异前为 **0** 条）。
+
+**审查**：A 轴判"通过"（**P2×1 + P3×3**，均已处置）；B 轴出 findings（**臂层调用点的 R1 盲区**——A 轴同判）⇒ 处置后**修后窄复验两轴均判"通过"**（B 轴无 P0/P1/P2，另出 3×P3 + 一条纪律事件登记；A 轴判 P1-A / P1-B / P2 全部闭合且有牙）。
+
+**残余（登记，不阻断）**：
+1. **R4（本批新发现的既有缺口，未被 #285 覆盖）**：`interrupt_streams()` 抛错时**收口段整个不执行** ⇒ 该路径下 context span **0 次收集**（不是二次收集）。这是既有形状（`_TerminalContext` 的收口段在调用之后），本票 AC 是"清口语义"，未触碰该路径；**与 R2/R3 是同一族的"出口覆盖不齐"问题**，修它需另开票。
+2. **替身分叉（潜在，登记）**：`tests/observability/test_tracer_port.py` 的专用替身返回 `str` 句柄，生产与共享替身返回 `NullSpan`——Core 从不调用句柄方法，故当前无害；已在替身 docstring 点名（`8213164`），不当门禁面用。
+
