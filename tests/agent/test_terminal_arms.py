@@ -60,8 +60,10 @@ from agent_harness.session import (
     TEXT_DELTA,
     Session,
 )
+from agent_harness.session.store import SeqConflict
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
+from tests.session.store_fixtures import RejectingStore
 
 RUN_ID = "run-1"
 
@@ -416,6 +418,45 @@ def test_telemetry_forwards_the_compaction_count() -> None:
     assert seen == [3, None]
 
 
+def test_context_build_completed_keeps_the_pre_264_keyword_arity() -> None:
+    """残余 R1：**关键字集合**逐字回到 #264 之前（端口输出无差异，差异在这层）。
+
+    `_Telemetry` 的两个活调用点 + `close_pending` 的直呼端口，两种形状：成功路径传
+    `compacted_turn_count`（值域内，`None` 也算传——那是"本轮没有压缩发生"的实参）；
+    `close_pending` 与 context 超限臂**不传**。历史：#265 把**经 wrapper 的两处**统一成
+    "一律带关键字"（超限臂随之从裸调变带关键字）；`close_pending` 一直直呼端口、
+    从不经该参数，谈不上"被统一"。本票把 wrapper 的缺省形状改回"调用方没给就不传"
+    （哨兵 `_UNSET`），本条钉住口径。
+
+    为什么值得一条用例：显式 `None` 与不传在 `RunTracer` 那里**输出同效**
+    （按 `is not None` 决定是否写 metadata 键），所以这条差异只能在这一层被观察到；
+    而"调用形状变了"本身是接口契约变动（第三方 Tracer 实现的自定义签名会受影响）。
+
+    本用例只钉 `_Telemetry` 自己的缺省语义；"**臂**有没有把形状用对"由
+    `test_context_exceeded_arm_closes_and_clears_the_handle`（臂层裸调）与
+    `test_context_window_exceeded_then_disconnect_collects_the_span_once`
+    （端到端 kwargs 面）分别承载。
+    """
+    seen: list[tuple[str, ...]] = []
+
+    class _AritySpy(_RecordingTracer):
+        def context_build_completed(self, span: Any, **kwargs: Any) -> None:
+            seen.append(tuple(sorted(kwargs)))
+
+    telemetry = _Telemetry(tracer=_AritySpy())
+
+    telemetry.context_build_started(step=0)
+    telemetry.context_build_completed(compacted_turn_count=3)   # 有压缩：
+    telemetry.context_build_started(step=1)
+    telemetry.context_build_completed(compacted_turn_count=None)  # 无压缩但调用方**给了**值
+    telemetry.context_build_started(step=2)
+    telemetry.context_build_completed()                         # 调用方没给（超限臂形状）
+    telemetry.context_build_started(step=3)                     # 再起一次：close_pending 只在途才调
+    telemetry.close_pending(error_type=None, reason="cancelled")
+
+    assert seen == [("compacted_turn_count",), ("compacted_turn_count",), (), ()]
+
+
 def test_telemetry_snapshot_leaves_live_handles_alone() -> None:
     """快照取一份：收口只置空快照自己那份，活值不动（#264 纪律的落点）。"""
     live = _Telemetry(tracer=_RecordingTracer(), ctx_span="span-ctx", generation="gen-1")
@@ -571,21 +612,28 @@ async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> 
 
 
 @pytest.mark.asyncio
-async def test_context_exceeded_arm_keeps_the_handle_it_closed(session: Session) -> None:
-    """超限臂收口后**不**清句柄——这是 #264 之前的既有形状，本票逐字保留。
+async def test_context_exceeded_arm_closes_and_clears_the_handle(session: Session) -> None:
+    """超限臂**收口即清口**（#285 / 残余 R2）：句柄不会被第二条收集臂再收一次。
 
-    为什么值得一条用例：这是本票唯一"行为差异面"。若改成收口即清口，"超限 + 消费方在
-    终态帧上断连"（GeneratorExit 落在下面那次 yield 之后）这条**生产可达**路径会**少
-    一次** `context_build_completed`——旧形状对同一 span 二次收口。两轴独立实测的差分
-    是 6 次 vs 5 次端口调用（脚本与读数见 tracker #265 段的残余 R2 与归档明细）。
+    历史：#264 之前这条臂收口后**保留**句柄，于是"超限 + 消费方在终态帧上断连"
+    （GeneratorExit 落在下面那次 yield 之后）这条**生产可达**路径会对同一 span 二次
+    收口——`#265` 的等价重构逐字复刻了该形状（`keep_handle=True`）并把它登记为残余
+    R2 / R3；`#285` 修掉它，本用例随新语义翻转（旧名
+    `..._keeps_the_handle_it_closed`，此前钉的是"二次收口"这一缺陷事实）。
 
-    收集者不止取消臂：超限臂落终态的 `append` 失败（存储故障）会让**异常臂**同样再收
-    一次，实测与 #264 之前逐项相同（残余 R3）。
-
-    ⇒ 本用例钉的是**既有事实**（不是期望语义）：断言里的"二次收口"是缺陷，不是契约。
-    修它要单独开票（等价重构票不许顺手改行为），届时本用例会红——那正是它的用途。
+    钉四件事，缺一不可：① 收口后句柄为空；② 取消臂在同一 arms 上**不再**产生第二条
+    `context_build_completed`；③ 终态语义不变（只有一条 `run/failed`）；④ 收口是
+    **裸调**（残余 R1 在这一层的形状——只钉 `_Telemetry` 自己的缺省行为抓不住
+    "臂把 `compacted_turn_count=None` 显式传回去"这种回归）。
     """
-    kit = _kit(session, step_base=2)
+    ctx_kwargs: list[tuple[str, ...]] = []
+
+    class _AritySpy(_RecordingTracer):
+        def context_build_completed(self, span: Any, **kwargs: Any) -> None:
+            ctx_kwargs.append(tuple(sorted(kwargs)))
+            self._record("context_build_completed", span=span)
+
+    kit = _kit(session, step_base=2, tracer=_AritySpy())
     kit.arms.telemetry.ctx_span = "span-ctx"
 
     emitted = await _drain(
@@ -596,16 +644,56 @@ async def test_context_exceeded_arm_keeps_the_handle_it_closed(session: Session)
 
     assert [e.type for e in emitted] == [RUN_FAILED]
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
-    # 既有形状：收口不清口 —— 句柄仍在（对比成功路径：收口即清口）
-    assert kit.arms.telemetry.ctx_span == "span-ctx"
+    # 收口即清口（与成功路径同形）
+    assert kit.arms.telemetry.ctx_span is None
+    assert ctx_kwargs == [()], "超限臂的收口是裸调（R1：不传 compacted_turn_count）"
 
-    # 于是取消臂（终态帧之后断连）拿同一句柄**再收一次** —— 既有事实，如实钉住
+    # 取消臂（终态帧之后断连）拿不到句柄 ⇒ **没有**第二次收口
     kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     assert [name for name, _ in kit.tracer.calls] == [
-        "context_build_completed", "run_failed", "context_build_completed", "run_failed",
+        "context_build_completed", "run_failed", "run_failed",
     ]
-    assert kit.tracer.calls[2][1]["span"] == "span-ctx"
+    assert ctx_kwargs == [()], "第二条收集臂根本不该调端口"
+
+
+@pytest.mark.asyncio
+async def test_context_exceeded_arm_append_failure_does_not_recollect_the_span(
+    session: Session, tmp_path: Any,
+) -> None:
+    """R3 的第二条收集出口 = **异常臂**：超限臂落终态的 `append` 失败也只收一次（#285）。
+
+    构造方式用的是仓库既有夹具（`tests/session/store_fixtures.py`，残余⑦ 指明的成本口径）：
+    终态 `append` 抛 `SeqConflict` ⇒ 生产路径把异常交给顶层异常臂处理，异常臂经
+    `arms.context(steps)` 取**快照**再收口。修 R2/R3 之前，快照里仍有那个已被超限臂
+    收过的句柄 ⇒ 端口收到第二次 `context_build_completed`（与取消臂同源，只是出口不同）。
+
+    只钉观测面（端口调用计数与句柄归属）：异常臂自己的持久化路径在同一次故障下也会失败
+    （存储坏着），那不是本用例的被测面。
+    """
+    kit = _kit(session, step_base=2)
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    session._store = RejectingStore(tmp_path)
+
+    with pytest.raises(SeqConflict):
+        await _drain(
+            kit.runtime._terminal_context_exceeded(
+                kit.arms, steps=3, error=ContextWindowExceededError("上下文超限"),
+            ),
+        )
+
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
+    assert kit.arms.telemetry.ctx_span is None
+
+    # 顶层异常臂（生产里由 _drive 的 except 调用）——同一 arms、同一份快照语义
+    with pytest.raises(SeqConflict):  # 存储故障仍在：异常臂的终态写同样失败
+        await _drain(
+            kit.runtime._terminal_exception(kit.arms, steps=3, error=SeqConflict("写不进去")),
+        )
+
+    assert [name for name, _ in kit.tracer.calls] == [
+        "context_build_completed", "run_failed", "run_failed",
+    ], "异常臂不得对已收口的 span 再收一次（R3）"
 
 
 # ---------------------------------------------------------------------------

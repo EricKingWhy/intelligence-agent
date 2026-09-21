@@ -360,18 +360,61 @@ async def test_context_window_exceeded_drives_terminal_port_lifecycle(tmp_path, 
     ]
 
 
+class _ContextSpanRecordingNullTracer(RecordingNullTracer):
+    """`RecordingNullTracer` + context span 的**身份与调用形状**（#285 的断言面）。
+
+    只记方法名时，"同一 span 被收两次"与"两个不同 span 各收一次"是同一条记录
+    （同方法名、同次数、同顺序）——把句柄换成另一个照样绿。本替身补三样：
+    `context_build_started` 造的句柄（每次不同，带 step）、`context_build_completed`
+    收到的句柄、以及它**带的关键字集合**（残余 R1：超限臂的调用是裸调，不传
+    `compacted_turn_count`）。其余方法仍走父类的 `__getattr__` 记录，形状不变。
+
+    （做成测试内的专用替身、不改进共享的 `RecordingNullTracer`：新身份面只服务这一条
+    用例，共享替身另有 5 个读者（`test_tracer_port.py` 与 `test_tool_tracing.py`），
+    为一条用例扩一个共用替身的接口不划算——理由**不是**"那边依赖句柄为 None"：共享
+    替身委托的 `NullTracer` 本来就返回 `NullSpan()`，句柄并非 None。）
+    """
+
+    def __init__(self, calls: list[str] | None = None) -> None:
+        super().__init__(calls)
+        self.started: list[Any] = []
+        self.collected: list[Any] = []
+        self.collected_kwargs: list[tuple[str, ...]] = []
+
+    def context_build_started(self, *, step: int) -> Any:
+        super().__getattr__("context_build_started")(step=step)  # 记名 + 委托（返回值丢弃）
+        span = f"ctx-span-{step}"
+        self.started.append(span)
+        return span
+
+    def context_build_completed(self, span: Any, **kwargs: Any) -> None:
+        super().__getattr__("context_build_completed")(span, **kwargs)  # 记名 + 委托
+        self.collected.append(span)
+        self.collected_kwargs.append(tuple(sorted(kwargs)))
+
+
+def _record_context_spans(monkeypatch) -> _ContextSpanRecordingNullTracer:
+    tracer = _ContextSpanRecordingNullTracer()
+    monkeypatch.setattr(runtime_module, "NullTracer", lambda: tracer)
+    return tracer
+
+
 @pytest.mark.asyncio
-async def test_context_window_exceeded_then_disconnect_collects_the_span_twice(
+async def test_context_window_exceeded_then_disconnect_collects_the_span_once(
     tmp_path, monkeypatch,
 ):
-    """超限臂 + 终态帧上断连：同一 context span 会被**第二条收集臂**再收一次。
+    """超限臂 + 终态帧上断连：同一 context span **只收一次**（#285 / 残余 R2 修复）。
 
     这条路径**生产可达**（消费方在终态帧上断连 ⇒ GeneratorExit 落进 `_drive` 的取消
-    臂），6 次端口调用是 #264 之前的既有形状：本票（等价重构）逐字保留，两条出口与其
-    余细节登记为残余 R2 / R3（tracker #265 段）。用途同 `tests/agent/test_terminal_arms.py`
-    的同名用例——修 R2 / R3 的那张票会让它转红；在这里它钉的是**既有事实**。
+    臂）。#264 之前超限臂收口后保留句柄，于是取消臂拿同一句柄**再收一次**（6 次端口
+    调用）；`#265` 的等价重构逐字复刻了该形状并登记为残余 R2，`#285` 修掉它 ⇒ 5 次。
+
+    断言面按残余⑧ 的要求补全：方法名序列（次数 + 顺序）+ **句柄身份**（收回来的就是
+    起出去的那一个）+ **调用形状**（残余 R1：超限臂裸调，不带 `compacted_turn_count`）
+    ——只断言方法名的话，把二次收口的句柄换成另一个同样会绿；形状不入断言的话，
+    超限臂改回"带 `compacted_turn_count=None`"同样会绿。
     """
-    calls = _record_null_tracer_calls(monkeypatch)
+    tracer = _record_context_spans(monkeypatch)
     session = make_session(tmp_path)
     registry = ToolRegistry()
     runtime = AgentRuntime(
@@ -386,10 +429,13 @@ async def test_context_window_exceeded_then_disconnect_collects_the_span_twice(
             break  # 悬空点：终态帧已出，消费方在此断开
     await agen.aclose()
 
-    assert calls == [
+    assert tracer.calls == [
         "run_started", "context_build_started", "context_build_completed", "run_failed",
-        "context_build_completed", "run_failed",
-    ]
+        "run_failed",
+    ], "取消臂不得对已收口的 span 再收一次——第二次 run_failed 是取消臂自己的归因"
+    assert tracer.started == ["ctx-span-0"]
+    assert tracer.collected == tracer.started, "收口收到的句柄必须是起出去的那一个"
+    assert tracer.collected_kwargs == [()], "超限臂的收口是裸调（残余 R1：不传 compacted_turn_count）"
 
 
 @pytest.mark.asyncio

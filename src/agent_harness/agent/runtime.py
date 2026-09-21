@@ -271,6 +271,20 @@ class _RunFinalizer:
         return event
 
 
+class _Unset:
+    """「调用方没传这个关键字」的哨兵类型（#285 / 残余 R1）。
+
+    `None` 不能兼作哨兵：`compacted_turn_count=None` 是**有意义的实参**（"本轮没有压缩
+    发生"），在端口那一侧的调用关键字集合里与"根本没传"是两回事。
+    """
+
+    __slots__ = ()
+
+
+#: 模块级唯一实例（判据用 `is`，不用 `==`——哨兵的身份就是它的全部含义）。
+_UNSET = _Unset()
+
+
 @dataclass
 class _Telemetry:
     """一次 run 的观测可变状态单点 owner（#265 / T11 第二切片）。
@@ -283,15 +297,17 @@ class _Telemetry:
     清在哪里"只由本对象的成对方法决定（#247 AC4）——**但这不等于"每个出口都被调用
     到"**，后者见下「收口责任边界」。
 
-    恒定式（#265 AC 的"逐字兼容"）：本对象的每个方法都是**转发**——调用的端口方法、
-    调用条件与顺序与原调用点相同，不加行为、不判空。两处**已登记的差异**（编号对应
-    docs/SDD_TICKET_TRACKER.md 的 #265 残余 R1 / R2+R3）：
-    ① `compacted_turn_count` 一律以关键字转发：**端口输出无差异**（`RunTracer` 按
-    `is not None` 决定是否写 metadata 键 ⇒ 显式 `None` 与不传同效；`NullTracer` 本就不
-    产出观测，两条路皆零输出），差异只在"调用关键字集合"这一层；
-    ② context 超限臂收口后**保留**在途句柄（`keep_handle`）——复刻它 #264 之前的既有
-    形状：该句柄会被**第二条收集臂**再收一次，取消臂（"超限 + 消费方在终态帧上断连"）
-    与异常臂（"超限臂落终态的 append 失败"）两条出口皆然。
+    恒定式：本对象的每个方法都是**转发**——调用的端口方法、调用条件与顺序与原调用点
+    相同，不加行为、不判空。`context_build_completed` 的调用形状（关键字集合）逐字回到
+    #264 之前：成功路径带 `compacted_turn_count`，`close_pending` 与 context 超限臂不带
+    （#265 把**经 wrapper 的两处**统一成"一律带关键字"——超限臂随之从裸调变带关键字；
+    `close_pending` 一直直呼端口、从不经该参数。那是残余 R1 的口径偏差，由 #285 收口）。
+
+    #285 起：**收口即清口**（超限臂不再例外）。#264 之前那条臂收口后保留句柄，于是同一
+    span 会被**第二条收集臂**再收一次——取消臂（"超限 + 消费方在终态帧上断连"）与异常臂
+    （"超限臂落终态的 `append` 失败"）两条出口皆然（残余 R2 / R3）。两条出口各有一条
+    仓库内用例钉住单次收口：`tests/agent/test_terminal_arms.py`。
+
     端口实现的选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外，
     故可选/故障 sink 不拖垮 Core 的性质不变。工具批次的 span 归 ToolExecutor：
     `tracer` 原样转交。
@@ -335,26 +351,29 @@ class _Telemetry:
         self.ctx_span = self.tracer.context_build_started(step=step)
 
     def context_build_completed(
-        self, *, compacted_turn_count: int | None = None, keep_handle: bool = False,
+        self, *, compacted_turn_count: int | None | _Unset = _UNSET,
     ) -> None:
-        """收口 context span（成功路径）。
+        """收口 context span（**收口即清口**，三条调用路径同一语义）。
 
         端口调用**无条件**——句柄可能是降级实现的 None，端口自己早退（port.py
-        模块 docstring 的句柄契约）。成功路径收口即清口（与 _drive 原调用点"调完
-        紧跟一句 `= None`"一致）。
+        模块 docstring 的句柄契约）。收口后一律置空：清口是"这次观测**经过本对象**
+        交代完了"的标记，保留它等于允许第二次收口（残余 R2 / R3 的根因，由 #285 收口）。
+        清口只保证"不会收两次"，**不**保证"每个出口都收过一次"——未清不等于已交代
+        （`interrupt_streams` 抛错时收口段整个不执行，见类 docstring 的责任边界）。
 
-        ``keep_handle`` 只服务 context 超限臂：那条臂在 #264 之前就**不清**句柄
-        （#264 只是原样搬过来），于是同一句柄会被**第二条收集臂**再收一次——取消臂
-        （"超限 + 消费方在终态帧上断连"）与异常臂（"超限臂落终态的 append 失败"，
-        实测同样可达）两条出口皆然。本票是等价重构 ⇒ 逐字保留该形状，两条出口与
-        可达路径登记为残余 R2 / R3（见 docs/SDD_TICKET_TRACKER.md 的 #265 段），
-        要不要修由单独一张票决定。
+        关键字集合逐字回到 #264 之前的形状（残余 R1）：调用方**传了**就带关键字转发
+        （`None` 也带——那是"本轮没有压缩发生"的实参，与"没传"不同），**没传**就裸调。
+        故缺省值是哨兵 `_UNSET` 而不是 `None`：经本对象的两个调用点里，成功路径在值域内、
+        context 超限臂在值域外，一个参数同时表达"两个形状"（`close_pending` 不过这里，
+        它直呼端口）。
         """
-        self.tracer.context_build_completed(
-            self.ctx_span, compacted_turn_count=compacted_turn_count,
-        )
-        if not keep_handle:
-            self.ctx_span = None
+        if compacted_turn_count is _UNSET:
+            self.tracer.context_build_completed(self.ctx_span)
+        else:
+            self.tracer.context_build_completed(
+                self.ctx_span, compacted_turn_count=compacted_turn_count,
+            )
+        self.ctx_span = None
 
     def model_call_started(self, *, step: int, messages: Any, model: str | None = None) -> None:
         self.generation = self.tracer.model_call_started(
@@ -1408,11 +1427,11 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
     ) -> AsyncIterator[AgentEvent]:
         """context 超限臂：模型在本轮从未被调用，直接落终态（不经 failure_terminal）。"""
-        # keep_handle=True 复刻本臂 #264 之前的既有形状（收口不清口 ⇒ 同一 span 被第二条
-        # 收集臂再收一次：取消臂的"终态帧上断连"与异常臂的"落终态 append 失败"两条出口）。
-        # 行为零变化是本票 AC，缺陷登记为残余 R2 / R3（见 _Telemetry 的 docstring 与
-        # docs/SDD_TICKET_TRACKER.md 的 #265 段）。
-        arms.telemetry.context_build_completed(keep_handle=True)
+        # 裸调（不带 compacted_turn_count）是 #264 之前的调用形状，逐字保留（残余 R1）；
+        # 收口即清口 ⇒ 本句柄不会被第二条收集臂再收一次——取消臂（"终态帧上断连"）与
+        # 异常臂（"下面这次 append 失败"）两条出口都因此只收一次（#285 修的 R2 / R3，
+        # 两条出口各有仓库内用例）。
+        arms.telemetry.context_build_completed()
         arms.telemetry.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
         failed = arms.session.append(
             RUN_FAILED,
