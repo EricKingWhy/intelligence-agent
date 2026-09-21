@@ -140,4 +140,5 @@ f9ba501c9c403d22dcd03bfe63b291b2c5a6a969	F7/#278 落点记录（tracker F7 验�
 be7db83	P1-B4 审查记录（tracker P1-B4 节 + phase_status 归档索引 + 本台账审查行，docs-only）
 3976e02	性能线并入 main 的落点记录（PHASE_STATUS 索引 + 月度归档明细，docs-only）
 83dcfb73932f10d95afd21a7734fbc92dd45d610	集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
-4f41ba7	B-23 集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 月度归档修后复扫条、新增闭合复验条；docs-only）
+4f41ba7	B-23 集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
+b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 月度归档修后复扫条、新增闭合复验条；docs-only）
