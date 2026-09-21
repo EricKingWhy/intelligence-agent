@@ -17,10 +17,22 @@
   这一路既跑不了真实模型、用例的 `skipif` 又不会说话，放行只能以夹具层 ERROR 收场
   ——B-33 登记的第 2 条残余（"半配置"），2026-09-22 收口。
 
-**配置面的那条分界与用例的 `skipif` 逐字等价**（四、五两条的判据是同一个）：用例问的是
-`bool(settings.model_api_key)`（`tests/agent/test_integration_coding.py`），本守卫就问
-同一个东西——**不 strip**（`MODEL_API_KEY="   "` 在用例侧算"配了"，守卫也必须算"配了"，
-否则又是"守卫放行、夹具层 ERROR"）。先前的写法是"provider 与 key 都非空且 strip 后非空"，
+**配置面的那条分界与用例的 `skipif` 是同一个判据**（四、五两条问的是同一件事）：用例问
+`if not settings.model_api_key.get_secret_value(): pytest.skip(...)`
+（`tests/integration/test_phase13_gate.py` / `test_phase14_gate.py` 的 `_gate_settings`；
+`tests/agent/test_integration_coding.py` 用等价的 `bool(...)` 拼法），本守卫就问同一个东西
+——**不 strip**（`MODEL_API_KEY="   "` 在用例侧算"配了"，守卫也必须算"配了"，否则又是
+"守卫放行、夹具层 ERROR"）。三处措辞不同、**语义等价**（`SecretStr` 下 `bool("") is False`、
+`bool("   ") is True`，两轴各自实测）；守卫另外容忍普通 `str` 与 `None`（鸭子类型替身，
+`None` 侧用例表达式会抛——对 `Settings` 不可达，登记在 `_primary_key_present` 的 docstring）。
+**一处例外**：`tests/integration/test_phase12_web_gate.py` 挂的是 **fallback** 侧的门控、且
+那两条用例直接建 `ModelConfig`（不走 `from_settings`）⇒ 它们本就没有"夹具层 ERROR"这个
+暴露面，守卫对它们只是多一层保险。**这条保险并非总在**（两轴审查 B 轴实测）：本守卫的
+放行判据是主 key 是否非空，主 key 为空时它**放行且不探测**——那两个用例实际用的是 fallback
+端点，此时若 fallback 不可用，它们仍会在自己的门控层 skip（不是 ERROR，因为门控看的是
+fallback），但**"端点可用性已探过"这句话对它们不成立**。⇒ 别把 phase12 那两条读作"已被
+守卫覆盖"。
+先前的写法是"provider 与 key 都非空且 strip 后非空"，
 显式清空 `MODEL_PROVIDER=` 与空白 key 两条出口都回到 ERROR 形状，2026-09-22 两轴审查
 实测后按等价口径改写。
 
@@ -153,15 +165,16 @@ _STATUS_REASONS: dict[int, str] = {
     429: REASON_RATE_LIMITED,
 }
 
-#: 配置**值**回显前的"密钥形"兜底（配置文本 / provider 名 / model 名都用它）。
-#: 形状白名单，只兜现实里最常见的几族（`sk-` / `pk-` / `hf_` / `ghp_` 前缀、AWS 的
-#: `AKIA…`、纯 hex ≥ 24、`id.secret` 两段式）。**故意不穷尽**：无前缀的任意串（例如
-#: `code` / `state` 这类泛名）仍会原样回显——判据是"形状"就必然如此；根因是配置值
-#: 经错误正文回显这一面没有产品层统一实现，属已登记的待办（与本守卫的 base_url 同名
-#: 那条同源），不在这里假装解决。
+#: 配置**值**回显前的"密钥形"兜底（配置文本 / provider 名 / model 名 / base_url / detail
+#: 都用它）。形状白名单，只兜现实里最常见的几族（`sk-` / `pk-` / `hf_` / `ghp_` 前缀、
+#: AWS 的 `AKIA…`、纯 hex ≥ 24、`id.secret` 两段式）。**故意不穷尽**：无前缀的任意串
+#: （例如 `code` / `state` 这类泛名）仍会原样回显——判据是"形状"就必然如此；根因是配置值
+#: 经错误正文回显这一面没有产品层统一实现，属已登记的待办。
 #: ⚠ 不能直接把整段文本喂 `_redact_detail`（实测）：它的 `api[-_]?key` 规则会把
 #: `FALLBACK_MODEL_API_KEY` 这类 **env 名**一并打码成 `FALLBACK_MODEL_***`，把"缺哪
-#: 一个 env"这条唯一可操作的信息毁掉。
+#: 一个 env"这条唯一可操作的信息毁掉。`_redact_base_url` 仍会走 `_redact_detail`（它是
+#: 最后一层兜底），所以 **URL / detail 那两个回显面确实有这条过度打码**——如实记在这里，
+#: `_incomplete_chain_reason`（要保住 env 名）才绕开它。
 _KEY_SHAPED_TOKEN = re.compile(
     r"(?i)\b(?:sk|pk|hf|gh[pousr])[-_][A-Za-z0-9_-]{4,}"     # 常见前缀形
     r"|\bAKIA[0-9A-Z]{16}\b"                                  # AWS access key id
@@ -171,14 +184,19 @@ _KEY_SHAPED_TOKEN = re.compile(
 
 # ── base_url 回显前的脱敏（B-33 残余①，2026-09-22）──────────────────────────
 #: userinfo 形凭据（`https://user:pass@` / `https://<token>@`）：与
-#: `transport/contract.py` 的 `_GIT_URL_USERINFO` 同一口径起手，**两处都比它宽**——
-#: 一是不带冒号的那半（`https://<token>@host` 现实中同样常见），二是不带 scheme 的
-#: `user:pass@host`（SDK 报错正文里 URL 未必带 `http://`；写成 `(https?://)` 起手会漏）。
-#: 判据落在"`@` 后面必须是主机名"：否则正文里的邮件地址、`@decorator`、`100@2026-09-22`
-#: 都会被误伤。代价：路径里含 `@` 的 URL 会把 `host/path@` 一起打码——安全侧。
+#: `transport/contract.py` 的 `_GIT_URL_USERINFO` 同一口径起手，**三处都比它宽**——
+#: 不带冒号的那半（`https://<token>@host`）、不带 scheme 的 `user:pass@host`、以及
+#: **单标签主机 / IPv6 字面量**（`localhost:8000` / `ollama:11434` / `[::1]`）。
+#: 最后一条是两轴审查的 B 轴实测逼出来的：产品 `validate_base_url` 只校验 scheme+netloc，
+#: 自建 OpenAI 兼容端点（本地 / 内网）的 URL **带 userinfo 且主机名无点**是现实写法，
+#: 只认"带点主机名"会把整段凭据原样放进 skip 理由（进 CI 日志）。
+#: 量词不设上限（曾写成 `{1,64}`，实测 80 字符的 token 会**留下前 16 位**明文）。
+#: **代价（如实记）**：判据只看"`@` 前后像不像 `凭据@主机`"，所以邮件地址
+#: （`ops@a.invalid`）、`foo@pytest.mark`、`100@2026-09-22` 这类**不含凭据**的串也会被
+#: 打码。方向是安全的：少一段可读文本，不是多一段凭据。
 _URL_USERINFO = re.compile(
-    r"(?i)[^\s/@:]{1,64}(?::[^\s/@]{0,64})?@"
-    r"(?=[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:[/\s?]|$))"
+    r"(?i)[^\s/@:]+(?::[^\s/@]*)?@"
+    r"(?=(?:\[[0-9a-f:]+\]|[a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::\d+)?(?:[/\s?]|$))"
 )
 #: query / fragment 形凭据（`?api_key=…` / `?X-Amz-Signature=…`）：参数名按**子串**
 #: 判定（`client_secret` / `subscription-key` 这类派生命名永远列不全），分隔符覆盖
@@ -192,15 +210,24 @@ _URL_CREDENTIAL_VALUE = re.compile(
 def _redact_base_url(text: str) -> str:
     """URL 形凭据的回显脱敏（skip 理由会被 pytest 原样打印，还带一条 warning）。
 
-    用户自有配置的 base_url 可能把凭据塞在 userinfo 或 query 里；最后再过一遍
-    `_redact_detail`（密钥形 token 的兜底）。副作用是含 `sk` / `pk` 的主机名也可能被
-    打码——**可接受的 fail-closed** 取舍：provider / model 名仍在本行里，读者定位得到
-    端点；公开面（issue / CI 日志）少一段 URL 比多一段凭据划算。
+    四层，**本模块自己的密钥形词表也在内**：userinfo → `_KEY_SHAPED_TOKEN` →
+    query / fragment → `_redact_detail`（产品侧的兜底）。第三层的补入是两轴审查 B 轴
+    实测逼出来的：`base_url` / `detail` 原先只过 `_redact_detail` 的窄词表
+    （`sk|pk|api_key` 等），本模块已定义的"密钥形"判据（32 位 hex、`AKIA…`、`hf_…`）
+    **从不作用于这两个字段**——端点把 key 回显在错误正文里时能原样穿过。放在
+    `_redact_detail` 之前：先按形状整段吃掉，再让产品那条兜底扫尾巴。
 
-    入参是**文本**不是"必须是 URL"：`probe_endpoint` 拿它过一遍含 URL 的错误正文
-    （同一条判据，比那里原先的 `_redact_detail(str(error))` 严格更强）。
+    **`_redact_detail` 的真实行为**（实测）：非锚定的子串替换，尾巴一路吃到空白 / 引号
+    ——所以它会把**不含凭据**的主机名也截断（`https://risk-free.example.com/v1` ⇒
+    `https://ri***`、`…example.sk/v1` ⇒ `…example.***`）。⇒ "写完还能看出打的是哪个
+    地址"**只在多数情形成立**，不是保证；取舍是 fail-closed（少一段可读文本，不是多一段
+    凭据）。
+
+    入参是**文本**不是"必须是 URL"：`probe_endpoint` 拿它过一遍含 URL 的错误正文，
+    `EndpointProbe.line()` 拿它过 `base_url` 与 `detail` 两个回显面。
     """
     masked = _URL_USERINFO.sub("***@", text)
+    masked = _KEY_SHAPED_TOKEN.sub("***", masked)
     masked = _URL_CREDENTIAL_VALUE.sub(r"\1***", masked)
     return _redact_detail(masked)
 
@@ -251,18 +278,20 @@ def classify_environment_failure(error: BaseException) -> str | None:
 class EndpointProbe:
     """一个端点的探测结果（三态：可用 / 不可用（已分类）/ 未分类）。
 
-    `base_url` 关掉 `repr`：dataclass 生成的 `__repr__` 会在断言失败 / `-l` 输出里
-    原样打印配置值，而本类的回显面一律走 `line()`（脱敏后）——两处只留一处。
+    四个**用户配置 / 外部输入**字段关掉 `repr`：dataclass 生成的 `__repr__` 会在断言
+    失败、`-l` 局部变量、日志里原样打印它们（`provider` / `model_name` 有人会贴错成
+    key，`base_url` 与 `detail` 是凭据的回显面）——本类的对外文本面只留 `line()` 一处
+    （那里逐字段脱敏）。`reason` / `error_type` / `ok` 是我们自己的枚举与布尔，留着。
     """
 
     label: str
-    provider: str
-    model_name: str
+    provider: str = field(repr=False)
+    model_name: str = field(repr=False)
     base_url: str = field(repr=False)
     ok: bool
     reason: str | None = None
     error_type: str = ""
-    detail: str = ""
+    detail: str = field(default="", repr=False)
 
     @property
     def unavailable(self) -> bool:
@@ -287,17 +316,18 @@ class EndpointProbe:
     def line(self) -> str:
         """skip 理由里的一行：`· primary provider/model @ base_url → 归因（脱敏详情）`。
 
-        三个回显字段都来自用户配置、都要先脱敏：base_url 走 `_redact_base_url`（凭据
-        可能塞在 userinfo / query 里），provider / model 名走 `_KEY_SHAPED_TOKEN`（有人
-        会把 key 贴错字段，那两个字段本身没有"形状"判据）。本行会被 pytest 原样打印
-        并进 warning，是这条守卫里唯一对外的文本面。
+        四个回显字段都来自用户配置 / 上游错误正文、都在**这里**脱敏（不假定上游已脱敏：
+        `detail` 通常由 `probe_endpoint` 先过一遍，但手工构造的探针会直接塞原文，而本行
+        会被 pytest 原样打印并进 warning，是这条守卫唯一对外的文本面）：base_url 与 detail
+        走 `_redact_base_url`（凭据可能塞在 userinfo / query 里），provider / model 名走
+        `_KEY_SHAPED_TOKEN`（有人会把 key 贴错字段，那两个字段本身没有"形状"判据）。
         """
         provider = _KEY_SHAPED_TOKEN.sub("***", self.provider)
         model_name = _KEY_SHAPED_TOKEN.sub("***", self.model_name)
         text = (f"  · {self.label} {provider}/{model_name} @ "
                 f"{_redact_base_url(self.base_url)} → {self.message()}")
         if self.detail:
-            text += f"\n    {self.detail}"
+            text += f"\n    {_redact_base_url(self.detail)}"
         return text
 
 
@@ -371,15 +401,21 @@ def _configured_chain(settings: Any) -> list[tuple[str, ModelConfig]] | None:
 
 
 def _primary_key_present(settings: Any) -> bool:
-    """主模型 key 是否非空——**与用例 `skipif` 逐字等价**的那条判据。
+    """主模型 key 是否非空——**与用例 `skipif` 同一判据**（措辞不同、语义等价）。
 
     这是"缺配置"与"配置有缺陷"的分界：key 为空 ⇒ 用例既有 `skipif` 有自己的话说
     （放行）；key 给了却建不起整条链 ⇒ 那条链的缺陷必须由守卫说出口（响亮 skip）。
 
-    等价性是有意的：用例问 `bool(settings.model_api_key)`（`SecretStr("")` ⇒ False），
-    本函数**不 strip**——`"   "` 在用例侧算"配了"（`SecretStr` 非空即真），守卫也必须
-    算"配了"，否则空白 key 又变成"守卫放行、用例 `skipif` 沉默、夹具层 ERROR"。
-    provider 不参与判定：它有非空默认值（`config.py`），显式清空是配置缺陷、不是"没配"。
+    等价性是有意的：用例问 `if not settings.model_api_key.get_secret_value(): skip`
+    （`SecretStr("")` ⇒ False、`"   "` ⇒ True），本函数**不 strip**——`"   "` 在用例侧算
+    "配了"，守卫也必须算"配了"，否则空白 key 又变成"守卫放行、用例 `skipif` 沉默、夹具层
+    ERROR"。provider 不参与判定：它有非空默认值（`config.py`），显式清空是配置缺陷、
+    不是"没配"。
+
+    比用例宽的两处（**如实登记**）：入参是鸭子类型（`getattr` + `get_secret_value` 可选），
+    以及 `None` 直接判 False——对 `Settings` 不可达（它恒是 `SecretStr`），只有替身会走到；
+    用例侧那个表达式遇到 `None` 会抛 `AttributeError`。这不会造成"守卫放行而用例 ERROR"
+    （方向相反：守卫多算"在场"⇒ 更早开口）。
     """
     key = getattr(settings, "model_api_key", None)
     if key is None:

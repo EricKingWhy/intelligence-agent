@@ -84,9 +84,13 @@ class _RecordingTracer:
     在 Core 单点强制——本替身不模拟那一层。）
 
     ⚠ 句柄形状与生产**不同型**：这里返回 `str`，生产返回 `Span`（或降级后的 `None`）。
-    本替身只服务这两条臂——臂对句柄只做"存 / 取 / 转交"，从不调它的方法，所以形状差异
-    在**本文件的断言面**上没有影响；同型替身在 `tests/observability/test_tracer_port.py`
-    （`_IdentifiedNullSpan`），那里才测"句柄是怎么被收口的"。
+    对**这两条臂**无影响——臂对句柄只做"存 / 取 / 转交"，从不调它的方法。但本文件不止
+    臂用例：`_Telemetry` 的单测（`test_telemetry_*`）**正在断言这个 `str` 形状**
+    （`assert telemetry.ctx_span == "ctx-span-2"`），所以"把本文件的替身全换成同型句柄"
+    是**有断言成本的改动**，不是机械替换——同型替身在
+    `tests/observability/test_tracer_port.py`（`_IdentifiedNullSpan`），那里测的是
+    "句柄怎么被收口"。本文件其余 `str` 句柄替身（`_CountSpy` / `_AritySpy`）同理保留，
+    该分叉已登记在 `docs/SDD_TICKET_TRACKER.md` 的 B-33/B-35 残余里。
     """
 
     trace_id = "trace-1"

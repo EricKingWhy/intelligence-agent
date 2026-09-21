@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import ssl
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -283,6 +284,86 @@ def test_skip_reason_masks_the_credential_shaped_writes_the_first_rule_missed() 
     assert "semi-7777" not in lines[4]
 
 
+def test_skip_reason_masks_userinfo_on_dotless_hosts() -> None:
+    """单标签主机 / IPv6 字面量上的 userinfo **也要打码**（B-35 B 轴 P1）。
+
+    B 轴实测的漏法：首版主机名前瞻写成"必须含点"，于是 `localhost` / `ollama` /
+    `[::1]` 这几类**主机名不带点**的 URL 整段凭据原样回显。这不是纸上情形——产品
+    `validate_base_url` 只校验 scheme + netloc，自建 OpenAI 兼容端点（本地 / 内网容器）
+    正是这种写法，而 skip 理由会进 CI 日志与被贴进 issue 的输出。
+    """
+    lines = [
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="http://user:pass1@localhost:8000/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://tok2-abc@ollama:11434/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://u:sec3@[::1]:8000/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://tok4@vllm-svc/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+    ]
+
+    for line in lines:
+        assert "***" in line and "@" in line
+    for line, leaked in zip(lines, ("pass1", "tok2-abc", "sec3", "tok4")):
+        assert leaked not in line, f"凭据 {leaked!r} 漏进理由：{line}"
+
+
+def test_a_dotless_host_stays_readable_after_masking() -> None:
+    """反向：打码只吃 userinfo，**主机名与端口留着**（排查要看的就是它）。
+
+    `_redact_detail` 的尾巴会吃到空白 / 引号，所以这一条同时钉住"单标签主机不被它
+    连带吃掉"——B 轴 P1 的修法如果顺手把主机一起遮了，理由就失去可操作性。
+    """
+    probe = EndpointProbe(
+        label="primary", provider="p", model_name="m",
+        base_url="http://user:pass@localhost:8000/v1/chat", ok=False,
+        reason=REASON_UNREACHABLE, error_type="ConnectError", detail="",
+    )
+
+    line = probe.line()
+
+    assert "user:pass" not in line
+    assert "localhost:8000" in line and "/chat" in line
+
+
+def test_skip_reason_masks_key_shaped_tokens_in_the_url_and_the_detail() -> None:
+    """本模块自己的"密钥形"词表**也必须作用于 base_url / detail**（B-35 B 轴 P2）。
+
+    B 轴实测：这两个回显面原先只过 `_redact_detail` 的窄词表（`sk|pk|api_key` 等），
+    于是一个 32 位 hex 或 `AKIA…` 形式的 token 能原样穿过——本模块**已经有**这套形状
+    判据（`_KEY_SHAPED_TOKEN`），却只拿它扫 provider / model 名。修法是把它并入
+    `_redact_base_url`（四层之一）。
+    """
+    lines = [
+        # 32 位 hex：`_redact_detail` 的窄词表不认（没有 key 字样的上下文）
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://h.invalid/v1/0123456789abcdef0123456789abcdef",
+                      ok=False, reason=REASON_TIMEOUT, error_type="APITimeoutError",
+                      detail="").line(),
+        # AWS 形：detail 是上游错误正文，最容易原样带回
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=PROVIDER_AUTH_REASON, error_type="AuthenticationError",
+                      detail="boto3 error: AKIAIOSFODNN7EXAMPLE rejected").line(),
+        # 前缀形：`hf_` 一族（首版词表只查 provider / model 名）
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=PROVIDER_AUTH_REASON, error_type="AuthenticationError",
+                      detail="token hf_ABCDEFGHIJKLMNOP was rejected").line(),
+    ]
+
+    for line in lines:
+        assert "***" in line
+    assert "0123456789abcdef" not in lines[0]
+    assert "AKIAIOSFODNN7EXAMPLE" not in lines[1]
+    assert "hf_ABCDEFGHIJKLMNOP" not in lines[2]
+
+
 def test_skip_reason_keeps_a_non_credential_query_readable() -> None:
     """反向：普通参数名**不许**被误伤（`?model=` 是排查时的关键信息）。"""
     probe = EndpointProbe(
@@ -292,6 +373,63 @@ def test_skip_reason_keeps_a_non_credential_query_readable() -> None:
     )
 
     assert "?model=deepseek-chat" in probe.line()
+
+
+def test_skip_reason_masks_a_long_credential_entirely() -> None:
+    """长凭据**整段**打码（回归钉：量词曾写成 `{1,64}` ⇒ 前 16 位明文留在理由里）。
+
+    这条是两轴审查的 A 轴实测出来的：`{1,64}` 的上限是**脱敏自己造的漏洞**——超过 64
+    字符的 token 只遮住尾部，前缀照样进 pytest 输出与 warning。断言必须检查"那段前缀
+    不在输出里"，只断言 `"***" in line` 是空转（旧实现同样满足）。
+    """
+    token = "P" * 80  # 现实中：JWT / 长 API key / base64 段
+    probe = EndpointProbe(
+        label="primary", provider="p", model_name="m",
+        base_url=f"https://user:{token}@a.invalid/v1", ok=False,
+        reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="",
+    )
+
+    line = probe.line()
+
+    assert "PPPP" not in line, f"长凭据的前缀漏了：{line}"
+    assert "***@a.invalid" in line, "打码后主机名仍可读（定位端点要看这个）"
+
+
+def test_a_bare_email_in_the_text_is_masked_too_disclosed_tradeoff() -> None:
+    """邮件地址**也**会被打码——这是披露过的取舍，不是 bug。
+
+    主机名前瞻只排除 `@decorator` / `100@2026-09-22` 这类非主机形态，分不出"人名 + 域名"。
+    方向是安全的（少一段可读文本 < 多一段凭据），故按现状钉住；要改成保护邮件地址，
+    必须同时改 `_URL_USERINFO` 的注释与这条用例。
+    """
+    probe = EndpointProbe(
+        label="primary", provider="p", model_name="m",
+        base_url="https://a.invalid/v1", ok=False,
+        reason=REASON_UNREACHABLE, error_type="ConnectError",
+        detail="contact ops@a.invalid for help",
+    )
+
+    assert "***@a.invalid" in probe.line()
+
+
+def test_probe_repr_does_not_echo_the_sensitive_fields() -> None:
+    """`repr(probe)` 不许回显配置值 / 错误正文（断言失败与 `-l` 会自动打印它）。
+
+    只把 `base_url` 关掉不够：`provider` / `model_name` 有人会贴错成 key，`detail` 是
+    上游错误正文（凭据回显面）。这条钉住四个字段全关。
+    """
+    probe = EndpointProbe(
+        label="primary", provider="sk-live-ABCD1234", model_name="AKIAIOSFODNN7EXAMPLE",
+        base_url="https://u:p@a.invalid/v1", ok=False,
+        reason=REASON_UNREACHABLE, error_type="ConnectError",
+        detail="raw detail with https://u:p@a.invalid/v1",
+    )
+
+    text = repr(probe)
+
+    for secret in ("ABCD1234", "AKIAIOSFODNN7EXAMPLE", "a.invalid", "raw detail"):
+        assert secret not in text, f"repr 里漏了 {secret!r}：{text}"
+    assert "primary" in text and "reason=" in text, "非敏感的定位字段要留着"
 
 
 def test_skip_reason_masks_key_shaped_provider_and_model_names() -> None:
@@ -530,9 +668,10 @@ async def test_chain_verdict_and_ensure_release_on_incomplete_config(monkeypatch
     """**没声明**主模型（key 为空）在两层都只是放行——覆盖三条形态。
 
     这是守卫与用例既有 `skipif` 的分界：**key 为空** ⇒ 由 `skipif` 说话。判据与用例侧
-    逐字等价（`bool(settings.model_api_key.get_secret_value())`，不 strip、不看 provider），
-    所以放行面恰好是"用例自己会 skip"的那一片；其余形态一律走响亮 skip——放行它们
-    只会以夹具层 ERROR 收场（B-33 残余②的形状）。
+    同一件事（`get_secret_value()` 非空，不 strip、不看 provider；措辞不同、语义等价——
+    精确边界见 `live_model_guard._primary_key_present` 的 docstring），所以放行面恰好是
+    "用例自己会 skip"的那一片；其余形态一律走响亮 skip——放行它们只会以夹具层 ERROR
+    收场（B-33 残余②的形状）。
 
     三个空值全是显式钉的：`Settings(...)` 会读**机器上真实的** `.env`（pydantic-settings 的
     env_file 来源），不钉就等于让本机的 key 决定这条用例往哪条出口走——实测踩过。
@@ -554,6 +693,8 @@ def test_primary_key_present_matrix_matches_the_case_side_skipif() -> None:
 
     用例侧的表达式就是这个矩阵的期望列：`bool(settings.model_api_key.get_secret_value())`
     （`tests/integration/test_phase13_gate.py` / `test_phase14_gate.py` 的 `_gate_settings`）。
+    期望列是**手抄**的，所以下面还有一条文本级漂移闸
+    （`test_case_side_skipif_text_still_matches_the_guards_predicate`）钉住用例侧原文。
     守卫若在这里加了 `.strip()` 或"provider 也要非空"，**这批本该放行的形态会变成响亮
     skip**——方向是安全的（不静默代码回归），但口径与用例分叉，同一台机器上会出现
     "用例 skipif 说没配、守卫却报配置缺陷"的矛盾读数。所以两处判据必须一起改。
@@ -570,6 +711,31 @@ def test_primary_key_present_matrix_matches_the_case_side_skipif() -> None:
         key = settings.model_api_key.get_secret_value()
         assert bool(key) is expected, "夹具值与期望列不一致（先修表）"
         assert guard._primary_key_present(settings) is expected
+
+
+#: 用例侧放行判据的**文本**（两轴审查 B 轴 P3：期望列是手写的，改动用例侧不会让上面那条
+#: 变红）。这里按文本再钉一道：用例侧表达式一旦改写，本用例立刻红，逼着回头看等价口径。
+_CASE_SIDE_PREDICATE = "if not settings.model_api_key.get_secret_value():"
+
+
+def test_case_side_skipif_text_still_matches_the_guards_predicate() -> None:
+    """上面那张矩阵的"等价"不是自证的：**用例侧原文**也得还是同一个判据（文本级漂移闸）。
+
+    局限（如实记）：文本匹配钉的是**拼写**，不是语义——把 `not` 挪走这类等价改写它会漏。
+    它挡的是最常见的漂移（有人把用例侧改成 `.strip()` / 加 provider 条件 / 抽成别的
+    表达式），那时本用例红，而上面的矩阵仍会绿——正是要吵醒的那种分歧。
+    """
+    cases = [
+        Path(__file__).parent / "integration" / "test_phase13_gate.py",
+        Path(__file__).parent / "integration" / "test_phase14_gate.py",
+    ]
+
+    for path in cases:
+        text = path.read_text(encoding="utf-8")
+        assert _CASE_SIDE_PREDICATE in text, (
+            f"{path.name} 的放行判据变了——守卫的等价口径（`_primary_key_present`）"
+            f"必须跟着一起改，或把这里改成新的原文"
+        )
 
 
 @pytest.mark.asyncio

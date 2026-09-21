@@ -318,11 +318,24 @@ class _Telemetry:
     与"段内抛错"是两回事：后者由 `_TerminalStages` 逐段兜底收口（残余 R4），前者
     本对象无从保证（那段代码压根没执行）。
 
-    逐段兜底**也不覆盖收尾的全部内容**，两条边界如实记在这里，免得被读成"收尾已免疫
-    一切故障"：一是两段之间的取值（`arms.cancel_reason()`）与终态事件本身的写入仍裸奔
-    ——前者是内存读（`return "orphaned" if run.reap_requested else "cancelled"`），
-    没有失败面，后者抛错的传播形状与修前一致（见 `_terminal_exception` 的 docstring）；
-    二是兜底**不吞**异常——第一处原样在全部段跑完后重抛，只是不再让后面的段陪葬。
+    逐段兜底**也不覆盖收尾的全部内容**，边界如实记在这里，免得被读成"收尾已免疫
+    一切故障"：一是两段之间的取值（`arms.cancel_reason()`，`runtime.py` 的
+    `cancel_reason()`）与终态事件本身的写入仍裸奔，二是兜底**不吞**异常——第一处原样
+    在全部段跑完后重抛，只是不再让后面的段陪葬。
+
+    关于那处取值：`cancel_reason()` 本身只是一次委托（`return self.cancel_reason_supplier()
+    if self.cancel_reason_supplier else "cancelled"`），它的失败面**等于注入的 supplier 的
+    失败面**——`run_stream(cancel_reason_supplier=…)` 是公开参数，当前唯一调用点是 web 的
+    lambda（`web/runmanager.py` 里 `return "orphaned" if run.reap_requested else "cancelled"`，
+    一次 bool 读），所以**当前**没有失败面；换成会抛的 supplier 则属于未收口的出口
+    （登记为残余，收口方式与 `cancel_reason` 段一致：过 `_TerminalStages`）。
+    **这个残余有两轴审查 B 轴给的实测复现**（不是推理）：teardown 注入一个抛
+    `RuntimeError` 的 supplier ⇒ 收口段**0 次执行**，`tracer.calls == []`、session 里
+    没有 `run/failed`——与修复前 `interrupt_streams()` 抛错的症状**逐条相同**。
+    ⇒ 想复现就照 `tests/agent/test_terminal_arms.py` 的 `_ArmsKit` 加一个 throwing
+    supplier，别把它当"理论边界"。同批的兜底只捕获 `Exception`（不捕获
+    `BaseException`）：`KeyboardInterrupt` / `CancelledError` 会穿透——仓库内无生产者，
+    作为边界记在这里。
 
     边界：`run_span`（诊断日志的根 span id）**不收**——它只在创建时写一次、不进端口，
     没有"起/清两处写"的漂移面，留在 `_drive` 局部（#264 已定的同一条判据）。
@@ -451,7 +464,8 @@ class _TerminalStages:
     ——不吞、不改类型、不换异常，调用方看到的失败与修前同源，只是收尾不再半途而废。
 
     被保护的是"收口段"（`interrupt_streams` / `close_observability`）；终态事件本身的
-    写入不在其列：它抛错时的传播形状与修前一致（见两条臂的 docstring）。
+    写入与段间取值不在其列——每一处**逐条列在对应臂的 docstring 里**（取消臂 / 异常臂
+    各有一段"不在保护面内的两处"），那是读者该看的地方，这里不重复。
 
     两条臂都接了这个执行器，但**不是同一段代码**：取消臂逐段直呼，异常臂在段之间把
     收口产生的事件逐条 yield 给流消费者。所以"某条出口修好了"不能由另一条臂的用例
@@ -459,6 +473,9 @@ class _TerminalStages:
 
     契约：`step` 必须返回**当场物化**的 list（两段都是普通方法、返回 list）。若将来
     某段改成生成器 / 惰性迭代，抛错就发生在调用方的 `for` 里，本兜底接不住。
+    边界：`except Exception`——`BaseException`（`KeyboardInterrupt` / `CancelledError`）
+    按 Python 惯例穿透，不在兜底面内。仓库内两段收口都是同步普通方法（不 await），
+    没有这条路径的生产者；两轴审查 B 轴把它记为已知边界而非缺陷。
     """
 
     def __init__(self) -> None:
@@ -1565,6 +1582,9 @@ class AgentRuntime:
         逐段兜底（R4）：两段收口任一抛错都不跳过后续——观测收口照跑、终态事件照写，
         第一处异常在最后原样再抛（修前它会让整条收尾链断在这里：有 span 0 次收口、
         也没有 `run/failed`）。
+
+        **不在保护面内的两处**（读这段别当"整条收尾都免疫了"）：`reason` 的取值与
+        终态事件本身的写入都在 `stages` 之外——后者抛错的传播形状与修前一致。
         """
         ctx = arms.context(steps)
         stages = _TerminalStages()
@@ -1593,6 +1613,11 @@ class AgentRuntime:
         逐段兜底（R4）：两段收口任一抛错都不跳过后续——观测收口照跑、终态事件照写，
         第一处异常在全部收尾跑完后原样再抛（修前 streamer 收口一抛错，本臂后面的
         每一行都不执行）。
+
+        **不在保护面内的两处**（读这段别当"整条收尾都免疫了"）：`to_agent_event(...)`
+        的 yield 与终态事件本身的写入都在 `stages` 之外——收口段产出的事件在终态事件
+        之前 yield，消费方在这一点断连仍是既有窗口（先于 R4 存在）；终态写入抛错的
+        传播形状也与修前一致。
         """
         ctx = arms.context(steps)
         # 分类只在**模型调用在途**时进行（model_call_open 正是 model/failed 的
