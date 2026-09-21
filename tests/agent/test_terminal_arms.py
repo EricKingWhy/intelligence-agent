@@ -458,9 +458,10 @@ async def test_cancelled_arm_discards_events_but_persists_them(session: Session)
     assert by_type[RUN_FAILED].run_id == RUN_ID
     assert by_type[MODEL_FAILED].run_id == RUN_ID
     assert by_type[RUN_FAILED].data["reason"] == "cancelled"
-    # 切换事实只**取走一次**（断的是产品行为，不是替身的幂等实现）
+    # 切换事实只**取走一次**：断的是产品行为（替代了原来那句
+    # `drain_transitions() == []`——它只反映替身自己清空了队列，臂一次都不取也照样绿）
     assert coord.drains == 1
-    assert coord.drain_transitions() == []
+    assert [e.type for e in written].count(MODEL_FALLBACK) == 1
     # 观测：取消臂也要收口 generation（error_type="cancelled" 而非异常类型）
     assert ("model_call_failed", {"error_type": "cancelled"}) in kit.tracer.calls
     assert ("context_build_completed", {"span": "span-ctx"}) in kit.tracer.calls
@@ -539,10 +540,11 @@ async def test_failed_arm_classifies_only_while_the_model_call_is_open(
     assert run_failed.data["message"] == PROVIDER_ACCOUNT_UNAVAILABLE_MESSAGE
     assert kit.since(mark)[-2].data["message"] == PROVIDER_ACCOUNT_UNAVAILABLE_MESSAGE
     assert run_failed.run_id == RUN_ID
-    assert run_failed.step_id is None, (
-        "死参数实测：#263 段记录的 failure_terminal(steps=…) 不被转发（Session.end_run "
-        "无 step_id 形参）⇒ 异常臂终态 step_id 恒 None。让参数生效是行为变更，不在本票。"
-    )
+    # ⚠ 本条钉的是**既有缺陷的当前实测形状**，不是期望语义：#263 段登记的
+    # failure_terminal(steps=…) 不被转发（Session.end_run 无 step_id 形参）⇒ max_steps /
+    # 同错熔断 / 异常三条臂的终态 step_id 恒 None。让参数生效是行为变更（本行与 golden
+    # 会一起变红，那是预期的红），不在本票——#264 的提取保持原状。
+    assert run_failed.step_id is None
     assert kit.since(mark)[-2].run_id == RUN_ID, "model/failed 与终态挂同一个 run"
 
     # 同类文本但不在途：退回类型名，不误标 provider 归因
