@@ -28,6 +28,7 @@ from agent_harness.context.builder import ContextWindowExceededError
 from agent_harness.observability import LangfuseSink
 from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.session import (
+    CONTEXT_COMPACTED,
     MODEL_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -299,6 +300,44 @@ class _OverflowingContextBuilder:
 
     async def build(self, session: Any) -> list:
         raise ContextWindowExceededError("超限")
+
+
+class _CompactingContextBuilder:
+    """ContextBuilder 替身：投影时落一条 context/compacted 事实（非异常路径）。
+
+    runtime 读这条事件的 `compacted_turn_count` 喂给 context span 的收口——
+    `_Telemetry` 只负责把它转发到端口，这里是那条 metadata 的端到端来源。
+    """
+
+    async def build(self, session: Any) -> list:
+        session.append(CONTEXT_COMPACTED, {"compacted_turn_count": 2})
+        return []
+
+
+@pytest.mark.asyncio
+async def test_compaction_count_reaches_the_context_span_metadata(tmp_path, monkeypatch):
+    """压缩计数必须随 context span 的收口到达端口（AC1 的 metadata 面）。"""
+    seen: list[int | None] = []
+
+    class _CountSpy(NullTracer):
+        def context_build_started(self, *, step: int) -> Any:
+            return f"ctx-{step}"
+
+        def context_build_completed(
+            self, span: Any, *, compacted_turn_count: int | None = None,
+        ) -> None:
+            seen.append(compacted_turn_count)
+
+    monkeypatch.setattr(runtime_module, "NullTracer", lambda: _CountSpy())
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([AIMessage(content="答")]), registry, ToolExecutor(registry),
+        context_builder=_CompactingContextBuilder(),
+    )
+
+    await runtime.run(make_session(tmp_path), "hi")
+
+    assert seen == [2], "compaction 事件的计数必须原样到端口（不是 None、不是别的值）"
 
 
 @pytest.mark.asyncio

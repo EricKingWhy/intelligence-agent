@@ -284,9 +284,18 @@ class _Telemetry:
     收口（#247 AC4）。
 
     恒定式（#265 AC 的"逐字兼容"）：本对象的每个方法都是**转发**——调用的端口方法、
-    参数、调用条件与顺序与原调用点逐字相同，不加行为、不判空、不补参。端口实现的
-    选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外，故可选/故障
-    sink 不拖垮 Core 的性质不变。工具批次的 span 归 ToolExecutor：`tracer` 原样转交。
+    调用条件与顺序与原调用点相同，不加行为、不判空。两处**已登记的差异**（都在"键集 /
+    清口"层面，取值等价；登记见 docs/SDD_TICKET_TRACKER.md 的 #265 残余）：
+    ① `compacted_turn_count` 一律以关键字转发（端口两个实现的默认值即 None，值等价）；
+    ② context 超限臂收口后**保留**在途句柄（`keep_handle`）——复刻它 #264 之前的既有
+    形状（"超限 + 消费方在终态帧上断连"时取消臂会对同一 span 再收一次）。
+    端口实现的选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外，
+    故可选/故障 sink 不拖垮 Core 的性质不变。工具批次的 span 归 ToolExecutor：
+    `tracer` 原样转交。
+
+    收口责任边界（按可证伪的方式写）：**收口只经本对象的成对方法**，已收口的句柄在本
+    对象里唯一存放。各终结点**何时**调用、取消/异常臂经 `snapshot()` 拿的是哪份副本，
+    由 `_drive` 与两个终态臂决定——本对象不保证"每个出口都被调用到"。
 
     边界：`run_span`（诊断日志的根 span id）**不收**——它只在创建时写一次、不进端口，
     没有"起/清两处写"的漂移面，留在 `_drive` 局部（#264 已定的同一条判据）。
@@ -323,18 +332,24 @@ class _Telemetry:
         self.ctx_span = self.tracer.context_build_started(step=step)
 
     def context_build_completed(
-        self, *, compacted_turn_count: int | None = None,
+        self, *, compacted_turn_count: int | None = None, keep_handle: bool = False,
     ) -> None:
         """收口 context span（成功路径）。
 
         端口调用**无条件**——句柄可能是降级实现的 None，端口自己早退（port.py
-        模块 docstring 的句柄契约）。清口与端口无关：调过即视为已收口，与 _drive
-        原调用点"调完紧跟一句 `= None`"逐字一致。
+        模块 docstring 的句柄契约）。成功路径收口即清口（与 _drive 原调用点"调完
+        紧跟一句 `= None`"一致）。
+
+        ``keep_handle`` 只服务 context 超限臂：那条臂在 #264 之前就**不清**句柄
+        （#264 只是原样搬过来），于是"超限 + 消费方在终态帧上断连"时取消臂会拿同一
+        句柄**再收一次**。本票是等价重构 ⇒ 逐字保留该形状，缺陷与可达路径登记为残余，
+        要不要修由单独一张票决定。
         """
         self.tracer.context_build_completed(
             self.ctx_span, compacted_turn_count=compacted_turn_count,
         )
-        self.ctx_span = None
+        if not keep_handle:
+            self.ctx_span = None
 
     def model_call_started(self, *, step: int, messages: Any, model: str | None = None) -> None:
         self.generation = self.tracer.model_call_started(
@@ -1388,7 +1403,10 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
     ) -> AsyncIterator[AgentEvent]:
         """context 超限臂：模型在本轮从未被调用，直接落终态（不经 failure_terminal）。"""
-        arms.telemetry.context_build_completed()
+        # keep_handle=True 复刻本臂 #264 之前的既有形状（收口不清口 ⇒ "超限 + 消费方在
+        # 终态帧上断连"时取消臂对同一 span 再收一次）。行为零变化是本票 AC，缺陷登记为
+        # 残余（见 _Telemetry.context_build_completed 的 docstring）。
+        arms.telemetry.context_build_completed(keep_handle=True)
         arms.telemetry.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
         failed = arms.session.append(
             RUN_FAILED,

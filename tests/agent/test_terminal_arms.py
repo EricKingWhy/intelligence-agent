@@ -396,6 +396,26 @@ def test_telemetry_close_pending_skips_handles_that_are_not_in_flight() -> None:
     assert [name for name, _ in tracer.calls] == ["run_failed"]
 
 
+def test_telemetry_forwards_the_compaction_count() -> None:
+    """metadata 面：压缩计数随收口一起到端口，缺省如实 None（不伪造）。"""
+    seen: list[int | None] = []
+
+    class _CountSpy(_RecordingTracer):
+        def context_build_completed(
+            self, span: Any, *, compacted_turn_count: int | None = None,
+        ) -> None:
+            seen.append(compacted_turn_count)
+
+    telemetry = _Telemetry(tracer=_CountSpy())
+
+    telemetry.context_build_started(step=0)
+    telemetry.context_build_completed(compacted_turn_count=3)
+    telemetry.context_build_started(step=1)
+    telemetry.context_build_completed()
+
+    assert seen == [3, None]
+
+
 def test_telemetry_snapshot_leaves_live_handles_alone() -> None:
     """快照取一份：收口只置空快照自己那份，活值不动（#264 纪律的落点）。"""
     live = _Telemetry(tracer=_RecordingTracer(), ctx_span="span-ctx", generation="gen-1")
@@ -548,6 +568,41 @@ async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> 
     assert kit.result_holder[0].status == STATUS_CONTEXT_WINDOW_EXCEEDED
     assert memory.submits == []
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
+
+
+@pytest.mark.asyncio
+async def test_context_exceeded_arm_keeps_the_handle_it_closed(session: Session) -> None:
+    """超限臂收口后**不**清句柄——这是 #264 之前的既有形状，本票逐字保留。
+
+    为什么值得一条用例：这是本票唯一"行为差异面"。若改成收口即清口，"超限 + 消费方在
+    终态帧上断连"（GeneratorExit 落在下面那次 yield 之后）这条**生产可达**路径会**少
+    一次** `context_build_completed`——旧形状对同一 span 二次收口。两轴独立实测的差分
+    是 6 次 vs 5 次端口调用（脚本见 tracker #265 段的红证）。
+
+    ⇒ 本用例钉的是**既有事实**（不是期望语义）：断言里的"二次收口"是缺陷，不是契约。
+    修它要单独开票（等价重构票不许顺手改行为），届时本用例会红——那正是它的用途。
+    """
+    kit = _kit(session, step_base=2)
+    kit.arms.telemetry.ctx_span = "span-ctx"
+
+    emitted = await _drain(
+        kit.runtime._terminal_context_exceeded(
+            kit.arms, steps=3, error=ContextWindowExceededError("上下文超限"),
+        ),
+    )
+
+    assert [e.type for e in emitted] == [RUN_FAILED]
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
+    # 既有形状：收口不清口 —— 句柄仍在（对比成功路径：收口即清口）
+    assert kit.arms.telemetry.ctx_span == "span-ctx"
+
+    # 于是取消臂（终态帧之后断连）拿同一句柄**再收一次** —— 既有事实，如实钉住
+    kit.runtime._terminal_cancelled(kit.arms, steps=3)
+
+    assert [name for name, _ in kit.tracer.calls] == [
+        "context_build_completed", "run_failed", "context_build_completed", "run_failed",
+    ]
+    assert kit.tracer.calls[2][1]["span"] == "span-ctx"
 
 
 # ---------------------------------------------------------------------------
