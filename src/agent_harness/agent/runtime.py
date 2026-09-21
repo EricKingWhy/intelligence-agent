@@ -272,6 +272,145 @@ class _RunFinalizer:
 
 
 @dataclass
+class _Telemetry:
+    """一次 run 的观测可变状态单点 owner（#265 / T11 第二切片）。
+
+    收之前：`tracer` 在 `_drive` 局部与臂字段里各存一份（选定后靠 `arms.tracer = tracer`
+    同点写回对齐），`ctx_span` / `generation` 是"起/清各两处写"的裸句柄，收口序列在每个
+    收尾路径上直呼端口方法。本对象把这些收成**一份**（构造一次、按引用交给使用方，与
+    `_RunFinalizer` 同一形状），并守住一条纪律：**句柄不出对象**——调用方只报"哪个阶段
+    开始了 / 结束了 / 在途的东西按失败收口"，既不持有也不回传句柄。这样"句柄写在哪里、
+    清在哪里"只由本对象的成对方法决定（#247 AC4）——**但这不等于"每个出口都被调用
+    到"**，后者见下「收口责任边界」。
+
+    恒定式（#265 AC 的"逐字兼容"）：本对象的每个方法都是**转发**——调用的端口方法、
+    调用条件与顺序与原调用点相同，不加行为、不判空。两处**已登记的差异**（编号对应
+    docs/SDD_TICKET_TRACKER.md 的 #265 残余 R1 / R2+R3）：
+    ① `compacted_turn_count` 一律以关键字转发：**端口输出无差异**（`RunTracer` 按
+    `is not None` 决定是否写 metadata 键 ⇒ 显式 `None` 与不传同效；`NullTracer` 本就不
+    产出观测，两条路皆零输出），差异只在"调用关键字集合"这一层；
+    ② context 超限臂收口后**保留**在途句柄（`keep_handle`）——复刻它 #264 之前的既有
+    形状：该句柄会被**第二条收集臂**再收一次，取消臂（"超限 + 消费方在终态帧上断连"）
+    与异常臂（"超限臂落终态的 append 失败"）两条出口皆然。
+    端口实现的选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外，
+    故可选/故障 sink 不拖垮 Core 的性质不变。工具批次的 span 归 ToolExecutor：
+    `tracer` 原样转交。
+
+    收口责任边界（按可证伪的方式写）：**收口只经本对象的成对方法**，已收口的句柄在本
+    对象里唯一存放。各终结点**何时**调用、取消/异常臂经 `snapshot()` 拿的是哪份副本，
+    由 `_drive` 与两个终态臂决定——本对象不保证"每个出口都被调用到"。
+
+    边界：`run_span`（诊断日志的根 span id）**不收**——它只在创建时写一次、不进端口，
+    没有"起/清两处写"的漂移面，留在 `_drive` 局部（#264 已定的同一条判据）。
+    """
+
+    tracer: Tracer = field(default_factory=NullTracer)
+    #: 在途句柄：非 None = 有一次尚未收口的观测。未配置观测时是 NullSpan；adapter
+    #: 降级时可能是 None——两种情况端口自身都安全（见 observability/port.py）。
+    ctx_span: Span | None = None
+    generation: Span | None = None
+
+    def run_started(self) -> None:
+        self.tracer.run_started()
+
+    def run_completed(
+        self, final_text: str, usage_total: dict[str, int] | None = None,
+    ) -> None:
+        self.tracer.run_completed(final_text, usage_total=usage_total)
+
+    def run_failed(self, reason: str) -> None:
+        self.tracer.run_failed(reason)
+
+    @property
+    def trace_id(self) -> str | None:
+        """本 run 的真实 trace 标识（观测缺席/降级时如实 None，不伪造）。"""
+        return self.tracer.trace_id
+
+    @property
+    def trace_url(self) -> str | None:
+        """与 trace_id 并列的可点击 URL（同一降级模式）。"""
+        return self.tracer.trace_url
+
+    def context_build_started(self, *, step: int) -> None:
+        self.ctx_span = self.tracer.context_build_started(step=step)
+
+    def context_build_completed(
+        self, *, compacted_turn_count: int | None = None, keep_handle: bool = False,
+    ) -> None:
+        """收口 context span（成功路径）。
+
+        端口调用**无条件**——句柄可能是降级实现的 None，端口自己早退（port.py
+        模块 docstring 的句柄契约）。成功路径收口即清口（与 _drive 原调用点"调完
+        紧跟一句 `= None`"一致）。
+
+        ``keep_handle`` 只服务 context 超限臂：那条臂在 #264 之前就**不清**句柄
+        （#264 只是原样搬过来），于是同一句柄会被**第二条收集臂**再收一次——取消臂
+        （"超限 + 消费方在终态帧上断连"）与异常臂（"超限臂落终态的 append 失败"，
+        实测同样可达）两条出口皆然。本票是等价重构 ⇒ 逐字保留该形状，两条出口与
+        可达路径登记为残余 R2 / R3（见 docs/SDD_TICKET_TRACKER.md 的 #265 段），
+        要不要修由单独一张票决定。
+        """
+        self.tracer.context_build_completed(
+            self.ctx_span, compacted_turn_count=compacted_turn_count,
+        )
+        if not keep_handle:
+            self.ctx_span = None
+
+    def model_call_started(self, *, step: int, messages: Any, model: str | None = None) -> None:
+        self.generation = self.tracer.model_call_started(
+            step=step, messages=messages, model=model,
+        )
+
+    def model_call_completed(
+        self, *, output_text: str,
+        usage: dict[str, int] | None = None,
+        duration_ms: int | None = None,
+        finish_reason: str | None = None,
+        provider_request_id: str | None = None,
+        response_model: str | None = None,
+        fallback_transitions: list[Any] | None = None,
+        tool_call_names: list[str] | None = None,
+    ) -> None:
+        self.tracer.model_call_completed(
+            self.generation, output_text=output_text, usage=usage,
+            duration_ms=duration_ms, finish_reason=finish_reason,
+            provider_request_id=provider_request_id, response_model=response_model,
+            fallback_transitions=fallback_transitions, tool_call_names=tool_call_names,
+        )
+        self.generation = None
+
+    def close_pending(
+        self, *, error_type: str | None, reason: str, cancelled: bool = False,
+    ) -> None:
+        """取消臂 / 异常臂的观测收口：在途 ctx_span → 在途 generation → run_failed。
+
+        三条调用的**条件与顺序**逐字保留（原有实现的形状，本票不改）：在途句柄
+        才调端口——与成功路径的无条件调用不同，那是原臂的既有语义；取消归因为
+        "cancelled"而不是异常类型名。
+        """
+        if self.ctx_span is not None:
+            self.tracer.context_build_completed(self.ctx_span)
+            self.ctx_span = None
+        if self.generation is not None:
+            self.tracer.model_call_failed(
+                self.generation,
+                error_type=("cancelled" if cancelled else error_type),
+            )
+            self.generation = None
+        self.tracer.run_failed(reason)
+
+    def snapshot(self) -> _Telemetry:
+        """收口快照（#264 纪律）：值取一份交给收尾上下文，收口只置空快照自己那份。
+
+        臂上的活值不动——臂写完即 return，回写没有读者；写回反而会掩盖"谁拥有
+        这两个句柄"（`tests/agent/test_terminal_arms.py` 的取消臂用例钉住这条）。
+        """
+        return _Telemetry(
+            tracer=self.tracer, ctx_span=self.ctx_span, generation=self.generation,
+        )
+
+
+@dataclass
 class _TerminalContext:
     """取消臂 / 异常臂共享的收尾上下文（架构候选 1）。
 
@@ -289,9 +428,8 @@ class _TerminalContext:
     terminal: _RunFinalizer
     streamer: BlockStreamer | None
     model_coord: ModelFallbackCoordinator
-    tracer: Tracer
-    ctx_span: Span | None
-    generation: Span | None
+    #: 观测收口用的**快照**（见 `_Telemetry.snapshot`）：收尾上下文不持活值。
+    telemetry: _Telemetry
 
     def interrupt_streams(self) -> list[SessionEvent]:
         """流式块收口 + 切换事实落盘（取消臂与异常臂同一不变量）。
@@ -317,7 +455,7 @@ class _TerminalContext:
         self, *, error_type: str | None, reason: str, cancelled: bool = False,
         readable_message: str | None = None,
     ) -> list[SessionEvent]:
-        """model/failed 归因 + tracer 收口（ctx_span / generation / run_failed）。
+        """model/failed 归因 + 观测收口（在途 ctx_span / generation / run_failed）。
 
         ``cancelled`` 区分取消臂（True）与异常臂（False）的 model/failed 消息；
         ``error_type`` 只落类型名（脱敏不变量）；完整消息与调用栈只进结构化日志
@@ -330,18 +468,13 @@ class _TerminalContext:
                 step=self.steps, cancelled=cancelled, error_type=error_type,
                 readable_message=readable_message,
             ))
-        # 观测端口（#249）恒为对象且已包保护层（见 _GuardedTracer）：这里既不判空
-        # 也不兜异常，端口实现的故障不会让调用方紧随其后的终态事件写不出去。
-        if self.ctx_span is not None:
-            self.tracer.context_build_completed(self.ctx_span)
-            self.ctx_span = None
-        if self.generation is not None:
-            self.tracer.model_call_failed(
-                self.generation,
-                error_type=("cancelled" if cancelled else error_type),
-            )
-            self.generation = None
-        self.tracer.run_failed(reason)
+        # 观测收口（#249 / #265）：在途句柄的三条调用收在 `_Telemetry.close_pending`
+        # 里，本方法只决定调用时点与归因入参。端口恒为对象且已包保护层（见
+        # _GuardedTracer）：收口侧既不判空也不兜异常，端口实现的故障不会让调用方
+        # 紧随其后的终态事件写不出去。
+        self.telemetry.close_pending(
+            error_type=error_type, reason=reason, cancelled=cancelled,
+        )
         return events
 
 
@@ -361,12 +494,14 @@ class _TerminalArms:
       引用**（_drive 就地累加 usage、写 `model_call_open` 标志），臂读到的自然是当时值。
       **只收臂真正读的**：`run_span`（日志用的 span id）留在 _drive 的局部变量里——臂一个读者
       都没有，收进来就是死字段。
-    · **同点写回**：step_base / memory_event_start / tracer / streamer —— _drive 里各自
+    · **同点写回**：step_base / memory_event_start / streamer —— _drive 里各自
       **只有一处赋值**，臂在那条语句里同步写回；局部变量保留给模型轮/工具批次继续读（本票 Scope
       lock 不搬那段）。唯一写点 ⇒ 不存在两个真相。`run_id` **不在此列**：owner 是
       `_RunFinalizer.begin_run`（本类只读，见下面的 property），不存第二份。
-    · **唯一存放**：ctx_span / generation —— _drive 里有"起/清"两处写，局部变量删除、只留本对象
-      （两处状态才会漂移，这正是要收敛的形态；#265 的 telemetry 切片从这里继续）。
+    · **唯一存放**：telemetry —— `tracer` 与在途句柄（ctx_span / generation）住 `_Telemetry`，
+      臂只按引用透传（#265 落地：这三样此前双份存放/双处写——tracer 靠同点写回对齐、句柄"起/清"
+      各两处写；收进单点 owner 后**句柄不出对象**，#264 的"唯一存放"从臂字段延续到该对象）。
+      收尾要的是**快照**（见 `context()`），不是活值。
     """
 
     session: Session
@@ -377,10 +512,8 @@ class _TerminalArms:
     cancel_reason_supplier: Callable[[], str] | None
     step_base: int = 0
     memory_event_start: int = 0
-    tracer: Tracer = field(default_factory=NullTracer)
+    telemetry: _Telemetry = field(default_factory=_Telemetry)
     streamer: BlockStreamer | None = None
-    ctx_span: Span | None = None
-    generation: Span | None = None
 
     @property
     def run_id(self) -> str | None:
@@ -403,12 +536,16 @@ class _TerminalArms:
         return self.step_base + steps
 
     def context(self, steps: int) -> _TerminalContext:
-        """取消臂 / 异常臂共享的收尾上下文（两臂字段完全重合 ⇒ 单点转换）。"""
+        """取消臂 / 异常臂共享的收尾上下文（两臂字段完全重合 ⇒ 单点转换）。
+
+        观测面取 `_Telemetry.snapshot()`：收口只置空快照自己的在途句柄，臂上的活值
+        不动（#264 纪律）。
+        """
         return _TerminalContext(
             session=self.session, run_id=self.run_id,
             steps=self.envelope_step(steps), terminal=self.terminal,
             streamer=self.streamer, model_coord=self.model_coord,
-            tracer=self.tracer, ctx_span=self.ctx_span, generation=self.generation,
+            telemetry=self.telemetry.snapshot(),
         )
 
     def cancel_reason(self) -> str:
@@ -703,9 +840,6 @@ class AgentRuntime:
         # 注意 steps 仍是 run 内轮次计数（max_steps 保险丝与 AgentRunResult.steps
         # 依赖它逐 run 从 0 起算），全局编号一律走 step_base + steps。
         step_base = 0
-        # 观测端口（#249）：本 run 的 tracer 恒为对象——缺席实现是 NullTracer，
-        # 选定与保护见 _new_tracer。
-        tracer: Tracer = NullTracer()
         # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
         # begin_run 之前异常 = 没有可记账的 run，保持 None。
         streamer: BlockStreamer | None = None
@@ -730,13 +864,18 @@ class AgentRuntime:
         # 退化为透传（异常原样上抛），但看门狗/并发闸对所有 run 生效。
         model_coord = self._new_coordinator()
         run_span = new_span_id()
-        # 终结臂上下文（#264）：run_id / step_base / tracer / streamer / memory 起点
-        # 在各自的既有唯一写点同步写回本对象（见 _TerminalArms 的字段纪律）；
-        # ctx_span / generation 只住这里（_drive 不再留同名局部变量）。
+        # 观测状态单点 owner（#265）：tracer 在 begin_run 之后选定（见下），在途
+        # 句柄（ctx_span / generation）只住这里——_drive 不再留同名局部变量，句柄
+        # 也不出该对象（#264 "唯一存放"的落点）。run_span 留在本函数局部：它不可变、
+        # 不进端口，没有"起/清两处写"，收进去就是死状态（#264 同一条判据）。
+        telemetry = _Telemetry()
+        # 终结臂上下文（#264）：run_id / step_base / streamer / memory 起点
+        # 在各自的既有唯一写点同步写回本对象（见 _TerminalArms 的字段纪律）。
         arms = _TerminalArms(
             session=session, terminal=terminal, usage_total=usage_total,
             model_coord=model_coord,
             result_holder=result_holder, cancel_reason_supplier=cancel_reason_supplier,
+            telemetry=telemetry,
         )
         try:
             # 写入 user 消息事件
@@ -763,9 +902,10 @@ class AgentRuntime:
             )
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
-            tracer = self._new_tracer(session, run_id, user_input, turn_index)
-            arms.tracer = tracer
-            tracer.run_started()
+            # 观测端口（#249）恒为对象——缺席实现是 NullTracer，选定与保护见
+            # _new_tracer；此处是它的唯一写点（#265 起由 _Telemetry 持有）。
+            telemetry.tracer = self._new_tracer(session, run_id, user_input, turn_index)
+            telemetry.run_started()
             # 流式块记账绑定本 run（ADR-0016 §3.3）：此后思考/文本 chunk 经
             # streamer 合帧成 durable delta；取消/失败臂负责 interrupt 收口。
             streamer = BlockStreamer(session)
@@ -813,7 +953,7 @@ class AgentRuntime:
 
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
-                arms.ctx_span = tracer.context_build_started(step=steps)
+                telemetry.context_build_started(step=steps)
                 try:
                     messages = await self._context_builder.build(session)
                 except ContextWindowExceededError as error:
@@ -826,14 +966,12 @@ class AgentRuntime:
                 compaction = next(
                     (e for e in new_events if e.type == CONTEXT_COMPACTED), None,
                 )
-                tracer.context_build_completed(
-                    arms.ctx_span,
+                telemetry.context_build_completed(
                     compacted_turn_count=(
                         compaction.data.get("compacted_turn_count")
                         if compaction is not None else None
                     ),
                 )
-                arms.ctx_span = None
                 for event in new_events:
                     yield to_agent_event(event)
 
@@ -843,7 +981,7 @@ class AgentRuntime:
                 llm_started = time.perf_counter()
                 # generation 句柄（ADR-0018 D7）：与 llm_call 诊断行同源同时点，
                 # 完成/失败时回填；异常臂/取消臂负责收口在途 generation。
-                arms.generation = tracer.model_call_started(
+                telemetry.model_call_started(
                     step=steps + 1, messages=messages,
                     model=self._primary_model_name,
                 )
@@ -978,8 +1116,7 @@ class AgentRuntime:
                 # generation 回填（ADR-0018 D7）：与 llm_call 诊断行同源数据——
                 # usage/时延/finish_reason/fallback 履历；无数据键省略零伪造。
                 response_meta = getattr(ai, "response_metadata", None) or {}
-                tracer.model_call_completed(
-                    arms.generation,
+                telemetry.model_call_completed(
                     output_text=extracted_content,
                     usage=usage,
                     duration_ms=llm_duration_ms,
@@ -989,7 +1126,6 @@ class AgentRuntime:
                     fallback_transitions=fallback_transitions,
                     tool_call_names=[c.name for c in calls] if calls else None,
                 )
-                arms.generation = None
                 if tool_calls:
                     model_data["tool_calls"] = [
                         {"id": c.id, "name": c.name, "args": c.args} for c in calls
@@ -1057,7 +1193,9 @@ class AgentRuntime:
                 try:
                     executions = await self.executor.execute_batch(
                         calls,
-                        tracer=tracer,
+                        # 工具 span 是 ToolExecutor 的职责：观测端口原样转交
+                        # （不经 _Telemetry 转发，本对象只管 run 级在途状态）。
+                        tracer=telemetry.tracer,
                         session=session,
                         operation_context=OperationContext(
                             session_id=session.session_id,
@@ -1270,13 +1408,17 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
     ) -> AsyncIterator[AgentEvent]:
         """context 超限臂：模型在本轮从未被调用，直接落终态（不经 failure_terminal）。"""
-        arms.tracer.context_build_completed(arms.ctx_span)
-        arms.tracer.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
+        # keep_handle=True 复刻本臂 #264 之前的既有形状（收口不清口 ⇒ 同一 span 被第二条
+        # 收集臂再收一次：取消臂的"终态帧上断连"与异常臂的"落终态 append 失败"两条出口）。
+        # 行为零变化是本票 AC，缺陷登记为残余 R2 / R3（见 _Telemetry 的 docstring 与
+        # docs/SDD_TICKET_TRACKER.md 的 #265 段）。
+        arms.telemetry.context_build_completed(keep_handle=True)
+        arms.telemetry.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
         failed = arms.session.append(
             RUN_FAILED,
             {"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": str(error),
-             "trace_id": arms.tracer.trace_id,
-             "trace_url": arms.tracer.trace_url},
+             "trace_id": arms.telemetry.trace_id,
+             "trace_url": arms.telemetry.trace_url},
             run_id=arms.run_id, step_id=arms.envelope_step(steps),
         )
         arms.terminal.mark_terminal_written()
@@ -1296,13 +1438,13 @@ class AgentRuntime:
         镜像（yield）**夹在记忆抽取与 checkpoint 之间**：先后顺序是基线冻结的事实
         （checkpoint 失败被 _save_checkpoint 吞掉，但记忆抽取失败会走异常臂）。
         """
-        arms.tracer.run_completed(final, usage_total=dict(arms.usage_total) or None)
+        arms.telemetry.run_completed(final, usage_total=dict(arms.usage_total) or None)
         end_event = arms.session.end_run(
             arms.run_id, status="completed", final_text=final,
             usage_total=dict(arms.usage_total) or None,
             cost_usd=None,   # TODO(spec 12): 费率表未定义，不伪造
-            trace_id=arms.tracer.trace_id,
-            trace_url=arms.tracer.trace_url,
+            trace_id=arms.telemetry.trace_id,
+            trace_url=arms.telemetry.trace_url,
         )
         arms.terminal.mark_terminal_written()
         self._write_memories(arms.session, arms.memory_event_start)
@@ -1324,13 +1466,13 @@ class AgentRuntime:
         reason 用的是同一个常量（STATUS_MAX_STEPS_EXCEEDED /
         STATUS_IDENTICAL_TOOL_FAILURE_LOOP），调用点只传一次。
         """
-        arms.tracer.run_failed(reason)
+        arms.telemetry.run_failed(reason)
         end_event = arms.terminal.failure_terminal(
             steps=arms.envelope_step(steps),
             reason=reason,
             message=message,
-            trace_id=arms.tracer.trace_id,
-            trace_url=arms.tracer.trace_url,
+            trace_id=arms.telemetry.trace_id,
+            trace_url=arms.telemetry.trace_url,
         )
         self._write_memories(arms.session, arms.memory_event_start)
         if end_event is not None:
@@ -1353,8 +1495,8 @@ class AgentRuntime:
         arms.terminal.cancelled_terminal(
             steps=arms.envelope_step(steps),
             reason=reason,
-            trace_id=arms.tracer.trace_id,
-            trace_url=arms.tracer.trace_url,
+            trace_id=arms.telemetry.trace_id,
+            trace_url=arms.telemetry.trace_url,
         )
 
     async def _terminal_exception(
@@ -1397,8 +1539,8 @@ class AgentRuntime:
             steps=arms.envelope_step(steps),
             reason=provider_reason or type(error).__name__,
             message=terminal_message,
-            trace_id=arms.tracer.trace_id,
-            trace_url=arms.tracer.trace_url,
+            trace_id=arms.telemetry.trace_id,
+            trace_url=arms.telemetry.trace_url,
         )
         if end_event is not None:
             yield to_agent_event(end_event)

@@ -28,6 +28,7 @@ from agent_harness.context.builder import ContextWindowExceededError
 from agent_harness.observability import LangfuseSink
 from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.session import (
+    CONTEXT_COMPACTED,
     MODEL_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -301,6 +302,44 @@ class _OverflowingContextBuilder:
         raise ContextWindowExceededError("超限")
 
 
+class _CompactingContextBuilder:
+    """ContextBuilder 替身：投影时落一条 context/compacted 事实（非异常路径）。
+
+    runtime 读这条事件的 `compacted_turn_count` 喂给 context span 的收口——
+    `_Telemetry` 只负责把它转发到端口，这里是那条 metadata 的端到端来源。
+    """
+
+    async def build(self, session: Any) -> list:
+        session.append(CONTEXT_COMPACTED, {"compacted_turn_count": 2})
+        return []
+
+
+@pytest.mark.asyncio
+async def test_compaction_count_reaches_the_context_span_metadata(tmp_path, monkeypatch):
+    """压缩计数必须随 context span 的收口到达端口（AC1 的 metadata 面）。"""
+    seen: list[int | None] = []
+
+    class _CountSpy(NullTracer):
+        def context_build_started(self, *, step: int) -> Any:
+            return f"ctx-{step}"
+
+        def context_build_completed(
+            self, span: Any, *, compacted_turn_count: int | None = None,
+        ) -> None:
+            seen.append(compacted_turn_count)
+
+    monkeypatch.setattr(runtime_module, "NullTracer", lambda: _CountSpy())
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([AIMessage(content="答")]), registry, ToolExecutor(registry),
+        context_builder=_CompactingContextBuilder(),
+    )
+
+    await runtime.run(make_session(tmp_path), "hi")
+
+    assert seen == [2], "compaction 事件的计数必须原样到端口（不是 None、不是别的值）"
+
+
 @pytest.mark.asyncio
 async def test_context_window_exceeded_drives_terminal_port_lifecycle(tmp_path, monkeypatch):
     """超限臂：这一臂连 model_call_started 都不会发生，run_failed 仍必须到达端口。"""
@@ -318,6 +357,38 @@ async def test_context_window_exceeded_drives_terminal_port_lifecycle(tmp_path, 
     assert result.status == STATUS_CONTEXT_WINDOW_EXCEEDED
     assert calls == [
         "run_started", "context_build_started", "context_build_completed", "run_failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_window_exceeded_then_disconnect_collects_the_span_twice(
+    tmp_path, monkeypatch,
+):
+    """超限臂 + 终态帧上断连：同一 context span 会被**第二条收集臂**再收一次。
+
+    这条路径**生产可达**（消费方在终态帧上断连 ⇒ GeneratorExit 落进 `_drive` 的取消
+    臂），6 次端口调用是 #264 之前的既有形状：本票（等价重构）逐字保留，两条出口与其
+    余细节登记为残余 R2 / R3（tracker #265 段）。用途同 `tests/agent/test_terminal_arms.py`
+    的同名用例——修 R2 / R3 的那张票会让它转红；在这里它钉的是**既有事实**。
+    """
+    calls = _record_null_tracer_calls(monkeypatch)
+    session = make_session(tmp_path)
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([AIMessage(content="不会走到这里")]),
+        registry, ToolExecutor(registry),
+        context_builder=_OverflowingContextBuilder(),
+    )
+
+    agen = runtime.run_stream(session, "hi")
+    async for event in agen:
+        if event.type == RUN_FAILED:
+            break  # 悬空点：终态帧已出，消费方在此断开
+    await agen.aclose()
+
+    assert calls == [
+        "run_started", "context_build_started", "context_build_completed", "run_failed",
+        "context_build_completed", "run_failed",
     ]
 
 
