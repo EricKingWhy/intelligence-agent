@@ -10,6 +10,11 @@ ScriptedModel 全链验证"整段序列长什么样"（`tests/agent/test_event_s
 
 界线：本文件**不碰**"走哪条臂、何时 return"——那是 `_drive` 的职责（由 golden 覆盖）。
 
+#265（T11 第二切片）把观测可变状态（tracer + 在途 ctx_span / generation）收进
+`_Telemetry`，本文件随之只改**属性路径**（`arms.*` → `arms.telemetry.*`）——既有断言的
+期望值一字未改，那正是"提取零行为变化"的一部分证据；另加一节直接钉 `_Telemetry` 自身的
+成对 / 收口纪律（臂层断言此前只是顺带覆盖）。全链那一半仍由 golden 承担。
+
 本文件同时补掉两条 #263 留下的残余（见 `docs/SDD_TICKET_TRACKER.md` B-27 段残余①）：
 `_TerminalContext.interrupt_streams` 里 `streamer.interrupt(step=…)` 与 `MODEL_FALLBACK`
 的 `self.steps + 1` 此前**没有任何冻结序列覆盖**（14 个场景无一在终结臂里产出
@@ -24,7 +29,12 @@ from typing import Any
 
 import pytest
 
-from agent_harness.agent.runtime import AgentRuntime, _RunFinalizer, _TerminalArms
+from agent_harness.agent.runtime import (
+    AgentRuntime,
+    _RunFinalizer,
+    _Telemetry,
+    _TerminalArms,
+)
 from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
@@ -64,8 +74,10 @@ RUN_ID = "run-1"
 class _RecordingTracer:
     """记录臂调了哪些观测方法。
 
-    golden 用 NullTracer（no-op）⇒ 观测调用在全链基线里**不可见**；而 #265 要动的
+    golden 用 NullTracer（no-op）⇒ 观测调用在全链基线里**不可见**；而 #265 收敛的
     正是这套 telemetry 调用点，所以在臂这一层把它钉住：哪条臂调什么、带什么值。
+    句柄也由这里造（`ctx-span-<step>` / `generation-<step>`）——#265 之后句柄不再
+    流经调用方，只有一个消费者（`_Telemetry`）能测到"收到的是哪一个"。
     （真实实现：`agent_harness/observability/port.py`，不抛的保证由 `_GuardedTracer`
     在 Core 单点强制——本替身不模拟那一层。）
     """
@@ -79,16 +91,34 @@ class _RecordingTracer:
     def _record(self, name: str, **fields: Any) -> None:
         self.calls.append((name, fields))
 
+    def run_started(self) -> None:
+        self._record("run_started")
+
     def run_completed(self, final_text: str, usage_total: dict[str, int] | None = None) -> None:
         self._record("run_completed", final_text=final_text, usage_total=usage_total)
 
     def run_failed(self, reason: str) -> None:
         self._record("run_failed", reason=reason)
 
+    def context_build_started(self, *, step: int) -> Any:
+        self._record("context_build_started", step=step)
+        return f"ctx-span-{step}"
+
     def context_build_completed(
         self, span: Any, *, compacted_turn_count: int | None = None,
     ) -> None:
         self._record("context_build_completed", span=span)
+
+    def model_call_started(
+        self, *, step: int, messages: Any, model: str | None = None,
+    ) -> Any:
+        self._record("model_call_started", step=step)
+        return f"generation-{step}"
+
+    def model_call_completed(
+        self, generation: Any, *, output_text: str, **rest: Any,
+    ) -> None:
+        self._record("model_call_completed", span=generation, output_text=output_text)
 
     def model_call_failed(self, generation: Any, *, error_type: str) -> None:
         self._record("model_call_failed", error_type=error_type)
@@ -206,7 +236,7 @@ class _ArmsKit:
             cancel_reason_supplier=cancel_reason_supplier,
             step_base=step_base,
             memory_event_start=memory_event_start,
-            tracer=self.tracer,
+            telemetry=_Telemetry(tracer=self.tracer),
             streamer=streamer,
         )
 
@@ -258,8 +288,8 @@ def test_context_passes_the_round_state_through(session: Session) -> None:
     streamer.begin_run(RUN_ID)
     coord = _PendingCoordinator()
     kit = _kit(session, streamer=streamer, coord=coord)
-    kit.arms.ctx_span = object()
-    kit.arms.generation = object()
+    kit.arms.telemetry.ctx_span = object()
+    kit.arms.telemetry.generation = object()
 
     ctx = kit.arms.context(steps=3)
 
@@ -269,9 +299,114 @@ def test_context_passes_the_round_state_through(session: Session) -> None:
     assert ctx.terminal is kit.arms.terminal
     assert ctx.streamer is streamer
     assert ctx.model_coord is coord
-    assert ctx.tracer is kit.tracer
-    assert ctx.ctx_span is kit.arms.ctx_span
-    assert ctx.generation is kit.arms.generation
+    assert ctx.telemetry.tracer is kit.tracer
+    assert ctx.telemetry.ctx_span is kit.arms.telemetry.ctx_span
+    assert ctx.telemetry.generation is kit.arms.telemetry.generation
+
+
+# ---------------------------------------------------------------------------
+# `_Telemetry`：观测可变状态的单点 owner（#265）
+# ---------------------------------------------------------------------------
+
+
+def test_telemetry_pairs_the_in_flight_handles() -> None:
+    """起 / 收成对：句柄不出对象，收口后不留悬空（#247 AC4 的"每个出口都释放"）。
+
+    成功路径的端口调用是**无条件**的（句柄可能因 adapter 降级为 None，端口自己
+    早退）——与取消/异常臂的"仅在途才调"是两条既有语义，各钉一条。
+    """
+    tracer = _RecordingTracer()
+    telemetry = _Telemetry(tracer=tracer)
+
+    telemetry.context_build_started(step=2)
+    assert telemetry.ctx_span == "ctx-span-2", "句柄住在对象里，调用方拿不到"
+    telemetry.context_build_completed(compacted_turn_count=1)
+    assert telemetry.ctx_span is None
+    telemetry.model_call_started(step=3, messages=[], model="m")
+    assert telemetry.generation == "generation-3"
+    telemetry.model_call_completed(output_text="答", usage={"total_tokens": 1})
+    assert telemetry.generation is None
+
+    assert [name for name, _ in tracer.calls] == [
+        "context_build_started", "context_build_completed",
+        "model_call_started", "model_call_completed",
+    ]
+    # 端口收到的是**本对象保管的那个句柄**（这层身份无法从别处观察）
+    assert ("context_build_completed", {"span": "ctx-span-2"}) in tracer.calls
+    assert ("model_call_completed", {"span": "generation-3", "output_text": "答"}) \
+        in tracer.calls
+    # trace 身份如实透传端口（缺席实现是 None，不伪造）
+    assert telemetry.trace_id == "trace-1"
+    assert telemetry.trace_url == "https://trace.example/trace-1"
+    assert _Telemetry().trace_id is None
+
+
+def test_telemetry_success_path_calls_the_port_even_with_a_degraded_handle() -> None:
+    """adapter 降级（句柄 None）时成功路径仍调端口——端口对 None 句柄安全早退。"""
+
+    class _DegradedTracer(_RecordingTracer):
+        def context_build_started(self, *, step: int) -> Any:
+            self._record("context_build_started", step=step)
+            return None  # 降级 adapter 的如实返回（端口契约允许 None 句柄）
+
+    tracer = _DegradedTracer()
+    telemetry = _Telemetry(tracer=tracer)
+
+    telemetry.context_build_started(step=0)
+    telemetry.context_build_completed()
+
+    assert [name for name, _ in tracer.calls] == [
+        "context_build_started", "context_build_completed",
+    ]
+    assert ("context_build_completed", {"span": None}) in tracer.calls
+
+
+def test_telemetry_close_pending_order_and_attribution() -> None:
+    """收口三连：在途 ctx_span → 在途 generation（取消归因 "cancelled"）→ run_failed。"""
+    tracer = _RecordingTracer()
+    telemetry = _Telemetry(tracer=tracer, ctx_span="span-ctx", generation="gen-1")
+
+    telemetry.close_pending(error_type=None, reason="cancelled", cancelled=True)
+
+    assert [name for name, _ in tracer.calls] == [
+        "context_build_completed", "model_call_failed", "run_failed",
+    ]
+    assert ("context_build_completed", {"span": "span-ctx"}) in tracer.calls
+    assert ("model_call_failed", {"error_type": "cancelled"}) in tracer.calls
+    assert telemetry.ctx_span is None and telemetry.generation is None
+
+
+def test_telemetry_close_pending_keeps_the_exception_attribution() -> None:
+    """异常臂：error_type 原样透传（未分类故障的可读文案由 `_TerminalContext` 负责）。"""
+    tracer = _RecordingTracer()
+    telemetry = _Telemetry(tracer=tracer, generation="gen-1")
+
+    telemetry.close_pending(error_type="TimeoutError", reason="TimeoutError")
+
+    assert [name for name, _ in tracer.calls] == ["model_call_failed", "run_failed"]
+    assert ("model_call_failed", {"error_type": "TimeoutError"}) in tracer.calls
+
+
+def test_telemetry_close_pending_skips_handles_that_are_not_in_flight() -> None:
+    """非在途不调端口（成功路径收过的句柄 / 模型尚未调用）——原臂的既有语义。"""
+    tracer = _RecordingTracer()
+
+    _Telemetry(tracer=tracer).close_pending(error_type=None, reason="boom")
+
+    assert [name for name, _ in tracer.calls] == ["run_failed"]
+
+
+def test_telemetry_snapshot_leaves_live_handles_alone() -> None:
+    """快照取一份：收口只置空快照自己那份，活值不动（#264 纪律的落点）。"""
+    live = _Telemetry(tracer=_RecordingTracer(), ctx_span="span-ctx", generation="gen-1")
+
+    snapshot = live.snapshot()
+    snapshot.close_pending(error_type=None, reason="cancelled", cancelled=True)
+
+    assert live.ctx_span == "span-ctx"
+    assert live.generation == "gen-1"
+    assert (snapshot.ctx_span, snapshot.generation) == (None, None)
+    assert (snapshot.tracer, snapshot.trace_id) == (live.tracer, "trace-1")
 
 
 def test_cancel_reason_defaults_to_cancelled_and_asks_the_supplier(session: Session) -> None:
@@ -439,8 +574,8 @@ async def test_cancelled_arm_discards_events_but_persists_them(session: Session)
     kit = _kit(session, streamer=streamer, coord=coord, step_base=2)
     kit.arms.terminal.model_call_open = True
     # 取消发生在模型调用在途：ctx_span / generation 都在（观测收口的两个前置）。
-    kit.arms.ctx_span = "span-ctx"
-    kit.arms.generation = "gen-1"
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
     mark = len(session.events)
     envelope = kit.arms.envelope_step(3)
 
@@ -471,9 +606,9 @@ async def test_cancelled_arm_discards_events_but_persists_them(session: Session)
     ]
     assert not [c for c in kit.tracer.calls if c[0] == "run_completed"]
     # ctx 是**快照**：收口置空的是快照，臂上那份活值不动（臂写完即 return，
-    # 回写没有读者——写回反而会掩盖"谁拥有这两个字段"）。
-    assert kit.arms.ctx_span == "span-ctx"
-    assert kit.arms.generation == "gen-1"
+    # 回写没有读者——写回反而会掩盖"谁拥有这两个句柄"）。
+    assert kit.arms.telemetry.ctx_span == "span-ctx"
+    assert kit.arms.telemetry.generation == "gen-1"
 
 
 @pytest.mark.asyncio
