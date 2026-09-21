@@ -4090,3 +4090,22 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 恢复 = python **直写松散 ref 文件**（`os.makedirs(<commondir>/refs/heads/workbuddy)` + 写 `40位SHA\n`），
 绕开 git 的 ref 写入路径；`for-each-ref` 快照 **14 → 15 条，只多目标 ref、零丢失**，且随后跨 8+ 次独立进程
 （含一次 4m52s 长跑脚本）复验均能解析。
+
+---
+
+## B-32（#265 telemetry 切片——T11 第二切片）
+
+**状态**：实现 + 两轮两轴独立审查完成。两轴**第 1 轮均判"必须修后重审"**（findings 全数处置于 `7aef01b`）；**第 2 轮 B 轴判"通过"（P0/P1/P2 = 0）、A 轴判"不通过"**——A 轴三条全部落在 docstring / 记账面（**代码面无须返工**：B 轴 16 例端口调用差分实测 `7aef01b` 与 `09bae51` 结构签名逐项相同），已由 `cef3bcd` 落地。父票 `#247` **保持 OPEN**（本票只关自己）。
+
+**交付面**：`src/agent_harness/agent/runtime.py`（`_Telemetry`：`tracer` + 在途 `ctx_span` / `generation` 的单点 owner，方法全是端口转发；`句柄不出对象`；`_TerminalContext` 只持 `snapshot()`，`_TerminalArms.telemetry` 一处持有）+ `tests/agent/test_terminal_arms.py`（属性路径适配 + 2 条新用例）+ `tests/observability/test_tracer_port.py`（2 条新用例）。**行为零变化**的两条判据：① #263 的 golden（`test_event_sequence_golden.py`）逐字未改且全绿；② 端口调用差分（16 例，两轴各自独立复现）在 `09bae51` ↔ `7aef01b` 之间**结构签名逐项相同**。`run_span` **仍留 `_drive` 局部**（不可变、不进端口、无"起/清两处写"⇒ #264 同一条判据）；端口实现选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外（不变量 #21 不变）。
+
+**落点**：`7d6e30d` 实现 → `7aef01b` 两轴 findings 修复 → `2fb974f` 集成合并（并入 #274 的 12 笔，**独立审查行见台账**）→ `cef3bcd` 修后重审的两条 P3 措辞 + 超限断连端到端用例 → docs / 台账（本批末期）。**审查范围行与 docs-only 白名单唯一住 `docs/review_ledger.tsv`**；**逐轮 findings、红证、变异与门禁读数明细统一写在 `docs/phase_status/2026-09.md` 的 B-32 段**，本节只留状态、约定与残余。
+
+**残余（登记，不阻断；R1 为已知差异、R2/R3 是同一根因的两条出口，修不修由单独一张票决定）**：
+1. **R1**：`compacted_turn_count` 一律以关键字转发（成功路径 / 超限臂 / `close_pending` 三处口径统一）。**端口输出无差异**（两个实现都按 `is not None` 决定是否写 metadata 键），差异只在"调用关键字集合"这一层——按端口 Protocol 显式关键字签名的实现都不可见。
+2. **R2**：context 超限臂收口后**保留**在途句柄（`keep_handle=True`）⇒"超限 + 消费方在终态帧上断连"时**取消臂**对同一 span 再收一次（端口调用 6 次而非 5 次）。这是 #264 之前的既有形状，本票 AC = 行为逐字兼容 ⇒ 逐字保留；新增两条用例（臂层 `test_context_exceeded_arm_keeps_the_handle_it_closed` + 端到端 `test_context_window_exceeded_then_disconnect_collects_the_span_twice`）钉住它，并在 docstring 注明"**既有事实、非期望语义**"——修 R2/R3 的票会让这两条转红。
+3. **R3**：同一保留句柄的**第二条收集出口是异常臂**——超限臂落终态的 `append` 失败（存储故障）会让异常臂同样再收一次（B 轴运行级实测，与 `09bae51` 逐项相同）。**修 R2 的票必须同时覆盖两条出口**，只按取消臂写会漏一半。
+4. `keep_handle` 是公开参数、默认值（`False`）是"语义正确"的那一侧 ⇒ 将来新增调用点漏传会**静默**改行为。B 轴建议改私有命名 / 专用方法（让"错的那条路"自带名字）。**登记不修**：改名会让本批已锚定的树与三份审查全部作废，且不属本票 AC。
+5. `7aef01b` 的 commit message 有一处与事实不符：自称"docstring 不再自称…每个出口都不可能漏掉收口"，实测该句**当时仍在**（A 轴修后重审抓到，判该条 P3 未闭合）。因三份独立审查与合并提交均已锚定该 sha，按**不改写已锚定历史**处理 ⇒ 由 `cef3bcd` 真正改掉该句，此处如实登记这处 message 失实。
+6. **沿袭未动（指针，非本票残余）**：#264 段的残余②③（四条臂终态 `run_id` 无端到端锁；`aclose()` 打在"臂正 `await _save_checkpoint` 中途"未实测）与死参数 `failure_terminal(steps=)` 保持原状——本票未触碰其代码路径。
+
