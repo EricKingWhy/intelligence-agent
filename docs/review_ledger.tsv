@@ -8,7 +8,8 @@
 #   描述必须与自己的 range 相符（实测踩过一次：描述写"不含 X"而 range 含 X）。
 #   脚本校验：base/tip 存在、base 是 tip 的祖先、tip 是 HEAD 的祖先。
 #
-# [whitelist] 段：  <sha>\t<原因>    （7 位缩写或 40 位全长都认）
+# 2026-09-21	B-30 接手 delta 闭合复验——A 轴（Standards，只读子代理；锚 `d5e1a68`，范围 `20ee173..d5e1a68`）：上轮 4 条 findings 逐条闭合成立；另出 3 条 = P2×1 + P3×2（P0/P1 = 0）：① 归档仍以事实口吻引用已撤回的"13 处"、② 状态行"523efc1 之后 6 笔"实为 7 笔 ⇒ 均处置于 `b7108c7`；③ 协议 §8.1 第 4 条把裸写 `^{commit}` 与 `<冻结sha>` 并列写成"重定向符"（过度声明：实测两者不引号亦 exit 0，只有 < 会走样）⇒ 处置于本批末笔（逐笔 sha 见「集成」段）	20ee173..d5e1a68
+[whitelist] 段：  <sha>\t<原因>    （7 位缩写或 40 位全长都认）
 #   只收 docs-only——脚本逐条校验改动文件是否全部命中**文档扩展名**（`docs/` 下只认
 #   .md/.txt/.rst/.tsv/.json/.yaml，因为仓库里就有 `docs/integration/*.sh`）。
 #   已被审查行覆盖的条目是死条目，脚本会告警，应删除。
@@ -141,4 +142,4 @@ be7db83	P1-B4 审查记录（tracker P1-B4 节 + phase_status 归档索引 + 本
 3976e02	性能线并入 main 的落点记录（PHASE_STATUS 索引 + 月度归档明细，docs-only）
 83dcfb73932f10d95afd21a7734fbc92dd45d610	集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
 4f41ba7	B-23 集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
-b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 月度归档修后复扫条、新增闭合复验条；docs-only）
+b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 月度归档修后复扫条、新增闭合复验条；docs-only）5658d86	B-30 A 轴闭合复验 1 条 P3 处置（协议 §8.1 第 4 条过度声明按实测改写 + 归档闭合复验按轴归属；docs-only）
