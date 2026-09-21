@@ -625,8 +625,42 @@ B 臂走的是**真机制**：CDP `Emulation.setEmulatedMedia` 打开 `prefers-r
 > 若测得可忽略 ⇒ 本票**不改代码**，关单为「复核通过」；本文件必须留下这次测量的数字。
 
 ### B6 — Ledger 单动作连接收敛（#274）
-_待落基线。_
-要求指标：
+
+_（2026-09-21 基线已落：本节原先只有占位符 `_待落基线。_`，不含任何既有数字 ⇒ 未违反 §1.2 的「不得改写他人已落的数字」。）_
+
+**迁移次数的事实来源**（读实现确认，不凭空取值）：
+- 正常工具调用 = **2 次迁移**：`tooling/executor.py:322`（PENDING → RUNNING）+ `:421`（→ SUCCEEDED / FAILED）。
+- 取消路径 **+1**：`tooling/executor.py:388` / `:736`（→ CANCELLED）。
+- 恢复 reconcile 链 **+3**：`recovery/coordinator.py:513`（RUNNING → UNKNOWN）→ `:516`（→ NEED_RECONCILE）→ `:558`（→ 终态）。
+⇒ 正常路径 **2** 次迁移；含 reconcile 的完整链 **5** 次迁移。
+
+| 场景 | 规模 | 指标 | 改造前 | 改造后 | 口径 / 命令 | 日期 | commit |
+|---|---|---|---|---|---|---|---|
+| 单次 `update_state`（PENDING → RUNNING） | N=300 | `_connect` 调用次数 / 次 | **3.00** | **1.00** | `measure_b6.py`，spy 包装 `_connect` 计数 | 2026-09-21 | `6c4790d`（红证）/ `a2651d6`（实现） |
+| 同上 | N=300 | 单次耗时 中位 / p95 / max | **32.7 / 41.6 / 51.7 ms** | **13.7 / 18.7 / 23.8 ms** | `time.perf_counter` 逐次测 | 2026-09-21 | 同上 |
+| 一次**正常工具调用**（2 次迁移） | — | `_connect` 总次数 | **6** | **2** | 单次计数 × 2 | 2026-09-21 | 同上 |
+| 一次工具调用**含 reconcile 全链**（5 次迁移） | — | `_connect` 总次数 | **15** | **5** | 单次计数 × 5 | 2026-09-21 | 同上 |
+
+**复现性（同一个量测脚本，改造前 3 轮 / 改造后 3 轮）**
+
+- `_connect` 计数：改造前三轮恒 **3.00**；改造后三轮恒 **1.00**（确定性，与机器负载无关）。
+- 单次耗时中位：改造前 **32.7（N=300）/ 27.8（N=300）/ 24.8（N=100）ms**；
+  改造后 **13.7（N=300）/ 10.0（N=300）/ 11.7（N=100）ms** ⇒ 约 **2.3×**（±15% 机器噪声，只作数量级）。
+- 一次正常工具调用的 connect 次数 **6 → 2**；含 reconcile 全链 **15 → 5**。
+
+**口径（§2.3）**：改造前后**同一条命令、同一台机**，每轮重建 DB；计数类断言优先
+（CI 上耗时抖动大）。**长期仪表**是 `tests/storage/test_sqlite_operation_ledger.py` 里那条
+连接计数用例（确定性、随票入库）；上表耗时才用一次性脚本，脚本**不入库**
+（保证本票 `git diff --stat` 只出现 Scope lock 内的文件）。
+
+```bash
+# 主仓库 venv + PYTHONPATH 指向本 worktree 的 src（worktree 的 .venv 无依赖）
+cd <worktree>
+PYTHONUTF8=1 PYTHONPATH=$PWD/src \
+  "D:/intelligence-agent-backend/.venv/Scripts/python.exe" measure_b6.py 300
+```
+
+原要求指标（保留）：
 - 一次 `update_state` 的 `_connect` 调用次数（改造前 **3**）；
 - 一次工具调用在 Ledger 上的迁移次数 × 单次 `update_state` 耗时（改造前/后）。
 

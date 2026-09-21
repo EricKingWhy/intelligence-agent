@@ -3906,3 +3906,112 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 ⑦ **docker 沙箱清理面有残留泄漏（B 轴实测，只报告）**：`src/agent_harness/sandbox/docker.py` 的延迟清理（`_queue_late_cleanup` / `_drain_pending_cleanup`）只在**后续调用**里 drain ⇒ daemon 上累积 20 个 `agent-harness-*` 容器（全 `Exited (137)`）与若干 `agent-harness-<uuid>` 卷。本批未做根因定位、未修（超票面）。
 
 **集成与关单（2026-09-21，本手一手读数）**：按 §13.2(b) 直接在施工 clone 的 `main` 上提交（无「先回后正」；批开工点 `origin/main` = `5003377` 是 `HEAD` 祖先）。集成范围 **`5003377..bb594e6` = 6 笔**（`e036681` 门禁修复 → `1383e52` demo 同缺陷类修复 → `f763ee5` docs 落点 → `1a77f9b` 读数归属更正 → `0571b01` 闭合轮 findings 处置 → `bb594e6` 台账行 2 行 + 白名单 1 行），**只有前 2 笔动代码**（各 1 文件、1 行级）。集成前门禁：覆盖闸门 `scripts/check_review_coverage.sh` **exit 0**（提交总数 334 / 已审查 238 / 待判定 96）；**冻结树传递判据（§8.1 第 3 条）输出原文**：① `git diff --name-status --no-renames 1383e52 HEAD` = 4 行全 `M` 且全 docs-only（`docs/PHASE_STATUS.md` / `docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-09.md` / `docs/review_ledger.tsv`）⇒ 跑过全量的那棵树 `1383e52` 的**代码面 = 被集成的代码面**；② `git status --short` = `?? .zcodeignore`；`ruff check .` **All checks passed**（tip 复跑）；`git diff --check` 无输出；`git merge-base --is-ancestor origin/main HEAD` exit **0**。已按 §14.4 常设授权快进 `push origin main`：① `5003377..bb594e6`（上列 6 笔，**全部代码改动都在这 6 笔里**）→ 写后 `origin/main` = `HEAD` = `bb594e6`、`HEAD^{tree}` = `5cb7b0e49765f963769e743791d76f80fe3c7660`、ahead/behind = 0/0、**只有 `main` 一条 ref 移动**；② `bb594e6..<本批末笔>` = 收尾 6 笔（`cedb30c` 集成段落盘 → `ef4a09b` 其白名单行 → `e3fa930` 集成 push 结构补记 → `d59705a` 其白名单行 → 本条修订 → 其白名单行），**纯 docs / 台账**（判据① 仍为同 4 行全 `M` docs-only ⇒ 冻结树 `1383e52` 的代码面 = 集成后的代码面）；每次 push 后均实测 `origin/main` = `HEAD`、ahead/behind = 0/0。**§14.9 通知、两 clone 落后读数与重叠面、「全量日志首行写 `sha + HEAD^{tree}`」约定**的完整明细见 `docs/phase_status/2026-09.md` B-31 段末三条子项（其中「§14.9 通知与约定」一条为通知正文；本节不复述，§16.1）。**无关单**：用户批准的单独「门禁修复」票，不对应任何 GitHub issue。**审查轮次（全批两轴，均只读子代理）**：① 发现轮锚 `fd9882c`（= `e036681` amend 前身）；② 闭合轮范围 `e036681..1a77f9b`——A 轴 `P0/P1 = 0` / P2×2 / P3×5、B 轴 `P0/P1 = 0` / P2×1 / P3×4，**两轴均判"可以合入"**；两轮 findings 全数处置于 `0571b01`。**如实登记本手两处机械失误（均当场被闸门抓到，都已修）**：① `606.00s` 读数错挂到 `full_b31_final.log` 名下并写进三处文档 ⇒ `1a77f9b` 更正为 `546.21s (0:09:06)`；② 台账追加脚本断言写成 `assert "\t" * 3 in row`（行内只有 2 个制表符）⇒ 改 `assert row.count("\t") == 2` 后成功（147 → 150 行）。
+---
+
+## 批 P1-B6（2026-09-21）：Operation Ledger 单动作三连连接收敛（#274）
+
+**票面**：GitHub #274（`## What to build` 必做 1/2/3、AC1–AC9、`## Scope lock`、`## Blocked by` = #242）；父票 #267。
+**状态**：`6c4790d`（红证 + 守卫用例）→ `a2651d6`（实现）→ 本批 docs/台账提交。**未落地任何 ref**——沙箱写
+`refs/heads/workbuddy/` 会回收该命名空间，落点由用户在终端一条 `git update-ref` 完成。
+
+### 阻塞解除（实测，非照抄票面）
+
+`#242` 已 CLOSED（`2026-09-20T18:05:02Z`）。票面说它「**很可能**在同一文件加列/加读写」，故设了硬 `Blocked by`。
+**实测它根本没碰 `storage/sqlite.py`**：
+
+```
+git diff --name-only 42b7faf^ 42b7faf  → recovery/__init__.py, recovery/reconcile.py, tests/recovery/test_adjudication_token.py
+git diff --name-only 923e72c^ 923e72c  → recovery/coordinator.py, tests/integration/test_bash_reconcile.py, tests/recovery/test_reconcile.py
+```
+
+`git log --oneline -10 -- src/agent_harness/storage/sqlite.py` 亦证实两笔不在其中 ⇒ **原 blocker 是预防性的，重叠为零。**
+
+### 基线
+
+本 worktree 的 `HEAD`(`bb594e6`) 落后 `origin/main`(`09bae51`)**213 个文件**，但**其中无一个属 `storage/`**
+（`git diff --stat origin/main -- src/agent_harness/storage/sqlite.py` 为空 ⇒ 要改的代码已是最新形态）。
+为免与 main 分叉，提交以 `origin/main` 为父（`git read-tree origin/main` 对齐索引，不动 refs）。
+
+### 变更面
+
+| 文件 | 改动 | numstat（vs `origin/main`） |
+|---|---|---|
+| `src/agent_harness/storage/sqlite.py` | `update_state`：三次 `_connect` 收成一次（读 → 校验 → CAS 写 → 读回，同一个 `async with` 块内） | +33 −20 |
+| `tests/storage/test_sqlite_operation_ledger.py` | 新增 3 用例（连接计数 / `KeyError` / CAS 竞态） | +118 −0 |
+| `docs/PERF_BASELINE.md` | B6 节：改造前基线 + 改造后对照 + 复现性三轮 | +36 −2 |
+
+**AC 逐条**
+- **AC1** 连接计数 spy：一次 `update_state` = **1** 次连接；附改造前红证。✅
+- **AC2** 三种异常逐项等价：`KeyError`（新增）/ `ValueError`（既有 `test_operation_moves_to_terminal_state_with_recovery_data:71`）/ `RuntimeError`（新增竞态用例），**文案逐字**不变。✅
+- **AC3** 既有测试**删除行数 = 0**（`git diff --numstat` = `118 0`）。✅
+- **AC4** UPDATE 的 SQL 与改造前**逐字一致**：程序化提取三引号块比对，EOL 归一后 `True`；
+  （`core.autocrlf=true` 使 `git show` 返回 LF 而工作树为 CRLF —— 直接字符串比对会假阴性，已按归一后比对）。
+  diff 里该 SQL 全部是**上下文行**，无 `+`/`-`。✅
+- **AC5** CAS 未变：两个 writer 竞争同一行，后者仍抛 `RuntimeError`。✅
+- **AC6** 代码面 `git diff --stat` 只出现 `storage/sqlite.py` 与其测试（`docs/PERF_BASELINE.md` 是本票 AC7 要求的例外）。✅
+- **AC7** `docs/PERF_BASELINE.md` B6 节前后数字 + 复现性三轮。✅
+- **AC8** 门禁全绿（下）。✅
+- **AC9** DoD 写明必做 3 的「不做」理由（下）。✅
+
+### 红证（改造前，实测）
+
+```
+$ PYTHONUTF8=1 PYTHONPATH=$PWD/src "D:/intelligence-agent-backend/.venv/Scripts/python.exe" \
+    -m pytest tests/storage/test_sqlite_operation_ledger.py -q -p no:randomly
+E       AssertionError: update_state 打开了 3 个连接，期望 1
+E       assert 3 == 1
+1 failed, 9 passed in 10.37s
+```
+
+### 门禁（精确读数）
+
+- **专项**：`tests/storage/ + tests/recovery/ + tests/web/test_web_multiturn.py` → **177 passed / 0 failed**
+  （`--junitxml`：`tests 177 / failures 0 / errors 0 / skipped 0`，25.41 s）。
+- **全量**：`pytest tests/ -q -p no:randomly` → **2916 passed / 2 skipped / 42 deselected / 0 failed**，462.37 s。
+  逐数对得上：上一票终点 **2913** + 本票新增 3 用例 = **2916**。
+- `ruff check .` → `All checks passed!`
+- `git diff --check` → 无输出。
+
+> 运行链路（**别照抄票面的 `uv run`**）：worktree 的 `.venv` 是空壳（无 pytest/ruff），必须用
+> **主仓 venv** `D:/intelligence-agent-backend/.venv/Scripts/python.exe` + `PYTHONPATH=<worktree>/src`
+> + `PYTHONUTF8=1`，pytest 加 `-p no:randomly`。
+
+### Review（两轴独立只读子代理）
+
+- fixed point = `09bae51`（= `origin/main` tip），范围 `09bae51..a2651d6`（2 个 commit）。
+- **Standards 轴**：**可以合入** —— 0×P0/P1/P2 + 3×P3（注释略复述实现；函数内 import 与文件顶部风格不一；
+  一处缺 `: Path` 注解）。AC3/AC4/AC6、R1/R2/R3、必做 3 逐条核对为「守住」。
+- **Correctness 轴**：**可以合入** —— 0×P0/P1 + **1×P2** + 数条 P3。
+  **P2**：并发用例**改造前后都通过** ⇒ 对「三连连接收敛」这件事**无判别力**（它守的是 CAS 不被删掉）。
+  已采纳：在该用例 docstring 里点明「它守 CAS，不守连接数」。
+  轴内 A/B 实测：竞态注入确实被触发（`fired=True`，WAL 下未被锁阻塞 ⇒ **非假绿**）；
+  连接计数用例**改造前红 3 / 改造后绿 1** ⇒ 它是 B6 唯一真正的回归守卫。
+  等价性实测：非法迁移路径改造前后**都不写库**（事后 `SELECT state` 仍为原值）；`KeyError` 路径改造前后都是 **1** 次连接。
+
+### 必做 3「不做」的理由（AC9）
+
+不做跨模块 `_connect` 工厂合并：
+1. `storage/sqlite.py:3-4` 已写明这几个 store「逻辑上各自独立 contract」；
+2. 4 处同形但独立的工厂分别在 `storage/sqlite.py:35-41`、`memory/sqlite_record_store.py:54-61`、
+   `knowledge/registry.py:38-44`、`workspace/store.py:85-92`（`_BUSY_TIMEOUT_MS` 各自定义）；
+   其中 `workspace/store.py:88` 多一行 `row_factory`，位置与其它三处**不同**（在 PRAGMA 之前）；
+3. 合并只省行数，风险是打破各自的 contract 边界；
+4. `recovery/coordinator.py:344-361` **不是**连接工厂（是 `BEGIN EXCLUSIVE TRANSACTION` 锁），
+   **不得**被算作「第 5 份样板」。
+
+### 性能（本票收益，数字只落 `docs/PERF_BASELINE.md` B6 节）
+
+`_connect` / 次 `update_state` **3.00 → 1.00**（确定性）；单次耗时中位 **32.7 → 13.7 ms**（约 **2.3×**）；
+一次正常工具调用（2 次迁移）的 connect 次数 **6 → 2**，含 reconcile 全链 **15 → 5**。
+
+### 未闭合项（每项写明解除条件）
+
+1. **4 处同形 `_connect` 工厂未合并**。解除条件：出现**第三个**理由（前两个：行数收益不足；`sqlite.py` 曾被
+   #242 占用）——例如将来统一更换 SQLite 驱动 / 统一加连接级配置，届时**以「统一驱动策略」为名开票，不以去重为名**。
+2. **不做显式事务包裹读+写**。解除条件：有实测证明 CAS 重试在真实负载下频繁抛 `RuntimeError`（当前无此证据）；
+   届时需先有 ADR 讨论串行化策略，并与 `recovery/coordinator.py` 的数据库级锁口径对齐。
+3. **单次 `update_state` 仍需一次 connect**（改造后中位 ~13.7 ms）。本票只减少**次数**（3→1），不消除 connect 本身；
+   进一步降本需连接复用/池化，**超出本票 Scope lock**，且与「每操作新连接 + per-connection `busy_timeout`」的
+   既有刻意设计冲突（票面「不得触碰的既有刻意设计」第 1 条），故不做。
+
+**残余风险**：读-校验-写之间的窗口**变短但未消失**（票面 Risks 已明示）；CAS 仍是唯一防线。
