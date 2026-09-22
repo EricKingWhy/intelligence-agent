@@ -33,9 +33,14 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
     「推送范围 / 单车道 / 受影响面」的**局部**读数，写进同一个 `<sha>.json` 会把该树的**全量**
     结论覆写成只剩一条车道（`--replay` 还得依赖那个 `<rev>` 仍然存在）。
   · **落盘失败 = FAIL**（fail-closed）：读数的唯一来源写不出来 ⇒ 这条"通过"不可引用。
-  · **工作树不干净 = 拒绝落盘并 FAIL**：6 条车道是在**工作树**上跑的，而读数只能记 `HEAD` 的
+  · **工作树偏离 `HEAD` = 拒绝落盘并 FAIL**：6 条车道是在**工作树**上跑的，而读数只能记 `HEAD` 的
     `sha` / `^{tree}`；两者不一致时写出去，这份读数就指到了一棵**没被测过的树**（§8.7 第 3 条）。
-    只想看结果、不想先提交 ⇒ 加 `--no-record`。
+    判据**不看单一 `git status` 的脸色** —— 它受本地 config 影响、且对 `assume-unchanged` 完全失明
+    （两种绕过都被 R1 实测复现过）。三条独立判据：① 追踪文件偏离（显式带 `--untracked-files=all`）；
+    ② `assume-unchanged` / `skip-worktree` 位（单独查 `git ls-files -v`）；③ 未跟踪文件里**后缀命中
+    车道输入**的（`LANE_INPUT_SUFFIXES`）。其余未跟踪文件（本仓稳态就有 `?? .zcodeignore`）**如实
+    记进读数的 `worktree.untracked`**、不据以拒绝 —— 否则一个与车道无关的未跟踪文件会把「读数的
+    唯一来源」永久卡死。只想看结果、不想先提交 ⇒ 加 `--no-record`。
   · `--replay <file>` 按落盘里的 `argv` / `cwd` / `env` **原样重跑**并比对判定（墙钟不参与），
     让"落盘 JSON 可独立复核"成为机械判据而不是人眼比对。
   ⚠ 它只覆盖本脚本的**这 6 条机械车道**，**不是** `AGENTS.md` §14.10 的完整门禁 ——
@@ -62,6 +67,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -531,7 +537,8 @@ def _env_overrides(lane: Lane) -> dict[str, str]:
 
 def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
                 results: list[tuple[Lane, int, float, str]],
-                affected: dict | None, changed: list[str]) -> dict:
+                affected: dict | None, changed: list[str],
+                worktree: dict | None = None) -> dict:
     """拼出落盘的读数文档。
 
     **票面 #293 的字段要求**（`sha` + `^{tree}` + 每车道结论 + 墙钟 + 工具版本）由
@@ -589,30 +596,84 @@ def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
             ],
         },
         "affected": (dict(affected, changed_files=len(changed)) if affected is not None else None),
+        # 读数**自证**它跑在哪棵树上：落盘前已断言追踪文件与 HEAD 一致、且无 assume-unchanged /
+        # skip-worktree 位（否则根本走不到这里）。未跟踪文件里**不适配车道输入**的那些如实列出，
+        # 免得读者以为「工作树完全等于 HEAD」（那是更强的、我们**没有**证明的断言）。
+        "worktree": {
+            "tracked_matches_head": True,
+            "untracked": [ln[3:].strip() for ln in (worktree or {}).get("untracked", [])][:20],
+            "untracked_total": len((worktree or {}).get("untracked", [])),
+        },
         "lanes": lanes,
     }
 
 
-def worktree_dirty() -> str:
-    """工作树对 `HEAD` 的未提交改动（**含未跟踪文件**）——`git status --porcelain` 原文，空 = 干净。
+#: 未被跟踪、但**可能被某条车道读进来**的后缀 ⇒ 出现就拒绝落盘（fail-closed）。
+#: ruff 读 py/pyi/ipynb；oxlint / tsc 读 ts/tsx/js/jsx/mjs/cjs/vue；guards / coverage 读
+#: tsv（映射表、台账）与 json/toml/cfg/ini/yaml 一类配置。
+LANE_INPUT_SUFFIXES = (
+    ".py", ".pyi", ".ipynb",
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue",
+    ".json", ".toml", ".cfg", ".ini", ".tsv", ".yaml", ".yml",
+)
 
-    落盘前必须为空：`ruff` / `oxlint` / `tsc` / `guards` 都是**在工作树上跑**的，而读数记的是
-    `HEAD` 的 `sha` + `^{tree}`。两者不一致时写出去，这份读数就指到了一棵**没被测过的树** ——
-    正是协议 §8.7 第 3 条（"读数必须能指到它跑的树"）最典型的失效形状。
+#: 本脚本**自己的输出**目录：它不是任何车道的输入（没有车道读 `docs/gate/**`），而落盘必然把它
+#: 造出来 ⇒ 必须从「车道输入」判据里排除，否则「同一棵树重跑」永远走不到（第二次一定被守卫拒）。
+GATE_DIR_PREFIX = GATE_DIR.replace(os.sep, "/") + "/"
+
+
+def worktree_divergence() -> dict:
+    """工作树对 `HEAD` 的偏离（**不依赖本地 config，也不盲信 `git status`**）。
+
+    车道是在**工作树**上跑的，而读数只能记 `HEAD` 的 `sha` / `^{tree}` ⇒ 两者一旦不一致，
+    写出去的读数就指到了一棵**没被测过的树**（协议 §8.7 第 3 条）。返回四类：
+
+      · `tracked`   —— 追踪文件的内容/类型偏离。**显式**带 `--untracked-files=all`：
+                        `git config status.showUntrackedFiles no` 挡不住它（R1 实测过这个绕过）。
+      · `hidden`    —— `assume-unchanged` / `skip-worktree` 位。⚠ 这两个位让 `git status`
+                        **彻底看不见**该文件的改动（R1 实测：打上 assume-unchanged 后改文件，
+                        `git status --porcelain` 仍为空、落盘照样成功）⇒ 必须单独查 `ls-files -v`。
+      · `untracked` —— 其余未跟踪文件（**如实记录，不据以拒绝**）。
+      · `risky`     —— 未跟踪文件里**后缀命中 `LANE_INPUT_SUFFIXES`** 的那些（据以拒绝）。
+
+    `tracked` / `hidden` / `risky` 非空 ⇒ 拒绝落盘并 FAIL。**不**把「有任何未跟踪文件」当拒绝
+    理由（本仓稳态就有 `?? .zcodeignore`）—— 那会把「读数的唯一来源」永久卡死；也不把
+    `docs/gate/` 自己的产物算成「车道输入」（它不是任何车道的输入，见 `GATE_DIR_PREFIX`）。
     """
-    return git("status", "--porcelain").stdout.strip()
+    tracked: list[str] = []
+    untracked: list[str] = []
+    stat = git("status", "--porcelain", "--untracked-files=all").stdout
+    for line in stat.splitlines():
+        if not line.strip():
+            continue
+        (untracked if line.startswith("??") else tracked).append(line)
+    # 除 `H`（正常缓存）以外的任何位都算偏离：`S` = skip-worktree、小写 = assume-unchanged。
+    hidden = [ln for ln in git("ls-files", "-v").stdout.splitlines() if ln[:1] and ln[:1] != "H"]
+    risky = [
+        u for u in untracked
+        if u[3:].strip().lower().endswith(LANE_INPUT_SUFFIXES)
+        and not u[3:].strip().replace(os.sep, "/").startswith(GATE_DIR_PREFIX)
+    ]
+    return {"tracked": tracked, "hidden": hidden, "untracked": untracked, "risky": risky}
 
 
 def write_reading(*, head: str, tree: str, argv: list[str], wall: float,
                   results: list[tuple[Lane, int, float, str]],
-                  affected: dict | None, changed: list[str]) -> str:
+                  affected: dict | None, changed: list[str],
+                  worktree: dict | None = None) -> str:
     """落盘到 `docs/gate/<head sha>.json`，返回绝对路径。
 
     文件名用**全 40 位 sha**：短 sha 的宽度是环境属性（同一提交 7 位 / 8 位都实测过），当键会撞。
-    同一棵树重跑会**覆写同名文件**（读数以最后一次为准）—— 这是有意的，别当成 bug。
+    键是 `sha` 而**不是** `^{tree}`：共享同一棵树的多个提交（纯 docs 提交）各自产出一份，
+    `--replay` 各认各的。**同一个 sha 重跑会覆写同名文件**（读数以最后一次为准）—— 有意的。
+    ⚠ 但「重跑」有个前置：落盘一定把 `docs/gate/<sha>.json` 造出来，**只要它还没被提交**，守卫就
+    放行（它被 `GATE_DIR_PREFIX` 排除在「车道输入」之外）；**一旦它进了某个提交**，再跑就是
+    「追踪文件被改写」⇒ 守卫拒绝。想在那个 sha 上再取一次读数：要么先把这份读数提交掉、再在别处
+    checkout 该 sha 跑，要么本次只是「看一眼」就加 `--no-record`。
+    ⇒ 这段是本机制**固有的自指**（树里的文件无法认证它自己），如实写在这里，别读成 bug。
     """
     doc = reading_doc(head=head, tree=tree, argv=argv, wall=wall, results=results,
-                      affected=affected, changed=changed)
+                      affected=affected, changed=changed, worktree=worktree)
     out_dir = os.path.join(REPO_ROOT, GATE_DIR)
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{head}.json")
@@ -626,7 +687,19 @@ def replay_reading(path: str) -> int:
     """独立复核（票面 #293 的 AC）：按落盘里的 `argv` / `cwd` / `env` **原样重跑**，比对判定。
 
     比的是**判定**（每条车道的 PASS/FAIL），**不是墙钟** —— 票面明写"墙钟允许不同"。
-    不一致一律算失败：要么树变了，要么环境变了，要么落盘被改过；三种都不能引用。
+
+    **它证明什么、不证明什么**（R1 findings 后收紧，2026-09-22）：
+    · 证明："落盘里这些命令，在**当前工作树**上也给出同样的判定"。
+    · **不**证明"落盘那棵树被复核了" —— 落盘文件必然落在其目标 sha 的**子提交**里，所以复核时的
+      `HEAD` 天然不等于落盘 sha。两者不同时**打印出来**，别读成同一棵。
+    · 因此还做四道机械校验，任一不过一律 FAIL（缺一即不可引用）：
+      ① 落盘 `sha` / `tree` 必须是 40 位 hex；且 `sha` 在本仓**真实存在**、它的 `^{tree}` 必须
+         **等于**落盘写的 `tree`（伪造的 sha、或 sha 与 tree 不自洽 ⇒ 直接拒；`deadbeef…` 这类
+         在 R1 里被实测过能骗过旧版复核）；
+      ② 落盘里的**车道名集合**必须与当前脚本的车道集合完全一致 —— 脚本演化后旧 JSON 不得静默
+         "复核通过"而新车道从未被跑；
+      ③ 有车道 `argv` 缺失（工具缺失/被拦）⇒ **FAIL，不是 SKIP**（"核对不了就不放行"）；
+      ④ 当前工作树不得偏离 `HEAD`（同 `worktree_divergence()`），否则"判定相同"毫无意义。
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -638,15 +711,45 @@ def replay_reading(path: str) -> int:
     if not lanes:
         print("❌ 读数里没有 lanes")
         return 1
-    print(f"复核 {_rel(os.path.abspath(path))}：sha={(doc.get('sha') or '?')[:12]} "
-          f"tree={(doc.get('tree') or '?')[:12]} 落盘判定={doc.get('result')}")
+    recorded_sha = str(doc.get("sha") or "")
+    recorded_tree = str(doc.get("tree") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", recorded_sha) or not re.fullmatch(r"[0-9a-f]{40}", recorded_tree):
+        print(f"❌ 落盘里的 sha / tree 不是 40 位 hex：sha={recorded_sha!r} tree={recorded_tree!r}")
+        return 1
+    real_tree = git("rev-parse", "--verify", "--quiet", recorded_sha + "^{tree}", check=False).stdout.strip()
+    if real_tree != recorded_tree:
+        print(f"❌ 落盘署名不自洽：sha={recorded_sha[:12]} 在本仓解析出的 tree="
+              f"{real_tree[:12] or '（该 sha 不存在）'}，而落盘写的是 {recorded_tree[:12]}"
+              " ⇒ 这份读数不可引用（篡改过 / 不是本仓的读数）。")
+        return 1
+    divergence = worktree_divergence()
+    blocking = divergence["tracked"] + divergence["hidden"] + divergence["risky"]
+    if blocking:
+        print(f"❌ 复核前工作树已偏离 HEAD（{len(blocking)} 条）⇒ “判定相同”证明不了任何东西。"
+              " 先提交/摘掉这些改动再来。")
+        return 1
+    current = [ln.name for ln in build_lanes("")]
+    recorded_names = [ln.get("name") for ln in lanes]
+    if recorded_names != current:
+        print("❌ 车道集合不一致 —— 脚本已演化，这份落盘的复核结论**不成立**：")
+        print(f"     落盘：{recorded_names}")
+        print(f"     当前：{current}")
+        return 1
+    print(f"复核 {_rel(os.path.abspath(path))}：落盘 sha={recorded_sha[:12]} "
+          f"tree={recorded_tree[:12]} 落盘判定={doc.get('result')}")
+    head = git("rev-parse", "HEAD").stdout.strip()
+    if head != recorded_sha:
+        print(f"⚠ 当前 HEAD={head[:12]} ≠ 落盘 sha={recorded_sha[:12]}（落盘文件必然在其目标 sha 的"
+              "子提交里）⇒ 本复核只证明「这些命令在当前工作树上也给出同样判定」，**不**等于复核了落盘那棵树。")
     print("─" * 72)
     bad: list[str] = []
     for lane in lanes:
         name = lane.get("name") or "?"
         recorded = lane.get("argv")
         if not recorded:
-            print(f"  {name:11s} SKIP  落盘里没有 argv（{lane.get('blocked') or '未记录原因'}）")
+            bad.append(name)
+            print(f"  {name:11s} FAIL  落盘里没有 argv（{lane.get('blocked') or '未记录原因'}）"
+                  " ⇒ 复核不了就不放行")
             continue
         lane_argv = _expand_argv(recorded)
         env = dict(os.environ, **(lane.get("env") or {}))
@@ -820,23 +923,35 @@ def main(argv: list[str]) -> int:
         print("读数：本次是局部运行（--since / --only / --affected）"
               "⇒ **不落盘**（那不是全量门禁读数，避免覆写该树的全量结论）")
     if record_here:
-        dirty = worktree_dirty()
-        if dirty:
+        divergence = worktree_divergence()
+        blocking = divergence["tracked"] + divergence["hidden"] + divergence["risky"]
+        if blocking:
             # fail-closed：车道跑在**工作树**上，读数却只能记 `HEAD` 的 `sha` / `^{tree}`。
-            dlines = [ln for ln in dirty.split("\n") if ln.strip()]
-            print("❌ 读数落盘被拒：工作树对 HEAD 不干净 ⇒ 车道是在**工作树**上跑的，而读数只能记"
-                  " HEAD 的 `sha` + `^{tree}`；")
+            print("❌ 读数落盘被拒：工作树与 HEAD 的偏离会**影响车道输入** ⇒ 车道是在**工作树**上"
+                  "跑的，而读数只能记 HEAD 的 `sha` + `^{tree}`；")
             print("   写出去就成了「指到一棵没被测过的树」的读数（协议 §8.7 第 3 条）。")
-            for ln in dlines[:10]:
-                print(f"     {ln}")
-            if len(dlines) > 10:
-                print(f"     …（共 {len(dlines)} 条）")
-            print("   处置：先把改动落成 commit（**不要** `git stash`）再重跑；"
+            for label, key in (("追踪文件偏离", "tracked"),
+                               ("assume-unchanged / skip-worktree 位", "hidden"),
+                               ("未跟踪的**车道输入**（后缀命中）", "risky")):
+                items = divergence[key]
+                if not items:
+                    continue
+                print(f"   · {label}：{len(items)} 条")
+                for ln in items[:6]:
+                    print(f"       {ln}")
+                if len(items) > 6:
+                    print(f"       …（共 {len(items)} 条）")
+            if divergence["untracked"]:
+                print(f"   （另有 {len(divergence['untracked'])} 个未跟踪文件，后缀不命中车道输入"
+                      " ⇒ 不阻断；它们会如实记进读数的 `worktree.untracked`）")
+            print("   处置：先把这些改动落成 commit（**不要** `git stash`；`assume-unchanged` 位用"
+                  " `git update-index --no-assume-unchanged <path>` 摘掉）再重跑；"
                   "只想看一眼、不落盘就加 `--no-record`。")
             return 1
         try:
             path = write_reading(head=head, tree=tree, argv=list(argv), wall=wall,
-                                 results=results, affected=affected, changed=changed)
+                                 results=results, affected=affected, changed=changed,
+                                 worktree=divergence)
             print(f"读数已落盘：{_rel(path)}")
         except OSError as exc:
             # fail-closed：读数的唯一来源写不出来 ⇒ 这条"通过"不可引用（与"核对不了就不放行"同向）。
