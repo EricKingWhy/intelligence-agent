@@ -183,25 +183,35 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   （`web/src/components/StepDetail.window.test.tsx`，6224ms，即 B-29 已知 flake），一次 **67 文件
   1067 例全绿** ⇒ 该红是**非确定性**的，前端红**结构上无法归因**到本次改动。
 - **期望证据**：`受影响面（--affected …）` 块 + `Gate-0 PASS/FAIL`；`neg_tier < 4` 的层会被标 **unproven**。
-- **实测（2026-09-22，冻结树 `HEAD=deee3313 / tree=4db47417`；`git status --porcelain` 的**已跟踪**
+- **实测（2026-09-22，最终树 `HEAD=65f8d1f0a455 / tree=3cbc12dd63f2`；`git status --porcelain` 的**已跟踪**
   部分为空，仅剩一个**非本批**的未跟踪 `.zcodeignore`）**：
 
   | 状态 | 改动面 | 选中车道 | 内联跑的 | 只登记不跑的 | 墙钟（Gate-0 自报） |
   | --- | --- | --- | --- | --- | --- |
-  | A 后端 session | 1 文件（`session/approval.py`） | `coverage/diff-check/guards/pytest-full/ruff` | `diff-check`/`ruff`/`guards`/`coverage` + `tests/session` | `pytest-full` | **65.5s**（其中 `tests/session` 58.29s） |
-  | B 前端 src | 1 文件（`web/src/**`） | `build/coverage/diff-check/oxlint/tsc/vitest` | `diff-check`/`oxlint`/`tsc`/`coverage` | `web/src`（vitest）、`build` | **11.6s** |
-  | C 纯 docs | 1 文件（`review_ledger.tsv`） | `coverage/diff-check` | `diff-check`/`coverage` | — | **4.3s** |
+  | A 后端 session | 1 文件（`session/approval.py`） | `coverage/diff-check/guards/pytest-full/ruff` | `diff-check`/`ruff`/`guards`/`coverage` + `tests/session` | `pytest-full` | **88.9s**（其中 `tests/session` 82.21s） |
+  | B 前端 src | 1 文件（`web/src/**`） | `build/coverage/diff-check/oxlint/tsc/vitest` | `diff-check`/`oxlint`/`tsc`/`coverage` | `web/src`（vitest）、`build` | **12.7s** |
+  | C 纯 docs | 1 文件（`review_ledger.tsv`） | `coverage/diff-check` | `diff-check`/`coverage` | — | **3.7s** |
 
   ⚠ **四条读数的 `coverage` 车道都是红的**，这是闸门**正确工作**的形状：它从**工作树**读台账，而本批
-  自己的 7 笔提交（`d79fcba..deee331`）**当时还没写进台账**（本批含代码面 ⇒ 必须走**真实审查行**、
+  自己的 10 笔提交（`d79fcba..65f8d1f`）**当时还没写进台账**（本批含代码面 ⇒ 必须走**真实审查行**、
   不能走白名单）。⇒ **本块不含任何 `coverage` PASS 的结论**（它当时就是红的）；
   落台账后**必须复跑一次**并把读数写进落点记录（判据：`python scripts/check_review_coverage.py` 退出 0）。
 
-  同树**全量** Gate-0 作对照：仅 `coverage` 红、其余 5 条 PASS，**15.7s**。
+  ⚠ **同一台机器在本轮整体比上一轮慢**（全量 `pytest tests` 427.75s → 560.29s；A 的内联子集
+  58.29s → 82.21s；`vitest` 18.88s → 28.33s）⇒ 上表是**最终树**上**同一轮**的读数，跨轮的绝对秒数
+  **不可混用**；「倍数」只在同轮内可比（见下）。
+
+  同树**全量** Gate-0 作对照：仅 `coverage` 红、其余 5 条 PASS，**17.5s**。
   ⚠ A 行比全量 Gate-0 **更慢**，这是**正确**的——全量 Gate-0 **一条测试都不跑**，而 A 真的跑了
-  58.29s 的受影响子集。`--affected` 的价值**不在**"比快车道快"，而在 ① 告诉你**哪些重车道**
+  82.21s 的受影响子集。`--affected` 的价值**不在**"比快车道快"，而在 ① 告诉你**哪些重车道**
   受影响（A 点名 `pytest-full`，B 点名 `vitest` + `build`）② 用**受影响子集**替掉整套
   `pytest-full` / `vitest`。
+
+- **空改动面必须 fail-closed（2026-09-22 修后重审补的牙）**：`--affected HEAD`（此时
+  `git diff --name-only HEAD..HEAD` 恰为空）**修复前**会打印 `Gate-0 PASS：0/0 通过`——一个与真 PASS
+  **不可区分**的绿，而这是该参数的**自然用法**。现在空面**不收敛**：打印
+  「⚠ 改动面为空（该范围没有任何改动文件）⇒ **fail-closed：跑全部车道**」并**实跑 6/6**
+  （同树实测 `Gate-0 FAIL：5/6 通过，墙钟 16.8s`，仅 `coverage` 红）。
 
 - **三元组对账（票面 comment 新增的 AC「map 与 `--affected` 对同一批改动给出同一组车道」）**：
   对上述三个改动面，**三路求值逐项相同**——① map 侧（`tests/test_verification_map.py::_mine_eval`，
@@ -210,21 +220,27 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   三态 `map == summary` 与 `map == CLI` **全为 `true`**（车道集合与 focused 集合都比过）；
   `unmapped` 三态**全为 `[]`**（没有路径落空 ⇒ 没有触发 fail-closed 退回）。
 
-- **"整条重来"的对照基线（同树实测，口径 = 工具自报墙钟）**：全量 Gate-0 **15.7s** + 全量
-  `pytest tests` **427.75s** + 全量 `vitest run src` **18.88s** ≈ **462.3s**
-  （还不含 ⑩ 构建 / ⑪ e2e）。⇒ A 状态用 `--affected` 只花 **65.5s**，**约 7.1× 便宜**，
+- **"整条重来"的对照基线（同轮、同树；口径 = 各工具**自报**耗时，不混用进程墙钟）**：全量 Gate-0
+  **17.5s** + 全量 `pytest tests` **560.29s** + 全量 `vitest run src` **28.33s** ≈ **606.1s**
+  （还不含 ⑩ 构建 / ⑪ e2e）。⇒ A 状态用 `--affected` 只花 **88.9s**，**约 6.8× 便宜**，
   并且它点名了唯一必须补跑的重车道（`pytest-full`）。
   全量 `pytest tests` 的权威读数用 `PYTHONPATH=` 跑（绕开 safe-delete shim——否则跑到后期会被
   `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 截断、**拿不到结论行**，2026-09-22 实测踩过一次）+ `--junitxml`：
-  `3103 passed, 13 skipped, 42 deselected, 13 warnings in 427.75s`，rc=0；junit 聚合
+  `3103 passed, 13 skipped, 42 deselected, 13 warnings in 560.29s`，rc=0；junit 聚合
   `tests=3116 / failures=0 / errors=0 / skipped=13`。
-  全量 `vitest run src`：`Test Files 67 passed (67)` / `Tests 1067 passed (1067)`，`Duration 18.88s`，rc=0
+  全量 `vitest run src`：`Test Files 67 passed (67)` / `Tests 1067 passed (1067)`，`Duration 28.33s`，rc=0
   （同类干净树上此前另有过一次 1 例超时的读数 ⇒ 见本节血证 ②，「非确定性」的结论不变）。
-- **变异证明（隔离克隆 `%TEMP%` 里真删真改，正控全绿）**：删 `frontend-src` 整行 ⇒ 覆盖面红；
-  加一条重复行（`docs-dup`）⇒ **承重**红；把 `focused_runner` 复原成血证 ① 的写法 ⇒ **内联策略锁**红；
-  `neg_tier` 改 9 ⇒ 词表红。
+- **变异证明（隔离克隆 `%TEMP%\wbi_292_mut3` 里真删真改；正控 20 例全绿；每条都记「守卫 rc」+
+  「直接调 `gate0.parse_map()` 的结果」）**：删 `web/src/` 整行 ⇒ **覆盖面**红（2 例）；
+  加一条重复行（`docs-dup`）⇒ **承重**红（`test_every_row_is_load_bearing`）；
+  把 `focused_runner` 复原成血证 ① 的写法（给 `web/**` 挑 vitest）⇒ **内联策略锁**红；
+  `neg_tier` 改 9 ⇒ **阶梯值域**红。**外加本批新补的那条牙**：摘掉某行的 `coverage` ⇒
+  **`parse_map` 解析期**当场 `ValueError`（`verification.map.tsv:67 缺无条件车道：['coverage']`），
+  不必等 `--affected` 命中该面 ⇒ 守卫红（3 例）。克隆内逐字节还原后复跑 **20 passed**。
 - ⚠ **边界**（与协议 §8.8.9 **同源**，改一处必须两处同改）：只用于**失败后的增量重跑**；
-  未映射路径 ⇒ **fail-closed 退回全量**；不得替代推送前全量 Gate-0，也不得替代集成前完整门禁（§4）。
+  未映射路径 ⇒ **fail-closed 退回全量**；**改动面为空 ⇒ 同样 fail-closed（不收敛成 0 条）**；
+  同时给了 `--since` 与 `--affected` ⇒ **一律以 `--affected` 的范围为准**（并先印说明）；
+  不得替代推送前全量 Gate-0，也不得替代集成前完整门禁（§4）。
 
 ---
 
@@ -255,7 +271,9 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   **不在 Gate-0 里的那几条（②③⑤⑩⑪）**是长耗时的那批（② 后端全量 pytest 是分钟级；③⑪ 本文件无耗时读数；⑤ 标注十秒级、⑩ 标注秒到十秒级，两者均未在本批实测；⑫ 真机验收属人工车道，无耗时读数），且它们的受影响面**不由人当场划集合**（那正是放松的入口），只能来自机械可复核的
   映射（协议 **§8.8.2 INV-1 / §8.8.3 边界表 / §8.8.9**；映射**已机器化**，见 §2 ⑭）。
 - **`--affected <rev>` 的边界（issue #292 **已落地**，见 §2 ⑭）**：它**只**用于**失败后的增量重跑**，既不得替代
-  **推送前全量 Gate-0**（推送前恒跑全部 6 条），也不得替代**集成前完整门禁**（协议 §8.8.4 第 1 行）。改动面里出现**未映射路径** ⇒ **fail-closed 退回全量**；`neg_tier < 4` 的层会被标 **unproven**，**依据 unproven 主张跳过任一条车道必须在台账 / 落点记录里写明**。
+  **推送前全量 Gate-0**（推送前恒跑全部 6 条），也不得替代**集成前完整门禁**（协议 §8.8.4 第 1 行）。改动面里出现**未映射路径** ⇒ **fail-closed 退回全量**；**改动面为空**（如 `--affected HEAD`）
+  ⇒ **同样 fail-closed、不收敛成 0 条**（`0/0 通过` 与真 PASS 不可区分）；同时给 `--since` 与
+  `--affected` ⇒ **一律以 `--affected` 的范围为准**（并先印说明）；`neg_tier < 4` 的层会被标 **unproven**，**依据 unproven 主张跳过任一条车道必须在台账 / 落点记录里写明**。
 - `pre-push` hook **是本地便利，不是安全边界**：`git push --no-verify` 可绕过；
   `core.hooksPath` 是**本地配置**、不随仓库分发 ⇒ **别的 clone 没启用就等于没有**。
   所以它取消不了 CI，也取消不了两轴独立审查；**两侧仍然没有 CI**（这是已知缺口，不是本文能解决的）。
