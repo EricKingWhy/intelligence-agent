@@ -45,7 +45,10 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
+# ⚠ `--no-record`（issue #293）：Gate-0 默认会把读数写进 `docs/gate/<sha>.json`。在**推送那一刻**
+#    往工作树里写文件，等于把刚收干净的树又弄脏（AGENTS.md §14.10 要求 Working Tree clean），
+#    而那份读数也不属于任何提交 ⇒ 推送路径一律关闭落盘；读数的产生留给显式的集成前全量运行。
 if [ -n "$SINCE" ]; then
-  exec "$PY" scripts/gate0.py --since "$SINCE"
+  exec "$PY" scripts/gate0.py --no-record --since "$SINCE"
 fi
-exec "$PY" scripts/gate0.py
+exec "$PY" scripts/gate0.py --no-record

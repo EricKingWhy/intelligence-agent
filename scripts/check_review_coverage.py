@@ -35,11 +35,30 @@
 
     python scripts/check_review_coverage.py              # 0 = 全绿；1 = 有未声明 commit 或台账有问题
     LEDGER=path/to.tsv python scripts/check_review_coverage.py
+    LEDGER_DIR=path/to/dir python scripts/check_review_coverage.py     # 默认 docs/review_ledger.d
     python scripts/check_review_coverage.py --list       # 只打印范围与覆盖数；仍有缺口时退 2
 
 判据：`<最早台账 base>..HEAD` 的**每条 commit 都必须在台账里有归属**——审查行 / `[whitelist]` 段
-里逐条自校验过 docs-only 的 commit / **恰好只改 `docs/review_ledger.tsv`** 的记账提交。
+里逐条自校验过 docs-only 的 commit / **恰好只改台账文件本身**的记账提交。
 **代码提交永远不能走白名单**，只有"补一次审查"一条路。
+
+## 双读过渡（issue #293）
+
+台账有**两处来源**，本闸门**两处都认**（并集）：
+
+- `docs/review_ledger.tsv` —— 旧单文件（多线并行时两侧都 append 会反复走并集解析）；
+- `docs/review_ledger.d/<name>.tsv` —— **一文件一条**。目录不存在 = 空，不影响任何判定。
+
+两条硬约束：
+
+- **文件名只是标签，判定只看内容**：闸门**不**从文件名推断 sha / 范围 / 归属，所以文件名叫错
+  不会改变任何判定。这也意味着改名 / 重排不会造成口径漂移。
+- **append-only（与 vendored `show-me-your-work` 同源）**：目录形式下"追加一条" = **新建一个文件**；
+  写错要改 ⇒ **再加一条新文件**，**不去改既有文件**。本闸门**无法**机械证明这一点（与旧单文件
+  同样属于声明式输入）—— 它是纪律，不是判据，别把它读成已被强制。
+
+`.sh` 参考实现**只读旧单文件**，所以两者的"同 tip 同结论"只在**目录为空**时逐项可比；
+迁入目录后比的是**判定集**（三元组 + `❌` 集合），不是逐字 stdout——与既有的对照纪律一致。
 
 信任边界（与 `.sh` 相同，来自协议 §7 第 8 条）：台账是**声明式输入**——本闸门只能证明
 "每条 commit 都有归属"，**不能**证明审查真实发生过；审计窗口左端由台账自己决定；台账从
@@ -61,6 +80,9 @@ DOC_PATTERN = r'^(docs/.*\.(md|txt|rst|tsv|json|ya?ml)$|AGENTS\.md|CLAUDE\.md|CO
 DOC_RE = re.compile(DOC_PATTERN)
 
 LEDGER_PATH = "docs/review_ledger.tsv"
+
+#: 台账目录（issue #293）：**一文件一条**。不存在 = 空（过渡期两处都认，见模块 docstring "双读过渡"）。
+LEDGER_DIR = "docs/review_ledger.d"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40,64} (commit|tag) \d+$")
 
 FAIL_HELP = """
@@ -145,6 +167,70 @@ def read_ledger(path: str) -> tuple[list[str], list[str]]:
             continue
         (rows if section == "review" else wl).append(line)
     return rows, wl
+
+
+def _rel(path: str) -> str:
+    """仓库相对路径（正斜杠）—— 打印统一用这个形态（台账路径会在 `[whitelist]` 行里出现）。"""
+    return os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+
+
+def ledger_dir() -> str:
+    """台账目录的绝对路径（`LEDGER_DIR` 环境变量可覆盖，测试用）。"""
+    raw = os.environ.get("LEDGER_DIR") or LEDGER_DIR
+    return raw if os.path.isabs(raw) else os.path.join(REPO_ROOT, raw)
+
+
+def is_ledger_path(path: str) -> bool:
+    """这个路径是不是台账文件本身（旧单文件，或新目录下的一条 `.tsv`）。"""
+    return path == LEDGER_PATH or (path.startswith(LEDGER_DIR + "/") and path.endswith(".tsv"))
+
+
+def is_ledger_only(files: list[str]) -> bool:
+    """恰好只改**一个**台账文件 ⇒ 记账动作自动放行。
+
+    ⚠ 这是对 `.sh` 原判据（`== [docs/review_ledger.tsv]`）的**等价扩展**，不是放松：仍然要求
+    **恰好一个**文件，且那个文件必须是台账（旧单文件 / 新目录下的 `.tsv`）。夹带任何其他文件
+    （含 `scripts/`、`.md`、`.zcodeignore`）一律回落到正常判定。
+    不扩展的话，目录形式会重现死循环：登记一条 → 需要一个白名单行 → 白名单行又是新文件 → …
+    """
+    return len(files) == 1 and is_ledger_path(files[0])
+
+
+def read_all(legacy: str) -> tuple[list[str], list[str], int, int, list[str]]:
+    """读**两处**台账并求并集：返回 `(审查行, 白名单行, 旧文件行数, 目录行数, 告警)`。
+
+    旧单文件在前、目录按**文件名排序**在后——顺序只影响打印与 `base` 的比较顺序，**不影响判定**：
+    `base` 取的是"能被 HEAD 到达的最早那个"（按可达性比较，不是按行序），因此两处合并的先后
+    不改变三元组。
+    """
+    warns: list[str] = []
+    paths = [legacy]
+    d = ledger_dir()
+    if os.path.isdir(d):
+        for entry in sorted(os.listdir(d)):
+            full = os.path.join(d, entry)
+            if not os.path.isfile(full):
+                continue
+            if not entry.endswith(".tsv"):
+                warns.append(f"⚠️  {_rel(full)} 不是 .tsv，已忽略（目录只收 .tsv）")
+                continue
+            paths.append(full)
+    rows: list[str] = []
+    wl: list[str] = []
+    n_old = 0
+    for path in paths:
+        is_legacy = path == legacy
+        file_rows, file_wl = read_ledger(path)
+        rows += file_rows
+        wl += file_wl
+        if is_legacy:
+            n_old = len(file_rows)
+        elif not file_rows and not file_wl:
+            # 不失败：一个"什么都没声明"的文件不豁免任何 commit（不构成放松）；但它十有八九是写错了。
+            # ⚠ 只对**目录**下的文件告警：旧单文件在完全迁走之后本来就只剩注释，
+            # 对"正常终态"刷警告会把告警训练成噪音。
+            warns.append(f"⚠️  {_rel(path)} 里没有审查行/白名单行（空文件或只有注释）⇒ 贡献 0 条归属")
+    return rows, wl, n_old, len(rows) - n_old, warns
 
 
 # --------------------------------------------------------------------------- #
@@ -253,7 +339,7 @@ def main(argv: list[str]) -> int:
     if not os.path.isfile(ledger):
         die(f"找不到台账 {os.environ.get('LEDGER') or LEDGER_PATH}")
 
-    rows, wl = read_ledger(ledger)
+    rows, wl, n_old, n_new, ledger_warns = read_all(ledger)
     if not rows:
         die("台账里没有审查行")
 
@@ -274,8 +360,10 @@ def main(argv: list[str]) -> int:
         revs += [rbase, rtip]
     resolved = resolve_many(revs)
 
-    rows_desc = f"审查范围（台账，{len(rows)} 行）:"
+    rows_desc = f"审查范围（台账，{len(rows)} 行" + (f" = 旧单文件 {n_old} + 目录 {n_new}" if n_new else "") + "）:"
     print(rows_desc)
+    for w in ledger_warns:
+        print(w)
 
     covered: set[str] = set()
     base_literal = ""
@@ -342,7 +430,7 @@ def main(argv: list[str]) -> int:
         # 台账自身的记账动作**自动放行**：恰好只改 docs/review_ledger.tsv 的提交机械可验、藏不了代码；
         # 而"把这件事记进台账"本身又要被记账是**死循环**（实测 2026-09-17 绕了三轮）。
         # 收窄条件：夹带任何其他文件（含 scripts/）即回落到正常判定。
-        if filemap.get(sha, []) == [LEDGER_PATH]:
+        if is_ledger_only(filemap.get(sha, [])):
             print(f"✅ 台账自身更新（自动放行）: {short}  {subject}")
             continue
 

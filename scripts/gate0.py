@@ -23,8 +23,23 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
   **不得**替代**推送前全量 Gate-0**（pre-push 恒不带 `--affected`），也**不得**替代**集成前完整门禁**
   （协议 §8.8.4 第 1 行）。改动面里出现**未映射路径**时 **fail-closed**：退回全量并打印出来。
   输出会标出每层在 `blast-radius` 确定性阶梯上的级别；**< 4 的一律标 `unproven`**。
-- **不产生"读数"**：本脚本只回退出码与人的可读输出，**不写任何文件**（机器产出的门禁读数
-  `docs/gate/<sha>.json` 计划在批 3）。
+- **产生读数（issue #293）**：默认把本次读数落盘到 `docs/gate/<head sha>.json`（`sha` +
+  `git rev-parse <sha>^{tree}` + 每车道结论 + 墙钟 + 工具版本）。**它是门禁读数的唯一来源** ——
+  集成前的读数一律引用该文件，**不从终端输出手抄任何数字**（#213 的事故成因就是手抄 fixed point
+  错一格 ⇒ 静默豁免一票，没有任何东西会报错）。
+  · 只想看一眼、不想动工作树 ⇒ `--no-record`；`.githooks/pre-push` **恒带** `--no-record`
+    （否则推送那一刻会在工作树里留下一个未提交的读数文件，把刚收干净的树弄脏）。
+  · **只有裸全量运行落盘**：带 `--since` / `--only` / `--affected` 的一律不落盘 —— 它们是
+    「推送范围 / 单车道 / 受影响面」的**局部**读数，写进同一个 `<sha>.json` 会把该树的**全量**
+    结论覆写成只剩一条车道（`--replay` 还得依赖那个 `<rev>` 仍然存在）。
+  · **落盘失败 = FAIL**（fail-closed）：读数的唯一来源写不出来 ⇒ 这条"通过"不可引用。
+  · **工作树不干净 = 拒绝落盘并 FAIL**：6 条车道是在**工作树**上跑的，而读数只能记 `HEAD` 的
+    `sha` / `^{tree}`；两者不一致时写出去，这份读数就指到了一棵**没被测过的树**（§8.7 第 3 条）。
+    只想看结果、不想先提交 ⇒ 加 `--no-record`。
+  · `--replay <file>` 按落盘里的 `argv` / `cwd` / `env` **原样重跑**并比对判定（墙钟不参与），
+    让"落盘 JSON 可独立复核"成为机械判据而不是人眼比对。
+  ⚠ 它只覆盖本脚本的**这 6 条机械车道**，**不是** `AGENTS.md` §14.10 的完整门禁 ——
+  JSON 的 `scope.does_not_cover` 如实列出没跑的重车道。
 
 ## 用法 / 退出码
 
@@ -34,6 +49,9 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
                                                # （`<rev>` 也可写成范围 `A..B`；仅用于失败后的增量重跑；
                                                #  未映射路径 ⇒ fail-closed 全量）
     python scripts/gate0.py --only ruff        # 只重跑一条（失败后增量验证用，别整条流水线重跑）
+    python scripts/gate0.py --no-record        # 不落盘读数（只看一眼；pre-push 恒带它）
+                                               #   带 --since/--only/--affected 时本来就不落盘
+    python scripts/gate0.py --replay <file>    # 独立复核：原样重跑落盘里的命令，比对判定
     python scripts/gate0.py --list             # 列车道名
 
 **fail-closed**：任何车道因"工具缺失 / 超时 / 无法执行"而没能得到结论，一律算**失败**，
@@ -42,11 +60,13 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(REPO_ROOT, "web")
@@ -72,6 +92,10 @@ GUARD_TESTS = (
 
 #: 代码面 ↔ 必跑车道的机械映射（issue #292）。`--affected` 读它；`tests/test_verification_map.py` 守它。
 MAP_PATH = os.path.join("docs", "agents", "verification.map.tsv")
+
+#: 门禁读数的落盘目录（issue #293）：`docs/gate/<sha>.json`。
+#: **集成前读数的唯一来源**（协议 §7 第 8 条 / `AGENTS.md` §14.10 指向这里）⇒ 必须落进版本控制。
+GATE_DIR = os.path.join("docs", "gate")
 
 #: 映射表的**列名（顺序即列序）**。`MapRow` 按位置解包，`parse_map` 用它校验列数。
 #: 前四列里的后四者逐一对齐 `docs/agents/skills/create-verification-skill` 的 feature 四要素
@@ -413,6 +437,243 @@ def surface_report(since: str) -> str:
     return f"改动面：{len(files)} 文件（{scope}）— {shown}{caveat}"
 
 
+# --------------------------------------------------------------------------- #
+# 读数落盘与独立复核（issue #293）
+# --------------------------------------------------------------------------- #
+
+def _rel(path: str) -> str:
+    """仓库相对路径（正斜杠）——打印与 JSON 里统一用这个形态。"""
+    return os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+
+
+def _portable_argv(argv: list[str]) -> list[str]:
+    """把 argv 里的**机器绝对路径**折成可携带形态。
+
+    落盘文件进**版本控制**（而且是公开仓库），不应该把本机路径写进去：
+    `REPO_ROOT` 前缀 ⇒ `.`；用户主目录前缀 ⇒ `~`；其余原样；分隔符统一正斜杠。
+    `--replay` 用 `_expand_argv` 对称还原 —— 两边必须同时改，否则"原样重跑"就破了。
+    """
+    pairs = ((REPO_ROOT.replace("\\", "/"), "."), (os.path.expanduser("~").replace("\\", "/"), "~"))
+    out: list[str] = []
+    for el in argv:
+        norm = el.replace("\\", "/")
+        for prefix, mark in pairs:
+            if norm == prefix:
+                norm = mark
+                break
+            if norm.startswith(prefix + "/"):
+                norm = mark + norm[len(prefix):]
+                break
+        out.append(norm)
+    return out
+
+
+def _expand_argv(argv: list[str]) -> list[str]:
+    """`_portable_argv` 的逆（`--replay` 用）：`.` ⇒ `REPO_ROOT`，`~` ⇒ 用户主目录。"""
+    out: list[str] = []
+    for el in argv:
+        if el == ".":
+            out.append(REPO_ROOT)
+        elif el.startswith("./"):
+            out.append(os.path.join(REPO_ROOT, el[2:]))
+        elif el == "~" or el.startswith("~/"):
+            out.append(os.path.expanduser(el))
+        else:
+            out.append(el)
+    return out
+
+
+def _probe_version(argv: list[str] | None) -> str:
+    """取某个工具自报的版本（取首行）。取不到就如实写 `unknown（…）`，**不编**。"""
+    if not argv:
+        return "missing"
+    try:
+        proc = subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=20, check=False)
+    except subprocess.TimeoutExpired:
+        return "unknown（超时）"
+    except OSError as exc:
+        return f"unknown（{type(exc).__name__}）"
+    text = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    first = text.split("\n")[0].strip() if text else ""
+    if proc.returncode != 0 or not first:
+        return "unknown（取不到）"
+    return first
+
+
+def tool_versions() -> dict[str, str]:
+    """本次读数涉及的工具版本（票面 #293 明列的字段之一）。缺失一律写 `missing`。"""
+    out: dict[str, str] = {"git": _probe_version(["git", "--version"])}
+    py = venv_python()
+    out["python"] = _probe_version([py, "--version"]) if py else "missing"
+    ruff = venv_exe("ruff")
+    out["ruff"] = _probe_version([ruff, "--version"]) if ruff else "missing"
+    node = shutil.which("node")
+    out["node"] = _probe_version([node, "--version"]) if node else "missing"
+    # 前端两条走包的 .js 入口（与车道 ③④ 同一形态），不经过 npm / .bin/*.cmd。
+    for name, rel in (("oxlint", os.path.join("node_modules", "oxlint", "bin", "oxlint")),
+                      ("tsc", os.path.join("node_modules", "typescript", "bin", "tsc"))):
+        js = os.path.join(WEB_DIR, rel)
+        out[name] = _probe_version([node, js, "--version"]) if (node and os.path.isfile(js)) else "missing"
+    return out
+
+
+def _env_overrides(lane: Lane) -> dict[str, str]:
+    """车道显式设过的环境变量（**只记与当前进程不同的键**）。
+
+    复核时必须原样重放：`pytest` 那两条车道设了 `PYTHONUTF8=1` / `PYTHONPATH=`，
+    不重放就会拿到不同的读数 —— "同一命令"包括它的环境。
+    """
+    if not lane.env:
+        return {}
+    return {k: v for k, v in lane.env.items() if os.environ.get(k) != v}
+
+
+def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
+                results: list[tuple[Lane, int, float, str]],
+                affected: dict | None, changed: list[str]) -> dict:
+    """拼出落盘的读数文档。
+
+    **票面 #293 的字段要求**（`sha` + `^{tree}` + 每车道结论 + 墙钟 + 工具版本）由
+    `sha` / `tree` / `lanes[].status` / `wall_seconds` / `tool_versions` 承载；
+    `argv` + `cwd` + `env` 让 `--replay` 能**原样重跑**，否则"可独立复核"就只剩人眼比对。
+    失败车道的输出尾部一并落下（红在哪要能直接看见）；通过车道不记输出（免得 JSON 变成日志）。
+    """
+    lanes: list[dict] = []
+    for lane, rc, secs, out in results:
+        entry: dict = {
+            "name": lane.name,
+            "desc": lane.desc,
+            "status": "PASS" if rc == 0 else "FAIL",
+            "rc": rc,
+            "seconds": round(secs, 2),
+            "cwd": _rel(lane.cwd),
+        }
+        if lane.argv is None:
+            entry["argv"] = None
+            entry["command"] = None
+            entry["blocked"] = lane.blocked
+        else:
+            portable = _portable_argv(lane.argv)
+            entry["argv"] = portable
+            entry["command"] = " ".join(portable)
+            overrides = _env_overrides(lane)
+            if overrides:
+                entry["env"] = overrides
+        if rc != 0:
+            tail = [ln for ln in out.split("\n") if ln.strip()][-8:]
+            if tail:
+                entry["output_tail"] = tail
+        lanes.append(entry)
+    failed = [e["name"] for e in lanes if e["status"] != "PASS"]
+    return {
+        "schema": 1,
+        "gate": "gate0",
+        "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "sha": head,
+        "tree": tree,
+        "argv": list(argv),
+        "result": "FAIL" if failed else "PASS",
+        "passed": len(lanes) - len(failed),
+        "total": len(lanes),
+        "failed": failed,
+        "wall_seconds": round(wall, 2),
+        "budget_seconds": GATE0_BUDGET,
+        "lane_timeout_seconds": LANE_TIMEOUT,
+        "tool_versions": tool_versions(),
+        "scope": {
+            "covers": "gate0.py 的机械车道（见 lanes）",
+            "does_not_cover": [
+                "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+                "两轴独立审查与 Runtime Verification 的人工判据",
+            ],
+        },
+        "affected": (dict(affected, changed_files=len(changed)) if affected is not None else None),
+        "lanes": lanes,
+    }
+
+
+def worktree_dirty() -> str:
+    """工作树对 `HEAD` 的未提交改动（**含未跟踪文件**）——`git status --porcelain` 原文，空 = 干净。
+
+    落盘前必须为空：`ruff` / `oxlint` / `tsc` / `guards` 都是**在工作树上跑**的，而读数记的是
+    `HEAD` 的 `sha` + `^{tree}`。两者不一致时写出去，这份读数就指到了一棵**没被测过的树** ——
+    正是协议 §8.7 第 3 条（"读数必须能指到它跑的树"）最典型的失效形状。
+    """
+    return git("status", "--porcelain").stdout.strip()
+
+
+def write_reading(*, head: str, tree: str, argv: list[str], wall: float,
+                  results: list[tuple[Lane, int, float, str]],
+                  affected: dict | None, changed: list[str]) -> str:
+    """落盘到 `docs/gate/<head sha>.json`，返回绝对路径。
+
+    文件名用**全 40 位 sha**：短 sha 的宽度是环境属性（同一提交 7 位 / 8 位都实测过），当键会撞。
+    同一棵树重跑会**覆写同名文件**（读数以最后一次为准）—— 这是有意的，别当成 bug。
+    """
+    doc = reading_doc(head=head, tree=tree, argv=argv, wall=wall, results=results,
+                      affected=affected, changed=changed)
+    out_dir = os.path.join(REPO_ROOT, GATE_DIR)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{head}.json")
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(doc, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    return path
+
+
+def replay_reading(path: str) -> int:
+    """独立复核（票面 #293 的 AC）：按落盘里的 `argv` / `cwd` / `env` **原样重跑**，比对判定。
+
+    比的是**判定**（每条车道的 PASS/FAIL），**不是墙钟** —— 票面明写"墙钟允许不同"。
+    不一致一律算失败：要么树变了，要么环境变了，要么落盘被改过；三种都不能引用。
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"❌ 读不到 / 解析不了读数：{exc}")
+        return 1
+    lanes = doc.get("lanes") or []
+    if not lanes:
+        print("❌ 读数里没有 lanes")
+        return 1
+    print(f"复核 {_rel(os.path.abspath(path))}：sha={(doc.get('sha') or '?')[:12]} "
+          f"tree={(doc.get('tree') or '?')[:12]} 落盘判定={doc.get('result')}")
+    print("─" * 72)
+    bad: list[str] = []
+    for lane in lanes:
+        name = lane.get("name") or "?"
+        recorded = lane.get("argv")
+        if not recorded:
+            print(f"  {name:11s} SKIP  落盘里没有 argv（{lane.get('blocked') or '未记录原因'}）")
+            continue
+        lane_argv = _expand_argv(recorded)
+        env = dict(os.environ, **(lane.get("env") or {}))
+        cwd = os.path.join(REPO_ROOT, lane.get("cwd") or ".")
+        try:
+            proc = subprocess.run(lane_argv, cwd=cwd, env=env, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=LANE_TIMEOUT, check=False)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            rc = 124
+        except OSError:
+            rc = 127
+        status = "PASS" if rc == 0 else "FAIL"
+        same = status == lane.get("status")
+        if not same:
+            bad.append(name)
+        verdict = "一致" if same else f"不一致（落盘是 {lane.get('status')}）"
+        print(f"  {name:11s} {status:4s} {verdict}")
+    print("─" * 72)
+    if bad:
+        print(f"❌ 复核不一致：{', '.join(bad)} —— 该落盘读数**不可引用**")
+        return 1
+    print("✅ 复核一致：落盘里每条车道重跑得到相同判定（墙钟不参与比对）。")
+    return 0
+
+
 def usage() -> int:
     print(__doc__.strip())
     return 0
@@ -420,7 +681,8 @@ def usage() -> int:
 
 def main(argv: list[str]) -> int:
     _utf8_stdio()
-    since, only, affected_rev = "", "", ""
+    since, only, affected_rev, replay_path = "", "", "", ""
+    record = True
     rest = list(argv)
     while rest:
         arg = rest.pop(0)
@@ -436,9 +698,16 @@ def main(argv: list[str]) -> int:
             for lane in build_lanes(""):
                 print(f"  {lane.name:11s} {lane.desc}")
             return 0
+        elif arg == "--replay":
+            replay_path = rest.pop(0) if rest else ""
+        elif arg == "--no-record":
+            record = False
         else:
             print(f"未知参数：{arg}\n")
             return usage() or 1
+
+    if replay_path:
+        return replay_reading(replay_path)
 
     if affected_rev:
         # 车道①（diff-check）与改动面报告都用同一区间，避免"受影响集合用 A、空白检查用 B"两套口径。
@@ -543,6 +812,36 @@ def main(argv: list[str]) -> int:
 
     print("─" * 72)
     print(surface_report(since))
+    # ── 读数落盘（issue #293）：门禁读数的**唯一来源** ─────────────────────────────
+    # 只在**裸全量**运行时落盘：`--since` / `--only` / `--affected` 都是局部读数（推送范围 / 单车道 /
+    # 受影响面），写进同一个 `<sha>.json` 会把该树的全量结论覆写掉。落盘前还要求工作树干净（见下）。
+    record_here = record and not only and not affected_rev and not since
+    if record and not record_here:
+        print("读数：本次是局部运行（--since / --only / --affected）"
+              "⇒ **不落盘**（那不是全量门禁读数，避免覆写该树的全量结论）")
+    if record_here:
+        dirty = worktree_dirty()
+        if dirty:
+            # fail-closed：车道跑在**工作树**上，读数却只能记 `HEAD` 的 `sha` / `^{tree}`。
+            dlines = [ln for ln in dirty.split("\n") if ln.strip()]
+            print("❌ 读数落盘被拒：工作树对 HEAD 不干净 ⇒ 车道是在**工作树**上跑的，而读数只能记"
+                  " HEAD 的 `sha` + `^{tree}`；")
+            print("   写出去就成了「指到一棵没被测过的树」的读数（协议 §8.7 第 3 条）。")
+            for ln in dlines[:10]:
+                print(f"     {ln}")
+            if len(dlines) > 10:
+                print(f"     …（共 {len(dlines)} 条）")
+            print("   处置：先把改动落成 commit（**不要** `git stash`）再重跑；"
+                  "只想看一眼、不落盘就加 `--no-record`。")
+            return 1
+        try:
+            path = write_reading(head=head, tree=tree, argv=list(argv), wall=wall,
+                                 results=results, affected=affected, changed=changed)
+            print(f"读数已落盘：{_rel(path)}")
+        except OSError as exc:
+            # fail-closed：读数的唯一来源写不出来 ⇒ 这条"通过"不可引用（与"核对不了就不放行"同向）。
+            print(f"❌ 读数落盘失败：{exc}")
+            return 1
     if wall > GATE0_BUDGET:
         print(f"⚠ 超过预算目标：墙钟 {wall:.1f}s > {GATE0_BUDGET:.0f}s（预算只是目标，不改变上面的判定）")
     failed = [lane.name for lane, rc, _s, _o in results if rc != 0]
