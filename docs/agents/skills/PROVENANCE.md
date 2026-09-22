@@ -167,3 +167,46 @@ MIT 要求「许可与版权声明随副本一并保留」——`pstack-LICENSE.
 
 ⚠ **注意**：§4.1 的"去掉 `disable-model-invocation`"是对**安装副本**做的操作。本目录里的文件保持
 上游字节，**sha256 因此始终可校验**。不要把安装时改过的文件拷回来。
+
+
+## 7. 已安装到宿主的记录（2026-09-22）
+
+需求方 21:38 指令：「我要装进 codex / zcode，你替我装吧」＋「**可以去掉 `disable-model-invocation`，
+但只能是让模型可以自动调用 pstack 的 skills；其他比如 mattpocock 的 `handoff` 必须要手动调用，
+绝对不能所有的 skills 都让模型自动调用**」。
+
+| 宿主 | 目录 | 装入数 |
+| --- | --- | --- |
+| codex | `~/.codex/skills/` | **7** |
+| zcode | `~/.zcode/skills/` | **7** |
+
+**对安装副本做的唯一变换**：删掉 frontmatter 里的 `disable-model-invocation: true` 整行
+（`'disable-model-invocation: true\r\n'` = **32 字节**；注意该字段名本身是 30 字符，不是 31 —— 手算过一次差了 1 位）。
+`name` / `description` 与正文一字未动，`references/` 下的文件逐字节 verbatim。
+行尾保持上游的 **CRLF**：宿主惯例本来就是 CRLF（实测 codex 48 CRLF / 34 LF、zcode 62 CRLF / 2 LF）⇒ **不需要转行尾**。
+
+**校验口径（可复跑）**：
+
+- 14/14 安装目录：文件集相同、`SKILL.md` 行数差**恰为 1**，且
+  `installed == source[:k] + source[k+1:]`（`k` = 上游该字段所在行）⇒ 证明「**只有那一行被去掉**」；
+  `references/` 下文件逐字节相同。
+- **未碰任何已有 skill**：两宿主里"非本次安装"的条目最新 mtime 分别是 **13004 分钟 / 14562 分钟**前
+  （≈9–10 天），我的 7 个是 **0.3 分钟**前 ⇒ 没有改写任何既有文件。
+- **`handoff` 仍是手动调用**：`~/.codex/skills/handoff/SKILL.md` 与 `~/.zcode/skills/handoff/SKILL.md`
+  实测**仍带** `disable-model-invocation` ✓ —— 这正是需求方点名要保住的那条。
+- 仍带该字段的 skill 数：codex **15** / zcode **18**（本次只改了新增的 7 个）。
+- 宿主目录条目数：codex 93、zcode 72（各 = 原数 + 7）。
+
+**撤销**：这 14 个目录都是本次**新建**的（装前逐条查过，两宿主均无同名目录），
+删掉它们即可完全回退，**不需要恢复任何原文件**：
+
+```bash
+for d in blast-radius create-verification-skill maintain-verification-skill \
+         principle-encode-lessons-in-structure principle-prove-it-works \
+         principle-sequence-verifiable-units show-me-your-work; do
+  rm -rf "$HOME/.codex/skills/$d" "$HOME/.zcode/skills/$d"
+done
+```
+
+⚠ **`~/.zcode/skills/llms.txt` 不是全量注册表** —— 它只列 13 个设计类 skill
+（`implement` / `tdd` / `code-review` 都不在里面），skill 发现靠**目录扫描**。**本次没有改它。**
