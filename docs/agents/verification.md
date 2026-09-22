@@ -18,7 +18,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 
 # 集成前（完整门禁，分钟级；一个冻结树只跑一次）
 ```
-完整门禁的命令见 §2 的 ②③④⑤⑦⑩⑪。**Gate-0 ≠ 完整门禁**（见 §4）。
+完整门禁 = §2 的**全部机械车道 ①–⑪**（`AGENTS.md` §14.10 清单 + 协议 §7 第 6 条点名的工具）；
+其中**分钟级**的那几条（②③④⑤⑦⑩⑪）命令见对应小节。**Gate-0 ≠ 完整门禁**（见 §4）。
 
 ---
 
@@ -31,7 +32,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | `session/event.py` 或任一生成物 | ⑦ 生成物同步守卫（**必跑**，跨 `src`↔`web` 的有唯一一条） | Gate-0（自动） |
 | `web/**` | ④ tsc + ⑤ vitest + ⑥ oxlint | Gate-0 跑④⑥；⑤按需 |
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
-| 任何"要进 main"的批次 | ①②③④⑤⑥⑦⑧⑨⑩ + 两轴独立审查 | 人工，冻结树 |
+| 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
 | 只想重跑失败的那一条 | `python scripts/gate0.py --only <lane>` | 人工 |
 
 ---
@@ -153,7 +154,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | 现象 | 原因 | 正解 |
 | --- | --- | --- |
 | `npm` / `npx` 秒退，退出码非 0，日志十几字节乱码（GBK 读出来是"拒绝访问。"） | 沙箱把 `cmd.exe` 拉黑，任何 `.cmd` / `.bat` 入口都起不来 | 直接调包的 `.js` 入口：`node node_modules/<pkg>/…`（见 §2 各条） |
-| 脚本里 `dirname` / `wc` / `comm` / `grep` / `sort` / `mktemp` 全 `command not found` | bash shim 缺 coreutils | 用 python 或 `git` 子命令；`git` 自带的 coreutils 在 `<PortableGit>/usr/bin`（可临时加 PATH 跑 `.sh`） |
+| 脚本里 `dirname` / `wc` / `comm` / `grep` / `sort` / `mktemp` 全 `command not found` | bash shim 的 **PATH 里没有** coreutils（**不是不存在**） | 用 python 或 `git` 子命令。跑 `.sh` 时：把 `<PortableGit>/usr/bin` 加进 PATH，并**用全路径 bash**（`"…/PortableGit/…/bin/bash.exe" scripts/x.sh`）——直接写 `bash` 在部分调用上下文里会落到被安全策略拦下的 WSL 通道（实测 `PROGRAM BLOCKED … wsl.exe`），与脚本本身无关 |
 | 全量 pytest 后期若干 `tests/evaluation/*` "随机"失败 | safe-delete shim 的跨测试删除配额 | `./scripts/run_tests_clean.sh`（清空 `PYTHONPATH`） |
 | `os.symlink` 静默 no-op（不抛异常、不创建） | 沙箱文件保护 | 相关用例先探针再归因，别当成自己改出来的 bug |
 | 分钟级脚本被 SIGTERM、且重定向文件是空的 | 前台跑长任务 + stdout 块缓冲 | 长跑放后台跑（`run_in_background`），或先落盘再读 |
