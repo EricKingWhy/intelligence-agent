@@ -311,17 +311,21 @@ def test_skip_reason_masks_userinfo_on_dotless_hosts() -> None:
         EndpointProbe(label="primary", provider="p", model_name="m",
                       base_url="https://tok4@vllm-svc/v1", ok=False,
                       reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
-        # `?` 结尾（查询串起点）专钉尾部集合里的 `?`（B 轴 C5 实测：拿掉它 59 条全绿）；
-        # 大写形专钉 `(?i)`（同样全绿）。
+        # `?` 结尾（查询串起点）专钉尾部集合里的 `?`（B 轴 C5 实测的漏法：无 scheme 写法
+        # `user:pass@host?x=1` 在 `?` 缺失时整段凭据原样回显）。它**必须不带 `://`**——
+        # 四轮复验实测：带 scheme 时被「整段 authority」那一层先吃掉，把尾部集合里的 `?`
+        # 删掉 62 条仍全绿（那条写法钉不住本层）；改成无 scheme 后才真钉住。
         EndpointProbe(label="primary", provider="p", model_name="m",
-                      base_url="https://user:pass5@a.invalid?x=1", ok=False,
+                      base_url="user:pass5@a.invalid?x=1", ok=False,
                       reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        # 这条带 scheme 且全大写：`(?i)` 的功劳**不在这里**（本行同样被 authority 层吃掉，
+        # 只钉那一层）——本层的 `(?i)` 由下面无 scheme 的 `USER:PASS9@OLLAMA:11434/V1` 钉。
         EndpointProbe(label="primary", provider="p", model_name="m",
                       base_url="HTTPS://USER:PASS6@HOST.INVALID/V1", ok=False,
                       reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
         # **无 scheme 形**：上面几条都带 `://`，被「整段 authority」那一层先一步吃掉，
         # 于是本层的主机名前瞻 / 大小写 / 尾部分隔符**全都可以被删掉/收窄而不变红**
-        # （三轮变异实测 M11/M15/M16/M24 六条全绿）。只有不带 scheme 的写法能把本层的
+        # （三轮变异实测 M4/M8/M11/M15/M16/M24 六条全绿）。只有不带 scheme 的写法能把本层的
         # 判据单独钉住——而这正是 SDK 报错正文里常见的形状（`user:pass@host/v1`）。
         EndpointProbe(label="primary", provider="p", model_name="m",
                       base_url="user:pass7@localhost:8000/v1", ok=False,

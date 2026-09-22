@@ -1061,8 +1061,8 @@ async def test_failed_arm_still_writes_the_terminal_event_when_the_port_raises(
     （`for streamed in ctx.close_observability(…)`）时，取消臂的同类用例
     （`test_cancelled_arm_still_writes_the_terminal_event_when_the_port_raises`）
     **仍然全绿**，只有本用例变红：异常在第二段当场穿透，`failure_terminal` 那几行
-    再也到不了，`run/failed` 随之消失——正是 R4 要堵的形状（B 轴实测：那处改动让
-    78 个用例保持绿）。
+    再也到不了，`run/failed` 随之消失——正是 R4 要堵的形状（四轮复验实测：那处改动让
+    arms 文件内 28 条保持绿、AC5 五文件集 1 红 / 301 绿，红的正是本用例）。
     """
     kit = _kit(session, step_base=2, tracer=_ExplodingPortTracer())
     kit.arms.terminal.model_call_open = True

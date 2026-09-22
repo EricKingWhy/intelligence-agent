@@ -187,10 +187,16 @@ _KEY_SHAPED_TOKEN = re.compile(
 )
 
 #: header / 赋值形的值（`Authorization: Bearer …` / `X-Api-Key: …` / `api_key=…`）：
-#: 参数**名**按子串判定（与 query 层同一口径），值整段吃掉——含可选的一节 scheme 词
-#: （`Bearer` / `Basic`），否则 `Authorization: Basic dXNl…` 只吃掉 `Basic`、base64 本体
-#: 留下（窄复验 B 轴实测）。窄复验 B 轴实测这两类值原先都原样穿过
-#: （`_redact_detail` 只吃得掉名字那一半）。
+#: 参数**名**按子串判定（与 query 层同一口径），值整段 `\S+` 吃掉（尾随的 `)` 也会被带走）。
+#: 值前那节可选的「scheme 词」写成 `(?:[a-z]{3,12}\s+)?`——**任何** 3–12 个字母的小写词都
+#: 算，不是只认 `Bearer` / `Basic`：不这样写，`Authorization: Basic dXNl…` 只会吃掉
+#: `Basic`、base64 本体留下（窄复验 B 轴实测）；这两类值原先都原样穿过（`_redact_detail`
+#: 只吃得掉名字那一半）。**代价（如实记，四轮复验实测）**：本层对**任意文本**生效
+#: （不像 query 层需要 `?&;#` 前缀），所以散文里的 `名字=值` 也会被吞一段——
+#: `authentication=basic mode` / `secretary=alice password_hint=none` 整段成了 `***`、
+#: `create_chat_model(max_tokens=8192) rejected` 变成 `create_chat_model(*** rejected`。
+#: **不收窄成闭集**：那会把自定义 scheme（`Authorization: <自定义词> <凭据>`）重新放出去，
+#: 而这里的方向是安全的——少一段可读文本，不是多一段凭据。
 _KEY_VALUE_ASSIGNMENT = re.compile(
     r"(?i)\b[a-z0-9_-]*(?:api[-_]?key|apikey|token|secret|password|passwd|pwd|authorization)"
     r"[a-z0-9_-]*\s*[:=]\s*(?:[a-z]{3,12}\s+)?\S+"
