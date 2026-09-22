@@ -579,23 +579,29 @@ skill 支撑，或显式声明"不需要引"**」，第 1 条要求「新写的�
 
 **三件套**（都在仓库内，按路径读即可）：
 
-- `docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的机械映射。列**对齐**
-  `docs/agents/skills/create-verification-skill` 的 feature 四要素（`Sub-features` / `How to get to it`
-  / `Driving it with <harness>` / `Gotchas`），另加 `surface`（= How to get to it 的机械化：只允许**路径前缀**
-  或**精确路径**，禁通配、禁 catch-all）与 `neg_tier`（`blast-radius` 阶梯）。**每一行都要承重**。
-- `tests/test_verification_map.py` —— 守卫。① `git ls-files` 里**每个**被跟踪文件都被映射；② 结构合法
-  （7 列 / layer 唯一 / 车道 id 在词表内 / focused 路径存在 / `neg_tier ∈ 1..5`）；③ **每一行都承重**
-  （删掉任一行 ⇒ 至少一个文件的受影响集合发生变化）；③′ **`focused` 必须真跑得动**——pytest 目标要对盘核到
-  `test_*.py`（`pytest <空目录>` 退出码 5，与 vitest 的 `No test files found` 同形状，都是**假 FAIL**），
-  且"哪些 focused 按设计不内联"要在守卫里**逐个登记**（见边界 5）；
-  ④ 自带独立匹配器，对**每个**文件与 `gate0.py` 的
-  求值**逐项相同**（map 与 `--affected` 不是两套真相）。它跑在 Gate-0 的 `guards` 车道里
-  ⇒ **映射腐烂 = 推送前就红**。
+- `docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的机械映射（23 行 × 8 列）。
+  **四列逐一对齐** `docs/agents/skills/create-verification-skill` §3 的 feature 四要素：
+  `Sub-features` → `sub_features`、`How to get to it (user POV)` → `how_to_get_to_it`、
+  `Driving it with <harness>` → `lanes` + `focused`（「驱动它」的两半：跑哪些车道、跑哪些用例）、
+  `Gotchas` → `gotchas`；另加三个**机械列**：`surface`（`--affected` 的匹配键，只允许**路径前缀**或
+  **精确路径**，禁通配、禁 catch-all）、`layer`、`neg_tier`（`blast-radius` 阶梯）。
+  `how_to_get_to_it` 是**散文**、`--affected` **不消费它**（它服务的是「人工逐行复核」）。**每一行都要承重**。
+- `tests/test_verification_map.py` —— 守卫（**20 例**；编号与 `docs/agents/verification.md` §2 ⑭ **同源**，
+  改一处必须两处同改）。① `git ls-files` 里**每个**被跟踪文件都被映射；② 结构合法
+  （**8 列** / layer 唯一 / 车道 id 在词表内 / focused 路径存在 / `neg_tier ∈ 1..5`）；
+  ③ **每一行都承重**（删掉任一行 ⇒ 至少一个文件的受影响集合发生变化）；④ **`focused` 必须真跑得动**——
+  pytest 目标要对盘核到 `test_*.py`（`pytest <空目录>` 退出码 5，与 vitest 的 `No test files found`
+  同形状，都是**假 FAIL**），且"哪些 focused 按设计不内联"要在守卫里**逐个登记**（见边界 5）；
+  ⑤ **每一行都必须列无条件车道** `diff-check` + `coverage`（`verification.md` §1 决策表第 1 行「任何文件」）
+  —— 漏列会让 `--affected` 在那个面上把它们**静默跳过**，那不是增量而是放松；
+  ⑥ `how_to_get_to_it` 的形状**可机械判定**（要么写明「无用户入口」，要么引一个真实存在的仓库路径）；
+  ⑦ 自带**独立**匹配器与**独立**求值器，对**每个**文件与 `gate0.py` 的求值**逐项相同**
+  （map 与 `--affected` 不是两套真相）。它跑在 Gate-0 的 `guards` 车道里 ⇒ **映射腐烂 = 推送前就红**。
 - `python scripts/gate0.py --affected <rev>` —— 消费映射：由 `<rev>..HEAD`（`<rev>` 亦可写成范围 `A..B`）
   的改动面算出受影响集合，只跑集合内的车道 + 受影响 focused 用例（**只内联 pytest 子集**，见边界 5）。
   **默认行为不变**（不带它恒跑全部 6 车道）。
 
-**四条边界**（与 `docs/agents/verification.md` §4 **同源**，任一处改动必须两处同改）：
+**五条边界**（与 `docs/agents/verification.md` §4 **同源**，任一处改动必须两处同改）：
 
 1. `--affected` **只**用于**失败后的增量重跑**；**不得**替代**推送前全量 Gate-0**（`.githooks/pre-push`
    恒不带它），也**不得**替代**集成前完整门禁**（§8.8.4 第 1 行）。
