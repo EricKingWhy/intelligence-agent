@@ -4133,7 +4133,7 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 **落点**：`2f1d22f` 实现（含两轴 findings 处置）→ `8213164` 窄复验 P3 处置（与 B-34 同笔）→ `f1b65e4` docs 落点（tracker 两段 + 归档 2 条 + PHASE_STATUS 索引重算）→ `bafbd12` 台账（4 条审查行 + 1 条白名单，覆盖闸门 exit 0）→ **集成**：`push origin main` **快进** `56d561b..bafbd12`（`origin/main` = `HEAD`，ahead/behind 0/0）；`#284` 已按 §14.12 关单（comment 附交付面 / 红→绿 / 变异 / 两轴审查与窄复验 / 门禁读数 / 覆盖闸门 / 残余）。**§14.9 三方对齐**：后端（本 clone）、集成区（`D:\intelligence-agent`）、前端（`D:\intelligence-agent-frontend`）集成后均**快进到 `bafbd12`**（各自 `rev-list --left-right --count HEAD...origin/main` = 0/0）。**逐轮 findings、变异读数、`-m integration` 前后对照与门禁读数统一写在 `docs/phase_status/2026-09.md` 的 B-33 条**；本节只留判据、约定与结论。**`bafbd12` 之后另有 4 笔 docs-only**（`f838a92` 落点记账 / `f28fcc5` 台账白名单 / `4cd66ef` 读数环境归因更正 / `a080912` 台账白名单；`git diff bafbd12..a080912 -- src tests` 为空）已继续 `push origin main` 到位 **`a080912`**（增量 3 次快进；`origin/main` = `HEAD`，0/0；**其后仅本批 docs-only 记账笔**，按 `git log --oneline a080912..origin/main` 枚举），覆盖闸门在最终树复跑 **exit 0**（台账 84 行 / 区间 `09ca47a1..HEAD` / 391 提交 / 已审查 274 / 待判定 117），三方 clone 复对齐 `origin/main` 顶端。
 
-**残余（登记，不阻断）**：无 P0/P1/P2 级；两条被窄复验点出、**登记不修**的已知项：① 探测行的 `line()` 会回显 `base_url`（与连接测试 UI 同一口径；用户自有配置里的 URL 可能带凭据 ⇒ 若要收紧应在产品层统一做，不在本守卫单方面改）；② **半配置**（给了 `MODEL_API_KEY` 但 fallback 侧缺键）在守卫路径放行、到用例夹具层变 ERROR——该形状**先于本批存在**（用例既有 `skipif` 只看主模型键），本批未扩大也未缩小它。
+**残余（本批登记时，不阻断）**：无 P0/P1/P2 级；两条被窄复验点出、当时**登记不修**的已知项——**两条均已由 B-35 收口**（用户 2026-09-22 批准，不另开票）：① 探测行的 `line()` 会回显 `base_url` ⇒ 已加 `_redact_base_url`（userinfo + query 两处脱敏，`detail` 走同一 helper），详见 B-35 段；② **半配置**（给了 `MODEL_API_KEY` 但 fallback 侧缺键）在守卫路径放行、到用例夹具层变 ERROR——该形状**先于本批存在**（用例既有 `skipif` 只看主模型键），B-35 把守卫的配置谓词收到与用例 `skipif` **逐字等价**（`bool(model_api_key.get_secret_value())`，不 strip、不看 provider），于是"用例会跑而链建不起来"的形态一律变成点名缺陷的响亮 skip。**口径说明**：① 的收紧只发生在守卫侧（`tests/live_model_guard.py`），产品层 `web/model_providers.py` 的 `_redact_detail` 未动（§8 Scope Lock）⇒ **两层口径不同**，这是有意为之，不是遗漏。
 
 ---
 
@@ -4149,7 +4149,71 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 **审查**：A 轴判"通过"（**P2×1 + P3×3**，均已处置）；B 轴出 findings（**臂层调用点的 R1 盲区**——A 轴同判）⇒ 处置后**修后窄复验两轴均判"通过"**（B 轴无 P0/P1/P2，另出 3×P3 + 一条纪律事件登记；A 轴判 P1-A / P1-B / P2 全部闭合且有牙）。
 
-**残余（登记，不阻断）**：
-1. **R4（本批新发现的既有缺口，未被 #285 覆盖）**：`interrupt_streams()` 抛错时**收口段整个不执行** ⇒ 该路径下 context span **0 次收集**（不是二次收集）。这是既有形状（`_TerminalContext` 的收口段在调用之后），本票 AC 是"清口语义"，未触碰该路径；**与 R2/R3 是同一族的"出口覆盖不齐"问题**，修它需另开票。
-2. **替身分叉（潜在，登记）**：`tests/observability/test_tracer_port.py` 的专用替身返回 `str` 句柄，生产与共享替身返回 `NullSpan`——Core 从不调用句柄方法，故当前无害；已在替身 docstring 点名（`8213164`），不当门禁面用。
+**残余（本批登记时，不阻断）**：**两条均已由 B-35 收口**（用户 2026-09-22 批准直接修，**未另开票**）：
+1. **R4（本批新发现的既有缺口，未被 #285 覆盖）**：`interrupt_streams()` 抛错时**收口段整个不执行** ⇒ 该路径下 context span **0 次收集**（不是二次收集）。这是既有形状（`_TerminalContext` 的收口段在调用之后），本票 AC 是"清口语义"，未触碰该路径；**与 R2/R3 是同一族的"出口覆盖不齐"问题** ⇒ B-35 以 `_TerminalStages` 逐段兜底收口（取消臂与异常臂**两条出口同时**接入，第一处异常在全部段跑完后原样重抛），详见 B-35 段。
+2. **替身分叉（潜在，登记）**：`tests/observability/test_tracer_port.py` 的专用替身返回 `str` 句柄，生产与共享替身返回 `NullSpan`——Core 从不调用句柄方法，故当前无害；已在替身 docstring 点名（`8213164`），不当门禁面用 ⇒ B-35 把该替身换成 `NullSpan` 子类（`_IdentifiedNullSpan`），句柄类型与生产同型。
+
+---
+
+## B-35（B-33/B-34 残余四条收口 + 父票 `#247` 验收面核查）
+
+**状态**：实现 + 两轴独立审查（各一轮，另 B 轴复跑一轮）+ findings **三轮**处置（收尾一轮为窄复验 findings）+ 修后窄复验完成；门禁在冻结树全绿（见「红证」与「落点」）。**票面**：用户 2026-09-22 批准的四条残余（B-33 ①②、B-34 R4、测试替身 `str` 句柄 vs `NullSpan`），**未另开票**（R4 原登记写的是「修它需另开票」，用户批准直接修）；同时授权核查父票 `#247` 自身验收面并处置。
+
+**四条残余各自的口径**（每条都先有"修前形状"的红证，见下）：
+
+1. **B-33 ① 探测行回显 `base_url`** ⇒ `_redact_base_url` **六层**：整段 authority（`://` 之后到最后一个 `@`）→ userinfo（**带与不带 scheme、含单标签主机 / IPv6 字面量**）→ `_KEY_SHAPED_TOKEN`（本模块的密钥形词表，含 JWT）→ header / 赋值形的值（`Authorization: Basic <b64>` / `X-Api-Key: …`，吃掉可选 scheme 词后的整段值）→ query / fragment 形凭据（参数名按**子串**判定、分隔符含 `;` `#`、参数名允许 `[` `]`）→ `_redact_detail` 兜底；`probe_endpoint` 的 `detail`、`EndpointProbe.line()` 的 `base_url` 与 `detail` 走**同一个** helper。副作用如实登记：含 `sk` / `pk` 的主机名、邮件地址、`@decorator`、日期、`://` 之后的整段 authority（含 query 里塞了邮件地址时）都可能被打码（fail-closed，可接受）。
+2. **B-33 ② 半配置在夹具层变 ERROR** ⇒ 配置谓词 `_primary_key_present` 收到与用例 `skipif` **逐字等价**（`bool(settings.model_api_key.get_secret_value())`：**不 strip**、**不看 provider**），声明了却建不起整条链 ⇒ `_incomplete_chain_reason` 响亮 skip（点名缺哪个 env + 诚实尾句「本守卫分不出配置缺项与配置代码回归」「本 skip 不构成门禁通过」）。等价性是刻意的：判据一旦分叉，同一台机器上会出现「用例 `skipif` 说没配、守卫却报配置缺陷」的矛盾读数；另加一条**文本级漂移闸**钉住用例侧原文（期望列是手抄的）。
+3. **B-34 R4 `interrupt_streams()` 抛错 ⇒ 收口段整个不执行 ⇒ 该路径 0 次收集** ⇒ `_TerminalStages` 逐段兜底：段抛错记结构化日志（`stage` / `error_type` / `error_message`，不静默）并**继续跑后续段**，第一处异常在全部段跑完后 `raise_first()` **原样重抛**（不吞、不改类型）。取消臂与异常臂**两条出口同时接入**（两臂差异只有"能否 yield"，**不是同一段代码** ⇒ 两臂各有用例钉住）。边界如实写在 docstring：收尾里的**终态事件写入**、段间取值（`cancel_reason()`——它是对注入的 supplier 的**委托**，失败面等于注入方的失败面，当前唯一调用点见残余第 5 条）、`BaseException` 不兜底、以及"`step` 必须当场物化 list（惰性迭代接不住）"的契约都写进去了。
+4. **替身分叉** ⇒ `tests/observability/test_tracer_port.py` 的专用替身改返回 `_IdentifiedNullSpan(NullSpan)`（与生产 / 共享替身同型，身份仍可辨），断言 `isinstance(tracer.started[0], NullSpan)`。
+
+**交付面**：`3bf721e`（5 文件 +425/−43：四条残余 + 8 条新用例）+ `9faa0b2`（5 文件 +332/−76：一轴 findings 处置 + 编排审计六条）+ `34e46ae`（4 文件 +283/−52：**二轮** findings 处置——无点主机脱敏、密钥形词表并入 URL / detail 面、句柄分叉如实改写、用例侧漂移闸、新用例 4 条）+ `c7acb8e`（4 文件 +335/−45：**三轮**窄复验 findings 处置——整段 authority / header 赋值两层、JWT 分支、两臂钉子补齐、隔离输入、新用例 5 条）。
+
+**红证（先 A-B 对照、再定向变异）**：半配置在**合成假 key 的 `.env` 副本**上 A-B 对照——修前用例以 `ConfigError: provider 'deepseek' 缺少 API key，必须在 .env 中配置 FALLBACK_MODEL_API_KEY` 收场（夹具层 ERROR 形状），修后同一条变成点名该 env 的响亮 skip；**无 `.env`** 边界实测守卫按设计放行（交给用例自带 `skipif`）。定向变异四处，各只打红自己的新钉子：M1 收口段故障隔离 ⇒ 3 红 / 38 绿；M2 脱敏 ⇒ 2 红 / 43 绿；M3 替身句柄同型 ⇒ 1 红 / 14 绿；M4 半配置裁决 ⇒ 2 红 / 43 绿。findings 处置笔另有 7 处变异（first-wins → last-wins 1 红、provider 名不脱敏 1 红、userinfo 退回「必须带 scheme」1 红、query 分隔符退回 `?&` 1 红、key 判定加回 `strip()` **2 红**、缺陷理由不脱敏 1 红、`detail` 退回 `_redact_detail` 1 红）。**二轮**处置再补 4 处，共 **14 处变异逐条打红自己的钉子**（M11 前瞻退回「必须含点的主机名」1 红、M12 撤掉 `_KEY_SHAPED_TOKEN` 那一层 1 红、M13 **改写用例侧判据原文**（钉的是 `tests/integration/test_phase13_gate.py`）1 红、M14 打码过宽把主机名一起吞掉 1 红）——**无效钉子 0**。
+
+**三轮变异（`%TEMP%` scratch 副本，25 条逐条跑）**：M1–M14 见上；三轮新增 **M15–M25**（尾部集合退回 `[/\s?]`、主机名类退回不含 `_`、异常臂第二段退回直呼、段故障不记日志、撤掉 authority 层、撤掉 JWT 分支、撤掉 query 层、hex 阈值抬到 25、`close_pending` 交 `None` 句柄、去掉 `(?i)`、header 值不再吃 scheme 词）⇒ **25 条全红、无效钉子 0**。⚠ **过程发现（值得记下来）**：M4 / M8 / M11 / M15 / M16 / M24 首轮**全绿**——不是判据没被钉住，而是**新补的层把旧层的窄判据遮住了**（`://` 形 URL 由"整段 authority"层先吃掉、`;token=` 由 header / 赋值层先吃掉），于是那些收窄在带 scheme 的输入上**删掉也不变红**。处置是给每条判据补**无 scheme 的隔离行**（`user:pw@host#frag` / `user:pw@my_host/v1` / `user:<80 字符>@host/v1` / `;X-Amz-Signature=…` / `USER:PASS@OLLAMA:11434`）：分层脱敏天然互相遮蔽，**只有隔离输入才证明某一层在位**。
+
+**门禁（冻结树 `1821a7be…`（= `c7acb8e` 的树；`git -C <clone> rev-parse HEAD^{tree}` 与 `git rev-parse c7acb8e^{tree}` 逐字符相等），读数在 clone `%TEMP%/iab-b35-mut` 里取）**：全量 **3044 passed / 2 skipped / 42 deselected / 9 warnings in 314.07s**（= 二轮冻结树的 3039 + 三轮 5 个新测试函数：guard 39→42、arms 27→29）、Phase 16 gate **12 passed**、`ruff check`（本批 5 个文件）All checks passed、`git diff --check` exit 0。⚠ **读数纪律**：必须用 **Windows 形式** 的 `PYTHONPATH=<clone>;<clone>/src` 并**先断言** `agent_harness.__file__` / `tests.__path__` 落在 clone 内——本轮踩过：bash 的 `$TEMP` 展开成 `/tmp/...`，Windows 版 Python 不认，静默回落到主工作树的 editable 安装（`D:\intelligence-agent-backend\src`），于是"全量 N passed"读的其实是主工作树（还带着并行会话的在途改动）；同一次错误混用还会伪造出 `ImportError: cannot import name 'PermissionChange'` 这类**只存在于混用状态**的收集错误（clone 的测试 + 主工作树的 src），`HEAD` 树本身自洽（`git show HEAD:src/agent_harness/session/approval.py` 有该名字、测试文件在 `HEAD` 也在）。
+
+**审查**：两轴各一独立只读子代理（A 轴 Standards / 文档真实性、B 轴 Falsification），**均无 P0/P1**：A 轴 6×P2 + 9×P3、B 轴 6×P2 + 10×P3；B 轴对 R4 的核心主张判 **holds**。findings 分三类处置于 `9faa0b2`：**(a) 判据真缺陷**——配置谓词与用例 `skipif` 分叉（`MODEL_PROVIDER=` 与空白 key 两条出口会回到"夹具层 ERROR"，正是本批声称消灭的形状）⇒ 收到等价；**(b) 脱敏覆盖**——userinfo 不带冒号 / 不带 scheme、参数名派生命名（`client_secret` / `X-Amz-Signature`）、`;` `#` 分隔符、provider / model 名（有人会把 key 贴错字段）、`detail` 路径共五类实测漏法 ⇒ 逐条补宽并各配一条用例；**(c) 空断言**——原「理由里没有主模型 key 明文」在本形状下**无论如何都不会红**（报错正文里根本没有那个 key）⇒ 换成密钥形 provider 名必须被打码的有牙版本。
+
+**三轮（窄复验，跑在 `34e46ae` 上）**：A 轴（Standards / 文档真实性）出 1×P2 + 5×P3、B 轴（Falsification）出 1×P1 + 5×P2 + 4×P3，**均为"已修项仍有残口 / 已写文档仍不实"**，无一条推翻四条残余的修法本身。逐条处置：
+- **A 轴 P2（规则与注释都不实）**：`_URL_USERINFO` 的注释宣称"比 `_GIT_URL_USERINFO` 宽两处"，实测另有三处**收窄**（`…@host#frag`、`'…@internal'`、`…@my_host/v1` 整段凭据原样穿过）⇒ 收宽判据（尾部收进 `#` `"` `'` `)` `]` `}` `,` `;` `>`、主机名收进 `_` 与 FQDN 末尾的点）并重写注释，把两处放宽 / 三处收窄 / 无上限量词的由来分开写清。
+- **A 轴 P3×5**：phase12 段"仍会 skip"的说法不实（配了 key 但端点不可达时那两条是**红**）⇒ 改；`_primary_key_present` 的 `None` 方向没写（守卫放行、用例侧 `AttributeError`）⇒ 分开写；"第三层"层级写错 ⇒ 改正；`@decorator`/日期两例与判据不符 ⇒ 改成"确实会被一起打码"；两处 tracker 指针过期 ⇒ 修。
+- **B 轴 P1（六处实测漏法）**：口令含 `/`、双 `@`、`Authorization: Basic <b64>`、`Authorization: Bearer <JWT>`、`X-Api-Key: …`、JSON 引号里夹的 `https://tok@host` —— 每一类都原样穿过 ⇒ 新增两层（整段 authority、header / 赋值形的值）+ 密钥形词表加 JWT 分支，各配用例（含一条**裸 JWT**：`Authorization:` 那条即使删掉 JWT 分支也仍被 header 层吃掉 ⇒ 只有裸写法能钉住该分支）。
+- **B 轴 P2/P3（钉子不足）**：`hex` 阈值 `{24,}` 在 24 位处没有用例（改 `{25,}` 全绿）、`close_pending` 交出去的 `generation` 没有任何身份断言（传 `None` 全绿）、**异常臂的收口第二段没有用例**（把 `stages.run("close_observability", …)` 退回直呼，78 个用例保持绿）、**删掉 `_TerminalStages.run` 的结构化日志**全部用例仍绿 ⇒ 逐条补：24 位 hex 一条、两个 `close_pending` 用例改成**句柄身份**断言、异常臂第二段故障一条（端口抛错时 `run/failed` 仍要落盘）、段故障日志一条（caplog 断 `stage` / `error_type` / `error_message` / `outcome`）。
+- **B 轴 P3（如实记）**：`_RecordingTracer` 的 `str` 句柄分叉在本文件的 `_Telemetry` 单测里**就是被断言的对象**（不是"与断言面无关"）⇒ 改写 docstring 为如实说明 + 指向登记残余；惰性 `step` 的静默失守在契约里写明（无生产者，不造用例）。
+
+**二轮（B 轴复跑，针对 `9faa0b2` 的提交树）**：判定 R4 核心主张 **holds**、无「守卫放行但用例报错」的形状、调用方的 `except Exception` 不改变可观察结局、8 条新用例均有牙、三模块 94 passed。同时出四条可执行 findings，**三条已修于 `34e46ae`、一条转登记**：
+- **P1（已修）无点主机名的 userinfo 原样回显**：前瞻要求"含点的主机名"，`http://user:pass@localhost:8000/v1` / `ollama:11434` / `[::1]` 整段凭据进 skip 理由，而产品 `validate_base_url` 只校验 scheme + netloc ⇒ 自建本地 / 内网端点是现实写法。
+- **P2（已修）`_KEY_SHAPED_TOKEN` 从不作用于 `base_url` / `detail`**：这两个面只过 `_redact_detail` 的窄词表，32 位 hex / `AKIA…` / `hf_…` 能原样穿过本模块**自己已经定义**的形状判据。
+- **P2（已修）`cancel_reason_supplier` 抛错复现修前症状**：B 轴用真实 teardown 注入 throwing supplier，实测收口段 **0 次执行**、`tracer.calls == []`、无 `run/failed`——与 `interrupt_streams()` 抛错的旧症状逐条相同。**处置是登记不是改码**（§8 Scope Lock / §9.1.1：动公开参数的失败语义超出本票授权），但把复现步骤与修法（过 `_TerminalStages`）写进 `_Telemetry` docstring，不再只是"理论边界"。
+- **P3（已修）`_RecordingTracer` 的"形状差异与断言面无关"是错的**：本文件的 `_Telemetry` 单测正在断言 `str` 句柄（`_CountSpy` / `_AritySpy` 同理）⇒ 改写为如实说明 + 指向登记的残余。
+- 另两条 P3 转登记：矩阵用例的期望列是**手抄**的（已补一条**文本级漂移闸**钉用例侧原文，语义仍靠人工对照）、phase12 两条在主 key 为空时**不被探测**（模块 docstring 明写"别读作已被守卫覆盖"）。
+- **窄复验**：A 轴（Standards / 文档真实性）与 B 轴（Falsification）各一独立只读子代理跑在 `34e46ae` 上，判定见「窄复验」小节。
+
+**残余（本次登记，不阻断；前三条属"有意保留"而非缺陷）**：
+
+1. **两层口径不同**：① 的收紧只在守卫侧（`tests/live_model_guard.py`），产品层 `web/model_providers.py::_redact_detail` **未动**（§8 Scope Lock：不顺手改产品层）。⇒ 连接测试 UI 与守卫的脱敏面不同，这是**决定**不是遗漏；若将来要统一，应在产品层做（届时守卫的 helper 可删除）。
+2. **`_URL_USERINFO` 的过度打码面**：判据只看"`@` 前后像不像 `凭据@主机`" ⇒ 邮件地址、`foo@pytest.mark`、`100@2026-09-22` 这类**不含凭据**的串也会被打码（fail-closed：少一段可读文本，不是多一段凭据）。**无点主机与 IPv6 已覆盖**（二轮 P1 修复）；**仍未覆盖**：带路径凭据的形态（`https://host/v1/<token>`，无 `@` 无参数名——判据是形状就必然漏）、**没有 header 名的裸 scheme 值**（`Authorization:` 被吃掉名字那一半时靠名字触发；正文只写 `Basic dXNlcjpwYXNzd29yZA==` 就没有锚点）。
+3. **`_KEY_SHAPED_TOKEN` 非穷尽**：只认前缀形（`sk-` / `pk-` / `hf_` / `gh…`）、AWS access key id、纯 hex（≥24）、`id.secret` 两段式、**JWT（`eyJ…`，三轮补入）**。不透明形态（随机串、base64 无前缀、短 hex、长数字）**不认**——判据宽到那份上会把正常文本一起打码。二轮已把它并入 `base_url` / `detail` 面（此前只作用于 provider / model 名）。**why not `_redact_detail` 独用**：它的 `api[-_]?key` 规则会把 `FALLBACK_MODEL_API_KEY` 这类 **env 名**打成 `FALLBACK_MODEL_***`，毁掉"缺哪个键"这条唯一可操作信息；`_redact_base_url` 仍以它收尾，故 URL / detail 面上**确实有这条过度打码**。
+4. **`_VERDICTS` 以链签名为键**（不加凭据别名化）：把 key 混进签名会让"账号状态中途翻转"被缓存掩盖；键里只含 provider / model 名 / base_url（均为非密字段）。
+5. **`cancel_reason()` 与终态写入仍裸奔**（`_TerminalStages` 之外）：终态写入抛错的传播形状与修前一致；`cancel_reason()` 是**未收口出口**——B 轴二轮用 throwing supplier 实测复现了修前症状（收口段 0 次执行、`tracer.calls == []`、无 `run/failed`）。**当前无生产者**（唯一调用点是 web 的 `"orphaned" if run.reap_requested else "cancelled"`），修法（把该取值也过 `_TerminalStages`）写在 `_Telemetry` docstring 里；改公开参数的失败语义需单独授权。
+6. **异常臂"yield 事件"与"写终态"之间的既有窗口**：收口段产出的流事件在终态事件之前 yield，消费方此时断开仍有既有窗口——**先于本批存在**，本批未扩大也未缩小。
+7. **`str(error)` 的病态 `__str__`**：异常类型自带 `__str__` 抛错时脱敏路径会再抛（探测失败面里的边缘形态）。
+8. **`BaseException` 穿透兜底**：`_TerminalStages` 只 `except Exception` ⇒ `KeyboardInterrupt` / `CancelledError` 不被兜底（Python 惯例；仓库内两段收口都是同步普通方法，无生产者）。**两轴 B 轴二轮记为已知边界**。
+9. **其余 `str` 句柄替身**：`tests/agent/test_terminal_arms.py::_RecordingTracer`（及同文件的 `_CountSpy` / `_AritySpy`）返回 `str` 句柄——臂只做存 / 取 / 转交，但**本文件的 `_Telemetry` 单测确实在断言这个形状**（`telemetry.ctx_span == "ctx-span-2"`）⇒ 换成同型句柄有断言成本，不是机械替换；已在该类 docstring 如实写明。同型替身在 `tests/observability/test_tracer_port.py::_IdentifiedNullSpan`。
+10. **phase12 两条不在守卫的探测面内**（主 key 为空时守卫放行且不探测；它们的门控在 fallback 侧、用例直接建 `ModelConfig`）⇒ 读覆盖面时别把它们算作"已被守卫覆盖"。
+11. **矩阵用例的语义等价靠人工对照**：文本级漂移闸只钉用例侧**拼写**（等价改写会漏），期望列仍是手抄。
+12. **`_primary_key_present` 对非 `SecretStr` 输入与用例侧分叉**（普通 `str` / 无 `get_secret_value` 的对象走另一分支）——对 `Settings` 不可达，作为判据边界登记。
+13. **沿袭未动**（指针，非本批残余）：`#264` 段残余②③（四条臂终态 `run_id` 无端到端锁；`aclose()` 打在"臂正 `await _save_checkpoint` 中途"未实测）与死参数 `failure_terminal(steps=)`。
+14. **`_URL_AUTHORITY` 层的过度打码面**（三轮新增）：`://` 之后的整段 authority 只要还含 `@` 就整段打码 ⇒ URL 的 query 值里塞了邮件地址时，authority 会连带被打码（fail-closed 方向；`[^\s]*` 跨不过空白 ⇒ 报错正文里的 URL 天然以空白为界）。判据注释里如实写了。
+15. **参数名子串表之外的值不打码**（三轮新增）：`?session=…` / `?ticket=…` 这类名字不含 `key|token|secret|auth|password|passwd|pwd|pass|sig|credential` 的查询参数、以及 `X-Request-Sig` 之外的自造 header 名，都不在判据里（按名字判定就必然如此）。`?jwt=eyJ…` 另有 JWT 分支兜住。
+16. **分层遮蔽影响"哪一层在位"的可测性**（三轮新增，方法学注记）：新补的宽层（authority / header 赋值）会在常见输入上**先于**旧窄层命中，于是旧层收窄**删掉也不变红**（三轮 M4/M8/M11/M15/M16/M24 首轮全绿即此）。现每条窄判据都有一条**隔离输入**（无 scheme 形式）钉住；后续再加层时要补同样的隔离输入，否则新层的存在会让旧层的用例变成空转。
+17. **惰性 `step` 的静默失守**（三轮新增，契约级）：`_TerminalStages.run` 的兜底是 `try: return step()` ⇒ 若某段改成生成器 / 惰性迭代，抛错会发生在调用方的 `for` 里，本兜底接不住。仓库内两段收口都是同步普通方法（无生产者），已写进类 docstring 的契约段。
+
+**父票 `#247` 验收面核查（用户授权；读数在冻结树上取，命令逐条可复跑）**：AC1 读码（`run` / `run_stream` 两条入口都经 `_drive`）；AC2 `tests/agent/test_event_sequence_golden.py` **243 passed**；AC3 `tests/agent/test_stream_disconnect_recovery.py` + `tests/agent/test_agent_loop.py` **11 passed**；AC4 `tests/observability/test_tool_tracing.py` + `tests/agent/test_terminal_arms.py` **38 passed**（9 + 29）；AC5 变异（独立副本 `%TEMP%/iab-b35-ac5`，跑 golden + arms + tracer_port + tool_tracing + runmanager 五个文件）——**M5**（`interrupt_streams` 改空操作）**5 红 / 297 绿**、**M6**（`cancelled_terminal` 的 `reason` 写死）**1 红 / 301 绿**；对照（未变异）302 passed。⚠ **M6 的定位如实记**：那颗钉子**在 web 侧**（`tests/web/test_runmanager.py` 的 `orphaned` 归因端到端用例）——只在 agent 侧四个文件里跑会读到"绿"，别据此说"没被钉住"；上一版台账写的"M6 6 红"是错的（当时锚点还命中不到 `_terminal_cancelled`，本次把锚点收到三行上下文后重测）。Phase 16 gate **12 passed** ⇒ 三张子票（`#263` / `#264` / `#265`）已全部 CLOSED，AC 面自身满足 ⇒ 按 §14.12 关单（comment 逐 AC 附证据 + 继承残余）。**`#248` 保持 OPEN**（AC2 部分满足 + R1/R2 待裁决）。
+
+**落点**：`3bf721e`（四条残余）→ `9faa0b2`（一轴 findings 处置）→ `34e46ae`（二轮 findings 处置）→ `c7acb8e`（三轮 findings 处置，**本 range 的代码 tip**）→ 文档笔（tracker 本段 + `docs/phase_status/2026-09.md` 归档 + `PHASE_STATUS.md` 焦点/索引）→ 台账笔（`docs/review_ledger.tsv`：审查行 4 条 + 白名单 1 条，覆盖闸门 exit 0）→ **集成**：`push origin main`（本 clone 按 §13.2(b) 在 `main` 上提交 ⇒ 快进，`origin/main` = `HEAD`）→ `#247` 关单（§14.12，comment 逐 AC 附证据）→ §14.9 三方对齐通知。
+
+**窄复验（跑在 `34e46ae` 上，A 轴 Standards / 文档真实性 + B 轴 Falsification 各一独立只读子代理）**：findings 处置于 `c7acb8e`，判定与残余登记见本段「三轮」「审查」与「残余」三处；门禁已在 `c7acb8e` 的树上重跑（读数见上「门禁」行，本节不留"待复验"预测）。
 
