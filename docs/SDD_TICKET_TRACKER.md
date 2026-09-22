@@ -4444,7 +4444,7 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 ## B-40（`#291` 增量验证：把七阶段主干与失败回退边界定稿进协议）
 
-**状态**：4 笔交付 + 1 笔落点已完成、**未推送**（2026-09-22）。**拟归批次 B-40**（本段即登记）。父票面 = GitHub `#291`（OPEN + `ready-for-agent`）。
+**状态**：4 笔交付 + 1 笔落点 + 1 笔白名单声明已完成，**已快进推送并关单**（2026-09-22）。**拟归批次 B-40**（本段即登记）。父票面 = GitHub `#291`（OPEN + `ready-for-agent`）。
 **依赖关系**：本票是 `#292`（verification feature map + `gate0 --affected`）的前置 —— `#292` 票面备注明写「应先有『失败回退边界』（另一张票）」。`#293`（批 3）最后做。
 
 **问题**：需求方 2026-09-22 定稿的主干（`Grill → Spec → Tickets → Implement(TDD/Tests/Matt 双轴) → Runtime Verification → Evidence Gate → Merge`）**只存在于协议 §9 那张表**：正文没有定义，也没有「失败该退到哪」的边界；相关要求散落在 §7 第 6/8 条与 §8.1–§8.6，读的人拼不出回退路径。实测依据：B-35 一票墙钟 165 分钟里 **137 分钟（83%）**花在处置审查意见、B-36 = 35/53 分钟（66%），两票 `docs` 新增 **0 行** ⇒ 慢的不是实现，是**回退与重跑的范围**没人界定。
@@ -4486,7 +4486,10 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 - AC-b「**失败回退边界表的每一档，要能被 §9 的 skill 支撑，或显式声明"不需要引"**」。
 ⇒ 兑现于 `4622c12` 的 **§8.8.8**（9 档逐一给依据）：Tickets / Runtime Verification / Evidence Gate 三档给**全路径**；Implement / Tests、Merge 两档明文"**本仓特有规则，不需要引**"（情形 ①，附理由）；Grill / Spec / Implement-Review 三档标**情形 ①**（本仓主从关系路由归 §9 明写的 Matt 主开发 skills，**不冒充**"上游无可复用"——情形 ② 要 `PROVENANCE` §2 有判定，这三档没有）；Implement / TDD 一档属**情形 ②**（`PROVENANCE` §2 主表 + §2.1 有"不 vendored"的判定）。路径与 §9 表**逐条字面全等**（R3 两轴各自核过）。§8.8.8 同时划清与 `#292` 的分工：`blast-radius` 给的是**方法**，本仓要的「代码面 ↔ 必跑车道」**机械映射**还不存在 ⇒ `#292` 前"只重跑受影响 verification"**没有机械判据**，人算只产出候选集合、**不得**用于缩小任何重跑范围。
 
-**门禁**：见本段末尾「门禁」一条（覆盖闸门读数与推送状态在落点提交后回填）。
+**门禁**：覆盖闸门 `python scripts/check_review_coverage.py` ⇒ **exit 0**（`09ca47a..HEAD` 提交总数 **498** / 已审查 **353** / 待判定 **145** / `❌` **0**）。
+
+**集成与关单**（2026-09-22）：
+- `push origin main` ⇒ `e378273..446db82`（fast-forward，7 笔；推送前 `.githooks/pre-push` 自动跑 Gate-0 **6/6 PASS / 墙钟 18.1s**，改动面 6 文件全为 docs）；覆盖闸门 `09ca47a..HEAD` **498 / 已审查 353 / 待判定 145 / ❌ 0 ⇒ exit 0**；`origin/main` = `446db82ac06d3c65885455944e0e4e593b59c955`（`git ls-remote --heads origin` 实测，本地 5 refs + 4 tags 逐条零损伤）；`#291` 已按 §14.12 关单（comment 载 7 笔实现提交 + 三项验收读数 + 4 轮审查 + 超预算披露 + 残余 5 条）。
 
 **残余（登记，不阻断，附解除条件）**：
 1. **`#292` 未落地 ⇒ 环内增量目前只到"失败那一条"**（`gate0.py --only <lane>` 与直接喂 focused 文件两条入口已存在）。**解除 = `#292` 落地 `docs/agents/verification.map.tsv` + `gate0.py --affected <rev>`**，届时把 Review / RV 两行的"环内可以跳过"打开。
