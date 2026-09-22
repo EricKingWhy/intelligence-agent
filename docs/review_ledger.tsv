@@ -191,3 +191,4 @@ fd55e70	B-33/B-34 落点行补最终 tip（bafbd12 → a080912 的 4 笔 docs-on
 f08f630	B-33/B-34 tip 锚点自维护口径（tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
 66cb2ae	B-35 三轮（窄复验）findings 与最终读数的文档落点（tracker B-35 段 + 月度归档 + PHASE_STATUS 焦点/索引；docs-only）
 5944617	B-35 四/五轮 findings 与处置的文档落点（tracker B-35 段 + 月度归档 + PHASE_STATUS 焦点/索引；docs-only）
+ffd0857	B-35 集成与关单状态如实化（tracker B-35 段「集成与关单」子段/状态行/落点行/父票段 + 月度归档 L660 段 + PHASE_STATUS 焦点与日志行；docs-only，src/tests 零改动）
