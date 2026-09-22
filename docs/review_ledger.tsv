@@ -198,3 +198,4 @@ f08f630	B-33/B-34 tip 锚点自维护口径（tracker 落点/状态 + 归档两�
 ffd0857	B-35 集成与关单状态如实化（tracker B-35 段「集成与关单」子段/状态行/落点行/父票段 + 月度归档 L660 段 + PHASE_STATUS 焦点与日志行；docs-only，src/tests 零改动）
 0ad98ef	B-35 收尾 tip 锚点改自维护口径 + 三方对齐读数更新（tracker 集成与关单段/落点行 + 月度归档 L660 段 + PHASE_STATUS 两行；docs-only）
 2f145af	B-36（#281）文档落点（`PERF_BASELINE.md` B8 节数字面 + AC4 声明 + tracker `## B-36` 段 + 月度归档 L669 + `PHASE_STATUS.md` 焦点/最近条目/按日索引；docs-only，`src`/`tests`/`scripts` 零改动）
+47d8f2d	B-37（#286–#290）全仓 review findings 开票落点（tracker 批次 + PHASE_STATUS 当前焦点；docs-only，未实现代码）
