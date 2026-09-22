@@ -97,8 +97,9 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 守卫对象：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
   `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）与
   `docs/EVENT_VOCABULARY.md`（`scripts/gen_event_vocabulary.py`）。
-- 期望证据：`6 passed`（生成物 2 文件）+ `16 passed`（验证映射守卫，见 §2 ⑭）= **`22 passed`（3 文件）**。
-- 实测：3 文件 22 例 —— pytest 自身热 **1.2s**；Gate-0 车道口径 **4.0s**（含解释器启动）。
+- 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）= **`26 passed`（3 文件）**。
+- 实测：3 文件 26 例 —— pytest 自身热 **0.8s**（`26 passed in 0.84s`）；Gate-0 `guards` 车道口径 **5.4s**
+  （含解释器启动；`a5bbf03` 树实测，`python scripts/gate0.py --only guards` → PASS / 墙钟 5.4s）。
 - 漂移时先跑生成器：`uv run python scripts/gen_event_types.py` / `... gen_event_vocabulary.py`。
 
 ### ⑧ 审查覆盖闸门
@@ -151,17 +152,25 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 
 ### ⑭ 验证映射与 `--affected`（受影响面的机器化；issue #292）
 
-- **产物**：`docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的**机械映射**。
-  列**对齐** `docs/agents/skills/create-verification-skill` 的 feature 四要素（`Sub-features` /
-  `How to get to it` / `Driving it with <harness>` / `Gotchas`），另加 `surface`（只允许**路径前缀**或
-  **精确路径**，禁通配、禁 catch-all）与 `neg_tier`（`blast-radius` 确定性阶梯）。
-- **守卫**：`tests/test_verification_map.py`（跑在 Gate-0 的 `guards` 车道里）：① `git ls-files` 里
-  **每个**被跟踪文件都被映射；② 结构合法（7 列 / layer 唯一 / 车道 id 在词表内 / focused 路径存在）；
-  ③ **每一行都承重**（删掉任一行 ⇒ 至少一个文件的受影响集合变化）；④ 自带**独立**匹配器，与
-  `gate0.py` 对**每个**文件求值**逐项相同**；⑤ `focused` 必须**真跑得动**——pytest 目标要对盘核到
-  `test_*.py`（`pytest <空目录>` 会以 exit 5 收场，与 vitest 的 `No test files found` 是同一形状的
-  **假 FAIL**），且"哪些 focused 按设计不内联"必须在 `test_focused_only_inlines_pytest_subsets` 里
-  **逐个登记**。⇒ 映射腐烂、或把非 pytest 面接上内联车道 = **推送前就红**。
+- **产物**：`docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的**机械映射**
+  （**23 行 × 8 列**）。四列**逐一对齐** `docs/agents/skills/create-verification-skill` §3 的 feature
+  四要素（`Sub-features` → `sub_features`；`How to get to it (user POV)` → `how_to_get_to_it`；
+  `Driving it with <harness>` → `lanes` + `focused`；`Gotchas` → `gotchas`），另加三个**机械列**：
+  `surface`（`--affected` 的匹配键：只允许**路径前缀**或**精确路径**，禁通配、禁 catch-all）、
+  `layer`、`neg_tier`（`blast-radius` 确定性阶梯）。`how_to_get_to_it` 是**散文**、`--affected`
+  **不消费它**——它服务的是「人工逐行复核」（只给路径的映射，人复核不出"这个面用户摸不摸得到"）。
+- **守卫**：`tests/test_verification_map.py`（**20 例**；跑在 Gate-0 的 `guards` 车道里。编号与协议
+  §8.8.9 **同源**，改一处必须两处同改）：① `git ls-files` 里**每个**被跟踪文件都被映射；
+  ② 结构合法（**8 列** / layer 唯一 / 车道 id 在词表内 / focused 路径存在 / `neg_tier ∈ 1..5`）；
+  ③ **每一行都承重**（删掉任一行 ⇒ 至少一个文件的受影响集合变化）；④ `focused` 必须**真跑得动**——
+  pytest 目标要对盘核到 `test_*.py`（`pytest <空目录>` 会以 exit 5 收场，与 vitest 的
+  `No test files found` 是同一形状的**假 FAIL**），且"哪些 focused 按设计不内联"必须在
+  `test_focused_only_inlines_pytest_subsets` 里**逐个登记**；⑤ **每一行都必须列无条件车道**
+  `diff-check` + `coverage`（§1 决策表第 1 行「任何文件」）——漏列会让 `--affected` 在那个面上把它们
+  **静默跳过**，那不是增量而是放松；⑥ `how_to_get_to_it` 的形状**可机械判定**（要么写明「无用户入口」，
+  要么引一个真实存在的仓库路径）；⑦ 自带**独立**匹配器与**独立**求值器，对**每个**文件与 `gate0.py`
+  的求值**逐项相同**（map 与 `--affected` 不是两套真相）。⇒ 映射腐烂、或把非 pytest 面接上内联车道
+  = **推送前就红**。
 - **命令**：`.venv/Scripts/python.exe scripts/gate0.py --affected <rev>`（`<rev>` 亦可为范围 `A..B`）。
   只跑受影响车道 + 受影响 focused 用例；**默认行为不变**（不带它恒跑全部 6 车道）。
 - **⚠ `focused` 的内联范围（2026-09-22 定，两条血证）**：**只有 pytest 子集内联**（`tests/**` 或 `*.py`）。
