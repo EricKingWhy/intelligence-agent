@@ -204,3 +204,4 @@ ffd0857	B-35 集成与关单状态如实化（tracker B-35 段「集成与关单
 47d8f2d	B-37（#286–#290）全仓 review findings 开票落点（tracker 批次 + PHASE_STATUS 当前焦点；docs-only，未实现代码）
 d5ce8fe	B-37 真实 Gate 配置预检读数落点（tracker 配置预检一行；docs-only）
 fd0a33b	B-37 合并 origin/main（#282 F18-A + B-37 票面登记）；4 份记账面冲突按用户批准保留双方语义，5 个变更文件均为 docs-only
+e8b2707	F18-B（#283）docs-only 落点记录（tracker `## F18-B` 段 + 月度归档 2026-09-22 条 + `PHASE_STATUS` 焦点/最近条目/归档索引/按日定位 + F18-A 残余①标注解除；3 文件全为 `.md`）
