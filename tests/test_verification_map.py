@@ -85,14 +85,19 @@ ROWS = _read_rows()
 
 
 def _matches(pattern: str, path: str) -> bool:
-    """独立实现（刻意与 gate0 的写法不同，但语义必须等价）。"""
+    """独立实现：与 `scripts/gate0.py::map_matches` 的**语义必须等价**（等价是硬要求）。
+
+    写法现在与那边**逐字相同**，是 2026-09-22 给 `map_matches` 补上 `rstrip("/")` 那一支之后的
+    结果（原先少了这支、两边不等价 ⇒ "两条路径对每个文件逐项相同"的结论当时没有意义）。
+    逐字相同**不是**可以把两份合并成一个的理由：这份的价值恰在于"另一条独立路径"。
+    """
     if pattern.endswith("/"):
         return path.startswith(pattern) or path.rstrip("/") == pattern.rstrip("/")
     return path == pattern
 
 
 def _row_hits(row: list[str], path: str) -> bool:
-    return any(_matches(p, path) for p in _split(row[0]))
+    return any(_matches(p, path) for p in _split(row[I_SURFACE]))
 
 
 def _mine_eval(path: str) -> tuple[list[str], list[str], bool]:
@@ -147,7 +152,8 @@ def test_layers_are_unique_and_columns_match_the_header():
     layers = [r[I_LAYER] for r in ROWS]
     dupes = sorted({x for x in layers if layers.count(x) > 1})
     assert not dupes, f"layer 必须唯一，重复：{dupes}"
-    assert all(len(r) == len(COLUMNS) for r in ROWS)
+    # 列数由 `_read_rows()` 在 import 期就断言过（`assert len(cells) == len(COLUMNS)`）；
+    # 这里再断一次是**空转断言**（永不可能成为失败点），2026-09-22 审查指出后删掉。
 
 
 def test_every_lane_id_is_in_the_vocabulary():
@@ -284,13 +290,16 @@ def test_gate_change_pulls_in_the_coverage_gate_itself():
 # ------------------------------------------------------------------ gate0 的 map 解析器自身
 
 def test_gate0_parser_rejects_bad_input(tmp_path):
-    """列数不符 / 车道 id 不在词表内，都必须**解析期**报错——不许静默按位置乱解、更不许少跑一条车道。"""
+    """列数不符 / 车道 id 不在词表内 / 缺无条件车道，都必须**解析期**报错——不许静默按位置乱解、
+    更不许少跑一条车道。"""
     g0 = _gate0_module()
     header = "\t".join(COLUMNS)
     # 行内字段顺序即 COLUMNS：surface / layer / sub_features / how_to_get_to_it /
     #                        lanes / focused / neg_tier / gotchas
+    # 正控行的 `lanes` 必须列齐**无条件项**（`verification.md` §1 决策表第 1 行「任何文件」都要跑
+    # `diff-check` 与 `coverage`）—— 否则会被下面第三条规则挡下（2026-09-22 加该校验时当场踩到）。
     good = tmp_path / "good.tsv"
-    good.write_text(header + "\n" + "a/\tb\tc\td\tdiff-check\tf\t3\tg" + "\n", encoding="utf-8")
+    good.write_text(header + "\n" + "a/\tb\tc\td\tdiff-check|coverage\tf\t3\tg" + "\n", encoding="utf-8")
     assert len(g0.parse_map(str(good))) == 1, "正控：合法的 8 列行必须能解析"
     short = tmp_path / "short.tsv"
     short.write_text("a/\tb\tc\n", encoding="utf-8")
@@ -302,6 +311,12 @@ def test_gate0_parser_rejects_bad_input(tmp_path):
     stray.write_text(header + "\n" + "a/\tb\tc\td\tnot-a-lane\tf\t3\tg" + "\n", encoding="utf-8")
     with pytest.raises(ValueError):
         g0.parse_map(str(stray))
+    # 第三种坏输入：车道 id **全都在词表内**，但漏了无条件项 —— 也必须报错。这正是 2026-09-22 审查
+    # 指出的那个洞：漏列不会当场红，而是在 `--affected` 命中该面时被**静默跳过**（少跑一条车道 = 放松）。
+    missing = tmp_path / "missing.tsv"
+    missing.write_text(header + "\n" + "a/\tb\tc\td\tdiff-check\tf\t3\tg" + "\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        g0.parse_map(str(missing))
 
 
 def test_gate0_affected_summary_fails_closed_on_unmapped_path():
@@ -372,6 +387,7 @@ def test_every_inlined_pytest_target_actually_collects_tests():
             if not found:
                 bad.append((target, "目录下没有任何 pytest 用例（会退化成假 FAIL）"))
     assert not bad, f"内联 focused 目标收不到用例：{bad}"
+
 
 def test_every_row_lists_the_unconditional_lanes():
     """每一行都必须列 `diff-check` + `coverage` —— 这两条对**任何文件**都跑（决策表第 1 行）。

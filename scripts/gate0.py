@@ -180,6 +180,14 @@ def parse_map(path: str | None = None) -> list[MapRow]:
                 raise ValueError(
                     f"{label}:{lineno} 车道 id 不在词表内：{stray}"
                     "（词表见 docs/agents/verification.md §2；写错一个 id 就等于少跑一条车道）")
+            # `UNCONDITIONAL_LANES` 在这里**真的被用上**（2026-09-22 审查指出它原先是死常量）：
+            # 缺无条件车道 ⇒ **解析期**就报错，而不是等 `--affected` 在那个面上把它们**静默跳过**
+            # （静默少跑一条 = 放松）。守卫里另有一份独立副本，那是刻意的交叉对账、不是重复。
+            missing = [x for x in UNCONDITIONAL_LANES if x not in row.lanes]
+            if missing:
+                raise ValueError(
+                    f"{label}:{lineno} 缺无条件车道：{missing}"
+                    "（verification.md §1 决策表第 1 行「任何文件」都要跑这两条）")
             rows.append(row)
     if not rows:
         raise ValueError(f"{label} 没有数据行")
@@ -284,7 +292,7 @@ def focused_manual_reason(path: str) -> str:
     if path.rstrip("/") == "tests":
         return "整个测试目录 = 重车道 pytest-full 本身，按 §2 命令跑"
     if path.startswith("web/"):
-        return "前端/浏览器重车道，按 §2 命令跑；vitest 在干净 HEAD 上就有红 ⇒ 只看失败集合差集"
+        return "前端/浏览器重车道，按 §2 命令跑；vitest 在同类干净树上的读数非确定（有红有绿）⇒ 只看失败集合差集"
     return "非 pytest focused，没有可信的内联 runner，按 §2 命令人工跑"
 
 
@@ -432,8 +440,14 @@ def main(argv: list[str]) -> int:
             print(f"未知参数：{arg}\n")
             return usage() or 1
 
-    if affected_rev and not since:
+    if affected_rev:
         # 车道①（diff-check）与改动面报告都用同一区间，避免"受影响集合用 A、空白检查用 B"两套口径。
+        # ⚠ 同时给了 `--since` 时也必须**统一到 `--affected` 的范围**：此前写成
+        # `if affected_rev and not since:`，实测同一份输出里会同时出现 `受影响面（--affected A）`
+        # 与 `改动面：…（B）` 两个范围（2026-09-22 审查实测）—— 正是本处要消灭的那种分裂。
+        if since and _as_range(since) != _as_range(affected_rev):
+            print(f"⚠ --since（{_as_range(since)}）与 --affected（{_as_range(affected_rev)}）范围不同："
+                  "一律以 --affected 的范围为准（否则空白检查与受影响集合会变成两套口径）。")
         since = affected_rev
 
     lanes = build_lanes(since)
@@ -453,7 +467,11 @@ def main(argv: list[str]) -> int:
             return 1
         changed = got
         affected = affected_summary(rows, changed)
-        if not affected["unmapped"]:
+        # 空改动面 ⇒ **fail-closed，不收敛**：否则 `--affected <刚提交的 sha>`（此时
+        # `git diff --name-only <sha>..HEAD` 恰为空）会打印出 `Gate-0 PASS：0/0 通过` ——
+        # 一个与真 PASS **不可区分**的绿（2026-09-22 审查实测）。那不是"没有受影响面"，
+        # 是"这个范围里根本没有改动"，属于用错参数，必须响亮退回全量。
+        if not affected["unmapped"] and changed:
             keep = set(affected["lanes"])
             lanes = [ln for ln in lanes if ln.name in keep]
         # else：fail-closed —— 有路径映射不到就**不动车道集合**（= 保持全量），只再加 focused。
@@ -489,6 +507,9 @@ def main(argv: list[str]) -> int:
         if affected["unproven"]:
             print(f"  · ⚠ unproven（blast-radius 阶梯 < 4：未跑真代码证明「其余车道不受影响」）："
                   f"{', '.join(affected['unproven'])}")
+        if not changed:
+            print("  · ⚠ 改动面为空（该范围没有任何改动文件）⇒ **fail-closed：跑全部车道**"
+                  "（不收敛成 0 条 —— 否则会打印出与真 PASS 不可区分的「0/0 通过」）")
         if affected["unmapped"]:
             print(f"  · ❌ 未映射路径 {len(affected['unmapped'])} 个 ⇒ **fail-closed：跑全部车道**（请补 map）")
             for u in affected["unmapped"][:10]:

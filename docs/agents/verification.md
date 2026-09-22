@@ -153,8 +153,9 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 ### ⑭ 验证映射与 `--affected`（受影响面的机器化；issue #292）
 
 - **产物**：`docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的**机械映射**
-  （**23 行 × 8 列**）。四列**逐一对齐** `docs/agents/skills/create-verification-skill` §3 的 feature
-  四要素（`Sub-features` → `sub_features`；`How to get to it (user POV)` → `how_to_get_to_it`；
+  （**24 行 × 8 列**）。feature 四要素由其中**五列**承载（`Driving it with <harness>` 拆成 `lanes` +
+  `focused`），逐一对齐 `docs/agents/skills/create-verification-skill` §3
+  （`Sub-features` → `sub_features`；`How to get to it (user POV)` → `how_to_get_to_it`；
   `Driving it with <harness>` → `lanes` + `focused`；`Gotchas` → `gotchas`），另加三个**机械列**：
   `surface`（`--affected` 的匹配键：只允许**路径前缀**或**精确路径**，禁通配、禁 catch-all）、
   `layer`、`neg_tier`（`blast-radius` 确定性阶梯）。`how_to_get_to_it` 是**散文**、`--affected`
@@ -193,7 +194,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 
   ⚠ **四条读数的 `coverage` 车道都是红的**，这是闸门**正确工作**的形状：它从**工作树**读台账，而本批
   自己的 7 笔提交（`d79fcba..deee331`）**当时还没写进台账**（本批含代码面 ⇒ 必须走**真实审查行**、
-  不能走白名单）。收口笔落台账后复跑 ⇒ `coverage` **PASS**、闸门 **exit 0**。
+  不能走白名单）。⇒ **本块不含任何 `coverage` PASS 的结论**（它当时就是红的）；
+  落台账后**必须复跑一次**并把读数写进落点记录（判据：`python scripts/check_review_coverage.py` 退出 0）。
 
   同树**全量** Gate-0 作对照：仅 `coverage` 红、其余 5 条 PASS，**15.7s**。
   ⚠ A 行比全量 Gate-0 **更慢**，这是**正确**的——全量 Gate-0 **一条测试都不跑**，而 A 真的跑了

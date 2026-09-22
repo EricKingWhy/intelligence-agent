@@ -579,8 +579,9 @@ skill 支撑，或显式声明"不需要引"**」，第 1 条要求「新写的�
 
 **三件套**（都在仓库内，按路径读即可）：
 
-- `docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的机械映射（23 行 × 8 列）。
-  **四列逐一对齐** `docs/agents/skills/create-verification-skill` §3 的 feature 四要素：
+- `docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的机械映射（24 行 × 8 列）。
+  **四要素由五列承载**（`Driving it with <harness>` 拆成 `lanes` + `focused`），逐一对齐
+  `docs/agents/skills/create-verification-skill` §3 的 feature 四要素：
   `Sub-features` → `sub_features`、`How to get to it (user POV)` → `how_to_get_to_it`、
   `Driving it with <harness>` → `lanes` + `focused`（「驱动它」的两半：跑哪些车道、跑哪些用例）、
   `Gotchas` → `gotchas`；另加三个**机械列**：`surface`（`--affected` 的匹配键，只允许**路径前缀**或
