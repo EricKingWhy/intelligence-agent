@@ -1,0 +1,53 @@
+# docs/agents/verification.map.tsv —— 代码面 ↔ 必跑车道 / focused 用例的**机械映射**（issue #292，批次 B-41）
+#
+# 用途：把「这次该跑什么」从**记忆**变成**可被脚本消费的表**。`scripts/gate0.py --affected <rev>` 读本表，
+#       由改动面算出应跑集合；`tests/test_verification_map.py` 是本表的守卫（完整性 + 车道词表 + focused 路径存在）。
+#
+# 列（**对齐 `docs/agents/skills/create-verification-skill` 的 feature 四要素**，另加两个机械列）：
+#   surface      = `How to get to it` 的机械化 —— `|` 分隔的**路径前缀**（以 `/` 结尾）或**精确路径**。
+#                  只允许这两种形态（守卫会校验）：不做通配、不做 catch-all，否则守卫会失去牙齿。
+#   layer        = 分组键，唯一；人工阅读与 `--affected` 输出用。
+#   sub_features = `Sub-features` —— 该面下的子特征（`|` 分隔的短 id）。
+#   lanes        = `Driving it with <harness>` —— **必跑车道 id**（`|` 分隔）。
+#                  词表见 `docs/agents/verification.md` §2：Gate-0 可跑的 6 条
+#                  （diff-check / ruff / oxlint / tsc / guards / coverage）+ 重车道
+#                  （pytest-full / pytest-clean / vitest / build / e2e / live）。
+#   focused      = 受影响的 focused 用例路径（`|` 分隔；**相对仓库根**，目录或文件，必须在盘上存在）。
+#                  ⚠ **只有 pytest 子集会被 `--affected` 内联跑**（`tests/**` 或 `*.py`）。前端与
+#                  浏览器类（vitest / e2e / live）只作**登记**，列进「按 §2 命令人工跑」的清单——
+#                  原因见 `scripts/gate0.py::focused_runner` 的两条血证（vitest 的 cwd 是 `web/`；
+#                  且它在干净 HEAD 上就有红）。加一条非 pytest 的 focused 会被
+#                  `tests/test_verification_map.py::test_focused_only_inlines_pytest_subsets` 挡下。
+#   neg_tier     = **blast-radius 确定性阶梯**（`docs/agents/skills/blast-radius`）：本行「**未列出的车道
+#                  不受影响**」这个主张停在第几级。1=我这么说 / 2=指到行 / 3=走过失败路径到不了 /
+#                  4=**跑了真代码**（有机械守卫在跑）/ 5=在运行的应用里复现。
+#                  **< 4 ⇒ 该主张是 `unproven`**：`--affected` 会逐行打印出来，不得据此**缩小任何重跑范围**
+#                  （只可用于协议 §8.8.3 允许的「失败后环内重跑」）。
+#   gotchas      = `Gotchas` —— 会让这次验证白跑或失真的陷阱。
+#
+# ⚠ 本表**不新增门禁**：它只回答「受影响面是什么」。完整门禁的清单权威仍是 `AGENTS.md` §14.10 与
+#   协议 §7；`--affected` 的边界见协议 §8.8 与 `docs/agents/verification.md` §4。
+surface	layer	sub_features	lanes	focused	neg_tier	gotchas
+src/agent_harness/session/	backend-session	session-events|derivation|permission-mode|fork|run-manager	ruff|pytest-full|guards|coverage|diff-check	tests/session	3	event.py 是事件词汇唯一真值，改它必须连带跑生成物守卫（见 backend-event-vocabulary 行）；有 pending 审批时禁止改权限档（409）；改派生要连带看 tests/session 的 golden
+src/agent_harness/session/event.py	backend-event-vocabulary	event-vocabulary|generated-artifacts	ruff|guards|pytest-full|coverage|diff-check	tests/test_event_types_generated.py|tests/test_event_vocabulary_generated.py|tests/session	4	词汇改动必须先跑 scripts/gen_event_types.py 与 scripts/gen_event_vocabulary.py；两份生成物（web/src/generated/event-types.ts、docs/EVENT_VOCABULARY.md）不重生成就会红
+src/agent_harness/agent/|src/agent_harness/orchestration/|src/agent_harness/prompt/	backend-core-runtime	run-loop|streaming|chunk-aggregation|telemetry|orchestration|prompt-registry	ruff|pytest-full|guards|coverage|diff-check	tests/agent|tests/orchestration|tests/prompt	3	流式 chunk 聚合、telemetry 收口、终态帧都在同一段运行时里；改 runtime.py 必须同时跑 tests/agent 的事件序列 golden（test_event_sequence_golden.py），否则等价性破坏看不出来
+src/agent_harness/context/|src/agent_harness/memory/|src/agent_harness/knowledge/	backend-context	context-assembly|summarization|token-counting|memory-store|knowledge-index	ruff|pytest-full|coverage|diff-check	tests/context|tests/memory|tests/knowledge	3	tiktoken 特例：encode 与 encode_ordinary 的分歧只在**单个**用例上现形（tests/context/test_tokens.py），只看「全量通过」会漏
+src/agent_harness/model/|src/agent_harness/websearch/	backend-model	provider-chain|fallback|base-url-redaction|web-search	ruff|pytest-full|coverage|diff-check	tests/model|tests/websearch	3	真实调用用例受 tests/live_model_guard.py 三态守卫（无 .env 时是**响亮 skip**，不是通过）；`-m integration` 的结论不能当本行的结论
+src/agent_harness/sandbox/|src/agent_harness/tools/|src/agent_harness/tooling/	backend-execution	sandbox-policy|bash-budget|tool-registry|tool-executor	ruff|pytest-full|coverage|diff-check	tests/sandbox|tests/tools|tests/tooling	3	Docker 相关用例在 daemon 不在场时是 skip 不是通过；os.symlink 在本沙箱**静默 no-op**（先探针再归因）
+src/agent_harness/storage/|src/agent_harness/recovery/|src/agent_harness/workspace/|src/agent_harness/instance_lock.py	backend-persistence	event-store|checkpoint|recovery-ports|workspace-index|instance-lock	ruff|pytest-full|coverage|diff-check	tests/storage|tests/recovery|tests/workspace	3	恢复子系统走**域内端口**（RecoveryStoreBundle）：改端口成员要同时跑 tests/recovery，守卫只看 import 面、属性链绕过抓不到
+src/agent_harness/transport/|src/agent_harness/web/|src/agent_harness/mcp/|src/agent_harness/mcp_client	backend-transport	sse-transport|web-api|mcp-client	ruff|pytest-full|coverage|diff-check	tests/transport|tests/web|tests/mcp_client	3	SSE 断连/重连语义**跨前后端**（web/e2e/e-reconnect.spec.ts）；只跑后端会漏
+src/agent_harness/capability/|src/agent_harness/multiagent/|src/agent_harness/observability/|src/agent_harness/skills/	backend-aux	capability-probe|multiagent|tracer|skill-loader	ruff|pytest-full|coverage|diff-check	tests/capability|tests/multiagent|tests/observability	3	observability 的**端口调用次数差分**是等价性判据（B-32 先例）：改 telemetry 要跑该目录全量，子集跑不是判别器
+src/agent_harness/__init__.py|src/agent_harness/assembly.py|src/agent_harness/cli.py|src/agent_harness/config.py|src/agent_harness/identity.py|src/agent_harness/logging.py	backend-entry	assembly-wiring|builtin-tool-registration|cli|settings|logging	ruff|pytest-full|coverage|diff-check	tests/test_assembly.py|tests/test_cli.py|tests/test_identity.py|tests/test_structured_logging.py	3	assembly 是内置工具的**唯一消费点**：新增工具不接线就红（B-38 的 17 failed 红证形状）
+tests/	backend-tests	test-suite	ruff|pytest-full|coverage|diff-check	tests	3	失败**总数**不可用于归因（沙箱负载下非确定性）⇒ 只看失败**集合差集**；全量后期 tests/evaluation/* 会因 safe-delete 配额假红 ⇒ 用 scripts/run_tests_clean.sh
+web/src/	frontend-src	session-view|composer|timeline|permission-pill|projection|styles	oxlint|tsc|vitest|build|coverage|diff-check	web/src	3	tsc -b 只在出错时说话（无输出 = 通过）；改样式要两主题块同批核对；**vitest 不内联**（见 focused 列说明）：2026-09-22 实测干净 HEAD 上 `vitest run src` = 67 文件 1067 例中 **1 红**（`web/src/components/StepDetail.window.test.tsx` 超时 6224ms，即 B-29 已知 flake）⇒ 前端 vitest 的红**不归因**于本次改动，只看失败**集合差集**
+web/src/generated/	frontend-generated	generated-event-types	oxlint|tsc|guards|coverage|diff-check	tests/test_event_types_generated.py	4	这是**生成物**：手改必被守卫打红；要改它得先改 src/agent_harness/session/event.py 再跑 scripts/gen_event_types.py
+web/e2e/|web/e2e-live/	frontend-e2e	e2e-scenarios|live-e2e	e2e|live|oxlint|tsc	web/e2e	2	playwright 写死 :5173 且 reuseExistingServer=false（被占用会**拒绝启动**，这是有意的）；真机车道前置见 docs/ACCEPTANCE_LANE_ENV.md；web/e2e-live 需要真实后端
+web/package.json|web/pnpm-lock.yaml|web/index.html|web/vite.config.ts|web/vitest.config.ts|web/vitest.perf.config.ts|web/tsconfig.json|web/tsconfig.app.json|web/tsconfig.node.json|web/playwright.config.ts|web/playwright.live.config.ts|web/.oxlintrc.json|web/stream_check_local.mjs|web/ui_check3.mjs|web/PRODUCT.md|web/README.md|web/.gitignore	frontend-config	build-config|test-config|lint-config|dev-server	oxlint|tsc|vitest|build|diff-check	web/src	3	改 tsconfig / vite 配置会波及**全部**前端车道；本机 npm/npx 被沙箱拉黑 ⇒ 一律走 `node node_modules/<pkg>/…`
+web/scripts/	frontend-scripts	port-preflight|perf-inspector	oxlint|e2e		2	web/scripts/preflight-port.mjs 是 playwright 的前置：改它要重跑 e2e 才看得出问题
+scripts/	repo-scripts	gate0|coverage-gate|generators|run-tests-clean	ruff|coverage|diff-check	tests/test_measure_sse_streaming.py|tests/test_migrate_legacy_step_id.py	3	改 scripts/check_review_coverage.py 或 scripts/gate0.py 是在改**闸门自身** ⇒ 必须走**真实审查行**，不能走白名单；scripts/check_review_coverage.sh 已冻结为语义参考
+docs/	docs	process-docs|spec|adr|phase-status|review-ledger|research	diff-check|coverage		3	改 docs/review_ledger.tsv 会改闸门的**声明式输入**（台账从**工作树**读，必须在干净检出上跑）；docs-only 提交可走白名单，但代码提交永远不行
+AGENTS.md|CLAUDE.md|CONTEXT.md|README.md|CHANGELOG.md|DESIGN.md|LICENSE	repo-governance	process-charter|agent-entry|domain-vocabulary|license	diff-check|coverage		3	AGENTS.md 的**章节号与标题被跨文件引用** ⇒ 只能压正文，禁止重排编号或改标题；删减前先 git grep 该内容是否被外部引用
+pyproject.toml|uv.lock|dev.sh|.gitattributes|.gitignore|.env.example|.githooks/	repo-config	dependency-manifest|hook-wiring|eol-policy|env-template	diff-check|coverage|pytest-full|ruff		3	改依赖后 ruff 规则集可能变（pyproject 对 ruff **无上界**）；.gitattributes 钉着 hook 的 eol=lf，改它会让 pre-push 坏掉；pyproject.toml 本身在 `ruff check .` 的范围内
+web/public/	frontend-static-assets	favicon|icons|static-assets	build|e2e|diff-check		2	favicon 有专门的 e2e 用例（web/e2e/favicon.spec.ts）：改 public/ 下的 svg 要重跑 e2e 才看得出
+.specify/|.idea/|.impeccable/|.scratch/	repo-tooling-not-product	speckit-config|ide-project|design-critique|scratch-artifacts	diff-check|coverage		2	这些是**工具 / 草稿面**，不是产品代码：它们在 src / tests / web / scripts 之外，改它们不触发任何代码车道。断言它们「不影响代码」的依据只是**路径在代码面之外**（tier 2）⇒ 属 unproven，不要据此去缩小别的重跑范围
+demo/|evaluation/|goal/|design-system/|logs/	demo-and-evaluation	live-agent-demo|eval-datasets|goal-specs|design-tokens|runtime-logs	ruff|pytest-full|diff-check	tests/test_live_agent_repl.py	2	demo/live_agent.py 的自建 registry 是已知残余（B-38 登记）；evaluation/* 走 safe-delete 配额；logs/ 是运行期产物、不入库
