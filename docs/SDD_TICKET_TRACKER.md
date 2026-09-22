@@ -3776,16 +3776,20 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 
 ### B-26（2026-09-21）：#248 领域服务改显式 collaborators（截至 `8fcf483` 共 **6 轮**独立审查 = 两轴各一 + 五轮窄验证 → `978e960` / `ed1c5fa` / `61aaa20` / `a6dbb9f` / `d96e148` / `af6f369` / `8fcf483`）
 
-**状态**：`#248` 的实现与证据已完成、**保持 OPEN**——AC1/AC3/AC4/AC5 满足，**AC2 部分满足**（残余 R1），另有两处**待用户裁决**（见下）。blocker `#243` 已关。
+**状态**：`#248` 的实现与证据 2026-09-21 完成（AC1/AC3/AC4/AC5 满足，AC2 当时**部分满足**）；**2026-09-22 用户裁决 R1/R2 后两处残余闭合** ⇒ AC2 转**满足**（三份域文件对 `web` 的引用数为 0），`#248` 随本批集成按 §14.12 关单。blocker `#243` 已关。
 
 **落点**：实现 `978e960`（18 文件，+661/−255）→ 两轴 findings 修复 `ed1c5fa`（3 文件）→ 窄验证第一轮 findings 修复 `61aaa20`（1 文件）→ docs 落点 `a6dbb9f`（4 文件，docs-only）→ 窄验证第二轮 findings 修复 `d96e148`（测试 + docs）→ 窄验证第三轮 findings 修复 `af6f369`（测试 + docs）→ 窄验证第四轮 P3 收口 `8fcf483`（测试 + docs）。机制正本 `docs/adr/0040-session-service-explicit-collaborators.md`（D1–D5 决策、§3 字段清单、R1–R4 残余与未采纳方案、§6 AC 矩阵）；本批门禁读数、逐轮审查 findings 与处置、红证产物、残余与待裁决边界统一写在 `docs/phase_status/2026-09.md` 的 B-26 段；本节只保留 ticket 状态、待裁决与残余，不复制机制。
 
-**待用户裁决（票面未改写，AGENTS.md §9.1.1）**：① **R1**——`RunManager`（+ `ManagedRun` / `Subscriber`）的模块家仍在 `web/`，是 AC2「新 interface 不引用 `web`」唯一未闭合处（该模块自身不 import 任何 web 依赖，本层只在 `TYPE_CHECKING` 下命名它、运行时零成本；纯移位即闭合，但跨 ~13 个测试文件的 patch 路径，属跨模块重构）。② **R2**——本票新增了一条通向组合层 `assembly` 的**类型级**引用 `stores: RecoveryStores`（改造前该符号根本不出现于 `service.py`）；不碰 `web`、AC2 字面不受影响，但同属本票引入的接口耦合，可选"接受登记"或"领域自建三 store 束、去掉该参数"。拿到裁决前不自行搬迁、不自行改写构造契约。
+**裁决（2026-09-22，用户逐项选定；票面按 §9.1.1 只在获得裁决后推进）**：① **R1 = 「搬到 `session/`」**——依据是 Mature 先例：Temporal 把 RunManager 放在 `temporal/` SDK 内、Jupyter Server 把 KernelManager 放在 server 包内；落地为 `git mv` 到 `agent_harness/session/runmanager.py`（纯移位，运行时零影响）。② **R2 = 「领域自建端口」**——依据是 langgraph / langmem 由库自身声明运行所需最小接口、由调用方实现；落地为 `session/service.py` 自建 `RecoveryStoreBundle`（`@runtime_checkable` Protocol，四个成员 = 装配层实读点），构造参数注解不再写 `assembly.RecoveryStores`。两处残余随之**闭合**，守卫按"残余归零"改写（三份域文件登记值全空集）并新增家钉住 / 结构兼容 / 组合层 import 边界三条判据。裁决依据、逐条取舍与未采纳方案见 ADR-0040 头部「裁决」段 + §4 R1/R2/R4。
 
 **残余（登记，不阻断，各需单独票）**：
-- `RunManager` 的家在 `web/runmanager.py`（R1，同上，待裁决）。
-- 守卫作用域（两条并列，见 ADR-0040 §4 R3）：子进程那条只看**真正被加载**的模块级 web import；AST 那条扫全部 import 语句（含函数体内的惰性 import，比原描述更严），**不覆盖** `__import__` / `importlib.import_module` 这类动态导入。实测任何模块级 `agent_harness.web.*` 运行时 import 都会立刻成环（`web/__init__.py` eager import `app`），故该性质是结构性约束。
-- 未采纳的收窄方案（窄 Protocol、合并 `stores` 与三 ledger、搬 `RunManager`）逐条留痕在 ADR-0040 §4 R4，附否掉的理由。
+- ~~`RunManager` 的家在 `web/runmanager.py`（R1，待裁决）~~ **已闭合（2026-09-22，R1 裁决后搬到 `session/runmanager.py`）**。
+- 守卫作用域（两条并列，见 ADR-0040 §4 R3）：子进程那条只看**真正被加载**的模块级 web import；AST 那条扫全部 import 语句（含函数体内的惰性 import，比原描述更严），**不覆盖** `__import__` / `importlib.import_module` 这类动态导入，也**不覆盖"属性链"形态**（`import agent_harness` + `agent_harness.assembly.X` / `agent_harness.web.app.X`——2026-09-22 复验 findings N2 实测登记，两条 import 判据的共同边界）。实测任何模块级 `agent_harness.web.*` 运行时 import 都会立刻成环（`web/__init__.py` eager import `app`），故该性质是结构性约束。
+- 未采纳的收窄方案（窄 Protocol、合并 `stores` 与三 ledger、**搬 `RunManager`（已于 2026-09-22 被裁决采纳）**）逐条留痕在 ADR-0040 §4 R4，附否掉的理由。
+
+**R1/R2 闭合批次（2026-09-22，用户裁决后执行）**：三笔——`8310e62` 实现（R1 搬迁 + R2 端口 + 守卫改写，12 文件 +186/−48）→ `a54c13a` 首轮 findings 处置（组合层 import 守卫收全四种等价写法 + 扫描扩到三份域文件）→ `848586e` 复验 N 条处置（`is_assembly_module` 点分段精度 + `AppState` 守卫补扫 `runmanager.py` + 三处指针/口径订正）。**红证 21 条**（前 14 条见 ADR-0040 §5 表；本批 7 条见 §5.1：旧路径复活、真实束删成员、组合层 import 四种写法、域文件重新引用 web），全部按预期变红且还原后 `git hash-object` 一致。**门禁（`848586e`，待集成树）**：全量 `PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly` = **3093 passed / 2 skipped / 42 deselected / 0 failed in 487.24 s**（中间树 `a54c13a` 同命令 3092 / 0 failed in 581.93 s；首版树 3090 passed / 1 failed，唯一失败为登记在案的既有 flake `test_timeout_stops_late_workspace_mutation`，同树单跑 **3/3 passed** 判非本批引入）；`ruff check` 改动文件 All checks passed；`git diff --check` 无输出。**独立审查三轮**（均独立只读子代理）：R1 审 `8310e62` 判**可集成**（2×P2 + 4×P3 全处置于 `a54c13a`）、R2 修后窄复验 `a54c13a` 判**修复成立**（另出 N1–N7，处置于 `848586e`）、R3 窄复验 `848586e` 判**N1–N7 全部真闭合**（无 P0/P1/P2，仅余 2 条纯文档口径，本批收尾已订正）。机制正本 ADR-0040（头部裁决段 + §4 R1/R2/R4 + §5.1/§5.2）；逐条明细见 `docs/phase_status/2026-09.md` 2026-09-22 B-39 条。
+
+**集成与关单（2026-09-22，R1/R2 闭合批次）**：集成记录在集成执行后追加（台账笔 + 覆盖闸门读数 + push 结果 + `#248` 关单 + §14.9 回补），落点为本段与 `docs/phase_status/2026-09.md` 的 B-39 条——按 §16.1 只写一次、别处只留指针。
 
 **覆盖**：本批各提交（实现 / 各轮窄验证的 findings 修复 / docs 落点）的审查范围行与 docs-only 白名单**唯一住在 `docs/review_ledger.tsv`**（闸门 `scripts/check_review_coverage.sh` 的输入；机制见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）。本节**不复述**范围清单——上一轮审查按这里写死的清单去台账核对，发现台账当时还没有对应行（finding N1：文档先于台账声明覆盖），故按 §16.1 收敛为指针。
 

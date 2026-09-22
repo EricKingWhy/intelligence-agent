@@ -282,8 +282,9 @@ async def on_run_terminal(self, session_id: str) -> None:
 
 **唯一调用点**（不得有第二处）：`RunManager` 的 `ManagedRun._drive` 完成路径所在模块
 **2026-09-22 由 `web/runmanager.py` 迁至 `session/runmanager.py`（纯移位，见 ADR-0040 §4 R1）**，
-按旧路径搜索会零命中。原写的行号 `:182` **从来不是有效读数**（复验 findings 的 N1 实测：搬迁前
-该参数也在 `:228`，写 ADR 时的 `web/runmanager.py:182` 是别的内容）——现址 `:228` 已核。接线方式：
+按旧路径搜索会零命中。原写的行号 `:182` **从来不是有效读数**（复验 findings 的 N1 实测：该参数
+在最近若干版一直落在 `:228`，更早一版在 `:225`；`web/runmanager.py:182` 在任何一版都是别的内容）
+——现址 `:228` 已核。接线方式：
 
 - `RunManager.__init__(..., on_run_terminal: Callable[[str], Awaitable[None]] | None = None)`（现 `session/runmanager.py:228`，默认 None ⇒ 测试与既有调用零改动）
 - `_drive` 的 `finally`：先写终态、`run.finish()` 之后再 `await self._on_run_terminal(session_id)`；异常吞掉并记结构化日志（收尾失败不得影响 run 的终态事实）

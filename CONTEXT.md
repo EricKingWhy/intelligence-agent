@@ -433,7 +433,7 @@ run 生命周期与 HTTP 请求生命周期的解耦态：`POST /api/sessions` �
 _Avoid_: background run, fire-and-forget, async detach
 
 **RunManager**:
-web 层的 run 生命周期托管（`web/runmanager.py`）：per-session detached task + 订阅者扇出 + **seq 幂等合并**（session listener 通道与 `_drive` 镜像通道按 durable seq 去重汇流，durable 事实唯一来源是 `Session.append`）+ 有界订阅队列（2000 帧，满时丢最旧保最新——seq gap 让客户端重连自愈）。拥有 `memory_session_var` 的绑定权。
+run 生命周期托管（`session/runmanager.py`——2026-09-22 由 `web/runmanager.py` 迁入，见 ADR-0040 §4 R1）：per-session detached task + 订阅者扇出 + **seq 幂等合并**（session listener 通道与 `_drive` 镜像通道按 durable seq 去重汇流，durable 事实唯一来源是 `Session.append`）+ 有界订阅队列（2000 帧，满时丢最旧保最新——seq gap 让客户端重连自愈）。拥有 `memory_session_var` 的绑定权。
 _Avoid_: run registry, task manager, event bus
 
 **合帧（Coalescing）**:
