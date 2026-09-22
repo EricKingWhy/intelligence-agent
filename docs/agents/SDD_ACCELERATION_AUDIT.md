@@ -691,7 +691,7 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 
 补审的两轴子代理之后，**独立复核子代理因 API 频率限制（429，次日 12:07 重置）无法启动** ⇒ 按台账
 先例降级为**主会话内联复核**（同形态先例：批 2 台账行「子代理返回空输出 ⇒ 主会话内联双轴」）。
-**如实标注：这不是独立复核**；频率重置后可再起真独立子代理复核一次。
+**如实标注：当时不是独立复核**；频率重置（次日 12:07）后已补真独立复核，见本节末尾。
 
 机械复算 8 项（脚本：`%TEMP%\wbi_verify8.py`，输出 `wbi_verify8_out.txt`；`%TEMP%\wbi_gate_replay.py`
 在 `5c22f777` 的干净 clone 上复跑 `scripts/check_review_coverage.py`，输出 `wbi_gate_replay_out.txt`）：
@@ -718,3 +718,5 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 **结论：15/16 PASS**；唯一 finding 即第 2 条的引号口径，已在本笔处置。另一条线在 `5c22f777` 之后
 追加的 `541b61ea` / `1bb0a811` / `4f0df6e4` 三笔只碰 `docs/FRONTEND_ISSUES_LOG.md` 与台账
 （`877a576..4f0df6e4` 的 diff --name-only 实测），本线三个文件的复算基准不受影响。
+
+**独立复核（2026-09-23 00:xx 起，频率重置后，真独立子代理）**：子代理用 GitHub API 取上游 `53e579f1` 树（不依赖本机 clone），与本仓 `a5f46989` 的 `ls-tree -r` 逐条比 blob sha1：命题 A 【逐字节副本】**12/12 全等**；命题 B 【目录恰好 13 项】**PASS**；命题 C 【未动 Matt skill】**PASS**（codex/zcode 里 Matt skill mtime 均 >13100 分钟前，`handoff` 仍带 `disable-model-invocation: true`）。总判定：三项全部 PASS。
