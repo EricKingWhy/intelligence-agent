@@ -3639,6 +3639,12 @@ cd web && node node_modules/vitest/vitest.mjs run --reporter=verbose src/lib/sse
 （每条含 merge/tip SHA、本票提交清单、验收证据节指针、门禁数字）。
 **#274**（B6，blocked by #242）与 **#281**（B8，blocked by #247）**未开工** ⇒ 父票 **#267 保持 OPEN**。
 
+> **⚠ 2026-09-22 更新（B-36）**：上条的阻塞已全部解除——**`#274` 已由并行会话完成并关单**（B6，其阻塞 `#242` 已闭合）；
+> **`#281` 由 B-36 完成并关单**（B8，其阻塞 `#247` 已按 §14.12 关单；B-35 段有 `#247` 验收面取证记录）。
+> 子票 **14/14 CLOSED** ⇒ 父票 **`#267` 的验收面（`docs/tickets/perf-interaction-smoothness-2026-09-18.md` §0.6 七条）已逐条取证据核后按 §14.12 关单**
+> （2026-09-22，`closedAt` = 2026-09-22T04:22:45Z；两条如实披露：G4「观感口径」多行仍为「未取得」、本次 e2e 全矩阵未取得全绿读数）。
+> 证据与命令见 `#267` 上的两则 comment（验收面 6217 字符 + 关单披露），明细见下方「B-36」段与 `docs/phase_status/2026-09.md` L669 起。
+
 > 另：本次推送同时把 `main` 线上原本未推的 33 个提交（含 `#257`–`#262` 与 B-19/B-20/B-21 审查记录）推到 `origin/main`。
 > 这批票的关单属**另一条线的验收范围**——`docs/PHASE_STATUS.md` 当前焦点写明「全量与最终验收通过前不 push/关单」，
 > 且 `#258` late `exec_create` cleanup P2 按用户既有决定保持 OPEN ⇒ **本记录不代为关单**，如实披露该边界。
@@ -4271,7 +4277,23 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 4. **`_drive` 本身的结构问题（约 700 行）不在本票范围**（票面未闭合项②）。解除条件：另开票（`#247` 已 CLOSED ⇒ 文件级冲突已消失）。
 5. **票面提到的"同一函数体附近可能还有其它逐项累加形态"本票未扫**（只处理票面点名的聚合块）。解除条件：出现另一处的实测证据 ⇒ 另开票。
 
-**集成与关单**：见本节末段（事实登记）。
+**集成与关单（2026-09-22，事实登记）**：
+- **台账笔**（审查行 4 条 + 文档落点白名单行）：`ddae080`；`bash scripts/check_review_coverage.sh` **exit 0**。
+- **push**：`git push origin main` **快进 `c6def07..ddae080`**（非强推、无新分支）⇒ `origin/main` = `ddae080`；该区间的代码面就是本批四笔（`6bee833` / `7a382c4` / `94c6f73` / `2570a00`）+ 两笔 docs-only。
+- **`#281` 关单**（`gh issue view 281` 复核 = **CLOSED**，`closedAt` = `2026-09-22T03:33:00Z`）：comment 带交付面 / 红证 / 门禁数字 / 三条偏离。
+- **父票 `#267` 验收面核查（用户授权）后按 §14.12 关单**（**CLOSED**，`closedAt` = `2026-09-22T04:22:45Z`）。票面 `docs/tickets/perf-interaction-smoothness-2026-09-18.md` §0.6 七条 DoD 逐条取证：
+  ① **不变量 #22**：本批 web 面只动**单一投影源**及其消费者，未新增第二套 Session 真相（`eventsVersion` 是既有追加信号）；
+  ② **COW 引用稳定性**：`web/src/lib/projection.test.ts` 的引用稳定块 base(`2ea205a`) 与 HEAD **逐字节相同**（4648 字符；HEAD 侧仅为 N2 的 13 行纯插入）⇒ **未被改写**，同文件实测 **205 passed**；
+  ③ **每处改动都有前后数字**：`PERF_BASELINE.md` 12 个子票节全部有成对数字；`#268`/`#269` 两节显式声明 docs-only、不在本记数内；
+  ④ **5 处刻意设计全部保留**（含 F7 的 keep-mounted 钉子 `StepDetail.memo.test.tsx:217`、F6 的**有数字** wontfix：`git diff --numstat` = `1 0`）；
+  ⑤ **未撤回任何冻结决策**（G2 `eventsVersion` / G3 不写数字进 `PHASE_STATUS` / G4 口径 A+C / G6 勘误 / G7 ADR-0037 逐条核过）；
+  ⑥ **可复制证据**：后端冻结树 `2570a00` 全量 **3070 passed / exit 0** + `ruff` clean（该树 `src`/`tests` 子树与 HEAD **逐字节相同**，且其后零 src/tests 提交 ⇒ 读数可传递到 HEAD 的代码面）；前端为**批次内既有读数**（逐条核对存在，非本次重跑）：`tsc -b` exit 0、`oxlint` **0 error / 42 warning / 206 files**、`vitest` **65 files / 1052 tests**、`vite build` exit 0；覆盖闸门 exit 0；
+  ⑦ **无「无数字的 wontfix」**（逐节核过；`PERF_BASELINE` 的「未取得」行都带解除条件）。
+- **两条如实披露**（已写进 `#267` 关单 comment，不构成 DoD 未满足）：① **G4「观感口径」仍为空**——F1/F2/F3/F6 节多行标「未取得」（供应商账户冻结，逐行已写解除条件）；② **本次 e2e 全矩阵未取得全绿读数**——HEAD 版 `web/` 提取树跑两次：**437 passed / 1 failed**（run 1：`e2e/r-project-groups.spec.ts:168`）、**436 passed / 2 failed**（run 2：`e2e/u-project-task.spec.ts:230`、`e2e/v-dir-browser.spec.ts:60`）；三条**互不相同且全部落在 `chromium-1920` 工程**，同树单跑这三条 spec ⇒ **42 passed / exit 0**，三条主题均不在本批改动面内 ⇒ 判为负载/时序型不稳定，e2e 一项由批次内既有读数承担并披露留痕（提取树有一处已知偏差：`@fontsource*` 字体请求落在 Vite `server.fs.allow` 之外而 404，未观察到与断言有因果链）。
+- **§14.9 集成后回补**：三方 clone（后端 / 集成区 / 前端）对齐 `ddae080`（`HEAD^{tree}` = `5b5ba280c3017ab507779c26be78009883b8a897`，三处逐字符相同）。
+- **自纠一笔（G3）**：本批初次落 `docs/PHASE_STATUS.md` 时把性能比值写进了该文件（**违反 G3 冻结决策**「性能数字不进 PHASE_STATUS」）⇒ 已改为只留指针（数字一律在 `PERF_BASELINE.md` B8 节）。此处留痕，免得后来者以为 G3 当时没被执行。
+- **并行线边界（如实登记）**：本批全程 `git commit --only <paths>`；`#282` 线的落点/台账笔在同一 clone 的 `main` 上推进（`941277e` / `e12895f` / `1fda3e5` / `500e4e6`，**代码面零改动**，`git diff --stat origin/main..<HEAD> -- src tests web scripts` 为空）——本批**未代其推送、未代其关单**。
+- **本笔的两处持有（如实登记，不冒充已落）**：① **本 clone 的 `main` 未 push 到 `origin/main`**——它领先 4 笔（并行线的 F18-A `#282` 落点 / 台账笔，docs-only），且该线的 index/worktree 另持一套**未提交**的 F18-A 回退状态（21 路径）⇒ **push 与回退的处置归该线**；B-36 自己的**代码面与 `#281`/`#267` 两处关单**均已落地（`origin/main` = `ddae080`，`#281` / `#267` 均 CLOSED）。② **`docs/PHASE_STATUS.md` 按日索引行（B-36 子项数 / 行范围）未随本笔提交**——该行的 HEAD 版与并行线工作树版**数字互不相同**（该行随 F18-A 是否落地而变），本笔不写一个自己无法复现口径的计数 ⇒ 由 F18-A 处置定稿后按最终落地状态重算（工作树里已有一版针对「F18-A 不在」的候选值，随该笔落）。
 
 **落点**：`6bee833`（实现 + 新用例 26 条）→ `7a382c4`（R1 findings）→ `94c6f73`（R2 findings）→ **`2570a00`**（R3 finding，**docstring-only，本 range 的代码 tip**）→ 文档落点笔（tracker 本段 + `docs/PERF_BASELINE.md` B8 节 + `docs/phase_status/2026-09.md` 归档 + `PHASE_STATUS.md` 焦点/索引）→ 台账笔（审查行 4 条 + 白名单行）→ 集成与关单 → 集成/关单的落点笔 → 台账白名单行（tip 按自维护口径对账，不写死 sha）。
 
