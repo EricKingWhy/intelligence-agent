@@ -2827,3 +2827,30 @@ PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_l
 3. **未覆盖项**（§5）：真模型链路（等计费解冻）、鉴权横幅（需 `JWT_SECRET`）、Trace（需 Langfuse）、
    `恢复会话` 入口、工具流 running 窗口三件、项目/记忆的写操作；
 4. **M-02** 的自动化纪律：e2e 里点流式期间的按钮要用坐标点击或真人节奏，别用 `locator.click()` 直接判"没反应"。
+
+### 10. 门禁读数（收口轮，2026-09-22）
+
+跑在修复后的树上（前端 `fe72dbb`、后端 `5c22f77`；两个施工 clone 的工作树即门禁树）：
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| ① ruff | `.venv/Scripts/ruff.exe check .`（后端） | `All checks passed!`，exit 0 |
+| ② 后端全量 pytest | `scripts/run_tests_clean.sh tests/` + `PYTEST_EXTRA_ARGS="-q -p no:randomly"` | 3082 passed / **1 failed** / 13 skipped，850s |
+| ④ tsc | `node node_modules/typescript/bin/tsc -b`（`web/`） | exit 0 |
+| ⑤ vitest | `node node_modules/vitest/vitest.mjs run`（`web/`） | 1066 passed / **1 failed**，47s |
+| ⑥ oxlint | `node node_modules/oxlint/bin/oxlint`（`web/`） | **0 errors** / 68 warnings，exit 0 |
+| ⑪ e2e | `node node_modules/@playwright/test/cli.js test --workers=2`（`web/`） | 439 passed / **1 failed**，14.2m |
+| ⑨ diff-check | `git diff --check` | 干净（exit 0） |
+| ⑧ 覆盖闸门 | `scripts/check_review_coverage.py` | 前端 exit 0；后端待判定只剩**他线** 1 笔（`877a576`，不在本轮范围） |
+
+三处红**全部**是环境 / 负载 flake，均以「同一棵树单跑」反证，**不是**本轮改动引入：
+
+- 后端 `tests/observability/test_flush_lifecycle.py::test_web_lifespan_flushes_on_shutdown`：
+  根因是**本机审计后端进程（:8000）占着 instance lock**（`InstanceLock.acquire` → `_take_os_lock`
+  取不到 OS 排他锁）⇒ 停进程后单跑 **3 passed**（18.28s）。
+- 前端 vitest `src/components/StepDetail.window.test.tsx` 的「DIFFS / ARTIFACTS：默认先裁…」：
+  全量 67 worker 满载下 6796ms 撞 5s 默认超时 ⇒ **单跑 6 passed**（该例 2876ms）。
+- 前端 e2e `e2e/o-wait-hint.spec.ts:91`（chromium-1920 一档）：假时钟推进 31s 后 `.wait-hint`
+  未及出现 ⇒ **该 spec 单跑 6 passed / 15.9s**（同一条在 chromium-1280 档的全量里是绿的）。
+
+结论：本轮改动**零回归**；三条红按协议「既有红与 flake」口径**登记**（不是修，是记）。
