@@ -316,11 +316,12 @@ def test_gate0_affected_summary_fails_closed_on_unmapped_path():
 #: 按设计**不内联**的 focused（前端 / 浏览器类）。加一条新的非 pytest focused 必须同时改这里——
 #: 这是一道"要求你明确表态"的锁。原因见 `scripts/gate0.py::focused_runner` 的两条血证：
 #: ① vitest 的 cwd 是 `web/`，仓库相对路径当 filter 会 `No test files found`（假 FAIL）；
-#: ② 干净 HEAD 上 `vitest run src` 本身就红（B-29 已知 flake）⇒ 前端红无法归因。
+#: ② 同一类干净树上 `vitest run src` 的两次读数**结果不同**（一次 1 例超时 = B-29 已知 flake，
+#:    一次 67 文件 1067 例全绿）⇒ 红是**非确定性**的，前端红无法归因。
 MANUAL_FOCUSED = [
     "tests",      # 整个测试目录 = 重车道 pytest-full 本身（子集才便宜 ⇒ 全量不内联）
     "web/e2e",    # playwright 重车道
-    "web/src",    # vitest：cwd 是 web/ 且干净 HEAD 上就有红（两条血证见 focused_runner）
+    "web/src",    # vitest：cwd 是 web/，且同类干净树上的读数非确定（有红有绿）⇒ 见 focused_runner
 ]
 
 
