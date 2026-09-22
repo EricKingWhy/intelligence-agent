@@ -1,6 +1,6 @@
 # ADR-0041 — 权限档的会话内可变性：permission/changed 事件 +「最后一次胜」派生
 
-**Status**: Proposed（随 #282 合入后转 Accepted）
+**Status**: Accepted（2026-09-22 随 #282 合入 main，见 tracker「F18-A（#282）」段）
 **Date**: 2026-09-21
 **Related**: GitHub #282（F18-A 后端）/ #283（F18-B 前端）；
 `docs/tickets/session-permission-mode-mutability-2026-09-21.md`；

@@ -4111,3 +4111,35 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 6. **沿袭未动（指针，非本票残余）**：#264 段的残余②③（四条臂终态 `run_id` 无端到端锁；`aclose()` 打在"臂正 `await _save_checkpoint` 中途"未实测）与死参数 `failure_terminal(steps=)` 保持原状——本票未触碰其代码路径。
 7. **R3 在仓库内没有用例**（窄复验 B 轴 P3）：异常臂那条二次收口只有 docstring 散文登记，`grep` 两个用例文件零命中（构造方式 = 让超限臂落终态那次 `append` 抛 `OSError`，两轴各自在副本探针里独立复现过）。⇒ **修 R2/R3 的票必须同时补这条用例**；本票不补的理由是它属**新增测试面**、不在本票 AC。**成本更正（窄复验第二轮）**：不需要新建 session 替身——仓库已有可复用的故障注入夹具 `tests/session/store_fixtures.py`（#251 立的共享模块：`RejectingStore` 恒拒写 / `FailingFromStore(fail_from=N)` 第 N 次起拒写），注入是一行既有手法 `session._store = RejectingStore(...)`（见 `tests/session/test_write_behavior_golden.py:153`）；缺的只是用例本身（需捕获终态 `append` 失败再走 `_terminal_exception` 的脚手架）。
 8. **端到端用例的断言面只有方法名序列**（窄复验 B 轴 P3，M2 盲区实测：把二次收集的句柄换成 `NullSpan()`——同方法名、同次数、同顺序——该用例仍绿）：句柄**身份**由臂层用例 `assert kit.tracer.calls[2][1]["span"] == "span-ctx"` 承担。两条合起来才钉住"同一 span 被再收一次"；单看端到端那条会漏"句柄被换掉"。
+---
+## F18-A（#282 会话内可改权限档·后端）
+
+**状态**：实现 + 两轴独立审查 + 并入 main 完成（2026-09-22）。父票无（F18 两票紧耦合，不设 umbrella）；姊妹票 F18-B = `#283`（前端，依赖本票）。
+
+**问题**：权限档（`read-only` / `workspace-write` / `danger-full-access`）与 `auto_approve` 自项目早期起被**刻意**定为「会话创建时定、之后不可变」的会话属性（与 `cwd` 同级），但该决策**从未有 ADR**，且「mid-session 改档」被记录为产品决策待定 **≥6 次却始终未开票**。用户反馈「太死板」：想中途换档只能新建会话、丢上下文。**定性**：**不是缺陷**而是**被刻意 deferral 的产品决策**（后端 `tests/session/test_permission_mode_persistence.py` 16 例 + 前端 `#236` 逐字断 title 将其钉住）；成立的只有两点 —— ① **流程债**（记录 ≥6 次从未开票）；② 只读 pill 是**零出路的死胡同**（只有悬停 title，无任何「新建会话」引导/链接/菜单）。
+
+**冻结决策（ADR-0041，grill 逐项拍板，实施者不得重新猜测）**：① 事件唯一 `permission/changed`，data 同时含 `permission_mode` + `auto_approve`；② 档位与 `auto_approve` **一起改**（同事件 / 同闸门 / 同生效点）；③ 双向可改，升 `danger-full-access` 需**前端显式确认**（后端不加强制标志位）；④ **生效时机 = 下一轮 run**（per-run 快照，结构性免费 —— ADR §1.2）；⑤ **有 pending 审批时禁止改档**（后端 409 / 前端禁用）；⑥ 三概念分离 `declared_at_creation` ∥ `effective_now` ∥ `policy_at_approval`，**不得**把 `session_permission_mode` 与 `permission_policy` 合并（`#236` 边界）；⑦ 补 ADR-0041（= AC0）；⑧ 不新开「锁定时给引导」票 —— 改档可行后 `PERMISSION_MODE_LOCKED_HINT` 成假话，在 `#283` 内**删除**它（即「假话引导」的消解方式）。
+
+**交付面（5 笔实现/文档 + 1 笔台账，`0d2e0de` → `4f0993f3`）**：
+1. `0d2e0de` `permission/changed` 入 durable 词汇表（常量 + `EVENT_TYPES` + 两个生成器产物 + 三处守卫；`tests/session/test_event_store.py:88` 的**硬编码期望集必须手改**）—— 6 文件 +20/−2。
+2. `754c23f` 派生改「**最后一次** `permission/changed` 胜」+ 唯一写入口 `append_permission_change`（**折入** `session/approval.py`，不新开 `permission_switch.py` —— ADR-0041 D8 记理由）—— 1 文件 +86。
+3. `3fa3c48` 端点 `POST /api/sessions/{id}/permission` + pending **409** 闸门 + fork 继承 effective 档 —— 6 文件 +153/−20。
+4. `c5993a5` 域 / service / 端点用例（`tests/session/test_permission_change.py` 737 行 + `tests/web/test_web_session_permission.py` 180 行）—— +917。
+5. `22fb990` ADR-0041（149 行）+ 本地执行索引 `docs/tickets/session-permission-mode-mutability-2026-09-21.md`（103 行，含 AC2 红证留痕）—— +252。
+6. `4f0993f3` 两轴审查行（台账，range `eac23cc2..22fb9904`）。
+
+**AC（10 条全过，逐条证据见台账审查行）**：AC0 ADR 含「未采纳方案」小节；AC1 生成物经脚本 + 两守卫绿 + `test_event_store.py:88` 手改同步；AC2 红证 = 改造前树（`git archive 3b4e93c6 src`）跑同一断言脚本**失败**（派生仍 `READ_ONLY`）vs 工作树**成功**（`DANGER_FULL_ACCESS`），输出存索引 §0.8；AC3 三优先用例；AC4 **200 / 422 / 404 / 409**；AC5 `auto_approve` 同事件同闸门同生效点；AC6 fork 继承 effective + resume 派生；AC7 `tests/session/test_permission_mode_persistence.py` **一字未改**（`git diff` 空、无删除行）；AC8 `permission_policy` 未变（用 `TOOL_APPROVAL_REQUESTED` **双向**证明有 pending 审批时改档也不写 `permission_policy` 键）；AC9 ruff 0 + 全量 pytest；AC10 per-run 快照三处引用入 ADR §1.2。
+
+**两轴独立审查（Standards + Spec 各一独立只读子代理；固定点 `3b4e93c6`，审的是未提交工作树，findings 全数处置 ⇒ 该工作树即本 range 的 tip `22fb9904`）**：Standards 轴要求按 `AGENTS.md` §16.1 只留「非显然约束 + 一行 ADR 指针」、删跨文件复述（写入口不新开模块而折入 `approval.py` 即其处置）；Spec 轴把 AC8 由单向**加强为双向**，并为 ADR §4 补 4 条残余（`auto_approve` 必填 / 运行时惰性 / `projection.ts` 强制 no-op / seq 循环重复）。**两轴均无 P0/P1 级代码缺陷。**
+
+**集成（2026-09-22，一手读数）**：`origin/main` 当时已在 `7e872014`（B-32/`#265` 台账线 14 笔）⇒ 本批 6 笔**不能快进**，按 §14.6「先回后正」把 `origin/main` 合回本分支再推。**merge commit `56d561ba`**（parents `4f0993f3` + `7e872014`），合并树 `8accb7cd`。**唯一冲突** `docs/review_ledger.tsv` —— 双方在 `[review]` 段**同一位置各追加一行**（main 的 B-32 集成 merge 审查行 vs 本批 `#282` 两轴审查行），形状是纯 append 碰撞、顺序不可判定 ⇒ 按**并集**解析（main 12 行在前 + 本批 1 行）。**集合运算证明零改写零丢失**：base 162 行 / main 174 (+12) / branch 163 (+1)、共同 **157** 行；base 是两侧的**保序子序列**；并集恰为「main 版本 + 本批那一行」。其余 **12 文件**三方自动合并干净。**合并审计**：重叠仅台账 1 文件；合并树各 blob 严格等于某一侧父提交；对两父 **0 路径丢失**；**0 冲突标记**；`git diff --check` 双向 rc=0。**push**：`origin/main` `7e87201..56d561b`、工作分支 `4f0993f..56d561b`（两次均快进、exit 0）。
+
+**落点**：ADR-0041 Status `Proposed` → **`Accepted`**（残余③的解除条件）；tracker 本段 + 月度归档 2026-09-22 条 + `PHASE_STATUS` 焦点 / 索引 / 按日定位。
+
+**残余（登记，不阻断，附解除条件）**：
+1. 前端 `web/src/lib/projection.ts` 的 `permission/changed` 分支是 **no-op**，由 `Record<EventTypeValue, …>` 穷尽性强制 —— 属 F18-B 范围。**解除 = `#283` 合入**。
+2. seq-retry 循环在 `change_model` / `change_permission_mode` 两处重复。**解除 = 第三处出现时抽公共**。
+3. ~~ADR-0041 Status 仍 `Proposed`~~ —— **已于本次落点解除**（见上）。
+4. 端点非法档位走 `InvalidDecision`(**422**) 而非 400，沿用 Service 层既有映射。**解除 = 如需独立错误码再拆**。
+
+**§14.9 通知**：集成区（`D:\intelligence-agent`）与前端（`D:\intelligence-agent-frontend`）开工前先 `git merge-base --is-ancestor origin/main HEAD` 自检。
