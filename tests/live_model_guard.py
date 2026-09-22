@@ -188,15 +188,21 @@ _KEY_SHAPED_TOKEN = re.compile(
 
 #: header / 赋值形的值（`Authorization: Bearer …` / `X-Api-Key: …` / `api_key=…`）：
 #: 参数**名**按子串判定（与 query 层同一口径），值整段 `\S+` 吃掉（尾随的 `)` 也会被带走）。
-#: 值前那节可选的「scheme 词」写成 `(?:[a-z]{3,12}\s+)?`——**任何** 3–12 个字母的小写词都
-#: 算，不是只认 `Bearer` / `Basic`：不这样写，`Authorization: Basic dXNl…` 只会吃掉
-#: `Basic`、base64 本体留下（窄复验 B 轴实测）；这两类值原先都原样穿过（`_redact_detail`
-#: 只吃得掉名字那一半）。**代价（如实记，四轮复验实测）**：本层对**任意文本**生效
-#: （不像 query 层需要 `?&;#` 前缀），所以散文里的 `名字=值` 也会被吞一段——
-#: `authentication=basic mode` / `secretary=alice password_hint=none` 整段成了 `***`、
+#: 值前那节可选的「scheme 词」写成 `(?:[a-z]{3,12}\s+)?`——**任何** 3–12 个字母的词都算
+#: （实测 `Negotiate` 命中、`abc` 命中，`xy` 与 13 个字母的不命中），不是只认 `Bearer` /
+#: `Basic`：不这样写，`Authorization: Basic dXNl…` 只会吃掉 `Basic`、base64 本体留下
+#: （窄复验 B 轴实测）——这两类值原先都原样穿过，兜底的 `_redact_detail` 只认名字形
+#: （`api[-_]?key` / `sk-` …），对 `Authorization: Basic …` 一个字符都不吃。
+#: **代价（如实记，实测）**：本层对**任意文本**生效（不像 query 层需要 `?&;#` 前缀），
+#: 所以散文里的 `名字=值` 也会被吞一段——`authorization=basic mode` 与
+#: `secretary=alice password_hint=none` 整段成了 `***`、
 #: `create_chat_model(max_tokens=8192) rejected` 变成 `create_chat_model(*** rejected`。
-#: **不收窄成闭集**：那会把自定义 scheme（`Authorization: <自定义词> <凭据>`）重新放出去，
-#: 而这里的方向是安全的——少一段可读文本，不是多一段凭据。
+#: **边界（如实记）**：scheme 词只认 3–12 个**字母** ⇒ 带连字符 / 数字的写法
+#: （`Authorization: AWS4-HMAC-SHA256 Credential=…`、`X-Custom-Auth dXNl…`）本层只吃掉
+#: 第一个词，其后的凭据得靠别的层——`AKIA…` / 长 hex 由 `_KEY_SHAPED_TOKEN` 兜住，
+#: 而 `Credential=MYUSERID/…` 这类既不形状可辨、名字又不在表里的值**两层都不覆盖**。
+#: **不收窄成闭集**：闭集（`bearer|basic|digest|token`）会把 `Authorization: Negotiate …`
+#: 这类带凭据的写法重新放出去，而这里的方向是安全的——少一段可读文本，不是多一段凭据。
 _KEY_VALUE_ASSIGNMENT = re.compile(
     r"(?i)\b[a-z0-9_-]*(?:api[-_]?key|apikey|token|secret|password|passwd|pwd|authorization)"
     r"[a-z0-9_-]*\s*[:=]\s*(?:[a-z]{3,12}\s+)?\S+"
