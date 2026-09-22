@@ -4324,6 +4324,6 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 **真实 Gate 决策**：五票全部集成后统一执行，不以当前连接预检代替最终验收。模型 primary/fallback 至少有一条真实可用链；Memory/Knowledge 固定专用 collection `memory_gate_test` / `knowledge_gate_test`；七牛使用 `intelligence-agent` bucket 的随机 session 前缀；Langfuse dataset/experiment/trace 保留作为审计证据并验证无意外重复，Milvus/Knowledge/七牛临时数据必须用真实查询确认残留为 0。凭证只存在本机 ignored `.env`，禁止进入 Issue、tracker、日志或命令输出。
 
-**配置预检（不替代最终 Gate）**：Settings 秘密字段完整；Milvus 认证/连接 ✅（专用 `memory_gate_test` 尚不存在，留给 Gate 创建与清理）；Embedding 真实请求 ✅（1024 维）；七牛对目标 bucket 的 `HeadBucket` ✅；Langfuse `auth_check` ✅。模型未发请求：primary / fallback 的 provider 标识均不在当前 `PROVIDER_PRESETS`（支持集合是代码内冻结的 `deepseek/qwen/tencent/senseaudio/zhipu`）⇒ `ModelConfig.from_settings` 配置期失败。待用户选择与实际端点相符的两个非秘密 provider 标识后重跑连接预检；不得把该配置失败记成真实模型已验证。
+**配置预检（不替代最终 Gate）**：Settings 秘密字段完整；Milvus 认证/连接 ✅（专用 `memory_gate_test` 尚不存在，留给 Gate 创建与清理）；Embedding 真实请求 ✅（1024 维）；七牛对目标 bucket 的 `HeadBucket` ✅；Langfuse `auth_check` ✅。模型 provider 已按用户决定映射为 primary `senseaudio` / fallback `qwen`，`ModelConfig.from_settings` ✅；两端点最小真实调用读数为 **primary = 已分类不可用、fallback = 可用**，故真实链至少一端可用，但不得据此声称 primary 已通过，也不得替代五票集成后的最终真实 Gate。
 
 **流程**：每票各自走 V3.1-lite 的红证、实现、专项门禁、两轴独立 review、coverage 与逐票关单；`#286 → #287 → #288` 串行。`#289/#290` 可与该链并行，但同一文件只允许一条线修改。最终真实 Gate 是整个 B-37 的批次收口条件，不是任一单票可以伪报的完成证据。
