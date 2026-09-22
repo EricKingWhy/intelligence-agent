@@ -1,14 +1,19 @@
 # SDD 提速改造 · 工作记录与外部复核包
 
-> **状态**：批 1 已落盘并推送（`refs/heads/main` = `22aa291`）。**批 2 的完整链条已走完**：
-> 施工 → 两轴独立审查 → findings 全修 → **修后重审** → 落台账（`aa5f9e2a`）→ **覆盖闸门两口径绿**。
-> 本地 `refs/heads/main` = `aa5f9e2a`（**13 笔未推送**，等用户批准）；批 3 待做。
-> **本轮的审查与自曝**：四轮独立只读子代理 —— **批 1 补审**（`b529aa5..22aa291`，该协议修订此前只走白名单声明、
-> 从未经任何独立审查）→ 批 2 两轴（`22aa291..9bb51c4b`）→ 修后重审两轴（`9bb51c4b..8ccb9b8e`）；
-> findings 全数处置，其中 **3 条是我自己写出的真 bug**（见 §8.6）；全量门禁唯一 1 条失败已定性归属为
-> **环境**（见 §8.7）；`.sh` ↔ `.py` 的**全量**对照已完成（见 §9.4）。
-> **闸门读数（可复跑）**：`09ca47a..HEAD` 464 提交 / 已审查 331 / 待判定 133 / `❌` **0**；
-> **工作树与干净检出（`git clone --local` 后复跑）两个口径均 exit 0** —— 复跑 `python scripts/check_review_coverage.py`。
+> **状态（2026-09-22 收工复核；本文上一条状态已过期，按实测改写）**：**批 1 已推送**（`origin/main` = `22aa291`）。
+> **批 2 的完整链条已走完并落在本地**：施工 `66cc1fa`/`9527559`/`22992e4`/`acde040` → 两轴独立审查 →
+> findings 全修 → 修后重审 → 更正 `ebb28b4`/`9bb51c4b` → 台账笔 `aa5f9e2a` → 收口 docs 笔 `337a858b` →
+> 台账白名单笔 `ea4f7c65`；覆盖闸门在**工作树**与**干净检出**两个口径都曾 exit 0。
+> ⚠ **本地 `refs/heads/main` 已不是 `ea4f7c65`**——**另一条线**（#200 `cached_tokens` 真机取证 + 第十五轮真机
+> 逐控件审计）在 **20:49:01 / 20:49:07** 于同一工作树追加了 `cd02c61` 与 `29cb5081` 两笔。
+> 当前 `refs/heads/main` = `29cb5081`，**领先 `origin/main`（`22aa291`）17 笔，全部未推送**
+> （用户 20:36 明令「暂时不要推」）。
+> ⚠ **闸门现状 = RED**：`python scripts/check_review_coverage.py` **exit 1**；`09ca47a..HEAD` **468 提交 /
+> 已审查 331 / 待判定 137**，`❌` **2** 条 = `cd02c61`（docs-only 却未声明白名单）+ `29cb5081`
+> （**代码提交**，按 §7 第 8 条**永远不能走白名单**，必须有真实审查行）。这两笔**不是本线产出**，
+> 本线**不擅自替它写审查行**（代码提交的审查必须独立且真实）——见 §10.5。
+> **本轮新增（本线）**：协议新增 **§9「阶段 → 外部 Skill 引用」** + 搬运 9 个 pstack skill（逐字节，MIT）
+> 到 `docs/agents/skills/`——见 **§10**。该笔是 docs-only，走白名单，并**主动登记「待补审」**。
 > **用途**：本文件是「SDD V3.1 开发流程提速」这条线的完整工作记录 + **审计包**，
 > 供**独立审查者（能力更强的模型）**复核。
 > **写法纪律**：本文所有数字均为**当场实测**，随附可复跑命令；无法当场复跑的历史读数会显式标注来源。
@@ -252,7 +257,8 @@ docstring；`gate0.py` 里只有一处内联注释提到 coreutils，也已同�
   `--since` 正确从 stdin 取到远端 sha。另核：`.git/hooks/` 下**没有任何生效的自定义钩子**
   ⇒ 切 `hooksPath` 不会禁用既有钩子（先查再切，不假设）。
 - **顺带修掉一个会让 hook 在所有平台失效的坑**：`.gitattributes` 只钉了 `*.sh` / `*.ps1`，
-  而 hook **无扩展名** + `core.autocrlf=true` ⇒ 会被检出成 CRLF，`exit 1` 这种行直接坏
+  而 hook **无扩展名** + `core.autocrlf=true` ⇒ 会被检出成 CRLF，`exit 1
+` 这种行直接坏
   （正是该文件注释里描述的 `bad interpreter` 病根）。已加 `/.githooks/* text eol=lf`；
   hook 文件本体实测 **0 个 CRLF**。
 - 边界：**本地便利，不是安全边界**（`--no-verify` 可绕），**不能**替代 CI 或人工审查。
@@ -533,3 +539,86 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
    `scripts/gate0.sh` 从未存在（`git log --all -- scripts/gate0.sh` 为空），已由批 2 的 `ebb28b4`
    改成 `gate0.py` —— 上一轮审查若只取 `b529aa5...22aa291` 会把该更正笔漏在范围外，已按包含
    `ebb28b4` 的范围登记。
+
+
+---
+
+## 10. pstack 复用落地（2026-09-22 本轮新增）
+
+### 10.1 需求方指令，以及我此前理解错在哪
+
+需求方 2026-09-22 20:49 原话：「**pstack 你得好好借鉴，你可以把里面有价值的 skills 下载下来，不能全量安装，
+你用到几个就下几个，能复用 pstack 直接复用，不要自己写 skills**，你可以引导模型，比如在某个阶段让模型
+调用某个 skill 去执行，就是引用。」
+
+**自曝**：本文 §1 那份「pstack 原则对照 6 条」是**读二手摘要**写的——我只搬了**原则的文字**，
+**一个 skill 本体都没搬，也从未 clone 上游**。而 pstack 里**恰好就有增量验证的机器**：
+`principle-sequence-verifiable-units`（23 行）就是「失败点回退」这条原则的表达式，
+`create-verification-skill` 直接产出 feature map。需求方点出这一点是对的，我此前把「借鉴」做成了「复述」。
+
+### 10.2 实际做了什么（可复跑）
+
+| 步骤 | 读数 / 命令 |
+| --- | --- |
+| 抓上游 | `git clone --depth 1 --filter=blob:none --sparse https://github.com/cursor/plugins.git` → `git sparse-checkout set pstack`。**不装插件、不跑任何上游脚本**（上游是 Cursor 插件仓库，README 的安装方式是 `/add-plugin pstack`） |
+| 上游版本 | `53e579f1481697931fc44f5445171397cfa2b24b`（2026-09-21 19:40:52 -0700） |
+| 许可 | **MIT**，`Copyright (c) 2026 Lauren Tan`；全文**逐字节副本**在 `docs/agents/skills/pstack-LICENSE.txt`（满足 MIT 的「版权声明随副本保留」） |
+| 上游 skill 总数 | **47**（全部 ≤ 300 行，零依赖、零构建） |
+| 搬运量 | **9 个 skill**（≈19%）+ 4 个 reference 数据文件 + 1 份许可 = **14 文件** |
+| 逐字节校验 | 13 个内容文件 `copy → 回读 → bytes 比对` **全 OK**；sha256 清单见 `docs/agents/skills/PROVENANCE.md` §5 |
+| 安全扫描 | 正则（`curl`/`wget`/`https?://`/`nc`/`ssh`/`scp`/`eval`/`exec(`/`base64`/`.env`/`.ssh`/`id_rsa`/credential/password/secret/token/api_key/`rm -rf`/`chmod 777`/`sudo`）扫上游 **全部**文件 ⇒ **60 处命中，全部落在未搬运的 skill 内**；搬进来的 9 个**只命中 3 处**，且全是 `create-verification-skill/references/feature-map-example/*.md` 里的示例本地地址 `http://127.0.0.1:4173`。**零网络调用、零凭据读取、零 `eval`、零删除命令** |
+
+### 10.3 选型判据（为什么是这 9 个，不是 47 个）
+
+判据只有一条：**这个 skill 有没有一个明确的消费阶段？协议会按名字引用它吗？** 没有就不搬。
+未搬的 38 个分三类：
+
+1. **本仓已有等价物** —— `principle-guard-the-context-window` ↔ `AGENTS.md` §2 已有的读数纪律；
+   `principle-fix-root-causes` ↔ 已在用的 Matt `diagnosing-bugs`。两套等价规则并存迟早漂移成两个口径。
+2. **属于别的宿主** —— `setup-pstack` / `poteto-mode` / `make-bot-ui` 依赖 Cursor 的插件与自动化宿主，
+   本仓 Agent 不共享那套机制，照搬会变成"看起来有、其实调不动"的死引用。
+3. **带可携带的攻击面** —— `poteto-mode/scripts/**` 有 `.ts` 编排器与 GitHub token 处理、
+   `make-bot-ui` 有 `curl -fsSL https://tailscale.com/install.sh | sudo sh`。
+   ⇒ 本目录**只搬散文**（`.md` / `.tsv` / `.txt`），**不搬任何可执行文件**。
+   这是「不做全量安装」的**具体**代价，不是抽象担心。
+
+完整「阶段 → skill」映射表见 `docs/agents/skills/PROVENANCE.md` §3。
+
+**另有一个"没搬"的诚实项**：`show-me-your-work/scripts/log.sh` **本身无风险**（纯本地 TSV 追加器，
+唯一的"安全相关"行为是防御性的：把 `=` `+` `-` `@` 开头的单元格前缀单引号，防表格公式注入）。
+不搬它的真实理由是 ① 本仓不需要（台账是 Python 落盘的）；② `docs/**` 下的 `.sh` **不命中覆盖闸门的
+`DOC_PATTERN`**，搬进来会让该提交无法走 docs-only 白名单——正是 §7 第 8 条记的那类陷阱。
+⇒ 该 skill 正文提到的 `scripts/log.sh` 在本仓**是悬空引用**，已在 PROVENANCE 里写明。
+
+### 10.4 引用怎么落进协议
+
+- 新增 **§9「阶段 → 外部 Skill 引用（vendored，不自造）」**：一张表，把七阶段主干每一步该读哪个
+  skill 钉住；另加「与 §8.7 的关系」与「本节边界」两段。
+- 在 **§1.2 第 2 条**（逐票 focused tests 那一步）加了一处**使用点指针**——走到那里就能看到 §9。
+- **执行语义 = 「按仓库内相对路径读该文件，并按正文执行」**，不写成"调用某工具里的某 skill"。
+  理由：`AGENTS.md` 文件头写明**谁在干活谁是主开发**（ZCode / Codex / WorkBuddy / Claude Code），
+  各家 skill 装载机制不同；按**仓库内相对路径**引用是唯一对各家**同时**成立的形式，
+  且随仓库版本化、可 diff、可审计、无需安装。
+- **§2 的双轴独立审查一个字没动**（需求方硬约束「mattpocock 的 code-review 不能改变」）；
+  §9 表格里那一行显式写「不引第三方」。
+
+### 10.5 明确登记：这一笔走白名单，且**待补审**
+
+新增的 14 个文件 + 协议 §9 + §1.2 指针 + 本文更新，**全部命中 `DOC_PATTERN`**（`.md` / `.tsv` / `.txt`），
+按 §7 第 8 条可由 `[whitelist]` 段放行。
+
+⚠ **但批 1 的教训正是**（`b529aa5..22aa291` 补审）：**协议正文改动只走白名单声明、从未经任何独立审查，
+是本线的已知缺陷形状**。因此本笔**主动登记「待补审」**，并把这句话写进台账白名单行的 reason。
+是否起两轴独立审查由需求方定——本轮不动用它的理由是：**§9 是纯增引用、零放松**，
+`§8.7「明确不做的事」一条未改`，且新增内容不改变任何既有步骤的判据。
+
+**与此并列、但本线不动的**：`cd02c61` / `29cb5081` 两笔（另一条线）缺归属。其中 `29cb5081` 是**代码提交**，
+按 §7 第 8 条**永远不能走白名单**，必须有**真实且独立**的审查行。本线**不代为补审查行**
+（那等于伪造审查），只在此如实登记，等需求方裁决（见本文开头状态块）。
+
+### 10.6 本文 §1 那 6 条原则的现状
+
+§1 的「pstack 原则对照」现在**部分被 §9 的引用替代**：`encode-lessons-in-structure` 与 `prove-it-works`
+已由 vendored skill 承担，协议里不再重述其内容——这正是 `principle-encode-lessons-in-structure`
+自己要求的形状（「同一条指令写第二遍时，编码成结构而不是更多文字」）。
+**明确不采用**的 `principle-never-block-on-the-human` 结论不变（与本仓 §9.1.1「票面变更控制」冲突）。

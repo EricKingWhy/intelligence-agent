@@ -39,7 +39,7 @@
 ### 1.2 实施与验证
 
 1. 按最小垂直切片实现；修 Bug 或新增行为时先建立能命中真实症状的测试，再修复并复跑。
-2. 每个 Ticket 跑与改动相称的 focused tests、lint / type check 和必要的集成测试；**不要求每张票都重跑全量测试**。高风险跨模块改动可在自然边界提前跑更广门禁。**全量的跑法见 §8.1（冻结树单次全量）——只跑一次，但必须跑在冻结树、且读数可机械传递。**
+2. 每个 Ticket 跑与改动相称的 focused tests、lint / type check 和必要的集成测试；**不要求每张票都重跑全量测试**。高风险跨模块改动可在自然边界提前跑更广门禁。**全量的跑法见 §8.1（冻结树单次全量）——只跑一次，但必须跑在冻结树、且读数可机械传递。** 本步（TDD / 写测试 / 留测试）引用的外部方法见 **§9**——按路径读 `docs/agents/skills/` 下的对应 skill，**不要在本文件重写一遍等价文字**。
 3. 相关验证通过后再提交，commit message 描述实际工程事实；更新 `docs/SDD_TICKET_TRACKER.md` 的状态、提交、门禁证据和残余问题。`uv run` 后检查 `uv.lock`，处理规则见 §7 第 6 条（该条同时写明本仓当前的跑法：按用户指令用 `.venv` 里的 pytest，不用 `uv run`）。
 
 ## 2. 按风险安排 Code Review
@@ -404,3 +404,35 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
 - 不让代码提交走白名单；不让 docs-only 白名单收任何 `.py` / 脚本。
 - 不因为提速而缩小审查的 base..tip 范围，也不把"审查者没看到"的 commit 写进审查行。
 - 不为省时间而跳过 `scripts/check_review_coverage.sh`（它现在是唯一的机械闸门）。
+
+---
+
+## 9. 阶段 → 外部 Skill 引用（vendored，不自造）
+
+用户 2026-09-22 指令：「能复用 pstack 直接复用，不要自己写 skills……引导模型在某个阶段调用某个 skill，就是引用。」
+
+**执行语义（对所有 Agent 成立）**：下表每一行 = 走到该阶段时，**按路径读那个 skill 文件，并按它的正文执行**。
+不需要"安装"、不需要插件宿主、不需要在特定工具里注册——`AGENTS.md` 文件头写明谁在干活谁是主开发
+（ZCode / Codex / WorkBuddy / Claude Code），按**仓库内相对路径**引用是唯一对各家同时成立的形式。
+副本与来源见 `docs/agents/skills/PROVENANCE.md`（上游 `cursor/plugins@pstack`，MIT，逐字节副本 + sha256 清单）。
+
+| 阶段 | 引用的 skill（路径相对 `docs/agents/skills/`） | 在这一步干什么 |
+| --- | --- | --- |
+| Tickets（拆分） | `principle-sequence-verifiable-units/SKILL.md` | 拆成「每个单元以**可验证状态**收尾」的序列，不在当前单元绿之前推进；提交顺序要让 reviewer 能重放 |
+| Implement / TDD | `tdd/SKILL.md` | 先让坏行为可执行；**测试路径不划算时不许静默跳过**，要明说理由并换最接近的可执行检查 |
+| Implement / Tests | `principle-test-behavior-not-implementation/SKILL.md` | 留测试前的判据：把该测试 import 的函数全改成返回 `undefined`，它还过吗？过 ⇒ 重写断言或删掉 |
+| Implement / Review | （**不引第三方**） | 双轴独立审查保持 Matt 原版，用户 2026-09-22 明确「不能改变」 |
+| Runtime Verification | `principle-prove-it-works/SKILL.md` | 声明完成前对**真实产物**取证；**能脚本化就脚本化**，读数留给 reviewer 重跑 |
+| Runtime Verification | `blast-radius/SKILL.md` | 算改动在**别处**会破坏什么；到不了"跑真代码"一级的安全事实**必须明文标 `unproven`** |
+| Runtime Verification（基建） | `create-verification-skill/SKILL.md` | 产 feature map（特征 ↔ 用户入口 ↔ 怎么驱动 ↔ 坑）；**没被执行过的生成物是草稿，不是交付物** |
+| Runtime Verification（基建） | `maintain-verification-skill/SKILL.md` | feature map 的维护环（源波次 ∥ live 波次）；最坏一个 PR |
+| Evidence Gate | `principle-encode-lessons-in-structure/SKILL.md` | 同一条指令写第二遍时，编码成 lint / 元数据 / 运行时检查 / 脚本；挑**允许范围内最强的机制** |
+| Evidence Gate | `show-me-your-work/SKILL.md` | 决策轨迹 TSV；原文明说「**别的 skill 把轨迹路由到这里，不要自造一套**」——与本仓台账同构 |
+
+**与 §8.7 的关系**：本节只增加**引用**，不放松任何一条。上表任何一行与 §8 的"质量优先条款"冲突时，
+以 §8 为准（例如 `tdd` 说"测试不划算就换检查"，§8.6 仍要求把换掉的检查与理由落进版本控制文本）。
+
+**本节的边界**：只钉"到哪个阶段读哪个文件"。**七阶段主干本身**（`Grill → Spec → Tickets → Implement
+├ TDD ├ Tests └ Matt 双轴 → Runtime Verification → Evidence Gate → Merge`）与其**失败回退边界表**
+的定稿属 issue #291，不在本节范围内；本节先让已经存在的阶段有可引用的外部方法，
+避免在协议里重写一遍等价文字（那正是 `principle-encode-lessons-in-structure` 要消灭的形状）。
