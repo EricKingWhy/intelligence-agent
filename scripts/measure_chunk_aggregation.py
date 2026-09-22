@@ -11,8 +11,9 @@ LangChain 的 `AIMessageChunk.__add__` 每步都**新建**一条消息、把 con
 
 ## 口径（PERF_BASELINE §2.3）
 
-1. **确定性指标（不含计时）**：聚合全程交给 `merge_content` 的**字符总数**——即「聚合一共
-   抄了多少字符」。这是 O(N·L) vs O(L) 的**直接**度量，与机器无关 ⇒ 它是主判据。
+1. **确定性指标（不含计时）**：聚合全程交给 `merge_content` 的**复制量**——str content 计
+   **字符数**（§1/§2 用它）、块列表 content 计**元素数**（§1b 用它）。这是 O(N·L) vs O(L) 的
+   **直接**度量，与机器无关 ⇒ 它是主判据。
 2. **耗时**：同一批 N 的墙钟（best-of-5，取最小值抗抖动）。只作上下文：它由 memcpy 带宽、
    GC 与缓存共同决定，跨机器漂移可达数十个百分点。
 3. **端到端**：真跑 `AgentRuntime.run_stream`（剧本 = N 个文本 chunk），中位数 3 次。
@@ -87,10 +88,18 @@ class _CopyVolume:
 
     `add_ai_message_chunks` 调用的是模块全局名 `merge_content`，因此在模块上替换即可
     同时覆盖两条臂（逐项 `+` 也走同一个入口）。
+
+    **两种 content 形态分列计**（混成一个总数没有意义）：
+    - `chars`：str content 的字符数——**§1/§2 用的就是它**（票面场景 = 「30k 字符切成数千
+      chunk」= 纯文本）；
+    - `blocks`：块列表 content（`[{"type": "text", ...}]`）的**元素个数**——LangChain 对这种
+      content 走 `merge_lists`，复制成本按元素计，此时 `chars` 恒为 0（不是"没抄东西"）。
+    只计 str 或只计元素都不会给出错误结论，但**哪一列有含义取决于语料**，故两列并列。
     """
 
     def __init__(self) -> None:
         self.chars = 0
+        self.blocks = 0
         self._real: Any = None
 
     def __enter__(self) -> Self:
@@ -100,6 +109,8 @@ class _CopyVolume:
             for part in (first, *others):
                 if isinstance(part, str):
                     self.chars += len(part)
+                elif isinstance(part, (list, tuple)):
+                    self.blocks += len(part)
             return self._real(first, *others)
 
         lc_ai.merge_content = counting
@@ -119,10 +130,16 @@ def text_chunks(n: int, width: int) -> list[AIMessageChunk]:
     return [AIMessageChunk(content="x" * width) for _ in range(n)]
 
 
-def volume(fn: Any, chunks: list[AIMessageChunk]) -> int:
+def block_chunks(n: int) -> list[AIMessageChunk]:
+    """块列表 content——LangChain 对它的合并走 `merge_lists`，复制成本按**元素**计。"""
+    return [AIMessageChunk(content=[{"type": "text", "text": "x"}]) for _ in range(n)]
+
+
+def volume(fn: Any, chunks: list[AIMessageChunk]) -> tuple[int, int]:
+    """返回 `(chars, blocks)`——哪一列有含义取决于语料（见 `_CopyVolume`）。"""
     with _CopyVolume() as vol:
         fn(list(chunks))
-    return vol.chars
+    return vol.chars, vol.blocks
 
 
 def best_ms(fn: Any, chunks: list[AIMessageChunk], repeats: int = 5) -> float:
@@ -174,7 +191,7 @@ async def main() -> None:
     label = sys.argv[1] if len(sys.argv) > 1 else "?"
     print(f"=== B8 #281 基准（{label}）：chunk 聚合 复制量 / 耗时 / 端到端 ===")
 
-    print(f"\n【1】确定性指标：聚合全程交给 merge_content 的字符总数（width={WIDTH}）")
+    print(f"\n【1】确定性指标：聚合全程交给 merge_content 的字符总数（width={WIDTH}，纯文本语料）")
     print(f"{'N':>7}{'流总字符 L':>12}{'naive 复制量':>15}{'oneshot 复制量':>16}"
           f"{'naive/L':>10}{'naive 4×比':>12}{'oneshot 4×比':>14}")
     prev_n: float | None = None
@@ -182,11 +199,26 @@ async def main() -> None:
     for n in SIZES:
         chunks = text_chunks(n, WIDTH)
         assert shape(naive_fold(chunks)) == shape(oneshot_fold(chunks)), f"N={n}: 两臂结果不同"
-        v_n, v_o = volume(naive_fold, chunks), volume(oneshot_fold, chunks)
+        v_n, _ = volume(naive_fold, chunks)
+        v_o, _ = volume(oneshot_fold, chunks)
         print(f"{n:>7}{n * WIDTH:>12}{v_n:>15,}{v_o:>16,}{v_n / (n * WIDTH):>9.2f}x"
               f"{ratio(v_n, prev_n):>12}{ratio(v_o, prev_o):>14}")
         prev_n, prev_o = v_n, v_o
     print("  判据：4× N 时 ≈4 ⇒ 线性；≈16 ⇒ 二次。naive/L 随 N 线性增长即二次的直接证据。")
+    print("  L = 流的总字符数（= 改造后应当抄的量）；改造后列恒等于 L 即 O(L)。")
+
+    print("\n【1b】同一口径的块列表语料（`content=[{type:text,...}]`）：此语料下 chars 恒为 0")
+    print(f"{'N':>7}{'流总元素':>10}{'naive 元素数':>14}{'oneshot 元素数':>16}"
+          f"{'naive 4×比':>12}{'oneshot 4×比':>14}")
+    prev_n = prev_o = None
+    for n in SIZES:
+        chunks = block_chunks(n)
+        assert shape(naive_fold(chunks)) == shape(oneshot_fold(chunks)), f"N={n}: 两臂结果不同"
+        _, b_n = volume(naive_fold, chunks)
+        _, b_o = volume(oneshot_fold, chunks)
+        print(f"{n:>7}{n:>10}{b_n:>14,}{b_o:>16,}{ratio(b_n, prev_n):>12}{ratio(b_o, prev_o):>14}")
+        prev_n, prev_o = b_n, b_o
+    print("  形态判据看本表的**元素**列：这一列与 §1 同形（改造前二次、改造后线性）。")
 
     print(f"\n【2】耗时（同一批 N，best-of-5；width={WIDTH}）")
     print(f"{'N':>7}{'naive(ms)':>12}{'oneshot(ms)':>14}{'倍数':>10}"
