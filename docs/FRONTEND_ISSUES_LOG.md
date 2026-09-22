@@ -2782,8 +2782,15 @@ PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_l
   清理方式：`api.delete_session(<id>)`（硬删；只删本轮自造 id，用户原有会话一条不动）。
 - 前端 `localStorage` 残留：`ahi.traceDensity=balanced`、`ahi.theme=light`、`ahi.showArchived` 已关、
   `ahi.apiToken` 已清除；`ahi.selectedSession` 属正常交互产物。
-- 一次性脚本落点：后端 `.workbuddy/live_audit/`、前端 `web/.audit-live/`，**均在 gitignore 内、不入库**，
-  审计结束后删除；本轮唯一的仓库写入是本文档（+ 后续修复的代码与测试）。
+- 一次性脚本落点：后端 `.workbuddy/live_audit/`（**在 gitignore 内**）、前端 `web/.audit-live/`
+  （**不在 `web/.gitignore` 内**——本行原写「均在 gitignore 内」，收口时实测 `git status` 把它列成 `??`，
+  是错的，2026-09-22 更正）。
+- **收口清理（2026-09-22 完成）**：锚定 42 条自造会话（今日 + `stub-main` 内容标记，另加两条未走到
+  模型调用的探针会话）硬删，`.agent/workspace/sessions` 余 34 条为审计前既有、一条未动；
+  `web/.audit-live/` 与 `web/shots/` 已删（截图不留），其文字证据（`BRIEF.md`、`findings-*.md`、
+  读数 JSON、一次性 `.mjs`）迁至后端 gitignored 的 `.workbuddy/live_audit/frontend_audit/`
+  （62 文件 / 459 KB），同样不入库；桩 LLM（:8123）与审计后端（:8000）进程已停。
+  本轮唯一的仓库写入是本文档（+ 修复的代码与测试）。
 - **全程未打印任何密钥值**（只列 key 名与我自建的假 token 形状）。
 
 ### 7. 处置与修复台账（本轮收口）
