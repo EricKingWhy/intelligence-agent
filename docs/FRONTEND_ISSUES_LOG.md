@@ -2608,3 +2608,168 @@ commit message 写明"方向翻转 + 断言同步"）。
 5. **仓库自研能力的边界**（多票共用）：`retrieve_knowledge` 属 **knowledge** capability，
    与长期记忆（memory）是两回事；技能有 `load_skill` 按需加载，记忆**没有**对应的读侧工具——
    这正是 #202 要补的差距。
+
+---
+
+## 第十五轮（2026-09-22）：真机逐控件全量点击审计（用户点名：每个控件都要点一遍 + 刷新一致性）
+
+> 用户指令（原话）：「对于前端的每个功能都要测试一遍，对于每个功能按钮你必须都要点击一下……
+> 有没有点击了结果没有反应的，你必须每个都要点一遍」「还要去检查一下比如页面刷新后会话内容还在不在？
+> ……刷新后的会话也要和刷新前的会话是一致的」。本轮的登记按「边测边写」实时进行。
+
+### 0. 环境与方法（决定了本轮证据的边界，先读这一段）
+
+| 项 | 事实 |
+| --- | --- |
+| 真机 | 真后端 `agent_harness.web.app:create_app`（uvicorn :8000）+ 真 vite dev server（:5173）+ 真 Chromium（Playwright 1.63.0）。**只有模型这一跳是本地脚本桩** |
+| 为什么桩模型 | 真供应商 `api.senseaudio.cn` 返回 400 `{'code':'billing','message':'计费账户已被冻结'}` ⇒ **真模型链路整轮不可用**（外部阻塞，见 §5），任何"真模型已验证"的结论本轮都不成立 |
+| 桩的行为 | `.workbuddy/live_audit/stub_llm.py`（gitignore 内的一次性脚本，非仓库代码）：OpenAI 兼容 :8123，按消息里的 `#tag` 决定行为（`#fail`/`#long`/`#reason`/`#write`/`#write-big`/`#bash`/`#bash-long`/`#read`/`#read-big`/`#delegate`/`#slow`），流式含 `reasoning_content` 增量、tool_calls 分片、末帧带 `finish_reason` + `usage`（含 `prompt_tokens_details.cached_tokens`） |
+| 未改动的东西 | `.env` 未改（桩地址经 env 覆盖传入，不落盘）、`.zcodeignore` 未读未碰、未动任何用户数据文件；上游仓库零改动（本轮全程只读源码，唯一的仓库写入是本文档 + 下一步的修复） |
+| 门禁基线 | e2e 主车道全量 **440 passed / 0 failed**（12.7m），树 `22aa291`；三 clone 已对齐到 `22aa291` |
+
+**分工**：两个 subagent 并行（A = R1 TopBar / R2 Session Rail / R3 Workspace / R4 空态 / R8 Palette / 会话管理；
+B = R5 Conversation / R6 Approval / R9 Run Inspector），主控负责 R7 Composer + 5 个 picker + #283 权限档 +
+上下文容量看板 + 刷新一致性三场景。控件基址：`ACCEPTANCE_CONTROL_INVENTORY.md`（110 项，R1–R9）。
+
+### 1. 结论速览
+
+- **点过的控件**：初始页 69 个可见控件 + 选中会话后的动态控件（Inspector 各档、审批卡、委派行、工具流、
+  队列 chip、停止按钮、恢复入口排除项）逐一点击或明确记录"为何未点"（见 §4）。
+- **新发现**：**1 个真缺陷**（M-01，后端 P2，缓存命中率永不采集）+ **1 个待定 P2**（A-02，取消文案两处不一致）
+  + **11 个 P3/观察项** + **16 条清单漂移**。
+- **用户点名的刷新一致性：真机通过**（三场景，见 §2 首行）——静止刷新逐节点一致、长会话一致、
+  流式中途刷新自行续流到终态；唯一差异是侧栏相对时间（「刚刚」→「1 分钟前」），非内容差异。
+- **无 P0/P1**：本轮没有"点了没反应"的功能按钮；仅"停止"按钮在 Playwright 合成点击（`locator.click()`）
+  下不生效，真人节奏点击稳定生效 ⇒ 判为**测试基建假象**而非产品缺陷（§3 M-02，含判别实验）。
+
+### 2. 已验证正常（真机点击 + 请求/事件级证据）
+
+| 组 | 项 | 结论要点 |
+| --- | --- | --- |
+| **刷新一致性（用户点名）** | 长会话刷新（`5affc020`，1416 叶子节点） | 对话区**逐节点一致**（1416→1416，差异 1 处 = 侧栏 `45 事件 · 7 分钟前`→`8 分钟前`） |
+| | 工具链会话刷新（`261bbd55`，794 叶子） | 同上（差异 1 处 = 相对时间） |
+| | **流式中途刷新**（run `0406a04d`，turn 6） | 刷新后**不点任何东西**，+18s 内界面出现该 run 完整正文（前 60 字命中）；控制台零错误、零失败请求 |
+| R1 TopBar | 密度四档（radio） | 4/4 可切，`ahi.traceDensity` 持久化；palette 同功能条目 4 条亦通 |
+| | `API 身份令牌设置`（钥匙） | 开/合/保存/清除全通；写入 `localStorage.ahi.apiToken`、面板关闭（异常分支见 A-04） |
+| | `记忆管理` | 打开 memory-panel 对话框、Esc 关（清单未列，见 D-2） |
+| | Inspector 折叠 / `切换主题` | 收起↔展开；light↔dark 且刷新后保持 |
+| R2 Session Rail | 行选中 | `.selected` + 历史加载 + `GET /events` 按需取 |
+| | 行 `⋯` 菜单：`加入项目…`/`新建项目…`/`归档`/删除… | 全部可点；归档 `200 POST /archive` 行移出侧栏；`取消归档` `200 DELETE /archive` 行恢复 |
+| | `显示已归档会话` | `aria-pressed` 翻转 + `已归档` 徽标重现 + `localStorage.ahi.showArchived=1` 持久化 |
+| | `删除会话…` 二次确认 | 弹窗含会话标题/ID 回显 + 「这是硬删除，不可恢复」+ 后果四条；Esc=取消；`永久删除（不可恢复）` → `200 DELETE` 行消失，后端复核该 id 已 404 |
+| R3 Workspace | 三档 tab `Chat`/`文件/改动`/`输出` | 3/3 可切、`role=tab`/`aria-selected` 独占、`role=tabpanel[hidden]` 对应 |
+| | Composer 发送 / `Ctrl+Enter` | 空输入 `发送=DISABLED`（正确）；输入后可点，`200 POST /messages`，输入框清空；`Ctrl+Enter` 等价 |
+| | 模型选择 picker | 两级菜单：`默认链 系统自动选` / provider 分组（`deepseek`/`senseaudio`/`qwen`）/ `管理模型 …`；选中回写 trigger |
+| | 权限模式 picker | 三档 `只读`/`工作区写入`/`完全访问`；选档 → `200 POST /permission` + `permission/changed` 事件 |
+| | Agent Profile picker | 选「编程」→ 下一轮 `run/started.agent_profile="coding"`（线上可查） |
+| | Reasoning Effort picker | 选「深度」→ `POST /messages` 请求体含 `"reasoning_effort":"deep"`；`run/started` 生效 |
+| | 上下文容量看板 | 数字与后端一致：看板 `9,584 / 200,000（4.8%）` ↔ `/context-usage used_tokens=9584` |
+| | **#283 危险档内联确认** | 升 `完全访问` 必须过内联确认（含后果文案）；`取消` ⇒ 值不变（`工作区写入`）；`升级` ⇒ `200 POST /permission {"permission_mode":"danger-full-access","auto_approve":true}` + `permission/changed`，**刷新后仍在**（`完全访问`） |
+| | 排队 / `立即` 转 steer | 在途再发一条 → 排队可见（chip，带`编辑`/`取消`）；点 `立即` → `queue/cancelled` + `steer/requested` + `POST /messages` 带 `mode:"steer","queue_id":…`，界面显示「引导中」 |
+| R5 Conversation | `分叉` | 真派生 child session 并跳转 |
+| | 轮次折叠 / `复制回答` / `复制代码` | 折叠双向翻转；剪贴板拿到全量文本 / 围栏内全量代码 |
+| | 工具行 `act-node` L0→L1→L2→L0 / `Inspect` chip | 循环正确；chip 切到 Inspector 工具详情 |
+| | 代码块 `自动换行`/`不换行` | 容器类翻转 |
+| | 委派行展开 / `复制子会话 ID` / `Inspect 子会话` / `打开子会话` | 4/4 通过（`aria-expanded` 翻转、剪贴板=child id、Inspector 原位展开 child、主窗切换） |
+| | reasoning header 展开/收起 | 通过 |
+| R6 Approval | `批准` | busy 禁用 → `POST /approve` 200 → 工具真执行 → 卡片消失 |
+| | `拒绝` | `POST /approve {approved:false}` → 工具被拒（`PERMISSION_DENIED`）→ 卡片消失 |
+| R8 Palette | 17 项动作/密度条目 + 事件条目抽样 | 开/关（overlay、Esc）、`↑↓` active、`Enter` 执行、`切换 Run Inspector`、`跳到最新事件`、`复制 Run ID`、`切换主题`、`聚焦输入框`、四档密度、事件条目跳 Inspector——全部通过 |
+| R9 Inspector | 五 tab + Timeline 行定位 + `加载更早 N 条` + hover 浮层 + Terminal 钻取 | 5/5 tab 可点且 `aria-selected` 独占；行点击定位正确；窗口 +500 条语义正确 |
+| | 事件详情 `Overview`/`Input`/`Output`/`Raw` + `复制 JSON`/`复制 Raw` | 全通（剪贴板已逐步核对）；工具详情四档同理 |
+| | child 视图 `Run` 返回 | 通过 |
+
+### 3. 新发现（本轮）
+
+#### M-01 — 缓存命中率**永远采集不到**：读的键名与 langchain 归一化后的键名不一致【P2 · 后端 · 待修】
+
+| 项 | 值 |
+| --- | --- |
+| 归因 | **后端**（`src/agent_harness/agent/runtime.py::_usage_from_response`） |
+| 复现 | 真 provider 栈（`create_chat_model` → OpenAI 兼容线 → 桩 :8123）发一次带缓存明细的调用，读 `usage_metadata` 与 runtime 抽取结果对照（一行命令见下） |
+| 期望 | `model/completed.usage.cached_tokens` 带回缓存读取量 ⇒ #200 看板「平均缓存命中率」有数 |
+| 实测 | langchain 归一化后给的是 **`input_token_details.cache_read`**，runtime 读的是 **`cached_tokens`** ⇒ 永远 `None` ⇒ 看板恒显示「缓存命中率未采集（提供商未返回缓存明细）」。原始证据（本轮重跑）：`usage_metadata = {"input_tokens": 225, "output_tokens": 5, "total_tokens": 230, "input_token_details": {"cache_read": 75}, ...}`；`runtime 读的键 cached_tokens -> None`；`langchain 实际给的键 -> ['cache_read']` |
+| 为什么之前没发现 | 单测**喂的是内部键名**（`tests/web/test_context_usage.py` 多处 mock `"input_token_details": {"cached_tokens": 80}`），于是"测试全绿 + 真链路永远 None"两个事实同时成立；`tests/test_structured_logging.py:99` 喂的恰是**真形状** `{"cache_read": 2}`，但断言"恰好 3 键"并把理由写成"FakeModel 不转发 input_token_details"——**该注释与事实不符**（它确实转发了），实为键名不匹配导致的巧合通过 |
+| 连带 | 设计稿 `docs/design/CONTEXT_CAPACITY_DASHBOARD.md:47` 把数据源写成 `usage.input_token_details.cached_tokens`（也是错的一侧）；契约 `docs/spec/Observable_Agent_Workspace_SDD/03_RUNTIME_EVENT_CONTRACT.md:162` 声明的**事件字段**名 `cached_tokens?` 是对的，不能改（前端/看板/API 都按它读） |
+| 修法（待审） | 抽取侧同时接受两种键名（`cache_read` 优先，`cached_tokens` 兜底兼容非 langchain 路径），事件字段名保持不变；同步把单测的 mock 改成**真形状**，删掉/修正误导注释；设计稿的数据源路径一并订正 |
+
+```bash
+# 复现（需桩在 :8123；脚本是一次性探针，不入库）
+PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_long.py
+```
+
+#### A-02 — 用户主动取消后，顶部说「已取消」、同屏 Run 卡片说「失败」【P2 · 归因待定（前端文案 / 后端事件语义）· 待裁决】
+
+- **复现**：空态输入 `#slow …` 回车建会话 → 流中（顶栏 `思考中 · 2s`）按 `Escape` → 读顶部 chip 与 Inspector。
+- **实测**：顶部 chip = `已取消`；同屏 Inspector = `Run 1 失败` / `已取消`；事件序列末条是 **`run/failed {reason:"cancelled"}`**（不是 `run/cancelled`）；网络侧只有 `200 POST /sessions/<id>/cancel`。
+- **问题**：同一件事两处措辞不同，用户分不清"我停的"还是"它挂了"。
+- **两种修法（择一，需裁决）**：(a) 前端把 `run/failed + reason=cancelled` 一律投影为「已取消」（投影层单点，不动事件语义）；
+  (b) 后端为主动取消新增独立终态（`run/cancelled`），代价是事件模型与所有读侧都要加分支。
+  倾向 (a)：`reason` 已经把语义带全，事件类型无需增殖（符合 §9.2 最少改动）。
+
+#### P3 / 观察项（按归属）
+
+| 编号 | 结论 | 归属 | 证据要点 |
+| --- | --- | --- | --- |
+| **M-02** | 「停止」按钮在 Playwright `locator.click()` 下 7/7 不触发 `POST /cancel`；**鼠标坐标点击 3/3 生效**、真人节奏（`move→down→120ms→up`）亦生效；时间线：点击 +6413ms → `POST /cancel` +6415ms → `run/failed{reason:"cancelled"}` +6416ms。同页对照实验证明是**合成点击被流式重渲染吞掉**，非产品缺陷 | 测试基建 | `findings-M4/M5/M8/M9/M10.md`；结论：后续自动化用坐标点击或真人节奏，勿据 `locator.click()` 判缺陷 |
+| **A-01** | `+ 新建会话` 不建会话：主区回空态、composer 聚焦、**无 `POST /api/sessions`**、侧栏行数不变、后端 `zero-event rows: []`；源码证实是**有意**的草稿态（`App.tsx` `handleNew` 只 `selectSession(null)`；真建会话发生在空态提交时）。"点了没反应"不成立，风险只在清单措辞 | 前端（语义/清单） | `a-r2r3r4.mjs`；`App.tsx:406-420,646` |
+| **A-03** | 取消流会在网络层留下 `POST /api/sessions :: net::ERR_ABORTED`（SSE 主动断开的正常副作用）；无 console error、UI 无报错条。记此以免下一轮误判为缺陷，但它会污染"零失败请求"类断言 | 前端（预期行为） | `a-r3fix.mjs` `badResponses` |
+| **A-04** | 保存**无 claims 的 token**：localStorage 写入成功、面板关闭，但身份 chip 不出现，且**无任何提示**（清单 R1-09/10 只说"chip 出现"，没说非法时怎么办） | 前端 | `a-r1.mjs`；`TopBar.tsx` `saveToken`/chip 条件 |
+| **A-06** | 空态 chip 点击后**焦点留在 chip 按钮**（三次点击值都注入正确，但 `activeElement=BUTTON`）⇒ 键盘用户按 Enter 是"再点一次 chip"而不是发送，读作"没反应" | 前端 | `a-r3fix.mjs` `empty_chips` |
+| **A-08** | Palette 密度条目文案不统一：实际是 `切换到 紧凑`、`切换到 均衡`（**中间有空格**），而 `切换到 详细`、`切换到 Raw` 没有；按文案精确检索/自动化会匹配失败 | 前端文案 | `a-r8.mjs` `palette_items` |
+| **B-D7** | Inspector 工具 Raw 的两个 `复制 Raw` 按钮**同 aria-label**，无法按名称区分 `tool/call` 与 `tool/result`（可访问性/可测性缺口） | 前端 | `findings-B.md` §R9-22/23 |
+| **A-05** | 鉴权横幅与 `关闭提示` X **本轮不可达**：本后端未配 `JWT_SECRET` ⇒ 任何 token 都不出 401 ⇒ `authRequired` 恒 false。**不能声称通过，也不判缺陷** | 环境 | `a-r3fix.mjs` `fake_token_banner`（全部 200） |
+| **A-07** | Palette 的 `复制 Trace ID` / `打开 Trace` 两条在本环境**不渲染**（无 `trace_id`/Langfuse 未启用）；另有两条新条目（`整页打开 Inspector`、`管理记忆`）清单未列 | 环境 + 清单 | `a-r8.mjs` `palette_items`（33 条） |
+
+### 4. 清单漂移（`ACCEPTANCE_CONTROL_INVENTORY.md` ≠ 实际 UI，共 16 条）
+
+| # | 清单写的 | 实际（2026-09-22 实测） |
+| --- | --- | --- |
+| D-1 | R3 模式三档 `Chat`/`Split`/`Preview`（`aria-pressed`） | 中心列是 `role=tab` 三档：`Chat`/`文件/改动`/`输出`（`Split`/`Preview` 模式名已在源码中删除） |
+| D-2 | R1 共 11 项 | 多出 `记忆管理`（memory-panel）与 `上下文容量`（仅选中会话时渲染） |
+| D-3 | R2 共 2 项 | 多出 `显示已归档会话`（`aria-pressed`）、`新建项目`、项目区折叠行、行内 `⋯` 菜单 |
+| D-4 | R1「Enter 触发保存」 | 正确，但 **chips 与身份 chip 的触发条件（claims 合法性）清单未写** ⇒ A-04 这类"该出现没出现"无法按清单判定 |
+| D-5 | 清单行号基于 2026-09-11 `feat/frontend` 快照 | 现行 `TopBar.tsx` 行号整体下移（密度 picker `:137-142` vs 清单 `:102` 等）⇒ 行号不可直接跳转 |
+| D-6 | R8「17 项」 | 实际 33 条 = 动作 7 + 密度 4 + 事件 N（本会话 30）；`复制 Trace ID`/`打开 Trace` 只在该会话有 trace 时渲染 |
+| D-7 | 事件条目格式 | 实际 `{type} · {summary} / #{seq}`；基数「最近 100 条倒序」 |
+| D-8 | 未记 `显示已归档会话` 的持久化键 | 实测 `localStorage['ahi.showArchived']='1'` |
+| D1(B) | R5-13 `复制 inspect_artifact 引用`（`ToolCard.tsx:383`） | 代码中不存在；归档入口改为 `ArtifactViewer`「查看完整内容」 |
+| D2(B) | R9-06 `返回 Timeline`（`detail-back-btn`） | 代码中不存在；改为"选中项详情" peek 覆盖层 + `关闭预览（保持选中）` |
+| D3(B) | R5-07/08/09 位置写 `ToolCard.tsx:301/308/323` | 实际在 `ToolOutputStream.tsx:147/149/164`（仅文件/行号漂移） |
+| D4(B) | R5-03 复制按钮"1.6s 显示已复制" | 按钮为纯图标，反馈只改 `aria-label`/`title`（无可见文案） |
+| D5(B) | R6 只有 `批准`/`拒绝` | 实为 `批准 Ctrl+⏎` / `拒绝 Ctrl+⌫`（清单未记快捷键） |
+| D6(B) | R5-14「JSON 折叠开关出现在主区 L2」 | 主区 L2 的 bash/read 专用块**不含** JSON 树；`json-toggle` 只在 Inspector 输入/输出档发生 |
+| D7(B) | R9 两个 `复制 Raw` | 与清单一致，但两按钮**同 aria-label**（=B-D7，可测性缺口） |
+| D8(B) | 未记 | 切到另一个会话时 Inspector **自动收起**（#183 AC4，非缺陷）⇒ 会造成"Inspector 内控件短暂不可达" |
+
+### 5. 未覆盖 / 待补（明确不计通过）
+
+| 项 | 原因 | 怎么补 |
+| --- | --- | --- |
+| **真模型链路（全轮）** | 供应商计费冻结（400 `billing`）⇒ 只能用桩。**桩不可覆盖的部分**：真实模型的 prompt 组装效果、真实 tool_call 参数多样性、真实推理内容 | 用户解除计费冻结后，用同一批脚本（`web/.audit-live/*.mjs`，去桩即可）复跑一轮"真链路抽验" |
+| R3-01 鉴权横幅 `X`（`关闭提示`） | 后端未配 `JWT_SECRET`，横幅无渲染条件 | 用 `JWT_SECRET=<任意>` 起后端重跑 |
+| R8-09/R8-10 `复制 Trace ID`/`打开 Trace` | 无 `trace_id`/`trace_url`（Langfuse 未启用） | 启用 Langfuse 后重跑 `a-r8.mjs` |
+| R3-02 `恢复会话`（`RotateCcw`） | 需 `isRecoverableRun`（缺 run 终态 / dangling tool_call）；造 dangling 需杀进程，会污染并发会话 | 单机时 `#slow` 中强断后端，再看模式条右侧是否出现并点它（应 `POST /recover`） |
+| R5-07/08/09 工具流三件、R5-13 `复制续读 offset`、R5-20 reasoning `↓ 跳到最新`、R5-04 对话 `↓ 最新` | 渲染条件是 `status==='running' \|\| !result`，桩的 bash/read 一次性返回，未抢到窗口；`#write` 参数名错（`file_path` ≠ 后端 `path`）已修但在本轮窗口内没重造素材 | 用修正后的 `#write-big` + `#read-big` 重造 continuation，再在 running 窗口内点 |
+| 项目行 `⋯` 的 `重命名项目`/`删除项目…`/`在此项目中新建任务`、会话行 `上移/下移/移出项目`、记忆 `删除这条记忆` | 均为对**他人数据/项目账本**的写操作，超出本轮范围 | 隔离环境执行（主控/用户确认后） |
+| Inspector 工具 Raw 第二个 `复制 Raw` | 与第一个同 aria-label，只核对了第一个的剪贴板 | 随 B-D7 一并修（拆 label）后复验 |
+
+### 6. 测试足迹与清理（本轮造的数据）
+
+- 桩后端上的**种子会话 5 条**（`long_markdown`/`reasoning`/`tools`/`delegation`/`long_session`）与 A、B 两位
+  agent 的 12 条自造会话 + 主控的 3 条探针会话（含 `#slow`/`#fail` 系列、`0406a04d` run）**全部是本轮产物**，
+  清理清单已随报告落盘（`.workbuddy/live_audit/seed_sessions.json`、`findings-B.md` §测试足迹）。
+  清理方式：`api.delete_session(<id>)`（硬删；只删本轮自造 id，用户原有会话一条不动）。
+- 前端 `localStorage` 残留：`ahi.traceDensity=balanced`、`ahi.theme=light`、`ahi.showArchived` 已关、
+  `ahi.apiToken` 已清除；`ahi.selectedSession` 属正常交互产物。
+- 一次性脚本落点：后端 `.workbuddy/live_audit/`、前端 `web/.audit-live/`，**均在 gitignore 内、不入库**，
+  审计结束后删除；本轮唯一的仓库写入是本文档（+ 后续修复的代码与测试）。
+- **全程未打印任何密钥值**（只列 key 名与我自建的假 token 形状）。
+
+### 7. 本轮之后的处置顺序（占位，随进展更新）
+
+1. **M-01**（P2 后端）按上表修法实施 + 改单测 + 订正设计稿数据源；
+2. **A-02**（P2 待裁决）按 (a) 投影层单点修，登记裁决依据；
+3. P3 中"低成本、纯前端文案/可测性"的三条（A-08 空格统一、B-D7 拆 aria-label、A-06 焦点进输入框）随批处理；
+4. A-01 / A-04 属**语义与产品口径**问题：不擅自改行为，连同 D-1…D-8 的清单过期一并交用户裁决（改清单 or 改行为）；
+5. 上述修完各跑一轮 `/code-review`（预算按协议 §8.3：每轴 1 轮）并真机复验，然后清理 §6 足迹。
