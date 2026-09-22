@@ -238,7 +238,14 @@ async def build_runtime(
     sandbox = workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
-        registry.register(tool_cls(sandbox))
+        # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
+        # Settings，装配层是唯一的接线点；接不上就成死键（tests/test_assembly_bash_budget.py）。
+        kwargs = (
+            {"timeout_seconds": settings.bash_timeout_seconds}
+            if tool_cls is BashTool
+            else {}
+        )
+        registry.register(tool_cls(sandbox, **kwargs))
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。

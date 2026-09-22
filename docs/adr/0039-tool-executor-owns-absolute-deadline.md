@@ -194,3 +194,38 @@ MUTATING ⇒ False），并把沙箱已捕获的 `exit_code / stdout / stderr / 
   `.workbuddy/probe_same_deadline_race_longblock.py`、`.workbuddy/probe_docker_same_deadline.py`、
   `.workbuddy/probe_c1_margin.py`；C7/L2 复现 `.workbuddy/probe_c7_git_residual.py`；
   L4 复现 `.workbuddy/probe_l4_old_signature.py`（均为本地一次性产物，不在仓库内）。
+
+---
+
+## 5. 附录（2026-09-22）：预算的配置入口（#244 AC5）
+
+D1–D7 / L1–L7 **不改**。本条只补 AC5「配置非法值启动期响亮失败」缺的那一环：此前预算唯一
+落点是模块常量，源码里没有"配置一个坏值"的位置，AC5 无从满足。
+
+- **入口**：`Settings.bash_timeout_seconds`（env `BASH_TIMEOUT_SECONDS`），
+  `Field(default=60.0, gt=0, allow_inf_nan=False)`。默认值仍是 60.0——
+  「BashTool 默认有效预算 = 60 秒」这条冻结不变，配置只改**被消费的数值**，不改 owner。
+- **非法值在 `Settings` 构造期失败**（≤0 / nan / ±inf ⇒ `ValidationError`）。构造期即启动期
+  （`cli` 与 `web/app.create_app` 各构造一次）⇒ 「没有预算」「无穷预算」不会带进运行时。
+- **第二道闸在工具自己**：`BashTool(sandbox, *, timeout_seconds=...)` 对非有限 / ≤0 抛
+  `ValueError`。直调构造不经 `Settings`，静默回落会把"配了个坏值"显示成"配了个好值"。
+- **消费点唯一**：`assembly.py` 的 `BUILTIN_LOCAL_TOOLS` 装配循环把该值传进 `BashTool`；
+  `src/` 内没有第二个 `BashTool` 生产者（web/CLI/resume/child 都走 `build_runtime`）。
+- **钉子与红证**：`tests/tools/test_bash_budget_config.py`（三处 60 同值、环境变量可配、
+  非法值两处响亮失败）、`tests/test_assembly_bash_budget.py`（装配后实例值 = 配置值）。
+  改动前的冻结树 + 这两个测试文件 ⇒ **17 failed / 1 passed**：3 ×
+  `AttributeError: 'Settings' object has no attribute 'bash_timeout_seconds'`、
+  7 × `DID NOT RAISE ValidationError`、6 × `TypeError: BashTool.__init__() got an unexpected
+  keyword argument 'timeout_seconds'`、1 × `assert 60.0 == 25.0`；唯一 pass 是默认值钉子
+  （改动前后同为 60.0，属有意）。变异（逐条记**变异点**）：`config.py` 的 `Field(default=60.0…)`
+  60→45 ⇒ 红 2（改 `tools/bash.py` 的 `DEFAULT_BASH_TIMEOUT_SECONDS` 实测只红 1——装配臂读的是
+  Settings 给的默认值，不是该常量）；去掉 `gt=0` / `allow_inf_nan` ⇒ 红 7；装配不接线 ⇒ 红 1；
+  去掉工具层守卫 ⇒ 红 6。
+- **读数归属（防口径漂移）**：§4 的读数与门禁数字属于**本 ADR 的原始提交树（§5 之前）**；
+  §5 追加后本文件所在树的读数见 `docs/SDD_TICKET_TRACKER.md` 的 B-37 段与 `#256` / `#244`
+  的关单 comment。
+- **已知残余（登记，不在本附录内修）**：① `demo/live_agent.py` 自建 registry、不经 assembly
+  ⇒ 配置对它无效；② `sandbox/local.py` 的 `DEFAULT_EXEC_TIMEOUT = 60.0`（Docker 复用）仍是
+  "不转发 deadline 的调用方"的退回值（L2 的 git 路径），与本开关不同源；③ 程序内直传
+  `timeout_seconds=True` 会被 `float` 当 1.0 秒接受（`bool` 是 `int` 子类；env 路径
+  `BASH_TIMEOUT_SECONDS=true` 抛 `ValidationError`，且无 Settings 变更端点可达）。
