@@ -86,3 +86,55 @@ describe('Composer 队列条（ADR-0030 §5.2）', () => {
     expect(html).not.toContain('aria-label="取消排队消息"');
   });
 });
+
+// ── #283（F18-B）：会话内可改权限档 + 中性禁用文案 ──
+// pill 的**触发按钮**不在 Radix portal 里，所以它的禁用态与 title 是 SSR 可断的；浮层内的
+// 升档确认面（role/aria + 取消不发请求）在 `e2e/control-row.spec.ts` 里锁——本仓没有 jsdom。
+
+describe('Composer 权限 pill（#283）', () => {
+  // 逐字对齐后端 PermissionPolicy 三档（`tooling/contract.py`），同 e2e fixtures 的口径。
+  const MODES = [
+    { id: 'read-only', display_name: '只读', description: '可读文件和运行只读工具，不可写入。', icon: 'lock' },
+    { id: 'workspace-write', display_name: '工作区写入', description: '可读写工作区内文件；高危工具仍需审批。', icon: 'pencil' },
+    { id: 'danger-full-access', display_name: '完全访问', description: '所有工具无需审批，含网络与系统副作用。仅在可信环境使用。', icon: 'unlock' },
+  ];
+
+  it('会话内且不忙 → pill **可交互**（#236 的「会话内一律只读」已随本票删除）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base, permissionModes: MODES, selectedPermissionMode: 'read-only',
+      onPermissionModeChange: noop, permissionInSession: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-label="权限模式"');
+    expect(html).not.toContain('aria-disabled="true"');
+    // 假提示必须消失：改档可行之后「权限档在会话创建时确定，会话内不可修改」就是假话。
+    expect(html).not.toContain('权限档在会话创建时确定，会话内不可修改');
+  });
+
+  it('AC4：本轮进行中 → pill 仍禁用，且原因是**中性**的（不再宣称档位不可变）', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base, streaming: true, permissionModes: MODES, selectedPermissionMode: 'read-only',
+      onPermissionModeChange: noop, permissionInSession: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('title="本轮进行中，等这一轮结束再改档"');
+    expect(html).not.toContain('权限档在会话创建时确定，会话内不可修改');
+  });
+
+  it('AC4：等待审批决策 → pill 仍禁用，且原因是**中性**的', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base, approvalPending: true, permissionModes: MODES, selectedPermissionMode: 'read-only',
+      onPermissionModeChange: noop, permissionInSession: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('title="等待审批决策后再改档"');
+  });
+
+  it('新会话（permissionInSession 假）→ 仍是创建期选择，无会话内的锁', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base, permissionModes: MODES, selectedPermissionMode: null, onPermissionModeChange: noop,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-label="权限模式"');
+    expect(html).toContain('>权限<'); // 未选 → placeholder
+    expect(html).not.toContain('aria-disabled="true"');
+  });
+});

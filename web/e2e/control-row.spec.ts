@@ -414,32 +414,34 @@ test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形'
   }
 });
 
-/** #236：会话已定档 → 权限 pill 显示**会话真值**并转为只读。
+/** #283（F18-B）：会话内权限 pill **可改** —— 与 #236 的「只读」正好相反。
  *
- *  为什么必须在 e2e：可编辑性由 App 的 `selectedId` 决定（单测断不到"选中会话"这个
- *  状态），真值又只从 `session/started` 投影来——必须走真实的「列表 → 点行 → 投影」
- *  链路，才能同时锁住"源换对了"和"确实锁死了"。
+ *  为什么必须在 e2e：可编辑性由 App 的 `selectedId` 决定（单测断不到「选中会话」这个
+ *  状态），真值又只从投影来——必须走真实的「列表 → 点行 → 投影」链路，才能同时锁住
+ *  「源换对了」「确实可改」「改档真的发了请求」。
  *
- *  旧行为（本票要消灭的）：pill 由创建回执的本地状态供值，会话内仍可编辑——拨到
- *  「只读」以为写操作会弹审批，后端其实仍按创建档执行。 */
-test('#236：会话内权限 pill 只读显示 session/started 的档位', async ({ page }) => {
-  const SID = 'e2e-session-perm';
-  const EVENTS = [
-    // 会话真值在这里——后端「显式改档才写键」（F15 #234）
-    { type: 'session/started', data: { permission_mode: 'read-only' }, seq: 1, session_id: SID, time: T },
-    { type: 'user/message', data: { content: '历史问题' }, seq: 2, session_id: SID, time: T },
-    { type: 'run/started', data: { turn_index: 1 }, seq: 3, session_id: SID, run_id: 'r-1', time: T },
-    { type: 'text/delta', data: { delta: '历史回答。' }, seq: 4, session_id: SID, step_id: 1, run_id: 'r-1', time: T },
-    { type: 'model/completed', data: { content: '历史回答。' }, seq: 5, session_id: SID, step_id: 1, run_id: 'r-1', time: T },
-    { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: 'r-1', time: T },
-  ];
+ *  被本票替换掉的旧行为（#236）：pill 在会话内 `disabled`，title **逐字**为
+ *  「权限档在会话创建时确定，会话内不可修改」——那句在改档可行之后成了假话，删掉它
+ *  正是本票 AC3 的消解方式（不新开「锁定时给引导」的票）。 */
+const PERM_SID = 'e2e-session-perm';
+const PERM_EVENTS = [
+  // 会话真值在这里——后端「显式改档才写键」（F15 #234）
+  { type: 'session/started', data: { permission_mode: 'read-only' }, seq: 1, session_id: PERM_SID, time: T },
+  { type: 'user/message', data: { content: '历史问题' }, seq: 2, session_id: PERM_SID, time: T },
+  { type: 'run/started', data: { turn_index: 1 }, seq: 3, session_id: PERM_SID, run_id: 'r-1', time: T },
+  { type: 'text/delta', data: { delta: '历史回答。' }, seq: 4, session_id: PERM_SID, step_id: 1, run_id: 'r-1', time: T },
+  { type: 'model/completed', data: { content: '历史回答。' }, seq: 5, session_id: PERM_SID, step_id: 1, run_id: 'r-1', time: T },
+  { type: 'run/completed', data: {}, seq: 6, session_id: PERM_SID, run_id: 'r-1', time: T },
+];
+const permSession = {
+  session_id: PERM_SID, event_count: 6, first_event_time: T, last_event_time: T,
+  first_user_message: '历史问题', trace_id: null, trace_url: null,
+};
 
+test('#283 AC3：会话内权限 pill 可改、读会话真值，旧「不可修改」提示彻底消失', async ({ page }) => {
   await routeApi(page, {
-    sessions: [{
-      session_id: SID, event_count: 6, first_event_time: T, last_event_time: T,
-      first_user_message: '历史问题', trace_id: null, trace_url: null,
-    }],
-    events: EVENTS,
+    sessions: [permSession],
+    events: PERM_EVENTS,
     permissionModes: PERMISSION_MODES,
   });
   await page.goto('/');
@@ -449,9 +451,89 @@ test('#236：会话内权限 pill 只读显示 session/started 的档位', async
   await expect(trigger).toBeEnabled();
   await expect(trigger).toContainText('权限');
 
-  // 打开历史会话 → pill 换成会话真值，且转为只读 + 说明为什么
+  // 打开历史会话 → pill 换成会话真值，但**仍可编辑**（#236 的只读已删除）
   await page.locator('.session-item').first().click();
   await expect(trigger).toContainText('只读');
-  await expect(trigger).toBeDisabled();
-  await expect(trigger).toHaveAttribute('title', '权限档在会话创建时确定，会话内不可修改');
+  await expect(trigger).toBeEnabled();
+  await expect(trigger).not.toHaveAttribute('title', '权限档在会话创建时确定，会话内不可修改');
+
+  // 浮层：会话内**没有**「默认（未选）」那一行（端点只认三个具体档位，`null` 必然 422，
+  // 留着就是死胡同）；底部如实披露生效时机（ADR-0041 D4：不得承诺「立即生效」）。
+  await trigger.click();
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  await expect(page.locator('.picker-foot')).toContainText('改档从下一轮 run 起生效');
+  await expect(page.locator('.picker-item', { hasText: '默认（未选）' })).toHaveCount(0);
+  await expect(page.locator('[role="listbox"]:visible .picker-item')).toHaveCount(PERMISSION_MODES.length);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+});
+
+test('#283 AC1/AC2：平移档直接发请求；升「完全访问」先确认，取消则一个请求都不发', async ({ page }) => {
+  const posts: Array<{ permission_mode?: string; auto_approve?: boolean }> = [];
+  // 事件列表**可变**：改档成功后前端会重读该会话的事件并重投影（AC7：不拿回执写本地
+  // 状态，真值只能来自事件流），所以 mock 必须能在 POST 之后交出新的 permission/changed。
+  const events = [...PERM_EVENTS];
+  await routeApi(page, {
+    sessions: [permSession],
+    events,
+    permissionModes: PERMISSION_MODES,
+    onPermissionPost: (route) => {
+      const body = (route.request().postDataJSON() ?? {}) as { permission_mode?: string; auto_approve?: boolean };
+      posts.push(body);
+      events.push({
+        type: 'permission/changed',
+        data: { permission_mode: body.permission_mode, auto_approve: body.auto_approve },
+        seq: events.length + 1, session_id: PERM_SID, time: T,
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'changed',
+          permission_mode: body.permission_mode ?? '',
+          auto_approve: body.auto_approve ?? false,
+        }),
+      });
+    },
+  });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await expect(trigger).toContainText('只读');
+
+  // ① 平移档（read-only → workspace-write）：无需确认，直接发 POST。
+  await trigger.click();
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  await expect(listbox).toBeVisible();
+  await listbox.getByRole('option', { name: /工作区写入/ }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  // 请求体逐字：档位是端点唯一入参，auto_approve 必填（ADR-0041 §4）且镜像创建路径的 true。
+  expect(posts[0]).toEqual({ permission_mode: 'workspace-write', auto_approve: true });
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0); // 成功才关浮层
+  // pill 换了值——真值来自重读后的事件流，不是回执（AC7）
+  await expect(trigger).toContainText('工作区写入');
+
+  // ② 升到完全访问：先出确认面（role=alertdialog），**取消不发请求**（AC2）。
+  await trigger.click();
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  await page.locator('[role="listbox"]:visible .picker-item', { hasText: '完全访问' }).first().click();
+  const confirm = page.locator('.picker-foot [role="alertdialog"]');
+  await expect(confirm).toBeVisible();
+  await expect(confirm).toHaveAttribute('aria-label', '确认升级到完全访问');
+  // 浮层**没有**被关掉（确认面就在里面，先关掉就没地方确认了）
+  await expect(page.locator('[role="listbox"]:visible')).toHaveCount(1);
+  await confirm.getByRole('button', { name: '取消' }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect.poll(() => posts.length).toBe(1); // 取消 ⇒ 没多发任何请求
+  await expect(trigger).toContainText('工作区写入'); // 档位纹丝不动
+
+  // ③ 再选一次 → 确认 → 才发。
+  await page.locator('[role="listbox"]:visible .picker-item', { hasText: '完全访问' }).first().click();
+  await expect(confirm).toBeVisible();
+  await confirm.getByRole('button', { name: '升级' }).click();
+  await expect.poll(() => posts.length).toBe(2);
+  expect(posts[1]).toEqual({ permission_mode: 'danger-full-access', auto_approve: true });
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+  await expect(trigger).toContainText('完全访问');
 });

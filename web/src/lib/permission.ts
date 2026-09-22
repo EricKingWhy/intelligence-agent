@@ -85,8 +85,8 @@ export function permissionView(state: ConversationState): PermissionView {
  *
  *  - **新会话**（`selectedSessionId === null`）：显示本地创建意图（它会随 create 请求
  *    发出，是这个会话档位的成因）。
- *  - **会话内**：显示会话真值（`session_permission_mode`，投影自 `session/started`；
- *    F15 #234 起档位是会话属性、创建后不可变）。
+ *  - **会话内**：显示会话真值（`session_permission_mode`，投影自 `session/started`，
+ *    F18-B #283 起被 `permission/changed` 覆写 = 当下生效档）。
  *
  *  会话内取真值必须过一道**身份闸**（`conversation.session_id === selectedSessionId`）：
  *  切会话时 `conversation` 仍是**旧会话**的（history 正在加载，见 `useSession.ts` 的

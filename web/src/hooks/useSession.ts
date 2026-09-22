@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -1225,6 +1225,31 @@ export function useSession() {
     setMode(id ? { kind: 'viewing', sessionId: id } : { kind: 'idle' });
   }, []);
 
+  /** F18-B（#283）：「就地对账」——把指定会话的 durable log 重读一遍并重投影。
+   *
+   *  为什么需要它：会话内改档（`POST /api/sessions/{id}/permission`）在**没有在途 run**
+   *  的会话上不会推流（`permission/changed` 只是一条 durable 追加），而 AC7 禁止拿回执
+   *  写本地状态（那是第二套真相）。于是「重读 log → 重投影」这条**既有**路径就是唯一
+   *  不引入第二套真相的刷新方式。
+   *
+   *  实现 = `selectSession(同一个 id)`：`setMode` 每次都是**新对象**，而历史装载 effect
+   *  以 `[mode]` 为依赖 ⇒ 会重跑「GET events → projectHistory → setConversation」。
+   *  语义上等价于「切走再切回」，只是没有切走。
+   *
+   *  安全性论证（为什么不会把别的东西弄坏）：
+   *   - 调用点只有一处，且 pill 在 `streaming` 时是禁用的 ⇒ 本函数执行时该会话必然处于
+   *     `viewing`（无订阅、`sseRef.current` 为 null），`cancel()` 是 no-op；
+   *   - `shouldShowHistoryLoading(conversation, sid)` 为 false（conversation 就是它）⇒
+   *     不显示占位符、**不清错误横幅**（`setError(null)` 只在真的换会话时跑）；
+   *   - `forgetResumeAttempt` 是必要的：同一 `(sid, afterSeq)` 若刚试过接流会被去重挡掉，
+   *     而这次重读恰恰要用同一个游标再看一次。 */
+  const reloadConversation = useCallback(
+    (sid: string) => {
+      selectSession(sid);
+    },
+    [selectSession],
+  );
+
   /** 用户显式硬删会话（#172 / ADR-0029）——**不可恢复**：无墓碑、无回收站、无撤销。
    *
    *  入口层（`DeleteSessionDialog`）负责拿到显式二次确认，本函数负责"确认之后收敛"
@@ -1380,6 +1405,19 @@ export function useSession() {
     async (sessionId: string, provider: string, modelId: string) => {
       return changeSessionModel(sessionId, provider, modelId);
     },
+    [],
+  );
+
+  /** F18-B #283：会话内改权限档（`POST /api/sessions/{id}/permission`）。
+   *
+   *  本层**不做**任何本地状态推导、也不吞错误：改后的真值由事件流重投影得出（调用方
+   *  成功后就地 `reloadConversation`），失败向上抛给调用点就地回显。
+   *
+   *  `autoApprove` 由调用方显式给出——端点把它定为**必填**（ADR-0041 §4），这里刻意
+   *  不设默认值：一个藏在本层的默认值会把「批准策略取哪一边」变成看不见的决定。 */
+  const changePermission = useCallback(
+    async (sessionId: string, permissionMode: string, autoApprove: boolean) =>
+      changeSessionPermission(sessionId, permissionMode, autoApprove),
     [],
   );
 
@@ -1544,6 +1582,8 @@ export function useSession() {
     recover,
     refreshSessions,
     changeModel,
+    changePermission,
+    reloadConversation,
     fork,
     sendSteer,
     flushQueue,

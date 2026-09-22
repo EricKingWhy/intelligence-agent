@@ -4323,9 +4323,64 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 **落点**：ADR-0041 Status `Proposed` → **`Accepted`**（残余③的解除条件）；tracker 本段 + 月度归档 2026-09-22 条 + `PHASE_STATUS` 焦点 / 索引 / 按日定位。
 
 **残余（登记，不阻断，附解除条件）**：
-1. 前端 `web/src/lib/projection.ts` 的 `permission/changed` 分支是 **no-op**，由 `Record<EventTypeValue, …>` 穷尽性强制 —— 属 F18-B 范围。**解除 = `#283` 合入**。
+1. 前端 `web/src/lib/projection.ts` 的 `permission/changed` 分支是 **no-op**，由 `Record<EventTypeValue, …>` 穷尽性强制 —— 属 F18-B 范围。**解除 = `#283` 合入**。 —— **已于 2026-09-22 解除**（`#283` 合入 main，tip `e10bfda`，见本文件 `## F18-B` 段）。
 2. seq-retry 循环在 `change_model` / `change_permission_mode` 两处重复。**解除 = 第三处出现时抽公共**。
 3. ~~ADR-0041 Status 仍 `Proposed`~~ —— **已于本次落点解除**（见上）。
 4. 端点非法档位走 `InvalidDecision`(**422**) 而非 400，沿用 Service 层既有映射。**解除 = 如需独立错误码再拆**。
 
 **§14.9 通知**：集成区（`D:\intelligence-agent`）与前端（`D:\intelligence-agent-frontend`）开工前先 `git merge-base --is-ancestor origin/main HEAD` 自检。
+
+---
+
+## F18-B（#283 会话内可编辑权限档·前端）
+
+**状态**：实现 + 四道门禁全绿 + 并入 main 完成（2026-09-22）。父票无；与 F18-A（`#282` 后端）紧耦合，本票是其唯一 `Blocked by`（已解除）。
+
+**问题**：F18-A 把权限档（`read-only` / `workspace-write` / `danger-full-access`）改成**会话内可变**，但前端仍按只读处理：pill `disabled`、`permission/changed` 投影是 **no-op**、`PERMISSION_MODE_LOCKED_HINT` 还在断言「档位创建后不可变」（改档可行后已成**假话**）。**定性**：不是新需求，而是 F18-A 的**配套前端**；AC 由 ADR-0041 决策 D2/D3/D4 与 `#282` 登记的残余①直接给定。
+
+**冻结决策（ADR-0041 + `#282` 残余①，实施者不得重新猜测）**：① 投影 `permission/changed` 落真值（**last-wins**），**只动** `session_permission_mode`、不碰 `permission_policy`（`#236` 边界）；② 非法值归 `null` 且**不回退** `session/started`；③ 升级 `danger-full-access` 走**浮层内联确认行**（`role="alertdialog"`，点「取消」**不发请求**；后端不加强制标志位）；④ **删除** `PERMISSION_MODE_LOCKED_HINT`（ADR-0041 决策⑧ 指定的「假话引导」消解方式）；⑤ 有 pending 审批 / 本轮进行中 ⇒ pill 禁用但文案**中性**（不再声称「不可变」）；⑥ 改档成功后**强制重载该会话事件**（重读 → 重投影，不做乐观本地态）。
+
+**交付面（2 笔：代码 + 台账）**：
+1. `463b598` `feat(web): #283 会话内可编辑权限档，升级 danger-full-access 走浮层内联确认` —— `web/src/**` + `web/e2e/**` **16 文件 +641/−86**（`lib/projection.ts` 新增 `projectPermissionChanged` / `summarizePermissionChanged` 并从 no-op 分支换入；`lib/api.ts` 新增 `changeSessionPermission`；`components/OptionPicker.tsx` 的 `onChange` 支持返回 `false` 抑制自动关闭 + `footer` 支持渲染函数 + `showDefault`；`components/Composer.tsx` 解禁 pill + 内联确认行 + 删假提示；`hooks/useSession.ts` 新增 `changePermission` 与 `reloadConversation`；`App.tsx` 接线；`styles/app.css` `.picker-confirm`；用例 `lib/projection.test.ts` / `lib/permission.test.ts` / `components/Composer.test.tsx` / `components/OptionPicker.test.tsx`；e2e `fixtures.ts` + `control-row.spec.ts`）。
+2. `e10bfda` `chore(review-ledger):` —— 本票审查行（range `f1557e814a0d..463b59839ec7`，含四道门禁读数与独立归因）。
+
+**AC（逐条证据见台账审查行）**：AC1 降档**即刻** POST `{permission_mode, auto_approve}`；AC2 升 `danger-full-access` 出确认行、点「取消」`posts` 计数不变；AC3 pill 解禁且浮层不再有「默认（未选）」；AC4 投影 last-wins + 重放幂等 + 坏值归 `null` 且不回落 `session/started`；AC5 只动 `session_permission_mode`（不写 `permission_policy`）；AC6 假提示已删、禁用文案中性；AC7 改档成功后强制重载该会话事件。
+
+**门禁（最终树 `e10bfda`）**：`tsc -b` **0 错**；`vitest run` **65 文件 / 1063 passed / 0 failed**（连跑两轮同读数）；`oxlint` **0 error**（42 警告全为**既存** React-Compiler lint）；`vite build` **0 错**（2116 模块）；e2e **真机 Chromium**：`control-row.spec.ts` **24 passed（57.0s）**、`u-project-task.spec.ts` **10 passed（21.3s）**。**环境与代码的划界（实测）**：`vite build` 若 `--outDir` 指向既有 `dist/`，会在 `vite:prepare-out-dir` 被沙箱 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`（清 67 个文件）拦下 —— **环境非代码**，`✓ 2116 modules transformed` 早已打过。
+
+**独立归因（失败集合差集）**：`web/src/components/StepDetail.window.test.tsx:132` 曾红一次（`Test timed out in 5000ms`）；该用例 N=500 双渲染、**单跑实测 4386ms ≈ 默认预算 5000ms 的 88%** ⇒ A/B 对照：纯净树（`git checkout-index -f` 把 16 文件还原成 HEAD 内容）**1052 passed / 0 failed**，本树连跑两轮 **1063 passed / 0 failed** ⇒ **差集 ∅ = 非回归**（差 11 = 本票新增用例数）。临界预算作为**既存**脆弱点登记（残余①）。
+
+**附带的文档真实性更正（非本票 AC）**：5 处已被 F18-A / `#283` 推翻的旧表述（`web/src/types.ts` 3 处、`web/src/lib/permission.ts`、`web/src/components/StepDetail.tsx`、`web/src/lib/projection.ts`、`web/src/lib/projection.test.ts` 2 处）逐条改写，使「档位创建后不可变 / 后端只认创建档」不再作为**事实**出现（保留处均改为「曾被推翻」的历史叙述）。
+
+**范围锁**：只改前端仓 `web/src/**` + `web/e2e/**`；后端与 `permission_policy` 语义**一字未动**。
+
+**集成（2026-09-22，一手读数）**：首次推送被拒 —— 远端 `main` 已被**并发批次**推进（`500e4e6` → `f1557e8`，6 笔**纯文档**：tracker / `PHASE_STATUS` / 台账白名单）⇒ 两笔提交以 plumbing 重放到 `f1557e8` 之上（`read-tree origin/main` + 只 stage 本票 16 个 `web` 文件 + 台账行重插）；重放后 `web` 子树 `git rev-parse <tree>:web` **逐字节相同** ⇒ 上述门禁读数对代码面继续成立。**快进 push** `f1557e8..e10bfda`（exit 0）；`origin/main` = `HEAD` = `e10bfda`（`rev-list --left-right --count` = 0/0）。
+
+**落点**：tracker 本段 + 月度归档 2026-09-22 条 + `PHASE_STATUS` 焦点 / 最近条目 / 归档索引（300 → 301）/ 按日定位；台账白名单行（docs-only）。**并解除 F18-A 残余①**（`#283` 已合入）。
+
+**残余（登记，不阻断，附解除条件）**：
+1. `web/src/components/StepDetail.window.test.tsx:132` 单跑 4386ms ≈ 5000ms 预算的 88%（N=500 双渲染 + unmount/remount），并行下偶发 `Test timed out`。**解除 = 另开票补显式 `testTimeout`**（不在本票范围）。
+2. 会话内改档的 e2e 只有 `control-row.spec.ts` 两例；`u-project-task.spec.ts` 只覆盖**创建面**（`.project-dialog` 内 pill，`permissionInSession === false`）⇒ 语义未变、无需改动。**解除 = 出现改档相关的创建面回归时补例**。
+3. `web/src/App.tsx` 的 `COMPOSER_AUTO_APPROVE` 是模块级常量 `true`（对应 ADR-0041 决策②「档位与 `auto_approve` 一起改」）。**解除 = 若产品要求 `auto_approve` 可单独从 UI 切换再扩展**。
+
+**§14.9 通知**：集成区（`D:\intelligence-agent`）与后端 worktree 开工前先 `git merge-base --is-ancestor origin/main HEAD` 自检（本批 docs-only 记账笔会把后端线落在后面）。
+
+## B-37（2026-09-22）：全仓 review findings 开票（Multi-Agent / Recovery / Artifact / Evaluation）
+
+**状态**：仅完成需求去重、票面冻结与 GitHub 开票；**五票均 OPEN，未开工、未实现、未关单**。用户经三轮 grilling 批准把原六条 finding 按根因去重，并把通用递归状态从立即安全边界中拆开，最终为五张新票；历史 `#87/#88/#91` 不重开。
+
+| 顺序 | Issue | 优先级 | 冻结范围 | 依赖 / 并行规则 |
+| --- | --- | --- | --- | --- |
+| 1 | `#286` 动态 SubAgent grantable/depth 权限边界 | P1 | root 深度 0；`max_depth=1` 允许一层；runtime-owned remaining depth 逐层消费；child 只能收窄 scope/depth，不能从 full registry 重建 | 无；先施工 |
+| 2 | `#287` tree-wide delegation 预算、repeated guard 与 crash recovery | P1 | 全树共享 `max_delegations` + failure fingerprint；per-agent `max_steps` 仍独立；resume 不刷新额度 | blocked by `#286` |
+| 3 | `#288` delegated child non-owning workspace binding | P1 | child 删除只删 alias；parent 拥有实际 workspace；递归 descendants 解析到 canonical owner；cycle/corruption fail-closed | blocked by `#286/#287`；避免同文件并行 |
+| 4 | `#289` Artifact stored/message unwritten 真实 Kill Gate | P2 | 先红证；若证实生产缺陷，票内只做最小生产修复；Local + 真七牛；临时对象残留必须 0 | 与 `#286/#287/#288` 独立，可在另一 clone 并行 |
+| 5 | `#290` Langfuse deterministic Experiment async 假绿 | P2 | async `run_case` 核心 + 薄 sync wrapper；消费 `ExperimentResult`；故意失败的真云对照必须使 Gate 红 | 与其余票独立，可在另一 clone 并行 |
+
+**发现证据**：全仓审查冻结点 `7e8720148011`；五个问题涉及的实现/规格文件在审查期间推进到 `c6def071` 时与冻结点无差异，故复现归属于冻结树。票面创建时主线已由并行会话推进，实际施工必须从届时最新 `origin/main` 开工，不能把审查冻结 SHA 当施工基线。逐条代码位置、复现、AC、测试、review 要求与残余以 GitHub `#286`–`#290` 票面为权威。
+
+**真实 Gate 决策**：五票全部集成后统一执行，不以当前连接预检代替最终验收。模型 primary/fallback 至少有一条真实可用链；Memory/Knowledge 固定专用 collection `memory_gate_test` / `knowledge_gate_test`；七牛使用 `intelligence-agent` bucket 的随机 session 前缀；Langfuse dataset/experiment/trace 保留作为审计证据并验证无意外重复，Milvus/Knowledge/七牛临时数据必须用真实查询确认残留为 0。凭证只存在本机 ignored `.env`，禁止进入 Issue、tracker、日志或命令输出。
+
+**配置预检（不替代最终 Gate）**：Settings 秘密字段完整；Milvus 认证/连接 ✅（专用 `memory_gate_test` 尚不存在，留给 Gate 创建与清理）；Embedding 真实请求 ✅（1024 维）；七牛对目标 bucket 的 `HeadBucket` ✅；Langfuse `auth_check` ✅。模型 provider 已按用户决定映射为 primary `senseaudio` / fallback `qwen`，`ModelConfig.from_settings` ✅；两端点最小真实调用读数为 **primary = 已分类不可用、fallback = 可用**，故真实链至少一端可用，但不得据此声称 primary 已通过，也不得替代五票集成后的最终真实 Gate。
+
+**流程**：每票各自走 V3.1-lite 的红证、实现、专项门禁、两轴独立 review、coverage 与逐票关单；`#286 → #287 → #288` 串行。`#289/#290` 可与该链并行，但同一文件只允许一条线修改。最终真实 Gate 是整个 B-37 的批次收口条件，不是任一单票可以伪报的完成证据。

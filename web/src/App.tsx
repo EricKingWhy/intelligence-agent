@@ -79,6 +79,17 @@ const FORK_TIMEOUT_MS = 30_000;
  *  引用恒定还有一个用处：关闭态的返回值可被下游安全地当作「内容未变」的信号。 */
 const CLOSED_PALETTE_ITEMS: CommandItem[] = [];
 
+/** #283：会话内改档时随 `permission_mode` 一起发出去的 `auto_approve`（ADR-0041 §4）。
+ *
+ *  端把它定为**必填**（漏传即 422）且刻意不给默认值——否则一次「只改档位」的调用会把
+ *  批准策略一并翻掉。本仓创建路径恒送 `true`（`submitTask` / `createEmptySession`），
+ *  改档镜像同一值 ⇒「会话内改成这档」与「创建时就选这档」得到同一条事件。
+ *
+ *  为什么不去做「档位 → 批准策略」的映射：目录端点（`GET /api/permission-modes`）压根
+ *  不下发批准策略，前端凭空造一张表就是第二份知识；而且对有档位声明的会话，`auto_approve`
+ *  在运行期是惰性的（ADR-0041 §4 未闭合项，优先级由 F15 #234 定）。 */
+const COMPOSER_AUTO_APPROVE = true;
+
 export default function App() {
   // BUG-001 fix：fork 失败的本地错误状态（useSession 的 error 是流级通道）。
   const [forkError, setForkError] = useState<{ sessionId: string; message: string } | null>(null);
@@ -103,6 +114,8 @@ export default function App() {
     recover,
     refreshSessions,
     changeModel,
+    changePermission,
+    reloadConversation,
     fork,
     sendSteer,
     flushQueue,
@@ -465,18 +478,35 @@ export default function App() {
     [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
 
-  // #236：权限 pill 按"有没有会话"换源，且会话内一律只读（续聊 amend 面不含
-  // `permission_mode`，可编辑就是骗人）。取值 + 跨会话身份闸都在纯函数
-  // `composerPermissionMode` 里（App 没有 SSR 测试车道，逻辑放 lib 直测）。
-  // 锁定条件取 `selectedId !== null || streaming`：两半合起来 = `mode.kind !== 'idle'`
-  // （见 `useSession.ts:408-409`），也就是"这次 composer 不是新会话"。只写前者会漏掉
-  // 「提交新任务 → 首帧到达」这段 `live(sessionId: null)` 窗口（降级路径下可长到 run 结束），
-  // 那时改档同样不生效。
-  const permissionModeLocked = selectedId !== null || streaming;
+  // #283：权限 pill 在会话内**可改**（#236 的「创建时确定、会话内不可修改」已被 F18-A
+  // 推翻）。取值 + 跨会话身份闸仍在纯函数 `composerPermissionMode` 里（App 没有 SSR
+  // 测试车道，逻辑放 lib 直测）；禁用与升档确认在 Composer 内（它知道 `streaming` /
+  // `approvalPending`），本层不再派生 `permissionModeLocked`。
   const displayedPermissionMode = composerPermissionMode(
     selectedId,
     conversation,
     selectedPermissionMode,
+  );
+
+  /** #283：改档提交口（Composer 的权限浮层调用；**失败向上抛**，由浮层就地回显）。
+   *
+   *  - 新会话（`selectedId === null`）：只更新本地创建意图——它会随 create 请求发出，
+   *    是这个会话档位的成因（既有语义，零改动）。
+   *  - 会话内：调 #282 的端点。`null`（「默认（未选）」）到不了这里——Composer 在会话内
+   *    已把那一行隐藏（端点只接受三个具体档位）。
+   *  - 成功后**不用回执写本地状态**（AC7）：改档已 durable 落进事件流，就地重读该会话的
+   *    事件并重投影，pill 仍只读投影这一个真相。 */
+  const handlePermissionModeChange = useCallback(
+    async (mode: string | null) => {
+      if (selectedId === null) {
+        setSelectedPermissionMode(mode);
+        return;
+      }
+      if (mode === null) return;
+      await changePermission(selectedId, mode, COMPOSER_AUTO_APPROVE);
+      reloadConversation(selectedId);
+    },
+    [selectedId, changePermission, reloadConversation],
   );
 
   const handleSubmit = useCallback(
@@ -1128,8 +1158,8 @@ export default function App() {
                     onModelChange={handleModelChange}
                     permissionModes={permissionModes}
                     selectedPermissionMode={displayedPermissionMode}
-                    onPermissionModeChange={setSelectedPermissionMode}
-                    permissionModeLocked={permissionModeLocked}
+                    onPermissionModeChange={handlePermissionModeChange}
+                    permissionInSession={selectedId !== null}
                     agentProfiles={agentProfiles}
                     selectedAgentProfile={selectedAgentProfile}
                     onAgentProfileChange={setSelectedAgentProfile}
