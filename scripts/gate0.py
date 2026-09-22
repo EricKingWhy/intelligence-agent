@@ -249,10 +249,11 @@ def changed_files(rev: str) -> list[str] | None:
 #:     `No test files found, exiting with code 1` ⇒ 车道 FAIL / 整体 rc=1。
 #:     而那一笔改动只碰了 `web/src/components/StepDetail.test.tsx` 一类前端文件，
 #:     **红与改动无关**，是纯粹的假红。
-#:   血证 2（潮水线以下的红）：修好过滤器之后实测，干净 HEAD 上 `vitest run src` 本身**就是红的**——
-#:     67 文件 1067 例里 1 例超时（`web/src/components/StepDetail.window.test.tsx`，6224ms，
-#:     即 map 的 `frontend-src` 行 gotchas 里登记的 B-29 已知 flake）。
-#:     ⇒ 前端 vitest 的红**结构上无法归因**到本次改动。
+#:   血证 2（潮水线以下的红）：修好过滤器之后实测，**同一类干净树跑两次结果不同**——一次 67 文件
+#:     1067 例里 1 例超时（`web/src/components/StepDetail.window.test.tsx`，6224ms，即 map 的
+#:     `frontend-src` 行 gotchas 里登记的 B-29 已知 flake），一次 **67 文件 1067 例全绿**（20.0s）。
+#:     ⚠ 所以这里的红是**非确定性**的（不是"恒红"）——2026-09-22 首版把它写成了恒常事实，已更正。
+#:     ⇒ 结论反而**更强**：同一棵树既红又绿 ⇒ 前端 vitest 的红**结构上无法归因**到本次改动。
 #:
 #: 取舍（与 Gate-0 自身的划分一致：快车道跑 / 重车道列出）：
 #:   · **只内联 pytest 子集**——`pytest-full` 是重车道，而**子集**才是"失败后的增量重跑"真正便宜的面。
