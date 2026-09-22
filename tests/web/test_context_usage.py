@@ -161,14 +161,20 @@ class _FakeEvent:
 
 
 def test_t1_cache_capture_present():
-    """mock 响应带 cached_tokens ⇒ model/completed.usage.cached_tokens 存在且相等。"""
+    """langchain 归一化形状（``cache_read``）⇒ model/completed.usage.cached_tokens 存在且相等。
+
+    喂的必须是**真形状**：真链路上 langchain 把 OpenAI 的
+    ``prompt_tokens_details.cached_tokens`` 归一化成 ``input_token_details.cache_read``
+    （2026-09-22 真机取证，见 `docs/FRONTEND_ISSUES_LOG.md` 第十五轮 M-01）。
+    历史上本用例喂的是内部名 ``cached_tokens``，于是"单测全绿 + 真链路恒 null"同时成立。
+    """
     from agent_harness.agent.runtime import _usage_from_response
 
     class _AI:
         def __init__(self) -> None:
             self.usage_metadata = {
                 "input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
-                "input_token_details": {"cached_tokens": 80},
+                "input_token_details": {"cache_read": 80},
             }
 
     usage = _usage_from_response(_AI())
@@ -176,6 +182,20 @@ def test_t1_cache_capture_present():
         "prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
         "cached_tokens": 80,
     }
+
+
+def test_t1_cache_capture_legacy_key():
+    """不走 langchain 归一化的路径用原始名 ``cached_tokens`` ⇒ 同样采集（兼容保留）。"""
+    from agent_harness.agent.runtime import _usage_from_response
+
+    class _AI:
+        def __init__(self) -> None:
+            self.usage_metadata = {
+                "input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
+                "input_token_details": {"cached_tokens": 70},
+            }
+
+    assert _usage_from_response(_AI())["cached_tokens"] == 70
 
 
 def test_t1_cache_capture_absent():
@@ -200,22 +220,29 @@ def test_t1_cache_capture_absent():
 
 
 def test_t1_cache_capture_invalid():
-    """非数值/负值 cached_tokens ⇒ 键省略（不伪造）。"""
+    """非数值/负值缓存明细 ⇒ 键省略（不伪造）；两种键名同一把关。"""
     from agent_harness.agent.runtime import _usage_from_response
 
     class _AINeg:
         def __init__(self) -> None:
             self.usage_metadata = {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
-                                   "input_token_details": {"cached_tokens": -5}}
+                                   "input_token_details": {"cache_read": -5}}
 
     assert "cached_tokens" not in _usage_from_response(_AINeg())
 
     class _AIStr:
         def __init__(self) -> None:
             self.usage_metadata = {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
-                                   "input_token_details": {"cached_tokens": "80"}}
+                                   "input_token_details": {"cache_read": "80"}}
 
     assert "cached_tokens" not in _usage_from_response(_AIStr())
+
+    class _AINegLegacy:
+        def __init__(self) -> None:
+            self.usage_metadata = {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
+                                   "input_token_details": {"cached_tokens": -5}}
+
+    assert "cached_tokens" not in _usage_from_response(_AINegLegacy())
 
 
 # ── T2：命中率算法（求和口径）─────────────────────────────────────────
@@ -469,12 +496,13 @@ async def test_t5_endpoint_shape_with_run(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_t5_endpoint_cache_ok_with_cached_usage(tmp_path, monkeypatch):
-    """provider 带 cached_tokens ⇒ 事件流有 cached_tokens ⇒ cache.state=ok。"""
+    """provider 带缓存明细（langchain 归一化名 ``cache_read``）⇒ 事件流有
+    cached_tokens ⇒ cache.state=ok。"""
     server, serve_task, port = await _start_server(
         tmp_path, monkeypatch,
         model_kwargs={"usage_metadata": {
             "input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
-            "input_token_details": {"cached_tokens": 90},
+            "input_token_details": {"cache_read": 90},
         }},
     )
     try:
@@ -619,7 +647,7 @@ async def test_t6_endpoint_survives_snapshot_loss(tmp_path, monkeypatch):
         tmp_path, monkeypatch,
         model_kwargs={"usage_metadata": {
             "input_tokens": 54841, "output_tokens": 6501, "total_tokens": 61342,
-            "input_token_details": {"cached_tokens": 50000},
+            "input_token_details": {"cache_read": 50000},
         }},
     )
     try:

@@ -107,10 +107,13 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     丢弃遵循"缺失/无效时省略"语义，不是伪造；非数值形状已被 AIMessage 自身
     校验挡在构造期（归因 model 失败，语义正确），到不了这里。
 
-    缓存读取（#200，SDD 03 §162 已声明的 ``cached_tokens`` 兑现）：只读
-    OpenAI 兼容线的 ``input_token_details.cached_tokens``；字段缺失/非数值/
-    负值 ⇒ 键省略（**不写 0**——0 会被命中率算成 0% 假话，not_collected
-    语义才是诚实口径）。
+    缓存读取（#200，SDD 03 §162 已声明的 ``cached_tokens`` 兑现）：从
+    ``input_token_details`` 取缓存读取量；字段缺失/非数值/负值 ⇒ 键省略
+    （**不写 0**——0 会被命中率算成 0% 假话，not_collected 语义才是诚实口径）。
+
+    **两个键名都要认**：langchain 把 OpenAI 的 ``prompt_tokens_details.cached_tokens``
+    归一化成 ``cache_read``（实测真链路上 ``input_token_details == {"cache_read": 75}``），
+    只有不走归一化的路径才是原始名。历史上只认 ``cached_tokens``，于是真链路恒不采集。
     """
     meta = getattr(ai, "usage_metadata", None)
     if not isinstance(meta, dict):
@@ -124,7 +127,9 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
             usage[target_key] = value
     details = meta.get("input_token_details")
     if isinstance(details, dict):
-        cached = details.get("cached_tokens")
+        cached = details.get("cache_read")
+        if cached is None:
+            cached = details.get("cached_tokens")
         if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
             usage["cached_tokens"] = cached
     return usage or None

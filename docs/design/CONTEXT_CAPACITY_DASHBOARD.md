@@ -44,7 +44,7 @@
 | 项 | 契约 |
 | --- | --- |
 | 采集点 | `runtime.py` 的 `_usage_from_response`（`:118-135`） |
-| 新字段 | 从 provider 响应的 `usage.input_token_details.cached_tokens` 读**缓存读取 token 数**；字段缺失 → `None`，**不写 0** |
+| 新字段 | 从 provider 响应的 `usage.input_token_details` 读**缓存读取 token 数**；字段缺失 → `None`，**不写 0**。键名**两个都认**：langchain 归一化后是 `cache_read`（2026-09-22 真机取证：真链路 `{"cache_read": 75}`，本表原先只写 `cached_tokens` 是错的），不走归一化的路径才是原始名 `cached_tokens` |
 | 落点 | `model/completed` 的 `data.usage` 增加可选 `cached_tokens`；`usage_total` 增加累加项 `cache_read_tokens`（取消臂 `runtime.py:240-242` 也如实带上） |
 | 口径 | **平均缓存命中率 = Σ cached_tokens ÷ Σ input_tokens**（该会话/该 run 所有模型调用求和）。**不是**逐调用命中率的算术平均（调用大小差异会让算术平均失真） |
 | 无数据 | 没有任何一次调用带回 cache 字段 ⇒ 前端显示「未采集（提供商未返回缓存明细）」，**不显示 0%** |
