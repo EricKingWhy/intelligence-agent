@@ -434,7 +434,12 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
 | Runtime Verification（基建） | `docs/agents/skills/create-verification-skill/SKILL.md` | 产 feature map（特征 ↔ 用户入口 ↔ 怎么驱动 ↔ 坑）；**没被执行过的生成物是草稿，不是交付物** |
 | Runtime Verification（基建） | `docs/agents/skills/maintain-verification-skill/SKILL.md` | feature map 的维护环（源波次 ∥ live 波次）；最坏一个 PR |
 | Evidence Gate | `docs/agents/skills/principle-encode-lessons-in-structure/SKILL.md` | 同一条指令写第二遍时，编码成 lint / 元数据 / 运行时检查 / 脚本；挑**允许范围内最强的机制** |
-| Evidence Gate | `docs/agents/skills/show-me-your-work/SKILL.md` | 决策轨迹 TSV；原文明说「**别的 skill 把轨迹路由到这里，不要自造一套**」——与本仓台账同构 |
+| Evidence Gate | `docs/agents/skills/show-me-your-work/SKILL.md` | 决策轨迹 TSV；英文原文 `Other skills route their audit trail here instead of inventing one.`（"别的技能把审计轨迹路由到这里，不要自造一套"）——与本仓台账同构 |
+
+**引用的一处硬边界（2026-09-22 两轴审查实测）**：这些正文是上游在**别家宿主**里写的，按路径读得到，
+但里面有**在本仓执行不了的步骤**（上游存在、本目录未搬的跨 skill 引用；Cursor 专属路径）。
+**取用时只取增量**：留方法论、跳过宿主绑定。逐条清单（含行号）在
+`docs/agents/skills/PROVENANCE.md` §4.2 —— 本节不重复列，避免两处各写一份而分叉。
 
 **与 §8.7 的关系**：本节只增加**引用**，不放松任何一条。上表任何一行与 §8 的"质量优先条款"冲突时，
 以 §8 为准（例如 `principle-sequence-verifiable-units` 说"每个单元以可验证状态收尾"，
@@ -444,3 +449,7 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
 ├ TDD ├ Tests └ Matt 双轴 → Runtime Verification → Evidence Gate → Merge`）与其**失败回退边界表**
 的定稿属 issue #291，不在本节范围内；本节先让已经存在的阶段有可引用的外部方法，
 避免在协议里重写一遍等价文字（那正是 `principle-encode-lessons-in-structure` 要消灭的形状）。
+
+⚠ **左列阶段名的现状（2026-09-22 两轴审查实测）**：`Runtime Verification` / `Evidence Gate` 这两个
+名字**目前只存在于本节这张表**，协议正文里没有定义 ⇒ 「走到该阶段」的触发点暂由本节给出。
+#291 落地七阶段主干后，阶段名以那里为准，并回来对齐本表。

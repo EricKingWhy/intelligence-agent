@@ -1,19 +1,18 @@
 # SDD 提速改造 · 工作记录与外部复核包
 
-> **状态（2026-09-22 收工复核；本文上一条状态已过期，按实测改写）**：**批 1 已推送**（`origin/main` = `22aa291`）。
-> **批 2 的完整链条已走完并落在本地**：施工 `66cc1fa`/`9527559`/`22992e4`/`acde040` → 两轴独立审查 →
-> findings 全修 → 修后重审 → 更正 `ebb28b4`/`9bb51c4b` → 台账笔 `aa5f9e2a` → 收口 docs 笔 `337a858b` →
-> 台账白名单笔 `ea4f7c65`；覆盖闸门在**工作树**与**干净检出**两个口径都曾 exit 0。
-> ⚠ **本地 `refs/heads/main` 已不是 `ea4f7c65`**——**另一条线**（#200 `cached_tokens` 真机取证 + 第十五轮真机
-> 逐控件审计）在 **20:49:01 / 20:49:07** 于同一工作树追加了 `cd02c61` 与 `29cb5081` 两笔。
-> 当前 `refs/heads/main` = `29cb5081`，**领先 `origin/main`（`22aa291`）17 笔，全部未推送**
-> （用户 20:36 明令「暂时不要推」）。
-> ⚠ **闸门现状 = RED**：`python scripts/check_review_coverage.py` **exit 1**；`09ca47a..HEAD` **468 提交 /
-> 已审查 331 / 待判定 137**，`❌` **2** 条 = `cd02c61`（docs-only 却未声明白名单）+ `29cb5081`
-> （**代码提交**，按 §7 第 8 条**永远不能走白名单**，必须有真实审查行）。这两笔**不是本线产出**，
-> 本线**不擅自替它写审查行**（代码提交的审查必须独立且真实）——见 §10.5。
-> **本轮新增（本线）**：协议新增 **§9「阶段 → 外部 Skill 引用」** + 搬运 9 个 pstack skill（逐字节，MIT）
-> 到 `docs/agents/skills/`——见 **§10**。该笔是 docs-only，走白名单，并**主动登记「待补审」**。
+> **状态（2026-09-22 晚 · 本文件第三次按实测改写；早先状态块已过期）**：**批 1 已推送**（`origin/main` = `22aa291`）。
+> **批 2 的完整链条已走完并落在本地**：施工 → 两轴独立审查 → findings 全修 → 修后重审 → 台账笔；
+> 覆盖闸门在**工作树**与**干净检出**两个口径都曾 exit 0。
+> ⚠ **本地 `refs/heads/main` 已被另一条线推进**：该线（#200 `cached_tokens` 真机取证 + 第十五轮真机
+> 逐控件审计）先后追加 `cd02c61`、`29cb5081`、`5c22f777` 三笔。当前 `refs/heads/main` = `5c22f777`，
+> **领先 `origin/main`（`22aa291`）24 笔，全部未推送**（用户 20:36 明令「暂时不要推」）。
+> ⚠ **闸门现状 = RED（外部原因）**：`python scripts/check_review_coverage.py` **exit 1**；
+> **475 提交 / 已审查 331 / 待判定 144**，`❌` **3** 条 = `cd02c61`（docs-only 却未声明白名单）+
+> `29cb508`（**代码提交**）+ `5c22f77`（docs + refactor **混合提交**，含 `src/**`）——后两条按 §7 第 8 条
+> **永远不能走白名单**，必须有真实审查行。这三笔**都不是本线产出**，本线**不擅自替它写审查行**
+> （那等于伪造审查）；用户 2026-09-22 21:38 明确「**我不动，留给那条线**」，故只如实登记。
+> **本线新增**：协议新增 **§9「阶段 → 外部 Skill 引用」** + 搬运 pstack skill 到 `docs/agents/skills/`
+> （最终 **7 个**，逐字节，MIT）——见 **§10**；该批 **已完成两轴独立补审、6 条 P2 全数处置**——见 **§10.8**。
 > **用途**：本文件是「SDD V3.1 开发流程提速」这条线的完整工作记录 + **审计包**，
 > 供**独立审查者（能力更强的模型）**复核。
 > **写法纪律**：本文所有数字均为**当场实测**，随附可复跑命令；无法当场复跑的历史读数会显式标注来源。
@@ -257,8 +256,7 @@ docstring；`gate0.py` 里只有一处内联注释提到 coreutils，也已同�
   `--since` 正确从 stdin 取到远端 sha。另核：`.git/hooks/` 下**没有任何生效的自定义钩子**
   ⇒ 切 `hooksPath` 不会禁用既有钩子（先查再切，不假设）。
 - **顺带修掉一个会让 hook 在所有平台失效的坑**：`.gitattributes` 只钉了 `*.sh` / `*.ps1`，
-  而 hook **无扩展名** + `core.autocrlf=true` ⇒ 会被检出成 CRLF，`exit 1
-` 这种行直接坏
+  而 hook **无扩展名** + `core.autocrlf=true` ⇒ 会被检出成 CRLF，`exit 1` 这种行直接坏
   （正是该文件注释里描述的 `bad interpreter` 病根）。已加 `/.githooks/* text eol=lf`；
   hook 文件本体实测 **0 个 CRLF**。
 - 边界：**本地便利，不是安全边界**（`--no-verify` 可绕），**不能**替代 CI 或人工审查。
@@ -540,7 +538,6 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
    改成 `gate0.py` —— 上一轮审查若只取 `b529aa5...22aa291` 会把该更正笔漏在范围外，已按包含
    `ebb28b4` 的范围登记。
 
-
 ---
 
 ## 10. pstack 复用落地（2026-09-22 本轮新增）
@@ -564,8 +561,9 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 
 **第二轮自曝（21:27 追加）**：首轮我搬了 **9** 个，其中 **2 个与 Matt 主开发 skills 功能重合**——
 
-- `tdd`：`~/.codex/skills/tdd/SKILL.md` 与 `~/.zcode/skills/tdd/SKILL.md` **已存在**（同一份 3541 B 的
-  Matt 英文版）⇒ **同名撞目录**，装进去会覆盖或遮蔽；且 `mp-eng-implement` 正文明文
+- `tdd`：`~/.codex/skills/tdd/SKILL.md` 与 `~/.zcode/skills/tdd/SKILL.md` **已存在**（同一份内容、**只差行尾**：
+  codex 侧 3549 B / LF、zcode 侧 3587 B / CRLF，归一化行尾后 sha256 同为 `cb01f66b…`）
+  ⇒ **同名撞目录**，装进去会覆盖或遮蔽；且 `mp-eng-implement` 正文明文
   「**Use /tdd where possible**, at pre-agreed seams」⇒ 这一步的路由**本来就归 Matt**。
 - `principle-test-behavior-not-implementation`：与 Matt `tdd` 的 `## What a good test is`
   （「Tests verify behavior through public interfaces, **not implementation details**」）
@@ -584,8 +582,8 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 | 许可 | **MIT**，`Copyright (c) 2026 Lauren Tan`；全文**逐字节副本**在 `docs/agents/skills/pstack-LICENSE.txt` |
 | 上游 skill 总数 | **47**（全部 ≤ 300 行，零依赖、零构建） |
 | **最终留存** | **7 个 skill**（≈15%）+ 3 个 feature-map 示例 + 1 个 TSV 模板 + 1 份许可 = **12 个内容文件**（`PROVENANCE.md` 另计） |
-| 逐字节校验 | 12 个内容文件 `copy → 回读 → bytes 比对` **全 OK**；sha256 清单见 `PROVENANCE.md` §6 |
-| 安全扫描 | 正则（`curl`/`wget`/`https?://`/`nc`/`ssh`/`scp`/`eval`/`exec(`/`base64`/`.env`/`.ssh`/`id_rsa`/credential/password/secret/token/api_key/`rm -rf`/`chmod 777`/`sudo`）扫上游 **全部**文件 ⇒ **60 处命中，全部落在未搬运的 skill 内**（最重两条：`make-bot-ui` 的 `curl … \| sudo sh`、`poteto-mode/scripts/watch-pr/github.ts` 的 token 处理）；留存的 7 个**只命中 3 处**，全是 `create-verification-skill/references/feature-map-example/*.md` 里的示例本地地址 `http://127.0.0.1:4173` |
+| 逐字节校验 | 12 个内容文件 `copy → 回读 → bytes 比对` **全 OK**；且 **11/11 skill 文件 + LICENSE 的 git blob sha1 逐条等于上游同名 blob**（"逐字节副本"的硬判据）；清单见 `PROVENANCE.md` §6（**git 对象口径**） |
+| 安全扫描 | 正则（`curl`/`wget`/`https?://`/`nc`/`ssh`/`scp`/`eval`/`exec(`/`base64`/`.env`/`.ssh`/`id_rsa`/credential/password/secret/token/api_key/`rm -rf`/`chmod 777`/`sudo`）扫上游 `pstack/skills/` **全部** 122 个文件 ⇒ **78 次匹配 / 69 行命中**（口径与更正见 `PROVENANCE.md` §5）（最重两条：`make-bot-ui` 的 `curl … \| sudo sh`、`poteto-mode/scripts/watch-pr/github.ts` 的 token 处理）；留存的 7 个**命中 4 处**（3 处 `create-verification-skill/references/feature-map-example/*.md` 里的示例本地地址 `http://127.0.0.1:4173` + 1 处 `create-verification-skill/SKILL.md:17` 的散文 `curl-able`） |
 | 上游全集对比 | 只搬散文（`.md`/`.tsv`/`.txt`），**不搬任何可执行文件** |
 
 ### 10.3 选型判据（**两道闸门**，第二道是 21:27 才补上的）
@@ -623,7 +621,7 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 
 ### 10.5 **装进 codex / zcode 之前必须知道的两件事**（需求方 21:27 说明会安装）
 
-1. **`disable-model-invocation: true` 会拦住模型**。上游每个 skill 的 frontmatter 都带这个字段
+1. **`disable-model-invocation: true` 会拦住模型**。上游 47 个 skill 里 **46 个**的 frontmatter 带这个字段（唯一例外 `setup-pstack`）
    （语义 = 「**只允许用户 `/` 手动调用，模型不得自动调用**」；本机 `~/.codex/skills/handoff/SKILL.md`
    用的是同一字段，说明 codex 认它）。而协议要的恰是"**在某个阶段由模型调用**"⇒ 原样装进去等于
    装了个模型碰不到的 skill。`PROVENANCE.md` **§4.1** 给了一段可直接复制的去字段命令。
@@ -640,6 +638,8 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 本轮不动用它的理由是：**§9 是纯增引用、零放松**，`§8.7「明确不做的事」一条未改`，
 且新增内容不改变任何既有步骤的判据。
 
+⇒ **已于同日补审**（两轴独立只读子代理），findings 全数处置；见 **§10.8**。
+
 **与此并列、但本线不动的**：`cd02c61` / `29cb5081` 两笔（另一条线）缺归属。其中 `29cb5081` 含
 `src/agent_harness/agent/runtime.py`，属**代码提交**，按 §7 第 8 条**永远不能走白名单**，
 必须有**真实且独立**的审查行。本线**不代为补审查行**（那等于伪造审查），只在此如实登记。
@@ -650,3 +650,39 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 已由 vendored skill 承担，协议里不再重述其内容——这正是 `principle-encode-lessons-in-structure`
 自己要求的形状。**明确不采用**的 `principle-never-block-on-the-human` 结论不变
 （与本仓 §9.1.1「票面变更控制」冲突）。
+
+## 10.8 补审：两轴独立审查 + findings 全数处置（2026-09-22 晚）
+
+§10.6 说"待补审"，本轮补上。范围 **`29cb508..1ff7a24`**（本线 6 笔：`c69facf` 协议 §9 + 搬运 /
+`922a662` 台账 / `43d2e77` 选型收紧 / `05b19bd` 台账 / `78024a0` PROVENANCE §7 / `1ff7a24` 台账），
+两轴各一**独立只读子代理**（Standards / Falsification）：**均判 PASS-WITH-FINDINGS、无 P0/P1**，
+但出了 **6 条 P2** —— 它们指向**同一件事：本文与 `PROVENANCE.md` 里的数字 / 口径不实或不可复跑**。
+
+| # | finding | 实测证据 | 处置 |
+| --- | --- | --- | --- |
+| 1 | `PROVENANCE` §6 的**字节 / sha256 记的是工作树形态**，不是上游 / 入库字节 | 本机 `core.autocrlf=true`；`blast-radius/SKILL.md` 工作树 **4066 B** 而入库 blob **4016 B**；12/12 满足「入库 = 工作树 − CRLF 行数」；LICENSE 1088 vs 1067 | §6 整表改 **git 对象口径**（对象 sha1 / 入库字节 / 入库 sha256 / 另列本机检出字节），并写明旧口径为什么是坏尺子 |
+| 2 | `PROVENANCE` §7 写「行尾保持**上游的** CRLF」——**上游是 LF** | 12/12 入库 blob 的 CRLF 计数 = **0** | 改为「上游 / 入库是 LF；CRLF 来自本机检出」 |
+| 3 | `PROVENANCE` §2 与本文 §10.1 写「同一份 **3541 B** 的 Matt 英文版」 | 实测 codex **3549 B**（LF）、zcode **3587 B**（CRLF）；归一化行尾后 sha256 同为 `cb01f66b…` | 两处改实测值 + 「同一份」加"只差行尾"限定 |
+| 4 | `PROVENANCE` §3 与协议 §9 是**同一张表的两个副本，且已分叉** | 同一行两处措辞不同、路径写法不同（全路径 vs 裸相对路径） | 删 §3 的表、改为指向协议 §9；本文那句"映射表见 §3"同步改掉 |
+| 5 | §5 扫描数字**不可复跑**：上游"共 60 处"未记口径、留存"命中 3"少算 1 | 同批正则实测：上游 `pstack/skills/` 122 文件 = **78 次匹配 / 69 行**；本目录留存（不含 `PROVENANCE.md` 自身）**4 处**（3 处 `http://127.0.0.1:4173` + `create-verification-skill/SKILL.md:17` 的散文 `curl-able`） | §5 写死口径 + 双列表 + 显式登记"原读数已更正" |
+| 6 | §9 表**只登记了 1 条悬空引用**，实际还有 4 类宿主专属 / 悬空 | `how` / `why` / `arena` / `unslop` / `principle-build-the-lever` 在 4 个 skill 根目录**全部不存在**；`create-verification-skill:25,36` 写死 `.cursor/skills/verify-*`；`show-me-your-work:56` 依赖 `agent-transcripts/` | `PROVENANCE` 新增 **§4.2** 逐条清单；协议 §9 加一段边界并指向 §4.2 |
+
+**P3 / P4 一并处置**：§4.1「上游**每个** skill 都带该字段」实为 **46/47**（例外 `setup-pstack`）；
+§9 与 §3 用中文引号引"原文"而原文是英文（改英文原文 + 中文释义）；协议 §9 左列阶段名
+（`Runtime Verification` / `Evidence Gate`）**协议正文里没有定义**（加现状说明并指向 #291）；
+`PROVENANCE` §2.1「已撤销 2 个」的 sha256 改为入库对象口径；新引入的连续空行 1 处。
+
+🔴 **我自己造出、必须单独点名的缺陷**：`c69facf` **顺带改掉了本文一行无关内容** —— 那处
+"`exit 1` + **字面 CR 字节**"的演示，被我用 python **文本模式**重写本文时通用换行归一化成了 LF
+（实测：`29cb508` 该处 CR 计数 = 1，`c69facf` 起 = 0）。违反 `AGENTS.md` §9.3「不改无关格式」，
+而旧台账行只登了"头部更正 + §10"。**本轮已把那个 CR 字节恢复**，并在台账新行里如实登记这次
+未声明改动。教训：改中文大文件必须**按字节**读写，不要用会做通用换行归一化的文本模式。
+
+**本轮独立复核（主会话自己跑，不采信子代理转述）**：
+
+- **「逐字节副本」的硬判据**：从 `api.github.com/repos/cursor/plugins/git/trees/53e579f1…` 取上游
+  blob sha1，与 `git rev-parse 1ff7a24:docs/agents/skills/…` **逐条比对** ⇒ **11/11 skill 文件 + LICENSE
+  全等**（blob sha 相等即字节相等）。同批实测上游 `pstack/skills/` = **47** 个 skill（与 §10.2 相符）、
+  最长 `SKILL.md` **156 行** ⇒「全部 ≤ 300 行」成立。
+- 12/12 文件的工作树与对象字节差**恰等于各自 CRLF 行数**（4016+50=4066、1067+21=1088…）。
+- 上游重建：`git clone --depth 1 --filter=blob:none --sparse` → `HEAD` = `53e579f1…`（与 §10.2 一致）。
