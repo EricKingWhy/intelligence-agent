@@ -111,6 +111,12 @@ def split_fields(row: str, count: int) -> list[str]:
     结果 —— 那是真实的**口径漂移**（2026-09-22 由 Spec 轴独立审查指出），不是风格问题。
     第 `count` 个字段吃掉**剩余全部内容**（含其中的 tab），与 bash 把余下词并进最后一个
     变量的行为一致。
+
+    ⚠ **它不是"为未来的输入"造的防御**（两轴 Standards 轴质疑过这一点，成立）：当前
+    `docs/review_ledger.tsv` 的 103 行审查行里，**0 行**含连续 / 首尾 tab（审查者实测），
+    即今天的新旧切法逐行全等。保留它的理由是**语义等价**：这个函数的定义就是 bash 的
+    `IFS=$'\t' read`，而"与冻结的 `.sh` 口径等价"是双实现对照能被接受的前提。
+    若判定这仍属投机抽象 ⇒ 可回退为 `row.split("\t", count - 1)`，代价是口径不再严格等价。
     """
     fields = re.split(r"\t+", row.strip("\t"), maxsplit=count - 1)
     return fields + [""] * (count - len(fields))
@@ -314,14 +320,11 @@ def main(argv: list[str]) -> int:
     cov_n = total - miss_n
 
     print()
-    # ⚠ 这里与 `.sh` 有**一处刻意的文本差异**（判定集完全相同）：
-    #   · `.sh` 在"覆盖区间"行**回显台账里的字面量**（本仓最早 base 写作 `09ca47a1`，8 位）；
-    #   · 本行经 `%h` **归一化**，而入参是解析后的**全长 sha** ⇒ git 回 7 位（`09ca47a`）。
-    # 成因是 git 的 abbreviation 宽度**取决于入参形态**（本仓 git 2.52.0.windows.1 实测：
-    #   `git log --no-walk --format=%h 09ca47a1` → `09ca47a1`；
-    #   `git log --no-walk --format=%h 09ca47a12c45bf273e46494be0fedef143cd89d3` → `09ca47a`）。
-    # ⇒ **读数文本不可逐字比对，判定集才能**。别为了"看起来一样"改成回显字面量：字面量可能
-    #   是手抄的缩写，归一化后仍会经 `resolved` 校验（不存在即 die），信息量更高。
+    # 短 sha 的**显示宽度**是环境属性（git 的 abbreviation 依入参形态与 git 版本而变），
+    # 不是实现差异：本行与 `.sh:104`（`git rev-parse --short "$base"`）都走 git 缩写，
+    # 同一提交在本会话见过 8 位、在别的调用上下文见过 7 位。
+    # ⇒ 双实现对照**比判定集，不比读数文本**；机制与全量对照读数见
+    #   `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4（本注释不重复叙述，§16.1）。
     print(f"覆盖区间: {short_and_subject([base_sha])[base_sha][0]}..HEAD")
     print(f"提交总数 {total} / 已审查 {cov_n} / 待判定 {miss_n}")
 

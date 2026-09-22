@@ -115,7 +115,8 @@ def build_lanes(since: str) -> list[Lane]:
 
     # ③④ 前端静态检查：直接调包的 .js 入口，不经过 `npm`/`npx`/`.bin/*.cmd`——
     #     本机沙箱把 `cmd.exe` 拉黑（`.cmd` 秒退且报错字节是 GBK 的"拒绝访问。"），
-    #     而 `.bin/oxlint` 是 POSIX sh 脚本、会用到 `dirname`/`sed`（shim 缺 coreutils）。
+    #     而 `.bin/oxlint` 是 POSIX sh 脚本、会用到 `dirname`/`sed`（shim 的 **PATH 里没有**
+    #     coreutils——不是不存在，它们在 Git 自带目录里，见审计 §5.2 的更正块）。
     node = shutil.which("node")
     oxlint_js = os.path.join("node_modules", "oxlint", "bin", "oxlint")
     tsc_js = os.path.join("node_modules", "typescript", "bin", "tsc")
