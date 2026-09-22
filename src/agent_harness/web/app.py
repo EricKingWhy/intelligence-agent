@@ -44,6 +44,7 @@ from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
+from agent_harness.session.runmanager import RunManager
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
     ActiveRunConflict,
@@ -80,7 +81,6 @@ from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.context_usage import build_context_usage_payload
 from agent_harness.web.domain_errors import http_error
-from agent_harness.web.runmanager import RunManager
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,

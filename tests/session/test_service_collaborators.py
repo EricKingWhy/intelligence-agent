@@ -287,21 +287,23 @@ class TestRuntimeImportBoundary:
         )
 
     #: 领域文件的 web 类型引用**登记表**（ADR-0040 §4 R1）：集合必须恰等于这里。
-    #: 多一条 = 残余悄悄扩大；少一条 = 残余已消除（那时要同时更新 ADR 与这条判据，
-    #: 不能顺手改守卫）。两个领域服务都扫：`projects.py` 今天是空集。
+    #: 2026-09-22 用户裁决「搬到 `session/`」后 R1 已闭合 ⇒ 三份域文件**全为空集**，
+    #: 即"领域层（代码 + 注解）零 web 引用"；任一条重新出现都会让集合不等而变红。
+    #: 多一条 = 残余复活；改这里必须同时改 ADR 与裁决，不能顺手改守卫。
     EXPECTED_TYPE_ONLY_WEB_IMPORTS: ClassVar[dict[str, set[str]]] = {
-        "agent_harness/session/service.py": {
-            "from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber"
-        },
+        "agent_harness/session/service.py": set(),
         "agent_harness/session/projects.py": set(),
+        # R1 的产物本身也是域文件：`RunManager` 搬进来后不得反向 import web
+        # （它被 `web.app` 在模块级 import，反向依赖会当场成环）。
+        "agent_harness/session/runmanager.py": set(),
     }
 
     def test_types_only_reference_to_web_is_the_documented_residual(self):
-        """残余的**唯一**一条 `web` 引用必须仍是 TYPE_CHECKING 下的 `RunManager`。
+        """**残余已归零**：三份域文件（代码 + TYPE_CHECKING）都不得引用 `web`。
 
-        ADR-0040 §4 R1 记着它：`RunManager` 的模块家在 `web/`（无 HTTP 依赖，
-        仅 4 个方法被用到）。它是**待裁决**项，所以判据是"集合恰等于登记值"而不是
-        "包含登记值"——残余的增减都要先改决策。
+        命名保留（ADR-0040 §5 的红证表按此名留痕）；语义随 2026-09-22 用户裁决更新：
+        R1 闭合后判据从"残余恰等于登记值"变成"登记值全为空集"——`RunManager` 的家已搬到
+        `agent_harness/session/runmanager.py`，`service.py` 里那条 TYPE_CHECKING 引用随之删除。
         `import agent_harness.web.app` 与 `from agent_harness.web import app` 语义等价，
         两种写法一起收（`ast.Import` / `ast.ImportFrom` + 全部别名），否则强度就取决于
         写法；相对导入（`from .. import web`）按被扫文件所在包解成绝对模块名；
@@ -312,6 +314,7 @@ class TestRuntimeImportBoundary:
         assert set(self.EXPECTED_TYPE_ONLY_WEB_IMPORTS) == {
             "agent_harness/session/service.py",
             "agent_harness/session/projects.py",
+            "agent_harness/session/runmanager.py",
         }, "登记表被清空或改名 ⇒ 这条守卫会静默变成空转（审查 findings）"
 
         for rel, residual in self.EXPECTED_TYPE_ONLY_WEB_IMPORTS.items():
@@ -344,6 +347,64 @@ class TestRuntimeImportBoundary:
                 f"（登记值 {sorted(residual)}；增减都要先更新 ADR-0040 §4 R1 / 裁决，"
                 "不能顺手改守卫）"
             )
+
+    def test_run_manager_home_is_the_session_package(self):
+        """R1（用户裁决 2026-09-22）：`RunManager` 的家 = `session/runmanager.py`。
+
+        纯移位，运行时零影响；这条钉住"家在哪"，免得后来者把它挪回传输层
+        （挪回去会让上一条守卫立刻红，但那是间接信号——这里给直接的判据）。
+        """
+        moved = SRC_ROOT / "agent_harness/session/runmanager.py"
+        assert moved.is_file(), (
+            "RunManager 的家应是 agent_harness/session/runmanager.py"
+            "（ADR-0040 §4 R1 已按用户裁决闭合）"
+        )
+        assert not (SRC_ROOT / "agent_harness/web/runmanager.py").exists(), (
+            "旧路径 web/runmanager.py 不得复活——RunManager 是领域模块"
+        )
+
+    def test_domain_store_port_is_satisfied_by_composition_bundle(self, tmp_path: Path):
+        """R2（用户裁决 2026-09-22）：组合层造的真实束必须满足领域端口。
+
+        端口 = `RecoveryStoreBundle`（`session/service.py` 自建，只声明装配层真正读的
+        四个成员）。这条是**结构兼容**判据：`assembly.RecoveryStores` 改成员名/删成员
+        会让它红——那时要么改装配层，要么改端口，不能让它悄悄漂移。
+        """
+        from agent_harness.assembly import recovery_stores
+        from agent_harness.session.service import RecoveryStoreBundle
+
+        bundle = recovery_stores(tmp_path / "harness.db")
+        assert isinstance(bundle, RecoveryStoreBundle), (
+            "assembly 造的 RecoveryStores 不再满足领域端口 RecoveryStoreBundle"
+        )
+
+    def test_service_imports_no_composition_types(self):
+        """R2：领域层不得 import 组合层**类型**；唯一允许的是 `build_runtime`。
+
+        `build_runtime` 是既有耦合（改造前就在，且
+        `tests/web/test_web_phase5_permission.py` 用 `monkeypatch.setattr(service_module,
+        "build_runtime", …)` 把它钉在模块级名字上），不在本票范围。本票收口的是
+        `RecoveryStores` 那一条——它现在是领域自建的端口，不该再出现在 import 里。
+        """
+        tree = ast.parse((SRC_ROOT / "agent_harness/session/service.py").read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "") == "agent_harness.assembly":
+                offenders += [
+                    f"{node.lineno}: {ast.unparse(node)}"
+                    for alias in node.names
+                    if alias.name != "build_runtime"
+                ]
+            elif isinstance(node, ast.Import):
+                offenders += [
+                    f"{node.lineno}: {ast.unparse(node)}"
+                    for alias in node.names
+                    if alias.name.startswith("agent_harness.assembly")
+                ]
+        assert offenders == [], (
+            f"session/service.py 又 import 了组合层类型：{offenders}"
+            "（R2 已改为领域自建端口 RecoveryStoreBundle：装配层造束、领域只认形状）"
+        )
 
     def test_web_module_match_is_not_a_substring_test(self):
         """钉住判据的**精度**：`agent_harness.websearch` 是兄弟模块，不是传输层。

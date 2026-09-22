@@ -47,8 +47,8 @@ from pydantic import ValidationError
 
 from agent_harness.config import Settings
 from agent_harness.session.event import EVENT_TYPES as SESSION_EVENT_TYPES
+from agent_harness.session.runmanager import RunManager
 from agent_harness.web.app import SessionSummary, create_app
-from agent_harness.web.runmanager import RunManager
 from tests.scripted_model import ScriptedModel
 
 _DATA_PREFIX = "data:"

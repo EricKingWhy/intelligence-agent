@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.session import RUN_COMPLETED, RUN_STARTED, Session
+from agent_harness.session.runmanager import RunManager
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.scripted_model import ScriptedModel
@@ -60,8 +61,6 @@ class TestRunManager:
     @pytest.mark.asyncio
     async def test_disconnect_does_not_kill_run(self, tmp_path):
         """核心语义反转（D-A）：订阅者离开后 run 继续跑到终态。"""
-        from agent_harness.web.runmanager import RunManager
-
         store = JsonlSessionStore(root=tmp_path / "sessions")
         session = _make_session(tmp_path)
         runtime = _runtime(ScriptedModel([AIMessage(content="done")]))
@@ -84,8 +83,6 @@ class TestRunManager:
     @pytest.mark.asyncio
     async def test_subscriber_receives_events_without_duplicates(self, tmp_path):
         """durable 事实幂等合并：listener 捕获 + 镜像 yield 双通道不产生重复。"""
-        from agent_harness.web.runmanager import RunManager
-
         session = _make_session(tmp_path)
         runtime = _runtime(ScriptedModel([AIMessage(content="hello")]))
         manager = RunManager(disconnect_grace_seconds=60.0)
@@ -109,8 +106,6 @@ class TestRunManager:
     @pytest.mark.asyncio
     async def test_orphan_run_reclaimed_after_grace(self, tmp_path, monkeypatch):
         """零订阅者超过宽限期 → run 被回收（取消臂收尾 run/failed）。"""
-        from agent_harness.web.runmanager import RunManager
-
         class SlowModel:
             def bind_tools(self, tools, **kwargs):
                 return self
@@ -141,8 +136,6 @@ class TestRunManager:
 
     @pytest.mark.asyncio
     async def test_cancel_marks_task(self, tmp_path):
-        from agent_harness.web.runmanager import RunManager
-
         session = _make_session(tmp_path)
         runtime = _runtime(ScriptedModel([AIMessage(content="done")]))
         manager = RunManager(disconnect_grace_seconds=60.0)

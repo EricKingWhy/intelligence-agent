@@ -35,7 +35,7 @@ from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.memory.types import memory_session_var
 from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_STARTED, Session
 
-logger = logging.getLogger("agent_harness.web.runmanager")
+logger = logging.getLogger("agent_harness.session.runmanager")
 
 #: 订阅者队列上限（帧）：满时丢最旧（seq gap → 客户端重连自愈）。
 SUBSCRIBER_QUEUE_MAX = 2000

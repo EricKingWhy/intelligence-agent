@@ -36,7 +36,7 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service_module, "build_runtime", _fake_build)
 
-    from agent_harness.web.runmanager import RunManager, Subscriber
+    from agent_harness.session.runmanager import RunManager, Subscriber
 
     def _fake_launch(self, session, runtime, user_input):
         sub = Subscriber()

@@ -326,7 +326,7 @@ class _Telemetry:
     关于那处取值：`cancel_reason()` 本身只是一次委托（`return self.cancel_reason_supplier()
     if self.cancel_reason_supplier else "cancelled"`），它的失败面**等于注入的 supplier 的
     失败面**——`run_stream(cancel_reason_supplier=…)` 是公开参数，当前唯一调用点是 web 的
-    lambda（`web/runmanager.py` 里 `return "orphaned" if run.reap_requested else "cancelled"`，
+    lambda（`session/runmanager.py` 里 `return "orphaned" if run.reap_requested else "cancelled"`，
     一次 bool 读），所以**当前**没有失败面；换成会抛的 supplier 则属于未收口的出口
     （登记在 `docs/SDD_TICKET_TRACKER.md` **B-35 残余**第 5 条，收口方式与 `cancel_reason`
     段一致：过 `_TerminalStages`）。
@@ -886,7 +886,7 @@ class AgentRuntime:
 
         cancel_reason_supplier（ADR-0016 §2.1）：取消臂收尾时调用来决定
         run/failed 的 reason（"cancelled" / "orphaned"），让 run 的宿主
-        （web RunManager）区分取消来源；None = 默认 "cancelled"。
+        （`RunManager`）区分取消来源；None = 默认 "cancelled"。
 
         SSE endpoint 直接消费这个 iterator；前端据此实时渲染。
         """

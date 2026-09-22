@@ -30,8 +30,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 from agent_harness.web.serialization import build_event_payload
 
 if TYPE_CHECKING:
+    from agent_harness.session.runmanager import RunManager
     from agent_harness.web.app import AppState
-    from agent_harness.web.runmanager import RunManager
 
 logger = logging.getLogger("agent_harness.web.websocket")
 

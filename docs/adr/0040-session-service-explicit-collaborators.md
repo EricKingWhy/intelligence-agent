@@ -9,12 +9,18 @@
 **决策授权**: #248 的 Scope 原文——「先盘点真实 consumer 和最小所需字段。只有出现至少两个实现/测试替身
 并能形成真实 seam 时，才由 domain 定义窄 Protocol 或显式 collaborators；**不要**仅把 AppState 换成
 同样宽的 Protocol。」
-**⚠ 边界（未获用户批准，如实登记）**: 两处接口级耦合按 AGENTS.md §9.1.1 登记为待裁决项，本批次
-**未**擅自改写票面、也未擅自搬模块或改构造契约——
+**⚠ 边界（首版 2026-09-21 如实登记，2026-09-22 用户裁决后已闭合）**: 首版按 AGENTS.md §9.1.1 把两处
+接口级耦合登记为**待裁决项**，本批次当时**未**擅自改写票面、也未擅自搬模块或改构造契约——
 
-1. AC2 的「新 interface 不引用 `web`」只满足到**容器类型 + 15 个 collaborator** 的粒度：唯一残余
+1. AC2 的「新 interface 不引用 `web`」当时只满足到**容器类型 + 15 个 collaborator** 的粒度：唯一残余
    `RunManager`（+ `ManagedRun` / `Subscriber`）的模块家仍在 `web/`（§4 R1）；
 2. 本票**新增**了一条通向组合层 `assembly` 的类型级引用 `stores: RecoveryStores`（§4 R2）。
+
+**裁决（2026-09-22，用户逐项选定）**：R1 = **「搬到 `session/`」**（对齐 Temporal 把 RunManager 放在
+`temporal/` SDK 内、Jupyter Server 把 KernelManager 放在 server 包内的做法）；R2 = **「领域自建端口」**
+（对齐 langgraph / langmem 由库自身声明运行所需最小接口、由调用方实现的做法）。两处残余**已闭合**，
+闭合后 AC2 由"部分满足"变为"满足"（§6）。裁决依据、落地范围与证据见 §4 R1/R2 与 §5 红证 15–18。
+
 **真实证据**: §5 列了可复算的读数、红证产物与门禁数字（树 = 本文档所在提交的父提交 + 本提交）。
 
 ---
@@ -109,7 +115,7 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 | 11 | `transport_ledger: SqliteTransportLedger` | `transport_ledger` 属性 | `delete_for_session` | 2 |
 | 12 | `checkpoint_store: SqliteCheckpointStore` | `checkpoint_store` 属性 | `delete_for_session` | 2 |
 | 13 | `harness_db: Path` | `harness_db` 属性 | 建"恢复/扫描"用的数据库句柄（`database_path=` 两处） | 3 |
-| 14 | `stores: RecoveryStores` | `stores` property | 传给恢复接线（`stores=` 两处） | 3 |
+| 14 | `stores: RecoveryStoreBundle`（领域端口，见 §4 R2） | `stores` property | 传给恢复接线（`stores=` 两处） | 3 |
 | 15 | `ensure_stores: Callable[[], Awaitable[None]]` | `ensure_stores()` 方法 | 8 个入口的惰性初始化（兼容不走 lifespan 的测试路径） | 9 |
 | 16 | `get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]]` | `get_wiring()` 方法 | 审批回调与模型变更需要真实装配集 | 3 |
 
@@ -128,17 +134,23 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 
 ## 4. 残余与已知边界（如实登记）
 
-**R1 — `RunManager`（+ `ManagedRun` / `Subscriber`）的家仍在 `web/runmanager.py`。**
-这是 AC2 唯一未闭合处。事实澄清（避免把"位置"误读成"依赖"）：
+**R1 — `RunManager`（+ `ManagedRun` / `Subscriber`）的家曾在 `web/runmanager.py`（AC2 唯一未闭合处）。**
+首版登记的澄清（避免把"位置"误读成"依赖"）：
 
 - 该模块**不 import 任何 web 依赖**：模块级只 import `agent_harness.agent`（`AgentEvent` /
   `AgentRuntime`）、`agent_harness.memory.types`、`agent_harness.session`（事件常量 + `Session`）。
 - 本层只用到它的 4 个方法（`launch` / `get_active` / `is_busy` / `cancel`，见 §3 第 2 行）。
 - 引用发生在 `if TYPE_CHECKING:` 内，运行时零成本。
 
-**待用户裁决**：(a) 接受为残余登记 + 另开 ticket 把模块搬到 `session/`（纯移位，运行时零影响，
-但跨 ~13 个测试文件的 patch 路径），或 (b) 现在就搬。在拿到裁决前不自行搬迁（AGENTS.md §8 Scope
-Lock：不顺手重构）。
+**裁决与闭合（2026-09-22）**：用户选定 **(b) 现在就搬**——`git mv` 到
+`agent_harness/session/runmanager.py`（纯移位，运行时零影响；logger 名同步改为
+`agent_harness.session.runmanager`，模块内与 `agent/runtime.py` 的两处指路注释一并订正）。
+影响面**实测** 7 个文件 / 10 处 import（`grep -rn "agent_harness.web.runmanager" src tests`），
+比首版估的"跨 ~13 个测试文件"少——估值与实测的差写在这里，免得下一轮再按旧估值排期。
+守卫随之从"残余不得扩大"改成"**残余已归零**"：`EXPECTED_TYPE_ONLY_WEB_IMPORTS` 的三份域文件
+全为空集（`service.py` / `projects.py` / `runmanager.py`），另加
+`test_run_manager_home_is_the_session_package` 钉住新家（旧路径复活即红）。闭合后领域层
+（代码 + 注解）对 `web` 的引用数为 **0**。
 
 **R2 — `assembly.RecoveryStores`（本票**新增**的接口级类型引用）与 `assembly.build_runtime`（既有）。**
 两件事要分开说：
@@ -153,9 +165,26 @@ Lock：不顺手重构）。
   构造契约**多了一条通向组合层（`assembly`）的类型级引用**——不是 `web`，AC2 的字面不受影响，
   但按 §9.1.1 的口径这是一处**本票引入**的接口耦合，必须留痕而不是记成"本来就有"。
 
-**待用户裁决（与 R1 同一批）**：接受这条引用（`RecoveryStores` 只是三个 store 的只读束，
-且 R4 已记"合并参数"被否的取舍），或改为由领域层自己从三个 ledger 组束、把该类型从构造契约里
-去掉（少 1 个参数，代价是领域自建上层 bundle）。
+**裁决与闭合（2026-09-22）**：用户选定「**领域自建端口**」——`session/service.py` 自己声明
+`RecoveryStoreBundle`（`@runtime_checkable` Protocol），构造参数注解改为 `stores: RecoveryStoreBundle`；
+组合根仍造真实束（`assembly.RecoveryStores`），领域层不再 import 组合层**类型**。取舍与依据：
+
+- 端口只声明**形状**、不复制具体类型：束的成员增删与领域层的 import 解耦，改组束不再牵动 `session/`；
+- 端口成员清单**由读端决定**：`build_runtime(stores=…)` / `initialize_stores(stores=…)` 实测只读
+  `operation_ledger` / `checkpoint_store` / `session_meta_store` / `workspace_index` 四项
+  （`assembly.py` 的调用点），端口就这四项、不多不少；
+- **别把这条读成"更窄"**：真实束 `RecoveryStores` 今天也恰是这 4 个成员（`assembly.py:83`
+  的 dataclass 实测），所以端口与它**等宽**。收益不在成员数，而在两件事——形状由领域自己声明、
+  组合层类型不再进领域 import；把"等宽"写成"收窄"会让下一个审查者按错的理由通过它；
+- 端口的保证是**弱**的，写清楚免得被高估：仓库门禁只有 `ruff` + `pytest`（`pyproject.toml` 无 mypy
+  / pyright 段），所以"注解写的是什么类型"没有静态检查器兜底。真正的机械保证只有两条用例——
+  正向 `isinstance(recovery_stores(tmp), RecoveryStoreBundle)`（成员改名/删除即红）与负向
+  import 边界；领域层将来真去读第 5 个成员时，**没有**机制强制先补端口（靠 review）。这是选
+  "自建端口"相对"领域自建 bundle"的已知代价：换来的是不复制组合层类型 + 不动装配层。
+- `build_runtime` 保持原样：它是本票改造**之前**就有的运行时耦合（上一段），且
+  `tests/web/test_web_phase5_permission.py` 用 `monkeypatch.setattr(service_module, "build_runtime", …)`
+  把它钉在模块级名字上，动它属 Scope 外；守卫只拦**组合层类型**再进 import，白名单恰为
+  `build_runtime` 一项（`test_service_imports_no_composition_types`）。
 
 **R3 — 两条守卫各自的作用域要说清**（窄验证第二轮实测后订正——此前把两条的作用域写混了）：
 
@@ -187,7 +216,9 @@ initialized module …`）⇒ 它们在今天**不可利用**；但守卫已按 
 | --- | --- |
 | 窄 Protocol（domain 定义 4–5 个方法的 run host 协议） | 单实现 + 无可替换替身（§1.1）；冻结决策明文禁止为单一实现造浅 seam |
 | 合并 `stores` 与三个 ledger 参数（它们是同一批对象的两种视图） | 只少 1 个参数（15 vs 16），却让领域自建上层 `assembly` bundle；收益与噪声不成比例 |
-| 把 `RunManager` 搬出 `web/`（R1 的 (b)） | 纯移位、运行时零影响，但属跨模块重构，需用户裁决；见 R1 |
+| 把 `RunManager` 搬出 `web/`（R1 的 (b)） | 首版列为"需用户裁决"；**2026-09-22 用户裁决采纳**，本批已执行（见 R1） |
+| 领域层从三个 ledger 自建束、把 `stores` 参数整个去掉（R2 的另一条路） | 少 1 个参数，但把"恢复子系统要哪些 store"的知识从装配层搬进领域层；用户选的是**自建端口**（保留参数、只换类型），不是自建 bundle |
+| 端口成员照真实束的类型写（`SqliteOperationLedger` / `SqliteCheckpointStore` / `SqliteSessionMetaStore`） | 端口要声明的是**领域的形状**，写具体实现类等于把组合层的具体类型换个名字抄进领域——那正是本票要消除的形状。改用 storage 层的 ABC（`OperationLedger` / `CheckpointStore` / `SessionMetaStore`）。**如实登记一处不一致**：同一构造器里另有 13 个参数本来就用 `Sqlite*` 具体类型（本票改造**之前**就如此，属 Scope 外），所以今天 `session/service.py` 里两种风格并存 |
 
 ---
 
@@ -265,6 +296,43 @@ tracked 树）。脚本自己断言锚点唯一、还原后哈希一致，任何
 `is_type_checking_test` 之后，第 11 条探针的锚点**当场失效**（锚点唯一性断言报"出现 0 次"）——
 即"改完实现要同步改探针"这件事由脚本机械保证，不靠人记得。**探针本身必须先被证明能判别。**
 
+### 5.1 R1/R2 闭合批次（2026-09-22）的证据
+
+**门禁（本批工作树 = 提交的代码面）**：全量 `PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q
+-p no:randomly` = **3090 passed / 2 skipped / 42 deselected / 1 failed / 13 warnings in 617.23 s**。
+唯一失败 `tests/sandbox/test_docker_sandbox.py::test_timeout_stops_late_workspace_mutation`
+是登记在案的**既有 flake**；**如实说明取证缺口**：那份日志只留了末 20 行，**失败签名已丢**
+（登记项的判据要求"`:93` 断言 + stdout 空"逐条对上，本次无法核对）。故不按"签名命中"走 §8.6 的
+免复跑通道，改用三条可复核的独立证据判**非本批引入**：① 该用例与它被测的
+`src/agent_harness/sandbox/docker.py` 都不在本批 `git status --short` 内（逐字节未动）；
+② 同树单跑 **3/3 passed**（call 4.59 / 4.63 / 4.61 s，墙钟各 5.07–5.08 s；形态落在登记项记的
+"正常"区间，超预算形态未复现）；③ 本批三个位点（`session/service.py` 端口、`session/runmanager.py`
+移位、4 个 web 测试文件的 import 路径）与 docker 沙箱无共享代码路径。
+`ruff check` 改动文件 All checks passed（含本批修掉的 4 处 I001：搬迁后 import 需重排）；
+`git diff --check` 无 whitespace / conflict-marker 输出。
+
+**红证（同一方法学；脚本 `.workbuddy/red_248_r1r2.py`，日志 `.workbuddy/red_248_r1r2.log`）**：
+五条全部按预期变红、还原后哈希一致。
+
+| # | 变异 | 观察到的失败 |
+| --- | --- | --- |
+| 15 | 造出旧路径 `src/agent_harness/web/runmanager.py`（桩文件；原本不存在） | `AssertionError: 旧路径 web/runmanager.py 不得复活——RunManager 是领域模块` |
+| 16 | 从 `assembly.RecoveryStores` 删掉 `session_meta_store` 字段 + 工厂里对应的 kwarg（同一语义的一对锚点） | `AssertionError: assembly 造的 RecoveryStores 不再满足领域端口 RecoveryStoreBundle` |
+| 17 | 在 `service.py` 的 `TYPE_CHECKING` 块里加 `from agent_harness.assembly import RecoveryStores` | `AssertionError: session/service.py 又 import 了组合层类型：['142: from agent_harness.assembly import RecoveryStores']` |
+| 18 | 同位置改加 plain import `import agent_harness.assembly` | 同一条断言：`['142: import agent_harness.assembly']`（两种等价写法一起收，否则强度取决于写法） |
+| 19 | 同位置加 `from agent_harness.web.app import AppState as _RedProbeAppState` | `AssertionError: agent_harness/session/service.py 的 TYPE_CHECKING web 引用集合变了：[…]（登记值 []）`——即"残余归零"判据对**任何**新 web 引用敏感 |
+
+**取不到红证的一条，如实登记**：`test_run_manager_home_is_the_session_package` 的第一条断言
+（新家必须存在）**无法以"守卫变红"的形式取证**——把该模块搬走会让这份测试模块在**收集期**
+`ImportError`（它模块级 import `RunManager`），红的是收集而不是那条断言。该断言的定位因此是
+**可读判据**（"家在哪"写进测试），不是静默风险防线：模块真不在了，10 处 import 会当场全断。
+第 15 条只证了它的第二条断言。
+
+**旧脚本的探针已随本批失效（不修改历史读数）**：`.workbuddy/red_248_guards.py` 的探针 3/4/6/7
+锚在"`service.py` 里存在 `from agent_harness.web.runmanager import …`"这段文本上，搬迁后该文本
+不复存在 ⇒ 再跑那个脚本会在锚点唯一性断言处 `sys.exit`（脚本自检生效，不是它失效）。表 1–14
+记录的是**搬迁前**那棵树上的实测，原样保留。
+
 ---
 
 ## 6. AC 矩阵（逐条，含未闭合项）
@@ -272,7 +340,7 @@ tracked 树）。脚本自己断言锚点唯一、还原后哈希一致，任何
 | AC | 结论 | 证据 |
 | --- | --- | --- |
 | AC1 文档列出每个 AppState 字段与使用方法 | **满足** | §3 表格 16 行（每行含用途与实测引用数）+ 紧随其后的 `ProjectService` 3 项（散文，非表格行）；测试 `test_session_service_takes_exactly_the_documented_collaborators` / `test_project_service_takes_exactly_the_documented_collaborators` 把两份清单钉在代码上，漂移即红 |
-| AC2 新 interface 不引用 `web`，且比 AppState 明显更窄 | **部分满足** | 容器类型与 15 个 collaborator 已无 web 引用（§2 D1/D5 + 守卫）；"明显更窄"的判据见 §3 末段（16 个参数全被使用、容器 21 个公开成员中 5 个永不触碰）。**未闭合**：残余 R1（`RunManager` 的模块家仍在 `web/`），待用户裁决 |
+| AC2 新 interface 不引用 `web`，且比 AppState 明显更窄 | **满足**（2026-09-22 闭合） | 容器类型与 16 个 collaborator 均已无 web 引用：`RunManager` 的家搬到 `agent_harness/session/`（§4 R1），`stores` 改注解为领域自建端口 `RecoveryStoreBundle`（§4 R2）；三份域文件的 `EXPECTED_TYPE_ONLY_WEB_IMPORTS` 全为空集 ⇒ 领域层（代码 + 注解）对 `web` 的引用数为 **0**。"明显更窄"的判据见 §3 末段（16 个参数全被使用、容器 21 个公开成员中 5 个永不触碰）。原"部分满足"的唯一未闭合项（R1）已由用户裁决并落地 |
 | AC3 transport composition root 负责适配 | **满足** | §2 D2；守卫 `test_services_are_constructed_only_in_the_composition_root`（`src` 全树唯一构造点 = `web/app.py`）；红证 1 |
 | AC4 构造测试不再依赖魔法属性，运行行为不变 | **满足** | `tests/session/test_service_collaborators.py`：普通 duck-typed 对象即可构造、16 个字段逐个 identity 可证、缺字段 `AttributeError`、调用时现取属性；`tests/session/conftest.py::make_session_service` 提供无容器构造夹具；全量门禁不变（tracker B-26） |
 | AC5 删除新 seam 会重新造成跨层类型耦合，而不是只少一个 wrapper | **满足** | 删掉组合根后，**26 个 `session_service(...)` 调用点 + 1 个 `project_service(...)` 调用点**（`app.py` 21 / `websocket.py` 3 / `lineage.py` 1 / `workspace_files.py` 1；命令见 §5）**各自**要命名 16 个 collaborator——那正是把适配复制 27 遍；构造点守卫与导入边界守卫会同时变红（红证 1/4） |

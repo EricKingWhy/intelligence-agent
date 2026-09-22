@@ -32,8 +32,8 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
+from agent_harness.session.runmanager import RunManager
 from agent_harness.web.app import create_app
-from agent_harness.web.runmanager import RunManager
 from tests.scripted_model import ScriptedModel
 
 _DATA_PREFIX = "data:"

@@ -32,7 +32,7 @@ import stat
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import anyio
 
@@ -134,24 +134,22 @@ from agent_harness.tooling.contract import PermissionPolicy
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agent_harness.assembly import RecoveryStores
     from agent_harness.capability.base import CapabilityRegistry
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
     from agent_harness.recovery.scan import InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
+    from agent_harness.session.runmanager import ManagedRun, RunManager, Subscriber
+    from agent_harness.storage.checkpoint import CheckpointStore
+    from agent_harness.storage.operation import OperationLedger
+    from agent_harness.storage.session_meta import SessionMetaStore
     from agent_harness.storage.sqlite import (
         SqliteCheckpointStore,
         SqliteOperationLedger,
         SqliteSessionMetaStore,
     )
     from agent_harness.transport.contract import SqliteTransportLedger
-
-    # `RunManager` 的家目前仍在 `web/`（运行管理器 + SSE 订阅者）。本层只在类型
-    # 标注里命名它、**运行时不 import** —— 这是 #248 留下的残余（ADR-0040 §4 R1：
-    # 该模块无任何 web 依赖，本层只用到 4 个方法；守卫锁住"残余不得扩大"）。
-    from agent_harness.web.runmanager import ManagedRun, RunManager, Subscriber
     from agent_harness.workspace.index import WorkspaceIndex
 
 
@@ -291,6 +289,24 @@ class SessionDeletionStats:
 # ── SessionService ───────────────────────────────────────────────────
 
 
+@runtime_checkable
+class RecoveryStoreBundle(Protocol):
+    """恢复子系统 Store 束的**领域端口**（#248 R2；用户裁决 2026-09-22）。
+
+    本层只把束转交给 `build_runtime`，所以端口只声明装配层真正读到的四个成员
+    （`assembly.build_runtime` / `initialize_stores` 读 `stores.operation_ledger`、
+    `.checkpoint_store`、`.session_meta_store`、`.workspace_index`），**不复制**
+    组合层的具体类型：组合根造真实束（`assembly.RecoveryStores`），领域只认形状。
+    结构兼容由 `tests/session/test_service_collaborators.py` 的两条用例钉住
+    （成员改名即红，且 `service.py` 不得再 import 组合层类型）。
+    """
+
+    operation_ledger: OperationLedger
+    checkpoint_store: CheckpointStore
+    session_meta_store: SessionMetaStore
+    workspace_index: WorkspaceIndex | None
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -319,7 +335,7 @@ class SessionService:
         transport_ledger: SqliteTransportLedger,
         checkpoint_store: SqliteCheckpointStore,
         harness_db: Path,
-        stores: RecoveryStores,
+        stores: RecoveryStoreBundle,
         ensure_stores: Callable[[], Awaitable[None]],
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
     ) -> None:
