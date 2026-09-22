@@ -214,9 +214,9 @@ credential password secret token api_key rm -rf chmod 777 sudo
 
 ## 7. 已安装到宿主的记录（2026-09-22）
 
-需求方 21:38 指令：「我要装进 codex / zcode，你替我装吧」＋「**可以去掉 `disable-model-invocation`，
-但只能是让模型可以自动调用 pstack 的 skills；其他比如 mattpocock 的 `handoff` 必须要手动调用，
-绝对不能所有的 skills 都让模型自动调用**」。
+需求方指令（21:38）：「我要装进 codex / zcode，你替我装吧」＋「**可以去掉 `disable-model-invocation`，但只能是让模型可以自动调用 pstack 的 skills**」。
+⚠ **需求方 2026-09-22 23:14 澄清了后半句的确切含义**（此前本段误抄，已更正）：「mattpocock 的 skills **不要动** —— 开发者本来就有手动有自动（如 `/handoff` 设计为手动），那是设计好的，我们不该改；**要改的只有 pstack**，因为 pstack 开发者只设计了手动调用，而我们要它既能被模型自动调用、也能手动调用」。
+⇒ **对 mattpocock（codex / zcode / workbuddy）零改动**；本线只动 pstack 那 7 个的安装副本。
 
 | 宿主 | 目录 | 装入数 |
 | --- | --- | --- |
@@ -238,8 +238,8 @@ credential password secret token api_key rm -rf chmod 777 sudo
   `references/` 下文件逐字节相同。
 - **未碰任何已有 skill**：两宿主里"非本次安装"的条目最新 mtime 分别是 **13004 分钟 / 14562 分钟**前
   （≈9–10 天），我的 7 个是 **0.3 分钟**前 ⇒ 没有改写任何既有文件。
-- **`handoff` 仍是手动调用**：`~/.codex/skills/handoff/SKILL.md` 与 `~/.zcode/skills/handoff/SKILL.md`
-  实测**仍带** `disable-model-invocation` ✓ —— 这正是需求方点名要保住的那条。
+- **未动任何 Matt skill**：`~/.codex/skills/handoff/SKILL.md` 与 `~/.zcode/skills/handoff/SKILL.md`
+  实测**仍带** `disable-model-invocation` ✓（`/handoff` 保持开发者设计的手动调用形态，需求方 23:14 明确**不改它**，本线从未改过）。
 - 仍带该字段的 skill 数：codex **15** / zcode **18**（本次只改了新增的 7 个）。
 - 宿主目录条目数：codex 93、zcode 72（各 = 原数 + 7）。
 
