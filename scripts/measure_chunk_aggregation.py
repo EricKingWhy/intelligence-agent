@@ -96,8 +96,12 @@ class _CopyVolume:
       content 走 `merge_lists`，复制成本按元素计，此时 `chars` 恒为 0（不是"没抄东西"）。
 
     口径边界（如实记）：
-    - **只认 `list`**：本版 langchain 的 `merge_content` 对 tuple content 直接抛错（不按元素
-      复制），把 `len(tuple)` 记成"元素复制量"与真实行为不符 ⇒ tuple 不计。
+    - **只认 `list`**：`AIMessageChunk` 的 content 在**构造期**就被 pydantic 归一成 `list`
+      （tuple 根本到不了 `merge_content`）；而裸 tuple 交给 `merge_content` 时，行为取决于
+      **当前累计值是 str 还是序列**（不是"第几个参数"）——累计值仍是 `str` 时被**静默拆包**
+      成 list（`merged = [merged, *content]`），累计值已是 list/tuple 且末元素是 str 时走
+      `merged[-1] += content` ⇒ `TypeError: can only concatenate str (not "tuple") to str`
+      （两轴各测到一种）⇒ 记 `len(tuple)` 既不可达、也没有稳定含义，故不计。
     - 元素里的 dict **带 `index`** 时，`merge_lists` 是"合并"而非"追加" ⇒ 追加侧元素数会略高于
       本列（本脚本的语料是不带 index 的 `{"type": "text", ...}`，故当前精确）。
     - 只覆盖 `content`：`tool_call_chunks` 的 args 拼接不在本口径内。
