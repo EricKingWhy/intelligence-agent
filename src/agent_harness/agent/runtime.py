@@ -271,6 +271,20 @@ class _RunFinalizer:
         return event
 
 
+class _Unset:
+    """「调用方没传这个关键字」的哨兵类型（#285 / 残余 R1）。
+
+    `None` 不能兼作哨兵：`compacted_turn_count=None` 是**有意义的实参**（"本轮没有压缩
+    发生"），在端口那一侧的调用关键字集合里与"根本没传"是两回事。
+    """
+
+    __slots__ = ()
+
+
+#: 模块级唯一实例（判据用 `is`，不用 `==`——哨兵的身份就是它的全部含义）。
+_UNSET = _Unset()
+
+
 @dataclass
 class _Telemetry:
     """一次 run 的观测可变状态单点 owner（#265 / T11 第二切片）。
@@ -283,22 +297,46 @@ class _Telemetry:
     清在哪里"只由本对象的成对方法决定（#247 AC4）——**但这不等于"每个出口都被调用
     到"**，后者见下「收口责任边界」。
 
-    恒定式（#265 AC 的"逐字兼容"）：本对象的每个方法都是**转发**——调用的端口方法、
-    调用条件与顺序与原调用点相同，不加行为、不判空。两处**已登记的差异**（编号对应
-    docs/SDD_TICKET_TRACKER.md 的 #265 残余 R1 / R2+R3）：
-    ① `compacted_turn_count` 一律以关键字转发：**端口输出无差异**（`RunTracer` 按
-    `is not None` 决定是否写 metadata 键 ⇒ 显式 `None` 与不传同效；`NullTracer` 本就不
-    产出观测，两条路皆零输出），差异只在"调用关键字集合"这一层；
-    ② context 超限臂收口后**保留**在途句柄（`keep_handle`）——复刻它 #264 之前的既有
-    形状：该句柄会被**第二条收集臂**再收一次，取消臂（"超限 + 消费方在终态帧上断连"）
-    与异常臂（"超限臂落终态的 append 失败"）两条出口皆然。
+    恒定式：本对象的每个方法都是**转发**——调用的端口方法、调用条件与顺序与原调用点
+    相同，不加行为、不判空。`context_build_completed` 的调用形状（关键字集合）逐字回到
+    #264 之前：成功路径带 `compacted_turn_count`，`close_pending` 与 context 超限臂不带
+    （#265 把**经 wrapper 的两处**统一成"一律带关键字"——超限臂随之从裸调变带关键字；
+    `close_pending` 一直直呼端口、从不经该参数。那是残余 R1 的口径偏差，由 #285 收口）。
+
+    #285 起：**收口即清口**（超限臂不再例外）。#264 之前那条臂收口后保留句柄，于是同一
+    span 会被**第二条收集臂**再收一次——取消臂（"超限 + 消费方在终态帧上断连"）与异常臂
+    （"超限臂落终态的 `append` 失败"）两条出口皆然（残余 R2 / R3）。两条出口各有一条
+    仓库内用例钉住单次收口：`tests/agent/test_terminal_arms.py`。
+
     端口实现的选择（`_new_tracer`）与故障保护（`_GuardedTracer`）仍在本对象之外，
     故可选/故障 sink 不拖垮 Core 的性质不变。工具批次的 span 归 ToolExecutor：
     `tracer` 原样转交。
 
     收口责任边界（按可证伪的方式写）：**收口只经本对象的成对方法**，已收口的句柄在本
     对象里唯一存放。各终结点**何时**调用、取消/异常臂经 `snapshot()` 拿的是哪份副本，
-    由 `_drive` 与两个终态臂决定——本对象不保证"每个出口都被调用到"。
+    由 `_drive` 与两个终态臂决定——本对象不保证"每个出口都被调用到"。注意"没被走到"
+    与"段内抛错"是两回事：后者由 `_TerminalStages` 逐段兜底收口（残余 R4），前者
+    本对象无从保证（那段代码压根没执行）。
+
+    逐段兜底**也不覆盖收尾的全部内容**，边界如实记在这里，免得被读成"收尾已免疫
+    一切故障"：一是两段之间的取值（`arms.cancel_reason()`，`runtime.py` 的
+    `cancel_reason()`）与终态事件本身的写入仍裸奔，二是兜底**不吞**异常——第一处原样
+    在全部段跑完后重抛，只是不再让后面的段陪葬。
+
+    关于那处取值：`cancel_reason()` 本身只是一次委托（`return self.cancel_reason_supplier()
+    if self.cancel_reason_supplier else "cancelled"`），它的失败面**等于注入的 supplier 的
+    失败面**——`run_stream(cancel_reason_supplier=…)` 是公开参数，当前唯一调用点是 web 的
+    lambda（`web/runmanager.py` 里 `return "orphaned" if run.reap_requested else "cancelled"`，
+    一次 bool 读），所以**当前**没有失败面；换成会抛的 supplier 则属于未收口的出口
+    （登记在 `docs/SDD_TICKET_TRACKER.md` **B-35 残余**第 5 条，收口方式与 `cancel_reason`
+    段一致：过 `_TerminalStages`）。
+    **这个残余有两轴审查 B 轴给的实测复现**（不是推理）：teardown 注入一个抛
+    `RuntimeError` 的 supplier ⇒ 收口段**0 次执行**，`tracer.calls == []`、session 里
+    没有 `run/failed`——与修复前 `interrupt_streams()` 抛错的症状**逐条相同**。
+    ⇒ 想复现就照 `tests/agent/test_terminal_arms.py` 的 `_ArmsKit` 加一个 throwing
+    supplier，别把它当"理论边界"。同批的兜底只捕获 `Exception`（不捕获
+    `BaseException`）：`KeyboardInterrupt` / `CancelledError` 会穿透——仓库内无生产者，
+    作为边界记在这里。
 
     边界：`run_span`（诊断日志的根 span id）**不收**——它只在创建时写一次、不进端口，
     没有"起/清两处写"的漂移面，留在 `_drive` 局部（#264 已定的同一条判据）。
@@ -335,26 +373,30 @@ class _Telemetry:
         self.ctx_span = self.tracer.context_build_started(step=step)
 
     def context_build_completed(
-        self, *, compacted_turn_count: int | None = None, keep_handle: bool = False,
+        self, *, compacted_turn_count: int | None | _Unset = _UNSET,
     ) -> None:
-        """收口 context span（成功路径）。
+        """收口 context span（**收口即清口**，三条调用路径同一语义）。
 
         端口调用**无条件**——句柄可能是降级实现的 None，端口自己早退（port.py
-        模块 docstring 的句柄契约）。成功路径收口即清口（与 _drive 原调用点"调完
-        紧跟一句 `= None`"一致）。
+        模块 docstring 的句柄契约）。收口后一律置空：清口是"这次观测**经过本对象**
+        交代完了"的标记，保留它等于允许第二次收口（残余 R2 / R3 的根因，由 #285 收口）。
+        清口只保证"不会收两次"，**不**保证"每个出口都收过一次"——未清不等于已交代：
+        收口段可能根本没被走到（run 在进终态臂之前就没了下文）。**段内**抛错与此不同：
+        逐段兜底已收口那一路（`_TerminalStages` / 残余 R4），段抛错不再跳过后续段。
 
-        ``keep_handle`` 只服务 context 超限臂：那条臂在 #264 之前就**不清**句柄
-        （#264 只是原样搬过来），于是同一句柄会被**第二条收集臂**再收一次——取消臂
-        （"超限 + 消费方在终态帧上断连"）与异常臂（"超限臂落终态的 append 失败"，
-        实测同样可达）两条出口皆然。本票是等价重构 ⇒ 逐字保留该形状，两条出口与
-        可达路径登记为残余 R2 / R3（见 docs/SDD_TICKET_TRACKER.md 的 #265 段），
-        要不要修由单独一张票决定。
+        关键字集合逐字回到 #264 之前的形状（残余 R1）：调用方**传了**就带关键字转发
+        （`None` 也带——那是"本轮没有压缩发生"的实参，与"没传"不同），**没传**就裸调。
+        故缺省值是哨兵 `_UNSET` 而不是 `None`：经本对象的两个调用点里，成功路径在值域内、
+        context 超限臂在值域外，一个参数同时表达"两个形状"（`close_pending` 不过这里，
+        它直呼端口）。
         """
-        self.tracer.context_build_completed(
-            self.ctx_span, compacted_turn_count=compacted_turn_count,
-        )
-        if not keep_handle:
-            self.ctx_span = None
+        if compacted_turn_count is _UNSET:
+            self.tracer.context_build_completed(self.ctx_span)
+        else:
+            self.tracer.context_build_completed(
+                self.ctx_span, compacted_turn_count=compacted_turn_count,
+            )
+        self.ctx_span = None
 
     def model_call_started(self, *, step: int, messages: Any, model: str | None = None) -> None:
         self.generation = self.tracer.model_call_started(
@@ -408,6 +450,56 @@ class _Telemetry:
         return _Telemetry(
             tracer=self.tracer, ctx_span=self.ctx_span, generation=self.generation,
         )
+
+
+class _TerminalStages:
+    """终态收尾的**逐段兜底**执行器（残余 R4，2026-09-22）。
+
+    收尾此前是直排的：任何一段抛错，它**后面**的段整个不执行。最刺眼的一条是
+    `interrupt_streams()` 抛错（streamer 收口失败 / 切换事实落盘失败）时观测收口
+    （context span、generation、`run_failed`）**一次都没发生**，run 也拿不到终态事件
+    ——与 R2/R3 同族：出口覆盖不齐（B-34 段登记的 R4）。
+
+    本对象把"每段独立兜底"收成一个点：段抛错 ⇒ 记一条结构化日志（类型 + 文本；
+    不静默）并继续跑后续段；**第一处异常**在全部段跑完后由 `raise_first()` 原样再抛
+    ——不吞、不改类型、不换异常，调用方看到的失败与修前同源，只是收尾不再半途而废。
+
+    被保护的是"收口段"（`interrupt_streams` / `close_observability`）；终态事件本身的
+    写入与段间取值不在其列——每一处**逐条列在对应臂的 docstring 里**（取消臂 / 异常臂
+    各有一段"不在保护面内的两处"），那是读者该看的地方，这里不重复。
+
+    两条臂都接了这个执行器，但**不是同一段代码**：取消臂逐段直呼，异常臂在段之间把
+    收口产生的事件逐条 yield 给流消费者。所以"某条出口修好了"不能由另一条臂的用例
+    代替——两边各有用例钉住（`tests/agent/test_terminal_arms.py`）。
+
+    契约：`step` 必须返回**当场物化**的 list（两段都是普通方法、返回 list）。若将来
+    某段改成生成器 / 惰性迭代，抛错就发生在调用方的 `for` 里，本兜底接不住。
+    边界：`except Exception`——`BaseException`（`KeyboardInterrupt` / `CancelledError`）
+    按 Python 惯例穿透，不在兜底面内。仓库内两段收口都是同步普通方法（不 await），
+    没有这条路径的生产者；两轴审查 B 轴把它记为已知边界而非缺陷。
+    """
+
+    def __init__(self) -> None:
+        self.first: Exception | None = None
+
+    def run(self, stage: str, step: Callable[[], list[SessionEvent]]) -> list[SessionEvent]:
+        """跑一段收尾；抛错 ⇒ 记日志、返回空、**不**中断后续段。"""
+        try:
+            return step()
+        except Exception as error:  # noqa: BLE001 — 收尾段故障边界（见类 docstring）
+            if self.first is None:
+                self.first = error
+            log_event(
+                logger, "system_log", f"终态收尾段 {stage} 失败（已继续执行后续段）",
+                level="warn", component="agent_runtime", outcome="stage_failed",
+                stage=stage, error_type=type(error).__name__, error_message=str(error),
+            )
+            return []
+
+    def raise_first(self) -> None:
+        """全部段跑完后原样再抛第一处异常（没有失败则什么都不做）。"""
+        if self.first is not None:
+            raise self.first
 
 
 @dataclass
@@ -1022,8 +1114,15 @@ class AgentRuntime:
                     # 空流（模型没吐任何 chunk）退化成空 content。
                     if collected:
                         ai: AIMessage = collected[0]
-                        for c in collected[1:]:
-                            ai = ai + c  # type: ignore[assignment]
+                        rest = collected[1:]
+                        # 其余 chunk 走 `AIMessageChunk.__add__` 的 **list 形态**（内部即
+                        # langchain_core.messages.ai.add_ai_message_chunks）：在 langchain-core
+                        # 1.5.4 上与本块原先的逐项 `+` 字段等价（对照用例见
+                        # tests/agent/test_stream_chunk_aggregation.py），但累计内容只复制一次
+                        # ⇒ O(N·L) → O(L)。逐项折叠每步都要重抄一遍已累计内容，长回答被切成
+                        # 数千 chunk 时就是一次同步 CPU 尖峰（#281）。
+                        if rest:
+                            ai = ai + rest  # type: ignore[assignment]
                         # 聚合后保证是 AIMessage（AIMessageChunk + AIMessageChunk = AIMessageChunk，
                         # 后续逻辑期望 .tool_calls 属性，chunk 也有，但类型标注对齐成 AIMessage）
                         if not isinstance(ai, AIMessage):
@@ -1408,11 +1507,11 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
     ) -> AsyncIterator[AgentEvent]:
         """context 超限臂：模型在本轮从未被调用，直接落终态（不经 failure_terminal）。"""
-        # keep_handle=True 复刻本臂 #264 之前的既有形状（收口不清口 ⇒ 同一 span 被第二条
-        # 收集臂再收一次：取消臂的"终态帧上断连"与异常臂的"落终态 append 失败"两条出口）。
-        # 行为零变化是本票 AC，缺陷登记为残余 R2 / R3（见 _Telemetry 的 docstring 与
-        # docs/SDD_TICKET_TRACKER.md 的 #265 段）。
-        arms.telemetry.context_build_completed(keep_handle=True)
+        # 裸调（不带 compacted_turn_count）是 #264 之前的调用形状，逐字保留（残余 R1）；
+        # 收口即清口 ⇒ 本句柄不会被第二条收集臂再收一次——取消臂（"终态帧上断连"）与
+        # 异常臂（"下面这次 append 失败"）两条出口都因此只收一次（#285 修的 R2 / R3，
+        # 两条出口各有仓库内用例）。
+        arms.telemetry.context_build_completed()
         arms.telemetry.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
         failed = arms.session.append(
             RUN_FAILED,
@@ -1487,17 +1586,29 @@ class AgentRuntime:
         与异常臂的唯一差异是"收尾事件丢弃"：两臂共用 `_TerminalContext` 的收尾
         序列，本臂把返回值直接丢掉。reason 的解析点（supplier 调用）保持在
         `interrupt_streams()` **之后**——与原臂同序。
+
+        逐段兜底（R4）：两段收口任一抛错都不跳过后续——观测收口照跑、终态事件照写，
+        第一处异常在最后原样再抛（修前它会让整条收尾链断在这里：有 span 0 次收口、
+        也没有 `run/failed`）。
+
+        **不在保护面内的两处**（读这段别当"整条收尾都免疫了"）：`reason` 的取值与
+        终态事件本身的写入都在 `stages` 之外——后者抛错的传播形状与修前一致。
         """
         ctx = arms.context(steps)
-        ctx.interrupt_streams()
+        stages = _TerminalStages()
+        stages.run("interrupt_streams", ctx.interrupt_streams)
         reason = arms.cancel_reason()
-        ctx.close_observability(error_type=None, reason=reason, cancelled=True)
+        stages.run(
+            "close_observability",
+            lambda: ctx.close_observability(error_type=None, reason=reason, cancelled=True),
+        )
         arms.terminal.cancelled_terminal(
             steps=arms.envelope_step(steps),
             reason=reason,
             trace_id=arms.telemetry.trace_id,
             trace_url=arms.telemetry.trace_url,
         )
+        stages.raise_first()
 
     async def _terminal_exception(
         self, arms: _TerminalArms, *, steps: int, error: BaseException,
@@ -1506,6 +1617,15 @@ class AgentRuntime:
 
         归因口径（已分类 / 未分类两条支路，以及"每条失败路径都要有值"为什么必须
         做到）见 docs/adr/0033-run-failure-attribution-surface.md §2.1/§2.4。
+
+        逐段兜底（R4）：两段收口任一抛错都不跳过后续——观测收口照跑、终态事件照写，
+        第一处异常在全部收尾跑完后原样再抛（修前 streamer 收口一抛错，本臂后面的
+        每一行都不执行）。
+
+        **不在保护面内的两处**（读这段别当"整条收尾都免疫了"）：`to_agent_event(...)`
+        的 yield 与终态事件本身的写入都在 `stages` 之外——收口段产出的事件在终态事件
+        之前 yield，消费方在这一点断连仍是既有窗口（先于 R4 存在）；终态写入抛错的
+        传播形状也与修前一致。
         """
         ctx = arms.context(steps)
         # 分类只在**模型调用在途**时进行（model_call_open 正是 model/failed 的
@@ -1524,13 +1644,17 @@ class AgentRuntime:
             provider_message
             or UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=type(error).__name__)
         )
-        for streamed in ctx.interrupt_streams():
+        stages = _TerminalStages()
+        for streamed in stages.run("interrupt_streams", ctx.interrupt_streams):
             yield to_agent_event(streamed)
-        for streamed in ctx.close_observability(
-            error_type=type(error).__name__,
-            reason=provider_reason or type(error).__name__,
-            cancelled=False,
-            readable_message=provider_message,
+        for streamed in stages.run(
+            "close_observability",
+            lambda: ctx.close_observability(
+                error_type=type(error).__name__,
+                reason=provider_reason or type(error).__name__,
+                cancelled=False,
+                readable_message=provider_message,
+            ),
         ):
             yield to_agent_event(streamed)
         # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
@@ -1544,6 +1668,7 @@ class AgentRuntime:
         )
         if end_event is not None:
             yield to_agent_event(end_event)
+        stages.raise_first()
 
     def _new_coordinator(self) -> ModelFallbackCoordinator:
         """per-run coordinator 工厂（_drive 每调一次；测试可直取验证接线）。"""

@@ -24,6 +24,7 @@ ScriptedModel 全链验证"整段序列长什么样"（`tests/agent/test_event_s
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -34,6 +35,7 @@ from agent_harness.agent.runtime import (
     _RunFinalizer,
     _Telemetry,
     _TerminalArms,
+    _TerminalStages,
 )
 from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
@@ -59,9 +61,12 @@ from agent_harness.session import (
     RUN_STARTED,
     TEXT_DELTA,
     Session,
+    SessionEvent,
 )
+from agent_harness.session.store import SeqConflict
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
+from tests.session.store_fixtures import RejectingStore
 
 RUN_ID = "run-1"
 
@@ -80,6 +85,16 @@ class _RecordingTracer:
     流经调用方，只有一个消费者（`_Telemetry`）能测到"收到的是哪一个"。
     （真实实现：`agent_harness/observability/port.py`，不抛的保证由 `_GuardedTracer`
     在 Core 单点强制——本替身不模拟那一层。）
+
+    ⚠ 句柄形状与生产**不同型**：这里返回 `str`，生产返回 `Span`（或降级后的 `None`）。
+    对**这两条臂**无影响——臂对句柄只做"存 / 取 / 转交"，从不调它的方法。但本文件不止
+    臂用例：`_Telemetry` 的单测（`test_telemetry_*`）**正在断言这个 `str` 形状**
+    （`assert telemetry.ctx_span == "ctx-span-2"`），所以"把本文件的替身全换成同型句柄"
+    是**有断言成本的改动**，不是机械替换——同型替身在
+    `tests/observability/test_tracer_port.py`（`_IdentifiedNullSpan`），那里测的是
+    "句柄怎么被收口"。本文件其余 `str` 句柄替身（`_CountSpy` / `_AritySpy`）同理保留，
+    该分叉登记在 `docs/SDD_TICKET_TRACKER.md` 的 **B-34 残余②**（原始形状）与 **B-35 残余**
+    第 9 条（本批的如实改写与"有断言成本"结论）。
     """
 
     trace_id = "trace-1"
@@ -121,7 +136,9 @@ class _RecordingTracer:
         self._record("model_call_completed", span=generation, output_text=output_text)
 
     def model_call_failed(self, generation: Any, *, error_type: str) -> None:
-        self._record("model_call_failed", error_type=error_type)
+        # 句柄也记下来：`close_pending` 这条出口此前**没有身份断言**（窄复验 B 轴 C4 实测
+        # "传 None 照样 59 条全绿"）⇒ 记 `span` 才能钉住"转交的是在途那个句柄"。
+        self._record("model_call_failed", span=generation, error_type=error_type)
 
 
 class _PendingCoordinator:
@@ -206,12 +223,17 @@ def _runtime(
 
 
 class _ArmsKit:
-    """一次装配的全部零件（臂 + 便于断言的句柄）。"""
+    """一次装配的全部零件（臂 + 便于断言的句柄）。
+
+    `streamer` 声明成 `Any` 而不是 `BlockStreamer`：这里的故障注入用的是**鸭子类型**替身
+    （`_FailingStreamer` 只实现 `interrupt`，刻意不继承生产类——继承会把"臂只调这一面"
+    这条事实藏起来）。注成生产类型等于对类型检查器说谎。
+    """
 
     def __init__(
         self, runtime: AgentRuntime, session: Session, *, step_base: int = 0,
         run_id: str | None = RUN_ID, memory_event_start: int = 0,
-        streamer: BlockStreamer | None = None, coord: Any = None,
+        streamer: Any = None, coord: Any = None,
         tracer: _RecordingTracer | None = None,
         cancel_reason_supplier: Any = None,
         usage_total: dict[str, int] | None = None,
@@ -362,9 +384,14 @@ def test_telemetry_success_path_calls_the_port_even_with_a_degraded_handle() -> 
 
 
 def test_telemetry_close_pending_order_and_attribution() -> None:
-    """收口三连：在途 ctx_span → 在途 generation（取消归因 "cancelled"）→ run_failed。"""
+    """收口三连：在途 ctx_span → 在途 generation（取消归因 "cancelled"）→ run_failed。
+
+    句柄用 `object()` 而非字面量：`_Telemetry` 若把在途句柄换成别的值（或 `None`），
+    `span=gen` 这条断言才红——窄复验 B 轴 C4 实测这条出口此前**没有身份断言**。
+    """
     tracer = _RecordingTracer()
-    telemetry = _Telemetry(tracer=tracer, ctx_span="span-ctx", generation="gen-1")
+    gen = object()
+    telemetry = _Telemetry(tracer=tracer, ctx_span="span-ctx", generation=gen)
 
     telemetry.close_pending(error_type=None, reason="cancelled", cancelled=True)
 
@@ -372,19 +399,20 @@ def test_telemetry_close_pending_order_and_attribution() -> None:
         "context_build_completed", "model_call_failed", "run_failed",
     ]
     assert ("context_build_completed", {"span": "span-ctx"}) in tracer.calls
-    assert ("model_call_failed", {"error_type": "cancelled"}) in tracer.calls
+    assert ("model_call_failed", {"span": gen, "error_type": "cancelled"}) in tracer.calls
     assert telemetry.ctx_span is None and telemetry.generation is None
 
 
 def test_telemetry_close_pending_keeps_the_exception_attribution() -> None:
     """异常臂：error_type 原样透传（未分类故障的可读文案由 `_TerminalContext` 负责）。"""
     tracer = _RecordingTracer()
-    telemetry = _Telemetry(tracer=tracer, generation="gen-1")
+    gen = object()
+    telemetry = _Telemetry(tracer=tracer, generation=gen)
 
     telemetry.close_pending(error_type="TimeoutError", reason="TimeoutError")
 
     assert [name for name, _ in tracer.calls] == ["model_call_failed", "run_failed"]
-    assert ("model_call_failed", {"error_type": "TimeoutError"}) in tracer.calls
+    assert ("model_call_failed", {"span": gen, "error_type": "TimeoutError"}) in tracer.calls
 
 
 def test_telemetry_close_pending_skips_handles_that_are_not_in_flight() -> None:
@@ -414,6 +442,48 @@ def test_telemetry_forwards_the_compaction_count() -> None:
     telemetry.context_build_completed()
 
     assert seen == [3, None]
+
+
+def test_context_build_completed_keeps_the_pre_264_keyword_arity() -> None:
+    """残余 R1：**关键字集合**逐字回到 #264 之前（端口输出无差异，差异在这层）。
+
+    `_Telemetry` 的两个活调用点 + `close_pending` 的直呼端口，两种形状：成功路径传
+    `compacted_turn_count`（值域内，`None` 也算传——那是"本轮没有压缩发生"的实参）；
+    `close_pending` 与 context 超限臂**不传**。历史：#265 把**经 wrapper 的两处**统一成
+    "一律带关键字"（超限臂随之从裸调变带关键字）；`close_pending` 一直直呼端口、
+    从不经该参数，谈不上"被统一"。本票把 wrapper 的缺省形状改回"调用方没给就不传"
+    （哨兵 `_UNSET`），本条钉住口径。
+
+    为什么值得一条用例：显式 `None` 与不传在 `RunTracer` 那里**输出同效**
+    （按 `is not None` 决定是否写 metadata 键），所以这条差异只能在这一层被观察到；
+    而"调用形状变了"本身是接口契约变动（第三方 Tracer 实现的自定义签名会受影响）。
+
+    本用例只钉 `_Telemetry` 自己的缺省语义；"**臂**有没有把形状用对"由
+    `test_context_exceeded_arm_closes_and_clears_the_handle`（臂层裸调）与
+    `test_context_window_exceeded_then_disconnect_collects_the_span_once`
+    （端到端 kwargs 面）分别承载。
+
+    末项（第 4 个 `()`）顺带钉住 `close_pending` 的形状：它**直呼端口**、从不经上面那个
+    参数，所以它给出的关键字集合也是空——这正是它与前两项分属两条路径的证据。
+    """
+    seen: list[tuple[str, ...]] = []
+
+    class _AritySpy(_RecordingTracer):
+        def context_build_completed(self, span: Any, **kwargs: Any) -> None:
+            seen.append(tuple(sorted(kwargs)))
+
+    telemetry = _Telemetry(tracer=_AritySpy())
+
+    telemetry.context_build_started(step=0)
+    telemetry.context_build_completed(compacted_turn_count=3)   # 有压缩：
+    telemetry.context_build_started(step=1)
+    telemetry.context_build_completed(compacted_turn_count=None)  # 无压缩但调用方**给了**值
+    telemetry.context_build_started(step=2)
+    telemetry.context_build_completed()                         # 调用方没给（超限臂形状）
+    telemetry.context_build_started(step=3)                     # 再起一次：close_pending 只在途才调
+    telemetry.close_pending(error_type=None, reason="cancelled")
+
+    assert seen == [("compacted_turn_count",), ("compacted_turn_count",), (), ()]
 
 
 def test_telemetry_snapshot_leaves_live_handles_alone() -> None:
@@ -571,21 +641,28 @@ async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> 
 
 
 @pytest.mark.asyncio
-async def test_context_exceeded_arm_keeps_the_handle_it_closed(session: Session) -> None:
-    """超限臂收口后**不**清句柄——这是 #264 之前的既有形状，本票逐字保留。
+async def test_context_exceeded_arm_closes_and_clears_the_handle(session: Session) -> None:
+    """超限臂**收口即清口**（#285 / 残余 R2）：句柄不会被第二条收集臂再收一次。
 
-    为什么值得一条用例：这是本票唯一"行为差异面"。若改成收口即清口，"超限 + 消费方在
-    终态帧上断连"（GeneratorExit 落在下面那次 yield 之后）这条**生产可达**路径会**少
-    一次** `context_build_completed`——旧形状对同一 span 二次收口。两轴独立实测的差分
-    是 6 次 vs 5 次端口调用（脚本与读数见 tracker #265 段的残余 R2 与归档明细）。
+    历史：#264 之前这条臂收口后**保留**句柄，于是"超限 + 消费方在终态帧上断连"
+    （GeneratorExit 落在下面那次 yield 之后）这条**生产可达**路径会对同一 span 二次
+    收口——`#265` 的等价重构逐字复刻了该形状（`keep_handle=True`）并把它登记为残余
+    R2 / R3；`#285` 修掉它，本用例随新语义翻转（旧名
+    `..._keeps_the_handle_it_closed`，此前钉的是"二次收口"这一缺陷事实）。
 
-    收集者不止取消臂：超限臂落终态的 `append` 失败（存储故障）会让**异常臂**同样再收
-    一次，实测与 #264 之前逐项相同（残余 R3）。
-
-    ⇒ 本用例钉的是**既有事实**（不是期望语义）：断言里的"二次收口"是缺陷，不是契约。
-    修它要单独开票（等价重构票不许顺手改行为），届时本用例会红——那正是它的用途。
+    钉四件事，缺一不可：① 收口后句柄为空；② 取消臂在同一 arms 上**不再**产生第二条
+    `context_build_completed`；③ 终态语义不变（只有一条 `run/failed`）；④ 收口是
+    **裸调**（残余 R1 在这一层的形状——只钉 `_Telemetry` 自己的缺省行为抓不住
+    "臂把 `compacted_turn_count=None` 显式传回去"这种回归）。
     """
-    kit = _kit(session, step_base=2)
+    ctx_kwargs: list[tuple[str, ...]] = []
+
+    class _AritySpy(_RecordingTracer):
+        def context_build_completed(self, span: Any, **kwargs: Any) -> None:
+            ctx_kwargs.append(tuple(sorted(kwargs)))
+            self._record("context_build_completed", span=span)
+
+    kit = _kit(session, step_base=2, tracer=_AritySpy())
     kit.arms.telemetry.ctx_span = "span-ctx"
 
     emitted = await _drain(
@@ -596,16 +673,56 @@ async def test_context_exceeded_arm_keeps_the_handle_it_closed(session: Session)
 
     assert [e.type for e in emitted] == [RUN_FAILED]
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
-    # 既有形状：收口不清口 —— 句柄仍在（对比成功路径：收口即清口）
-    assert kit.arms.telemetry.ctx_span == "span-ctx"
+    # 收口即清口（与成功路径同形）
+    assert kit.arms.telemetry.ctx_span is None
+    assert ctx_kwargs == [()], "超限臂的收口是裸调（R1：不传 compacted_turn_count）"
 
-    # 于是取消臂（终态帧之后断连）拿同一句柄**再收一次** —— 既有事实，如实钉住
+    # 取消臂（终态帧之后断连）拿不到句柄 ⇒ **没有**第二次收口
     kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     assert [name for name, _ in kit.tracer.calls] == [
-        "context_build_completed", "run_failed", "context_build_completed", "run_failed",
+        "context_build_completed", "run_failed", "run_failed",
     ]
-    assert kit.tracer.calls[2][1]["span"] == "span-ctx"
+    assert ctx_kwargs == [()], "第二条收集臂根本不该调端口"
+
+
+@pytest.mark.asyncio
+async def test_context_exceeded_arm_append_failure_does_not_recollect_the_span(
+    session: Session, tmp_path: Any,
+) -> None:
+    """R3 的第二条收集出口 = **异常臂**：超限臂落终态的 `append` 失败也只收一次（#285）。
+
+    构造方式用的是仓库既有夹具（`tests/session/store_fixtures.py`，残余⑦ 指明的成本口径）：
+    终态 `append` 抛 `SeqConflict` ⇒ 生产路径把异常交给顶层异常臂处理，异常臂经
+    `arms.context(steps)` 取**快照**再收口。修 R2/R3 之前，快照里仍有那个已被超限臂
+    收过的句柄 ⇒ 端口收到第二次 `context_build_completed`（与取消臂同源，只是出口不同）。
+
+    只钉观测面（端口调用计数与句柄归属）：异常臂自己的持久化路径在同一次故障下也会失败
+    （存储坏着），那不是本用例的被测面。
+    """
+    kit = _kit(session, step_base=2)
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    session._store = RejectingStore(tmp_path)
+
+    with pytest.raises(SeqConflict):
+        await _drain(
+            kit.runtime._terminal_context_exceeded(
+                kit.arms, steps=3, error=ContextWindowExceededError("上下文超限"),
+            ),
+        )
+
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
+    assert kit.arms.telemetry.ctx_span is None
+
+    # 顶层异常臂（生产里由 _drive 的 except 调用）——同一 arms、同一份快照语义
+    with pytest.raises(SeqConflict):  # 存储故障仍在：异常臂的终态写同样失败
+        await _drain(
+            kit.runtime._terminal_exception(kit.arms, steps=3, error=SeqConflict("写不进去")),
+        )
+
+    assert [name for name, _ in kit.tracer.calls] == [
+        "context_build_completed", "run_failed", "run_failed",
+    ], "异常臂不得对已收口的 span 再收一次（R3）"
 
 
 # ---------------------------------------------------------------------------
@@ -655,8 +772,11 @@ async def test_cancelled_arm_discards_events_but_persists_them(session: Session)
     # `drain_transitions() == []`——它只反映替身自己清空了队列，臂一次都不取也照样绿）
     assert coord.drains == 1
     assert [e.type for e in written].count(MODEL_FALLBACK) == 1
-    # 观测：取消臂也要收口 generation（error_type="cancelled" 而非异常类型）
-    assert ("model_call_failed", {"error_type": "cancelled"}) in kit.tracer.calls
+    # 观测：取消臂也要收口 generation（error_type="cancelled" 而非异常类型）。
+    # 句柄按**身份**断言（B 轴 P3）：此前替身 `_record("model_call_failed", error_type=…)`
+    # 把 generation 丢了，于是 `close_pending` 传 `None` 也全绿——"收口的是哪一个句柄"
+    # 无人钉住；现在替身记下它，这里连值一起断（取消臂这一步收的就是在途那个）。
+    assert ("model_call_failed", {"span": "gen-1", "error_type": "cancelled"}) in kit.tracer.calls
     assert ("context_build_completed", {"span": "span-ctx"}) in kit.tracer.calls
     assert ("run_failed", {"reason": "cancelled"}) in kit.tracer.calls
     assert [c[0] for c in kit.tracer.calls] == [
@@ -782,3 +902,210 @@ async def test_failed_arm_uses_the_unclassified_message_for_unknown_errors(
         error_type="ValueError",
     )
     assert session.events[-2].data["message"] == "model call failed: ValueError"
+
+
+# ---------------------------------------------------------------------------
+# R4：收口段抛错不得让后续段消失（2026-09-22）
+# ---------------------------------------------------------------------------
+
+
+class _FailingStreamer:
+    """`interrupt(step=…)` 抛错的 streamer 替身（R4 的故障注入点，鸭子类型）。
+
+    生产里这里坐的是 `BlockStreamer`；本替身只实现终结臂真正调用的那一面，用来把
+    "流收口段抛错"做成可复现的故障（修前它让两臂后面的每一行都不执行）。
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls: list[int] = []
+
+    def interrupt(self, *, step: int) -> list[Any]:
+        self.calls.append(step)
+        raise self.error
+
+
+class _ExplodingPortTracer(_RecordingTracer):
+    """在 `model_call_failed` 上抛错的端口替身（R4 的第二段故障注入点）。"""
+
+    def model_call_failed(self, generation: Any, *, error_type: str) -> None:
+        raise RuntimeError("观测端口炸了")
+
+
+@pytest.mark.asyncio
+async def test_failed_arm_keeps_everything_after_the_failing_stream_stage(
+    session: Session,
+) -> None:
+    """R4（异常臂出口）：流收口段抛错时，观测收口与终态事件仍然执行。
+
+    修前实测形状：`interrupt_streams()` 一抛错，本臂后面的每一行都不执行 ⇒ 在途的
+    ctx_span / generation **0 次收口**、session 里也**没有** `run/failed`（消费方只看到
+    一个异常）。本用例钉三件事：① 端口收到三条收口调用（context_build_completed /
+    model_call_failed / run_failed）；② 终态 `run/failed` 落盘；③ 第一处异常在**全部
+    收尾跑完后**原样再抛（类型与文本都不替换）。
+    """
+    streamer = _FailingStreamer(RuntimeError("streamer 收口炸了"))
+    kit = _kit(session, streamer=streamer, step_base=2)
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="streamer 收口炸了"):
+        await _drain(
+            kit.runtime._terminal_exception(kit.arms, steps=3, error=ValueError("模型调用炸了")),
+        )
+
+    assert streamer.calls == [kit.arms.envelope_step(3) + 1], \
+        "流收口段（interrupt）确实被走到过——故障注入点有效"
+    assert [name for name, _ in kit.tracer.calls] == [
+        "context_build_completed", "model_call_failed", "run_failed",
+    ], "观测收口不得被前一段的故障跳过（R4）"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED]
+    assert written[-1].data["reason"] == "ValueError", \
+        "归因仍来自 run 的原始错误，不因收尾段故障而变"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_arm_keeps_everything_after_the_failing_stream_stage(
+    session: Session,
+) -> None:
+    """R4（取消臂出口）：同一故障在取消臂上同样不得让收口与终态事件消失。
+
+    取消臂是**另一条出口**（生成器关闭中调用、事件被丢弃），与异常臂各写一遍才是这族
+    缺口的完整判据面（与 R2/R3 的处置口径一致）。
+    """
+    streamer = _FailingStreamer(RuntimeError("streamer 收口炸了"))
+    kit = _kit(session, streamer=streamer, step_base=2)
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="streamer 收口炸了"):
+        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+
+    assert streamer.calls == [kit.arms.envelope_step(3) + 1]
+    assert [name for name, _ in kit.tracer.calls] == [
+        "context_build_completed", "model_call_failed", "run_failed",
+    ]
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED]
+    assert written[-1].data["reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_arm_still_writes_the_terminal_event_when_the_port_raises(
+    session: Session,
+) -> None:
+    """R4（第二段故障）：观测收口自己抛错时，终态事件仍然落盘。
+
+    与上一条的差别是故障段不同（`close_observability` 里的端口调用）：它证明"逐段兜底"
+    覆盖的是整条收尾序列，而不是只护住 `interrupt_streams` 这一段。
+    """
+    kit = _kit(session, step_base=2, tracer=_ExplodingPortTracer())
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="观测端口炸了"):
+        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
+        "抛错那一步之前仍执行过；它之后的 run_failed 没到（故障确实发生在段中间）"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
+        "终态事件不得因收口段故障而消失（R4）"
+    assert written[-1].data["reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_both_stages_failing_re_raises_the_first_one_after_running_both(
+    session: Session,
+) -> None:
+    """两段都炸：`raise_first()` 还原**第一处**，且第二段照样跑到（不是短路退出）。
+
+    "先到先得"是 `_TerminalStages` 的契约之一（只存第一处）。不钉住的话，把它改成
+    "每次都覆盖"不会有任何用例变红——而调用方看到的失败会从"流收口的错"翻成"观测收口的
+    错"，归因随之翻转（排障时先看到的是完全不相干的那一段）。
+    """
+    streamer = _FailingStreamer(RuntimeError("streamer 收口炸了"))
+    kit = _kit(session, streamer=streamer, step_base=2, tracer=_ExplodingPortTracer())
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="streamer 收口炸了"):
+        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+
+    assert streamer.calls == [kit.arms.envelope_step(3) + 1], "第一段（流收口）跑过"
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
+        "第二段也跑到了（否则不会有第二处异常）；它内部抛错，故只到这一步"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
+        "两段皆炸也不影响终态事件落盘"
+
+
+@pytest.mark.asyncio
+async def test_failed_arm_still_writes_the_terminal_event_when_the_port_raises(
+    session: Session,
+) -> None:
+    """R4（异常臂第二段）：观测收口自己抛错时，`run/failed` 仍然落盘。
+
+    **为什么异常臂要单独一遍**（两轴审查 B 轴 P2）：两臂的收尾**不是同一段代码**——
+    取消臂逐段直呼，异常臂在段之间把收口产出的事件逐条镜像给流消费者。把
+    `_terminal_exception` 里那句 `stages.run("close_observability", …)` 换回直呼
+    （`for streamed in ctx.close_observability(…)`）时，取消臂的同类用例
+    （`test_cancelled_arm_still_writes_the_terminal_event_when_the_port_raises`）
+    **仍然全绿**，只有本用例变红：异常在第二段当场穿透，`failure_terminal` 那几行
+    再也到不了，`run/failed` 随之消失——正是 R4 要堵的形状（四轮复验实测：那处改动让
+    arms 文件内 28 条保持绿、AC5 五文件集 1 红 / 301 绿，红的正是本用例）。
+    """
+    kit = _kit(session, step_base=2, tracer=_ExplodingPortTracer())
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="观测端口炸了"):
+        await _drain(
+            kit.runtime._terminal_exception(kit.arms, steps=3, error=ValueError("模型调用炸了")),
+        )
+
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
+        "抛错那一步之前仍执行过；它之后的 run_failed 没到（故障确实发生在段中间）"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
+        "终态事件不得因收口段故障而消失（R4）"
+    assert written[-1].data["reason"] == "ValueError", \
+        "归因仍来自 run 的原始错误，不因收尾段故障而变"
+
+
+def test_a_failing_stage_is_reported_in_the_structured_log(caplog: pytest.LogCaptureFixture) -> None:
+    """段抛错**不静默**：一条结构化日志带上段名 + 异常类型 + 文本（两轴审查 B 轴 P3）。
+
+    类 docstring 承诺"记一条结构化日志（类型 + 文本；不静默）并继续跑后续段"，但删掉
+    `_TerminalStages.run` 里那次 `log_event(...)` 后全部用例照绿——收尾故障只剩调用方
+    看到的第一处异常，而"哪一段炸的""后续段已继续执行"这两个事实无人承载，排障时只能
+    从原始异常的调用栈里猜。这里不经两条臂、直接调执行器，把日志面本身钉成判据。
+    """
+    stages = _TerminalStages()
+
+    def boom() -> list[SessionEvent]:
+        raise RuntimeError("收口炸了")
+
+    with caplog.at_level(logging.WARNING, logger="agent_harness.agent"):
+        assert stages.run("interrupt_streams", boom) == []
+
+    records = [r for r in caplog.records if getattr(r, "event_type", None) == "system_log"]
+    assert len(records) == 1, "收尾段故障必须留下恰好一条结构化日志"
+    record = records[0]
+    assert record.stage == "interrupt_streams"
+    assert record.error_type == "RuntimeError"
+    assert record.error_message == "收口炸了"
+    assert record.outcome == "stage_failed"
+    assert "interrupt_streams" in record.getMessage(), "段名也要在人类可读的消息里"
+    assert stages.first is not None, "日志之外，第一处异常仍要留给 raise_first()"

@@ -70,8 +70,11 @@ def _make_runtime(workspace: Path) -> AgentRuntime:
     )
 
 
+# 两层 skip，判的是两件不同的事：skipif = 「key 配了没有」（缺配置），
+# requires_live_model = 「配的端点此刻能不能服务」（账户/配额/网络，见 tests/live_model_guard.py）。
 @pytest.mark.skipif(not _HAS_API_KEY, reason="需要 .env 里配置 MODEL_API_KEY 才跑集成测试")
 @pytest.mark.integration
+@pytest.mark.usefixtures("requires_live_model")
 @pytest.mark.asyncio
 class TestAgentCodingIntegration:
     """真实 LLM 驱动的端到端：Agent 在 sandbox 里写文件、跑命令、读结果、给回答。"""
