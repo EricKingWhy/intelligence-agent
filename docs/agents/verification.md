@@ -34,6 +34,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
 | 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
 | 只想重跑失败的那一条 | `python scripts/gate0.py --only <lane>` | 人工 |
+| 一次改动只重跑受影响的那些 | `python scripts/gate0.py --affected <rev>`（见 §2 ⑭；<rev> 亦可为 `A..B`；**只内联 pytest 子集**） | 人工 |
 
 ---
 
@@ -88,15 +89,16 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 期望证据：退出 0；配置在 `web/.oxlintrc.json`（`react` / `typescript` / `oxc` 插件）。
 - 实测：冷 4.4s / 热 0.6s。
 
-### ⑦ 生成物同步守卫（跨 `src` ↔ `web`，只有这一条能抓）
+### ⑦ 生成物同步守卫 + 验证映射守卫（跨 `src` ↔ `web`，只有这一条能抓）
 
 - 命令：`PYTHONUTF8=1 PYTHONPATH= .venv/Scripts/python.exe -m pytest
-  tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py -q -p no:randomly -p no:cacheprovider`
+  tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py
+  tests/test_verification_map.py -q -p no:randomly -p no:cacheprovider`
 - 守卫对象：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
   `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）与
   `docs/EVENT_VOCABULARY.md`（`scripts/gen_event_vocabulary.py`）。
-- 期望证据：`6 passed`（2 文件）。
-- 实测：冷 6.5s / 热 3.6–4.0s。
+- 期望证据：`6 passed`（生成物 2 文件）+ `16 passed`（验证映射守卫，见 §2 ⑭）= **`22 passed`（3 文件）**。
+- 实测：3 文件 22 例 —— pytest 自身热 **1.2s**；Gate-0 车道口径 **4.0s**（含解释器启动）。
 - 漂移时先跑生成器：`uv run python scripts/gen_event_types.py` / `... gen_event_vocabulary.py`。
 
 ### ⑧ 审查覆盖闸门
@@ -147,6 +149,53 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 实测：**热 20–22s、冷 ≈40s**（预算 60s）。
 - 由 `.githooks/pre-push` 在推送前调用（启用：`git config core.hooksPath .githooks`）。
 
+### ⑭ 验证映射与 `--affected`（受影响面的机器化；issue #292）
+
+- **产物**：`docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的**机械映射**。
+  列**对齐** `docs/agents/skills/create-verification-skill` 的 feature 四要素（`Sub-features` /
+  `How to get to it` / `Driving it with <harness>` / `Gotchas`），另加 `surface`（只允许**路径前缀**或
+  **精确路径**，禁通配、禁 catch-all）与 `neg_tier`（`blast-radius` 确定性阶梯）。
+- **守卫**：`tests/test_verification_map.py`（跑在 Gate-0 的 `guards` 车道里）：① `git ls-files` 里
+  **每个**被跟踪文件都被映射；② 结构合法（7 列 / layer 唯一 / 车道 id 在词表内 / focused 路径存在）；
+  ③ **每一行都承重**（删掉任一行 ⇒ 至少一个文件的受影响集合变化）；④ 自带**独立**匹配器，与
+  `gate0.py` 对**每个**文件求值**逐项相同**；⑤ `focused` 必须**真跑得动**——pytest 目标要对盘核到
+  `test_*.py`（`pytest <空目录>` 会以 exit 5 收场，与 vitest 的 `No test files found` 是同一形状的
+  **假 FAIL**），且"哪些 focused 按设计不内联"必须在 `test_focused_only_inlines_pytest_subsets` 里
+  **逐个登记**。⇒ 映射腐烂、或把非 pytest 面接上内联车道 = **推送前就红**。
+- **命令**：`.venv/Scripts/python.exe scripts/gate0.py --affected <rev>`（`<rev>` 亦可为范围 `A..B`）。
+  只跑受影响车道 + 受影响 focused 用例；**默认行为不变**（不带它恒跑全部 6 车道）。
+- **⚠ `focused` 的内联范围（2026-09-22 定，两条血证）**：**只有 pytest 子集内联**（`tests/**` 或 `*.py`）。
+  前端 / 浏览器类（`vitest` / `e2e` / `live`）与整个 `tests/`（= `pytest-full` **本身**，子集才便宜）
+  **一律只登记、不内联**，输出里逐条注明原因。血证 ①（坐标系混用）：`focused` 路径一律**相对仓库根**，
+  而 vitest 的 cwd 是 `web/` ⇒ 把 `web/src` 原样当 filter 会 `No test files found, exiting with code 1`
+  ——**假 FAIL**，而那次改动根本没碰 `web/`。血证 ②（潮水线以下的红）：修好过滤器后测出，**干净 HEAD**
+  上 `vitest run src` 本身就是红的（67 文件 1067 例中 1 例超时，`web/src/components/StepDetail.window.test.tsx`，
+  即 B-29 已知 flake）⇒ 前端红**无法归因**到本次改动。
+- **期望证据**：`受影响面（--affected …）` 块 + `Gate-0 PASS/FAIL`；`neg_tier < 4` 的层会被标 **unproven**。
+- **实测（2026-09-22，同树 `HEAD=784df9e / tree=fb8780bd`）**：
+
+  | 状态 | 改动面 | 选中车道 | 内联跑的 | 只登记不跑的 | 墙钟 |
+  | --- | --- | --- | --- | --- | --- |
+  | A 后端 session | 1 文件（`session/approval.py`） | `coverage/diff-check/guards/pytest-full/ruff` | 4 条快车道 + `tests/session` | `pytest-full` | **107.7s**（其中 `tests/session` 96.8s） |
+  | B 前端 src | 1 文件（`web/src/**`） | `build/coverage/diff-check/oxlint/tsc/vitest` | `diff-check/oxlint/tsc/coverage` | `web/src`（vitest）、`build` | **12.2s** |
+  | C 纯 docs | 1 文件（`review_ledger.tsv`） | `coverage/diff-check` | 这两条 | — | **3.8s** |
+
+  同树**全量** Gate-0 作对照：6/6 PASS **16.3s**。⚠ A 行比全量 Gate-0 **更慢**，这是**正确**的——
+  全量 Gate-0 **一条测试都不跑**，而 A 真的跑了 96.8s 的受影响子集。`--affected` 的价值**不在**"比快车道快"，
+  而在 ① 告诉你**哪些重车道**受影响（A 会点名 `pytest-full`，B 会点名 `vitest` + `build`）
+  ② 用**受影响子集**替掉整套 `pytest-full` / `vitest`。
+
+- **"整条重来"的对照基线（同树实测）**：全量 Gate-0 **16.3s** + 全量 `pytest tests` **511.2s**
+  （**3098 passed / 3 failed**，3 条**全**在 `tests/evaluation/*` —— 即 §3 里登记的 safe-delete 配额假红，
+  与本次改动无关；这恰好又一次说明 §5 第 5 条"只看失败**集合差集**"）+ 全量 `vitest run src` **28.2s**
+  ≈ **555.7s**（还不含 ⑩ 构建 / ⑪ e2e）。⇒ A 状态用 `--affected` 只花 **107.7s**，**约 5.2× 便宜**，
+  并且它点名了唯一必须补跑的重车道（`pytest-full`）。
+- **变异证明（隔离克隆 `%TEMP%` 里真删真改，正控全绿）**：删 `frontend-src` 整行 ⇒ 覆盖面红；
+  加一条重复行（`docs-dup`）⇒ **承重**红；把 `focused_runner` 复原成血证 ① 的写法 ⇒ **内联策略锁**红；
+  `neg_tier` 改 9 ⇒ 词表红。
+- ⚠ **边界**（与协议 §8.8.9 **同源**，改一处必须两处同改）：只用于**失败后的增量重跑**；
+  未映射路径 ⇒ **fail-closed 退回全量**；不得替代推送前全量 Gate-0，也不得替代集成前完整门禁（§4）。
+
 ---
 
 ## 3. 本机环境（WorkBuddy 沙箱）的跑法差异
@@ -174,9 +223,9 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   （`diff-check` / `ruff` / `oxlint` / `tsc` / `guards` / `coverage`）成立——理由是它们耗时已被实测
   （20–22s 热 / 36–45s 冷）、且判定是机械的。**不得**据此认为"完整门禁与 e2e 也可以按路径跳过"：
   **不在 Gate-0 里的那几条（②③⑤⑩⑪）**是长耗时的那批（② 后端全量 pytest 是分钟级；③⑪ 本文件无耗时读数；⑤ 标注十秒级、⑩ 标注秒到十秒级，两者均未在本批实测；⑫ 真机验收属人工车道，无耗时读数），且它们的受影响面**不由人当场划集合**（那正是放松的入口），只能来自机械可复核的
-  映射（协议 **§8.8.2 INV-1 / §8.8.3 边界表**；映射的机器化属 issue #292）。
-- **`--affected <rev>`（issue #292 落地后）的边界**：它**只**用于**失败后的增量重跑**，既不得替代
-  **推送前全量 Gate-0**（推送前恒跑全部 6 条），也不得替代**集成前完整门禁**（协议 §8.8.4 第 1 行）。
+  映射（协议 **§8.8.2 INV-1 / §8.8.3 边界表 / §8.8.9**；映射**已机器化**，见 §2 ⑭）。
+- **`--affected <rev>` 的边界（issue #292 **已落地**，见 §2 ⑭）**：它**只**用于**失败后的增量重跑**，既不得替代
+  **推送前全量 Gate-0**（推送前恒跑全部 6 条），也不得替代**集成前完整门禁**（协议 §8.8.4 第 1 行）。改动面里出现**未映射路径** ⇒ **fail-closed 退回全量**；`neg_tier < 4` 的层会被标 **unproven**，**依据 unproven 主张跳过任一条车道必须在台账 / 落点记录里写明**。
 - `pre-push` hook **是本地便利，不是安全边界**：`git push --no-verify` 可绕过；
   `core.hooksPath` 是**本地配置**、不随仓库分发 ⇒ **别的 clone 没启用就等于没有**。
   所以它取消不了 CI，也取消不了两轴独立审查；**两侧仍然没有 CI**（这是已知缺口，不是本文能解决的）。
@@ -192,5 +241,6 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 2. **不跨批沿用读数**；不传递来源树不明的读数（协议 §8.7）。
 3. 例外通道：集成前先比 `HEAD^{tree}`——两 clone tree 相同即证明"跑过门禁的树 = 被集成的树"，
    不必重复跑全量（协议 §7 第 8 条）。
-4. 失败时**只重跑失败的那条**（`--only`），不整条流水线重跑。
+4. 失败时**只重跑失败的那条**（`--only`），不整条流水线重跑；整票级的受影响重跑用 `--affected <rev>`
+   （见 §2 ⑭），但**它标出的 `unproven` 必须一并写进读数**。
 5. 不要用"失败总数"归因：沙箱负载下非确定性，只看**失败集合差集**。
