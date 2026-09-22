@@ -177,28 +177,47 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   前端 / 浏览器类（`vitest` / `e2e` / `live`）与整个 `tests/`（= `pytest-full` **本身**，子集才便宜）
   **一律只登记、不内联**，输出里逐条注明原因。血证 ①（坐标系混用）：`focused` 路径一律**相对仓库根**，
   而 vitest 的 cwd 是 `web/` ⇒ 把 `web/src` 原样当 filter 会 `No test files found, exiting with code 1`
-  ——**假 FAIL**，而那次改动根本没碰 `web/`。血证 ②（潮水线以下的红）：修好过滤器后测出，**干净 HEAD**
-  上 `vitest run src` 本身就是红的（67 文件 1067 例中 1 例超时，`web/src/components/StepDetail.window.test.tsx`，
-  即 B-29 已知 flake）⇒ 前端红**无法归因**到本次改动。
+  ——**假 FAIL**，而那次改动根本没碰 `web/`。血证 ②（潮水线以下的红）：修好过滤器后测出，**同一类干净树**
+  上 `vitest run src` 的两次读数**结果不同**——一次 67 文件 1067 例中 1 例超时
+  （`web/src/components/StepDetail.window.test.tsx`，6224ms，即 B-29 已知 flake），一次 **67 文件
+  1067 例全绿** ⇒ 该红是**非确定性**的，前端红**结构上无法归因**到本次改动。
 - **期望证据**：`受影响面（--affected …）` 块 + `Gate-0 PASS/FAIL`；`neg_tier < 4` 的层会被标 **unproven**。
-- **实测（2026-09-22，同树 `HEAD=784df9e / tree=fb8780bd`）**：
+- **实测（2026-09-22，冻结树 `HEAD=deee3313 / tree=4db47417`；`git status --porcelain` 的**已跟踪**
+  部分为空，仅剩一个**非本批**的未跟踪 `.zcodeignore`）**：
 
-  | 状态 | 改动面 | 选中车道 | 内联跑的 | 只登记不跑的 | 墙钟 |
+  | 状态 | 改动面 | 选中车道 | 内联跑的 | 只登记不跑的 | 墙钟（Gate-0 自报） |
   | --- | --- | --- | --- | --- | --- |
-  | A 后端 session | 1 文件（`session/approval.py`） | `coverage/diff-check/guards/pytest-full/ruff` | 4 条快车道 + `tests/session` | `pytest-full` | **107.7s**（其中 `tests/session` 96.8s） |
-  | B 前端 src | 1 文件（`web/src/**`） | `build/coverage/diff-check/oxlint/tsc/vitest` | `diff-check/oxlint/tsc/coverage` | `web/src`（vitest）、`build` | **12.2s** |
-  | C 纯 docs | 1 文件（`review_ledger.tsv`） | `coverage/diff-check` | 这两条 | — | **3.8s** |
+  | A 后端 session | 1 文件（`session/approval.py`） | `coverage/diff-check/guards/pytest-full/ruff` | `diff-check`/`ruff`/`guards`/`coverage` + `tests/session` | `pytest-full` | **65.5s**（其中 `tests/session` 58.29s） |
+  | B 前端 src | 1 文件（`web/src/**`） | `build/coverage/diff-check/oxlint/tsc/vitest` | `diff-check`/`oxlint`/`tsc`/`coverage` | `web/src`（vitest）、`build` | **11.6s** |
+  | C 纯 docs | 1 文件（`review_ledger.tsv`） | `coverage/diff-check` | `diff-check`/`coverage` | — | **4.3s** |
 
-  同树**全量** Gate-0 作对照：6/6 PASS **16.3s**。⚠ A 行比全量 Gate-0 **更慢**，这是**正确**的——
-  全量 Gate-0 **一条测试都不跑**，而 A 真的跑了 96.8s 的受影响子集。`--affected` 的价值**不在**"比快车道快"，
-  而在 ① 告诉你**哪些重车道**受影响（A 会点名 `pytest-full`，B 会点名 `vitest` + `build`）
-  ② 用**受影响子集**替掉整套 `pytest-full` / `vitest`。
+  ⚠ **四条读数的 `coverage` 车道都是红的**，这是闸门**正确工作**的形状：它从**工作树**读台账，而本批
+  自己的 7 笔提交（`d79fcba..deee331`）**当时还没写进台账**（本批含代码面 ⇒ 必须走**真实审查行**、
+  不能走白名单）。收口笔落台账后复跑 ⇒ `coverage` **PASS**、闸门 **exit 0**。
 
-- **"整条重来"的对照基线（同树实测）**：全量 Gate-0 **16.3s** + 全量 `pytest tests` **511.2s**
-  （**3098 passed / 3 failed**，3 条**全**在 `tests/evaluation/*` —— 即 §3 里登记的 safe-delete 配额假红，
-  与本次改动无关；这恰好又一次说明 §5 第 5 条"只看失败**集合差集**"）+ 全量 `vitest run src` **28.2s**
-  ≈ **555.7s**（还不含 ⑩ 构建 / ⑪ e2e）。⇒ A 状态用 `--affected` 只花 **107.7s**，**约 5.2× 便宜**，
+  同树**全量** Gate-0 作对照：仅 `coverage` 红、其余 5 条 PASS，**15.7s**。
+  ⚠ A 行比全量 Gate-0 **更慢**，这是**正确**的——全量 Gate-0 **一条测试都不跑**，而 A 真的跑了
+  58.29s 的受影响子集。`--affected` 的价值**不在**"比快车道快"，而在 ① 告诉你**哪些重车道**
+  受影响（A 点名 `pytest-full`，B 点名 `vitest` + `build`）② 用**受影响子集**替掉整套
+  `pytest-full` / `vitest`。
+
+- **三元组对账（票面 comment 新增的 AC「map 与 `--affected` 对同一批改动给出同一组车道」）**：
+  对上述三个改动面，**三路求值逐项相同**——① map 侧（`tests/test_verification_map.py::_mine_eval`，
+  **刻意独立的第二实现**）② summary 侧（`gate0.affected_summary()`，`--affected` 内部真正用的那个）
+  ③ CLI 侧（真跑 `python scripts/gate0.py --affected <range>` 后解析它打印的车道集合）。
+  三态 `map == summary` 与 `map == CLI` **全为 `true`**（车道集合与 focused 集合都比过）；
+  `unmapped` 三态**全为 `[]`**（没有路径落空 ⇒ 没有触发 fail-closed 退回）。
+
+- **"整条重来"的对照基线（同树实测，口径 = 工具自报墙钟）**：全量 Gate-0 **15.7s** + 全量
+  `pytest tests` **427.75s** + 全量 `vitest run src` **18.88s** ≈ **462.3s**
+  （还不含 ⑩ 构建 / ⑪ e2e）。⇒ A 状态用 `--affected` 只花 **65.5s**，**约 7.1× 便宜**，
   并且它点名了唯一必须补跑的重车道（`pytest-full`）。
+  全量 `pytest tests` 的权威读数用 `PYTHONPATH=` 跑（绕开 safe-delete shim——否则跑到后期会被
+  `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 截断、**拿不到结论行**，2026-09-22 实测踩过一次）+ `--junitxml`：
+  `3103 passed, 13 skipped, 42 deselected, 13 warnings in 427.75s`，rc=0；junit 聚合
+  `tests=3116 / failures=0 / errors=0 / skipped=13`。
+  全量 `vitest run src`：`Test Files 67 passed (67)` / `Tests 1067 passed (1067)`，`Duration 18.88s`，rc=0
+  （同类干净树上此前另有过一次 1 例超时的读数 ⇒ 见本节血证 ②，「非确定性」的结论不变）。
 - **变异证明（隔离克隆 `%TEMP%` 里真删真改，正控全绿）**：删 `frontend-src` 整行 ⇒ 覆盖面红；
   加一条重复行（`docs-dup`）⇒ **承重**红；把 `focused_runner` 复原成血证 ① 的写法 ⇒ **内联策略锁**红；
   `neg_tier` 改 9 ⇒ 词表红。
