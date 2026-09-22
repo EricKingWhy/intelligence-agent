@@ -200,3 +200,4 @@ ffd0857	B-35 集成与关单状态如实化（tracker B-35 段「集成与关单
 0ad98ef	B-35 收尾 tip 锚点改自维护口径 + 三方对齐读数更新（tracker 集成与关单段/落点行 + 月度归档 L660 段 + PHASE_STATUS 两行；docs-only）
 2f145af	B-36（#281）文档落点（`PERF_BASELINE.md` B8 节数字面 + AC4 声明 + tracker `## B-36` 段 + 月度归档 L669 + `PHASE_STATUS.md` 焦点/最近条目/按日索引；docs-only，`src`/`tests`/`scripts` 零改动）
 941277e66b2afe3a24e194ec9115f531bdb9b9a8	#282 落点记录（tracker F18-A 段 + 归档 2026-09-22 条 + PHASE_STATUS 焦点/索引/按日定位 + ADR-0041 Status 转 Accepted；docs-only）
+b44b9ef5fd8a8ceef54e3f1c7d0b3d3a8ce5014c	B-36（#281）集成与关单落点（tracker `## B-36` 段「集成与关单（2026-09-22，事实登记）」+ 第 3640 行「#274/#281 未开工」加 2026-09-22 更新注 + 月度归档 B-36 条 4 条子项：集成与关单 / 两条如实披露 / G3 自纠 / 两处持有；docs-only，`src`/`tests`/`web`/`scripts` 零改动）。**两处持有如实登记**：① 本 clone 的 `main` 未 push（领先 `origin/main` 4 笔并行线 docs-only + 其一套未提交的 F18-A 回退状态）；② `PHASE_STATUS.md` 按日索引行待 F18-A 处置定稿后重算（该行随 F18-A 是否落地而变）
