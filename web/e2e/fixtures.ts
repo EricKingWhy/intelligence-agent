@@ -228,6 +228,10 @@ export interface ApiMock {
    *  注入此回调即可**计数**或延迟响应（BUG-011 回归锁：双击只允许一个请求；
    *  延迟响应用来撑开「首个请求还没回来就又点了一下」这个窗口）。 */
   onModelPost?: (route: Route) => Promise<void> | void;
+  /** POST /api/sessions/{id}/permission（F18-A #282 端点，#283 起前端消费；缺省 200 →
+   *  回传请求里的档位与 auto_approve，即真实端点的「改后当下生效值」形状）。
+   *  注入此回调即可**计数**（AC2：取消升档确认时不得发请求）或断言请求体（AC1）。 */
+  onPermissionPost?: (route: Route) => Promise<void> | void;
   /** POST /api/sessions/{id}/forks（T7 #137 分叉；缺省 200 → 派生 child）。
    *  注入此回调即可断言请求体（BUG-001 回归锁：from_seq 必须是 user/message 的
    *  seq，不是 turn.step_id）或伪造 422。 */
@@ -735,6 +739,20 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
           status: 'changed',
           provider: body.provider ?? '',
           model_id: body.model_id ?? '',
+        }),
+        contentType: 'application/json',
+      });
+    }
+    // #283：会话内改权限档（F18-A #282 的端点）。缺省按真实端点答「改后当下生效值」。
+    if (/^\/api\/sessions\/[^/]+\/permission$/.test(path) && req.method() === 'POST') {
+      if (mock.onPermissionPost) return mock.onPermissionPost(route);
+      const body = (req.postDataJSON() ?? {}) as { permission_mode?: string; auto_approve?: boolean };
+      return route.fulfill({
+        status: 200,
+        body: JSON.stringify({
+          status: 'changed',
+          permission_mode: body.permission_mode ?? '',
+          auto_approve: body.auto_approve ?? false,
         }),
         contentType: 'application/json',
       });

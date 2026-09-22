@@ -76,12 +76,15 @@ describe('OptionPicker（Radix Popover 契约，#201）', () => {
     expect(html).toContain('aria-disabled="true"');
   });
 
-  it('disabled + disabledHint → title 换成"为什么不可点"；未 disabled 时 hint 不生效（#236）', () => {
+  it('disabled + disabledHint → title 换成"为什么不可点"；未 disabled 时 hint 不生效（#236/#283）', () => {
     const locked = render({
       options: toCatalogOptions(ENTRIES), value: 'ask', disabled: true,
-      disabledHint: '权限档在会话创建时确定，会话内不可修改',
+      // #283：断的是**机制**（hint 顶掉 trigger 的 title），不是某一句话。这里改用今天
+      // 真正会传进来的中性原因——#236 那句「权限档在会话创建时确定，会话内不可修改」
+      // 已随本票删除（改档可行后它就是假话），拿它当断言样本会把废弃文案钉成契约。
+      disabledHint: '等待审批决策后再改档',
     });
-    expect(locked).toContain('title="权限档在会话创建时确定，会话内不可修改"');
+    expect(locked).toContain('title="等待审批决策后再改档"');
 
     // 未锁定时 hint 只是被传进来，不参与 title（title 仍由选中条目决定）
     const editable = render({

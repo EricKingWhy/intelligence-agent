@@ -147,4 +147,18 @@ describe('composerPermissionMode — 权限 pill 该显示哪一档（#236）', 
   it('选中会话但 conversation 尚未加载（null）→ null', () => {
     expect(composerPermissionMode('s1', null, 'read-only')).toBeNull();
   });
+
+  it('会话内改过档（permission/changed）→ pill 读到的是**改后**的档（#283）', () => {
+    // 取值源没变（仍是 `conversation.session_permission_mode`）——变的是投影：#283 起
+    // `permission/changed` 也折叠进这个字段（最后一条胜），所以会话内改档会如实反映到
+    // pill 上，而不是继续停在创建时的声明档（那正是 #236 的只读 pill 让人误判的地方）。
+    const changed = applyEvent(convOf('s1', 'read-only'), {
+      type: 'permission/changed',
+      seq: 2,
+      session_id: 's1',
+      time: T,
+      data: { permission_mode: 'danger-full-access', auto_approve: true },
+    } as unknown as Parameters<typeof applyEvent>[1]);
+    expect(composerPermissionMode('s1', changed, null)).toBe('danger-full-access');
+  });
 });

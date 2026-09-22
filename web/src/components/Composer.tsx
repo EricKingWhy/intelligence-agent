@@ -6,8 +6,8 @@
  * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
-import { memo, useEffect, useState, type KeyboardEvent } from 'react';
-import { ArrowUp, Brain, Check, Pencil, Play, Shield, Square, User, X, Zap } from 'lucide-react';
+import { memo, useEffect, useId, useState, type KeyboardEvent } from 'react';
+import { ArrowUp, Brain, Check, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
 import type { PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
@@ -16,9 +16,11 @@ import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 
-/** #236：会话内权限 pill 只读时的悬停说明——说清**为什么**不可点（档位是会话属性，
- *  创建后不可变；续聊 amend 面不含该键，改了也不生效）。 */
-const PERMISSION_MODE_LOCKED_HINT = '权限档在会话创建时确定，会话内不可修改';
+/** #283：升到这一档要在 pill 浮层里给一次显式确认（ADR-0041 D1——后端**不加**强制标志位，
+ *  确认是 UX 层的责任）。字面量与后端 `PermissionPolicy.DANGER_FULL_ACCESS` 同值：它同时
+ *  「目录里的一个 id」与「危险判定」，所以不在前端另立第二张表（那样两处一漂移，
+ *  「确认」就会挂在错的档位上——比不确认更糟）。 */
+const DANGER_PERMISSION_MODE = 'danger-full-access';
 
 interface Props {
   streaming: boolean;
@@ -41,11 +43,16 @@ interface Props {
   /** GET /api/permission-modes 清单。空 → 隐藏控件。 */
   permissionModes?: CatalogEntry[];
   selectedPermissionMode?: string | null;
-  onPermissionModeChange?: (id: string | null) => void;
-  /** #236：会话已定档 → 权限 pill **只读**。续聊 amend 面不含 `permission_mode`
-   *  （见 `lib/amend.ts`），所以会话内改档从来就不生效——留着可编辑就是骗人：用户把
-   *  pill 拨到「只读」，以为此后写操作会弹审批，后端仍按**创建时**的档执行。 */
-  permissionModeLocked?: boolean;
+  /** 改档提交口。**失败必须向上抛**：本组件把原因就地回显在权限浮层里，不另开错误通道。
+   *  缺席 = 只读展示（与其余控件同款降级）。 */
+  onPermissionModeChange?: (id: string | null) => Promise<void> | void;
+  /** #283：这个 pill 当前作用于**已存在的会话**（`selectedId !== null`）。
+   *
+   *  会话内改档走 #282 的 `POST /api/sessions/{id}/permission`（**下一轮 run 生效**）——
+   *  #236 的「权限档创建时确定、会话内不可修改」已被 F18-A 推翻，那句悬停提示随本票
+   *  删除（它是「假话引导」：改档可行之后它就不成立了）。
+   *  新会话（`false`）仍是创建期选择：随 create 请求发出，本地意图即真相。 */
+  permissionInSession?: boolean;
   /** GET /api/agent-profiles 清单。空 → 隐藏控件。 */
   agentProfiles?: CatalogEntry[];
   selectedAgentProfile?: string | null;
@@ -83,7 +90,7 @@ export const Composer = memo(function Composer({
   permissionModes = [],
   selectedPermissionMode = null,
   onPermissionModeChange,
-  permissionModeLocked = false,
+  permissionInSession = false,
   agentProfiles = [],
   selectedAgentProfile = null,
   onAgentProfileChange,
@@ -110,6 +117,111 @@ export const Composer = memo(function Composer({
   const locked = approvalPending;
   // 锁定提示只表达「审批阻塞」这一种原因；纯 streaming 有自己的 affordances（停止键/Esc 提示）。
   const showLock = approvalPending && !streaming;
+
+  // ── #283 权限 pill：会话内可改 + 升档确认 ──
+  // 禁用只剩两个**操作性**原因（都不是「档位不可变」）：等审批（后端闸门会 409，
+  // ADR-0041 D5）与本轮进行中（档位下一轮才生效，本轮改了 UI 无从交代结果）。
+  // `#236` 的「会话内一律只读」那一条已随本票删除。
+  const permissionLocked = locked || streaming;
+  const permissionDisabledHint = locked
+    ? '等待审批决策后再改档'
+    : streaming
+      ? '本轮进行中，等这一轮结束再改档'
+      : undefined;
+
+  // 三态互斥：待确认（`pendingDanger`）> 提交中（`permissionBusy`）> 失败原因。
+  const [pendingDanger, setPendingDanger] = useState<string | null>(null);
+  const [permissionBusy, setPermissionBusy] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const dangerDescId = useId();
+
+  /** 提交改档。**浮层保持打开直到回执**——提前关掉浮层等于「点了没反应」，那正是本票要
+   *  消灭的形态；失败就把后端 detail 原样留在原地（409 是「先裁决那条审批」这类可执行
+   *  的话），成功才关。 */
+  const commitPermission = (next: string | null, close: () => void) => {
+    setPermissionError(null);
+    setPermissionBusy(true);
+    void Promise.resolve(onPermissionModeChange?.(next))
+      .then(() => {
+        setPendingDanger(null);
+        setPermissionBusy(false);
+        close();
+      })
+      .catch((e: unknown) => {
+        setPermissionBusy(false);
+        setPermissionError((e as Error).message);
+      });
+  };
+
+  /** 权限选中回调。返回 `false` = 否决本次关闭（契约见 `OptionPicker` 的 `onChange`）。 */
+  const handlePermissionSelect = (next: string | null, close: () => void): boolean => {
+    setPermissionError(null);
+    // 新会话：创建期选择，没有后端往返、也无所谓「确认」——立即关（既有行为零改动）。
+    if (!permissionInSession) {
+      onPermissionModeChange?.(next);
+      return true;
+    }
+    // 会话内：**升**到完全访问要一次显式确认（取消即不发请求）；降档直接提交。
+    // 「重复选当前档」不必再问一遍——它不改变任何东西。
+    if (next === DANGER_PERMISSION_MODE && next !== selectedPermissionMode) {
+      setPendingDanger(next);
+      return false;
+    }
+    commitPermission(next, close);
+    return false;
+  };
+
+  /** 权限浮层底部：确认面 / 失败原因 / 提交态 / 会话内生效时机披露，四者互斥。
+   *  用渲染函数形态是因为「确认」之后必须由 picker 关掉自己（`close` 只在那边存在）。 */
+  const renderPermissionFooter = ({ close }: { close: () => void }) => {
+    if (pendingDanger !== null) {
+      return (
+        <div
+          className="picker-confirm"
+          role="alertdialog"
+          aria-label="确认升级到完全访问"
+          aria-describedby={dangerDescId}
+        >
+          <TriangleAlert size={12} aria-hidden="true" />
+          <span id={dangerDescId}>
+            完全访问：此后所有工具调用都不再需要审批，含网络与系统副作用。确认升级？
+          </span>
+          <button
+            type="button"
+            className="project-btn project-btn-danger"
+            onClick={() => commitPermission(pendingDanger, close)}
+            disabled={permissionBusy}
+          >
+            {permissionBusy ? '提交中…' : '升级'}
+          </button>
+          <button
+            type="button"
+            className="project-btn"
+            onClick={() => setPendingDanger(null)}
+            disabled={permissionBusy}
+          >
+            取消
+          </button>
+        </div>
+      );
+    }
+    if (permissionError !== null) {
+      return (
+        <div className="picker-confirm" role="alert">
+          <TriangleAlert size={12} aria-hidden="true" />
+          <span>改档失败：{permissionError}</span>
+          <button type="button" className="project-btn" onClick={() => setPermissionError(null)}>
+            知道了
+          </button>
+        </div>
+      );
+    }
+    if (permissionBusy) return <span>提交中…</span>;
+    // ADR-0041 D4：改档**下一轮 run 生效** ⇒ UI 不得承诺「立即生效」，得把时机说清。
+    return permissionInSession ? (
+      <span>改档从下一轮 run 起生效（本轮不受影响）</span>
+    ) : undefined;
+  };
 
   // 外部示例任务注入（引用变化即触发；每次点击 chip 生成新对象）
   useEffect(() => {
@@ -309,22 +421,26 @@ export const Composer = memo(function Composer({
                 并点名「不得内置默认值，否则合并本身就会顺手把英文名改掉，等于偷偷做了 B 项」。
                 所以这里传的是各调用点原来的名字——顺手统一会连同 locator 一起改，
                 正是那条冻结结论要防的事。要统一请先改票面结论。 */}
-            {/* #236：会话已定档 → 只读展示（真值来自 `session/started` 投影，由 App 传入）；
-                新会话 → 仍是创建期选择（随 create 请求发出）。 */}
+            {/* #283：会话内**可改**——#236 的「创建时定、会话内不可修改」已被 F18-A 推翻。
+                真值仍只来自投影（`session/started` / `permission/changed` 折叠出的
+                `session_permission_mode`，由 App 传入）；新会话 → 仍是创建期选择（随 create
+                请求发出）。升到「完全访问」要一次显式确认，确认面在本浮层的 footer 里
+                （见 `renderPermissionFooter`）。 */}
             <OptionPicker
               ariaLabel="权限模式"
               title="工具调用如何批准？"
               options={toCatalogOptions(permissionModes, catalogIcon)}
               value={selectedPermissionMode}
-              onChange={onPermissionModeChange ?? (() => {})}
+              onChange={handlePermissionSelect}
               icon={Shield}
               placeholder="权限"
-              disabled={locked || permissionModeLocked}
-              // 审批等待时 `locked` 才是**操作性的**禁用原因（旁边另有可见提示），
-              // 别用"会话内不可改"顶掉 trigger 原有的「当前档位 + 后端描述」title。
-              disabledHint={
-                permissionModeLocked && !locked ? PERMISSION_MODE_LOCKED_HINT : undefined
-              }
+              // 禁用只剩操作性原因（审批待决 / 本轮进行中）——不再是「档位不可变」。
+              disabled={permissionLocked}
+              disabledHint={permissionDisabledHint}
+              // 会话内没有「默认（未选）」这个目标：端点只接受三个具体档位，`null` 发过去
+              // 必然 422 ⇒ 留着就是一个点下去必错的死胡同。
+              showDefault={!permissionInSession}
+              footer={renderPermissionFooter}
             />
             <OptionPicker
               ariaLabel="Agent Profile"

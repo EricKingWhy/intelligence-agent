@@ -6006,6 +6006,16 @@ button.json-row {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
+/* #283：权限浮层 footer 里的升档确认面 / 失败回显——形态与 .provider-confirm-row
+ *（ProviderManagerDialog 那处危险确认先例）一致：内联 TriangleAlert + 一句话 + 两个小
+ * 按钮，可换行。刻意**不**共用那个类名：一处改样式不该误伤另一处。 */
+.picker-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+}
 .picker-sep {
   height: 1px;
   margin: var(--space-xs) var(--space-sm);

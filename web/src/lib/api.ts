@@ -1174,6 +1174,54 @@ export async function changeSessionModel(
   return res.json();
 }
 
+// ── Session-level permission switch（F18-A #282 后端 / F18-B #283 前端，ADR-0041）──
+
+/** POST /api/sessions/{id}/permission 的响应体。
+ *  `permission_mode` / `auto_approve` 是 service 解析出的**改后当下生效值**（不是请求
+ *  回显）——但前端**不拿它当状态**，见 `changeSessionPermission` 的第三条约定。 */
+export interface PermissionChangeResult {
+  status: string;
+  permission_mode: string;
+  auto_approve: boolean;
+}
+
+/** 会话内改权限档 + `auto_approve`（ADR-0041 D1/D2）。
+ *
+ * 三条调用方必须知道的约定：
+ *
+ * 1. **下一轮 run 生效**（D4）：只 append durable 事件、不打断在途 run ⇒ **不得**向用户
+ *    承诺「立即生效」（Composer 的权限浮层底部披露同一句话）。
+ * 2. **`auto_approve` 是必填**：后端刻意不给默认值，漏传即 422——否则一次「只改档位」
+ *    的调用会把批准策略一并翻掉（ADR-0041 §4）。
+ * 3. **不用回执写本地状态**：档位的唯一真相是投影折叠出的
+ *    `ConversationState.session_permission_mode`。「回执驱动的本地状态正是要消灭的第二套
+ *    真相」（同本文件 `CreatedEmptySession` 那条注释）——回执只在调用方做失败判定与
+ *    「什么时候重读事件」的时机用，值本身不进任何前端状态。
+ *
+ * 错误码（`detail` 原样带出，调用方就地回显）：
+ * - 404 = session 不存在
+ * - 422 = 档位不在 `PermissionPolicy`
+ * - 409 = 有未裁决审批（PendingApprovalConflict）或 seq 冲突
+ */
+export async function changeSessionPermission(
+  sessionId: string,
+  permissionMode: string,
+  autoApprove: boolean,
+): Promise<PermissionChangeResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/permission`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ permission_mode: permissionMode, auto_approve: autoApprove }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    // 带 status 的具名错误（同 createEmptySession）：409 与 422 需要被调用方分开讲，
+    // 而 changeSessionModel 那种裸 `Error` 只有一句状态码，用户看不懂。
+    throw new SessionError(res.status, detail || `change permission ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Fork（T7 #137，PRD §2.4）──
 
 /** POST /api/sessions/{id}/forks 的响应体。 */

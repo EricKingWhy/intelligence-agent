@@ -126,11 +126,28 @@ interface Props {
   options: Option[];
   /** 当前选中 value；`null` = 未选（= 后端默认值）。 */
   value: string | null;
-  /** 选中回调；`null` 表示选了「默认（未选）」。 */
-  onChange: (value: string | null) => void;
-  /** 面板底部插槽（说明性内容）。当前唯一使用者：档位 picker 的收窄提示
-   *  （#201，文案组装在 `lib/agentProfileScope.ts`）。 */
-  footer?: ReactNode;
+  /** 选中回调；`null` 表示选了「默认（未选）」。
+   *
+   *  **返回 `false` = 否决本次关闭**（#283 加法，向后兼容）：升档确认面就挂在本浮层的
+   *  `footer` 里，确认之前不能先把浮层关掉。此时浮层的关闭权交给调用方——第二个入参
+   *  `close` 就是那个关闸（幂等）。返回 `undefined`/其它值 = 维持原行为（立即关）。
+   *
+   *  为什么用第二个入参而不是让调用方自己存一个「稍后关」的回调：本仓禁止 render 期
+   *  读写 ref（见 `hooks/useSession.ts` 的同款注释），而 `close` 只有在 `footer` 的
+   *  render-prop 里才拿得到——由本组件在提交点直接交出去，是唯一不需要外部状态的做法。 */
+  onChange: (value: string | null, close: () => void) => void | boolean;
+  /** 面板底部插槽（说明性内容）。两种形态：
+   *   - 节点：静态说明。使用者是档位 picker 的收窄提示（#201，文案组装在
+   *     `lib/agentProfileScope.ts`）；
+   *   - 渲染函数：需要 `close` 的交互内容。使用者是权限 picker 的升档确认面（#283）。
+   *  两者可以同时不存在（不渲染这一行）。 */
+  footer?: ReactNode | ((ctx: { close: () => void }) => ReactNode);
+  /** 是否渲染「默认（未选）」那一行（缺省 `true`）。
+   *
+   *  为什么需要这个开关（#283）：会话内改档走 `POST /api/sessions/{id}/permission`，
+   *  它的法定入参是三个**具体**档位，`null` 无法表达 ⇒ 会话内留着「默认（未选）」就是
+   *  一个点下去必然 422 的死胡同。新会话必须保留它——那正是「尚未选定」本身。 */
+  showDefault?: boolean;
   disabled?: boolean;
   /** `disabled` 时 trigger 的 `title`（说清**为什么**不可点）。缺省 → 沿用原 title 规则。
    *  #236：权限 pill 在会话内转为只读，需要一句能解释原因的悬停文案。 */
@@ -146,6 +163,7 @@ export function OptionPicker({
   value,
   onChange,
   footer,
+  showDefault = true,
   disabled = false,
   disabledHint,
 }: Props) {
@@ -169,11 +187,18 @@ export function OptionPicker({
 
   /** 关闭态下的选中一律丢弃（与 ModelPicker 同一条 BUG-011 守卫）：浮层退出动画期间
    *  节点仍在 DOM 且可命中，第二次点击会再发一次请求。 */
+  const close = () => setOpen(false);
   const commit = (next: string) => {
     if (!open) return;
-    onChange(next === DEFAULT_VALUE ? null : next);
-    setOpen(false);
+    // 调用方返回 `false` = 否决本次关闭（#283：升档确认面就在 footer 里，确认之前不能
+    // 先关掉；关闭权随第二个入参交给它）。其余返回值维持原行为。
+    if (onChange(next === DEFAULT_VALUE ? null : next, close) === false) return;
+    close();
   };
+  // 渲染函数形态的 footer 要拿 `close`（它只在组件内部存在），而且它可能要表达
+  //「这一档没话可说」——归一成 null，免得在浮层底部渲染出一条只有上边框的空白行
+  //（新会话的权限 picker 今天就是这种情形）。
+  const footerContent = typeof footer === 'function' ? footer({ close }) : footer;
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
@@ -219,7 +244,10 @@ export function OptionPicker({
             <CommandList ref={listRef}>
               <CommandGroup>
                 {/* FE-R11-05：单选必须能回到「没选」——否则选了就再也退不回来
-                    （只能整页 reload）。提交 null，与 trigger placeholder 同义。 */}
+                    （只能整页 reload）。提交 null，与 trigger placeholder 同义。
+                    #283：会话内这一行由调用方关掉（`showDefault={false}`）——那条路径上
+                    「未选」不是一个可达目标，见 `showDefault` 的契约说明。 */}
+                {showDefault && (
                 <CommandItem
                   value={DEFAULT_VALUE}
                   keywords={['默认', '未选', 'default', 'none']}
@@ -237,6 +265,7 @@ export function OptionPicker({
                     selected={effectiveValue === null}
                   />
                 </CommandItem>
+                )}
                 {options.map((o) => {
                   const isSelected = effectiveValue === o.value;
                   return (
@@ -254,7 +283,7 @@ export function OptionPicker({
                 })}
               </CommandGroup>
             </CommandList>
-            {footer ? <div className="picker-foot">{footer}</div> : null}
+            {footerContent ? <div className="picker-foot">{footerContent}</div> : null}
           </Command>
         </Popover.Content>
       </Popover.Portal>

@@ -2190,7 +2190,9 @@ describe('审批投影 — 权限档（permission_policy）/ 待审批 / 裁决�
 
 // ── #236：会话级权限档从 `session/started` 投影（F15 #234 的读侧）──
 // 此前前端断言"`permission_mode` 不在任何事件里"，pill 只能靠创建回执的本地状态供值——
-// 那既是第二套真相，也让用户以为会话内改档生效（后端只认创建档）。
+// 那既是第二套真相，也让用户以为会话内改档生效。当时后端**确实只认创建档**，所以
+// 「#236 让读侧改走事件投影」就够了；F18-B #283 起后端支持会话内改档，改档由下面那组
+// （`permission/changed`）负责，**本组只管 started 的创建声明**。
 
 describe('session/started → session_permission_mode（#236）', () => {
   const T = '2026-09-18T00:00:00Z';
@@ -2214,7 +2216,7 @@ describe('session/started → session_permission_mode（#236）', () => {
     expect(s.session_permission_mode).toBeNull();
   });
 
-  it('只认第一条：档位是会话属性、创建后不可变，迟到/重放的 started 不改写它', () => {
+  it('只认第一条：started 只声明创建档，迟到/重放的 started 不改写它', () => {
     let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
     s = applyEvent(s, started({ permission_mode: 'danger-full-access' }, 2));
     expect(s.session_permission_mode).toBe('read-only');
@@ -2241,6 +2243,81 @@ describe('session/started → session_permission_mode（#236）', () => {
     }));
     expect(s.session_permission_mode).toBe('read-only');
     expect(s.permission_policy).toBe('workspace-write');
+  });
+});
+
+// ── #283（F18-B）：`permission/changed` —— 会话内改档的投影（ADR-0041 D2/D3）──
+// 与上面那组的分工：上面锁「**无** changed 时回退 session/started 的声明档」，这里锁
+// 「有 changed 时它胜」。两条合起来才是 D3 的完整优先级。
+
+describe('permission/changed → session_permission_mode（#283）', () => {
+  const T = '2026-09-22T00:00:00Z';
+  const started = (data: Record<string, unknown>, seq = 1) =>
+    ev({ type: EventType.SESSION_STARTED, seq, session_id: 's', run_id: 'r', time: T, data });
+  const changed = (data: Record<string, unknown>, seq: number) =>
+    ev({ type: EventType.PERMISSION_CHANGED, seq, session_id: 's', time: T, data });
+
+  it('会话内改档 → 覆盖创建时的声明档（端点写的就是这条事件）', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, changed({ permission_mode: 'workspace-write', auto_approve: true }, 2));
+    expect(s.session_permission_mode).toBe('workspace-write');
+  });
+
+  it('**最后一条胜**（与 session/started 的「只认第一条」相反）：连续三条只留最后一条', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, changed({ permission_mode: 'workspace-write' }, 2));
+    s = applyEvent(s, changed({ permission_mode: 'danger-full-access' }, 3));
+    s = applyEvent(s, changed({ permission_mode: 'read-only' }, 4));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
+  it('重放幂等：同一批事件再折一遍得到同一档（JSONL 回放不改变结论）', () => {
+    const events = [
+      started({ permission_mode: 'read-only' }),
+      changed({ permission_mode: 'danger-full-access' }, 2),
+      changed({ permission_mode: 'workspace-write' }, 3),
+    ];
+    const fold = () => events.reduce((acc, e) => applyEvent(acc, e), initConversation('s'));
+    expect(fold().session_permission_mode).toBe('workspace-write');
+    expect(fold().session_permission_mode).toBe(fold().session_permission_mode);
+  });
+
+  it('坏值读作「未声明」→ null，**不**回落 declared：镜像后端 effective_permission_mode', () => {
+    // 后端 `session/approval.py::effective_permission_mode` 命中最后一条 changed 就**不再
+    // 往下找**，值不可解析时按未声明返回 None。前端必须同口径——否则会出现「UI 说只读、
+    // 后端按更松的档自动放行写操作」，正是 #236 收掉的那条 P2。
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, changed({ permission_mode: 7 }, 2));
+    expect(s.session_permission_mode).toBeNull();
+
+    let t = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    t = applyEvent(t, changed({ permission_mode: '' }, 2));
+    expect(t.session_permission_mode).toBeNull();
+  });
+
+  it('只碰 session_permission_mode：permission_policy（审批观测阈值）不被这条事件改写', () => {
+    // 三概念分离是 #236 的边界（ADR-0041 D6），容器级常驻风险 ⇒ 每条新路径都要证一次。
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_APPROVAL_REQUESTED, seq: 2, session_id: 's', run_id: 'r', step_id: 1, time: T,
+      data: {
+        approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'workspace-write',
+        title: 't', description: 'd', arguments_preview: {}, permission: 'workspace-write',
+        policy: 'workspace-write', reason: 'r', allowed_decisions: ['deny'],
+      },
+    }));
+    s = applyEvent(s, changed({ permission_mode: 'danger-full-access', auto_approve: true }, 3));
+    expect(s.session_permission_mode).toBe('danger-full-access');
+    expect(s.permission_policy).toBe('workspace-write');
+  });
+
+  it('时间线摘要是真话而非空白：带档位 → 「权限档 → X」；缺档位 → 「权限档已变更」', () => {
+    // 与 model/changed 同待遇（summarizeModelChanged）：改档是用户自己发起的会话级变更，
+    // 留一行真值比留一行空白更如实。
+    let s = applyEvent(initConversation('s'), changed({ permission_mode: 'workspace-write' }, 1));
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('权限档 → workspace-write');
+    s = applyEvent(s, changed({}, 2));
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('权限档已变更');
   });
 });
 

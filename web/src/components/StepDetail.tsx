@@ -907,7 +907,8 @@ export function ChatTab({
  *
  *  数据全部来自事件流投影（`tool/approval-requested` → 队列；`permission/resolved`
  *  → 裁决留痕），**没有新 API**。段里两个"档"是两件事：`session_permission_mode`
- *  （会话创建时声明、不可变）与 `permission_policy`（审批真发生那一刻实际用的阈值）。
+ *  （会话当下生效档；创建时声明、F18-B #283 起会话内可改）与 `permission_policy`
+ *  （审批真发生那一刻实际用的阈值）。
  *  本段显示的是**后者**——它是运行时证据，会话无审批事件就无从得知，如实显示 `—` +
  *  说明原因（不拿前者冒充；#236 更正了此处"`permission_mode` 不在任何事件里"的旧前提）。
  *  整段措辞都在 `lib/permission.ts` 里定，这里只接线。

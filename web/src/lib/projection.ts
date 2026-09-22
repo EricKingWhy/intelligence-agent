@@ -753,7 +753,8 @@ function projectOperationReconcileRequired(state: ConversationState, event: Agen
 /** `session/started`（会话第一条事件）：`started_data` 是会话级初始配置的**加法槽**
  *  （T7 #137）。今天这里只取 F15 #234 落进来的权限档（`permission_mode`）。
  *
- *  **只认第一个带值的 `session/started`**：档位是会话属性、创建后不可变，所以重放 /
+ *  **只认第一个带值的 `session/started`**：started 只声明**创建时**那一档，会话内改档走
+ *  `permission/changed`（F18-B #283 起，那边「最后一条胜」）——所以重放 /
  *  迟到重复投递都不得让后来的值改写先到的（与后端 `approval.py::declared_permission_mode`
  *  同一规矩——那边也是在第一条 started 上取键，缺键即 None）。实现按"已非 null 即早退"
  *  达成这一点（"没带键"读作"没声明"，所以脏日志里**后**一条仍可声明：比后端"只在第一条
@@ -768,6 +769,33 @@ function projectSessionStarted(state: ConversationState, event: AgentEvent): voi
   if (state.session_permission_mode !== null) return;
   const mode = event.data.permission_mode;
   if (typeof mode === 'string' && mode) state.session_permission_mode = mode;
+}
+
+/** F18-B（#283）：`permission/changed` —— 会话内改档的 durable 事实（ADR-0041 D2）。
+ *
+ *  **最后一条胜**（ADR-0041 D3），与 `model/changed`（`projectModelChanged`）同形。这里
+ *  **刻意不**复用 `projectSessionStarted` 的「已非 null 即早退」——那条规矩的存在理由正是
+ *  「档位是会话属性、创建后不可变」，而本票的前提就是推翻它。
+ *
+ *  **坏值读作「未声明」⇒ 写 null**：后端 `effective_permission_mode`
+ *  （`session/approval.py`）命中最后一条 `permission/changed` 后**不再往下找**，值不可
+ *  解析时按未声明返回 None、**不回落** `session/started` 的声明值。前端逐字照抄这个
+ *  优先级：两边对「当下生效的是哪一档」必须同口径，否则会重现 #236 的 P2——UI 说只读、
+ *  后端按更松的档自动放行写操作。
+ *
+ *  **只动 `session_permission_mode`**：事件里还带 `auto_approve`，但前端今天没有它的
+ *  消费者（没有「批准策略」控件）——三概念分离见 ADR-0041 D6，`permission_policy`
+ *  （审批观测阈值）在这条路径上**一律不碰**。 */
+function projectPermissionChanged(state: ConversationState, event: AgentEvent): void {
+  const mode = event.data.permission_mode;
+  state.session_permission_mode = typeof mode === 'string' && mode ? mode : null;
+}
+
+/** `permission/changed` 在时间线里的一行（对齐 `summarizeModelChanged`）：改档是用户自己
+ *  发起的会话级变更，留一行真值比留一行空白更如实——与 `model/changed` 同待遇。 */
+function summarizePermissionChanged(event: AgentEvent): string {
+  const mode = event.data.permission_mode;
+  return typeof mode === 'string' && mode ? `权限档 → ${mode}` : '权限档已变更';
 }
 
 /** #37 交互式审批（PRD §2.2）：ToolExecutor._check_approval 暂停 run，
@@ -1123,10 +1151,13 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   },
   [EventType.MODEL_FALLBACK]: { apply: projectModelFallback, summarize: summarizeModelFallback },
   [EventType.MODEL_CHANGED]: { apply: projectModelChanged, summarize: summarizeModelChanged },
-  // F18-A（#282）：会话内改权限档已进词汇表（durable）。本票是**后端**票——投影
-  // 「最后一次 permission/changed 胜」与 pill 的可编辑化属 #283（F18-B）。这里先登记
-  // 为 no-op：保持 Record 穷尽性（否则 tsc 红），且不让 applyEvent 把它当未知帧丢弃。
-  [EventType.PERMISSION_CHANGED]: { apply: noopProjection, summarize: emptySummary },
+  // F18-B（#283）：会话内改档落真投影——「最后一条 permission/changed 胜」（ADR-0041 D3）。
+  // F18-A（#282）曾把它登记为 no-op（只为满足 Record 穷尽性、不把帧当未知事件丢弃），
+  // 那行已被本票替换——ADR-0041 §4 的那条未闭合项据此解除。
+  [EventType.PERMISSION_CHANGED]: {
+    apply: projectPermissionChanged,
+    summarize: summarizePermissionChanged,
+  },
   [EventType.AGENT_DELEGATION_STARTED]: {
     apply: projectAgentDelegationStarted,
     summarize: summarizeDelegationStarted,
