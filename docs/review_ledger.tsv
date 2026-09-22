@@ -237,3 +237,5 @@ e489dc9	#248 R1/R2 闭合批次「集成与关单」落点（tracker B-26 集成
 1bb0a81	真机审计第十五轮 §6 收口登记（更正一处 gitignore 说法 + 记清理动作与证据落点）——只改 `docs/FRONTEND_ISSUES_LOG.md` 一个 .md，docs-only
 4f0df6e	真机审计第十五轮 §10 门禁读数（含三条红的 flake 归属）+ 1bb0a81 白名单行——改动两个文件（`docs/FRONTEND_ISSUES_LOG.md` + `docs/review_ledger.tsv`）全在 `docs/` 下 .md/.tsv，docs-only
 2a266cc	真机审计第十五轮「集成与推送」登记（前端六笔 ff 进集成 clone + push origin；后端 clone 落后与台账并集冲突待裁）——只改 `docs/FRONTEND_ISSUES_LOG.md` 一个 .md，docs-only
+1d72485aa6b99490fd1240529208f7cf3aa027ad	#291（B-40）末轮处置笔——消掉 §8.8.8 与 §8.8.3 的自相矛盾 + 5 条 P2；**该笔按本票决定未再开审查轮**（本票第 3 轮已超出 §8.3「修后重审每轴 1 轮」预算，已在 tracker / 月度归档 / 台账审查行三处明文登记待用户裁决），6 处改动全部是收窄或事实更正、不引入任何新的放松；只改 docs/SDD_WORKFLOW_PROTOCOL.md 一个 .md，docs-only 走白名单
+85b798f87a85ada7dd06936522d328385885ec3a	#291（B-40）落点记录——台账 3 条审查行 + PHASE_STATUS 最近条目 + tracker B-40 段 + 月度归档 B-40 块；只改 docs/review_ledger.tsv / docs/PHASE_STATUS.md / docs/SDD_TICKET_TRACKER.md / docs/phase_status/2026-09.md 四个 .md/.tsv，全落在文档扩展名内，docs-only 走白名单
