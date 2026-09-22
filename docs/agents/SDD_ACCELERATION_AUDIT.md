@@ -1,6 +1,9 @@
 # SDD 提速改造 · 工作记录与外部复核包
 
-> **状态**：批 1 已落盘并推送（`refs/heads/main` = `22aa291`）。**批 2 已施工完毕**（代码/文档已落盘，待审查与落台账）；批 3 待做。
+> **状态**：批 1 已落盘并推送（`refs/heads/main` = `22aa291`）。**批 2 已施工 + 已过两轴独立审查 + findings 已修**
+> （代码/文档已落盘，待「修后重审」与落台账）；批 3 待做。
+> **本轮的审查与自曝**：两轴 findings 全部处置，其中 **3 条是我自己写出的真 bug**（见 §8.6）；
+> 全量门禁唯一 1 条失败已定性归属（见 §8.7）；`.sh` ↔ `.py` 的双实现对照已完成（见 §9.4）。
 > **用途**：本文件是「SDD V3.1 开发流程提速」这条线的完整工作记录 + **审计包**，
 > 供**独立审查者（能力更强的模型）**复核。
 > **写法纪律**：本文所有数字均为**当场实测**，随附可复跑命令；无法当场复跑的历史读数会显式标注来源。
@@ -19,6 +22,7 @@
 4. **批 2 是否过度设计？** 有没有更简单的等效做法？（完整设计见本文 **§5**）
 5. **批次顺序（1 → 2 → 3）是否正确？** 批 3「必须最后做」的理由是否成立？
 6. **python 版闸门与既有 `check_review_coverage.sh` 的双实现一致性如何保证？** 会不会口径漂移？
+   （**§9.4 已给出实测对照结果**：三元组与共同判定行全等，唯一差异是短 sha 显示宽度。请复核该对照的证据力。）
 7. **pre-push hook 是否只是"假安全感"**（本地可 `--no-verify` 绕过）？值不值得做？
 8. **协议 §8.3 第 7 条的「前提条款」是否足够**，仍会不会"一端不报、另一端也不报"？
 9. **有没有更好的做法被漏掉了？**（本线可能陷入局部最优）
@@ -186,16 +190,24 @@ git ls-remote --heads origin main   # 22aa291386e9ce562207b762baad298d0226ba56
 ### 5.1 前置发现：**现有闸门在本机根本跑不起来**
 
 `scripts/check_review_coverage.sh` 是本仓**唯一的机械闸门**，但它依赖 `dirname` / `wc` / `comm` /
-`grep` / `sort` / `mktemp`，而本机 WorkBuddy 沙箱的 bash shim **缺 coreutils**（实测全部
-`command not found`）⇒ **该闸门在当前环境下从未被真正执行过**，只能靠人工用 python 复刻口径。
+`grep` / `sort` / `mktemp`，而本机 WorkBuddy 沙箱 bash 的 **PATH 里没有 coreutils**（实测全部
+`command not found`）⇒ 直接跑它在第一行 `cd "$(dirname "$0")/.."` 就死 ⇒ **该闸门在本机的
+默认跑法下从未执行过**，只能靠人工用 python 复刻口径。
 
 ⇒ 批 2 的首要交付因此调整为：**让闸门真的能跑**。
 
 ### 5.2 交付 A：`scripts/check_review_coverage.py`（python 版闸门）
 
 **为什么必须有它**：`.sh` 版是本仓唯一机械闸门，但依赖 `dirname`/`wc`/`comm`/`grep`/`sort`/`mktemp`，
-而施工环境的 sh 缺 coreutils ⇒ **该闸门在施工环境里从未真的执行过**（`docs/SDD_TICKET_TRACKER.md:2157`
-早已登记"本沙箱跑不了"）。本交付把它变成"真的能跑"。
+而施工环境 bash 的 **PATH 里没有 coreutils** ⇒ 直接跑它在第一行就死 ⇒ **该闸门在施工环境的默认
+跑法下从未执行过**（`docs/SDD_TICKET_TRACKER.md:2157` 早已登记"本沙箱跑不了"）。本交付把它变成
+"默认就能跑、且快"。
+
+> **2026-09-22 更正（批 2 施工中，两轴 Standard 轴 findings）**：coreutils **并非不存在**——它们在
+> Git 自带目录里（`<PortableGit>/usr/bin`）。
+> `PATH="<PortableGit>/usr/bin:$PATH" bash scripts/check_review_coverage.sh` **能跑**，只是**很慢**
+> （逐条 fork git；全量 >25 分钟未完成，见 §9.4）。原话"跑不动"说的是**默认 PATH**，不是"不可能跑"；
+> 本文件、协议 §8.3 第 7 条前提块、`check_review_coverage.py` 与 `gate0.py` 的 docstring 已**同步更正**。
 
 - 口径**逐条对齐** `.sh`：最早 `base` 取法（`base` 保持台账里的**字面量**，故末行可能打印 `089524a~1`
   这类 rev 表达式）、`rev-list <tip> --not <base>` 取并集、`DOC_PATTERN`、白名单 docs-only 自校验、
@@ -205,10 +217,11 @@ git ls-remote --heads origin main   # 22aa291386e9ce562207b762baad298d0226ba56
 - 性能：全程 **4 次 git 子进程**——`rev-list --parents HEAD`（拿全图）→ `cat-file --batch-check`
   （批量解 rev）→ `log --no-walk --format=%H%x09%h%x09%s`（批量短名 + subject）→
   `show --no-renames --pretty=format:%x01%H --name-only`（批量文件表）；之后全在内存算可达性。
-- 实测：**3.6–7.1s**（对比 `.sh` 的逐条 fork：>11 分钟未完，见 §9.4）。
+- 实测：**3.6–7.1s**（对比 `.sh` 的逐条 fork：**>25 分钟**未完，见 §9.4）。
 - 施工踩坑（都留在代码注释里）：`git rev-parse --short` **只接受单个 rev**（134 个参数直接
   `fatal: Needed a single revision`）；`cat-file --batch-check` 的 `%(objectname:short)` 原子不展开；
-  `%h` 与 `rev-parse --short` 实测 **8/8 逐条相等**，故选后者。
+  `%h` 与 `rev-parse --short` 在同一入参形态下实测 **8/8 逐条相等**；因为前者能一次吃多个 rev，
+  **故选前者**（原文误写作"故选后者"，2026-09-22 更正）。
 
 ### 5.3 交付 B：`scripts/gate0.py`（≤60 秒快速门禁）
 
@@ -249,12 +262,13 @@ git ls-remote --heads origin main   # 22aa291386e9ce562207b762baad298d0226ba56
 | 验收项 | 判据 | 实测 |
 | --- | --- | --- |
 | 交付 A：自身可跑 | 本机 `.venv` python 直跑、exit 0 | ✅ 3.6–7.1s |
-| 交付 A：同 tip 同结论 | 三元组 + ❌ 集合与 `.sh` 参考版逐项相同 | 参考版跑完后对照（见 §9.4） |
+| 交付 A：同 tip 同结论 | 三元组 + ❌ 集合与 `.sh` 参考版逐项相同 | ✅ `22aa291`：两版**同为 `451 / 317 / 134`**（`.py` 另给 `❌ 0 / exit 0`）；共同判定行 **9/9 逐字相同、0 分歧**。详见 §9.4 |
 | 交付 B：预算 | 全车道墙钟 ≤60s | ✅ 热 20–22s / 冷 ≈40s |
 | 交付 B：**负向验证** | 存在未归属 commit ⇒ 必须非 0 | 用**本批自己的代码提交**做（真实负向，不伪造） |
 | 交付 C：生效 | `git hook run pre-push` 真的走到 Gate-0 | ✅ RC=0、20.5s |
 | 交付 D：覆盖 | 覆盖 §14.10 清单的全部工具 | ✅ 13 条 |
-| 零漂移 | 代码面之外无意外改动、闸门读数不变 | 见 §9.3 |
+| 零漂移 | 代码面之外无意外改动 | ✅ `git diff --name-only 22aa291..HEAD -- src tests web` **为空**（本批只动 `scripts/`、`.githooks/`、`.gitattributes`、`docs/`） |
+| **全量门禁**（`AGENTS.md` §14.10） | 全量 `pytest` **0 failed** | ⚠ **1 failed / 3095 passed / 13 skipped（619s，树 `6b95cef2da69`）** —— 唯一失败 `tests/observability/test_flush_lifecycle.py::test_web_lifespan_flushes_on_shutdown`，已定性为**环境**（外部进程持 `.instance.lock`），**非本批回归**；三重证据 + 受控实验见 §8.7 |
 
 
 ---
@@ -282,6 +296,7 @@ git ls-remote --heads origin main   # 22aa291386e9ce562207b762baad298d0226ba56
 | 4 | `docs/SDD_TICKET_TRACKER.md` 单文件 **420,673 字符** | 体量 | 本线未处理，需单独立项 |
 | 5 | 后端 `ruff` **无任何配置文件** | ~~牙齿弱~~ ⇒ **原判断被实测推翻**（见 §8.4） | **不补配置**（补了只是把上游默认集抄一遍，反而更难复核）；改为更正协议事实 + 记录"强度随 ruff 版本漂移" |
 | 6 | 两侧无 CI | 无远端强制 | 本线**不**引入 CI（需求方未要求；pre-push 只是本地替代，且只在本 clone 生效） |
+| 8 | 全量 `pytest` 在 `9bb51c4b` 上 **1 failed**（`test_web_lifespan_flushes_on_shutdown`） | **环境**（外部进程持 OS 级排他锁），非本批回归；三重证据 + 受控实验见 §8.7 | 解除条件：终止该外部 uvicorn（或换 session root）后复跑该用例，期望 `3 passed`。**不许**用 `ALLOW_SHARED_ROOT=1` 凑绿（那是降级放行，会把真锁冲突静默掉） |
 | 7 | 协议 §8.3 第 7 条的**前提块事实**在批 2 后过期（原文写「无 pre-push 强制」、「后端 ruff 无配置 ⇒ 牙齿弱」，且判据写成「仓库里有没有配置」） | **同批已更正** | 改为「判据 = **环境内跑没跑过**」+ 记录 Gate-0 的真实覆盖范围 + 写明**豁免不得跨环境传递** |
 
 ---
@@ -335,14 +350,75 @@ printf '# -*- coding: utf-8 -*-\nimport os\n' \
 `FURB188` ×2（`endswith` + 切片 ⇒ `removesuffix`/`removeprefix`）、`PIE810`（合并 `startswith`）。
 **这本身就是 §8.3 第 7 条前提成立的实证**（工具能报 ⇒ 审查不必重复报）。
 
-### 8.6 交付 A / B 施工中我自己写出的 2 个 bug（都被"读数对不上"抓出来）
+### 8.6 交付 A / B 施工中我自己写出的 3 个 bug（都被"读数对不上"抓出来）
 
 1. `git rev-parse --short` **只接受单个 rev**：批量传 134 个 ⇒ `fatal: Needed a single revision`。
    改用 `git log --no-walk --format=%h`（实测与 `rev-parse --short` **8/8 逐条相等**）。
 2. `split("\n")` 未先 `rstrip` ⇒ 把 1 行读成 2 行（于是误报"返回 2 行，期望 1 行"）。
+3. **（批 3 之前、交付 B 自己打出来的）** `surface_report` 对 `git status --porcelain` 的行**先 `strip()`
+   再切前 3 列**：而 ` M x` 的**前导空格本身就是状态列的一部分** ⇒ 路径被吃掉一个字符，
+   实测把 `scripts/…` 显示成 `cripts/…`。拦住它的是**我自己那条车道的输出**（"改动面：3 文件 — `cripts 2`"
+   这个明显不存在的目录名）。已在 `gate0.py` 改为"先按原行切 3 列、再 strip"，并回读确认显示恢复为
+   `scripts 2  .zcodeignore 1`。
 
-⇒ 两个都**不是逻辑错**，而是**对 git / 字符串行为的错误假设**；拦住它们的仍然是"读数对不上三元组就停"。
+⇒ 三个都**不是逻辑错**，而是**对 git / 字符串行为的错误假设**；拦住它们的仍然是"读数对不上就停"。
+**第 3 条的教训最强**：如果不是我要求门禁把自己看到的改动面打出来，这个 bug 会静默留在脚本里。
 
+#### 8.6.1 附带确认的一条 git 行为（给未来的对照者）
+
+`%h` / `git rev-parse --short` 的输出宽度**取决于入参形态**（本仓 git 2.52.0.windows.1，可复跑）：
+
+```bash
+git log --no-walk --format=%h 09ca47a1                                     # → 09ca47a1  (8 位：入参就是 8 位缩写)
+git log --no-walk --format=%h 09ca47a12c45bf273e46494be0fedef143cd89d3     # → 09ca47a   (7 位：入参是全长)
+git rev-parse --short 09ca47a12c45bf273e46494be0fedef143cd89d3             # → 09ca47a   (7 位)
+```
+
+⇒ **同一提交可以有 7 位与 8 位两种显示**。这条直接决定了 `.sh` ↔ `.py` 的对照纪律：
+**读数文本不可逐字比对，判定集才能**（详见 §9.4）。
+
+
+
+### 8.7 全量门禁唯一 1 条失败：**环境**（外部进程持 `.instance.lock`），附带受控实验
+
+**读数**（树 `6b95cef2da69` / tip `9bb51c4b`，`PYTHONUTF8=1 PYTHONPATH=` 全量跑）：
+
+```text
+tests=3095  failures=1  errors=0  skipped=13  time=619.065
+FAILED tests/observability/test_flush_lifecycle.py::test_web_lifespan_flushes_on_shutdown
+  agent_harness.instance_lock.InstanceLockError: 另一个进程已在写同一个 session root，启动被拒绝。
+    锁文件：D:\intelligence-agent-backend\.agent\workspace\.instance.lock
+    占用者：pid=25888 / started_at=2026-09-22T10:48:32Z / root=D:\intelligence-agent-backend\.agent\workspace
+```
+
+**归属判定的三重证据**（不是"应该是环境问题"，是可判定的三条）：
+
+1. **机械**：本批 `git diff --name-only 22aa291..HEAD -- src tests web` = **空** ⇒ 不可能引入这条失败。
+2. **隔离复跑仍红**：只跑该文件（3 例，6.92s）⇒ `1 failed, 2 passed` ⇒ 排除"全量串跑的跨用例污染 /
+   SSE 闩锁竞态"（`ADR-0038` 那一类机制）。
+3. **根因可指认**：`msvcrt.locking(LK_NBLCK)` 抛 `PermissionError`（锁**真的被别的进程持有**）；
+   锁文件里报的占用者是 **`python.exe -m uvicorn agent_harness.web.app:create_app --host 127.0.0.1
+   --port 8000`，创建于 2026-09-22 18:48:12** —— 早于本批开工、**不是本线起的**。
+   这与文档既有的两处登记是同一个坑：`docs/SDD_TICKET_TRACKER.md:928`、
+   `docs/integration/FRONTEND_MEM5_INTEGRATION_PROMPT.md:107-108`。
+
+**受控实验（把"锁"从"环境"里单拎出来）**：`Settings.workspace_dir` 默认值是**相对路径**
+`.agent/workspace`（`src/agent_harness/config.py:106`）⇒ 换 cwd 就换了 session root。
+在钉住同一棵树 `6b95cef2da69` 的克隆里跑同一条用例、同一解释器、同一用例集合：
+
+```text
+主工作树（锁被外部 uvicorn 持有）  : 1 failed          RC=1
+克隆（workspace=<clone>/.agent/…）  : 3 passed in 6.14s RC=0
+```
+
+⇒ **唯一变量是 session root / 锁占用**，根因确认。**不作假绿**：不动 `ALLOW_SHARED_ROOT=1` 逃生门
+（那是"知情的降级放行"，会把真锁冲突静默掉），也不去 kill 别人的进程。
+
+⚠ **不推翻** `ADR-0038 §4` 对"外部持锁"假说的排除：那条实验覆盖的是**另一组用例**
+（`test_workspace_files_api + test_web_stream + test_web_api`）且用的是"只取该锁"的受控进程；
+本次是**真在跑 app 的 uvicorn**，两者不矛盾。
+
+**残余（唯一未闭合项）**：本批因此**拿不到"全量门禁 0 failed"的读数**。解除条件写在 §7 第 8 行。
 
 ---
 
@@ -378,15 +454,52 @@ git show --no-renames --pretty=format: --name-only <sha>   # merge 走 --cc，�
   `PATH="<PortableGit>/usr/bin:$PATH" bash scripts/check_review_coverage.sh` **能跑**，只是**很慢**
   （逐条 fork git；本批实测 >11 分钟未结束）。
 - **Gate-0**：`python scripts/gate0.py`（6 车道；热 20–22s / 冷 ≈40s）。
-- **闸门当前读数**：`09ca47a..HEAD` = **451 提交 / 已审 317 / 待判定 134 / ❌ 0**（python 版，exit 0）；
-  死白名单告警 **33 条**（与 §7 第 3 行的既有登记一致，构成一次独立印证）。
+- **闸门读数（两棵树，别混用）**：
+  · **`22aa291`（批 2 落盘前，交付 A 的验收读数）**：`451 / 317 / 134 / ❌ 0`、exit 0 ——
+    2026-09-22 已在**钉住该 sha 的克隆里现场复现**（`git clone` → `checkout --detach 22aa291` →
+    把当前 `.py` 放进去跑），不是靠记忆。
+  · **`9bb51c4b`（批 2 六笔落盘后、写台账前）**：`457 / 317 / 140`、**❌ 6**、exit 1 —— 这 6 笔就是
+    本批自己的提交，**在补审查行与白名单声明之前必然显示为未归属**，是**预期的中间态**而不是缺陷
+    （先落代码、后记账，正是本批要说明的次序；`ebb28b4` 被逐个点名）。
+  · 死白名单告警 **33 条**（与 §7 第 3 行的既有登记一致，构成一次独立印证）。
 
 
-### 9.4 本文件的位置与状态 / 待补的对照读数
+### 9.4 本文件的位置与状态 / `.sh` ↔ `.py` 对照结果
 
 - 路径：`docs/agents/SDD_ACCELERATION_AUDIT.md`
 - 本文为**活文件**：批 2 已施工（§5 按实测改写、§7/§8 已更正）；批 3 完成后继续更新。
-- **待补（唯一未闭合的验收项）**：`.sh` 参考版在**同 tip** 上的完整读数。本批已启动该对照，但
-  它逐条 fork git、**>11 分钟未结束** ⇒ 不阻塞其余验收：python 版本身已在同 tip 给出
-  `451 / 317 / 134 / ❌ 0` 且 exit 0，且它的口径是**照着 `.sh` 注释里记录的全部实测坑**写的
-  （含 `--no-renames`、BOM/CR 剥离、`awk NF`、merge 的"核对不了就不放行"）。
+#### 9.4.1 `.sh` ↔ `.py` 双实现对照（2026-09-22 完成，取代此前"待补"）
+
+| 对照项 | `.sh`（语义参考，冻结） | `.py`（可运行实现） | 结论 |
+| --- | --- | --- | --- |
+| 覆盖区间 | `09ca47a1..HEAD` | `09ca47a..HEAD` | **同一提交**，显示宽度不同（见 9.4.2） |
+| 三元组 @ `22aa291` | `451 / 317 / 134` | `451 / 317 / 134`、`❌ 0`、exit 0 | **逐项相同** |
+| 逐条判定（共同前缀 9 条） | 9 条 ✅ 行 | 同 9 条 ✅ 行 | **逐字相同、0 分歧** |
+| 全量逐条输出 | **未取**（>25 分钟未完成，被计时上限截断） | 140 条 | ⚠ **未覆盖**，见下 |
+
+**`22aa291` 那行怎么来的（可复跑）**：
+
+```bash
+python scripts/check_review_coverage.py                       # @9bb51c4b → 457 / 317 / 140, ❌6, exit 1
+cp scripts/check_review_coverage.py <clone>/scripts/           # <clone> 钉在 22aa291（该 sha 上还没有 .py）
+(cd <clone> && python scripts/check_review_coverage.py)        # → 451 / 317 / 134, ❌0, exit 0
+PATH="<PortableGit>/usr/bin:$PATH" bash scripts/check_review_coverage.sh   # → 451 / 317 / 134（>25min）
+```
+
+> 说明：`.py` 是**批 2 才新增**的文件，`22aa291` 的树里没有它 ⇒ 复现方式是"把当前脚本放进该 tip 的
+> 克隆"（台账与历史都取该 clone 自己的那份），这是**同 tip 同台账**的对照，不是跨 tip 比较。
+
+#### 9.4.2 唯一的真实差异：短 sha 显示宽度（**不是口径分歧**）
+
+`.sh` 在"覆盖区间"行**回显台账里的字面量**（本仓最早 base 写作 `09ca47a1`，8 位）；`.py` 经
+`%h` **归一化**且入参是解析后的**全长 sha** ⇒ git 回 7 位。成因见 **§8.6.1**（可复跑）。
+
+既然不同调用形态能对**同一提交**给出 7 位与 8 位，则：
+
+> **双实现的对照纪律 = 比判定集，不比读数文本。** 差异必须能被归因到"显示"而不是"判定"，
+> 否则才是漂移。本条已写进 `check_review_coverage.py` 的 §317 行注释，防止后人误改。
+
+**为什么全量逐条输出未取**：`.sh` 每条 commit fork 数个 git 子进程，457 条 >25 分钟（实测被截断）。
+在本机拿不到全量读数**不等于**判据缺失——等价性由 ①三元组逐项相同 ②共同前缀 9/9 逐字相同
+③`.py` 的口径是照着 `.sh` 注释里记录的全部实测坑写的（`--no-renames`、BOM/CR 剥离、`awk NF`、
+merge 的"核对不了就不放行"）三者共同支撑；**但这条等价性仍是"未取全量"**，如实登记，不夸大。

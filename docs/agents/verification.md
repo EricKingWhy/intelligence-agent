@@ -158,7 +158,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | `os.symlink` 静默 no-op（不抛异常、不创建） | 沙箱文件保护 | 相关用例先探针再归因，别当成自己改出来的 bug |
 | 分钟级脚本被 SIGTERM、且重定向文件是空的 | 前台跑长任务 + stdout 块缓冲 | 长跑放后台跑（`run_in_background`），或先落盘再读 |
 
-`.gitattributes` 只钉了 `*.sh` 与 `*.ps1` 的 `eol=lf`；**无扩展名的 git hook**（`.githooks/pre-push`）
+`.gitattributes` 钉住 `*.sh` 的 `eol=lf` 与 `*.ps1` 的 `eol=crlf`（**不是**都 `lf`——2026-09-22 两轴审查指出此处笔误）；**无扩展名的 git hook**（`.githooks/pre-push`）
 2026-09-22 已单独加规则——否则 `core.autocrlf=true` 会把它检出成 CRLF，`exit 1\r` 这种行直接坏掉。
 
 ---
