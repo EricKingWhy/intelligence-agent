@@ -1114,8 +1114,14 @@ class AgentRuntime:
                     # 空流（模型没吐任何 chunk）退化成空 content。
                     if collected:
                         ai: AIMessage = collected[0]
-                        for c in collected[1:]:
-                            ai = ai + c  # type: ignore[assignment]
+                        rest = collected[1:]
+                        # 其余 chunk 走 `AIMessageChunk.__add__` 的 **list 形态**（内部即
+                        # langchain_core.messages.ai.add_ai_message_chunks）：与逐项 `+`
+                        # 字段语义等价（对照用例见 tests/agent/test_stream_chunk_aggregation.py），
+                        # 但累计内容只复制一次 ⇒ O(N·L) → O(L)。逐项折叠每步都要重抄一遍
+                        # 已累计内容，长回答被切成数千 chunk 时就是一次同步 CPU 尖峰（#281）。
+                        if rest:
+                            ai = ai + rest  # type: ignore[assignment]
                         # 聚合后保证是 AIMessage（AIMessageChunk + AIMessageChunk = AIMessageChunk，
                         # 后续逻辑期望 .tool_calls 属性，chunk 也有，但类型标注对齐成 AIMessage）
                         if not isinstance(ai, AIMessage):
