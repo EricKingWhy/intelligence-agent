@@ -216,3 +216,4 @@ e8b2707	F18-B（#283）docs-only 落点记录（tracker `## F18-B` 段 + 月度�
 b429f1a	B-38（`#244` AC5）记账落点（tracker `## B-38` 段 + 月度归档 2026-09-22 B-38 条 + `PHASE_STATUS` 焦点状态句改写/B-38 子句/最近条目/归档索引 301→302/按日定位 6→7 条重算；docs-only，`src` / `tests` / `web` / `scripts` 零改动）
 3179a6d	#248 R1/R2 闭合批次记账落点（tracker B-26 段：状态转收口 + 裁决段 + 闭合批次段 + 集成占位 / 月度归档 B-39 条 / `PHASE_STATUS` 焦点·主线·裁决句·归档索引 301→303·按日定位 8 条·最近条目 / `CONTEXT.md` RunManager 路径改 `session/runmanager.py` / ADR-0030·0040 第三轮文档口径订正；docs-only，`src`/`tests`/`web`/`scripts` 零改动）
 c19d1f38432f7ff54b7df7036c4112adfbc78567	F18-B（#283）第三手补记：两轴独立审查（两轴均 P0/P1 = 0）+ 作者红证（改造前树 8 failed / 239 passed）+ B-29 flake 登记（StepDetail.window.test.tsx:132）+ 台账审查行按 §8.5.1 压缩；3 文件全为 .md
+e489dc9	#248 R1/R2 闭合批次「集成与关单」落点（tracker B-26 集成段 + 月度归档 B-39 集成子项 + `PHASE_STATUS` B-39 最近条目补集成事实 / 按日定位子项数口径统一；docs-only，`src`/`tests`/`web`/`scripts` 零改动）
