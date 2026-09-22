@@ -201,3 +201,4 @@ ffd0857	B-35 集成与关单状态如实化（tracker B-35 段「集成与关单
 2f145af	B-36（#281）文档落点（`PERF_BASELINE.md` B8 节数字面 + AC4 声明 + tracker `## B-36` 段 + 月度归档 L669 + `PHASE_STATUS.md` 焦点/最近条目/按日索引；docs-only，`src`/`tests`/`scripts` 零改动）
 941277e66b2afe3a24e194ec9115f531bdb9b9a8	#282 落点记录（tracker F18-A 段 + 归档 2026-09-22 条 + PHASE_STATUS 焦点/索引/按日定位 + ADR-0041 Status 转 Accepted；docs-only）
 47d8f2d	B-37（#286–#290）全仓 review findings 开票落点（tracker 批次 + PHASE_STATUS 当前焦点；docs-only，未实现代码）
+d5ce8fe	B-37 真实 Gate 配置预检读数落点（tracker 配置预检一行；docs-only）
