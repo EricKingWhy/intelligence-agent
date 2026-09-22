@@ -24,6 +24,7 @@ ScriptedModel 全链验证"整段序列长什么样"（`tests/agent/test_event_s
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -34,6 +35,7 @@ from agent_harness.agent.runtime import (
     _RunFinalizer,
     _Telemetry,
     _TerminalArms,
+    _TerminalStages,
 )
 from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
@@ -59,6 +61,7 @@ from agent_harness.session import (
     RUN_STARTED,
     TEXT_DELTA,
     Session,
+    SessionEvent,
 )
 from agent_harness.session.store import SeqConflict
 from agent_harness.tooling import ToolExecutor, ToolRegistry
@@ -90,7 +93,8 @@ class _RecordingTracer:
     是**有断言成本的改动**，不是机械替换——同型替身在
     `tests/observability/test_tracer_port.py`（`_IdentifiedNullSpan`），那里测的是
     "句柄怎么被收口"。本文件其余 `str` 句柄替身（`_CountSpy` / `_AritySpy`）同理保留，
-    该分叉已登记在 `docs/SDD_TICKET_TRACKER.md` 的 B-33/B-35 残余里。
+    该分叉登记在 `docs/SDD_TICKET_TRACKER.md` 的 **B-34 残余②**（原始形状）与 **B-35 残余**
+    第 9 条（本批的如实改写与"有断言成本"结论）。
     """
 
     trace_id = "trace-1"
@@ -132,7 +136,9 @@ class _RecordingTracer:
         self._record("model_call_completed", span=generation, output_text=output_text)
 
     def model_call_failed(self, generation: Any, *, error_type: str) -> None:
-        self._record("model_call_failed", error_type=error_type)
+        # 句柄也记下来：`close_pending` 这条出口此前**没有身份断言**（窄复验 B 轴 C4 实测
+        # "传 None 照样 59 条全绿"）⇒ 记 `span` 才能钉住"转交的是在途那个句柄"。
+        self._record("model_call_failed", span=generation, error_type=error_type)
 
 
 class _PendingCoordinator:
@@ -378,9 +384,14 @@ def test_telemetry_success_path_calls_the_port_even_with_a_degraded_handle() -> 
 
 
 def test_telemetry_close_pending_order_and_attribution() -> None:
-    """收口三连：在途 ctx_span → 在途 generation（取消归因 "cancelled"）→ run_failed。"""
+    """收口三连：在途 ctx_span → 在途 generation（取消归因 "cancelled"）→ run_failed。
+
+    句柄用 `object()` 而非字面量：`_Telemetry` 若把在途句柄换成别的值（或 `None`），
+    `span=gen` 这条断言才红——窄复验 B 轴 C4 实测这条出口此前**没有身份断言**。
+    """
     tracer = _RecordingTracer()
-    telemetry = _Telemetry(tracer=tracer, ctx_span="span-ctx", generation="gen-1")
+    gen = object()
+    telemetry = _Telemetry(tracer=tracer, ctx_span="span-ctx", generation=gen)
 
     telemetry.close_pending(error_type=None, reason="cancelled", cancelled=True)
 
@@ -388,19 +399,20 @@ def test_telemetry_close_pending_order_and_attribution() -> None:
         "context_build_completed", "model_call_failed", "run_failed",
     ]
     assert ("context_build_completed", {"span": "span-ctx"}) in tracer.calls
-    assert ("model_call_failed", {"error_type": "cancelled"}) in tracer.calls
+    assert ("model_call_failed", {"span": gen, "error_type": "cancelled"}) in tracer.calls
     assert telemetry.ctx_span is None and telemetry.generation is None
 
 
 def test_telemetry_close_pending_keeps_the_exception_attribution() -> None:
     """异常臂：error_type 原样透传（未分类故障的可读文案由 `_TerminalContext` 负责）。"""
     tracer = _RecordingTracer()
-    telemetry = _Telemetry(tracer=tracer, generation="gen-1")
+    gen = object()
+    telemetry = _Telemetry(tracer=tracer, generation=gen)
 
     telemetry.close_pending(error_type="TimeoutError", reason="TimeoutError")
 
     assert [name for name, _ in tracer.calls] == ["model_call_failed", "run_failed"]
-    assert ("model_call_failed", {"error_type": "TimeoutError"}) in tracer.calls
+    assert ("model_call_failed", {"span": gen, "error_type": "TimeoutError"}) in tracer.calls
 
 
 def test_telemetry_close_pending_skips_handles_that_are_not_in_flight() -> None:
@@ -760,8 +772,11 @@ async def test_cancelled_arm_discards_events_but_persists_them(session: Session)
     # `drain_transitions() == []`——它只反映替身自己清空了队列，臂一次都不取也照样绿）
     assert coord.drains == 1
     assert [e.type for e in written].count(MODEL_FALLBACK) == 1
-    # 观测：取消臂也要收口 generation（error_type="cancelled" 而非异常类型）
-    assert ("model_call_failed", {"error_type": "cancelled"}) in kit.tracer.calls
+    # 观测：取消臂也要收口 generation（error_type="cancelled" 而非异常类型）。
+    # 句柄按**身份**断言（B 轴 P3）：此前替身 `_record("model_call_failed", error_type=…)`
+    # 把 generation 丢了，于是 `close_pending` 传 `None` 也全绿——"收口的是哪一个句柄"
+    # 无人钉住；现在替身记下它，这里连值一起断（取消臂这一步收的就是在途那个）。
+    assert ("model_call_failed", {"span": "gen-1", "error_type": "cancelled"}) in kit.tracer.calls
     assert ("context_build_completed", {"span": "span-ctx"}) in kit.tracer.calls
     assert ("run_failed", {"reason": "cancelled"}) in kit.tracer.calls
     assert [c[0] for c in kit.tracer.calls] == [
@@ -1032,3 +1047,65 @@ async def test_both_stages_failing_re_raises_the_first_one_after_running_both(
     written = kit.since(mark)
     assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
         "两段皆炸也不影响终态事件落盘"
+
+
+@pytest.mark.asyncio
+async def test_failed_arm_still_writes_the_terminal_event_when_the_port_raises(
+    session: Session,
+) -> None:
+    """R4（异常臂第二段）：观测收口自己抛错时，`run/failed` 仍然落盘。
+
+    **为什么异常臂要单独一遍**（两轴审查 B 轴 P2）：两臂的收尾**不是同一段代码**——
+    取消臂逐段直呼，异常臂在段之间把收口产出的事件逐条镜像给流消费者。把
+    `_terminal_exception` 里那句 `stages.run("close_observability", …)` 换回直呼
+    （`for streamed in ctx.close_observability(…)`）时，取消臂的同类用例
+    （`test_cancelled_arm_still_writes_the_terminal_event_when_the_port_raises`）
+    **仍然全绿**，只有本用例变红：异常在第二段当场穿透，`failure_terminal` 那几行
+    再也到不了，`run/failed` 随之消失——正是 R4 要堵的形状（B 轴实测：那处改动让
+    78 个用例保持绿）。
+    """
+    kit = _kit(session, step_base=2, tracer=_ExplodingPortTracer())
+    kit.arms.terminal.model_call_open = True
+    kit.arms.telemetry.ctx_span = "span-ctx"
+    kit.arms.telemetry.generation = "gen-1"
+    mark = len(session.events)
+
+    with pytest.raises(RuntimeError, match="观测端口炸了"):
+        await _drain(
+            kit.runtime._terminal_exception(kit.arms, steps=3, error=ValueError("模型调用炸了")),
+        )
+
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
+        "抛错那一步之前仍执行过；它之后的 run_failed 没到（故障确实发生在段中间）"
+    written = kit.since(mark)
+    assert [e.type for e in written] == [MODEL_FAILED, RUN_FAILED], \
+        "终态事件不得因收口段故障而消失（R4）"
+    assert written[-1].data["reason"] == "ValueError", \
+        "归因仍来自 run 的原始错误，不因收尾段故障而变"
+
+
+def test_a_failing_stage_is_reported_in_the_structured_log(caplog: pytest.LogCaptureFixture) -> None:
+    """段抛错**不静默**：一条结构化日志带上段名 + 异常类型 + 文本（两轴审查 B 轴 P3）。
+
+    类 docstring 承诺"记一条结构化日志（类型 + 文本；不静默）并继续跑后续段"，但删掉
+    `_TerminalStages.run` 里那次 `log_event(...)` 后全部用例照绿——收尾故障只剩调用方
+    看到的第一处异常，而"哪一段炸的""后续段已继续执行"这两个事实无人承载，排障时只能
+    从原始异常的调用栈里猜。这里不经两条臂、直接调执行器，把日志面本身钉成判据。
+    """
+    stages = _TerminalStages()
+
+    def boom() -> list[SessionEvent]:
+        raise RuntimeError("收口炸了")
+
+    with caplog.at_level(logging.WARNING, logger="agent_harness.agent"):
+        assert stages.run("interrupt_streams", boom) == []
+
+    records = [r for r in caplog.records if getattr(r, "event_type", None) == "system_log"]
+    assert len(records) == 1, "收尾段故障必须留下恰好一条结构化日志"
+    record = records[0]
+    assert record.stage == "interrupt_streams"
+    assert record.error_type == "RuntimeError"
+    assert record.error_message == "收口炸了"
+    assert record.outcome == "stage_failed"
+    assert "interrupt_streams" in record.getMessage(), "段名也要在人类可读的消息里"
+    assert stages.first is not None, "日志之外，第一处异常仍要留给 raise_first()"

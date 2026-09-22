@@ -29,9 +29,11 @@
 那两条用例直接建 `ModelConfig`（不走 `from_settings`）⇒ 它们本就没有"夹具层 ERROR"这个
 暴露面，守卫对它们只是多一层保险。**这条保险并非总在**（两轴审查 B 轴实测）：本守卫的
 放行判据是主 key 是否非空，主 key 为空时它**放行且不探测**——那两个用例实际用的是 fallback
-端点，此时若 fallback 不可用，它们仍会在自己的门控层 skip（不是 ERROR，因为门控看的是
-fallback），但**"端点可用性已探过"这句话对它们不成立**。⇒ 别把 phase12 那两条读作"已被
-守卫覆盖"。
+端点，所以 **"端点可用性已探过"这句话对它们不成立**。⚠ 修窄复验 A 轴纠正过这里的措辞：
+门控是**在场性**检查（`provider` / `api_key` / `model_name` 三者非空，`:38-45`），所以
+"fallback 不可用"的后果分两种——**未配置**（`FALLBACK_MODEL_*` 缺键）⇒ `_fallback_model_config`
+里 skip；**已配置但端点不可用** ⇒ 这两条**直接红**（`test_gate2…` 断言 `status == "completed"`、
+`test_gate3…` 断言 `levels` 非空），不是 skip。⇒ 别把 phase12 那两条读作"已被守卫覆盖"。
 先前的写法是"provider 与 key 都非空且 strip 后非空"，
 显式清空 `MODEL_PROVIDER=` 与空白 key 两条出口都回到 ERROR 形状，2026-09-22 两轴审查
 实测后按等价口径改写。
@@ -167,9 +169,9 @@ _STATUS_REASONS: dict[int, str] = {
 
 #: 配置**值**回显前的"密钥形"兜底（配置文本 / provider 名 / model 名 / base_url / detail
 #: 都用它）。形状白名单，只兜现实里最常见的几族（`sk-` / `pk-` / `hf_` / `ghp_` 前缀、
-#: AWS 的 `AKIA…`、纯 hex ≥ 24、`id.secret` 两段式）。**故意不穷尽**：无前缀的任意串
-#: （例如 `code` / `state` 这类泛名）仍会原样回显——判据是"形状"就必然如此；根因是配置值
-#: 经错误正文回显这一面没有产品层统一实现，属已登记的待办。
+#: AWS 的 `AKIA…`、纯 hex ≥ 24、`id.secret` 两段式、JWT 三段式）。**故意不穷尽**：
+#: 无前缀的任意串（例如 `code` / `state` 这类泛名）仍会原样回显——判据是"形状"就必然如此；
+#: 根因是配置值经错误正文回显这一面没有产品层统一实现，属已登记的待办。
 #: ⚠ 不能直接把整段文本喂 `_redact_detail`（实测）：它的 `api[-_]?key` 规则会把
 #: `FALLBACK_MODEL_API_KEY` 这类 **env 名**一并打码成 `FALLBACK_MODEL_***`，把"缺哪
 #: 一个 env"这条唯一可操作的信息毁掉。`_redact_base_url` 仍会走 `_redact_detail`（它是
@@ -180,42 +182,77 @@ _KEY_SHAPED_TOKEN = re.compile(
     r"|\bAKIA[0-9A-Z]{16}\b"                                  # AWS access key id
     r"|\b[0-9a-fA-F]{24,}\b"                                  # 纯 hex（≥24）
     r"|\b[0-9a-fA-F]{8,}\.[A-Za-z0-9]{8,}\b"                  # id.secret 两段式
+    # JWT（`eyJ…` 头 + 两段点分）：窄复验 B 轴实测 `Authorization: Bearer eyJ…` 能原样穿过
+    r"|\beyJ[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]{2,}){1,2}\b"
 )
+
+#: header / 赋值形的值（`Authorization: Bearer …` / `X-Api-Key: …` / `api_key=…`）：
+#: 参数**名**按子串判定（与 query 层同一口径），值整段吃掉——含可选的一节 scheme 词
+#: （`Bearer` / `Basic`），否则 `Authorization: Basic dXNl…` 只吃掉 `Basic`、base64 本体
+#: 留下（窄复验 B 轴实测）。窄复验 B 轴实测这两类值原先都原样穿过
+#: （`_redact_detail` 只吃得掉名字那一半）。
+_KEY_VALUE_ASSIGNMENT = re.compile(
+    r"(?i)\b[a-z0-9_-]*(?:api[-_]?key|apikey|token|secret|password|passwd|pwd|authorization)"
+    r"[a-z0-9_-]*\s*[:=]\s*(?:[a-z]{3,12}\s+)?\S+"
+)
+
+#: scheme 后的整段 authority 里若出现 `@`，把 `@` 前的一切打码（`(?<=://)` 起手）。
+#: 补这层是因为 userinfo 层的形状判据在两种写法上会漏：口令里带 `/`
+#: （`https://user:pa/ss@a.invalid/v1`，userinfo 只能从 `ss` 起匹配）与出现两个 `@`
+#: （`https://user:pass@evil@a.invalid/v1`，首个 `@` 前的部分原样留下）。`[^\s]*` 跨不过
+#: 空白 ⇒ 报错正文里的 URL 天然以空白为界；**代价**：URL 自身在 authority 之后还含 `@`
+#: （例如 query 值里塞了邮件地址）时会把 authority 一起打码——方向仍是 fail-closed。
+_URL_AUTHORITY = re.compile(r"(?<=://)[^\s]*@")
 
 # ── base_url 回显前的脱敏（B-33 残余①，2026-09-22）──────────────────────────
 #: userinfo 形凭据（`https://user:pass@` / `https://<token>@`）：与
-#: `transport/contract.py` 的 `_GIT_URL_USERINFO` 同一口径起手，**三处都比它宽**——
-#: 不带冒号的那半（`https://<token>@host`）、不带 scheme 的 `user:pass@host`、以及
-#: **单标签主机 / IPv6 字面量**（`localhost:8000` / `ollama:11434` / `[::1]`）。
-#: 最后一条是两轴审查的 B 轴实测逼出来的：产品 `validate_base_url` 只校验 scheme+netloc，
-#: 自建 OpenAI 兼容端点（本地 / 内网）的 URL **带 userinfo 且主机名无点**是现实写法，
-#: 只认"带点主机名"会把整段凭据原样放进 skip 理由（进 CI 日志）。
+#: `transport/contract.py` 的 `_GIT_URL_USERINFO` 同一口径起手。**相对它更宽的是两处**：
+#: 不带冒号的那半（`https://<token>@host`）与不带 scheme 的 `user:pass@host`（SDK 报错
+#: 正文里的 URL 未必带 `http://`，写成 `(https?://)` 起手会漏）。
+#: **收窄的三处**（两轴审查 A 轴实测，均为"凭据原样穿过"）——`_GIT_URL_USERINFO` 不看
+#: `@` 之后的形状，本规则要看，所以凡是尾部 / 主机字符不在下面集合里的写法都会漏：
+#: `…@host#frag`（`#` 曾是禁区）、`'…@internal'`（引号曾是禁区）、`…@my_host/v1`（主机名
+#: 含 `_`）。`detail` 是 `str(error)` 的上游文本，SDK 报错里就是这种带引号 / 带 fragment
+#: 的 URL ⇒ 已把 `#` `"` `'` `)` `]` `}` `,` `;` `>` 与主机名里的 `_`、FQDN 末尾的点收进
+#: 判据（2026-09-22 窄复验 A 轴 findings 处置）。
+#: **单标签主机 / IPv6 字面量**（`localhost:8000` / `ollama:11434` / `[::1]`）不是相对
+#: `_GIT_URL_USERINFO` 的差异，而是相对**本规则上一版**的差异：上一版要求"含点主机名"，
+#: 于是本地 / 内网自建端点（产品 `validate_base_url` 只校验 scheme + netloc，这种写法合法）
+#: 的整段凭据会原样进 skip 理由。
 #: 量词不设上限（曾写成 `{1,64}`，实测 80 字符的 token 会**留下前 16 位**明文）。
 #: **代价（如实记）**：判据只看"`@` 前后像不像 `凭据@主机`"，所以邮件地址
 #: （`ops@a.invalid`）、`foo@pytest.mark`、`100@2026-09-22` 这类**不含凭据**的串也会被
 #: 打码。方向是安全的：少一段可读文本，不是多一段凭据。
 _URL_USERINFO = re.compile(
     r"(?i)[^\s/@:]+(?::[^\s/@]*)?@"
-    r"(?=(?:\[[0-9a-f:]+\]|[a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::\d+)?(?:[/\s?]|$))"
+    r"(?=(?:\[[0-9a-f:]+\]|[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\.?)(?::\d+)?"
+    r"(?:[/\s?#\"')\]},;>]|$))"
 )
 #: query / fragment 形凭据（`?api_key=…` / `?X-Amz-Signature=…`）：参数名按**子串**
 #: 判定（`client_secret` / `subscription-key` 这类派生命名永远列不全），分隔符覆盖
-#: `?` / `&` / `;` / `#`。
+#: `?` / `&` / `;` / `#`。参数名允许 `[` `]`（`?keys[]=`，窄复验 B 轴实测遗漏），
+#: `pass` 也在子串表里（`?pass=`）。
 _URL_CREDENTIAL_VALUE = re.compile(
-    r"(?i)([?&;#][a-z0-9_.-]*(?:key|token|secret|auth|password|passwd|pwd|sig|credential)"
-    r"[a-z0-9_.-]*=)[^&\s#]*"
+    r"(?i)([?&;#][a-z0-9_.\-\[\]]*(?:key|token|secret|auth|password|passwd|pwd|pass|sig"
+    r"|credential)[a-z0-9_.\-\[\]]*=)[^&\s#]*"
 )
 
 
 def _redact_base_url(text: str) -> str:
     """URL 形凭据的回显脱敏（skip 理由会被 pytest 原样打印，还带一条 warning）。
 
-    四层，**本模块自己的密钥形词表也在内**：userinfo → `_KEY_SHAPED_TOKEN` →
-    query / fragment → `_redact_detail`（产品侧的兜底）。第三层的补入是两轴审查 B 轴
-    实测逼出来的：`base_url` / `detail` 原先只过 `_redact_detail` 的窄词表
-    （`sk|pk|api_key` 等），本模块已定义的"密钥形"判据（32 位 hex、`AKIA…`、`hf_…`）
-    **从不作用于这两个字段**——端点把 key 回显在错误正文里时能原样穿过。放在
-    `_redact_detail` 之前：先按形状整段吃掉，再让产品那条兜底扫尾巴。
+    **六层**（顺序即下面代码的顺序）：整段 authority（scheme 后的 `…@`）→ userinfo 形 →
+    本模块密钥形词表 → header / 赋值形的值 → query / fragment → `_redact_detail`（产品侧兜底）。
+
+    三层的补入都由两轴审查的实测逼出来（每次都是"凭据原样穿过"）：
+    **第二层**（密钥形词表）：`base_url` / `detail` 原先只过 `_redact_detail` 的窄词表
+    （`sk|pk|api_key` 等），本模块已定义的"密钥形"判据（32 位 hex、`AKIA…`、`hf_…`、
+    JWT）**从不作用于这两个字段**——端点把 key 回显在错误正文里时能原样穿过。
+    **第四层**（header / 赋值）：`Authorization: Bearer eyJ…` / `X-Api-Key: …` 的值
+    原样穿过（`_redact_detail` 只吃得掉名字那一半）。
+    **第一层**（整段 authority）：userinfo 层的形状判据在"口令含 `/`"与"两个 `@`"两种
+    写法上只能吃到后半段。
+    放在 `_redact_detail` 之前：先按形状整段吃掉，再让产品那条兜底扫尾巴。
 
     **`_redact_detail` 的真实行为**（实测）：非锚定的子串替换，尾巴一路吃到空白 / 引号
     ——所以它会把**不含凭据**的主机名也截断（`https://risk-free.example.com/v1` ⇒
@@ -226,8 +263,10 @@ def _redact_base_url(text: str) -> str:
     入参是**文本**不是"必须是 URL"：`probe_endpoint` 拿它过一遍含 URL 的错误正文，
     `EndpointProbe.line()` 拿它过 `base_url` 与 `detail` 两个回显面。
     """
-    masked = _URL_USERINFO.sub("***@", text)
+    masked = _URL_AUTHORITY.sub("***@", text)
+    masked = _URL_USERINFO.sub("***@", masked)
     masked = _KEY_SHAPED_TOKEN.sub("***", masked)
+    masked = _KEY_VALUE_ASSIGNMENT.sub("***", masked)
     masked = _URL_CREDENTIAL_VALUE.sub(r"\1***", masked)
     return _redact_detail(masked)
 
@@ -412,10 +451,13 @@ def _primary_key_present(settings: Any) -> bool:
     ERROR"。provider 不参与判定：它有非空默认值（`config.py`），显式清空是配置缺陷、
     不是"没配"。
 
-    比用例宽的两处（**如实登记**）：入参是鸭子类型（`getattr` + `get_secret_value` 可选），
-    以及 `None` 直接判 False——对 `Settings` 不可达（它恒是 `SecretStr`），只有替身会走到；
-    用例侧那个表达式遇到 `None` 会抛 `AttributeError`。这不会造成"守卫放行而用例 ERROR"
-    （方向相反：守卫多算"在场"⇒ 更早开口）。
+    比用例宽的两处（**如实登记**，窄复验 A 轴要求把两处的方向分开写）：
+    入参是鸭子类型（`getattr` + 可选 `get_secret_value`）⇒ 守卫**多算"在场"**（更早开口，
+    不会放行一个用例会 ERROR 的形态）；`None` 直接判 False（`key is None` 提前返回）⇒
+    **方向相反**：守卫放行、用例侧 `settings.model_api_key.get_secret_value()` 抛
+    `AttributeError` = 正是"守卫放行而用例 ERROR"。两条对真实 `Settings` 都不可达
+    （`model_api_key` 恒是 `SecretStr`），只有替身会走到 ⇒ 作为判据边界登记，不在守卫里
+    追平（追平要引入新的抛错面）。
     """
     key = getattr(settings, "model_api_key", None)
     if key is None:

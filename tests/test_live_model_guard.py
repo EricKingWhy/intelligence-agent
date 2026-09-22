@@ -275,13 +275,19 @@ def test_skip_reason_masks_the_credential_shaped_writes_the_first_rule_missed() 
         EndpointProbe(label="primary", provider="p", model_name="m",
                       base_url="https://a.invalid/v1;token=semi-7777", ok=False,
                       reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="").line(),
+        # `;` 分隔 + 只有 query 层认得的参数名（`sig`）：`token=` 这种名字**另一层也认**
+        # （`_KEY_VALUE_ASSIGNMENT` 按 `[:=]` 赋值形吃整段），于是"分隔符集合里有 `;`"
+        # 这件事在 `;token=` 上测不出来（三轮变异实测 M4 绿）。换个只有本层认的名字才隔离。
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1;X-Amz-Signature=sig-6666", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="").line(),
     ]
 
     for line in lines:
         assert "***" in line
     assert "tok1234" not in lines[0] and "secret" not in lines[1]
     assert "cs-9999" not in lines[2] and "sig-8888" not in lines[3]
-    assert "semi-7777" not in lines[4]
+    assert "semi-7777" not in lines[4] and "sig-6666" not in lines[5]
 
 
 def test_skip_reason_masks_userinfo_on_dotless_hosts() -> None:
@@ -305,12 +311,109 @@ def test_skip_reason_masks_userinfo_on_dotless_hosts() -> None:
         EndpointProbe(label="primary", provider="p", model_name="m",
                       base_url="https://tok4@vllm-svc/v1", ok=False,
                       reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        # `?` 结尾（查询串起点）专钉尾部集合里的 `?`（B 轴 C5 实测：拿掉它 59 条全绿）；
+        # 大写形专钉 `(?i)`（同样全绿）。
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://user:pass5@a.invalid?x=1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="HTTPS://USER:PASS6@HOST.INVALID/V1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        # **无 scheme 形**：上面几条都带 `://`，被「整段 authority」那一层先一步吃掉，
+        # 于是本层的主机名前瞻 / 大小写 / 尾部分隔符**全都可以被删掉/收窄而不变红**
+        # （三轮变异实测 M11/M15/M16/M24 六条全绿）。只有不带 scheme 的写法能把本层的
+        # 判据单独钉住——而这正是 SDK 报错正文里常见的形状（`user:pass@host/v1`）。
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="user:pass7@localhost:8000/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="user:pass8@[::1]:8000/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="USER:PASS9@OLLAMA:11434/V1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
     ]
 
     for line in lines:
-        assert "***" in line and "@" in line
-    for line, leaked in zip(lines, ("pass1", "tok2-abc", "sec3", "tok4")):
+        assert "***@" in line, f"userinfo 没被打码：{line}"
+    for line, leaked in zip(lines, ("pass1", "tok2-abc", "sec3", "tok4", "pass5", "PASS6",
+                                    "pass7", "pass8", "PASS9")):
         assert leaked not in line, f"凭据 {leaked!r} 漏进理由：{line}"
+
+
+def test_skip_reason_masks_authority_and_header_shaped_credentials() -> None:
+    """scheme 后的整段 authority / header 值 / JWT / JSON 引号里：窄复验 B 轴 C1 逐条实测的漏法。
+
+    六类各钉一条（每一类原先都原样回显）：口令含 `/` 与出现两个 `@`（userinfo 层的形状
+    判据只能吃到后半段 ⇒ 补一层"整段 authority"）；`Authorization: Basic <base64>` 与
+    `Authorization: Bearer <JWT>`（base64 / JWT 本体没有能锚定的名字，靠 header 名 + 可选
+    scheme 词触发值整段）；`X-Api-Key: …`（`_redact_detail` 只吃得掉名字那一半）；
+    JSON 错误体里被引号夹住的 URL；以及**裸 JWT**（URL 路径里、没有任何名字在旁）。
+    最后一条是 `_KEY_SHAPED_TOKEN` 的 `eyJ` 分支**唯一**不能删的理由：带 `Authorization:`
+    的那条即使删掉该分支也仍被 header 层吃掉，于是"分支在位"这件事只有裸写法能证明。
+    """
+    lines = [
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="{.net error: https://user:pa/ss@a.invalid/v1}").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="https://user:pass@evil@a.invalid/v1").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=PROVIDER_AUTH_REASON, error_type="AuthenticationError",
+                      detail="Authorization: Basic dXNlcjpwYXNzd29yZA==").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=PROVIDER_AUTH_REASON, error_type="AuthenticationError",
+                      detail="Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc"
+                      ).line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=PROVIDER_AUTH_REASON, error_type="AuthenticationError",
+                      detail="X-Api-Key: SECRETVALUEJ supplied").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail='{"error":{"message":"https://tok9@api.invalid"}}').line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="GET /v1/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.barejwt HTTP/1.1"
+                      ).line(),
+    ]
+
+    for line in lines:
+        assert "***" in line, f"没被打码：{line}"
+    for line, leaked in zip(lines, ("pa/ss", "user:pass@evil", "dXNlcjpwYXNzd29yZA==",
+                                    "eyJhbGciOiJIUzI1NiJ9", "SECRETVALUEJ", "tok9",
+                                    "barejwt")):
+        assert leaked not in line, f"凭据 {leaked!r} 漏进理由：{line}"
+
+
+def test_skip_reason_masks_hex_tokens_at_the_size_boundary() -> None:
+    """hex 阈值 `{24,}` 的下界附近：24 位与 40 位都打码（B 轴 C5 实测 `{32}` 时 59 条全绿）。
+
+    既有用例的 token 恰好 32 位 ⇒ 把 `{24,}` 改成 `{32,}` 它照样绿。补一条 40 位与一条
+    24 位，阈值一提就红。
+    """
+    lines = [
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError",
+                      detail="token 0123456789abcdef0123456789abcdef0123").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_TIMEOUT, error_type="APITimeoutError",
+                      detail="token 0123456789abcdef01234567").line(),
+    ]
+
+    for line in lines:
+        assert "***" in line, f"没被打码：{line}"
+    assert "0123456789abcdef" not in lines[0]
+    assert "0123456789abcdef" not in lines[1]
 
 
 def test_a_dotless_host_stays_readable_after_masking() -> None:
@@ -364,6 +467,52 @@ def test_skip_reason_masks_key_shaped_tokens_in_the_url_and_the_detail() -> None
     assert "hf_ABCDEFGHIJKLMNOP" not in lines[2]
 
 
+def test_skip_reason_masks_userinfo_before_fragments_quotes_and_underscore_hosts() -> None:
+    """窄复验 A 轴实测的**三处收窄**（凭据原样穿过）：`…@host#frag` / `'…@internal'` /
+    `…@my_host/v1`。
+
+    收窄的由来：`transport/contract.py::_GIT_URL_USERINFO` 只看 `scheme://凭据@`，**不看
+    `@` 之后的形状**；本规则要看，于是尾部 / 主机字符不在集合里就整段回显。`detail` 是
+    `str(error)` 的上游文本（SDK 报错正文里正是带引号 / 带 fragment / 下划线主机的 URL），
+    所以这三处不是纸上情形。修法：尾部集合收进 `#` `"` `'` `)` `]` `}` `,` `;` `>`，
+    主机名收进 `_` 与 FQDN 末尾的点。
+
+    后三条是**无 scheme 形**：带 `://` 的写法由「整段 authority」层兜住，本层这三处收窄
+    在那上面**删掉也不变红**（三轮变异实测 M15/M16 全绿）——只有不带 scheme 的写法能把
+    本层判据单独钉住。
+    """
+    lines = [
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://user:pw1@host#frag", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError", detail="").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="base_url='https://user:pw2@internal'").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="connect failed for https://user:pw3@my_host/v1").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="connection to user:pw4@host#frag failed").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="base_url='user:pw5@internal'").line(),
+        EndpointProbe(label="primary", provider="p", model_name="m",
+                      base_url="https://a.invalid/v1", ok=False,
+                      reason=REASON_UNREACHABLE, error_type="ConnectError",
+                      detail="connect failed for user:pw6@my_host/v1").line(),
+    ]
+
+    for line in lines:
+        assert "***@" in line, f"userinfo 没被打码：{line}"
+    for line, leaked in zip(lines, ("pw1", "pw2", "pw3", "pw4", "pw5", "pw6")):
+        assert leaked not in line, f"凭据 {leaked!r} 漏进理由：{line}"
+
+
 def test_skip_reason_keeps_a_non_credential_query_readable() -> None:
     """反向：普通参数名**不许**被误伤（`?model=` 是排查时的关键信息）。"""
     probe = EndpointProbe(
@@ -381,6 +530,8 @@ def test_skip_reason_masks_a_long_credential_entirely() -> None:
     这条是两轴审查的 A 轴实测出来的：`{1,64}` 的上限是**脱敏自己造的漏洞**——超过 64
     字符的 token 只遮住尾部，前缀照样进 pytest 输出与 warning。断言必须检查"那段前缀
     不在输出里"，只断言 `"***" in line` 是空转（旧实现同样满足）。
+    第二条是**无 scheme 形**：`://` 那条由「整段 authority」层兜住，本层的量词上限在它
+    上面删掉也不变红（三轮变异实测 M8 绿）——隔离证必须不带 scheme。
     """
     token = "P" * 80  # 现实中：JWT / 长 API key / base64 段
     probe = EndpointProbe(
@@ -388,17 +539,28 @@ def test_skip_reason_masks_a_long_credential_entirely() -> None:
         base_url=f"https://user:{token}@a.invalid/v1", ok=False,
         reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="",
     )
+    schemeless = EndpointProbe(
+        label="primary", provider="p", model_name="m",
+        base_url=f"user:{token}@a.invalid/v1", ok=False,
+        reason=REASON_TIMEOUT, error_type="APITimeoutError", detail="",
+    )
 
     line = probe.line()
+    schemeless_line = schemeless.line()
 
     assert "PPPP" not in line, f"长凭据的前缀漏了：{line}"
     assert "***@a.invalid" in line, "打码后主机名仍可读（定位端点要看这个）"
+    assert "PPPP" not in schemeless_line, f"无 scheme 形的前缀漏了：{schemeless_line}"
+    assert "***@a.invalid" in schemeless_line
 
 
 def test_a_bare_email_in_the_text_is_masked_too_disclosed_tradeoff() -> None:
     """邮件地址**也**会被打码——这是披露过的取舍，不是 bug。
 
-    主机名前瞻只排除 `@decorator` / `100@2026-09-22` 这类非主机形态，分不出"人名 + 域名"。
+    判据只看"`@` 前后像不像 `凭据@主机`"，**分不出"人名 + 域名"**——`100@2026-09-22`、
+    `foo@pytest.mark` 这类也会一起被打码（窄复验 A 轴实测：本规则比"只排除 `@decorator`"
+    更宽，那几个例子并不在豁免之列）。真正**不被**匹配的是尾部紧跟非分隔符的形态，例如
+    `foo@pytest.mark.parametrize(len)`（`(` 不在尾部集合里）。
     方向是安全的（少一段可读文本 < 多一段凭据），故按现状钉住；要改成保护邮件地址，
     必须同时改 `_URL_USERINFO` 的注释与这条用例。
     """
@@ -715,7 +877,11 @@ def test_primary_key_present_matrix_matches_the_case_side_skipif() -> None:
 
 #: 用例侧放行判据的**文本**（两轴审查 B 轴 P3：期望列是手写的，改动用例侧不会让上面那条
 #: 变红）。这里按文本再钉一道：用例侧表达式一旦改写，本用例立刻红，逼着回头看等价口径。
+#: 三个站点（`_primary_key_present` 的 docstring 点名的就是这三个），后两个拼写不同：
+#: 两个 gate 用 `if not settings.model_api_key.get_secret_value():`，
+#: `tests/agent/test_integration_coding.py` 用 `bool(_settings.model_api_key)`。
 _CASE_SIDE_PREDICATE = "if not settings.model_api_key.get_secret_value():"
+_CASE_SIDE_PREDICATE_CODING = "bool(_settings.model_api_key)"
 
 
 def test_case_side_skipif_text_still_matches_the_guards_predicate() -> None:
@@ -724,15 +890,19 @@ def test_case_side_skipif_text_still_matches_the_guards_predicate() -> None:
     局限（如实记）：文本匹配钉的是**拼写**，不是语义——把 `not` 挪走这类等价改写它会漏。
     它挡的是最常见的漂移（有人把用例侧改成 `.strip()` / 加 provider 条件 / 抽成别的
     表达式），那时本用例红，而上面的矩阵仍会绿——正是要吵醒的那种分歧。
+    第三个站点（`test_integration_coding.py`）是窄复验 B 轴 C2 补进来的：它此前无人看守，
+    在那边加 `.strip()` 任何用例都不会红。
     """
     cases = [
-        Path(__file__).parent / "integration" / "test_phase13_gate.py",
-        Path(__file__).parent / "integration" / "test_phase14_gate.py",
+        (Path(__file__).parent / "integration" / "test_phase13_gate.py", _CASE_SIDE_PREDICATE),
+        (Path(__file__).parent / "integration" / "test_phase14_gate.py", _CASE_SIDE_PREDICATE),
+        (Path(__file__).parent / "agent" / "test_integration_coding.py",
+         _CASE_SIDE_PREDICATE_CODING),
     ]
 
-    for path in cases:
+    for path, predicate in cases:
         text = path.read_text(encoding="utf-8")
-        assert _CASE_SIDE_PREDICATE in text, (
+        assert predicate in text, (
             f"{path.name} 的放行判据变了——守卫的等价口径（`_primary_key_present`）"
             f"必须跟着一起改，或把这里改成新的原文"
         )

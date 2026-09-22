@@ -328,7 +328,8 @@ class _Telemetry:
     失败面**——`run_stream(cancel_reason_supplier=…)` 是公开参数，当前唯一调用点是 web 的
     lambda（`web/runmanager.py` 里 `return "orphaned" if run.reap_requested else "cancelled"`，
     一次 bool 读），所以**当前**没有失败面；换成会抛的 supplier 则属于未收口的出口
-    （登记为残余，收口方式与 `cancel_reason` 段一致：过 `_TerminalStages`）。
+    （登记在 `docs/SDD_TICKET_TRACKER.md` **B-35 残余**第 5 条，收口方式与 `cancel_reason`
+    段一致：过 `_TerminalStages`）。
     **这个残余有两轴审查 B 轴给的实测复现**（不是推理）：teardown 注入一个抛
     `RuntimeError` 的 supplier ⇒ 收口段**0 次执行**，`tracer.calls == []`、session 里
     没有 `run/failed`——与修复前 `interrupt_streams()` 抛错的症状**逐条相同**。
