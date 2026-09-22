@@ -2698,14 +2698,23 @@ B = R5 Conversation / R6 Approval / R9 Run Inspector），主控负责 R7 Compos
 PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_long.py
 ```
 
-#### A-02 — 用户主动取消后，顶部说「已取消」、同屏 Run 卡片说「失败」【P2 · 归因待定（前端文案 / 后端事件语义）· 待裁决】
+#### A-02 — 用户主动取消后，顶部说「已取消」、同屏 Run 卡片说「失败」【P2 · 前端（展示层）· 已修复 `a21c5d2`】
 
 - **复现**：空态输入 `#slow …` 回车建会话 → 流中（顶栏 `思考中 · 2s`）按 `Escape` → 读顶部 chip 与 Inspector。
 - **实测**：顶部 chip = `已取消`；同屏 Inspector = `Run 1 失败` / `已取消`；事件序列末条是 **`run/failed {reason:"cancelled"}`**（不是 `run/cancelled`）；网络侧只有 `200 POST /sessions/<id>/cancel`。
 - **问题**：同一件事两处措辞不同，用户分不清"我停的"还是"它挂了"。
-- **两种修法（择一，需裁决）**：(a) 前端把 `run/failed + reason=cancelled` 一律投影为「已取消」（投影层单点，不动事件语义）；
-  (b) 后端为主动取消新增独立终态（`run/cancelled`），代价是事件模型与所有读侧都要加分支。
-  倾向 (a)：`reason` 已经把语义带全，事件类型无需增殖（符合 §9.2 最少改动）。
+- **根因**：读同一件事的两条规则不同源——顶栏/概览走 `projection.run_cancelled`（判 `reason`），
+  而 Inspector 时间线的 **run 分组头**只按**事件类型**判（`run/failed` → `failed`），`reason` 根本没参与。
+- **修法（已实施，(a) 展示层单点）**：`reason === 'cancelled'` 的判据收敛到**一个**叶模块
+  `web/src/lib/runCancel.ts`（`isCancelledRunFailure`），由会话投影与 run 分组共同调用；分组状态新增
+  `cancelled`（徽章「已取消」，与 `interrupted` 同中性色域）。**事件语义一字未动**（后端仍发
+  `run/failed{reason:cancelled}`）——`reason` 已把语义带全，为它增殖一个事件类型要改所有读侧，
+  与 §9.2 最少改动相悖。
+- **若用户偏好 (b)**（后端新增独立终态 `run/cancelled`）：本条的展示层改动仍然正确、不返工，
+  届时只需后端加事件类型 + 各读侧加分支——**该替代路径未被否决，只是未被采纳**。
+- **真机复验（2026-09-22 修复后）**：慢流中点停止 → 顶栏脉冲 `已取消`，Inspector run 分组头徽章
+  `run-badge run-badge-cancelled | 已取消`，后端事件尾仍是 `run/failed {"reason":"cancelled"}`。
+- **回归锁**：`web/src/lib/timelineGroups.test.ts`（cancelled 推导 + 脏数据 `failed↔cancelled` 先到者胜）。
 
 #### P3 / 观察项（按归属）
 
@@ -2715,11 +2724,22 @@ PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_l
 | **A-01** | `+ 新建会话` 不建会话：主区回空态、composer 聚焦、**无 `POST /api/sessions`**、侧栏行数不变、后端 `zero-event rows: []`；源码证实是**有意**的草稿态（`App.tsx` `handleNew` 只 `selectSession(null)`；真建会话发生在空态提交时）。"点了没反应"不成立，风险只在清单措辞 | 前端（语义/清单） | `a-r2r3r4.mjs`；`App.tsx:406-420,646` |
 | **A-03** | 取消流会在网络层留下 `POST /api/sessions :: net::ERR_ABORTED`（SSE 主动断开的正常副作用）；无 console error、UI 无报错条。记此以免下一轮误判为缺陷，但它会污染"零失败请求"类断言 | 前端（预期行为） | `a-r3fix.mjs` `badResponses` |
 | **A-04** | 保存**无 claims 的 token**：localStorage 写入成功、面板关闭，但身份 chip 不出现，且**无任何提示**（清单 R1-09/10 只说"chip 出现"，没说非法时怎么办） | 前端 | `a-r1.mjs`；`TopBar.tsx` `saveToken`/chip 条件 |
-| **A-06** | 空态 chip 点击后**焦点留在 chip 按钮**（三次点击值都注入正确，但 `activeElement=BUTTON`）⇒ 键盘用户按 Enter 是"再点一次 chip"而不是发送，读作"没反应" | 前端 | `a-r3fix.mjs` `empty_chips` |
-| **A-08** | Palette 密度条目文案不统一：实际是 `切换到 紧凑`、`切换到 均衡`（**中间有空格**），而 `切换到 详细`、`切换到 Raw` 没有；按文案精确检索/自动化会匹配失败 | 前端文案 | `a-r8.mjs` `palette_items` |
-| **B-D7** | Inspector 工具 Raw 的两个 `复制 Raw` 按钮**同 aria-label**，无法按名称区分 `tool/call` 与 `tool/result`（可访问性/可测性缺口） | 前端 | `findings-B.md` §R9-22/23 |
+| **A-06** | 空态 chip 点击后**焦点留在 chip 按钮**（三次点击值都注入正确，但 `activeElement=BUTTON`）⇒ 键盘用户按 Enter 是"再点一次 chip"而不是发送，读作"没反应"。**【已修 `a21c5d2`】** 注入后就地 `focus()` 输入框；真机复验 `activeId=composer-input`；回归锁 `Composer.presetFocus.test.tsx`（含"null 时不抢焦点"） | 前端 | `a-r3fix.mjs`；修复轮 `m-fixcheck.mjs` |
+| **A-08** | ~~Palette 密度条目四档文案空格不一致~~ **【核验后：误读，不改】** 修复轮真机复读四个条目 = `["切换到 紧凑","切换到 均衡","切换到 详细","切换到 Raw"]`——**四条同形**（同一模板 `切换到 ${DENSITY_CN[d]}`），源码注释明写这是 UI-06 的 CJK 间距规则（中文与英文/数字间加半角空格），`e2e/i-keyboard.spec.ts` 与 `lib/commands.test.ts` 已双份钉住；应用内检索对带/不带空格两种输入都能命中（`commands.test.ts` 有断言）。A 侧第一次用 `hasText:'切换到紧凑'` 匹配 0 条是 **Playwright 字面子串匹配**的脚本问题，不是产品问题 | 前端（**非缺陷**） | 修复轮 `m-fixcheck.mjs`（原文四条）；`App.tsx:927-935`；`e2e/i-keyboard.spec.ts:94-98` |
+| **B-D7** | Inspector 工具 Raw 的两个 `复制 Raw` 按钮**同 aria-label**，无法按名称区分 `tool/call` 与 `tool/result`（可访问性/可测性缺口）。**【已修 `a21c5d2`】** 拆成 `复制 Raw（tool/call）` / `复制 Raw（tool/result）`；真机复验 Raw 档两钮 aria-label 已可区分；回归锁 `StepDetail.toolRaw.test.tsx`（jsdom 点 Raw 档后断言） | 前端 | `findings-B.md` §R9-22/23；修复轮 `m-fixcheck2.mjs` |
 | **A-05** | 鉴权横幅与 `关闭提示` X **本轮不可达**：本后端未配 `JWT_SECRET` ⇒ 任何 token 都不出 401 ⇒ `authRequired` 恒 false。**不能声称通过，也不判缺陷** | 环境 | `a-r3fix.mjs` `fake_token_banner`（全部 200） |
 | **A-07** | Palette 的 `复制 Trace ID` / `打开 Trace` 两条在本环境**不渲染**（无 `trace_id`/Langfuse 未启用）；另有两条新条目（`整页打开 Inspector`、`管理记忆`）清单未列 | 环境 + 清单 | `a-r8.mjs` `palette_items`（33 条） |
+
+#### M-05 — 上下文容量看板的缓存行少一个右括号（渲染成半角花括号）【P3 · 前端 · 已修复 `2afae0e`】
+
+- **怎么发现的**：修完 M-01 后真机复验看板，读到 `平均缓存命中率 32.6%（1 次调用全部带回明细} · 估算`
+  ——**右括号是半角 `}`**。
+- **根因**：`ContextUsagePanel.tsx` 里写的是 `{'（'}{…}{'}'}`（`'}'` 处应为 `'）'`），
+  闭合位置写成半角花括号；两条分支（partial / ok）共用这一处字面量。
+- **修复**：改成 `{'）'}`；e2e 断言从"中间那段文字"收紧为**整串**
+  （`（1/2 次调用带回明细） · 估算` 与 `（12 次调用全部带回明细） · 估算`，partial 与 ok 两档都锁）。
+- **为什么本轮之前没发现**：`e2e/context-usage.spec.ts` 只断言 `1/2 次调用带回明细`，括号不在断言范围内；
+  真机上的"未采集"空态（M-01 修复前看板恒走 `not_collected` 分支）根本不渲染这一行。
 
 ### 4. 清单漂移（`ACCEPTANCE_CONTROL_INVENTORY.md` ≠ 实际 UI，共 16 条）
 
@@ -2766,10 +2786,37 @@ PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_l
   审计结束后删除；本轮唯一的仓库写入是本文档（+ 后续修复的代码与测试）。
 - **全程未打印任何密钥值**（只列 key 名与我自建的假 token 形状）。
 
-### 7. 本轮之后的处置顺序（占位，随进展更新）
+### 7. 处置与修复台账（本轮收口）
 
-1. **M-01**（P2 后端）按上表修法实施 + 改单测 + 订正设计稿数据源；
-2. **A-02**（P2 待裁决）按 (a) 投影层单点修，登记裁决依据；
-3. P3 中"低成本、纯前端文案/可测性"的三条（A-08 空格统一、B-D7 拆 aria-label、A-06 焦点进输入框）随批处理；
-4. A-01 / A-04 属**语义与产品口径**问题：不擅自改行为，连同 D-1…D-8 的清单过期一并交用户裁决（改清单 or 改行为）；
-5. 上述修完各跑一轮 `/code-review`（预算按协议 §8.3：每轴 1 轮）并真机复验，然后清理 §6 足迹。
+| 编号 | 级别 | 处置 | commit / 证据 |
+| --- | --- | --- | --- |
+| **M-01** | P2 后端 | **已修**：`_usage_from_response` 认 langchain 归一化名 `cache_read`（原始名 `cached_tokens` 兜底）；事件字段名不变；单测改喂真形状 + 保留兜底/非法值用例；设计稿 §3.1 数据源与 T1 同步订正 | `29cb508`；真机端到端：`model/completed.usage = {…,"cached_tokens":30}`，`/context-usage.cache = {"state":"ok","reported_calls":1,"total_calls":1,"avg_hit_rate":0.326}`，看板显示 `平均缓存命中率 32.6%`（修复前恒「未采集」） |
+| **A-02** | P2 前端 | **已修**（(a) 展示层单点，事件语义不动）：判据收敛到 `lib/runCancel.ts`，run 分组头新增「已取消」中性徽章 | `a21c5d2`；真机：脉冲 `已取消` + 分组头 `run-badge-cancelled \| 已取消`；回归锁 `timelineGroups.test.ts` |
+| **M-05** | P3 前端 | **已修**：看板缓存行右括号（原半角 `}`） | `2afae0e`；e2e 断言收紧到整串（partial / ok 两档） |
+| **A-06** | P3 前端 | **已修**：chip 注入后聚焦输入框 | `a21c5d2`；真机 `activeId=composer-input`；回归锁 `Composer.presetFocus.test.tsx` |
+| **B-D7** | P3 前端 | **已修**：两个 `复制 Raw` 拆名 | `a21c5d2`；真机两钮 aria-label 可区分；回归锁 `StepDetail.toolRaw.test.tsx` |
+| **A-08** | P3 前端 | **不改**：核验为误读（四条同形，UI-06 CJK 间距规则，e2e+单测双锁）——详见上表该行 | 修复轮真机复读四条文案 |
+| **M-02 / A-03** | 观察项 | 无产品改动（测试基建 / 预期行为），已登记 | 见 §3 |
+| **A-01 / A-04** | P3 前端 | **未改**：属语义与产品口径（`+` 是草稿态还是立即建会话；非法 token 怎么提示）。**需用户裁决**：改行为 or 改清单措辞 | 见 §3 两行 |
+| **A-05 / A-07** | 环境 | 未覆盖（无 JWT_SECRET / 无 trace_id），不计通过 | 见 §5 |
+| **D-1…D-8 / D1…D8（B）** | 清单 | **未改**：`ACCEPTANCE_CONTROL_INVENTORY.md` 与现行 UI 的 16 处漂移，属文档更新，等用户裁决后一次性改 | 见 §4 |
+
+### 8. 两轴独立审查（协议 §8.3：每轴 1 轮）
+
+对本批 5 笔改动（后端 `cd02c61`+`29cb508`；前端 `a21c5d2`+`2afae0e`+修复轮追加笔）跑了两轴：
+
+| 轴 | 结论 | 处置 |
+| --- | --- | --- |
+| **Standards** | 硬违规 **0**；判断项 7：①取消语义被判三处 ②后端注释越出"操作约束+指针" ③A-02 决策未留痕 ④`cached_tokens` 兜底无仓内生产者 ⑤脏数据 `failed↔cancelled` 无用例 ⑥A-06/B-D7 无回归守卫 ⑦`.run-badge-cancelled` 无对比度守卫 | ①②③⑤⑥ **本轮修**（收敛 `runCancel.ts` / 注释改为指向设计稿 / 登记裁决依据 + 用户可推翻路径 / 补脏数据用例 / 补两个 jsdom 回归锁）；④保留（判据：兜底路径正是本次缺陷的成因，删掉会让"不走归一化的集成"重蹈覆辙，属有意为之）；⑦不改并登记（新徽章复用 `interrupted` 既有 token，无新 token；`t-contrast.spec.ts` 本就不含 `interrupted`，单独加 `cancelled` 反而不一致——属既有缺口，§8 Scope Lock 不顺手扩） |
+| **Spec** | (a) 4 / (b) 1 / (c) 2：①A-02 决策未登记 ②A-08 未随批（而 §7 原计划写了）③B-D7 缺修后复验 ④设计稿 T1 mock 形状未同步 ⑤`STATUS_RANK` 重写超出规格 ⑥A-08 登记与源码矛盾 ⑦`M-05` 只出现在 commit 信息里 | ①②③④⑥⑦ **本轮修**（A-08 改成"不改+理由"、M-05 补进本文件、T1 订正、两条 jsdom 锁、决策登记）；⑤保留并说明（为新增 `cancelled` 而不破坏原优先链，等价性由新增用例逐例覆盖，属完成本票所必需） |
+
+**"M-05 只在 commit 信息里"是本轮的真实教训**：先提交后补文档，会出现"文档说自己是唯一叙述落点、
+而事实只活在 git log 里"的窗口。已按 §16.1 补回本文件。
+
+### 9. 遗留（交用户裁决 / 下轮处理）
+
+1. **A-01 / A-04** 的产品口径（见 §7 表）；
+2. **16 条清单漂移**：建议一次性更新 `ACCEPTANCE_CONTROL_INVENTORY.md`（它是验收基线，长期落后会让下一轮审计继续产出"漂移"这种噪声）；
+3. **未覆盖项**（§5）：真模型链路（等计费解冻）、鉴权横幅（需 `JWT_SECRET`）、Trace（需 Langfuse）、
+   `恢复会话` 入口、工具流 running 窗口三件、项目/记忆的写操作；
+4. **M-02** 的自动化纪律：e2e 里点流式期间的按钮要用坐标点击或真人节奏，别用 `locator.click()` 直接判"没反应"。

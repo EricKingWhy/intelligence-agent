@@ -192,7 +192,7 @@ builder 快照一个持久化落点（新 Store），属基础设施扩面（`AG
 
 | # | 用例 | 断言 |
 | --- | --- | --- |
-| T1 | 采集 cache | mock 响应带 `input_token_details.cached_tokens` ⇒ `model/completed.usage.cached_tokens` 存在且相等；缺失 ⇒ 字段为 `None`/省略，**绝不写 0** |
+| T1 | 采集 cache | mock 响应带 **provider 真形状** `input_token_details.cache_read`（langchain 归一化名，见 §3.1）⇒ `model/completed.usage.cached_tokens` 存在且相等；另有用例守原始名 `cached_tokens` 兜底；缺失 ⇒ 字段为 `None`/省略，**绝不写 0** |
 | T2 | 命中率算法 | 两次调用（1000/800 命中）⇒ 平均 = 0.8（求和口径，不是逐次平均）；全缺 ⇒ `cache.state="not_collected"`；部分缺 ⇒ `"partial"` |
 | T3 | 既有断言更新 | `test_structured_logging.py` 更新后仍断言 3 个既有字段，并允许可选第 4 个；PR 说明这是本票的行为变更 |
 | T4 | 求和不变式 | **`state="ok"` 时** `Σ(四类) + Σ(工具两组) == used_tokens`；构造有 MCP 工具的场景 ⇒ `tools.mcp > 0`。`usage_only` / `no_data` 不受这条约束（前者六桶如实为 0，见 §3.4） |

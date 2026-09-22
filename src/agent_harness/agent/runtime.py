@@ -111,9 +111,9 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     ``input_token_details`` 取缓存读取量；字段缺失/非数值/负值 ⇒ 键省略
     （**不写 0**——0 会被命中率算成 0% 假话，not_collected 语义才是诚实口径）。
 
-    **两个键名都要认**：langchain 把 OpenAI 的 ``prompt_tokens_details.cached_tokens``
-    归一化成 ``cache_read``（实测真链路上 ``input_token_details == {"cache_read": 75}``），
-    只有不走归一化的路径才是原始名。历史上只认 ``cached_tokens``，于是真链路恒不采集。
+    **两个键名都要认**：provider 线走 langchain 归一化后是 ``cache_read``，不走
+    归一化的路径才是原始名 ``cached_tokens``；成因与取证见
+    `docs/design/CONTEXT_CAPACITY_DASHBOARD.md` §3.1。
     """
     meta = getattr(ai, "usage_metadata", None)
     if not isinstance(meta, dict):
