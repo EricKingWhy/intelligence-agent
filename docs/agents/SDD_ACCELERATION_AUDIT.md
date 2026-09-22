@@ -551,74 +551,102 @@ PATH="<PortableGit>/usr/bin:$PATH" "<PortableGit>/bin/bash.exe" scripts/check_re
 你用到几个就下几个，能复用 pstack 直接复用，不要自己写 skills**，你可以引导模型，比如在某个阶段让模型
 调用某个 skill 去执行，就是引用。」
 
+同日 21:27 追加两条硬约束（**这两条改变了选型结果**）：
+
+> 「pstack 里面你下了哪些？**只能下载我们能用上的**啊，比如 Matt 的 `/implement` 和 pstack 的
+> `/poteto-mode` 功能一致，下载 `/poteto-mode` 完全就是干扰模型了，**mattpocock 的是主开发 skills，
+> pstack 只是打辅助**，而且我会在 codex 和 zcode 里面都装上你下载的 skills。」
+
 **自曝**：本文 §1 那份「pstack 原则对照 6 条」是**读二手摘要**写的——我只搬了**原则的文字**，
 **一个 skill 本体都没搬，也从未 clone 上游**。而 pstack 里**恰好就有增量验证的机器**：
-`principle-sequence-verifiable-units`（23 行）就是「失败点回退」这条原则的表达式，
+`principle-sequence-verifiable-units` 就是「失败后不整条重跑」这条原则的表达式，
 `create-verification-skill` 直接产出 feature map。需求方点出这一点是对的，我此前把「借鉴」做成了「复述」。
+
+**第二轮自曝（21:27 追加）**：首轮我搬了 **9** 个，其中 **2 个与 Matt 主开发 skills 功能重合**——
+
+- `tdd`：`~/.codex/skills/tdd/SKILL.md` 与 `~/.zcode/skills/tdd/SKILL.md` **已存在**（同一份 3541 B 的
+  Matt 英文版）⇒ **同名撞目录**，装进去会覆盖或遮蔽；且 `mp-eng-implement` 正文明文
+  「**Use /tdd where possible**, at pre-agreed seams」⇒ 这一步的路由**本来就归 Matt**。
+- `principle-test-behavior-not-implementation`：与 Matt `tdd` 的 `## What a good test is`
+  （「Tests verify behavior through public interfaces, **not implementation details**」）
+  与 `## Anti-patterns` 第一条 `Tautological`（「the assertion recomputes the expected value the way
+  the code does … Expected values must come from an independent source of truth」）**是同一份内容**。
+
+**这两个已撤销**，撤销证据（搬进来时的 sha256 前 32 位）留在
+`docs/agents/skills/PROVENANCE.md` §2.1，防止以后又被加回来。
 
 ### 10.2 实际做了什么（可复跑）
 
 | 步骤 | 读数 / 命令 |
 | --- | --- |
-| 抓上游 | `git clone --depth 1 --filter=blob:none --sparse https://github.com/cursor/plugins.git` → `git sparse-checkout set pstack`。**不装插件、不跑任何上游脚本**（上游是 Cursor 插件仓库，README 的安装方式是 `/add-plugin pstack`） |
+| 抓上游 | `git clone --depth 1 --filter=blob:none --sparse https://github.com/cursor/plugins.git` → `git sparse-checkout set pstack`。**不装插件、不跑任何上游脚本** |
 | 上游版本 | `53e579f1481697931fc44f5445171397cfa2b24b`（2026-09-21 19:40:52 -0700） |
-| 许可 | **MIT**，`Copyright (c) 2026 Lauren Tan`；全文**逐字节副本**在 `docs/agents/skills/pstack-LICENSE.txt`（满足 MIT 的「版权声明随副本保留」） |
+| 许可 | **MIT**，`Copyright (c) 2026 Lauren Tan`；全文**逐字节副本**在 `docs/agents/skills/pstack-LICENSE.txt` |
 | 上游 skill 总数 | **47**（全部 ≤ 300 行，零依赖、零构建） |
-| 搬运量 | **9 个 skill**（≈19%）+ 4 个 reference 数据文件 + 1 份许可 = **14 文件** |
-| 逐字节校验 | 13 个内容文件 `copy → 回读 → bytes 比对` **全 OK**；sha256 清单见 `docs/agents/skills/PROVENANCE.md` §5 |
-| 安全扫描 | 正则（`curl`/`wget`/`https?://`/`nc`/`ssh`/`scp`/`eval`/`exec(`/`base64`/`.env`/`.ssh`/`id_rsa`/credential/password/secret/token/api_key/`rm -rf`/`chmod 777`/`sudo`）扫上游 **全部**文件 ⇒ **60 处命中，全部落在未搬运的 skill 内**；搬进来的 9 个**只命中 3 处**，且全是 `create-verification-skill/references/feature-map-example/*.md` 里的示例本地地址 `http://127.0.0.1:4173`。**零网络调用、零凭据读取、零 `eval`、零删除命令** |
+| **最终留存** | **7 个 skill**（≈15%）+ 3 个 feature-map 示例 + 1 个 TSV 模板 + 1 份许可 = **12 个内容文件**（`PROVENANCE.md` 另计） |
+| 逐字节校验 | 12 个内容文件 `copy → 回读 → bytes 比对` **全 OK**；sha256 清单见 `PROVENANCE.md` §6 |
+| 安全扫描 | 正则（`curl`/`wget`/`https?://`/`nc`/`ssh`/`scp`/`eval`/`exec(`/`base64`/`.env`/`.ssh`/`id_rsa`/credential/password/secret/token/api_key/`rm -rf`/`chmod 777`/`sudo`）扫上游 **全部**文件 ⇒ **60 处命中，全部落在未搬运的 skill 内**（最重两条：`make-bot-ui` 的 `curl … \| sudo sh`、`poteto-mode/scripts/watch-pr/github.ts` 的 token 处理）；留存的 7 个**只命中 3 处**，全是 `create-verification-skill/references/feature-map-example/*.md` 里的示例本地地址 `http://127.0.0.1:4173` |
+| 上游全集对比 | 只搬散文（`.md`/`.tsv`/`.txt`），**不搬任何可执行文件** |
 
-### 10.3 选型判据（为什么是这 9 个，不是 47 个）
+### 10.3 选型判据（**两道闸门**，第二道是 21:27 才补上的）
 
-判据只有一条：**这个 skill 有没有一个明确的消费阶段？协议会按名字引用它吗？** 没有就不搬。
-未搬的 38 个分三类：
+**闸门 ①（有没有消费阶段）**：这个 skill 会被协议**按名字引用**吗？没有就不搬。
+未搬的 38 个里：① 本仓 / Matt 已有等价物；② 属别的宿主（`setup-pstack` / `poteto-mode` /
+`make-bot-ui` / `automate-me` 依赖 Cursor 插件与自动化宿主）；③ 带可携带的攻击面（见 §10.2 扫描）。
 
-1. **本仓已有等价物** —— `principle-guard-the-context-window` ↔ `AGENTS.md` §2 已有的读数纪律；
-   `principle-fix-root-causes` ↔ 已在用的 Matt `diagnosing-bugs`。两套等价规则并存迟早漂移成两个口径。
-2. **属于别的宿主** —— `setup-pstack` / `poteto-mode` / `make-bot-ui` 依赖 Cursor 的插件与自动化宿主，
-   本仓 Agent 不共享那套机制，照搬会变成"看起来有、其实调不动"的死引用。
-3. **带可携带的攻击面** —— `poteto-mode/scripts/**` 有 `.ts` 编排器与 GitHub token 处理、
-   `make-bot-ui` 有 `curl -fsSL https://tailscale.com/install.sh | sudo sh`。
-   ⇒ 本目录**只搬散文**（`.md` / `.tsv` / `.txt`），**不搬任何可执行文件**。
-   这是「不做全量安装」的**具体**代价，不是抽象担心。
+**闸门 ②（与 Matt 主开发 skills 是否功能重合）**：把两者正文摊开对照，**同一步骤会不会有两种说法**。
+重合 ⇒ 不下载。这一道是 21:27 之后补的，命中 2 个（见 §10.1）。
+完整逐项对照表（含"保留但从宽标注"的 2 个判断项：`principle-sequence-verifiable-units` 与
+`show-me-your-work`）在 `docs/agents/skills/PROVENANCE.md` **§2**。
 
-完整「阶段 → skill」映射表见 `docs/agents/skills/PROVENANCE.md` §3。
+**留存的 7 个，每一个都对应一条 Matt 侧没有的能力**：
 
-**另有一个"没搬"的诚实项**：`show-me-your-work/scripts/log.sh` **本身无风险**（纯本地 TSV 追加器，
-唯一的"安全相关"行为是防御性的：把 `=` `+` `-` `@` 开头的单元格前缀单引号，防表格公式注入）。
-不搬它的真实理由是 ① 本仓不需要（台账是 Python 落盘的）；② `docs/**` 下的 `.sh` **不命中覆盖闸门的
-`DOC_PATTERN`**，搬进来会让该提交无法走 docs-only 白名单——正是 §7 第 8 条记的那类陷阱。
-⇒ 该 skill 正文提到的 `scripts/log.sh` 在本仓**是悬空引用**，已在 PROVENANCE 里写明。
+| skill | Matt 侧为何覆盖不到 |
+| --- | --- |
+| `principle-sequence-verifiable-units` | Matt `to-tickets` 管**拆票**；这条多出的是「**提交 / PR 的堆叠顺序本身要能自证**给 reviewer」，对应本仓 §8.4 第 3 条「逐票落 commit，压成一个 commit 读数就不属于任何单票」 |
+| `blast-radius` | Matt `to-tickets` 只在"宽重构"语境提过 blast radius 这个词；这条是完整方法论（确定性阶梯 1→5，「**到不了"跑真代码"一级的安全事实必须写 `unproven`**」）——issue #292 的底座 |
+| `principle-prove-it-works` | Matt `code-review` 审的是 **diff**；这条管「对**真实产物**取证、不用代理指标 / 自报 / "能编译"，**能脚本化就脚本化**」 |
+| `create-verification-skill` | 无对照。产 feature map（`Sub-features` / `How to get to it (user POV)` / `Driving it with <harness>` / `Gotchas`）——issue #292 的方法来源 |
+| `maintain-verification-skill` | 无对照。feature map 的维护环（源波次 ∥ live 波次；维护期间禁止改产品代码） |
+| `principle-encode-lessons-in-structure` | 无对照。「同一条指令写第二遍时，编码成结构」——#292 / #293 的动机表述 |
+| `show-me-your-work` | Matt `handoff` 是"把对话压成交接文档"；这条是"**长跑作业的决策轨迹 TSV**"。功能不同，但本仓台账已覆盖其大半 ⇒ **判断项**，增量只有格式规范与两条纪律（evidence 是指针 / append-only 永不改历史），供 #293 |
 
 ### 10.4 引用怎么落进协议
 
-- 新增 **§9「阶段 → 外部 Skill 引用（vendored，不自造）」**：一张表，把七阶段主干每一步该读哪个
-  skill 钉住；另加「与 §8.7 的关系」与「本节边界」两段。
-- 在 **§1.2 第 2 条**（逐票 focused tests 那一步）加了一处**使用点指针**——走到那里就能看到 §9。
+- 新增 **§9「阶段 → 外部 Skill 引用（vendored，不自造）」**：一张表把每阶段该读的文件钉住，开头先写明
+  **主从关系**（Matt 主开发 / pstack 辅助），且**与 Matt 重合的一律不 vendored、不安装**。
+- 在 **§1.2 第 2 条**（逐票 focused tests）加了**使用点指针**，并明确 TDD 与测试质量**归 Matt**。
 - **执行语义 = 「按仓库内相对路径读该文件，并按正文执行」**，不写成"调用某工具里的某 skill"。
-  理由：`AGENTS.md` 文件头写明**谁在干活谁是主开发**（ZCode / Codex / WorkBuddy / Claude Code），
-  各家 skill 装载机制不同；按**仓库内相对路径**引用是唯一对各家**同时**成立的形式，
-  且随仓库版本化、可 diff、可审计、无需安装。
-- **§2 的双轴独立审查一个字没动**（需求方硬约束「mattpocock 的 code-review 不能改变」）；
-  §9 表格里那一行显式写「不引第三方」。
+  理由：`AGENTS.md` 文件头写明谁在干活谁是主开发（ZCode / Codex / WorkBuddy / Claude Code），
+  各家 skill 装载机制不同；按**仓库内相对路径**引用是唯一对各家**同时**成立的形式。
+- **§2 的双轴独立审查一个字没动**（需求方硬约束「mattpocock 的 code-review 不能改变」）。
 
-### 10.5 明确登记：这一笔走白名单，且**待补审**
+### 10.5 **装进 codex / zcode 之前必须知道的两件事**（需求方 21:27 说明会安装）
 
-新增的 14 个文件 + 协议 §9 + §1.2 指针 + 本文更新，**全部命中 `DOC_PATTERN`**（`.md` / `.tsv` / `.txt`），
-按 §7 第 8 条可由 `[whitelist]` 段放行。
+1. **`disable-model-invocation: true` 会拦住模型**。上游每个 skill 的 frontmatter 都带这个字段
+   （语义 = 「**只允许用户 `/` 手动调用，模型不得自动调用**」；本机 `~/.codex/skills/handoff/SKILL.md`
+   用的是同一字段，说明 codex 认它）。而协议要的恰是"**在某个阶段由模型调用**"⇒ 原样装进去等于
+   装了个模型碰不到的 skill。`PROVENANCE.md` **§4.1** 给了一段可直接复制的去字段命令。
+2. **装之前查同名撞目录**：`ls ~/.codex/skills/<name> ~/.zcode/skills/<name>`。有输出就**停下来判断**
+   —— 同一功能就不要装（这正是 `tdd` 的教训）。
+   `PROVENANCE.md` §4.1 同时给了这两条命令。
+
+### 10.6 明确登记：这一笔走白名单，且**待补审**
+
+新增/修改的文件全部命中 `DOC_PATTERN`（`.md` / `.tsv` / `.txt`），按 §7 第 8 条可由 `[whitelist]` 段放行。
 
 ⚠ **但批 1 的教训正是**（`b529aa5..22aa291` 补审）：**协议正文改动只走白名单声明、从未经任何独立审查，
 是本线的已知缺陷形状**。因此本笔**主动登记「待补审」**，并把这句话写进台账白名单行的 reason。
-是否起两轴独立审查由需求方定——本轮不动用它的理由是：**§9 是纯增引用、零放松**，
-`§8.7「明确不做的事」一条未改`，且新增内容不改变任何既有步骤的判据。
+本轮不动用它的理由是：**§9 是纯增引用、零放松**，`§8.7「明确不做的事」一条未改`，
+且新增内容不改变任何既有步骤的判据。
 
-**与此并列、但本线不动的**：`cd02c61` / `29cb5081` 两笔（另一条线）缺归属。其中 `29cb5081` 是**代码提交**，
-按 §7 第 8 条**永远不能走白名单**，必须有**真实且独立**的审查行。本线**不代为补审查行**
-（那等于伪造审查），只在此如实登记，等需求方裁决（见本文开头状态块）。
+**与此并列、但本线不动的**：`cd02c61` / `29cb5081` 两笔（另一条线）缺归属。其中 `29cb5081` 含
+`src/agent_harness/agent/runtime.py`，属**代码提交**，按 §7 第 8 条**永远不能走白名单**，
+必须有**真实且独立**的审查行。本线**不代为补审查行**（那等于伪造审查），只在此如实登记。
 
-### 10.6 本文 §1 那 6 条原则的现状
+### 10.7 本文 §1 那 6 条原则的现状
 
 §1 的「pstack 原则对照」现在**部分被 §9 的引用替代**：`encode-lessons-in-structure` 与 `prove-it-works`
 已由 vendored skill 承担，协议里不再重述其内容——这正是 `principle-encode-lessons-in-structure`
-自己要求的形状（「同一条指令写第二遍时，编码成结构而不是更多文字」）。
-**明确不采用**的 `principle-never-block-on-the-human` 结论不变（与本仓 §9.1.1「票面变更控制」冲突）。
+自己要求的形状。**明确不采用**的 `principle-never-block-on-the-human` 结论不变
+（与本仓 §9.1.1「票面变更控制」冲突）。
