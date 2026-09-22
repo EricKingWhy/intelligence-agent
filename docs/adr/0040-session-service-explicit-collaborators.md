@@ -145,10 +145,11 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 **裁决与闭合（2026-09-22）**：用户选定 **(b) 现在就搬**——`git mv` 到
 `agent_harness/session/runmanager.py`（纯移位，运行时零影响；logger 名同步改为
 `agent_harness.session.runmanager`，模块内与 `agent/runtime.py` 的两处指路注释一并订正）。
-影响面**实测** 7 个文件 / 10 处 import（`grep -rn "agent_harness.web.runmanager" src tests`），
-比首版估的"跨 ~13 个测试文件"少——估值与实测的差写在这里，免得下一轮再按旧估值排期。
-守卫随之从"残余不得扩大"改成"**残余已归零**"：`EXPECTED_TYPE_ONLY_WEB_IMPORTS` 的三份域文件
-全为空集（`service.py` / `projects.py` / `runmanager.py`），另加
+影响面**实测** 13 行 / 10 个文件（`git grep -n "agent_harness.web.runmanager" 55f2deb -- src tests`）；
+其中真正的 import 语句是 **11 条 / 8 个文件**（剔除模块自己的 logger 行 1 条与守卫表里的字面量
+1 条）——本批最初写的是"7 个文件 / 10 处"（那是改写脚本自己的命中数，口径更窄），按上面这条
+可复算命令订正。守卫随之从"残余不得扩大"改成"**残余已归零**"：`EXPECTED_TYPE_ONLY_WEB_IMPORTS`
+的三份域文件全为空集（`service.py` / `projects.py` / `runmanager.py`），另加
 `test_run_manager_home_is_the_session_package` 钉住新家（旧路径复活即红）。闭合后领域层
 （代码 + 注解）对 `web` 的引用数为 **0**。
 
@@ -172,15 +173,22 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 - 端口只声明**形状**、不复制具体类型：束的成员增删与领域层的 import 解耦，改组束不再牵动 `session/`；
 - 端口成员清单**由读端决定**：`build_runtime(stores=…)` / `initialize_stores(stores=…)` 实测只读
   `operation_ledger` / `checkpoint_store` / `session_meta_store` / `workspace_index` 四项
-  （`assembly.py` 的调用点），端口就这四项、不多不少；
+  （`assembly.py` 的调用点），端口就这四项、不多不少。**口径写清楚**：这四项是
+  「`build_runtime` ∪ `initialize_stores` 的读点」，不是"领域自己会读到的"——`build_runtime`
+  只读 3 项，`workspace_index` 仅由 `initialize_stores` 读，而领域层调的是**注入的**
+  `ensure_stores`（真实实现 `web/app.py` 的闭包用组合根自己的束，与 `self._stores` 无关），
+  领域层自己从不解引用 `self._stores` 的任何成员、只把它转交给 `build_runtime`；
 - **别把这条读成"更窄"**：真实束 `RecoveryStores` 今天也恰是这 4 个成员（`assembly.py:83`
   的 dataclass 实测），所以端口与它**等宽**。收益不在成员数，而在两件事——形状由领域自己声明、
   组合层类型不再进领域 import；把"等宽"写成"收窄"会让下一个审查者按错的理由通过它；
 - 端口的保证是**弱**的，写清楚免得被高估：仓库门禁只有 `ruff` + `pytest`（`pyproject.toml` 无 mypy
-  / pyright 段），所以"注解写的是什么类型"没有静态检查器兜底。真正的机械保证只有两条用例——
-  正向 `isinstance(recovery_stores(tmp), RecoveryStoreBundle)`（成员改名/删除即红）与负向
-  import 边界；领域层将来真去读第 5 个成员时，**没有**机制强制先补端口（靠 review）。这是选
-  "自建端口"相对"领域自建 bundle"的已知代价：换来的是不复制组合层类型 + 不动装配层。
+  / pyright 段），所以"注解写的是什么类型"没有静态检查器兜底；`isinstance` 对
+  `@runtime_checkable` + 数据成员的 Protocol **只查属性存在性**（成员值改成 `None` 或换个类型
+  仍然绿）。真正的机械保证只有两条用例——正向
+  `isinstance(recovery_stores(tmp), RecoveryStoreBundle)`（成员改名/删除即红，见 §5.1 红证 16）
+  与负向 import 边界；"端口**多写**一个成员"没有任何用例能发现，靠 review；领域层将来真去读
+  第 5 个成员时，也没有机制强制先补端口。这是选"自建端口"相对"领域自建 bundle"的已知代价：
+  换来的是不复制组合层类型 + 不动装配层。
 - `build_runtime` 保持原样：它是本票改造**之前**就有的运行时耦合（上一段），且
   `tests/web/test_web_phase5_permission.py` 用 `monkeypatch.setattr(service_module, "build_runtime", …)`
   把它钉在模块级名字上，动它属 Scope 外；守卫只拦**组合层类型**再进 import，白名单恰为
@@ -218,7 +226,7 @@ initialized module …`）⇒ 它们在今天**不可利用**；但守卫已按 
 | 合并 `stores` 与三个 ledger 参数（它们是同一批对象的两种视图） | 只少 1 个参数（15 vs 16），却让领域自建上层 `assembly` bundle；收益与噪声不成比例 |
 | 把 `RunManager` 搬出 `web/`（R1 的 (b)） | 首版列为"需用户裁决"；**2026-09-22 用户裁决采纳**，本批已执行（见 R1） |
 | 领域层从三个 ledger 自建束、把 `stores` 参数整个去掉（R2 的另一条路） | 少 1 个参数，但把"恢复子系统要哪些 store"的知识从装配层搬进领域层；用户选的是**自建端口**（保留参数、只换类型），不是自建 bundle |
-| 端口成员照真实束的类型写（`SqliteOperationLedger` / `SqliteCheckpointStore` / `SqliteSessionMetaStore`） | 端口要声明的是**领域的形状**，写具体实现类等于把组合层的具体类型换个名字抄进领域——那正是本票要消除的形状。改用 storage 层的 ABC（`OperationLedger` / `CheckpointStore` / `SessionMetaStore`）。**如实登记一处不一致**：同一构造器里另有 13 个参数本来就用 `Sqlite*` 具体类型（本票改造**之前**就如此，属 Scope 外），所以今天 `session/service.py` 里两种风格并存 |
+| 端口成员照真实束的类型写（`SqliteOperationLedger` / `SqliteCheckpointStore` / `SqliteSessionMetaStore`） | 端口要声明的是**领域的形状**，写具体实现类等于把组合层的具体类型换个名字抄进领域——那正是本票要消除的形状。改用 storage 层的 ABC（`OperationLedger` / `CheckpointStore` / `SessionMetaStore`）。**如实登记一处不一致**：同一构造器里另有 **4** 个参数本来就用 `Sqlite*` 具体类型（`session_meta_store` / `operation_ledger` / `transport_ledger` / `checkpoint_store`；`inspect.signature` 实测，本票改造**之前**就如此，属 Scope 外），所以今天 `session/service.py` 里两种风格并存 |
 
 ---
 
@@ -318,9 +326,19 @@ tracked 树）。脚本自己断言锚点唯一、还原后哈希一致，任何
 | --- | --- | --- |
 | 15 | 造出旧路径 `src/agent_harness/web/runmanager.py`（桩文件；原本不存在） | `AssertionError: 旧路径 web/runmanager.py 不得复活——RunManager 是领域模块` |
 | 16 | 从 `assembly.RecoveryStores` 删掉 `session_meta_store` 字段 + 工厂里对应的 kwarg（同一语义的一对锚点） | `AssertionError: assembly 造的 RecoveryStores 不再满足领域端口 RecoveryStoreBundle` |
-| 17 | 在 `service.py` 的 `TYPE_CHECKING` 块里加 `from agent_harness.assembly import RecoveryStores` | `AssertionError: session/service.py 又 import 了组合层类型：['142: from agent_harness.assembly import RecoveryStores']` |
-| 18 | 同位置改加 plain import `import agent_harness.assembly` | 同一条断言：`['142: import agent_harness.assembly']`（两种等价写法一起收，否则强度取决于写法） |
+| 17 | 在 `service.py` 的 `TYPE_CHECKING` 块里加 `from agent_harness.assembly import RecoveryStores` | `AssertionError: 领域文件又 import 了组合层类型：['agent_harness/session/service.py:142: from agent_harness.assembly import RecoveryStores']` |
+| 18 | 同位置改加 plain import `import agent_harness.assembly` | 同一条断言：`[…: import agent_harness.assembly]` |
 | 19 | 同位置加 `from agent_harness.web.app import AppState as _RedProbeAppState` | `AssertionError: agent_harness/session/service.py 的 TYPE_CHECKING web 引用集合变了：[…]（登记值 []）`——即"残余归零"判据对**任何**新 web 引用敏感 |
+| 20 | 同位置加 `from agent_harness import assembly`（等价写法第三种） | 同第 17/18 条断言：`[…: from agent_harness import assembly]` |
+| 21 | 同位置加相对导入 `from ..assembly import RecoveryStores`（等价写法第四种） | 同第 17/18 条断言：`[…: from ..assembly import RecoveryStores]` |
+
+**第 20/21 条是审查 findings 的修复证据（P2）**：本批最初那版守卫只看 `node.module` 与
+`alias.name`，于是 `from agent_harness import assembly`、`from ..assembly import …`、
+`from .. import assembly` 三种等价写法**整类绕过**——判据强度会取决于写法。独立审查当场用合成
+源码证明三条都漏（并指出同文件 88-107 行的 `imported_modules` 早就为 web 守卫处理过同一类漏判），
+修法是**复用那个 helper**（`assembly_type_imports`），并补一条 `test_composition_import_forms_are_all_considered`
+把四种写法（外加白名单 `build_runtime` 与一个无关模块的负例）钉住。判据同时从"只扫
+`service.py`"扩到**三份域文件**（审查 findings 的 P3：只守一处等于把另两处的缺口留给下一个人）。
 
 **取不到红证的一条，如实登记**：`test_run_manager_home_is_the_session_package` 的第一条断言
 （新家必须存在）**无法以"守卫变红"的形式取证**——把该模块搬走会让这份测试模块在**收集期**

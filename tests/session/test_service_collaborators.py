@@ -107,6 +107,31 @@ def imported_modules(node: ast.Import | ast.ImportFrom, package: str) -> list[st
     return [alias.name for alias in node.names]
 
 
+def assembly_type_imports(node: ast.Import | ast.ImportFrom, package: str) -> list[str]:
+    """import 语句从组合层 `agent_harness.assembly` 带进领域层的**白名单外**名字。
+
+    复用 `imported_modules`：`from agent_harness.assembly import X`、`from agent_harness
+    import assembly`、相对导入（`from ..assembly import X` / `from .. import assembly`）、
+    多别名 `import` 四种等价写法**一起收**——只看 `node.module` 或 `alias.name` 时，
+    后三种能整类绕过守卫（审查 findings 的 P2；本文件 88-107 行的同类漏判第一次审查
+    也提过，所以这里必须复用同一个 helper，不另写一遍）。
+    白名单只有 `build_runtime`：本票改造**之前**就有的运行时依赖，且被
+    `tests/web/test_web_phase5_permission.py` 的 `monkeypatch.setattr(service_module,
+    "build_runtime", …)` 钉在模块级名字上，动它属 Scope 外。
+    """
+    allowed = {"build_runtime"}
+    modules = imported_modules(node, package)
+    if isinstance(node, ast.Import):
+        return [m for m in modules if m.startswith("agent_harness.assembly")]
+    offenders = []
+    for leaf in modules[1:]:
+        if not leaf.startswith("agent_harness.assembly"):
+            continue
+        if leaf == "agent_harness.assembly" or leaf.rsplit(".", 1)[-1] not in allowed:
+            offenders.append(leaf)
+    return offenders
+
+
 def is_web_module(module: str) -> bool:
     """是否属 `agent_harness.web` 包**本身**。
 
@@ -378,33 +403,56 @@ class TestRuntimeImportBoundary:
             "assembly 造的 RecoveryStores 不再满足领域端口 RecoveryStoreBundle"
         )
 
-    def test_service_imports_no_composition_types(self):
-        """R2：领域层不得 import 组合层**类型**；唯一允许的是 `build_runtime`。
+    def test_domain_files_import_no_composition_types(self):
+        """R2：三份域文件都不得 import 组合层**类型**；唯一允许的是 `build_runtime`。
 
         `build_runtime` 是既有耦合（改造前就在，且
         `tests/web/test_web_phase5_permission.py` 用 `monkeypatch.setattr(service_module,
         "build_runtime", …)` 把它钉在模块级名字上），不在本票范围。本票收口的是
         `RecoveryStores` 那一条——它现在是领域自建的端口，不该再出现在 import 里。
+        扫**三份**域文件而不是只扫 `service.py`：`projects.py` / `runmanager.py` 今天
+        都没有这类 import，但只守一处等于把另两处的缺口留给下一个人（审查 findings P3）。
+        判据本体在 `assembly_type_imports`（收全四种等价写法）。
         """
-        tree = ast.parse((SRC_ROOT / "agent_harness/session/service.py").read_text(encoding="utf-8"))
         offenders: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and (node.module or "") == "agent_harness.assembly":
-                offenders += [
-                    f"{node.lineno}: {ast.unparse(node)}"
-                    for alias in node.names
-                    if alias.name != "build_runtime"
-                ]
-            elif isinstance(node, ast.Import):
-                offenders += [
-                    f"{node.lineno}: {ast.unparse(node)}"
-                    for alias in node.names
-                    if alias.name.startswith("agent_harness.assembly")
-                ]
+        for rel in sorted(self.EXPECTED_TYPE_ONLY_WEB_IMPORTS):
+            package = str(PurePosixPath(rel).parent).replace("/", ".")
+            tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"))
+            offenders += [
+                f"{rel}:{node.lineno}: {ast.unparse(node)}"
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+                and assembly_type_imports(node, package)
+            ]
         assert offenders == [], (
-            f"session/service.py 又 import 了组合层类型：{offenders}"
+            f"领域文件又 import 了组合层类型：{offenders}"
             "（R2 已改为领域自建端口 RecoveryStoreBundle：装配层造束、领域只认形状）"
         )
+
+    def test_composition_import_forms_are_all_considered(self):
+        """钉住上一条判据的**强度**：四种等价写法一起收，否则强度取决于写法。
+
+        审查 findings 的 P2：最初的实现只看 `node.module` 与 `alias.name`，于是
+        `from agent_harness import assembly`、`from ..assembly import RecoveryStores`、
+        `from .. import assembly` 三种写法**整类绕过**守卫（同文件 88-107 行的
+        `imported_modules` 早已为 web 守卫处理过同一类漏判）。
+        """
+        package = "agent_harness.session"
+        cases = {
+            "from agent_harness.assembly import RecoveryStores": True,
+            "from agent_harness.assembly import build_runtime": False,  # 白名单
+            "from agent_harness.assembly import build_runtime, RecoveryStores": True,
+            "import agent_harness.assembly": True,
+            "import agent_harness.assembly as a": True,
+            "from agent_harness import assembly": True,
+            "from ..assembly import RecoveryStores": True,
+            "from .. import assembly": True,
+            "from agent_harness.storage.operation import OperationLedger": False,
+        }
+        for source, expected in cases.items():
+            node = ast.parse(source).body[0]
+            got = bool(assembly_type_imports(node, package))
+            assert got is expected, f"{source!r} 判成 {got}，应为 {expected}"
 
     def test_web_module_match_is_not_a_substring_test(self):
         """钉住判据的**精度**：`agent_harness.websearch` 是兄弟模块，不是传输层。

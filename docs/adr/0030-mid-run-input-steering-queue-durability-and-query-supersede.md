@@ -280,9 +280,12 @@ async def on_run_terminal(self, session_id: str) -> None:
     self._append_session_event(session_id, <QUEUE_CONSUMED | STEER_APPLIED>, ...)
 ```
 
-**唯一调用点**（不得有第二处）：`web/runmanager.py` 的 `ManagedRun._drive` 完成路径。接线方式：
+**唯一调用点**（不得有第二处）：`RunManager` 的 `ManagedRun._drive` 完成路径所在模块
+**2026-09-22 由 `web/runmanager.py` 迁至 `session/runmanager.py`（纯移位，见 ADR-0040 §4 R1）**，
+按下面写死的旧路径搜索会零命中——已按现址订正行号（`:182` 是搬迁前的读数，实为陈旧值；
+`grep -n "on_run_terminal" src/agent_harness/session/runmanager.py` 现落在 `:228`）。接线方式：
 
-- `RunManager.__init__(..., on_run_terminal: Callable[[str], Awaitable[None]] | None = None)`（`web/runmanager.py:182`，默认 None ⇒ 测试与既有调用零改动）
+- `RunManager.__init__(..., on_run_terminal: Callable[[str], Awaitable[None]] | None = None)`（现 `session/runmanager.py:228`，默认 None ⇒ 测试与既有调用零改动）
 - `_drive` 的 `finally`：先写终态、`run.finish()` 之后再 `await self._on_run_terminal(session_id)`；异常吞掉并记结构化日志（收尾失败不得影响 run 的终态事实）
 - `web/app.py` 启动时注入 `on_run_terminal=SessionService(app.state.agent).on_run_terminal`
 
