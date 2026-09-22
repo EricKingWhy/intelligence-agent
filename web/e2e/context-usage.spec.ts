@@ -90,9 +90,11 @@ test('T6b：有数据 → 六桶图例 + 分段条 + 阈值标记 + 缓存命中
   // 阈值标记两根（70%/85%）
   await expect(dialog.locator('.ctx-usage-mark-compact')).toHaveCount(1);
   await expect(dialog.locator('.ctx-usage-mark-hard')).toHaveCount(1);
-  // 缓存命中率（大字百分比 + 口径）
+  // 缓存命中率（大字百分比 + 口径）——ok 档的整串也要成对（真机审计第十五轮：
+  // 右括号位置原先是半角 `}`，看板显示成「（12 次调用全部带回明细} · 估算」）。
   await expect(dialog).toContainText('平均缓存命中率');
   await expect(dialog).toContainText('99.6%');
+  await expect(dialog).toContainText('（12 次调用全部带回明细） · 估算');
 });
 
 test('T6c：未采集 → 「未采集（提供商未返回缓存明细）」，不显示 0%', async ({ page }) => {

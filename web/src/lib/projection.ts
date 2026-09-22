@@ -8,6 +8,7 @@
 
 import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
+import { isCancelledRunFailure } from './runCancel';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 
@@ -643,7 +644,7 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
  *  可见 trace，跳转有排查价值；此前 failed 分支漏抽 trace_id 是 pre-existing bug）。 */
 function projectRunFailed(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
-  state.run_cancelled = data.reason === 'cancelled';
+  state.run_cancelled = isCancelledRunFailure(data);
   // #220：折叠失败归因。要点三条（载荷形状与呈现口径见 ADR-0033 §2.2/2.3）：
   // 取消那支不记（取消 ≠ 错误，da394a9）；两个键互相独立、都可缺；都没给就整体 null
   // ——不是 `{reason:null,message:null}`，那会让 `if (run_failure)` 为真却无内容。

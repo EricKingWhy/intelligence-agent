@@ -91,6 +91,14 @@ describe('groupEventsByRun — 按 run_id 首现顺序分组', () => {
     // cancelled → completed：已取消是终态，后续 completed 不回退（与 failed → completed 同序）。
     expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'z'), cancelledEvent('z', 2), e(EventType.RUN_COMPLETED, 3, 'z')])[0].status)
       .toBe('cancelled');
+    // cancelled 与 failed 同级 ⇒ 先到者胜（同一 run 两种归因并存属脏数据，不猜谁更"真"）。
+    const failedEvent = (runId: string, seq: number): AgentEvent => ({
+      type: EventType.RUN_FAILED, data: {}, seq, run_id: runId, session_id: 's',
+    } as AgentEvent);
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'p'), cancelledEvent('p', 2), failedEvent('p', 3)])[0].status)
+      .toBe('cancelled');
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'q'), failedEvent('q', 2), cancelledEvent('q', 3)])[0].status)
+      .toBe('failed');
   });
 
   it('空数组 → 空分组', () => {

@@ -9,6 +9,7 @@
  *  - `run/failed` 带 `reason === 'cancelled'` 是**用户取消**（≠ 错误，da394a9）：
  *    与顶栏脉冲同一口径，否则同一次取消会出现「已取消 / 失败」两种说法
  *    （真机审计 A-02，`docs/FRONTEND_ISSUES_LOG.md` 第十五轮）。 */
+import { isCancelledRunFailure } from './runCancel';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
 
@@ -26,9 +27,10 @@ export interface RunGroup {
   start: number;
 }
 
-/** 组状态严重度：并存的脏数据取更醒目者。取消与失败同级（同一终态的两种归因），
- *  interrupted 更醒目、completed 最弱——与原「interrupted > failed > completed」
- *  逐例等价（见 timelineGroups.test.ts 的并存用例）。 */
+/** 组状态严重度：并存的脏数据取更醒目者。`cancelled` 与 `failed` 同级——两者是同一
+ *  终态（`run/failed`）的两种归因，正常不会并存；真并存时**先到者胜**（严格大于才覆盖，
+ *  即"日志里先落的那个终态说了算"，不凭猜）。`interrupted` 更醒目、`completed` 最弱
+ *  ——与原 `interrupted > failed > completed` 逐例等价（见 timelineGroups.test.ts）。 */
 const STATUS_RANK: Record<RunGroupStatus, number> = {
   running: 0,
   completed: 1,
@@ -42,8 +44,7 @@ function terminalStatusOf(e: AgentEvent): RunGroupStatus | null {
   if (e.type === EventType.RUN_COMPLETED) return 'completed';
   if (e.type === EventType.RUN_INTERRUPTED) return 'interrupted';
   if (e.type === EventType.RUN_FAILED) {
-    const reason = (e.data as Record<string, unknown> | undefined)?.reason;
-    return reason === 'cancelled' ? 'cancelled' : 'failed';
+    return isCancelledRunFailure(e.data) ? 'cancelled' : 'failed';
   }
   return null;
 }
