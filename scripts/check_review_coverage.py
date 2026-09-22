@@ -4,10 +4,16 @@
 ## 为什么会有第二个实现
 
 `.sh` 版是本仓**唯一的机械闸门**，但它依赖 `dirname` / `wc` / `comm` / `grep` / `sort` /
-`mktemp`。WorkBuddy 沙箱的 bash shim **缺 coreutils**（实测全部 `command not found`），
-`set -euo pipefail` 下第一行 `cd "$(dirname "$0")/.."` 就死 ⇒ **该闸门在施工环境里从未真的
-执行过**，长期以来只能靠人工用 python 复刻口径（见 `docs/SDD_TICKET_TRACKER.md:2157` 的登记：
-「本沙箱跑不了（需 `wsl.exe`，被安全策略拦下）」）。本文件把这件事变成可执行。
+`mktemp`，而 WorkBuddy 沙箱 bash shim 的 **PATH 里没有 coreutils**（实测全部
+`command not found`），`set -euo pipefail` 下第一行 `cd "$(dirname "$0")/.."` 就死 ⇒
+**该闸门在施工环境里从未真的执行过**，长期以来只能靠人工用 python 复刻口径
+（见 `docs/SDD_TICKET_TRACKER.md:2157` 的登记：「本沙箱跑不了（需 `wsl.exe`，被安全策略拦下）」）。
+
+> **2026-09-22 更正（本批）**：coreutils **并非不存在**，它们在 Git 自带目录里
+> （`<PortableGit>/usr/bin`，`dirname`/`wc`/`comm`/`sort`/`mktemp` 全套）⇒
+> `PATH="<PortableGit>/usr/bin:$PATH" bash scripts/check_review_coverage.sh` **能跑**，
+> 只是**很慢**（逐条 fork git，实测 >11 分钟未结束）。上面"跑不动"说的是**直接跑**
+> （PATH 里没有），不是"不可能跑"。本文件的价值因此是：**在本机默认环境下真的能跑、且快**。
 
 ## 与 `.sh` 的关系（重要，别搞反）
 
@@ -96,6 +102,19 @@ def die(msg: str) -> None:
 # --------------------------------------------------------------------------- #
 # 台账解析（与 `.sh` 的 `while IFS= read -r line` 逐条对齐）
 # --------------------------------------------------------------------------- #
+
+def split_fields(row: str, count: int) -> list[str]:
+    """等价于 bash 的 `IFS=$'\t' read -r a b c`。
+
+    ⚠ 必须**折叠连续 tab**（并剥掉首尾 tab）：tab 属 IFS whitespace，bash 的 `read`
+    会把连续分隔符当一个、并去掉首尾空白。用 `str.split("\t")` 会把这些行解析成不同
+    结果 —— 那是真实的**口径漂移**（2026-09-22 由 Spec 轴独立审查指出），不是风格问题。
+    第 `count` 个字段吃掉**剩余全部内容**（含其中的 tab），与 bash 把余下词并进最后一个
+    变量的行为一致。
+    """
+    fields = re.split(r"\t+", row.strip("\t"), maxsplit=count - 1)
+    return fields + [""] * (count - len(fields))
+
 
 def read_ledger(path: str) -> tuple[list[str], list[str]]:
     """返回 (审查行, 白名单行)。空行与 `#` 注释跳过；`[whitelist]` 切换段。"""
@@ -242,10 +261,7 @@ def main(argv: list[str]) -> int:
     revs: list[str] = []
     parsed: list[tuple[str, str, str, str]] = []
     for row in rows:
-        fields = row.split("\t", 2)
-        while len(fields) < 3:
-            fields.append("")
-        date, desc, rng = fields
+        date, desc, rng = split_fields(row, 3)
         rbase = rng.split("..")[0]
         rtip = rng.rsplit("..", 1)[-1]
         parsed.append((date, desc, rbase, rtip))
@@ -298,6 +314,14 @@ def main(argv: list[str]) -> int:
     cov_n = total - miss_n
 
     print()
+    # ⚠ 这里与 `.sh` 有**一处刻意的文本差异**（判定集完全相同）：
+    #   · `.sh` 在"覆盖区间"行**回显台账里的字面量**（本仓最早 base 写作 `09ca47a1`，8 位）；
+    #   · 本行经 `%h` **归一化**，而入参是解析后的**全长 sha** ⇒ git 回 7 位（`09ca47a`）。
+    # 成因是 git 的 abbreviation 宽度**取决于入参形态**（本仓 git 2.52.0.windows.1 实测：
+    #   `git log --no-walk --format=%h 09ca47a1` → `09ca47a1`；
+    #   `git log --no-walk --format=%h 09ca47a12c45bf273e46494be0fedef143cd89d3` → `09ca47a`）。
+    # ⇒ **读数文本不可逐字比对，判定集才能**。别为了"看起来一样"改成回显字面量：字面量可能
+    #   是手抄的缩写，归一化后仍会经 `resolved` 校验（不存在即 die），信息量更高。
     print(f"覆盖区间: {short_and_subject([base_sha])[base_sha][0]}..HEAD")
     print(f"提交总数 {total} / 已审查 {cov_n} / 待判定 {miss_n}")
 
@@ -363,5 +387,8 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except BrokenPipeError:  # pragma: no cover
-        sys.exit(0)
+    except BrokenPipeError:
+        # ⚠ **不许 exit 0**：那正是 `.sh:126-128` 明写要堵的"防 SIGPIPE 假绿"形状
+        # （管道被提前关闭 ≠ 闸门跑通了）。自写解析器不得把"没验"变成"通过"。
+        sys.stderr.write("覆盖闸门：输出管道被提前关闭，闸门未完成 —— 这不算通过。\n")
+        sys.exit(1)
