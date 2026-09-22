@@ -94,7 +94,13 @@ class _CopyVolume:
       chunk」= 纯文本）；
     - `blocks`：块列表 content（`[{"type": "text", ...}]`）的**元素个数**——LangChain 对这种
       content 走 `merge_lists`，复制成本按元素计，此时 `chars` 恒为 0（不是"没抄东西"）。
-    只计 str 或只计元素都不会给出错误结论，但**哪一列有含义取决于语料**，故两列并列。
+
+    口径边界（如实记）：
+    - **只认 `list`**：本版 langchain 的 `merge_content` 对 tuple content 直接抛错（不按元素
+      复制），把 `len(tuple)` 记成"元素复制量"与真实行为不符 ⇒ tuple 不计。
+    - 元素里的 dict **带 `index`** 时，`merge_lists` 是"合并"而非"追加" ⇒ 追加侧元素数会略高于
+      本列（本脚本的语料是不带 index 的 `{"type": "text", ...}`，故当前精确）。
+    - 只覆盖 `content`：`tool_call_chunks` 的 args 拼接不在本口径内。
     """
 
     def __init__(self) -> None:
@@ -109,7 +115,7 @@ class _CopyVolume:
             for part in (first, *others):
                 if isinstance(part, str):
                     self.chars += len(part)
-                elif isinstance(part, (list, tuple)):
+                elif isinstance(part, list):
                     self.blocks += len(part)
             return self._real(first, *others)
 
@@ -140,6 +146,22 @@ def volume(fn: Any, chunks: list[AIMessageChunk]) -> tuple[int, int]:
     with _CopyVolume() as vol:
         fn(list(chunks))
     return vol.chars, vol.blocks
+
+
+def check_counter_exact_text(n: int, chars_n: int, chars_o: int) -> None:
+    """纯文本语料：把**字符**计数器钉在**闭式解**上（改坏计数器 ⇒ 在此响亮失败）。
+
+    逐项折叠第 i 步交给 `merge_content` 的量 =（已累计的 i 个 chunk）+（第 i+1 个）
+    ⇒ naive = `w·(N-1)(N+2)/2`；一次归并只交一次 ⇒ oneshot = `L = N·w`。两者都与机器无关。
+    """
+    assert chars_n == WIDTH * (n - 1) * (n + 2) // 2, f"naive chars N={n}: {chars_n}"
+    assert chars_o == n * WIDTH, f"oneshot chars N={n}: {chars_o}"
+
+
+def check_counter_exact_blocks(n: int, blocks_n: int, blocks_o: int) -> None:
+    """块列表语料：同一闭式解换成**元素**口径（naive `(N-1)(N+2)/2`、oneshot `N`）。"""
+    assert blocks_n == (n - 1) * (n + 2) // 2, f"naive blocks N={n}: {blocks_n}"
+    assert blocks_o == n, f"oneshot blocks N={n}: {blocks_o}"
 
 
 def best_ms(fn: Any, chunks: list[AIMessageChunk], repeats: int = 5) -> float:
@@ -201,11 +223,13 @@ async def main() -> None:
         assert shape(naive_fold(chunks)) == shape(oneshot_fold(chunks)), f"N={n}: 两臂结果不同"
         v_n, _ = volume(naive_fold, chunks)
         v_o, _ = volume(oneshot_fold, chunks)
+        check_counter_exact_text(n, v_n, v_o)
         print(f"{n:>7}{n * WIDTH:>12}{v_n:>15,}{v_o:>16,}{v_n / (n * WIDTH):>9.2f}x"
               f"{ratio(v_n, prev_n):>12}{ratio(v_o, prev_o):>14}")
         prev_n, prev_o = v_n, v_o
     print("  判据：4× N 时 ≈4 ⇒ 线性；≈16 ⇒ 二次。naive/L 随 N 线性增长即二次的直接证据。")
     print("  L = 流的总字符数（= 改造后应当抄的量）；改造后列恒等于 L 即 O(L)。")
+    print("  计数器自身由 check_counter_exact_text / check_counter_exact_blocks 钉在闭式解上。")
 
     print("\n【1b】同一口径的块列表语料（`content=[{type:text,...}]`）：此语料下 chars 恒为 0")
     print(f"{'N':>7}{'流总元素':>10}{'naive 元素数':>14}{'oneshot 元素数':>16}"
@@ -216,9 +240,20 @@ async def main() -> None:
         assert shape(naive_fold(chunks)) == shape(oneshot_fold(chunks)), f"N={n}: 两臂结果不同"
         _, b_n = volume(naive_fold, chunks)
         _, b_o = volume(oneshot_fold, chunks)
+        check_counter_exact_blocks(n, b_n, b_o)
         print(f"{n:>7}{n:>10}{b_n:>14,}{b_o:>16,}{ratio(b_n, prev_n):>12}{ratio(b_o, prev_o):>14}")
         prev_n, prev_o = b_n, b_o
     print("  形态判据看本表的**元素**列：这一列与 §1 同形（改造前二次、改造后线性）。")
+
+    print("\n【1c】块列表语料的墙钟——**独立于计数器**的第二把尺子（best-of-2）")
+    print(f"{'N':>7}{'naive(ms)':>12}{'oneshot(ms)':>14}{'naive 4×比':>12}")
+    prev_n = None
+    for n in (1000, 4000):
+        chunks = block_chunks(n)
+        t_n, t_o = best_ms(naive_fold, chunks, 2), best_ms(oneshot_fold, chunks, 2)
+        print(f"{n:>7}{t_n:>12.1f}{t_o:>14.1f}{(f'{t_n / prev_n:.2f}x' if prev_n else '-'):>12}")
+        prev_n = t_n
+    print("  墙钟含 per-chunk 常数项，故 4× 比会低于 16；它只用来确认【1b】不是计数器自说自话。")
 
     print(f"\n【2】耗时（同一批 N，best-of-5；width={WIDTH}）")
     print(f"{'N':>7}{'naive(ms)':>12}{'oneshot(ms)':>14}{'倍数':>10}"
