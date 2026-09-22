@@ -1,0 +1,51 @@
+#!/bin/sh
+# .githooks/pre-push —— 推送前调 Gate-0（`scripts/gate0.py`，预算 ≤60s）。
+#
+# 启用（**本地配置，不随仓库分发**）：
+#     git config core.hooksPath .githooks
+# 关闭：
+#     git config --unset core.hooksPath
+#
+# ⚠ 边界：hook 是**本地便利，不是安全边界**——`git push --no-verify` 可绕过，别的 clone 没启用
+#    就等于没有。它挡的是"忘了跑"，不是"故意绕过"。所以它取消不了 CI 与两轴审查。
+#
+# ⚠ 本文件**只用 POSIX 内建**（cd / while / read / case / [ ] / exec / echo）：本机 WorkBuddy
+#    沙箱的 sh 缺 coreutils（`dirname` / `cat` / `grep` 全部 command not found），hook 里出现
+#    任何一个都会在"推送那一刻"炸掉——正是 `scripts/check_review_coverage.sh` 长期跑不动的病根。
+#
+# ⚠ 本文件**没有扩展名** ⇒ `.gitattributes` 里必须给它 `eol=lf`：`core.autocrlf=true` 会把
+#    没有属性声明的文本文件检出成 CRLF，而 `exit 1\r` 这样的行在 sh 下直接坏掉。
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# 把 git 写进 stdin 的 ref 列表读完（不读会留下 SIGPIPE），并取第一个非零 remote sha
+# 当作 `--since`（= 远端当前的位置，用来查这次推送范围的空白/冲突标记）。取不到就不传，
+# Gate-0 会退化成查工作树。
+SINCE=""
+while read -r _lref _lsha _rref rsha; do
+  case "$rsha" in
+    ""|0000000000000000000000000000000000000000) ;;
+    *) [ -n "$SINCE" ] || SINCE="$rsha" ;;
+  esac
+done
+
+# 找仓库自己的解释器优先（Gate-0 要用它 `-m pytest`，系统 python 通常没装这些测试依赖）。
+PY=""
+if [ -x ".venv/Scripts/python.exe" ]; then
+  PY=".venv/Scripts/python.exe"
+elif [ -x ".venv/bin/python" ]; then
+  PY=".venv/bin/python"
+else
+  PY="$(command -v python3 || command -v python || true)"
+fi
+
+if [ -z "$PY" ]; then
+  echo "pre-push: 找不到 python，Gate-0 没跑 —— **这不算通过**。" >&2
+  echo "          先装依赖；确实要推送，就 --no-verify 或 git config --unset core.hooksPath。" >&2
+  exit 1
+fi
+
+if [ -n "$SINCE" ]; then
+  exec "$PY" scripts/gate0.py --since "$SINCE"
+fi
+exec "$PY" scripts/gate0.py
