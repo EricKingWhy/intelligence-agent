@@ -446,7 +446,7 @@ Grill → Spec → Tickets → Implement ├─ TDD（红→绿）
 
 #### 8.8.3 失败回退边界表
 
-每格的前提都是 **INV-1**；"环内可以跳过"一列**只在修复迭代环内**成立，
+每格的前提都是 **INV-1**（**失败本身已经改了代码面的行**——Review / Runtime Verification / Merge——不适用：那些行的"可以跳过"另受机械映射约束）；"环内可以跳过"一列**只在修复迭代环内**成立，
 **不含集成前那一次完整门禁**（§8.8.4 第 1 行）。
 
 | 阶段 | 失败信号（可判定） | 回退到 | 必须重跑 | 环内可以跳过 | 跳过为什么不放松 |
@@ -457,7 +457,7 @@ Grill → Spec → Tickets → Implement ├─ TDD（红→绿）
 | Implement / TDD | 红环意外绿（测试没测到），或绿环红 | 原地（本票 TDD 环） | 本票 focused 用例 | 其它票、其它端、Runtime Verification、Evidence Gate | 本票尚未冻结，下游读数无意义（§8.1 第 1 条） |
 | Implement / Tests | 本票 focused 用例红 | 本票 Implement 修复；**失败若暴露的是规格歧义 ⇒ 按 §3.1 升为票面变化（那是新票，不是回退）** | **本票全部** focused 用例（至少含失败的那个），判据看**失败集合差集**（`docs/agents/verification.md` §5 第 5 条；flake 例外按 §8.6 第 3 条） | 上游三阶段；**冻结树尚未成立期间**的全量 | 上游产物未变（同一份 spec / 票面）；冻结树不成立时全量读数不成立（§8.1 第 2 条） |
 | Implement / Matt 双轴 Review | 任一轴 NEEDS-FIX（P0/P1） | 本票 Implement 修复 | **针对新 diff 的 review**（§8.8.5）+ 每条 finding 的逐条红证 | 上游三阶段；未受影响的车道——**其受影响集合必须由机械映射给出**，不由人当场划（映射机器化属 issue #292；**在 #292 落地前该格只有"上游三阶段"可用**） | 受影响面由 map 决定，不是人的判断；**map 覆盖不到的读数一律重跑**（INV-1 不适用于本行——修复已经改了代码面） |
-| Runtime Verification | 真实产物验收失败（含 e2e / 真机证据） | 本票 Implement 修复 | **针对新 diff 的 review** + targeted tests + **只重跑受影响 verification** | 未受影响的 verification 车道——**其受影响集合必须由机械映射给出**，不由人当场划（映射机器化属 issue #292；**#292 落地前本格不可用 ⇒ RV 只能整段重跑**） | 受影响面由 map 决定，不是人的判断 |
+| Runtime Verification | 真实产物验收失败（含 e2e / 真机证据） | 本票 Implement 修复 | **针对新 diff 的 review** + targeted tests + **只重跑受影响 verification** | 未受影响的 verification 车道——**其受影响集合必须由机械映射给出**，不由人当场划（映射机器化属 issue #292；**#292 落地前本格不可用 ⇒ RV 只能整段重跑**） | 受影响面由 map 决定，不是人的判断；**map 覆盖不到的读数一律重跑**（INV-1 不适用于本行——修复已经改了代码面） |
 | Evidence Gate | 证据缺失 / 读数指不到树 / 门禁红 | 回**产生该读数的那条车道**所在的阶段 | 产生该证据的那条车道（或回它所属的阶段入口） | 与失败无因果关系的车道 | 因果由本表的行定位，不由当场划集合 |
 | Merge | push 被拒（非 ff），或集成后门禁红 | 非 ff ⇒ 先合远端（`AGENTS.md` §13–§14）再回 Evidence Gate；门禁红 ⇒ 回 Evidence Gate 重采 | 见 §8.8.4 第 1 行 | —— | 集成面变化就是代码面变化 ⇒ INV-1 不成立 |
 
@@ -482,7 +482,7 @@ focused 文件交给 `pytest` / `vitest`。**"只重跑受影响 verification"�
 | 4 | **覆盖闸门** `scripts/check_review_coverage.py`（§7 第 8 条与 §8.7 第 8 条写的是 `check_review_coverage.sh`，那是**冻结的语义参考**；本机唯一跑得动的是 `.py` 版） | §7 第 8 条；§8.7 第 8 条 | 每次集成前跑、要求 exit 0；回退产生的修复提交仍是代码提交，仍须真实审查行。 |
 | 5 | **造红的隔离**（变异只在主工作树**之外**的副本里做） | §8.1 第 6 条；§8.7 第 4 条 | 增量重跑不改变这条：读数必须采自干净树。 |
 | 6 | **读数必须能指到树**（`sha` + `^{tree}`） | §8.7 第 3 条 | 就是 INV-1 的第 ① 条。 |
-| 7 | **Runtime Verification 这个阶段本身**（`AGENTS.md` §14.10 的清单本身只写"Tests 通过"，e2e / 真机是被 **§7 第 6 条**点名的；§8.8.4 第 1 行的完整门禁能覆盖它**跑没跑**，覆盖不到"跑出来的东西在用户入口上真的成立吗"） | §8.8.1；§7 第 6 条；§9 的 `principle-prove-it-works` | 增量**可以缩小它的范围**（只重跑受影响车道），**不能取消这个阶段**；也不许把"没有可跑的自动化 verification"当成"不必做验证"。 |
+| 7 | **Runtime Verification 这个阶段本身**（`AGENTS.md` §14.10 的清单本身只写"Tests 通过"；**e2e** 是被 **§7 第 6 条**点名的，而**真机**属人工车道（`docs/agents/verification.md` §2 的 ⑫）——所以完整门禁覆盖不了"真机 / 用户入口上真的成立吗"这类判断） | §8.8.1；§7 第 6 条；§9 的 `principle-prove-it-works` | 增量**可以缩小它的范围**（只重跑受影响车道），**不能取消这个阶段**；也不许把"没有可跑的自动化 verification"当成"不必做验证"。 |
 
 #### 8.8.5 「针对新 diff 的 review」= 修后重审，不是又一轮发现
 
@@ -557,21 +557,21 @@ skill 支撑，或显式声明"不需要引"**」，第 1 条要求「新写的�
 
 | §8.8.3 的档 | 方法依据 | 为什么是它 / 为什么不需要引 |
 | --- | --- | --- |
-| Grill | §9「主从关系」段的 **Matt `grilling`**（主开发，不在本目录） | 需求收敛的方法归 Matt，本仓不重写 |
-| Spec | §9「主从关系」段的 **Matt `to-spec`** | 同上 |
+| Grill | §9「主从关系」段的 **Matt `grilling`**（主开发，不在本目录） | 需求收敛的方法归 Matt，本仓不重写（**属合法情形 ①**：本仓主从关系规则，§9 已写明；不是"上游无可复用"） |
+| Spec | §9「主从关系」段的 **Matt `to-spec`** | 同 Grill（**属合法情形 ①**） |
 | Tickets | `docs/agents/skills/principle-sequence-verifiable-units/SKILL.md`（§9 表第 1 行）+ **Matt `to-tickets`** | 拆分与排序要能自证给 reviewer |
 | Implement / TDD | §9 表 **Implement / TDD** 行的 **Matt `tdd`** | §9 已明写该步路由归 Matt |
 | Implement / Tests | **本仓特有规则，不需要引**：判据是「失败集合差集」，写在 `docs/agents/verification.md` §5 第 5 条 | 属票面 comment 的合法情形 ① |
-| Implement / Matt 双轴 Review | §9 表 **Implement / Review** 行的 **Matt `code-review`**（主开发，不在本目录；用户 2026-09-22 明确「不能改变」） | 「针对新 diff 的 review」= 修后重审，仍按该 skill 的两轴做 |
+| Implement / Matt 双轴 Review | §9 表 **Implement / Review** 行的 **Matt `code-review`**（主开发，不在本目录；用户 2026-09-22 明确「不能改变」） | 「针对新 diff 的 review」= 修后重审，仍按该 skill 的两轴做（**属合法情形 ①**：用户 2026-09-22 明确「不能改变」，§9 已写明这一步归 Matt） |
 | Runtime Verification | `docs/agents/skills/principle-prove-it-works/SKILL.md`（对真实产物取证）**+** `docs/agents/skills/blast-radius/SKILL.md`（**"只重跑受影响 verification"里"算影响面"这一步的方法归它**） | 本档是"增量"最吃方法的一档，故两处都点名 |
 | Evidence Gate | `docs/agents/skills/principle-encode-lessons-in-structure/SKILL.md`（重复出现的指令编码成机制）**+** `docs/agents/skills/show-me-your-work/SKILL.md`（决策轨迹路由到既有台账，不自造一套） | §9 表同两行 |
 | Merge | **本仓特有规则，不需要引**：合并 / 推送的授权与前置条件在 `AGENTS.md` §13–§14 与协议 §3.2 | 属合法情形 ①；上游没有可复用的 git 授权 skill |
 
 **"受影响面"这一档与 issue #292 的分工（把方法与本仓缺口分开）**：`blast-radius` 给的是**方法**
 （怎么算改动在别处会破坏什么）；本仓要的那张「代码面 ↔ 必跑车道」的**机械映射**还不存在（属 issue #292）。
-⇒ 在 #292 落地前，"只重跑受影响 verification"只能是**人按 `blast-radius` 的方法做一次、并对
-到不了"跑真代码"一级的结论明文标 `unproven`**，**不得**当成可复用的机械判据，也不得据此缩小
-§8.8.4 第 1 行的集成前完整门禁。
+⇒ 在 #292 落地前，"只重跑受影响 verification"**没有机械判据**：`blast-radius` 的人算只产出**候选**集合，
+**不得**用于缩小任何重跑范围（§8.8.3 的 Review 行与 Runtime Verification 行已经写死：#292 落地前
+那两格**不可用**，RV 只能整段重跑），**也不得**据此缩小 §8.8.4 第 1 行的集成前完整门禁。
 
 ---
 
