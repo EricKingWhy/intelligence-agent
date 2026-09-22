@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gate0.py —— 推送前的快速门禁（Gate-0）。预算：**墙钟 ≤60 秒**。
+"""gate0.py —— 推送前的快速门禁（Gate-0）。预算目标：**墙钟 ≤60 秒**（目标，非硬约束；超了只告警，不把「慢」伪装成「失败」）。
 
 ## 它解决什么
 
@@ -14,7 +14,7 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
 - **不是安全边界**：pre-push hook 本地可 `--no-verify` 绕过，也不影响别的 clone（启用靠本地
   `git config core.hooksPath .githooks`，该配置**不随仓库分发**）。它挡的是"忘了跑"，不是"故意绕过"。
 - **不取代** `AGENTS.md` §14.10 的集成前完整门禁，也不取代两轴独立审查。
-- **不做按路径跳过**：全量 6 车道实测 ≈36–45s（2026-09-22 读数），已满足预算；按改动路径跳过某条
+- **不做按路径跳过**：全量 6 车道实测约 **20–22s（热）/ 36–45s（冷）**（2026-09-22 读数），已满足预算；按改动路径跳过某条
   车道属于**放松**（跨层影响难以穷举），机制上没有必要。改动面只作**信息展示**，不影响跑什么。
 - **不产生"读数"**：本脚本只回退出码与人的可读输出，**不写任何文件**（机器产出的门禁读数
   `docs/gate/<sha>.json` 计划在批 3）。
@@ -41,9 +41,13 @@ import time
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(REPO_ROOT, "web")
 
-#: 单条车道的墙上限。不是预算（预算是 60s），而是"卡死也要有个结论"的兜底：
+#: 单条车道的墙上限。不是预算（预算见 `GATE0_BUDGET`），而是"卡死也要有个结论"的兜底：
 #: pre-push hook 里挂死会让人推不动代码，超时按失败处理并打印出来。
 LANE_TIMEOUT = 300.0
+
+#: 预算目标（墙钟秒）。**目标而非硬约束**：超了只打印告警，仍按各车道的真实退出码判定。
+#: 原因：把「超预算」等于「失败」会把环境负载导致的慢误判成代码问题，与本项目「不做假绿灯」同理。
+GATE0_BUDGET = 60.0
 
 #: 生成物同步守卫：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
 #: ↔ `docs/EVENT_VOCABULARY.md`。共 2 文件 6 例。
@@ -71,10 +75,6 @@ def venv_exe(name: str) -> str | None:
     """优先仓库 `.venv`（项目自己的工具链），退回 PATH。"""
     found = _venv_file(f".venv/Scripts/{name}.exe", f".venv/bin/{name}")
     return found or shutil.which(name)
-
-
-def node_exe() -> str | None:
-    return shutil.which("node")
 
 
 def _utf8_stdio() -> None:
@@ -116,7 +116,7 @@ def build_lanes(since: str) -> list[Lane]:
     # ③④ 前端静态检查：直接调包的 .js 入口，不经过 `npm`/`npx`/`.bin/*.cmd`——
     #     本机沙箱把 `cmd.exe` 拉黑（`.cmd` 秒退且报错字节是 GBK 的"拒绝访问。"），
     #     而 `.bin/oxlint` 是 POSIX sh 脚本、会用到 `dirname`/`sed`（shim 缺 coreutils）。
-    node = node_exe()
+    node = shutil.which("node")
     oxlint_js = os.path.join("node_modules", "oxlint", "bin", "oxlint")
     tsc_js = os.path.join("node_modules", "typescript", "bin", "tsc")
     have_js = os.path.isdir(os.path.join(WEB_DIR, "node_modules"))
@@ -161,26 +161,34 @@ def run_lane(lane: Lane) -> tuple[int, float, str]:
 
 
 def surface_report(since: str) -> str:
-    """改动面（**信息展示**，不影响跑什么）。`--since` 缺省时退化为工作树未提交改动。"""
+    """改动面（**信息展示**，不影响跑什么）。
+
+    `--since` 缺省时退化为工作树未提交改动。此时车道 ①（diff-check）也**只覆盖工作树**，不检查「已提交但未推送」的提交。
+    这是一个**降级**，不能靠读使用者自己想起来——所以写进返回值，而不只写在注释里。
+    """
     if since:
         proc = git("diff", "--name-only", f"{since}..HEAD")
         scope = f"{since}..HEAD"
     else:
         proc = git("status", "--porcelain")
         scope = "工作树（未提交）"
-    files = [ln.strip() for ln in proc.stdout.split("\n") if ln.strip()]
+    # ⚠ **不许先 `strip()` 再切**：`git status --porcelain` 的前两列是状态码，第 3 列起才是路径，
+    # 而 ` M x` 的**前导空格本身就是状态列的一部分**。先 strip 会吃一个字符——实测把
+    # `scripts/…` 显示成 `cripts/…`（本车道 2026-09-22 自己打出来暴露的，见审计 §8.6）。
+    lines = [ln for ln in proc.stdout.split("\n") if ln.strip()]
+    files = [ln[3:].strip() for ln in lines] if not since else [ln.strip() for ln in lines]
+    # 未给 --since 时只覆盖工作树（车道 ① 同理）⇒ 把降级写进返回值，别让人误读成「推送范围已查」。
+    caveat = "" if since else ("；⚠ 未给 --since ⇒ 车道 ① 只覆盖工作树，不含已提交未推送的提交")
     if proc.returncode != 0:
-        return f"改动面：?（{scope} 取不到）"
-    if not since:
-        files = [f[3:] if len(f) > 3 else f for f in files]  # 去掉 porcelain 状态两列
+        return f"改动面：?（{scope} 取不到）{caveat}"
     buckets: dict[str, int] = {}
     for path in files:
         top = path.split("/")[0]
         buckets[top] = buckets.get(top, 0) + 1
     if not buckets:
-        return f"改动面：0 文件（{scope}）"
+        return f"改动面：0 文件（{scope}）{caveat}"
     shown = "  ".join(f"{k} {v}" for k, v in sorted(buckets.items(), key=lambda kv: -kv[1]))
-    return f"改动面：{len(files)} 文件（{scope}）— {shown}"
+    return f"改动面：{len(files)} 文件（{scope}）— {shown}{caveat}"
 
 
 def usage() -> int:
@@ -217,7 +225,7 @@ def main(argv: list[str]) -> int:
 
     head = git("rev-parse", "HEAD").stdout.strip()
     tree = git("rev-parse", "HEAD^{tree}").stdout.strip()
-    print(f"Gate-0（推送前快速门禁）  tip={head[:12]}  tree={tree[:12]}  预算=60s")
+    print(f"Gate-0（推送前快速门禁）  tip={head[:12]}  tree={tree[:12]}  预算目标={GATE0_BUDGET:.0f}s")
     # 协议要求任何门禁读数都必须能指到"跑在哪棵树上（sha + ^{tree}）"，所以上面两行都在。
     print("─" * 72)
 
@@ -246,6 +254,8 @@ def main(argv: list[str]) -> int:
 
     print("─" * 72)
     print(surface_report(since))
+    if wall > GATE0_BUDGET:
+        print(f"⚠ 超过预算目标：墙钟 {wall:.1f}s > {GATE0_BUDGET:.0f}s（预算只是目标，不改变上面的判定）")
     failed = [lane.name for lane, rc, _s, _o in results if rc != 0]
     if failed:
         print(f"Gate-0 FAIL：{len(results) - len(failed)}/{len(results)} 通过，墙钟 {wall:.1f}s")
