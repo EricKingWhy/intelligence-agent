@@ -2854,3 +2854,16 @@ PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_l
   未及出现 ⇒ **该 spec 单跑 6 passed / 15.9s**（同一条在 chromium-1280 档的全量里是绿的）。
 
 结论：本轮改动**零回归**；三条红按协议「既有红与 flake」口径**登记**（不是修，是记）。
+
+**集成与推送（本线已完成）**：前端六笔 `22aa291..bec12fa`（13 文件，全在 `web/` 与
+`docs/review_ledger.tsv`；`git diff 22aa291..bec12fa -- src tests scripts` 为空）已 ff 进
+`D:\intelligence-agent` 的 `main` —— 集成 tree `d804b761…` 与前端门禁 tree **逐字节相同**
+（§13.4：tree 相等即证「被集成的就是跑过门禁的那棵」），随后 `git push origin main`
+（`22aa291..bec12fa`，快进）。三个 clone 的即时状态：集成 clone 与前端 clone 均为
+`bec12fa`＝`origin/main`（ahead/behind 皆 0）。
+
+**后端 clone 落后 6 笔，且合并 `origin/main` 会冲突**：冲突面只有 `docs/review_ledger.tsv`
+一个文件（两线都把台账行插在 `[whitelist]` 之前同一个锚点；`git merge-tree --write-tree
+main origin/main` 只读实测），语义上唯一正确的解是**并集**（两线的行一条都不能丢）。
+按 §14.7 不在未获批准时自行解决，交用户 / 后端线裁决；本笔登记（本文档 §10）留在后端 clone，
+随后端线集成时才进 `origin`（前端线的 push 不带它）。

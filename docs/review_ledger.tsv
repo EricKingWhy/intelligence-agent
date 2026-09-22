@@ -230,3 +230,5 @@ c19d1f38432f7ff54b7df7036c4112adfbc78567	F18-B（#283）第三手补记：两轴
 e489dc9	#248 R1/R2 闭合批次「集成与关单」落点（tracker B-26 集成段 + 月度归档 B-39 集成子项 + `PHASE_STATUS` B-39 最近条目补集成事实 / 按日定位子项数口径统一；docs-only，`src`/`tests`/`web`/`scripts` 零改动）
 6cab69b	#248 R1/R2 闭合批次收尾记账（tracker B-26 集成段 + 归档 B-39 集成子项 + `PHASE_STATUS` B-39 最近条目：补「实记笔/台账笔推送 + 三方 clone 复补」的对齐事实与自终止式表述；docs-only，`src`/`tests`/`web`/`scripts` 零改动）
 1bb0a81	真机审计第十五轮 §6 收口登记（更正一处 gitignore 说法 + 记清理动作与证据落点）——只改 `docs/FRONTEND_ISSUES_LOG.md` 一个 .md，docs-only
+4f0df6e	真机审计第十五轮 §10 门禁读数（含三条红的 flake 归属）+ 1bb0a81 白名单行——改动两个文件（`docs/FRONTEND_ISSUES_LOG.md` + `docs/review_ledger.tsv`）全在 `docs/` 下 .md/.tsv，docs-only
+2a266cc	真机审计第十五轮「集成与推送」登记（前端六笔 ff 进集成 clone + push origin；后端 clone 落后与台账并集冲突待裁）——只改 `docs/FRONTEND_ISSUES_LOG.md` 一个 .md，docs-only

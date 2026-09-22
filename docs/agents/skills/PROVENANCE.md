@@ -139,7 +139,7 @@ MIT 要求「许可与版权声明随副本一并保留」——`pstack-LICENSE.
 
 ```text
 curl wget https?:// \bnc\b \bssh\b \bscp\b \beval\b exec\( base64 \.env \.ssh id_rsa
-credential password secret token api_key "rm -rf" "chmod 777" sudo
+credential password secret token api_key rm -rf chmod 777 sudo
 ```
 
 | 扫描对象 | 文件数 | 命中文件 | 匹配次数 | 命中行数 |
@@ -151,6 +151,11 @@ credential password secret token api_key "rm -rf" "chmod 777" sudo
 （同一批正则按"匹配次数"得 78、按"命中行数"得 69）；早先写「留存 7 个命中数 = 3」也少算了 1 处。
 上表为**本轮实测**。另注：单扫本目录时 `PROVENANCE.md` 自身会额外命中 **27** 次——它引用了这串
 正则本身，故上表把它排除单列。
+
+⚠ **口径更正之二（2026-09-22 窄复验）**：上框正则里 `rm -rf` / `chmod 777` 此前写成了带双引号的
+字面量（`"rm -rf"`），**按带引号字面复跑 = 28 命中文件 / 77 匹配 / 68 行**
+（少 `poteto-mode/playbooks/worktree-cleanup.md:9` 一处**裸** `rm -rf`）。实跑口径无引号，框内已对齐；
+上表 **29 / 78 / 69** 不变。复跑命令与输出见审计包 §10.8.1 第 2 条。
 
 **结论**：
 
