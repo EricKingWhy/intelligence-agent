@@ -4275,3 +4275,23 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 **落点**：`6bee833`（实现 + 新用例 26 条）→ `7a382c4`（R1 findings）→ `94c6f73`（R2 findings）→ **`2570a00`**（R3 finding，**docstring-only，本 range 的代码 tip**）→ 文档落点笔（tracker 本段 + `docs/PERF_BASELINE.md` B8 节 + `docs/phase_status/2026-09.md` 归档 + `PHASE_STATUS.md` 焦点/索引）→ 台账笔（审查行 4 条 + 白名单行）→ 集成与关单 → 集成/关单的落点笔 → 台账白名单行（tip 按自维护口径对账，不写死 sha）。
 
+## B-37（2026-09-22）：全仓 review findings 开票（Multi-Agent / Recovery / Artifact / Evaluation）
+
+**状态**：仅完成需求去重、票面冻结与 GitHub 开票；**五票均 OPEN，未开工、未实现、未关单**。用户经三轮 grilling 批准把原六条 finding 按根因去重，并把通用递归状态从立即安全边界中拆开，最终为五张新票；历史 `#87/#88/#91` 不重开。
+
+| 顺序 | Issue | 优先级 | 冻结范围 | 依赖 / 并行规则 |
+| --- | --- | --- | --- | --- |
+| 1 | `#286` 动态 SubAgent grantable/depth 权限边界 | P1 | root 深度 0；`max_depth=1` 允许一层；runtime-owned remaining depth 逐层消费；child 只能收窄 scope/depth，不能从 full registry 重建 | 无；先施工 |
+| 2 | `#287` tree-wide delegation 预算、repeated guard 与 crash recovery | P1 | 全树共享 `max_delegations` + failure fingerprint；per-agent `max_steps` 仍独立；resume 不刷新额度 | blocked by `#286` |
+| 3 | `#288` delegated child non-owning workspace binding | P1 | child 删除只删 alias；parent 拥有实际 workspace；递归 descendants 解析到 canonical owner；cycle/corruption fail-closed | blocked by `#286/#287`；避免同文件并行 |
+| 4 | `#289` Artifact stored/message unwritten 真实 Kill Gate | P2 | 先红证；若证实生产缺陷，票内只做最小生产修复；Local + 真七牛；临时对象残留必须 0 | 与 `#286/#287/#288` 独立，可在另一 clone 并行 |
+| 5 | `#290` Langfuse deterministic Experiment async 假绿 | P2 | async `run_case` 核心 + 薄 sync wrapper；消费 `ExperimentResult`；故意失败的真云对照必须使 Gate 红 | 与其余票独立，可在另一 clone 并行 |
+
+**发现证据**：全仓审查冻结点 `7e8720148011`；五个问题涉及的实现/规格文件在审查期间推进到 `c6def071` 时与冻结点无差异，故复现归属于冻结树。票面创建时主线已由并行会话推进，实际施工必须从届时最新 `origin/main` 开工，不能把审查冻结 SHA 当施工基线。逐条代码位置、复现、AC、测试、review 要求与残余以 GitHub `#286`–`#290` 票面为权威。
+
+**真实 Gate 决策**：五票全部集成后统一执行，不以当前连接预检代替最终验收。模型 primary/fallback 至少有一条真实可用链；Memory/Knowledge 固定专用 collection `memory_gate_test` / `knowledge_gate_test`；七牛使用 `intelligence-agent` bucket 的随机 session 前缀；Langfuse dataset/experiment/trace 保留作为审计证据并验证无意外重复，Milvus/Knowledge/七牛临时数据必须用真实查询确认残留为 0。凭证只存在本机 ignored `.env`，禁止进入 Issue、tracker、日志或命令输出。
+
+**配置预检（不替代最终 Gate）**：Settings 秘密字段完整；Milvus 认证/连接 ✅（专用 `memory_gate_test` 尚不存在，留给 Gate 创建与清理）；Embedding 真实请求 ✅（1024 维）；七牛对目标 bucket 的 `HeadBucket` ✅；Langfuse `auth_check` ✅。模型未发请求：primary / fallback 的 provider 标识均不在当前 `PROVIDER_PRESETS`（支持集合是代码内冻结的 `deepseek/qwen/tencent/senseaudio/zhipu`）⇒ `ModelConfig.from_settings` 配置期失败。待用户选择与实际端点相符的两个非秘密 provider 标识后重跑连接预检；不得把该配置失败记成真实模型已验证。
+
+**流程**：每票各自走 V3.1-lite 的红证、实现、专项门禁、两轴独立 review、coverage 与逐票关单；`#286 → #287 → #288` 串行。`#289/#290` 可与该链并行，但同一文件只允许一条线修改。最终真实 Gate 是整个 B-37 的批次收口条件，不是任一单票可以伪报的完成证据。
+
