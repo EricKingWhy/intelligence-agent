@@ -15,6 +15,7 @@ Runtime 异常——exit_code/stdout/stderr 放进 data 供模型读取，模型
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 
 from pydantic import BaseModel, Field
@@ -65,8 +66,27 @@ class BashTool(Tool):
     POSIX/容器为 `/bin/sh`，Windows 本机为 `cmd.exe`。模型可见描述据此声明真相。
     """
 
-    def __init__(self, sandbox: Sandbox) -> None:
+    def __init__(
+        self, sandbox: Sandbox, *, timeout_seconds: float | None = None
+    ) -> None:
+        """`timeout_seconds` 缺省 = `DEFAULT_BASH_TIMEOUT_SECONDS`（#244 冻结值）。
+
+        非有限 / ≤0 的预算是**第二道闸**：`Settings.bash_timeout_seconds` 已在
+        构造期拦一次，但 `BashTool(sandbox)` 可以被直接构造（测试、CLI、未来的
+        其它装配点），静默回落到默认值会让"配了个坏值"看起来像"配了个好值"。
+        """
+        if timeout_seconds is not None and not (
+            math.isfinite(timeout_seconds) and timeout_seconds > 0
+        ):
+            raise ValueError(
+                f"bash timeout_seconds 必须是有限正数，收到 {timeout_seconds!r}"
+            )
         self._sandbox = sandbox
+        self._timeout_seconds = (
+            DEFAULT_BASH_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
 
     @property
     def name(self) -> str:
@@ -111,8 +131,8 @@ class BashTool(Tool):
 
     @property
     def timeout_seconds(self) -> float:
-        """统一 Bash contract：ToolExecutor 的有效预算为 60 秒。"""
-        return DEFAULT_BASH_TIMEOUT_SECONDS
+        """统一 Bash contract：ToolExecutor 的有效预算（默认 60 秒，#244 冻结）。"""
+        return self._timeout_seconds
 
     @property
     def side_effect(self) -> ToolSideEffect:

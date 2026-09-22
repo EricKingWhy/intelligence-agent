@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # ≤0 = 无限等待（关闭 fail-closed，保留旧行为）。默认 300s：足够人类走开再回来，
     # 又不让一个没人管的危险工具无限期挂住 run。
     approval_timeout_seconds: float = 300.0
+    # Bash 工具的执行预算（秒）。ADR-0039（含 2026-09-22 附录）：#244 冻结
+    # 「ToolExecutor 是唯一 deadline owner、Local/Docker 默认有效预算同为 60 秒」，
+    # 本字段只提供 Executor 消费的预算输入，不与它争 owner。
+    # 非法值（≤0 / nan / ±inf）在 **Settings 构造期**响亮失败——构造期即启动期，
+    # 所以"没有预算"或"无穷预算"不会被静默带进运行时（#244 AC5）。
+    # 消费点只有装配层（assembly 的 BUILTIN_LOCAL_TOOLS 循环）；接不上就成死键，
+    # 由 tests/test_assembly_bash_budget.py 钉住。
+    bash_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     # Model Fallback 两级链（ADR-0014 决策 14）：FALLBACK_MODEL_PROVIDER 为空 =
     # 单级（无 fallback）。fallback key 同 SecretStr 脱敏待遇（活密钥）。
     fallback_model_provider: str = ""
