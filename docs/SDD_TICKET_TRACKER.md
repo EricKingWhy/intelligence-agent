@@ -4227,3 +4227,51 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 **窄复验（跑在 `34e46ae` 上，A 轴 Standards / 文档真实性 + B 轴 Falsification 各一独立只读子代理）**：findings 处置于 `c7acb8e`，判定与残余登记见本段「三轮」「审查」与「残余」三处；门禁已在 `c7acb8e` 的树上重跑（读数见上「门禁」行，本节不留"待复验"预测）。
 
+## B-36（`#281` B8 流式 chunk 聚合去 O(n²) + 父票 `#267` 验收面核查）
+
+**状态**：实现 + **四轮独立审查**（发现阶段两轴 → 修后重审两轴 → 窄复验两轴 → 窄复验两轴，共 8 个独立只读子代理）⇒ findings 全部闭合（**P0 = 0**，无一条推翻所选方案）；门禁在**冻结树**全绿；台账行补齐后覆盖闸门 exit 0；集成与关单见本节「集成与关单」。
+
+**票面授权与前置（两条前置都核查过，不是假定）**：① 用户 2026-09-22「我授权你执行」（截图六票里未执行 / 未执行完的部分），关单权同时授予；② 票面 `## Blocked by` 是 **`#247`** ⇒ 开工前实测 `#247` **已 CLOSED**（B-35 时段按 §14.12 关的）⇒ 阻塞**自然解除**，**不需要**动用票面那条「例外窗口」，也不需要另取协调记录。⚠ 票面写的行号 `:791-802` 与文件现状 `:1117-1127` **已漂移**（`#247` 在同文件做过分阶段收敛 ⇒ 文件变长）⇒ 本票按**代码块**施工，不按行号。
+
+**方案（AC9）：选票面的 C（复用官方聚合入口），不选 A 也不选 B。** `AIMessageChunk.__add__` 对 `list[AIMessageChunk]` 的**列表形态**直接转发到 `langchain_core.messages.ai.add_ai_message_chunks`——**逐项折叠走的是同一个函数**（每步只喂 1 个 other），所以合并语义**一行未改**，改的只是"N−1 次调用"→"1 次调用"：累计内容从"每步重抄一遍"变成"只复制一次"。不选 A（手工拼 `content`）的理由：票面已预言它会绕过 LangChain 对 `tool_calls` / metadata 的合并语义；不选 B（分块平衡归并）的理由：仍是 N−1 次字段合并，只把 O(n²) 降成 O(n log n)，还要自己处理分组边界（票面 Risks 第三条）。**Reuse First（`AGENTS.md` §6）**：C 复用官方实现，不新增合并语义。**为什么不破坏 `tool_calls` 语义**：改造前后同为 `add_ai_message_chunks`（同一实现）——由 9 组语料的逐字段对照（`type` / `content` / `tool_calls` / `tool_call_chunks` / `additional_kwargs` / `response_metadata` / `usage_metadata` / `id` / `chunk_position`）**加**一条"整条流只准发 1 次 `add_ai_message_chunks`"的结构钉子共同锁住；`isinstance(ai, AIMessage)` 的类型对齐分支与"空流 ⇒ `AIMessage(content="")`"**逐字保留**（票面「不得触碰的既有刻意设计」），`:791-792` 那两行语义注释也一字未改（票面要求保留）。
+
+**交付面**（`git diff --stat c6def07..2570a00`：**3 文件 +700/−2**）：`6bee833`（聚合块改一次归并 + 新 golden 用例 26 条 / 398 行）→ `7a382c4`（findings 处置：复制量口径分列 + 等价性注释标注版本前提）→ `94c6f73`（findings 处置：计数器闭式自证 + `list` 口径 + §1c 第二把尺子）→ `2570a00`（**docstring-only**：修正 tuple 行为的判别条件）。
+
+**红证（先写钉子再实现 + 定向变异，两轴各自独立复现）**：**结构性钉子**是本票唯一"改造前红"的判据——`test_aggregation_issues_a_single_merge_call_for_the_whole_stream` 断言整条流只发 **1 次** `add_ai_message_chunks`；在改造前的 `runtime.py`（`c6def07`）上读数是 `[1, 1, …, 1]`（11 个 1），与断言期望的 `[11]` 不符 ⇒ **改造前红、改造后绿**（`1 failed / 25 passed`，且**红行正是这一条**——其余 25 条是"两臂等价"型，改造前后都该绿，这是刻意的：它们锁的是"不许改语义"）。定向变异（`%TEMP%` scratch 副本；主工作树全程零改动）：**M1** 改回逐项折叠 ⇒ **1 红 / 25 绿**；**M2** 归并反序 ⇒ 13 红；**M3** 丢尾 ⇒ 12 红；**M4** 只归并首个 ⇒ 12 红；**对照**（未变异）26 绿。**两轴独立复现**：轴 A 在自建副本里复现 M1 的读数（`[1]*11 != [11]`，`1 failed / 25 passed`）；轴 B 自写的反序 / 丢尾变异各读到 **12 红**（作者侧同族变异读到 12~13 红——**改动点不同故红数不同，两个读数都留档**，不合并成一个数）。修后各轮另有 5 处变异（计数器 `chars` / `blocks` 各收成 `+= 1`、两臂不等价、脚本闭式断言、tuple 探针），**逐条打红自己的钉子、无效钉子 0**。
+
+**门禁（冻结树 `2570a00`，tree `dffcb897fb75f9492aae67676f4cd58e88dc8691`；脚本 blob `9daf81710b70f43dcdfddecb3b99d920fd242cfb`；读数在隔离 clone `%TEMP%/iab-b36-clone4` 里取，先断言 `agent_harness.__file__` 落在 clone 内）**：全量 **3070 passed / 2 skipped / 42 deselected / 9 warnings in 337.72s / `PYTEST_EXIT=0`**；`pytest tests/agent/` **484 passed / 3 deselected**；AC4 的 golden（`test_event_sequence_golden.py` + 本票新用例）**269 passed**；`ruff check .` **All checks passed**。**冻结与读数传递的如实记**：本批**没有**用 §8.1.3 的"读数传递"——门禁就是在**待集成的那棵树**上跑的（隔离 clone 取的正是 `2570a00` 的树）；且本 clone 的**主工作树**上另有并行会话（`#282` 线）的 **17 条已暂存未提交**改动（`src/agent_harness/session/**` / `web/**` / `tests/**` 等）⇒ §8.1.3 判据 ② 在本 clone **不可用**（它要求工作树除 `?? .zcodeignore` 外全为 docs）。替代证据（更强、且机械可验）：**index 指纹在门禁窗口前后逐字符相同**——窗口前 `git write-tree` = `cb946f815cc2b605cb021fffdb820ac5c26b887d`，窗口后同值 ⇒ 对方 17 条暂存路径在窗口内**没动过**；本批 4 笔提交全部用 `git commit --only <paths>`（提交后其暂存集合原样保留，逐次复核）。`?? .zcodeignore` 全程未触碰（用户本机数据）。
+
+**AC 逐条对账（票面 `## Acceptance criteria`）**：
+- **AC1**（前置用例组 6 条先作为 golden 通过、改造后仍全通过）✅ `tests/agent/test_stream_chunk_aggregation.py` 26 条。六类落点：①纯文本逐字相同 `test_text_only_chunks_merge_to_concatenated_content`；②带 `tool_calls` 的多 chunk **逐字段**相同 `test_tool_call_args_split_across_chunks_merge_field_by_field` + `test_two_tool_calls_interleaved_merge_in_index_order`；③空流 `test_empty_stream_is_reported_as_empty_response`；④单 chunk（含类型对齐路径）`test_single_chunk_with_and_without_tool_calls`；⑤`usage_metadata` `test_usage_metadata_merges_like_before`；⑥`additional_kwargs` 并入 9 组语料的逐字段对照。**"先通过再优化"的口径如实记**：该文件与实现同笔落地（`6bee833`），逐字流程是**用例先写、嵌在用例里的 `_naive_fold` 逐字照抄改造前的折叠**，故"两臂等价"型用例在改造前后都绿；**唯一改造前会红的是那条结构钉子**（见「红证」）。
+- **AC2**（带 `tool_calls` 的多 chunk 合并结果与改造前逐字段相同，有断言）✅ 9 组语料逐字段对照（字段名见「方案」段）+ `SPLIT_ARGS_CHUNKS` / `TWO_CALLS_CHUNKS` 两组专测增量 args 拼接与多调用 `index` 对齐。
+- **AC3**（聚合耗时呈线性、三点拟合、附改造前对照，且改造前应呈超线性）✅/⚠ **数字在 `docs/PERF_BASELINE.md` B8 节**（`c6def07` 起从未有过数字，本批首落）。⚠ **如实记**：改造前的**耗时**在票面那个 chunk 宽度（`width=10`）下**不呈超线性**（4× 比只有 4.27× / 4.68×——被每 chunk 的固定开销淹没）；超线性在**确定性复制量**（§1/§1b：15.99× / 16.00×，改造后恒 4.00×）、**§1c 块语料墙钟**（15.08×）与 **§4 宽 chunk**（N 翻倍 13.45×）上成立。**没有**把 §2 的数字包装成"改造前也超线性"。
+- **AC4**（事件产出序列逐条不变）✅ **复用 #247 的 `_drive` 事件序列 golden**（票面明写"复用 #247 的 golden 若已存在"）：`tests/agent/test_event_sequence_golden.py` 243 条 + 本票新用例 26 条 = **269 passed**；已在 `PERF_BASELINE.md` 的 B8 节按要求**显式声明**。
+- **AC5**（`git diff` 里 `runtime.py` 的改动行全部落在 `:791-802`）✅ **判据按代码块而非行号**：`git diff -U0 c6def07..2570a00 -- src/agent_harness/agent/runtime.py | grep -c "^@@"` = **1**，hunk 头 `@@ -1117,2 +1117,9 @@`，内容就是聚合块本身（`for c in collected[1:]: ai = ai + c` → `rest = collected[1:]` + 一次归并 + 6 行说明注释）。行号漂移的原因见上（`#247` 同文件施工）。
+- **AC6**（`git diff --stat` 只出现 `agent/runtime.py` 与其测试）⚠ **字面未满足**：实际是 **3 个**文件——`src/agent_harness/agent/runtime.py` + `tests/agent/test_stream_chunk_aggregation.py` + **`scripts/measure_chunk_aggregation.py`**（量测脚本，293 行）。理由与取舍见「偏离」第 1 条；`docs/PERF_BASELINE.md` 是票面「必做 2」明确要求的 docs 面（`docs/**` 是文档，不计入代码面）。
+- **AC7**（`docs/PERF_BASELINE.md` 有 N=1k/4k/16k 改造前后耗时）✅ 已落，含确定性复制量 / 块语料 / 端到端 / 宽 chunk 四组对照 + 未闭合项表。
+- **AC8**（门禁全绿）✅ 见「门禁」段（全量 3070 passed / exit 0、`tests/agent/` 484 passed、`ruff` clean）。⚠ 票面 `## Validation` 与「后端工程门禁」写的是 `uv run …`——本机可用形态是 `PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly`（`uv run` 在本环境不适用）；**命令字面不同，读数口径同**，如实记。
+- **AC9**（DoD 说明选定方案与理由、为何不破坏 `tool_calls` 语义）✅ 见「方案」段。
+- **票面 `## Definition of done` 六项**：实现 commit（4 笔，中文正文 + 英文类型前缀 `perf(agent):`）✅；红证 ✅（见「红证」，含"改造前失败"的原始读数）；票面 Validation 的实际输出 ✅（按上面那条命令形态替换）；`PERF_BASELINE` 前后数字 ✅；残余风险与未闭合项（每条带解除条件）✅ 见「残余」+ `PERF_BASELINE` B8 的「未闭合项」表；进入对应 review 窗口 ✅（四轮 / 8 个子代理）。
+
+**偏离与诚实边界（三条，全部主动登记）**：
+1. **AC6 的第三类文件（Scope 扩张）**：票面 AC3 / 「必做 2」要求"N 个 chunk 的聚合耗时 + 改造前对照数字"，却**没给量测工具**。若把量测写成一次性临时脚本，数字就**不可复跑**——直接违反 `PERF_BASELINE.md` §1 第 3 条硬规则（"只有数字没有口径 = 无效"）与 §1.3（每个数字要能由**命令 + 脚本路径**重现）。取舍：**宁可多一个 `scripts/` 文件，也不留不可复核的数字**。代价如实记：`scripts/**` 按 SDD §8.1.3 **不算** docs-only ⇒ 它让"冻结树 + 只追加 docs"的读数传递判据失效，**必须在新树上重跑全量**——本批照做（3 次全量：`7a382c4` / `94c6f73` / `2570a00` 各一次）。
+2. **AC5 的行号**：票面 `:791-802` vs 实际 `:1117-1127`（见上）。
+3. **AC3 的耗时形态**：`width=10` 下改造前不呈超线性（见 AC3 那条）——**没有**把数字包装成票面期望的形状。
+
+**审查（四轮 / 8 个子代理；全部在隔离副本里工作，每轮收尾都核 `git status` 与 blob 指纹 ⇒ 主工作树零改动）**：
+- **R1 发现阶段（两轴，审 `6bee833` 的树 `7c92f86c…`）**：无 P0。findings 与处置：**【P1】AC7 数字未落**（`PERF_BASELINE.md` B8 仍是 `_待落基线。_`）+ 同族的**【P2】定向变异读数无落点** ⇒ docs-only 面，由本次落点闭合；**【P2】`_CopyVolume` 只认 str** ⇒ 块列表语料读数恒 0/0（"没抄东西"的假象）⇒ `7a382c4` 拆成 `chars` / `blocks` 两列 + 各配闭式断言；**【P3】"与逐项 `+` 等价"缺版本前提** ⇒ `7a382c4` 注释里注明 langchain-core 1.5.4 并给对照用例路径；**【P3】`(list, tuple)` 分支写法误导**（该分支在当前版本不可达）⇒ 注释改写；**【P4】带 `index` 的元素走 `merge_lists` 是"合并"而非"追加"** ⇒ 注释如实记（脚本语料不带 `index`，故当前精确）。
+- **R2 修后重审（两轴，审 `7a382c4` 的树 `e16d430e…`）**：findings 处置于 `94c6f73`：**【P3】§1b 不自证**——把计数器改坏时结论会**静默翻转**成"naive 4.00x"而**无任何断言报警**（这是最值钱的一条：读数看起来还在，判据已经失效）⇒ 加 `check_counter_exact_text` / `check_counter_exact_blocks` 两条**闭式**断言（改坏 ⇒ N=1000 就 `AssertionError`、exit 1）；**【P4】§1c 只有打印、没有独立于计数器的第二把尺子** ⇒ 补为块语料墙钟对照；**【P4】断言与模块级 `WIDTH` 耦合**（误用会大声失败）⇒ 登记。
+- **R3 窄复验（两轴，审 `94c6f73` 的树 `88e535aa…`）**：轴 A **PASS**（独立复现"计数器改坏 ⇒ 响亮失败"：`AssertionError: naive blocks N=1000: 999`、exit 1；§1c naive 191.3 → 2901.3 ms = **15.17×**）；轴 B **PASS-with-findings**（断言有牙：自写 3 条变异全部响亮失败），出 **【P3】口径注释把"裸 tuple 交给 `merge_content` 会抛 TypeError"写成**本版通用行为**——实测不成立**（构造期 pydantic 把 tuple 归一成 `list`，tuple 根本到不了 `merge_content`）⇒ `2570a00` 按实测改写（**docstring-only**）。
+- **R4 窄复验（两轴，审 `2570a00`）**：**两轴均 PASS**。轴 A：逐叶 AST diff ⇒ 全树**只有 `_CopyVolume` 的 docstring 一个差异叶**，剥离全部 docstring 后两版 AST **逐字节相同** ⇒ "可执行代码零改动"成立；新注释 6 项断言在 langchain-core 1.5.4 上逐条复现属实，另造 9 组组合**未得反例**（并实测 `merge_content("a", {"type":"text"})` 拆出的是**键** ⇒ `str` 臂是普适迭代器拆包、不是 tuple 专用）。轴 B：3 条变异（`chars += 1` / `blocks += 1` / 两臂不等价）**全部 exit 1** 且红行落在对应的闭式断言与"量测前的等价性断言"上；"只认 `list`"的收窄经 **7 类 content 形态**实测**不反转任何结论**（`None` / `dict` 构造期即 `ValidationError`；裸 tuple 构造期归一成 `list`，读数与 `list` 逐位相同）。两轴各出 1 条 **P4 非缺陷**（空累计值 `merge_content([], ("b",))` → `[]` 静默丢弃；`tool_call_chunks` 的 args 拼接不在计数口径内）⇒ 均**登记不修**（前者：注释自带的"且末元素是 str"已排除空序列；后者：docstring 已声明边界）。
+
+**残余（登记，不阻断；各带解除条件）**：
+1. **§2 的窄 chunk 耗时里改造前的二次项被常数项淹没**（4.27× / 4.68×）⇒ 要在 `width=10` 上直读二次需 N ≫ 16k（票面上界已到 16k）；形态判据改用 §1/§1b/§1c/§4。
+2. **§4 的 8000 档两臂都跳**（1.6 MB 工作集的分配 / GC 悬崖）⇒ 该点只作上下文，不作形态判据。解除条件：换更大内存 / 预热后重跑，或按流式分片喂语料（本票不做）。
+3. **计数口径只覆盖 `content`**：`tool_call_chunks` 的 args 拼接不在内（脚本 docstring 已记）。解除条件：出现"args 拼接本身成为热点"的实测证据 ⇒ 另开票（同文件与 `#247` 冲突，须等其合并后）。
+4. **`_drive` 本身的结构问题（约 700 行）不在本票范围**（票面未闭合项②）。解除条件：另开票（`#247` 已 CLOSED ⇒ 文件级冲突已消失）。
+5. **票面提到的"同一函数体附近可能还有其它逐项累加形态"本票未扫**（只处理票面点名的聚合块）。解除条件：出现另一处的实测证据 ⇒ 另开票。
+
+**集成与关单**：见本节末段（事实登记）。
+
+**落点**：`6bee833`（实现 + 新用例 26 条）→ `7a382c4`（R1 findings）→ `94c6f73`（R2 findings）→ **`2570a00`**（R3 finding，**docstring-only，本 range 的代码 tip**）→ 文档落点笔（tracker 本段 + `docs/PERF_BASELINE.md` B8 节 + `docs/phase_status/2026-09.md` 归档 + `PHASE_STATUS.md` 焦点/索引）→ 台账笔（审查行 4 条 + 白名单行）→ 集成与关单 → 集成/关单的落点笔 → 台账白名单行（tip 按自维护口径对账，不写死 sha）。
+
