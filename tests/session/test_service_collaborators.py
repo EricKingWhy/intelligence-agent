@@ -6,8 +6,8 @@
   是表格，在这里是 frozenset，两边任一漂移这条就红。
 - **AC2/AC4**：构造不经过容器——普通 duck-typed 对象（不是 `AppState`、不是
   `MagicMock`）即可；少一个 collaborator 属性就是 `AttributeError`，没有魔法兜底；
-  domain 源码（`session/service.py` / `session/projects.py`）不再在代码或注解里
-  命名 `AppState`。
+  domain 源码（`session/service.py` / `session/projects.py` / `session/runmanager.py`）
+  不再在代码或注解里命名 `AppState`。
 - **AC3**：两个领域服务的**构造点都只允许 `web/app.py`**（传输侧组合根）；
   各自的定义模块只定义类，不构造实例。
 - **AC5**：删掉组合根就会重新造成跨层耦合，所以这里锁住"import domain 不 import
@@ -118,18 +118,30 @@ def assembly_type_imports(node: ast.Import | ast.ImportFrom, package: str) -> li
     白名单只有 `build_runtime`：本票改造**之前**就有的运行时依赖，且被
     `tests/web/test_web_phase5_permission.py` 的 `monkeypatch.setattr(service_module,
     "build_runtime", …)` 钉在模块级名字上，动它属 Scope 外。
+    模块判据按**点分段**（`is_assembly_module`），不用子串：将来出现兄弟模块
+    `agent_harness/assembly_helpers.py` 时子串判据会误报——本仓有先例
+    （`agent_harness.websearch` 之于 `web`）。
     """
     allowed = {"build_runtime"}
     modules = imported_modules(node, package)
     if isinstance(node, ast.Import):
-        return [m for m in modules if m.startswith("agent_harness.assembly")]
+        return [m for m in modules if is_assembly_module(m)]
     offenders = []
     for leaf in modules[1:]:
-        if not leaf.startswith("agent_harness.assembly"):
+        if not is_assembly_module(leaf):
             continue
         if leaf == "agent_harness.assembly" or leaf.rsplit(".", 1)[-1] not in allowed:
             offenders.append(leaf)
     return offenders
+
+
+def is_assembly_module(module: str) -> bool:
+    """是否属组合层 `agent_harness.assembly` 模块**本身**（点分段，非子串）。
+
+    与 `is_web_module` 同形：`"agent_harness.assembly" in module` 会把将来的兄弟模块
+    `agent_harness.assembly_helpers` 误当组合层（本仓已有 `websearch` / `web` 的先例）。
+    """
+    return module == "agent_harness.assembly" or module.startswith("agent_harness.assembly.")
 
 
 def is_web_module(module: str) -> bool:
@@ -257,11 +269,15 @@ class TestCompositionRoot:
 
         用 AST 取标识符而不是文本匹配：docstring 可以正常提到"那个 state 容器"，
         但一旦有注解或代码真的引用了容器类型，这条就红。
+        三份域文件都扫：`runmanager.py` 自 2026-09-22 起也是域文件（R1 搬迁），
+        而它开了 `from __future__ import annotations` —— **字符串注解只有这条守卫
+        能抓**，所以它不能漏（复验 findings 的 N5）。
         """
         offenders: list[str] = []
         for rel in (
             Path("agent_harness/session/service.py"),
             Path("agent_harness/session/projects.py"),
+            Path("agent_harness/session/runmanager.py"),
         ):
             tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -453,6 +469,17 @@ class TestRuntimeImportBoundary:
             node = ast.parse(source).body[0]
             got = bool(assembly_type_imports(node, package))
             assert got is expected, f"{source!r} 判成 {got}，应为 {expected}"
+
+    def test_assembly_module_match_is_not_a_substring_test(self):
+        """钉住判据的**精度**：将来的 `agent_harness.assembly_helpers` 不是组合层。
+
+        子串判据会把它误报——那时守卫的"绿"就不再等于"领域没碰组合层"。本仓有先例：
+        `is_web_module` 专门为 `agent_harness.websearch` 写了同形的精度用例。
+        """
+        assert is_assembly_module("agent_harness.assembly")
+        assert is_assembly_module("agent_harness.assembly.foo")
+        assert not is_assembly_module("agent_harness.assembly_helpers")
+        assert not is_assembly_module("my_agent_harness.assembly")
 
     def test_web_module_match_is_not_a_substring_test(self):
         """钉住判据的**精度**：`agent_harness.websearch` 是兄弟模块，不是传输层。

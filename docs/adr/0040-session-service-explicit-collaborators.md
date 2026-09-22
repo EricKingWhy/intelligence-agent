@@ -192,7 +192,8 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 - `build_runtime` 保持原样：它是本票改造**之前**就有的运行时耦合（上一段），且
   `tests/web/test_web_phase5_permission.py` 用 `monkeypatch.setattr(service_module, "build_runtime", …)`
   把它钉在模块级名字上，动它属 Scope 外；守卫只拦**组合层类型**再进 import，白名单恰为
-  `build_runtime` 一项（`test_service_imports_no_composition_types`）。
+  `build_runtime` 一项（`test_domain_files_import_no_composition_types`；该用例 2026-09-22
+  随扫描扩到三份域文件而更名，旧名 `test_service_imports_no_composition_types`）。
 
 **R3 — 两条守卫各自的作用域要说清**（窄验证第二轮实测后订正——此前把两条的作用域写混了）：
 
@@ -210,6 +211,15 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
   `from agent_harness.web import *` / `from ..web.app import *`。今天
   `src/agent_harness/__init__.py` 只有一条 docstring、没有任何 re-export，故无实际暴露面）。
   这两类属**声明范围外**，不视为缺口（审查第三轮提出前两类漏判，本批已收全；相对导入同一轮收全）。
+- **两条 import 边界守卫都不覆盖"属性链"形态**（复验 findings 的 N2，2026-09-22 登记）：
+  `import agent_harness` 单独一条不算违规，但导入机制会把子模块挂成包属性 ⇒ 此后
+  `agent_harness.assembly.RecoveryStores`（对称地 `agent_harness.web.app.X`）可以**不经
+  import 语句**引用到组合层 / 传输层的名字。实测：`assembly_type_imports` 对
+  `import agent_harness` 返回 `[]`，而 `hasattr(agent_harness, "assembly")` 为真（`service.py`
+  自己 import 了该子模块）。今天没有任何这样的引用（三份域文件 web 引用为 0、组合层引用只有
+  白名单 `build_runtime`），且这是 **import 判据的共同边界**，故登记为声明范围外；要收口得另开
+  一条"注解与表达式里的限定名"判据（与 `test_domain_never_names_the_transport_container` 同形，
+  那条能抓住字符串注解里的 `AppState`），属新票范围。
 
 另外实测：今天任何模块级 `agent_harness.web.*` 运行时 import 都会**立刻成环**
 （`web/__init__.py` eager import `app`，`app` 又 import `session.projects` → `session.service`）
@@ -343,7 +353,8 @@ tracked 树）。脚本自己断言锚点唯一、还原后哈希一致，任何
 **取不到红证的一条，如实登记**：`test_run_manager_home_is_the_session_package` 的第一条断言
 （新家必须存在）**无法以"守卫变红"的形式取证**——把该模块搬走会让这份测试模块在**收集期**
 `ImportError`（它模块级 import `RunManager`），红的是收集而不是那条断言。该断言的定位因此是
-**可读判据**（"家在哪"写进测试），不是静默风险防线：模块真不在了，10 处 import 会当场全断。
+**可读判据**（"家在哪"写进测试），不是静默风险防线：模块真不在了，11 条 import（8 个文件）
+会当场全断。
 第 15 条只证了它的第二条断言。
 
 **旧脚本的探针已随本批失效（不修改历史读数）**：`.workbuddy/red_248_guards.py` 的探针 3/4/6/7
