@@ -225,9 +225,11 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                     ? `${(usage.cache.avg_hit_rate * 100).toFixed(1)}%`
                     : '—'}
                   <span className="ctx-usage-cache-note">
+                    {/* 括号必须成对：这里原先是 `{'}'}`（半角花括号），真机上看成
+                        「（1 次调用全部带回明细} · 估算」（真机审计第十五轮追加发现）。 */}
                     {'（'}{usage.cache.state === 'partial'
                       ? `${usage.cache.reported_calls}/${usage.cache.total_calls} 次调用带回明细`
-                      : `${usage.cache.total_calls} 次调用全部带回明细`}{'}'} · 估算
+                      : `${usage.cache.total_calls} 次调用全部带回明细`}{'）'} · 估算
                   </span>
                 </span>
               )}
