@@ -4384,3 +4384,45 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 **配置预检（不替代最终 Gate）**：Settings 秘密字段完整；Milvus 认证/连接 ✅（专用 `memory_gate_test` 尚不存在，留给 Gate 创建与清理）；Embedding 真实请求 ✅（1024 维）；七牛对目标 bucket 的 `HeadBucket` ✅；Langfuse `auth_check` ✅。模型 provider 已按用户决定映射为 primary `senseaudio` / fallback `qwen`，`ModelConfig.from_settings` ✅；两端点最小真实调用读数为 **primary = 已分类不可用、fallback = 可用**，故真实链至少一端可用，但不得据此声称 primary 已通过，也不得替代五票集成后的最终真实 Gate。
 
 **流程**：每票各自走 V3.1-lite 的红证、实现、专项门禁、两轴独立 review、coverage 与逐票关单；`#286 → #287 → #288` 串行。`#289/#290` 可与该链并行，但同一文件只允许一条线修改。最终真实 Gate 是整个 B-37 的批次收口条件，不是任一单票可以伪报的完成证据。
+
+
+---
+
+## B-38（`#244` AC5 Bash 预算配置入口 + 集成）
+
+**状态**：实现 + 两轮独立审查 + 冻结树全量门禁 + 并入 main（merge `fe46f24`）完成（2026-09-22）。父票 `#244`（[P1][Tool Runtime] 冻结并统一 BashTool 执行预算契约）；本批只补它的 **AC5「配置非法值启动期响亮失败」**——AC1–AC4 与三张子票（`#256` / `#257` / `#258`）的交付面此前已落地，本批是父票 AC 面最后一块。
+
+**命名（同批号撞名的处置，§16.1）**：本批最初记作「B-37」，落台账后发现上游并行线已用 **B-37** 记「全仓 review findings 开票（`#286`–`#290`）」（上文 `## B-37` 段）⇒ 本批在台账与文档里改口径为 **B-38**（台账两行描述 + 本段 + 月度归档）。**提交 subject 不改**（`6ce1e52` 仍写 `B-37（#244 AC5）`）——改它要重写已存在的对象，收益不抵风险；本段即该笔的正名。
+
+**问题**：`#244` 已冻结「ToolExecutor 是唯一 deadline owner、Local/Docker 默认有效预算同为 60 秒」（ADR-0039 D1–D7 / L1–L7），但**预算没有任何配置入口**：唯一落点是 `tools/bash.py` 的模块常量 `DEFAULT_BASH_TIMEOUT_SECONDS = 60.0` ⇒ 源码里不存在「配一个坏值」的位置，AC5 无从满足（不是没实现，是没有可被判定的面）。
+
+**交付面（3 笔，代码面 5 文件）**：
+1. `054ee3f` `feat(#244): Bash 预算配置入口 + BashTool 注入两闸（AC5）` —— `Settings.bash_timeout_seconds`（`Field(default=60.0, gt=0, allow_inf_nan=False)`）+ `BashTool(sandbox, *, timeout_seconds=...)` 的构造期守卫（非有限 / ≤0 ⇒ `ValueError`）+ 钉子 `tests/tools/test_bash_budget_config.py`。3 文件 +114/−3。
+2. `3c556e0` `feat(#244): 装配层接线 bash 预算 + ADR-0039 附录` —— `assembly.build_runtime` 的 `BUILTIN_LOCAL_TOOLS` 循环把 `settings.bash_timeout_seconds` 注入 `BashTool`（唯一消费点；`src/` 内无第二个 `BashTool` 生产者，web / CLI / resume / child 都走 `build_runtime`）+ 钉子 `tests/test_assembly_bash_budget.py` + ADR-0039 §5 附录（配置入口 / 两道闸 / 唯一消费点 / 变异读数 / 三条残余 / 读数归属）。3 文件 +117/−1。
+3. `6ce1e52` `chore(review-ledger):` —— 台账 2 条审查行（`806a1072d0fcff592b7c81f74156349903b3528f..054ee3f` / `054ee3f..3c556e0`）。
+
+**AC5 对账**：① 配置面存在且**消费点唯一**（装配层循环；不接线即红）；② 默认值仍是 `#244` 冻结的 **60.0**（配置只改被消费的数值，不改 owner）；③ 非法值（`0` / `-1` / `-0.5` / `nan` / `±inf` / `"abc"`）在 `Settings` **构造期**抛 `ValidationError`——构造期即启动期（`cli` 与 `web/app.create_app` 各构造一次）⇒「没有预算」「无穷预算」进不了运行时；④ 直构 `BashTool` 不经 `Settings` 时由工具层第二道闸 `ValueError` 兜底（静默回落会把「配了个坏值」显示成「配了个好值」）；⑤ 环境变量 `BASH_TIMEOUT_SECONDS` 可配且生效。
+
+**红证（改动前冻结树 `806a107` + 仅那两个测试文件）**：**17 failed / 1 passed**（9.38 s；第二次复现 10.71 s），逐条为 3 × `AttributeError: 'Settings' object has no attribute 'bash_timeout_seconds'`、7 × `DID NOT RAISE ValidationError`、6 × `TypeError: BashTool.__init__() got an unexpected keyword argument 'timeout_seconds'`、1 × `assert 60.0 == 25.0`；唯一 pass 是默认值钉子（改动前后同为 60.0，**有意**）。
+
+**变异（四条，均由审查者在隔离副本独立复现）**：`config.py` 的 `Field(default=60.0…)` 60→45 ⇒ 红 **2**（对照：改 `tools/bash.py` 的 `DEFAULT_BASH_TIMEOUT_SECONDS` 只红 **1** ⇒ 两处不能互相顶替）；去掉 `gt=0` / `allow_inf_nan` ⇒ 红 **7**；装配不接线 ⇒ 红 **1**；去掉工具层守卫 ⇒ 红 **6**。
+
+**实机探针（真进程、两臂）**：脚本化装配（`patch(create_chat_model)`）+ 真实 `ToolExecutor` + 真实 `LocalSandbox`——配置 **25.0** ⇒ `ok=True wall=12.1 s`（12 秒长命令跑完）；配置 **5.0** ⇒ `ok=False` / `error_code=TIMEOUT` / `wall=5.4 s`（同一命令被预算切掉）。两臂均 `PROBE_EXIT=0`。
+
+**门禁**：
+- 冻结树（`806a107` + 本批 5 文件 = tree `cae29108a0fa34e8af7dc1978f0a24bcb518856e`，读数在隔离 clone 取、取前先断言 `agent_harness.__file__` 落在 clone 内）：全量 **3088 passed / 2 skipped / 42 deselected / 9 warnings in 328.67 s / 0 failed / `PYTEST_EXIT=0`**；focused `tests/sandbox tests/tooling tests/tools` **378 passed / 1 skipped**（68.74 s）；`ruff check .` clean；`git diff --check` clean。
+- 集成树（merge `fe46f24` = tree `af1e0287cb84ecd03be209561d2146d6fbdc553a`）：全量 **3088 passed / 2 skipped / 42 deselected / 9 warnings in 411.22 s / 0 failed / exit 0**；`ruff check .` clean；`git diff --check` exit 0。
+- **读数传递（§8.1.3）**：集成树的 `src` / `tests` 子树与冻结树**对象相等**（`git rev-parse fe46f24:src` = `3ad9a7b6809af17de1cfec8f355c47de65e87d65`、`:tests` = `16d25289abd69cc484685afe8ad62d3f3c504581`，与冻结树工作树 `git write-tree` 的同名子树逐字符相同）⇒ 冻结树读数对集成树代码面继续成立；集成树上仍另跑一次全量作确认（读数见上）。
+- **已知红（登记）**：中间树全量曾红 1 条 = `tests/sandbox/test_docker_sandbox.py::test_timeout_stops_late_workspace_mutation`，签名与本文件登记的既有 flake 一致（`:93` 断言 + 空 stdout + `duration_ms=1958.7 > 1.0 s` 预算，容器冷启动）⇒ 按 §8.6 同树 3 次单跑（fail/pass/pass）处置；最终树全量 **0 failed**。
+
+**两轮独立审查（各一独立只读子代理）**：R1 全量轴（审 `054ee3f` 的树）判 **PASS-WITH-NITS**，findings 全数处置（内联 `tool_cls is BashTool` 判定简化、注释准确性、ADR 变异点写具体、ADR §4 读数归属声明）；R2 delta 复验轴（审 `3c556e0`）判 **PASS-WITH-NITS**，三条 nit 全修。**两轴均无 P0/P1**。
+
+**集成（2026-09-22，§14.6「先回后正」）**：`origin/main` 已在 `165ae9f`（并行线 F18-A `#282` / F18-B `#283` + `#286`–`#290` 票面登记 + 各线记账）⇒ 本批 3 笔不能快进。**merge `fe46f24`**（parents `6ce1e52` + `165ae9f`），在**隔离 clone**（`D:\iab_b37_merge`）里执行。**唯一冲突** `docs/review_ledger.tsv`：两侧都是**追加**（本批 2 条审查行 + 1 条白名单行 vs 上游 1 条审查行 + 4 条白名单行）⇒ 按 §14.7 第 4 条「两边逻辑可同时保留」以**并集**解析（HEAD 184 行 + MERGE_HEAD 186 行 − 交集 181 = 189 行；双向包含自证无丢行、0 冲突标记）。台账是覆盖闸门的机读输入，漏任一侧都会被闸门打红 ⇒ 此处不存在「选边」。其余 20 个文件（`docs/**` + `web/**`）由 git 自动合并。**独立审计**见台账本批第三行（六项检查：merge 形状 / 并集往返 / 非冲突文件逐路径等于某一侧父提交 / 路径集零丢失 / 三份记账文件双侧内容存活 / 空白与冲突标记卫生）。
+- **偏离披露（§14.4）**：「冲突解决后的 `git add`」按 §14.4 本应**单独获批**；本批按用户对本批的集成 / 推送常设授权与「未执行 / 未执行完的部分授权执行」一并执行，解析方式（纯并集、不取 sides）与闸门复验结果记在此处与 merge 提交信息里，**供用户事后否决**。
+
+**残余（登记，不阻断，附解除条件）**：
+1. `demo/live_agent.py` 自建 registry、不经 `assembly` ⇒ 配置对它无效。**解除 = demo 改走 `build_runtime`**。
+2. `sandbox/local.py:32` 的 `DEFAULT_EXEC_TIMEOUT = 60.0`（Docker 复用）仍是「不转发 deadline 的调用方」的退回值（ADR-0039 L2 记的 `tools/git.py` 路径），与本开关**不同源**。**解除 = 所有工具都转发 Executor 的绝对 deadline**。
+3. 程序内直传 `timeout_seconds=True` 会被 `float` 当 **1.0 秒**接受（`bool` 是 `int` 子类；env 路径 `BASH_TIMEOUT_SECONDS=true` 抛 `ValidationError`，且无 Settings 变更端点可达）。**解除 = 需要接受程序化预算时用 `isinstance(x, bool)` 显式拒绝**。
+
+**关单（§14.12）**：`#244`（umbrella）与 `#256`（子票）的 comment 载明实现 commit、红→绿与四条变异读数、两处门禁精确读数、审查固定点与覆盖闸门结果、残余三条；并**明写**两件事——① 关单**不构成**对 `5db3d43` 三层 Scope 偏离（B-25 登记、§9.1.1 待裁决）的追认，用户仍可要求拆分重做；② 父票的「最终跨模块 Gate」由本批实机探针（Local 侧长命令 + 预算截断两臂）＋ `#258` 已关单的 Docker parity 证据 ＋ 全量门禁读数共同构成——**B-38 未另跑 Docker 侧实机臂**（引用而非重跑，如实披露）。
