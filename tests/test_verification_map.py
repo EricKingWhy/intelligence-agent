@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -39,7 +40,15 @@ REPO = Path(__file__).resolve().parents[1]
 MAP_PATH = REPO / "docs" / "agents" / "verification.map.tsv"
 GATE0_PATH = REPO / "scripts" / "gate0.py"
 
-COLUMNS = ("surface", "layer", "sub_features", "lanes", "focused", "neg_tier", "gotchas")
+COLUMNS = ("surface", "layer", "sub_features", "how_to_get_to_it",
+           "lanes", "focused", "neg_tier", "gotchas")
+
+# 列序 = map 的表头。**用具名索引而不是裸数字**：列序一变，裸数字会**静默指错列**——那种错不会报错，
+# 只会让断言悄悄去查别的东西。2026-09-22 加 `how_to_get_to_it` 时正是靠这层避免整体错位。
+I_SURFACE, I_LAYER, I_SUB, I_POV, I_LANES, I_FOCUSED, I_TIER, I_GOTCHAS = range(len(COLUMNS))
+
+#: 无条件车道（`docs/agents/verification.md` §1 决策表第 1 行「任何文件」）。**每一行**都必须列它们。
+UNCONDITIONAL_LANES = ("diff-check", "coverage")
 LANE_VOCAB = {
     "diff-check", "ruff", "oxlint", "tsc", "guards", "coverage",          # Gate-0 可跑的 6 条
     "pytest-full", "pytest-clean", "vitest", "build", "e2e", "live",      # 重车道（Gate-0 之外）
@@ -59,9 +68,9 @@ def _read_rows() -> list[list[str]]:
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             cells = line.split("\t")
-            if cells[0] == "surface":
+            if tuple(cells) == COLUMNS:
                 continue
-            assert len(cells) == len(COLUMNS), f"{MAP_PATH.name}:{lineno} 列数 {len(cells)} != 7"
+            assert len(cells) == len(COLUMNS), f"{MAP_PATH.name}:{lineno} 列数 {len(cells)} != {len(COLUMNS)}"
             rows.append(cells)
     assert rows, f"{MAP_PATH.name} 没有数据行"
     return rows
@@ -87,8 +96,8 @@ def _mine_eval(path: str) -> tuple[list[str], list[str], bool]:
     for row in ROWS:
         if _row_hits(row, path):
             hit = True
-            lanes |= set(_split(row[3]))
-            focused |= set(_split(row[4]))
+            lanes |= set(_split(row[I_LANES]))
+            focused |= set(_split(row[I_FOCUSED]))
     return sorted(lanes), sorted(focused), not hit
 
 
@@ -129,40 +138,40 @@ def test_map_has_uniform_line_endings_and_tabs():
         "本仓 autocrlf=true ⇒ 只查统一性，不查具体口径）")
 
 
-def test_layers_are_unique_and_columns_are_exactly_seven():
-    layers = [r[1] for r in ROWS]
+def test_layers_are_unique_and_columns_match_the_header():
+    layers = [r[I_LAYER] for r in ROWS]
     dupes = sorted({x for x in layers if layers.count(x) > 1})
     assert not dupes, f"layer 必须唯一，重复：{dupes}"
-    assert all(len(r) == 7 for r in ROWS)
+    assert all(len(r) == len(COLUMNS) for r in ROWS)
 
 
 def test_every_lane_id_is_in_the_vocabulary():
-    bad = sorted({l for r in ROWS for l in _split(r[3]) if l not in LANE_VOCAB})
+    bad = sorted({l for r in ROWS for l in _split(r[I_LANES]) if l not in LANE_VOCAB})
     assert not bad, f"车道 id 不在词表内（见 docs/agents/verification.md §2）：{bad}"
 
 
 def test_every_row_lists_at_least_one_lane_and_a_valid_tier():
     for r in ROWS:
-        assert _split(r[3]), f"{r[1]}: 必须有 ≥1 条车道"
-        assert int(r[5]) in (1, 2, 3, 4, 5), f"{r[1]}: neg_tier 越界 = {r[5]}"
+        assert _split(r[I_LANES]), f"{r[I_LAYER]}: 必须有 ≥1 条车道"
+        assert int(r[I_TIER]) in (1, 2, 3, 4, 5), f"{r[I_LAYER]}: neg_tier 越界 = {r[I_TIER]}"
 
 
 def test_surfaces_are_prefix_or_exact_only_no_wildcards_no_catch_all():
     """只允许「以 `/` 结尾的路径前缀」与「精确路径」；禁通配、禁 catch-all（否则守卫没牙齿）。"""
     banned = {"*", "**", "**/*", "/", "", ".", "./"}
     for r in ROWS:
-        pats = _split(r[0])
-        assert pats, f"{r[1]}: surface 为空"
+        pats = _split(r[I_SURFACE])
+        assert pats, f"{r[I_LAYER]}: surface 为空"
         for p in pats:
-            assert p not in banned, f"{r[1]}: catch-all 形态 {p!r} 不允许"
-            assert not any(ch in p for ch in "*?["), f"{r[1]}: 不允许通配 {p!r}"
+            assert p not in banned, f"{r[I_LAYER]}: catch-all 形态 {p!r} 不允许"
+            assert not any(ch in p for ch in "*?["), f"{r[I_LAYER]}: 不允许通配 {p!r}"
             if "/" not in p:
                 # 顶层裸名只允许是**文件**：目录必须写成 `dir/`，否则前缀语义不明（`logs` vs `logs/`）。
-                assert not (REPO / p).is_dir(), f"{r[1]}: 顶层目录必须以 '/' 结尾：{p!r}"
+                assert not (REPO / p).is_dir(), f"{r[I_LAYER]}: 顶层目录必须以 '/' 结尾：{p!r}"
 
 
 def test_every_focused_target_exists_on_disk():
-    missing = sorted({t for r in ROWS for t in _split(r[4]) if not (REPO / t).exists()})
+    missing = sorted({t for r in ROWS for t in _split(r[I_FOCUSED]) if not (REPO / t).exists()})
     assert not missing, f"focused 指向不存在的路径：{missing}"
 
 
@@ -190,14 +199,14 @@ def test_every_row_is_load_bearing(tracked_files):
         lane_c: Counter = Counter()
         foc_c: Counter = Counter()
         for i in idxs:
-            lane_c.update(_split(ROWS[i][3]))
-            foc_c.update(_split(ROWS[i][4]))
+            lane_c.update(_split(ROWS[i][I_LANES]))
+            foc_c.update(_split(ROWS[i][I_FOCUSED]))
         for i in idxs:
-            unique = any(lane_c[l] == 1 for l in _split(ROWS[i][3])) or \
-                     any(foc_c[t] == 1 for t in _split(ROWS[i][4]))
+            unique = any(lane_c[l] == 1 for l in _split(ROWS[i][I_LANES])) or \
+                     any(foc_c[t] == 1 for t in _split(ROWS[i][I_FOCUSED]))
             if unique:
                 needed.add(i)
-    lazy = [ROWS[i][1] for i in range(len(ROWS)) if i not in needed]
+    lazy = [ROWS[i][I_LAYER] for i in range(len(ROWS)) if i not in needed]
     assert not lazy, f"这些行删掉不会有任何文件受影响（装饰性映射，必须删或改）：{lazy}"
 
 
@@ -269,16 +278,25 @@ def test_gate_change_pulls_in_the_coverage_gate_itself():
 
 # ------------------------------------------------------------------ gate0 的 map 解析器自身
 
-def test_gate0_parser_rejects_wrong_column_count(tmp_path):
-    bad = tmp_path / "bad.tsv"
-    bad.write_text("surface\tlayer\tsub_features\tlanes\tfocused\tneg_tier\n", encoding="utf-8")
-    bad.write_text("a/\tb\tc\td\te\t3\tf\n", encoding="utf-8")
+def test_gate0_parser_rejects_bad_input(tmp_path):
+    """列数不符 / 车道 id 不在词表内，都必须**解析期**报错——不许静默按位置乱解、更不许少跑一条车道。"""
     g0 = _gate0_module()
-    assert len(g0.parse_map(str(bad))) == 1
-    bad2 = tmp_path / "bad2.tsv"
-    bad2.write_text("a/\tb\tc\n", encoding="utf-8")
+    header = "\t".join(COLUMNS)
+    # 行内字段顺序即 COLUMNS：surface / layer / sub_features / how_to_get_to_it /
+    #                        lanes / focused / neg_tier / gotchas
+    good = tmp_path / "good.tsv"
+    good.write_text(header + "\n" + "a/\tb\tc\td\tdiff-check\tf\t3\tg" + "\n", encoding="utf-8")
+    assert len(g0.parse_map(str(good))) == 1, "正控：合法的 8 列行必须能解析"
+    short = tmp_path / "short.tsv"
+    short.write_text("a/\tb\tc\n", encoding="utf-8")
     with pytest.raises(ValueError):
-        g0.parse_map(str(bad2))
+        g0.parse_map(str(short))
+    # 第二种坏输入：列数对，但 `lanes` 里有个刻意的词表外 id —— 必须同样报错
+    # （写错一个车道 id 就等于少跑一条车道，绝不能静默通过）。
+    stray = tmp_path / "stray.tsv"
+    stray.write_text(header + "\n" + "a/\tb\tc\td\tnot-a-lane\tf\t3\tg" + "\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        g0.parse_map(str(stray))
 
 
 def test_gate0_affected_summary_fails_closed_on_unmapped_path():
@@ -304,7 +322,7 @@ MANUAL_FOCUSED = [
 def test_focused_only_inlines_pytest_subsets():
     """非 pytest 的 focused **一律不内联**，且必须逐个登记（防止有人"顺手"把它们接上内联车道）。"""
     g0 = _gate0_module()
-    manual = sorted({t for r in ROWS for t in _split(r[4]) if g0.focused_runner(t) is None})
+    manual = sorted({t for r in ROWS for t in _split(r[I_FOCUSED]) if g0.focused_runner(t) is None})
     assert manual == MANUAL_FOCUSED, (
         "非 pytest 的 focused 集合变了。若这是有意的，请先读 `scripts/gate0.py::focused_runner` 的"
         f"两条血证再更新登记表。现值={manual} 期望={MANUAL_FOCUSED}")
@@ -336,7 +354,7 @@ def test_every_inlined_pytest_target_actually_collects_tests():
     g0 = _gate0_module()
     bad = []
     for r in ROWS:
-        for target in _split(r[4]):
+        for target in _split(r[I_FOCUSED]):
             if g0.focused_runner(target) != "pytest":
                 continue
             path = REPO / target
@@ -348,3 +366,33 @@ def test_every_inlined_pytest_target_actually_collects_tests():
             if not found:
                 bad.append((target, "目录下没有任何 pytest 用例（会退化成假 FAIL）"))
     assert not bad, f"内联 focused 目标收不到用例：{bad}"
+
+def test_every_row_lists_the_unconditional_lanes():
+    """每一行都必须列 `diff-check` + `coverage` —— 这两条对**任何文件**都跑（决策表第 1 行）。
+
+    漏列的后果是**静默缩小**：`--affected` 只保留受影响行列出的车道 ⇒ 那一面上这两条会被跳过，
+    而输出看起来"一切正常"。2026-09-22 两轴审查发现 5 行漏列（`web/e2e/`、`web/scripts/`、
+    `web/public/`、`frontend-config`、`demo/…`），所以它必须是**结构性**的，不能靠人记得。
+    """
+    miss = {r[I_LAYER]: sorted(set(UNCONDITIONAL_LANES) - set(_split(r[I_LANES]))) for r in ROWS
+            if set(UNCONDITIONAL_LANES) - set(_split(r[I_LANES]))}
+    assert not miss, f"这些行漏了无条件车道（--affected 会在该面静默跳过它们）：{miss}"
+
+
+def test_every_row_states_how_a_user_reaches_it():
+    """`How to get to it (user POV)`（skill §3 四要素之一）必须逐行给出，且形状**可机械判定**。
+
+    这一列是**散文**，脚本判不了真伪——所以只强制一条能判的形状：要么写明「无用户入口」，
+    要么**至少引一个真实存在的仓库路径**。它能挡住的是"写成无法核实的空话"（引一个不存在的入口）。
+    """
+    bad = []
+    for r in ROWS:
+        cell = r[I_POV].strip()
+        if not cell:
+            bad.append((r[I_LAYER], "为空"))
+        elif "无用户入口" in cell:
+            continue
+        elif not [c for c in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", cell)
+                  if (REPO / c).exists()]:
+            bad.append((r[I_LAYER], "既没写「无用户入口」，也没引任何真实存在的仓库路径"))
+    assert not bad, f"user POV 列不合格：{bad}"
