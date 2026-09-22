@@ -44,7 +44,7 @@ describe('groupEventsByRun — 按 run_id 首现顺序分组', () => {
     expect(attached[0]).toMatchObject({ runId: 'r1', count: 2 });
   });
 
-  it('状态推导：completed / failed / interrupted；无终态 → running', () => {
+  it('状态推导：completed / failed / cancelled / interrupted；无终态 → running', () => {
     const done = groupEventsByRun([e(EventType.RUN_STARTED, 1, 'a'), e(EventType.RUN_COMPLETED, 2, 'a')]);
     expect(done[0].status).toBe('completed');
     const failed = groupEventsByRun([e(EventType.RUN_STARTED, 1, 'b'), e(EventType.RUN_FAILED, 2, 'b')]);
@@ -55,7 +55,25 @@ describe('groupEventsByRun — 按 run_id 首现顺序分组', () => {
     expect(live[0].status).toBe('running');
   });
 
-  it('脏数据多终态并存：interrupted > failed > completed 取更醒目者', () => {
+  it('run/failed.reason=cancelled → cancelled（用户取消 ≠ 失败，A-02）', () => {
+    const cancelled: AgentEvent = {
+      type: EventType.RUN_FAILED, data: { reason: 'cancelled' }, seq: 2, run_id: 'k', session_id: 's',
+    } as AgentEvent;
+    const groups = groupEventsByRun([e(EventType.RUN_STARTED, 1, 'k'), cancelled]);
+    expect(groups[0].status).toBe('cancelled');
+
+    // 无 reason / 其它 reason（真实失败）仍是 failed——不把失败洗成取消。
+    const other: AgentEvent = {
+      type: EventType.RUN_FAILED, data: { reason: 'model_error' }, seq: 2, run_id: 'm', session_id: 's',
+    } as AgentEvent;
+    const plain: AgentEvent = {
+      type: EventType.RUN_FAILED, data: {}, seq: 2, run_id: 'n', session_id: 's',
+    } as AgentEvent;
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'm'), other])[0].status).toBe('failed');
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'n'), plain])[0].status).toBe('failed');
+  });
+
+  it('脏数据多终态并存：interrupted > failed（含 cancelled）> completed 取更醒目者', () => {
     const dirty = groupEventsByRun([
       e(EventType.RUN_STARTED, 1, 'x'),
       e(EventType.RUN_COMPLETED, 2, 'x'),
@@ -63,6 +81,24 @@ describe('groupEventsByRun — 按 run_id 首现顺序分组', () => {
       e(EventType.RUN_INTERRUPTED, 4, 'x'),
     ]);
     expect(dirty[0].status).toBe('interrupted');
+
+    // completed → cancelled：取消比完成醒目（与 completed → failed 同序）。
+    const cancelledEvent = (runId: string, seq: number): AgentEvent => ({
+      type: EventType.RUN_FAILED, data: { reason: 'cancelled' }, seq, run_id: runId, session_id: 's',
+    } as AgentEvent);
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'y'), e(EventType.RUN_COMPLETED, 2, 'y'), cancelledEvent('y', 3)])[0].status)
+      .toBe('cancelled');
+    // cancelled → completed：已取消是终态，后续 completed 不回退（与 failed → completed 同序）。
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'z'), cancelledEvent('z', 2), e(EventType.RUN_COMPLETED, 3, 'z')])[0].status)
+      .toBe('cancelled');
+    // cancelled 与 failed 同级 ⇒ 先到者胜（同一 run 两种归因并存属脏数据，不猜谁更"真"）。
+    const failedEvent = (runId: string, seq: number): AgentEvent => ({
+      type: EventType.RUN_FAILED, data: {}, seq, run_id: runId, session_id: 's',
+    } as AgentEvent);
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'p'), cancelledEvent('p', 2), failedEvent('p', 3)])[0].status)
+      .toBe('cancelled');
+    expect(groupEventsByRun([e(EventType.RUN_STARTED, 1, 'q'), failedEvent('q', 2), cancelledEvent('q', 3)])[0].status)
+      .toBe('failed');
   });
 
   it('空数组 → 空分组', () => {

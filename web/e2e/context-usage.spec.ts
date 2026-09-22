@@ -90,9 +90,11 @@ test('T6b：有数据 → 六桶图例 + 分段条 + 阈值标记 + 缓存命中
   // 阈值标记两根（70%/85%）
   await expect(dialog.locator('.ctx-usage-mark-compact')).toHaveCount(1);
   await expect(dialog.locator('.ctx-usage-mark-hard')).toHaveCount(1);
-  // 缓存命中率（大字百分比 + 口径）
+  // 缓存命中率（大字百分比 + 口径）——ok 档的整串也要成对（真机审计第十五轮：
+  // 右括号位置原先是半角 `}`，看板显示成「（12 次调用全部带回明细} · 估算」）。
   await expect(dialog).toContainText('平均缓存命中率');
   await expect(dialog).toContainText('99.6%');
+  await expect(dialog).toContainText('（12 次调用全部带回明细） · 估算');
 });
 
 test('T6c：未采集 → 「未采集（提供商未返回缓存明细）」，不显示 0%', async ({ page }) => {
@@ -184,9 +186,10 @@ test('T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不�
   await expect(dialog).toContainText('分类未采集');
   await expect(dialog).toContainText('最近一次调用的输入规模');
   await expect(dialog).toContainText('2 次调用有用量上报');
-  // 5) 缓存事实来自同一条事件流（partial：1/2）
+  // 5) 缓存事实来自同一条事件流（partial：1/2）——括号成对（真机审计第十五轮：
+  //    原先渲染的是半角 `}`，看板显示成「（1/2 次调用带回明细} · 估算」）。
   await expect(dialog).toContainText('91.2%');
-  await expect(dialog).toContainText('1/2 次调用带回明细');
+  await expect(dialog).toContainText('（1/2 次调用带回明细） · 估算');
   // 6) 阈值标记仍在（占用条的主要用途：看得见自己在哪）
   await expect(dialog.locator('.ctx-usage-mark-compact')).toHaveCount(1);
   await expect(dialog.locator('.ctx-usage-mark-hard')).toHaveCount(1);

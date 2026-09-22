@@ -129,6 +129,8 @@ describe('ToolEventSections 标签条（PRD §8.4 四段：Overview/Input/Output
       raw_result: { type: 'tool/result', data: { y: 2 } },
     } as ToolCall);
     expect(withRaw).toContain('>Raw<');
+    // Raw 面板（含两个「复制 Raw」按钮）只在选中 Raw 档时渲染 ⇒ SSR 首帧看不到，
+    // 故这里无法锁住其 aria-label（真机审计 B-D7 的整改见 e2e/真机复验）。
   });
 });
 

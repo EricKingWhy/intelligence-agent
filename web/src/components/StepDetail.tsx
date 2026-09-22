@@ -547,10 +547,13 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
   );
 });
 
-/** UI-03：run 分组头状态徽章文案（与 run-badge-<state> 色域一一对应）。 */
+/** UI-03：run 分组头状态徽章文案（与 run-badge-<state> 色域一一对应）。
+ *  `cancelled` = 用户取消（`run/failed.reason=cancelled`，与顶栏脉冲同口径）——
+ *  缺了它这次取消会显示成「失败」（真机审计 A-02）。 */
 const RUN_GROUP_STATUS_LABEL: Record<RunGroupStatus, string> = {
   completed: '已完成',
   failed: '失败',
+  cancelled: '已取消',
   interrupted: '已中断',
   running: '进行中',
 };
@@ -1641,7 +1644,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           {tool.raw_call && (
             <div className="detail-code-wrap">
               <div className="io-raw-label">tool/call 原始事件</div>
-              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw" />
+              <CopyButton text={JSON.stringify(tool.raw_call, null, 2)} label="复制 Raw（tool/call）" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_call} />
               </div>
@@ -1650,7 +1653,7 @@ export function ToolEventSections({ tool }: { tool: ToolCall }) {
           {tool.raw_result && (
             <div className="detail-code-wrap">
               <div className="io-raw-label">tool/result 原始事件</div>
-              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw" />
+              <CopyButton text={JSON.stringify(tool.raw_result, null, 2)} label="复制 Raw（tool/result）" />
               <div className="detail-json">
                 <JsonTree value={tool.raw_result} />
               </div>

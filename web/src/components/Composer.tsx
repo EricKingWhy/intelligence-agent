@@ -6,7 +6,7 @@
  * presetTask: 外部注入的示例任务（空状态 chip 点击），注入后仍可自由编辑。
  */
 
-import { memo, useEffect, useId, useState, type KeyboardEvent } from 'react';
+import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Brain, Check, Pencil, Play, Shield, Square, TriangleAlert, User, X, Zap } from 'lucide-react';
 import type { PresetTask, UndeliveredInput } from '../types';
 import { modKey } from '../lib/platform';
@@ -104,6 +104,8 @@ export const Composer = memo(function Composer({
   onFlush,
 }: Props) {
   const [value, setValue] = useState('');
+  /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
   // item——条目会随事件流增删，存 id 让渲染始终对账当前事实（不变量 #22）。
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -225,7 +227,11 @@ export const Composer = memo(function Composer({
 
   // 外部示例任务注入（引用变化即触发；每次点击 chip 生成新对象）
   useEffect(() => {
-    if (presetTask) setValue(presetTask.text);
+    if (!presetTask) return;
+    setValue(presetTask.text);
+    // 注入后把焦点交到输入框：焦点留在 chip 上时，键盘用户按 Enter 会**再点一次
+    // chip**（读作"没反应"），与"注入即可编辑/发送"的意图相反（真机审计 A-06）。
+    inputRef.current?.focus();
   }, [presetTask]);
 
   const submit = (mode: 'queue' | 'steer') => {
@@ -395,6 +401,7 @@ export const Composer = memo(function Composer({
         {/* UI-01：审批待决时给出锁定原因（置灰不是隐形）。 */}
         {showLock && <div className="composer-locked-hint">等待审批决策后再继续</div>}
         <textarea
+          ref={inputRef}
           id="composer-input"
           name="task"
           className="composer"

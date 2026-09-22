@@ -3547,8 +3547,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 中断 = 中性第四态（OBS-007：取消 ≠ 失败，与顶栏 pulse 同语言）。 */
-.run-badge-interrupted {
+/* 中断 = 中性第四态（OBS-007：取消 ≠ 失败，与顶栏 pulse 同语言）。
+   用户取消（run/failed.reason=cancelled）同色域：同一件事在分组头与顶栏
+   不能一个说「失败」一个说「已取消」。 */
+.run-badge-interrupted,
+.run-badge-cancelled {
   color: var(--text-secondary);
   background: var(--color-hover);
   border-color: var(--border-subtle);
