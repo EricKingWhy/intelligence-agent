@@ -149,4 +149,5 @@ c89fc62	#293（B-42）门禁读数绿 JSON 笔 c89fc62b（docs/gate/96baf4f….j
 326099f08e2484476f8337b97ca91b3914dfc6d7	docs(workflow): 文档瘦身与失真修复（AGENTS.md + 协议，根级 .md 与 docs/ 下 .md 均属文档扩展名，docs-only；指针化 3 处 + 失真/悬空引用更正 8 处，判据一字未删）
 79ee8abca1e25beafc3251bd3dfe863a5b904748	docs(workflow): 协议三处失真修复 + §7 第 8 条③登记守卫新枚举源（SDD_WORKFLOW_PROTOCOL.md，docs/ 下 .md 属文档扩展名，docs-only）
 890ea2e1edfa022edea99352f5e47e05d1f31c2c	#286（B-43）落点四件套 —— PHASE_STATUS 焦点/条目 + 月度归档 B-43 条 + tracker B-43 段（含交付面 / 冻结语义 7 条与 AC 6 条对账 / 红证与变异读数 / 门禁读数 / 两轴审查结论 / 残余 4 条）；只改 docs/ 下三个 .md（`docs/PHASE_STATUS.md` / `docs/phase_status/2026-09.md` / `docs/SDD_TICKET_TRACKER.md`），docs-only
-e15f51c1f7d8bf5b31691dacd2b7f9fe23b83189	#286（B-43）门禁读数 + 验证报告笔 —— （Gate-0 6/6 PASS 机器落盘） + （V3.1 实测验证报告：8 条改进点 + 10 条可判定证明 + 6 条体系缺陷）；只改 docs/ 下 .json 与 .md，docs-only
+e15f51c1f7d8bf5b31691dacd2b7f9fe23b83189	#286（B-43）门禁读数 + 验证报告笔 —— `docs/gate/64d2c78979b8c263ba9d90e2dd500b735bcb5bcd.json`（Gate-0 6/6 PASS / passed 6 / total 6 / failed 空，机器落盘） + `docs/agents/SDD_V31_LIVE_VALIDATION_286.md`（V3.1 实测验证报告：8 条改进点 + 10 条可判定证明 + 7 条体系缺陷）；只改 docs/ 下 .json 与 .md，docs-only
+0e909f84c8060dc0f879358be087e02c47234737	#286（B-43）验证报告「缺陷 7」补笔 —— 台账白名单行描述字段零校验（bash 反引号命令替换静默吞掉文件名 + 把真实 .md 当脚本执行、在仓库根创建 6 个 0 字节垃圾文件，已删除并复核）；只改 `docs/agents/SDD_V31_LIVE_VALIDATION_286.md` 一个 .md，docs-only
