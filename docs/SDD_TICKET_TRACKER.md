@@ -4753,3 +4753,38 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 2. **缺陷 3 第 2 项（`env_failures` 结构化字段）依赖 `#295`**：本票只写「门的判定应为环境项之外 0 失败」这一口径。
 3. **一次推送被 Gate-0 拒（如实登记，非假红）**：首次推送时 `diff-check` FAIL（`docs/SDD_TICKET_TRACKER.md:4755: new blank line at EOF`）—— 落点脚本在 tracker 末尾多留一个空行；由 `c39f462` 修掉后重推成功（`607dee4..b1c9dac`）。**这是门禁正确工作**。
 4. **§8.8.3 附表依赖人工维护**：暂无机械守卫检查「本批是否该在附表里追加一行」；登记纪律靠落点时人工执行（与 §8.5 记账压缩同性质）。
+
+---
+
+## B-45（`#295` 台账描述字段 lint + docs-only 按路径自动归属 + 语义等价判据）
+
+**状态**：🔄 **交付完成，待推送 / 待关单**（3 笔 `0437950` → `fa0a175` → `1fdd7e8`）。
+
+**票面**：GitHub `#295`（B-43 报告的缺陷 1 / 5 / 7 —— 工具面三条）。前置依赖 B-44（`#294`）已关单 ⇒ 口径已定。
+
+**交付（代码面 3 文件 + 文档面 2 文件）**：
+
+- `scripts/check_review_coverage.py`（+171 行首笔 / 复又 +62 行修复笔）：5 条描述字段 lint（`unbalanced_backtick` / `empty_parens` / `control_chars` / `overlong` / `unbalanced_bold`）+ `LINT_LINE_LIMIT = 800`（协议 §8.5 第 1 条同口径，量**整行**三列）+ `is_docs_only()` / `format_auto_attribution()` + `--strict`。
+- `scripts/check_semantic_equiv.py`（新增 198 行）：`normalize()` / `normalized_digest()` / `is_semantically_equivalent()` / `read_blob()` + CLI（`--a/--b` 或 `--file-a/--file-b`，`--json`，退出码 0/1/2）。口径 = `ast.parse` → 剥模块/类/函数三级 docstring → `ast.unparse`；**fail-closed**（任一解析失败判不等价）。
+- `tests/tooling/test_review_coverage_lint.py`（新增，24 例）：A 组 lint 9 例（每条规则正控+反控）/ B 组自动归属 5 例 / C 组等价判据 8+ 例，含变异注入钩子 `WBI_GATE_UNDER_TEST` / `WBI_EQUIV_UNDER_TEST`。
+- `docs/SDD_WORKFLOW_PROTOCOL.md`：**新增 §8.9 写盘纪律**（凡把中文/长文本写进受控文件一律脚本落盘再跑、禁 `python -c` 内联；附两起活体事故）；§8.5 恢复 1–4 条原样。
+- `AGENTS.md`：§16.2 落盘纪律**只留指针**（正文在 §8.9，理由同 §16.1）。
+
+**两轴独立审查（Standards + Correctness 各一独立只读子代理，锚 `8f9ea1c..0437950`）**：判 **不可集成** ⇒ 出 **2×P1 + 6×P2 + 2×P3**，**全数处置于 `fa0a175`**（详见审查行 `docs/review_ledger.d/143-8f9ea1c-fa0a175.tsv`）。
+
+**验收读数（可复跑）**：
+
+- `tests/tooling/test_review_coverage_lint.py` ⇒ **24 passed**（`--junitxml` 取证）。
+- `ruff check scripts/ tests/tooling/test_review_coverage_lint.py` ⇒ **All checks passed**。
+- 覆盖闸门（干净检出、清空 `PYTHONPATH`）⇒ **exit 0**；末行原文 `✅ 台账覆盖闸门通过：089524a~1..HEAD 每条 commit 均有归属（审查行 / 白名单 / 台账记账）。`。
+- **旧 vs 新归属对照**（票面验收 5）：lint 体检 249 行 / 命中 42 行（默认 warn）；归属性条数 = docs-only 自动归属 **89** / 台账自身更新 **101** / 白名单（手写 docs-only 声明）**0** ⇒ 票面「旧 2 笔手写声明 → 新 0 笔」**已得实证**。
+- **「没放松」验收 4/4 PASS**（本仓真实提交做攻击样本）：夹带 `scripts/` 的 `536a76e` ⇒ exit 1、自动归属行 0；伪造 docs-only 白名单行 ⇒ 被拒；截断描述默认 ⇒ exit 0 **但打印 lint 命中**（不静默）；`--strict` ⇒ exit 1。
+- **变异测试 3 检查点**（`is_docs_only` 恒 True / 删 `empty_parens` / 去 glob 豁免）：失败集合 3 / 1 / 1，**两两互不相同、交集 0**，**不共用失败面**。
+
+**残余（登记，不阻断，附解除条件）**：
+
+1. **半截粗体 + 裸 glob 同形不可消歧**（假阴性）：同一行两者相加恰为偶数时仍漏报（如 `**B 未闭合，另见 src/** 目录`）。真判需 markdown 解析器；该形状在真实台账未出现，兜底是 `overlong` / 语义审查。**解除条件**：出现真实漏报样本时改写为解析器实现。
+2. **`--strict` 与 `--list` 组合静默失效**：`--list` 提前 `return` ⇒ strict 分支不可达；且 `--strict` 未写进本文件「用法 / 退出码」块。非本票 Scope（CLI 重排）。**解除条件**：单独开票重排 CLI 并补用法块。
+3. **`test_equivalence_reads_blobs_from_git` 属自比弱用例**（同 blob 读两次相比）：非永真（`a` 非空断言仍守住），保留。
+
+**集成（待执行）**：`origin/main` 待实测；推送前 `.githooks/pre-push` 自动跑 Gate-0 六车道。
