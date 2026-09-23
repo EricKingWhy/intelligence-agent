@@ -63,7 +63,8 @@ class CapabilityWiring:
     lifecycle: list[Any] = field(default_factory=list)
     # Multi-Agent（Phase 13，ADR-0015）：delegate 工具已进 tools，但其依赖
     # （模型链/registry/session store）要等 build_runtime 装配完才能注入——
-    # 这里只携带 provider 引用，激活在 build_runtime 完成（激活前调用明确失败）。
+    # 此处是缓存 wiring 上的 provider prototype；build_runtime 为每个 root Runtime
+    # 创建独立实例再激活，descendant runtimes 继承该实例。
     multiagent_provider: Any | None = None
     #: capability 名 → 降级原因（`DegradeReason` 的**值**；写点一律取 `.value`——
     #: 存枚举成员的话，将来任何 `f"{reason}"` 会写出 `DegradeReason.X` 而不是码）。

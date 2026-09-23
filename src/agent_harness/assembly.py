@@ -289,6 +289,13 @@ async def build_runtime(
         async def approval_callback(_req):  # type: ignore[no-redef]
             return ApprovalResponse(approved=True, reason="auto-approve")
 
+    runtime_multiagent_provider = None
+    if wiring.multiagent_provider is not None and session_store is not None:
+        # CapabilityWiring is cached across requests; activation state is not.
+        # Give each root Runtime its own provider and DelegateTool while descendants
+        # inherit that same registry/provider through AgentFactory.
+        runtime_multiagent_provider = wiring.multiagent_provider.new_runtime_instance()
+
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席
         # （不注册 delegate，单代理照常），与 optional capability 语义一致。
@@ -297,6 +304,10 @@ async def build_runtime(
                 "multiagent 已启用但未提供 session_store，delegate 工具降级缺席"
             )
             continue
+        if isinstance(capability_tool, DelegateTool) and runtime_multiagent_provider is not None:
+            capability_tool = DelegateTool(
+                runtime_multiagent_provider, max_delegations=root_max_delegations,
+            )
         registry.register(capability_tool)
 
     # agent_profile tool_scope 收窄（ADR-0020a）：仅在非 main profile 时过滤——
@@ -323,7 +334,7 @@ async def build_runtime(
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
     # 同一审批面（决策 11 权限传递）。
-    if wiring.multiagent_provider is not None and session_store is not None:
+    if runtime_multiagent_provider is not None:
         from agent_harness.agent.factory import AgentFactory
 
         def _child_executor_factory(child_registry: ToolRegistry) -> ToolExecutor:
@@ -333,7 +344,7 @@ async def build_runtime(
                 operation_ledger=stores.operation_ledger,
             )
 
-        wiring.multiagent_provider.activate(
+        runtime_multiagent_provider.activate(
             factory=AgentFactory(
                 model=model, fallback_model=fallback_model,
                 executor_factory=_child_executor_factory,

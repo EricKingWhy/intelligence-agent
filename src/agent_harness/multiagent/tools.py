@@ -20,7 +20,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from agent_harness.multiagent.provider import InProcessSubagentProvider
-from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
+from agent_harness.tooling import Tool, ToolResult, ToolRuntimeSignal, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
@@ -206,10 +206,10 @@ class DelegateTool(Tool):
             tree_id, fingerprint, ok=result.ok,
         )
         return result.model_copy(update={
-            "runtime_signal": {
-                "level": signal.level.name.lower(),
-                "tool_name": signal.tool_name,
-                "fingerprint": signal.fingerprint,
-                "consecutive_failures": signal.consecutive_failures,
-            },
+            "runtime_signal": ToolRuntimeSignal(
+                level=signal.level.name.lower(),
+                tool_name=signal.tool_name,
+                fingerprint=signal.fingerprint,
+                consecutive_failures=signal.consecutive_failures,
+            ),
         })

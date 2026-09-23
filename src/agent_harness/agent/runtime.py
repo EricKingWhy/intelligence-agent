@@ -1370,10 +1370,10 @@ class AgentRuntime:
                     persisted = execution.result.runtime_signal
                     if persisted is not None:
                         sig = GuardSignal(
-                            GuardLevel[str(persisted["level"]).upper()],
-                            str(persisted["tool_name"]),
-                            str(persisted["fingerprint"]),
-                            int(persisted["consecutive_failures"]),
+                            GuardLevel[persisted.level.upper()],
+                            persisted.tool_name,
+                            persisted.fingerprint,
+                            persisted.consecutive_failures,
                         )
                     else:
                         sig = guard.observe(call.name, call.args, execution.result.ok)

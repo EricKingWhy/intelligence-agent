@@ -559,6 +559,10 @@ class TestSubagentChildInheritance:
             tmp_path, parent_id="parent-flaky", parent_cwd=tmp_path / "project",
             child_answers=2,
         )
+        # #287 loads the parent event snapshot during activation to recover durable
+        # tree metadata; force the cwd-specific lazy-read path for this transient-I/O test.
+        provider_impl._parent_cwd_cache = None
+        provider_impl._parent_cwd_loaded = False
         original = store.read_events
         calls: list[str] = []
 

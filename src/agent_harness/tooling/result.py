@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -37,6 +37,15 @@ class ErrorCode(str, Enum):
     PERMISSION_DENIED = "PERMISSION_DENIED"  # 权限拒绝 → 不重试
     TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"  # 工具内部异常 → 默认不重试
     CANCELLED = "CANCELLED"  # 批次前序失败或外部取消 → 不重试
+
+
+class ToolRuntimeSignal(BaseModel):
+    """Typed control signal consumed by AgentRuntime, never exposed to the model."""
+
+    level: Literal["none", "soft", "hard"]
+    tool_name: str
+    fingerprint: str
+    consecutive_failures: int
 
 
 class ToolResult(BaseModel):
@@ -67,7 +76,7 @@ class ToolResult(BaseModel):
     artifact_ref: str | None = None
     # Runtime-only control signal. It is consumed after tool results are collected
     # and deliberately omitted from model output and Operation Ledger JSON.
-    runtime_signal: dict[str, Any] | None = Field(default=None, exclude=True)
+    runtime_signal: ToolRuntimeSignal | None = Field(default=None, exclude=True)
     # 工具产生的延迟会话事件 (event_type, data)：executor 在 tool/call 之后
     # 落盘（delegation 事件同款通道，overflow 是既有生产者）。exclude=True：
     # 这是 durable 事件通道，不是模型可见内容——model_dump_json（回灌给模型

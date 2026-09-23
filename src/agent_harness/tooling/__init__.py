@@ -23,7 +23,7 @@ from agent_harness.tooling.contract import (
 from agent_harness.tooling.executor import ToolExecution, ToolExecutor
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.registry import ToolRegistry
-from agent_harness.tooling.result import ErrorCode, ToolResult
+from agent_harness.tooling.result import ErrorCode, ToolResult, ToolRuntimeSignal
 
 __all__ = [
     "ApprovalCallback",
@@ -39,5 +39,6 @@ __all__ = [
     "ToolPermission",
     "ToolRegistry",
     "ToolResult",
+    "ToolRuntimeSignal",
     "ToolSideEffect",
 ]

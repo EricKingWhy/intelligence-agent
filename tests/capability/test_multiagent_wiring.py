@@ -5,9 +5,11 @@
 - build_runtime 激活链：session_store 缺席 → delegate 降级缺席（不注册不炸）
 """
 
+import asyncio
 import json
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from agent_harness.assembly import (
     build_runtime,
@@ -21,7 +23,9 @@ from agent_harness.config import Settings
 from agent_harness.multiagent.provider import InProcessSubagentProvider
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.session import Session
 from agent_harness.session.store import JsonlSessionStore
+from tests.scripted_model import ScriptedModel
 
 
 def _settings(tmp_path, *, multiagent: bool = True) -> Settings:
@@ -85,6 +89,77 @@ async def test_build_runtime_activates_provider(tmp_path):
     provider = runtime.registry.get("delegate")._provider
     assert isinstance(provider, InProcessSubagentProvider)
     assert provider._activated
+
+
+@pytest.mark.asyncio
+async def test_build_runtime_isolates_provider_state_between_sessions(tmp_path):
+    """One cached capability wiring must not cross-bind concurrent root sessions."""
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    stores = recovery_stores(tmp_path / "harness.db")
+    await initialize_stores(stores)
+    wiring = await wire_capabilities(
+        CapabilityRegistry(), parse_capabilities_config(settings.capabilities),
+        settings=settings,
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    workspaces = WorkspaceRegistry(root=tmp_path / "workspaces")
+    session_a = Session.start(store, session_id="runtime-a")
+    session_b = Session.start(store, session_id="runtime-b")
+
+    def delegate(call_id: str, task: str) -> AIMessage:
+        return AIMessage(content="", tool_calls=[{
+            "id": call_id,
+            "name": "delegate",
+            "args": {"target": "coding", "task": task},
+        }])
+
+    models = [
+        ScriptedModel([
+            delegate("root-a-call", "task from A"),
+            AIMessage(content="child A complete"),
+            AIMessage(content="root A complete"),
+        ]),
+        ScriptedModel([
+            delegate("root-b-call", "task from B"),
+            AIMessage(content="child B complete"),
+            AIMessage(content="root B complete"),
+        ]),
+    ]
+    with patch("agent_harness.assembly.create_chat_model", side_effect=models):
+        runtime_a = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=workspaces, session_id=session_a.session_id,
+            workspace=tmp_path / "project-a", max_steps=5, auto_approve=True,
+            session_store=store,
+        )
+        runtime_b = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=workspaces, session_id=session_b.session_id,
+            workspace=tmp_path / "project-b", max_steps=5, auto_approve=True,
+            session_store=store,
+        )
+
+    provider_a = runtime_a.registry.get("delegate")._provider
+    provider_b = runtime_b.registry.get("delegate")._provider
+    assert provider_a is not provider_b
+
+    results = await asyncio.gather(
+        runtime_a.run(session_a, "root A"),
+        runtime_b.run(session_b, "root B"),
+    )
+
+    assert [result.status for result in results] == ["completed", "completed"]
+    assert provider_a.last_child_sessions[0].sandbox is workspaces.get("runtime-a")
+    assert provider_b.last_child_sessions[0].sandbox is workspaces.get("runtime-b")
+    root_run_a = next(event for event in session_a.events if event.type == "run/started")
+    root_run_b = next(event for event in session_b.events if event.type == "run/started")
+    tree_a = await stores.delegation_tree_ledger.get_state(root_run_a.run_id)
+    tree_b = await stores.delegation_tree_ledger.get_state(root_run_b.run_id)
+    assert tree_a.root_session_id == "runtime-a"
+    assert tree_b.root_session_id == "runtime-b"
+    assert tree_a.used_delegations == tree_b.used_delegations == 1
 
 
 @pytest.mark.asyncio

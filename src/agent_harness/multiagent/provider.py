@@ -200,6 +200,15 @@ class InProcessSubagentProvider:
         self._parent_cwd_cache: str | None = None
         self._parent_cwd_loaded = False
 
+    def new_runtime_instance(self) -> InProcessSubagentProvider:
+        """Create an unactivated provider for one root Runtime.
+
+        Capability wiring is cached process-wide, but session/store/workspace
+        bindings are not: each Runtime must own its own mutable provider state.
+        Descendant Runtimes keep using this instance through the inherited registry.
+        """
+        return InProcessSubagentProvider(profiles=self._profiles)
+
     def activate(
         self,
         *,
@@ -237,8 +246,12 @@ class InProcessSubagentProvider:
         self._resume_tree_id = None
         self._resume_bound_run_id = None
         self._tree_metadata_error = False
+        self._parent_cwd_cache = None
+        self._parent_cwd_loaded = False
         try:
             events = session_store.read_events(parent_session_id)
+            self._parent_cwd_cache = session_cwd(events)
+            self._parent_cwd_loaded = True
             started = next((event for event in events if event.type == SESSION_STARTED), None)
             if started is not None:
                 tree_id = started.data.get("delegation_tree_id")
@@ -293,10 +306,6 @@ class InProcessSubagentProvider:
         self._active_children = (
             asyncio.Semaphore(max_active_children) if max_active_children > 0 else None
         )
-        # 重复激活（docstring 承诺"覆盖"）可能换父会话：缓存必须跟着作废，
-        # 否则子会话会继承**上一个**父的 cwd。
-        self._parent_cwd_cache = None
-        self._parent_cwd_loaded = False
         self._activated = True
 
     def _parent_cwd(self) -> str | None:
