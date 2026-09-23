@@ -157,15 +157,20 @@ class TestAgentFactoryFiltering:
         assert {x.name for x in runtime.registry.list()} == {"read"}
         assert any("web_search" in rec.message for rec in caplog.records)
 
-    def test_default_grantable_is_source_registry(self, tmp_path):
-        """不传 grantable = 可授予全集（built-in profile 从全量 registry 起步）。"""
+    def test_create_rejects_missing_grantable(self, tmp_path):
+        """#286：`grantable` 必填——「省略 = 可授予全集」这条防提升旁路已封死。
+
+        本用例的前身 `test_default_grantable_is_source_registry` 断言的正是那条
+        旁路（「省略 = 全量」）。封死后同一调用点必须**报错**，所以是反转而不是
+        删除：契约翻转本身要有测试盯着，删掉等于把证据一起删了。
+        """
         source = _full_registry(tmp_path)
         factory = AgentFactory(model=ScriptedModel([]))
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read", "write"}))
 
-        runtime = factory.create(spec, source_registry=source)
-        assert {x.name for x in runtime.registry.list()} == {"read", "write"}
+        with pytest.raises(TypeError):
+            factory.create(spec, source_registry=source)  # type: ignore[call-arg]
 
 
 class TestAgentFactoryInheritance:
