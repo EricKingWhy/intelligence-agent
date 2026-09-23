@@ -10,7 +10,9 @@ Milvus 派生/relay 与 provider 边界在各自的 seam 上另测（`test_v2_in
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
+import aiosqlite
 import pytest
 import pytest_asyncio
 
@@ -30,6 +32,11 @@ USER_B = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-b")
 OTHER_TENANT = TrustedMemoryIdentity(tenant_id="tenant-b", user_id="user-a")
 PROJECT_X = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-a", project_id="project-x")
 PROJECT_Y = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-a", project_id="project-y")
+# 同一个项目 id，但换了用户 / 换了租户——两条"看着像同一个项目"的越权方向。
+USER_B_PROJECT_X = TrustedMemoryIdentity(
+    tenant_id="tenant-a", user_id="user-b", project_id="project-x")
+OTHER_TENANT_PROJECT_X = TrustedMemoryIdentity(
+    tenant_id="tenant-b", user_id="user-a", project_id="project-x")
 
 
 @pytest_asyncio.fixture
@@ -193,6 +200,37 @@ async def test_at_most_one_active_version_per_logical_memory(
 
 
 @pytest.mark.asyncio
+async def test_at_most_one_active_is_enforced_by_the_partial_index_itself(
+    store: SqliteMemoryV2Store,
+) -> None:
+    """R4 的第二层保险：**绕过 store** 直接插第二条 active 也会被数据库拒绝。
+
+    判别性：并发用例 `test_concurrent_updates_leave_exactly_one_active_version` 的两个写者
+    派生的是**同一个**目标版本，先被表级 `UNIQUE(root_id, version)` 接住——把它当作
+    "部分唯一索引 `memory_v2_one_active` 的判别性测试"是过强的声明（2026-09-24 修后重审
+    Spec 轴指出，用原始 SQL 探针复核成立）。真正只有那个部分索引能接住的是
+    「同 `root_id`、**版本不同**、两条都 `active`」这种行：本用例走原始 SQL 造它，
+    变异验证里把索引改成非唯一（`DROP INDEX` 等价）时该插入会**成功** ⇒ 该用例变红。
+    """
+    created = await store.create(make_draft(), USER_A)
+    async with aiosqlite.connect(store.database_path) as connection:
+        cursor = await connection.execute(
+            "SELECT * FROM memory_v2_records WHERE memory_id=?", (created.id,))
+        columns = [description[0] for description in cursor.description]
+        row = dict(zip(columns, await cursor.fetchone()))
+    row["memory_id"] = "mem-illegal-second-active"
+    row["version"] += 1
+
+    with pytest.raises(sqlite3.IntegrityError):
+        async with aiosqlite.connect(store.database_path) as connection:
+            await connection.execute(
+                f"INSERT INTO memory_v2_records ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                tuple(row[name] for name in columns))
+            await connection.commit()
+
+
+@pytest.mark.asyncio
 async def test_update_rejects_record_owned_by_another_identity(
     store: SqliteMemoryV2Store,
 ) -> None:
@@ -314,6 +352,51 @@ async def test_list_active_user_global_is_visible_with_a_project_context(
     visible = await store.list_active(PROJECT_X, scope=MemoryScope.USER_GLOBAL, limit=50)
 
     assert [record.id for record in visible] == [global_memory.id]
+
+
+@pytest.mark.asyncio
+async def test_list_active_project_scope_never_leaks_across_projects_or_identities(
+    store: SqliteMemoryV2Store,
+) -> None:
+    """`project` 作用域的 `list_active` 只返回**本**项目、**本**身份的行。
+
+    判别性：把项目谓词退化成 `1=1`（只留 tenant/user/scope/status 四个条件）时，本文件
+    原有用例**全绿**——它们只造了一个项目的记录。要钉住"项目过滤真的生效"，必须同时存在
+    三个方向的邻居：同租户同用户的另一个项目、同租户另一个用户的同名项目、另一个租户的
+    同名项目。少任何一条，对应方向的越权就测不出来。
+    """
+    mine = await store.create(
+        make_draft(scope=MemoryScope.PROJECT, project_id="project-x", content="我的项目事实"),
+        PROJECT_X)
+    await store.create(
+        make_draft(scope=MemoryScope.PROJECT, project_id="project-y", content="别的项目"), PROJECT_Y)
+    await store.create(
+        make_draft(scope=MemoryScope.PROJECT, project_id="project-x", content="同事的项目"), USER_B_PROJECT_X)
+    await store.create(
+        make_draft(scope=MemoryScope.PROJECT, project_id="project-x", content="外租户的项目"),
+        OTHER_TENANT_PROJECT_X)
+
+    visible = await store.list_active(PROJECT_X, scope=MemoryScope.PROJECT, limit=50)
+
+    assert [record.id for record in visible] == [mine.id]
+
+
+@pytest.mark.asyncio
+async def test_get_of_a_project_record_is_denied_without_a_project_context(
+    store: SqliteMemoryV2Store,
+) -> None:
+    """`get` 也必须做项目归属判断：同一个用户、没有项目上下文 ⇒ 读不到项目记忆。
+
+    判别性：`_visible` 对 `project` 作用域要求 `row.project_id == trusted.project_id`，
+    而 `USER_A` 的 `project_id` 是 `None` ⇒ `'project-x' == None` 为假。若项目判断只在
+    `list_active` 里做、`get` 只看 tenant/user（很自然的漏写），这条会红而其他用例全绿。
+    """
+    created = await store.create(
+        make_draft(scope=MemoryScope.PROJECT, project_id="project-x"), PROJECT_X)
+
+    assert (await store.get(created.id, PROJECT_X)).id == created.id
+    with pytest.raises(KeyError):
+        await store.get(created.id, USER_A)
 
 
 @pytest.mark.asyncio
