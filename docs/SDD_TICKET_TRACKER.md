@@ -4654,7 +4654,7 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 - **focused**：`tests/agent tests/multiagent` **524 passed / 0 failed / 3 deselected / 75.75 s**（junit `tests=524 failures=0 errors=0 skipped=0`）；`tests/multiagent/test_delegation_depth.py` 单跑 **8 passed / 0 failed / 1.974 s**。
 - **`ruff`**（10 个改动 / 新增文件）：`All checks passed!`。**`git diff --check`**：exit 0。
 - **覆盖闸门** `scripts/check_review_coverage.py`：**exit 0**，区间 `09ca47a..HEAD`，三元组 `538 / 373 / 165`、`❌ 0`。
-- **§8.1 第 3 条读数传递**：冻结后只追加 docs / 台账 ⇒ 判据① `git diff --name-status --no-renames e58c1339 HEAD` 与 ② `git status --short` 的**输出原文**见「集成」段（集成后补写，本节不写未取得的读数）。
+- **§8.1 第 3 条读数传递**：冻结后只追加 docs / 台账 ⇒ 判据① `git diff --name-status --no-renames e58c1339 HEAD` 与 ② `git status --short` 的**输出原文**见下「集成（已完成）」段（已取得并落盘）。
 
 **审查（§8.2 三路并行，锚同一冻结树）**：Standards 轴与 Correctness·Spec 轴各一独立只读子代理，**均 PASS-WITH-FINDINGS（P0=0 P1=0 P2=0 P3=1）**，且**两轴各自独立**指出同一处 P3（`provider.activate` 的 docstring 对 `max_depth=0` 的语义描述夸大）。按 §8.3 第 6 条**全量登记、不因预算略去**。
 
@@ -4665,4 +4665,9 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 3. **并行子树隔离只有设计论证、无用例**：`ContextVar` 的理由是「同一个 `DelegateTool` 对象被多棵子树共享」，现有 8 例证的是单链；「`asyncio.gather` 并行两棵子树各自配额互不可见」无用例。**解除 = 补一条并行 spawn 用例**（该面由 `#287` 的全树预算票天然覆盖，故不单开票）。
 4. **票面 Scope 外（有意不做）**：tree-wide `max_delegations` / failure fingerprint / crash recovery 归 `#287`；delegated child workspace 归属 / 恢复归 `#288`。
 
-**集成（待执行）**：`origin/main` 实测 = `6e281c74d4b13c5b708ec2329cae0131be49fb4c`（= 本批 base ⇒ 可**快进**推送）。推送前 `.githooks/pre-push` 自动跑 Gate-0 六车道。
+**集成（已完成）**：推前 `origin/main` 实测 = `6e281c74d4b13c5b708ec2329cae0131be49fb4c`（= 本批 base ⇒ 可**快进**）；`git push origin main` 触发 `.githooks/pre-push` 跑 Gate-0 六车道 = **6/6 PASS**（tip=`e800ecb3dfee` / tree=`bee8cec76d00` / 墙钟 43.1s / 改动面 17 文件 = docs 7 + tests 6 + src 4）。推送结果 `6e281c7..e800ecb  main -> main`（**ff，`PUSH_EXIT=0`**，无被拒 / 无强推）；推后 `git ls-remote --heads origin refs/heads/main` = `e800ecb3dfee397b82188b1bc865f9d0b55ce1b3` = 本地 `HEAD` = 本地 `refs/heads/main`。本批共 **10 笔**（`git log --oneline 6e281c74d4b13c5b708ec2329cae0131be49fb4c..e800ecb3dfee397b82188b1bc865f9d0b55ce1b3` 可复跑：红证 1 / 实现 1 / AC5 用例 1 / 审查行 1 / 落点 1 / 白名单 4 / 报告补笔 1）。
+
+**§8.1 第 3 条两条判据（输出原文，锚 = 推送 tip `e800ecb3`）**：
+
+- 判据① `git diff --name-status --no-renames e58c1339 e800ecb3`（rc=0）：`M docs/PHASE_STATUS.md` / `M docs/SDD_TICKET_TRACKER.md` / `A docs/agents/SDD_V31_LIVE_VALIDATION_286.md` / `A docs/gate/64d2c78979b8c263ba9d90e2dd500b735bcb5bcd.json` / `M docs/phase_status/2026-09.md` / `A docs/review_ledger.d/122-6e281c7-e58c1339.tsv` / `M docs/review_ledger.tsv` ⇒ 状态列仅 `A`/`M`，7 条路径**全命中** `DOC_PATTERN` ✅（代码面零改动，冻结树有效）。
+- 判据② `git status --short -uall`（rc=0）：`?? .zcodeignore`（稳态）与 `?? docs/research/2026-09-23-agent-tool-loop-termination-benchmark.md` ⇒ 除稳态未跟踪项外工作树干净 ✅。**如实披露**：后者**非本批产物**（本批 10 笔的 `--name-status` 里不含它；本批从未创建或写入该路径），系**并行线的研究产物**，按「不碰他人交付面」原则保持未跟踪。
