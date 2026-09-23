@@ -639,6 +639,15 @@ def worktree_divergence() -> dict:
     `tracked` / `hidden` / `risky` 非空 ⇒ 拒绝落盘并 FAIL。**不**把「有任何未跟踪文件」当拒绝
     理由（本仓稳态就有 `?? .zcodeignore`）—— 那会把「读数的唯一来源」永久卡死；也不把
     `docs/gate/` 自己的产物算成「车道输入」（它不是任何车道的输入，见 `GATE_DIR_PREFIX`）。
+
+    ⚠ `git status` 天生遵守 `.git/info/exclude`，且**没有任何 config 能关掉它**：攻击者把
+    未跟踪的车道语义文件（`conftest.py` / `ruff.toml` / `tsconfig*.json` / `*.d.ts` …）追加进
+    `.git/info/exclude` 后，status 完全看不见 ⇒ 车道在 ≠HEAD 的被污染工作树上跑而守卫不拦
+    （2026-09-23 严格审查实测复现，P1-c 同族姐妹面）。⇒ 未跟踪集合不只看 status，还要并上
+    `git ls-files --others --exclude-per-directory=.gitignore`——只应用**已入库**的 `.gitignore`
+    （改它本身会被 ① 追踪偏离抓住），**绕开** `info/exclude` 与 `core.excludesFile` 这两个本地
+    藏匿面；不能裸 `--others`（本仓实测会多出 5.5 万条 node_modules 噪音灌进读数）。方向
+    fail-closed（本地藏不住、噪音不暴涨）；`risky` 只按 `LANE_INPUT_SUFFIXES` 过滤。
     """
     tracked: list[str] = []
     untracked: list[str] = []
@@ -650,6 +659,15 @@ def worktree_divergence() -> dict:
         if not line.strip():
             continue
         (untracked if line.startswith("??") else tracked).append(line)
+    # info/exclude 盲区兜底（见 docstring ⚠ 段）：`ls-files --others --exclude-per-directory=
+    # .gitignore` 只应用已入库的 .gitignore、绕开本地藏匿面，把 status 看不见的未跟踪文件并入
+    # 同一判据。同样带 `-c core.quotepath=false`（P1-b 同族：`ls-files` 对非 ASCII 路径默认
+    # 也 C-quote）。去重键与下方 `risky` 过滤的切片口径一致。
+    seen = {u[3:].strip() for u in untracked}
+    for p in git("-c", "core.quotepath=false", "ls-files", "--others",
+                 "--exclude-per-directory=.gitignore").stdout.splitlines():
+        if p and p not in seen:
+            untracked.append("?? " + p)
     # 除 `H`（正常缓存）以外的任何位都算偏离：`S` = skip-worktree、小写 = assume-unchanged。
     hidden = [ln for ln in git("ls-files", "-v").stdout.splitlines() if ln[:1] and ln[:1] != "H"]
     risky = [
