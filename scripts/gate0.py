@@ -642,7 +642,10 @@ def worktree_divergence() -> dict:
     """
     tracked: list[str] = []
     untracked: list[str] = []
-    stat = git("status", "--porcelain", "--untracked-files=all").stdout
+    # `-c core.quotepath=false`：让 `git status` 以**原始字节**输出非 ASCII 路径，而不是 C-quote
+    # （`?? "ZZ_\344\270\255..."`）。否则 `endswith(LANE_INPUT_SUFFIXES)` 对带引号/八进制转义的
+    # 路径恒为假 ⇒ 非 ASCII 的未跟踪车道输入被守卫**放行**（R2 P1-b 实测复现）。
+    stat = git("-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all").stdout
     for line in stat.splitlines():
         if not line.strip():
             continue
@@ -716,7 +719,7 @@ def replay_reading(path: str) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", recorded_sha) or not re.fullmatch(r"[0-9a-f]{40}", recorded_tree):
         print(f"❌ 落盘里的 sha / tree 不是 40 位 hex：sha={recorded_sha!r} tree={recorded_tree!r}")
         return 1
-    real_tree = git("rev-parse", "--verify", "--quiet", recorded_sha + "^{tree}", check=False).stdout.strip()
+    real_tree = git("rev-parse", "--verify", "--quiet", recorded_sha + "^{tree}").stdout.strip()
     if real_tree != recorded_tree:
         print(f"❌ 落盘署名不自洽：sha={recorded_sha[:12]} 在本仓解析出的 tree="
               f"{real_tree[:12] or '（该 sha 不存在）'}，而落盘写的是 {recorded_tree[:12]}"

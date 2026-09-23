@@ -207,14 +207,38 @@ def read_all(legacy: str) -> tuple[list[str], list[str], int, int, list[str]]:
     paths = [legacy]
     d = ledger_dir()
     if os.path.isdir(d):
-        for entry in sorted(os.listdir(d)):
-            full = os.path.join(d, entry)
-            if not os.path.isfile(full):
-                continue
-            if not entry.endswith(".tsv"):
-                warns.append(f"⚠️  {_rel(full)} 不是 .tsv，已忽略（目录只收 .tsv）")
-                continue
-            paths.append(full)
+        # 用 git 视角枚举台账目录，而不是 `os.listdir`（R2 P1-c）：`os.listdir` 会读到被
+        # `.git/info/exclude` / `.gitignore` 藏起的伪造 `.tsv`，而守卫（`git status -uall` /
+        # `git ls-files --others --exclude-standard`）看不见它 ⇒ 伪造审查行能溜进判定集、
+        # 把 exit 1 伪造成 exit 0。统一到 git 视角后两者口径一致：藏起的文件**两边都不认**。
+        # ⚠ 但 `LEDGER_DIR` 可被环境变量覆盖为**仓库外**路径（测试用）：仓库外目录不是 git
+        # 管理的，git 视角列不出任何文件（`ls-files` 只列仓库内路径），且跨盘时 `os.path.relpath`
+        # 会抛 `ValueError`。这种情况**回退 `os.listdir`**——那是测试临时目录，不涉及本仓的
+        # exclude 绕过面；盲目用 git 视角会静默跳过或崩溃（R3 修后重审 P3/P4，两轴独立指出）。
+        try:
+            rel = os.path.relpath(d, REPO_ROOT)
+            in_repo = rel != os.pardir and not rel.startswith(os.pardir + os.sep)
+        except ValueError:
+            in_repo = False
+        if in_repo:
+            listed: set[str] = set(git("ls-files", "--cached", "--", rel.replace(os.sep, "/").rstrip("/") + "/").stdout.splitlines())
+            listed |= set(git("ls-files", "--others", "--exclude-standard", "--", rel.replace(os.sep, "/").rstrip("/") + "/").stdout.splitlines())
+            for entry in sorted(listed):
+                if not entry:
+                    continue
+                if not entry.endswith(".tsv"):
+                    warns.append(f"⚠️  {entry} 不是 .tsv，已忽略（目录只收 .tsv）")
+                    continue
+                paths.append(os.path.join(REPO_ROOT, entry.replace("/", os.sep)))
+        else:
+            for entry in sorted(os.listdir(d)):
+                full = os.path.join(d, entry)
+                if not os.path.isfile(full):
+                    continue
+                if not entry.endswith(".tsv"):
+                    warns.append(f"⚠️  {_rel(full)} 不是 .tsv，已忽略（目录只收 .tsv）")
+                    continue
+                paths.append(full)
     rows: list[str] = []
     wl: list[str] = []
     n_old = 0
