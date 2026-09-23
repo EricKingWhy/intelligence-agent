@@ -406,8 +406,6 @@ class InProcessSubagentProvider:
     async def _run_child(
         self, spec: AgentSpec, full_task: str, scope: SpawnScope, tree_id: str,
     ) -> SubAgentResult:
-        # child sandbox = 父的同一实例（spec §9：coding 的改动 review 直接可见）
-        parent_sandbox = self._workspace_registry.get(self._parent_session_id)
         # 配额与可授予集合在**开 session 之前**算：越权/超深度的 spawn 要显式
         # 失败，且不该在 session 列表里留下一个只有 session/started 的幽灵子会话。
         # #286 把这条路径从「罕见」（只有越权申请才走）变成「模型每次撞深度上限
@@ -418,9 +416,16 @@ class InProcessSubagentProvider:
             source_registry=scope.registry,
             grantable=grantable_names(scope, allowance),
         )
+        # child workspace = 父的同一 canonical owner（spec §9：coding 的改动
+        # review 直接可见）；先 durable bind，保证 child Session 一旦落盘，恢复
+        # 就能按 child_session_id 重新解析该 workspace。
+        child_session_id = str(uuid4())
+        child_sandbox = self._workspace_registry.bind_alias(
+            child_session_id, self._parent_session_id,
+        )
         child_session = Session(
-            session_id=str(uuid4()), store=self._session_store,
-            sandbox=parent_sandbox,
+            session_id=child_session_id, store=self._session_store,
+            sandbox=child_sandbox,
         )
         # WS-1 #151：子会话的 cwd 与 fork 同一规则——显式继承父会话的会话侧锚。
         # 不写的话每个子代理都会作为"未分组"会话出现在会话列表里（它们与父同属

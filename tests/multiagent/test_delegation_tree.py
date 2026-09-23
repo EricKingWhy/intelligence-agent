@@ -1,4 +1,4 @@
-"""Behavioral contracts for one persistent delegation tree (#287)."""
+"""Behavioral contracts for persistent delegation trees and child recovery (#287/#288)."""
 
 from __future__ import annotations
 
@@ -18,14 +18,20 @@ from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
 from agent_harness.multiagent.provider import InProcessSubagentProvider
 from agent_harness.multiagent.tools import DelegateTool
+from agent_harness.recovery import RecoveryCoordinator
 from agent_harness.recovery.scan import scan_interrupted_sessions
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import Session
-from agent_harness.session.event import RUN_INTERRUPTED, TOOL_FAILURE_GUARD, TOOL_RESULT
+from agent_harness.session.event import (
+    RUN_INTERRUPTED,
+    TOOL_FAILURE_GUARD,
+    TOOL_RESULT,
+)
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import SqliteOperationLedger
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tools.read import ReadTool
 from tests.scripted_model import ScriptedModel
 
 
@@ -166,9 +172,8 @@ async def test_delegation_tree_metadata_persists_on_child_session(tmp_path):
 
     # Rebuild a provider around the persisted child session with a deliberately
     # larger profile cap; the session's remaining allowance stays authoritative.
-    workspace_registry.create(
-        child.session_id, workspace_root=tmp_path / "workspace",
-    )
+    assert child.sandbox is workspace_registry.get(session.session_id)
+    assert workspace_registry.get(child.session_id) is child.sandbox
     recovered_provider = InProcessSubagentProvider(profiles=profiles)
     recovered_registry = ToolRegistry()
     recovered_registry.register(DelegateTool(recovered_provider))
@@ -509,3 +514,94 @@ async def test_process_kill_and_recovery_preserve_budget_and_failure_fingerprint
     resumed_tree = await tree_ledger.get_state(prior_run.run_id)
     assert resumed_tree.used_delegations == 3
     assert resumed_tree.consecutive_failures == 3
+
+
+@pytest.mark.asyncio
+async def test_child_process_recovery_restores_delegated_coding_workspace(tmp_path):
+    """A restarted RecoveryCoordinator resolves the persisted child workspace alias."""
+    project_root = Path(__file__).resolve().parents[2]
+    child_process = Path(__file__).with_name("_workspace_recovery_kill_child.py")
+    root = tmp_path / "workspace-recovery"
+    environment = dict(os.environ)
+    environment["PYTHONUTF8"] = "1"
+    crashed = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, str(child_process), json.dumps({"root": str(root)})],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert crashed.returncode == 91
+    assert "KILL_AFTER_CHILD_WORKSPACE_WRITE" in crashed.stdout
+
+    session_store = JsonlSessionStore(root / "sessions")
+    child_sessions = [
+        session_id
+        for session_id in session_store.list_session_ids()
+        if session_id != "workspace-recovery-parent"
+    ]
+    assert len(child_sessions) == 1
+    child_id = child_sessions[0]
+    child_events = session_store.read_events(child_id)
+    child_started = next(event for event in child_events if event.type == "session/started")
+    assert child_started.agent_id == "coding"
+    assert child_started.data["delegation_root_session_id"] == "workspace-recovery-parent"
+    database = root / "harness.db"
+    operation_ledger = SqliteOperationLedger(database)
+    await operation_ledger.initialize()
+    registry_after_restart = WorkspaceRegistry(root=root / "workspaces")
+    coordinator = RecoveryCoordinator(
+        session_store=session_store,
+        workspace_registry=registry_after_restart,
+        operation_ledger=operation_ledger,
+        database_path=database,
+    )
+    recovered_child = await coordinator.recover(child_id)
+
+    assert recovered_child.sandbox is not None
+    assert Path(recovered_child.sandbox.workspace_root) == root / "workspace"
+    assert recovered_child.sandbox.read_text("recovery-marker.txt") == "written-before-crash"
+    child_operations = await operation_ledger.list_for_session(child_id)
+    assert len(child_operations) == 1
+    assert child_operations[0].session_id == child_id
+    assert child_operations[0].agent_id == "coding"
+    assert child_operations[0].tool_name == "write"
+
+    recovered_registry = ToolRegistry()
+    recovered_registry.register(ReadTool(recovered_child.sandbox))
+    recovered_runtime = AgentRuntime(
+        model=ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "id": "read-marker-after-recovery",
+                "name": "read",
+                "args": {"path": "recovery-marker.txt"},
+            }]),
+            AIMessage(content="recovered child complete"),
+        ]),
+        registry=recovered_registry,
+        executor=ToolExecutor(
+            recovered_registry, operation_ledger=operation_ledger,
+        ),
+        max_steps=4,
+        agent_id="coding",
+    )
+    result = await recovered_runtime.run(recovered_child, "continue after recovery")
+
+    assert result.status == "completed"
+    assert recovered_child.sandbox.read_text("recovery-marker.txt") == "written-before-crash"
+    resumed_operations = await operation_ledger.list_for_session(child_id)
+    assert [operation.tool_name for operation in resumed_operations] == ["write", "read"]
+    assert [operation.agent_id for operation in resumed_operations] == [
+        "coding", "coding",
+    ]
+    read_result = next(
+        json.loads(event.data["content"])
+        for event in recovered_child.events
+        if event.type == TOOL_RESULT
+        and event.data["tool_call_id"] == "read-marker-after-recovery"
+    )
+    assert read_result["data"]["content"] == "written-before-crash"
+    assert sum(event.type == TOOL_RESULT for event in recovered_child.events) == 2

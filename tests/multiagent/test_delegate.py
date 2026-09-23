@@ -130,7 +130,11 @@ class TestDelegateTool:
     @pytest.mark.asyncio
     async def test_child_failure_yields_failed_tool_result(self, tmp_path):
         child_model = ScriptedModel([AIMessage(content="")])  # 空响应 → run 失败
-        tool, _, _, _ = _activated_tool(tmp_path, child_model=child_model)
+        tool, workspace_registry, parent_session_id, provider = _activated_tool(
+            tmp_path, child_model=child_model,
+        )
+        parent_sandbox = workspace_registry.get(parent_session_id)
+        parent_sandbox.write_text("owner-marker.txt", "parent-owned")
 
         result = await tool.execute(_args("coding", "必失败任务"))
 
@@ -138,6 +142,9 @@ class TestDelegateTool:
         payload = json.loads(result.metadata["output"])
         assert payload["status"] == "failed"
         assert result.retryable is False  # 决策归 supervisor，不自动重试
+        child = provider.last_child_sessions[-1]
+        assert workspace_registry.get(child.session_id) is parent_sandbox
+        assert parent_sandbox.read_text("owner-marker.txt") == "parent-owned"
 
     @pytest.mark.asyncio
     async def test_child_shares_parent_sandbox(self, tmp_path):
@@ -148,6 +155,12 @@ class TestDelegateTool:
         assert provider.last_child_sessions, "child session 可观测（hub/lineage 挂点）"
         child = provider.last_child_sessions[-1]
         assert child.sandbox is workspace_registry.get(parent_session_id)
+        assert workspace_registry.get(child.session_id) is child.sandbox
+        child.sandbox.write_text("owner-marker.txt", "parent-owned")
+        workspace_registry.delete(child.session_id)
+        assert workspace_registry.get(parent_session_id).read_text(
+            "owner-marker.txt"
+        ) == "parent-owned"
 
     @pytest.mark.asyncio
     async def test_unactivated_provider_fails_explicitly(self, tmp_path):
@@ -376,7 +389,10 @@ class TestCancelAndResume:
         registry.register(delegate)
         store = JsonlSessionStore(tmp_path / "sessions")
         workspace_registry = WorkspaceRegistry(root=tmp_path / "w")
-        workspace_registry.create("parent-1", workspace_root=tmp_path / "ws")
+        parent_sandbox = workspace_registry.create(
+            "parent-1", workspace_root=tmp_path / "ws",
+        )
+        parent_sandbox.write_text("owner-marker.txt", "parent-owned")
         provider.activate(
             factory=AgentFactory(model=_BlockingChildModel([AIMessage(content="x")]),
                                  primary_model_name="m"),
@@ -411,6 +427,12 @@ class TestCancelAndResume:
         child_types = [e.type for e in child._events]
         assert "model/failed" in child_types
         assert "run/failed" in child_types
+        assert workspace_registry.get(child.session_id) is parent_sandbox
+        assert parent_sandbox.read_text("owner-marker.txt") == "parent-owned"
+        workspace_registry.delete(child.session_id)
+        assert workspace_registry.get("parent-1").read_text(
+            "owner-marker.txt"
+        ) == "parent-owned"
 
         # 父 session：委派尝试已可见（model/completed 携带 tool_calls，无 Ledger
         # 时立即持久化），但委派未完成 → 无 tool/result。

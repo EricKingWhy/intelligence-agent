@@ -28,10 +28,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
+from agent_harness.sandbox import WorkspaceBindingError
 from agent_harness.session.runmanager import RunManager
 from agent_harness.web.app import create_app
 from tests.scripted_model import ScriptedModel
@@ -258,6 +260,31 @@ def test_cwd_session_delete_never_touches_the_user_directory(tmp_path: Path) -> 
     # harness 自己的字节照删
     assert not (Path(client.app.state.agent.sessions_root) / session_id).exists()
     assert not (Path(client.app.state.agent.workspaces_root) / f"{session_id}.json").exists()
+
+
+def test_parent_hard_delete_leaves_child_alias_fail_closed_and_preserves_user_path(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    user_dir = tmp_path / "user-selected-workspace"
+    user_dir.mkdir()
+    marker = user_dir / "keep.txt"
+    marker.write_text("user data", encoding="utf-8")
+    parent_id = _create_session(client, cwd=str(user_dir))
+
+    workspace_registry = client.app.state.agent.workspace_registry
+    workspace_registry.bind_alias("delegated-child", parent_id)
+    workspace_registry.bind_alias("delegated-grandchild", "delegated-child")
+    aliases_root = Path(client.app.state.agent.workspaces_root)
+
+    response = client.delete(f"/api/sessions/{parent_id}")
+
+    assert response.status_code == 200, response.text
+    for alias_id in ("delegated-child", "delegated-grandchild"):
+        assert (aliases_root / f"{alias_id}.json").exists()
+        with pytest.raises(WorkspaceBindingError, match=f"missing owner '{parent_id}'"):
+            workspace_registry.get(alias_id)
+    assert marker.read_text(encoding="utf-8") == "user data"
 
 
 # ── 错误矩阵 ────────────────────────────────────────────────────────

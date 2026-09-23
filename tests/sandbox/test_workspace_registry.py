@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from agent_harness.sandbox import LocalSubprocessSandbox
-from agent_harness.sandbox.registry import WorkspaceRegistry
+from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
 
 
 @pytest.fixture
@@ -111,6 +111,154 @@ class TestWorkspaceRecovery:
         assert recovered_a.read_text("a.txt") == "from_a"
         assert recovered_b.read_text("b.txt") == "from_b"
         assert Path(recovered_a.workspace_root) != Path(recovered_b.workspace_root)
+
+
+def test_delegated_workspace_alias_survives_restart_and_resolves_canonically(
+    registry: WorkspaceRegistry, tmp_path: Path,
+):
+    owner = registry.create("owner")
+    owner.write_text("marker.txt", "shared")
+
+    assert registry.bind_alias("child", "owner") is owner
+    assert registry.bind_alias("grandchild", "child") is owner
+    assert registry.get("grandchild") is owner
+    assert registry.recorded_workspace_roots("grandchild") == [
+        str(Path(owner.workspace_root).resolve()),
+    ]
+
+    import json
+
+    grandchild_mapping = json.loads(
+        (tmp_path / "workspaces" / "grandchild.json").read_text(encoding="utf-8")
+    )
+    assert grandchild_mapping["workspace_owner_session_id"] == "owner"
+    assert "workspace_root" not in grandchild_mapping
+
+    restarted = WorkspaceRegistry(root=tmp_path, backend="local")
+    recovered = restarted.get("grandchild")
+    assert Path(recovered.workspace_root) == Path(owner.workspace_root)
+    assert recovered.read_text("marker.txt") == "shared"
+
+
+def test_alias_binding_is_immutable_and_invalid_aliases_fail_closed(
+    registry: WorkspaceRegistry, tmp_path: Path, caplog,
+):
+    registry.create("owner")
+    registry.create("other-owner")
+    registry.bind_alias("child", "owner")
+
+    with pytest.raises(WorkspaceBindingError, match="cannot be rebound"):
+        registry.bind_alias("child", "other-owner")
+    with pytest.raises(WorkspaceBindingError, match="non-owning workspace alias"):
+        registry.create("child", workspace_root=tmp_path / "replacement")
+
+    mappings = tmp_path / "workspaces"
+    (mappings / "cycle-a.json").write_text(
+        '{"session_id":"cycle-a","workspace_owner_session_id":"cycle-b"}',
+        encoding="utf-8",
+    )
+    (mappings / "cycle-b.json").write_text(
+        '{"session_id":"cycle-b","workspace_owner_session_id":"cycle-a"}',
+        encoding="utf-8",
+    )
+    (mappings / "missing-owner.json").write_text(
+        '{"session_id":"missing-owner","workspace_owner_session_id":"gone"}',
+        encoding="utf-8",
+    )
+    (mappings / "malformed.json").write_text(
+        '{"session_id":"malformed","workspace_owner_session_id":',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceBindingError, match="cycle"):
+        registry.get("cycle-a")
+    with pytest.raises(WorkspaceBindingError, match="missing owner 'gone'"):
+        registry.get("missing-owner")
+    assert not (mappings / "gone").exists()
+    assert any(
+        "references a missing owner" in record.message for record in caplog.records
+    )
+    with pytest.raises(WorkspaceBindingError, match="unreadable"):
+        registry.get("malformed")
+
+
+def test_stopping_or_deleting_child_alias_does_not_affect_parent(
+    registry: WorkspaceRegistry,
+):
+    parent = registry.create("parent")
+    parent.write_text("kept.txt", "still owned by parent")
+    registry.bind_alias("child", "parent")
+
+    registry.stop("child")
+    assert registry.get("parent").read_text("kept.txt") == "still owned by parent"
+
+    registry.delete("child")
+    assert not registry.exists("child")
+    assert registry.exists("parent")
+    assert registry.get("parent").read_text("kept.txt") == "still owned by parent"
+
+
+def test_deleting_parent_cleans_workspace_once_and_invalidates_descendant_aliases(
+    registry: WorkspaceRegistry,
+):
+    parent = registry.create("parent")
+    parent.write_text("owned.txt", "delete with owner")
+    workspace_root = Path(parent.workspace_root)
+    registry.bind_alias("child", "parent")
+    registry.bind_alias("grandchild", "child")
+    original_delete = parent.delete
+    delete_calls = 0
+
+    def count_delete():
+        nonlocal delete_calls
+        delete_calls += 1
+        original_delete()
+
+    parent.delete = count_delete
+    registry.delete("parent")
+
+    assert delete_calls == 1
+    assert not workspace_root.exists()
+    assert not registry.exists("parent")
+    assert not registry.exists("child")
+    assert not registry.exists("grandchild")
+
+
+def test_discarding_owner_artifacts_leaves_aliases_fail_closed_and_preserves_custom_root(
+    tmp_path: Path,
+):
+    registry = WorkspaceRegistry(root=tmp_path / "registry", backend="local")
+    custom_root = tmp_path / "user-project"
+    parent = registry.create("parent", workspace_root=custom_root)
+    parent.write_text("keep.txt", "not harness-owned")
+    registry.bind_alias("child", "parent")
+    registry.bind_alias("grandchild", "child")
+
+    registry.discard_session_artifacts("parent")
+
+    assert not registry.exists("parent")
+    assert registry.exists("child")
+    assert registry.exists("grandchild")
+    for descendant_id in ("child", "grandchild"):
+        with pytest.raises(WorkspaceBindingError, match="missing owner 'parent'"):
+            registry.get(descendant_id)
+    assert parent.read_text("keep.txt") == "not harness-owned"
+
+
+def test_discarding_artifacts_cleans_corrupt_mapping_without_reading_it(
+    registry: WorkspaceRegistry,
+):
+    mapping_file = registry._mapping_path("corrupt")
+    mapping_file.parent.mkdir(parents=True, exist_ok=True)
+    mapping_file.write_text("{truncated", encoding="utf-8")
+    default_workspace = mapping_file.parent / "corrupt"
+    default_workspace.mkdir()
+    (default_workspace / "marker.txt").write_text("harness-owned", encoding="utf-8")
+
+    registry.discard_session_artifacts("corrupt")
+
+    assert not mapping_file.exists()
+    assert not default_workspace.exists()
 
 
 class TestExists:
