@@ -1,0 +1,1 @@
+2026-09-22	#293（B-42）批 3 修后重审两轴（Standards + Spec 均 NEEDS-FIX，且都在新引入的代码面上各给新 P1：--replay 因 git(..., check=False) 必抛 TypeError / 非 ASCII 未跟踪路径被 C-quote 而守卫漏 / .git/info/exclude 藏台账文件绕过守卫并污染覆盖率读数；按 §8.3 第 4 条「无第二轮」停止修复、如实登记、交用户裁决）	0896336..26c0e86
