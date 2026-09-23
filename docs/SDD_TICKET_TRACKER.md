@@ -4758,7 +4758,7 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 ## B-45（`#295` 台账描述字段 lint + docs-only 按路径自动归属 + 语义等价判据）
 
-**状态**：🔄 **交付完成，待推送 / 待关单**（3 笔 `0437950` → `fa0a175` → `1fdd7e8`）。
+**状态**：✅ **已完成 —— 已推送 + 已关单**（4 笔 `0437950` → `fa0a175` → `1fdd7e8` → `31ef526`）。`origin/main` = `31ef526939bcfcc15133df4f2141143d25289d71`，推送 `8f9ea1c..31ef526` 为 **fast-forward**，Gate-0 **6/6 PASS**；`#295` 已 `close --reason completed`（关单评论 [issuecomment-5792688513](https://github.com/EricKingWhy/intelligence-agent/issues/295#issuecomment-5792688513)）。
 
 **票面**：GitHub `#295`（B-43 报告的缺陷 1 / 5 / 7 —— 工具面三条）。前置依赖 B-44（`#294`）已关单 ⇒ 口径已定。
 
@@ -4787,4 +4787,4 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 2. **`--strict` 与 `--list` 组合静默失效**：`--list` 提前 `return` ⇒ strict 分支不可达；且 `--strict` 未写进本文件「用法 / 退出码」块。非本票 Scope（CLI 重排）。**解除条件**：单独开票重排 CLI 并补用法块。
 3. **`test_equivalence_reads_blobs_from_git` 属自比弱用例**（同 blob 读两次相比）：非永真（`a` 非空断言仍守住），保留。
 
-**集成（待执行）**：`origin/main` 待实测；推送前 `.githooks/pre-push` 自动跑 Gate-0 六车道。
+**集成（已完成）**：`origin/main` 实测 = `31ef526939bcfcc15133df4f2141143d25289d71`（`git ls-remote --heads origin` 读数，= 本地 `main`）。推送 `8f9ea1c..31ef526` **fast-forward**，`.githooks/pre-push` 自动跑 Gate-0 六车道 ⇒ **6/6 PASS**（diff-check 0.26s / ruff 0.31s / oxlint 0.41s / tsc 8.46s / guards 3.11s / coverage 2.97s，墙钟 15.5s）。**落点笔 `31ef526` 由本票新功能自身自动归属**（闸门输出 `✅ docs-only（按路径自动归属）: 31ef526 …`）⇒ 端到端可用。关单评论与 `#295` 状态实测 `state=CLOSED reason=COMPLETED comments=1`。
