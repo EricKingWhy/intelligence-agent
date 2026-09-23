@@ -139,8 +139,19 @@ active 检索面。V2 **没有硬删入口**——墓碑/删除 API 是 MEM-V2-7
   **revision 变化同时重置重试预算**（新版本不是旧毒丸的证据）。
 - `acknowledge` 失败与索引失败**分开归因**：前者意味着"我们连账都记不上"，后者意味着
   "外部索引不可用"，两者排障方向完全不同。
-- 连续 `MAX_CONSECUTIVE_FAILURES = 5` 次后进入**本进程死信**（不再空转，outbox 行保留可观察）。
-  计数器活在进程内存里 ⇒ 重启自愈。
+- **死信预算只统计索引侧失败**：连续 `MAX_CONSECUTIVE_FAILURES = 5` 次**索引**失败后进入
+  本进程死信（不再空转，outbox 行保留可观察）。计数器活在进程内存里 ⇒ 重启自愈。
+  `acknowledge` 失败**不**消耗该预算——它发生在索引**已经写成功之后**，把一次账本故障记成
+  索引失败会让一条健康的 key 永久停摆（索引里有、outbox 行永远留着，两边静默分叉），
+  而重试 ack 是幂等的、每轮只多一次 SQLite 写（不是忙等）。
+- 账本故障走**独立**的升级路径：连续 `MAX_CONSECUTIVE_FAILURES` 次 ack 失败 ⇒ `logger.error`。
+  只把它变可观察，**不**改变重试行为、**不**进死信。
+- ⚠️ 这一条与 V1 刻意相反，属于需要登记的差异：V1 `memory/outbox_relay.py` 的 `flush` 把 ack
+  失败也计入同一预算，理由写在它的注释里（"ack 持续失败的条目必须死信，不能靠每轮重复 upsert
+  空转（毒丸）"）。V2 不采纳该取舍，因为 V2 的 outbox 行本身就是"未收敛"标记、且每轮最多一次
+  幂等写；但 V1 真正担心的是"卡死且无人知晓"，这一点成立 ⇒ 用上面的独立 `ERROR` 升级补上。
+  两条路径的记录契约不同（V1 `PendingMemory` / V2 `PendingMemoryChangeV2`），本票不改 V1。
+  （2026-09-24 修后重审 Standards 轴提出，复核后确认采纳。）
 
 ### D8 — 检索命中必须回 SQLite 复核（AC7）
 
@@ -210,11 +221,18 @@ provenance。就地改造会让"V2 写入"和"V1 读取"在同一列上语义分
 
 ### 3.2 为什么"至多一条 active"要交给数据库
 
-应用层自觉在并发下必然失守（TOCTOU：先读状态再写）。部分唯一索引让"两条 active"在
-**插入那一刻**被数据库拒绝，不依赖任何调用方纪律。判别性测试 =
-`tests/memory/v2/test_v2_store.py::test_concurrent_updates_leave_exactly_one_active_version`
-（两个写者基于同一版本并发派生，断言恰好一个成功、一个 `ValueError`、
-`list_active` 只剩胜者、`superseded_by` 未被败者改脏）。
+应用层自觉在并发下必然失守（TOCTOU：先读状态再写）。这里其实是**两层**数据库约束，
+各自接住不同的失败模式、各有独立的判别性测试——把它们混为一谈会得出过强的结论：
+
+| 层 | 约束 | 接住什么 | 判别性测试 |
+| --- | --- | --- | --- |
+| 版本唯一 | 表级 `UNIQUE(root_id, version)` | 两个写者从**同一版本**派生、算出**同一个**目标版本 | `test_concurrent_updates_leave_exactly_one_active_version`（断言恰好一个成功、一个 `ValueError`、`list_active` 只剩胜者、`superseded_by` 未被败者改脏） |
+| 至多一条 active | 部分唯一索引 `memory_v2_one_active`（`WHERE status='active'`） | **绕过 store** 的写入（原始 SQL / 其它写入方）插入"同 `root_id`、版本不同、两条都 active" | `test_at_most_one_active_is_enforced_by_the_partial_index_itself` |
+
+⚠️ 2026-09-24 修后重审 Spec 轴指出：并发用例里两个写者的目标版本相同，**先**被表级
+`UNIQUE(root_id, version)` 接住 ⇒ 它证明不了部分唯一索引在起作用。原始 SQL 探针复核成立
+（`DROP INDEX memory_v2_one_active` 后那条非法插入会**成功**）。因此上表把两层分开登记，
+并补了第二行那个用例；本轮变异红证里对应「把索引退化成非唯一 ⇒ 该用例变红」一条。
 
 ### 3.3 为什么 `MemoryDraftV2` 与 `MemoryRecordV2` 分成两个模型
 
@@ -263,8 +281,8 @@ provenance。就地改造会让"V2 写入"和"V1 读取"在同一列上语义分
 | 文件 | 承载的决策 |
 | --- | --- |
 | `types.py` | D1（判别联合 / `Literal[2]` / `extra="forbid"`）、D2（draft 与 record 共用 `_MemoryContentFields`）、D3（tier/scope/provenance 规则）、D4（`TrustedMemoryIdentity` / `UntrustedIdentityError` / `assert_trusted_identity`） |
-| `store.py` | D5（版本 + 部分唯一索引 + `_require_active` + scope/project 禁改）、D6（invalidate 保留内容）、D7（记录行 + outbox 同事务、`PendingMemoryChangeV2` 自足、`revision` ack） |
-| `index.py` | D7（`MemoryV2VectorIndex` 端口、`MemoryV2IndexRelay` 的失败保留 / 死信 / revision 重置、ack 与索引失败分开归因）、D8（`resolve_active_hits`） |
+| `store.py` | D5（版本 + **两层 active 约束**：表级 `UNIQUE(root_id, version)` + 部分唯一索引 + `_require_active` + scope/project 禁改）、D6（invalidate 保留内容）、D7（记录行 + outbox 同事务、`PendingMemoryChangeV2` 自足、`revision` ack） |
+| `index.py` | D7（`MemoryV2VectorIndex` 端口、`MemoryV2IndexRelay` 的失败保留 / **索引侧**死信 / revision 重置、账本故障的独立 `ERROR` 升级）、D8（`resolve_active_hits`） |
 | `capability.py` | D9（`MemoryV2Capability` Protocol + `MemoryV2Service` 组合） |
 | `__init__.py` | 显式导出契约面（避免"包里任何东西都能被 `import *` 拿到"） |
 
@@ -273,32 +291,37 @@ provenance。就地改造会让"V2 写入"和"V1 读取"在同一列上语义分
 | 文件 | 覆盖 |
 | --- | --- |
 | `_records.py` | 三种 payload 的工厂（含 `make_draft` / `make_record`），各测试文件共用 |
-| `test_v2_types.py` | AC2 的边界与反控：内容/数值边界（含 `inf` / `-inf` / `nan`）、kind-payload 判别、tier/scope 组合、provenance（`user_edit` 是唯一豁免档）、身份冲突、不可变性 |
-| `test_v2_store.py` | AC1（roundtrip）、AC3（跨会话项目可见性 + 跨项目/用户/租户不可见）、AC4（版本 + supersession + 版本历史）、AC5（失效不出 active 面）、AC6 前半（outbox 入队 / ack revision / 自足路由）、**并发 active 不变量**、`list_active` 的 project 谓词判别性、`profile` 存档往返 |
-| `test_v2_index.py` | AC6（注入 upsert **与 delete** 失败 ⇒ 已提交事实保留 + outbox 可恢复 + 重放恰好收敛一次）、死信预算与 revision 重置、账本故障不消耗索引预算、AC7（伪造/过期/跨归属命中复核） |
+| `test_v2_types.py` | AC2 的边界与反控：内容/数值边界（含 `inf` / `-inf` / `nan`）、kind-payload 判别、tier/scope 组合、provenance（豁免面 = `user_edit` **且** 无会话；带会话的 `user_edit` 仍须指得出事件）、身份冲突、不可变性 |
+| `test_v2_store.py` | AC1（roundtrip）、AC3（跨会话项目可见性 + 跨项目/用户/租户不可见）、AC4（版本 + supersession + 版本历史）、AC5（失效不出 active 面）、AC6 前半（outbox 入队 / ack revision / 自足路由）、**并发 active 不变量**（+ 部分唯一索引的独立判别性用例）、`list_active` 的 project 谓词判别性（含**三个越权方向**）、`get` 的项目归属判别性、`profile` 存档往返 |
+| `test_v2_index.py` | AC6（注入 upsert **与 delete** 失败 ⇒ 已提交事实保留 + outbox 可恢复 + 重放恰好收敛一次）、死信预算与 revision 重置、账本故障不消耗索引预算、账本持续失败的 `ERROR` 升级、AC7（伪造/过期/跨归属命中复核） |
 | `test_v2_capability.py` | 经 `MemoryV2Capability` Protocol 走完整生命周期（create → search → update → invalidate）+ 实现与 Protocol 的方法面一致性 |
 
-### 5.1 实测读数（本机，2026-09-24，修复本轮两轴审查 findings 之后重测）
+### 5.1 实测读数（本机，2026-09-24；处置完两轮审查 findings 之后重测）
+
+**断言口径：用例数与失败集合（可复现）；耗时只作参考，不作断言**（2026-09-24 修后重审 Spec 轴 P4-1）。
 
 ```
 $ .venv/Scripts/python.exe -m pytest tests/memory/v2 -q --no-header
-114 passed in 5.36s
+119 passed
 
 $ .venv/Scripts/python.exe -m ruff check .
 All checks passed!
 
-$ .venv/Scripts/python.exe -m pytest tests/memory -q --no-header     # 全量 = V1 225 + V2 114
-339 tests, 1 failed / 338 passed in 198.04s
-── 唯一失败：tests/memory/test_memory_lifecycle.py
-   ::test_concurrent_writers_converge_on_one_row_and_one_index_state
-   形态恒为 sqlite3.OperationalError: attempt to write a readonly database
-   （V1 既存环境 flaky，见 §5.2）
-── V2 的 114 条本次全绿。**这不能读作"V2 免疫该通道"** —— 见 §5.2 末尾的"结论边界"。
+$ .venv/Scripts/python.exe -m pytest tests/memory -q --no-header     # 全量 = V1 225 + V2 119
+失败集合 = { tests/memory/test_memory_lifecycle.py
+             ::test_concurrent_writers_converge_on_one_row_and_one_index_state }
+形态恒为 sqlite3.OperationalError: attempt to write a readonly database
+（V1 既存环境 flaky，见 §5.2）—— **除它之外无任何失败**。
 ```
 
-> ⚠ **本节的证据外延在 2026-09-24 被两轴审查驳回并已更正**：修复前本节写的是
-> "102 条全绿 + `-k concurrent` 连跑 10 次 10/10 ⇒ V2 不受该环境通道影响"。
-> 后半个推论不成立（§5.2 末尾给出理由）。本节现在只声明**观测**，不声明**性质**。
+> ⚠ **本节的证据外延在 2026-09-24 被两轴审查驳回并已更正两次**：
+>
+> 1. 首轮修复前本节写的是"102 条全绿 + `-k concurrent` 连跑 10 次 10/10 ⇒ V2 不受该环境
+>    通道影响"。后半个推论不成立（理由见 §5.2 末尾的"结论边界"）⇒ 本节改为只声明**观测**。
+> 2. 修后重审后又把口径从"`338 passed` / 秒数"改成**失败集合**：本机负载下总数与秒数都
+>    不可复现，用它们当断言等于给自己埋一条假红灯。
+>
+> 现在本节声明的是：**在本次运行里，V2 的 119 条全绿、全量只有 §5.2 登记的那一条失败**。
 
 ### 5.2 全量套件里那条 V1 失败：判定为**既存 flaky，非本票回归**
 
@@ -355,22 +378,31 @@ $ .venv/Scripts/python.exe -m pytest tests/memory -q --no-header     # 全量 = 
 - 本票的并发用例只能作为"在未被环境干扰的运行里 R3/R4 成立"的证据，**不能**作为
   "V2 并发安全性已被稳定验证"的证据；
 - 该非确定性是**施工环境**问题（`%TEMP%` 落在 `safe-delete` 守卫视野内），处置归环境/工具线，
-  **不改变本票的实现结论**，也不允许用放宽断言 / 缩小范围的方式让它变绿（§8 Scope Lock）。
+  **不改变本票的实现结论**。
+
+处置口径：按 Scope Lock（AGENTS.md §8）本票**只报告、不顺手修**；该 flaky 的修复归属 V1 记忆线。
+备选方向：让并发写者各自用独立 DB 文件，或把该用例的并发写串行化。
+**不允许**用放宽断言 / 缩小范围的方式让它变绿。
 
 ---
 
 ### 5.3 本轮审查 findings 的处置与变异红证（2026-09-24）
 
 两轴独立审查（Standards + Spec，各一只读子代理，fixed point `7dc5eb4`）判 `NEEDS-FIX`：
-`P0=0`；两轴独立收敛到**同一个 P1**。逐条处置如下，每条都用"回退修复 ⇒ 目标用例变红"作判别性证明。
+`P0=0`；两轴独立收敛到**同一个 P1**。逐条处置如下。
+
+判别性口径（2026-09-24 修后重审 Standards 轴 P3-3 要求收敛）：**凡能用「回退实现 ⇒ 目标用例变红」
+证明的，下文给出红在哪条**；结构性删除与文档更正没有变异红证，它们的判别性来源在下文单独说明
+（把"删死代码"写成"回退即变红"是过强的声明）。同一处修复内部**互为冗余**的两半，只回退其中一半
+**应当仍然绿**——`首轮 P2` 那一行即属此类，已按该口径改写。
 
 | # | finding | 处置 | 红证（回退 ⇒ 红在哪条） |
 | --- | --- | --- | --- |
 | **P1** | `list_active` 的项目谓词写成"调用方有 `project_id` 就按 `project_id` 比较" ⇒ `user_global` 行（`project_id` 为 `NULL`）被**静默**筛掉，破坏 §4.3 / R5。两轴独立复现。 | 谓词改为 `AND (scope <> 'project' OR project_id = ?)`——项目过滤**只**对 `project` 作用域生效 | 回退谓词 ⇒ `test_list_active_user_global_is_visible_with_a_project_context` 红 |
 | **P2** | AC6 / R7 的 **delete 失败**半边无判别性测试（`fail_delete` 零引用） | 新增 `test_index_delete_failure_keeps_the_committed_state_and_the_intent`（失败保留状态与意图 + 恢复后恰好在 `delete_calls` 里出现一次），并给 AC5 用例补 `contains` / `delete_calls` 断言（原断言只看 `search` 结果，query 不匹配也同样为空） | 回退需改实现（本仓库不改生产代码来造红证）；该用例同时钉住"失败路径不得假装成功" |
-| **P2** | `acknowledge` 失败与索引失败**共用**重试预算 ⇒ 一次账本故障可永久毒住一条健康的 key | 拆开：`_apply` 成功即清预算；ack 失败只记日志、**不**消耗预算（`MemoryV2IndexRelay` docstring 同步） | 回退成共用预算 ⇒ `test_acknowledge_failure_does_not_poison_the_index_retry_budget` 红 |
+| **P2** | `acknowledge` 失败与索引失败**共用**重试预算 ⇒ 一次账本故障可永久毒住一条健康的 key | 拆开：`_apply` 成功即清预算；ack 失败只记日志、**不**消耗预算（`MemoryV2IndexRelay` docstring 同步） | 整段结构回退（= 修复前）⇒ `test_acknowledge_failure_does_not_poison_the_index_retry_budget` 红。<br>⚠️ 只回退其中**一半**（把 ack 改回共用预算、但保留"索引成功即清预算"）**仍然绿**——两处互为冗余，索引每轮成功都会清掉共享计数，毒丸攒不到上限。变异脚本把这一条按 `expect=green` 登记，不再写成"回退即红" |
 | **P3** | 死信预算与 revision 重置无测试 | 新增两条：预算耗尽后**不再尝试**但 outbox 行保留；同 id 的 revision 变化重置预算 | 回退死信判断 ⇒ 预算用例红 |
-| **P3** | `explicit_command` 允许空 provenance（§6.1 的豁免面只有 `user_edit`） | 收紧为"`user_edit` 是唯一豁免档" | 回退成只拦 `automatic` ⇒ `test_provenance_sources_reject_empty_source_event_ids[explicit_command]` 红 |
+| **P3** | `explicit_command` 允许空 provenance（§6.1 的豁免面只有 `user_edit`） | 收紧为"`user_edit` 是唯一豁免档"。（修后重审又进一步收紧为**合取**——`user_edit` **且**无会话——见 §5.4 第 7 条） | 回退成只拦 `automatic` ⇒ `test_provenance_sources_reject_empty_source_event_ids[explicit_command]` 红 |
 | **P3** | `tier = profile` 未经存储层往返验证 | 新增 `test_profile_tier_roundtrips_through_the_store` | 回退 `_values` 的 tier 为常量 ⇒ 该用例红 |
 | **P3** | `allow_inf_nan=False` 冗余（`ge`/`le` 已挡住非有限值） | 删掉该参数，并补 `inf` / `-inf` 反控（`nan` 原本已有） | 该断言由 `ge`/`le` 提供；见 `test_importance_out_of_range_rejected` / `..._strength_...` |
 | **P3** | 死代码：`MemoryV2Service.store` property、`MemoryV2IndexRelay.stop()`、`indexed` 列（只写不读）、4 个包级导出常量零消费者、`MemoryV2Capability` 未导出 | 全部删除；改为在 `__init__.py` 导出 `MemoryV2Capability`（D9 说"边界是 Protocol"，导出它才与之一致） | 结构性删除，无红证（见下"为何这几条没有变异"） |
@@ -383,13 +415,46 @@ $ .venv/Scripts/python.exe -m pytest tests/memory -q --no-header     # 全量 = 
 （`grep -rn indexed src/agent_harness/memory/v2/ tests/memory/v2/` 零命中）。
 为这类删除造"回退 ⇒ 变红"是把可编译性当测试，收益为负。
 
-变异红证脚本（`.scratch/mutation_proof_297.py`，非交付物）本轮 5/5 全部按预期变红，
-且脚本在 `finally` 里用原始字节恢复并逐字节比对（不触碰任何 git 写操作）。
+变异红证脚本（`.scratch/mutation_proof_297.py`，非交付物）：每条用例带 `expect` 字段声明判别性
+（`red` = 回退后**必须**变红；`green` = 冗余半边，回退后**应当**仍绿），脚本逐条核对。
+它不依赖任何 git 写操作——只读写目标源文件的字节，`finally` 里按原始字节恢复并逐字节比对；
+另外启动时把被触碰的文件副本放到 `.scratch/mutation_backup/`（脚本被硬杀时手工还原用）。
+读数见 §5.4。
 
+---
 
-按 Scope Lock（AGENTS.md §8）本票**只报告、不顺手修**；处置归属 V1 记忆线。
-备选方向：让并发写者各自用独立 DB 文件，或把该用例的并发写串行化。
-**不允许**用放宽断言 / 缩小范围的方式让它变绿。
+### 5.4 修后重审 findings 的处置（2026-09-24）
+
+按 `docs/SDD_WORKFLOW_PROTOCOL.md` §8.3 第 4 条，修后用掉**每轴 1 轮**重审预算：两个只读子代理
+分别从 Standards / Spec 轴审 `7dc5eb4..16d12d7`，**均判 `PASS-WITH-NITS`（`P0=0`、`P1=0`）**。
+逐条处置如下（这些是**修后重审**提出的新 findings，与 §5.3 的首轮 findings 不同批）。
+
+| # | 轴 / 编号 | finding | 处置 | 判别性证据 |
+| --- | --- | --- | --- | --- |
+| 1 | Standards P2-1 | ADR §D7 把"连续失败后死信"写得像对**所有**失败都成立，与代码（只统计索引侧）不符 | §D7 改写为"死信预算**只**统计索引侧失败"，并补账本故障的独立 `ERROR` 升级 | 文档与实现一致；实现侧由第 4 条的红证覆盖 |
+| 2 | Standards P2-2 | ack 无界重试且**无升级**，与 V1 `outbox_relay.py` 的刻意相反策略冲突 | 采纳"独立升级"：新增 `_count_ack_failure`，连续 `MAX_CONSECUTIVE_FAILURES` 次 ack 失败 ⇒ `logger.error`（仍不死信）；§D7 明确登记与 V1 的差异及理由 | 新增 `test_a_persistently_failing_ledger_escalates_to_error_without_dead_lettering`；变异「删掉 ERROR 升级」⇒ 该用例红 |
+| 3 | Standards P3-1 | `index.py` 模块 docstring 声称两边"策略一致"，在 ack 预算这一点上已为假 | 改写为"共有的策略 + **一处刻意不跟 V1** 的地方"，指到 V1 文件与 §D7 | 文档更正 |
+| 4 | Standards P3-2 | §5.3 末尾悬挂了本属 §5.2 的收尾段（Scope Lock 措辞） | 移回 §5.2 末尾，§5.3 只留本轮内容 | 文档更正 |
+| 5 | Standards P3-3 / Spec P4-2 | 变异脚本标签/判别性声明过强（把冗余半边写成"回退即红"） | 脚本引入 `expect` 字段（`red`/`green`）并对冗余半边按 `green` 登记；§5.3 的 P2 行同步改写；§5.3 表头口径改写 | 脚本自检：冗余半边登记为 `green` 且实测 `rc=0` |
+| 6 | Standards P3-4 / Spec P3-2 | P1 的原理在 ADR 内多处复述；§5.3 表头"每条都用回退⇒变红"与其中两行（delete 失败、删死代码）矛盾 | §5.3 表头按"给了红证 / 未给红证"分口径重写（见第 5 条）；P1 原理的单点解释留在 `SqliteMemoryV2Store.list_active` 的 docstring，本 ADR 只留指向该用例的指针 | 文档更正 |
+| 7 | Standards P4-1 / Spec P2-3 | provenance 豁免只看 `source_type`，忽略 `source_session_id` ⇒ 带会话的 `user_edit` 也能空 provenance，宽于 §6.1 | 收紧为**合取**：`user_edit` **且** `source_session_id is None` 才豁免 | 新增 `test_user_edit_with_a_session_still_requires_an_event_id`；变异「豁免只判 `source_type`」⇒ 该用例红 |
+| 8 | Spec P2-1 | `list_active` 的越权方向（跨项目 / 跨租户 / 同租户他人）无判别性测试——把谓词整段删掉，V2 用例仍全绿 | 新增 `test_list_active_project_scope_never_leaks_across_projects_or_identities`（三个方向的邻居同场） | 变异「项目谓词整段删掉」⇒ 该用例红 |
+| 9 | Spec P2-2 | ADR §3.2 把"部分唯一索引"的判别性挂在一个实际由表级 `UNIQUE(root_id, version)` 接住的用例上 | §3.2 改为**两层约束分表**登记；补 `test_at_most_one_active_is_enforced_by_the_partial_index_itself`（原始 SQL 绕过 store 插两条 active、版本不同） | 变异「`memory_v2_one_active` 退化成非唯一」⇒ 该用例红（探针复核：`DROP INDEX` 后非法插入**成功**） |
+| 10 | Spec P3-1 | `get` 的"project 记录 + 无项目上下文"只被间接覆盖 | 新增 `test_get_of_a_project_record_is_denied_without_a_project_context`（同用户、无项目上下文 ⇒ `KeyError`） | 变异「`_visible` 删掉项目归属判断」⇒ 该用例红 |
+| 11 | Spec P3-3 | AC8 的"V1 套件保持 green"在本机不字面成立 | 已在 §5.2 登记为**既存环境性 flaky**（非本票回归），并在 §7 门禁条款里写明只允许那一条 | §5.2 的对照证据链 |
+| 12 | Spec P4-1 | §5.1 的耗时读数为秒级、不可复现 | §5.4 起改为登记**用例数 / 失败集合**（可复现），耗时只作参考不再作为断言 | 见下方重测读数 |
+| 13 | Standards P4-2 | 变异脚本被硬中断会留脏工作树 | 脚本启动时把被触碰文件备份到 `.scratch/mutation_backup/`，并在输出里打印还原路径 | 脚本自证 |
+
+**§5.4 重测读数（本机，2026-09-24，口径 = 用例数与失败集合）**：
+
+- `pytest tests/memory/v2` = **119 passed**（由 114 → +5：§5.3 与本节的 5 条新用例）；
+- `ruff check .` = `All checks passed!`；
+- `pytest tests/memory`（含 V1）实测 **344 tests / 1 failed**，失败集合恰好是
+  **{ `tests/memory/test_memory_lifecycle.py::test_concurrent_writers_converge_on_one_row_and_one_index_state` }**
+  = §5.2 登记的那一条 V1 环境性失败，**集合差集为空**、无新增失败
+  （判定口径见 §5.1/§5.2：看集合，不看失败数）；
+- 变异脚本 `.scratch/mutation_proof_297.py`：**12 条**用例全部按各自的 `expect` 落地
+  （11 条 `red` 实测变红 + 1 条 `green` 实测仍绿，后者正是 §5.3 首轮 P2 那对冗余半边）。
 
 ---
 
@@ -408,9 +473,11 @@ LangMem / 其他项目的代码，**该票**必须补 license notice——本 AD
 ## 7. 验证与登记约定
 
 - **门禁**：`ruff check .`（gate0 的 `ruff` 车道）必须 clean；`pytest tests/memory/v2` 必须全绿
-  （本机 114/114）；`pytest tests/memory`（含 V1）只允许出现 §5.2 登记的那一条 V1 环境性失败
-  （形态恒为 `attempt to write a readonly database`）。任何**新增**失败一律按本票回归处理。
-  判别性证据见 §5.1 与 §5.3（本轮 findings 的逐条变异红证）。
+  （本机 119/119）；`pytest tests/memory`（含 V1）的**失败集合**只允许是 §5.2 登记的那一条 V1
+  环境性失败（形态恒为 `attempt to write a readonly database`）。判据是**集合差集为空**，
+  不是"失败数"——本机负载下总数不可复现（§5.1）。任何**新增**失败一律按本票回归处理。
+  判别性证据见 §5.3 与 §5.4（两轮 findings 的逐条变异红证；脚本 `.scratch/mutation_proof_297.py`
+  的 `expect` 字段就是逐条的判别性声明）。
 - **覆盖**：本票的 commit 必须在 `docs/review_ledger.d/` 有归属行（`scripts/check_review_coverage.py`）。
 - **ADR 索引**：本 ADR 已在 `docs/PHASE_STATUS.md` 的 Memory V2 条目下被引用（2026-09-24 补），
   否则后续票找不到它。
