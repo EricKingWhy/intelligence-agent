@@ -147,3 +147,4 @@ c89fc62	#293（B-42）门禁读数绿 JSON 笔 c89fc62b（docs/gate/96baf4f….j
 18de51b	#293（B-42）集成/关单状态如实化笔 18de51b4（PHASE_STATUS/tracker/月度归档三个 .md，docs-only）
 2627286270b006b1345578b13820a1028e2e58f7	docs(acceleration): 审计包头部状态块同步（SDD_ACCELERATION_AUDIT.md，.md 属文档扩展名，docs-only）
 326099f08e2484476f8337b97ca91b3914dfc6d7	docs(workflow): 文档瘦身与失真修复（AGENTS.md + 协议，根级 .md 与 docs/ 下 .md 均属文档扩展名，docs-only；指针化 3 处 + 失真/悬空引用更正 8 处，判据一字未删）
+79ee8abca1e25beafc3251bd3dfe863a5b904748	docs(workflow): 协议三处失真修复 + §7 第 8 条③登记守卫新枚举源（SDD_WORKFLOW_PROTOCOL.md，docs/ 下 .md 属文档扩展名，docs-only）
