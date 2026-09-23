@@ -64,10 +64,17 @@
    读数**机器落盘** `docs/gate/64d2c78979b8c263ba9d90e2dd500b735bcb5bcd.json`。
 9. **§8.1 第 3 条读数传递（冻结 → 集成）**
    - 判据① `git diff --name-status --no-renames e58c1339 HEAD` ⇒ 状态列**只有 `A` / `M`**，路径全部命中 `DOC_PATTERN`
-   - 判据② `git status --short` ⇒ 除 `?? .zcodeignore`（有意例外）外为空
+   - 判据② `git status --short -uall`（锚推送 tip `e800ecb3`）⇒ 仅 `?? .zcodeignore`（稳态）
+     与 `?? docs/research/2026-09-23-agent-tool-loop-termination-benchmark.md`
+     —— 后者**如实记为并行线产物**（不在本批任何提交的 `--name-status` 内、本批未创建或写入该路径，
+     按「不碰他人交付面」原则保持未跟踪）
    ⇒ 冻结树读数对被集成树**继续成立**，无需二次全量。
-10. **覆盖闸门** `python scripts/check_review_coverage.py` ⇒ **exit 0**
-    （区间 `09ca47a..HEAD`，三元组 `538 / 373 / 165`，`❌ 0`）。
+10. **覆盖闸门** `python scripts/check_review_coverage.py` ⇒ **exit 0**。末行原文：
+    `✅ 台账覆盖闸门通过：089524a~1..HEAD 每条 commit 均有归属（审查行 / 白名单 / 台账记账）。`
+    并在推送 tip `753acc1` 上重跑后逐条计数（`grep -c` 等价物）：
+    `✅ 白名单(docs-only)` **81** 条 + `✅ 台账自身更新（自动放行）` **93** 条 = **174** 条归属判定，
+    `❌` **0** 条。（本项为**时点读数**：更早一次运行在只落审查行的中间 tip 上，
+    区间与计数不同于此处；引用时以本次原文为准。）
 
 ---
 
