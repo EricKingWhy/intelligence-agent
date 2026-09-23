@@ -68,7 +68,6 @@ CREATE TABLE IF NOT EXISTS memory_v2_records (
     source_event_ids TEXT NOT NULL, evidence TEXT NOT NULL,
     valid_at TEXT, invalidated_at TEXT, superseded_by TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    indexed BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE(root_id, version)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_active
@@ -191,7 +190,7 @@ class SqliteMemoryV2Store:
         async with _connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             await connection.execute(
-                "UPDATE memory_v2_records SET status=?, invalidated_at=?, updated_at=?, indexed=FALSE "
+                "UPDATE memory_v2_records SET status=?, invalidated_at=?, updated_at=? "
                 "WHERE memory_id=?", (MemoryStatus.INVALIDATED.value, now, now, memory_id))
             await self._enqueue(connection, memory_id, MemoryOperationV2.DELETE,
                                 row["tenant_id"], row["user_id"], row["scope"], row["project_id"])
@@ -224,7 +223,7 @@ class SqliteMemoryV2Store:
             if previous is not None:
                 # 先让出 root_id 上的 active 槽位，再插入新版本（部分唯一索引不允许两条 active）。
                 await connection.execute(
-                    "UPDATE memory_v2_records SET status=?, superseded_by=?, updated_at=?, indexed=FALSE "
+                    "UPDATE memory_v2_records SET status=?, superseded_by=?, updated_at=? "
                     "WHERE memory_id=?",
                     (MemoryStatus.SUPERSEDED.value, memory_id, now, previous["memory_id"]))
                 await self._enqueue(connection, previous["memory_id"], MemoryOperationV2.DELETE,
@@ -272,6 +271,12 @@ class SqliteMemoryV2Store:
 
         `project` 作用域在没有可信项目上下文时返回空列表而不是报错：那是
         "这次调用没有项目视野"，不是调用方错误。
+
+        ⚠ 项目过滤**只对 `project` 作用域生效**（`scope <> 'project' OR project_id = ?`）：
+        `user_global` 行的 `project_id` 恒为 `NULL`，若把谓词写成"调用方有 project_id 就过滤"，
+        则 `NULL = 'project-x'` 求值为 NULL ⇒ 整条谓词非真 ⇒ **user_global 记录整批被静默筛掉**。
+        而带项目上下文的调用方照样必须看得见自己的 user_global 记忆（§4.3 / R5）。
+        判别性测试：`test_list_active_user_global_is_visible_with_a_project_context`。
         """
         if scope is MemoryScope.PROJECT and trusted.project_id is None:
             return []
@@ -280,10 +285,10 @@ class SqliteMemoryV2Store:
             connection.execute("""
                 SELECT * FROM memory_v2_records
                 WHERE tenant_id=? AND user_id=? AND scope=? AND status='active'
-                  AND (? IS NULL OR project_id=?)
+                  AND (scope <> 'project' OR project_id = ?)
                 ORDER BY created_at DESC, memory_id DESC LIMIT ? OFFSET ?
             """, (trusted.tenant_id, trusted.user_id, scope.value,
-                  trusted.project_id, trusted.project_id, max(0, limit), max(0, offset))) as cursor,
+                  trusted.project_id, max(0, limit), max(0, offset))) as cursor,
         ):
             return [_to_record(row) for row in await cursor.fetchall()]
 
@@ -334,16 +339,17 @@ class SqliteMemoryV2Store:
         return [self._change(row) for row in rows]
 
     async def acknowledge(self, change: PendingMemoryChangeV2) -> bool:
+        """按 `revision` 原子确认一条变更已收敛；匹配到才返回 `True`（重放第二次即 `False`）。
+
+        **outbox 行自身就是"还没收敛"的标记**：删掉它 = 收敛完成。这里刻意不在记录行上
+        再写一个"已索引"列——那个标记没有任何读者，而多一份状态就多一处可能与 outbox 不一致。
+        """
         async with _connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
                 "DELETE FROM memory_v2_outbox WHERE memory_id=? AND revision=?",
                 (change.memory_id, change.revision))
             matched = cursor.rowcount == 1
-            if matched:
-                # 记录行可能已不在（outbox 行的生命周期独立于记录行）→ 命中 0 行，幂等。
-                await connection.execute(
-                    "UPDATE memory_v2_records SET indexed=TRUE WHERE memory_id=?", (change.memory_id,))
             await connection.commit()
         return matched
 

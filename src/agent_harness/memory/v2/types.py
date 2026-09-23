@@ -177,8 +177,10 @@ class _MemoryContentFields(BaseModel):
     project_id: str | None = Field(default=None, min_length=1)
     content: str = Field(min_length=1, max_length=CONTENT_MAX_CHARS)
     payload: MemoryPayload
-    importance: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
-    strength: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    # `ge`/`le` 对 `inf` / `-inf` / `nan` 同样失败（`nan` 与任何数比较均为假 ⇒ 不满足 `ge`），
+    # 所以不需要额外的 `allow_inf_nan=False`；三者的反控测试在 `test_v2_types.py`。
+    importance: float = Field(ge=0.0, le=1.0)
+    strength: float = Field(ge=0.0, le=1.0)
     source_type: SourceType
     source_session_id: str | None = None
     source_event_ids: list[str] = Field(default_factory=list)
@@ -205,10 +207,13 @@ class _MemoryContentFields(BaseModel):
                 raise ValueError("project scope requires project_id")
         elif self.project_id is not None:
             raise ValueError("user_global scope must not carry project_id")
-        if self.source_type is SourceType.AUTOMATIC and not self.source_event_ids:
-            # §6.1：自动形成的记忆必须指得出它是从哪些事件推出来的；
-            # 空 provenance 的"自动记忆"无法被审计，也就无法被撤回。
-            raise ValueError("automatic source requires at least one source_event_id")
+        if self.source_type is not SourceType.USER_EDIT and not self.source_event_ids:
+            # §6.1 原文："Non-empty ... may be empty **only** for direct UI edits without a
+            # session" ⇒ 豁免面只有 `user_edit` 一档（UI 上的直接编辑可能压根没有会话）。
+            # `automatic`（推断出来的）与 `explicit_command`（会话里下的命令）都指得出事件，
+            # 也必须指得出——空 provenance 的记忆无法被审计，也就无法被撤回。
+            raise ValueError(
+                f"{self.source_type.value} source requires at least one source_event_id")
 
 
 class MemoryDraftV2(_MemoryContentFields):

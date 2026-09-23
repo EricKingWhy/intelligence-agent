@@ -20,7 +20,6 @@ ack 按 revision 匹配）是一致的，这是有意的，不是重复实现—
 from __future__ import annotations
 
 import logging
-from contextlib import suppress
 from typing import Protocol
 
 from agent_harness.memory.v2.store import (
@@ -115,8 +114,12 @@ class InMemoryMemoryV2Index:
 class MemoryV2IndexRelay:
     """SQLite outbox → 派生索引的收敛。
 
-    失败一律保留 outbox 行、下轮重试；连续 `MAX_CONSECUTIVE_FAILURES` 次后进入
-    本进程死信（不再空转，outbox 行保留可观察）。计数器活在进程内存里 ⇒ 重启自愈。
+    失败一律保留 outbox 行、下轮重试；连续 `MAX_CONSECUTIVE_FAILURES` 次**索引侧**失败后
+    进入本进程死信（不再空转，outbox 行保留可观察）。计数器活在进程内存里 ⇒ 重启自愈。
+
+    重试预算**只**统计索引侧失败（`_count_index_failure`）：`acknowledge` 失败发生在索引
+    **已经写成功之后**，把它计入预算会让一次账本故障永久毒住一条健康的 key——那条变更再也
+    不会被重试，索引与实际状态就此静默分叉。重试 ack 本身无害（upsert/delete 幂等）。
 
     刻意没有 asyncio 锁：`acknowledge` 是按 `revision` 原子匹配的，两个并发 flush
     只会有一个 ack 成功、另一个返回 `False`（不重复计数）；upsert/delete 自身幂等。
@@ -144,15 +147,20 @@ class MemoryV2IndexRelay:
                 try:
                     await self._apply(change)
                 except Exception as error:  # noqa: BLE001 — 保留 durable outbox，下轮重试。
-                    self._count_failure(change, error)
+                    self._count_index_failure(change, error)
                     continue
+                # 索引侧已经收敛 ⇒ 这条不再可能是毒丸，先清掉它的重试预算，
+                # 再单独处理账本（ack 失败不该把一条健康的 key 记成失败）。
+                self._failure_counts.pop(change.memory_id, None)
+                self._failure_revisions.pop(change.memory_id, None)
                 try:
                     count += await self._store.acknowledge(change)
-                except Exception as error:  # noqa: BLE001 — ack 失败与索引失败分开归因。
-                    self._count_failure(change, error)
-                else:
-                    self._failure_counts.pop(change.memory_id, None)
-                    self._failure_revisions.pop(change.memory_id, None)
+                except Exception as error:  # noqa: BLE001 — 只影响账本，不影响索引健康度。
+                    # 刻意**不**计入重试预算：索引已经写成功，进死信会让 outbox 行永久留存，
+                    # 而重试 ack 本身是无害的（upsert/delete 幂等）⇒ 下轮再试，直到账记上。
+                    logger.warning("Memory V2 outbox acknowledge deferred (%s); index already "
+                                   "converged, outbox row retained",
+                                   type(error).__name__)
             after_id = page[-1].memory_id
         return count
 
@@ -166,7 +174,8 @@ class MemoryV2IndexRelay:
         assert record is not None  # PendingMemoryChangeV2 不变量：upsert ⟹ 携带 record
         await self._index.upsert(record)
 
-    def _count_failure(self, change: PendingMemoryChangeV2, error: Exception) -> None:
+    def _count_index_failure(self, change: PendingMemoryChangeV2, error: Exception) -> None:
+        """索引侧失败的计数（**只**给索引失败用；ack 失败走另一条分支，不消耗预算）。"""
         failures = self._failure_counts.get(change.memory_id, 0) + 1
         self._failure_counts[change.memory_id] = failures
         detail = f"{type(error).__name__}"
@@ -176,11 +185,6 @@ class MemoryV2IndexRelay:
                          change.operation.value, change.memory_id)
         else:
             logger.warning("Memory V2 index sync deferred (%s); outbox retained", detail)
-
-    async def stop(self) -> None:
-        """占位：进程内 relay 无常驻任务，保留给装配层的统一关闭序列。"""
-        with suppress(Exception):  # pragma: no cover - 无资源可释放
-            return
 
 
 async def resolve_active_hits(
