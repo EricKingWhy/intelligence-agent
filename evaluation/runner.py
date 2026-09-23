@@ -22,12 +22,16 @@ from pydantic import BaseModel, Field
 from agent_harness.agent import AgentRuntime
 from agent_harness.model.scripted import ScriptedModel
 from agent_harness.session import (
+    MODEL_COMPLETED,
     RUN_COMPLETED,
+    RUN_STARTED,
+    TOOL_CALL,
     USER_MESSAGE,
     JsonlSessionStore,
     Session,
     SessionEvent,
 )
+from agent_harness.storage import OperationLedger, SqliteOperationLedger
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from evaluation.assertions import (
     dangling_tool_call_ids,
@@ -133,10 +137,19 @@ async def run_case_async(
 
     if runtime_factory is not None:
         runtime = runtime_factory(case)
+        ledger = getattr(
+            getattr(runtime, "executor", None), "operation_ledger", None,
+        )
     else:
         registry = _registry_for_case(case)
         model = _build_script_model(case)
-        runtime = AgentRuntime(model, registry, ToolExecutor(registry))
+        ledger = SqliteOperationLedger(Path(session_root) / "state.db")
+        await ledger.initialize()
+        runtime = AgentRuntime(
+            model,
+            registry,
+            ToolExecutor(registry, operation_ledger=ledger),
+        )
 
     metrics: dict[str, Any] = {}
     error: str | None = None
@@ -147,13 +160,24 @@ async def run_case_async(
         error = f"{type(exc).__name__}: {exc}"
 
     events = list(session.events)
+    operations = (
+        await ledger.list_for_session(session.session_id)
+        if isinstance(ledger, OperationLedger)
+        else None
+    )
     metrics["dangling_tool_calls"] = len(dangling_tool_call_ids(events))
     metrics["duplicate_confirmed_side_effects"] = (
-        duplicate_confirmed_side_effect_count(events)
+        duplicate_confirmed_side_effect_count(operations, events)
     )
     metrics["status"] = result.status if result is not None else "error"
 
-    ok = error is None and metrics["dangling_tool_calls"] == 0
+    ok = (
+        error is None
+        and result is not None
+        and result.status == "completed"
+        and metrics["dangling_tool_calls"] == 0
+        and metrics["duplicate_confirmed_side_effects"] == 0
+    )
     if case.case_type == "tool_selection":
         selection_ok = tool_selection_ok(events, list(case.expected.get("tools", [])))
         metrics["tool_selected"] = selection_ok
@@ -253,6 +277,39 @@ async def _run_kill_resume_case_async(
     session: Session = Session.start(store)
     session.append(USER_MESSAGE, {"content": case.task})
 
+    # Seed the durable model/tool-call boundary that would precede the real
+    # crashed execution; RecoveryCoordinator must reconcile this dangling call.
+    crash_run_id = "run-kill"
+    crash_tool_call = {
+        "id": "call-kill-1",
+        "name": "bash",
+        "args": {"command": "apply-migration"},
+    }
+    session.append(
+        RUN_STARTED,
+        {"turn_index": 1, "agent_profile": "main"},
+        run_id=crash_run_id,
+        agent_id="default",
+    )
+    session.append(
+        MODEL_COMPLETED,
+        {"content": "", "tool_calls": [crash_tool_call]},
+        run_id=crash_run_id,
+        step_id=1,
+        agent_id="default",
+    )
+    session.append(
+        TOOL_CALL,
+        {
+            "tool_call_id": crash_tool_call["id"],
+            "tool_name": crash_tool_call["name"],
+            "args": crash_tool_call["args"],
+        },
+        run_id=crash_run_id,
+        step_id=1,
+        agent_id="default",
+    )
+
     verdict_value = str(case.expected.get("verdict", "CONFIRM_SUCCESS"))
     verdict = ReconcileVerdict(verdict_value)
     tool_result = ToolResult.success(
@@ -293,11 +350,11 @@ async def _run_kill_resume_case_async(
         error = f"{type(exc).__name__}: {exc}"
 
     events = list(recovered.events) if recovered is not None else []
+    operations = await ledger.list_for_session(session.session_id)
+    duplicate_side_effects = duplicate_confirmed_side_effect_count(operations, events)
     metrics: dict[str, Any] = {
         "dangling_tool_calls": len(dangling_tool_call_ids(events)),
-        "duplicate_confirmed_side_effects": (
-            duplicate_confirmed_side_effect_count(events)
-        ),
+        "duplicate_confirmed_side_effects": duplicate_side_effects,
         "kill_resume_ok": kill_resume_ok(events) if recovered is not None else False,
         "agent_runtime_completed": (
             runtime_result is not None and runtime_result.status == "completed"
@@ -310,6 +367,7 @@ async def _run_kill_resume_case_async(
         and metrics["kill_resume_ok"]
         and metrics["agent_runtime_completed"]
         and metrics["dangling_tool_calls"] == 0
+        and metrics["duplicate_confirmed_side_effects"] == 0
     )
     return (
         CaseResult(

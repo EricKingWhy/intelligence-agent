@@ -9,12 +9,14 @@ from __future__ import annotations
 from collections import Counter
 
 from agent_harness.session import (
+    OPERATION_RECONCILE_REQUIRED,
     SESSION_RESUMED,
     TOOL_CALL,
     TOOL_FAILURE_GUARD,
     TOOL_RESULT,
     SessionEvent,
 )
+from agent_harness.storage import Operation, OperationState
 
 
 def dangling_tool_call_ids(events: list[SessionEvent]) -> list[str]:
@@ -33,14 +35,62 @@ def dangling_tool_call_ids(events: list[SessionEvent]) -> list[str]:
     return [call_id for call_id in called if call_id not in answered]
 
 
-def duplicate_confirmed_side_effect_count(events: list[SessionEvent]) -> int:
-    """Count repeated tool-result confirmations for one call (ADR-0019 D8)."""
+def duplicate_confirmed_side_effect_count(
+    operations: list[Operation] | None,
+    events: list[SessionEvent],
+) -> int | None:
+    """Measure duplicate terminal Ledger entries and repeat recovery evidence.
+
+    ``None`` means the Ledger evidence is missing, incomplete, or non-terminal;
+    callers must not turn that into a passing zero. Session events additionally
+    reveal duplicate result confirmations and repeated reconcile decisions.
+    """
+    if operations is None:
+        return None
+
+    call_ids = {
+        str(event.data["tool_call_id"])
+        for event in events
+        if event.type == TOOL_CALL and event.data.get("tool_call_id") is not None
+    }
+    operation_ids = {operation.operation_id for operation in operations}
+    if call_ids != operation_ids:
+        return None
+
+    terminal_states = {
+        OperationState.SUCCEEDED,
+        OperationState.FAILED,
+        OperationState.CANCELLED,
+    }
+    if any(operation.state not in terminal_states for operation in operations):
+        return None
+
+    terminal_counts = Counter(
+        operation.operation_id
+        for operation in operations
+        if operation.state in terminal_states
+    )
+    duplicate_terminals = sum(
+        count - 1 for count in terminal_counts.values() if count > 1
+    )
     result_ids = [
         str(event.data["tool_call_id"])
         for event in events
         if event.type == TOOL_RESULT and event.data.get("tool_call_id") is not None
     ]
-    return sum(count - 1 for count in Counter(result_ids).values() if count > 1)
+    duplicate_results = sum(
+        count - 1 for count in Counter(result_ids).values() if count > 1
+    )
+    reconcile_ids = [
+        str(event.data["tool_call_id"])
+        for event in events
+        if event.type == OPERATION_RECONCILE_REQUIRED
+        and event.data.get("tool_call_id") is not None
+    ]
+    duplicate_reconciles = sum(
+        count - 1 for count in Counter(reconcile_ids).values() if count > 1
+    )
+    return duplicate_terminals + duplicate_results + duplicate_reconciles
 
 
 def tool_selection_ok(events: list[SessionEvent], expected_tools: list[str]) -> bool:

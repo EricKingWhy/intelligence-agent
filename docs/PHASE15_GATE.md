@@ -19,11 +19,11 @@
 
 ## #290 Follow-up：async Experiment 与 false-green Gate（2026-09-24）
 
-`run_langfuse_experiment` 的成功状态现在以 Langfuse `ExperimentResult` 为证据：数据集不能为空或含重复 item/case；结果必须逐 item 对齐；每个 `CaseResult.ok`、`p0_pass`、`dangling_tool_calls` 均达标；recovery case 必须 100% 通过。每个 case 都从事件流测量同一 `tool_call_id` 的重复 `tool/result` 确认数（ADR-0019 D8），该指标缺失或非零均失败；标记/产出 `permission_violations` 的 case 也必须提供且为 0。SDK 丢弃失败 task、遗漏 evaluator 或重复结果均不能得到 `status=ok`。
+`run_langfuse_experiment` 的成功状态现在以 Langfuse `ExperimentResult` 为证据：数据集不能为空或含重复 item/case；结果必须逐 item 对齐；每个 `CaseResult.ok`、适用的 `p0_pass`、`dangling_tool_calls` 均达标；普通 case 的 `AgentRuntime.status` 必须为 `completed`，kill/resume case 必须显式证明 continuation completed；recovery case 必须 100% 通过。`duplicate_confirmed_side_effects` 按 ADR-0019 D8 从 Operation Ledger 测量：每个 `tool/call` 必须能匹配唯一 Ledger operation，Ledger 条目必须处于终态；重复终态条目、重复 `tool/result` 或重复 `operation/reconcile-required` 都计入非零。Ledger 缺失、不完整或仍有非终态时指标记为未测量，不伪报 0，Gate 失败。标记/产出 `permission_violations` 的 case 也必须提供且为 0。SDK 丢弃失败 task、遗漏 evaluator、重复结果或重复 reconcile 均不能得到 `status=ok`。
 
 Langfuse Experiment task 直接 `await run_case_async`；同步 `run_case` 仅供非事件循环调用，在事件循环内明确提示调用 async API。`kill_resume` case 在 RecoveryCoordinator 补齐结果后继续经过 AgentRuntime，确保所有 dataset item 都走 Runtime。
 
-本地验证：`tests/evaluation` 与 Phase 15 默认车道 **19 passed / 2 integration deselected**；Phase 16 **13 passed**；本轮改动 Ruff 全绿。真实 Langfuse passing run 与 deliberately failing control 已加入 `test_gate5_real_seed_idempotent_and_experiment`：要求 pass 为 `ok`、控制组全部失败、两个 dataset run ID 不同、seed 前后 item ID 完全不变。按用户批准，真云 Gate 尚未运行；#287–#290 集成后再执行。成功实验与失败控制实验的 dataset/experiment/trace 均保留作审计证据，不清理、不额外 seed item。
+本地验证：`tests/evaluation` + Phase 15 默认车道 **26 passed / 2 integration deselected**；本轮相关 Ruff 全绿。真实 Langfuse passing run 与 deliberately failing control 已加入 `test_gate5_real_seed_idempotent_and_experiment`：要求 pass 为 `ok`、控制组全部失败、两个 dataset run ID 不同、seed 前后 item ID 完全不变。按用户批准，真云 Gate 尚未运行；#287–#290 集成后再执行。成功实验与失败控制实验的 dataset/experiment/trace 均保留作审计证据，不清理、不额外 seed item。
 
 ## Gate 2 审计清单（官方 best-practices 固化断言，全部对真云回捞数据）
 

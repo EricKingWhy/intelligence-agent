@@ -11,9 +11,7 @@ import pytest
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.model.scripted import ScriptedModel
-from agent_harness.session import TOOL_RESULT, JsonlSessionStore, Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
-from evaluation.assertions import duplicate_confirmed_side_effect_count
 from evaluation.runner import EvalCase, run_case, run_case_async
 from evaluation.support import AddTool
 
@@ -156,6 +154,68 @@ async def test_run_case_async_is_the_core_and_sync_wrapper_rejects_running_loop(
         run_case(_case(), session_root=tmp_path / "sync-in-loop")
 
 
+@pytest.mark.asyncio
+async def test_case_without_operation_ledger_does_not_report_duplicate_metric_as_zero(
+    tmp_path,
+) -> None:
+    from langchain_core.messages import AIMessage
+
+    case = EvalCase(name="untracked", case_type="other", task="Finish without tools.")
+
+    def untracked_runtime(_case: EvalCase) -> AgentRuntime:
+        registry = ToolRegistry()
+        return AgentRuntime(
+            ScriptedModel([AIMessage(content="done")]),
+            registry,
+            ToolExecutor(registry),
+        )
+
+    result, _events = await run_case_async(
+        case, session_root=tmp_path / "untracked", runtime_factory=untracked_runtime,
+    )
+
+    assert result.metrics["duplicate_confirmed_side_effects"] is None
+    assert result.ok is False
+
+
+@pytest.mark.asyncio
+async def test_failed_agent_runtime_status_cannot_pass_a_case(tmp_path) -> None:
+    from langchain_core.messages import AIMessage
+
+    from agent_harness.storage import SqliteOperationLedger
+
+    session_root = tmp_path / "failed-status"
+    ledger = SqliteOperationLedger(session_root / "state.db")
+    await ledger.initialize()
+    registry = ToolRegistry()
+    registry.register(AddTool())
+    case = EvalCase(name="failed-runtime", case_type="other", task="Finish.")
+
+    def failing_runtime(_case: EvalCase) -> AgentRuntime:
+        return AgentRuntime(
+            ScriptedModel([AIMessage(
+                content="",
+                tool_calls=[{
+                    "id": "call-at-step-limit",
+                    "name": "add",
+                    "args": {"first_number": 1, "second_number": 2},
+                    "type": "tool_call",
+                }],
+            )]),
+            registry,
+            ToolExecutor(registry, operation_ledger=ledger),
+            max_steps=1,
+        )
+
+    result, _events = await run_case_async(
+        case, session_root=session_root, runtime_factory=failing_runtime,
+    )
+
+    assert result.metrics["status"] == "max_steps_exceeded"
+    assert result.metrics["duplicate_confirmed_side_effects"] == 0
+    assert result.ok is False
+
+
 def test_langfuse_experiment_awaits_task_and_checks_case_and_evaluator_results(
     tmp_path,
 ) -> None:
@@ -235,12 +295,34 @@ def test_gate_requires_measured_duplicate_side_effect_metric(tmp_path) -> None:
     )
 
 
-def test_duplicate_confirmation_metric_counts_extra_results(tmp_path) -> None:
-    session = Session.start(JsonlSessionStore(tmp_path / "sessions"))
-    session.append(TOOL_RESULT, {"tool_call_id": "same-call", "content": "{}"})
-    session.append(TOOL_RESULT, {"tool_call_id": "same-call", "content": "{}"})
+def test_langfuse_gate_rejects_duplicate_terminal_ledger_evidence(
+    tmp_path, monkeypatch,
+) -> None:
+    from agent_harness.storage.sqlite import SqliteOperationLedger
 
-    assert duplicate_confirmed_side_effect_count(session.events) == 1
+    original_list_for_session = SqliteOperationLedger.list_for_session
+
+    async def list_with_duplicate_terminal(self, session_id: str):
+        operations = await original_list_for_session(self, session_id)
+        return [*operations, operations[0].model_copy()] if operations else operations
+
+    monkeypatch.setattr(
+        SqliteOperationLedger, "list_for_session", list_with_duplicate_terminal,
+    )
+    item = _item()
+    client = _AsyncExperimentClient([item])
+
+    gate = _run_experiment(tmp_path, client)
+
+    case_result = client.result.item_results[0].output["result"]
+    assert case_result["metrics"]["duplicate_confirmed_side_effects"] == 1
+    assert case_result["ok"] is False
+    assert gate["status"] == "failed"
+    assert any(
+        "duplicate_confirmed_side_effects" in reason
+        for failure in gate["failures"]
+        for reason in failure["reasons"]
+    )
 
 
 @pytest.mark.parametrize(

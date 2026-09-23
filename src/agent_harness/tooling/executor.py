@@ -228,6 +228,11 @@ class ToolExecutor:
         """Whether this Executor enforces the durable Operation lifecycle."""
         return self._operation_ledger is not None
 
+    @property
+    def operation_ledger(self) -> OperationLedger | None:
+        """Expose the durable operation evidence to project-owned evaluators."""
+        return self._operation_ledger
+
     async def execute(
         self,
         tool_call: ToolCall | dict[str, Any],
