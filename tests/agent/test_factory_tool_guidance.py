@@ -57,13 +57,25 @@ def _spec(tool_scope: frozenset[str], *, name: str = "coding") -> AgentSpec:
     )
 
 
+def _grant_all(registry: ToolRegistry) -> frozenset[str]:
+    """测试口径：把 registry 里的工具**全部**标为可授予。
+
+    生产路径不这样算——`InProcessSubagentProvider` 按 runtime 剩余深度算
+    grantable（remaining=0 时摘掉 dispatch 工具）。测试里显式写出来，是为了让
+    「可授予集合」成为调用点必须表过态的东西（#286 删掉了「省略 = 全量」默认值）。
+    """
+    return frozenset(tool.name for tool in registry.list())
+
+
 def test_factory_without_flag_appends_nothing():
     """B2 的成立与工具数据无关：工具**有** guidance，默认仍逐字节等于 spec。"""
     registry = ToolRegistry()
     registry.register(FakeTool("probe", "P"))
     spec = _spec(frozenset({"probe"}))
 
-    child = AgentFactory(model=ScriptedModel([])).create(spec, source_registry=registry)
+    child = AgentFactory(model=ScriptedModel([])).create(
+        spec, source_registry=registry, grantable=_grant_all(registry),
+    )
 
     assert child._context_builder.system_prompt == spec.system_prompt
 
@@ -75,7 +87,7 @@ def test_factory_with_flag_appends_guidance():
 
     child = AgentFactory(
         model=ScriptedModel([]), include_tool_guidance=True,
-    ).create(spec, source_registry=registry)
+    ).create(spec, source_registry=registry, grantable=_grant_all(registry))
 
     # BUG-013：join_guidance 现在带澄清句（与父路径同源）。
     from agent_harness.prompt.tool_sections import TOOL_USE_DISCLAIMER
@@ -94,7 +106,7 @@ def test_factory_guidance_comes_from_child_registry():
 
     child = AgentFactory(
         model=ScriptedModel([]), include_tool_guidance=True,
-    ).create(spec, source_registry=registry)
+    ).create(spec, source_registry=registry, grantable=_grant_all(registry))
 
     prompt = child._context_builder.system_prompt
     assert prompt is not None
@@ -110,7 +122,7 @@ def test_factory_child_guidance_respects_persona_order():
     child = AgentFactory(
         model=ScriptedModel([]), include_tool_guidance=True,
         persona=PersonaConfig(suffix="S"),
-    ).create(spec, source_registry=registry)
+    ).create(spec, source_registry=registry, grantable=_grant_all(registry))
 
     # BUG-013：join_guidance 含澄清句（与父路径同源），五段顺序不漂移。
     from agent_harness.prompt.tool_sections import TOOL_USE_DISCLAIMER
@@ -128,6 +140,6 @@ def test_factory_flag_on_without_guidance_appends_nothing():
 
     child = AgentFactory(
         model=ScriptedModel([]), include_tool_guidance=True,
-    ).create(spec, source_registry=registry)
+    ).create(spec, source_registry=registry, grantable=_grant_all(registry))
 
     assert child._context_builder.system_prompt == spec.system_prompt

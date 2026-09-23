@@ -44,8 +44,6 @@ from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
-_BASE_TOOLS = ("read", "delegate")
-
 
 class _EchoArgs(BaseModel):
     text: str = Field(default="x", description="回显")
@@ -117,8 +115,11 @@ class _Env:
             executor_factory=executor_factory,
         )
         self.registry = ToolRegistry()
-        for name in _BASE_TOOLS:
-            self.registry.register(_ToolStub(name))
+        self.registry.register(_ToolStub("read"))
+        # 根持有的 `delegate` 必须是**真** DelegateTool：registry 里放同名
+        # 替身会把根自己的委派吃掉（模型的 tool call 打到替身上），端到端树
+        # 就断在根这一层——而红相期间「断在根上」与「按预期红」不可区分。
+        self.registry.register(self.delegate)
         if max_depth is None:
             self.provider.activate(
                 factory=self.factory,
@@ -270,6 +271,41 @@ class TestDepthBoundary:
             f"{env.child_registries()}"
         )
 
+
+
+
+    @pytest.mark.asyncio
+    async def test_depth_one_tree_end_to_end_child_registry_is_narrowed(self, tmp_path):
+        """**脚手架守卫**（修复前就该绿）：根的委派必须真的落到 provider。
+
+        这条不测 #286 的边界，它钉的是**测试自己**：`_Env` 的根 registry 里必须是
+        真 `DelegateTool`，否则模型的 tool_call 会打到同名替身上、端到端树断在根上，
+        而「断在根上」在红相期间与「按预期红」不可区分（本票实测踩过：初版测试文件
+        的 `_BASE_TOOLS` 就带了一个 `_ToolStub("delegate")`，两条 depth=2 用例因此
+        红得毫无信息量）。
+
+        修复前也该绿：老代码 `grantable` 省略 = 全集，child 只申请 `read` 仍然只拿到
+        `read`，所以这条在两侧都成立。
+        """
+        child_model = ScriptedModel([AIMessage(content="child 完成")])
+        env = _env(tmp_path, child_model=child_model,
+                   profiles={"coding_like": _spec("coding_like", {"read"})})
+        root_model = ScriptedModel([_tool_call("d1", "coding_like"),
+                                    AIMessage(content="根收尾")])
+        root = AgentRuntime(model=root_model, registry=env.registry,
+                            executor=ToolExecutor(env.registry), max_steps=5)
+
+        session = make_session(tmp_path)
+        run = await root.run(session, "一棵深度 1 的树")
+
+        assert run.status == "completed"
+        assert env.child_registries() == [{"read"}], (
+            f"根的委派没落到 provider（captured={env.child_registries()}）——"
+            "检查 `_Env` 的根 registry 里放的是不是真 DelegateTool"
+        )
+        results = [json.loads(e.data["content"]) for e in session.events
+                   if e.type == "tool/result"]
+        assert results and results[-1]["ok"] is True, "根这一层委派必须成功"
 
 class TestBuiltinProfilesUnaffected:
     """AC4：内置档位声明面零变化（边界是运行期收窄，不是改档位）。"""

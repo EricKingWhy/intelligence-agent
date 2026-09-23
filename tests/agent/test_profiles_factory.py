@@ -45,6 +45,16 @@ def _full_registry(tmp_path) -> ToolRegistry:
     return reg
 
 
+def _grant_all(registry: ToolRegistry) -> frozenset[str]:
+    """测试口径：把 registry 里的工具**全部**标为可授予。
+
+    生产路径不这样算——`InProcessSubagentProvider` 按 runtime 剩余深度算
+    grantable（remaining=0 时摘掉 dispatch 工具）。测试里显式写出来，是为了让
+    「可授予集合」成为调用点必须表过态的东西（#286 删掉了「省略 = 全量」默认值）。
+    """
+    return frozenset(tool.name for tool in registry.list())
+
+
 #: 三内置档位声明工具面的 **exact set 对账表**（#238 AC1）。
 #:
 #: 这是**手写镜像**，不是从 `BUILTIN_PROFILES` 反推——反推等于用自己证明自己：
@@ -126,7 +136,8 @@ class TestAgentFactoryFiltering:
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read", "bash"}))
 
-        runtime = factory.create(spec, source_registry=source)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert {x.name for x in runtime.registry.list()} == {"read", "bash"}
         assert {x.name for x in source.list()} == {"read", "write", "bash", "edit",
@@ -152,7 +163,8 @@ class TestAgentFactoryFiltering:
                          tool_scope=frozenset({"read", "web_search"}))
 
         with caplog.at_level(logging.WARNING, logger="agent_harness.agent.factory"):
-            runtime = factory.create(spec, source_registry=source)
+            runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert {x.name for x in runtime.registry.list()} == {"read"}
         assert any("web_search" in rec.message for rec in caplog.records)
@@ -185,7 +197,9 @@ class TestAgentFactoryInheritance:
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read"}), max_steps=7)
 
-        runtime = factory.create(spec, source_registry=_full_registry(tmp_path))
+        source = _full_registry(tmp_path)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert runtime.model is model
         assert runtime._fallback_model is fallback
@@ -207,7 +221,9 @@ class TestAgentFactoryInheritance:
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read"}))
 
-        runtime = factory.create(spec, source_registry=_full_registry(tmp_path))
+        source = _full_registry(tmp_path)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert captured == [runtime.registry]
 
@@ -224,7 +240,9 @@ class TestGateFourthAgent:
         )
         factory = AgentFactory(model=ScriptedModel([]),
                                primary_model_name="main-model")
-        runtime = factory.create(spec, source_registry=_full_registry(tmp_path))
+        source = _full_registry(tmp_path)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert {x.name for x in runtime.registry.list()} == {"read", "grep"}
         assert runtime.max_steps == 5

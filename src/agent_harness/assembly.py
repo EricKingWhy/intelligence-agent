@@ -196,10 +196,16 @@ async def build_runtime(
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
     # coding/research_review 收窄 registry 到 spec.tool_scope + 注入 spec.system_prompt。
     # 未知名字 web 层已 422，这里 KeyError 再响亮失败一次（防御性，不应发生）。
+    # #286：main 也是**根委派配额**的来源——即便 agent_profile=None（= 出厂
+    # main），根 max_depth 也要从这里取，所以 import 提到分支外。
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+
     profile_spec = None
     if agent_profile is not None:
-        from agent_harness.agent.profiles import BUILTIN_PROFILES
         profile_spec = BUILTIN_PROFILES[agent_profile]
+    # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
+    root_max_depth = (profile_spec if profile_spec is not None
+                      else BUILTIN_PROFILES["main"]).max_depth
 
     # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
     # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
@@ -342,6 +348,7 @@ async def build_runtime(
             session_store=session_store,
             workspace_registry=workspace_registry,
             parent_session_id=session_id,
+            max_depth=root_max_depth,
         )
 
     def _render_runtime_context() -> str:

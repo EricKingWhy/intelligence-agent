@@ -3,7 +3,9 @@
 SubAgent MUST 复用同一 Agent Loop（不变量 #19）——Factory 不造新 Runtime
 类，只做三件事：
 1. 权限校验：spec 申请的 tool_scope 中，「存在于全量 registry 但不在可授予
-   集合」的申请 = 越权提升，拒绝（防 child 自配全量工具的逃逸通道）；
+   集合」的申请 = 越权提升，拒绝（防 child 自配全量工具的逃逸通道）；可授予
+   集合 `grantable` **必填**（#286）——不接受「省略 = 全量」这种隐式兜底，
+   那正是「child 重新拿到 delegate」的逃逸通道本身；
 2. 缺席降级：optional capability 的工具（如 websearch 未配）不在全量
    registry 里 → 降级丢弃 + warning（同 capability 降级缺席语义）；
 3. 构造期收窄：从全量 registry 过滤出【新】ToolRegistry 实例 + 经
@@ -71,11 +73,17 @@ class AgentFactory:
         spec: AgentSpec,
         *,
         source_registry: ToolRegistry,
-        grantable: frozenset[str] | set[str] | None = None,
+        grantable: frozenset[str] | set[str],
     ) -> AgentRuntime:
-        """按 spec 构造 child runtime（复用同一 Agent Loop，不变量 #19）。"""
+        """按 spec 构造 child runtime（复用同一 Agent Loop，不变量 #19）。
+
+        `grantable` **必填**（#286）：它曾经可选，省略时默认「可授予 = source
+        registry 全量」——child 申请 `delegate` 而调用点忘了收窄，递归委派的
+        逃逸通道就开了。可授予集合是**权限决策**，不是能隐式兜底的默认值：
+        「谁能被授予什么」是每个调用点必须说出口的事。
+        """
         source_names = {tool.name for tool in source_registry.list()}
-        grantable_names = set(grantable) if grantable is not None else set(source_names)
+        grantable_names = set(grantable)
 
         # 越权提升：工具真实存在但不在可授予集合 → 拒绝（防逃逸通道）。
         escalated = (spec.tool_scope & source_names) - grantable_names
