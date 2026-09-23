@@ -143,3 +143,4 @@ e62005e	#292（B-41）⑭ 读数整块重写为**最终树**读数 + 补两条�
 7b3ba0db223b42a1d63d6eae28b722d0ff391b95	docs(#292): B-41 落点四件套（PHASE_STATUS 焦点/条目 + 月度归档 B-41 条 + tracker B-41 段 + 台账 2 条审查行 + 1 条白名单）——只改 docs/ 下 4 个文件（`docs/PHASE_STATUS.md` / `docs/phase_status/2026-09.md` / `docs/SDD_TICKET_TRACKER.md` / `docs/review_ledger.tsv`），docs-only；覆盖闸门实测 `09ca47a..e62005e` 提交总数 511 / 已审查 363 / 待判定 148 / ❌ 0 ⇒ exit 0
 8c119dd4a702a69ae3bcb085d45ffe2081f81377	docs(#292): B-41 状态如实化——已推送（ff `784df9e..c9ef006`，13 笔）+ `#292` 关单 + 索引外扩 1 条子项——只改 `docs/PHASE_STATUS.md` / `docs/phase_status/2026-09.md` / `docs/SDD_TICKET_TRACKER.md` 三个 .md，docs-only
 f04eceb	#293（B-42）落点笔 f04eceb4 —— 审查行 139/140/141（.tsv）+ PHASE_STATUS/tracker/月度归档（.md），docs-only
+c89fc62	#293（B-42）门禁读数绿 JSON 笔 c89fc62b（docs/gate/96baf4f….json，.json 属文档扩展名，docs-only）
