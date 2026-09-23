@@ -190,8 +190,9 @@ class InProcessSubagentProvider:
         self._summary_limit = 8192
         self._overflow_configured = False
         # 并发 child 封顶（#90, ADR-0015 决策 13）：超出排队不失败。
+        self._active_children_owner: InProcessSubagentProvider = self
         self._active_children: asyncio.Semaphore | None = None
-        self._max_active_children = 0
+        self._max_active_children: int | None = None
         # 子会话观测挂点（未来 Agent Hub / lineage 消费；测试断言共享 sandbox）。
         self.last_child_sessions: list[Session] = []
         # 父 cwd 缓存（WS-1 #151）：写后不可变 → 同一个父只读一次，不重读父 JSONL。
@@ -207,7 +208,9 @@ class InProcessSubagentProvider:
         bindings are not: each Runtime must own its own mutable provider state.
         Descendant Runtimes keep using this instance through the inherited registry.
         """
-        return InProcessSubagentProvider(profiles=self._profiles)
+        instance = InProcessSubagentProvider(profiles=self._profiles)
+        instance._active_children_owner = self._active_children_owner
+        return instance
 
     def activate(
         self,
@@ -302,10 +305,28 @@ class InProcessSubagentProvider:
             logger.warning("读取委派树恢复元数据失败", exc_info=True)
         self._summary_limit = summary_limit
         self._overflow_configured = overflow_configured
-        self._max_active_children = max_active_children
-        self._active_children = (
-            asyncio.Semaphore(max_active_children) if max_active_children > 0 else None
-        )
+        limiter_owner = self._active_children_owner
+        if limiter_owner is self:
+            # A directly used provider has no process-wide prototype; preserve
+            # activate()'s existing replacement semantics for its single Runtime.
+            self._max_active_children = max_active_children
+            self._active_children = (
+                asyncio.Semaphore(max_active_children) if max_active_children > 0 else None
+            )
+        else:
+            if limiter_owner._max_active_children is None:
+                limiter_owner._max_active_children = max_active_children
+                limiter_owner._active_children = (
+                    asyncio.Semaphore(max_active_children)
+                    if max_active_children > 0 else None
+                )
+            elif limiter_owner._max_active_children != max_active_children:
+                raise ValueError(
+                    "All runtimes from one multi-agent provider must use the same "
+                    "process-wide max_active_children limit."
+                )
+            self._max_active_children = limiter_owner._max_active_children
+            self._active_children = limiter_owner._active_children
         self._activated = True
 
     def _parent_cwd(self) -> str | None:
@@ -393,15 +414,26 @@ class InProcessSubagentProvider:
 
         # 当前层的配额：根（还没有人往下走过）= 装配点的 max_depth；否则 = 本层
         # 被赋予的剩余额度（#286：child 抬不动它）。
-        scope = current_scope() or self._root_scope()
         tree_id = self.tree_id()
+        scope = current_scope()
+        if scope is None:
+            scope = await self._root_scope(tree_id)
         # 并发 child 封顶（#90）：超出排队等待，不失败不丢弃。
         async with (self._active_children or nullcontext(None)):
             return await self._run_child(spec, full_task, scope, tree_id)
 
-    def _root_scope(self) -> SpawnScope:
-        """根配额：装配点给的 `max_depth` + 装配点给的 registry。"""
-        return SpawnScope(registry=self._source_registry, remaining=self._max_depth)
+    async def _root_scope(self, tree_id: str) -> SpawnScope:
+        """根 scope 不得超过当前 delegation tree 已持久化的深度上限。"""
+        remaining = self._max_depth
+        try:
+            tree_state = await self._delegation_ledger.get_state(tree_id)
+        except KeyError:
+            # 直接使用 Provider（未由 DelegateTool 预留预算）时还没有持久化 tree。
+            # 正常委派会先 reserve，恢复时因此必须以 ledger 内的上限为准。
+            pass
+        else:
+            remaining = min(remaining, tree_state.max_depth)
+        return SpawnScope(registry=self._source_registry, remaining=remaining)
 
     async def _run_child(
         self, spec: AgentSpec, full_task: str, scope: SpawnScope, tree_id: str,

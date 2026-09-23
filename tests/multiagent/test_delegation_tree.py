@@ -249,6 +249,118 @@ async def test_interrupted_root_reuses_the_same_tree_budget_on_resume(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_interrupted_root_cannot_expand_persisted_depth_on_resume(tmp_path):
+    session_store = JsonlSessionStore(tmp_path / "sessions")
+    workspace_registry = WorkspaceRegistry(root=tmp_path / "workspaces")
+    session = Session.start(session_store, session_id="depth-resume-root")
+    session.append(RUN_INTERRUPTED, {"reason": "process_restart"}, run_id="bounded-tree")
+    workspace_registry.create(session.session_id, workspace_root=tmp_path / "workspace")
+    tree_ledger = SqliteDelegationTreeLedger(tmp_path / "recovery.db")
+    await tree_ledger.initialize()
+    await tree_ledger.reserve(
+        "bounded-tree", root_session_id=session.session_id,
+        max_delegations=8, max_depth=2,
+    )
+
+    profiles = {"supervisor": _spec("supervisor")}
+    provider = InProcessSubagentProvider(profiles=profiles)
+    registry = ToolRegistry()
+    registry.register(DelegateTool(provider, max_delegations=8))
+    provider.activate(
+        factory=AgentFactory(model=ScriptedModel([
+            _delegate("nested-after-resume", "supervisor", "nested task"),
+            AIMessage(content="child complete"),
+        ])),
+        source_registry=registry,
+        session_store=session_store,
+        workspace_registry=workspace_registry,
+        parent_session_id=session.session_id,
+        max_depth=3,
+        max_delegations=8,
+        delegation_ledger=tree_ledger,
+    )
+    root = AgentRuntime(
+        model=ScriptedModel([
+            _delegate("root-after-resume", "supervisor", "resume work"),
+            AIMessage(content="root complete"),
+        ]),
+        registry=registry,
+        executor=ToolExecutor(registry),
+        max_steps=4,
+    )
+
+    result = await root.run(session, "resume interrupted root")
+
+    assert result.status == "completed"
+    assert len(provider.last_child_sessions) == 1
+    first_child = provider.last_child_sessions[0]
+    started = next(event for event in first_child.events if event.type == "session/started")
+    assert started.data["delegation_remaining_depth"] == 1
+    assert (await tree_ledger.get_state("bounded-tree")).max_depth == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_provider_clones_share_process_child_limit(tmp_path):
+    class _ConcurrentChildModel:
+        def __init__(self):
+            self.active = 0
+            self.peak = 0
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def ainvoke(self, messages, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0.03)
+                return AIMessage(content="child complete")
+            finally:
+                self.active -= 1
+
+    session_store = JsonlSessionStore(tmp_path / "sessions")
+    workspace_registry = WorkspaceRegistry(root=tmp_path / "workspaces")
+    model = _ConcurrentChildModel()
+    prototype = InProcessSubagentProvider(profiles={"supervisor": _spec("supervisor")})
+    runtimes = []
+    for index in range(2):
+        session = Session.start(session_store, session_id=f"parallel-root-{index}")
+        workspace_registry.create(session.session_id)
+        provider = prototype.new_runtime_instance()
+        registry = ToolRegistry()
+        registry.register(DelegateTool(provider))
+        provider.activate(
+            factory=AgentFactory(model=model),
+            source_registry=registry,
+            session_store=session_store,
+            workspace_registry=workspace_registry,
+            parent_session_id=session.session_id,
+            max_depth=2,
+            max_active_children=1,
+        )
+        runtimes.append((
+            AgentRuntime(
+                model=ScriptedModel([
+                    _delegate(f"parallel-call-{index}", "supervisor", "parallel task"),
+                    AIMessage(content="root complete"),
+                ]),
+                registry=registry,
+                executor=ToolExecutor(registry),
+                max_steps=4,
+            ),
+            session,
+        ))
+
+    results = await asyncio.gather(*(
+        runtime.run(session, "delegate concurrently")
+        for runtime, session in runtimes
+    ))
+
+    assert [result.status for result in results] == ["completed", "completed"]
+    assert model.peak == 1
+
+
+@pytest.mark.asyncio
 async def test_same_failed_delegation_across_descendants_triggers_persistent_guard(tmp_path):
     session_store = JsonlSessionStore(tmp_path / "sessions")
     workspace_registry = WorkspaceRegistry(root=tmp_path / "workspaces")
