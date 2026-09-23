@@ -1,0 +1,1 @@
+2026-09-24	#290 指标修订复核（Standards + Spec 独立审查者；fixed point b01bc10）：Standards 0 findings；Spec 再确认 1 个 P2，D8 Ledger 终态/重复 reconcile 证据仍未由 Gate 计量。该发现由 66d2611 修复，之后完成独立双轴复核。	b01bc10..85a0ab9

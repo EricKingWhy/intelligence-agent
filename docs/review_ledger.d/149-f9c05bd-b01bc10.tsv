@@ -1,0 +1,1 @@
+2026-09-24	#289 修复复核（Standards + Spec 独立审查者；fixed point f9c05bd）：ADR-0019 D4 明确 artifact/externalized 后补 tool/result、元数据不推测、重复恢复幂等；Local/Qiniu 投影测试确认 UI 可打开。0 个确认 P0-P3 findings；未运行云端 Gate。	f9c05bd..b01bc10
