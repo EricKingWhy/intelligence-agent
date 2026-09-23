@@ -74,6 +74,7 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
@@ -398,6 +399,7 @@ class AppState:
         self.transport_ledger = SqliteTransportLedger(self.harness_db)
         self.checkpoint_store = SqliteCheckpointStore(self.harness_db)
         self.session_meta_store = SqliteSessionMetaStore(self.harness_db)
+        self.delegation_tree_ledger = SqliteDelegationTreeLedger(self.harness_db)
         self.workspace_registry = WorkspaceRegistry(
             root=Path(settings.workspace_dir), backend="local"
         )
@@ -449,6 +451,7 @@ class AppState:
             operation_ledger=self.operation_ledger,
             checkpoint_store=self.checkpoint_store,
             session_meta_store=self.session_meta_store,
+            delegation_tree_ledger=self.delegation_tree_ledger,
             workspace_index=self.workspace_index,
         )
 

@@ -13,13 +13,13 @@ DelegationDecision 即 delegate 工具调用参数（spec §4）——编排决�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from agent_harness.multiagent.provider import InProcessSubagentProvider
-from agent_harness.session import run_context_var
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
@@ -56,24 +56,8 @@ class DelegateTool(Tool):
         max_delegations: int = 8,
     ) -> None:
         self._provider = provider
-        # 预算（ADR-0015 决策 13，用户强调）：按 run 计数，超限 = 明确失败
-        # 回填（模型可读已用/上限并自行收尾），绝不静默截断。
+        # 树级默认上限（#287）：持久化计数由 provider 的共享 tree ledger 负责。
         self._max_delegations = max_delegations
-        self._run_counts: dict[str, int] = {}
-
-    def _budget_check(self) -> str | None:
-        """超预算返回失败消息；未超则计数 +1 并返回 None。计数按 run 隔离。"""
-        run_id = run_context_var.get() or "__no_run__"
-        used = self._run_counts.get(run_id, 0)
-        if used >= self._max_delegations:
-            return (f"delegation 预算耗尽（已用 {used}/{self._max_delegations}）。"
-                    "请综合已有结果直接收尾，或改变策略，不要再委派。")
-        self._run_counts[run_id] = used + 1
-        # 计数字典防漏式上限（run 数量有界；防御性清理最老条目）
-        if len(self._run_counts) > 64:
-            oldest = next(iter(self._run_counts))
-            self._run_counts.pop(oldest, None)
-        return None
 
     @property
     def name(self) -> str:
@@ -123,29 +107,44 @@ class DelegateTool(Tool):
         这些只在 delegate 确实注册时才该出现（工具缺席 → 说明缺席）。
         """
         return (
-            f"委派须知：每次 run 最多委派 {self._max_delegations} 次，超出会明确失败，"
+            f"委派须知：整棵委派树最多委派 {self._max_delegations} 次，超出会明确失败，"
             "请预留收尾余量；子代理看不到你们的对话历史，task 描述必须自洽；"
             "子代理失败会原样回填（含它的结构化结果），是否重试由你决定。"
         )
 
     async def execute(self, args: _DelegateArgs) -> ToolResult:
-        budget_failure = self._budget_check()
-        if budget_failure is not None:
-            return ToolResult.failure(
-                message=budget_failure, error_code=ErrorCode.INVALID_ARGUMENT,
+        tree_id = self._provider.tree_id()
+        fingerprint = self._fingerprint(args.target, args.task, args.constraints)
+        try:
+            reservation = await self._provider.reserve_delegation(
+                tree_id, max_delegations=self._max_delegations,
             )
+        except Exception:  # noqa: BLE001 - a missing durable reservation must fail closed
+            return ToolResult.failure(
+                message="无法确认委派树预算；本次未启动子代理，请稍后重试或直接收尾。",
+                error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+            )
+        if not reservation.accepted:
+            result = ToolResult.failure(
+                message=(f"delegation 预算耗尽（已用 {reservation.used}/{reservation.limit}）。"
+                         "请综合已有结果直接收尾，或改变策略，不要再委派。"),
+                error_code=ErrorCode.INVALID_ARGUMENT,
+            )
+            return await self._with_tree_guard(result, tree_id, fingerprint)
         try:
             result = await self._provider.run(
                 target=args.target, task=args.task, constraints=args.constraints,
             )
         except ValueError as error:
-            return ToolResult.failure(
+            failed = ToolResult.failure(
                 message=str(error), error_code=ErrorCode.INVALID_ARGUMENT,
             )
+            return await self._with_tree_guard(failed, tree_id, fingerprint)
         except RuntimeError as error:
-            return ToolResult.failure(
+            failed = ToolResult.failure(
                 message=str(error), error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
+            return await self._with_tree_guard(failed, tree_id, fingerprint)
         payload: dict[str, Any] = {
             "agent_id": result.agent_id,
             "status": result.status,
@@ -171,14 +170,15 @@ class DelegateTool(Tool):
             }),
         ]
         if result.status == "completed":
-            return ToolResult.success(
+            completed = ToolResult.success(
                 message=f"子代理 '{result.agent_id}' 完成：{result.summary[:200]}",
                 data={"output": json.dumps(payload, ensure_ascii=False)},
                 pending_events=pending_events,
             )
+            return await self._with_tree_guard(completed, tree_id, fingerprint)
         # failure 无 data 参数：结构化 payload 走 metadata（内容仍经
         # model_dump_json 全量回灌给 supervisor 模型）。
-        return ToolResult.failure(
+        failed = ToolResult.failure(
             message=f"子代理 '{result.agent_id}' 未能完成（status={result.status}）："
                     f"{result.summary[:200] or '（无输出）'}",
             error_code=ErrorCode.TOOL_EXECUTION_ERROR,
@@ -186,3 +186,30 @@ class DelegateTool(Tool):
             metadata={"output": json.dumps(payload, ensure_ascii=False)},
             pending_events=pending_events,
         )
+        return await self._with_tree_guard(failed, tree_id, fingerprint)
+
+    @staticmethod
+    def _fingerprint(target: str, task: str, constraints: list[str]) -> str:
+        request = json.dumps(
+            {"task": task, "constraints": constraints},
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        request_hash = hashlib.sha256(request.encode("utf-8")).hexdigest()
+        return f"{target}:{request_hash}"
+
+    async def _with_tree_guard(
+        self, result: ToolResult, tree_id: str, fingerprint: str,
+    ) -> ToolResult:
+        signal = await self._provider.observe_delegation_result(
+            tree_id, fingerprint, ok=result.ok,
+        )
+        return result.model_copy(update={
+            "runtime_signal": {
+                "level": signal.level.name.lower(),
+                "tool_name": signal.tool_name,
+                "fingerprint": signal.fingerprint,
+                "consecutive_failures": signal.consecutive_failures,
+            },
+        })

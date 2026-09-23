@@ -34,9 +34,9 @@
     - 推导产出：`changed_files`（child 事件中 write/edit/apply_patch 参数推导，不跑 git）
     - DEFER：`tests`（无真实来源，V1 省略字段）
     - **大产物溢出（不变量 #15）**：summary 超限（8KB）→ 全文走 child 侧 artifact 溢出管线，父拿压缩摘要 + artifact ref，按需 read——用户拍板「结构化交付 + 大产物摘要/引用化」
-13. **预算三旋钮（出厂值，可覆盖）**：`max_delegations=8`（每 run，防烧钱）/ `max_active_children=4`（并行上限）/ child `max_steps=10`。**超预算 = delegate 返回明确失败（"delegation 预算耗尽"）让 supervisor 模型自己收尾，绝不静默截断**（用户强调）。
+13. **预算三旋钮（出厂值，可覆盖）**：`max_delegations=8`（每棵 root delegation tree，防烧钱）/ `max_active_children=4`（并行上限）/ child `max_steps=10`。root 与所有 descendants 累计共享同一委派预算；新 root run 建立新 tree，进程重启后恢复被中断的 tree 不重置已用额度。**超预算 = delegate 返回明确失败（"delegation 预算耗尽"）让 supervisor 模型自己收尾，绝不静默截断**（用户强调）。
 14. **模型策略**：V1 唯一策略 `model_policy="inherit"`——child 继承主模型链（同 create_chat_model + fallback + 流式看门狗），fallback/看门狗对 child 自动生效零新代码。per-profile 模型列表等真实账单数据说话。
-15. **Termination 四件套**（作用域不混淆）：Agent `max_steps`（child 10）/ Supervisor `max_delegations`（8）/ `max_active_children`（4）/ **repeated-delegation 熔断**——复用 RepeatedToolFailureGuard 指纹机制，指纹 = (target_profile, task 哈希)，软硬同款（软：注入纠正消息；硬：终止 run）。
+15. **Termination 四件套**（作用域不混淆）：Agent `max_steps`（child 10，per-agent run）/ Supervisor `max_delegations`（8，tree-wide）/ `max_active_children`（4，进程级并行上限）/ **repeated-delegation 熔断**——复用 RepeatedToolFailureGuard 的软/硬阈值语义；指纹 = (target_profile, canonical task + constraints 哈希)，同一 tree 的 root 与所有 descendants 共用可恢复的 failure/fingerprint 状态（#287）。
 16. **child 失败语义**：child run 失败 → `SubAgentResult.status=failed` + unresolved 说明回填，重试与否由 supervisor 模型决定（换措辞再 delegate 或放弃），框架不自动重试。
 17. **delegate 工具 schema**：`{target: str(预定义 profile 名), task: str, constraints?: string[]}`；禁止 target=未注册 profile（明确报错列出可选）。
 18. **kill/resume 语义**：child run 复用 stall 看门狗与 cancel 语义；父 run 中断时未完成的 delegation 走既有 dangling tool/result 合成机制，child session 留档可查、不自动复活（重新委派 = supervisor resume 后自己决定）。

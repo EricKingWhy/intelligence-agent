@@ -31,6 +31,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent.guards import (
     GuardLevel,
+    GuardSignal,
     RepeatedToolFailureGuard,
 )
 from agent_harness.agent.streaming import BlockStreamer
@@ -1366,7 +1367,16 @@ class AgentRuntime:
                 # 工具回填后、下一轮模型调用前观察本轮工具结果；取最严重信号。
                 worst_signal = None
                 for call, execution in zip(calls, executions):
-                    sig = guard.observe(call.name, call.args, execution.result.ok)
+                    persisted = execution.result.runtime_signal
+                    if persisted is not None:
+                        sig = GuardSignal(
+                            GuardLevel[str(persisted["level"]).upper()],
+                            str(persisted["tool_name"]),
+                            str(persisted["fingerprint"]),
+                            int(persisted["consecutive_failures"]),
+                        )
+                    else:
+                        sig = guard.observe(call.name, call.args, execution.result.ok)
                     if sig.level != GuardLevel.NONE and (
                         worst_signal is None or sig.level > worst_signal.level
                     ):

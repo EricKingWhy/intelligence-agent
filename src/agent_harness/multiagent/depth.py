@@ -54,6 +54,10 @@ _scope: ContextVar[SpawnScope | None] = ContextVar(
     "agent_harness_multiagent_spawn_scope", default=None,
 )
 
+_tree_id: ContextVar[str | None] = ContextVar(
+    "agent_harness_multiagent_tree_id", default=None,
+)
+
 
 def current_scope() -> SpawnScope | None:
     """当前 spawn 作用域的配额；`None` = 根（还没有人往下走过）。"""
@@ -68,6 +72,21 @@ def bind_scope(scope: SpawnScope) -> Iterator[None]:
         yield
     finally:
         _scope.reset(token)
+
+
+def current_tree_id() -> str | None:
+    """当前委派树身份；child run 的新 run_id 不得替换它。"""
+    return _tree_id.get()
+
+
+@contextmanager
+def bind_tree_id(tree_id: str) -> Iterator[None]:
+    """把整棵委派树身份传播给 child task，退出时恢复调用方的树。"""
+    token: Token = _tree_id.set(tree_id)
+    try:
+        yield
+    finally:
+        _tree_id.reset(token)
 
 
 def child_allowance(parent: SpawnScope, spec: AgentSpec) -> int:

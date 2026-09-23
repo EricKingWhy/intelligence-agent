@@ -51,6 +51,7 @@ from agent_harness.storage import (
     SqliteSessionMetaStore,
 )
 from agent_harness.storage.artifact_select import select_artifact_store
+from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
@@ -92,6 +93,7 @@ class RecoveryStores:
     operation_ledger: SqliteOperationLedger
     checkpoint_store: SqliteCheckpointStore
     session_meta_store: SqliteSessionMetaStore
+    delegation_tree_ledger: SqliteDelegationTreeLedger
     workspace_index: WorkspaceIndex | None = None
 
 
@@ -107,6 +109,7 @@ def recovery_stores(
         operation_ledger=SqliteOperationLedger(path),
         checkpoint_store=SqliteCheckpointStore(path),
         session_meta_store=SqliteSessionMetaStore(path),
+        delegation_tree_ledger=SqliteDelegationTreeLedger(path),
         workspace_index=(
             WorkspaceIndex(SqliteWorkspaceStore(path), workspace_headers)
             if workspace_headers is not None
@@ -124,6 +127,7 @@ async def initialize_stores(stores: RecoveryStores) -> None:
     await stores.operation_ledger.initialize()
     await stores.checkpoint_store.initialize()
     await stores.session_meta_store.initialize()
+    await stores.delegation_tree_ledger.initialize()
     if stores.workspace_index is not None:
         await stores.workspace_index.initialize()
 
@@ -206,6 +210,8 @@ async def build_runtime(
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
     root_max_depth = (profile_spec if profile_spec is not None
                       else BUILTIN_PROFILES["main"]).max_depth
+    root_max_delegations = (profile_spec if profile_spec is not None
+                            else BUILTIN_PROFILES["main"]).max_delegations
 
     # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
     # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
@@ -349,6 +355,8 @@ async def build_runtime(
             workspace_registry=workspace_registry,
             parent_session_id=session_id,
             max_depth=root_max_depth,
+            max_delegations=root_max_delegations,
+            delegation_ledger=stores.delegation_tree_ledger,
         )
 
     def _render_runtime_context() -> str:

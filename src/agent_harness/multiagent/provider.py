@@ -32,13 +32,26 @@ from agent_harness.agent.runtime import AgentRunResult
 from agent_harness.multiagent.depth import (
     SpawnScope,
     bind_scope,
+    bind_tree_id,
     child_allowance,
     current_scope,
+    current_tree_id,
     grantable_names,
 )
 from agent_harness.sandbox import WorkspaceRegistry
-from agent_harness.session import SESSION_STARTED, Session, cwd_event_data, session_cwd
+from agent_harness.session import (
+    SESSION_STARTED,
+    Session,
+    cwd_event_data,
+    run_context_var,
+    session_cwd,
+)
+from agent_harness.session.event import RUN_INTERRUPTED, RUN_TERMINAL_TYPES
 from agent_harness.session.store import JsonlSessionStore
+from agent_harness.storage.delegation_tree import (
+    DelegationReservation,
+    InMemoryDelegationTreeLedger,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +173,14 @@ class InProcessSubagentProvider:
         self._source_registry = None
         # 根委派配额（#286）：activate 用根 profile 的 max_depth 覆盖。
         self._max_depth = 1
+        self._root_max_depth = 1
+        self._max_delegations = 8
+        self._delegation_ledger = InMemoryDelegationTreeLedger()
+        self._session_tree_id: str | None = None
+        self._root_session_id: str | None = None
+        self._resume_tree_id: str | None = None
+        self._resume_bound_run_id: str | None = None
+        self._tree_metadata_error = False
         self._session_store: JsonlSessionStore | None = None
         self._workspace_registry: WorkspaceRegistry | None = None
         self._parent_session_id: str | None = None
@@ -191,6 +212,8 @@ class InProcessSubagentProvider:
         overflow_configured: bool = False,
         max_active_children: int = 4,
         max_depth: int = 1,
+        max_delegations: int = 8,
+        delegation_ledger=None,
     ) -> None:
         """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。
 
@@ -203,9 +226,67 @@ class InProcessSubagentProvider:
         self._factory = factory
         self._source_registry = source_registry
         self._max_depth = max_depth
+        self._root_max_depth = max_depth
+        self._max_delegations = max_delegations
+        self._delegation_ledger = delegation_ledger or InMemoryDelegationTreeLedger()
         self._session_store = session_store
         self._workspace_registry = workspace_registry
         self._parent_session_id = parent_session_id
+        self._root_session_id = parent_session_id
+        self._session_tree_id = None
+        self._resume_tree_id = None
+        self._resume_bound_run_id = None
+        self._tree_metadata_error = False
+        try:
+            events = session_store.read_events(parent_session_id)
+            started = next((event for event in events if event.type == SESSION_STARTED), None)
+            if started is not None:
+                tree_id = started.data.get("delegation_tree_id")
+                root_id = started.data.get("delegation_root_session_id")
+                remaining = started.data.get("delegation_remaining_depth")
+                root_max_depth = started.data.get("delegation_root_max_depth")
+                root_max_delegations = started.data.get("delegation_root_max_delegations")
+                if isinstance(tree_id, str) and tree_id:
+                    self._session_tree_id = tree_id
+                if isinstance(root_id, str) and root_id:
+                    self._root_session_id = root_id
+                if isinstance(remaining, int) and not isinstance(remaining, bool):
+                    self._max_depth = min(self._max_depth, remaining)
+                if isinstance(root_max_depth, int) and not isinstance(root_max_depth, bool):
+                    self._root_max_depth = root_max_depth
+                if (isinstance(root_max_delegations, int)
+                        and not isinstance(root_max_delegations, bool)
+                        and root_max_delegations >= 0):
+                    self._max_delegations = root_max_delegations
+                if self._session_tree_id and not (
+                    isinstance(root_id, str) and root_id
+                    and isinstance(remaining, int) and not isinstance(remaining, bool)
+                    and remaining >= 0
+                    and isinstance(root_max_depth, int)
+                    and not isinstance(root_max_depth, bool)
+                    and root_max_depth >= remaining
+                    and isinstance(root_max_delegations, int)
+                    and not isinstance(root_max_delegations, bool)
+                    and root_max_delegations >= 0
+                ):
+                    self._tree_metadata_error = True
+                if (not self._session_tree_id
+                        and started.agent_id not in {None, "default", "main"}):
+                    # A child session without the metadata needed to recover its
+                    # parent tree must not silently receive a fresh depth/budget.
+                    self._tree_metadata_error = True
+            if self._session_tree_id is None:
+                last_terminal = next(
+                    (event for event in reversed(events)
+                     if event.type in RUN_TERMINAL_TYPES and event.run_id),
+                    None,
+                )
+                if last_terminal is not None and last_terminal.type == RUN_INTERRUPTED:
+                    self._resume_tree_id = last_terminal.run_id
+        except Exception:
+            # A read failure must not silently grant a fresh tree budget or depth.
+            self._tree_metadata_error = True
+            logger.warning("读取委派树恢复元数据失败", exc_info=True)
         self._summary_limit = summary_limit
         self._overflow_configured = overflow_configured
         self._max_active_children = max_active_children
@@ -256,6 +337,39 @@ class InProcessSubagentProvider:
                 f"未知 profile '{target}'（可选：{sorted(self._profiles)}）"
             ) from None
 
+    def tree_id(self) -> str:
+        """Return the inherited tree identity or establish one from this root run."""
+        inherited = current_tree_id()
+        if inherited:
+            return inherited
+        if self._session_tree_id:
+            return self._session_tree_id
+        run_id = run_context_var.get()
+        if self._resume_tree_id and run_id:
+            if self._resume_bound_run_id is None:
+                self._resume_bound_run_id = run_id
+            if self._resume_bound_run_id == run_id:
+                return self._resume_tree_id
+        return run_id or self._parent_session_id or "__no_run__"
+
+    async def reserve_delegation(
+        self, tree_id: str, *, max_delegations: int,
+    ) -> DelegationReservation:
+        if self._tree_metadata_error:
+            raise RuntimeError("委派树恢复元数据不可用；拒绝启动子代理")
+        return await self._delegation_ledger.reserve(
+            tree_id, root_session_id=self._root_session_id or self._parent_session_id or tree_id,
+            max_delegations=min(max_delegations, self._max_delegations),
+            max_depth=self._root_max_depth,
+        )
+
+    async def observe_delegation_result(
+        self, tree_id: str, fingerprint: str, *, ok: bool,
+    ):
+        return await self._delegation_ledger.observe_result(
+            tree_id, fingerprint, ok=ok,
+        )
+
     async def run(self, *, target: str, task: str,
                   constraints: list[str]) -> SubAgentResult:
         if not self._activated:
@@ -271,16 +385,17 @@ class InProcessSubagentProvider:
         # 当前层的配额：根（还没有人往下走过）= 装配点的 max_depth；否则 = 本层
         # 被赋予的剩余额度（#286：child 抬不动它）。
         scope = current_scope() or self._root_scope()
+        tree_id = self.tree_id()
         # 并发 child 封顶（#90）：超出排队等待，不失败不丢弃。
         async with (self._active_children or nullcontext(None)):
-            return await self._run_child(spec, full_task, scope)
+            return await self._run_child(spec, full_task, scope, tree_id)
 
     def _root_scope(self) -> SpawnScope:
         """根配额：装配点给的 `max_depth` + 装配点给的 registry。"""
         return SpawnScope(registry=self._source_registry, remaining=self._max_depth)
 
     async def _run_child(
-        self, spec: AgentSpec, full_task: str, scope: SpawnScope,
+        self, spec: AgentSpec, full_task: str, scope: SpawnScope, tree_id: str,
     ) -> SubAgentResult:
         # child sandbox = 父的同一实例（spec §9：coding 的改动 review 直接可见）
         parent_sandbox = self._workspace_registry.get(self._parent_session_id)
@@ -303,7 +418,14 @@ class InProcessSubagentProvider:
         # 一个项目）。父无锚（历史遗留 / 父会话日志不在）→ 不写该字段，与父一致。
         child_session.append(
             SESSION_STARTED,
-            cwd_event_data(self._parent_cwd()),
+            {
+                **cwd_event_data(self._parent_cwd()),
+                "delegation_tree_id": tree_id,
+                "delegation_root_session_id": self._root_session_id,
+                "delegation_remaining_depth": allowance,
+                "delegation_root_max_depth": self._root_max_depth,
+                "delegation_root_max_delegations": self._max_delegations,
+            },
             agent_id=spec.name,
         )
         # spawn 即注册（hub/lineage 语义：子代理在 spawn 时可见，不等完成）
@@ -311,11 +433,10 @@ class InProcessSubagentProvider:
 
         # 子代理的整段 run 都跑在**它自己**的配额作用域里：它再 spawn 时读到的是
         # 「我手里有什么工具 + 我还能往下几层」，而不是根的（#286 冻结语义 5）。
-        with bind_scope(SpawnScope(registry=child_runtime.registry,
-                                   remaining=allowance)):
-            run_result: AgentRunResult = await child_runtime.run(
-                child_session, full_task,
-            )
+        with bind_tree_id(tree_id), bind_scope(SpawnScope(
+            registry=child_runtime.registry, remaining=allowance,
+        )):
+            run_result: AgentRunResult = await child_runtime.run(child_session, full_task)
 
         status = ("completed" if run_result.status == "completed" else "failed")
         logger.info(

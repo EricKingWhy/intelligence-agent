@@ -65,6 +65,9 @@ class ToolResult(BaseModel):
     retryable: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
     artifact_ref: str | None = None
+    # Runtime-only control signal. It is consumed after tool results are collected
+    # and deliberately omitted from model output and Operation Ledger JSON.
+    runtime_signal: dict[str, Any] | None = Field(default=None, exclude=True)
     # 工具产生的延迟会话事件 (event_type, data)：executor 在 tool/call 之后
     # 落盘（delegation 事件同款通道，overflow 是既有生产者）。exclude=True：
     # 这是 durable 事件通道，不是模型可见内容——model_dump_json（回灌给模型
