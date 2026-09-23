@@ -158,3 +158,4 @@ ef286944da06a8522abf9627813aaf60368a3c1d	#286（B-43）验证报告读数订正�
 b074740edef03fae068b83d3d14db22602ed0672	docs-only 落点笔：#294（B-44）协议口径修订 —— tracker B-44 段 + PHASE_STATUS 焦点/最近条目 + 月度归档 B-44 条（3 文件全部命中 DOC_PATTERN）
 f1625345f4053f911da8430e54a08912ff51080a	docs-only 交付笔：#294（B-44）协议 §8 口径修订 —— 缺陷 1/2/3/4/6 五条一次落（只改 docs/SDD_WORKFLOW_PROTOCOL.md）
 3bd2529c317a832c637f861c57337f4764131a21	docs-only 交付笔：#294（B-44）缺陷 1 判据实施边界如实化 —— 口径在本票、实现与三个控制样本归 #295（只改 docs/SDD_WORKFLOW_PROTOCOL.md）
+c39f46281cd4c678c28a4f5bbe8180671c85291a	docs-only 修复笔：#294（B-44）tracker 尾部多余空行 —— Gate-0 diff-check 拦下 new blank line at EOF 后修掉（只改 docs/SDD_TICKET_TRACKER.md）
