@@ -18,6 +18,9 @@
 
 ## 按任务查阅
 
+- Memory V2（`#296`–`#304`）：产品合同读 `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`，
+  实现票读 `docs/tickets/mem-v2-*.md`，成熟产品调研读
+  `docs/research/2026-09-22-production-long-term-memory-systems.md`。
 - `docs/adr/`：机制与决议的完整叙述；只读与当前模块相关的 ADR。
 - `docs/tickets/`：票面、拆分和历史 ticket 资料；GitHub issue 仍是已批准票面的上游。
 - `docs/agents/`：只在对应 Agent 分支触发时读取的 playbook 与仓库约定。

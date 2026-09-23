@@ -12,6 +12,26 @@
 
 ---
 
+## 当前规划：Memory V2（2026-09-23，只规划/开票，未施工）
+
+| ID | GitHub | 状态 | 目标 | blocked_by |
+| --- | --- | --- | --- | --- |
+| Spec | #296 | OPEN / `ready-for-agent` | Production Long-Term Memory V2 产品与工程合同 | — |
+| MEM-V2-1 | #297 | OPEN / `ready-for-agent` | Typed Memory lifecycle vertical slice | — |
+| MEM-V2-2 | #298 | OPEN / `ready-for-agent` | Durable Formation and Adjudication | #297 |
+| MEM-V2-3 | #299 | OPEN / `ready-for-agent` | Cross-session Profile and hybrid recall | #297 |
+| MEM-V2-4 | #300 | OPEN / `ready-for-agent` | Explicit commands and governance API | #297 |
+| MEM-V2-5 | #301 | OPEN / `ready-for-agent` | Memory management Web UI | #300 |
+| MEM-V2-6 | #302 | OPEN / `ready-for-agent` | Privacy observability and quality evaluation | #298, #299, #300 |
+| MEM-V2-7 | #303 | OPEN / `ready-for-agent` | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
+| MEM-V2-8 | #304 | OPEN / `ready-for-agent` | Final real Gate and release evidence | #301, #302, #303 |
+
+**事实源与边界**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。GitHub `#297`–`#304` 已原生挂为 `#296` 的 Sub-issue，并已建立上述 Blocked-by 边。当前没有任何票进入实现；旧 SQLite/Milvus Memory 数据仍在，只有 `#303` 获准在其依赖全部集成并完成精确目标/保留项验证后执行 clean-slate 删除。
+
+**施工顺序**：先 `#297`；再并行 `#298` / `#299` / `#300`；随后按依赖推进 `#301` / `#302` / `#303`；最后仅在前七票集成后执行 `#304`。每票独立 review/门禁/关单；不得把 `#304` 的真实 Gate 提前当作单票完成证据。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过
