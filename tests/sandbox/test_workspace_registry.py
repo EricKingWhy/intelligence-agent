@@ -33,18 +33,20 @@ class TestCreate:
         assert Path(sandbox.workspace_root).is_dir()
 
     def test_mapping_json_written(self, registry: WorkspaceRegistry, tmp_path: Path):
-        """create → 映射 JSON 文件存在且包含正确字段。"""
-        registry.create("sess_1")
+        """create → UTF-8 映射 JSON 可读回 Unicode Windows workspace 路径。"""
+        workspace_root = tmp_path / "王浩宇" / "AppData" / "Local"
+        registry.create("sess_1", workspace_root=workspace_root)
 
         mapping_file = tmp_path / "workspaces" / "sess_1.json"
         assert mapping_file.exists()
 
         import json
 
-        mapping = json.loads(mapping_file.read_text())
+        # The persisted contract is UTF-8; never decode it using the Windows locale.
+        mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
         assert mapping["session_id"] == "sess_1"
         assert mapping["backend"] == "local"
-        assert "workspace_root" in mapping
+        assert mapping["workspace_root"] == str(workspace_root.resolve())
         assert mapping["container_name"] is None
         assert mapping["volume_name"] is None
         assert "created_at" in mapping
