@@ -34,6 +34,7 @@
 #   才被认作白名单（否则会被当成审查行），拆成一文件一条就得给每个文件塞一个标记行；
 #   而白名单是**低频**写入（审查行才是每批都加的那一类）⇒ 收益小于搬迁成本。
 [whitelist]
+84d4097	仅提交 Gate-0 6/6 PASS 机器读数 JSON（`docs/gate/475640e3c67d5642285854f6f36601fe86e731cd.json`），不含代码或测试变更，docs-only
 59192b9	保留首次 Gate-0 机器读数（对应合并提交 1887bfa，唯一失败为当时尚未登记的 coverage 白名单）；本提交只新增该 Gate JSON 与本台账 docs-only 声明，无代码或测试变更
 1887bfa	合并最新 origin/main（B-44 关闭与 B-43 最新状态）及 Memory V2 规划后的冲突并集；相对第一父提交仅修改 PHASE_STATUS、SDD_TICKET_TRACKER、SDD_WORKFLOW_PROTOCOL、月度归档和 review ledger 五份文档（.md/.tsv），无代码或测试变更，docs-only
 c1fbef6	Memory V2 规划落点：新增 PRD、成熟产品调研与 8 张可独立施工 ticket，并同步 README / PHASE_STATUS / tracker / 月度归档；全部为文档扩展名，docs-only
