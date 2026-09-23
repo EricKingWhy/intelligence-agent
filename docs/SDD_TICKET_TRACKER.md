@@ -4671,3 +4671,33 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 - 判据① `git diff --name-status --no-renames e58c1339 e800ecb3`（rc=0）：`M docs/PHASE_STATUS.md` / `M docs/SDD_TICKET_TRACKER.md` / `A docs/agents/SDD_V31_LIVE_VALIDATION_286.md` / `A docs/gate/64d2c78979b8c263ba9d90e2dd500b735bcb5bcd.json` / `M docs/phase_status/2026-09.md` / `A docs/review_ledger.d/122-6e281c7-e58c1339.tsv` / `M docs/review_ledger.tsv` ⇒ 状态列仅 `A`/`M`，7 条路径**全命中** `DOC_PATTERN` ✅（代码面零改动，冻结树有效）。
 - 判据② `git status --short -uall`（rc=0）：`?? .zcodeignore`（稳态）与 `?? docs/research/2026-09-23-agent-tool-loop-termination-benchmark.md` ⇒ 除稳态未跟踪项外工作树干净 ✅。**如实披露**：后者**非本批产物**（本批 10 笔的 `--name-status` 里不含它；本批从未创建或写入该路径），系**并行线的研究产物**，按「不碰他人交付面」原则保持未跟踪。
+
+**关单（§14.12）**：`#286` ⇒ **CLOSED / COMPLETED**（`closedAt 2026-09-23T08:25:33Z` = 本机 `2026-09-23 16:25 +0800`）。关单 comment = [#issuecomment-5791553161](https://github.com/EricKingWhy/intelligence-agent/issues/286#issuecomment-5791553161)，正文载明实现 commit、红证与变异读数、两轴审查结论、门禁读数与残余登记。**本批最终 tip = `2ce6406`**（14 笔：交付 3 + 审查/台账 3 + 落点 2 + 读数订正 2 + 白名单声明 2 + 门禁 JSON 1 + 关单前补记 1）。
+
+**7 条体系缺陷的处置登记（用户 2026-09-23 明确「必须弥补」⇒ 全部开票，不做「只登记不推进」）**：
+
+报告 `docs/agents/SDD_V31_LIVE_VALIDATION_286.md` §3 登记 7 条，按改动面切成两票：
+
+| # | 缺陷 | 落点 | 票 |
+| --- | --- | --- | --- |
+| 1 | **P3 无廉价修复通道**（纯注释 `src/**` diff 也让冻结树失效 ⇒ 理性选择是推迟） | 协议 §8.1 第 3 条旁新增「语义等价可传递」例外 | `#294` |
+| 2 | 「红证」与「变异」共用一个词（目的相反：证实现缺失 / 证用例有鉴别力） | 协议 §8.3 第 4 条旁**分列**两术语 + 变异须覆盖 ≥2 个不同检查点 | `#294` |
+| 3 | 沙箱 safe-delete 假红污染每次全量读数（默认仍走 shim） | 协议口径：默认走 `scripts/run_tests_clean.sh`；`gate0.py` 的 `env_failures` 结构化字段（若需改脚本 ⇒ 移 `#295`） | `#294` |
+| 4 | `git archive` 副本行尾 CRLF ⇒ 变异锚点静默 0 命中 | 协议副本操作条款：先探测行尾 + 断言命中数 `== 1` | `#294` |
+| 5 | **记账笔 > 交付笔**（实测 3 交付 vs 5 记账） | 闸门按路径机械自动归属，取代逐步 sha 手写白名单 | `#295`（代码面） |
+| 6 | 本次未覆盖 §8.8.3 失败回退路径（P0/P1 = 0 ⇒ 一行没走到） | `verification.map.tsv` 登记「回退路径覆盖记录」 | `#294` |
+| 7 | 台账白名单/审查行**描述字段零校验**（B-43 反引号被 shell 吞掉文件名仍 exit 0） | `scripts/check_review_coverage.py` 增描述字段 lint（warn 默认 + `--strict`） | `#295`（代码面） |
+
+**新增票（均 `OPEN` + `ready-for-agent`）**：
+
+- **`#294`** `[P2][Process]` 协议口径类 5 条（缺陷 1 / 2 / 3 / 4 / 6）—— **纯 docs**（`docs/SDD_WORKFLOW_PROTOCOL.md` §8 + `AGENTS.md` 同口径处 + `verification.map.tsv`），不含任何 `src/**` / `scripts/**` 改动。
+- **`#295`** `[P2][Tooling]` 闸门结构类 2 条（缺陷 7 / 5）——**含代码面**（`scripts/check_review_coverage.py`，视方案含 `scripts/gate0.py` + `tests/**`）⇒ **必须走真实审查行，不得走白名单**。
+
+**两项用户裁决（2026-09-23，已回填票面）**：
+
+1. **缺陷 1 判据强度 = 严格判据 + 兜底出口** ⇒ 主判据 = 两 blob 各自 `ast.parse`、剥离 docstring 与注释后归一化、**逐字节相同**方判等价且读数可传递；判据**必须自证可证伪**（「注释里改字面量」的负控须判**不等价**、只改 docstring 措辞的正控须判**等价**，两控制样本都进测试）；判为不等价时允许该 P3 **顺带进下一批**（不重开冻结树），但台账须写明未随批修复 + 原因 + 归属票号。
+2. **缺陷 5 = 方案 C：docs-only 按路径机械自动归属** ⇒ 一个提交若**全部改动路径**命中 `DOC_PATTERN`，闸门**自动归属并逐条打印**，不再手写白名单行。归属证据由「作者声明」升级为「**路径客观事实**」。**前置依赖：缺陷 7 的 lint 必须先生效**（否则自动归属会把截断行照放）⇒ `#295` 内验收顺序 = 先 lint、后自动归属。
+   - **A 未采纳**：`docs/gate/latest.json` 固定名会推翻 B-42「读数要能被指到具体树」的子决定（B-42 已落地且本批读数可指树能力建立其上）。
+   - **B 未采纳**：白名单声明必须引用**已存在**的 sha ⇒ 同一笔内自引用不可能，最少仍是 2 笔，实测收益趋近 0。
+
+**本批如实登记的一处未做**：`Runtime Verification` 阶段**未产生真机 / e2e 证据** —— 票面 AC 全为单测可判定，以「隔离副本真跑 + 同树对照归因」代替；**不得声称走过真机验收**。
