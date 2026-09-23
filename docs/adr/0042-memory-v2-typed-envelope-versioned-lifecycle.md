@@ -79,7 +79,9 @@ V2 写入**不接** run-end 自动写回（即 V2 目前只有显式调用者）
   紧凑画像"，把 project 作用域的事实注入到所有会话就是越界。
 - `scope ∈ {user_global, project}`；`project` 必须带 `project_id`，`user_global` 必须不带
   （两者互为反证，任一侧单独校验都能被绕过）。
-- `source_type = automatic` **必须**至少有一个 `source_event_id`：空 provenance 的"自动记忆"
+- `source_type` 中 **`user_edit` 是唯一允许空 provenance 的档位**（§6.1 原文：`source_event_ids`
+  "may be empty **only** for direct UI edits without a session"）。`automatic`（推断出来的）与
+  `explicit_command`（会话里下的命令）都指得出事件，也必须指得出——空 provenance 的记忆
   无法被审计，也就无法被撤回。
 
 ### D4 — 身份只来自可信上下文；读写两侧的失败语义刻意不同
@@ -175,7 +177,7 @@ MEM-V2-7 必须**在票面上**显式取代它们（而不是"顺手改掉"）�
 | 3 | ADR-0026 D1：`update` = `upsert by id`（同 id 覆盖，无历史） | 由 V2 的"派生新版本 + 旧版 superseded"取代 | 同一动词的**语义反转**（覆盖 vs 追加）。两条语义并存会让"更新了一条记忆"有两种可观察结果 |
 | 4 | ADR-0026 D1 + Consequences ①：`forget` = **硬删无墓碑** | 引入 §6.1 的 tombstone 契约（`deleted` 状态 + 只留 hash）与最终删除 API | 用户当初选硬删是在"没有 tombstone 契约"的前提下做的；PRD §6.1 新增了该契约，取舍前提变了 |
 | 5 | ADR-0026 D3 / D5：outbox 的"脏 `operation` 按 upsert 自愈"+ 就地 `ALTER TABLE` 补列迁移 | V2 outbox 有 `CHECK` 约束，不需要该兜底；cutover 后老库迁移路径退出 | 兜底是**无 CHECK 老库上的唯一防线**，它随老库一起退役。留着会让"未识别的 operation 值"在 V2 里也变成可接受输入 |
-| 6 | ADR-0031 D2/D3/D8：`retrieve_memory` / `remember_this` / `forget_memory` 指向 V1 capability 与 `MemoryScope.USER` | 三个工具的注入语义与调用面改为 V2 | 工具是对模型的**契约**，它们的 `description` 与环境行为必须与底层一致；否则模型按旧描述调用会打到已退役的语义 |
+| 6 | ADR-0031 D2/D3/D6（§3 的工具契约面）：`retrieve_memory` / `remember_this` / `forget_memory` 指向 V1 capability 与 `MemoryScope.USER` | 三个工具的注入语义与调用面改为 V2 | 工具是对模型的**契约**，它们的 `description` 与环境行为必须与底层一致；否则模型按旧描述调用会打到已退役的语义。D6 正是"描述与底层不一致"的既有实例 |
 | 7 | ADR-0008 子决策 1：V1 最小闭环（`update`/`delete` 留接口）+ 子决策 2 的三原语面（`store`/`recall`/`search`） | 由 V2 的七方法面取代 | ADR-0026 已部分 refines（动词纳入交付），但**面本身**（三原语 vs 七方法）到 cutover 才收敛 |
 | 8 | ADR-0008 子决策 3/4 中"LangMem 通过 `BaseStore` 适配我们的存储" | LangMem 在 formation / consolidation 侧的去留，由 MEM-V2-2 决定后在此收口 | 本票**不动** LangMem（V2 尚未接自动写回）；此处登记是为了让 MEM-V2-7 不能以"没人提过"为由跳过 |
 
@@ -271,26 +273,32 @@ provenance。就地改造会让"V2 写入"和"V1 读取"在同一列上语义分
 | 文件 | 覆盖 |
 | --- | --- |
 | `_records.py` | 三种 payload 的工厂（含 `make_draft` / `make_record`），各测试文件共用 |
-| `test_v2_types.py` | AC2 的边界与反控：内容/数值边界、kind-payload 判别、tier/scope 组合、provenance、身份冲突、不可变性 |
-| `test_v2_store.py` | AC1（roundtrip）、AC3（跨会话项目可见性 + 跨项目/用户/租户不可见）、AC4（版本 + supersession + 版本历史）、AC5（失效不出 active 面）、AC6 前半（outbox 入队 / ack revision / 自足路由）、**并发 active 不变量** |
-| `test_v2_index.py` | AC6（注入索引失败 ⇒ 已提交事实保留 + outbox 可恢复 + 重放恰好收敛一次）、AC7（伪造/过期/跨归属命中复核） |
-| `test_v2_capability.py` | 经 `MemoryV2Capability` Protocol 走完整生命周期（create → search → update → invalidate） |
+| `test_v2_types.py` | AC2 的边界与反控：内容/数值边界（含 `inf` / `-inf` / `nan`）、kind-payload 判别、tier/scope 组合、provenance（`user_edit` 是唯一豁免档）、身份冲突、不可变性 |
+| `test_v2_store.py` | AC1（roundtrip）、AC3（跨会话项目可见性 + 跨项目/用户/租户不可见）、AC4（版本 + supersession + 版本历史）、AC5（失效不出 active 面）、AC6 前半（outbox 入队 / ack revision / 自足路由）、**并发 active 不变量**、`list_active` 的 project 谓词判别性、`profile` 存档往返 |
+| `test_v2_index.py` | AC6（注入 upsert **与 delete** 失败 ⇒ 已提交事实保留 + outbox 可恢复 + 重放恰好收敛一次）、死信预算与 revision 重置、账本故障不消耗索引预算、AC7（伪造/过期/跨归属命中复核） |
+| `test_v2_capability.py` | 经 `MemoryV2Capability` Protocol 走完整生命周期（create → search → update → invalidate）+ 实现与 Protocol 的方法面一致性 |
 
-### 5.1 实测读数（本机，2026-09-23）
+### 5.1 实测读数（本机，2026-09-24，修复本轮两轴审查 findings 之后重测）
 
 ```
 $ .venv/Scripts/python.exe -m pytest tests/memory/v2 -q --no-header
-102 passed in 3.82s
-
-$ .venv/Scripts/python.exe -m pytest tests/memory/v2/test_v2_store.py -q --no-header -k concurrent
-1 passed            # 连跑 10 次，10/10 passed
+114 passed in 5.36s
 
 $ .venv/Scripts/python.exe -m ruff check .
 All checks passed!
 
-$ .venv/Scripts/python.exe -m pytest tests/memory --no-header -q      # 全量 = V1 225 + V2 102
-1 failed / 326 passed —— 唯一失败者是 V1 既存 flaky 用例（见 §5.2），V2 的 102 条全绿
+$ .venv/Scripts/python.exe -m pytest tests/memory -q --no-header     # 全量 = V1 225 + V2 114
+339 tests, 1 failed / 338 passed in 198.04s
+── 唯一失败：tests/memory/test_memory_lifecycle.py
+   ::test_concurrent_writers_converge_on_one_row_and_one_index_state
+   形态恒为 sqlite3.OperationalError: attempt to write a readonly database
+   （V1 既存环境 flaky，见 §5.2）
+── V2 的 114 条本次全绿。**这不能读作"V2 免疫该通道"** —— 见 §5.2 末尾的"结论边界"。
 ```
+
+> ⚠ **本节的证据外延在 2026-09-24 被两轴审查驳回并已更正**：修复前本节写的是
+> "102 条全绿 + `-k concurrent` 连跑 10 次 10/10 ⇒ V2 不受该环境通道影响"。
+> 后半个推论不成立（§5.2 末尾给出理由）。本节现在只声明**观测**，不声明**性质**。
 
 ### 5.2 全量套件里那条 V1 失败：判定为**既存 flaky，非本票回归**
 
@@ -325,11 +333,59 @@ $ .venv/Scripts/python.exe -m pytest tests/memory --no-header -q      # 全量 =
 5. **闭合**：纯净基线树 plain 复跑 **1 failed**（第 7 行）。基线在无 V2 时同样复现 ⇒ 结论成立。
 
 **结论**：该用例在**本机沙箱**里 flaky，形态恒为 `attempt to write a readonly database`，
-与 V1 无关、与本票无关。频率**没有可信估计**（基线 2 次里红 1 次，样本太小）；
-也不能排除"测试越多越容易触发"，但那属**负载/环境**通道——本票的 102 条 V2 用例自身 102/102 全绿。
+与 V1 无关，也**不是本票引入的回归**（第 7 行是决定性读数：无 V2 的纯净树上同样复现）。
+频率**没有可信估计**（基线 2 次里红 1 次，样本太小）；也不能排除"测试越多越容易触发"，
+但那属**负载/环境**通道。
 可疑诱因（**未验证，仅列方向**）：SQLite 的 WAL/journal 与沙箱文件保护守卫在
 `%TEMP%` 下的竞争——本仓 `safe-delete` 守卫的告警实测就指向
 `pytest-of-…/garbage-<uuid>`，说明该目录处在守卫视野内。
+
+#### 结论边界：本节证不了"V2 免疫该通道"（2026-09-24 两轴 Standards 轴指出，复核后确认成立）
+
+上面每一行证明的都是"**这条 V1 用例**在无 V2 的树上同样红"。它**不**支持下面这个外推：
+
+> 本票新增的并发用例用的是**同一种落盘方式**（`tmp_path` ⇒ 同一 `%TEMP%` 下方 + 每操作
+> 新连接 + `BEGIN IMMEDIATE`）。同一通道若打中它，暴露出来的症状**不是** `OperationalError`，
+> 而是"败者抛出的异常类型不等于 `ValueError`"（该用例断言败者必为 `ValueError`）
+> ⇒ 表现为**本票自己的红**，与 V1 那条一样不可归因。
+
+因此：
+
+- "V2 的 114 条本次全绿"只能读作**本次运行未被触发**（观测），不能读作**V2 免疫**（性质）；
+- 本票的并发用例只能作为"在未被环境干扰的运行里 R3/R4 成立"的证据，**不能**作为
+  "V2 并发安全性已被稳定验证"的证据；
+- 该非确定性是**施工环境**问题（`%TEMP%` 落在 `safe-delete` 守卫视野内），处置归环境/工具线，
+  **不改变本票的实现结论**，也不允许用放宽断言 / 缩小范围的方式让它变绿（§8 Scope Lock）。
+
+---
+
+### 5.3 本轮审查 findings 的处置与变异红证（2026-09-24）
+
+两轴独立审查（Standards + Spec，各一只读子代理，fixed point `7dc5eb4`）判 `NEEDS-FIX`：
+`P0=0`；两轴独立收敛到**同一个 P1**。逐条处置如下，每条都用"回退修复 ⇒ 目标用例变红"作判别性证明。
+
+| # | finding | 处置 | 红证（回退 ⇒ 红在哪条） |
+| --- | --- | --- | --- |
+| **P1** | `list_active` 的项目谓词写成"调用方有 `project_id` 就按 `project_id` 比较" ⇒ `user_global` 行（`project_id` 为 `NULL`）被**静默**筛掉，破坏 §4.3 / R5。两轴独立复现。 | 谓词改为 `AND (scope <> 'project' OR project_id = ?)`——项目过滤**只**对 `project` 作用域生效 | 回退谓词 ⇒ `test_list_active_user_global_is_visible_with_a_project_context` 红 |
+| **P2** | AC6 / R7 的 **delete 失败**半边无判别性测试（`fail_delete` 零引用） | 新增 `test_index_delete_failure_keeps_the_committed_state_and_the_intent`（失败保留状态与意图 + 恢复后恰好在 `delete_calls` 里出现一次），并给 AC5 用例补 `contains` / `delete_calls` 断言（原断言只看 `search` 结果，query 不匹配也同样为空） | 回退需改实现（本仓库不改生产代码来造红证）；该用例同时钉住"失败路径不得假装成功" |
+| **P2** | `acknowledge` 失败与索引失败**共用**重试预算 ⇒ 一次账本故障可永久毒住一条健康的 key | 拆开：`_apply` 成功即清预算；ack 失败只记日志、**不**消耗预算（`MemoryV2IndexRelay` docstring 同步） | 回退成共用预算 ⇒ `test_acknowledge_failure_does_not_poison_the_index_retry_budget` 红 |
+| **P3** | 死信预算与 revision 重置无测试 | 新增两条：预算耗尽后**不再尝试**但 outbox 行保留；同 id 的 revision 变化重置预算 | 回退死信判断 ⇒ 预算用例红 |
+| **P3** | `explicit_command` 允许空 provenance（§6.1 的豁免面只有 `user_edit`） | 收紧为"`user_edit` 是唯一豁免档" | 回退成只拦 `automatic` ⇒ `test_provenance_sources_reject_empty_source_event_ids[explicit_command]` 红 |
+| **P3** | `tier = profile` 未经存储层往返验证 | 新增 `test_profile_tier_roundtrips_through_the_store` | 回退 `_values` 的 tier 为常量 ⇒ 该用例红 |
+| **P3** | `allow_inf_nan=False` 冗余（`ge`/`le` 已挡住非有限值） | 删掉该参数，并补 `inf` / `-inf` 反控（`nan` 原本已有） | 该断言由 `ge`/`le` 提供；见 `test_importance_out_of_range_rejected` / `..._strength_...` |
+| **P3** | 死代码：`MemoryV2Service.store` property、`MemoryV2IndexRelay.stop()`、`indexed` 列（只写不读）、4 个包级导出常量零消费者、`MemoryV2Capability` 未导出 | 全部删除；改为在 `__init__.py` 导出 `MemoryV2Capability`（D9 说"边界是 Protocol"，导出它才与之一致） | 结构性删除，无红证（见下"为何这几条没有变异"） |
+| **P3** | ADR-0031 的决策号误引（D8 实为 `tool_scope`，与 capability/USER 无关） | §D10 第 6 行改为 `D2/D3/D6`（D6 正是"描述与底层不一致"的既有实例） | 文档更正 |
+| **P3** | 本 ADR 自述的"需被 PRD / PHASE_STATUS 引用"义务未履行（`grep 0042` 零命中） | 在 `docs/PHASE_STATUS.md` 的 Memory V2 条目下加指针 | 文档更正 |
+
+**为什么"删死代码"这几条没有变异红证**：删除件的判别性由**编译/导入期**承担——
+`MemoryV2Service.store` 与 `MemoryV2IndexRelay.stop` 一旦被删，任何残留引用会直接
+`AttributeError`；`indexed` 列的删除会让 `acknowledge` 少一次写，而该写没有任何读者
+（`grep -rn indexed src/agent_harness/memory/v2/ tests/memory/v2/` 零命中）。
+为这类删除造"回退 ⇒ 变红"是把可编译性当测试，收益为负。
+
+变异红证脚本（`.scratch/mutation_proof_297.py`，非交付物）本轮 5/5 全部按预期变红，
+且脚本在 `finally` 里用原始字节恢复并逐字节比对（不触碰任何 git 写操作）。
+
 
 按 Scope Lock（AGENTS.md §8）本票**只报告、不顺手修**；处置归属 V1 记忆线。
 备选方向：让并发写者各自用独立 DB 文件，或把该用例的并发写串行化。
@@ -351,8 +407,10 @@ LangMem / 其他项目的代码，**该票**必须补 license notice——本 AD
 
 ## 7. 验证与登记约定
 
-- **门禁**：`ruff check .`（gate0 的 `ruff` 车道）与 `pytest tests/memory`（含 V1）
-  必须无**本票引入的**失败；本票的判别性证据见 §5.1，V1 环境性失败见 §5.2。
+- **门禁**：`ruff check .`（gate0 的 `ruff` 车道）必须 clean；`pytest tests/memory/v2` 必须全绿
+  （本机 114/114）；`pytest tests/memory`（含 V1）只允许出现 §5.2 登记的那一条 V1 环境性失败
+  （形态恒为 `attempt to write a readonly database`）。任何**新增**失败一律按本票回归处理。
+  判别性证据见 §5.1 与 §5.3（本轮 findings 的逐条变异红证）。
 - **覆盖**：本票的 commit 必须在 `docs/review_ledger.d/` 有归属行（`scripts/check_review_coverage.py`）。
-- **ADR 索引**：本 ADR 需在 `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md` 或
-  `docs/PHASE_STATUS.md` 的相关条目里被引用，否则后续票找不到它。
+- **ADR 索引**：本 ADR 已在 `docs/PHASE_STATUS.md` 的 Memory V2 条目下被引用（2026-09-24 补），
+  否则后续票找不到它。
