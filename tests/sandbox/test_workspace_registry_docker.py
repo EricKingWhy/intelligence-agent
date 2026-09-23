@@ -66,7 +66,7 @@ class TestDockerRegistryDeterministicNaming:
         _sandbox = registry.create(SESSION_ID)
 
         mapping_file = tmp_path / "workspaces" / f"{SESSION_ID}.json"
-        mapping = json.loads(mapping_file.read_text())
+        mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
         assert mapping["container_name"] == f"agent-harness-{SESSION_ID}"
         assert mapping["volume_name"] == f"agent-harness-{SESSION_ID}"
 
