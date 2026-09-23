@@ -168,7 +168,7 @@ Review 必须同时检查**代码正确性 + 当前规格一致性**，不能只
 
 当前主开发（谁在干活谁就是，见文件头）维护 Matt SDD 主工程规划：
 
-- 需求澄清 → Engineering Specification → GitHub Issue / Ticket 拆分 → 实施；当前施工与 review 节奏见 `docs/SDD_WORKFLOW_PROTOCOL.md`（V3）
+- 需求澄清 → Engineering Specification → GitHub Issue / Ticket 拆分 → 实施；当前施工与 review 节奏见 `docs/SDD_WORKFLOW_PROTOCOL.md`（V3.1-lite）
 - GitHub Issue、Ticket 依赖与验收标准
 - 主 Ticket 拆分与集成
 
@@ -490,15 +490,12 @@ origin/main
   不把过期分支直接合进 main
 （若走 §13.2(b) 即直接在施工 clone 的 main 上提交，则没有这一步，直接对账）
 → diff 检查 + 门禁全绿（§14.10）
-→ **审查覆盖闸门**：`scripts/check_review_coverage.sh`
-   （范围 `<最早台账 base>..HEAD` 的每条 commit 必须有台账归属：审查行、docs-only 白名单，
-    或"恰好只改台账文件"的记账提交——**代码提交只有"补一次审查"一条路**；
-    台账 `docs/review_ledger.tsv`，机制与**信任边界**见 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条）
+→ **审查覆盖闸门**：`python scripts/check_review_coverage.py` exit 0
+   （范围 / 两类例外 / 信任边界见 §14.10 与协议 §7 第 8 条——**代码提交只有「补一次审查」一条路**）
 → merge 到本地 main（快进优先）
 → **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
-   与施工 clone 的 `HEAD^{tree}` 比——**相等即证明"我跑过门禁的那棵树"就是"被集成的这棵树"**，
-   不必再跑一遍（2026-09-17 实测：两 clone tree 同为 `e63c202…`，省掉一次 ~20 分钟的前后端全量）。
-   不等（例如集成 clone 的检出行尾/CRLF 造成差异、或合入时产生新内容）⇒ 在集成 clone 里跑全量门禁
+   与施工 clone 的 `HEAD^{tree}` 比——相等即证明「跑过门禁的树 = 被集成的树」，不必再跑
+   （机制与实测见协议 §7 第 8 条末段）；不等才在集成 clone 里跑全量门禁
 → 确认前后端集成正常
 → git push origin main（当前主开发执行，常设授权见 §14.4）
 → 通知另一条线把 main 合回来（§14.9）
@@ -732,8 +729,21 @@ A 合入 `main` 后，之前针对 B 做的 Conflict 判断**全部视为可能�
 - Lint 通过；
 - Type Check（如项目存在）通过；
 - `git diff --check` 无 whitespace / conflict-marker 问题；
-- **审查覆盖闸门通过**：`scripts/check_review_coverage.sh` 退出 0（§13.4 那一步；漏了它
-  = 允许未审查的 commit 进 main，2026-09-17 立的机械门）；
+- **审查覆盖闸门通过**：`scripts/check_review_coverage.py` 退出 0（§13.4 那一步；漏了它
+  = 允许未审查的 commit 进 main，2026-09-17 立的机械门）。
+  `.sh` 是**冻结的语义参考**（依赖 coreutils，本机默认 PATH 下跑不动；2026-09-22 台账拆到
+  `docs/review_ledger.d/` 后它只认单文件、表达不了「双读」）⇒ **唯一可运行权威是 `.py`**
+  （拆分前布局的同树对照结论见 `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4；口径登记见协议 §8.8.5）；
+- **门禁读数来自机器落盘**：`docs/gate/<sha>.json`（`scripts/gate0.py` 每次**裸全量**运行写出：
+  `sha` + `^{tree}` + 每车道结论 + 墙钟 + 工具版本 + 该次运行的工作树证据；`--replay <file>`
+  可独立复核判定）。**Gate-0 这 6 条机械车道**的读数一律**引用该文件**，不手抄终端数字 ——
+  **"人抄读数"这条路径已删除**（#213 的成因就是手抄 fixed point 错一格而静默豁免一票，
+  没有任何东西会报错）。⚠ 该文件**只覆盖这 6 条**（它自己的 `scope.does_not_cover` 如实列出
+  pytest-full / pytest-clean / vitest / build / e2e / live）—— **重车道**的读数不在里面，
+  同样不得手抄，必须来自**可复跑的命令**并把命令与树写进落点记录。
+  **落盘前工作树必须不偏离 `HEAD`**（三条**独立**检查：追踪文件偏离 / `assume-unchanged` 与
+  `skip-worktree` 位 / 未跟踪的车道输入）⇒ 否则拒绝落盘并 FAIL（车道跑在工作树上、读数只能记
+  `HEAD` 的树，两者不一致就是"指到一棵没被测过的树"）。机制与边界见协议 §7 第 8 条；
 - 没有误删文件；
 - 没有覆盖其他 Agent 成果；
 - 没有 Scope 外修改。
@@ -821,7 +831,7 @@ diff --strip-trailing-cr <a> <b>           # 万不得已比工作树时必须�
 | 在途 ticket、门禁证据、review 覆盖状态与残余问题 | `docs/SDD_TICKET_TRACKER.md` |
 | Phase 状态、当前焦点、历史索引 | `docs/PHASE_STATUS.md`（**只放索引一行 + 行号指针**） |
 | 批次 / 集成 / 审查的**逐条明细** | `docs/phase_status/<年-月>.md`（当月归档，按需读） |
-| 机读的审查范围台账（覆盖闸门的输入） | `docs/review_ledger.tsv` |
+| 机读的审查范围台账（覆盖闸门的输入） | `docs/review_ledger.tsv` + `docs/review_ledger.d/*.tsv`（双读） |
 | 一次性集成执行资料 | `docs/archive/integration-prompts/`、`docs/archive/handoffs/`；旧路径映射见各目录 README |
 
 **同一事实只在一处写全，其余处只留指针**（2026-09-17 立的规矩，起因：一条机制描述同时住在

@@ -1,0 +1,1 @@
+2026-09-17	闸门脚本两轴审查（Standards + Spec 独立子代理，读 c2b3b23 状态）——findings：docs/ 下脚本可被白名单放行(P1)、根级名缺 $ 锚、SIGPIPE fail-open、BOM 剥离 no-op、缺 base-ancestor 校验、台账行 25/26 事实错误	132ba35..c2b3b23

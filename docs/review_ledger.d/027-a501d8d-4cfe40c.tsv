@@ -1,0 +1,1 @@
+2026-09-17	#217 两轴审查（Standards + Spec 独立子代理，fixed point a501d8d，审的是未提交工作树）——findings：提取正则丢连字符名(P2)、app.py 定义处旧注释称"没有跨端自动校验"(P2)、三处叙述重复 issue 错误前提、新增前端循环近似恒真、"不做 codegen"理由漏先例、e2e 注释夸大覆盖；**findings 的修复与实现合并落在同一 commit 4cfe40c**	a501d8d..4cfe40c

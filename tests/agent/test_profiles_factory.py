@@ -45,6 +45,16 @@ def _full_registry(tmp_path) -> ToolRegistry:
     return reg
 
 
+def _grant_all(registry: ToolRegistry) -> frozenset[str]:
+    """测试口径：把 registry 里的工具**全部**标为可授予。
+
+    生产路径不这样算——`InProcessSubagentProvider` 按 runtime 剩余深度算
+    grantable（remaining=0 时摘掉 dispatch 工具）。测试里显式写出来，是为了让
+    「可授予集合」成为调用点必须表过态的东西（#286 删掉了「省略 = 全量」默认值）。
+    """
+    return frozenset(tool.name for tool in registry.list())
+
+
 #: 三内置档位声明工具面的 **exact set 对账表**（#238 AC1）。
 #:
 #: 这是**手写镜像**，不是从 `BUILTIN_PROFILES` 反推——反推等于用自己证明自己：
@@ -126,7 +136,8 @@ class TestAgentFactoryFiltering:
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read", "bash"}))
 
-        runtime = factory.create(spec, source_registry=source)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert {x.name for x in runtime.registry.list()} == {"read", "bash"}
         assert {x.name for x in source.list()} == {"read", "write", "bash", "edit",
@@ -152,20 +163,26 @@ class TestAgentFactoryFiltering:
                          tool_scope=frozenset({"read", "web_search"}))
 
         with caplog.at_level(logging.WARNING, logger="agent_harness.agent.factory"):
-            runtime = factory.create(spec, source_registry=source)
+            runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert {x.name for x in runtime.registry.list()} == {"read"}
         assert any("web_search" in rec.message for rec in caplog.records)
 
-    def test_default_grantable_is_source_registry(self, tmp_path):
-        """不传 grantable = 可授予全集（built-in profile 从全量 registry 起步）。"""
+    def test_create_rejects_missing_grantable(self, tmp_path):
+        """#286：`grantable` 必填——「省略 = 可授予全集」这条防提升旁路已封死。
+
+        本用例的前身 `test_default_grantable_is_source_registry` 断言的正是那条
+        旁路（「省略 = 全量」）。封死后同一调用点必须**报错**，所以是反转而不是
+        删除：契约翻转本身要有测试盯着，删掉等于把证据一起删了。
+        """
         source = _full_registry(tmp_path)
         factory = AgentFactory(model=ScriptedModel([]))
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read", "write"}))
 
-        runtime = factory.create(spec, source_registry=source)
-        assert {x.name for x in runtime.registry.list()} == {"read", "write"}
+        with pytest.raises(TypeError):
+            factory.create(spec, source_registry=source)  # type: ignore[call-arg]
 
 
 class TestAgentFactoryInheritance:
@@ -180,7 +197,9 @@ class TestAgentFactoryInheritance:
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read"}), max_steps=7)
 
-        runtime = factory.create(spec, source_registry=_full_registry(tmp_path))
+        source = _full_registry(tmp_path)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert runtime.model is model
         assert runtime._fallback_model is fallback
@@ -202,7 +221,9 @@ class TestAgentFactoryInheritance:
         spec = AgentSpec(name="child", description="d", system_prompt="s",
                          tool_scope=frozenset({"read"}))
 
-        runtime = factory.create(spec, source_registry=_full_registry(tmp_path))
+        source = _full_registry(tmp_path)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert captured == [runtime.registry]
 
@@ -219,7 +240,9 @@ class TestGateFourthAgent:
         )
         factory = AgentFactory(model=ScriptedModel([]),
                                primary_model_name="main-model")
-        runtime = factory.create(spec, source_registry=_full_registry(tmp_path))
+        source = _full_registry(tmp_path)
+        runtime = factory.create(spec, source_registry=source,
+                                 grantable=_grant_all(source))
 
         assert {x.name for x in runtime.registry.list()} == {"read", "grep"}
         assert runtime.max_steps == 5

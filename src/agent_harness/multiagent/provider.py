@@ -11,7 +11,8 @@ subprocess/remote(ACP) 未来换实现即可。
 未激活时执行 → 明确失败（绝不静默伪装）。
 
 child 的边界（都在 activate 注入的 factory/registry 里固化）：
-- registry 经 AgentFactory 过滤（depth=1：child 无 delegate）；
+- registry 经 AgentFactory 过滤，收窄到「本层实有工具 ∩ 剩余深度允许的可授予
+  集合」（#286：remaining=0 时 child 拿不到 delegate，且申请即显式拒绝）；
 - sandbox 与父共享同一实例（spec §9：coding 改动 review 可见）；
 - Session 独立 JSONL（lineage 由父流 delegation 事件的 child_session_id 引用）。
 """
@@ -28,6 +29,13 @@ from uuid import uuid4
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import BUILTIN_PROFILES, AgentSpec
 from agent_harness.agent.runtime import AgentRunResult
+from agent_harness.multiagent.depth import (
+    SpawnScope,
+    bind_scope,
+    child_allowance,
+    current_scope,
+    grantable_names,
+)
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import SESSION_STARTED, Session, cwd_event_data, session_cwd
 from agent_harness.session.store import JsonlSessionStore
@@ -150,6 +158,8 @@ class InProcessSubagentProvider:
         self._activated = False
         self._factory: AgentFactory | None = None
         self._source_registry = None
+        # 根委派配额（#286）：activate 用根 profile 的 max_depth 覆盖。
+        self._max_depth = 1
         self._session_store: JsonlSessionStore | None = None
         self._workspace_registry: WorkspaceRegistry | None = None
         self._parent_session_id: str | None = None
@@ -180,10 +190,19 @@ class InProcessSubagentProvider:
         summary_limit: int = 8192,
         overflow_configured: bool = False,
         max_active_children: int = 4,
+        max_depth: int = 1,
     ) -> None:
-        """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。"""
+        """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。
+
+        `max_depth` = **根配额**（#286 冻结语义 1）：root depth=0，所以它同时就是
+        「从根还能往下几层」。来源是根 profile 的 `AgentSpec.max_depth`（装配点传），
+        不是 child 的自述——child 抬不动它。默认 1 = V1 出厂语义（ADR-0015 决策 7）：
+        忘了传只会更保守，不会更宽；传 0 会被 `child_allowance` 折成「根自己也派不
+        出去」，同样 fail-closed，不炸。
+        """
         self._factory = factory
         self._source_registry = source_registry
+        self._max_depth = max_depth
         self._session_store = session_store
         self._workspace_registry = workspace_registry
         self._parent_session_id = parent_session_id
@@ -249,13 +268,32 @@ class InProcessSubagentProvider:
         if constraints:
             full_task = task + "\n\n约束：\n" + "\n".join(f"- {c}" for c in constraints)
 
+        # 当前层的配额：根（还没有人往下走过）= 装配点的 max_depth；否则 = 本层
+        # 被赋予的剩余额度（#286：child 抬不动它）。
+        scope = current_scope() or self._root_scope()
         # 并发 child 封顶（#90）：超出排队等待，不失败不丢弃。
         async with (self._active_children or nullcontext(None)):
-            return await self._run_child(spec, full_task)
+            return await self._run_child(spec, full_task, scope)
 
-    async def _run_child(self, spec: AgentSpec, full_task: str) -> SubAgentResult:
+    def _root_scope(self) -> SpawnScope:
+        """根配额：装配点给的 `max_depth` + 装配点给的 registry。"""
+        return SpawnScope(registry=self._source_registry, remaining=self._max_depth)
+
+    async def _run_child(
+        self, spec: AgentSpec, full_task: str, scope: SpawnScope,
+    ) -> SubAgentResult:
         # child sandbox = 父的同一实例（spec §9：coding 的改动 review 直接可见）
         parent_sandbox = self._workspace_registry.get(self._parent_session_id)
+        # 配额与可授予集合在**开 session 之前**算：越权/超深度的 spawn 要显式
+        # 失败，且不该在 session 列表里留下一个只有 session/started 的幽灵子会话。
+        # #286 把这条路径从「罕见」（只有越权申请才走）变成「模型每次撞深度上限
+        # 都会走」，所以顺序本身现在是可观测性的一部分。
+        allowance = child_allowance(scope, spec)
+        child_runtime = self._factory.create(
+            spec,
+            source_registry=scope.registry,
+            grantable=grantable_names(scope, allowance),
+        )
         child_session = Session(
             session_id=str(uuid4()), store=self._session_store,
             sandbox=parent_sandbox,
@@ -271,8 +309,13 @@ class InProcessSubagentProvider:
         # spawn 即注册（hub/lineage 语义：子代理在 spawn 时可见，不等完成）
         self.last_child_sessions.append(child_session)
 
-        child_runtime = self._factory.create(spec, source_registry=self._source_registry)
-        run_result: AgentRunResult = await child_runtime.run(child_session, full_task)
+        # 子代理的整段 run 都跑在**它自己**的配额作用域里：它再 spawn 时读到的是
+        # 「我手里有什么工具 + 我还能往下几层」，而不是根的（#286 冻结语义 5）。
+        with bind_scope(SpawnScope(registry=child_runtime.registry,
+                                   remaining=allowance)):
+            run_result: AgentRunResult = await child_runtime.run(
+                child_session, full_task,
+            )
 
         status = ("completed" if run_result.status == "completed" else "failed")
         logger.info(

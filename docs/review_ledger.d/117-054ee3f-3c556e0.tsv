@@ -1,0 +1,1 @@
+2026-09-22	B-38（#244 AC5）装配接线 + ADR-0039 §5 附录：`assembly.build_runtime` 把 `settings.bash_timeout_seconds` 注入 `BashTool`（内联 `tool_cls is BashTool` 判定，无参工具类不变）+ 新钉子 `tests/test_assembly_bash_budget.py`（装配后实例值 = 配置值；不接线即红）+ ADR 附录（配置入口 / 两道闸 / 唯一消费点 / 钉子与红证变异读数 / 三条残余 / 读数归属）。审查与门禁同上一条（同一冻结树、同一审查窗口，两笔同属 B-37 一批）。	054ee3f..3c556e0

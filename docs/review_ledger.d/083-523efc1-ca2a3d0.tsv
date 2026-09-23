@@ -1,0 +1,1 @@
+2026-09-21	B-30 文档治理清理双轴审查（Standards + Spec；fixed point `523efc1`）：首轮各 1 个阻断 finding（PHASE 日索引失真；历史 git object 路径误迁）经 `a6c34ce`（Standards）/ `ca2a3d0`（Spec）修复；全范围修后复审 P0/P1/P2/P3=0。既有 P3（历史 diff 后侧未固定）经 `ca2a3d0` 收口，最终增量双轴均无新增 finding	523efc1..ca2a3d0

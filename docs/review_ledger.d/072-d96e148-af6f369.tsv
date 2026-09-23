@@ -1,0 +1,1 @@
+2026-09-21	#248 窄验证第四轮（审 `af6f369` = 4 docs + `test_service_collaborators.py`，+67/−34）——三条 P3 全数修复（落 `8fcf483`）：① `imported_modules()` 的 `package` 参数**刻意不给默认值**（给默认值时，将来新增调用点忘传会静默退回修复前的弱判据，而 `TypeError` 才是想让它暴露的形状）；② ADR 的守卫能力边界 R3 漏写 **star import**（`from agent_harness.web import *` 的内容不在覆盖内）；③ 审查**轮数**在 ADR / tracker / 月档三处口径不一 ⇒ 统一为「两轴各一 + 窄验证第 N 轮」的轮次命名。	d96e148..af6f369

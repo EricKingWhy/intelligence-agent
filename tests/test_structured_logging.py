@@ -128,14 +128,15 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     llm_entry = entries[2]
     assert llm_entry["llm_input(模型输入)"] == "只回复 ok"
     assert llm_entry["llm_output(模型输出)"] == "ok"
-    # #200 行为变更（见 PR）：本测试的 FakeModel（本地 astream，不转发
-    # input_token_details）不带回缓存明细 ⇒ 仍是 3 键（缺失即省略，不写 0）。
-    # 带回明细的路径（cached_tokens 第 4 键）由 tests/web/test_context_usage.py
-    # 的 T1/T5 用例锁住（ScriptedModel 流末尾转发 usage_metadata）。
+    # #200 缓存明细：FakeModel 的末帧**确实**转发 input_token_details，形状是
+    # langchain 归一化过的 ``cache_read``（真链路同形，见
+    # `docs/FRONTEND_ISSUES_LOG.md` 第十五轮 M-01）⇒ 第 4 键 cached_tokens 必须出现。
+    # 缺失即省略、绝不写 0 的分支由 tests/web/test_context_usage.py 的 T1 用例锁住。
     assert llm_entry["token_usage(Token用量)"] == {
         "prompt_tokens": 4,
         "completion_tokens": 1,
         "total_tokens": 5,
+        "cached_tokens": 2,
     }
     assert llm_entry["outcome(结果)"] == "success"
     assert "duration_ms(耗时毫秒)" in llm_entry

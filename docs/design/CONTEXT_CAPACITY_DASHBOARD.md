@@ -44,7 +44,7 @@
 | 项 | 契约 |
 | --- | --- |
 | 采集点 | `runtime.py` 的 `_usage_from_response`（`:118-135`） |
-| 新字段 | 从 provider 响应的 `usage.input_token_details.cached_tokens` 读**缓存读取 token 数**；字段缺失 → `None`，**不写 0** |
+| 新字段 | 从 provider 响应的 `usage.input_token_details` 读**缓存读取 token 数**；字段缺失 → `None`，**不写 0**。键名**两个都认**：langchain 归一化后是 `cache_read`（2026-09-22 真机取证：真链路 `{"cache_read": 75}`，本表原先只写 `cached_tokens` 是错的），不走归一化的路径才是原始名 `cached_tokens` |
 | 落点 | `model/completed` 的 `data.usage` 增加可选 `cached_tokens`；`usage_total` 增加累加项 `cache_read_tokens`（取消臂 `runtime.py:240-242` 也如实带上） |
 | 口径 | **平均缓存命中率 = Σ cached_tokens ÷ Σ input_tokens**（该会话/该 run 所有模型调用求和）。**不是**逐调用命中率的算术平均（调用大小差异会让算术平均失真） |
 | 无数据 | 没有任何一次调用带回 cache 字段 ⇒ 前端显示「未采集（提供商未返回缓存明细）」，**不显示 0%** |
@@ -192,7 +192,7 @@ builder 快照一个持久化落点（新 Store），属基础设施扩面（`AG
 
 | # | 用例 | 断言 |
 | --- | --- | --- |
-| T1 | 采集 cache | mock 响应带 `input_token_details.cached_tokens` ⇒ `model/completed.usage.cached_tokens` 存在且相等；缺失 ⇒ 字段为 `None`/省略，**绝不写 0** |
+| T1 | 采集 cache | mock 响应带 **provider 真形状** `input_token_details.cache_read`（langchain 归一化名，见 §3.1）⇒ `model/completed.usage.cached_tokens` 存在且相等；另有用例守原始名 `cached_tokens` 兜底；缺失 ⇒ 字段为 `None`/省略，**绝不写 0** |
 | T2 | 命中率算法 | 两次调用（1000/800 命中）⇒ 平均 = 0.8（求和口径，不是逐次平均）；全缺 ⇒ `cache.state="not_collected"`；部分缺 ⇒ `"partial"` |
 | T3 | 既有断言更新 | `test_structured_logging.py` 更新后仍断言 3 个既有字段，并允许可选第 4 个；PR 说明这是本票的行为变更 |
 | T4 | 求和不变式 | **`state="ok"` 时** `Σ(四类) + Σ(工具两组) == used_tokens`；构造有 MCP 工具的场景 ⇒ `tools.mcp > 0`。`usage_only` / `no_data` 不受这条约束（前者六桶如实为 0，见 §3.4） |

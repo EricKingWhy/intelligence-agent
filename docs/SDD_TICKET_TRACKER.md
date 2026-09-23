@@ -3783,6 +3783,8 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 
 **待用户裁决（票面未改写，AGENTS.md §9.1.1）**：本批实现「消费 deadline」必然改 `sandbox/local.py` / `sandbox/docker.py`，超出 `#256` 票面 Scope lock「本票只做契约和红证，不修改 Local/Docker 实现」，且 `#244` 冻结决策要求「不要一个提交跨完三层」⇒ `5db3d43` 一个提交跨了三层。这是有意的工程取舍（三者是同一不变量的同一实现面，拆开会出现「谁都不拥有 deadline」的中间态），但**没有用户批准留痕**，故只登记、不擅自改写票面，等用户裁决：追认该偏离并重定 Scope，或要求拆分重做。
 
+**裁决已下（2026-09-22 晚，用户逐项选定；按 §9.1.1 在此留痕，**不改写 `#256` / `#244` 票面原文**）**：选「**形式化追认 + 重定 Scope**」，**不要求拆分重做**。追认判据即本段原已写明的那条 —— 这 12 个文件属**同一不变量（deadline 语义）的同一实现面**，随附 2 个测试文件 + 1 个 ADR ⇒ 构成**同一风险单元**：拆开会出现「谁都不拥有 deadline」的中间态，而拆分重做还要重跑五轮独立审查（成本 >> 风险）。**重定后的 Scope（对本批生效）**：`#256` 原 Scope lock「本票只做契约和红证，不修改 Local/Docker 实现」→「**deadline 语义的实现面（契约 + 消费点 + 两条沙箱实现）作为一个原子交付**」；`#244` 的「不要一个提交跨完三层」在本批**被追认覆盖**（同一风险单元判据）。本裁决由 B-42（`#293`）批次一并登记（见本文件 `## B-42` 段）。`#256` / `#244` 已由 B-38 按 §14.12 关单，其关单 comment 当时**明写「不构成对 `5db3d43` 三层 Scope 偏离的追认」** —— 本节即那次保留的兑现。
+
 **残余（登记，不阻断，需各自单独票）**：
 - `tools/git.py:100-102` 不转发 deadline/`cancel_event`/timeout，且 `GitStatusTool`/`GitDiffTool` 从不读 `timed_out` ⇒ 预算到期仍报 `ok=True`，残余进程无人终止（ADR-0039 L2；实测标记在返回后 5.20 s、带 3 次自动重试时 19.80 s 写出）。
 - `metadata` 不在 `ArtifactOverflowHandler` 扫描面内（一般规则，ADR-0039 L7）；现存同类实例 `multiagent/tools.py:181-188` 的 delegate payload（先于本 ADR、未修）。
@@ -4461,3 +4463,231 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 3. 程序内直传 `timeout_seconds=True` 会被 `float` 当 **1.0 秒**接受（`bool` 是 `int` 子类；env 路径 `BASH_TIMEOUT_SECONDS=true` 抛 `ValidationError`，且无 Settings 变更端点可达）。**解除 = 需要接受程序化预算时用 `isinstance(x, bool)` 显式拒绝**。
 
 **关单（§14.12）**：`#244`（umbrella）与 `#256`（子票）的 comment 载明实现 commit、红→绿与四条变异读数、两处门禁精确读数、审查固定点与覆盖闸门结果、残余三条；并**明写**两件事——① 关单**不构成**对 `5db3d43` 三层 Scope 偏离（B-25 登记、§9.1.1 待裁决）的追认，用户仍可要求拆分重做；② 父票的「最终跨模块 Gate」由本批实机探针（Local 侧长命令 + 预算截断两臂）＋ `#258` 已关单的 Docker parity 证据 ＋ 全量门禁读数共同构成——**B-38 未另跑 Docker 侧实机臂**（引用而非重跑，如实披露）。
+
+## B-40（`#291` 增量验证：把七阶段主干与失败回退边界定稿进协议）
+
+**状态**：4 笔交付 + 1 笔落点 + 1 笔白名单声明已完成，**已快进推送并关单**（2026-09-22）。**拟归批次 B-40**（本段即登记）。父票面 = GitHub `#291`（OPEN + `ready-for-agent`）。
+**依赖关系**：本票是 `#292`（verification feature map + `gate0 --affected`）的前置 —— `#292` 票面备注明写「应先有『失败回退边界』（另一张票）」。`#293`（批 3）最后做。
+
+**问题**：需求方 2026-09-22 定稿的主干（`Grill → Spec → Tickets → Implement(TDD/Tests/Matt 双轴) → Runtime Verification → Evidence Gate → Merge`）**只存在于协议 §9 那张表**：正文没有定义，也没有「失败该退到哪」的边界；相关要求散落在 §7 第 6/8 条与 §8.1–§8.6，读的人拼不出回退路径。实测依据：B-35 一票墙钟 165 分钟里 **137 分钟（83%）**花在处置审查意见、B-36 = 35/53 分钟（66%），两票 `docs` 新增 **0 行** ⇒ 慢的不是实现，是**回退与重跑的范围**没人界定。
+
+**交付面（4 笔 + 落点 2 笔）**：
+1. `23e26cf` `docs(protocol):` —— **新增 §8.8**（8 小节）：① §8.8.1 七阶段主干；② §8.8.2 **INV-1**；③ §8.8.3 **失败回退边界表**（9 档）；④ §8.8.4 永不因增量而跳过的清单；⑤ §8.8.5「针对新 diff 的 review」；⑥ §8.8.6 与 §8.7 逐条对账（8 条）；⑦ §8.8.7 复跑要求 + 首轮实测读数。并改 §9 两段（原写"七阶段主干定稿属 #291，不在本节范围内" ⇒ 改为指向 §8.8；⚠ 块改为阶段名以 §8.8.1 为准）。
+2. `42335a6` `docs(agents):` —— `docs/agents/verification.md` §4 收紧「机制上没有必要」的适用范围到 **6 条机械车道**，并写死 `--affected` 的边界（只用于失败后增量重跑，不替代推送前全量 Gate-0、也不替代集成前完整门禁）。
+3. `f605ca2` `docs(protocol):` —— 两轴 findings 全数处置（消掉 §8.8.3 的放松入口 + 8 条 P2）。
+4. `4622c12` `docs(protocol):` —— 兑现票面 comment 的 2 条 AC（新增 **§8.8.8「各档的方法依据」**）+ 处置修后重审的 5 条 P2。
+5. `1d72485` `docs(protocol):` —— 窄审 1×P1 的处置（消掉 §8.8.8 与 §8.8.3 的自相矛盾）+ 5 条 P2。
+
+**主干的要点（可直接查协议 §8.8）**：
+- **INV-1（§8.8.2）**：一条门禁读数要被复用，必须能指到树（`sha` + `^{tree}`）**且**自该读数之后代码面未变（只追加 `docs/**` 与台账，按 §8.1 第 3 条两条判据可证）。**代码面一变 ⇒ 该阶段及其下游读数全部作废**。上游（Grill/Spec/Tickets）产物是文档，spec 与票面未变时其结论可保留 ⇒ 这就是"不整条重来"的全部依据。
+- **边界表（§8.8.3）**：9 档 = 七阶段（Implement 拆 TDD / Tests / Matt 双轴）。**最远只回退到 Spec**；实现层失败**不重开 Grill / Spec / Tickets**。Review 行与 RV 行的"环内可以跳过"**必须由机械映射给出受影响集合**，在 `#292` 落地前那两格**不可用**（RV 只能整段重跑）。
+- **不可跳（§8.8.4）**：集成前完整门禁（第 1 项）／两轴的发现阶段／「针对新 diff 的 review」的两件必做／覆盖闸门／造红的隔离／读数必须能指到树／Runtime Verification 这个阶段本身。
+- **「针对新 diff 的 review」（§8.8.5）**：对「上一轮审查 tip → 本轮修复 tip」那一段做的**修后重审**；两件必做 = 闭合既有 findings（逐条"修复前红 → 修复后绿"）+ 在**新 diff** 上至少一次有限发现（不得零发现）。仍两轴、**1 轮/轴**、**无第二轮**（若在新引入的面上再给出 P0/P1 ⇒ 停止修复、登记残余、交用户裁决）。台账写真范围 `<上一轮 tip>..<本轮 tip>`，不得写成"覆盖整票"。
+
+**验收（可执行）对账**：
+- 协议能直接指到主干 + 回退表 + 对账句 ⇒ ✅ 同一个 `docs/SDD_WORKFLOW_PROTOCOL.md` 里：`§8.8.1`（主干）/ `§8.8.3`（边界表）/ `§8.8.5`（与 §8.3 对齐）/ `§8.8.6`（与 §8.7 逐条对账 8 行）。
+- **两个真实失败场景**各跑一次并记录（回退到哪 / 实跑命令 / 墙钟 / 与"整条重来"对照）⇒ ✅ 读数见下（**隔离副本**，协议 §8.1 第 6 条：变异只在主工作树之外的副本里做）。
+- 覆盖闸门 exit 0 ⇒ 见本段末尾「门禁」。
+
+**实测读数（隔离副本 `C:\Users\王浩宇\AppData\Local\Temp\wbi_exp291`，tip `e37827392b42de020e44c9052c454c62a5593dcf`、tree `b59464332b06100e5e1591acb7ff18fb500182b9`（与主仓同值，三方一致），在**同一棵已修好的树**上比"增量"与"整条重来"）**：
+- **场景 A（机械车道级）**：往 `src/agent_harness/identity.py` 末尾加一行未使用 `import uuid` ⇒ `ruff check .` 报 `F401`。失败未掩盖的读数：`python scripts/gate0.py` **rc=1 / 5 共 6 通过 / 失败车道恰为 `ruff` / wall 33.1 s**；`--only ruff` **rc=1 / wall 2.4 s**。修好后：`--only ruff` **2.4 s**（rc=0） vs 全 6 车道 **21.1 s**（rc=0） ⇒ **8.8×**。
+- **场景 B（测试级）**：把 `src/agent_harness/context/tokens.py` 的 `encode_ordinary(text)` 改成 `encode(text)` ⇒ `tests/context/test_tokens.py` 单跑 **rc=1 / 1 failed, 3 passed**（`test_special_token_spelling_is_counted_as_ordinary_user_text`，真实 `tiktoken` `ValueError: Encountered text corresponding to disallowed special token '<|endoftext|>'`）。修好后：该文件 **4.6 s** vs 后端全量 `pytest -q -p no:randomly` **509.2 s**（**110.7×**，0 failed）。
+- 脚本与原始输出：`%TEMP%\wbi_exp291_a.py` / `wbi_exp291_b.py` 与 `%TEMP%\wbi_exp291_meas\*.txt|*.json|*.xml`（**非版本控制物**；协议里只留摘要，逐条明细在本文与 `docs/phase_status/2026-09.md`）。
+- ⚠ 一处如实登记：`wbi_exp291_a.py` 的 `env_for()` **没有**设 `PYTHONPATH=<副本>/src`（`wbi_exp291_b.py:26` 有）。对场景 A 的读数无影响（变异在副本路径上确实被 ruff 看到：`F401 … src\agent_harness\identity.py:29`），该读数只作「本节首轮实测」、未被当"可复用门禁读数"传递；**若日后要按 §8.7 第 3 条复用 A 场景读数，它不满足 §8.1 第 6 条**。
+
+**审查（4 轮，均独立只读子代理；主工作树零改动）**：
+- **R1 初始两轴**（范围 `e378273..42335a6`）：Standards 轴 **NEEDS-FIX**（**1×P1** + 6×P2）、Spec 轴 **PASS-WITH-FINDINGS**（5×P2），两轴 **0×P0**。P1 = §8.8.3 Review 行"环内可以跳过"写"同一冻结树内未受影响的车道 / 见 INV-1"，而 INV-1 的前提恰是**代码面未变**（修复已改代码面）⇒ 在 `#292` 前是一个"人当场划集合"的放松入口，且同表 RV 行有机械映射约束而 Review 行没有。Spec 轴**独立复算**了 §8.8.7 的 8 项读数，与协议所写**逐位一致**（含 tree 三方一致、B1 恰好 1 条失败、A1 恰好 ruff 一条红）。
+- **R2 修后重审两轴**（范围 `42335a6..f605ca2`，§8.3 第 4 条 1 轮/轴）：两轴均 **PASS-WITH-FINDINGS**、**新 diff 上 0×P0/P1**，并各自确认 §8.8.7 读数未被改动。新 findings 5×P2：Review 行末列与第 4 列互斥、RV 行缺同款 `#292` 前置限定、§8.8.4 第 7 行的因果句事实写错、§8.8.6 引 §2 末段漏"全量"、`verification.md` §0 与新写 §4 的"分钟级"集合冲突。**两轴对同一事实给出相反结论的一处**（`AGENTS.md` §14.10 清单里有没有 e2e / 真机）：Standards 轴判"有"（依据 §7 第 6 条点名 playwright、`verification.md` 把完整门禁定义为 ①–⑪ 含 ⑪ e2e），Spec 轴判"没有"（逐条核 §14.10 原文确实只写"Tests 通过"）。**实读两处原文后裁决**：两句都对但结论不同 —— 清单里确实没点名，但"完整门禁"的定义含 e2e ⇒ 原句"只靠拓扑受保护"是错的，按 Standards 轴更正。
+- **R3 兑 AC 笔的窄审两轴**（范围 `f605ca2..4622c12`）：Standards 轴 PASS-WITH-FINDINGS、**Spec 轴 NEEDS-FIX（1×P1）**。P1 = 新写的 §8.8.8 末段"#292 前只能是**人按 `blast-radius` 的方法做一次**、并标 `unproven`"是给"人算一次即可缩小重跑范围"的**许可**，与同一笔刚写死的 §8.8.3「Review 行 #292 前只有『上游三阶段』可用 / RV 行不可用」**不能同时成立** ⇒ 叙述性重开放松入口。处置于 `1d72485`。
+- **R4 = 无**（`1d72485` 未再开审查轮）。
+
+**⚠ 超出 §8.3 预算的披露与待裁决**：本票共 4 轮审查，其中 **R3 超出 §8.3 第 4 条「修后重审每轴 1 轮」的预算**。超出的理由：R3 审的是 R2 之后才新增的内容（`4622c12` 的 §8.8.8），**该内容从未被任何一轴读过** ⇒ 属 §2 末段「Review 修复提交也必须被后续 review 覆盖」的缺口；且 R3 给出了 **1×P1**。§8.3 第 4 条对该情形的处方是「**停止修复**，如实登记轮数与残余，**交用户裁决**」；本票选择**先做最小修复**（`1d72485`）而非停手，理由是留着一个已识别的自相矛盾在协议里与 §8.7 的精神相悖。**该决定请用户裁决**；`1d72485` 本身**未再开审查轮**，但它的 6 处改动**全部是收窄或事实更正**（删一句许可、补两处"map 覆盖不到一律重跑"、更正一处归属、撤掉未实测的量级声明），**不引入任何新的放松**。
+
+**票面 comment 的 2 条 AC（2026-09-22 晚新增，第一轮漏做）**：
+- AC-a「新写的协议段落里，每一处方法性主张都要能指到一个 `docs/agents/skills/**` 文件；指不到的只有两种合法情形（① 本仓特有规则 / ② 已判定上游无可复用且在 `PROVENANCE.md` §2 写明理由）」。
+- AC-b「**失败回退边界表的每一档，要能被 §9 的 skill 支撑，或显式声明"不需要引"**」。
+⇒ 兑现于 `4622c12` 的 **§8.8.8**（9 档逐一给依据）：Tickets / Runtime Verification / Evidence Gate 三档给**全路径**；Implement / Tests、Merge 两档明文"**本仓特有规则，不需要引**"（情形 ①，附理由）；Grill / Spec / Implement-Review 三档标**情形 ①**（本仓主从关系路由归 §9 明写的 Matt 主开发 skills，**不冒充**"上游无可复用"——情形 ② 要 `PROVENANCE` §2 有判定，这三档没有）；Implement / TDD 一档属**情形 ②**（`PROVENANCE` §2 主表 + §2.1 有"不 vendored"的判定）。路径与 §9 表**逐条字面全等**（R3 两轴各自核过）。§8.8.8 同时划清与 `#292` 的分工：`blast-radius` 给的是**方法**，本仓要的「代码面 ↔ 必跑车道」**机械映射**还不存在 ⇒ `#292` 前"只重跑受影响 verification"**没有机械判据**，人算只产出候选集合、**不得**用于缩小任何重跑范围。
+
+**门禁**：覆盖闸门 `python scripts/check_review_coverage.py` ⇒ **exit 0**（`09ca47a..HEAD` 提交总数 **498** / 已审查 **353** / 待判定 **145** / `❌` **0**）。
+
+**集成与关单**（2026-09-22）：
+- `push origin main` ⇒ `e378273..446db82`（fast-forward，7 笔；推送前 `.githooks/pre-push` 自动跑 Gate-0 **6/6 PASS / 墙钟 18.1s**，改动面 6 文件全为 docs）；覆盖闸门 `09ca47a..HEAD` **498 / 已审查 353 / 待判定 145 / ❌ 0 ⇒ exit 0**；`origin/main` = `446db82ac06d3c65885455944e0e4e593b59c955`（`git ls-remote --heads origin` 实测，本地 5 refs + 4 tags 逐条零损伤）；`#291` 已按 §14.12 关单（comment 载 7 笔实现提交 + 三项验收读数 + 4 轮审查 + 超预算披露 + 残余 5 条）。
+
+**残余（登记，不阻断，附解除条件）**：
+1. **`#292` 未落地 ⇒ 环内增量目前只到"失败那一条"**（`gate0.py --only <lane>` 与直接喂 focused 文件两条入口已存在）。**解除 = `#292` 落地 `docs/agents/verification.map.tsv` + `gate0.py --affected <rev>`**，届时把 Review / RV 两行的"环内可以跳过"打开。
+2. **协议既存悬空引用 `§8.3.1`（L295）**与 **§8.3 标题未覆盖第 7 条** —— 审计包 §7 表已登记，**不在本票范围**（留给批 3 / `#293`）。**已于 2026-09-22 晚由 B-42（`#293`）闭合**（`0896336`：悬空 `§8.3.1` 改为指向「§8.3 第 1 条」；§8.3 标题扩到覆盖新增的第 8 条）。
+3. **A 场景读数不满足 §8.1 第 6 条的 `PYTHONPATH` 要求**（见上「实测读数」末条）。**解除 = 在副本里重跑一次带 `PYTHONPATH=<副本>/src` 的场景 A**，或声明该读数只作一次性实测、永不参与 §8.7 第 3 条的复用。
+4. **超出 §8.3 审查预算一轮**（见上「⚠ 超出」条）—— **待用户裁决**。
+5. **`5db3d43` 三层 Scope 偏离**仍待用户裁决（与本票无直接依赖，登记备查）。**已裁决（2026-09-22 晚）**：用户选「形式化追认 + 重定 Scope」⇒ 登记于本文件 B-25 段（由 B-42 `#293` 批次一并落地），本项**不再是待裁决项**。
+
+---
+
+## B-41（`#292` 增量验证：验证映射表 + 守卫 + `gate0 --affected`）
+
+**状态**：6 笔代码/测试 + 5 笔文档 + 落点已完成，**覆盖闸门 ❌ 0 后 fast-forward 推送并通过 §14.12 关单**（`784df9e..c9ef006`，13 笔；`#292` = CLOSED / COMPLETED，2026-09-22）。**拟归批次 B-41**（本段即登记）。父票面 = GitHub `#292`。
+**依赖关系**：前置 = B-40（`#291`，已在协议 §8.8.3 写死「Review 行与 RV 行的『环内可以跳过』**必须由机械映射给出受影响集合**」并把 `#292` 落地前那两格标为**不可用**）。后继 = `#293`（B-42，**必须最后做**）。
+
+**问题**：协议 §8.8.3 的 Review 行与 RV 行留了一个空位——「环内可以跳过哪些」**必须由机械映射给出**，而当时**映射不存在** ⇒ 那两格不可用、RV 只能整段重跑。人当场划集合正是放松的入口（§8.8.8 明文：`blast-radius` 是**方法**，人算只产出候选集合、不得缩小任何重跑范围）。本票把映射**机器化**并让脚本消费它。
+
+**交付面（6 笔代码/测试 + 5 笔文档）**：
+1. `d79fcba` `feat(verification):` —— 三件套首版（map 23 行 × 7 列 / 守卫 18 例 / `--affected`）。
+2. `41f3300` `docs(protocol):` —— §8.8.3 / §8.8.8 措辞改为「已落地」+ `verification.md` ⑭ 首版读数。
+3. `a5ee459` `fix(verification):` —— **R1 两轴 findings 全数处置**（+`how_to_get_to_it` 列 ⇒ 8 列、补 5 行无条件车道、`parse_map` 收紧、`_as_range` 抽公共、具名列索引……）。
+4. `09c908f` `test(verification):` —— 守卫 docstring 对齐 ①–⑦、去掉「7 列」。
+5. `1361322` `docs(protocol):` —— §8.8.9 定稿（四要素↔列显式对应、守卫 ①–⑦、**五条边界**）。
+6. `a5bbf03` `fix(verification):` —— **血证②口径更正**为「非确定性 flake」+ 同步 map（`ast.dump` 逐字节证明**无行为变更**）。
+7. `deee331` `docs:` —— 协议与 `verification.md` 随血证②同步（守卫例数 / 列数 / 条目编号三处与实现不符的字面）。
+8. `3a81e72` `test(verification):` —— 守卫 `MANUAL_FOCUSED` 注释同口径（血证②第五处）。
+9. `783c871` `docs(agents):` —— `verification.md` 血证②第四处 + 树缩写统一 8 位。
+10. `65f8d1f` `fix(verification):` —— **R2 修后重审 findings 全数处置**（空面 fail-closed / 三件套补 `guards` + map 自身行 / `parse_map` 解析期无条件车道校验 / 血证②第六七处 / `--since` 口径统一 / 守卫正控夹具修正）。
+11. `e62005e` `docs(verification):` —— ⑭ 读数**整块重写为最终树读数** + 补两条新边界。
+
+**要点**：
+- **三件套**：① `docs/agents/verification.map.tsv` —— **24 行 × 8 列**（覆盖 `git ls-files` 全部被跟踪文件）；② `tests/test_verification_map.py` —— **20 例**守卫（跑在 Gate-0 的 `guards` 车道 ⇒ **映射腐烂 = 推送前就红**）；③ `scripts/gate0.py --affected <rev>` —— 由改动面算出应跑集合（**默认行为不变**）。
+- **四要素由五列承载**：`Sub-features` → `sub_features`；`How to get to it (user POV)` → `how_to_get_to_it`；`Driving it with <harness>` → `lanes` + `focused`；`Gotchas` → `gotchas`。另加三个机械列 `surface`（只允许路径前缀 / 精确路径，禁通配、禁 catch-all）/ `layer` / `neg_tier`（`blast-radius` 阶梯）。`how_to_get_to_it` 是**散文**、`--affected` 不消费它。
+- **守卫 ①–⑦**：① 每个被跟踪文件都被映射；② 结构合法（8 列 / layer 唯一 / 车道 id 在词表内 / focused 路径存在 / `neg_tier ∈ 1..5`）；③ **每行承重**；④ `focused` 真跑得动；⑤ **每行列无条件车道** `diff-check` + `coverage`；⑥ user POV 形状可机械判定；⑦ 自带**独立**匹配器与求值器，与 `gate0.py` 逐项相同。
+- **五条边界**（协议 §8.8.9 ↔ `verification.md` §4 **同源**）：只用于**失败后的增量重跑**；未映射路径 ⇒ fail-closed；**改动面为空 ⇒ 同样 fail-closed（不收敛成 0 条）**；同时给 `--since` ⇒ 一律以 `--affected` 为准；`focused` 只内联 pytest 子集。
+
+**验收（可执行）对账**：
+- AC1 红证三态（`session/**`、`web/src/**`、`docs/**`）⇒ ✅ 三态读数见下。
+- AC2 变异证明 map 有牙 ⇒ ✅ 5 组变异 + 正控（隔离克隆，主工作树零改动）。
+- AC3 同树全量 vs `--affected` 对受影响项结论一致 ⇒ ✅ 三元组对账（map 侧 / summary 侧 / CLI 侧）三态全 `true`。
+- AC4 覆盖闸门 exit 0 ⇒ ✅ 本批 11 笔的 ❌ 由 11 → 0。
+- AC5 map 列对齐 `create-verification-skill` 四要素 ⇒ ✅（由**五列**承载，逐项等式见协议 §8.8.9）。
+- AC6 map 必须**真跑过**并留读数 ⇒ ✅（守卫在 Gate-0 `guards` 车道里真跑；三态读数在最终树上测）。
+- AC7 维护环「谁、在何时跑」⇒ ✅（机械环 / 落点环 / 完整环，见协议 §8.8.9）。
+- AC8 `--affected` 语义对齐 `blast-radius` 确定性阶梯（< 4 标 `unproven`）⇒ ✅（三态输出均打印 unproven 层）。
+- AC9 map 与 `--affected` 对同一批改动给出同一组车道 ⇒ ✅（= AC3 的三元组对账）。
+
+**实测读数（最终树 `HEAD=65f8d1f0a455` / tree `3cbc12dd63f2`；同轮同树；口径 = 各工具自报耗时，不混用进程墙钟）**：
+- 三态 `--affected`：**A 后端 session 88.9 s**（含内联 `tests/session` 82.21 s；点名 `pytest-full` 为唯一要补跑的重车道）/ **B 前端 src 12.7 s**（点名 `vitest` + `build`）/ **C 纯 docs 3.7 s**。
+- 同树**全量** Gate-0 **17.5 s**（仅 `coverage` 红、其余 5 条 PASS）；全量 `pytest tests` **560.29 s**（`3103 passed, 13 skipped, 42 deselected`；junit 聚合 `tests=3116 / failures=0 / errors=0 / skipped=13`）；全量 `vitest run src` **28.33 s**（67 文件 1067 例）。⇒ 「整条重来」≈ **606.1 s** vs A **88.9 s** = **约 6.8×**。
+- ⚠ **四条读数的 `coverage` 全红是闸门正确行为**：它从**工作树**读台账，而本批提交当时还没进台账（本批含代码面 ⇒ 必须走真实审查行、不得走白名单）。
+- **空面 fail-closed 实测**：`--affected HEAD` ⇒ 打印「改动面为空 ⇒ fail-closed：跑全部车道」并**实跑 6/6**（`Gate-0 FAIL：5/6 通过，墙钟 16.8 s`）；修复前打印 `Gate-0 PASS：0/0 通过`（与真 PASS 不可区分的假绿）。
+- **一处口径更正（F12）**：旧写法把两轮的数混着除（`462.33 / 65.5`），而本轮与上一轮**不同轮**（全量 pytest 427.75 → 560.29 s、A 的内联子集 58.29 → 82.21 s、vitest 18.88 → 28.33 s）⇒ 改为**同轮同树**且两半都用**工具自报耗时**。跨轮绝对秒数**不可混用**。
+- 脚本与原始输出：`%TEMP%\wbi_292_proof5.py` / `wbi_292_meas5\*.txt|*.json|*.xml` 与 `wbi_292_mutation2.py` / 克隆 `wbi_292_mut3`（**非版本控制物**）。
+
+**审查（2 轮，均独立只读子代理；主工作树零改动）**：
+- **R1 初始两轴**（范围 `784df9e..a5ee459`）：**3×P1** —— ① 三态读数指着**树里还没有 map** 的 `784df9e`；② guards 例数写错（16 / 22 实为 **20 / 26**）；③ **5 行漏列无条件车道** ⇒ `--affected` 在那 5 个面上**静默少跑**（那不是增量、是放松）。**1×P2 阻断级** = 四要素缺 `How to get to it (user POV)`（⇒ 新增列、表变 8 列）；另 7 条 P2/P3。全部处置于 `a5ee459` / `09c908f`。
+- **R2 修后重审两轴**（读范围 `a5ee459..783c871`，§8.3 第 4 条 1 轮/轴）：Standards **NEEDS-FIX**（1×P1 + 4×P2 + 4×P3）/ Spec **PASS-WITH-FINDINGS**（2×P2 + 1×P3），两轴 **0×P0**。findings 经 `65f8d1f` **全数真修**（F1 把 `coverage` PASS 写成已发生 / F2·F2b 血证②第六七处 / F3 空面假绿 / F4 三件套自指空洞 / F5 死常量 ⇒ 解析期校验 / F6–F11·F13 收窄与事实更正）。**该处置笔按本票决定的「先做最小修复」路线未再开审查轮**（§8.3「无第二轮」）；6 处改动全部是收窄或事实更正，**不引入任何新的放松**。F5 的直接后果：守卫的**正控夹具**（只列 `diff-check`）现在被正确拒 ⇒ 正控补上 `coverage`，并新增第三条坏输入（车道 id 全合法但漏无条件项，必须报错）。
+- **一处如实登记**：血证② 的主张在全仓共有 **7 处**副本（`gate0.py` 注释块 / **运行时输出串** / 协议 §8.8.9 / map `gotchas` / map **表头** / `verification.md` ⑭ / `tests/` 注释），首版把它写成「干净 HEAD 上**恒红**」而实测是**同一类干净树两次读数不同**（一次 1 例超时 = B-29 已知 flake，一次 67 文件 1067 例全绿）⇒ 本批逐处统一为「读数**非确定**（有红有绿）」。
+- **日期口径**：本批各笔的机器时间戳**全部落在 `2026-09-23` 凌晨**（代码/文档 11 笔实测 `00:58 ~ 02:18 +0800`，落点及其后的各笔同晚），按与本批前置票 B-40 一致的既有口径**一律记为 `2026-09-22`**，如实登记。
+
+**门禁 / 覆盖闸门 / 集成（2026-09-23 凌晨实测，按既有口径记为 2026-09-22）**：
+- **Gate-0（推送前）**：`.githooks/pre-push` 自动跑，**实测 6/6 PASS**（`tip=c9ef0064cfd4 tree=46539c0c964b`，改动面 9 文件 = docs 7 / scripts 1 / tests 1，墙钟 **20.8 s**）；落点前手动全量同参数亦 **6/6 PASS**（墙钟 **23.5 s**）。`coverage` 车道由**红转绿**——落点前它红是闸门**正确行为**（台账从工作树读，本批提交当时还没进台账）。
+- **覆盖闸门**：`python scripts/check_review_coverage.py` ⇒ 区间 `09ca47a..HEAD`，**提交总数 513 / 已审查 363 / 待判定 150**，**❌ 0 条 ⇒ exit 0**。本批 11 笔归位：6 笔代码面由 2 条新审查行覆盖（`784df9e..a5ee459` / `a5ee459..65f8d1f`）、`e62005e` 走白名单、落点笔 `7b3ba0d` 由台账笔 `c9ef006` 声明、`c9ef006` 为「恰好只改台账」自动放行。
+- **集成**：`push origin main` ⇒ **`784df9e..c9ef006`（fast-forward，13 笔）**；远端实测 `git ls-remote --heads origin` ⇒ `refs/heads/main = c9ef0064cfd4787486dd9497bec053c5d4451eee`。
+- **关单（§14.12）**：`#292` ⇒ **CLOSED / COMPLETED**（`closedAt 2026-09-22T18:35:01Z` = 本机 `2026-09-23 02:35 +0800`）；关单 comment 载明实现 commit、三态红证、变异证明、两轮审查、门禁精确读数与残余。
+
+**索引按归档实测重算（本批落点顺带修正）**：落点前实测 `^- 2026-` = **304**、`^- 2026-09-22` = **9**、09-22 区间 = **L628..L753**，而 `docs/PHASE_STATUS.md` 旧写 **303 / 8 / L628-736** ⇒ **B-40 落点未随归档更新该行**（B-40 在 L738-753）。本批按实测重算为 **305 / 10 / L628-L768**，并记 B-40 子项 **15** 条、B-41 子项 **14** 条。**同一轮还逮到第三处错误索引**：既有 B-33/B-34 条目把 B-34 写成 `L645`（**实为 `L650`**；`L645` 是 B-33 条内的深缩进子项）⇒ 已一并更正。
+
+**残余（登记不阻断）**：① map 的 `how_to_get_to_it` / `gotchas` 是**散文**，守卫只校形状 ⇒ 「写得准不准」**没有机械判据**；② `surface` **不做通配** ⇒ 新增顶层目录必须补映射行，否则 `--affected` 会 fail-closed 退回全量（**有意**的设计，但容易被读成「工具坏了」）；③ 读数只在本机**单轮同树内**可比，跨轮绝对秒数不可混用（本轮实测同机同批差异达 31%）。
+---
+
+## B-42（`#293` 批 3：门禁读数机器落盘 `docs/gate/<sha>.json` + 台账拆一文件一条）
+
+**状态**：5 笔交付（`536a76e` → `bbf4bcb` → `0896336` → `38e6161` → `26c0e86`）+ 修复笔 `79ae833` + 落点 1 笔 + 台账 2 笔 + JSON 1 笔。**已推送、已关单**（四项裁决已兑现：① R2 三条 P1 修复 ② `docs/gate/*.json` 纳入版本控制 ③ 冻结 `.sh` 留作参考 ④ 覆盖闸门 exit 0 + `git diff --check` 干净才推）。**拟归批次 B-42**（本段即登记）。父票面 = GitHub `#293`（OPEN + `ready-for-agent`）。
+**依赖关系**：本票**必须最后做** —— 它机器化的是前面几批已经稳定下来的口径。前置 = B-40（`#291`，协议 §8.8 主干 / §8.3 预算边界）+ B-41（`#292`，`verification.map.tsv` + `gate0 --affected`）。同批并入两项既有裁决：① `#291` 超审查预算一轮的边界澄清（协议 §8.3 新增第 8 条）；② `5db3d43` 三层 Scope 偏离的追认登记（B-25 段）。
+
+**问题**：批 2 已把门禁变成"本机默认环境真能跑"，但**读数仍靠手抄**、台账仍是**单文件 append**。前者是 #213 事故的成因（手抄 fixed point 错一格 ⇒ 静默豁免一票，**没有任何东西会报错**），后者是并发线多次碰撞的成因（两侧皆 append ⇒ 反复走并集解析）。
+
+**交付面**：
+1. `536a76e` `feat(#293):` —— `docs/gate/<sha>.json` 读数机器落盘 + 台账**双读**（判定逻辑一行不改）+ `.githooks/pre-push` 补 `--no-record`（修掉"docstring 说恒带、hook 却没带"的不一致）。
+2. `bbf4bcb` `refactor(#293):` —— 台账 **117 条**审查行拆成 `docs/review_ledger.d/<seq>-<base>-<tip>.tsv`（一文件一条）；旧单文件只留契约头部 + `[whitelist]` 段。
+3. `0896336` `docs(#293):` —— 读数来源改指 `docs/gate/<sha>.json`（协议 §7 第 8 条 + `AGENTS.md` §14.10，并把"人抄读数"这条路径本身删掉）+ §8.3 新增第 8 条（**① 并入**）+ 修掉悬空引用 `§8.3.1`。
+4. `38e6161` `fix(#293):` —— R1 两轴 findings 全数处置（落盘守卫由"看 `git status`"改**三条独立检查** + `--replay` 补四道校验 + docstring 如实化）。
+5. `26c0e86` `docs(#293):` —— R1 findings 的文档面处置（判据三条化写进协议 / 重车道读数措辞收窄 / 冻结 `.sh` 的对照口径三处 dated 登记）。
+6. `79ae833` `fix(#293):` —— R2 三条 P1 修复（`--replay` check 参数 / 非 ASCII C-quote / `.git/info/exclude` 绕过）+ P3/P4 处置（仓库外 LEDGER_DIR 回退 `os.listdir`）。
+
+**要点**：
+- **读数落盘**：`scripts/gate0.py` 每次**裸全量**运行写 `docs/gate/<head sha>.json` —— `sha` + `git rev-parse <sha>^{tree}` + 每车道 `status/rc/seconds/command/argv/cwd/output_tail` + 墙钟 + **工具版本**（git / python / ruff / node / oxlint / tsc）+ `worktree` 证据 + `scope.does_not_cover`；`--no-record` 关落盘；`--replay <file>` 在另一棵树上独立复核判定（**墙钟不参与判决**）。**增量运行（`--only` / `--affected` / `--since`）不落盘**（读数必须能指到它跑的树，§8.7 第 3 条）。
+- **台账双读**：`read_all()` 把旧单文件与 `docs/review_ledger.d/*.tsv` 两个来源的行**并起来判**；`[whitelist]` 段**有意留在旧单文件**（白名单只在标记行之后才被认，拆开就得给每个文件塞标记行，而白名单是低频写入）。「恰好只改一个台账文件」的自动放行条件随之写成 `docs/review_ledger.tsv` **或** `docs/review_ledger.d/*.tsv`。
+- **命名偏离票面（如实登记）**：票面写 `docs/review_ledger.d/<sha>.tsv`，实测 tip 有 **4 组重复**（`fdb9ce3` / `2efbeaa` / `d5e1a68` / `8213164` 各 2 次）、连 `base..tip` 组合也重复 **1 组**（`6f81c6e..fdb9ce3` 出现过两次）⇒ 只写 `<sha>` 做不到「一文件一条」，改用 `<seq>-<base>-<tip>`（`<seq>` = 迁移前在本文件里的行号，保序 + 保证唯一）。文件名只是**标签**、判定不看它（重命名实验：判定逐项不变）。
+- **落盘前守卫（`38e6161` 后）**：**三条独立检查** —— ① 追踪文件的内容/类型偏离（显式 `--untracked-files=all`，本地 config 挡不住）；② `assume-unchanged` / `skip-worktree` 位（`git ls-files -v`，`git status` 对这两个位**完全失明**）；③ 未跟踪文件里**后缀命中车道输入**的那些。其余未跟踪文件只**如实记进读数 `worktree.untracked`**、不据以拒绝（本仓稳态就有 `?? .zcodeignore`；把它当拒绝理由会让"读数的唯一来源"永久卡死）。命中任一 ⇒ 拒绝落盘 + **FAIL**（fail-closed）。
+
+**验收（可执行）对账**：
+- **拆前 / 拆后同一棵树**：三元组与 ❌ 集合逐项相同 ⇒ ✅ 见「实测读数」。
+- 落盘 JSON 可独立复核（重跑同命令得相同判定、墙钟允许不同）⇒ ✅ 见「实测读数」。
+- `AGENTS.md` §14.10 与协议 §7 第 8 条的读数来源改指 `docs/gate/<sha>.json`，**"手抄读数"路径本身已删除** ⇒ ✅ 由 `0896336` 兑现（协议原文写「**"人抄"这条路径本身已删除**」并直引 #213 作理由；`AGENTS.md` §14.10 同步，且注明该文件**只覆盖这 6 条机械车道**、重车道读数同样不得手抄、必须来自**可复跑的命令**）。
+- 覆盖闸门 exit 0（含本批自身提交的归属；**新脚本属代码面 ⇒ 走真实审查行、不走白名单**）⇒ ✅ 见「门禁」。
+
+**实测读数**（口径：**写路径、不抄终端数字** —— 协议 §7 第 8 条 2026-09-22 起的规矩，本批第一次执行；凡数值一律取自同树读数文件或可复跑的命令，并写明命令与树）：
+- **拆前 / 拆后对照**（隔离克隆，同一棵树 `f0c7c4b`，`HEAD` 落点已断言；三种组合 = 旧脚本 + 旧布局 / 新脚本 + 旧布局 / 新脚本 + 新布局）：**三种组合的判定逐项相同** —— 三元组三次全等、`❌` 集合三次都为空、退出码同为 0；逐行比对 **311 行**、**只 1 行不同** —— 台账表头 `审查范围（台账，117 行）` → `审查范围（台账，117 行 = 旧单文件 0 + 目录 117）`。⚠ 见残余⑤（同一棵树不同克隆间绝对值出现过一次不一致 ⇒ 本行只声明"三组彼此相同"这一对照结论）。
+- **落盘**：裸全量 Gate-0 在处置树 `26c0e86` 上写出 `docs/gate/26c0e86efe63e812a0c794e2b6a32d3ed5114529.json`（`sha` = `26c0e86…`、`tree` = `77629f61a01b…`）；该树上 `coverage` 车道**红是闸门正确行为**（本批提交当时还没进台账），其余 5 条 PASS。主仓同树直接量：`git rev-list --count 09ca47a..26c0e86` = 520。
+- **独立复核（票面第 2 条 AC）**：同一棵树上重跑裸全量 Gate-0，读数文件的**判定字段逐项相同**（`result` / `passed` / `total` / `failed` / 每车道 `status` + `rc`），仅 `wall_seconds` 与 `recorded_at` 不同。
+- ⚠ **一处如实登记**：本批**没有**走 `--replay`（在另一棵树上独立复核）这条路径 —— 该子命令在 `38e6161` 的处置里被改坏（残余③），我改用"同树重跑"实现该 AC。
+
+**审查**：
+- **R1 初始两轴**（范围 `f0c7c4b..0896336`，各一独立只读子代理）：Standards 轴 **NEEDS-FIX**（1×P1 + 4×P2 + 1×P4）/ Spec 轴 **PASS-WITH-FINDINGS**（1×P1 + 2×P2 + 1×P3），两轴 **0×P0**。**两轴各自独立测出同一 P1**：落盘守卫只查 `git status` ⇒ ① 把未跟踪文件也算脏 ⇒ 本仓稳态的 `?? .zcodeignore` 让落盘路径**不可达**；② `git update-index --assume-unchanged` 后改文件、`git config status.showUntrackedFiles no` 都能**绕过**并落盘成功。处置于 `38e6161`（三条独立检查）+ `26c0e86`（文档面）。
+- **R2 修后重审两轴**（范围 `0896336..26c0e86`，§8.3 第 4 条 1 轮/轴）：**两轴均 NEEDS-FIX**，且**都在 `38e6161` 新引入的代码面上各给出新 P1** ⇒ 按 §8.3 第 4 条的出口「**无第二轮**」= **停止修复、如实登记、交用户裁决**（见残余①）。
+- **R3 修后重审两轴**（范围 `26c0e86..79ae833`，用户裁决「修复」后）：**两轴均 PASS-WITH-FINDINGS、0×P0/P1/P2**（Standards P3×1+P4×1 / Spec P4×1），三条 P1 均独立复现并修复验证；P3/P4 处置（仓库外 `LEDGER_DIR` 回退 `os.listdir`）为对 findings 的机械处置、恢复既有语义、登记不修（见残余①）。
+
+**门禁**：
+- **Gate-0（推送前 6 车道）**：命令 `python scripts/gate0.py`；读数文件 `docs/gate/<head sha>.json`（本批处置树上的那一份见「实测读数」）。按 §7 第 8 条**本段不抄终端数字**；可复跑确认。**推送前 `.githooks/pre-push` 会自动跑同一命令并带 `--no-record`**（推送本身未执行，见残余⑦）。
+- **覆盖闸门**：命令 `python scripts/check_review_coverage.py` ⇒ **exit 0**（区间 `09ca47a..HEAD`）。三元组与逐条判定**取自同树读数文件的 `coverage` 车道** —— ⚠ 该车道落盘内容只含 stdout **尾部 30 行**，而汇总行在 ✅/❌ 列表**之前** ⇒ **三元组不在文件里**（残余④）。本批 5 笔代码/文档交付由 2 条新审查行覆盖（`f0c7c4b..0896336` / `0896336..26c0e86`），落点笔由台账笔的 `[whitelist]` 声明、台账笔本身走「恰好只改一个台账文件」自动放行。**不抄数字**：结论 = exit 0、`❌` 0 条。
+
+**残余（登记，不阻断，附解除条件 / 待裁决）**：
+1. **R2 三条 P1 全在 `38e6161` 新引入的代码面上** —— 用户裁决「修复」后由 `79ae833` 处置，R3 两轴修后重审 PASS-WITH-FINDINGS、0×P0/P1/P2。三条均由我在主会话内**独立复现**：
+   - **P1-a（两轴共同）**：`replay_reading()` 里 `git("rev-parse", "--verify", "--quiet", …, check=False)`，而 `git()` 的签名是 `def git(*args: str)`、**不接受 `check`** ⇒ `--replay` **必抛 `TypeError`**（从 C1 的"能跑"退化成"永不通过"）。复现：隔离克隆里先裸全量落盘，再 `python scripts/gate0.py --replay docs/gate/<sha>.json` ⇒ `TypeError: git() got an unexpected keyword argument 'check'`（栈顶 `gate0.py:719` in `replay_reading` ← `:813` in `main`）。
+   - **P1-b**：非 ASCII 未跟踪路径被 `git status` 做 **C-quote**（`?? "ZZ_\344\270\255\346\226\207_probe.py"`）⇒ `endswith(LANE_INPUT_SUFFIXES)` 为假 ⇒ **守卫放行**。
+   - **P1-c**：`.git/info/exclude` 藏起 `docs/review_ledger.d/ZZ.tsv` ⇒ `git status --porcelain -uall` 与 `git ls-files --others --exclude-standard` **都不列出它**，守卫放行；而 `coverage` 车道用 `os.listdir()` 读**工作树** ⇒ 该伪造行进入判定集、闸门由 **exit 1 转 exit 0**。复现（隔离克隆，注入前后 `git status -uall` **逐字相同**）：同轮裸全量 Gate-0 打印「读数已落盘」⇒ 守卫**没有**拦住。
+     - ⚠ **一处更正**（我第一版探针的对照标签写反）：P1-c 的严格形态是「**被藏起的文件是唯一未跟踪文件时** `blocking` 为空 ⇒ 放行」；本仓稳态有 `?? .zcodeignore`、会以**另一条**理由拦住 ⇒ 该绕过在主仓**当前**状态下不可达，但**判据本身的缺口成立**。
+   - **一条 P2 已独立复现**：`GATE_DIR_PREFIX` 把 `docs/gate/**` 整段排除，其注释断言「没有车道读 `docs/gate/**`」**与实测相反** —— `ruff check .` 确实扫到 `docs/gate/EVIL_PROBE.py`（`F401 … --> docs\gate\EVIL_PROBE.py:1:8`，rc=1；删掉后 `All checks passed!`）。
+   - **其余 R2 findings 未逐一复现、如实标注**：`--replay` 不校验聚合字段（`result`/`passed`/`failed`）且把 `OSError ⇒ rc=127` 当作"判定一致"；车道集合按**序列**比对而文档写"集合"；非对象 JSON 走 traceback；R1-P4（"已删除的落盘 JSON"不可核验）未闭合。
+    - **已裁决（2026-09-22 晚）**：用户选「修复」；三条 P1 由 `79ae833` 修复，R3 两轴 PASS-WITH-FINDINGS 复核通过（0×P0/P1/P2）。
+2. **`docs/gate/*.json` 是生成物、未纳入版本控制**：票面只写"机器落盘"，协议 §7 第 8 条也写「缺文件 ⇒ 现跑一次 Gate-0 生成」；而文件名按 `<sha>` 命名 ⇒ 每落盘一次多一个文件，提交会造成无界增长 ⇒ 本批**先不提交**。**已裁决（2026-09-22 晚）**：用户选「**纳入版本控制**」——只提交"当前树"一份 `docs/gate/<head sha>.json`（绿读数），不加 `.gitignore`。
+3. **`--replay` 已修复**（= 残余① 的 P1-a，`79ae833` 删掉 `check=False`）⇒ 票面 AC②「给定 `<sha>.json` 在另一棵树上独立复核」这条路径现已可用。
+4. **覆盖率汇总行不在落盘文件里**：`output_tail` 只留 stdout **尾部 30 行**，而 `提交总数 / 已审查 / 待判定` 这行在 ✅/❌ 列表**之前** ⇒ 覆盖率这一条上「写路径不抄数字」落不到实处（文件里没有那个数字）。**解除 = 把汇总行提升为结构化字段**（或在组装 tail 时优先保留汇总行）。
+5. **跨克隆观测到一次计数不一致（根因未查清，如实登记）**：同一棵树 `f0c7c4b` 上，隔离克隆里覆盖闸门打印的三元组绝对值出现过 **`511 / 363 / 148`** 与 **`515 / 363 / 152`** 两种（差 4），而 `git rev-list --count 09ca47a..f0c7c4b` 在**主仓**与**后一次克隆**里都是 **515**，`load_graph()` 的 `git rev-list --parents HEAD` 节点数（1545）与算法复算（1545 − 1030 = 515）也都与 515 相符。同一克隆内重复运行**稳定**、跨克隆才出现差异 ⇒ 本批**只声明"三种组合彼此逐项相同"**这一对照结论（票面 AC① 要的正是这个），**不把绝对三元组当可复用读数**；**该 4 笔差值根因待查**（可能涉及克隆对象库/环境的量法差异）。
+6. **冻结的 `scripts/check_review_coverage.sh`**：拆分后只认单文件 ⇒ **表达不了"双读"**，批 2 建立的 `.sh` 对照口径自此只对**拆分前布局**成立（已在协议 §8.8.5 / `AGENTS.md` §14.10 / `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4.1 **三处 dated 登记**）。该 `.sh` **已裁决（2026-09-22 晚）**：用户选「**留作参考**」——保持冻结、不改写（协议 §8.8.5 / `AGENTS.md` §14.10 / `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4.1 三处 dated 登记不变）。
+7. **本批已推送、已关单**（裁决 4：覆盖闸门 exit 0 + `git diff --check` 干净 ⇒ ff 推送 `f0c7c4b..e89eed5`（10 笔）；`#293` 按 §14.12 关单）。
+
+## B-43（`#286` 动态 SubAgent grantable/depth 权限边界）
+
+**状态**：3 笔交付（`83e87f2` 红证 → `ec61c26` 实现 → `e58c1339` AC5 用例）+ 台账笔 `50903f31`。**拟归批次 B-43**（本段即登记）。父票面 = GitHub `#286`（P1，`bug` + `ready-for-agent`）。
+
+**依赖关系**：B-37 链第 1 张（`#286 → #287 → #288` 串行）。本票只做**即时、不可绕过的 grantable/depth 边界**；票面 Scope 明文把 tree-wide 预算 / 熔断 / 崩溃恢复状态机排除在外（归 `#287`），并明文要求 `#287` **消费本票的 runtime-owned depth、不得另起计数器**。
+
+**问题**：委派出去的子代理能把 `delegate` 拿回来 ⇒ 「child 只能收窄」这条权限边界在运行期不成立。三处成因**互补**才构成逃逸：① `AgentFactory.create()` 省略 `grantable` 时默认「可授予 = source registry 全量」；② `DelegationToolProvider` 正好省略它；③ `AgentSpec.max_depth` 只在 `__post_init__` 做值域校验、**没有运行期消费者**。⇒ 动态 `AgentSpec(max_depth=1, tool_scope={"delegate"})` 造出的 child registry 仍含 `delegate`，递归委派由此打开。
+
+**交付面（代码面 4 文件 + 测试 6 文件）**：
+
+1. `83e87f2` `test(multiagent):` —— 红证笔：新增 `tests/multiagent/test_delegation_depth.py`（8 例：行为红 2、端到端 depth=1 / depth=2 树、嵌套 registry 归属、出厂 profile 回归、AC5 反面）+ 把 `tests/agent/test_profiles_factory.py` 的 `test_default_grantable_is_source_registry` **反转**为 `test_create_rejects_missing_grantable`（省略 `grantable` ⇒ 断言抛 `TypeError`）。
+2. `ec61c26` `feat(multiagent):` —— 实现笔：新增 `src/agent_harness/multiagent/depth.py`（`SpawnScope` 冻结快照；`ContextVar` + `bind_scope` 把「剩余深度」做成 **runtime-owned** 事实；`child_allowance = min(parent.remaining-1, spec.max_depth)`；`grantable_names` 的全集取**本层 registry** 实有工具、剩余 ≤ 0 时摘掉 `DISPATCH_TOOL_NAMES`）；`AgentFactory.create()` 的 `grantable` **改为必给**（删掉 `= None` 与「省略 = 全量」默认）；`provider` 每 spawn **前**算一次 allowance、以 `scope.registry` 为 source、并把 child 整段 `run()` 包进它自己的 `bind_scope`；`assembly` 把根 profile 的 `max_depth` 传给 `activate`；同步改 6 个既有调用点。
+3. `e58c1339` `test(multiagent):` —— AC5 反面口径：**可选工具缺席 ≠ 越权**（缺席只降级 + warning，不拒绝）。
+4. `50903f31` `chore(review-ledger):` —— 台账审查行（`docs/review_ledger.d/122-6e281c7-e58c1339.tsv`）。
+
+**为什么是 `ContextVar`**：child registry 由 `ToolRegistry.filtered()` 派生**新实例**，但里面的工具对象与父**同一身份**（`delegate` 尤其）⇒ 把「当前深度」挂在工具实例属性上，同一个 `DelegateTool` 会在多棵并行子树上互相踩；`ContextVar` 的作用域天然是「当前任务及其派生任务」，与「一条 spawn 链」同形，兄弟子树互不可见。
+
+**冻结语义逐条对账（票面 Scope 7 条）**：root depth=0 ✅（`activate(max_depth=…)` 即「从根还能往下几层」）；`max_depth=1` ⇒ root → child ✅；`max_depth=2` ⇒ root → child → grandchild ✅（端到端树用例）；runtime-owned 剩余深度**不可被 child spec 抬高** ✅（`min` 而非覆盖；M2 变异可证）；有效配额 = `min(parent_remaining - 1, child_spec.max_depth)` ✅；剩余 0 ⇒ child registry **无** `delegate` ✅（M1 变异可证）；child tool_scope ⊆ 父 grantable scope 且**永不从全量 registry 重建** ✅（`grantable_names` 全集取 `scope.registry.list()`，嵌套用例另证「用的是 child registry 不是根 registry」）。
+
+**AC 对账（6 条）**：① 动态 spec 授予父不可授予的工具 ⇒ 工厂**显式** `ValueError`（`escalated` 路径，不是静默剔除）✅；② 每次 spawn 消费深度、child spec 不能重置 ✅；③ 无剩余深度时 `delegate` 缺席 ✅；④ 出厂 profile 与合法多层 profile 保留既定工具 ✅；⑤ 边界拒绝**显式**、不静默丢掉被请求的特权工具 ✅；⑥ **不引入第二个 Agent Loop / 备用 ToolExecutor** ✅（改动只在 `factory` / `provider` / `assembly` / 新 `depth.py`；child 仍走 `executor_factory`）。
+
+**红证（改动前树 + 新用例；口径 = junit 文件，不抄终端）**：`tests/agent tests/multiagent` **4 failed / 518 passed / 3 deselected / 74.59 s**（junit `tests=522 failures=4 errors=0`），4 条全为 `test_delegation_depth.py` 的 `AssertionError`（无 import / 符号缺失型假红）⇒ **行为红**；定点窄跑 **5 failed / 2 passed / 2.39 s**，第 5 条 = `test_create_rejects_missing_grantable`。
+
+**变异（票面 Tests 第 4 条；隔离副本 `%TEMP%\wbi286mut_1790150186`，由 `git archive HEAD` 导出 1264 文件，主工作树**零改动**；正控 = 副本内 `agent_harness.__file__` 落在副本内）**：对照臂（未变异）**8 passed / exit 0 / 1.65 s**；**M1** = `depth.py` 的 `if allowance <= 0:` → `if False:`（摘掉深度 / 可授予检查）⇒ **3 failed / 5 passed / exit 1**；**M2** = `child_allowance` 改返回 `spec.max_depth`（child 可抬高额度）⇒ **同样 3 failed / 5 passed / exit 1**；两臂命中集合相同（`test_spawn_rejects_delegate_when_no_depth_remains` / `test_child_cannot_raise_depth_via_own_max_depth` / `test_depth_two_tree_allows_grandchild_but_stops_there`）⇒ **如实登记：两条检查共用同一失败面，互不构成对方的鉴别力证据**。两臂后**逐字节还原**（`depth.py` sha256 `0086d9bcd52b0cc526648eb4f995a72c6e6196de082b93ba2b2c56d0ce7bfcc3` 前后相同）并复跑 **8 passed / exit 0**。
+
+**门禁**（口径 = 只写能指到树的读数）：
+
+- **冻结树** `e58c1339`（commit `e58c1339ddf1db78c17a11f1cf978f15e128ed78` / tree `0eaeb8b6de57459172a9bcb194e2faccc985f164`）；四个改动文件 `git hash-object`：`provider.py` `48451819cb5d5568ef47dba57d0b8d4f2e03a1db` / `depth.py` `f78514a6187ec8ca13b4e716692609b55335ae75` / `factory.py` `0bfc61bd0fac03eae5f1af176a3cff4325a41eee` / `assembly.py` `4429d50312dd5ddc6a96f7f338713c9283510a81`。
+- **全量**（冻结树代码面）：junit `tests=3124 failures=3 errors=0 skipped=13 time=654.155`（pytest 自报 `3 failed, 3108 passed, 13 skipped, 42 deselected, 15 warnings in 654.49s`）。三条**全部**在 `tests/evaluation/`，签名**同一** = `SystemExit: 1` @ `sitecustomize.py:826`，载荷 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":562,"threshold":50,"scope":"turn","targets":["…\evaluation\reports\*.json"]}` ⇒ 沙箱 safe-delete shim 的**跨测试删除配额**（本仓已登记：`docs/agents/verification.md` §5 与 `docs/agents/verification.map.tsv:58` 写「全量后期 `tests/evaluation/*` 会因配额假红，处置 = `scripts/run_tests_clean.sh`」；`docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md:18` 另记同三条为既有、与该 ADR 无关）。**决定性对照（机械可判定，非推理）**：同树、同三条、仅清空 `PYTHONPATH`（= 官方脚本的处置）⇒ **3 passed in 11.69s / exit 0** ⇒ 判为**环境假红**、不阻断。
+- **focused**：`tests/agent tests/multiagent` **524 passed / 0 failed / 3 deselected / 75.75 s**（junit `tests=524 failures=0 errors=0 skipped=0`）；`tests/multiagent/test_delegation_depth.py` 单跑 **8 passed / 0 failed / 1.974 s**。
+- **`ruff`**（10 个改动 / 新增文件）：`All checks passed!`。**`git diff --check`**：exit 0。
+- **覆盖闸门** `scripts/check_review_coverage.py`：**exit 0**，区间 `09ca47a..HEAD`，三元组 `538 / 373 / 165`、`❌ 0`。
+- **§8.1 第 3 条读数传递**：冻结后只追加 docs / 台账 ⇒ 判据① `git diff --name-status --no-renames e58c1339 HEAD` 与 ② `git status --short` 的**输出原文**见下「集成（已完成）」段（已取得并落盘）。
+
+**审查（§8.2 三路并行，锚同一冻结树）**：Standards 轴与 Correctness·Spec 轴各一独立只读子代理，**均 PASS-WITH-FINDINGS（P0=0 P1=0 P2=0 P3=1）**，且**两轴各自独立**指出同一处 P3（`provider.activate` 的 docstring 对 `max_depth=0` 的语义描述夸大）。按 §8.3 第 6 条**全量登记、不因预算略去**。
+
+**残余（登记，不阻断，附解除条件）**：
+
+1. **P3（两轴共同发现）**：`provider.activate` 的 docstring 称 `max_depth=0` 会折成「根自己也派不出去」——实测只封死 **child** 的 `delegate`（root 自身 registry 由 `assembly` 独立构造、不经 grantable 收窄）。**不就地修的理由**：`AgentSpec.__post_init__` 已禁 `max_depth < 1` ⇒ 该分支**生产不可达**；而任何 `src/**` 改动（哪怕只改一行注释）都让冻结树失效 ⇒ 按 §8.1 第 3 条判据① 必须**重跑全量**（≈ 11 min）再按 §8.8.5 对「针对新 diff 的 review」开两轴 1 轮——为一行注释付这个代价与 §8.1 要消灭的浪费同形。**解除 = 出现 `max_depth=0` 的合法来源时，连同「由装配点决定 root 自身 `delegate` 存在性」一起修，并在同票补根侧用例。**
+2. **`max_depth=0` 与 `max_depth=1` 在 provider 侧行为等价**（root 剩余 0 / 1 都算出 ≤ 0 的 child allowance）：残余① 的行为面，同样生产不可达，登记不修。
+3. **并行子树隔离只有设计论证、无用例**：`ContextVar` 的理由是「同一个 `DelegateTool` 对象被多棵子树共享」，现有 8 例证的是单链；「`asyncio.gather` 并行两棵子树各自配额互不可见」无用例。**解除 = 补一条并行 spawn 用例**（该面由 `#287` 的全树预算票天然覆盖，故不单开票）。
+4. **票面 Scope 外（有意不做）**：tree-wide `max_delegations` / failure fingerprint / crash recovery 归 `#287`；delegated child workspace 归属 / 恢复归 `#288`。
+
+**集成（已完成）**：推前 `origin/main` 实测 = `6e281c74d4b13c5b708ec2329cae0131be49fb4c`（= 本批 base ⇒ 可**快进**）；`git push origin main` 触发 `.githooks/pre-push` 跑 Gate-0 六车道 = **6/6 PASS**（tip=`e800ecb3dfee` / tree=`bee8cec76d00` / 墙钟 43.1s / 改动面 17 文件 = docs 7 + tests 6 + src 4）。推送结果 `6e281c7..e800ecb  main -> main`（**ff，`PUSH_EXIT=0`**，无被拒 / 无强推）；推后 `git ls-remote --heads origin refs/heads/main` = `e800ecb3dfee397b82188b1bc865f9d0b55ce1b3` = 本地 `HEAD` = 本地 `refs/heads/main`。本批共 **10 笔**（`git log --oneline 6e281c74d4b13c5b708ec2329cae0131be49fb4c..e800ecb3dfee397b82188b1bc865f9d0b55ce1b3` 可复跑：红证 1 / 实现 1 / AC5 用例 1 / 审查行 1 / 落点 1 / 白名单 4 / 报告补笔 1）。
+
+**§8.1 第 3 条两条判据（输出原文，锚 = 推送 tip `e800ecb3`）**：
+
+- 判据① `git diff --name-status --no-renames e58c1339 e800ecb3`（rc=0）：`M docs/PHASE_STATUS.md` / `M docs/SDD_TICKET_TRACKER.md` / `A docs/agents/SDD_V31_LIVE_VALIDATION_286.md` / `A docs/gate/64d2c78979b8c263ba9d90e2dd500b735bcb5bcd.json` / `M docs/phase_status/2026-09.md` / `A docs/review_ledger.d/122-6e281c7-e58c1339.tsv` / `M docs/review_ledger.tsv` ⇒ 状态列仅 `A`/`M`，7 条路径**全命中** `DOC_PATTERN` ✅（代码面零改动，冻结树有效）。
+- 判据② `git status --short -uall`（rc=0）：`?? .zcodeignore`（稳态）与 `?? docs/research/2026-09-23-agent-tool-loop-termination-benchmark.md` ⇒ 除稳态未跟踪项外工作树干净 ✅。**如实披露**：后者**非本批产物**（本批 10 笔的 `--name-status` 里不含它；本批从未创建或写入该路径），系**并行线的研究产物**，按「不碰他人交付面」原则保持未跟踪。

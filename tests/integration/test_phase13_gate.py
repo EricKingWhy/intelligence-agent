@@ -162,7 +162,9 @@ class TestGate3DynamicFourthAgent:
             model=runtime.model, primary_model_name="gate-analyst",
             stream_idle_timeout=60.0, stream_total_timeout=600.0,
         )
-        analyst_runtime = factory.create(spec, source_registry=ToolRegistry())
+        analyst_runtime = factory.create(
+            spec, source_registry=ToolRegistry(), grantable=frozenset(),
+        )
         analyst_session = Session.start(
             JsonlSessionStore(tmp_path / "sessions" / "analyst"),
         )
