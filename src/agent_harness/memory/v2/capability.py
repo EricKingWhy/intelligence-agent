@@ -27,7 +27,12 @@ from agent_harness.memory.v2.types import (
 
 
 class MemoryV2Capability(Protocol):
-    """V2 记忆的公开操作面（create / read / search / update / invalidate）。"""
+    """V2 记忆的公开操作面（create / read / search / update / invalidate）。
+
+    方法名刻意**不**照抄 `SqliteMemoryV2Store`（`read` ↔ `get`、`versions` ↔
+    `list_versions`）：这个面描述的是"记忆操作"，store 描述的是"SQLite 行操作"。
+    换掉底层实现时该改的只有组合实现（`MemoryV2Service`），不是调用方。
+    """
 
     async def create(self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2: ...
 
@@ -61,11 +66,6 @@ class MemoryV2Service:
     def __init__(self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex) -> None:
         self._store = store
         self._index = index
-
-    @property
-    def store(self) -> SqliteMemoryV2Store:
-        """relay 与装配层需要拿到权威存储；不作为对外记忆操作面的一部分。"""
-        return self._store
 
     async def create(self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         return await self._store.create(draft, trusted)
