@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,33 @@ class TestDepthBoundary:
         results = [json.loads(e.data["content"]) for e in session.events
                    if e.type == "tool/result"]
         assert results and results[-1]["ok"] is True, "根这一层委派必须成功"
+
+    @pytest.mark.asyncio
+    async def test_unavailable_optional_tool_degrades_instead_of_rejecting(
+        self, tmp_path, caplog,
+    ):
+        """AC5 的反面口径：**缺席**（本层 registry 根本没有）走降级，不走拒绝。
+
+        与 `test_spawn_rejects_delegate_when_no_depth_remains` 成对：两种成因都必须
+        保住各自的信息——越权 = 显式拒绝并点名工具；缺席 = warning 降级、委派照跑。
+        混掉任一者，模型就失去判断「为什么没给我」的依据（本票新引入的
+        `depth.grantable_names()` 是这条区分的唯一实现点）。
+        """
+        env = _env(tmp_path, profiles={
+            "wants_web": _spec("wants_web", {"read", "web_search"}),
+        })
+
+        with caplog.at_level(logging.WARNING, logger="agent_harness.agent.factory"):
+            result = await env.delegate.execute(
+                _delegate_args("wants_web", "要个没配的工具"),
+            )
+
+        assert result.ok, f"缺席工具应降级，不该让整次委派失败：{result.message}"
+        assert env.child_registries() == [{"read"}], env.child_registries()
+        assert any("web_search" in rec.message for rec in caplog.records), (
+            "缺席降级必须留 warning（否则就是静默剔除）"
+        )
+
 
 class TestBuiltinProfilesUnaffected:
     """AC4：内置档位声明面零变化（边界是运行期收窄，不是改档位）。"""
