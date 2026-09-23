@@ -109,7 +109,7 @@ def _registry_for_case(case: EvalCase) -> ToolRegistry:
     return registry
 
 
-def run_case(
+async def run_case_async(
     case: EvalCase,
     *,
     session_root: str | Path,
@@ -123,7 +123,9 @@ def run_case(
     """
     started = time.perf_counter()
     if case.case_type == "kill_resume":
-        return _run_kill_resume_case(case, session_root, started)
+        return await _run_kill_resume_case_async(
+            case, session_root, started, runtime_factory=runtime_factory,
+        )
 
     store = JsonlSessionStore(Path(session_root))
     session: Session = Session.start(store)
@@ -139,7 +141,7 @@ def run_case(
     error: str | None = None
     result = None
     try:
-        result = asyncio.run(runtime.run(session, case.task))
+        result = await runtime.run(session, case.task)
     except Exception as exc:  # noqa: BLE001 - 单条 case 失败不得炸掉整个实验
         error = f"{type(exc).__name__}: {exc}"
 
@@ -168,6 +170,24 @@ def run_case(
             duration_ms=int((time.perf_counter() - started) * 1000),
         ),
         events,
+    )
+
+
+def run_case(
+    case: EvalCase,
+    *,
+    session_root: str | Path,
+    runtime_factory: Callable[[EvalCase], AgentRuntime] | None = None,
+) -> tuple[CaseResult, list[SessionEvent]]:
+    """Synchronous wrapper for callers outside an active event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(run_case_async(
+            case, session_root=session_root, runtime_factory=runtime_factory,
+        ))
+    raise RuntimeError(
+        "run_case() cannot run inside an active event loop; await run_case_async() instead"
     )
 
 
@@ -203,18 +223,21 @@ def run_dataset(
     return results
 
 
-def _run_kill_resume_case(
-    case: EvalCase, session_root: str | Path, started: float,
+async def _run_kill_resume_case_async(
+    case: EvalCase,
+    session_root: str | Path,
+    started: float,
+    *,
+    runtime_factory: Callable[[EvalCase], AgentRuntime] | None,
 ) -> tuple[CaseResult, list[SessionEvent]]:
     """kill/resume Golden Case（spec 12 §11 硬要求，deterministic in-CI 版）：
 
     构造"崩溃窗口"事实——tool/call 已持久化、Ledger Operation 停在 RUNNING、
     tool/result 缺失（= kill 后未收口）——再走真实 RecoveryCoordinator 恢复：
     两步状态机 -> operation/reconcile-required -> 显式裁决 -> 合成 tool/result。
-    断言：session/resumed 在场、无悬空 tool_call、Ledger 终态与裁决一致。
+    再由 AgentRuntime 基于已恢复会话完成 continuation。断言：session/resumed 在场、
+    无悬空 tool_call、Ledger 终态与裁决一致，且 Runtime 完成。
     """
-    import asyncio
-
     from agent_harness.recovery import RecoveryCoordinator
     from agent_harness.storage import (
         SqliteOperationLedger,
@@ -232,10 +255,10 @@ def _run_kill_resume_case(
         message="migration applied (confirmed by user verdict)",
     )
     ledger = SqliteOperationLedger(root / "state.db")
-    asyncio.run(_seed_running_op(
+    await _seed_running_op(
         ledger, session.session_id, "call-kill-1",
         tool_result.model_dump_json(),
-    ))
+    )
 
     coordinator = RecoveryCoordinator(
         session_store=store,
@@ -246,8 +269,22 @@ def _run_kill_resume_case(
     )
     error: str | None = None
     recovered: Session | None = None
+    runtime_result = None
     try:
-        recovered = asyncio.run(coordinator.recover(session.session_id))
+        recovered = await coordinator.recover(session.session_id)
+        continuation_case = case.model_copy(update={
+            "script": [{"content": "恢复的操作已确认，任务完成。"}],
+        })
+        if runtime_factory is not None:
+            runtime = runtime_factory(continuation_case)
+        else:
+            registry = _registry_for_case(continuation_case)
+            runtime = AgentRuntime(
+                _build_script_model(continuation_case), registry, ToolExecutor(registry),
+            )
+        runtime_result = await runtime.run(
+            recovered, "Continue after recovery and report the confirmed operation result.",
+        )
     except Exception as exc:  # noqa: BLE001 - 单条 case 失败不得炸掉实验
         error = f"{type(exc).__name__}: {exc}"
 
@@ -255,12 +292,16 @@ def _run_kill_resume_case(
     metrics: dict[str, Any] = {
         "dangling_tool_calls": len(dangling_tool_call_ids(events)),
         "kill_resume_ok": kill_resume_ok(events) if recovered is not None else False,
+        "agent_runtime_completed": (
+            runtime_result is not None and runtime_result.status == "completed"
+        ),
         "verdict": verdict_value,
     }
     ok = (
         error is None
         and recovered is not None
         and metrics["kill_resume_ok"]
+        and metrics["agent_runtime_completed"]
         and metrics["dangling_tool_calls"] == 0
     )
     return (

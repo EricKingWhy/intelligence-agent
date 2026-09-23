@@ -17,6 +17,14 @@
 `uv run pytest tests/integration/test_phase15_gate.py -m integration -v` → 2 passed（Gate 2/5）。
 默认车道随全量：1173 passed 零失败。
 
+## #290 Follow-up：async Experiment 与 false-green Gate（2026-09-24）
+
+`run_langfuse_experiment` 的成功状态现在以 Langfuse `ExperimentResult` 为证据：数据集不能为空或含重复 item/case；结果必须逐 item 对齐；每个 `CaseResult.ok`、`p0_pass`、`dangling_tool_calls` 均达标；recovery case 必须 100% 通过。若某 case 标记或输出了 `duplicate_confirmed_side_effects` / `permission_violations` 指标，则该指标必须存在且为 0。SDK 丢弃失败 task、遗漏 evaluator 或重复结果均不能得到 `status=ok`。
+
+Langfuse Experiment task 直接 `await run_case_async`；同步 `run_case` 仅供非事件循环调用，在事件循环内明确提示调用 async API。`kill_resume` case 在 RecoveryCoordinator 补齐结果后继续经过 AgentRuntime，确保所有 dataset item 都走 Runtime。
+
+本地验证：`tests/evaluation` 与 Phase 15 默认车道 **17 passed / 2 integration deselected**；Phase 16 **13 passed**；本轮改动 Ruff 全绿。真实 Langfuse passing run 与 deliberately failing control 已加入 `test_gate5_real_seed_idempotent_and_experiment`：要求 pass 为 `ok`、控制组全部失败、两个 dataset run ID 不同、seed 前后 item ID 完全不变。按用户批准，真云 Gate 尚未运行；#287–#290 集成后再执行。成功实验与失败控制实验的 dataset/experiment/trace 均保留作审计证据，不清理、不额外 seed item。
+
 ## Gate 2 审计清单（官方 best-practices 固化断言，全部对真云回捞数据）
 
 - trace name 描述性（`agent-run`）✓；session 聚合 = session_id（`propagate_attributes` 官方通道）✓
