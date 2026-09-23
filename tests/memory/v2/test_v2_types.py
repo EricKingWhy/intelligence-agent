@@ -117,7 +117,11 @@ def test_project_scope_accepts_matching_project_id() -> None:
 
 
 def test_user_edit_source_is_representable() -> None:
-    """R8：用户编辑权威必须能在记录契约里表达（后续票据此防止被助手证据覆盖）。"""
+    """R8：用户编辑权威必须能在记录契约里表达（后续票据此防止被助手证据覆盖）。
+
+    这条只钉**无会话**的 `user_edit`（§6.1 豁免的字面形态）；带会话的 `user_edit`
+    不允许空 provenance，由 `test_user_edit_with_a_session_still_requires_an_event_id` 钉住。
+    """
     built = record(source_type=SourceType.USER_EDIT, source_event_ids=[], source_session_id=None)
     assert built.source_type is SourceType.USER_EDIT
 
@@ -268,13 +272,28 @@ def test_blank_project_id_rejected() -> None:
 
 @pytest.mark.parametrize("source_type", [SourceType.AUTOMATIC, SourceType.EXPLICIT_COMMAND])
 def test_provenance_sources_reject_empty_source_event_ids(source_type: SourceType) -> None:
-    """§6.1 的豁免面**只有** `user_edit`（"may be empty only for direct UI edits
+    """§6.1 的豁免面**只有**「无会话的 `user_edit`」（"may be empty only for direct UI edits
     without a session"）⇒ `automatic` 与 `explicit_command` 都必须指得出事件。
 
-    正控在 `test_user_edit_source_is_representable`（`user_edit` 允许空 provenance）。
+    豁免的另一半（`user_edit` + 有会话 ⇒ 仍然拒绝）见
+    `test_user_edit_with_a_session_still_requires_an_event_id`。
     """
     with pytest.raises(ValidationError):
         record(source_type=source_type, source_event_ids=[])
+
+
+def test_user_edit_with_a_session_still_requires_an_event_id() -> None:
+    """豁免是**合取**（`user_edit` **且** 无会话），不是"`user_edit` 就放行"。
+
+    判别性：正控 `test_user_edit_source_is_representable` 用的是 `source_session_id=None`，
+    它钉不住"带会话的 `user_edit` 也能空 provenance"这条放宽——把豁免写成只看
+    `source_type`，那条正控照样绿。只有本条能把豁免面收回到 §6.1 的字面。
+    """
+    with pytest.raises(ValidationError):
+        record(source_type=SourceType.USER_EDIT, source_event_ids=[], source_session_id="session-1")
+    assert record(
+        source_type=SourceType.USER_EDIT, source_event_ids=[], source_session_id=None,
+    ).source_type is SourceType.USER_EDIT
 
 
 def test_evidence_is_required() -> None:

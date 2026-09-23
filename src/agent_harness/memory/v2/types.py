@@ -207,13 +207,18 @@ class _MemoryContentFields(BaseModel):
                 raise ValueError("project scope requires project_id")
         elif self.project_id is not None:
             raise ValueError("user_global scope must not carry project_id")
-        if self.source_type is not SourceType.USER_EDIT and not self.source_event_ids:
+        if not self.source_event_ids and not (
+            self.source_type is SourceType.USER_EDIT and self.source_session_id is None
+        ):
             # §6.1 原文："Non-empty ... may be empty **only** for direct UI edits without a
-            # session" ⇒ 豁免面只有 `user_edit` 一档（UI 上的直接编辑可能压根没有会话）。
+            # session" ⇒ 豁免是**合取**：既要 `user_edit`，又要**没有会话**。UI 上的直接编辑
+            # 可能压根没有会话，那才指不出事件；一旦带上了 `source_session_id`，事件就在那个
+            # 会话里，`user_edit` 这个来源类型不再是豁免理由。
             # `automatic`（推断出来的）与 `explicit_command`（会话里下的命令）都指得出事件，
             # 也必须指得出——空 provenance 的记忆无法被审计，也就无法被撤回。
             raise ValueError(
-                f"{self.source_type.value} source requires at least one source_event_id")
+                f"{self.source_type.value} source requires at least one source_event_id "
+                "(provenance may be empty only for a sessionless user_edit)")
 
 
 class MemoryDraftV2(_MemoryContentFields):
