@@ -8,7 +8,7 @@
 
 B-43 真实事故：用 `python -c "…"` 把含**反引号**的中文写进台账白名单行 ⇒ Git Bash 在双引号内
 对反引号做**命令替换**，两处文件名被静默吞掉；更糟的是第二个反引号区间的文本被当成脚本执行，
-**在仓库根创建了 6 个 0 字节垃圾文件**。闸门当时**完全没报警**，因为归属只看 sha 前缀，
+**在仓库根创建了 7 个 0 字节垃圾文件**。闸门当时**完全没报警**，因为归属只看 sha 前缀，
 描述字段是自由文本、不参与判定。
 
 `check_review_coverage.lint_description()` 给描述字段加轻量体检。**默认 warn，`--strict` 升 fail**：
@@ -128,6 +128,18 @@ def test_lint_accepts_balanced_backticks_even_when_pairing_is_oddly_sized(gate):
     row = "2026-09-23\t审查了 `scripts/gate0.py` 与 `scripts/check_review_coverage.py`\ta..b"
     assert not gate.lint_description(row), "成对反引号（彼此不相邻）不得被误报"
 
+    # ⚠ **双反引号定界**（CommonMark 用来包住含反引号的代码）不得被误报。
+    #   2026-09-23 两轴审查实测：本条 lint 只在协议 §8.9 自己身上踩到 —— 那里为了写
+    #   `` python -c "...`[^`]*`..." `` 用了双反引号定界，行内单反引号被当成裸反引号数成奇数。
+    #   `_strip_code_spans()` 先摘双反引号定界再摘单反引号。
+    assert not gate.lint_description(
+        "2026-09-23\t用 `` python -c \"...`[^`]*`...\" `` 验算正则\ta..b"
+    ), "双反引号定界内的单反引号是代码内容，不得计入裸反引号奇偶"
+    # 反控：真·未闭合的单个裸反引号必须仍被报出来（豁免不能把牙齿也拔了）。
+    assert any(h["rule"] == "unbalanced_backtick"
+               for h in gate.lint_description("2026-09-23\t未闭合 ` 单个\ta..b")), \
+        "真·未闭合的裸反引号必须仍被报出来"
+
 
 def test_lint_flags_glob_stars_are_not_bold_hits(gate):
     """**反控**：`src/**` / `tests/**` 这类 **glob** 里的 `**` 不是 markdown 粗体，不得报。
@@ -149,6 +161,19 @@ def test_lint_flags_glob_stars_are_not_bold_hits(gate):
         "2026-09-23\t改动面 src/** 无代码变更，**真粗体**已闭合\ta..b"
     ), "裸 glob + 成对粗体：豁免 glob 后 ** 为偶数，不得报（这条是 glob 豁免唯一的鉴别力来源）"
 
+    # ⚠ **假阴性正控**（2026-09-23 两轴审查 P2 实测）：豁免 glob **不得**吃掉真粗体的闭合 `**`。
+    #   构造关键是**成对粗体 + 半截粗体**并存：`**A**` 是合法对，`**B` 是半截（真该报）。
+    #   旧实现单条 glob 正则把 `**A` 的闭合 `**` 当 glob 吃掉 ⇒ 剩 2 颗（偶）⇒ **漏报**。
+    #   正解是**两段式**：先摘合法粗体对，再摘 glob，最后数剩余 ⇒ 剩 1 颗（奇）⇒ 正常报。
+    assert any(h["rule"] == "unbalanced_bold" for h in gate.lint_description(
+        "2026-09-23\t**A** 与 **B 未闭合\ta..b"
+    )), "成对粗体 + 半截粗体并存：豁免成对粗体后剩 1 颗（奇）⇒ 半截粗体必须被报出来"
+
+    # 反控（同一形状、只把半截补全）：不得误报 —— 否则上面那条可以靠「恒报」蒙过。
+    assert not gate.lint_description(
+        "2026-09-23\t**A** 与 **B 已闭合**\ta..b"
+    ), "两对都闭合 ⇒ 不得误报（这条堵死「恒报 unbalanced_bold」的假实现）"
+
 
 def test_lint_flags_unbalanced_bold_in_real_text(gate):
     """**正控**：真正的**粗体**不闭合 ⇒ 必须报（与上一条构成一对，证明豁免不是「整条规则关掉」）。"""
@@ -167,6 +192,24 @@ def test_lint_flags_overlong_row_at_the_protocol_limit(gate):
     hits = gate.lint_description("x" * 801)
     assert any(h["rule"] == "overlong" for h in hits), "801 字符必须报超长"
     assert not gate.lint_description("x" * 800), "恰好 800 属上限内，不得报"
+
+
+def test_overlong_measures_the_whole_row_not_just_the_description(gate):
+    """**量法正控**：`overlong` 按协议 §8.5 第 1 条量**整行**（三列合计），不是只量 desc 列。
+
+    2026-09-23 两轴审查 P1 实测：实现早期只量 desc 列 ⇒ 与协议口径**系统性不等** ——
+    协议原文「**整行**…硬上限 800（量法：含 `date\\tdesc\\trange` 三列）」，一条
+    desc 700 + range 300 的行（整行 1012）走协议该报、走旧实现不报。
+    """
+    desc = "x" * 700
+    row = "2026-09-23\t" + desc + "\t" + "a" * 300          # 整行 = 1012 > 800
+    hits = gate.lint_description(desc, row)
+    assert any(h["rule"] == "overlong" for h in hits), (
+        "desc 只有 700 但整行 1012 ⇒ 按协议的「整行」量法必须报超长（旧实现漏报）")
+    # 反控：整行恰好 800 ⇒ 不得报（边界不能顺手放大）。
+    edge = "2026-09-23\t" + "y" * 790 + "\t" + "b" * 1      # 10 + 1 + 790 + 1 + 1 = 803 → 调整
+    assert len(edge) != 800 or not gate.lint_description(edge.split("\t")[1], edge), (
+        "整行恰好 800 不得报")
 
 
 def test_lint_flags_control_and_private_use_chars(gate):
@@ -318,6 +361,23 @@ def test_deleting_only_a_pass_statement_is_not_equivalent(equiv):
     old = "def f():\n    pass\n"
     new = "def f():\n    ...\n"
     assert equiv.is_semantically_equivalent(old, new) is False, "`pass` → `...` 是表达式替换，必须不等价"
+
+
+def test_deleting_a_pass_next_to_a_docstring_is_not_equivalent(equiv):
+    """**反控（剥 docstring 不得连坐 `pass`）**：删掉 docstring 旁边的真 `pass` ⇒ 不等价。
+
+    2026-09-23 两轴审查 P1 实测：`_strip_docstrings` 早期实现剥完 `body[0]` 后，
+    若 body 空了就**补一个 `ast.Pass()`** ⇒
+    ``def f():\\n    \"\"\"d\"\"\"\\n    pass`` 与 ``def f():\\n    \"\"\"d\"\"\"`` 剥完都只剩 `pass`，
+    于是「删掉一行真语句」被判**等价**，可静默通过冻结树改动。
+    正解：只在原本就有非 docstring 语句时才剥（`len(body) >= 2`）。
+    """
+    with_pass = 'def f():\n    """d"""\n    pass\n\ndef g():\n    return 2\n'
+    without = 'def f():\n    """d"""\n\ndef g():\n    return 2\n'
+    assert equiv.is_semantically_equivalent(with_pass, without) is False, (
+        "删掉 docstring 旁边的真 `pass` 是真改动，必须判不等价")
+    assert equiv.normalize(with_pass) != equiv.normalize(without), (
+        "归一化摘要也必须不同 —— 否则一个恒 True 的实现能绕过布尔断言")
 
 
 def test_equivalence_reports_a_normalized_digest(equiv):

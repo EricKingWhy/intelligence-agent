@@ -100,11 +100,39 @@ _PUA_RE = re.compile("[\ue000-\uf8ff\U000f0000-\U000ffffd\U00100000-\U0010fffd]"
 _CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 #: 行内代码（一对反引号夹住的内容）。**私有**：lint 与 glob 豁免都用它把"代码里的符号"摘出去。
+#: 只认**单反引号**定界（`` `code` ``）。**双反引号定界**（`` `` `x` `` ``，CommonMark 里用来包住
+#: 含反引号的代码）由 `_MULTI_BACKTICK_RE` 先摘 —— 否则被包住的单反引号会被数成裸反引号，
+#: 造成 `unbalanced_backtick` 假阳性（issue #295 两轴审查实测：协议 §8.9 自己就踩了这条）。
+_MULTI_BACKTICK_RE = re.compile(r"(`{2,}).+?\1")
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _strip_code_spans(desc: str) -> str:
+    """摘掉**双反引号定界**的行内代码（可能内嵌单反引号），再摘单反引号行内代码。
+
+    顺序不可换：先摘双的 —— 否则 `` `` a`b `` `` 会被单反引号规则切成两半、留下半个定界。
+    """
+    return _INLINE_CODE_RE.sub("", _MULTI_BACKTICK_RE.sub("", desc))
 
 #: **glob 里**的 `**`：`src/**`、`tests/**`、`docs/**` 这类。它们不是 markdown 粗体定界符，
 #: 粗体奇偶检查必须先豁免它们（2026-09-23 实测：历史台账 4 条奇数 `**` 行里，
 #: `099-37e8c4d-d165740.tsv` 的奇数**全部**来自 glob ⇒ 不豁免就是纯假阳性）。
+#:
+#: 合法的**粗体对**（`**x**`，内容非空且不以 `*` 起）。**先摘它、再判剩余奇偶** ——
+#: 顺序是关键：靠单条正则同时处理「粗体对」与「glob」时，glob 模式一定会误吃粗体的闭合 `**`
+#: （2026-09-23 两轴审查 P2 实测：`**A** 与 **B 未闭合` 被判"偶数" ⇒ 半截粗体静默漏报）。
+_BOLD_PAIR_RE = re.compile(r"\*\*(?=[^\s*])(?:[^*]|\*(?!\*))*?\*\*")
+
+#: **glob 里**的 `**`：`src/**`、`tests/**`、`docs/**` 这类。它们不是 markdown 粗体定界符，
+#: 粗体奇偶检查必须豁免（2026-09-23 实测：历史台账 4 条奇数 `**` 行里，
+#: `099-37e8c4d-d165740.tsv` 的奇数**全部**来自 glob ⇒ 不豁免就是纯假阳性）。
+#: 形状 = 紧跟在路径字符后、且后面是 `/`、空白、标点或行尾。
+#: **已知局限（刻意不修）**：同一行里「半截粗体 + 裸 glob」共存、且两者相加恰好凑成偶数时
+#: （如 `**B 未闭合，另见 src/** 目录` ⇒ 1 颗半截 + 1 颗 glob = 2 颗）仍会漏报。
+#: 无法用正则消歧——`src/**` 与 `**B` 的字符形状完全同构，要真判需要 markdown 解析器。
+#: 处置：这是**假阴性**（漏报），不是假阳性；且该形状在真实台账里未出现。
+#: 真正的兜底是「有半截粗体必然伴随行被截断 ⇒ `overlong` / 语义审查会发现」。登记于此，
+#: 由 issue #295 两轴审查轮确认接受。
 _GLOB_STARS_RE = re.compile(r"(?<=[A-Za-z0-9_./-])\*\*(?=[/\s,，。）)]|$)")
 
 FAIL_HELP = """
@@ -283,12 +311,12 @@ def read_all(legacy: str) -> tuple[list[str], list[str], int, int, list[str]]:
 # 描述字段 lint（issue #295 / 缺陷 7）
 # --------------------------------------------------------------------------- #
 
-def lint_description(desc: str) -> list[dict]:
+def lint_description(desc: str, row: str | None = None) -> list[dict]:
     """体检一条台账描述字段，返回命中列表（每条 `{"rule", "why"}`）。**纯函数、永不抛**。
 
     为什么需要它（B-43 真实事故）：用 `python -c "…"` 把含**反引号**的中文写进台账白名单行 ⇒
     Git Bash 在双引号内对反引号做**命令替换**，两处文件名被**静默吞掉**；更糟的是第二个反引号
-    区间的文本被当成脚本执行，**在仓库根创建了 6 个 0 字节垃圾文件**。而覆盖闸门**完全没报警** ——
+    区间的文本被当成脚本执行，**在仓库根创建了 7 个 0 字节垃圾文件**。而覆盖闸门**完全没报警** ——
     归属只看 sha 前缀（描述字段是自由文本、不参与判定），截断后的行照样让闸门 exit 0。
 
     它**不**证明描述语义正确（那是散文，脚本判不了真伪）；它挡的是"文本被机械损坏"这一族：
@@ -297,6 +325,8 @@ def lint_description(desc: str) -> list[dict]:
     立刻改成 fail 会让闸门在存量上红；「新行从严、存量登记」是惯用做法。
     """
     hits: list[dict] = []
+    # `overlong` 按协议 §8.5 量**整行**；未传 `row` 时退化为只量 `desc`（单字段调用者）。
+    whole = desc if row is None else row
 
     def add(rule: str, why: str) -> None:
         hits.append({"rule": rule, "why": why})
@@ -305,12 +335,14 @@ def lint_description(desc: str) -> list[dict]:
         add("control_chars", f"描述不是字符串（{type(desc).__name__}）——台账解析出错了？")
         return hits
 
-    if desc.count("`") % 2:
+    # 反引号奇偶：**先摘掉行内代码**（含双反引号定界的），再数剩下的裸反引号。
+    # issue #295 两轴审查实测：不摘的话 `` `` a`b `` `` 这类合法写法会被数成奇数 ⇒ 假阳性。
+    stripped = _strip_code_spans(desc)
+    if stripped.count("`") % 2:
         add("unbalanced_backtick",
-            f"反引号 {desc.count('`')} 个（奇数）⇒ 必有区间没闭合。**这条最常见于"
+            f"裸反引号 {stripped.count('`')} 个（奇数）⇒ 必有区间没闭合。**这条最常见于"
             "命令替换把整段代码吞掉**，被吞掉的往往正是文件名 / sha / 路径")
-    # 裸空括号：先把行内代码摘掉再判 —— `` `f()` `` 里的括号是代码，不是瑕疵。
-    stripped = _INLINE_CODE_RE.sub("", desc)
+    # 裸空括号：行内代码已在上面摘掉 —— `` `f()` `` 里的括号是代码，不是瑕疵。
     if "（）" in stripped or "()" in stripped:
         add("empty_parens",
             "存在空的圆括号对（全角或半角）⇒ 括号里的内容没了。真实事故里它是**反引号区间"
@@ -319,13 +351,19 @@ def lint_description(desc: str) -> list[dict]:
         add("control_chars", "含控制字符（NUL / BS / ESC 之属）⇒ 文本被二进制污染")
     if _PUA_RE.search(desc):
         add("control_chars", "含 Unicode 私用区字符（U+E000..U+F8FF 等）⇒ 编码转换污染")
-    if len(desc) > LINT_LINE_LIMIT:
-        add("overlong", f"描述长 {len(desc)} 字符 > 上限 {LINT_LINE_LIMIT}（协议 §8.5 的硬上限）")
+    # 量法必须与协议 §8.5 第 1 条一致：**整行**（含 `date\tdesc\trange` 三列），不是只量 desc 列。
+    # issue #295 两轴审查 P1：早期只量 desc 列 ⇒ 与协议口径系统性不等（一条 700 字符 desc +
+    # 300 字符 range 的行走协议该报、走实现不报）。`row` 缺省为 `desc` 以兼容单字段调用。
+    if len(whole) > LINT_LINE_LIMIT:
+        add("overlong", f"整行长 {len(whole)} 字符 > 上限 {LINT_LINE_LIMIT}（协议 §8.5 第 1 条的硬上限，量法 = 三列合计）")
     # 粗体奇偶：**先豁免 glob 里的 `**`**（`src/**` / `tests/**`），再数剩下的。
-    bold_probe = _GLOB_STARS_RE.sub("", _INLINE_CODE_RE.sub("", desc))
+    # 粗体奇偶：**两段式** —— 先摘合法粗体对，再摘 glob，最后数剩余 `**` 的奇偶。
+    # 顺序不可换（issue #295 两轴审查 P2 实测）：靠单条 glob 正则去豁免时，它一定会
+    # 把粗体的闭合 `**` 当 glob 吃掉 ⇒ `**A** 与 **B 未闭合` 被判"偶数" ⇒ 半截粗体漏报。
+    bold_probe = _GLOB_STARS_RE.sub("", _BOLD_PAIR_RE.sub("", stripped))
     if bold_probe.count("**") % 2:
         add("unbalanced_bold",
-            f"粗体定界符 `**` 剩 {bold_probe.count('**')} 颗（奇数，已豁免 glob）⇒ "
+            f"粗体定界符 `**` 剩 {bold_probe.count('**')} 颗（奇数，已豁免成对粗体与 glob）⇒ "
             "有半截粗体没闭合，通常伴随**行被截断**")
     return hits
 
@@ -343,13 +381,13 @@ def lint_rows(rows: list[str], wl: list[str]) -> list[dict]:
     for line, row in enumerate(rows, 1):
         desc = split_fields(row, 3)[1]
         if desc:
-            found = lint_description(desc)
+            found = lint_description(desc, row)
             if found:
                 out.append({"where": "review", "line": line, "text": row, "hits": found})
     for line, w in enumerate(wl, 1):
         desc = w.split("\t", 1)[1] if "\t" in w else ""
         if desc:
-            found = lint_description(desc)
+            found = lint_description(desc, w)
             if found:
                 out.append({"where": "whitelist", "line": line, "text": w, "hits": found})
     return out

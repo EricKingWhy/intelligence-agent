@@ -73,21 +73,28 @@ def _strip_docstrings(tree: ast.AST) -> ast.AST:
     只处理这三级的**首条**语句：那是 Python 里唯一会被解释器当 docstring 的位置
     （`__doc__` 的来源）。一个语句块**中间**的裸字符串是**真语句**（求值后被丢弃），
     剥它就是在放松判据 —— 所以这里刻意只查 `body[0]`。
+
+    **剥后为空时补 `ast.Pass()` 会放松判据（实测事故，见 issue #295 两轴审查 P1）**：
+    一个「只有 docstring」的函数与一个「docstring + `pass`」的函数，旧实现剥完都只剩 `pass`，
+    于是"删掉一行真语句"被判等价。正解：只在**原本就有非 docstring 语句**时才剥
+    （判据是 `len(body) >= 2`）；剥完为空时**保留原 body 不动**。
+    代价：只有 docstring 的函数与「docstring + `pass`」会被判**不等价**——这是刻意的
+    fail-closed 方向（宁可判不等价，不可漏判等价）。
+
+    注：本 docstring **刻意不写行内三引号字面量** —— 那会提前闭合本 docstring 本身
+    （同一 session 里已经踩过两次，见协议 §8.9）。
     """
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = getattr(node, "body", None)
-        if not body:
+        if not body or len(body) < 2:
+            # 剥了就没有别的语句了 ⇒ 保留原样，避免把"零语句"与"pass"混为一谈。
             continue
         first = body[0]
         if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
                 and isinstance(first.value.value, str):
             node.body = body[1:]
-            # 一个类 / 函数的 body 被清空后必须是合法 AST ⇒ 补一个 `pass`。
-            # 不补的话 `ast.unparse` 会产出 `def f():`（语法不合法），或直接抛。
-            if not node.body:
-                node.body = [ast.Pass()]
     return tree
 
 
