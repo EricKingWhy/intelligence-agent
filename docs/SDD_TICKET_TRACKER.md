@@ -4621,3 +4621,48 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 5. **跨克隆观测到一次计数不一致（根因未查清，如实登记）**：同一棵树 `f0c7c4b` 上，隔离克隆里覆盖闸门打印的三元组绝对值出现过 **`511 / 363 / 148`** 与 **`515 / 363 / 152`** 两种（差 4），而 `git rev-list --count 09ca47a..f0c7c4b` 在**主仓**与**后一次克隆**里都是 **515**，`load_graph()` 的 `git rev-list --parents HEAD` 节点数（1545）与算法复算（1545 − 1030 = 515）也都与 515 相符。同一克隆内重复运行**稳定**、跨克隆才出现差异 ⇒ 本批**只声明"三种组合彼此逐项相同"**这一对照结论（票面 AC① 要的正是这个），**不把绝对三元组当可复用读数**；**该 4 笔差值根因待查**（可能涉及克隆对象库/环境的量法差异）。
 6. **冻结的 `scripts/check_review_coverage.sh`**：拆分后只认单文件 ⇒ **表达不了"双读"**，批 2 建立的 `.sh` 对照口径自此只对**拆分前布局**成立（已在协议 §8.8.5 / `AGENTS.md` §14.10 / `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4.1 **三处 dated 登记**）。该 `.sh` **已裁决（2026-09-22 晚）**：用户选「**留作参考**」——保持冻结、不改写（协议 §8.8.5 / `AGENTS.md` §14.10 / `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4.1 三处 dated 登记不变）。
 7. **本批已推送、已关单**（裁决 4：覆盖闸门 exit 0 + `git diff --check` 干净 ⇒ ff 推送 `f0c7c4b..e89eed5`（10 笔）；`#293` 按 §14.12 关单）。
+
+## B-43（`#286` 动态 SubAgent grantable/depth 权限边界）
+
+**状态**：3 笔交付（`83e87f2` 红证 → `ec61c26` 实现 → `e58c1339` AC5 用例）+ 台账笔 `50903f31`。**拟归批次 B-43**（本段即登记）。父票面 = GitHub `#286`（P1，`bug` + `ready-for-agent`）。
+
+**依赖关系**：B-37 链第 1 张（`#286 → #287 → #288` 串行）。本票只做**即时、不可绕过的 grantable/depth 边界**；票面 Scope 明文把 tree-wide 预算 / 熔断 / 崩溃恢复状态机排除在外（归 `#287`），并明文要求 `#287` **消费本票的 runtime-owned depth、不得另起计数器**。
+
+**问题**：委派出去的子代理能把 `delegate` 拿回来 ⇒ 「child 只能收窄」这条权限边界在运行期不成立。三处成因**互补**才构成逃逸：① `AgentFactory.create()` 省略 `grantable` 时默认「可授予 = source registry 全量」；② `DelegationToolProvider` 正好省略它；③ `AgentSpec.max_depth` 只在 `__post_init__` 做值域校验、**没有运行期消费者**。⇒ 动态 `AgentSpec(max_depth=1, tool_scope={"delegate"})` 造出的 child registry 仍含 `delegate`，递归委派由此打开。
+
+**交付面（代码面 4 文件 + 测试 6 文件）**：
+
+1. `83e87f2` `test(multiagent):` —— 红证笔：新增 `tests/multiagent/test_delegation_depth.py`（8 例：行为红 2、端到端 depth=1 / depth=2 树、嵌套 registry 归属、出厂 profile 回归、AC5 反面）+ 把 `tests/agent/test_profiles_factory.py` 的 `test_default_grantable_is_source_registry` **反转**为 `test_create_rejects_missing_grantable`（省略 `grantable` ⇒ 断言抛 `TypeError`）。
+2. `ec61c26` `feat(multiagent):` —— 实现笔：新增 `src/agent_harness/multiagent/depth.py`（`SpawnScope` 冻结快照；`ContextVar` + `bind_scope` 把「剩余深度」做成 **runtime-owned** 事实；`child_allowance = min(parent.remaining-1, spec.max_depth)`；`grantable_names` 的全集取**本层 registry** 实有工具、剩余 ≤ 0 时摘掉 `DISPATCH_TOOL_NAMES`）；`AgentFactory.create()` 的 `grantable` **改为必给**（删掉 `= None` 与「省略 = 全量」默认）；`provider` 每 spawn **前**算一次 allowance、以 `scope.registry` 为 source、并把 child 整段 `run()` 包进它自己的 `bind_scope`；`assembly` 把根 profile 的 `max_depth` 传给 `activate`；同步改 6 个既有调用点。
+3. `e58c1339` `test(multiagent):` —— AC5 反面口径：**可选工具缺席 ≠ 越权**（缺席只降级 + warning，不拒绝）。
+4. `50903f31` `chore(review-ledger):` —— 台账审查行（`docs/review_ledger.d/122-6e281c7-e58c1339.tsv`）。
+
+**为什么是 `ContextVar`**：child registry 由 `ToolRegistry.filtered()` 派生**新实例**，但里面的工具对象与父**同一身份**（`delegate` 尤其）⇒ 把「当前深度」挂在工具实例属性上，同一个 `DelegateTool` 会在多棵并行子树上互相踩；`ContextVar` 的作用域天然是「当前任务及其派生任务」，与「一条 spawn 链」同形，兄弟子树互不可见。
+
+**冻结语义逐条对账（票面 Scope 7 条）**：root depth=0 ✅（`activate(max_depth=…)` 即「从根还能往下几层」）；`max_depth=1` ⇒ root → child ✅；`max_depth=2` ⇒ root → child → grandchild ✅（端到端树用例）；runtime-owned 剩余深度**不可被 child spec 抬高** ✅（`min` 而非覆盖；M2 变异可证）；有效配额 = `min(parent_remaining - 1, child_spec.max_depth)` ✅；剩余 0 ⇒ child registry **无** `delegate` ✅（M1 变异可证）；child tool_scope ⊆ 父 grantable scope 且**永不从全量 registry 重建** ✅（`grantable_names` 全集取 `scope.registry.list()`，嵌套用例另证「用的是 child registry 不是根 registry」）。
+
+**AC 对账（6 条）**：① 动态 spec 授予父不可授予的工具 ⇒ 工厂**显式** `ValueError`（`escalated` 路径，不是静默剔除）✅；② 每次 spawn 消费深度、child spec 不能重置 ✅；③ 无剩余深度时 `delegate` 缺席 ✅；④ 出厂 profile 与合法多层 profile 保留既定工具 ✅；⑤ 边界拒绝**显式**、不静默丢掉被请求的特权工具 ✅；⑥ **不引入第二个 Agent Loop / 备用 ToolExecutor** ✅（改动只在 `factory` / `provider` / `assembly` / 新 `depth.py`；child 仍走 `executor_factory`）。
+
+**红证（改动前树 + 新用例；口径 = junit 文件，不抄终端）**：`tests/agent tests/multiagent` **4 failed / 518 passed / 3 deselected / 74.59 s**（junit `tests=522 failures=4 errors=0`），4 条全为 `test_delegation_depth.py` 的 `AssertionError`（无 import / 符号缺失型假红）⇒ **行为红**；定点窄跑 **5 failed / 2 passed / 2.39 s**，第 5 条 = `test_create_rejects_missing_grantable`。
+
+**变异（票面 Tests 第 4 条；隔离副本 `%TEMP%\wbi286mut_1790150186`，由 `git archive HEAD` 导出 1264 文件，主工作树**零改动**；正控 = 副本内 `agent_harness.__file__` 落在副本内）**：对照臂（未变异）**8 passed / exit 0 / 1.65 s**；**M1** = `depth.py` 的 `if allowance <= 0:` → `if False:`（摘掉深度 / 可授予检查）⇒ **3 failed / 5 passed / exit 1**；**M2** = `child_allowance` 改返回 `spec.max_depth`（child 可抬高额度）⇒ **同样 3 failed / 5 passed / exit 1**；两臂命中集合相同（`test_spawn_rejects_delegate_when_no_depth_remains` / `test_child_cannot_raise_depth_via_own_max_depth` / `test_depth_two_tree_allows_grandchild_but_stops_there`）⇒ **如实登记：两条检查共用同一失败面，互不构成对方的鉴别力证据**。两臂后**逐字节还原**（`depth.py` sha256 `0086d9bcd52b0cc526648eb4f995a72c6e6196de082b93ba2b2c56d0ce7bfcc3` 前后相同）并复跑 **8 passed / exit 0**。
+
+**门禁**（口径 = 只写能指到树的读数）：
+
+- **冻结树** `e58c1339`（commit `e58c1339ddf1db78c17a11f1cf978f15e128ed78` / tree `0eaeb8b6de57459172a9bcb194e2faccc985f164`）；四个改动文件 `git hash-object`：`provider.py` `48451819cb5d5568ef47dba57d0b8d4f2e03a1db` / `depth.py` `f78514a6187ec8ca13b4e716692609b55335ae75` / `factory.py` `0bfc61bd0fac03eae5f1af176a3cff4325a41eee` / `assembly.py` `4429d50312dd5ddc6a96f7f338713c9283510a81`。
+- **全量**（冻结树代码面）：junit `tests=3124 failures=3 errors=0 skipped=13 time=654.155`（pytest 自报 `3 failed, 3108 passed, 13 skipped, 42 deselected, 15 warnings in 654.49s`）。三条**全部**在 `tests/evaluation/`，签名**同一** = `SystemExit: 1` @ `sitecustomize.py:826`，载荷 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":562,"threshold":50,"scope":"turn","targets":["…\evaluation\reports\*.json"]}` ⇒ 沙箱 safe-delete shim 的**跨测试删除配额**（本仓已登记：`docs/agents/verification.md` §5 与 `docs/agents/verification.map.tsv:58` 写「全量后期 `tests/evaluation/*` 会因配额假红，处置 = `scripts/run_tests_clean.sh`」；`docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md:18` 另记同三条为既有、与该 ADR 无关）。**决定性对照（机械可判定，非推理）**：同树、同三条、仅清空 `PYTHONPATH`（= 官方脚本的处置）⇒ **3 passed in 11.69s / exit 0** ⇒ 判为**环境假红**、不阻断。
+- **focused**：`tests/agent tests/multiagent` **524 passed / 0 failed / 3 deselected / 75.75 s**（junit `tests=524 failures=0 errors=0 skipped=0`）；`tests/multiagent/test_delegation_depth.py` 单跑 **8 passed / 0 failed / 1.974 s**。
+- **`ruff`**（10 个改动 / 新增文件）：`All checks passed!`。**`git diff --check`**：exit 0。
+- **覆盖闸门** `scripts/check_review_coverage.py`：**exit 0**，区间 `09ca47a..HEAD`，三元组 `538 / 373 / 165`、`❌ 0`。
+- **§8.1 第 3 条读数传递**：冻结后只追加 docs / 台账 ⇒ 判据① `git diff --name-status --no-renames e58c1339 HEAD` 与 ② `git status --short` 的**输出原文**见「集成」段（集成后补写，本节不写未取得的读数）。
+
+**审查（§8.2 三路并行，锚同一冻结树）**：Standards 轴与 Correctness·Spec 轴各一独立只读子代理，**均 PASS-WITH-FINDINGS（P0=0 P1=0 P2=0 P3=1）**，且**两轴各自独立**指出同一处 P3（`provider.activate` 的 docstring 对 `max_depth=0` 的语义描述夸大）。按 §8.3 第 6 条**全量登记、不因预算略去**。
+
+**残余（登记，不阻断，附解除条件）**：
+
+1. **P3（两轴共同发现）**：`provider.activate` 的 docstring 称 `max_depth=0` 会折成「根自己也派不出去」——实测只封死 **child** 的 `delegate`（root 自身 registry 由 `assembly` 独立构造、不经 grantable 收窄）。**不就地修的理由**：`AgentSpec.__post_init__` 已禁 `max_depth < 1` ⇒ 该分支**生产不可达**；而任何 `src/**` 改动（哪怕只改一行注释）都让冻结树失效 ⇒ 按 §8.1 第 3 条判据① 必须**重跑全量**（≈ 11 min）再按 §8.8.5 对「针对新 diff 的 review」开两轴 1 轮——为一行注释付这个代价与 §8.1 要消灭的浪费同形。**解除 = 出现 `max_depth=0` 的合法来源时，连同「由装配点决定 root 自身 `delegate` 存在性」一起修，并在同票补根侧用例。**
+2. **`max_depth=0` 与 `max_depth=1` 在 provider 侧行为等价**（root 剩余 0 / 1 都算出 ≤ 0 的 child allowance）：残余① 的行为面，同样生产不可达，登记不修。
+3. **并行子树隔离只有设计论证、无用例**：`ContextVar` 的理由是「同一个 `DelegateTool` 对象被多棵子树共享」，现有 8 例证的是单链；「`asyncio.gather` 并行两棵子树各自配额互不可见」无用例。**解除 = 补一条并行 spawn 用例**（该面由 `#287` 的全树预算票天然覆盖，故不单开票）。
+4. **票面 Scope 外（有意不做）**：tree-wide `max_delegations` / failure fingerprint / crash recovery 归 `#287`；delegated child workspace 归属 / 恢复归 `#288`。
+
+**集成（待执行）**：`origin/main` 实测 = `6e281c74d4b13c5b708ec2329cae0131be49fb4c`（= 本批 base ⇒ 可**快进**推送）。推送前 `.githooks/pre-push` 自动跑 Gate-0 六车道。
