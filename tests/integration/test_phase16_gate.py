@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -668,6 +669,22 @@ async def test_kill_restart_reconcile_continue(
     assert ops[0].state is OperationState.SUCCEEDED, (
         f"恢复后 Ledger 无 UNKNOWN 残留，操作必须终态 SUCCEEDED，实际 {ops[0].state}"
     )
+
+
+@pytest.mark.asyncio
+async def test_artifact_saved_before_session_event_recovers(tmp_path: Path) -> None:
+    """Phase 16: real child kill after Artifact save, before externalized/result events."""
+    from tests.integration.test_artifact_crash_window import (
+        run_local_artifact_crash_window,
+    )
+
+    root = tmp_path / "t_artifact_crash_window"
+    try:
+        await run_local_artifact_crash_window(root)
+    finally:
+        if root.exists():
+            shutil.rmtree(root)
+        assert not root.exists(), "Phase 16 Artifact Gate left temporary local data"
 
 
 @pytest.mark.asyncio

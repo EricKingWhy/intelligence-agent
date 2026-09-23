@@ -2,7 +2,7 @@
 
 > 本文件是 Phase 16「Final Full E2E」的 **Gate 证据总表** 与过程记录。
 > 冻结规格来源：`docs/adr/0019-phase16-final-full-e2e.md`（grill 三轮收敛，12 项决策 D1–D12）。
-> 测试载体：`tests/integration/test_phase16_gate.py`（12 个分段独立断言）+ `tests/integration/_phase16_helpers.py`（薄编排层 + fixture）。
+> 测试载体：`tests/integration/test_phase16_gate.py`（原 12 个分段断言 + #289 Artifact 崩溃窗口，共 13 个）+ `tests/integration/_phase16_helpers.py`（薄编排层 + fixture）。
 > 工作区：`D:\intelligence-agent-phase16`，分支 `feat/phase16`。本 Gate **未 push、未 merge**——等待用户决定（§14.4 / §14.11）。
 
 ---
@@ -24,7 +24,7 @@
 
 ## 2. 分段独立断言清单（ADR-0019 D1）
 
-12 个测试函数，每个只断言自己负责的链段——CI 信号不被跨段失败污染，维护成本与信号清晰度取得平衡（D1 取舍）。
+13 个测试函数，每个只断言自己负责的链段——CI 信号不被跨段失败污染，维护成本与信号清晰度取得平衡（D1 取舍）。原 12 段沿用下表；#289 增加 Artifact 崩溃窗口：
 
 | Ticket | 测试函数 | 段 | 状态 | 耗时 |
 | ------ | -------- | -- | ---- | ---- |
@@ -40,8 +40,9 @@
 | #130 T5 | `test_fork_creates_isolated_lineage` | fork 隔离 lineage | ✅ | 0.06s |
 | #130 T5 | `test_langfuse_trace_structure_complete` | Langfuse trace 结构 | ✅ | 0.05s |
 | #130 T5 | `test_eval_report_gate_metrics` | Eval 报告指标可计算 | ✅ | 0.03s |
+| #289 | `test_artifact_saved_before_session_event_recovers` | Artifact 已存、外置/结果事件未写时 Kill → Recovery | ✅ | 本次运行未单独计时 |
 
-**总计**：12 passed, 0 skipped, wall clock **8.25s**（含 Docker 容器恢复 6.85s）。
+**原始 12 段基线**：12 passed, 0 skipped, wall clock **8.25s**（含 Docker 容器恢复 6.85s）。#289 加入后，本次在 Docker Desktop 29.4.1 可用时复跑为 **13 passed, 0 skipped**；历史性能表仍保留原始基线口径。
 
 ---
 
@@ -82,6 +83,7 @@ D11 的原则：性能指标在本 Phase **只记录、不设阈值门**——�
 - **薄编排层（D1）**：关键路径用 `ScriptedModel` 喂固定响应序列，把 Full E2E 从概率链降为确定性链——Gate 因此可重复。真实模型覆盖由 §6 遗留项承接。
 - **全 fake 进 CI（D3）**：KB（FakeKnowledgeVectorStore）/ Web（脚本化）/ 模型（ScriptedModel）/ Langfuse（FakeRecorder）全部 in-process，零网络零 token。
 - **真子进程 kill（D4）**：kill 测试用真 `subprocess` 跑 `_kill_child.py`，在 bash 执行中段 `os._exit(137)`——不是 mock。父进程构造**全新**的 store/ledger，强制走 `RecoveryCoordinator.recover` 的跨进程路径（不是同进程重试）。
+- **Artifact 崩溃窗口（#289）**：真子进程在 LocalArtifactStore 保存原文并将 `artifact_ref` 写入终态 Ledger 后、`artifact/externalized` 与 `tool/result` 写入前 `os._exit(137)`；全新 RecoveryCoordinator 合成唯一结果，Gate 检查原文可读、无 dangling call、无重复副作用，且第二次恢复幂等。Qiniu 真云 Gate 属最终云端车道，留待 B-37 全部集成后执行。
 - **mutating tool = coding 副作用（D6）**：BashTool 写文件 + EditTool 改文件，副作用以文件系统真实持久化来对账 Ledger，不靠 mock 断言。
 - **trace + report 是 Gate（D12）**：Langfuse trace 结构与 Eval 报告指标本身就是 Gate 断言对象，不只是辅助观测。
 
@@ -134,7 +136,7 @@ D11 的原则：性能指标在本 Phase **只记录、不设阈值门**——�
 ```bash
 cd D:\intelligence-agent
 uv run pytest tests/integration/test_phase16_gate.py -m integration -v
-# 期望：12 passed（Docker daemon 在场）；daemon 缺席则 11 passed + 1 skipped
+# 期望：13 passed（Docker daemon 在场）；daemon 缺席则 12 passed + 1 skipped
 ```
 
 全量回归（确保本 Phase 未引入跨模块回归）：
@@ -149,6 +151,6 @@ uv run pytest -q   # 默认排除 integration/qiniu；离线全量基线见 PHAS
 
 - ADR：`docs/adr/0019-phase16-final-full-e2e.md`
 - 术语：`CONTEXT.md`「Phase 16 / Final Full E2E」段
-- 测试：`tests/integration/test_phase16_gate.py`、`tests/integration/_phase16_helpers.py`、`tests/integration/_kill_child.py`（向后兼容扩展：`backend` 字段）
+- 测试：`tests/integration/test_phase16_gate.py`、`tests/integration/_phase16_helpers.py`、`tests/integration/_kill_child.py`（向后兼容扩展：`backend` 字段）、`tests/integration/_artifact_kill_child.py`、`tests/integration/test_artifact_crash_window.py`
 - Tickets：#126（T1）、#127（T2）、#128（T3）、#129（T4）、#130（T5）
 - 集成手册：`docs/archive/integration-prompts/INTEGRATION_PROMPT_PHASE16.md`
