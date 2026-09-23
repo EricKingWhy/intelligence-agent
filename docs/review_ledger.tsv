@@ -159,3 +159,4 @@ b074740edef03fae068b83d3d14db22602ed0672	docs-only 落点笔：#294（B-44）协
 f1625345f4053f911da8430e54a08912ff51080a	docs-only 交付笔：#294（B-44）协议 §8 口径修订 —— 缺陷 1/2/3/4/6 五条一次落（只改 docs/SDD_WORKFLOW_PROTOCOL.md）
 3bd2529c317a832c637f861c57337f4764131a21	docs-only 交付笔：#294（B-44）缺陷 1 判据实施边界如实化 —— 口径在本票、实现与三个控制样本归 #295（只改 docs/SDD_WORKFLOW_PROTOCOL.md）
 c39f46281cd4c678c28a4f5bbe8180671c85291a	docs-only 修复笔：#294（B-44）tracker 尾部多余空行 —— Gate-0 diff-check 拦下 new blank line at EOF 后修掉（只改 docs/SDD_TICKET_TRACKER.md）
+f15b51e1e2589fbb5da0a4193b64ab0fa256766e	docs-only 状态笔：#294（B-44）已推送（607dee4..b1c9dac ff）+ #294 关单如实化 —— tracker / PHASE_STATUS / 月度归档 三文件（均命中 DOC_PATTERN）
