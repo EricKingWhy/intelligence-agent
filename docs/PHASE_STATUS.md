@@ -40,9 +40,7 @@
 
 ## 当前工作焦点
 
-**当前焦点：B-44（`#294`）协议口径修订 —— B-43 报告缺陷 1 / 2 / 3 / 4 / 6，2 笔（`f162534` → `3bd2529`），纯 docs，**已推送（`607dee4..b1c9dac` ff）/ 已关单**（`#295` 为配套票：判据实现与三个控制样本）。**
-
-**当前焦点：B-43（`#286`）动态 SubAgent grantable/depth 权限边界 —— 3 笔交付（`83e87f2` 红证 → `ec61c26` 实现 → `e58c1339` AC5 用例）+ 台账笔 `50903f31`，覆盖闸门 exit 0，**已推送 / 已关单**（关单 `2026-09-23T08:25:33Z`；本批最终 tip `2ce6406`；新票 `#294`/`#295`；pre-push Gate-0 6/6 PASS、43.1s）：把「剩余深度」做成**运行期拥有**的事实（新 `src/agent_harness/multiagent/depth.py`：`SpawnScope` 冻结快照 + `ContextVar` `bind_scope` + `child_allowance = min(parent.remaining-1, spec.max_depth)` + 剩余 ≤ 0 时摘掉 `DISPATCH_TOOL_NAMES`），`AgentFactory.create()` 的 `grantable` 由「省略 = 全量」**改为必给**，`provider` 每 spawn 前算一次配额并以**本层 registry** 为 source，`assembly` 传根 profile 的 `max_depth`。票面 6 条 AC + 7 条冻结语义**逐条对账通过**；红证 = 改动前树 **4 failed / 518 passed**（行为红，无签名红）；变异 M1/M2 各 **3 failed**、逐字节还原后复绿；全量 **3124 / 3 failed**，三条全为 `tests/evaluation/*` 的 safe-delete 配额假红（同树清空 `PYTHONPATH` ⇒ **3 passed**）；两轴独立审查**均 PASS-WITH-FINDINGS**（P0=P1=P2=0、P3=1，且两轴各自指出同一处 `provider.activate` docstring 夸大 ⇒ 登记残余①）。**上一批 = B-42（`#293`）**门禁读数机器落盘 + 台账「一文件一条」，**已推送 / 已关单**。明细见 `docs/SDD_TICKET_TRACKER.md` B-43 段与 `docs/phase_status/2026-09.md` 的 2026-09-23 条。
+**当前焦点：完成 B-45（`#295`）与 Memory V2 规划产物的集成和验证。** B-45 已在 `origin/main` 完成并关单；本分支保留其闸门实现、测试、审查台账与 B-45 证据，同时保留已批准的 Memory V2 PRD、研究、父规格 `#296` 和子票 `#297`–`#304`。Memory V2 当前仅完成规划与开票，实施待后续 Coding Agent 执行；本次集成不启动实现，也不删除旧记忆。B-43（`#286`）和 B-44（`#294`）均为已完成历史批次，见下方最近条目及归档。
 
 **Memory V2 已完成规划、等待施工（2026-09-23）**：父规格 `#296` 与 8 张独立实现票 `#297`–`#304` 均为 **OPEN + `ready-for-agent`**，GitHub 已建立原生 Sub-issue 与 Blocked-by 关系。首票固定为 `#297` Typed Memory lifecycle；其后 `#298` Formation/Adjudication、`#299` 跨会话召回、`#300` 治理 API 可并行；`#301` UI、`#302` 评测、`#303` clean-slate cutover 收口后，最后执行 `#304` 真实 Gate。产品合同见 `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`，执行票见 `docs/tickets/mem-v2-*.md`，调研依据见 `docs/research/2026-09-22-production-long-term-memory-systems.md`。**本轮只规划/开票：未修改运行时代码、未执行旧记忆删除、未运行实现门禁。**
 
@@ -67,6 +65,7 @@
 ### 最近条目（最新在上）
 
 
+- 2026-09-23（B-45，`#295` 台账描述字段 lint + docs-only 按路径自动归属 + 语义等价判据 —— 交付 4 笔 `0437950` → `fa0a175` → `1fdd7e8` → `31ef526`，**已推送 `8f9ea1c..31ef526`（ff，Gate-0 6/6 PASS） / 已关单 `#295`**）：把 B-43 报告里三条**工具面**缺陷落成可执行护栏。**① 缺陷 7**：闸门新增 5 条描述字段 lint（`unbalanced_backtick`/`empty_parens`/`control_chars`/`overlong`/`unbalanced_bold`，阈值 800 与协议 §8.5 同口径），**默认 warn、`--strict` 升 fail**，每条配正控+反控。**② 缺陷 5（方案 C）**：新增 `is_docs_only()` —— 提交的全部改动路径命中 `DOC_PATTERN` ⇒ **按路径自动归属**，归属证据从「作者声明」升级为「路径客观事实」（实测白名单手写 docs-only 声明 **2 → 0 笔**）。**③ 缺陷 1**：新增 `scripts/check_semantic_equiv.py`（`ast.parse` → 剥三级 docstring → `ast.unparse`，fail-closed）。**协议新增 §8.9 写盘纪律**：凡把中文/长文本写进受控文件一律脚本落盘再跑、禁 `python -c` 内联。**两轴独立审查判不可集成（2×P1 + 6×P2 + 2×P3）⇒ 全数处置于 `fa0a175`**：P1① `AGENTS.md` §16.2 被写成协议逐字副本且指针 `§14.12` 消失、P1② 剥 docstring 时连坐真 `pass` ⇒ 删一行真语句被判等价（**直接推翻本票自己的反控样本**）。测试 24 passed、ruff clean、覆盖闸门 exit 0、「没放松」4/4 PASS。**集成已完成**：`8f9ea1c..31ef526` fast-forward 推送，Gate-0 **6/6 PASS**（墙钟 15.5s），`#295` 关单评论 [issuecomment-5792688513](https://github.com/EricKingWhy/intelligence-agent/issues/295#issuecomment-5792688513)。明细见 `docs/phase_status/2026-09.md` L798。
 - 2026-09-23（B-44，`#294` 协议口径修订 —— 交付 2 笔，**纯 docs**，**已推送（`607dee4..b1c9dac` ff）/ 已关单**）：把 B-43 报告 §3 的五条口径类缺陷逐条落成条文 —— ① §8.1 第 3 条**并列新增**「纯注释 / 纯 docstring 的 `src/**` diff ⇒ 语义等价」例外（判据 = `ast` 剥离 docstring 与注释后归一化逐字节相同；三个控制样本的**实现归 `#295`**）；② §8.3 第 4 条**分列**「红证」与「变异」并给定义，要求变异覆盖 ≥2 个检查点且失败集合不同；③ §8.6 定「全量默认走 `scripts/run_tests_clean.sh`」与「门的判定 = 环境项之外 0 失败」口径（`gate0.py` 改动归 `#295`）；④ §8.1 第 6 条**硬要求**副本操作前探测行尾 + 断言锚点命中数 `== 1`；⑤ §8.8.3 增失败回退路径**覆盖登记附表**（B-42 = 触发 / B-43 = 未触发）。**判据只增不减**：改动前 707 条非空行一条不缺；协议 735 → 803 行，纯 CRLF；`test_verification_map.py` 20 passed；`git diff --check` rc=0。
 - 2026-09-23（Memory V2 规划）：父规格 `#296` + 8 张子票 `#297`–`#304` 已发布并建立原生 Sub-issue / Blocked-by；PRD、独立票面与成熟产品研究已入仓工作树。本轮只规划/开票，未施工、未删旧记忆。明细见 `docs/phase_status/2026-09.md` L797。
 - 2026-09-23（B-43，`#286` 动态 SubAgent grantable/depth 权限边界 —— 交付 3 笔 + 台账 1 笔，**已推送（`6e281c7..e800ecb` ff）/ 已关单**）：封死「委派出去的子代理把 `delegate` 拿回来」这条**运行期**逃逸通道。**三处成因互补**才构成逃逸：`AgentFactory.create()` 省略 `grantable` 时默认全量、`DelegationToolProvider` 正好省略它、`AgentSpec.max_depth` 只在 `__post_init__` 有值域校验没有运行期消费者。**交付**：`83e87f2` 红证（新 `tests/multiagent/test_delegation_depth.py` 8 例 + 工厂契约反转）；`ec61c26` 实现（新 `multiagent/depth.py` 把剩余深度做成 runtime-owned 事实 + `create(grantable=…)` 必给 + `provider` 逐层消费 + `assembly` 传根配额 + 6 处调用点）；`e58c1339` AC5 反面口径（缺席 ≠ 越权）。**红证 4 failed / 518 passed**（行为红，非签名红）；**变异 M1/M2 各 3 failed**、逐字节还原后 8 passed；**全量 3124 / 3 failed** 且三条全为 `tests/evaluation/*` 的 safe-delete 配额假红（同树清空 `PYTHONPATH` ⇒ 3 passed）；focused 524 passed；`ruff` clean；覆盖闸门 exit 0（`538 / 373 / 165`，`❌ 0`）。**两轴独立审查均 PASS-WITH-FINDINGS**（P0=P1=P2=0 / P3=1，两轴各自指出 `provider.activate` 的 docstring 对 `max_depth=0` 的描述夸大 ⇒ 登记残余①，不重开冻结树）。明细见 `docs/phase_status/2026-09.md` L784。
@@ -91,14 +90,14 @@
 
 | 文件 | 覆盖日期 | 条目数 | 说明 |
 | --- | --- | --- | --- |
-| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-23 | 309 | 历史明细；2026-09-17 初次迁移的正文逐字保留，后续批次按日期追加（条目数 = `grep -c "^- 2026-"` **实测**：B-42 `#293` 落点 = 306、B-43 `#286` 落点 = 307、Memory V2 规划 = 308、B-44 `#294` = 309） |
+| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-23 | 310 | 历史明细；2026-09-17 初次迁移的正文逐字保留，后续批次按日期追加（条目数 = `grep -c "^- 2026-"` **实测**：B-42 `#293` 落点 = 306、B-44 `#294` = 307、B-43 `#286` = 308、Memory V2 规划 = 309、B-45 `#295` = 310）。更新与读取纪律见本文件「按日定位」表。 |
 
 ### 按日定位（归档内行号，日期降序）
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
-| 2026-09-23 | 3（B-44 `#294` / B-43 `#286` / Memory V2 PRD + Tickets + Issues） | `2026-09.md` L783-L797（B-44 = L783；B-43 = L784 起含 11 条子项；Memory V2 = L797；**子项数口径 = `^  - ` 顶层计数**） |
-| 2026-09-22 | 11（B-33 / B-34 / B-35 / B-36 / F18-A `#282` / F18-B `#283` / B-38 / B-39 `#248` / B-40 `#291` / B-41 `#292` / B-42 `#293`） | `2026-09.md` L628-L781（**子项数口径 = `^  - ` 顶层计数**（更深缩进的另计），2026-09-22 按归档**实测重算**：B-33 = L628 起含 12 条子项，B-34 = L650 起含 8 条子项，B-35 = L660 起含 7 条子项，B-36 = L669 起含 13 条子项，F18-A = L684 起含 12 条子项，F18-B = L698 起含 12 条子项，B-38 = L719 起含 8 条子项，B-39 = L729 起含 7 条子项，**B-40 = L737 起含 15 条子项，B-41 = L753 起含 14 条子项，B-42 = L768 起含 9 条子项**） |
+| 2026-09-23 | 4（B-44 `#294` / B-43 `#286` / Memory V2 PRD + Tickets + Issues / B-45 `#295`） | `2026-09.md` L783-L806（B-44 = L783；B-43 = L784 起含 11 条子项；Memory V2 = L797；B-45 = L798 起含 8 条子项；**子项数口径 = `^  - ` 顶层计数**） |
+| 2026-09-22 | 11（B-33 / B-34 / B-35 / B-36 / F18-A `#282` / F18-B `#283` / B-38 / B-39 `#248` / B-40 `#291` / B-41 `#292` / B-42 `#293`） | `2026-09.md` L628-L780（**子项数口径 = `^  - ` 顶层计数**（更深缩进的另计），2026-09-22 按归档**实测重算**：B-33 = L628 起含 12 条子项，B-34 = L650 起含 8 条子项，B-35 = L660 起含 7 条子项，B-36 = L669 起含 13 条子项，F18-A = L684 起含 12 条子项，F18-B = L698 起含 12 条子项，B-38 = L719 起含 8 条子项，B-39 = L729 起含 7 条子项，**B-40 = L737 起含 15 条子项，B-41 = L753 起含 14 条子项，B-42 = L768 起含 9 条子项**） |
 | 2026-09-21 | 10（B-24 / B-25 / B-26 / B-27 / B-28 / B-29 / B-30 / B-31 / #274 B6 集成/关单 / B-32） | `2026-09.md` L512-627（B-29 = L567，B-30 = L568 起含 8 条子项，B-31 = L578 起含 13 条子项，**#274 B6 集成/关单 = L593 起含 8 条子项**，B-32 = L609 起含 17 条子项） |
 | 2026-09-20 | 8 | `2026-09.md` L485-511 |
 | 2026-09-19 | 20 | `2026-09.md` L465-484 |

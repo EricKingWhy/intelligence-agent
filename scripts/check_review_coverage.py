@@ -85,6 +85,56 @@ LEDGER_PATH = "docs/review_ledger.tsv"
 LEDGER_DIR = "docs/review_ledger.d"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40,64} (commit|tag) \d+$")
 
+#: 描述字段 lint 的规则名集合（issue #295 / 缺陷 7）。**测试按集合断言**：
+#: 加规则不该让守卫红，删 / 改名现有规则必须红。
+LINT_RULES = ("unbalanced_backtick", "empty_parens", "control_chars", "overlong", "unbalanced_bold")
+
+#: 描述字段长度硬上限 = 协议 §8.5 的值。它同时是 lint 的 `overlong` 阈值。
+LINT_LINE_LIMIT = 800
+
+#: Unicode 私用区（U+E000..U+F8FF + 两个补充私用区）。这两个区段本身合法但**不承载语义**，
+#: 出现在台账描述里几乎只能来自"文本被二进制 / 编码转换污染"。
+_PUA_RE = re.compile("[\ue000-\uf8ff\U000f0000-\U000ffffd\U00100000-\U0010fffd]")
+
+#: 控制字符（除 \t 与 \r）：NUL 是其中最典型的一个，但 BS / ESC 等同样不该出现在台账里。
+_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+#: 行内代码（一对反引号夹住的内容）。**私有**：lint 与 glob 豁免都用它把"代码里的符号"摘出去。
+#: 只认**单反引号**定界（`` `code` ``）。**双反引号定界**（`` `` `x` `` ``，CommonMark 里用来包住
+#: 含反引号的代码）由 `_MULTI_BACKTICK_RE` 先摘 —— 否则被包住的单反引号会被数成裸反引号，
+#: 造成 `unbalanced_backtick` 假阳性（issue #295 两轴审查实测：协议 §8.9 自己就踩了这条）。
+_MULTI_BACKTICK_RE = re.compile(r"(`{2,}).+?\1")
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _strip_code_spans(desc: str) -> str:
+    """摘掉**双反引号定界**的行内代码（可能内嵌单反引号），再摘单反引号行内代码。
+
+    顺序不可换：先摘双的 —— 否则 `` `` a`b `` `` 会被单反引号规则切成两半、留下半个定界。
+    """
+    return _INLINE_CODE_RE.sub("", _MULTI_BACKTICK_RE.sub("", desc))
+
+#: **glob 里**的 `**`：`src/**`、`tests/**`、`docs/**` 这类。它们不是 markdown 粗体定界符，
+#: 粗体奇偶检查必须先豁免它们（2026-09-23 实测：历史台账 4 条奇数 `**` 行里，
+#: `099-37e8c4d-d165740.tsv` 的奇数**全部**来自 glob ⇒ 不豁免就是纯假阳性）。
+#:
+#: 合法的**粗体对**（`**x**`，内容非空且不以 `*` 起）。**先摘它、再判剩余奇偶** ——
+#: 顺序是关键：靠单条正则同时处理「粗体对」与「glob」时，glob 模式一定会误吃粗体的闭合 `**`
+#: （2026-09-23 两轴审查 P2 实测：`**A** 与 **B 未闭合` 被判"偶数" ⇒ 半截粗体静默漏报）。
+_BOLD_PAIR_RE = re.compile(r"\*\*(?=[^\s*])(?:[^*]|\*(?!\*))*?\*\*")
+
+#: **glob 里**的 `**`：`src/**`、`tests/**`、`docs/**` 这类。它们不是 markdown 粗体定界符，
+#: 粗体奇偶检查必须豁免（2026-09-23 实测：历史台账 4 条奇数 `**` 行里，
+#: `099-37e8c4d-d165740.tsv` 的奇数**全部**来自 glob ⇒ 不豁免就是纯假阳性）。
+#: 形状 = 紧跟在路径字符后、且后面是 `/`、空白、标点或行尾。
+#: **已知局限（刻意不修）**：同一行里「半截粗体 + 裸 glob」共存、且两者相加恰好凑成偶数时
+#: （如 `**B 未闭合，另见 src/** 目录` ⇒ 1 颗半截 + 1 颗 glob = 2 颗）仍会漏报。
+#: 无法用正则消歧——`src/**` 与 `**B` 的字符形状完全同构，要真判需要 markdown 解析器。
+#: 处置：这是**假阴性**（漏报），不是假阳性；且该形状在真实台账里未出现。
+#: 真正的兜底是「有半截粗体必然伴随行被截断 ⇒ `overlong` / 语义审查会发现」。登记于此，
+#: 由 issue #295 两轴审查轮确认接受。
+_GLOB_STARS_RE = re.compile(r"(?<=[A-Za-z0-9_./-])\*\*(?=[/\s,，。）)]|$)")
+
 FAIL_HELP = """
 闸门失败。处置（二选一，不要改台账蒙过去）：
   · 对这些 commit **补一次审查**（两轴 /code-review，范围写进台账的新行）；
@@ -258,6 +308,141 @@ def read_all(legacy: str) -> tuple[list[str], list[str], int, int, list[str]]:
 
 
 # --------------------------------------------------------------------------- #
+# 描述字段 lint（issue #295 / 缺陷 7）
+# --------------------------------------------------------------------------- #
+
+def lint_description(desc: str, row: str | None = None) -> list[dict]:
+    """体检一条台账描述字段，返回命中列表（每条 `{"rule", "why"}`）。**纯函数、永不抛**。
+
+    为什么需要它（B-43 真实事故）：用 `python -c "…"` 把含**反引号**的中文写进台账白名单行 ⇒
+    Git Bash 在双引号内对反引号做**命令替换**，两处文件名被**静默吞掉**；更糟的是第二个反引号
+    区间的文本被当成脚本执行，**在仓库根创建了 7 个 0 字节垃圾文件**。而覆盖闸门**完全没报警** ——
+    归属只看 sha 前缀（描述字段是自由文本、不参与判定），截断后的行照样让闸门 exit 0。
+
+    它**不**证明描述语义正确（那是散文，脚本判不了真伪）；它挡的是"文本被机械损坏"这一族：
+    被吞掉的反引号区间、被截断的行、二进制污染。**默认为 warn**，`--strict` 才升 fail ——
+    历史台账里有已知的截断行（本模块的守卫测试硬编码了其中一条作正控），
+    立刻改成 fail 会让闸门在存量上红；「新行从严、存量登记」是惯用做法。
+    """
+    hits: list[dict] = []
+    # `overlong` 按协议 §8.5 量**整行**；未传 `row` 时退化为只量 `desc`（单字段调用者）。
+    whole = desc if row is None else row
+
+    def add(rule: str, why: str) -> None:
+        hits.append({"rule": rule, "why": why})
+
+    if not isinstance(desc, str):      # 全定义：任何输入都不许抛
+        add("control_chars", f"描述不是字符串（{type(desc).__name__}）——台账解析出错了？")
+        return hits
+
+    # 反引号奇偶：**先摘掉行内代码**（含双反引号定界的），再数剩下的裸反引号。
+    # issue #295 两轴审查实测：不摘的话 `` `` a`b `` `` 这类合法写法会被数成奇数 ⇒ 假阳性。
+    stripped = _strip_code_spans(desc)
+    if stripped.count("`") % 2:
+        add("unbalanced_backtick",
+            f"裸反引号 {stripped.count('`')} 个（奇数）⇒ 必有区间没闭合。**这条最常见于"
+            "命令替换把整段代码吞掉**，被吞掉的往往正是文件名 / sha / 路径")
+    # 裸空括号：行内代码已在上面摘掉 —— `` `f()` `` 里的括号是代码，不是瑕疵。
+    if "（）" in stripped or "()" in stripped:
+        add("empty_parens",
+            "存在空的圆括号对（全角或半角）⇒ 括号里的内容没了。真实事故里它是**反引号区间"
+            "被整段吞掉**留下的坑（`把「加载更早」点到全量（）`）")
+    if _CONTROL_RE.search(desc) or "\x00" in desc:
+        add("control_chars", "含控制字符（NUL / BS / ESC 之属）⇒ 文本被二进制污染")
+    if _PUA_RE.search(desc):
+        add("control_chars", "含 Unicode 私用区字符（U+E000..U+F8FF 等）⇒ 编码转换污染")
+    # 量法必须与协议 §8.5 第 1 条一致：**整行**（含 `date\tdesc\trange` 三列），不是只量 desc 列。
+    # issue #295 两轴审查 P1：早期只量 desc 列 ⇒ 与协议口径系统性不等（一条 700 字符 desc +
+    # 300 字符 range 的行走协议该报、走实现不报）。`row` 缺省为 `desc` 以兼容单字段调用。
+    if len(whole) > LINT_LINE_LIMIT:
+        add("overlong", f"整行长 {len(whole)} 字符 > 上限 {LINT_LINE_LIMIT}（协议 §8.5 第 1 条的硬上限，量法 = 三列合计）")
+    # 粗体奇偶：**先豁免 glob 里的 `**`**（`src/**` / `tests/**`），再数剩下的。
+    # 粗体奇偶：**两段式** —— 先摘合法粗体对，再摘 glob，最后数剩余 `**` 的奇偶。
+    # 顺序不可换（issue #295 两轴审查 P2 实测）：靠单条 glob 正则去豁免时，它一定会
+    # 把粗体的闭合 `**` 当 glob 吃掉 ⇒ `**A** 与 **B 未闭合` 被判"偶数" ⇒ 半截粗体漏报。
+    bold_probe = _GLOB_STARS_RE.sub("", _BOLD_PAIR_RE.sub("", stripped))
+    if bold_probe.count("**") % 2:
+        add("unbalanced_bold",
+            f"粗体定界符 `**` 剩 {bold_probe.count('**')} 颗（奇数，已豁免成对粗体与 glob）⇒ "
+            "有半截粗体没闭合，通常伴随**行被截断**")
+    return hits
+
+
+def lint_rows(rows: list[str], wl: list[str]) -> list[dict]:
+    """对台账全部行跑 lint，返回 `[{"where", "line", "text", "hits"}, ...]`。
+
+    `where` = `"review"` / `"whitelist"`（**打印时要能指回是哪一段**，否则用户不知道该去
+    哪个区块改）。描述字段的取值口径跟判定循环一致：
+      · 审查行 = `split_fields(row, 3)` 的第 2 个字段（范围描述）；
+      · 白名单行 = `row.split("\t", 1)[1]`（原因），**没有 tab 的行整行当描述**
+        ——与 `main()` 里 `w.split("\t", 1)[1]` 的既有形状对齐，缺 tab 的行在那里本来就拿不到原因。
+    """
+    out: list[dict] = []
+    for line, row in enumerate(rows, 1):
+        desc = split_fields(row, 3)[1]
+        if desc:
+            found = lint_description(desc, row)
+            if found:
+                out.append({"where": "review", "line": line, "text": row, "hits": found})
+    for line, w in enumerate(wl, 1):
+        desc = w.split("\t", 1)[1] if "\t" in w else ""
+        if desc:
+            found = lint_description(desc, w)
+            if found:
+                out.append({"where": "whitelist", "line": line, "text": w, "hits": found})
+    return out
+
+
+def format_lint_report(findings: list[dict], total_rows: int) -> list[str]:
+    """把 lint 结果渲染成要打印的行（**逐条给规则名 + 原因 + 截断样本**）。
+
+    打印策略：每条命中一行摘要（`⚠️ lint <where>:<line> …`），**不打印整行原文**
+    ——历史行的描述动辄上千字符，全打出来会把闸门的正常输出淹掉。
+    截断到 100 字符足以定位（配 `where` + `line` 就能在文件里找到）。
+    """
+    lines = [f"⚠️  台账描述字段 lint：{len(findings)} 行命中（共体检 {total_rows} 行；默认 warn，`--strict` 升 fail）"]
+    for f in findings:
+        rules = ",".join(h["rule"] for h in f["hits"])
+        snippet = f["text"][:100].replace("\r", "")
+        lines.append(f"     {f['where']}:{f['line']}  [{rules}]  {snippet}")
+        for h in f["hits"][:2]:          # 每行最多展开两条原因，避免刷屏
+            lines.append(f"         · {h['rule']}: {h['why']}")
+    return lines
+
+
+# --------------------------------------------------------------------------- #
+# docs-only 按路径机械自动归属（issue #295 / 缺陷 5，方案 C）
+# --------------------------------------------------------------------------- #
+
+def is_docs_only(files: list[str]) -> bool:
+    """一个提交的**全部**改动路径都命中 `DOC_PATTERN` ⇒ 可机械自动归属。
+
+    为什么这是**更强**的证据（方案 C 的立论）：旧路径要求作者手写一行白名单声明，
+    闸门只做 sha 前缀匹配 —— 归属证据是「作者说它是 docs-only」。本判据的输入是
+    `git show --name-only` 给出的**路径客观事实**，作者无法伪造（他可以写错描述，
+    但不能让 `scripts/x.py` 变成 `docs/x.md`）。
+
+    ⚠ **与 `is_ledger_only` 并列、不替代**：那条管「恰好一个台账文件」，
+    这条管「全是文档」。两者都自动放行，但都必须自己 fail-closed：
+      · `files` 为空 ⇒ 返回 False。空表的成因是 merge 提交的 `--name-only` 默认无输出，
+        或枚举失败 —— **「核对不了」不是「没问题」**（`.sh` 对此 fail-closed，本判据沿用）。
+      · 模式**复用 `DOC_RE`**，不另造。另造一个更松的模式就是「在看不见的地方放松闸门」；
+        `tests/tooling/test_review_coverage_lint.py` 里有一条逐例对账锁住这一点。
+    """
+    return bool(files) and all(DOC_RE.match(f) for f in files)
+
+
+def format_auto_attribution(short: str, subject: str, files: list[str]) -> str:
+    """渲染自动归属的一行（**逐条打印路径**，票面要求「保持可审计」）。
+
+    归属从「作者声明」升级为「路径客观事实」之后，这个事实必须留在输出里 ——
+    否则审计者只能看到一句「自动放行」，那就比旧的白名单行**更**不可审计了。
+    多路径用 ` + ` 连；单路径直出。**不截断路径列表**（路径本身就短）。
+    """
+    return f"✅ docs-only（按路径自动归属）: {short}  {subject} — {' + '.join(files)}"
+
+
+# --------------------------------------------------------------------------- #
 # 提交图：一次 rev-list 拿全图，之后全靠内存可达性（不再逐条起子进程）
 # --------------------------------------------------------------------------- #
 
@@ -359,6 +544,10 @@ def main(argv: list[str]) -> int:
     if not os.path.isabs(ledger):
         ledger = os.path.join(REPO_ROOT, ledger)
     list_only = "--list" in argv
+    # `--strict`：把描述字段 lint 的命中从 warn 升为 fail（issue #295 / 缺陷 7）。
+    # **默认 warn** 的理由：历史台账有已知截断行，立刻 fail 会让闸门在存量上红；
+    # 存量登记（本模块守卫测试里的硬编码正控 + 台账就地修回）之后才可把它设为默认。
+    strict = "--strict" in argv
 
     if not os.path.isfile(ledger):
         die(f"找不到台账 {os.environ.get('LEDGER') or LEDGER_PATH}")
@@ -388,6 +577,13 @@ def main(argv: list[str]) -> int:
     print(rows_desc)
     for w in ledger_warns:
         print(w)
+
+    # 描述字段 lint（缺陷 7）。⚠ **必须在任何判定前跑**：它是「方案 C 自动归属」的前置依赖
+    # ——自动归属若先跑，一条被截断的 docs-only 行会被照放（票面明写的依赖顺序）。
+    lint_findings = lint_rows(rows, wl)
+    if lint_findings:
+        for line in format_lint_report(lint_findings, len(rows) + len(wl)):
+            print(line)
 
     covered: set[str] = set()
     base_literal = ""
@@ -458,6 +654,15 @@ def main(argv: list[str]) -> int:
             print(f"✅ 台账自身更新（自动放行）: {short}  {subject}")
             continue
 
+        # 方案 C（issue #295 / 缺陷 5）：**全部**改动路径都是文档 ⇒ 按路径机械自动归属。
+        # 与白名单相比这是**更强**的证据（路径客观事实 > 作者声明），所以放在白名单之前，
+        # 且**不需要**作者再写一行声明。⚠ 顺序有讲究：先 `is_docs_only` 再回落白名单，
+        # 因为已有的大量白名单行现在只是冗余（不删也能跑 —— 白名单分支仍在）。
+        files_docs = filemap.get(sha, [])
+        if is_docs_only(files_docs):
+            print(format_auto_attribution(short, subject, files_docs))
+            continue
+
         reason = ""
         for w in wl:
             if w.startswith((f"{short}\t", f"{sha}\t")):
@@ -482,6 +687,10 @@ def main(argv: list[str]) -> int:
             fail = 1
         else:
             print(f"✅ 白名单(docs-only): {short}  {subject} — {reason}")
+
+    if strict and lint_findings:
+        print(f"❌ `--strict`：{len(lint_findings)} 行描述字段 lint 命中被升为失败")
+        fail = 1
 
     if fail:
         print(FAIL_HELP)
