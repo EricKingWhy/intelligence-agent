@@ -313,9 +313,8 @@ class RecoveryCoordinator:
                         and event.data.get("tool_call_id") == item.tool_call_id
                         for event in session.events
                     ):
-                        # Artifact persistence precedes this event in the normal path.
-                        # Recreate the UI-facing reference when a crash interrupted that
-                        # window; size/MIME are unavailable in the Ledger and stay null.
+                        # Restore the artifact UI reference before tool/result per ADR-0019 D4.
+                        # The Ledger has no size/MIME fields, so do not invent them.
                         session.append(
                             ARTIFACT_EXTERNALIZED,
                             {

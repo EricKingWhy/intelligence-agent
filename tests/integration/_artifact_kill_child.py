@@ -91,8 +91,7 @@ async def _run(config: dict[str, str]) -> None:
             settings, session_id=config["session_id"],
         )
     elif provider == "qiniu":
-        # The opt-in live Gate reads configured credentials at runtime; never serialize
-        # them into the child command, SessionEvent, or test output.
+        # Keep live Gate credentials in-process per AGENTS.md §4.3; never serialize them.
         settings = Settings(artifact_overflow_chars=OVERFLOW_CHARS)
         artifact_store = S3ArtifactStore(settings, session_id=config["session_id"])
     else:
