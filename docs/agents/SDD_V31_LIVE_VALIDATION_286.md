@@ -1,0 +1,154 @@
+# SDD V3.1 实测验证报告 —— 以 `#286` 为样本（2026-09-23）
+
+> **样本**：GitHub `#286`「[P1][Multi-Agent] 封死动态 SubAgent grantable/depth 权限绕过」。
+> **口径**：本文件只写**可复跑的命令 / 可判定的输出**；凡数字均取自同树读数文件或现场命令，
+> 不抄摘要、不凭记忆补数（协议 §7 第 8 条与 §8.7 第 3 条）。树锚 = 冻结树
+> `e58c1339ddf1db78c17a11f1cf978f15e128ed78` / tree `0eaeb8b6de57459172a9bcb194e2faccc985f164`。
+> **结论先行**：交付主面（票面 6 条 AC + 7 条冻结语义）**逐条可执行验证通过**，**P0/P1 为 0**；
+> 体系在本次抓到 **1 条两轴独立复现的 P3**（安全边界模块的 docstring 事实错误），
+> 但**没有廉价修复通道** ⇒ 它被理性地推迟、随交付进入 main。这是本次最重要的体系缺陷。
+
+---
+
+## 1. 相对旧流程的具体改进点（逐条 + 本次实测证据）
+
+| # | V3.1 条款 | 旧流程（V3-lite / V2 实测纪录） | 本次 `#286` 实测证据 |
+|---|---|---|---|
+| 1 | **§8.1 冻结树单次全量** | 每批 2–3 次全量（"再改一点再全量一次"） | 全量**只跑一次**：junit `tests=3124 failures=3 errors=0 skipped=13 time=654.155`。冻结后只追加 docs / 台账 ⇒ 用 §8.1 第 3 条两条判据机械传递读数（判据原文见 §2 第 9 条） |
+| 2 | **§8.2 冻结即三路并行** | 串行：先审查 → 再红证 → 再全量（约 30–40 min 纯等待） | 两轴审查 ∥ 作者红证 ∥ 全量，**锚同一个 tip**；三者互不阻塞，红证不再等审查 |
+| 3 | **§8.3 有界审查预算（1 轮/轴、无第二轮）** | 修后重审无上限：B-35 拉到 **5 轮**、B-36 拉到 **4 轮**，末轮只改注释 | 初始两轴**各 1 轮**即收口；两轴各 1 条 P3 ⇒ 按 §8.3 第 6 条**登记**而不是重开冻结树（残余①）。**未产生任何第二轮** |
+| 4 | **§8.3 第 7 条「工具已管的事，审查不再报」** | 审查与 `ruff` / `oxlint` 重叠，重复 findings 触发又一轮处置 | 两轴 findings 里 **0 条** `ruff` / 格式 / 未用变量类重复项 ⇒ 真豁免在本次生效 |
+| 5 | **§8.5 记账压缩 + 台账一文件一条** | 台账单文件 append，多线反复走并集解析 | 台账**只落 1 条**审查行（1120 B）覆盖**三笔**交付；本笔恰好一个台账文件 ⇒ 覆盖闸门 `is_ledger_only` **自动放行**（无需白名单） |
+| 6 | **§8.6 既有红 / flake 的处置** | 未知红 ⇒ 整批阻断或盲目重跑全量 | 3 条 `tests/evaluation/*` 红用**机械对照**归因：同树、同三条、仅清空 `PYTHONPATH` ⇒ `3 passed in 11.69s`（**没有重跑 654 s 的全量**） |
+| 7 | **交付必须是可执行验收**（用户常设要求） | 常见"人工检查过了" | 票面 Tests 第 4 条「变异测试」**真落地**：隔离副本（`git archive`，1264 文件）内 M1 / M2 各 `3 failed`，逐字节还原后复绿；正控断言 `agent_harness.__file__` 落在副本内（否则读数作废） |
+| 8 | **§8.8.3 失败回退边界表** | 失败即"整条流水线从头来" | 本次**未触发回退**（无 P0/P1）⇒ 该条未被检验，**如实记为"本次未覆盖"**（见 §3 第 6 条） |
+
+---
+
+## 2. 可复现证明（命令 + 可判定输出）
+
+> 全部命令在 `D:\intelligence-agent-backend`、`.venv/Scripts/python.exe` 下执行。
+
+1. **红证（行为红，不是签名红）**
+   `pytest tests/agent tests/multiagent -q`（改动前树 + 本票测试文件）
+   ⇒ junit `tests=522 failures=4 errors=0 time=73.182`；4 条全为 `AssertionError`，
+   node id = `test_spawn_rejects_delegate_when_no_depth_remains` /
+   `test_child_cannot_raise_depth_via_own_max_depth` /
+   `test_depth_two_tree_allows_grandchild_but_stops_there` /
+   `test_nested_spawn_uses_child_registry_not_root_registry`。**无 import / 符号缺失型假红**。
+2. **绿证（冻结树）** `pytest tests/multiagent/test_delegation_depth.py -q`
+   ⇒ `8 passed / 0 failed in 1.974s`（junit `tests=8 failures=0`）。
+3. **受影响面 focused** `pytest tests/agent tests/multiagent -q`
+   ⇒ `524 passed, 3 deselected in 75.75s`（junit `tests=524 failures=0 errors=0 skipped=0`）。
+4. **变异（票面 Tests 第 4 条）** 隔离副本内：
+   - 对照臂（未变异）⇒ `8 passed / exit 0 / 1.65s`
+   - **M1**：`depth.py` 的 `if allowance <= 0:` → `if False:`（摘掉深度 / 可授予检查）⇒ `3 failed / 5 passed / exit 1`
+   - **M2**：`child_allowance` 改返回 `spec.max_depth`（child 可抬高额度）⇒ `3 failed / 5 passed / exit 1`
+   - 两臂后逐字节还原（`depth.py` sha256 `0086d9bc…` 前后相同）⇒ 复跑 `8 passed / exit 0`
+   - **如实登记**：M1 / M2 命中的**失败集合相同**（三条边界用例）⇒ 两条检查共用同一失败面，
+     **互不构成对方的鉴别力证据**；真正的鉴别力证据是第 1 条红证。
+5. **全量（冻结树代码面）** ⇒ junit `tests=3124 failures=3 errors=0 skipped=13 time=654.155`
+   （`3 failed, 3108 passed, 13 skipped, 42 deselected, 15 warnings in 654.49s`）。
+   三条全部在 `tests/evaluation/`，**签名同一** =
+   `SystemExit: 1` @ `sitecustomize.py:826` + 载荷
+   `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":562,"threshold":50,"scope":"turn",…evaluation\reports\*.json}`
+   ⇒ 沙箱 safe-delete shim 的**跨测试删除配额**（已在 `docs/agents/verification.md` §5、
+   `docs/agents/verification.map.tsv:58`、`docs/adr/0038-test-isolation-reset-sse-shutdown-latch.md:18` 三处登记）。
+6. **归因对照（决定性，机械可判定）**
+   `PYTHONPATH= .venv/Scripts/python.exe -m pytest <那三条 node id> -q`
+   ⇒ **`3 passed in 11.69s` / exit 0** ⇒ 判为**环境假红**、不阻断。
+7. **`ruff`** 改动 / 新增 10 文件 ⇒ `All checks passed!`。
+8. **Gate-0（推送前 6 车道）** `python scripts/gate0.py`
+   ⇒ `tip=64d2c78979b8 tree=60b312657eb3`，**6/6 PASS**（diff-check 0.54s / ruff 0.43s /
+   oxlint 2.07s / tsc 24.98s / guards 6.86s / coverage 6.65s），墙钟 **41.5s**；
+   读数**机器落盘** `docs/gate/64d2c78979b8c263ba9d90e2dd500b735bcb5bcd.json`。
+9. **§8.1 第 3 条读数传递（冻结 → 集成）**
+   - 判据① `git diff --name-status --no-renames e58c1339 HEAD` ⇒ 状态列**只有 `A` / `M`**，路径全部命中 `DOC_PATTERN`
+   - 判据② `git status --short` ⇒ 除 `?? .zcodeignore`（有意例外）外为空
+   ⇒ 冻结树读数对被集成树**继续成立**，无需二次全量。
+10. **覆盖闸门** `python scripts/check_review_coverage.py` ⇒ **exit 0**
+    （区间 `09ca47a..HEAD`，三元组 `538 / 373 / 165`，`❌ 0`）。
+
+---
+
+## 3. 体系缺陷与不足（本次发现，附对交付质量的影响）
+
+### 缺陷 1（最重要）：P3 没有廉价修复通道 ⇒ 已知的文档缺陷被理性地"合法放行"
+
+- **现象**：两轴**各自独立**报出同一处 P3 —— `src/agent_harness/multiagent/provider.py`
+  的 `activate` docstring 称 `max_depth=0` 会被折成「根自己也派不出去」；
+  实测只封死 **child** 的 `delegate`（root 自身的 registry 由 `assembly` 独立构造、
+  不经 grantable 收窄）。这是一个**安全边界模块**里的事实错误描述。
+- **体系为什么修不了它**：§8.1 第 3 条判据①要求"冻结后发生变化的路径全部命中 `DOC_PATTERN`"，
+  而 `src/**/*.py` **不在**该模式内 ⇒ 任何 `src/**` 改动（**哪怕只改一行注释**）都让冻结树失效，
+  必须重跑全量（≈ 11 min）+ 按 §8.8.5 对"针对新 diff 的 review"再开两轴 1 轮。
+- **后果（对交付质量的影响）**：为一行注释支付 ≈ 30 min + 2 个审查子代理，与 §8.1 要消灭的
+  浪费同形 ⇒ 理性选择是**推迟**。于是交付里带着一条**已知的、可一行修掉的**事实错误，
+  且它位于权限边界的文档上——未来读者可能据此删掉别的守卫。本次按 §8.3 第 6 条如实登记为残余①
+  （含解除条件），**没有假绿**。
+- **建议**：给「纯注释 / 纯 docstring 的 `src/**` diff」一条与 docs-only 等价的机器判据
+  （例：AST 剥离 docstring 与注释后，改前改后 token 流逐字节相同 ⇒ 视为读数可传递），
+  或明确把 P3 的修复纳入"下一批顺带"的允许范围（不重开冻结树）。
+
+### 缺陷 2：协议没区分「红证」与「变异」，票面要的第 4 条无处安放
+
+- **现象**：票面 Tests 第 4 条要的是"破坏已交付代码 ⇒ 回归用例转红"（变异）；
+  §8.3 第 4 条 / §8.8.5 讲的是"修后重审在新 diff 上至少一次有限发现（自写变异或逐处红证）"。
+  两者**目的相反**（前者证明用例有牙，后者证明修复无新伤），协议里共用一个词。
+- **后果**：若只按 §8.3 第 4 条做一轮 1 条变异，会**误判"鉴别力已证"**——本次实测，
+  M1 与 M2 **命中完全相同的三条用例**，单看任一条都会得出"其余检查也被覆盖"的错误印象。
+- **建议**：协议显式把「红证（旧树红 / 新树绿）」与「变异（新树上破坏 ⇒ 红）」分列，
+  并要求变异**至少覆盖两条不同检查点且失败集合不同**（否则登记"共用失败面"）。
+
+### 缺陷 3：沙箱 safe-delete 假红仍在污染**每一次**全量读数
+
+- **现象**：全量 `3124 / 3 failed`，三条全是 `tests/evaluation/*` 的
+  `SystemExit: 1`（safe-delete 跨测试删除配额，`count=562 > threshold=50`）。
+- **体系为什么没消化掉它**：它已被登记（`verification.md` §5 / `verification.map.tsv:58` /
+  ADR-0038），处置脚本 `scripts/run_tests_clean.sh` 也在仓库里；但**默认跑法**仍走 shim，
+  于是每批全量后仍要**人工归因一轮**，且关单 comment 必须专门解释"3 failed 不是回归"。
+- **后果（对交付质量的影响）**：① 每次全量多一轮归因成本；② `3 failed` 这个数字在评审者
+  眼里天然是红灯，**需要额外文字去抵消误判**；③ 归因本身**无法机械化**——本次靠"清空
+  `PYTHONPATH` 对照"才拿到判定（11.69s），这一步没有任何闸门强制。
+- **建议**：把「全量读数默认走 `run_tests_clean.sh`」写成协议口径，把"走 shim 的跑法"
+  降为例外；或在 `docs/gate/<sha>.json` 里把该类失败**结构化标记**为环境项。
+
+### 缺陷 4：`git archive` 副本的行尾是 CRLF ⇒ 变异锚点会**静默 0 命中**
+
+- **现象**：本次第一版变异脚本用 `\n` 写多行锚点，在 `git archive` 出来的副本上
+  `AssertionError: 锚点未命中`（副本里 `src/**` 是 **CRLF**，`depth.py` 实测 `b'\r\n'`）。
+- **后果**：若脚本**不断言**锚点命中，替换会静默不发生 ⇒ 产出"**对照绿 / 变异也绿**"的
+  **假读数**，看起来像"用例没鉴别力"，实际是变异根本没做。
+- **建议**：协议 §8.1 第 6 条补一句：副本操作必须**行尾归一 + 断言锚点命中**
+  （本次的做法：以 `b"\r\n" in raw` 探测行尾再构造锚点，命中失败即 `assert` 报错）。
+
+### 缺陷 5：记账笔占比过高，"落点"结构性地需要 2–3 笔
+
+- **现象**：本票交付 3 笔代码 / 测试笔，而记账侧是 5 笔（台账审查行 1 + 落点 1 + 白名单 1 +
+  门禁读数 JSON 1 + 读数白名单 1）⇒ **记账笔 > 交付笔**，GitHub commits 流被稀释。
+  其中「落点笔（多文件 ⇒ 白名单）+ 白名单笔（恰好一个台账文件 ⇒ 自动放行）」
+  是**协议强制的 2 笔结构**（`is_ledger_only` 要求恰好一个文件）。
+- **加剧项**：B-42 裁决「`docs/gate/*.json` 纳入版本控制」但文件名按 `<head sha>` ⇒
+  每个 tip 多一个文件、再多一笔提交 + 一笔白名单。
+- **建议**：① 门禁读数落盘改用**固定名**（如 `docs/gate/latest.json`）或直接把结论行写进 tracker，
+  消掉"每 tip 一文件"；② 允许把「落点（docs-only 多文件）+ 白名单行」合并为一笔
+  ——只要白名单引用的是**同批更早**的提交，或把白名单段移进 `docs/review_ledger.d/`。
+
+### 缺陷 6：本次**未覆盖** §8.8.3 的失败回退路径（如实披露）
+
+- 本次两轴 `P0=P1=0` ⇒ 失败回退边界表**一行都没被走到**（没有 NEEDS-FIX 触发修复 + 修后重审）。
+- **影响**：不能据本次样本声称"回退表已被验证"。它在 B-42 被走到过（R2 两轴均 NEEDS-FIX、
+  两轴各出新 P1 ⇒ 触发「无第二轮、停止修复、交用户裁决」出口），本次只是**未复现**。
+
+---
+
+## 4. 净评估：对本次交付质量的影响
+
+| 维度 | 结论 |
+|---|---|
+| 交付主面 | 票面 **6 条 AC** 与 **7 条冻结语义**逐条可执行验证通过；**P0 / P1 = 0** |
+| 发现的真缺陷 | 1 条 P3（两轴独立复现同一处，安全边界 docstring 事实错误）+ 3 条残余（行为等价面 / 无并行子树用例 / Scope 外） |
+| 体系带来的正收益 | ① 强制了"红证 / 绿证 / 变异 / 全量 / 两轴"五件套，证据链完整且可复跑；② §8.1 + §8.2 省掉至少一次全量（≈ 11 min）与整段串行等待；③ §8.3 有界预算阻止了"为一行注释开第二、第三轮"的历史模式；④ §8.6 让环境假红用 12 秒对照归因，而不是重跑 11 分钟 |
+| 体系带来的负收益 | ① **P3 无廉价修复通道**，导致已知文档缺陷随交付进入 main；② 记账笔 > 交付笔，commits 流被稀释 |
+| 明确的产物 | `docs/SDD_TICKET_TRACKER.md` `## B-43` 段 + `docs/phase_status/2026-09.md` L783 起 + 台账 `docs/review_ledger.d/122-6e281c7-e58c1339.tsv` + 门禁读数 `docs/gate/64d2c789….json` |
+| 未闭环 | `#287`（tree-wide 预算 / 熔断 / 恢复）与 `#288`（child workspace 归属）依赖本票的 runtime-owned depth；本次**未**触碰它们的状态机 |
