@@ -161,6 +161,36 @@ class EvidenceItem(_PayloadBase):
     hash: str = Field(min_length=1)
 
 
+def assert_content_contract(
+    *, kind: MemoryKind, tier: MemoryTier, scope: MemoryScope,
+    project_id: str | None, payload: MemoryPayload,
+) -> None:
+    """§4.1/§4.2/§4.3 里"单字段看不出错"的组合规则。
+
+    抽成模块级函数是因为有**两个**消费者：完整信封（`_MemoryContentFields`）与
+    #298 的 formation 候选（`formation.FormationCandidate`）。候选是"还没被运行时
+    补齐身份与版本的信封"，它必须受同一套组合规则约束——各写一份会让"模型多报一个
+    profile 档位的 episode"从一个入口被挡住、从另一个入口放进来。
+
+    每条都以 `ValueError` 结束（pydantic 会包成 ValidationError），并带上足以定位的
+    字段值——这是给"校验失败"留证据，不是给调用方做控制流。
+    """
+    if payload.kind != kind.value:
+        raise ValueError(f"payload kind {payload.kind!r} does not match record kind {kind.value!r}")
+    if tier is MemoryTier.PROFILE:
+        # §4.2：profile 是"每次可自动注入的紧凑画像"，只有 user_global 的
+        # active semantic 能进。project 作用域的事实注入到所有会话会越界。
+        if kind is not MemoryKind.SEMANTIC:
+            raise ValueError(f"profile tier requires semantic kind, got {kind.value!r}")
+        if scope is not MemoryScope.USER_GLOBAL:
+            raise ValueError(f"profile tier requires user_global scope, got {scope.value!r}")
+    if scope is MemoryScope.PROJECT:
+        if project_id is None:
+            raise ValueError("project scope requires project_id")
+    elif project_id is not None:
+        raise ValueError("user_global scope must not carry project_id")
+
+
 class _MemoryContentFields(BaseModel):
     """信封里"由内容决定、与生命周期无关"的那部分字段，draft 与 record 共用。
 
@@ -187,26 +217,10 @@ class _MemoryContentFields(BaseModel):
     evidence: list[EvidenceItem] = Field(min_length=1)
 
     def _check_common_contract(self) -> None:
-        """§4.1/§4.2/§4.3/§6.1 里"单字段看不出错"的那部分规则。
-
-        每条都以 `ValueError` 结束（pydantic 会包成 ValidationError），
-        并带上足以定位的字段值——这是给"校验失败"留证据，不是给调用方做控制流。
-        """
-        if self.payload.kind != self.kind.value:
-            raise ValueError(
-                f"payload kind {self.payload.kind!r} does not match record kind {self.kind.value!r}")
-        if self.tier is MemoryTier.PROFILE:
-            # §4.2：profile 是"每次可自动注入的紧凑画像"，只有 user_global 的
-            # active semantic 能进。project 作用域的事实注入到所有会话会越界。
-            if self.kind is not MemoryKind.SEMANTIC:
-                raise ValueError(f"profile tier requires semantic kind, got {self.kind.value!r}")
-            if self.scope is not MemoryScope.USER_GLOBAL:
-                raise ValueError(f"profile tier requires user_global scope, got {self.scope.value!r}")
-        if self.scope is MemoryScope.PROJECT:
-            if self.project_id is None:
-                raise ValueError("project scope requires project_id")
-        elif self.project_id is not None:
-            raise ValueError("user_global scope must not carry project_id")
+        """组合规则：§4.1/§4.2/§4.3 的共用部分 + 本层独有的 provenance 规则。"""
+        assert_content_contract(
+            kind=self.kind, tier=self.tier, scope=self.scope,
+            project_id=self.project_id, payload=self.payload)
         if not self.source_event_ids and not (
             self.source_type is SourceType.USER_EDIT and self.source_session_id is None
         ):
