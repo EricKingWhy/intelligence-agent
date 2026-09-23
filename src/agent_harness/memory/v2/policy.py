@@ -10,7 +10,7 @@
 | R | 内容 | 本模块的执法点 |
 | --- | --- | --- |
 | R4 | 总 5 / Semantic ≤3 / Episodic ≤2 / Procedural ≤1，按 durable value 截断 | `_rank_and_cap` |
-| R5 | Procedural 需两条独立事件，除非用户明确陈述规则 | `_meets_procedural_threshold` |
+| R5 | Procedural 需两条独立**成功/纠正**事件，除非用户明确陈述规则 | `_qualifying_event_ids` + `_meets_procedural_threshold` |
 | R6 | USER/profile 事实需直接用户证据或显式确认 | `_has_user_authority` |
 | R7 | 秘密一律拒；敏感需显式记住请求 | `find_secret` + `_reject` 前两条 |
 
@@ -47,15 +47,24 @@
 
 被政策拒掉的候选**不占** R4 的名额。否则两条带密钥的垃圾候选就能把三条合法记忆挤出去——
 名额是给"可写入的内容"用的，不是给"模型输出的条数"用的。
+
+# R5 的第二个半边（T4 补上的一处自我更正）
+
+T3 交付时把 R5 的"成功/纠正"记成"运行时判不了"，理由是"`tool/result` 不带 `ok` 字段"。
+**那个前提是错的**：`content` 就是 `ToolResult` 的 JSON，`ok` 一直在里面。前提不成立结论
+也就不成立，所以在 T4 里补上 `_qualifying_event_ids`，不再把它挂在"已知缺口"里。留这段
+记录是为了让"为什么 T3 的用例当时能过"可追溯——它过是因为当时压根没测这一半。
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
+from typing import Any
 
 from agent_harness.memory.extractor import _is_runtime_injected
 from agent_harness.memory.v2.formation import FormationCandidate, Sensitivity
@@ -152,6 +161,29 @@ def find_secret(*texts: str) -> SecretKind | None:
     return None
 
 
+def cut_at_secret(text: str) -> tuple[str, SecretKind | None]:
+    """把文本从**第一处**秘密命中处起整段砍掉；返回 `(安全前缀, 命中的类型)`。
+
+    T4 组装模型输入时用它（AC9："no secret reaches model input"）。
+
+    为什么不"只把命中片段换成占位符"：多行私钥的匹配只覆盖
+    `-----BEGIN … PRIVATE KEY-----` 那一行，base64 正文在它后面——span 级替换会把
+    正文原样留下。从命中点起全砍，正文必然一起消失，且不需要"猜秘密边界"。
+
+    多个模式各自 `search` 后取**最早**的起点：某个模式先命中但位置更靠后时，
+    只处理它就会把另一个更早的秘密留在前缀里。
+    """
+    earliest: int | None = None
+    hit: SecretKind | None = None
+    for kind, pattern in _SECRET_PATTERNS:
+        match = pattern.search(text)
+        if match is not None and (earliest is None or match.start() < earliest):
+            earliest, hit = match.start(), kind
+    if earliest is None or hit is None:
+        return text, None
+    return text[:earliest], hit
+
+
 # --------------------------------------------------------------------------------------
 # 证据角色（R6 的地基）：回查事件，不信模型的 `role`
 # --------------------------------------------------------------------------------------
@@ -185,6 +217,87 @@ def resolve_evidence_source(event: SessionEvent) -> EvidenceSource:
     if source is EvidenceSource.USER and _is_runtime_injected(event):
         return EvidenceSource.OTHER
     return source
+
+
+class ToolOutcome(str, Enum):
+    """一次工具执行的结果在运行时眼里的样子（AC8 的"合格"判据）。
+
+    `tool/result` 事件的 `data` 只有 `{tool_call_id, content}`，而 `content` 是
+    `ToolResult` 的 JSON——`ok` 就藏在里面。所以"这次工具成功了吗"是**可以**由运行时
+    确定性读出的，不必靠模型自述：
+
+    - `SUCCESS` / `FAILURE`：`content` 解析出 `ToolResult.ok` 的布尔值；
+    - `UNKNOWN`：结果事件在，但 `content` 读不出可判定的 `ok`（旧日志 / 手工写入 /
+      形状污染 / 非 JSON）。**不猜**——读不出就不算成功；
+    - `MISSING`：压根没有对应的 `tool/result` 事件。
+
+    `ok` 用 `isinstance(..., bool)` 严格判定：JSON 里它只会是真布尔，而 `"false"`
+    这种字符串在宽松判定下会变成"成功"。
+    """
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    UNKNOWN = "unknown"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResultView:
+    """从 `tool/result` 的 `content` 里读出的**全部**可用字段。
+
+    单独成形是为了让解析只有一条路径：本模块要 `ok`（判状态），
+    `projection` 要 `message` / `artifact_ref`（组装模型输入）。各解析一次 =
+    各写一份容错，某个字段口径改了另一处不知道。
+    """
+
+    ok: bool | None
+    message: str
+    artifact_ref: str | None
+
+
+def read_tool_result(event: SessionEvent) -> ToolResultView | None:
+    """解析一条事件的 `content` 为 `ToolResultView`；读不出返回 `None`（不抛）。
+
+    非 `tool/result` 事件、`content` 不是 JSON 对象、以及任何字段类型不符，
+    都走同一条 `None` / 默认值路径——恢复链上的一行坏数据只该损失该行。
+    """
+    if event.type != TOOL_RESULT:
+        return None
+    raw = event.data.get("content") if isinstance(event.data, Mapping) else None
+    payload = _json_object(raw)
+    if payload is None:
+        return None
+    ok = payload.get("ok")
+    message = payload.get("message")
+    artifact_ref = payload.get("artifact_ref")
+    return ToolResultView(
+        ok=ok if isinstance(ok, bool) else None,
+        message=message if isinstance(message, str) else "",
+        artifact_ref=artifact_ref if isinstance(artifact_ref, str) and artifact_ref else None,
+    )
+
+
+def resolve_tool_outcome(event: SessionEvent) -> ToolOutcome:
+    """从一条事件读出工具结果；非结果事件一律 `MISSING`。"""
+    if event.type != TOOL_RESULT:
+        return ToolOutcome.MISSING
+    view = read_tool_result(event)
+    if view is None or view.ok is None:
+        return ToolOutcome.UNKNOWN
+    return ToolOutcome.SUCCESS if view.ok else ToolOutcome.FAILURE
+
+
+def _json_object(raw: object) -> Mapping[str, Any] | None:
+    """把 `tool/result` 的 `content` 解析成 JSON 对象；读不出返回 None（不抛）。"""
+    if isinstance(raw, Mapping):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, Mapping) else None
 
 
 # --------------------------------------------------------------------------------------
@@ -247,13 +360,19 @@ def select_candidates(
     `explicit_remember` 是**运行时**持有的同意信号（`Remember X` 那条命令路径的产物，
     PRD §5.6.1）。自动形成路径上恒为 False。模型输出里没有任何字段能影响它。
     """
+    # 先物化再建两份索引：`events` 声明成 `Iterable`，若调用方传的是生成器，
+    # 第二遍遍历会看到空序列——那会让 "qualifying" 静默变成空集（一处沉默的过严）。
+    event_list = list(events)
     sources: dict[str, EvidenceSource] = {
-        event.event_id: resolve_evidence_source(event) for event in events
+        event.event_id: resolve_evidence_source(event) for event in event_list
     }
+    qualifying = _qualifying_event_ids(event_list)
     admissible: list[tuple[int, FormationCandidate]] = []
     rejected: list[RejectedCandidate] = []
     for index, candidate in enumerate(candidates):
-        reason = _reject(candidate, sources, explicit_remember=explicit_remember)
+        reason = _reject(
+            candidate, sources, explicit_remember=explicit_remember, qualifying=qualifying
+        )
         if reason is None:
             admissible.append((index, candidate))
         else:
@@ -265,7 +384,7 @@ def select_candidates(
 
 def _reject(
     candidate: FormationCandidate, sources: Mapping[str, EvidenceSource], *,
-    explicit_remember: bool,
+    explicit_remember: bool, qualifying: frozenset[str],
 ) -> PolicyRejection | None:
     """逐条判据，**顺序即优先级**（先命中先返回）。
 
@@ -284,7 +403,7 @@ def _reject(
     ):
         return PolicyRejection.USER_FACT_WITHOUT_USER_EVIDENCE
     if candidate.kind is MemoryKind.PROCEDURAL and not _meets_procedural_threshold(
-        candidate, sources
+        candidate, sources, qualifying
     ):
         return PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
     return None
@@ -368,19 +487,51 @@ def _has_user_authority(
     )
 
 
+def _qualifying_event_ids(events: Iterable[SessionEvent]) -> frozenset[str]:
+    """R5 里"成功或纠正"这一半的运行时判据：哪些事件算**可验证的行动结果**。
+
+    合格 = 用户真的说了这句话（genuine `user/message`，注入样板不算），或一条运行时
+    读得出 `ok` 的 `tool/result`（`SUCCESS` 与 `FAILURE` 都算）。
+
+    为什么失败也算：R5 要挡的是"一次观察（或一次幻觉）就变成规则"，而运行时能确定性
+    验证的只有"这次行动真的发生过、结果读得出来"。"这次做法对不对"是语义判断，运行时
+    给不出证据；把 `FAILURE` 也排除，会让"失败两次 ⇒ 换个方案"这类正当经验永远形不成
+    规则（§4.1 的 Procedural 本来就承载"已验证的过程"）。
+
+    为什么 `UNKNOWN` / `MISSING` 不算：读不出来时运行时**没有**证据说明这次行动发生过，
+    拿它凑第二条事件等于用一条形态污染的结果伪造门槛。这正是 `resolve_tool_outcome`
+    把"读不出"与"没结果"同列为非成功的原因。
+    """
+    qualifying: set[str] = set()
+    for event in events:
+        readable_outcome = event.type == TOOL_RESULT and resolve_tool_outcome(event) in (
+            ToolOutcome.SUCCESS,
+            ToolOutcome.FAILURE,
+        )
+        if resolve_evidence_source(event) is EvidenceSource.USER or readable_outcome:
+            qualifying.add(event.event_id)
+    return frozenset(qualifying)
+
+
 def _meets_procedural_threshold(
-    candidate: FormationCandidate, sources: Mapping[str, EvidenceSource],
+    candidate: FormationCandidate,
+    sources: Mapping[str, EvidenceSource],
+    qualifying: frozenset[str],
 ) -> bool:
-    """R5：两条**独立**事件，或用户明确陈述了规则。
+    """R5：两条合格的**独立**事件，或用户明确陈述了规则。
 
     "独立"是运行时能确定性判定的那一半——数**不同**的 `event_id`。同一事件被引用两次
     不是两条事件，这是本条最容易漏掉的一面（用例专门钉它）。
 
-    "成功 / 纠正"是另一半，运行时**判不了**：本仓 `tool/result` 不带 `ok`/`error` 字段，
-    从事件形状看不出一次行动是否成功。把"读不出成功就算没成功"硬写成判据，会得到一条
-    比 PRD 更弱的第二契约——所以那一半留给形成模型的判断，本模块只登记这条边界
-    （ADR-0043），不假装已执法。
+    "成功或纠正"那一半由 `_qualifying_event_ids` 给出（见它的取舍说明）。T3 当时把它记成
+    "运行时判不了"，理由是"`tool/result` 不带 `ok` 字段"——**那个前提是错的**：
+    `content` 就是 `ToolResult` 的 JSON，`ok` 一直在里面（`read_tool_result` 就是读它）。
+    前提不成立，结论也就不成立，所以这一半在这里补上，不再挂在"已知缺口"里。
+
+    用户证据走豁免分支：用户直接把规则讲出来时，一条事件就够（R5 原文的 unless）。
     """
-    if any(sources.get(item.event_id) is EvidenceSource.USER for item in candidate.evidence):
+    if any(
+        sources.get(item.event_id) is EvidenceSource.USER for item in candidate.evidence
+    ):
         return True
-    return len({item.event_id for item in candidate.evidence}) >= 2
+    return len({item.event_id for item in candidate.evidence} & qualifying) >= 2

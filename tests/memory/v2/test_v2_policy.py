@@ -22,6 +22,7 @@ R7 要求秘密 / 敏感策略是**模型之外**的运行时边界。所以本�
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import pytest
@@ -38,18 +39,23 @@ from agent_harness.memory.v2.policy import (
     EvidenceSource,
     PolicyRejection,
     SecretKind,
+    ToolOutcome,
     durable_value,
     find_secret,
+    read_tool_result,
     resolve_evidence_source,
+    resolve_tool_outcome,
     select_candidates,
 )
 from agent_harness.memory.v2.types import MemoryKind
 from agent_harness.session import (
     MODEL_COMPLETED,
+    TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
 )
+from agent_harness.tooling.result import ErrorCode, ToolResult
 
 # --------------------------------------------------------------------------------------
 # fixtures
@@ -75,7 +81,30 @@ def _model(event_id: str = "m:1") -> SessionEvent:
 
 
 def _tool(event_id: str = "t:1") -> SessionEvent:
+    """一条**读不出 `ok`** 的 `tool/result`（`content` 不是 `ToolResult` 的 JSON）。
+
+    刻意保留这个形状：`resolve_tool_outcome` 对它是 `UNKNOWN`，而 UNKNOWN 不算
+    "成功/纠正"——所以它反过来是 R5 门槛的一组反控素材。
+    """
     return _event(event_id, TOOL_RESULT, {"tool_call_id": "c1", "content": "ok"})
+
+
+def _tool_ok(event_id: str = "t:ok1", tool_call_id: str = "c1") -> SessionEvent:
+    """一条运行时读得出 `ok=True` 的 `tool/result`。"""
+    result = ToolResult.success("done")
+    return _event(
+        event_id, TOOL_RESULT,
+        {"tool_call_id": tool_call_id, "content": result.model_dump_json()},
+    )
+
+
+def _tool_failed(event_id: str = "t:bad", tool_call_id: str = "c9") -> SessionEvent:
+    """一条读得出 `ok=False` 的 `tool/result`（"纠正"那半边）。"""
+    result = ToolResult.failure("boom", error_code=ErrorCode.TOOL_EXECUTION_ERROR)
+    return _event(
+        event_id, TOOL_RESULT,
+        {"tool_call_id": tool_call_id, "content": result.model_dump_json()},
+    )
 
 
 def _payload(kind: str = "semantic", **overrides) -> dict:
@@ -111,10 +140,20 @@ def _candidate(**overrides) -> FormationCandidate:
     ).candidates[0]
 
 
+def _default_events() -> list[SessionEvent]:
+    """默认事件池：一条用户消息、一条助手消息、一条**读不出**的工具结果，
+    以及两条**读得出**的工具结果（成功 + 失败各一）。
+
+    为什么池子里要有"读得出 ok"的两条：R5 的"成功/纠正"半边要求证据事件本身合格，
+    没有它们的池子只能测到"独立"那半边。
+    """
+    return [_user(), _model(), _tool(), _tool_ok("t:ok1", "c1"), _tool_failed()]
+
+
 def _select(candidates, *, events=None, explicit_remember: bool = False):
     return select_candidates(
         candidates,
-        events=[_user(), _model(), _tool()] if events is None else events,
+        events=_default_events() if events is None else events,
         explicit_remember=explicit_remember,
     )
 
@@ -429,9 +468,74 @@ def test_a_procedural_candidate_from_two_independent_events_is_accepted() -> Non
     outcome = _select([_candidate(
         kind="procedural", payload=_payload("procedural"),
         evidence=[
-            _evidence("m:1", "assistant", "先跑 pnpm i"),
-            _evidence("t:1", "tool", "已经成功两次"),
+            _evidence("t:ok1", "tool", "第一次成功了"),
+            _evidence("t:bad", "tool", "第二次踩了坑改过来"),
         ])])
+    assert len(outcome.accepted) == 1
+
+
+def test_a_procedural_candidate_from_one_qualifying_event_is_rejected() -> None:
+    """只有一条读得出 `ok` 的结果事件时不算两条——另一条是助手文本，不是"行动"。"""
+    outcome = _select([_candidate(
+        kind="procedural", payload=_payload("procedural"),
+        evidence=[
+            _evidence("m:1", "assistant", "先跑 pnpm i"),
+            _evidence("t:ok1", "tool", "成功了"),
+        ])])
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
+
+
+def test_an_unreadable_tool_result_does_not_count_as_a_qualifying_event() -> None:
+    """`UNKNOWN`（`content` 不是 `ToolResult` 的 JSON）不能凑门槛。
+
+    两条都读不出来时门槛必须是**不满足**：否则两条形态污染的结果就能造出一条规则，
+    而运行时其实没有任何证据说明这两次行动发生过。
+    """
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[_evidence("t:1", "tool", "读不出来"),
+                      _evidence("t:2", "tool", "也读不出来")])],
+        events=[_tool("t:1"), _tool("t:2")],
+    )
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
+
+
+def test_a_tool_call_without_any_result_does_not_count_as_a_qualifying_event() -> None:
+    """`MISSING`：只有 `tool/call`、没有 `tool/result`。用一条没跑完的调用凑门槛
+    同样是伪造——"发起了"与"发生了"是两件事。"""
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[_evidence("tc:pending", "tool", "调用已发出"),
+                      _evidence("m:1", "assistant", "继续")])],
+        events=[
+            _event("tc:pending", TOOL_CALL,
+                   {"tool_call_id": "c7", "tool_name": "run_shell", "args": {}}),
+            _model(),
+        ],
+    )
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
+
+
+def test_two_failed_attempts_count_as_two_qualifying_events() -> None:
+    """R5 的"纠正"半边：失败也**可验证**（运行时读得出 `ok=False`），而"做法对不对"
+    是语义判断。把失败排除会让"失败两次 ⇒ 换个方案"这类正当经验永远形不成规则。"""
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[
+                _evidence("t:bad", "tool", "第一次失败"),
+                _evidence("t:bad2", "tool", "第二次失败"),
+            ])],
+        events=[_tool_failed("t:bad", "c1"), _tool_failed("t:bad2", "c2")],
+    )
     assert len(outcome.accepted) == 1
 
 
@@ -463,8 +567,9 @@ def test_an_injected_user_message_cannot_exempt_the_procedural_threshold() -> No
 def _many(kind: str, count: int, *, importance: float = 0.5) -> list[FormationCandidate]:
     """同 kind 的 `count` 条候选；内容互不相同，证据指向同一批可解析事件。
 
-    procedural 的 fixture 带**两条**证据：R5 的门槛比名额先判，用一条证据的 procedural
-    会全部死在 `PROCEDURAL_THRESHOLD_NOT_MET` 上，名额那条规则就永远测不到。
+    procedural 的 fixture 带**两条合格**证据（两条读得出 `ok` 的工具结果）：R5 的门槛比
+    名额先判，用一条证据的 procedural 会全部死在 `PROCEDURAL_THRESHOLD_NOT_MET` 上，
+    名额那条规则就永远测不到。
     """
     return [
         _candidate(
@@ -476,8 +581,8 @@ def _many(kind: str, count: int, *, importance: float = 0.5) -> list[FormationCa
             strength=1.0,
             evidence=(
                 [
-                    _evidence("m:1", "assistant", f"#{index}"),
-                    _evidence("t:1", "tool", f"#{index}"),
+                    _evidence("t:ok1", "tool", f"#{index}"),
+                    _evidence("t:bad", "tool", f"#{index}"),
                 ]
                 if kind == "procedural"
                 else [_evidence("m:1", "assistant", f"#{index}")]
@@ -619,3 +724,105 @@ def test_the_rejection_reasons_are_stable_strings() -> None:
     assert PolicyRejection.OVER_CAP.value == "over_cap"
     assert all(isinstance(reason.value, str) for reason in PolicyRejection)
     assert all(isinstance(source.value, str) for source in EvidenceSource)
+
+
+# --------------------------------------------------------------------------------------
+# 第 9 组：`tool/result` 的运行时读法（R5"成功/纠正"的判据来源）
+# --------------------------------------------------------------------------------------
+#
+# `tool/result` 的 `data` 只有 `{tool_call_id, content}`，而 `content` 是 `ToolResult`
+# 的 JSON——"这次工具成没成"因此是**可以**确定性读出的。这组用例钉住读法的每一个分岔：
+# 读得出就是成功/失败，读不出就是 unknown（**不猜**），没有结果事件就是 missing。
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (ToolResult.success("ok").model_dump_json(), ToolOutcome.SUCCESS),
+        (ToolResult.failure("no", error_code=ErrorCode.TIMEOUT).model_dump_json(),
+         ToolOutcome.FAILURE),
+    ],
+)
+def test_a_readable_result_event_maps_to_success_or_failure(
+    content: str, expected: ToolOutcome,
+) -> None:
+    event = _event("t:1", TOOL_RESULT, {"tool_call_id": "c1", "content": content})
+    assert resolve_tool_outcome(event) is expected
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "not json", '"a string"', "[1, 2]", "null", '{"message": "ok 字段缺席"}',
+     '{"ok": "true"}', '{"ok": 1}'],
+)
+def test_an_unreadable_result_maps_to_unknown(content: str) -> None:
+    """`"true"` / `1` 都不算成功：JSON 里 `ok` 只会是真布尔，宽松判定会把
+    `"false"` 这类字符串读成"成功"，那是把模型的形态污染变成一条假证据。"""
+    event = _event("t:1", TOOL_RESULT, {"tool_call_id": "c1", "content": content})
+    assert resolve_tool_outcome(event) is ToolOutcome.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _event("u:1", USER_MESSAGE, {"content": "问"}),
+        _event("m:1", MODEL_COMPLETED, {"content": "答"}),
+        _event("tc:1", TOOL_CALL, {"tool_call_id": "c1", "tool_name": "t", "args": {}}),
+        _event("rc:1", "run/completed", {"status": "ok"}),
+    ],
+)
+def test_a_non_result_event_is_missing(event: SessionEvent) -> None:
+    """`MISSING` 与 `UNKNOWN` 是两件事：前者"没有结果"，后者"结果读不出来"。
+    两者都不算成功，但归因不同——事件里的 attempt/stage 要能区分。"""
+    assert resolve_tool_outcome(event) is ToolOutcome.MISSING
+
+
+def test_a_result_event_with_contaminated_data_shape_still_answers() -> None:
+    """`data` 形状污染时退化成"读不出"，而不是抛错 brick 掉整个政策执行。"""
+    event = _event("t:1", TOOL_RESULT, {"content": ToolResult.success("ok").model_dump_json()})
+    contaminated = dataclasses.replace(event, data=None)  # type: ignore[arg-type]
+    assert resolve_tool_outcome(contaminated) is ToolOutcome.UNKNOWN
+
+
+def test_read_tool_result_exposes_the_fields_the_projection_needs() -> None:
+    """`projection` 要的 `message` / `artifact_ref` 与政策要的 `ok` 走**同一次解析**。
+    两处各解析一次 = 两处各写一份容错，某个字段口径改了另一处不知道。"""
+    result = ToolResult.success("install ok", data={"anything": 1}).model_copy(
+        update={"artifact_ref": "art-9f2c"})
+    view = read_tool_result(_event(
+        "t:1", TOOL_RESULT, {"tool_call_id": "c1", "content": result.model_dump_json()}))
+    assert view is not None
+    assert (view.ok, view.message, view.artifact_ref) == (True, "install ok", "art-9f2c")
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "not json", '"a string"', "[1, 2]", '{"ok": "true", "message": 5, "artifact_ref": 7}'],
+)
+def test_read_tool_result_answers_none_or_defaults_on_damaged_content(content: str) -> None:
+    """读不出 `ok` ⇒ `None`（不猜）；字段类型不符 ⇒ 那个字段退化成空（其余仍然可用）。"""
+    view = read_tool_result(
+        _event("t:1", TOOL_RESULT, {"tool_call_id": "c1", "content": content}))
+    if content == '{"ok": "true", "message": 5, "artifact_ref": 7}':
+        assert view is not None
+        assert (view.ok, view.message, view.artifact_ref) == (None, "", None)
+    else:
+        assert view is None
+
+
+def test_read_tool_result_refuses_a_non_result_event() -> None:
+    """不按事件类型设防时，一段**长得像工具结果**的用户文本会被读成执行结果。
+
+    最后一条是关键：用户粘一段 `{"ok": true}` 进对话（完全可能出现），
+    若只看 `content` 像不像 JSON，它就会被当成"某次工具成功了"。
+    """
+    assert read_tool_result(_user()) is None
+    assert read_tool_result(_model()) is None
+    assert read_tool_result(
+        _event("u:2", USER_MESSAGE, {"content": '{"ok": true, "message": "hi"}'})) is None
+
+
+def test_the_tool_outcome_values_are_stable_strings() -> None:
+    assert {outcome.value for outcome in ToolOutcome} == {
+        "success", "failure", "unknown", "missing",
+    }
