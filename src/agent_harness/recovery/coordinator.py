@@ -54,6 +54,7 @@ from agent_harness.recovery.reconcile import (
 )
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import (
+    ARTIFACT_EXTERNALIZED,
     OPERATION_RECONCILE_REQUIRED,
     SESSION_RESUMED,
     TOOL_CALL,
@@ -289,6 +290,45 @@ class RecoveryCoordinator:
                         run_id=item.run_id,
                         agent_id=item.agent_id,
                     )
+                operation = operations_by_call_id.get(item.tool_call_id)
+                recovered_result = (
+                    _try_parse_result_json(item.content, item.tool_name)
+                    if operation is not None
+                    and operation.state is OperationState.SUCCEEDED
+                    else None
+                )
+                artifact_ref = (
+                    recovered_result.artifact_ref
+                    if recovered_result is not None
+                    and recovered_result.ok
+                    else None
+                )
+                if artifact_ref and operation is not None:
+                    if operation.artifact_ref and operation.artifact_ref != artifact_ref:
+                        raise RecoveryError(
+                            "Operation Ledger artifact_ref does not match recovered ToolResult"
+                        )
+                    if not any(
+                        event.type == ARTIFACT_EXTERNALIZED
+                        and event.data.get("tool_call_id") == item.tool_call_id
+                        for event in session.events
+                    ):
+                        # Artifact persistence precedes this event in the normal path.
+                        # Recreate the UI-facing reference when a crash interrupted that
+                        # window; size/MIME are unavailable in the Ledger and stay null.
+                        session.append(
+                            ARTIFACT_EXTERNALIZED,
+                            {
+                                "artifact_id": artifact_ref,
+                                "session_id": session_id,
+                                "source_tool": item.tool_name,
+                                "tool_call_id": item.tool_call_id,
+                                "size": None,
+                                "mime_type": None,
+                            },
+                            run_id=item.run_id,
+                            agent_id=item.agent_id,
+                        )
                 session.append(
                     TOOL_RESULT,
                     {"tool_call_id": item.tool_call_id, "content": item.content},
@@ -298,7 +338,6 @@ class RecoveryCoordinator:
                 # PENDING 决策落地后同步推进 Ledger：session 已合成 CANCELLED
                 # 语义的 tool/result，Ledger 行却永远停在 PENDING——两边对同一
                 # tool_call 永久不一致（可观测性 + 后续 reconcile 重复触发）。
-                operation = operations_by_call_id.get(item.tool_call_id)
                 if (operation is not None
                         and operation.state is OperationState.PENDING
                         and self._operation_ledger is not None):
@@ -470,13 +509,26 @@ class RecoveryCoordinator:
         if operation.result_json:
             parsed = _try_parse_result_json(operation.result_json, operation.tool_name)
             if parsed is not None:
+                if (operation.state is OperationState.SUCCEEDED and parsed.ok
+                        and operation.artifact_ref):
+                    if parsed.artifact_ref and parsed.artifact_ref != operation.artifact_ref:
+                        raise RecoveryError(
+                            "Operation Ledger artifact_ref does not match result_json"
+                        )
+                    if parsed.artifact_ref is None:
+                        parsed = parsed.model_copy(
+                            update={"artifact_ref": operation.artifact_ref},
+                        )
                 return parsed.model_dump_json()
             # 腐烂 result_json：视为"结果详情缺失"，落入下面的降级合成。
         if operation.state is OperationState.SUCCEEDED:
-            return ToolResult.success(
+            result = ToolResult.success(
                 f"操作 '{operation.tool_name}' 已确认成功（Ledger 记录），"
                 "但结果详情缺失。"
-            ).model_dump_json()
+            )
+            if operation.artifact_ref:
+                result = result.model_copy(update={"artifact_ref": operation.artifact_ref})
+            return result.model_dump_json()
         return ToolResult.failure(
             message=(
                 f"操作 '{operation.tool_name}' 终态为 {operation.state.value}"

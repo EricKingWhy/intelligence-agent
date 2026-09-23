@@ -32,6 +32,7 @@ from tests.integration._artifact_kill_child import (
     ARTIFACT_CONTENT,
     OVERFLOW_CHARS,
     TOOL_CALL_ID,
+    TOOL_NAME,
 )
 
 _CHILD = Path(__file__).with_name("_artifact_kill_child.py")
@@ -144,6 +145,28 @@ def _assert_recovered_result(session: Session, expected_artifact_id: str) -> Too
     return result
 
 
+def _assert_recovered_artifact_is_ui_openable(
+    session: Session, session_id: str, artifact_id: str,
+) -> None:
+    externalized = [
+        event for event in session.events if event.type == ARTIFACT_EXTERNALIZED
+    ]
+    assert len(externalized) == 1
+    assert externalized[0].data == {
+        "artifact_id": artifact_id,
+        "session_id": session_id,
+        "source_tool": TOOL_NAME,
+        "tool_call_id": TOOL_CALL_ID,
+        "size": None,
+        "mime_type": None,
+    }
+    result_index = next(
+        index for index, event in enumerate(session.events)
+        if event.type == TOOL_RESULT and event.data["tool_call_id"] == TOOL_CALL_ID
+    )
+    assert session.events.index(externalized[0]) < result_index
+
+
 def _assert_crash_window(root: Path, session_id: str, events: list) -> str:
     calls = [event for event in events if event.type == TOOL_CALL]
     results = [event for event in events if event.type == TOOL_RESULT]
@@ -183,12 +206,13 @@ async def run_local_artifact_crash_window(root: Path) -> None:
     result = _assert_recovered_result(recovered, artifact_id)
     assert result.artifact_ref == operation.artifact_ref
     assert (root / "side-effects" / "executed.txt").read_text(encoding="utf-8") == "executed\n"
+    _assert_recovered_artifact_is_ui_openable(recovered, session_id, artifact_id)
 
     # A second recovery is idempotent and must not append another result or artifact event.
     recovered_again = await _recover(root, session_id)
     assert len([event for event in recovered_again.events if event.type == TOOL_RESULT]) == 1
     assert len([event for event in recovered_again.events
-                if event.type == ARTIFACT_EXTERNALIZED]) == 0
+                if event.type == ARTIFACT_EXTERNALIZED]) == 1
     assert sorted(path.name for path in (root / "artifacts" / session_id).iterdir()) == artifact_files
     assert session_store.read_events(session_id)
 
@@ -257,12 +281,18 @@ async def test_qiniu_artifact_crash_window_recovers_and_cleans_random_prefix(
             recovered = await _recover(root, session_id)
             result = _assert_recovered_result(recovered, artifact_id)
             assert result.artifact_ref == operation.artifact_ref
+            _assert_recovered_artifact_is_ui_openable(
+                recovered, session_id, artifact_id,
+            )
             assert (root / "side-effects" / "executed.txt").read_text(
                 encoding="utf-8"
             ) == "executed\n"
             recovered_again = await _recover(root, session_id)
             assert len([event for event in recovered_again.events
                         if event.type == TOOL_RESULT]) == 1
+            _assert_recovered_artifact_is_ui_openable(
+                recovered_again, session_id, artifact_id,
+            )
             assert session_store.read_events(session_id)
         finally:
             await _delete_owned_prefix(client, bucket, prefix)

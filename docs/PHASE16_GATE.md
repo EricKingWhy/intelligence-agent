@@ -40,7 +40,7 @@
 | #130 T5 | `test_fork_creates_isolated_lineage` | fork 隔离 lineage | ✅ | 0.06s |
 | #130 T5 | `test_langfuse_trace_structure_complete` | Langfuse trace 结构 | ✅ | 0.05s |
 | #130 T5 | `test_eval_report_gate_metrics` | Eval 报告指标可计算 | ✅ | 0.03s |
-| #289 | `test_artifact_saved_before_session_event_recovers` | Artifact 已存、外置/结果事件未写时 Kill → Recovery | ✅ | 本次运行未单独计时 |
+| #289 | `test_artifact_saved_before_session_event_recovers` | Artifact 已存、外置/结果事件未写时 Kill → Recovery，并恢复 UI 外置引用 | ✅ | 本次运行未单独计时 |
 
 **原始 12 段基线**：12 passed, 0 skipped, wall clock **8.25s**（含 Docker 容器恢复 6.85s）。#289 加入后，本次在 Docker Desktop 29.4.1 可用时复跑为 **13 passed, 0 skipped**；历史性能表仍保留原始基线口径。
 
@@ -83,7 +83,7 @@ D11 的原则：性能指标在本 Phase **只记录、不设阈值门**——�
 - **薄编排层（D1）**：关键路径用 `ScriptedModel` 喂固定响应序列，把 Full E2E 从概率链降为确定性链——Gate 因此可重复。真实模型覆盖由 §6 遗留项承接。
 - **全 fake 进 CI（D3）**：KB（FakeKnowledgeVectorStore）/ Web（脚本化）/ 模型（ScriptedModel）/ Langfuse（FakeRecorder）全部 in-process，零网络零 token。
 - **真子进程 kill（D4）**：kill 测试用真 `subprocess` 跑 `_kill_child.py`，在 bash 执行中段 `os._exit(137)`——不是 mock。父进程构造**全新**的 store/ledger，强制走 `RecoveryCoordinator.recover` 的跨进程路径（不是同进程重试）。
-- **Artifact 崩溃窗口（#289）**：真子进程在 LocalArtifactStore 保存原文并将 `artifact_ref` 写入终态 Ledger 后、`artifact/externalized` 与 `tool/result` 写入前 `os._exit(137)`；全新 RecoveryCoordinator 合成唯一结果，Gate 检查原文可读、无 dangling call、无重复副作用，且第二次恢复幂等。Qiniu 真云 Gate 属最终云端车道，留待 B-37 全部集成后执行。
+- **Artifact 崩溃窗口（#289）**：真子进程在 LocalArtifactStore 保存原文并将 `artifact_ref` 写入终态 Ledger 后、`artifact/externalized` 与 `tool/result` 写入前 `os._exit(137)`；全新 RecoveryCoordinator 合成唯一结果及唯一 `artifact/externalized` UI 引用（未知的 size/MIME 保持 null），Gate 检查原文可读、无 dangling call、无重复副作用，且第二次恢复幂等。Qiniu 真云 Gate 属最终云端车道，留待 B-37 全部集成后执行。
 - **mutating tool = coding 副作用（D6）**：BashTool 写文件 + EditTool 改文件，副作用以文件系统真实持久化来对账 Ledger，不靠 mock 断言。
 - **trace + report 是 Gate（D12）**：Langfuse trace 结构与 Eval 报告指标本身就是 Gate 断言对象，不只是辅助观测。
 
