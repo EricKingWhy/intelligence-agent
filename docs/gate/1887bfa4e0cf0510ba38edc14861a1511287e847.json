@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-09-23T21:00:30+08:00",
+  "sha": "1887bfa4e0cf0510ba38edc14861a1511287e847",
+  "tree": "5c0f7dd49e755f3ef837ee276eb0ab3ff6e49277",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 5,
+  "total": 6,
+  "failed": [
+    "coverage"
+  ],
+  "wall_seconds": 10.67,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "Python 3.13.5",
+    "ruff": "ruff 0.16.3",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.81.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.05,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.08,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/ruff.exe",
+        "check",
+        "."
+      ],
+      "command": "./.venv/Scripts/ruff.exe check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.27,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 5.65,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 生成物同步守卫 + 验证映射守卫（3 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 3.78,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 0.83,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py",
+      "output_tail": [
+        "✅ 白名单(docs-only): f162534  docs(#294): 协议 §8 口径修订 —— 缺陷 1/2/3/4/6（纯 docs，判据只增不减） — docs-only 交付笔：#294（B-44）协议 §8 口径修订 —— 缺陷 1/2/3/4/6 五条一次落（只改 docs/SDD_WORKFLOW_PROTOCOL.md）",
+        "✅ 台账自身更新（自动放行）: f8efae7  chore(review-ledger): 白名单行——B-12 落点记录（docs-only）",
+        "✅ 白名单(docs-only): fc01d28  docs(#229-#233): B-12 集成 push 补记——两条落点记录同批推送 + 三方收敛 d404b88 + 网络方向翻转 — B-12 集成 push 补记（tracker + 归档，docs-only）",
+        "✅ 白名单(docs-only): fd0a33b  Merge remote-tracking branch 'origin/main' — B-37 合并 origin/main（#282 F18-A + B-37 票面登记）；4 份记账面冲突按用户批准保留双方语义，5 个变更文件均为 docs-only",
+        "闸门失败。处置（二选一，不要改台账蒙过去）：",
+        "  · 对这些 commit **补一次审查**（两轴 /code-review，范围写进台账的新行）；",
+        "  · 或者：若它们确实只是文档改动 ⇒ 在台账 [whitelist] 段声明（脚本会校验 docs-only）。",
+        "  协议原文：docs/SDD_WORKFLOW_PROTOCOL.md §7。"
+      ]
+    }
+  ]
+}
