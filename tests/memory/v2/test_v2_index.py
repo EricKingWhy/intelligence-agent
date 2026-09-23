@@ -89,6 +89,9 @@ async def test_invalidated_record_leaves_the_index(
     await store.invalidate(created.id, USER_A)
     await relay(store, index).flush()
 
+    # 断言直接打在"索引行没了"上：只断言 search 结果为空的话，query 不匹配也同样为空。
+    assert created.id in index.delete_calls
+    assert not await index.contains(created.id, USER_A, MemoryScope.USER_GLOBAL)
     assert await index.search("主题", USER_A, MemoryScope.USER_GLOBAL, 10) == []
 
 
@@ -221,3 +224,128 @@ async def test_resolve_preserves_the_ranking_order_of_surviving_hits(
 
     assert [record.id for record in resolved] == [second.id, first.id]
     assert all(record.status is MemoryStatus.ACTIVE for record in resolved)
+
+
+# --------------------------------------------------------------------------------------
+# 切片 9：索引侧故障的两个半边（删除失败 / 死信预算）+ 账本故障的隔离
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_index_delete_failure_keeps_the_committed_state_and_the_intent(
+    store: SqliteMemoryV2Store, index: InMemoryMemoryV2Index,
+) -> None:
+    """AC6 / R7 的**删除**半边：删除失败同样不回滚已提交的状态，且可恢复地恰好收敛一次。
+
+    判别性：若删除失败被当成"已经删掉了"（例如吞掉异常后照常 ack），下面 `contains`
+    断言与重放后的 `delete_calls` 计数都会红。
+    """
+    created = await store.create(make_draft(content="偏好浅色主题"), USER_A)
+    await relay(store, index).flush()
+    await store.invalidate(created.id, USER_A)
+    index.fail_delete = RuntimeError("milvus unavailable")
+
+    assert await relay(store, index).flush() == 0
+
+    assert (await store.get(created.id, USER_A)).status is MemoryStatus.INVALIDATED
+    assert [change.memory_id for change in await store.pending()] == [created.id]
+    # 索引里那条**还在**（删除没成功，不能假装成功）。
+    assert await index.contains(created.id, USER_A, MemoryScope.USER_GLOBAL)
+
+    index.fail_delete = None
+    assert await relay(store, index).flush() == 1
+    assert index.delete_calls.count(created.id) == 1
+    assert not await index.contains(created.id, USER_A, MemoryScope.USER_GLOBAL)
+    assert await store.pending() == []
+
+
+@pytest.mark.asyncio
+async def test_index_failures_are_abandoned_after_the_budget_but_the_intent_survives(
+    store: SqliteMemoryV2Store, index: InMemoryMemoryV2Index, monkeypatch,
+) -> None:
+    """连续索引失败达到预算 ⇒ 本进程死信（不再空转），但 outbox 行保留可观察。
+
+    用途例自己包装 `upsert` 计数（`InMemoryMemoryV2Index.upsert_calls` 只在**成功**时
+    记录，数不出"有没有再试"）。
+    """
+    created = await store.create(make_draft(content="偏好深色主题"), USER_A)
+    attempts: list[str] = []
+
+    async def failing_upsert(record) -> None:
+        attempts.append(record.id)
+        raise RuntimeError("milvus unavailable")
+
+    monkeypatch.setattr(index, "upsert", failing_upsert)
+    relay_instance = relay(store, index)
+
+    for _ in range(MemoryV2IndexRelay.MAX_CONSECUTIVE_FAILURES):
+        assert await relay_instance.flush() == 0
+    assert len(attempts) == MemoryV2IndexRelay.MAX_CONSECUTIVE_FAILURES
+
+    assert await relay_instance.flush() == 0
+    assert len(attempts) == MemoryV2IndexRelay.MAX_CONSECUTIVE_FAILURES  # 死信：不再尝试
+    assert [change.memory_id for change in await store.pending()] == [created.id]
+
+
+@pytest.mark.asyncio
+async def test_a_new_revision_resets_an_abandoned_retry_budget(
+    store: SqliteMemoryV2Store, index: InMemoryMemoryV2Index, monkeypatch,
+) -> None:
+    """死信不是永久的：同一条 id 换了期望状态（`revision` 变化）⇒ 预算重置、正常重试。
+
+    `invalidate` 让同一条 `memory_id` 的期望从 upsert 变成 delete（revision 随之变化），
+    这正是"新版本不是旧毒丸"的形态。
+    """
+    created = await store.create(make_draft(content="偏好浅色主题"), USER_A)
+    attempts: list[str] = []
+
+    async def failing_upsert(record) -> None:
+        attempts.append(record.id)
+        raise RuntimeError("milvus unavailable")
+
+    monkeypatch.setattr(index, "upsert", failing_upsert)
+    relay_instance = relay(store, index)
+    for _ in range(MemoryV2IndexRelay.MAX_CONSECUTIVE_FAILURES):
+        await relay_instance.flush()
+
+    before = len(attempts)
+    assert await relay_instance.flush() == 0
+    assert len(attempts) == before  # 已死信
+
+    await store.invalidate(created.id, USER_A)  # upsert → delete：revision 变了
+    assert await relay_instance.flush() == 1  # 新 revision 不被旧预算连坐
+    assert await store.pending() == []
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_failure_does_not_poison_the_index_retry_budget(
+    store: SqliteMemoryV2Store, index: InMemoryMemoryV2Index, monkeypatch,
+) -> None:
+    """账本故障不得毒住一条健康的 key：ack 失败发生在索引写成功**之后**。
+
+    判别性：若 ack 失败与索引失败共用重试预算，`MAX_CONSECUTIVE_FAILURES` 轮之后这条
+    变更会被永久跳过——索引里已经有它、outbox 行却永远留着，两边静默分叉。
+    """
+    created = await store.create(make_draft(content="用户偏好深色主题"), USER_A)
+    real_acknowledge = store.acknowledge
+    ack_attempts: list[str] = []
+
+    async def failing_acknowledge(change) -> bool:
+        ack_attempts.append(change.memory_id)
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "acknowledge", failing_acknowledge)
+    relay_instance = relay(store, index)
+    rounds = MemoryV2IndexRelay.MAX_CONSECUTIVE_FAILURES + 2
+
+    for _ in range(rounds):
+        assert await relay_instance.flush() == 0
+
+    # 索引每轮都真的写进去了（upsert 幂等），账一次都没记上 ⇒ outbox 行还在。
+    assert index.upsert_calls.count(created.id) == rounds
+    assert len(ack_attempts) == rounds
+    assert [change.memory_id for change in await store.pending()] == [created.id]
+
+    monkeypatch.setattr(store, "acknowledge", real_acknowledge)
+    assert await relay_instance.flush() == 1  # 账本恢复 ⇒ 立刻收敛，没有被死信跳过
+    assert await store.pending() == []

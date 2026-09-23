@@ -19,6 +19,7 @@ from agent_harness.memory.v2 import (
     MemoryRecordV2,
     MemoryScope,
     MemoryStatus,
+    MemoryTier,
     TrustedMemoryIdentity,
 )
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
@@ -293,6 +294,39 @@ async def test_list_active_project_scope_is_empty_without_project_context(
     await store.create(
         make_draft(scope=MemoryScope.PROJECT, project_id="project-x"), PROJECT_X)
     assert await store.list_active(USER_A, scope=MemoryScope.PROJECT, limit=50) == []
+
+
+@pytest.mark.asyncio
+async def test_list_active_user_global_is_visible_with_a_project_context(
+    store: SqliteMemoryV2Store,
+) -> None:
+    """带项目上下文的调用方照样看得见自己的 user_global 记忆（§4.3 / R5）。
+
+    判别性：`user_global` 行的 `project_id` 是 `NULL`。若把项目过滤写成"调用方有
+    project_id 就按 project_id 比较"，`NULL = 'project-x'` 求值为 NULL ⇒ 这一行被
+    **静默**筛掉（返回空列表而不是报错）。`get` 路径走的是 `_visible`，不受影响
+    ⇒ 只有 `list_active` 会漏，所以只有这条用例能钉住它。
+    """
+    global_memory = await store.create(make_draft(content="全局偏好"), USER_A)
+    await store.create(
+        make_draft(scope=MemoryScope.PROJECT, project_id="project-x", content="项目事实"), PROJECT_X)
+
+    visible = await store.list_active(PROJECT_X, scope=MemoryScope.USER_GLOBAL, limit=50)
+
+    assert [record.id for record in visible] == [global_memory.id]
+
+
+@pytest.mark.asyncio
+async def test_profile_tier_roundtrips_through_the_store(store: SqliteMemoryV2Store) -> None:
+    """`profile` 是 user_global 的 semantic 专属档位（§4.2）——经存储往返必须原样保留。"""
+    created = await store.create(
+        make_draft(tier=MemoryTier.PROFILE, content="用户偏好简洁回答"), USER_A)
+
+    assert created.tier is MemoryTier.PROFILE
+    assert (await store.get(created.id, USER_A)).tier is MemoryTier.PROFILE
+    assert [record.tier for record in await store.list_active(USER_A, limit=50)] == [
+        MemoryTier.PROFILE,
+    ]
 
 
 # --------------------------------------------------------------------------------------

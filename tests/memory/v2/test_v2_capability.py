@@ -10,7 +10,12 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
-from agent_harness.memory.v2 import MemoryScope, MemoryStatus, TrustedMemoryIdentity
+from agent_harness.memory.v2 import (
+    MemoryScope,
+    MemoryStatus,
+    MemoryV2Capability,
+    TrustedMemoryIdentity,
+)
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
@@ -125,3 +130,19 @@ async def test_lifecycle_is_versioned_and_status_is_observable_via_protocol(serv
     assert [record.version for record in history] == [2, 1]
     assert history[0].status is MemoryStatus.ACTIVE and history[0].id == second.id
     assert history[1].status is MemoryStatus.SUPERSEDED
+
+
+def test_service_implements_every_method_the_capability_protocol_declares() -> None:
+    """`MemoryV2Service` 落地 `MemoryV2Capability` 的全部方法——"边界是 Protocol"的落地检查。
+
+    方法名**从 Protocol 自己派生**（不在测试里再抄一份）：抄一份等于造第二份契约，
+    Protocol 加了方法而实现漏了时这条不会红，恰好丢掉它要守的东西。
+    第一行是正控：真的读到了方法名，否则下面的断言对空列表恒真。
+    """
+    declared = [
+        name for name, value in vars(MemoryV2Capability).items()
+        if callable(value) and not name.startswith("_")
+    ]
+    assert declared
+    missing = [name for name in declared if not callable(getattr(MemoryV2Service, name, None))]
+    assert missing == []

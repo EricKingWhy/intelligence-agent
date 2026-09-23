@@ -138,14 +138,24 @@ def test_empty_content_rejected() -> None:
         record(content="")
 
 
-@pytest.mark.parametrize("importance", [-0.01, 1.01, float("nan")])
+@pytest.mark.parametrize(
+    "importance", [-0.01, 1.01, float("nan"), float("inf"), float("-inf")],
+)
 def test_importance_out_of_range_rejected(importance: float) -> None:
+    """越界值与非有限值（`nan` / `inf` / `-inf`）走同一条 `ge`/`le` 判据。
+
+    `ge`/`le` 之所以够用：`nan` 与任何数比较均为假 ⇒ 不满足 `ge`；`inf` 不满足
+    `le`。正控见 `test_score_inclusive_bounds_accepted`。
+    """
     with pytest.raises(ValidationError):
         record(importance=importance)
 
 
-@pytest.mark.parametrize("strength", [-0.01, 1.01, float("nan")])
+@pytest.mark.parametrize(
+    "strength", [-0.01, 1.01, float("nan"), float("inf"), float("-inf")],
+)
 def test_strength_out_of_range_rejected(strength: float) -> None:
+    """与 `importance` 同一条判据（非有限值同样被 `ge`/`le` 挡住）。"""
     with pytest.raises(ValidationError):
         record(strength=strength)
 
@@ -256,9 +266,15 @@ def test_blank_project_id_rejected() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_automatic_source_requires_source_event_ids() -> None:
+@pytest.mark.parametrize("source_type", [SourceType.AUTOMATIC, SourceType.EXPLICIT_COMMAND])
+def test_provenance_sources_reject_empty_source_event_ids(source_type: SourceType) -> None:
+    """§6.1 的豁免面**只有** `user_edit`（"may be empty only for direct UI edits
+    without a session"）⇒ `automatic` 与 `explicit_command` 都必须指得出事件。
+
+    正控在 `test_user_edit_source_is_representable`（`user_edit` 允许空 provenance）。
+    """
     with pytest.raises(ValidationError):
-        record(source_event_ids=[])
+        record(source_type=source_type, source_event_ids=[])
 
 
 def test_evidence_is_required() -> None:
