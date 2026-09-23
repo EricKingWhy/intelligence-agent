@@ -12,9 +12,16 @@ Milvus 是**派生**索引，不是事实源。任何一条检索命中在被送
 
 V1 的 relay 绑定 V1 的 `PendingMemory`（携带 `MemoryEntry`）与 V1 的 `VectorIndexStore`。
 #297 的 Must Not Do 要求 V1 路径继续可运行，所以 V1 的类不动；V2 有自己的
-`PendingMemoryChangeV2` 与 V2 索引端口。两边的**策略**（失败保留意图、连续失败后死信、
-ack 按 revision 匹配）是一致的，这是有意的，不是重复实现——它们服务两套不同的
-记录契约，合并任何一侧都会让另一侧的冻结契约被改写。
+`PendingMemoryChangeV2` 与 V2 索引端口。两边共有的策略是「失败保留意图、连续失败后死信、
+ack 按 revision 匹配」；它们服务两套不同的记录契约，合并任何一侧都会让另一侧的冻结契约
+被改写。
+
+**一处刻意不跟 V1 的地方**：`ack` 失败是否消耗重试预算。V1 把 ack 失败也计入同一个连续失败
+计数（`memory/outbox_relay.py` 的 `flush`，那里的注释写明理由是"ack 持续失败的条目必须死信，
+不能靠每轮重复 upsert 空转"）。V2 不这么做——V2 的 outbox 行本身就是"未收敛"标记，
+索引已经写成功之后再进死信只会让一个健康的 key 永久失去重试，而重试 ack 是幂等的、不会空转
+（每轮只多一次 SQLite 写）。取而代之的是**独立**的 ack 计数器，只用于把持续账本故障升级到
+`ERROR`（可观察），不改变重试行为。取舍记录在 ADR-0042 §D7。
 """
 
 from __future__ import annotations
@@ -120,6 +127,8 @@ class MemoryV2IndexRelay:
     重试预算**只**统计索引侧失败（`_count_index_failure`）：`acknowledge` 失败发生在索引
     **已经写成功之后**，把它计入预算会让一次账本故障永久毒住一条健康的 key——那条变更再也
     不会被重试，索引与实际状态就此静默分叉。重试 ack 本身无害（upsert/delete 幂等）。
+    账本故障改用**独立**计数器（`_count_ack_failure`）在连续 `MAX_CONSECUTIVE_FAILURES` 次后
+    升级到 `ERROR`：只把"账本卡死"变得可观察，不把它变成死信。
 
     刻意没有 asyncio 锁：`acknowledge` 是按 `revision` 原子匹配的，两个并发 flush
     只会有一个 ack 成功、另一个返回 `False`（不重复计数）；upsert/delete 自身幂等。
@@ -132,6 +141,12 @@ class MemoryV2IndexRelay:
         self._index = index
         self._failure_counts: dict[str, int] = {}
         self._failure_revisions: dict[str, str] = {}
+        # 与 `_failure_counts` / `_failure_revisions` 完全分开：这个只驱动告警升级，
+        # 从不参与死信判断。**自己的** revision 记录是必需的——索引成功那条路径会 pop
+        # `_failure_revisions`，若共用它，ack 计数每轮都会被误判成"revision 变了"而归零，
+        # 升级分支永远不会触发。
+        self._ack_failure_counts: dict[str, int] = {}
+        self._ack_failure_revisions: dict[str, str] = {}
 
     async def flush(self) -> int:
         count = 0
@@ -142,6 +157,10 @@ class MemoryV2IndexRelay:
                     # revision 变化（含首次出现）= 新版本不是旧毒丸的证据，重置重试预算。
                     self._failure_counts.pop(change.memory_id, None)
                 self._failure_revisions[change.memory_id] = change.revision
+                if self._ack_failure_revisions.get(change.memory_id) != change.revision:
+                    # ack 计数同理：新版本换了账本目标，旧的连续失败不再说明当前问题。
+                    self._ack_failure_counts.pop(change.memory_id, None)
+                self._ack_failure_revisions[change.memory_id] = change.revision
                 if self._failure_counts.get(change.memory_id, 0) >= self.MAX_CONSECUTIVE_FAILURES:
                     continue
                 try:
@@ -158,9 +177,11 @@ class MemoryV2IndexRelay:
                 except Exception as error:  # noqa: BLE001 — 只影响账本，不影响索引健康度。
                     # 刻意**不**计入重试预算：索引已经写成功，进死信会让 outbox 行永久留存，
                     # 而重试 ack 本身是无害的（upsert/delete 幂等）⇒ 下轮再试，直到账记上。
-                    logger.warning("Memory V2 outbox acknowledge deferred (%s); index already "
-                                   "converged, outbox row retained",
-                                   type(error).__name__)
+                    # 「下轮再试」必须配一条升级路径，否则卡死的账本会静默到进程重启。
+                    self._count_ack_failure(change, error)
+                else:
+                    self._ack_failure_counts.pop(change.memory_id, None)
+                    self._ack_failure_revisions.pop(change.memory_id, None)
             after_id = page[-1].memory_id
         return count
 
@@ -185,6 +206,23 @@ class MemoryV2IndexRelay:
                          change.operation.value, change.memory_id)
         else:
             logger.warning("Memory V2 index sync deferred (%s); outbox retained", detail)
+
+    def _count_ack_failure(self, change: PendingMemoryChangeV2, error: Exception) -> None:
+        """账本（ack）失败的**独立**计数：只驱动告警升级，**不**参与死信预算。
+
+        与 V1 `memory/outbox_relay.py` 的取舍相反（那里 ack 失败也计入同一预算）——
+        理由见模块 docstring 与 ADR-0042 §D7：V2 的 outbox 行就是"未收敛"标记，
+        索引已成功后再死信等于让健康的 key 永久停摆，而重试 ack 幂等、不会空转。
+        """
+        failures = self._ack_failure_counts.get(change.memory_id, 0) + 1
+        self._ack_failure_counts[change.memory_id] = failures
+        if failures >= self.MAX_CONSECUTIVE_FAILURES:
+            logger.error("Memory V2 outbox acknowledge still failing after %d attempts (%s); "
+                         "index converged, %s change for %s stays in outbox",
+                         failures, type(error).__name__, change.operation.value, change.memory_id)
+        else:
+            logger.warning("Memory V2 outbox acknowledge deferred (%s); index already "
+                           "converged, outbox row retained", type(error).__name__)
 
 
 async def resolve_active_hits(

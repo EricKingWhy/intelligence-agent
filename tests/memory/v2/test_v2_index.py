@@ -10,6 +10,8 @@ Seam：`MemoryV2IndexRelay.flush()`（索引收敛）与 `resolve_active_hits()`
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 import pytest_asyncio
 
@@ -349,3 +351,37 @@ async def test_acknowledge_failure_does_not_poison_the_index_retry_budget(
     monkeypatch.setattr(store, "acknowledge", real_acknowledge)
     assert await relay_instance.flush() == 1  # 账本恢复 ⇒ 立刻收敛，没有被死信跳过
     assert await store.pending() == []
+
+
+@pytest.mark.asyncio
+async def test_a_persistently_failing_ledger_escalates_to_error_without_dead_lettering(
+    store: SqliteMemoryV2Store, index: InMemoryMemoryV2Index, monkeypatch, caplog,
+) -> None:
+    """账本持续失败必须**可观察**（升级 `ERROR`），且**不**因此死信。
+
+    判别性（两个方向各钉一半）：
+    - 删掉 `_count_ack_failure` 的升级分支 ⇒ 永远只有 `WARNING`，卡死的账本能静默到进程重启
+      ⇒ 下面"必须有 `ERROR`"会红；
+    - 让它复用索引重试预算 ⇒ 第 `MAX_CONSECUTIVE_FAILURES` 轮之后这条变更不再被尝试，
+      而 outbox 行还在（= 真·死信）⇒ 下面 `upsert_calls.count(...) == rounds` 会红
+      （真·死信的那条红证由 `test_acknowledge_failure_does_not_poison_the_index_retry_budget` 承担）。
+    """
+    created = await store.create(make_draft(content="用户偏好深色主题"), USER_A)
+
+    async def failing_acknowledge(change) -> bool:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "acknowledge", failing_acknowledge)
+    relay_instance = relay(store, index)
+    rounds = MemoryV2IndexRelay.MAX_CONSECUTIVE_FAILURES + 2
+
+    with caplog.at_level(logging.ERROR, logger="agent_harness.memory.v2.index"):
+        for _ in range(rounds):
+            assert await relay_instance.flush() == 0
+
+    escalated = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert escalated, "持续账本失败没有升级到 ERROR"
+    assert "acknowledge" in escalated[0].getMessage()
+    # 不做死信：意图保留，且下一轮立刻重试（不是"永久跳过"）。
+    assert [change.memory_id for change in await store.pending()] == [created.id]
+    assert index.upsert_calls.count(created.id) == rounds
