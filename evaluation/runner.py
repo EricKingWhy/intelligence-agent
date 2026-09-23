@@ -31,6 +31,7 @@ from agent_harness.session import (
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from evaluation.assertions import (
     dangling_tool_call_ids,
+    duplicate_confirmed_side_effect_count,
     kill_resume_ok,
     recovery_guard_ok,
     tool_selection_ok,
@@ -147,6 +148,9 @@ async def run_case_async(
 
     events = list(session.events)
     metrics["dangling_tool_calls"] = len(dangling_tool_call_ids(events))
+    metrics["duplicate_confirmed_side_effects"] = (
+        duplicate_confirmed_side_effect_count(events)
+    )
     metrics["status"] = result.status if result is not None else "error"
 
     ok = error is None and metrics["dangling_tool_calls"] == 0
@@ -291,6 +295,9 @@ async def _run_kill_resume_case_async(
     events = list(recovered.events) if recovered is not None else []
     metrics: dict[str, Any] = {
         "dangling_tool_calls": len(dangling_tool_call_ids(events)),
+        "duplicate_confirmed_side_effects": (
+            duplicate_confirmed_side_effect_count(events)
+        ),
         "kill_resume_ok": kill_resume_ok(events) if recovered is not None else False,
         "agent_runtime_completed": (
             runtime_result is not None and runtime_result.status == "completed"

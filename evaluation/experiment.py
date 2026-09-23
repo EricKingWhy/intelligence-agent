@@ -80,13 +80,18 @@ def _deterministic_evaluators() -> list[Callable[..., dict[str, Any]]]:
             "metadata": {"applicable": applicable},
         }
 
-    def counted_metric(name: str, tags: set[str]) -> Callable[..., dict[str, Any]]:
+    def counted_metric(
+        name: str, tags: set[str], *, required: bool = False,
+    ) -> Callable[..., dict[str, Any]]:
         def evaluate(*, output: dict[str, Any], metadata: Any = None,
                      **_kwargs: Any) -> dict[str, Any]:
             result = output.get("result", {})
             metrics = result.get("metrics", {})
             metrics = metrics if isinstance(metrics, dict) else {}
-            applicable = name in metrics or bool(tags.intersection(_metadata_tags(metadata)))
+            applicable = (
+                required or name in metrics
+                or bool(tags.intersection(_metadata_tags(metadata)))
+            )
             count = _count_metric(metrics, name) if name in metrics else 0
             value = count if count is not None else (1 if applicable else 0)
             return {
@@ -101,9 +106,7 @@ def _deterministic_evaluators() -> list[Callable[..., dict[str, Any]]]:
         p0_pass,
         dangling,
         recovery,
-        counted_metric(
-            "duplicate_confirmed_side_effects", {"side_effect", "side_effects"},
-        ),
+        counted_metric("duplicate_confirmed_side_effects", set(), required=True),
         counted_metric("permission_violations", {"permission", "permissions"}),
     ]
 
@@ -325,12 +328,16 @@ def _experiment_gate_result(
                 recovery_passed += 1
 
         tags = _metadata_tags(metadata)
-        for metric_name, score_name, tag_names in (
+        for metric_name, score_name, tag_names, required in (
             ("duplicate_confirmed_side_effects", "duplicate_confirmed_side_effects",
-             {"side_effect", "side_effects"}),
-            ("permission_violations", "permission_violations", {"permission", "permissions"}),
+             set(), True),
+            ("permission_violations", "permission_violations", {"permission", "permissions"},
+             False),
         ):
-            applicable = metric_name in metrics or bool(tag_names.intersection(tags))
+            applicable = (
+                required or metric_name in metrics
+                or bool(tag_names.intersection(tags))
+            )
             if applicable:
                 count = _count_metric(metrics, metric_name)
                 if count is None:

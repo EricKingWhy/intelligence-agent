@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from agent_harness.session import (
     SESSION_RESUMED,
     TOOL_CALL,
@@ -29,6 +31,16 @@ def dangling_tool_call_ids(events: list[SessionEvent]) -> list[str]:
         elif event.type == TOOL_RESULT:
             answered.add(str(event.data.get("tool_call_id")))
     return [call_id for call_id in called if call_id not in answered]
+
+
+def duplicate_confirmed_side_effect_count(events: list[SessionEvent]) -> int:
+    """Count repeated tool-result confirmations for one call (ADR-0019 D8)."""
+    result_ids = [
+        str(event.data["tool_call_id"])
+        for event in events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") is not None
+    ]
+    return sum(count - 1 for count in Counter(result_ids).values() if count > 1)
 
 
 def tool_selection_ok(events: list[SessionEvent], expected_tools: list[str]) -> bool:

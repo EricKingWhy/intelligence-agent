@@ -11,7 +11,9 @@ import pytest
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.model.scripted import ScriptedModel
+from agent_harness.session import TOOL_RESULT, JsonlSessionStore, Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
+from evaluation.assertions import duplicate_confirmed_side_effect_count
 from evaluation.runner import EvalCase, run_case, run_case_async
 from evaluation.support import AddTool
 
@@ -148,6 +150,7 @@ async def test_run_case_async_is_the_core_and_sync_wrapper_rejects_running_loop(
 ) -> None:
     result, _events = await run_case_async(_case(), session_root=tmp_path / "async")
     assert result.ok is True
+    assert result.metrics["duplicate_confirmed_side_effects"] == 0
 
     with pytest.raises(RuntimeError, match="run_case_async"):
         run_case(_case(), session_root=tmp_path / "sync-in-loop")
@@ -171,6 +174,9 @@ def test_langfuse_experiment_awaits_task_and_checks_case_and_evaluator_results(
     assert passed["status"] == "ok"
     assert passed["total"] == passed["passed"] == 1
     assert client.result.item_results[0].output["result"]["ok"] is True
+    assert client.result.item_results[0].output["result"]["metrics"][
+        "duplicate_confirmed_side_effects"
+    ] == 0
 
     failed_client = _AsyncExperimentClient([item])
     failed = _run_experiment(
@@ -205,6 +211,36 @@ def test_duplicate_dataset_items_fail_before_creating_an_experiment_run(tmp_path
         for failure in result["failures"]
         for reason in failure["reasons"]
     )
+
+
+def test_gate_requires_measured_duplicate_side_effect_metric(tmp_path) -> None:
+    item = _item()
+    client = _AsyncExperimentClient(
+        [item],
+        result_payload={
+            "name": item.metadata["name"],
+            "case_type": item.metadata["case_type"],
+            "ok": True,
+            "metrics": {"dangling_tool_calls": 0},
+        },
+    )
+
+    result = _run_experiment(tmp_path, client)
+
+    assert result["status"] == "failed"
+    assert any(
+        "duplicate_confirmed_side_effects" in reason
+        for failure in result["failures"]
+        for reason in failure["reasons"]
+    )
+
+
+def test_duplicate_confirmation_metric_counts_extra_results(tmp_path) -> None:
+    session = Session.start(JsonlSessionStore(tmp_path / "sessions"))
+    session.append(TOOL_RESULT, {"tool_call_id": "same-call", "content": "{}"})
+    session.append(TOOL_RESULT, {"tool_call_id": "same-call", "content": "{}"})
+
+    assert duplicate_confirmed_side_effect_count(session.events) == 1
 
 
 @pytest.mark.parametrize(
