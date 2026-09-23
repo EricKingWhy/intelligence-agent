@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -37,6 +36,7 @@ from uuid import uuid4
 
 import aiosqlite
 
+from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.types import (
     EvidenceItem,
     MemoryDraftV2,
@@ -51,10 +51,6 @@ from agent_harness.memory.v2.types import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: 与 V1（`memory/sqlite_record_store.py`）同款：每操作新连接 + busy_timeout，
-#: 否则 writeback 与 relay 并发写（BEGIN IMMEDIATE）会立刻抛 "database is locked"。
-_BUSY_TIMEOUT_MS = 10_000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory_v2_records (
@@ -92,17 +88,6 @@ _COLUMNS = (
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-@asynccontextmanager
-async def _connect(database_path: Path):
-    connection = await aiosqlite.connect(database_path)
-    try:
-        connection.row_factory = aiosqlite.Row
-        await connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-        yield connection
-    finally:
-        await connection.close()
 
 
 class MemoryOperationV2(str, Enum):
@@ -149,7 +134,7 @@ class SqliteMemoryV2Store:
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.executescript(_SCHEMA)
             await connection.commit()
@@ -187,7 +172,7 @@ class SqliteMemoryV2Store:
         row = await self._authorized_row(memory_id, trusted)
         self._require_active(row, action="invalidate")
         now = _utc_now()
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             await connection.execute(
                 "UPDATE memory_v2_records SET status=?, invalidated_at=?, updated_at=? "
@@ -218,7 +203,7 @@ class SqliteMemoryV2Store:
         # 身份字段由本方法从可信身份补齐，所以这条断言只在 project_id 上可能失败：
         # 把 A 项目的事实标成 B 项目就是一次越权的跨项目写入，必须在落盘前拒绝。
         assert_trusted_identity(record, trusted)
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             if previous is not None:
                 # 先让出 root_id 上的 active 槽位，再插入新版本（部分唯一索引不允许两条 active）。
@@ -253,7 +238,7 @@ class SqliteMemoryV2Store:
         读路径刻意不区分"不存在"与"不是你的"：区分等于告诉调用方别人的 id 是否存在。
         """
         async with (
-            _connect(self.database_path) as connection,
+            connect(self.database_path) as connection,
             connection.execute(
                 "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)
             ) as cursor,
@@ -281,7 +266,7 @@ class SqliteMemoryV2Store:
         if scope is MemoryScope.PROJECT and trusted.project_id is None:
             return []
         async with (
-            _connect(self.database_path) as connection,
+            connect(self.database_path) as connection,
             connection.execute("""
                 SELECT * FROM memory_v2_records
                 WHERE tenant_id=? AND user_id=? AND scope=? AND status='active'
@@ -297,7 +282,7 @@ class SqliteMemoryV2Store:
     ) -> list[MemoryRecordV2]:
         """一个逻辑记忆的全部版本，新→旧（§6.4 的版本历史；不含被删除的内容）。"""
         async with (
-            _connect(self.database_path) as connection,
+            connect(self.database_path) as connection,
             connection.execute(
                 "SELECT * FROM memory_v2_records WHERE root_id=? ORDER BY version DESC", (root_id,)
             ) as cursor,
@@ -318,7 +303,7 @@ class SqliteMemoryV2Store:
         记录行可能已经不在或已改状态，JOIN 只用来取"要索引的内容"。
         """
         async with (
-            _connect(self.database_path) as connection,
+            connect(self.database_path) as connection,
             connection.execute("""
                 SELECT o.memory_id AS memory_id, o.revision AS revision, o.operation AS operation,
                        o.tenant_id AS tenant_id, o.user_id AS user_id, o.scope AS scope,
@@ -344,7 +329,7 @@ class SqliteMemoryV2Store:
         **outbox 行自身就是"还没收敛"的标记**：删掉它 = 收敛完成。这里刻意不在记录行上
         再写一个"已索引"列——那个标记没有任何读者，而多一份状态就多一处可能与 outbox 不一致。
         """
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
                 "DELETE FROM memory_v2_outbox WHERE memory_id=? AND revision=?",
@@ -401,7 +386,7 @@ class SqliteMemoryV2Store:
         self, memory_id: str, trusted: TrustedMemoryIdentity,
     ) -> aiosqlite.Row:
         async with (
-            _connect(self.database_path) as connection,
+            connect(self.database_path) as connection,
             connection.execute(
                 "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)
             ) as cursor,
