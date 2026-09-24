@@ -32,7 +32,7 @@ Gate：
 - ModelProvider
 - streaming + complete AIMessage
 - minimal AgentRuntime
-- max_steps
+- max_steps（Phase 1 的旧终止字段：现为 `budget.local.max_agent_turns` 的迁移期 alias，读法见 `02 §5.1`）
 
 Gate：
 - 简单对话重启后可恢复历史；

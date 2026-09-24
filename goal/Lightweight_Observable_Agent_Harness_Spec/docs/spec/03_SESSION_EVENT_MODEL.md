@@ -113,14 +113,17 @@ src/agent_harness/session/event.py                  ← 唯一事实源
 
 ### 3.4 暂停 / 恢复生命周期事件（**持久化、非终态**）
 
-长任务的执行边界由两类**持久化**事件表达。名字与载荷字段的权威枚举仍只有
-`docs/EVENT_VOCABULARY.md`（§3），本节只定格**语义与不变量**；契约冻结于 ADR-0044：
+长任务的执行边界由两类**持久化**事件表达：**`run/paused`** 与 **`run/resumed`**（#305 §5 冻结的名字）。
+本节是这两个名字的**语义与字段权威**（契约冻结于 ADR-0044）；机器可读的**枚举**副本由
+`docs/EVENT_VOCABULARY.md` 承载，而该文件是从 `src/agent_harness/session/event.py` **生成**的：
+本契约尚未落地为常量，故两个名字的枚举条目会在实现票把常量加入 `event.py` 并重新生成后出现
+（先写规格再写代码）。在枚举条目出现之前，本节就是它们的权威定义。
 
-- **暂停事件**：`reason ∈ {budget_exhausted, deadline, stuck}`、触发维度或 stuck 模式、
-  预算 `version`、consumed / limits 快照、`continuation`（已完成 / 剩余 / 阻塞 / 下一步安全动作）、
-  `closeout_source ∈ {model, deterministic}`、`resume_requirements`（预算与 deadline 暂停为空）。
-  **非终态**：停止活动执行，但**不**关闭逻辑 `run_id`。
-- **恢复事件**：`from_pause_seq`、`previous_budget_version`、新的 `budget_version`、更新后的 limits、
+- **`run/paused`**：`reason ∈ {budget_exhausted, deadline, stuck}`、`trigger_dimension`（触发维度或
+  stuck 模式）、预算 `version`、consumed / limits 快照、`continuation`（已完成 / 剩余 / 阻塞 /
+  下一步安全动作）、`closeout_source ∈ {model, deterministic}`、`resume_requirements`（预算与
+  deadline 暂停为空）。**非终态**：停止活动执行，但**不**关闭逻辑 `run_id`。
+- **`run/resumed`**：`from_pause_seq`、`previous_budget_version`、新的 `budget_version`、更新后的 limits、
   consumed（**等于**暂停快照，直到产生新工作）、
   `resume_basis ∈ {budget_increase, relevant_steer, environment_change, policy_change}`。
 
@@ -164,6 +167,19 @@ load session events
 ```
 
 Resume MUST NOT 默认重放所有 Tool。
+
+**Run 状态集合**（#305 §6 冻结，与 §3.4 的事件配对；状态由 SessionEvent 派生，不以进程本地内存为准）：
+`active | paused | completed | failed | interrupted | needs_reconcile`。两条读法 MUST 明确：
+
+- `interrupted` 是**崩溃恢复态**：进程被杀或断连后由启动扫描补记 `run/interrupted`，未结清时
+  **对账优先于恢复**；`needs_reconcile` 同样 MUST 先 reconcile 才允许恢复；
+- **显式取消**（用户 cancel / 断连 / 孤儿回收）保持既有**立即**语义，MUST NOT 被改写成 `paused`：
+  它仍落 `run/failed` 的既有面（`reason ∈ {cancelled, orphaned}`），故 `02 §2` 的 loop 出口词表里的
+  `cancelled` 是**出口原因**，不是状态名；`paused` 只由预算 / deadline / stuck 三类原因产生。
+
+**Crash durability**（真实子进程 kill 后重启，无刷新）：MUST 从已持久化事件重建出**同样的**
+limits、consumed、`budget_version`、continuation 判定与 stuck 指纹（§3.4 不变量），
+MUST NOT 依赖进程本地内存；重启 MUST NOT 放大任何授权（不重置 counter、不放宽 ceiling、不清指纹）。
 
 长任务暂停后的**同 run 恢复**（§3.4）：
 
