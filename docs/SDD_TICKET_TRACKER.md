@@ -4956,8 +4956,8 @@ ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动�
 `test_concurrent_writers_converge_on_one_row_and_one_index_state`）—— 用**裸 aiosqlite** 并发
 `BEGIN IMMEDIATE` 复现出**完全相同**的错误 ⇒ 环境，非本票回归。
 
-**残留与下一步**：`#298` 的实现面与审查面**已闭合**；剩余两件 = ① `#298` 证据评论（GitHub）与
-`PHASE_STATUS` 索引（由本批末笔 docs-only 落点记账兑现）；② **集成**（由集成线负责，`#297` 先合）。
+**残留与下一步**：`#298` 的实现面与审查面**已闭合**；剩余**一件** = **集成**（由集成线负责，`#297` 先合）。
+`PHASE_STATUS` 索引由本批末笔 `e8e7632` 兑现；`#298` 证据评论已发 —— [issuecomment-5812364609](https://github.com/EricKingWhy/intelligence-agent/issues/298#issuecomment-5812364609)。
 其后的兄弟票顺序不变：`#299`（跨会话召回，接上检索驱动即解 §D11 的空洞）/ `#300`（治理 API，
 `explicit_remember` 的**持久性**要在立项时落成 job 上的列）/ `#301`（UI）/ `#302`（评测）/
 `#303`（clean-slate cutover）/ `#304`（真实 Gate）。
