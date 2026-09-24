@@ -36,7 +36,7 @@ from uuid import uuid4
 
 import aiosqlite
 
-from agent_harness.memory.v2._sqlite import connect
+from agent_harness.memory.v2._sqlite import connect, write_connection
 from agent_harness.memory.v2.types import (
     EvidenceItem,
     MemoryDraftV2,
@@ -143,48 +143,62 @@ class SqliteMemoryV2Store:
     # 写路径
     # ----------------------------------------------------------------------------------
 
-    async def create(self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+    async def create(
+        self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
+        connection: aiosqlite.Connection | None = None,
+    ) -> MemoryRecordV2:
         """新建一条逻辑记忆（version=1，root_id=自己的 id）。"""
-        return await self._insert(draft, trusted, root_id=None, version=1, previous=None)
+        return await self._insert(
+            draft, trusted, root_id=None, version=1, previous=None, connection=connection)
 
     async def update(
-        self, previous_id: str, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity,
+        self, previous_id: str, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
+        connection: aiosqlite.Connection | None = None,
     ) -> MemoryRecordV2:
         """基于 `previous_id` 派生下一版：新 active 版本 + 旧版本置 superseded。
 
         版本号由**这里**决定（`previous.version + 1`），调用方给不了——R3 要求单调性
         是存储的保证，不是调用方的纪律。
+
+        读与写**不共用**一个自开事务：并发写者各读到同一版 active，然后在 `_insert`
+        的写事务里撞上 `memory_v2_one_active` 部分唯一索引。把"至多一条 active"交给
+        数据库判定（而不是把读并进写事务去串行化全部写者）既贴合 R3 的原文——不变量在
+        数据库层、不在调用方纪律——也不让一个更长的事务放大锁等待。
+        借用路径下调用方的事务已经在跑，读自然落在里面（`connection` 透传）。
         """
-        previous = await self._authorized_row(previous_id, trusted)
+        previous = await self._authorized_row(previous_id, trusted, connection=connection)
         self._require_active(previous, action="update")
         if draft.scope.value != previous["scope"] or draft.project_id != previous["project_id"]:
             # 允许 draft 改写 scope/project 等于允许"把一条 user_global 记忆改成项目记忆"
             # 或反向——两者的可见性集合不同，是越权而不是编辑。
             raise ValueError("update must keep the logical memory's scope and project")
-        record = await self._insert(
+        return await self._insert(
             draft, trusted, root_id=previous["root_id"], version=previous["version"] + 1,
-            previous=previous,
+            previous=previous, connection=connection,
         )
-        return record
 
-    async def invalidate(self, memory_id: str, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+    async def invalidate(
+        self, memory_id: str, trusted: TrustedMemoryIdentity, *,
+        connection: aiosqlite.Connection | None = None,
+    ) -> MemoryRecordV2:
         """把 active 记录置为 invalidated（内容保留，§5.4.2）。"""
-        row = await self._authorized_row(memory_id, trusted)
+        row = await self._authorized_row(memory_id, trusted, connection=connection)
         self._require_active(row, action="invalidate")
         now = _utc_now()
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            await connection.execute(
+        async with write_connection(self.database_path, connection) as conn:
+            await conn.execute(
                 "UPDATE memory_v2_records SET status=?, invalidated_at=?, updated_at=? "
                 "WHERE memory_id=?", (MemoryStatus.INVALIDATED.value, now, now, memory_id))
-            await self._enqueue(connection, memory_id, MemoryOperationV2.DELETE,
+            await self._enqueue(conn, memory_id, MemoryOperationV2.DELETE,
                                 row["tenant_id"], row["user_id"], row["scope"], row["project_id"])
-            await connection.commit()
-        return await self.get(memory_id, trusted)
+            # 回读走**同一个**连接：借用进来的事务还没提交，另开一条连接在 WAL 下看不到
+            # 本次改动，会读回旧状态（调用方据此发事件、报 action）。
+            return await self._read_in(conn, memory_id, trusted)
 
     async def _insert(
         self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
         root_id: str | None, version: int, previous: aiosqlite.Row | None,
+        connection: aiosqlite.Connection | None = None,
     ) -> MemoryRecordV2:
         """插入一条新的 active 版本；`previous` 非空时同事务把它置为 superseded。"""
         memory_id = str(uuid4())
@@ -203,29 +217,28 @@ class SqliteMemoryV2Store:
         # 身份字段由本方法从可信身份补齐，所以这条断言只在 project_id 上可能失败：
         # 把 A 项目的事实标成 B 项目就是一次越权的跨项目写入，必须在落盘前拒绝。
         assert_trusted_identity(record, trusted)
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
+        async with write_connection(self.database_path, connection) as conn:
             if previous is not None:
                 # 先让出 root_id 上的 active 槽位，再插入新版本（部分唯一索引不允许两条 active）。
-                await connection.execute(
+                await conn.execute(
                     "UPDATE memory_v2_records SET status=?, superseded_by=?, updated_at=? "
                     "WHERE memory_id=?",
                     (MemoryStatus.SUPERSEDED.value, memory_id, now, previous["memory_id"]))
-                await self._enqueue(connection, previous["memory_id"], MemoryOperationV2.DELETE,
+                await self._enqueue(conn, previous["memory_id"], MemoryOperationV2.DELETE,
                                     previous["tenant_id"], previous["user_id"], previous["scope"],
                                     previous["project_id"])
             try:
-                await connection.execute(
+                await conn.execute(
                     f"INSERT INTO memory_v2_records ({_COLUMNS}) VALUES "
                     "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._values(record))
             except aiosqlite.IntegrityError as error:
-                await connection.rollback()
+                # 不在这里 rollback：自开事务时由 `write_connection` 收尾，借用事务时
+                # 回滚是拥有者的事（见 `write_connection` 的说明）。
                 raise ValueError(f"memory record conflicts with an existing row: {error}") from None
-            await self._enqueue(connection, memory_id, MemoryOperationV2.UPSERT,
+            await self._enqueue(conn, memory_id, MemoryOperationV2.UPSERT,
                                 trusted.tenant_id, trusted.user_id, record.scope.value,
                                 record.project_id)
-            await connection.commit()
         return record
 
     # ----------------------------------------------------------------------------------
@@ -237,13 +250,15 @@ class SqliteMemoryV2Store:
 
         读路径刻意不区分"不存在"与"不是你的"：区分等于告诉调用方别人的 id 是否存在。
         """
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)
-            ) as cursor,
-        ):
-            row = await cursor.fetchone()
+        async with connect(self.database_path) as connection:
+            return await self._read_in(connection, memory_id, trusted)
+
+    async def _read_in(
+        self, connection: aiosqlite.Connection, memory_id: str,
+        trusted: TrustedMemoryIdentity,
+    ) -> MemoryRecordV2:
+        """在**给定**连接上读一条（`invalidate` 借事务回读自己的改动时用它）。"""
+        row = await _row_in(connection, memory_id)
         if row is None or not self._visible(row, trusted):
             raise KeyError(memory_id)
         return _to_record(row)
@@ -383,15 +398,15 @@ class SqliteMemoryV2Store:
         return True
 
     async def _authorized_row(
-        self, memory_id: str, trusted: TrustedMemoryIdentity,
+        self, memory_id: str, trusted: TrustedMemoryIdentity, *,
+        connection: aiosqlite.Connection | None = None,
     ) -> aiosqlite.Row:
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)
-            ) as cursor,
-        ):
-            row = await cursor.fetchone()
+        """取一条并核对归属；给了 `connection` 就在**借来的事务**里读（`update` 用它）。"""
+        if connection is not None:
+            row = await _row_in(connection, memory_id)
+        else:
+            async with connect(self.database_path) as owned:
+                row = await _row_in(owned, memory_id)
         if row is None:
             raise KeyError(memory_id)
         if not self._visible(row, trusted):
@@ -417,6 +432,14 @@ class SqliteMemoryV2Store:
             record.valid_at, record.invalidated_at, record.superseded_by,
             record.created_at, record.updated_at,
         )
+
+
+async def _row_in(connection: aiosqlite.Connection, memory_id: str) -> aiosqlite.Row | None:
+    """按 id 读一行；读不到返回 `None`——授权判定是调用方的事，不是这一行的事。"""
+    async with connection.execute(
+        "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)
+    ) as cursor:
+        return await cursor.fetchone()
 
 
 def _to_record(row: aiosqlite.Row) -> MemoryRecordV2:

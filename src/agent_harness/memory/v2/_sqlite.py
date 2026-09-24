@@ -47,3 +47,28 @@ async def connect(database_path: Path):
 def stamp(moment: datetime | None = None) -> str:
     """UTC 归一化后的 ISO 时间戳（见模块 docstring）。"""
     return (moment if moment is not None else datetime.now(UTC)).astimezone(UTC).isoformat()
+
+
+@asynccontextmanager
+async def write_connection(database_path: Path, connection: aiosqlite.Connection | None = None):
+    """写路径的连接：调用方给了就**借用**（它拥有事务），否则自开一个 `BEGIN IMMEDIATE`。
+
+    借用之所以存在：记忆记录 + outbox 意图必须与 **formation job 的终态**一起落地。
+    "为什么必须同一次提交"的完整论证只在 `jobs.SqliteMemoryV2JobStore.commit_with_outcome`
+    一处（§16.1）；这里只写本函数自己看不出来的那条操作约束：
+
+    借用时**不提交也不回滚**——提交是拥有者的事。抛出的异常一律向上传播（拥有者据此回滚）
+    ——在这里顺手 rollback 会把拥有者事务里其它已成功的写一起抹掉，而"借来的连接"本来
+    就不该由被调用方处置。
+    """
+    if connection is not None:
+        yield connection
+        return
+    async with connect(database_path) as owned:
+        await owned.execute("BEGIN IMMEDIATE")
+        try:
+            yield owned
+        except BaseException:
+            await owned.rollback()
+            raise
+        await owned.commit()

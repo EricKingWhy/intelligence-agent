@@ -40,15 +40,21 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import uuid4
+
+import aiosqlite
 
 from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
+
+#: `commit_with_outcome` 里 `work` 的返回类型（调用方自己决定要带回什么）。
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +103,15 @@ TERMINAL_STAGES: tuple[MemoryJobStage, ...] = (MemoryJobStage.COMPLETED, MemoryJ
 _TERMINAL_VALUES: tuple[str, ...] = tuple(stage.value for stage in TERMINAL_STAGES)
 #: `stage NOT IN (?, ?)` 的占位符，从枚举派生——避免 DDL / SQL 里再抄一份状态名。
 _NOT_TERMINAL = ", ".join("?" for _ in _TERMINAL_VALUES)
+
+#: "这一行仍属于我、且还没终结"的完整谓词。`transition`（UPDATE-CAS）与
+#: `commit_with_outcome`（先 SELECT 再 UPDATE）**各写一遍**就等于把同一条属主规则
+#: 存了两份 —— 两处漂移的后果是"推进被拦、提交被放行"这类只在并发下才现形的洞。
+#: 占位符顺序固定为 `(job_id, worker_id, now_stamp, *_TERMINAL_VALUES)`。
+_OWNED_AND_LIVE = (
+    f"job_id=? AND lease_owner=? AND lease_expires_at > ? "
+    f"AND stage NOT IN ({_NOT_TERMINAL})"
+)
 
 
 class MemoryJobOutcome(str, Enum):
@@ -275,24 +290,13 @@ class SqliteMemoryV2JobStore:
             raise ValueError("outcome/reason are only meaningful for a terminal stage")
 
         now_stamp = stamp(now)
-        assignments = ["stage=?", "updated_at=?"]
-        values: list[Any] = [stage.value, now_stamp]
-        if state is not None:
-            assignments.append("state=?")
-            values.append(json.dumps(state, ensure_ascii=False, sort_keys=True))
-        if stage.is_terminal:
-            # 终结时释放 lease：终态 job 不该再占着"该用户的在途槽位"（R11）。
-            assignments.extend(["outcome=?", "reason=?", "lease_owner=NULL",
-                                "lease_expires_at=NULL"])
-            values.extend([outcome.value if outcome is not None else None, reason])
-        values.extend([job_id, worker_id, now_stamp, *_TERMINAL_VALUES])
+        assignments, values = _stage_assignment(
+            stage=stage, state=state, outcome=outcome, reason=reason, now_stamp=now_stamp)
         async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
-                f"UPDATE memory_v2_jobs SET {', '.join(assignments)} "
-                f"WHERE job_id=? AND lease_owner=? AND lease_expires_at > ? "
-                f"  AND stage NOT IN ({_NOT_TERMINAL})",
-                values)
+                f"UPDATE memory_v2_jobs SET {', '.join(assignments)} WHERE {_OWNED_AND_LIVE}",
+                [*values, job_id, worker_id, now_stamp, *_TERMINAL_VALUES])
             moved = cursor.rowcount == 1
             row = None
             if moved:
@@ -301,6 +305,58 @@ class SqliteMemoryV2JobStore:
                 row = await rows.fetchone()
             await connection.commit()
         return _to_job(row) if row is not None else None
+
+    async def commit_with_outcome(
+        self, *, job_id: str, worker_id: str, outcome: MemoryJobOutcome,
+        work: Callable[[aiosqlite.Connection], Awaitable[T]],
+        state: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
+        reason: str | None = None, now: datetime | None = None,
+    ) -> T | None:
+        """在**一个事务**里执行 `work(connection)` 并写下成功终态（AC6 / AC7）。
+
+        为什么必须同一事务：`work` 写的是记忆记录 + outbox 意图（§6.6 已经要求这两样
+        同事务）。若它们与 job 终态分两次提交，"记录已写、job 仍未终结"的窗口在恢复时与
+        "还没开始写"无法区分——重放就会写出第二条逻辑记忆，AC7 的"零重复"随之失效。
+        合在一个事务里，崩溃只剩下两种结局：**全在**（job 已 COMPLETED，`claim` 不会再
+        认领它）或**全不在**（job 仍非终态，重跑安全）。
+
+        `state` 可以是 callable：`work` 里累积的计数（实际写入的 action、丢弃归因）跑完
+        才知道，而它们要跟终态写进同一行 ⇒ 序列化只能推迟到 `work` 之后。传 dict 就是
+        即时快照，传 callable 就是"落盘那一刻再取"。
+
+        `work` 抛异常 ⇒ 整体回滚：job 保持非终态、零记录写入；调用方据此另开一次提交记
+        降级终态（`transition` 的 `DEGRADED`）。
+        返回 `None` = 竞争失败（属主不是我 / lease 过期 / 已终结）——**此时 `work` 根本不会
+        被执行**，这正是"副作用只在拿到属主时发生"的落点。
+
+        检查放在 `work` 之前（`SELECT 1`）而不是"UPDATE 再看 rowcount"：本事务已持写锁，
+        SELECT 的结论到提交前都成立，而把它提前能让"我不再是属主"这件事**不做任何副作用的
+        准备工作**就退出。终态的赋值片段与 `transition` 共用 `_stage_assignment`。
+        """
+        now_stamp = stamp(now)
+        async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    f"SELECT 1 FROM memory_v2_jobs WHERE {_OWNED_AND_LIVE}",
+                    (job_id, worker_id, now_stamp, *_TERMINAL_VALUES))
+                if await cursor.fetchone() is None:
+                    await connection.rollback()
+                    return None
+                result = await work(connection)
+                assignments, values = _stage_assignment(
+                    stage=MemoryJobStage.COMPLETED, state=state() if callable(state) else state,
+                    outcome=outcome, reason=reason, now_stamp=now_stamp)
+                updated = await connection.execute(
+                    f"UPDATE memory_v2_jobs SET {', '.join(assignments)} WHERE job_id=?",
+                    [*values, job_id])
+                if updated.rowcount != 1:
+                    raise RuntimeError(f"memory_v2_jobs row vanished for {job_id}")
+            except BaseException:
+                await connection.rollback()
+                raise
+            await connection.commit()
+        return result
 
     # ----------------------------------------------------------------------------------
     # 读
@@ -316,6 +372,33 @@ class SqliteMemoryV2JobStore:
         if row is None:
             raise KeyError(job_id)
         return _to_job(row)
+
+
+def _stage_assignment(
+    *, stage: MemoryJobStage, state: dict[str, Any] | None,
+    outcome: MemoryJobOutcome | None, reason: str | None, now_stamp: str,
+) -> tuple[list[str], list[Any]]:
+    """`UPDATE memory_v2_jobs SET …` 的赋值片段与参数。
+
+    `transition` 与 `commit_with_outcome` 共用这一份：状态名、终态字段、lease 释放
+    只在这里写一次，两条入口因此不会漂移（"给了 outcome 却忘了释放 lease"这类错
+    只有一处可能发生）。
+
+    WHERE 子句**不在这里**：`transition` 用一条 UPDATE-CAS 完成，`commit_with_outcome`
+    先 SELECT 确认属主、执行副作用、再写终态——**语句形状**不同。但两者用的是**同一个
+    属主谓词** `_OWNED_AND_LIVE`：那才是会漂移的那一半，所以它被抽了出去。把 WHERE 整体
+    塞进来只会多一条"位置参数必须先 SET 后 WHERE 地对齐"的纪律。
+    """
+    assignments = ["stage=?", "updated_at=?"]
+    values: list[Any] = [stage.value, now_stamp]
+    if state is not None:
+        assignments.append("state=?")
+        values.append(json.dumps(state, ensure_ascii=False, sort_keys=True))
+    if stage.is_terminal:
+        # 终结时释放 lease：终态 job 不该再占着"该用户的在途槽位"（R11）。
+        assignments.extend(["outcome=?", "reason=?", "lease_owner=NULL", "lease_expires_at=NULL"])
+        values.extend([outcome.value if outcome is not None else None, reason])
+    return assignments, values
 
 
 def _require(row: Any, key: str) -> Any:

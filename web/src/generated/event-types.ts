@@ -23,6 +23,7 @@ export const EventType = {
   ARTIFACT_EXTERNALIZED: 'artifact/externalized',
   CONTEXT_COMPACTED: 'context/compacted',
   MEMORY_DEGRADED: 'memory/degraded',
+  MEMORY_UPDATED: 'memory/updated',
   TOOL_FAILURE_GUARD: 'tool/failure-guard',
   MODEL_FALLBACK: 'model/fallback',
   AGENT_DELEGATION_STARTED: 'agent/delegation-started',

@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 
-from agent_harness.memory.v2 import TrustedMemoryIdentity
+from agent_harness.memory.v2 import MemoryScope, TrustedMemoryIdentity
 from agent_harness.memory.v2.jobs import (
     MemoryJobOutcome,
     MemoryJobStage,
@@ -328,3 +328,83 @@ async def test_the_job_table_coexists_with_record_writes_in_one_database(
     assert record.id
     assert (await job_store.get(job.job_id)).stage is MemoryJobStage.QUEUED
     assert (await records.get(record.id, USER_A)).id == record.id
+
+
+# --------------------------------------------------------------------------------------
+# 切片 6：终态与副作用同事务（#298 T6 / AC6 / AC7）
+# --------------------------------------------------------------------------------------
+
+
+async def _claimed_pair(tmp_path):
+    """一个装了记录表 + job 表的库，含一条**已认领**的 job。"""
+    path = tmp_path / "memory-v2.db"
+    records = SqliteMemoryV2Store(path)
+    await records.initialize()
+    job_store = SqliteMemoryV2JobStore(path)
+    await job_store.initialize()
+    enqueued = await _enqueue(job_store, "session-1")
+    claimed = await job_store.claim(worker_id="w1")
+    assert claimed is not None and claimed.job_id == enqueued.job_id
+    return records, job_store, claimed
+
+
+@pytest.mark.asyncio
+async def test_commit_with_outcome_rolls_back_the_work_when_it_raises(tmp_path) -> None:
+    """AC6 的"全不在"半边：`work` 抛异常 ⇒ 它的写与 job 终态一起不落地。"""
+    records, jobs, claimed = await _claimed_pair(tmp_path)
+
+    async def work(connection) -> str:
+        await records.create(make_draft(), USER_A, connection=connection)
+        raise RuntimeError("side effect failed halfway")
+
+    with pytest.raises(RuntimeError):
+        await jobs.commit_with_outcome(
+            job_id=claimed.job_id, worker_id="w1", outcome=MemoryJobOutcome.COMMITTED,
+            work=work)
+
+    assert await records.list_active(
+        USER_A, scope=MemoryScope.USER_GLOBAL, limit=10) == []
+    after = await jobs.get(claimed.job_id)
+    assert after.stage is not MemoryJobStage.COMPLETED
+    assert after.outcome is None and after.reason is None
+
+
+@pytest.mark.asyncio
+async def test_commit_with_outcome_never_runs_the_work_without_the_lease(tmp_path) -> None:
+    """没拿到属主时 `work` **根本不该被执行**——不是"执行了再回滚"。"""
+    _records, jobs, claimed = await _claimed_pair(tmp_path)
+    ran: list[str] = []
+
+    async def work(connection) -> str:
+        ran.append("yes")
+        return "done"
+
+    result = await jobs.commit_with_outcome(
+        job_id=claimed.job_id, worker_id="intruder", outcome=MemoryJobOutcome.COMMITTED,
+        work=work)
+
+    assert result is None
+    assert ran == []
+    assert (await jobs.get(claimed.job_id)).stage is MemoryJobStage.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_commit_with_outcome_reads_a_callable_state_after_the_work(tmp_path) -> None:
+    """`state` 传 callable ⇒ 落盘那一刻才取值：`work` 里累积的计数才写得进去。"""
+    _records, jobs, claimed = await _claimed_pair(tmp_path)
+    counters = {"written": 0}
+
+    async def work(connection) -> dict:
+        counters["written"] += 1
+        return counters
+
+    result = await jobs.commit_with_outcome(
+        job_id=claimed.job_id, worker_id="w1", outcome=MemoryJobOutcome.COMMITTED,
+        state=lambda: dict(counters), work=work)
+
+    assert result == {"written": 1}
+    stored = await jobs.get(claimed.job_id)
+    assert stored.state == {"written": 1}
+    assert stored.stage is MemoryJobStage.COMPLETED
+    assert stored.outcome is MemoryJobOutcome.COMMITTED
+    assert stored.lease_owner is None and stored.lease_expires_at is None

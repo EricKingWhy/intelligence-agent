@@ -826,3 +826,36 @@ def test_the_tool_outcome_values_are_stable_strings() -> None:
     assert {outcome.value for outcome in ToolOutcome} == {
         "success", "failure", "unknown", "missing",
     }
+
+
+# --------------------------------------------------------------------------------------
+# AC3 的 unsupported-source：证据必须指得到本轮的一个真实事件
+# --------------------------------------------------------------------------------------
+
+
+def test_a_candidate_whose_evidence_names_no_known_event_is_rejected() -> None:
+    """普通的 semantic 候选也要求可解析的 provenance——不是只有用户事实才需要。
+
+    与 `ghost:1` 那条用户事实用例的区别：那条命中更具体的
+    `USER_FACT_WITHOUT_USER_EVIDENCE`（判据在前），这里是一条**不需要任何权威**的普通
+    偏好候选，所以兜底判据是唯一可能命中者。
+    """
+    outcome = _select([_candidate(evidence=[_evidence("ghost:1", "assistant", "编的")])])
+
+    assert outcome.accepted == ()
+    assert [item.reason for item in outcome.rejected] == [PolicyRejection.UNSUPPORTED_SOURCE]
+
+
+def test_one_resolvable_reference_is_enough_for_provenance() -> None:
+    """判据是"**至少**有一条指得到"，不是"每一条都要指得到"。
+
+    模型多列一条解析不到的依据（比如它把更早的上下文也算了进来）不该让整条候选作废：
+    同错拒整条会把"模型多说了半句"变成"这条记忆永久丢失"。
+    """
+    outcome = _select([_candidate(evidence=[
+        _evidence("m:1", "assistant", "好的"),
+        _evidence("ghost:1", "assistant", "从别处抄来的"),
+    ])])
+
+    assert len(outcome.accepted) == 1
+    assert outcome.rejected == ()

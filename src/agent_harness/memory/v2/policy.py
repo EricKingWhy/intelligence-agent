@@ -13,6 +13,7 @@
 | R5 | Procedural 需两条独立**成功/纠正**事件，除非用户明确陈述规则 | `_qualifying_event_ids` + `_meets_procedural_threshold` |
 | R6 | USER/profile 事实需直接用户证据或显式确认 | `_has_user_authority` |
 | R7 | 秘密一律拒；敏感需显式记住请求 | `find_secret` + `_reject` 前两条 |
+| AC3 | 证据至少要指得到本轮的一个真实事件 | `_reject` 末条（`UNSUPPORTED_SOURCE`） |
 
 # 三条需要登记的取舍
 
@@ -314,6 +315,10 @@ class PolicyRejection(str, Enum):
     USER_FACT_WITHOUT_USER_EVIDENCE = "user_fact_without_user_evidence"
     #: 名额不足（R4），**不是**对内容的否定判断——同一条候选在更空的批次里会被接受。
     OVER_CAP = "over_cap"
+    #: 证据引用的 `event_id` 一条都回查不到（AC3 的 unsupported-source）。
+    #: 与 `USER_FACT_WITHOUT_USER_EVIDENCE` 的区别：那条是"来源角色不对"，这条是
+    #: "压根指不到本轮的任何一个事件"——连它是谁说的都无从谈起。
+    UNSUPPORTED_SOURCE = "unsupported_source"
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +398,10 @@ def _reject(
     2. 敏感同意次之：这是"能不能写"的前置条件，写在内容规则之前更符合直觉。
     3. 用户事实权威：R6。
     4. Procedural 门槛：R5。
+    5. 来源可解析（AC3 的 unsupported-source）：**放最后**是刻意的——它是兜底判据，
+       更具体的归因（"这是用户事实但没有用户证据"）优先于笼统的"指不到事件"。
+       提前会让上一条的归因码被顶掉：排障者看到"来源不可解析"，却看不到
+       "模型把助手的话当成了用户事实"。
     """
     if candidate.sensitivity is Sensitivity.SECRET or _secret_in(candidate) is not None:
         return PolicyRejection.SECRET
@@ -406,6 +415,10 @@ def _reject(
         candidate, sources, qualifying
     ):
         return PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    if not any(item.event_id in sources for item in candidate.evidence):
+        # §6.1 要求自动记忆的 `source_event_ids` 非空，本判据挡住它的另一半：
+        # 非空但**编造**。指不到任何真实事件的记忆不可审计、不可撤回（§5.4）。
+        return PolicyRejection.UNSUPPORTED_SOURCE
     return None
 
 

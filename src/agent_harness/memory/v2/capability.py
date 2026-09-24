@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+import aiosqlite
+
 from agent_harness.memory.v2.index import MemoryV2VectorIndex, resolve_active_hits
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
@@ -76,6 +78,30 @@ class MemoryV2Service:
 
     async def invalidate(self, memory_id: str, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         return await self._store.invalidate(memory_id, trusted)
+
+    # ----------------------------------------------------------------------------------
+    # 事务内写（#298 T6 的形成执行器专用）
+    # ----------------------------------------------------------------------------------
+    #
+    # 上面七个方法是"一次调用一个事务"。执行器需要的边界更宽：一批裁决动作要与
+    # **记忆记录 + outbox + formation job 终态**一起落地（AC6 / AC7）。
+    # "为什么必须同一次提交"的完整论证只在
+    # `jobs.SqliteMemoryV2JobStore.commit_with_outcome` 一处（§16.1）。
+    #
+    # 它们**不是**新的 provider 契约：`MemoryV2Capability` 仍然冻结在七个方法上，
+    # 这三个是"在别人的事务里干活"的额外面，只有组合实现（本类）需要提供。
+
+    async def create_in(self, connection: aiosqlite.Connection, draft: MemoryDraftV2,
+                        trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+        return await self._store.create(draft, trusted, connection=connection)
+
+    async def update_in(self, connection: aiosqlite.Connection, previous_id: str,
+                        draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+        return await self._store.update(previous_id, draft, trusted, connection=connection)
+
+    async def invalidate_in(self, connection: aiosqlite.Connection, memory_id: str,
+                            trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+        return await self._store.invalidate(memory_id, trusted, connection=connection)
 
     async def read(self, memory_id: str, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         return await self._store.get(memory_id, trusted)

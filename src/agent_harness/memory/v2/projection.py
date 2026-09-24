@@ -318,6 +318,15 @@ def _project_memories(records: Iterable[MemoryRecordV2]) -> list[ProjectedMemory
     return projected
 
 
+def project_memories(records: Iterable[MemoryRecordV2]) -> tuple[ProjectedMemory, ...]:
+    """把一批记录投影成模型可见的最小面（截到 `MAX_SIMILAR_MEMORIES`，按传入顺序）。
+
+    公开给执行器：裁决阶段也要把"相关的既有记忆"喂给模型（§5.2.5），而它必须与 formation
+    看到**同一套**字段——各写一份会让"多喂了一个身份字段"只在一个阶段被抓到。
+    """
+    return tuple(_project_memories(records))
+
+
 def build_formation_input(
     run_events: Sequence[SessionEvent],
     *,

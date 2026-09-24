@@ -260,6 +260,22 @@ class AdjudicationResult(_ContractModel):
         return self
 
 
+class AdjudicationBatch(_ContractModel):
+    """§6.3 的**整批**裁决：与候选**顺序对应**的一个对象数组。
+
+    为什么是一批而不是逐候选一次调用——PRD §5.3 第 5 条把整作业的模型调用上限定在 5 次，
+    而候选上限是 5（§5.2.3）："formation 1 次 + 每候选 1 次"最坏要 6 次，两个数字互相打架。
+    批量是唯一自洽的读法；它还有个实质好处：模型能同时看到整批候选，
+    `duplicate` / `enrich_existing` 这类**需要跨候选比较**的判据才有意义——逐候选调用时
+    每个候选都只看得见自己，`duplicate` 永远判不出来。
+
+    "条数等于候选数"**不在这里**校验：契约模型不知道候选有几个，那条判定属于执行器
+    （它同时持有两侧的计数）。
+    """
+
+    results: list[AdjudicationResult]
+
+
 # --------------------------------------------------------------------------------------
 # 解析（第 1 层：传输归一；第 2/3 层交给上面的模型）
 # --------------------------------------------------------------------------------------
@@ -276,6 +292,11 @@ def parse_formation_result(raw: str | Mapping[str, Any]) -> FormationResult:
 def parse_adjudication_result(raw: str | Mapping[str, Any]) -> AdjudicationResult:
     """把模型的原始输出解析成**一条** `AdjudicationResult`；失败抛 `ModelOutputError`。"""
     return _validate(raw, AdjudicationResult)
+
+
+def parse_adjudication_results(raw: str | Mapping[str, Any]) -> list[AdjudicationResult]:
+    """把模型的原始输出解析成**整批**裁决（顺序即候选顺序）；失败抛 `ModelOutputError`。"""
+    return _validate(raw, AdjudicationBatch).results
 
 
 def _validate(raw: str | Mapping[str, Any], model: type[_ContractModel]):
