@@ -1146,6 +1146,13 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     summarize: summarizeContextCompacted,
   },
   [EventType.MEMORY_DEGRADED]: { apply: noopProjection, summarize: emptySummary },
+  // #298（T6 引入 `memory/updated`，T8 补登记）：与 MEMORY_DEGRADED 同形——提交型记忆变更，
+  // 载荷只有 count / memory IDs / action counts / job ID，**不带内容**（PRD V2 §6.5）。
+  // 它是 `Record<EventTypeValue, EventSemantics>` 的穷尽性成员：登记为 no-op 才是既有兜底
+  // 行为（进 `unknown_events` 计数、不把帧当未知事件丢弃），不登记则前端 `tsc` 直接红
+  // ——生成物 `event-types.ts` 由 `scripts/gen_event_types.py` 生成，加类型就必须在这里登记。
+  // UI 展示面归 MEM-V2-5（#301），本行只负责穷尽性。
+  [EventType.MEMORY_UPDATED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_FAILURE_GUARD]: {
     apply: projectToolFailureGuard,
     summarize: summarizeToolFailureGuard,
