@@ -79,13 +79,10 @@ Stories 不一致——本票只如实登记该上游不一致，**不**修改 #
 
 ### D3 — 暂停/恢复是 durable 生命周期，不是终态
 
-- 新增两类**持久化**事件（名字与载荷的权威枚举仍只有 `docs/EVENT_VOCABULARY.md`，本 ADR 只定格契约语义）：
-  - `run/paused`：`reason ∈ {budget_exhausted, deadline, stuck}` + `trigger_dimension` + `budget_version`
-    + `consumed` / `limits` 快照 + `continuation`（已完成 / 剩余 / 阻塞 / 下一步安全动作）
-    + `closeout_source ∈ {model, deterministic}` + `resume_requirements`（预算与 deadline 暂停为空）。
-    **非终态**：停止活动执行，但不关闭逻辑 `run_id`。
-  - `run/resumed`：`from_pause_seq` + `previous_budget_version` + 新 `budget_version` + 更新后的 `limits`
-    + `consumed`（**等于**暂停快照，直到产生新工作）+ `resume_basis ∈ {budget_increase, relevant_steer, environment_change, policy_change}`。
+- 新增两类**持久化**事件：`run/paused` 与 `run/resumed`。名字、载荷字段与不变量是契约，权威落点是
+  `03 §3.4`（在实现票把常量加入 `session/event.py` 之前，语义与字段由该节定义；枚举的机器可读副本
+  随该票重新生成 `docs/EVENT_VOCABULARY.md` 才出现）——本 ADR **不复制**字段清单，只固定下列规则：
+- **非终态**：暂停停止活动执行，但**不**关闭逻辑 `run_id`；暂停时该逻辑 run 不出现完成 / 失败事件。
 - **同一 `run_id`**：恢复绝不新建 run_id，绝不重置任何 counter 或 stuck 指纹。
 - **CAS**：恢复请求带 `expected_version` 与**绝对 ceiling**（不是增量）。版本过期、把 ceiling 降到
   已消耗之下、缺少必要变更依据、存在未 reconcile 副作用 ⇒ **409**，且**不启动**任何 model/tool/child 工作。
@@ -108,8 +105,8 @@ Stories 不一致——本票只如实登记该上游不一致，**不**修改 #
 
 ### D5 — stuck 检测：扩展既有 guard 责任域，一次 replan，恢复需真实变更
 
-五个模式的阈值是**契约**，权威表（含 3 / 4 / 3 / 6 / 4 与项目级阈值的 provenance）在 `02 §5.3`
-——本 ADR **不复制**该表；本节固定其规则与理由：
+五个模式的阈值是**契约**，权威表（五个阈值 + 项目级阈值的 provenance）在 `02 §5.3`
+——本 ADR **不复制**该表，也不复制数字；本节固定其规则与理由：
 
 - **责任域唯一**：扩展 `agent/guards.py`（ADR-0014）这一处护栏，**不新增第二个 loop guard**。
 - 阈值首达 ⇒ 发一条结构化 guard 事件 + 允许**恰好一次**纠正性 replan；同一模式在 replan 后
@@ -143,8 +140,8 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
   `AgentSpec.max_depth` 只能收窄不能抬高），**#287** 落地了树级默认配额与**持久化**树账本
   （`multiagent/tools.py` 的 `tree_id` / `max_delegations`，持久化计数由 provider 的共享 tree ledger
   负责）。本特性**扩展**它们，**不得**另建平行的第二棵树账本。
-- 树内 `max_delegations` 默认 **8**：整棵 SessionBudget 树最多 8 次被接纳的 `delegate`，
-  第 9 次在**子 Agent 执行前**被拒。
+- 树内 `max_delegations` 的默认值、会话作用域与「第几次被拒」的判定见 `10 §5.1`（本 ADR 不复制该值）：
+  整棵 SessionBudget 树共享一个上限，超出者在**子 Agent 执行前**被拒。
 - 根/子/孙与并发兄弟对共享额度的更新必须原子；创建、重试、恢复、重启子 Agent **都不能**
   重置或放大剩余深度、counter、ceiling 或 stuck 指纹。子 `AgentSpec` / profile 只能**收窄**授权。
 
@@ -153,9 +150,9 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 - 新公开字段 `budget.local.max_agent_turns`；`max_steps` **保留为过渡 alias**：
   只发 `max_steps` ⇒ 解释为根 AgentRuntime 的 local fuse；两者同时出现且**相等** ⇒ 接受；
   **不等** ⇒ 422（**在任何工作开始前**）。任何超过生效上层 ceiling 的配置 ⇒ **拒绝，不静默截断**。
-- 仓库内调用方（Web / CLI / SessionService / AgentProfile / Multi-Agent 创建 / 测试）随 T3 迁移；
-  **删除** alias 是 contract 阶段（`#320`），前置条件是**证明零剩余调用方**（#305 AC-15）——
-  五场景真实 Live Gate 3/3（D10）是**本特性**的集成门禁，不是删除动作的额外前置。
+- 仓库内调用方（Web / CLI / SessionService / AgentProfile / Multi-Agent 创建 / 测试）随 `#308` 迁移；
+  **删除** alias 是 contract 阶段（`#320`），前置条件是**证明零剩余调用方**（#305 AC-15；
+  「Live Gate 不是删除动作的前置」这一读法的权威句在 `02 §5.1`）。
 - 迁移期间**不得**改变既有 step/event 身份语义（step_id 与事件序列 identity 不因改名而变）。
 
 ### D9 — 投影与接口语义
@@ -181,7 +178,7 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
   ② 低显式预算 ⇒ `run/paused` ⇒ 提高绝对 ceiling 后**同 run_id** 恢复并完成、消耗不重置；
   ③ 真实重复工具失败 ⇒ 恰好一次 replan ⇒ 同模式持续则 `PAUSED_STUCK`；
   ④ 真实 deadline 且存在在途 mutating 工具 ⇒ 不启动新工作，安全收尾或 `NEED_RECONCILE`；
-  ⑤ 真实父子委派树共享预算并强制 `max_delegations=8`。
+  ⑤ 真实父子委派树共享预算并强制 `max_delegations=8`（该值仍引自 #305 的场景原文；默认值权威在 `10 §5.1`）。
 - 每个场景在**同一** commit/tree/配置上**连跑三次**，**3/3** 才算通过；**所有失败尝试必须保留**
   （禁止重跑后只留成功者）；任何代码变更即作废先前的矩阵。
 - 证据必须含：`schema_version`、`scenario_id` / `scenario_version`、`sha`、`tree`、Provider/model
@@ -203,8 +200,9 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 
 ## 3. 决策覆盖表（#305 → 落地位置）
 
-用法：左边是 #305 的编号（该文件是仓库内逐字节副本），右边是**生效落点**。**判据是右列可逐条打开**。
-凡 #305 的 BOUNDED / FREE 项，此处只登记「实现自由」的边界，不额外约定实现形状。
+用法：左边是 #305 的编号（该文件是 #305 正文的仓库内副本，读数与唯一差异见 §Related），
+右边是**生效落点**。**判据是右列可逐条打开**。凡 #305 的 BOUNDED / FREE 项，此处只登记
+「实现自由」的边界，不额外约定实现形状。
 
 ### 3.1 Contracts（#305 第 240–453 行）
 
@@ -229,10 +227,10 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 | --- | --- | --- |
 | 1 | Runtime 仍项目自有、Python、async-first | 不变（`02 §1`） |
 | 2 | 旧低 step 上限被**分层预算**取代，不是换个低位数字 | `02 §5`、本 ADR **D1** |
-| 3 | 默认 local fuse 500；Deployment 可降，请求不得越权 | 本 ADR **D1**、`02 §5.1` |
+| 3 | local fuse 有默认高位值；Deployment 可降，请求不得越权 | `02 §5.1`（含默认值）、本 ADR **D1** |
 | 4 | RunBudget 与 SessionBudget 是**两个** durable 账本，各自覆盖其作用域的委派树 | 本 ADR **D1/D7**、`10 §5.1` |
 | 5 | SessionBudget 无默认 ceiling（`max_delegations` 除外），但必须累计并投影 | `10 §5.1`、`11 §6.1` |
-| 6 | `max_delegations=8` 是本 PRD 唯一新增的工具级默认配额 | `10 §5.1` + 本 ADR **D7** |
+| 6 | 树级 `max_delegations` 是本 PRD 唯一新增的工具级默认配额 | `10 §5.1`（含默认值）+ 本 ADR **D7** |
 | 7 | closeout 容量在适用预算内**预留**，不是额外不记账的工作 | 本 ADR **D3**、`02 §5.2` |
 | 8 | 模型 closeout 不可用 ⇒ 确定性 continuation 只用已持久化事实 | 本 ADR **D3**、`02 §5.2` |
 | 9 | deadline 在稳定边界协作式生效；显式 cancel 保持立即语义 | 本 ADR **D4**、`04 §9.1` |
@@ -240,7 +238,7 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 | 11 | fork 新建 SessionBudget 并记录父快照；replay 零消耗 | `03 §6/§7` + 本 ADR **D11** |
 | 12 | 同名前参失败检测**扩展**为多模式 stuck，仍只有一个 guard 责任域 | 本 ADR **D5**（Refines ADR-0014） |
 | 13 | CompletionPolicy 可选可插拔；Quiescence 强制不可绕过 | 本 ADR **D6**、`02 §5.4` |
-| 14 | `max_steps` expand–contract；删除是后续 contract 票 | 本 ADR **D8** |
+| 14 | `max_steps` expand–contract；删除是后续 contract 票 | 本 ADR **D8**、`02 §5.1` |
 | 15 | **#287** 拥有 durable 树级委派预算/指纹机制，本特性扩展而非另建 | 本 ADR **D7**、`10 §5.1` |
 | 16 | Web UI 仍是 SessionEvent 与服务端状态的投影 | `11 §6`/`§6.1` |
 
@@ -284,7 +282,7 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 - 不用 LangGraph / LangChain 接管 Agent Loop；不新增第二条 Tool 执行路径；不新增第二个 loop guard。
 - 不把 Git / pytest / Todo / 具体 Coding Tool 的完成规则硬编码进 Core（CompletionPolicy 是 seam，不是特判）。
 - 不做跨主机分布式预算协调；不做计费/开票/自动购额；不做通用 workflow DAG 引擎。
-- 不为 read / edit / bash / web / MCP 设任意低默认配额（唯一新增默认配额是 `max_delegations=8`）。
+- 不为 read / edit / bash / web / MCP 设任意低默认配额（唯一新增的工具级默认配额是树级 `max_delegations`）。
 - 不保证模型能完成本身不可完成、权限不足或外部依赖缺失的任务。
 - 不用 Mock/Fake 的成功替代真实模型与生产工具的交付证据；不静默自动恢复。
 - 不新建平行 Engineering Specification 或平行 Roadmap（本 ADR 只做**增量对齐**）。
@@ -296,7 +294,7 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 2. **`max_steps` 的失败归因面是「前向失配」，不是当前缺陷**：
    `docs/adr/0033-run-failure-attribution-surface.md`（`max_steps_exceeded` 作为 `run/failed` 载荷）
    与 `docs/BACKEND_CONTRACT_STREAMING_UI.md`（同）描述的是**当前实现**，在实现未改前**仍然为真**；
-   但 T3/T4 落地后命中 local fuse MUST 落 `run/paused`（`02 §5.1–§5.2` 已冻结），届时这两份文档
+   但 `#308` / `#312` 落地后命中 local fuse MUST 落 `run/paused`（`02 §5.1–§5.2` 已冻结），届时这两份文档
    若不随合同更新，前端会照**相反**合同实现——2026-09-17 的 #222 审查（台账
    `docs/review_ledger.d/031-1a4c2fb-864fb15.tsv`）已经发生过一次同类问题，那一次是当场同步。
    **归属未定**（候选：`#320` 的 contract 面，或在实现票票面明确），按 §9.1.1 本票既不擅自改这两份
@@ -311,7 +309,7 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 - **交付面**：本 ADR + `02/03/04/10/11/12` 正式规格章节 + `README.md` 索引口径 + `14_IMPLEMENTATION_ROADMAP.md`
   依赖指针 + 两笔前置摄入（#305 正文副本、调研报告）。**零** `src/**` / `tests/**` / `web/**` 改动。
 - **门禁**：`git diff --check`、`ruff check .`、覆盖闸门 `scripts/check_review_coverage.py` exit 0、
-  `scripts/gate0.py` 裸全量落盘 `docs/gate/<sha>.json`（六条机械车道）、冻结树全量 pytest（§8.1）。
+  `scripts/gate0.py` 裸全量落盘 `docs/gate/<sha>.json`（六条机械车道）、冻结树全量 pytest（协议 §8.1）。
   规格 / 链接 / Markdown 校验器**仓库内不存在**（实测：`scripts/` 无此类脚本），该项以「逐文件相对链接与
   锚点核对」+ `git diff --check` 兑现并如实登记，不声称跑过不存在的工具。
 - **读数落点（§16.1：本 ADR 只写机制与要求，不复制易失读数）**：批次、commit、门禁数字、两轴结论与

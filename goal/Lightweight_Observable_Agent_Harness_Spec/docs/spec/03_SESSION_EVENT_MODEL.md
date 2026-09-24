@@ -171,11 +171,13 @@ Resume MUST NOT 默认重放所有 Tool。
 **Run 状态集合**（#305 §6 冻结，与 §3.4 的事件配对；状态由 SessionEvent 派生，不以进程本地内存为准）：
 `active | paused | completed | failed | interrupted | needs_reconcile`。两条读法 MUST 明确：
 
-- `interrupted` 是**崩溃恢复态**：进程被杀或断连后由启动扫描补记 `run/interrupted`，未结清时
+- `interrupted` 是**崩溃恢复态**：持有会话的进程被杀后，启动扫描补记 `run/interrupted`，未结清时
   **对账优先于恢复**；`needs_reconcile` 同样 MUST 先 reconcile 才允许恢复；
-- **显式取消**（用户 cancel / 断连 / 孤儿回收）保持既有**立即**语义，MUST NOT 被改写成 `paused`：
-  它仍落 `run/failed` 的既有面（`reason ∈ {cancelled, orphaned}`），故 `02 §2` 的 loop 出口词表里的
-  `cancelled` 是**出口原因**，不是状态名；`paused` 只由预算 / deadline / stuck 三类原因产生。
+- **显式取消与孤儿回收**保持既有**立即 / 回收**语义，MUST NOT 被改写成 `paused`：用户 `cancel`
+  与零订阅者超时后的孤儿回收仍落 `run/failed` 的既有面（`reason ∈ {cancelled, orphaned}`）；
+  单纯的客户端断连既不是取消也不是 `interrupted`（只停止订阅，久无订阅者才由回收路径收尾）。
+  故 `02 §2` 的 loop 出口词表里的 `cancelled` 是**出口原因**，不是状态名；`paused` 只由
+  预算 / deadline / stuck 三类原因产生。
 
 **Crash durability**（真实子进程 kill 后重启，无刷新）：MUST 从已持久化事件重建出**同样的**
 limits、consumed、`budget_version`、continuation 判定与 stuck 指纹（§3.4 不变量），
