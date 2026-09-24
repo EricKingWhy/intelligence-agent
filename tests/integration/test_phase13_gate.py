@@ -25,11 +25,58 @@ from langchain_core.messages import AIMessage
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.config import Settings
 from agent_harness.session import Session
+from agent_harness.session.event import SessionEvent
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolRegistry
 from tests.scripted_model import ScriptedModel
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+def _assert_child_internal_payloads_are_not_copied(
+    child_events: list[SessionEvent], parent_events: list[SessionEvent],
+) -> None:
+    # `model/completed` is excluded because the parent may legitimately reuse the
+    # child result summary. The provenance/count assertions in Gate4 still guard
+    # event-history isolation; exact content comparison is reserved for tool data.
+    child_tool_payloads = {
+        (event.type, json.dumps(event.data, sort_keys=True, ensure_ascii=False))
+        for event in child_events
+        if event.type in {"tool/call", "tool/result"}
+    }
+    parent_tool_payloads = {
+        (event.type, json.dumps(event.data, sort_keys=True, ensure_ascii=False))
+        for event in parent_events
+        if event.type in {"tool/call", "tool/result"}
+    }
+    assert child_tool_payloads.isdisjoint(parent_tool_payloads), (
+        "父 Session 不得复制 child 的完整工具事件载荷"
+    )
+
+
+async def test_gate4_allows_summary_reuse_but_rejects_copied_tool_payloads():
+    child_summary = SessionEvent(
+        type="model/completed", session_id="child", data={"content": "task summary"},
+    )
+    parent_summary = SessionEvent(
+        type="model/completed", session_id="parent", data={"content": "task summary"},
+    )
+
+    _assert_child_internal_payloads_are_not_copied(
+        [child_summary], [parent_summary],
+    )
+
+    for event_type in ("tool/call", "tool/result"):
+        child_tool_event = SessionEvent(
+            type=event_type, session_id="child", data={"payload": "private tool data"},
+        )
+        parent_tool_event = SessionEvent(
+            type=event_type, session_id="parent", data={"payload": "private tool data"},
+        )
+        with pytest.raises(AssertionError):
+            _assert_child_internal_payloads_are_not_copied(
+                [child_tool_event], [parent_tool_event],
+            )
 
 
 def _gate_settings(tmp_path, *, live_model: bool = True) -> Settings:
@@ -285,17 +332,9 @@ class TestGate4NoHistoryDump:
             not (set(event.source_event_ids or ()) & child_event_ids)
             for event in session.events
         ), "父 Session 不得以 provenance 引用 child 内部事件"
-        child_internal_payloads = {
-            (event.type, json.dumps(event.data, sort_keys=True, ensure_ascii=False))
-            for event in child_events.events
-            if event.type in {"model/completed", "tool/call", "tool/result"}
-        }
-        parent_payloads = {
-            (event.type, json.dumps(event.data, sort_keys=True, ensure_ascii=False))
-            for event in session.events
-        }
-        assert child_internal_payloads.isdisjoint(parent_payloads), (
-            "父 Session 不得复制 child 的内部模型/工具事件内容"
+        # Parent may reuse child result summary; full tool payload copies remain forbidden.
+        _assert_child_internal_payloads_are_not_copied(
+            child_events.events, session.events,
         )
 
 
