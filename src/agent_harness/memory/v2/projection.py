@@ -16,16 +16,37 @@ hidden reasoning、unrestricted full history。这类约束用"从事件 dict �
 
 | 通道 | 来源 | 形状 |
 | --- | --- | --- |
-| `current_run` | 本次 run 的 `user/message` / `model/completed` 文本 | `{role, text}` |
-| `earlier_messages` | history 里**最近 8 条**同类消息 | `{role, text}` |
-| `tool_calls` | `tool/call` 的**工具名** + `tool/result` 的**状态 / 消息 / artifact_ref** | `{name, status, summary, artifacts}` |
+| `current_run` | 本次 run 的 `user/message` / `model/completed` 文本 | `{ref, role, text}` |
+| `earlier_messages` | history 里**最近 8 条**同类消息 | `{ref, role, text}`（`ref` 恒 `None`） |
+| `tool_calls` | `tool/call` 的**工具名** + `tool/result` 的**状态 / 消息 / artifact_ref** | `{ref, name, status, summary, artifacts}` |
 | `similar_memories` | 检索层的 `MemoryRecordV2`，只取 4 个字段 | `{memory_id, kind, scope, content}` |
+
+`ref` 就是下面「证据怎么引」那一节讲的运行时别名；`similar_memories` 不带它——记忆不是本轮事件，
+引它构不成 provenance。
 
 **刻意不投影的东西**（每一条都对应一个测试）：工具 `args`（模型自己写的，最容易夹带
 `api_key=`）、`ToolResult.data`（结构化的原始输出，未外置也可能上千字符）、`artifact/*`
-事件的体积与 mime、`reasoning/*`、以及全部事件信封字段（`event_id` / `seq` / `session_id`）
-与记录身份字段（`tenant_id` / `user_id`）。最后两类既是噪声又是泄漏面——模型不需要
-"这条记忆属于谁"才能判断该不该形成记忆。
+事件的体积与 mime、`reasoning/*`、事件的**真实**信封字段（`event_id` / `seq` /
+`session_id`）与记录身份字段（`tenant_id` / `user_id`）。后两类既是噪声又是泄漏面——
+模型不需要"这条记忆属于谁"才能判断该不该形成记忆。
+
+# 证据怎么引：运行时发的别名（`ref`）
+
+模型必须能说明"这句话 / 这次行动出自哪个事件"——§6.1 的 provenance 与 R5 的"两条合格
+事件"都建立在它上面——而真实 `event_id` 是会话日志的内部句柄，与 `session_id` 同族，
+不进模型。所以投影**按出现顺序**给每个可被引用的本轮事件发一个确定性别名 `e1`…`eN`，
+作为 `ref` 字段放进载荷；`别名 → 真实 event_id` 的对照表留在 `FormationInput.refs`
+（运行时侧，**不在载荷里**），由执行器在写盘前翻回来。
+
+三条由此而来的性质，都是有意的：
+
+1. **别名是投影的产物，不是日志的引用**：模型没有别的途径知道真 id，所以"引一个真 id"
+   这种输出会因解析不到而按 `unsupported_source` 被拒——错误方向是 fail closed。
+2. **只有本轮事件有别名**：`earlier_messages` 的 `ref` 恒为 `None`。它们是上下文而不是
+   provenance（`policy` 只拿本轮事件建键空间，模型引它们本来也解析不了，发个 id 等于
+   递给它一条必然失败的路）。
+3. **别名的顺序就是载荷的阅读顺序**（先 `current_run`，后 `tool_calls`），所以同一份事件
+   序列永远得到同一份载荷——"可重放的 prompt"这条既有性质不受影响。
 
 # 凭证：从命中点整段砍，而不是替换命中片段
 
@@ -55,7 +76,8 @@ span 级替换会留下可用的残片）。这里只补两条顺序约束，两
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from agent_harness.memory.extractor import _is_runtime_injected
@@ -105,8 +127,13 @@ _TRUNCATION_MARKER = "…[truncated]"
 
 @dataclass(frozen=True, slots=True)
 class ProjectedMessage:
-    """一条进模型的对话文本。`role` 取 `"user"` / `"assistant"` 两个值之一。"""
+    """一条进模型的对话文本。`role` 取 `"user"` / `"assistant"` 两个值之一。
 
+    `ref` 是该事件在**本次载荷**里的运行时别名（`e1`…，见模块 docstring）；本 run 之外的
+    历史消息拿不到别名，恒为 `None`。
+    """
+
+    ref: str | None
     role: str
     text: str
 
@@ -118,8 +145,12 @@ class ProjectedToolCall:
     `status` 复用 `policy.ToolOutcome`：`MISSING`＝没有对应的结果事件，
     `UNKNOWN`＝结果事件在但读不出可判定的 `ok`。两者都**不算成功**——R5 的
     "两条独立成功事件"不能靠一条没跑完、或一条形态污染的结果凑出来。
+
+    `ref` 指向**结果事件**（`tool/result`）：那才是"这次行动发生过"的凭据（`_qualifying_
+    event_ids` 读的就是它）。没有结果事件就没有可引的对象，`ref` 为 `None`。
     """
 
+    ref: str | None
     name: str
     status: ToolOutcome
     summary: str
@@ -143,28 +174,41 @@ class ProjectedMemory:
 
 @dataclass(frozen=True, slots=True)
 class FormationInput:
-    """一次形成 job 可以交给模型的全部输入。"""
+    """一次形成 job 可以交给模型的全部输入。
+
+    `refs` 是**运行时侧**的对照表（`别名 → 真实 event_id`），它随 `current_run` 与
+    `tool_calls` 的 `ref` 字段一起产生，但**不进载荷**——载荷里只有别名（见模块 docstring）。
+    执行器拿它把模型引的别名翻回真实 id，并在进政策前交给 `policy.select_candidates`
+    当作"模型可引的键空间"。
+
+    它是只读映射（`MappingProxyType`）：`frozen=True` 冻的本来只是**容器**，这四个元组字段
+    已经做到了，对照表作为第五个字段不能例外——交付出去的输入不该还能被就地改掉。
+    """
 
     current_run: tuple[ProjectedMessage, ...] = ()
     earlier_messages: tuple[ProjectedMessage, ...] = ()
     tool_calls: tuple[ProjectedToolCall, ...] = ()
     similar_memories: tuple[ProjectedMemory, ...] = ()
+    refs: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     def to_prompt_payload(self) -> dict[str, Any]:
         """序列化成可 JSON 化的字典；AC9 的断言对象就是它的 `json.dumps` 结果。
 
-        键与顺序都固定 ⇒ 同一份输入永远得到同一份载荷（可重放的 prompt）。
+        键与顺序都固定 ⇒ 同一份输入永远得到同一份载荷（可重放的 prompt）。`refs` 刻意
+        不在结果里：它是运行时事实，不是给模型的输入。
         """
         return {
             "current_run": [
-                {"role": item.role, "text": item.text} for item in self.current_run
+                {"ref": item.ref, "role": item.role, "text": item.text}
+                for item in self.current_run
             ],
             "earlier_messages": [
-                {"role": item.role, "text": item.text}
+                {"ref": item.ref, "role": item.role, "text": item.text}
                 for item in self.earlier_messages
             ],
             "tool_calls": [
                 {
+                    "ref": item.ref,
                     "name": item.name,
                     "status": item.status.value,
                     "summary": item.summary,
@@ -229,11 +273,45 @@ def _data_of(event: SessionEvent) -> Mapping[str, Any]:
 # --------------------------------------------------------------------------------------
 
 
-def _project_messages(events: Iterable[SessionEvent]) -> list[ProjectedMessage]:
+class _Aliases:
+    """按投影出现顺序发确定性别名（`e1`…`eN`），并记住它指向哪个真实事件。
+
+    刻意做成"发号器 + 对照表"而不是"先收集再编号"：别名必须在**生成载荷的同一个循环里**
+    产生。事后另起一遍遍历，那一遍的顺序就成了别名顺序的定义——两处顺序一旦分叉，别名与
+    载荷就对不上（"可重放的 prompt"最容易坏在这里）。
+
+    **同一个事件只发一个别名**（`_issued` 是幂等备忘录）。这不是洁癖：政策侧要把
+    `别名 → 真实 event_id` 反过来建成"真实 id → 键"的键空间，一个事件拿到两个别名时那个
+    反向映射会折叠到最后一个，于是**载荷广告过的前一个 `ref` 解析不到**——正是本模块要
+    根除的那类"模型引的号和运行时翻回的 id 对不上"，而且全链路不报错。触发它也不需要
+    异常输入：同一 run 里出现重复的 `tool_call_id`（两条 `tool/call` 配对到同一条
+    `tool/result`）就够。
+    """
+
+    def __init__(self) -> None:
+        self.mapping: dict[str, str] = {}
+        self._issued: dict[str, str] = {}
+
+    def next(self, event_id: str) -> str:
+        issued = self._issued.get(event_id)
+        if issued is not None:
+            return issued
+        alias = f"e{len(self.mapping) + 1}"
+        self.mapping[alias] = event_id
+        self._issued[event_id] = alias
+        return alias
+
+
+def _project_messages(
+    events: Iterable[SessionEvent], aliases: _Aliases | None,
+) -> list[ProjectedMessage]:
     """把事件序列投影成对话文本；非消息事件与运行期注入的样板一律跳过。
 
     跳过注入的样板与 `resolve_evidence_source` 同一口径（`injected_by` 非空）：那是运行时
     的脚手架，不是用户说的话——把它当对话喂回去，等于请模型从样板里形成记忆。
+
+    `aliases=None` ⇒ 不发别名（`ref` 恒为 `None`）。历史消息走的就是这条路：它们是上下文，
+    不是 provenance。
     """
     messages: list[ProjectedMessage] = []
     for event in events:
@@ -247,6 +325,7 @@ def _project_messages(events: Iterable[SessionEvent]) -> list[ProjectedMessage]:
             continue
         messages.append(
             ProjectedMessage(
+                ref=None if aliases is None else aliases.next(event.event_id),
                 role=role,
                 text=_safe_text(_data_of(event).get("content"), MAX_MESSAGE_CHARS),
             )
@@ -254,11 +333,17 @@ def _project_messages(events: Iterable[SessionEvent]) -> list[ProjectedMessage]:
     return messages
 
 
-def _project_tool_calls(events: Iterable[SessionEvent]) -> list[ProjectedToolCall]:
+def _project_tool_calls(
+    events: Iterable[SessionEvent], aliases: _Aliases | None,
+) -> list[ProjectedToolCall]:
     """按 `tool_call_id` 把 `tool/call` 与 `tool/result` 配对。
 
     顺序取 `tool/call` 的出现顺序（那是模型发起调用的顺序）。结果事件先于调用事件到达
     也能配对——配对是按 id 建的索引，不依赖到达顺序。
+
+    别名发给**结果事件**（理由见 `ProjectedToolCall`），所以没有结果的调用拿不到别名：
+    `MISSING` 那条本来就无法充当证据（`_qualifying_event_ids` 不认它），发个 id 只会让
+    模型以为它可以引。
     """
     results: dict[str, SessionEvent] = {}
     for event in events:
@@ -282,6 +367,11 @@ def _project_tool_calls(events: Iterable[SessionEvent]) -> list[ProjectedToolCal
         artifact_ref = "" if view is None else _safe_identifier(view.artifact_ref)
         projected.append(
             ProjectedToolCall(
+                ref=(
+                    None
+                    if aliases is None or result is None
+                    else aliases.next(result.event_id)
+                ),
                 name=_safe_text(
                     _data_of(event).get("tool_name"), MAX_TOOL_SUMMARY_CHARS
                 ),
@@ -342,10 +432,18 @@ def build_formation_input(
     三个入参互不重叠是**调用方的责任**：`history` 里若混入 run 内的事件，同一句话会既
     出现在 `current_run` 又出现在 `earlier_messages`。去重需要投影层自己判 run 边界，而
     run 边界已经由调用方的切片表达（在这里再判一次就是第二套 run 边界判定）。
+
+    别名只发给 `run_events`，且**先消息后工具调用**——载荷的阅读顺序即别名顺序（模块
+    docstring 第 3 条）。下面两行的先后就是这条规则本身，别把它压成一次构造调用：那时
+    顺序会由关键字参数的书写顺序隐式决定，读的人看不出这是个约定。
     """
+    aliases = _Aliases()
+    current_run = tuple(_project_messages(run_events, aliases))
+    tool_calls = tuple(_project_tool_calls(run_events, aliases))
     return FormationInput(
-        current_run=tuple(_project_messages(run_events)),
-        earlier_messages=tuple(_project_messages(history)[-MAX_EARLIER_MESSAGES:]),
-        tool_calls=tuple(_project_tool_calls(run_events)),
+        current_run=current_run,
+        earlier_messages=tuple(_project_messages(history, None)[-MAX_EARLIER_MESSAGES:]),
+        tool_calls=tool_calls,
         similar_memories=tuple(_project_memories(similar_memories)),
+        refs=MappingProxyType(dict(aliases.mapping)),
     )

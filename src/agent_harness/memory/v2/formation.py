@@ -150,6 +150,12 @@ class CandidateEvidence(_ContractModel):
 
     `hash` 刻意不在契约里：§6.1 的 `EvidenceItem.hash` 是完整性凭据，由运行时按摘录算出。
     让模型供给哈希等于让它自己给自己盖章——一条伪造的摘录可以配一个自洽的哈希。
+
+    ⚠️ `event_id` 里装的**不是会话日志的真实 id，而是投影发出去的运行时别名**（`e1`…）：
+    真实 `event_id` 与 `session_id` 同族，按 R2 不进模型输入（见 `projection` 模块 docstring）。
+    字段名保留是刻意的——契约冻结（PRD §6.2 / §6.3），改名要动规格；代价是排障者看到
+    `evidence[].event_id == "e1"` 时**在会话日志里查不到这个 id**，而没有任何东西会报错。
+    翻回真实 id 的地方是 `executor._draft_from`（写盘前）。
     """
 
     event_id: str = Field(min_length=1, max_length=200)

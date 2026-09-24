@@ -18,6 +18,9 @@ R7 要求秘密 / 敏感策略是**模型之外**的运行时边界。所以本�
    运行时**不**自建 9 类敏感分类器（词表不是分类器，声称有会是一层假防线）。
 3. **证据角色**：角色由运行时按 `event_id` 回查事件判定，**不看模型给的 `role`**——
    模型写 `role="user"` 不会让工具证据变成用户证据。
+   注意这里的 `event_id` 在生产路径上装的是**投影发的别名**（`e1`…），不是会话日志的真实
+   id；本文件默认走 `refs=None`（真 id）那条路，别名键空间的用例在最后一组。
+   （全貌见 `projection` 模块 docstring。）
 """
 
 from __future__ import annotations
@@ -150,11 +153,12 @@ def _default_events() -> list[SessionEvent]:
     return [_user(), _model(), _tool(), _tool_ok("t:ok1", "c1"), _tool_failed()]
 
 
-def _select(candidates, *, events=None, explicit_remember: bool = False):
+def _select(candidates, *, events=None, explicit_remember: bool = False, refs=None):
     return select_candidates(
         candidates,
         events=_default_events() if events is None else events,
         explicit_remember=explicit_remember,
+        refs=refs,
     )
 
 
@@ -859,3 +863,79 @@ def test_one_resolvable_reference_is_enough_for_provenance() -> None:
 
     assert len(outcome.accepted) == 1
     assert outcome.rejected == ()
+
+
+# --------------------------------------------------------------------------------------
+# 别名键空间：传了 `refs` 时，模型可引的只有投影发给它的别名（T6b 的 P0 修复）
+# --------------------------------------------------------------------------------------
+#
+# 模型只看得到投影载荷，而载荷里的事件引用是**别名**（`e1`…，真实 `event_id` 不进模型）。
+# 所以"政策按真 id 建键空间"会让生产路径上每条候选都落 `unsupported_source`——自动记忆
+# 零写入，且日志上看起来只是"模型没给出可解析的证据"。这组用例把键空间钉在别名上，
+# 并留一条默认参数的行为锁（`refs=None` ⇒ 真 id，显式命令路径不受影响）。
+
+
+def test_an_aliased_evidence_item_resolves_through_the_refs_table() -> None:
+    outcome = _select(
+        [_candidate(evidence=[_evidence("e1", "user", "请用 pnpm")])], refs={"e1": "u:1"})
+    assert len(outcome.accepted) == 1
+    assert outcome.rejected == ()
+
+
+def test_a_real_event_id_stops_being_a_valid_citation_when_refs_are_supplied() -> None:
+    """别名的存在就是为了让模型**不可能**引真 id——键空间必须只认别名。"""
+    outcome = _select(
+        [_candidate(evidence=[_evidence("u:1", "user", "请用 pnpm")])], refs={"e1": "u:1"})
+    assert [item.reason for item in outcome.rejected] == [PolicyRejection.UNSUPPORTED_SOURCE]
+
+
+def test_a_ref_pointing_outside_the_run_resolves_to_nothing() -> None:
+    """对照表不是"模型可引的清单"，它只是键的翻译；指到本轮没有的事件仍然解析不到。"""
+    refs = {"e1": "u:1", "e2": "u:0-not-in-this-run"}
+    ghost = _select(
+        [_candidate(evidence=[_evidence("e2", "user", "更早那轮说的")])], refs=refs)
+    assert [item.reason for item in ghost.rejected] == [PolicyRejection.UNSUPPORTED_SOURCE]
+
+    # 正控：同一张表里的 `e1` 仍然可用（拒的不是"整张表作废"）。
+    assert len(_select(
+        [_candidate(evidence=[_evidence("e1", "user", "请用 pnpm")])], refs=refs).accepted) == 1
+
+
+def test_the_procedural_threshold_counts_aliased_events() -> None:
+    """R5 的"两条合格事件"也要在别名键空间里数——`sources` 与 `qualifying` 两处键空间
+    一分叉，门槛就永远凑不齐（这正是这个洞在政策层的形态）。"""
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[_evidence("e1", "tool", "第一次成功了"),
+                      _evidence("e2", "tool", "第二次踩了坑改过来")])],
+        refs={"e1": "t:ok1", "e2": "t:bad"},
+    )
+    assert len(outcome.accepted) == 1
+
+
+def test_user_authority_is_resolved_through_the_alias_not_the_raw_id() -> None:
+    """R6 的地基不变：角色仍由**回查事件**判定，别名只是"用哪个键去查"。"""
+    user_fact = {"tier": "profile", "payload": _payload("semantic", category="profile")}
+    refs = {"e1": "u:1", "e2": "m:1"}
+
+    accepted = _select(
+        [_candidate(evidence=[_evidence("e1", "user", "我在用 Windows")], **user_fact)],
+        refs=refs)
+    assert len(accepted.accepted) == 1
+
+    # 模型把助手的回复标成 `role="user"`，也不因为换了个键就变成用户证据。
+    rejected = _select(
+        [_candidate(evidence=[_evidence("e2", "user", "用户说他喜欢简洁")], **user_fact)],
+        refs=refs)
+    assert [item.reason for item in rejected.rejected] == [
+        PolicyRejection.USER_FACT_WITHOUT_USER_EVIDENCE
+    ]
+
+
+def test_without_refs_the_keyspace_remains_the_real_event_ids() -> None:
+    """默认参数把键空间留在真 id 上：显式命令路径与既有调用方行为逐字不变。"""
+    assert len(_select([_candidate()]).accepted) == 1
+    assert [item.reason for item in _select(
+        [_candidate(evidence=[_evidence("e1", "user", "请用 pnpm")])]).rejected
+    ] == [PolicyRejection.UNSUPPORTED_SOURCE]

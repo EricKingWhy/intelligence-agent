@@ -154,7 +154,7 @@ def _json(payload: dict[str, Any]) -> str:
 
 def test_a_short_message_survives_verbatim() -> None:
     payload = _payload(run_events=[_user("请用 pnpm")])
-    assert payload["current_run"] == [{"role": "user", "text": "请用 pnpm"}]
+    assert payload["current_run"] == [{"ref": "e1", "role": "user", "text": "请用 pnpm"}]
 
 
 def test_an_over_long_message_is_truncated_with_a_marker() -> None:
@@ -247,10 +247,10 @@ def test_the_current_run_carries_user_and_assistant_text_in_order() -> None:
     payload = _payload(run_events=[_user("第一问", "u1"), _assistant("第一答", "m1"),
                                    _user("第二问", "u2"), _assistant("第二答", "m2")])
     assert payload["current_run"] == [
-        {"role": "user", "text": "第一问"},
-        {"role": "assistant", "text": "第一答"},
-        {"role": "user", "text": "第二问"},
-        {"role": "assistant", "text": "第二答"},
+        {"ref": "e1", "role": "user", "text": "第一问"},
+        {"ref": "e2", "role": "assistant", "text": "第一答"},
+        {"ref": "e3", "role": "user", "text": "第二问"},
+        {"ref": "e4", "role": "assistant", "text": "第二答"},
     ]
 
 
@@ -408,7 +408,7 @@ def test_tool_arguments_never_reach_the_model() -> None:
     ])
     assert FAKE_KEY not in _json(payload)
     assert "秘密正文" not in _json(payload)
-    assert set(payload["tool_calls"][0]) == {"name", "status", "summary", "artifacts"}
+    assert set(payload["tool_calls"][0]) == {"ref", "name", "status", "summary", "artifacts"}
 
 
 def test_structured_tool_data_never_reaches_the_model() -> None:
@@ -677,22 +677,143 @@ def test_the_projection_result_holds_tuples_not_mutable_lists() -> None:
 
 def test_no_raw_session_event_dict_is_carried_into_the_payload() -> None:
     """投影是**重建**而不是裁剪事件 dict：`session_id`/`seq`/`event_id` 这些
-    运行事实不该出现在模型输入里（它们既不帮模型判断，又扩大泄漏面）。"""
+    运行事实不该出现在模型输入里（它们既不帮模型判断，又扩大泄漏面）。
+
+    同时钉住"别名不是真 id 的变形"：`u1` / `m1` 这两个真实事件 id 一个字节都不该出现
+    ——模型必须靠投影**发给它**的 `ref` 来引用，而不是从 `event_id` 里推测。
+    """
     payload = _payload(run_events=[_user("问"), _assistant("答")])
     text = _json(payload)
-    for absent in ("session_id", "event_id", "seq", "schema_version", "injected_by"):
+    for absent in ("session_id", "event_id", "seq", "schema_version", "injected_by",
+                   "u1", "m1"):
         assert absent not in text
 
 
 def test_a_projected_tool_call_is_the_declared_shape() -> None:
+    """载荷里的工具调用**只带** `ProjectedToolCall` 声明的那些键（多一个少一个都会被抓住）。
+
+    `**payload[...]` 是刻意的：键集合不对时构造器直接 `TypeError`，而不会被"只挑我要的
+    字段"那种读法悄悄吞掉——后者正是"新加的字段没接进投影管道"的漏法。
+
+    只断言键与值，**不**断言 `ToolOutcome` / `tuple`：载荷里的是 JSON 形状（`status` 是
+    字符串、`artifacts` 是 list），dataclass 构造器不做类型转换，拿它当契约就成了把
+    序列化格式钉死。
+    """
     payload = _payload(run_events=[
         _call("c1", "run_shell", event_id="tc1"),
         _result("c1", event_id="tr1"),
     ])
-    tool = ProjectedToolCall(
-        name=payload["tool_calls"][0]["name"],
-        status=payload["tool_calls"][0]["status"],
-        summary=payload["tool_calls"][0]["summary"],
-        artifacts=tuple(payload["tool_calls"][0]["artifacts"]),
-    )
-    assert tool.name == "run_shell"
+    tool = ProjectedToolCall(**payload["tool_calls"][0])
+    assert (tool.ref, tool.name, tool.status, tool.summary, tool.artifacts) == (
+        "e1", "run_shell", "success", "done", [])
+
+
+# --------------------------------------------------------------------------------------
+# 第 7 组：证据怎么引 —— 运行时发的别名（T6b 的 P0 修复）
+# --------------------------------------------------------------------------------------
+#
+# 模型必须能说"这句话 / 这次行动出自哪个事件"（§6.1 的 provenance、R5 的"两条合格事件"
+# 都建立在它上面），而真实 `event_id` 与 `session_id` 同族、不进模型。所以投影按出现顺序
+# 发确定性别名 `e1`…`eN`，对照表留在 `FormationInput.refs`（**不进载荷**）。
+#
+# 这一组钉的是"别名与载荷一一对应"：别名顺序一旦与载荷阅读顺序分叉，模型引的 `e2` 就会
+# 指到别的事件上——而那种错在整条链路上没有任何一处会报错。
+
+
+def test_aliases_follow_the_payload_reading_order() -> None:
+    """先 `current_run`（消息）后 `tool_calls`，且顺序就是载荷的阅读顺序。"""
+    result = build_formation_input(run_events=[
+        _user("问", "u1"), _assistant("答", "m1"),
+        _call("c1", "run_shell", event_id="tc1"), _result("c1", event_id="tr1"),
+    ])
+
+    assert [m.ref for m in result.current_run] == ["e1", "e2"]
+    assert [t.ref for t in result.tool_calls] == ["e3"]
+    assert dict(result.refs) == {"e1": "u1", "e2": "m1", "e3": "tr1"}
+
+
+def test_a_tool_call_ref_points_at_the_result_event_not_the_call_event() -> None:
+    """`ref` 指向 `tool/result`——那才是"这次行动发生过"的凭据（R5 读的就是它）。
+
+    指向 `tool/call` 会让模型引一条**没有结果**的事件当证据，而 `_qualifying_event_ids`
+    不认它：引用看起来成立、门槛却永远凑不齐，且没有任何一处报错。
+    """
+    result = build_formation_input(run_events=[
+        _call("c1", "run_shell", event_id="tc1"), _result("c1", event_id="tr1"),
+    ])
+
+    assert dict(result.refs) == {"e1": "tr1"}
+    assert result.tool_calls[0].ref == "e1"
+
+
+def test_a_tool_call_without_a_result_gets_no_ref() -> None:
+    """没有结果事件就没有可引的对象。发个 id 只会让模型以为它可以引。"""
+    result = build_formation_input(run_events=[
+        _call("c1", "run_shell", event_id="tc1"), _user("问", "u1"),
+    ])
+
+    assert result.tool_calls[0].ref is None
+    assert dict(result.refs) == {"e1": "u1"}
+
+
+def test_earlier_messages_never_receive_a_ref() -> None:
+    """历史是上下文，不是 provenance：发个必然解析不了的 id 等于递给模型一条死路。"""
+    result = build_formation_input(
+        run_events=[_user("问", "u1")], history=[_user("旧", "u0")])
+
+    assert result.current_run[0].ref == "e1"
+    assert [m.ref for m in result.earlier_messages] == [None]
+    assert dict(result.refs) == {"e1": "u1"}
+
+
+def test_skipped_events_consume_no_alias() -> None:
+    """进不了载荷的事件不占号：否则别名序列里会出现空洞（`e2` 凭空缺席）。"""
+    result = build_formation_input(run_events=[
+        _injected_user(event_id="u-inj"),
+        _ev(RUN_COMPLETED, {"status": "ok"}, "rc"),
+        _ev("reasoning/completed", {"content": "想了一下"}, "rs"),
+        _user("问", "u1"),
+    ])
+
+    assert [m.ref for m in result.current_run] == ["e1"]
+    assert dict(result.refs) == {"e1": "u1"}
+
+
+def test_the_refs_table_stays_out_of_the_payload_and_is_replayable() -> None:
+    """对照表是**运行时事实**，不是给模型的输入；同时两次投影给出的表必须一致。"""
+    kwargs: dict[str, Any] = {"run_events": [_user("问", "u1"), _assistant("答", "m1")]}
+
+    first, second = build_formation_input(**kwargs), build_formation_input(**kwargs)
+    assert dict(first.refs) == dict(second.refs)
+    assert "e1" in _json(first.to_prompt_payload())      # 别名本身在载荷里
+    assert "u1" not in _json(first.to_prompt_payload())  # 真 id 不在
+    assert "refs" not in first.to_prompt_payload()
+
+
+def test_the_same_event_never_gets_two_aliases() -> None:
+    """同一个事件被投影两次时**复用同一个**别名，不发第二个号。
+
+    为什么不是洁癖：政策侧要把「别名 → 真 id」反过来建成「真 id → 键」的键空间，一个事件
+    拿到两个别名时那个反向映射会折叠到最后一个 ⇒ **载荷广告过的前一个 `ref` 从此解析不到**
+    （模型引它只会落 `unsupported_source`），而全链路不报错。触发它不需要异常输入：同一 run
+    里出现重复的 `tool_call_id`（两条 `tool/call` 配对到同一条 `tool/result`）就够——
+    下面就是这个形状。
+    """
+    result = build_formation_input(run_events=[
+        _call("c1", "run_shell", event_id="tc1"),
+        _result("c1", event_id="tr1"),
+        _call("c1", "run_shell", event_id="tc2"),  # 重复的 tool_call_id
+    ])
+
+    assert [t.ref for t in result.tool_calls] == ["e1", "e1"]
+    # 对照表是**单射**：没有两个别名指向同一事件（这正是上面那条性质的判据）。
+    assert len(set(result.refs)) == len(result.refs)
+    assert list(result.refs.values()) == ["tr1"]
+
+
+def test_the_refs_table_cannot_be_edited_in_place() -> None:
+    """交付出去的输入不该还能被就地改掉——四个元组字段如此，对照表也一样。"""
+    result = build_formation_input(run_events=[_user("问", "u1")])
+
+    with pytest.raises(TypeError):
+        result.refs["e1"] = "改掉"  # type: ignore[index]

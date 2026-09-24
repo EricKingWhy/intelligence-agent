@@ -53,6 +53,11 @@ T0 = datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"
 
+#: 证据引用链用例（第 7 组）用**真 UUID** 做事件 id：`u:1` 这种短 id 有被"别名恰好像真 id"
+#: 的实现蒙对的可能，UUID 蒙不出来。
+RUN_UUID = "6f1a0c62-3e2d-4b8a-9c11-7d5e0a2b4c6d"
+REPLY_UUID = "b3d9f0aa-1c44-4e77-8f21-0a9b8c7d6e5f"
+
 
 # --------------------------------------------------------------------------------------
 # 替身与工厂
@@ -141,6 +146,11 @@ def _roles(*, fallback: bool = False) -> MemoryModelRoles:
 
 
 def _run_events() -> list[SessionEvent]:
+    """本轮事件：投影会给它们发别名 `e1`（用户消息）/ `e2`（助手回复）。
+
+    **候选证据必须引这两个别名**，不能引 `u:1` / `m:1`：模型只看得到载荷，而载荷里装的
+    就是别名（T6b 修的 P0）。用真 id 写用例等于在测一个模型到不了的世界。
+    """
     return [
         SessionEvent(event_id="u:1", seq=1, type=USER_MESSAGE, session_id="session-1",
                      run_id="run-1", data={"content": "请以后都用 pnpm 装依赖"}),
@@ -159,7 +169,7 @@ def _candidate(**overrides) -> dict:
                     "category": "preference"},
         "importance": 0.8,
         "strength": 0.9,
-        "evidence": [{"event_id": "u:1", "role": "user", "excerpt": "请用 pnpm"}],
+        "evidence": [{"event_id": "e1", "role": "user", "excerpt": "请用 pnpm"}],
         "sensitivity": "ordinary",
     }
     raw.update(overrides)
@@ -296,7 +306,7 @@ async def test_every_noop_completes_quietly(env: Env) -> None:
 @pytest.mark.asyncio
 async def test_policy_rejections_do_not_reach_adjudication(env: Env) -> None:
     """被政策拒掉的候选**不进**裁决：它们不该占用模型调用，也不该被喂回模型。"""
-    secret_candidate = _candidate(evidence=[{"event_id": "u:1", "role": "user",
+    secret_candidate = _candidate(evidence=[{"event_id": "e1", "role": "user",
                                              "excerpt": f"我的 key 是 {SECRET}"}])
     invoker = FakeInvoker(
         formation=[_formation_candidates(secret_candidate)], adjudication=[])
@@ -371,8 +381,8 @@ async def test_repeated_evidence_references_are_deduplicated_but_all_kept(env: E
     `_add(...)` 里——放在候选上只影响政策，进不了落盘的那条记录。
     """
     duplicated = [
-        {"event_id": "u:1", "role": "user", "excerpt": "请用 pnpm"},
-        {"event_id": "u:1", "role": "user", "excerpt": "以后都用 pnpm"},
+        {"event_id": "e1", "role": "user", "excerpt": "请用 pnpm"},
+        {"event_id": "e1", "role": "user", "excerpt": "以后都用 pnpm"},
     ]
     invoker = FakeInvoker(
         formation=[_formation_candidates(_candidate())],
@@ -776,9 +786,11 @@ async def test_the_formation_call_carries_the_safe_projection(env: Env) -> None:
     call = invoker.calls[0]
     assert call.stage is MemoryModelStage.FORMATION
     assert call.payload["current_run"] == [
-        {"role": "user", "text": "请以后都用 pnpm 装依赖"},
-        {"role": "assistant", "text": "好的"},
+        {"ref": "e1", "role": "user", "text": "请以后都用 pnpm 装依赖"},
+        {"ref": "e2", "role": "assistant", "text": "好的"},
     ]
+    # AC9 的另一半：真实事件 id 不进模型输入——模型只能引投影发给它的别名。
+    assert "u:1" not in json.dumps(call.payload, ensure_ascii=False)
     assert call.max_output_tokens == 4000
     assert call.timeout_seconds > 0
 
@@ -800,7 +812,7 @@ async def test_a_secret_never_reaches_the_model_input_record_or_event(env: Env) 
     ]
     secret_candidate = _candidate(
         content=f"用户的 API key 是 {SECRET}",
-        evidence=[{"event_id": "u:1", "role": "user", "excerpt": secret_text}])
+        evidence=[{"event_id": "e1", "role": "user", "excerpt": secret_text}])
     invoker = FakeInvoker(
         formation=[_formation_candidates(secret_candidate)], adjudication=[])
     job = await _claimed(env)
@@ -835,3 +847,120 @@ async def test_the_degraded_event_carries_only_stable_metadata(env: Env) -> None
     assert data["reason_code"] == DegradedReason.PROVIDER_ERROR.value
     assert data["fallback_used"] is False
     assert run_id == "run-1"
+
+
+# --------------------------------------------------------------------------------------
+# 第 7 组：证据引用链（T6b 的 P0 修复）
+# --------------------------------------------------------------------------------------
+#
+# 模型看得到的只有投影载荷，而载荷里的事件引用是**别名**（`e1`…）。这条链有三段，
+# 任何一段断开都是一个静默的坏结局：政策段断了 ⇒ 生产路径上每条候选都落
+# `unsupported_source`（自动记忆零写入）；落盘段断了 ⇒ 库里存着指向不存在事件的引用。
+# 本组把三段各钉一次，并且用**真 UUID** 做事件 id——`u:1` 有被"别名恰好像真 id"蒙对的余地。
+
+
+@pytest.mark.asyncio
+async def test_a_well_cited_candidate_is_accepted_and_reaches_adjudication(env: Env) -> None:
+    """P0 的核心断言：证据引投影发的别名 ⇒ 政策**接受**，并且真的走到裁决与落盘。
+
+    修好之前这条会以 `rejected={"unsupported_source": 1}`、零裁决调用、零写入收场。
+    有判别力的正是 `state` 里那两个计数——"没写成"这个结果本身不区分原因，
+    而这套归因把它钉到具体那一条判据上。
+    """
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())], adjudication=[_adjudication(_add())])
+    job, result, _sink = await _run(env, invoker)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
+    state = (await env.jobs.get(job.job_id)).state
+    assert (state["accepted"], state["rejected"]) == (1, {})
+    assert [c.stage for c in invoker.calls] == [
+        MemoryModelStage.FORMATION, MemoryModelStage.ADJUDICATION]
+
+
+@pytest.mark.asyncio
+async def test_the_alias_is_translated_back_to_the_real_event_id_before_it_is_stored(
+    env: Env,
+) -> None:
+    """落盘段的闭合：模型引 `e1`，写进记录的是**真实事件 id**。
+
+    断言对象是 `source_event_ids`——§6.1 的 provenance。写成别名就是一条指向不存在事件的
+    记忆：不可审计、不可撤回，而且读取侧不会有任何报错。
+    """
+    events = [
+        SessionEvent(event_id=RUN_UUID, seq=1, type=USER_MESSAGE, session_id="session-1",
+                     run_id="run-1", data={"content": "以后都用 pnpm"}),
+        SessionEvent(event_id=REPLY_UUID, seq=2, type=MODEL_COMPLETED, session_id="session-1",
+                     run_id="run-1", data={"content": "好的"}),
+    ]
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())], adjudication=[_adjudication(_add())])
+    job = await _claimed(env)
+    result = await _executor(env, invoker).run(
+        job, worker_id="worker-1", run_events=events, roles=_roles(), sink=RecordingSink())
+
+    assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
+    stored = await env.store.get(result.written[0].id, USER_A)
+    assert stored.source_event_ids == [RUN_UUID]
+    assert stored.evidence[0].hash == hashlib.sha256("请用 pnpm".encode()).hexdigest()
+    formation_payload = json.dumps(invoker.calls[0].payload, ensure_ascii=False)
+    assert RUN_UUID not in formation_payload
+    assert "e1" in formation_payload
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_citing_a_ref_the_projection_never_issued_is_rejected(env: Env) -> None:
+    """引投影没发过的号（`e9`）与引真实 id（`u:1`）是同一件事：解析不到 ⇒ fail closed。
+
+    只验"被拒"没有判别力（修好之前连合法候选也落同一个归因）；这里验的是**归因落在
+    `unsupported_source` 上**，并且模型压根不该被请去裁决一条站不住的候选。
+    """
+    ghost = _candidate(evidence=[{"event_id": "e9", "role": "user", "excerpt": "查无此号"}],
+                       content="用户偏好某件没人说过的事")
+    invoker = FakeInvoker(formation=[_formation_candidates(ghost)], adjudication=[])
+    job, result, _sink = await _run(env, invoker)
+
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.NO_WRITE
+    assert [c.stage for c in invoker.calls] == [MemoryModelStage.FORMATION]
+    assert (await env.jobs.get(job.job_id)).state["rejected"] == {"unsupported_source": 1}
+    assert await _active(env) == []
+
+
+@pytest.mark.asyncio
+async def test_a_real_event_id_is_not_a_valid_citation_for_the_model(env: Env) -> None:
+    """反向锁：模型**不能**靠真 id 引用（它压根看不到真 id），别名是唯一入口。
+
+    这条防的是"为了让老用例继续过"而把两种键都收进键空间——那会让模型凭空拥有引用任意
+    会话事件的能力，而它本来只该能引投影发给它的那几个。
+    """
+    real_id = _candidate(evidence=[{"event_id": "u:1", "role": "user", "excerpt": "请用 pnpm"}],
+                         content="用户偏好用 pnpm 安装依赖")
+    invoker = FakeInvoker(formation=[_formation_candidates(real_id)], adjudication=[])
+    job, result, _sink = await _run(env, invoker)
+
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.NO_WRITE
+    assert (await env.jobs.get(job.job_id)).state["rejected"] == {"unsupported_source": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_whose_evidence_resolves_to_nothing_is_discarded(env: Env) -> None:
+    """裁决阶段能重写证据（它看到的是候选的 JSON），重写成解析不到的引用**只废这一条**。
+
+    §6.1 要求 `source_event_ids` 非空，所以这条动作不是"少写几个字段"而是不成立；
+    但它不该连累同批里合法的写入（与越权 UPDATE 的逐条隔离同款），归因码也单独一串——
+    `evidence_unresolved` 说的是"模型引了个不存在的 ref"，与版本冲突、越权都不是一回事。
+    """
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate(), _candidate(content="第二条候选"))],
+        adjudication=[_adjudication(
+            _add(evidence=[{"event_id": "e404", "role": "user", "excerpt": "查无此号"}]),
+            _add(content="用户偏好用 pnpm 装依赖"))])
+    job, result, sink = await _run(env, invoker)
+
+    assert result is not None
+    assert result.outcome is MemoryJobOutcome.COMMITTED
+    assert len(result.written) == 1
+    assert sink.events[0][1]["actions"] == {"ADD": 1}
+    assert (await env.jobs.get(job.job_id)).state["discarded"] == {"evidence_unresolved": 1}

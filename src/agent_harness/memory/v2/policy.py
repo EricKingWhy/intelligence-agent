@@ -355,6 +355,7 @@ def select_candidates(
     candidates: Sequence[FormationCandidate], *,
     events: Iterable[SessionEvent],
     explicit_remember: bool = False,
+    refs: Mapping[str, str] | None = None,
 ) -> CandidateSelection:
     """政策执法 + 名额截断。
 
@@ -362,16 +363,28 @@ def select_candidates(
     **它是必填的关键字参数**：默认成空集合会让所有用户事实静默变成"没有用户证据"
     ——一处沉默的过严比一处沉默的过松更难发现，所以不给自己留这个口子。
 
+    `refs` 是投影层发的**别名对照表**（`别名 → 真实 event_id`，见 `projection` 模块
+    docstring）。传了它，候选证据的 `event_id` 就按**别名**解析；`None`（默认）时按真实 id
+    解析。默认保持 `None` 是刻意的：这个参数是"模型能引什么"的唯一开关，默认成别名会让
+    不带投影的调用方（显式命令路径、纯函数用例）静默全落 `unsupported_source`——一处
+    沉默的过严，和生产路径上那个洞一样致命，只是方向相反。
+
     `explicit_remember` 是**运行时**持有的同意信号（`Remember X` 那条命令路径的产物，
     PRD §5.6.1）。自动形成路径上恒为 False。模型输出里没有任何字段能影响它。
     """
     # 先物化再建两份索引：`events` 声明成 `Iterable`，若调用方传的是生成器，
     # 第二遍遍历会看到空序列——那会让 "qualifying" 静默变成空集（一处沉默的过严）。
     event_list = list(events)
+    keys = _evidence_keys(event_list, refs)
     sources: dict[str, EvidenceSource] = {
-        event.event_id: resolve_evidence_source(event) for event in event_list
+        keys[event.event_id]: resolve_evidence_source(event)
+        for event in event_list if event.event_id in keys
     }
-    qualifying = _qualifying_event_ids(event_list)
+    # 合格集也要过同一张对照表：`sources` 按别名建键而它按真实 id 建键时，
+    # R5 的门槛会永远数不到两条——两处键空间分叉正是这个洞的形态。
+    qualifying = frozenset(
+        keys[event_id] for event_id in _qualifying_event_ids(event_list) if event_id in keys
+    )
     admissible: list[tuple[int, FormationCandidate]] = []
     rejected: list[RejectedCandidate] = []
     for index, candidate in enumerate(candidates):
@@ -385,6 +398,25 @@ def select_candidates(
 
     accepted = _rank_and_cap(admissible, rejected)
     return CandidateSelection(accepted=tuple(accepted), rejected=tuple(rejected))
+
+
+def _evidence_keys(
+    events: Sequence[SessionEvent], refs: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """真实 `event_id` → **模型可以引用的键**。
+
+    `refs=None` ⇒ 键就是真实 id，行为与别名引入前逐字一致。带 `refs` 时键空间＝投影发出去
+    的那张对照表。
+
+    **本函数只做翻译，不设门**：门在调用点那两处推导式的 `if ... in keys` 上（`sources` 与
+    `qualifying` 都只遍历 `event_list`），所以投影没发过别名的事件压根进不了键空间——"模型
+    引不到的东西解析不了"由此成立，错误方向是 fail closed。曾经在这里多加过一道
+    `if real in known` 的过滤，后来实测它对 `sources` / `qualifying` 都无影响（两处本来
+    就只看 `event_list` 里的 id），属不产生行为的第二层，已删。
+    """
+    if refs is None:
+        return {event.event_id: event.event_id for event in events}
+    return {real: alias for alias, real in refs.items()}
 
 
 def _reject(
