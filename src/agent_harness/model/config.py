@@ -41,24 +41,17 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         # DashScope 兼容模式支持 function calling。
         "supports_tools": True,
     },
-    # 腾讯 Coding Plan（OpenAI 兼容）。base_url 不含 /chat/completions，
-    # SDK 会自动拼接；无默认模型，MODEL_NAME 必填。
-    "tencent": {
-        "model_base_url": "https://chatapi.weixin.qq.com/openai/v1",
-        "model_name": "",
+    # Xiaomi MiMo（OpenAI Chat Completions 兼容）；官方列出的默认通用对话模型。
+    "mimo": {
+        "model_base_url": "https://api.xiaomimimo.com/v1",
+        "model_name": "mimo-v2.6-flash",
+        # 官方模型规格明确支持 function tool calling。
+        "supports_tools": True,
     },
     # SenseAudio（OpenAI 兼容）。无默认模型，MODEL_NAME 必填。
     "senseaudio": {
         "model_base_url": "https://api.senseaudio.cn/v1",
         "model_name": "",
-    },
-    # 智谱 BigModel（OpenAI 兼容）。无默认模型，MODEL_NAME 必填
-    # （如 glm-4.5-air；思考模型，流式 reasoning 增量连续，不触发 idle 看门狗）。
-    "zhipu": {
-        "model_base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model_name": "",
-        # GLM-4 系列支持 function calling。
-        "supports_tools": True,
     },
 }
 

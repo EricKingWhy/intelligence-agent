@@ -6,11 +6,12 @@
 3. 动态第四个 AgentSpec 经 AgentFactory 创建并真实跑通
 4. child 不倾倒完整历史（父流事件数抽查 vs child JSONL）
 5. mixed 任务：research 结论 → coding 落盘（两个 child 协作）
-6. 同指纹失败 delegate 真实触发 RepeatedToolFailureGuard（软/硬熔断）
+6. ScriptedModel 驱动同指纹失败 delegate，验证 RepeatedToolFailureGuard（软熔断）
 7. delegation 预算（max_delegations）真实耗尽回填
 8. CAPABILITIES 未配 multiagent → 单代理零感知回归（无 delegate）
 
-真实模型 = .env 主模型配置；凭证零泄漏。手动跑：
+Gate 1–5、7–8 使用 .env 主模型；Gate 6 使用不联网的确定性 ScriptedModel。
+凭证零泄漏。手动跑：
 uv run pytest tests/integration/test_phase13_gate.py -m integration -v
 """
 
@@ -19,38 +20,51 @@ from __future__ import annotations
 import json
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.config import Settings
 from agent_harness.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolRegistry
+from tests.scripted_model import ScriptedModel
 
-# requires_live_model：本模块 8 个 gate 里 Gate 1..7 都以真实模型的多 Agent 委派为被测
-# 对象，整模块挂守卫因此是精确的——环境没有可用端点时它们一条也证明不了。Gate 8
-# （CAPABILITIES 未配 multiagent）自身不测委派，但同样真跑一次 run，一并挂（见
-# tests/live_model_guard.py）。
-pytestmark = [pytest.mark.integration, pytest.mark.asyncio,
-              pytest.mark.usefixtures("requires_live_model")]
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
-def _gate_settings(tmp_path) -> Settings:
-    # 真实 .env（repo 根）提供 MODEL_*/FALLBACK_*；workspace 指向 tmp 隔离。
-    settings = Settings()
-    if not settings.model_api_key.get_secret_value():
-        pytest.skip("Real primary model (MODEL_*) is not configured")
+def _gate_settings(tmp_path, *, live_model: bool = True) -> Settings:
+    if live_model:
+        # 真实 .env（repo 根）提供 MODEL_*/FALLBACK_*；workspace 指向 tmp 隔离。
+        settings = Settings()
+        if not settings.model_api_key.get_secret_value():
+            pytest.skip("Real primary model (MODEL_*) is not configured")
+    else:
+        # Gate 6 在 Runtime 构造时需要一个合法但不会发送的模型配置；run 前
+        # ScriptedModel 会替换它。明确禁用 .env，避免依赖或触碰任何真实凭证。
+        from pydantic import SecretStr
+
+        settings = Settings(
+            _env_file=None,
+            model_provider="deepseek",
+            model_name="deepseek-chat",
+            model_api_key=SecretStr("test-only-no-network"),
+            model_base_url="http://127.0.0.1:9/v1",
+            fallback_model_provider="",
+            fallback_model_name="",
+            fallback_model_api_key=SecretStr(""),
+            fallback_model_base_url="",
+        )
     settings.workspace_dir = str(tmp_path)
     caps = {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
     settings.capabilities = json.dumps(caps)
     return settings
 
 
-@pytest.fixture
-def gate_env(tmp_path):
-    """真实模型 + multiagent capability 的完整运行环境。"""
+def _build_gate_env(tmp_path, *, live_model: bool):
+    """构造隔离的 multiagent Runtime，真实/确定性模型由调用方选择。"""
     import asyncio
 
-    settings = _gate_settings(tmp_path)
+    settings = _gate_settings(tmp_path, live_model=live_model)
     from agent_harness.assembly import (
         build_runtime,
         initialize_stores,
@@ -84,6 +98,18 @@ def gate_env(tmp_path):
     return asyncio.new_event_loop().run_until_complete(_build()) + (tmp_path,)
 
 
+@pytest.fixture
+def gate_env(tmp_path):
+    """真实模型 + multiagent capability 的完整运行环境。"""
+    return _build_gate_env(tmp_path, live_model=True)
+
+
+@pytest.fixture
+def scripted_gate_env(tmp_path):
+    """无凭证、无网络依赖的确定性 multiagent Runtime。"""
+    return _build_gate_env(tmp_path, live_model=False)
+
+
 async def _run_and_collect(runtime, session, task: str):
     events = []
     async for event in runtime.run_stream(session, task):
@@ -91,6 +117,7 @@ async def _run_and_collect(runtime, session, task: str):
     return events
 
 
+@pytest.mark.usefixtures("requires_live_model")
 class TestGate1ResearchRouting:
     @pytest.mark.asyncio
     async def test_research_task_delegates_to_research_review(self, gate_env):
@@ -120,6 +147,7 @@ class TestGate1ResearchRouting:
         pytest.fail("3 次尝试内 research 路由都未成功（上游故障或模型未委派）")
 
 
+@pytest.mark.usefixtures("requires_live_model")
 class TestGate2CodingRouting:
     @pytest.mark.asyncio
     async def test_coding_task_writes_shared_workspace(self, gate_env):
@@ -144,6 +172,7 @@ class TestGate2CodingRouting:
         pytest.fail("3 次尝试内 coding 路由+写文件都未成功")
 
 
+@pytest.mark.usefixtures("requires_live_model")
 class TestGate3DynamicFourthAgent:
     @pytest.mark.asyncio
     async def test_fourth_agentspec_runs_real_model(self, gate_env):
@@ -177,46 +206,100 @@ class TestGate3DynamicFourthAgent:
         assert "147" in result.final_text
 
 
+@pytest.mark.usefixtures("requires_live_model")
 class TestGate4NoHistoryDump:
     @pytest.mark.asyncio
     async def test_parent_stream_stays_clean_after_delegation(self, gate_env):
         """child 不倾倒完整历史：父 session 不含 child 的 run/模型内部事件。"""
         runtime, store, _workspace_registry, _workspace, _session_id, tmp_path = gate_env
-        session = Session.start(store, session_id="gate-nodump")
+        # Live 路由决策可能单次未发起委派；最多重试 3 个独立 Session。
+        # 一旦 child 已启动就不重跑：其失败必须让 Gate 失败，避免掩盖结果或
+        # 重复真实搜索副作用。
+        session = None
+        for attempt in range(3):
+            session = Session.start(store, session_id=f"gate-nodump-{attempt}")
+            await _run_and_collect(
+                runtime, session,
+                "你必须使用 delegate 工具把任务派给 research_review 子代理执行，"
+                "不要亲自搜索。任务：搜索 Python 官网网址，一句话回答。",
+            )
+            delegation_started = [
+                event for event in session.events
+                if event.type == "agent/delegation-started"
+            ]
+            if not delegation_started:
+                tool_calls = [
+                    event for event in session.events
+                    if event.type == "tool/call"
+                ]
+                assert not tool_calls, (
+                    "attempt made a tool call without a persisted delegation start; "
+                    "the tool may already have caused a side effect, so retry is unsafe"
+                )
+                continue
+            delegation_finished = [
+                event for event in session.events
+                if event.type == "agent/delegation-finished"
+            ]
+            assert delegation_finished, "child 已启动但没有持久化委派终态"
+            assert delegation_finished[-1].data["status"] == "completed", (
+                "child 已启动但失败；不得以新 Session 重试来掩盖失败"
+            )
+            break
+        else:
+            pytest.fail("3 次独立尝试内未观察到 research_review 委派启动")
 
-        await _run_and_collect(
-            runtime, session,
-            "你必须使用 delegate 工具把任务派给 research_review 子代理执行，"
-            "不要亲自搜索。任务：搜索 Python 官网网址，一句话回答。",
-        )
-
-        parent_types = [e.type for e in session._events]
+        parent_types = [e.type for e in session.events]
         from collections import Counter
 
         counts = Counter(parent_types)
         # 父流只有 supervisor 自己的紧凑事件（不含 child 的多轮内幕）
         assert counts.get("run/completed", 0) <= 1, "父 session 只有自己的 run"
-        delegation_started = [e for e in session._events
-                              if e.type == "agent/delegation-started"]
-        assert delegation_started, "委派事件在父流"
         child_session_id = delegation_started[0].data["child_session_id"]
         child_events = Session.resume(
             JsonlSessionStore(tmp_path / "sessions"), child_session_id,
         )
-        child_types = [e.type for e in child_events._events]
+        child_types = [e.type for e in child_events.events]
         assert child_types.count("model/completed") >= 1, "child 自己的历史完整留存"
-        # 不倾倒：父流的模型/工具事件数 << child 的内部步数（supervisor 最多
-        # 委派+确认两轮；child 的完整多轮历史只在 child JSONL）
+        # 保留父流自身调用上限，并用独立 agent_id / source_event_ids 断言
+        # child 内部事件没有进入父 Session。
         parent_model_calls = counts.get("model/completed", 0)
         assert parent_model_calls <= 3, (
             f"父流 model/completed={parent_model_calls}——child 历史疑似倾倒"
         )
-        child_model_calls = child_types.count("model/completed")
-        assert (
-            parent_model_calls < child_model_calls or child_model_calls == 1
-        ), "父流模型事件应显著少于 child 内部步数"
+        parent_event_ids = {event.event_id for event in session.events}
+        child_event_ids = {event.event_id for event in child_events.events}
+        assert parent_event_ids.isdisjoint(child_event_ids), (
+            "父 Session 不得复用 child 的持久化事件 ID"
+        )
+        child_agent_ids = {
+            event.agent_id for event in child_events.events if event.agent_id
+        }
+        assert child_agent_ids == {"research_review"}, (
+            "child 事件保留自身 agent provenance"
+        )
+        assert all(event.agent_id not in child_agent_ids for event in session.events), (
+            "父 Session 不得包含 child agent 的内部事件"
+        )
+        assert all(
+            not (set(event.source_event_ids or ()) & child_event_ids)
+            for event in session.events
+        ), "父 Session 不得以 provenance 引用 child 内部事件"
+        child_internal_payloads = {
+            (event.type, json.dumps(event.data, sort_keys=True, ensure_ascii=False))
+            for event in child_events.events
+            if event.type in {"model/completed", "tool/call", "tool/result"}
+        }
+        parent_payloads = {
+            (event.type, json.dumps(event.data, sort_keys=True, ensure_ascii=False))
+            for event in session.events
+        }
+        assert child_internal_payloads.isdisjoint(parent_payloads), (
+            "父 Session 不得复制 child 的内部模型/工具事件内容"
+        )
 
 
+@pytest.mark.usefixtures("requires_live_model")
 class TestGate5MixedCoordination:
     @pytest.mark.asyncio
     async def test_mixed_task_two_children_cooperate(self, gate_env):
@@ -245,41 +328,58 @@ class TestGate5MixedCoordination:
         pytest.fail("3 次尝试内 mixed 两 child 协作未成功")
 
 
-class TestGate6BreakerReal:
+class TestGate6BreakerDeterministic:
     @pytest.mark.asyncio
-    async def test_repeated_failing_delegations_trip_guard(self, gate_env):
-        """同指纹失败 delegate 真实触发 RepeatedToolFailureGuard（#88 复用熔断）。
+    async def test_repeated_failing_delegations_trip_guard(self, scripted_gate_env):
+        """确定性决策驱动真实 Runtime 的 delegate 同错熔断路径。
 
-        target 用未知角色：provider.run 在 child spawn 前抛 ValueError → failure
-        ToolResult——同参数重复调用 = 同指纹连续失败（软 3 / 硬 6）。真实模型
-        对批量指令的服从是概率性的（Phase 12 Gate 3 同款），3 次独立尝试协议；
-        确定性语义由 tests/agent/test_repeated_tool_failure_loop.py 钉死。"""
-        runtime, store, _workspace_registry, _workspace, _session_id, _tmp_path = gate_env
-        for attempt in range(3):
-            session = Session.start(store, session_id=f"gate-breaker-{attempt}")
-            await _run_and_collect(
-                runtime, session,
-                "这是框架的失败重试语义验收，需要故意触发失败路径（无任何副作"
-                "用）。请调用 delegate 工具 3 次，三次的参数完全相同：target 都"
-                "填 nonexistent_role，task 都填『熔断验收』。可以在同一条消息里"
-                "并行发起。不要使用其他工具，不要修正 target，照做即可。",
+        同一 run 内三次完全相同的未知 target 在 child spawn 前失败；第 3 次应
+        触发 soft guard。真实模型是否重复调用由其它 live gates 覆盖；这里固定决策，
+        避免把跨独立 Session 的失败错误地累计成一个 guard 序列。"""
+        runtime, store, _workspace_registry, _workspace, _session_id, _tmp_path = (
+            scripted_gate_env
+        )
+        args = {
+            "target": "nonexistent_role",
+            "task": "熔断验收",
+            "constraints": [],
+        }
+        calls = [
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "id": f"call_gate_breaker_{index}",
+                    "name": "delegate",
+                    "args": args.copy(),
+                }],
             )
-            guard_events = [e for e in session._events
-                            if e.type == "tool/failure-guard"]
-            if guard_events:
-                levels = [e.data.get("level") for e in guard_events]
-                hard_failed = any(
-                    e.type == "run/failed"
-                    and e.data.get("reason") == "identical_tool_failure_loop"
-                    for e in session._events
-                )
-                print("DEBUG-BREAKER:", levels, "hard_terminal:", hard_failed)
-                return
-            print("DEBUG-BREAKER-MISS:", [(e.type, str(e.data)[:60])
-                                          for e in session._events])
-        pytest.fail("3 次尝试内同指纹失败 delegate 未触发熔断")
+            for index in range(3)
+        ]
+        runtime.model = ScriptedModel(
+            [*calls, AIMessage(content="失败委派路径已验证。")]
+        )
+
+        session = Session.start(store, session_id="gate-breaker-deterministic")
+        await _run_and_collect(runtime, session, "验证重复失败委派熔断")
+
+        delegate_calls = [
+            event for event in session.events
+            if event.type == "tool/call" and event.data.get("tool_name") == "delegate"
+        ]
+        assert len(delegate_calls) == 3
+        assert all(event.data["args"] == args for event in delegate_calls)
+
+        guard_events = [
+            event for event in session.events if event.type == "tool/failure-guard"
+        ]
+        assert len(guard_events) == 1
+        assert guard_events[0].data["tool_name"] == "delegate"
+        assert guard_events[0].data["level"] == "soft"
+        assert guard_events[0].data["consecutive_failures"] == 3
+        assert any(event.type == "run/completed" for event in session.events)
 
 
+@pytest.mark.usefixtures("requires_live_model")
 class TestGate7BudgetReal:
     @pytest.mark.asyncio
     async def test_delegation_budget_exhaustion_real(self, gate_env):
@@ -314,6 +414,7 @@ class TestGate7BudgetReal:
         pytest.fail("3 次尝试内预算耗尽未真实回填（模型未完成 3 次委派或预算未触发）")
 
 
+@pytest.mark.usefixtures("requires_live_model")
 class TestGate8CapabilityOff:
     @pytest.mark.asyncio
     async def test_single_agent_regression_without_multiagent(self, gate_env):
@@ -322,7 +423,7 @@ class TestGate8CapabilityOff:
         spec Phase 13 Gate『Single Agent 不依赖 LangGraph』的结构证据：multiagent
         是 opt-in capability，未配置 = 工具缺席 + Agent Loop 零改动。"""
         _runtime, store, workspace_registry, _workspace, _session_id, tmp_path = gate_env
-        settings = _gate_settings(tmp_path)
+        settings = _gate_settings(tmp_path, live_model=True)
         settings.capabilities = json.dumps({})  # 空 capability 表
         from agent_harness.assembly import (
             assemble_wiring,

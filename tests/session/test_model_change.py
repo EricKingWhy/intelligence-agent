@@ -39,10 +39,10 @@ from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from agent_harness.web.app import session_service
 
-#: 两个 catalog 条目，provider 必须命中预设（deepseek / zhipu）。
+#: 两个 catalog 条目，provider 必须命中预设（deepseek / mimo）。
 _CATALOG = (
     '[{"name": "gpt-4o", "provider": "deepseek", "model_name": "gpt-4o-mini"},'
-    ' {"name": "glm-4.5", "provider": "zhipu", "model_name": "glm-4.5"}]'
+    ' {"name": "mimo-v2.6-flash", "provider": "mimo", "model_name": "mimo-v2.6-flash"}]'
 )
 
 
@@ -110,22 +110,22 @@ class TestChangeModel:
 
         change = asyncio.run(
             service.change_model(
-                session_id="sid", provider="zhipu", model_id="glm-4.5"
+                session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
             )
         )
 
         assert change.from_provider == "deepseek"
         assert change.from_model_id == "gpt-4o"
-        assert change.to_provider == "zhipu"
-        assert change.to_model_id == "glm-4.5"
+        assert change.to_provider == "mimo"
+        assert change.to_model_id == "mimo-v2.6-flash"
 
         events = state.store.read_events("sid")
         assert events[-1].type == MODEL_CHANGED
         assert events[-1].data == {
             "from_provider": "deepseek",
             "from_model_id": "gpt-4o",
-            "to_provider": "zhipu",
-            "to_model_id": "glm-4.5",
+            "to_provider": "mimo",
+            "to_model_id": "mimo-v2.6-flash",
         }
 
     def test_second_change_derives_from_previous_change(self, tmp_path):
@@ -134,14 +134,14 @@ class TestChangeModel:
         service = session_service(state)
 
         asyncio.run(
-            service.change_model(session_id="sid", provider="zhipu", model_id="glm-4.5")
+            service.change_model(session_id="sid", provider="mimo", model_id="mimo-v2.6-flash")
         )
         change = asyncio.run(
             service.change_model(session_id="sid", provider="deepseek", model_id="gpt-4o")
         )
 
-        assert change.from_provider == "zhipu"
-        assert change.from_model_id == "glm-4.5"
+        assert change.from_provider == "mimo"
+        assert change.from_model_id == "mimo-v2.6-flash"
         assert change.to_provider == "deepseek"
         assert change.to_model_id == "gpt-4o"
 
@@ -153,7 +153,7 @@ class TestChangeModel:
         with pytest.raises(UnknownModel):
             asyncio.run(
                 service.change_model(
-                    session_id="sid", provider="zhipu", model_id="does-not-exist"
+                    session_id="sid", provider="mimo", model_id="does-not-exist"
                 )
             )
 
@@ -166,7 +166,7 @@ class TestChangeModel:
         with pytest.raises(UnknownModel):
             asyncio.run(
                 service.change_model(
-                    session_id="sid", provider="zhipu", model_id="gpt-4o"
+                    session_id="sid", provider="mimo", model_id="gpt-4o"
                 )
             )
 
@@ -177,7 +177,7 @@ class TestChangeModel:
         with pytest.raises(SessionNotFound):
             asyncio.run(
                 service.change_model(
-                    session_id="nope", provider="zhipu", model_id="glm-4.5"
+                    session_id="nope", provider="mimo", model_id="mimo-v2.6-flash"
                 )
             )
 
@@ -200,7 +200,7 @@ class TestChangeModel:
         with pytest.raises(UnknownModel):
             asyncio.run(
                 session_service(state).change_model(
-                    session_id="sid", provider="zhipu", model_id="glm-4.5"
+                    session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
                 )
             )
 
@@ -239,14 +239,31 @@ class TestRuntimeReadsSessionModel:
                     seq=1,
                     type=MODEL_CHANGED,
                     session_id="sid",
-                    data={"to_provider": "zhipu", "to_model_id": "glm-4.5"},
+                    data={"to_provider": "mimo", "to_model_id": "mimo-v2.6-flash"},
                 ),
             ]
         )
 
         kwargs = _resume_capture(state)
 
-        assert kwargs["model_name"] == "glm-4.5"
+        assert kwargs["model_name"] == "mimo-v2.6-flash"
+
+    def test_removed_provider_in_persisted_session_falls_back_to_default(self, tmp_path):
+        """旧 provider 事件不可变；目录移除后续聊回落默认链而非 500。"""
+        state = _state(tmp_path)
+        state.store = MagicMock()
+        legacy_event = SessionEvent(
+            seq=0,
+            type=MODEL_CHANGED,
+            session_id="sid",
+            data={"to_provider": "zhipu", "to_model_id": "glm-4.5"},
+        )
+        state.store.read_events = MagicMock(return_value=[legacy_event])
+
+        kwargs = _resume_capture(state)
+
+        assert kwargs["model_name"] is None
+        assert state.store.read_events("sid") == [legacy_event]
 
     def test_explicit_amend_model_wins(self, tmp_path):
         state = _state(tmp_path)
@@ -262,9 +279,9 @@ class TestRuntimeReadsSessionModel:
             ]
         )
 
-        kwargs = _resume_capture(state, amend=AmendOptions(model="glm-4.5"))
+        kwargs = _resume_capture(state, amend=AmendOptions(model="mimo-v2.6-flash"))
 
-        assert kwargs["model_name"] == "glm-4.5"
+        assert kwargs["model_name"] == "mimo-v2.6-flash"
 
     def test_no_session_model_keeps_default_chain(self, tmp_path):
         state = _state(tmp_path)
@@ -406,7 +423,7 @@ class TestChangeModelDoesNotResume:
 
         asyncio.run(
             session_service(state).change_model(
-                session_id="sid", provider="zhipu", model_id="glm-4.5"
+                session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
             )
         )
 
@@ -458,7 +475,7 @@ class TestChangeModelDoesNotResume:
 
         asyncio.run(
             session_service(state).change_model(
-                session_id="sid", provider="zhipu", model_id="glm-4.5"
+                session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
             )
         )
         live.append(USER_MESSAGE, {"content": "after"})
@@ -482,7 +499,7 @@ class TestChangeModelDoesNotResume:
 
         asyncio.run(
             session_service(state).change_model(
-                session_id="sid", provider="zhipu", model_id="glm-4.5"
+                session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
             )
         )
 
@@ -522,7 +539,7 @@ class TestConcurrentModelChange:
         async def run_both():
             return await asyncio.gather(
                 session_service(state).change_model(
-                    session_id="sid", provider="zhipu", model_id="glm-4.5"
+                    session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
                 ),
                 session_service(state).change_model(
                     session_id="sid", provider="deepseek", model_id="gpt-4o"
@@ -538,7 +555,7 @@ class TestConcurrentModelChange:
         model_changes = [e for e in events if e.type == MODEL_CHANGED]
         # 两个切换都生效——不是「第二个被静默丢掉」
         assert len(model_changes) == 2
-        assert {c.to_model_id for c in changes} == {"glm-4.5", "gpt-4o"}
+        assert {c.to_model_id for c in changes} == {"mimo-v2.6-flash", "gpt-4o"}
         # 后一条的 from_* 必须看到前一条的结果（冲突后重新取快照，不沿用旧快照）
         assert (
             model_changes[1].data["from_model_id"]
@@ -565,7 +582,7 @@ class TestConcurrentModelChange:
         with pytest.raises(SeqConflict):
             asyncio.run(
                 session_service(state).change_model(
-                    session_id="sid", provider="zhipu", model_id="glm-4.5"
+                    session_id="sid", provider="mimo", model_id="mimo-v2.6-flash"
                 )
             )
 

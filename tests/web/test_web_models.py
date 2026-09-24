@@ -14,7 +14,8 @@ from agent_harness.web.app import create_app
 from tests.scripted_model import ScriptedModel
 
 _AGENT_MODELS = (
-    '[{"name": "qwen-max", "provider": "senseaudio", "model_name": "qwen3.8-max-0902"}]'
+    '[{"name": "qwen-max", "provider": "senseaudio", "model_name": "qwen3.8-max-0902"},'
+    ' {"name": "mimo-flash", "provider": "mimo", "model_name": "mimo-v2.6-flash"}]'
 )
 
 
@@ -24,7 +25,7 @@ def catalog_app(tmp_path):
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         model_provider="deepseek", model_name="deepseek-chat",
-        fallback_model_provider="zhipu", fallback_model_name="glm-4.5-air",
+        fallback_model_provider="mimo", fallback_model_name="mimo-v2.6-flash",
         fallback_model_api_key="sk-fallback",
         agent_models=_AGENT_MODELS,
     )
@@ -43,12 +44,14 @@ class TestModelsEndpoint:
         body = resp.json()
         models = body["models"]
         # 旧字段 alias（向后兼容）
-        assert [m["name"] for m in models] == ["deepseek-chat", "qwen-max"]
+        assert [m["name"] for m in models] == ["deepseek-chat", "qwen-max", "mimo-flash"]
         assert models[0]["default"] is True and models[1]["default"] is False
         assert models[1]["model"] == "qwen3.8-max-0902"
         assert models[1]["provider"] == "senseaudio"
+        assert models[2]["model"] == "mimo-v2.6-flash"
+        assert models[2]["provider"] == "mimo"
         # Phase 2 新字段（SDD 03 §16 ModelOption）
-        assert [m["id"] for m in models] == ["deepseek-chat", "qwen-max"]
+        assert [m["id"] for m in models] == ["deepseek-chat", "qwen-max", "mimo-flash"]
         assert models[0]["is_default"] is True and models[1]["is_default"] is False
         assert all(m["is_available"] is True for m in models)
         assert models[0]["metadata_source"] == "provider_preset"
@@ -69,6 +72,11 @@ class TestModelsEndpoint:
         assert "supports_vision" not in deepseek, \
             "supports_vision 未在 deepseek preset 声明，不该被猜出来"
         assert "supports_reasoning_summary" not in deepseek
+
+        mimo = next(m for m in body["models"] if m["id"] == "mimo-flash")
+        assert mimo["provider"] == "mimo"
+        assert mimo.get("supports_tools") is True
+        assert mimo["metadata_source"] == "provider_preset"
 
     def test_models_catalog_entry_without_capabilities_falls_back_to_preset(self, catalog_client):
         """catalog 条目不声明能力位 → 回落 preset，metadata_source=provider_preset。"""
@@ -127,7 +135,7 @@ class TestSessionModelParam:
                 "/api/sessions", json={"task": "hi", "model": "qwen-max"})
         assert resp.status_code == 200
         assert seen["names"][0] == "qwen3.8-max-0902"
-        assert "glm-4.5-air" in seen["names"], "fallback 链不受 model 选择影响（ADR-0014）"
+        assert "mimo-v2.6-flash" in seen["names"], "fallback 链不受 model 选择影响（ADR-0014）"
 
     def test_no_model_param_keeps_default_chain(self, catalog_client):
         """不传 model = 默认链（现行为不变）。"""

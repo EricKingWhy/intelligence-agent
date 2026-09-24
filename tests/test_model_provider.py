@@ -31,6 +31,12 @@ class TestModelConfigFromSettings:
             == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
 
+    def test_mimo_uses_official_preset(self):
+        config = ModelConfig.from_settings(make_settings(model_provider="mimo"))
+        assert config.provider == "mimo"
+        assert config.model_name == "mimo-v2.6-flash"
+        assert config.base_url == "https://api.xiaomimimo.com/v1"
+
     def test_explicit_config_overrides_preset(self):
         config = ModelConfig.from_settings(
             make_settings(
@@ -41,18 +47,10 @@ class TestModelConfigFromSettings:
         assert config.model_name == "deepseek-reasoner"
         assert config.base_url == "https://api.deepseek.com"
 
-    def test_tencent_preset_requires_model_name(self):
-        config = ModelConfig.from_settings(
-            make_settings(
-                model_provider="tencent",
-                model_name="claude-sonnet-4-5",
-            )
-        )
-        assert config.model_name == "claude-sonnet-4-5"
-        assert config.base_url == "https://chatapi.weixin.qq.com/openai/v1"
-
-        with pytest.raises(ConfigError, match="MODEL_NAME"):
-            ModelConfig.from_settings(make_settings(model_provider="tencent"))
+    @pytest.mark.parametrize("provider", ["tencent", "zhipu"])
+    def test_replaced_provider_is_rejected(self, provider):
+        with pytest.raises(ConfigError, match=provider):
+            ModelConfig.from_settings(make_settings(model_provider=provider))
 
     def test_unknown_provider_raises_config_error(self):
         with pytest.raises(ConfigError, match="unknown-provider"):
@@ -65,6 +63,12 @@ class TestCreateChatModel:
         model = create_chat_model(config)
         assert model.model_name == "qwen-plus"
         assert str(model.openai_api_base) == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def test_creates_mimo_model_with_official_endpoint(self):
+        config = ModelConfig.from_settings(make_settings(model_provider="mimo"))
+        model = create_chat_model(config)
+        assert model.model_name == "mimo-v2.6-flash"
+        assert str(model.openai_api_base) == "https://api.xiaomimimo.com/v1"
 
     def test_temperature_is_applied(self):
         config = ModelConfig.from_settings(
@@ -199,7 +203,7 @@ class TestSenseaudioPreset:
         assert config.base_url == "https://api.senseaudio.cn/v1"
 
     def test_senseaudio_requires_model_name(self):
-        """senseaudio 无默认模型（同 tencent 姿势）：MODEL_NAME 必填。"""
+        """senseaudio 无默认模型：MODEL_NAME 必填。"""
         with pytest.raises(ConfigError, match="MODEL_NAME"):
             ModelConfig.from_settings(make_settings(model_provider="senseaudio"))
 
@@ -261,33 +265,30 @@ class TestFallbackModelConfig:
         dumped = settings.model_dump(mode="json")
         assert dumped["fallback_model_api_key"] != "sk-fb-live"
 
-    def test_zhipu_preset(self):
-        """Phase 14：zhipu 入册（fallback 异构上游，CLI fork 摘要链真实路径）。"""
+    def test_mimo_accepts_explicit_model_name(self):
         config = ModelConfig.from_settings(
             make_settings(
-                model_provider="zhipu",
-                model_name="glm-4.5-air",
+                model_provider="mimo",
+                model_name="mimo-v2.6-pro",
             )
         )
-        assert config.provider == "zhipu"
-        assert config.model_name == "glm-4.5-air"
-        assert config.base_url == "https://open.bigmodel.cn/api/paas/v4"
+        assert config.provider == "mimo"
+        assert config.model_name == "mimo-v2.6-pro"
+        assert config.base_url == "https://api.xiaomimimo.com/v1"
 
-        with pytest.raises(ConfigError, match="MODEL_NAME"):
-            ModelConfig.from_settings(make_settings(model_provider="zhipu"))
-
-    def test_from_settings_builds_fallback_chain_with_zhipu(self):
-        """from_settings 全链（含 fallback provider=zhipu）不再抛未知 provider。"""
+    def test_from_settings_builds_fallback_chain_with_mimo(self):
+        """from_settings 全链接受 MiMo fallback 并保留显式模型和地址。"""
         config = ModelConfig.from_settings(
             make_settings(
                 model_provider="senseaudio",
                 model_name="deepseek-v4-flash-0731",
-                fallback_model_provider="zhipu",
-                fallback_model_name="glm-4.5-air",
-                fallback_model_api_key="zk-test",
-                fallback_model_base_url="https://open.bigmodel.cn/api/paas/v4",
+                fallback_model_provider="mimo",
+                fallback_model_name="mimo-v2.6-flash",
+                fallback_model_api_key="sk-mimo-test",
+                fallback_model_base_url="https://api.xiaomimimo.com/v1",
             )
         )
         assert config.fallback is not None
-        assert config.fallback.provider == "zhipu"
-        assert config.fallback.model_name == "glm-4.5-air"
+        assert config.fallback.provider == "mimo"
+        assert config.fallback.model_name == "mimo-v2.6-flash"
+        assert config.fallback.base_url == "https://api.xiaomimimo.com/v1"

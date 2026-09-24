@@ -26,7 +26,7 @@ from agent_harness.model.provider_store import (
 @pytest.fixture
 def store(tmp_path: Path) -> ProviderStore:
     return ProviderStore(tmp_path / "model-providers.json", MemoryCredentialStore(),
-                         builtin_ids=frozenset({"deepseek", "qwen", "tencent"}))
+                         builtin_ids=frozenset({"deepseek", "qwen", "mimo"}))
 
 
 def _body(**overrides):

@@ -18,9 +18,9 @@
 | Gate 1 | research 任务 → 模型自主路由 research_review（真实委派 + child 完成） | ✅ PASS |
 | Gate 2 | coding 任务 → coding + 共享 workspace 真实写文件 | ✅ PASS |
 | Gate 3 | 动态第四个 AgentSpec 经 AgentFactory 创建并真实跑通 | ✅ PASS |
-| Gate 4 | child 不倾倒完整历史（父流事件数抽查 vs child JSONL） | ✅ PASS |
+| Gate 4 | child 不倾倒完整历史（父/子 Session 的 agent 与事件 provenance 隔离） | ✅ PASS |
 | Gate 5 | mixed 任务：research 结论 → coding 落盘（两个 child 协作） | ✅ PASS |
-| Gate 6 | 同指纹失败 delegate 真实触发 RepeatedToolFailureGuard | ✅ PASS |
+| Gate 6 | ScriptedModel 驱动同指纹失败 delegate，真实 Runtime 触发 RepeatedToolFailureGuard | ✅ PASS |
 | Gate 7 | delegation 预算（max_delegations）真实耗尽回填 | ✅ PASS |
 | Gate 8 | CAPABILITIES 未配 multiagent → 单代理零感知回归（无 delegate） | ✅ PASS |
 
@@ -89,9 +89,11 @@ LLM 可见工具**（决策 10）：动态创建是代码路径公开 API，模�
 
 ## Gate 4 — child 不倾倒完整历史（不变量 6「完整保存 ≠ 完整注入」的多代理版）
 
-**验证点**：委派后父 session 事件抽查——`agent/delegation-*` 在场、父 `model/completed`
-数 ≤ 3 且 < child 内部步数；child 自己的 JSONL 保留完整多轮历史（前端钻取是纯增量，
-决策 8 父流白盒边界）。
+**验证点**：委派后父 session 中 `agent/delegation-started/finished` 在场，父侧
+`model/completed` 数 ≤ 3；child 自己的 JSONL 保留完整历史，child agent 身份和事件 provenance
+不得出现在父 Session。父/子事件 ID 不复用；父事件不得引用 child 事件 ID。该直接边界检查
+并断言父事件不含 child 内部模型/工具事件 payload；共同替代父/子模型调用数的严格大小比较，
+避免把合法的同轮数执行误判为历史倾倒，也能捕捉重新分配事件 ID 后的内容倾倒。
 
 实测 16:02:30：父流 delegation-started/finished 在场、父 model/completed ≤ 3
 且 < child 内部步数；child JSONL 保留完整多轮历史。
@@ -105,14 +107,18 @@ LLM 可见工具**（决策 10）：动态创建是代码路径公开 API，模�
 {research_review, coding}，mixed.txt 真实落盘（research 结论经 supervisor
 交接给 coding 写入）。
 
-## Gate 6 — 同指纹失败 delegate 真实触发熔断（#88）
+## Gate 6 — 同指纹失败 delegate 触发熔断（#88）
 
-**验证点**：prompt 要求模型并行发起 6 个**参数完全相同**、target=未知角色的 delegate 调用
-→ provider 在 child spawn 前明确失败（决策 17 禁止未知 target）→ 同指纹连续失败累计 →
-`tool/failure-guard` 事件（软 3 / 批内塌缩直接硬 6，Phase 12 Gate 3 同款语义）。
+**当前自动化验证点**：ScriptedModel 发起 3 个**参数完全相同**、target=未知角色的 delegate
+调用；Runtime / ToolExecutor / RepeatedToolFailureGuard 均真实运行，provider 在 child spawn 前
+明确失败（决策 17 禁止未知 target），第 3 次产生唯一 `tool/failure-guard(level=soft)`，
+`consecutive_failures=3`，随后 run 正常完成。该测试不调用真实模型，也不依赖 `.env` 或网络。
 
-概率性说明：真实模型对批量指令的服从是概率性的，3 次独立尝试协议；确定性语义由
-全循环单测钉死（见上「结构性 Gate 证据」）。
+**历史真实模型 Gate 记录**：以下实测仍记录此前真实模型批量调用的观察结果，不代表当前自动化
+Gate 仍依赖真实模型。
+
+此前真实模型对批量指令的服从是概率性的；确定性语义由当前自动化 Gate 与全循环单测钉死
+（见上「结构性 Gate 证据」）。
 
 实测 16:15:30（session JSONL 取证，pytest-1155）：3 × tool/call(delegate) 同参数 →
 ```json
