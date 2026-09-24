@@ -100,6 +100,7 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
     from agent_harness.session import USER_MESSAGE
     from agent_harness.tooling import ToolExecutor, ToolRegistry
     from tests.conftest import make_session
+    from tests.langmem_doubles import ScriptedChatModel
     from tests.scripted_model import ScriptedModel
 
     if not gate_settings.embedding_api_key.get_secret_value() or not gate_settings.embedding_model:
@@ -118,14 +119,25 @@ async def test_real_memory_runtime_semantics_and_cleanup(gate_settings, tmp_path
     vectors = MilvusVectorStore(gate_settings, gate_embeddings(gate_settings))
     records = SqliteMemoryRecordStore(tmp_path / "memory.db")
     await records.initialize()
-    capability = LangMemMemoryCapability(records, vectors)
+    decision_model = ScriptedChatModel(responses=[AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "MemoryPayload",
+            "args": {
+                "content": "我喜欢使用 TypeScript 开发应用。",
+                "metadata": {"importance": 0.9},
+            },
+            "id": "gate-memory-create",
+        }],
+    )])
+    capability = LangMemMemoryCapability(records, vectors, decision_model)
     relay = OutboxRelay(records, vectors)
     session = make_session(tmp_path / "sessions")
     alice = IdentityContext("gate_" + uuid4().hex, "alice", ["user", "session"])
     identity_token = set_identity_context(alice)
     session_token = memory_session_var.set(session.session_id)
-    # Control conversation outputs so this gate tests storage and semantic retrieval,
-    # independently of nondeterministic chat-model wording. Extractor itself is real.
+    # Use deterministic extraction and consolidation decisions so this gate tests real
+    # storage and semantic retrieval independently of nondeterministic chat-model wording.
     extractor = MemoryExtractor(ScriptedModel([AIMessage(content=
         '[{"scope":"user","content":"我喜欢使用 TypeScript 开发应用。","importance":0.9}]')]))
     writer = MemoryWriteback(capability, extractor)

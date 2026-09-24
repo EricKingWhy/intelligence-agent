@@ -34,11 +34,12 @@ def _recovery_status(result: dict[str, Any], metadata: Any) -> tuple[bool, bool]
     required = set()
     case_type = result.get("case_type")
     tags = _metadata_tags(metadata)
-    if case_type == "recovery" or "recovery" in tags:
-        required.add("recovered")
     if case_type == "kill_resume":
         required.update({"kill_resume_ok", "agent_runtime_completed"})
-    required.update(key for key in ("recovered", "kill_resume_ok") if key in metrics)
+    else:
+        if case_type == "recovery" or "recovery" in tags:
+            required.add("recovered")
+        required.update(key for key in ("recovered", "kill_resume_ok") if key in metrics)
     if not required:
         return True, False
     passed = all(key in metrics and metrics[key] is True for key in required)

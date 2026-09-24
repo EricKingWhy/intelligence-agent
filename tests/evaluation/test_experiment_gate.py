@@ -325,6 +325,36 @@ def test_langfuse_gate_rejects_duplicate_terminal_ledger_evidence(
     )
 
 
+def test_kill_resume_case_uses_its_specific_recovery_metrics(tmp_path) -> None:
+    case = EvalCase(
+        name="kill_resume_confirm_success",
+        case_type="kill_resume",
+        task="Recover the confirmed operation and finish the run.",
+        expected={"verdict": "CONFIRM_SUCCESS"},
+        tags=["p0", "recovery"],
+    )
+    client = _AsyncExperimentClient(
+        [_item(case)],
+        result_payload={
+            "name": case.name,
+            "case_type": case.case_type,
+            "ok": True,
+            "metrics": {
+                "kill_resume_ok": True,
+                "agent_runtime_completed": True,
+                "dangling_tool_calls": 0,
+                "duplicate_confirmed_side_effects": 0,
+            },
+        },
+    )
+
+    result = _run_experiment(tmp_path, client)
+
+    assert result["status"] == "ok"
+    assert result["recovery_applicable"] == 1
+    assert result["recovery_passed"] == 1
+
+
 @pytest.mark.parametrize(
     ("case_type", "metrics"),
     [
