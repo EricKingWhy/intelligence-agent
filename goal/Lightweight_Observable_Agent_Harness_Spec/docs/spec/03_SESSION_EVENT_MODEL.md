@@ -111,6 +111,27 @@ src/agent_harness/session/event.py                  ← 唯一事实源
 | `step/completed` | **草案，不实现** | 同上。判读"某步是否结束"用该步事件的存在性与终态（`run/completed` / `run/failed` / `run/interrupted` + 信封 `step_id`），不引入新的成对事件 |
 | `context/built` | **草案，不实现** | 上下文装配的结果由 `context/compacted`（压缩后摘要）+ `compaction/start` / `compaction/end`（replay 确定性 bracket）+ `model/completed` 的 usage 共同表达。逐次装配的完整 prompt 不进事件流（体积与冗余，且模型只看得到结果） |
 
+### 3.4 暂停 / 恢复生命周期事件（**持久化、非终态**）
+
+长任务的执行边界由两类**持久化**事件表达。名字与载荷字段的权威枚举仍只有
+`docs/EVENT_VOCABULARY.md`（§3），本节只定格**语义与不变量**；契约冻结于 ADR-0044：
+
+- **暂停事件**：`reason ∈ {budget_exhausted, deadline, stuck}`、触发维度或 stuck 模式、
+  预算 `version`、consumed / limits 快照、`continuation`（已完成 / 剩余 / 阻塞 / 下一步安全动作）、
+  `closeout_source ∈ {model, deterministic}`、`resume_requirements`（预算与 deadline 暂停为空）。
+  **非终态**：停止活动执行，但**不**关闭逻辑 `run_id`。
+- **恢复事件**：`from_pause_seq`、`previous_budget_version`、新的 `budget_version`、更新后的 limits、
+  consumed（**等于**暂停快照，直到产生新工作）、
+  `resume_basis ∈ {budget_increase, relevant_steer, environment_change, policy_change}`。
+
+不变量：
+
+- 每次暂停恰好一条暂停事件，且该逻辑 run 在该时点 MUST NOT 出现完成 / 失败事件；
+- 恢复沿用**同一 `run_id`**，MUST NOT 重置累计消耗或 stuck 指纹；
+- 两类事件 MUST 可被 replay / `derive_messages` / 投影重建成同样的状态（跨客户端一致）；
+- 预算**账目**事件的表示（逐次接纳落账 / 稳定边界落账 / 等价 append-only 形式）属实现自由，
+  前提是全部 AC 与 replay 等价成立（#305 §5 的 BOUNDED 条款）。
+
 ## 4. Derive Messages
 
 模型历史 SHOULD 由 SessionEvent 投影得到：
@@ -144,12 +165,22 @@ load session events
 
 Resume MUST NOT 默认重放所有 Tool。
 
+长任务暂停后的**同 run 恢复**（§3.4）：
+
+- 请求 MUST 标识被暂停的 `run_id`、带 `expected_version` 与 `resume_basis`，并给出**绝对** ceiling；
+- MUST NOT 重置任何 counter，也 MUST NOT 把 ceiling 降到已消耗之下；
+- 存在未结清的 `NEED_RECONCILE` 副作用时，**对账优先于恢复**：先 reconcile，再允许恢复；
+- 版本过期 / 并发提交 / stuck 暂停缺少所需的变更依据 ⇒ 拒绝，且不启动任何 model / tool / child 工作
+  （状态码口径见 `11 §6.1`）。
+
 ## 6. Replay
 
 Replay 目标：
 - 从已持久化 Event 重新派生 UI / messages / trace；
 - 允许“逻辑回放”；
 - 默认冻结已发生 Tool Result，不重新产生外部副作用。
+
+Replay MUST **消耗零预算**：不得改变任何 counter，也不得调用 Provider 或 Tool。
 
 如果需要“重新执行式 replay”，必须显式进入不同模式，并要求权限/隔离。
 
@@ -171,6 +202,9 @@ parent session
 - UI 能显示 lineage/tree；
 - Artifact Ref 可以按权限复用；
 - Sandbox fork 的物理策略可独立于 SessionEvent fork。
+
+预算语义：fork 的 child session 得到**新的 SessionBudget 身份**，并记录父 session / 父预算快照与
+lineage；child 的消耗 MUST NOT 改变父的账本。
 
 ## 8. Compaction 与 Session
 
@@ -201,4 +235,9 @@ JSONL 与数据库可以同时启用，但需要定义一个清晰的 commit 顺
 - Fork 后父子 Session 独立；
 - Replay 不触发真实副作用；
 - Compaction 后旧历史仍存在；
-- UI 可根据事件重新构建主要视图。
+- UI 可根据事件重新构建主要视图；
+- 暂停 / 恢复事件持久化且**非终态**：暂停时该逻辑 run 不出现完成 / 失败事件；
+- 同 `run_id` 恢复不重置累计消耗与 stuck 指纹；版本过期或并发恢复至多一个生效，其余被拒且不开工；
+- `NEED_RECONCILE` 优先于恢复：未对账前无法恢复；
+- replay 零预算消耗、零 Provider/Tool 调用；
+- fork 得到新 SessionBudget 身份与父快照 / lineage，父 Session 账本不变。
