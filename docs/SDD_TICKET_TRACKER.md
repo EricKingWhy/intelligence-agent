@@ -4967,3 +4967,76 @@ ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动�
 其后的兄弟票顺序不变：`#299`（跨会话召回，接上检索驱动即解 §D11 的空洞）/ `#300`（治理 API，
 `explicit_remember` 的**持久性**要在立项时落成 job 上的列）/ `#301`（UI）/ `#302`（评测）/
 `#303`（clean-slate cutover）/ `#304`（真实 Gate）。
+
+## T1（`#306`，B 链首票）：长任务执行边界契约冻结 —— ADR-0044 + 六章正式规格（2026-09-25 · 已推分支、未集成、未关单）
+
+**状态**：✅ 交付与审查闭合；**零** `src/**` / `tests/**` / `web/**` 改动（纯契约与文档）。分支
+`zcode/T306-longrun-budget-contracts`（tip `ec4f73e`），固定点 `d0e2dcb`（= 施工开始时的 `origin/main`）。
+**本轮 `origin/main` 未动、未关单**（§14.12：未合 main 的完成票只在 issue comment 记录分支与 commit）。
+
+**票面**：GitHub `#306`；父票 `#305` 的产品与架构裁决已冻结。要求：把 #305 的 FIXED 决策写进正式规格、
+给出决策覆盖表，且不得把未验证数字写成正式要求。
+
+**交付序列**（9 笔 + 台账笔 + 读数笔）：
+
+| # | commit | 内容 |
+| --- | --- | --- |
+| 1 | `c4a696e` | 摄入 #305 正文副本（38,483 字符 / 41,041 字节；逐行一致，唯一差异是正文末尾多一个换行） |
+| 2 | `002292b` | 摄入决策依据调研 |
+| 3 | `cfb6f48` | **ADR-0044** D1–D11 + §3 决策覆盖表 + §4.1 登记 |
+| 4 | `9de1c80` | ADR 去重：删两张与规格重复的表改指针（**此笔引入阈值错序，第 7 笔修正**） |
+| 5 | `1ac86e7` | 规格 `02` §5.1–§5.4 / `03` §3.4 / `04` §9.1 |
+| 6 | `ec006c7` | 规格 `10` §5.1 / `11` §6.1 / `12` §9.1 + `README` 索引 + `14` §3 依赖指针 |
+| 7 | `e2029e1` | 发现阶段两轴 findings 处置 |
+| 8 | `8da02f3` | ADR §5 只列门禁要求，读数落点交 tracker 与台账 |
+| 9 | `daaf662` | R2 处置：ADR 数值重述改指针、`03 §5` 断连读法修正、活票号替换 T 号 |
+| — | `3ed88e7` | 审查台账两行（`300-*.tsv` / `301-*.tsv`） |
+| — | `ec4f73e` | Gate-0 读数落盘 |
+
+**契约要点**：三种控制（local fuse `max_agent_turns` / RunBudget / SessionBudget）与**七个 counter 的唯一计数点**；
+优先级 `Deployment > AgentProfile > Session/Run override > Tool policy`（下层只能收窄，越权开工前拒绝）；
+`run/paused` / `run/resumed` 两个持久化非终态事件 + CAS 恢复（绝对 ceiling、绝不重置已消耗）；
+deadline 与显式 cancel 分野 + `NEED_RECONCILE` 不盲重跑；五种 stuck 模式阈值与指纹规则（**扩展** ADR-0014
+的 guard 责任域，不新增第二个 guard）；Runtime Quiescence 六条 + 可插拔 `CompletionPolicy`；
+委派树预算 owner（`#286` 运行期深度配额 / `#287` 树级默认与持久化账本）；`max_steps` 的
+expand–migrate–contract；422/409 开工前拒绝与投影口径（Provider 账目缺失 = unavailable，永不记 0）；
+五场景真实 Live Gate（同树 3/3、失败保留、`verdict ∈ {PASS,FAIL,BLOCKED,SKIPPED}`、凭证零泄漏）。
+
+**两轴独立审查**：
+
+- **发现阶段**（锚 `ec006c7`，审 `d0e2dcb..ec006c7`）：Standards **FAIL**（P1=1 P2=2 P3=3）／
+  Spec **FAIL**（P1=2 P2=6 P3=4），18 条（去重 15 项）。台账行 `docs/review_ledger.d/300-d0e2dcb-ec006c7.tsv`。
+- **修后重审 R2**（锚 `daaf662`，审 `ec006c7..daaf662`）：Standards 闭合 **4/6**、Spec 闭合 **11/12**；
+  **新发现 P0=0 P1=0**（未触发 §8.3 第 4 条停止修复出口）；R2 在修订面新引入的两条已当场修复。
+  台账行 `docs/review_ledger.d/301-ec006c7-daaf662.tsv`。
+- 最值钱的三条 findings：① 去重笔把 stuck 阈值序列写成 `3/3/4/6/4`（权威序 `3/4/3/6/4`）——把两个模式读反；
+  ② `run/resumed` 在正式规格**零落点**，且名字权威被指向一个由 `event.py` 生成、装不下它的枚举表；
+  ③ ADR-0033 与跨仓契约的 `max_steps` 归因面未登记归属。
+
+**门禁读数（冻结树 `3ed88e7` / tree `c8525a1`）**：
+
+- 全量 pytest（`scripts/run_tests_clean.sh`）：**3779 passed, 2 skipped, 48 deselected, 15 warnings in 474.98s**，exit 0。
+- Gate-0 裸全量：**6/6 PASS**，墙钟 16.4s（diff-check 0.04 / ruff 0.97 / oxlint 0.23 / tsc 11.14 / guards 3.13 / coverage 0.89）
+  ⇒ `docs/gate/3ed88e7b147f34522a3c4f30781f6a2d0d41dd68.json`（`result=PASS`、`passed=6`、`failed=[]`、
+  `worktree.tracked_matches_head=true`；工具版本 git 2.52.0 / Python 3.13.5 / ruff 0.16.3 / node v22.21.1 /
+  oxlint 1.81.0 / tsc 6.0.3）。
+- `ruff check .`：All checks passed（Gate-0 lane ②，rc=0）。
+- 覆盖闸门：exit 0，末行 `✅ 台账覆盖闸门通过：089524a~1..HEAD 每条 commit 均有归属（审查行 / 白名单 / 台账记账）。`
+- §8.1.3 判据 ①（`git diff --name-status --no-renames 3ed88e7 HEAD`）= 唯一一条
+  `A docs/gate/3ed88e7b147f34522a3c4f30781f6a2d0d41dd68.json`；②（`git status --short`）= 仅 `?? .zcodeignore`。
+- 链接/锚点核对（仓库无此类校验器 ⇒ 自写一次性核对器在仓库外跑）：90 处章节引用 + 53 处仓内路径，0 失败。
+
+**残余（登记，不阻断）**：
+
+1. **前向失配，需用户裁决**：`docs/adr/0033-run-failure-attribution-surface.md` 与
+   `docs/BACKEND_CONTRACT_STREAMING_UI.md` 仍把 `max_steps_exceeded` 写成撞保险丝时的失败归因面。
+   实现未改前仍为真；`#308`/`#312` 落地后必须落 `run/paused` ⇒ 届时不同步会让前端照**相反**合同实现
+   （2026-09-17 的 #222 已有先例）。归属未定，ADR §4.1 已登记。
+2. `#305` 正文 FIXED 段自述 "All 30 user decisions" 与其 35 条 User Stories 不一致（上游自身不一致；只登记）。
+3. 范围级 `git diff --check d0e2dcb..HEAD` 报 61 行 trailing whitespace，全部落在两笔**摄入副本**
+   （PRD 副本 59 / 调研 2），是 GitHub 正文的 Markdown 硬换行双空格：清理会改变渲染语义、且破坏
+   「与 #305 正文逐行一致」的可对照性 ⇒ 保留并登记（仓库既有 docs 亦有同类）。
+4. 规格内 `max_delegations` 默认值在 `02 §5.1` / `10 §5.1` / `11 §6.1` 各一次，按「每章写自己作用域
+   的契约」保留；ADR 侧已清零。
+
+**下一步**：集成由集成线负责；其后按交接册顺序 `#307` → `#308` → …
