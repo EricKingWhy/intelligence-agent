@@ -40,9 +40,9 @@
 
 ## 当前工作焦点
 
-**当前焦点：B-45（`#295`）与 Memory V2 规划产物已完成 `main` 集成并同步至 `origin/main`。** `#295` 为 CLOSED；Memory V2 父 Issue `#296` 与子 Issue `#297`–`#304` 仍为 OPEN，规划已就绪；前两票 `#297` / `#298` 已于 2026-09-24 由前端线实现完成（见下方 `#297` / `#298` 条），其余实现票仍待施工，由用户交给 Coding Agent 执行。本轮只修正 workspace mapping 回归测试中的默认编码误用，生产 UTF-8 序列化逻辑未改；全量 pytest 与 Gate-0 证据见下方 2026-09-23 集成收尾条目。未清空旧 Memory 数据，未修改 `.env` 或凭证。B-43（`#286`）和 B-44（`#294`）均为已完成历史批次。
+**当前焦点：Memory V2 A 链 `#299` 已在本地短分支完成实现与双轴复审**（2026-09-25）。分支 `codex/mem-v2-3-cross-session-profile`，代码提交 `adb86f2`、`11fb406`；聚焦后端用例 691 passed、Ruff clean、前端 scope 用例 8 passed、前端 build 成功。Standards 与 Spec 两轴修后均无 P0–P3；AC10 冻结 Recall@6 ≥85% 与真实 Milvus 混合检索仍是未完成发布证据。未推送、未集成、未关单；下一票是已批准的独立兄弟票 `#300`。`#297`–`#299` 均待集成；`#301`–`#304` 仍须等 `#299` 和 `#300` 集成后按依赖解冻。旧 Memory 数据未清理，未修改 `.env` 或凭证。
 
-**Memory V2 已完成规划、等待施工（2026-09-23）**：父规格 `#296` 与 8 张独立实现票 `#297`–`#304` 均为 **OPEN + `ready-for-agent`**，GitHub 已建立原生 Sub-issue 与 Blocked-by 关系。首票固定为 `#297` Typed Memory lifecycle；其后 `#298` Formation/Adjudication、`#299` 跨会话召回、`#300` 治理 API 可并行；`#301` UI、`#302` 评测、`#303` clean-slate cutover 收口后，最后执行 `#304` 真实 Gate。产品合同见 `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`，执行票见 `docs/tickets/mem-v2-*.md`，调研依据见 `docs/research/2026-09-22-production-long-term-memory-systems.md`。**本轮只规划/开票：未修改运行时代码、未执行旧记忆删除、未运行实现门禁。**
+**Memory V2 规划与 8 张实现票拆分均已完成；施工进度以各票落点为准（2026-09-25）**：`#297` Typed lifecycle、`#298` Formation/Adjudication 与 `#299` 跨会话召回已完成分支实现，均未集成；`#300` 治理 API 是当前下一票。`#301` UI、`#302` 评测、`#303` clean-slate cutover 依赖 `#299` / `#300` 集成，`#304` 最终真实 Gate 依赖前三票完成。父规格 `#296`、产品合同 `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`，执行票 `docs/tickets/mem-v2-*.md`。旧记忆尚未删除；不得把本地候选描述为已集成或已关单。
 
 **`#297`（MEM-V2-1）Typed Memory lifecycle 已在前端线实现并推送到自己的分支（2026-09-24）**：交付 `src/agent_harness/memory/v2/**` —— typed envelope（`semantic`/`episodic`/`procedural` 判别联合）+ 版本化生命周期 + SQLite 权威 store（**新表** `memory_v2_records` / `memory_v2_outbox`）+ outbox→派生索引 relay + provider-neutral `MemoryV2Capability`；**V1 路径零改动**，`main` 由集成线合并。机制与取舍单点在 **`docs/adr/0042-memory-v2-typed-envelope-versioned-lifecycle.md`**：§D10 = `#297` 的 AC8 显式登记（逐条列出将在 `#303` clean-slate cutover 被取代的 8 项旧决策）、§5.1 门禁读数（口径已改为**用例数与失败集合**）、§5.2 既存环境 flaky 的**结论边界**、§5.3 首轮两轴审查 findings 的逐条处置与变异红证、§5.4 **修后重审**（两轴各 1 轮预算，均 `PASS-WITH-NITS`，`P0=0`/`P1=0`）13 条 findings 的逐条处置。门禁（处置完两轮 findings 后重测）：`ruff check .` clean；`pytest tests/memory/v2` **119 passed**；`pytest tests/memory` **344 tests / 1 failed**，失败集合恰好是 §5.2 登记的 V1 环境性 flaky（`test_concurrent_writers_converge_on_one_row_and_one_index_state`，形态恒为 `attempt to write a readonly database`），集合差集为空。分支 `T297-mem-v2-1-typed-lifecycle`，**未推 `main`**。
 
@@ -95,12 +95,14 @@
 
 | 文件 | 覆盖日期 | 条目数 | 说明 |
 | --- | --- | --- | --- |
-| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-23 | 311 | 历史明细；2026-09-17 初次迁移的正文逐字保留，后续批次按日期追加（条目数 = `grep -c "^- 2026-"` **实测**：B-42 `#293` 落点 = 306、B-44 `#294` = 307、B-43 `#286` = 308、Memory V2 规划 = 309、B-45 `#295` = 310、本轮集成与验证 = 311）。更新与读取纪律见本文件「按日定位」表。 |
+| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-25 | 316 | 历史明细；2026-09-17 初次迁移的正文逐字保留。条目数由 `grep -c "^- 2026-"` 实测：截至 9/23 为 311，9/24 增 3 条，9/25 增 2 条（B-37 收口与 #299 候选）。更新与读取纪律见本文件「按日定位」表。 |
 
 ### 按日定位（归档内行号，日期降序）
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
+| 2026-09-25 | 2（B-37 GitHub 收口 / MEM-V2-3 `#299`） | `2026-09.md` L811-L812（B-37 = L811；`#299` = L812） |
+| 2026-09-24 | 3（MEM-V2-2 `#298` / B-37 最终 Gate / B-37 验证补记） | `2026-09.md` L808-L810 |
 | 2026-09-23 | 5（B-44 `#294` / B-43 `#286` / Memory V2 PRD + Tickets + Issues / B-45 `#295` / 集成与全量验证） | `2026-09.md` L783-L807（B-44 = L783；B-43 = L784 起含 11 条子项；Memory V2 = L797；B-45 = L798 起含 8 条子项；集成与验证 = L807；**子项数口径 = `^  - ` 顶层计数**） |
 | 2026-09-22 | 11（B-33 / B-34 / B-35 / B-36 / F18-A `#282` / F18-B `#283` / B-38 / B-39 `#248` / B-40 `#291` / B-41 `#292` / B-42 `#293`） | `2026-09.md` L628-L780（**子项数口径 = `^  - ` 顶层计数**（更深缩进的另计），2026-09-22 按归档**实测重算**：B-33 = L628 起含 12 条子项，B-34 = L650 起含 8 条子项，B-35 = L660 起含 7 条子项，B-36 = L669 起含 13 条子项，F18-A = L684 起含 12 条子项，F18-B = L698 起含 12 条子项，B-38 = L719 起含 8 条子项，B-39 = L729 起含 7 条子项，**B-40 = L737 起含 15 条子项，B-41 = L753 起含 14 条子项，B-42 = L768 起含 9 条子项**） |
 | 2026-09-21 | 10（B-24 / B-25 / B-26 / B-27 / B-28 / B-29 / B-30 / B-31 / #274 B6 集成/关单 / B-32） | `2026-09.md` L512-627（B-29 = L567，B-30 = L568 起含 8 条子项，B-31 = L578 起含 13 条子项，**#274 B6 集成/关单 = L593 起含 8 条子项**，B-32 = L609 起含 17 条子项） |
