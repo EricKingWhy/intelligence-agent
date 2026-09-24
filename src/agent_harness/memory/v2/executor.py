@@ -170,7 +170,7 @@ class DegradedReason(str, Enum):
 
     前三个与 `budget.BudgetDimension` **逐字对齐**（`test_...` 钉着这个重叠）：
     预算耗尽的原因就是那三个维度，不需要第二套名字。
-    其余六条是"没花钱也失败了"的形态。
+    其余八条是"没花钱也失败了"的形态。
     """
 
     # —— 与 budget.BudgetDimension 对齐 ——
@@ -183,8 +183,20 @@ class DegradedReason(str, Enum):
     INVALID_MODEL_OUTPUT = "invalid_model_output"
     ADJUDICATION_INCOMPLETE = "adjudication_incomplete"
     APPLY_FAILED = "apply_failed"
-    # —— 装配层面的缺席 ——
+    # —— 装配 / 环境层面的缺席 ——
     NO_PRIMARY_MODEL = "no_primary_model"
+    #: 重建不出本 job 对应的事件切片（T7：`session_id` + `run_id` 在会话日志里找不到
+    #: 这一轮的事件，或日志读不出来）。eligibility 保证入队时"这一轮没有事件"为假，
+    #: 所以它只可能是"数据回不来了"——是环境事实，不是模型或预算的失败。
+    RUN_EVENTS_UNAVAILABLE = "run_events_unavailable"
+    #: 执行器**契约之外**的异常（T7 的 runner 观测到的形态：异常穿过了 `run` 自己的
+    #: 全套降级处理）。已知来源是它的依赖——检索层与存储层。
+    #:
+    #: 为什么不在这里继续细分：细分要靠**猜**异常的来源，而真正定位它的是日志里的
+    #: traceback；枚举里多写一个猜出来的名字，只会让运维在"job_failed 到底是哪层"
+    #: 上多走一段。这个码的用处只有一个：告诉运维"不是模型说的、不是预算用完的，
+    #: 去日志看堆栈"。
+    JOB_FAILED = "job_failed"
 
 
 class MemoryJobEventSink(Protocol):
@@ -371,6 +383,15 @@ class MemoryJobExecutor:
         if roles.primary is None:
             return await self._degrade(job, worker_id=worker_id, run_id=run_id, sink=sink,
                                        state=state, reason=DegradedReason.NO_PRIMARY_MODEL)
+        if not run_events:
+            # T7：调用方（runner）重建不出这一轮的事件切片时**也走这条**降级，而不是抛异常——
+            # 异常会让 job 停在非终态、被服务循环每次认领都再失败一次（空转堵队列）。
+            # eligibility 保证入队时本 run 有真实用户发言与成功回复，所以"空"只可能是
+            # 重建失败（日志被硬删 / 迁移前入队的旧行），不是"这一轮本来就没什么可记"。
+            logger.warning("Memory V2 job %s has no run events to form from", job.job_id)
+            return await self._degrade(job, worker_id=worker_id, run_id=run_id, sink=sink,
+                                       state=state,
+                                       reason=DegradedReason.RUN_EVENTS_UNAVAILABLE)
         budget = MemoryJobBudget(limits=self._limits, clock=self._clock)
         try:
             advanced = await self._advance(job, worker_id=worker_id,

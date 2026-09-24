@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS memory_v2_jobs (
     idempotency_key TEXT NOT NULL UNIQUE,
     tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, project_id TEXT,
     session_id TEXT NOT NULL,
+    run_id TEXT,
     stage TEXT NOT NULL, state TEXT NOT NULL,
     outcome TEXT, reason TEXT,
     lease_owner TEXT, lease_expires_at TEXT,
@@ -133,6 +134,16 @@ class MemoryFormationJob:
     user_id: str
     project_id: str | None
     session_id: str
+    #: 本 job 属于哪一次 run（T7 新增）。**不是**可选的装饰：恢复扫描只能靠
+    #: `(session_id, run_id)` 从会话日志里切出这一次 run 的事件（`build_formation_input`
+    #: 的 `run_events`），没有它就无法在重启后重建模型输入。刻意做成列而不是塞进
+    #: `state`——`state` 会被属主的每次 `transition` 整体覆写（`_stage_assignment`），
+    #: 放那里的标识符会在第一次推进阶段时静默消失，而"恢复时找不到这一轮"表现为
+    #: 一次安静的零写入。
+    #:
+    #: 可空只为一件事：T7 之前入队的行（`_migrate_run_id` 补列时给 NULL）。那批 job
+    #: 没有可重建的事件切片，恢复扫描会跳过并告警，而不是拿一个错的切片去跑。
+    run_id: str | None
     stage: MemoryJobStage
     state: dict[str, Any]
     outcome: MemoryJobOutcome | None
@@ -160,7 +171,28 @@ class SqliteMemoryV2JobStore:
         async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.executescript(_JOB_SCHEMA)
+            await self._migrate_run_id(connection)
             await connection.commit()
+
+    @staticmethod
+    async def _migrate_run_id(connection: aiosqlite.Connection) -> None:
+        """T7 加法：给 T1 建出的旧表补 `run_id` 列。
+
+        `CREATE TABLE IF NOT EXISTS` 对**已存在**的表是空操作，所以 T1 期间建过的库
+        （开发/测试机上真实存在）不会因为改了 DDL 就长出这一列——不补的话那些库上
+        每次入队都是 `no such column: run_id`。
+
+        可重入（`PRAGMA table_info` 判缺再补），与 `memory/sqlite_record_store.py` 的
+        既有迁移同款：SQLite 的 DDL 不参与驱动事务，靠"哨兵列存在与否"当完成标记。
+
+        列**可空**：`ALTER TABLE ADD COLUMN` 没法先空后填再收紧（同既有迁移的注释）。
+        旧行因此是 `run_id IS NULL`，恢复扫描据此跳过它们（见 runner 的说明）——
+        那批 job 是 T7 之前入队的，本来就没有可重建的事件切片。
+        """
+        async with connection.execute("PRAGMA table_info(memory_v2_jobs)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "run_id" not in columns:
+            await connection.execute("ALTER TABLE memory_v2_jobs ADD COLUMN run_id TEXT")
 
     # ----------------------------------------------------------------------------------
     # 入队
@@ -168,7 +200,7 @@ class SqliteMemoryV2JobStore:
 
     async def enqueue(
         self, *, idempotency_key: str, trusted: TrustedMemoryIdentity, session_id: str,
-        now: datetime | None = None,
+        run_id: str | None = None, now: datetime | None = None,
     ) -> MemoryFormationJob:
         """按幂等键入队；键已存在就返回**已有**那一行（含已终结的），不新建。
 
@@ -182,10 +214,11 @@ class SqliteMemoryV2JobStore:
             await connection.execute(
                 "INSERT OR IGNORE INTO memory_v2_jobs "
                 "(job_id, idempotency_key, tenant_id, user_id, project_id, session_id, "
-                " stage, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)",
+                " run_id, stage, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)",
                 (str(uuid4()), idempotency_key, trusted.tenant_id, trusted.user_id,
-                 trusted.project_id, session_id, MemoryJobStage.QUEUED.value, moment, moment))
+                 trusted.project_id, session_id, run_id, MemoryJobStage.QUEUED.value,
+                 moment, moment))
             cursor = await connection.execute(
                 "SELECT * FROM memory_v2_jobs WHERE idempotency_key=?", (idempotency_key,))
             row = await cursor.fetchone()
@@ -416,6 +449,7 @@ def _to_job(row: Any) -> MemoryFormationJob:
         user_id=row["user_id"],
         project_id=row["project_id"],
         session_id=row["session_id"],
+        run_id=row["run_id"],
         stage=MemoryJobStage(row["stage"]),
         state=json.loads(row["state"]),
         outcome=MemoryJobOutcome(row["outcome"]) if row["outcome"] is not None else None,
