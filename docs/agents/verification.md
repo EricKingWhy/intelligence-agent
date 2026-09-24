@@ -262,16 +262,17 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   `attempt-<n>.jsonl`（**入库**：#319 与集成前重车道引用它，所以不能只留在临时目录里）。
   一次性工作区在系统临时目录（仓库**之外**），跑完销毁并**核实**（`sandbox.delete()` 之后仍存在
   就清只读位强删，`deleted` 是核实结论而非"调用过删除"）。
-- **实测读数（2026-09-25，树 `HEAD=f8bb91e637d7… / tree=7700e975f7c7`）**：
+- **实测读数（2026-09-25，树 `HEAD=45505e6a75ae… / tree=02002825d310`）**：
 
   | 运行 | 判定 | 读数 |
   | --- | --- | --- |
-  | 正常 | `PASS` | 3/3 PASS（6.2s / 13.5s / 20.4s），每次 6 条断言全绿：`write`/`bash`/`git_status` 真调用、`notes.txt` 内容比对一致、无悬空 `tool/call`。`validate` **17 条 0 FAIL** |
-  | `--inject-failure attempt:2` | `FAIL` | 第 2 次受控失败、**第 1/3 次照跑**（R2：失败样本全留），原因写明"注入运行不得计入 Live Gate"。`validate` **14 条 0 FAIL** |
-  | 清空 `MODEL_API_KEY` / `FALLBACK_MODEL_API_KEY` | `BLOCKED` | **零请求、零尝试、无轨迹**，前置清单点名缺哪个 key。`validate` **5 条 0 FAIL** |
+  | 正常 | `PASS` | 3/3 PASS（13.0s / 16.0s / 12.0s），每次 6 条断言全绿：`write`/`bash`/`git_status` 真调用、`notes.txt` 内容比对一致、无悬空 `tool/call`。`validate` **24 条 0 FAIL**（`--require-pass` 退出 0） |
+  | `--inject-failure attempt:2` | `FAIL` | 第 2 次受控失败、**第 1/3 次照跑**（R2：失败样本全留），原因写明"注入运行不得计入 Live Gate"。`validate` **19 条 0 FAIL** |
+  | 清空 `MODEL_API_KEY` / `FALLBACK_MODEL_API_KEY` | `BLOCKED` | **零 run、零尝试、无轨迹**（配置链建不起来），前置清单点名缺哪个 key。`validate` **6 条 0 FAIL** |
 
-  三次读数的 `sha`/`tree` 都指 `f8bb91e`（`evidence.json.sha` 与 `worktree.tracked_matches_head` 同源），
-  即"跑过门禁的树 = 证据指向的树"。
+  三次读数的 `sha`/`tree` 都指 `45505e6`（`evidence.json.sha` 与 `worktree.tracked_matches_head` 同源），
+  即"跑过门禁的树 = 证据指向的树"。**首轮读数（`f8bb91e`）仍留在库里**（三份，`validate` 也逐条过）：
+  它们是修复前那棵树的如实记录；判定语义与反篡改判据在 `45505e6` 被加严，故本票的**权威读数**是上表。
 
 - ⚠ **与 Gate-0 的次序（实测踩过）**：证据是**未跟踪的 `*.json`**，而 `docs/gate/` 之外任何未跟踪的
   `.json` 都是 Gate-0 `worktree_divergence()` 的 `risky`（`LANE_INPUT_SUFFIXES` 含 `.json`）⇒
