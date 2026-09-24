@@ -91,9 +91,14 @@ LLM 可见工具**（决策 10）：动态创建是代码路径公开 API，模�
 
 **验证点**：委派后父 session 中 `agent/delegation-started/finished` 在场，父侧
 `model/completed` 数 ≤ 3；child 自己的 JSONL 保留完整历史，child agent 身份和事件 provenance
-不得出现在父 Session。父/子事件 ID 不复用；父事件不得引用 child 事件 ID。该直接边界检查
-并断言父事件不含 child 内部模型/工具事件 payload；共同替代父/子模型调用数的严格大小比较，
-避免把合法的同轮数执行误判为历史倾倒，也能捕捉重新分配事件 ID 后的内容倾倒。
+不得出现在父 Session。父/子事件 ID 不复用；父事件不得引用 child 事件 ID。精确载荷检查按
+`child_session_id` 配对委派终态：仅允许 parent 重用与该 child 的 `delegation-finished.summary`
+完全相同的最后一条 `model/completed`；其他 child `model/completed` 及所有 `tool/call` /
+`tool/result` payload 若在父流中原样重复均判失败。这样既允许结果摘要回传，也能捕捉重新分配事件 ID
+后的内部历史/工具载荷倾倒。
+
+**2026-09-24 验证说明**：摘要例外与多 child 配对由确定性 SessionEvent 回归用例覆盖；本轮没有重跑真实
+模型 Gate，以下实测记录仍是历史真实 Gate 证据，不代表本轮变更后的云端复验。
 
 实测 16:02:30：父流 delegation-started/finished 在场、父 model/completed ≤ 3
 且 < child 内部步数；child JSONL 保留完整多轮历史。

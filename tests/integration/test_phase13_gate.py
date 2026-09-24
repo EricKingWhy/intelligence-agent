@@ -39,14 +39,16 @@ def _assert_child_internal_payloads_are_not_copied(
 ) -> None:
     # Exempt only the final child model event that supplied the delegated summary.
     # Other child model events and all tool payloads remain protected.
-    summary_event_id = next(
-        (
-            event.event_id for event in reversed(child_events)
-            if child_summary is not None
-            and event.type == "model/completed"
-            and event.data.get("content") == child_summary
-        ),
+    last_model_event = next(
+        (event for event in reversed(child_events) if event.type == "model/completed"),
         None,
+    )
+    summary_event_id = (
+        last_model_event.event_id
+        if child_summary is not None
+        and last_model_event is not None
+        and last_model_event.data.get("content") == child_summary
+        else None
     )
     child_internal_payloads = {
         (event.type, json.dumps(event.data, sort_keys=True, ensure_ascii=False))
@@ -61,6 +63,19 @@ def _assert_child_internal_payloads_are_not_copied(
     assert child_internal_payloads.isdisjoint(parent_payloads), (
         "父 Session 不得复制 child 的内部模型/工具事件内容"
     )
+
+
+def _finished_delegation_for_child(
+    finished_events: list[SessionEvent], child_session_id: str,
+) -> SessionEvent:
+    matches = [
+        event for event in finished_events
+        if event.data.get("child_session_id") == child_session_id
+    ]
+    assert len(matches) == 1, (
+        f"expected one delegation finish for {child_session_id}, got {len(matches)}"
+    )
+    return matches[0]
 
 
 async def test_gate4_allows_summary_reuse_but_rejects_copied_internal_payloads():
@@ -97,6 +112,25 @@ async def test_gate4_allows_summary_reuse_but_rejects_copied_internal_payloads()
             _assert_child_internal_payloads_are_not_copied(
                 [child_tool_event], [parent_tool_event], child_summary="task summary",
             )
+
+
+async def test_gate4_uses_the_finished_event_for_the_inspected_child():
+    first_child_finish = SessionEvent(
+        type="agent/delegation-finished",
+        session_id="parent",
+        data={"child_session_id": "child-1", "status": "completed", "summary": "one"},
+    )
+    last_child_finish = SessionEvent(
+        type="agent/delegation-finished",
+        session_id="parent",
+        data={"child_session_id": "child-2", "status": "completed", "summary": "two"},
+    )
+
+    assert _finished_delegation_for_child(
+        [first_child_finish, last_child_finish], "child-1",
+    ) is first_child_finish
+    with pytest.raises(AssertionError, match="expected one delegation finish"):
+        _finished_delegation_for_child([last_child_finish], "child-1")
 
 
 def _gate_settings(tmp_path, *, live_model: bool = True) -> Settings:
@@ -309,7 +343,11 @@ class TestGate4NoHistoryDump:
                 if event.type == "agent/delegation-finished"
             ]
             assert delegation_finished, "child 已启动但没有持久化委派终态"
-            assert delegation_finished[-1].data["status"] == "completed", (
+            child_session_id = delegation_started[0].data["child_session_id"]
+            child_finish = _finished_delegation_for_child(
+                delegation_finished, child_session_id,
+            )
+            assert child_finish.data["status"] == "completed", (
                 "child 已启动但失败；不得以新 Session 重试来掩盖失败"
             )
             break
@@ -322,7 +360,6 @@ class TestGate4NoHistoryDump:
         counts = Counter(parent_types)
         # 父流只有 supervisor 自己的紧凑事件（不含 child 的多轮内幕）
         assert counts.get("run/completed", 0) <= 1, "父 session 只有自己的 run"
-        child_session_id = delegation_started[0].data["child_session_id"]
         child_events = Session.resume(
             JsonlSessionStore(tmp_path / "sessions"), child_session_id,
         )
@@ -356,7 +393,7 @@ class TestGate4NoHistoryDump:
         _assert_child_internal_payloads_are_not_copied(
             child_events.events,
             session.events,
-            child_summary=delegation_finished[-1].data.get("summary"),
+            child_summary=child_finish.data.get("summary"),
         )
 
 
