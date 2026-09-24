@@ -53,11 +53,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from agent_harness.config import Settings
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import MemoryJobExecutor
-from agent_harness.memory.v2.index import InMemoryMemoryV2Index
+from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
 from agent_harness.memory.v2.roles import (
     MEMORY_PRIMARY_ALIAS,
@@ -74,8 +75,28 @@ logger = logging.getLogger(__name__)
 MEMORY_V2_DATABASE_NAME = "memory-v2.db"
 
 
+async def build_memory_v2_service(
+    settings: Settings, *, vector_store: Any | None = None,
+) -> MemoryV2Service:
+    """Build SQLite authority and its derived index independently of the formation model."""
+    database = Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME
+    store = SqliteMemoryV2Store(database)
+    await store.initialize()
+    await store.purge_expired_tombstones()
+    if vector_store is None:
+        index = InMemoryMemoryV2Index()
+    else:
+        from agent_harness.memory.v2.milvus_index import MilvusMemoryV2Index
+
+        index = MilvusMemoryV2Index(vector_store)
+    relay = MemoryV2IndexRelay(store, index)
+    return MemoryV2Service(store, index, relay=relay)
+
+
 async def build_memory_formation(
     settings: Settings, *, sessions: JsonlSessionStore,
+    memory_v2: MemoryV2Service | None = None, vector_store: Any | None = None,
+    workspace_index: Any | None = None,
 ) -> MemoryJobRunner | None:
     """装配记忆形成管线；主模型角色解析不出时返回 `None`（= 这个部署没有这条管线）。
 
@@ -97,25 +118,22 @@ async def build_memory_formation(
         return None
 
     database = Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME
-    store = SqliteMemoryV2Store(database)
     jobs = SqliteMemoryV2JobStore(database)
-    await store.initialize()
     await jobs.initialize()
 
     # 组合实现同时满足两个执行器端口（写者 `create_in/update_in/invalidate_in`、
     # 检索者 `search`）——一个对象，所以"写进去的"与"检索到的"不可能是两套可见性规则。
-    service = MemoryV2Service(store, InMemoryMemoryV2Index())
+    service = memory_v2 or await build_memory_v2_service(settings, vector_store=vector_store)
     executor = MemoryJobExecutor(
         jobs=jobs, writer=service, searcher=service, invoker=ChatModelInvoker(),
     )
-    # `extraction_enabled` 刻意走默认值（`True`）：它的生产来源是"用户关掉自动抽取"那个
-    # memory-settings 入口（PRD §5.6 的 `/api/memory-settings`），属后续票。票面把
-    # "globally disabled extraction"列为必须排除的形状，判定与用例都已实现，但**本票在
-    # 运行期没有产出方**——T8 两轴审查 P3 已登记，写在调用点免得读者以为它已接线。
-    # （"整仓关掉记忆"不靠它：那条路走 `wiring.memory is None` 的装配闸门。）
+    # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每次终结通知时从
+    # SQLite 读取可信用户的 extraction_enabled；设置由 #300 的治理 API 持久化。
     runner = MemoryJobRunner(
         jobs=jobs, sessions=sessions, executor=executor, roles=roles,
         max_concurrency=settings.memory_v2_max_concurrency,
+        memory_v2=service,
+        workspace_index=workspace_index,
     )
     recovered = await runner.recover()
     logger.info(

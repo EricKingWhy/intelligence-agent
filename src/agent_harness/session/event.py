@@ -52,6 +52,8 @@ MEMORY_DEGRADED = "memory/degraded"
 # action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
 # （不变量 #22）。NO_MEMORY 与"全部 NOOP"不发这个事件：安静成功不能装成"写过了"（AC2）。
 MEMORY_UPDATED = "memory/updated"
+# V2 recall explanation contains IDs and ranking metadata only, never memory content.
+MEMORY_RECALLED = "memory/recalled"
 # ── + Phase 12 Reliability 信号（同错熔断 + 模型 fallback，ADR-0014） ──
 TOOL_FAILURE_GUARD = "tool/failure-guard"
 MODEL_FALLBACK = "model/fallback"
@@ -145,6 +147,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         CONTEXT_COMPACTED,
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
+        MEMORY_RECALLED,
         TOOL_FAILURE_GUARD,
         MODEL_FALLBACK,
         AGENT_DELEGATION_STARTED,

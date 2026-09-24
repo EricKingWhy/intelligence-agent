@@ -404,6 +404,31 @@ async def test_opt_out_and_missing_model_reply_enqueue_nothing(env: Env) -> None
     assert _job_rows(env) == []
 
 
+@pytest.mark.asyncio
+async def test_durable_extraction_setting_gates_each_subsequent_run(env: Env) -> None:
+    identity = IdentityContext(tenant_id="local", user_id="local", scopes=["user", "session"])
+    token = set_identity_context(identity)
+    trusted = TrustedMemoryIdentity("local", "local")
+    try:
+        await env.service.update_settings(trusted, extraction_enabled=False)
+        runner = _runner(env, _working(calls=1), memory_v2=env.service)
+        try:
+            _seed_run(env, run_id="disabled-by-setting")
+            assert await _notify(runner, env, run_id="disabled-by-setting") is None
+            assert _job_rows(env) == []
+
+            await env.service.update_settings(trusted, extraction_enabled=True)
+            _seed_run(env, run_id="enabled-by-setting")
+            assert await _notify(runner, env, run_id="enabled-by-setting") is not None
+            await runner.drain()
+            assert len(_job_rows(env)) == 1
+            assert len(_memory_rows(env)) == 1
+        finally:
+            await runner.aclose()
+    finally:
+        identity_context_var.reset(token)
+
+
 # --------------------------------------------------------------------------------------
 # 2. 新鲜路径：入队 → 服务循环 → 写盘 → 事件（R12 / AC10）
 # --------------------------------------------------------------------------------------

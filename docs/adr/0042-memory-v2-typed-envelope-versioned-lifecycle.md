@@ -1,10 +1,11 @@
 # ADR-0042 — Memory V2：类型化信封、版本化生命周期与派生索引
 
-- **Status**: Proposed（契约已实现并实测通过；V1/V2 并存期，cutover 归 MEM-V2-7）
+- **Status**: Proposed（契约已实现并实测通过；#300 增加 V2 治理与墓碑；V1/V2 cutover 仍归 MEM-V2-7）
 - **Date**: 2026-09-23
 - **Deciders**: 用户（PRD 契约逐条冻结，2026-09-22）+ 本 Agent（机制设计）
 - **Related**:
   - Issue #297 / MEM-V2-1（父票 #296）
+  - Issue #300 / MEM-V2-4（显式命令与治理 API）
   - `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`（下称 PRD；§4 产品模型、§6.1 信封、§6.6 持久化归属、§7 固定/有界/自由）
   - `docs/research/2026-09-22-production-long-term-memory-systems.md`
   - ADR-0008（Memory Capability 架构）、ADR-0009（多租户身份隔离 / 5 层 scope 枚举）、
@@ -188,7 +189,7 @@ MEM-V2-7 必须**在票面上**显式取代它们（而不是"顺手改掉"）�
 | 3 | ADR-0026 D1：`update` = `upsert by id`（同 id 覆盖，无历史） | 由 V2 的"派生新版本 + 旧版 superseded"取代 | 同一动词的**语义反转**（覆盖 vs 追加）。两条语义并存会让"更新了一条记忆"有两种可观察结果 |
 | 4 | ADR-0026 D1 + Consequences ①：`forget` = **硬删无墓碑** | 引入 §6.1 的 tombstone 契约（`deleted` 状态 + 只留 hash）与最终删除 API | 用户当初选硬删是在"没有 tombstone 契约"的前提下做的；PRD §6.1 新增了该契约，取舍前提变了 |
 | 5 | ADR-0026 D3 / D5：outbox 的"脏 `operation` 按 upsert 自愈"+ 就地 `ALTER TABLE` 补列迁移 | V2 outbox 有 `CHECK` 约束，不需要该兜底；cutover 后老库迁移路径退出 | 兜底是**无 CHECK 老库上的唯一防线**，它随老库一起退役。留着会让"未识别的 operation 值"在 V2 里也变成可接受输入 |
-| 6 | ADR-0031 D2/D3/D6（§3 的工具契约面）：`retrieve_memory` / `remember_this` / `forget_memory` 指向 V1 capability 与 `MemoryScope.USER` | 三个工具的注入语义与调用面改为 V2 | 工具是对模型的**契约**，它们的 `description` 与环境行为必须与底层一致；否则模型按旧描述调用会打到已退役的语义。D6 正是"描述与底层不一致"的既有实例 |
+| 6 | ADR-0031 D2/D3/D6（§3 的工具契约面）：`retrieve_memory` / `remember_this` / `forget_memory` 指向 V1 capability 与 `MemoryScope.USER` | #300 已将 `remember_this` / `forget_memory` 改为 V2 显式命令；`retrieve_memory` 仍待 #299 的 V2 recall adapter；#303 负责最终淘汰 V1 | 工具是对模型的**契约**，它们的 `description` 与环境行为必须与底层一致；并行期须明确每个工具当前指向，不能把整个切换误记为同一次 cutover |
 | 7 | ADR-0008 子决策 1：V1 最小闭环（`update`/`delete` 留接口）+ 子决策 2 的三原语面（`store`/`recall`/`search`） | 由 V2 的七方法面取代 | ADR-0026 已部分 refines（动词纳入交付），但**面本身**（三原语 vs 七方法）到 cutover 才收敛 |
 | 8 | ADR-0008 子决策 3/4 中"LangMem 通过 `BaseStore` 适配我们的存储" | LangMem 在 formation / consolidation 侧的去留，由 MEM-V2-2 决定后在此收口 | 本票**不动** LangMem（V2 尚未接自动写回）；此处登记是为了让 MEM-V2-7 不能以"没人提过"为由跳过 |
 
@@ -197,7 +198,7 @@ MEM-V2-7 必须**在票面上**显式取代它们（而不是"顺手改掉"）�
 
 ### D11 — 非目标（明确排除）
 
-- 不做最终删除 / tombstone API（MEM-V2-7）。
+- 不做跨 V1/V2 的 clean-slate cutover 与 legacy-path retirement（MEM-V2-7）。V2 记录的治理删除 API、内容清除、30 天内容无关 tombstone 与 outbox 删除由 #300 交付；它们不迁移或删除 V1 数据。
 - 不做 Web UI（MEM-V2-5）。
 - 不做后台模型抽取流水线（MEM-V2-2）。
 - 不做最终召回排序 / 质量评估（MEM-V2-6）。
@@ -205,6 +206,13 @@ MEM-V2-7 必须**在票面上**显式取代它们（而不是"顺手改掉"）�
 - 不让 Milvus 成为事实源。
 - 不激活 V2 的 run-end 自动写回。
 - 不改 V1 的任何行为、不删任何真实记忆数据。
+
+### D12 — #300 增加 V2 治理生命周期，不提前 cutover
+
+#300 在现有 V2 信封与 SQLite 权威存储上增加用户编辑、单条/批量删除、内容无关 tombstone、
+独立设置和显式命令入口。索引仍是派生数据，SQLite 提交后的索引删除失败由 outbox 重试；
+失败不得恢复已删除内容或让旧索引命中重新可读。此增量不改变 V1 schema、V1 fallback 或
+#303 的 clean-slate cutover 责任。
 
 ---
 
