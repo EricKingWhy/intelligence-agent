@@ -4410,13 +4410,13 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 ## B-37（2026-09-22）：全仓 review findings 开票（Multi-Agent / Recovery / Artifact / Evaluation）
 
-**状态**：仅完成需求去重、票面冻结与 GitHub 开票；**五票均 OPEN，未开工、未实现、未关单**。用户经三轮 grilling 批准把原六条 finding 按根因去重，并把通用递归状态从立即安全边界中拆开，最终为五张新票；历史 `#87/#88/#91` 不重开。
+**状态（2026-09-24）**：`#286` 已集成并 CLOSED（集成点 `2ce64060049d947ddeefd8a0ed22357b07fd1de9`）；GitHub 实读确认 `#287`–`#290` 仍 OPEN。当前隔离候选仅记录其实际包含的改动，不据此宣称后四票完成、集成或关单。用户经三轮 grilling 批准把原六条 finding 按根因去重，并把通用递归状态从立即安全边界中拆开，最终为五张新票；历史 `#87/#88/#91` 不重开。
 
 | 顺序 | Issue | 优先级 | 冻结范围 | 依赖 / 并行规则 |
 | --- | --- | --- | --- | --- |
 | 1 | `#286` 动态 SubAgent grantable/depth 权限边界 | P1 | root 深度 0；`max_depth=1` 允许一层；runtime-owned remaining depth 逐层消费；child 只能收窄 scope/depth，不能从 full registry 重建 | 无；先施工 |
-| 2 | `#287` tree-wide delegation 预算、repeated guard 与 crash recovery | P1 | 全树共享 `max_delegations` + failure fingerprint；per-agent `max_steps` 仍独立；resume 不刷新额度 | blocked by `#286` |
-| 3 | `#288` delegated child non-owning workspace binding | P1 | child 删除只删 alias；parent 拥有实际 workspace；递归 descendants 解析到 canonical owner；cycle/corruption fail-closed | blocked by `#286/#287`；避免同文件并行 |
+| 2 | `#287` tree-wide delegation 预算、repeated guard 与 crash recovery | P1 | 全树共享 `max_delegations` + failure fingerprint；per-agent `max_steps` 仍独立；resume 不刷新额度 | `#286` 已 CLOSED；原 blocker 已解除 |
+| 3 | `#288` delegated child non-owning workspace binding | P1 | child 删除只删 alias；parent 拥有实际 workspace；递归 descendants 解析到 canonical owner；cycle/corruption fail-closed | `#286` 已 CLOSED；仍 blocked by `#287`；避免同文件并行 |
 | 4 | `#289` Artifact stored/message unwritten 真实 Kill Gate | P2 | 先红证；若证实生产缺陷，票内只做最小生产修复；Local + 真七牛；临时对象残留必须 0 | 与 `#286/#287/#288` 独立，可在另一 clone 并行 |
 | 5 | `#290` Langfuse deterministic Experiment async 假绿 | P2 | async `run_case` 核心 + 薄 sync wrapper；消费 `ExperimentResult`；故意失败的真云对照必须使 Gate 红 | 与其余票独立，可在另一 clone 并行 |
 
@@ -4427,6 +4427,8 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 **配置预检（不替代最终 Gate）**：Settings 秘密字段完整；Milvus 认证/连接 ✅（专用 `memory_gate_test` 尚不存在，留给 Gate 创建与清理）；Embedding 真实请求 ✅（1024 维）；七牛对目标 bucket 的 `HeadBucket` ✅；Langfuse `auth_check` ✅。模型 provider 已按用户决定映射为 primary `senseaudio` / fallback `qwen`，`ModelConfig.from_settings` ✅；两端点最小真实调用读数为 **primary = 已分类不可用、fallback = 可用**，故真实链至少一端可用，但不得据此声称 primary 已通过，也不得替代五票集成后的最终真实 Gate。
 
 **流程**：每票各自走 V3.1-lite 的红证、实现、专项门禁、两轴独立 review、coverage 与逐票关单；`#286 → #287 → #288` 串行。`#289/#290` 可与该链并行，但同一文件只允许一条线修改。最终真实 Gate 是整个 B-37 的批次收口条件，不是任一单票可以伪报的完成证据。
+
+**候选复核（2026-09-24，未集成）**：固定点 `f15bd5166883afd7bc5f988112ca5b4eb4a491bf` → 候选 `0aea03cd043803703638c2712155ff534657cb23` 的完整范围完成独立 Standards / Spec review，两轴均无 P0–P3；Gate4 断言现在覆盖所有启动的 child。相关确定性测试 `3 passed`，目标文件 Ruff 与 `git diff --check` 通过。准确审查范围见 `docs/review_ledger.d/156-f15bd51-0aea03c.tsv`。本次未运行真实模型 / 云端 Gate；候选仍未集成，#287–#290 不据此关单。
 
 
 ---
