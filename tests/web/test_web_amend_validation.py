@@ -136,7 +136,7 @@ class TestSendMessageAmendValidation:
         assert resp.status_code == 404
 
     def test_queued_with_active_run_ignores_amend(self, bare_client, monkeypatch):
-        """在途 run 的 queued 消息：amend 未被消费 → 按契约丢弃为全 None。"""
+        """在途 run 的 queued 消息：amend 未被消费 → 其余字段按契约丢弃为 None。"""
         captured: dict = {}
 
         async def fake_send(self, **kwargs):
@@ -158,6 +158,72 @@ class TestSendMessageAmendValidation:
         assert resp.status_code == 200
         assert resp.json() == {"status": "queued", "queue_id": "q-1"}
         assert captured["amend"] == AmendOptions()
+
+    def test_in_flight_message_keeps_only_the_profile_for_judgement(
+        self, bare_client, monkeypatch
+    ):
+        """在途消息只把 `agent_profile` 透传下去（预算判定要看档位 ceiling），其余仍丢弃。
+
+        #308：判定与运行态无关要求"档位 ceiling"这条轴也可判——同一份
+        `{agent_profile, budget}` 在空转会话上 422、在在途 run 上 200 queued 就是
+        P1 病灶复发。但**消费**语义不变：在途分支不启动 run，service 只拿它做判定
+        （见 `SessionService.send_message`）；失效的引用类字段（model / providers）
+        依旧不被校验、不被透传——否则一个失效引用会 422 掉用户刚敲的消息。
+        """
+        captured: dict = {}
+
+        async def fake_send(self, **kwargs):
+            captured.update(kwargs)
+            return SendMessageResult(
+                status="queued", queued_message=SimpleNamespace(queue_id="q-1")
+            )
+
+        monkeypatch.setattr(SessionService, "send_message", fake_send)
+        monkeypatch.setattr(
+            bare_client.app.state.agent.run_manager,
+            "get_active",
+            lambda sid: object(),  # 在途 run 存在
+        )
+        resp = bare_client.post(
+            "/api/sessions/sid-1/messages",
+            json={
+                "content": "hi",
+                "agent_profile": "coding",
+                "model": "definitely-not-a-model",
+                "context_providers": ["definitely-not-a-provider"],
+                "reasoning_effort": "deep",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert captured["amend"] == AmendOptions(agent_profile="coding")
+
+    def test_steer_message_keeps_only_the_profile_for_judgement(
+        self, bare_client, monkeypatch
+    ):
+        """steer 与 queued 同一条通道：只留 `agent_profile`。"""
+        captured: dict = {}
+
+        async def fake_send(self, **kwargs):
+            captured.update(kwargs)
+            return SendMessageResult(status="steered", queued_message=None)
+
+        monkeypatch.setattr(SessionService, "send_message", fake_send)
+        monkeypatch.setattr(
+            bare_client.app.state.agent.run_manager,
+            "get_active",
+            lambda sid: object(),
+        )
+        resp = bare_client.post(
+            "/api/sessions/sid-1/messages",
+            json={
+                "content": "hi",
+                "mode": "steer",
+                "agent_profile": "coding",
+                "model": "definitely-not-a-model",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert captured["amend"] == AmendOptions(agent_profile="coding")
 
 
 # ── POST /api/sessions/{id}/resume ────────────────────────────────────

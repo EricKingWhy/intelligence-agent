@@ -199,8 +199,10 @@ def test_settings_rejects_non_positive_ceiling() -> None:
         Settings(_env_file=None, local_max_agent_turns=0)
 
 
-def test_declared_turn_ceiling_follows_the_profile_choice() -> None:
+def test_declared_turn_ceiling_follows_the_profile_choice(monkeypatch) -> None:
     """根路径与 child 路径取同一个档位声明（`None` ⇒ 回落到 `main`）。"""
+    import dataclasses
+
     from agent_harness.agent.profiles import BUILTIN_PROFILES, declared_turn_ceiling
 
     # 内置三档位都不写死数字（出厂设定不制造"档位 500 撞 deployment 100"的必然失败组合）。
@@ -211,3 +213,13 @@ def test_declared_turn_ceiling_follows_the_profile_choice() -> None:
     assert declared_turn_ceiling(None) == declared_turn_ceiling("main")
     with pytest.raises(KeyError):
         declared_turn_ceiling("no-such-profile")
+    # 声明数字时**值要回传**（上面三条只证明"内置档位都是 None"，对"真的读到了声明值"
+    # 没有鉴别力——web 用例是靠 monkeypatch 档位才间接覆盖到这一点的）。
+    monkeypatch.setitem(
+        BUILTIN_PROFILES, "coding",
+        dataclasses.replace(BUILTIN_PROFILES["coding"], max_agent_turns=40),
+    )
+    assert declared_turn_ceiling("coding") == 40
+    assert resolve_local_fuse(
+        deployment=DEFAULT_MAX_AGENT_TURNS, profile=declared_turn_ceiling("coding"),
+    ).as_projection() == {"max_agent_turns": 40, "source": SOURCE_PROFILE}

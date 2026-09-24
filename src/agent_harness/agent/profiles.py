@@ -133,7 +133,10 @@ def declared_turn_ceiling(agent_profile: str | None) -> int | None:
     未知档位名**响亮失败**（同 `build_runtime` 的 `BUILTIN_PROFILES[...]`：web 层
     `_validate_agent_profile` 已 422，这里是防御性的第二道，不静默退化到 main）。
     """
-    return BUILTIN_PROFILES[agent_profile or "main"].max_agent_turns
+    # ⚠ 用 `is not None` 而不是 truthiness：空串在这里应当与 `build_runtime` 一样
+    # **响亮失败**（KeyError），而不是被静默当成 `main`——判定与运行时取档位的规则
+    # 必须逐字同源，否则"判的是 main、跑的是别的档位"。
+    return BUILTIN_PROFILES[agent_profile if agent_profile is not None else "main"].max_agent_turns
 
 
 def declared_tool_universe() -> frozenset[str]:

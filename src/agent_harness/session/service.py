@@ -1028,30 +1028,33 @@ class SessionService:
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
 
-        # 第 1 步：取代校验**先于**取消（校验是纯读，无顺序依赖）——Spec 审查
-        # P3：若先 cancel 再发现 supersedes_seq 不合法（409），请求失败却留下了
-        # QUEUE_CANCELLED 副作用，用户排队项丢失。校验通过后才取消旧项。
-        # queue_id 与 supersedes_seq 可同传（取代一条已落盘消息并取消一条排队项
-        # 是两个独立合法动作）；**取代校验在任何分支下都必须跑**——P2 审查缺口：
-        # 原 elif 会因同传 queue_id 而跳过校验，第 3 步照样写 superseded 事件，
-        # 客户端可借排队项捎带绕过 D8。
+        # 第 1 步：**纯读/纯函数**校验全部先于任何落盘（本方法的顺序纪律）。
+        # 取代校验是纯读，预算判定是纯函数；`cancel_queue` 会写 queue/cancelled，所以
+        # 两者都必须在它之前——否则一个被拒请求会先毁掉用户的排队项（"旧项被取消 +
+        # 新内容按 mode 投递"只剩前半句）。queue_id 与 supersedes_seq 可同传（取代一条
+        # 已落盘消息、取消一条排队项是两个独立合法动作）；**取代校验在任何分支下都必须
+        # 跑**——P2 审查缺口：原 elif 会因同传 queue_id 而跳过校验，第 3 步照样写
+        # superseded 事件，客户端可借排队项捎带绕过 D8。
         if supersedes_seq is not None:
             await self._assert_supersedable(session_id, supersedes_seq)
+
+        # local fuse（#308）判定：**与分支无关**（同一条解析函数、同一个档位来源），形状
+        # 错误 / 不等双字段 / 越权三档拒绝都在任何工作开始前发生。判定不看运行态是刻意
+        # 的：否则同一份请求体在 idle 会话上 422、在活跃 run 上 200（queued），客户端没法
+        # 预期，复核者读到的状态码取决于"此刻有没有 run"。
+        # 生效值在这里**丢弃**：idle 分支由 `resume_and_launch` 再解析一次（同一纯函数、
+        # 同一输入 ⇒ 同值），生效值只有一个消费点。
+        resolve_local_fuse(
+            deployment=self._settings.local_max_agent_turns,
+            profile=_profile_turn_ceiling(amend),
+            request=local_max_agent_turns,
+            alias=max_steps,
+        )
+
         if queue_id is not None:
             await self.cancel_queue(session_id=session_id, queue_id=queue_id)
 
         active_run = self._run_manager.get_active(session_id)
-
-        if mode == "steer" or active_run is not None:
-            # 这两条分支不启动 run ⇒ 不消费生效 fuse；但**判定照跑**（同一条解析函数、
-            # 同一个档位来源，结果丢弃）：形状 / 不等双字段 / 越权三档拒绝都发生在
-            # 任何工作开始之前，与"此刻有没有 run"无关（`02 §5.1` D8）。
-            resolve_local_fuse(
-                deployment=self._settings.local_max_agent_turns,
-                profile=_profile_turn_ceiling(amend),
-                request=local_max_agent_turns,
-                alias=max_steps,
-            )
 
         if mode == "steer":
             if active_run is None:

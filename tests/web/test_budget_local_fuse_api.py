@@ -268,6 +268,7 @@ def test_steer_judges_the_budget_body_before_the_target_check(tmp_path):
 
     app, client = _web(tmp_path)
     session_id = _create_idle_session(client)
+    before = [e.type for e in app.state.agent.store.read_events(session_id)]
 
     conflict = client.post(
         f"/api/sessions/{session_id}/messages",
@@ -291,11 +292,12 @@ def test_steer_judges_the_budget_body_before_the_target_check(tmp_path):
     )
     assert over_ceiling.status_code == 422, over_ceiling.text
 
-    # 被拒请求零副作用（会话已存在，所以这里看事件流而不是 workspace）：
-    # 既没排队也没登记 steer。
-    types = [e.type for e in app.state.agent.store.read_events(session_id)]
-    assert MESSAGE_QUEUED not in types, types
-    assert STEER_REQUESTED not in types, types
+    # 被拒请求零副作用（会话已存在，所以这里看事件流而不是 workspace）：事件流**逐条**
+    # 不变——只断言"某两个类型不在列表里"会放过 queue/cancelled、message/superseded
+    # 这类被拒请求本不该写下的记录。
+    after = [e.type for e in app.state.agent.store.read_events(session_id)]
+    assert after == before, f"{before} → {after}"
+    assert MESSAGE_QUEUED not in after and STEER_REQUESTED not in after
 
     # 对照组：合法 body 在同一个空转会话上仍是 409——判定没把目标检查吞掉，
     # 也没把"没在途 run"这件事实改写成别的状态码。

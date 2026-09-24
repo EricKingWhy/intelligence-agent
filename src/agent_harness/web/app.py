@@ -226,8 +226,9 @@ class CreateSessionRequest(_AmendValueValidators):
     # local fuse（#308）：公共字段 `budget.local.max_agent_turns`，`max_steps` 是迁移期
     # deprecated alias（规则见 `agent/budget.py`；这里只挡形状：非正数 → 422）。
     #
-    # 这里刻意**没有** `le=` 上限：生效上限是 Deployment ceiling，判定归领域层；一个与
-    # 策略无关的数字只会造成两种假象——"200 以内随便传"与"策略允许 500 却被 200 挡住"。
+    # 这里刻意**没有** `le=` 上限：生效上限 = min(Deployment, 档位声明)（判定见
+    # `agent/budget.py`）；一个与策略无关的数字只会造成两种假象——"200 以内随便传"与
+    # "策略允许 500 却被 200 挡住"。
     budget: BudgetRequest | None = None
     max_steps: int | None = Field(default=None, ge=1)
     # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
@@ -730,8 +731,9 @@ def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     的标准形状）——这就是 R5 要的 deprecation signal：旧客户端不改代码也能看到自己用的是
     废弃字段，且文案里的字段名同样来自投影（改别名只改一处）。
 
-    `fuse is None` ⇒ 空 dict（没有生效 fuse 的响应不投影：queued / steered 分支，以及
-    `launch=False` 的只建会话——见调用点注释）。
+    `fuse is None` ⇒ 空 dict（没有生效 fuse 的响应不投影：queued / steered 分支）。反向
+    的抑制发生在**调用点**：`launch=False` 的只建会话**有**生效 fuse，但那个值是请求级、
+    没有任何 run 消费它（`11 §6.1` 只把 budget 挂在启动 run 上），所以调用点刻意不投影。
     """
     if fuse is None:
         return {}
@@ -1681,7 +1683,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = session_service(app.state.agent)
         amend = AmendOptions.from_request(req)
-        # 契约（handoff §3.1 / P3）：只有 idle → launched 才消费 amend；在途 run
+        # 契约（handoff §3.1 / P3）：只有 idle → launched 才**消费** amend；在途 run
         # 的 queued 消息与 steer 一律忽略这些字段。因此引用类字段（model /
         # context_providers，取值集合来自运行时 catalog / wiring，可能已失效）
         # 只在这条路径上校验——否则一个失效引用会 422 掉用户刚敲的消息。
@@ -1693,8 +1695,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         ):
             await _validate_amend_for_existing_session(app.state.agent, amend)
         else:
-            # 未被消费：按契约丢弃（与改动前 send_message 的忽略语义一致）。
-            amend = AmendOptions()
+            # 未被消费。但**只丢弃消费性字段**，`agent_profile` 要留给预算判定：它同时是
+            # 生效 local fuse 的一个输入（档位 ceiling），丢掉它会让同一份 body 的状态码
+            # 取决于"此刻有没有 run"——#308 的判定与运行态无关要求这条轴也可判。
+            # 不消费 = 不启动 run ⇒ 没有任何别处会读它（`SessionService.send_message`
+            # 只在判定与 idle 分支用 amend）。
+            amend = AmendOptions(agent_profile=req.agent_profile)
         try:
             result = await service.send_message(
                 session_id=session_id,
