@@ -75,7 +75,7 @@ import logging
 import os
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -98,7 +98,7 @@ from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
-from agent_harness.session import Session, SessionEvent
+from agent_harness.session import USER_MESSAGE, Session, SessionEvent
 from agent_harness.session.errors import SeqConflict
 from agent_harness.session.store import JsonlSessionStore
 
@@ -257,6 +257,65 @@ class SessionEventSink:
         )
 
 
+def run_slice_bounds(
+    events: Sequence[SessionEvent], run_id: str,
+) -> tuple[int, int] | None:
+    """在会话日志里定位这一次 run 的切片（半开区间 `[start, stop)`）；找不到返回 `None`。
+
+    # 为什么不能只按 `run_id` 过滤（T7b 用探针实测后修正）
+
+    `_drive` 的顺序是**先写 user 消息、再 `begin_run`**（`agent/runtime.py`），而
+    `Session.append` 的 `run_id` **没有默认值**（`session/session.py`）——所以**本轮用户
+    发言的 `run_id` 是 `None`**。按 `run_id == job.run_id` 过滤会把它排除出 `run_events`
+    并推进 `history`，而 `projection` 只给 `run_events` 发运行时别名 ⇒ 模型在**结构上**
+    引不到用户原话（R6 要求 USER/profile 事实必须有直接用户证据），观测上只表现为
+    "自动记忆写不出一条用户事实"。这与 T6b 修的 `event_id` 缺失是**同一类**静默失效：
+    用例之所以全绿，是因为 fixture 把 user 消息写成了带 `run_id`——一个产出方到不了的形状。
+
+    # 规则
+
+    以本 run **首个**带 `run_id` 的事件为锚，向前吞掉紧邻的 `user/message`（那一轮的
+    输入，它本身不带 `run_id`），向后取本 run 的**最后一个**事件。得到的区间与 V1 的
+    `_write_memories(session, arms.memory_event_start)` 语义对齐——那边的起点正是
+    `session.mark()`，即那条 user 消息**之前**。
+
+    刻意取**连续区间**而不是"筛出所有带该 run_id 的事件"：会话逐轮串行，所以区间内的事件
+    按定义都属于这一轮；而过滤器会把这一轮里其它 `run_id` 为 `None` 的事件重新丢掉——
+    那正是本条修正要防的那个错误，写回过滤器就等于把 bug 换个地方重写一遍。
+    """
+    owned = [index for index, event in enumerate(events) if event.run_id == run_id]
+    if not owned:
+        return None
+    start = owned[0]
+    # 向前只吞**紧邻的 user/message**：那一轮的用户输入就在 `begin_run` 之前一行。
+    # 不写额外条件（例如"该事件必须不带 run_id"）——生产里 user 消息的 `run_id` 恒为
+    # `None`，那种判断永远为真，就是死分支；而"会不会一路吞到上一轮"由本循环自己的条件
+    # 挡住：上一轮的末尾是 `run/completed` / `run/failed`，不是 `user/message`。
+    while start > 0 and events[start - 1].type == USER_MESSAGE:
+        start -= 1
+    return start, owned[-1] + 1
+
+
+@runtime_checkable
+class MemoryFormationNotifier(Protocol):
+    """运行时把一轮终结交给记忆形成的唯一入口（#298 T7b）。
+
+    为什么是 Protocol，而不是让 `agent/runtime.py` 直接收 `MemoryJobRunner`：Runtime
+    需要的只是"把这一轮告诉宿主"这一件事，而 `MemoryJobRunner` 是**作业宿主子系统**
+    ——它自己拥有服务循环、认领、恢复、模型调用器与事件出口。让 agent 核心依赖那一整套
+    （连同它背后的 jobs / executor / policy / formation 全链）等于把"运行时收尾"与
+    "记忆作业怎么跑"焊在一起；而这个端口只有一行签名。
+
+    `MemoryJobRunner` 在结构上满足它（因此它没有被继承）。`runtime_checkable` 让装配层
+    能对"给进来的东西真的满足契约"下断言，而不是只靠注解。
+    """
+
+    async def notify_run_finished(
+        self, *, session_id: str, run_id: str, terminal_status: str,
+        events: Sequence[SessionEvent],
+    ) -> object | None: ...
+
+
 class MemoryJobRunner:
     """记忆作业的宿主：资格判定、幂等入队、启动期恢复、单泵服务循环。
 
@@ -288,6 +347,7 @@ class MemoryJobRunner:
         self._sink = sink
         self._extraction_enabled = extraction_enabled
         self._recovery_limit = recovery_limit
+        self._max_concurrency = max_concurrency
         # lease 属主：**进程内稳定**（同一个 runner 的所有认领都用它）。带 pid 是为了
         # 让运维能从库里看出"这一行是哪个进程拿着"，带随机后缀是为了同机多进程不撞名。
         self._worker_id = worker_id or f"memory-v2:{os.getpid()}:{uuid4().hex[:8]}"
@@ -303,6 +363,13 @@ class MemoryJobRunner:
     @property
     def worker_id(self) -> str:
         return self._worker_id
+
+    @property
+    def max_concurrency(self) -> int:
+        """R11 的全局并发上限（本进程在飞 job 数的上限）。装配层据此记一行可对账的日志，
+        同时让"配置真的流到了这里"能用一条断言判，而不必靠计时反推（`Semaphore` 没有
+        公开的容量读数）。"""
+        return self._max_concurrency
 
     # ----------------------------------------------------------------------------------
     # 入队（Runtime 的终结臂调用）
@@ -506,6 +573,13 @@ class MemoryJobRunner:
                 logger.exception("Memory V2 job %s: cannot rebuild the run slice", job.job_id)
                 return await self._abandon(job, reason=DegradedReason.RUN_EVENTS_UNAVAILABLE)
             try:
+                # `explicit_remember` 刻意**不传**（走执行器的默认 False）：本宿主只有
+                # **自动形成**这一条入队路径（run 终结触发），而自动路径上同意信号恒为
+                # False 是政策层写死的前提（`policy.py` 第 2 节：9 类 `sensitive` 候选在
+                # 自动路径上必须被拒，AC3 的 unauthorized-sensitive）。"Remember X" 那条
+                # 显式命令路径的生产方属于 #300（governance API），它**不能**搭这条入队口
+                # ——那会让"用户要求记住"被静默降级成"自动形成"，而这一轮的候选带不带
+                # 同意是一条**持久事实**（写在 job 上没有，恢复后就不可知）。
                 return await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),
@@ -539,8 +613,14 @@ class MemoryJobRunner:
     ) -> tuple[list[SessionEvent], list[SessionEvent]]:
         """按 `(session_id, run_id)` 从会话日志切出（本轮事件，更早历史）。
 
-        `run_id` 为 `None`（T7 之前入队的旧行）或切不出事件时返回**空的本轮事件**：
-        执行器把"没有本轮事件"当作一条可判定的降级（见其 `run` 的注释），所以这里不抛。
+        `run_id` 为 `None`（T7 之前入队的旧行）或日志里找不到这一次 run 时返回**空的本轮
+        事件**：执行器把"没有本轮事件"当作一条可判定的降级（见其 `run` 的注释），所以这里
+        不抛。
+
+        切片的边界判定收在 `run_slice_bounds` 一处——**不要**在这里退回"按 run_id 过滤"，
+        那条路会把本轮用户发言（`run_id is None`）挤出 `run_events`，而投影的别名只发给
+        `run_events`（完整论证在该函数的 docstring 里）。
+
         历史取**序号在本轮之前**的全部事件——投影自己会截到最近 8 条 user/assistant
         消息，在这里再截一次就是把它的规则抄了第二遍。
         """
@@ -551,15 +631,15 @@ class MemoryJobRunner:
             )
             return [], []
         events = await asyncio.to_thread(self._sessions.read_events, job.session_id)
-        run_events = [event for event in events if event.run_id == job.run_id]
-        if not run_events:
+        bounds = run_slice_bounds(events, job.run_id)
+        if bounds is None:
             logger.warning(
                 "Memory V2 job %s: session %s holds no events for run %s",
                 job.job_id, job.session_id, job.run_id,
             )
             return [], []
-        first_seq = min(event.seq for event in run_events)
-        return run_events, [event for event in events if event.seq < first_seq]
+        start, stop = bounds
+        return events[start:stop], events[:start]
 
     def _sink_for(self, job: MemoryFormationJob) -> MemoryJobEventSink:
         """本次执行的事件出口。注入了就用注入的，否则按 job 的会话建一个。"""

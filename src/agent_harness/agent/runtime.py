@@ -25,7 +25,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
@@ -88,6 +88,13 @@ from agent_harness.storage import (
     SessionMeta,
 )
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
+
+if TYPE_CHECKING:
+    # #298 T7b：只借类型，不借实现。`memory.v2.runner` 会连带拉起 jobs / executor /
+    # policy / formation 一整套（以及它们的 langchain 依赖），而 Runtime 需要的只是
+    # "把这一轮告诉宿主"这一个方法——注解在 `from __future__ import annotations` 下
+    # 是惰性的，所以这层依赖在**运行期**不存在。
+    from agent_harness.memory.v2.runner import MemoryFormationNotifier
 
 logger = logging.getLogger("agent_harness.agent")
 
@@ -703,6 +710,7 @@ class AgentRuntime:
         context_providers: list[ContextProvider] | None = None,
         system_prompt: str | None = None,
         memory_writer: MemoryWriteback | None = None,
+        memory_formation: MemoryFormationNotifier | None = None,
         failure_guard: RepeatedToolFailureGuard | None = None,
         fallback_model: Any | None = None,
         fallback_policy: FallbackPolicy | None = None,
@@ -778,6 +786,11 @@ class AgentRuntime:
                 p for p in context_providers if id(p) not in existing_ids
             )
         self._memory_writer = memory_writer
+        # V2 记忆形成的宿主（#298 T7b）：None = 未装配（V1 路径与绝大多数单测的
+        # 形状），两个终态臂因此零改动。与 `memory_writer` 并列而不是取代它——
+        # V1 的退出是 #303（clean-slate cutover，破坏性改动）的事，本票只把 V2
+        # 这条链接上。
+        self._memory_formation = memory_formation
 
         # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
         # 并在回复里产出 tool_calls。bind_tools 是 LangChain 的标准接线点。
@@ -1537,10 +1550,15 @@ class AgentRuntime:
     async def _terminal_completed(
         self, arms: _TerminalArms, *, steps: int, final: str,
     ) -> AsyncIterator[AgentEvent]:
-        """正常完成臂：终态事件 → 记忆抽取 → 镜像 → FINAL_COMPLETED 边界 → 结果。
+        """正常完成臂：终态事件 → 记忆抽取（V1 提交 / V2 入队）→ 镜像 → FINAL_COMPLETED
+        边界 → 结果。
 
-        镜像（yield）**夹在记忆抽取与 checkpoint 之间**：先后顺序是基线冻结的事实
+        镜像（yield）**夹在记忆工作与 checkpoint 之间**：先后顺序是基线冻结的事实
         （checkpoint 失败被 _save_checkpoint 吞掉，但记忆抽取失败会走异常臂）。
+
+        `_notify_memory_formation` 与 `_write_memories` 同在镜像**之前**（#298 T7b）：
+        它是"作业在运行时交出这一轮之前落盘"那一条 Must Do 的落点，本身只多一次
+        INSERT——"可见答复不等形成跑完"由形成被丢进后台任务来兑现。
         """
         arms.telemetry.run_completed(final, usage_total=dict(arms.usage_total) or None)
         end_event = arms.session.end_run(
@@ -1552,6 +1570,7 @@ class AgentRuntime:
         )
         arms.terminal.mark_terminal_written()
         self._write_memories(arms.session, arms.memory_event_start)
+        await self._notify_memory_formation(arms, terminal_status=STATUS_COMPLETED)
         yield to_agent_event(end_event)
         # FINAL_COMPLETED 稳定边界：Run 正常结束事件已持久化。
         await self._save_checkpoint(arms.session, CheckpointBoundary.FINAL_COMPLETED)
@@ -1569,6 +1588,10 @@ class AgentRuntime:
         加字段还会漏它）。`reason` 同时是 AgentRunResult.status——两臂的 status 与
         reason 用的是同一个常量（STATUS_MAX_STEPS_EXCEEDED /
         STATUS_IDENTICAL_TOOL_FAILURE_LOOP），调用点只传一次。
+
+        #298 T7b：`reason` 同时就是交给记忆形成的终态（AC1 的"两张获批的受控失败"）——
+        它在 `eligibility.ELIGIBLE_TERMINAL_STATUSES` 里，取消类与 `failed` 不在，
+        所以"走这条臂"不等于"该建 job"，判定留给 eligibility。
         """
         arms.telemetry.run_failed(reason)
         end_event = arms.terminal.failure_terminal(
@@ -1579,6 +1602,7 @@ class AgentRuntime:
             trace_url=arms.telemetry.trace_url,
         )
         self._write_memories(arms.session, arms.memory_event_start)
+        await self._notify_memory_formation(arms, terminal_status=reason)
         if end_event is not None:
             yield to_agent_event(end_event)
         arms.result_holder.append(
@@ -1718,6 +1742,50 @@ class AgentRuntime:
                 session,
                 [e for e in session.since(start)
                  if e.type not in _MEMORY_EXCLUDED_EVENT_TYPES],
+            )
+
+    async def _notify_memory_formation(
+        self, arms: _TerminalArms, *, terminal_status: str,
+    ) -> None:
+        """把这一轮交给 V2 记忆形成（#298 T7b，AC1 的生产入口）。
+
+        **为什么是"先入队，再镜像终态"**：ticket 同时要求"作业必须在运行时交出这一轮
+        之前落盘"与"可见答复不能等记忆形成跑完"。本方法只 `await` 一次入队（一次
+        SQLite INSERT），形成交给宿主的后台任务——两句因此都成立。
+
+        反过来把入队放在镜像**之后**（写起来更"不挡用户"）会开一个静默的丢失窗口：
+        消费方收到 `run/completed` 就断连时生成器被关闭，镜像之后的行根本不会执行，
+        而那一轮记忆没有任何地方报错。所以在"多等一次 INSERT"与"可能整轮丢失"之间
+        选前者。
+
+        **为什么这里不筛事件类型**：本调用传的是**资格判定的输入**，不是执行输入——
+        执行时的事件切片由宿主按 `(session_id, run_id)` 从会话日志重建（新鲜路径与
+        恢复路径共用同一段代码，见 `memory.v2.runner` 的模块 docstring）。所以这里
+        不抄 `_write_memories` 那份 V1 排除清单：V2 侧由 `projection` 的**允许清单**
+        把关，抄第二份只会多一处要跟着事件词表更新的地方，而漏更新的那一次是静默的。
+
+        **失败隔离**：`run/completed` 此刻已经落盘，这里抛异常会被顶层异常臂接住并
+        补一条 `run/failed`——一个 run 出现双终态，历史不可对账（`_save_checkpoint`
+        里是同一类论证）。记忆是旁路：它坏了只落日志。
+
+        `run_id` 为 `None` 说明 run 从未开始：没有 run 就没有可切片的轮次，直接跳过
+        （`_terminal_failed_run` 在 begin_run 之前失败时是这个形状）。
+        """
+        notifier = self._memory_formation
+        if notifier is None or arms.run_id is None:
+            return
+        try:
+            await notifier.notify_run_finished(
+                session_id=arms.session.session_id,
+                run_id=arms.run_id,
+                terminal_status=terminal_status,
+                events=arms.session.since(arms.memory_event_start),
+            )
+        except Exception:
+            # 旁路故障边界：见上——绝不毒化已落盘的 run 结果。
+            logger.exception(
+                "把 run %s 交给记忆形成失败（已落盘的 run 事实不受影响）",
+                arms.run_id,
             )
 
     async def _save_checkpoint(
