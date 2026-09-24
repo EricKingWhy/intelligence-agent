@@ -33,6 +33,18 @@ class Settings(BaseSettings):
     # 进程级模型调用并发闸（#89）：parent+child 共享上限，防 TPM/QPM 限流与
     # 机器过载。≤0 = 关闭。TPM 令牌桶限流器 DEFER（ADR-0015）。
     model_max_concurrency: int = 3
+    # Deployment hard ceiling：单个 AgentRuntime 实例的 local turn fuse（#308 / ADR-0044
+    # D1，权威表在 `02 §5.1`）。operator 的政策旋钮——**下调**它是本特性的意图
+    # （"Deployment may lower it"）；本层就是最高层，所以没有"越权"可言，上调也是
+    # 部署者的显式选择。请求覆盖（`budget.local.max_agent_turns` / 旧 `max_steps`）
+    # 只能收窄到这个值之下，越过即 422（在任何工作开始前，判定见 `agent/budget.py`）。
+    #
+    # 字面量刻意与 `agent.budget.DEFAULT_MAX_AGENT_TURNS` 分列两处而**不 import**：
+    # config 是依赖图最底层，反向 import `agent_harness.agent`（包 `__init__` 会拉
+    # runtime → model.config → 回到本模块）会踩部分初始化循环。两者相等由
+    # `tests/agent/test_local_budget_resolution.py::test_settings_default_matches_contract`
+    # 机械钉住——漏了那条就是"规格说 500、部署默认另一个数"。
+    local_max_agent_turns: int = Field(default=500, ge=1)
     # 交互式审批等待上限（秒）：无人决策 = fail-closed 默认拒绝（PRD T6 §2.2 C）。
     # ≤0 = 无限等待（关闭 fail-closed，保留旧行为）。默认 300s：足够人类走开再回来，
     # 又不让一个没人管的危险工具无限期挂住 run。

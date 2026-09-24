@@ -5,7 +5,7 @@
     2. 模型调用（ainvoke 一次性 / astream 流式逐 chunk）
     3. session.append(model/completed)（持久化完整 AIMessage）
     4. steps += 1
-    5. 若无 tool_calls → 返回最终回答；若 steps >= max_steps → 返回兜底状态；否则执行工具回填进入下一轮
+    5. 若无 tool_calls → 返回最终回答；若 steps >= max_agent_turns（local fuse）→ 返回兜底状态；否则执行工具回填进入下一轮
 
 两个入口：
     - run(): 经典一次性调用，返回 AgentRunResult（向后兼容，252 现有测试不破）。
@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
+from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS
 from agent_harness.agent.guards import (
     GuardLevel,
     GuardSignal,
@@ -587,7 +588,7 @@ class _TerminalContext:
 class _TerminalArms:
     """一次 run 的终结臂上下文（#264 / T11 第一切片）：六个终结点共享的收尾输入收成一个对象。
 
-    此前六个终结点（context 超限 / completed / max_steps / 同错熔断硬触发 / 取消 / 顶层异常）
+    此前六个终结点（context 超限 / completed / local fuse / 同错熔断硬触发 / 取消 / 顶层异常）
     各自在 `_drive` 里重算同一批输入（run_id、步号、streamer、model_coord、memory 起点…），
     近重复的收尾序列散在同一函数的不同缩进层。本对象是这些输入的**单一存放点**，臂是按它命名
     的方法（`_terminal_*`）——`_drive` 仍是唯一的 loop owner，只决定"走哪条臂 + 何时 return"。
@@ -693,9 +694,13 @@ class _GuardedTracer:
 class AgentRuntime:
     """最小透明 Agent Loop。
 
-    构造时绑定 model + registry + executor + max_steps；一次 run()/run_stream() 通过
+    构造时绑定 model + registry + executor + max_agent_turns；一次 run()/run_stream() 通过
     Session 驱动 event-sourced 循环。工具执行（校验/超时/重试/并发）下沉到
     ToolExecutor；本类只保留"驱动循环"这一份职责。
+
+    `max_agent_turns` 是 **local fuse**（`02 §5.1` 第一层，ADR-0044 D1）：一个实例的
+    高位保险丝，**不跨兄弟池化**。生效值的解析（Deployment → AgentProfile → 请求覆盖）
+    在 `agent_harness.agent.budget.resolve_local_fuse`——本类只消费解析结果，不做策略判断。
     """
 
     def __init__(
@@ -703,7 +708,7 @@ class AgentRuntime:
         model: Any,
         registry: ToolRegistry,
         executor: ToolExecutor,
-        max_steps: int = 20,
+        max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS,
         *,
         checkpoint_policy: CheckpointPolicy | None = None,
         session_meta_store: Any | None = None,
@@ -759,9 +764,11 @@ class AgentRuntime:
         # = 添加性（既有调用方与测试零改动）。
         self._agent_profile = agent_profile
         self._dropped_tools = dropped_tools
-        # max_steps 是"模型不收敛时的保险丝"，不是正常业务停止条件；
-        # 正常停止由"模型不再返回 tool_calls"决定。
-        self.max_steps = max_steps
+        # max_agent_turns 是"模型不收敛时的保险丝"，不是正常业务停止条件；
+        # 正常停止由"模型不再返回 tool_calls"决定（`02 §5`）。
+        if max_agent_turns < 1:
+            raise ValueError(f"max_agent_turns 必须 ≥ 1：{max_agent_turns}")
+        self.max_agent_turns = max_agent_turns
         # Checkpoint seam（ADR-0004 Round 2）：默认策略 OnStableBoundary，
         # 但只有注入了 CheckpointStore 才真正落盘——Core 不被存储强制依赖。
         self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
@@ -948,7 +955,7 @@ class AgentRuntime:
         # step_id 必须 session 级唯一递增，续聊 run 若再从 1 编号，第二轮的
         # model/* 会与首轮冲突——前端 withTurnAt 折叠进首轮 turn，首轮回答被
         # 清空、次轮回答错位（TICKET_STEP_ID_COLLISION_MULTI_TURN）。
-        # 注意 steps 仍是 run 内轮次计数（max_steps 保险丝与 AgentRunResult.steps
+        # 注意 steps 仍是 run 内轮次计数（max_agent_turns 保险丝与 AgentRunResult.steps
         # 依赖它逐 run 从 0 起算），全局编号一律走 step_base + steps。
         step_base = 0
         # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
@@ -1248,7 +1255,7 @@ class AgentRuntime:
                     model_data["tool_calls"] = [
                         {"id": c.id, "name": c.name, "args": c.args} for c in calls
                     ]
-                will_execute_tools = bool(tool_calls) and steps + 1 < self.max_steps
+                will_execute_tools = bool(tool_calls) and steps + 1 < self.max_agent_turns
                 defer_model_event = (
                     will_execute_tools and self.executor.tracks_operations
                 )
@@ -1282,9 +1289,13 @@ class AgentRuntime:
                         yield streamed
                     return
 
-                # 第 6 步：模型仍在请求工具——若已达 max_steps 则兜底返回。
-                if steps >= self.max_steps:
-                    self._log("agent_decision", "模型不收敛，撞 max_steps 兜底",
+                # 第 6 步：模型仍在请求工具——若已达 local fuse 则兜底返回。
+                # **单一判定点**（`#308` 车票要求）：生效轮数只在这里与 `max_agent_turns`
+                # 比一次。`#312` 接 `run/paused` 时把"到顶"改成暂停，改的是这一个 if 的
+                # 结果分支——不新增 loop、不新增计数器（`steps` 就是 agent_turns 的计数点：
+                # 上面"这一轮算一步"在模型响应被接纳为决策**之后**才执行，R1）。
+                if steps >= self.max_agent_turns:
+                    self._log("agent_decision", "模型不收敛，撞 local fuse 兜底",
                               span_id=new_span_id(), parent_span_id=run_span, step=steps,
                               decision="max_steps_exceeded", remaining_steps=0,
                               reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
@@ -1523,7 +1534,7 @@ class AgentRuntime:
                     pass
 
     # ─── 终结臂（#264 / T11 第一切片）────────────────────────────────────────
-    # 六个终结点（context 超限 / completed / max_steps / 同错熔断硬触发 / 取消 /
+    # 六个终结点（context 超限 / completed / local fuse / 同错熔断硬触发 / 取消 /
     # 顶层异常）的收尾序列从 _drive 提到这里；_drive 仍是唯一 loop owner，只决定
     # "走哪条臂 + 何时 return"。每条臂的**顺序与 append 次数**是 #263 基线冻结的
     # 事实（`tests/agent/test_event_sequence_golden.py`），改动会让基线变红——那
@@ -1591,9 +1602,9 @@ class AgentRuntime:
     async def _terminal_failed_run(
         self, arms: _TerminalArms, *, steps: int, reason: str, message: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        """max_steps / 同错熔断硬触发共用的失败终态（两臂只差 reason 与可读文案）。
+        """local fuse（迁移期仍是 `max_steps_exceeded` 终态）/ 同错熔断硬触发共用的失败终态（两臂只差 reason 与可读文案）。
 
-        走 failure_terminal（终态字段的唯一 owner）：max_steps 路径原先自己拼
+        走 failure_terminal（终态字段的唯一 owner）：local fuse 路径原先自己拼
         end_run，于是 #222 之前它**一个归因键都没有**（字段集中供给被绕过 = 下一次
         加字段还会漏它）。`reason` 同时是 AgentRunResult.status——两臂的 status 与
         reason 用的是同一个常量（STATUS_MAX_STEPS_EXCEEDED /

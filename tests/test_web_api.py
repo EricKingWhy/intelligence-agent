@@ -202,7 +202,7 @@ def test_create_session_streams_sse(client):
                return_value=ScriptedModel(responses=[AIMessage(content="hello from stub")])):
         resp = client.post(
             "/api/sessions",
-            json={"task": "say hi", "max_steps": 2},
+            json={"task": "say hi", "budget": {"local": {"max_agent_turns": 2}}},
         )
     assert resp.status_code == 200
     assert "text/event-stream" in resp.headers.get("content-type", "")
@@ -321,13 +321,22 @@ def test_create_session_rejects_missing_task_on_launch(tmp_path):
 
 
 def test_create_session_rejects_invalid_max_steps(tmp_path):
-    """max_steps=0（非正数）和 1000（超上限 200）→ 422，且不留任何落盘痕迹。"""
+    """local fuse 非法值 → 422，且不留任何落盘痕迹（两道闸门各挡一类）。
+
+    - `0`：非正数——pydantic `ge=1` 挡在形状层（领域层还有一层 `_positive`）；
+    - `1000`：越过 Deployment ceiling（默认 500，`Settings.local_max_agent_turns`）——
+      领域层 `resolve_local_fuse` 挡下（#308 / ADR-0044 D1：下层只能收窄）。
+
+    旧行为是 pydantic `le=200` 挡住 1000；那个与策略无关的硬数字已删（它既让"200 以内
+    随便传"看起来合法，又会挡住策略允许的 500）。逐类语义与投影见
+    `tests/web/test_budget_local_fuse_api.py`。
+    """
     settings = Settings(workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
     for max_steps in (0, 1000):
         resp = client.post("/api/sessions", json={"task": "hi", "max_steps": max_steps})
-        assert resp.status_code == 422, f"max_steps={max_steps} 应被 422 拒绝"
+        assert resp.status_code == 422, f"local fuse={max_steps} 应被 422 拒绝"
     _assert_rejection_left_no_trace(app)
 
 
@@ -467,7 +476,7 @@ def test_create_session_sse_emits_run_failed_on_model_error(client):
     # 空剧本 → 首次模型调用即抛 RuntimeError
     with patch("agent_harness.assembly.create_chat_model",
                return_value=ScriptedModel(responses=[])):
-        resp = client.post("/api/sessions", json={"task": "boom", "max_steps": 2})
+        resp = client.post("/api/sessions", json={"task": "boom", "budget": {"local": {"max_agent_turns": 2}}})
     assert resp.status_code == 200
     assert "text/event-stream" in resp.headers.get("content-type", "")
     frames = [line[len("data:"):].strip() for line in resp.text.splitlines() if line.startswith("data:")]
@@ -692,7 +701,7 @@ def test_build_runtime_wires_recovery_stores(tmp_path):
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=state.workspace_registry,
             session_id="sess-wiring", workspace=workspace,
-            max_steps=10, auto_approve=True,
+            max_agent_turns=10, auto_approve=True,
         ))
     # 映射持久化：恢复时可还原 sandbox（web session 不再是无映射孤儿）
     assert state.workspace_registry.exists("sess-wiring")

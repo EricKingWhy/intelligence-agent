@@ -522,14 +522,12 @@ export default function App() {
       // 新会话：无 selectedId → startSession 创建新会话。
       if (selectedId) {
         void sendMessage(selectedId, task, {
-          maxSteps: 10,
           amend: toAmendFields(composerControls),
         });
         return;
       }
       void submitTask({
         task,
-        max_steps: 10,
         auto_approve: true,
         ...toCreateControls(composerControls),
       });
@@ -552,7 +550,6 @@ export default function App() {
       try {
         const created = await createEmptySession({
           cwd: project.path,
-          max_steps: 10,
           auto_approve: true,
           ...(permissionMode ? { permission_mode: permissionMode } : {}),
         });
@@ -679,7 +676,6 @@ export default function App() {
     (fromSeq: number, newContent: string) => {
       if (!selectedId) return;
       void sendMessage(selectedId, newContent, {
-        maxSteps: 10,
         amend: { supersedes_seq: fromSeq },
       });
     },
@@ -696,7 +692,6 @@ export default function App() {
     (item: UndeliveredInput) => {
       if (!selectedId) return;
       void sendMessage(selectedId, item.content, {
-        maxSteps: 10,
         amend: { mode: 'steer', queue_id: item.id },
       });
     },
@@ -720,7 +715,6 @@ export default function App() {
     (item: UndeliveredInput, newContent: string) => {
       if (!selectedId) return;
       void sendMessage(selectedId, newContent, {
-        maxSteps: 10,
         amend: { mode: 'queue', queue_id: item.id },
       });
     },

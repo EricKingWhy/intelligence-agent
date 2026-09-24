@@ -26,6 +26,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from agent_harness.agent import AgentEvent
+from agent_harness.agent.budget import resolve_local_fuse
 from agent_harness.assembly import (
     assemble_wiring,
     build_runtime,
@@ -200,11 +201,16 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
         # （见 recovery/scan.py 单进程假设）。扫描归属长驻会话宿主（web lifespan）。
         session_id = str(uuid4())
         workspace = workspace_root / "workspaces" / session_id
+        # local fuse（#308）：CLI 不再自带一个低位数字——生效值 = Deployment 默认 500，
+        # 会话级覆盖走 `budget.local.max_agent_turns`（CLI 暂无该开关，与 Web 同一条解析）。
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
             session_id=session_id, workspace=workspace,
-            max_steps=10, auto_approve=True,
+            max_agent_turns=resolve_local_fuse(
+                deployment=settings.local_max_agent_turns,
+            ).max_agent_turns,
+            auto_approve=True,
             session_store=store,
         )
         session = Session.start(store, session_id=session_id, cwd=workspace)

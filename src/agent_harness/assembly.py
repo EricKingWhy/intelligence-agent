@@ -180,7 +180,7 @@ async def build_runtime(
     workspace_registry: WorkspaceRegistry,
     session_id: str,
     workspace: Path,
-    max_steps: int,
+    max_agent_turns: int,
     permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
     auto_approve: bool | None = None,
     approval_callback: ApprovalCallback | None = None,
@@ -204,6 +204,11 @@ async def build_runtime(
     式审批 callback（见 web 层 PendingApprovalQueue）。
     steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
     MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
+
+    `max_agent_turns`（#308）：**已解析的** local fuse 生效值——调用方（SessionService
+    / CLI）先用 `agent.budget.resolve_local_fuse` 把 Deployment / AgentProfile / 请求
+    覆盖合成一个整数（越权与 alias 冲突在那一步就已拒绝，422 早于本函数），本函数只
+    消费结果。刻意**不**在这里解析：装配点应该只有一个输入，而不是"再判一次策略"。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
@@ -369,6 +374,9 @@ async def build_runtime(
                 # Factory 默认 False：B2 契约（child.system_prompt == spec.system_prompt）
                 # 的成立必须与"工具恰好没有 guidance"无关。
                 include_tool_guidance=True,
+                # child 的 local fuse 上限（#308）：档位声明（内置三档位是 None=继承）
+                # 只能收窄到 Deployment ceiling 之下，越界在 Factory.create 里被拒。
+                local_max_agent_turns=settings.local_max_agent_turns,
             ),
             source_registry=registry,
             session_store=session_store,
@@ -408,7 +416,7 @@ async def build_runtime(
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
                               overflow_handler=overflow_handler,
                               operation_ledger=stores.operation_ledger),
-        max_steps=max_steps,
+        max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,
         context_builder=ContextBuilder(

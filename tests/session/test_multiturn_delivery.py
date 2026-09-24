@@ -168,8 +168,8 @@ class TwoTurnScriptedModel(GateScriptedModel):
     `operations.tool_call_id` 唯一约束让 run 2 直接 run/failed。这个替身在每次
     模型调用时生成**新** tool_call_id（按调用计数），多 run 复用安全。
 
-    ⚠ 剧本每次都吐 tool_call 会让模型永不收敛（第 11 次调用撞 max_steps 保险丝
-    ⇒ run/failed）。``turns_with_tools`` 控制带 tool 的调用次数，之后吐纯文本
+    ⚠ 剧本每次都吐 tool_call 会让模型永不收敛（一直转下去会撞 local fuse ⇒
+    run/failed；#308 起默认 500 轮，"跑满保险丝"不再是短用例写得出来的路径）。``turns_with_tools`` 控制带 tool 的调用次数，之后吐纯文本
     收尾——"第二个 run 的第一次调用就收尾"用默认 1。
     """
 

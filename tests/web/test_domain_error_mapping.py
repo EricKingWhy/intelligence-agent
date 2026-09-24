@@ -97,6 +97,14 @@ def test_status_map_is_the_audited_contract():
         # 刻意与 `ActiveRunConflict`（同为 409）分开：那条是「有在途 run 就不许并发」，
         # 本条只针对「有待裁决会议」，与在途 run 本身无关。
         "PendingApprovalConflict": 409,
+        # T3 / #308（ADR-0044 D1/D8/D9）：预算配置不可接受——迁移期 alias `max_steps`
+        # 与新字段冲突、下层声明越过生效上层 ceiling。与其余 422 同类（输入不可接受
+        # 且未开工）而不是 409：冲突两侧都是**请求自身**的字段/声明，不涉及服务端
+        # 当前状态（409 留给版本过期 / 已消耗之下等状态冲突）。父子三类各自登记
+        # ——本表是精确类型索引。
+        "BudgetRejection": 422,
+        "BudgetAliasConflict": 422,
+        "BudgetCeilingExceeded": 422,
     }
 
 

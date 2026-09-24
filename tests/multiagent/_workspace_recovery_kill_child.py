@@ -63,7 +63,7 @@ async def _run(root: Path) -> None:
             description="coding child",
             system_prompt="write the requested marker",
             tool_scope=frozenset({"write"}),
-            max_steps=4,
+            max_agent_turns=4,
         ),
     }
     provider = InProcessSubagentProvider(profiles=profiles)
@@ -89,7 +89,7 @@ async def _run(root: Path) -> None:
         model=_ParentDelegateModel(),
         registry=registry,
         executor=ToolExecutor(registry, operation_ledger=operation_ledger),
-        max_steps=4,
+        max_agent_turns=4,
     )
     await runtime.run(parent, "delegate marker creation to coding")
 

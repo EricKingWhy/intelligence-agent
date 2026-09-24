@@ -224,7 +224,7 @@ class TestDepthBoundary:
         )
         root_model = ScriptedModel([_tool_call("d1", "sup"), AIMessage(content="根收尾")])
         root = AgentRuntime(model=root_model, registry=env.registry,
-                            executor=ToolExecutor(env.registry), max_steps=5)
+                            executor=ToolExecutor(env.registry), max_agent_turns=5)
 
         run = await root.run(make_session(tmp_path), "跑一棵两层树")
 
@@ -263,7 +263,7 @@ class TestDepthBoundary:
 
         root_model = ScriptedModel([_tool_call("d1", "sup"), AIMessage(content="根收尾")])
         root = AgentRuntime(model=root_model, registry=env.registry,
-                            executor=ToolExecutor(env.registry), max_steps=5)
+                            executor=ToolExecutor(env.registry), max_agent_turns=5)
 
         await root.run(make_session(tmp_path), "跨层要工具")
 
@@ -294,7 +294,7 @@ class TestDepthBoundary:
         root_model = ScriptedModel([_tool_call("d1", "coding_like"),
                                     AIMessage(content="根收尾")])
         root = AgentRuntime(model=root_model, registry=env.registry,
-                            executor=ToolExecutor(env.registry), max_steps=5)
+                            executor=ToolExecutor(env.registry), max_agent_turns=5)
 
         session = make_session(tmp_path)
         run = await root.run(session, "一棵深度 1 的树")

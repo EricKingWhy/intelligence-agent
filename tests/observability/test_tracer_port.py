@@ -473,7 +473,7 @@ async def test_hard_guard_run_drives_terminal_port_lifecycle(tmp_path, monkeypat
     ])
     registry = ToolRegistry()
     registry.register(FailureTool())
-    runtime = AgentRuntime(scripted, registry, ToolExecutor(registry), max_steps=20)
+    runtime = AgentRuntime(scripted, registry, ToolExecutor(registry), max_agent_turns=20)
 
     result = await runtime.run(session, "反复试同一个失败命令")
 
@@ -552,7 +552,7 @@ async def test_raising_tracer_cannot_change_the_max_steps_verdict(tmp_path, monk
     registry = ToolRegistry()
     registry.register(_FlakyTool())
     runtime = AgentRuntime(
-        ScriptedModel(rounds), registry, ToolExecutor(registry), max_steps=2,
+        ScriptedModel(rounds), registry, ToolExecutor(registry), max_agent_turns=2,
     )
 
     result = await runtime.run(session, "永远算不完")

@@ -78,15 +78,24 @@ def test_unregister_is_test_only_removal(clean_registry) -> None:
 
 
 def test_builtin_registration_is_explicit_and_idempotent() -> None:
-    """两次调用只注册一次（幂等）；列表里不会出现两份内置场景。"""
+    """两次调用只注册一次（幂等）；列表里不会出现两份内置场景。
+
+    内置清单会随票增长（T2 smoke → T3 长任务 → …），所以断言钉的是**幂等**与**可解析**，
+    不是"只有一个"：把条数写死会让每张加场景的票都得改这里，而那一天真正的回归
+    （同 id 注册两次）反而没人测。
+    """
     register_builtin_scenarios()
     register_builtin_scenarios()
     smoke = get_scenario(SMOKE_ID)
     assert isinstance(smoke, LiveScenario)
     assert smoke.version == 1
-    assert [item.id for item in BUILTIN_SCENARIOS] == [SMOKE_ID]
-    assert [item.id for item in list_scenarios()].count(SMOKE_ID) == 1
-    assert is_builtin(SMOKE_ID) is True, "随 harness 发布的场景要能被 runner 认出来"
+    declared = [item.id for item in BUILTIN_SCENARIOS]
+    assert SMOKE_ID in declared
+    assert len(declared) == len(set(declared)), f"内置清单里有重复 id：{declared}"
+    for scenario_id in declared:
+        assert is_builtin(scenario_id) is True, f"{scenario_id} 随 harness 发布，要能被 runner 认出"
+        assert get_scenario(scenario_id) is not None
+        assert [item.id for item in list_scenarios()].count(scenario_id) == 1
 
 
 def test_stub_cannot_declare_itself_builtin(clean_registry) -> None:

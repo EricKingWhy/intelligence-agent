@@ -159,6 +159,19 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
   return res.json();
 }
 
+export interface BudgetPayload {
+  /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。**本票只开这一层**：
+   *  `run` / `session` 由 T4/T10 落地，在那之前后端对未知键是 422
+   *  （`extra="forbid"`），所以类型里也不预留——预留会让"编译通过、请求 422"
+   *  变成新的漂移源。
+   *
+   *  **缺省不发键**：不传 = 后端按 Deployment/AgentProfile 解析（默认 500）。
+   *  前端刻意没有默认值——硬编码一个数字会变成请求侧覆盖：运维把 deployment
+   *  ceiling 调低时，它反而让请求 422（#308 AC：产品调用方不再主动发送
+   *  `max_steps`）。 */
+  local?: { max_agent_turns?: number };
+}
+
 export interface StartSessionPayload {
   task: string;
   workspace?: string;
@@ -170,7 +183,7 @@ export interface StartSessionPayload {
    *  **互斥**：两个都传 → 422 `workspace 与 cwd 只能二选一`。前端入口一次只用一种，
    *  这条互斥在后端兜底而不是在这里猜（谁先谁后是可观测契约，见 PRD §4.1）。 */
   cwd?: string;
-  max_steps?: number;
+  budget?: BudgetPayload;
   auto_approve?: boolean;
   /** 可选模型选择（T10 #103，契约 C6）：GET /api/models 的 name；不传 = 默认
    *  链；未知 → 422（调用方提示重新选择并刷新目录）。 */
@@ -201,7 +214,7 @@ export interface StartSessionPayload {
  *  后端默认 workspace-write + auto-approve。 */
 export interface CreateEmptySessionPayload {
   cwd?: string;
-  max_steps?: number;
+  budget?: BudgetPayload;
   auto_approve?: boolean;
   permission_mode?: string;
   workspace?: string;
@@ -231,7 +244,7 @@ export async function createEmptySession(
       buildBody(payload, {
         workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
         cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
-        max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+        budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
         auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
         permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
       }),
@@ -394,7 +407,7 @@ const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
   cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
-  max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+  budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
   auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
   model: (p) => (p.model ? ['model', p.model] : null),
   permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
@@ -437,7 +450,7 @@ export async function startSessionErrorDetail(res: Response): Promise<string> {
 export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
-  max_steps?: number;
+  budget?: BudgetPayload;
   /** 编辑语义（ADR-0030 §4.4，后端 #196 起接受；默认缺省不发键 = 现有行为不变）：
    *  - supersedes_seq：取代 seq 为它的那条 user/message **及其整轮**（只影响
    *    模型可见投影与界面，历史事件照旧保留）。目标必须是最新一条非注入用户
@@ -464,12 +477,14 @@ export interface SendMessagePayload {
   context_providers?: string[];
 }
 
-/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；mode / max_steps
- *  有后端默认值，故缺省在此补齐（与 create 路径「缺省即不发键」不同）。 */
+/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；`mode` 有后端默认值，
+ *  故缺省在此补齐（其余键缺省即不发键，与 create 路径同款）。 */
 const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
-  max_steps: (p) => ['max_steps', p.max_steps ?? 10],
+  // budget（#308）：与 create 路径同款「有值才带键」，**没有**前端默认值。
+  // 旧的 `max_steps: p.max_steps ?? 10` 正是产品侧低位默认的来源之一，随本票移除。
+  budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
   // 编辑语义（ADR-0030）：与 amend 四项同款「有值才带键」，缺省不发键 = 后端
   // 默认 None = 现有行为逐字不变。
   supersedes_seq: (p) =>

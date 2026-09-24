@@ -540,7 +540,7 @@ def _scenarios() -> tuple[Scenario, ...]:
             name="max_steps",
             note="模型不收敛撞保险丝：第 2 轮不再执行工具，直接 run/failed",
             build=lambda w: _runtime(
-                ScriptedModel([_tool_call(i) for i in range(6)]), max_steps=2,
+                ScriptedModel([_tool_call(i) for i in range(6)]), max_agent_turns=2,
                 memory_writer=w.memory,
             ),
             drive=_drive_full,

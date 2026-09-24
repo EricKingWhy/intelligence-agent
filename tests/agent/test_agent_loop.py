@@ -90,10 +90,10 @@ def _registry() -> ToolRegistry:
     return reg
 
 
-def _runtime(model: ScriptedModel, max_steps: int = 20) -> AgentRuntime:
+def _runtime(model: ScriptedModel, max_agent_turns: int = 20) -> AgentRuntime:
     """构造绑定了 executor + registry 的 Runtime。"""
     reg = _registry()
-    return AgentRuntime(model=model, registry=reg, executor=ToolExecutor(reg), max_steps=max_steps)
+    return AgentRuntime(model=model, registry=reg, executor=ToolExecutor(reg), max_agent_turns=max_agent_turns)
 
 
 # ---------- 路径 A：无工具直接完成 ----------
@@ -262,7 +262,7 @@ TOOL_CALL_ID_LOOP = "call_loop"
 class TestAgentLoopMaxSteps:
     @pytest.mark.asyncio
     async def test_max_steps_exceeded_with_exact_step_count(self, tmp_path):
-        """模型不收敛 + max_steps=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。
+        """模型不收敛 + max_agent_turns=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。
 
         #222 追加：这条终态此前 run/failed 里**没有任何键**，"步数用尽"只活在后端
         进程日志里；现在 reason 落常量，durable 历史自己说得清为什么失败。
@@ -282,7 +282,7 @@ class TestAgentLoopMaxSteps:
             for i in range(3)
         ]
         scripted = ScriptedModel(rounds)
-        runtime = _runtime(scripted, max_steps=3)
+        runtime = _runtime(scripted, max_agent_turns=3)
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "永远算不完")
@@ -319,7 +319,7 @@ class TestAgentLoopMaxSteps:
             for i in range(2)
         ] + [AIMessage(content="总算算完了")]
         scripted = ScriptedModel(rounds)
-        runtime = _runtime(scripted, max_steps=3)
+        runtime = _runtime(scripted, max_agent_turns=3)
 
         result = await runtime.run(make_session(tmp_path), "最后一步收敛")
 

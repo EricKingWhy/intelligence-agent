@@ -328,7 +328,7 @@ class TestResumeAndLaunchPassthrough:
                 service.resume_and_launch(
                     session_id="test-sid",
                     task="hello",
-                    max_steps=5,
+                    local_max_agent_turns=5,
                     amend=AmendOptions(
                         reasoning_effort="deep",
                         agent_profile="coding",
@@ -381,7 +381,7 @@ class TestResumeAndLaunchPassthrough:
                 service.resume_and_launch(
                     session_id="test-sid",
                     task="hello",
-                    max_steps=5,
+                    local_max_agent_turns=5,
                 )
             )
 

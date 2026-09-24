@@ -220,7 +220,7 @@ async def test_failed_run_backfills_trace_id_and_trace_url_symmetrically(tmp_pat
         _registry_with_add(),
         ToolExecutor(_registry_with_add()),
         observability_sink=_sink(recorder),
-        max_steps=2,
+        max_agent_turns=2,
     )
     await runtime.run(session, "force fail")
 

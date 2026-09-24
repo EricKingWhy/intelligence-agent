@@ -1034,11 +1034,13 @@ export function useSession() {
       sessionId: string,
       content: string,
       opts?: {
-        maxSteps?: number;
         /** 字段集直接取自 /messages 的请求契约——Omit 出 amend 面，不会随
          *  请求契约增删字段而漂移。mode 可被 amend 覆盖（steer 通道复用同一
-         *  端点，见 sendSteer）。 */
-        amend?: Omit<SendMessagePayload, 'content' | 'max_steps'>;
+         *  端点，见 sendSteer）。
+         *
+         *  #308：`maxSteps` 选项随迁移移除——续聊不再主动发送任何 local fuse
+         *  数字，缺省由后端按 Deployment/AgentProfile 解析（默认 500）。 */
+        amend?: Omit<SendMessagePayload, 'content' | 'budget'>;
       },
     ) => {
       setError(null);
@@ -1163,7 +1165,6 @@ export function useSession() {
         const amend = opts?.amend ?? {};
         await deliver({
           content,
-          max_steps: opts?.maxSteps ?? 10,
           ...amend,
           mode: amend.mode === 'steer' ? 'steer' : 'queue',
         });

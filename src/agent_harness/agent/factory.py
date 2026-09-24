@@ -21,6 +21,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS, resolve_local_fuse
 from agent_harness.agent.profiles import AgentSpec
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.prompt import PersonaConfig, compose_agent_prompt, join_guidance
@@ -46,9 +47,14 @@ class AgentFactory:
         observability_sink: Any | None = None,
         persona: PersonaConfig | None = None,
         include_tool_guidance: bool = False,
+        local_max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS,
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
+        # Deployment ceiling（#308）：child 的 local fuse 由"档位声明（可为 None）→
+        # 收到这个 ceiling 之下"解析。**子 Agent 不会继承一个更大的上限**——父级额度
+        # 更大不构成放行理由（ADR-0044 D1：local fuse 不跨兄弟池化）。
+        self._local_max_agent_turns = local_max_agent_turns
         # executor 组装缝：policy/approval/ledger/overflow 等运行配置由调用方
         # 闭包捕获——Factory 不关心 Executor 怎么配，只保证 child registry 先
         # 过滤再进入组装。
@@ -102,6 +108,12 @@ class AgentFactory:
             )
         effective = spec.tool_scope & source_names
 
+        # local fuse（#308）：档位声明只能**收窄** Deployment ceiling；越界的档位声明
+        # 在这里被拒（child 执行前，ADR-0044 D7/D1），不静默取小值。
+        child_fuse = resolve_local_fuse(
+            deployment=self._local_max_agent_turns, profile=spec.max_agent_turns,
+        )
+
         child_registry = source_registry.filtered(effective)
         executor = (self._executor_factory(child_registry) if self._executor_factory
                     else ToolExecutor(child_registry))
@@ -113,7 +125,7 @@ class AgentFactory:
             model=self._model,
             registry=child_registry,
             executor=executor,
-            max_steps=spec.max_steps,
+            max_agent_turns=child_fuse.max_agent_turns,
             fallback_model=self._fallback_model,
             primary_model_name=self._primary_model_name,
             fallback_model_name=self._fallback_model_name,

@@ -110,7 +110,7 @@ class FailOnceModel:
 def _runtime(primary: Any, fallback: Any | None) -> AgentRuntime:
     return AgentRuntime(
         model=primary, registry=_registry(), executor=ToolExecutor(_registry()),
-        max_steps=10,
+        max_agent_turns=10,
         fallback_model=fallback,
         fallback_policy=TwoLevelFallbackPolicy(),
         primary_model_name="primary-model",
@@ -273,7 +273,7 @@ class TestStallWatchdogInLoop:
     ) -> AgentRuntime:
         return AgentRuntime(
             model=primary, registry=_registry(), executor=ToolExecutor(_registry()),
-            max_steps=10,
+            max_agent_turns=10,
             fallback_model=fallback,
             primary_model_name="primary-model",
             fallback_model_name="fallback-model",
@@ -339,7 +339,7 @@ class TestTransitionPersistenceOnFailure:
         fallback = _StalledStreamModel(first_chunk="fb ", stall_seconds=99.0)
         runtime = AgentRuntime(
             model=primary, registry=_registry(), executor=ToolExecutor(_registry()),
-            max_steps=10,
+            max_agent_turns=10,
             fallback_model=fallback,
             primary_model_name="primary-model",
             fallback_model_name="fallback-model",
@@ -371,11 +371,11 @@ class TestModelCallGateWiring:
         inner = ScriptedModel([AIMessage(content="ok"), AIMessage(content="ok")])
         coord_a = AgentRuntime(
             model=inner, registry=_registry(), executor=ToolExecutor(_registry()),
-            max_steps=5, model_call_gate=gate,
+            max_agent_turns=5, model_call_gate=gate,
         )._new_coordinator()
         coord_b = AgentRuntime(
             model=inner, registry=_registry(), executor=ToolExecutor(_registry()),
-            max_steps=5, model_call_gate=gate,
+            max_agent_turns=5, model_call_gate=gate,
         )._new_coordinator()
 
         t0 = time.perf_counter()

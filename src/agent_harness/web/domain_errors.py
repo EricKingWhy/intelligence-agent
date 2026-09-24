@@ -69,6 +69,15 @@ fork 父时不删（不级联、不静默 orphan），detail 带子会话数量�
 （`POST /api/sessions/{id}/permission`）。机制 / 不复用 `ActiveRunConflict` 的理由见 ADR-0041
 §4.1。上表已补该端点行。
 
+**T3 追加（#308）**：新增 `BudgetRejection` 家族三档 `: 422`——预算配置不可接受：迁移期
+alias `max_steps` 与新字段 `budget.local.max_agent_turns` **同时出现且不等**（`BudgetAliasConflict`）、
+下层声明的 ceiling **越过生效上层**（`BudgetCeilingExceeded`，ADR-0044 D1/D8）。判定发生在
+**任何 model / tool / child 工作开始前**（ADR-0044 D9：与其余 422 同类——输入不可接受且未开工），
+被拒请求不落盘、不写消耗预算的事件。三个类都是 `BudgetRejection` 的子类，本表是**精确类型**
+索引，所以父子各自登记（同 `WorkspacePathInvalid` 的规矩）。命中端点：`POST /api/sessions`、
+`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/messages`（launched 路径）与
+`POST /api/sessions/{id}/queue/flush`。
+
 ## 设计取舍（为什么不再往前一步）
 
 - **不用 FastAPI 全局 `exception_handler`**：那会把整张表应用到每个端点，使一个本来
@@ -84,6 +93,11 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from agent_harness.agent.budget import (
+    BudgetAliasConflict,
+    BudgetCeilingExceeded,
+    BudgetRejection,
+)
 from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.session.errors import (
     ActiveRunConflict,
@@ -123,6 +137,11 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     InvalidDecision: 422,
     UnknownModel: 422,
     InvalidForkBoundary: 422,
+    # T3 / #308（ADR-0044 D1/D8/D9）：预算配置不可接受——alias 冲突 / 越过生效上层
+    # ceiling。父类与两个子类各自登记（精确类型索引）。
+    BudgetRejection: 422,
+    BudgetAliasConflict: 422,
+    BudgetCeilingExceeded: 422,
     # 404：目标不存在（approve 的三个来源有意不可区分，见模块 docstring）
     SessionNotFound: 404,
     ApprovalQueueMissing: 404,

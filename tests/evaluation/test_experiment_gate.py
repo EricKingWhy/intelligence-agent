@@ -204,7 +204,7 @@ async def test_failed_agent_runtime_status_cannot_pass_a_case(tmp_path) -> None:
             )]),
             registry,
             ToolExecutor(registry, operation_ledger=ledger),
-            max_steps=1,
+            max_agent_turns=1,
         )
 
     result, _events = await run_case_async(

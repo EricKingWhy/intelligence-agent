@@ -41,7 +41,7 @@ def _spec(name: str) -> AgentSpec:
         description=name,
         system_prompt=f"You are {name}.",
         tool_scope=frozenset({"delegate"}),
-        max_steps=8,
+        max_agent_turns=8,
         max_depth=4,
     )
 
@@ -109,7 +109,7 @@ async def test_descendants_consume_one_cumulative_tree_budget(tmp_path):
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=8,
+        max_agent_turns=8,
     )
 
     result = await root.run(session, "run the delegation tree")
@@ -159,7 +159,7 @@ async def test_delegation_tree_metadata_persists_on_child_session(tmp_path):
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=4,
+        max_agent_turns=4,
     )
     await root.run(session, "start")
 
@@ -193,7 +193,7 @@ async def test_delegation_tree_metadata_persists_on_child_session(tmp_path):
         ]),
         registry=recovered_registry,
         executor=ToolExecutor(recovered_registry),
-        max_steps=4,
+        max_agent_turns=4,
     )
     await recovered_runtime.run(child, "resume child")
 
@@ -234,7 +234,7 @@ async def test_interrupted_root_reuses_the_same_tree_budget_on_resume(tmp_path):
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=4,
+        max_agent_turns=4,
     )
 
     await root.run(session, "resume")
@@ -286,7 +286,7 @@ async def test_interrupted_root_cannot_expand_persisted_depth_on_resume(tmp_path
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=4,
+        max_agent_turns=4,
     )
 
     result = await root.run(session, "resume interrupted root")
@@ -346,7 +346,7 @@ async def test_runtime_provider_clones_share_process_child_limit(tmp_path):
                 ]),
                 registry=registry,
                 executor=ToolExecutor(registry),
-                max_steps=4,
+                max_agent_turns=4,
             ),
             session,
         ))
@@ -391,7 +391,7 @@ async def test_same_failed_delegation_across_descendants_triggers_persistent_gua
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=10,
+        max_agent_turns=10,
     )
 
     result = await root.run(session, "repeat the delegated task")
@@ -439,7 +439,7 @@ async def test_identical_failed_sibling_delegations_share_guard_state(tmp_path):
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=4,
+        max_agent_turns=4,
     )
 
     result = await root.run(session, "run sibling failures concurrently")
@@ -492,7 +492,7 @@ async def test_constraints_participate_in_repeated_delegation_fingerprint(tmp_pa
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=4,
+        max_agent_turns=4,
     )
 
     result = await root.run(session, "compare distinct constrained delegations")
@@ -607,7 +607,7 @@ async def test_process_kill_and_recovery_preserve_budget_and_failure_fingerprint
         ]),
         registry=registry,
         executor=ToolExecutor(registry, operation_ledger=operation_ledger),
-        max_steps=4,
+        max_agent_turns=4,
     )
 
     result = await resumed_runtime.run(recovered, "resume interrupted tree")
@@ -697,7 +697,7 @@ async def test_child_process_recovery_restores_delegated_coding_workspace(tmp_pa
         executor=ToolExecutor(
             recovered_registry, operation_ledger=operation_ledger,
         ),
-        max_steps=4,
+        max_agent_turns=4,
         agent_id="coding",
     )
     result = await recovered_runtime.run(recovered_child, "continue after recovery")

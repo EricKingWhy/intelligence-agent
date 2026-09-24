@@ -68,7 +68,7 @@ class TestCorruptLogHttpSemantics:
 
         res = client.post(
             "/api/sessions/sid-1/messages",
-            json={"content": "再问一次", "mode": "queue", "max_steps": 5},
+            json={"content": "再问一次", "mode": "queue", "budget": {"local": {"max_agent_turns": 5}}},
         )
 
         assert res.status_code == 409, res.text

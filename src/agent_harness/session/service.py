@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import anyio
 
+from agent_harness.agent.budget import LocalFuse, resolve_local_fuse
 from agent_harness.assembly import build_runtime
 from agent_harness.logging import log_event
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
@@ -215,11 +216,17 @@ class LaunchResult:
 
     #204：`launch=False` 的只建路径返回 `run=None`/`subscriber=None`——
     没有 run 就没有订阅句柄，None 是诚实的"不存在"，调用方据此不组 SSE。
+
+    `local_fuse`（#308）：本次 run 生效的 local fuse 与来源，**只读投影**的数据面
+    （车票 Must Do）。Web 层把它映射成响应头（`X-Local-Max-Agent-Turns` /
+    `X-Local-Fuse-Source`，用了旧 alias 时另加 `Deprecation` 与 `Warning`）；CLI 与
+    后续票直接读字段。解析发生在本结果被构造**之前**——越权/冲突已在开工前拒绝。
     """
 
     session: Session
     run: ManagedRun | None
     subscriber: Subscriber | None
+    local_fuse: LocalFuse | None = None
 
 
 @dataclass(frozen=True)
@@ -256,6 +263,10 @@ class SendMessageResult:
     subscriber: Subscriber | None = None
     queued_message: QueuedMessage | None = None
     steer_request: SteerRequest | None = None
+    #: launched 分支的生效 local fuse（#308）。queued / steered **不消费**预算
+    #: （`11 §6.1` 只把 budget 挂在"idle 会话消息启动"上）——那两条分支因此是 None：
+    #: 不是"解析失败"，而是"本条请求没有产生 run"。
+    local_fuse: LocalFuse | None = None
 
     def to_response(self) -> dict[str, str]:
         """Web 层 queued/steered 分支返回体（launched 走 SSE 不经此）。
@@ -520,7 +531,8 @@ class SessionService:
         task: str,
         workspace_name: str | None = None,
         cwd: str | None = None,
-        max_steps: int = 10,
+        local_max_agent_turns: int | None = None,
+        max_steps: int | None = None,
         permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
         permission_mode_explicit: bool = False,
         auto_approve_explicit: bool = False,
@@ -544,6 +556,12 @@ class SessionService:
         组装顺序（R6-6）：先建 workspace + runtime，最后才 Session.start 落盘，
         避免 runtime 组装失败时留下只含 session/started 的孤儿 session。
 
+        local fuse（#308）：`local_max_agent_turns` 是 `budget.local.max_agent_turns`
+        的请求声明，`max_steps` 是迁移期 deprecated alias——两者在**任何副作用之前**由
+        `agent.budget.resolve_local_fuse` 与 Deployment ceiling 合成生效值（不等 ⇒ 422；
+        越过上层 ceiling ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。解析刻意放在最前面：
+        被拒请求不建 workspace 目录、不落盘任何事件。
+
         `workspace_name` 与 `cwd` 二选一（ADR-0027）：
         - `workspace_name`（旧契约，逐字节不变）：单个目录名，目录在
           `workspaces_root` 下由 Harness **创建**；
@@ -553,6 +571,14 @@ class SessionService:
         from uuid import uuid4
 
         from agent_harness.model.config import ConfigError, ModelConfig
+
+        # local fuse 解析先于一切副作用（#308 / ADR-0044 D9：422 在开工前，被拒请求
+        # 不启动 model/tool/child 工作，也不写消耗预算的事件——也不建 workspace 目录）。
+        fuse = resolve_local_fuse(
+            deployment=self._settings.local_max_agent_turns,
+            request=local_max_agent_turns,
+            alias=max_steps,
+        )
 
         # 校验顺序即契约（PRD §4.1）：先"二选一"（两个都给了就没有优先级问题可言），
         # 再各走各的形态校验。"非空"按 strip 后的内容判；只给了一个但内容空白（如
@@ -631,7 +657,7 @@ class SessionService:
             workspace_registry=self._workspace_registry,
             session_id=session_id,
             workspace=workspace,
-            max_steps=max_steps,
+            max_agent_turns=fuse.max_agent_turns,
             permission_mode=permission_mode,
             approval_callback=approval_callback,
             session_store=self._store,
@@ -678,7 +704,9 @@ class SessionService:
             # （登记点永远等不到 pop）——只建路径当场撤掉登记，队列不泄漏。
             if interactive:
                 self._approval_queues.pop(session_id, None)
-            return LaunchResult(session=session, run=None, subscriber=None)
+            return LaunchResult(
+                session=session, run=None, subscriber=None, local_fuse=fuse,
+            )
 
         run, subscriber = self._run_manager.launch(session, runtime, task)
 
@@ -686,14 +714,17 @@ class SessionService:
         if interactive:
             self._attach_approval_queue_gc(run, session_id)
 
-        return LaunchResult(session=session, run=run, subscriber=subscriber)
+        return LaunchResult(
+            session=session, run=run, subscriber=subscriber, local_fuse=fuse,
+        )
 
     async def resume_and_launch(
         self,
         *,
         session_id: str,
         task: str,
-        max_steps: int = 10,
+        local_max_agent_turns: int | None = None,
+        max_steps: int | None = None,
         amend: AmendOptions | None = None,
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
@@ -711,6 +742,13 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # local fuse（#308）：与 create 同一条解析；位置在**只读前置检查之后、
+        # Session.resume 追加事件之前**——被拒请求不写 session/resumed、不建目录。
+        fuse = resolve_local_fuse(
+            deployment=self._settings.local_max_agent_turns,
+            request=local_max_agent_turns,
+            alias=max_steps,
+        )
         # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
         amend = _amend_with_session_model(amend, existing, self._settings)
         if self._run_manager.get_active(session_id) is not None:
@@ -809,7 +847,7 @@ class SessionService:
             workspace_registry=self._workspace_registry,
             session_id=session_id,
             workspace=workspace,
-            max_steps=max_steps,
+            max_agent_turns=fuse.max_agent_turns,
             permission_mode=permission_mode,
             approval_callback=approval_callback,
             session_store=self._store,
@@ -824,7 +862,9 @@ class SessionService:
         # run 终结时 GC approval_queue（与创建路径同一条防泄漏路径）。
         if interactive:
             self._attach_approval_queue_gc(run, session_id)
-        return LaunchResult(session=session, run=run, subscriber=subscriber)
+        return LaunchResult(
+            session=session, run=run, subscriber=subscriber, local_fuse=fuse,
+        )
 
     # ── 重连续传 ─────────────────────────────────────────────────────
 
@@ -928,7 +968,8 @@ class SessionService:
         session_id: str,
         content: str,
         mode: str = "queue",
-        max_steps: int = 10,
+        local_max_agent_turns: int | None = None,
+        max_steps: int | None = None,
         amend: AmendOptions | None = None,
         supersedes_seq: int | None = None,
         queue_id: str | None = None,
@@ -962,6 +1003,12 @@ class SessionService:
 
         staged amend 字段透传给 ``resume_and_launch``（idle 分支），
         与 create 路径对齐。默认 None = 当前行为不变。
+
+        local fuse（#308）：与 amend 同一条纪律——**只有 idle → launched 才消费**。
+        `local_max_agent_turns` / `max_steps`（deprecated alias）在 idle 分支交给
+        ``resume_and_launch`` 解析（冲突/越权在那里 422，早于任何 run 工作）；在途 run
+        的 queued 消息与 steer **不消费**它们（`11 §6.1` 只把 budget 挂在 idle 消息
+        启动上），按既有"未被消费的 amend 字段丢弃"契约忽略——不是静默截断生效 ceiling。
 
         不抢断、不改写历史事件（不变量 #3 / #22）；queue 与 steer 的消费由
         run 边界（``on_run_terminal``）/ runtime 循环头驱动，本方法只做注册与
@@ -1009,7 +1056,9 @@ class SessionService:
         elif active_run is None:
             # idle → 直接拉起新 run（同 resume 路径）。
             launched = await self.resume_and_launch(
-                session_id=session_id, task=content, max_steps=max_steps,
+                session_id=session_id, task=content,
+                local_max_agent_turns=local_max_agent_turns,
+                max_steps=max_steps,
                 amend=amend,
             )
             result = SendMessageResult(
@@ -1017,6 +1066,7 @@ class SessionService:
                 session=launched.session,
                 run=launched.run,
                 subscriber=launched.subscriber,
+                local_fuse=launched.local_fuse,
             )
         else:
             # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
@@ -1129,7 +1179,6 @@ class SessionService:
         self,
         *,
         session_id: str,
-        max_steps: int = 10,
         amend: AmendOptions | None = None,
     ) -> LaunchResult | None:
         """取 1 条未投递输入接力开新 run（ADR-0030 §4.5.5）。None = 无待投递。
@@ -1142,6 +1191,9 @@ class SessionService:
         （用户看不见、无从恢复），"已投递但没记消费"= 重启后再投一次
         （重复回答，用户看得见）。选后者（同 §4.4 的取舍方向）。
 
+        local fuse（#308）：本路径**没有**请求级覆盖（排队项按契约不携带 budget，
+        `11 §6.1`），生效值 = Deployment 默认（500）——由 ``resume_and_launch`` 解析。
+
         `ActiveRunConflict` 直接上抛：调用方（HTTP flush）翻 409；终态驱动侧
         自己吞掉并记日志——此时输入仍在事件流里，下一个终态会再试（不会丢）。
         """
@@ -1150,7 +1202,7 @@ class SessionService:
             return None
         nxt = pending[0]
         launched = await self.resume_and_launch(
-            session_id=session_id, task=nxt.content, max_steps=max_steps, amend=amend,
+            session_id=session_id, task=nxt.content, amend=amend,
         )
         # run_id 拿不到（超时）不阻塞投递：消费判据是 input_id，run_id 只是归因。
         run_id = await launched.run.wait_run_id()
