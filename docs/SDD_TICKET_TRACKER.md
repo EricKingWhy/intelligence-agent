@@ -30,6 +30,12 @@
 
 **施工顺序**：先 `#297`；再并行 `#298` / `#299` / `#300`；随后按依赖推进 `#301` / `#302` / `#303`；最后仅在前七票集成后执行 `#304`。每票独立 review/门禁/关单；不得把 `#304` 的真实 Gate 提前当作单票完成证据。
 
+> **状态更新（2026-09-24）**：上表「OPEN / `ready-for-agent`」与上一段的「当前没有任何票进入实现」**均已过期**，
+> 按「历史片段不改写、新状态追加」的惯例在此更正：`#297`（`T297-mem-v2-1-typed-lifecycle`，tip `32ef89b`）
+> 与 `#298`（`T298-mem-v2-2-durable-formation-adjudication`）**均已进入实现并各自推送分支**，
+> 两票在 GitHub 上仍为 OPEN（未集成未关单）。`#298` 的逐票记录见文末
+> 「MEM-V2-2（`#298`）T1–T6b 施工记录」段。
+
 ---
 
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
@@ -4808,3 +4814,64 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 3. **`test_equivalence_reads_blobs_from_git` 属自比弱用例**（同 blob 读两次相比）：非永真（`a` 非空断言仍守住），保留。
 
 **集成（已完成）**：`origin/main` 实测 = `31ef526939bcfcc15133df4f2141143d25289d71`（`git ls-remote --heads origin` 读数，= 本地 `main`）。推送 `8f9ea1c..31ef526` **fast-forward**，`.githooks/pre-push` 自动跑 Gate-0 六车道 ⇒ **6/6 PASS**（diff-check 0.26s / ruff 0.31s / oxlint 0.41s / tsc 8.46s / guards 3.11s / coverage 2.97s，墙钟 15.5s）。**落点笔 `31ef526` 由本票新功能自身自动归属**（闸门输出 `✅ docs-only（按路径自动归属）: 31ef526 …`）⇒ 端到端可用。关单评论与 `#295` 状态实测 `state=CLOSED reason=COMPLETED comments=1`。
+
+## MEM-V2-2（`#298`）T1–T6b 施工记录（2026-09-24 · 进行中，未落 main）
+
+**状态**：🚧 **实现中 —— 已推送分支，未集成、未关单**。分支 `T298-mem-v2-2-durable-formation-adjudication`。
+集成基线实测 `git merge-base HEAD origin/main` = `f2d6ed57af41f4b64e1fc5175a77977c1308d675` = 当时的
+`origin/main` ⇒ 本分支是 main 的**严格超集**（具备 fast-forward 条件）；但分支**包含 `#297` 的全部提交**
+（`#298` 的 `blocked_by: #297`）⇒ **`#297` 未集成前不得单独合 main**。本轮 `origin/main` **未动**。
+
+**票面**：GitHub `#298`（`docs/tickets/mem-v2-2-durable-formation-adjudication.md`）。本文件上表里的
+「OPEN / `ready-for-agent`」是开票当日快照，本段为其当前态。
+
+**交付序列（7 笔 #298 相关 commit）**：
+
+| 切片 | commit | 内容 |
+| --- | --- | --- |
+| 前置 | `1d9fc28` | 抽出 V2 存储共用的连接策略与时间戳（`memory/v2/_sqlite.py`） |
+| T1 | `2a64c5a` | 落 durable formation job 存储（幂等入队 / 按用户串行 / lease CAS / 终态） |
+| T2 | `1296e74` | 判定 run 终结是否有资格触发记忆形成 |
+| T3 | `01308de` | Formation/Adjudication 契约与候选政策执法 |
+| T4 | `9b02171` | 组装记忆模型的安全输入投影（R2 安全投影） |
+| T5 | `09eeae3` | 记忆作业的模型角色解析与预算账本 |
+| T6 | `2f5a32e` | 形成作业执行器与单事务终态 |
+| T6b | `f8f46e7` | **P0 修复**：证据引用链（运行时别名 `ref`）—— 见下「票面变更」 |
+
+**门禁读数（T6b 提交前实跑）**：
+
+- `python -m ruff check src/ tests/` ⇒ **All checks passed**（exit 0）。
+- `python -m pytest tests/memory -q --junitxml=.scratch/junit-298-t6b.xml` ⇒ **757 passed / 0 failed**（73.08s，0 skipped）。
+- 变异证明 `.scratch/mutation_proof_298.py`（全量、无参数）⇒ **96 条全部按各自的判别性声明落地**（exit 0）。
+  退出码 0 同时证明启动自检 ③「96 条变异的锚点全部唯一命中」通过 —— 锚点失效会以 FATAL 退 2。
+- 净增对账：T6 收口读数 738 收集 ⇒ 本切片 **757**，净增 **+19** = 投影 6 + 政策 6 + 执行器 5 + 审查后补的
+  2 条锁（别名单射 / 对照表只读）。变异 +7（T6b 一组）。
+
+**票面变更（`AGENTS.md` §9.1.1 —— 已获用户批准）**：
+
+T6 收口时发现**跨切片 P0**：R2 安全投影**刻意不投影任何 `event_id`**（且有测试钉着），而
+`CandidateEvidence` 契约与 `policy._reject` 的 provenance 判据都以**真实 `event_id`** 为键 ⇒ 模型在结构上
+无法产出可解析的证据，**生产路径上每个候选都会落到 `unsupported_source`**（AC3 点名的类别 ⇒ 自动记忆零写入）。
+既有用例把真实 id 直接写进 fixture，所以全绿 —— 即「测试编码了一个模型到不了的世界」。
+按 §9.1.1 停在报告阶段，用户裁决 = **候选 A（投影发运行时别名）**。
+
+已落地的修法（完整叙述见票面文件新增的「票面更正（T6b · 2026-09-24，用户已批准）」节）：
+
+1. 投影按**阅读顺序**（先 `current_run` 消息、后 `tool_calls`）给本轮可引用事件发 `e1…eN` 别名，命名
+   `ref`，作为**新增 wire 字段**进载荷；`别名 → 真实 event_id` 对照表留在 `FormationInput.refs`，**不进载荷**。
+2. `select_candidates(..., refs=...)` 以别名为键空间；**默认 `refs=None` ⇒ 键仍是真实 id，行为逐字不变**
+   （`refs` 参数是「模型能引什么」的唯一开关）；`sources` 与 `qualifying` 共用同一键空间。
+3. 执行器在写盘前把别名翻回真实 id；一条都翻不回来 ⇒ 逐条丢弃，归因码 `evidence_unresolved`
+   （§6.1 要求 provenance 非空）。**真实 id 仍不进模型 ⇒ AC9 判据不变。**
+
+**两轴独立审查**（Standards + Spec，独立只读子代理）：结论「**没有 P0/P1，不需打回重做**」。2 项必须先修
+（`_evidence_keys` 的死过滤 + 其 docstring 把 fail-closed 记错位置 / `projection.py` 自带的 R2 通道表形状已过期）
++ 1 条真 bug（`_Aliases.next` **非单射**：同一 run 内重复 `tool_call_id` 时，同一结果事件拿到两个别名，
+反向建键折叠 ⇒ **载荷广告过的 `ref` 解析不到**，且全链路不报错）+ 7 条 P2 清理 ⇒ **全部处置**
+（该修的修、该采纳的采纳），并逐条留锁：单射回归用例、对照表只读（`MappingProxyType`）、对应变异条目。
+审查同时明确写下多条「经查不成立」（R2 泄漏 / 不变量 #7 #8 #22 / `refs` 跨重启丢失 / AC4 零回归）。
+
+**残留与下一步**：T7（装配 + Runtime 终结接入：`MemoryModelInvoker` / `MemoryJobEventSink` / **R11 全局并发
+默认 4 可配**）→ T8（**ADR-0043 必须写入别名机制完整叙述** + 事件词表再生成 + 两轴 review + 台账新文件 +
+覆盖闸门 `scripts/check_review_coverage.sh` **exit 0** + `#298` 证据评论 + `PHASE_STATUS`）。
+本文件里的「覆盖闸门」与「关单」两件**尚未做**，故 `#298` 保持 OPEN。
