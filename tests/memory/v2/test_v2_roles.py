@@ -186,14 +186,14 @@ def test_the_chain_fallback_satisfies_the_fallback_role_when_it_is_qwen() -> Non
 def test_the_main_chain_fallback_is_not_reused_as_the_memory_fallback() -> None:
     """主链的 `.fallback`（ADR-0014 的两级链）**不是** `memory.fallback`。
 
-    主链 fallback 是 zhipu ⇒ 记忆的 fallback 角色仍未配置（`None`）；而且主链 primary
+    主链 fallback 是 mimo ⇒ 记忆的 fallback 角色仍未配置（`None`）；而且主链 primary
     被当作记忆 primary 返回时，它自己身上的 `.fallback` 也必须已被摘掉——否则
     "memory.fallback 是 qwen"这句话在主链配了别的 fallback 时就不成立。
     """
     settings = _settings(
         model_provider=MEMORY_PRIMARY_PROVIDER, model_name="chain-model", model_api_key="chain",
-        fallback_model_provider="zhipu", fallback_model_name="glm-air",
-        fallback_model_api_key="zhipu-secret")
+        fallback_model_provider="mimo", fallback_model_name="mimo-v2.6-flash",
+        fallback_model_api_key="mimo-secret")
     roles = resolve_memory_roles(settings)
 
     assert roles.primary is not None
