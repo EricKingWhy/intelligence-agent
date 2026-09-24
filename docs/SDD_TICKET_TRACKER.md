@@ -4815,17 +4815,15 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 
 **集成（已完成）**：`origin/main` 实测 = `31ef526939bcfcc15133df4f2141143d25289d71`（`git ls-remote --heads origin` 读数，= 本地 `main`）。推送 `8f9ea1c..31ef526` **fast-forward**，`.githooks/pre-push` 自动跑 Gate-0 六车道 ⇒ **6/6 PASS**（diff-check 0.26s / ruff 0.31s / oxlint 0.41s / tsc 8.46s / guards 3.11s / coverage 2.97s，墙钟 15.5s）。**落点笔 `31ef526` 由本票新功能自身自动归属**（闸门输出 `✅ docs-only（按路径自动归属）: 31ef526 …`）⇒ 端到端可用。关单评论与 `#295` 状态实测 `state=CLOSED reason=COMPLETED comments=1`。
 
-## MEM-V2-2（`#298`）T1–T6b 施工记录（2026-09-24 · 进行中，未落 main）
+## MEM-V2-2（`#298`）T1–T8 实现完成 + 两轴审查（2026-09-24 · 未落 main）
 
-**状态**：🚧 **实现中 —— 已推送分支，未集成、未关单**。分支 `T298-mem-v2-2-durable-formation-adjudication`。
-集成基线实测 `git merge-base HEAD origin/main` = `f2d6ed57af41f4b64e1fc5175a77977c1308d675` = 当时的
-`origin/main` ⇒ 本分支是 main 的**严格超集**（具备 fast-forward 条件）；但分支**包含 `#297` 的全部提交**
-（`#298` 的 `blocked_by: #297`）⇒ **`#297` 未集成前不得单独合 main**。本轮 `origin/main` **未动**。
+**状态**：🚧 **T1–T8 实现完成、两轴独立审查已做、findings（S1–S11 / P1–P5）全数处置 —— 已推送分支，未集成、未关单**。分支 `T298-mem-v2-2-durable-formation-adjudication`。
 
-**票面**：GitHub `#298`（`docs/tickets/mem-v2-2-durable-formation-adjudication.md`）。本文件上表里的
-「OPEN / `ready-for-agent`」是开票当日快照，本段为其当前态。
+集成基线实测 `git merge-base HEAD origin/main` = `f2d6ed57af41f4b64e1fc5175a77977c1308d675` = 当时的 `origin/main`；`origin/main`（`f2d6ed5`）、`origin/feat/backend`（`9727344`）、`origin/T297-mem-v2-1-typed-lifecycle`（`32ef89b`）三者经 `git merge-base --is-ancestor` 逐条验实**均为本分支祖先** ⇒ 本分支是 main 的**严格超集**（具备 fast-forward 条件），且与并行线**文件面交集为空**（我方只动 `src/agent_harness/memory/v2/**`、`src/agent_harness/{agent,capability}` 的两个接缝、`tests/memory/v2/**`、`web/src/lib/projection.ts`、`docs/**`）。但分支**包含 `#297` 的全部提交**（`#298` 的 `blocked_by: #297`）⇒ **`#297` 未集成前不得单独合 main**。本轮 `origin/main` **未动**。
 
-**交付序列（7 笔 #298 相关 commit）**：
+**票面**：GitHub `#298`（`docs/tickets/mem-v2-2-durable-formation-adjudication.md`）。本文件上表里的「OPEN / `ready-for-agent`」是开票当日快照，本段为其当前态。
+
+**交付序列（13 笔 #298 相关 commit，不含 T8 的三笔）**：
 
 | 切片 | commit | 内容 |
 | --- | --- | --- |
@@ -4837,8 +4835,13 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
 | T5 | `09eeae3` | 记忆作业的模型角色解析与预算账本 |
 | T6 | `2f5a32e` | 形成作业执行器与单事务终态 |
 | T6b | `f8f46e7` | **P0 修复**：证据引用链（运行时别名 `ref`）—— 见下「票面变更」 |
+| T6b-docs | `62afc87` | 登记 T6b 的票面变更与 T1–T6b 施工记录（docs-only） |
+| T7a | `69e1917` | 记忆作业的宿主：资格入队 / 崩溃恢复 / 并发服务循环 |
+| T7b | `a6fa548` | 按**连续区间**切本轮事件 + 把 run 终结接给记忆形成 |
+| T7b | `2d9b4e3` | 装配层把配置面拼成一条可用的形成管线（`memory/v2/assembly.py` 新） |
+| T8 前端 | `a88a0a0` | `memory/updated` 不构成"记忆内容变更"反例（修一条**自 T6 起一直红**的过期断言） |
 
-**门禁读数（T6b 提交前实跑）**：
+**T6b 收口读数（历史记录，保留）**：
 
 - `python -m ruff check src/ tests/` ⇒ **All checks passed**（exit 0）。
 - `python -m pytest tests/memory -q --junitxml=.scratch/junit-298-t6b.xml` ⇒ **757 passed / 0 failed**（73.08s，0 skipped）。
@@ -4846,6 +4849,33 @@ fetch 后 **8 ahead / 185 behind**。`D:\intelligence-agent-frontend` —— 本
   退出码 0 同时证明启动自检 ③「96 条变异的锚点全部唯一命中」通过 —— 锚点失效会以 FATAL 退 2。
 - 净增对账：T6 收口读数 738 收集 ⇒ 本切片 **757**，净增 **+19** = 投影 6 + 政策 6 + 执行器 5 + 审查后补的
   2 条锁（别名单射 / 对照表只读）。变异 +7（T6b 一组）。
+
+**T6b 的两轴独立审查（历史记录，保留）**：Standards + Spec 各一独立只读子代理，结论「**没有 P0/P1，不需打回重做**」。2 项必须先修
+（`_evidence_keys` 的死过滤 + 其 docstring 把 fail-closed 记错位置 / `projection.py` 自带的 R2 通道表形状已过期）
++ 1 条真 bug（`_Aliases.next` **非单射**：同一 run 内重复 `tool_call_id` 时，同一结果事件拿到两个别名，
+反向建键折叠 ⇒ **载荷广告过的 `ref` 解析不到**，且全链路不报错）+ 7 条 P2 清理 ⇒ **全部处置**
+（该修的修、该采纳的采纳），并逐条留锁：单射回归用例、对照表只读（`MappingProxyType`）、对应变异条目。
+审查同时明确写下多条「经查不成立」（R2 泄漏 / 不变量 #7 #8 #22 / `refs` 跨重启丢失 / AC4 零回归）。
+
+**T8 的三笔（本段的主体）**：
+
+| 笔 | commit | 规模 | 内容 |
+| --- | --- | --- | --- |
+| T8-a | `2559a1b` | 12 文件 +176 −28 | 处置 findings 的 src / tests 面：`ConfigError` 响亮上抛 / `run_slice_bounds` 的 `while`→`if` / 三处 docstring 按实测改写 / 补三条判别性锁 / 两处就地登记 |
+| T8-b | `ea64459` | 2 文件 +10 −2 | 跟上 `memory/updated` 的两条下游车道：前端 `EVENT_SEMANTICS` 登记 + 再生成 `docs/EVENT_VOCABULARY.md` |
+| T8-c | `aa48eac` | 1 文件（新，357 行） | **ADR-0043** `docs/adr/0043-memory-v2-evidence-aliases-contract-readings-and-gaps.md` |
+
+**门禁读数（T8 落点前逐条重测；命令与口径见 ADR-0043 §5.1）**：
+
+- `./.venv/Scripts/python.exe -m ruff check .` ⇒ **All checks passed!**（exit 0）。
+- `tests/memory/v2` 15 文件**分两片**（8 + 7）⇒ **303 + 285 = 588 passed**（0 failed / 0 skipped）。
+- `tests/memory`（V1，除 `v2/`）17 文件分两片 ⇒ **128 + 97 = 225 passed**（0 failed）。
+- `tests/agent` ⇒ **484 passed / 3 deselected**。
+- `tests/capability` + 7 个装配测试 + 两个生成物守卫 + `tests/web/test_memory_api.py` ⇒ **178 passed**。
+- 前端 `cd web && node node_modules/typescript/bin/tsc --noEmit -p tsconfig.app.json` ⇒ **exit 0**（T6 起为 `TS2741` exit 2，本票修）。
+- 事件词表守卫 `tests/test_event_vocabulary_generated.py` ⇒ **6 passed**（再生成**前** 2 条红）。
+- **覆盖闸门** `python scripts/check_review_coverage.py` ⇒ **exit 0**；区间 `09ca47a..HEAD`，三元组 **612 / 405 / 207**，末行原文 `✅ 台账覆盖闸门通过：089524a~1..HEAD 每条 commit 均有归属（审查行 / 白名单 / 台账记账）。`（本票台账行 `docs/review_ledger.d/147-32ef89b-aa48eac.tsv` 落盘后复跑；整行 776 字符 ≤ 协议 §8.5 硬上限 800、描述字段 lint **0 命中**。）
+- ⚠️ **总收集数不用于判定**（见 ADR-0043 §5.2）；V2 两片的划分是人为的，判据是**总数与失败集合**。
 
 **票面变更（`AGENTS.md` §9.1.1 —— 已获用户批准）**：
 
@@ -4855,7 +4885,7 @@ T6 收口时发现**跨切片 P0**：R2 安全投影**刻意不投影任何 `eve
 既有用例把真实 id 直接写进 fixture，所以全绿 —— 即「测试编码了一个模型到不了的世界」。
 按 §9.1.1 停在报告阶段，用户裁决 = **候选 A（投影发运行时别名）**。
 
-已落地的修法（完整叙述见票面文件新增的「票面更正（T6b · 2026-09-24，用户已批准）」节）：
+已落地的修法（完整叙述见票面文件新增的「票面更正（T6b · 2026-09-24，用户已批准）」节，机制单点在 **ADR-0043 §D1–§D6**）：
 
 1. 投影按**阅读顺序**（先 `current_run` 消息、后 `tool_calls`）给本轮可引用事件发 `e1…eN` 别名，命名
    `ref`，作为**新增 wire 字段**进载荷；`别名 → 真实 event_id` 对照表留在 `FormationInput.refs`，**不进载荷**。
@@ -4864,14 +4894,70 @@ T6 收口时发现**跨切片 P0**：R2 安全投影**刻意不投影任何 `eve
 3. 执行器在写盘前把别名翻回真实 id；一条都翻不回来 ⇒ 逐条丢弃，归因码 `evidence_unresolved`
    （§6.1 要求 provenance 非空）。**真实 id 仍不进模型 ⇒ AC9 判据不变。**
 
-**两轴独立审查**（Standards + Spec，独立只读子代理）：结论「**没有 P0/P1，不需打回重做**」。2 项必须先修
-（`_evidence_keys` 的死过滤 + 其 docstring 把 fail-closed 记错位置 / `projection.py` 自带的 R2 通道表形状已过期）
-+ 1 条真 bug（`_Aliases.next` **非单射**：同一 run 内重复 `tool_call_id` 时，同一结果事件拿到两个别名，
-反向建键折叠 ⇒ **载荷广告过的 `ref` 解析不到**，且全链路不报错）+ 7 条 P2 清理 ⇒ **全部处置**
-（该修的修、该采纳的采纳），并逐条留锁：单射回归用例、对照表只读（`MappingProxyType`）、对应变异条目。
-审查同时明确写下多条「经查不成立」（R2 泄漏 / 不变量 #7 #8 #22 / `refs` 跨重启丢失 / AC4 零回归）。
+**两轴独立审查（T8）**：
 
-**残留与下一步**：T7（装配 + Runtime 终结接入：`MemoryModelInvoker` / `MemoryJobEventSink` / **R11 全局并发
-默认 4 可配**）→ T8（**ADR-0043 必须写入别名机制完整叙述** + 事件词表再生成 + 两轴 review + 台账新文件 +
-覆盖闸门 `scripts/check_review_coverage.sh` **exit 0** + `#298` 证据评论 + `PHASE_STATUS`）。
-本文件里的「覆盖闸门」与「关单」两件**尚未做**，故 `#298` 保持 OPEN。
+范围 `git diff 32ef89b..a88a0a0`（13 笔 / 36 文件 / 10493 插入），**固定点 = `a88a0a0`**，
+Standards 与 Spec 各一独立只读子代理（贴合协议 §8.3 每轴 1 轮预算）。
+
+**结论**：Standards **NEEDS-FIX**（`P0=0 P1=2 P2=2 P3=5 P4=2`）／Spec **PASS-WITH-FINDINGS**
+（`P0=0 P1=1 P2=3 P3=2`）。两轴都**独立复核并确认**了本票的核心事实主张（T7b 的切片因果链、装配三决定），
+也都独立复现了 ADR-0043 §5.2 登记的沙箱噪声。两轴均**未**发现 P0。**16 条 findings（S1–S11 + P1–P5）
+全数处置**，逐条处置表见 ADR-0043 §5.3；摘要：
+
+- **两轴共识的 2×P1（都是"别的车道没跟上"，不是本票逻辑错）**：① 固定点前端 `tsc` **红**
+  （`web/src/generated/event-types.ts` 有 `memory/updated` 而 `projection.ts::EVENT_SEMANTICS` 未登记 ⇒
+  `TS2741` exit 2）⇒ 补登记（`ea64459`）；② `docs/EVENT_VOCABULARY.md` 未随 `event.py` 再生成 ⇒
+  守卫红 ⇒ 再生成（**A/B 实证**：装回固定点版本跑守卫，报
+  `AssertionError: 产物漏了 event.py 已注册的类型: ['memory/updated']`，2 failed ⇒ 再生成后 6 passed）。
+- **Spec P1**：R7 的"运行期独立于模型分类"**只对 secrets 成立** —— PRD §5.7.2 的 9 类敏感**没有**
+  运行期检测器，唯一信号是模型自陈 ⇒ **采纳并登记**（ADR-0043 §D8 + §4），明确"不要对外讲更强的版本"。
+- **修**：`ConfigError` 从宽 `except Exception` 里摘出来**响亮上抛**为 `CapabilityError(init_failed)`
+  （先例同 `_wire_mcp`）；`run_slice_bounds` 的 `while`→`if`（只吞**一条**，孤儿形态下不再把别的轮次
+  拉进来）；三处 docstring 按实测行为改写（`_seconds_until_claimable` 的租约语义、`run_id` 的
+  "**调用点不传**、而默认值就是 `None`"、`eligibility` 两条生产不可达分支）；`_MAX_QUERY_CHARS` 去掉重复截断。
+- **补判别性锁（每条都附变异读数）**：R5「两条**独立**事件」的判据**无用例钉住**（审查者实测：
+  丢掉集合去重后 61 条全绿）⇒ 补 `test_a_procedural_candidate_citing_one_qualifying_event_twice_is_rejected`；
+  `DegradedReason` docstring 引用了**不存在**的 `test_...` 占位符（把"未证"写成"已证"）⇒ 补
+  `test_degraded_reasons_cover_every_budget_dimension`；装配期配置类故障 ⇒ 补
+  `test_a_broken_model_catalog_fails_loudly_instead_of_degrading`；AC9 的 log / trace 分支 ⇒ 加
+  `caplog` 探针 + **仪器自证**断言。
+- **登记不修**：9 类敏感无运行期检测器（§D8）／**派生索引在生产无驱动** ⇒ 裁决期"相似记忆"结构性为空、
+  模型只能一路 `ADD`（§D11，归属 `#299` / `#303`）／`project_id` 恒 `None`（§D9）／
+  `extraction_enabled` 生产无产出方／R10 的 input-token 维度只在账本层验证（三条共用同一条
+  `_Degraded(BudgetDimension.value)` 路径）。
+- **两轴各自主动怀疑后核实为"不成立"**（摘要见 ADR-0043 §5.3 末段）：R2 两处截断方向／
+  `refs=None` 不会在生产静默全拒／按用户串行是**数据库 CAS**（重启后仍有效）／别名键空间不会同时接受真 id／
+  AC7 不只靠 `run()` 那行早退（数据库 CAS 才是承担者，属纵深防御）／事务边界与异常吞噬逐条审查无
+  `except: pass`。
+
+**变异红证（判据 = 基线绿 / 变异红 / 还原逐字节一致 / 复跑绿）**：
+
+- **T7b 切片**（`.scratch/mutate_t7b_slice.py`）：基线 **43/43 绿**；M1–M4 分别 **2 / 4 / 1 / 1** 条红；
+  还原两文件**逐字节一致** + 复跑 **43/43**。
+- **T8 处置**（`.scratch/mutate_t8.py <case>`，3 例：`configerror` / `procedural-dedup` /
+  `budget-dimension-alignment`）：**3/3 符合期望**（每例的基线绿 / 变异红 / 还原一致 / 复跑绿四项全过）。
+
+**T6 引入 `memory/updated` 的四处未跟进落点**（本票**门禁照出来的**，非本票引入）：`docs/EVENT_VOCABULARY.md`
+未再生成／前端 `EVENT_SEMANTICS` 未登记／`tests/web/test_memory_api.py` 的子串过滤误伤 ⇒ 逐条登记于
+ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动作，四条车道各自都有守卫，但**没有任何一条
+守卫覆盖"另外三条还没跟上"**。
+
+**施工教训四条**（全文见 ADR-0043 §5.5）：① "死分支"论证要慎用（被省略的条件往往正是挡住异常形态的那条）；
+② 变异 / 快照型脚本**与手工编辑不可并行**（脚本回写会静默抹掉手工改动）；③ 回归锁要锁**行为**、不锁
+**实现形状**（M3 首轮实测 green，补行为锁后才 red）；④ 本票的**复发性缺陷类型** = 「测试编码了一个产出方
+到不了的世界」（T6 / T7b / T8 各一次）。
+
+**实测环境约束（结论边界，逐条见 ADR-0043 §5.2）**：本机四条属性影响读数形态 —— ① 前台命令约 120s
+被 SIGTERM 且不 auto-background ⇒ 长跑门禁必须**按文件切片**（每片 < 115s）；② `run_in_background`
+会被塞进沙箱（**即使同时传跳过沙箱标志**）⇒ 判据是 junit 里的
+`sqlite3.OperationalError: attempt to write a readonly database`；③ `nohup` 派生的子进程活不过工具调用；
+④ `tests/memory/v2` 与 `tests/memory` **整目录**跑会挂死（未定位）⇒ **一律分两片**。另登记两条既存
+环境 flaky（`test_concurrent_claims_have_exactly_one_winner` / V1 的
+`test_concurrent_writers_converge_on_one_row_and_one_index_state`）—— 用**裸 aiosqlite** 并发
+`BEGIN IMMEDIATE` 复现出**完全相同**的错误 ⇒ 环境，非本票回归。
+
+**残留与下一步**：`#298` 的实现面与审查面**已闭合**；剩余两件 = ① `#298` 证据评论（GitHub）与
+`PHASE_STATUS` 索引（由本批末笔 docs-only 落点记账兑现）；② **集成**（由集成线负责，`#297` 先合）。
+其后的兄弟票顺序不变：`#299`（跨会话召回，接上检索驱动即解 §D11 的空洞）/ `#300`（治理 API，
+`explicit_remember` 的**持久性**要在立项时落成 job 上的列）/ `#301`（UI）/ `#302`（评测）/
+`#303`（clean-slate cutover）/ `#304`（真实 Gate）。
