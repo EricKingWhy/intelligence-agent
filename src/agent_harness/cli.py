@@ -185,8 +185,11 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
     # 整条链都缺关联键（一次 CLI 运行 = 一个可对账的 trace）。
     with log_context(LogContext.create(service="agent-harness", env="local")):
         workspace_root = Path(settings.workspace_dir)
-        _, wiring = await assemble_wiring(settings)
+        # store 先建（#298 T7b）：`assemble_wiring` 要把它交给 V2 记忆形成——执行 job 时
+        # 按 (session_id, run_id) 从**这一份**日志切本轮事件，所以必须注入而不是让装配层
+        # 按目录约定另建一份（两份分叉的症状是"job 永远切片为空"，没有任何东西报路径不一致）。
         store = JsonlSessionStore(root=workspace_root / "sessions")
+        _, wiring = await assemble_wiring(settings, sessions=store)
         # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
         # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
         stores = recovery_stores(workspace_root / "harness.db", workspace_headers=store)
