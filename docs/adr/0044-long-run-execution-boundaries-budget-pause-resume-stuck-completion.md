@@ -311,10 +311,15 @@ Core 提供**一个**可插拔 `CompletionPolicy` seam，位置在既有的最�
 - **交付面**：本 ADR + `02/03/04/10/11/12` 正式规格章节 + `README.md` 索引口径 + `14_IMPLEMENTATION_ROADMAP.md`
   依赖指针 + 两笔前置摄入（#305 正文副本、调研报告）。**零** `src/**` / `tests/**` / `web/**` 改动。
 - **门禁**：`git diff --check`、`ruff check .`、覆盖闸门 `scripts/check_review_coverage.py` exit 0、
-  `scripts/gate0.py` 裸全量落盘 `docs/gate/<sha>.json`；规格/链接/Markdown 校验器**仓库内不存在**
-  （实测：`scripts/` 无此类脚本），故该项以「逐文件相对链接与锚点核对」+ `git diff --check` 兑现并如实登记。
+  `scripts/gate0.py` 裸全量落盘 `docs/gate/<sha>.json`（六条机械车道）、冻结树全量 pytest（§8.1）。
+  规格 / 链接 / Markdown 校验器**仓库内不存在**（实测：`scripts/` 无此类脚本），该项以「逐文件相对链接与
+  锚点核对」+ `git diff --check` 兑现并如实登记，不声称跑过不存在的工具。
+- **读数落点（§16.1：本 ADR 只写机制与要求，不复制易失读数）**：批次、commit、门禁数字、两轴结论与
+  残余问题一律写在 `docs/SDD_TICKET_TRACKER.md` 的 T1 段与审查台账行（`docs/review_ledger.d/`）；
+  本 ADR **不**重复这些数字，避免同一事实两处写全后漂移。
 - **审查**：独立 Standards 轴 + Spec 轴（Spec 轴按票面要求核「#305 与正式规格语义等价 + 正式规格
-  优先级 + #287 复用边界 + 凭证零泄漏」）。审查范围、结论与 findings 处置写在台账行与 tracker 段。
+  优先级 + #287 复用边界 + 凭证零泄漏」），发现阶段与修后重审各一轮（协议 §8.3）；审查范围、结论与
+  findings 处置写在台账行与 tracker 段。
 
 ---
 
