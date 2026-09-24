@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -289,6 +290,53 @@ class SqliteMemoryV2Store:
                 ORDER BY created_at DESC, memory_id DESC LIMIT ? OFFSET ?
             """, (trusted.tenant_id, trusted.user_id, scope.value,
                   trusted.project_id, max(0, limit), max(0, offset))) as cursor,
+        ):
+            return [_to_record(row) for row in await cursor.fetchall()]
+
+    async def list_profiles(
+        self, trusted: TrustedMemoryIdentity, *, limit: int = 256,
+    ) -> list[MemoryRecordV2]:
+        """Read the bounded, active user-global semantic profile candidate set."""
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute("""
+                SELECT * FROM memory_v2_records
+                WHERE tenant_id=? AND user_id=? AND scope=? AND tier='profile'
+                  AND kind='semantic' AND status='active'
+                ORDER BY importance DESC, strength DESC, updated_at DESC, memory_id
+                LIMIT ?
+            """, (trusted.tenant_id, trusted.user_id, MemoryScope.USER_GLOBAL.value,
+                  max(0, min(limit, 256)))) as cursor,
+        ):
+            return [_to_record(row) for row in await cursor.fetchall()]
+
+    async def keyword_search(
+        self, terms: Sequence[str], trusted: TrustedMemoryIdentity, *,
+        scope: MemoryScope, limit: int,
+    ) -> list[MemoryRecordV2]:
+        """Return authorized active Collection rows matching any normalized term.
+
+        SQLite is authoritative. The bounded lexical lane deliberately searches only the
+        canonical content, never SessionEvent history, payload evidence, or deleted rows.
+        """
+        safe_terms = list(dict.fromkeys(term for term in terms if term))[:64]
+        if not safe_terms or limit <= 0 or (scope is MemoryScope.PROJECT and trusted.project_id is None):
+            return []
+        predicates = " OR ".join("content LIKE ?" for _ in safe_terms)
+        params: list[object] = [trusted.tenant_id, trusted.user_id, scope.value]
+        where = "tenant_id=? AND user_id=? AND scope=? AND tier='collection' AND status='active'"
+        if scope is MemoryScope.PROJECT:
+            where += " AND project_id=?"
+            params.append(trusted.project_id)
+        params.extend(f"%{term}%" for term in safe_terms)
+        params.append(max(0, min(limit, 128)))
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(f"""
+                SELECT * FROM memory_v2_records
+                WHERE {where} AND ({predicates})
+                ORDER BY updated_at DESC, memory_id LIMIT ?
+            """, params) as cursor,
         ):
             return [_to_record(row) for row in await cursor.fetchall()]
 

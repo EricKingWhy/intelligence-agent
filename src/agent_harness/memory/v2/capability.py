@@ -14,11 +14,23 @@ provider 专属分支。所以调用方（工具、API、后续的 formation 流
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from typing import Protocol
 
 import aiosqlite
 
-from agent_harness.memory.v2.index import MemoryV2VectorIndex, resolve_active_hits
+from agent_harness.memory.v2.index import (
+    MemoryV2IndexRelay,
+    MemoryV2VectorIndex,
+    resolve_active_hits,
+)
+from agent_harness.memory.v2.recall import (
+    RankedMemory,
+    keyword_overlap,
+    keyword_terms,
+    rank_memory,
+)
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
     MemoryDraftV2,
@@ -65,9 +77,13 @@ class MemoryV2Service:
     要求复用既有 substrate 与其语义）。
     """
 
-    def __init__(self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex) -> None:
+    def __init__(
+        self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex,
+        *, relay: MemoryV2IndexRelay | None = None,
+    ) -> None:
         self._store = store
         self._index = index
+        self._relay = relay
 
     async def create(self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         return await self._store.create(draft, trusted)
@@ -119,3 +135,53 @@ class MemoryV2Service:
     ) -> list[MemoryRecordV2]:
         hits = await self._index.search(query, trusted, scope, limit)
         return await resolve_active_hits(self._store, hits, trusted, scope)
+
+    async def list_profiles(
+        self, trusted: TrustedMemoryIdentity, *, limit: int = 256,
+    ) -> list[MemoryRecordV2]:
+        return await self._store.list_profiles(trusted, limit=limit)
+
+    async def hybrid_search(
+        self, query: str, trusted: TrustedMemoryIdentity, *,
+        scopes: Sequence[MemoryScope], limit: int,
+    ) -> list[RankedMemory]:
+        """Dense + SQLite keyword recall with SQLite identity/status revalidation."""
+        if not query.strip() or limit <= 0:
+            return []
+        if self._relay is not None:
+            await self._relay.flush()
+        terms = keyword_terms(query)
+        candidate_limit = min(128, max(20, limit * 4))
+        candidates: dict[str, tuple[MemoryRecordV2, float]] = {}
+        for scope in dict.fromkeys(scopes):
+            if scope is MemoryScope.PROJECT and trusted.project_id is None:
+                continue
+            dense_hits = await self._index.search(query, trusted, scope, candidate_limit)
+            dense_ids = [(memory_id, score) for memory_id, score in dense_hits
+                         if isinstance(score, (int, float)) and math.isfinite(score)]
+            for record in await resolve_active_hits(self._store, dense_ids, trusted, scope):
+                if record.tier.value == "collection":
+                    score = next((float(value) for memory_id, value in dense_ids
+                                  if memory_id == record.id), 0.0)
+                    candidates[record.id] = (record, max(0.0, min(1.0, score)))
+
+            lexical = await self._store.keyword_search(
+                terms, trusted, scope=scope, limit=candidate_limit,
+            )
+            for record in lexical:
+                try:
+                    current = await self._store.get(record.id, trusted)
+                except KeyError:
+                    continue
+                if (current.status.value == "active" and current.tier.value == "collection"
+                        and current.scope is scope):
+                    candidates.setdefault(current.id, (current, 0.0))
+
+        ranked = [RankedMemory(
+            record=record,
+            explanation=rank_memory(
+                record, dense=dense, keyword=keyword_overlap(record.content, terms),
+            ),
+        ) for record, dense in candidates.values()]
+        ranked.sort(key=lambda hit: (-float(hit.explanation["score"]), hit.record.id))
+        return ranked[:min(limit, 128)]

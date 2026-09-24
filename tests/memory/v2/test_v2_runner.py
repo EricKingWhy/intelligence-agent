@@ -364,6 +364,37 @@ async def test_the_job_identity_comes_from_the_request_context(env: Env) -> None
     assert _memory_rows(env)[0]["user_id"] == "user-z"
 
 
+@pytest.mark.asyncio
+async def test_the_job_project_comes_from_the_trusted_session_binding(env: Env) -> None:
+    _seed_run(env)
+
+    class WorkspaceIndex:
+        def workspace_of_session(self, session_id: str):
+            assert session_id == SESSION
+            return type("Workspace", (), {"id": "project-x"})()
+
+    runner = _runner(env, _unscripted(), workspace_index=WorkspaceIndex())
+    await _notify(runner, env)
+    await runner.drain()
+
+    assert _job_rows(env)[0]["project_id"] == "project-x"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_project_binding_narrows_the_job_to_user_global(env: Env) -> None:
+    _seed_run(env)
+
+    class BrokenWorkspaceIndex:
+        def workspace_of_session(self, _session_id: str):
+            raise RuntimeError("do not expose this detail")
+
+    runner = _runner(env, _unscripted(), workspace_index=BrokenWorkspaceIndex())
+    await _notify(runner, env)
+    await runner.drain()
+
+    assert _job_rows(env)[0]["project_id"] is None
+
+
 @pytest.mark.parametrize(
     ("case", "overrides", "runner_kwargs"),
     [

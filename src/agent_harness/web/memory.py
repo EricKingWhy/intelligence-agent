@@ -1,14 +1,11 @@
-"""用户侧记忆入口（#159 B）：列出自己的记忆 + 硬删单条。
+"""用户侧记忆入口：V1 列表/遗忘与 V2 脱敏召回解释。
 
-三条刻意的边界：
+边界：
 
-- **不接受 namespace 参数**（AC3/AC7）：tenant/user 由 `AuthSeamMiddleware` 从可信入口解析并
-  绑定到 ContextVar，handler 只调契约（`MemoryCapability`）。归属校验在**领域层**再走一遍
-  （`MemoryRecordStore.delete` 的 namespace 匹配）——不是只靠查询条件过滤。
-- **不写 `SessionEvent`**（AC8）：记忆是 Capability 不是会话真相（不变量 #16/#22），
-  审计走 `memory/audit.py` 的结构化日志（入口 `api`）。
-- **只暴露 USER scope**：HTTP 请求没有 run 绑定的 session 上下文（`memory_session_var` 只在
-  detached run 任务里设置），按 session 浏览记忆需要可信的会话上下文，不在本票范围。
+- V1 列表/遗忘入口不接受 namespace 参数；tenant/user 来自 `AuthSeamMiddleware`，归属校验
+  仍由领域能力执行。V1 审计写结构化日志，不写 `SessionEvent`。
+- V2 why-recalled 入口只从当前身份与 WorkspaceIndex 解析可信项目，再按每个 memory ID
+  调用 SQLite 权威读取；响应不含正文或证据。
 
 来源闸复用项目 API 的 `require_trusted_origin`（ADR-0025 D1）：本地信任模式下只接受本机
 来源；配置了 `jwt_secret` 时由认证层接管。**刻意不复制一份**——安全规则有两份副本就是两个
@@ -17,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from fastapi import Depends, HTTPException, Query
@@ -33,7 +31,10 @@ from agent_harness.memory.audit import (
 from agent_harness.memory.capability import MemoryCapability
 from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.memory.types import MemoryEntry, MemoryScope, public_metadata
-from agent_harness.web.domain_errors import memory_http_error
+from agent_harness.memory.v2.recall import RANKING_VERSION, trusted_identity_for_session
+from agent_harness.session.errors import InvalidSessionId, SessionNotFound
+from agent_harness.session.event import MEMORY_RECALLED
+from agent_harness.web.domain_errors import http_error, memory_http_error
 from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
@@ -82,6 +83,26 @@ class MemoryDeleted(BaseModel):
 
     id: str
     deleted: bool
+
+
+class MemoryRecallExplanation(BaseModel):
+    """Redacted explanation; intentionally has no record content or raw evidence."""
+
+    memory_id: str
+    kind: str
+    scope: str
+    source_type: str
+    version: int
+    source_session_id: str | None
+    source_event_ids: list[str]
+    ranking: dict[str, str | float | int]
+
+
+class SessionMemoryRecall(BaseModel):
+    run_id: str | None
+    seq: int
+    time: str
+    memories: list[MemoryRecallExplanation]
 
 
 def _summary(entry: MemoryEntry) -> MemorySummary:
@@ -157,3 +178,76 @@ def register_memory_routes(app: FastAPI) -> None:
 
         record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_FORGOTTEN)
         return MemoryDeleted(id=memory_id, deleted=True)
+
+    @app.get("/api/sessions/{session_id}/memory-recalls")
+    async def get_session_memory_recalls(
+        session_id: str, _: None = Depends(require_trusted_origin),
+    ) -> list[SessionMemoryRecall]:
+        """Return authorized redacted explanations for automatic V2 recalls in one session."""
+        state = app.state.agent
+        await state.ensure_stores()
+        from agent_harness.web.app import session_service
+
+        try:
+            events = await session_service(state).get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as error:
+            raise http_error(error) from error
+        _, wiring = await state.get_wiring()
+        capability = wiring.memory_v2
+        if capability is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "memory_v2_unavailable", "message": "V2 记忆召回尚未装配。"},
+            )
+        try:
+            trusted = trusted_identity_for_session(session_id, state.workspace_index)
+        except PermissionError as error:
+            raise memory_http_error(error) from error
+
+        ranking_fields = {
+            "ranking_version", "dense", "keyword", "importance", "strength",
+            "source_authority", "kind_weight", "scope_weight", "age_days", "decay", "score",
+        }
+        results: list[SessionMemoryRecall] = []
+        for event in events:
+            if event.type != MEMORY_RECALLED:
+                continue
+            explanations: list[MemoryRecallExplanation] = []
+            raw_memories = event.data.get("memories", [])
+            if not isinstance(raw_memories, list):
+                continue
+            for raw in raw_memories:
+                if not isinstance(raw, dict) or not isinstance(raw.get("memory_id"), str):
+                    continue
+                try:
+                    record = await capability.read(raw["memory_id"], trusted)
+                except KeyError:
+                    # Do not reveal whether an event named a record owned by another identity.
+                    continue
+                version = raw.get("version")
+                if type(version) is not int or record.version != version:
+                    continue
+                raw_ranking = raw.get("ranking")
+                if not isinstance(raw_ranking, dict):
+                    raw_ranking = {}
+                ranking = {
+                    key: value for key, value in raw_ranking.items()
+                    if key in ranking_fields and type(value) in (str, int, float)
+                    and (not isinstance(value, float) or math.isfinite(value))
+                    and (key != "ranking_version" or value == RANKING_VERSION)
+                }
+                explanations.append(MemoryRecallExplanation(
+                    memory_id=record.id,
+                    kind=record.kind.value,
+                    scope=record.scope.value,
+                    source_type=record.source_type.value,
+                    version=record.version,
+                    source_session_id=record.source_session_id,
+                    source_event_ids=list(record.source_event_ids),
+                    ranking=ranking,
+                ))
+            if explanations:
+                results.append(SessionMemoryRecall(
+                    run_id=event.run_id, seq=event.seq, time=event.time, memories=explanations,
+                ))
+        return results

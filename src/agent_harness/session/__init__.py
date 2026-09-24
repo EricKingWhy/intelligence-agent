@@ -20,6 +20,7 @@ from agent_harness.session.event import (
     CONTEXT_COMPACTED,
     EVENT_TYPES,
     MEMORY_DEGRADED,
+    MEMORY_RECALLED,
     MODEL_COMPLETED,
     MODEL_DELTA,
     MODEL_FAILED,
@@ -63,6 +64,7 @@ __all__ = [
     "DANGLING_TOOL_CONTENT",
     "EVENT_TYPES",
     "MEMORY_DEGRADED",
+    "MEMORY_RECALLED",
     "MODEL_COMPLETED",
     "MODEL_DELTA",
     "MODEL_FAILED",
@@ -100,4 +102,3 @@ __all__ = [
     "run_context_var",
     "session_cwd",
 ]
-

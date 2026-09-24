@@ -70,6 +70,8 @@ class CapabilityWiring:
     #: 因为调用方要**按名字**取它注入 runtime，而不是去生命周期列表里按类型翻。
     #: 未装配（模型角色没配 / 调用方没提供会话日志）时恒 `None` ⇒ 终结臂走"没有宿主"的旧路径。
     memory_formation: Any | None = None
+    #: 同一 V2 组合服务供自动召回、显式搜索与会话解释 API 使用。
+    memory_v2: Any | None = None
     # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 aclose 关闭。
     lifecycle: list[Any] = field(default_factory=list)
     # Multi-Agent（Phase 13，ADR-0015）：delegate 工具已进 tools，但其依赖
@@ -162,30 +164,43 @@ async def _wire_memory(
     ))
 
 
-async def _wire_memory_formation(
+async def _wire_memory_v2(
     settings: Settings, wiring: CapabilityWiring, *, sessions: JsonlSessionStore | None,
+    workspace_index: Any | None = None,
 ) -> None:
-    """在**已活的** V1 记忆之上接出 V2 形成管线（#298 T7b）。
+    """在已启用的 V1 记忆之上装配 V2 召回与可选形成（#299）。
 
     闸门是**装配结果**而不是配置项：`wiring.memory is not None` 才是"这个进程真的有记忆"
     ——它一次覆盖三种形态（CAPABILITIES 里没有 memory / `enabled: false` 被关掉 / 组件
     没配齐而降级），正是 PRD §5.6.4「关闭记忆 = 同时关掉自动抽取与自动召回」的落点。
     所以这里**不该**再有第二个开关。
 
-    为什么不塞进 `_wire_memory`：那条路的入参形状是"一个 capability 的 cfg + 它的 provider
-    名"，而 V2 管线既不吃 cfg 也不认 provider（它只认 `memory.primary` 这个模型角色）；
-    硬塞进去就得给 `_BUILTIN_WIRING` 里其余六个 factory 各加一个用不上的参数。
+    V2 service 复用已初始化 Memory provider 的向量客户端；只有后台形成 runner 需要
+    `memory.primary` 模型角色，召回本身不依赖该角色。
 
-    失败按 OPTIONAL 降级（与 `wire_capabilities` 循环里的同一条纪律）：V2 管线起不来不该
-    让整个应用起不来，更不该影响 V1 记忆——那才是此刻在服务用户的路径。
+    失败按 OPTIONAL 降级（与 `wire_capabilities` 循环里的同一条纪律）：V2 召回/形成起不来
+    不该让整个应用起不来，更不该影响 V1 记忆——那才是此刻在服务用户的路径。
     """
     if sessions is None or wiring.memory is None:
         return
-    from agent_harness.memory.v2.assembly import build_memory_formation
+    from agent_harness.memory.v2.assembly import (
+        build_memory_formation,
+        build_memory_v2_service,
+    )
+    from agent_harness.memory.v2.recall import MemoryV2ContextProvider
+    from agent_harness.memory.v2.roles import resolve_memory_roles
+    from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
     from agent_harness.model.config import ConfigError
 
     try:
-        runner = await build_memory_formation(settings, sessions=sessions)
+        roles = resolve_memory_roles(settings)
+        service = await build_memory_v2_service(
+            settings, vector_store=getattr(wiring.memory, "vectors", None),
+        )
+        runner = await build_memory_formation(
+            settings, sessions=sessions,
+            memory_capability=service, roles=roles, workspace_index=workspace_index,
+        )
     except ConfigError as error:
         # 配置类故障**响亮上抛**，不降级（T8 两轴审查 P2 修）：`roles.resolve_memory_roles`
         # 自己的契约就是"配错了要响亮"（缺 `MODEL_API_KEY` / provider 名非法都抛
@@ -205,9 +220,19 @@ async def _wire_memory_formation(
         )
         wiring.degradations["memory_v2"] = DegradeReason.INIT_FAILED.value
         return
+    wiring.memory_v2 = service
+    wiring.context_providers.append(MemoryV2ContextProvider(
+        service, workspace_index=workspace_index,
+        timeout_seconds=settings.memory_search_timeout_seconds,
+    ))
+    wiring.tool_contributors.append(_ToolsProvider([
+        RetrieveMemoryV2Tool(
+            service, workspace_index=workspace_index,
+            timeout_seconds=settings.memory_search_timeout_seconds,
+        ),
+    ]))
     if runner is None:
-        # 模型角色没配：装配层已经记了一行 warning 说清原因，这里不再重复登记——
-        # "没配"是缺省状态（`degradations` 的字段约定：只登记非缺省的原因）。
+        # 召回不依赖形成模型角色；只跳过后台写作业，其余 V2 读取路径保持可用。
         return
     wiring.memory_formation = runner
     # 生命周期挂通道：`aclose` 先停泵（此后拒绝新 run）再有界地排空在飞 job。
@@ -439,6 +464,16 @@ class _MemoryCapabilityProvider:
         ]
 
 
+class _ToolsProvider:
+    """Contributes already constructed tools through the common registry collection path."""
+
+    def __init__(self, tools: list[Any]) -> None:
+        self._tools = tools
+
+    def contributes_tools(self) -> list[Any]:
+        return list(self._tools)
+
+
 class _MultiagentCapabilityProvider:
     """ContributesTools 适配（multiagent）：贡献 delegate 工具。"""
 
@@ -583,6 +618,7 @@ async def wire_capabilities(
     *,
     settings: Settings,
     sessions: JsonlSessionStore | None = None,
+    workspace_index: Any | None = None,
 ) -> CapabilityWiring:
     """按 config 驱动 builtin 接线；未知 capability / 未知 provider 显式报错（不静默忽略）。
 
@@ -632,6 +668,12 @@ async def wire_capabilities(
             wiring.degradations[name] = DegradeReason.INIT_FAILED.value
             continue
 
+    # V2 自动召回与形成共享一个 service；在统一收集工具之前接线，以便 V2 搜索工具
+    # 也只经 ContributesTools → ToolRegistry → ToolExecutor。
+    await _wire_memory_v2(
+        settings, wiring, sessions=sessions, workspace_index=workspace_index,
+    )
+
     # 收集工具贡献：已启用的 provider（demo capability 走这条）**加上**第二来源
     # `tool_contributors`（#159）。一个循环、一条 `isinstance` 规则、零旁路——没有任何
     # 地方直接往 `wiring.tools` 里 append。
@@ -645,7 +687,4 @@ async def wire_capabilities(
         if isinstance(contributor, ContributesTools):
             wiring.tools.extend(contributor.contributes_tools())
 
-    # V2 记忆形成（#298 T7b）：在工具收集**之后**接，因为它的闸门是"V1 记忆真的活了"
-    # （`wiring.memory` 只在 `_wire_memory` 成功时被设置），与工具贡献无关。
-    await _wire_memory_formation(settings, wiring, sessions=sessions)
     return wiring

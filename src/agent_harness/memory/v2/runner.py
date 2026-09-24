@@ -352,6 +352,8 @@ class MemoryJobRunner:
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         recovery_limit: int = DEFAULT_RECOVERY_LIMIT,
         worker_id: str | None = None,
+        memory_capability: Any | None = None,
+        workspace_index: Any | None = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
@@ -359,6 +361,8 @@ class MemoryJobRunner:
         self._sessions = sessions
         self._executor = executor
         self._roles = roles
+        self.memory_capability = memory_capability
+        self._workspace_index = workspace_index
         #: 默认按会话建 sink（`executor` 的端口没有 session 参数，只能在这里绑）。
         #: 允许注入是为了让用例能对着裸 list 断言事件，而不必去读会话日志。
         self._sink = sink
@@ -415,14 +419,20 @@ class MemoryJobRunner:
             logger.debug("Memory V2 skipped run %s: %s", run_id, decision.skip_reason)
             return None
         identity = get_identity_context()
+        project_id = None
+        if self._workspace_index is not None:
+            try:
+                workspace = self._workspace_index.workspace_of_session(session_id)
+                project_id = workspace.id if workspace is not None else None
+            except Exception as error:  # noqa: BLE001 — project failure narrows to user-global.
+                logger.warning(
+                    "Memory V2 project binding unavailable (%s); enqueueing user-global context",
+                    type(error).__name__,
+                )
         job = await self._jobs.enqueue(
             idempotency_key=idempotency_key(run_id),
-            # project_id 恒 None：本票没有可信的项目绑定来源（`types.TrustedMemoryIdentity`
-            # 自己写明"具体解析链在后续票据接线"）。后果是执行器的检索与政策判据都只看到
-            # `user_global` 一个作用域——诚实的方向：少形成一条 project 记忆，而不是把一条
-            # 用户事实错记到项目名下。已在 T8/ADR-0043 登记。
             trusted=TrustedMemoryIdentity(
-                tenant_id=identity.tenant_id, user_id=identity.user_id, project_id=None,
+                tenant_id=identity.tenant_id, user_id=identity.user_id, project_id=project_id,
             ),
             session_id=session_id, run_id=run_id,
         )

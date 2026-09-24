@@ -90,6 +90,7 @@ class TestSessionEventDTO:
             # 不带内容（事件流不是第二份记忆真相，不变量 #22）；与
             # memory/degraded 并列但语义不同——那条是降级信号，这条是成功写入。
             "memory/updated",
+            "memory/recalled",
         }
         assert EVENT_TYPES == expected
 

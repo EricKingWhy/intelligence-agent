@@ -132,6 +132,22 @@ async def test_without_a_resolvable_primary_role_there_is_no_pipeline(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_recall_is_wired_even_without_a_formation_model_role(tmp_path, monkeypatch) -> None:
+    _patch_components(monkeypatch)
+    wiring = await wire_capabilities(
+        CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+        settings=_settings(tmp_path, model_provider="deepseek"),
+        sessions=_sessions(tmp_path),
+    )
+
+    assert wiring.memory_formation is None
+    assert wiring.memory_v2 is not None
+    assert {provider.name for provider in wiring.context_providers} == {"memory", "memory_v2"}
+    assert {tool.name for tool in wiring.tools} >= {"retrieve_memory_v2"}
+    await wiring.aclose()
+
+
+@pytest.mark.asyncio
 async def test_a_resolvable_primary_role_builds_the_pipeline(tmp_path) -> None:
     """可解析出主角色 ⇒ 真 runner，且作业表与记录表在**同一个库文件**里。
 

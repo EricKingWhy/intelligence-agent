@@ -476,6 +476,7 @@ class AppState:
                 # (session_id, run_id) 从**运行时空正在写的那一份**日志切本轮事件。
                 wiring = await wire_capabilities(
                     registry, config, settings=self.settings, sessions=self.store,
+                    workspace_index=self.workspace_index,
                 )
                 # 先落字段再查 _closed：锁在手上，shutdown 必然排在本次释放之后，
                 # 它会从字段上取走这份 wiring 并关闭——绝不静默丢弃。

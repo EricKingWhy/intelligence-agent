@@ -1153,6 +1153,8 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // ——生成物 `event-types.ts` 由 `scripts/gen_event_types.py` 生成，加类型就必须在这里登记。
   // UI 展示面归 MEM-V2-5（#301），本行只负责穷尽性。
   [EventType.MEMORY_UPDATED]: { apply: noopProjection, summarize: emptySummary },
+  // #299 只提供脱敏事件与 API；Timeline 的解释展示归 #301。
+  [EventType.MEMORY_RECALLED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_FAILURE_GUARD]: {
     apply: projectToolFailureGuard,
     summarize: summarizeToolFailureGuard,
