@@ -62,20 +62,17 @@ Decisions + AC-1..AC-19。按项目优先级（正式规格高于 GitHub Issue�
 **下层只能收窄，不能放大**；试图越过生效的上层 ceiling ⇒ **在开工前**拒绝（见 D9）。
 local fuse **不跨兄弟池化**：子 Agent 不能因为父级额度更大而继承一个更大的本地保险丝。
 
-### D2 — counter 语义（唯一权威定义）
+### D2 — counter 语义：七个定义各有**唯一计数点**
 
-| counter | 定义 |
-| --- | --- |
-| `agent_turns` | 一个 AgentRuntime 内**被接受**的模型决策数。决策在 Provider 响应被规范化并接纳进 loop 之后才算；被拒绝 / 传输失败的请求不加这个计数 |
-| `model_requests` | 实际发出的**每一次** Provider 请求。primary / fallback / closeout / 子 Agent 请求各自独立计数 |
-| `tool_calls` | 被接纳进 ToolExecutor 的**规范化逻辑工具调用**数。一次 ToolExecutor retry 仍是一个逻辑调用 |
-| `tool_attempts` | ToolExecutor 的**每一次实际尝试**（含 retry）。可观察，但**不是** `tool_calls` 的别名 |
-| `total_tokens` | 配置的预算作用域内，Provider 自报 input + output token 之和 |
-| `cost_usd` | Provider 归属的 USD 成本之和；**不可得时不编价、不记 0** |
-| `delegations` | 委派树内被接纳的 `delegate` 调用数 |
+七个 counter（`agent_turns` / `model_requests` / `tool_calls` / `tool_attempts` / `total_tokens` /
+`cost_usd` / `delegations`）的定义与计数点是**契约**，权威表在 `02 §5.1`——本 ADR **不复制**该表
+（同一事实两处写全会漂移）。本节只固定三条最容易混淆、且直接决定计数正确性判据的边界：
 
-计数点是**单一**的：`agent_turns` 在响应被接纳处、`tool_calls` 在 ToolExecutor 的**唯一接纳点**、
-`model_requests` 在 Provider 调用处。任一 counter 的实现位置都不得出现第二个计数点。
+1. **`tool_calls` ≠ `tool_attempts`**：一次 ToolExecutor retry 仍是一个逻辑调用；接纳点**之前**被拒的
+   调用不消耗配额，但拒绝理由必须可审计。
+2. **`model_requests` 独立于 `agent_turns`**：primary / fallback / closeout / 子 Agent 的**每一次**
+   实际 Provider 请求各自计数；被拒或传输失败的请求**不**增 `agent_turns`。
+3. **`cost_usd` 只在 Provider 给出可靠归属值时累计**：不可得记 **unavailable**，不编价、不记 0。
 
 ### D3 — 暂停/恢复是 durable 生命周期，不是终态
 
@@ -107,15 +104,7 @@ local fuse **不跨兄弟池化**：子 Agent 不能因为父级额度更大而�
 
 ### D5 — stuck 检测：扩展既有 guard 责任域，一次 replan，恢复需真实变更
 
-阈值（照抄 #305 §8，权威表在 `02_AGENT_RUNTIME.md` §5.3）：
-
-| 模式 | 阈值 |
-| --- | ---: |
-| 同动作 + 同错误/结果失败 | 3 |
-| 同动作 + 同观察 | 4 |
-| 无进展独白 / 模型决策 | 3 |
-| 两模式交替循环 | 6 个决策 |
-| 项目级无进展窗口 | 4 个决策 |
+五个模式的阈值（3 / 3 / 4 / 6 / 4）是**契约**，权威表在 `02 §5.3`；本节固定其规则与理由：
 
 - **责任域唯一**：扩展 `agent/guards.py`（ADR-0014）这一处护栏，**不新增第二个 loop guard**。
 - 阈值首达 ⇒ 发一条结构化 guard 事件 + 允许**恰好一次**纠正性 replan；同一模式在 replan 后
