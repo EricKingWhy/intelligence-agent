@@ -327,10 +327,18 @@ async def test_audit_goes_to_structured_logs_not_session_events(memory_app, capl
     assert record.memory_id == memory_id
     assert record.tenant_id == "acme" and record.user_id == "alice"
 
-    # 会话事件流里不得出现"记忆内容变更"类事件——将来有人想加"memory/forget"之类，
+    # 会话事件流里不得出现"记忆**内容**变更"类事件——将来有人想加"memory/forget"之类，
     # 会先撞红这里。**注意口径**：`memory/degraded` 是**降级观测**（抽取/写回/检索失败），
     # 不是内容变更，AC8 明说它不构成反例，所以这里不能写成"任何含 memory 的事件都不许有"。
-    forbidden = [t for t in SESSION_EVENT_TYPES if any(
+    #
+    # `memory/updated` 同理不构成反例（**2026-09-24 修**）：它由 PRD V2 §6.5 与
+    # #298 R12 明确规定——"committed changes emit `memory/updated`"，载荷只有
+    # count / memory IDs / action counts / job ID，**不带内容**（`MEMORY_UPDATED` 的
+    # 写入点 `runner.SessionEventSink` 与 T6 的单事务提交同源）。此前它被下面的
+    # `"memory/update"` 子串误伤：那条断言写于只有 `memory/degraded` 的年代，
+    # T6（`2f5a32e`）把 `memory/updated` 登记进词表后这条就一直红着——本文件由
+    # #298 T7b 的门禁发现。缺的正是当时那份例外名单里的第二项。
+    forbidden = [t for t in SESSION_EVENT_TYPES if t != "memory/updated" and any(
         word in t.lower() for word in ("forget", "delet", "memory/update"))]
     assert forbidden == []
 

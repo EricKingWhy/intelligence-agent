@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # BUG-014：记忆检索外层超时（此前 context provider 写死 5s，比 embedding SDK
     # 的 15s 还紧——代理转发场景必超时）。Settings 注入式，与既有超时字段同风格。
     memory_search_timeout_seconds: float = Field(default=10.0, gt=0)
+    # R11（#298）：「Jobs are serialized per user. Global formation concurrency defaults
+    # to four and is configurable.」——**按用户串行**在数据库里（`jobs.claim` 的自占用
+    # 子查询，跨重启有效），这一项是**本进程在飞记忆作业数**的上限。
+    # `gt=0` 不是形式约束：0 会让服务循环派不出任何 job，表现为"记忆永远不形成"——
+    # 配错必须响亮失败。消费点唯一：`memory/v2/assembly.build_memory_formation`。
+    memory_v2_max_concurrency: int = Field(default=4, gt=0)
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70

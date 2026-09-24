@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from agent_harness.capability import factories
 from agent_harness.capability.base import (
@@ -29,6 +29,10 @@ from agent_harness.memory.tools import (
     RetrieveMemoryTool,
 )
 from agent_harness.sandbox import WorkspaceRegistry
+
+if TYPE_CHECKING:
+    # 只出现在注解里（`wire_capabilities` 的 `sessions` 参数），运行期由调用方传实例。
+    from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,13 @@ class CapabilityWiring:
     tool_contributors: list[Any] = field(default_factory=list)
     memory_writer: Any | None = None
     memory: Any | None = None  # MemoryComponents 生命周期包（relay/writeback），由 aclose 关闭
+    #: V2 记忆形成管线（`memory/v2/assembly.build_memory_formation` 的产物）。它是**终结臂的
+    #: 接收端**：`build_runtime` 把它注入 `AgentRuntime(memory_formation=...)`，每轮 run 收尾
+    #: 时由它决定该不该入队、并在可见答复交付**之前**把 job 落盘（#298 T7b）。
+    #: 它同时是 `lifecycle` 成员（`aclose` 先停泵再排空在飞 job），但它单独留一个字段，
+    #: 因为调用方要**按名字**取它注入 runtime，而不是去生命周期列表里按类型翻。
+    #: 未装配（模型角色没配 / 调用方没提供会话日志）时恒 `None` ⇒ 终结臂走"没有宿主"的旧路径。
+    memory_formation: Any | None = None
     # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 aclose 关闭。
     lifecycle: list[Any] = field(default_factory=list)
     # Multi-Agent（Phase 13，ADR-0015）：delegate 工具已进 tools，但其依赖
@@ -149,6 +160,58 @@ async def _wire_memory(
     wiring.tool_contributors.append(_MemoryCapabilityProvider(
         components.capability, timeout_seconds=settings.memory_search_timeout_seconds,
     ))
+
+
+async def _wire_memory_formation(
+    settings: Settings, wiring: CapabilityWiring, *, sessions: JsonlSessionStore | None,
+) -> None:
+    """在**已活的** V1 记忆之上接出 V2 形成管线（#298 T7b）。
+
+    闸门是**装配结果**而不是配置项：`wiring.memory is not None` 才是"这个进程真的有记忆"
+    ——它一次覆盖三种形态（CAPABILITIES 里没有 memory / `enabled: false` 被关掉 / 组件
+    没配齐而降级），正是 PRD §5.6.4「关闭记忆 = 同时关掉自动抽取与自动召回」的落点。
+    所以这里**不该**再有第二个开关。
+
+    为什么不塞进 `_wire_memory`：那条路的入参形状是"一个 capability 的 cfg + 它的 provider
+    名"，而 V2 管线既不吃 cfg 也不认 provider（它只认 `memory.primary` 这个模型角色）；
+    硬塞进去就得给 `_BUILTIN_WIRING` 里其余六个 factory 各加一个用不上的参数。
+
+    失败按 OPTIONAL 降级（与 `wire_capabilities` 循环里的同一条纪律）：V2 管线起不来不该
+    让整个应用起不来，更不该影响 V1 记忆——那才是此刻在服务用户的路径。
+    """
+    if sessions is None or wiring.memory is None:
+        return
+    from agent_harness.memory.v2.assembly import build_memory_formation
+    from agent_harness.model.config import ConfigError
+
+    try:
+        runner = await build_memory_formation(settings, sessions=sessions)
+    except ConfigError as error:
+        # 配置类故障**响亮上抛**，不降级（T8 两轴审查 P2 修）：`roles.resolve_memory_roles`
+        # 自己的契约就是"配错了要响亮"（缺 `MODEL_API_KEY` / provider 名非法都抛
+        # `ConfigError`），而 `ConfigError` 不是 `CapabilityError` 的子类 —— 下面那条宽
+        # `except Exception` 原本会把它一起吞掉。后果是把"你配错了"降级成"你没配"：
+        # 运维看到 `degradations["memory_v2"] = init_failed`，而真正的原因（`AGENT_MODELS`
+        # 坏）只留在 traceback 里。与主循环对 `CapabilityError` 的分流（见本文件 `wire_capabilities`
+        # 的 `except CapabilityError: raise`）及 `_wire_mcp` 的 `ConfigError → CapabilityError`
+        # 是同一条纪律：**降级只留给外部/环境故障**。
+        raise CapabilityError(
+            f"capability 'memory' 的 V2 形成管线配置错误：{error}", code="init_failed"
+        ) from error
+    except Exception:
+        logger.warning(
+            "V2 记忆形成装配失败，按 %s 降级跳过（V1 记忆不受影响）",
+            Degradation.OPTIONAL_RUNTIME.value, exc_info=True,
+        )
+        wiring.degradations["memory_v2"] = DegradeReason.INIT_FAILED.value
+        return
+    if runner is None:
+        # 模型角色没配：装配层已经记了一行 warning 说清原因，这里不再重复登记——
+        # "没配"是缺省状态（`degradations` 的字段约定：只登记非缺省的原因）。
+        return
+    wiring.memory_formation = runner
+    # 生命周期挂通道：`aclose` 先停泵（此后拒绝新 run）再有界地排空在飞 job。
+    wiring.lifecycle.append(runner)
 
 
 def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
@@ -519,6 +582,7 @@ async def wire_capabilities(
     config: dict[str, ProviderConfig],
     *,
     settings: Settings,
+    sessions: JsonlSessionStore | None = None,
 ) -> CapabilityWiring:
     """按 config 驱动 builtin 接线；未知 capability / 未知 provider 显式报错（不静默忽略）。
 
@@ -527,6 +591,11 @@ async def wire_capabilities(
     OPTIONAL capability 的 factory 失败（外部依赖故障等）降级为跳过并记 warning——
     失败的能力不会出现在 Registry 里，Consumer 走 optional() 的 None 降级路径
     （08 §7 验收：Optional Provider 故障可以降级）；REQUIRED_CORE 则向上抛。
+
+    `sessions`（#298 T7b）：运行时空在写的那个会话日志存储。装配 V2 记忆形成管线要它
+    （执行 job 时按 `(session_id, run_id)` 从日志切这一轮的事件）。**不提供 = 不装配 V2
+    形成**（`memory_formation` 恒 None）：测试与不跑 V2 的调用方因此零改动，而生产的两处
+    调用点（`web/app.py` 的 `get_wiring` / `assemble_wiring`）各自把自己手上的 store 传进来。
     """
     wiring = CapabilityWiring()
     for name, cfg in config.items():
@@ -575,4 +644,8 @@ async def wire_capabilities(
     for contributor in contributors:
         if isinstance(contributor, ContributesTools):
             wiring.tools.extend(contributor.contributes_tools())
+
+    # V2 记忆形成（#298 T7b）：在工具收集**之后**接，因为它的闸门是"V1 记忆真的活了"
+    # （`wiring.memory` 只在 `_wire_memory` 成功时被设置），与工具贡献无关。
+    await _wire_memory_formation(settings, wiring, sessions=sessions)
     return wiring

@@ -472,7 +472,11 @@ class AppState:
             if self._wiring is None or self._registry is None:
                 config = parse_capabilities_config(self.settings.capabilities)
                 registry = CapabilityRegistry()
-                wiring = await wire_capabilities(registry, config, settings=self.settings)
+                # sessions=自己的 store（#298 T7b）：V2 记忆形成执行 job 时要按
+                # (session_id, run_id) 从**运行时空正在写的那一份**日志切本轮事件。
+                wiring = await wire_capabilities(
+                    registry, config, settings=self.settings, sessions=self.store,
+                )
                 # 先落字段再查 _closed：锁在手上，shutdown 必然排在本次释放之后，
                 # 它会从字段上取走这份 wiring 并关闭——绝不静默丢弃。
                 self._registry, self._wiring = registry, wiring
