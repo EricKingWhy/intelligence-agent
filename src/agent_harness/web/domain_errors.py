@@ -73,10 +73,11 @@ fork 父时不删（不级联、不静默 orphan），detail 带子会话数量�
 alias `max_steps` 与新字段 `budget.local.max_agent_turns` **同时出现且不等**（`BudgetAliasConflict`）、
 下层声明的 ceiling **越过生效上层**（`BudgetCeilingExceeded`，ADR-0044 D1/D8）。判定发生在
 **任何 model / tool / child 工作开始前**（ADR-0044 D9：与其余 422 同类——输入不可接受且未开工），
-被拒请求不落盘、不写消耗预算的事件。三个类都是 `BudgetRejection` 的子类，本表是**精确类型**
-索引，所以父子各自登记（同 `WorkspacePathInvalid` 的规矩）。命中端点：`POST /api/sessions`、
-`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/messages`（launched 路径）与
-`POST /api/sessions/{id}/queue/flush`。
+被拒请求不落盘、不写消耗预算的事件。命中端点：`POST /api/sessions`、
+`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/messages`（**两种模式都判**，且判定
+早于分支：同一条请求体不该因为运行态不同而换状态码）。
+`POST /api/sessions/{id}/queue/flush` **不在**其中：它不带 budget 入参，重投的 fuse 只由
+Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上抛不出这三档。
 
 ## 设计取舍（为什么不再往前一步）
 

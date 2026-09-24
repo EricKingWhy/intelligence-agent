@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from agent_harness.agent import AgentEvent
 from agent_harness.agent.budget import resolve_local_fuse
+from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.assembly import (
     assemble_wiring,
     build_runtime,
@@ -203,12 +204,14 @@ async def run(message: str, *, write: Callable[[str], None] | None = None) -> st
         workspace = workspace_root / "workspaces" / session_id
         # local fuse（#308）：CLI 不再自带一个低位数字——生效值 = Deployment 默认 500，
         # 会话级覆盖走 `budget.local.max_agent_turns`（CLI 暂无该开关，与 Web 同一条解析）。
+        # 档位声明同样参与收窄（CLI 走默认 main 档位，与 `build_runtime` 的档位选择同源）。
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
             session_id=session_id, workspace=workspace,
             max_agent_turns=resolve_local_fuse(
                 deployment=settings.local_max_agent_turns,
+                profile=declared_turn_ceiling(None),
             ).max_agent_turns,
             auto_approve=True,
             session_store=store,

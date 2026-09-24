@@ -42,11 +42,10 @@ class AgentSpec:
     description: str
     system_prompt: str
     tool_scope: frozenset[str] = field(default_factory=frozenset)
-    #: 档位的 local turn fuse 声明（#308 / ADR-0044 D1）。``None`` = **继承上层**
-    #: （Deployment 默认 500，`config.Settings.local_max_agent_turns`）——三个内置档位
-    #: 就是 None：出厂设定不写死数字，operator 下调 Deployment ceiling 时它们自然跟随，
-    #: 不会出现"档位声明 500 撞上 deployment 100"这种必然失败的组合（低层只能收窄，
-    #: 判定见 `agent/budget.py`）。自定义档位要收窄时显式给正整数，且必须 ≤ Deployment。
+    #: 档位的 local turn fuse 声明（#308 / ADR-0044 D1）。``None`` = **继承上层**：三个内置
+    #: 档位都是 None——出厂设定不写死数字，operator 下调 Deployment ceiling 时自动跟随，
+    #: 不会出现"档位声明 500 撞上 deployment 100"这种必然失败的组合。自定义档位收窄时
+    #: 显式给正整数（必须 ≤ Deployment；判定见 `agent/budget.py`）。
     max_agent_turns: int | None = None
     max_depth: int = 1
     model_policy: str = "inherit"
@@ -121,6 +120,20 @@ BUILTIN_PROFILES: dict[str, AgentSpec] = {
         tool_scope=_RESEARCH_TOOLS,
     ),
 }
+
+
+def declared_turn_ceiling(agent_profile: str | None) -> int | None:
+    """生效档位声明的 local turn ceiling（``None`` = 该档位不声明、继承 Deployment）。
+
+    根路径（`SessionService` 的 fuse 解析）与 child 路径（`AgentFactory.create`）取的是
+    **同一个档位**：`build_runtime` / `AgentFactory` 在 `agent_profile is None` 时都用
+    `main`，所以这里也回落到 `main`——否则"生效 fuse 出自哪个档位"会随调用点漂移，而
+    漂移的后果是请求可以越过档位 ceiling 而不被拒（ADR-0044 D1 的"不静默"）。
+
+    未知档位名**响亮失败**（同 `build_runtime` 的 `BUILTIN_PROFILES[...]`：web 层
+    `_validate_agent_profile` 已 422，这里是防御性的第二道，不静默退化到 main）。
+    """
+    return BUILTIN_PROFILES[agent_profile or "main"].max_agent_turns
 
 
 def declared_tool_universe() -> frozenset[str]:

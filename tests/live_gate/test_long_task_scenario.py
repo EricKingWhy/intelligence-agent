@@ -4,7 +4,7 @@
 产出并落进 `docs/live_gate/**`；本文件只钉**场景自身**的两件可机检事实，避免"跑了才知道
 场景是不是恒 PASS / 恒 FAIL"：
 
-1. **信息屏障真的成立**：链脚本一次调用最多推进一格，拿旧 token 不推进——这正是场景
+1. **信息屏障真的成立**：链脚本一次调用最多推进一格，拿旧串不推进——这正是场景
    "必须超过 10 轮"的来源，不是"希望模型慢慢来"；
 2. **断言集是诚实的**：`steps ≤ 10`、轨迹里出现 `max_steps_exceeded`、产物/步数不一致
    都要判不通过；并且在一个自洽终态上全部通过。
@@ -154,7 +154,7 @@ async def test_prepare_reports_unmet_precondition_when_policy_is_too_low(tmp_pat
 
 
 def test_chain_advances_only_with_the_observed_token(tmp_path):
-    """拿旧 token 不推进；拿当前 token 才推进——每次调用**最多**推进一格。"""
+    """拿旧串不推进；拿当前串才推进——每次调用**最多**推进一格。"""
     ctx = _context(tmp_path)
     import asyncio
 
@@ -164,12 +164,12 @@ def test_chain_advances_only_with_the_observed_token(tmp_path):
     assert ctx.sandbox.exec(f"python {CHAIN_SCRIPT} {stale}").exit_code == 0
     assert ctx.sandbox.read_text(STEPS_FILE).strip() == "1"
 
-    # 同一条旧 token 再用一次：非零退出且**不推进**（信息屏障的另一半）
+    # 同一条旧串再用一次：非零退出且**不推进**（信息屏障的另一半）
     replay = ctx.sandbox.exec(f"python {CHAIN_SCRIPT} {stale}")
     assert replay.exit_code != 0
     assert ctx.sandbox.read_text(STEPS_FILE).strip() == "1"
 
-    # 用当前 token 一路推到 TRANSITIONS 格（每格都必须先看到上一次的输出）
+    # 用当前串一路推到 TRANSITIONS 格（每格都必须先看到上一次的输出）
     for expected in range(2, TRANSITIONS + 1):
         current = ctx.sandbox.read_text(TOKEN_FILE).strip()
         result = ctx.sandbox.exec(f"python {CHAIN_SCRIPT} {current}")
@@ -207,7 +207,7 @@ def test_assertions_reject_a_fuse_trip(tmp_path):
     [
         {TOKEN_FILE: "abcd1234", STEPS_FILE: str(TRANSITIONS - 1), DONE_FILE: "abcd1234"},  # 少一步
         {TOKEN_FILE: "abcd1234", STEPS_FILE: str(TRANSITIONS)},  # 没有 done.txt
-        {TOKEN_FILE: "abcd1234", STEPS_FILE: str(TRANSITIONS), DONE_FILE: "deadbeef"},  # token 不一致
+        {TOKEN_FILE: "abcd1234", STEPS_FILE: str(TRANSITIONS), DONE_FILE: "deadbeef"},  # 串不一致
     ],
 )
 def test_assertions_reject_inconsistent_artifacts(tmp_path, files):

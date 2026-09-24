@@ -539,3 +539,69 @@ async def test_steer_message_is_not_marked_as_runtime_injected(tmp_path, monkeyp
     # 用户首次发言（A）与引导（B）都参与抽取 ⇒ 两者口径一致
     first_user = harness.of_type(session_id, USER_MESSAGE)[0]
     assert _is_runtime_injected(first_user) is False
+
+
+# ── #308（T3）：在途通道也判定 budget 请求体 ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatch):
+    """run 在途时发的消息**不消费** budget，但**判定照跑**。
+
+    同一份请求体不该因为"此刻有没有 run"而换语义：`{max_steps:8, budget:9}` 在空转
+    会话上 422，在活跃 run 上也必须是拒绝，而不是静默入队——入队那版还会在下一次
+    投递时按 deployment 默认启动，用户以为设了 9 轮、实际生效 500。
+
+    HTTP 层的同一判据（steer 先 422 后 409 的顺序）在
+    `tests/web/test_budget_local_fuse_api.py::test_steer_judges_the_budget_body_before_the_target_check`；
+    这里用 gate 把 run 钉在在途，覆盖 queued 分支。
+    """
+    from agent_harness.agent.budget import BudgetAliasConflict, BudgetCeilingExceeded
+
+    gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [AIMessage(content="答")], gate=gate,
+    )
+    launched = await harness.service.create_and_launch(task="A")
+    session_id = launched.session.session_id
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
+        what="run 起跑（gate 把它钉在模型调用上）",
+    )
+
+    with pytest.raises(BudgetAliasConflict) as conflict:
+        await harness.service.send_message(
+            session_id=session_id, content="B", mode="queue",
+            local_max_agent_turns=9, max_steps=8,
+        )
+    assert "8" in str(conflict.value) and "9" in str(conflict.value)
+
+    with pytest.raises(BudgetCeilingExceeded):
+        await harness.service.send_message(
+            session_id=session_id, content="B", mode="queue",
+            local_max_agent_turns=10_000,
+        )
+
+    # steer 分支同一条判定（顺序也在：预算拒绝先于"steer 必须有在途 run"）。
+    with pytest.raises(BudgetAliasConflict):
+        await harness.service.send_message(
+            session_id=session_id, content="B", mode="steer",
+            local_max_agent_turns=9, max_steps=8,
+        )
+
+    # 被拒请求零副作用：既不落 message/queued，也不落 steer/requested。
+    assert harness.of_type(session_id, MESSAGE_QUEUED) == []
+    assert harness.of_type(session_id, STEER_REQUESTED) == []
+
+    # 合法（且不消费）的旧字段仍照旧排队：迁移期兼容不能被这条判定收紧掉。
+    queued = await harness.service.send_message(
+        session_id=session_id, content="B", mode="queue", max_steps=9,
+    )
+    assert queued.status == "queued"
+    assert [e.data["content"] for e in harness.of_type(session_id, MESSAGE_QUEUED)] == ["B"]
+
+    gate.set()
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_COMPLETED)) == 2,
+        what="排队项被接力成第二个 run 并跑完",
+    )

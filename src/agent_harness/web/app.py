@@ -223,14 +223,11 @@ class CreateSessionRequest(_AmendValueValidators):
     # 不复制），并自动注册为项目 + 归组。与 `workspace` 互斥（同时非空 → 422）。
     # 形态/存在性/是否目录的校验在 SessionService._resolve_cwd（领域层，与 CLI 共用）。
     cwd: str | None = None
-    # local fuse（#308 / ADR-0044 D8）：公共字段是 `budget.local.max_agent_turns`；
-    # `max_steps` 保留为**迁移期 deprecated alias**（相等接受、不等 422 —— 判定在
-    # 领域层，一处规则一处实现）。这里只校验**形状**：非正数 → 422。
+    # local fuse（#308）：公共字段 `budget.local.max_agent_turns`，`max_steps` 是迁移期
+    # deprecated alias（规则见 `agent/budget.py`；这里只挡形状：非正数 → 422）。
     #
-    # `le=200` 的上限**删掉了**：生效上限现在是 Deployment ceiling
-    # （`Settings.local_max_agent_turns`），由领域层统一判定（越过 ⇒ 422）。留着那个
-    # 与策略无关的 200 只会造成两种假象——"200 以内随便传"（越过策略也放行）与
-    # "策略允许 500 却被 200 挡住"。
+    # 这里刻意**没有** `le=` 上限：生效上限是 Deployment ceiling，判定归领域层；一个与
+    # 策略无关的数字只会造成两种假象——"200 以内随便传"与"策略允许 500 却被 200 挡住"。
     budget: BudgetRequest | None = None
     max_steps: int | None = Field(default=None, ge=1)
     # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
@@ -302,11 +299,9 @@ class ResumeRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/resume 的请求体。"""
 
     task: str = Field(min_length=1, max_length=100_000)
-    # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。`max_steps` 同样保留为
-    # 迁移期 alias：alias 规则是**全局**的（`02 §5.1` / D8「两者同时出现且相等 ⇒ 接受；
-    # 不等 ⇒ 422，在任何工作开始前」），不是逐端点的。本端点此前没有该字段，但若在这里
-    # 漏掉它，`{"max_steps": 8, "budget": {…9}}` 会**静默**通过别名冲突校验——同一个请求体
-    # 在创建端点 422、在恢复端点静默生效，正是要避免的"逐端点漂移"。
+    # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。`max_steps` 必须在这里
+    # 一起出现：alias 规则是**全局**的（`02 §5.1` D8），漏掉它会让 `{max_steps:8,
+    # budget:{…9}}` 在本端点静默通过、在创建端点 422。
     budget: BudgetRequest | None = None
     max_steps: int | None = Field(default=None, ge=1)
     # staged amend 字段（可选，None = 默认行为）
@@ -337,9 +332,8 @@ class SendMessageRequest(_AmendValueValidators):
 
     content: str = Field(min_length=1, max_length=100_000)
     mode: str = Field(default="queue", pattern="^(queue|steer)$")
-    # local fuse（#308）：与创建端点同一套字段与规则（见 CreateSessionRequest 的说明）。
-    # 只对 idle → launched 分支生效（在途 run 的 queued / steer 不消费 budget，
-    # `11 §6.1` + 既有"未消费的 amend 字段丢弃"契约）。
+    # local fuse（#308）：与创建端点同一套字段与规则。生效值只有 idle → launched
+    # 消费；queued / steer 只判定、丢弃（`11 §6.1`——判定照跑是为了让状态码与运行态无关）。
     budget: BudgetRequest | None = None
     max_steps: int | None = Field(default=None, ge=1)
     supersedes_seq: int | None = Field(default=None, ge=0)
@@ -730,24 +724,27 @@ def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     为什么是响应头：SSE 响应没有 JSON 体可承载元数据（`X-Permission-Mode` 就是为解决
     同一个问题立的先例），而 JSON 分支与 SSE 分支用同一条通道才能"两处一致"。
 
-    值的三项对应 `agent.budget.LocalFuse.as_projection()`：生效轮数、来源（deployment /
-    agent_profile / 请求字段 / alias）。用了迁移期 `max_steps` 时另加
-    `Deprecation: true` 与 `Warning: 299 …`（RFC 8594 / RFC 7234 §5.5 的标准形状）
-    ——这就是 R5 要的 deprecation signal：旧客户端不改代码也能看到自己用的是废弃字段。
+    值一律取自 `agent.budget.LocalFuse.as_projection()`（**单一形状**：客户端可见的字段与
+    它们的取值只定义一次，这里只做"字段名 → 响应头名"的映射，不重新组装事实）。用了迁移期
+    `max_steps` 时另加 `Deprecation: true` 与 `Warning: 299 …`（RFC 8594 / RFC 7234 §5.5
+    的标准形状）——这就是 R5 要的 deprecation signal：旧客户端不改代码也能看到自己用的是
+    废弃字段，且文案里的字段名同样来自投影（改别名只改一处）。
 
-    `fuse is None` ⇒ 空 dict（无 run 的响应没有生效 fuse 可投影，见 send_message 的
-    queued / steered 分支）。
+    `fuse is None` ⇒ 空 dict（没有生效 fuse 的响应不投影：queued / steered 分支，以及
+    `launch=False` 的只建会话——见调用点注释）。
     """
     if fuse is None:
         return {}
+    projection = fuse.as_projection()
     headers = {
-        "X-Local-Max-Agent-Turns": str(fuse.max_agent_turns),
-        "X-Local-Fuse-Source": fuse.source,
+        "X-Local-Max-Agent-Turns": str(projection["max_agent_turns"]),
+        "X-Local-Fuse-Source": projection["source"],
     }
-    if fuse.used_legacy_alias:
+    deprecation = projection.get("deprecation")
+    if deprecation:
         headers["Deprecation"] = "true"
         headers["Warning"] = (
-            '299 - "max_steps is deprecated; use budget.local.max_agent_turns"'
+            f'299 - "{deprecation["field"]} is deprecated; use {deprecation["replacement"]}"'
         )
     return headers
 
@@ -1158,10 +1155,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         # 只读投影（#308 Must Do）：生效 local fuse + 来源，SSE 与 JSON 两条路径都带
         # （SSE 没有 JSON 体可承载元数据，`X-Permission-Mode` 是同一条先例）。
-        headers = {
-            "X-Permission-Mode": permission_mode.value,
-            **_local_fuse_headers(result.local_fuse),
-        }
+        #
+        # 只建会话（`launch=False`）**不投影** fuse：那个值按"本次请求若启动 run 会生效几轮"
+        # 解析，而它既不持久化、也没被任何 run 消费（后续 `/messages` 会按当时的 Deployment
+        # 重新解析）——回一个请求级数字当会话级 ceiling 是假事实。
+        fuse_headers = _local_fuse_headers(result.local_fuse) if launch else {}
+        headers = {"X-Permission-Mode": permission_mode.value, **fuse_headers}
 
         # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
         # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题
@@ -1809,7 +1808,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
         if launched is None:
             return {"status": "idle"}
-        return _launched_response(app, launched, session_id)
+        # 与 `/messages` 的 launched 分支**同一投影**（同一段响应组装）：重投的 run 也消费
+        # 了生效 fuse，客户端在两条入口上读到的 ceiling 必须是同一个事实。
+        return _launched_response(
+            app, launched, session_id,
+            headers=_local_fuse_headers(launched.local_fuse),
+        )
 
     @app.post("/api/sessions/{session_id}/queue/{queue_id}/cancel")
     async def cancel_queue_item(session_id: str, queue_id: str) -> dict[str, str]:

@@ -205,10 +205,9 @@ async def build_runtime(
     steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
     MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
 
-    `max_agent_turns`（#308）：**已解析的** local fuse 生效值——调用方（SessionService
-    / CLI）先用 `agent.budget.resolve_local_fuse` 把 Deployment / AgentProfile / 请求
-    覆盖合成一个整数（越权与 alias 冲突在那一步就已拒绝，422 早于本函数），本函数只
-    消费结果。刻意**不**在这里解析：装配点应该只有一个输入，而不是"再判一次策略"。
+    `max_agent_turns`（#308）：**已解析的** local fuse 生效值，本函数只消费结果。刻意
+    **不**在这里解析：装配点只有一个输入，而不是"再判一次策略"（解析点见
+    `agent.budget.resolve_local_fuse`）。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），

@@ -51,9 +51,9 @@ class AgentFactory:
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
-        # Deployment ceiling（#308）：child 的 local fuse 由"档位声明（可为 None）→
-        # 收到这个 ceiling 之下"解析。**子 Agent 不会继承一个更大的上限**——父级额度
-        # 更大不构成放行理由（ADR-0044 D1：local fuse 不跨兄弟池化）。
+        # Deployment ceiling（#308）：child 的 local fuse = 档位声明收窄到本 ceiling
+        # 之下。**子 Agent 不会继承一个更大的上限**——父级额度更大不构成放行理由
+        # （ADR-0044 D1：local fuse 不跨兄弟池化）。
         self._local_max_agent_turns = local_max_agent_turns
         # executor 组装缝：policy/approval/ledger/overflow 等运行配置由调用方
         # 闭包捕获——Factory 不关心 Executor 怎么配，只保证 child registry 先

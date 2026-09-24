@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import anyio
 
 from agent_harness.agent.budget import LocalFuse, resolve_local_fuse
+from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.assembly import build_runtime
 from agent_harness.logging import log_event
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
@@ -199,6 +200,16 @@ def validate_session_id(session_id: str) -> str:
 # ── 数据载体 ──────────────────────────────────────────────────────────
 # AmendOptions 已移至 session/amend.py（候选 2 后续修正：消除 model_switch ↔
 # service 的双向导入环）。本模块从那里重新导出，既有导入路径不变。
+
+
+def _profile_turn_ceiling(amend: AmendOptions | None) -> int | None:
+    """生效档位声明的 local turn ceiling（`None` = 不声明、继承 Deployment）。
+
+    取的是 `build_runtime` 会用的**同一个档位**（`amend.agent_profile`，None ⇒ `main`）：
+    生效 fuse 与真正跑起来的 profile 必须是同一个档位的声明，否则"请求可越过档位
+    ceiling"会静默成立（ADR-0044 D1/D7，判定见 `agent/budget.py`）。
+    """
+    return declared_turn_ceiling(amend.agent_profile if amend is not None else None)
 
 
 # ── 模型切换 / Fork 领域逻辑 ────────────────────────────────────────
@@ -557,10 +568,9 @@ class SessionService:
         避免 runtime 组装失败时留下只含 session/started 的孤儿 session。
 
         local fuse（#308）：`local_max_agent_turns` 是 `budget.local.max_agent_turns`
-        的请求声明，`max_steps` 是迁移期 deprecated alias——两者在**任何副作用之前**由
-        `agent.budget.resolve_local_fuse` 与 Deployment ceiling 合成生效值（不等 ⇒ 422；
-        越过上层 ceiling ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。解析刻意放在最前面：
-        被拒请求不建 workspace 目录、不落盘任何事件。
+        的请求声明，`max_steps` 是迁移期 deprecated alias——两者由
+        `agent.budget.resolve_local_fuse` 与 Deployment ceiling 合成生效值
+        （不等 / 越权 ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。
 
         `workspace_name` 与 `cwd` 二选一（ADR-0027）：
         - `workspace_name`（旧契约，逐字节不变）：单个目录名，目录在
@@ -572,10 +582,11 @@ class SessionService:
 
         from agent_harness.model.config import ConfigError, ModelConfig
 
-        # local fuse 解析先于一切副作用（#308 / ADR-0044 D9：422 在开工前，被拒请求
-        # 不启动 model/tool/child 工作，也不写消耗预算的事件——也不建 workspace 目录）。
+        # local fuse（#308）：解析先于一切副作用——被拒请求不建 workspace、不落任何
+        # 事件，更不启动 model / tool / child（ADR-0044 D9）。
         fuse = resolve_local_fuse(
             deployment=self._settings.local_max_agent_turns,
+            profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
             alias=max_steps,
         )
@@ -742,10 +753,11 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
-        # local fuse（#308）：与 create 同一条解析；位置在**只读前置检查之后、
-        # Session.resume 追加事件之前**——被拒请求不写 session/resumed、不建目录。
+        # local fuse（#308）：位置在只读前置检查之后、`Session.resume` 追加事件之前——
+        # 被拒请求不写 session/resumed、不建目录。
         fuse = resolve_local_fuse(
             deployment=self._settings.local_max_agent_turns,
+            profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
             alias=max_steps,
         )
@@ -1004,11 +1016,9 @@ class SessionService:
         staged amend 字段透传给 ``resume_and_launch``（idle 分支），
         与 create 路径对齐。默认 None = 当前行为不变。
 
-        local fuse（#308）：与 amend 同一条纪律——**只有 idle → launched 才消费**。
-        `local_max_agent_turns` / `max_steps`（deprecated alias）在 idle 分支交给
-        ``resume_and_launch`` 解析（冲突/越权在那里 422，早于任何 run 工作）；在途 run
-        的 queued 消息与 steer **不消费**它们（`11 §6.1` 只把 budget 挂在 idle 消息
-        启动上），按既有"未被消费的 amend 字段丢弃"契约忽略——不是静默截断生效 ceiling。
+        local fuse（#308）：与 amend 同一条纪律——**只有 idle → launched 才消费**生效值
+        （`11 §6.1` 把 budget 挂在"idle 会话消息启动"上）；在途 run 的 queued 消息与
+        steer 只跑**判定**、丢弃生效值（为什么判定照跑见下方解析点的注释）。
 
         不抢断、不改写历史事件（不变量 #3 / #22）；queue 与 steer 的消费由
         run 边界（``on_run_terminal``）/ runtime 循环头驱动，本方法只做注册与
@@ -1031,6 +1041,17 @@ class SessionService:
             await self.cancel_queue(session_id=session_id, queue_id=queue_id)
 
         active_run = self._run_manager.get_active(session_id)
+
+        if mode == "steer" or active_run is not None:
+            # 这两条分支不启动 run ⇒ 不消费生效 fuse；但**判定照跑**（同一条解析函数、
+            # 同一个档位来源，结果丢弃）：形状 / 不等双字段 / 越权三档拒绝都发生在
+            # 任何工作开始之前，与"此刻有没有 run"无关（`02 §5.1` D8）。
+            resolve_local_fuse(
+                deployment=self._settings.local_max_agent_turns,
+                profile=_profile_turn_ceiling(amend),
+                request=local_max_agent_turns,
+                alias=max_steps,
+            )
 
         if mode == "steer":
             if active_run is None:

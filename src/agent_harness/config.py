@@ -34,10 +34,9 @@ class Settings(BaseSettings):
     # 机器过载。≤0 = 关闭。TPM 令牌桶限流器 DEFER（ADR-0015）。
     model_max_concurrency: int = 3
     # Deployment hard ceiling：单个 AgentRuntime 实例的 local turn fuse（#308 / ADR-0044
-    # D1，权威表在 `02 §5.1`）。operator 的政策旋钮——**下调**它是本特性的意图
-    # （"Deployment may lower it"）；本层就是最高层，所以没有"越权"可言，上调也是
-    # 部署者的显式选择。请求覆盖（`budget.local.max_agent_turns` / 旧 `max_steps`）
-    # 只能收窄到这个值之下，越过即 422（在任何工作开始前，判定见 `agent/budget.py`）。
+    # D1，权威表在 `02 §5.1`）。operator 的政策旋钮——**下调**它是本特性的意图，上调也是
+    # 部署者的显式选择（本层就是最高层，"越权"只在它之下成立）。请求覆盖只能收窄到这个
+    # 值之下，越过即 422（判定见 `agent/budget.py`）。
     #
     # 字面量刻意与 `agent.budget.DEFAULT_MAX_AGENT_TURNS` 分列两处而**不 import**：
     # config 是依赖图最底层，反向 import `agent_harness.agent`（包 `__init__` 会拉

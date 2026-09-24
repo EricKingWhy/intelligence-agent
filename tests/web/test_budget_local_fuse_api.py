@@ -210,6 +210,102 @@ def test_alias_over_deployment_ceiling_rejected_before_any_work(tmp_path):
     _assert_rejected_without_side_effects(app, probe)
 
 
+def test_request_over_profile_ceiling_rejected_before_any_work(tmp_path, monkeypatch):
+    """PRD 决策 3 / R3：请求不得越过 **AgentProfile 政策**——生效上层 = min(各层)。
+
+    内置三档位都声明 `None`（出厂不写死数字），所以这里把一个档位的声明值调到 40：缺省
+    Deployment 500 仍在上，**档位**才是生效上层，请求 300 必须 422（而不是静默取 40）。
+    请求 30 是合法的收窄 ⇒ 200 且投影回 30。
+    """
+    from dataclasses import replace
+
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+
+    monkeypatch.setitem(
+        BUILTIN_PROFILES, "coding",
+        replace(BUILTIN_PROFILES["coding"], max_agent_turns=40),
+    )
+    app, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        rejected = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "agent_profile": "coding",
+                "budget": {"local": {"max_agent_turns": 300}},
+            },
+        )
+    assert rejected.status_code == 422, rejected.text
+    assert "40" in rejected.json()["detail"], "错误文案要给出生效 ceiling（档位声明）"
+    _assert_rejected_without_side_effects(app, probe)
+
+    with probe:
+        accepted = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "agent_profile": "coding",
+                "budget": {"local": {"max_agent_turns": 30}},
+            },
+        )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.headers["x-local-max-agent-turns"] == "30"
+
+
+def test_steer_judges_the_budget_body_before_the_target_check(tmp_path):
+    """非启动分支（steer）也要判请求体，且**判定先于**"有没有在途 run"这条分支。
+
+    空转会话上 `mode=steer` 本来是 409（`SteerTargetNotFound`）；请求体自身矛盾时
+    必须是 **422**。若判定被放到分支之后，这里读到的就是 409——同一份 body 的语义
+    取决于运行态，客户端与复核者都无从预期。
+
+    "在途 run 的 queued / steer" 那条分支需要把 run 真钉在在途（本文件的
+    `TestClient` 会等 SSE 流跑完，拿不到那个窗口），证据在会话层：
+    `tests/session/test_multiturn_delivery.py::test_in_flight_input_still_judges_the_budget_body`。
+    """
+    from agent_harness.session.event import MESSAGE_QUEUED, STEER_REQUESTED
+
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+
+    conflict = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={
+            "content": "you are confused",
+            "mode": "steer",
+            "max_steps": 8,
+            "budget": {"local": {"max_agent_turns": 9}},
+        },
+    )
+    assert conflict.status_code == 422, conflict.text
+    assert "8" in conflict.json()["detail"] and "9" in conflict.json()["detail"]
+
+    over_ceiling = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={
+            "content": "you are confused",
+            "mode": "steer",
+            "budget": {"local": {"max_agent_turns": 10_000}},
+        },
+    )
+    assert over_ceiling.status_code == 422, over_ceiling.text
+
+    # 被拒请求零副作用（会话已存在，所以这里看事件流而不是 workspace）：
+    # 既没排队也没登记 steer。
+    types = [e.type for e in app.state.agent.store.read_events(session_id)]
+    assert MESSAGE_QUEUED not in types, types
+    assert STEER_REQUESTED not in types, types
+
+    # 对照组：合法 body 在同一个空转会话上仍是 409——判定没把目标检查吞掉，
+    # 也没把"没在途 run"这件事实改写成别的状态码。
+    legal = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "you are confused", "mode": "steer", "max_steps": 9},
+    )
+    assert legal.status_code == 409, legal.text
+
+
 @pytest.mark.parametrize("turns", [0, -1])
 def test_non_positive_turns_rejected_before_any_work(tmp_path, turns):
     """非正数 → 422（形状闸门在 pydantic，领域层还有一层 `_positive`）。"""
@@ -269,7 +365,38 @@ def _create_idle_session(client: TestClient) -> str:
     """只建会话不启动 run（launch=false）→ 得到可 resume 的空闲会话。"""
     resp = client.post("/api/sessions", json={}, params={"launch": "false"})
     assert resp.status_code == 200, resp.text
+    # 只建会话**不投影** fuse：那个数字是请求级的、未被任何 run 消费，也不持久化
+    # （后续 /messages 会按当时的 Deployment 重新解析）——回一个"会话级 ceiling"
+    # 是假事实（不变量 #21 同族：缺失不能被顶替成看起来有值）。
+    assert "x-local-max-agent-turns" not in resp.headers, resp.headers
+    assert "x-local-fuse-source" not in resp.headers, resp.headers
     return resp.json()["session_id"]
+
+
+def test_queue_flush_projects_the_same_fuse(tmp_path):
+    """队列重投（flush）的 launched 响应与 `/messages` 同一投影（同一段组装）。
+
+    起点是**空会话**（`launch=false`）+ 手工 append 一条 `message/queued`（模拟"重启后
+    手工投递"）：先跑一个真 run 再 append 会与终态回调的自动接力竞争（既有用例
+    `test_multiturn_queue_http.py` 已记录过这个形状）。
+    """
+    from agent_harness.session import Session
+    from agent_harness.session.event import MESSAGE_QUEUED
+    from agent_harness.session.store import JsonlSessionStore
+
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    Session.append_event(
+        JsonlSessionStore(root=app.state.agent.sessions_root), session_id,
+        MESSAGE_QUEUED, {"queue_id": "q-flush", "content": "重启前的消息"},
+    )
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(f"/api/sessions/{session_id}/queue/flush")
+    assert resp.status_code == 200, resp.text
+    assert probe.calls, "flush 必须真的拉起 run（否则响应头只是装饰）"
+    assert resp.headers["x-local-max-agent-turns"] == str(_DEFAULT_CEILING)
+    assert resp.headers["x-local-fuse-source"] == "deployment"
 
 
 def test_resume_honors_budget_and_projects_fuse(tmp_path):

@@ -179,10 +179,14 @@ def test_settings_default_matches_contract() -> None:
 
     这是那处分列的**唯一**防漂移闸门：若规格的 500 变了而 `Settings` 没跟上，
     所有缺省入口会解析出一个与契约不同的 local fuse，而且没有任何东西会报错。
+
+    `_env_file=None`：断言的对象是**契约默认值**，不是这台机器的部署策略——读仓库 `.env`
+    会让一个合法的 `LOCAL_MAX_AGENT_TURNS=200` 把这条闸门打红（那时红的是部署，不是契约），
+    也会让单测去吃部署机的其它配置。
     """
     from agent_harness.config import Settings
 
-    assert Settings().local_max_agent_turns == DEFAULT_MAX_AGENT_TURNS
+    assert Settings(_env_file=None).local_max_agent_turns == DEFAULT_MAX_AGENT_TURNS
 
 
 def test_settings_rejects_non_positive_ceiling() -> None:
@@ -192,4 +196,18 @@ def test_settings_rejects_non_positive_ceiling() -> None:
     from agent_harness.config import Settings
 
     with pytest.raises(ValidationError):
-        Settings(local_max_agent_turns=0)
+        Settings(_env_file=None, local_max_agent_turns=0)
+
+
+def test_declared_turn_ceiling_follows_the_profile_choice() -> None:
+    """根路径与 child 路径取同一个档位声明（`None` ⇒ 回落到 `main`）。"""
+    from agent_harness.agent.profiles import BUILTIN_PROFILES, declared_turn_ceiling
+
+    # 内置三档位都不写死数字（出厂设定不制造"档位 500 撞 deployment 100"的必然失败组合）。
+    assert {name: declared_turn_ceiling(name) for name in BUILTIN_PROFILES} == {
+        name: None for name in BUILTIN_PROFILES
+    }
+    # `None`（未指定档位）与显式 `main` 必须同值：`build_runtime` 就是这么落档的。
+    assert declared_turn_ceiling(None) == declared_turn_ceiling("main")
+    with pytest.raises(KeyError):
+        declared_turn_ceiling("no-such-profile")

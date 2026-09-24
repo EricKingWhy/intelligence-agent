@@ -1,33 +1,21 @@
 """分层预算的**唯一解析点**（`#308` T3：本票只强制 local turn fuse）。
 
-## 语义来源（不在这里重新发明）
+语义权威是 ADR-0044 D1/D8 与 `02 §5.1`（三层控制不可互相替代、配置优先级
+`Deployment > AgentProfile > Session/Run request override > Tool policy`、下层只能收窄、
+越权在**任何 model / tool / child 工作开始前**拒绝且不静默截断），本模块不复述它们，
+只做一件事：把各层的声明值合成一个生效 `LocalFuse` + 来源。
 
-ADR-0044 D1/D8 与 `02 §5.1`：
+本票**不**实现的（别误以为漏了）：RunBudget（`#312`）与 SessionBudget（`#318`），
+所以这里没有 turn 之外的 counter，也没有 `budget.run` / `budget.session` 的解析
+（wire 形状由 `web/app.py` 请求模型的 `extra="forbid"` 挡住，422 而非静默忽略）。
+`agent_turns` 的计数点就是既有的 Agent Loop 轮次计数（`runtime.py` 里"这一轮算一步"
+那一行，在模型响应被规范化并接纳为决策之后递增）——本票不新增计数器、不新增 loop。
 
-- 三层控制不可互相替代，本票只实现第一层——**Local AgentRuntime fuse**：单个
-  `AgentRuntime` 实例的 turn 保险丝，**不跨兄弟池化**；默认 `max_agent_turns = 500`；
-- 配置优先级 `Deployment > AgentProfile > Session/Run request override > Tool policy`，
-  **下层只能收窄**：越过生效上层 ceiling 的配置在**任何 model / tool / child 工作开始前**
-  被拒绝（HTTP 422，`11 §6.1`），**不静默截断**；
-- 公共字段是 `budget.local.max_agent_turns`；`max_steps` 是迁移期 deprecated alias
-  （只发它 ⇒ 解释为根 AgentRuntime 的 local fuse；两者同时出现且相等 ⇒ 接受；不等 ⇒ 422）。
-  alias 的**删除**由 `#320` 在证明零剩余调用方后执行——本模块因此不删它，也不猜它。
+`max_steps` 是迁移期 deprecated alias（只发它 ⇒ 解释为根 AgentRuntime 的 local fuse）；
+它的**删除**由 `#320` 在证明零剩余调用方后执行，所以本模块不删它、也不猜它。
 
-## 本票**不**实现的部分（读这段，别误以为漏了）
-
-RunBudget（`#312`）与 SessionBudget（`#318`）尚未实现，所以这里**没有** turn 之外的
-counter，也**没有** `budget.run` / `budget.session` 的解析。wire 形状那一侧由
-`web/app.py` 的请求模型 `extra="forbid"` 挡住未知键（422，不是静默忽略）——将来谁实现
-那些作用域，谁把字段加进请求模型，本模块再加对应解析。
-
-`agent_turns` 的**计数点**就是既有的 Agent Loop 轮次计数（`runtime.py` 里"这一轮算一步"
-那一行，在模型响应被规范化并接纳为决策之后递增）——本票不新增计数器，也不新增 loop
-（车票 Must Not Do / §9.2）。
-
-## 为什么是"解析"而不是"持有计数器"
-
-本模块是**纯函数 + 值对象**：输入各层的声明值，输出生效值与来源。计数器与暂停/恢复状态
-归 runtime 与后续票——这样"生效几轮、谁定的"可以在 HTTP 层被投影（`as_projection()`），
+之所以是"解析"而不是"持有计数器"：本模块是**纯函数 + 值对象**，计数器与暂停/恢复状态
+归 runtime 与后续票。这样"生效几轮、谁定的"能在 HTTP 层被投影（`as_projection()`），
 而"已经跑了几轮"永远只有一个 owner。
 """
 

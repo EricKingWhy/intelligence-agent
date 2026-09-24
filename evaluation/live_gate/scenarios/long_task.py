@@ -3,17 +3,19 @@
 ## 为什么这个任务**结构性**需要超过 10 次模型决策
 
 车票要的不是"跑了个比较长的任务"，而是一次**不能**在 10 轮内完成的任务。所以任务的每一步
-都建立在**信息屏障**上：工作区里的 `chain.py` 每次调用只有在参数等于 `chain.txt` 里的当前
-token 时才推进一格，推进结果是**新随机 token**（`secrets.token_hex(4)`，不可能被预计算）。
+都建立在**信息屏障**上：工作区里的 `chain.py` 每次调用只有在参数等于 `chain.txt` 里的当前串时
+才推进一格，推进结果是**新随机串**（`secrets.token_hex(4)`，不可能被预计算）；一次调用最多
+推进一格（每次调用都重新读 `chain.txt`，所以"一次调用推两格"结构上做不到）。
 
-于是"下一步要传什么参数"这个信息只存在于**上一条命令的 stdout** 里：
+于是"下一步要传什么"这个信息**只由上一次调用产生**——它在 stdout 里给出，同时写回
+`chain.txt`（两者同一时刻产生，读哪个都行）。12 格因此需要**至少 12 次独立调用**，而每次
+调用都是模型的一次决策 ⇒ `steps ≥ 12`：
 
-- 一次 bash 调用最多推进一格（要推进必须传入当前 token，而当前 token 只能从上次输出读）；
-- 因此完成 `TRANSITIONS` 格 ⇒ **至少** `TRANSITIONS` 次模型决策（每轮一个决策）。
-
-`TRANSITIONS = 12 > 10`：这正是旧 `max_steps=10` 会截断的地方。场景**不**手写任何 fuse
-数字，而是走生产解析路径（`Settings.local_max_agent_turns` → `resolve_local_fuse`）——
-"缺省入口解析出 500"这件事由实现决定，场景只消费它（车票 Must Do：缺省 local fuse=500）。
+- `TRANSITIONS = 12 > 10`：这正是旧 `max_steps=10` 会截断的地方。场景**不**手写任何 fuse
+  数字，而是走生产解析路径（`Settings.local_max_agent_turns` → `resolve_local_fuse`）——
+  "缺省入口解析出 500"这件事由实现决定，场景只消费它（车票 Must Do：缺省 local fuse=500）。
+- 下界而不是等式：模型若用 shell 循环一次跑完 12 格（prompt 明文禁止），`steps` 会 **≤ 10**
+  ⇒ `legacy_turn_limit_exceeded` 断言**如实判红**，不洗成 PASS（见下"不证明什么"）。
 
 ## 它证明什么 / 不证明什么（诚实边界）
 
@@ -26,9 +28,20 @@ token 时才推进一格，推进结果是**新随机 token**（`secrets.token_h
 
 ## 为什么断言钉这两个可机检事实
 
-`chain-steps.txt == 12` 只有在 12 次**正确的 token 回传**后才成立（script 自己数的）；
-`done.txt` 内容 == 最终 token 只有在模型真的读到了最后一次输出后才成立。两条都不需要
+`chain-steps.txt == 12` 只有在 12 次**正确的串回传**后才成立（script 自己数的）；
+`done.txt` 内容 == 最终串只有在模型真的读到了最后一次输出后才成立。两条都不需要
 复算随机值，也不需要读模型的话。
+
+## 为什么产物叫 `next` 而不是 `token`（实测踩过，别改回去）
+
+首版把链输出写成 `step=N token=<hex>`，3/3 的第一次尝试**十条断言全绿**却被判 `FAIL`：
+`secrets.py` 的赋值形态扫描（`_SECRET_ASSIGNMENT`，键名词表含 `token`）把它读成凭证回显。
+误报的直接原因是**正文里 `token=` 后面跟着中文、中间没有空白**，于是 `[^\\s,;\"']{16,}`
+把例子里那串连同后面的汉字一起吞进"值"里（≥16 字符 ⇒ 命中），证据因此不落盘。
+
+**处置是改场景的命名，不是放松扫描器**：安全边界不为取证方便让步（`AGENTS` §9.5 红线），
+而"日志里 `token=…` 是不是凭证"这件事扫描器**不该**去猜。所以链输出改用 `next=`，prompt 里
+的例子也照此写——信息屏障与全部断言一条都没变。
 """
 
 from __future__ import annotations
@@ -61,44 +74,48 @@ FUSE_TRIP_MARKER = "max_steps_exceeded"
 #: 真实模型调用的单次超时（秒）：本任务 12+ 轮，给足余量。
 REQUEST_TIMEOUT = 180.0
 
-_CHAIN_SCRIPT_SOURCE = '''"""Live Gate 长任务链（#308）：一次调用推进一格，token 随机生成。
+_CHAIN_SCRIPT_SOURCE = '''"""Live Gate 长任务链（#308）：一次调用推进一格，推进串随机生成。
 
-契约：`python chain.py <当前 token>`，token 与 chain.txt 一致才推进——新 token 由
-secrets 生成并写回 chain.txt，步数 +1；不一致则非零退出且**不推进**。
+契约：`python chain.py <当前串>`，与 chain.txt 一致才推进——新串由 secrets 生成并写回
+chain.txt，步数 +1；不一致则非零退出且**不推进**。
+
+输出的键名刻意用 `next` 而不是 `token`：`live_gate/secrets.py` 的赋值形态扫描会把
+`token=<≥16 字符>` 读成凭证回显（见模块 docstring 的实测记录），安全边界不为此让步。
 """
 
 import pathlib
 import secrets
 import sys
 
-token_file = pathlib.Path("chain.txt")
+link_file = pathlib.Path("chain.txt")
 steps_file = pathlib.Path("chain-steps.txt")
 
-if not token_file.exists():
+if not link_file.exists():
     sys.exit("chain.txt 缺失：工作区未被正确 seed")
-current = token_file.read_text().strip()
+current = link_file.read_text().strip()
 if len(sys.argv) < 2 or sys.argv[1].strip() != current:
-    sys.exit("token 不匹配：必须把当前 token 作为参数传入（先读上一条输出，不要猜）")
+    sys.exit("串不匹配：必须把当前串作为参数传入（先读上一条输出，不要猜）")
 
-new_token = secrets.token_hex(4)
-token_file.write_text(new_token)
+new_link = secrets.token_hex(4)
+link_file.write_text(new_link)
 steps = int((steps_file.read_text().strip() or "0")) + 1
 steps_file.write_text(str(steps))
-print(f"step={steps} token={new_token}")
+print(f"step={steps} next={new_link}")
 '''
 
 TASK = (
     "这是一条必须**逐步**完成的链式任务：工作区里已经放好 chain.py 与初值文件 chain.txt。\n"
     "每一步只做一件事：\n"
-    "  1) 运行 `python chain.py <当前 token>`"
-    "（第一次的当前 token 就是 chain.txt 里的初值，可以先用 bash 读一次 chain.txt）；\n"
-    "  2) 从它的输出里拿到新 token（形如 `step=N token=xxxxxxxx`），它同时被写进 chain.txt。\n"
+    "  1) 运行 `python chain.py <当前串>`"
+    "（第一次的当前串就是 chain.txt 里的初值，可以先用 bash 读一次 chain.txt）；\n"
+    "  2) 从它的输出里拿到新串（形如 `step=N` 与 `next=xxxxxxxx` 两段），"
+    "它同时被写进 chain.txt。\n"
     f"重复上面的动作，直到 chain-steps.txt 里的步数达到 {TRANSITIONS}。\n"
     "必须遵守的规则：\n"
     "  - **一次 bash 调用只运行一次 chain.py**：不要用 shell 循环，也不要用 `;` / `&&` "
-    "把多次调用拼在一条命令里——token 是随机值，只能从上一条命令的输出里读出来；\n"
+    "把多次调用拼在一条命令里——串是随机值，只能从上一条命令的输出里读出来；\n"
     "  - 每一步都要真的执行命令并读输出，不要跳步；\n"
-    f"  - 全部 {TRANSITIONS} 步完成后，用 write 工具创建 {DONE_FILE}，内容恰好是最终的 token"
+    f"  - 全部 {TRANSITIONS} 步完成后，用 write 工具创建 {DONE_FILE}，内容恰好是最终的串"
     "（不要换行、不要引号、不要多余字符）；\n"
     "  - 最后用一句话汇总，不要长篇输出。"
 )
