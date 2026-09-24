@@ -721,8 +721,9 @@ async def test_an_interrupted_job_recovers_to_exactly_one_outcome(env: Env) -> N
     # 崩溃点更早的形态：job 停在非终态、lease 到期 ⇒ 另一个 worker 接手重跑。
     stalled = await env.jobs.enqueue(
         idempotency_key="run-2", trusted=USER_A, session_id="session-1")
-    await env.jobs.claim(worker_id="dead-worker", now=T0)
-    recovered = await env.jobs.claim(worker_id="worker-2", now=T0 + timedelta(hours=1))
+    recovery_now = datetime.now(UTC)
+    await env.jobs.claim(worker_id="dead-worker", now=recovery_now - timedelta(hours=1))
+    recovered = await env.jobs.claim(worker_id="worker-2", now=recovery_now)
     assert recovered is not None and recovered.job_id == stalled.job_id
 
     second_invoker = FakeInvoker(
