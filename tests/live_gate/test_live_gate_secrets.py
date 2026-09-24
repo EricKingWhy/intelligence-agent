@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+
 from pydantic import BaseModel, SecretStr
 
 from evaluation.live_gate.secrets import (
@@ -27,6 +29,8 @@ class _Stub(BaseModel):
 
     model_api_key: SecretStr = SecretStr("")
     fallback_model_api_key: SecretStr = SecretStr("")
+    #: JSON 形状的 `SecretStr`（对齐 `Settings.agent_models` 的真实形状：条目里带 api_key）。
+    agent_models_json: SecretStr = SecretStr("")
     plain_field: str = "not-a-secret"
 
 
@@ -117,3 +121,40 @@ def test_scan_payload_masks_values_in_keys_and_nested_items() -> None:
     assert masked["tree"] == HEX_40
     assert payload["tree"] == HEX_40
     assert f"k-{secret}" in payload
+
+
+def test_all_github_token_prefixes_are_masked() -> None:
+    """`ghp_` 不是唯一的 GitHub 前缀（`gho_` / `ghu_` / `ghs_` / `ghr_` 同族）。"""
+    for prefix in ("ghp", "gho", "ghu", "ghs", "ghr"):
+        masked, findings = mask_text(f"token {prefix}_" + "a" * 24, where="t")
+        assert [finding.rule for finding in findings] == ["key_shaped_token"], prefix
+        assert masked == "token ***"
+
+
+def test_url_userinfo_without_a_colon_is_masked() -> None:
+    """只有 token、没有冒号的 userinfo 是最常见的一种漏法（`https://<token>@host`）。"""
+    masked, findings = mask_text("GET https://secret-token-value@api.example.com/v1", where="t")
+    assert [finding.rule for finding in findings] == ["url_userinfo"]
+    assert "secret-token-value" not in masked
+
+
+def test_json_shaped_secret_yields_its_entry_level_values() -> None:
+    """`agent_models` 这类 `SecretStr` 装的是 **JSON**：真凭证在条目里（`api_key`）。"""
+    payload = json.dumps([
+        {
+            "name": "a", "provider": "deepseek",
+            "base_url": "https://api.example.com/v1", "api_key": "entry-level-key-0001",
+        },
+    ])
+    values = credential_values(_Stub(agent_models_json=SecretStr(payload)))
+    assert "entry-level-key-0001" in values
+    # 反控：非凭证字段不进精确值层（把 base_url 当凭证会让正常文本被掩掉并误报）
+    assert "https://api.example.com/v1" not in values
+    masked, _ = mask_text("leak entry-level-key-0001", values=values, where="t")
+    assert "entry-level-key-0001" not in masked
+
+
+def test_non_json_secret_is_still_collected_as_a_whole() -> None:
+    """JSON 解析失败**不抛**：那只说明"这个字段不是 JSON"，整串照旧进精确值层。"""
+    values = credential_values(_Stub(model_api_key=SecretStr("plain-secret-value-0002")))
+    assert values == ["plain-secret-value-0002"]

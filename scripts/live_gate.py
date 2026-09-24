@@ -10,16 +10,24 @@
     python scripts/live_gate.py run [--scenario ID] [--out-dir DIR] [--no-write]
                                    [--skip REASON] [--inject-failure attempt:N]
         # 跑一次 Live Gate（3 次真实尝试）→ 落盘 docs/live_gate/<stamp>-<sha12>-<场景>/evidence.json
-    python scripts/live_gate.py validate <evidence.json> [--json]
+        # `--no-write`：只看结论 —— **目录都不建、轨迹不复制**（凭证扫描照做，一个字节不落）
+    python scripts/live_gate.py validate <evidence.json> [--json] [--require-pass]
         # 独立复核一份证据（不跑场景、不需要凭证）：重算判定 / 重读轨迹 / 比对 sha256 / 复扫凭证
+        # `--require-pass`：连证据**自己声明的判定**也要求是 PASS（默认只要求"证据自洽"）
 
     退出码：0 = 判定 PASS（`validate` 为复核通过）；1 = 未通过（FAIL / BLOCKED / SKIPPED / 复核有 FAIL）；
             2 = 用法错误或环境错误（未知场景、证据文件读不了、缺参数）
 
 ## 判定语义（详见 `evaluation/live_gate/schema.py`）
 
-`PASS` 只有一条路径：计划的三次尝试**全部成功**且没有任何注入/替身参与。缺凭证 ⇒ `BLOCKED`
-（**一个模型请求都不发**）；操作者显式跳过 ⇒ `SKIPPED`。两者**都不是通过**，退出码都是 1。
+`PASS` 只有一条路径：计划的三次尝试**全部成功**且没有任何注入/替身参与（替身缝两类：
+`capability` / `scenario`，后者由"定义文件是否真的在 `evaluation/live_gate/scenarios/` 下"
+**机械核实**）。缺凭证 ⇒ `BLOCKED`（不发任何 run；端点不可用那条路探测请求已经发过，见
+`capability.py`）；操作者显式跳过 ⇒ `SKIPPED`。两者**都不是通过**，退出码都是 1。
+
+`validate` 的两种结论**不是一回事**，别混：复核通过 = "这份证据**自洽且可核对**"
+（一份如实记着 FAIL 的证据也可以复核通过）；判定通过 = 证据里的 `verdict` 就是 `PASS`
+（要 `--require-pass`）。
 
 ## 与 Gate-0 的次序（实测踩过，别踩第二遍）
 
@@ -53,17 +61,7 @@ def _utf8_stdio() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace", newline="\n")
 
 
-def _print_capability(capability, *, as_json: bool) -> None:
-    payload = {
-        "verdict": capability.verdict,
-        "reason": capability.reason,
-        "credential_names": capability.credential_names,
-        "provider": capability.provider.model_dump() if capability.provider else None,
-        "probes": [probe.model_dump() for probe in capability.probes],
-    }
-    if as_json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return
+def _print_capability(capability) -> None:
     print(f"能力面判定: {capability.verdict}")
     print("凭证键名（值不打印）: " + (", ".join(capability.credential_names) or "(无)"))
     if capability.provider is not None:
@@ -83,8 +81,22 @@ async def _cmd_capabilities(args: argparse.Namespace) -> int:
     from evaluation.live_gate.capability import check_capability
 
     capability = await check_capability(Settings())
-    _print_capability(capability, as_json=args.json)
-    print(f"docker daemon（仅供将来场景选型，本票证据不使用）: {_docker_state()}")
+    docker = _docker_state()
+    if args.json:
+        # `--json` 必须是**纯 JSON**：docker 那行是给人看的补充信息，混进来会让
+        # `python -c "json.load(stdin)"` 直接炸（消费者按"输出即 JSON"读，这不是它的错）。
+        payload = {
+            "verdict": capability.verdict,
+            "reason": capability.reason,
+            "credential_names": capability.credential_names,
+            "provider": capability.provider.model_dump() if capability.provider else None,
+            "probes": [probe.model_dump() for probe in capability.probes],
+            "docker": docker,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        _print_capability(capability)
+        print(f"docker daemon（仅供将来场景选型，本票证据不使用）: {docker}")
     return EXIT_OK if capability.ready else EXIT_NOT_PASSED
 
 
@@ -175,6 +187,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(f"用法错误：证据文件不存在：{path}", file=sys.stderr)
         return EXIT_USAGE
     payload = json.loads(path.read_text(encoding="utf-8"))
+    declared = str(payload.get("verdict", "") or "")
     values: tuple[str, ...] = ()
     try:
         from agent_harness.config import Settings
@@ -183,18 +196,35 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001 - 复核**不需要**凭证；读不到就只跑形状层（如实标注）
         values = ()
     report = validate_evidence(payload, evidence_path=path, secret_values=values)
+    # 两种结论**不是一回事**：`passed` = "判定通过"（声明就是 PASS **且**证据自洽），
+    # 而退出码默认只反映前者里的"证据自洽"那一半（如实记着 FAIL 的证据也自洽）。
+    # 早先只出"证据自洽"、又把它写成"复核通过"，一份 BLOCKED 证据也能让退出码为 0 ——
+    # 脚本化消费方读到的是"通过"。`--require-pass` 把退出码也绑到"声明 PASS"上。
+    passed = report.ok and declared == "PASS"
+    exit_ok = passed or (report.ok and not args.require_pass)
     if args.json:
         print(json.dumps(
-            {"ok": report.ok, "checks": [vars(check) for check in report.checks]},
+            {
+                "ok": report.ok,
+                "declared_verdict": declared,
+                "passed": passed,
+                "require_pass": bool(args.require_pass),
+                "exit_ok": exit_ok,
+                "checks": [vars(check) for check in report.checks],
+            },
             ensure_ascii=False, indent=2,
         ))
     else:
         for check in report.checks:
             mark = {"PASS": "✅", "FAIL": "❌", "UNAVAILABLE": "⚠️ "}.get(check.status, "?")
             print(f"{mark} {check.name}: {check.detail}")
-        print(f"复核结论: {'通过' if report.ok else '未通过'}"
+        print(f"证据声明的判定: {declared or '(缺)'}")
+        print(f"复核结论（证据自洽）: {'通过' if report.ok else '未通过'}"
               f"（{len(report.failures)} 条 FAIL / 共 {len(report.checks)} 条）")
-    return EXIT_OK if report.ok else EXIT_NOT_PASSED
+        print("判定通过（声明 PASS 且证据自洽）: " + ("是" if passed else f"否（声明 {declared or '缺'}）"))
+        if not passed and report.ok and not args.require_pass:
+            print("本次退出码只反映「证据自洽」；要连判定一起要求，加 --require-pass")
+    return EXIT_OK if exit_ok else EXIT_NOT_PASSED
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -211,7 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="跑一次 Live Gate（3 次真实尝试）")
     run.add_argument("--scenario", default="smoke-production-tools", help="场景 id（默认内置 smoke）")
     run.add_argument("--out-dir", default="", help="证据目录（默认 docs/live_gate）")
-    run.add_argument("--no-write", action="store_true", help="只看结论，不落盘证据")
+    run.add_argument("--no-write", action="store_true", help="只看结论：不落盘证据（目录不建、轨迹不复制）")
     run.add_argument("--skip", default="", help="操作者显式跳过（判 SKIPPED，附理由）")
     run.add_argument(
         "--inject-failure", default="",
@@ -221,6 +251,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate", help="独立复核一份证据")
     validate.add_argument("evidence", help="证据 JSON 路径")
     validate.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    validate.add_argument(
+        "--require-pass", action="store_true",
+        help="连证据声明的判定也要求 PASS（默认只要求「证据自洽」：如实记着 FAIL 的证据也自洽）",
+    )
     return parser
 
 

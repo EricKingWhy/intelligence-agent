@@ -12,10 +12,20 @@
 | 总判定 | 由 `attempts` 的逐条状态**重算** 3/3（含注入/替身上限） | 声明 `PASS` 但只有 2 次成功 |
 | 尝试数 | `len(attempts)` 必须等于 `runner.attempts_planned`（缺的不得当成功） | 少跑一次仍称 3/3 |
 | 事件轨迹 | 逐条重读 JSONL：重算行数、`tool/call` 工具序列、run 终态在场、`sha256` 与记录值比对 | 轨迹被替换 / 事后编辑 |
+| 反篡改字段的**在场性** | PASS 尝试**必须**记着 `events_sha256` / `event_count` / `tool_calls`，且比对**不以非空为前提** | "清空字段 ⇒ 无需比对 ⇒ 一致"（假的一致） |
 | 空轨迹引用 | **PASS 尝试没有轨迹引用 ⇒ FAIL**；未跑起来的尝试（注入 / 前置不成立 / 命中凭证）⇒ `UNAVAILABLE` | "声称跑过但不可复核" / 把失败样本的缺席当成 FAIL |
+| PASS 尝试的断言 | `attempts[].assertions[].ok` 必须全为真 | 判定与场景自报的判据互相矛盾 |
 | 悬空工具调用 | `evaluation.assertions.dangling_tool_call_ids` 重算 | 轨迹内部不一致 |
 | 凭证 | 整份 JSON + 轨迹文件重扫一遍 | 凭证被写进证据 |
 | 工作树 | 证据里记录的 `tracked_matches_head` 为真（且 `risky` 为空） | 读数指到一棵被污染的树 |
+| 工作区销毁 | `sandbox.created` 为真 ⇒ `sandbox.deleted` 也必须为真 | "一次性工作区"其实是留下的孤儿目录 |
+
+**"记了才比"是最容易被利用的假判据**（二轴审查 P1）：早先三个字段的比较都写成
+`if attempt.events_sha256 and …`，于是把字段清成空串/0/空列表就能让每一条都走到 `else`
+分支、打印"一致"而不比较任何东西。现在的形状是：PASS 尝试缺任一字段 ⇒ 直接 FAIL；
+非 PASS 尝试缺字段 ⇒ `UNAVAILABLE` + 明说"未记录，未比对"（**不许**说成"一致"）。
+若将来真出现"通过但确实没有工具调用"的场景，正确做法是在那一票里给出显式判据
+（例如一条 `no_tool_calls_expected` 断言），而不是把这条放宽回"记了才比"。
 
 `validate_evidence()` 返回逐项结论，任一 `FAIL` ⇒ 退出码非 0（`UNAVAILABLE` **不算失败**：
 它是"本环境复核不了这一项"，如实标出而不是放行）。**它判不了**"场景语义是否真的
@@ -126,6 +136,53 @@ def _run_terminal_check(events: list[Any], attempt: Any) -> tuple[str, str]:
     return UNAVAILABLE, "轨迹里没有该 run 的终态事件（尝试可能中途中断）"
 
 
+def _digest_check(actual: str, attempt: Any) -> tuple[str, str]:
+    """轨迹 `sha256` 的比对结论（**不以"记录值非空"为前提**，见模块 docstring）。"""
+    if not attempt.events_sha256:
+        return UNAVAILABLE, "证据未记录 events_sha256，未比对"
+    if actual != attempt.events_sha256:
+        return FAIL, "轨迹 sha256 与证据记录不一致（文件被改过？）"
+    return PASS, f"sha256 一致（{actual[:12]}）"
+
+
+def _line_count_check(actual: int, attempt: Any) -> tuple[str, str]:
+    if not attempt.event_count:
+        return UNAVAILABLE, "证据未记录 event_count，未比对"
+    if actual != attempt.event_count:
+        return FAIL, f"证据写 {attempt.event_count} 行，轨迹实为 {actual} 行"
+    return PASS, f"{actual} 行一致"
+
+
+def _tool_calls_check(actual: list[str], attempt: Any) -> tuple[str, str]:
+    if not attempt.tool_calls:
+        return UNAVAILABLE, "证据未记录 tool_calls，未比对"
+    if actual != attempt.tool_calls:
+        return FAIL, f"证据写 {attempt.tool_calls}，轨迹实为 {actual}"
+    return PASS, f"{len(actual)} 次调用一致"
+
+
+def _recorded_check(attempt: Any, *, fields: tuple[str, ...]) -> tuple[str, str] | None:
+    """PASS 尝试的反篡改字段**必须在场**；缺了就是 FAIL（不是"没得比 ⇒ 一致"）。"""
+    if attempt.status is not Verdict.PASS:
+        return None
+    absent = [name for name in fields if not getattr(attempt, name)]
+    if not absent:
+        return None
+    return FAIL, (
+        f"PASS 尝试未记录 {' / '.join(absent)} —— 反篡改判据不是「记了才比」"
+        "（清空字段即可免于比对，报告里却看不出没比过）"
+    )
+
+
+def _assertions_check(attempt: Any) -> tuple[str, str]:
+    bad = [assertion.name for assertion in attempt.assertions if not assertion.ok]
+    if bad:
+        return FAIL, f"PASS 尝试带着未满足的断言：{bad}"
+    if not attempt.assertions:
+        return UNAVAILABLE, "PASS 尝试没有断言记录（本次只核了 ok 位与轨迹）"
+    return PASS, f"{len(attempt.assertions)} 条断言均满足"
+
+
 def validate_evidence(
     payload: dict[str, Any],
     *,
@@ -206,18 +263,20 @@ def validate_evidence(
             continue
         text = path.read_text(encoding="utf-8")
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if attempt.events_sha256 and digest != attempt.events_sha256:
-            report.add(f"{where}.events", FAIL, "轨迹 sha256 与证据记录不一致（文件被改过？）")
+        absent = _recorded_check(attempt, fields=("events_sha256", "event_count"))
+        if absent is not None:
+            report.add(f"{where}.events", *absent)
         else:
-            report.add(f"{where}.events", PASS, f"sha256 一致（{digest[:12]}）")
-        if attempt.event_count and attempt.event_count != text.count("\n"):
-            report.add(
-                f"{where}.event_count", FAIL,
-                f"证据写 {attempt.event_count} 行，轨迹实为 {text.count(chr(10))} 行",
-            )
+            report.add(f"{where}.events", *_digest_check(digest, attempt))
+            report.add(f"{where}.event_count", *_line_count_check(text.count("\n"), attempt))
         events = _load_events(path)
         if events is None:
-            report.add(f"{where}.events_parse", UNAVAILABLE, "轨迹不是本仓的 SessionEvent JSONL 格式")
+            # PASS 尝试的轨迹解析不了 ⇒ FAIL（"声称跑过但不可复核"）；失败样本 ⇒ UNAVAILABLE
+            report.add(
+                f"{where}.events_parse",
+                FAIL if attempt.status is Verdict.PASS else UNAVAILABLE,
+                "轨迹不是本仓的 SessionEvent JSONL 格式",
+            )
             continue
         dangling = dangling_tool_call_ids(events)
         if dangling:
@@ -225,11 +284,25 @@ def validate_evidence(
         else:
             report.add(f"{where}.dangling_tool_calls", PASS, "无悬空 call")
         tools = [str(event.data.get("tool_name")) for event in events if event.type == "tool/call"]
-        if attempt.tool_calls and tools != attempt.tool_calls:
-            report.add(f"{where}.tool_calls", FAIL, f"证据写 {attempt.tool_calls}，轨迹实为 {tools}")
+        absent = _recorded_check(attempt, fields=("tool_calls",))
+        if absent is not None:
+            report.add(f"{where}.tool_calls", *absent)
         else:
-            report.add(f"{where}.tool_calls", PASS, f"{len(tools)} 次调用一致")
+            report.add(f"{where}.tool_calls", *_tool_calls_check(tools, attempt))
+        if attempt.status is Verdict.PASS:
+            report.add(f"{where}.assertions", *_assertions_check(attempt))
         report.add(f"{where}.run_terminal", *_run_terminal_check(events, attempt))
+
+    # ④′ 一次性工作区销毁（AC：销毁或隔离后开发仓库没有副作用 —— "删不掉"也是一种失败）
+    if not evidence.sandbox.created:
+        report.add("sandbox_deleted", UNAVAILABLE, "本次运行没有创建工作区")
+    elif evidence.sandbox.deleted:
+        report.add("sandbox_deleted", PASS, "一次性工作区已核实销毁")
+    else:
+        report.add(
+            "sandbox_deleted", FAIL,
+            f"工作区未核实销毁（teardown={evidence.sandbox.teardown or '未销毁'}）",
+        )
 
     # ⑤ 凭证复扫（证据本体 + 轨迹文件；`seek` 走整份文本）
     findings: list[SecretFinding] = []

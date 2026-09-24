@@ -2,11 +2,15 @@
 
 ## 为什么不是直接 `shutil.rmtree`
 
-Windows 上 `git` 把 `.git/objects/**` 写成**只读**（实测 `-r--r--r--`），`shutil.rmtree`
-遇到它会失败 —— `LocalSubprocessSandbox.delete()` 用的正是 `rmtree(ignore_errors=True)`，
-于是删不掉却**不报错**（原型实测：`workspace/.git` 整棵树留在临时目录里）。本模块因此：
-先走 sandbox 自己的 `delete()`（契约不变），失败后按"清只读位 + 重试"补一次，**最后核实**
-目录是否真的消失 —— `deleted` 是核实过的结论，不是"我调用过删除"。
+Windows 上 `git` 把 `.git/objects/**` 写成**只读**（实测 `-r--r--r--`），`shutil.rmtree` 遇到
+它清不干净。`LocalSubprocessSandbox.delete()` 走 `rmtree(ignore_errors=True)`，但它**自己会
+核实**：目录仍在就抛 `RuntimeError`（R8-6，`sandbox/local.py`）—— 只读的 `.git` 正是它最常见
+的触发源。本模块因此：先走 sandbox 自己的 `delete()`（契约不变，抛错**记下不吞**），失败后按
+"清只读位 + 重试"补一次，**最后核实**目录是否真的消失 —— `deleted` 是核实过的结论，不是
+"我调用过删除"。
+
+（原型期这里写过"删不掉却不报错"：那是 `delete()` 还没有核实动作时的形状。现在两步走的真正
+理由是**一次性根目录里不只有 sandbox 的目录**——见 `teardown()` 的说明。）
 
 ## 工作区身份不落本机绝对路径
 
@@ -31,6 +35,27 @@ from evaluation.live_gate.schema import SandboxRecord
 #: 一个没有 git 的镜像（`python:3-slim`）会让 git 工具场景直接失败，把"镜像缺工具"混进
 #: "实现有问题"的归因面里 —— 本票不做，登记边界。
 SUPPORTED_BACKENDS = ("local",)
+
+#: Sandbox 类型 → 后端名。与 `WorkspaceRegistry._instantiate_sandbox` 的词表同源（那边是
+#: 名字 → 类型，这里是反查）。证据里的 `sandbox.backend` 曾经是**写死的字面量** `"local"`：
+#: 换成 docker（或任何别的后端）时它会照旧写 `local`，而错记的后端名比缺失更难发现
+#: （复核者会拿着一个不存在的后端去对账）。未登记的类型**显式抛**，不猜。
+_BACKEND_BY_TYPE: tuple[tuple[type, str], ...] = ((LocalSubprocessSandbox, "local"),)
+
+#: 本 Gate 创建工作区用的后端名（`create_workspace` 建的正是 `_BACKEND_BY_TYPE[0]` 那一型）。
+#: 没有工作区的证据块（BLOCKED / SKIPPED）填它 —— 填的是"本 Gate 会用的后端"，与上面同源，
+#: 不另写一份字面量（两处字面量漂移时，谁也不知道该信哪个）。
+DEFAULT_BACKEND = _BACKEND_BY_TYPE[0][1]
+
+
+def _backend_name(sandbox: Sandbox) -> str:
+    for sandbox_type, name in _BACKEND_BY_TYPE:
+        if isinstance(sandbox, sandbox_type):
+            return name
+    raise ValueError(
+        f"未登记的 Sandbox 类型 {type(sandbox).__name__}——证据拒绝记录一个猜出来的后端名"
+        "（新后端要在 _BACKEND_BY_TYPE 里登记，见 workspace.py 模块 docstring）"
+    )
 
 
 def _identity(path: Path | str) -> str:
@@ -102,7 +127,7 @@ def create_workspace(*, prefix: str = "live-gate-") -> DisposableWorkspace:
     root = Path(tempfile.mkdtemp(prefix=prefix))
     sandbox = LocalSubprocessSandbox(workspace_root=root / "workspace")
     record = SandboxRecord(
-        backend="local",
+        backend=_backend_name(sandbox),
         disposable=True,
         created=True,
         deleted=False,

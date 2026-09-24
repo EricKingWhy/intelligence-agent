@@ -11,6 +11,7 @@ import pytest
 from evaluation.live_gate.registry import (
     LiveScenario,
     get_scenario,
+    is_builtin,
     list_scenarios,
     register_scenario,
     unregister_scenario,
@@ -85,3 +86,24 @@ def test_builtin_registration_is_explicit_and_idempotent() -> None:
     assert smoke.version == 1
     assert [item.id for item in BUILTIN_SCENARIOS] == [SMOKE_ID]
     assert [item.id for item in list_scenarios()].count(SMOKE_ID) == 1
+    assert is_builtin(SMOKE_ID) is True, "随 harness 发布的场景要能被 runner 认出来"
+
+
+def test_stub_cannot_declare_itself_builtin(clean_registry) -> None:
+    """P1：`builtin=True` 是**申请核实**，不是声明 —— 定义文件不在 `scenarios/` 下就注册不上。
+
+    否则任何能 `import` 到注册表的代码都能把一个替身场景标成内置，写出一份
+    `PASS / seams={}` 的证据（注册表是进程级可写单例，这正是攻击面）。
+    """
+    with pytest.raises(ValueError, match="不得声明为内置"):
+        register_scenario(_StubScenario(), builtin=True)
+    with pytest.raises(KeyError):
+        get_scenario(_StubScenario.id)
+
+
+def test_registered_stub_is_not_builtin(clean_registry) -> None:
+    register_builtin_scenarios()
+    register_scenario(_StubScenario())
+    assert is_builtin(_StubScenario.id) is False
+    unregister_scenario(_StubScenario.id)
+    assert is_builtin(SMOKE_ID) is True, "摘掉替身不该动到内置集合"

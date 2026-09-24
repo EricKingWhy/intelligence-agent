@@ -51,7 +51,36 @@ def test_validate_returns_zero_for_a_consistent_evidence(tmp_path: Path, capsys)
     path = tmp_path / "evidence.json"
     path.write_text(evidence.to_json(), encoding="utf-8", newline="\n")
     assert cli.main(["validate", str(path)]) == cli.EXIT_OK
-    assert "复核结论: 通过" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "复核结论（证据自洽）: 通过" in out
+    # 自洽 ≠ 判定通过：这份证据声明的是 SKIPPED，脚本化消费方必须看得见这一行
+    assert "证据声明的判定: SKIPPED" in out
+    assert "判定通过（声明 PASS 且证据自洽）: 否" in out
+
+
+def test_validate_require_pass_rejects_a_self_consistent_non_pass(tmp_path: Path, capsys) -> None:
+    """`--require-pass`：一份自洽的 SKIPPED 证据默认退出 0，加了闸门就必须是 1。
+
+    `passed`（判定通过 = 声明 PASS 且自洽）**两种跑法下都是 false** —— 它不随开关变形，
+    变的是退出码。这样机器面不会因为"没加开关"就把 SKIPPED 读成"判定通过"。
+    """
+    cli = _load_cli()
+    evidence = make_evidence(attempts=[], verdict="SKIPPED", reason="机制测试")
+    path = tmp_path / "evidence.json"
+    path.write_text(evidence.to_json(), encoding="utf-8", newline="\n")
+    assert cli.main(["validate", str(path), "--json", "--require-pass"]) == cli.EXIT_NOT_PASSED
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["passed"] is False
+    assert payload["declared_verdict"] == "SKIPPED"
+    assert payload["exit_ok"] is False
+    # 不加闸门：退出码只反映"证据自洽"（这是默认口径，且输出里要说明）
+    assert cli.main(["validate", str(path), "--require-pass"]) == cli.EXIT_NOT_PASSED
+    capsys.readouterr()
+    assert cli.main(["validate", str(path)]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "判定通过（声明 PASS 且证据自洽）: 否" in out
+    assert "--require-pass" in out, "退出码口径与判定口径的差别要写在输出里"
 
 
 def test_validate_json_output_is_machine_readable(tmp_path: Path, capsys) -> None:
@@ -63,6 +92,26 @@ def test_validate_json_output_is_machine_readable(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert {check["name"] for check in payload["checks"]} >= {"schema", "verdict_recomputed"}
+
+
+def test_capabilities_json_is_pure_json(tmp_path: Path, capsys, monkeypatch) -> None:
+    """`--json` 的输出必须整体可 `json.loads`（docker 那行是给人看的，不能混进机器面）。
+
+    能力面用替身（不探测真实端点）：本用例判的是**输出形态**，不是网络。
+    """
+    cli = _load_cli()
+    from evaluation.live_gate.capability import ProviderCapability
+
+    async def _fake_check(settings, *, timeout=None):
+        return ProviderCapability(verdict="BLOCKED", reason="机制测试：不探测", credential_names=[])
+
+    monkeypatch.setattr(
+        "evaluation.live_gate.capability.check_capability", _fake_check, raising=True,
+    )
+    assert cli.main(["capabilities", "--json"]) == cli.EXIT_NOT_PASSED
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "BLOCKED"
+    assert "docker" in payload
 
 
 def test_validate_returns_one_for_a_tampered_verdict(tmp_path: Path, capsys) -> None:

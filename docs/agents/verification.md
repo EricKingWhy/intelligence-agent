@@ -33,6 +33,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | `web/**` | ④ tsc + ⑤ vitest + ⑥ oxlint | Gate-0 跑④⑥；⑤按需 |
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
 | 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
+| `evaluation/live_gate/**` 或票面要求"真模型 + 生产工具"的证据 | ⑮ Live Gate（**需真凭证**；`validate` 复核入库证据） | 人工，冻结树（不进推送前 60s 快车道） |
 | 只想重跑失败的那一条 | `python scripts/gate0.py --only <lane>` | 人工 |
 | 一次改动只重跑受影响的那些 | `python scripts/gate0.py --affected <rev>`（见 §2 ⑭；<rev> 亦可为 `A..B`；**只内联 pytest 子集**） | 人工 |
 
@@ -241,6 +242,59 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   未映射路径 ⇒ **fail-closed 退回全量**；**改动面为空 ⇒ 同样 fail-closed（不收敛成 0 条）**；
   同时给了 `--since` 与 `--affected` ⇒ **一律以 `--affected` 的范围为准**（并先印说明）；
   不得替代推送前全量 Gate-0，也不得替代集成前完整门禁（§4）。
+
+---
+
+### ⑮ Live Gate — 真实模型 + 生产工具的一次性工作区证据（`#307`，T2）
+
+- **命令**：`.venv/Scripts/python.exe scripts/live_gate.py run [--scenario <id>] [--inject-failure attempt:<n>] [--skip <理由>]`
+  复核：`… live_gate.py validate docs/live_gate/<目录>/evidence.json`；只探能力面：`… live_gate.py capabilities`。
+- **判据是四态，不是两态**（`decide_verdict` 是纯函数，PASS 只有一条路径）：
+
+  | 判定 | 何时 | CLI 退出码 |
+  | --- | --- | --- |
+  | `PASS` | **3/3 真实尝试全过**，且无注入、无替身 | 0（**只有它**） |
+  | `FAIL` | 任一次不过 / 尝试数不足 / 有注入或替身（含**非内置场景**）/ 凭证扫描命中 / 工作区没被真删掉 | 1 |
+  | `BLOCKED` | 缺凭证、端点全不可用、第 1 次尝试的 prepare 就不成立（含 prepare 自己抛异常）—— **不发 run** | 1 |
+  | `SKIPPED` | 操作者显式 `--skip <理由>`（不得产出 PASS） | 1 |
+
+- **证据落点**：`docs/live_gate/<UTC stamp>-<sha12>-<场景>/evidence.json` + 每次尝试的事件轨迹
+  `attempt-<n>.jsonl`（**入库**：#319 与集成前重车道引用它，所以不能只留在临时目录里）。
+  一次性工作区在系统临时目录（仓库**之外**），跑完销毁并**核实**（`sandbox.delete()` 之后仍存在
+  就清只读位强删，`deleted` 是核实结论而非"调用过删除"）。
+- **实测读数（2026-09-25，树 `HEAD=f8bb91e637d7… / tree=7700e975f7c7`）**：
+
+  | 运行 | 判定 | 读数 |
+  | --- | --- | --- |
+  | 正常 | `PASS` | 3/3 PASS（6.2s / 13.5s / 20.4s），每次 6 条断言全绿：`write`/`bash`/`git_status` 真调用、`notes.txt` 内容比对一致、无悬空 `tool/call`。`validate` **17 条 0 FAIL** |
+  | `--inject-failure attempt:2` | `FAIL` | 第 2 次受控失败、**第 1/3 次照跑**（R2：失败样本全留），原因写明"注入运行不得计入 Live Gate"。`validate` **14 条 0 FAIL** |
+  | 清空 `MODEL_API_KEY` / `FALLBACK_MODEL_API_KEY` | `BLOCKED` | **零请求、零尝试、无轨迹**，前置清单点名缺哪个 key。`validate` **5 条 0 FAIL** |
+
+  三次读数的 `sha`/`tree` 都指 `f8bb91e`（`evidence.json.sha` 与 `worktree.tracked_matches_head` 同源），
+  即"跑过门禁的树 = 证据指向的树"。
+
+- ⚠ **与 Gate-0 的次序（实测踩过）**：证据是**未跟踪的 `*.json`**，而 `docs/gate/` 之外任何未跟踪的
+  `.json` 都是 Gate-0 `worktree_divergence()` 的 `risky`（`LANE_INPUT_SUFFIXES` 含 `.json`）⇒
+  **Live Gate 跑完但证据未提交时，Gate-0 会拒绝落盘读数**（拒绝是对的：那份读数会指到一棵被
+  "未跟踪的车道输入"影响的树）。正确次序：跑 Live Gate → `git add docs/live_gate/…` 提交 → 再跑 Gate-0。
+  （Live Gate 自己的 `worktree_proof()` **排除**自己的输出目录，所以"证据已在盘上"不会让本次运行自证不干净。）
+- **落盘边界**：轨迹与 attempt 文本**落盘前**过两层处理 —— ① 凭证扫描（进程内 `SecretStr` 精确值 +
+  形状层；命中就**不落盘**并判 FAIL）② 宿主绝对路径替成 `<workspace>`（`attempts[].redactions` 记形状）。
+  ⚠ 轨迹是 JSONL，`cwd` 里的反斜杠是**转义形态**（`C:\\Users\\…`），逐字比对替换不到——两种形态都要替换，
+  且候选**跨根按长度倒序**替换（否则短根先吃掉前缀，落盘成 `<workspace>\workspace`）。这两条都是实测踩出来的。
+- **行尾说明（含一处刻意不改的边界，审查登记项）**：证据 JSONL 入库后，在 `core.autocrlf=true` 的
+  clone 上检出行尾是 CRLF，但复核用的 `read_text()` 走 Python 通用换行（CRLF→LF）⇒ `events_sha256`
+  比对**跨 clone 稳定**。⚠ 但**逐字节**审计（`sha256sum attempt-1.jsonl`、跨 clone 比工作树）在 CRLF
+  clone 上**对不上**记录值 —— 那是 `AGENTS.md` §13.1(b) 的测量陷阱，不是篡改。脚本化审计请用
+  `validate`（它按 LF 口径重算）；必须比字节时先剥 CR（`diff --strip-trailing-cr` / `tr -d '\r'`）。
+  **处置：不加 `docs/live_gate/** text eol=lf`** —— 仓库行尾策略刻意保持"只钉 `*.sh` / `*.ps1` / git hook"
+  （§3；历史上 `.gitattributes` 的扩大改动本身被判过范围越界），而复核链路已经跨行尾稳定，钉它只是
+  让"裸字节审计"这一步也成立，收益小于改公共配置的成本。若将来有人按裸 `sha256sum` 对账并对不上，
+  以本条为据（**登记项**，非新增欠账）。
+- **边界**：① 需要真实 Provider 凭证与网络 ⇒ **不是**每次推送都能跑的车道，属**集成前 / 票面验收**的重车道；
+  ② 不得用替身或 Fake 结果充当 Live Gate 读数（`#305` 明文）——机制用例的替身只落 `tmp_path`、只测判定语义；
+  ③ 它**不替代**集成前完整门禁（§4）：本车道回答"真模型 + 生产工具这条链真的通"，不回答 lint / 类型 / 前端 / e2e；
+  ④ 后续场景（#319 的五类）只需 `register_scenario` 注册，runner 与 validator 直接复用。
 
 ---
 

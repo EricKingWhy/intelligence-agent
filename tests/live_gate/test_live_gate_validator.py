@@ -14,7 +14,7 @@ from pathlib import Path
 from agent_harness.session import JsonlSessionStore, Session
 from evaluation.live_gate import repo, validator
 from evaluation.live_gate.schema import GATE_ATTEMPTS, SCHEMA_VERSION, Verdict
-from evaluation.live_gate.validator import FAIL, PASS, validate_evidence
+from evaluation.live_gate.validator import FAIL, PASS, UNAVAILABLE, validate_evidence
 from tests.live_gate._evidence_factory import (
     RUN_ID,
     attempt_record,
@@ -199,3 +199,87 @@ def test_validator_does_not_import_the_runner() -> None:
     """"独立复核"的机械底线：复核不依赖产生证据的那份实现（判据重复是**有意**的）。"""
     assert "runner" not in dir(validator)
     assert FAIL != PASS
+
+
+def test_pass_attempt_must_record_the_anti_tamper_fields(tmp_path: Path) -> None:
+    """P1：「记了才比」是最容易被利用的假判据 —— 清空字段就换来一个"一致"。
+
+    三个字段各测一遍：清空之后必须 FAIL，且**不能**出现任何"一致"的结论。
+    """
+    base = _attempts_with_traces(tmp_path)
+    recorded = {
+        "events_ref": base[0].events_ref,
+        "events_sha256": base[0].events_sha256,
+        "event_count": base[0].event_count,
+        "tool_calls": tuple(base[0].tool_calls),
+    }
+    for missing_field in ("events_sha256", "event_count", "tool_calls"):
+        kwargs = {key: value for key, value in recorded.items() if key != missing_field}
+        records = list(base)
+        records[0] = attempt_record(1, **kwargs)
+        report = _validate(tmp_path, make_evidence(attempts=records))
+        field = "tool_calls" if missing_field == "tool_calls" else "events"
+        check = next(item for item in report.checks if item.name == f"attempt[1].{field}")
+        assert check.status == FAIL, f"{missing_field} 为空却未判 FAIL：{check.detail}"
+        assert missing_field in check.detail, check.detail
+        assert "一致" not in check.detail, f"{missing_field} 没比对却说了一致：{check.detail}"
+
+
+def test_non_pass_attempt_without_recorded_fields_is_unavailable(tmp_path: Path) -> None:
+    """失败样本的记录缺字段 ⇒ 如实记 UNAVAILABLE（"没得比"与"比不过"必须分开）。"""
+    ref, _, _, _ = _trace(tmp_path, 1)
+    records = [attempt_record(1, status=Verdict.FAIL, error="脚本化失败", events_ref=ref)]
+    report = _validate(tmp_path, make_evidence(attempts=records, verdict=Verdict.FAIL))
+    statuses = {check.name: check.status for check in report.checks}
+    assert statuses["attempt[1].events"] == UNAVAILABLE
+    assert statuses["attempt[1].event_count"] == UNAVAILABLE
+    assert statuses["attempt[1].tool_calls"] == UNAVAILABLE
+    assert report.ok is True, _failures(report)
+    assert "未比对" in next(
+        check.detail for check in report.checks if check.name == "attempt[1].events"
+    )
+
+
+def test_pass_attempt_with_a_failed_assertion_is_caught(tmp_path: Path) -> None:
+    """判定与场景自报的判据互相矛盾 ⇒ 复核必须红（`ok=True` 而断言是 false 的形状）。"""
+    records = _attempts_with_traces(tmp_path)
+    records[0].assertions[0].ok = False
+    report = _validate(tmp_path, make_evidence(attempts=records))
+    assert "attempt[1].assertions" in " ".join(_failures(report))
+
+
+def test_unparseable_trace_fails_for_pass_but_not_for_fail(tmp_path: Path) -> None:
+    """轨迹不是本仓 JSONL：PASS 尝试 ⇒ FAIL（声称跑过却不可复核）；失败样本 ⇒ UNAVAILABLE。"""
+    text = "这不是 JSONL\n"
+    (tmp_path / "attempt-1.jsonl").write_text(text, encoding="utf-8", newline="\n")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    lines = text.count("\n")
+
+    passing = make_evidence(attempts=[
+        attempt_record(1, events_ref="attempt-1.jsonl", events_sha256=digest, event_count=lines,
+                       tool_calls=("write",)),
+        *[attempt_record(index, events_ref="nowhere.jsonl") for index in range(2, GATE_ATTEMPTS + 1)],
+    ])
+    report = _validate(tmp_path, passing)
+    assert next(
+        check for check in report.checks if check.name == "attempt[1].events_parse"
+    ).status == FAIL
+
+    failing = make_evidence(
+        attempts=[attempt_record(1, status=Verdict.FAIL, error="崩了", events_ref="attempt-1.jsonl",
+                                 events_sha256=digest, event_count=lines)],
+        verdict=Verdict.FAIL,
+    )
+    assert next(
+        check for check in _validate(tmp_path, failing).checks
+        if check.name == "attempt[1].events_parse"
+    ).status == UNAVAILABLE
+
+
+def test_undestroyed_workspace_is_caught(tmp_path: Path) -> None:
+    """AC 的机械判据：记着"建了工作区"却没说"删掉了" ⇒ 复核红（一次性的东西不能留下来）。"""
+    evidence = make_evidence(attempts=[])
+    broken = evidence.model_copy(deep=True)
+    broken.sandbox.deleted = False
+    report = _validate(tmp_path, broken)
+    assert "sandbox_deleted" in " ".join(_failures(report))

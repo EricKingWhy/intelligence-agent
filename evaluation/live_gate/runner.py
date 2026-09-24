@@ -5,12 +5,22 @@
 | 情形 | 判定 | 为什么不是别的 |
 | --- | --- | --- |
 | `--skip <reason>` | `SKIPPED` | 操作者显式跳过；**不得**产出 PASS |
-| 缺凭证 / 端点全不可用 / **第 1 次尝试**的 prepare 就不成立 | `BLOCKED` | "没跑"与"跑了没通过"必须分开归因；BLOCKED 时**一个模型请求都不发** |
-| 3 次全过 | `PASS` | 唯一能产出 PASS 的路径 |
+| 缺凭证 / 端点全不可用 / **第 1 次尝试**的 prepare 就不成立 | `BLOCKED` | "没跑"与"跑了没通过"必须分开归因 |
+| 3 次全过（且无替身缝） | `PASS` | 唯一能产出 PASS 的路径 |
 | 任一次不过 / 尝试数不足 | `FAIL` | 失败尝试**全部保留**（R2：第 1、2 次失败后仍跑完计划） |
-| 注入了受控失败或替身 | `FAIL`（上限） | 假模型 / 假工具不得计入 Live Gate（`#305` 明文） |
+| 注入了受控失败或存在替身缝 | `FAIL`（上限） | 假模型 / 假工具 / 替身场景不得计入 Live Gate（`#305` 明文） |
 | 凭证扫描命中（轨迹 / 错误 / 证据字段） | `FAIL` + **立即停** | 安全边界优先于"跑完计划"；命中时轨迹**不落盘** |
 | 工作区没被真删掉 / 开发仓库被改动 | `FAIL` | 这两条是"证据本身不可信"的形状 |
+
+**`BLOCKED` 少发请求 ≠ 一个请求都不发**（措辞要准）：凭证不足时确实一个请求都不发
+（`capability.check_capability` 在构造配置链之前就返回）；端点不可用那条路**必然已经发过**
+探测请求（`probe_endpoint`，`max_tokens=1`）—— 说得准确些是"**不发 run、不跑那 3 次尝试**"。
+本票的 R1 关心的是后者（真实调用次数），不要把它读成"网络层零字节"。
+
+**替身缝有两类**（`GateOptions.seams`，出现即把判定上限锁到 `FAIL`）：`capability`（显式传入
+了替身探测函数）与 `scenario`（场景不是随 harness 发布的内置场景）。后者是**机械核实**的
+（`registry.is_builtin`：定义文件必须落在 `evaluation/live_gate/scenarios/` 下）—— 注册表是
+进程级可写单例，只靠"调用方声明"的话，一个替身场景就能写出一份 `PASS / seams={}` 的证据。
 
 ## 为什么工作区在仓库外、证据在仓库内
 
@@ -43,7 +53,12 @@ from typing import Any
 
 from evaluation.live_gate import repo
 from evaluation.live_gate.capability import ProviderCapability, check_capability
-from evaluation.live_gate.registry import AttemptOutcome, ScenarioContext, get_scenario
+from evaluation.live_gate.registry import (
+    AttemptOutcome,
+    ScenarioContext,
+    get_scenario,
+    is_builtin,
+)
 from evaluation.live_gate.schema import (
     GATE_ATTEMPTS,
     AttemptRecord,
@@ -64,7 +79,7 @@ from evaluation.live_gate.secrets import (
     mask_text,
     scan_payload,
 )
-from evaluation.live_gate.workspace import create_workspace
+from evaluation.live_gate.workspace import DEFAULT_BACKEND, create_workspace
 
 #: 单次尝试的墙钟上限（秒）。模型调用自身有 `REQUEST_TIMEOUT`（180s），但 20 步上限叠起来
 #: 仍可能把一次 Gate 拖成小时级 —— 那等于没有闸门。到点判 FAIL（不是"跳过"）。
@@ -73,8 +88,9 @@ ATTEMPT_TIMEOUT = 900.0
 #: 受控失败注入的前缀（**验证专用**）：`attempt:<n>` 让第 n 次尝试在不调用场景的情况下失败。
 INJECT_ATTEMPT_PREFIX = "attempt:"
 
-#: 证据里如实登记的替身清单（键 = 面，值 = `injected`）。出现即判 FAIL 上限。
+#: 证据里如实登记的替身清单（键 = 面，值 = `injected` / `not_builtin`）。出现即判 FAIL 上限。
 SEAM_CAPABILITY = "capability"
+SEAM_SCENARIO = "scenario"
 
 #: 落盘前把一次性工作区的宿主绝对路径替成 `<workspace>`（`workspace.py` 的对外承诺：
 #: 入库证据不带本机用户目录）。事实登记在 `AttemptRecord.redactions` 上。
@@ -115,7 +131,14 @@ def _relative_to_repo(path: Path) -> str:
 
 @dataclass
 class GateOptions:
-    """一次 invocation 的输入。`capability_fn` 是**替身缝**（测试用）：注入即不得 PASS。"""
+    """一次 invocation 的输入。
+
+    **没有尝试数开关**：次数写死 `GATE_ATTEMPTS`（3）。这里曾经有个 `attempts: int` 字段
+    —— `GateOptions(attempts=0)` 能一路走到 `decide_verdict` 并产出 `PASS`（"3/3 不可放宽"
+    是 `#307` 的硬边界，一个构造参数就绕过去了）。放松的入口不留（`__init__.py` 同款措辞）。
+
+    `capability_fn` 是**替身缝**（测试用）：注入即不得 PASS（见 `seams`）。
+    """
 
     scenario_id: str
     out_dir: Path = field(default_factory=lambda: repo.REPO_ROOT / repo.OUTPUT_DIR)
@@ -125,11 +148,20 @@ class GateOptions:
     injected_failure: str = ""
     capability_fn: Callable[[Any], Awaitable[ProviderCapability]] = check_capability
     write: bool = True
-    attempts: int = GATE_ATTEMPTS
 
     @property
     def seams(self) -> dict[str, str]:
-        return {} if self.capability_fn is check_capability else {SEAM_CAPABILITY: "injected"}
+        """本次运行的替身缝：出现即把判定上限锁到 `FAIL`（判定表见模块 docstring）。
+
+        两类都**核实**、都不靠调用方声明：`capability` 比的是函数对象（`is`），`scenario`
+        问的是注册表（定义文件是否真的在 `scenarios/` 下 —— 注册表可写，声明不足为凭）。
+        """
+        seams: dict[str, str] = {}
+        if self.capability_fn is not check_capability:
+            seams[SEAM_CAPABILITY] = "injected"
+        if not is_builtin(self.scenario_id):
+            seams[SEAM_SCENARIO] = "not_builtin"
+        return seams
 
 
 @dataclass
@@ -244,13 +276,16 @@ def _mask_outcome(
 
 def _copy_events(
     *, session_root: Path, session_id: str, run_dir: Path, index: int,
-    values: tuple[str, ...], roots: tuple[str, ...] = (),
+    values: tuple[str, ...], roots: tuple[str, ...] = (), persist: bool = True,
 ) -> tuple[str, str, int, list[SecretFinding], bool]:
     """把一次尝试的事件轨迹写进证据目录（脱敏 + 路径替换后再落盘）。
 
     返回 `(events_ref, sha256, 行数, findings, 是否替换过宿主路径)`。**扫出凭证就不落地**：
     轨迹里出现真凭证时，唯一正确的动作是"不把它写进仓库 + 把这次 Gate 判 FAIL"，而不是
     "掩掉再存"（掩码规则一旦漏一种形状，泄漏就已经发生了）。
+
+    `persist=False`（`--no-write`）时**一个字节都不写**（连目录都不建）：但**扫描照做** ——
+    "只看结论"是少落盘，不是少一层安全边界。
     """
     source = session_root / session_id / "events.jsonl"
     if not source.exists():
@@ -259,6 +294,8 @@ def _copy_events(
     _, findings = mask_text(text, values=values, where=f"attempt[{index}].events")
     if findings:
         return "", "", text.count("\n"), findings, False
+    if not persist:
+        return "", "", text.count("\n"), [], False
     text, replaced = _redact_host_paths(text, roots=roots)
     target = run_dir / f"attempt-{index}.jsonl"
     target.write_text(text, encoding="utf-8", newline="")
@@ -299,7 +336,18 @@ async def _run_attempt(
             attempt_index=index,
             injected_failure=options.injected_failure,
         )
-        problems = await scenario.prepare(ctx)
+        try:
+            problems = await scenario.prepare(ctx)
+        except Exception as crash:  # noqa: BLE001 - prepare 抛异常**不是**"前置不成立"这一种可能
+            # 场景的 prepare 自己崩了：早先这里没兜底 ⇒ 异常穿透 `run_gate`，整次 Gate 直接炸掉
+            # （连一份"没跑成"的证据都不留）。归因文案必须说清"这也可能是场景缺陷"：否则一个
+            # 有 bug 的场景会被读成"环境不具备"，把实现问题洗成 BLOCKED。
+            message, _ = mask_text(
+                f"{type(crash).__name__}: {crash}",
+                values=values, where=f"attempt[{index}].prepare",
+            )
+            message, _ = _redact_host_paths(message, roots=workspace_roots)
+            problems = [f"prepare 抛异常：{message}（也可能是场景实现缺陷）"]
         if not problems:
             try:
                 outcome = await asyncio.wait_for(scenario.run(ctx), timeout=ATTEMPT_TIMEOUT)
@@ -321,6 +369,7 @@ async def _run_attempt(
         events_ref, events_sha, line_count, event_findings, trace_replaced = _copy_events(
             session_root=workspace.root / "sessions", session_id=session_id,
             run_dir=run_dir, index=index, values=values, roots=workspace_roots,
+            persist=options.write,
         )
         findings.extend(event_findings)
         if path_replaced or trace_replaced:
@@ -398,9 +447,12 @@ async def run_gate(options: GateOptions) -> GateResult:
 
     if not options.skip_reason and capability.ready:
         run_dir = options.out_dir / f"{_stamp()}-{before['head_sha'][:12]}-{options.scenario_id}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        if options.write:
+            # `--no-write` 是"不落盘"的承诺，不是"少落一个文件"：目录不建、轨迹不复制
+            # （早先目录与轨迹无条件落盘，于是 `--no-write` 仍然在 out_dir 留了一整套轨迹）。
+            run_dir.mkdir(parents=True, exist_ok=True)
         statuses: list[Verdict] = []
-        for index in range(1, options.attempts + 1):
+        for index in range(1, GATE_ATTEMPTS + 1):
             if stopped_early:
                 break
             if options.injected_failure == f"{INJECT_ATTEMPT_PREFIX}{index}":
@@ -417,10 +469,13 @@ async def run_gate(options: GateOptions) -> GateResult:
             )
             findings.extend(run.findings)
             sandboxes.append(run.sandbox)
-            if run.problems and index == 1 and not attempts:
-                # 第 1 次尝试连 prepare 都没过 ⇒ 外部条件不具备，判 BLOCKED（不是 FAIL）
+            if run.problems and index == 1:
+                # 第 1 次尝试连 prepare 都没过 ⇒ 外部条件不具备，判 BLOCKED（不是 FAIL）。
+                # 取证卫生一并写进前置清单：BLOCKED 不产出 attempt 记录，早先这里直接 break，
+                # teardown 失败那行字连同被丢弃的 record 一起消失（"没跑成"的运行看起来无痕）。
                 verdict = Verdict.BLOCKED
-                missing, reason = list(run.problems), "；".join(run.problems)
+                missing = [*run.problems, *run.hygiene]
+                reason = "；".join(missing)
                 stopped_early = True
                 break
             attempts.append(run.record)
@@ -433,7 +488,7 @@ async def run_gate(options: GateOptions) -> GateResult:
         if not stopped_early:
             verdict = decide_verdict(
                 attempt_statuses=statuses,
-                attempts_planned=options.attempts,
+                attempts_planned=GATE_ATTEMPTS,
                 injected_failure=options.injected_failure,
                 injected_seams=tuple(options.seams),
             )
@@ -476,7 +531,7 @@ async def run_gate(options: GateOptions) -> GateResult:
             findings=[],
         ),
         runner=RunnerRecord(
-            tool_versions=_tool_versions(), argv=list(sys.argv), attempts_planned=options.attempts,
+            tool_versions=_tool_versions(), argv=list(sys.argv), attempts_planned=GATE_ATTEMPTS,
         ),
         scope={"does_not_cover": list(SCOPE_DOES_NOT_COVER)},
     )
@@ -516,7 +571,7 @@ def _sandbox_summary(sandboxes: list[SandboxRecord]) -> SandboxRecord:
     """证据级的 sandbox 块：配置面 + 全部一次性身份 + 是否都删干净（逐次身份在 attempt 上）。"""
     if not sandboxes:
         return SandboxRecord(
-            backend="local", disposable=True, created=False, deleted=False,
+            backend=DEFAULT_BACKEND, disposable=True, created=False, deleted=False,
             env_allowlisted=True, workspace_ids=[],
         )
     return SandboxRecord(

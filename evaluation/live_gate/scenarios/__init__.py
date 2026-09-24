@@ -10,11 +10,16 @@ BUILTIN_SCENARIOS = (_SMOKE,)
 
 
 def register_builtin_scenarios() -> tuple[str, ...]:
-    """注册内置场景（幂等：已注册的跳过）。返回本次可用的场景 id。"""
+    """注册内置场景（幂等：已注册的跳过）。返回本次可用的场景 id。
+
+    `builtin=True` 不是"声明"而是"申请核实"（`registry._is_shipped`：定义文件必须真的在
+    本目录下）——只有核实过的场景才允许产出 `PASS`，否则替身场景能往 `docs/live_gate/`
+    写出一份看起来完全正常的通过证据。
+    """
     from evaluation.live_gate.registry import list_scenarios
 
     existing = {scenario.id for scenario in list_scenarios()}
     for scenario in BUILTIN_SCENARIOS:
         if scenario.id not in existing:
-            register_scenario(scenario)
+            register_scenario(scenario, builtin=True)
     return tuple(scenario.id for scenario in BUILTIN_SCENARIOS)

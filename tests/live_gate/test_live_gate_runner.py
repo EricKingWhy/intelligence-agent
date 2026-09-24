@@ -16,6 +16,7 @@ import pytest
 from pydantic import BaseModel, SecretStr
 
 from agent_harness.session import JsonlSessionStore, Session
+from evaluation.live_gate import registry as scenario_registry
 from evaluation.live_gate.capability import READY, ProviderCapability
 from evaluation.live_gate.registry import (
     AttemptOutcome,
@@ -23,8 +24,18 @@ from evaluation.live_gate.registry import (
     register_scenario,
     unregister_scenario,
 )
-from evaluation.live_gate.runner import GateOptions, run_gate
-from evaluation.live_gate.schema import AssertionResult, ProviderRecord, Verdict
+from evaluation.live_gate.runner import (
+    SEAM_CAPABILITY,
+    SEAM_SCENARIO,
+    GateOptions,
+    run_gate,
+)
+from evaluation.live_gate.schema import (
+    GATE_ATTEMPTS,
+    AssertionResult,
+    ProviderRecord,
+    Verdict,
+)
 from evaluation.live_gate.validator import validate_evidence
 from tests import live_model_guard
 from tests.live_gate._evidence_factory import RUN_ID, write_session_trace
@@ -63,17 +74,20 @@ class _ScriptedScenario:
 
     def __init__(
         self, *, prepare_failures: tuple[int, ...] = (), run_failures: tuple[int, ...] = (),
-        trace: bool = True, trace_secret: str = "",
+        trace: bool = True, trace_secret: str = "", prepare_raises: tuple[int, ...] = (),
     ) -> None:
         self.prepare_failures = prepare_failures
         self.run_failures = run_failures
         self.trace = trace
         self.trace_secret = trace_secret
+        self.prepare_raises = prepare_raises
         self.prepared: list[int] = []
         self.ran: list[int] = []
 
     async def prepare(self, ctx: ScenarioContext) -> list[str]:
         self.prepared.append(ctx.attempt_index)
+        if ctx.attempt_index in self.prepare_raises:
+            raise RuntimeError("场景自己崩了（机制测试）")
         if ctx.attempt_index in self.prepare_failures:
             return [f"前置不成立（attempt {ctx.attempt_index}）"]
         return []
@@ -107,6 +121,18 @@ def scenario():
 
     yield _register
     unregister_scenario(SCENARIO_ID)
+
+
+@pytest.fixture
+def builtin_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把替身场景标成**内置**（仅此一处豁免），用来覆盖"3/3 全过 ⇒ PASS"这条路径。
+
+    生产代码拿不到这个豁免：`register_scenario(builtin=True)` 要求场景类的定义文件**真的**
+    落在 `evaluation/live_gate/scenarios/` 下（`registry._is_shipped`，机制用例的替身定义在
+    `tests/` 里 ⇒ 过不了）。要覆盖 PASS 分支就只能在测试里显式改这个集合；而"替身场景默认
+    判 FAIL + 记 seam"由 `test_stub_scenario_is_a_seam_and_forbids_pass` 单独钉住。
+    """
+    monkeypatch.setattr(scenario_registry, "_BUILTIN_IDS", {SCENARIO_ID})
 
 
 def _capability(*, verdict: str = READY, reason: str = "stub") -> ProviderCapability:
@@ -181,7 +207,7 @@ async def test_unknown_scenario_fails_fast_without_writing(tmp_path: Path) -> No
 
 
 async def test_three_passes_produce_pass_and_evidence_under_out_dir(
-    tmp_path: Path, scenario, ready_capability,
+    tmp_path: Path, scenario, ready_capability, builtin_stub,
 ) -> None:
     stub = scenario()
     result = await run_gate(_options(tmp_path))
@@ -221,13 +247,75 @@ async def test_injected_failure_caps_verdict_at_fail_and_keeps_other_attempts(
     assert "注入" in result.evidence.reason
 
 
-async def test_explicit_capability_seam_forbids_pass(tmp_path: Path, scenario) -> None:
+async def test_explicit_capability_seam_forbids_pass(tmp_path: Path, scenario, builtin_stub) -> None:
     """替身缝（显式传入的 `capability_fn`）必须在证据里留痕，且判 FAIL。"""
     scenario()
     result = await run_gate(_options(tmp_path, capability_fn=lambda settings: _await(_capability())))
-    assert result.evidence.seams == {"capability": "injected"}
+    assert result.evidence.seams == {SEAM_CAPABILITY: "injected"}
     assert result.evidence.verdict is Verdict.FAIL
     assert "替身缝" in result.evidence.reason
+
+
+async def test_stub_scenario_is_a_seam_and_forbids_pass(
+    tmp_path: Path, scenario, ready_capability,
+) -> None:
+    """P1：替身场景（定义文件不在 `scenarios/` 下）不得产出 `PASS / seams={}`。
+
+    三次尝试全过、能力面是真的 —— 唯一的问题是"这不是随 harness 发布的场景"，
+    判定必须落到 FAIL 并在证据里写下 `scenario` 这一条缝，否则一份假证据看起来完全正常。
+    """
+    stub = scenario()
+    result = await run_gate(_options(tmp_path))
+    assert [attempt.status for attempt in result.evidence.attempts] == [Verdict.PASS] * 3
+    assert result.evidence.seams == {SEAM_SCENARIO: "not_builtin"}
+    assert result.evidence.verdict is Verdict.FAIL
+    assert "替身缝" in result.evidence.reason and SEAM_SCENARIO in result.evidence.reason
+    assert stub.ran == [1, 2, 3], "判定变了，但尝试照跑完（不是靠少跑来判 FAIL）"
+
+
+async def test_no_attempt_count_knob_can_shorten_the_gate(
+    tmp_path: Path, scenario, ready_capability, builtin_stub,
+) -> None:
+    """P1：`GateOptions.attempts` 曾经是可写构造参数 ⇒ `attempts=0` 能一路走到 PASS。
+
+    现在次数写死 `GATE_ATTEMPTS`：没有旋钮、证据里的计划数恒为该常量、场景被调用 3 次。
+    """
+    assert "attempts" not in GateOptions.__dataclass_fields__
+    with pytest.raises(TypeError):
+        GateOptions(scenario_id=SCENARIO_ID, out_dir=tmp_path, attempts=1)
+    stub = scenario()
+    result = await run_gate(_options(tmp_path))
+    assert result.evidence.runner.attempts_planned == GATE_ATTEMPTS
+    assert [attempt.index for attempt in result.evidence.attempts] == [1, 2, 3]
+    assert stub.ran == [1, 2, 3]
+
+
+async def test_no_write_leaves_out_dir_untouched(tmp_path: Path, scenario, ready_capability) -> None:
+    """`--no-write` 是"一个字节都不落"：目录都不建（轨迹复制更是不能发生）。
+
+    早先 run_dir 与轨迹是无条件落盘的，于是 `--no-write` 只在最后少写了一行 evidence.json。
+    """
+    stub = scenario()
+    result = await run_gate(_options(tmp_path, write=False))
+    assert result.evidence_path is None
+    assert list(tmp_path.iterdir()) == [], "只看结论的运行不得在证据目录里留任何东西"
+    assert stub.ran == [1, 2, 3]
+    assert result.evidence.attempts[0].events_ref == ""
+    # 扫描照做：解出来的行数仍写进记录（只是没有可复核的轨迹引用）
+    assert result.evidence.attempts[0].event_count > 0
+
+
+async def test_no_write_still_stops_on_a_credential_in_the_trace(
+    tmp_path: Path, scenario, ready_capability,
+) -> None:
+    """`--no-write` 省的是落盘，**不是**安全边界：轨迹里扫出凭证仍要立即停、判 FAIL。"""
+    stub = scenario(trace_secret=SECRET)
+    result = await run_gate(
+        _options(tmp_path, write=False, settings=_settings(model_api_key=SecretStr(SECRET))),
+    )
+    assert stub.ran == [1], "安全边界优先于「跑完计划」"
+    assert "configured_credential_value" in result.evidence.attempts[0].secret_scan_rules
+    assert list(tmp_path.iterdir()) == []
 
 
 async def test_run_failure_keeps_running_the_remaining_attempts(
@@ -253,7 +341,9 @@ async def test_skip_is_skipped_not_pass(tmp_path: Path, scenario) -> None:
     assert result.evidence_path is not None, "跳过也要留档（否则无从审计）"
 
 
-async def test_blocked_capability_sends_no_attempts(tmp_path: Path, scenario, blocked_capability) -> None:
+async def test_blocked_capability_sends_no_attempts(
+    tmp_path: Path, scenario, blocked_capability, builtin_stub,
+) -> None:
     stub = scenario()
     result = await run_gate(_options(tmp_path))
     assert result.evidence.verdict is Verdict.BLOCKED
@@ -273,6 +363,56 @@ async def test_first_attempt_prepare_failure_blocks(tmp_path: Path, scenario, re
     assert result.evidence.verdict is Verdict.BLOCKED
     assert result.evidence.attempts == []
     assert result.evidence.missing_preconditions == ["前置不成立（attempt 1）"]
+    assert stub.ran == []
+
+
+async def test_prepare_crash_is_a_problem_not_a_runner_crash(
+    tmp_path: Path, scenario, ready_capability,
+) -> None:
+    """场景的 `prepare` 抛异常不得让整次 Gate 崩掉（那就连"没跑成"的证据都不留）。
+
+    归因文案必须点出"也可能**是场景自己的缺陷**"：否则一个有 bug 的场景会被读成"环境不具备"，
+    把实现问题洗成 BLOCKED（第 1 次尝试 ⇒ 判 BLOCKED 的口径不变）。
+    """
+    stub = scenario(prepare_raises=(1,))
+    result = await run_gate(_options(tmp_path))
+    assert result.evidence.verdict is Verdict.BLOCKED
+    assert result.evidence.attempts == []
+    assert len(result.evidence.missing_preconditions) == 1
+    problem = result.evidence.missing_preconditions[0]
+    assert "prepare 抛异常" in problem and "RuntimeError" in problem
+    assert "场景实现缺陷" in problem
+    assert stub.ran == []
+    # 证据仍然落盘（"没跑成"也是一条要审计的事实）
+    assert result.evidence_path is not None
+
+
+async def test_blocked_keeps_teardown_hygiene_in_the_precondition_list(
+    tmp_path: Path, scenario, ready_capability, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BLOCKED 不产出 attempt 记录 ⇒ 取证卫生必须写进前置清单，否则它就此消失。
+
+    早先这条路径直接 `break`，teardown 失败那行字随被丢弃的记录一起不见（"没跑成"的运行
+    看起来无痕）。这里只**篡改结论**（真删除照走，不留临时垃圾），判的是"那行字会不会被带出来"。
+    """
+    from evaluation.live_gate.workspace import DisposableWorkspace
+
+    real_teardown = DisposableWorkspace.teardown
+
+    def _fake_teardown(self):
+        record = real_teardown(self)  # 真删干净；只是把"核实结论"改成失败
+        record.deleted = False
+        return record
+
+    monkeypatch.setattr(DisposableWorkspace, "teardown", _fake_teardown)
+    stub = scenario(prepare_failures=(1,))
+    result = await run_gate(_options(tmp_path))
+    assert result.evidence.verdict is Verdict.BLOCKED
+    assert result.evidence.attempts == []
+    joined = "；".join(result.evidence.missing_preconditions)
+    assert "一次性工作区未被删除" in joined
+    assert "一次性工作区未被删除" in result.evidence.reason
+    assert result.evidence.sandbox.deleted is False, "证据级的删除结论也要如实为假"
     assert stub.ran == []
 
 
