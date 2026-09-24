@@ -5059,3 +5059,112 @@ clone 稳定，裸字节审计在 CRLF clone 上对不上记录值属 §13.1(b) 
 3. 登记项（不阻断）：`BLOCKED` 的准确说法是"不发那 3 次 run"；"端点全不可用"那条路上探测请求**已经发过**
    一次 `max_tokens=1` —— 文案已按此纠偏（`capability.py` / `runner.py` / `__init__.py` / `verification.md` §⑮）。
 4. **未关单**（§14.12：等合入证据齐备后由主线处理；本轮按要求不自行关单）。
+
+## T3（`#308`，B 链第三票）：local 轮次预算 `budget.local.max_agent_turns` 契约落地（2026-09-25 · 已推分支、未集成、未关单）
+
+**状态**：✅ 交付、审查、真实证据与门禁闭合；分支 `zcode/T308-local-turn-budget`，出发基点 `08a9bdd`
+（= T2 记录笔；**本分支包含 T2 全部提交**），**冻结树 `bf4ddb7` / tree `401988c7`**。与 `origin/main`
+（`d0e2dcb`）的共同祖先即 `d0e2dcb`。**本轮 `origin/main` 未动、未关单**（§14.12：未合 main 的完成票只在
+issue comment 记录分支与 commit；集成由集成线负责）。
+
+**集成顺序约束（§14.9）**：① 本分支含 T2（`#307`）**全部提交** ⇒ 集成时 **T2 不可跳过**（T3 先合会把 T2 隐式
+带进 main）；② T1（`#306`）的 `ADR-0044` + 六章规格（`02 §5.1` 等）只存在于 `zcode/T306-longrun-budget-contracts`
+⇒ 本票代码注释里那些"机制单点"指针在 T1 落 main 之前是**悬空指针**。结论：三条线落位顺序 = **T1 → T2 → T3**。
+
+**票面**：GitHub `#308`（父票 `#305`；`blocked_by: #306, #307` 两票均已完成）。票面明写的边界：**不实现
+`run/paused`**；到达 local fuse 时保持 T1 冻结的**过渡行为**（`run/failed(reason=max_steps_exceeded)`），并为
+T4 接入暂停**预留单一判定结果**；**不得出现第二套 loop**。DoD 四条：旧 10 默认不再限制任何正式入口 / alias
+兼容但仓内主动调用全部迁移 / 真实长任务证据绑定精确 SHA+tree / 不实现 T4 之后的能力、不删旧字段。
+
+**交付序列**（4 笔 + 台账笔 + 本记录笔，父链逐笔显式指定）：
+
+| # | commit | 规模 | 内容 |
+| --- | --- | --- | --- |
+| 1 | `b3d99f4` | 69 文件 / +1837 −194 | `agent/budget.py`（`DEFAULT_MAX_AGENT_TURNS=500` + `resolve_local_fuse` + `BudgetRejection` 家族）/ `Settings.local_max_agent_turns` / `AgentRuntime(max_agent_turns=)` 唯一判定点 / `AgentSpec`·`AgentFactory`·`assembly`·`cli` 接线 / `session/service.py` 四入口 / `web/app.py` 请求模型 + 422 + 只读投影 `X-Local-Max-Agent-Turns`·`X-Local-Fuse-Source` / `web/domain_errors.py` / 前端六处 `max_steps: 10` 迁移（`web/src`）/ 新 Live Gate 场景 `long-task-past-legacy-turn-limit` + 确定性用例 |
+| 2 | `67ecad6` | 14 文件 / +380 −124 | R1 处置（判定与分支解耦 / 档位 ceiling 接线 / P3 四条）+ 场景产物键名 `token=` → `next=` |
+| 3 | `0164e1d` | 7 文件 / +197 −37 | 修后重审处置（判定先于落盘 P2-1 / 档位轴也可判 P2-2 / P3 五条） |
+| 4 | `ce23f19` | 5 文件 / +783 | 长任务真实 3/3 PASS 证据（`0164e1d` / tree `a42dcf16`）+ 首版 FAIL 证据（`b3d99f4`，`token=` 触发扫描器） |
+| — | `bf4ddb7` | 4 文件 | 台账四条审查行 `303`–`306`（字段范围首尾相接：`08a9bdd..b3d99f4` / `b3d99f4..67ecad6` / `67ecad6..0164e1d` / `0164e1d..ce23f19`） |
+| — | 本记录笔 | 4 文件 | 本段 + `PHASE_STATUS` 索引 + 归档明细 + Gate-0 读数 `docs/gate/bf4ddb799b5c34f37435f868e904a2b6414131f8.json`（+ 台账行 `305` 的一处悬空指针更正） |
+
+**机制要点**（完整叙述单点在 `ADR-0044` 与 `02 §5.1`，两者都在 T1 分支；本段只记操作性事实）：
+
+- **四来源优先级、下层只能收窄**：Deployment ceiling（`Settings.local_max_agent_turns`）> AgentProfile 声明 >
+  Session/Run request override > `max_steps` alias；越权 / 冲突 / 非法值**在解析点**抛 `BudgetRejection` 子类
+  （调用方不做二次判断），被拒 ⇒ **不建 workspace、不落 JSONL、不构造模型**。
+- **alias 规则是全局的**（不逐端点）：只发 `max_steps` ⇒ 根 local fuse + `source=max_steps_alias` + deprecation
+  信号；两者同传**且相等** ⇒ 接受；**不等 ⇒ 422**。alias 删除属 `#320`；`ResumeRequest` 也必须吃 alias 规则
+  （`{"max_steps": 8, "budget": {…9}}` 在恢复端点必须 422，R1 前有用例钉住）。
+- **判定与运行态解耦**（R1 的 P1）：queued / steer 分支**也**跑 `resolve_local_fuse`，生效值丢弃 ——
+  同一份请求体的状态码不再取决于"此刻有没有 run"。
+- **单一判定结果留给 T4**：`steps >= max_agent_turns` 落 `run/failed(reason=max_steps_exceeded)` 是票面钦定的
+  **过渡行为**；本票因此**没有**第二套 loop、也没有 `run/paused`。
+- **档位声明与运行时逐字同源**：`profiles.declared_turn_ceiling` 用 `is not None` 回落（空串响亮 `KeyError`，
+  不静默当 `main`），与 `build_runtime` 取档位的规则一致 —— 否则会出现"判的是 main、跑的是别的档位"。
+
+**两轴独立审查（R1）与修后重审（R2）**：
+
+- **R1**（Architecture + Standards 各一独立只读子代理，审冻结代码笔 `b3d99f4`）：**P1 一条、两轴共识** ——
+  `send_message` 的 queued / steer 分支**跳过** budget 判定 ⇒ `{max_steps:8, budget:{…9}}` 在 idle 会话 422、
+  在活跃 run 上 200 queued。P2 一条：根路径的**档位声明**被静默忽略（create / resume / send_message / CLI
+  四路都只拿 Deployment 解析）。P3 四条：`le=200` 与策略无关 / 投影未走 `as_projection()` / `domain_errors`
+  未登记三档 422 命中端点 / 八处注释复述机制。处置笔 `67ecad6`：判定上移到分支**之前** + 新增
+  `declared_turn_ceiling` 四路接线 + P3 逐条处置。
+- **R2**（两轴各一独立只读子代理，读范围 `b3d99f4..67ecad6`，含限定发现）：**0×P0 / 0×P1**，**2×P2 为两轴
+  独立共识** —— ① 判定块在 `cancel_queue` **之后**，而它会写 `queue/cancelled` ⇒ 被拒的带 `queue_id` 请求先毁掉
+  用户的旧排队项（"旧项被取消 + 新内容重新投递"只剩前半句）；② web 层对非启动分支清空 amend ⇒ 判定看不到
+  请求声明的 `agent_profile`，P1 病灶在档位轴复发。P3 五条（stale 注释 / `launch=False` 归类错 /
+  `declared_turn_ceiling` 用 truthiness / 零副作用断言过弱 / 档位声明测试无鉴别力）。处置笔 `0164e1d`：
+  判定**先于任何落盘**、只保留 `agent_profile` 供判定（消费语义不变）、P3 全数处置。
+- **红证**（处置前在 `67ecad6` 上实跑）：`test_rejected_queue_edit_keeps_the_old_queued_item` 红于
+  `Left contains one more item: 'queue/cancelled'`；`test_in_flight_message_keeps_only_the_profile_for_judgement`
+  与 `test_steer_message_keeps_only_the_profile_for_judgement` 红于 `agent_profile: None != 'coding'`；处置后全绿。
+- **不再开第三轮审查**（§8.3 第 4 条停止条件未触发 + §8.8.5 末条）：`0164e1d` 的**代码面没有独立审查轮覆盖**，
+  此事实与"未复审范围"如实登记在本段与台账行 `305`，供集成线/用户复核时知情。
+
+**真实 Live Gate（`#308` 的核心验收）**：场景 `long-task-past-legacy-turn-limit` —— 链脚本一次调用最多推进一格
+（新 token 只存在于上一条命令的 stdout ⇒ **结构性**需要 12 > 旧上限 10 次模型决策）。真实模型
+`mimo/mimo-v2.6-flash` @ `api.xiaomimimo.com` + 生产工具：**3/3 PASS**（33.8s / 45.1s / 39.8s），每次
+`run_status=completed`、`steps=16`、`chain-steps.txt=12`、`model/completed=16`、16 次 tool_calls（bash 13 +
+write 1 + read 2）、10 条断言全绿、无悬空 tool call、**轨迹里没有 `max_steps_exceeded`**、生效 fuse = 500
+source=deployment。`scripts/live_gate.py validate` 独立复核 **24 条检查 0 FAIL**。首版 FAIL 证据（树 `b3d99f4`：
+十条断言全绿却被 `live_gate/secrets.py` 的赋值形态扫描判 FAIL —— 产物键名 `token=` 后跟中文、中间无空白，
+例子连汉字被吞成 ≥16 字符"值"）**保留入库**作原始依据，**不作本票验收证据**；安全边界不为让路，改的是场景
+自身的键名。证据目录：`docs/live_gate/20260924T224918-0164e1d576d5-long-task-past-legacy-turn-limit/`。
+
+**门禁读数（冻结树 `bf4ddb7` / tree `401988c7`，全部可复跑）**：
+
+- 后端全量 pytest（`PYTHONPATH=` + `.venv/Scripts/python.exe -m pytest tests/ -q --no-header -p no:cacheprovider`）：
+  **3935 passed, 2 skipped, 48 deselected, 16 warnings in 502.41s (0:08:22)**，`PYTEST_EXIT=0`；
+  junit：`tests=3937 / failures=0 / errors=0 / skipped=2`（junit 与日志在仓库外临时目录）。
+- Gate-0 裸全量：**6/6 PASS**，墙钟 **13.7s**（diff-check 0.03 / ruff 0.10 / oxlint 0.34 / tsc 8.65 / guards 3.49 /
+  coverage 1.06），`result=PASS` / `passed=6` / `failed=[]` / `worktree.tracked_matches_head=true` /
+  `untracked=['.zcodeignore']`（工具版本 git 2.52.0 / Python 3.13.5 / ruff 0.16.3 / node v22.21.1 / oxlint 1.81.0 /
+  tsc 6.0.3）⇒ `docs/gate/bf4ddb799b5c34f37435f868e904a2b6414131f8.json`。⚠ 车道 ① 的**改动面**是工作树
+  （`--since` 未给）⇒ 全量 whitespace 判据另用 `git diff --check 08a9bdd..HEAD` 复跑 = rc 0（无 trailing
+  whitespace / 无冲突标记）。
+- 前端重车道（Gate-0 只覆盖 oxlint + tsc）：`vitest run` **67 文件 / 1068 passed**（rc=0，25.69s）；
+  `tsc -b` rc=0；`vite build` rc=0（1.47s，产物 `web/dist` 被 gitignore，工作树仍干净）。
+- `ruff check src/ tests/ evaluation/`：All checks passed（Gate-0 lane ②，rc=0）。
+- 覆盖闸门：exit 0（本记录笔之后复跑，末行 `✅ 台账覆盖闸门通过：…每条 commit 均有归属（审查行 / 白名单 / 台账记账）。`）。
+- §8.1.3 判据 ①（`git diff --name-status --no-renames bf4ddb7 HEAD`）= 本记录笔（4 文件全在 `docs/**`）；
+  ②（`git status --short`）= 仅 `?? .zcodeignore`（前端构建产物 `web/dist/**` 被 gitignore 覆盖）。
+
+**残余与下一步**：
+
+1. **集成**（集成线负责）：顺序 = **T1 → T2 → T3**（理由见上方"集成顺序约束"；三处文档同位置追加按 §14.7 并集解析）。
+2. **前向失配（到期提醒，承接 T1 残余①）**：`docs/adr/0033-run-failure-attribution-surface.md` 与
+   `docs/BACKEND_CONTRACT_STREAMING_UI.md` 仍把 `max_steps_exceeded` 写成撞保险丝时的失败归因面 —— 本票按
+   票面**保持过渡行为**、**没有动**这两处文本；**`#312` 落 `run/paused` 时必须同步**（不同步会让前端照相反合同
+   实现）。归属未定，T1 已在 `ADR-0044 §4.1` 登记。
+3. **待用户裁决的开放决策（本票实现的形态）**：**queued / steer 消息上的 budget 声明只判定、不消费**
+   （判定照跑、生效值丢弃）。理由 = `11 §6.1` 只把 budget 挂在"会话创建 / 显式恢复 / idle 会话消息启动"三类
+   **启动**语义上，且判定照跑才能保证"同一份 body 的状态码不取决于运行态"。备选：① 保持不变（现状）；
+   ② 把 claims 挂到 queue item 上、由 run 边界消费；③ 在途 run 上带预算声明的消息直接 422。这条不改代码也能
+   运行，登记在此等裁决。
+4. **既有测试弱点（登记不修，Scope Lock）**：`tests/session/test_multiturn_delivery.py:406` 的
+   `assert harness.state.message_queues.list_pending(session_id) != []` 比较的是**未 await 的 coroutine**
+   （恒真 + `RuntimeWarning: coroutine ... was never awaited`）⇒ 该断言当前无鉴别力；本票的新取证改在**事件流
+   快照**上做（逐条不变），未顺手改这条（解除 = 出现针对该镜像的首个真回归时一并修）。
+5. **未关单**（§14.12：等合入证据齐备后由主线处理；本轮按要求不自行关单）。
+6. 后续票按交接册顺序：`#312`（T4）→ `#313` → `#314` → `#315` → `#316` → `#317` → `#318` → `#319` → `#320`。
