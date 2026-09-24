@@ -4967,3 +4967,95 @@ ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动�
 其后的兄弟票顺序不变：`#299`（跨会话召回，接上检索驱动即解 §D11 的空洞）/ `#300`（治理 API，
 `explicit_remember` 的**持久性**要在立项时落成 job 上的列）/ `#301`（UI）/ `#302`（评测）/
 `#303`（clean-slate cutover）/ `#304`（真实 Gate）。
+
+## T2（`#307`，B 链第二票）：真实模型 + 生产工具 Live Gate 证据运行器（2026-09-25 · 已推分支、未集成、未关单）
+
+**状态**：✅ 交付与审查闭合；分支 `zcode/T307-live-gate-evidence-runner`，固定点 `d0e2dcb`（= 施工开始时的
+`origin/main`），**冻结树 `76ced9a` / tree `9045ace`**。**本轮 `origin/main` 未动、未关单**（§14.12：未合 main
+的完成票只在 issue comment 记录分支与 commit）。本票与 T1（分支 `zcode/T306-longrun-budget-contracts`）
+**并行**、各自从 `main` 出发：两者都在 `docs/SDD_TICKET_TRACKER.md` / `docs/PHASE_STATUS.md` /
+`docs/phase_status/2026-09.md` 的**同位置追加** ⇒ 集成时这三处按 §14.7 做**并集**解析（两侧都留），不是二选一。
+代码面**零交集**（本票只碰 `evaluation/live_gate/**`、`scripts/live_gate.py`、`tests/live_gate/**`、`docs/**`）。
+
+**票面**：GitHub `#307`（父票 `#305`）。DoD 四条 —— ① Runner 与 evidence validator 可被后续 Issue 直接复用；
+② 真实 smoke 的 3/3 机器证据**绑定到实现 tree**；③ 没有 Fake 结果被计入 Live Gate；④ 独立审查确认
+凭证与一次性工作区边界（凭证零泄漏 / 工作区真删掉）。
+
+**交付序列**（4 笔 + 台账/读数笔；父链逐笔显式指定）：
+
+| # | commit | 规模 | 内容 |
+| --- | --- | --- | --- |
+| 1 | `f8bb91e` | 22 文件 / +3592 | `evaluation/live_gate/**`（`schema` / `capability` / `registry` / `repo` / `runner` / `workspace` / `secrets` / `validator` + `scenarios/smoke`）+ `scripts/live_gate.py`（`run` / `validate` / `capabilities`）+ `tests/live_gate/**`（**72 例**，全部 credential-free） |
+| 2 | `c1d7bd2` | 8 文件 / +684 | 首轮三态真实证据（PASS / 注入 FAIL / 无凭证 BLOCKED），三份都绑定 `f8bb91e`（tree `7700e97`） |
+| 3 | `45505e6` | 15 文件 / +760 −80 | 两轴审查 P1×3 + P2 处置（见下）；`tests/live_gate` 72 → **95 例** |
+| 4 | `b0f92ea` | 8 文件 / +677 | 在**修复后的树**重跑三态并入库（绑定 `45505e6` / tree `02002825`）；首轮三份保留在库 |
+| — | `76ced9a` | 2 文件 | 台账行 `docs/review_ledger.d/302-d0e2dcb-b0f92ea.tsv` + `docs/agents/verification.md` §⑮ 读数表 |
+| — | 本记录笔 | 4 文件 | 本段 + `PHASE_STATUS` 索引 + `docs/phase_status/2026-09.md` + Gate-0 读数 `docs/gate/76ced9aff66bd19a90088a786899ad26ebad3af2.json` |
+
+**机制要点**（完整叙述单点在 `evaluation/live_gate/runner.py` 模块 docstring 与 `docs/agents/verification.md` §2 ⑮）：
+
+- **判定是四态、PASS 只有一条路径**：`decide_verdict` 是纯函数 —— `PASS` = 3/3 真实尝试全过 **且**无注入 **且**
+  无替身缝；`FAIL` = 任一次不过 / 尝试数不足 / 有注入或替身 / 凭证扫描命中 / 工作区没被真删掉；
+  `BLOCKED` = 缺凭证或前置不成立（**不发那 3 次 run**；"端点全不可用"那条路上能力探测本身已经发过一次
+  `max_tokens=1`）；`SKIPPED` = 操作者显式 `--skip <理由>`（不得产出 PASS）。
+- **两类替身缝、都机械核实**：`capability`（注入的探测函数不是内置那个）+ `scenario`（场景类的定义文件必须
+  真落在 `evaluation/live_gate/scenarios/` 下 —— `register_scenario(builtin=True)` 是**申请核实**，不是声明）。
+  任一缝存在 ⇒ 判定上限锁 FAIL 并写进证据的 `seams`。
+- **反篡改判据**：`events_sha256` / `event_count` / `tool_calls` 三个字段在 PASS 尝试里**缺一即 FAIL**
+  （不是"非空才比"）；非 PASS 尝试缺字段 ⇒ `UNAVAILABLE` + 明写"未记录，未比对"（不许说成"一致"）。
+- **凭证与工作区边界**：落盘前两层处理 —— 进程内 `SecretStr` 精确值 + 形状层扫描（命中 ⇒ **不落盘**并判 FAIL）、
+  宿主绝对路径替成 `<workspace>`（JSONL 转义形态 + 跨根长度倒序）；一次性工作区在系统临时目录（仓库**之外**），
+  跑完核实销毁（`deleted` 是核实结论而非"调用过删除"）。
+- **复用面**：`#319` 的五类场景只需 `register_scenario`，runner 与 validator 直接复用。
+
+**两轴独立审查**（Standards + Spec 各一独立只读子代理；范围 `d0e2dcb..f8bb91e`）：**两轴均 FAIL**。
+P1 **三处，全是"能产出假 PASS"的面**：① `GateOptions.attempts` —— 一个构造参数就能把"3/3 不可放宽"调成
+0 次仍走到 `PASS`；② validator 的反篡改比对写成"字段非空才比"（**"记了才比"**）—— 清空字段即可免于比对，
+且报告里看不出没比过；③ 注册表是进程级可写单例，"内置场景"只是**调用方的声明** ⇒ 替身场景可产出 `PASS`
+且 `seams` 为空。P2 七组：`--no-write` 仍建目录并复制轨迹 / `prepare` 抛异常穿透 `run_gate`（连"没跑成"
+的证据都不留）/ BLOCKED 提前返回丢掉取证卫生 / `secrets` 漏 `gh[pousr]` 族、无冒号 userinfo、JSON 形状凭证 /
+`workspace` 后端写死字面量 `"local"` / 文档把"BLOCKED 零请求"说过头 / CLI `capabilities --json` 混入非 JSON 行
+且 `validate` 退出码让一份 BLOCKED 证据读作"通过"。**处置笔 `45505e6`（§8.3 无第二轮）**：三处 P1 全修且各补
+判别性用例（另补 PASS 尝试的断言必须全真、轨迹解析失败对 PASS 判 FAIL、`sandbox.created ⇒ deleted` 进复核项），
+P2 逐条处置，**一条登记不改**（`docs/live_gate/**` 不加 `text eol=lf`：复核链路走 `read_text` 通用换行已跨
+clone 稳定，裸字节审计在 CRLF clone 上对不上记录值属 §13.1(b) 测量陷阱，仓库行尾策略刻意保持最小 —— 依据
+写进 `docs/agents/verification.md` §⑮）。台账行 `docs/review_ledger.d/302-d0e2dcb-b0f92ea.tsv`。
+
+**三层真实证据（`scripts/live_gate.py run` → `validate` 独立复核）**：
+
+| 运行 | 判定 | 机器读数 | `validate` |
+| --- | --- | --- | --- |
+| 正常 | **PASS** | 3/3 PASS（13.0s / 16.0s / 12.0s），每次 6 条断言全绿（`write`/`bash`/`git_status` 真调用、`notes.txt` 内容比对一致、无悬空 `tool/call`） | **24 条 0 FAIL**；`--require-pass` 退出 0 |
+| `--inject-failure attempt:2` | **FAIL** | 第 2 次受控失败、**第 1/3 次照跑**（失败样本与轨迹全留），原因写明"注入运行不得计入 Live Gate" | **19 条 0 FAIL** |
+| 置空 `MODEL_API_KEY` / `FALLBACK_MODEL_API_KEY` | **BLOCKED** | **零 run、零尝试、无轨迹**（配置链建不起来），前置清单点名缺哪个 key | **6 条 0 FAIL** |
+
+三份证据的 `sha` / `tree` 都是 `45505e6a…` / `02002825…`；`seams` 全空（内置场景经 `registry.is_builtin`
+机械核实）；`redactions` 逐次记 `workspace_path`（轨迹里 `"cwd":"<workspace>"`，宿主路径零泄漏）；
+`secret_scan.findings` 全 0（`exact_value_scan=ran`：进程内 10 个 `SecretStr` 的精确值 + 形状层都扫过）。
+**首轮（`f8bb91e`）三份也保留在库**，并用**加严后**的 validator 逐条复核通过 ⇒ 它们如实记录了修复前那棵树，
+不是伪造品；本票的**权威读数**是上表。
+
+**门禁读数（冻结树 `76ced9a` / tree `9045ace`）**：
+
+- 后端全量 pytest（`PYTHONPATH=` + `.venv/Scripts/python.exe -m pytest tests/ -q --no-header -p no:cacheprovider`）：**3874 passed, 2 skipped, 48 deselected, 11 warnings in 507.40s (0:08:27)**，`PYTEST_EXIT=0`（`PYTHONPATH=` 纯净环境，绕开 safe-delete shim；junit 与日志在仓库外临时目录）
+- Gate-0 裸全量：**6/6 PASS**，墙钟 **22.2s**（diff-check 0.03 / ruff 0.08 / oxlint 1.57 / tsc 16.87 / guards 2.84 / coverage 0.84），`result=PASS` / `passed=6` / `failed=[]` / `worktree.tracked_matches_head=true` / `untracked=['.zcodeignore']`（工具版本 git 2.52.0 / Python 3.13.5 / ruff 0.16.3 / node v22.21.1 / oxlint 1.81.0 / tsc 6.0.3） ⇒ `docs/gate/76ced9aff66bd19a90088a786899ad26ebad3af2.json`
+- `ruff check .`：All checks passed（Gate-0 lane ②，rc=0）。
+- 覆盖闸门：**exit 0**，末行原文 `✅ 台账覆盖闸门通过：089524a~1..HEAD 每条 commit 均有归属（审查行 / 白名单 / 台账记账）。`
+- §8.1.3 判据 ①（`git diff --name-status --no-renames 76ced9a HEAD`）= 本记录笔（4 文件全在 `docs/**`）；
+  ②（`git status --short`）= 仅 `?? .zcodeignore`。
+
+**实测踩出来的坑（三处，都已在代码/文档里留字）**：① **轨迹是 JSONL，`cwd` 里的反斜杠是转义形态**
+（`C:\\Users\\…`），逐字比对替换不到 ⇒ 会静默带着宿主用户目录入库，而现场只看到 `redactions == []`；两种
+形态都要替换、候选**跨根按长度倒序**。② **`SessionEvent` 是 dataclass 不是 pydantic 模型** ⇒ validator 曾用
+`model_validate` 解析轨迹，导致**每条轨迹都判 UNAVAILABLE**、悬空 call 与工具序列检查**从未真的执行**，
+而报告仍显示通过。③ **未跟踪的 `.json` 是 Gate-0 的 `risky`** ⇒ Live Gate 跑完但证据未提交时 Gate-0 拒绝落盘
+读数；正确次序 = 跑 Live Gate → 提交证据 → 再跑 Gate-0（Live Gate 自己的 `worktree_proof()` 排除自己的输出
+目录，所以"证据已在盘上"不会让本次运行自证不干净）。
+
+**残余与下一步**：
+
+1. **集成**（集成线负责，与 T1 的先后由 §14.9 定；三处文档的同位置追加按 §14.7 并集解析）。
+2. `#319`（五类真实 Live Gate 3/3）**直接复用**本票的 runner / validator / scenario 注册面。
+3. 登记项（不阻断）：`BLOCKED` 的准确说法是"不发那 3 次 run"；"端点全不可用"那条路上探测请求**已经发过**
+   一次 `max_tokens=1` —— 文案已按此纠偏（`capability.py` / `runner.py` / `__init__.py` / `verification.md` §⑮）。
+4. **未关单**（§14.12：等合入证据齐备后由主线处理；本轮按要求不自行关单）。
