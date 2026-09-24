@@ -65,6 +65,16 @@ def _assert_child_internal_payloads_are_not_copied(
     )
 
 
+def _assert_children_internal_payloads_are_not_copied(
+    children: list[tuple[list[SessionEvent], str | None]],
+    parent_events: list[SessionEvent],
+) -> None:
+    for child_events, child_summary in children:
+        _assert_child_internal_payloads_are_not_copied(
+            child_events, parent_events, child_summary=child_summary,
+        )
+
+
 def _finished_delegation_for_child(
     finished_events: list[SessionEvent], child_session_id: str,
 ) -> SessionEvent:
@@ -112,6 +122,43 @@ async def test_gate4_allows_summary_reuse_but_rejects_copied_internal_payloads()
             _assert_child_internal_payloads_are_not_copied(
                 [child_tool_event], [parent_tool_event], child_summary="task summary",
             )
+
+    earlier_summary_text = SessionEvent(
+        type="model/completed", session_id="child", data={"content": "task summary"},
+    )
+    different_final_answer = SessionEvent(
+        type="model/completed", session_id="child", data={"content": "actual final answer"},
+    )
+    with pytest.raises(AssertionError):
+        _assert_child_internal_payloads_are_not_copied(
+            [earlier_summary_text, different_final_answer],
+            [parent_summary],
+            child_summary="task summary",
+        )
+
+
+async def test_gate4_checks_internal_payloads_for_every_child():
+    first_child_summary = SessionEvent(
+        type="model/completed", session_id="child-1", data={"content": "summary one"},
+    )
+    second_child_internal = SessionEvent(
+        type="tool/result", session_id="child-2", data={"payload": "private child two"},
+    )
+    parent_summary = SessionEvent(
+        type="model/completed", session_id="parent", data={"content": "summary one"},
+    )
+    copied_second_child_payload = SessionEvent(
+        type="tool/result", session_id="parent", data={"payload": "private child two"},
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_children_internal_payloads_are_not_copied(
+            [
+                ([first_child_summary], "summary one"),
+                ([second_child_internal], "summary two"),
+            ],
+            [parent_summary, copied_second_child_payload],
+        )
 
 
 async def test_gate4_uses_the_finished_event_for_the_inspected_child():
@@ -343,13 +390,31 @@ class TestGate4NoHistoryDump:
                 if event.type == "agent/delegation-finished"
             ]
             assert delegation_finished, "child 已启动但没有持久化委派终态"
-            child_session_id = delegation_started[0].data["child_session_id"]
-            child_finish = _finished_delegation_for_child(
-                delegation_finished, child_session_id,
+            child_session_ids = [
+                event.data["child_session_id"] for event in delegation_started
+            ]
+            assert len(child_session_ids) == len(set(child_session_ids)), (
+                "每个 child delegation start 必须使用唯一 child_session_id"
             )
-            assert child_finish.data["status"] == "completed", (
-                "child 已启动但失败；不得以新 Session 重试来掩盖失败"
+            finished_child_ids = [
+                event.data.get("child_session_id") for event in delegation_finished
+            ]
+            assert len(finished_child_ids) == len(set(finished_child_ids)), (
+                "每个 child_session_id 只能有一个 delegation finish"
             )
+            assert set(finished_child_ids) == set(child_session_ids), (
+                "每个已启动 child 都必须且只能有一个匹配的委派终态"
+            )
+            child_finishes = {
+                child_id: _finished_delegation_for_child(
+                    delegation_finished, child_id,
+                )
+                for child_id in child_session_ids
+            }
+            assert all(
+                finish.data["status"] == "completed"
+                for finish in child_finishes.values()
+            ), "child 已启动但失败；不得以新 Session 重试来掩盖失败"
             break
         else:
             pytest.fail("3 次独立尝试内未观察到 research_review 委派启动")
@@ -360,11 +425,25 @@ class TestGate4NoHistoryDump:
         counts = Counter(parent_types)
         # 父流只有 supervisor 自己的紧凑事件（不含 child 的多轮内幕）
         assert counts.get("run/completed", 0) <= 1, "父 session 只有自己的 run"
-        child_events = Session.resume(
-            JsonlSessionStore(tmp_path / "sessions"), child_session_id,
-        )
-        child_types = [e.type for e in child_events.events]
-        assert child_types.count("model/completed") >= 1, "child 自己的历史完整留存"
+        children = []
+        for child_id in child_session_ids:
+            child_events = Session.resume(
+                JsonlSessionStore(tmp_path / "sessions"), child_id,
+            )
+            child_types = [event.type for event in child_events.events]
+            assert child_types.count("model/completed") >= 1, (
+                f"child {child_id} 自己的历史完整留存"
+            )
+            child_agent_ids = {
+                event.agent_id for event in child_events.events if event.agent_id
+            }
+            assert child_agent_ids == {"research_review"}, (
+                f"child {child_id} 事件保留自身 agent provenance"
+            )
+            children.append((
+                child_events.events,
+                child_finishes[child_id].data.get("summary"),
+            ))
         # 保留父流自身调用上限，并用独立 agent_id / source_event_ids 断言
         # child 内部事件没有进入父 Session。
         parent_model_calls = counts.get("model/completed", 0)
@@ -372,16 +451,20 @@ class TestGate4NoHistoryDump:
             f"父流 model/completed={parent_model_calls}——child 历史疑似倾倒"
         )
         parent_event_ids = {event.event_id for event in session.events}
-        child_event_ids = {event.event_id for event in child_events.events}
+        child_event_ids = {
+            event.event_id
+            for child_events, _summary in children
+            for event in child_events
+        }
         assert parent_event_ids.isdisjoint(child_event_ids), (
             "父 Session 不得复用 child 的持久化事件 ID"
         )
         child_agent_ids = {
-            event.agent_id for event in child_events.events if event.agent_id
+            event.agent_id
+            for child_events, _summary in children
+            for event in child_events
+            if event.agent_id
         }
-        assert child_agent_ids == {"research_review"}, (
-            "child 事件保留自身 agent provenance"
-        )
         assert all(event.agent_id not in child_agent_ids for event in session.events), (
             "父 Session 不得包含 child agent 的内部事件"
         )
@@ -390,11 +473,7 @@ class TestGate4NoHistoryDump:
             for event in session.events
         ), "父 Session 不得以 provenance 引用 child 内部事件"
         # Parent may reuse child result summary; full tool payload copies remain forbidden.
-        _assert_child_internal_payloads_are_not_copied(
-            child_events.events,
-            session.events,
-            child_summary=child_finish.data.get("summary"),
-        )
+        _assert_children_internal_payloads_are_not_copied(children, session.events)
 
 
 @pytest.mark.usefixtures("requires_live_model")
