@@ -61,25 +61,25 @@ def _grant_all(registry: ToolRegistry) -> frozenset[str]:
 #: 改 scope 时表跟着改就永远绿，"改 scope"这件事本身没有任何地方要求人显式经过。
 #: 表写死名字后，往 `_CODING_TOOLS` 加一个工具必须同时改这里（否则红），于是
 #: "声明面变了"变成一次**有意识**的动作。与 `tests/web/test_web_phase5_staged_endpoints.py`
-#: 里 17/12/7 的手工镜像同源：那份钉数量（前端 fixture 的跨语言镜像），这份钉名字。
+#: 里 18/13/8 的手工镜像同源：那份钉数量（前端 fixture 的跨语言镜像），这份钉名字。
 _DECLARED_SCOPES: dict[str, frozenset[str]] = {
     # main = coding ∪ research ∪ {delegate, inspect_artifact}（supervisor 面）
     "main": frozenset({
         "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
-        "git_status", "git_diff", "retrieve_memory", "remember_this",
+        "git_status", "git_diff", "retrieve_memory", "retrieve_memory_v2", "remember_this",
         "forget_memory", "retrieve_knowledge", "read_knowledge_source",
         "web_search", "delegate", "inspect_artifact",
     }),
     # #202 / ADR-0031 D8：记忆工具（检索 + 显式写入 + 删除）对 coding 开放
     "coding": frozenset({
         "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
-        "git_status", "git_diff", "retrieve_memory", "remember_this",
+        "git_status", "git_diff", "retrieve_memory", "retrieve_memory_v2", "remember_this",
         "forget_memory",
     }),
-    # #202：retrieve_memory 是只读检索，对 research 开放；写侧工具不进
+    # #202 / #299：只读记忆检索对 research 开放；写侧工具不进
     "research_review": frozenset({
         "read", "grep", "glob", "retrieve_knowledge",
-        "read_knowledge_source", "web_search", "retrieve_memory",
+        "read_knowledge_source", "web_search", "retrieve_memory", "retrieve_memory_v2",
     }),
 }
 
@@ -104,7 +104,7 @@ class TestBuiltinProfiles:
         assert main.max_delegations == 8
         # 注：main 的 scope 由 `_MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | {...}`
         # 定义，所以"其余档位 ⊆ main"是**结构上**成立的（不是可被断言推翻的性质）；
-        # main 具体是哪 17 个由上面的 exact set 表钉住。
+        # main 具体是哪 18 个由上面的 exact set 表钉住。
 
     def test_coding_scope_has_no_web(self):
         coding = BUILTIN_PROFILES["coding"]

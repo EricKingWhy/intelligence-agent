@@ -70,6 +70,7 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ("ReadKnowledgeSourceTool", "agent_harness.knowledge.tools"),
     ("IngestDocumentTool", "agent_harness.knowledge.tools"),
     ("RetrieveMemoryTool", "agent_harness.memory.tools"),
+    ("RetrieveMemoryV2Tool", "agent_harness.memory.v2.search_tool"),
     ("RememberThisTool", "agent_harness.memory.tools"),
     ("ForgetMemoryTool", "agent_harness.memory.tools"),
     ("WebSearchTool", "agent_harness.websearch.tools"),
@@ -98,7 +99,7 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
     "read_artifact": (
         "MinIO/Local 配对的产物读回工具，未在任何档位声明：审计 §5.7 实测它是 coding "
         "收窄后**唯一**被剔除的工具，而前端 tooltip 因此列不出这个名字。**只登记不改 scope**"
-        "——收窄面变更会牵动跨端手工镜像的 17/12/7（#238 Scope）"
+        "——收窄面变更会牵动跨端手工镜像的 18/13/8（#238 Scope）"
     ),
     "ingest_document": (
         "知识库**写入**工具，未在任何档位声明（子代理走只读检索 retrieve_knowledge / "

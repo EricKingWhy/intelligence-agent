@@ -131,11 +131,11 @@ class TestAgentProfiles:
         ``total`` 换成另一个来源），UI 上那句提示立刻变成假话，而**看是看不出来的**
         （数字只会变成另一个数字）。
 
-        ⚠ 下面**显式写死 17 / 12 / 7**（而不是只跟 `BUILTIN_PROFILES` 自比）：前端
+        ⚠ 下面**显式写死 18 / 13 / 8**（而不是只跟 `BUILTIN_PROFILES` 自比）：前端
         `e2e/fixtures.ts::AGENT_PROFILES` 与 `lib/agentProfileScope.test.ts` 是这三
         个数的**手工镜像**，跨语言没有共享来源。只自比的话，某人往 `_CODING_TOOLS`
-        加一个工具 → 后端测试照样绿、前端照样绿，而 fixture 里还是 12/17（真机是
-        13/18）——"三处都绿、UI 说错话"正是这类漂移的形态。写死数字让后端先红，
+        加一个工具 → 后端测试照样绿、前端照样绿，而 fixture 里还是 13/18（真机是
+        14/19）——"三处都绿、UI 说错话"正是这类漂移的形态。写死数字让后端先红，
         见到红请同时改前端那两处（这是有意的双份维护，与 §15 的 CSS 双份同理）。
         """
         from agent_harness.agent.profiles import (
@@ -161,16 +161,16 @@ class TestAgentProfiles:
             assert (scope["open"] + len(scope["excluded"])) == scope["total"]
 
         # 手工镜像的数字（前端 fixture / 纯函数单测里各有一份），改动必须三处同步
-        assert by_id["main"] == {"open": 17, "total": 17, "excluded": []}
-        assert by_id["coding"]["open"] == 12
-        assert by_id["coding"]["total"] == 17
-        assert by_id["research_review"]["open"] == 7
+        assert by_id["main"] == {"open": 18, "total": 18, "excluded": []}
+        assert by_id["coding"]["open"] == 13
+        assert by_id["coding"]["total"] == 18
+        assert by_id["research_review"]["open"] == 8
 
     def test_main_profile_reports_nothing_narrowed(self, bare_client):
         """main（通用）**没有**被收窄的工具 ⇒ excluded 为空、open == total。
 
         前端据此不渲染那句提示（"从简、不能突兀"）：没被收窄就没有事实可说，
-        「共 17 个中开放 17 个」只增噪音。
+        「共 18 个中开放 18 个」只增噪音。
         """
         resp = bare_client.get("/api/agent-profiles")
         main = next(p for p in resp.json()["profiles"] if p["id"] == "main")

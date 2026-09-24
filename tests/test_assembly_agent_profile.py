@@ -160,7 +160,7 @@ async def test_effective_scope_is_intersection_when_capabilities_absent(tmp_path
     `artifact_dir=""` 关掉本地 artifact store（合法配置：写了就是"别落盘"），注册面只剩
     9 个本地工具，capability 工具（knowledge / websearch / memory / delegate）全部缺席。
     缺席**不是**被剔除：它们不进 registry，也**不**进 `dropped_tools`——后者只装"注册了
-    但未声明"的名字。声明数（17/12/7）与实际数（9/9/3）在这里必然不等，这正是
+    但未声明"的名字。声明数（18/13/8）与实际数（9/9/3）在这里必然不等，这正是
     `tool_scope_summary` docstring 说的"这两个数不能读作实际工具数"。
     """
     runtime = await _build_runtime(tmp_path, agent_profile=profile, artifact_dir="")

@@ -19,15 +19,15 @@ const entry = (
 });
 
 const PROFILES: CatalogEntry[] = [
-  entry('main', { open: 17, total: 17, excluded: [] }),
+  entry('main', { open: 18, total: 18, excluded: [] }),
   entry('coding', {
-    open: 12,
-    total: 17,
+    open: 13,
+    total: 18,
     excluded: ['delegate', 'inspect_artifact', 'read_knowledge_source', 'retrieve_knowledge', 'web_search'],
   }),
   entry('research_review', {
-    open: 7,
-    total: 17,
+    open: 8,
+    total: 18,
     excluded: [
       'apply_patch', 'bash', 'delegate', 'edit', 'forget_memory',
       'git_diff', 'git_status', 'inspect_artifact', 'remember_this', 'write',
@@ -41,13 +41,13 @@ describe('toolScopeNote', () => {
     const note = toolScopeNote(PROFILES, 'coding');
     // 措辞锁："声明开放"这几个字是批 2 Spec 轴 P1 的修复点——原稿写「只开放 12 个
     // 工具」，而本部署实际注册的是另一个集合（最小 wiring 实测 main 10 / coding 9 /
-    // research_review 3，声明是 17/12/7；且本地 artifact 下 read_artifact 会被收窄
+    // research_review 3，声明是 18/13/8；且本地 artifact 下 read_artifact 会被收窄
     // 却不在这份 excluded 里）。改成"某某声明了 N 个"后逐字为真。
     // **不要**把它改回"开放 N 个"。
-    expect(note?.text).toBe('该档位声明开放 12 个工具（全部档位声明 17 个）');
+    expect(note?.text).toBe('该档位声明开放 13 个工具（全部档位声明 18 个）');
   });
 
-  it('未被收窄的档位（excluded 为空）不提示——「17 中开放 17」只是噪音', () => {
+  it('未被收窄的档位（excluded 为空）不提示——「18 中开放 18」只是噪音', () => {
     expect(toolScopeNote(PROFILES, 'main')).toBeNull();
   });
 
@@ -57,7 +57,7 @@ describe('toolScopeNote', () => {
     // 把默认档位写成 coding 就会凭空冒出一句提示（用户没选任何档位）。
     expect(toolScopeNote(PROFILES, null)).toBeNull();
     expect(toolScopeNote(PROFILES, '')).toBeNull();
-    expect(toolScopeNote([entry('main', { open: 17, total: 17, excluded: [] })], null)).toBeNull();
+    expect(toolScopeNote([entry('main', { open: 18, total: 18, excluded: [] })], null)).toBeNull();
   });
 
   it('后端没给 tool_scope（老部署）→ 不提示，也不编一个数', () => {

@@ -1118,8 +1118,8 @@ export const PERMISSION_MODES = [
 /** `GET /api/agent-profiles` 的默认载荷（形状 = 后端 `AGENT_PROFILE_DESCRIPTIONS`
  *  + `agent/profiles.py::tool_scope_summary` 的 `tool_scope`）。
  *
- *  `tool_scope` 三个数**逐值镜像后端实测值**（main 17/17、coding 12/17、
- *  research_review 7/17）——后端那两个函数会随 scope 改动漂移，两侧各有一把锁
+ *  `tool_scope` 三个数**逐值镜像后端实测值**（main 18/18、coding 13/18、
+ *  research_review 8/18）——后端那两个函数会随 scope 改动漂移，两侧各有一把锁
  *  （后端 `test_web_phase5_staged_endpoints.py::test_tool_scope_counts_match_declared_scopes`，
  *  前端 `lib/agentProfileScope.test.ts`）；改 scope 请同时看这两处。
  *  只写要断言的事实：`display_name`/`description` 的文案不参与断言。 */
@@ -1129,7 +1129,7 @@ export const AGENT_PROFILES = [
     display_name: 'Main',
     description: '通用编排代理（默认）',
     icon: 'layers',
-    tool_scope: { open: 17, total: 17, excluded: [] },
+    tool_scope: { open: 18, total: 18, excluded: [] },
   },
   {
     id: 'coding',
@@ -1137,8 +1137,8 @@ export const AGENT_PROFILES = [
     description: '代码编辑、调试和构建任务专用',
     icon: 'code',
     tool_scope: {
-      open: 12,
-      total: 17,
+      open: 13,
+      total: 18,
       excluded: [
         'delegate', 'inspect_artifact', 'read_knowledge_source',
         'retrieve_knowledge', 'web_search',
@@ -1151,8 +1151,8 @@ export const AGENT_PROFILES = [
     description: '研究、检索和审查任务专用',
     icon: 'search',
     tool_scope: {
-      open: 7,
-      total: 17,
+      open: 8,
+      total: 18,
       excluded: [
         'apply_patch', 'bash', 'delegate', 'edit', 'forget_memory',
         'git_diff', 'git_status', 'inspect_artifact', 'remember_this', 'write',

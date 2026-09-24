@@ -137,6 +137,15 @@ def trusted_identity_for_session(session_id: str, workspace_index: Any | None) -
     )
 
 
+def _recall_failure_reason_code(error: Exception) -> str:
+    """Map runtime exceptions to stable, content-free event reason codes."""
+    if isinstance(error, TimeoutError):
+        return "retrieval_timeout"
+    if isinstance(error, PermissionError):
+        return "authorization_denied"
+    return "retrieval_unavailable"
+
+
 def recall_event_item(hit: RankedMemory, tier: MemoryTier) -> dict[str, Any]:
     record = hit.record
     return {
@@ -169,7 +178,8 @@ def _render(tier: MemoryTier, records: Sequence[MemoryRecordV2]) -> HumanMessage
 class MemoryV2ContextProvider:
     """Inject complete Profile and Collection records under their separate fixed budgets."""
 
-    name = "memory_v2"
+    # Keep the public context-provider ID stable while V2 replaces V1's implementation.
+    name = "memory"
 
     def __init__(
         self, capability: MemoryV2RecallCapability, *, workspace_index: Any | None = None,
@@ -229,7 +239,8 @@ class MemoryV2ContextProvider:
             try:
                 session.append(MEMORY_DEGRADED, {
                     "operation": "recall", "stage": "retrieval",
-                    "reason_code": type(error).__name__,
+                    "reason_code": _recall_failure_reason_code(error),
+                    "job_id": None, "attempts": 1, "fallback_used": False,
                 }, run_id=run_context_var.get())
             except Exception:  # noqa: BLE001 — a logging failure must not fail this optional provider.
                 logger.warning("Could not persist Memory V2 recall degradation")

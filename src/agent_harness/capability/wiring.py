@@ -168,7 +168,7 @@ async def _wire_memory_v2(
     settings: Settings, wiring: CapabilityWiring, *, sessions: JsonlSessionStore | None,
     workspace_index: Any | None = None,
 ) -> None:
-    """在已启用的 V1 记忆之上装配 V2 召回与可选形成（#299）。
+    """装配 V2 召回与可选形成（#299）。
 
     闸门是**装配结果**而不是配置项：`wiring.memory is not None` 才是"这个进程真的有记忆"
     ——它一次覆盖三种形态（CAPABILITIES 里没有 memory / `enabled: false` 被关掉 / 组件
@@ -179,20 +179,32 @@ async def _wire_memory_v2(
     `memory.primary` 模型角色，召回本身不依赖该角色。
 
     失败按 OPTIONAL 降级（与 `wire_capabilities` 循环里的同一条纪律）：V2 召回/形成起不来
-    不该让整个应用起不来，更不该影响 V1 记忆——那才是此刻在服务用户的路径。
+    不该让整个应用起不来。进入 V2 runtime 路径后停用 V1 自动注入（V1 将文本放进
+    SystemMessage）；V2 不可用时自动召回为空，但 V1 capability、写入器和显式工具仍可用。
     """
-    if sessions is None or wiring.memory is None:
+    if wiring.memory is None:
         return
-    from agent_harness.memory.v2.assembly import (
-        build_memory_formation,
-        build_memory_v2_service,
-    )
-    from agent_harness.memory.v2.recall import MemoryV2ContextProvider
-    from agent_harness.memory.v2.roles import resolve_memory_roles
-    from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
-    from agent_harness.model.config import ConfigError
+    # V1 provider 的实现与存量数据保持原样，但 SystemMessage 注入不满足 V2 的非特权
+    # 召回契约。只要当前调用进入 V2 runtime 路径，就不再自动注入 V1 记忆；V2 降级时
+    # 宁可无自动记忆，也不能把 V1 recalled text 放进特权指令通道。
+    wiring.context_providers[:] = [
+        provider for provider in wiring.context_providers if provider.name != "memory"
+    ]
+    if sessions is None:
+        return
 
+    from agent_harness.model.config import ConfigError
     try:
+        # Keep optional V2 imports inside the degradation boundary too: an import or
+        # module-initialization failure must not prevent the rest of the app from wiring.
+        from agent_harness.memory.v2.assembly import (
+            build_memory_formation,
+            build_memory_v2_service,
+        )
+        from agent_harness.memory.v2.recall import MemoryV2ContextProvider
+        from agent_harness.memory.v2.roles import resolve_memory_roles
+        from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
+
         roles = resolve_memory_roles(settings)
         service = await build_memory_v2_service(
             settings, vector_store=getattr(wiring.memory, "vectors", None),
@@ -215,12 +227,15 @@ async def _wire_memory_v2(
         ) from error
     except Exception:
         logger.warning(
-            "V2 记忆形成装配失败，按 %s 降级跳过（V1 记忆不受影响）",
+            "V2 记忆装配失败，按 %s 降级跳过（V1 capability 与显式工具仍可用）",
             Degradation.OPTIONAL_RUNTIME.value, exc_info=True,
         )
         wiring.degradations["memory_v2"] = DegradeReason.INIT_FAILED.value
         return
     wiring.memory_v2 = service
+    for contributor in wiring.tool_contributors:
+        if isinstance(contributor, _MemoryCapabilityProvider):
+            contributor.use_v2_retrieval()
     wiring.context_providers.append(MemoryV2ContextProvider(
         service, workspace_index=workspace_index,
         timeout_seconds=settings.memory_search_timeout_seconds,
@@ -453,15 +468,20 @@ class _MemoryCapabilityProvider:
     def __init__(self, capability: MemoryCapability, timeout_seconds: float = 10.0) -> None:
         self._capability = capability
         self._timeout_seconds = timeout_seconds
+        self._include_v1_retrieval = True
+
+    def use_v2_retrieval(self) -> None:
+        self._include_v1_retrieval = False
 
     def contributes_tools(self) -> list[Any]:
-        # #202 / ADR-0031：三个记忆工具（读 retrieve_memory / 写 remember_this /
-        # 删 forget_memory）都随 capability 存在而存在（D5）——不写 runtime 特判。
-        return [
-            RetrieveMemoryTool(self._capability, timeout_seconds=self._timeout_seconds),
-            RememberThisTool(self._capability),
-            ForgetMemoryTool(self._capability),
-        ]
+        # V1 keeps explicit search only until V2 is wired; both read paths must not
+        # be exposed together. V1 write/governance tools remain independently available.
+        tools = [RememberThisTool(self._capability), ForgetMemoryTool(self._capability)]
+        if self._include_v1_retrieval:
+            tools.insert(
+                0, RetrieveMemoryTool(self._capability, timeout_seconds=self._timeout_seconds),
+            )
+        return tools
 
 
 class _ToolsProvider:
