@@ -108,6 +108,11 @@ async def build_memory_formation(
     executor = MemoryJobExecutor(
         jobs=jobs, writer=service, searcher=service, invoker=ChatModelInvoker(),
     )
+    # `extraction_enabled` 刻意走默认值（`True`）：它的生产来源是"用户关掉自动抽取"那个
+    # memory-settings 入口（PRD §5.6 的 `/api/memory-settings`），属后续票。票面把
+    # "globally disabled extraction"列为必须排除的形状，判定与用例都已实现，但**本票在
+    # 运行期没有产出方**——T8 两轴审查 P3 已登记，写在调用点免得读者以为它已接线。
+    # （"整仓关掉记忆"不靠它：那条路走 `wiring.memory is None` 的装配闸门。）
     runner = MemoryJobRunner(
         jobs=jobs, sessions=sessions, executor=executor, roles=roles,
         max_concurrency=settings.memory_v2_max_concurrency,

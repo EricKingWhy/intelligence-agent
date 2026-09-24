@@ -22,7 +22,11 @@ import aiosqlite
 import pytest
 
 from agent_harness.agent.types import STATUS_COMPLETED
-from agent_harness.capability.base import CapabilityRegistry, DegradeReason
+from agent_harness.capability.base import (
+    CapabilityError,
+    CapabilityRegistry,
+    DegradeReason,
+)
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
@@ -367,3 +371,35 @@ async def test_the_visible_answer_does_not_wait_for_a_slow_memory_model(
     finally:
         invoker.release.set()
         await runner.aclose()
+
+
+# --------------------------------------------------------------------------------------
+# 4. 配置类故障不能降级成"没配"（T8 两轴审查 P2）
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_broken_model_catalog_fails_loudly_instead_of_degrading(
+    tmp_path, monkeypatch,
+) -> None:
+    """`roles.resolve_memory_roles` 抛的 `ConfigError` 必须**穿透**装配层。
+
+    为什么：`model.config.ConfigError` **不是** `CapabilityError` 的子类，而
+    `_wire_memory_formation` 里那条宽 `except Exception` 原本会把它一起吞掉 ⇒
+    `degradations["memory_v2"] = init_failed`。运维看到的是"**没配**"（一个缺省状态）
+    而不是"**配错了**"（`AGENT_MODELS` 坏），真正原因只剩 traceback 里一行 warning。
+    这与 `roles.py` 开头的契约（"配错了要响亮"）及主循环对 `CapabilityError` 的分流
+    都相反，所以修法是上抛成 `CapabilityError(init_failed)`——降级只留给外部/环境故障。
+
+    判别性：把 `except ConfigError: raise` 那一支删掉，本用例转红（拿到 `degradations`
+    而不是异常）。
+    """
+    _patch_components(monkeypatch)
+    settings = _settings(tmp_path, agent_models="{这不是合法 JSON")
+    with pytest.raises(CapabilityError) as caught:
+        await wire_capabilities(
+            CapabilityRegistry(),
+            parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+            settings=settings, sessions=_sessions(tmp_path),
+        )
+    assert caught.value.code == "init_failed"

@@ -168,7 +168,9 @@ class MemoryModelStage(str, Enum):
 class DegradedReason(str, Enum):
     """终态降级的稳定归因码（进 `memory/degraded` 的 `reason_code`）。
 
-    前三个与 `budget.BudgetDimension` **逐字对齐**（`test_...` 钉着这个重叠）：
+    前三个与 `budget.BudgetDimension` **逐字对齐**（
+    `tests/memory/v2/test_v2_budget.py::test_degraded_reasons_cover_every_budget_dimension`
+    钉着这个重叠——T8 补的真实用例；此前这里是未填的 `test_...` 占位符，等于把"未证"写成"已证"）：
     预算耗尽的原因就是那三个维度，不需要第二套名字。
     其余八条是"没花钱也失败了"的形态。
     """
@@ -750,12 +752,17 @@ def _memory_payload(memory: ProjectedMemory) -> dict[str, Any]:
 
 
 def _run_query(run_events: Sequence[SessionEvent]) -> str:
-    """本轮的用户发言——formation 找"相似记忆"用的 query。"""
+    """本轮的用户发言——formation 找"相似记忆"用的 query。
+
+    刻意**不**在这里截断：唯一需要边界的地方是"交给检索层"那一步
+    （`_relevant` 的 `query[:_MAX_QUERY_CHARS]`）。两处都截同一个常量，会让下一个人
+    以为这两个上限可能不同而不敢删其中一处（T8 两轴审查 P4：这曾是同一上界的重复应用）。
+    """
     texts = [
         event.data.get("content") for event in run_events
         if event.type == USER_MESSAGE and isinstance(event.data, dict)
     ]
-    return "\n".join(text for text in texts if isinstance(text, str))[:_MAX_QUERY_CHARS]
+    return "\n".join(text for text in texts if isinstance(text, str))
 
 
 def _estimate_input_tokens(call: MemoryModelCall) -> int:

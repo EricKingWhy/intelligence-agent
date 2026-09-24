@@ -143,9 +143,16 @@ def _seconds_until_claimable(
     只会变的一种情形是 **lease 到期**：`jobs.claim` 不收"属主还活着"的行（那是别的
     进程/别的协程在跑），而属主如果已经死了，唯一的解除条件就是时间。
 
-    `None` 的两种含义都表示"别等了"：没有待办，或者待办是被**按用户串行**挡住的
-    （它们无属主或有属主但同用户另有在途 job）——那种情况由那个在途 job 的终结来解除，
-    而那件事发生时本进程的泵会自己再跑一轮。等时间是白等。
+    `None` 只表示"**没有任何租约**会到期"：没有待办，或待办全都没有属主 / 租约字段
+    （典型是刚入队、还没被任何人认领的行）——那种情况由"有人认领它 / 终结它"来解除，
+    而那件事发生时泵会自己再跑一轮。等时间是白等。
+
+    ⚠ **有属主且租约未到期的行会照常计入延迟**，即使它正被**按用户串行**挡着（挡它的
+    是同用户的另一条在途 job，而那条 job 本身可能远未终结）。这不是缺陷：代价只是多
+    武装一个无害的定时器——到期那一下 `claim` 会重新判一次，判不过就静静地什么都不做。
+
+    （2026-09-24 T8 两轴审查指出：此处原先写的是"待办被按用户串行挡住 ⇒ 返回 `None`"，
+    与实现相反；本段按实测行为改写。）
     """
     delays: list[float] = []
     for job in pending:
@@ -264,9 +271,10 @@ def run_slice_bounds(
 
     # 为什么不能只按 `run_id` 过滤（T7b 用探针实测后修正）
 
-    `_drive` 的顺序是**先写 user 消息、再 `begin_run`**（`agent/runtime.py`），而
-    `Session.append` 的 `run_id` **没有默认值**（`session/session.py`）——所以**本轮用户
-    发言的 `run_id` 是 `None`**。按 `run_id == job.run_id` 过滤会把它排除出 `run_events`
+    `_drive` 的顺序是**先写 user 消息、再 `begin_run`**（`agent/runtime.py`），而写那条
+    user 消息时**不传 `run_id`**（`Session.append` 的 `run_id` 默认就是 `None`，见
+    `session/session.py` 的签名）——所以**本轮用户发言的 `run_id` 是 `None`**。按
+    `run_id == job.run_id` 过滤会把它排除出 `run_events`
     并推进 `history`，而 `projection` 只给 `run_events` 发运行时别名 ⇒ 模型在**结构上**
     引不到用户原话（R6 要求 USER/profile 事实必须有直接用户证据），观测上只表现为
     "自动记忆写不出一条用户事实"。这与 T6b 修的 `event_id` 缺失是**同一类**静默失效：
@@ -274,24 +282,33 @@ def run_slice_bounds(
 
     # 规则
 
-    以本 run **首个**带 `run_id` 的事件为锚，向前吞掉紧邻的 `user/message`（那一轮的
-    输入，它本身不带 `run_id`），向后取本 run 的**最后一个**事件。得到的区间与 V1 的
-    `_write_memories(session, arms.memory_event_start)` 语义对齐——那边的起点正是
-    `session.mark()`，即那条 user 消息**之前**。
+    以本 run **首个**带 `run_id` 的事件为锚，向前吞掉**紧邻的那一条** `user/message`
+    （那一轮的用户输入就在 `begin_run` 之前一行），向后取本 run 的**最后一个**事件。
+    得到的区间与 V1 的 `_write_memories(session, arms.memory_event_start)` 语义对齐——
+    那边的起点正是 `session.mark()`，即那条 user 消息**之前**。
 
     刻意取**连续区间**而不是"筛出所有带该 run_id 的事件"：会话逐轮串行，所以区间内的事件
     按定义都属于这一轮；而过滤器会把这一轮里其它 `run_id` 为 `None` 的事件重新丢掉——
     那正是本条修正要防的那个错误，写回过滤器就等于把 bug 换个地方重写一遍。
+
+    # 为什么只吞**一条**而不是"一路往前吞"（T8 两轴审查后收紧）
+
+    初版写成 `while ... == USER_MESSAGE`，理由是"上一轮的末尾是 `run/completed`，会挡住
+    它"。那个论证只覆盖了"上一轮正常终结"这一种形态：`_drive` 在 `yield user_event` 与
+    `begin_run` 之间被断连时，user 事件**已经落盘**，而 `run/started` 与终态都不会写
+    （`_TerminalFinalizer` 对 `run_id is None` 直接 return）⇒ 日志里会出现**连续两条**
+    `user/message`，`while` 会把那条孤儿一并吞进本轮（它会进 `current_run`、拿到别名，
+    于是可以被当作本轮证据）。改成 `if` 之后，生产里两者在**合法输入上等价**
+    （`begin_run` 紧邻 user 消息，且 `checkpoint/saved` 明确不写会话事件、不会插进中间），
+    而孤儿形态下不再越界——错误方向变成"少吞"，那只会退化成初版那个"用户原话缺席"的
+    可观测降级，不会把别的轮次拉进来。**不**写"该事件必须不带 `run_id`"那个附加条件：
+    生产里它恒为真，是死分支，而且挡不住孤儿。
     """
     owned = [index for index, event in enumerate(events) if event.run_id == run_id]
     if not owned:
         return None
     start = owned[0]
-    # 向前只吞**紧邻的 user/message**：那一轮的用户输入就在 `begin_run` 之前一行。
-    # 不写额外条件（例如"该事件必须不带 run_id"）——生产里 user 消息的 `run_id` 恒为
-    # `None`，那种判断永远为真，就是死分支；而"会不会一路吞到上一轮"由本循环自己的条件
-    # 挡住：上一轮的末尾是 `run/completed` / `run/failed`，不是 `user/message`。
-    while start > 0 and events[start - 1].type == USER_MESSAGE:
+    if start > 0 and events[start - 1].type == USER_MESSAGE:
         start -= 1
     return start, owned[-1] + 1
 

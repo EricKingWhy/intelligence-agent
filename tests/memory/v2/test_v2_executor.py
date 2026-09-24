@@ -152,8 +152,11 @@ def _run_events() -> list[SessionEvent]:
     就是别名（T6b 修的 P0）。用真 id 写用例等于在测一个模型到不了的世界。
     """
     return [
+        # 本轮 user 事件**不带 run_id**：生产里 `_drive` 先写它、再 `begin_run`，且
+        # `Session.append` 的 `run_id` 默认就是 `None`（T8 两轴审查 P4：此处原先写
+        # `run_id="run-1"`，正是一个产出方到不了的形状——本票反复惩罚的那一类）。
         SessionEvent(event_id="u:1", seq=1, type=USER_MESSAGE, session_id="session-1",
-                     run_id="run-1", data={"content": "请以后都用 pnpm 装依赖"}),
+                     run_id=None, data={"content": "请以后都用 pnpm 装依赖"}),
         SessionEvent(event_id="m:1", seq=2, type=MODEL_COMPLETED, session_id="session-1",
                      run_id="run-1", data={"content": "好的"}),
     ]
@@ -763,6 +766,12 @@ async def test_adjudication_sees_bounded_relevant_active_memories(env: Env) -> N
     existing = await env.service.create(make_draft(content=content), USER_A)
     # 写记录与索引收敛是两件事（`MemoryV2Service.search` 刻意不顺手 flush）：这里显式
     # 扮演 relay 跑过一遍，否则检索看不到刚写的那条。
+    #
+    # ⚠ **这一行是本用例唯一一处"生产到不了的世界"**（T8 两轴审查 P2 指出，保留但显式登记）：
+    # `MemoryV2IndexRelay.flush()` 目前**没有任何生产驱动**（全仓只有用例调它，见 ADR-0043
+    # §D11）⇒ 真实部署里索引恒空、"相似记忆"恒为空。所以本用例证明的是"**检索非空时**执行器
+    # 把结果按最小可见面喂给裁决"，而不是"生产里裁决一定看得到相似记忆"——后者要等召回那一票
+    # 把 relay 驱动接上。断言不因此失效：R2 的字面上界（≤ 10）两边都成立。
     await env.index.upsert(existing)
     invoker = FakeInvoker(
         formation=[_formation_candidates(_candidate())],
@@ -801,8 +810,15 @@ async def test_the_formation_call_carries_the_safe_projection(env: Env) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_secret_never_reaches_the_model_input_record_or_event(env: Env) -> None:
-    """AC9：用户消息与候选里的凭证，既进不了模型输入，也进不了记录与事件。"""
+async def test_a_secret_never_reaches_the_model_input_record_or_event(
+    env: Env, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC9：用户消息与候选里的凭证，既进不了模型输入，也进不了记录、事件与**日志**。
+
+    「log or trace」那一支此前没有专门用例（T8 两轴审查 P2）——实现侧本就不打印内容，
+    但那是"看起来安全"，不是"被证明安全"。这里把级别开到 DEBUG 抓整个执行过程的日志。
+    """
+    caplog.set_level("DEBUG")
     secret_text = f"我的 key 是 {SECRET}，以后就用它"
     events = [
         SessionEvent(event_id="u:1", seq=1, type=USER_MESSAGE, session_id="session-1",
@@ -830,6 +846,10 @@ async def test_a_secret_never_reaches_the_model_input_record_or_event(env: Env) 
     assert await _active(env) == []
     # 3) 事件里没有凭证
     assert SECRET not in json.dumps([data for _t, data, _r in sink.events], ensure_ascii=False)
+    # 4) 日志里也没有凭证。先证明**仪器有读数**：级别开到 DEBUG 后一条日志都没有，
+    #    说明抓取没生效，下面那条否定断言就是空的（假绿）。
+    assert caplog.records, "DEBUG 级别下零日志 ⇒ 上一条否定断言没有判别力"
+    assert SECRET not in caplog.text, "凭证进了日志"
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,11 @@ def decide_run_end_eligibility(
     """这个 run 终结时该不该入队一个记忆形成 job（`eligible=True` ⇒ 恰好一个，R1）。"""
     if not extraction_enabled:
         return _skip(FormationSkipReason.EXTRACTION_DISABLED)
+    # 下面两条（取消类 / 未获批的终态）在**生产**路径上到不了这里：运行时只有正常完成臂
+    # 与两张获批的受控失败臂会通知记忆形成（`agent/runtime.py::_notify_memory_formation`
+    # 的全部调用点），取消 / 上下文超限 / 异常三条臂压根不调它。它们仍然留着——这是纯函数
+    # 层的第二道兜底，判据是"白名单之外一律 fail closed"，将来有人给新臂接上通知时，
+    # 错的那一支不会静默通过。（T8 两轴审查 P3：runtime 侧的注释原读起来像这两条可达。）
     if terminal_status in CANCELLED_TERMINAL_STATUSES:
         return _skip(FormationSkipReason.CANCELLED)
     if terminal_status not in ELIGIBLE_TERMINAL_STATUSES:

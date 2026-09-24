@@ -181,9 +181,22 @@ async def _wire_memory_formation(
     if sessions is None or wiring.memory is None:
         return
     from agent_harness.memory.v2.assembly import build_memory_formation
+    from agent_harness.model.config import ConfigError
 
     try:
         runner = await build_memory_formation(settings, sessions=sessions)
+    except ConfigError as error:
+        # 配置类故障**响亮上抛**，不降级（T8 两轴审查 P2 修）：`roles.resolve_memory_roles`
+        # 自己的契约就是"配错了要响亮"（缺 `MODEL_API_KEY` / provider 名非法都抛
+        # `ConfigError`），而 `ConfigError` 不是 `CapabilityError` 的子类 —— 下面那条宽
+        # `except Exception` 原本会把它一起吞掉。后果是把"你配错了"降级成"你没配"：
+        # 运维看到 `degradations["memory_v2"] = init_failed`，而真正的原因（`AGENT_MODELS`
+        # 坏）只留在 traceback 里。与主循环对 `CapabilityError` 的分流（见本文件 `wire_capabilities`
+        # 的 `except CapabilityError: raise`）及 `_wire_mcp` 的 `ConfigError → CapabilityError`
+        # 是同一条纪律：**降级只留给外部/环境故障**。
+        raise CapabilityError(
+            f"capability 'memory' 的 V2 形成管线配置错误：{error}", code="init_failed"
+        ) from error
     except Exception:
         logger.warning(
             "V2 记忆形成装配失败，按 %s 降级跳过（V1 记忆不受影响）",

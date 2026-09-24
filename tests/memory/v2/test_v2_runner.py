@@ -133,8 +133,8 @@ def _seed_run(
     """往会话日志里写一轮，**顺序与 `_drive` 逐条一致**。
 
     生产顺序是：先写 user 消息，再 `begin_run`（写 `run/started`），最后模型回复。
-    关键的一条：`Session.append` 的 `run_id` **没有默认值**，所以本轮 user 事件的
-    `run_id` 是 `None`。
+    关键的一条：写 user 消息时**不传 `run_id`**（`Session.append` 的 `run_id` 默认就是
+    `None`），所以本轮 user 事件的 `run_id` 是 `None`。
 
     早先这里给 user 消息补了 `run_id`，于是 fixture 描述了一个**产出方到不了的世界**：
     "本轮用户发言属于本轮"这件事靠一个生产里不存在的字段成立。后果是 `_slice` 按
@@ -841,7 +841,8 @@ def test_the_users_own_message_lands_in_the_run_slice(env: Env) -> None:
     events = env.sessions.read_events(SESSION)
     user_event = next(event for event in events if event.type == USER_MESSAGE)
     assert user_event.run_id is None, (
-        "生产事实：`_drive` 先写 user 消息再 begin_run（`Session.append` 的 run_id 无默认值）"
+        "生产事实：`_drive` 先写 user 消息、再 begin_run，且写它时不传 run_id"
+        "（`Session.append` 的 run_id 默认就是 `None`）"
     )
 
     bounds = run_slice_bounds(events, RUN)

@@ -491,6 +491,29 @@ def test_a_procedural_candidate_from_one_qualifying_event_is_rejected() -> None:
     ]
 
 
+def test_a_procedural_candidate_citing_one_qualifying_event_twice_is_rejected() -> None:
+    """**"独立"这一半的判别性锁**（T8 两轴审查 P2 补）。
+
+    R5 要求两条**独立**的 success/correction 事件，实现是集合去重后的交集大小 ≥ 2
+    （`policy._meets_procedural_threshold`）。为什么不能靠上面那条
+    `..._from_two_identical_evidence_items_is_rejected` 兜住：那条用的是 `m:1`（助手文本），
+    它被拒的理由是**不属于合格事件**，而不是"不独立"——实测把门槛实现改成"按引用条数计数"
+    （丢掉集合去重）之后，`test_v2_policy.py` 原来的 101 条**全绿**，那个洞静默存活。
+
+    这条用 `t:ok1`（真读得出 `ok` 的 `tool/result`）连引两次：去重后合集大小是 1，
+    门槛必须**不满足**。变异（去掉门槛里的集合去重）会让它转红——这是它存在的理由。
+    """
+    outcome = _select([_candidate(
+        kind="procedural", payload=_payload("procedural"),
+        evidence=[
+            _evidence("t:ok1", "tool", "成功了"),
+            _evidence("t:ok1", "tool", "成功了"),
+        ])])
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ], "同一条合格事件引两次只算一条——否则一条事件就能凭空造出一条自动规则（R5）"
+
+
 def test_an_unreadable_tool_result_does_not_count_as_a_qualifying_event() -> None:
     """`UNKNOWN`（`content` 不是 `ToolResult` 的 JSON）不能凑门槛。
 

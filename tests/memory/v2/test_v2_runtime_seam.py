@@ -105,7 +105,9 @@ def seeded(tmp_path: Any) -> _Seeded:
     """run/started → 真实用户发言 → 模型成功回复（eligibility 眼里的最小合格形状）。
 
     **事件顺序与 `_drive` 逐条一致**，包括那条容易写错的事实：user 消息在 `begin_run`
-    之前写，因此它的 `run_id` 是 `None`（`Session.append` 的 run_id 没有默认值）。
+    之前写，**且调用点不传 `run_id`**，因此它的 `run_id` 是 `None`。（准确说法是
+    "`Session.append` 的 `run_id` 默认就是 `None`，`_drive` 没传"——本文件此前写成
+    "没有默认值"，措辞不实，2026-09-24 T8 两轴审查更正。）
     fixture 若在这里补上 run_id，就等于把接缝描述成一个产出方到不了的世界。
     """
     session = make_session(tmp_path)

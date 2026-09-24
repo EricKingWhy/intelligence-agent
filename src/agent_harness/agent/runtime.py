@@ -1590,8 +1590,11 @@ class AgentRuntime:
         STATUS_IDENTICAL_TOOL_FAILURE_LOOP），调用点只传一次。
 
         #298 T7b：`reason` 同时就是交给记忆形成的终态（AC1 的"两张获批的受控失败"）——
-        它在 `eligibility.ELIGIBLE_TERMINAL_STATUSES` 里，取消类与 `failed` 不在，
-        所以"走这条臂"不等于"该建 job"，判定留给 eligibility。
+        它在 `eligibility.ELIGIBLE_TERMINAL_STATUSES` 里，取消类与 `failed` 不在。
+        ⚠ 准确说：**取消 / 上下文超限 / 异常三条臂压根不调 `_notify_memory_formation`**
+        （只有本臂与正常完成臂调），所以 AC1 的"被排除终态一个都不建"在生产上由"不通知"
+        兑现；`eligibility` 的白名单与 `CANCELLED` / `UNSUPPORTED_TERMINAL_FAILURE` 两条是
+        **第二道纯函数层的兜底**（T8 两轴审查 P3 指出原文读起来像这两条可达）。
         """
         arms.telemetry.run_failed(reason)
         end_event = arms.terminal.failure_terminal(

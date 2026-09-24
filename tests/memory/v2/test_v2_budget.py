@@ -37,6 +37,7 @@ from agent_harness.memory.v2.budget import (
     MemoryModelRole,
     next_attempt,
 )
+from agent_harness.memory.v2.executor import DegradedReason
 from agent_harness.memory.v2.formation import ModelOutputError
 from agent_harness.model.fallback import is_transient_model_error
 from agent_harness.model.stall import ModelStallError
@@ -411,3 +412,18 @@ def test_the_schema_case_is_the_formation_contract_error() -> None:
     assert issubclass(ModelOutputError, ValueError)
     assert is_transient_model_error(ModelOutputError("x")) is False
     assert next_attempt(FIRST_ATTEMPT, ModelOutputError("x"), has_fallback=True) is None
+
+
+def test_degraded_reasons_cover_every_budget_dimension() -> None:
+    """`executor.DegradedReason` 的前三个必须与 `BudgetDimension` **逐字对齐**。
+
+    `executor.py` 的 docstring 一直宣称"前三个逐字对齐、有用例钉着"，但那个用例名当时是
+    未填的 `test_...` 占位符——等于把"未证"写成"已证"（T8 两轴审查 P3）。这条把它兑现。
+
+    为什么仍需要一条静态锁：漂移的后果本身是响亮的（`DegradedReason(exhausted.dimension
+    .value)` 会抛 `ValueError`），但"响亮"只在真跑到预算耗尽那条分支时才发生；这里锁的是
+    "在跑到它之前，两套名字就没有分叉"。
+    """
+    assert {dimension.value for dimension in BudgetDimension} <= {
+        reason.value for reason in DegradedReason
+    }, "预算维度必须都能表示成降级归因码（executor 直接拿 dimension.value 构造它）"
