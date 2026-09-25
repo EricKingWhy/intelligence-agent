@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -252,6 +253,39 @@ async def test_automatic_evidence_cannot_supersede_or_invalidate_user_edit(gover
     assert (await store.get(edited.id, TRUSTED)).status is MemoryStatus.ACTIVE
 
 
+@pytest.mark.asyncio
+async def test_edit_cannot_resurrect_a_memory_deleted_after_its_initial_read(
+    governance, monkeypatch,
+):
+    service, store, _index = governance
+    original = await service.create(make_draft(content="需要删除的权威事实"), TRUSTED)
+    insert_started = asyncio.Event()
+    resume_insert = asyncio.Event()
+    insert = store._insert
+
+    async def pause_before_insert(*args, **kwargs):
+        insert_started.set()
+        await resume_insert.wait()
+        return await insert(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_insert", pause_before_insert)
+    edit_task = asyncio.create_task(store.update(
+        original.id,
+        make_draft(content="删除后不应复活", source_type=SourceType.USER_EDIT),
+        TRUSTED,
+    ))
+    await asyncio.wait_for(insert_started.wait(), timeout=1)
+    try:
+        receipt = await service.delete(original.id, TRUSTED)
+        assert receipt.deleted
+    finally:
+        resume_insert.set()
+
+    with pytest.raises(ValueError, match="changed|no longer active"):
+        await edit_task
+    assert await store.list_records(TRUSTED) == []
+
+
 def test_explicit_command_match_rejects_negated_intent():
     assert explicit_remember_matches("Please remember I prefer tea", "I prefer tea")
     assert explicit_remember_matches("Can you remember that I prefer tea?", "I prefer tea")
@@ -320,6 +354,13 @@ def test_explicit_command_match_rejects_negated_intent():
     )
     assert not explicit_remember_matches(
         "Remember tea and I don't want the system to include my diagnosis in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and keep my diagnosis out of memory: I have lupus", "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and I do not consent to storing my diagnosis in memory: I have lupus",
         "I have lupus",
     )
     assert not explicit_remember_matches(
@@ -425,6 +466,10 @@ async def test_remember_tool_rejects_unbound_or_negated_content(governance, tmp_
         ("excluded-from-memory", "Remember tea and exclude my diagnosis from memory: I have lupus",
          "I have lupus"),
         ("omit-from-memory", "Remember tea and omit my diagnosis from memory: I have lupus",
+         "I have lupus"),
+        ("keep-out-of-memory", "Remember tea and keep my diagnosis out of memory: I have lupus",
+         "I have lupus"),
+        ("no-consent-to-store", "Remember tea and I do not consent to storing my diagnosis in memory: I have lupus",
          "I have lupus"),
         ("do-not-want-include", "Remember tea and I don't want to include my diagnosis in memory: I have lupus",
          "I have lupus"),

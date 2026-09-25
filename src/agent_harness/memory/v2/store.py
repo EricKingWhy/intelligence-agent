@@ -274,11 +274,14 @@ class SqliteMemoryV2Store:
             ):
                 raise ValueError("automatic memory matches a deleted source")
             if previous is not None:
-                # 先让出 root_id 上的 active 槽位，再插入新版本（部分唯一索引不允许两条 active）。
-                await conn.execute(
+                # 更新必须仍命中最初读取的 active 版本；delete/update 可能在读写间提交。
+                cursor = await conn.execute(
                     "UPDATE memory_v2_records SET status=?, superseded_by=?, updated_at=? "
-                    "WHERE memory_id=?",
-                    (MemoryStatus.SUPERSEDED.value, memory_id, now, previous["memory_id"]))
+                    "WHERE memory_id=? AND root_id=? AND version=? AND status=?",
+                    (MemoryStatus.SUPERSEDED.value, memory_id, now, previous["memory_id"],
+                     previous["root_id"], previous["version"], MemoryStatus.ACTIVE.value))
+                if cursor.rowcount != 1:
+                    raise ValueError("memory changed or is no longer active")
                 await self._enqueue(conn, previous["memory_id"], MemoryOperationV2.DELETE,
                                     previous["tenant_id"], previous["user_id"], previous["scope"],
                                     previous["project_id"])
