@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -15,8 +16,11 @@ from pathlib import Path
 import jwt
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
-from agent_harness.capability.base import DegradeReason
+from agent_harness.capability.base import CapabilityRegistry, DegradeReason
+from agent_harness.capability.config import parse_capabilities_config
+from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.identity import (
     IdentityContext,
@@ -25,6 +29,7 @@ from agent_harness.identity import (
 )
 from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.types import MemoryScope, memory_session_var
+from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.tools import _RememberV2Args
 from agent_harness.memory.v2.types import (
     MemoryKind,
@@ -109,6 +114,63 @@ def memory_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app = create_app(settings, enable_cors=False)
     with TestClient(app) as client:
         yield client, components
+
+
+@pytest.mark.asyncio
+async def test_v2_governance_api_works_without_session_store_and_closes_in_its_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    components = _FakeMemoryComponents()
+    monkeypatch.setattr(
+        "agent_harness.capability.factories.build_memory_components",
+        lambda settings, *, provider="builtin": components,
+    )
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+        jwt_secret=_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
+    )
+    app = create_app(settings, enable_cors=False)
+    owner_loop = asyncio.get_running_loop()
+    start_loops = []
+    close_loops = []
+    original_start = MemoryV2Service.start_tombstone_purger
+    original_aclose = MemoryV2Service.aclose
+
+    def _track_start(service, **kwargs):
+        start_loops.append(asyncio.get_running_loop())
+        return original_start(service, **kwargs)
+
+    async def _track_aclose(service):
+        close_loops.append(asyncio.get_running_loop())
+        await original_aclose(service)
+
+    monkeypatch.setattr(MemoryV2Service, "start_tombstone_purger", _track_start)
+    monkeypatch.setattr(MemoryV2Service, "aclose", _track_aclose)
+    async with app.router.lifespan_context(app):
+        state = app.state.agent
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(
+            registry, parse_capabilities_config(settings.capabilities), settings=settings,
+        )
+        state._registry, state._wiring = registry, wiring
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            settings_response = await client.get(
+                "/api/memory-settings", headers=_auth(_ALICE),
+            )
+            filtered_response = await client.get(
+                "/api/memories?kind=semantic", headers=_auth(_ALICE),
+            )
+
+        assert settings_response.status_code == 200, settings_response.text
+        assert set(settings_response.json()) == {"extraction_enabled", "recall_enabled"}
+        assert filtered_response.status_code == 200, filtered_response.text
+        assert filtered_response.json() == []
+
+    assert start_loops == close_loops == [owner_loop]
+    assert components.closed
 
 
 async def _seed(components: _FakeMemoryComponents, identity: IdentityContext,

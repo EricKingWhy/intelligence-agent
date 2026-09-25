@@ -46,8 +46,11 @@ from agent_harness.session import (
     RUN_STARTED,
     USER_MESSAGE,
     JsonlSessionStore,
+    Session,
     SessionEvent,
+    run_context_var,
 )
+from agent_harness.session.event import MEMORY_DEGRADED
 from tests.memory.v2._records import make_draft
 
 IDENTITY = IdentityContext("tenant-a", "user-a", ["user"])
@@ -236,6 +239,39 @@ async def test_durable_recall_setting_gates_the_existing_context_provider(govern
         assert provider.calls == 2
     finally:
         identity_context_var.reset(identity_token)
+
+
+@pytest.mark.asyncio
+async def test_recall_settings_failure_is_a_single_redacted_degradation(tmp_path):
+    class _BrokenService:
+        async def get_settings(self, _identity):
+            raise RuntimeError("secret settings backend detail")
+
+    class _Provider:
+        async def select(self, *_args):
+            raise AssertionError("recall must not run when its setting is unavailable")
+
+    session = Session.start(
+        JsonlSessionStore(root=tmp_path / "sessions"), session_id="session-settings-failed",
+    )
+    guarded = _MemorySettingsContextProvider(_Provider(), _BrokenService())
+    identity_token = set_identity_context(IDENTITY)
+    run_token = run_context_var.set("run-settings-failed")
+    try:
+        assert await guarded.select(session, 100) == []
+    finally:
+        run_context_var.reset(run_token)
+        identity_context_var.reset(identity_token)
+
+    degraded = [event for event in session.events if event.type == MEMORY_DEGRADED]
+    assert len(degraded) == 1
+    assert degraded[0].run_id == "run-settings-failed"
+    assert degraded[0].data == {
+        "operation": "recall", "stage": "retrieval",
+        "reason_code": "retrieval_unavailable", "job_id": None,
+        "attempts": 1, "fallback_used": False,
+    }
+    assert "secret settings backend detail" not in str(degraded[0].data)
 
 
 @pytest.mark.asyncio

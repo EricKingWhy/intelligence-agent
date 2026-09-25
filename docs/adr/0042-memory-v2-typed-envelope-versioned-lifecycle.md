@@ -11,10 +11,11 @@
   - ADR-0008（Memory Capability 架构）、ADR-0009（多租户身份隔离 / 5 层 scope 枚举）、
     ADR-0024（Memory provider seam）、ADR-0026（硬删 + outbox 操作类型 + last-write-wins）、
     ADR-0031（`retrieve_memory` / `remember_this`）
-- **Supersedes**: **无**。本 ADR 在 MEM-V2-7 之前**不取代任何旧决策**——V1 的行为逐字保留。
+- **Supersedes**: **无整体取代**。V1 的存储、数据与未迁移治理契约在 MEM-V2-7 前继续保留；
+  #299/#300 明确登记的自动召回与显式命令切换属于本 ADR 的窄范围例外。
 - **将于 MEM-V2-7 supersede 的旧决策**：§D10 逐条列出（这是 AC8 要求的显式登记）。
 - **Refines**: ADR-0008 子决策 1（"scope 只实现 USER + SESSION"）——V2 新开
-  `user_global` / `project` 两档，**但不改动 V1 的 `USER` / `SESSION` 行为**。
+  `user_global` / `project` 两档，不改 V1 的 `USER` / `SESSION` 存储与授权语义。
 
 ---
 
@@ -39,7 +40,7 @@ PRD 的出发点是三条已被观察到的缺陷，不是"想要更漂亮的 sc
 | ADR-0026 D1：`update` = `upsert by id`；`forget` = 硬删无墓碑 | V2 的 `update` 派生新版本并保留历史；`invalidate` 保留内容 | V2 的 `update` / `invalidate` 是**新方法**，与 V1 的 `update` / `forget` 并存。硬删与墓碑归 MEM-V2-7 |
 | ADR-0026 D3：outbox 的"脏 `operation` 按 upsert 自愈" | V2 outbox 是**新表**，可以带 `CHECK` 约束 | V2 outbox 装 `CHECK (operation IN ('upsert','delete'))`，不继承 D5 的"补列迁移"路径（新表没有老库形状） |
 | ADR-0024 D1：provider 边界 = 整个 `MemoryComponents` 包 | 新增记忆操作面会不会变成"第二套 provider 体系"？ | **不冲突，且必须遵守**：V2 活在 `builtin` provider 内部；对外新增 `MemoryV2Capability` Protocol 只是 `builtin` 内部的端口，不新增 provider |
-| ADR-0031：`retrieve_memory` / `remember_this` / `forget_memory` 指向 V1 capability | V2 有新的操作面 | 本票**不动**这三个工具（Must Not Do）。它们指向 V2 的时机归 MEM-V2-7 |
+| ADR-0031：`retrieve_memory` / `remember_this` / `forget_memory` 原指向 V1 capability | V2 有新的操作面 | #299 将 `retrieve_memory` 接到 V2 recall；#300 将 `remember_this` / `forget_memory` 接到 V2 显式命令。工具名与统一执行路径保持不变；V1 数据及存储兼容路径的退场归 MEM-V2-7 |
 
 ### 1.3 为什么是 expand 而不是 cutover
 
@@ -179,8 +180,9 @@ active 检索面。V2 **没有硬删入口**——墓碑/删除 API 是 MEM-V2-7
 
 ### D10 — 将在 MEM-V2-7 被取代的旧决策（**AC8 的显式登记**）
 
-下列条目**今天仍然有效**，V1 逐字按原样运行。它们是"clean-slate cutover"时要处理的对象，
-MEM-V2-7 必须**在票面上**显式取代它们（而不是"顺手改掉"）：
+下表登记 V1 旧决策及其当前处理状态：未迁移的兼容路径在 MEM-V2-7 前继续适用；第 6 条的
+工具接线已由 #299/#300 局部切换，自动召回安全边界见 D11。MEM-V2-7 必须**在票面上**显式
+处理剩余旧路径（而不是"顺手改掉"）：
 
 | # | 旧决策（锚点） | cutover 时的处置 | 为什么必须显式取代 |
 | --- | --- | --- | --- |
@@ -189,7 +191,7 @@ MEM-V2-7 必须**在票面上**显式取代它们（而不是"顺手改掉"）�
 | 3 | ADR-0026 D1：`update` = `upsert by id`（同 id 覆盖，无历史） | 由 V2 的"派生新版本 + 旧版 superseded"取代 | 同一动词的**语义反转**（覆盖 vs 追加）。两条语义并存会让"更新了一条记忆"有两种可观察结果 |
 | 4 | ADR-0026 D1 + Consequences ①：`forget` = **硬删无墓碑** | 引入 §6.1 的 tombstone 契约（`deleted` 状态 + 只留 hash）与最终删除 API | 用户当初选硬删是在"没有 tombstone 契约"的前提下做的；PRD §6.1 新增了该契约，取舍前提变了 |
 | 5 | ADR-0026 D3 / D5：outbox 的"脏 `operation` 按 upsert 自愈"+ 就地 `ALTER TABLE` 补列迁移 | V2 outbox 有 `CHECK` 约束，不需要该兜底；cutover 后老库迁移路径退出 | 兜底是**无 CHECK 老库上的唯一防线**，它随老库一起退役。留着会让"未识别的 operation 值"在 V2 里也变成可接受输入 |
-| 6 | ADR-0031 D2/D3/D6（§3 的工具契约面）：`retrieve_memory` / `remember_this` / `forget_memory` 指向 V1 capability 与 `MemoryScope.USER` | #300 已将 `remember_this` / `forget_memory` 改为 V2 显式命令；`retrieve_memory` 仍待 #299 的 V2 recall adapter；#303 负责最终淘汰 V1 | 工具是对模型的**契约**，它们的 `description` 与环境行为必须与底层一致；并行期须明确每个工具当前指向，不能把整个切换误记为同一次 cutover |
+| 6 | ADR-0031 D2/D3/D6（§3 的工具契约面）：三个记忆工具原指向 V1 capability 与 `MemoryScope.USER` | #299 已将固定名称 `retrieve_memory` 接到 V2 recall；#300 已将 `remember_this` / `forget_memory` 接到 V2 显式命令；MEM-V2-7 负责最终淘汰剩余 V1 兼容路径 | 工具是对模型的**契约**，它们的 `description` 与环境行为必须与底层一致；并行期须明确每个工具当前指向，不能把整个切换误记为同一次 cutover |
 | 7 | ADR-0008 子决策 1：V1 最小闭环（`update`/`delete` 留接口）+ 子决策 2 的三原语面（`store`/`recall`/`search`） | 由 V2 的七方法面取代 | ADR-0026 已部分 refines（动词纳入交付），但**面本身**（三原语 vs 七方法）到 cutover 才收敛 |
 | 8 | ADR-0008 子决策 3/4 中"LangMem 通过 `BaseStore` 适配我们的存储" | LangMem 在 formation / consolidation 侧的去留，由 MEM-V2-2 决定后在此收口 | 本票**不动** LangMem（V2 尚未接自动写回）；此处登记是为了让 MEM-V2-7 不能以"没人提过"为由跳过 |
 
@@ -205,7 +207,9 @@ MEM-V2-7 必须**在票面上**显式取代它们（而不是"顺手改掉"）�
 - 不引入 Graphiti 或图数据库。
 - 不让 Milvus 成为事实源。
 - 不激活 V2 的 run-end 自动写回。
-- 不改 V1 的任何行为、不删任何真实记忆数据。
+- 不改 V1 schema、存储数据或授权语义，也不删任何真实记忆数据。#299 接入 V2 自动召回时，
+  V1 自动召回不再向特权 `SystemMessage` 注入内容；V2 故障时也不回退到该路径。V1 显式工具的
+  V2 切换由 #300 登记，剩余 V1 路径的最终退场归 MEM-V2-7。
 
 ### D12 — #300 增加 V2 治理生命周期，不提前 cutover
 

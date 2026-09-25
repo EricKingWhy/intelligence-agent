@@ -191,11 +191,6 @@ async def _wire_memory_v2(
         provider for provider in wiring.context_providers
         if getattr(provider, "name", None) != "memory"
     ]
-    if sessions is None:
-        # Without the session ledger, V2 cannot resolve trusted project context. Keep the
-        # V1 capability and explicit tools, but leave automatic recall disabled.
-        return
-
     from agent_harness.model.config import ConfigError
 
     try:
@@ -210,11 +205,14 @@ async def _wire_memory_v2(
 
         vector_store = getattr(wiring.memory, "vectors", None)
         service = await build_memory_v2_service(settings, vector_store=vector_store)
-        roles = resolve_memory_roles(settings)
-        runner = await build_memory_formation(
-            settings, sessions=sessions, memory_v2=service,
-            vector_store=vector_store, workspace_index=workspace_index, roles=roles,
-        )
+        if sessions is None:
+            runner = None
+        else:
+            roles = resolve_memory_roles(settings)
+            runner = await build_memory_formation(
+                settings, sessions=sessions, memory_v2=service,
+                vector_store=vector_store, workspace_index=workspace_index, roles=roles,
+            )
     except ConfigError as error:
         raise CapabilityError(
             f"capability 'memory' 的 V2 形成管线配置错误：{error}", code="init_failed"
@@ -228,23 +226,25 @@ async def _wire_memory_v2(
         return
 
     wiring.memory_v2 = service
-    v2_context = MemoryV2ContextProvider(
-        service, workspace_index=workspace_index,
-        timeout_seconds=settings.memory_search_timeout_seconds,
-    )
-    wiring.context_providers.append(_MemorySettingsContextProvider(v2_context, service))
+    if sessions is not None:
+        v2_context = MemoryV2ContextProvider(
+            service, workspace_index=workspace_index,
+            timeout_seconds=settings.memory_search_timeout_seconds,
+        )
+        wiring.context_providers.append(_MemorySettingsContextProvider(v2_context, service))
     for contributor in wiring.tool_contributors:
-        if isinstance(contributor, _MemoryCapabilityProvider):
+        if isinstance(contributor, _MemoryCapabilityProvider) and sessions is not None:
             contributor.use_v2_retrieval()
             contributor.use_v2_commands(
                 service, sessions, workspace_index=workspace_index,
             )
-    wiring.tool_contributors.append(_ToolsProvider([
-        RetrieveMemoryV2Tool(
-            service, workspace_index=workspace_index,
-            timeout_seconds=settings.memory_search_timeout_seconds,
-        ),
-    ]))
+    if sessions is not None:
+        wiring.tool_contributors.append(_ToolsProvider([
+            RetrieveMemoryV2Tool(
+                service, workspace_index=workspace_index,
+                timeout_seconds=settings.memory_search_timeout_seconds,
+            ),
+        ]))
     service.start_tombstone_purger()
     wiring.lifecycle.append(service)
     if runner is not None:
@@ -512,6 +512,8 @@ class _MemorySettingsContextProvider:
 
         from agent_harness.identity import get_identity_context
         from agent_harness.memory.v2.types import TrustedMemoryIdentity
+        from agent_harness.session import run_context_var
+        from agent_harness.session.event import MEMORY_DEGRADED
 
         identity = get_identity_context()
         if "user" not in identity.scopes:
@@ -525,6 +527,21 @@ class _MemorySettingsContextProvider:
                 "V2 memory settings unavailable; skipping automatic recall (%s)",
                 type(error).__name__,
             )
+            try:
+                reason_code = (
+                    "retrieval_timeout" if isinstance(error, TimeoutError)
+                    else "authorization_denied" if isinstance(error, PermissionError)
+                    else "retrieval_unavailable"
+                )
+                session.append(MEMORY_DEGRADED, {
+                    "operation": "recall", "stage": "retrieval",
+                    "reason_code": reason_code, "job_id": None,
+                    "attempts": 1, "fallback_used": False,
+                }, run_id=run_context_var.get())
+            except Exception:  # noqa: BLE001 — a logging failure must not fail this optional provider.
+                logging.getLogger(__name__).warning(
+                    "Could not persist Memory V2 settings degradation",
+                )
             return []
         if not settings.recall_enabled:
             return []
@@ -685,10 +702,10 @@ async def wire_capabilities(
     失败的能力不会出现在 Registry 里，Consumer 走 optional() 的 None 降级路径
     （08 §7 验收：Optional Provider 故障可以降级）；REQUIRED_CORE 则向上抛。
 
-    `sessions`（#298 T7b）：运行时空在写的那个会话日志存储。装配 V2 记忆形成管线要它
-    （执行 job 时按 `(session_id, run_id)` 从日志切这一轮的事件）。**不提供 = 不装配 V2
-    形成**（`memory_formation` 恒 None）：测试与不跑 V2 的调用方因此零改动，而生产的两处
-    调用点（`web/app.py` 的 `get_wiring` / `assemble_wiring`）各自把自己手上的 store 传进来。
+    `sessions`（#298 T7b）：运行时空在写的那个会话日志存储。治理 service 独立装配；V2
+    自动召回、显式命令与形成管线需要会话身份或事件来源，缺少 store 时保持关闭。形成 job
+    按 `(session_id, run_id)` 从日志读取本轮事件。生产的两处调用点（`web/app.py` 的
+    `get_wiring` / `assemble_wiring`）各自把手上的 store 传进来。
     """
     wiring = CapabilityWiring()
     for name, cfg in config.items():

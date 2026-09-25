@@ -231,13 +231,13 @@ async def test_the_pipeline_hangs_on_the_wiring_and_its_lifecycle(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_without_a_session_store_v1_explicit_tools_remain_but_auto_context_is_disabled(
+async def test_without_a_session_store_governance_and_v1_tools_remain_but_auto_context_is_disabled(
     tmp_path, monkeypatch,
 ) -> None:
-    """调用方不传会话日志 ⇒ V1 capability 与显式工具保留，不走特权自动注入。
+    """调用方不传会话日志 ⇒ 治理 service 与 V1 工具保留，不走特权自动注入。
 
     `sessions=None` 时没有可安全解析可信项目身份的 V2 recall 上下文；因此自动 recall 为空，
-    但 V1 capability、写入器和显式检索工具仍可用。
+    但治理 service、V1 capability、写入器和显式工具仍可用。
     """
     fake = _patch_components(monkeypatch)
     wiring = await wire_capabilities(
@@ -245,6 +245,8 @@ async def test_without_a_session_store_v1_explicit_tools_remain_but_auto_context
         settings=_settings(tmp_path),
     )
 
+    assert wiring.memory_v2 is not None, "治理 API 不依赖 session store"
+    assert wiring.memory_v2 in wiring.lifecycle
     assert wiring.memory_formation is None
     assert wiring.memory is fake and wiring.memory_writer is fake.writeback
     assert wiring.context_providers == []
