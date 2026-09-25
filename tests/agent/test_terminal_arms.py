@@ -30,6 +30,11 @@ from typing import Any
 
 import pytest
 
+from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
+    TRIGGER_LOCAL_TURNS,
+    LaunchRunBudget,
+)
 from agent_harness.agent.runtime import (
     AgentRuntime,
     _RunFinalizer,
@@ -42,7 +47,7 @@ from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
+    STATUS_PAUSED,
     AgentRunResult,
 )
 from agent_harness.context.compactor import ContextWindowExceededError
@@ -58,6 +63,7 @@ from agent_harness.session import (
     REASONING_INTERRUPTED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_PAUSED,
     RUN_STARTED,
     TEXT_DELTA,
     Session,
@@ -562,7 +568,7 @@ async def test_completed_arm_order_terminal_then_memory_then_checkpoint(
 
 
 # ---------------------------------------------------------------------------
-# 失败终态臂（max_steps / 同错熔断硬触发共用）
+# 失败终态臂（`#312` T4 起只剩同错熔断硬触发一条生产路径；预算到顶走暂停臂）
 # ---------------------------------------------------------------------------
 
 
@@ -577,23 +583,73 @@ async def test_failed_run_arm_writes_reason_and_stops_at_one_terminal(
 
     emitted = await _drain(
         kit.runtime._terminal_failed_run(
-            kit.arms, steps=2, reason=STATUS_MAX_STEPS_EXCEEDED, message="连续 2 轮仍在请求工具",
+            kit.arms, steps=2, reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+            message="连续 2 轮仍在请求工具",
         ),
     )
 
     assert [e.type for e in emitted] == [RUN_FAILED]
     terminal = kit.since(mark)[-1]
-    assert terminal.data["reason"] == STATUS_MAX_STEPS_EXCEEDED
+    assert terminal.data["reason"] == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
     assert terminal.data["message"] == "连续 2 轮仍在请求工具"
     assert terminal.run_id == RUN_ID, "终态事件必须挂在本次 run 上"
-    assert kit.result_holder[0].status == STATUS_MAX_STEPS_EXCEEDED
-    assert kit.tracer.calls == [("run_failed", {"reason": STATUS_MAX_STEPS_EXCEEDED})]
+    assert kit.result_holder[0].status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+    assert kit.tracer.calls == [
+        ("run_failed", {"reason": STATUS_IDENTICAL_TOOL_FAILURE_LOOP}),
+    ]
     assert memory.submits[0][1] == RUN_FAILED, "记忆抽取要在终态落盘之后"
 
     # 单终态不变量：再调一次不得补第二条终结（双终结 = 历史不可对账）
     before = len(session.events)
     assert await _drain(
-        kit.runtime._terminal_failed_run(kit.arms, steps=2, reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP),
+        kit.runtime._terminal_failed_run(
+            kit.arms, steps=2, reason=STATUS_CONTEXT_WINDOW_EXCEEDED,
+        ),
+    ) == []
+    assert session.events[before:] == []
+
+
+@pytest.mark.asyncio
+async def test_pause_arm_is_nonterminal_and_closes_the_execution(
+    session: Session,
+) -> None:
+    """预算暂停臂（`#312` T4）：落一条 `run/paused`、**没有**终态、不写记忆。
+
+    `mark_terminal_written()` 在这里的含义不是"补终态"，而是"本次执行的收口事实已落盘"：
+    紧随其后的任何终结臂都必须被单终态不变量拦住（否则一次暂停会追加一条假失败）。
+
+    closeout：`LaunchRunBudget()` 无 run ceiling ⇒ 还剩预留容量 ⇒ 会尝试一次模型
+    closeout，但本 kit 的 model 是 `object()`（无 `ainvoke`）⇒ 回落确定性 continuation，
+    于是 `consumed` **不** +1（未被接纳的 closeout 不计 agent turn）。
+    """
+    memory = _MemorySpy()
+    kit = _kit(session, memory_writer=memory)
+    mark = len(session.events)
+
+    emitted = await _drain(
+        kit.runtime._terminal_paused(
+            kit.arms, launch=LaunchRunBudget(), steps=2,
+            trigger_dimension=TRIGGER_LOCAL_TURNS,
+        ),
+    )
+
+    assert [e.type for e in emitted] == [RUN_PAUSED]
+    paused = kit.since(mark)[-1]
+    assert paused.run_id == RUN_ID
+    assert paused.data["consumed"] == {"agent_turns": 2}
+    assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
+    assert kit.result_holder[0].status == STATUS_PAUSED
+    # 暂停不产生终态归因：run 尚未终结，tracer 的终态调用留给真正的终态
+    assert kit.tracer.calls == []
+    # 记忆形成只认终态（白名单无 paused）：暂停一次提交都不该有
+    assert memory.submits == []
+
+    # 收口已落盘 ⇒ 后续失败臂不得再补终态（单终态不变量的执行层落点）
+    before = len(session.events)
+    assert await _drain(
+        kit.runtime._terminal_failed_run(
+            kit.arms, steps=2, reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+        ),
     ) == []
     assert session.events[before:] == []
 

@@ -11,6 +11,8 @@ export const EventType = {
   RUN_COMPLETED: 'run/completed',
   RUN_FAILED: 'run/failed',
   RUN_INTERRUPTED: 'run/interrupted',
+  RUN_PAUSED: 'run/paused',
+  RUN_RESUMED: 'run/resumed',
   USER_MESSAGE: 'user/message',
   MODEL_STARTED: 'model/started',
   MODEL_DELTA: 'model/delta',

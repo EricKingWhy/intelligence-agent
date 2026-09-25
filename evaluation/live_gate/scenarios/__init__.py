@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from evaluation.live_gate.registry import register_scenario
 from evaluation.live_gate.scenarios.long_task import SCENARIO as _LONG_TASK
+from evaluation.live_gate.scenarios.pause_resume import SCENARIO as _PAUSE_RESUME
 from evaluation.live_gate.scenarios.smoke import SCENARIO as _SMOKE
 
-#: 内置场景清单。后续票（`#312`–`#318`）把自己的场景加到这里即可被 `--list` / `run` 看见。
-BUILTIN_SCENARIOS = (_SMOKE, _LONG_TASK)
+#: 内置场景清单。后续票（`#313`–`#318`）把自己的场景加到这里即可被 `--list` / `run` 看见。
+BUILTIN_SCENARIOS = (_SMOKE, _LONG_TASK, _PAUSE_RESUME)
 
 
 def register_builtin_scenarios() -> tuple[str, ...]:

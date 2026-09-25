@@ -63,6 +63,17 @@ class BudgetCeilingExceeded(BudgetRejection):
     """下层声明的 ceiling **越过**生效上层 ceiling（D1：下层只能收窄）。"""
 
 
+class BudgetConflict(SessionServiceError):
+    """预算生命周期请求与当前**持久化状态**冲突（HTTP 409，零副作用）。
+
+    与 `BudgetRejection`（422）的分界按 `11 §6.1`：**形状非法**是 422（字段缺失、
+    值域不对、alias 冲突、越权 ceiling），**状态对不上**是 409（version 过期、
+    ceiling 不足以继续、活动 run 冲突、缺少所需变更依据、存在未 reconcile 副作用）。
+    继承 `SessionServiceError` 的理由同 `BudgetRejection`：走 `web/domain_errors.py`
+    的**单一**状态码映射。
+    """
+
+
 def _positive(value: int, *, layer: str) -> int:
     """形状闸门：local fuse 是正整数。
 

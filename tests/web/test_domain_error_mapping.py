@@ -105,6 +105,10 @@ def test_status_map_is_the_audited_contract():
         "BudgetRejection": 422,
         "BudgetAliasConflict": 422,
         "BudgetCeilingExceeded": 422,
+        # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立（版本过期、
+        # run_id 不是被暂停的那个、没有暂停 run、ceiling 没真高于已消耗）——请求
+        # **形状**合法（那是上面三条 422 的口径），是"状态对不上"，所以是 409。
+        "BudgetConflict": 409,
     }
 
 

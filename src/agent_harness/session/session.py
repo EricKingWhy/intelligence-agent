@@ -395,7 +395,8 @@ class Session:
 
     def begin_run(self, *, agent_id: str = "default",
                   agent_profile: str = "main",
-                  model: str | None = None) -> tuple[str, int]:
+                  model: str | None = None,
+                  budget: dict[str, Any] | None = None) -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
         ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
@@ -412,12 +413,19 @@ class Session:
         总传真值）。取值口径、与 ``model/completed`` 回显侧的对照、以及为什么
         不能放在 ``model/started``（流式专属、永不持久化），见
         ``docs/adr/0034-request-side-model-identity.md``。
+
+        ``budget``（`#312` T4）：本逻辑 run 的 **run 作用域** 预算快照（ceiling 等）。
+        `None` **不落键**——"没有配 ceiling"是"没有这条事实"，不是"ceiling=0"
+        （`11 §6.1`：不可得 ≠ 0）。`run/paused` 的 limits 快照由它重建，
+        所以配了 ceiling 时必须落（否则重启后投影不出配置值）。
         """
         run_id = str(uuid4())
         turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
         data: dict[str, Any] = {"turn_index": turn_index, "agent_profile": agent_profile}
         if model is not None:
             data["model"] = model
+        if budget is not None:
+            data["budget"] = budget
         self.append(RUN_STARTED, data, run_id=run_id, agent_id=agent_id)
         return run_id, turn_index
 

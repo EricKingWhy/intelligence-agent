@@ -49,6 +49,9 @@ class TestSessionEventDTO:
             "run/completed",
             "run/failed",
             "run/interrupted",
+            # #312 T4：暂停/恢复是 durable 生命周期事实（非终态暂停 + 同一 run 接回）
+            "run/paused",
+            "run/resumed",
             "user/message",
             "text/delta",
             "model/completed",

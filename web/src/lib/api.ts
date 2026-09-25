@@ -1154,6 +1154,67 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
   return res.json();
 }
 
+// ── 同 run 恢复（`#312` T4，PRD §3 / `11 §6.1`）──
+
+/** 恢复被预算暂停的逻辑 run 的请求体（**不带 task**）。
+ *
+ *  与「带 task 的续聊恢复」是**两种形态**，后端按 `task` 是否存在区分
+ *  （`web/app.py::ResumeRequest`）：给了 task = 新任务新 run_id（既有语义，逐字不变）；
+ *  不给 task = 同 run 续跑，此时必须带 `run_id` + `resume_basis` +
+ *  `budget.expected_version` + 绝对 ceiling（缺声明 422、状态对不上 409）。
+ *
+ *  `budget.run.max_agent_turns_total` 是**绝对值**不是增量：后端比的是
+ *  `ceiling > consumed + 1`（`run_budget.resume_ceiling_ok`），低到不能继续的 ceiling
+ *  会被 409 拒掉。`expected_version` 与 `run` 平级（PRD §3 的冻结形状——它是
+ *  "这次预算变更"的属性，不是某个作用域的 ceiling）。 */
+export interface ResumePausedRunPayload {
+  run_id: string;
+  resume_basis: 'budget_increase';
+  budget: {
+    expected_version: number;
+    run: { max_agent_turns_total: number };
+  };
+}
+
+/** 恢复请求被拒（409/422 且**零副作用**：后端判定在任何落盘之前）。
+ *  单独一个错误类型是为了让调用方能按状态分派——409 要重读日志对齐真相，
+ *  422 是请求形状问题（改参数重试即可），两者对用户的下一步动作不同。 */
+export class ResumeRejectionError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** POST /api/sessions/{id}/resume（同 run 续跑）。
+ *
+ *  成功返回**原始 Response**：后端以 SSE 流回（`_run_stream_response`，与
+ *  POST /messages 的 launched 分支同形），调用方交给既有 SSE/WS 消费机器
+ *  （不在这里读 body——攒包时响应头可能被压到 run 结束才下发，读 body 就是卡住）。
+ *  409/422 是**短 JSON**，当场读掉 detail 再抛（否则 detail 丢失，用户只看到一个
+ *  没头没尾的"恢复失败"）。 */
+export async function resumeSession(
+  sessionId: string,
+  payload: ResumePausedRunPayload,
+): Promise<Response> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 409 || res.status === 422) {
+    const detail = await readErrorDetail(res);
+    throw new ResumeRejectionError(
+      res.status,
+      detail || (res.status === 409 ? '恢复被拒绝（状态已变化）' : '恢复请求无效'),
+    );
+  }
+  if (res.status === 404) throw new ResumeRejectionError(404, '会话不存在');
+  if (!res.ok) throw new ResumeRejectionError(res.status, `恢复失败（${res.status}）`);
+  return res;
+}
+
 // ── Session-level model switch（T7 #137，PRD §2.3）──
 
 /** POST /api/sessions/{id}/model 的响应体。

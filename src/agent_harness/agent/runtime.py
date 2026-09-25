@@ -21,19 +21,38 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
-from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS
+from agent_harness.agent.budget import (
+    DEFAULT_MAX_AGENT_TURNS,
+    SOURCE_DEPLOYMENT,
+    LocalFuse,
+)
 from agent_harness.agent.guards import (
     GuardLevel,
     GuardSignal,
     RepeatedToolFailureGuard,
+)
+from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
+    CLOSEOUT_MODEL,
+    REASON_BUDGET_EXHAUSTED,
+    LaunchRunBudget,
+    RunTurnLimits,
+    as_run_started_budget,
+    build_limits_snapshot,
+    build_pause_data,
+    closeout_capacity,
+    deterministic_continuation,
+    normalize_continuation,
+    pause_trigger,
 )
 from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
@@ -41,7 +60,7 @@ from agent_harness.agent.types import (
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_FAILED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
+    STATUS_PAUSED,
     AgentEvent,
     AgentRunResult,
     to_agent_event,
@@ -72,6 +91,7 @@ from agent_harness.session import (
     MODEL_FALLBACK,
     MODEL_STARTED,
     RUN_FAILED,
+    RUN_PAUSED,
     RUN_STARTED,
     TOOL_FAILURE_GUARD,
     USER_MESSAGE,
@@ -167,6 +187,46 @@ def _extract_text(content: Any) -> str:
             if isinstance(block, dict) and block.get("type") == "text"
         )
     return ""
+
+
+def _closeout_instruction(
+    *, trigger_dimension: str, consumed: int, ceiling: int | None, steps: int,
+) -> str:
+    """预算暂停前那一次有界 closeout 的指令（`#312`）。
+
+    指令本身**不**进事件流：持久化的只有它的产出（`run/paused.continuation`）——
+    continuation 是"这次暂停的续跑说明书"，不是对话内容，不该被
+    `derive_messages` 当成模型可见历史回灌（不变量 #5/#6）。
+    """
+    ceiling_text = "无 ceiling" if ceiling is None else str(ceiling)
+    return (
+        "运行即将因回合预算到顶而暂停，现在需要一份供恢复使用的续跑说明。\n"
+        f"触发维度：{trigger_dimension}；本逻辑 run 已消耗 {consumed} 轮（ceiling={ceiling_text}）。\n"
+        "只依据上面的会话历史作答，**不要**调用工具、不要推测还没发生的事。\n"
+        "只输出一个 JSON 对象（不要代码块、不要多余文字），键固定为：\n"
+        '{"completed": ["已确实完成的事"], "remaining": ["还没做完的事"], '
+        '"blockers": ["阻塞点"], "next_safe_action": "恢复后第一步该做什么"}\n'
+        "四个键都必填；completed/remaining/blockers 是字符串数组（可为空数组）。"
+    )
+
+
+def _parse_closeout_json(text: str) -> Any:
+    """解析 closeout 的 JSON 产出（容忍 ```json 代码块围栏）；失败返回 `None`。
+
+    只做"取出 JSON"，不做宽容修补——合不合契约由 `normalize_continuation` 判，
+    修补一个形状不对的产出等于替模型编 continuation。
+    """
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    try:
+        return json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
 
 
 def _extract_reasoning(chunk: Any) -> str:
@@ -730,6 +790,8 @@ class AgentRuntime:
         steer_source: SteerSource | None = None,
         agent_profile: str = "main",
         dropped_tools: tuple[str, ...] = (),
+        run_budget: LaunchRunBudget | None = None,
+        local_fuse_source: str = SOURCE_DEPLOYMENT,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -769,6 +831,13 @@ class AgentRuntime:
         if max_agent_turns < 1:
             raise ValueError(f"max_agent_turns 必须 ≥ 1：{max_agent_turns}")
         self.max_agent_turns = max_agent_turns
+        # local fuse 的**来源**（deployment / agent_profile / 请求覆盖，`#308` 已解析）。
+        # 运行时只把它投影进 `run/paused.limits.local`（客户端要看"谁定的"），
+        # 不做任何策略判断——解析规则仍只在 `agent/budget.py` 一处。
+        self._local_fuse_source = local_fuse_source
+        # RunBudget 上下文（`#312`）：本次执行的账本起点（version / ceiling / 已消耗）。
+        # `None` = 没有 run 作用域预算信息（沿用既有行为：无 ceiling、账本从 0 起）。
+        self._run_budget = run_budget or LaunchRunBudget()
         # Checkpoint seam（ADR-0004 Round 2）：默认策略 OnStableBoundary，
         # 但只有注入了 CheckpointStore 才真正落盘——Core 不被存储强制依赖。
         self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
@@ -803,6 +872,11 @@ class AgentRuntime:
         # 把 Registry 的工具定义绑定到模型——模型才会知道有哪些工具可选、
         # 并在回复里产出 tool_calls。bind_tools 是 LangChain 的标准接线点。
         # ScriptedModel 没有 bind_tools（测试用剧本直接构造 tool_calls），跳过绑定。
+        # `_raw_model` 另存一份**未绑定工具**的 provider：预算暂停时的一次有界
+        # closeout 用它生成 continuation（同"摘要不让模型请求工具"的既有做法，
+        # 见本构造器上方 system_prompt 注释）——否则 closeout 可能又产出一个
+        # tool_call，而暂停点之后不执行任何工具。
+        self._raw_model = model
         definitions = registry.export_model_definitions()
         if definitions and hasattr(model, "bind_tools"):
             self.model = model.bind_tools(definitions)
@@ -884,12 +958,16 @@ class AgentRuntime:
                 )
         return applicable
 
-    async def run(self, session: Session, user_input: str) -> AgentRunResult:
+    async def run(self, session: Session, user_input: str | None) -> AgentRunResult:
         """跑完整条 Agent Loop，返回 AgentRunResult。
 
         所有交互历史通过 Session 的 append-only SessionEvent 持久化；
         messages list 退化为每轮从事件投影出的运行期缓存。
         用 ainvoke 一次性拿完整 AIMessage（非流式入口，向后兼容）。
+
+        ``user_input=None``（`#312`）：同 run 续跑且**没有**新任务文本——不落
+        `user/message`，直接从已持久化历史继续（票面「Ordinary budget resume needs
+        no new task text」；伪一条"继续"会往事件流里塞客户端从未说过的话）。
         """
         # 结果经本次调用专属的 holder 回传，不经实例字段——一个 Runtime 并发
         # 跑多个 run 时各拿各的，绝不出现"谁后终结谁生效"的跨 run 串台。
@@ -899,7 +977,7 @@ class AgentRuntime:
         return result_holder[-1]
 
     async def run_stream(
-        self, session: Session, user_input: str,
+        self, session: Session, user_input: str | None,
         cancel_reason_supplier: Callable[[], str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """流式驱动 Agent Loop，逐条 yield AgentEvent。
@@ -931,7 +1009,7 @@ class AgentRuntime:
             await drive.aclose()
 
     async def _drive(
-        self, session: Session, user_input: str, *, stream: bool,
+        self, session: Session, user_input: str | None, *, stream: bool,
         result_holder: list[AgentRunResult] | None = None,
         cancel_reason_supplier: Callable[[], str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
@@ -1005,19 +1083,37 @@ class AgentRuntime:
             # 必须在 append 本轮 user 消息之前算：本轮消息不计入基数。
             step_base = max(session.max_step_id, session.user_turn_count)
             arms.step_base = step_base
-            user_event = session.append(USER_MESSAGE, {"content": user_input})
-            yield to_agent_event(user_event)
-            # USER_ACCEPTED 稳定边界：user/message 已持久化。
-            await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
+            if user_input is not None:
+                user_event = session.append(USER_MESSAGE, {"content": user_input})
+                yield to_agent_event(user_event)
+                # USER_ACCEPTED 稳定边界：user/message 已持久化。
+                await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)
+            # user_input is None = 同 run 续跑且无新任务文本（`#312`）：既没有新
+            # user/message 可落，也没有「用户输入已被接纳」这个稳定边界可记——
+            # 恢复这个事实由服务层的 `run/resumed` 事件表达（恢复刻度见它）。
 
-            run_id, turn_index = session.begin_run(
-                agent_id=self._agent_id, agent_profile=self._agent_profile,
-                # #226：请求侧模型标识落 durable 事件（同一 run 内只在 fallback 时换
-                # 模型，那次切换另由 model/fallback 记录）。装配层给的
-                # primary_model_name = ModelConfig.model_name = 发给 provider 的
-                # `model` 值（model/provider.py:107）。取值口径见 ADR-0034。
-                model=self._primary_model_name,
-            )
+            launch_budget = self._run_budget
+            resuming = launch_budget.run_id is not None
+            if resuming:
+                # `#312` 同 run 续跑：**不**新建 run_id、**不**再落 run/started。
+                # "恢复"这个事实由服务层在 CAS 通过后立刻落 `run/resumed`（durable，
+                # 且在任何工作开始之前），runtime 只是接上那条逻辑 run 继续跑——
+                # 计数器与 stuck 指纹都不重置（`02 §5.2`），消耗以事件为准。
+                run_id = launch_budget.run_id
+                turn_index = launch_budget.turn_index or 1
+            else:
+                run_id, turn_index = session.begin_run(
+                    agent_id=self._agent_id, agent_profile=self._agent_profile,
+                    # #226：请求侧模型标识落 durable 事件（同一 run 内只在 fallback 时换
+                    # 模型，那次切换另由 model/fallback 记录）。装配层给的
+                    # primary_model_name = ModelConfig.model_name = 发给 provider 的
+                    # `model` 值（model/provider.py:107）。取值口径见 ADR-0034。
+                    model=self._primary_model_name,
+                    # `#312`：run 作用域 ceiling 在**开始时就 durable**（只在显式配了
+                    # ceiling 时落键）——否则重启后投影不出"配置的绝对 ceiling"，
+                    # 而 `03 §3.4` 要求 limits 可从事件重建成同样的值。
+                    budget=as_run_started_budget(launch_budget.limits),
+                )
             terminal.begin_run(run_id)
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
             # 观测端口（#249）恒为对象——缺席实现是 NullTracer，选定与保护见
@@ -1036,11 +1132,13 @@ class AgentRuntime:
             # 本 run 的记忆注入注册表（#202 / ADR-0031 D4）：设空集合，由
             # MemoryContextProvider.select() 在注入时写入；run 收尾 reset。
             memory_injected_token = memory_injected_ids_var.set(frozenset())
-            # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
-            run_started = next(
-                e for e in session.since(arms.memory_event_start) if e.type == RUN_STARTED
-            )
-            yield to_agent_event(run_started)
+            if not resuming:
+                # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
+                # 续跑执行没有新的 run/started（逻辑 run 是同一个），跳过镜像。
+                run_started = next(
+                    e for e in session.since(arms.memory_event_start) if e.type == RUN_STARTED
+                )
+                yield to_agent_event(run_started)
 
             # run_config（#198）：每个 run 的运行条件——档位 / 主模型 / 生效工具
             # 清单 / 被剔除工具——落一条结构化日志。此前这些事实不落任何日志，
@@ -1059,6 +1157,26 @@ class AgentRuntime:
                       outcome="started", agent_name="agent_runtime")
 
             while True:
+                # 第 -1 步（`#312` T4）：**唯一**的回合预算准入点。位置在 steer 注入与
+                # ContextBuilder 之前——`02 §5.1` 要求判定发生在"任何 model / tool /
+                # child 工作开始之前"，所以到顶时不再灌 steer、不再发起模型调用；
+                # 本次执行以一条非终态 `run/paused` 收口（预留的那次 closeout 除外）。
+                # 两个作用域在同一次判定里比（run 累计 ceiling / local fuse），命中
+                # 哪个维度由 `pause_trigger` 如实回传——不合并成一个计数器（`02 §5.1`）。
+                trigger_dimension = self._pause_trigger(launch_budget, steps=steps)
+                if trigger_dimension is not None:
+                    self._log("agent_decision", "回合预算到顶，run 暂停（非终态）",
+                              span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                              decision="budget_paused", remaining_steps=0,
+                              reason=f"命中 {trigger_dimension}，本次执行以 run/paused 收口",
+                              outcome="success")
+                    async for streamed in self._terminal_paused(
+                        arms, launch=launch_budget, steps=steps,
+                        trigger_dimension=trigger_dimension,
+                    ):
+                        yield streamed
+                    return
+
                 # 第 0 步（ADR-0030 D2）：steer 注入。位置固定在 ContextBuilder
                 # 之前——那是模型可见投影的唯一入口，注入必须发生在投影之前才
                 # 会被本轮模型调用看到；轮次边界（而不是"边答边改"）是物理约束：
@@ -1255,7 +1373,12 @@ class AgentRuntime:
                     model_data["tool_calls"] = [
                         {"id": c.id, "name": c.name, "args": c.args} for c in calls
                     ]
-                will_execute_tools = bool(tool_calls) and steps + 1 < self.max_agent_turns
+                # 本轮之后循环还会不会继续：走的是**同一个** `_pause_trigger`
+                # （单一判定入口，两处不可能漂移）。旧式 `steps + 1 < max_agent_turns`
+                # 在 `#312` 起少了 closeout 预留，会让延迟落盘猜错一档。
+                will_execute_tools = bool(tool_calls) and self._pause_trigger(
+                    launch_budget, steps=steps + 1,
+                ) is None
                 defer_model_event = (
                     will_execute_tools and self.executor.tracks_operations
                 )
@@ -1289,23 +1412,9 @@ class AgentRuntime:
                         yield streamed
                     return
 
-                # 第 6 步：模型仍在请求工具——若已达 local fuse 则兜底返回。
-                # **单一判定点**（`#308` 车票要求）：生效轮数只在这里与 `max_agent_turns`
-                # 比一次。`#312` 接 `run/paused` 时把"到顶"改成暂停，改的是这一个 if 的
-                # 结果分支——不新增 loop、不新增计数器（`steps` 就是 agent_turns 的计数点：
-                # 上面"这一轮算一步"在模型响应被接纳为决策**之后**才执行，R1）。
-                if steps >= self.max_agent_turns:
-                    self._log("agent_decision", "模型不收敛，撞 local fuse 兜底",
-                              span_id=new_span_id(), parent_span_id=run_span, step=steps,
-                              decision="max_steps_exceeded", remaining_steps=0,
-                              reason=f"连续 {steps} 轮仍在请求工具，触发保险丝", outcome="success")
-                    # 文案复用上面那行日志的同一句；终态字段由 failure_terminal 单点供给。
-                    async for streamed in self._terminal_failed_run(
-                        arms, steps=steps, reason=STATUS_MAX_STEPS_EXCEEDED,
-                        message=f"连续 {steps} 轮仍在请求工具，触发保险丝",
-                    ):
-                        yield streamed
-                    return
+                # 第 6 步：模型仍在请求工具。预算是否到顶**不在这里判**——那件事统一
+                # 在循环顶部（第 -1 步）用 `_pause_trigger` 判一次，两个作用域不会因为
+                # 多一个判定点而漂移；本执行到顶时不会走到这里（顶部已经收口）。
 
                 # 第 7 步：用 ToolExecutor 执行整批 tool_call 并按原 id 回填。
                 # ADR-0016 §4.1：tool/call 预持久化（执行前）——02 §8.3 状态机
@@ -1542,6 +1651,129 @@ class AgentRuntime:
     # 共同纪律：终态字段由 _RunFinalizer 单点供给；信封编号走 arms.envelope_step()；
     # 取消臂不 yield（生成器关闭中禁止产出），异常臂逐条镜像收尾事件。
 
+    def _pause_trigger(self, launch: LaunchRunBudget, *, steps: int) -> str | None:
+        """本次执行此刻还能不能继续；到顶时返回命中的预算维度（`#312` T4）。
+
+        **唯一**判定入口：循环顶部的准入（"要不要暂停"）与 `model/completed` 的
+        延迟落盘（"本轮之后还会不会继续"）两处都调它——同一个判定不可能对不上
+        （`#308` 把判定收在一处的要求延续到这里，只是位置从"轮末"挪到"轮前"：
+        `02 §5.1` 要的是"在任何 model / tool / child 工作开始之前"）。
+
+        `steps` = 本执行**已接纳**的轮数；run 作用域的累计消耗 = 启动时账本 + 本执行。
+        local fuse 用本执行轮数计（它是**实例级**保险丝，续跑执行拿到的是新实例，
+        `02 §5.1` 的三层控制互不替代）。
+        """
+        return pause_trigger(
+            consumed_turns=launch.consumed_turns + steps,
+            run_limits=launch.limits,
+            execution_steps=steps,
+            local_fuse_turns=self.max_agent_turns,
+        )
+
+    async def _terminal_paused(
+        self, arms: _TerminalArms, *, launch: LaunchRunBudget, steps: int,
+        trigger_dimension: str,
+    ) -> AsyncIterator[AgentEvent]:
+        """预算暂停臂（`#312` T4；`02 §5.2` / `03 §3.4` / ADR-0044 D3）。
+
+        顺序（每一条都是契约事实，不是实现口味）：
+
+        1. **closeout**：先看还剩不剩容量（`closeout_capacity`）——剩则用**一次**
+           有界模型调用产出 continuation，且这次调用**记进预算**（`consumed` +1，
+           ticket FIXED「closeout 属于预算内消耗」/"预留容量不是额外不记账的工作"）；
+           没容量、调用失败或产出不合契约 ⇒ 落**确定性** continuation（只用已持久化
+           事实，不伪造进展/成功/工具结果）。
+        2. 落**恰好一条** `run/paused`（durable、**非终态**）并镜像给流消费者。
+        3. 本次执行到此收口：**不**落 `run/completed` / `run/failed`（`02 §5.2` 明文），
+           **不**做记忆形成（run 没结束，此刻抽取过早——`memory/v2/eligibility.py`
+           的白名单里没有 paused），也不新增 Checkpoint 边界（`07 §3` 只有四个）。
+        """
+        consumed = launch.consumed_turns + steps
+        limits = build_limits_snapshot(
+            run_limits=launch.limits,
+            local_fuse=LocalFuse(
+                max_agent_turns=self.max_agent_turns, source=self._local_fuse_source,
+            ),
+        )
+        continuation, closeout_source = await self._closeout_continuation(
+            arms, steps=steps, trigger_dimension=trigger_dimension,
+            consumed=consumed, ceiling=launch.limits.max_agent_turns_total,
+        )
+        if closeout_source == CLOSEOUT_MODEL:
+            consumed += 1
+        paused = arms.session.append(
+            RUN_PAUSED,
+            build_pause_data(
+                reason=REASON_BUDGET_EXHAUSTED,
+                trigger_dimension=trigger_dimension,
+                version=launch.version,
+                consumed_turns=consumed,
+                limits=limits,
+                continuation=continuation,
+                closeout_source=closeout_source,
+                # 预算暂停没有额外前置条件（`03 §3.4`：非空只出现在 stuck 暂停）。
+                resume_requirements=(),
+                # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，
+                # 用户从事件就能找到那一段 trace。run 未终结 ⇒ 这不是 run 的 trace；
+                # trace_url 此刻还不存在（只在终态回调里合成，见 build_pause_data）。
+                trace_id=arms.telemetry.trace_id,
+            ),
+            run_id=arms.run_id, step_id=arms.envelope_step(steps),
+        )
+        # 本次执行的**收口事实**已落盘：后续任何臂都不得再补一条终态（单终态不变量的
+        # 执行层落点）。逻辑 run 仍开着——这由 `run/paused` 自己表达（它不在
+        # RUN_TERMINAL_TYPES 里），`run/resumed` 会以同一 run_id 接回。
+        arms.terminal.mark_terminal_written()
+        yield to_agent_event(paused)
+        arms.result_holder.append(
+            AgentRunResult(status=STATUS_PAUSED, final_text="", steps=steps),
+        )
+
+    async def _closeout_continuation(
+        self, arms: _TerminalArms, *, steps: int, trigger_dimension: str,
+        consumed: int, ceiling: int | None,
+    ) -> tuple[dict[str, Any], str]:
+        """产出 continuation 与它的来源（`model` / `deterministic`）。
+
+        **有界**的含义是双重的：预算上最多一次调用（且必须还有容量），形状上只接受
+        契约里的四个键（见 `normalize_continuation`）。任何一步不合契约都**回落到**
+        确定性组装——这条路必须永远可用（它是暂停能够成立的前提）。
+        """
+        fallback = deterministic_continuation(
+            events=arms.session.since(0), run_id=arms.run_id or "",
+            trigger_dimension=trigger_dimension, ceiling=ceiling,
+            consumed_turns=consumed,
+        )
+        if not closeout_capacity(consumed_turns=consumed, run_limits=RunTurnLimits(ceiling)):
+            return fallback, CLOSEOUT_DETERMINISTIC
+        try:
+            messages = await self._context_builder.build(arms.session)
+        except Exception as error:  # noqa: BLE001 - closeout 是尽力而为，绝不能反噬暂停
+            logger.warning(
+                "closeout 上下文装配失败（%s）——回落确定性 continuation",
+                type(error).__name__,
+            )
+            return fallback, CLOSEOUT_DETERMINISTIC
+        try:
+            response = await self._raw_model.ainvoke(
+                [*messages, HumanMessage(content=_closeout_instruction(
+                    trigger_dimension=trigger_dimension,
+                    consumed=consumed, ceiling=ceiling, steps=steps,
+                ))],
+            )
+            parsed = _parse_closeout_json(_extract_text(response.content))
+        except Exception as error:  # noqa: BLE001 - 同上：模型 closeout 不可用不是失败
+            logger.warning(
+                "closeout 模型调用失败（%s）——回落确定性 continuation",
+                type(error).__name__,
+            )
+            return fallback, CLOSEOUT_DETERMINISTIC
+        normalized = normalize_continuation(parsed)
+        if normalized is None:
+            logger.warning("closeout 产出不合契约——回落确定性 continuation")
+            return fallback, CLOSEOUT_DETERMINISTIC
+        return normalized, CLOSEOUT_MODEL
+
     async def _terminal_context_exceeded(
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
     ) -> AsyncIterator[AgentEvent]:
@@ -1602,16 +1834,19 @@ class AgentRuntime:
     async def _terminal_failed_run(
         self, arms: _TerminalArms, *, steps: int, reason: str, message: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        """local fuse（迁移期仍是 `max_steps_exceeded` 终态）/ 同错熔断硬触发共用的失败终态（两臂只差 reason 与可读文案）。
+        """受控失败终态（`#312` 起只剩同错熔断硬触发一条路径）。
 
-        走 failure_terminal（终态字段的唯一 owner）：local fuse 路径原先自己拼
-        end_run，于是 #222 之前它**一个归因键都没有**（字段集中供给被绕过 = 下一次
-        加字段还会漏它）。`reason` 同时是 AgentRunResult.status——两臂的 status 与
-        reason 用的是同一个常量（STATUS_MAX_STEPS_EXCEEDED /
-        STATUS_IDENTICAL_TOOL_FAILURE_LOOP），调用点只传一次。
+        走 failure_terminal（终态字段的唯一 owner）：本路径原先自己拼 end_run，
+        于是 #222 之前它**一个归因键都没有**（字段集中供给被绕过 = 下一次加字段
+        还会漏它）。`reason` 同时是 AgentRunResult.status，调用点只传一次。
 
-        #298 T7b：`reason` 同时就是交给记忆形成的终态（AC1 的"两张获批的受控失败"）——
-        它在 `eligibility.ELIGIBLE_TERMINAL_STATUSES` 里，取消类与 `failed` 不在。
+        `#312`（T4）起回合预算到顶走的是 `_terminal_paused`（非终态暂停），
+        不再是本臂——所以 `max_steps_exceeded` 这个受控失败终态已不可达并随之删除
+        （行为裁决见 `02 §5.2`：命中预算 ⇒ 暂停，不是失败）。
+
+        #298 T7b：`reason` 同时就是交给记忆形成的终态——它在
+        `eligibility.ELIGIBLE_TERMINAL_STATUSES` 里（现在只剩
+        `completed` + `identical_tool_failure_loop` 两项），取消类与 `failed` 不在。
         ⚠ 准确说：**取消 / 上下文超限 / 异常三条臂压根不调 `_notify_memory_formation`**
         （只有本臂与正常完成臂调），所以 AC1 的"被排除终态一个都不建"在生产上由"不通知"
         兑现；`eligibility` 的白名单与 `CANCELLED` / `UNSUPPORTED_TERMINAL_FAILURE` 两条是
@@ -1736,13 +1971,17 @@ class AgentRuntime:
         )
 
     def _new_tracer(
-        self, session: Session, run_id: str, user_input: str, turn_index: int,
+        self, session: Session, run_id: str, user_input: str | None, turn_index: int,
     ) -> Tracer:
         """观测实现选择（#249）：全 run 唯一一处"观测是否存在"的判据。
 
         未注入 / 未启用 sink → NullTracer（零外部副作用）；启用 → RunTracer
         （Langfuse adapter，ADR-0018 D5/D7）。返回的实现外面一律包
         ``_GuardedTracer``——调用点既不判空、也不各自兜异常。
+
+        ``user_input=None``（同 run 续跑无新任务文本）在 trace 输入位落空串：
+        这一次执行**没有**用户新输入，而不是"用户说了空话"（`RunTracer` 的
+        input 位是 str，不为它扩一个 None 语义）。
         """
         sink = self._observability_sink
         if sink is None or not sink.enabled:
@@ -1752,7 +1991,7 @@ class AgentRuntime:
             session_id=session.session_id,
             run_id=run_id,
             agent_id=self._agent_id,
-            user_input=user_input,
+            user_input=user_input or "",
             turn_index=turn_index,
         ))
 

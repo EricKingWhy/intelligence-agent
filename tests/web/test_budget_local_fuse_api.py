@@ -342,18 +342,30 @@ def test_unknown_key_in_budget_rejected_not_silently_ignored(tmp_path):
     _assert_rejected_without_side_effects(app, probe)
 
 
-def test_run_and_session_budget_not_accepted_yet(tmp_path):
-    """`budget.run` / `budget.session` 在 T4/T10 之前一律 422。
+def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
+    """尚未实现的作用域 / 维度一律 422（T4 把 `run` 的 turns 一维开了出来）。
 
     "先看起来接受、其实不生效"是最坏的一种兼容：用户会以为预算在管。宁可
-    显式拒绝（T4/T10 落地时再开这两个键）。
+    显式拒绝——本用例钉住**仍未实现**的三类（`budget.session` 属 T10 / `#318`；
+    PRD §3 冻结形状里 run 的其余六维属后续票；`expected_version` 在**创建**入口
+    没有可比较的版本，属 T4 的形状规则）：
+
+      * `budget.run` 的六维给了**非空值** ⇒ 422（给了 `null` / `{}` 则合法，
+        见 `tests/web/test_run_pause_resume_api.py` 的 PRD 全形用例）；
+      * `budget.session` 任何形态 ⇒ 422（`extra="forbid"`）；
+      * `budget.expected_version` 在创建入口 ⇒ 422（创建会启动新 run，没有版本可比）。
     """
     app, client = _web(tmp_path)
     probe = _ModelProbe()
     with probe:
         for payload in (
-            {"budget": {"run": {"max_agent_turns_total": 5}}},
             {"budget": {"session": {"max_agent_turns_total": 5}}},
+            {"budget": {"run": {"max_tool_calls": 5}}},
+            {"budget": {"run": {"max_total_tokens": 1000}}},
+            {"budget": {"run": {"max_cost_usd": "0.01"}}},
+            {"budget": {"run": {"deadline_at": "2026-09-25T00:00:00Z"}}},
+            {"budget": {"run": {"tool_call_limits": {"read_file": 3}}}},
+            {"budget": {"expected_version": 3}},
         ):
             resp = client.post("/api/sessions", json={"task": "hi", **payload})
             assert resp.status_code == 422, f"{payload} 应被拒：{resp.text}"

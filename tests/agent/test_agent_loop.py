@@ -7,7 +7,8 @@
 - A：无工具——模型首轮就给最终回答，Runtime 只调用 1 次。
 - B：一次工具往返——首轮提议 add，回填，第二轮给最终回答。
 - C：连续两轮工具——证明 Loop 能跨第 2 轮继续走第 3 轮。
-- D：max_steps 兜底——模型不收敛时保险丝正确熔断。
+- D：local fuse 到顶——模型不收敛时以**非终态** `run/paused` 收口（`#312` T4：撞保险丝
+  不再是失败，而是一次可恢复的暂停；被暂停的 run 用同一 run_id 续跑）。
 """
 
 from __future__ import annotations
@@ -19,8 +20,13 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentRuntime
-from agent_harness.agent.types import STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED
-from agent_harness.session import RUN_FAILED
+from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
+    REASON_BUDGET_EXHAUSTED,
+    TRIGGER_LOCAL_TURNS,
+)
+from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
+from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -255,78 +261,118 @@ class TestAgentLoopTwoConsecutiveToolRounds:
         assert TOOL_CALL_ID_A != TOOL_CALL_ID_B
 
 
-# ---------- 场景④：max_steps 不收敛兜底 ----------
+# ---------- 场景④：local fuse 到顶 -> 非终态暂停（#312 T4） ----------
 TOOL_CALL_ID_LOOP = "call_loop"
 
 
-class TestAgentLoopMaxSteps:
-    @pytest.mark.asyncio
-    async def test_max_steps_exceeded_with_exact_step_count(self, tmp_path):
-        """模型不收敛 + max_agent_turns=3 -> max_steps_exceeded + steps=3 + final_text="" + 恰好 3 次调用。
+def _loop_rounds(count: int) -> list[AIMessage]:
+    """`count` 轮"仍在请求工具"的剧本（永不收敛）。"""
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "add",
+                    "args": {"first_number": i, "second_number": i},
+                    "id": TOOL_CALL_ID_LOOP,
+                    "type": "tool_call",
+                }
+            ],
+        )
+        for i in range(count)
+    ]
 
-        #222 追加：这条终态此前 run/failed 里**没有任何键**，"步数用尽"只活在后端
-        进程日志里；现在 reason 落常量，durable 历史自己说得清为什么失败。
+
+class TestAgentLoopLocalFusePause:
+    @pytest.mark.asyncio
+    async def test_local_fuse_pauses_with_exact_step_count(self, tmp_path):
+        """模型不收敛 + max_agent_turns=3 -> 非终态 `run/paused`（不再是失败）+ steps=2。
+
+        `#312` T4 起"撞保险丝"的裁决是暂停：本地 fuse 与 run ceiling 走**同一条**
+        暂停臂（`02 §5.2`）。判定点在**循环顶部**（任何模型调用之前），且判定里包含
+        了为 closeout 预留的那一轮 ⇒ 被接纳的普通轮 = 3 - 1 = 2，第 3 次模型调用是
+        **有界 closeout**（它拿到的剧本不是 continuation JSON ⇒ 回落到确定性
+        continuation，不伪造进展）。
         """
-        rounds = [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "add",
-                        "args": {"first_number": i, "second_number": i},
-                        "id": TOOL_CALL_ID_LOOP,
-                        "type": "tool_call",
-                    }
-                ],
-            )
-            for i in range(3)
-        ]
-        scripted = ScriptedModel(rounds)
+        scripted = ScriptedModel(_loop_rounds(3))
         runtime = _runtime(scripted, max_agent_turns=3)
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "永远算不完")
 
-        assert result.status == STATUS_MAX_STEPS_EXCEEDED
+        assert result.status == STATUS_PAUSED
         assert result.final_text == ""
-        assert result.steps == 3
+        assert result.steps == 2
+        # 2 次普通轮 + 1 次 closeout：closeout 也必须显式过一次模型（有界机会）
         assert len(scripted.snapshots) == 3
-        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
-        assert run_failed.data["reason"] == "max_steps_exceeded"
-        # 文案复用 agent_decision 日志里的同一句：模型不收敛是**可读**的结局，
-        # 不是又一个机器码（reason 已有码，message 给人看）
-        assert run_failed.data["message"] == "连续 3 轮仍在请求工具，触发保险丝"
+        closeout_request = scripted.snapshots[2].messages[-1]
+        assert closeout_request.type == "human"
+        assert TRIGGER_LOCAL_TURNS in closeout_request.content
+
+        # 落盘事实：恰好一条 run/paused，**没有**任何终态（暂停不是完成也不是失败）
+        paused_events = [e for e in session.events if e.type == RUN_PAUSED]
+        assert len(paused_events) == 1
+        assert not [e for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)]
+        data = paused_events[0].data
+        assert data["reason"] == REASON_BUDGET_EXHAUSTED
+        assert data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
+        assert data["budget_version"] == 1
+        assert data["consumed"] == {"agent_turns": 2}
+        # 两个作用域各自的原生投影（命中哪个维度由 trigger_dimension 指明）
+        assert data["limits"]["local"]["max_agent_turns"] == 3
+        assert data["limits"]["run"]["max_agent_turns_total"] is None
+        assert data["closeout_source"] == CLOSEOUT_DETERMINISTIC
+        assert data["resume_requirements"] == []
+        assert set(data["continuation"]) == {
+            "completed", "remaining", "blockers", "next_safe_action",
+        }
 
     @pytest.mark.asyncio
-    async def test_convergence_on_last_step_is_completed_not_exceeded(self, tmp_path):
-        """回归：模型恰好在第 max_steps 轮收敛（无 tool_calls）-> completed 而非 max_steps_exceeded。
+    async def test_convergence_before_the_reserved_turn_completes(self, tmp_path):
+        """回归：模型在预留容量**之前**收敛（无 tool_calls）-> completed，不是暂停。
 
-        停止信号（无 tool_calls）必须先于 max_steps 兜底判定，
-        否则最终回答会被误报为不收敛且 final_text 被丢弃。
+        停止信号（无 tool_calls）必须先于预算兜底判定，否则最终回答会被误报成
+        "预算到顶"并把 final_text 丢掉（`#312` 保留了这条顺序）。
         """
-        rounds = [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "add",
-                        "args": {"first_number": i, "second_number": i},
-                        "id": TOOL_CALL_ID_LOOP,
-                        "type": "tool_call",
-                    }
-                ],
-            )
-            for i in range(2)
-        ] + [AIMessage(content="总算算完了")]
+        rounds = _loop_rounds(1) + [AIMessage(content="总算算完了")]
         scripted = ScriptedModel(rounds)
         runtime = _runtime(scripted, max_agent_turns=3)
 
-        result = await runtime.run(make_session(tmp_path), "最后一步收敛")
+        result = await runtime.run(make_session(tmp_path), "收敛")
 
         assert result.status == STATUS_COMPLETED
         assert result.final_text == "总算算完了"
-        assert result.steps == 3
+        assert result.steps == 2
+        assert len(scripted.snapshots) == 2
+
+    @pytest.mark.asyncio
+    async def test_reserved_turn_is_not_a_regular_turn(self, tmp_path):
+        """行为变更（`#312`）：ceiling 的**最后一轮**属于 closeout，不再是普通轮。
+
+        剧本里第 3 轮本来是"最终回答"，但该轮已被预留的 closeout 占用 ⇒ 它只会被
+        当作 closeout 请求的答复（不是合法 continuation JSON），于是落 `run/paused`
+        而不是 `completed`。这与 T4 之前的 `max_steps` 语义**相反**（那时最后一轮仍
+        可以收敛）：预留容量属于 ceiling 之内（`02 §5.2`），不能既算 closeout 又当
+        普通轮用。稳定态（生产 fuse=500）里这 1 轮可忽略；小 ceiling 下它正是"暂停前
+        还剩一次收口机会"的兑现。
+        """
+        rounds = _loop_rounds(2) + [AIMessage(content="总算算完了")]
+        scripted = ScriptedModel(rounds)
+        runtime = _runtime(scripted, max_agent_turns=3)
+        session = make_session(tmp_path)
+
+        result = await runtime.run(session, "第三轮才收敛")
+
+        assert result.status == STATUS_PAUSED
+        assert result.steps == 2
         assert len(scripted.snapshots) == 3
+        # 第 3 次请求是 closeout 请求（末尾是 closeout 指令），不是"第 3 个普通轮"；
+        # 那句"总算算完了"因此没有成为最终回答（final_text=""），run 停在暂停态。
+        closeout_request = scripted.snapshots[2].messages[-1]
+        assert closeout_request.type == "human"
+        assert TRIGGER_LOCAL_TURNS in closeout_request.content
+        paused = next(e for e in session.events if e.type == RUN_PAUSED)
+        assert paused.data["consumed"] == {"agent_turns": 2}
 
 
 # ---------- 场景⑤：失败边界（故障注入，剧本可控可重现） ----------

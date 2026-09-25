@@ -79,6 +79,14 @@ alias `max_steps` 与新字段 `budget.local.max_agent_turns` **同时出现且�
 `POST /api/sessions/{id}/queue/flush` **不在**其中：它不带 budget 入参，重投的 fuse 只由
 Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上抛不出这三档。
 
+**T4 追加（#312）**：新增 `BudgetConflict: 409`——恢复暂停 run 的 CAS 比较失败
+（`expected_version` 过期 / `run_id` 不是被暂停的那个 / 本会话最新逻辑 run 不在暂停态 /
+绝对 ceiling 没真高于已消耗），以及"暂停原因或 `resume_basis` 的前置条件本票未实现"
+（`#315` deadline / `#317` stuck 各自负责）。与 T3 的 422 档分界是 PRD §9 的原文：
+**形状非法 422、状态对不上 409**——判定都在 `agent_harness.agent.run_budget.validate_resume`
+（单一规则来源），且都在任何 model / tool / child 工作与任何落盘之前（被拒请求零副作用）。
+命中端点目前只有 `POST /api/sessions/{id}/resume`：同 run 续跑只存在于这个恢复面。
+
 ## 设计取舍（为什么不再往前一步）
 
 - **不用 FastAPI 全局 `exception_handler`**：那会把整张表应用到每个端点，使一个本来
@@ -97,6 +105,7 @@ from fastapi import HTTPException
 from agent_harness.agent.budget import (
     BudgetAliasConflict,
     BudgetCeilingExceeded,
+    BudgetConflict,
     BudgetRejection,
 )
 from agent_harness.memory.errors import MemoryNotFound
@@ -151,6 +160,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     WorkspaceNotFound: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
+    # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立——expected_version
+    # 过期、run_id 不是被暂停的那个、没有暂停 run、ceiling 没真高于已消耗。请求形状
+    # 合法（那是 422 的 T3 档），是**状态对不上**，且判定在任何落盘之前发生。
+    BudgetConflict: 409,
     RecoveryConflict: 409,
     ApprovalAlreadyResolved: 409,
     SteerTargetNotFound: 409,

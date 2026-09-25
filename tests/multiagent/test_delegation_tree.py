@@ -439,7 +439,10 @@ async def test_identical_failed_sibling_delegations_share_guard_state(tmp_path):
         ]),
         registry=registry,
         executor=ToolExecutor(registry),
-        max_agent_turns=4,
+        # 本剧本需要 4 个产出轮（3 次委派 + 1 次收口回答）。`#312` 起 local fuse
+        # 预留最后 1 轮给 closeout（`02 §5.1/5.2`：fuse=4 ⇒ 只接纳 3 个产出轮，
+        # 第 4 轮归收口调用）——所以这里给 5，否则 run 会在第 4 轮之前 `run/paused`。
+        max_agent_turns=5,
     )
 
     result = await root.run(session, "run sibling failures concurrently")

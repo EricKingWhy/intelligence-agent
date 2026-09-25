@@ -1,7 +1,8 @@
 """#263（#247 子票）— AgentRuntime 的 run/run_stream 事件序列基线（golden）。
 
 **问题**（票面）：`_drive` 的终结分支散在六处（context 超限 / completed /
-max_steps / 同错熔断硬触发 / 取消 / 顶层异常），每一处只被各自的窄用例零散覆盖
+local fuse（`#312` 起改走非终态 `run/paused`）/ 同错熔断硬触发 / 取消 / 顶层异常），
+每一处只被各自的窄用例零散覆盖
 （断言"这条事件在/不在"），**没有一条"整段序列长什么样、按什么顺序"的可执行基线**。
 #264 要把终结臂从 `_drive` 里提出来，先得有能在提取前后逐字比对的事实。
 
@@ -55,12 +56,13 @@ max_steps / 同错熔断硬触发 / 取消 / 顶层异常），每一处只被�
 `model/failed(2)`（异常臂与取消臂的 `_TerminalContext`）、`tool/call(2)`、`run/failed(1)`/`(None)`。
 #264 若"顺手统一"这些形状或搬表达式时漏掉 `step_base`，基线必须变红。
 
-**死参数（#264 必须先懂这条）**：`max_steps` / `hard_guard` / `provider_error` 三个臂的
+**死参数（#264 必须先懂这条）**：`hard_guard` / `provider_error` 两个臂的
 `failure_terminal(steps=step_base + steps)` 是**死参数**——`_RunFinalizer.failure_terminal`
 （`runtime.py:246-271`）不转发 `steps`，`Session.end_run`（`session.py:424-436`）也没有
-`step_id` 形参 ⇒ 这三臂的终态 `step_id` **恒为 None**，改或删那个实参**不可观测**（本文件的
+`step_id` 形参 ⇒ 这两臂的终态 `step_id` **恒为 None**，改或删那个实参**不可观测**（本文件的
 `(run/failed, None)` 对只钉"它就是 None"）。反之若让 `steps` 真的生效（终态带上 step_id），
-那是行为变更，这条基线会红。
+那是行为变更，这条基线会红。（`#312` T4 之前这张表里还有 `max_steps` 臂，同属这一族；
+它现在走**非终态**的 `run/paused`，收口事件显式带 `step_base + steps`。）
 
 **接线是冻结的**：默认场景用 `ToolExecutor(registry)`，即**无 Ledger** ⇒
 `tracks_operations=False` ⇒ `model/completed` 在工具批次之前立即落盘。生产接线
@@ -104,7 +106,6 @@ from agent_harness.agent.guards import RepeatedToolFailureGuard
 from agent_harness.agent.types import (
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
 )
 from agent_harness.context.compactor import ContextWindowExceededError
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
@@ -120,6 +121,7 @@ from agent_harness.session import (
     REASONING_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_PAUSED,
     RUN_STARTED,
     SESSION_STARTED,
     STREAM_ONLY_TYPES,
@@ -152,7 +154,7 @@ STREAM_FACT_TYPES = frozenset({
 })
 
 # 终态 data 里"给人读的文案"：**键必须在、值必须是非空 str**，但措辞不逐字钉——
-# 措辞不是序列事实（max_steps 的具体文案另有 tests/agent/test_agent_loop.py 精确断言）。
+# 措辞不是序列事实（各失败臂的固定文案另有 tests/agent/test_agent_loop.py 等精确断言）。
 PROSE = "<prose>"
 PROSE_KEYS = frozenset({"message"})
 
@@ -537,25 +539,27 @@ def _scenarios() -> tuple[Scenario, ...]:
                              MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
-            name="max_steps",
-            note="模型不收敛撞保险丝：第 2 轮不再执行工具，直接 run/failed",
+            name="local_fuse_pause",
+            note="模型不收敛撞 local fuse（#312 T4 起不再是失败）：第 2 轮的准入判定在"
+                 "模型调用之前命中 ⇒ 只留 1 轮 model/completed，收口是**非终态**的 "
+                 "run/paused。closeout 那次调用拿到的剧本轮次不是 continuation JSON "
+                 "⇒ closeout_source=deterministic（有界模型调用失败不得反噬暂停）",
             build=lambda w: _runtime(
                 ScriptedModel([_tool_call(i) for i in range(6)]), max_agent_turns=2,
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
             durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     MODEL_COMPLETED, RUN_FAILED),
+                     RUN_PAUSED),
             emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, MODEL_STARTED, MODEL_COMPLETED, RUN_FAILED),
-            terminal=RUN_FAILED,
-            terminal_payload={"reason": STATUS_MAX_STEPS_EXCEEDED, "message": PROSE,
-                              "trace_id": None, "trace_url": None},
+                     TOOL_RESULT, RUN_PAUSED),
+            terminal=None,
+            terminal_payload={},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (MODEL_COMPLETED, 3),
-                   (RUN_FAILED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_FAILED),),
+                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (RUN_PAUSED, 2)),
+            # 暂停**不是**终态 ⇒ 不触发记忆形成（`memory/v2/eligibility.py` 的白名单里
+            # 没有 paused）；"0 次提交"是事实，不是没测。
+            memory_submits=(),
         ),
         Scenario(
             name="context_exceeded",
@@ -898,7 +902,7 @@ async def test_terminal_is_unique_and_last(name: str, tmp_path: Any) -> None:
     """终态至多一条；有终态时必须是最后一条，且载荷的**整个键集**与信封与基线相等。
 
     载荷必须钉：各失败臂的**终态类型相同**（都是 `run/failed`），只有 `reason`
-    区分它们——只钉类型的话，改错臂（例如把熔断的 reason 写成 max_steps）不会被
+    区分它们——只钉类型的话，改错臂（例如把熔断的 reason 写成另一条臂的）不会被
     发现。人读文案（`message`）只钉"键在、值是非空 str"（措辞不是序列事实）。
 
     信封也必须钉：`end_run` 派不带 step_id（None），context 臂与取消臂显式带
@@ -1107,13 +1111,14 @@ async def test_memory_writeback_submits_the_declared_events(name: str, tmp_path:
 
 # 只在"已跑完一轮"的 session 上才分岔的臂。
 # 前三条显式写 `step_base + steps` ⇒ 第二轮必须是 1（不是 0）；
-# 后三条走 `end_run`，其 `steps=` 是死参数（见文件头"死参数"段）⇒ 恒 None，
+# 后两条走 `end_run`，其 `steps=` 是死参数（见文件头"死参数"段）⇒ 恒 None，
 # 这一半钉的是"它**仍然**是 None"：哪天那参数真的生效（= 行为变更），基线必红。
+# `local_fuse_pause` 不在本表：它的收口事件是**非终态**的 `run/paused`（#312 T4），
+# 落在下面 `_TURN2_ENVELOPE_ARMS` 的"全事件信封"覆盖里（含它自己的 step_id）。
 _TURN2_TERMINAL_ARMS = (
     ("context_exceeded", 1),
     ("generator_exit_post_run", 1),
     ("cancel_while_blocked", 1),
-    ("max_steps", None),
     ("hard_guard", None),
     ("provider_error", None),
 )

@@ -152,6 +152,7 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
     eventsVersion: 0,
     trace_id: null, trace_url: null, model_fallback: null, run_id: null,
     run_interrupted: null, run_failure: null, turn_index: null,
+    run_paused: null,
     requested_model: null,
     model_run_id: null,
     seenSeqs: new Set<number>(),
