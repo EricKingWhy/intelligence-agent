@@ -25,18 +25,24 @@ from agent_harness.identity import (
 )
 from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.types import MemoryScope, memory_session_var
+from agent_harness.memory.v2.tools import _RememberV2Args
+from agent_harness.memory.v2.types import (
+    MemoryKind,
+    SemanticCategory,
+    SemanticPayload,
+    TrustedMemoryIdentity,
+)
 from agent_harness.memory.v2.types import (
     MemoryScope as MemoryScopeV2,
 )
-from agent_harness.memory.v2.types import (
-    TrustedMemoryIdentity,
-)
 from agent_harness.memory.vector_store import VectorStoreError
+from agent_harness.session import Session
 from agent_harness.session.event import (
     EVENT_TYPES as SESSION_EVENT_TYPES,
 )
 from agent_harness.session.event import (
     MEMORY_RECALLED,
+    USER_MESSAGE,
     SessionEvent,
 )
 from agent_harness.web.app import create_app
@@ -190,6 +196,10 @@ async def test_list_paginates_and_clamps(memory_app):
     assert client.get("/api/memories?limit=0", headers=_auth(_ALICE)).status_code == 422
     assert client.get("/api/memories?limit=10000", headers=_auth(_ALICE)).status_code == 422
     assert client.get("/api/memories?offset=-1", headers=_auth(_ALICE)).status_code == 422
+    assert client.get("/api/memories?offset=10001", headers=_auth(_ALICE)).status_code == 422
+    assert client.get(
+        f"/api/memories?offset={2**63}", headers=_auth(_ALICE),
+    ).status_code == 422
 
 
 @pytest.mark.asyncio
@@ -492,6 +502,46 @@ async def test_v2_project_filter_uses_resolved_workspace_and_identity(memory_app
     assert client.get(
         "/api/memories?scope=project&project_id=unknown-project", headers=_auth(_ALICE),
     ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_web_remember_tool_uses_project_scope_from_workspace_ledger(memory_app, tmp_path):
+    client, _components = memory_app
+    state = client.app.state.agent
+    await state.ensure_stores()
+    project_path = tmp_path / "remember-project"
+    project_path.mkdir()
+    workspace = await state.workspace_index.create(project_path, title="Remember project")
+    session_id = "remember-project-session"
+    session = Session.start(state.store, session_id=session_id, cwd=project_path)
+    session.append(USER_MESSAGE, {"content": "Please remember this project uses pnpm"})
+    await state.workspace_index.attach_session(session_id)
+
+    _registry, wiring = await state.get_wiring()
+    remember = next(tool for tool in wiring.tools if tool.name == "remember_this")
+    assert remember._workspace_index is state.workspace_index
+    assert wiring.memory_v2 is not None
+
+    identity_token = set_identity_context(_ALICE)
+    session_token = memory_session_var.set(session_id)
+    try:
+        result = await remember.execute(_RememberV2Args(
+            content="this project uses pnpm",
+            kind=MemoryKind.SEMANTIC,
+            payload=SemanticPayload(
+                subject="project tooling", fact="uses pnpm",
+                category=SemanticCategory.PROJECT_FACT,
+            ),
+        ))
+    finally:
+        memory_session_var.reset(session_token)
+        identity_context_var.reset(identity_token)
+
+    assert result.ok
+    trusted = TrustedMemoryIdentity(_ALICE.tenant_id, _ALICE.user_id, workspace.id)
+    record = await wiring.memory_v2._store.get(result.data["memory_id"], trusted)
+    assert record.scope is MemoryScopeV2.PROJECT
+    assert record.project_id == workspace.id
 
 
 @pytest.mark.asyncio

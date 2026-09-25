@@ -364,7 +364,10 @@ async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypat
     wire_started = asyncio.Event()
     release_wire = asyncio.Event()
 
-    async def slow_wire(registry, config, *, settings=None, sessions=None):
+    async def slow_wire(
+        registry, config, *, settings=None, sessions=None, workspace_index=None,
+    ):
+        assert workspace_index is state.workspace_index
         wire_started.set()
         await release_wire.wait()  # 模拟慢装配（真实场景是连 Milvus / embedding）
         return _StubWiring(_StubMemory())

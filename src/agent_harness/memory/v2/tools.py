@@ -116,9 +116,11 @@ class RememberMemoryV2Tool(Tool):
                 )
             trusted = trusted_identity_for_session(session_id, self._workspace_index)
             event_text = source_text
+            scope = MemoryScope.PROJECT if trusted.project_id is not None else MemoryScope.USER_GLOBAL
             draft = MemoryDraftV2(
-                kind=args.kind, tier=args.tier, scope=MemoryScope.USER_GLOBAL,
-                project_id=None, content=args.content, payload=args.payload,
+                kind=args.kind, tier=args.tier, scope=scope,
+                project_id=trusted.project_id if scope is MemoryScope.PROJECT else None,
+                content=args.content, payload=args.payload,
                 importance=args.importance, strength=args.strength,
                 source_type=SourceType.EXPLICIT_COMMAND, source_session_id=session_id,
                 source_event_ids=[source.event_id],

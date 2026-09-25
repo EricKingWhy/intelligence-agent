@@ -52,13 +52,13 @@ def _clean_settings_env(request: pytest.FixtureRequest) -> Iterator[None]:
     Settings(_env_file=None) 的单测会读到真实 MODEL_*/MILVUS_* 而假失败
     （preset 断言、缺 model_name 快速失败等全部漂移）。
 
-    autouse 清洗所有 Settings 字段对应的大写环境变量；豁免 qiniu 标记的
-    真实集成测试（它们显式依赖真实凭证）。deliberate setenv 的测试不受
+    autouse 清洗所有 Settings 字段对应的大写环境变量；豁免 qiniu/live_services 标记的
+    真实外部服务集成测试（它们显式依赖真实凭证）。deliberate setenv 的测试不受
     影响（monkeypatch.setenv 发生在本 fixture 之后的测试体内）。
 
     清洗规则住在 `settings_env_sealed()`：真实模型守卫夹具用的是同一条。
     """
-    if "qiniu" in request.keywords:
+    if "qiniu" in request.keywords or "live_services" in request.keywords:
         yield
         return
     with settings_env_sealed():

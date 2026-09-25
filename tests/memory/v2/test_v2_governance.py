@@ -18,6 +18,7 @@ from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.capability import MemoryIndexDeletePending, MemoryV2Service
 from agent_harness.memory.v2.commands import (
+    explicit_forget_query_matches,
     explicit_remember_matches,
     has_forget_intent,
 )
@@ -253,10 +254,107 @@ async def test_automatic_evidence_cannot_supersede_or_invalidate_user_edit(gover
 
 def test_explicit_command_match_rejects_negated_intent():
     assert explicit_remember_matches("Please remember I prefer tea", "I prefer tea")
+    assert explicit_remember_matches("Can you remember that I prefer tea?", "I prefer tea")
+    assert not explicit_remember_matches(
+        "Can you remember if I prefer tea?", "I prefer tea",
+    )
+    assert not explicit_remember_matches(
+        "Could you remember whether I prefer tea?", "I prefer tea",
+    )
+    assert not explicit_remember_matches(
+        "请你记得我是否患有抑郁症", "患有抑郁症",
+    )
     assert not explicit_remember_matches("Do not remember this chat", "this chat")
+    assert not explicit_remember_matches(
+        "You should not remember this: I prefer tea", "I prefer tea",
+    )
+    assert not explicit_remember_matches(
+        "Remember I prefer tea. My diagnosis is X.", "My diagnosis is X",
+    )
+    assert not explicit_remember_matches("I remember I prefer tea", "I prefer tea")
+    assert not explicit_remember_matches("I’ll remember I prefer tea", "I prefer tea")
+    assert not explicit_remember_matches("我记得我喜欢喝茶", "我喜欢喝茶")
+    assert not explicit_remember_matches("我记住了我喜欢喝茶", "我喜欢喝茶")
+    assert not explicit_remember_matches(
+        "You shouldn’t remember this: I prefer tea", "I prefer tea",
+    )
+    assert not explicit_remember_matches(
+        "Remember I prefer tea, but do not store my diagnosis: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and avoid storing my diagnosis: I have lupus.", "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember I like tea and don't include my diagnosis in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember my tea preference and not to include my diagnosis in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember my tea preference and avoid including my diagnosis in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and exclude my diagnosis from memory: I have lupus", "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and omit my diagnosis from memory: I have lupus", "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and I don't want to include my diagnosis in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and no need to add my diagnosis to memory: I have lupus", "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and I don't want you storing my diagnosis in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and I don't want my diagnosis stored in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "Remember tea and I don't want the system to include my diagnosis in memory: I have lupus",
+        "I have lupus",
+    )
+    assert not explicit_remember_matches(
+        "记住我喜欢茶而且不要把病情写入记忆：我患有抑郁症", "我患有抑郁症",
+    )
+    assert not explicit_remember_matches(
+        "记住我喜欢茶而且我不想把病情写入记忆：我患有抑郁症", "我患有抑郁症",
+    )
+    assert not explicit_remember_matches(
+        "记住我喜欢茶而且不希望把病情加入记忆：我患有抑郁症", "我患有抑郁症",
+    )
+    assert not explicit_remember_matches(
+        "记得我患有抑郁症吗？", "我患有抑郁症",
+    )
     assert not explicit_remember_matches("不要记住这次对话", "这次对话")
     assert has_forget_intent("Forget preferred editor")
     assert not has_forget_intent("Don't forget my preferred editor")
+    assert not has_forget_intent("You shouldn't forget my preferred editor")
+    assert not has_forget_intent(
+        "PLEASE FORGET MY PREFERRED EDITOR, BUT DO NOT DELETE THE MEMORY ABOUT MY PREFERRED EDITOR."
+    )
+    assert not has_forget_intent("Don't delete the memory about coffee")
+    assert not has_forget_intent("Don’t delete the memory about coffee")
+    assert not has_forget_intent("I don't want you to delete the memory about coffee")
+    assert not has_forget_intent("我不想让你删除记忆：咖啡偏好")
+    assert not explicit_forget_query_matches(
+        "I’ll forget the memory about coffee", "coffee",
+    )
+    assert not explicit_forget_query_matches(
+        "我忘记了这条关于咖啡的记忆", "咖啡",
+    )
+    assert not explicit_forget_query_matches(
+        "Forget my coffee preference. I also like tea.", "tea",
+    )
+    assert explicit_forget_query_matches("Forget my coffee preference", "coffee")
     assert not has_forget_intent("不要忘记我的编辑器偏好")
 
 
@@ -303,7 +401,120 @@ async def test_remember_tool_requires_current_user_consent_and_writes_typed_sour
     assert result.ok
     record = await store.get(result.data["memory_id"], TRUSTED)
     assert record.source_type is SourceType.EXPLICIT_COMMAND
+    assert record.scope is MemoryScope.USER_GLOBAL
     assert record.source_event_ids == [event_id]
+
+
+@pytest.mark.asyncio
+async def test_remember_tool_rejects_unbound_or_negated_content(governance, tmp_path):
+    service, store, _index = governance
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    cases = (
+        ("negated", "You should not remember this: I prefer tea", "I prefer tea"),
+        ("unbound", "Remember I prefer tea. My diagnosis is X.", "My diagnosis is X"),
+        ("reported", "我记得我喜欢喝茶", "我喜欢喝茶"),
+        ("curly-negation", "You shouldn’t remember this: I prefer tea", "I prefer tea"),
+        ("unconsented", "Remember tea, but do not store my diagnosis: I have lupus",
+         "I have lupus"),
+        ("excluded", "Remember tea and don't include my diagnosis in memory: I have lupus",
+         "I have lupus"),
+        ("not-to-include", "Remember tea and not to include my diagnosis in memory: I have lupus",
+         "I have lupus"),
+        ("avoid-including", "Remember tea and avoid including my diagnosis in memory: I have lupus",
+         "I have lupus"),
+        ("excluded-from-memory", "Remember tea and exclude my diagnosis from memory: I have lupus",
+         "I have lupus"),
+        ("omit-from-memory", "Remember tea and omit my diagnosis from memory: I have lupus",
+         "I have lupus"),
+        ("do-not-want-include", "Remember tea and I don't want to include my diagnosis in memory: I have lupus",
+         "I have lupus"),
+        ("no-need-add", "Remember tea and no need to add my diagnosis to memory: I have lupus",
+         "I have lupus"),
+        ("chinese-excluded", "记住我喜欢茶而且不要把病情写入记忆：我患有抑郁症",
+         "我患有抑郁症"),
+        ("chinese-do-not-want", "记住我喜欢茶而且我不想把病情写入记忆：我患有抑郁症",
+         "我患有抑郁症"),
+    )
+    tool = RememberMemoryV2Tool(service, sessions)
+    identity_token = set_identity_context(IDENTITY)
+    try:
+        for session_id, text, content in cases:
+            await _write_user_turn(sessions, session_id, text)
+            binding = memory_session_var.set(session_id)
+            try:
+                result = await tool.execute(_RememberV2Args(
+                    content=content, kind=MemoryKind.SEMANTIC,
+                    payload=_semantic_payload(content),
+                ))
+            finally:
+                memory_session_var.reset(binding)
+            assert not result.ok
+    finally:
+        identity_context_var.reset(identity_token)
+    assert await store.list_records(TRUSTED) == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_remember_uses_the_current_project_scope(governance, tmp_path):
+    from types import SimpleNamespace
+
+    service, store, _index = governance
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    session_id = "project-session"
+    await _write_user_turn(sessions, session_id, "Remember this project uses pnpm")
+
+    class WorkspaceIndex:
+        @staticmethod
+        def workspace_of_session(_session_id):
+            return SimpleNamespace(id="project-a")
+
+    tool = RememberMemoryV2Tool(service, sessions, workspace_index=WorkspaceIndex())
+    binding = memory_session_var.set(session_id)
+    identity_token = set_identity_context(IDENTITY)
+    try:
+        result = await tool.execute(_RememberV2Args(
+            content="this project uses pnpm", kind=MemoryKind.SEMANTIC,
+            payload=_semantic_payload("this project uses pnpm"),
+        ))
+    finally:
+        identity_context_var.reset(identity_token)
+        memory_session_var.reset(binding)
+
+    assert result.ok
+    project_identity = TrustedMemoryIdentity("tenant-a", "user-a", project_id="project-a")
+    record = await store.get(result.data["memory_id"], project_identity)
+    assert record.scope is MemoryScope.PROJECT
+    assert record.project_id == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_negated_forget_tool_does_not_delete_matching_memory(governance, tmp_path):
+    service, store, _index = governance
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    record = await service.create(make_draft(content="my preferred editor is VS Code"), TRUSTED)
+    tool = ForgetMemoryV2Tool(service, sessions)
+    cases = (
+        ("negated-delete", "Don't delete the memory about my preferred editor"),
+        ("curly-negated-delete", "Don’t delete the memory about my preferred editor"),
+        ("want-delete", "I don't want you to delete the memory about my preferred editor"),
+        ("chinese-want-delete", "我不想让你删除记忆：my preferred editor"),
+        ("negated-forget", "You shouldn't forget my preferred editor"),
+        ("reported-forget", "我忘记了这条关于 my preferred editor 的记忆"),
+    )
+    identity_token = set_identity_context(IDENTITY)
+    try:
+        for session_id, text in cases:
+            await _write_user_turn(sessions, session_id, text)
+            binding = memory_session_var.set(session_id)
+            try:
+                result = await tool.execute(_ForgetV2Args(query="preferred editor"))
+            finally:
+                memory_session_var.reset(binding)
+            assert not result.ok
+    finally:
+        identity_context_var.reset(identity_token)
+
+    assert (await store.get(record.id, TRUSTED)).status is MemoryStatus.ACTIVE
 
 
 @pytest.mark.asyncio

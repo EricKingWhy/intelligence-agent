@@ -62,5 +62,6 @@ pythonpath = ["."]
 addopts = ["-m", "not integration and not qiniu"]
 markers = [
     "integration: 端到端集成测试（需要真实 LLM API key、烧 token）",
+    "live_services: integration test that intentionally reads credentials for real services",
     "qiniu: 七牛云 S3 集成测试（需要真实对象存储凭证）",
 ]

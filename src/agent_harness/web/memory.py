@@ -64,6 +64,9 @@ if TYPE_CHECKING:
 
 #: 单页上限：记忆正文可能很长，列表必须有闸（客户端可传更小值）。
 _MAX_LIMIT = 200
+# Offset listing materializes all rows through the requested page before slicing;
+# bound it to keep list requests finite and page_count within SQLite's integer range.
+_MAX_OFFSET = 10_000
 
 #: 装配期没能启用记忆时的**逐原因**说法（#225）。为什么要分开写：真机上
 #: `CAPABILITIES` 里配着 memory、向量库连不上，装配期降级但路由层只能重复
@@ -253,7 +256,7 @@ def register_memory_routes(app: FastAPI) -> None:
     @app.get("/api/memories")
     async def list_memories(
         limit: int = Query(50, ge=1, le=_MAX_LIMIT, description="单页条数上限"),
-        offset: int = Query(0, ge=0, description="跳过的条数（按创建时间倒序）"),
+        offset: int = Query(0, ge=0, le=_MAX_OFFSET, description="跳过的条数（按创建时间倒序）"),
         q: str | None = Query(None, max_length=500),
         kind: Annotated[MemoryKindV2 | None, Query(description="记忆类型筛选")] = None,
         status: Annotated[MemoryStatusV2 | None, Query(description="生命周期筛选")] = None,

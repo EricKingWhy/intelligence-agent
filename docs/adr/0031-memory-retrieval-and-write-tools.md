@@ -310,15 +310,18 @@ available. `retrieve_memory` remains on the V1 capability until the V2 recall ad
 and does not itself perform retrieval or emit those events.
 
 - `remember_this` writes a typed V2 record only when the current user-authored message contains
-  both a positive, explicit remember instruction and the proposed content. An assistant's
-  judgment that a fact may be useful later is not consent. Negated remember instructions and
-  credential-like content are rejected. Provenance is the source user event, and the record is
-  marked `explicit_command`.
+  both a positive, explicit remember instruction and the proposed content in the same command
+  clause. An assistant's judgment that a fact may be useful later is not consent. Negated remember
+  instructions, content in a different sentence, and credential-like content are rejected. Scope
+  comes from the trusted session/workspace ledger: project-linked sessions create project memories;
+  other sessions create user-global memories. Provenance is the source user event, and the record
+  is marked `explicit_command`.
 - `forget_memory` requires an explicit forget instruction in the current user-authored message.
   A query must also come from that message. Multiple matches are read-only candidates; deletion
   requires the user to select a candidate by `memory_id` in a subsequent message. V2 deletion
   erases record versions immediately and retains only content-free hashes in a 30-day tombstone
-  while the derived-index delete is relayed through the durable outbox.
+  while the derived-index delete is relayed through the durable outbox. Expired tombstones are
+  purged at service startup and hourly for long-lived processes.
 - The authenticated V2 governance routes add list/filter, detail, version history, authoritative
   edit, idempotent single delete, confirmed bulk delete, per-user extraction/recall settings, and
   per-session recall explanations. They use the existing trusted identity and workspace ledger;

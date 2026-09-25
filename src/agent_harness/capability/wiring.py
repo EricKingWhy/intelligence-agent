@@ -93,12 +93,21 @@ class CapabilityWiring:
     async def aclose(self) -> None:
         """关闭本次装配持有的全部生命周期资源；逐项故障隔离——进程退出路径，
         一项失败不阻断其余清理。"""
+        # Formation jobs share the provider's vector store. Stop and drain them before
+        # MemoryComponents.close() tears down that store.
+        if self.memory_formation is not None:
+            try:
+                await self.memory_formation.aclose()
+            except Exception:
+                logger.warning("memory formation 关闭失败（继续其余清理）", exc_info=True)
         if self.memory is not None:
             try:
                 await self.memory.close()
             except Exception:
                 logger.warning("memory 组件关闭失败（继续其余清理）", exc_info=True)
         for obj in self.lifecycle:
+            if obj is self.memory_formation:
+                continue
             aclose = getattr(obj, "aclose", None)
             if aclose is None:
                 continue
@@ -231,10 +240,14 @@ async def _wire_memory_formation(
                 )
     if runner is None:
         # 没有 formation model 时，持久治理 API 与显式 V2 工具仍可工作。
+        service.start_tombstone_purger()
+        wiring.lifecycle.append(service)
         return
     wiring.memory_formation = runner
     # 生命周期挂通道：`aclose` 先停泵（此后拒绝新 run）再有界地排空在飞 job。
     wiring.lifecycle.append(runner)
+    service.start_tombstone_purger()
+    wiring.lifecycle.append(service)
 
 
 def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:

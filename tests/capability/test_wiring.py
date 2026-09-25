@@ -330,3 +330,30 @@ async def test_wiring_aclose_closes_memory_and_lifecycle_with_isolation():
 
     assert memory.closed, "memory 组件必须被关闭"
     assert lifecycle.closed, "failing 项之后其余 lifecycle 仍须被关闭（隔离）"
+
+
+@pytest.mark.asyncio
+async def test_wiring_drains_memory_formation_before_closing_shared_memory():
+    events = []
+
+    class FakeMemory:
+        async def close(self):
+            events.append("memory")
+
+    class FakeFormation:
+        async def aclose(self):
+            events.append("formation")
+
+    class FakeLifecycle:
+        async def aclose(self):
+            events.append("other")
+
+    formation = FakeFormation()
+    wiring = CapabilityWiring(
+        memory=FakeMemory(), memory_formation=formation,
+        lifecycle=[formation, FakeLifecycle()],
+    )
+
+    await wiring.aclose()
+
+    assert events == ["formation", "memory", "other"]

@@ -14,7 +14,9 @@ provider 专属分支。所以调用方（工具、API、后续的 formation 流
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 from typing import Protocol
 
 import aiosqlite
@@ -37,6 +39,8 @@ from agent_harness.memory.v2.types import (
     SourceType,
     TrustedMemoryIdentity,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryV2Capability(Protocol):
@@ -82,6 +86,36 @@ class MemoryV2Service:
         self._store = store
         self._index = index
         self._relay = relay
+        self._tombstone_purger: asyncio.Task | None = None
+
+    def start_tombstone_purger(self, *, interval_seconds: float = 3600) -> None:
+        """Purge expired tombstones hourly for long-lived processes."""
+        if interval_seconds <= 0:
+            raise ValueError("tombstone purge interval must be positive")
+        if self._tombstone_purger is None or self._tombstone_purger.done():
+            self._tombstone_purger = asyncio.create_task(
+                self._purge_tombstones_loop(interval_seconds),
+                name="memory-v2-tombstone-purger",
+            )
+
+    async def _purge_tombstones_loop(self, interval_seconds: float) -> None:
+        while True:
+            try:
+                await self._store.purge_expired_tombstones()
+            except Exception as error:  # noqa: BLE001 — a purge failure must not stop later runs.
+                logger.warning("Memory V2 tombstone purge failed (%s)", type(error).__name__)
+            await asyncio.sleep(interval_seconds)
+
+    async def aclose(self) -> None:
+        task = self._tombstone_purger
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        self._tombstone_purger = None
 
     async def create(self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         self._reject_secret(draft)
