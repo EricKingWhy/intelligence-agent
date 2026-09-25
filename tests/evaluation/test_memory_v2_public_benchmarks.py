@@ -160,6 +160,27 @@ async def test_public_baseline_skips_and_duplicate_traces_cannot_freeze(tmp_path
     assert not baseline_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_public_baseline_without_answer_quality_cannot_freeze(tmp_path):
+    path = _locomo_file(tmp_path)
+    cases = load_locomo(path)
+    baseline_path = tmp_path / "baseline.json"
+
+    report = await run_public_baseline(
+        "locomo", cases,
+        lambda case: {"observed": _measurement(case, answer_correct=None)},
+        dataset_path=path, config_aliases={"reader": "memory.primary"},
+        report_path=tmp_path / "missing-answer.json", freeze_path=baseline_path,
+    )
+
+    assert report["status"] == "failed"
+    assert report["metrics"]["answer_quality"]["denominator"] == len(cases)
+    assert report["metrics"]["answer_quality"]["value"] == 0
+    assert "invalid_metric:synthetic-conversation-qa-0000:answer_correct" in report["failures"]
+    assert report["baseline_frozen"] is False
+    assert not baseline_path.exists()
+
+
 def test_public_benchmark_loader_rejects_duplicate_question_ids(tmp_path):
     path = _longmemeval_file(tmp_path)
     content = json.loads(path.read_text(encoding="utf-8"))

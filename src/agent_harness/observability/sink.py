@@ -194,7 +194,7 @@ class LangfuseSink:
             self._register_failure("start_observation", exc)
             return None
 
-    def memory_observation(self, *, stage: str, metadata: dict[str, Any]) -> None:
+    def memory_observation(self, stage: str, metadata: dict[str, Any]) -> None:
         """Send one metadata-only Memory V2 observation through the optional SDK sink."""
         if not _SAFE_METADATA_TOKEN.fullmatch(stage):
             return

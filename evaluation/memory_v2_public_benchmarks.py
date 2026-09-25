@@ -298,7 +298,7 @@ def _aggregate_public_run(
             continue
         missing = _OBSERVATION_FIELDS - observed.keys()
         reasons.extend(f"missing_metric:{case.case_id}:{field}" for field in sorted(missing))
-        if observed.get("answer_correct") is not None and type(observed["answer_correct"]) is not bool:
+        if type(observed.get("answer_correct")) is not bool:
             reasons.append(f"invalid_metric:{case.case_id}:answer_correct")
         for field in (
             "stored_record_count", "pollution_count", "injected_tokens", "latency_ms",
@@ -316,10 +316,7 @@ def _aggregate_public_run(
             reasons.append(f"invalid_metric:{case.case_id}:cost_usd")
         observations[case.case_id] = observed
 
-    answer_cases = [
-        case for case in executed
-        if observations.get(case.case_id, {}).get("answer_correct") is not None
-    ]
+    answer_cases = executed
     answer_hits = sum(
         observations[case.case_id].get("answer_correct") is True for case in answer_cases
     )

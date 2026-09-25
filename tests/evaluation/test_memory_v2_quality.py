@@ -88,6 +88,7 @@ def test_frozen_gold_passes_all_blocking_metrics_with_complete_measurements():
         ("explicit_opt_out", "ineligible_trigger_write_count", 1, "ineligible_trigger_writes"),
         ("transient_noop", "action", "ADD", "noop_accuracy"),
         ("transient_noop", "action", "ADD", "write_precision"),
+        ("positive_semantic_preference", "written_count", 0, "write_precision"),
         ("positive_semantic_preference", "kind", "episodic", "kind_accuracy"),
         ("contradiction_supersession", "old_version_superseded", False,
          "contradiction_handling"),

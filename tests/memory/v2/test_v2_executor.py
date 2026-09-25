@@ -323,6 +323,49 @@ async def test_job_observations_include_metadata_without_projected_content(env: 
 
 
 @pytest.mark.asyncio
+async def test_langfuse_observer_receives_memory_job_observations(env: Env) -> None:
+    from agent_harness.observability.sink import LangfuseSink
+
+    class _Observation:
+        def __init__(self, metadata):
+            self.metadata = metadata
+            self.ended = False
+
+        def end(self):
+            self.ended = True
+
+    class _Client:
+        def __init__(self):
+            self.observations = []
+
+        def start_observation(self, **kwargs):
+            observation = _Observation(kwargs["metadata"])
+            self.observations.append((kwargs["name"], observation))
+            return observation
+
+    client = _Client()
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk", client_factory=lambda **_kwargs: client,
+    )
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+
+    _job, result, _events = await _run(env, invoker, observer=sink.memory_observation)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.NO_WRITE
+    assert {name for name, _observation in client.observations} >= {
+        "memory-job", "memory-model", "memory-schema", "memory-formation",
+    }
+    assert all(observation.ended for _name, observation in client.observations)
+    model = next(
+        observation.metadata for name, observation in client.observations
+        if name == "memory-model"
+    )
+    assert model["model_alias"] == "memory.primary"
+    assert "input_sha256" in model
+    assert "system_prompt" not in model
+
+
+@pytest.mark.asyncio
 async def test_observer_failure_does_not_change_a_committed_memory_job(env: Env) -> None:
     def unavailable_observer(_name: str, _metadata: dict) -> None:
         raise RuntimeError("Langfuse credential=private")

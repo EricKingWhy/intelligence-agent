@@ -418,6 +418,36 @@ async def test_failing_run_drives_terminal_port_lifecycle(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_memory_v2_langfuse_outage_does_not_fail_agent_runtime(tmp_path, caplog):
+    class _BrokenClient:
+        def start_observation(self, **_kwargs):
+            raise RuntimeError("api_key=private-value")
+
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk",
+        client_factory=lambda **_kwargs: _BrokenClient(),
+    )
+
+    class _MemoryFormation:
+        async def notify_run_finished(self, **_kwargs):
+            return None
+
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([AIMessage(content="safe answer")]), registry,
+        ToolExecutor(registry), memory_formation=_MemoryFormation(), observability_sink=sink,
+    )
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "private user prompt")
+
+    assert result.status == "completed"
+    assert result.final_text == "safe answer"
+    assert session.events[-1].type == RUN_COMPLETED
+    assert "private-value" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_cancelled_run_drives_terminal_port_lifecycle(tmp_path, monkeypatch):
     """取消臂（消费方断连）：在途 generation 必须收口 + run_failed 必须到达端口。
 

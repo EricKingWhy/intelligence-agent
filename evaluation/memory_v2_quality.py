@@ -223,6 +223,7 @@ def evaluate_memory_gold(
         and obs(case).get("kind") == case.expected["kind"]
         and obs(case).get("scope") == case.expected["scope"]
         and obs(case).get("source_authority") == case.expected["source_authority"]
+        and obs(case).get("written_count", 0) > 0
         for case in writes
     )
     kind_correct = sum(
