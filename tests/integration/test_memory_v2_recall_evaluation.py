@@ -26,6 +26,7 @@ from agent_harness.memory.v2.types import (
 )
 from agent_harness.session import USER_MESSAGE, JsonlSessionStore, Session
 from evaluation.memory_v2_recall import dataset_sha256, load_dataset, recall_at_k
+from scripts.gate0 import worktree_divergence
 from tests.memory.v2._records import make_draft
 
 pytestmark = [pytest.mark.integration, pytest.mark.live_services, pytest.mark.asyncio]
@@ -51,8 +52,10 @@ class _CachedEmbeddings:
 
 
 async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
-    git_status = _git_output("status", "--porcelain")
-    assert not git_status, "live Recall@6 evidence must run from a clean committed tree"
+    divergence = worktree_divergence()
+    assert not any(divergence[key] for key in ("tracked", "hidden", "risky")), (
+        "live Recall@6 evidence must run without tracked, hidden-index, or risky-input divergence"
+    )
     code_commit = _git_output("rev-parse", "HEAD")
     code_tree = _git_output("rev-parse", "HEAD^{tree}")
     settings = Settings()
