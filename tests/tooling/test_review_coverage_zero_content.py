@@ -27,11 +27,30 @@
 
 ## 变异实测（2026-09-26；`WBI_GATE_UNDER_TEST` 指向打了变异的副本，只跑本文件）
 
+**被抓到的**（每条都被**恰好预期**的用例抓住）：
+
 - **M1 拆掉接线**（判定循环里 `if False and sha in zero_parent:`）⇒ **只红正控那条端到端**，
-  7 条纯函数测试**全绿** ⇒ 「纯函数测试看不见接线」不是推断，是实测。
+  其余 8 条（7 条判据层 + 反控端到端）**全绿** ⇒ 「判据层测试看不见接线」不是推断，是实测。
 - **M2 判据偷懒**（文件表为空就 `return parents[0]`，即"凡是空表就放行"）⇒ 红 4 条，
   含 `…_still_fail_closed_end_to_end` ⇒ 反控确实拦得住那条假实现。
 - **M3 去掉 `target` 真值守卫**（`None == None` 判等）⇒ **只红** `…_tree_cannot_be_resolved`。
+- **M15 去掉 `expect.match(line)` 形状校验**（`missing` 那行被当成 sha 取用）⇒ **只红**
+  `test_resolve_trees_rejects_a_line_that_is_not_a_tree`；本条是补写的，此前**无任何用例**能抓它
+  —— 那正是"注释声称 fail-closed、测试却没钉住"的唯一一处。
+
+**未被抓到、但也不该被证伪（逐条定级，别读成漏网）**：
+
+- **M4 删 `if not parents: return None`（根提交守卫）** ⇒ 行为**完全相同**（无父 ⇒ 循环零次 ⇒
+  照样 `return None`）。这条守卫是**可读性**，不是分支；删了没人能证伪，因为没有可观察差异。
+- **M5 命中多个父时返回最后一个而非第一个** ⇒ 只有"两个父的树恰好相同"（真存在，如把已并入的
+  分支再 `--no-ff` 合一次）时标签不同，**两个都是正当归属** ⇒ 无判定差异，属良性。
+- **M6 改成「树 == 任一祖先」**（而非仅父）⇒ 判据**放宽**、本文件不钉它，但**未被证伪**：
+  它会把"整棵树恰好回到某个祖先状态"的提交也放行（如删除某文件后树回到祖父的样子）—— 那种
+  提交的内容确实等于一份已存在的树，可"相对父的**增量**"并未被审查 ⇒ 属**真放松**。当前实现
+  取**父**（更严），保留即安全；若将来有人想放宽，必须**另案**并补上这条反控。
+- **M7 去掉 `cand` 预筛**（对全部待判定提交解树）⇒ 结论**完全相同**，只是多解几个 rev ⇒ 良性。
+- **M9 把接线挪到 `is_ledger_only` 之后** ⇒ 只有"既是零新增内容、又恰好只改台账"的提交（几乎
+  不存在）会**换一个 ✅ 标签**（`✅ 台账自身更新` ↔ `✅ 零新增内容`），**两边都是绿** ⇒ 良性。
 """
 
 from __future__ import annotations
@@ -122,6 +141,30 @@ def test_prints_full_shas_for_recomputation(gate):
     text = gate.format_zero_content("abc1234", "Merge pull request #322", parent, tree)
     assert "abc1234" in text, "必须打印短 sha"
     assert tree in text and parent in text, f"必须打印树与父的完整 sha（实得 {text!r}）"
+
+
+def test_resolve_trees_rejects_a_line_that_is_not_a_tree(gate):
+    """**反控**：`resolve_many` 必须按**行的形状**判成败，不能只看退出码 / 无条件取首段。
+
+    为什么这是 `resolve_trees` 的**命门**：`git cat-file --batch-check` 对**不存在的对象也退 0**，
+    只是把该行变成 `<input> missing`。若实现写成 `line.split(" ")[0]` 无条件取值，两次"解不出"会
+    得到**两个 `missing` 字样**、彼此 `==` ⇒ 一个解不出树的父会被判成"与提交同树" ⇒ **fail-closed
+    被悄悄拔掉**。所以这里既要钉"不存在的对象 ⇒ None"，也要钉两条正则**互不兼收**
+    （`FULL_SHA_RE` 故意不收 `tree` 行：它还兼任 commit 行的形状判据，放宽它等于把哨兵行也认了）。
+    """
+    real = gate.git("rev-parse", "HEAD").stdout.strip()
+    assert len(real) == 40, f"环境异常：拿不到 HEAD 的完整 sha（{real!r}）"
+    bogus = "0" * 40
+
+    trees = gate.resolve_trees([real, bogus])
+    assert trees[real] is not None and len(trees[real]) == 40, f"真实 rev 必须解出树：{trees[real]!r}"
+    assert trees[bogus] is None, f"不存在的对象必须映射为 None，实得 {trees[bogus]!r}"
+
+    assert gate.TREE_SHA_RE.match(f"{trees[real]} tree 1")
+    assert not gate.FULL_SHA_RE.match(f"{trees[real]} tree 1"), \
+        "`FULL_SHA_RE` 不得兼收 tree 行（它还兼任 commit 行形状判据）"
+    assert not gate.TREE_SHA_RE.match(f"{real} commit 1")
+    assert gate.FULL_SHA_RE.match(f"{real} commit 1")
 
 
 # =========================================================================== #
