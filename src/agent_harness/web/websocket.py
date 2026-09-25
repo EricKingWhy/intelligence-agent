@@ -275,12 +275,13 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     pass
                 elif msg_type == "send_message":
                     # 续聊走 SessionService（业务逻辑不进 WS 层）
+                    from agent_harness.agent.budget import BudgetRejection
                     from agent_harness.session.service import (
                         InvalidSessionId,
                         SessionNotFound,
                         WorkspaceBindingConflict,
                     )
-                    from agent_harness.web.app import session_service
+                    from agent_harness.web.app import session_service, ws_budget_claims
 
                     sid = msg.get("session_id", "")
                     content = msg.get("content", "")
@@ -288,15 +289,28 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     if not sid or not content:
                         await _send_json({"type": "error", "message": "missing session_id or content"})
                         continue
+                    # budget（#308）：帧里的形状错误当场回错误帧（不静默丢弃）；
+                    # 语义判定（alias 冲突 / 越权）在领域层，错误同样回帧。
+                    try:
+                        claims = ws_budget_claims(msg)
+                    except ValueError as error:
+                        await _send_json({"type": "error", "message": str(error)})
+                        continue
                     service = session_service(state)
                     try:
                         result = await service.send_message(
-                            session_id=sid, content=content, mode=mode,
+                            session_id=sid, content=content, mode=mode, **claims,
                         )
                     # WorkspaceBindingConflict（#266）：WS 是 HTTP 三个端点之外的第四个
                     # 续聊入口——不在这里收编，它会逃到外层的 `except Exception`（只
                     # `logger.debug`）并让连接静默死掉，用户看不到任何原因。
-                    except (InvalidSessionId, SessionNotFound, WorkspaceBindingConflict) as e:
+                    # BudgetRejection（#308）：同上，别名冲突 / 越权 ceiling 也要有回声。
+                    except (
+                        InvalidSessionId,
+                        SessionNotFound,
+                        WorkspaceBindingConflict,
+                        BudgetRejection,
+                    ) as e:
                         await _send_json({"type": "error", "message": str(e)})
                         continue
                     if result.status == "launched":

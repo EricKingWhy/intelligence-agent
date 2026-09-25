@@ -68,7 +68,7 @@ async def _run(root: Path) -> None:
     profiles = {
         "supervisor": AgentSpec(
             name="supervisor", description="supervisor", system_prompt="supervisor",
-            tool_scope=frozenset({"delegate"}), max_steps=8, max_depth=4,
+            tool_scope=frozenset({"delegate"}), max_agent_turns=8, max_depth=4,
         ),
     }
     provider = InProcessSubagentProvider(profiles=profiles)
@@ -93,7 +93,7 @@ async def _run(root: Path) -> None:
         model=_KillOnThirdRootCall(),
         registry=registry,
         executor=ToolExecutor(registry, operation_ledger=operations),
-        max_steps=8,
+        max_agent_turns=8,
     )
     await runtime.run(session, "start crash/resume verification")
 

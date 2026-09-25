@@ -17,6 +17,12 @@
 
 脱敏：FallbackTransition.reason 只带异常类型名，不带异常消息——Provider
 回显可能含敏感文本（与 model/failed 事件的脱敏不变量一致）。
+
+`#313`（T5）：本模块**额外**记下每一次**实际**发出去的 Provider 请求
+（`ModelRequestAttempt`），供 Runtime 落 `model/request`（计数点定义见 `02 §5.1`）。
+放在这一层的原因只有一条：**"这次调用实际发了几次请求"只有编排层知道**——primary
+失败后那次 fallback 重试是同一次决策里的第二次请求。与 transitions 同一姿势，本层
+只记录事实，落盘与镜像由持有 Session 的 Runtime 负责。
 """
 
 from __future__ import annotations
@@ -29,6 +35,12 @@ from typing import Any, Protocol, runtime_checkable
 import httpx
 from langchain_core.messages import AnyMessage
 
+from agent_harness.model.accounting import (
+    PROVIDER_ROLE_FALLBACK,
+    PROVIDER_ROLE_PRIMARY,
+    REQUEST_OUTCOME_COMPLETED,
+    REQUEST_OUTCOME_FAILED,
+)
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.stall import ModelStallError, stream_with_stall_guard
 
@@ -79,6 +91,24 @@ class FallbackTransition:
     from_model: str
     to_model: str
     reason: str
+
+
+@dataclass(frozen=True)
+class ModelRequestAttempt:
+    """一次**实际**发出去的 Provider 请求（`#313`：`model_requests` 的一格）。
+
+    三件只有这一层知道的事（其余规则见 `02 §5.1`，本处不复述）：
+
+    - `role`：primary / fallback。closeout 那一次由 Runtime 的收口调用点自己记
+      ——那条路径**绕过**本协调器（见 `_closeout_continuation`）。
+    - `outcome`：拿到响应（completed）或没拿到（failed：瞬时故障、非瞬时错误、
+      取消、断连）。没拿到的**照样算一次请求**：它真的发出去了。
+    - usage / cost **不在这里**：那是**响应**的属性，而流式路径的响应由 Runtime
+      聚合（本层只见 chunk），落盘见 `agent/runtime.py::_append_model_request`。
+    """
+
+    role: str
+    outcome: str
 
 
 @runtime_checkable
@@ -140,6 +170,7 @@ class ModelFallbackCoordinator:
         self._gate = gate
         self.current = primary
         self._transitions: list[FallbackTransition] = []
+        self._requests: list[ModelRequestAttempt] = []
 
     def _guarded_stream(self, model: Any, messages: list[AnyMessage]) -> AsyncIterator[Any]:
         """单次流式尝试（按需包双守卫 + 并发闸；fallback 重试同样受保护）。
@@ -175,15 +206,35 @@ class ModelFallbackCoordinator:
         V1 看门狗不覆盖 ainvoke（总时限会误杀合法长推理）——socket 级
         read-timeout 仍是底线，见 model/stall.py 模块 docstring。
         并发闸同样生效（非流式调用占一个槽位，两次尝试各占一次）。
+
+        每次尝试**恰记一格** `ModelRequestAttempt`（`#313`）：成功与失败都记，
+        取消 / 断连（`BaseException`，如 `CancelledError`）也记——请求发出去了就
+        发生过，只是没拿到响应。记录走 `except BaseException` 而不是
+        `except Exception`：后者会让取消/断连这类"请求已发出但未完成"从账上消失。
         """
+        role = self._current_role()
         try:
             async with self._slot():
-                return await self.current.ainvoke(messages)
-        except Exception as error:
-            if not self._try_switch(error):
+                result = await self.current.ainvoke(messages)
+        except BaseException as error:
+            self._record_request(role, REQUEST_OUTCOME_FAILED)
+            if not isinstance(error, Exception) or not self._try_switch(error):
                 raise
+            return await self._ainvoke_once(messages)
+        self._record_request(role, REQUEST_OUTCOME_COMPLETED)
+        return result
+
+    async def _ainvoke_once(self, messages: list[AnyMessage]) -> Any:
+        """切换后的那一次重试（**不再**切换：never 切回、只重试一次）。"""
+        role = self._current_role()
+        try:
             async with self._slot():
-                return await self.current.ainvoke(messages)
+                result = await self.current.ainvoke(messages)
+        except BaseException:
+            self._record_request(role, REQUEST_OUTCOME_FAILED)
+            raise
+        self._record_request(role, REQUEST_OUTCOME_COMPLETED)
+        return result
 
     async def astream(
         self, messages: list[AnyMessage]
@@ -192,21 +243,59 @@ class ModelFallbackCoordinator:
 
         已产出的 chunk 由消费者聚合（前缀 + fallback 续写）——SSE 客户端
         看到的是一段连续流；完整聚合结果由 model/completed 持久化。
+
+        记账同 `ainvoke`：每次尝试恰一格，且**流被半途关闭**（消费者断连 →
+        `GeneratorExit`）也算一次失败的请求——那一格在第一段 `except
+        BaseException` 里记，`yield` 型生成器关闭时同样会走到。
         """
+        role = self._current_role()
         try:
             async for chunk in self._guarded_stream(self.current, messages):
                 yield chunk
-        except Exception as error:
-            if not self._try_switch(error):
+        except BaseException as error:
+            self._record_request(role, REQUEST_OUTCOME_FAILED)
+            if not isinstance(error, Exception) or not self._try_switch(error):
                 raise
-            async for chunk in self._guarded_stream(self.current, messages):
-                yield chunk
+            retry_role = self._current_role()
+            try:
+                async for chunk in self._guarded_stream(self.current, messages):
+                    yield chunk
+            except BaseException:
+                self._record_request(retry_role, REQUEST_OUTCOME_FAILED)
+                raise
+            self._record_request(retry_role, REQUEST_OUTCOME_COMPLETED)
+            return
+        self._record_request(role, REQUEST_OUTCOME_COMPLETED)
 
     def drain_transitions(self) -> list[FallbackTransition]:
         """取走自上次 drain 以来的切换事实（Runtime 逐调用持久化用）。"""
         out = self._transitions
         self._transitions = []
         return out
+
+    def drain_requests(self) -> list[ModelRequestAttempt]:
+        """取走自上次 drain 以来的**实际请求**记录（Runtime 落 `model/request` 用）。
+
+        drain 语义与 transitions 一致：同一次决策可能留下两格（primary 失败 +
+        fallback 成功），Runtime 逐格落盘后据此镜像——被拒绝 / 传输失败的那一格
+        也**在**（`02 §5.1`：失败请求占 `model_requests` 一席，但不增 `agent_turns`）。
+        """
+        out = self._requests
+        self._requests = []
+        return out
+
+    def _current_role(self) -> str:
+        """此刻的调用角色：`self.current` 指向 fallback 就是 fallback，否则 primary。
+
+        按**身份**判（`is`）而不是按序号：`never 切回`由 `_try_switch` 保证，
+        所以"当前是谁"就是"这次请求以谁的名义发出"。
+        """
+        if self._fallback is not None and self.current is self._fallback:
+            return PROVIDER_ROLE_FALLBACK
+        return PROVIDER_ROLE_PRIMARY
+
+    def _record_request(self, role: str, outcome: str) -> None:
+        self._requests.append(ModelRequestAttempt(role=role, outcome=outcome))
 
     def _try_switch(self, error: BaseException) -> bool:
         """错误值得切且还没切过 → 切换并记录事实；否则 False（上抛原异常）。"""

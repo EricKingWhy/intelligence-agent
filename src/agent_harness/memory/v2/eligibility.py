@@ -41,14 +41,17 @@ from enum import Enum
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
 )
 from agent_harness.memory.extractor import _is_runtime_injected
 from agent_harness.session import MODEL_COMPLETED, USER_MESSAGE, SessionEvent
 
-#: 能触发记忆形成的终态：正常完成 + 两张获批的受控失败（max-steps、同错熔断）。
+#: 能触发记忆形成的终态：正常完成 + 一张获批的受控失败（同错熔断）。
+#: `#312`（T4）起预算/保险丝到顶**不再是失败终态**，而是非终态 `run/paused`
+#: （`02 §5.2` / `03 §3.4`）——那时的 run 还没结束，抽记忆是过早的；同 run 由
+#: `run/resumed` 接回，最终仍会走到完成臂并在这里入队。故旧的
+#: `max_steps_exceeded` 从白名单移除（该终态在运行时已不可达）。
 ELIGIBLE_TERMINAL_STATUSES = frozenset({
-    STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+    STATUS_COMPLETED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
 })
 
 #: 取消类终态（ADR-0016 §2.1：断连消费 = `cancelled`；孤儿回收 = `orphaned`）。

@@ -62,12 +62,12 @@ class EchoTool(Tool):
 
 
 def _runtime(model: ScriptedModel, *, with_tool: bool = False,
-             max_steps: int = 20) -> AgentRuntime:
+             max_agent_turns: int = 20) -> AgentRuntime:
     registry = ToolRegistry()
     if with_tool:
         registry.register(EchoTool())
     return AgentRuntime(model=model, registry=registry,
-                        executor=ToolExecutor(registry), max_steps=max_steps)
+                        executor=ToolExecutor(registry), max_agent_turns=max_agent_turns)
 
 
 async def _run_turn(runtime: AgentRuntime, session, text: str):
@@ -159,7 +159,7 @@ class TestStepIdSessionUnique:
             AIMessage(content="首轮完成"),
             AIMessage(content="第二轮完成"),
         ])
-        runtime = _runtime(model, with_tool=True, max_steps=3)
+        runtime = _runtime(model, with_tool=True, max_agent_turns=3)
 
         first = await runtime.run(session, "第一轮")
         second = await runtime.run(session, "第二轮")

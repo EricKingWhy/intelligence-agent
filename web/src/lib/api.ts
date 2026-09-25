@@ -21,6 +21,7 @@ import type {
   SessionSummary,
 } from '../types';
 import { emitUnauthorized, getToken } from './auth';
+import type { RunLimitField } from './runBudget';
 import { parseCapabilities, type CapabilityDescriptor } from './capabilities';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
@@ -159,6 +160,19 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
   return res.json();
 }
 
+export interface BudgetPayload {
+  /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。**本票只开这一层**：
+   *  `run` / `session` 由 T4/T10 落地，在那之前后端对未知键是 422
+   *  （`extra="forbid"`），所以类型里也不预留——预留会让"编译通过、请求 422"
+   *  变成新的漂移源。
+   *
+   *  **缺省不发键**：不传 = 后端按 Deployment/AgentProfile 解析（默认 500）。
+   *  前端刻意没有默认值——硬编码一个数字会变成请求侧覆盖：运维把 deployment
+   *  ceiling 调低时，它反而让请求 422（#308 AC：产品调用方不再主动发送
+   *  `max_steps`）。 */
+  local?: { max_agent_turns?: number };
+}
+
 export interface StartSessionPayload {
   task: string;
   workspace?: string;
@@ -170,7 +184,7 @@ export interface StartSessionPayload {
    *  **互斥**：两个都传 → 422 `workspace 与 cwd 只能二选一`。前端入口一次只用一种，
    *  这条互斥在后端兜底而不是在这里猜（谁先谁后是可观测契约，见 PRD §4.1）。 */
   cwd?: string;
-  max_steps?: number;
+  budget?: BudgetPayload;
   auto_approve?: boolean;
   /** 可选模型选择（T10 #103，契约 C6）：GET /api/models 的 name；不传 = 默认
    *  链；未知 → 422（调用方提示重新选择并刷新目录）。 */
@@ -201,7 +215,7 @@ export interface StartSessionPayload {
  *  后端默认 workspace-write + auto-approve。 */
 export interface CreateEmptySessionPayload {
   cwd?: string;
-  max_steps?: number;
+  budget?: BudgetPayload;
   auto_approve?: boolean;
   permission_mode?: string;
   workspace?: string;
@@ -231,7 +245,7 @@ export async function createEmptySession(
       buildBody(payload, {
         workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
         cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
-        max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+        budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
         auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
         permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
       }),
@@ -394,7 +408,7 @@ const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
   cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
-  max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+  budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
   auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
   model: (p) => (p.model ? ['model', p.model] : null),
   permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
@@ -437,7 +451,7 @@ export async function startSessionErrorDetail(res: Response): Promise<string> {
 export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
-  max_steps?: number;
+  budget?: BudgetPayload;
   /** 编辑语义（ADR-0030 §4.4，后端 #196 起接受；默认缺省不发键 = 现有行为不变）：
    *  - supersedes_seq：取代 seq 为它的那条 user/message **及其整轮**（只影响
    *    模型可见投影与界面，历史事件照旧保留）。目标必须是最新一条非注入用户
@@ -464,12 +478,14 @@ export interface SendMessagePayload {
   context_providers?: string[];
 }
 
-/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；mode / max_steps
- *  有后端默认值，故缺省在此补齐（与 create 路径「缺省即不发键」不同）。 */
+/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；`mode` 有后端默认值，
+ *  故缺省在此补齐（其余键缺省即不发键，与 create 路径同款）。 */
 const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
-  max_steps: (p) => ['max_steps', p.max_steps ?? 10],
+  // budget（#308）：与 create 路径同款「有值才带键」，**没有**前端默认值。
+  // 旧的 `max_steps: p.max_steps ?? 10` 正是产品侧低位默认的来源之一，随本票移除。
+  budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
   // 编辑语义（ADR-0030）：与 amend 四项同款「有值才带键」，缺省不发键 = 后端
   // 默认 None = 现有行为逐字不变。
   supersedes_seq: (p) =>
@@ -1137,6 +1153,72 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
   }
   if (!res.ok) throw new RecoverError(res.status, `恢复失败（${res.status}）`);
   return res.json();
+}
+
+// ── 同 run 恢复（`#312` T4，PRD §3 / `11 §6.1`）──
+
+/** 恢复被预算暂停的逻辑 run 的请求体（**不带 task**）。
+ *
+ *  与「带 task 的续聊恢复」是**两种形态**，后端按 `task` 是否存在区分
+ *  （`web/app.py::ResumeRequest`）：给了 task = 新任务新 run_id（既有语义，逐字不变）；
+ *  不给 task = 同 run 续跑，此时必须带 `run_id` + `resume_basis` +
+ *  `budget.expected_version` + 绝对 ceiling（缺声明 422、状态对不上 409）。
+ *
+ *  `budget.run` 的键是四个 run 维度里**卡住的那一个**（`#313`：`max_agent_turns_total`
+ *  / `max_model_requests` / `max_total_tokens` / `max_cost_usd`，与后端
+ *  `RunLimitsBody` 的字段名逐字相同）。值是**绝对值**不是增量：后端要求这一维恢复后
+ *  至少放得下一次新准入（turns / requests 要 `> consumed + 1`，tokens / cost 要
+ *  `> consumed`），低到不能继续的 ceiling 会被 409 拒掉；未点名的维度**沿用**暂停时的
+ *  ceiling（不清空、不重置 counter——ADR-0044 D1/D3）。cost 维传十进制**字符串**
+ *  （保住 wire 精度；后端 `parse_cost_ceiling` 数与串都收）。
+ *  `expected_version` 与 `run` 平级（PRD §3 的冻结形状——它是"这次预算变更"的属性，
+ *  不是某个作用域的 ceiling）。 */
+export interface ResumePausedRunPayload {
+  run_id: string;
+  resume_basis: 'budget_increase';
+  budget: {
+    expected_version: number;
+    run: Partial<Record<RunLimitField, number | string>>;
+  };
+}
+
+/** 恢复请求被拒（409/422 且**零副作用**：后端判定在任何落盘之前）。
+ *  单独一个错误类型是为了让调用方能按状态分派——409 要重读日志对齐真相，
+ *  422 是请求形状问题（改参数重试即可），两者对用户的下一步动作不同。 */
+export class ResumeRejectionError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** POST /api/sessions/{id}/resume（同 run 续跑）。
+ *
+ *  成功返回**原始 Response**：后端以 SSE 流回（`_run_stream_response`，与
+ *  POST /messages 的 launched 分支同形），调用方交给既有 SSE/WS 消费机器
+ *  （不在这里读 body——攒包时响应头可能被压到 run 结束才下发，读 body 就是卡住）。
+ *  409/422 是**短 JSON**，当场读掉 detail 再抛（否则 detail 丢失，用户只看到一个
+ *  没头没尾的"恢复失败"）。 */
+export async function resumeSession(
+  sessionId: string,
+  payload: ResumePausedRunPayload,
+): Promise<Response> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 409 || res.status === 422) {
+    const detail = await readErrorDetail(res);
+    throw new ResumeRejectionError(
+      res.status,
+      detail || (res.status === 409 ? '恢复被拒绝（状态已变化）' : '恢复请求无效'),
+    );
+  }
+  if (res.status === 404) throw new ResumeRejectionError(404, '会话不存在');
+  if (!res.ok) throw new ResumeRejectionError(res.status, `恢复失败（${res.status}）`);
+  return res;
 }
 
 // ── Session-level model switch（T7 #137，PRD §2.3）──

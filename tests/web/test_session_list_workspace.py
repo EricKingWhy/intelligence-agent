@@ -43,7 +43,7 @@ def _app(tmp_path: Path):
 
 def _create(client: TestClient, *, workspace: str | None = None) -> str:
     """建一个会话（真 runtime + 替身模型），返回它的 session_id（从 SSE 帧里取）。"""
-    payload: dict[str, object] = {"task": "hi", "max_steps": 1}
+    payload: dict[str, object] = {"task": "hi", "budget": {"local": {"max_agent_turns": 1}}}
     if workspace is not None:
         payload["workspace"] = workspace
     with patch(

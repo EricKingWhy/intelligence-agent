@@ -16,6 +16,8 @@ from agent_harness.session.event import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
+    RUN_PAUSED,
+    RUN_RESUMED,
     RUN_STARTED,
     SESSION_FORKED,
     SESSION_STARTED,
@@ -36,6 +38,42 @@ pytestmark = pytest.mark.asyncio
 
 def _store(tmp_path) -> JsonlSessionStore:
     return JsonlSessionStore(tmp_path / "sessions")
+
+
+def _pause_data() -> dict:
+    """`run/paused.data` 的最小合法形状（`03 §3.4`；字段名取自 `build_pause_data`）。"""
+    return {
+        "reason": "budget_exhausted",
+        "trigger_dimension": "run.max_agent_turns_total",
+        "budget_version": 1,
+        "consumed": {"agent_turns": 1},
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 2},
+        },
+        "continuation": {
+            "completed": [], "remaining": ["还有活要干"], "blockers": [],
+            "next_safe_action": "抬高 ceiling 后同 run 恢复",
+        },
+        "closeout_source": "deterministic",
+        "resume_requirements": [],
+        "trace_id": None,
+    }
+
+
+def _resume_data() -> dict:
+    """`run/resumed.data` 的最小合法形状（同 run 续跑：版本 +1、绝对 ceiling）。"""
+    return {
+        "from_pause_seq": 3,
+        "previous_budget_version": 1,
+        "budget_version": 2,
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 8},
+        },
+        "consumed": {"agent_turns": 1},
+        "resume_basis": "budget_increase",
+    }
 
 
 def _build_parent(store: JsonlSessionStore) -> Session:
@@ -241,6 +279,60 @@ async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
     )
     assert [e.type for e in child.events].count(RUN_INTERRUPTED) == 1
     assert [e.type for e in child.events][-1] == SESSION_FORKED
+
+
+async def test_fork_from_paused_run_prefix(tmp_path) -> None:
+    """`#312`：尾部 `run/paused` 的 run 也算「已收口」——它之后的消息是合法 fork 锚点。
+
+    暂停的执行没有在途工具调用、也没有悬空 run（`03 §3.4`），所以 child 以它作前缀是
+    完整的。回归：若把 pause 排除在收口集合之外，暂停过的会话里 fork 会突然不可用——
+    而"暂停后想换个方向重跑"（fork 出 child 另起一条线）恰恰是这个状态下的常见动作。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    s = Session.start(store, session_id="paused")
+    s.append(USER_MESSAGE, {"content": "第一条"})
+    run_id, _ = s.begin_run()
+    s.append(RUN_PAUSED, _pause_data(), run_id=run_id)
+    s.append(USER_MESSAGE, {"content": "换个方向再来"})
+
+    assert find_fork_boundaries(s.events) == [s.events[1].seq, s.events[-1].seq]
+    child = await fork_session(
+        store, meta, "paused",
+        boundary_user_message_seq=s.events[-1].seq,
+        child_session_id="after-pause",
+    )
+
+    assert [e.type for e in child.events].count(RUN_PAUSED) == 1
+    assert [e.type for e in child.events][-1] == SESSION_FORKED
+
+
+async def test_fork_prefix_with_resumed_run_is_rejected(tmp_path) -> None:
+    """`run/resumed` 把 run 重新计入未收口 ⇒ 悬空前缀仍被拒（暂停不是免检通道）。
+
+    成对的负向面：如果"pause 计一次收口"被实现成"这个 run 从此永远算收口"，一个
+    **正在恢复中**的 run 也会被当成完整前缀——child 就可能在一个执行未收口的截面上
+    长出来（`ForkBoundaryError` 的存在意义正是禁止这个）。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    s = Session.start(store, session_id="resumed")
+    s.append(USER_MESSAGE, {"content": "第一条"})
+    run_id, _ = s.begin_run()
+    s.append(RUN_PAUSED, _pause_data(), run_id=run_id)
+    s.append(RUN_RESUMED, _resume_data(), run_id=run_id)
+    s.append(USER_MESSAGE, {"content": "第二条"})
+
+    # 恢复之后的那条用户消息不是锚点（此刻 run 又开着）
+    assert find_fork_boundaries(s.events) == [s.events[1].seq]
+    with pytest.raises(ForkBoundaryError, match="未终态|悬空|open"):
+        await fork_session(
+            store, meta, "resumed",
+            boundary_user_message_seq=s.events[-1].seq,
+            child_session_id="not-created",
+        )
 
 
 # ── T3 copy-on-fork（#109, ADR-0017 决策 5）─────────────────────────────────

@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { isCancelledRunFailure } from './runCancel';
 import { parseArtifactMarker } from './toolShapes';
@@ -175,6 +175,7 @@ export function initConversation(session_id: string): ConversationState {
     run_id: null,
     model_fallback: null,
     run_interrupted: null,
+    run_paused: null,
     run_failure: null,
     turn_index: null,
     requested_model: null,
@@ -671,6 +672,109 @@ function projectRunInterrupted(state: ConversationState, event: AgentEvent): voi
   finalizeRun(state, 'completed', event.time);
 }
 
+/** 某个键的**整数读数**：只在真为有限数时采用，否则 null（= 该维缺席，不是 0）。 */
+function dimensionNumber(raw: Record<string, unknown>, key: string): number | null {
+  return numberOf(raw[key]) ?? null;
+}
+
+/** 某个键的**十进制读数**（cost 维）：wire 上是十进制**字符串**（也可能是数），
+ *  原样保留字符串形态，不在前端转 float（`11 §6.1`：二进制浮点相等不是契约）；
+ *  空串 / 形状不合 ⇒ null（unavailable，不是 0）。 */
+function dimensionDecimalText(raw: Record<string, unknown>, key: string): string | null {
+  const value = raw[key];
+  if (typeof value === 'string') return value.trim() === '' ? null : value.trim();
+  const num = numberOf(value);
+  return num === undefined ? null : String(num);
+}
+
+/** `data.consumed` → 四维读数（`#313`）。整组缺失 ⇒ null（老暂停载荷没有这组键，
+ *  不是"四维都是 0"）。 */
+function parseConsumedFacts(raw: unknown): RunBudgetDimensionFacts | null {
+  if (!isRecord(raw)) return null;
+  return {
+    agent_turns: dimensionNumber(raw, 'agent_turns'),
+    model_requests: dimensionNumber(raw, 'model_requests'),
+    total_tokens: dimensionNumber(raw, 'total_tokens'),
+    cost_usd: dimensionDecimalText(raw, 'cost_usd'),
+  };
+}
+
+/** `data.limits.run` → 四维 ceiling（`#313`）。键名是载荷自己的 `max_*` 形态
+ *  （与恢复请求 `budget.run` 的键同一套名字）；`null` = 该维没配（unlimited）。 */
+function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
+  if (!isRecord(raw)) return null;
+  return {
+    max_agent_turns_total: dimensionNumber(raw, 'max_agent_turns_total'),
+    max_model_requests: dimensionNumber(raw, 'max_model_requests'),
+    max_total_tokens: dimensionNumber(raw, 'max_total_tokens'),
+    max_cost_usd: dimensionDecimalText(raw, 'max_cost_usd'),
+  };
+}
+
+/** `run/paused` 载荷 → `RunPausedInfo`（投影与 Timeline 摘要**共用同一解析**：
+ *  两处各读一遍字段就会各有一套兜底默认值，改一处忘一处就是两条真相）。
+ *
+ *  读取一律"缺失即缺席"（零伪造）：`run_id` 取事件自身归属（`event.run_id` 是权威，
+ *  载荷里没有同名键）；数字键仅在真为有限数时采用。 */
+function parsePausedInfo(event: AgentEvent): RunPausedInfo {
+  const data = event.data;
+  const limits = isRecord(data.limits) ? data.limits : null;
+  const runScope = limits && isRecord(limits.run) ? limits.run : null;
+  const localScope = limits && isRecord(limits.local) ? limits.local : null;
+  const consumed = isRecord(data.consumed) ? data.consumed : null;
+  const localTurns = localScope ? numberOf(localScope.max_agent_turns) : undefined;
+  return {
+    run_id: typeof event.run_id === 'string' ? event.run_id : '',
+    version: numberOf(data.budget_version) ?? 1,
+    pause_seq: event.seq,
+    reason: typeof data.reason === 'string' && data.reason ? data.reason : 'budget_exhausted',
+    trigger_dimension:
+      typeof data.trigger_dimension === 'string' ? data.trigger_dimension : '',
+    consumed_agent_turns: numberOf(consumed?.agent_turns) ?? 0,
+    run_limit: runScope ? (numberOf(runScope.max_agent_turns_total) ?? null) : null,
+    consumed_dimensions: parseConsumedFacts(consumed),
+    run_limits: parseRunLimitFacts(runScope),
+    local_fuse:
+      localTurns === undefined
+        ? null
+        : {
+            max_agent_turns: localTurns,
+            source:
+              localScope && typeof localScope.source === 'string' ? localScope.source : '',
+          },
+    continuation: parseContinuation(data.continuation),
+    closeout_source:
+      typeof data.closeout_source === 'string' ? data.closeout_source : 'deterministic',
+    resume_requirements: stringList(data.resume_requirements),
+    trace_id: typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null,
+  };
+}
+
+/** `#312` T4：预算到顶的**非终态**暂停。
+ *
+ *  与三个终态投影的关键差别：`run_status` 收成 `'paused'`（不是 completed/failed/
+ *  interrupted），并且**不**落 `run_failure` —— 暂停没有失败归因可言。已经跑过的
+ *  这一轮按 `finalizeRun` 的共用清扫 settle（caret 停、running 工具标 stopped），
+ *  因为它所属的执行区间确实结束了；恢复会从 `step_base+1` 起新的一轮执行
+ *  （后端 runtime 的 `step_base = max(session.max_step_id, session.user_turn_count)`），
+ *  所以历史轮次照旧可读、新工作进新轮。 */
+function projectRunPaused(state: ConversationState, event: AgentEvent): void {
+  state.run_paused = parsePausedInfo(event);
+  // 暂停不是失败：归因面必须清空（否则同屏出现"已暂停"与上一轮的失败原因）。
+  state.run_failure = null;
+  finalizeRun(state, 'paused', event.time);
+}
+
+/** `#312` T4：同 run 恢复——服务层 CAS 通过后落 `run/resumed`，随后才启动执行。
+ *
+ *  它**不是**新的 `run/started`（后端不变量：同一逻辑 run 里只有一条），所以这里
+ *  只做两件事：收起暂停事实、把 run 状态放回 running。turn 级状态不动——新执行的
+ *  事件会自己建新轮（`step_base+1`），`finalizeRun('paused')` 已经 settle 过旧轮。 */
+function projectRunResumed(state: ConversationState, _event: AgentEvent): void {
+  state.run_paused = null;
+  state.run_status = 'running';
+}
+
 /** Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
  *  Attach the ref to the producing tool call so the Inspector can fetch it.
  *
@@ -1091,6 +1195,22 @@ function summarizeRunInterrupted(event: AgentEvent): string {
   return step !== null && step !== undefined ? `第 ${step} 步中断` : '运行中断';
 }
 
+/** `#312`：`run/paused` 行摘要 = 命中的维度 + consumed/ceiling 两个数。
+ *  数字缺失就不写那一段（不编 0）——暂停行的价值正是"卡在哪、烧了多少"。 */
+function summarizeRunPaused(event: AgentEvent): string {
+  const info = parsePausedInfo(event);
+  const ceiling = info.run_limit === null ? '无 ceiling' : String(info.run_limit);
+  return `${info.trigger_dimension || '预算到顶'} · ${info.consumed_agent_turns}/${ceiling}`;
+}
+
+/** `#312`：`run/resumed` 行摘要 = 版本跃迁（CAS 的可见证据）。 */
+function summarizeRunResumed(event: AgentEvent): string {
+  const previous = numberOf(event.data.previous_budget_version);
+  const current = numberOf(event.data.budget_version);
+  if (previous === undefined || current === undefined) return '已恢复';
+  return `已恢复 · 预算版本 ${previous} → ${current}`;
+}
+
 /** #220：`run/failed` 行摘要 = 随事件的失败归因文案，缺 message 时退到 reason 码
  *  （「identical_tool_failure_loop」比空白更能说明这行为什么红）。
  *  两处与相邻 summary 不同，都是刻意的：取消那支返回空串（它是 run/failed 但语义是取消，
@@ -1120,11 +1240,22 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.RUN_COMPLETED]: { apply: projectRunCompleted, summarize: summarizeRunCompleted },
   [EventType.RUN_FAILED]: { apply: projectRunFailed, summarize: summarizeRunFailed },
   [EventType.RUN_INTERRUPTED]: { apply: projectRunInterrupted, summarize: summarizeRunInterrupted },
+  // #312：暂停（非终态）+ 同 run 恢复。两者都进 EVENT_SEMANTICS 的穷尽表——
+  // generated/event-types.ts 早已含这两个类型，漏登记会被 tsc 直接挡下（防漂移）。
+  [EventType.RUN_PAUSED]: { apply: projectRunPaused, summarize: summarizeRunPaused },
+  [EventType.RUN_RESUMED]: { apply: projectRunResumed, summarize: summarizeRunResumed },
   [EventType.USER_MESSAGE]: { apply: projectUserMessage, summarize: summarizeUserMessage },
   [EventType.MODEL_STARTED]: { apply: projectModelStarted, summarize: emptySummary },
   [EventType.MODEL_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
   [EventType.MODEL_COMPLETED]: { apply: projectModelCompleted, summarize: summarizeModelCompleted },
   [EventType.MODEL_FAILED]: { apply: noopProjection, summarize: emptySummary },
+  // #313（T5）：`model/request` 是**账本**事件（一次实际 Provider 请求一格），不改会话投影
+  // 状态——预算读数由 `run/started` 的 budget 与 `run/paused` / `run/resumed` 承载（11 §6.1）。
+  // 与 `MODEL_FAILED` 同形：登记为 no-op 意味着它**不**进 `unknown_events`（进那本账的是
+  // `unhandledProjection` 那条兜底路径，别把两者混说）；
+  // 不登记则 `Record<EventTypeValue, EventSemantics>` 的穷尽性被破坏，`tsc` 直接红
+  // （`event-types.ts` 是生成物，加类型就必须在这里登记）。
+  [EventType.MODEL_REQUEST]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_CALL]: { apply: projectToolCall, summarize: summarizeToolCall },
   [EventType.TOOL_RESULT]: { apply: projectToolResult, summarize: summarizeToolResult },
   [EventType.OPERATION_RECONCILE_REQUIRED]: {
@@ -1431,8 +1562,17 @@ function markPendingApprovalsStale(state: ConversationState): void {
  * turn.status differs ('done' vs 'failed'). Splitting them was the source of
  * a past caret-never-stops bug; the shared helper makes the invariant
  * "run ends → no streaming turn" structural.
+ * `#312` 起多一档 `'paused'`：它同样要 settle（当前执行区间确实结束了，caret 必须
+ * 停、在跑工具标 stopped），但**不是**终态——`run_status` 落 'paused'，让 UI 与
+ * completed / failed / interrupted 分开呈现。turn.status 与 completed 同档取
+ * 'done'：那一轮的内容是完整可读的（不是半截失败的轮），后续工作由恢复执行新建
+ * 的那一轮承载。
  * Copy-on-write：只克隆真正需要变更的 turn/tool，已 settle 的保持引用。 */
-function finalizeRun(state: ConversationState, status: 'completed' | 'failed', time?: string): void {
+function finalizeRun(
+  state: ConversationState,
+  status: 'completed' | 'failed' | 'paused',
+  time?: string,
+): void {
   state.run_status = status;
   state.active_step_id = null;
   markPendingApprovalsStale(state);
@@ -1625,6 +1765,45 @@ function parseUsage(value: unknown): UsageStats | null {
     Number.isFinite(completion_tokens) &&
     Number.isFinite(total_tokens);
   return ok ? { prompt_tokens, completion_tokens, total_tokens } : null;
+}
+
+// ── `#312` run/paused 载荷的小工具（放在投影只读路径上，一律"缺失即缺席"）──
+
+/** 载荷对象判定：数组也是 object，这里显式排除（`[]` 不是 `{}`）。 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 有限数字才认（NaN / Infinity / 字符串数字一律 undefined = 缺席，不猜）。 */
+function numberOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** 字符串列表的宽容读：只留字符串项；不是数组就返回空列表（不编内容）。 */
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
+/** `run/paused.data.continuation` 的四键契约（`03 §3.4`）：缺任一键 ⇒ null。
+ *  **不补齐**——补齐会让"模型 closeout 没产出"看起来像"产出了空计划"。 */
+function parseContinuation(value: unknown): RunContinuation | null {
+  if (!isRecord(value)) return null;
+  const action = value.next_safe_action;
+  if (typeof action !== 'string' || !action) return null;
+  const lists = ['completed', 'remaining', 'blockers'] as const;
+  const out: Partial<Record<(typeof lists)[number], string[]>> = {};
+  for (const key of lists) {
+    const raw = value[key];
+    if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string')) return null;
+    out[key] = raw as string[];
+  }
+  return {
+    completed: out.completed ?? [],
+    remaining: out.remaining ?? [],
+    blockers: out.blockers ?? [],
+    next_safe_action: action,
+  };
 }
 
 /**

@@ -19,10 +19,11 @@ from langchain_core.messages import AIMessage
 
 import agent_harness.agent.runtime as runtime_module
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.run_budget import TRIGGER_LOCAL_TURNS
 from agent_harness.agent.types import (
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
+    STATUS_PAUSED,
 )
 from agent_harness.context.builder import ContextWindowExceededError
 from agent_harness.observability import LangfuseSink
@@ -32,6 +33,7 @@ from agent_harness.session import (
     MODEL_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_PAUSED,
 )
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.agent.test_repeated_tool_failure_loop import FailureTool, _tool_call
@@ -473,7 +475,7 @@ async def test_hard_guard_run_drives_terminal_port_lifecycle(tmp_path, monkeypat
     ])
     registry = ToolRegistry()
     registry.register(FailureTool())
-    runtime = AgentRuntime(scripted, registry, ToolExecutor(registry), max_steps=20)
+    runtime = AgentRuntime(scripted, registry, ToolExecutor(registry), max_agent_turns=20)
 
     result = await runtime.run(session, "反复试同一个失败命令")
 
@@ -526,11 +528,12 @@ async def test_raising_tracer_cannot_turn_a_completed_run_into_failed(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_raising_tracer_cannot_change_the_max_steps_verdict(tmp_path, monkeypatch):
-    """max_steps 臂的端口调用抛异常：归因与终态仍是 max_steps_exceeded。
+async def test_raising_tracer_cannot_change_the_budget_pause_verdict(tmp_path, monkeypatch):
+    """预算暂停臂：端口抛异常也不得把暂停改写成失败（`#312` T4 起的保险丝出口）。
 
-    该臂的 `run_failed` 在 `failure_terminal` 之前——没有保护层时 reason 会从
-    max_steps_exceeded 变成 RuntimeError、status 变成 failed。
+    这条臂**不调**任何终态端口（run 没结束，归因留给真正的终态），所以这里钉的是
+    "第三方的 `run_failed` 抛错时，暂停依旧是一条 `run/paused`、没有任何 `run/failed`"。
+    哪天有人给暂停路径加了未经保护的端口调用，本行会红（保护层见 `_GuardedTracer`）。
     """
 
     class _RaisingTracer(NullTracer):
@@ -552,11 +555,12 @@ async def test_raising_tracer_cannot_change_the_max_steps_verdict(tmp_path, monk
     registry = ToolRegistry()
     registry.register(_FlakyTool())
     runtime = AgentRuntime(
-        ScriptedModel(rounds), registry, ToolExecutor(registry), max_steps=2,
+        ScriptedModel(rounds), registry, ToolExecutor(registry), max_agent_turns=2,
     )
 
     result = await runtime.run(session, "永远算不完")
 
-    assert result.status == STATUS_MAX_STEPS_EXCEEDED
-    assert session.events[-1].type == RUN_FAILED
-    assert session.events[-1].data["reason"] == STATUS_MAX_STEPS_EXCEEDED
+    assert result.status == STATUS_PAUSED
+    assert session.events[-1].type == RUN_PAUSED
+    assert session.events[-1].data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
+    assert not [e for e in session.events if e.type == RUN_FAILED]

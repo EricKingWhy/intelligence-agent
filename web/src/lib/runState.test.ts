@@ -191,16 +191,28 @@ describe('isRecoverableRun — run/interrupted 是终态', () => {
 // ── EventType 词表漂移锁（跨 worktree 的唯一可用信号：生成物）──
 
 describe('EventType 词表漂移锁', () => {
-  it('生成物里每个 run 事件都必须被显式分类（终态或 run/started）', () => {
+  it('生成物里每个 run 事件都必须被显式分类（终态 / started / 非终态生命周期刻度）', () => {
     // 单测读不到另一个 worktree 的后端源码，但**读得到生成物**
     // （web/src/generated/event-types.ts 由后端 scripts/gen_event_types.py 生成）。
     // 后端加第四种 run 终态时会重新生成它，这里的「有未分类的 run 事件」随即变红，
     // 逼着维护者回答「它是不是终态」——T8 加 run/interrupted 时三处枚举集体漏掉，
-    // 正是因为没有这道门（已 mutation 验证：注入 run/paused → 本测试变红）。
-    // 已分类 = 终态集合里的，或已知非终态的 run/started。
+    // 正是因为没有这道门。
+    //
+    // #312（T4）扩过一次分类：`run/paused` / `run/resumed` 是**非终态**生命周期刻度
+    // （后端 `03 §5` 的六值状态集合：暂停不是 completed / failed / interrupted），
+    // 所以不能塞进 RUN_TERMINAL_TYPES——塞进去会让"暂停"在终端帧判定、时长结算、
+    // 恢复入口三处全被当成"跑完了"。它们对**执行区间**的开合另有语义（见 scanRuns：
+    // paused 收一段、resumed 再开一段），那个语义由本题的 hasUnterminatedRun 用例锁。
+    const NONTERMINAL_LIFECYCLE: ReadonlySet<string> = new Set<string>([
+      EventType.RUN_STARTED,
+      EventType.RUN_PAUSED,
+      EventType.RUN_RESUMED,
+    ]);
     const runTypes: string[] = Object.values(EventType).filter((v) => v.startsWith('run/'));
     expect(runTypes.length).toBeGreaterThan(1); // 生成物没读到时应立刻失败，而不是静默通过
-    const unclassified = runTypes.filter((v) => v !== EventType.RUN_STARTED && !RUN_TERMINAL_TYPES.has(v));
+    const unclassified = runTypes.filter(
+      (v) => !RUN_TERMINAL_TYPES.has(v) && !NONTERMINAL_LIFECYCLE.has(v),
+    );
     expect(unclassified).toEqual([]);
   });
 });

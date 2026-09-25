@@ -54,7 +54,7 @@ def _build_runtime(model, tmp_path: Path) -> AgentRuntime:
         model=model,
         registry=ToolRegistry(),
         executor=ToolExecutor(ToolRegistry()),
-        max_steps=5,
+        max_agent_turns=5,
     )
 
 

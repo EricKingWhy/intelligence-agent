@@ -71,7 +71,7 @@ async def _build_runtime(
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="sess-guidance",
             workspace=tmp_path / "workspaces" / "sess-guidance",
-            max_steps=10, auto_approve=True, session_store=store,
+            max_agent_turns=10, auto_approve=True, session_store=store,
             agent_profile=agent_profile,
         )
     return runtime

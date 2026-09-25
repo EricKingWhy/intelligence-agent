@@ -305,6 +305,16 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-color: var(--border-subtle);
 }
 
+/* 暂停（#312）：预算到顶、等客户端抬高绝对 ceiling 后同 run 续跑——既不是成功也不是
+   失败，也**不能**与「已中断」共用同一个中性色：同一屏里这两个可能同时出现在不同
+   会话上，颜色相同就把它们说成一回事了。用既有的 --info（含亮色覆盖，§15 无需新增
+   token），无动画：暂停是静止态，闪动会读成"还在跑"。 */
+.run-pulse.pulse-paused {
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--info) 30%, transparent);
+}
+
 /* 停顿等待提示（FE-01/#148）：只是「等久了」的旁注，不是告警——三级文字色、
    无底色无描边，避免与胶囊体的状态通道抢注意力。复用既有语义 token，
    不新增 :root 变量（§15 无需补亮色覆盖）。 */
@@ -5838,6 +5848,102 @@ button.json-row {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 8%, transparent);
   border-bottom: 1px solid var(--border-subtle);
+}
+
+/* ── 预算暂停面板（#312）：比状态条重一档——它带着一个**动作**（抬高绝对 ceiling
+ *    并恢复同一 run），所以除了陈述事实还要能操作。用既有 --info token（暗/亮两套
+ *    都有定义，§15 无需新增变量），与「暂停」脉冲同一色域。 */
+.pause-panel {
+  padding: var(--space-sm) var(--space-lg);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--info) 6%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm);
+}
+
+.pause-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--info);
+  font-weight: 550;
+}
+
+.pause-panel-facts {
+  margin-top: var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.pause-panel-continuation {
+  margin: var(--space-xs) 0 0;
+  padding-left: var(--space-lg);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.pause-panel-continuation li {
+  list-style: none;
+}
+
+.pause-panel-resume {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.pause-panel-resume input {
+  width: 7ch;
+  padding: 2px var(--space-xs);
+  font: 400 var(--text-xs) var(--font-mono);
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.pause-panel-resume input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.pause-resume-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 3px var(--space-sm);
+  font: 550 var(--text-xs) var(--font-ui);
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--info) 35%, transparent);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+
+.pause-resume-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--info) 22%, transparent);
+}
+
+.pause-resume-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pause-resume-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.pause-panel-hint {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.pause-panel-error {
+  font-size: var(--text-xs);
+  color: var(--danger);
 }
 
 .reconnect-dot {

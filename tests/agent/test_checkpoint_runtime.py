@@ -132,13 +132,15 @@ async def test_checkpoint_does_not_emit_session_event(tmp_path: Path) -> None:
 
     event_types = [event.type for event in session.events]
     assert "checkpoint/saved" not in event_types
-    # 只有对话事实，没有任何存储动作事件。
+    # 只有对话事实（含 `#313` 的 `model/request` 请求账目——它同样是运行事实），
+    # 没有任何存储动作事件。
     assert all(
         t
         in {
             "session/started",
             "user/message",
             "run/started",
+            "model/request",
             "model/completed",
             "tool/call",
             "tool/result",

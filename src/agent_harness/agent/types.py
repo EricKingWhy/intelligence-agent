@@ -22,8 +22,12 @@ if TYPE_CHECKING:
 # - 字符串在日志和断言里一眼能读，Debug 更直接。
 # 正常完成
 STATUS_COMPLETED = "completed"
-# 不收敛兜底：模型反复请求工具直到 max_steps（Task 2 完整验证，Task 1 只留结构）
-STATUS_MAX_STEPS_EXCEEDED = "max_steps_exceeded"
+# 预算/暂停（`#312` T4）：回合预算（RunBudget 累计 ceiling 或 local fuse）到顶时，
+# run **不是**完成也不是失败，而是落一条非终态 `run/paused` 并停止活动执行。
+# 这是"本次执行的出口状态"，不是事件 schema——逻辑 run 由 `run/resumed` 以同一
+# `run_id` 接回（`02 §5.2` / `03 §3.4`）。T3 迁移期的 `max_steps_exceeded` 终态
+# 随本票消失：撞保险丝不再是失败，而是一次可恢复的暂停。
+STATUS_PAUSED = "paused"
 STATUS_CONTEXT_WINDOW_EXCEEDED = "context_window_exceeded"
 # 同错熔断硬终止（ADR-0014 #69）：模型连续 N 次同指纹失败工具调用后，
 # AgentRuntime 强制 end_run(failed)，防止步数/token 烧穿。
@@ -38,11 +42,13 @@ class AgentRunResult:
     """一次 AgentRuntime.run() 的最终结果。
 
     字段语义：
-    - status: 正常结束用 completed；模型一直不收敛、撞到 max_steps 用 max_steps_exceeded。
+    - status: 正常结束用 completed；预算到顶、本次执行以 `run/paused` 收口用 paused
+      （逻辑 run 未终结，可由 `run/resumed` 续跑）；其余为失败态。
     - final_text: 最终回答文本。正常完成时来自"没有 tool_calls 的那一轮模型的 content"，
-      不是 Runtime 自己拼接的；max_steps_exceeded 时为空串（绝不伪造最终回答）。
+      不是 Runtime 自己拼接的；暂停与失败态为空串（绝不伪造最终回答——暂停的
+      continuation 另有事件字段承载，不复用 final_text）。
     - steps: 模型被调用的轮数（不是工具个数）。一个含多个 tool_call 的响应仍算 1 步，
-      避免 max_steps 出现 off-by-one。
+      避免 ceiling 出现 off-by-one。
     """
 
     status: str

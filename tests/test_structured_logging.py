@@ -110,9 +110,9 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("agent_harness.assembly.create_chat_model",
                       lambda config, **kw: FakeModel())
 
-    result = await cli.run("只回复 ok", write=lambda _text: None)
+    outcome = await cli.run("只回复 ok", write=lambda _text: None)
 
-    assert result == "ok"
+    assert outcome.final_text == "ok"
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [
         "run_config",
@@ -174,8 +174,10 @@ async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("agent_harness.assembly.create_chat_model",
                       lambda config, **kw: FailingModel())
 
-    result = await cli.run("触发失败", write=lambda _text: None)
-    assert result == ""
+    outcome = await cli.run("触发失败", write=lambda _text: None)
+    # `#312`：`run()` 返回 RunOutcome（暂停与失败都拿不到回答，必须可区分）。
+    assert outcome.final_text == ""
+    assert outcome.paused is False
 
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [

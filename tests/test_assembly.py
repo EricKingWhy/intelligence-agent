@@ -105,7 +105,7 @@ async def test_build_runtime_wires_full_stack(tmp_path):
             workspace_registry=workspace_registry,
             session_id="sess-assembly",
             workspace=tmp_path / "workspaces" / "sess-assembly",
-            max_steps=10,
+            max_agent_turns=10,
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
 
@@ -144,7 +144,7 @@ async def test_build_runtime_wires_capability_tools_and_manual_approval(tmp_path
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="s", workspace=tmp_path / "w",
-            max_steps=5,
+            max_agent_turns=5,
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             approval_callback=_deny,
         )
@@ -175,7 +175,7 @@ async def test_build_runtime_wires_model_fallback(tmp_path):
             settings=_settings(tmp_path), wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="s1", workspace=tmp_path / "w1",
-            max_steps=5,
+            max_agent_turns=5,
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
     assert runtime._fallback_model is None
@@ -193,7 +193,7 @@ async def test_build_runtime_wires_model_fallback(tmp_path):
             settings=fb_settings, wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="s2", workspace=tmp_path / "w2",
-            max_steps=5,
+            max_agent_turns=5,
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
     # 两次构造：第 1 次 primary、第 2 次 fallback；配置链一致
@@ -249,7 +249,7 @@ async def _runtime_with(tmp_path, settings: Settings, session_id: str = "sess-ar
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id=session_id,
             workspace=tmp_path / "workspaces" / session_id,
-            max_steps=10,
+            max_agent_turns=10,
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
 

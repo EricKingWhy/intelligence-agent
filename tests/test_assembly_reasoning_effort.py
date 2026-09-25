@@ -53,7 +53,7 @@ async def _build_runtime(
             workspace_registry=workspace_registry,
             session_id="sess-effort",
             workspace=tmp_path / "workspaces" / "sess-effort",
-            max_steps=10,
+            max_agent_turns=10,
             reasoning_effort=reasoning_effort,
         )
 
