@@ -19,16 +19,16 @@
 | Spec | #296 | OPEN / `ready-for-agent` | Production Long-Term Memory V2 产品与工程合同 | — |
 | MEM-V2-1 | #297 | CLOSED / integrated | Typed Memory lifecycle vertical slice | — |
 | MEM-V2-2 | #298 | CLOSED / integrated | Durable Formation and Adjudication | #297 |
-| MEM-V2-3 | #299 | OPEN / AC10 pending | Cross-session Profile and hybrid recall | #297 |
+| MEM-V2-3 | #299 | CLOSED / integrated | Cross-session Profile and hybrid recall | #297 |
 | MEM-V2-4 | #300 | CLOSED / integrated | Explicit commands and governance API | #297 |
 | MEM-V2-5 | #301 | CLOSED / integrated | Memory management Web UI | #300 |
-| MEM-V2-6 | #302 | OPEN / blocked by #299 | Privacy observability and quality evaluation | #298, #299, #300 |
-| MEM-V2-7 | #303 | OPEN / blocked by #299 | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
+| MEM-V2-6 | #302 | OPEN / unblocked | Privacy observability and quality evaluation | #298, #299, #300 |
+| MEM-V2-7 | #303 | OPEN / unblocked | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
 | MEM-V2-8 | #304 | OPEN / waits for #302 and #303 | Final real Gate and release evidence | #301, #302, #303 |
 
-**事实源与边界（截至 2026-09-25）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。GitHub `#297`、`#298`、`#300`、`#301` 已 CLOSED 且代码已集成到 `main`；`#299` 仍 OPEN，待完成冻结的 AC10（Recall@6 ≥85% 与真实 Milvus hybrid 检索证据）。`#302` / `#303` 因 `#299` 未完成而阻塞；`#304` 等 `#302` / `#303` 完成。旧 SQLite/Milvus Memory 数据仍在；仅 `#303` 获准在依赖集成并完成精确目标与保留项核验后执行 clean-slate 删除。
+**事实源与边界（截至 2026-09-25）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。GitHub `#297`–`#301` 均 CLOSED 且代码已集成到 `main`；`#299` 的 AC10 已以冻结语料和真实 Milvus hybrid 检索证据通过。`#302` / `#303` 已解除 `#299` 依赖并可推进；`#304` 仍等待 `#302` / `#303`。旧 SQLite/Milvus Memory 数据仍在；仅 `#303` 获准在依赖集成并完成精确目标与保留项核验后执行 clean-slate 删除。
 
-**施工顺序**：`#297`、`#298`、`#300`、`#301` 已完成并集成；先完成 `#299` 的 AC10 与集成，再推进依赖它的 `#302` / `#303`，最后执行 `#304` 的最终真实 Gate。每票仍独立执行 review、门禁和关单。
+**施工顺序**：`#297`–`#301` 已完成并集成；继续推进已解锁的 `#302` / `#303`，两票完成后执行 `#304` 的最终真实 Gate。每票仍独立执行 review、门禁和关单。
 
 > **状态更新（2026-09-24）**：上表「OPEN / `ready-for-agent`」与上一段的「当前没有任何票进入实现」**均已过期**，
 > 按「历史片段不改写、新状态追加」的惯例在此更正：`#297`（`T297-mem-v2-1-typed-lifecycle`，tip `32ef89b`）
@@ -36,7 +36,7 @@
 > 两票在 GitHub 上仍为 OPEN（未集成未关单）。`#298` 的逐票记录见文末
 > 「MEM-V2-2（`#298`）T1–T6b 施工记录」段。
 
-> **当前状态（2026-09-25）**：`#297`、`#298`、`#300`、`#301` 已集成并 CLOSED；本次 #301 集成 tip 为 `74db7d7`。`#299` 因 AC10 Recall@6 与真实 Milvus hybrid 证据仍 OPEN；`#302` / `#303` 等 `#299`，`#304` 等 `#302` / `#303`。逐票历史记录保留在下文。
+> **当前状态（2026-09-25）**：`#297`–`#301` 已集成并 CLOSED；#299 AC10 的冻结语料 Recall@6=0.95、真实 Milvus hybrid 检索及证据已随 `fbb8a98c` 集成，GitHub issue 已关闭。`#302` / `#303` 已解除阻塞，`#304` 仍等后二票。逐票历史记录保留在下文。
 
 ---
 
@@ -4970,9 +4970,9 @@ ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动�
 `explicit_remember` 的**持久性**要在立项时落成 job 上的列）/ `#301`（UI）/ `#302`（评测）/
 `#303`（clean-slate cutover）/ `#304`（真实 Gate）。
 
-## MEM-V2-3（`#299`）实现与两轴修后复审（2026-09-25 · 本地未集成）
+## MEM-V2-3（`#299`）实现、AC10 评测与集成收口（2026-09-25）
 
-**状态**：实现与修后独立审查完成，候选仍在本地短分支；GitHub issue 保持 OPEN。分支 `codex/mem-v2-3-cross-session-profile`，基线 `d0e2dcb3c45bc56c305732ca7dbbe24dca8fffb7`，代码提交 `adb86f2020c6166fa0c358413412a0ea1649adea` 与 `11fb40604a34df5d27c2ab7b59e06c32b186f99a`。
+**状态**：#299 已完成、快进集成并推送到 `main`，GitHub issue 已 CLOSED；集成 tip `fbb8a98ca5e6ec133609d2d9d23b27f54f9a186c`。AC10 评测补充分支为 `codex/mem-v2-3-ac10-eval`；早期跨会话实现分支与修后审查记录仍按下文保留。
 
 **交付**：V2 有界 Profile 与 Collection hybrid recall、确定性检索/排名、跨会话 `memory/recalled` 与 recall explanation API、V2 显式读取工具及必要的 runtime/web 接线。V1 自动上下文与显式读取仅在 V2 成功接线时被取代；可选依赖失败或无 session 时保留安全降级路径。`remember_this` / `forget_memory` 治理命令迁移属于兄弟票 `#300`，本票未声称完成。
 
@@ -4980,7 +4980,7 @@ ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动�
 
 **两轴审查**：固定点 `d0e2dcb3c45bc56c305732ca7dbbe24dca8fffb7`，审查至 `11fb40604a34df5d27c2ab7b59e06c32b186f99a`。Standards 与 Spec 修后均未发现确认的 P0–P3。审查行见 `docs/review_ledger.d/200-d0e2dcb-11fb406.tsv`。
 
-**未完成的验收证据**：AC10 冻结项目 Recall@6 ≥85% 尚无可复跑读数；真实 Milvus hybrid retrieval integration test 尚缺。此前全量前端 Vitest 有一次超时，虽单测重跑通过，仍不宣称全量前端门禁全绿。未运行 Gate-0、未推送分支、未合并、未关单；`main` 与 `origin/main` 未改。
+**AC10（通过）**：冻结语料 `evaluation/datasets/memory_v2_project_cross_session_v1.json`（SHA-256 `8b33b9da3cf9cfeca894c3080d9358e4bfc3eca6cee3f8c817f7b772619813c8`）覆盖 20 个跨会话项目级查询；真实 Milvus `hybrid_search` 命中 19/20，Recall@6 = **0.95**，超过 **0.85** 门槛。复跑命令：`uv run --extra memory pytest tests/integration/test_memory_v2_recall_evaluation.py -m 'integration and live_services' -s -q`（1 passed，82.37s）。临时 collection `memv2r_4171ff0dbe60` 已确认清理。脱敏运行证据见 `docs/evidence/memory-v2-recall-ac10-2026-09-25.json`，记录绑定代码提交 `2117ae6d5f30057013a59ba9f6409197d687cb8c` 与 tree `e4ebd1440f606b60421d37b86c934e271728881e`，不含密钥或查询/记忆正文。全量默认 pytest 为 3813 passed / 31 skipped / 50 deselected；Recall focused tests 19 passed；集成 Gate-0 为 6/6 PASS（`docs/gate/9eaba18915242784e38b5036eb10cc515b93040b.json`），review coverage exit 0。AC10 两轴复审无 P0–P4，见 `docs/review_ledger.d/206-98208ef-2117ae6.tsv`。此前全量前端 Vitest 的已知超时仍按 #301 记录，不宣称该全量车道通过。
 
 ## MEM-V2-5（`#301`）Memory management Web UI + tombstone 读取（2026-09-25 · 已集成并关闭）
 
@@ -4990,4 +4990,4 @@ ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动�
 
 **验证与审查**：后端全量 `pytest` **3811 passed / 31 skipped / 49 deselected**；前端 lint/build 通过；Memory 管理 Playwright E2E **20 passed**；Gate-0 机器记录 `docs/gate/18387b8e64556651e40231003eb08075be320e02.json` 为 **6/6 PASS**；覆盖闸门 exit 0。集成两轴 review（固定点 `cbe2e0c`）无 actionable findings。标准 Vitest 全量运行仍有 1 条 `StepDetail.window.test.tsx` 既有超时；该文件不在本票改动内，仓库验证文档已登记此 flaky，单文件提高 timeout 的诊断运行 6/6 通过。关单评论已记录该限制。
 
-**后续依赖**：`#299` 仍因 AC10（Recall@6 ≥85% 与真实 Milvus hybrid 证据）OPEN；`#302` / `#303` 等其完成，`#304` 等二者。
+**后续依赖**：`#299` 已关闭；`#302` / `#303` 现已解锁，`#304` 仍等待两票完成。
