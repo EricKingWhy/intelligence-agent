@@ -1,0 +1,1 @@
+2026-09-25	MEM-V2 P2 remediation: final Spec + Standards PASS for sessionless governance wiring, redacted recall-settings degradation, same-loop service lifecycle test, and ADR-0042 alignment. Full pytest: 3837 passed, 2 skipped, 49 deselected; Ruff passed. #299 AC10 remains prerelease evidence.	8797b90ea897551d3b89aa497de037847dfa1c6a..24d508b5fad1d2e3eb03c1ed9cbde5ad62362a35

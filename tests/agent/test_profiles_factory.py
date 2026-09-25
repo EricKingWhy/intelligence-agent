@@ -76,7 +76,7 @@ _DECLARED_SCOPES: dict[str, frozenset[str]] = {
         "git_status", "git_diff", "retrieve_memory", "remember_this",
         "forget_memory",
     }),
-    # #202：retrieve_memory 是只读检索，对 research 开放；写侧工具不进
+    # #202 / #299：只读记忆检索对 research 开放；写侧工具不进
     "research_review": frozenset({
         "read", "grep", "glob", "retrieve_knowledge",
         "read_knowledge_source", "web_search", "retrieve_memory",

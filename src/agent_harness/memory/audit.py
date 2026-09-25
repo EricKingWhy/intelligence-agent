@@ -48,3 +48,17 @@ def record_forget(*, entry_point: str, memory_id: str, outcome: str) -> None:
         entry_point=entry_point,
         outcome=outcome,
     )
+
+
+def record_memory_change(
+    *, entry_point: str, action: str, memory_ids: list[str] | tuple[str, ...] = (),
+    affected_count: int = 0,
+) -> None:
+    """Record a redacted V2 logical change; never include content or evidence excerpts."""
+    identity = get_identity_context()
+    log_event(
+        logger, "memory_governance", f"memory governance via {entry_point}: {action}",
+        tenant_id=identity.tenant_id, user_id=identity.user_id,
+        entry_point=entry_point, action=action, memory_ids=tuple(memory_ids),
+        affected_count=affected_count,
+    )

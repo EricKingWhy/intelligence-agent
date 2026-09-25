@@ -68,7 +68,8 @@ class AgentSpec:
 #: #202 / ADR-0031 D8：记忆检索与显式写入工具对 coding 开放（写入源是模型自己）。
 _CODING_TOOLS = frozenset({
     "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
-    "git_status", "git_diff", "retrieve_memory", "remember_this", "forget_memory",
+    "git_status", "git_diff", "retrieve_memory",
+    "remember_this", "forget_memory",
 })
 
 #: research/review 角色的只读工具集（spec §8：Knowledge/Web/MCP 只读，无

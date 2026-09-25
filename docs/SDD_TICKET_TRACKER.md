@@ -5279,3 +5279,14 @@ ceiling 抬高上限 ⇒ **同一 `run_id`** 续跑 ⇒ 跑完链式任务（`ru
 8. **可选能力 fail-open 如实记录**：本环境 `memory` 抽取降级（`memory/degraded`），暂停 / 续跑主路径不依赖它。
 9. **未关单**（§14.12：等合入证据齐备后由主线处理；本轮按要求不自行关单）。
 10. 后续票按交接册顺序：`#313` → `#314` → `#315` → `#316` → `#317` → `#318` → `#319` → `#320`。
+## MEM-V2-3（`#299`）实现与两轴修后复审（2026-09-25 · 本地未集成）
+
+**状态**：实现与修后独立审查完成，候选仍在本地短分支；GitHub issue 保持 OPEN。分支 `codex/mem-v2-3-cross-session-profile`，基线 `d0e2dcb3c45bc56c305732ca7dbbe24dca8fffb7`，代码提交 `adb86f2020c6166fa0c358413412a0ea1649adea` 与 `11fb40604a34df5d27c2ab7b59e06c32b186f99a`。
+
+**交付**：V2 有界 Profile 与 Collection hybrid recall、确定性检索/排名、跨会话 `memory/recalled` 与 recall explanation API、V2 显式读取工具及必要的 runtime/web 接线。V1 自动上下文与显式读取仅在 V2 成功接线时被取代；可选依赖失败或无 session 时保留安全降级路径。`remember_this` / `forget_memory` 治理命令迁移属于兄弟票 `#300`，本票未声称完成。
+
+**验证**：相关后端用例 **691 passed**；触及的 Python 文件 Ruff clean；`web/src/lib/agentProfileScope.test.ts` **8 passed**；`pnpm run build` 成功；`git diff --check origin/main..HEAD` clean。一次完整前端 Vitest 曾有 `StepDetail.window.test.tsx` 超时、单测隔离重跑通过；完整后端 pytest 未在修复后重跑，因此这里不记全量门禁通过。
+
+**两轴审查**：固定点 `d0e2dcb3c45bc56c305732ca7dbbe24dca8fffb7`，审查至 `11fb40604a34df5d27c2ab7b59e06c32b186f99a`。Standards 与 Spec 修后均未发现确认的 P0–P3。审查行见 `docs/review_ledger.d/200-d0e2dcb-11fb406.tsv`。
+
+**未完成的验收证据**：AC10 冻结项目 Recall@6 ≥85% 尚无可复跑读数；真实 Milvus hybrid retrieval integration test 尚缺。此前全量前端 Vitest 有一次超时，虽单测重跑通过，仍不宣称全量前端门禁全绿。未运行 Gate-0、未推送分支、未合并、未关单；`main` 与 `origin/main` 未改。

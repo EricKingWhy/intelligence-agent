@@ -138,18 +138,20 @@ async def assemble_wiring(
     settings: Settings,
     *,
     sessions: JsonlSessionStore | None = None,
+    workspace_index: WorkspaceIndex | None = None,
 ) -> tuple[CapabilityRegistry, CapabilityWiring]:
     """CAPABILITIES env → 显式装配（capability 发现/降级归 wire_capabilities）。
 
     `sessions` 透传给 `wire_capabilities`，是**同一个**会话日志存储（#298 T7b）：
     V2 记忆形成在执行 job 时要按 `(session_id, run_id)` 从它里面切这一轮的事件，
     而它必须与运行时空正在写的那一份是同一处——所以由调用方注入，不在这里按约定现建。
-    不传 = 不装配 V2 形成（其余能力零改动）。
+    `workspace_index` 给 V2 自动召回与形成作业提供可信的 session → project 绑定。
+    不传 `sessions` = 不装配 V2 记忆（其余能力零改动）。
     """
     registry = CapabilityRegistry()
     wiring = await wire_capabilities(
         registry, parse_capabilities_config(settings.capabilities),
-        settings=settings, sessions=sessions,
+        settings=settings, sessions=sessions, workspace_index=workspace_index,
     )
     return registry, wiring
 

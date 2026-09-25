@@ -5,7 +5,7 @@
 
 1. 什么时候装配（缺模型角色 / 记忆被关掉 / 调用方没给会话日志 ⇒ 不装配）；
 2. 装配出来连到哪（作业库与记录库同一个文件、并发上限取自配置、挂上 lifecycle 与 runtime 接缝）；
-3. 装配失败时**不**拖垮整个应用（按 OPTIONAL 降级，V1 记忆不受影响）。
+3. 装配失败时**不**拖垮整个应用（按 OPTIONAL 降级；V1 capability 与显式工具仍可用）。
 
 最后一条用例是本票唯一的端到端：真 SQLite + 真会话日志 + 真 runner（只有模型是替身），
 它证 AC10——**慢记忆模型不挡可见答复**。放在这一层而不是 seam 那一层的原因：seam 用
@@ -132,6 +132,24 @@ async def test_without_a_resolvable_primary_role_there_is_no_pipeline(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_recall_is_wired_even_without_a_formation_model_role(tmp_path, monkeypatch) -> None:
+    _patch_components(monkeypatch)
+    wiring = await wire_capabilities(
+        CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+        settings=_settings(tmp_path, model_provider="deepseek"),
+        sessions=_sessions(tmp_path),
+    )
+
+    assert wiring.memory_formation is None
+    assert wiring.memory_v2 is not None
+    assert {provider.name for provider in wiring.context_providers} == {"memory"}
+    tool_names = {tool.name for tool in wiring.tools}
+    assert {"retrieve_memory", "remember_this", "forget_memory"} <= tool_names
+    assert "retrieve_memory_v2" not in tool_names
+    await wiring.aclose()
+
+
+@pytest.mark.asyncio
 async def test_a_resolvable_primary_role_builds_the_pipeline(tmp_path) -> None:
     """可解析出主角色 ⇒ 真 runner，且作业表与记录表在**同一个库文件**里。
 
@@ -213,13 +231,13 @@ async def test_the_pipeline_hangs_on_the_wiring_and_its_lifecycle(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_without_a_session_store_the_rest_of_the_wiring_is_unchanged(
+async def test_without_a_session_store_governance_and_v1_tools_remain_but_auto_context_is_disabled(
     tmp_path, monkeypatch,
 ) -> None:
-    """调用方不传会话日志 ⇒ 只有 V2 形成缺席，V1 记忆照常（零改动路径）。
+    """调用方不传会话日志 ⇒ 治理 service 与 V1 工具保留，不走特权自动注入。
 
-    这条钉的是"新增参数默认值不改变既有调用方行为"：`sessions=None` 必须只影响这一条管线，
-    不能顺手把 memory capability 也降级掉。
+    `sessions=None` 时没有可安全解析可信项目身份的 V2 recall 上下文；因此自动 recall 为空，
+    但治理 service、V1 capability、写入器和显式工具仍可用。
     """
     fake = _patch_components(monkeypatch)
     wiring = await wire_capabilities(
@@ -227,9 +245,15 @@ async def test_without_a_session_store_the_rest_of_the_wiring_is_unchanged(
         settings=_settings(tmp_path),
     )
 
+    assert wiring.memory_v2 is not None, "治理 API 不依赖 session store"
+    assert wiring.memory_v2 in wiring.lifecycle
     assert wiring.memory_formation is None
     assert wiring.memory is fake and wiring.memory_writer is fake.writeback
-    assert len(wiring.context_providers) == 1
+    assert wiring.context_providers == []
+    assert {tool.name for tool in wiring.tools} >= {
+        "retrieve_memory", "remember_this", "forget_memory",
+    }
+    await wiring.aclose()
     assert "memory" not in wiring.degradations, "V1 记忆没有降级，别登记成降级"
 
 
@@ -269,11 +293,12 @@ async def test_memory_components_missing_means_no_pipeline(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_broken_pipeline_degrades_without_failing_the_wiring(tmp_path, monkeypatch) -> None:
-    """管线起不来 ⇒ 按 OPTIONAL 降级跳过，V1 记忆照常服务。
+    """V2 管线起不来 ⇒ OPTIONAL 降级；V1 capability 保留但不自动注入特权记忆。
 
     反向行为（让异常穿出去）会把"V2 记忆的一个装配故障"升级成**整个应用起不来**——
-    而此刻真正在服务用户的仍是 V1 那条路。降级原因写进 `degradations`，路由层才分得清
-    "没配"与"配了但坏了"（#225 的同一诉求）。
+    而 V1 capability、写入器与显式检索工具仍可用。自动回退到 V1 的 SystemMessage 注入会
+    违反 recalled-text 的非特权要求。降级原因写进 `degradations`，路由层才分得清"没配"
+    与"配了但坏了"（#225 的同一诉求）。
     """
     fake = _patch_components(monkeypatch)
 
@@ -288,7 +313,28 @@ async def test_a_broken_pipeline_degrades_without_failing_the_wiring(tmp_path, m
 
     assert wiring.memory_formation is None
     assert wiring.memory is fake and wiring.memory_writer is fake.writeback
+    assert wiring.context_providers == []
+    assert {tool.name for tool in wiring.tools} >= {"retrieve_memory"}
     assert wiring.degradations["memory_v2"] == DegradeReason.INIT_FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_optional_v2_import_failure_degrades_after_disabling_privileged_v1_context(
+    tmp_path, monkeypatch,
+) -> None:
+    import sys
+
+    _patch_components(monkeypatch)
+    monkeypatch.setitem(sys.modules, "agent_harness.memory.v2.assembly", None)
+
+    wiring = await wire_capabilities(
+        CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+        settings=_settings(tmp_path), sessions=_sessions(tmp_path),
+    )
+
+    assert wiring.context_providers == []
+    assert wiring.degradations["memory_v2"] == DegradeReason.INIT_FAILED.value
+    assert "retrieve_memory" in {tool.name for tool in wiring.tools}
 
 
 # --------------------------------------------------------------------------------------

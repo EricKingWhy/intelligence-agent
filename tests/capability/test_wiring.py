@@ -142,7 +142,9 @@ class TestWireCapabilities:
         assert registry.descriptor("memory").degradation is Degradation.OPTIONAL_RUNTIME
         assert registry.get("memory") is fake.capability
         assert fake.initialized and not fake.closed
-        assert len(wiring.context_providers) == 1
+        # V1 automatic recall writes into privileged SystemMessage context. The V2 runtime
+        # path leaves automatic context disabled when there is no session ledger to wire V2.
+        assert wiring.context_providers == []
         assert wiring.memory_writer is fake.writeback
         assert wiring.memory is fake
 
@@ -330,3 +332,30 @@ async def test_wiring_aclose_closes_memory_and_lifecycle_with_isolation():
 
     assert memory.closed, "memory 组件必须被关闭"
     assert lifecycle.closed, "failing 项之后其余 lifecycle 仍须被关闭（隔离）"
+
+
+@pytest.mark.asyncio
+async def test_wiring_drains_memory_formation_before_closing_shared_memory():
+    events = []
+
+    class FakeMemory:
+        async def close(self):
+            events.append("memory")
+
+    class FakeFormation:
+        async def aclose(self):
+            events.append("formation")
+
+    class FakeLifecycle:
+        async def aclose(self):
+            events.append("other")
+
+    formation = FakeFormation()
+    wiring = CapabilityWiring(
+        memory=FakeMemory(), memory_formation=formation,
+        lifecycle=[formation, FakeLifecycle()],
+    )
+
+    await wiring.aclose()
+
+    assert events == ["formation", "memory", "other"]

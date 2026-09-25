@@ -39,29 +39,27 @@ runner 持有服务循环（`_pump` task）、`Semaphore` 与脏标记，它们�
 （真正的执行在后台任务里），但它必须在**有任何新 run 之前**发生——否则一个重启后残留的
 job 会排在这一轮新 job 后面，而按用户串行的 `claim` 会把它挡到更久。
 
-# 已知缺口：派生索引还没有生产驱动（如实登记，别当成已经通了）
+# 派生索引：与 V1 共享已初始化的 Milvus client，搜索前收敛 V2 outbox
 
-执行器的检索（R2 的"最多十条相似 active 记忆"）走 `MemoryV2Service.search` → 索引。
-索引由 `index.MemoryV2IndexRelay.flush()` 从 SQLite outbox 收敛，而**全仓只有用例调用过
-`flush()`**：本票不引入它的驱动（周期循环或按 job 触发都是新机制，归属召回那一票）。
-后果说清楚：接线之后，**生产**路径上那份"相似记忆"结构性地为空 ⇒ 裁决期看不到既有记忆 ⇒
-模型只能一路 ADD。R2 的**字面**要求仍然成立（0 ≤ 10，每条上限亦然），受影响的只是更新/去重
-的质量面。这一条已登记在 T8 的缺口清单里。
+形成与自动/显式召回共享同一个 `MemoryV2Service` 和派生索引。召回前由同一 service
+刷新 SQLite outbox；Milvus 仍是派生索引，所有命中随后回 SQLite 做身份、项目、active 状态复核。
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from agent_harness.config import Settings
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import MemoryJobExecutor
-from agent_harness.memory.v2.index import InMemoryMemoryV2Index
+from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
 from agent_harness.memory.v2.roles import (
     MEMORY_PRIMARY_ALIAS,
     MEMORY_PRIMARY_PROVIDER,
+    MemoryModelRoles,
     resolve_memory_roles,
 )
 from agent_harness.memory.v2.runner import ChatModelInvoker, MemoryJobRunner
@@ -74,8 +72,29 @@ logger = logging.getLogger(__name__)
 MEMORY_V2_DATABASE_NAME = "memory-v2.db"
 
 
+async def build_memory_v2_service(
+    settings: Settings, *, vector_store: Any | None = None,
+) -> MemoryV2Service:
+    """Build SQLite authority and its derived index independently of the formation model."""
+    database = Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME
+    store = SqliteMemoryV2Store(database)
+    await store.initialize()
+    await store.purge_expired_tombstones()
+    if vector_store is None:
+        index = InMemoryMemoryV2Index()
+    else:
+        from agent_harness.memory.v2.milvus_index import MilvusMemoryV2Index
+
+        index = MilvusMemoryV2Index(vector_store)
+    relay = MemoryV2IndexRelay(store, index)
+    return MemoryV2Service(store, index, relay=relay)
+
+
 async def build_memory_formation(
     settings: Settings, *, sessions: JsonlSessionStore,
+    vector_store: Any | None = None, workspace_index: Any | None = None,
+    memory_v2: MemoryV2Service | None = None,
+    roles: MemoryModelRoles | None = None,
 ) -> MemoryJobRunner | None:
     """装配记忆形成管线；主模型角色解析不出时返回 `None`（= 这个部署没有这条管线）。
 
@@ -85,7 +104,7 @@ async def build_memory_formation(
     再按 `Path(settings.workspace_dir)/"sessions"` 建一份，就是路径约定抄了第二遍——
     一旦两处分叉，症状是"job 永远切片为空 ⇒ 每轮降级"，没有任何东西报路径不一致。
     """
-    roles = resolve_memory_roles(settings)
+    roles = roles or resolve_memory_roles(settings)
     if roles.primary is None:
         # 不打印模型名 / 端点 / 凭据（roles 模块的同一约束）；别名与 provider 名是
         # PRD §5.3.3 公开固定的映射，写出来是为了这句话可执行。
@@ -97,25 +116,22 @@ async def build_memory_formation(
         return None
 
     database = Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME
-    store = SqliteMemoryV2Store(database)
     jobs = SqliteMemoryV2JobStore(database)
-    await store.initialize()
     await jobs.initialize()
 
     # 组合实现同时满足两个执行器端口（写者 `create_in/update_in/invalidate_in`、
     # 检索者 `search`）——一个对象，所以"写进去的"与"检索到的"不可能是两套可见性规则。
-    service = MemoryV2Service(store, InMemoryMemoryV2Index())
+    service = memory_v2 or await build_memory_v2_service(settings, vector_store=vector_store)
     executor = MemoryJobExecutor(
         jobs=jobs, writer=service, searcher=service, invoker=ChatModelInvoker(),
     )
-    # `extraction_enabled` 刻意走默认值（`True`）：它的生产来源是"用户关掉自动抽取"那个
-    # memory-settings 入口（PRD §5.6 的 `/api/memory-settings`），属后续票。票面把
-    # "globally disabled extraction"列为必须排除的形状，判定与用例都已实现，但**本票在
-    # 运行期没有产出方**——T8 两轴审查 P3 已登记，写在调用点免得读者以为它已接线。
-    # （"整仓关掉记忆"不靠它：那条路走 `wiring.memory is None` 的装配闸门。）
+    # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每次终结通知时从
+    # SQLite 读取可信用户的 extraction_enabled；设置由 #300 的治理 API 持久化。
     runner = MemoryJobRunner(
         jobs=jobs, sessions=sessions, executor=executor, roles=roles,
         max_concurrency=settings.memory_v2_max_concurrency,
+        memory_v2=service,
+        workspace_index=workspace_index,
     )
     recovered = await runner.recover()
     logger.info(
