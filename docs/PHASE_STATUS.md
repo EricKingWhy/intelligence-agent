@@ -40,13 +40,13 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 A 链 `#299` 已在本地短分支完成实现与双轴复审**（2026-09-25）。分支 `codex/mem-v2-3-cross-session-profile`，代码提交 `adb86f2`、`11fb406`；聚焦后端用例 691 passed、Ruff clean、前端 scope 用例 8 passed、前端 build 成功。Standards 与 Spec 两轴修后均无 P0–P3；AC10 冻结 Recall@6 ≥85% 与真实 Milvus 混合检索仍是未完成发布证据。未推送、未集成、未关单；下一票是已批准的独立兄弟票 `#300`。`#297`–`#299` 均待集成；`#301`–`#304` 仍须等 `#299` 和 `#300` 集成后按依赖解冻。旧 Memory 数据未清理，未修改 `.env` 或凭证。
+**当前焦点：Memory V2 中 `#297`、`#298`、`#300`、`#301` 已集成并 CLOSED（#301 集成 tip `74db7d7`）。`#299` 仍 OPEN，必须先补齐 AC10 Recall@6 ≥85% 与真实 Milvus hybrid 检索证据；`#302` / `#303` 因此等待 `#299`，`#304` 等待 `#302` / `#303`。#301 的完整验证、review 与已知 Vitest 超时见 `docs/phase_status/2026-09.md` L813。旧 Memory 数据未清理，未修改 `.env` 或凭证。
 
-**Memory V2 规划与 8 张实现票拆分均已完成；施工进度以各票落点为准（2026-09-25）**：`#297` Typed lifecycle、`#298` Formation/Adjudication 与 `#299` 跨会话召回已完成分支实现，均未集成；`#300` 治理 API 是当前下一票。`#301` UI、`#302` 评测、`#303` clean-slate cutover 依赖 `#299` / `#300` 集成，`#304` 最终真实 Gate 依赖前三票完成。父规格 `#296`、产品合同 `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`，执行票 `docs/tickets/mem-v2-*.md`。旧记忆尚未删除；不得把本地候选描述为已集成或已关单。
+**Memory V2 当前状态（2026-09-25）**：`#297` / `#298` / `#300` / `#301` 已 CLOSED 并集成；`#299` 的 AC10 尚未完成，`#302` / `#303` 被其阻塞，`#304` 等待后二票。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。旧记忆数据仍保留；clean-slate 只在 `#303` 依赖完成并核验目标和保留项后执行。
 
-**`#297`（MEM-V2-1）Typed Memory lifecycle 已在前端线实现并推送到自己的分支（2026-09-24）**：交付 `src/agent_harness/memory/v2/**` —— typed envelope（`semantic`/`episodic`/`procedural` 判别联合）+ 版本化生命周期 + SQLite 权威 store（**新表** `memory_v2_records` / `memory_v2_outbox`）+ outbox→派生索引 relay + provider-neutral `MemoryV2Capability`；**V1 路径零改动**，`main` 由集成线合并。机制与取舍单点在 **`docs/adr/0042-memory-v2-typed-envelope-versioned-lifecycle.md`**：§D10 = `#297` 的 AC8 显式登记（逐条列出将在 `#303` clean-slate cutover 被取代的 8 项旧决策）、§5.1 门禁读数（口径已改为**用例数与失败集合**）、§5.2 既存环境 flaky 的**结论边界**、§5.3 首轮两轴审查 findings 的逐条处置与变异红证、§5.4 **修后重审**（两轴各 1 轮预算，均 `PASS-WITH-NITS`，`P0=0`/`P1=0`）13 条 findings 的逐条处置。门禁（处置完两轮 findings 后重测）：`ruff check .` clean；`pytest tests/memory/v2` **119 passed**；`pytest tests/memory` **344 tests / 1 failed**，失败集合恰好是 §5.2 登记的 V1 环境性 flaky（`test_concurrent_writers_converge_on_one_row_and_one_index_state`，形态恒为 `attempt to write a readonly database`），集合差集为空。分支 `T297-mem-v2-1-typed-lifecycle`，**未推 `main`**。
+**`#297`（MEM-V2-1）Typed Memory lifecycle：已集成到 `main`，GitHub issue CLOSED。实现、review 与测试历史保留在 `docs/SDD_TICKET_TRACKER.md`。
 
-**`#298`（MEM-V2-2）Durable Formation and Adjudication 已在前端线实现完成并推送到自己的分支（2026-09-24）**：交付 16 笔（`1d9fc28` → `aa48eac`），把「run 终结 ⇒ 有资格则入队 ⇒ 模型形成候选 ⇒ 裁决 ⇒ 单事务终态写入」做成 durable（幂等入队 / 按用户串行 / lease CAS / 崩溃恢复 / 进程级并发上限默认 4）。T6 抓到**跨切片 P0**（R2 安全投影刻意不投影真 `event_id`，而契约与政策判据都以真 id 为键 ⇒ 生产路径上每个候选都落 `unsupported_source`、自动记忆**零写入**），经用户裁决改为**投影发运行时别名 `ref`**（默认 `refs=None` 时行为逐字不变）。机制与能力边界单点在 **`docs/adr/0043-memory-v2-evidence-aliases-contract-readings-and-gaps.md`**：§D1–§D7 机制 / §D8 登记「9 类敏感**没有**运行期检测器，R7 的『独立于模型分类』只对 secrets 成立」/ §D11 登记「**派生索引在生产尚无驱动** ⇒ 裁决期『相似记忆』结构性为空、模型只能一路 ADD」（归属 `#299`/`#303`）/ §5.3 两轴 findings 逐条处置 / §5.4 T6 引入 `memory/updated` 的**三处未跟进落点**。两轴独立审查结论：Standards **NEEDS-FIX**（P0=0 P1=2）／Spec **PASS-WITH-FINDINGS**（P0=0 P1=1），16 条 findings 全部处置。分支 `T298-mem-v2-2-durable-formation-adjudication`，**未推 `main`**；`origin/main` 是它的祖先（且它包含 `#297` 全部提交 ⇒ `#297` 未合前不得单独合 main）。
+**`#298`（MEM-V2-2）Durable Formation and Adjudication：已集成到 `main`，GitHub issue CLOSED；ADR-0043 及历史 review / 验证边界见 tracker 与月度归档。
 
 **F18-A（`#282` 会话内可改权限档·后端）已完成并并入 main（merge `56d561ba`，2026-09-22；覆盖闸门 exit 0、快进 push `origin/main`、三方交叉验证一致）**：权限档与 `auto_approve` 由「创建时定、不可变」改为**会话内可变**（ADR-0041 Status → **`Accepted`**）—— 事件唯一 `permission/changed`、派生「**最后一次 changed 胜**」、生效时机 = **下一轮 run**（per-run 快照）、**有 pending 审批时 409 禁改**、升 `danger-full-access` 由前端确认。**F18-B（`#283` 前端）已完成并并入 main（tip `e10bfda`，2026-09-22；四道门禁全绿 —— `tsc -b` 0 错 / `vitest run` **1063 passed** / `oxlint` **0 error** / `vite build` 0 错，e2e 真机 `control-row` **24 passed** + `u-project-task` **10 passed**；快进 push `f1557e8..e10bfda`）**：pill 解禁 + 升 `danger-full-access` 走浮层**内联确认行** + 删假提示 `PERMISSION_MODE_LOCKED_HINT` + 投影「最后一次胜」（只动 `session_permission_mode`）+ 改档成功后强制重载该会话事件。**2026-09-22 第三手补记（用户批准「补全套」）**：`#283` 事后补**两轴独立审查**（A 轴 Standards / B 轴 Correctness·Spec **均通过**，P0 = P1 = 0；合计 P2 = 5 / P3 = 7，均不阻断）+ **作者红证**（改造前树 **8 failed / 239 passed**）+ `StepDetail.window.test.tsx:132` 登记进 B-29 已知 flake 表（含一次独立确认）；台账审查行按 §8.5.1 由 **2319 压到 784 字符**、7 栏齐全。
 
@@ -67,6 +67,9 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+
+- 2026-09-25（MEM-V2-5 `#301` 已集成、推送并 CLOSED，tip `74db7d7`）：Tombstone 授权读取 + 管理 UI；后端全量 3811 passed / 31 skipped / 49 deselected，管理 E2E 20 passed，lint/build、review coverage 与 Gate-0 6/6 通过。全量 Vitest 有 1 条未改动 `StepDetail.window` 已知超时，详见 L813。
+- 2026-09-25（MEM-V2-3 `#299` 状态）：issue 仍 OPEN，AC10 Recall@6 ≥85% 与真实 Milvus hybrid 检索证据未完成；`#302` / `#303` 等其集成。实现与审查历史见 `docs/phase_status/2026-09.md` L812。
 
 
 - 2026-09-24（MEM-V2-2（`#298`）Durable Formation and Adjudication —— **T1–T8 实现完成 + 两轴独立审查 + ADR-0043**，分支 `T298-mem-v2-2-durable-formation-adjudication`，**已推送、未集成、未关单**）：交付 16 笔（`1d9fc28` → `aa48eac`），把「run 终结 ⇒ 资格入队 ⇒ 模型形成候选 ⇒ 裁决 ⇒ 单事务终态」做成 durable；T6 抓到**跨切片 P0**（R2 投影不给真 `event_id` × 契约要真 id ⇒ 生产路径上自动记忆**零写入**），按用户裁决改为**运行时别名 `ref`**；T7a/T7b 接上宿主与装配（闸门 = `wiring.memory is not None`；作业表与记录表**同库文件**以满足 AC6/AC7 同事务；runner 进程级单例）。**两轴独立审查**（范围 `32ef89b..a88a0a0`，13 笔 / 36 文件 / 10493 插入，固定点 `a88a0a0`）Standards **NEEDS-FIX**（P0=0 P1=2 P2=2 P3=5 P4=2）／Spec **PASS-WITH-FINDINGS**（P0=0 P1=1 P2=3 P3=2），**16 条 findings（S1–S11 + P1–P5）全数处置**，逐条表在 ADR-0043 §5.3。门禁：`ruff check .` clean；`tests/memory/v2` 两片 **588**；V1 记忆 **225**；`tests/agent` **484**；装配/capability/守卫/web **178**；前端 `tsc` **exit 0**（修掉自 T6 起红的 `TS2741`）；**覆盖闸门 exit 0**（`09ca47a..HEAD` / 612 / 405 / 207）。**登记缺口**：9 类敏感无运行期检测器（§D8）／派生索引生产无驱动 ⇒ 裁决期「相似记忆」结构性为空（§D11，归属 `#299`/`#303`）。明细见 `docs/phase_status/2026-09.md` L808；证据评论 [issuecomment-5812364609](https://github.com/EricKingWhy/intelligence-agent/issues/298#issuecomment-5812364609)。
@@ -95,13 +98,13 @@
 
 | 文件 | 覆盖日期 | 条目数 | 说明 |
 | --- | --- | --- | --- |
-| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-25 | 316 | 历史明细；2026-09-17 初次迁移的正文逐字保留。条目数由 `grep -c "^- 2026-"` 实测：截至 9/23 为 311，9/24 增 3 条，9/25 增 2 条（B-37 收口与 #299 候选）。更新与读取纪律见本文件「按日定位」表。 |
+| `docs/phase_status/2026-09.md` | 2026-09-03 .. 2026-09-25 | 317 | 历史明细；2026-09-17 初次迁移的正文逐字保留。条目数由 `grep -c "^- 2026-"` 实测：截至 9/23 为 311，9/24 增 3 条，9/25 增 3 条（B-37 收口、#299、#301）。更新与读取纪律见本文件「按日定位」表。
 
 ### 按日定位（归档内行号，日期降序）
 
 | 日期 | 条目 | 位置 |
 | --- | --- | --- |
-| 2026-09-25 | 2（B-37 GitHub 收口 / MEM-V2-3 `#299`） | `2026-09.md` L811-L812（B-37 = L811；`#299` = L812） |
+| 2026-09-25 | 3（B-37 GitHub 收口 / MEM-V2-3 `#299` / MEM-V2-5 `#301`） | `2026-09.md` L811-L813（B-37 = L811；`#299` = L812；`#301` = L813） |
 | 2026-09-24 | 3（MEM-V2-2 `#298` / B-37 最终 Gate / B-37 验证补记） | `2026-09.md` L808-L810 |
 | 2026-09-23 | 5（B-44 `#294` / B-43 `#286` / Memory V2 PRD + Tickets + Issues / B-45 `#295` / 集成与全量验证） | `2026-09.md` L783-L807（B-44 = L783；B-43 = L784 起含 11 条子项；Memory V2 = L797；B-45 = L798 起含 8 条子项；集成与验证 = L807；**子项数口径 = `^  - ` 顶层计数**） |
 | 2026-09-22 | 11（B-33 / B-34 / B-35 / B-36 / F18-A `#282` / F18-B `#283` / B-38 / B-39 `#248` / B-40 `#291` / B-41 `#292` / B-42 `#293`） | `2026-09.md` L628-L780（**子项数口径 = `^  - ` 顶层计数**（更深缩进的另计），2026-09-22 按归档**实测重算**：B-33 = L628 起含 12 条子项，B-34 = L650 起含 8 条子项，B-35 = L660 起含 7 条子项，B-36 = L669 起含 13 条子项，F18-A = L684 起含 12 条子项，F18-B = L698 起含 12 条子项，B-38 = L719 起含 8 条子项，B-39 = L729 起含 7 条子项，**B-40 = L737 起含 15 条子项，B-41 = L753 起含 14 条子项，B-42 = L768 起含 9 条子项**） |
