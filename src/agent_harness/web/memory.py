@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -45,6 +45,7 @@ from agent_harness.memory.v2.types import (
 from agent_harness.memory.v2.types import (
     MemoryPayload,
     MemoryRecordV2,
+    MemoryTombstoneV2,
 )
 from agent_harness.memory.v2.types import (
     MemoryScope as MemoryScopeV2,
@@ -110,6 +111,19 @@ class MemorySummary(BaseModel):
     source_event_ids: list[str] | None = None
     payload: dict | None = None
     evidence: list[dict[str, str]] | None = None
+
+
+class MemoryTombstoneSummary(BaseModel):
+    """Authorized deletion marker; deliberately contains no content or hashes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    root_id: str
+    scope: MemoryScopeV2
+    project_id: str | None
+    status: Literal["deleted"] = "deleted"
+    deleted_at: str
 
 
 class MemoryDeleted(BaseModel):
@@ -204,6 +218,16 @@ def _v2_summary(record: MemoryRecordV2) -> MemorySummary:
     )
 
 
+def _v2_tombstone_summary(tombstone: MemoryTombstoneV2) -> MemoryTombstoneSummary:
+    return MemoryTombstoneSummary(
+        id=tombstone.id,
+        root_id=tombstone.root_id,
+        scope=tombstone.scope,
+        project_id=tombstone.project_id,
+        deleted_at=tombstone.deleted_at,
+    )
+
+
 def register_memory_routes(app: FastAPI) -> None:
     """把记忆路由挂到既有 app（`create_app` 里一行调用的接入面）。"""
 
@@ -263,7 +287,7 @@ def register_memory_routes(app: FastAPI) -> None:
         scope: Annotated[MemoryScopeV2 | None, Query(description="归属范围筛选")] = None,
         project_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(require_trusted_origin),
-    ) -> list[MemorySummary]:
+    ) -> list[MemorySummary | MemoryTombstoneSummary]:
         """列出 V1 与当前身份可见的 V2 记忆，并支持 V2 typed filters.
 
         Management reads use authoritative stores, never vector search. Existing unfiltered
@@ -305,19 +329,33 @@ def register_memory_routes(app: FastAPI) -> None:
                 else:
                     entries = await capability.list_entries(MemoryScope.USER, page_count, 0)
             v2_records = []
+            tombstones = []
             if service is not None:
-                v2_records = await service.list_records(
-                    trusted, query=q, kind=kind, status=status, scope=scope,
-                    project_id=project_id, limit=page_count, offset=0,
-                )
+                if status is MemoryStatusV2.DELETED:
+                    if kind is None:
+                        tombstones = await service.list_tombstones(
+                            trusted, query=q, scope=scope, project_id=project_id,
+                            limit=page_count, offset=0,
+                        )
+                else:
+                    v2_records = await service.list_records(
+                        trusted, query=q, kind=kind, status=status, scope=scope,
+                        project_id=project_id, limit=page_count, offset=0,
+                    )
         except PermissionError as error:
             # 认证通过但身份没有 "user" scope（`MemoryNamespace.of` 的授权校验）。不翻译就会
             # 以未登记领域异常的形状冒成 500——AC6 要的是明确状态码；同一身份的 DELETE 也是
             # 403，两个入口必须给同一个答案。
             raise memory_http_error(error) from error
-        summaries = [_summary(entry) for entry in entries]
+        summaries: list[MemorySummary | MemoryTombstoneSummary] = [
+            _summary(entry) for entry in entries
+        ]
         summaries.extend(_v2_summary(record) for record in v2_records)
-        summaries.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+        summaries.extend(_v2_tombstone_summary(item) for item in tombstones)
+        summaries.sort(key=lambda item: (
+            item.deleted_at if isinstance(item, MemoryTombstoneSummary) else item.created_at,
+            item.id,
+        ), reverse=True)
         return summaries[offset:offset + limit]
 
     @app.delete("/api/memories/{memory_id}")
@@ -386,24 +424,32 @@ def register_memory_routes(app: FastAPI) -> None:
         memory_id: str,
         project_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(require_trusted_origin),
-    ) -> MemorySummary:
+    ) -> MemorySummary | MemoryTombstoneSummary:
         service = await _v2_service()
         trusted = await _trusted_v2(project_id)
         try:
             return _v2_summary(await service.read(memory_id, trusted))
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail="memory not found") from error
+        except KeyError:
+            try:
+                return _v2_tombstone_summary(await service.read_tombstone(memory_id, trusted))
+            except KeyError as error:
+                raise HTTPException(status_code=404, detail="memory not found") from error
 
     @app.get("/api/memories/{memory_id}/versions")
     async def get_memory_versions(
         memory_id: str,
         project_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(require_trusted_origin),
-    ) -> list[MemorySummary]:
+    ) -> list[MemorySummary | MemoryTombstoneSummary]:
         service = await _v2_service()
         trusted = await _trusted_v2(project_id)
         try:
-            record = await service.read(memory_id, trusted)
+            try:
+                record = await service.read(memory_id, trusted)
+            except KeyError:
+                tombstone = await service.read_tombstone(memory_id, trusted)
+                tombstones = await service.tombstone_versions(tombstone.root_id, trusted)
+                return [_v2_tombstone_summary(item) for item in tombstones]
             versions = await service.versions(record.root_id, trusted)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="memory not found") from error

@@ -107,13 +107,49 @@ async def test_delete_erases_all_versions_and_keeps_only_content_free_tombstones
         names = {row["name"] for row in columns}
         assert names == {
             "memory_id", "root_id", "tenant_id", "user_id", "scope", "project_id",
-            "deleted_at", "expires_at", "deletion_reason", "content_hashes", "source_hashes",
+            "version", "deleted_at", "expires_at", "deletion_reason", "content_hashes",
+            "source_hashes",
         }
-        rows = await connection.execute_fetchall("SELECT * FROM memory_v2_tombstones")
+        rows = await connection.execute_fetchall(
+            "SELECT memory_id, version FROM memory_v2_tombstones ORDER BY version DESC"
+        )
     serialized = json.dumps([dict(row) for row in rows], ensure_ascii=False)
     assert "最初的偏好" not in serialized and "修订后的偏好" not in serialized
     assert "hash-1" not in serialized and "event-1" not in serialized
-    assert len(rows) == 2
+    assert [(row["memory_id"], row["version"]) for row in rows] == [
+        (second.id, 2), (first.id, 1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_initialize_adds_nullable_version_order_to_legacy_tombstones(tmp_path):
+    database_path = tmp_path / "legacy-memory-v2.db"
+    async with connect(database_path) as connection:
+        await connection.execute(
+            "CREATE TABLE memory_v2_tombstones ("
+            "memory_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, tenant_id TEXT NOT NULL, "
+            "user_id TEXT NOT NULL, scope TEXT NOT NULL, project_id TEXT, deleted_at TEXT NOT NULL, "
+            "expires_at TEXT NOT NULL, deletion_reason TEXT NOT NULL, content_hashes TEXT NOT NULL, "
+            "source_hashes TEXT NOT NULL)"
+        )
+        await connection.execute(
+            "INSERT INTO memory_v2_tombstones VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("old-memory", "old-root", "tenant-a", "user-a", "user_global", None,
+             "2026-09-25T00:00:00+00:00", "2026-10-25T00:00:00+00:00",
+             "user_request", "[]", "[]"),
+        )
+        await connection.commit()
+
+    store = SqliteMemoryV2Store(database_path)
+    await store.initialize()
+
+    async with connect(database_path) as connection:
+        columns = await connection.execute_fetchall("PRAGMA table_info(memory_v2_tombstones)")
+        old_tombstone = await connection.execute_fetchall(
+            "SELECT version FROM memory_v2_tombstones WHERE memory_id='old-memory'"
+        )
+    assert "version" in {row["name"] for row in columns}
+    assert old_tombstone[0]["version"] is None
 
 
 @pytest.mark.asyncio
