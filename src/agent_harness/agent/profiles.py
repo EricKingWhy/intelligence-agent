@@ -61,7 +61,7 @@ class AgentSpec:
 #: #202 / ADR-0031 D8：记忆检索与显式写入工具对 coding 开放（写入源是模型自己）。
 _CODING_TOOLS = frozenset({
     "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
-    "git_status", "git_diff", "retrieve_memory", "retrieve_memory_v2",
+    "git_status", "git_diff", "retrieve_memory",
     "remember_this", "forget_memory",
 })
 
@@ -71,7 +71,7 @@ _CODING_TOOLS = frozenset({
 _RESEARCH_TOOLS = frozenset({
     "read", "grep", "glob",
     "retrieve_knowledge", "read_knowledge_source", "web_search",
-    "retrieve_memory", "retrieve_memory_v2",
+    "retrieve_memory",
 })
 
 #: supervisor（main）：亲自查证用全量 + delegate。max_steps 对齐单代理现状。
@@ -138,7 +138,7 @@ def tool_scope_summary(profile: str) -> dict[str, Any]:
 
     - **声明 ⊃ 注册**：`scope` 里有名字，本部署可能没注册它。同一 harness 实测
       注册数 = main/None **10**、coding **9**、research_review **3**（声明分别是
-      18/13/8）：knowledge/websearch/memory 等 capability 未启用（或缺运行期前置，
+      17/12/7）：knowledge/websearch/memory 等 capability 未启用（或缺运行期前置，
       如 `TAVILY_API_KEY` / session_store）时不注册，`retrieve_knowledge` /
       `web_search` / `retrieve_memory` / `delegate` 一类就不在 registry 里，此时
       "开放 7 个"是**高报**。这个数**不是常量**：它随 wiring 与运行期前置变化

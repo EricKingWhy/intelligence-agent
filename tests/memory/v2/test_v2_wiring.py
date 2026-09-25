@@ -144,8 +144,8 @@ async def test_recall_is_wired_even_without_a_formation_model_role(tmp_path, mon
     assert wiring.memory_v2 is not None
     assert {provider.name for provider in wiring.context_providers} == {"memory"}
     tool_names = {tool.name for tool in wiring.tools}
-    assert {"retrieve_memory_v2", "remember_this", "forget_memory"} <= tool_names
-    assert "retrieve_memory" not in tool_names
+    assert {"retrieve_memory", "remember_this", "forget_memory"} <= tool_names
+    assert "retrieve_memory_v2" not in tool_names
     await wiring.aclose()
 
 

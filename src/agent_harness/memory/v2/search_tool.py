@@ -47,7 +47,7 @@ class RetrieveMemoryV2Tool(Tool):
 
     @property
     def name(self) -> str:
-        return "retrieve_memory_v2"
+        return "retrieve_memory"
 
     @property
     def description(self) -> str:

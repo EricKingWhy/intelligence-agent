@@ -171,7 +171,8 @@ class TestWebWiringCoexistence:
 
         assert [d.name for d in registry.available()] == ["memory", "skills", "ticker"]
         assert wiring.memory_writer is not None
-        assert len(wiring.context_providers) == 2  # MemoryContextProvider + SkillCatalogContextProvider
+        # V1 automatic recall is disabled without the session ledger; skills remain injected.
+        assert len(wiring.context_providers) == 1  # SkillCatalogContextProvider
         # #159 起 memory 经契约贡献遗忘工具（收集循环的第二来源）——这个共存网关必须看见它，
         # 否则"记忆工具真的接进了统一 ToolRegistry"就没有证据。断言**集合**而不是顺序：收集
         # 顺序是实现细节，不是这个网关要守的行为。#202 / ADR-0031：retrieve_memory /

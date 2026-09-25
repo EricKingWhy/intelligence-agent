@@ -74,6 +74,11 @@ async def test_v2_milvus_upsert_single_and_bulk_delete(tmp_path) -> None:
         written.append(one.id)
         await relay.flush()
         assert await is_indexed(one.id)
+        hits = await service.hybrid_search(
+            one.content, identity, scopes=(MemoryScope.USER_GLOBAL,), limit=5,
+        )
+        by_id = {hit.record.id: hit for hit in hits}
+        assert by_id[one.id].explanation["dense"] > 0
 
         await service.delete(one.id, identity)
         assert not await is_indexed(one.id)
