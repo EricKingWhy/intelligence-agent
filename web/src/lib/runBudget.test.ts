@@ -9,7 +9,13 @@ import { describe, expect, it } from 'vitest';
 import { EventType } from '../types';
 import type { AgentEvent, RunPausedInfo } from '../types';
 import { deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun } from './runState';
-import { ceilingDraftError, ceilingDraftValue, dimensionLabel, pauseFacts } from './runBudget';
+import {
+  ceilingDraftError,
+  ceilingDraftValue,
+  dimensionLabel,
+  minResumeValue,
+  pauseFacts,
+} from './runBudget';
 import { initConversation } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
@@ -118,11 +124,77 @@ describe('pauseFacts —— 与 CLI 同一口径的展示数字（#312）', () =
     expect(facts.localFuseTurns).toBeNull();
   });
 
-  it('两个作用域的标签各自认得出来；未知维度原样回显（不编名字）', () => {
+  it('四个 run 维度与 local fuse 各有标签；未知维度原样回显（不编名字）', () => {
     expect(dimensionLabel('run.max_agent_turns_total')).toContain('run 累计轮次到顶');
     expect(dimensionLabel('local.max_agent_turns')).toContain('单次执行保险丝到顶');
-    expect(dimensionLabel('run.max_total_tokens')).toBe('run.max_total_tokens');
+    // `#313` 起这四个维度都可能命中：它们各自有标签，不打裸串（review P2-3）。
+    expect(dimensionLabel('run.max_model_requests')).toContain('run 累计模型请求到顶');
+    expect(dimensionLabel('run.max_total_tokens')).toContain('run 累计 token 到顶');
+    expect(dimensionLabel('run.max_cost_usd')).toContain('run 累计成本到顶');
+    expect(dimensionLabel('run.unknown_dimension')).toBe('run.unknown_dimension');
     expect(dimensionLabel('')).toBe('预算维度未声明');
+  });
+
+  it('暂停落在 requests / tokens / cost：读数与剩余按**那一维**算（不是 turns 的）', () => {
+    const requests = pauseFacts(
+      pausedInfo({
+        trigger_dimension: 'run.max_model_requests',
+        consumed_dimensions: { agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: null },
+        run_limits: {
+          max_agent_turns_total: 8, max_model_requests: 4,
+          max_total_tokens: null, max_cost_usd: null,
+        },
+      }),
+    );
+    expect(requests.tripped?.spec.dimension).toBe('run.max_model_requests');
+    expect(requests.tripped?.consumedText).toBe('4');
+    expect(requests.tripped?.remainingText).toBe('0');
+    expect(requests.resumeTarget.resumeField).toBe('max_model_requests');
+    // 只列有事实的维度：turns / requests 有消耗与 ceiling，tokens 只有消耗快照
+    // （照样要列——"花了 120 token 但没配上限"本身是事实），cost 两边都没有 ⇒ 不列。
+    expect(requests.dimensions.map((fact) => fact.spec.consumedKey)).toEqual([
+      'agent_turns', 'model_requests', 'total_tokens',
+    ]);
+    const tokens = requests.dimensions[2];
+    expect(tokens.ceilingText).toBe('unlimited');
+    expect(tokens.remainingText).toBe('unavailable');
+    // requests 维的恢复阈值含 closeout 预留：4 + 1 + 1 = 6。
+    expect(minResumeValue(requests.resumeTarget, requests.tripped!)).toBe(6);
+  });
+
+  it('cost 维：十进制字符串读数与剩余**精确**相减（不经过 float）', () => {
+    const cost = pauseFacts(
+      pausedInfo({
+        trigger_dimension: 'run.max_cost_usd',
+        consumed_dimensions: {
+          agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: '0.10',
+        },
+        run_limits: {
+          max_agent_turns_total: null, max_model_requests: null,
+          max_total_tokens: null, max_cost_usd: '0.30',
+        },
+      }),
+    );
+    // 0.30 - 0.10 在浮点里是 0.19999999999999998；这里必须逐字是 0.20。
+    expect(cost.tripped?.remainingText).toBe('0.20');
+    expect(cost.tripped?.consumedText).toBe('0.10');
+    // 计量维度的建议默认值 = consumed + 1（不是"最小合法值"）。
+    expect(minResumeValue(cost.resumeTarget, cost.tripped!)).toBe('1.10');
+    expect(cost.resumeTarget.resumeFlag).toBe('--run-cost-usd');
+  });
+
+  it('老暂停载荷（无四维组）：turns 维照旧，其余三维不列（不编 unavailable 噪声）', () => {
+    const facts = pauseFacts(pausedInfo());
+    expect(facts.dimensions.map((fact) => fact.spec.consumedKey)).toEqual(['agent_turns']);
+    expect(facts.tripped?.spec.dimension).toBe('run.max_agent_turns_total');
+    expect(facts.resumeTarget.resumeField).toBe('max_agent_turns_total');
+  });
+
+  it('暂停落在 local fuse：没有 run 维读数可报（不拿 turns 冒充），恢复回落到 turns', () => {
+    const facts = pauseFacts(pausedInfo({ trigger_dimension: 'local.max_agent_turns' }));
+    expect(facts.tripped).toBeNull();
+    expect(facts.dimensionLabel).toContain('单次执行保险丝到顶');
+    expect(facts.resumeTarget.resumeField).toBe('max_agent_turns_total');
   });
 });
 

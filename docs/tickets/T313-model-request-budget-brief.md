@@ -15,7 +15,7 @@
 | 七个 counter 的**唯一定义与计数点** | `SPEC_ROOT/02_AGENT_RUNTIME.md` §5.1 | `agent_turns` / `model_requests` / `tool_calls` / `tool_attempts` / `total_tokens` / `cost_usd` / `delegations` 各数什么、在哪数 |
 | 预算载荷与暂停 / 恢复语义 | `SPEC_ROOT/03_SESSION_EVENT_MODEL.md` §3.4、§5 | `run/paused` / `run/resumed` 的字段与不变式；**账目事件的表示方式是实现自由的**（逐次接纳落账 / 稳定边界落账 / 等价 append-only 形式），只要 AC 与 replay 等价成立 |
 | 预算配置面与 HTTP 形状 | `SPEC_ROOT/11_STREAMING_API_WEB_UI.md` §6.1 | run 作用域六个维度、`422` 与 `409` 的分工、投影必须含什么 |
-| 预算分层与暂停生命周期 | `docs/adr/0044-run-budget-pause-resume.md` D2–D6 | 三级预算不合并、cost 不臆造、durable pause 生命周期、deadline 判定位置、cancel≠pause、stuck 归属、quiescence 六条 |
+| 预算分层与暂停生命周期 | `docs/adr/0044-long-run-execution-boundaries-budget-pause-resume-stuck-completion.md` D2–D6 | 三级预算不合并、cost 不臆造、durable pause 生命周期、deadline 判定位置、cancel≠pause、stuck 归属、quiescence 六条 |
 
 `SPEC_ROOT` = `goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/`（**不是**根上的 `docs/spec/`）。
 
@@ -47,9 +47,11 @@
   closeout 那次调用的 usage / cost 入账；`end_run(cost_usd=<真实值|None>)` 替换现在的
   `cost_usd=None,  # TODO(spec 12)`；投影面 = `run/started` 的 budget + `run/paused` / `run/resumed` +
   （候选）`GET /api/sessions/{id}/budget`；两个生成物重新生成。
-  **待开工时定稿的一处**：AC-8 的「Web 显示」是只到投影（`web/src/lib/projection.ts` + 生成物）还是
-  也要一个 UI 面板 —— 本票 Must Not 没有排除 UI，但 T4 已引入 `PausedPanel`，
-  决定前先看 `web/src/components/PausedPanel.tsx` 能否直接承载。
+  **AC-8 的「Web 显示」已定稿**：由 T4 的 `PausedPanel` 承载（不新建面板）——`web/src/lib/runBudget.ts`
+  从「只认 turns」扩成四维表（标签 / 读数 / 恢复目标维度 / 十进制精确相减），`PausedPanel` 按**命中的
+  那一维**报标题与恢复输入，`api.ts` / `useSession.ts` 的恢复载荷按维度带字段。首次审查（`667ea1a`）
+  发现只动生成物会让面板把「被 requests 卡住」显示成「已消耗 0 轮 · 绝对 ceiling unlimited」——
+  那是在陈述一件没发生过的事。
 
 ## 3. AC → 落点 → 判据
 
@@ -58,9 +60,9 @@
 | 1 | 一个决策可对应多次实际请求，且每次恰计一次 | `model/fallback.py` 计数 + `model/request` 事件 | 新单测：primary 失败 → fallback 成功 ⇒ `model_requests=2`、`agent_turns=1` |
 | 2 | primary / fallback / child / closeout 都入对账 | 同上 + closeout 调用点；child 归 T10（本票只保证不误计） | `tests/agent/test_model_fallback_runtime.py` + 新用例 |
 | 3 | token 只用 Provider 自报，不可用不转 0 | `model/accounting.py` + `agent/runtime.py` 的 usage 累加 | 新单测：响应无 usage ⇒ 投影 `unavailable`，**不是** 0 |
-| 4 | cost 只来自可靠归属，不臆造费率 | `cost_usd_from_response`（只认 `response_metadata["cost"]`） | 新单测 + 生产路径恒 `unavailable` 的断言 |
-| 5 | 任一路径无可靠强制 ⇒ 首个请求前拒绝 | `web/app.py` 的 `_reject_unimplemented_dimensions` 改成「按声明能力判定」 | API 用例：`max_cost_usd` 显式 ⇒ 422 且**零副作用**（无 `run/started`、无 session 变更） |
-| 6 | 已接纳的请求被预留 / 限界，绝不有意越线 | `agent/run_budget.py` 的 `pause_trigger` / `closeout_capacity` | 边界单测：`consumed == ceiling` ⇒ 拒绝准入；`consumed == ceiling-1` ⇒ 放行 |
+| 4 | cost 只来自可靠归属，不臆造费率 | `cost_usd_from_response`（只认 `response_metadata["cost"]`） | `tests/agent/test_run_pause_resume.py`：Provider 逐次自报 ⇒ 十进制**精确**累加（含 closeout 那次）；任一次没报 ⇒ 该维整本未知（`None` 粘性，**不是**已知部分之和）；生产路径（`reports_cost=False`）恒 `unavailable` |
+| 5 | 任一路径无可靠强制 ⇒ 首个请求前拒绝 | `web/app.py` 的 `_reject_unimplemented_dimensions` 改成「按声明能力判定」 | API 用例**双向**：①`max_cost_usd` 显式 ⇒ 422 + **零副作用**（不构造模型、无 `run/started`、无 session 变更），且 detail 指名该维**无法强制执行**；②**正控**——本链能强制的 `max_total_tokens` 必须被接受并落进 `run/started.data.budget`（只断言 422 的弱判据在旧树上同样绿，区分不了「按能力判定」与「一律拒绝」） |
+| 6 | 已接纳的请求被预留 / 限界，绝不有意越线 | `agent/run_budget.py` 的 `pause_trigger` / `closeout_capacity` | 边界单测按**两类维度**分别钉：**可数维度**（turns / requests）每次准入预留一个 closeout 位置 ⇒ `consumed + 预留 >= ceiling` 即停（`consumed == ceiling-1` 就该停，`consumed == ceiling-2` 才放行）；**计量维度**（tokens / cost）下一轮多大不可预知、**没有**预留 ⇒ `consumed >= ceiling` 才停（`consumed == ceiling-1` 仍放行，代价是那一轮自己可能越线——这正是「不得**有意**越线」的边界）。两个谓词别合成一个：准入用 `_dimension_reached`，closeout 容量用 `_dimension_headroom`（后者是 `consumed < ceiling`，含「账目未知 ⇒ 没有余量」） |
 | 7 | 撞线落 `run/paused`，抬高**绝对** ceiling 后同 run 续跑且不重置 | T4 既有路径 + 三维度 | `tests/agent/test_run_pause_resume.py` 扩展；Live Gate 场景 `budget-pause-resume-same-run` 真跑 |
 | 8 | API / 流 / CLI / Web 投影一致，刷新 / replay 后仍一致 | `session/service.py` 投影 + `web/app.py` + `cli.py` | replay 等价用例（`derive_run_budget` 对 `store.read_events` 重算 == 内存态） |
 | 9 | 受控 primary 失败 → 真实 fallback，证据含两侧 id 与计数、无凭证 | Live Gate 专用场景（**有配置 fallback 时才跑**，否则 `BLOCKED`） | 真实证据目录 + `scripts/live_gate.py validate --require-pass` |

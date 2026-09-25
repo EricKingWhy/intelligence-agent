@@ -19,11 +19,10 @@
 回显可能含敏感文本（与 model/failed 事件的脱敏不变量一致）。
 
 `#313`（T5）：本模块**额外**记下每一次**实际**发出去的 Provider 请求
-（`ModelRequestAttempt`），供 Runtime 落 `model/request` —— `model_requests`
-的唯一计数点（`02 §5.1`）。计数放在这里而不是 Runtime 的调用点，因为"这次调用
-实际发了几次请求"只有编排层知道（primary 失败后那次 fallback 重试是同一次
-决策里的**第二次**请求）。与 transitions 同一姿势：本层只**记录事实**，落盘与
-镜像由持有 Session 的 Runtime 负责（模型层不持有会话）。
+（`ModelRequestAttempt`），供 Runtime 落 `model/request`（计数点定义见 `02 §5.1`）。
+放在这一层的原因只有一条：**"这次调用实际发了几次请求"只有编排层知道**——primary
+失败后那次 fallback 重试是同一次决策里的第二次请求。与 transitions 同一姿势，本层
+只记录事实，落盘与镜像由持有 Session 的 Runtime 负责。
 """
 
 from __future__ import annotations
@@ -98,15 +97,14 @@ class FallbackTransition:
 class ModelRequestAttempt:
     """一次**实际**发出去的 Provider 请求（`#313`：`model_requests` 的一格）。
 
-    `role` 是 `02 §5.1` 的三值来源之一（primary / fallback；closeout 由 Runtime
-    的收口调用点自己记——那条路径**绕过**本协调器，见 `_closeout_continuation`）。
-    `outcome` 区分"拿到响应"与"没拿到"：拿不到（瞬时故障、非瞬时错误、取消、
-    断连）**照样算一次请求**——它真的发出去了，只是没有产出决策
-    （`agent_turns` 因此不动，两个 counter 各归各的计数点，绝不混同）。
+    三件只有这一层知道的事（其余规则见 `02 §5.1`，本处不复述）：
 
-    usage / cost **不在这里**：那是**响应**的属性，而流式路径的响应由 Runtime
-    聚合（本层只见 chunk）。坐标交给 Runtime 后，它把产出响应的那一次请求与该
-    响应自报的 usage / cost 一起落盘（见 `agent/runtime.py::_append_model_request`）。
+    - `role`：primary / fallback。closeout 那一次由 Runtime 的收口调用点自己记
+      ——那条路径**绕过**本协调器（见 `_closeout_continuation`）。
+    - `outcome`：拿到响应（completed）或没拿到（failed：瞬时故障、非瞬时错误、
+      取消、断连）。没拿到的**照样算一次请求**：它真的发出去了。
+    - usage / cost **不在这里**：那是**响应**的属性，而流式路径的响应由 Runtime
+      聚合（本层只见 chunk），落盘见 `agent/runtime.py::_append_model_request`。
     """
 
     role: str

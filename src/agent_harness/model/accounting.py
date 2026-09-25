@@ -96,10 +96,17 @@ def cost_usd_from_response(response: Any) -> Decimal | None:
     metadata = getattr(response, "response_metadata", None)
     if not isinstance(metadata, dict):
         return None
-    return _decimal_or_none(metadata.get(COST_METADATA_KEY))
+    return decimal_or_none(metadata.get(COST_METADATA_KEY))
 
 
-def _decimal_or_none(raw: Any) -> Decimal | None:
+def decimal_or_none(raw: Any) -> Decimal | None:
+    """宽容读一个十进制**金额**：非负有限则返回 `Decimal`，其余一律 `None`。
+
+    接受 `Decimal` / `int` / `float` / 十进制字符串；bool、None、其它类型、NaN/Inf、
+    负数都算"没有这个值"。**这是全链唯一的读数实现**（`#313`）：Provider 响应里的
+    归属成本（`cost_usd_from_response`）与事件 / 投影里读回的成本（`agent/run_budget.py`）
+    必须走同一条规则——两份实现必然漂移，而漂移出来的是账目语义。
+    """
     if isinstance(raw, bool) or raw is None:
         return None
     if isinstance(raw, Decimal):

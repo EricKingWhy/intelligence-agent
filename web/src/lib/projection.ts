@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, RunContinuation, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { isCancelledRunFailure } from './runCancel';
 import { parseArtifactMarker } from './toolShapes';
@@ -672,6 +672,45 @@ function projectRunInterrupted(state: ConversationState, event: AgentEvent): voi
   finalizeRun(state, 'completed', event.time);
 }
 
+/** 某个键的**整数读数**：只在真为有限数时采用，否则 null（= 该维缺席，不是 0）。 */
+function dimensionNumber(raw: Record<string, unknown>, key: string): number | null {
+  return numberOf(raw[key]) ?? null;
+}
+
+/** 某个键的**十进制读数**（cost 维）：wire 上是十进制**字符串**（也可能是数），
+ *  原样保留字符串形态，不在前端转 float（`11 §6.1`：二进制浮点相等不是契约）；
+ *  空串 / 形状不合 ⇒ null（unavailable，不是 0）。 */
+function dimensionDecimalText(raw: Record<string, unknown>, key: string): string | null {
+  const value = raw[key];
+  if (typeof value === 'string') return value.trim() === '' ? null : value.trim();
+  const num = numberOf(value);
+  return num === undefined ? null : String(num);
+}
+
+/** `data.consumed` → 四维读数（`#313`）。整组缺失 ⇒ null（老暂停载荷没有这组键，
+ *  不是"四维都是 0"）。 */
+function parseConsumedFacts(raw: unknown): RunBudgetDimensionFacts | null {
+  if (!isRecord(raw)) return null;
+  return {
+    agent_turns: dimensionNumber(raw, 'agent_turns'),
+    model_requests: dimensionNumber(raw, 'model_requests'),
+    total_tokens: dimensionNumber(raw, 'total_tokens'),
+    cost_usd: dimensionDecimalText(raw, 'cost_usd'),
+  };
+}
+
+/** `data.limits.run` → 四维 ceiling（`#313`）。键名是载荷自己的 `max_*` 形态
+ *  （与恢复请求 `budget.run` 的键同一套名字）；`null` = 该维没配（unlimited）。 */
+function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
+  if (!isRecord(raw)) return null;
+  return {
+    max_agent_turns_total: dimensionNumber(raw, 'max_agent_turns_total'),
+    max_model_requests: dimensionNumber(raw, 'max_model_requests'),
+    max_total_tokens: dimensionNumber(raw, 'max_total_tokens'),
+    max_cost_usd: dimensionDecimalText(raw, 'max_cost_usd'),
+  };
+}
+
 /** `run/paused` 载荷 → `RunPausedInfo`（投影与 Timeline 摘要**共用同一解析**：
  *  两处各读一遍字段就会各有一套兜底默认值，改一处忘一处就是两条真相）。
  *
@@ -693,6 +732,8 @@ function parsePausedInfo(event: AgentEvent): RunPausedInfo {
       typeof data.trigger_dimension === 'string' ? data.trigger_dimension : '',
     consumed_agent_turns: numberOf(consumed?.agent_turns) ?? 0,
     run_limit: runScope ? (numberOf(runScope.max_agent_turns_total) ?? null) : null,
+    consumed_dimensions: parseConsumedFacts(consumed),
+    run_limits: parseRunLimitFacts(runScope),
     local_fuse:
       localTurns === undefined
         ? null

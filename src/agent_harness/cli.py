@@ -272,12 +272,16 @@ def _dimension_remaining(consumed: Any, ceiling: Any) -> str:
     return "unavailable"
 
 
-def _extra_dimension_lines(data: dict) -> list[str]:
+def _extra_dimension_lines(data: dict, *, carried: bool = False) -> list[str]:
     """另外三个 run 维度的摘要行（**只**渲染有事实可说的维度）。
 
     "有事实可说" = 配了 ceiling 或消耗快照里有这个键。老暂停事件（`#313` 之前）
     只有 turns 一维，多打三行 `unavailable / unlimited` 是噪声不是信息——而 CLI
     显示的是同一份 durable 投影，过去与现在的输出都必须是同一份事实的忠实渲染。
+
+    `carried=True` 只用于 `run/resumed` 块：那几行读的是**沿用过来**的计数与新的
+    ceiling（恢复不重置，`03 §5`），与同一块里 `turns` 行的 "carried" 同一语义；
+    暂停块里它们则是本轮的即时读数，不加这个字。
     """
     limits = ((data.get("limits") or {}).get("run") or {})
     consumed = data.get("consumed") or {}
@@ -288,7 +292,7 @@ def _extra_dimension_lines(data: dict) -> list[str]:
         raw_consumed = consumed.get(consumed_key)
         raw_ceiling = limits.get(ceiling_key)
         lines.append(
-            f"  {consumed_key}: consumed "
+            f"  {consumed_key}: {'carried ' if carried else ''}consumed "
             f"{'unavailable' if raw_consumed is None else raw_consumed}"
             f" / limit {'unlimited' if raw_ceiling is None else raw_ceiling}"
             f" (remaining {_dimension_remaining(raw_consumed, raw_ceiling)})\n"
@@ -377,7 +381,7 @@ def render_resume_block(data: dict) -> str:
             f" / limit {facts['ceiling_text']} (remaining {facts['remaining_text']})\n"
         ),
     ]
-    lines.extend(_extra_dimension_lines(data))
+    lines.extend(_extra_dimension_lines(data, carried=True))
     return "".join(lines)
 
 

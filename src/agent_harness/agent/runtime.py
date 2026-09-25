@@ -1294,20 +1294,33 @@ class AgentRuntime:
                     )
                     assert streamer is not None
                     collected: list[AIMessageChunk] = []
-                    async for chunk in model_coord.astream(messages):
-                        collected.append(chunk)
-                        reasoning_text = _extract_reasoning(chunk)
-                        if reasoning_text:
-                            for streamed in streamer.offer_reasoning(
-                                reasoning_text, step=step_base + steps + 1,
-                            ):
-                                yield to_agent_event(streamed)
-                        delta_text = _extract_text(chunk.content)
-                        if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
-                            for streamed in streamer.offer_text(
-                                delta_text, step=step_base + steps + 1,
-                            ):
-                                yield to_agent_event(streamed)
+                    # 模型流的句柄必须留着并**显式关闭**（`#313`）：`async for` 在
+                    # `yield` 处被中断（消费方断连 / 本函数被 aclose）时不会关闭内层
+                    # 生成器，于是"请求已发出、没拿到响应"这一格永远不会被记账，而
+                    # 取消臂随后的 drain 已经跑过 ⇒ 那一格从账上消失（`02 §5.1`：
+                    # `model_requests` 数的是**实际发出去**的请求）。先关流、再收尾
+                    # 的顺序由本 finally 保证：它与 with 语句同一语义，只是不能写成
+                    # with（异步发生器没有 `__aenter__`）。
+                    model_stream = model_coord.astream(messages)
+                    try:
+                        async for chunk in model_stream:
+                            collected.append(chunk)
+                            reasoning_text = _extract_reasoning(chunk)
+                            if reasoning_text:
+                                for streamed in streamer.offer_reasoning(
+                                    reasoning_text, step=step_base + steps + 1,
+                                ):
+                                    yield to_agent_event(streamed)
+                            delta_text = _extract_text(chunk.content)
+                            if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
+                                for streamed in streamer.offer_text(
+                                    delta_text, step=step_base + steps + 1,
+                                ):
+                                    yield to_agent_event(streamed)
+                    finally:
+                        # 已耗尽时是 no-op；在途时抛 GeneratorExit 进 `astream`，
+                        # 由它记下那一格（outcome=failed）后再把 GeneratorExit 吞掉。
+                        await model_stream.aclose()
                     # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
                     for streamed in streamer.end_step(step=step_base + steps + 1):
                         yield to_agent_event(streamed)

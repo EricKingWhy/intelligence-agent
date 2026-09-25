@@ -28,14 +28,9 @@
   自报的值**。任何一个请求没自报 ⇒ 该维度的累计是"未知"（`None`），不是 0
   （`11 §6.1`：不可得 = unavailable，MUST NOT 记为 0；只有"一个请求都没有"的空和才是 0）。
 
-**四维的临界点语义有区别**（不是口味，是"下一位多大能不能预知"决定的）：
-
-- turns / requests：每次准入都**预留**一次 closeout 的位置（`RESERVED_CLOSEOUT_TURNS` /
-  `RESERVED_CLOSEOUT_REQUESTS`）⇒ 暂停发生在 ceiling 之前一格，closeout 因此有位置可站
-  （`02 §5.2`、ticket R2「closeout 在 ceiling 之内」）。
-- tokens / cost：下一轮要用多少不可预知 ⇒ 只能"到线即停"：`consumed >= ceiling` 就不得再
-  **有意**开始新调用（`consumed == ceiling - 1` 仍放行——那一轮自己可能越线，这正是"不可
-  预知"的诚实代价，规格要求的是"不得**有意**越线"）。
+**四维的临界点语义分两类**（可数维度预留 closeout、计量维度到线即停）：判据与理由
+写在 `_dimension_reached` / `_dimension_headroom` 的 docstring 里，本模块不复述第二遍
+（准入与 closeout 容量是**两个**谓词，合并会让暂停点上的收口恒被拒）。
 
 **本模块不实现**（别误以为漏了）：deadline（`#315`）、tool quota（`#314`）、stuck
 （`#317`）、SessionBudget（`#318`）。所以 `run/paused.data.reason` 目前只会是
@@ -54,7 +49,7 @@ from agent_harness.agent.budget import (
     BudgetRejection,
     LocalFuse,
 )
-from agent_harness.model.accounting import ProviderAccounting
+from agent_harness.model.accounting import ProviderAccounting, decimal_or_none
 from agent_harness.session.event import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
@@ -139,6 +134,13 @@ _CONTINUATION_MAX_CHARS = 500
 #: 终态事件（`03 §5`）：出现即该逻辑 run 不再可恢复。
 _TERMINAL_TYPES = frozenset({RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED})
 
+#: 终态事件 → `03 §5` 状态词表里的名字（事件类型是路径，状态名是词表项，别混用）。
+_TERMINAL_STATE = {
+    RUN_COMPLETED: "completed",
+    RUN_FAILED: "failed",
+    RUN_INTERRUPTED: "interrupted",
+}
+
 
 def _decimal_text(value: Decimal | None) -> str | None:
     """`Decimal` → wire 上的十进制**字符串**（`None` 原样）。
@@ -151,23 +153,12 @@ def _decimal_text(value: Decimal | None) -> str | None:
 
 
 def _decimal_or_none(raw: Any) -> Decimal | None:
-    """读回十进制成本（宽容读）：只接受非负有限的十进制字面量 / 数，其余 ⇒ `None`。"""
-    if isinstance(raw, bool) or raw is None:
-        return None
-    if isinstance(raw, Decimal):
-        value = raw
-    elif isinstance(raw, (int, float)):
-        value = Decimal(str(raw))
-    elif isinstance(raw, str):
-        try:
-            value = Decimal(raw.strip())
-        except (InvalidOperation, ValueError):
-            return None
-    else:
-        return None
-    if not value.is_finite() or value < 0:
-        return None
-    return value
+    """读回十进制成本：**同一条规则**在 `model/accounting.decimal_or_none`（唯一实现）。
+
+    Provider 响应里的成本与事件 / 投影里读回的成本必须用同一条宽容读法；这里只是
+    给本模块的调用点一个短名字，规则本身不在这里再写一遍。
+    """
+    return decimal_or_none(raw)
 
 
 @dataclass(frozen=True)
@@ -347,13 +338,20 @@ class RunBudgetState:
     limits: RunLimits
     consumed: BudgetConsumed
     paused: PausedRun | None
-    terminal: bool
+    #: 终态事件**自己的**状态名（`03 §5` 词表：`completed` / `failed` / `interrupted`），
+    #: 非终态为 `None`。存状态名而不是布尔：客户端投影要按冻结词表回报状态，布尔会逼
+    #: 调用方回头去事件里找是哪一种终态——那就是第二份真相。
+    terminal_type: str | None = None
     turn_index: int | None = None
 
     @property
     def consumed_turns(self) -> int:
         """turn 维度的消耗（见 `PausedRun.consumed_turns`）。"""
         return self.consumed.agent_turns
+
+    @property
+    def terminal(self) -> bool:
+        return self.terminal_type is not None
 
     @property
     def resumable(self) -> bool:
@@ -516,13 +514,13 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
     - `version`：初始 1，每条 `run/resumed` +1（CAS 的比较对象，`03 §3.4`）。
     - `consumed`：四维各自按计数点累计（`consumed_from_events`）。
     - `paused`：最后一条 `run/paused` 之后**没有** `run/resumed` 也没有终态 → 仍在暂停。
-    - `terminal`：出现任一终态事件（`03 §5`：completed / failed / interrupted）。
+    - `terminal_type`：终态事件的状态名（`03 §5`：`completed` / `failed` / `interrupted`）。
     """
     items = [event for event in events if event.run_id == run_id]
     version = 1
     turns_so_far = 0
     paused: PausedRun | None = None
-    terminal = False
+    terminal_type: str | None = None
     turn_index: int | None = None
     for event in items:
         if event.type == RUN_STARTED:
@@ -554,16 +552,16 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
         elif event.type == RUN_RESUMED:
             version += 1
             paused = None
-            terminal = False
+            terminal_type = None
         elif event.type in _TERMINAL_TYPES:
-            terminal = True
+            terminal_type = _TERMINAL_STATE[event.type]
     return RunBudgetState(
         run_id=run_id,
         version=version,
         limits=_state_limits(items, run_id),
         consumed=consumed_from_events(items),
         paused=paused,
-        terminal=terminal,
+        terminal_type=terminal_type,
         turn_index=turn_index,
     )
 
@@ -877,9 +875,9 @@ def resume_limits(paused: RunLimits, *, request: RunLimits) -> RunLimits:
     """恢复后的**生效** ceiling 集合：请求点名的那几维取请求值，其余沿用暂停时的值。
 
     为什么未点名的维度是"沿用"而不是"清空"：清空等于借着一次恢复把 operator 起的
-    ceiling 撤掉——那是**放大**授权（ADR-0044 §10「创建、重试、恢复、重启…都不能重置
-    或放大 ceiling」），一次"抬高 token"的恢复不该顺手删掉 turn ceiling。想删 ceiling
-    是另一个动作，本票没有那条路径。
+    ceiling 撤掉——那是**放大**授权（ADR-0044 D1「配置只能收窄」；D3 同时定了「恢复绝不
+    重置任何 counter」，同一方向），一次"抬高 token"的恢复不该顺手删掉 turn ceiling。
+    想删 ceiling 是另一个动作，本票没有那条路径。
 
     于是恢复请求的语义是"在这些维度上给出新的绝对 ceiling"，而不是"这就是新的全集"；
     点名了却放不下一次新准入的维度由 `validate_resume` 的 headroom 判定拒绝（409），
@@ -1075,6 +1073,16 @@ def project_budget(
     `enforcement`（哪几个维度在本链真的能强制，`11 §6.1`）由调用方注入
     `ProviderAccounting`：它是**部署能力**，不是某个 run 的事实，所以不进
     `PausedRun` 这个纯派生对象。
+
+    `state` 取 `03 §5` 冻结词表的原词：暂停态由 `PausedRun.as_projection()` 给
+    `paused`，非暂停态给 `active`，终态给**那一个**终态事件的名字
+    （`completed` / `failed` / `interrupted`）——不合并成一个 `terminal`：客户端要据此
+    分辨"跑完了"与"炸了"，用一个笼统词就得自己再去翻事件。词表里另有 `needs_reconcile`，
+    本链还没有把它落成 run 事件的入口（对账链归 `#305` 侧的后续票），所以这里**产不出**
+    它——不产不等于可以拿别的词顶替。
+    唯一的例外是 `none`：会话里**一个 run 都没有**时不存在 run 状态可言，冻结词表不为
+    这种情形留词；本投影用 `none` 表示"无可投影的 run"，并把这一条登记在此（它与
+    `active` 的区别是测试与客户端都要认得的）。
     """
     if state.paused is not None:
         projection: dict[str, Any] = dict(state.paused.as_projection())
@@ -1083,7 +1091,7 @@ def project_budget(
     return {
         "run_id": state.run_id,
         "version": state.version,
-        "state": "terminal" if state.terminal else ("running" if state.run_id else "none"),
+        "state": state.terminal_type or ("active" if state.run_id else "none"),
         "limits": state.limits.as_projection(),
         "consumed": state.consumed.as_projection(),
         "remaining": state.consumed.remaining(state.limits),

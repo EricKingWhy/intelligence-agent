@@ -21,6 +21,7 @@ import type {
   SessionSummary,
 } from '../types';
 import { emitUnauthorized, getToken } from './auth';
+import type { RunLimitField } from './runBudget';
 import { parseCapabilities, type CapabilityDescriptor } from './capabilities';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
@@ -1163,16 +1164,21 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
  *  不给 task = 同 run 续跑，此时必须带 `run_id` + `resume_basis` +
  *  `budget.expected_version` + 绝对 ceiling（缺声明 422、状态对不上 409）。
  *
- *  `budget.run.max_agent_turns_total` 是**绝对值**不是增量：后端比的是
- *  `ceiling > consumed + 1`（`run_budget.resume_ceiling_ok`），低到不能继续的 ceiling
- *  会被 409 拒掉。`expected_version` 与 `run` 平级（PRD §3 的冻结形状——它是
- *  "这次预算变更"的属性，不是某个作用域的 ceiling）。 */
+ *  `budget.run` 的键是四个 run 维度里**卡住的那一个**（`#313`：`max_agent_turns_total`
+ *  / `max_model_requests` / `max_total_tokens` / `max_cost_usd`，与后端
+ *  `RunLimitsBody` 的字段名逐字相同）。值是**绝对值**不是增量：后端要求这一维恢复后
+ *  至少放得下一次新准入（turns / requests 要 `> consumed + 1`，tokens / cost 要
+ *  `> consumed`），低到不能继续的 ceiling 会被 409 拒掉；未点名的维度**沿用**暂停时的
+ *  ceiling（不清空、不重置 counter——ADR-0044 D1/D3）。cost 维传十进制**字符串**
+ *  （保住 wire 精度；后端 `parse_cost_ceiling` 数与串都收）。
+ *  `expected_version` 与 `run` 平级（PRD §3 的冻结形状——它是"这次预算变更"的属性，
+ *  不是某个作用域的 ceiling）。 */
 export interface ResumePausedRunPayload {
   run_id: string;
   resume_basis: 'budget_increase';
   budget: {
     expected_version: number;
-    run: { max_agent_turns_total: number };
+    run: Partial<Record<RunLimitField, number | string>>;
   };
 }
 

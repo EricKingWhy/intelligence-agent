@@ -596,7 +596,7 @@ class SessionService:
         if run_id is None:
             state = RunBudgetState(
                 run_id=None, version=1, limits=RunLimits(), consumed=BudgetConsumed(),
-                paused=None, terminal=False,
+                paused=None, terminal_type=None,
             )
         else:
             state = derive_run_budget(events, run_id)

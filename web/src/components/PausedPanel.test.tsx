@@ -54,9 +54,12 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     expect(html).toContain('已在预算到顶处暂停');
     expect(html).toContain('run.max_agent_turns_total');
     expect(html).toContain('budget_exhausted');
-    expect(html).toContain('已消耗 3 轮');
+    // 读数按**命中的那一维**报（`#313`）：turns 命中时标题给出本轮读数，四维清单
+    // 再把它逐维列出（与 CLI 的行文同一份事实，措辞按 Web 的排版）。
+    expect(html).toContain('run 累计轮次到顶（run.max_agent_turns_total）：已消耗 3');
     expect(html).toContain('绝对 ceiling 8');
     expect(html).toContain('剩余 5');
+    expect(html).toContain('agent_turns: 3 / limit 8（剩余 5） · 到顶');
     expect(html).toContain('预算版本 2');
     expect(html).toContain('收口 model');
     expect(html).toContain('local fuse 500（deployment）');
@@ -75,6 +78,58 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     expect(head).toContain('不是失败');
     expect(head).not.toContain('已完成');
     expect(head).not.toContain('失败：');
+  });
+
+  it('暂停落在 requests 维：标题与恢复输入都指 requests（不是"消耗 0 轮 · 无上限"）', () => {
+    const html = render(
+      paused({
+        trigger_dimension: 'run.max_model_requests',
+        consumed_agent_turns: 3,
+        run_limit: 8,
+        consumed_dimensions: { agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: null },
+        run_limits: {
+          max_agent_turns_total: 8,
+          max_model_requests: 4,
+          max_total_tokens: null,
+          max_cost_usd: null,
+        },
+      }),
+    );
+    expect(html).toContain('run 累计模型请求到顶（run.max_model_requests）：已消耗 4');
+    expect(html).toContain('model_requests: 4 / limit 4（剩余 0） · 到顶');
+    // turns 维没到顶也要在清单里（事实完整），但它不是"卡住的那一维"。
+    expect(html).toContain('agent_turns: 3 / limit 8（剩余 5）');
+    expect(html).not.toContain('agent_turns: 3 / limit 8（剩余 5） · 到顶');
+    // 恢复输入抬的是 requests，且预校验按 requests 的消耗算（4 + 预留 1 + 1 = 6）。
+    expect(html).toContain('绝对 ceiling（max_model_requests）');
+    expect(html).toContain('至少 6');
+    expect(html).toContain('抬的是 max_model_requests');
+    // cost 维两边都没事实 ⇒ 不渲染（多打一行 unavailable/unlimited 是噪声不是信息）。
+    expect(html).not.toContain('cost_usd');
+  });
+
+  it('暂停落在 cost 维：十进制读数按字符串原样呈现，恢复输入按十进制校验', () => {
+    const html = render(
+      paused({
+        trigger_dimension: 'run.max_cost_usd',
+        consumed_dimensions: {
+          agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: '1.25',
+        },
+        run_limits: {
+          max_agent_turns_total: null,
+          max_model_requests: null,
+          max_total_tokens: null,
+          max_cost_usd: '1.25',
+        },
+      }),
+      { draft: '1.50' },
+    );
+    expect(html).toContain('cost_usd: 1.25 / limit 1.25（剩余 0.00） · 到顶');
+    expect(html).toContain('绝对 ceiling（max_cost_usd）');
+    // 计量维度不能说"至少 N"（判据是严格大于已消耗，连续域上没有最小值）——
+    // 提示必须如实说规则，2.25 只是默认值。
+    expect(html).toContain('须严格大于已消耗 1.25');
+    expect(html).toContain('value="1.50"');
   });
 
   it('未配 run ceiling：写 unlimited 与"未声明"（不写 0 冒充）', () => {

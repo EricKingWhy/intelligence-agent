@@ -835,8 +835,8 @@ def test_resume_ceilings_overlay_the_paused_run_never_clear_unnamed_dimensions()
     """未点名的维度**沿用**暂停时的 ceiling，不会被一次恢复清空。
 
     清空 = 借着"抬高 token"把 operator 起的 turn ceiling 撤掉 = **放大**授权
-    （ADR-0044 §10：「恢复…不能重置或放大 ceiling」）。所以恢复请求的语义是"在这几维
-    给新的绝对 ceiling"，不是"这是新的全集"。
+    （ADR-0044 D1：配置只能收窄；D3：恢复绝不重置任何 counter）。所以恢复请求的语义是
+    "在这几维给新的绝对 ceiling"，不是"这是新的全集"。
     """
     snapshot = BudgetConsumed(agent_turns=1, model_requests=1, total_tokens=100,
                               cost_usd=None)
@@ -963,7 +963,7 @@ def test_project_budget_running_state_carries_the_enforcement_projection() -> No
     projection = project_budget(state, accounting=USAGE_ONLY, local_fuse=FUSE)
 
     assert projection["run_id"] == RUN_ID
-    assert projection["state"] == "running"
+    assert projection["state"] == "active", "非暂停非终态 = 冻结词表的 active"
     assert projection["consumed"]["agent_turns"] == 1
     assert projection["enforcement"] == {
         "max_total_tokens": "enforceable", "max_cost_usd": "unavailable",
@@ -973,13 +973,15 @@ def test_project_budget_running_state_carries_the_enforcement_projection() -> No
 
 def test_project_budget_terminal_and_none_states() -> None:
     terminal = derive_run_budget([_started(), _ev(2, MODEL_COMPLETED), _ev(3, RUN_COMPLETED)], RUN_ID)
-    assert project_budget(terminal, accounting=USAGE_ONLY)["state"] == "terminal"
+    assert project_budget(terminal, accounting=USAGE_ONLY)["state"] == "completed", (
+        "终态回报那一个终态事件的名字，不是一个笼统的 terminal"
+    )
 
     # "none" 的构造与 `SessionService.budget_projection` 一致：会话里一个 run 都没有时
     # 它自己造一个 `run_id=None` 的空状态（`derive_run_budget` 只会被真实存在的 run 调用）。
     empty = RunBudgetState(
         run_id=None, version=1, limits=RunLimits(), consumed=BudgetConsumed(),
-        paused=None, terminal=False,
+        paused=None, terminal_type=None,
     )
     projection = project_budget(empty, accounting=USAGE_ONLY)
     assert projection["state"] == "none"

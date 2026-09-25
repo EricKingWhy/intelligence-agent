@@ -24,6 +24,7 @@ local fuse **没有**这条预留（EB-2 的"500 步到顶"就是到顶），这
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -118,6 +119,17 @@ def _tool_round(idx: int) -> AIMessage:
     )
 
 
+def _reporting(message: AIMessage, *, cost: str) -> AIMessage:
+    """给剧本消息挂上 Provider 自报的 usage 与**归属成本**（`response_metadata["cost"]`,
+    `#313` 的 cost 维唯一来源）。原样保留内容与 tool_calls，只加报账字段。"""
+    return AIMessage(
+        content=message.content,
+        tool_calls=list(message.tool_calls),
+        usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        response_metadata={"cost": cost},
+    )
+
+
 def _continuation_json(**overrides: object) -> AIMessage:
     payload: dict[str, object] = {
         "completed": ["已完成第一步"],
@@ -193,6 +205,75 @@ async def test_model_closeout_is_a_model_request_not_an_accepted_turn(tmp_path) 
     assert state.consumed_turns == 2, "派生账本 = 事件说的事实（closeout 不进计数）"
     assert state.paused is not None
     assert state.resumable is True
+
+
+@pytest.mark.asyncio
+async def test_provider_reported_cost_is_summed_exactly_across_steps_and_closeout(
+    tmp_path,
+) -> None:
+    """Provider 自报归属成本（`response_metadata["cost"]`）时逐次入账，**十进制精确**。
+
+    `#313` 的 cost 维只有一条来源：Provider 自己报的归属成本（`02 §5.1`：只统计
+    Provider 自报的值，不臆造费率表）。本用例把这条正路走一遍：普通轮与 closeout
+    各报一次，四次请求（2 个被接纳的轮 + 1 次被拒的轮 + closeout）合计必须**逐字**
+    等于手工相加的十进制值——`float` 累加会让 `0.0025 × 3` 变成 `0.007500000000000001`，
+    而 wire 上的成本是十进制（`11 §6.1`：二进制浮点相等不是契约）。
+
+    第二个用例走"先有后无"：closeout 那次没报 ⇒ 整本账未知（`None`），不是
+    "已知部分的和"——把未知当 0 会得到一份看起来精确、实际上少了钱的账。
+    """
+    cost = "0.0025"
+    # 每一次响应都自报同一笔归属成本（脚本消息原样吐回，字段随消息走）。
+    scripted = ScriptedModel([
+        _reporting(_tool_round(1), cost=cost),
+        _reporting(_tool_round(2), cost=cost),
+        _reporting(_continuation_json(), cost=cost),
+    ])
+    runtime = _runtime(scripted, ceiling=3)
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "两轮之后收口，成本逐次报账")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    requests = [e for e in session.events if e.type == MODEL_REQUEST]
+    assert len(requests) == 3, "2 个普通轮 + 1 次 closeout，恰三次真实请求"
+    assert [e.data.get("cost_usd") for e in requests] == [cost, cost, cost]
+    assert paused.data["consumed"]["cost_usd"] == "0.0075", (
+        "三次请求各 0.0025 ⇒ 0.0075（十进制字符串，不是浮点近似）"
+    )
+    assert paused.data["consumed"]["total_tokens"] == 45
+
+    state = derive_run_budget(session.events, _run_id_of(session))
+    assert state.consumed.cost_usd == Decimal("0.0075")
+    assert state.consumed.total_tokens == 45
+
+
+@pytest.mark.asyncio
+async def test_a_later_request_without_cost_makes_the_whole_dimension_unknown(
+    tmp_path,
+) -> None:
+    """一次没自报归属成本 ⇒ 该维**未知**（`None`），不是"已知部分之和"。
+
+    `None` 粘性（`runtime._TerminalArms.add_cost`）：总和 = 已知部分 + 未知部分，
+    后者不可知，所以整本是未知。生产链路（`reports_cost=False`）恒走这一格——
+    把它写成 0 会让对账以为"这个 run 不要钱"（`11 §6.1`：不可得 ≠ 0）。
+    """
+    scripted = ScriptedModel([
+        _reporting(_tool_round(1), cost="0.0100"),
+        # closeout 那次响应不带 cost（Provider 静默没报）：`response_metadata` 里没有这个键。
+        _continuation_json(),
+    ])
+    runtime = _runtime(scripted, ceiling=2)
+    session = make_session(tmp_path)
+
+    await runtime.run(session, "第二次没报成本")
+
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert [e.data.get("cost_usd") for e in session.events if e.type == MODEL_REQUEST] == [
+        "0.0100", None,
+    ]
+    assert paused.data["consumed"]["cost_usd"] is None, "一次缺失 ⇒ 整维未知，不是 0.01"
 
 
 @pytest.mark.asyncio

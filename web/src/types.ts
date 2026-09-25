@@ -498,6 +498,29 @@ export interface RunContinuation {
   next_safe_action: string;
 }
 
+/** 四维账目里的一维读数（`#313`）：`null` = 载荷没带该维（老暂停 / 字段缺失），
+ *  **不是** 0（`11 §6.1` 的不可得 ≠ 0）。
+ *
+ *  `cost_usd` 在 wire 上是十进制**字符串**（二进制浮点相等不是契约），这里原样保留
+ *  字符串，不做 float 化——要算差值请用 `lib/runBudget.ts` 的十进制减法。 */
+export interface RunBudgetDimensionFacts {
+  agent_turns: number | null;
+  model_requests: number | null;
+  total_tokens: number | null;
+  cost_usd: string | null;
+}
+
+/** `data.limits.run` 的**四维** ceiling 视图（`#313`）：键名是载荷自己的 `max_*`
+ *  形态（与 `run_budget.RunLimits` 的字段名逐字相同，也与恢复请求 `budget.run` 的键
+ *  逐字相同——同一个名字在三个地方，别在前端另起同义词）。`null` = 该维**没配**
+ *  ceiling（unlimited，不是 0）。 */
+export interface RunLimitsFacts {
+  max_agent_turns_total: number | null;
+  max_model_requests: number | null;
+  max_total_tokens: number | null;
+  max_cost_usd: string | null;
+}
+
 /** `run/paused` 的折叠结果（`#312` T4）：一个**非终态**的暂停事实。
  *
  *  语义边界（`#305` PRD / `03 §5`）：暂停只收口**当前这段执行区间**，逻辑 run 仍在场
@@ -512,6 +535,10 @@ export interface RunContinuation {
  *    不是重算值）——恢复保留它，UI 显示它。
  *  - `run_limit` ← `data.limits.run.max_agent_turns_total`：绝对 ceiling；
  *    **null = 无 ceiling**（`11 §6.1`：不可用 ≠ 0，绝不渲染成「还剩 0 轮」）。
+ *  - `consumed_dimensions` / `run_limits` ← `data.consumed` / `data.limits.run` 的
+ *    **四维**视图（`#313`）：暂停可能落在 requests / tokens / cost 上，只读 turn 那一维
+ *    会把"被 requests 卡住"显示成"消耗 0 轮、无上限"。两者为 null 表示载荷没带这组键
+ *    （老暂停），不是"四维都是 0"。
  *  - `local_fuse` ← `data.limits.local`：单实例保险丝。命中它时**没有** run ceiling
  *    可抬（要改的是部署/档位预算），故两种暂停原因的恢复动作不同，分开存。
  *  - `trace_id` 恒有键、可为 null（暂停不合成 trace URL）。 */
@@ -524,11 +551,15 @@ export interface RunPausedInfo {
   pause_seq: number | null;
   /** `budget_exhausted`（本票唯一值；deadline / stuck 属 #315 / #317）。 */
   reason: string;
-  /** 命中的 ceiling 维度：`run.max_agent_turns_total` / `local.max_agent_turns`。 */
+  /** 命中的 ceiling 维度：四个 run 维之一，或 `local.max_agent_turns`。 */
   trigger_dimension: string;
   consumed_agent_turns: number;
   /** run 作用域绝对 ceiling；null = 未配（无 ceiling，不是 0）。 */
   run_limit: number | null;
+  /** `#313`：四维消耗快照（`data.consumed`）；载荷没带 ⇒ null（不是全 0）。 */
+  consumed_dimensions: RunBudgetDimensionFacts | null;
+  /** `#313`：run 作用域四个绝对 ceiling（`data.limits.run`）；载荷没带 ⇒ null。 */
+  run_limits: RunLimitsFacts | null;
   /** local 作用域保险丝快照；事件没带（旧/畸形载荷）时为 null。 */
   local_fuse: { max_agent_turns: number; source: string } | null;
   /** 暂停那一刻的续跑指引；形状不合契约时 null（不伪造进度）。 */

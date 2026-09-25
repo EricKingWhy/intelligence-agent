@@ -29,6 +29,7 @@ import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExist
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
+import type { RunLimitField } from '../lib/runBudget';
 import { forgetResumeAttempt, maxEventSeq, nextResumeAttempt, readStoredSessionId, writeStoredSessionId, type ResumeAttempts } from '../lib/sessionRestore';
 
 /** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
@@ -1405,11 +1406,20 @@ export function useSession() {
    *  调用方的 ceiling 输入，只做两件用户看得见的事——显示后端 detail，并 `selectSession`
    *  同一 id 触发**既有历史装载 effect** 重读 durable log（不变量 #22：刷新后屏幕上的
    *  暂停事实 / consumed / version 必须是服务器的那一份，而不是我们记着的旧版本）。
-   *  用户据此把 ceiling 抬得更高再来一次。 */
+   *  用户据此把 ceiling 抬得更高再来一次。
+   *
+   *  `#313`：抬的是**卡住的那一维**（`dimension`），值是绝对值。cost 维传十进制字符串
+   *  （保住 wire 精度，后端 `parse_cost_ceiling` 数与串都收）；未点名的维度由后端沿用
+   *  暂停时的 ceiling。 */
   const resumePausedRun = useCallback(
     async (
       sessionId: string,
-      request: { runId: string; expectedVersion: number; ceiling: number },
+      request: {
+        runId: string;
+        expectedVersion: number;
+        dimension: RunLimitField;
+        value: number | string;
+      },
     ): Promise<void> => {
       setError(null);
       // 与 sendFollowUp 入口同一套代际/流状态重置：这是一次新的在途执行。
@@ -1437,7 +1447,7 @@ export function useSession() {
           resume_basis: 'budget_increase',
           budget: {
             expected_version: request.expectedVersion,
-            run: { max_agent_turns_total: request.ceiling },
+            run: { [request.dimension]: request.value },
           },
         });
         const res = await raceEarlyResponse(pending);

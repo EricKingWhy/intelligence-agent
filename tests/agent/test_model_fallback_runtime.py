@@ -436,34 +436,45 @@ class TestRequestAccounting:
         assert (consumed.model_requests, consumed.agent_turns) == (1, 0)
 
     @pytest.mark.asyncio
-    async def test_consumer_stops_the_stream_mid_flight_the_request_is_still_counted(
+    async def test_consumer_stops_mid_flight_the_in_flight_request_is_still_counted(
         self, tmp_path,
     ):
-        """消费方在流中途收手（生成器关闭）：**已经发出去**的那次请求照样落账。
+        """消费方在**真·在途**时收手（请求已发出、模型流还开着）：那一格照样落账。
 
         这条不是细节：流式路径下"请求发出去了、用户点了停止"是最常见的中断形状，
         少记一格会让 `model_requests` 与 Provider 账单对不上，而账本正是拿它对账的。
 
-        收手时点选在 `model/started`（**请求发出之后**的第一帧）——那才是"在途"，
-        取第一帧就关会连请求都还没发，测的就不是这条路径了。
+        **收手时点**取第一个 `text/delta`，并用 `_StalledStreamModel` 把"在途"造出来：
+        它在第二个 chunk 之前长睡（> `BlockStreamer` 的 30ms flush 窗口）⇒ 那一帧到达时
+        模型流仍悬挂在自己的 `yield` 上。**不能取 `model/started`**：那个帧在
+        `runtime.py` 里严格早于对 `model_coord.astream()` 的第一次拉取，请求根本还没
+        发出（断言 1 条就成了断言一个不存在的请求；本用例 2026-09-25 的第一版正是踩了
+        这个坑，正确读数是 0）。
+
+        记账点在 `model/fallback.py` 的 `except BaseException`，而它**只在流被关闭时**
+        才跑：`async for` 被中断不会自动关内层生成器 ⇒ 由 runtime 的
+        `finally: await model_stream.aclose()` 保证"先关流（记下这一格）、再走取消臂的
+        drain 落盘"。少了那一步，取消臂 drain 到的是空，已发出的请求从账上消失。
         """
-        primary = ScriptedModel([AIMessage(content="一"), AIMessage(content="二")])
+        primary = _StalledStreamModel(first_chunk="部分回答", stall_seconds=0.06)
         session = make_session(tmp_path)
         stream = _runtime(primary, None).run_stream(session, "你好")
 
         seen: list[str] = []
         async for frame in stream:
             seen.append(frame.type)
-            if frame.type == "model/started":
+            if frame.type == "text/delta":
                 break
-        assert "model/started" in seen, f"没走到在途那一刻：{seen}"
+        assert "text/delta" in seen, f"没走到真在途那一刻：{seen}"
         await stream.aclose()
 
         requests = [e for e in session._events if e.type == MODEL_REQUEST]
-        assert len(requests) == 1
-        assert requests[0].data["role"] == "primary"
-        # 中断的调用没拿到完整响应 ⇒ 没有产出决策（这一格只证明请求发生过）
-        assert consumed_from_events(session._events).agent_turns == 0
+        assert [(e.data["role"], e.data["outcome"]) for e in requests] == [
+            ("primary", "failed"),
+        ], "请求发出去了、没拿到响应：这一格是 failed，且必须先于取消臂的 drain 落账"
+        consumed = consumed_from_events(session._events)
+        assert consumed.agent_turns == 0, "中断的调用没产出决策（这一格只证明请求发生过）"
+        assert consumed.total_tokens is None, "没有响应 ⇒ 没有自报 usage（未知，不是 0）"
 
 
 class TestModelCallGateWiring:

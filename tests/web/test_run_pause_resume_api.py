@@ -523,6 +523,13 @@ def test_unenforceable_and_malformed_ceilings_are_rejected_before_any_work(tmp_p
     本链报得了 usage、报不了 cost ⇒ 显式 cost ceiling 是"配了但强制不了"，必须拒绝
     而不是静默忽略（静默忽略会让客户端以为预算被看着）。零副作用的可观测定义同 T3：
     不构造模型 + 事件流一条不涨。
+
+    **判据必须可分辨**（review F6 的修法）：只断言"422"是**弱判据**——`#313` 之前
+    "token / cost ceiling 尚未实现 ⇒ 422"这条旧规则同样能满足它，于是本用例在旧树上
+    照样绿、证明不了 enforceability 这条规则存在。所以这里两头都钉：
+    ①被拒的那一维**点名是"无法强制执行"**（detail 里说得出理由，不是笼统的 422）；
+    ②同一维一旦可执行就必须**被接受**并真的落进 `run/started.data.budget`
+    （`max_total_tokens` 的**正控**，见下一个用例）。
     """
     app, client = _web(tmp_path)
     session_id = _create_idle_session(client)
@@ -531,22 +538,59 @@ def test_unenforceable_and_malformed_ceilings_are_rejected_before_any_work(tmp_p
 
     with probe:
         cases = [
-            {"max_cost_usd": "0.01"},          # 形状合法但本链强制不了
-            {"max_model_requests": 0},          # 正整数闸门
-            {"max_total_tokens": -5},
-            {"max_cost_usd": "abc"},
-            {"max_total_tokens": "many"},
+            ({"max_cost_usd": "0.01"}, "max_cost_usd"),     # 形状合法但本链强制不了
+            ({"max_model_requests": 0}, None),              # 正整数闸门
+            ({"max_total_tokens": -5}, None),
+            ({"max_cost_usd": "abc"}, None),
+            ({"max_total_tokens": "many"}, None),
         ]
-        for run_budget in cases:
+        for run_budget, named in cases:
             resp = client.post(
                 f"/api/sessions/{session_id}/messages",
                 json={"content": "把 A 改成 B",
                       "budget": {"run": run_budget}},
             )
             assert resp.status_code == 422, f"{run_budget} 应 422：{resp.text}"
+            if named is not None:
+                # 拒绝**理由**必须指名那一维不可强制（而不是"没实现"或"形状非法"）。
+                detail = resp.json()["detail"]
+                assert named in detail and "强制" in detail, detail
 
     assert probe.calls == [], "被拒请求不得构造模型（校验早于任何副作用）"
     assert _events(client, session_id) == before, "被拒请求不得改动会话历史"
+
+
+def test_enforceable_token_ceiling_is_accepted_and_snapshotted(tmp_path):
+    """正控：**可执行**的 token ceiling 必须被接受，并原样进 `run/started`。
+
+    与上一个用例配对，构成 `11 §6.1` 那条 422 判据的双向证据：同一份 payload 形状，
+    换一个**本链能强制**的维度（`max_total_tokens`，`ProviderAccounting.reports_usage
+    =True`）就该放行。旧规则（"token ceiling 未实现 ⇒ 一律 422"）在本用例上必红，
+    所以它证明的是 enforceability 规则本身，而不是"有个 422 挡在前面"。
+
+    快照那一半同样是要紧的：客户端配的 ceiling 必须能在重启后从 `run/started`
+    重建（`as_run_started_budget`）——只在进程内存里记着就等于没有。
+    """
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ScriptedProbe()
+
+    with probe:
+        resp = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "把 A 改成 B",
+                  "budget": {"run": {"max_total_tokens": 500, "max_model_requests": 3}}},
+        )
+        assert resp.status_code == 200, resp.text
+        assert "run/completed" in resp.text, resp.text[:400]
+
+    started = _one(_events(client, session_id), "run/started")
+    assert started["data"]["budget"]["run"] == {
+        "max_agent_turns_total": None,
+        "max_model_requests": 3,
+        "max_total_tokens": 500,
+        "max_cost_usd": None,
+    }, "配置的 ceiling 必须落进 run/started（重启后从这里重建）"
 
 
 def test_budget_endpoint_projects_the_ledger_and_enforcement(tmp_path):

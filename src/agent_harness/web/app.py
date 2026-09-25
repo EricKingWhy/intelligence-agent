@@ -250,7 +250,7 @@ def budget_claims(
         # 一一对应）。形态由 pydantic 挡，可执行性由领域层
         # `validate_ceiling_enforceability` 在首个 Provider 请求之前挡
         # （生产链 reports_cost=False ⇒ 显式 max_cost_usd 恒 422——那是规格要求的
-        # 诚实行为，不是缺陷；见 ADR-0044 D4）。
+        # 诚实行为，不是缺陷；见 ADR-0044 D2 第 3 条 + D9 的 422 清单）。
         "run_max_agent_turns_total": (
             run.max_agent_turns_total if run is not None else None
         ),
