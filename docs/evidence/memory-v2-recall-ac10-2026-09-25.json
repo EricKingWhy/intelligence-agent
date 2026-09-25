@@ -3,11 +3,11 @@
   "measured_date": "2026-09-25",
   "dataset": "memory-v2-project-cross-session-v1",
   "dataset_sha256": "8b33b9da3cf9cfeca894c3080d9358e4bfc3eca6cee3f8c817f7b772619813c8",
-  "code_commit": "88f70ad4e0768134a916db5635709e4abe7de980",
-  "code_tree": "cc50628ba1b17f7f8f569e44f0f15f41b14dd4e1",
-  "worktree_guard": "scripts.gate0.worktree_divergence: tracked=0, hidden=0, risky=0",
+  "code_commit": "1737c4648a5b3bdde92ffd01e593e51f22143dc6",
+  "code_tree": "4a8ea83da0a2c869847986083057ec9a92d728f4",
+  "worktree_guard": "scripts.gate0.worktree_divergence clean; no untracked .gitignore outside tracked-rule runtime cache roots",
   "ranking_version": "hybrid-v1",
-  "collection": "memv2r_8473f5157590",
+  "collection": "memv2r_a72ebddde19c",
   "collection_created_for_run": true,
   "cleanup": "confirmed_absent",
   "query_count": 20,
@@ -42,7 +42,8 @@
   },
   "verification": {
     "command": "uv run --extra memory pytest tests/integration/test_memory_v2_recall_evaluation.py -m 'integration and live_services' -s -q",
-    "result": "1 passed in 46.62s",
+    "result": "1 passed in 105.32s",
+    "credentials_loaded_process_only": true,
     "live_configuration_values_recorded": false,
     "query_and_memory_text_recorded": false
   }
