@@ -25,8 +25,7 @@ skill_scope
 context_policy
 sandbox_policy
 memory_policy
-max_steps
-budget
+budget（含 `local.max_agent_turns`；`max_steps` 仅迁移期 alias，口径见 `02 §5.1`）
 permissions
 ```
 
@@ -85,6 +84,20 @@ V1 需要限制：
 - tool scope
 - budget
 - sandbox write permission
+
+### 5.1 委派树共享预算（唯一 owner = #287 的 tree context）
+
+- 「谁还能再委派、还剩几层、树内已消耗多少」这类运行期事实的 owner 是 #287 落地的 runtime 侧
+  tree context（`multiagent/depth.py` 的 ContextVar 作用域 + `multiagent/tools.py` 的
+  `tree_id` / `max_delegations`）。本能力**扩展**它，MUST NOT 另建平行的第二棵树账本。
+- 树内 `max_delegations` 默认 **8**：整棵 SessionBudget 树最多 8 次被接纳的 `delegate` 调用，
+  第 9 次在**子 Agent 执行前**被拒。
+- 根 / 子 / 孙与并发兄弟对共享额度的更新 MUST 原子：创建、重试、恢复、重启子 Agent 都 MUST NOT
+  重置或放大剩余深度、counter、ceiling 或 stuck 指纹。
+- 子 `AgentSpec` / profile **只能收窄**授权，不得抬高父级额度。
+- 每个 `AgentRuntime` 仍各自持有自己的 **local fuse**（`02 §5.1`），且**不跨兄弟池化**：
+  即使共享 SessionBudget 无 ceiling，单个子 Agent 也不会无限运行。
+- RunBudget 与 SessionBudget 都是各自作用域的委派树累积账本；`delegations` 计被接纳的 `delegate` 调用。
 
 ## 6. SubAgentResult
 
@@ -175,12 +188,13 @@ V1 可先实现 in-process/fork，并保留 Provider interface。
 ## 12. Termination
 
 必须同时有：
-- Agent `max_steps`
-- Supervisor `max_delegations`
+- Agent 本地保险丝与分层预算（`02 §5.1`；`max_steps` 见迁移序列）
+- Supervisor `max_delegations`（默认 8，树级共享，见 §5.1）
 - max child depth
 - repeated delegation guard
 
-作用域不得混淆。
+作用域不得混淆：local fuse 是**每个 AgentRuntime** 的事实，`max_delegations` / SessionBudget 是
+**整棵委派树**的事实。
 
 ## 13. Acceptance Criteria
 
@@ -193,4 +207,8 @@ V1 可先实现 in-process/fork，并保留 Provider interface。
 - SubAgentResult 不倾倒完整历史；
 - max_delegations 生效；
 - kill/resume 时 agent_id/operation/workspace 能恢复；
-- LangGraph 未安装时 Single Agent Core 仍可运行。
+- LangGraph 未安装时 Single Agent Core 仍可运行；
+- 整棵树的 `max_delegations=8` 生效，第 9 次委派在**子 Agent 执行前**被拒；
+- 根 / 子 / 孙与并发兄弟竞争最后一个额度时至多一个被接纳，其余不开工；
+- 创建、重试、恢复、重启子 Agent 都不能重置或放大共享额度、深度、counter 或 stuck 指纹；
+- 无关会话 / 无关根树之间的预算互不影响。

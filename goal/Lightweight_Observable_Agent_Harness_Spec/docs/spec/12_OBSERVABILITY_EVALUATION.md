@@ -145,6 +145,31 @@ timestamp
 - citation validity = 100%
 - permission violations = 0
 - task success 达到经真实数据校准的阈值
+- 每类暂停原因（预算 / deadline / stuck）都不伴随完成 / 失败事件
+- 恢复前后 consumed 快照对账相等（不重置）
+- replay 的预算消耗为 0
+
+### 9.1 强制 Live Gate（真实 Provider + 生产工具）
+
+长任务预算 / 暂停恢复 / stuck / 完成判定 MUST 由**真实链路**证据证明，并与默认无凭证测试套件**分离**：
+
+- **链路**：部署中配置的**真实 Primary Provider**（测 fallback 时另加真实 Fallback Provider）、
+  生产 Tool Registry 与 ToolExecutor 实现、真实 Local 或 Docker Sandbox 内的**一次性工作区**、
+  真实文件 / 命令 / Git 操作。MUST NOT 引入仅供测试的「返回下一步」工具，MUST NOT 用 Fake Provider 兜底。
+- **五个场景**：① 真实模型 + 生产工具完成一个**必须超过旧 10 轮 / 10 工具**实际限制的任务；
+  ② 低显式预算 ⇒ 暂停 ⇒ 提高绝对 ceiling 后**同 `run_id`** 恢复并完成、消耗不重置；
+  ③ 真实重复工具失败 ⇒ 恰好一次 replan ⇒ 同模式持续则 `PAUSED_STUCK`；
+  ④ 真实 deadline 且存在在途 mutating 工具 ⇒ 不启动新工作，正常收尾或 `NEED_RECONCILE`；
+  ⑤ 真实父子委派树共享预算并强制 `max_delegations=8`。
+- **重复口径**：每个场景在**同一** commit / Git tree / 配置上**连跑三次**，**3/3** 才算通过；
+  **所有失败尝试必须保留**（禁止重跑后只留成功者）；任何代码变更即作废先前的矩阵。
+- **证据字段**：`schema_version`、`scenario_id` / `scenario_version`、`sha`、`tree`、
+  Provider / model 标识（**无** token / 密钥 / 授权头）、Sandbox 类型与一次性工作区身份、
+  三次尝试的起止与状态、Session / Run 身份、事件与 trace 引用、
+  `verdict ∈ {PASS, FAIL, BLOCKED, SKIPPED}`。
+- **缺条件不伪装**：缺凭据、Provider 或 Sandbox 不可用、场景未执行 ⇒ **BLOCKED / SKIPPED，永不 PASS**；
+  受影响的实现票**不得关单**。
+- **凭证零泄漏**：MUST NOT 打印、持久化或提交任何凭证值；`.env` 只可列 key **名**。
 
 ## 10. Final Full E2E
 
@@ -185,4 +210,8 @@ existing Session
 - Eval 可重复运行；
 - Kill/Resume case 纳入回归；
 - Citation 有真实来源；
-- Regression report 可对比版本。
+- Regression report 可对比版本；
+- §9.1 五个场景各有**同树 3/3** 证据，且证据字段齐全、可指认到 sha 与 tree；
+- 缺凭据 / Provider / Sandbox 时返回 BLOCKED / SKIPPED 并以非零结果退出，MUST NOT 输出 PASS；
+- 失败尝试被保留且可枚举；任何代码变更后矩阵重跑；
+- 输出、事件证据与提交物中不含任何凭证值（自动扫描）。
