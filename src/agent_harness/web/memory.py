@@ -33,15 +33,12 @@ from agent_harness.memory.audit import (
 from agent_harness.memory.capability import MemoryCapability
 from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.memory.types import MemoryEntry, MemoryScope, public_metadata
-from agent_harness.memory.v2.recall import RANKING_VERSION, trusted_identity_for_session
-from agent_harness.session.errors import InvalidSessionId, SessionNotFound
-from agent_harness.session.event import MEMORY_RECALLED
-from agent_harness.web.domain_errors import http_error, memory_http_error
 from agent_harness.memory.v2.capability import (
     InvalidMemoryPayload,
     MemoryIndexDeletePending,
     StaleMemoryVersion,
 )
+from agent_harness.memory.v2.recall import RANKING_VERSION, trusted_identity_for_session
 from agent_harness.memory.v2.types import (
     MemoryKind as MemoryKindV2,
 )
@@ -55,7 +52,9 @@ from agent_harness.memory.v2.types import (
 from agent_harness.memory.v2.types import (
     MemoryStatus as MemoryStatusV2,
 )
+from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.event import MEMORY_RECALLED
+from agent_harness.web.domain_errors import http_error, memory_http_error
 from agent_harness.web.projects import require_trusted_origin
 
 if TYPE_CHECKING:
