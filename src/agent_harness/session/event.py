@@ -45,6 +45,12 @@ MODEL_STARTED = "model/started"
 MODEL_DELTA = "model/delta"
 MODEL_COMPLETED = "model/completed"
 MODEL_FAILED = "model/failed"
+# `#313` T5：**每一次实际 Provider 请求**恰一条的账目记录（`02 §5.1` 的唯一计数点）。
+# 与 model/completed 的分工：后者是「被接纳进 loop 的模型决策」的 durable 记录
+# （agent_turns 的计数点），本事件是「真的发出去过的请求」（model_requests 的计数点）
+# ——primary / fallback / closeout 各记一条，被拒绝或传输失败的请求也**在**其中
+# （它们不增 agent_turns，但确实发生过）。usage / cost_usd 只在该次响应自报时落键。
+MODEL_REQUEST = "model/request"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
@@ -146,6 +152,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         USER_MESSAGE,
         MODEL_COMPLETED,
         MODEL_FAILED,
+        # #313 T5：每次实际 Provider 请求的账目记录（model_requests 的唯一计数点）
+        MODEL_REQUEST,
         TOOL_CALL,
         TOOL_RESULT,
         TOOL_OUTPUT_DELTA,
