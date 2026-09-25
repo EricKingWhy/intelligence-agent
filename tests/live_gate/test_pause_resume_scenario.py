@@ -52,6 +52,8 @@ TOOL_CALL = "bash"
 #: 合成轨迹里每格请求自报的 token 数（断言比的是"与轨迹重算相同"，数字本身无关紧要）。
 PRIMARY_TOKENS = 11
 CLOSEOUT_TOKENS = 5
+#: 成本面对账用例里每格请求自报的 USD（十进制字符串，与 wire 同形）。
+COST_PER_REQUEST = "0.01"
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -85,7 +87,8 @@ class _StubSandbox:
         return self._files[name]
 
 
-def _pause_payload(*, consumed: int = LOW_CEILING - 1, closeout: str = "model") -> dict:
+def _pause_payload(*, consumed: int = LOW_CEILING - 1, closeout: str = "model",
+                   cost_usd: str | None = None) -> dict:
     """`run/paused.data`（字段名是 `03 §3.4` 的契约：reason / trigger_dimension /
     budget_version / consumed / limits / continuation / closeout_source /
     resume_requirements）。
@@ -105,7 +108,7 @@ def _pause_payload(*, consumed: int = LOW_CEILING - 1, closeout: str = "model") 
             "agent_turns": consumed,
             "model_requests": 2,
             "total_tokens": PRIMARY_TOKENS + CLOSEOUT_TOKENS,
-            "cost_usd": None,
+            "cost_usd": cost_usd,
         },
         "limits": {
             "local": {"max_agent_turns": 500, "source": "deployment"},
@@ -121,7 +124,8 @@ def _pause_payload(*, consumed: int = LOW_CEILING - 1, closeout: str = "model") 
     }
 
 
-def _resume_payload(*, consumed: int = LOW_CEILING - 1, run_limit: int = RESUME_CEILING) -> dict:
+def _resume_payload(*, consumed: int = LOW_CEILING - 1, run_limit: int = RESUME_CEILING,
+                    cost_usd: str | None = None) -> dict:
     """`run/resumed.data`（同 run 续跑：版本 +1、consumed 等于暂停快照、绝对 ceiling）。"""
     return {
         "from_pause_seq": 6,
@@ -136,7 +140,7 @@ def _resume_payload(*, consumed: int = LOW_CEILING - 1, run_limit: int = RESUME_
             "agent_turns": consumed,
             "model_requests": 2,
             "total_tokens": PRIMARY_TOKENS + CLOSEOUT_TOKENS,
-            "cost_usd": None,
+            "cost_usd": cost_usd,
         },
         "resume_basis": "budget_increase",
     }
@@ -146,6 +150,7 @@ def _events(
     *, pause_count: int = 1, resumed: bool = True,
     pause: dict | None = None, resume: dict | None = None,
     first_turn_terminal: bool = False, missing_usage: bool = False,
+    cost: str | None = None,
 ) -> list[Any]:
     """自洽的事件序列：低预算执行（1 个产出轮 + 1 次 closeout 请求）→ 恢复 → 续跑完成。
 
@@ -156,6 +161,8 @@ def _events(
 
     `missing_usage=True`：最后那次请求不自报 usage ⇒ 该维在**整本 run**上转未知
     （`11 §6.1`：不可得 ≠ 0），用于钉"投影不得把未知写成 0"。
+    `cost` 非空时每格请求自报同一个 USD（十进制字符串）⇒ 成本面在两侧都**已知**，
+    用于钉 cost 对账（缺省时两侧都是未知，走的是另一向）。
     """
     events: list[Any] = []
     seq = 0
@@ -172,6 +179,8 @@ def _events(
         data: dict[str, Any] = {"role": role, "outcome": outcome}
         if tokens is not None:
             data["usage"] = {"total_tokens": tokens}
+        if cost is not None:
+            data["cost_usd"] = cost
         add(MODEL_REQUEST, data)
 
     add("session/started")
@@ -504,6 +513,48 @@ def test_final_state_ledger_is_green_on_the_self_consistent_sequence(tmp_path):
     """自洽序列上四维账目（暂停快照 + API 投影）全绿 —— 判据不是恒红。"""
     failed = _failed(_assertions(tmp_path, _events()))
     assert not {name for name in failed if name.startswith(("pause.", "api_projection."))}, failed
+
+
+def test_pause_cost_mismatch_is_red(tmp_path):
+    """暂停快照的 cost 与轨迹重算不等 → 判红（成本面"两侧都已知且不等"的那一向）。
+
+    `#313` 补审 F2：成本面此前全套用例只走"两侧都未知 ⇒ 绿"一向（本部署
+    `reports_cost=False`），把判据改坏不红。这条把已报告成本的那一向钉住：暂停窗口内
+    2 格 × 0.01 = 0.02，快照写 0.02 绿、写 0.01 红（十进制字符串逐字相等，不走浮点）。
+    """
+    events = _events(
+        cost=COST_PER_REQUEST,
+        pause=_pause_payload(cost_usd="0.02"),
+        resume=_resume_payload(cost_usd="0.02"),
+    )
+    honest = _failed(_assertions(tmp_path, events))
+    assert "pause.cost" not in honest, honest
+
+    wrong = _events(
+        cost=COST_PER_REQUEST,
+        pause=_pause_payload(cost_usd="0.01"),
+        resume=_resume_payload(cost_usd="0.01"),
+    )
+    assert "pause.cost" in _failed(_assertions(tmp_path, wrong))
+
+
+def test_projection_cost_mismatch_is_red(tmp_path):
+    """API 投影的 cost 与轨迹重算不等 → 判红（同一条判据的投影面）。
+
+    投影面按**整本 run** 重算（5 格 × 0.01 = 0.05），所以如实那份必须绿。
+    """
+    events = _events(
+        cost=COST_PER_REQUEST,
+        pause=_pause_payload(cost_usd="0.02"),
+        resume=_resume_payload(cost_usd="0.02"),
+    )
+    honest = _failed(_assertions(tmp_path, events))
+    assert "api_projection.cost" not in honest, honest
+
+    mismatched = _failed(
+        _assertions(tmp_path, events, projection=_projection(events, cost_usd="0.06"))
+    )
+    assert "api_projection.cost" in mismatched, mismatched
 
 
 # ── 受控 primary 失败（AC-9 的证据面）─────────────────────────────────────

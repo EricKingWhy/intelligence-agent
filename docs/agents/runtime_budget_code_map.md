@@ -16,7 +16,7 @@
 | 一次**被接纳的模型决策** | `agent/runtime.py` 的 `_drive` 循环体 | `model/completed` | `agent_turns` |
 | 一次**实际发出的 Provider 请求**（primary / fallback / closeout 各一次；被拒 / 传输失败**也**算） | `model/fallback.py` 的 `_slot()` / `ainvoke` / `astream`；closeout 走 `agent/runtime.py` 的 `_closeout_continuation`（`self._raw_model.ainvoke`，**绕过 coordinator**） | `model/request`（T5 新增） | `model_requests` |
 | 一次工具调用 / 一次工具尝试（含重试） | `tooling/executor.py` | `tool/call` / `tool/result` | `tool_calls` / `tool_attempts`（T6） |
-| Provider 自报的 token | 响应 `usage_metadata` → `agent/runtime.py` 的 `_usage_from_response` | `model/completed.data.usage`、`run/completed.data.usage_total` | `total_tokens`（T5） |
+| Provider 自报的 token | 响应 `usage_metadata` → `agent/runtime.py` 的 `_usage_from_response` | `model/request.data.usage`（**计数点本体**）、`model/completed.data.usage`（本轮那次）、`run/completed.data.usage_total`（**本次执行**的切片，同 run 恢复后 ≠ run 累计） | `total_tokens`（T5） |
 | Provider 归属的 USD | 响应 `response_metadata["cost"]` → `model/accounting.py` 的 `cost_usd_from_response` | 同上的 cost 键（十进制**字符串**） | `cost_usd`（T5） |
 | 委派 | `multiagent/tools.py`（`DelegateTool`） | `agent/delegation-started` / `-finished` | `delegations`（T10 做树聚合） |
 
@@ -41,7 +41,7 @@
 - `_usage_from_response`（usage 抽取）、`_RunFinalizer`（终态载荷，持 `usage_total` 引用）
 - loop 顶部准入判定、`astream`（流式）/ `ainvoke`（非流式）两个模型调用点、空 / DSML 拒绝路径、
   `drain_transitions`（fallback 切换事件）、usage 累加处（T5：**前移**，让被拒响应也计 usage）
-- 终态臂：`_terminal_paused` / `_terminal_completed`（`cost_usd` 现在是 `None + TODO(spec 12)`）/ `_terminal_failed_run` / `_terminal_cancelled`
+- 终态臂：`_terminal_paused` / `_terminal_completed`（`cost_usd` 写 Provider 归属累计；读数为 `None` 只因 `HARNESS_MODEL_ACCOUNTING.reports_cost=False`）/ `_terminal_failed_run` / `_terminal_cancelled`
 - `_pause_trigger`、`_closeout_continuation`
 
 **`src/agent_harness/model/`**：
@@ -80,7 +80,7 @@
 | --- | --- | --- |
 | 逐场景 durable 序列 / `discarded` 尾部 / 终态载荷键集 | `tests/agent/test_event_sequence_golden.py` | 增删事件、改终态键集 |
 | 流帧是持久化日志的**前缀** | 同文件 `test_durable_frames_mirror_the_persisted_log` | 新事件没被 SSE 镜像（只能进 `discarded` 并声明） |
-| `run/paused` 键集与 `consumed == {"agent_turns": 2}` | 同文件 `test_pause_payload_key_set_is_pinned` | 改 `run/paused` 载荷（T5 会动它 ⇒ 同步改） |
+| `run/paused` 键集与 `consumed` **四键**（`agent_turns` / `model_requests` / `total_tokens` / `cost_usd`，T5 起；替身模型不自报 ⇒ token / cost 为 `null`） | 同文件 `test_pause_payload_key_set_is_pinned` | 改 `run/paused` 载荷 |
 | 生成物同步 | `scripts/gate0.py` 守卫 + `tests/test_event_vocabulary_generated.py` | 改了事件类型却没重新生成 |
 | 覆盖闸门 | `scripts/check_review_coverage.py`（**唯一可运行权威**，`.sh` 是冻结语义参考） | 有 commit 没有对应审查行 |
 | 门禁落盘 | `docs/gate/<sha>.json`（`scripts/gate0.py` 裸全量写出：6 条机械车道 + 墙钟 + 工具版本 + 工作树证据） | 手抄读数（**已禁止**）；重车道读数必须来自可复跑命令 |

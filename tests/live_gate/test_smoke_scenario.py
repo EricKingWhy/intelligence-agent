@@ -49,17 +49,22 @@ TOKENS_PER_REQUEST = 7
 def _events(
     *, tool_calls: list[str] | None = None, requests: int | None = None,
     reported_tokens: int | None = None, terminal_usage: int | None = None,
+    outcomes: list[str] | None = None, cost_per_request: str | None = None,
+    terminal_cost: str | None = None,
 ) -> list[Any]:
     """自洽轨迹：run/started + 每次工具调用各一对 call/result + 一次决策 + run/completed。
 
     每条带 `seq`（与持久化 `SessionEvent` 同名同义）：复读判据按 `(seq, type)` 逐条比。
-    三个 `*_tokens` / `requests` 参数是**故意制造分歧**的旋钮（对账判据的鉴别力用例）：
-    缺省时三者自洽（1 格请求、自报 7、终态 usage_total=7）。
+    下面几个参数是**故意制造分歧**的旋钮（对账判据的鉴别力用例）：
+    缺省时全部自洽（1 格请求、自报 7、终态 usage_total=7、两侧 cost 都不自报）。
+    `outcomes` 逐格给请求结果（用来造"fallback 接住过一次失败"的形状）；
+    `cost_per_request` / `terminal_cost` 给成本面造"两侧都已知且不等"的形状。
     """
     calls = ["write", "bash", "git_status"] if tool_calls is None else tool_calls
     request_count = 1 if requests is None else requests
     self_reported = TOKENS_PER_REQUEST if reported_tokens is None else reported_tokens
     total = self_reported if terminal_usage is None else terminal_usage
+    outcome_list = ["completed"] * request_count if outcomes is None else outcomes
     events: list[Any] = [SimpleNamespace(
         seq=1, type="run/started", data={"turn_index": 1}, run_id=RUN_ID,
     )]
@@ -73,21 +78,23 @@ def _events(
             seq=len(events) + 1, type="tool/result",
             data={"tool_call_id": call_id, "tool_name": name}, run_id=RUN_ID,
         ))
-    for _ in range(request_count):
+    for index in range(request_count):
+        data: dict[str, Any] = {
+            "role": "primary", "outcome": outcome_list[index], "model": "test-model",
+            "usage": {"total_tokens": self_reported},
+        }
+        if cost_per_request is not None:
+            data["cost_usd"] = cost_per_request
         events.append(SimpleNamespace(
-            seq=len(events) + 1, type="model/request",
-            data={
-                "role": "primary", "outcome": "completed", "model": "test-model",
-                "usage": {"total_tokens": self_reported},
-            },
-            run_id=RUN_ID,
+            seq=len(events) + 1, type="model/request", data=data, run_id=RUN_ID,
         ))
     events.append(SimpleNamespace(
         seq=len(events) + 1, type="model/completed", data={"content": "完成"}, run_id=RUN_ID,
     ))
     events.append(SimpleNamespace(
         seq=len(events) + 1, type="run/completed",
-        data={"final_text": "完成", "usage_total": {"total_tokens": total}, "cost_usd": None},
+        data={"final_text": "完成", "usage_total": {"total_tokens": total},
+              "cost_usd": terminal_cost},
         run_id=RUN_ID,
     ))
     return events
@@ -202,6 +209,35 @@ def test_assertions_reject_requests_out_of_step_with_decisions():
     """请求数 ≠ 决策数 → 判红（直路：一次决策恰一次实际请求）。"""
     results = _assertions_for(requests=2)
     assert not results["budget.one_request_per_decision"].ok
+
+
+def test_plain_path_criterion_rejects_a_trajectory_that_saw_a_failure():
+    """`requests=2 / turns=1 / failed=1`（fallback 接住过一次失败）→ 判红。
+
+    这条形状上恒等式 `requests - turns == failed` **成立**，所以恒等式不是判据：直路要求
+    `failed == 0` 与 `requests == turns` 同时成立。只断言"请求数对不上"的用例在两种写法下
+    都红，分辨不出判据被放宽 —— 这条用例才是钉住合取式的那一半（`#313` 补审 P3-1）。
+    """
+    results = _assertions_for(
+        requests=2, outcomes=["completed", "failed"],
+        terminal_usage=TOKENS_PER_REQUEST * 2,
+    )
+    failed = {name for name, item in results.items() if not item.ok}
+    assert failed == {"budget.one_request_per_decision"}
+
+
+def test_terminal_cost_mismatch_is_red():
+    """终态 `cost_usd` 与轨迹重算不等 → 判红（成本面"两侧都已知且不等"的那一向）。
+
+    `#313` 补审 F2：成本面此前全套用例只走"两侧都未知 ⇒ 绿"一向（本部署
+    `reports_cost=False`），把判据改坏不红。这条先把已知的那一向钉住。
+    """
+    green = _assertions_for(cost_per_request="0.01", terminal_cost="0.01")
+    assert green["budget.terminal_cost"].ok
+    assert "未知" not in green["budget.terminal_cost"].detail
+
+    red = _assertions_for(cost_per_request="0.01", terminal_cost="0.02")
+    assert not red["budget.terminal_cost"].ok
 
 
 def test_assertions_reject_tokens_that_do_not_match_the_trajectory():

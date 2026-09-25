@@ -66,6 +66,10 @@ def _decimal_or_none(raw: Any) -> Decimal | None:
 
     只接受 `str` / `int` / `Decimal`：`float` 会引入与 wire 不等价的二进制近似
     （`11 §6.1`：二进制浮点相等不是契约），所以它按"不可解析"处理。
+
+    与产品侧的唯一读数实现（`model/accounting.py`）**不等价**：那一版收 `float`、拒负值
+    与非有限。生产写入点只落 `format(Decimal, "f")` 的有限非负串 ⇒ 今天不可达；这里按判据
+    侧更严的形状处理 —— 形态分歧只会判红（fail-closed），不会放行。
     """
     if isinstance(raw, bool) or raw is None:
         return None
@@ -177,8 +181,13 @@ def terminal_counter_assertions(
 ) -> list[AssertionResult]:
     """终态载荷（`run/completed`）里的 `usage_total` / `cost_usd` 与轨迹对账。
 
-    与 `consumed_counter_assertions` 是同一条判据的另一张面：终态载荷是**已结束**那次
-    执行的读数，暂停快照是**恢复的基数**——两份都不得与轨迹漂移（`11 §6.1`）。
+    与 `consumed_counter_assertions` 是同一条判据的另一张面：暂停快照是**恢复的基数**，
+    终态载荷是**已结束那次执行**的读数（`11 §6.1`）。
+
+    ⚠ 作用域限制（`#313` 补审 Correctness F1 登记，待裁决）：runtime 的 `usage_total` 每次
+    执行新建、只累加**本次**执行 ⇒ 仅在「一次执行 == 一个 run」时它与按 run 重算的 `facts`
+    同值。**同 run 恢复过**的运行上两者必然不等，所以暂停 / 恢复场景目前**不接**这张面
+    （接了会恒红）。这个函数因此只适用于单执行 run（smoke / long_task 那种直路）。
     """
     payload = terminal if isinstance(terminal, Mapping) else None
     usage = payload.get("usage_total") if payload is not None else None
@@ -210,9 +219,10 @@ def terminal_counter_assertions(
 def plain_path_request_assertion(*, facts: RequestAccounting, label: str) -> AssertionResult:
     """无 fallback / 无 pause 的直路：每个被接纳的决策**恰好**一次成功请求。
 
-    判据是 `requests - turns == failed`：失败请求不产出决策（不增 `agent_turns`），
-    所以正常路径上 `requests == turns` 且 `failed == 0`——两者任一被打破都会落红，
-    而不是被"请求数 ≥ 轮数"这种松判据盖住。
+    判据是 `failed == 0 and requests == turns` 的**合取**，不是恒等式
+    `requests - turns == failed`：失败请求不产出决策（不增 `agent_turns`），所以直路上两者
+    必须同时成立；而恒等式在"fallback 接住了一次失败"的形状（`requests=2 / turns=1 /
+    failed=1`）上**同样成立** —— 拿它当判据会把"重试过"静默读成"干净直路"。
     """
     ok = facts.failed == 0 and facts.requests == facts.turns
     return AssertionResult(
