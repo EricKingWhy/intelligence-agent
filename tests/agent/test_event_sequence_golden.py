@@ -103,17 +103,17 @@ from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.agent.guards import RepeatedToolFailureGuard
+from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
+    REASON_BUDGET_EXHAUSTED,
+    TRIGGER_LOCAL_TURNS,
+)
 from agent_harness.agent.types import (
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
 )
 from agent_harness.context.compactor import ContextWindowExceededError
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
-from agent_harness.agent.run_budget import (
-    CLOSEOUT_DETERMINISTIC,
-    REASON_BUDGET_EXHAUSTED,
-    TRIGGER_LOCAL_TURNS,
-)
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
@@ -430,7 +430,8 @@ async def _ledger_runtime(wiring: _Wiring) -> AgentRuntime:
 
     Ledger 必须先 initialize（否则写 Ledger 抛错、run 直接走异常臂），故 builder
     是 async。注意这里的时序与无 Ledger 场景**不同**：`model/completed` 被推迟到
-    工具批次之后（`runtime.py:924-936` 的 `defer_model_event`）。
+    工具批次之后（`agent/runtime.py` 的 `defer_model_event`，按
+    `bool(tool_calls) and executor.tracks_operations` 判定——**不看预算**）。
     """
     registry = _registry()
     ledger = SqliteOperationLedger(wiring.tmp_path / "state.db")

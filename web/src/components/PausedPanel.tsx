@@ -21,6 +21,7 @@ import {
   ceilingDraftError,
   CONTINUATION_SECTIONS,
   pauseFacts,
+  RESERVED_CLOSEOUT_TURNS,
 } from '../lib/runBudget';
 
 export interface PausedPanelProps {
@@ -109,7 +110,7 @@ export function PausedPanel({
         )}
         {draftError === null && !resuming && (
           <span className="pause-panel-hint">
-            {`至少 ${facts.minResumeCeiling}（须大于已消耗 ${facts.consumed} + 1，否则恢复后立刻再次暂停）；已消耗不重置，恢复沿用同一 run_id`}
+            {`至少 ${facts.minResumeCeiling}（须大于已消耗 ${facts.consumed} + ${RESERVED_CLOSEOUT_TURNS}，否则恢复后立刻再次暂停）；已消耗不重置，恢复沿用同一 run_id`}
           </span>
         )}
       </div>

@@ -23,6 +23,7 @@ import json
 
 import pytest
 from langchain_core.messages import AIMessage
+from pydantic import BaseModel
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
@@ -46,12 +47,14 @@ from agent_harness.session import (
     RUN_PAUSED,
     RUN_RESUMED,
     RUN_STARTED,
+    TOOL_CALL,
+    TOOL_RESULT,
     USER_MESSAGE,
     Session,
 )
 from agent_harness.session.store import JsonlSessionStore
+from agent_harness.storage import SqliteOperationLedger
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
-from pydantic import BaseModel
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -82,12 +85,18 @@ class _EchoTool(Tool):
 def _runtime(
     model, *, ceiling: int | None, consumed: int = 0, run_id: str | None = None,
     version: int = 1, local_fuse: int = 500,
+    operation_ledger: SqliteOperationLedger | None = None,
 ) -> AgentRuntime:
-    """一个执行实例：`local_fuse` 是本实例的保险丝，`run_budget` 是启动时的 run 账本。"""
+    """一个执行实例：`local_fuse` 是本实例的保险丝，`run_budget` 是启动时的 run 账本。
+
+    `operation_ledger` 给了就按**生产接线**挂上（`tracks_operations=True`）——那会让
+    `model/completed` 走到延迟落盘分支，是另一条时序（不是配置口味）。
+    """
     registry = ToolRegistry()
     registry.register(_EchoTool())
     return AgentRuntime(
-        model=model, registry=registry, executor=ToolExecutor(registry),
+        model=model, registry=registry,
+        executor=ToolExecutor(registry, operation_ledger=operation_ledger),
         max_agent_turns=local_fuse, local_fuse_source=SOURCE_DEPLOYMENT,
         run_budget=LaunchRunBudget(
             version=version, limits=RunTurnLimits(max_agent_turns_total=ceiling),
@@ -225,6 +234,38 @@ async def test_no_model_call_at_all_when_the_closeout_has_no_capacity(tmp_path) 
     assert paused.data["consumed"] == {"agent_turns": 1}, "快照沿用启动上下文，不重数"
     assert paused.data["budget_version"] == 2
     assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
+
+
+# ── 暂停边界那一轮的工具批次与延迟落盘 ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_deferred_model_event_stays_behind_the_tool_batch_at_the_pause_boundary(
+    tmp_path,
+) -> None:
+    """挂 Ledger 的执行器 + 暂停边界那一轮：`model/completed` 仍在它引用的工具之后。
+
+    延迟落盘的语义是"model 决策的 durable 记录不早于它引用的那批工具"，**与预算无关**：
+    预算判定在循环顶部，只决定**下一轮**还起不起模型调用，本轮整批工具照跑。把预算前瞻
+    掺回这个判定（`#312` 审查前的形状）会让暂停轮——恰恰是最需要可对账的那一轮——退回
+    "model/completed 先于工具"，而且**没有任何既有用例看得见**：golden 的 `local_fuse_pause`
+    用无 Ledger 的执行器（那条分支根本不走），
+    `tests/agent/test_operation_ledger_runtime.py` 只钉了无 Ledger 时的相反形状。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    scripted = ScriptedModel([_tool_round(1), _continuation_json()])
+    runtime = _runtime(scripted, ceiling=2, operation_ledger=ledger)
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "跑一轮工具就撞 ceiling")
+
+    assert result.status == STATUS_PAUSED
+    types = [e.type for e in session.events]
+    assert types.index(TOOL_CALL) < types.index(MODEL_COMPLETED) < types.index(TOOL_RESULT), (
+        "暂停轮里 model 决策的 durable 记录必须晚于它引用的 tool/call"
+    )
+    assert types.index(MODEL_COMPLETED) < types.index(RUN_PAUSED), "暂停收口在账目之后"
 
 
 # ── 恢复：同一个 run_id、消耗不重置 ──────────────────────────────────────

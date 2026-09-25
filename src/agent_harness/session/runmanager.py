@@ -431,3 +431,6 @@ class RunManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*tasks, return_exceptions=True)
         self._runs.clear()
+        # 锁与 `_runs` 同寿命（构造注释里的口径）：`aclose` 清一张表就清两张，
+        # 免得"同一条口径"这句话在关停之后只剩一半是真的。
+        self._session_locks.clear()
