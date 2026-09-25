@@ -1,8 +1,8 @@
 # PRD：Agent 长任务预算、暂停恢复与可靠完成判定
 
-**状态**：Ready for Agent  
-**日期**：2026-09-23  
-**适用范围**：Agent Runtime、Session/Event、Tool Runtime、Multi-Agent、REST/SSE/WS、CLI、Web UI、Evaluation Gate  
+**状态**：Ready for Agent
+**日期**：2026-09-23
+**适用范围**：Agent Runtime、Session/Event、Tool Runtime、Multi-Agent、REST/SSE/WS、CLI、Web UI、Evaluation Gate
 **性质**：产品与工程交付契约；不替代冻结的 Engineering Specification。若两者出现实质冲突，执行者必须报告 Gap 并停止扩大范围。
 
 ## Problem Statement
@@ -119,122 +119,122 @@
 
 ### EB-1 — Completion-first default
 
-**Given** no explicit token, cost, deadline, model-request or tool-call ceiling  
-**And** the configured AgentProfile local fuse is not exhausted  
-**When** a task requires more than ten decisions or tool calls  
-**Then** the run continues until it completes, pauses for another defined reason, is cancelled, or fails  
+**Given** no explicit token, cost, deadline, model-request or tool-call ceiling
+**And** the configured AgentProfile local fuse is not exhausted
+**When** a task requires more than ten decisions or tool calls
+**Then** the run continues until it completes, pauses for another defined reason, is cancelled, or fails
 **And** the former low default does not terminate it.
 
 ### EB-2 — Local high fuse
 
-**Given** an AgentRuntime has made 500 accepted model decisions without completing  
-**When** it reaches its local `max_agent_turns` ceiling  
-**Then** it performs the reserved closeout flow and enters `run/paused`  
+**Given** an AgentRuntime has made 500 accepted model decisions without completing
+**When** it reaches its local `max_agent_turns` ceiling
+**Then** it performs the reserved closeout flow and enters `run/paused`
 **And** it does not write `run/completed` or `run/failed` solely because the fuse was reached.
 
 ### EB-3 — Structured closeout
 
-**Given** a budget boundary is approaching  
-**When** sufficient reserved budget remains for closeout  
-**Then** the model receives one bounded opportunity to describe completed work, remaining work, blockers and the next safe action  
+**Given** a budget boundary is approaching
+**When** sufficient reserved budget remains for closeout
+**Then** the model receives one bounded opportunity to describe completed work, remaining work, blockers and the next safe action
 **And** the resulting continuation is persisted.
 
-**Given** the model closeout cannot run or does not produce a valid continuation  
-**When** the Runtime pauses  
-**Then** it persists a deterministic continuation assembled only from durable facts  
+**Given** the model closeout cannot run or does not produce a valid continuation
+**When** the Runtime pauses
+**Then** it persists a deterministic continuation assembled only from durable facts
 **And** it does not fabricate progress, success or tool results.
 
 ### EB-4 — Same-run resume
 
-**Given** a run is paused with consumed counters and a budget version  
-**When** an authorized client submits a higher absolute ceiling with the expected version  
-**Then** the system appends `run/resumed` using the same `run_id`  
-**And** preserves consumed counters, continuation and stuck fingerprints  
+**Given** a run is paused with consumed counters and a budget version
+**When** an authorized client submits a higher absolute ceiling with the expected version
+**Then** the system appends `run/resumed` using the same `run_id`
+**And** preserves consumed counters, continuation and stuck fingerprints
 **And** increments the budget version.
 
 ### EB-5 — CAS conflict
 
-**Given** two clients observed the same paused budget version  
-**When** both attempt to update and resume it  
-**Then** at most one succeeds  
+**Given** two clients observed the same paused budget version
+**When** both attempt to update and resume it
+**Then** at most one succeeds
 **And** the other receives HTTP 409 without starting model or tool work.
 
 ### EB-6 — Explicit but unenforceable budget
 
-**Given** a request specifies a token or cost ceiling  
-**And** the selected Provider chain cannot supply the accounting required to enforce that ceiling  
-**When** the client attempts to start or resume work  
-**Then** the request is rejected before any model request  
+**Given** a request specifies a token or cost ceiling
+**And** the selected Provider chain cannot supply the accounting required to enforce that ceiling
+**When** the client attempts to start or resume work
+**Then** the request is rejected before any model request
 **And** no budget-consuming event is written.
 
 ### EB-7 — Stuck detection
 
-**Given** the Runtime observes one configured repeating behavior pattern  
-**When** the pattern first reaches its threshold  
+**Given** the Runtime observes one configured repeating behavior pattern
+**When** the pattern first reaches its threshold
 **Then** it emits a structured guard signal and allows exactly one corrective replan.
 
-**Given** the same pattern persists after that replan without evidenced progress  
-**When** the threshold is reached again  
-**Then** the run enters `run/paused` with reason `stuck`  
+**Given** the same pattern persists after that replan without evidenced progress
+**When** the threshold is reached again
+**Then** the run enters `run/paused` with reason `stuck`
 **And** a plain resume without relevant steer, environment change or policy change is rejected with 409.
 
 ### EB-8 — Deadline
 
-**Given** a configured deadline has passed  
-**When** the Runtime reaches its next scheduling boundary  
-**Then** it starts no new model request, tool call or child Agent  
-**And** allows already-started tool work to finish only under its existing timeout/cancel policy  
+**Given** a configured deadline has passed
+**When** the Runtime reaches its next scheduling boundary
+**Then** it starts no new model request, tool call or child Agent
+**And** allows already-started tool work to finish only under its existing timeout/cancel policy
 **And** pauses at the next stable boundary.
 
-**Given** an in-flight mutating operation cannot be proven completed or not started  
-**When** deadline handling evaluates recovery  
+**Given** an in-flight mutating operation cannot be proven completed or not started
+**When** deadline handling evaluates recovery
 **Then** the session enters `NEED_RECONCILE` instead of retrying it.
 
 ### EB-9 — Reliable completion
 
-**Given** a model response contains no new tool calls  
-**When** Tool, Approval, Child Agent, Operation Ledger or reconcile work remains in flight or dangling  
+**Given** a model response contains no new tool calls
+**When** Tool, Approval, Child Agent, Operation Ledger or reconcile work remains in flight or dangling
 **Then** the run does not complete.
 
-**Given** the Runtime is quiescent  
-**And** the configured CompletionPolicy accepts the result  
-**When** finalization runs  
+**Given** the Runtime is quiescent
+**And** the configured CompletionPolicy accepts the result
+**When** finalization runs
 **Then** and only then may the system append `run/completed`.
 
 ### EB-10 — Delegation tree budget
 
-**Given** a root run delegates to children and grandchildren  
-**When** any descendant consumes a shared budget dimension  
-**Then** the same RunBudget and SessionBudget ledgers are updated atomically  
-**And** creating or resuming a child does not reset or enlarge them  
+**Given** a root run delegates to children and grandchildren
+**When** any descendant consumes a shared budget dimension
+**Then** the same RunBudget and SessionBudget ledgers are updated atomically
+**And** creating or resuming a child does not reset or enlarge them
 **And** the tree-wide default `max_delegations` is 8.
 
 ### EB-11 — Fork and replay
 
-**Given** a session is forked  
-**When** the child session is created  
-**Then** it receives a new SessionBudget ledger  
+**Given** a session is forked
+**When** the child session is created
+**Then** it receives a new SessionBudget ledger
 **And** records the parent lineage and parent budget snapshot.
 
-**Given** events are replayed  
-**When** a client reconstructs state  
+**Given** events are replayed
+**When** a client reconstructs state
 **Then** no budget counter changes and no provider or tool is called.
 
 ### EB-12 — Backward compatibility
 
-**Given** a client sends only `max_steps`  
-**When** the request is valid under deployment policy  
+**Given** a client sends only `max_steps`
+**When** the request is valid under deployment policy
 **Then** it is interpreted as the root AgentRuntime local `max_agent_turns` ceiling.
 
-**Given** a client sends both `max_steps` and the equivalent new field with different values  
-**When** validation runs  
+**Given** a client sends both `max_steps` and the equivalent new field with different values
+**When** validation runs
 **Then** the request returns 422 before launching work.
 
 ### EB-13 — Cross-client truth
 
-**Given** a run paused while the browser was disconnected  
-**When** Web or CLI reconnects and replays SessionEvent  
-**Then** it shows the same pause reason, continuation, consumed budget, absolute ceilings and version  
+**Given** a run paused while the browser was disconnected
+**When** Web or CLI reconnects and replays SessionEvent
+**Then** it shows the same pause reason, continuation, consumed budget, absolute ceilings and version
 **And** neither client maintains a second authoritative state.
 
 ## Contracts
