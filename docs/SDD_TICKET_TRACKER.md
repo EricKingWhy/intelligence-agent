@@ -5168,3 +5168,114 @@ source=deployment。`scripts/live_gate.py validate` 独立复核 **24 条检查 
    快照**上做（逐条不变），未顺手改这条（解除 = 出现针对该镜像的首个真回归时一并修）。
 5. **未关单**（§14.12：等合入证据齐备后由主线处理；本轮按要求不自行关单）。
 6. 后续票按交接册顺序：`#312`（T4）→ `#313` → `#314` → `#315` → `#316` → `#317` → `#318` → `#319` → `#320`。
+
+## T4（`#312`，B 链第四票）：预算到顶落非终态 `run/paused`、同一 run 带 CAS 续跑（2026-09-25 · 已推分支、未集成、未关单）
+
+**状态**：✅ 交付、审查、真实证据与门禁闭合；分支 `zcode/T312-run-pause-resume`，出发基点 `dfdded6`
+（= T3 记录笔；**本分支包含 T2 / T3 全部提交**），真实证据绑定 **`089de04` / tree `1292cab0`**，
+最终冻结树 **`fc3ad15` / tree `d27a1aad`**。**本轮 `origin/main`（`d0e2dcb`）未动、未关单**
+（§14.12：未合 main 的完成票只在 issue comment 记录分支与 commit；集成由集成线负责）。
+
+**集成顺序约束（§14.9）**：① 本分支含 T3（`#308`）与 T2（`#307`）**全部提交** ⇒ 集成时两者都不可跳过；
+② T1（`#306`）的 `ADR-0044` + 六章规格（`02 §5.1` / `03 §3.4` / `11 §6.1`）**以及 T1 自己的 tracker / 归档记录**
+（`621986e`）都只存在于 `zcode/T306-longrun-budget-contracts` ⇒ 本票代码注释里的"机制单点"指针在 T1 落 main 前是
+**悬空指针**。结论：四条线落位顺序 = **T1 → T2 → T3 → T4**。
+
+**票面**：GitHub `#312`（父票 `#305`；`blocked_by: #306, #307, #308` 三票均已完成）。本票是 `#305` 冻结契约里
+"一次逻辑 run 的累计回合预算"的**执行面**：`run/paused` 非终态 + `run/resumed` 同 run 续跑。Must Not：不重置计数器、
+不为同 run 续跑造新 `run_id`、不做 token / cost / deadline / stuck / SessionBudget / 树聚合（`#313`–`#318`）、
+不在 tool / approval / child / reconcile 未结清时完成、不改取消语义、不建客户端本地权威暂停态。
+
+**交付序列**（5 笔 + 台账笔 + 本记录笔，父链逐笔显式指定）：
+
+| # | commit | 规模 | 内容 |
+| --- | --- | --- | --- |
+| 1 | `33a00ec` | 55 文件 / +5891 −264 | `agent/run_budget.py`（version / limits / consumed / paused 全从**持久化事件**重建）+ runtime 暂停路径与收口容量预留 + 生命周期四处判定 + `session/service.py` 同 run 续跑（CAS）+ web / CLI 暂停态 + 前端投影与 `PausedPanel` + 新 Live Gate 场景 `budget-pause-resume-same-run` |
+| 2 | `0fdd197` | 21 文件 / +704 −152 | R1 处置：计数点归位 `model/completed`、`defer_model_event` 判据回归、AC-8 并发锁改挂 `RunManager.session_lock`、生命周期覆盖补齐、P3 五条、T3 遗留两处文档同步 |
+| 3 | `eb50a6c` | 6 文件 / +61 −15 | R2 处置：F6 鉴别力用例（红证实测）+ P3 三条 + 前端镜像常量 `RESERVED_CLOSEOUT_TURNS` |
+| 4 | `089de04` | 1 文件 / +17 −3 | Live Gate 场景终态读盘移到 `shutdown()` 之后（validator 抓到的 `event_count` 差一行） |
+| 5 | `fc3ad15` | 8 文件 / +1392 | 真实 3/3 PASS 证据 + 首版 FAIL 证据（保留入库作原始依据） |
+| — | `f25be96` | 5 文件 | 台账五条审查行 `307`–`311`（范围首尾相接 `dfdded6..33a00ec` / `33a00ec..0fdd197` / `0fdd197..eb50a6c` / `eb50a6c..089de04` / `089de04..fc3ad15`） |
+| — | 本记录笔 | 4 文件 | 本段 + `PHASE_STATUS` 索引 + 归档明细 + Gate-0 读数 `docs/gate/f25be96729c89519c63c916cd2cdf71464b6c107.json` |
+
+**机制要点**（完整叙述单点在 `ADR-0044` 与 `02 §5.1` / `03 §3.4` / `11 §6.1`，都在 T1 分支；本段只记操作性事实）：
+
+- **ceiling 预留**：`ceiling = N` 只接纳 **N−1** 个产出轮，第 N 轮留给收口（`RESERVED_CLOSEOUT_TURNS = 1`）；
+  判定在 loop 顶部、任何 model / tool / child 工作**之前** ⇒ "低预算必然暂停"是结构结果，不赌模型行为。
+- **`consumed.agent_turns` 只数 `model/completed`**（R1 的 P2 修正）：收口那次调用是 `model_requests`，**不进**
+  `consumed` —— `02 §5.1` 的七个 counter 不得混同，"收口在 ceiling 之内"由**预留**表达。run ceiling 判定保留预留
+  （`consumed + RESERVED >= ceiling`），local fuse 判定**不预留**（与 EB-2 / T3 冻结的临界点同源，只改去向不改判定）。
+- **两个作用域各自判定、不合并成一条计数器**：`run.max_agent_turns_total`（跨 pause / resume 累计、不重置）与
+  `local.max_agent_turns`（T3 落地的本实例保险丝）；命中哪个维度由 `pause_trigger` 如实回传（`trigger_dimension`）。
+- **同 run 续跑不造新事实**：`LaunchRunBudget(version=paused.version+1, …)` ⇒ **同一 `run_id`**、不调 `begin_run`、
+  不落 `user/message`；与既有的显式新任务恢复（`session/resumed`）是可区分的两条语义；混合声明（同 run 三件套与
+  `task` 并存）⇒ 422。
+- **CAS 的唯一判定点**是 `run_budget.validate_resume`（`expected_version` / `run_id` / 真在暂停态 / 绝对 ceiling
+  真高于已消耗 / `resume_basis`）；HTTP 侧**形状非法 422、状态对不上 409**（`11 §6.1`），判定发生在任何落盘与任何
+  工作之前。
+- **`run/paused` 是非终态但不是"崩溃现场"**：不进 `RUN_TERMINAL_TYPES`（前端同理），但四处判定按"该次执行已干净
+  收口"收口 —— `interrupt.py` 尾部 pause **不算**未终结、`fork` 的 pause = −1 / resume = +1、`runmanager` 暂停态
+  **抑制接力投递**（否则暂停之上直接开新 `run_id` 等于绕开刚生效的 ceiling）、记忆资格白名单不含暂停。
+
+**两轴独立审查（R1）与修后重审（R2）**：
+
+- **R1**（Standards + Correctness/Spec 各一独立只读子代理，审冻结代码笔 `33a00ec`）：**P0=0 / P1=0，全 P2/P3**。
+  P2① = `consumed.agent_turns` 把 closeout 那次调用也数进账；P2② = `defer_model_event` 掺进预算前瞻 ⇒ 暂停边界上
+  判"工具不会跑"却照样跑那批工具。**真缺陷一条（AC-8 并发）**：同版本并发 resume **两条都 200** —— CAS 锁原先挂在
+  `SessionService` 上，而 web 传输层**每请求构造一个** ⇒ 锁从未共享；修后真 uvicorn 并发用例读 `[200, 409]`，败者
+  零 model / tool / child 工作。覆盖缺口：interrupt 尾部 pause / fork delta / runmanager 接力抑制 / `run/paused`
+  载荷键集。P3 五条：CLI 未配 ceiling 时 remaining 伪造成 0 / 死参数与局部别名 / 机制注释复述 / 前端魔数 `+2` /
+  T3 遗留两处文档前向失配。处置笔 `0fdd197`。
+- **R2**（两轴各一独立只读子代理，读范围 `33a00ec..0fdd197`，含限定发现）：**两轴均 PASS-WITH-FINDINGS，
+  P0=0 / P1=0**。**P2 一条、两轴独立共识**：F6 的修复**零鉴别力** —— 两轴各自把前瞻加回去，
+  `tests/{agent,session,recovery,tooling,web}` + CLI 共 **1640 条全绿、0 失败**（两轴读数 310 / 1640，失败集合皆空）
+  ⇒ 修复靠注释自证（覆盖面：只有 `tracks_operations=True` 且暂停轮含 tool_calls 才走该分支）。P3 三条：
+  `_pause_trigger` docstring 过期 / golden 的行号指针 / `aclose()` 只清 `_runs` 与"同一条口径"注释不符。处置笔 `eb50a6c`。
+- **红证**（在 `%TEMP%\t4-redproof` 副本实测，主工作树未动）：把前瞻加回 `defer_model_event` ⇒ **恰好 1 条红**，即新
+  用例 `test_deferred_model_event_stays_behind_the_tool_batch_at_the_pause_boundary`（读数里 `model/completed` 跑到
+  它引用的 `tool/call` 之前）；逐字节还原 ⇒ 9 passed。
+- **不再开第三轮审查**（§8.3 第 4 条停止条件未触发 + §8.8.5 末条）：`eb50a6c` 与 `089de04` 的**代码面没有独立审查
+  轮覆盖**，此事实与"未复审范围"如实登记在本段与台账行 `309` / `310`，供集成线 / 用户复核时知情。
+
+**真实 Live Gate（`#312` 的核心验收）**：场景 `budget-pause-resume-same-run` —— 低 ceiling 跑到暂停 ⇒ 用**绝对**
+ceiling 抬高上限 ⇒ **同一 `run_id`** 续跑 ⇒ 跑完链式任务（`run/resumed` 由**生产代码**产生，不由场景手写）。真实
+模型 + 生产工具：**3/3 PASS**（102.0s / 93.4s / 82.5s），每次 17/17 断言、`steps=8`、9 次 tool_calls，`seams` 空、
+`redactions=[workspace_path]`、secret_scan 0 命中；`scripts/live_gate.py validate` 独立复核 **24 条检查 0 FAIL**、
+`--require-pass` 退出 0。**首版证据（树 `eb50a6c`）保留入库、不作验收证据** —— 它是**证据完整性缺陷的复现物**：场景
+在 `try` 里读终态事件、`finally` 才 `state.shutdown()`，而 `MemoryWriteback.close()` 会先 drain 在途写回（本环境落一条
+`memory/degraded`，追加在 `run/completed` 之后）⇒ "记录 `event_count=76`"与"轨迹 77 行"差一行，被 runner 自己的
+反篡改比对如实判 FAIL（修复笔 `089de04`）。证据目录：
+`docs/live_gate/20260925T060807-089de048992f-budget-pause-resume-same-run/`。
+
+**门禁读数（最终冻结树 `fc3ad15` / tree `d27a1aad`，全部可复跑）**：
+
+- 后端全量 pytest（`PYTHONPATH=` + `scripts/run_tests_clean.sh tests/`）：**4016 passed, 2 skipped, 48 deselected,
+  14 warnings in 507.01s**，`EXIT=0`（junit 与日志在仓库外临时目录）。
+- Gate-0 裸全量（跑在台账笔 `f25be96` 上，其后只有 docs-only 记录笔）：**6/6 PASS**，墙钟 **14.4s**（diff-check 0.04 /
+  ruff 0.12 / oxlint 0.33 / tsc 9.07 / guards 3.79 / coverage 1.06），`result=PASS` / `passed=6` / `failed=[]` /
+  `worktree.tracked_matches_head=true` / `untracked=['.zcodeignore']` ⇒ `docs/gate/f25be96729c89519c63c916cd2cdf71464b6c107.json`。
+- 前端重车道（Gate-0 只覆盖 oxlint + tsc）：`vitest run` **70 文件 / 1098 passed**（rc 0，18.33s）；`npm run build`
+  （`tsc -b` + `vite build`）rc 0；`oxlint` **0 error**（42 警告皆既存 React-Compiler lint）。
+- `ruff check src/ tests/ evaluation/`：All checks passed（Gate-0 车道 ②，rc=0）。
+- 覆盖闸门：exit 0（本记录笔之后复跑）。
+- §8.1.3 判据 ①（`git diff --name-status --no-renames fc3ad15 HEAD`）= 本记录笔（4 文件全在 `docs/**`）；
+  ②（`git status --short`）= 仅 `?? .zcodeignore`。
+
+**残余与下一步**：
+
+1. **集成**（集成线负责）：顺序 = **T1 → T2 → T3 → T4**（理由见上方"集成顺序约束"；四处文档同位置追加按 §14.7 并集解析）。
+2. **同类缺陷的其它落点（登记不修，Scope Lock）**：`evaluation/live_gate/scenarios/long_task.py` 与 `smoke.py` 里
+   "终态读盘在 `state.shutdown()` 之前"的形态与 `089de04` 修的完全相同（本票实测只有 `pause_resume.py` 在真实环境里
+   撞上）。解除 = 出现同类假 FAIL 时一并修。
+3. **`RunManager.launch` 的 check-then-act 竞态（登记）**：CAS 锁只覆盖 resume 入口；"查在途 run → 启动"不是原子动作，
+   两个并发 `launch` 理论上都能过检查。解除 = 需要时把同一把锁扩到 `launch`。
+4. **CAS 只在进程内生效（边界）**：`RunManager.session_lock` 是进程内锁 ⇒ 多进程 / 多副本部署下同版本并发 resume
+   没有跨进程互斥；`03 §3.4` 的 CAS 语义在单进程内成立。
+5. **`run/paused` 不带 `trace_url`**（登记）：载荷 9 键里只有 `trace_id`（可为 `None`），与 T2 落 main 的 `trace_url`
+   契约不一致；归属未定（暂停不是 run 终态，URL 回填时点未定义）。
+6. **浏览器级暂停面板验证未做**：前端只有 `vitest` + `tsc -b` + `vite build` + `oxlint`，没有真机点击暂停面板 /
+   续跑入口的证据。
+7. **`web/src/lib/projection.ts` 与 A 链的未合并改动重叠**：集成时该文件可能与本 clone 之外的分支相遇（纯追加面）。
+8. **可选能力 fail-open 如实记录**：本环境 `memory` 抽取降级（`memory/degraded`），暂停 / 续跑主路径不依赖它。
+9. **未关单**（§14.12：等合入证据齐备后由主线处理；本轮按要求不自行关单）。
+10. 后续票按交接册顺序：`#313` → `#314` → `#315` → `#316` → `#317` → `#318` → `#319` → `#320`。
