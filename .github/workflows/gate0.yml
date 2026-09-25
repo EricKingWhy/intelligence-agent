@@ -59,9 +59,11 @@
 #       进 main 的提交成立**（main 上的历史提交不在闸门内）。落点当时实测：main 尚未开保护
 #       （`gh api .../branches/main/protection` = 404、`rulesets` = `[]`）。**2026-09-26 已开启
 #       并读回**：必需检查 `gate0`（app = github-actions）、`strict: true`、`enforce_admins: true`、
-#       禁 force-push、禁删除分支、仅允许 merge commit（squash / rebase 已关）。PR #321 是保护
-#       下的首次合并（**未用 `--admin`**）；同日反向验证：一笔 fast-forward 直推被拒，报
-#       `GH006` + `Changes must be made through a pull request` + `Required status check "gate0" is expected`。
+#       禁 force-push、禁删除分支、仅允许 merge commit（squash / rebase 已关）。**推断**（保护开启
+#       的那一刻没有 API 时间戳可查，故只能由"#321 是开启后第一笔进 main 的合并"与它的合并记录推
+#       出来）：PR #321 是保护下的首次合并，且**未用 `--admin`**。同日**实测**的反向验证：一笔
+#       fast-forward 直推被拒，报 `GH006` + `Changes must be made through a pull request` +
+#       `Required status check "gate0" is expected`。
 # 不保证：**闸门本身不可被改**。`pull_request` 事件在 PR 的 **merge 上下文**里执行 workflow
 #       ⇒ **改了这个文件**的 PR，其改动会被执行；而必需检查之名取自 `jobs.gate0.name`
 #       ⇒ 它仍报出一个叫 `gate0` 的绿检查。（写"merge 上下文"而非"头提交"：PR 没动这个文件时，
