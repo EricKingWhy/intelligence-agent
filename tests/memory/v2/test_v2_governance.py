@@ -286,6 +286,40 @@ async def test_edit_cannot_resurrect_a_memory_deleted_after_its_initial_read(
     assert await store.list_records(TRUSTED) == []
 
 
+@pytest.mark.asyncio
+async def test_invalidate_cannot_overwrite_a_version_superseded_after_its_initial_read(
+    governance, monkeypatch,
+):
+    service, store, _index = governance
+    original = await service.create(make_draft(content="等待失效的事实"), TRUSTED)
+    read_complete = asyncio.Event()
+    resume_invalidation = asyncio.Event()
+    authorized_row = store._authorized_row
+    first_read = True
+
+    async def pause_after_first_read(*args, **kwargs):
+        nonlocal first_read
+        row = await authorized_row(*args, **kwargs)
+        if first_read:
+            first_read = False
+            read_complete.set()
+            await resume_invalidation.wait()
+        return row
+
+    monkeypatch.setattr(store, "_authorized_row", pause_after_first_read)
+    invalidate_task = asyncio.create_task(service.invalidate(original.id, TRUSTED))
+    await asyncio.wait_for(read_complete.wait(), timeout=1)
+    updated = await store.update(
+        original.id, make_draft(content="更新后的事实"), TRUSTED,
+    )
+    resume_invalidation.set()
+
+    with pytest.raises(ValueError, match="changed|no longer active"):
+        await invalidate_task
+    assert (await store.get(original.id, TRUSTED)).status is MemoryStatus.SUPERSEDED
+    assert (await store.get(updated.id, TRUSTED)).status is MemoryStatus.ACTIVE
+
+
 def test_explicit_command_match_rejects_negated_intent():
     assert explicit_remember_matches("Please remember I prefer tea", "I prefer tea")
     assert explicit_remember_matches("Can you remember that I prefer tea?", "I prefer tea")

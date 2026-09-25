@@ -237,9 +237,13 @@ class SqliteMemoryV2Store:
             raise PermissionError("user-edited memory cannot be invalidated by automatic evidence")
         now = self._now().isoformat()
         async with write_connection(self.database_path, connection) as conn:
-            await conn.execute(
+            cursor = await conn.execute(
                 "UPDATE memory_v2_records SET status=?, invalidated_at=?, updated_at=? "
-                "WHERE memory_id=?", (MemoryStatus.INVALIDATED.value, now, now, memory_id))
+                "WHERE memory_id=? AND root_id=? AND version=? AND status=?",
+                (MemoryStatus.INVALIDATED.value, now, now, memory_id, row["root_id"],
+                 row["version"], MemoryStatus.ACTIVE.value))
+            if cursor.rowcount != 1:
+                raise ValueError("memory changed or is no longer active")
             await self._enqueue(conn, memory_id, MemoryOperationV2.DELETE,
                                 row["tenant_id"], row["user_id"], row["scope"], row["project_id"])
             # 回读走**同一个**连接：借用进来的事务还没提交，另开一条连接在 WAL 下看不到
