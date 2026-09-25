@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from uuid import uuid4
 
 import pytest
@@ -30,6 +31,12 @@ from tests.memory.v2._records import make_draft
 pytestmark = [pytest.mark.integration, pytest.mark.live_services, pytest.mark.asyncio]
 
 
+def _git_output(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
 class _CachedEmbeddings:
     """Reuse real provider vectors so each Milvus operation avoids another model request."""
 
@@ -44,6 +51,10 @@ class _CachedEmbeddings:
 
 
 async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
+    git_status = _git_output("status", "--porcelain")
+    assert not git_status, "live Recall@6 evidence must run from a clean committed tree"
+    code_commit = _git_output("rev-parse", "HEAD")
+    code_tree = _git_output("rev-parse", "HEAD^{tree}")
     settings = Settings()
     if not settings.milvus_uri or not settings.milvus_token.get_secret_value():
         pytest.skip("live Milvus credentials are not configured")
@@ -81,9 +92,13 @@ async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
     vectors = MilvusVectorStore(vector_settings, cached)
     service: MemoryV2Service | None = None
     collection_created = False
+    collection_absent_before_run = False
     evidence: dict | None = None
 
     try:
+        existing_collections = await vectors.connect()
+        assert collection_name not in existing_collections, "generated collection name must be unused"
+        collection_absent_before_run = True
         await vectors.initialize()
         collection_created = vectors.created_collection
         assert collection_created, "evaluation must own a new isolated Milvus collection"
@@ -144,6 +159,8 @@ async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
         evidence = {
             "dataset": dataset["dataset_id"],
             "dataset_sha256": dataset_sha256(),
+            "code_commit": code_commit,
+            "code_tree": code_tree,
             "ranking_version": RANKING_VERSION,
             "collection": collection_name,
             "collection_created_for_run": collection_created,
@@ -159,20 +176,36 @@ async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
         }
         assert result["recall"] >= dataset["minimum_recall"], json.dumps(evidence, sort_keys=True)
     finally:
-        if service is not None:
-            await service.aclose()
-        if vectors.created_collection:
+        try:
+            if service is not None:
+                await service.aclose()
+        finally:
             try:
-                await vectors.drop_created_collection()
-            except Exception:  # noqa: BLE001 — drop may commit remotely before its connection fails.
+                if collection_absent_before_run:
+                    try:
+                        remaining = await vectors.connect()
+                    except Exception:  # noqa: BLE001 — reconnect after uncertain create response.
+                        await vectors.close()
+                        vectors = MilvusVectorStore(vector_settings)
+                        remaining = await vectors.connect()
+                    if collection_name in remaining:
+                        try:
+                            if vectors.created_collection:
+                                await vectors.drop_created_collection()
+                            else:
+                                # The unique name was absent before this run; create may have
+                                # committed remotely even when its response was lost.
+                                await vectors._call("drop_collection", collection_name=collection_name)
+                        except Exception:  # noqa: BLE001 — drop may commit before its response is lost.
+                            await vectors.close()
+                            vectors = MilvusVectorStore(vector_settings)
+                        remaining = await vectors.connect()
+                        if collection_name in remaining:
+                            await vectors._call("drop_collection", collection_name=collection_name)
+                            remaining = await vectors.connect()
+                    assert collection_name not in remaining, "temporary Milvus collection cleanup failed"
+                if evidence is not None:
+                    evidence["cleanup"] = "confirmed_absent"
+                    print(json.dumps(evidence, sort_keys=True))
+            finally:
                 await vectors.close()
-                vectors = MilvusVectorStore(vector_settings)
-            remaining = await vectors.connect()
-            if collection_name in remaining:
-                await vectors._call("drop_collection", collection_name=collection_name)
-                remaining = await vectors.connect()
-            assert collection_name not in remaining, "temporary Milvus collection cleanup failed"
-        if evidence is not None:
-            evidence["cleanup"] = "confirmed"
-            print(json.dumps(evidence, sort_keys=True))
-        await vectors.close()
