@@ -17,6 +17,12 @@
 3/3 是硬判据 ⇒ 任务必须**结构性可达**（不赌模型的措辞或长链推理）。任务只要三件事：
 写一个内容固定的文件（`write`）、跑一条只读 git 命令（`bash`）、看仓库状态（`git_status`）。
 断言只钉**结果**与**工具面**（文件内容 + 至少一个生产工具 + 无悬空 call），不评语义质量。
+
+## 账本面（`#313` T5）
+
+直路（无 pause / 无 fallback）是"一次决策 = 一次实际请求"的**基线**：断言把
+`model_requests` / `total_tokens` / `cost_usd` 与轨迹重算结果对账（判据与理由见
+`accounting.py`）。真实用法（Provider 自报的 token）因此进证据，而不是只在单测里被假设。
 """
 
 from __future__ import annotations
@@ -25,10 +31,15 @@ from typing import Any
 
 from evaluation.assertions import dangling_tool_call_ids
 from evaluation.live_gate.registry import AttemptOutcome, ScenarioContext
+from evaluation.live_gate.scenarios.accounting import (
+    plain_path_request_assertion,
+    request_accounting,
+    terminal_counter_assertions,
+)
 from evaluation.live_gate.schema import AssertionResult
 
 SCENARIO_ID = "smoke-production-tools"
-SCENARIO_VERSION = 1
+SCENARIO_VERSION = 2
 
 #: 场景产物：路径与内容都是**常量** —— 断言才能是"相等"，而不是"看起来像"。
 ARTIFACT = "notes.txt"
@@ -183,11 +194,17 @@ class SmokeProductionToolsScenario:
         except Exception as error:  # noqa: BLE001 - 产物不存在也是判据的一种取值
             artifact_ok, artifact_detail = False, f"读取失败：{type(error).__name__}"
         dangling = dangling_tool_call_ids(events)
+        facts = request_accounting(events)
+        terminal = next(
+            (event.data for event in events if event.type == "run/completed"), None,
+        )
         return [
             AssertionResult(
                 name="run_completed", ok=run_status == "completed",
                 detail=f"run_status={run_status}",
             ),
+            plain_path_request_assertion(facts=facts, label="budget"),
+            *terminal_counter_assertions(facts=facts, terminal=terminal, label="budget"),
             AssertionResult(
                 name="artifact_content", ok=artifact_ok,
                 detail=f"{ARTIFACT} 内容比对（{artifact_detail}）",

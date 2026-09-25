@@ -1249,6 +1249,12 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.MODEL_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
   [EventType.MODEL_COMPLETED]: { apply: projectModelCompleted, summarize: summarizeModelCompleted },
   [EventType.MODEL_FAILED]: { apply: noopProjection, summarize: emptySummary },
+  // #313（T5）：`model/request` 是**账本**事件（一次实际 Provider 请求一格），不改会话投影
+  // 状态——预算读数由 `run/started` 的 budget 与 `run/paused` / `run/resumed` 承载（11 §6.1）。
+  // 登记为 no-op 才是既有兜底行为（进 `unknown_events` 计数、不把帧当未知事件丢弃）；
+  // 不登记则 `Record<EventTypeValue, EventSemantics>` 的穷尽性被破坏，`tsc` 直接红
+  // （`event-types.ts` 是生成物，加类型就必须在这里登记）。
+  [EventType.MODEL_REQUEST]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_CALL]: { apply: projectToolCall, summarize: summarizeToolCall },
   [EventType.TOOL_RESULT]: { apply: projectToolResult, summarize: summarizeToolResult },
   [EventType.OPERATION_RECONCILE_REQUIRED]: {

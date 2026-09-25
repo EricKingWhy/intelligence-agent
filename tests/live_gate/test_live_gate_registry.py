@@ -88,7 +88,10 @@ def test_builtin_registration_is_explicit_and_idempotent() -> None:
     register_builtin_scenarios()
     smoke = get_scenario(SMOKE_ID)
     assert isinstance(smoke, LiveScenario)
-    assert smoke.version == 1
+    # 场景版本随票增长（T2 v1 → T5 v2 …），钉的是"版本是个正整数"而不是某个具体值：
+    # 写死具体值会让每张改场景的票都得改这里，而真正的回归（版本没写 / 写成 0 或字符串）
+    # 照样能被抓住。
+    assert isinstance(smoke.version, int) and smoke.version >= 1
     declared = [item.id for item in BUILTIN_SCENARIOS]
     assert SMOKE_ID in declared
     assert len(declared) == len(set(declared)), f"内置清单里有重复 id：{declared}"

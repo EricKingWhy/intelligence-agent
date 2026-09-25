@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from evaluation.live_gate import repo
+from evaluation.live_gate.registry import get_scenario
 from tests.live_gate._evidence_factory import make_evidence
 
 
@@ -29,7 +30,9 @@ def test_list_registers_the_builtin_smoke_scenario(capsys) -> None:
     assert cli.main(["list"]) == cli.EXIT_OK
     out = capsys.readouterr().out
     assert "smoke-production-tools" in out
-    assert "v1" in out
+    # 场景版本随票增长（T2 v1 → T5 v2 …），钉的是"版本以 vN 形式打出来"，
+    # 不是某个具体 N —— 写死会让每张改场景的票都得改这里。
+    assert f"v{get_scenario('smoke-production-tools').version}" in out
 
 
 def test_unknown_scenario_is_a_usage_error_without_any_request(capsys) -> None:

@@ -382,7 +382,9 @@ export function ceilingDraftError(paused: RunPausedInfo, draft: string): string 
     if (!Number.isSafeInteger(value) || value < 1) return 'ceiling 必须是正整数';
   }
   const minimum = fact === null ? null : minResumeValue(spec, fact);
-  if (minimum === null || fact === null) {
+  // `fact.consumed` 是**可空属性**（行在、读数为未知）：它与"行不在"是同一件事的两种形状，
+  // 一起收窄——否则下面的阈值仍然是 `string | number | null`，`tsc` 在赋值处报。
+  if (minimum === null || fact === null || fact.consumed === null) {
     // 账目未知而该维配了 ceiling：后端必然 409（无法证明在预算内）。前端不编一个
     // 数字，如实说"预校验不了"。
     return '已消耗读数不可得：这一维配了 ceiling 而账目未知时后端会拒绝恢复（409）';

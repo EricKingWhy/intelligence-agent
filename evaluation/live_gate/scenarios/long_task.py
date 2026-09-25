@@ -42,6 +42,12 @@
 **处置是改场景的命名，不是放松扫描器**：安全边界不为取证方便让步（`AGENTS` §9.5 红线），
 而"日志里 `token=…` 是不是凭证"这件事扫描器**不该**去猜。所以链输出改用 `next=`，prompt 里
 的例子也照此写——信息屏障与全部断言一条都没变。
+
+## 账本面（`#313` T5）
+
+12+ 次决策的长路是"计数器在高轮数下不漂移"的**真实样本**：`model_requests` /
+`total_tokens` / `cost_usd` 与轨迹重算结果对账（判据与理由见 `accounting.py`），
+于是"长跑之后账还对得上"有机械证据，而不靠人看数字。
 """
 
 from __future__ import annotations
@@ -49,12 +55,18 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent_harness.session import MODEL_COMPLETED, RUN_COMPLETED
 from evaluation.assertions import dangling_tool_call_ids
 from evaluation.live_gate.registry import AttemptOutcome, ScenarioContext
+from evaluation.live_gate.scenarios.accounting import (
+    plain_path_request_assertion,
+    request_accounting,
+    terminal_counter_assertions,
+)
 from evaluation.live_gate.schema import AssertionResult
 
 SCENARIO_ID = "long-task-past-legacy-turn-limit"
-SCENARIO_VERSION = 1
+SCENARIO_VERSION = 2
 
 #: 链步数 = 模型决策数下界（见模块 docstring 的信息屏障）。12 > 旧上限 10。
 TRANSITIONS = 12
@@ -274,10 +286,17 @@ class LongTaskPastLegacyTurnLimitScenario:
         final_token = _safe_read(ctx.sandbox, TOKEN_FILE).strip()
         steps_recorded = _safe_read(ctx.sandbox, STEPS_FILE).strip()
         done_content = _safe_read(ctx.sandbox, DONE_FILE)
-        model_requests = sum(1 for event in events if event.type == "model/completed")
+        # `model/completed` 数的是**被接纳的决策**（= `agent_turns`），不是
+        # `model_requests`（后者数每一次实际 Provider 请求，`02 §5.1` 两者分开）。
+        # 这个局部名原先叫 `model_requests`，在 `#313` 引入真计数器后会造成读反。
+        decisions = sum(1 for event in events if event.type == MODEL_COMPLETED)
         fuse_tripped = any(FUSE_TRIP_MARKER in _event_text(event) for event in events)
         dangling = dangling_tool_call_ids(events)
         bash_calls = tool_calls.count("bash")
+        facts = request_accounting(events)
+        terminal = next(
+            (event.data for event in events if event.type == RUN_COMPLETED), None,
+        )
         return [
             AssertionResult(
                 name="run_completed", ok=run_status == "completed",
@@ -306,9 +325,15 @@ class LongTaskPastLegacyTurnLimitScenario:
                 detail=f"{DONE_FILE} 与 {TOKEN_FILE} 比对（缺失或不等即不通过）",
             ),
             AssertionResult(
-                name="model_requests_observed", ok=model_requests > LEGACY_TURN_LIMIT,
-                detail=f"model/completed={model_requests}",
+                name="model_decisions_exceeded_legacy_limit",
+                ok=decisions > LEGACY_TURN_LIMIT,
+                detail=(
+                    f"model/completed（= agent_turns）={decisions}"
+                    f"（旧上限 {LEGACY_TURN_LIMIT}）"
+                ),
             ),
+            plain_path_request_assertion(facts=facts, label="budget"),
+            *terminal_counter_assertions(facts=facts, terminal=terminal, label="budget"),
             AssertionResult(
                 name="tool_work_observed",
                 ok=bash_calls >= TRANSITIONS and "write" in tool_calls,

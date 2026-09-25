@@ -64,19 +64,47 @@ class _StubSandbox:
         return self._files[name]
 
 
-def _events(*, steps: int, fuse_tripped: bool, bash_calls: int = TRANSITIONS) -> list[Any]:
-    """自洽的事件序列：`steps` 次 model/completed + bash/write 各配对 + run/started。
+#: 一格请求自报的 token 数（合成值）。断言比的是"与轨迹重算相同"，数字本身无关紧要，
+#: 但取常数能让"少算一格 / 记成 0"这类变异一眼看得出差在哪。
+TOKENS_PER_REQUEST = 11
+
+
+def _events(
+    *, steps: int, fuse_tripped: bool, bash_calls: int = TRANSITIONS,
+    requests: int | None = None, reported_tokens: int = TOKENS_PER_REQUEST,
+    terminal_tokens: int | None = None,
+) -> list[Any]:
+    """自洽的事件序列：`steps` 次 model/completed（各一次实际请求）+ bash/write 各配对
+    + run/completed（带 `usage_total`）。
 
     `fuse_tripped=True` 时把 `max_steps_exceeded` 写进一次 run/failed（模拟旧行为——
-    这正是"撞 fuse 的 run 不该被记成通过"的输入）。
+    这正是"撞 fuse 的 run 不该被记成通过"的输入）；那种形状没有 `run/completed`，
+    终态读数缺失 ⇒ 对账判据如实判红（正是要看见的形状）。
 
     每条带 `seq`（与持久化 `SessionEvent` 同名同义）：`durable_replay_matches_live`
     按 `(seq, type)` 逐条比，替身没有 seq 就比不出"复读与首读同序"这件事。
+
+    `requests` / `reported_tokens` / `terminal_tokens` 是**故意制造分歧**的旋钮（对账判据的
+    鉴别力用例）：`requests` 只动"落了几格请求"，`terminal_tokens` 只动终态那一份读数
+    （默认 = 逐格累加，即同源），三者互相独立才能分别考出"哪一面漂了"。
     """
+    request_count = steps if requests is None else requests
+    terminal_total = (
+        request_count * reported_tokens if terminal_tokens is None else terminal_tokens
+    )
     events: list[Any] = [
         SimpleNamespace(seq=1, type="run/started", data={"turn_index": 1}, run_id="run-long-1"),
     ]
     for index in range(1, steps + 1):
+        if index <= request_count:
+            events.append(SimpleNamespace(
+                seq=len(events) + 1, type="model/request",
+                data={
+                    "role": "primary", "outcome": "completed", "model": "test-model",
+                    "usage": {"total_tokens": reported_tokens},
+                },
+                run_id="run-long-1",
+            ))
         events.append(SimpleNamespace(
             seq=len(events) + 1, type="model/completed", data={"content": ""},
             run_id="run-long-1",
@@ -109,14 +137,29 @@ def _events(*, steps: int, fuse_tripped: bool, bash_calls: int = TRANSITIONS) ->
             data={"reason": "max_steps_exceeded", "message": "撞保险丝"},
             run_id="run-long-1",
         ))
+    else:
+        # 终态读数：usage_total = 自报格数 × 每格 token（逐格累加的同义表达）。
+        events.append(SimpleNamespace(
+            seq=len(events) + 1, type="run/completed",
+            data={
+                "final_text": "12 步完成",
+                "usage_total": {"total_tokens": terminal_total},
+                # 生产链不报 cost（`#313` D4）⇒ 未知，不是 0。
+                "cost_usd": None,
+            },
+            run_id="run-long-1",
+        ))
     return events
 
 
 def _assertions_for(
     *, steps: int, fuse_tripped: bool, files: dict[str, str], bash_calls: int = TRANSITIONS,
     tool_calls: list[str] | None = None, replayed: list[Any] | None = None,
+    **event_kwargs: Any,
 ) -> dict[str, Any]:
-    events = _events(steps=steps, fuse_tripped=fuse_tripped, bash_calls=bash_calls)
+    events = _events(
+        steps=steps, fuse_tripped=fuse_tripped, bash_calls=bash_calls, **event_kwargs,
+    )
     calls = tool_calls if tool_calls is not None else ["bash"] * bash_calls + ["write"]
     results = SCENARIO._assertions(
         ctx=SimpleNamespace(session_id="live-gate-long-task-a1", sandbox=_StubSandbox(files)),
@@ -240,7 +283,7 @@ def test_assertions_reject_missing_tool_or_model_work(tmp_path):
         steps=1, fuse_tripped=False, files=_consistent_files(),
         bash_calls=TRANSITIONS,
     )
-    assert not no_model["model_requests_observed"].ok
+    assert not no_model["model_decisions_exceeded_legacy_limit"].ok
 
 
 def test_assertions_reject_a_trajectory_that_grew_after_the_first_read(tmp_path):
@@ -264,3 +307,37 @@ def test_assertions_reject_a_trajectory_that_grew_after_the_first_read(tmp_path)
     # 其余断言与这件事无关：它们仍然全绿 —— 判红只由"轨迹动了"触发（鉴别力在这一点上）
     failed = {name for name, item in results.items() if not item.ok}
     assert failed == {"durable_replay_matches_live"}
+
+
+# ── 账本面（`#313` T5）────────────────────────────────────────────────
+
+
+def test_assertions_reject_a_request_count_that_drifted_from_the_trajectory():
+    """终态记的请求数与轨迹不等 → 判红（长跑之后账仍然要对得上）。"""
+    results = _assertions_for(
+        steps=TRANSITIONS + 1, fuse_tripped=False, files=_consistent_files(),
+        requests=TRANSITIONS,
+    )
+    assert not results["budget.one_request_per_decision"].ok
+
+
+def test_assertions_reject_terminal_tokens_that_do_not_match_the_trajectory():
+    """终态 `usage_total` 与逐格自报的累加不等 → 判红（计数器不得漂移）。
+
+    只动**终态那一份**读数（`terminal_tokens`），逐格自报照旧 ⇒ 红必然落在 `terminal_tokens`
+    上，而不是"两边一起改所以一起对"。
+    """
+    steps = TRANSITIONS + 1
+    results = _assertions_for(
+        steps=steps, fuse_tripped=False, files=_consistent_files(),
+        terminal_tokens=steps * TOKENS_PER_REQUEST + 3,
+    )
+    assert results["budget.one_request_per_decision"].ok
+    assert not results["budget.terminal_tokens"].ok
+
+
+def test_cost_stays_unknown_when_no_request_reports_it():
+    """生产链不报 cost ⇒ 读数未知（不是 0）：这条在真实 3/3 上也会走到。"""
+    results = _assertions_for(steps=TRANSITIONS + 1, fuse_tripped=False, files=_consistent_files())
+    assert results["budget.terminal_cost"].ok
+    assert "未知" in results["budget.terminal_cost"].detail

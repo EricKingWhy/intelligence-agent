@@ -86,6 +86,9 @@ from evaluation.live_gate.workspace import DEFAULT_BACKEND, create_workspace
 ATTEMPT_TIMEOUT = 900.0
 
 #: 受控失败注入的前缀（**验证专用**）：`attempt:<n>` 让第 n 次尝试在不调用场景的情况下失败。
+#: 该前缀之外的非空值**不跳过场景**，原样交给场景消费（`ScenarioContext.injected_failure`，
+#: 如 `#313` 的 `primary-failure`）——两种形态都被 `injected_failure` 非空锁到 `FAIL` 上限，
+#: 差别只在"这次运行烧不烧真实请求"，判定面由 `validator._recompute_verdict` 独立重算。
 INJECT_ATTEMPT_PREFIX = "attempt:"
 
 #: 证据里如实登记的替身清单（键 = 面，值 = `injected` / `not_builtin`）。出现即判 FAIL 上限。
@@ -456,7 +459,8 @@ async def run_gate(options: GateOptions) -> GateResult:
             if stopped_early:
                 break
             if options.injected_failure == f"{INJECT_ATTEMPT_PREFIX}{index}":
-                # 受控失败注入：**不调用场景**（验证专用，不必再烧一次真实调用）
+                # 受控失败注入：**不调用场景**（验证专用，不必再烧一次真实调用）。
+                # 其他非空标记走下面那条路（场景自己消费，如 `primary-failure`）。
                 attempts.append(AttemptRecord(
                     index=index, started_at=now_utc(), ended_at=now_utc(), status=Verdict.FAIL,
                     duration_ms=0, error=f"injected-failure: attempt {index}（验证专用注入）",

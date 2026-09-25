@@ -32,6 +32,10 @@ function pausedInfo(overrides: Partial<RunPausedInfo> = {}): RunPausedInfo {
     trigger_dimension: 'run.max_agent_turns_total',
     consumed_agent_turns: 3,
     run_limit: 4,
+    // `#313` 四维组：本夹具是**老暂停载荷**形状（事件没带 `consumed` / `limits.run`）⇒ null，
+    // 语义是"该维读数未知"而不是 0。需要四维的用例各自显式传值（见下面的 requests 用例）。
+    consumed_dimensions: null,
+    run_limits: null,
     local_fuse: { max_agent_turns: 500, source: 'deployment' },
     continuation: null,
     closeout_source: 'model',

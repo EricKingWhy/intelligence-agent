@@ -245,7 +245,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--skip", default="", help="操作者显式跳过（判 SKIPPED，附理由）")
     run.add_argument(
         "--inject-failure", default="",
-        help="验证专用：attempt:<n> 让第 n 次尝试受控失败（总判定必为 FAIL）",
+        help=(
+            "验证专用（总判定必为 FAIL，不计入 3/3）：attempt:<n> 让第 n 次尝试在不调用场景的"
+            "情况下失败；primary-failure 交给场景自己消费（真实发出 primary 请求但连不上，"
+            "由真实配置的 fallback 接住 —— #313 的 AC-9 证据面）"
+        ),
     )
 
     validate = sub.add_parser("validate", help="独立复核一份证据")

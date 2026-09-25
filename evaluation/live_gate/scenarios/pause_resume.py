@@ -59,6 +59,24 @@
 跑完由 `workspace.teardown()` 连同根目录一起销毁并核实。可选能力（CAPABILITIES）**沿用
 部署配置**：生产装配路径按 `wire_capabilities` 的既有纪律装配它们（外部依赖故障按
 OPTIONAL 降级，`08 §7`）。
+
+## 账本面（`#313` T5）
+
+暂停快照 / `run/resumed` 快照 / API 投影（`SessionService.budget_projection`）里的四维
+读数，与**轨迹重算**结果逐维对账（判据与理由见 `accounting.py`）。暂停是"账在恢复基数上
+必须完全一致"的现场：`model_requests` 要数进 closeout 那次请求、不得并进 `agent_turns`；
+token / cost 只认 Provider 自报，缺一格就是未知而不是 0。
+
+## 受控 primary 失败（`--inject-failure primary-failure`）
+
+AC-9 要的是"受控 primary 失败 → **真实配置的** fallback 接管"的证据。本场景在收到该注入
+标记时只改**一个**字段：把 primary 的 `base_url` 指到 `.invalid` 保留域（RFC 2606，必然解析
+失败 ⇒ 真实发出的一次连接失败请求，瞬时故障分类 ⇒ policy 放行切换）。fallback 一侧
+**逐字沿用部署配置**，两级链由生产 `build_runtime` 装配——不是本场景手搭的模型链。
+
+这条运行**不得**被当成 3/3 的一部分：`injected_failure` 非空 ⇒ runner 与 validator 两边都把
+判定锁到 `FAIL`（`schema.decide_verdict` / `validator._recompute_verdict`），它产出的是
+**证据**（两侧 model id + 请求计数 + 未自报 usage 的未知语义），不是通过。
 """
 
 from __future__ import annotations
@@ -69,10 +87,24 @@ from typing import Any
 
 from evaluation.assertions import dangling_tool_call_ids
 from evaluation.live_gate.registry import AttemptOutcome, ScenarioContext
+from evaluation.live_gate.scenarios.accounting import (
+    consumed_counter_assertions,
+    request_accounting,
+)
 from evaluation.live_gate.schema import AssertionResult
 
 SCENARIO_ID = "budget-pause-resume-same-run"
-SCENARIO_VERSION = 1
+#: v2（`#313` T5）：断言集加入四维账本对账 + 受控 primary 失败的证据面（下面的注入标记）。
+SCENARIO_VERSION = 2
+
+#: 受控 primary 失败的注入标记（`python scripts/live_gate.py run --inject-failure primary-failure`）。
+#: 它**不**走 `attempt:N` 那条"合成一次失败尝试"的路（那是给 validator 自证用的），而是由本
+#: 场景消费：见模块 docstring「受控 primary 失败」。判定仍被锁到 `FAIL`（证据，不是通过）。
+PRIMARY_FAILURE_INJECTION = "primary-failure"
+
+#: 受控失败用的 primary 端点：`.invalid` 是 RFC 2606 保留域 ⇒ DNS 必然解析失败
+#: （不依赖本机某个端口恰好没人监听，也不赌 Provider 的错误语义）。
+BROKEN_PRIMARY_BASE_URL = "http://live-gate-primary.invalid/v1"
 
 #: 首次执行的 run 作用域**绝对** ceiling。2 = 「1 个产出轮 + 为 closeout 预留的那一轮」：
 #: 准入判定是 `consumed + 1 >= ceiling`，所以在首轮之后必然命中（暂停是**结构**结果，
@@ -200,12 +232,20 @@ def _scenario_settings(ctx: ScenarioContext) -> Any:
 
     **其余字段逐字沿用部署配置**（含 CAPABILITIES / 模型链 / 审批超时）：本场景要跑的
     就是生产装配路径，只在"运行时产物落哪"这一项上重定向。
+
+    受控 primary 失败（`--inject-failure primary-failure`，见模块 docstring）时**多改一个
+    字段**：primary 的 `base_url` 指向 `.invalid`。`model_provider` / `model_name` /
+    `model_api_key` 与**整条 fallback 配置**逐字不动——所以证据里的两侧 id 与部署配置一致，
+    而 primary 那次失败是"真实发出、真实连不上"，不是替身假装的。
     """
     root = ctx.session_root.parent
-    return ctx.settings.model_copy(update={
+    overrides: dict[str, Any] = {
         "workspace_dir": str(root),
         "artifact_dir": str(root / "artifacts"),
-    })
+    }
+    if ctx.injected_failure == PRIMARY_FAILURE_INJECTION:
+        overrides["model_base_url"] = BROKEN_PRIMARY_BASE_URL
+    return ctx.settings.model_copy(update=overrides)
 
 
 async def _drain(result: Any, *, service: Any, phase: str) -> list[Any]:
@@ -329,6 +369,9 @@ class BudgetPauseResumeSameRunScenario:
             events = await service.get_events(ctx.session_id)
             # 独立复读（新的 store 实例、重新读盘）：durable 事实与内存态一致性的证据面
             replayed = store.read_events(ctx.session_id)
+            # API 投影（`#313` T5，`11 §6.1` 的客户端面）：四维读数与水位的**服务端**读数，
+            # 与轨迹重算对账。它**只读**（`budget_projection` 不写事件），所以放在读盘之后。
+            projection = await service.budget_projection(ctx.session_id)
         except Exception as error:  # noqa: BLE001 - 同上的如实记录
             return AttemptOutcome(
                 ok=False, session_id=ctx.session_id,
@@ -345,6 +388,7 @@ class BudgetPauseResumeSameRunScenario:
         )
         assertions = self._assertions(
             ctx=ctx, events=events, replayed=replayed, tool_calls=tool_calls,
+            projection=projection,
             streams={
                 "pause": [str(event.type) for event in stream_pause],
                 "resume": [str(event.type) for event in stream_resume],
@@ -368,6 +412,7 @@ class BudgetPauseResumeSameRunScenario:
     def _assertions(
         self, *, ctx: ScenarioContext, events: list[Any], replayed: list[Any],
         tool_calls: list[str], streams: dict[str, list[str]],
+        projection: dict[str, Any] | None = None,
     ) -> list[AssertionResult]:
         """结构性判据（机械可检，不是 LLM judge）。"""
         from agent_harness.agent.run_budget import (
@@ -442,6 +487,17 @@ class BudgetPauseResumeSameRunScenario:
         done_content = _safe_read(ctx.sandbox, DONE_FILE)
         fuse_tripped = any(FUSE_TRIP_MARKER in _event_text(event) for event in events)
         dangling = dangling_tool_call_ids(events)
+        # 账本面（`#313` T5）：暂停快照是**恢复的基数**、API 投影是**客户端读到的**那一份，
+        # 两者都要与轨迹重算逐维相同（判据与理由见 `accounting.py`）。
+        pause_cutoff = paused.seq if paused is not None else None
+        pause_facts = request_accounting(
+            [event for event in events if pause_cutoff is None or event.seq <= pause_cutoff]
+        )
+        run_facts = request_accounting(events)
+        projection_consumed = (
+            projection.get("consumed") if isinstance(projection, dict) else None
+        )
+        induced = ctx.injected_failure == PRIMARY_FAILURE_INJECTION
         return [
             AssertionResult(
                 name="pause_exactly_once", ok=len(paused_events) == 1,
@@ -486,6 +542,9 @@ class BudgetPauseResumeSameRunScenario:
                     f"（期望 {expected_consumed} = {LOW_CEILING - 1} 个产出轮；"
                     "closeout 是 model_requests，不进 agent_turns）"
                 ),
+            ),
+            *consumed_counter_assertions(
+                facts=pause_facts, consumed=pdata.get("consumed"), label="pause",
             ),
             AssertionResult(
                 name="pause_continuation_contract", ok=continuation_ok,
@@ -577,6 +636,9 @@ class BudgetPauseResumeSameRunScenario:
                     f" terminal={getattr(state, 'terminal', None)}"
                 ),
             ),
+            *consumed_counter_assertions(
+                facts=run_facts, consumed=projection_consumed, label="api_projection",
+            ),
             AssertionResult(
                 name="durable_replay_matches_live",
                 ok=(
@@ -622,7 +684,66 @@ class BudgetPauseResumeSameRunScenario:
                     f"run_id={'有' if run_id else '无'} tool_calls={len(tool_calls)}"
                 ),
             ),
+            *(
+                _fallback_evidence_assertions(
+                    ctx=ctx, events=events, pause_facts=pause_facts,
+                )
+                if induced else []
+            ),
         ]
+
+
+def _fallback_evidence_assertions(
+    *, ctx: ScenarioContext, events: list[Any], pause_facts: Any,
+) -> list[AssertionResult]:
+    """受控 primary 失败的证据面（只在 `--inject-failure primary-failure` 下出现）。
+
+    三条各自独立：**失败请求真的发生过**（primary 角色 + 失败格）、**真实配置的 fallback
+    接了手**（`model/fallback` 的两侧名字 == 部署配置，且有 fallback 角色的请求）、
+    **缺 usage 的格让该维度转未知而不是 0**（`02 §5.1` / `11 §6.1` 的语义在真实数据上成立）。
+    判定被锁到 `FAIL`（注入）——这三条是"这次运行的证据读得懂"，不是"这次运行通过"。
+    """
+    from agent_harness.session import MODEL_FALLBACK
+
+    from_model = str(getattr(ctx.settings, "model_name", "") or "")
+    to_model = str(getattr(ctx.settings, "fallback_model_name", "") or "")
+    transitions = [event for event in events if event.type == MODEL_FALLBACK]
+    reached = [
+        event for event in transitions
+        if str(event.data.get("from_model") or "") == from_model
+        and str(event.data.get("to_model") or "") == to_model
+    ]
+    return [
+        AssertionResult(
+            name="fallback_primary_failure_recorded",
+            ok=pause_facts.failed >= 1 and pause_facts.by_role.get("primary", 0) >= 1,
+            detail=(
+                f"受控 primary={from_model or '?'}；{pause_facts.summary()}"
+                "（失败的那次请求占 model_requests 一席，不增 agent_turns）"
+            ),
+        ),
+        AssertionResult(
+            name="fallback_used_configured_provider",
+            ok=bool(reached) and pause_facts.by_role.get("fallback", 0) >= 1,
+            detail=(
+                f"model/fallback 事件 {len(transitions)} 条，其中 "
+                f"{from_model or '?'} → {to_model or '?'} 的 {len(reached)} 条；"
+                f"fallback 角色的请求 {pause_facts.by_role.get('fallback', 0)} 次"
+                "（fallback 一侧逐字沿用部署配置）"
+            ),
+        ),
+        AssertionResult(
+            name="unavailable_usage_is_unknown_not_zero",
+            ok=pause_facts.tokens is None and pause_facts.cost is None,
+            detail=(
+                "暂停快照 total_tokens="
+                f"{'未知' if pause_facts.tokens is None else pause_facts.tokens}"
+                " cost_usd="
+                f"{'未知' if pause_facts.cost is None else format(pause_facts.cost, 'f')}"
+                "（该 run 有请求未自报 usage ⇒ 未知，不得记为 0）"
+            ),
+        ),
+    ]
 
 
 SCENARIO = BudgetPauseResumeSameRunScenario()

@@ -41,12 +41,25 @@ class _StubSandbox:
         return self._files[name]
 
 
-def _events(*, tool_calls: list[str] | None = None) -> list[Any]:
-    """自洽轨迹：run/started + 每次工具调用各一对 call/result + run/completed。
+#: 一格请求自报的 token 数（合成值）。用**能整除的常数**：断言比的是"和轨迹重算相同"，
+#: 数字本身是多少无关紧要，但让"少算一格 / 记成 0"这类变异一眼看得出差在哪。
+TOKENS_PER_REQUEST = 7
+
+
+def _events(
+    *, tool_calls: list[str] | None = None, requests: int | None = None,
+    reported_tokens: int | None = None, terminal_usage: int | None = None,
+) -> list[Any]:
+    """自洽轨迹：run/started + 每次工具调用各一对 call/result + 一次决策 + run/completed。
 
     每条带 `seq`（与持久化 `SessionEvent` 同名同义）：复读判据按 `(seq, type)` 逐条比。
+    三个 `*_tokens` / `requests` 参数是**故意制造分歧**的旋钮（对账判据的鉴别力用例）：
+    缺省时三者自洽（1 格请求、自报 7、终态 usage_total=7）。
     """
     calls = ["write", "bash", "git_status"] if tool_calls is None else tool_calls
+    request_count = 1 if requests is None else requests
+    self_reported = TOKENS_PER_REQUEST if reported_tokens is None else reported_tokens
+    total = self_reported if terminal_usage is None else terminal_usage
     events: list[Any] = [SimpleNamespace(
         seq=1, type="run/started", data={"turn_index": 1}, run_id=RUN_ID,
     )]
@@ -60,11 +73,22 @@ def _events(*, tool_calls: list[str] | None = None) -> list[Any]:
             seq=len(events) + 1, type="tool/result",
             data={"tool_call_id": call_id, "tool_name": name}, run_id=RUN_ID,
         ))
+    for _ in range(request_count):
+        events.append(SimpleNamespace(
+            seq=len(events) + 1, type="model/request",
+            data={
+                "role": "primary", "outcome": "completed", "model": "test-model",
+                "usage": {"total_tokens": self_reported},
+            },
+            run_id=RUN_ID,
+        ))
     events.append(SimpleNamespace(
         seq=len(events) + 1, type="model/completed", data={"content": "完成"}, run_id=RUN_ID,
     ))
     events.append(SimpleNamespace(
-        seq=len(events) + 1, type="run/completed", data={"final_text": "完成"}, run_id=RUN_ID,
+        seq=len(events) + 1, type="run/completed",
+        data={"final_text": "完成", "usage_total": {"total_tokens": total}, "cost_usd": None},
+        run_id=RUN_ID,
     ))
     return events
 
@@ -72,9 +96,9 @@ def _events(*, tool_calls: list[str] | None = None) -> list[Any]:
 def _assertions_for(
     *, run_status: str = "completed", tool_calls: list[str] | None = None,
     files: dict[str, str] | None = None, replayed: list[Any] | None = None,
-    session_id: str = SESSION_ID,
+    session_id: str = SESSION_ID, **event_kwargs: Any,
 ) -> dict[str, Any]:
-    events = _events(tool_calls=tool_calls)
+    events = _events(tool_calls=tool_calls, **event_kwargs)
     calls = [
         str(event.data.get("tool_name")) for event in events if event.type == "tool/call"
     ]
@@ -169,3 +193,30 @@ def test_assertions_reject_missing_session_identity():
     """没有 session_id → 判红（证据必须能指回它跑在哪个会话上）。"""
     results = _assertions_for(session_id="")
     assert not results["session_identity_present"].ok
+
+
+# ── 账本面（`#313` T5）────────────────────────────────────────────────
+
+
+def test_assertions_reject_requests_out_of_step_with_decisions():
+    """请求数 ≠ 决策数 → 判红（直路：一次决策恰一次实际请求）。"""
+    results = _assertions_for(requests=2)
+    assert not results["budget.one_request_per_decision"].ok
+
+
+def test_assertions_reject_tokens_that_do_not_match_the_trajectory():
+    """终态 `usage_total` 与轨迹重算不等 → 判红（半格差也要看得见）。"""
+    results = _assertions_for(terminal_usage=TOKENS_PER_REQUEST + 1)
+    assert results["budget.one_request_per_decision"].ok
+    assert not results["budget.terminal_tokens"].ok
+
+
+def test_cost_is_unknown_when_no_request_reports_it():
+    """没有任何一格自报 cost ⇒ 读数必须是**未知**（`None`），不是 0。
+
+    生产的 Provider 归属链当前不报 cost（`#313` 的 D4：不臆造费率），所以这条在真实
+    3/3 上也会走到——它正是"不可得 ≠ 0"在证据里的落点。
+    """
+    results = _assertions_for()
+    assert results["budget.terminal_cost"].ok
+    assert "未知" in results["budget.terminal_cost"].detail
