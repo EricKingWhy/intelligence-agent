@@ -5,13 +5,18 @@
 # 本地 `.githooks/pre-push` 挡的是"忘了跑"，不是"故意绕过"：`core.hooksPath` 是**本地配置、
 # 不随仓库分发**（别的 clone 不启用就等于没有），且 `git push --no-verify` 可绕过。2026-09-25
 # 之前本仓**零 CI**，所以 main 上的一切门禁都是自愿的 —— 这正是 #213 事故的成因。
-# 把同一套门禁搬到服务端、并在 main 上开 `gate0` 为**必需状态检查**之后，绕过路径只剩
-# "显式关掉分支保护"一条（仓库设置里有审计），不再有静默绕过。
+# 把同一套门禁搬到服务端、并在 main 上开 `gate0` 为**必需状态检查**之后，"忘了跑"与
+# "本地 --no-verify"这两条路径被封死；剩下的只有「显式关掉分支保护」与「改闸门自己」，
+# 后者见下方"它保证什么 / 不保证什么"。
 #
 # 它跑什么
 #
 # `scripts/gate0.py` 的**全部 6 条机械车道**（diff-check / ruff / oxlint / tsc / guards / coverage）。
-# 它是推送前门禁的**同一份实现**，不是第二个口径 —— 本地跑绿与 CI 跑绿是同一个判据。
+# 它跑的是推送前门禁的**同一份脚本**（不是第二套判据实现）—— 但**同一份脚本 ≠ 同一个环境与
+# 范围**，本地绿**推不出** CI 绿。已实测的反例：`ruff` 的 EXE001 只在 Unix 生效（ruff 0.16.3
+# 文档原文 "is not enforced on Windows or WSL"），而 Windows 施工机 `core.filemode=false`
+# ⇒ 本地永远看不见、CI 一直红（2026-09-25 实测 7 处）。解释器与依赖由 `uv.lock` /
+# `pnpm-lock.yaml` + `--locked` 钉住，故差异面主要是**平台**。
 # 它**不**取代协议 §8.8.4 的集成前**完整**门禁（重车道 pytest-full / vitest / build / e2e 仍须本地跑）。
 #
 # 三个决定性的细节（每一个都会让 CI 变成假红或自锁）
@@ -23,8 +28,24 @@
 #    浅克隆会让它判错或判不了。
 # ③ 只跑 `pull_request`，**不跑 push**：PR 合并后 main 顶端是一个 merge 提交，而它要被覆盖闸门
 #    承认需要"后续的台账行"（本仓既有做法，见 `chore(review-ledger): cover <merge>` 那一族提交）。
-#    若在 push 上跑，main 会在每次合并后**变红直到补行**；而 main 是必需检查的上游，
-#    `strict` 模式下会把下一个 PR 一起锁死。不跑就没这个自锁。
+#    若在 push 上跑，main 会在每次合并后**变红直到补行**。
+#    ⚠ 不跑 push **不等于"没有自锁"，只是把红点搬到下一个 PR**：main 顶端那个尚未记账的 merge
+#    提交，会被后续任何从 main 开出的 PR 的覆盖区间包含 ⇒ coverage 红（`strict` 要求分支与
+#    main 同步，会更快撞上）。处置 = 在该 PR 内补一行台账（只动台账的提交自动放行）。
+#
+# 它保证什么 / 不保证什么
+#
+# 保证：**没有"已过闸门"的提交之外的东西进得了 main** —— 前提是分支保护确实开着、
+#       `enforce_admins` 为真、且必需检查名与 `jobs.gate0.name` 一致。
+# 不保证：**闸门本身不可被改**。`pull_request` 事件执行的是 PR **头提交**里的这份 workflow，
+#       而必需检查之名取自 `jobs.gate0.name` ⇒ 一个能改这个文件的 PR 可以顺手改掉闸门，
+#       却仍然报出一个叫 `gate0` 的绿检查。同类输入还有 `scripts/gate0.py`（车道 argv / 词表）、
+#       `scripts/check_review_coverage.py`、`docs/review_ledger.tsv`（其判据是"每条 commit 有归属"，
+#       **不证明**审查真的发生过）、`docs/agents/verification.map.tsv`、
+#       `tests/test_verification_map.py`；更隐蔽的是闸门**读的配置**：新增根 `ruff.toml`
+#       （或 pyproject 里 `[tool.ruff] select = []`）、根 `conftest.py`、`web/tsconfig.json`
+#       都能静默关掉一条车道。⇒ 分支保护解决的是"闸门挡不挡得住手滑"，不是"挡不挡得住
+#       有权改它的人"。
 #
 # 环境对齐：python 3.13 / node 22 / pnpm 10.32.1 / `uv sync --locked --all-extras`，
 # 与本地施工环境一致（含 extras —— 本机 `.venv` 里确实装着 langgraph / langfuse / docker 等）。
@@ -88,6 +109,7 @@ jobs:
 
       - name: Gate-0（6 条机械车道，含覆盖闸门）
         run: |
+          # `--since` 只喂 `diff-check` 与展示：覆盖车道的区间由**台账**推出，不受它影响。
           BASE=$(git merge-base origin/main HEAD)
-          echo "diff 范围：${BASE}..HEAD"
+          echo "diff 范围（仅供 diff-check）：${BASE}..HEAD"
           PYTHONUTF8=1 .venv/bin/python scripts/gate0.py --since "$BASE"
