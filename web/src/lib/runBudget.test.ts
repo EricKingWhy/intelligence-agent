@@ -107,7 +107,8 @@ describe('pauseFacts —— 与 CLI 同一口径的展示数字（#312）', () =
     expect(facts.localFuseTurns).toBe(500);
     expect(facts.localFuseSource).toBe('deployment');
     expect(facts.version).toBe(2);
-    expect(facts.minResumeCeiling).toBe(5); // consumed + 2（后端判据 > consumed + 1）
+    // 后端判据 ceiling > consumed + RESERVED_CLOSEOUT_TURNS ⇒ 最小合法值 = consumed + 2
+    expect(facts.minResumeCeiling).toBe(5);
   });
 
   it('未配 run ceiling：ceiling/remaining 都是 null（渲染成 unlimited，不是 0）', () => {

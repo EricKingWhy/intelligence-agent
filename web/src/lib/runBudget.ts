@@ -11,6 +11,20 @@
 
 import type { RunPausedInfo } from '../types';
 
+/** 后端暂停判据里的两个常量（**只做展示口径，判定权威在后端**）。
+ *
+ *  `RESERVED_CLOSEOUT_TURNS` 镜像 `run_budget.RESERVED_CLOSEOUT_TURNS`：暂停点在
+ *  `consumed + 预留 >= ceiling`，所以恢复至少要留出"一个可接纳 turn + 一次 closeout
+ *  预留" ⇒ 最小合法 ceiling = `consumed + RESERVED + 1`（后端 `resume_ceiling_ok`
+ *  的 `ceiling > consumed + RESERVED`）。前端拿它**提示**（省一次必然 409 的往返），
+ *  真正的拒绝在后端——两边口径若分叉，以后端为准，改这里对齐。 */
+export const RESERVED_CLOSEOUT_TURNS = 1;
+
+/** 恢复请求的最小合法绝对 ceiling（绝对**值**，不是增量）。 */
+export function minResumeCeiling(consumedTurns: number): number {
+  return consumedTurns + RESERVED_CLOSEOUT_TURNS + 1;
+}
+
 export interface PauseFacts {
   consumed: number;
   /** 绝对 ceiling；null = 未配（UI 文案 "unlimited"，不是 0）。 */
@@ -23,9 +37,7 @@ export interface PauseFacts {
   version: number;
   /** 命中维度的人话标签（未知维度原样回显，不编名字）。 */
   dimensionLabel: string;
-  /** 恢复所需的最小绝对 ceiling——后端判据是 `ceiling > consumed + 1`
-   *  （`run_budget.resume_ceiling_ok`：至少留出"一个可接纳 turn + 一次 closeout 预留"），
-   *  所以最小合法值是 consumed + 2。 */
+  /** 恢复所需的最小绝对 ceiling（见 `minResumeCeiling`）。 */
   minResumeCeiling: number;
 }
 
@@ -53,7 +65,7 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
     closeoutSource: paused.closeout_source,
     version: paused.version,
     dimensionLabel: dimensionLabel(paused.trigger_dimension),
-    minResumeCeiling: paused.consumed_agent_turns + 2,
+    minResumeCeiling: minResumeCeiling(paused.consumed_agent_turns),
   };
 }
 
@@ -64,13 +76,13 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
  *  自己的规则就会与后端分叉，所以这里刻意只有这一条，且措辞指向是同一个数。 */
 export function ceilingDraftError(paused: RunPausedInfo, draft: string): string | null {
   const text = draft.trim();
-  if (!text) return `请填绝对 ceiling（至少 ${paused.consumed_agent_turns + 2}）`;
+  const min = minResumeCeiling(paused.consumed_agent_turns);
+  if (!text) return `请填绝对 ceiling（至少 ${min}）`;
   if (!/^\d+$/.test(text)) return 'ceiling 必须是正整数';
   const value = Number(text);
   if (!Number.isSafeInteger(value) || value < 1) return 'ceiling 必须是正整数';
-  const min = paused.consumed_agent_turns + 2;
   if (value < min) {
-    return `ceiling 必须大于已消耗 ${paused.consumed_agent_turns} + 1（至少 ${min}），否则恢复后立刻会再次暂停`;
+    return `ceiling 必须大于已消耗 ${paused.consumed_agent_turns} + ${RESERVED_CLOSEOUT_TURNS}（至少 ${min}），否则恢复后立刻会再次暂停`;
   }
   return null;
 }

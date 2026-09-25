@@ -4,14 +4,18 @@
 
 1. **暂停是预算撞线的结构结果**：首次执行的 run 作用域 ceiling 取 `LOW_CEILING = 2`，
    而准入判定是 `consumed + 1 >= ceiling`、位置在任何 model / tool / child 工作**之前**
-   （`02 §5.1`）⇒ 首轮之后必然命中 `run.max_agent_turns_total`。这一条与模型怎么选
-   无关 —— "暂停"不是等运气等来的。
+   （`02 §5.1`）⇒ 只要首轮真的产出了东西，第 2 次准入必然命中
+   `run.max_agent_turns_total`。判据是机械的（不含"模型愿不愿意"）：若模型第一轮就
+   给出最终回答（= 一步都没干活），它不会暂停——而那种情况立刻被
+   `chain_completed_after_resume` 判红（链一步没推进），不会变成假通过。
 2. **恢复沿用同一 run，且由生产代码落盘**：续跑走 `SessionService.resume_and_launch`
    （Web / CLI 的**同一条** CAS 路径）⇒ `run/resumed` 不是本场景手写的。断言钉住
    `from_pause_seq` / `previous_budget_version` / `consumed` 快照 / `resume_basis` /
    抬高后的绝对 ceiling，以及全程只有一条 `run/started`、一条 `user/message`
-   （同 run 续跑不落新任务文本）。首轮用的是**既有的另一种恢复形态**（带 `task` 的
-   新任务续聊）⇒ 票面要求"两种形态可分辨"这件事在本场景里同时被真实走过一遍。
+   （同 run 续跑不落新任务文本）。两次调用的形状也顺带被真实走了一遍：首轮带 `task`
+   （新任务入口——空会话上就是同一条 `resume_and_launch`），续跑不带 `task` 但带
+   `run_id` + `expected_version`（同 run 形态）；两者的可分辨性是 `validate_resume`
+   的形状闸门，不是本场景自定的规矩。
 3. **暂停前干过活、恢复后接着干**：链任务的信息屏障（见下）保证"还剩几格"只可能由
    后续执行完成。断言里"暂停之后仍有 tool/call"与"链走满 + 产物等于最终串"两条合起来，
    排除"暂停时其实已经做完、恢复只是走个过场"的假通过。
@@ -70,15 +74,16 @@ from evaluation.live_gate.schema import AssertionResult
 SCENARIO_ID = "budget-pause-resume-same-run"
 SCENARIO_VERSION = 1
 
-#: 首次执行的 run 作用域**绝对** ceiling。2 = 「恰好 1 个产出轮 + 1 次 closeout 预留」：
-#: 准入判定在首轮之后必然命中 ⇒ 暂停是**结构**结果。取 1 会让首轮都不发生，证据里就没有
-#: "暂停前真的干过活"这一面（而那正是"恢复不是走过场"的前提）。
+#: 首次执行的 run 作用域**绝对** ceiling。2 = 「1 个产出轮 + 为 closeout 预留的那一轮」：
+#: 准入判定是 `consumed + 1 >= ceiling`，所以在首轮之后必然命中（暂停是**结构**结果，
+#: 与模型怎么选无关）。取 1 会让首轮都不发生，证据里就没有"暂停前真的干过活"这一面
+#: ——而那正是"恢复不是走过场"的前提。
 LOW_CEILING = 2
 
 #: 恢复时给出的绝对 ceiling（**绝对值，不是增量** —— PRD §3 明文，场景不做加法）。
-#: 恢复后可接纳的轮数 = `ceiling - consumed - 1` ≥ 9（`consumed ∈ {1, 2}`）：4 格链从
-#: 任何断点都跑得完，同时**不是**无限预算 —— "恢复后再次撞线"这种真回归仍然可见
-#: （撞线会让 `run/paused` 变成两条，断言如实判红）。
+#: 恢复后可接纳的轮数 = `ceiling - consumed - 1` = 12 − 1 − 1 = 10 ≥ 9（
+#: `consumed = LOW_CEILING - 1 = 1`）：4 格链从任何断点都跑得完，同时**不是**无限预算
+#: ——"恢复后再次撞线"这种真回归仍然可见（撞线会让 `run/paused` 变成两条，断言如实判红）。
 RESUME_CEILING = 12
 
 #: 链步数 = 模型决策数下界（见模块 docstring 的信息屏障）。
@@ -352,7 +357,6 @@ class BudgetPauseResumeSameRunScenario:
     ) -> list[AssertionResult]:
         """结构性判据（机械可检，不是 LLM judge）。"""
         from agent_harness.agent.run_budget import (
-            CLOSEOUT_MODEL,
             REASON_BUDGET_EXHAUSTED,
             TRIGGER_RUN_TURNS,
             derive_run_budget,
@@ -381,8 +385,10 @@ class BudgetPauseResumeSameRunScenario:
         p_limits = pdata.get("limits")
         closeout = str(pdata.get("closeout_source") or "")
         consumed_at_pause = _agent_turns(pdata.get("consumed"))
-        # 账（`02 §5.2`）：ceiling=N 只接纳 N-1 个产出轮，closeout 那次也算**预算内**消耗
-        expected_consumed = (LOW_CEILING - 1) + (1 if closeout == CLOSEOUT_MODEL else 0)
+        # 账（`02 §5.1` 的七个 counter 互不混同）：`agent_turns` 只数被接纳的产出轮，
+        # ceiling=N 放行 N-1 轮（判定含预留）；closeout 那一次是 `model_requests`，
+        # **不**进这个快照。它的位置由预留表达（`02 §5.2`）。
+        expected_consumed = LOW_CEILING - 1
         continuation = pdata.get("continuation")
         continuation_ok = (
             isinstance(continuation, dict)
@@ -463,8 +469,8 @@ class BudgetPauseResumeSameRunScenario:
                 ok=consumed_at_pause == expected_consumed and closeout in ("model", "deterministic"),
                 detail=(
                     f"consumed={consumed_at_pause} closeout_source={closeout!r}"
-                    f"（期望 {expected_consumed} = {LOW_CEILING - 1} 个产出轮 + "
-                    f"{'1 次 closeout' if closeout == CLOSEOUT_MODEL else '0'}）"
+                    f"（期望 {expected_consumed} = {LOW_CEILING - 1} 个产出轮；"
+                    "closeout 是 model_requests，不进 agent_turns）"
                 ),
             ),
             AssertionResult(

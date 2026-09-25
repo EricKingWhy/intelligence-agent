@@ -129,10 +129,12 @@ def test_version_starts_at_one_and_increments_per_resume() -> None:
     assert resumed.paused is None, "run/resumed 之后不再处于暂停"
 
 
-def test_consumed_counts_accepted_decisions_and_a_model_closeout() -> None:
-    """计数点是"被接纳的模型决策"（`model/completed`）+ **模型** closeout 那一次。
+def test_consumed_counts_accepted_decisions_only() -> None:
+    """计数点是"被**接纳进 loop** 的模型决策"（`model/completed`）。
 
-    `model/failed`（拒绝或传输失败）不计数——它不是一个被接纳的决策。
+    `model/failed`（拒绝或传输失败）不计数；**模型 closeout 那一次也不计数** —— 它是
+    `model_requests`（`02 §5.1` 明文并列 primary / fallback / closeout / 子 Agent），
+    记进 `agent_turns` 就是该节 AC 禁止的"计数混同"。
     """
     events = [
         _started(),
@@ -140,13 +142,33 @@ def test_consumed_counts_accepted_decisions_and_a_model_closeout() -> None:
         _ev(3, "model/failed"),
         _ev(4, MODEL_COMPLETED),
         _paused(5, consumed=2, closeout=CLOSEOUT_MODEL),
-        _resumed(6, consumed=3),
+        _resumed(6, consumed=2),
         _ev(7, MODEL_COMPLETED),
     ]
     state = derive_run_budget(events, RUN_ID)
 
-    # 2 次普通决策 + 1 次模型 closeout + 恢复后 1 次 = 4
-    assert state.consumed_turns == 4
+    # 2 次普通决策 + 恢复后 1 次 = 3（closeout 不进这个数）
+    assert state.consumed_turns == 3
+
+
+def test_closeout_source_is_provenance_not_a_counter() -> None:
+    """同一个暂停点，`closeout_source` 换值不改变 `consumed`（它不是计数点）。"""
+    events = [
+        _started(),
+        _ev(2, MODEL_COMPLETED),
+        _paused(3, consumed=2, closeout=CLOSEOUT_MODEL),
+    ]
+    with_model = derive_run_budget(events, RUN_ID)
+    with_deterministic = derive_run_budget(
+        [_started(), _ev(2, MODEL_COMPLETED), _paused(3, consumed=2,
+                                                       closeout=CLOSEOUT_DETERMINISTIC)],
+        RUN_ID,
+    )
+
+    assert with_model.consumed_turns == with_deterministic.consumed_turns == 1
+    assert with_model.paused is not None and with_deterministic.paused is not None
+    assert with_model.paused.closeout_source == CLOSEOUT_MODEL
+    assert with_deterministic.paused.closeout_source == CLOSEOUT_DETERMINISTIC
 
 
 def test_derivation_ignores_other_runs() -> None:
@@ -158,7 +180,7 @@ def test_derivation_ignores_other_runs() -> None:
 
 
 def test_paused_snapshot_is_read_from_the_event_not_recomputed() -> None:
-    """`consumed` 快照以事件为准（含 closeout 那一轮），不是"重数一遍事件"。
+    """`consumed` 快照以事件为准，不是"重数一遍事件"。
 
     暂停事件是**当时**的账；之后的恢复/新决策只影响 state.consumed_turns。
     """
@@ -167,7 +189,7 @@ def test_paused_snapshot_is_read_from_the_event_not_recomputed() -> None:
 
     assert state.paused is not None
     assert state.paused.consumed_turns == 7
-    assert state.consumed_turns == 2, "state 的累计仍按事件重算（快照只描述那一刻）"
+    assert state.consumed_turns == 1, "state 的累计仍按事件重算（快照只描述那一刻）"
 
 
 @pytest.mark.parametrize("terminal", [RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED])
@@ -261,15 +283,19 @@ def test_pause_trigger_prefers_the_run_scope() -> None:
 
 
 def test_local_fuse_fires_with_its_own_counter() -> None:
-    """local fuse 是**实例级**保险丝：用本执行的步数计（续跑执行拿到的是新实例）。"""
+    """local fuse 是**实例级**保险丝：用本执行的步数计（续跑执行拿到的是新实例）。
+
+    临界点是 `steps >= fuse`（`02 §5.1`：fuse 按**被接纳**的模型决策计数），**不**含
+    closeout 预留——closeout 不是被接纳的决策，它在 fuse 上不占位，且这正是 EB-2 与
+    T3 冻结的那个判定点（`#312` 只改它的去向，不改临界点）。
+    """
     unlimited = RunTurnLimits(max_agent_turns_total=None)
 
-    # 判定含预留：0+1 >= 2 不成立 ⇒ 还能跑；1+1 >= 2 成立 ⇒ 停
     assert pause_trigger(
-        consumed_turns=99, run_limits=unlimited, execution_steps=0, local_fuse_turns=2,
+        consumed_turns=99, run_limits=unlimited, execution_steps=1, local_fuse_turns=2,
     ) is None
     assert pause_trigger(
-        consumed_turns=500, run_limits=unlimited, execution_steps=1, local_fuse_turns=2,
+        consumed_turns=500, run_limits=unlimited, execution_steps=2, local_fuse_turns=2,
     ) == TRIGGER_LOCAL_TURNS
 
 
@@ -293,7 +319,7 @@ def test_resume_must_leave_room_for_a_turn_plus_the_reserved_closeout() -> None:
 
 
 def test_reserved_closeout_turns_is_one() -> None:
-    """预算是"容量"不是豁免：常量是 1，且它**算在** ceiling 之内（`02 §5.2`）。"""
+    """预留是**turn ceiling 作用域**的容量，常量是 1（`02 §5.2`）；local fuse 不吃它。"""
     assert RESERVED_CLOSEOUT_TURNS == 1
 
 

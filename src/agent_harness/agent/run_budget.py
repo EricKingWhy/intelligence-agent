@@ -15,10 +15,11 @@
 3. **开工前校验** —— `validate_resume` 的 409/422 判定：被拒请求**不启动**任何
    model / tool / child 工作，也不写消耗预算的事件（`11 §6.1`）。
 
-**计数点（唯一）**：`agent_turns` = `model/completed`（被接纳的模型决策的 durable 记录）
-+ `run/paused(closeout_source=model)`（预留的那一次 closeout 也是**预算内**消耗，见
-ticket FIXED「closeout 属于预算内消耗」）。两项都是 append-only 事实 ⇒ 跨进程重启重建精确；
-`model/failed`（拒绝或传输失败的请求）**不**计数（`02 §5.1`）。
+**`agent_turns` 的计数点只有一个**：`model/completed`（被**接纳进 loop** 的模型决策的 durable
+记录）。`model/failed`（拒绝或传输失败的请求）不计数；**closeout 那一次调用也不计数** ——
+它是 `model_requests`（`02 §5.1` 明文把 closeout 与 primary/fallback/子 Agent 并列），
+把两者记进同一个数就叫"计数混同"，而 `02 §5.1` 的 AC 明文禁止混同（R2 的「closeout 在
+ceiling 之内」由**预留**表达：暂停在 ceiling 前一轮成立，closeout 因此有位置可站）。
 
 **本票不实现**（别误以为漏了）：token / cost / deadline / tool quota / stuck /
 SessionBudget —— 分别是 `#313` / `#314`（同票工具配额）/ `#315` / `#317` / `#318`。
@@ -75,8 +76,9 @@ RESUME_BASIS_VALUES: frozenset[str] = frozenset(
     }
 )
 
-#: 暂停前为 closeout **预留**的 turn 数（`02 §5.2`「在适用预算内预留容量」）。
-#: 预留是**容量**不是豁免：这一次 closeout 照样记进 `consumed`（ticket FIXED）。
+#: 暂停前为 closeout **预留**的 turn 容量（`02 §5.2`「在适用预算内预留容量」，
+#: ticket R2「closeout work accounted inside the configured ceiling」）。
+#: **只对 run ceiling 生效**（fuse 的临界点为什么不预留，见 `pause_trigger`）。
 #: 取 1 = 一次有界机会；`#305` 未固定数字，故这里是本实现的常量并如实投影。
 RESERVED_CLOSEOUT_TURNS = 1
 
@@ -237,7 +239,7 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
     """从 append-only 事件派生该逻辑 run 的账本（纯函数，无 IO、无缓存）。
 
     - `version`：初始 1，每条 `run/resumed` +1（CAS 的比较对象，`03 §3.4`）。
-    - `consumed.agent_turns`：`model/completed` 计数 + model closeout 计数（见模块 docstring）。
+    - `consumed.agent_turns`：`model/completed` 计数（计数点的唯一来源，见模块 docstring）。
     - `paused`：最后一条 `run/paused` 之后**没有** `run/resumed` 也没有终态 → 仍在暂停。
     - `terminal`：出现任一终态事件（`03 §5`：completed / failed / interrupted）。
     """
@@ -257,8 +259,6 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
         elif event.type == RUN_PAUSED:
             version_after = version
             closeout = event.data.get("closeout_source")
-            if closeout == CLOSEOUT_MODEL:
-                consumed += 1
             paused = PausedRun(
                 run_id=run_id,
                 pause_seq=event.seq,
@@ -319,7 +319,7 @@ def _consumed_from_projection(raw: Any, fallback: int) -> int:
     """从 `consumed` 快照里取 `agent_turns`（`03 §3.4` 的快照形状：`{"agent_turns": N}`）。
 
     读不到才回落到"按事件重算"——那条回落只为读到畸形事件而存在（宽容读）。
-    正常路径**必须**用快照：它是暂停那一刻的账（含那次 closeout），而重算值会随
+    正常路径**必须**用快照：它是暂停那一刻的账，而重算值会随
     后续事件继续涨（恢复后的 `model/completed`），拿它当"暂停时的消耗"会让
     `resume_ceiling_ok` 与 `run/resumed.consumed` 一起漂移——那正是"恢复不得重置
     消耗"这条不变量会破的地方。
@@ -350,18 +350,21 @@ def pause_trigger(
     """这次执行还能不能继续（不能继续时返回命中的维度名）。
 
     判定用的是**下一轮**的准入（`02 §5.1`：判定发生在任何 model / tool / child 工作
-    开始之前）：本轮已消耗 + 预留 closeout 容量一旦够到 ceiling，就不再启动新的模型
-    决策——于是暂停时**还剩**一次 closeout 的容量（`02 §5.2` 的预留）。
+    开始之前）。两个作用域的临界点**不同**，因为两个 counter 的定义不同：
 
-    两个作用域各自判定、互不替代（`02 §5.1`）：run ceiling 是累计账本，local fuse 是
-    单实例保险丝（续跑执行拿到的是**新实例**，故用本执行的 `execution_steps` 计）。
+    - **run ceiling**（`run.max_agent_turns_total`，累计账本，客户端配的那个上限）：
+      本轮已消耗 + 预留 closeout 容量够到 ceiling 就停 ⇒ 暂停时**还剩**一次 closeout
+      的容量（`02 §5.2` 的预留；ticket R2 的「closeout 在 ceiling 之内」）。
+    - **local fuse**（单实例保险丝，`02 §5.1`「按**被接纳**的模型决策计数」）：`steps` 够到
+      fuse 就停。closeout 不是被接纳的决策 ⇒ 它在 fuse 上不占位，故这里**不**预留 ——
+      这正是 EB-2 的临界点，也是 T3 冻结的单一判定结果（本票只改去向，不改临界点）。
+
     run ceiling 命中时优先报它——它是客户端配的那个上限，可恢复的动作是抬高它。
     """
-    reserved = RESERVED_CLOSEOUT_TURNS
     ceiling = run_limits.max_agent_turns_total
-    if ceiling is not None and consumed_turns + reserved >= ceiling:
+    if ceiling is not None and consumed_turns + RESERVED_CLOSEOUT_TURNS >= ceiling:
         return TRIGGER_RUN_TURNS
-    if execution_steps + reserved >= local_fuse_turns:
+    if execution_steps >= local_fuse_turns:
         return TRIGGER_LOCAL_TURNS
     return None
 
@@ -371,6 +374,11 @@ def closeout_capacity(*, consumed_turns: int, run_limits: RunTurnLimits) -> bool
 
     没有容量 ⇒ 只落**确定性** continuation（`02 §5.2`：模型 closeout 不可用时不得
     超出预算去补一次调用）。
+
+    本票的暂停点上这个判据恒为真（`pause_trigger` 保证 `consumed` 严格低于 ceiling，
+    没有 ceiling 时更是无上限）——保留它是**不变量的显式表达 + 后续维度的接口**：
+    `#313`/`#314` 的 token/cost/deadline 暂停可能发生在 turn 维度之外的边界上，那时
+    "还有没有一次调用的余地"就不再显然。删掉它等于把这条判断散回调用点。
     """
     ceiling = run_limits.max_agent_turns_total
     return ceiling is None or consumed_turns < ceiling
@@ -382,6 +390,11 @@ def resume_ceiling_ok(*, consumed_turns: int, ceiling: int | None) -> bool:
     判据是**能继续干活**，不是"数字变大"：至少留出「一个可接纳的 turn + 一次 closeout
     预留」——恰好等于 consumed+1 的 ceiling 会在下次准入立刻再次暂停，接受它等于
     让客户端拿到一个"恢复成功但什么都没发生"的假象。
+
+    这是本实现对冻结清单的**收紧**读法（`11 §6.1` 只点名「ceiling 降到已消耗之下 ⇒
+    409」）：比该条更严一格，因此不会放过任何冻结文本要求拒绝的请求，只是额外拒绝
+    "恢复了但一轮都跑不了"的请求。收紧的边界如实登记在 tracker 的 T4 段（§3.1），
+    若产品要放开，改这里一处即可（前端只做展示提示，不做判定）。
     """
     if ceiling is None:
         return False

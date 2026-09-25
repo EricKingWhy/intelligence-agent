@@ -74,10 +74,15 @@ class _StubSandbox:
         return self._files[name]
 
 
-def _pause_payload(*, consumed: int = 2, closeout: str = "model") -> dict:
+def _pause_payload(*, consumed: int = LOW_CEILING - 1, closeout: str = "model") -> dict:
     """`run/paused.data`（字段名是 `03 §3.4` 的契约：reason / trigger_dimension /
     budget_version / consumed / limits / continuation / closeout_source /
-    resume_requirements）。"""
+    resume_requirements）。
+
+    `consumed.agent_turns` 的默认值是 `LOW_CEILING - 1`（= 1 个产出轮）：closeout 那次
+    调用是 `model_requests`，**不**进这个 counter（`02 §5.1`），与 `closeout_source`
+    是 model 还是 deterministic 无关。
+    """
     return {
         "reason": "budget_exhausted",
         "trigger_dimension": "run.max_agent_turns_total",
@@ -97,7 +102,7 @@ def _pause_payload(*, consumed: int = 2, closeout: str = "model") -> dict:
     }
 
 
-def _resume_payload(*, consumed: int = 2, run_limit: int = RESUME_CEILING) -> dict:
+def _resume_payload(*, consumed: int = LOW_CEILING - 1, run_limit: int = RESUME_CEILING) -> dict:
     """`run/resumed.data`（同 run 续跑：版本 +1、consumed 等于暂停快照、绝对 ceiling）。"""
     return {
         "from_pause_seq": 6,
@@ -117,7 +122,8 @@ def _events(
     pause: dict | None = None, resume: dict | None = None,
     first_turn_terminal: bool = False,
 ) -> list[Any]:
-    """自洽的事件序列：低预算执行（1 产出轮 + model closeout）→ 恢复 → 续跑完成。
+    """自洽的事件序列：低预算执行（1 个产出轮；closeout 不落 `model/completed`）→ 恢复
+    → 续跑完成。
 
     与真实轨迹同形：`run/started` 一条、`user/message` 一条、暂停后仍有 tool/call、
     `run/completed` 一条（同 run_id）。seq 由计数器顺序分配（改结构时不用手改数字）。
@@ -271,7 +277,12 @@ def test_assertions_pass_on_a_self_consistent_sequence(tmp_path):
 
 
 def test_assertions_accept_deterministic_closeout(tmp_path):
-    """closeout 回落到确定性组装时账要跟着变：consumed = 产出轮（不含 closeout）。"""
+    """closeout 回落到确定性组装（`closeout_source=deterministic`）时账不变。
+
+    计数点是**被接纳的产出轮**：closeout 无论走模型还是确定性组装都是 `model_requests`
+    （`02 §5.1`），所以同一份 `consumed` 在两种来源下都必须通过——这条和下面那条
+    "把 closeout 加进 counter 就判红"合起来钉住这个语义。
+    """
     events = _events(
         pause=_pause_payload(consumed=1, closeout="deterministic"),
         resume=_resume_payload(consumed=1),
@@ -289,9 +300,14 @@ def test_second_pause_is_red(tmp_path):
     assert "pause_exactly_once" in _failed(assertions)
 
 
-def test_consumed_inconsistent_with_closeout_is_red(tmp_path):
-    """消耗账与 closeout 来源对不上（model closeout 却没记那一轮）⇒ 判红。"""
-    events = _events(pause=_pause_payload(consumed=1, closeout="model"))
+def test_consumed_counting_the_closeout_is_red(tmp_path):
+    """把 closeout 也加进 `agent_turns`（旧写法）= 混同两个 counter ⇒ `pause_consumed_accounting` 红。
+
+    这是"七个 counter 互不混同"（`02 §5.1`）在取证面上的守卫：真回归里若有人把
+    closeout 记回这个 counter，低预算暂停的账会变成 `LOW_CEILING`（1 产出轮 + 1 次
+    closeout），本用例如实判红。
+    """
+    events = _events(pause=_pause_payload(consumed=LOW_CEILING, closeout="model"))
     assert "pause_consumed_accounting" in _failed(_assertions(tmp_path, events))
 
 

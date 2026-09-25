@@ -10,8 +10,11 @@ ADR-0044 D2/D3。
 - 这里证明**跨执行**的语义对——暂停一次执行、用同一个 run_id 再跑一次，消耗累计、
   身份不变、重启后投影一致（"进程内记忆"在这条链上不参与任何判定）。
 
-账目约定（多处断言的前提，`02 §5.2`）：closeout 是**预算内**的消耗。所以
-`ceiling=N` 的 run 只接纳 N−1 个产出轮，第 N 轮归预留的收口调用。
+账目约定（多处断言的前提，`02 §5.1` 的七个 counter 互不混同）：`consumed.agent_turns`
+只数**被接纳进 loop 的模型决策**（`model/completed`）；closeout 那一次是 `model_requests`，
+**不**进这个 counter。它在预算里的位置由 **run ceiling 的预留**表达：暂停发生在 ceiling
+前一轮（`consumed + 1 >= ceiling`），于是 `ceiling=N` 的 run 接纳 N−1 个产出轮之后收口。
+local fuse **没有**这条预留（EB-2 的"500 步到顶"就是到顶），这条不对称是刻意的。
 """
 
 from __future__ import annotations
@@ -135,12 +138,14 @@ def _run_id_of(session: Session) -> str:
 
 
 @pytest.mark.asyncio
-async def test_model_closeout_records_the_reserved_turn_inside_the_ceiling(tmp_path) -> None:
-    """ceiling=3 且模型给了合法 continuation ⇒ 恰好用掉**预算内**的预留那一轮。
+async def test_model_closeout_is_a_model_request_not_an_accepted_turn(tmp_path) -> None:
+    """ceiling=3 且模型给了合法 continuation ⇒ 暂停时 `agent_turns` 只记 2。
 
-    账：2 个普通轮（被接纳） + 1 次 closeout = 3 = ceiling（`02 §5.2`：预留是容量
-    不是豁免，它记进 consumed）。暂停不是终态：既没有 `run/completed`，也没有
-    `run/failed`——"fuse 到顶"本身不是失败（PRD #305 EB-2）。
+    账：2 个普通轮（被接纳） + 1 次 closeout 模型调用。那次调用**不**记进
+    `consumed.agent_turns`（它是 `model_requests`，`02 §5.1` 禁止把七个 counter 混同）；
+    它的位置由**预留**表达——判定含预留轮（`consumed + 1 >= ceiling`），所以第 3 轮
+    不会既当普通轮又当收口轮。暂停不是终态：既没有 `run/completed`，也没有
+    `run/failed`——"到顶"本身不是失败（PRD #305 EB-2）。
     """
     scripted = ScriptedModel([_tool_round(1), _tool_round(2), _continuation_json()])
     runtime = _runtime(scripted, ceiling=3)
@@ -153,7 +158,7 @@ async def test_model_closeout_records_the_reserved_turn_inside_the_ceiling(tmp_p
     assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED
     assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
     assert paused.data["closeout_source"] == CLOSEOUT_MODEL
-    assert paused.data["consumed"] == {"agent_turns": 3}
+    assert paused.data["consumed"] == {"agent_turns": 2}
     assert paused.data["limits"]["run"]["max_agent_turns_total"] == 3
     assert paused.data["continuation"] == {
         "completed": ["已完成第一步"],
@@ -163,10 +168,12 @@ async def test_model_closeout_records_the_reserved_turn_inside_the_ceiling(tmp_p
     }
     assert paused.data["resume_requirements"] == []
     assert [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)] == []
+    # closeout 真的过了一次模型（有界机会），但那不是被接纳的一轮：模型侧调用 3 次
+    assert len(scripted.snapshots) == 3
 
     state = derive_run_budget(session.events, _run_id_of(session))
     assert state.version == 1
-    assert state.consumed_turns == 3, "派生账本 = 事件说的事实"
+    assert state.consumed_turns == 2, "派生账本 = 事件说的事实（closeout 不进计数）"
     assert state.paused is not None
     assert state.resumable is True
 
@@ -189,8 +196,8 @@ async def test_paused_projection_reads_the_consumed_snapshot(tmp_path) -> None:
     paused = latest_paused_run(session.events)
     assert paused is not None
     assert paused.run_id == run_id
-    # ceiling=2 ⇒ 1 个普通轮 + 1 次 closeout = 2
-    assert paused.consumed_turns == 2
+    # ceiling=2 ⇒ 1 个普通轮 + 1 次 closeout（后者不进 counter）
+    assert paused.consumed_turns == 1
     assert derive_run_budget(session.events, run_id).consumed_turns == paused.consumed_turns
 
 
@@ -238,7 +245,7 @@ async def test_same_run_resume_completes_without_resetting_accounting(tmp_path) 
     paused = latest_paused_run(session.events)
     assert paused is not None
     pause_seq = len(session.events)
-    assert paused.consumed_turns == 3
+    assert paused.consumed_turns == 2
 
     second = ScriptedModel([AIMessage(content="第二步也做完了")])
     resumed_runtime = _runtime(
@@ -300,13 +307,13 @@ async def test_local_fuse_counts_the_current_execution_not_the_run_ledger(tmp_pa
     """local fuse 是**实例级**的：续跑执行从 0 起步数它自己的步数。
 
     构造：没有 run ceiling（`max_agent_turns_total=None`），local fuse = 2，启动账本
-    已有 3 轮 ⇒ 续跑执行跑满 1 轮普通轮就触发 local fuse（1+1>=2），而 run 账本
-    （3）与本判定无关。命中维度如实回传 `local.max_agent_turns`——两个作用域互不替代
-    （`02 §5.1`），投影上必须能分辨是谁到顶。closeout 仍可发生（run 侧无 ceiling ⇒
-    不设限），并记进快照。
+    已有 3 轮 ⇒ 续跑执行跑满 2 个普通轮才触发 local fuse（`steps >= 2`），run 账本
+    （3）与本判定无关（fuse 不吃"预留 closeout"那一轮，也不看累计消耗）。命中维度如实
+    回传 `local.max_agent_turns`——两个作用域互不替代（`02 §5.1`），投影上必须能分辨
+    是谁到顶。closeout 仍可发生（run 侧无 ceiling ⇒ 不设限），其来源照实记进快照。
     """
     session = make_session(tmp_path)
-    scripted = ScriptedModel([_tool_round(1), _continuation_json()])
+    scripted = ScriptedModel([_tool_round(1), _tool_round(2), _continuation_json()])
     runtime = _runtime(
         scripted, ceiling=None, consumed=3, run_id="run-existing", version=2, local_fuse=2,
     )
@@ -316,7 +323,7 @@ async def test_local_fuse_counts_the_current_execution_not_the_run_ledger(tmp_pa
     assert result.status == STATUS_PAUSED
     paused = next(e for e in session.events if e.type == RUN_PAUSED)
     assert paused.data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
-    # run 账本：启动 3 + 本执行 1 个普通轮 + 1 次 closeout = 5
+    # run 账本：启动 3 + 本执行 2 个普通轮 = 5（closeout 那一次是 model_requests）
     assert paused.data["consumed"] == {"agent_turns": 5}
     assert paused.data["closeout_source"] == CLOSEOUT_MODEL
     assert paused.data["limits"]["run"]["max_agent_turns_total"] is None

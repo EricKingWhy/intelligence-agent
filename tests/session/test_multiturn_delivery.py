@@ -23,6 +23,7 @@ from agent_harness.config import Settings
 from agent_harness.model.scripted import RequestSnapshot, ScriptedModel
 from agent_harness.session import (
     RUN_COMPLETED,
+    RUN_PAUSED,
     RUN_STARTED,
     USER_MESSAGE,
     Session,
@@ -168,9 +169,10 @@ class TwoTurnScriptedModel(GateScriptedModel):
     `operations.tool_call_id` 唯一约束让 run 2 直接 run/failed。这个替身在每次
     模型调用时生成**新** tool_call_id（按调用计数），多 run 复用安全。
 
-    ⚠ 剧本每次都吐 tool_call 会让模型永不收敛（一直转下去会撞 local fuse ⇒
-    run/failed；#308 起默认 500 轮，"跑满保险丝"不再是短用例写得出来的路径）。``turns_with_tools`` 控制带 tool 的调用次数，之后吐纯文本
-    收尾——"第二个 run 的第一次调用就收尾"用默认 1。
+    ⚠ 剧本每次都吐 tool_call 会让模型永不收敛（一直转下去会撞 local fuse：`#312` T4
+    起收口成**非终态** `run/paused`，在此之前是 `run/failed`；默认 fuse=500 轮，
+    短用例写不出"跑满保险丝"这条路径）。``turns_with_tools`` 控制带 tool 的调用次数，
+    之后吐纯文本收尾——"第二个 run 的第一次调用就收尾"用默认 1。
     """
 
     def __init__(
@@ -268,8 +270,52 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
     assert harness.human_texts(session_id) == ["A", "B"]
 
 
-# ── T2 / T3：steer 注入同一 run，A+B 都在链上 ──────────────────────────
+@pytest.mark.asyncio
+async def test_queue_does_not_relay_across_a_paused_run(tmp_path, monkeypatch):
+    """暂停的执行**不驱动接力**：排队输入留在队列里，只由显式 resume 唤醒（`#312` R4）。
 
+    为什么这条不能省（它是与上面那条正向用例成对的负向面）：接力会在暂停之上直接开出
+    **新的 run_id**，而 ceiling 是按逻辑 run 记账的——那等于绕开刚生效的上限，且
+    "暂停"这件事对用户就白发生了。所以 `ManagedRun.paused` 必须抑制终态回调。
+
+    构造：run 的 ceiling 取 2（1 个产出轮 + 为 closeout 预留的那一轮）⇒ 第一个普通轮
+    之后必然暂停；模型在第 1 个响应后一直挂在 gate 上，测试在这个窗口里入队 B。
+    """
+    gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [_TOOL_TURN, AIMessage(content="第一轮收尾")], gate=gate,
+    )
+    launched = await harness.service.create_and_launch(
+        task="A", run_max_agent_turns_total=2,
+    )
+    session_id = launched.session.session_id
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1, what="run 1 起跑",
+    )
+
+    queued = await harness.service.send_message(
+        session_id=session_id, content="B", mode="queue",
+    )
+    assert queued.status == "queued"
+
+    gate.set()
+    await harness.wait_for(
+        lambda: harness.of_type(session_id, RUN_PAUSED), what="run/paused 落盘",
+    )
+    # 暂停之后模型**不会**再被调用（closeout 那次调用由预算闸门放行，不是普通轮）：
+    # 这里只等"接力真的没有发生"的那一小段窗口，避免把"还没轮到"读成"不会做"。
+    await asyncio.sleep(0.2)
+
+    assert len(harness.of_type(session_id, RUN_STARTED)) == 1, "暂停不得由接力开出新 run"
+    assert harness.of_type(session_id, QUEUE_CONSUMED) == [], "排队输入必须留在队列里"
+    assert harness.of_type(session_id, RUN_COMPLETED) == []
+    # 排队的输入没有丢：它仍是 durable 事实里的"未投递输入"，等一个显式 resume
+    # （本票不做"暂停 + 队列"的合并恢复，所以这里只钉"还在"，不钉它何时被投递）。
+    pending = await harness.service.list_undelivered_inputs(session_id)
+    assert [item.content for item in pending] == ["B"]
+
+
+# ── T2 / T3：steer 注入同一 run，A+B 都在链上 ──────────────────────────
 
 @pytest.mark.asyncio
 async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):

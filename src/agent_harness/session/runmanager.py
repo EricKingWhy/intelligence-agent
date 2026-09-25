@@ -67,10 +67,10 @@ class ManagedRun:
         self._next_subscriber_id = 0
         self._last_enqueued_seq = -1
         self.terminal = False
-        # #312（R4）：本执行以 `run/paused` 收口——非终态，但**同样不再调度新工作**。
-        # 与 terminal 分开记：terminal 描述"这个 run task 结束了"（决定 get_active
-        # 是否把它算在途），paused 描述"逻辑 run 还没完，只是让位给 ceiling"（决定
-        # 要不要接力投递下一条排队输入）。
+        # #312（R4）：本执行以 `run/paused` 收口——非终态，但**同样不再调度新工作**
+        # （`_drive` 的收口处解释为什么不接力）。与 terminal 分开记：terminal 描述
+        # "这个 run task 结束了"（决定 get_active 是否把它算在途），paused 描述
+        # "逻辑 run 还没完，只是让位给 ceiling"（决定要不要接力投递下一条排队输入）。
         self.paused = False
         self.reap_requested = False
         self._orphan_handle: asyncio.TimerHandle | None = None
@@ -252,10 +252,32 @@ class RunManager:
         # = 不缓存（CLI 等调用方不消费看板）；Web 层在正确的时刻叫它。
         self._on_context_snapshot = on_context_snapshot
         self._runs: dict[str, ManagedRun] = {}
+        # `#312`：同会话恢复的 CAS 临界区锁（每会话一把，终身保留——与 `_runs`
+        # 同一条"每会话一条、不回收"的口径）。
+        #
+        # 为什么锁挂在**这里**而不是 `SessionService`：Web 传输层每个请求都新建一个
+        # 服务实例（`session_service(app.state.agent)` 在处理器里），锁挂在实例上等于
+        # 没有互斥——两个并发 resume 会各自读到同一个 version 然后都启动。RunManager
+        # 才是每会话状态的常驻 owner（本字典与 `_runs` 同寿命），所以它同时是这把锁
+        # 的正确归属（AC-8：并发恢复只允许一个赢家）。
+        self._session_locks: dict[str, asyncio.Lock] = {}
         # 关停中：`aclose()` 取消在途 run 会走 `_drive` 的 finally，而那条路径默认
         # 会触发接力投递——关机时又拉起新 run 显然是错的（进程马上没了，新 run
         # 只会被半个生命周期地拖死）。置位后终态回调直接跳过。
         self._closing = False
+
+    def session_lock(self, session_id: str) -> asyncio.Lock:
+        """取得该会话的串行化锁（同会话的 CAS 临界区，`#312`）。
+
+        调用方约定：**只在临界区持有**（读 version → 写 `run/resumed`），不要跨
+        整个 run 生命周期持有——不同临界区之间（launch 之后）的串行化由
+        `get_active` 的 409 负责。
+        """
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     def launch(
         self, session: Session, runtime: AgentRuntime, user_input: str | None,

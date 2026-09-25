@@ -400,10 +400,6 @@ class SessionService:
         self._stores = stores
         self._ensure_stores = ensure_stores
         self._get_wiring = get_wiring
-        # #312：同会话恢复的 CAS 临界区锁（每会话一把，终身保留——与 RunManager
-        # `_runs` 同一条"每会话一条、不回收"的口径；会话数量级由运维决定，
-        # 一把空 Lock 的常驻成本远低于"每次重建导致互斥失效"的后果）。
-        self._resume_locks: dict[str, asyncio.Lock] = {}
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -996,12 +992,13 @@ class SessionService:
     # ── 暂停 run 的同 run 恢复（`#312`）──────────────────────────────
 
     def _resume_lock(self, session_id: str) -> asyncio.Lock:
-        """同会话恢复的 CAS 临界区（进程内互斥；durable 互斥靠 `run/resumed` 自身）。"""
-        lock = self._resume_locks.get(session_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._resume_locks[session_id] = lock
-        return lock
+        """同会话恢复的 CAS 临界区（进程内互斥；durable 互斥靠 `run/resumed` 自身）。
+
+        锁**取自 `RunManager`**（它才是每会话状态的常驻 owner）：Web 传输层每个请求
+        新建一个服务实例，锁挂在服务实例上等于没有互斥（两个并发 resume 会各自读到
+        同一个 version 然后都开工）。见 `RunManager.session_lock` 的注释。
+        """
+        return self._run_manager.session_lock(session_id)
 
     def _paused_resume_state(
         self,

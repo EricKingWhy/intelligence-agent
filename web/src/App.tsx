@@ -785,7 +785,8 @@ export default function App() {
   const paused = conversation?.run_paused ?? null;
   const pausedFacts = useMemo(() => (paused ? pauseFacts(paused) : null), [paused]);
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
-   *  （consumed+2，后端判据 ceiling > consumed+1）——默认值零点击可提交，
+   *  （consumed+2 = consumed + RESERVED + 1，后端判据 `ceiling > consumed + RESERVED`）
+   *  ——默认值零点击可提交，
    *  但它只是草稿初值，不是"权威 ceiling"。 */
   const pauseCeilingDraft =
     paused === null

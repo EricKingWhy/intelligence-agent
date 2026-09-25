@@ -121,10 +121,12 @@ def _assert_no_new_work(client: TestClient, session_id: str, before: list[dict])
 
 
 def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path):
-    """AC 主线：ceiling=1 暂停（closeout 花掉预留那一轮）→ ceiling=4 恢复 → 同一个 run 完成。
+    """AC 主线：ceiling=1 当场暂停 → ceiling=4 恢复 → 同一个 run 完成并接上真实工作。
 
-    账（`02 §5.2`）：暂停时 consumed=1（0 个产出轮 + 1 次模型 closeout）；恢复要求
-    `ceiling > consumed + 1`，所以 4 是合法起点，恢复后的执行再消耗 1 轮。
+    账（`02 §5.1` 的七个 counter 互不混同）：`ceiling=1` 连一个产出轮都放行不了
+    （判定含预留：`0 + 1 >= 1`），所以暂停时 `consumed.agent_turns == 0`；closeout
+    那一次模型调用是 `model_requests`，**不**进这个 counter（它的位置由预留表达）。
+    恢复要求 `ceiling > consumed + 预留`，所以 4 是合法起点，恢复后的执行才真正产出。
     """
     _, client = _web(tmp_path)
     session_id = _create_idle_session(client)
@@ -133,11 +135,18 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
     with probe:
         paused = _pause_the_run(client, session_id)
         run_id = paused[RUN_ID_KEY]
-        assert paused["data"] == {
+        data = dict(paused["data"])
+        # trace_id 恒在这条事件上（`03 §3.4` 的归因面）。它的**值**取决于观测端口
+        # 是否装配（NullTracer ⇒ None，别的用例开了 sink 则是真 trace id）⇒ 只钉
+        # "键在 + 形状对"，钉死 None 会让本用例在整套同跑时误红。
+        assert "trace_id" in data, "暂停事件必须带本次执行的 trace 归因面"
+        trace_id = data.pop("trace_id")
+        assert trace_id is None or isinstance(trace_id, str), trace_id
+        assert data == {
             "reason": "budget_exhausted",
             "trigger_dimension": "run.max_agent_turns_total",
             "budget_version": 1,
-            "consumed": {"agent_turns": 1},
+            "consumed": {"agent_turns": 0},
             "limits": {
                 "local": {"max_agent_turns": 500, "source": "deployment"},
                 "run": {"max_agent_turns_total": 1},
@@ -150,7 +159,6 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
             },
             "closeout_source": "model",
             "resume_requirements": [],
-            "trace_id": None,
         }
 
         # 暂停不是终态，且没有第二条 run/started（新 run 由 /resume 之后的执行接上）
@@ -190,7 +198,7 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
         "previous_budget_version": 1,
         "budget_version": 2,
         # 恢复**不重置**消耗：快照等于暂停那一刻的账（新工作之后由 model/completed 累加）
-        "consumed": {"agent_turns": 1},
+        "consumed": {"agent_turns": 0},
         "limits": {
             "local": {"max_agent_turns": 500, "source": "deployment"},
             "run": {"max_agent_turns_total": 4},
@@ -271,10 +279,11 @@ def test_wrong_run_id_and_unraised_ceiling_are_rejected(tmp_path):
         cases = [
             # 不是被暂停的那个 run（客户端拼错了 id / 拿的是上一条 run 的）
             {RUN_ID_KEY: "run-does-not-exist", "budget": {"expected_version": 1}},
-            # ceiling 恰好等于 consumed+1 ⇒ 下次准入立刻再次暂停，"恢复成功却什么都没发生"
+            # ceiling 恰好等于 consumed + 预留（这里 consumed=0 ⇒ 1）⇒ 下次准入立刻再次
+            # 暂停，"恢复成功却什么都没发生"。它同时是暂停前的那个值 ⇒ 没有真提高。
             {RUN_ID_KEY: paused[RUN_ID_KEY], "budget": {"expected_version": 1}},
         ]
-        ceilings = [4, 2]
+        ceilings = [4, 1]
         for case, ceiling in zip(cases, ceilings, strict=True):
             resp = client.post(
                 f"/api/sessions/{session_id}/resume",
@@ -408,3 +417,113 @@ def test_non_budget_pause_reason_is_rejected(tmp_path, reason):
     assert reason in resp.json()["detail"]
     assert probe.calls == []
     _assert_no_new_work(client, session_id, before)
+
+
+# ── AC-8：并发恢复只允许一个赢家 ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
+    tmp_path, monkeypatch,
+):
+    """两个同 `expected_version` 的 resume 并发 ⇒ 恰好一个 200、一个 409、一条 `run/resumed`（AC-8）。
+
+    为什么必须是**真并发**而不是"先后发两次"：`expected_version` 是 CAS 的比较对象
+    （`03 §3.4`），它只在"读 version → 写 `run/resumed`"之间不被别人插进来时才成立。
+    顺序发两次永远不会同时读到同一个 version，也就测不到那把锁——上面
+    `test_stale_expected_version_is_rejected_without_any_work` 只证明"陈旧值被拒"，
+    证明不了"同一版本至多一个成功者"。所以这里起真 uvicorn（真并发连接）并对齐发令。
+
+    `TestClient` 换成真服务器是必要的：它的同步请求模型让"两个请求同时在锁上排队"
+    这个窗口不可构造。
+    """
+    import asyncio
+
+    import httpx2
+    import uvicorn
+
+    from agent_harness.config import Settings
+    from agent_harness.web.app import create_app
+
+    def _factory(config: Any, **kwargs: Any) -> ScriptedModel:
+        # 每次**执行**装配模型：第一条剧本给那次低预算执行（它只做 closeout），
+        # 之后的执行（唯一赢家那次）拿到收尾回答。
+        return ScriptedModel([AIMessage(content="A 已改完")])
+
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _factory)
+    app = create_app(Settings(
+        _env_file=None, workspace_dir=str(tmp_path),
+        model_api_key="sk-test", enable_cors=False,
+    ))
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="127.0.0.1", port=0, log_level="error", lifespan="on",
+    ))
+    serve_task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(100):
+            if server.started:
+                break
+            await asyncio.sleep(0.05)
+        assert server.started, "测试服务器未起来"
+        port = server.servers[0].sockets[0].getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+
+        async with httpx2.AsyncClient(timeout=20.0) as client:
+            created = await client.post(
+                f"{base}/api/sessions", json={}, params={"launch": "false"},
+            )
+            assert created.status_code == 200, created.text
+            session_id = created.json()["session_id"]
+
+            launched = await client.post(
+                f"{base}/api/sessions/{session_id}/messages",
+                json={
+                    "content": "把 A 改成 B",
+                    "budget": {"run": {"max_agent_turns_total": 1}},
+                },
+            )
+            assert launched.status_code == 200, launched.text
+            assert "run/paused" in launched.text, launched.text[:400]
+            pause_body = [
+                json.loads(line.removeprefix("data:").strip())
+                for line in launched.text.splitlines() if line.startswith("data:")
+            ]
+            paused = next(f for f in pause_body if f.get("type") == "run/paused")
+            payload = {
+                RUN_ID_KEY: paused["run_id"],
+                "resume_basis": "budget_increase",
+                "budget": {"run": {"max_agent_turns_total": 4}, "expected_version": 1},
+            }
+            # 对齐发令：两个请求同时进入服务（同一 run_id / 同一版本 / 同一 ceiling）
+            first, second = await asyncio.gather(
+                client.post(f"{base}/api/sessions/{session_id}/resume", json=payload),
+                client.post(f"{base}/api/sessions/{session_id}/resume", json=payload),
+            )
+            statuses = sorted([first.status_code, second.status_code])
+
+        assert statuses == [200, 409], (
+            f"并发恢复必须恰好一个赢家：{first.status_code} / {second.status_code}"
+            f" · {first.text[:200]} · {second.text[:200]}"
+        )
+        loser = first if first.status_code == 409 else second
+        assert "version" in loser.json()["detail"] or "暂停" in loser.json()["detail"]
+        assert "data:" not in loser.text, "被拒的请求不是一条流（没有开工）"
+
+        events = app.state.agent.store.read_events(session_id)
+        types = [event.type for event in events]
+        # `run/resumed` 在任何工作开始**之前**落盘 ⇒ 它恰好一条就是"只有一个赢家开工"
+        # 的结构证据（第二次生效的恢复必然先写第二条，无论它后面跑成什么样）。
+        assert types.count("run/resumed") == 1, "同一版本至多一个成功者（CAS 的唯一胜者）"
+        assert types.count("run/paused") == 1
+        assert types.count("run/started") == 1
+        assert types.count("run/completed") == 1
+        # 只跑了一次产出轮（暂停那次执行 0 轮：ceiling=1 连一轮都不放行；赢家 1 轮）。
+        # 若有第二个执行被启动，这里会出现第二条 model/completed。
+        assert types.count("model/completed") == 1, types
+    finally:
+        server.should_exit = True
+        serve_task.cancel()
+        try:
+            await serve_task
+        except asyncio.CancelledError:
+            pass

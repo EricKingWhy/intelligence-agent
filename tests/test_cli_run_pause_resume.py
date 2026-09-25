@@ -107,6 +107,20 @@ def test_pause_block_never_substitutes_zero_for_missing_numbers():
     assert "resume requirements: 需要人工裁决" in text
     assert "continuation" not in text, "空 continuation 不渲染空壳段落"
 
+    # 有消耗、没有 ceiling（local fuse 撞线）：remaining 仍然 unavailable——
+    # 它无从计算（不是 0），也不能拿消耗本身顶替（那是"剩余"的反面）。
+    local_only = render_pause_block({
+        "reason": "budget_exhausted",
+        "trigger_dimension": "local.max_agent_turns",
+        "budget_version": 1,
+        "consumed": {"agent_turns": 3},
+        "limits": {"local": {"max_agent_turns": 500}, "run": {"max_agent_turns_total": None}},
+        "closeout_source": "model",
+        "resume_requirements": [],
+    })
+    assert "consumed 3 / limit unlimited (remaining unavailable)" in local_only
+    assert "remaining 0" not in local_only
+
 
 def test_resume_hint_gives_absolute_ceiling_placeholder():
     """恢复指令用占位符给**绝对** ceiling：CLI 不替用户猜一个数字（猜出来会被当策略）。"""
@@ -183,7 +197,9 @@ async def test_cli_pause_then_resume_completes_the_same_run(monkeypatch, tmp_pat
     assert "[run paused]" in text
     assert "reason=budget_exhausted" in text
     assert "dimension=run.max_agent_turns_total" in text
-    assert "consumed 1 / limit 1" in text
+    # ceiling=1 连一个产出轮都放行不了（判定含预留）⇒ 计数是 0；closeout 那一次是
+    # model_requests，不进 agent_turns（`02 §5.1` 的七个 counter 互不混同）。
+    assert "consumed 0 / limit 1" in text
 
     # session_id 从磁盘读回（CLI 的一次性命令打印它，正是为了让用户能恢复）
     session_id = _only_session_id(settings)

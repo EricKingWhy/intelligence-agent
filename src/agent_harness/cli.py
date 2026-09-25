@@ -221,7 +221,9 @@ def _pause_facts(data: dict) -> dict:
     consumed = data.get("consumed") or {}
     turns = consumed.get("agent_turns")
     ceiling = run_limits.get("max_agent_turns_total")
-    remaining = None if ceiling is None else max(ceiling - (turns or 0), 0)
+    # 缺 consumed 就不能算 remaining：`11 §6.1` 的「不可得 ≠ 0」对**推导量**同样成立
+    # （否则畸形事件下会同时打印 consumed=unavailable 与一个像模像样的 remaining）。
+    remaining = None if ceiling is None or turns is None else max(ceiling - turns, 0)
     return {
         "turns": turns,
         "ceiling": ceiling,

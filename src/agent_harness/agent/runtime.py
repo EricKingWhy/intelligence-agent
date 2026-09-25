@@ -190,7 +190,7 @@ def _extract_text(content: Any) -> str:
 
 
 def _closeout_instruction(
-    *, trigger_dimension: str, consumed: int, ceiling: int | None, steps: int,
+    *, trigger_dimension: str, consumed: int, ceiling: int | None,
 ) -> str:
     """预算暂停前那一次有界 closeout 的指令（`#312`）。
 
@@ -1373,15 +1373,13 @@ class AgentRuntime:
                     model_data["tool_calls"] = [
                         {"id": c.id, "name": c.name, "args": c.args} for c in calls
                     ]
-                # 本轮之后循环还会不会继续：走的是**同一个** `_pause_trigger`
-                # （单一判定入口，两处不可能漂移）。旧式 `steps + 1 < max_agent_turns`
-                # 在 `#312` 起少了 closeout 预留，会让延迟落盘猜错一档。
-                will_execute_tools = bool(tool_calls) and self._pause_trigger(
-                    launch_budget, steps=steps + 1,
-                ) is None
-                defer_model_event = (
-                    will_execute_tools and self.executor.tracks_operations
-                )
+                # 「这批工具会不会真的跑」只看有没有 tool_calls：预算判定只决定**下一轮**
+                # 还起不起新模型调用（第 6 步），本轮的整批工具照跑（第 7 步）。
+                # **不**把 `_pause_trigger` 的前瞻掺进来：那会让"要不要延迟落
+                # model/completed"跟着"循环还会不会继续"走，在暂停边界上说出"工具不会跑"
+                # 却照样把工具跑完（延迟落盘的目的是"model 决策的 durable 记录不早于它
+                # 引用的那批工具"，与循环走不走无关）。
+                defer_model_event = bool(tool_calls) and self.executor.tracks_operations
                 model_event: SessionEvent | None = None
                 if not defer_model_event:
                     model_event = session.append(
@@ -1679,14 +1677,17 @@ class AgentRuntime:
         顺序（每一条都是契约事实，不是实现口味）：
 
         1. **closeout**：先看还剩不剩容量（`closeout_capacity`）——剩则用**一次**
-           有界模型调用产出 continuation，且这次调用**记进预算**（`consumed` +1，
-           ticket FIXED「closeout 属于预算内消耗」/"预留容量不是额外不记账的工作"）；
-           没容量、调用失败或产出不合契约 ⇒ 落**确定性** continuation（只用已持久化
-           事实，不伪造进展/成功/工具结果）。
+           有界模型调用产出 continuation（`closeout_source=model`）；没容量、调用失败
+           或产出不合契约 ⇒ 落**确定性** continuation（只用已持久化事实，不伪造进展/
+           成功/工具结果）。
         2. 落**恰好一条** `run/paused`（durable、**非终态**）并镜像给流消费者。
         3. 本次执行到此收口：**不**落 `run/completed` / `run/failed`（`02 §5.2` 明文），
            **不**做记忆形成（run 没结束，此刻抽取过早——`memory/v2/eligibility.py`
            的白名单里没有 paused），也不新增 Checkpoint 边界（`07 §3` 只有四个）。
+
+        **closeout 不记进 `consumed.agent_turns`**：那个 counter 只数被接纳进 loop 的
+        模型决策，closeout 是 `model_requests`（计数点与「预留」的完整推导见
+        `agent/run_budget.py` 的模块 docstring 与 `pause_trigger`）。
         """
         consumed = launch.consumed_turns + steps
         limits = build_limits_snapshot(
@@ -1696,11 +1697,9 @@ class AgentRuntime:
             ),
         )
         continuation, closeout_source = await self._closeout_continuation(
-            arms, steps=steps, trigger_dimension=trigger_dimension,
+            arms, trigger_dimension=trigger_dimension,
             consumed=consumed, ceiling=launch.limits.max_agent_turns_total,
         )
-        if closeout_source == CLOSEOUT_MODEL:
-            consumed += 1
         paused = arms.session.append(
             RUN_PAUSED,
             build_pause_data(
@@ -1730,7 +1729,7 @@ class AgentRuntime:
         )
 
     async def _closeout_continuation(
-        self, arms: _TerminalArms, *, steps: int, trigger_dimension: str,
+        self, arms: _TerminalArms, *, trigger_dimension: str,
         consumed: int, ceiling: int | None,
     ) -> tuple[dict[str, Any], str]:
         """产出 continuation 与它的来源（`model` / `deterministic`）。
@@ -1758,7 +1757,7 @@ class AgentRuntime:
             response = await self._raw_model.ainvoke(
                 [*messages, HumanMessage(content=_closeout_instruction(
                     trigger_dimension=trigger_dimension,
-                    consumed=consumed, ceiling=ceiling, steps=steps,
+                    consumed=consumed, ceiling=ceiling,
                 ))],
             )
             parsed = _parse_closeout_json(_extract_text(response.content))

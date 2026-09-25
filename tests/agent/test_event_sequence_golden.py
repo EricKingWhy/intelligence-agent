@@ -109,6 +109,11 @@ from agent_harness.agent.types import (
 )
 from agent_harness.context.compactor import ContextWindowExceededError
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
+from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
+    REASON_BUDGET_EXHAUSTED,
+    TRIGGER_LOCAL_TURNS,
+)
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_DELTA,
@@ -540,9 +545,11 @@ def _scenarios() -> tuple[Scenario, ...]:
         ),
         Scenario(
             name="local_fuse_pause",
-            note="模型不收敛撞 local fuse（#312 T4 起不再是失败）：第 2 轮的准入判定在"
-                 "模型调用之前命中 ⇒ 只留 1 轮 model/completed，收口是**非终态**的 "
-                 "run/paused。closeout 那次调用拿到的剧本轮次不是 continuation JSON "
+            note="模型不收敛撞 local fuse（#312 T4 起不再是失败）：第 3 轮的准入判定在"
+                 "模型调用之前命中 ⇒ 留 2 轮 model/completed，收口是**非终态**的 "
+                 "run/paused。fuse 不吃'预留 closeout 那一轮'（预留是 run ceiling 的算法，"
+                 "EB-2 的 500 步到顶就是到顶）⇒ 被接纳的轮数 = fuse 值。closeout 那次"
+                 "调用拿到的剧本轮次不是 continuation JSON "
                  "⇒ closeout_source=deterministic（有界模型调用失败不得反噬暂停）",
             build=lambda w: _runtime(
                 ScriptedModel([_tool_call(i) for i in range(6)]), max_agent_turns=2,
@@ -550,13 +557,15 @@ def _scenarios() -> tuple[Scenario, ...]:
             ),
             drive=_drive_full,
             durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     RUN_PAUSED),
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, RUN_PAUSED),
             emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
+                     TOOL_RESULT, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
                      TOOL_RESULT, RUN_PAUSED),
             terminal=None,
             terminal_payload={},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (RUN_PAUSED, 2)),
+                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (MODEL_COMPLETED, 3),
+                   (TOOL_CALL, 3), (TOOL_RESULT, 3), (RUN_PAUSED, 3)),
             # 暂停**不是**终态 ⇒ 不触发记忆形成（`memory/v2/eligibility.py` 的白名单里
             # 没有 paused）；"0 次提交"是事实，不是没测。
             memory_submits=(),
@@ -879,6 +888,46 @@ async def test_discarded_segment_is_exactly_the_declared_one(
         f"{scenario.name}：未进流的落盘段与声明不符"
     assert _counted(tail) == _counted(list(scenario.discarded)), \
         f"{scenario.name}：未进流的落盘段条数与声明不符"
+
+
+@pytest.mark.asyncio
+async def test_pause_payload_key_set_is_pinned(tmp_path: Any) -> None:
+    """`run/paused` 载荷的**整个键集**（`#312` / `03 §3.4`）。
+
+    暂停是**非终态**，所以它不走 `test_terminal_is_unique_and_last` 那条路（那条只认
+    `RUN_TERMINAL_TYPES`），键集就没人钉——而 `03 §3.4` 对这两个事件的字段是逐键写明
+    的契约：少一个（例如 `resume_requirements`）客户端就无法区分"没有前置条件"与
+    "这条事件根本不是暂停"；多一个（例如 `trace_url`——它只在终态回调里合成，暂停时
+    还不存在）就是凭空造事实。
+
+    取值只钉**机械字段**（reason / 维度 / 版本 / 消耗 / 两档 limits / closeout 来源）：
+    `continuation` 的文案由模型或确定性组装产出，不是序列事实（它另有各自的用例）。
+    """
+    _scenario, _emitted, session = await _run("local_fuse_pause", tmp_path)
+    paused = [e for e in session.events if e.type == RUN_PAUSED]
+
+    assert len(paused) == 1
+    data = paused[0].data
+    assert set(data) == {
+        "reason", "trigger_dimension", "budget_version", "consumed", "limits",
+        "continuation", "closeout_source", "resume_requirements", "trace_id",
+    }, "run/paused 的字段清单是 `03 §3.4` 的契约（多一个/少一个都变红）"
+    assert data["reason"] == REASON_BUDGET_EXHAUSTED
+    assert data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
+    assert data["budget_version"] == 1
+    # 计数点是"被接纳的产出轮"（fuse=2 ⇒ 2 轮）；closeout 不进这个 counter
+    assert data["consumed"] == {"agent_turns": 2}
+    assert data["limits"] == {
+        "local": {"max_agent_turns": 2, "source": "deployment"},
+        "run": {"max_agent_turns_total": None},
+    }
+    assert data["closeout_source"] == CLOSEOUT_DETERMINISTIC
+    assert data["resume_requirements"] == []
+    # continuation 的四个键齐（`next_safe_action` 非空）；文案本身不在这里钉
+    assert set(data["continuation"]) == {
+        "completed", "remaining", "blockers", "next_safe_action",
+    }
+    assert data["trace_id"] is None, "本场景没有装配 tracer（NullTracer）"
 
 
 # ---------------------------------------------------------------------------

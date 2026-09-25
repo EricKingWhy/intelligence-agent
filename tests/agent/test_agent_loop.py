@@ -24,6 +24,9 @@ from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     REASON_BUDGET_EXHAUSTED,
     TRIGGER_LOCAL_TURNS,
+    TRIGGER_RUN_TURNS,
+    LaunchRunBudget,
+    RunTurnLimits,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
 from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED
@@ -96,10 +99,16 @@ def _registry() -> ToolRegistry:
     return reg
 
 
-def _runtime(model: ScriptedModel, max_agent_turns: int = 20) -> AgentRuntime:
+def _runtime(
+    model: ScriptedModel, max_agent_turns: int = 20,
+    run_budget: LaunchRunBudget | None = None,
+) -> AgentRuntime:
     """构造绑定了 executor + registry 的 Runtime。"""
     reg = _registry()
-    return AgentRuntime(model=model, registry=reg, executor=ToolExecutor(reg), max_agent_turns=max_agent_turns)
+    return AgentRuntime(
+        model=model, registry=reg, executor=ToolExecutor(reg),
+        max_agent_turns=max_agent_turns, run_budget=run_budget,
+    )
 
 
 # ---------- 路径 A：无工具直接完成 ----------
@@ -286,15 +295,18 @@ def _loop_rounds(count: int) -> list[AIMessage]:
 class TestAgentLoopLocalFusePause:
     @pytest.mark.asyncio
     async def test_local_fuse_pauses_with_exact_step_count(self, tmp_path):
-        """模型不收敛 + max_agent_turns=3 -> 非终态 `run/paused`（不再是失败）+ steps=2。
+        """模型不收敛 + local fuse=3 -> 非终态 `run/paused`（不再是失败）+ steps=3。
 
         `#312` T4 起"撞保险丝"的裁决是暂停：本地 fuse 与 run ceiling 走**同一条**
-        暂停臂（`02 §5.2`）。判定点在**循环顶部**（任何模型调用之前），且判定里包含
-        了为 closeout 预留的那一轮 ⇒ 被接纳的普通轮 = 3 - 1 = 2，第 3 次模型调用是
+        暂停臂（`02 §5.2`）。判定点在**循环顶部**（任何模型调用之前）。
+
+        fuse 与 run ceiling 的容量口径不同（`02 §5.1` 是三个独立计数器）：ceiling 里
+        含一轮 closeout 预留，fuse **不含**——它数的是"本执行接纳了多少轮"（PRD EB-2：
+        500 步到顶就是到顶）。所以 fuse=3 放行 3 轮普通工作，第 4 次模型调用才是
         **有界 closeout**（它拿到的剧本不是 continuation JSON ⇒ 回落到确定性
         continuation，不伪造进展）。
         """
-        scripted = ScriptedModel(_loop_rounds(3))
+        scripted = ScriptedModel(_loop_rounds(4))
         runtime = _runtime(scripted, max_agent_turns=3)
         session = make_session(tmp_path)
 
@@ -302,10 +314,10 @@ class TestAgentLoopLocalFusePause:
 
         assert result.status == STATUS_PAUSED
         assert result.final_text == ""
-        assert result.steps == 2
-        # 2 次普通轮 + 1 次 closeout：closeout 也必须显式过一次模型（有界机会）
-        assert len(scripted.snapshots) == 3
-        closeout_request = scripted.snapshots[2].messages[-1]
+        assert result.steps == 3
+        # 3 次普通轮 + 1 次 closeout：closeout 也必须显式过一次模型（有界机会）
+        assert len(scripted.snapshots) == 4
+        closeout_request = scripted.snapshots[3].messages[-1]
         assert closeout_request.type == "human"
         assert TRIGGER_LOCAL_TURNS in closeout_request.content
 
@@ -317,7 +329,8 @@ class TestAgentLoopLocalFusePause:
         assert data["reason"] == REASON_BUDGET_EXHAUSTED
         assert data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
         assert data["budget_version"] == 1
-        assert data["consumed"] == {"agent_turns": 2}
+        # 计数点是"被接纳的普通轮"：closeout 那一次是 model_requests，不进 agent_turns
+        assert data["consumed"] == {"agent_turns": 3}
         # 两个作用域各自的原生投影（命中哪个维度由 trigger_dimension 指明）
         assert data["limits"]["local"]["max_agent_turns"] == 3
         assert data["limits"]["run"]["max_agent_turns_total"] is None
@@ -328,8 +341,8 @@ class TestAgentLoopLocalFusePause:
         }
 
     @pytest.mark.asyncio
-    async def test_convergence_before_the_reserved_turn_completes(self, tmp_path):
-        """回归：模型在预留容量**之前**收敛（无 tool_calls）-> completed，不是暂停。
+    async def test_convergence_before_the_fuse_completes(self, tmp_path):
+        """回归：模型在保险丝**到顶之前**收敛（无 tool_calls）-> completed，不是暂停。
 
         停止信号（无 tool_calls）必须先于预算兜底判定，否则最终回答会被误报成
         "预算到顶"并把 final_text 丢掉（`#312` 保留了这条顺序）。
@@ -347,7 +360,7 @@ class TestAgentLoopLocalFusePause:
 
     @pytest.mark.asyncio
     async def test_reserved_turn_is_not_a_regular_turn(self, tmp_path):
-        """行为变更（`#312`）：ceiling 的**最后一轮**属于 closeout，不再是普通轮。
+        """run ceiling 的**最后一轮**属于 closeout，不再是普通轮。
 
         剧本里第 3 轮本来是"最终回答"，但该轮已被预留的 closeout 占用 ⇒ 它只会被
         当作 closeout 请求的答复（不是合法 continuation JSON），于是落 `run/paused`
@@ -355,10 +368,16 @@ class TestAgentLoopLocalFusePause:
         可以收敛）：预留容量属于 ceiling 之内（`02 §5.2`），不能既算 closeout 又当
         普通轮用。稳定态（生产 fuse=500）里这 1 轮可忽略；小 ceiling 下它正是"暂停前
         还剩一次收口机会"的兑现。
+
+        预留**只对 run ceiling 生效**：同一剧本换成 fuse 判定时会跑满 3 轮（见上一条
+        用例）——两个作用域各有各的容量算法，这是刻意的不对称，不要"顺手对齐"。
         """
         rounds = _loop_rounds(2) + [AIMessage(content="总算算完了")]
         scripted = ScriptedModel(rounds)
-        runtime = _runtime(scripted, max_agent_turns=3)
+        runtime = _runtime(
+            scripted, max_agent_turns=500,
+            run_budget=LaunchRunBudget(limits=RunTurnLimits(max_agent_turns_total=3)),
+        )
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "第三轮才收敛")
@@ -370,9 +389,14 @@ class TestAgentLoopLocalFusePause:
         # 那句"总算算完了"因此没有成为最终回答（final_text=""），run 停在暂停态。
         closeout_request = scripted.snapshots[2].messages[-1]
         assert closeout_request.type == "human"
-        assert TRIGGER_LOCAL_TURNS in closeout_request.content
+        assert TRIGGER_RUN_TURNS in closeout_request.content
         paused = next(e for e in session.events if e.type == RUN_PAUSED)
+        assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
         assert paused.data["consumed"] == {"agent_turns": 2}
+        assert paused.data["limits"]["run"]["max_agent_turns_total"] == 3
+        # run/started 就把 ceiling 落盘了（重启后 limits 能重建成同一个值，`03 §3.4`）
+        started = next(e for e in session.events if e.type == "run/started")
+        assert started.data["budget"]["run"]["max_agent_turns_total"] == 3
 
 
 # ---------- 场景⑤：失败边界（故障注入，剧本可控可重现） ----------
