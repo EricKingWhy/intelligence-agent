@@ -94,15 +94,18 @@ async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
         relay = MemoryV2IndexRelay(store, index)
         service = MemoryV2Service(store, index, relay=relay)
 
+        sessions = JsonlSessionStore(root=tmp_path / "sessions")
+        source_session = Session.start(sessions, session_id=source_session_id)
         memory_ids: dict[str, str] = {}
         for item in dataset["memories"]:
             content = item["content"]
+            source_event = source_session.append(USER_MESSAGE, {"content": content})
             draft = make_draft(
                 content=content,
                 scope=MemoryScope.PROJECT,
                 project_id=identity.project_id,
                 source_session_id=source_session_id,
-                source_event_ids=[f"gold-event-{item['id']}"],
+                source_event_ids=[source_event.event_id],
                 payload=SemanticPayload(
                     subject=item["id"], fact=content,
                     category=SemanticCategory.PROJECT_FACT,
@@ -116,7 +119,6 @@ async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
             memory_ids[record.id] = item["id"]
         await relay.flush()
 
-        sessions = JsonlSessionStore(root=tmp_path / "query-sessions")
         ranked_ids: dict[str, list[str]] = {}
         target_factors: dict[str, dict[str, float | int | str]] = {}
         for query in dataset["queries"]:
