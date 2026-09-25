@@ -91,7 +91,8 @@ async def test_v2_milvus_upsert_single_and_bulk_delete(tmp_path) -> None:
         assert len(tombstones) == 1
         assert set(tombstones[0].keys()) == {
             "memory_id", "root_id", "tenant_id", "user_id", "scope", "project_id",
-            "deleted_at", "expires_at", "deletion_reason", "content_hashes", "source_hashes",
+            "version", "deleted_at", "expires_at", "deletion_reason", "content_hashes",
+            "source_hashes",
         }
 
         many = [
