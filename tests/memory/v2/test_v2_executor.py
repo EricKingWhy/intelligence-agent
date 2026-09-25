@@ -232,7 +232,7 @@ async def _claimed(
 
 def _executor(
     env: Env, invoker, *, writer=None, limits: MemoryBudgetLimits | None = None,
-    clock=None,
+    clock=None, observer=None,
 ) -> MemoryJobExecutor:
     values: dict = {
         "jobs": env.jobs,
@@ -244,6 +244,8 @@ def _executor(
         values["limits"] = limits
     if clock is not None:
         values["clock"] = clock
+    if observer is not None:
+        values["observer"] = observer
     return MemoryJobExecutor(**values)
 
 
@@ -289,6 +291,64 @@ async def test_no_memory_completes_quietly(env: Env) -> None:
     assert stored.stage is MemoryJobStage.COMPLETED
     assert stored.outcome is MemoryJobOutcome.NO_WRITE
     assert [c.stage for c in invoker.calls] == [MemoryModelStage.FORMATION]
+
+
+@pytest.mark.asyncio
+async def test_job_observations_include_metadata_without_projected_content(env: Env) -> None:
+    observations: list[tuple[str, dict]] = []
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+
+    _job, result, _sink = await _run(
+        env, invoker,
+        observer=lambda name, metadata: observations.append((name, metadata)),
+    )
+
+    assert result is not None and result.outcome is MemoryJobOutcome.NO_WRITE
+    assert {name for name, _ in observations} >= {"job", "model", "schema", "formation"}
+    captured = repr(observations)
+    assert "请用 pnpm" not in captured
+    assert "evidence" not in captured
+    model = next(metadata for name, metadata in observations if name == "model")
+    assert model["model_alias"] == "memory.primary"
+    assert model["input_tokens_estimated"] is True
+    assert model["cost_usd"] is None
+    assert model["outcome"] == "success"
+    assert len(model["input_sha256"]) == 64
+    assert len(model["output_sha256"]) == 64
+    assert len(model["content_sha256"]) == 64
+    assert isinstance(model["output_tokens"], int)
+    assert model["output_tokens_estimated"] is True
+    assert "payload" not in model
+    assert "system_prompt" not in model
+
+
+@pytest.mark.asyncio
+async def test_observer_failure_does_not_change_a_committed_memory_job(env: Env) -> None:
+    def unavailable_observer(_name: str, _metadata: dict) -> None:
+        raise RuntimeError("Langfuse credential=private")
+
+    searchable = await env.service.create(
+        make_draft(content="Synthetic recall remains searchable after observer failure"), USER_A,
+    )
+    await env.index.upsert(searchable)
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())],
+    )
+
+    _job, result, _sink = await _run(env, invoker, observer=unavailable_observer)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
+    assert [call.stage for call in invoker.calls] == [
+        MemoryModelStage.FORMATION, MemoryModelStage.ADJUDICATION,
+    ]
+    records = await _active(env)
+    assert len(records) == 2
+    recalled = await env.service.search(
+        "Synthetic recall remains searchable", USER_A,
+        scope=MemoryScope.USER_GLOBAL, limit=5,
+    )
+    assert [record.id for record in recalled] == [searchable.id]
 
 
 @pytest.mark.asyncio
