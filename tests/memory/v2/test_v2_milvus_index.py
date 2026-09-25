@@ -1,3 +1,5 @@
+"""V2 reuses the initialized Milvus client and keeps SQLite authoritative."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -41,6 +43,7 @@ async def test_project_search_routes_on_the_trusted_project_and_returns_ids_only
     assert call["filter_params"] == {
         "tenant": "tenant-a", "user": "user-a", "scope": "project", "route": "project-x",
     }
+    assert "tenant_id == {tenant}" in call["filter"]
     assert call["output_fields"] == ["memory_id"]
     assert call["limit"] == 10
 
@@ -57,19 +60,39 @@ async def test_project_search_without_trusted_project_does_not_call_milvus() -> 
 
 
 @pytest.mark.asyncio
-async def test_project_upsert_stores_project_route_and_namespaced_primary_key() -> None:
+async def test_project_upsert_search_and_delete_use_namespaced_trusted_routing() -> None:
     vectors = _InitializedVectorStore()
     index = MilvusMemoryV2Index(vectors)
     record = make_record(
-        memory_id="memory-1", scope=MemoryScope.PROJECT, project_id="project-x",
+        tenant_id="tenant-a", user_id="user-a", memory_id="memory-1",
+        scope=MemoryScope.PROJECT, project_id="project-x", content="a durable preference",
     )
 
     await index.upsert(record)
+    operation, upsert = vectors.calls[-1]
+    row = upsert["data"][0]
+    assert operation == "upsert" and upsert["collection_name"] == "memory"
+    assert row["id"] != record.id and len(row["id"]) == 64
+    assert row["memory_id"] == record.id and row["session_id"] == "project-x"
+    assert row["scope"] == "project" and row["content"] == record.content
 
-    operation, call = vectors.calls[0]
-    row = call["data"][0]
-    assert operation == "upsert"
-    assert row["session_id"] == "project-x"
-    assert row["scope"] == "project"
-    assert row["memory_id"] == "memory-1"
-    assert row["id"] != "memory-1"
+    hits = await index.search(
+        "preference", TrustedMemoryIdentity("tenant-a", "user-a", "project-x"),
+        MemoryScope.PROJECT, 5,
+    )
+    operation, search = vectors.calls[-1]
+    assert operation == "search" and hits == [(record.id, 0.8)]
+    assert search["filter_params"] == {
+        "tenant": "tenant-a", "user": "user-a", "scope": "project", "route": "project-x",
+    }
+
+    await index.delete(
+        record.id, tenant_id="tenant-a", user_id="user-a",
+        scope=MemoryScope.PROJECT, project_id="project-x",
+    )
+    operation, deletion = vectors.calls[-1]
+    assert operation == "delete"
+    assert deletion["filter_params"] == {
+        "tenant": "tenant-a", "user": "user-a", "scope": "project",
+        "route": "project-x", "memory": record.id,
+    }

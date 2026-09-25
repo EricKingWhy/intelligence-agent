@@ -73,6 +73,8 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ("RetrieveMemoryV2Tool", "agent_harness.memory.v2.search_tool"),
     ("RememberThisTool", "agent_harness.memory.tools"),
     ("ForgetMemoryTool", "agent_harness.memory.tools"),
+    ("RememberMemoryV2Tool", "agent_harness.memory.v2.tools"),
+    ("ForgetMemoryV2Tool", "agent_harness.memory.v2.tools"),
     ("WebSearchTool", "agent_harness.websearch.tools"),
     ("LoadSkillTool", "agent_harness.skills.tool"),
     ("DelegateTool", "agent_harness.multiagent.tools"),

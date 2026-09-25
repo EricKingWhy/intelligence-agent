@@ -162,6 +162,21 @@ def test_an_explicit_turn_opt_out_is_excluded() -> None:
     assert verdict.skip_reason is FormationSkipReason.EXPLICIT_OPT_OUT
 
 
+@pytest.mark.parametrize(
+    "content",
+    ["Do not remember this chat", "不要记住这次对话", "本轮不要记忆"],
+)
+def test_natural_language_turn_opt_out_skips_formation_without_a_setting_change(
+    content: str,
+) -> None:
+    verdict = _decide(
+        STATUS_COMPLETED, [_user(content=content), _model()],
+    )
+
+    assert verdict.eligible is False
+    assert verdict.skip_reason is FormationSkipReason.EXPLICIT_OPT_OUT
+
+
 @pytest.mark.parametrize("marker", [False, None, "", 0])
 def test_a_falsy_opt_out_marker_does_not_suppress(marker) -> None:
     """只有真值才算退出——`False` / `None` / 空串 / 0 都是"没说要退出"。"""

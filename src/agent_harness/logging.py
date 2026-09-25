@@ -41,6 +41,8 @@ EVENT_TYPES = frozenset(
         # 记忆内容变更的审计（#159）：记忆是 Capability，变更痕迹只落结构化日志，
         # 不进 SessionEvent（ADR-0026 / 不变量 #16、#22）。
         "memory_forget",
+        # V2 治理 API 与显式命令的脱敏审计，只记录动作、id 和影响数量。
+        "memory_governance",
         # 冲突消解的额外开销观测（#158）：检索了几次/取回几条/截断几条/决策花了多久。
         # 同样是诊断词汇而非会话事件（记忆不是会话真相）。
         "memory_consolidated",

@@ -7,6 +7,8 @@ Seam：`MemoryV2Capability` 的七个方法。测试只通过这个 Protocol 调
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 
@@ -68,6 +70,27 @@ async def test_searched_memory_never_exposes_superseded_or_invalidated(service) 
 
     assert [record.id for record in hits] == [current.id]
     assert await capability.versions(current.root_id, USER_A) != []
+
+
+@pytest.mark.asyncio
+async def test_tombstone_purger_repeats_and_stops_with_service(service) -> None:
+    capability, store, _index = service
+    calls = 0
+
+    async def purge():
+        nonlocal calls
+        calls += 1
+        return 0
+
+    store.purge_expired_tombstones = purge
+    capability.start_tombstone_purger(interval_seconds=0.01)
+    await asyncio.sleep(0.035)
+    await capability.aclose()
+    stopped_at = calls
+    await asyncio.sleep(0.02)
+
+    assert stopped_at >= 2
+    assert calls == stopped_at
 
 
 @pytest.mark.asyncio

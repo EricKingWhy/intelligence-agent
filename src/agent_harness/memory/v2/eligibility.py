@@ -33,6 +33,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -65,6 +66,12 @@ MEMORY_OPT_OUT_FIELD = "memory_opt_out"
 #: 未获批的失败终态上（`failed`），本来就过不了终态那一关。多收一个 `model/failed`
 #: 会是一条永远走不到的兜底分支，而不是多一层保护。
 _MODEL_RESPONSE_EVENT_TYPE = MODEL_COMPLETED
+_OPT_OUT_TEXT = re.compile(
+    r"(?:\b(?:do\s+not|don't|dont)\s+remember\s+(?:this|the\s+current)\s+"
+    r"(?:chat|conversation|session)\b|"
+    r"不要记住(?:这|本)次(?:聊天|对话)|不要把(?:这|本)次对话记下来|本轮不要记忆)",
+    re.IGNORECASE,
+)
 
 
 class FormationSkipReason(str, Enum):
@@ -132,6 +139,9 @@ def _skip(reason: FormationSkipReason) -> RunEndEligibility:
 
 
 def _opts_out(event: SessionEvent) -> bool:
-    """该用户消息是否声明"别记这次"。只看我们自己的结构化字段，不做内容启发式。"""
+    """该用户消息是否声明"别记这次"，只影响包含该 user/message 的当前 run。"""
     data = event.data if isinstance(event.data, dict) else {}
-    return bool(data.get(MEMORY_OPT_OUT_FIELD))
+    content = data.get("content")
+    return bool(data.get(MEMORY_OPT_OUT_FIELD)) or (
+        isinstance(content, str) and bool(_OPT_OUT_TEXT.search(content))
+    )

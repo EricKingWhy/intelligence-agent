@@ -352,7 +352,7 @@ class MemoryJobRunner:
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         recovery_limit: int = DEFAULT_RECOVERY_LIMIT,
         worker_id: str | None = None,
-        memory_capability: Any | None = None,
+        memory_v2: Any | None = None,
         workspace_index: Any | None = None,
     ) -> None:
         if max_concurrency < 1:
@@ -361,7 +361,7 @@ class MemoryJobRunner:
         self._sessions = sessions
         self._executor = executor
         self._roles = roles
-        self.memory_capability = memory_capability
+        self.memory_v2 = memory_v2
         self._workspace_index = workspace_index
         #: 默认按会话建 sink（`executor` 的端口没有 session 参数，只能在这里绑）。
         #: 允许注入是为了让用例能对着裸 list 断言事件，而不必去读会话日志。
@@ -411,22 +411,26 @@ class MemoryJobRunner:
         if self._closed:
             logger.warning("Memory V2 runner is closed; dropping run %s", run_id)
             return None
+        identity = get_identity_context()
+        trusted = TrustedMemoryIdentity(tenant_id=identity.tenant_id, user_id=identity.user_id)
+        extraction_enabled = self._extraction_enabled
+        if self.memory_v2 is not None:
+            extraction_enabled = (await self.memory_v2.get_settings(trusted)).extraction_enabled
         decision = decide_run_end_eligibility(
             terminal_status=terminal_status, events=events,
-            extraction_enabled=self._extraction_enabled,
+            extraction_enabled=extraction_enabled,
         )
         if not decision.eligible:
             logger.debug("Memory V2 skipped run %s: %s", run_id, decision.skip_reason)
             return None
-        identity = get_identity_context()
         project_id = None
         if self._workspace_index is not None:
             try:
                 workspace = self._workspace_index.workspace_of_session(session_id)
                 project_id = workspace.id if workspace is not None else None
-            except Exception as error:  # noqa: BLE001 — project failure narrows to user-global.
+            except Exception as error:  # noqa: BLE001 — missing project context narrows scope.
                 logger.warning(
-                    "Memory V2 project binding unavailable (%s); enqueueing user-global context",
+                    "Memory V2 project binding unavailable (%s); using user-global scope",
                     type(error).__name__,
                 )
         job = await self._jobs.enqueue(
