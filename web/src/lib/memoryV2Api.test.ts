@@ -192,9 +192,9 @@ describe('Memory V2 API adapter', () => {
     });
   });
 
-  it('loads version history and masks deleted payloads without inventing content', async () => {
+  it('rejects full deleted version records outside the content-free tombstone contract', async () => {
     const deleted = v2Record({
-      id: 'm-deleted', status: 'deleted', content: '', payload: null, version: 4,
+      id: 'm-deleted', status: 'deleted', content: 'must stay hidden', payload: null, version: 4,
     });
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse([deleted]));
     vi.stubGlobal('fetch', fetchMock);
@@ -202,7 +202,43 @@ describe('Memory V2 API adapter', () => {
     const versions = await getMemoryVersions('root/1');
 
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/memories/root%2F1/versions');
-    expect(versions).toMatchObject([{ status: 'deleted', content: '', payload: null }]);
+    expect(versions).toEqual([]);
+  });
+
+  it('parses authorized tombstone summaries without accepting content or hash fields', async () => {
+    const tombstone = {
+      id: 'm-deleted',
+      root_id: 'root-deleted',
+      scope: 'user_global',
+      project_id: null,
+      status: 'deleted',
+      deleted_at: '2026-09-25T10:00:00Z',
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([tombstone]))
+      .mockResolvedValueOnce(jsonResponse([v2Record({
+        id: tombstone.id,
+        root_id: tombstone.root_id,
+        scope: tombstone.scope,
+        project_id: tombstone.project_id,
+        status: 'deleted',
+        content: 'must stay hidden',
+      })]))
+      .mockResolvedValueOnce(jsonResponse([{ ...tombstone, scope: 'project' }]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const [record] = await listMemoryRecords(20, 0, { status: 'deleted' });
+    const malformed = await listMemoryRecords(20, 0, { status: 'deleted' });
+    const invalidProject = await listMemoryRecords(20, 0, { status: 'deleted' });
+
+    expect(record).toMatchObject({
+      id: 'm-deleted', root_id: 'root-deleted', status: 'deleted',
+      is_tombstone: true, content: '', deleted_at: tombstone.deleted_at,
+      created_at: tombstone.deleted_at, payload: null,
+    });
+    expect(malformed).toEqual([]);
+    expect(invalidProject).toEqual([]);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('status=deleted');
   });
 
   it('sends the expected version and parses only approved recall explanation fields', async () => {

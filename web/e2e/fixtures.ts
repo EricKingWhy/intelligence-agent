@@ -327,6 +327,8 @@ export interface ApiMock {
   memoryVanishedIds?: string[];
   /** GET /api/memories 的拦截口（断言分页参数或伪造 500）；返回 true = 已处理。 */
   onMemoriesGet?: (route: Route) => Promise<boolean> | boolean;
+  /** GET /api/memories/{id}/versions 的拦截口（例如 content-free tombstone history）。 */
+  onMemoryVersionsGet?: (route: Route, memoryId: string) => Promise<boolean> | boolean;
   /** MEM-V2-5: independently persisted setting fixture and optional mutation failure. */
   memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean };
   memorySettingsPatchError?: { status: number; detail: string };
@@ -938,6 +940,7 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
     const memoryVersionsMatch = /^\/api\/memories\/([^/]+)\/versions$/.exec(path);
     if (memoryVersionsMatch && req.method() === 'GET') {
       const id = decodeURIComponent(memoryVersionsMatch[1]);
+      if (mock.onMemoryVersionsGet && (await mock.onMemoryVersionsGet(route, id))) return;
       const selected = memoryState.find((item) => item.id === id);
       if (selected?.project_id && new URL(req.url()).searchParams.get('project_id') !== selected.project_id) {
         return json(route, { detail: `记忆不存在：${id}` }, 404);

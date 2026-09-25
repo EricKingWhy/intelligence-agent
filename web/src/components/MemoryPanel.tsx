@@ -387,16 +387,17 @@ function MemoryRow({ record, pending, onDelete, onDeleted, onNotice, onChanged }
         {record.tier && <span>{record.tier === 'profile' ? '画像' : '集合'}</span>}
         {record.source_type && <span>{record.source_type}</span>}
         <span className={`memory-scope${record.scope === 'session' ? ' scope-session' : ' scope-user'}`}>{record.scope === 'session' ? '会话' : record.scope === 'user' ? '用户' : SCOPE_LABELS[record.scope as MemoryScopeV2]}</span>
-        <time className="memory-time" dateTime={record.created_at}>{formatMemoryTime(record.created_at)}</time>
-        {kind === null && <span>旧版记忆</span>}
+        <time className="memory-time" dateTime={record.deleted_at ?? record.created_at}>{formatMemoryTime(record.deleted_at ?? record.created_at)}</time>
+        {kind === null && !record.is_tombstone && <span>旧版记忆</span>}
       </div>
       {detailsOpen && <dl className="memory-v2-details">
-        <dt>创建时间</dt><dd>{formatMemoryTime(record.created_at)}</dd>
-        <dt>来源</dt><dd>{record.source_type ?? '旧版'}</dd>
+        {record.is_tombstone
+          ? <><dt>删除时间</dt><dd>{formatMemoryTime(record.deleted_at ?? record.created_at)}</dd></>
+          : <><dt>创建时间</dt><dd>{formatMemoryTime(record.created_at)}</dd><dt>来源</dt><dd>{record.source_type ?? '旧版'}</dd></>}
         {record.project_id && <><dt>项目 ID</dt><dd>{record.project_id}</dd></>}
-        {record.source_session_id && <><dt>来源会话</dt><dd>{record.source_session_id}</dd></>}
-        {record.source_event_ids.length > 0 && <><dt>来源事件</dt><dd>{record.source_event_ids.join(', ')}</dd></>}
-        {record.payload && Object.entries(record.payload).filter(([key]) => key !== 'kind').map(([key, value]) => <Fragment key={key}><dt>{key === 'category' ? '类别' : key}</dt><dd>{value}</dd></Fragment>)}
+        {!record.is_tombstone && record.source_session_id && <><dt>来源会话</dt><dd>{record.source_session_id}</dd></>}
+        {!record.is_tombstone && record.source_event_ids.length > 0 && <><dt>来源事件</dt><dd>{record.source_event_ids.join(', ')}</dd></>}
+        {!record.is_tombstone && record.payload && Object.entries(record.payload).filter(([key]) => key !== 'kind').map(([key, value]) => <Fragment key={key}><dt>{key === 'category' ? '类别' : key}</dt><dd>{value}</dd></Fragment>)}
       </dl>}
 
       {editing && kind && <form className="memory-v2-edit" onSubmit={(event) => void saveEdit(event)}>
@@ -417,7 +418,7 @@ function MemoryRow({ record, pending, onDelete, onDeleted, onNotice, onChanged }
         {historyError && <span className="memory-v2-error" role="alert">{historyError}<button onClick={() => void loadHistory()}>重试</button></span>}
         {versions === null && !historyError && <span role="status">正在读取版本…</span>}
         {versions?.map((version) => <div className="memory-v2-version" key={version.id}>
-          <strong>v{version.version ?? '—'} · {version.status ? STATUS_LABELS[version.status] : '旧版'}</strong>
+          <strong>{version.is_tombstone ? STATUS_LABELS.deleted : `v${version.version ?? '—'} · ${version.status ? STATUS_LABELS[version.status] : '旧版'}`}</strong>
           <time>{formatMemoryTime(version.created_at)}</time>
           <p>{version.status === 'deleted' ? '内容已删除' : version.content}</p>
         </div>)}

@@ -15,6 +15,8 @@ export type MemoryPayload =
 export interface MemoryRecord {
   id: string;
   content: string;
+  is_tombstone: boolean;
+  deleted_at: string | null;
   scope: 'user' | 'session' | MemoryScopeV2;
   metadata: Record<string, unknown>;
   created_at: string;
@@ -131,14 +133,44 @@ function parsePayload(raw: unknown, kind: MemoryKind, allowDeleted: boolean): Me
 
 function parseMemoryRecord(raw: unknown): MemoryRecord | null {
   if (!isObject(raw)) return null;
-  if (typeof raw.id !== 'string' || !raw.id || typeof raw.content !== 'string') return null;
-  if (typeof raw.created_at !== 'string' || !raw.created_at) return null;
+  if (typeof raw.id !== 'string' || !raw.id) return null;
   if (!['user', 'session', ...MEMORY_SCOPES].includes(raw.scope as string)) return null;
   const scope = raw.scope as MemoryRecord['scope'];
+  if (raw.status === 'deleted') {
+    const tombstoneFields = ['id', 'root_id', 'scope', 'project_id', 'status', 'deleted_at'];
+    if (Object.keys(raw).some((key) => !tombstoneFields.includes(key))
+      || !MEMORY_SCOPES.includes(scope as MemoryScopeV2)
+      || typeof raw.root_id !== 'string' || !raw.root_id
+      || (raw.project_id !== null && typeof raw.project_id !== 'string')
+      || ((scope === 'project') !== (typeof raw.project_id === 'string'))
+      || typeof raw.deleted_at !== 'string' || !raw.deleted_at) return null;
+    return {
+      id: raw.id,
+      content: '',
+      is_tombstone: true,
+      deleted_at: raw.deleted_at,
+      scope,
+      metadata: {},
+      created_at: raw.deleted_at,
+      root_id: raw.root_id,
+      version: null,
+      kind: null,
+      tier: null,
+      status: 'deleted',
+      project_id: raw.project_id,
+      source_type: null,
+      source_session_id: null,
+      source_event_ids: [],
+      payload: null,
+    };
+  }
+  if (typeof raw.content !== 'string' || typeof raw.created_at !== 'string' || !raw.created_at) return null;
   const metadata = isObject(raw.metadata) ? raw.metadata : {};
   const base = {
     id: raw.id,
     content: raw.content,
+    is_tombstone: false,
+    deleted_at: null,
     scope,
     metadata,
     created_at: raw.created_at,

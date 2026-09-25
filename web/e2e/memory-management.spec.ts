@@ -73,6 +73,60 @@ test('AC1: search and all list filters are sent to the API and render its result
     && url.searchParams.get('scope') === 'user_global')).toBe(true);
 });
 
+test('AC2: deleted tombstones show only authorized metadata and content-free history', async ({ page }) => {
+  const requested: URL[] = [];
+  const tombstone = {
+    id: 'm-deleted-v2', root_id: 'root-deleted', scope: 'user_global', project_id: null,
+    status: 'deleted', deleted_at: '2026-09-25T10:00:00Z',
+  };
+  await routeApi(page, {
+    memories: [],
+    onMemoriesGet: async (route) => {
+      const url = new URL(route.request().url());
+      requested.push(url);
+      if (url.searchParams.get('status') !== 'deleted') return false;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([tombstone]),
+      });
+      return true;
+    },
+    onMemoryVersionsGet: async (route, memoryId) => {
+      if (memoryId !== tombstone.id) return false;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          tombstone,
+          { ...tombstone, id: 'm-deleted-v1', deleted_at: '2026-09-24T10:00:00Z' },
+        ]),
+      });
+      return true;
+    },
+  });
+  await page.goto('/');
+  await openPanel(page);
+  await panel(page).getByLabel('状态', { exact: true }).selectOption('deleted');
+
+  const row = panel(page).locator('.memory-row');
+  await expect(row).toHaveCount(1);
+  await expect(row).toContainText('已删除');
+  await expect(row).toContainText('内容已删除');
+  await expect(row).not.toContainText('旧版记忆');
+  await expect(row.getByRole('button', { name: '删除这条记忆' })).toHaveCount(0);
+  await expect.poll(() => requested.some((url) => url.searchParams.get('status') === 'deleted')).toBe(true);
+
+  await row.getByRole('button', { name: '详细信息' }).click();
+  await expect(row.locator('.memory-v2-details')).toContainText('删除时间');
+  await row.getByRole('button', { name: '版本历史' }).click();
+  const history = row.locator('.memory-v2-history');
+  await expect(history.locator('.memory-v2-version')).toHaveCount(2);
+  await expect(history).toContainText('内容已删除');
+  await expect(history).not.toContainText('v—');
+  await expect(history).not.toContainText('must stay hidden');
+});
+
 test('project memory operations carry its authorized context and bulk preview covers global plus project', async ({ page }) => {
   const requested: URL[] = [];
   const bulkUrls: URL[] = [];
