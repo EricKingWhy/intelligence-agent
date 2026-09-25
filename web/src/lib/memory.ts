@@ -4,6 +4,98 @@
  *  可用纯函数测试锁住（不依赖 SSR/浏览器环境）。 */
 
 import type { MemoryScope, MemorySummary } from '../types';
+import type { MemoryKind, MemoryPayload, MemoryRecord, SemanticCategory } from './memoryV2Api';
+
+export const MEMORY_CONTENT_MAX_CHARS = 500;
+export const MEMORY_PAYLOAD_FIELDS: Record<MemoryKind, readonly { key: string; label: string }[]> = {
+  semantic: [
+    { key: 'subject', label: '主体' },
+    { key: 'fact', label: '事实' },
+  ],
+  episodic: [
+    { key: 'situation', label: '情境' },
+    { key: 'action', label: '行动' },
+    { key: 'outcome', label: '结果' },
+    { key: 'lesson', label: '经验' },
+  ],
+  procedural: [
+    { key: 'trigger', label: '触发条件' },
+    { key: 'procedure', label: '操作步骤' },
+    { key: 'success_condition', label: '成功条件' },
+  ],
+};
+export const SEMANTIC_CATEGORIES: readonly { value: SemanticCategory; label: string }[] = [
+  { value: 'preference', label: '偏好' },
+  { value: 'profile', label: '个人画像' },
+  { value: 'project_fact', label: '项目事实' },
+  { value: 'constraint', label: '约束' },
+];
+
+export type MemoryPayloadDraft = Record<string, string>;
+
+/** Match the backend's Python character-count and per-kind required-field contract. */
+export function validateMemoryEdit(
+  record: Pick<MemoryRecord, 'kind' | 'status'>,
+  content: string,
+  payload: MemoryPayload | null,
+): string[] {
+  const errors: string[] = [];
+  if (record.kind === null || record.status !== 'active') errors.push('只有当前有效的 V2 记忆可以编辑。');
+  if (!content.trim()) errors.push('记忆正文不能为空。');
+  if (Array.from(content).length > MEMORY_CONTENT_MAX_CHARS) {
+    errors.push(`记忆正文不能超过 ${MEMORY_CONTENT_MAX_CHARS} 个字符。`);
+  }
+  if (record.kind === null || payload === null || payload.kind !== record.kind) {
+    errors.push('结构化字段必须与记忆类型匹配。');
+    return errors;
+  }
+  const fields = MEMORY_PAYLOAD_FIELDS[record.kind];
+  for (const { key, label } of fields) {
+    const value = payload[key as keyof MemoryPayload];
+    if (typeof value !== 'string' || !value.trim()) errors.push(`${label}不能为空。`);
+    else if (Array.from(value).length > MEMORY_CONTENT_MAX_CHARS) {
+      errors.push(`${label}不能超过 ${MEMORY_CONTENT_MAX_CHARS} 个字符。`);
+    }
+  }
+  if (record.kind === 'semantic'
+    && payload.kind === 'semantic'
+    && !SEMANTIC_CATEGORIES.some(({ value }) => value === payload.category)) {
+    errors.push('请选择有效的语义类别。');
+  }
+  return errors;
+}
+
+export function memoryPayloadFromDraft(
+  kind: MemoryKind,
+  values: MemoryPayloadDraft,
+): MemoryPayload | null {
+  if (kind === 'semantic') {
+    const category = SEMANTIC_CATEGORIES.find(({ value }) => value === values.category)?.value;
+    if (!category) return null;
+    return { kind, subject: values.subject ?? '', fact: values.fact ?? '', category };
+  }
+  if (kind === 'episodic') {
+    return {
+      kind,
+      situation: values.situation ?? '',
+      action: values.action ?? '',
+      outcome: values.outcome ?? '',
+      lesson: values.lesson ?? '',
+    };
+  }
+  return {
+    kind,
+    trigger: values.trigger ?? '',
+    procedure: values.procedure ?? '',
+    success_condition: values.success_condition ?? '',
+  };
+}
+
+export function memoryPayloadDraft(payload: MemoryPayload): MemoryPayloadDraft {
+  return Object.fromEntries(
+    Object.entries(payload).map(([key, value]) => [key, String(value)]),
+  );
+}
 
 /** 单页条数：与后端 `web/memory.py` 的默认值一致（`limit=50`，上界 200）。
  *

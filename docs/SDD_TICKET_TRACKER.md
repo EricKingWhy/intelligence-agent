@@ -12,29 +12,31 @@
 
 ---
 
-## 当前规划：Memory V2（2026-09-23，只规划/开票，未施工）
+## 当前规划：Memory V2（截至 2026-09-25）
 
 | ID | GitHub | 状态 | 目标 | blocked_by |
 | --- | --- | --- | --- | --- |
 | Spec | #296 | OPEN / `ready-for-agent` | Production Long-Term Memory V2 产品与工程合同 | — |
-| MEM-V2-1 | #297 | OPEN / `ready-for-agent` | Typed Memory lifecycle vertical slice | — |
-| MEM-V2-2 | #298 | OPEN / `ready-for-agent` | Durable Formation and Adjudication | #297 |
-| MEM-V2-3 | #299 | OPEN / `ready-for-agent` | Cross-session Profile and hybrid recall | #297 |
-| MEM-V2-4 | #300 | OPEN / `ready-for-agent` | Explicit commands and governance API | #297 |
-| MEM-V2-5 | #301 | OPEN / `ready-for-agent` | Memory management Web UI | #300 |
-| MEM-V2-6 | #302 | OPEN / `ready-for-agent` | Privacy observability and quality evaluation | #298, #299, #300 |
-| MEM-V2-7 | #303 | OPEN / `ready-for-agent` | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
-| MEM-V2-8 | #304 | OPEN / `ready-for-agent` | Final real Gate and release evidence | #301, #302, #303 |
+| MEM-V2-1 | #297 | CLOSED / integrated | Typed Memory lifecycle vertical slice | — |
+| MEM-V2-2 | #298 | CLOSED / integrated | Durable Formation and Adjudication | #297 |
+| MEM-V2-3 | #299 | CLOSED / integrated | Cross-session Profile and hybrid recall | #297 |
+| MEM-V2-4 | #300 | CLOSED / integrated | Explicit commands and governance API | #297 |
+| MEM-V2-5 | #301 | CLOSED / integrated | Memory management Web UI | #300 |
+| MEM-V2-6 | #302 | OPEN / unblocked | Privacy observability and quality evaluation | #298, #299, #300 |
+| MEM-V2-7 | #303 | OPEN / unblocked | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
+| MEM-V2-8 | #304 | OPEN / waits for #302 and #303 | Final real Gate and release evidence | #301, #302, #303 |
 
-**事实源与边界**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。GitHub `#297`–`#304` 已原生挂为 `#296` 的 Sub-issue，并已建立上述 Blocked-by 边。当前没有任何票进入实现；旧 SQLite/Milvus Memory 数据仍在，只有 `#303` 获准在其依赖全部集成并完成精确目标/保留项验证后执行 clean-slate 删除。
+**事实源与边界（截至 2026-09-25）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。GitHub `#297`–`#301` 均 CLOSED 且代码已集成到 `main`；`#299` 的 AC10 已以冻结语料和真实 Milvus hybrid 检索证据通过。`#302` / `#303` 已解除 `#299` 依赖并可推进；`#304` 仍等待 `#302` / `#303`。旧 SQLite/Milvus Memory 数据仍在；仅 `#303` 获准在依赖集成并完成精确目标与保留项核验后执行 clean-slate 删除。
 
-**施工顺序**：先 `#297`；再并行 `#298` / `#299` / `#300`；随后按依赖推进 `#301` / `#302` / `#303`；最后仅在前七票集成后执行 `#304`。每票独立 review/门禁/关单；不得把 `#304` 的真实 Gate 提前当作单票完成证据。
+**施工顺序**：`#297`–`#301` 已完成并集成；继续推进已解锁的 `#302` / `#303`，两票完成后执行 `#304` 的最终真实 Gate。每票仍独立执行 review、门禁和关单。
 
 > **状态更新（2026-09-24）**：上表「OPEN / `ready-for-agent`」与上一段的「当前没有任何票进入实现」**均已过期**，
 > 按「历史片段不改写、新状态追加」的惯例在此更正：`#297`（`T297-mem-v2-1-typed-lifecycle`，tip `32ef89b`）
 > 与 `#298`（`T298-mem-v2-2-durable-formation-adjudication`）**均已进入实现并各自推送分支**，
 > 两票在 GitHub 上仍为 OPEN（未集成未关单）。`#298` 的逐票记录见文末
 > 「MEM-V2-2（`#298`）T1–T6b 施工记录」段。
+
+> **当前状态（2026-09-25）**：`#297`–`#301` 已集成并 CLOSED；#299 AC10 的冻结语料 Recall@6=0.95、真实 Milvus hybrid 检索及证据已随 `fbb8a98c` 集成，GitHub issue 已关闭。`#302` / `#303` 已解除阻塞，`#304` 仍等后二票。逐票历史记录保留在下文。
 
 ---
 
@@ -5279,9 +5281,9 @@ ceiling 抬高上限 ⇒ **同一 `run_id`** 续跑 ⇒ 跑完链式任务（`ru
 8. **可选能力 fail-open 如实记录**：本环境 `memory` 抽取降级（`memory/degraded`），暂停 / 续跑主路径不依赖它。
 9. **未关单**（§14.12：等合入证据齐备后由主线处理；本轮按要求不自行关单）。
 10. 后续票按交接册顺序：`#313` → `#314` → `#315` → `#316` → `#317` → `#318` → `#319` → `#320`。
-## MEM-V2-3（`#299`）实现与两轴修后复审（2026-09-25 · 本地未集成）
+## MEM-V2-3（`#299`）实现、AC10 评测与集成收口（2026-09-25）
 
-**状态**：实现与修后独立审查完成，候选仍在本地短分支；GitHub issue 保持 OPEN。分支 `codex/mem-v2-3-cross-session-profile`，基线 `d0e2dcb3c45bc56c305732ca7dbbe24dca8fffb7`，代码提交 `adb86f2020c6166fa0c358413412a0ea1649adea` 与 `11fb40604a34df5d27c2ab7b59e06c32b186f99a`。
+**状态**：#299 已完成、快进集成并推送到 `main`，GitHub issue 已 CLOSED；集成 tip `fbb8a98ca5e6ec133609d2d9d23b27f54f9a186c`。AC10 评测补充分支为 `codex/mem-v2-3-ac10-eval`；早期跨会话实现分支与修后审查记录仍按下文保留。
 
 **交付**：V2 有界 Profile 与 Collection hybrid recall、确定性检索/排名、跨会话 `memory/recalled` 与 recall explanation API、V2 显式读取工具及必要的 runtime/web 接线。V1 自动上下文与显式读取仅在 V2 成功接线时被取代；可选依赖失败或无 session 时保留安全降级路径。`remember_this` / `forget_memory` 治理命令迁移属于兄弟票 `#300`，本票未声称完成。
 
@@ -5289,4 +5291,50 @@ ceiling 抬高上限 ⇒ **同一 `run_id`** 续跑 ⇒ 跑完链式任务（`ru
 
 **两轴审查**：固定点 `d0e2dcb3c45bc56c305732ca7dbbe24dca8fffb7`，审查至 `11fb40604a34df5d27c2ab7b59e06c32b186f99a`。Standards 与 Spec 修后均未发现确认的 P0–P3。审查行见 `docs/review_ledger.d/200-d0e2dcb-11fb406.tsv`。
 
-**未完成的验收证据**：AC10 冻结项目 Recall@6 ≥85% 尚无可复跑读数；真实 Milvus hybrid retrieval integration test 尚缺。此前全量前端 Vitest 有一次超时，虽单测重跑通过，仍不宣称全量前端门禁全绿。未运行 Gate-0、未推送分支、未合并、未关单；`main` 与 `origin/main` 未改。
+**AC10（通过）**：冻结语料 `evaluation/datasets/memory_v2_project_cross_session_v1.json`（SHA-256 `8b33b9da3cf9cfeca894c3080d9358e4bfc3eca6cee3f8c817f7b772619813c8`）覆盖 20 个跨会话项目级查询；真实 Milvus `hybrid_search` 命中 19/20，Recall@6 = **0.95**，超过 **0.85** 门槛。复跑命令：`uv run --extra memory pytest tests/integration/test_memory_v2_recall_evaluation.py -m 'integration and live_services' -s -q`（1 passed，82.37s）。临时 collection `memv2r_4171ff0dbe60` 已确认清理。脱敏运行证据见 `docs/evidence/memory-v2-recall-ac10-2026-09-25.json`，记录绑定代码提交 `2117ae6d5f30057013a59ba9f6409197d687cb8c` 与 tree `e4ebd1440f606b60421d37b86c934e271728881e`，不含密钥或查询/记忆正文。全量默认 pytest 为 3813 passed / 31 skipped / 50 deselected；Recall focused tests 19 passed；集成 Gate-0 为 6/6 PASS（`docs/gate/9eaba18915242784e38b5036eb10cc515b93040b.json`），review coverage exit 0。AC10 两轴复审无 P0–P4，见 `docs/review_ledger.d/206-98208ef-2117ae6.tsv`。此前全量前端 Vitest 的已知超时仍按 #301 记录，不宣称该全量车道通过。
+
+## MEM-V2-5（`#301`）Memory management Web UI + tombstone 读取（2026-09-25 · 已集成并关闭）
+
+**状态**：`#301` 已快进集成到 `main` 并推送 GitHub，tip `74db7d7f7ef866764795ca48eef7e996292e728a`；GitHub issue CLOSED。前后端分支在集成前各自完成实现与审查，无 merge conflict。
+
+**交付**：提供受授权的 deleted-memory 列表、单条详情与版本历史读取，并完成 Memory V2 管理 UI、删除后列表 refetch 竞态修复。Tombstone API 保持六字段摘要（`id`、`root_id`、`scope`、`project_id`、`status`、`deleted_at`），不返回内容、payload、evidence、hash、删除原因或版本号。用户批准在 tombstone 内部保存 nullable version ordinal，仅用于新删除记录的版本倒序；旧 tombstone 在 30 天 TTL 内按 `deleted_at` / ID 稳定排序，API 不暴露 ordinal。
+
+**验证与审查**：后端全量 `pytest` **3811 passed / 31 skipped / 49 deselected**；前端 lint/build 通过；Memory 管理 Playwright E2E **20 passed**；Gate-0 机器记录 `docs/gate/18387b8e64556651e40231003eb08075be320e02.json` 为 **6/6 PASS**；覆盖闸门 exit 0。集成两轴 review（固定点 `cbe2e0c`）无 actionable findings。标准 Vitest 全量运行仍有 1 条 `StepDetail.window.test.tsx` 既有超时；该文件不在本票改动内，仓库验证文档已登记此 flaky，单文件提高 timeout 的诊断运行 6/6 通过。关单评论已记录该限制。
+
+**后续依赖**：`#299` 已关闭；`#302` / `#303` 现已解锁，`#304` 仍等待两票完成。
+
+## B-46（无独立 issue）：服务端 Gate-0 + `main` 分支保护落地、覆盖闸门「空 `--cc`」处置与陈旧文档全量订正（2026-09-26）
+
+**状态**：CI 与分支保护**已落地并实测生效**（PR #321 合入为 `c8e04cb9`）。本段同时记录合入当天暴露出的覆盖闸门缺陷、其机械处置（台账 209 行），以及随后的陈旧文档全量订正批（分支 `docs/ci-protection-sync`，**零代码面**）。**无独立 GitHub issue** —— 本批源于用户点名的「`main` 开 branch protection + CI 跑 Gate-0 / 覆盖闸门」，不是票面驱动。
+
+**落地**：`.github/workflows/gate0.yml` 在 PR 上跑**同一份** `scripts/gate0.py` 的 6 条机械车道（环境对齐本地：python 3.13 / node 22 / pnpm 10.32.1 / `uv sync --locked --all-extras`）。`main` 保护**读回实测**：`required_status_checks.strict = true`、必需检查 `gate0`（`checks[0].app_id = 15368`）、`enforce_admins.enabled = true`、`allow_force_pushes = false`、`allow_deletions = false`、`required_approving_review_count = 0`。**行为反向验证（不靠读配置）**：一笔 fast-forward 直推被服务端拒绝，报 `GH006` + `Changes must be made through a pull request` + `Required status check "gate0" is expected`。⇒ 集成通道只剩「推集成分支 → 开 PR → `gate0` 绿 → 合并 PR」，两步**各自需单独批准**（`AGENTS.md` §14.4 已同步改写）。保护开启前 `main` 的最后一轮推进是另一会话的**直推**（从本分支基点 `f97265d7` 到 `5aeec173`，**11 笔**，含 `#299` AC10 收口与 `#301` 收尾）；保护开启后同类直推不再可行。
+
+**合入当天暴露的闸门缺陷（结构性，非偶发）**：`main` 顶端唯一 ❌ = merge `c8e04cb9`（区间 `09ca47a1..HEAD`，709 提交 / 已审查 464 / 待判定 245）。其 `git show --cc --name-only` **为空** —— 分支合入前已并入 `origin/main`（`strict` 要求分支与 `main` 同步，而 `rebase` 属默认禁止 ⇒ 只能 merge），故合并结果与父提交二（`be7cd592`）**逐文件相同**。`check_review_coverage.py` 的 `files_of` 对空表**两条归属通道皆 fail-closed**（审查行匹配不上；**白名单那一支同样拒空表**）⇒ 只能由一条**覆盖行**归属。因 `strict` 强制分支包含 `main` 顶端，**每个 PR 合入都会重现**；squash / rebase 不能绕（会重写 sha ⇒ 区间行的 `tip` 不再是 HEAD 祖先 ⇒ 闸门**判不了**，而不是判红）。
+
+**处置**：`docs/review_ledger.d/209-pr321-merge-c8e04cb9.tsv`（`range = be7cd592..c8e04cb9`，1 笔）。行内明写这是**机械归属、不是审查主张** —— 该 merge 零新增内容，其全部内容已在 207 / 208 两行覆盖范围内。实测覆盖闸门 464 → **465**、待判定 245 → **244**、**exit 0**。同批把本分支原占用的号改号为 **207 / 208**（`77981985`），`main` 侧 `#299` 的 `206-98208ef-2117ae6.tsv` 原样保留。
+
+**文档订正（6 文件 + 3 处收口，全在 docs-only 面内 ⇒ 覆盖闸门按路径自动归属、无需审查行）**：`AGENTS.md`（§13.4 / §14.4 / §14.6 / §14.10）、`CLAUDE.md` §3 第 7 条、`docs/SDD_WORKFLOW_PROTOCOL.md`（§8.8.6 第 ③ 项 / 执行面段 / `--replay` 段）、`docs/agents/verification.md`（§0 / §4）、`docs/agents/SDD_ACCELERATION_AUDIT.md` 第 6 行、`docs/integration/MERGE_EXECUTION_ORDER.md` 顶部横幅；收口条目落在本文件、`docs/PHASE_STATUS.md`、`docs/phase_status/2026-09.md`（L815）。核心口径变化：①「两侧无 CI / 无远端强制」作废；② `push origin main` **不再是常设授权**（服务端直接拒绝）；③ 新增「一次集成 = **两次单独批准**」的成本（是否纳为常设授权**尚未裁决**）。⚠ `.github/workflows/gate0.yml` 的**头部注释**同样过期，本批**刻意不动它** —— 那是**判定本 PR 自己的那条 workflow**（`pull_request` 事件在 PR 的 merge 上下文里执行），把它并入**闸门修法 PR**（那一批本就要改闸门行为、本就要做两轴独立审查）。
+
+**读数**：覆盖闸门的**载荷事实** = 台账 209 行把那个 merge 从「`main` 顶端唯一 ❌」变成已归属（已审查 464 → **465**、待判定 245 → **244**），其后每一笔 docs / 台账提交都被**按路径自动归属**、最终 **exit 0**（区间 `09ca47a1..HEAD`）；Gate-0 裸全量 **6/6 PASS**（`tip=8abec4e3c22a / tree=ce44030a2730`，墙钟 20.9s；落盘 `docs/gate/8abec4e3c22ae164e3b221eefe3941bc6c3406a3.json`）；服务端权威读数见该 PR 的 `gate0` 检查。
+
+**残余（登记，不阻断）**：① **结构性根治未落地** —— 给 `check_review_coverage.py` 加「树 == 某父的树 ⇒ 零新增内容 ⇒ 自动归属」，按用户裁决**单独开一个 PR**（适用时含 `.sh` 语义参考、协议行号引用、测试与两轴独立审查）；② **闸门自身可被 PR 改**（改了 workflow 的 PR 其改动会被执行，仍报出一个叫 `gate0` 的绿检查；`CODEOWNERS` 因单账号无法自批而关不上这个洞。同类输入还有 `scripts/gate0.py` / `check_review_coverage.py` / 台账 / `verification.map.tsv` 与闸门读的配置）；③ 既有冗余 `[whitelist]` 条目（历史遗留，非本批引入）；④ fork PR 检出限制（`ref: head.sha` + `fetch-depth: 0` 只取 `+refs/heads/*`）；⑤ 无仓库锚点钉住 CI 环境工具版本；⑥ `.github/workflows/gate0.yml` 头部注释的同步**刻意推迟**到闸门修法 PR（理由见上）—— 在那之前它仍写着「落点当时 `main` 尚未开保护」，属**已知的、有意的**未订正项，不是遗漏。
+
+## B-47（无独立 issue）：覆盖闸门第四条判据「零新增内容」——树 == 某父的树 ⇒ 自动归属（2026-09-26）
+
+**状态**：**已集成 `main`**（PR #323 → merge `d669ec90`，2026-09-26；分支 `gate/zero-content-attribution` 已删（本地 + 远端）；**无独立 issue ⇒ 无单可关**）。受审 4 笔 `da7dfef1..3bd597be` + 收尾 3 笔 docs，共 **7 笔**。承接 B-46 残余①那条已登记的结构性缺陷（"每个 PR 合入都会在 `main` 顶端重造一个 ❌"），按用户裁决**单独开一个 PR** 处置。**无独立 GitHub issue** —— 它是 B-46 已登记残余的实现票，不是票面驱动。
+
+**判据**：`zero_content_parent()` —— 提交的整棵树**逐字等于某个父的树** ⇒ 判「零新增内容」并自动归属，打印树与父的**完整** sha 供复算（审计者拿父的全 sha 跑一次 `git diff --name-only <父> <sha>` 就该得到空输出）。它与「`--cc` 空文件表」**不是**同一件事：空表 = "核对不了"（枚举失败也是空表）⇒ 必须 fail-closed；树相等是**正向证明** ⇒ 可以放行，且要求 `--cc` 文件表与 tree 对象**两条互相独立的 git 通路**得出同一结论。归属顺序：零新增内容 → 台账自身更新 → docs-only 按路径 → 失败。
+
+**为什么必须修**：`strict: true` 要求分支与 `main` 同步，而 `rebase` 属默认禁止 ⇒ 只能 merge ⇒ 分支在合入前已并入 `main` ⇒ GitHub 造出的 merge 与父提交二**逐文件相同** ⇒ `--cc`（不被任一父独自解释的那部分）无内容可列 ⇒ 两条归属通道**皆** fail-closed（白名单那一支同样拒空表）⇒ 每个 PR 合入都是 `main` 顶端的一个 ❌。实测两次：PR #321 的 `c8e04cb9`、PR #322 的 `da7dfef1`（距前者处置落地**仅一天**）。squash / rebase 绕不开（重写 sha ⇒ 区间行的 `tip` 不再是 HEAD 祖先 ⇒ 闸门**判不了**，比判红更糟），且两者在本仓已被分支保护关掉。
+
+**交付（7 笔）**：`9367a57e` 判据 + 接线 + `resolve_trees` 形状校验；`583e867a` 首审处置；`d3c9373d` 文档同步（协议 §7 第 8 条 / 审计 §5.2、§9.4.4 / `.github/workflows/gate0.yml` 头部注释 —— 后者正是 B-46 刻意推迟到本批的那一处）；`3bd597be` 修后重审处置；收尾 3 笔：`4ee53f45` 台账 210 行 + 落点四件套（tracker / PHASE_STATUS / 归档 L823 / 审计 §9.4.4）；`1f15d778` 计数口径订正（三处读数**各属不同 HEAD**、且「待判定」≠「未归属」）；`4153e4da` Gate-0 读数落盘 `docs/gate/1f15d778….json`。测试 `tests/tooling/test_review_coverage_zero_content.py` 9 条 = 7 条判据层 + 2 条**合成仓库**端到端：正控（树 == 父 2 的树 ⇒ `exit 0` 且打印 `✅ 零新增内容`）**修前是 `exit 1`**；反控（`--cc` 空表但树 ≠ 任何父 ⇒ **仍须** `exit 1`）拦住「凡是空表就放行」的假实现。端到端用合成仓库而不硬依赖本仓那笔真实 merge：后者迟早被补上台账行、不再进入判定循环，硬依赖它的测试会**静默失效**。
+
+**变异实测**（副本置于仓库**之外**）：M1 拆掉接线 ⇒ **只红正控端到端**（`1 failed, 8 passed`）—— 判据层测试看不见接线，是实测不是推断；M2 判据偷懒（有父就算零新增）⇒ 红 4 条含反控（`4 failed, 5 passed`）；M3 去掉 `target` 真值守卫 ⇒ 只红 `…_tree_cannot_be_resolved`；M15 去掉 `expect.match(line)` 形状校验 ⇒ 只红形状校验用例（`1 failed, 8 passed`），此前**无任何用例**能抓它。M4/M5/M7/M9 逐条定级为**良性**；M6（放宽到"树 == 任一祖先"）**未被证伪但属真放松**，当前实现取**父**更严，将来放宽须**另案** + 补反控。
+
+**审查**：两轮两轴独立审查（各一独立只读子代理），**P0/P1 = 0**。第一轮（fixed point = `9367a57e` 的树）2×P2 + 2×P3 —— 白名单口径措辞与代码行为不符（那一支实为**不可达**，独立佐证：归档 `:803` 实测「白名单 0 条」）/ "本仓 PR 流程不产生该形状"属误。**第二轮（修后重审，审 `d3c9373d` 的树）2×P2 + 1×P3，且都长在第一轮改写的产物上**：① `FAIL_HELP` 仍在教用户写 `[whitelist]` —— 第一轮改了协议与 docstring，却漏了失败用户唯一一定会读到的那段字符串；② 改写里的实测数字不准（"19 个取并集"实为"树 ≠ 某父"的总数，真残余只有 **3** 个）；③ 新用例依赖"闸门所在目录是个仓库"，而变异钩子正是把闸门复制到**仓库之外**跑。findings 全数处置于 `583e867a` / `3bd597be`；§8.3 第 4 条：修后重审无 P0/P1 ⇒ 不触发"停止修复"、不开第三轮。台账行 `docs/review_ledger.d/210-b47-zero-content-9367a57-3bd597b.tsv`（`range = da7dfef1..3bd597be`）。明细见归档 L823 与 `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4.4（含四分类实测表）。⚠ **审查过程事故已如实登记**：Correctness 轴子代理的合成仓库探针误落**另一个 clone**，受跟踪代码与提交零损失、约 25 个未跟踪 `.tmp_*` 草稿丢失（不可恢复）；红线补强见 §9.4.4。
+
+**读数**：`ruff check .` 全绿；`tests/tooling/` **154 passed**；覆盖闸门**三个读数列清（各属不同 HEAD，别混）**：落行前（HEAD `3bd597be`，行不在树里）`717 / 465 / 252`、唯一 ❌ = 本批 4 笔、`exit 1`；行**已写、未提交**时 `717 / 469 / 248`、`exit 0`；台账落点笔**提交后**（HEAD `4ee53f45`）`718 / 469 / 249`、**0 条 ❌**、`exit 0`（第 5 笔即该 docs 提交自身，按 docs-only 自动归属）。⚠ 口径：`已审查` = 被台账区间**覆盖**的提交数，`待判定` = 不在任何台账区间内者，**不等于“未归属”**；Gate-0 裸全量 **6/6 PASS**（读数落盘 `docs/gate/<本批台账提交 sha>.json`，见同批 docs 读数列）。
+
+**残余（登记，不阻断）**：① 把本判据推广到那 3 个"文件表为空**且**树 ≠ 任何父"的合并需要一条**更弱**的规则（它们是两侧的**并集**，不是零新增内容），属**另案**、需单独裁决；② 台账里 131 条历史 `[whitelist]` 条目与白名单那段**代码的存废**属**用户裁决项**（本批只改口径叙述，代码一字不动）；③ 冻结的 `scripts/check_review_coverage.sh` 只认拆分前的单一台账文件 ⇒ 在当前布局下**跑到空**（`exit 1`、只报"台账里没有审查行"），其归宿（删除还是重新归类）同样留待用户裁决；④ B-46 的残余②–⑥ 与"一次集成 = 两次单独批准是否纳为常设授权"不受本批影响，仍开放。
+
+**集成状态如实化（2026-09-26）**：走 `main` 保护开启后的唯一通道 —— 推集成分支 → 开 PR **#323** → 服务端 `gate0` **绿（25s）** → 合并（**仅 merge commit**）。合并后**无需补台账行**：该 merge 与**父提交二逐文件相同**（两侧树同为 `d48d3c2c…`，父一为 `7b8935ca…`）⇒ 正是本批新增的判据**自动归属了它自己**；PR #321 当时必须手写 row 248 做机械归属，#323 起不再需要。在真 `main`（`d669ec90`）上复跑闸门：**提交总数 721 / 已审查 469 / 待判定 252、0 条 ❌、`exit 0`**，`✅ 零新增内容` 同时归属 `d669ec90`（#323）与历史遗留的 `da7dfef1`（#322）两处 merge。`push origin main` 已被服务端拒（`GH006`，§14.4）⇒ 本笔收关记账**同样走 PR**，「常设授权直推 main」这条路径已不存在。**无独立 issue** ⇒ 无单可关（§14.12 不适用）。

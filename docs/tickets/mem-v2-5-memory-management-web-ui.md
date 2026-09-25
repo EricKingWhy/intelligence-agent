@@ -35,6 +35,7 @@ Users can manage all authorized V2 memories using the API as truth. Destructive 
 - Add independent automatic extraction and recall settings.
 - Display per-session “why recalled” information from the backend contract.
 - Display `已更新 N 条记忆` after committed updates and reveal contents only after an explicit expand action.
+- Display authorized tombstones through the existing deleted-status, detail, and version read routes, with a strict content-free response.
 - Preserve loading, empty, partial/degraded, forbidden/not-found, retry, stale/concurrent-change, and general failure states.
 
 ### Must Not Do
@@ -56,10 +57,12 @@ Users can manage all authorized V2 memories using the API as truth. Destructive 
 - **R7:** Automatic update notifications show only count by default; expand fetches/displays authorized updated records. Zero logical updates show no update notification.
 - **R8:** Concurrent 404/stale-version responses remove or refresh stale rows while leaving a visible, dismissible explanation.
 - **R9:** All interactive controls have programmatic names, visible focus, keyboard operation, and correct dialog focus restoration.
+- **R10:** Tombstone reads require the matching trusted identity and resolved project context; expired and unauthorized tombstones fail closed. Responses contain only `id`, `root_id`, `scope`, `project_id`, `status="deleted"`, and `deleted_at`. Deleted search matches only opaque IDs; kind filtering returns no tombstones because tombstones retain no kind.
+- **R11 (user-approved PRD §5.4 exception, 2026-09-25):** Tombstone history preserves descending original version order using an internal ordinal that is not returned by the API. Existing tombstones without an ordinal use deterministic deletion-time/ID ordering until their 30-day expiry; their original version order cannot be recovered.
 
 ## Contracts
 
-The UI consumes the APIs in PRD §6.4 and event behavior in §6.5. Required Chinese default notification text is exactly `已更新 N 条记忆` with N substituted as a base-10 count. Existing Web UI remains a projection of backend truth.
+The UI consumes the APIs in PRD §6.4 and event behavior in §6.5. Authorized tombstone reads use the existing `GET /api/memories?status=deleted`, `GET /api/memories/{id}`, and `GET /api/memories/{id}/versions` paths. Every tombstone response has exactly six fields: `id`, `root_id`, `scope`, `project_id`, `status="deleted"`, and `deleted_at`; it never exposes content, payload, evidence, hashes, deletion reason, identity fields, or version numbers. Under the user-approved PRD §5.4 exception dated 2026-09-25, the store retains a private ordinal solely to preserve descending version order for tombstones created after this change; it is not returned by the API and expires with the tombstone. Existing tombstones lack that ordinal and remain deterministically ordered by deletion time and opaque ID until their 30-day expiry; their original version order cannot be recovered. Search matches only opaque tombstone IDs/root IDs, and kind filters return no tombstones. Required Chinese default notification text is exactly `已更新 N 条记忆` with N substituted as a base-10 count. Existing Web UI remains a projection of backend truth.
 
 ## Implementation Freedom
 
@@ -88,7 +91,8 @@ parallelizable: with #302 and #303 once #300 is integrated
 
 ## Verification
 
-- API parser/type tests using real backend response shapes.
+- API parser/type tests using real backend response shapes, including strict content-free tombstones.
+- Backend authorization tests for owner, cross-user, matching/mismatched project context, and expired tombstones.
 - Component tests for filters, edit validation, versions, settings, notification disclosure, and failures.
 - Playwright user flows at both viewport projects, including keyboard/focus behavior.
 - Real browser smoke against the integrated backend for one create/edit/recall/delete lifecycle.

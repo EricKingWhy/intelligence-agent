@@ -31,6 +31,7 @@ import { DelegationNode } from './DelegationNode';
 import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
 import { CopyButton } from './CopyButton';
 import { ApprovalCard } from './ApprovalCard';
+import { MemoryActivity } from './MemoryActivity';
 
 interface Props {
   conversation: ConversationState | null;
@@ -405,6 +406,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
             </div>
           ))}
         </div>
+        <MemoryActivity key={conversation.session_id} conversation={conversation} />
         {/* #37 交互式审批——pending_approvals 非空时内联渲染。
          *  位于虚拟化轮次列表之后、列表末尾之前，确保：
          *  - 不参与虚拟化窗口（审批卡必须始终可见）

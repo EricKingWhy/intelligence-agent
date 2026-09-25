@@ -48,6 +48,7 @@ from agent_harness.memory.v2.types import (
     MemoryRecordV2,
     MemoryScope,
     MemoryStatus,
+    MemoryTombstoneV2,
     SourceType,
     TrustedMemoryIdentity,
 )
@@ -152,6 +153,26 @@ class MemoryV2Service:
             trusted, query=query, kind=kind, status=status, scope=scope,
             project_id=project_id, limit=limit, offset=offset,
         )
+
+    async def list_tombstones(
+        self, trusted: TrustedMemoryIdentity, *, query: str | None = None,
+        scope: MemoryScope | None = None, project_id: str | None = None,
+        limit: int = 50, offset: int = 0,
+    ) -> list[MemoryTombstoneV2]:
+        return await self._store.list_tombstones(
+            trusted, query=query, scope=scope, project_id=project_id,
+            limit=limit, offset=offset,
+        )
+
+    async def read_tombstone(
+        self, memory_id: str, trusted: TrustedMemoryIdentity,
+    ) -> MemoryTombstoneV2:
+        return await self._store.get_tombstone(memory_id, trusted)
+
+    async def tombstone_versions(
+        self, root_id: str, trusted: TrustedMemoryIdentity,
+    ) -> list[MemoryTombstoneV2]:
+        return await self._store.list_tombstone_versions(root_id, trusted)
 
     async def edit(
         self, memory_id: str, trusted: TrustedMemoryIdentity, *, expected_version: int,

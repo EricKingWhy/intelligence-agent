@@ -639,10 +639,156 @@ async def test_v2_delete_is_idempotent_erases_index_and_leaves_only_tombstone(me
             records = await cursor.fetchall()
     assert {row["name"] for row in columns} == {
         "memory_id", "root_id", "tenant_id", "user_id", "scope", "project_id",
-        "deleted_at", "expires_at", "deletion_reason", "content_hashes", "source_hashes",
+        "version", "deleted_at", "expires_at", "deletion_reason", "content_hashes",
+        "source_hashes",
     }
     assert len(tombstones) == 1 and records == []
     assert "只在删除前存在的正文" not in str(dict(tombstones[0]))
+
+
+@pytest.mark.asyncio
+async def test_v2_tombstone_reads_are_authorized_and_content_free(memory_app):
+    client, _components = memory_app
+    first = await _seed_v2(client, _ALICE, "只在删除前存在的敏感正文")
+    _registry, wiring = await client.app.state.agent.get_wiring()
+    assert wiring.memory_v2 is not None
+    trusted = TrustedMemoryIdentity(_ALICE.tenant_id, _ALICE.user_id)
+    edited = await wiring.memory_v2.edit(
+        first.id, trusted, expected_version=1,
+        content="只在删除前存在的另一段敏感正文",
+        payload=SemanticPayload(
+            subject="风格", fact="简洁", category=SemanticCategory.PREFERENCE,
+        ),
+    )
+    latest_id = edited.id
+    receipt = await wiring.memory_v2.delete(first.id, trusted)
+    assert receipt.deleted
+
+    listed = client.get("/api/memories?status=deleted&limit=10", headers=_auth(_ALICE))
+    assert listed.status_code == 200, listed.text
+    tombstones = listed.json()
+    assert {item["id"] for item in tombstones} == {first.id, latest_id}
+    assert all(set(item) == {
+        "id", "root_id", "scope", "project_id", "status", "deleted_at",
+    } for item in tombstones)
+    assert all(item["root_id"] == first.root_id for item in tombstones)
+    assert all(item["status"] == "deleted" and item["scope"] == "user_global" for item in tombstones)
+    assert all(isinstance(item["deleted_at"], str) and item["deleted_at"] for item in tombstones)
+    assert "敏感正文" not in listed.text
+    assert "content_hashes" not in listed.text and "source_hashes" not in listed.text
+    assert "deletion_reason" not in listed.text and "tenant_id" not in listed.text
+
+    by_id = client.get(f"/api/memories/{first.id}", headers=_auth(_ALICE))
+    history = client.get(f"/api/memories/{first.id}/versions", headers=_auth(_ALICE))
+    assert by_id.status_code == 200 and by_id.json() in tombstones
+    assert history.status_code == 200
+    assert [item["id"] for item in history.json()] == [latest_id, first.id]
+    assert all(item["status"] == "deleted" for item in history.json())
+    assert "敏感正文" not in by_id.text and "敏感正文" not in history.text
+
+    assert client.get(
+        "/api/memories?status=deleted&q=敏感正文", headers=_auth(_ALICE),
+    ).json() == []
+    matches = client.get(
+        f"/api/memories?status=deleted&q={first.id}", headers=_auth(_ALICE),
+    ).json()
+    assert {item["id"] for item in matches} == {first.id, latest_id}
+    assert client.get(
+        "/api/memories?status=deleted&kind=semantic", headers=_auth(_ALICE),
+    ).json() == []
+
+    assert client.get(f"/api/memories/{first.id}", headers=_auth(_BOB)).status_code == 404
+    assert client.get(
+        f"/api/memories/{first.id}/versions", headers=_auth(_BOB),
+    ).status_code == 404
+    assert client.get("/api/memories?status=deleted", headers=_auth(_BOB)).json() == []
+
+    from agent_harness.memory.v2._sqlite import connect
+
+    async with connect(wiring.memory_v2._store.database_path) as connection:
+        await connection.execute(
+            "UPDATE memory_v2_tombstones SET expires_at=? WHERE root_id=?",
+            ("2000-01-01T00:00:00+00:00", first.root_id),
+        )
+        await connection.commit()
+    assert client.get("/api/memories?status=deleted", headers=_auth(_ALICE)).json() == []
+    assert client.get(f"/api/memories/{first.id}", headers=_auth(_ALICE)).status_code == 404
+    assert client.get(
+        f"/api/memories/{first.id}/versions", headers=_auth(_ALICE),
+    ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_v2_project_tombstone_reads_require_the_matching_trusted_project(memory_app, tmp_path):
+    client, _components = memory_app
+    state = client.app.state.agent
+    await state.ensure_stores()
+    project_path = tmp_path / "tombstone-project"
+    project_path.mkdir()
+    workspace = await state.workspace_index.create(project_path, title="Tombstone project")
+    other_project_path = tmp_path / "other-tombstone-project"
+    other_project_path.mkdir()
+    other_workspace = await state.workspace_index.create(
+        other_project_path, title="Other tombstone project",
+    )
+    _registry, wiring = await state.get_wiring()
+    assert wiring.memory_v2 is not None
+    trusted = TrustedMemoryIdentity(_ALICE.tenant_id, _ALICE.user_id, workspace.id)
+    record = await wiring.memory_v2.create(make_draft(
+        scope=MemoryScopeV2.PROJECT,
+        project_id=workspace.id,
+        content="项目记忆删除前的正文",
+        source_event_ids=["project-tombstone-source"],
+    ), trusted)
+    receipt = await wiring.memory_v2.delete(record.id, trusted)
+    assert receipt.deleted
+
+    assert client.get("/api/memories?status=deleted", headers=_auth(_ALICE)).json() == []
+    scoped = client.get(
+        f"/api/memories?status=deleted&scope=project&project_id={workspace.id}",
+        headers=_auth(_ALICE),
+    )
+    assert scoped.status_code == 200, scoped.text
+    assert [item["id"] for item in scoped.json()] == [record.id]
+    assert scoped.json()[0]["project_id"] == workspace.id
+    assert "项目记忆删除前的正文" not in scoped.text
+
+    authorized_detail = client.get(
+        f"/api/memories/{record.id}?project_id={workspace.id}", headers=_auth(_ALICE),
+    )
+    authorized_history = client.get(
+        f"/api/memories/{record.id}/versions?project_id={workspace.id}",
+        headers=_auth(_ALICE),
+    )
+    assert authorized_detail.status_code == 200
+    assert authorized_detail.json() == scoped.json()[0]
+    assert authorized_history.status_code == 200
+    assert authorized_history.json() == [scoped.json()[0]]
+
+    other_project_list = client.get(
+        f"/api/memories?status=deleted&scope=project&project_id={other_workspace.id}",
+        headers=_auth(_ALICE),
+    )
+    assert other_project_list.status_code == 200 and other_project_list.json() == []
+    assert client.get(
+        f"/api/memories/{record.id}?project_id={other_workspace.id}",
+        headers=_auth(_ALICE),
+    ).status_code == 404
+    assert client.get(
+        f"/api/memories/{record.id}/versions?project_id={other_workspace.id}",
+        headers=_auth(_ALICE),
+    ).status_code == 404
+
+    assert client.get(
+        f"/api/memories/{record.id}", headers=_auth(_ALICE),
+    ).status_code == 404
+    assert client.get(
+        f"/api/memories?status=deleted&scope=project&project_id={workspace.id}",
+        headers=_auth(_BOB),
+    ).json() == []
+    assert client.get(
+        f"/api/memories/{record.id}?project_id={workspace.id}", headers=_auth(_BOB),
+    ).status_code == 404
 
 
 @pytest.mark.asyncio

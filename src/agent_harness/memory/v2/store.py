@@ -47,6 +47,7 @@ from agent_harness.memory.v2.types import (
     MemoryScope,
     MemoryStatus,
     MemoryTier,
+    MemoryTombstoneV2,
     SourceType,
     TrustedMemoryIdentity,
     assert_trusted_identity,
@@ -81,7 +82,7 @@ CREATE TABLE IF NOT EXISTS memory_v2_outbox (
 CREATE TABLE IF NOT EXISTS memory_v2_tombstones (
     memory_id TEXT PRIMARY KEY, root_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    scope TEXT NOT NULL, project_id TEXT,
+    scope TEXT NOT NULL, project_id TEXT, version INTEGER,
     deleted_at TEXT NOT NULL, expires_at TEXT NOT NULL,
     deletion_reason TEXT NOT NULL,
     content_hashes TEXT NOT NULL, source_hashes TEXT NOT NULL
@@ -184,6 +185,13 @@ class SqliteMemoryV2Store:
         async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.executescript(_SCHEMA)
+            async with connection.execute("PRAGMA table_info(memory_v2_tombstones)") as cursor:
+                tombstone_columns = {row["name"] for row in await cursor.fetchall()}
+            if "version" not in tombstone_columns:
+                # Existing content-free tombstones cannot recover their old version ordinal.
+                await connection.execute(
+                    "ALTER TABLE memory_v2_tombstones ADD COLUMN version INTEGER"
+                )
             await connection.commit()
 
     # ----------------------------------------------------------------------------------
@@ -443,6 +451,83 @@ class SqliteMemoryV2Store:
         ):
             return [_to_record(row) for row in await cursor.fetchall()]
 
+    async def list_tombstones(
+        self, trusted: TrustedMemoryIdentity, *, query: str | None = None,
+        scope: MemoryScope | None = None, project_id: str | None = None,
+        limit: int = 50, offset: int = 0,
+    ) -> list[MemoryTombstoneV2]:
+        """List only unexpired, authorized tombstone identifiers and deletion times."""
+        if project_id is not None and project_id != trusted.project_id:
+            raise PermissionError("project filter is not part of the trusted identity")
+        if scope is MemoryScope.PROJECT and trusted.project_id is None:
+            return []
+        clauses = [
+            "tenant_id=?", "user_id=?", "(scope <> 'project' OR project_id = ?)",
+            "expires_at > ?",
+        ]
+        values: list[object] = [
+            trusted.tenant_id, trusted.user_id, trusted.project_id, self._now().isoformat(),
+        ]
+        if scope is not None:
+            clauses.append("scope=?")
+            values.append(scope.value)
+        if project_id is not None:
+            clauses.append("scope='project' AND project_id=?")
+            values.append(project_id)
+        if query:
+            clauses.append(
+                "(instr(lower(memory_id), lower(?)) > 0 "
+                "OR instr(lower(root_id), lower(?)) > 0)"
+            )
+            values.extend((query, query))
+        values.extend((max(0, limit), max(0, offset)))
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                f"SELECT memory_id, root_id, scope, project_id, deleted_at "
+                f"FROM memory_v2_tombstones WHERE {' AND '.join(clauses)} "
+                "ORDER BY deleted_at DESC, memory_id DESC LIMIT ? OFFSET ?", values,
+            ) as cursor,
+        ):
+            return [_to_tombstone(row) for row in await cursor.fetchall()]
+
+    async def get_tombstone(
+        self, memory_id: str, trusted: TrustedMemoryIdentity,
+    ) -> MemoryTombstoneV2:
+        """Read one unexpired tombstone without exposing hashes or deletion reason."""
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT memory_id, root_id, tenant_id, user_id, scope, project_id, deleted_at "
+                "FROM memory_v2_tombstones WHERE memory_id=? AND expires_at > ?",
+                (memory_id, self._now().isoformat()),
+            ) as cursor,
+        ):
+            row = await cursor.fetchone()
+        if row is None or not self._tombstone_visible(row, trusted):
+            raise KeyError(memory_id)
+        return _to_tombstone(row)
+
+    async def list_tombstone_versions(
+        self, root_id: str, trusted: TrustedMemoryIdentity,
+    ) -> list[MemoryTombstoneV2]:
+        """List the content-free deletion markers for one authorized logical memory."""
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT memory_id, root_id, scope, project_id, deleted_at "
+                "FROM memory_v2_tombstones WHERE root_id=? AND tenant_id=? AND user_id=? "
+                "AND (scope <> 'project' OR project_id = ?) AND expires_at > ? "
+                "ORDER BY version DESC, deleted_at DESC, memory_id DESC",
+                (root_id, trusted.tenant_id, trusted.user_id, trusted.project_id,
+                 self._now().isoformat()),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        if not rows:
+            raise KeyError(root_id)
+        return [_to_tombstone(row) for row in rows]
+
     async def delete(
         self, memory_id: str, trusted: TrustedMemoryIdentity, *,
         reason: str = "user_request",
@@ -513,11 +598,11 @@ class SqliteMemoryV2Store:
             )
             await connection.execute(
                 "INSERT OR REPLACE INTO memory_v2_tombstones "
-                "(memory_id, root_id, tenant_id, user_id, scope, project_id, deleted_at, "
+                "(memory_id, root_id, tenant_id, user_id, scope, project_id, version, deleted_at, "
                 "expires_at, deletion_reason, content_hashes, source_hashes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (item["memory_id"], item["root_id"], item["tenant_id"], item["user_id"],
-                 item["scope"], item["project_id"], now.isoformat(),
+                 item["scope"], item["project_id"], item["version"], now.isoformat(),
                  (now + timedelta(days=30)).isoformat(), reason,
                  json.dumps([self._digest(item["content"])], separators=(",", ":")),
                  json.dumps([self._digest(value) for value in json.loads(item["source_event_ids"])],
@@ -808,4 +893,14 @@ def _to_record(row: aiosqlite.Row) -> MemoryRecordV2:
         superseded_by=row["superseded_by"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _to_tombstone(row: aiosqlite.Row) -> MemoryTombstoneV2:
+    return MemoryTombstoneV2(
+        id=row["memory_id"],
+        root_id=row["root_id"],
+        scope=MemoryScope(row["scope"]),
+        project_id=row["project_id"],
+        deleted_at=row["deleted_at"],
     )

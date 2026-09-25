@@ -277,6 +277,25 @@ class MemoryRecordV2(_MemoryContentFields):
         return self
 
 
+class MemoryTombstoneV2(BaseModel):
+    """Content-free, owner-scoped view of a retained deletion tombstone."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1)
+    root_id: str = Field(min_length=1)
+    status: Literal["deleted"] = "deleted"
+    scope: MemoryScope
+    project_id: str | None = None
+    deleted_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _enforce_scope(self) -> MemoryTombstoneV2:
+        if (self.scope is MemoryScope.PROJECT) != (self.project_id is not None):
+            raise ValueError("project_id must be present only for project tombstones")
+        return self
+
+
 @dataclass(frozen=True, slots=True)
 class TrustedMemoryIdentity:
     """由**可信入口**（请求上下文 / 会话绑定）解析出的身份，不是请求体里的自述。
