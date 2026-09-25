@@ -103,3 +103,10 @@ parallelizable: with #298 and #299 after #297
 - Deleted content is absent from every content-bearing persistence/observability surface tested.
 - ADR conflicts are explicitly superseded rather than left contradictory.
 - Review coverage, tracker, and PHASE_STATUS are updated after integration.
+
+## Validation Record (2026-09-25)
+
+- Full pytest on tree `edcd89ffbd2025f3efcdae5b3a5157828ce87ac6`: `3811 passed, 2 skipped, 49 deselected, 0 failed, 11 warnings` in 670.15s. Command: `PYTHONUTF8=1`, empty `PYTHONPATH`, `.venv/Scripts/python.exe -m pytest tests/ -q --no-header -p no:cacheprovider -p no:randomly`.
+- The existing Docker timeout test failure was caused by cold container startup consuming its 1s command budget. Prewarming the same sandbox before the measured command fixed the test; the updated test passed 3/3. Full-suite output still contained 11 warnings, including two aiosqlite worker-thread warnings; both named tests passed isolated reruns with that warning promoted to an error.
+- `ruff check .` passed. Gate-0 passed 6/6 for tree `43f54699724d024f32edddaafa55933b1ff71047`; machine record: `docs/gate/250496228ade71c1b49c1a371b13d55f32d9e7ac.json`. The branch-range Gate-0 run also passed 6/6.
+- The real Milvus integration test passed (1 test). Review coverage passed on the branch.
