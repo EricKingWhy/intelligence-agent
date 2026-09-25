@@ -119,6 +119,7 @@ from agent_harness.session import (
     MODEL_DELTA,
     MODEL_FAILED,
     MODEL_FALLBACK,
+    MODEL_REQUEST,
     MODEL_STARTED,
     REASONING_COMPLETED,
     REASONING_DELTA,
@@ -451,34 +452,39 @@ def _scenarios() -> tuple[Scenario, ...]:
             note="无工具一轮到底",
             build=lambda w: _runtime(_simple_model(), memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_REQUEST,
                      MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "answer", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
-                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED,
-                             RUN_COMPLETED),),
+                   (MODEL_REQUEST, 2), (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST,
+                             MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
             name="tool_ok",
             note="一轮工具（成功）后收尾；无 Ledger 接线 ⇒ model/completed 先于 tool/call",
             build=lambda w: _runtime(_two_rounds_model(), memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, MODEL_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TEXT_DELTA, MODEL_REQUEST, MODEL_COMPLETED,
+                     RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
-                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (TEXT_DELTA, 3), (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3),
+                   (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                             TOOL_CALL, TOOL_RESULT, MODEL_REQUEST, MODEL_COMPLETED,
+                             RUN_COMPLETED),),
         ),
         Scenario(
             name="tool_error",
@@ -487,36 +493,44 @@ def _scenarios() -> tuple[Scenario, ...]:
                                      registry=_registry(_FailingEchoTool()),
                                      memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, MODEL_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TEXT_DELTA, MODEL_REQUEST, MODEL_COMPLETED,
+                     RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
-                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (TEXT_DELTA, 3), (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3),
+                   (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                             TOOL_CALL, TOOL_RESULT, MODEL_REQUEST, MODEL_COMPLETED,
+                             RUN_COMPLETED),),
         ),
         Scenario(
             name="tool_ok_with_ledger",
             note="生产接线（带 Ledger）：model/completed 被推迟到工具批次之后",
             build=_ledger_runtime,
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TOOL_CALL, MODEL_COMPLETED, TOOL_RESULT,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TOOL_CALL, MODEL_COMPLETED,
-                     TOOL_RESULT, MODEL_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, TOOL_CALL,
+                     MODEL_COMPLETED, TOOL_RESULT, TEXT_DELTA, MODEL_REQUEST,
+                     MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST, TOOL_CALL,
+                     MODEL_COMPLETED, TOOL_RESULT, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TOOL_CALL, 2),
-                   (MODEL_COMPLETED, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
-                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, TOOL_CALL, MODEL_COMPLETED,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (TOOL_CALL, 2), (MODEL_COMPLETED, 2), (TOOL_RESULT, 2),
+                   (TEXT_DELTA, 3), (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3),
+                   (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, TOOL_CALL,
+                             MODEL_COMPLETED, TOOL_RESULT, MODEL_REQUEST,
+                             MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
             name="fallback",
@@ -532,17 +546,18 @@ def _scenarios() -> tuple[Scenario, ...]:
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_FALLBACK,
-                     MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA, MODEL_FALLBACK,
-                     MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_REQUEST, MODEL_REQUEST,
+                     MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA, MODEL_REQUEST,
+                     MODEL_REQUEST, MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "fallback 的回答", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
-                   (MODEL_FALLBACK, 2), (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_FALLBACK,
-                             MODEL_COMPLETED, RUN_COMPLETED),),
+                   (MODEL_REQUEST, 2), (MODEL_REQUEST, 2), (MODEL_FALLBACK, 2),
+                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_REQUEST,
+                             MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
             name="local_fuse_pause",
@@ -557,16 +572,19 @@ def _scenarios() -> tuple[Scenario, ...]:
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, RUN_PAUSED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, RUN_PAUSED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL,
+                     TOOL_RESULT, MODEL_REQUEST, RUN_PAUSED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, MODEL_STARTED,
+                     MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
+                     MODEL_REQUEST, RUN_PAUSED),
             terminal=None,
             terminal_payload={},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (MODEL_COMPLETED, 3),
-                   (TOOL_CALL, 3), (TOOL_RESULT, 3), (RUN_PAUSED, 3)),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3), (TOOL_CALL, 3),
+                   (TOOL_RESULT, 3), (MODEL_REQUEST, 3), (RUN_PAUSED, 3)),
             # 暂停**不是**终态 ⇒ 不触发记忆形成（`memory/v2/eligibility.py` 的白名单里
             # 没有 paused）；"0 次提交"是事实，不是没测。
             memory_submits=(),
@@ -593,13 +611,14 @@ def _scenarios() -> tuple[Scenario, ...]:
                  "异常臂也不写记忆",
             build=lambda w: _runtime(_ExplodingModel(), memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_FAILED, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_FAILED, RUN_FAILED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST, MODEL_FAILED,
+                     RUN_FAILED),
             terminal=RUN_FAILED,
             terminal_payload={"reason": "RuntimeError", "message": PROSE,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_FAILED, 2),
-                   (RUN_FAILED, None)),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_FAILED, 2), (RUN_FAILED, None)),
         ),
         Scenario(
             name="hard_guard",
@@ -612,22 +631,26 @@ def _scenarios() -> tuple[Scenario, ...]:
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     TOOL_FAILURE_GUARD, USER_MESSAGE, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE,
+                     MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
                      TOOL_FAILURE_GUARD, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE, MODEL_STARTED,
-                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD,
+                     USER_MESSAGE, MODEL_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),
             terminal=RUN_FAILED,
             terminal_payload={"reason": STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TOOL_FAILURE_GUARD, 2),
-                   (USER_MESSAGE, 2), (MODEL_COMPLETED, 3), (TOOL_CALL, 3),
-                   (TOOL_RESULT, 3), (TOOL_FAILURE_GUARD, 3), (RUN_FAILED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE, MODEL_COMPLETED,
-                             TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (TOOL_FAILURE_GUARD, 2), (USER_MESSAGE, 2), (MODEL_REQUEST, 3),
+                   (MODEL_COMPLETED, 3), (TOOL_CALL, 3), (TOOL_RESULT, 3),
+                   (TOOL_FAILURE_GUARD, 3), (RUN_FAILED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                             TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE,
+                             MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
+                             TOOL_FAILURE_GUARD, RUN_FAILED),),
         ),
         Scenario(
             name="checkpoint_error",
@@ -636,16 +659,17 @@ def _scenarios() -> tuple[Scenario, ...]:
                                      checkpoint_policy=_ExplodingCheckpointPolicy(),
                                      memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_REQUEST,
                      MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "answer", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
-                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED,
-                             RUN_COMPLETED),),
+                   (MODEL_REQUEST, 2), (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST,
+                             MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
             name="generator_exit_pre_run",
@@ -678,14 +702,14 @@ def _scenarios() -> tuple[Scenario, ...]:
             note="模型在途被取消：在途模型调用补 model/failed，两段都不进流",
             build=lambda w: _runtime(_BlockingModel(), memory_writer=w.memory),
             drive=_cancel_while_blocked,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_FAILED, RUN_FAILED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
             emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED),
             terminal=RUN_FAILED,
             terminal_payload={"reason": CANCEL_REASON, "trace_id": None, "trace_url": None},
             terminal_step_id=0,
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_FAILED, 2),
-                   (RUN_FAILED, 1)),
-            discarded=(MODEL_FAILED, RUN_FAILED),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_FAILED, 2), (RUN_FAILED, 1)),
+            discarded=(MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
             run_twin=False,
         ),
         Scenario(
@@ -775,10 +799,17 @@ async def _run(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", SCENARIO_IDS)
 async def test_durable_sequence_matches_golden(name: str, tmp_path: Any) -> None:
-    """落盘（durable）序列逐条等于基线。"""
+    """落盘（durable）序列逐条等于基线。
+
+    **两侧都过 `_collapse`**：基线表可以并列写同一个类型来表达"连续两次"
+    （`#313` 的 `fallback` 就是这样——一次决策对应两次实际请求，两条
+    `model/request` 相邻）。重数不在这条用例里判，它归 `_counted`：这里钉顺序、
+    那里钉次数，二者合起来才是"次数与顺序不变"。
+    """
     scenario, _emitted, session = await _run(name, tmp_path)
     types = [e.type for e in _persisted(session)]
-    assert _collapse(types) == scenario.durable, f"{scenario.name}：durable 序列偏离基线"
+    assert _collapse(types) == _collapse(list(scenario.durable)), \
+        f"{scenario.name}：durable 序列偏离基线"
 
 
 @pytest.mark.asyncio
@@ -802,9 +833,9 @@ async def test_durable_counts_match_golden(name: str, tmp_path: Any) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", SCENARIO_IDS)
 async def test_emitted_sequence_matches_golden(name: str, tmp_path: Any) -> None:
-    """流（含 ephemeral 帧）序列逐条等于基线。"""
+    """流（含 ephemeral 帧）序列逐条等于基线（两侧都过 `_collapse`，理由同上）。"""
     scenario, emitted, _session = await _run(name, tmp_path)
-    assert _collapse([e.type for e in emitted]) == scenario.emitted, \
+    assert _collapse([e.type for e in emitted]) == _collapse(list(scenario.emitted)), \
         f"{scenario.name}：emitted 序列偏离基线"
 
 
@@ -917,11 +948,22 @@ async def test_pause_payload_key_set_is_pinned(tmp_path: Any) -> None:
     assert data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
     assert data["budget_version"] == 1
     # 计数点是"被接纳的产出轮"（fuse=2 ⇒ 2 轮）；closeout 不进这个 counter
-    assert data["consumed"] == {"agent_turns": 2}
+    # （`#313` 起它进 `model_requests`：`02 §5.1` 把 closeout 与 primary/fallback
+    # 并列为一次**实际** Provider 请求）。本场景 3 次请求 = 2 轮 primary + 1 次
+    # closeout，两条计数点各自独立——这正是"turns ≠ requests"的最小证据。
+    assert data["consumed"] == {
+        "agent_turns": 2, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+    }, (
+        "consumed 四维全在；token / cost 是本场景替身模型**不自报**的维度 ⇒ null"
+        "（`11 §6.1`：不可得 ≠ 0），不是 0"
+    )
     assert data["limits"] == {
         "local": {"max_agent_turns": 2, "source": "deployment"},
-        "run": {"max_agent_turns_total": None},
-    }
+        "run": {
+            "max_agent_turns_total": None, "max_model_requests": None,
+            "max_total_tokens": None, "max_cost_usd": None,
+        },
+    }, "limits 按作用域各还原生投影（`11 §6.1`）；run 档四维全在，没配的是 null"
     assert data["closeout_source"] == CLOSEOUT_DETERMINISTIC
     assert data["resume_requirements"] == []
     # continuation 的四个键齐（`next_safe_action` 非空）；文案本身不在这里钉
@@ -1026,7 +1068,8 @@ def test_goldens_two_channels_are_mutually_consistent(name: str) -> None:
     scenario = GOLDENS[name]
     from_emitted = [t for t in scenario.emitted if t not in STREAM_ONLY_TYPES]
     combined = from_emitted + list(scenario.discarded)
-    assert _collapse(combined) == scenario.durable, f"{scenario.name}：两条通道的表互不自洽"
+    assert _collapse(combined) == _collapse(list(scenario.durable)), \
+        f"{scenario.name}：两条通道的表互不自洽"
     assert _counted(combined) == _counted(list(scenario.durable)), \
         f"{scenario.name}：两条通道的计数互不自洽"
 

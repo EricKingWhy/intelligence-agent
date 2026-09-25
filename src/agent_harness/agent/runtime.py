@@ -26,6 +26,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
@@ -44,12 +45,15 @@ from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
     REASON_BUDGET_EXHAUSTED,
+    BudgetConsumed,
     LaunchRunBudget,
-    RunTurnLimits,
+    RunLimits,
+    add_consumed,
     as_run_started_budget,
     build_limits_snapshot,
     build_pause_data,
     closeout_capacity,
+    consumed_from_events,
     deterministic_continuation,
     normalize_continuation,
     pause_trigger,
@@ -76,6 +80,12 @@ from agent_harness.model.failure import (
     classify_provider_failure,
     has_malformed_tool_call_markup,
 )
+from agent_harness.model.accounting import (
+    PROVIDER_ROLE_CLOSEOUT,
+    REQUEST_OUTCOME_COMPLETED,
+    REQUEST_OUTCOME_FAILED,
+    cost_usd_from_response,
+)
 from agent_harness.model.fallback import (
     FallbackPolicy,
     ModelFallbackCoordinator,
@@ -89,6 +99,7 @@ from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_FAILED,
     MODEL_FALLBACK,
+    MODEL_REQUEST,
     MODEL_STARTED,
     RUN_FAILED,
     RUN_PAUSED,
@@ -190,24 +201,40 @@ def _extract_text(content: Any) -> str:
 
 
 def _closeout_instruction(
-    *, trigger_dimension: str, consumed: int, ceiling: int | None,
+    *, trigger_dimension: str, consumed: BudgetConsumed, limits: RunLimits,
 ) -> str:
-    """预算暂停前那一次有界 closeout 的指令（`#312`）。
+    """预算暂停前那一次有界 closeout 的指令（`#312`，`#313` 扩到四维）。
 
     指令本身**不**进事件流：持久化的只有它的产出（`run/paused.continuation`）——
     continuation 是"这次暂停的续跑说明书"，不是对话内容，不该被
     `derive_messages` 当成模型可见历史回灌（不变量 #5/#6）。
+
+    账目**未知**的维度如实写"未知"：让模型看见"不知道花了多少 token"比让它看见一个
+    假的 0 更安全（它会据此写"剩下的不多了"这类判断）。
     """
-    ceiling_text = "无 ceiling" if ceiling is None else str(ceiling)
     return (
         "运行即将因回合预算到顶而暂停，现在需要一份供恢复使用的续跑说明。\n"
-        f"触发维度：{trigger_dimension}；本逻辑 run 已消耗 {consumed} 轮（ceiling={ceiling_text}）。\n"
+        f"触发维度：{trigger_dimension}（ceiling="
+        f"{_budget_value_text(limits.ceiling_of(trigger_dimension))}）；"
+        f"本逻辑 run 已消耗 {consumed.agent_turns} 轮 / "
+        f"{_budget_value_text(consumed.model_requests)} 次请求 / "
+        f"{_budget_value_text(consumed.total_tokens)} token / "
+        f"${_budget_value_text(consumed.cost_usd)}。\n"
         "只依据上面的会话历史作答，**不要**调用工具、不要推测还没发生的事。\n"
         "只输出一个 JSON 对象（不要代码块、不要多余文字），键固定为：\n"
         '{"completed": ["已确实完成的事"], "remaining": ["还没做完的事"], '
         '"blockers": ["阻塞点"], "next_safe_action": "恢复后第一步该做什么"}\n'
         "四个键都必填；completed/remaining/blockers 是字符串数组（可为空数组）。"
     )
+
+
+def _budget_value_text(value: Any) -> str:
+    """账目数值 → closeout 指令里的文案（`None` = 未知，不写成 0）。"""
+    if value is None:
+        return "未知"
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return str(value)
 
 
 def _parse_closeout_json(text: str) -> Any:
@@ -262,6 +289,22 @@ class _RunFinalizer:
         self.run_id: str | None = None
         self.model_call_open = False
         self._terminal_written = False
+        #: 本执行累计的**归属成本**（`#313` T5）。`None` = 至今没有任何一次响应
+        #: 自报过成本（或有一次没自报）——即"不可得"，不是 0（`11 §6.1`）。
+        self.cost_total: Decimal | None = None
+
+    def add_cost(self, cost: Decimal | None) -> None:
+        """记一次响应的 Provider 归属成本（`None` = 这次没有可靠归属）。
+
+        `None` **粘性**：一次不可归属就把整本账标成未知，后面的加数补不回缺的
+        那一块（"总和 = 已知部分 + 未知部分"，后者不可知）。所以生产链路
+        （`reports_cost=False`）的终态 `cost_usd` 恒为 `None`——那是实话，
+        不是"这个 run 不要钱"。
+        """
+        if cost is None:
+            self.cost_total = None
+            return
+        self.cost_total = (self.cost_total or Decimal(0)) + cost
 
     def begin_run(self, run_id: str) -> None:
         self.run_id = run_id
@@ -598,10 +641,10 @@ class _TerminalContext:
     telemetry: _Telemetry
 
     def interrupt_streams(self) -> list[SessionEvent]:
-        """流式块收口 + 切换事实落盘（取消臂与异常臂同一不变量）。
+        """流式块收口 + 切换事实与请求账目落盘（取消臂与异常臂同一不变量）。
 
-        顺序固定：interrupted（块级部分内容保留）先于 model/failed（调用级归因）；
-        drain 幂等——成功路径已取走则此处为空。
+        顺序固定：interrupted（块级部分内容保留）先于 model/fallback 与 model/request
+        （调用级归因）先于 model/failed；drain 幂等——成功路径已取走则此处为空。
         """
         events: list[SessionEvent] = []
         if self.streamer is not None:
@@ -613,6 +656,15 @@ class _TerminalContext:
                 {"from_model": transition.from_model,
                  "to_model": transition.to_model,
                  "reason": transition.reason},
+                run_id=self.run_id, step_id=self.steps + 1,
+            ))
+        # `#313`：调用失败/取消时，**已经发出去**的请求同样要落账——它们占
+        # `model_requests` 一席（`02 §5.1`），只是没有产出决策（不增 agent_turns）。
+        # 成功路径在这里 drain 到空（上面已取走并落盘），所以本循环是幂等的。
+        for request in self.model_coord.drain_requests():
+            events.append(self.session.append(
+                MODEL_REQUEST,
+                {"role": request.role, "outcome": request.outcome},
                 run_id=self.run_id, step_id=self.steps + 1,
             ))
         return events
@@ -834,7 +886,7 @@ class AgentRuntime:
         # local fuse 的**来源**（deployment / agent_profile / 请求覆盖，`#308` 已解析）。
         # 运行时只把它投影进 `run/paused.limits.local`（客户端要看"谁定的"），
         # 不做任何策略判断——解析规则仍只在 `agent/budget.py` 一处。
-        self._local_fuse_source = local_fuse_source
+        self.local_fuse_source = local_fuse_source
         # RunBudget 上下文（`#312`）：本次执行的账本起点（version / ceiling / 已消耗）。
         # `None` = 没有 run 作用域预算信息（沿用既有行为：无 ceiling、账本从 0 起）。
         self._run_budget = run_budget or LaunchRunBudget()
@@ -1163,7 +1215,12 @@ class AgentRuntime:
                 # 本次执行以一条非终态 `run/paused` 收口（预留的那次 closeout 除外）。
                 # 两个作用域在同一次判定里比（run 累计 ceiling / local fuse），命中
                 # 哪个维度由 `pause_trigger` 如实回传——不合并成一个计数器（`02 §5.1`）。
-                trigger_dimension = self._pause_trigger(launch_budget, steps=steps)
+                trigger_dimension = self._pause_trigger(
+                    launch_budget, steps=steps,
+                    consumed=self._execution_consumed(
+                        launch_budget, session, arms.memory_event_start,
+                    ),
+                )
                 if trigger_dimension is not None:
                     self._log("agent_decision", "回合预算到顶，run 暂停（非终态）",
                               span_id=new_span_id(), parent_span_id=run_span, step=steps,
@@ -1275,6 +1332,26 @@ class AgentRuntime:
                         ai = AIMessage(content="")
                 else:
                     ai = await model_coord.ainvoke(messages)
+                # `#313`（T5）：响应一拿到就**先记账**，早于下面任何接纳判定——
+                # 空响应 / DSML 泄漏 / 后续任何拒绝都**不**退回这一次请求的消耗
+                # （请求真的发出去了、Provider 也真的计了费）。此前 usage 只在
+                # "被接纳"分支里累加，被拒的那一轮 usage 直接丢账。
+                model_name = _model_name_from_response(ai)
+                usage = _usage_from_response(ai)
+                if usage:
+                    for key, value in usage.items():
+                        usage_total[key] = usage_total.get(key, 0) + value
+                model_cost = cost_usd_from_response(ai)
+                terminal.add_cost(model_cost)
+                # 每一次**实际**请求恰落一条 durable `model/request`（`model_requests`
+                # 的计数点，`02 §5.1`），并按 append 顺序镜像：流帧必须是落盘日志的
+                # 前缀（golden 判据）。位置在 `model/fallback` / `model/completed` 之前
+                # ——请求是先发生的事实，决策与切换是对它的解释。
+                for request_event in self._record_model_requests(
+                    session, model_coord, run_id=run_id, step=step_base + steps + 1,
+                    usage=usage, cost=model_cost, model=model_name,
+                ):
+                    yield to_agent_event(request_event)
                 # R6-2（用户拍板）：空响应不是成功——content 与 tool_calls 双空
                 # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
                 # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），
@@ -1313,14 +1390,11 @@ class AgentRuntime:
                 calls = ToolCall.normalize_all(ai.tool_calls or [])
                 tool_calls = calls
                 model_data: dict[str, Any] = {"content": extracted_content}
-                model_name = _model_name_from_response(ai)
                 if model_name:
                     model_data["model"] = model_name
-                usage = _usage_from_response(ai)
                 if usage:
+                    # usage / model_name 在上面的记账块里已抽好（同一份事实，不重抽）。
                     model_data["usage"] = usage
-                    for key, value in usage.items():
-                        usage_total[key] = usage_total.get(key, 0) + value
                 # llm_call 诊断日志带模型归因 + 时延 + 用量（与 cli.py 对齐，spec 02 §7/§10
                 # 要求每步可在 Diagnostic Log 定位到具体 provider/model）。
                 llm_log_fields: dict[str, Any] = {
@@ -1649,20 +1723,82 @@ class AgentRuntime:
     # 共同纪律：终态字段由 _RunFinalizer 单点供给；信封编号走 arms.envelope_step()；
     # 取消臂不 yield（生成器关闭中禁止产出），异常臂逐条镜像收尾事件。
 
-    def _pause_trigger(self, launch: LaunchRunBudget, *, steps: int) -> str | None:
-        """本次执行此刻还能不能继续；到顶时返回命中的预算维度（`#312` T4）。
+    def _record_model_requests(
+        self, session: Session, coord: ModelFallbackCoordinator, *,
+        run_id: str | None, step: int, usage: dict[str, int] | None,
+        cost: Decimal | None, model: str | None,
+    ) -> list[SessionEvent]:
+        """把本步的每一次**实际**请求落成 durable `model/request` 并返回（供镜像）。
+
+        usage / cost 只挂在**产出响应**的那一次上（= 最后一格且 `outcome=completed`）：
+        前面那些失败/被拒的尝试，Provider 没有给出可归属的账目——缺席实现不伪造
+        （`11 §6.1`），而它们的缺席会让本 run 的 token / cost 累计转为**未知**
+        （`agent/run_budget.py` 的 `None` 粘性），这正是"不可得 ≠ 0"在计数器上的落点。
+        """
+        attempts = coord.drain_requests()
+        events: list[SessionEvent] = []
+        for index, attempt in enumerate(attempts):
+            produced_response = (
+                index == len(attempts) - 1
+                and attempt.outcome == REQUEST_OUTCOME_COMPLETED
+            )
+            events.append(self._append_model_request(
+                session, role=attempt.role, outcome=attempt.outcome,
+                run_id=run_id, step=step,
+                usage=usage if produced_response else None,
+                cost=cost if produced_response else None,
+                model=model if produced_response else None,
+            ))
+        return events
+
+    def _append_model_request(
+        self, session: Session, *, role: str, outcome: str,
+        run_id: str | None, step: int, usage: dict[str, int] | None = None,
+        cost: Decimal | None = None, model: str | None = None,
+    ) -> SessionEvent:
+        """落一条 `model/request`（`model_requests` 的唯一计数点，`02 §5.1`）。
+
+        只写**知道**的键：usage / cost / model 缺席就不落键（不可得 ≠ 0）。
+        `cost_usd` 是十进制**字符串**：`Decimal` 进 `json.dumps` 会炸，而 `float()`
+        引入与 wire 不等价的二进制近似（`11 §6.1`：二进制浮点相等不是契约）。
+        """
+        data: dict[str, Any] = {"role": role, "outcome": outcome}
+        if model:
+            data["model"] = model
+        if usage:
+            data["usage"] = usage
+        if cost is not None:
+            data["cost_usd"] = format(cost, "f")
+        return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
+
+    def _execution_consumed(
+        self, launch: LaunchRunBudget, session: Session, start: int,
+    ) -> BudgetConsumed:
+        """逻辑 run 的**累计**账 = 启动时的账 + 本次执行新发生的账。
+
+        两侧都是事件派生值（`consumed_from_events` 读 `model/completed` 与
+        `model/request`），所以这里既不新增计数器、也不会与落盘事实漂移——
+        `#313` 的"计数点唯一"就落在这句话上。
+        """
+        return add_consumed(launch.consumed, consumed_from_events(session.since(start)))
+
+    def _pause_trigger(
+        self, launch: LaunchRunBudget, *, steps: int, consumed: BudgetConsumed,
+    ) -> str | None:
+        """本次执行此刻还能不能继续；到顶时返回命中的预算维度（`#312` T4 / `#313` T5）。
 
         **唯一**判定入口：循环顶部的准入（"要不要暂停"）。`model/completed` 的延迟落盘
         曾经也调它（"本轮之后还会不会继续"），`#312` 的审查把那条用法去掉了——延迟的
         语义是"model 决策的 durable 记录不早于它引用的那批工具"，与本执行还能不能继续
         无关（把预算看进去会让暂停边界上写出"工具不会跑"却照样跑完一批）。
 
-        `steps` = 本执行**已接纳**的轮数；run 作用域的累计消耗 = 启动时账本 + 本执行。
+        `steps` = 本执行**已接纳**的轮数；run 作用域四维的累计消耗由调用方按事件算好
+        传进来（`_execution_consumed`），本方法只做判定、不自己数数。
         local fuse 用本执行轮数计（它是**实例级**保险丝，续跑执行拿到的是新实例，
         `02 §5.1` 的三层控制互不替代）。
         """
         return pause_trigger(
-            consumed_turns=launch.consumed_turns + steps,
+            consumed=consumed,
             run_limits=launch.limits,
             execution_steps=steps,
             local_fuse_turns=self.max_agent_turns,
@@ -1687,18 +1823,34 @@ class AgentRuntime:
 
         **closeout 不记进 `consumed.agent_turns`**：那个 counter 只数被接纳进 loop 的
         模型决策，closeout 是 `model_requests`（计数点与「预留」的完整推导见
-        `agent/run_budget.py` 的模块 docstring 与 `pause_trigger`）。
+        `agent/run_budget.py` 的模块 docstring 与 `pause_trigger`）。但它**要**记进
+        `model_requests` / `total_tokens` / `cost_usd` —— 它是一次真实的 Provider
+        请求（`02 §5.1` 明文把 closeout 与 primary/fallback 并列），所以它的
+        `model/request` 事件在下面先落盘、再算暂停快照的 `consumed`：
+        快照是**恢复的基数**，漏掉 closeout 会让"恢复后重算的账"比快照多一格
+        （T4 的 `resume_headroom_ok` 与 `run/resumed.consumed` 就会各说一套）。
         """
-        consumed = launch.consumed_turns + steps
+        session = arms.session
+        envelope_step = arms.envelope_step(steps)
+        consumed_before = self._execution_consumed(
+            launch, session, arms.memory_event_start,
+        )
+        continuation, closeout_source, closeout_events = await self._closeout_continuation(
+            arms, trigger_dimension=trigger_dimension,
+            consumed=consumed_before, limits=launch.limits, step_id=envelope_step,
+        )
+        # closeout 的 `model/request` 先镜像再落 `run/paused`：两条都是 durable，
+        # 顺序与落盘顺序一致（流帧必须是落盘日志的前缀，见 golden）。
+        for closeout_event in closeout_events:
+            yield to_agent_event(closeout_event)
+        # closeout 那次请求已经落账（`_closeout_continuation` 里 append）⇒ 重新算一次
+        # 快照，让它包含进去。两次都从事件读，所以这是"再读一次真相"，不是累加。
+        consumed = self._execution_consumed(launch, session, arms.memory_event_start)
         limits = build_limits_snapshot(
             run_limits=launch.limits,
             local_fuse=LocalFuse(
-                max_agent_turns=self.max_agent_turns, source=self._local_fuse_source,
+                max_agent_turns=self.max_agent_turns, source=self.local_fuse_source,
             ),
-        )
-        continuation, closeout_source = await self._closeout_continuation(
-            arms, trigger_dimension=trigger_dimension,
-            consumed=consumed, ceiling=launch.limits.max_agent_turns_total,
         )
         paused = arms.session.append(
             RUN_PAUSED,
@@ -1706,7 +1858,7 @@ class AgentRuntime:
                 reason=REASON_BUDGET_EXHAUSTED,
                 trigger_dimension=trigger_dimension,
                 version=launch.version,
-                consumed_turns=consumed,
+                consumed=consumed,
                 limits=limits,
                 continuation=continuation,
                 closeout_source=closeout_source,
@@ -1717,7 +1869,7 @@ class AgentRuntime:
                 # trace_url 此刻还不存在（只在终态回调里合成，见 build_pause_data）。
                 trace_id=arms.telemetry.trace_id,
             ),
-            run_id=arms.run_id, step_id=arms.envelope_step(steps),
+            run_id=arms.run_id, step_id=envelope_step,
         )
         # 本次执行的**收口事实**已落盘：后续任何臂都不得再补一条终态（单终态不变量的
         # 执行层落点）。逻辑 run 仍开着——这由 `run/paused` 自己表达（它不在
@@ -1730,9 +1882,13 @@ class AgentRuntime:
 
     async def _closeout_continuation(
         self, arms: _TerminalArms, *, trigger_dimension: str,
-        consumed: int, ceiling: int | None,
-    ) -> tuple[dict[str, Any], str]:
-        """产出 continuation 与它的来源（`model` / `deterministic`）。
+        consumed: BudgetConsumed, limits: RunLimits, step_id: int,
+    ) -> tuple[dict[str, Any], str, list[SessionEvent]]:
+        """产出 continuation、它的来源（`model` / `deterministic`）与本次落盘的事件。
+
+        第三个返回值是**必须镜像**的：closeout 是一次真实的 Provider 请求，它落一条
+        `model/request`（`02 §5.1`），而"流帧 = 落盘日志的前缀"是 golden 钉住的不变量
+        ——落盘却不镜像会让暂停场景的帧序列在中间缺一格。
 
         **有界**的含义是双重的：预算上最多一次调用（且必须还有容量），形状上只接受
         契约里的四个键（见 `normalize_continuation`）。任何一步不合契约都**回落到**
@@ -1740,11 +1896,10 @@ class AgentRuntime:
         """
         fallback = deterministic_continuation(
             events=arms.session.since(0), run_id=arms.run_id or "",
-            trigger_dimension=trigger_dimension, ceiling=ceiling,
-            consumed_turns=consumed,
+            trigger_dimension=trigger_dimension, limits=limits, consumed=consumed,
         )
-        if not closeout_capacity(consumed_turns=consumed, run_limits=RunTurnLimits(ceiling)):
-            return fallback, CLOSEOUT_DETERMINISTIC
+        if not closeout_capacity(consumed=consumed, run_limits=limits):
+            return fallback, CLOSEOUT_DETERMINISTIC, []
         try:
             messages = await self._context_builder.build(arms.session)
         except Exception as error:  # noqa: BLE001 - closeout 是尽力而为，绝不能反噬暂停
@@ -1752,26 +1907,42 @@ class AgentRuntime:
                 "closeout 上下文装配失败（%s）——回落确定性 continuation",
                 type(error).__name__,
             )
-            return fallback, CLOSEOUT_DETERMINISTIC
+            return fallback, CLOSEOUT_DETERMINISTIC, []
         try:
             response = await self._raw_model.ainvoke(
                 [*messages, HumanMessage(content=_closeout_instruction(
-                    trigger_dimension=trigger_dimension,
-                    consumed=consumed, ceiling=ceiling,
+                    trigger_dimension=trigger_dimension, consumed=consumed, limits=limits,
                 ))],
             )
-            parsed = _parse_closeout_json(_extract_text(response.content))
         except Exception as error:  # noqa: BLE001 - 同上：模型 closeout 不可用不是失败
             logger.warning(
                 "closeout 模型调用失败（%s）——回落确定性 continuation",
                 type(error).__name__,
             )
-            return fallback, CLOSEOUT_DETERMINISTIC
+            # 请求发出去过（只是没拿到响应）⇒ 照样落账，usage / cost 缺席
+            # （`11 §6.1`：不可得 ≠ 0）。
+            return fallback, CLOSEOUT_DETERMINISTIC, [self._append_model_request(
+                arms.session, role=PROVIDER_ROLE_CLOSEOUT,
+                outcome=REQUEST_OUTCOME_FAILED, run_id=arms.run_id, step=step_id,
+            )]
+        usage = _usage_from_response(response)
+        cost = cost_usd_from_response(response)
+        request_event = self._append_model_request(
+            arms.session, role=PROVIDER_ROLE_CLOSEOUT,
+            outcome=REQUEST_OUTCOME_COMPLETED, run_id=arms.run_id, step=step_id,
+            usage=usage, cost=cost, model=_model_name_from_response(response),
+        )
+        # closeout 的 usage 也要进本执行的 token 账（原来只有主循环的响应入账）。
+        if usage:
+            for key, value in usage.items():
+                arms.usage_total[key] = arms.usage_total.get(key, 0) + value
+        arms.terminal.add_cost(cost)
+        parsed = _parse_closeout_json(_extract_text(response.content))
         normalized = normalize_continuation(parsed)
         if normalized is None:
             logger.warning("closeout 产出不合契约——回落确定性 continuation")
-            return fallback, CLOSEOUT_DETERMINISTIC
-        return normalized, CLOSEOUT_MODEL
+            return fallback, CLOSEOUT_DETERMINISTIC, [request_event]
+        return normalized, CLOSEOUT_MODEL, [request_event]
 
     async def _terminal_context_exceeded(
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
@@ -1816,7 +1987,11 @@ class AgentRuntime:
         end_event = arms.session.end_run(
             arms.run_id, status="completed", final_text=final,
             usage_total=dict(arms.usage_total) or None,
-            cost_usd=None,   # TODO(spec 12): 费率表未定义，不伪造
+            # `#313`：成本只来自 Provider 的**归属**报账（`response_metadata["cost"]`），
+            # 每次都自报才有值；任何一次缺失 ⇒ `None`（不可得 ≠ 0）。生产链路
+            # （`model/accounting.py`：`reports_cost=False`）因此恒为 `None` —— 那是
+            # 实情，不是"这个 run 不要钱"（费率表未定义 ⇒ 不臆造，`02 §5.1`）。
+            cost_usd=arms.terminal.cost_total,
             trace_id=arms.telemetry.trace_id,
             trace_url=arms.telemetry.trace_url,
         )

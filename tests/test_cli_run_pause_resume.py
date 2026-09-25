@@ -150,6 +150,72 @@ def test_resume_block_reports_version_step_and_carried_consumed():
     assert "carried consumed 3 / limit 8 (remaining 5)" in text
 
 
+# ── `#313` T5：四维的显示面与开关 ─────────────────────────────────────────
+
+
+def test_pause_block_renders_the_extra_dimensions_only_when_they_carry_facts():
+    """有新维度事实 ⇒ 逐维一行；老暂停事件（只有 turns 一维）⇒ 输出逐字不变。
+
+    老事件多打三行 `unavailable / unlimited` 是噪声：那份投影里根本没有那三维的
+    事实，渲染出来的"unavailable"会被读成"这次暂停与它们有关"。
+    """
+    legacy = render_pause_block(_PAUSE_DATA)
+    assert "total_tokens" not in legacy and "cost_usd" not in legacy
+
+    four_dim = render_pause_block({
+        **_PAUSE_DATA,
+        "trigger_dimension": "run.max_total_tokens",
+        "consumed": {"agent_turns": 3, "model_requests": 7, "total_tokens": 900,
+                     "cost_usd": "0.0125"},
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 8, "max_model_requests": 9,
+                    "max_total_tokens": 1000, "max_cost_usd": "0.02"},
+        },
+    })
+    assert "model_requests: consumed 7 / limit 9 (remaining 2)" in four_dim
+    assert "total_tokens: consumed 900 / limit 1000 (remaining 100)" in four_dim
+    # cost 在 wire 上是十进制字符串 ⇒ 差值在 Decimal 里算，不引入浮点近似
+    assert "cost_usd: consumed 0.0125 / limit 0.02 (remaining 0.0075)" in four_dim
+    assert "turns: consumed 3 / limit 8 (remaining 5)" in four_dim
+
+
+def test_pause_block_says_unavailable_instead_of_zero_for_unknown_dimensions():
+    """账目未知（没报 usage）⇒ 那一维显示 unavailable，不显示 0（`11 §6.1`）。"""
+    text = render_pause_block({
+        **_PAUSE_DATA,
+        "consumed": {"agent_turns": 1, "model_requests": 2,
+                     "total_tokens": None, "cost_usd": None},
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 8, "max_total_tokens": 1000},
+        },
+    })
+    assert "total_tokens: consumed unavailable / limit 1000 (remaining unavailable)" in text
+    assert "total_tokens: consumed 0" not in text
+    assert "cost_usd: consumed unavailable / limit unlimited (remaining unavailable)" in text
+
+
+def test_resume_hint_names_the_flag_of_the_tripped_dimension():
+    """恢复指令必须给一个**抬得动**这次暂停的开关（按 trigger_dimension 取）。
+
+    写死 `--run-turns-total` 在 token 维度暂停时是一句假指令：照抄执行会撞 409
+    （turn 维没配过，等于"没真提高"）——而 CLI 显示的应当是 durable 事实本身。
+    """
+    cases = {
+        "run.max_agent_turns_total": "--run-turns-total",
+        "run.max_model_requests": "--run-model-requests",
+        "run.max_total_tokens": "--run-total-tokens",
+        "run.max_cost_usd": "--run-cost-usd",
+        # 本票之外的暂停原因（local fuse / 未来维度）回落到任何 run 都读得懂的 turns 开关
+        "local.max_agent_turns": "--run-turns-total",
+    }
+    for dimension, flag in cases.items():
+        text = resume_hint("sess-42", data={**_PAUSE_DATA, "trigger_dimension": dimension})
+        assert f"{flag} N" in text, f"{dimension} 应给 {flag}：{text}"
+        assert "--expected-version 1" in text
+
+
 # ── 真链路：run 暂停 → resume 接上同一个 run ──────────────────────────────
 
 
@@ -299,3 +365,86 @@ def test_main_resume_maps_domain_rejection_to_exit_code(monkeypatch, capsys):
 
     assert excinfo.value.code == 1
     assert "resume 被拒绝" in capsys.readouterr().err
+
+
+def test_main_resume_requires_at_least_one_absolute_ceiling(monkeypatch, capsys):
+    """一个 ceiling 都不给 ⇒ 用法错误（exit 2），不当成"恢复成功"。
+
+    只给 session_id 的调用在语义上是"去掉全部 run ceiling"（普通续聊就能做），不是
+    "抬高后继续"。CLI 层拒绝比放过去更诚实：放过去会返回一个看不出差别的成功。
+    """
+    monkeypatch.setattr(cli, "Settings", lambda: Settings(_env_file=None, model_api_key="sk-test"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _main_resume(["sess-1", "--expected-version", "1"])
+
+    assert excinfo.value.code == 2, "argparse 的用法错误码"
+    assert "至少给一个绝对 ceiling" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_cli_stops_and_resumes_on_a_non_turn_dimension(monkeypatch, tmp_path):
+    """真链路：请求维 ceiling 停下 run → 抬高它 → 同一 run 完成（turn 维没参与）。
+
+    这条证明 CLI 的四个开关**真的接到了账本上**（不是只被 argparse 收下）：
+    `--run-model-requests 1` 当场暂停并如实报出命中维度与那一维的读数；恢复那一次把
+    requests 抬到位（上限从 1 → 3），`--run-total-tokens 2000` 则把**未到线**的 token
+    ceiling 一起抬高；两段摘要里的 token 行都来自 durable 快照（closeout 自报的 usage）。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    def _usage_answer(content: str, total_tokens: int) -> AIMessage:
+        return AIMessage(
+            content=content,
+            usage_metadata={"input_tokens": total_tokens - 3, "output_tokens": 3,
+                            "total_tokens": total_tokens},
+        )
+
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(responses=[
+            _usage_answer(_continuation_json().content, 20),
+        ]),
+    )
+    printed: list[str] = []
+    outcome = await cli.run(
+        "把 A 改成 B", run_model_requests=1, run_total_tokens=500, write=printed.append,
+    )
+
+    assert outcome.paused is True, "撞到请求维 ceiling ⇒ 暂停（不是失败，也不是空回答）"
+    text = "".join(printed)
+    assert "dimension=run.max_model_requests" in text
+    # 请求维含 closeout 预留 ⇒ ceiling=1 连一次普通请求都放行不了：turns 计数是 0，
+    # 而 closeout 那一次请求与它自报的 20 token 都在账上。
+    assert "model_requests: consumed 1 / limit 1 (remaining 0)" in text
+    assert "total_tokens: consumed 20 / limit 500 (remaining 480)" in text
+    assert "--run-model-requests N" in text, "恢复指令给的是被命中那一维的开关"
+
+    session_id = _only_session_id(settings)
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    paused_run_id = next(
+        e.run_id for e in store.read_events(session_id) if e.type == RUN_PAUSED
+    )
+
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(responses=[AIMessage(content="A 已改完")]),
+    )
+    printed_again: list[str] = []
+    resumed = await resume_command(
+        session_id, run_model_requests=3, run_total_tokens=2000,
+        expected_version=1, write=printed_again.append,
+    )
+
+    assert resumed.paused is False and resumed.final_text == "A 已改完"
+    text_again = "".join(printed_again)
+    assert "[run resumed]" in text_again
+    assert "model_requests: carried consumed 1 / limit 3 (remaining 2)" in text_again
+    assert "total_tokens: carried consumed 20 / limit 2000 (remaining 1980)" in text_again
+
+    events = store.read_events(session_id)
+    types = [e.type for e in events]
+    assert types.count(RUN_STARTED) == 1 and types.count(RUN_RESUMED) == 1
+    assert types.count(RUN_COMPLETED) == 1
+    assert {e.run_id for e in events if e.run_id} == {paused_run_id}

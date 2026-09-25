@@ -343,17 +343,22 @@ def test_unknown_key_in_budget_rejected_not_silently_ignored(tmp_path):
 
 
 def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
-    """尚未实现的作用域 / 维度一律 422（T4 把 `run` 的 turns 一维开了出来）。
+    """尚未实现的作用域 / 维度一律 422（T4 开 turns、T5 `#313` 再开 requests / tokens）。
 
     "先看起来接受、其实不生效"是最坏的一种兼容：用户会以为预算在管。宁可
     显式拒绝——本用例钉住**仍未实现**的三类（`budget.session` 属 T10 / `#318`；
-    PRD §3 冻结形状里 run 的其余六维属后续票；`expected_version` 在**创建**入口
-    没有可比较的版本，属 T4 的形状规则）：
+    PRD §3 冻结形状里 run 的 tool 配额与 deadline 属后续票；`expected_version`
+    在**创建**入口没有可比较的版本，属 T4 的形状规则）：
 
-      * `budget.run` 的六维给了**非空值** ⇒ 422（给了 `null` / `{}` 则合法，
+      * `budget.run` 里仍未实现的维给了**非空值** ⇒ 422（给了 `null` / `{}` 则合法，
         见 `tests/web/test_run_pause_resume_api.py` 的 PRD 全形用例）；
       * `budget.session` 任何形态 ⇒ 422（`extra="forbid"`）；
       * `budget.expected_version` 在创建入口 ⇒ 422（创建会启动新 run，没有版本可比）。
+
+    `max_cost_usd` 留在拒绝名单里的理由与上面三类**不同**（`#313` 已声明它的形状）：
+    本链的 Provider 集成不自报归属成本 ⇒ 这条 ceiling 现在无法强制执行 ⇒ 按
+    `11 §6.1` 在首个请求前 422（判定见 `agent/run_budget.validate_ceiling_enforceability`），
+    而不是收下一个永远不会触发的数字。
     """
     app, client = _web(tmp_path)
     probe = _ModelProbe()
@@ -361,7 +366,6 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
         for payload in (
             {"budget": {"session": {"max_agent_turns_total": 5}}},
             {"budget": {"run": {"max_tool_calls": 5}}},
-            {"budget": {"run": {"max_total_tokens": 1000}}},
             {"budget": {"run": {"max_cost_usd": "0.01"}}},
             {"budget": {"run": {"deadline_at": "2026-09-25T00:00:00Z"}}},
             {"budget": {"run": {"tool_call_limits": {"read_file": 3}}}},

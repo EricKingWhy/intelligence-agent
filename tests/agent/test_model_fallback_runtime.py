@@ -17,9 +17,10 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
+from agent_harness.agent.run_budget import consumed_from_events
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
-from agent_harness.session import MODEL_FAILED, MODEL_FALLBACK
+from agent_harness.session import MODEL_FAILED, MODEL_FALLBACK, MODEL_REQUEST
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -356,6 +357,113 @@ class TestTransitionPersistenceOnFailure:
         assert transitions[0].data["from_model"] == "primary-model"
         assert transitions[0].data["to_model"] == "fallback-model"
         assert transitions[0].data["reason"] == "ModelStallError"
+
+
+class TestRequestAccounting:
+    """`#313`：每一次**实际发出去**的 Provider 请求都在账上有一格（`02 §5.1`）。
+
+    计数点是 append-only 事件（`model/request`），这里用 `consumed_from_events` 读它——
+    与运行时判定读的是**同一个**函数，所以本类证的不是"事件里有这么几条"（那由 golden
+    逐字钉住），而是"这四条数出来是什么"：请求次数与"被接纳的轮数"是两个 counter，
+    失败/取消也占请求那一格，却不占轮数那一格。
+    """
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_then_fallback_counts_two_requests_one_turn(
+        self, tmp_path,
+    ):
+        primary = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=1, error=TimeoutError("primary down"),
+        )
+        # fallback 自报 usage：那一次的 token 才能进账（自报值，不是估算）
+        fallback = ScriptedModel([AIMessage(
+            content="fallback 的回答",
+            usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )])
+        session = make_session(tmp_path)
+
+        await _runtime(primary, fallback).run(session, "你好")
+
+        requests = [e for e in session._events if e.type == MODEL_REQUEST]
+        assert [(e.data["role"], e.data["outcome"]) for e in requests] == [
+            ("primary", "failed"), ("fallback", "completed"),
+        ]
+        consumed = consumed_from_events(session._events)
+        assert consumed.model_requests == 2, "一次决策 = 两次真实请求"
+        assert consumed.agent_turns == 1, "只有被接纳的那一次算轮"
+
+    @pytest.mark.asyncio
+    async def test_unreported_usage_makes_the_total_unknown_not_zero(self, tmp_path):
+        """primary 那次没拿到响应 ⇒ 它没有 usage。总和因此是**未知**（不是"只算成功那次"）。
+
+        这是 `11 §6.1` 的"不可得 ≠ 0"在请求账目上的形状：失败请求也花掉了 token，
+        只是没人知道多少；把它当作 0 会让 `total_tokens` 变成一个偏小的确定值。
+        """
+        primary = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=1, error=TimeoutError("primary down"),
+        )
+        fallback = ScriptedModel([AIMessage(
+            content="fallback 的回答",
+            usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )])
+        session = make_session(tmp_path)
+
+        await _runtime(primary, fallback).run(session, "你好")
+
+        consumed = consumed_from_events(session._events)
+        assert consumed.model_requests == 2
+        assert consumed.total_tokens is None, "有一次请求没报 usage ⇒ 累计未知（不是 15）"
+        assert consumed.cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_means_one_request_and_zero_turns(self, tmp_path):
+        """未配 fallback 的瞬时失败：一次请求、零轮（没有产出决策）。"""
+        primary = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=99, error=TimeoutError("primary down"),
+        )
+        session = make_session(tmp_path)
+
+        await _runtime(primary, None).run(session, "你好")
+
+        requests = [e for e in session._events if e.type == MODEL_REQUEST]
+        assert [(e.data["role"], e.data["outcome"]) for e in requests] == [
+            ("primary", "failed"),
+        ]
+        consumed = consumed_from_events(session._events)
+        assert (consumed.model_requests, consumed.agent_turns) == (1, 0)
+
+    @pytest.mark.asyncio
+    async def test_consumer_stops_the_stream_mid_flight_the_request_is_still_counted(
+        self, tmp_path,
+    ):
+        """消费方在流中途收手（生成器关闭）：**已经发出去**的那次请求照样落账。
+
+        这条不是细节：流式路径下"请求发出去了、用户点了停止"是最常见的中断形状，
+        少记一格会让 `model_requests` 与 Provider 账单对不上，而账本正是拿它对账的。
+
+        收手时点选在 `model/started`（**请求发出之后**的第一帧）——那才是"在途"，
+        取第一帧就关会连请求都还没发，测的就不是这条路径了。
+        """
+        primary = ScriptedModel([AIMessage(content="一"), AIMessage(content="二")])
+        session = make_session(tmp_path)
+        stream = _runtime(primary, None).run_stream(session, "你好")
+
+        seen: list[str] = []
+        async for frame in stream:
+            seen.append(frame.type)
+            if frame.type == "model/started":
+                break
+        assert "model/started" in seen, f"没走到在途那一刻：{seen}"
+        await stream.aclose()
+
+        requests = [e for e in session._events if e.type == MODEL_REQUEST]
+        assert len(requests) == 1
+        assert requests[0].data["role"] == "primary"
+        # 中断的调用没拿到完整响应 ⇒ 没有产出决策（这一格只证明请求发生过）
+        assert consumed_from_events(session._events).agent_turns == 0
 
 
 class TestModelCallGateWiring:

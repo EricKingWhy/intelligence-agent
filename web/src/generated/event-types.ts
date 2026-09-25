@@ -18,6 +18,7 @@ export const EventType = {
   MODEL_DELTA: 'model/delta',
   MODEL_COMPLETED: 'model/completed',
   MODEL_FAILED: 'model/failed',
+  MODEL_REQUEST: 'model/request',
   TOOL_CALL: 'tool/call',
   TOOL_RESULT: 'tool/result',
   OPERATION_RECONCILE_REQUIRED: 'operation/reconcile-required',

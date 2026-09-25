@@ -159,34 +159,38 @@ class LocalBudgetRequest(BaseModel):
 
 
 class RunBudgetRequest(BaseModel):
-    """`budget.run` 子对象（#312，`11 §6.1`）：逻辑 run 的**绝对** ceiling。
+    """`budget.run` 子对象（`#312` 建 / `#313` 扩到四维，`11 §6.1`）：逻辑 run 的**绝对** ceiling。
 
-    本票只实现 `max_agent_turns_total` 一维（票面 Must Not Do 把 token / cost /
-    deadline 明确留给后续票）。其余六维**照样声明**，理由是 PRD §3 把公开形状冻结
-    成"全形 + 可空"：只设 turns 的 PRD 全形请求体是**合法形状**，用 `extra="forbid"`
-    把 `max_tool_calls: null` 打成 422 会把合法客户端拒之门外。反过来，给它们赋
-    **非空值**才是 "客户端以为设了、运行时没实现" —— 那必须 422 而不是静默忽略
-    （ADR-0044 D1/D8），所以下面用 `model_validator` 逐个挡下。
+    `#313` 起四维可用：turns / model_requests / total_tokens / cost_usd。**可执行性**
+    不在这一层判（pydantic 只管形状）：本链强制不了某个维度时由
+    `agent/run_budget.validate_ceiling_enforceability` 在**首个 Provider 请求之前**
+    给 422——web 层不重述那条判定（`budget_claims` 只摊平）。
+
+    剩余三维（`max_tool_calls` / `deadline_at` / `tool_call_limits`）**照样声明**，理由是
+    PRD §3 把公开形状冻结成"全形 + 可空"：只设 run 的 PRD 全形请求体是**合法形状**，
+    用 `extra="forbid"` 把 `max_tool_calls: null` 打成 422 会把合法客户端拒之门外。
+    反过来，给它们赋**非空值**才是 "客户端以为设了、运行时没实现" —— 那必须 422 而不是
+    静默忽略（ADR-0044 D1/D8），所以下面用 `model_validator` 逐个挡下。
     """
 
     model_config = {"extra": "forbid"}
 
     max_agent_turns_total: int | None = Field(default=None, ge=1)
-    # 以下六维：`null` / `{}`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
-    max_model_requests: int | None = None
+    max_model_requests: int | None = Field(default=None, ge=1)
+    max_total_tokens: int | None = Field(default=None, ge=1)
+    #: 成本 ceiling：非负十进制（`11 §6.1`）。wire 上字符串最稳、数也收——
+    #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
+    #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
+    max_cost_usd: Decimal | None = Field(default=None, ge=0)
+    # 以下三维：`null` / `{}`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
     max_tool_calls: int | None = None
-    max_total_tokens: int | None = None
-    max_cost_usd: Decimal | None = None
     deadline_at: str | None = None
     tool_call_limits: dict[str, int] | None = None
 
     @model_validator(mode="after")
     def _reject_unimplemented_dimensions(self) -> RunBudgetRequest:
         for name in (
-            "max_model_requests",
             "max_tool_calls",
-            "max_total_tokens",
-            "max_cost_usd",
             "deadline_at",
             "tool_call_limits",
         ):
@@ -194,8 +198,8 @@ class RunBudgetRequest(BaseModel):
             if value is None or value == {}:
                 continue
             raise ValueError(
-                f"budget.run.{name} 尚未实现（#312 只实现 max_agent_turns_total，"
-                f"token / cost / deadline / tool_call_limits 见后续票）；"
+                f"budget.run.{name} 尚未实现（#313 实现了 turns / model_requests / "
+                f"total_tokens / cost_usd；tool 配额与 deadline 见后续票）；"
                 f"收到 {name} 不静默忽略，请去掉它"
             )
         return self
@@ -224,7 +228,7 @@ def budget_claims(
     max_steps: int | None,
     *,
     resume_surface: bool = False,
-) -> dict[str, int | None]:
+) -> dict[str, Any]:
     """把请求体的预算声明摊平成领域入口的关键字参数。
 
     刻意**只摊平、不判定**语义：相等 / 不等 / 越权的规则住在
@@ -239,12 +243,22 @@ def budget_claims(
     """
     local = budget.local if budget is not None else None
     run = budget.run if budget is not None else None
-    claims: dict[str, int | None] = {
+    claims: dict[str, Any] = {
         "local_max_agent_turns": local.max_agent_turns if local is not None else None,
         "max_steps": max_steps,
+        # `#312` 一维 + `#313` 三维：**只摊平**（四个领域参数名与 `budget.run.*`
+        # 一一对应）。形态由 pydantic 挡，可执行性由领域层
+        # `validate_ceiling_enforceability` 在首个 Provider 请求之前挡
+        # （生产链 reports_cost=False ⇒ 显式 max_cost_usd 恒 422——那是规格要求的
+        # 诚实行为，不是缺陷；见 ADR-0044 D4）。
         "run_max_agent_turns_total": (
             run.max_agent_turns_total if run is not None else None
         ),
+        "run_max_model_requests": (
+            run.max_model_requests if run is not None else None
+        ),
+        "run_max_total_tokens": run.max_total_tokens if run is not None else None,
+        "run_max_cost_usd": run.max_cost_usd if run is not None else None,
     }
     expected = budget.expected_version if budget is not None else None
     if expected is not None:
@@ -257,7 +271,7 @@ def budget_claims(
     return claims
 
 
-def ws_budget_claims(msg: dict[str, Any]) -> dict[str, int | None]:
+def ws_budget_claims(msg: dict[str, Any]) -> dict[str, Any]:
     """WS `send_message` 帧里的 budget（#308）：与 HTTP 入口同一套字段与规则。
 
     WS 帧是裸 dict（没有 pydantic 模型做解析），所以形状校验在这里显式做：
@@ -1401,6 +1415,26 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             app.state.agent, result.run, result.subscriber, session_id,
             headers=_local_fuse_headers(result.local_fuse),
         )
+
+    @app.get("/api/sessions/{session_id}/budget")
+    async def get_session_budget(session_id: str) -> dict[str, Any]:
+        """run 预算投影（`#313`，`11 §6.1`）：identity / version / 绝对 ceilings /
+        consumed / remaining / **可执行性** / 暂停原因 + continuation。
+
+        只读、幂等、**不启 run、不写事件**（`11 §6.1` 把投影定位成"客户端读当前
+        账本"，不是另一条会改状态的通道）。真相全部来自 append-only 事件
+        （`SessionEvent` 派生，`derive_run_budget`）——刷新 / 重启 / replay 之后
+        同一个会话给出同一份投影（不变量 #22：Web 不维护第二套 Session 真相）。
+
+        四维里某维不可得时是 `null`（unavailable），**永不** 0；`enforcement` 说明
+        本部署的 Provider 链能不能真的强制某一维（生产链 `max_cost_usd=unavailable`
+        ⇒ 显式配它会被 422 拒绝，见 `model/accounting.py`）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            return await service.budget_projection(session_id)
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
 
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:

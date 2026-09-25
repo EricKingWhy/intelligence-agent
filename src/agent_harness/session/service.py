@@ -32,6 +32,7 @@ import os
 import stat
 import time
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -45,14 +46,21 @@ from agent_harness.agent.budget import (
 )
 from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.agent.run_budget import (
+    BudgetConsumed,
     LaunchRunBudget,
     PausedRun,
-    RunTurnLimits,
+    RunBudgetState,
+    RunLimits,
     build_limits_snapshot,
     build_resume_data,
+    derive_run_budget,
     latest_paused_run,
+    latest_run_id,
+    project_budget,
+    run_limits_from_request,
     validate_resume,
 )
+from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.assembly import build_runtime
 from agent_harness.logging import log_event
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
@@ -226,6 +234,28 @@ def _profile_turn_ceiling(amend: AmendOptions | None) -> int | None:
     ceiling"会静默成立（ADR-0044 D1/D7，判定见 `agent/budget.py`）。
     """
     return declared_turn_ceiling(amend.agent_profile if amend is not None else None)
+
+
+def _run_limits(
+    *,
+    max_agent_turns_total: int | None,
+    max_model_requests: int | None,
+    max_total_tokens: int | None,
+    max_cost_usd: Decimal | str | int | float | None,
+) -> RunLimits:
+    """四个 run 作用域 ceiling → `RunLimits`（形态校验 + 可执行性判定）。
+
+    规则本体在 `agent/run_budget.py::run_limits_from_request`（Web / CLI 共用同一份，
+    422 的口径只有一处）；这里只把本部署的**账目能力声明**绑上——`HARNESS_MODEL_ACCOUNTING`
+    是部署事实，不是请求事实。
+    """
+    return run_limits_from_request(
+        max_agent_turns_total=max_agent_turns_total,
+        max_model_requests=max_model_requests,
+        max_total_tokens=max_total_tokens,
+        max_cost_usd=max_cost_usd,
+        accounting=HARNESS_MODEL_ACCOUNTING,
+    )
 
 
 # ── 模型切换 / Fork 领域逻辑 ────────────────────────────────────────
@@ -549,6 +579,40 @@ class SessionService:
             raise SessionNotFound(f"session '{session_id}' not found")
         return events
 
+    async def budget_projection(self, session_id: str) -> dict[str, Any]:
+        """run 账本的只读投影（`#313` T5，`11 §6.1`）。**只读**：不启动 run、不写事件。
+
+        与 `/events` 的分工：那里给"发生了什么"（append-only 事实流），这里给
+        "现在账本长什么样"（四维 ceilings / consumed / remaining / 可执行性 + 暂停
+        时的原因与 continuation）。两份读数同源——都从事件派生（`derive_run_budget`），
+        所以刷新 / replay 后一致（AC-8）；本方法不缓存、也不持有第二份计数器。
+
+        `local_fuse` 只在两处可得：暂停快照里（历史的生效值）与**在途** run 的
+        runtime 上（当前的生效值）。都没有时**缺席**——它是"生效配置"，从事件流
+        重建不出来（`run/started` 只记了 run 作用域的 ceiling），缺席比编一个数诚实。
+        """
+        events = await self.get_events(session_id)
+        run_id = latest_run_id(events)
+        if run_id is None:
+            state = RunBudgetState(
+                run_id=None, version=1, limits=RunLimits(), consumed=BudgetConsumed(),
+                paused=None, terminal=False,
+            )
+        else:
+            state = derive_run_budget(events, run_id)
+        local_fuse = state.paused.local_fuse if state.paused is not None else None
+        if local_fuse is None:
+            active = self._run_manager.get_active(session_id)
+            runtime = active.runtime if active is not None else None
+            if runtime is not None:
+                local_fuse = LocalFuse(
+                    max_agent_turns=runtime.max_agent_turns,
+                    source=runtime.local_fuse_source,
+                )
+        return project_budget(
+            state, accounting=HARNESS_MODEL_ACCOUNTING, local_fuse=local_fuse,
+        )
+
     async def has_session(self, session_id: str) -> bool:
         """检查 session 是否存在（用于 cancel/approve 等 404 前置校验）。"""
         self._validate_session_id(session_id)
@@ -574,6 +638,9 @@ class SessionService:
         amend: AmendOptions | None = None,
         launch: bool = True,
         run_max_agent_turns_total: int | None = None,
+        run_max_model_requests: int | None = None,
+        run_max_total_tokens: int | None = None,
+        run_max_cost_usd: Decimal | str | int | float | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -596,10 +663,10 @@ class SessionService:
         `agent.budget.resolve_local_fuse` 与 Deployment ceiling 合成生效值
         （不等 / 越权 ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。
 
-        run 作用域（`#312`）：`run_max_agent_turns_total` 是本 run 的**绝对**
-        turn ceiling（`budget.run.max_agent_turns_total`），落 `run/started.data.budget`
-        ——重启后投影要能重建同一个 ceiling（`03 §3.4`）。None = 本 run 无 run
-        作用域 ceiling（**不是** 0）。
+        run 作用域（`#312` 建账本 / `#313` 扩到四维）：四个 `run_max_*` 是本 run 的
+        **绝对** ceiling（`budget.run.*`），落 `run/started.data.budget`——重启后投影要能
+        重建同一个 ceiling（`03 §3.4`）。None = 该维度无 run 作用域 ceiling（**不是** 0）。
+        形态非法或本链强制执行不了的维度（见 `_run_limits`）在此 422，零副作用。
 
         `workspace_name` 与 `cwd` 二选一（ADR-0027）：
         - `workspace_name`（旧契约，逐字节不变）：单个目录名，目录在
@@ -618,6 +685,15 @@ class SessionService:
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
             alias=max_steps,
+        )
+        # run 作用域 ceiling（`#313`）：与 fuse 同一条纪律——形态校验与可执行性判定
+        # 都发生在任何副作用之前（不建 workspace、不落任何事件、不启动 model / tool /
+        # child）。`_run_limits` 内部对不可强制的维度抛 422（见其 docstring）。
+        run_limits = _run_limits(
+            max_agent_turns_total=run_max_agent_turns_total,
+            max_model_requests=run_max_model_requests,
+            max_total_tokens=run_max_total_tokens,
+            max_cost_usd=run_max_cost_usd,
         )
 
         # 校验顺序即契约（PRD §4.1）：先"二选一"（两个都给了就没有优先级问题可言），
@@ -690,9 +766,7 @@ class SessionService:
             session_id=session_id,
         )
 
-        launch_budget = LaunchRunBudget(
-            limits=RunTurnLimits(max_agent_turns_total=run_max_agent_turns_total),
-        )
+        launch_budget = LaunchRunBudget(limits=run_limits)
         runtime = await build_runtime(
             settings=self._settings,
             wiring=wiring,
@@ -777,6 +851,9 @@ class SessionService:
         resume_run_id: str | None = None,
         resume_basis: str | None = None,
         run_max_agent_turns_total: int | None = None,
+        run_max_model_requests: int | None = None,
+        run_max_total_tokens: int | None = None,
+        run_max_cost_usd: Decimal | str | int | float | None = None,
         expected_version: int | None = None,
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
@@ -801,9 +878,11 @@ class SessionService:
           状态对不上（版本过期 / run_id 不是暂停的那个 / 没有暂停 run / 在途冲突 /
           ceiling 没真提高）⇒ 409，且**零副作用**。
 
-        ``run_max_agent_turns_total``（`budget.run.max_agent_turns_total`）在两种
-        形态下都合法：新任务 ⇒ 新 run 的初始绝对 ceiling；同 run 续跑 ⇒ 抬高后的
-        绝对 ceiling（**不是**增量）。``budget.session`` 属 `#318`，本层没有它的参数。
+        ``run_max_*``（`#313` 起四维齐备；`budget.run.*`）在两种形态下都合法：
+        新任务 ⇒ 新 run 的初始绝对 ceiling；同 run 续跑 ⇒ 抬高后的绝对 ceiling
+        （**不是**增量）。四维各自判定（`resume_headroom_ok`）：任一维"放不下一次新
+        准入"就整个请求 409——接受它等于让客户端拿到"恢复成功但立刻再次暂停"的假象。
+        ``budget.session`` 属 `#318`，本层没有它的参数。
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
@@ -819,14 +898,20 @@ class SessionService:
             request=local_max_agent_turns,
             alias=max_steps,
         )
+        # run 作用域 ceiling（`#313`）：与创建路径同一个装配点、同一条"先校验后副作用"
+        # 纪律；形态非法 / 不可强制的维度在这里 422（不写 session/resumed、不建目录）。
+        run_limits = _run_limits(
+            max_agent_turns_total=run_max_agent_turns_total,
+            max_model_requests=run_max_model_requests,
+            max_total_tokens=run_max_total_tokens,
+            max_cost_usd=run_max_cost_usd,
+        )
         # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
         amend = _amend_with_session_model(amend, existing, self._settings)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
-
         # `#312`：同 run 续跑 vs 新任务续聊二选一（判定见方法 docstring）。全部
         # 只读——放在 workspace 对账/mkdir 之前，被拒请求既不建目录也不落任何事件。
-        run_limits = RunTurnLimits(max_agent_turns_total=run_max_agent_turns_total)
         same_run_resume = task is None
         #: 同 run 续跑的三个声明（None 检查后收窄为必填；两阶段都要用同一份值）。
         claim_run_id: str = ""
@@ -847,7 +932,7 @@ class SessionService:
             # 两次校验共用 `_paused_resume_state`——规则只有一份。
             launch_budget = await self._plan_paused_resume(
                 session_id=session_id, run_id=claim_run_id,
-                expected_version=claim_version, ceiling=run_max_agent_turns_total,
+                expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis,
             )
         else:
@@ -975,7 +1060,7 @@ class SessionService:
             # 装配失败时留下"已恢复但没人跑"的账，客户端重试还会因版本已变被拒。
             launch_budget, session = await self._commit_paused_resume(
                 session_id=session_id, run_id=claim_run_id,
-                expected_version=claim_version, ceiling=run_max_agent_turns_total,
+                expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis, fuse=fuse,
             )
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
@@ -1006,14 +1091,18 @@ class SessionService:
         *,
         run_id: str | None,
         expected_version: int | None,
-        ceiling: int | None,
+        limits: RunLimits,
         resume_basis: str | None,
-    ) -> PausedRun:
+    ) -> tuple[PausedRun, RunLimits]:
         """恢复声明的唯一权威判定（纯函数；锁由调用方持有）。
 
         没有暂停 run ⇒ 409（不是 422）：客户端拿着一个**曾经**存在的暂停版本
         来恢复，对不上的是状态而不是形状——与"版本过期"同一族（`11 §6.1`），
         且同样不启动任何 model / tool / child 工作。
+
+        返回 `(暂停事实, 生效 ceiling 集合)`：后者由 `validate_resume` 算出（请求
+        点名的维度取请求值、未点名的沿用暂停时的值），**两个阶段都用它**——阶段一
+        算出的 launch 上下文与阶段二落的 `run/resumed.limits` 必须是同一份集合。
         """
         paused = latest_paused_run(events)
         if paused is None:
@@ -1021,46 +1110,46 @@ class SessionService:
                 "本会话最新逻辑 run 不在暂停态（可能已被恢复、已终结，或已被后续新 run "
                 "取代）——expected_version 对应的暂停事实不存在；本请求未启动任何工作"
             )
-        validate_resume(
+        effective = validate_resume(
             paused, run_id=run_id, expected_version=expected_version,
-            ceiling=ceiling, resume_basis=resume_basis,
+            limits=limits, resume_basis=resume_basis,
         )
-        return paused
+        return paused, effective
 
-    def _launch_budget_from(self, paused, *, ceiling: int | None) -> LaunchRunBudget:
+    def _launch_budget_from(self, paused, *, limits: RunLimits) -> LaunchRunBudget:
         """暂停事实 → 续跑执行的账本上下文（version 已 +1、consumed 沿用快照）。
 
-        `ceiling` 用 `int | None` 只是为了不在这层重述"必须已提高"的判定
-        （`validate_resume` 是它的 owner）：走到这里时它按契约必为有效整数。
+        `limits` 是恢复后的**生效** ceiling 集合（四维，含未点名维度的沿用值）；
+        "必须真能继续"的判定在 `validate_resume`（本层不重述）。
         """
         return LaunchRunBudget(
             version=paused.version + 1,
-            limits=RunTurnLimits(max_agent_turns_total=ceiling),
-            consumed_turns=paused.consumed_turns,
+            limits=limits,
+            consumed=paused.consumed,
             run_id=paused.run_id,
             turn_index=paused.turn_index,
         )
 
     async def _plan_paused_resume(
         self, *, session_id: str, run_id: str, expected_version: int,
-        ceiling: int | None, resume_basis: str,
+        limits: RunLimits, resume_basis: str,
     ) -> LaunchRunBudget:
         """阶段一（锁内只读）：校验恢复声明并算出续跑账本，**不写任何东西**。"""
         async with self._resume_lock(session_id):
             events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
-            paused = self._paused_resume_state(
+            paused, effective = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
-                ceiling=ceiling, resume_basis=resume_basis,
+                limits=limits, resume_basis=resume_basis,
             )
             if self._run_manager.get_active(session_id) is not None:
                 # 暂停后"当前执行"已收口（task done），所以这里命中的是**并发**：
                 # 另一个恢复请求刚 launch 完（它的新执行在途）。与既有语义同码（409）。
                 raise ActiveRunConflict("session has an active run")
-            return self._launch_budget_from(paused, ceiling=ceiling)
+            return self._launch_budget_from(paused, limits=effective)
 
     async def _commit_paused_resume(
         self, *, session_id: str, run_id: str, expected_version: int,
-        ceiling: int | None, resume_basis: str, fuse: LocalFuse,
+        limits: RunLimits, resume_basis: str, fuse: LocalFuse,
     ) -> tuple[LaunchRunBudget, Session]:
         """阶段二（锁内 CAS 写侧）：重校验 + 落 `run/resumed`，返回续跑上下文。
 
@@ -1078,9 +1167,9 @@ class SessionService:
         """
         async with self._resume_lock(session_id):
             events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
-            paused = self._paused_resume_state(
+            paused, effective = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
-                ceiling=ceiling, resume_basis=resume_basis,
+                limits=limits, resume_basis=resume_basis,
             )
             session = Session.load(
                 self._store, session_id,
@@ -1093,10 +1182,10 @@ class SessionService:
                     previous_version=paused.version,
                     version=paused.version + 1,
                     limits=build_limits_snapshot(
-                        run_limits=RunTurnLimits(max_agent_turns_total=ceiling),
+                        run_limits=effective,
                         local_fuse=fuse,
                     ),
-                    consumed_turns=paused.consumed_turns,
+                    consumed=paused.consumed,
                     resume_basis=resume_basis,
                 ),
                 # 同一 run_id（`03 §3.4` 不变量：恢复沿用同一逻辑 run）。
@@ -1104,7 +1193,7 @@ class SessionService:
                 # 步号空间（下一次 model/* 自己按 step_base 续号）。
                 run_id=paused.run_id,
             )
-            return self._launch_budget_from(paused, ceiling=ceiling), session
+            return self._launch_budget_from(paused, limits=effective), session
 
     # ── 重连续传 ─────────────────────────────────────────────────────
 
@@ -1214,6 +1303,9 @@ class SessionService:
         supersedes_seq: int | None = None,
         queue_id: str | None = None,
         run_max_agent_turns_total: int | None = None,
+        run_max_model_requests: int | None = None,
+        run_max_total_tokens: int | None = None,
+        run_max_cost_usd: Decimal | str | int | float | None = None,
     ) -> SendMessageResult:
         """续聊消息入口（统一 CLI / Web 续聊路径）。
 
@@ -1249,11 +1341,11 @@ class SessionService:
         （`11 §6.1` 把 budget 挂在"idle 会话消息启动"上）；在途 run 的 queued 消息与
         steer 只跑**判定**、丢弃生效值（为什么判定照跑见下方解析点的注释）。
 
-        run 作用域（`#312`）：`run_max_agent_turns_total` 同一条纪律——只有 idle →
-        launched 才消费（它是**新 run** 的初始 ceiling）。注意本入口**不**做同 run
-        续跑：一条用户消息就是一段新任务（同 run 续跑走 `/resume` 且**不带** task）。
-        "排队输入不被自动接力"由 RunManager 的暂停抑制保证（R4）——暂停后不会因为
-        这里排了队就自己开新 run。
+        run 作用域（`#312` 建账本 / `#313` 扩到四维）：四个 `run_max_*` 同一条纪律——
+        只有 idle → launched 才消费（它们是**新 run** 的初始 ceiling）。注意本入口
+        **不**做同 run 续跑：一条用户消息就是一段新任务（同 run 续跑走 `/resume`
+        且**不带** task）。"排队输入不被自动接力"由 RunManager 的暂停抑制保证（R4）
+        ——暂停后不会因为这里排了队就自己开新 run。
 
         不抢断、不改写历史事件（不变量 #3 / #22）；queue 与 steer 的消费由
         run 边界（``on_run_terminal``）/ runtime 循环头驱动，本方法只做注册与
@@ -1320,6 +1412,9 @@ class SessionService:
                 max_steps=max_steps,
                 amend=amend,
                 run_max_agent_turns_total=run_max_agent_turns_total,
+                run_max_model_requests=run_max_model_requests,
+                run_max_total_tokens=run_max_total_tokens,
+                run_max_cost_usd=run_max_cost_usd,
             )
             result = SendMessageResult(
                 status="launched",

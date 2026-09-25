@@ -15,6 +15,7 @@ from agent_harness.agent import AgentEvent
 from agent_harness.cli import StreamRenderer, run
 from agent_harness.session import (
     MODEL_COMPLETED,
+    MODEL_REQUEST,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
@@ -127,7 +128,7 @@ async def test_cli_run_streams_persists_session_and_returns_final_text(
     (session_id,) = store.list_session_ids()
     types = [event.type for event in store.read_events(session_id)]
     assert types == [SESSION_STARTED, USER_MESSAGE, RUN_STARTED,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED]
+                     TEXT_DELTA, MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED]
 
 
 @pytest.mark.asyncio

@@ -146,10 +146,14 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
             "reason": "budget_exhausted",
             "trigger_dimension": "run.max_agent_turns_total",
             "budget_version": 1,
-            "consumed": {"agent_turns": 0},
+            # `#313` 起快照是**四维**的：0 个被接纳的轮 + 1 次真实请求（closeout 那次，
+            # 它没报 usage / cost ⇒ 那两个维度是"未知"而不是 0，`11 §6.1`）
+            "consumed": {"agent_turns": 0, "model_requests": 1,
+                         "total_tokens": None, "cost_usd": None},
             "limits": {
                 "local": {"max_agent_turns": 500, "source": "deployment"},
-                "run": {"max_agent_turns_total": 1},
+                "run": {"max_agent_turns_total": 1, "max_model_requests": None,
+                        "max_total_tokens": None, "max_cost_usd": None},
             },
             "continuation": {
                 "completed": ["已读完配置"],
@@ -198,10 +202,12 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
         "previous_budget_version": 1,
         "budget_version": 2,
         # 恢复**不重置**消耗：快照等于暂停那一刻的账（新工作之后由 model/completed 累加）
-        "consumed": {"agent_turns": 0},
+        "consumed": {"agent_turns": 0, "model_requests": 1,
+                     "total_tokens": None, "cost_usd": None},
         "limits": {
             "local": {"max_agent_turns": 500, "source": "deployment"},
-            "run": {"max_agent_turns_total": 4},
+            "run": {"max_agent_turns_total": 4, "max_model_requests": None,
+                    "max_total_tokens": None, "max_cost_usd": None},
         },
         "resume_basis": "budget_increase",
     }
@@ -419,7 +425,170 @@ def test_non_budget_pause_reason_is_rejected(tmp_path, reason):
     _assert_no_new_work(client, session_id, before)
 
 
-# ── AC-8：并发恢复只允许一个赢家 ─────────────────────────────────────────
+# ── `#313` T5：四维 ceiling 的 HTTP 面 ───────────────────────────────────
+
+
+def _usage_answer(text: str, total_tokens: int) -> AIMessage:
+    """一条**自报 usage** 的回答（token 维要有确定值，链路必须报过才知道花了多少）。"""
+    return AIMessage(
+        content=text,
+        usage_metadata={
+            "input_tokens": total_tokens - 3, "output_tokens": 3,
+            "total_tokens": total_tokens,
+        },
+    )
+
+
+def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
+    """请求维 ceiling 的 HTTP 主线：新维度**真的能停住 run**，恢复时点名抬高它。
+
+    覆盖面（哪一层证什么，读的人不必猜）：
+
+    - 本用例（wire）：`budget.run.max_model_requests` / `max_total_tokens` 被接受、
+      落进 `run/started` 快照、进投影、并**真的触发暂停**（`trigger_dimension` 是请求维）；
+    - 计数语义（token 的自报值、到线即停的差一格边界）在 `tests/agent/test_run_budget.py`
+      与 `tests/agent/test_run_pause_resume.py` 证——这里不重复造第二个计数点；
+    - token 维在本链路**端到端撞线**的证明属 Live Gate（真模型真 usage）。
+
+    请求维的临界点含预留（`RESERVED_CLOSEOUT_REQUESTS=1`）：ceiling=1 连一次普通请求都
+    放行不了，于是当场暂停、`consumed.agent_turns == 0`；closeout 仍有一次容量
+    （`consumed < ceiling`）⇒ 那次暂停是 `closeout_source=model`，它自报的 usage 进账。
+    """
+    _, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ScriptedProbe([_usage_answer(_continuation_json().content, 20)],
+                           [AIMessage(content="收尾完成")])
+
+    with probe:
+        resp = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "把 A 改成 B",
+                  "budget": {"run": {"max_model_requests": 1,
+                                     "max_total_tokens": 500}}},
+        )
+        assert resp.status_code == 200, resp.text
+        assert "run/paused" in resp.text, resp.text[:400]
+
+        events = _events(client, session_id)
+        paused = _one(events, "run/paused")
+        assert paused["data"]["trigger_dimension"] == "run.max_model_requests"
+        assert paused["data"]["closeout_source"] == "model"
+        assert paused["data"]["consumed"] == {
+            "agent_turns": 0, "model_requests": 1, "total_tokens": 20, "cost_usd": None,
+        }, "0 个被接纳的轮 + 1 次 closeout 请求（它自报的 20 token 进了账）"
+        assert paused["data"]["limits"]["run"] == {
+            "max_agent_turns_total": None, "max_model_requests": 1,
+            "max_total_tokens": 500, "max_cost_usd": None,
+        }
+        started = _one(events, "run/started")
+        assert started["data"]["budget"]["run"] == {
+            "max_agent_turns_total": None, "max_model_requests": 1,
+            "max_total_tokens": 500, "max_cost_usd": None,
+        }, "启动快照落盘 ⇒ 重启后能重建客户端配的 ceiling"
+
+        before = _events(client, session_id)
+        # 只抬 token：真正卡住 run 的是 requests（它继承了暂停时的 1，仍不含余量）
+        # ⇒ 409。接受它等于让客户端拿到"恢复成功但立刻又停"的假象。
+        resp = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={RUN_ID_KEY: paused[RUN_ID_KEY], "resume_basis": "budget_increase",
+                  "budget": {"run": {"max_total_tokens": 2000}, "expected_version": 1}},
+        )
+        assert resp.status_code == 409, resp.text
+        assert "max_model_requests" in resp.json()["detail"]
+        assert _events(client, session_id) == before, "被拒请求零副作用"
+
+        # 抬到位（点名 requests + turns，**不**点 token）⇒ 完成；未点名的维度沿用
+        resp = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={RUN_ID_KEY: paused[RUN_ID_KEY], "resume_basis": "budget_increase",
+                  "budget": {"run": {"max_model_requests": 3, "max_agent_turns_total": 4},
+                             "expected_version": 1}},
+        )
+        assert resp.status_code == 200, resp.text
+        assert "run/completed" in resp.text, resp.text[:400]
+
+    resumed = _one(_events(client, session_id), "run/resumed")
+    assert resumed["data"]["limits"]["run"] == {
+        "max_agent_turns_total": 4,       # 请求点名
+        "max_model_requests": 3,          # 请求点名
+        "max_total_tokens": 500,          # 未点名 ⇒ 沿用暂停时的 ceiling（不是被清空）
+        "max_cost_usd": None,
+    }
+
+
+def test_unenforceable_and_malformed_ceilings_are_rejected_before_any_work(tmp_path):
+    """`max_cost_usd` / 形状非法 ⇒ **422 且零副作用**（`11 §6.1`：开工前拒绝）。
+
+    本链报得了 usage、报不了 cost ⇒ 显式 cost ceiling 是"配了但强制不了"，必须拒绝
+    而不是静默忽略（静默忽略会让客户端以为预算被看着）。零副作用的可观测定义同 T3：
+    不构造模型 + 事件流一条不涨。
+    """
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    before = _events(client, session_id)
+    probe = _ScriptedProbe()
+
+    with probe:
+        cases = [
+            {"max_cost_usd": "0.01"},          # 形状合法但本链强制不了
+            {"max_model_requests": 0},          # 正整数闸门
+            {"max_total_tokens": -5},
+            {"max_cost_usd": "abc"},
+            {"max_total_tokens": "many"},
+        ]
+        for run_budget in cases:
+            resp = client.post(
+                f"/api/sessions/{session_id}/messages",
+                json={"content": "把 A 改成 B",
+                      "budget": {"run": run_budget}},
+            )
+            assert resp.status_code == 422, f"{run_budget} 应 422：{resp.text}"
+
+    assert probe.calls == [], "被拒请求不得构造模型（校验早于任何副作用）"
+    assert _events(client, session_id) == before, "被拒请求不得改动会话历史"
+
+
+def test_budget_endpoint_projects_the_ledger_and_enforcement(tmp_path):
+    """`GET /api/sessions/{id}/budget`：只读投影（`11 §6.1`），不启动 run、不写事件。
+
+    投影必须自足：identity / version / 绝对 ceiling + consumed + remaining、
+    **可执行性**（哪几维本链真能强制）、暂停原因与 continuation。客户端据此决定
+    "要不要继续 / 抬到多少"，不必自己重算账（重算就会出现第二份真相）。
+    """
+    _, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ScriptedProbe([_usage_answer("收尾完成", 5)])
+
+    before = client.get(f"/api/sessions/{session_id}/budget")
+    assert before.status_code == 200, before.text
+    idle = before.json()
+    assert idle["state"] == "none", "空闲会话还没有任何 run"
+    assert idle["enforcement"] == {"max_total_tokens": "enforceable",
+                                   "max_cost_usd": "unavailable"}
+
+    with probe:
+        _pause_the_run(client, session_id, ceiling=1)
+    after = client.get(f"/api/sessions/{session_id}/budget")
+    assert after.status_code == 200, after.text
+    projection = after.json()
+
+    assert projection["state"] == "paused"
+    assert projection["run_id"]
+    assert projection["version"] == 1
+    assert projection["consumed"]["agent_turns"] == 0
+    assert projection["remaining"]["agent_turns"] == 1
+    assert projection["limits"]["max_agent_turns_total"] == 1
+    assert projection["local_fuse"] == {"max_agent_turns": 500, "source": "deployment"}
+    assert projection["enforcement"]["max_cost_usd"] == "unavailable"
+    assert projection["reason"] == "budget_exhausted"
+    assert set(projection["continuation"]) >= {"completed", "remaining", "blockers"}
+
+    missing = client.get("/api/sessions/does-not-exist/budget")
+    assert missing.status_code == 404, missing.text
+
+
+
 
 
 @pytest.mark.asyncio

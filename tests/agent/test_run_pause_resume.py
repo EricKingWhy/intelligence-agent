@@ -15,6 +15,10 @@ ADR-0044 D2/D3。
 **不**进这个 counter。它在预算里的位置由 **run ceiling 的预留**表达：暂停发生在 ceiling
 前一轮（`consumed + 1 >= ceiling`），于是 `ceiling=N` 的 run 接纳 N−1 个产出轮之后收口。
 local fuse **没有**这条预留（EB-2 的"500 步到顶"就是到顶），这条不对称是刻意的。
+
+`#313` 起暂停快照是**四维**的（turns / requests / tokens / cost）：本文件的用例多为
+"模型没报 usage / cost"的剧本，所以那两个维度断言为 `None`（未知）而不是 0——把已知的
+部分写成 0 会让"不可得 ≠ 0"这条契约在测试自己身上先破掉。
 """
 
 from __future__ import annotations
@@ -34,14 +38,16 @@ from agent_harness.agent.run_budget import (
     REASON_BUDGET_EXHAUSTED,
     TRIGGER_LOCAL_TURNS,
     TRIGGER_RUN_TURNS,
+    BudgetConsumed,
     LaunchRunBudget,
-    RunTurnLimits,
+    RunLimits,
     derive_run_budget,
     latest_paused_run,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
 from agent_harness.session import (
     MODEL_COMPLETED,
+    MODEL_REQUEST,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_PAUSED,
@@ -99,8 +105,8 @@ def _runtime(
         executor=ToolExecutor(registry, operation_ledger=operation_ledger),
         max_agent_turns=local_fuse, local_fuse_source=SOURCE_DEPLOYMENT,
         run_budget=LaunchRunBudget(
-            version=version, limits=RunTurnLimits(max_agent_turns_total=ceiling),
-            consumed_turns=consumed, run_id=run_id,
+            version=version, limits=RunLimits(max_agent_turns_total=ceiling),
+            consumed=BudgetConsumed(agent_turns=consumed), run_id=run_id,
         ),
     )
 
@@ -167,7 +173,9 @@ async def test_model_closeout_is_a_model_request_not_an_accepted_turn(tmp_path) 
     assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED
     assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
     assert paused.data["closeout_source"] == CLOSEOUT_MODEL
-    assert paused.data["consumed"] == {"agent_turns": 2}
+    assert paused.data["consumed"] == {
+        "agent_turns": 2, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+    }, "四维快照：2 个被接纳的轮 + 3 次真实请求（2 个普通轮 + 1 次 closeout）"
     assert paused.data["limits"]["run"]["max_agent_turns_total"] == 3
     assert paused.data["continuation"] == {
         "completed": ["已完成第一步"],
@@ -192,7 +200,7 @@ async def test_paused_projection_reads_the_consumed_snapshot(tmp_path) -> None:
     """`PausedRun.consumed_turns` 取的是**事件里的快照**，不是"重数一遍事件"。
 
     两者在"暂停之后又续跑"时会分道扬镳：重算值继续涨，快照停在暂停那一刻。拿重算值
-    当"暂停时的消耗"会让 `resume_ceiling_ok` 与 `run/resumed.consumed` 一起漂移
+    当"暂停时的消耗"会让 `resume_headroom_ok` 与 `run/resumed.consumed` 一起漂移
     ——那正是"恢复不得重置/放大消耗"这条不变量会破的地方。
     """
     scripted = ScriptedModel([_tool_round(1), _continuation_json()])
@@ -231,7 +239,9 @@ async def test_no_model_call_at_all_when_the_closeout_has_no_capacity(tmp_path) 
     assert result.status == STATUS_PAUSED
     paused = next(e for e in session.events if e.type == RUN_PAUSED)
     assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
-    assert paused.data["consumed"] == {"agent_turns": 1}, "快照沿用启动上下文，不重数"
+    assert paused.data["consumed"] == {
+        "agent_turns": 1, "model_requests": 0, "total_tokens": 0, "cost_usd": "0",
+    }, "快照沿用启动上下文，不重数（本执行一个请求都没发 ⇒ 空和真的是 0）"
     assert paused.data["budget_version"] == 2
     assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
 
@@ -302,7 +312,9 @@ async def test_same_run_resume_completes_without_resetting_accounting(tmp_path) 
     assert [e.type for e in new_events].count(RUN_RESUMED) == 0, (
         "run/resumed 由 SessionService 在 launch 之前落盘（这里直接驱动 runtime）"
     )
-    assert new_events[0].type == MODEL_COMPLETED
+    assert new_events[0].type == MODEL_REQUEST, (
+        "续跑第一次请求就落账（`#313` 起请求有自己的计数点）"
+    )
     assert new_events[-1].type == RUN_COMPLETED
     # run 身份单一：恢复沿用同一逻辑 run——没有第二条 run/started、也没有新 user/message
     assert [e.type for e in session.events].count(RUN_STARTED) == 1
@@ -364,8 +376,10 @@ async def test_local_fuse_counts_the_current_execution_not_the_run_ledger(tmp_pa
     assert result.status == STATUS_PAUSED
     paused = next(e for e in session.events if e.type == RUN_PAUSED)
     assert paused.data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
-    # run 账本：启动 3 + 本执行 2 个普通轮 = 5（closeout 那一次是 model_requests）
-    assert paused.data["consumed"] == {"agent_turns": 5}
+    # run 账本：启动 3 + 本执行 2 个普通轮 = 5；closeout 那一次是 model_requests
+    assert paused.data["consumed"] == {
+        "agent_turns": 5, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+    }
     assert paused.data["closeout_source"] == CLOSEOUT_MODEL
     assert paused.data["limits"]["run"]["max_agent_turns_total"] is None
     assert paused.data["limits"]["local"]["max_agent_turns"] == 2

@@ -23,6 +23,7 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
 
@@ -36,8 +37,9 @@ from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.agent.run_budget import (
     RESUME_BASIS_BUDGET_INCREASE,
     LaunchRunBudget,
-    RunTurnLimits,
+    RunLimits,
     latest_paused_run,
+    run_limits_from_request,
 )
 from agent_harness.assembly import (
     assemble_wiring,
@@ -50,6 +52,7 @@ from agent_harness.identity import IdentityContext
 from agent_harness.instance_lock import InstanceLock, InstanceLockError
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
+from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.model.config import ModelConfig
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
@@ -238,6 +241,61 @@ def _pause_facts(data: dict) -> dict:
     }
 
 
+#: run 作用域另外三个维度（`#313`）：`(data 里的 consumed 键, limits 里的 ceiling 键)`。
+#: 顺序与 `agent/run_budget.TRIGGER_ORDER` 一致（turns 已单独渲染，见 `_pause_facts`）。
+_EXTRA_RUN_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("model_requests", "max_model_requests"),
+    ("total_tokens", "max_total_tokens"),
+    ("cost_usd", "max_cost_usd"),
+)
+
+
+def _dimension_remaining(consumed: Any, ceiling: Any) -> str:
+    """某一维度的 remaining 文案（不可得 / 不可算一律 unavailable，**永不** 0）。
+
+    cost 在 wire 上是十进制**字符串**：差值必须在 `Decimal` 里算（`float()` 会引入
+    与 wire 不等价的近似，`11 §6.1`）。任一侧形状不合 ⇒ unavailable——推算不出
+    剩余时如实说不知道，比编一个 0 更接近事实。
+    """
+    if ceiling is None or consumed is None:
+        return "unavailable"
+    try:
+        if isinstance(consumed, str) or isinstance(ceiling, str):
+            left, right = Decimal(str(ceiling)), Decimal(str(consumed))
+            return format(max(left - right, Decimal(0)), "f")
+        if isinstance(consumed, bool) or isinstance(ceiling, bool):
+            return "unavailable"
+        if isinstance(consumed, int) and isinstance(ceiling, int):
+            return str(max(ceiling - consumed, 0))
+    except (InvalidOperation, ValueError):
+        return "unavailable"
+    return "unavailable"
+
+
+def _extra_dimension_lines(data: dict) -> list[str]:
+    """另外三个 run 维度的摘要行（**只**渲染有事实可说的维度）。
+
+    "有事实可说" = 配了 ceiling 或消耗快照里有这个键。老暂停事件（`#313` 之前）
+    只有 turns 一维，多打三行 `unavailable / unlimited` 是噪声不是信息——而 CLI
+    显示的是同一份 durable 投影，过去与现在的输出都必须是同一份事实的忠实渲染。
+    """
+    limits = ((data.get("limits") or {}).get("run") or {})
+    consumed = data.get("consumed") or {}
+    lines: list[str] = []
+    for consumed_key, ceiling_key in _EXTRA_RUN_DIMENSIONS:
+        if consumed_key not in consumed and ceiling_key not in limits:
+            continue
+        raw_consumed = consumed.get(consumed_key)
+        raw_ceiling = limits.get(ceiling_key)
+        lines.append(
+            f"  {consumed_key}: consumed "
+            f"{'unavailable' if raw_consumed is None else raw_consumed}"
+            f" / limit {'unlimited' if raw_ceiling is None else raw_ceiling}"
+            f" (remaining {_dimension_remaining(raw_consumed, raw_ceiling)})\n"
+        )
+    return lines
+
+
 def render_pause_block(data: dict) -> str:
     """`run/paused` 的 data → 多行暂停摘要（`#312` / PRD §11）。
 
@@ -262,6 +320,7 @@ def render_pause_block(data: dict) -> str:
             f" · local fuse {facts['local']} · closeout={data.get('closeout_source', '')}\n"
         ),
     ]
+    lines.extend(_extra_dimension_lines(data))
     continuation = data.get("continuation")
     if isinstance(continuation, dict) and continuation:
         lines.append("  continuation:\n")
@@ -274,15 +333,31 @@ def render_pause_block(data: dict) -> str:
     return "".join(lines)
 
 
+#: 触发维度 → 抬高它的 CLI 开关（`#313`：四维各自可抬；提示必须指向**真存在**的开关）。
+_RESUME_FLAGS: dict[str, str] = {
+    "run.max_agent_turns_total": "--run-turns-total",
+    "run.max_model_requests": "--run-model-requests",
+    "run.max_total_tokens": "--run-total-tokens",
+    "run.max_cost_usd": "--run-cost-usd",
+}
+
+
 def resume_hint(session_id: str, *, data: dict) -> str:
-    """暂停之后"接下来怎么做"的一行指令（`#312`）。
+    """暂停之后"接下来怎么做"的一行指令（`#312` 建 / `#313` 按维度点名开关）。
 
     ceiling 用占位符 `N`：抬高多少是用户/运维的决定，CLI **不替它猜**一个数字
     （猜出来的"建议值"会被当成策略，且绝对 ceiling 与增量是两种语义）。
+
+    开关按 `trigger_dimension` 取（不是写死 turns）：暂停可能落在 requests / token /
+    cost 维度上，提示里给一个抬不动它的开关是**假指令**（PRD §11：CLI 显示的就是
+    durable 事实本身）。未知维度（本票之外的暂停原因）回落到 turns 开关——那是
+    `#308` 起一直存在的维度，也是唯一一个任何 run 都读得懂的。
     """
+    dimension = str(data.get("trigger_dimension", ""))
+    flag = _RESUME_FLAGS.get(dimension, "--run-turns-total")
     return (
         f"  resume: agent-harness resume {session_id}"
-        f" --run-turns-total N --expected-version {data.get('budget_version', '')}"
+        f" {flag} N --expected-version {data.get('budget_version', '')}"
         "  (N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮；不是增量)\n"
     )
 
@@ -290,14 +365,20 @@ def resume_hint(session_id: str, *, data: dict) -> str:
 def render_resume_block(data: dict) -> str:
     """`run/resumed` 的 data → 一行摘要（同 run 续跑：run_id 不变、版本 +1）。"""
     facts = _pause_facts(data)
-    return (
-        f"\n[run resumed] basis={data.get('resume_basis', '')}"
-        f" version={data.get('previous_budget_version', '')}"
-        f"→{data.get('budget_version', '')}"
-        f" from_pause_seq={data.get('from_pause_seq', '')}\n"
-        f"  turns: carried consumed {facts['consumed_text']}"
-        f" / limit {facts['ceiling_text']} (remaining {facts['remaining_text']})\n"
-    )
+    lines = [
+        (
+            f"\n[run resumed] basis={data.get('resume_basis', '')}"
+            f" version={data.get('previous_budget_version', '')}"
+            f"→{data.get('budget_version', '')}"
+            f" from_pause_seq={data.get('from_pause_seq', '')}\n"
+        ),
+        (
+            f"  turns: carried consumed {facts['consumed_text']}"
+            f" / limit {facts['ceiling_text']} (remaining {facts['remaining_text']})\n"
+        ),
+    ]
+    lines.extend(_extra_dimension_lines(data))
+    return "".join(lines)
 
 
 @dataclass(frozen=True)
@@ -318,6 +399,9 @@ async def run(
     message: str,
     *,
     run_turns_total: int | None = None,
+    run_model_requests: int | None = None,
+    run_total_tokens: int | None = None,
+    run_cost_usd: str | None = None,
     write: Callable[[str], None] | None = None,
 ) -> RunOutcome:
     """跑一次 Agent Loop：流式渲染到 write，返回 `RunOutcome`。
@@ -338,6 +422,10 @@ async def run(
     CLI 是"创建 + 第一条消息"的一个人驱动入口，与 Web 的创建端点同一档能力——
     没有它，CLI 连一次真实暂停都产生不了，也就无从演示"暂停 → 提高 ceiling →
     同一个 run 完成"。
+
+    `#313`：另外三个 run 维度（`run_model_requests` / `run_total_tokens` /
+    `run_cost_usd`）同一条纪律、同一份 422 规则（`run_limits_from_request`）。
+    cost 是十进制**字符串**（`11 §6.1`：二进制浮点相等不是契约），由领域层解析。
     """
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -378,7 +466,13 @@ async def run(
             # `#312`：run 作用域的绝对 ceiling（`--run-turns-total`）。None = 本 run
             # 不设 run 档 ceiling——**不是** 0（0 会把第一条 model 决策就挡下）。
             run_budget=LaunchRunBudget(
-                limits=RunTurnLimits(max_agent_turns_total=run_turns_total),
+                limits=run_limits_from_request(
+                    max_agent_turns_total=run_turns_total,
+                    max_model_requests=run_model_requests,
+                    max_total_tokens=run_total_tokens,
+                    max_cost_usd=run_cost_usd,
+                    accounting=HARNESS_MODEL_ACCOUNTING,
+                ),
             ),
             auto_approve=True,
             session_store=store,
@@ -463,9 +557,30 @@ def _main_dispatch() -> None:
              "缺省=不设 run 档 ceiling）。低值会让 run 在预算处 `run/paused`，"
              "用 `agent-harness resume` 抬高后接上同一个 run。",
     )
+    parser.add_argument(
+        "--run-model-requests", type=int, default=None,
+        help="本次 run 的**绝对** Provider 请求 ceiling"
+             "（budget.run.max_model_requests；primary / fallback / closeout 各计一次）",
+    )
+    parser.add_argument(
+        "--run-total-tokens", type=int, default=None,
+        help="本次 run 的**绝对** token ceiling（budget.run.max_total_tokens；"
+             "只统计 Provider 自报的 usage——不自报的链上显式配它会被 422 拒绝）",
+    )
+    parser.add_argument(
+        "--run-cost-usd", default=None,
+        help="本次 run 的**绝对** 成本 ceiling（budget.run.max_cost_usd，十进制；"
+             "只统计 Provider 自报的归属成本——不臆造费率表，报告不了的链上恒 422）",
+    )
     args = parser.parse_args(argv)
     outcome = asyncio.run(
-        run(args.message, run_turns_total=args.run_turns_total)
+        run(
+            args.message,
+            run_turns_total=args.run_turns_total,
+            run_model_requests=args.run_model_requests,
+            run_total_tokens=args.run_total_tokens,
+            run_cost_usd=args.run_cost_usd,
+        )
     )
     if outcome.paused:
         # `#312`：预算暂停**不是**失败——退出码 0，且暂停块 + 恢复指令已经打印。
@@ -745,7 +860,10 @@ def _event_of(events: list[SessionEvent], event_type: str) -> SessionEvent | Non
 async def resume_command(
     session_id: str,
     *,
-    run_turns_total: int,
+    run_turns_total: int | None = None,
+    run_model_requests: int | None = None,
+    run_total_tokens: int | None = None,
+    run_cost_usd: str | None = None,
     expected_version: int,
     run_id: str | None = None,
     basis: str = RESUME_BASIS_BUDGET_INCREASE,
@@ -759,6 +877,11 @@ async def resume_command(
     记忆——所以先打印暂停摘要（`run/paused` 的 durable data），再走
     `SessionService.resume_and_launch`（同一条 CAS 路径），最后把恢复后的 run 事件流
     渲染到结束。
+
+    `#313`：四个 run 维度各自可抬（与 Web 的 `budget.run.*` 同一套名字与同一份判定）。
+    四个都缺省 = 恢复后的 run 没有 run 档 ceiling——它**合法**（`resume_headroom_ok`
+    对未配置的维度不作要求），但那是"去掉 ceiling"，不是"抬高 ceiling"；
+    `_main_resume` 因此在命令行层要求至少给一个（CLI 的可用性判断，不是领域判定）。
 
     被拒时（形状 422 / 冲突 409）异常向上抛：`_main_resume` 打印后 exit 1，
     且**零副作用**（判定在任何落盘之前——见 `agent/run_budget.validate_resume`）。
@@ -787,6 +910,9 @@ async def resume_command(
         resume_run_id=run_id or paused.run_id,
         resume_basis=basis,
         run_max_agent_turns_total=run_turns_total,
+        run_max_model_requests=run_model_requests,
+        run_max_total_tokens=run_total_tokens,
+        run_max_cost_usd=run_cost_usd,
         expected_version=expected_version,
     )
     # 恢复后的版本事实**取自事件**（`run/resumed` 在 launch 之前落盘，不在 live
@@ -822,9 +948,21 @@ def _main_resume(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="agent-harness resume")
     parser.add_argument("session_id", help="被暂停的会话 id")
     parser.add_argument(
-        "--run-turns-total", type=int, required=True,
+        "--run-turns-total", type=int, default=None,
         help="抬高后的**绝对** run turn ceiling（budget.run.max_agent_turns_total，"
              "不是增量；必须高于已消耗 + 预留 closeout 轮）",
+    )
+    parser.add_argument(
+        "--run-model-requests", type=int, default=None,
+        help="抬高后的**绝对** Provider 请求 ceiling（budget.run.max_model_requests）",
+    )
+    parser.add_argument(
+        "--run-total-tokens", type=int, default=None,
+        help="抬高后的**绝对** token ceiling（budget.run.max_total_tokens）",
+    )
+    parser.add_argument(
+        "--run-cost-usd", default=None,
+        help="抬高后的**绝对** 成本 ceiling（budget.run.max_cost_usd，十进制）",
     )
     parser.add_argument(
         "--expected-version", type=int, required=True,
@@ -839,12 +977,25 @@ def _main_resume(argv: list[str]) -> None:
         help=f"resume_basis（本票只实现 {RESUME_BASIS_BUDGET_INCREASE}）",
     )
     args = parser.parse_args(argv)
+    if (
+        args.run_turns_total is None and args.run_model_requests is None
+        and args.run_total_tokens is None and args.run_cost_usd is None
+    ):
+        # 一个都不给 = 去掉全部 run ceiling，而不是"抬高"：那是另一件事（普通续聊也能做到），
+        # 不在 `resume` 的语义里。CLI 层拒绝，不给用户一个看不出差别的成功。
+        parser.error(
+            "至少给一个绝对 ceiling（--run-turns-total / --run-model-requests / "
+            "--run-total-tokens / --run-cost-usd）"
+        )
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
     try:
         outcome = asyncio.run(resume_command(
             args.session_id,
             run_turns_total=args.run_turns_total,
+            run_model_requests=args.run_model_requests,
+            run_total_tokens=args.run_total_tokens,
+            run_cost_usd=args.run_cost_usd,
             expected_version=args.expected_version,
             run_id=args.run_id,
             basis=args.basis,

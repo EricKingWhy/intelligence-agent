@@ -25,6 +25,7 @@ ScriptedModel 全链验证"整段序列长什么样"（`tests/agent/test_event_s
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any
 
@@ -33,6 +34,7 @@ import pytest
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     TRIGGER_LOCAL_TURNS,
+    BudgetConsumed,
     LaunchRunBudget,
 )
 from agent_harness.agent.runtime import (
@@ -56,10 +58,11 @@ from agent_harness.model.failure import (
     PROVIDER_ACCOUNT_UNAVAILABLE_REASON,
     UNCLASSIFIED_FAILURE_MESSAGE,
 )
-from agent_harness.model.fallback import FallbackTransition
+from agent_harness.model.fallback import FallbackTransition, ModelRequestAttempt
 from agent_harness.session import (
     MODEL_FAILED,
     MODEL_FALLBACK,
+    MODEL_REQUEST,
     REASONING_INTERRUPTED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -148,22 +151,34 @@ class _RecordingTracer:
 
 
 class _PendingCoordinator:
-    """只实现 `drain_transitions()` 的 coordinator 替身。
+    """只实现 `drain_transitions()` / `drain_requests()` 的 coordinator 替身。
 
-    终结臂对 coordinator 的唯一调用就是取走切换事实（编排/重试行为在
+    终结臂对 coordinator 的两处调用就是取走切换事实与请求账目（编排/重试行为在
     `tests/agent/test_model_fallback_runtime.py` 覆盖），故这里只喂一个待取的
     `FallbackTransition`，用来把"切换事实在终结臂里的落盘形状"（含信封表达式）钉住。
+    请求账目同理可以喂进来（`#313`）：调用失败/取消时**已经发出去**的请求照样要落
+    `model/request`，那是终结臂的行为，不是编排层的。
     """
 
-    def __init__(self, *transitions: FallbackTransition) -> None:
+    def __init__(
+        self, *transitions: FallbackTransition,
+        requests: Iterable[ModelRequestAttempt] = (),
+    ) -> None:
         self._pending = list(transitions)
+        self._pending_requests = list(requests)
         # 调用计数：断言"臂只取一次"要断这个，不能断"第二次返回空"——后者断的是
         # 本替身自己的幂等实现，产品代码怎么改都会绿（自证式断言）。
         self.drains = 0
+        self.request_drains = 0
 
     def drain_transitions(self) -> list[FallbackTransition]:
         self.drains += 1
         out, self._pending = self._pending, []
+        return out
+
+    def drain_requests(self) -> list[ModelRequestAttempt]:
+        self.request_drains += 1
+        out, self._pending_requests = self._pending_requests, []
         return out
 
 
@@ -618,25 +633,30 @@ async def test_pause_arm_is_nonterminal_and_closes_the_execution(
     `mark_terminal_written()` 在这里的含义不是"补终态"，而是"本次执行的收口事实已落盘"：
     紧随其后的任何终结臂都必须被单终态不变量拦住（否则一次暂停会追加一条假失败）。
 
-    closeout：`LaunchRunBudget()` 无 run ceiling ⇒ 还剩预留容量 ⇒ 会尝试一次模型
-    closeout，但本 kit 的 model 是 `object()`（无 `ainvoke`）⇒ 回落确定性 continuation，
-    于是 `consumed` **不** +1（未被接纳的 closeout 不计 agent turn）。
+    closeout：`LaunchRunBudget()` 无 run ceiling ⇒ 四维都还有余量（`closeout_capacity`）
+    ⇒ 会尝试一次模型 closeout，但本 kit 的 model 是 `object()`（无 `ainvoke`）⇒ 回落
+    确定性 continuation。**这次失败调用照样记 `model_requests`**（`#313`：请求发出去过
+    就是请求，失败只是没有产出决策 ⇒ 不增 `agent_turns`），而它没报 usage / cost
+    ⇒ 那两个维度记**未知**而不是 0（`11 §6.1`：不可得 ≠ 0）。
     """
     memory = _MemorySpy()
     kit = _kit(session, memory_writer=memory)
     mark = len(session.events)
+    launch = LaunchRunBudget(consumed=BudgetConsumed(agent_turns=2))
 
     emitted = await _drain(
         kit.runtime._terminal_paused(
-            kit.arms, launch=LaunchRunBudget(), steps=2,
+            kit.arms, launch=launch, steps=2,
             trigger_dimension=TRIGGER_LOCAL_TURNS,
         ),
     )
 
-    assert [e.type for e in emitted] == [RUN_PAUSED]
+    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
     paused = kit.since(mark)[-1]
     assert paused.run_id == RUN_ID
-    assert paused.data["consumed"] == {"agent_turns": 2}
+    assert paused.data["consumed"] == {
+        "agent_turns": 2, "model_requests": 1, "total_tokens": None, "cost_usd": None,
+    }
     assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
     assert kit.result_holder[0].status == STATUS_PAUSED
     # 暂停不产生终态归因：run 尚未终结，tracer 的终态调用留给真正的终态

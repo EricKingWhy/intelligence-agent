@@ -16,6 +16,7 @@ import logging
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -436,7 +437,7 @@ class Session:
         status: str,
         final_text: str = "",
         usage_total: dict | None = None,
-        cost_usd: float | None = None,
+        cost_usd: Decimal | str | None = None,
         trace_id: str | None = None,
         trace_url: str | None = None,
         reason: str | None = None,
@@ -463,7 +464,13 @@ class Session:
         if usage_total:
             data["usage_total"] = usage_total
         if status == "completed":
-            data["cost_usd"] = cost_usd
+            # 成本以十进制**字符串**入事件（`#313`）：`Decimal` 进 `json.dumps`
+            # （`session/store.py` 的裸 dumps）会炸，而 `float()` 会引入与 wire
+            # 不等价的二进制近似（`11 §6.1`：二进制浮点相等不是契约）。`None`
+            # 原样落（不可得 ≠ 0：客户端据此显示"未跟踪"，不是"零成本"）。
+            data["cost_usd"] = (
+                format(cost_usd, "f") if isinstance(cost_usd, Decimal) else cost_usd
+            )
         data["trace_id"] = trace_id
         data["trace_url"] = trace_url
         if status != "completed" and reason:

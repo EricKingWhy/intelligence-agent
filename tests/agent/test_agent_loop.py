@@ -26,7 +26,7 @@ from agent_harness.agent.run_budget import (
     TRIGGER_LOCAL_TURNS,
     TRIGGER_RUN_TURNS,
     LaunchRunBudget,
-    RunTurnLimits,
+    RunLimits,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
 from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED
@@ -330,7 +330,10 @@ class TestAgentLoopLocalFusePause:
         assert data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
         assert data["budget_version"] == 1
         # 计数点是"被接纳的普通轮"：closeout 那一次是 model_requests，不进 agent_turns
-        assert data["consumed"] == {"agent_turns": 3}
+        # （那次请求没报 usage / cost ⇒ 那两个维度记未知，不记 0——`11 §6.1`）
+        assert data["consumed"] == {
+            "agent_turns": 3, "model_requests": 4, "total_tokens": None, "cost_usd": None,
+        }
         # 两个作用域各自的原生投影（命中哪个维度由 trigger_dimension 指明）
         assert data["limits"]["local"]["max_agent_turns"] == 3
         assert data["limits"]["run"]["max_agent_turns_total"] is None
@@ -376,7 +379,7 @@ class TestAgentLoopLocalFusePause:
         scripted = ScriptedModel(rounds)
         runtime = _runtime(
             scripted, max_agent_turns=500,
-            run_budget=LaunchRunBudget(limits=RunTurnLimits(max_agent_turns_total=3)),
+            run_budget=LaunchRunBudget(limits=RunLimits(max_agent_turns_total=3)),
         )
         session = make_session(tmp_path)
 
@@ -392,7 +395,9 @@ class TestAgentLoopLocalFusePause:
         assert TRIGGER_RUN_TURNS in closeout_request.content
         paused = next(e for e in session.events if e.type == RUN_PAUSED)
         assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
-        assert paused.data["consumed"] == {"agent_turns": 2}
+        assert paused.data["consumed"] == {
+            "agent_turns": 2, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+        }
         assert paused.data["limits"]["run"]["max_agent_turns_total"] == 3
         # run/started 就把 ceiling 落盘了（重启后 limits 能重建成同一个值，`03 §3.4`）
         started = next(e for e in session.events if e.type == "run/started")
