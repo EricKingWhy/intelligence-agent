@@ -32,9 +32,11 @@ from agent_harness.memory.v2.tools import (
     _RememberV2Args,
 )
 from agent_harness.memory.v2.types import (
+    EpisodicPayload,
     MemoryKind,
     MemoryScope,
     MemoryStatus,
+    ProceduralPayload,
     SemanticCategory,
     SemanticPayload,
     SourceType,
@@ -75,7 +77,7 @@ async def _write_user_turn(sessions: JsonlSessionStore, session_id: str, text: s
 
 def _semantic_payload(fact: str) -> SemanticPayload:
     return SemanticPayload(
-        subject="用户偏好", fact=fact, category=SemanticCategory.PREFERENCE,
+        subject=fact, fact=fact, category=SemanticCategory.PREFERENCE,
     )
 
 
@@ -329,6 +331,20 @@ def test_explicit_command_match_rejects_negated_intent():
     assert not explicit_remember_matches(
         "Could you remember whether I prefer tea?", "I prefer tea",
     )
+    assert explicit_remember_matches(
+        "Remember I prefer tea even if coffee is unavailable", "I prefer tea",
+    )
+    assert explicit_remember_matches(
+        "请记住我常用的问候语是“你好吗”", "我常用的问候语是“你好吗”",
+    )
+    assert explicit_remember_matches(
+        "请记住我常用的问候语是你好吗", "我常用的问候语是你好吗",
+    )
+    assert not explicit_remember_matches("请记住我喜欢茶吗", "我喜欢茶吗")
+    assert explicit_remember_matches(
+        "Remember my office uses Slack. I don't agree with my manager's explanation.",
+        "my office uses Slack",
+    )
     assert not explicit_remember_matches(
         "请你记得我是否患有抑郁症", "患有抑郁症",
     )
@@ -397,19 +413,75 @@ def test_explicit_command_match_rejects_negated_intent():
         "Remember tea and I do not consent to storing my diagnosis in memory: I have lupus",
         "I have lupus",
     )
-    assert explicit_remember_matches(
+    for text, candidate in (
+        ("Remember my diagnosis is lupus, but keep my diagnosis out of memory", "my diagnosis is lupus"),
+        ("Remember my diagnosis is lupus; I do not consent to storing it in memory", "my diagnosis is lupus"),
+        ("Remember my diagnosis is lupus. I do not consent to storing it in memory", "my diagnosis is lupus"),
+        ("Remember I have lupus. I don't want this remembered.", "I have lupus"),
+        ("Remember I have lupus. I don't want this memorized.", "I have lupus"),
+        ("Remember I have lupus. Do not memorize this.", "I have lupus"),
+        ("Remember tea. I'd rather you not remember this.", "tea"),
+        ("Remember tea. I don't wish to have this remembered.", "tea"),
+        ("Remember tea. I wish you wouldn't remember this.", "tea"),
+        ("Remember tea. Please avoid remembering this.", "tea"),
+        ("Remember tea. I do not agree to this.", "tea"),
+        ("Remember I have lupus. I don't want this in long-term memory.", "I have lupus"),
+        ("Remember I have lupus. I would prefer this not to be remembered.", "I have lupus"),
+        ("Remember I have lupus. I would prefer not to have this remembered.", "I have lupus"),
+        ("Remember I have lupus. I don't want you remembering this.", "I have lupus"),
+        ("Remember tea and I opt out of storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea and I am opting out of storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea and I withdraw consent to storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea, there is no consent to storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea and I do not give consent to storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea and I refuse to consent to storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea and I refuse consent to storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea, but I am opting out of this.", "tea"),
+        ("Remember tea; I am opting out of that.", "tea"),
+        ("Remember tea. I do not consent.", "tea"),
+        ("Remember tea. I refuse consent.", "tea"),
+        ("Remember tea. I do not give consent.", "tea"),
+        ("Remember tea and I do not agree to store my diagnosis in memory: I have lupus", "I have lupus"),
+        ("Remember tea and I do not authorize storing my diagnosis in memory: I have lupus", "I have lupus"),
+        ("记住茶，我不同意把病情写入记忆：我患有抑郁症", "我患有抑郁症"),
+        ("记住茶，我不同意。", "茶"),
+        ("记住茶，我拒绝同意。", "茶"),
+        ("记住茶，我不愿意让你记住病情。", "茶"),
+    ):
+        assert not explicit_remember_matches(text, candidate)
+        assert not explicit_remember_matches(text, "tea")
+    assert not explicit_remember_matches(
         "Remember I prefer tea, and keep my diagnosis out of memory: I have lupus",
         "I prefer tea",
     )
-    assert explicit_remember_matches(
+    assert not explicit_remember_matches(
         "Remember I prefer tea, and I do not consent to storing my diagnosis in memory: I have lupus",
         "I prefer tea",
     )
-    assert explicit_remember_matches(
+    assert not explicit_remember_matches(
         "Remember tea and keep my diagnosis out of memory: I have lupus", "tea",
     )
     assert explicit_remember_matches(
         "Remember I prefer tea, and do you remember whether I prefer coffee?", "I prefer tea",
+    )
+    assert not explicit_remember_matches(
+        "Remember I prefer tea and remember whether I prefer coffee", "I prefer coffee",
+    )
+    assert explicit_remember_matches(
+        "Remember I prefer tea and remember whether I prefer coffee", "I prefer tea",
+    )
+    assert not explicit_remember_matches(
+        "Remember I prefer tea and remember whether I prefer coffee",
+        "I prefer tea and remember whether I prefer coffee",
+    )
+    assert not explicit_remember_matches(
+        "记住我喜欢茶并且你记得我是否喜欢咖啡吗", "我喜欢咖啡",
+    )
+    assert explicit_remember_matches(
+        "记住我喜欢茶并且你记得我是否喜欢咖啡吗", "我喜欢茶",
+    )
+    assert not explicit_remember_matches(
+        "Remember not to store my diagnosis, and remember I prefer tea", "I prefer tea",
     )
     assert not explicit_remember_matches(
         "记住我喜欢茶而且不要把病情写入记忆：我患有抑郁症", "我患有抑郁症",
@@ -445,6 +517,103 @@ def test_explicit_command_match_rejects_negated_intent():
     )
     assert explicit_forget_query_matches("Forget my coffee preference", "coffee")
     assert not has_forget_intent("不要忘记我的编辑器偏好")
+
+
+def test_remember_args_reject_payload_text_outside_consented_content():
+    for subject, fact in (("I", "I have lupus"), ("I have lupus", "I prefer tea")):
+        with pytest.raises(ValueError, match="payload.*content"):
+            _RememberV2Args(
+                content="I prefer tea", kind=MemoryKind.SEMANTIC,
+                payload=SemanticPayload(
+                    subject=subject, fact=fact, category=SemanticCategory.PREFERENCE,
+                ),
+            )
+
+
+def test_remember_args_preserve_negation_in_semantic_fact():
+    for content, fact in (
+        ("I do not have diabetes", "have diabetes"),
+        ("I am free of diabetes", "diabetes"),
+        ("I am free from diabetes", "diabetes"),
+        ("I am a non-smoker", "smoker"),
+        ("I am a nonsmoker", "smoker"),
+        ("I am a non-drinker", "drinker"),
+        ("I am a non-vegetarian", "vegetarian"),
+        ("I am a non-driver", "driver"),
+        ("I am diabetes-free", "diabetes"),
+        ("I am devoid of diabetes", "diabetes"),
+        ("There is an absence of diabetes", "diabetes"),
+        ("I deny having diabetes", "having diabetes"),
+        ("我并非糖尿病患者", "糖尿病患者"),
+        ("我未患有糖尿病", "患有糖尿病"),
+        ("我不喜欢咖啡", "喜欢咖啡"),
+        ("我否认自己患有糖尿病", "患有糖尿病"),
+        ("我并不是糖尿病患者", "糖尿病患者"),
+        ("我无糖尿病史", "糖尿病史"),
+        ("我未诊断为糖尿病", "诊断为糖尿病"),
+        ("我没得过糖尿病", "得过糖尿病"),
+        ("我无糖尿病", "糖尿病"),
+        ("我非糖尿病患者", "糖尿病患者"),
+        ("我非吸烟者", "吸烟者"),
+        ("我非素食者", "素食者"),
+    ):
+        with pytest.raises(ValueError, match="negated content"):
+            _RememberV2Args(
+                content=content, kind=MemoryKind.SEMANTIC,
+                payload=SemanticPayload(
+                    subject=fact, fact=fact, category=SemanticCategory.PROFILE,
+                ),
+            )
+        args = _RememberV2Args(
+            content=content, kind=MemoryKind.SEMANTIC,
+            payload=SemanticPayload(
+                subject=fact,
+                fact=content, category=SemanticCategory.PROFILE,
+            ),
+        )
+        assert args.payload.fact == content
+
+    with pytest.raises(ValueError, match="negated content"):
+        _RememberV2Args(
+            content="I do not have diabetes", kind=MemoryKind.EPISODIC,
+            payload=EpisodicPayload(
+                situation="I do not have diabetes", action="I do not have diabetes",
+                outcome="I do not have diabetes", lesson="I do not have diabetes",
+            ),
+        )
+
+    args = _RememberV2Args(
+        content="用不锈钢盆揉面，直到面团均匀", kind=MemoryKind.PROCEDURAL,
+        payload=ProceduralPayload(
+            trigger="揉面", procedure="用不锈钢盆揉面", success_condition="面团均匀",
+        ),
+    )
+    assert args.payload.procedure == "用不锈钢盆揉面"
+
+    args = _RememberV2Args(
+        content="在无锡使用工具，直到结果成功", kind=MemoryKind.PROCEDURAL,
+        payload=ProceduralPayload(
+            trigger="使用工具", procedure="在无锡使用工具", success_condition="结果成功",
+        ),
+    )
+    assert args.payload.procedure == "在无锡使用工具"
+
+    args = _RememberV2Args(
+        content="Use a non-stick pan to fry an egg", kind=MemoryKind.PROCEDURAL,
+        payload=ProceduralPayload(
+            trigger="fry an egg", procedure="Use a non-stick pan to fry an egg",
+            success_condition="fry an egg",
+        ),
+    )
+    assert args.payload.procedure == "Use a non-stick pan to fry an egg"
+
+    args = _RememberV2Args(
+        content="这位患者非常积极", kind=MemoryKind.SEMANTIC,
+        payload=SemanticPayload(
+            subject="患者", fact="这位患者非常积极", category=SemanticCategory.PROFILE,
+        ),
+    )
+    assert args.payload.fact == "这位患者非常积极"
 
 
 @pytest.mark.asyncio
@@ -505,6 +674,11 @@ async def test_remember_tool_rejects_unbound_or_negated_content(governance, tmp_
         ("curly-negation", "You shouldn’t remember this: I prefer tea", "I prefer tea"),
         ("unconsented", "Remember tea, but do not store my diagnosis: I have lupus",
          "I have lupus"),
+        ("opt-out", "Remember tea and I opt out of storing my diagnosis in memory: I have lupus",
+         "I have lupus"),
+        ("passive-optout", "Remember I have lupus. I don't want this remembered.",
+         "I have lupus"),
+        ("chinese-no-consent", "记住茶，我不同意把病情写入记忆：我患有抑郁症", "我患有抑郁症"),
         ("excluded", "Remember tea and don't include my diagnosis in memory: I have lupus",
          "I have lupus"),
         ("not-to-include", "Remember tea and not to include my diagnosis in memory: I have lupus",
@@ -548,7 +722,7 @@ async def test_remember_tool_rejects_unbound_or_negated_content(governance, tmp_
 
 
 @pytest.mark.asyncio
-async def test_remember_tool_keeps_requested_fact_and_rejects_opted_out_detail(
+async def test_remember_tool_rejects_whole_message_when_any_fact_is_opted_out(
     governance, tmp_path,
 ):
     service, store, _index = governance
@@ -579,9 +753,9 @@ async def test_remember_tool_keeps_requested_fact_and_rejects_opted_out_detail(
     finally:
         identity_context_var.reset(identity_token)
 
-    assert safe_result.ok
+    assert not safe_result.ok
     assert not denied_result.ok
-    assert [record.content for record in await store.list_records(TRUSTED)] == ["I prefer tea"]
+    assert await store.list_records(TRUSTED) == []
 
 
 @pytest.mark.asyncio

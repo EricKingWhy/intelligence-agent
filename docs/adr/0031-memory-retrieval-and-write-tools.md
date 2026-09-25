@@ -311,11 +311,18 @@ and does not itself perform retrieval or emit those events.
 
 - `remember_this` writes a typed V2 record only when the current user-authored message contains
   both a positive, explicit remember instruction and the proposed content in the same command
-  clause. An assistant's judgment that a fact may be useful later is not consent. Negated remember
-  instructions, content in a different sentence, and credential-like content are rejected. Scope
-  comes from the trusted session/workspace ledger: project-linked sessions create project memories;
-  other sessions create user-global memories. Provenance is the source user event, and the record
-  is marked `explicit_command`.
+  clause. Any negated or opt-out instruction anywhere in that message vetoes the whole write, even
+  when the requested content is otherwise safe; the user can send that fact separately. An
+  assistant's judgment that a fact may be useful later is not consent. Content in a different
+  sentence and credential-like content are rejected. Every free-text payload field must be a
+  case- and whitespace-insensitive substring of the proposed content; this keeps structured payload
+  text within the content the user explicitly authorized. When the content contains negation, only
+  a semantic payload whose `fact` preserves the full content is accepted; substring-only extraction
+  and negative episodic/procedural payloads are rejected because they cannot prove that polarity was
+  preserved. Scope comes from the trusted
+  session/workspace ledger: project-linked sessions create project memories; other sessions create
+  user-global memories. Provenance is the source user event, and the record is marked
+  `explicit_command`.
 - `forget_memory` requires an explicit forget instruction in the current user-authored message.
   A query must also come from that message. Multiple matches are read-only candidates; deletion
   requires the user to select a candidate by `memory_id` in a subsequent message. V2 deletion

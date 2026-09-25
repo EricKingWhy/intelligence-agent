@@ -529,7 +529,7 @@ async def test_web_remember_tool_uses_project_scope_from_workspace_ledger(memory
             content="this project uses pnpm",
             kind=MemoryKind.SEMANTIC,
             payload=SemanticPayload(
-                subject="project tooling", fact="uses pnpm",
+                subject="project", fact="uses pnpm",
                 category=SemanticCategory.PROJECT_FACT,
             ),
         ))

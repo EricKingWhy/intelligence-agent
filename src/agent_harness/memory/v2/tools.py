@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -33,6 +34,7 @@ from agent_harness.memory.v2.types import (
     MemoryScope,
     MemoryStatus,
     MemoryTier,
+    SemanticPayload,
     SourceType,
 )
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
@@ -41,10 +43,30 @@ from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 
 logger = logging.getLogger(__name__)
+_NEGATED_CONTENT = re.compile(
+    r"\b(?:not|never|no|without|cannot|can't|can’t|don't|don’t|doesn't|doesn’t|"
+    r"didn't|didn’t|won't|won’t|wouldn't|wouldn’t|isn't|isn’t|aren't|aren’t|"
+    r"wasn't|wasn’t|weren't|weren’t|haven't|haven’t|hasn't|hasn’t|hadn't|hadn’t|"
+    r"shouldn't|shouldn’t|mustn't|mustn’t|deny|denies|denied|denying)\b|"
+    r"\b(?:free\s+(?:of|from)|devoid\s+of|absence\s+of)\b|"
+    r"\bnon[- ]?(?:smoker|smoking|drinker|drinking|vegetarian|driver|diabetic|diabetes|"
+    r"allergic|pregnant|member|resident|citizen|employee|user|binary|verbal|compliant|"
+    r"existent|functional)\b|"
+    r"\b[a-z][a-z0-9]*-free\b|"
+    r"不(?:是|会|能|可以?|想|喜欢|要|需要|曾|同意|允许|授权|应|该|必|存在|具备|符合|"
+    r"支持|建议|推荐|属于|愿意|安全|确定|适合|知道|再|太|够|吃|喝|做|用)|"
+    r"没(?:有|法|能|得|吃|喝|做|去|来|看|听|写|用|学|懂|找|在|到)|"
+    r"没有|并非|並非|并不是|並不是|否认|否定|無法|无(?:法|需|权|效|意|关|所谓)|"
+    r"无[\u4e00-\u9fff]{1,16}(?:史|病|症状|疾病|记录|迹象)|"
+    r"非(?:糖尿病(?:患者)?|高血压(?:患者)?|心脏病(?:患者)?|癌症(?:患者)?|哮喘(?:患者)?|"
+    r"吸烟者|烟民|饮酒者|素食者|孕妇|过敏(?:者|体质)?|会员|居民|员工|用户|患者)|"
+    r"未(?:患有|诊断|確诊|确诊|检出|有|曾|能|完成|发现|同意|授权|报告|出现)|从未|不曾",
+    re.IGNORECASE,
+)
 
 
 class _RememberV2Args(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     content: str = Field(min_length=1, max_length=500)
     kind: MemoryKind
@@ -59,6 +81,30 @@ class _RememberV2Args(BaseModel):
         if not value.strip():
             raise ValueError("content must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def _payload_text_is_covered_by_content(self) -> _RememberV2Args:
+        normalized_content = " ".join(self.content.casefold().split()).strip(
+            " \t\r\n\"'“”‘’.,!?。！？;；:："
+        )
+        for field, value in self.payload.model_dump(mode="json").items():
+            if field in {"kind", "category"} or not isinstance(value, str):
+                continue
+            normalized_value = " ".join(value.casefold().split()).strip(
+                " \t\r\n\"'“”‘’.,!?。！？;；:："
+            )
+            if not normalized_value or normalized_value not in normalized_content:
+                raise ValueError(f"payload.{field} must be derived from content")
+        if _NEGATED_CONTENT.search(self.content) and (
+            not isinstance(self.payload, SemanticPayload)
+            or normalized_content not in " ".join(self.payload.fact.casefold().split()).strip(
+                " \t\r\n\"'“”‘’.,!?。！？;；:："
+            )
+        ):
+            raise ValueError(
+                "negated content must remain verbatim in a semantic payload fact"
+            )
+        return self
 
 
 class RememberMemoryV2Tool(Tool):
@@ -77,7 +123,8 @@ class RememberMemoryV2Tool(Tool):
     def description(self) -> str:
         return (
             "只在用户本轮明确要求记住且所给内容出现在该用户消息中时，写入一条有类型的 V2 长期记忆。"
-            "必须提供匹配 kind 的 payload；密钥、令牌、密码和私钥永不保存。"
+            "同一消息中出现任何拒绝保存的表述时，本次写入一律拒绝。payload 文本必须来自 content；"
+            "密钥、令牌、密码和私钥永不保存。"
         )
 
     @property

@@ -48,7 +48,7 @@ Explicit commands and HTTP operations use the same V2 authority/lifecycle bounda
 
 ## Requirements
 
-- **R1:** “Remember X” bypasses only the durable-value threshold; it still requires valid type/scope/payload, blocks secrets, and requires explicit consent for sensitive content.
+- **R1:** “Remember X” bypasses only the durable-value threshold; it still requires valid type/scope/payload, blocks secrets, and requires explicit consent for sensitive content. For `remember_this`, any negative-consent or opt-out wording anywhere in the current user message vetoes the entire write. Free-text payload fields must stay within the explicitly consented `content`. If that content contains negation, only a semantic payload whose `fact` preserves the full content is accepted; substring-only extraction and negative episodic/procedural payloads are rejected because they cannot prove polarity preservation.
 - **R2:** “Do not remember this chat” suppresses Formation for that turn and does not change global settings.
 - **R3:** “Forget X” deletes only an unambiguous authorized active match. Multiple matches return a selection set and mutate nothing until one is selected.
 - **R4:** Disabling memory disables automatic extraction and recall independently according to the two stored settings and never deletes records.
