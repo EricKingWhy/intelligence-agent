@@ -60,9 +60,9 @@ from agent_harness.agent.run_budget import (
     run_limits_from_request,
     validate_resume,
 )
-from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.assembly import build_runtime
 from agent_harness.logging import log_event
+from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
 from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
@@ -241,7 +241,7 @@ def _run_limits(
     max_agent_turns_total: int | None,
     max_model_requests: int | None,
     max_total_tokens: int | None,
-    max_cost_usd: Decimal | str | int | float | None,
+    max_cost_usd: Decimal | str | float | None,
 ) -> RunLimits:
     """四个 run 作用域 ceiling → `RunLimits`（形态校验 + 可执行性判定）。
 
@@ -640,7 +640,7 @@ class SessionService:
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
-        run_max_cost_usd: Decimal | str | int | float | None = None,
+        run_max_cost_usd: Decimal | str | float | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -853,7 +853,7 @@ class SessionService:
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
-        run_max_cost_usd: Decimal | str | int | float | None = None,
+        run_max_cost_usd: Decimal | str | float | None = None,
         expected_version: int | None = None,
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
@@ -1305,7 +1305,7 @@ class SessionService:
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
-        run_max_cost_usd: Decimal | str | int | float | None = None,
+        run_max_cost_usd: Decimal | str | float | None = None,
     ) -> SendMessageResult:
         """续聊消息入口（统一 CLI / Web 续聊路径）。
 

@@ -69,12 +69,12 @@ from agent_harness.agent.run_budget import (
     validate_resume,
 )
 from agent_harness.model.accounting import (
+    HARNESS_MODEL_ACCOUNTING,
     PROVIDER_ROLE_CLOSEOUT,
     PROVIDER_ROLE_FALLBACK,
     PROVIDER_ROLE_PRIMARY,
     REQUEST_OUTCOME_COMPLETED,
     REQUEST_OUTCOME_FAILED,
-    HARNESS_MODEL_ACCOUNTING,
     ProviderAccounting,
 )
 from agent_harness.session import (
@@ -549,25 +549,25 @@ def test_token_and_cost_dimensions_stop_at_the_line_without_reservation() -> Non
     `consumed == ceiling - 1` **仍然放行**：那一轮自己可能越线，这正是"不可预知"的
     诚实代价——规格要求的是"不得**有意**越线"，不是"保证不越线"。
     """
-    limits = RunLimits(max_total_tokens=100, max_cost_usd=Decimal("1"))
+    limits = RunLimits(max_total_tokens=100, max_cost_usd=Decimal(1))
 
     assert pause_trigger(
         consumed=BudgetConsumed(total_tokens=99, cost_usd=Decimal("0.99")),
         run_limits=limits, execution_steps=1, local_fuse_turns=500,
     ) is None, "差一格要放行（下一轮大小不可预知）"
     assert pause_trigger(
-        consumed=BudgetConsumed(total_tokens=100, cost_usd=Decimal("0")),
+        consumed=BudgetConsumed(total_tokens=100, cost_usd=Decimal(0)),
         run_limits=limits, execution_steps=1, local_fuse_turns=500,
     ) == TRIGGER_RUN_TOKENS, "恰好到线即停"
     assert pause_trigger(
-        consumed=BudgetConsumed(total_tokens=0, cost_usd=Decimal("1")),
+        consumed=BudgetConsumed(total_tokens=0, cost_usd=Decimal(1)),
         run_limits=limits, execution_steps=1, local_fuse_turns=500,
     ) == TRIGGER_RUN_COST
 
 
 def test_unknown_account_stops_a_dimension_that_has_a_ceiling() -> None:
     """账目未知 + 该维有 ceiling ⇒ 停：无法证明在预算内时继续发起请求就是"有意越线"。"""
-    limits = RunLimits(max_total_tokens=1000, max_cost_usd=Decimal("5"))
+    limits = RunLimits(max_total_tokens=1000, max_cost_usd=Decimal(5))
     unknown = BudgetConsumed(agent_turns=1, model_requests=2, total_tokens=None,
                              cost_usd=None)
 
@@ -617,32 +617,32 @@ def test_resume_must_leave_room_for_a_turn_plus_the_reserved_closeout() -> None:
 def test_resume_headroom_checks_every_configured_dimension() -> None:
     """四维各自判定：任一维放不下一次新准入就整个拒绝（不做"部分恢复"）。"""
     consumed = BudgetConsumed(agent_turns=2, model_requests=2, total_tokens=100,
-                              cost_usd=Decimal("1"))
+                              cost_usd=Decimal(1))
 
     assert resume_headroom_ok(
         consumed=consumed,
         limits=RunLimits(max_agent_turns_total=4, max_model_requests=4,
-                         max_total_tokens=200, max_cost_usd=Decimal("2")),
+                         max_total_tokens=200, max_cost_usd=Decimal(2)),
     ) is True, "四维都放得下一次新准入 ⇒ 接受"
     assert resume_headroom_ok(
         consumed=consumed,
         limits=RunLimits(max_agent_turns_total=3, max_model_requests=4,
-                         max_total_tokens=200, max_cost_usd=Decimal("2")),
+                         max_total_tokens=200, max_cost_usd=Decimal(2)),
     ) is False, "turns 恰好等于 consumed + 预留 ⇒ 下一次准入立刻再暂停（假恢复）"
     assert resume_headroom_ok(
         consumed=consumed,
         limits=RunLimits(max_agent_turns_total=4, max_model_requests=3,
-                         max_total_tokens=200, max_cost_usd=Decimal("2")),
+                         max_total_tokens=200, max_cost_usd=Decimal(2)),
     ) is False, "requests 与 turns 同族：同样要求 consumed + 预留 < ceiling"
     assert resume_headroom_ok(
         consumed=consumed,
         limits=RunLimits(max_agent_turns_total=4, max_model_requests=4,
-                         max_total_tokens=100, max_cost_usd=Decimal("2")),
+                         max_total_tokens=100, max_cost_usd=Decimal(2)),
     ) is False, "token 恰好到线 ⇒ 同样拒绝（没有可花钱的余地）"
     assert resume_headroom_ok(
         consumed=consumed,
         limits=RunLimits(max_agent_turns_total=4, max_model_requests=4,
-                         max_total_tokens=200, max_cost_usd=Decimal("1")),
+                         max_total_tokens=200, max_cost_usd=Decimal(1)),
     ) is False, "cost 恰好到线 ⇒ 同样拒绝"
 
 
@@ -677,7 +677,7 @@ def test_unenforceable_dimensions_are_rejected_before_any_request() -> None:
     # usage 能报、cost 报不了
     validate_ceiling_enforceability(RunLimits(max_total_tokens=1000), USAGE_ONLY)
     with pytest.raises(BudgetRejection) as excinfo:
-        validate_ceiling_enforceability(RunLimits(max_cost_usd=Decimal("1")), USAGE_ONLY)
+        validate_ceiling_enforceability(RunLimits(max_cost_usd=Decimal(1)), USAGE_ONLY)
     assert "max_cost_usd" in str(excinfo.value)
 
     # 一条 usage 都报不了的链 ⇒ token ceiling 同样拒绝
@@ -803,7 +803,7 @@ def test_a_resume_on_an_unknown_base_dimension_is_a_state_conflict() -> None:
     for limits in (
         RunLimits(max_agent_turns_total=5, max_model_requests=9),
         RunLimits(max_agent_turns_total=5, max_total_tokens=1000),
-        RunLimits(max_agent_turns_total=5, max_cost_usd=Decimal("1")),
+        RunLimits(max_agent_turns_total=5, max_cost_usd=Decimal(1)),
     ):
         with pytest.raises(BudgetConflict) as excinfo:
             validate_resume(

@@ -37,7 +37,6 @@ from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.agent.run_budget import (
     RESUME_BASIS_BUDGET_INCREASE,
     LaunchRunBudget,
-    RunLimits,
     latest_paused_run,
     run_limits_from_request,
 )
@@ -250,8 +249,11 @@ _EXTRA_RUN_DIMENSIONS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _dimension_remaining(consumed: Any, ceiling: Any) -> str:
+def _dimension_remaining(consumed: object, ceiling: object) -> str:
     """某一维度的 remaining 文案（不可得 / 不可算一律 unavailable，**永不** 0）。
+
+    形参类型是 `object`：读数来自 durable 事件的 `data`（JSON 形状不受类型系统
+    约束），本函数**逐个 `isinstance` 收窄**，认不出的形状一律 unavailable。
 
     cost 在 wire 上是十进制**字符串**：差值必须在 `Decimal` 里算（`float()` 会引入
     与 wire 不等价的近似，`11 §6.1`）。任一侧形状不合 ⇒ unavailable——推算不出

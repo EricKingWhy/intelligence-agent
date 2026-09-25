@@ -531,7 +531,7 @@ def test_unenforceable_and_malformed_ceilings_are_rejected_before_any_work(tmp_p
     ②同一维一旦可执行就必须**被接受**并真的落进 `run/started.data.budget`
     （`max_total_tokens` 的**正控**，见下一个用例）。
     """
-    app, client = _web(tmp_path)
+    _app, client = _web(tmp_path)
     session_id = _create_idle_session(client)
     before = _events(client, session_id)
     probe = _ScriptedProbe()
@@ -571,7 +571,7 @@ def test_enforceable_token_ceiling_is_accepted_and_snapshotted(tmp_path):
     快照那一半同样是要紧的：客户端配的 ceiling 必须能在重启后从 `run/started`
     重建（`as_run_started_budget`）——只在进程内存里记着就等于没有。
     """
-    app, client = _web(tmp_path)
+    _app, client = _web(tmp_path)
     session_id = _create_idle_session(client)
     probe = _ScriptedProbe()
 

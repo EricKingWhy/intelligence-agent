@@ -1187,19 +1187,25 @@ def deterministic_continuation(
     )
     return {
         "completed": [
-            f"本逻辑 run 已消耗 {consumed.agent_turns} 个 agent turn、"
-            f"{_value_text(consumed.model_requests)} 次 Provider 请求",
-            f"累计 token：{_value_text(consumed.total_tokens)}；"
-            f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}",
+            (
+                f"本逻辑 run 已消耗 {consumed.agent_turns} 个 agent turn、"
+                f"{_value_text(consumed.model_requests)} 次 Provider 请求"
+            ),
+            (
+                f"累计 token：{_value_text(consumed.total_tokens)}；"
+                f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}"
+            ),
             f"已接纳 {tool_calls} 个工具调用（其中 {tool_results} 个已落工具结果）",
         ],
         "remaining": [
             "暂停发生在下一轮模型决策之前：恢复后由模型从会话历史继续",
         ],
         "blockers": [
-            f"{trigger_dimension} 到顶："
-            f"consumed={_dimension_text(consumed, trigger_dimension)}, "
-            f"ceiling={_value_text(ceiling)}",
+            (
+                f"{trigger_dimension} 到顶："
+                f"consumed={_dimension_text(consumed, trigger_dimension)}, "
+                f"ceiling={_value_text(ceiling)}"
+            ),
         ],
         CONTINUATION_ACTION_KEY: action,
     }

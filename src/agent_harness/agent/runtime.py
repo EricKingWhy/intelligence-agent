@@ -73,18 +73,18 @@ from agent_harness.context.builder import ContextBuilder, ContextWindowExceededE
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
 from agent_harness.memory.writeback import MemoryWriteback
+from agent_harness.model.accounting import (
+    PROVIDER_ROLE_CLOSEOUT,
+    REQUEST_OUTCOME_COMPLETED,
+    REQUEST_OUTCOME_FAILED,
+    cost_usd_from_response,
+)
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.failure import (
     PROVIDER_FAILURE_MESSAGES,
     UNCLASSIFIED_FAILURE_MESSAGE,
     classify_provider_failure,
     has_malformed_tool_call_markup,
-)
-from agent_harness.model.accounting import (
-    PROVIDER_ROLE_CLOSEOUT,
-    REQUEST_OUTCOME_COMPLETED,
-    REQUEST_OUTCOME_FAILED,
-    cost_usd_from_response,
 )
 from agent_harness.model.fallback import (
     FallbackPolicy,
