@@ -1,0 +1,93 @@
+# .github/workflows/gate0.yml —— 服务端的 Gate-0（推送前快速门禁）
+#
+# 为什么存在（这是本文件唯一的目的）
+#
+# 本地 `.githooks/pre-push` 挡的是"忘了跑"，不是"故意绕过"：`core.hooksPath` 是**本地配置、
+# 不随仓库分发**（别的 clone 不启用就等于没有），且 `git push --no-verify` 可绕过。2026-09-25
+# 之前本仓**零 CI**，所以 main 上的一切门禁都是自愿的 —— 这正是 #213 事故的成因。
+# 把同一套门禁搬到服务端、并在 main 上开 `gate0` 为**必需状态检查**之后，绕过路径只剩
+# "显式关掉分支保护"一条（仓库设置里有审计），不再有静默绕过。
+#
+# 它跑什么
+#
+# `scripts/gate0.py` 的**全部 6 条机械车道**（diff-check / ruff / oxlint / tsc / guards / coverage）。
+# 它是推送前门禁的**同一份实现**，不是第二个口径 —— 本地跑绿与 CI 跑绿是同一个判据。
+# 它**不**取代协议 §8.8.4 的集成前**完整**门禁（重车道 pytest-full / vitest / build / e2e 仍须本地跑）。
+#
+# 三个决定性的细节（每一个都会让 CI 变成假红或自锁）
+#
+# ① `ref: head.sha`：`actions/checkout` 默认检出 `refs/pull/N/merge`，那是一个**合成 merge 提交**。
+#    覆盖闸门对 merge 提交的判据是"改动文件核对不了 ⇒ fail-closed"（`check_review_coverage.py`
+#    的 `files_of` 走 `--cc`，干净 merge 无输出）⇒ 不显式检出头提交，**每个 PR 都会假红**。
+# ② `fetch-depth: 0`：覆盖闸门沿祖先链判可达性（`git rev-list --parents HEAD` 要全图），
+#    浅克隆会让它判错或判不了。
+# ③ 只跑 `pull_request`，**不跑 push**：PR 合并后 main 顶端是一个 merge 提交，而它要被覆盖闸门
+#    承认需要"后续的台账行"（本仓既有做法，见 `chore(review-ledger): cover <merge>` 那一族提交）。
+#    若在 push 上跑，main 会在每次合并后**变红直到补行**；而 main 是必需检查的上游，
+#    `strict` 模式下会把下一个 PR 一起锁死。不跑就没这个自锁。
+#
+# 环境对齐：python 3.13 / node 22 / pnpm 10.32.1 / `uv sync --locked --all-extras`，
+# 与本地施工环境一致（含 extras —— 本机 `.venv` 里确实装着 langgraph / langfuse / docker 等）。
+# `--locked` 是刻意的：锁文件过期时**报错**而不是静默改依赖（不做假绿灯）。
+
+name: gate0
+
+on:
+  pull_request:
+    branches: [main]
+
+# 本工作流只读仓库，不需要任何写权限。
+permissions:
+  contents: read
+
+concurrency:
+  # 同一个 PR 连推多次时只保留最后一次 —— 前一次的结论对判定没有意义。
+  group: gate0-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate0:
+    # ⚠ 这个 `name` 就是**分支保护里要勾选的必需检查名**。改名等于 main 的保护规则找不到该检查
+    #   ⇒ 不要改，除非同批改保护规则。
+    name: gate0
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出 PR 头提交（不要 GitHub 的合成 merge 提交）
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: 取 main（算 merge-base 用）
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: 装 Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 装 uv 与后端依赖（dev 组 + 全部 extras，对齐本地 .venv）
+        run: |
+          python -m pip install --upgrade uv
+          uv sync --locked --all-extras
+
+      - name: 装 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 装 pnpm 10.32.1
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: 装前端依赖
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Gate-0（6 条机械车道，含覆盖闸门）
+        run: |
+          BASE=$(git merge-base origin/main HEAD)
+          echo "diff 范围：${BASE}..HEAD"
+          PYTHONUTF8=1 .venv/bin/python scripts/gate0.py --since "$BASE"
