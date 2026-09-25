@@ -308,9 +308,6 @@ class BudgetPauseResumeSameRunScenario:
                 expected_version=paused.version,
             )
             stream_resume = await _drain(resumed, service=service, phase="同 run 续跑执行")
-            events = await service.get_events(ctx.session_id)
-            # 独立复读（新的 store 实例、重新读盘）：durable 事实与内存态一致性的证据面
-            replayed = store.read_events(ctx.session_id)
         except Exception as error:  # noqa: BLE001 - 失败要如实记录（runner 统一脱敏）
             return AttemptOutcome(
                 ok=False, session_id=ctx.session_id,
@@ -320,6 +317,23 @@ class BudgetPauseResumeSameRunScenario:
             # 关闭可选能力（记忆形成泵 / MCP / 外部连接）与在途 run —— 一次尝试一个
             # 生命周期，不把连接与后台任务带进下一次尝试。
             await state.shutdown()
+
+        # 终态读盘必须在 `shutdown()` **之后**（`#312` 实测的坑）：可选能力的收尾会
+        # **追加 durable 事实** —— 本环境里 `memory/degraded` 就落在 `run/completed`
+        # 之后（`MemoryWriteback.close()` 先 drain 在途写回、再关连接，降级事件由那条
+        # 写回任务落盘）。早读会让判定所依据的事件比 runner 复制的那份轨迹少一行，
+        # 于是 `event_count` 与轨迹行数对不上 —— `validator.py` 的「记录值 ↔ 轨迹行数」
+        # 比对会如实判 FAIL（第一次真实运行时 attempt 2 就是这样被抓住的）。
+        # `shutdown()` 幂等，finally 里那次照旧：异常 / 取消路径也要关。
+        try:
+            events = await service.get_events(ctx.session_id)
+            # 独立复读（新的 store 实例、重新读盘）：durable 事实与内存态一致性的证据面
+            replayed = store.read_events(ctx.session_id)
+        except Exception as error:  # noqa: BLE001 - 同上的如实记录
+            return AttemptOutcome(
+                ok=False, session_id=ctx.session_id,
+                error=f"{type(error).__name__}: {error}",
+            )
 
         tool_calls = [
             str(event.data.get("tool_name"))
