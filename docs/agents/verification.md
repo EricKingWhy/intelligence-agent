@@ -21,6 +21,10 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 完整门禁 = §2 的**全部机械车道 ①–⑪**（`AGENTS.md` §14.10 清单 + 协议 §7 第 6 条点名的工具）；
 其中**长耗时**的那几条（②③⑤⑩⑪）命令见对应小节（④ `tsc -b` / ⑦ 生成物守卫是秒级、且已在 Gate-0 里；⑤⑩ 本文件未在本批实测耗时）。**Gate-0 ≠ 完整门禁**（见 §4）。
 
+**服务端同一套闸门（2026-09-26 起）**：`.github/workflows/gate0.yml` 在 PR 上跑**同一份**
+`scripts/gate0.py`，是 `main` 的**必需状态检查** `gate0`。它挡的是「忘了跑」与「本地
+`--no-verify`」；**本地绿推不出 CI 绿**（平台差异，见 §4），它是**门禁而非可选**。
+
 ---
 
 ## 1. 决策表
@@ -276,7 +280,12 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   `--affected` ⇒ **一律以 `--affected` 的范围为准**（并先印说明）；`neg_tier < 4` 的层会被标 **unproven**，**依据 unproven 主张跳过任一条车道必须在台账 / 落点记录里写明**。
 - `pre-push` hook **是本地便利，不是安全边界**：`git push --no-verify` 可绕过；
   `core.hooksPath` 是**本地配置**、不随仓库分发 ⇒ **别的 clone 没启用就等于没有**。
-  所以它取消不了 CI，也取消不了两轴独立审查；**两侧仍然没有 CI**（这是已知缺口，不是本文能解决的）。
+  所以它取消不了两轴独立审查。**服务端 CI 自 2026-09-26 起已存在**：`.github/workflows/gate0.yml`
+  在 PR 上跑**同一份** `scripts/gate0.py`，并把 `gate0` 挂成 `main` 的**必需状态检查**
+  （`enforce_admins` 为真、无旁路主体）⇒「忘了跑」与「本地 `--no-verify`」两条路径已封死，
+  直推 `main` 会被服务端拒绝（`GH006`）。**但它仍取消不了两轴独立审查**，也**挡不住闸门自己的
+  输入**（改该工作流 / `scripts/gate0.py` / `scripts/check_review_coverage.py` / 台账的 PR，
+  其改动会被执行、且仍报出一个叫 `gate0` 的绿检查）。完整边界见该工作流头部注释。
 - **fail-closed**：任何车道"工具缺失 / 超时 / 无法执行"一律算**失败**，不算"跳过"、不算通过
   （沿用覆盖闸门"核对不了就不放行"的口径）。
 

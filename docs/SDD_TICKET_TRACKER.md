@@ -4991,3 +4991,19 @@ ADR-0043 §5.4。**教益**：加一个事件类型是**跨四条车道**的动�
 **验证与审查**：后端全量 `pytest` **3811 passed / 31 skipped / 49 deselected**；前端 lint/build 通过；Memory 管理 Playwright E2E **20 passed**；Gate-0 机器记录 `docs/gate/18387b8e64556651e40231003eb08075be320e02.json` 为 **6/6 PASS**；覆盖闸门 exit 0。集成两轴 review（固定点 `cbe2e0c`）无 actionable findings。标准 Vitest 全量运行仍有 1 条 `StepDetail.window.test.tsx` 既有超时；该文件不在本票改动内，仓库验证文档已登记此 flaky，单文件提高 timeout 的诊断运行 6/6 通过。关单评论已记录该限制。
 
 **后续依赖**：`#299` 已关闭；`#302` / `#303` 现已解锁，`#304` 仍等待两票完成。
+
+## B-46（无独立 issue）：服务端 Gate-0 + `main` 分支保护落地、覆盖闸门「空 `--cc`」处置与陈旧文档全量订正（2026-09-26）
+
+**状态**：CI 与分支保护**已落地并实测生效**（PR #321 合入为 `c8e04cb9`）。本段同时记录合入当天暴露出的覆盖闸门缺陷、其机械处置（台账 209 行），以及随后的陈旧文档全量订正批（分支 `docs/ci-protection-sync`，**零代码面**）。**无独立 GitHub issue** —— 本批源于用户点名的「`main` 开 branch protection + CI 跑 Gate-0 / 覆盖闸门」，不是票面驱动。
+
+**落地**：`.github/workflows/gate0.yml` 在 PR 上跑**同一份** `scripts/gate0.py` 的 6 条机械车道（环境对齐本地：python 3.13 / node 22 / pnpm 10.32.1 / `uv sync --locked --all-extras`）。`main` 保护**读回实测**：`required_status_checks.strict = true`、必需检查 `gate0`（`checks[0].app_id = 15368`）、`enforce_admins.enabled = true`、`allow_force_pushes = false`、`allow_deletions = false`、`required_approving_review_count = 0`。**行为反向验证（不靠读配置）**：一笔 fast-forward 直推被服务端拒绝，报 `GH006` + `Changes must be made through a pull request` + `Required status check "gate0" is expected`。⇒ 集成通道只剩「推集成分支 → 开 PR → `gate0` 绿 → 合并 PR」，两步**各自需单独批准**（`AGENTS.md` §14.4 已同步改写）。保护开启前 `main` 的最后一轮推进是另一会话的**直推**（从本分支基点 `f97265d7` 到 `5aeec173`，**11 笔**，含 `#299` AC10 收口与 `#301` 收尾）；保护开启后同类直推不再可行。
+
+**合入当天暴露的闸门缺陷（结构性，非偶发）**：`main` 顶端唯一 ❌ = merge `c8e04cb9`（区间 `09ca47a1..HEAD`，709 提交 / 已审查 464 / 待判定 245）。其 `git show --cc --name-only` **为空** —— 分支合入前已并入 `origin/main`（`strict` 要求分支与 `main` 同步，而 `rebase` 属默认禁止 ⇒ 只能 merge），故合并结果与父提交二（`be7cd592`）**逐文件相同**。`check_review_coverage.py` 的 `files_of` 对空表**两条归属通道皆 fail-closed**（审查行匹配不上；**白名单那一支同样拒空表**）⇒ 只能由一条**覆盖行**归属。因 `strict` 强制分支包含 `main` 顶端，**每个 PR 合入都会重现**；squash / rebase 不能绕（会重写 sha ⇒ 区间行的 `tip` 不再是 HEAD 祖先 ⇒ 闸门**判不了**，而不是判红）。
+
+**处置**：`docs/review_ledger.d/209-pr321-merge-c8e04cb9.tsv`（`range = be7cd592..c8e04cb9`，1 笔）。行内明写这是**机械归属、不是审查主张** —— 该 merge 零新增内容，其全部内容已在 207 / 208 两行覆盖范围内。实测覆盖闸门 464 → **465**、待判定 245 → **244**、**exit 0**。同批把本分支原占用的号改号为 **207 / 208**（`77981985`），`main` 侧 `#299` 的 `206-98208ef-2117ae6.tsv` 原样保留。
+
+**文档订正（6 文件 + 3 处收口，全在 docs-only 面内 ⇒ 覆盖闸门按路径自动归属、无需审查行）**：`AGENTS.md`（§13.4 / §14.4 / §14.6 / §14.10）、`CLAUDE.md` §3 第 7 条、`docs/SDD_WORKFLOW_PROTOCOL.md`（§8.8.6 第 ③ 项 / 执行面段 / `--replay` 段）、`docs/agents/verification.md`（§0 / §4）、`docs/agents/SDD_ACCELERATION_AUDIT.md` 第 6 行、`docs/integration/MERGE_EXECUTION_ORDER.md` 顶部横幅；收口条目落在本文件、`docs/PHASE_STATUS.md`、`docs/phase_status/2026-09.md`（L815）。核心口径变化：①「两侧无 CI / 无远端强制」作废；② `push origin main` **不再是常设授权**（服务端直接拒绝）；③ 新增「一次集成 = **两次单独批准**」的成本（是否纳为常设授权**尚未裁决**）。⚠ `.github/workflows/gate0.yml` 的**头部注释**同样过期，本批**刻意不动它** —— 那是**判定本 PR 自己的那条 workflow**（`pull_request` 事件在 PR 的 merge 上下文里执行），把它并入**闸门修法 PR**（那一批本就要改闸门行为、本就要做两轴独立审查）。
+
+**读数**：覆盖闸门 `09ca47a1..HEAD` **709 / 465 / 244 / ❌ 0 ⇒ exit 0**；Gate-0 裸全量 **6/6 PASS**（落盘 `docs/gate/GATESHA.json`）；服务端权威读数见该 PR 的 `gate0` 检查。
+
+**残余（登记，不阻断）**：① **结构性根治未落地** —— 给 `check_review_coverage.py` 加「树 == 某父的树 ⇒ 零新增内容 ⇒ 自动归属」，按用户裁决**单独开一个 PR**（适用时含 `.sh` 语义参考、协议行号引用、测试与两轴独立审查）；② **闸门自身可被 PR 改**（改了 workflow 的 PR 其改动会被执行，仍报出一个叫 `gate0` 的绿检查；`CODEOWNERS` 因单账号无法自批而关不上这个洞。同类输入还有 `scripts/gate0.py` / `check_review_coverage.py` / 台账 / `verification.map.tsv` 与闸门读的配置）；③ 既有冗余 `[whitelist]` 条目（历史遗留，非本批引入）；④ fork PR 检出限制（`ref: head.sha` + `fetch-depth: 0` 只取 `+refs/heads/*`）；⑤ 无仓库锚点钉住 CI 环境工具版本；⑥ `.github/workflows/gate0.yml` 头部注释的同步**刻意推迟**到闸门修法 PR（理由见上）—— 在那之前它仍写着「落点当时 `main` 尚未开保护」，属**已知的、有意的**未订正项，不是遗漏。

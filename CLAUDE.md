@@ -95,8 +95,10 @@ Matt SDD 负责：
    依赖来源优先 `depends_on` / `resource_keys` / Tool metadata / 同文件冲突。
    V1 不使用 LLM 自由文本猜 DAG。
 7. **危险 Git 默认禁止**：`reset --hard` / `rebase` / `push --force` / `branch -D`。
-   `merge` / `push` 的授权分类见 `AGENTS.md` §14.4（集成与 `push origin main` 是常设授权，
-   feature 分支上的 push 仍需单独批准）。
+   `merge` / `push` 的授权分类见 `AGENTS.md` §14.4。⚠ **`push origin main` 自 2026-09-26 起
+   已不是常设授权**——main 开了服务端分支保护（必需检查 `gate0`、`enforce_admins` 为真），
+   直推被拒（`GH006`）；集成改走「推集成分支 → 开 PR → `gate0` 绿 → 合并 PR」，
+   而这两步各自仍需用户单独批准。
 
 ---
 
