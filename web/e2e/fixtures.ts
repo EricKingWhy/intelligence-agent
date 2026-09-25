@@ -327,6 +327,13 @@ export interface ApiMock {
   memoryVanishedIds?: string[];
   /** GET /api/memories 的拦截口（断言分页参数或伪造 500）；返回 true = 已处理。 */
   onMemoriesGet?: (route: Route) => Promise<boolean> | boolean;
+  /** MEM-V2-5: independently persisted setting fixture and optional mutation failure. */
+  memorySettings?: { extraction_enabled: boolean; recall_enabled: boolean };
+  memorySettingsPatchError?: { status: number; detail: string };
+  /** MEM-V2-5: current-session redacted recall explanation response. */
+  memoryRecalls?: unknown[];
+  /** These ids simulate a stale expected_version returned by concurrent editing. */
+  memoryEditConflictIds?: string[];
   // ── WS-6 / #169 项目内新建任务 ──
   /** 带 `cwd` 建会话时伪造失败（AC12：422 留在确认面）。spec 可以先设它、断言错误
    *  在浮层里，再设回 undefined 并重试——同一条路径因此能覆盖"可重试"。
@@ -379,9 +386,19 @@ export interface ProjectFixture {
 export interface MemoryFixture {
   id: string;
   content: string;
-  scope?: 'user' | 'session';
+  scope?: 'user' | 'session' | 'user_global' | 'project';
   metadata?: Record<string, unknown>;
   created_at?: string;
+  root_id?: string | null;
+  version?: number | null;
+  kind?: 'semantic' | 'episodic' | 'procedural' | null;
+  tier?: 'profile' | 'collection' | null;
+  status?: 'active' | 'superseded' | 'invalidated' | 'deleted' | null;
+  project_id?: string | null;
+  source_type?: 'automatic' | 'explicit_command' | 'user_edit' | null;
+  source_session_id?: string | null;
+  source_event_ids?: string[];
+  payload?: Record<string, unknown> | null;
 }
 
 /** 会话行 fixture：只带 WS-5 相关字段，其余由调用方按需补（旧 spec 的裸对象同样可用）。 */
@@ -435,6 +452,7 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
   }));
   /** 记忆状态：DELETE 真的摘条目（"删掉后再打开面板看不到"才是真语义）。 */
   const memoryState: MemoryFixture[] = (mock.memories ?? []).map((m) => ({ ...m }));
+  const memorySettings = { extraction_enabled: true, recall_enabled: true, ...mock.memorySettings };
   /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
   const sessionEvents = new Map<string, FrameSpec[]>();
   /** `GET /api/sessions` 的次数（`sessionsListFailAfter` 用；见该分支注释）。 */
@@ -834,16 +852,137 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       const params = new URL(req.url()).searchParams;
       const limit = Number(params.get('limit') ?? '50');
       const offset = Number(params.get('offset') ?? '0');
+      const projectId = params.get('project_id');
+      const matches = memoryState.filter((m) => {
+        const searchable = `${m.content} ${JSON.stringify(m.payload ?? {})}`.toLocaleLowerCase();
+        return (!params.get('q') || searchable.includes(params.get('q')!.toLocaleLowerCase()))
+          && (!params.get('kind') || m.kind === params.get('kind'))
+          && (!params.get('status') || m.status === params.get('status'))
+          && (!params.get('scope') || m.scope === params.get('scope'))
+          && (projectId ? m.project_id === projectId : !m.project_id);
+      });
       // 按后端语义切片（`web/memory.py` 的 limit/offset 分页）——"加载更多"因此
       // 真的会拿到下一页，而不是界面自己把一份全量数组切两半。
-      const page = memoryState.slice(offset, offset + limit).map((m) => ({
+      const page = matches.slice(offset, offset + limit).map((m) => ({
         id: m.id,
         content: m.content,
         scope: m.scope ?? 'user',
         metadata: m.metadata ?? {},
         created_at: m.created_at ?? T,
+        ...(m.kind !== undefined ? {
+          root_id: m.root_id ?? m.id,
+          version: m.version ?? 1,
+          kind: m.kind,
+          tier: m.tier ?? 'collection',
+          status: m.status ?? 'active',
+          project_id: m.project_id ?? null,
+          source_type: m.source_type ?? 'automatic',
+          source_session_id: m.source_session_id ?? null,
+          source_event_ids: m.source_event_ids ?? [],
+          payload: m.payload ?? null,
+        } : {}),
       }));
       return json(route, page);
+    }
+    if (path === '/api/memory-settings' && req.method() === 'GET') {
+      return json(route, memorySettings);
+    }
+    if (path === '/api/memory-settings' && req.method() === 'PATCH') {
+      if (mock.memorySettingsPatchError) {
+        return json(route, { detail: mock.memorySettingsPatchError.detail }, mock.memorySettingsPatchError.status);
+      }
+      Object.assign(memorySettings, req.postDataJSON() ?? {});
+      return json(route, memorySettings);
+    }
+    if (path.startsWith('/api/sessions/') && path.endsWith('/memory-recalls') && req.method() === 'GET') {
+      return json(route, mock.memoryRecalls ?? []);
+    }
+    if (path === '/api/memories/bulk-delete' && req.method() === 'POST') {
+      const body = (req.postDataJSON() ?? {}) as { kind?: string | null; confirmation?: string };
+      if (body.confirmation !== 'DELETE') return json(route, { detail: 'confirmation must be DELETE' }, 422);
+      const projectId = new URL(req.url()).searchParams.get('project_id');
+      const inContext = (m: MemoryFixture) => projectId ? !m.project_id || m.project_id === projectId : !m.project_id;
+      const roots = new Set(memoryState.filter((m) => m.kind && (!body.kind || m.kind === body.kind) && inContext(m)).map((m) => m.root_id ?? m.id));
+      for (let index = memoryState.length - 1; index >= 0; index -= 1) {
+        const row = memoryState[index];
+        if (row.kind && (!body.kind || row.kind === body.kind) && inContext(row)) memoryState.splice(index, 1);
+      }
+      return json(route, { affected_count: roots.size, deleted_version_count: roots.size });
+    }
+    const memoryGetMatch = /^\/api\/memories\/([^/]+)$/.exec(path);
+    if (memoryGetMatch && req.method() === 'GET') {
+      const id = decodeURIComponent(memoryGetMatch[1]);
+      const row = memoryState.find((item) => item.id === id);
+      if (!row) return json(route, { detail: `记忆不存在：${id}` }, 404);
+      if (row.project_id && new URL(req.url()).searchParams.get('project_id') !== row.project_id) {
+        return json(route, { detail: `记忆不存在：${id}` }, 404);
+      }
+      return json(route, {
+        ...row,
+        scope: row.scope ?? 'user',
+        metadata: row.metadata ?? {},
+        created_at: row.created_at ?? T,
+        ...(row.kind ? {
+          root_id: row.root_id ?? row.id,
+          version: row.version ?? 1,
+          tier: row.tier ?? 'collection',
+          status: row.status ?? 'active',
+          project_id: row.project_id ?? null,
+          source_type: row.source_type ?? 'automatic',
+          source_session_id: row.source_session_id ?? null,
+          source_event_ids: row.source_event_ids ?? [],
+          payload: row.payload ?? null,
+        } : {}),
+      });
+    }
+    const memoryVersionsMatch = /^\/api\/memories\/([^/]+)\/versions$/.exec(path);
+    if (memoryVersionsMatch && req.method() === 'GET') {
+      const id = decodeURIComponent(memoryVersionsMatch[1]);
+      const selected = memoryState.find((item) => item.id === id);
+      if (selected?.project_id && new URL(req.url()).searchParams.get('project_id') !== selected.project_id) {
+        return json(route, { detail: `记忆不存在：${id}` }, 404);
+      }
+      const versions = selected?.root_id
+        ? memoryState.filter((item) => item.root_id === selected.root_id)
+        : selected ? [selected] : [];
+      return json(route, [...versions].sort((a, b) => (b.version ?? 0) - (a.version ?? 0)));
+    }
+    const memoryEditMatch = /^\/api\/memories\/([^/]+)$/.exec(path);
+    if (memoryEditMatch && req.method() === 'PATCH') {
+      const id = decodeURIComponent(memoryEditMatch[1]);
+      const at = memoryState.findIndex((item) => item.id === id);
+      const current = memoryState[at];
+      const body = (req.postDataJSON() ?? {}) as { expected_version?: number; content?: string; payload?: Record<string, unknown> };
+      if ((mock.memoryEditConflictIds ?? []).includes(id)) return json(route, { detail: '记忆版本已变化' }, 409);
+      if (!current || !current.kind) return json(route, { detail: `记忆不存在：${id}` }, 404);
+      if (current.project_id && new URL(req.url()).searchParams.get('project_id') !== current.project_id) {
+        return json(route, { detail: `记忆不存在：${id}` }, 404);
+      }
+      if (body.expected_version !== (current.version ?? 1)) return json(route, { detail: '记忆版本已变化' }, 409);
+      current.status = 'superseded';
+      const next: MemoryFixture = {
+        ...current,
+        id: `${current.root_id ?? current.id}-v${(current.version ?? 1) + 1}`,
+        content: body.content ?? current.content,
+        payload: body.payload ?? current.payload,
+        version: (current.version ?? 1) + 1,
+        status: 'active',
+        source_type: 'user_edit',
+        created_at: T,
+      };
+      memoryState.splice(at + 1, 0, next);
+      return json(route, {
+        ...next,
+        scope: next.scope ?? 'user_global',
+        metadata: next.metadata ?? {},
+        root_id: next.root_id ?? current.id,
+        tier: next.tier ?? 'collection',
+        project_id: next.project_id ?? null,
+        source_type: next.source_type,
+        source_session_id: next.source_session_id ?? null,
+        source_event_ids: next.source_event_ids ?? [],
+        payload: next.payload,
+      });
     }
     const memoryMatch = /^\/api\/memories\/([^/]+)$/.exec(path);
     if (memoryMatch && req.method() === 'DELETE') {
@@ -869,7 +1008,15 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
         return json(route, { detail: `记忆不存在：${memoryId}` }, 404);
       }
       if (at < 0) return json(route, { detail: `记忆不存在：${memoryId}` }, 404);
-      memoryState.splice(at, 1); // 硬删：记录真的没了（不是软删/回收站）
+      const selected = memoryState[at];
+      if (selected.project_id && new URL(req.url()).searchParams.get('project_id') !== selected.project_id) {
+        return json(route, { detail: `记忆不存在：${memoryId}` }, 404);
+      }
+      if (selected.kind && selected.root_id) {
+        for (let index = memoryState.length - 1; index >= 0; index -= 1) {
+          if (memoryState[index].root_id === selected.root_id) memoryState.splice(index, 1);
+        }
+      } else memoryState.splice(at, 1); // 硬删：记录真的没了（不是软删/回收站）
       return json(route, { id: memoryId, deleted: true });
     }
 

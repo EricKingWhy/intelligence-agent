@@ -1,199 +1,202 @@
-/** 记忆列表 + 单条硬删（MEM-5 / #160）。
- *
- *  **不做第二套真相**（不变量 #22）：本 hook 只持有 `GET /api/memories` 的最近一次
- *  响应。`hiddenIds` 是唯一的本地投影，只在"删除请求往返期间"生效，两个结局都会
- *  重拉权威列表把它清掉（成功 → 该行由后端的缺席消失；失败 → 该行回来）。所以列表
- *  静止态永远等于最近一次后端响应——这正是 AC3「不得只做本地隐藏」的落地方式。
- *
- *  503 分两种（#225，判别走后端的机读 `code`，不匹配中文）：
- *  - **未装配**（配置状态）→ `disabled` 通道，面板显示"记忆未启用"、不给重试
- *    （不变量 #21：不该让用户去重试一个配置状态）；
- *  - **装配失败**（`init_failed`，向量库不可达之类）→ 走 `loadError` 通道：这是
- *    **故障**，要给错误条 + 重试，说成"未启用"会把用户推去改一个本来就配好的开关。 */
+/** Recent authoritative memory list state for the management panel. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MemoryError, describeMemoryError, isMemoryDisabled } from '../lib/api';
 import {
-  MemoryError,
-  deleteMemory,
-  isMemoryDisabled,
-  listMemories,
-} from '../lib/api';
-import { MEMORY_PAGE_SIZE, hasMoreAfter, refetchLimit, withoutIds } from '../lib/memory';
+  deleteMemoryRecord,
+  listMemoryRecords,
+  type MemoryFilters,
+  type MemoryRecord,
+} from '../lib/memoryV2Api';
+import { MEMORY_PAGE_SIZE, hasMoreAfter, refetchLimit } from '../lib/memory';
 import { withTimeout } from '../lib/timeout';
-import type { MemorySummary } from '../types';
+
+interface PageState {
+  key: string;
+  rows: MemoryRecord[];
+  hiddenIds: ReadonlySet<string>;
+  status: 'loading' | 'ready' | 'error' | 'disabled';
+  loadingMore: boolean;
+  hasMore: boolean;
+  loadError: string | null;
+  disabled: string | null;
+}
 
 export interface MemoriesState {
-  /** 面板应渲染的行（最近一次权威响应，减去在途/已确认删除但重拉未落地的行）。
-   *  **不导出原始 `rows`**：消费方只需要"该显示什么"，导出原始列表会诱使调用方
-   *  绕过隐藏集合自己算一份视图（批次审查发现的未使用导出）。 */
-  visible: MemorySummary[];
-  /** 首次加载中。 */
+  visible: MemoryRecord[];
   loading: boolean;
-  /** "加载更多"在途（与 `loading` 分开：首屏骨架不该在翻页时回来）。 */
   loadingMore: boolean;
-  /** 加载失败原因（**含 503 + `init_failed` 那个故障子类**，不含配置降级态）；
-   *  **不清空**已加载的行——一次抖动不该把列表抹掉。 */
   loadError: string | null;
-  /** 记忆能力**未装配**（配置状态）的后端原文；非空 = 降级态。
-   *  **不含装配失败**：那是故障，走 `loadError`（可重试）。 */
   disabled: string | null;
   hasMore: boolean;
-  /** 删除在途的行 id（按钮渲染"删除中…"并禁用，防连点重复 DELETE）。 */
   pending: ReadonlySet<string>;
-  /** 硬删一条：失败时**先把列表回滚成权威状态再抛**（调用方负责显示错误文案）。 */
-  remove: (memoryId: string) => Promise<void>;
+  remove: (memoryId: string, projectId?: string) => Promise<void>;
   loadMore: () => Promise<void>;
-  /** 重新拉取（保留已加载的页数，不把列表缩回第一页）。 */
   retry: () => Promise<void>;
 }
 
-/** 删除请求的兜底超时。api 层没有统一超时（其余请求同病，见 lib/timeout.ts 头注释），
- *  这里必须兜：DELETE 挂死时行已经乐观隐藏、确认条两个按钮都 disabled——用户会看到
- *  一条"点了删除于是消失"的记忆，且再也点不动任何东西。超时后走与失败**相同**的回滚
- *  路径（重新对账，不是假设删除失败：请求可能已经在后端完成，只是响应没回来）。 */
 const DELETE_TIMEOUT_MS = 30_000;
+const EMPTY_FILTERS: MemoryFilters = {};
+const EMPTY_ROWS: MemoryRecord[] = [];
 
-export function useMemories(): MemoriesState {
-  const [rows, setRows] = useState<MemorySummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [disabled, setDisabled] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
+export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesState {
+  const query = filters.q?.trim() ?? '';
+  const kind = filters.kind;
+  const status = filters.status;
+  const scope = filters.scope;
+  const projectId = filters.project_id;
+  const filterKey = JSON.stringify([query, kind ?? '', status ?? '', scope ?? '', projectId ?? '']);
+  const apiFilters = useMemo<MemoryFilters>(() => ({
+    ...(query ? { q: query } : {}),
+    ...(kind ? { kind } : {}),
+    ...(status ? { status } : {}),
+    ...(scope ? { scope } : {}),
+    ...(projectId ? { project_id: projectId } : {}),
+  }), [query, kind, status, scope, projectId]);
+
+  const [page, setPage] = useState<PageState>({
+    key: '',
+    rows: [],
+    hiddenIds: new Set(),
+    status: 'loading',
+    loadingMore: false,
+    hasMore: false,
+    loadError: null,
+    disabled: null,
+  });
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
-  const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string>>(() => new Set());
-
-  // 请求世代：只有**最后发起**的那次允许落地。删除后的重拉与用户手动重试可能重叠，
-  // 先发后到的旧响应不能覆盖新真相（同 useProjects 的 generation 纪律）。
   const generation = useRef(0);
-  // 当前行数的镜像：`loadMore` 的 offset 与 `retry` 的 limit 都要"当下的条数"，
-  // 而回调闭包里的 state 是发起时的快照。
-  const rowsRef = useRef<MemorySummary[]>([]);
 
-  /** 统一的错误落点：未装配 → 降级通道，其余（含装配失败）→ 错误通道。 */
-  const recordError = useCallback((error: unknown) => {
-    if (isMemoryDisabled(error)) {
-      setDisabled(error instanceof Error ? error.message : '记忆未启用');
-      setLoadError(null);
-      return;
+  const refetch = useCallback(async (limit: number) => {
+    const gen = ++generation.current;
+    try {
+      const rows = await listMemoryRecords(limit, 0, apiFilters);
+      if (gen !== generation.current) return;
+      setPage((previous) => {
+        const hiddenIds = previous.key === filterKey
+          ? new Set([...previous.hiddenIds].filter((id) => rows.some((row) => row.id === id)))
+          : new Set<string>();
+        return {
+          key: filterKey,
+          rows,
+          hiddenIds,
+          status: 'ready',
+          loadingMore: false,
+          hasMore: hasMoreAfter(rows.length, limit),
+          loadError: null,
+          disabled: null,
+        };
+      });
+    } catch (error) {
+      if (gen !== generation.current) return;
+      const message = describeMemoryError(error, '加载记忆失败');
+      setPage((previous) => ({
+        key: filterKey,
+        rows: previous.key === filterKey ? previous.rows : [],
+        hiddenIds: previous.key === filterKey ? previous.hiddenIds : new Set<string>(),
+        status: isMemoryDisabled(error) ? 'disabled' : 'error',
+        loadingMore: false,
+        hasMore: previous.key === filterKey && previous.hasMore,
+        loadError: isMemoryDisabled(error) ? null : message,
+        disabled: isMemoryDisabled(error) ? message : null,
+      }));
     }
-    // 装配失败（503 + init_failed）刻意落在这里：它有后端的可行动原文（"向量库不可达"），
-    // 而错误条正是"能重试 + 显示原因"的那个面。**不设 disabled**：那会渲染成"未启用"。
-    setDisabled(null);
-    setLoadError((error as Error).message || '加载记忆失败');
-  }, []);
+  }, [apiFilters, filterKey]);
 
-  /** 拉第 0 页（`limit` 条）。保留已加载行数由调用方通过 `limit` 表达。 */
-  const refetch = useCallback(
-    async (limit: number) => {
-      const gen = ++generation.current;
-      try {
-        const list = await listMemories(limit, 0);
-        if (gen !== generation.current) return;
-        rowsRef.current = list;
-        setRows(list);
-        setHasMore(hasMoreAfter(list.length, limit));
-        setLoadError(null);
-        setDisabled(null);
-        // 已不在权威列表里的 id 从隐藏集合清掉（删除已落地）；仍在列表里的保留
-        // ——它对应的 DELETE 还在途，现在取消隐藏会让该行闪回来。
-        const present = new Set(list.map((row) => row.id));
-        setHiddenIds((prev) => {
-          const kept = [...prev].filter((id) => present.has(id));
-          return kept.length === prev.size ? prev : new Set(kept);
-        });
-      } catch (error) {
-        if (gen !== generation.current) return;
-        recordError(error);
-      } finally {
-        // 无条件清首屏骨架：被更新的请求顶掉时也要清——否则面板会永远停在
-        // "加载中"（新请求不会替上一次清，它只管自己的 finally）。
-        setLoading(false);
-      }
-    },
-    [recordError],
-  );
-
+  // Start the API request here; state changes happen only after the request settles.
   useEffect(() => {
+    // The async request writes state only after its response arrives.
+    // oxlint-disable-next-line react/set-state-in-effect
     void refetch(MEMORY_PAGE_SIZE);
   }, [refetch]);
 
+  const currentRows = page.key === filterKey ? page.rows : EMPTY_ROWS;
+  const visible = useMemo(
+    () => currentRows.filter((row) => !page.hiddenIds.has(row.id)),
+    [currentRows, page.hiddenIds],
+  );
+
   const retry = useCallback(
-    () => refetch(refetchLimit(rowsRef.current.length)),
-    [refetch],
+    async () => {
+      setPage((previous) => previous.key === filterKey
+        ? { ...previous, status: 'loading', loadError: null, disabled: null }
+        : previous);
+      await refetch(refetchLimit(currentRows.length));
+    }, [currentRows.length, filterKey, refetch],
   );
 
   const loadMore = useCallback(async () => {
-    if (loadingMore || !hasMore) return;
+    if (page.key !== filterKey || page.loadingMore || !page.hasMore) return;
     const gen = ++generation.current;
-    setLoadingMore(true);
+    setPage((previous) => previous.key === filterKey
+      ? { ...previous, loadingMore: true }
+      : previous);
     try {
-      const page = await listMemories(MEMORY_PAGE_SIZE, rowsRef.current.length);
+      const nextPage = await listMemoryRecords(MEMORY_PAGE_SIZE, page.rows.length, apiFilters);
       if (gen !== generation.current) return;
-      // 按 id 去重再追加：offset 分页在"翻页期间有行被删"时会让后端把边界行
-      // 再给一次，直接 concat 会渲染出重复条目（本地去重只防重，不改顺序）。
-      const seen = new Set(rowsRef.current.map((row) => row.id));
-      const merged = [...rowsRef.current, ...page.filter((row) => !seen.has(row.id))];
-      rowsRef.current = merged;
-      setRows(merged);
-      setHasMore(hasMoreAfter(page.length, MEMORY_PAGE_SIZE));
-      setLoadError(null);
+      setPage((previous) => {
+        if (previous.key !== filterKey) return previous;
+        const seen = new Set(previous.rows.map((row) => row.id));
+        const rows = [...previous.rows, ...nextPage.filter((row) => !seen.has(row.id))];
+        return {
+          ...previous,
+          rows,
+          loadingMore: false,
+          hasMore: hasMoreAfter(nextPage.length, MEMORY_PAGE_SIZE),
+          loadError: null,
+        };
+      });
     } catch (error) {
       if (gen !== generation.current) return;
-      recordError(error);
-    } finally {
-      // 同样无条件复位：被重拉顶掉时若不清，按钮会永远停在"加载中"且再也点不动。
-      setLoadingMore(false);
+      setPage((previous) => previous.key === filterKey
+        ? {
+          ...previous,
+          loadingMore: false,
+          loadError: describeMemoryError(error, '加载更多记忆失败'),
+        }
+        : previous);
     }
-  }, [hasMore, loadingMore, recordError]);
+  }, [apiFilters, filterKey, page]);
 
-  const remove = useCallback(
-    async (memoryId: string) => {
-      if (pending.has(memoryId)) return;
-      // 立即藏起来（AC3「删除后列表立即反映」）；请求收口前不改变任何后端事实。
-      setHiddenIds((prev) => new Set(prev).add(memoryId));
-      setPending((prev) => new Set(prev).add(memoryId));
-      let deleted = false;
-      try {
-        // 不复用 useProjects 的 `after()`：那个包装是"跑写操作 → 重拉 → 抛错"，而这里
-        // 需要的是"乐观隐藏 → 写 → **两个结局都重拉** → 失败时先取消隐藏再抛"。语义不同，
-        // 硬套只会把回滚路径塞进一个为别的场景写的包装里。
-        const result = await withTimeout(deleteMemory(memoryId), DELETE_TIMEOUT_MS, '删除请求');
-        // 200 但 `deleted` 不为 true = 后端没确认删掉：不能凭状态码就假装它没了。
-        if (!result.deleted) throw new MemoryError(200, '后端未确认删除，该条记忆仍在。');
-        deleted = true;
-      } catch (error) {
-        // 失败 = 回滚：取消隐藏 + 重拉权威列表，然后把错误抛给调用方显示。
-        setHiddenIds((prev) => {
-          const next = new Set(prev);
-          next.delete(memoryId);
-          return next;
-        });
-        await refetch(refetchLimit(rowsRef.current.length));
-        throw error;
-      } finally {
-        setPending((prev) => {
-          const next = new Set(prev);
-          next.delete(memoryId);
-          return next;
-        });
-      }
-      // 成功：重拉权威列表。重拉失败也不取消隐藏——200 已经证明这条不存在了，
-      // 再把它显示回来才是伪造；loadError 会提示列表可能不是最新（可重试）。
-      if (deleted) await refetch(refetchLimit(rowsRef.current.length));
-    },
-    [pending, refetch],
-  );
+  const remove = useCallback(async (memoryId: string, projectId?: string) => {
+    if (pending.has(memoryId)) return;
+    const retainedLimit = refetchLimit(currentRows.length);
+    setPending((previous) => new Set(previous).add(memoryId));
+    let deleted = false;
+    try {
+      deleted = await withTimeout(
+        deleteMemoryRecord(memoryId, projectId), DELETE_TIMEOUT_MS, '删除请求',
+      );
+      if (!deleted) throw new MemoryError(200, '后端未确认删除，该条记忆仍在。');
+    } catch (error) {
+      await refetch(retainedLimit);
+      setPending((previous) => {
+        const next = new Set(previous);
+        next.delete(memoryId);
+        return next;
+      });
+      throw error;
+    }
 
-  const visible = useMemo(() => withoutIds(rows, hiddenIds), [rows, hiddenIds]);
+    setPage((previous) => previous.key === filterKey
+      ? { ...previous, hiddenIds: new Set(previous.hiddenIds).add(memoryId) }
+      : previous);
+    await refetch(retainedLimit);
+    setPending((previous) => {
+      const next = new Set(previous);
+      next.delete(memoryId);
+      return next;
+    });
+  }, [currentRows.length, filterKey, pending, refetch]);
 
+  const matches = page.key === filterKey;
   return {
     visible,
-    loading,
-    loadingMore,
-    loadError,
-    disabled,
-    hasMore,
+    loading: !matches || page.status === 'loading',
+    loadingMore: matches && page.loadingMore,
+    loadError: matches ? page.loadError : null,
+    disabled: matches ? page.disabled : null,
+    hasMore: matches && page.hasMore,
     pending,
     remove,
     loadMore,
